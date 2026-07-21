@@ -1,2 +1,9 @@
 .superpowers/
 .worktrees/
+build/
+dist/
+node_modules/
+*.tsbuildinfo
+*.profraw
+*.profdata
+*.sock
