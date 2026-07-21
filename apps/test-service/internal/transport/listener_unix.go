@@ -3,12 +3,24 @@
 package transport
 
 import (
+	"errors"
+	"fmt"
 	"net"
 	"os"
 )
 
 func listen(endpoint string) (net.Listener, error) {
-	_ = os.Remove(endpoint)
+	info, err := os.Lstat(endpoint)
+	if err == nil {
+		if info.Mode()&os.ModeSocket == 0 {
+			return nil, fmt.Errorf("IPC endpoint exists and is not a Unix socket: %s", endpoint)
+		}
+		if err := os.Remove(endpoint); err != nil {
+			return nil, err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
 	listener, err := net.Listen("unix", endpoint)
 	if err != nil {
 		return nil, err

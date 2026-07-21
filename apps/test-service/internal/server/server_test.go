@@ -1,9 +1,9 @@
 package server_test
 
 import (
-	"bytes"
 	"encoding/json"
 	"net"
+	"strings"
 	"testing"
 
 	"unit-test-ide.local/test-service/internal/protocol"
@@ -45,7 +45,8 @@ func TestServeConnectionRejectsOversizedLine(t *testing.T) {
 	client, service := net.Pipe()
 	go server.ServeConnection(service, session.New("0123456789abcdef", "linux", "unix-socket"))
 	defer client.Close()
-	go func() { _, _ = client.Write(append(bytes.Repeat([]byte("x"), server.MaxMessageBytes+1), '\n')) }()
+	line := requestLineOfSize(t, server.MaxMessageBytes+1)
+	go func() { _, _ = client.Write(append(line, '\n')) }()
 	var response protocol.Response
 	if err := json.NewDecoder(client).Decode(&response); err != nil {
 		t.Fatal(err)
@@ -53,4 +54,48 @@ func TestServeConnectionRejectsOversizedLine(t *testing.T) {
 	if response.Error == nil || response.Error.Code != "INVALID_MESSAGE" {
 		t.Fatalf("unexpected response: %#v", response)
 	}
+}
+
+func TestServeConnectionAcceptsLineAtMaximumSize(t *testing.T) {
+	client, service := net.Pipe()
+	go server.ServeConnection(service, session.New("0123456789abcdef", "linux", "unix-socket"))
+	defer client.Close()
+	line := requestLineOfSize(t, server.MaxMessageBytes)
+	go func() { _, _ = client.Write(append(line, '\n')) }()
+	var response protocol.Response
+	if err := json.NewDecoder(client).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Error == nil || response.Error.Code != "AUTH_REQUIRED" {
+		t.Fatalf("expected decoded request to reach the session, got %#v", response)
+	}
+}
+
+func requestLineOfSize(t *testing.T, size int) []byte {
+	t.Helper()
+	request := protocol.Request{
+		ProtocolVersion: protocol.Version,
+		Kind:            "request",
+		MessageID:       "0123456789abcdef0123456789abcdef",
+		Method:          "capabilities/get",
+		SentAt:          sentAt,
+		Payload:         json.RawMessage(`{"padding":""}`),
+	}
+	encoded, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paddingSize := size - len(encoded)
+	if paddingSize < 0 {
+		t.Fatalf("requested line size %d is smaller than envelope size %d", size, len(encoded))
+	}
+	request.Payload = json.RawMessage(`{"padding":"` + strings.Repeat("x", paddingSize) + `"}`)
+	encoded, err = json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) != size {
+		t.Fatalf("line size = %d, want %d", len(encoded), size)
+	}
+	return encoded
 }

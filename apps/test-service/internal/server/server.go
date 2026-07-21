@@ -14,9 +14,13 @@ const MaxMessageBytes = 1024 * 1024
 func ServeConnection(connection net.Conn, active *session.Session) {
 	defer connection.Close()
 	scanner := bufio.NewScanner(connection)
-	scanner.Buffer(make([]byte, 64*1024), MaxMessageBytes)
+	scanner.Buffer(make([]byte, 64*1024), MaxMessageBytes+2)
 	encoder := json.NewEncoder(connection)
 	for scanner.Scan() {
+		if len(scanner.Bytes()) > MaxMessageBytes {
+			_ = encoder.Encode(protocol.Failure(protocol.Request{MessageID: "00000000000000000000000000000000"}, "INVALID_MESSAGE", "message exceeds the 1 MiB limit", false))
+			return
+		}
 		request, err := protocol.DecodeRequest(scanner.Bytes())
 		if err != nil {
 			_ = encoder.Encode(protocol.Failure(protocol.Request{MessageID: "00000000000000000000000000000000"}, "INVALID_MESSAGE", "message is invalid", false))
