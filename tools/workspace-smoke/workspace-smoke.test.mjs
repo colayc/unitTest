@@ -16,3 +16,8 @@ test("README contains the complete local verification gate", async () => {
     assert.match(readme, new RegExp(command.replaceAll(" ", "\\s+")));
   }
 });
+
+test("dependency metadata uses the official npm registry", async () => {
+  assert.equal((await readFile(".npmrc", "utf8")).trim(), "registry=https://registry.npmjs.org/");
+  assert.doesNotMatch(await readFile("pnpm-lock.yaml", "utf8"), /registry\.npmmirror\.com/);
+});

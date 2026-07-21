@@ -33,6 +33,12 @@ func New(token, platform, transport string) *Session {
 
 func (s *Session) ShutdownRequested() <-chan struct{} { return s.shutdown }
 
+func (s *Session) Authenticated() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.authenticated
+}
+
 func (s *Session) Handle(request protocol.Request) protocol.Response {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -56,13 +62,31 @@ func (s *Session) Handle(request protocol.Request) protocol.Response {
 		s.authenticated = true
 		return protocol.Success(request, map[string]string{"negotiatedProtocolVersion": protocol.Version, "serviceVersion": "0.1.0"})
 	case "capabilities/get":
+		if err := decodeEmpty(request.Payload); err != nil {
+			return protocol.Failure(request, "INVALID_MESSAGE", "payload must be an empty object", false)
+		}
 		return protocol.Success(request, protocolmodel.Capabilities{Platform: s.platform, Transports: []string{s.transport}, Toolchains: []string{}, Frameworks: []string{}, CoverageTools: []string{}})
 	case "shutdown":
+		if err := decodeEmpty(request.Payload); err != nil {
+			return protocol.Failure(request, "INVALID_MESSAGE", "payload must be an empty object", false)
+		}
 		s.shutdownOnce.Do(func() { close(s.shutdown) })
 		return protocol.Success(request, map[string]bool{"accepted": true})
 	default:
 		return protocol.Failure(request, "METHOD_NOT_FOUND", "method is not supported", false)
 	}
+}
+
+func decodeEmpty(raw json.RawMessage) error {
+	var payload map[string]json.RawMessage
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	if err := decoder.Decode(&payload); err != nil || payload == nil || len(payload) != 0 {
+		return errors.New("payload is not an empty object")
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return errors.New("multiple JSON values")
+	}
+	return nil
 }
 
 func decodeHandshake(raw json.RawMessage) (handshake, error) {

@@ -101,6 +101,28 @@ func TestListenRemovesStaleUnixSocket(t *testing.T) {
 	defer listener.Close()
 }
 
+func TestListenRefusesActiveUnixSocket(t *testing.T) {
+	endpoint := filepath.Join(t.TempDir(), "service.sock")
+	active, err := net.Listen("unix", endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer active.Close()
+
+	replacement, err := transport.Listen(endpoint)
+	if replacement != nil {
+		_ = replacement.Close()
+	}
+	if err == nil {
+		t.Fatal("expected active socket to be rejected")
+	}
+	client, dialErr := net.Dial("unix", endpoint)
+	if dialErr != nil {
+		t.Fatalf("active socket was not preserved: %v", dialErr)
+	}
+	_ = client.Close()
+}
+
 func assertListenRejected(t *testing.T, endpoint string) {
 	t.Helper()
 	listener, err := transport.Listen(endpoint)

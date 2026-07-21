@@ -27,13 +27,13 @@ try {
     const output = check ? join(temp, String(index)) : target.output;
     await mkdir(dirname(output), { recursive: true });
     const result = spawnSync(process.execPath, [quicktype, "--src-lang", "schema", "--src", schema, ...target.args, "--out", output], { cwd: root, stdio: "inherit" });
-    if (result.status !== 0) process.exit(result.status ?? 1);
+    if (result.status !== 0) throw new Error(`quicktype failed with status ${result.status ?? 1}`);
     if (target.packageName) {
       await writeFile(output, `package ${target.packageName}\n\n${await readFile(output, "utf8")}`);
     }
     if (target.format === "gofmt") {
       const formatted = spawnSync("gofmt", ["-w", output], { cwd: root, stdio: "inherit" });
-      if (formatted.status !== 0) process.exit(formatted.status ?? 1);
+      if (formatted.status !== 0) throw new Error(`gofmt failed with status ${formatted.status ?? 1}`);
     }
     if (check) {
       const normalize = (value) => value.replaceAll("\r\n", "\n");

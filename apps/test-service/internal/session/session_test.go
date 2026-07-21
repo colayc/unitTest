@@ -81,6 +81,35 @@ func TestSessionRejectsUnknownMethodAfterAuthentication(t *testing.T) {
 	}
 }
 
+func TestSessionRejectsNonEmptyPayloadForKnownEmptyMethods(t *testing.T) {
+	for _, method := range []string{"capabilities/get", "shutdown"} {
+		t.Run(method, func(t *testing.T) {
+			s := session.New("0123456789abcdef", "linux", "unix-socket")
+			_ = s.Handle(request(t, "handshake", map[string]string{"token": "0123456789abcdef", "clientName": "test", "clientVersion": "0.1.0"}))
+			result := s.Handle(request(t, method, map[string]any{"unexpected": true}))
+			if result.Error == nil || result.Error.Code != "INVALID_MESSAGE" {
+				t.Fatalf("unexpected response: %#v", result)
+			}
+			if method == "shutdown" {
+				select {
+				case <-s.ShutdownRequested():
+					t.Fatal("invalid shutdown payload requested shutdown")
+				default:
+				}
+			}
+		})
+	}
+}
+
+func TestSessionPreservesUnknownMethodHandlingForNonEmptyPayload(t *testing.T) {
+	s := session.New("0123456789abcdef", "linux", "unix-socket")
+	_ = s.Handle(request(t, "handshake", map[string]string{"token": "0123456789abcdef", "clientName": "test", "clientVersion": "0.1.0"}))
+	result := s.Handle(request(t, "unknown", map[string]any{"allowed": "for method routing"}))
+	if result.Error == nil || result.Error.Code != "METHOD_NOT_FOUND" {
+		t.Fatalf("unexpected response: %#v", result)
+	}
+}
+
 func TestShutdownClosesSignalOnce(t *testing.T) {
 	s := session.New("0123456789abcdef", "linux", "unix-socket")
 	_ = s.Handle(request(t, "handshake", map[string]string{"token": "0123456789abcdef", "clientName": "test", "clientVersion": "0.1.0"}))

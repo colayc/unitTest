@@ -1,15 +1,17 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { execFile as execFileCallback, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import type { Capabilities } from "@unit-test-ide/protocol-models";
 import { ProtocolClient } from "@unit-test-ide/test-client";
 import { endpoint } from "./endpoint.js";
 
 type Exit = [code: number | null, signal: NodeJS.Signals | null];
+const execFile = promisify(execFileCallback);
 
 function within<T>(promise: Promise<T>, milliseconds: number, label: string): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -69,6 +71,14 @@ async function tokenWasConsumed(tokenFile: string): Promise<void> {
   throw new Error("service did not delete the token file after reading it");
 }
 
+async function restrictTokenFile(tokenFile: string): Promise<void> {
+  if (process.platform !== "win32") return;
+  const { stdout } = await execFile("whoami", ["/user", "/fo", "csv", "/nh"], { windowsHide: true, encoding: "utf8" });
+  const sid = String(stdout).match(/S-\d-(?:\d+-)+\d+/)?.[0];
+  if (!sid) throw new Error("could not determine the current Windows user SID");
+  await execFile("icacls", [tokenFile, "/inheritance:r", "/grant:r", `*${sid}:(F)`], { windowsHide: true });
+}
+
 async function terminate(child: ChildProcessWithoutNullStreams, exit: Promise<Exit>): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return;
   child.kill();
@@ -93,6 +103,7 @@ export async function runProbe(serviceBinary: string): Promise<Capabilities> {
 
   try {
     await writeFile(tokenFile, token, { mode: 0o600, flag: "wx" });
+    await restrictTokenFile(tokenFile);
     child = spawn(serviceBinary, ["--endpoint", serviceEndpoint, "--token-file", tokenFile], { windowsHide: true });
     exit = new Promise((resolve) => child?.once("exit", (code, signal) => resolve([code, signal])));
     child.stdout.on("data", (chunk: Buffer | string) => { stdout += String(chunk); });

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"syscall"
+	"time"
 )
 
 func listen(endpoint string) (net.Listener, error) {
@@ -14,6 +16,14 @@ func listen(endpoint string) (net.Listener, error) {
 	if err == nil {
 		if info.Mode()&os.ModeSocket == 0 {
 			return nil, fmt.Errorf("IPC endpoint exists and is not a Unix socket: %s", endpoint)
+		}
+		connection, dialErr := net.DialTimeout("unix", endpoint, 250*time.Millisecond)
+		if dialErr == nil {
+			_ = connection.Close()
+			return nil, fmt.Errorf("IPC endpoint is already active: %s", endpoint)
+		}
+		if !errors.Is(dialErr, syscall.ECONNREFUSED) {
+			return nil, fmt.Errorf("cannot confirm Unix socket is stale: %w", dialErr)
 		}
 		if err := os.Remove(endpoint); err != nil {
 			return nil, err

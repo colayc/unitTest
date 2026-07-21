@@ -7,12 +7,9 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"strings"
-	"sync"
 	"syscall"
 
 	"unit-test-ide.local/test-service/internal/server"
-	"unit-test-ide.local/test-service/internal/session"
 	"unit-test-ide.local/test-service/internal/transport"
 )
 
@@ -30,17 +27,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "--endpoint and --token-file are required")
 		return 2
 	}
-	rawToken, err := os.ReadFile(*tokenFile)
+	token, err := consumeTokenFile(*tokenFile)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
-	}
-	token := strings.TrimSpace(string(rawToken))
-	if len(token) < 16 {
-		fmt.Fprintln(stderr, "authentication token must contain at least 16 characters")
-		return 1
-	}
-	if err := os.Remove(*tokenFile); err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
@@ -53,38 +41,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	shutdown := make(chan struct{})
-	var shutdownOnce sync.Once
-	go func() {
-		select {
-		case <-ctx.Done():
-		case <-shutdown:
-		}
-		_ = listener.Close()
-	}()
+	service := server.NewService(listener, token, transport.PlatformName(), transport.TransportName(), server.ServiceConfig{MaxConnections: 64})
+	go func() { <-ctx.Done(); service.Shutdown() }()
 	fmt.Fprintf(stdout, "READY %s\n", *endpoint)
-
-	for {
-		connection, acceptErr := listener.Accept()
-		if acceptErr != nil {
-			select {
-			case <-ctx.Done():
-				return 0
-			case <-shutdown:
-				return 0
-			default:
-				fmt.Fprintln(stderr, acceptErr)
-				return 1
-			}
-		}
-		active := session.New(token, transport.PlatformName(), transport.TransportName())
-		go func() {
-			server.ServeConnection(connection, active)
-			select {
-			case <-active.ShutdownRequested():
-				shutdownOnce.Do(func() { close(shutdown) })
-			default:
-			}
-		}()
+	if err := service.Serve(); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
 	}
+	return 0
 }
