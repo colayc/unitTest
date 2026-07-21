@@ -28,15 +28,23 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "positional arguments are not supported")
 		return 2
 	}
+	prepareModeFlagProvided := false
 	serviceModeFlagProvided := false
 	flags.Visit(func(parsedFlag *flag.Flag) {
-		if parsedFlag.Name == "endpoint" || parsedFlag.Name == "token-file" {
+		switch parsedFlag.Name {
+		case "prepare-token-file":
+			prepareModeFlagProvided = true
+		case "endpoint", "token-file":
 			serviceModeFlagProvided = true
 		}
 	})
-	if *prepareTokenFilePath != "" {
+	if prepareModeFlagProvided {
 		if serviceModeFlagProvided {
 			fmt.Fprintln(stderr, "--prepare-token-file cannot be combined with --endpoint or --token-file")
+			return 2
+		}
+		if *prepareTokenFilePath == "" {
+			fmt.Fprintln(stderr, "--prepare-token-file requires a non-empty path")
 			return 2
 		}
 		if err := prepareTokenFile(*prepareTokenFilePath); err != nil {

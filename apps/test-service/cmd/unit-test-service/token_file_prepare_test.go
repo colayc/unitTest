@@ -1,12 +1,31 @@
 package main
 
 import (
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
 )
+
+func TestPrepareTokenFileRemovesCreatedFileWhenMetadataRefreshFails(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "token")
+	wantErr := errors.New("injected metadata failure")
+	originalStat := statPreparedTokenFile
+	statPreparedTokenFile = func(*os.File) (os.FileInfo, error) {
+		return nil, wantErr
+	}
+	t.Cleanup(func() { statPreparedTokenFile = originalStat })
+
+	err := prepareTokenFile(path)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("prepareTokenFile error = %v, want injected metadata failure", err)
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatalf("partially prepared token file was not removed: %v", err)
+	}
+}
 
 func TestPrepareTokenFileCreatesEmptyValidatedFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "token")

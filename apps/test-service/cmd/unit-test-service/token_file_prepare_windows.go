@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"unsafe"
@@ -10,21 +11,21 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func createTokenFile(path string) (*os.File, error) {
+func createTokenFile(path string) (*os.File, os.FileInfo, error) {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	sid := user.User.Sid.String()
 	descriptor, err := windows.SecurityDescriptorFromString(
 		fmt.Sprintf("O:%sD:P(A;;GA;;;%s)", sid, sid),
 	)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	name, err := windows.UTF16PtrFromString(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	attributes := &windows.SecurityAttributes{
 		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
@@ -40,7 +41,12 @@ func createTokenFile(path string) (*os.File, error) {
 		0,
 	)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return os.NewFile(uintptr(handle), path), nil
+	file := os.NewFile(uintptr(handle), path)
+	info, statErr := file.Stat()
+	if statErr != nil {
+		return nil, nil, errors.Join(statErr, file.Close())
+	}
+	return file, info, nil
 }
