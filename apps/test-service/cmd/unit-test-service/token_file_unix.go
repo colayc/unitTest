@@ -19,6 +19,10 @@ func openTokenFile(path string) (*os.File, error) {
 	return os.NewFile(uintptr(fd), path), nil
 }
 
+func inspectTokenPath(path string) (os.FileInfo, error) {
+	return os.Lstat(path)
+}
+
 func validateTokenFile(_ *os.File, info os.FileInfo) error {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {

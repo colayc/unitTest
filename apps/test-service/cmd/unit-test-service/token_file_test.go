@@ -92,6 +92,57 @@ func TestConsumeTokenFileRejectsOversizedFileAndRemovesIt(t *testing.T) {
 	assertRemoved(t, path)
 }
 
+func TestRemoveSameTokenFileRejectsMissingOriginalPath(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "token")
+	moved := filepath.Join(directory, "moved-token")
+	if err := os.WriteFile(path, []byte("0123456789abcdef"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := inspectTokenPath(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(path, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeSameTokenFile(path, expected); err == nil {
+		t.Fatal("expected a renamed-away token file to fail cleanup")
+	}
+	if _, err := os.Lstat(moved); err != nil {
+		t.Fatalf("renamed token file was not preserved for startup failure: %v", err)
+	}
+}
+
+func TestRemoveSameTokenFilePreservesReplacement(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "token")
+	moved := filepath.Join(directory, "original-token")
+	if err := os.WriteFile(path, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := inspectTokenPath(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(path, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("replacement"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeSameTokenFile(path, expected); err == nil {
+		t.Fatal("expected a replacement token path to fail identity checking")
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("replacement token path was removed: %v", err)
+	}
+	if string(contents) != "replacement" {
+		t.Fatalf("replacement contents = %q", contents)
+	}
+}
+
 func assertRemoved(t *testing.T, path string) {
 	t.Helper()
 	if _, err := os.Lstat(path); !os.IsNotExist(err) {

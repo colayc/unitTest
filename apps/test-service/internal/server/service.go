@@ -58,10 +58,11 @@ func (s *Service) Serve() error {
 			}
 			return err
 		}
-		s.mu.Lock()
-		s.connections[connection] = struct{}{}
-		s.mu.Unlock()
-		s.handlers.Add(1)
+		if !s.registerConnection(connection) {
+			_ = connection.Close()
+			<-capacity
+			return nil
+		}
 		go func() {
 			defer s.handlers.Done()
 			defer func() { <-capacity }()
@@ -77,6 +78,19 @@ func (s *Service) Serve() error {
 			}
 		}()
 	}
+}
+
+func (s *Service) registerConnection(connection net.Conn) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	select {
+	case <-s.stop:
+		return false
+	default:
+	}
+	s.connections[connection] = struct{}{}
+	s.handlers.Add(1)
+	return true
 }
 
 func (s *Service) Shutdown() {

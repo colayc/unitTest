@@ -11,13 +11,12 @@ import (
 const maxTokenFileBytes = 4096
 
 func consumeTokenFile(path string) (token string, err error) {
-	before, err := os.Lstat(path)
+	before, err := inspectTokenPath(path)
 	if err != nil {
 		return "", err
 	}
 	if before.Mode()&os.ModeSymlink != 0 {
-		removeErr := os.Remove(path)
-		return "", errors.Join(errors.New("authentication token file must not be a symlink"), removeErr)
+		return "", errors.Join(errors.New("authentication token file must not be a symlink"), removeSameTokenFile(path, before))
 	}
 	if !before.Mode().IsRegular() {
 		return "", errors.New("authentication token file must be a regular non-symlink file")
@@ -63,9 +62,9 @@ func consumeTokenFile(path string) (token string, err error) {
 }
 
 func removeSameTokenFile(path string, expected os.FileInfo) error {
-	current, err := os.Lstat(path)
+	current, err := inspectTokenPath(path)
 	if os.IsNotExist(err) {
-		return nil
+		return errors.New("authentication token file disappeared before deletion")
 	}
 	if err != nil {
 		return fmt.Errorf("inspect authentication token file before deletion: %w", err)
