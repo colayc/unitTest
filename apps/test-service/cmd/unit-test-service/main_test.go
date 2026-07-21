@@ -42,6 +42,36 @@ func TestRunRejectsMixedPreparationAndServiceModes(t *testing.T) {
 	}
 }
 
+func TestRunRejectsEmptyEndpointFlagInPreparationMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "token")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--prepare-token-file", path, "--endpoint="}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("run code = %d, want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "cannot be combined") {
+		t.Fatalf("stderr = %q, want combination error", stderr.String())
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("mixed mode created token path: %v", err)
+	}
+}
+
+func TestRunRejectsEmptyTokenFileFlagInPreparationMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "token")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--prepare-token-file", path, "--token-file="}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("run code = %d, want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "cannot be combined") {
+		t.Fatalf("stderr = %q, want combination error", stderr.String())
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("mixed mode created token path: %v", err)
+	}
+}
+
 func TestRunRejectsPositionalArguments(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"unexpected"}, &stdout, &stderr); code != 2 {
