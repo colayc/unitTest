@@ -1,0 +1,22 @@
+{
+  "name": "@unit-test-ide/test-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "dependencies": {
+    "@unit-test-ide/protocol-models": "workspace:*",
+    "@unit-test-ide/protocol-schema": "workspace:*",
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "typescript": "6.0.3"
+  },
+  "scripts": {
+    "build": "tsc -b tsconfig.json",
+    "test": "pnpm run build && node --test dist/client.test.js"
+  }
+}

@@ -42,6 +42,28 @@ importers:
         specifier: 3.0.1
         version: 3.0.1(ajv@8.20.0)
 
+  packages/test-client:
+    dependencies:
+      '@unit-test-ide/protocol-models':
+        specifier: workspace:*
+        version: link:../protocol-models
+      '@unit-test-ide/protocol-schema':
+        specifier: workspace:*
+        version: link:../protocol-schema
+      ajv:
+        specifier: 8.20.0
+        version: 8.20.0
+      ajv-formats:
+        specifier: 3.0.1
+        version: 3.0.1(ajv@8.20.0)
+    devDependencies:
+      '@types/node':
+        specifier: 24.13.3
+        version: 24.13.3
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
+
 packages:
 
   '@cspotcode/source-map-support@0.8.1':
