@@ -71,13 +71,9 @@ async function tokenWasConsumed(tokenFile: string): Promise<void> {
   throw new Error("service did not delete the token file after reading it");
 }
 
-async function restrictTokenFile(tokenFile: string): Promise<void> {
-  if (process.platform !== "win32") return;
-  const { stdout } = await execFile("whoami", ["/user", "/fo", "csv", "/nh"], { windowsHide: true, encoding: "utf8" });
-  const sid = String(stdout).match(/S-\d-(?:\d+-)+\d+/)?.[0];
-  if (!sid) throw new Error("could not determine the current Windows user SID");
-  await execFile("icacls", [tokenFile, "/setowner", `*${sid}`], { windowsHide: true }).catch(() => undefined);
-  await execFile("icacls", [tokenFile, "/inheritance:r", "/grant:r", `*${sid}:(F)`], { windowsHide: true });
+export async function prepareTokenFile(serviceBinary: string, tokenFile: string, token: string): Promise<void> {
+  await execFile(serviceBinary, ["--prepare-token-file", tokenFile], { windowsHide: true });
+  await writeFile(tokenFile, token, { flag: "r+" });
 }
 
 async function terminate(child: ChildProcessWithoutNullStreams, exit: Promise<Exit>): Promise<void> {
@@ -103,8 +99,7 @@ export async function runProbe(serviceBinary: string): Promise<Capabilities> {
   let stderr = "";
 
   try {
-    await writeFile(tokenFile, token, { mode: 0o600, flag: "wx" });
-    await restrictTokenFile(tokenFile);
+    await prepareTokenFile(serviceBinary, tokenFile, token);
     child = spawn(serviceBinary, ["--endpoint", serviceEndpoint, "--token-file", tokenFile], { windowsHide: true });
     exit = new Promise((resolve) => child?.once("exit", (code, signal) => resolve([code, signal])));
     child.stdout.on("data", (chunk: Buffer | string) => { stdout += String(chunk); });
