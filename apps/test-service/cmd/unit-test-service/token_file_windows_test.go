@@ -3,6 +3,8 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -15,7 +17,33 @@ func prepareTokenFileForTest(path string) error {
 	if err != nil {
 		return err
 	}
-	return setTokenFileACL(path, []windows.EXPLICIT_ACCESS{allowSID(user.User.Sid, windows.GENERIC_ALL)})
+	return setTokenFileOwnerAndACL(path, user.User.Sid, []windows.EXPLICIT_ACCESS{allowSID(user.User.Sid, windows.GENERIC_ALL)})
+}
+
+func TestPreparedTokenFileIsOwnedByCurrentUser(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "token-owner")
+	if err := os.WriteFile(path, []byte("0123456789abcdef"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareTokenFileForTest(path); err != nil {
+		t.Fatal(err)
+	}
+
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, _, err := sd.Owner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owner == nil || !owner.Equals(user.User.Sid) {
+		t.Fatalf("token owner = %v, want current user %v", owner, user.User.Sid)
+	}
 }
 
 func TestConsumeTokenFileRejectsACLThatGrantsAnotherPrincipal(t *testing.T) {
@@ -70,4 +98,31 @@ func setTokenFileACL(path string, entries []windows.EXPLICIT_ACCESS) error {
 		acl,
 		nil,
 	)
+}
+
+func setTokenFileOwnerAndACL(path string, owner *windows.SID, entries []windows.EXPLICIT_ACCESS) error {
+	ownerErr := windows.SetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION,
+		owner,
+		nil,
+		nil,
+		nil,
+	)
+	if aclErr := setTokenFileACL(path, entries); aclErr != nil {
+		return errors.Join(ownerErr, aclErr)
+	}
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		return errors.Join(ownerErr, err)
+	}
+	actual, _, err := sd.Owner()
+	if err != nil {
+		return errors.Join(ownerErr, err)
+	}
+	if actual == nil || !actual.Equals(owner) {
+		return errors.Join(ownerErr, fmt.Errorf("token owner = %v, want current user %v", actual, owner))
+	}
+	return nil
 }

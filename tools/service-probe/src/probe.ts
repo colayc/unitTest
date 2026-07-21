@@ -76,6 +76,7 @@ async function restrictTokenFile(tokenFile: string): Promise<void> {
   const { stdout } = await execFile("whoami", ["/user", "/fo", "csv", "/nh"], { windowsHide: true, encoding: "utf8" });
   const sid = String(stdout).match(/S-\d-(?:\d+-)+\d+/)?.[0];
   if (!sid) throw new Error("could not determine the current Windows user SID");
+  await execFile("icacls", [tokenFile, "/setowner", `*${sid}`], { windowsHide: true }).catch(() => undefined);
   await execFile("icacls", [tokenFile, "/inheritance:r", "/grant:r", `*${sid}:(F)`], { windowsHide: true });
 }
 
