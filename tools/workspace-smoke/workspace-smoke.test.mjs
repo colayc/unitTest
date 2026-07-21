@@ -21,3 +21,11 @@ test("dependency metadata uses the official npm registry", async () => {
   assert.equal((await readFile(".npmrc", "utf8")).trim(), "registry=https://registry.npmjs.org/");
   assert.doesNotMatch(await readFile("pnpm-lock.yaml", "utf8"), /registry\.npmmirror\.com/);
 });
+
+test("documentation records pre-write token file preparation", async () => {
+  const readme = await readFile("README.md", "utf8");
+  const decision = await readFile("docs/decisions/0001-local-ipc-and-protocol-v1.md", "utf8");
+  assert.match(readme, /--prepare-token-file/);
+  assert.match(decision, /--prepare-token-file/);
+  assert.doesNotMatch(readme, /removes inherited Windows permissions after writing/i);
+});
