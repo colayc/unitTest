@@ -46,6 +46,36 @@ func TestPreparedTokenFileIsOwnedByCurrentUser(t *testing.T) {
 	}
 }
 
+func TestValidateOwnerOnlyDACLAcceptsWellKnownAliasForOwner(t *testing.T) {
+	owner := ownerSIDFromSDDL(t, "LA")
+	if err := validateOwnerOnlyDACL("D:P(A;;GA;;;LA)", owner); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateOwnerOnlyDACLRejectsEveryoneAlias(t *testing.T) {
+	owner := ownerSIDFromSDDL(t, "LA")
+	if err := validateOwnerOnlyDACL("D:P(A;;GA;;;WD)", owner); err == nil {
+		t.Fatal("expected DACL granting Everyone access to be rejected")
+	}
+}
+
+func ownerSIDFromSDDL(t *testing.T, trustee string) *windows.SID {
+	t.Helper()
+	sd, err := windows.SecurityDescriptorFromString("O:" + trustee)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, _, err := sd.Owner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owner == nil {
+		t.Fatal("security descriptor owner is missing")
+	}
+	return owner
+}
+
 func TestConsumeTokenFileRejectsACLThatGrantsAnotherPrincipal(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "token")
 	if err := os.WriteFile(path, []byte("0123456789abcdef"), 0o600); err != nil {

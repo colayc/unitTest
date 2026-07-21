@@ -78,13 +78,13 @@ func validateTokenFile(file *os.File, _ os.FileInfo) error {
 	if err != nil || dacl == nil {
 		return errors.New("authentication token file must have a restrictive DACL")
 	}
-	if err := validateOwnerOnlyDACL(sd.String(), user.User.Sid.String()); err != nil {
+	if err := validateOwnerOnlyDACL(sd.String(), user.User.Sid); err != nil {
 		return err
 	}
 	return nil
 }
 
-func validateOwnerOnlyDACL(sddl string, ownerSID string) error {
+func validateOwnerOnlyDACL(sddl string, ownerSID *windows.SID) error {
 	start := strings.Index(sddl, "D:")
 	if start < 0 {
 		return errors.New("authentication token file DACL is missing")
@@ -108,7 +108,7 @@ func validateOwnerOnlyDACL(sddl string, ownerSID string) error {
 		case "D", "OD", "XD":
 			continue
 		case "A", "OA", "XA", "ZA":
-			if fields[5] != ownerSID {
+			if !sddlTrusteeMatchesSID(fields[5], ownerSID) {
 				return fmt.Errorf("authentication token file DACL grants access to %s", fields[5])
 			}
 			allowedOwner = true
@@ -120,6 +120,15 @@ func validateOwnerOnlyDACL(sddl string, ownerSID string) error {
 		return errors.New("authentication token file DACL does not grant access to its owner")
 	}
 	return nil
+}
+
+func sddlTrusteeMatchesSID(trustee string, expected *windows.SID) bool {
+	sd, err := windows.SecurityDescriptorFromString("O:" + trustee)
+	if err != nil {
+		return false
+	}
+	actual, _, err := sd.Owner()
+	return err == nil && actual != nil && expected != nil && actual.Equals(expected)
 }
 
 func splitSDDLACEs(value string) []string {
