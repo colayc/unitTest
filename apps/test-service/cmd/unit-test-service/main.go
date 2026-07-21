@@ -20,8 +20,24 @@ func run(args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	endpoint := flags.String("endpoint", "", "local IPC endpoint")
 	tokenFile := flags.String("token-file", "", "authentication token file")
+	prepareTokenFilePath := flags.String("prepare-token-file", "", "create an empty owner-only authentication token file")
 	if err := flags.Parse(args); err != nil {
 		return 2
+	}
+	if flags.NArg() != 0 {
+		fmt.Fprintln(stderr, "positional arguments are not supported")
+		return 2
+	}
+	if *prepareTokenFilePath != "" {
+		if *endpoint != "" || *tokenFile != "" {
+			fmt.Fprintln(stderr, "--prepare-token-file cannot be combined with --endpoint or --token-file")
+			return 2
+		}
+		if err := prepareTokenFile(*prepareTokenFilePath); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		return 0
 	}
 	if *endpoint == "" || *tokenFile == "" {
 		fmt.Fprintln(stderr, "--endpoint and --token-file are required")
