@@ -17,7 +17,16 @@ type Request struct {
 	Kind            string          `json:"kind"`
 	MessageID       string          `json:"messageId"`
 	Method          string          `json:"method"`
-	SentAt          string          `json:"sentAt,omitempty"`
+	SentAt          string          `json:"sentAt"`
+	Payload         json.RawMessage `json:"payload"`
+}
+
+type requestEnvelope struct {
+	ProtocolVersion *string         `json:"protocolVersion"`
+	Kind            *string         `json:"kind"`
+	MessageID       *string         `json:"messageId"`
+	Method          *string         `json:"method"`
+	SentAt          *string         `json:"sentAt"`
 	Payload         json.RawMessage `json:"payload"`
 }
 
@@ -39,19 +48,45 @@ type Response struct {
 }
 
 func DecodeRequest(line []byte) (Request, error) {
-	var value Request
+	var envelope requestEnvelope
 	decoder := json.NewDecoder(bytes.NewReader(line))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&value); err != nil {
+	if err := decoder.Decode(&envelope); err != nil {
 		return Request{}, err
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return Request{}, errors.New("multiple JSON values")
 	}
-	if value.Kind != "request" || value.MessageID == "" || value.Method == "" {
+	if envelope.ProtocolVersion == nil || envelope.Kind == nil || *envelope.Kind != "request" || envelope.MessageID == nil || !validMessageID(*envelope.MessageID) || envelope.Method == nil || *envelope.Method == "" || envelope.SentAt == nil {
 		return Request{}, errors.New("missing request fields")
 	}
-	return value, nil
+	if _, err := time.Parse(time.RFC3339, *envelope.SentAt); err != nil {
+		return Request{}, errors.New("invalid sentAt")
+	}
+	var payload map[string]json.RawMessage
+	if len(envelope.Payload) == 0 || json.Unmarshal(envelope.Payload, &payload) != nil || payload == nil {
+		return Request{}, errors.New("payload must be an object")
+	}
+	return Request{
+		ProtocolVersion: *envelope.ProtocolVersion,
+		Kind:            *envelope.Kind,
+		MessageID:       *envelope.MessageID,
+		Method:          *envelope.Method,
+		SentAt:          *envelope.SentAt,
+		Payload:         envelope.Payload,
+	}, nil
+}
+
+func validMessageID(value string) bool {
+	if len(value) != 32 {
+		return false
+	}
+	for _, character := range value {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func Success(request Request, payload any) Response {

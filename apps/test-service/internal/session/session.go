@@ -1,9 +1,13 @@
 package session
 
 import (
+	"bytes"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
+	"io"
 	"sync"
+	"unicode/utf8"
 
 	"unit-test-ide.local/test-service/internal/protocol"
 	"unit-test-ide.local/test-service/internal/protocolmodel"
@@ -42,8 +46,8 @@ func (s *Session) Handle(request protocol.Request) protocol.Response {
 
 	switch request.Method {
 	case "handshake":
-		var payload handshake
-		if err := json.Unmarshal(request.Payload, &payload); err != nil {
+		payload, err := decodeHandshake(request.Payload)
+		if err != nil {
 			return protocol.Failure(request, "INVALID_MESSAGE", "invalid handshake payload", false)
 		}
 		if subtle.ConstantTimeCompare([]byte(payload.Token), []byte(s.token)) != 1 {
@@ -59,4 +63,20 @@ func (s *Session) Handle(request protocol.Request) protocol.Response {
 	default:
 		return protocol.Failure(request, "METHOD_NOT_FOUND", "method is not supported", false)
 	}
+}
+
+func decodeHandshake(raw json.RawMessage) (handshake, error) {
+	var payload handshake
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&payload); err != nil {
+		return handshake{}, err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return handshake{}, errors.New("multiple JSON values")
+	}
+	if utf8.RuneCountInString(payload.Token) < 16 || payload.ClientName == "" || payload.ClientVersion == "" {
+		return handshake{}, errors.New("missing handshake fields")
+	}
+	return payload, nil
 }

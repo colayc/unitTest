@@ -41,6 +41,37 @@ func TestSessionRejectsWrongToken(t *testing.T) {
 	}
 }
 
+func TestSessionRejectsInvalidHandshakePayload(t *testing.T) {
+	tests := map[string]string{
+		"unknown property":      `{"token":"0123456789abcdef","clientName":"test","clientVersion":"0.1.0","unknown":true}`,
+		"missing token":         `{"clientName":"test","clientVersion":"0.1.0"}`,
+		"short token":           `{"token":"too-short","clientName":"test","clientVersion":"0.1.0"}`,
+		"missing clientName":    `{"token":"0123456789abcdef","clientVersion":"0.1.0"}`,
+		"empty clientName":      `{"token":"0123456789abcdef","clientName":"","clientVersion":"0.1.0"}`,
+		"missing clientVersion": `{"token":"0123456789abcdef","clientName":"test"}`,
+		"empty clientVersion":   `{"token":"0123456789abcdef","clientName":"test","clientVersion":""}`,
+		"null":                  `null`,
+		"array":                 `[]`,
+		"string":                `"payload"`,
+		"trailing JSON":         `{"token":"0123456789abcdef","clientName":"test","clientVersion":"0.1.0"} {}`,
+	}
+	for name, payload := range tests {
+		t.Run(name, func(t *testing.T) {
+			s := session.New("0123456789abcdef", "linux", "unix-socket")
+			result := s.Handle(protocol.Request{
+				ProtocolVersion: protocol.Version,
+				Kind:            "request",
+				MessageID:       "0123456789abcdef0123456789abcdef",
+				Method:          "handshake",
+				Payload:         json.RawMessage(payload),
+			})
+			if result.Kind != "error" || result.Error == nil || result.Error.Code != "INVALID_MESSAGE" {
+				t.Fatalf("unexpected response: %#v", result)
+			}
+		})
+	}
+}
+
 func TestSessionRejectsUnknownMethodAfterAuthentication(t *testing.T) {
 	s := session.New("0123456789abcdef", "linux", "unix-socket")
 	_ = s.Handle(request(t, "handshake", map[string]string{"token": "0123456789abcdef", "clientName": "test", "clientVersion": "0.1.0"}))
