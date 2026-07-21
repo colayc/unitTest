@@ -1,0 +1,17 @@
+{
+  "name": "@unit-test-ide/protocol-schema",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./v1/message": "./schema/v1/message.schema.json",
+    "./v1/capabilities": "./schema/v1/capabilities.schema.json"
+  },
+  "scripts": {
+    "test": "node --test test/schema.test.mjs"
+  },
+  "devDependencies": {
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1"
+  }
+}

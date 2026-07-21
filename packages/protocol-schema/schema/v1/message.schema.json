@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:unit-test-ide:protocol:v1:message",
+  "title": "ProtocolMessage",
+  "type": "object",
+  "oneOf": [
+    { "$ref": "#/$defs/handshakeRequest" },
+    { "$ref": "#/$defs/emptyRequest" },
+    { "$ref": "#/$defs/response" },
+    { "$ref": "#/$defs/error" }
+  ],
+  "$defs": {
+    "baseProperties": {
+      "type": "object",
+      "properties": {
+        "protocolVersion": { "const": "1.0" },
+        "messageId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+        "sentAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["protocolVersion", "messageId", "sentAt"]
+    },
+    "handshakeRequest": {
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/baseProperties" },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "request" },
+            "method": { "const": "handshake" },
+            "payload": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["token", "clientName", "clientVersion"],
+              "properties": {
+                "token": { "type": "string", "minLength": 16 },
+                "clientName": { "type": "string", "minLength": 1 },
+                "clientVersion": { "type": "string", "minLength": 1 }
+              }
+            }
+          },
+          "required": ["kind", "method", "payload"]
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "emptyRequest": {
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/baseProperties" },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "request" },
+            "method": { "enum": ["capabilities/get", "shutdown"] },
+            "payload": { "type": "object", "maxProperties": 0 }
+          },
+          "required": ["kind", "method", "payload"]
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "response": {
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/baseProperties" },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "response" },
+            "requestId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+            "method": { "enum": ["handshake", "capabilities/get", "shutdown"] },
+            "payload": { "type": "object" }
+          },
+          "required": ["kind", "requestId", "method", "payload"]
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "error": {
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/baseProperties" },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "error" },
+            "requestId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+            "error": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["code", "message", "retryable"],
+              "properties": {
+                "code": { "enum": ["INVALID_MESSAGE", "UNSUPPORTED_PROTOCOL", "AUTH_REQUIRED", "AUTH_FAILED", "METHOD_NOT_FOUND"] },
+                "message": { "type": "string" },
+                "retryable": { "type": "boolean" }
+              }
+            }
+          },
+          "required": ["kind", "requestId", "error"]
+        }
+      ],
+      "unevaluatedProperties": false
+    }
+  }
+}

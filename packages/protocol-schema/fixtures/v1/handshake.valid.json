@@ -1,0 +1,12 @@
+{
+  "protocolVersion": "1.0",
+  "kind": "request",
+  "messageId": "0123456789abcdef0123456789abcdef",
+  "method": "handshake",
+  "sentAt": "2026-07-21T00:00:00Z",
+  "payload": {
+    "token": "base64url-token1",
+    "clientName": "service-probe",
+    "clientVersion": "0.1.0"
+  }
+}

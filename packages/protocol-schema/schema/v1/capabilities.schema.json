@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:unit-test-ide:protocol:v1:capabilities",
+  "title": "Capabilities",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["platform", "transports", "toolchains", "frameworks", "coverageTools"],
+  "properties": {
+    "platform": { "type": "string", "pattern": "^(windows|linux)$" },
+    "transports": { "type": "array", "items": { "type": "string", "pattern": "^(named-pipe|unix-socket)$" } },
+    "toolchains": { "type": "array", "items": { "type": "string" } },
+    "frameworks": { "type": "array", "items": { "type": "string" } },
+    "coverageTools": { "type": "array", "items": { "type": "string" } }
+  }
+}
