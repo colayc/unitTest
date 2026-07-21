@@ -9,3 +9,10 @@ test("workspace pins supported toolchains", async () => {
   assert.equal(manifest.packageManager, "pnpm@11.4.0");
   assert.equal(manifest.engines.node, ">=24.18.0 <25");
 });
+
+test("README contains the complete local verification gate", async () => {
+  const readme = await readFile("README.md", "utf8");
+  for (const command of ["pnpm check:protocol-generated", "pnpm test", "pnpm test:e2e"]) {
+    assert.match(readme, new RegExp(command.replaceAll(" ", "\\s+")));
+  }
+});
