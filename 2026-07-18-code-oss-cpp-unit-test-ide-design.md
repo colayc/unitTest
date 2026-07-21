@@ -12,7 +12,7 @@
 首期目标：
 
 1. 发布具有自有品牌的 Windows、Linux 桌面 IDE。
-2. 支持 MSVC、GCC、Clang 工具链。
+2. 首个正式版本同时支持 Windows/MSVC、Linux/GCC、Linux/Clang 三个平台与工具链组合；Windows 覆盖率使用 clang-cl/llvm-cov 专用构建配置。
 3. 以 CppUTest/CppUMock 为 C/C++ 主测试方案，以 Unity/CMock 为纯 C 补充方案。
 4. 使用 CMake/CTest 调度构建和测试。
 5. 提供测试发现、测试树、运行控制、源码定位、覆盖率和报告功能。
@@ -86,7 +86,7 @@ Code-OSS 产品外壳
 ├── CppUTest/CppUMock 适配
 ├── Unity/CMock 适配
 ├── CMake/CTest 适配
-├── MSVC/GCC/Clang 适配
+├── MSVC/clang-cl/GCC/Clang 适配
 ├── gcovr/llvm-cov 适配
 └── 结果、历史和制品管理
 ```
@@ -185,7 +185,9 @@ Code-OSS 产品外壳
 - Windows、Linux 桌面安装包。
 - 自有品牌、配置、更新地址和扩展源。
 - CMake 项目识别和工作区配置。
-- MSVC、GCC、Clang 自动发现与手动配置。
+- 首个正式版本同时支持 Windows/MSVC、Linux/GCC、Linux/Clang。
+- Windows 自动发现 MSVC 与 LLVM/clang-cl；Linux 自动发现 GCC 与 Clang，并允许手动配置。
+- Windows 使用相互隔离的 MSVC 正式构建配置和 clang-cl 覆盖率构建配置，两者不得复用构建目录。
 
 ### 9.2 测试能力
 
@@ -198,8 +200,10 @@ Code-OSS 产品外壳
 
 ### 9.3 覆盖率与报告
 
-- GCC/gcovr 覆盖率。
-- Clang/llvm-cov 覆盖率。
+- Windows 使用 clang-cl 插桩并通过 llvm-profdata/llvm-cov 生成覆盖率；该结果代表 clang-cl 构建，不声明为 `cl.exe` 原生覆盖率。
+- Linux/GCC 使用 gcovr 生成覆盖率。
+- Linux/Clang 使用 llvm-cov 生成覆盖率。
+- clang-cl、llvm-profdata 与 llvm-cov 必须来自同一 LLVM 工具链版本；原始 `.profraw` 只作为短期中间制品，不作为长期兼容格式保存。
 - 覆盖率树、源码着色和汇总。
 - JUnit XML 与 HTML 报告导出。
 - 本地历史结果和制品查看。
@@ -272,9 +276,10 @@ Code-OSS 产品外壳
 
 | 平台 | 工具链 | 验证内容 |
 |---|---|---|
-| Windows | MSVC | C/C++ 编译、CppUTest、覆盖率、进程取消 |
+| Windows | MSVC | C/C++ 编译、CppUTest、Unity、构建诊断、进程取消 |
+| Windows | clang-cl/LLVM | 覆盖率构建、CppUTest、Unity、llvm-profdata、llvm-cov、源码路径映射 |
 | Linux | GCC | C/C++ 编译、CppUTest、Unity、gcovr |
-| Linux | Clang | C/C++ 编译、llvm-cov、ASan、UBSan |
+| Linux | Clang | C/C++ 编译、CppUTest、Unity、llvm-cov、ASan、UBSan |
 
 每个适配器包含成功、构建失败、测试失败、崩溃和超时示例工程。
 
@@ -285,6 +290,7 @@ Code-OSS 产品外壳
 ## 14. 发布门禁
 
 - 单元、契约、集成和关键端到端测试全部通过。
+- Windows/MSVC 正式构建与 Windows/clang-cl 覆盖率构建必须分别通过，且使用独立构建目录。
 - Windows、Linux 安装包完成签名或摘要校验。
 - 不存在未处置的高危依赖漏洞。
 - 依赖和预装扩展许可证完成审查。
@@ -298,11 +304,11 @@ Code-OSS 产品外壳
 
 首期视为成功需要同时满足：
 
-1. Windows/MSVC、Linux/GCC、Linux/Clang 的核心测试流程稳定运行。
+1. Windows/MSVC、Linux/GCC、Linux/Clang 的核心测试流程在首个正式版本中稳定运行。
 2. 同一工作区配置和测试源代码可以跨 Windows、Linux 使用。
 3. CppUTest 与 Unity 测试能够发现、运行、停止并准确显示结果。
 4. 构建错误、测试失败和基础设施错误能够被明确区分。
-5. 覆盖率可以在源码和汇总视图中查看并导出。
+5. Windows/clang-cl、Linux/GCC 和 Linux/Clang 的覆盖率可以在源码和汇总视图中查看并导出；产品界面明确显示实际覆盖率工具链。
 6. 未信任工作区不会自动执行代码。
 7. Code-OSS 核心改动保持最小并可持续合并上游。
 8. 测试服务可以脱离 IDE 独立运行和测试。
@@ -319,6 +325,8 @@ Code-OSS 产品外壳
 | 本地与云端协议分叉 | 版本化协议、传输层分离和契约测试 |
 | 大量测试导致 UI 卡顿 | 分页/增量事件、虚拟化树、性能基线和压力测试 |
 | CppUTest 不能满足现代 C++ 场景 | 保留框架适配层，后续可增加 GoogleTest 适配器 |
+| Windows 正式构建与覆盖率构建使用不同编译器导致行为差异 | 使用相同源码、依赖版本和测试范围；分别执行 MSVC 功能测试与 clang-cl 覆盖率测试，并在界面和报告中标明工具链 |
+| LLVM 原始覆盖率数据与工具版本不兼容 | 锁定 clang-cl、llvm-profdata、llvm-cov 版本组合，运行后立即转换为版本化 JSON/HTML 报告，原始 profile 仅短期保留 |
 | 云端需求提前侵入首期 | 仅预留协议字段，不实现首期非目标能力 |
 
 ## 17. 官方参考资料
@@ -332,6 +340,6 @@ Code-OSS 产品外壳
 - [Open VSX Registry FAQ](https://www.eclipse.org/legal/open-vsx-registry-faq/)
 - [CppUTest 用户手册](https://cpputest.github.io/)
 - [Unity Test](https://github.com/ThrowTheSwitch/unity)
+- [Clang Compiler User's Manual：clang-cl](https://clang.llvm.org/docs/UsersManual.html#clang-cl)
 - [LLVM Source-based Code Coverage](https://clang.llvm.org/docs/SourceBasedCodeCoverage.html)
 - [gcovr User Guide](https://gcovr.com/en/stable/guide.html)
-
