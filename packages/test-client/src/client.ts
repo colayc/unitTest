@@ -52,7 +52,12 @@ export class ProtocolClient {
   }
 
   async shutdown(): Promise<void> { this.#requireAuthentication(); await this.#request("shutdown", {}); }
-  close(): void { if (!this.#closed) { this.#closed = true; this.stream.destroy(); } }
+  close(): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    this.#failAll(new Error("service connection is closed"));
+    this.stream.destroy();
+  }
 
   #requireAuthentication(): void { if (!this.#authenticated) throw new Error("handshake has not completed"); }
 
@@ -71,12 +76,14 @@ export class ProtocolClient {
     for (;;) {
       const newline = this.#buffer.indexOf(0x0a);
       if (newline < 0) break;
-      const line = this.#buffer.subarray(0, newline);
+      let line = this.#buffer.subarray(0, newline);
       this.#buffer = this.#buffer.subarray(newline + 1);
+      if (line.at(-1) === 0x0d) line = line.subarray(0, -1);
       if (line.byteLength > MAX_MESSAGE_BYTES) { this.#failAll(new Error("protocol line exceeds the 1 MiB limit")); this.close(); return; }
       this.#onLine(line.toString("utf8"));
     }
-    if (this.#buffer.byteLength > MAX_MESSAGE_BYTES) { this.#failAll(new Error("protocol line exceeds the 1 MiB limit")); this.close(); }
+    const bufferedBodyBytes = this.#buffer.at(-1) === 0x0d ? this.#buffer.byteLength - 1 : this.#buffer.byteLength;
+    if (bufferedBodyBytes > MAX_MESSAGE_BYTES) { this.#failAll(new Error("protocol line exceeds the 1 MiB limit")); this.close(); }
   }
 
   #onLine(line: string): void {
