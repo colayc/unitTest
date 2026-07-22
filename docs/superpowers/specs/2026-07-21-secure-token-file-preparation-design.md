@@ -1,35 +1,35 @@
-# Secure Token File Preparation Design
+# Secure Token File Preparation 设计
 
-**Date:** 2026-07-21
-**Status:** Awaiting written review
+**日期：** 2026-07-21
+**状态：** 等待书面 review
 
-## Context
+## 背景
 
-The TypeScript service probe currently writes the authentication token and then invokes `icacls` on Windows. This has two problems:
+TypeScript service probe 当前会先写入 authentication token，然后在 Windows 上调用 `icacls`。这有两个问题：
 
-1. The token exists before its DACL is restricted.
-2. `icacls /grant:r` replaces entries for one trustee but does not guarantee that every other explicit allow ACE is removed. GitHub's Windows runner therefore retained a Local System (`SY`) ACE and the Go service correctly rejected the file.
+1. token 在其 DACL 被限制前就已存在。
+2. `icacls /grant:r` 会替换一个 trustee 的 entry，但不能保证移除其他所有 explicit allow ACE。因此，GitHub 的 Windows runner 保留了 Local System (`SY`) ACE，而 Go service 正确拒绝了该 file。
 
-The documented security contract remains unchanged: the token file is a regular, non-symlink file owned by the current user and accessible only by that user. The service must validate this contract independently before reading and deleting the token.
+已记录的 security contract 保持不变：token file 是由当前 user 所有且只能由该 user 访问的 regular、non-symlink file。service 在读取和删除 token 前必须独立验证此 contract。
 
-## Goals
+## 目标
 
-- Create the token file with restrictive permissions before any secret is written.
-- Use one launcher flow on Windows and Linux while keeping platform-specific permission code inside Go.
-- Preserve the service's existing owner, permission, identity, size, and deletion checks.
-- Remove the launcher's dependency on `whoami`, `icacls`, PowerShell, or another shell.
-- Fail closed without logging or passing the token through process arguments.
+- 在写入任何 secret 前以 restrictive permission 创建 token file。
+- 在 Windows 和 Linux 上使用一个 launcher flow，同时将 platform-specific permission code 保留在 Go 内。
+- 保留 service 现有的 owner、permission、identity、size 和 deletion check。
+- 移除 launcher 对 `whoami`、`icacls`、PowerShell 或其他 shell 的依赖。
+- 在不记录 log 且不通过 process argument 传递 token 的前提下 fail closed。
 
-## Non-goals
+## 非目标
 
-- Changing the handshake protocol or token format.
-- Allowing Local System, Administrators, group, or other-user access to the token file.
-- Building a general-purpose file-permission command.
-- Moving service lifecycle ownership into the Go process.
+- 改变 handshake protocol 或 token format。
+- 允许 Local System、Administrators、group 或 other-user 访问 token file。
+- 构建 general-purpose file-permission command。
+- 将 service lifecycle ownership 移入 Go process。
 
-## Approaches Considered
+## 考虑过的方案
 
-### 1. Go-owned secure file creation (selected)
+### 1. Go-owned secure file creation（已选择）
 
 Add a mutually exclusive service command mode:
 
@@ -37,61 +37,61 @@ Add a mutually exclusive service command mode:
 unit-test-service --prepare-token-file <path>
 ```
 
-The Go binary creates a new empty file with platform-native owner-only permissions and exits. TypeScript then opens that existing file without create semantics and writes the token before launching the normal service mode.
+Go binary 以 platform-native owner-only permission 创建新的 empty file 后退出。随后 TypeScript 在不采用 create semantic 的情况下打开该 existing file，并在启动 normal service mode 前写入 token。
 
-This keeps native permission logic in Go, creates the file securely before the secret exists, and avoids shell-specific ACL behavior.
+该方案将 native permission logic 保留在 Go 中，在 secret 存在前安全地创建 file，并避免 shell-specific ACL behavior。
 
-### 2. Replace the DACL through PowerShell
+### 2. 通过 PowerShell 替换 DACL
 
-PowerShell could construct a new ACL and remove all existing rules. This is smaller initially, but it adds quoting and host-policy dependencies and still requires careful sequencing to avoid writing the secret before hardening the file.
+PowerShell 可以构造新的 ACL 并移除所有 existing rule。这个方案起初更小，但会增加 quoting 和 host-policy dependency，并且仍需谨慎安排顺序，以避免在 hardening file 前写入 secret。
 
-### 3. Permit the `SY` ACE
+### 3. 允许 `SY` ACE
 
-Allowing Local System would make the GitHub runner pass, but it would weaken and redefine the existing owner-only contract instead of fixing token creation. It is rejected for this phase.
+允许 Local System 会使 GitHub runner 通过，但这会削弱并重新定义现有 owner-only contract，而不是修复 token creation。本 phase 不采纳此方案。
 
 ## Command Interface
 
-The executable has two exclusive modes:
+executable 有两种 mutually exclusive mode：
 
-- Preparation mode: `--prepare-token-file <path>` only.
-- Service mode: both `--endpoint <endpoint>` and `--token-file <path>`.
+- Preparation mode：仅 `--prepare-token-file <path>`。
+- Service mode：同时使用 `--endpoint <endpoint>` 和 `--token-file <path>`。
 
-Preparation mode rejects additional positional arguments, an existing destination, a missing parent directory, or any creation/permission error. It prints no token data. On partial failure it removes only the file instance it created.
+Preparation mode 拒绝 additional positional argument、existing destination、missing parent directory 或任何 creation/permission error。它不输出 token data。发生 partial failure 时，它只删除自己创建的 file instance。
 
-Service mode retains its current behavior and error codes. Supplying preparation and service flags together is a usage error with exit code `2`.
+Service mode 保持当前 behavior 和 error code。一起提供 preparation 和 service flag 是 usage error，exit code 为 `2`。
 
-## Secure Creation
+## 安全创建
 
 ### Windows
 
-The Go process obtains the current process token SID and builds a protected security descriptor whose DACL contains one allow ACE granting that SID full access. It passes this descriptor to `CreateFile` with `CREATE_NEW`, so the restrictive DACL applies atomically when the empty file is created. The current user is the file owner. The handle is closed before preparation mode exits.
+Go process 获取当前 process token SID，并构建 protected security descriptor；其 DACL 包含一个 allow ACE，向该 SID 授予 full access。它将此 descriptor 传给 `CreateFile`，并使用 `CREATE_NEW`，使 restrictive DACL 在创建 empty file 时 atomically 生效。当前 user 是 file owner。handle 会在 preparation mode 退出前关闭。
 
-The implementation validates the resulting owner and protected owner-only DACL using the same semantic SID comparison used during service startup. Any mismatch is an error and triggers identity-checked cleanup.
+implementation 使用 service startup 期间相同的 semantic SID comparison 验证 resulting owner 和 protected owner-only DACL。任何 mismatch 都是 error，并触发 identity-checked cleanup。
 
 ### Linux
 
-The Go process creates the file exclusively with mode `0600`. It verifies that the result is a regular file owned by the effective user with no group or other permission bits, then closes the handle.
+Go process 以 mode `0600` exclusive 创建 file。它验证结果是归 effective user 所有、且没有 group 或 other permission bit 的 regular file，然后关闭 handle。
 
 ## Launcher Data Flow
 
-1. TypeScript creates the temporary working directory and generates the token in memory.
-2. It executes the service binary with `--prepare-token-file <path>` and waits for exit code `0`.
-3. It opens the existing file without create semantics and writes the token. The open operation must not replace the file or its ACL.
-4. It launches normal service mode with `--endpoint` and `--token-file`.
-5. The Go service reopens without following symlinks, checks file identity and permissions, reads at most 4096 bytes, and deletes the same file before accepting connections.
-6. Existing handshake, capabilities, shutdown, and cleanup behavior continues unchanged.
+1. TypeScript 创建 temporary working directory，并在 memory 中生成 token。
+2. 它使用 `--prepare-token-file <path>` 执行 service binary，并等待 exit code `0`。
+3. 它在不采用 create semantic 的情况下打开 existing file 并写入 token。open operation 不得替换该 file 或其 ACL。
+4. 它使用 `--endpoint` 和 `--token-file` 启动 normal service mode。
+5. Go service 在不跟随 symlink 的情况下 reopen，检查 file identity 和 permission，最多读取 4096 bytes，并在接受 connection 前删除同一 file。
+6. 现有 handshake、capabilities、shutdown 和 cleanup behavior 保持不变。
 
-If any launcher step fails, TypeScript removes its temporary directory and reports process stdout/stderr without including the in-memory token.
+若任何 launcher step 失败，TypeScript 会删除其 temporary directory，并报告不含 in-memory token 的 process stdout/stderr。
 
-## Testing
+## 测试
 
-- A cross-platform Go CLI test proves preparation mode creates an empty file and rejects an existing path.
-- Windows tests prove the created file is owned by the current SID, has a protected DACL with only that SID, and does not grant `SY` or `WD` access.
-- Linux tests prove mode `0600` and current effective-user ownership.
-- CLI tests prove preparation mode is mutually exclusive with service mode.
-- The TypeScript E2E test exercises the real preparation command, writes the token to the existing file, authenticates, reads capabilities, and shuts down.
-- The full Windows/Ubuntu Actions matrix remains the acceptance gate.
+- cross-platform Go CLI test 证明 preparation mode 会创建 empty file 并拒绝 existing path。
+- Windows test 证明创建的 file 归当前 SID 所有，具有只包含该 SID 的 protected DACL，且不授予 `SY` 或 `WD` access。
+- Linux test 证明 mode `0600` 和当前 effective-user ownership。
+- CLI test 证明 preparation mode 与 service mode mutually exclusive。
+- TypeScript E2E test 演练真实的 preparation command，向 existing file 写入 token，完成 authentication、读取 capabilities 并 shutdown。
+- 完整的 Windows/Ubuntu Actions matrix 仍是 acceptance gate。
 
 ## Documentation Impact
 
-The local IPC decision record and README will state that the launcher asks the Go binary to create the restricted token file before writing the token. The owner-only validation contract does not change.
+local IPC decision record 和 README 将说明：launcher 在写入 token 前请求 Go binary 创建 restricted token file。owner-only validation contract 不变。
