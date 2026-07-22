@@ -11,7 +11,7 @@ import (
 func TestRunPrepareTokenFileModeCreatesEmptyFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "token")
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"--prepare-token-file", path}, &stdout, &stderr); code != 0 {
+	if code := run([]string{"--prepare-token-file", path}, strings.NewReader(""), &stdout, &stderr); code != 0 {
 		t.Fatalf("run code = %d, stderr = %q", code, stderr.String())
 	}
 	info, err := os.Stat(path)
@@ -30,7 +30,7 @@ func TestRunRejectsMixedPreparationAndServiceModes(t *testing.T) {
 		"--prepare-token-file", path,
 		"--endpoint", "unused-endpoint",
 		"--token-file", "unused-token",
-	}, &stdout, &stderr)
+	}, strings.NewReader(""), &stdout, &stderr)
 	if code != 2 {
 		t.Fatalf("run code = %d, want 2", code)
 	}
@@ -45,7 +45,7 @@ func TestRunRejectsMixedPreparationAndServiceModes(t *testing.T) {
 func TestRunRejectsEmptyEndpointFlagInPreparationMode(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "token")
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"--prepare-token-file", path, "--endpoint="}, &stdout, &stderr)
+	code := run([]string{"--prepare-token-file", path, "--endpoint="}, strings.NewReader(""), &stdout, &stderr)
 	if code != 2 {
 		t.Fatalf("run code = %d, want 2", code)
 	}
@@ -60,7 +60,7 @@ func TestRunRejectsEmptyEndpointFlagInPreparationMode(t *testing.T) {
 func TestRunRejectsEmptyTokenFileFlagInPreparationMode(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "token")
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"--prepare-token-file", path, "--token-file="}, &stdout, &stderr)
+	code := run([]string{"--prepare-token-file", path, "--token-file="}, strings.NewReader(""), &stdout, &stderr)
 	if code != 2 {
 		t.Fatalf("run code = %d, want 2", code)
 	}
@@ -104,7 +104,7 @@ func TestRunRejectsExplicitEmptyPreparationPath(t *testing.T) {
 			}
 
 			var stdout, stderr bytes.Buffer
-			if code := run(args, &stdout, &stderr); code != 2 {
+			if code := run(args, strings.NewReader(""), &stdout, &stderr); code != 2 {
 				t.Fatalf("run code = %d, want 2; stderr = %q", code, stderr.String())
 			}
 			if !strings.Contains(stderr.String(), test.wantError) {
@@ -126,7 +126,7 @@ func TestRunRejectsExplicitEmptyPreparationPath(t *testing.T) {
 
 func TestRunRejectsPositionalArguments(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"unexpected"}, &stdout, &stderr); code != 2 {
+	if code := run([]string{"unexpected"}, strings.NewReader(""), &stdout, &stderr); code != 2 {
 		t.Fatalf("run code = %d, want 2", code)
 	}
 	if !strings.Contains(stderr.String(), "positional arguments") {

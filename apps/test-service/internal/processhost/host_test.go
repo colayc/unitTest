@@ -1,0 +1,341 @@
+package processhost_test
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"unit-test-ide.local/test-service/internal/processcontrol"
+	"unit-test-ide.local/test-service/internal/processhost"
+)
+
+type targetResult struct {
+	code int
+	err  error
+}
+
+type fakeTarget struct {
+	pid, group int
+	done       chan targetResult
+}
+
+func (t *fakeTarget) PID() int          { return t.pid }
+func (t *fakeTarget) ProcessGroup() int { return t.group }
+func (t *fakeTarget) Wait() (int, error) {
+	result := <-t.done
+	return result.code, result.err
+}
+
+type fakePlatform struct {
+	target       *fakeTarget
+	startErr     error
+	terminateErr error
+	started      []processcontrol.Spec
+	terminations int
+	mu           sync.Mutex
+}
+
+func (p *fakePlatform) Start(spec processcontrol.Spec, stdout, stderr io.Writer) (processhost.Target, error) {
+	p.mu.Lock()
+	p.started = append(p.started, spec)
+	p.mu.Unlock()
+	if p.startErr != nil {
+		return nil, p.startErr
+	}
+	return p.target, nil
+}
+
+func (p *fakePlatform) Terminate(target processhost.Target, _ time.Duration) error {
+	p.mu.Lock()
+	p.terminations++
+	p.mu.Unlock()
+	select {
+	case p.target.done <- targetResult{}:
+	default:
+	}
+	return p.terminateErr
+}
+
+func (p *fakePlatform) terminationCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.terminations
+}
+
+type blockingControl struct {
+	data   *bytes.Reader
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newBlockingControl(data []byte) *blockingControl {
+	return &blockingControl{data: bytes.NewReader(data), closed: make(chan struct{})}
+}
+
+func (r *blockingControl) Read(buffer []byte) (int, error) {
+	if r.data.Len() > 0 {
+		return r.data.Read(buffer)
+	}
+	<-r.closed
+	return 0, io.ErrClosedPipe
+}
+
+func (r *blockingControl) Close() error {
+	r.once.Do(func() { close(r.closed) })
+	return nil
+}
+
+func commandBytes(t *testing.T, commands ...processcontrol.HostCommand) []byte {
+	t.Helper()
+	var result bytes.Buffer
+	for _, command := range commands {
+		if err := json.NewEncoder(&result).Encode(command); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return result.Bytes()
+}
+
+func decodeStatuses(t *testing.T, data []byte) []processcontrol.HostStatus {
+	t.Helper()
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	var statuses []processcontrol.HostStatus
+	for {
+		var status processcontrol.HostStatus
+		if err := decoder.Decode(&status); errors.Is(err, io.EOF) {
+			return statuses
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		statuses = append(statuses, status)
+	}
+}
+
+func TestRunStartsTargetAndReportsNaturalExit(t *testing.T) {
+	target := &fakeTarget{pid: 41, group: 42, done: make(chan targetResult, 1)}
+	target.done <- targetResult{code: 17}
+	platform := &fakePlatform{target: target}
+	spec := processcontrol.Spec{Executable: "fixture", Args: []string{"--task-fixture", "exit-nonzero"}}
+	control := newBlockingControl(commandBytes(t, processcontrol.StartCommand(spec)))
+	var status bytes.Buffer
+
+	if code := processhost.Run(context.Background(), platform, control, &status, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("code = %d, status = %q", code, status.String())
+	}
+	statuses := decodeStatuses(t, status.Bytes())
+	if len(statuses) != 2 || statuses[0].Kind != "started" || statuses[0].PID != 41 || statuses[0].ProcessGroup != 42 {
+		t.Fatalf("statuses = %#v", statuses)
+	}
+	if statuses[1].Kind != "exit" || statuses[1].ExitCode != 17 || statuses[1].ErrorCode != "" {
+		t.Fatalf("exit status = %#v", statuses[1])
+	}
+	if platform.terminationCount() != 1 {
+		t.Fatalf("terminations = %d, want 1", platform.terminationCount())
+	}
+	select {
+	case <-control.closed:
+	default:
+		t.Fatal("control reader was not closed after target completion")
+	}
+}
+
+func TestRunTerminatesTargetOnStopEOFAndContextCancellation(t *testing.T) {
+	tests := []struct {
+		name    string
+		control func(*testing.T, processcontrol.Spec) io.Reader
+		ctx     func() (context.Context, context.CancelFunc)
+	}{
+		{
+			name: "stop",
+			control: func(t *testing.T, spec processcontrol.Spec) io.Reader {
+				return bytes.NewReader(commandBytes(t, processcontrol.StartCommand(spec), processcontrol.StopCommand()))
+			},
+			ctx: func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) },
+		},
+		{
+			name: "eof",
+			control: func(t *testing.T, spec processcontrol.Spec) io.Reader {
+				return bytes.NewReader(commandBytes(t, processcontrol.StartCommand(spec)))
+			},
+			ctx: func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) },
+		},
+		{
+			name: "context",
+			control: func(t *testing.T, spec processcontrol.Spec) io.Reader {
+				return newBlockingControl(commandBytes(t, processcontrol.StartCommand(spec)))
+			},
+			ctx: func() (context.Context, context.CancelFunc) {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx, func() {}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			target := &fakeTarget{pid: 5, group: 6, done: make(chan targetResult, 1)}
+			platform := &fakePlatform{target: target}
+			ctx, cancel := test.ctx()
+			defer cancel()
+			var status bytes.Buffer
+			code := processhost.Run(ctx, platform, test.control(t, processcontrol.Spec{Executable: "fixture"}), &status, io.Discard, io.Discard)
+			if code != 0 {
+				t.Fatalf("code = %d, status = %q", code, status.String())
+			}
+			if platform.terminationCount() != 1 {
+				t.Fatalf("terminations = %d, want 1", platform.terminationCount())
+			}
+			statuses := decodeStatuses(t, status.Bytes())
+			if len(statuses) != 2 || statuses[1].Kind != "exit" {
+				t.Fatalf("statuses = %#v", statuses)
+			}
+		})
+	}
+}
+
+func TestRunRejectsInvalidInitialFramesFailClosed(t *testing.T) {
+	oversizeSecret := strings.Repeat("SENSITIVE", 9_000)
+	tests := []struct {
+		name    string
+		control string
+	}{
+		{name: "malformed", control: "{not-json}\n"},
+		{name: "wrong kind", control: `{"kind":"stop"}` + "\n"},
+		{name: "missing spec", control: `{"kind":"start"}` + "\n"},
+		{name: "unknown member", control: `{"kind":"start","spec":{"Executable":"fixture"},"token":"secret"}` + "\n"},
+		{name: "oversize", control: `{"kind":"start","spec":{"Executable":"fixture"},"unknown":"` + oversizeSecret + `"}` + "\n"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			platform := &fakePlatform{}
+			var status, stderr bytes.Buffer
+			if code := processhost.Run(context.Background(), platform, strings.NewReader(test.control), &status, io.Discard, &stderr); code != 2 {
+				t.Fatalf("code = %d, status = %q", code, status.String())
+			}
+			statuses := decodeStatuses(t, status.Bytes())
+			if len(statuses) != 1 || statuses[0].Kind != "error" || statuses[0].ErrorCode != "INVALID_HOST_COMMAND" || statuses[0].Message != "invalid start command" {
+				t.Fatalf("statuses = %#v", statuses)
+			}
+			if len(platform.started) != 0 {
+				t.Fatal("platform start was called")
+			}
+			combined := status.String() + stderr.String()
+			if strings.Contains(combined, "secret") || strings.Contains(combined, "SENSITIVE") || strings.Contains(combined, "fixture") {
+				t.Fatalf("error reflected input: %q", combined)
+			}
+		})
+	}
+}
+
+func TestRunClosesInheritedControlOnInvalidStart(t *testing.T) {
+	control := newBlockingControl([]byte("{invalid}\n"))
+	var status bytes.Buffer
+	if code := processhost.Run(context.Background(), &fakePlatform{}, control, &status, io.Discard, io.Discard); code != 2 {
+		t.Fatalf("code = %d", code)
+	}
+	select {
+	case <-control.closed:
+	default:
+		t.Fatal("control reader was not closed")
+	}
+}
+
+func TestRunAcceptsExactLimitStartFrameWithCRLF(t *testing.T) {
+	const frameLimit = 64 * 1024
+	base, err := json.Marshal(processcontrol.StartCommand(processcontrol.Spec{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	padding := strings.Repeat("x", frameLimit-len(base))
+	frame, err := json.Marshal(processcontrol.StartCommand(processcontrol.Spec{Executable: padding}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(frame) != frameLimit {
+		t.Fatalf("frame length = %d, want %d", len(frame), frameLimit)
+	}
+	target := &fakeTarget{pid: 9, group: 10, done: make(chan targetResult, 1)}
+	platform := &fakePlatform{target: target}
+	var status bytes.Buffer
+	if code := processhost.Run(context.Background(), platform, bytes.NewReader(append(frame, '\r', '\n')), &status, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("code = %d, status = %q", code, status.String())
+	}
+}
+
+func TestRunRedactsPlatformErrors(t *testing.T) {
+	secret := `C:\private\token args=--secret`
+	platform := &fakePlatform{startErr: errors.New(secret)}
+	var status, stderr bytes.Buffer
+	code := processhost.Run(context.Background(), platform, bytes.NewReader(commandBytes(t, processcontrol.StartCommand(processcontrol.Spec{Executable: secret}))), &status, io.Discard, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d", code)
+	}
+	statuses := decodeStatuses(t, status.Bytes())
+	if len(statuses) != 1 || statuses[0].ErrorCode != "PROCESS_START_FAILED" || statuses[0].Message != "target process could not start" {
+		t.Fatalf("statuses = %#v", statuses)
+	}
+	if strings.Contains(status.String()+stderr.String(), secret) {
+		t.Fatalf("error leaked platform details: status=%q stderr=%q", status.String(), stderr.String())
+	}
+}
+
+func TestRunRejectsUnknownCommandAfterStartAndTerminatesTarget(t *testing.T) {
+	target := &fakeTarget{pid: 5, group: 6, done: make(chan targetResult, 1)}
+	platform := &fakePlatform{target: target}
+	commands := commandBytes(t,
+		processcontrol.StartCommand(processcontrol.Spec{Executable: "fixture"}),
+		processcontrol.HostCommand{Kind: "start", Spec: &processcontrol.Spec{Executable: `C:\private\second.exe`}},
+	)
+	var status bytes.Buffer
+	if code := processhost.Run(context.Background(), platform, bytes.NewReader(commands), &status, io.Discard, io.Discard); code != 2 {
+		t.Fatalf("code = %d, status = %q", code, status.String())
+	}
+	statuses := decodeStatuses(t, status.Bytes())
+	if len(statuses) != 2 || statuses[0].Kind != "started" || statuses[1].Kind != "error" || statuses[1].ErrorCode != "INVALID_HOST_COMMAND" {
+		t.Fatalf("statuses = %#v", statuses)
+	}
+	if strings.Contains(status.String(), "private") {
+		t.Fatalf("status leaked command: %q", status.String())
+	}
+	if platform.terminationCount() != 1 {
+		t.Fatalf("terminations = %d, want 1", platform.terminationCount())
+	}
+}
+
+func TestRunReportsRedactedWaitFailure(t *testing.T) {
+	target := &fakeTarget{pid: 7, group: 8, done: make(chan targetResult, 1)}
+	target.done <- targetResult{code: 9, err: errors.New(`C:\private\failure`)}
+	platform := &fakePlatform{target: target}
+	control := newBlockingControl(commandBytes(t, processcontrol.StartCommand(processcontrol.Spec{Executable: "fixture"})))
+	var status bytes.Buffer
+	if code := processhost.Run(context.Background(), platform, control, &status, io.Discard, io.Discard); code != 1 {
+		t.Fatalf("code = %d", code)
+	}
+	statuses := decodeStatuses(t, status.Bytes())
+	if len(statuses) != 2 || statuses[1].Kind != "exit" || statuses[1].ExitCode != 9 || statuses[1].ErrorCode != "PROCESS_WAIT_FAILED" || statuses[1].Message != "" {
+		t.Fatalf("statuses = %#v", statuses)
+	}
+	if strings.Contains(status.String(), "private") {
+		t.Fatalf("status leaked wait error: %q", status.String())
+	}
+}
+
+func TestHostCommandConstructorsProduceClosedProtocolShapes(t *testing.T) {
+	spec := processcontrol.Spec{Executable: "fixture"}
+	start := processcontrol.StartCommand(spec)
+	if start.Kind != "start" || start.Spec == nil || start.Spec.Executable != "fixture" {
+		t.Fatalf("start = %#v", start)
+	}
+	stop := processcontrol.StopCommand()
+	if stop.Kind != "stop" || stop.Spec != nil {
+		t.Fatalf("stop = %#v", stop)
+	}
+}
