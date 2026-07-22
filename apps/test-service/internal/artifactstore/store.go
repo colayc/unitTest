@@ -39,9 +39,19 @@ type storeHooks struct {
 	afterSnapshotRead     func(position int64)
 	afterTempSync         func()
 	beforePublish         func(temporaryName string)
-	finalizeDirectory     func() error
+	finalizeDirectory     func(stage directoryFinalizeStage) error
+	beforeTempRemove      func(temporaryName string)
+	beforeCleanupExecute  func()
 	beforeCleanupRemove   func(relative string)
 }
+
+type directoryFinalizeStage string
+
+const (
+	directoryFinalizePublished        directoryFinalizeStage = "published"
+	directoryFinalizeTemporaryRemoved directoryFinalizeStage = "temporary-removed"
+	directoryFinalizeRollback         directoryFinalizeStage = "rollback"
+)
 
 func New(root string) (*Store, error) {
 	if root == "" {
@@ -97,7 +107,7 @@ func (s *Store) Close() error {
 	return nil
 }
 
-func (s *Store) CommitJSON(ctx context.Context, taskID, artifactID string, at time.Time, value any) (task.Artifact, error) {
+func (s *Store) CommitJSON(ctx context.Context, taskID, artifactID string, at time.Time, value any) (artifact task.Artifact, resultErr error) {
 	if err := ctx.Err(); err != nil {
 		return task.Artifact{}, err
 	}
@@ -126,12 +136,24 @@ func (s *Store) CommitJSON(ctx context.Context, taskID, artifactID string, at ti
 	if err != nil {
 		return task.Artifact{}, err
 	}
+	temporaryPresent := true
 	temporaryOpen := true
 	defer func() {
 		if temporaryOpen {
-			_ = temporary.Close()
+			if err := temporary.Close(); err != nil && resultErr == nil {
+				artifact = task.Artifact{}
+				resultErr = ErrStoreUnavailable
+			}
 		}
-		_ = parent.Remove(temporaryName)
+		if temporaryPresent {
+			removeErr := parent.Remove(temporaryName)
+			if removeErr != nil {
+				if _, statErr := parent.Lstat(temporaryName); statErr == nil || !errors.Is(statErr, os.ErrNotExist) {
+					artifact = task.Artifact{}
+					resultErr = ErrStoreUnavailable
+				}
+			}
+		}
 	}()
 	if _, err := temporary.Write(data); err != nil {
 		return task.Artifact{}, ErrStoreUnavailable
@@ -142,10 +164,6 @@ func (s *Store) CommitJSON(ctx context.Context, taskID, artifactID string, at ti
 	if s.hooks.afterTempSync != nil {
 		s.hooks.afterTempSync()
 	}
-	if err := temporary.Close(); err != nil {
-		return task.Artifact{}, ErrStoreUnavailable
-	}
-	temporaryOpen = false
 
 	if s.hooks.beforePublish != nil {
 		s.hooks.beforePublish(temporaryName)
@@ -164,34 +182,81 @@ func (s *Store) CommitJSON(ctx context.Context, taskID, artifactID string, at ti
 		return task.Artifact{}, rootOperationError(err)
 	}
 	published := true
+	var publishedIdentity os.FileInfo
+	finalize := func(stage directoryFinalizeStage) error {
+		if s.hooks.finalizeDirectory != nil {
+			if err := s.hooks.finalizeDirectory(stage); err != nil {
+				return ErrStoreUnavailable
+			}
+		}
+		return syncRootDirectory(parent)
+	}
 	rollback := func() error {
 		if !published {
 			return nil
+		}
+		if publishedIdentity != nil {
+			current, err := parent.Lstat(targetName)
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					published = false
+					return finalize(directoryFinalizeRollback)
+				}
+				return rootOperationError(err)
+			}
+			if isLinkInfo(current) || !current.Mode().IsRegular() || !os.SameFile(current, publishedIdentity) {
+				return ErrUnsafePath
+			}
 		}
 		if err := parent.Remove(targetName); err != nil {
 			return rootOperationError(err)
 		}
 		published = false
-		return syncRootDirectory(parent)
+		return finalize(directoryFinalizeRollback)
 	}
-	_ = parent.Remove(temporaryName)
-
-	if !rootIdentityMatches(s.root, parentRelative, parentIdentity) {
-		if err := rollback(); err != nil {
-			return task.Artifact{}, err
-		}
-		return task.Artifact{}, ErrUnsafePath
-	}
-	finalize := func() error { return syncRootDirectory(parent) }
-	if s.hooks.finalizeDirectory != nil {
-		finalize = s.hooks.finalizeDirectory
-	}
-	if err := finalize(); err != nil {
+	failPublished := func(cause error) (task.Artifact, error) {
 		if rollbackErr := rollback(); rollbackErr != nil {
 			return task.Artifact{}, rollbackErr
 		}
-		return task.Artifact{}, ErrStoreUnavailable
+		return task.Artifact{}, cause
 	}
+
+	if !rootIdentityMatches(s.root, parentRelative, parentIdentity) {
+		return failPublished(ErrUnsafePath)
+	}
+	final, finalInfo, err := openVerifiedFile(parent, targetName)
+	if err != nil {
+		return failPublished(err)
+	}
+	temporaryInfo, temporaryErr := temporary.Stat()
+	if closeErr := final.Close(); closeErr != nil {
+		return failPublished(ErrStoreUnavailable)
+	}
+	if temporaryErr != nil || !temporaryInfo.Mode().IsRegular() || !finalInfo.Mode().IsRegular() || !os.SameFile(temporaryInfo, finalInfo) {
+		return failPublished(ErrUnsafePath)
+	}
+	publishedIdentity = finalInfo
+	if err := finalize(directoryFinalizePublished); err != nil {
+		return failPublished(err)
+	}
+	if s.hooks.beforeTempRemove != nil {
+		s.hooks.beforeTempRemove(temporaryName)
+	}
+	if err := parent.Remove(temporaryName); err != nil {
+		return failPublished(ErrStoreUnavailable)
+	}
+	temporaryPresent = false
+	if err := finalize(directoryFinalizeTemporaryRemoved); err != nil {
+		return failPublished(err)
+	}
+	if !rootIdentityMatches(s.root, parentRelative, parentIdentity) {
+		return failPublished(ErrUnsafePath)
+	}
+	if err := temporary.Close(); err != nil {
+		temporaryOpen = false
+		return failPublished(ErrStoreUnavailable)
+	}
+	temporaryOpen = false
 
 	sum := sha256.Sum256(data)
 	return task.Artifact{
@@ -382,6 +447,12 @@ func auditCleanup(ctx context.Context, directory *cleanupDirectory, prefix strin
 }
 
 func (s *Store) executeCleanup(ctx context.Context, directory *cleanupDirectory) error {
+	if s.hooks.beforeCleanupExecute != nil {
+		s.hooks.beforeCleanupExecute()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	for _, file := range directory.files {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -396,11 +467,17 @@ func (s *Store) executeCleanup(ctx context.Context, directory *cleanupDirectory)
 		if s.hooks.beforeCleanupRemove != nil {
 			s.hooks.beforeCleanupRemove(file.relative)
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := directory.root.Remove(file.name); err != nil {
 			return rootOperationError(err)
 		}
 	}
 	for _, child := range directory.children {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := s.executeCleanup(ctx, child); err != nil {
 			return err
 		}
@@ -417,6 +494,9 @@ func (s *Store) executeCleanup(ctx context.Context, directory *cleanupDirectory)
 		}
 		if s.hooks.beforeCleanupRemove != nil {
 			s.hooks.beforeCleanupRemove(child.relative)
+		}
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		if err := directory.root.Remove(child.name); err != nil && !isDirectoryNotEmpty(err) {
 			return rootOperationError(err)

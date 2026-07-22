@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -63,6 +64,19 @@ func TestCommitJSONAndReadChunk(t *testing.T) {
 		if info.Mode().Perm() != 0o600 {
 			t.Fatalf("artifact mode = %o", info.Mode().Perm())
 		}
+	}
+}
+
+func TestPinnedDirectoryHandleSupportsDurableSync(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-specific directory FlushFileBuffers probe")
+	}
+	store, err := newStore(t, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syncRootDirectory(store.root); err != nil {
+		t.Fatalf("pinned parent durable sync failed: %T %v", err, err)
 	}
 }
 
@@ -340,7 +354,14 @@ func TestCommitJSONRollsBackPublicationWhenFinalizationFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.hooks.finalizeDirectory = func() error { return errors.New("injected finalization failure") }
+	var stages []directoryFinalizeStage
+	store.hooks.finalizeDirectory = func(stage directoryFinalizeStage) error {
+		stages = append(stages, stage)
+		if stage == directoryFinalizePublished {
+			return errors.New("injected finalization failure")
+		}
+		return nil
+	}
 	_, err = store.CommitJSON(context.Background(), id(1), id(2), time.Unix(0, 0).UTC(), map[string]string{"outcome": "cancelled"})
 	if !errors.Is(err, ErrStoreUnavailable) {
 		t.Fatalf("CommitJSON() error = %v", err)
@@ -349,7 +370,206 @@ func TestCommitJSONRollsBackPublicationWhenFinalizationFails(t *testing.T) {
 	if _, err := os.Lstat(target); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("failed commit left visible final artifact: %v", err)
 	}
+	if got, want := stages, []directoryFinalizeStage{directoryFinalizePublished, directoryFinalizeRollback}; !slices.Equal(got, want) {
+		t.Fatalf("finalization stages = %v, want %v", got, want)
+	}
 	assertNoTemporaryArtifacts(t, root)
+}
+
+func TestCommitJSONFlushesPublicationAndTemporaryRemoval(t *testing.T) {
+	root := t.TempDir()
+	store, err := newStore(t, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Join(root, "tasks", id(1))
+	target := filepath.Join(parent, id(2)+".json")
+	var temporary string
+	var stages []directoryFinalizeStage
+	store.hooks.beforePublish = func(name string) { temporary = filepath.Join(parent, name) }
+	store.hooks.finalizeDirectory = func(stage directoryFinalizeStage) error {
+		stages = append(stages, stage)
+		if _, err := os.Lstat(target); err != nil {
+			t.Fatalf("final missing during %s: %v", stage, err)
+		}
+		_, temporaryErr := os.Lstat(temporary)
+		switch stage {
+		case directoryFinalizePublished:
+			if temporaryErr != nil {
+				t.Fatalf("temporary missing before publication flush: %v", temporaryErr)
+			}
+		case directoryFinalizeTemporaryRemoved:
+			if !errors.Is(temporaryErr, os.ErrNotExist) {
+				t.Fatalf("temporary remains before removal flush: %v", temporaryErr)
+			}
+		}
+		return nil
+	}
+
+	if _, err := store.CommitJSON(context.Background(), id(1), id(2), time.Unix(0, 0).UTC(), map[string]string{"outcome": "cancelled"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := stages, []directoryFinalizeStage{directoryFinalizePublished, directoryFinalizeTemporaryRemoved}; !slices.Equal(got, want) {
+		t.Fatalf("finalization stages = %v, want %v", got, want)
+	}
+}
+
+func TestCommitJSONRollsBackWhenTemporaryRemovalFinalizationFails(t *testing.T) {
+	root := t.TempDir()
+	store, err := newStore(t, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stages []directoryFinalizeStage
+	store.hooks.finalizeDirectory = func(stage directoryFinalizeStage) error {
+		stages = append(stages, stage)
+		if stage == directoryFinalizeTemporaryRemoved {
+			return errors.New("injected temporary-removal finalization failure")
+		}
+		return nil
+	}
+
+	_, err = store.CommitJSON(context.Background(), id(1), id(2), time.Unix(0, 0).UTC(), map[string]string{"outcome": "cancelled"})
+	if !errors.Is(err, ErrStoreUnavailable) {
+		t.Fatalf("CommitJSON() error = %v", err)
+	}
+	target := filepath.Join(root, "tasks", id(1), id(2)+".json")
+	if _, err := os.Lstat(target); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed commit left visible final artifact: %v", err)
+	}
+	if got, want := stages, []directoryFinalizeStage{directoryFinalizePublished, directoryFinalizeTemporaryRemoved, directoryFinalizeRollback}; !slices.Equal(got, want) {
+		t.Fatalf("finalization stages = %v, want %v", got, want)
+	}
+}
+
+func TestCommitJSONRejectsSubstitutedTemporaryFile(t *testing.T) {
+	root := t.TempDir()
+	store, err := newStore(t, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Join(root, "tasks", id(1))
+	store.hooks.beforePublish = func(name string) {
+		temporary := filepath.Join(parent, name)
+		if err := os.Remove(temporary); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(temporary, []byte("attacker substitute"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	_, err = store.CommitJSON(context.Background(), id(1), id(2), time.Unix(0, 0).UTC(), map[string]string{"outcome": "cancelled"})
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("CommitJSON() error = %v", err)
+	}
+	target := filepath.Join(parent, id(2)+".json")
+	if _, err := os.Lstat(target); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("substitute became visible final artifact: %v", err)
+	}
+}
+
+func TestCommitJSONRejectsSubstitutedTemporaryLinkWithoutTouchingOutside(t *testing.T) {
+	root := t.TempDir()
+	store, err := newStore(t, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside.json")
+	if err := os.WriteFile(outside, []byte("outside must survive"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Join(root, "tasks", id(1))
+	store.hooks.beforePublish = func(name string) {
+		temporary := filepath.Join(parent, name)
+		if err := os.Remove(temporary); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, temporary); err != nil {
+			t.Skipf("file links are unavailable: %v", err)
+		}
+	}
+
+	_, err = store.CommitJSON(context.Background(), id(1), id(2), time.Unix(0, 0).UTC(), map[string]string{"outcome": "cancelled"})
+	if err == nil {
+		t.Fatal("CommitJSON() accepted a substituted temporary link")
+	}
+	if got, err := os.ReadFile(outside); err != nil || string(got) != "outside must survive" {
+		t.Fatalf("outside file changed: %q, %v", got, err)
+	}
+	if _, err := os.Lstat(filepath.Join(parent, id(2)+".json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("link became visible final artifact: %v", err)
+	}
+}
+
+func TestCommitJSONRejectsSubstitutedTemporaryJunctionWithoutTouchingOutside(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows reparse-point coverage")
+	}
+	root := t.TempDir()
+	store, err := newStore(t, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	outsideTarget := filepath.Join(outside, "outside.json")
+	if err := os.WriteFile(outsideTarget, []byte("outside must survive"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Join(root, "tasks", id(1))
+	store.hooks.beforePublish = func(name string) {
+		temporary := filepath.Join(parent, name)
+		if err := os.Remove(temporary); err != nil {
+			t.Fatal(err)
+		}
+		if err := makeDirectoryLink(outside, temporary); err != nil {
+			t.Skipf("directory junctions are unavailable: %v", err)
+		}
+	}
+
+	_, err = store.CommitJSON(context.Background(), id(1), id(2), time.Unix(0, 0).UTC(), map[string]string{"outcome": "cancelled"})
+	if err == nil {
+		t.Fatal("CommitJSON() accepted a substituted temporary junction")
+	}
+	if got, err := os.ReadFile(outsideTarget); err != nil || string(got) != "outside must survive" {
+		t.Fatalf("outside file changed: %q, %v", got, err)
+	}
+	if _, err := os.Lstat(filepath.Join(parent, id(2)+".json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("junction became visible final artifact: %v", err)
+	}
+}
+
+func TestCommitJSONSurfacesTemporaryRemovalFailureAndRollsBack(t *testing.T) {
+	root := t.TempDir()
+	store, err := newStore(t, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Join(root, "tasks", id(1))
+	var temporary string
+	store.hooks.beforeTempRemove = func(name string) {
+		temporary = filepath.Join(parent, name)
+		if err := os.Remove(temporary); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(temporary, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(temporary, "blocker"), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	_, err = store.CommitJSON(context.Background(), id(1), id(2), time.Unix(0, 0).UTC(), map[string]string{"outcome": "cancelled"})
+	if !errors.Is(err, ErrStoreUnavailable) {
+		t.Fatalf("CommitJSON() error = %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(parent, id(2)+".json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed commit left visible final artifact: %v", err)
+	}
+	if info, err := os.Lstat(temporary); err != nil || !info.IsDir() {
+		t.Fatalf("temp-removal failure was not surfaced with the blocking entry intact: %v", err)
+	}
 }
 
 func TestCommitJSONAncestorSwapCannotPublishOutsideRoot(t *testing.T) {
@@ -363,6 +583,9 @@ func TestCommitJSONAncestorSwapCannotPublishOutsideRoot(t *testing.T) {
 	moved := filepath.Join(root, "moved-task")
 	store.hooks.beforePublish = func(temporaryName string) {
 		if err := os.Rename(parent, moved); err != nil {
+			if runtime.GOOS == "windows" && errors.Is(err, os.ErrPermission) {
+				t.Skipf("Windows pins the open temporary file's parent against rename: %v", err)
+			}
 			t.Fatalf("move artifact parent: %v", err)
 		}
 		if err := makeDirectoryLink(outside, parent); err != nil {
@@ -466,6 +689,50 @@ func TestCleanupAncestorSwapCannotDeleteOutsideRoot(t *testing.T) {
 	_ = store.Cleanup(context.Background(), nil)
 	if got, err := os.ReadFile(outsideTarget); err != nil || string(got) != "outside must survive" {
 		t.Fatalf("cleanup changed outside target: %q, %v", got, err)
+	}
+}
+
+func TestCleanupChecksCancellationAtExecutionEntry(t *testing.T) {
+	root := t.TempDir()
+	store, err := newStore(t, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orphan := commit(t, store, id(1), id(2))
+	ctx, cancel := context.WithCancel(context.Background())
+	store.hooks.beforeCleanupExecute = cancel
+
+	if err := store.Cleanup(ctx, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if _, err := os.Stat(artifactPath(root, orphan)); err != nil {
+		t.Fatalf("cancelled cleanup removed artifact: %v", err)
+	}
+}
+
+func TestCleanupChecksCancellationImmediatelyBeforeDirectoryRemoval(t *testing.T) {
+	root := t.TempDir()
+	store, err := newStore(t, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptyRelative := filepath.ToSlash(filepath.Join("tasks", id(1)))
+	empty := filepath.Join(root, filepath.FromSlash(emptyRelative))
+	if err := os.MkdirAll(empty, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	store.hooks.beforeCleanupRemove = func(relative string) {
+		if relative == emptyRelative {
+			cancel()
+		}
+	}
+
+	if err := store.Cleanup(ctx, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+	if info, err := os.Stat(empty); err != nil || !info.IsDir() {
+		t.Fatalf("cancelled cleanup removed directory: %v", err)
 	}
 }
 
