@@ -6,7 +6,7 @@
 
 **首个正式版本的平台矩阵：**
 
-- Windows/MSVC：用于正式构建、测试和诊断。
+- Windows/MSVC：用于常规构建、测试和诊断。
 - Windows/clang-cl：配合 llvm-profdata/llvm-cov 用于覆盖率构建。
 - Linux/GCC：配合 gcovr。
 - Linux/Clang：配合 llvm-cov。
