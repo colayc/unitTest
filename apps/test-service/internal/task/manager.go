@@ -37,6 +37,7 @@ type ManagerConfig struct {
 	ServiceExecutable   string
 	ServiceInstanceID   string
 	TerminationGrace    time.Duration
+	ProcessCloseTimeout time.Duration
 	OutputFlushInterval time.Duration
 	CommandQueue        int
 }
@@ -51,11 +52,13 @@ type Manager struct {
 	serviceExecutable   string
 	serviceInstanceID   string
 	terminationGrace    time.Duration
+	processCloseTimeout time.Duration
 	outputFlushInterval time.Duration
 	commands            chan any
 	stopped             chan struct{}
 	healthy             atomic.Bool
 	closing             atomic.Bool
+	shutdownEnqueued    atomic.Bool
 	storageFailed       bool // command-loop owned
 }
 
@@ -76,7 +79,7 @@ type listCommand struct {
 	reply  chan listResponse
 }
 
-type shutdownCommand struct{ reply chan error }
+type shutdownCommand struct{ initiate bool }
 type outputCommand struct {
 	taskID string
 	value  ProcessOutput
@@ -137,6 +140,7 @@ type activeTask struct {
 	closeStarted          bool
 	closeComplete         bool
 	closeGeneration       uint64
+	closeFailed           bool
 	recoveryRequired      bool
 	cleanupWithoutDone    bool
 	stoppedWatchers       bool
@@ -159,13 +163,16 @@ func NewManager(config ManagerConfig) (*Manager, error) {
 	if config.OutputFlushInterval < defaultFlushInterval {
 		config.OutputFlushInterval = defaultFlushInterval
 	}
+	if config.ProcessCloseTimeout <= 0 {
+		config.ProcessCloseTimeout = config.TerminationGrace + 2*time.Second
+	}
 	if config.CommandQueue <= 0 {
 		config.CommandQueue = defaultCommandQueue
 	}
 	manager := &Manager{
 		store: config.Store, publisher: config.Publisher, processes: config.Processes, artifacts: config.Artifacts,
 		clock: config.Clock, newID: config.NewID, serviceExecutable: config.ServiceExecutable,
-		serviceInstanceID: config.ServiceInstanceID, terminationGrace: config.TerminationGrace,
+		serviceInstanceID: config.ServiceInstanceID, terminationGrace: config.TerminationGrace, processCloseTimeout: config.ProcessCloseTimeout,
 		outputFlushInterval: config.OutputFlushInterval, commands: make(chan any, config.CommandQueue), stopped: make(chan struct{}),
 	}
 	manager.healthy.Store(true)
@@ -262,15 +269,18 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	}
 	m.closing.Store(true)
 	m.healthy.Store(false)
-	reply := make(chan error, 1)
+	initiate := m.shutdownEnqueued.CompareAndSwap(false, true)
 	select {
-	case m.commands <- shutdownCommand{reply: reply}:
+	case m.commands <- shutdownCommand{initiate: initiate}:
+	case <-ctx.Done():
+		if initiate {
+			m.shutdownEnqueued.CompareAndSwap(true, false)
+		}
+		return ctx.Err()
 	case <-m.stopped:
 		return nil
 	}
 	select {
-	case err := <-reply:
-		return err
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-m.stopped:
@@ -300,7 +310,6 @@ func (m *Manager) sendInternal(command any) bool {
 
 func (m *Manager) loop() {
 	active := make(map[string]*activeTask)
-	var shutdownWaiters []chan error
 	for command := range m.commands {
 		switch value := command.(type) {
 		case startCommand:
@@ -352,29 +361,35 @@ func (m *Manager) loop() {
 			}
 		case closeResultCommand:
 			if current := active[value.taskID]; current != nil && current.closeGeneration == value.generation {
-				current.closeComplete = true
 				if value.err != nil {
 					m.healthy.Store(false)
+					current.closeStarted = false
+					current.closeComplete = false
+					current.closeFailed = true
+				} else {
+					current.closeComplete = true
+					current.closeFailed = false
 				}
-				if m.canRemove(current) {
+				if value.err == nil && m.canRemove(current) {
 					delete(active, value.taskID)
 				}
 			}
 		case shutdownCommand:
-			m.closing.Store(true)
-			m.healthy.Store(false)
-			shutdownWaiters = append(shutdownWaiters, value.reply)
+			if value.initiate {
+				m.closing.Store(true)
+				m.healthy.Store(false)
+			}
 			for _, current := range active {
-				if current.task.Status != StatusFinished && current.cause == "" {
+				if value.initiate && current.task.Status != StatusFinished && current.cause == "" {
 					current.cause = OutcomeInterrupted
 					m.terminate(current)
+				}
+				if current.closeFailed {
+					m.maybeStartClose(current)
 				}
 			}
 		}
 		if m.closing.Load() && len(active) == 0 {
-			for _, waiter := range shutdownWaiters {
-				waiter <- nil
-			}
 			close(m.stopped)
 			return
 		}
@@ -424,7 +439,9 @@ func (m *Manager) start(request StartRequest, active map[string]*activeTask) tas
 	running, err := ApplyTransition(stored, Transition{From: StatusQueued, To: StatusRunning, At: startedAt})
 	if err != nil {
 		delete(active, stored.ID)
-		_ = process.Close()
+		closeCtx, cancel := context.WithTimeout(context.Background(), m.processCloseTimeout)
+		_ = process.Close(closeCtx)
+		cancel()
 		return taskResponse{err: err}
 	}
 	lease := process.Lease()
@@ -833,12 +850,16 @@ func (m *Manager) maybeStartClose(current *activeTask) {
 		return
 	}
 	current.closeStarted = true
+	current.closeFailed = false
 	current.closeGeneration++
 	taskID := current.task.ID
 	generation := current.closeGeneration
 	process := current.process
+	closeTimeout := m.processCloseTimeout
 	go func() {
-		err := process.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+		defer cancel()
+		err := process.Close(ctx)
 		m.sendInternal(closeResultCommand{taskID: taskID, generation: generation, err: err})
 	}()
 }

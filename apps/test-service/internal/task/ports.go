@@ -72,7 +72,7 @@ type ManagedProcess interface {
 	Output() <-chan ProcessOutput
 	Done() <-chan ProcessResult
 	Terminate(context.Context, time.Duration) error
-	Close() error
+	Close(context.Context) error
 }
 
 type ArtifactWriter interface {

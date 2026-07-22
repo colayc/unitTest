@@ -94,7 +94,7 @@ func TestLinuxPrepareBlocksTargetUntilStart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer process.Close()
+	defer process.Close(context.Background())
 	lease := process.Lease()
 	if lease.HostPID <= 0 || lease.HostStartIdentity == "" || lease.TargetProcessGroup != 0 {
 		t.Fatalf("prepared lease = %#v", lease)
@@ -129,7 +129,7 @@ func TestLinuxRunnerUsesSeparateHostSessionAndTargetProcessGroup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer process.Close()
+	defer process.Close(context.Background())
 	if err := process.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +163,7 @@ func TestLinuxRunnerPreservesStdoutAndStderr(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer process.Close()
+	defer process.Close(context.Background())
 	if err := process.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +205,7 @@ func TestLinuxControlEOFAndHostSignalCleanTargetTree(t *testing.T) {
 		stop func(t *testing.T, process Process)
 	}{
 		{name: "control EOF", stop: func(t *testing.T, process Process) {
-			if err := process.Close(); err != nil {
+			if err := process.Close(context.Background()); err != nil {
 				t.Fatal(err)
 			}
 		}},
@@ -221,7 +221,7 @@ func TestLinuxControlEOFAndHostSignalCleanTargetTree(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer process.Close()
+			defer process.Close(context.Background())
 			if err := process.Start(context.Background()); err != nil {
 				t.Fatal(err)
 			}
@@ -239,7 +239,7 @@ func TestLinuxPlatformCleansDescendantsAfterNaturalMainExit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer process.Close()
+	defer process.Close(context.Background())
 	if err := process.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +256,7 @@ func TestLinuxPlatformEscalatesAndTerminateAlwaysReleasesWait(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer process.Close()
+	defer process.Close(context.Background())
 	if err := process.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +281,7 @@ func TestLinuxTerminateContextErrorStillReleasesWait(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer process.Close()
+	defer process.Close(context.Background())
 	if err := process.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -301,7 +301,7 @@ func TestLinuxRunnerDoesNotInheritInternalStatusHandleIntoTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer process.Close()
+	defer process.Close(context.Background())
 	if err := process.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +330,7 @@ func TestLinuxTerminateAfterNaturalCompletionIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer process.Close()
+	defer process.Close(context.Background())
 	if err := process.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -349,7 +349,7 @@ func TestLinuxRunnerContextCancellationCleansTargetTree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer process.Close()
+	defer process.Close(context.Background())
 	if err := process.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -367,10 +367,10 @@ func TestLinuxCloseBeforeStartReapsHostAndCleanupIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	lease := process.Lease()
-	if err := process.Close(); err != nil {
+	if err := process.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err := process.Close(); err != nil {
+	if err := process.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	assertProcessGone(t, lease.HostPID)
@@ -392,7 +392,7 @@ func TestLinuxNoisyTargetDoesNotBlockDoneOrCloseWithoutOutputConsumer(t *testing
 		t.Fatalf("result = %#v, want stable output overflow", result)
 	}
 	closed := make(chan error, 1)
-	go func() { closed <- process.Close() }()
+	go func() { closed <- process.Close(context.Background()) }()
 	select {
 	case err := <-closed:
 		if err != nil {
@@ -691,7 +691,7 @@ func TestLinuxCleanupRemovesOwnedGroupAfterHostIsGone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer process.Close()
+	defer process.Close(context.Background())
 	if err := process.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -720,10 +720,10 @@ func TestLinuxCloseIsIdempotentAndDoesNotLeakDescriptorsOrGoroutines(t *testing.
 			t.Fatal(err)
 		}
 		_ = receiveResult(t, process.Done())
-		if err := process.Close(); err != nil {
+		if err := process.Close(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		if err := process.Close(); err != nil {
+		if err := process.Close(context.Background()); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -766,7 +766,7 @@ func TestLinuxRunnerRedactsExecutableAndHostErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer process.Close()
+	defer process.Close(context.Background())
 	err = process.Start(context.Background())
 	if err == nil || strings.Contains(err.Error(), secret) {
 		t.Fatalf("Start error = %v", err)

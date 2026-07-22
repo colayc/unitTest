@@ -66,6 +66,34 @@ func TestPrepareDataDirRejectsIntermediateWindowsJunction(t *testing.T) {
 	}
 }
 
+func TestPinOwnerOnlyDirectoryFailsClosedOnAccessDeniedAncestor(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "data")
+	blocked := filepath.Dir(root)
+	guard, err := pinOwnerOnlyDirectoryWithOpen(root, func(path string, share uint32, readControl bool) (windows.Handle, error) {
+		if filepath.Clean(path) == filepath.Clean(blocked) {
+			return windows.InvalidHandle, windows.ERROR_ACCESS_DENIED
+		}
+		return openAbsoluteWindowsDirectory(path, share, readControl)
+	})
+	if guard != nil {
+		_ = guard.Close()
+	}
+	if err == nil {
+		t.Fatal("access-denied ancestor was accepted without a pinned handle or trust proof")
+	}
+}
+
+func TestWindowsSystemAncestorCanBePinnedWithoutAccessDeniedException(t *testing.T) {
+	handle, err := openAbsoluteWindowsDirectory(`C:\Users`, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, false)
+	if err != nil {
+		t.Fatalf("pin system-owned Users directory: %v", err)
+	}
+	defer windows.CloseHandle(handle)
+	if err := validateWindowsDirectoryObject(handle); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRuntimePinsWindowsAncestorsUntilClose(t *testing.T) {
 	base := t.TempDir()
 	ancestor := filepath.Join(base, "shared-parent")

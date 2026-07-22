@@ -10,6 +10,7 @@ import (
 	goruntime "runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,6 +21,18 @@ import (
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/taskstore"
 )
+
+func TestMain(m *testing.M) {
+	root, err := os.MkdirTemp(".", ".runtime-test-tmp-")
+	if err != nil {
+		panic(err)
+	}
+	_ = os.Setenv("TEMP", root)
+	_ = os.Setenv("TMP", root)
+	code := m.Run()
+	_ = os.RemoveAll(root)
+	os.Exit(code)
+}
 
 func TestOpenUsesRequiredOrderAndRecoversPersistentState(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "data")
@@ -213,12 +226,20 @@ func TestShutdownRetainsOwnershipUntilManagerQuiescesAndCanBeRetried(t *testing.
 	root := filepath.Join(t.TempDir(), "data")
 	process := newBlockingProcess()
 	cleanupStarted := make(chan struct{})
+	cleanupReturned := make(chan struct{})
 	allowCleanup := make(chan struct{})
-	runner := &recordingRunner{prepared: process, cleanup: func(task.ProcessLease) {
-		close(cleanupStarted)
-		<-allowCleanup
-		close(process.releaseTerminate)
-		process.complete(processcontrol.Result{Err: context.Canceled})
+	var startedOnce, returnedOnce, releaseOnce sync.Once
+	runner := &recordingRunner{prepared: process, cleanup: func(ctx context.Context, _ task.ProcessLease) error {
+		startedOnce.Do(func() { close(cleanupStarted) })
+		defer returnedOnce.Do(func() { close(cleanupReturned) })
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-allowCleanup:
+			releaseOnce.Do(func() { close(process.releaseTerminate) })
+			process.complete(processcontrol.Result{Err: context.Canceled})
+			return nil
+		}
 	}}
 	active, err := Open(Config{DataDir: root, ServiceExecutable: os.Args[0], Platform: platformForTest(), TerminationGrace: time.Millisecond, dependencies: testDependencies(runner, nil)})
 	if err != nil {
@@ -242,6 +263,12 @@ func TestShutdownRetainsOwnershipUntilManagerQuiescesAndCanBeRetried(t *testing.
 	case <-time.After(time.Second):
 		t.Fatal("Shutdown did not begin forced lease cleanup")
 	}
+	select {
+	case <-cleanupReturned:
+	case <-time.After(100 * time.Millisecond):
+		close(allowCleanup)
+		t.Fatal("Shutdown left forced cleanup running beyond the caller deadline")
+	}
 	layout, err := PrepareDataDir(root)
 	if err != nil {
 		t.Fatal(err)
@@ -264,8 +291,14 @@ func TestShutdownRetainsOwnershipUntilManagerQuiescesAndCanBeRetried(t *testing.
 		t.Fatalf("Close retained instance lock after quiescence: %v", err)
 	}
 	_ = locked.Close()
-	if cleaned := runner.cleanupLeases(); len(cleaned) != 1 || cleaned[0].HostStartIdentity != "blocking-process" {
+	cleaned := runner.cleanupLeases()
+	if len(cleaned) != 2 {
 		t.Fatalf("forced cleanup leases = %#v", cleaned)
+	}
+	for _, lease := range cleaned {
+		if lease.HostStartIdentity != "blocking-process" {
+			t.Fatalf("forced cleanup lease = %#v", lease)
+		}
 	}
 }
 
@@ -282,11 +315,61 @@ func TestManagedProcessCloseStopsForwardersWhenUnderlyingChannelsRemainOpen(t *t
 	case <-time.After(time.Second):
 		t.Fatal("output forwarder did not receive the underlying value")
 	}
-	if err := managed.Close(); err != nil {
+	if err := managed.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	assertChannelClosedSoon(t, managed.Output())
 	assertChannelClosedSoon(t, managed.Done())
+}
+
+func TestManagedProcessConcurrentCloseBoundsUnderlyingCloseAndStopsOutput(t *testing.T) {
+	process := newContextBlockingProcess()
+	managed := newManagedProcess(process)
+	producerDone := make(chan struct{})
+	go func() {
+		defer close(producerDone)
+		for {
+			select {
+			case <-process.closed:
+				return
+			case process.output <- processcontrol.Output{Stream: processcontrol.StreamStdout, Data: []byte("continuous")}:
+			}
+		}
+	}()
+
+	const callers = 8
+	errs := make(chan error, callers)
+	for range callers {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			defer cancel()
+			errs <- managed.Close(ctx)
+		}()
+	}
+	for range callers {
+		if err := <-errs; !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Close error = %v, want deadline", err)
+		}
+	}
+	select {
+	case <-producerDone:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("continuous output producer remained blocked after Close")
+	}
+	assertChannelClosedSoon(t, managed.Output())
+	assertChannelClosedSoon(t, managed.Done())
+	if calls := process.closeCalls.Load(); calls != 1 {
+		t.Fatalf("underlying Close calls = %d, want 1", calls)
+	}
+	close(process.releaseClose)
+	retry, cancelRetry := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancelRetry()
+	if err := managed.Close(retry); err != nil {
+		t.Fatalf("retry Close = %v", err)
+	}
+	if calls := process.closeCalls.Load(); calls != 2 {
+		t.Fatalf("underlying Close calls after retry = %d, want 2", calls)
+	}
 }
 
 const interruptedTaskID = "11111111111111111111111111111111"
@@ -337,7 +420,7 @@ type recordingRunner struct {
 	mu         sync.Mutex
 	cleaned    []task.ProcessLease
 	cleanupErr error
-	cleanup    func(task.ProcessLease)
+	cleanup    func(context.Context, task.ProcessLease) error
 	prepared   processcontrol.Process
 }
 
@@ -348,13 +431,13 @@ func (r *recordingRunner) Prepare(context.Context, processcontrol.Spec, string, 
 	return nil, errors.New("unexpected process start")
 }
 
-func (r *recordingRunner) Cleanup(_ context.Context, lease task.ProcessLease, _ time.Duration) error {
+func (r *recordingRunner) Cleanup(ctx context.Context, lease task.ProcessLease, _ time.Duration) error {
 	r.mu.Lock()
 	r.cleaned = append(r.cleaned, lease)
 	cleanup, cleanupErr := r.cleanup, r.cleanupErr
 	r.mu.Unlock()
 	if cleanup != nil {
-		cleanup(lease)
+		cleanupErr = errors.Join(cleanupErr, cleanup(ctx, lease))
 	}
 	return cleanupErr
 }
@@ -490,9 +573,40 @@ func (p *blockingProcess) Terminate(context.Context, time.Duration) error {
 	<-p.releaseTerminate
 	return nil
 }
-func (p *blockingProcess) Close() error { return nil }
+func (p *blockingProcess) Close(context.Context) error { return nil }
 func (p *blockingProcess) complete(result processcontrol.Result) {
 	p.once.Do(func() { close(p.output); p.done <- result; close(p.done) })
+}
+
+type contextBlockingProcess struct {
+	output       chan processcontrol.Output
+	done         chan processcontrol.Result
+	closed       chan struct{}
+	releaseClose chan struct{}
+	closeOnce    sync.Once
+	closeCalls   atomic.Int32
+}
+
+func newContextBlockingProcess() *contextBlockingProcess {
+	return &contextBlockingProcess{
+		output: make(chan processcontrol.Output), done: make(chan processcontrol.Result), closed: make(chan struct{}), releaseClose: make(chan struct{}),
+	}
+}
+
+func (*contextBlockingProcess) Lease() task.ProcessLease                       { return task.ProcessLease{} }
+func (*contextBlockingProcess) Start(context.Context) error                    { return nil }
+func (p *contextBlockingProcess) Output() <-chan processcontrol.Output         { return p.output }
+func (p *contextBlockingProcess) Done() <-chan processcontrol.Result           { return p.done }
+func (*contextBlockingProcess) Terminate(context.Context, time.Duration) error { return nil }
+func (p *contextBlockingProcess) Close(ctx context.Context) error {
+	p.closeCalls.Add(1)
+	p.closeOnce.Do(func() { close(p.closed) })
+	select {
+	case <-p.releaseClose:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func assertClosed[T any](t *testing.T, values <-chan T) {

@@ -433,7 +433,7 @@ func (process *unixProcess) Terminate(ctx context.Context, grace time.Duration) 
 	return process.forceTerminate(ctx, hostShutdownWait, nil)
 }
 
-func (process *unixProcess) Close() error {
+func (process *unixProcess) Close(ctx context.Context) error {
 	process.closeOnce.Do(func() {
 		process.closeControl()
 		process.discardOnce.Do(func() { close(process.outputDiscard) })
@@ -444,8 +444,18 @@ func (process *unixProcess) Close() error {
 			process.finishAfterHost(Result{Err: errProcessHostFailed})
 		}
 	})
-	<-process.hostExited
-	<-process.outputDone
+	select {
+	case <-process.hostExited:
+	case <-ctx.Done():
+		process.closeStatus()
+		return ctx.Err()
+	}
+	select {
+	case <-process.outputDone:
+	case <-ctx.Done():
+		process.closeStatus()
+		return ctx.Err()
+	}
 	process.closeStatus()
 	return nil
 }

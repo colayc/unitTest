@@ -26,6 +26,8 @@ var processHostEntry = func(stdin io.Reader, stdout, stderr io.Writer) int {
 }
 
 var listenTransport = transport.Listen
+var prepareTokenFileForRun = prepareTokenFile
+var consumeTokenFileForRun = consumeTokenFile
 
 func main() { os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr)) }
 
@@ -112,8 +114,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "--prepare-token-file requires a non-empty path")
 			return 2
 		}
-		if err := prepareTokenFile(*prepareTokenFilePath); err != nil {
-			fmt.Fprintln(stderr, err)
+		if err := prepareTokenFileForRun(*prepareTokenFilePath); err != nil {
+			fmt.Fprintln(stderr, "authentication token file preparation failed")
 			return 1
 		}
 		return 0
@@ -122,9 +124,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "--endpoint, --token-file, and --data-dir are required")
 		return 2
 	}
-	token, err := consumeTokenFile(*tokenFile)
+	token, err := consumeTokenFileForRun(*tokenFile)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
+		fmt.Fprintln(stderr, "authentication token unavailable")
 		return 1
 	}
 	executable, err := os.Executable()

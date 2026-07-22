@@ -10,6 +10,18 @@ import (
 	"testing"
 )
 
+func TestMain(m *testing.M) {
+	root, err := os.MkdirTemp(".", ".service-test-tmp-")
+	if err != nil {
+		panic(err)
+	}
+	_ = os.Setenv("TEMP", root)
+	_ = os.Setenv("TMP", root)
+	code := m.Run()
+	_ = os.RemoveAll(root)
+	os.Exit(code)
+}
+
 func TestRunPrepareTokenFileModeCreatesEmptyFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "token")
 	var stdout, stderr bytes.Buffer
@@ -227,6 +239,36 @@ func TestRunSanitizesServeFailureAfterReady(t *testing.T) {
 	}
 	if stdout.String() != "READY test-endpoint\n" || stderr.String() != "service transport failed\n" {
 		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestRunSanitizesPrepareTokenFailure(t *testing.T) {
+	previous := prepareTokenFileForRun
+	prepareTokenFileForRun = func(string) error {
+		return errors.New(`prepare C:\secret\token-file with token 0123456789abcdef and ENV_SECRET failed`)
+	}
+	defer func() { prepareTokenFileForRun = previous }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--prepare-token-file", filepath.Join(t.TempDir(), "token")}, strings.NewReader(""), &stdout, &stderr)
+	if code != 1 || stdout.Len() != 0 || stderr.String() != "authentication token file preparation failed\n" {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestRunSanitizesConsumeTokenFailure(t *testing.T) {
+	previous := consumeTokenFileForRun
+	consumeTokenFileForRun = func(string) (string, error) {
+		return "", errors.New(`consume C:\secret\token-file with token 0123456789abcdef and ENV_SECRET failed`)
+	}
+	defer func() { consumeTokenFileForRun = previous }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"--endpoint", "test-endpoint", "--token-file", `C:\secret\token-file`, "--data-dir", filepath.Join(t.TempDir(), "data"),
+	}, strings.NewReader(""), &stdout, &stderr)
+	if code != 1 || stdout.Len() != 0 || stderr.String() != "authentication token unavailable\n" {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 }
 

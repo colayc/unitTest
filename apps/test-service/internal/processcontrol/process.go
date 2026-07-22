@@ -37,7 +37,7 @@ type Process interface {
 	Output() <-chan Output
 	Done() <-chan Result
 	Terminate(context.Context, time.Duration) error
-	Close() error
+	Close(context.Context) error
 }
 
 type Runner interface {

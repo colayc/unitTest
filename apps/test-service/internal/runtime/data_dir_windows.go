@@ -21,6 +21,10 @@ type windowsDirectoryGuard struct {
 }
 
 func pinOwnerOnlyDirectory(absolute string) (io.Closer, error) {
+	return pinOwnerOnlyDirectoryWithOpen(absolute, openAbsoluteWindowsDirectory)
+}
+
+func pinOwnerOnlyDirectoryWithOpen(absolute string, openDirectory func(string, uint32, bool) (windows.Handle, error)) (io.Closer, error) {
 	user, descriptor, err := runtimeOwnerDescriptor()
 	if err != nil {
 		return nil, err
@@ -37,19 +41,13 @@ func pinOwnerOnlyDirectory(absolute string) (io.Closer, error) {
 	for segmentIndex, segment := range segments {
 		current = filepath.Join(current, segment)
 		final := segmentIndex == len(segments)-1
-		handle, openErr := openAbsoluteWindowsDirectory(current, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, final)
+		handle, openErr := openDirectory(current, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, final)
 		if errors.Is(openErr, windows.ERROR_FILE_NOT_FOUND) || errors.Is(openErr, windows.ERROR_PATH_NOT_FOUND) {
 			security := &windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: descriptor}
 			if err := windows.CreateDirectory(mustWindowsPath(current), security); err != nil && !errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
 				return fail(fmt.Errorf("create segment: %w", err))
 			}
-			handle, openErr = openAbsoluteWindowsDirectory(current, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, final)
-		}
-		if errors.Is(openErr, windows.ERROR_ACCESS_DENIED) && !final {
-			attributes, attributeErr := windows.GetFileAttributes(mustWindowsPath(current))
-			if attributeErr == nil && attributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 && attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT == 0 {
-				continue
-			}
+			handle, openErr = openDirectory(current, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, final)
 		}
 		if openErr != nil {
 			return fail(fmt.Errorf("open segment %d: %w", segmentIndex, openErr))

@@ -24,8 +24,6 @@ const (
 	adapterTimeout  = time.Second
 )
 
-var errAdapterCloseTimeout = errors.New("process adapter shutdown timed out")
-
 type Config struct {
 	DataDir           string
 	ServiceExecutable string
@@ -46,9 +44,11 @@ type Runtime struct {
 	guard     io.Closer
 	grace     time.Duration
 
-	shutdownOnce sync.Once
-	shutdownDone chan struct{}
-	shutdownErr  error
+	shutdownMu          sync.Mutex
+	shutdownRunning     bool
+	shutdownAttemptDone chan struct{}
+	shutdownComplete    bool
+	shutdownErr         error
 }
 
 type runtimeStore interface {
@@ -207,7 +207,7 @@ func Open(config Config) (*Runtime, error) {
 	}
 	return &Runtime{
 		store: store, artifacts: artifacts, broker: broker, manager: manager, runner: runner,
-		lock: locked, guard: guard, grace: grace, shutdownDone: make(chan struct{}),
+		lock: locked, guard: guard, grace: grace,
 	}, nil
 }
 
@@ -266,26 +266,65 @@ func (r *Runtime) Shutdown(ctx context.Context) error {
 	if r == nil {
 		return nil
 	}
-	r.shutdownOnce.Do(func() { go r.finishShutdown() })
-	select {
-	case <-r.shutdownDone:
-		return r.shutdownErr
-	case <-ctx.Done():
-		return ctx.Err()
+	for {
+		r.shutdownMu.Lock()
+		if r.shutdownComplete {
+			err := r.shutdownErr
+			r.shutdownMu.Unlock()
+			return err
+		}
+		if r.shutdownRunning {
+			done := r.shutdownAttemptDone
+			r.shutdownMu.Unlock()
+			select {
+			case <-done:
+				continue
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		r.shutdownRunning = true
+		r.shutdownAttemptDone = make(chan struct{})
+		done := r.shutdownAttemptDone
+		r.shutdownMu.Unlock()
+
+		err := r.shutdownAttempt(ctx)
+		r.shutdownMu.Lock()
+		if err == nil {
+			r.shutdownErr = r.closeResources()
+			r.shutdownComplete = true
+			err = r.shutdownErr
+		}
+		r.shutdownRunning = false
+		close(done)
+		r.shutdownMu.Unlock()
+		return err
 	}
 }
 
-func (r *Runtime) finishShutdown() {
-	defer close(r.shutdownDone)
-	var quiesceErr error
-	if r.manager != nil {
-		attempt, cancel := context.WithTimeout(context.Background(), r.grace)
-		attemptErr := r.manager.Shutdown(attempt)
-		cancel()
-		if attemptErr != nil {
-			quiesceErr = errors.Join(r.forceCleanup(), r.manager.Shutdown(context.Background()))
-		}
+func (r *Runtime) shutdownAttempt(ctx context.Context) error {
+	if r.manager == nil {
+		return nil
 	}
+	attempt, cancel := context.WithTimeout(ctx, r.grace)
+	err := r.manager.Shutdown(attempt)
+	cancel()
+	if err == nil {
+		return nil
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if err := r.forceCleanup(ctx); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return err
+	}
+	return r.manager.Shutdown(ctx)
+}
+
+func (r *Runtime) closeResources() error {
 	var brokerErr, artifactErr, storeErr, lockErr, guardErr error
 	if r.broker != nil {
 		brokerErr = r.broker.Close()
@@ -302,22 +341,20 @@ func (r *Runtime) finishShutdown() {
 	if r.guard != nil {
 		guardErr = r.guard.Close()
 	}
-	r.shutdownErr = errors.Join(quiesceErr, brokerErr, artifactErr, storeErr, lockErr, guardErr)
+	return errors.Join(brokerErr, artifactErr, storeErr, lockErr, guardErr)
 }
 
-func (r *Runtime) forceCleanup() error {
+func (r *Runtime) forceCleanup(ctx context.Context) error {
 	if r.store == nil || r.runner == nil {
 		return nil
 	}
-	leases, err := r.store.ActiveLeases(context.Background())
+	leases, err := r.store.ActiveLeases(ctx)
 	if err != nil {
 		return err
 	}
 	var cleanupErr error
 	for _, lease := range leases {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), r.grace+2*time.Second)
-		err := r.runner.Cleanup(cleanupCtx, lease, r.grace)
-		cancel()
+		err := r.runner.Cleanup(ctx, lease, r.grace)
 		if err != nil && !errors.Is(err, processcontrol.ErrLeaseIdentityMismatch) {
 			cleanupErr = errors.Join(cleanupErr, err)
 		}
@@ -349,23 +386,31 @@ func (f processFactory) Prepare(ctx context.Context, spec task.ProcessSpec, task
 }
 
 type managedProcess struct {
-	process processcontrol.Process
-	output  chan task.ProcessOutput
-	done    chan task.ProcessResult
-	stop    chan struct{}
-	wait    sync.WaitGroup
+	process       processcontrol.Process
+	output        chan task.ProcessOutput
+	done          chan task.ProcessResult
+	stop          chan struct{}
+	outputStopped chan struct{}
+	doneStopped   chan struct{}
 
-	closeOnce sync.Once
-	closeErr  error
+	closeMu       sync.Mutex
+	closeRunning  bool
+	closeComplete bool
+	closeAttempt  *managedCloseAttempt
+}
+
+type managedCloseAttempt struct {
+	done chan struct{}
+	err  error
 }
 
 func newManagedProcess(process processcontrol.Process) *managedProcess {
 	result := &managedProcess{
 		process: process, output: make(chan task.ProcessOutput), done: make(chan task.ProcessResult, 1), stop: make(chan struct{}),
+		outputStopped: make(chan struct{}), doneStopped: make(chan struct{}),
 	}
-	result.wait.Add(2)
 	go func() {
-		defer result.wait.Done()
+		defer close(result.outputStopped)
 		defer close(result.output)
 		for {
 			select {
@@ -384,7 +429,7 @@ func newManagedProcess(process processcontrol.Process) *managedProcess {
 		}
 	}()
 	go func() {
-		defer result.wait.Done()
+		defer close(result.doneStopped)
 		defer close(result.done)
 		for {
 			select {
@@ -412,21 +457,54 @@ func (p *managedProcess) Done() <-chan task.ProcessResult   { return p.done }
 func (p *managedProcess) Terminate(ctx context.Context, grace time.Duration) error {
 	return p.process.Terminate(ctx, grace)
 }
-func (p *managedProcess) Close() error {
-	p.closeOnce.Do(func() {
-		close(p.stop)
-		processErr := p.process.Close()
-		stopped := make(chan struct{})
-		go func() {
-			p.wait.Wait()
-			close(stopped)
-		}()
+func (p *managedProcess) Close(ctx context.Context) error {
+	p.closeMu.Lock()
+	if p.closeComplete {
+		err := p.closeAttempt.err
+		p.closeMu.Unlock()
+		return err
+	}
+	if p.closeRunning {
+		attempt := p.closeAttempt
+		p.closeMu.Unlock()
 		select {
-		case <-stopped:
-			p.closeErr = processErr
-		case <-time.After(adapterTimeout):
-			p.closeErr = errors.Join(processErr, errAdapterCloseTimeout)
+		case <-attempt.done:
+			return attempt.err
+		case <-ctx.Done():
+			return ctx.Err()
 		}
-	})
-	return p.closeErr
+	}
+	p.closeRunning = true
+	attempt := &managedCloseAttempt{done: make(chan struct{})}
+	p.closeAttempt = attempt
+	select {
+	case <-p.stop:
+	default:
+		close(p.stop)
+	}
+	p.closeMu.Unlock()
+
+	closeCtx, cancel := context.WithTimeout(ctx, adapterTimeout)
+	defer cancel()
+	processErr := p.process.Close(closeCtx)
+	waitErr := waitAdapterStopped(closeCtx, p.outputStopped, p.doneStopped)
+	p.closeMu.Lock()
+	attempt.err = errors.Join(processErr, waitErr)
+	p.closeRunning = false
+	p.closeComplete = attempt.err == nil
+	close(attempt.done)
+	err := attempt.err
+	p.closeMu.Unlock()
+	return err
+}
+
+func waitAdapterStopped(ctx context.Context, stopped ...<-chan struct{}) error {
+	for _, done := range stopped {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
 }

@@ -56,6 +56,11 @@ type windowsRunnerOperations struct {
 	closeHandle            func(windows.Handle) error
 }
 
+type windowsCloseAttempt struct {
+	done chan struct{}
+	err  error
+}
+
 type windowsProcess struct {
 	specValue     Spec
 	control       *os.File
@@ -83,7 +88,7 @@ type windowsProcess struct {
 	finished         chan struct{}
 	contextStop      chan struct{}
 	doneOnce         sync.Once
-	closeOnce        sync.Once
+	closeInitOnce    sync.Once
 	shutdownOnce     sync.Once
 	hostExitOnce     sync.Once
 	controlCloseOnce sync.Once
@@ -98,7 +103,10 @@ type windowsProcess struct {
 	jobErrMu         sync.Mutex
 	jobOperationErr  error
 	jobCloseErr      error
-	closeErr         error
+	closeMu          sync.Mutex
+	closeRunning     bool
+	closeComplete    bool
+	closeAttempt     *windowsCloseAttempt
 	shutdownErr      error
 }
 
@@ -357,14 +365,14 @@ func (process *windowsProcess) Terminate(ctx context.Context, grace time.Duratio
 	process.mu.Unlock()
 	if !started {
 		process.closeControl()
-		_ = process.shutdownHostBounded()
+		_ = process.shutdownHostBounded(ctx)
 		process.publish(Result{Err: errProcessHostFailed})
 		return nil
 	}
 	if grace < 0 {
 		grace = 0
 	}
-	if waitWindowsClosed(process.finished, grace) {
+	if waitWindowsClosedContext(ctx, process.finished, grace) {
 		process.closeOuterJob()
 		return redactWindowsOperationError(process.outerJobError())
 	}
@@ -373,28 +381,71 @@ func (process *windowsProcess) Terminate(ctx context.Context, grace time.Duratio
 	return errors.Join(err, redactWindowsOperationError(process.outerJobError()))
 }
 
-func (process *windowsProcess) Close() error {
-	process.closeOnce.Do(func() {
+func (process *windowsProcess) Close(ctx context.Context) error {
+	process.closeMu.Lock()
+	if process.closeComplete {
+		process.closeMu.Unlock()
+		process.retryRetainedHandles()
+		return nil
+	}
+	if process.closeRunning {
+		attempt := process.closeAttempt
+		process.closeMu.Unlock()
+		select {
+		case <-attempt.done:
+			process.retryRetainedHandles()
+			return attempt.err
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	attempt := &windowsCloseAttempt{done: make(chan struct{})}
+	process.closeRunning = true
+	process.closeAttempt = attempt
+	process.closeMu.Unlock()
+
+	err := process.closeWindowsProcess(ctx)
+	process.closeMu.Lock()
+	attempt.err = err
+	process.closeRunning = false
+	if err == nil {
+		process.closeComplete = true
+	}
+	close(attempt.done)
+	process.closeMu.Unlock()
+	process.retryRetainedHandles()
+	return err
+}
+
+func (process *windowsProcess) closeWindowsProcess(ctx context.Context) error {
+	process.closeInitOnce.Do(func() {
 		process.contextStopOnce.Do(func() { close(process.contextStop) })
 		process.closeControl()
 		process.discardOnce.Do(func() { close(process.outputDiscard) })
-		if !waitWindowsClosed(process.finished, 100*time.Millisecond) {
-			if err := process.shutdownHostBounded(); err != nil {
-				process.closeErr = errProcessHostFailed
-			}
-			process.publish(Result{Err: errProcessHostFailed})
-		} else {
-			process.closeOuterJob()
-			if process.outerJobError() != nil {
-				process.closeErr = errProcessHostFailed
-			}
-		}
-		process.closeStatus()
-		process.closeOutputReaders()
-		process.closeOutput()
 	})
-	process.retryRetainedHandles()
-	return process.closeErr
+	var closeErr error
+	if !waitWindowsClosedContext(ctx, process.finished, 100*time.Millisecond) {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		shutdownErr := process.shutdownHostBounded(ctx)
+		process.publish(Result{Err: errProcessHostFailed})
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if shutdownErr != nil {
+			closeErr = errProcessHostFailed
+		}
+	} else {
+		process.closeOuterJob()
+		if process.outerJobError() != nil {
+			closeErr = errProcessHostFailed
+		}
+	}
+	process.closeStatus()
+	process.closeOutputReaders()
+	process.closeOutput()
+	return closeErr
 }
 
 func (process *windowsProcess) readStatus(ctx context.Context) (HostStatus, error) {
@@ -483,7 +534,7 @@ func (process *windowsProcess) copyStream(readers *sync.WaitGroup, reader *os.Fi
 func (process *windowsProcess) finishAfterHost(result Result) {
 	if !waitWindowsClosed(process.hostExited, windowsHostShutdownWait) {
 		result.Err = errors.Join(result.Err, errProcessHostFailed)
-		_ = process.shutdownHostBounded()
+		_ = process.shutdownHostBounded(context.Background())
 	}
 	if !waitWindowsClosed(process.outputDone, windowsHostShutdownWait) {
 		result.Err = errors.Join(result.Err, errProcessHostFailed)
@@ -507,14 +558,14 @@ func (process *windowsProcess) publish(result Result) {
 
 func (process *windowsProcess) forceTerminate(ctx context.Context, prior error) error {
 	prior = errors.Join(prior, ctx.Err())
-	if err := process.shutdownHostBounded(); err != nil {
+	if err := process.shutdownHostBounded(ctx); err != nil {
 		prior = errors.Join(prior, errProcessHostFailed)
 	}
 	process.publish(Result{Err: errProcessHostFailed})
 	return prior
 }
 
-func (process *windowsProcess) shutdownHostBounded() error {
+func (process *windowsProcess) shutdownHostBounded(ctx context.Context) error {
 	process.shutdownOnce.Do(func() {
 		process.closeControl()
 		process.terminateOuterJob()
@@ -530,10 +581,10 @@ func (process *windowsProcess) shutdownHostBounded() error {
 		default:
 			host := process.hostOwner.Take()
 			if host != 0 && host != windows.InvalidHandle {
-				cleanupErr = winprocess.CleanupProcess(host, process.hostCleanupOperations(), 100*time.Millisecond)
+				cleanupErr = winprocess.CleanupProcess(host, process.hostCleanupOperations(), boundedWindowsWait(ctx, 100*time.Millisecond))
 			}
 		}
-		if !waitWindowsClosed(process.outputDone, 100*time.Millisecond) {
+		if !waitWindowsClosedContext(ctx, process.outputDone, 100*time.Millisecond) {
 			process.closeOutput()
 		}
 		if cleanupErr != nil || process.outerJobError() != nil || hostCloseErr != nil {
@@ -665,6 +716,35 @@ func waitWindowsClosed(done <-chan struct{}, duration time.Duration) bool {
 	case <-timer.C:
 		return false
 	}
+}
+
+func waitWindowsClosedContext(ctx context.Context, done <-chan struct{}, duration time.Duration) bool {
+	if duration < 0 {
+		duration = 0
+	}
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return false
+	}
+}
+
+func boundedWindowsWait(ctx context.Context, maximum time.Duration) time.Duration {
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return 0
+		}
+		if remaining < maximum {
+			return remaining
+		}
+	}
+	return maximum
 }
 
 func waitWindowsHandle(ctx context.Context, wait func(windows.Handle, uint32) (uint32, error), handle windows.Handle, duration time.Duration) bool {

@@ -65,7 +65,7 @@ func TestJobObjectTerminatesHostAndGrandchild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer process.Close()
+	defer process.Close(context.Background())
 	hostPID := process.Lease().HostPID
 	if err := process.Start(context.Background()); err != nil {
 		t.Fatal(err)
@@ -91,7 +91,7 @@ func TestWindowsNaturalMainExitKillsDescendantsBeforeDone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer process.Close()
+	defer process.Close(context.Background())
 	if err := process.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestWindowsPrepareBlocksTargetUntilStart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer process.Close()
+	defer process.Close(context.Background())
 	lease := process.Lease()
 	if lease.HostPID <= 0 || lease.HostStartIdentity == "" || lease.TargetProcessGroup != 0 {
 		t.Fatalf("prepared lease = %#v", lease)
@@ -131,7 +131,7 @@ func TestWindowsPreparedParentPipeHandlesAreNotInheritable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer value.Close()
+	defer value.Close(context.Background())
 	process := value.(*windowsProcess)
 	for name, file := range map[string]*os.File{
 		"control": process.control,
@@ -403,7 +403,7 @@ func TestWindowsTerminateErrorStillReleasesDoneAndKillsTree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer process.Close()
+	defer process.Close(context.Background())
 	if err := process.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -421,7 +421,7 @@ func TestWindowsContextCancellationAndCloseKillTargetTrees(t *testing.T) {
 		stop func(context.CancelFunc, Process) error
 	}{
 		{name: "context cancellation", stop: func(cancel context.CancelFunc, _ Process) error { cancel(); return nil }},
-		{name: "close", stop: func(_ context.CancelFunc, process Process) error { return process.Close() }},
+		{name: "close", stop: func(_ context.CancelFunc, process Process) error { return process.Close(context.Background()) }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			binary := buildWindowsService(t)
@@ -431,7 +431,7 @@ func TestWindowsContextCancellationAndCloseKillTargetTrees(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer process.Close()
+			defer process.Close(context.Background())
 			if err := process.Start(context.Background()); err != nil {
 				t.Fatal(err)
 			}
@@ -461,7 +461,7 @@ func TestWindowsControlEOFAndUnexpectedHostExitCleanTargetTrees(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer value.Close()
+			defer value.Close(context.Background())
 			if err := value.Start(context.Background()); err != nil {
 				t.Fatal(err)
 			}
@@ -481,7 +481,7 @@ func TestWindowsOrdinaryNonzeroExitIsAResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer process.Close()
+	defer process.Close(context.Background())
 	if err := process.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -504,7 +504,7 @@ func TestWindowsNoisyTargetDoesNotBlockDoneOrCloseWithoutOutputConsumer(t *testi
 	if !errors.Is(result.Err, ErrProcessOutputOverflow) {
 		t.Fatalf("result = %#v", result)
 	}
-	if err := process.Close(); err != nil {
+	if err := process.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -515,7 +515,7 @@ func TestWindowsTargetDoesNotReceiveStatusHandleEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer process.Close()
+	defer process.Close(context.Background())
 	if err := process.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -542,7 +542,7 @@ func TestWindowsTargetEnvironmentPrefersSpecValues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer process.Close()
+	defer process.Close(context.Background())
 	if err := process.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -575,10 +575,10 @@ func TestWindowsCloseIsIdempotentWithoutHandleOrGoroutineLeak(t *testing.T) {
 			t.Fatal(err)
 		}
 		_ = receiveWindowsResult(t, process.Done())
-		if err := process.Close(); err != nil {
+		if err := process.Close(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		if err := process.Close(); err != nil {
+		if err := process.Close(context.Background()); err != nil {
 			t.Fatal(err)
 		}
 		handleCounts = append(handleCounts, windowsHandleCount(t))
@@ -596,6 +596,29 @@ func TestWindowsCloseIsIdempotentWithoutHandleOrGoroutineLeak(t *testing.T) {
 	}
 	if after := runtime.NumGoroutine(); after > beforeGoroutines+4 {
 		t.Fatalf("goroutine count grew from %d to %d", beforeGoroutines, after)
+	}
+}
+
+func TestWindowsProcessCloseCanRetryAfterContextCancellation(t *testing.T) {
+	binary := buildWindowsService(t)
+	process, err := NewRunner(binary).Prepare(context.Background(), Spec{
+		Executable: binary,
+		Args:       []string{"--task-fixture", "success"},
+	}, windowsTestID(69), windowsTestID(70))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := process.Close(canceled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Close(canceled) = %v, want context.Canceled", err)
+	}
+
+	retry, retryCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer retryCancel()
+	if err := process.Close(retry); err != nil {
+		t.Fatalf("Close(retry) = %v", err)
 	}
 }
 
@@ -673,7 +696,7 @@ func TestWindowsCloseAndDoneAreBoundedWhenEveryNativeCleanupStageFails(t *testin
 	go process.copyOutput()
 
 	closed := make(chan error, 1)
-	go func() { closed <- process.Close() }()
+	go func() { closed <- process.Close(context.Background()) }()
 	select {
 	case err := <-closed:
 		if !errors.Is(err, errProcessHostFailed) {
@@ -713,7 +736,7 @@ func TestWindowsCloseAndDoneAreBoundedWhenEveryNativeCleanupStageFails(t *testin
 		t.Fatal("background cleanup did not close the signaled Host handle")
 	}
 	started := time.Now()
-	if err := process.Close(); !errors.Is(err, errProcessHostFailed) || time.Since(started) > 100*time.Millisecond {
+	if err := process.Close(context.Background()); !errors.Is(err, errProcessHostFailed) || time.Since(started) > 100*time.Millisecond {
 		t.Fatalf("second Close = %v after %s", err, time.Since(started))
 	}
 }
@@ -842,7 +865,7 @@ func TestWindowsPrepareRetriesResumedThreadClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	process := value.(*windowsProcess)
-	defer process.Close()
+	defer process.Close(context.Background())
 	deadline := time.Now().Add(time.Second)
 	for threadSuccesses.Load() == 0 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
@@ -968,7 +991,7 @@ func TestWindowsObserverWaitAndCleanupHaveExclusiveHandles(t *testing.T) {
 		t.Fatal("observer wait did not start")
 	}
 	started := time.Now()
-	if err := process.Close(); !errors.Is(err, errProcessHostFailed) {
+	if err := process.Close(context.Background()); !errors.Is(err, errProcessHostFailed) {
 		t.Fatalf("Close = %v", err)
 	}
 	if time.Since(started) > 500*time.Millisecond {
@@ -1017,7 +1040,7 @@ func TestWindowsRunnerRedactsExecutableAndNativeErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer process.Close()
+	defer process.Close(context.Background())
 	err = process.Start(context.Background())
 	if err == nil || strings.Contains(err.Error(), secret) {
 		t.Fatalf("Start error = %v", err)

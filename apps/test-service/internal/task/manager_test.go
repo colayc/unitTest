@@ -663,6 +663,34 @@ func TestManagerShutdownDeadlineLeavesClosingAndNeverCancels(t *testing.T) {
 	}
 }
 
+func TestManagerShutdownRetriesContextBoundProcessClose(t *testing.T) {
+	f := newManagerFixtureWithCloseTimeout(t, 20*time.Millisecond)
+	release := make(chan struct{})
+	f.process.closeBlock = release
+	started, err := f.manager.Start(context.Background(), task.StartRequest{IdempotencyKey: testID(88), Scenario: task.ScenarioSuccess, Timeout: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.process.complete(task.ProcessResult{ExitCode: 0})
+	f.awaitStoredTask(t, started.ID, task.StatusFinished)
+	f.awaitProcessClose(t, f.process)
+
+	short, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := f.manager.Shutdown(short); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Shutdown after timed-out process Close = %v, want deadline", err)
+	}
+	close(release)
+	long, cancelLong := context.WithTimeout(context.Background(), time.Second)
+	defer cancelLong()
+	if err := f.manager.Shutdown(long); err != nil {
+		t.Fatalf("retry Shutdown = %v", err)
+	}
+	if calls := f.process.closeCalls(); calls < 2 {
+		t.Fatalf("process Close calls = %d, want retry", calls)
+	}
+}
+
 type managerFixture struct {
 	manager   *task.Manager
 	store     *fakeStore
@@ -674,6 +702,10 @@ type managerFixture struct {
 }
 
 func newManagerFixture(t *testing.T) *managerFixture {
+	return newManagerFixtureWithCloseTimeout(t, 0)
+}
+
+func newManagerFixtureWithCloseTimeout(t *testing.T, closeTimeout time.Duration) *managerFixture {
 	t.Helper()
 	clock := newFakeClock()
 	store := newFakeStore()
@@ -687,6 +719,7 @@ func newManagerFixture(t *testing.T) *managerFixture {
 		Clock: clock, NewID: func() string { next++; return testID(next) },
 		ServiceExecutable: "trusted-service", ServiceInstanceID: testID(99),
 		TerminationGrace: time.Second, OutputFlushInterval: 25 * time.Millisecond,
+		ProcessCloseTimeout: closeTimeout,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1101,6 +1134,7 @@ type fakeProcess struct {
 	terminateBlock <-chan struct{}
 	terminateErr   error
 	closeErr       error
+	closeBlock     <-chan struct{}
 }
 
 func newFakeProcess() *fakeProcess {
@@ -1129,7 +1163,20 @@ func (p *fakeProcess) Terminate(context.Context, time.Duration) error {
 	}
 	return p.terminateErr
 }
-func (p *fakeProcess) Close() error                      { p.mu.Lock(); defer p.mu.Unlock(); p.closes++; return p.closeErr }
+func (p *fakeProcess) Close(ctx context.Context) error {
+	p.mu.Lock()
+	p.closes++
+	block, closeErr := p.closeBlock, p.closeErr
+	p.mu.Unlock()
+	if block != nil {
+		select {
+		case <-block:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return closeErr
+}
 func (p *fakeProcess) output(value task.ProcessOutput)   { p.outputs <- value }
 func (p *fakeProcess) complete(value task.ProcessResult) { p.completeOnce(value) }
 func (p *fakeProcess) completeOnce(value task.ProcessResult) {
