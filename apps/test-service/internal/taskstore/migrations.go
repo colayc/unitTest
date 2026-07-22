@@ -97,7 +97,24 @@ func (s *Store) validateAppliedMigrations(ctx context.Context, migrations []migr
 	if err := rows.Err(); err != nil {
 		return nil, storageError("read migration state", err)
 	}
+	if err := validateMigrationPrefix(migrations, applied); err != nil {
+		return nil, err
+	}
 	return applied, nil
+}
+
+func validateMigrationPrefix(migrations []migration, applied map[int]bool) error {
+	missing := false
+	for _, current := range migrations {
+		if !applied[current.version] {
+			missing = true
+			continue
+		}
+		if missing {
+			return fmt.Errorf("%w: migration history is not a contiguous prefix", task.ErrStorageUnavailable)
+		}
+	}
+	return nil
 }
 
 func loadMigrations() ([]migration, error) {

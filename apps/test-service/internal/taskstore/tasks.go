@@ -143,8 +143,10 @@ func (s *Store) Apply(ctx context.Context, mutation task.Mutation) (task.Task, [
 			return task.Task{}, nil, task.ErrInvalidArgument
 		}
 	}
-	if mutation.PutLease != nil && mutation.PutLease.TaskID != mutation.Task.ID {
-		return task.Task{}, nil, task.ErrInvalidArgument
+	if mutation.PutLease != nil {
+		if mutation.PutLease.TaskID != mutation.Task.ID || mutation.Task.Status == task.StatusFinished {
+			return task.Task{}, nil, task.ErrInvalidArgument
+		}
 	}
 	for _, artifact := range mutation.Artifacts {
 		if artifact.TaskID != mutation.Task.ID {
@@ -188,9 +190,11 @@ func (s *Store) Apply(ctx context.Context, mutation task.Mutation) (task.Task, [
 			return task.Task{}, nil, err
 		}
 	}
-	last := mutation.Task.LastSequence
+	var last int64
 	if len(events) > 0 {
 		last = events[len(events)-1].Sequence
+	} else if err := tx.QueryRowContext(ctx, `SELECT last_sequence FROM tasks WHERE task_id=?`, mutation.Task.ID).Scan(&last); err != nil {
+		return task.Task{}, nil, storageError("read task sequence", err)
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE tasks SET last_sequence=? WHERE task_id=?`, last, mutation.Task.ID); err != nil {
 		return task.Task{}, nil, storageError("update task sequence", err)

@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
-	"path/filepath"
+	"path"
 	"strings"
 	"time"
 
@@ -26,15 +26,19 @@ func insertArtifact(ctx context.Context, tx *sql.Tx, artifact task.Artifact) err
 
 func validArtifact(value task.Artifact) bool {
 	if value.ID == "" || value.TaskID == "" || value.Kind == "" || value.RelativePath == "" || value.MIMEType == "" ||
-		value.Size < 0 || value.CreatedAt.IsZero() || len(value.SHA256) != 64 || filepath.IsAbs(value.RelativePath) {
-		return false
-	}
-	clean := filepath.Clean(value.RelativePath)
-	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		value.Size < 0 || value.CreatedAt.IsZero() || len(value.SHA256) != 64 || !canonicalArtifactPath(value.RelativePath) {
 		return false
 	}
 	_, err := hex.DecodeString(value.SHA256)
 	return err == nil
+}
+
+func canonicalArtifactPath(value string) bool {
+	if value == "" || strings.ContainsAny(value, "\\:\x00") || path.IsAbs(value) {
+		return false
+	}
+	clean := path.Clean(value)
+	return clean == value && clean != "." && clean != ".." && !strings.HasPrefix(clean, "../")
 }
 
 func (s *Store) ListArtifacts(ctx context.Context, taskID, cursor string, limit int) (task.Page[task.Artifact], error) {

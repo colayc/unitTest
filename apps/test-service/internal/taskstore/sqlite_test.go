@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -107,6 +108,90 @@ func TestApplyWrongExpectedStatusRollsBackEverything(t *testing.T) {
 	}
 }
 
+func TestApplyWithoutEventsPreservesNewerPersistedSequence(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	now := time.Date(2026, 7, 22, 2, 10, 0, 0, time.UTC)
+	stale := createTask(t, store, newTask(23, 24, now))
+	appended, err := store.AppendEvent(ctx, stale.ID, draft(stale.ID, task.EventTaskOutput, now.Add(time.Second)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if appended.Sequence != 2 {
+		t.Fatalf("AppendEvent() sequence = %d, want 2", appended.Sequence)
+	}
+
+	updated, events, err := store.Apply(ctx, task.Mutation{Task: stale, Expected: task.StatusQueued})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 || updated.LastSequence != appended.Sequence {
+		t.Fatalf("Apply() = %#v, events=%#v", updated, events)
+	}
+	persisted, err := store.Get(ctx, stale.ID)
+	if err != nil || persisted.LastSequence != appended.Sequence {
+		t.Fatalf("Get() = %#v, %v", persisted, err)
+	}
+}
+
+func TestApplyRejectsLeaseForTerminalResult(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	now := time.Date(2026, 7, 22, 2, 20, 0, 0, time.UTC)
+	created := createTask(t, store, newTask(25, 26, now))
+	finished := created
+	finished.Status = task.StatusFinished
+	finished.Outcome = task.OutcomeSucceeded
+	finished.FinishedAt = ptrTime(now.Add(time.Second))
+	lease := task.ProcessLease{TaskID: created.ID, HostPID: 42, HostStartIdentity: "start", ServiceInstanceID: id(27)}
+	_, _, err := store.Apply(ctx, task.Mutation{Task: finished, Expected: task.StatusQueued, PutLease: &lease})
+	if !errors.Is(err, task.ErrInvalidArgument) {
+		t.Fatalf("Apply(terminal lease) error = %v, want ErrInvalidArgument", err)
+	}
+	var leaseCount int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM process_leases WHERE task_id=?`, created.ID).Scan(&leaseCount); err != nil {
+		t.Fatal(err)
+	}
+	persisted, getErr := store.Get(ctx, created.ID)
+	if leaseCount != 0 || getErr != nil || persisted.Status != task.StatusQueued {
+		t.Fatalf("leaseCount=%d persisted=%#v err=%v", leaseCount, persisted, getErr)
+	}
+}
+
+func TestApplyRollsBackSnapshotWhenEventInsertFails(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	now := time.Date(2026, 7, 22, 2, 30, 0, 0, time.UTC)
+	created := createTask(t, store, newTask(28, 29, now))
+	var existingEventID string
+	if err := store.db.QueryRow(`SELECT event_id FROM task_events WHERE task_id=?`, created.ID).Scan(&existingEventID); err != nil {
+		t.Fatal(err)
+	}
+	store.newID = func() string { return existingEventID }
+	running := mustTransition(t, created, task.Transition{From: task.StatusQueued, To: task.StatusRunning, At: now.Add(time.Second)})
+	lease := task.ProcessLease{TaskID: created.ID, HostPID: 50, HostStartIdentity: "start", ServiceInstanceID: id(30)}
+	_, _, err := store.Apply(ctx, task.Mutation{
+		Task: running, Expected: task.StatusQueued,
+		Events:   []task.EventDraft{draft(created.ID, task.EventTaskStarted, now.Add(time.Second))},
+		PutLease: &lease,
+	})
+	if !errors.Is(err, task.ErrStorageUnavailable) {
+		t.Fatalf("Apply() error = %v, want ErrStorageUnavailable", err)
+	}
+	persisted, err := store.Get(ctx, created.ID)
+	if err != nil || persisted.Status != task.StatusQueued || persisted.StartedAt != nil || persisted.LastSequence != created.LastSequence {
+		t.Fatalf("Get() after rollback = %#v, %v", persisted, err)
+	}
+	var leaseCount int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM process_leases WHERE task_id=?`, created.ID).Scan(&leaseCount); err != nil || leaseCount != 0 {
+		t.Fatalf("lease count = %d, %v", leaseCount, err)
+	}
+	watermark, err := store.Watermark(ctx)
+	if err != nil || watermark != created.LastSequence {
+		t.Fatalf("Watermark() = %d, %v", watermark, err)
+	}
+}
+
 func TestListUsesStableOpaqueCursor(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -197,6 +282,53 @@ func TestArtifactsPersistMetadataAndExposeCleanupReferences(t *testing.T) {
 	}
 }
 
+func TestArtifactPathsRequireCanonicalPortableRelativeForm(t *testing.T) {
+	base := task.Artifact{
+		ID: id(64), TaskID: id(65), Kind: "stdout", MIMEType: "text/plain",
+		Size: 1, SHA256: strings.Repeat("a", 64), CreatedAt: time.Date(2026, 7, 22, 5, 30, 0, 0, time.UTC),
+	}
+	valid := []string{
+		"stdout.txt",
+		"task/stdout.txt",
+		"task-1/output_0.json",
+	}
+	for _, relativePath := range valid {
+		t.Run("valid_"+strings.ReplaceAll(relativePath, "/", "_"), func(t *testing.T) {
+			artifact := base
+			artifact.RelativePath = relativePath
+			if !validArtifact(artifact) {
+				t.Fatalf("validArtifact(%q) = false", relativePath)
+			}
+		})
+	}
+	invalid := []string{
+		".",
+		"./task/stdout.txt",
+		"task//stdout.txt",
+		"task/./stdout.txt",
+		"task/sub/../stdout.txt",
+		"task/stdout.txt/",
+		"../stdout.txt",
+		"task/../../stdout.txt",
+		"/root/stdout.txt",
+		"//server/share/stdout.txt",
+		`\root\stdout.txt`,
+		`task\stdout.txt`,
+		"C:/task/stdout.txt",
+		`C:\task\stdout.txt`,
+		"C:task/stdout.txt",
+	}
+	for index, relativePath := range invalid {
+		t.Run(fmt.Sprintf("invalid_%02d", index), func(t *testing.T) {
+			artifact := base
+			artifact.RelativePath = relativePath
+			if validArtifact(artifact) {
+				t.Fatalf("validArtifact(%q) = true", relativePath)
+			}
+		})
+	}
+}
+
 func TestUpdateLeaseRequiresExistingLeaseOnActiveTask(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -274,6 +406,10 @@ func TestRecoverInterruptedFinishesAllActiveTasksAndDeletesLeases(t *testing.T) 
 	leases, err := store.ActiveLeases(ctx)
 	if err != nil || len(leases) != 0 {
 		t.Fatalf("ActiveLeases() = %#v, %v", leases, err)
+	}
+	var physicalLeaseCount int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM process_leases WHERE task_id=?`, running.ID).Scan(&physicalLeaseCount); err != nil || physicalLeaseCount != 0 {
+		t.Fatalf("physical lease count = %d, %v", physicalLeaseCount, err)
 	}
 	again, err := store.RecoverInterrupted(ctx, recoveredAt.Add(time.Second))
 	if err != nil || len(again) != 0 {
@@ -360,6 +496,102 @@ func TestReopenRejectsUnknownAppliedMigrationVersion(t *testing.T) {
 	}
 	if err == nil || !errors.Is(err, task.ErrStorageUnavailable) {
 		t.Fatalf("Open(unknown migration version) error = %v", err)
+	}
+}
+
+func TestMigrationHistoryMustBeContiguousPrefix(t *testing.T) {
+	migrations := []migration{{version: 1}, {version: 2}, {version: 3}}
+	if err := validateMigrationPrefix(migrations, map[int]bool{1: true, 3: true}); err == nil {
+		t.Fatal("validateMigrationPrefix() error = nil, want gap rejection")
+	}
+	if err := validateMigrationPrefix(migrations, map[int]bool{1: true, 2: true}); err != nil {
+		t.Fatalf("validateMigrationPrefix(contiguous) error = %v", err)
+	}
+}
+
+func TestReopenRoundTripsCompleteTaskHistory(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "history.sqlite")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	base := time.Date(2026, 7, 22, 9, 0, 0, 123456789, time.FixedZone("east", 8*60*60))
+	created := createTask(t, store, newTask(110, 111, base))
+	startedAt := base.Add(time.Second)
+	running := mustTransition(t, created, task.Transition{From: task.StatusQueued, To: task.StatusRunning, At: startedAt})
+	lease := task.ProcessLease{TaskID: created.ID, HostPID: 88, HostStartIdentity: "identity", ServiceInstanceID: id(115)}
+	running, startedEvents, err := store.Apply(ctx, task.Mutation{
+		Task: running, Expected: task.StatusQueued,
+		Events:   []task.EventDraft{{TaskID: created.ID, Type: task.EventTaskStarted, At: startedAt, Payload: json.RawMessage(`{"phase":"running"}`)}},
+		PutLease: &lease,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finishedAt := base.Add(2 * time.Second)
+	finished := mustTransition(t, running, task.Transition{
+		From: task.StatusRunning, To: task.StatusFinished, Outcome: task.OutcomeCommandFailed, At: finishedAt,
+		ErrorCode: "exit_nonzero", ErrorMessage: "simulated exit 7",
+	})
+	artifact := task.Artifact{
+		ID: id(112), TaskID: created.ID, Kind: "stdout", RelativePath: "history/stdout.txt", MIMEType: "text/plain",
+		Size: 7, SHA256: strings.Repeat("b", 64), CreatedAt: finishedAt,
+	}
+	finishedPayload := json.RawMessage(`{"outcome":"command_failed","exitCode":7}`)
+	finished, finishedEvents, err := store.Apply(ctx, task.Mutation{
+		Task: finished, Expected: task.StatusRunning,
+		Events:      []task.EventDraft{{TaskID: created.ID, Type: task.EventTaskFinished, At: finishedAt, Payload: finishedPayload}},
+		DeleteLease: true,
+		Artifacts:   []task.Artifact{artifact},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	queued := createTask(t, store, newTask(113, 114, base.Add(3*time.Second)))
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	gotFinished, err := reopened.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotFinished.Status != task.StatusFinished || gotFinished.Outcome != task.OutcomeCommandFailed ||
+		gotFinished.StartedAt == nil || !gotFinished.StartedAt.Equal(startedAt) ||
+		gotFinished.FinishedAt == nil || !gotFinished.FinishedAt.Equal(finishedAt) ||
+		!gotFinished.CreatedAt.Equal(base) || gotFinished.ErrorCode != "exit_nonzero" ||
+		gotFinished.ErrorMessage != "simulated exit 7" || gotFinished.LastSequence != finishedEvents[0].Sequence {
+		t.Fatalf("reopened finished task = %#v", gotFinished)
+	}
+	gotQueued, err := reopened.Get(ctx, queued.ID)
+	if err != nil || gotQueued.Outcome != "" || gotQueued.StartedAt != nil || gotQueued.FinishedAt != nil ||
+		gotQueued.ErrorCode != "" || gotQueued.ErrorMessage != "" {
+		t.Fatalf("reopened queued task = %#v, %v", gotQueued, err)
+	}
+	watermark, err := reopened.Watermark(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := reopened.EventsAfter(ctx, 0, watermark, 10)
+	if err != nil || len(events) != 4 || events[1].Sequence != startedEvents[0].Sequence ||
+		!events[1].At.Equal(startedAt) || string(events[1].Payload) != `{"phase":"running"}` ||
+		events[2].Sequence != finishedEvents[0].Sequence || !events[2].At.Equal(finishedAt) ||
+		string(events[2].Payload) != string(finishedPayload) {
+		t.Fatalf("reopened events = %#v, %v", events, err)
+	}
+	gotArtifact, err := reopened.GetArtifact(ctx, artifact.ID)
+	if err != nil || gotArtifact.ID != artifact.ID || gotArtifact.TaskID != artifact.TaskID ||
+		gotArtifact.Kind != artifact.Kind || gotArtifact.RelativePath != artifact.RelativePath ||
+		gotArtifact.MIMEType != artifact.MIMEType || gotArtifact.Size != artifact.Size ||
+		gotArtifact.SHA256 != artifact.SHA256 || !gotArtifact.CreatedAt.Equal(artifact.CreatedAt) {
+		t.Fatalf("reopened artifact = %#v, %v", gotArtifact, err)
 	}
 }
 
