@@ -115,6 +115,22 @@ type strictCloseControl struct {
 	closes int
 }
 
+type gatedNonCloser struct {
+	readCalled chan struct{}
+	release    chan struct{}
+	once       sync.Once
+}
+
+func newGatedNonCloser() *gatedNonCloser {
+	return &gatedNonCloser{readCalled: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (reader *gatedNonCloser) Read([]byte) (int, error) {
+	reader.once.Do(func() { close(reader.readCalled) })
+	<-reader.release
+	return 0, io.EOF
+}
+
 func (control *strictCloseControl) Read(buffer []byte) (int, error) {
 	return control.reader.Read(buffer)
 }
@@ -227,14 +243,14 @@ func TestRunTerminatesTargetOnStopEOFAndContextCancellation(t *testing.T) {
 		{
 			name: "stop",
 			control: func(t *testing.T, spec processcontrol.Spec) io.Reader {
-				return bytes.NewReader(commandBytes(t, processcontrol.StartCommand(spec), processcontrol.StopCommand()))
+				return io.NopCloser(bytes.NewReader(commandBytes(t, processcontrol.StartCommand(spec), processcontrol.StopCommand())))
 			},
 			ctx: func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) },
 		},
 		{
 			name: "eof",
 			control: func(t *testing.T, spec processcontrol.Spec) io.Reader {
-				return bytes.NewReader(commandBytes(t, processcontrol.StartCommand(spec)))
+				return io.NopCloser(bytes.NewReader(commandBytes(t, processcontrol.StartCommand(spec))))
 			},
 			ctx: func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) },
 		},
@@ -290,7 +306,7 @@ func TestRunRejectsInvalidInitialFramesFailClosed(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			platform := &fakePlatform{}
 			var status, stderr bytes.Buffer
-			if code := processhost.Run(context.Background(), platform, strings.NewReader(test.control), &status, io.Discard, &stderr); code != 2 {
+			if code := processhost.Run(context.Background(), platform, io.NopCloser(strings.NewReader(test.control)), &status, io.Discard, &stderr); code != 2 {
 				t.Fatalf("code = %d, status = %q", code, status.String())
 			}
 			statuses := decodeStatuses(t, status.Bytes())
@@ -338,7 +354,7 @@ func TestRunAcceptsExactLimitStartFrameWithCRLF(t *testing.T) {
 	target := &fakeTarget{pid: 9, group: 10, done: make(chan targetResult, 1)}
 	platform := &fakePlatform{target: target}
 	var status bytes.Buffer
-	if code := processhost.Run(context.Background(), platform, bytes.NewReader(append(frame, '\r', '\n')), &status, io.Discard, io.Discard); code != 0 {
+	if code := processhost.Run(context.Background(), platform, io.NopCloser(bytes.NewReader(append(frame, '\r', '\n'))), &status, io.Discard, io.Discard); code != 0 {
 		t.Fatalf("code = %d, status = %q", code, status.String())
 	}
 }
@@ -347,7 +363,7 @@ func TestRunRedactsPlatformErrors(t *testing.T) {
 	secret := `C:\private\token args=--secret`
 	platform := &fakePlatform{startErr: errors.New(secret)}
 	var status, stderr bytes.Buffer
-	code := processhost.Run(context.Background(), platform, bytes.NewReader(commandBytes(t, processcontrol.StartCommand(processcontrol.Spec{Executable: secret}))), &status, io.Discard, &stderr)
+	code := processhost.Run(context.Background(), platform, io.NopCloser(bytes.NewReader(commandBytes(t, processcontrol.StartCommand(processcontrol.Spec{Executable: secret})))), &status, io.Discard, &stderr)
 	if code != 1 {
 		t.Fatalf("code = %d", code)
 	}
@@ -368,7 +384,7 @@ func TestRunRejectsUnknownCommandAfterStartAndTerminatesTarget(t *testing.T) {
 		processcontrol.HostCommand{Kind: "start", Spec: &processcontrol.Spec{Executable: `C:\private\second.exe`}},
 	)
 	var status bytes.Buffer
-	if code := processhost.Run(context.Background(), platform, bytes.NewReader(commands), &status, io.Discard, io.Discard); code != 2 {
+	if code := processhost.Run(context.Background(), platform, io.NopCloser(bytes.NewReader(commands)), &status, io.Discard, io.Discard); code != 2 {
 		t.Fatalf("code = %d, status = %q", code, status.String())
 	}
 	statuses := decodeStatuses(t, status.Bytes())
@@ -412,7 +428,7 @@ func TestRunRejectsInvalidCommandWhenCommandWins(t *testing.T) {
 		processcontrol.HostCommand{Kind: "unknown"},
 	)
 	var status bytes.Buffer
-	if code := processhost.Run(context.Background(), platform, bytes.NewReader(commands), &status, io.Discard, io.Discard); code != 2 {
+	if code := processhost.Run(context.Background(), platform, io.NopCloser(bytes.NewReader(commands)), &status, io.Discard, io.Discard); code != 2 {
 		t.Fatalf("code = %d, status = %q", code, status.String())
 	}
 }
@@ -439,7 +455,7 @@ func TestRunRejectsFramesAfterStop(t *testing.T) {
 			)
 			control = append(control, test.trailing...)
 			var status bytes.Buffer
-			if code := processhost.Run(context.Background(), platform, bytes.NewReader(control), &status, io.Discard, io.Discard); code != 2 {
+			if code := processhost.Run(context.Background(), platform, io.NopCloser(bytes.NewReader(control)), &status, io.Discard, io.Discard); code != 2 {
 				t.Fatalf("code = %d, status = %q", code, status.String())
 			}
 			statuses := decodeStatuses(t, status.Bytes())
@@ -450,6 +466,72 @@ func TestRunRejectsFramesAfterStop(t *testing.T) {
 				t.Fatalf("terminations = %d, want 1", platform.terminationCount())
 			}
 		})
+	}
+}
+
+func TestRunRejectsUnterminatedFragmentAfterStopOnOwnedClose(t *testing.T) {
+	tests := []struct {
+		name     string
+		fragment string
+	}{
+		{name: "complete unknown JSON without newline", fragment: `{"kind":"unknown"}`},
+		{name: "malformed partial JSON", fragment: `{"kind":`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			target := &fakeTarget{pid: 5, group: 6, done: make(chan targetResult, 1)}
+			platform := &fakePlatform{target: target}
+			data := commandBytes(t,
+				processcontrol.StartCommand(processcontrol.Spec{Executable: "fixture"}),
+				processcontrol.StopCommand(),
+			)
+			control := newBlockingControl(append(data, test.fragment...))
+			var status bytes.Buffer
+			if code := processhost.Run(context.Background(), platform, control, &status, io.Discard, io.Discard); code != 2 {
+				t.Fatalf("code = %d, status = %q", code, status.String())
+			}
+			statuses := decodeStatuses(t, status.Bytes())
+			if len(statuses) != 2 || statuses[0].Kind != "started" || statuses[1].Kind != "error" || statuses[1].ErrorCode != "INVALID_HOST_COMMAND" {
+				t.Fatalf("statuses = %#v", statuses)
+			}
+			if platform.terminationCount() != 1 {
+				t.Fatalf("terminations = %d, want 1", platform.terminationCount())
+			}
+		})
+	}
+}
+
+func TestRunRejectsBlockingNonCloserBeforeReadOrPlatformStart(t *testing.T) {
+	control := newGatedNonCloser()
+	platform := &fakePlatform{}
+	var status bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- processhost.Run(context.Background(), platform, control, &status, io.Discard, io.Discard)
+	}()
+
+	select {
+	case code := <-done:
+		if code != 2 {
+			t.Fatalf("code = %d, status = %q", code, status.String())
+		}
+	case <-control.readCalled:
+		close(control.release)
+		<-done
+		t.Fatal("Run read from a non-closable control")
+	case <-time.After(2 * time.Second):
+		close(control.release)
+		<-done
+		t.Fatal("Run blocked on a non-closable control")
+	}
+
+	statuses := decodeStatuses(t, status.Bytes())
+	if len(statuses) != 1 || statuses[0].Kind != "error" || statuses[0].ErrorCode != "INVALID_HOST_CONTROL" || statuses[0].Message != "invalid host control" {
+		t.Fatalf("statuses = %#v", statuses)
+	}
+	if len(platform.started) != 0 {
+		t.Fatal("platform start was called")
 	}
 }
 
@@ -479,7 +561,7 @@ func TestRunTerminateErrorStillReleasesWaitAndReturnsRedactedFailure(t *testing.
 	var status bytes.Buffer
 	done := make(chan int, 1)
 	go func() {
-		done <- processhost.Run(context.Background(), platform, bytes.NewReader(control), &status, io.Discard, io.Discard)
+		done <- processhost.Run(context.Background(), platform, io.NopCloser(bytes.NewReader(control)), &status, io.Discard, io.Discard)
 	}()
 	select {
 	case code := <-done:

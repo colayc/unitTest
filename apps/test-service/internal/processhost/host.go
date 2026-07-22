@@ -48,24 +48,25 @@ type frameReader struct {
 var errInvalidHostFrame = errors.New("invalid host frame")
 
 type controlOwner struct {
-	reader io.Reader
-	closer io.Closer
-	closed chan struct{}
-	once   sync.Once
+	// control is the production inherited pipe. Requiring io.ReadCloser is
+	// what lets Run join a decoder blocked in Read without leaking it.
+	control io.ReadCloser
+	closed  chan struct{}
+	once    sync.Once
 }
 
-func newControlOwner(reader io.Reader) *controlOwner {
-	owner := &controlOwner{reader: reader, closed: make(chan struct{})}
-	owner.closer, _ = reader.(io.Closer)
-	return owner
+func newControlOwner(reader io.Reader) (*controlOwner, bool) {
+	control, ok := reader.(io.ReadCloser)
+	if !ok {
+		return nil, false
+	}
+	return &controlOwner{control: control, closed: make(chan struct{})}, true
 }
 
 func (owner *controlOwner) Close() {
 	owner.once.Do(func() {
 		close(owner.closed)
-		if owner.closer != nil {
-			_ = owner.closer.Close()
-		}
+		_ = owner.control.Close()
 	})
 }
 
@@ -88,6 +89,9 @@ func (reader *frameReader) command() (processcontrol.HostCommand, error) {
 		return processcontrol.HostCommand{}, errInvalidHostFrame
 	}
 	if err != nil && !errors.Is(err, io.EOF) {
+		if len(line) != 0 {
+			return processcontrol.HostCommand{}, errInvalidHostFrame
+		}
 		return processcontrol.HostCommand{}, err
 	}
 	if errors.Is(err, io.EOF) && len(line) == 0 {
@@ -181,10 +185,17 @@ func readControl(owner *controlOwner, frames *frameReader, stop chan<- struct{})
 	return done
 }
 
+// Run owns control for the duration of the Host protocol. Control must
+// implement io.ReadCloser so target completion or context cancellation can
+// interrupt and join a blocked command read. Run closes it exactly once.
 func Run(ctx context.Context, platform Platform, control io.Reader, status io.Writer, stdout, stderr io.Writer) int {
-	owner := newControlOwner(control)
+	owner, ok := newControlOwner(control)
+	if !ok {
+		_ = writeStatus(status, processcontrol.HostStatus{Kind: "error", ErrorCode: "INVALID_HOST_CONTROL", Message: "invalid host control"})
+		return 2
+	}
 	defer owner.Close()
-	frames := newFrameReader(owner.reader)
+	frames := newFrameReader(owner.control)
 	start, err := frames.command()
 	if err != nil || start.Kind != "start" || start.Spec == nil {
 		_ = writeStatus(status, processcontrol.HostStatus{Kind: "error", ErrorCode: "INVALID_HOST_COMMAND", Message: "invalid start command"})
