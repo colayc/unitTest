@@ -1,57 +1,57 @@
-# Secure Token File Preparation Implementation Plan
+# 安全令牌文件准备实施计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **面向智能体工作者：** 必须使用子技能：使用 superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans，逐项实施本计划。各步骤使用复选框（`- [ ]`）语法跟踪。
 
-**Goal:** Create the authentication token file with owner-only platform permissions before TypeScript writes the secret, then use the existing validated service startup path.
+**目标：** 在 TypeScript 写入秘密之前，以平台原生的仅所有者权限创建身份验证令牌文件，随后沿用现有且经过验证的服务启动路径。
 
-**Architecture:** The Go executable gains a mutually exclusive `--prepare-token-file` mode. Platform files create the empty destination atomically with a Windows protected owner-only DACL or Linux mode `0600`; the TypeScript probe invokes that mode, writes to the existing file, and then launches normal service mode.
+**架构：** Go 可执行文件新增互斥的 `--prepare-token-file` 模式。平台专用文件以 Windows 受保护的仅所有者 DACL 或 Linux mode `0600` 原子创建空目标文件；TypeScript 探针调用该模式，写入现有文件，然后启动正常服务模式。
 
-**Tech Stack:** Node.js 24.18.0, pnpm 11.4.0, TypeScript 6.0.3, Go 1.26.5, `golang.org/x/sys/windows`, and `golang.org/x/sys/unix`.
+**技术栈：** Node.js 24.18.0、pnpm 11.4.0、TypeScript 6.0.3、Go 1.26.5、`golang.org/x/sys/windows` 和 `golang.org/x/sys/unix`。
 
-## Global Constraints
+## 全局约束
 
-- Do not add dependencies or change protocol schema version `1.0`.
-- Support both Windows and Linux through build-tagged Go files.
-- The token file must be owned by the current user and grant access only to that user.
-- Apply restrictive permissions atomically before any token bytes are written.
-- Never pass the token in process arguments or include it in stdout, stderr, or errors.
-- Keep normal startup validation, 4096-byte limit, identity-checked deletion, handshake, capabilities, and shutdown behavior unchanged.
-- Reject an existing preparation destination instead of truncating or replacing it.
-- Follow test-driven development: run every specified red test before its implementation step.
-
----
-
-## File Map
-
-- `apps/test-service/cmd/unit-test-service/token_file_prepare.go`: common preparation validation, close, and failure cleanup orchestration.
-- `apps/test-service/cmd/unit-test-service/token_file_prepare_windows.go`: atomic Windows creation with a protected owner-only security descriptor.
-- `apps/test-service/cmd/unit-test-service/token_file_prepare_unix.go`: exclusive Linux creation with mode `0600`.
-- `apps/test-service/cmd/unit-test-service/token_file_prepare_test.go`: cross-platform preparation behavior.
-- `apps/test-service/cmd/unit-test-service/main.go`: mutually exclusive preparation and service CLI modes.
-- `apps/test-service/cmd/unit-test-service/main_test.go`: CLI dispatch and invalid-combination tests.
-- `tools/service-probe/src/probe.ts`: invoke preparation mode before writing the token.
-- `tools/service-probe/src/probe.test.ts`: real-binary preparation and end-to-end tests.
-- `tools/workspace-smoke/workspace-smoke.test.mjs`: documentation contract test.
-- `README.md`: launcher behavior for contributors.
-- `docs/decisions/0001-local-ipc-and-protocol-v1.md`: binding security decision.
+- 不得新增依赖，也不得更改协议 schema 版本 `1.0`。
+- 通过带 build tag 的 Go 文件同时支持 Windows 和 Linux。
+- 令牌文件必须归当前用户所有，并且只允许该用户访问。
+- 必须在写入任何令牌字节之前，原子应用限制性权限。
+- 绝不能通过进程参数传递令牌，也不能将其写入 stdout、stderr 或错误信息。
+- 正常启动验证、4096 字节上限、经过身份校验的删除、handshake、capabilities 和 shutdown 行为必须保持不变。
+- 如果准备目标已存在，必须拒绝操作，而不是截断或替换该目标。
+- 遵循测试驱动开发：每个指定的红灯测试都必须在相应实现步骤之前运行。
 
 ---
 
-### Task 1: Create an empty owner-only token file atomically
+## 文件映射
 
-**Files:**
-- Create: `apps/test-service/cmd/unit-test-service/token_file_prepare.go`
-- Create: `apps/test-service/cmd/unit-test-service/token_file_prepare_windows.go`
-- Create: `apps/test-service/cmd/unit-test-service/token_file_prepare_unix.go`
-- Create: `apps/test-service/cmd/unit-test-service/token_file_prepare_test.go`
+- `apps/test-service/cmd/unit-test-service/token_file_prepare.go`：通用的准备验证、关闭和失败清理编排。
+- `apps/test-service/cmd/unit-test-service/token_file_prepare_windows.go`：使用受保护的仅所有者安全描述符在 Windows 上原子创建文件。
+- `apps/test-service/cmd/unit-test-service/token_file_prepare_unix.go`：使用 mode `0600` 在 Linux 上排他创建文件。
+- `apps/test-service/cmd/unit-test-service/token_file_prepare_test.go`：跨平台准备行为。
+- `apps/test-service/cmd/unit-test-service/main.go`：互斥的准备模式和服务 CLI 模式。
+- `apps/test-service/cmd/unit-test-service/main_test.go`：CLI 分派和无效组合测试。
+- `tools/service-probe/src/probe.ts`：在写入令牌之前调用准备模式。
+- `tools/service-probe/src/probe.test.ts`：使用真实二进制文件的准备测试和端到端测试。
+- `tools/workspace-smoke/workspace-smoke.test.mjs`：文档契约测试。
+- `README.md`：面向贡献者的启动器行为说明。
+- `docs/decisions/0001-local-ipc-and-protocol-v1.md`：具有约束力的安全决策。
 
-**Interfaces:**
-- Consumes: existing `validateTokenFile(file *os.File, info os.FileInfo) error` and `removeSameTokenFile(path string, expected os.FileInfo) error`.
-- Produces: `prepareTokenFile(path string) error` for CLI preparation mode and build-tagged `createTokenFile(path string) (*os.File, error)` implementations.
+---
 
-- [ ] **Step 1: Write the failing cross-platform preparation tests**
+### Task 1：原子创建仅所有者可访问的空令牌文件
 
-Create `token_file_prepare_test.go`:
+**文件：**
+- 创建：`apps/test-service/cmd/unit-test-service/token_file_prepare.go`
+- 创建：`apps/test-service/cmd/unit-test-service/token_file_prepare_windows.go`
+- 创建：`apps/test-service/cmd/unit-test-service/token_file_prepare_unix.go`
+- 创建：`apps/test-service/cmd/unit-test-service/token_file_prepare_test.go`
+
+**接口：**
+- 输入：现有的 `validateTokenFile(file *os.File, info os.FileInfo) error` 和 `removeSameTokenFile(path string, expected os.FileInfo) error`。
+- 产出：供 CLI 准备模式使用的 `prepareTokenFile(path string) error`，以及带 build tag 的 `createTokenFile(path string) (*os.File, error)` 实现。
+
+- [ ] **Step 1：编写失败的跨平台准备测试**
+
+创建 `token_file_prepare_test.go`：
 
 ```go
 package main
@@ -116,19 +116,19 @@ func TestPrepareTokenFileRejectsExistingPathWithoutChangingIt(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run the focused test and verify RED**
+- [ ] **Step 2：运行聚焦测试并确认红灯**
 
-Run from `apps/test-service`:
+从 `apps/test-service` 运行：
 
 ```powershell
 go test ./cmd/unit-test-service -run 'TestPrepareTokenFile' -count=1
 ```
 
-Expected: build failure with `undefined: prepareTokenFile`.
+预期：构建失败，并出现 `undefined: prepareTokenFile`。
 
-- [ ] **Step 3: Implement common preparation orchestration**
+- [ ] **Step 3：实现通用准备编排**
 
-Create `token_file_prepare.go`:
+创建 `token_file_prepare.go`：
 
 ```go
 package main
@@ -157,9 +157,9 @@ func prepareTokenFile(path string) error {
 }
 ```
 
-- [ ] **Step 4: Implement atomic Windows creation**
+- [ ] **Step 4：实现 Windows 原子创建**
 
-Create `token_file_prepare_windows.go`:
+创建 `token_file_prepare_windows.go`：
 
 ```go
 //go:build windows
@@ -210,9 +210,9 @@ func createTokenFile(path string) (*os.File, error) {
 }
 ```
 
-- [ ] **Step 5: Implement exclusive Linux creation**
+- [ ] **Step 5：实现 Linux 排他创建**
 
-Create `token_file_prepare_unix.go`:
+创建 `token_file_prepare_unix.go`：
 
 ```go
 //go:build !windows
@@ -249,28 +249,28 @@ func createTokenFile(path string) (*os.File, error) {
 }
 ```
 
-- [ ] **Step 6: Format and run the focused tests to verify GREEN**
+- [ ] **Step 6：格式化并运行聚焦测试以确认绿灯**
 
-Run:
+运行：
 
 ```powershell
 gofmt -w cmd/unit-test-service/token_file_prepare.go cmd/unit-test-service/token_file_prepare_windows.go cmd/unit-test-service/token_file_prepare_unix.go cmd/unit-test-service/token_file_prepare_test.go
 go test ./cmd/unit-test-service -run 'TestPrepareTokenFile' -count=1
 ```
 
-Expected: both preparation tests pass. On Windows the first test exercises `validateOwnerOnlyDACL`, so any retained `SY`, `WD`, or other allow ACE fails the test.
+预期：两个准备测试均通过。在 Windows 上，第一个测试会执行 `validateOwnerOnlyDACL`，因此只要保留了 `SY`、`WD` 或任何其他允许 ACE，测试就会失败。
 
-- [ ] **Step 7: Run the complete Go test package**
+- [ ] **Step 7：运行完整的 Go 测试包**
 
-Run:
+运行：
 
 ```powershell
 go test ./cmd/unit-test-service -count=1
 ```
 
-Expected: all token consumption and preparation tests pass.
+预期：所有令牌消费和准备测试均通过。
 
-- [ ] **Step 8: Commit Task 1**
+- [ ] **Step 8：提交 Task 1**
 
 ```powershell
 git add apps/test-service/cmd/unit-test-service/token_file_prepare.go apps/test-service/cmd/unit-test-service/token_file_prepare_windows.go apps/test-service/cmd/unit-test-service/token_file_prepare_unix.go apps/test-service/cmd/unit-test-service/token_file_prepare_test.go
@@ -279,19 +279,19 @@ git commit -m "feat: create restricted token files atomically"
 
 ---
 
-### Task 2: Add the preparation command mode
+### Task 2：添加准备命令模式
 
-**Files:**
-- Create: `apps/test-service/cmd/unit-test-service/main_test.go`
-- Modify: `apps/test-service/cmd/unit-test-service/main.go`
+**文件：**
+- 创建：`apps/test-service/cmd/unit-test-service/main_test.go`
+- 修改：`apps/test-service/cmd/unit-test-service/main.go`
 
-**Interfaces:**
-- Consumes: `prepareTokenFile(path string) error` from Task 1.
-- Produces: `unit-test-service --prepare-token-file <path>` with success exit code `0`, operational failure `1`, and usage failure `2`.
+**接口：**
+- 输入：Task 1 提供的 `prepareTokenFile(path string) error`。
+- 产出：`unit-test-service --prepare-token-file <path>`，成功退出码为 `0`、操作失败退出码为 `1`、用法错误退出码为 `2`。
 
-- [ ] **Step 1: Write failing CLI mode tests**
+- [ ] **Step 1：编写失败的 CLI 模式测试**
 
-Create `main_test.go`:
+创建 `main_test.go`：
 
 ```go
 package main
@@ -349,19 +349,19 @@ func TestRunRejectsPositionalArguments(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run CLI tests and verify RED**
+- [ ] **Step 2：运行 CLI 测试并确认红灯**
 
-Run from `apps/test-service`:
+从 `apps/test-service` 运行：
 
 ```powershell
 go test ./cmd/unit-test-service -run 'TestRun' -count=1
 ```
 
-Expected: `flag provided but not defined: -prepare-token-file`; the positional-argument test also exposes the current unvalidated positional input.
+预期：出现 `flag provided but not defined: -prepare-token-file`；位置参数测试还会暴露当前未验证的位置输入。
 
-- [ ] **Step 3: Implement exclusive CLI dispatch**
+- [ ] **Step 3：实现互斥的 CLI 分派**
 
-In `main.go`, add the third flag and dispatch immediately after parsing:
+在 `main.go` 中添加第三个 flag，并在解析后立即分派：
 
 ```go
 endpoint := flags.String("endpoint", "", "local IPC endpoint")
@@ -391,11 +391,11 @@ if *endpoint == "" || *tokenFile == "" {
 }
 ```
 
-Leave the existing service startup below this block unchanged.
+此代码块下方现有的服务启动逻辑保持不变。
 
-- [ ] **Step 4: Format and verify GREEN**
+- [ ] **Step 4：格式化并确认绿灯**
 
-Run:
+运行：
 
 ```powershell
 gofmt -w cmd/unit-test-service/main.go cmd/unit-test-service/main_test.go
@@ -403,9 +403,9 @@ go test ./cmd/unit-test-service -run 'TestRun' -count=1
 go test ./cmd/unit-test-service -count=1
 ```
 
-Expected: all CLI tests and the complete command package pass.
+预期：所有 CLI 测试和完整命令包测试均通过。
 
-- [ ] **Step 5: Commit Task 2**
+- [ ] **Step 5：提交 Task 2**
 
 ```powershell
 git add apps/test-service/cmd/unit-test-service/main.go apps/test-service/cmd/unit-test-service/main_test.go
@@ -414,19 +414,19 @@ git commit -m "feat: add token file preparation command"
 
 ---
 
-### Task 3: Prepare the file before TypeScript writes the token
+### Task 3：在 TypeScript 写入令牌之前准备文件
 
-**Files:**
-- Modify: `tools/service-probe/src/probe.ts`
-- Modify: `tools/service-probe/src/probe.test.ts`
+**文件：**
+- 修改：`tools/service-probe/src/probe.ts`
+- 修改：`tools/service-probe/src/probe.test.ts`
 
-**Interfaces:**
-- Consumes: `unit-test-service --prepare-token-file <path>` from Task 2.
-- Produces: `prepareTokenFile(serviceBinary: string, tokenFile: string, token: string): Promise<void>` and the existing `runProbe(serviceBinary: string): Promise<Capabilities>`.
+**接口：**
+- 输入：Task 2 提供的 `unit-test-service --prepare-token-file <path>`。
+- 产出：`prepareTokenFile(serviceBinary: string, tokenFile: string, token: string): Promise<void>` 和现有的 `runProbe(serviceBinary: string): Promise<Capabilities>`。
 
-- [ ] **Step 1: Write the failing real-binary preparation test**
+- [ ] **Step 1：编写使用真实二进制文件的失败准备测试**
 
-Replace `probe.test.ts` with:
+将 `probe.test.ts` 替换为：
 
 ```ts
 import assert from "node:assert/strict";
@@ -458,19 +458,19 @@ test("probe authenticates, reads capabilities, and shuts the service down", asyn
 });
 ```
 
-- [ ] **Step 2: Run E2E and verify RED**
+- [ ] **Step 2：运行 E2E 并确认红灯**
 
-Run from the repository root:
+从仓库根目录运行：
 
 ```powershell
 pnpm --filter @unit-test-ide/service-probe test:e2e
 ```
 
-Expected: TypeScript build failure `Module './probe.js' has no exported member 'prepareTokenFile'`.
+预期：TypeScript 构建失败，并出现 `Module './probe.js' has no exported member 'prepareTokenFile'`。
 
-- [ ] **Step 3: Replace post-write ACL mutation with pre-write preparation**
+- [ ] **Step 3：用写入前准备替代写入后 ACL 修改**
 
-In `probe.ts`, keep the promisified `execFile`, delete `restrictTokenFile`, and add:
+在 `probe.ts` 中保留 Promise 化的 `execFile`，删除 `restrictTokenFile`，并添加：
 
 ```ts
 export async function prepareTokenFile(serviceBinary: string, tokenFile: string, token: string): Promise<void> {
@@ -479,43 +479,43 @@ export async function prepareTokenFile(serviceBinary: string, tokenFile: string,
 }
 ```
 
-Inside `runProbe`, replace:
+在 `runProbe` 内，将：
 
 ```ts
 await writeFile(tokenFile, token, { mode: 0o600, flag: "wx" });
 await restrictTokenFile(tokenFile);
 ```
 
-with:
+替换为：
 
 ```ts
 await prepareTokenFile(serviceBinary, tokenFile, token);
 ```
 
-Remove the `whoami` and `icacls` calls completely. Do not pass `token` to `execFile` or `spawn`.
+彻底移除对 `whoami` 和 `icacls` 的调用。不得将 `token` 传给 `execFile` 或 `spawn`。
 
-- [ ] **Step 4: Build and verify GREEN with the real service**
+- [ ] **Step 4：使用真实服务构建并确认绿灯**
 
-Run:
+运行：
 
 ```powershell
 pnpm --filter @unit-test-ide/service-probe test:e2e
 ```
 
-Expected: both the preparation test and the handshake/capabilities/shutdown E2E test pass on the current platform.
+预期：准备测试和 handshake/capabilities/shutdown E2E 测试在当前平台上均通过。
 
-- [ ] **Step 5: Run TypeScript and Go regression tests**
+- [ ] **Step 5：运行 TypeScript 和 Go 回归测试**
 
-Run:
+运行：
 
 ```powershell
 pnpm build
 pnpm test
 ```
 
-Expected: all workspace, TypeScript, and Go tests pass.
+预期：所有 workspace、TypeScript 和 Go 测试均通过。
 
-- [ ] **Step 6: Commit Task 3**
+- [ ] **Step 6：提交 Task 3**
 
 ```powershell
 git add tools/service-probe/src/probe.ts tools/service-probe/src/probe.test.ts
@@ -524,20 +524,20 @@ git commit -m "fix: prepare token files before writing secrets"
 
 ---
 
-### Task 4: Record the secure preparation contract
+### Task 4：记录安全准备契约
 
-**Files:**
-- Modify: `tools/workspace-smoke/workspace-smoke.test.mjs`
-- Modify: `README.md`
-- Modify: `docs/decisions/0001-local-ipc-and-protocol-v1.md`
+**文件：**
+- 修改：`tools/workspace-smoke/workspace-smoke.test.mjs`
+- 修改：`README.md`
+- 修改：`docs/decisions/0001-local-ipc-and-protocol-v1.md`
 
-**Interfaces:**
-- Consumes: the CLI and launcher behavior from Tasks 1-3.
-- Produces: contributor documentation and a smoke test that prevents regression to post-write ACL mutation.
+**接口：**
+- 输入：Tasks 1-3 提供的 CLI 和启动器行为。
+- 产出：贡献者文档，以及防止回退到写入后修改 ACL 的 smoke 测试。
 
-- [ ] **Step 1: Write the failing documentation contract test**
+- [ ] **Step 1：编写失败的文档契约测试**
 
-Append to `workspace-smoke.test.mjs`:
+追加到 `workspace-smoke.test.mjs`：
 
 ```js
 test("documentation records pre-write token file preparation", async () => {
@@ -549,44 +549,44 @@ test("documentation records pre-write token file preparation", async () => {
 });
 ```
 
-- [ ] **Step 2: Run the smoke test and verify RED**
+- [ ] **Step 2：运行 smoke 测试并确认红灯**
 
-Run:
+运行：
 
 ```powershell
 pnpm test:workspace
 ```
 
-Expected: the new test fails because neither document contains `--prepare-token-file`.
+预期：新测试失败，因为两份文档都不包含 `--prepare-token-file`。
 
-- [ ] **Step 3: Update the README**
+- [ ] **Step 3：更新 README**
 
-Replace the final README paragraph with:
+将 README 的最后一段替换为：
 
 ```markdown
 The service listens on a random per-user Windows Named Pipe or a Linux Unix Socket with mode `0600`. Every connection must complete the token handshake before using another method. Authentication token files must be owned by the current user and grant access only to that user: Unix uses owner-only mode bits, while Windows uses a protected owner-only DACL. Before writing the token, the launcher runs `unit-test-service --prepare-token-file <path>` so the Go binary creates the empty file with platform-native owner-only permissions. The service validates the file independently and deletes it after consuming the token.
 ```
 
-- [ ] **Step 4: Update the IPC decision**
+- [ ] **Step 4：更新 IPC 决策**
 
-Replace the token-file paragraph in ADR 0001 with:
+将 ADR 0001 中关于令牌文件的段落替换为：
 
 ```markdown
 Each client must send `handshake` first. Its token is supplied through a file owned by the current user. Before writing the token, the launcher invokes `unit-test-service --prepare-token-file <path>`; Go creates the empty file atomically with mode `0600` on Unix or a protected owner-only DACL on Windows. The launcher then writes to that existing file without replacing it. The service independently rejects symbolic links and non-owner access, bounds the file to 4 KiB, and must delete the same file it opened before startup can succeed. The protocol version is `1.0`.
 ```
 
-- [ ] **Step 5: Verify the documentation contract**
+- [ ] **Step 5：验证文档契约**
 
-Run:
+运行：
 
 ```powershell
 pnpm test:workspace
 git diff --check
 ```
 
-Expected: all workspace smoke tests pass and `git diff --check` prints no errors.
+预期：所有 workspace smoke 测试均通过，并且 `git diff --check` 不输出任何错误。
 
-- [ ] **Step 6: Commit Task 4**
+- [ ] **Step 6：提交 Task 4**
 
 ```powershell
 git add tools/workspace-smoke/workspace-smoke.test.mjs README.md docs/decisions/0001-local-ipc-and-protocol-v1.md
@@ -595,18 +595,18 @@ git commit -m "docs: describe secure token preparation"
 
 ---
 
-### Task 5: Run the complete local and hosted acceptance gates
+### Task 5：运行完整的本地与托管验收门禁
 
-**Files:**
-- Verify only; no source changes are expected.
+**文件：**
+- 仅验证；预期不修改源文件。
 
-**Interfaces:**
-- Consumes: all deliverables from Tasks 1-4.
-- Produces: fresh local evidence and a passing Windows/Ubuntu GitHub Actions run for Draft PR #1.
+**接口：**
+- 输入：Tasks 1-4 的全部交付物。
+- 产出：最新的本地证据，以及 Draft PR #1 中通过的 Windows/Ubuntu GitHub Actions 运行结果。
 
-- [ ] **Step 1: Run the complete local gate**
+- [ ] **Step 1：运行完整的本地门禁**
 
-Run from the repository root with the pinned Node.js and Go runtimes on `PATH`:
+从仓库根目录运行，并确保固定版本的 Node.js 和 Go 运行时位于 `PATH`：
 
 ```powershell
 pnpm install --frozen-lockfile --offline
@@ -621,17 +621,17 @@ git diff --check
 git status --short
 ```
 
-Expected: every command exits `0`; all tests pass; `git diff --check` is empty; `git status --short` is empty after the four task commits.
+预期：每条命令均以 `0` 退出；所有测试均通过；`git diff --check` 无输出；完成四次任务提交后，`git status --short` 无输出。
 
-- [ ] **Step 2: Push the feature branch**
+- [ ] **Step 2：推送功能分支**
 
 ```powershell
 git push github codex/foundation-protocol-service
 ```
 
-Expected: GitHub advances the Draft PR branch to the local `HEAD`.
+预期：GitHub 将 Draft PR 分支推进到本地 `HEAD`。
 
-- [ ] **Step 3: Find and watch the new Actions run**
+- [ ] **Step 3：查找并监视新的 Actions 运行**
 
 ```powershell
 $runs = & 'C:\Program Files\GitHub CLI\gh.exe' run list --repo colayc/unitTest --branch codex/foundation-protocol-service --event pull_request --limit 3 --json databaseId,headSha,status,conclusion,url | ConvertFrom-Json
@@ -639,4 +639,4 @@ $runID = $runs[0].databaseId
 & 'C:\Program Files\GitHub CLI\gh.exe' run watch $runID --repo colayc/unitTest --exit-status --interval 10
 ```
 
-Expected: both `verify (windows-latest)` and `verify (ubuntu-latest)` complete successfully, including `pnpm test:e2e` and `git diff --exit-code`.
+预期：`verify (windows-latest)` 和 `verify (ubuntu-latest)` 均成功完成，其中包括 `pnpm test:e2e` 和 `git diff --exit-code`。
