@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -387,11 +388,8 @@ func TestLinuxNoisyTargetDoesNotBlockDoneOrCloseWithoutOutputConsumer(t *testing
 	if err := process.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err := process.Terminate(context.Background(), 50*time.Millisecond); err != nil {
-		t.Fatal(err)
-	}
-	if result := receiveResult(t, process.Done()); result.Err != nil {
-		t.Fatal(result.Err)
+	if result := receiveResult(t, process.Done()); !errors.Is(result.Err, ErrProcessOutputOverflow) {
+		t.Fatalf("result = %#v, want stable output overflow", result)
 	}
 	closed := make(chan error, 1)
 	go func() { closed <- process.Close() }()
@@ -403,6 +401,125 @@ func TestLinuxNoisyTargetDoesNotBlockDoneOrCloseWithoutOutputConsumer(t *testing
 	case <-time.After(5 * time.Second):
 		t.Fatal("Close blocked behind unconsumed output")
 	}
+}
+
+func TestLinuxOutputOverflowDoesNotReplaceStrongerProcessError(t *testing.T) {
+	stronger := errors.New("stronger process failure")
+	process := &unixProcess{}
+	process.outputOverflow.Store(true)
+	result := process.applyOutputOverflow(Result{Err: stronger})
+	if !errors.Is(result.Err, stronger) || errors.Is(result.Err, ErrProcessOutputOverflow) {
+		t.Fatalf("result error = %v, want stronger error only", result.Err)
+	}
+}
+
+func TestLinuxCleanupRevalidatesHostIdentityAfterGroupScanBeforeSignals(t *testing.T) {
+	currentIdentity := "expected"
+	signals := 0
+	operations := linuxOperations{
+		startIdentity: func(int) (string, error) { return currentIdentity, nil },
+		ownedGroup: func(int, int) (bool, error) {
+			currentIdentity = "reused"
+			return true, nil
+		},
+		signalPID:   func(int, unix.Signal) error { signals++; return nil },
+		signalGroup: func(int, unix.Signal) error { signals++; return nil },
+		pidExists:   func(int) bool { return true },
+		groupExists: func(int) bool { return true },
+	}
+	runner := &unixRunner{executable: os.Args[0], operations: operations}
+	err := runner.Cleanup(context.Background(), task.ProcessLease{
+		HostPID: 200, HostStartIdentity: "expected", TargetProcessGroup: 300,
+	}, time.Millisecond)
+	if !errors.Is(err, ErrLeaseIdentityMismatch) {
+		t.Fatalf("Cleanup error = %v, want identity mismatch", err)
+	}
+	if signals != 0 {
+		t.Fatalf("signals = %d, want 0", signals)
+	}
+}
+
+func TestLinuxHostSignalRevalidatesIdentityAfterWait(t *testing.T) {
+	signals := 0
+	currentIdentity := "expected"
+	operations := linuxOperations{
+		startIdentity: func(int) (string, error) { return currentIdentity, nil },
+		signalPID:     func(int, unix.Signal) error { signals++; return nil },
+		signalGroup:   func(int, unix.Signal) error { signals++; return nil },
+	}
+	// Simulate the leased Host exiting and its PID being reused while a grace
+	// wait is in progress. The next signal must re-read rather than trust the
+	// identity observed before that wait.
+	currentIdentity = "reused"
+	for _, group := range []bool{false, true} {
+		err := operations.signalHost(200, "expected", unix.SIGKILL, group)
+		if !errors.Is(err, ErrLeaseIdentityMismatch) {
+			t.Fatalf("signalHost(group=%t) = %v", group, err)
+		}
+	}
+	if signals != 0 {
+		t.Fatalf("signals = %d, want 0", signals)
+	}
+}
+
+func TestLinuxOwnedGroupScanFailsClosedOnUnreadableOrMalformedStat(t *testing.T) {
+	tests := []struct {
+		name string
+		read func(string) ([]byte, error)
+	}{
+		{name: "unreadable", read: func(string) ([]byte, error) { return nil, fs.ErrPermission }},
+		{name: "malformed", read: func(string) ([]byte, error) { return []byte("malformed"), nil }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := scanLinuxOwnedGroup([]string{"123"}, test.read, 123, 456)
+			if !errors.Is(err, errProcessHostUnavailable) {
+				t.Fatalf("scan error = %v, want fail-closed unavailable", err)
+			}
+		})
+	}
+}
+
+func TestLinuxOwnedGroupScanIgnoresOnlyDisappearedEntries(t *testing.T) {
+	exists, err := scanLinuxOwnedGroup([]string{"123"}, func(string) ([]byte, error) {
+		return nil, os.ErrNotExist
+	}, 123, 456)
+	if err != nil || exists {
+		t.Fatalf("scan = (%t, %v), want (false, nil)", exists, err)
+	}
+}
+
+func TestLinuxOwnedGroupScanAcceptsUnrelatedKernelThreadStat(t *testing.T) {
+	records := map[string][]byte{
+		"2":   linuxStatForTest(2, 0, 0, "10"),
+		"300": linuxStatForTest(300, 300, 200, "20"),
+	}
+	exists, err := scanLinuxOwnedGroup([]string{"2", "300"}, func(path string) ([]byte, error) {
+		return records[filepath.Base(filepath.Dir(path))], nil
+	}, 300, 200)
+	if err != nil || !exists {
+		t.Fatalf("scan = (%t, %v), want owned group", exists, err)
+	}
+}
+
+func TestLinuxStartedStatusRejectsPIDOrGroupOne(t *testing.T) {
+	for _, status := range []HostStatus{
+		{Kind: "started", PID: 1, ProcessGroup: 2},
+		{Kind: "started", PID: 2, ProcessGroup: 1},
+	} {
+		if err := validateLinuxStartedStatus(status); err == nil {
+			t.Fatalf("status accepted: %#v", status)
+		}
+	}
+}
+
+func linuxStatForTest(pid, group, session int, identity string) []byte {
+	fields := []string{"S", "1", strconv.Itoa(group), strconv.Itoa(session)}
+	for len(fields) < 19 {
+		fields = append(fields, "0")
+	}
+	fields = append(fields, identity)
+	return []byte(fmt.Sprintf("%d (process) %s\n", pid, strings.Join(fields, " ")))
 }
 
 func TestLinuxCleanupRemovesOwnedGroupAfterHostIsGone(t *testing.T) {

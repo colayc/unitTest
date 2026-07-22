@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 
 var (
 	ErrLeaseIdentityMismatch  = errors.New("process lease identity mismatch")
+	ErrProcessOutputOverflow  = errors.New("process output overflow")
 	errProcessHostUnavailable = errors.New("process host is unavailable")
 	errProcessStartFailed     = errors.New("target process could not start")
 	errProcessHostFailed      = errors.New("process host failed")
@@ -35,6 +37,7 @@ const (
 
 type unixRunner struct {
 	executable string
+	operations linuxOperations
 }
 
 var _ Runner = (*unixRunner)(nil)
@@ -67,15 +70,88 @@ type unixProcess struct {
 	controlCloseOnce sync.Once
 	statusCloseOnce  sync.Once
 	discardOnce      sync.Once
+	outputOverflow   atomic.Bool
+	operations       linuxOperations
 }
 
 var _ Process = (*unixProcess)(nil)
 
 func NewRunner(serviceExecutable string) Runner {
-	return &unixRunner{executable: serviceExecutable}
+	return &unixRunner{executable: serviceExecutable, operations: defaultLinuxOperations()}
+}
+
+type linuxOperations struct {
+	startIdentity func(int) (string, error)
+	ownedGroup    func(int, int) (bool, error)
+	signalPID     func(int, unix.Signal) error
+	signalGroup   func(int, unix.Signal) error
+	pidExists     func(int) bool
+	groupExists   func(int) bool
+}
+
+func defaultLinuxOperations() linuxOperations {
+	operations := linuxOperations{
+		startIdentity: linuxStartIdentity,
+		signalPID:     signalLinuxPID,
+		signalGroup:   signalLinuxGroup,
+		pidExists:     linuxPIDExists,
+		groupExists:   linuxGroupExists,
+	}
+	operations.ownedGroup = linuxOwnedGroupExists
+	return operations
+}
+
+func (operations linuxOperations) signalHost(pid int, expected string, signal unix.Signal, group bool) error {
+	if err := operations.validateHost(pid, expected); err != nil {
+		return err
+	}
+	if group {
+		return operations.signalGroup(pid, signal)
+	}
+	return operations.signalPID(pid, signal)
+}
+
+func (operations linuxOperations) validateHost(pid int, expected string) error {
+	if pid <= 1 || expected == "" || operations.startIdentity == nil {
+		return ErrLeaseIdentityMismatch
+	}
+	identity, err := operations.startIdentity(pid)
+	if err != nil {
+		return errProcessHostUnavailable
+	}
+	if identity != expected {
+		return ErrLeaseIdentityMismatch
+	}
+	return nil
+}
+
+func (operations linuxOperations) signalTargetGroup(lease task.ProcessLease, hostExists bool, signal unix.Signal) error {
+	// Recovery deliberately uses the persisted tuple as one fixed ownership proof:
+	// HostPID is also the session ID, HostStartIdentity identifies that Host
+	// incarnation, and TargetProcessGroup must still belong to that session.
+	exists, err := operations.ownedGroup(lease.TargetProcessGroup, lease.HostPID)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		if operations.groupExists(lease.TargetProcessGroup) {
+			return ErrLeaseIdentityMismatch
+		}
+		return nil
+	}
+	if hostExists {
+		if err := operations.validateHost(lease.HostPID, lease.HostStartIdentity); err != nil {
+			return err
+		}
+	}
+	return operations.signalGroup(lease.TargetProcessGroup, signal)
 }
 
 func (runner *unixRunner) Prepare(ctx context.Context, spec Spec, taskID, serviceInstanceID string) (Process, error) {
+	operations := runner.operations
+	if operations.startIdentity == nil {
+		operations = defaultLinuxOperations()
+	}
 	controlReader, controlWriter, err := os.Pipe()
 	if err != nil {
 		return nil, errProcessHostUnavailable
@@ -103,30 +179,48 @@ func (runner *unixRunner) Prepare(ctx context.Context, spec Spec, taskID, servic
 	host.ExtraFiles = []*os.File{statusWriter}
 	host.Env = append(os.Environ(), "UNIT_TEST_IDE_STATUS_HANDLE="+strconv.Itoa(statusHandleNumber))
 	host.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Pdeathsig: syscall.SIGTERM}
+	identityReady := make(chan struct{})
+	var hostIdentity string
 	host.Cancel = func() error {
+		<-identityReady
 		if host.Process == nil {
 			return os.ErrProcessDone
 		}
-		err := host.Process.Signal(syscall.SIGTERM)
-		if errors.Is(err, os.ErrProcessDone) {
+		if hostIdentity == "" {
+			return os.ErrProcessDone
+		}
+		err := operations.signalHost(host.Process.Pid, hostIdentity, unix.SIGTERM, false)
+		if errors.Is(err, os.ErrProcessDone) || errors.Is(err, unix.ESRCH) {
 			return nil
+		}
+		if err == nil {
+			pid, identity := host.Process.Pid, hostIdentity
+			go func() {
+				timer := time.NewTimer(3 * time.Second)
+				defer timer.Stop()
+				<-timer.C
+				_ = operations.signalHost(pid, identity, unix.SIGKILL, true)
+			}()
 		}
 		return err
 	}
-	host.WaitDelay = 3 * time.Second
 	if err := host.Start(); err != nil {
+		close(identityReady)
 		closeFiles(controlReader, controlWriter, statusReader, statusWriter, stdoutReader, stdoutWriter, stderrReader, stderrWriter)
 		return nil, errProcessHostUnavailable
 	}
 	closeFiles(controlReader, statusWriter, stdoutWriter, stderrWriter)
 
-	identity, err := linuxStartIdentity(host.Process.Pid)
-	if err != nil {
-		_ = host.Process.Kill()
+	identity, err := operations.startIdentity(host.Process.Pid)
+	if err != nil || identity == "" {
+		_ = controlWriter.Close()
+		close(identityReady)
 		_ = host.Wait()
 		closeFiles(controlWriter, statusReader, stdoutReader, stderrReader)
 		return nil, errProcessHostUnavailable
 	}
+	hostIdentity = identity
+	close(identityReady)
 
 	process := &unixProcess{
 		host:         host,
@@ -148,6 +242,7 @@ func (runner *unixRunner) Prepare(ctx context.Context, spec Spec, taskID, servic
 		outputDiscard: make(chan struct{}),
 		done:          make(chan Result, 1),
 		finished:      make(chan struct{}),
+		operations:    operations,
 	}
 	go process.waitHost()
 	go process.copyOutput()
@@ -155,6 +250,10 @@ func (runner *unixRunner) Prepare(ctx context.Context, spec Spec, taskID, servic
 }
 
 func (runner *unixRunner) Cleanup(ctx context.Context, lease task.ProcessLease, grace time.Duration) error {
+	operations := runner.operations
+	if operations.startIdentity == nil {
+		operations = defaultLinuxOperations()
+	}
 	if lease.HostPID <= 1 || lease.HostStartIdentity == "" {
 		return ErrLeaseIdentityMismatch
 	}
@@ -163,7 +262,7 @@ func (runner *unixRunner) Cleanup(ctx context.Context, lease task.ProcessLease, 
 			return err
 		}
 	}
-	identity, err := linuxStartIdentity(lease.HostPID)
+	identity, err := operations.startIdentity(lease.HostPID)
 	hostExists := err == nil
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return errProcessHostUnavailable
@@ -175,12 +274,20 @@ func (runner *unixRunner) Cleanup(ctx context.Context, lease task.ProcessLease, 
 		return nil
 	}
 	if lease.TargetProcessGroup > 1 {
-		exists, err := linuxOwnedGroupExists(lease.TargetProcessGroup, lease.HostPID)
+		exists, err := operations.ownedGroup(lease.TargetProcessGroup, lease.HostPID)
 		if err != nil {
 			return err
 		}
+		if !exists && operations.groupExists(lease.TargetProcessGroup) {
+			return ErrLeaseIdentityMismatch
+		}
 		if !exists && !hostExists {
 			return nil
+		}
+		if hostExists {
+			if err := operations.validateHost(lease.HostPID, lease.HostStartIdentity); err != nil {
+				return err
+			}
 		}
 	}
 	if grace < 0 {
@@ -189,20 +296,20 @@ func (runner *unixRunner) Cleanup(ctx context.Context, lease task.ProcessLease, 
 
 	var cleanupErr error
 	if lease.TargetProcessGroup > 1 {
-		if err := signalOwnedLinuxGroup(lease.TargetProcessGroup, lease.HostPID, unix.SIGTERM); err != nil {
-			cleanupErr = errProcessHostFailed
+		if err := operations.signalTargetGroup(lease, hostExists, unix.SIGTERM); err != nil {
+			return redactLinuxOperationError(err)
 		}
 	}
 	if hostExists {
-		if err := signalLinuxPID(lease.HostPID, unix.SIGTERM); err != nil {
-			cleanupErr = errors.Join(cleanupErr, errProcessHostFailed)
+		if err := operations.signalHost(lease.HostPID, lease.HostStartIdentity, unix.SIGTERM, false); err != nil {
+			cleanupErr = errors.Join(cleanupErr, redactLinuxOperationError(err))
 		}
 	}
-	if waitLeaseGone(ctx, lease, grace) {
+	if waitLeaseGone(ctx, lease, grace, operations) {
 		return cleanupErr
 	}
 
-	identity, err = linuxStartIdentity(lease.HostPID)
+	identity, err = operations.startIdentity(lease.HostPID)
 	hostExists = err == nil
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return errors.Join(cleanupErr, errProcessHostUnavailable)
@@ -211,19 +318,26 @@ func (runner *unixRunner) Cleanup(ctx context.Context, lease task.ProcessLease, 
 		return errors.Join(cleanupErr, ErrLeaseIdentityMismatch)
 	}
 	if lease.TargetProcessGroup > 1 {
-		if err := signalOwnedLinuxGroup(lease.TargetProcessGroup, lease.HostPID, unix.SIGKILL); err != nil {
-			cleanupErr = errors.Join(cleanupErr, errProcessHostFailed)
+		if err := operations.signalTargetGroup(lease, hostExists, unix.SIGKILL); err != nil {
+			return errors.Join(cleanupErr, redactLinuxOperationError(err))
 		}
 	}
 	if hostExists {
-		if err := signalLinuxPID(lease.HostPID, unix.SIGKILL); err != nil {
-			cleanupErr = errors.Join(cleanupErr, errProcessHostFailed)
+		if err := operations.signalHost(lease.HostPID, lease.HostStartIdentity, unix.SIGKILL, false); err != nil {
+			cleanupErr = errors.Join(cleanupErr, redactLinuxOperationError(err))
 		}
 	}
-	if !waitLeaseGone(ctx, lease, hostShutdownWait) {
+	if !waitLeaseGone(ctx, lease, hostShutdownWait, operations) {
 		cleanupErr = errors.Join(cleanupErr, errProcessHostFailed)
 	}
 	return cleanupErr
+}
+
+func redactLinuxOperationError(err error) error {
+	if errors.Is(err, ErrLeaseIdentityMismatch) || errors.Is(err, errProcessHostUnavailable) {
+		return err
+	}
+	return errProcessHostFailed
 }
 
 func (process *unixProcess) Lease() task.ProcessLease {
@@ -256,7 +370,7 @@ func (process *unixProcess) Start(ctx context.Context) error {
 		process.finishAfterHost(Result{Err: errProcessStartFailed})
 		return errProcessStartFailed
 	}
-	if status.Kind != "started" || status.PID <= 0 || status.ProcessGroup <= 0 || status.PID != status.ProcessGroup {
+	if err := validateLinuxStartedStatus(status); err != nil {
 		process.closeControl()
 		process.finishAfterHost(Result{Err: errProcessHostFailed})
 		return errProcessHostFailed
@@ -359,7 +473,15 @@ func (process *unixProcess) watchExit() {
 
 func (process *unixProcess) finishAfterHost(result Result) {
 	<-process.hostExited
-	process.publish(result)
+	<-process.outputDone
+	process.publish(process.applyOutputOverflow(result))
+}
+
+func (process *unixProcess) applyOutputOverflow(result Result) Result {
+	if result.Err == nil && process.outputOverflow.Load() {
+		result.Err = ErrProcessOutputOverflow
+	}
+	return result
 }
 
 func (process *unixProcess) publish(result Result) {
@@ -396,12 +518,21 @@ func (process *unixProcess) copyStream(readers *sync.WaitGroup, reader *os.File,
 			select {
 			case process.output <- Output{Stream: stream, Data: data}:
 			case <-process.outputDiscard:
+			default:
+				process.outputOverflow.Store(true)
 			}
 		}
 		if err != nil {
 			return
 		}
 	}
+}
+
+func validateLinuxStartedStatus(status HostStatus) error {
+	if status.Kind != "started" || status.PID <= 1 || status.ProcessGroup <= 1 || status.PID != status.ProcessGroup {
+		return errProcessHostFailed
+	}
+	return nil
 }
 
 func (process *unixProcess) closeControl() {
@@ -419,30 +550,24 @@ func (process *unixProcess) closeStatus() {
 func (process *unixProcess) forceTerminate(ctx context.Context, wait time.Duration, prior error) error {
 	prior = errors.Join(prior, ctx.Err())
 	lease := process.Lease()
-	identity, err := linuxStartIdentity(lease.HostPID)
-	if err == nil && identity == lease.HostStartIdentity {
+	if err := process.operations.validateHost(lease.HostPID, lease.HostStartIdentity); err == nil {
 		if lease.TargetProcessGroup > 1 {
-			if err := signalOwnedLinuxGroup(lease.TargetProcessGroup, lease.HostPID, unix.SIGKILL); err != nil {
-				prior = errors.Join(prior, errProcessHostFailed)
+			if err := process.operations.signalTargetGroup(lease, true, unix.SIGKILL); err != nil {
+				prior = errors.Join(prior, redactLinuxOperationError(err))
 			}
 		}
 		if !waitClosed(ctx, process.hostExited, 100*time.Millisecond) {
-			if err := signalLinuxGroup(lease.HostPID, unix.SIGTERM); err != nil {
-				prior = errors.Join(prior, errProcessHostFailed)
+			if err := process.operations.signalHost(lease.HostPID, lease.HostStartIdentity, unix.SIGTERM, true); err != nil {
+				prior = errors.Join(prior, redactLinuxOperationError(err))
 			}
 		}
 		if !waitClosed(ctx, process.hostExited, wait) {
-			identity, err = linuxStartIdentity(lease.HostPID)
-			if err == nil && identity == lease.HostStartIdentity {
-				if err := signalLinuxGroup(lease.HostPID, unix.SIGKILL); err != nil {
-					prior = errors.Join(prior, errProcessHostFailed)
-				}
-			} else if err == nil {
-				prior = errors.Join(prior, ErrLeaseIdentityMismatch)
+			if err := process.operations.signalHost(lease.HostPID, lease.HostStartIdentity, unix.SIGKILL, true); err != nil {
+				prior = errors.Join(prior, redactLinuxOperationError(err))
 			}
 		}
-	} else if err == nil {
-		prior = errors.Join(prior, ErrLeaseIdentityMismatch)
+	} else {
+		prior = errors.Join(prior, redactLinuxOperationError(err))
 	}
 	process.closeControl()
 	if !waitClosed(ctx, process.hostExited, hostShutdownWait) {
@@ -464,11 +589,11 @@ func waitClosed(ctx context.Context, done <-chan struct{}, duration time.Duratio
 	}
 }
 
-func waitLeaseGone(ctx context.Context, lease task.ProcessLease, duration time.Duration) bool {
+func waitLeaseGone(ctx context.Context, lease task.ProcessLease, duration time.Duration, operations linuxOperations) bool {
 	deadline := time.Now().Add(duration)
 	for {
-		hostGone := !linuxPIDExists(lease.HostPID)
-		groupGone := lease.TargetProcessGroup <= 0 || !linuxGroupExists(lease.TargetProcessGroup)
+		hostGone := !operations.pidExists(lease.HostPID)
+		groupGone := lease.TargetProcessGroup <= 0 || !operations.groupExists(lease.TargetProcessGroup)
 		if hostGone && groupGone {
 			return true
 		}
@@ -515,11 +640,11 @@ func parseLinuxProcessStat(contents []byte) (linuxProcessStat, error) {
 		return linuxProcessStat{}, errors.New("invalid process identity")
 	}
 	processGroup, err := strconv.Atoi(fields[2])
-	if err != nil || processGroup <= 0 {
+	if err != nil || processGroup < 0 {
 		return linuxProcessStat{}, errors.New("invalid process identity")
 	}
 	session, err := strconv.Atoi(fields[3])
-	if err != nil || session <= 0 {
+	if err != nil || session < 0 {
 		return linuxProcessStat{}, errors.New("invalid process identity")
 	}
 	if _, err := strconv.ParseUint(fields[19], 10, 64); err != nil {
@@ -573,14 +698,6 @@ func validateLinuxSignalTarget(value int) error {
 	return nil
 }
 
-func signalOwnedLinuxGroup(pgid, session int, signal unix.Signal) error {
-	exists, err := linuxOwnedGroupExists(pgid, session)
-	if err != nil || !exists {
-		return err
-	}
-	return signalLinuxGroup(pgid, signal)
-}
-
 func linuxOwnedGroupExists(pgid, session int) (bool, error) {
 	if err := validateLinuxSignalTarget(pgid); err != nil {
 		return false, err
@@ -592,22 +709,32 @@ func linuxOwnedGroupExists(pgid, session int) (bool, error) {
 	if err != nil {
 		return false, errProcessHostUnavailable
 	}
-	found := false
+	names := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		pid, err := strconv.Atoi(entry.Name())
 		if err != nil || pid <= 0 {
 			continue
 		}
-		contents, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+		names = append(names, entry.Name())
+	}
+	return scanLinuxOwnedGroup(names, os.ReadFile, pgid, session)
+}
+
+func scanLinuxOwnedGroup(names []string, readFile func(string) ([]byte, error), pgid, session int) (bool, error) {
+	// Linux retains the session's PID identity while any session member exists,
+	// so the numeric session ID cannot be reused underneath an extant member.
+	found := false
+	for _, name := range names {
+		contents, err := readFile("/proc/" + name + "/stat")
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 		if err != nil {
-			continue
+			return false, errProcessHostUnavailable
 		}
 		stat, err := parseLinuxProcessStat(contents)
 		if err != nil {
-			continue
+			return false, errProcessHostUnavailable
 		}
 		if stat.processGroup != pgid {
 			continue

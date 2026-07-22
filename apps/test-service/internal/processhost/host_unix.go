@@ -20,7 +20,10 @@ import (
 
 const postKillWait = time.Second
 
-type unixPlatform struct{}
+type unixPlatform struct {
+	startIdentity func(int) (string, error)
+	sessionID     func() (int, error)
+}
 
 var _ Platform = (*unixPlatform)(nil)
 
@@ -38,10 +41,19 @@ type unixTarget struct {
 
 var _ Target = (*unixTarget)(nil)
 
-func NewPlatform() Platform { return &unixPlatform{} }
+func NewPlatform() Platform { return newUnixPlatform(processStartIdentity) }
 
-func (*unixPlatform) Start(spec processcontrol.Spec, stdout, stderr io.Writer) (Target, error) {
-	session, err := unix.Getsid(0)
+func newUnixPlatform(startIdentity func(int) (string, error)) *unixPlatform {
+	return &unixPlatform{
+		startIdentity: startIdentity,
+		sessionID: func() (int, error) {
+			return unix.Getsid(0)
+		},
+	}
+}
+
+func (platform *unixPlatform) Start(spec processcontrol.Spec, stdout, stderr io.Writer) (Target, error) {
+	session, err := platform.sessionID()
 	if err != nil || session <= 1 {
 		return nil, errors.New("target identity unavailable")
 	}
@@ -54,8 +66,23 @@ func (*unixPlatform) Start(spec processcontrol.Spec, stdout, stderr io.Writer) (
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	identity, _ := processStartIdentity(cmd.Process.Pid)
+	identity, err := platform.startIdentity(cmd.Process.Pid)
+	if err != nil || identity == "" {
+		killAndReapFailedTarget(cmd)
+		return nil, errors.New("target identity unavailable")
+	}
 	return &unixTarget{cmd: cmd, pgid: cmd.Process.Pid, session: session, startIdentity: identity, waitDone: make(chan struct{})}, nil
+}
+
+func killAndReapFailedTarget(cmd *exec.Cmd) {
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	if cmd.Process.Pid > 1 {
+		_ = unix.Kill(-cmd.Process.Pid, unix.SIGKILL)
+	}
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
 }
 
 func targetEnvironment(extra []string) []string {
@@ -125,17 +152,47 @@ func signalProcessGroup(target *unixTarget, signal unix.Signal) error {
 		return errors.New("invalid process group")
 	}
 	exists, owned, err := processGroupOwnedBySession(target.pgid, target.session, target.startIdentity)
-	if err != nil || !exists {
+	if err != nil {
 		return err
+	}
+	if !exists {
+		if processGroupExists(target.pgid) {
+			return errors.New("process group identity mismatch")
+		}
+		return nil
 	}
 	if !owned {
 		return errors.New("process group identity mismatch")
+	}
+	if err := validateTargetLeaderIdentity(target.pgid, target.startIdentity, os.ReadFile); err != nil {
+		return err
 	}
 	err = unix.Kill(-target.pgid, signal)
 	if errors.Is(err, unix.ESRCH) {
 		return nil
 	}
 	return err
+}
+
+func validateTargetLeaderIdentity(pgid int, expected string, readFile func(string) ([]byte, error)) error {
+	if pgid <= 1 || expected == "" {
+		return errors.New("process group identity mismatch")
+	}
+	contents, err := readFile("/proc/" + strconv.Itoa(pgid) + "/stat")
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return errors.New("process group identity unavailable")
+	}
+	_, _, identity, err := parseProcessStat(contents)
+	if err != nil {
+		return errors.New("process group identity unavailable")
+	}
+	if identity != expected {
+		return errors.New("process group identity mismatch")
+	}
+	return nil
 }
 
 func processGroupExists(pgid int) bool {
@@ -151,22 +208,36 @@ func processGroupOwnedBySession(pgid, session int, leaderIdentity string) (bool,
 	if err != nil {
 		return false, false, errors.New("process group identity unavailable")
 	}
-	found := false
+	names := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		pid, err := strconv.Atoi(entry.Name())
 		if err != nil || pid <= 0 {
 			continue
 		}
-		contents, err := os.ReadFile("/proc/" + entry.Name() + "/stat")
+		names = append(names, entry.Name())
+	}
+	return scanProcessGroupOwned(names, os.ReadFile, pgid, session, leaderIdentity)
+}
+
+func scanProcessGroupOwned(names []string, readFile func(string) ([]byte, error), pgid, session int, leaderIdentity string) (bool, bool, error) {
+	// Linux retains the session's PID identity while any session member exists,
+	// so the numeric session ID cannot be reused underneath an extant member.
+	found := false
+	for _, name := range names {
+		pid, err := strconv.Atoi(name)
+		if err != nil || pid <= 0 {
+			return false, false, errors.New("process group identity unavailable")
+		}
+		contents, err := readFile("/proc/" + name + "/stat")
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 		if err != nil {
-			continue
+			return false, false, errors.New("process group identity unavailable")
 		}
 		group, gotSession, identity, err := parseProcessStat(contents)
 		if err != nil {
-			continue
+			return false, false, errors.New("process group identity unavailable")
 		}
 		if group != pgid {
 			continue
@@ -201,11 +272,11 @@ func parseProcessStat(contents []byte) (int, int, string, error) {
 		return 0, 0, "", errors.New("invalid process identity")
 	}
 	group, err := strconv.Atoi(fields[2])
-	if err != nil || group <= 0 {
+	if err != nil || group < 0 {
 		return 0, 0, "", errors.New("invalid process identity")
 	}
 	session, err := strconv.Atoi(fields[3])
-	if err != nil || session <= 0 {
+	if err != nil || session < 0 {
 		return 0, 0, "", errors.New("invalid process identity")
 	}
 	if _, err := strconv.ParseUint(fields[19], 10, 64); err != nil {
