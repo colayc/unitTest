@@ -36,6 +36,7 @@ type fakePlatform struct {
 	target       *fakeTarget
 	startErr     error
 	terminateErr error
+	onTerminate  func()
 	started      []processcontrol.Spec
 	terminations int
 	mu           sync.Mutex
@@ -54,12 +55,84 @@ func (p *fakePlatform) Start(spec processcontrol.Spec, stdout, stderr io.Writer)
 func (p *fakePlatform) Terminate(target processhost.Target, _ time.Duration) error {
 	p.mu.Lock()
 	p.terminations++
+	onTerminate := p.onTerminate
 	p.mu.Unlock()
+	if onTerminate != nil {
+		onTerminate()
+	}
 	select {
 	case p.target.done <- targetResult{}:
 	default:
 	}
 	return p.terminateErr
+}
+
+type stagedControl struct {
+	first, second *bytes.Reader
+	releaseSecond chan struct{}
+	secondRead    chan struct{}
+	closed        chan struct{}
+	readOnce      sync.Once
+	closeOnce     sync.Once
+}
+
+func newStagedControl(first, second []byte) *stagedControl {
+	return &stagedControl{
+		first:         bytes.NewReader(first),
+		second:        bytes.NewReader(second),
+		releaseSecond: make(chan struct{}),
+		secondRead:    make(chan struct{}),
+		closed:        make(chan struct{}),
+	}
+}
+
+func (control *stagedControl) Read(buffer []byte) (int, error) {
+	if control.first.Len() > 0 {
+		return control.first.Read(buffer)
+	}
+	select {
+	case <-control.releaseSecond:
+	case <-control.closed:
+		return 0, io.ErrClosedPipe
+	}
+	if control.second.Len() > 0 {
+		count, err := control.second.Read(buffer)
+		control.readOnce.Do(func() { close(control.secondRead) })
+		return count, err
+	}
+	<-control.closed
+	return 0, io.ErrClosedPipe
+}
+
+func (control *stagedControl) Close() error {
+	control.closeOnce.Do(func() { close(control.closed) })
+	return nil
+}
+
+type strictCloseControl struct {
+	reader *bytes.Reader
+	mu     sync.Mutex
+	closes int
+}
+
+func (control *strictCloseControl) Read(buffer []byte) (int, error) {
+	return control.reader.Read(buffer)
+}
+
+func (control *strictCloseControl) Close() error {
+	control.mu.Lock()
+	defer control.mu.Unlock()
+	control.closes++
+	if control.closes > 1 {
+		return errors.New("control closed more than once")
+	}
+	return nil
+}
+
+func (control *strictCloseControl) closeCount() int {
+	control.mu.Lock()
+	defer control.mu.Unlock()
+	return control.closes
 }
 
 func (p *fakePlatform) terminationCount() int {
@@ -307,6 +380,121 @@ func TestRunRejectsUnknownCommandAfterStartAndTerminatesTarget(t *testing.T) {
 	}
 	if platform.terminationCount() != 1 {
 		t.Fatalf("terminations = %d, want 1", platform.terminationCount())
+	}
+}
+
+func TestRunRejectsInvalidCommandWhenTargetCompletionWins(t *testing.T) {
+	start := commandBytes(t, processcontrol.StartCommand(processcontrol.Spec{Executable: "fixture"}))
+	invalid := commandBytes(t, processcontrol.HostCommand{Kind: "unknown"})
+	control := newStagedControl(start, invalid)
+	target := &fakeTarget{pid: 5, group: 6, done: make(chan targetResult, 1)}
+	target.done <- targetResult{code: 0}
+	platform := &fakePlatform{target: target}
+	platform.onTerminate = func() {
+		close(control.releaseSecond)
+		<-control.secondRead
+	}
+	var status bytes.Buffer
+	if code := processhost.Run(context.Background(), platform, control, &status, io.Discard, io.Discard); code != 2 {
+		t.Fatalf("code = %d, status = %q", code, status.String())
+	}
+	statuses := decodeStatuses(t, status.Bytes())
+	if len(statuses) != 2 || statuses[1].Kind != "error" || statuses[1].ErrorCode != "INVALID_HOST_COMMAND" {
+		t.Fatalf("statuses = %#v", statuses)
+	}
+}
+
+func TestRunRejectsInvalidCommandWhenCommandWins(t *testing.T) {
+	target := &fakeTarget{pid: 5, group: 6, done: make(chan targetResult, 1)}
+	platform := &fakePlatform{target: target}
+	commands := commandBytes(t,
+		processcontrol.StartCommand(processcontrol.Spec{Executable: "fixture"}),
+		processcontrol.HostCommand{Kind: "unknown"},
+	)
+	var status bytes.Buffer
+	if code := processhost.Run(context.Background(), platform, bytes.NewReader(commands), &status, io.Discard, io.Discard); code != 2 {
+		t.Fatalf("code = %d, status = %q", code, status.String())
+	}
+}
+
+func TestRunRejectsFramesAfterStop(t *testing.T) {
+	oversize := `{"kind":"unknown","padding":"` + strings.Repeat("x", 64*1024) + `"}` + "\n"
+	tests := []struct {
+		name     string
+		trailing []byte
+	}{
+		{name: "duplicate stop", trailing: commandBytes(t, processcontrol.StopCommand())},
+		{name: "unknown", trailing: commandBytes(t, processcontrol.HostCommand{Kind: "unknown"})},
+		{name: "malformed", trailing: []byte("{malformed}\n")},
+		{name: "oversize", trailing: []byte(oversize)},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			target := &fakeTarget{pid: 5, group: 6, done: make(chan targetResult, 1)}
+			platform := &fakePlatform{target: target}
+			control := commandBytes(t,
+				processcontrol.StartCommand(processcontrol.Spec{Executable: "fixture"}),
+				processcontrol.StopCommand(),
+			)
+			control = append(control, test.trailing...)
+			var status bytes.Buffer
+			if code := processhost.Run(context.Background(), platform, bytes.NewReader(control), &status, io.Discard, io.Discard); code != 2 {
+				t.Fatalf("code = %d, status = %q", code, status.String())
+			}
+			statuses := decodeStatuses(t, status.Bytes())
+			if len(statuses) != 2 || statuses[0].Kind != "started" || statuses[1].Kind != "error" || statuses[1].ErrorCode != "INVALID_HOST_COMMAND" {
+				t.Fatalf("statuses = %#v", statuses)
+			}
+			if platform.terminationCount() != 1 {
+				t.Fatalf("terminations = %d, want 1", platform.terminationCount())
+			}
+		})
+	}
+}
+
+func TestRunClosesControlExactlyOnce(t *testing.T) {
+	target := &fakeTarget{pid: 5, group: 6, done: make(chan targetResult, 1)}
+	platform := &fakePlatform{target: target}
+	control := &strictCloseControl{reader: bytes.NewReader(commandBytes(t,
+		processcontrol.StartCommand(processcontrol.Spec{Executable: "fixture"}),
+		processcontrol.StopCommand(),
+	))}
+	var status bytes.Buffer
+	if code := processhost.Run(context.Background(), platform, control, &status, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("code = %d, status = %q", code, status.String())
+	}
+	if count := control.closeCount(); count != 1 {
+		t.Fatalf("control close count = %d, want 1", count)
+	}
+}
+
+func TestRunTerminateErrorStillReleasesWaitAndReturnsRedactedFailure(t *testing.T) {
+	target := &fakeTarget{pid: 5, group: 6, done: make(chan targetResult, 1)}
+	platform := &fakePlatform{target: target, terminateErr: errors.New(`C:\private\terminate failure`)}
+	control := commandBytes(t,
+		processcontrol.StartCommand(processcontrol.Spec{Executable: "fixture"}),
+		processcontrol.StopCommand(),
+	)
+	var status bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- processhost.Run(context.Background(), platform, bytes.NewReader(control), &status, io.Discard, io.Discard)
+	}()
+	select {
+	case code := <-done:
+		if code != 1 {
+			t.Fatalf("code = %d, status = %q", code, status.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("host did not return after Terminate released Wait with an error")
+	}
+	statuses := decodeStatuses(t, status.Bytes())
+	if len(statuses) != 2 || statuses[1].Kind != "exit" || statuses[1].ErrorCode != "PROCESS_WAIT_FAILED" {
+		t.Fatalf("statuses = %#v", statuses)
+	}
+	if strings.Contains(status.String(), "private") {
+		t.Fatalf("status leaked terminate error: %q", status.String())
 	}
 }
 

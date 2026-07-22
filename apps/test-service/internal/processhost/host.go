@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -18,18 +19,22 @@ const maxHostFrameBytes = 64 * 1024
 type Target interface {
 	PID() int
 	ProcessGroup() int
+	// Wait must complete after every Platform.Terminate invocation, including
+	// when Terminate returns an error.
 	Wait() (int, error)
 }
 
 type Platform interface {
 	Start(processcontrol.Spec, io.Writer, io.Writer) (Target, error)
+	// Terminate must initiate target-tree cleanup and cause Target.Wait to
+	// complete, even when cleanup itself returns an error. Run waits for that
+	// completion rather than timing out and abandoning a live target tree.
 	Terminate(Target, time.Duration) error
 }
 
 type waitResult struct {
 	exitCode int
 	err      error
-	stopped  bool
 }
 
 type controlResult struct {
@@ -40,6 +45,39 @@ type frameReader struct {
 	reader *bufio.Reader
 }
 
+var errInvalidHostFrame = errors.New("invalid host frame")
+
+type controlOwner struct {
+	reader io.Reader
+	closer io.Closer
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newControlOwner(reader io.Reader) *controlOwner {
+	owner := &controlOwner{reader: reader, closed: make(chan struct{})}
+	owner.closer, _ = reader.(io.Closer)
+	return owner
+}
+
+func (owner *controlOwner) Close() {
+	owner.once.Do(func() {
+		close(owner.closed)
+		if owner.closer != nil {
+			_ = owner.closer.Close()
+		}
+	})
+}
+
+func (owner *controlOwner) Closed() bool {
+	select {
+	case <-owner.closed:
+		return true
+	default:
+		return false
+	}
+}
+
 func newFrameReader(reader io.Reader) *frameReader {
 	return &frameReader{reader: bufio.NewReaderSize(reader, maxHostFrameBytes+3)}
 }
@@ -47,7 +85,7 @@ func newFrameReader(reader io.Reader) *frameReader {
 func (reader *frameReader) command() (processcontrol.HostCommand, error) {
 	line, err := reader.reader.ReadSlice('\n')
 	if errors.Is(err, bufio.ErrBufferFull) {
-		return processcontrol.HostCommand{}, errors.New("host frame exceeds limit")
+		return processcontrol.HostCommand{}, errInvalidHostFrame
 	}
 	if err != nil && !errors.Is(err, io.EOF) {
 		return processcontrol.HostCommand{}, err
@@ -58,20 +96,20 @@ func (reader *frameReader) command() (processcontrol.HostCommand, error) {
 	line = bytes.TrimSuffix(line, []byte{'\n'})
 	line = bytes.TrimSuffix(line, []byte{'\r'})
 	if len(line) > maxHostFrameBytes {
-		return processcontrol.HostCommand{}, errors.New("host frame exceeds limit")
+		return processcontrol.HostCommand{}, errInvalidHostFrame
 	}
 	if len(line) == 0 || !utf8.Valid(line) {
-		return processcontrol.HostCommand{}, errors.New("invalid host frame")
+		return processcontrol.HostCommand{}, errInvalidHostFrame
 	}
 	decoder := json.NewDecoder(bytes.NewReader(line))
 	decoder.DisallowUnknownFields()
 	var command processcontrol.HostCommand
 	if err := decoder.Decode(&command); err != nil {
-		return processcontrol.HostCommand{}, err
+		return processcontrol.HostCommand{}, errInvalidHostFrame
 	}
 	var trailing json.RawMessage
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return processcontrol.HostCommand{}, errors.New("host frame has trailing data")
+		return processcontrol.HostCommand{}, errInvalidHostFrame
 	}
 	return command, nil
 }
@@ -95,7 +133,6 @@ func waitOrStop(ctx context.Context, platform Platform, target Target, stop <-ch
 	case <-stop:
 		err := platform.Terminate(target, 2*time.Second)
 		result := <-done
-		result.stopped = true
 		if result.err == nil {
 			result.err = err
 		}
@@ -110,9 +147,44 @@ func waitOrStop(ctx context.Context, platform Platform, target Target, stop <-ch
 	}
 }
 
+func readControl(owner *controlOwner, frames *frameReader, stop chan<- struct{}) <-chan controlResult {
+	done := make(chan controlResult, 1)
+	go func() {
+		defer close(done)
+		stopped := false
+		signalStop := sync.OnceFunc(func() { close(stop) })
+		for {
+			command, err := frames.command()
+			if errors.Is(err, io.EOF) {
+				signalStop()
+				done <- controlResult{}
+				return
+			}
+			if err != nil {
+				if owner.Closed() && !errors.Is(err, errInvalidHostFrame) {
+					done <- controlResult{}
+					return
+				}
+				signalStop()
+				done <- controlResult{invalid: true}
+				return
+			}
+			if stopped || command.Kind != "stop" || command.Spec != nil {
+				signalStop()
+				done <- controlResult{invalid: true}
+				return
+			}
+			stopped = true
+			signalStop()
+		}
+	}()
+	return done
+}
+
 func Run(ctx context.Context, platform Platform, control io.Reader, status io.Writer, stdout, stderr io.Writer) int {
-	defer closeControl(control)
-	frames := newFrameReader(control)
+	owner := newControlOwner(control)
+	defer owner.Close()
+	frames := newFrameReader(owner.reader)
 	start, err := frames.command()
 	if err != nil || start.Kind != "start" || start.Spec == nil {
 		_ = writeStatus(status, processcontrol.HostStatus{Kind: "error", ErrorCode: "INVALID_HOST_COMMAND", Message: "invalid start command"})
@@ -130,27 +202,11 @@ func Run(ctx context.Context, platform Platform, control io.Reader, status io.Wr
 	}
 
 	stop := make(chan struct{})
-	controlDone := make(chan controlResult, 1)
-	go func() {
-		command, err := frames.command()
-		invalid := err != nil && !errors.Is(err, io.EOF)
-		if err == nil && (command.Kind != "stop" || command.Spec != nil) {
-			invalid = true
-		}
-		controlDone <- controlResult{invalid: invalid}
-		close(stop)
-	}()
-
+	controlDone := readControl(owner, frames, stop)
 	result := waitOrStop(ctx, platform, target, stop)
-	var commandResult controlResult
-	select {
-	case commandResult = <-controlDone:
-	default:
-		closeControl(control)
-		commandResult = <-controlDone
-	}
-	closeControl(control)
-	if result.stopped && commandResult.invalid {
+	owner.Close()
+	commandResult := <-controlDone
+	if commandResult.invalid {
 		_ = writeStatus(status, processcontrol.HostStatus{Kind: "error", ErrorCode: "INVALID_HOST_COMMAND", Message: "invalid stop command"})
 		return 2
 	}
@@ -165,10 +221,4 @@ func Run(ctx context.Context, platform Platform, control io.Reader, status io.Wr
 		return 1
 	}
 	return 0
-}
-
-func closeControl(control io.Reader) {
-	if closer, ok := control.(io.Closer); ok {
-		_ = closer.Close()
-	}
 }
