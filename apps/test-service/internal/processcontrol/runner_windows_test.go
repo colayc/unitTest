@@ -21,6 +21,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"unit-test-ide.local/test-service/internal/task"
+	"unit-test-ide.local/test-service/internal/winprocess"
 )
 
 const windowsHelperModeEnvironment = "UNIT_TEST_PROCESSCONTROL_WINDOWS_HELPER"
@@ -164,6 +165,7 @@ func TestWindowsPrepareAssignsOuterJobBeforeResumeAndFailsClosed(t *testing.T) {
 		return nil
 	}
 	operations.startIdentity = func(windows.Handle) (string, error) { return "identity", nil }
+	operations.duplicateObserver = func(windows.Handle) (windows.Handle, error) { return 204, nil }
 	operations.resumeThread = func(windows.Handle) error {
 		events = append(events, "resume")
 		return errors.New("injected resume failure")
@@ -359,6 +361,39 @@ func TestWindowsStartIdentityUsesCreationTime(t *testing.T) {
 	}
 }
 
+func TestWindowsStartIdentityRetriesObserverClose(t *testing.T) {
+	var attempts atomic.Int32
+	identity, err := windowsStartIdentityWithOperations(
+		123,
+		func(uint32) (windows.Handle, error) { return 731, nil },
+		func(handle windows.Handle) (string, error) {
+			if handle != 731 {
+				t.Fatalf("identity handle = %d", handle)
+			}
+			return "identity", nil
+		},
+		func(handle windows.Handle) error {
+			if handle != 731 {
+				t.Fatalf("close handle = %d", handle)
+			}
+			if attempts.Add(1) == 1 {
+				return errors.New("injected observer close failure")
+			}
+			return nil
+		},
+	)
+	if err != nil || identity != "identity" {
+		t.Fatalf("identity = (%q, %v)", identity, err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for attempts.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := attempts.Load(); got < 2 {
+		t.Fatalf("close attempts = %d", got)
+	}
+}
+
 func TestWindowsTerminateErrorStillReleasesDoneAndKillsTree(t *testing.T) {
 	binary := buildWindowsService(t)
 	operations := defaultWindowsRunnerOperations()
@@ -415,7 +450,10 @@ func TestWindowsControlEOFAndUnexpectedHostExitCleanTargetTrees(t *testing.T) {
 		stop func(*windowsProcess) error
 	}{
 		{name: "control EOF", stop: func(process *windowsProcess) error { process.closeControl(); return nil }},
-		{name: "Host exit", stop: func(process *windowsProcess) error { return windows.TerminateProcess(process.host, 1) }},
+		{name: "Host exit", stop: func(process *windowsProcess) error {
+			_, err := process.hostOwner.Use(func(handle windows.Handle) error { return windows.TerminateProcess(handle, 1) })
+			return err
+		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			binary := buildWindowsService(t)
@@ -619,8 +657,9 @@ func TestWindowsCloseAndDoneAreBoundedWhenEveryNativeCleanupStageFails(t *testin
 		status:        statusReader,
 		stdout:        stdoutReader,
 		stderr:        stderrReader,
-		job:           401,
-		host:          402,
+		jobOwner:      winprocess.NewHandleOwner(401, operations.closeHandle),
+		hostOwner:     winprocess.NewHandleOwner(402, operations.closeHandle),
+		observerOwner: winprocess.NewHandleOwner(403, operations.closeHandle),
 		ops:           operations,
 		started:       true,
 		hostExited:    make(chan struct{}),
@@ -688,7 +727,7 @@ func TestWindowsHostHandleCloseCanRetryAfterNativeFailure(t *testing.T) {
 		}
 		return nil
 	}
-	process := &windowsProcess{host: 501, ops: operations}
+	process := &windowsProcess{hostOwner: winprocess.NewHandleOwner(501, operations.closeHandle), ops: operations}
 	if err := process.closeHostHandle(); err == nil {
 		t.Fatal("first close unexpectedly succeeded")
 	}
@@ -697,6 +736,261 @@ func TestWindowsHostHandleCloseCanRetryAfterNativeFailure(t *testing.T) {
 	}
 	if got := attempts.Load(); got != 2 {
 		t.Fatalf("close attempts = %d", got)
+	}
+}
+
+func TestWindowsOuterJobCloseRetriesAfterFailure(t *testing.T) {
+	var attempts atomic.Int32
+	var successes atomic.Int32
+	operations := defaultWindowsRunnerOperations()
+	operations.closeHandle = func(handle windows.Handle) error {
+		if handle != 601 {
+			return nil
+		}
+		if attempts.Add(1) == 1 {
+			return errors.New("injected job close failure")
+		}
+		successes.Add(1)
+		return nil
+	}
+	process := &windowsProcess{jobOwner: winprocess.NewHandleOwner(601, operations.closeHandle), ops: operations}
+	process.closeOuterJob()
+	process.closeOuterJob()
+	if got := attempts.Load(); got != 2 {
+		t.Fatalf("close attempts = %d", got)
+	}
+	if got := successes.Load(); got != 1 {
+		t.Fatalf("successful closes = %d", got)
+	}
+	if process.jobOwner.Open() {
+		t.Fatal("outer Job handle ownership was not released")
+	}
+	if err := process.outerJobError(); err != nil {
+		t.Fatalf("retained close error = %v", err)
+	}
+}
+
+func TestWindowsNaturalHostExitRetriesProcessClose(t *testing.T) {
+	var attempts atomic.Int32
+	var successes atomic.Int32
+	operations := defaultWindowsRunnerOperations()
+	operations.waitProcess = func(handle windows.Handle, timeout uint32) (uint32, error) {
+		if handle != 611 || timeout != windows.INFINITE {
+			t.Fatalf("wait = (%d, %d)", handle, timeout)
+		}
+		return windows.WAIT_OBJECT_0, nil
+	}
+	operations.closeHandle = func(handle windows.Handle) error {
+		if handle != 612 {
+			return nil
+		}
+		if attempts.Add(1) == 1 {
+			return errors.New("injected process close failure")
+		}
+		successes.Add(1)
+		return nil
+	}
+	process := &windowsProcess{
+		hostOwner:     winprocess.NewHandleOwner(612, operations.closeHandle),
+		observerOwner: winprocess.NewHandleOwner(611, operations.closeHandle),
+		ops:           operations,
+		hostExited:    make(chan struct{}),
+	}
+	process.waitHost()
+	_ = process.closeHostHandle()
+	deadline := time.Now().Add(time.Second)
+	for successes.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := attempts.Load(); got < 2 {
+		t.Fatalf("close attempts = %d", got)
+	}
+	if got := successes.Load(); got != 1 {
+		t.Fatalf("successful closes = %d", got)
+	}
+	if process.hostOwner.Open() {
+		t.Fatal("Host process handle ownership was not released")
+	}
+}
+
+func TestWindowsPrepareRetriesResumedThreadClose(t *testing.T) {
+	var threadAttempts atomic.Int32
+	var threadSuccesses atomic.Int32
+	operations := defaultWindowsRunnerOperations()
+	operations.createProtectedJob = func(uint32) (windows.Handle, error) { return 621, nil }
+	operations.createHost = func(string, windows.Handle, windows.Handle, windows.Handle, windows.Handle) (windows.ProcessInformation, error) {
+		return windows.ProcessInformation{Process: 622, Thread: 623, ProcessId: 624}, nil
+	}
+	operations.assignProcess = func(windows.Handle, windows.Handle) error { return nil }
+	operations.startIdentity = func(windows.Handle) (string, error) { return "identity", nil }
+	operations.duplicateObserver = func(windows.Handle) (windows.Handle, error) { return 625, nil }
+	operations.resumeThread = func(windows.Handle) error { return nil }
+	operations.waitProcess = func(windows.Handle, uint32) (uint32, error) { return windows.WAIT_OBJECT_0, nil }
+	operations.closeHandle = func(handle windows.Handle) error {
+		if handle != 623 {
+			return nil
+		}
+		if threadAttempts.Add(1) == 1 {
+			return errors.New("injected thread close failure")
+		}
+		threadSuccesses.Add(1)
+		return nil
+	}
+	runner := &windowsRunner{executable: os.Args[0], operations: operations}
+	value, err := runner.Prepare(context.Background(), Spec{}, windowsTestID(63), windowsTestID(64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	process := value.(*windowsProcess)
+	defer process.Close()
+	deadline := time.Now().Add(time.Second)
+	for threadSuccesses.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := threadAttempts.Load(); got < 2 {
+		t.Fatalf("thread close attempts = %d", got)
+	}
+	if got := threadSuccesses.Load(); got != 1 {
+		t.Fatalf("successful thread closes = %d", got)
+	}
+}
+
+func TestWindowsPrepareObserverFailureCleansUpBeforeResume(t *testing.T) {
+	var resumed atomic.Bool
+	var processClosed atomic.Bool
+	operations := defaultWindowsRunnerOperations()
+	operations.createProtectedJob = func(uint32) (windows.Handle, error) { return 631, nil }
+	operations.createHost = func(string, windows.Handle, windows.Handle, windows.Handle, windows.Handle) (windows.ProcessInformation, error) {
+		return windows.ProcessInformation{Process: 632, Thread: 633, ProcessId: 634}, nil
+	}
+	operations.assignProcess = func(windows.Handle, windows.Handle) error { return nil }
+	operations.startIdentity = func(windows.Handle) (string, error) { return "identity", nil }
+	operations.duplicateObserver = func(windows.Handle) (windows.Handle, error) {
+		return 0, errors.New("injected duplicate failure")
+	}
+	operations.resumeThread = func(windows.Handle) error {
+		resumed.Store(true)
+		return nil
+	}
+	operations.terminateProcess = func(windows.Handle, uint32) error { return nil }
+	operations.waitProcess = func(windows.Handle, uint32) (uint32, error) { return windows.WAIT_OBJECT_0, nil }
+	operations.closeHandle = func(handle windows.Handle) error {
+		if handle == 632 {
+			processClosed.Store(true)
+		}
+		return nil
+	}
+	runner := &windowsRunner{executable: os.Args[0], operations: operations}
+	process, err := runner.Prepare(context.Background(), Spec{}, windowsTestID(65), windowsTestID(66))
+	if process != nil || !errors.Is(err, errProcessHostUnavailable) {
+		t.Fatalf("Prepare = (%#v, %v)", process, err)
+	}
+	if resumed.Load() || !processClosed.Load() {
+		t.Fatalf("resumed=%t processClosed=%t", resumed.Load(), processClosed.Load())
+	}
+}
+
+func TestWindowsObserverWaitAndCleanupHaveExclusiveHandles(t *testing.T) {
+	observerStarted := make(chan struct{})
+	allowObserverExit := make(chan struct{})
+	var observerActive atomic.Bool
+	var allowOriginalCleanup atomic.Bool
+	var rawHandleCollision atomic.Bool
+	var originalClosed atomic.Bool
+	var observerClosed atomic.Bool
+	var observerCloseAttempts atomic.Int32
+	operations := defaultWindowsRunnerOperations()
+	operations.createProtectedJob = func(uint32) (windows.Handle, error) { return 641, nil }
+	operations.createHost = func(string, windows.Handle, windows.Handle, windows.Handle, windows.Handle) (windows.ProcessInformation, error) {
+		return windows.ProcessInformation{Process: 642, Thread: 643, ProcessId: 644}, nil
+	}
+	operations.assignProcess = func(windows.Handle, windows.Handle) error { return nil }
+	operations.startIdentity = func(windows.Handle) (string, error) { return "identity", nil }
+	operations.duplicateObserver = func(handle windows.Handle) (windows.Handle, error) {
+		if handle != 642 {
+			t.Fatalf("duplicated handle = %d", handle)
+		}
+		return 645, nil
+	}
+	operations.resumeThread = func(windows.Handle) error { return nil }
+	operations.terminateJob = func(windows.Handle, uint32) error { return errors.New("injected job termination failure") }
+	operations.terminateProcess = func(windows.Handle, uint32) error {
+		if allowOriginalCleanup.Load() {
+			return nil
+		}
+		return errors.New("injected process termination failure")
+	}
+	operations.nativeTerminateProcess = operations.terminateProcess
+	operations.waitProcess = func(handle windows.Handle, timeout uint32) (uint32, error) {
+		switch handle {
+		case 645:
+			if timeout != windows.INFINITE {
+				t.Fatalf("observer timeout = %d", timeout)
+			}
+			observerActive.Store(true)
+			close(observerStarted)
+			<-allowObserverExit
+			observerActive.Store(false)
+			return windows.WAIT_OBJECT_0, nil
+		case 642:
+			if !observerActive.Load() {
+				rawHandleCollision.Store(true)
+			}
+			if allowOriginalCleanup.Load() {
+				return windows.WAIT_OBJECT_0, nil
+			}
+			return windows.WAIT_FAILED, errors.New("injected original wait failure")
+		default:
+			return windows.WAIT_OBJECT_0, nil
+		}
+	}
+	operations.closeHandle = func(handle windows.Handle) error {
+		switch handle {
+		case 642:
+			originalClosed.Store(true)
+		case 645:
+			if observerCloseAttempts.Add(1) == 1 {
+				return errors.New("injected observer close failure")
+			}
+			observerClosed.Store(true)
+		}
+		return nil
+	}
+	runner := &windowsRunner{executable: os.Args[0], operations: operations}
+	value, err := runner.Prepare(context.Background(), Spec{}, windowsTestID(67), windowsTestID(68))
+	if err != nil {
+		t.Fatal(err)
+	}
+	process := value.(*windowsProcess)
+	select {
+	case <-observerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("observer wait did not start")
+	}
+	started := time.Now()
+	if err := process.Close(); !errors.Is(err, errProcessHostFailed) {
+		t.Fatalf("Close = %v", err)
+	}
+	if time.Since(started) > 500*time.Millisecond {
+		t.Fatalf("Close blocked for %s", time.Since(started))
+	}
+	select {
+	case <-process.Done():
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Done remained blocked")
+	}
+	allowOriginalCleanup.Store(true)
+	deadline := time.Now().Add(time.Second)
+	for !originalClosed.Load() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	close(allowObserverExit)
+	deadline = time.Now().Add(time.Second)
+	for !observerClosed.Load() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if rawHandleCollision.Load() || !originalClosed.Load() || !observerClosed.Load() {
+		t.Fatalf("collision=%t originalClosed=%t observerClosed=%t", rawHandleCollision.Load(), originalClosed.Load(), observerClosed.Load())
 	}
 }
 

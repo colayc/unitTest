@@ -45,6 +45,7 @@ type windowsRunnerOperations struct {
 	createProtectedJob     func(uint32) (windows.Handle, error)
 	createHost             func(string, windows.Handle, windows.Handle, windows.Handle, windows.Handle) (windows.ProcessInformation, error)
 	assignProcess          func(windows.Handle, windows.Handle) error
+	duplicateObserver      func(windows.Handle) (windows.Handle, error)
 	resumeThread           func(windows.Handle) error
 	terminateJob           func(windows.Handle, uint32) error
 	terminateProcess       func(windows.Handle, uint32) error
@@ -56,15 +57,16 @@ type windowsRunnerOperations struct {
 }
 
 type windowsProcess struct {
-	specValue Spec
-	control   *os.File
-	status    *os.File
-	stdout    *os.File
-	stderr    *os.File
-	frames    *json.Decoder
-	job       windows.Handle
-	host      windows.Handle
-	ops       windowsRunnerOperations
+	specValue     Spec
+	control       *os.File
+	status        *os.File
+	stdout        *os.File
+	stderr        *os.File
+	frames        *json.Decoder
+	jobOwner      *winprocess.HandleOwner
+	hostOwner     *winprocess.HandleOwner
+	observerOwner *winprocess.HandleOwner
+	ops           windowsRunnerOperations
 
 	mu             sync.Mutex
 	lease          task.ProcessLease
@@ -83,7 +85,6 @@ type windowsProcess struct {
 	doneOnce         sync.Once
 	closeOnce        sync.Once
 	shutdownOnce     sync.Once
-	jobCloseOnce     sync.Once
 	hostExitOnce     sync.Once
 	controlCloseOnce sync.Once
 	statusCloseOnce  sync.Once
@@ -95,10 +96,8 @@ type windowsProcess struct {
 	outputMu         sync.Mutex
 	outputClosed     bool
 	jobErrMu         sync.Mutex
+	jobOperationErr  error
 	jobCloseErr      error
-	hostErrMu        sync.Mutex
-	hostCloseErr     error
-	hostClosed       bool
 	closeErr         error
 	shutdownErr      error
 }
@@ -114,6 +113,7 @@ func defaultWindowsRunnerOperations() windowsRunnerOperations {
 		createProtectedJob: createRunnerProtectedJob,
 		createHost:         createSuspendedWindowsHost,
 		assignProcess:      windows.AssignProcessToJobObject,
+		duplicateObserver:  duplicateWindowsProcessObserver,
 		resumeThread: func(thread windows.Handle) error {
 			_, err := windows.ResumeThread(thread)
 			return err
@@ -135,32 +135,33 @@ func (runner *windowsRunner) Prepare(ctx context.Context, spec Spec, taskID, ser
 	if err != nil {
 		return nil, errProcessHostUnavailable
 	}
+	jobOwner := winprocess.NewHandleOwner(job, runner.operations.closeHandle)
 	controlReader, controlWriter, err := os.Pipe()
 	if err != nil {
-		_ = runner.operations.closeHandle(job)
+		_ = jobOwner.CloseEventually()
 		return nil, errProcessHostUnavailable
 	}
 	statusReader, statusWriter, err := os.Pipe()
 	if err != nil {
 		closeWindowsFiles(controlReader, controlWriter)
-		_ = runner.operations.closeHandle(job)
+		_ = jobOwner.CloseEventually()
 		return nil, errProcessHostUnavailable
 	}
 	stdoutReader, stdoutWriter, err := os.Pipe()
 	if err != nil {
 		closeWindowsFiles(controlReader, controlWriter, statusReader, statusWriter)
-		_ = runner.operations.closeHandle(job)
+		_ = jobOwner.CloseEventually()
 		return nil, errProcessHostUnavailable
 	}
 	stderrReader, stderrWriter, err := os.Pipe()
 	if err != nil {
 		closeWindowsFiles(controlReader, controlWriter, statusReader, statusWriter, stdoutReader, stdoutWriter)
-		_ = runner.operations.closeHandle(job)
+		_ = jobOwner.CloseEventually()
 		return nil, errProcessHostUnavailable
 	}
 	closeAll := func() {
 		closeWindowsFiles(controlReader, controlWriter, statusReader, statusWriter, stdoutReader, stdoutWriter, stderrReader, stderrWriter)
-		_ = runner.operations.closeHandle(job)
+		_ = jobOwner.CloseEventually()
 	}
 	if err := clearWindowsFileInheritance(controlReader, controlWriter, statusReader, statusWriter, stdoutReader, stdoutWriter, stderrReader, stderrWriter); err != nil {
 		closeAll()
@@ -172,13 +173,17 @@ func (runner *windowsRunner) Prepare(ctx context.Context, spec Spec, taskID, ser
 		return nil, errProcessHostUnavailable
 	}
 	closeWindowsFiles(controlReader, statusWriter, stdoutWriter, stderrWriter)
+	var observerOwner *winprocess.HandleOwner
 	failCreatedHost := func(terminateJob bool) error {
 		if terminateJob {
-			_ = runner.operations.terminateJob(job, 1)
+			_, _ = jobOwner.UseExclusive(func(handle windows.Handle) error {
+				return runner.operations.terminateJob(handle, 1)
+			})
 		}
+		_ = observerOwner.CloseEventually()
 		cleanupErr := winprocess.FailCreatedProcess(info.Process, info.Thread, runner.createdProcessOperations(), 250*time.Millisecond)
 		closeWindowsFiles(controlWriter, statusReader, stdoutReader, stderrReader)
-		_ = runner.operations.closeHandle(job)
+		_ = jobOwner.CloseEventually()
 		return cleanupErr
 	}
 	if err := runner.operations.assignProcess(job, info.Process); err != nil {
@@ -194,23 +199,32 @@ func (runner *windowsRunner) Prepare(ctx context.Context, spec Spec, taskID, ser
 		}
 		return nil, errProcessHostUnavailable
 	}
+	observer, err := runner.operations.duplicateObserver(info.Process)
+	if err != nil || observer == 0 || observer == windows.InvalidHandle {
+		if cleanupErr := failCreatedHost(true); cleanupErr != nil {
+			return nil, errProcessHostFailed
+		}
+		return nil, errProcessHostUnavailable
+	}
+	observerOwner = winprocess.NewHandleOwner(observer, runner.operations.closeHandle)
 	if err := runner.operations.resumeThread(info.Thread); err != nil {
 		if cleanupErr := failCreatedHost(true); cleanupErr != nil {
 			return nil, errProcessHostFailed
 		}
 		return nil, errProcessHostUnavailable
 	}
-	_ = runner.operations.closeHandle(info.Thread)
+	_ = winprocess.NewHandleOwner(info.Thread, runner.operations.closeHandle).CloseEventually()
 	process := &windowsProcess{
-		specValue: spec,
-		control:   controlWriter,
-		status:    statusReader,
-		stdout:    stdoutReader,
-		stderr:    stderrReader,
-		frames:    json.NewDecoder(bufio.NewReader(statusReader)),
-		job:       job,
-		host:      info.Process,
-		ops:       runner.operations,
+		specValue:     spec,
+		control:       controlWriter,
+		status:        statusReader,
+		stdout:        stdoutReader,
+		stderr:        stderrReader,
+		frames:        json.NewDecoder(bufio.NewReader(statusReader)),
+		jobOwner:      jobOwner,
+		hostOwner:     winprocess.NewHandleOwner(info.Process, runner.operations.closeHandle),
+		observerOwner: observerOwner,
+		ops:           runner.operations,
 		lease: task.ProcessLease{
 			TaskID:            taskID,
 			HostPID:           int(info.ProcessId),
@@ -251,7 +265,8 @@ func (runner *windowsRunner) Cleanup(ctx context.Context, lease task.ProcessLeas
 	if err != nil {
 		return errProcessHostUnavailable
 	}
-	defer runner.operations.closeHandle(handle) //nolint:errcheck
+	observerOwner := winprocess.NewHandleOwner(handle, runner.operations.closeHandle)
+	defer observerOwner.CloseEventually() //nolint:errcheck
 	identity, err := runner.operations.startIdentity(handle)
 	if err != nil {
 		return errProcessHostUnavailable
@@ -323,7 +338,7 @@ func (process *windowsProcess) Done() <-chan Result   { return process.done }
 func (process *windowsProcess) Terminate(ctx context.Context, grace time.Duration) error {
 	select {
 	case <-process.finished:
-		process.closeOuterJob()
+		process.retryRetainedHandles()
 		return redactWindowsOperationError(process.outerJobError())
 	default:
 	}
@@ -378,6 +393,7 @@ func (process *windowsProcess) Close() error {
 		process.closeOutputReaders()
 		process.closeOutput()
 	})
+	process.retryRetainedHandles()
 	return process.closeErr
 }
 
@@ -426,11 +442,16 @@ func (process *windowsProcess) watchContext(ctx context.Context) {
 }
 
 func (process *windowsProcess) waitHost() {
-	result, err := process.ops.waitProcess(process.host, windows.INFINITE)
-	if err == nil && result == windows.WAIT_OBJECT_0 {
+	var result uint32
+	used, err := process.observerOwner.Use(func(handle windows.Handle) error {
+		var waitErr error
+		result, waitErr = process.ops.waitProcess(handle, windows.INFINITE)
+		return waitErr
+	})
+	if used && err == nil && result == windows.WAIT_OBJECT_0 {
 		process.markHostExited()
-		_ = process.closeHostHandle()
 	}
+	_ = process.observerOwner.CloseEventually()
 }
 
 func (process *windowsProcess) copyOutput() {
@@ -468,6 +489,7 @@ func (process *windowsProcess) finishAfterHost(result Result) {
 		result.Err = errors.Join(result.Err, errProcessHostFailed)
 		process.closeOutputReaders()
 	}
+	_ = process.closeHostHandle()
 	process.closeOutput()
 	if result.Err == nil && process.outputOverflow.Load() {
 		result.Err = ErrProcessOutputOverflow
@@ -495,24 +517,26 @@ func (process *windowsProcess) forceTerminate(ctx context.Context, prior error) 
 func (process *windowsProcess) shutdownHostBounded() error {
 	process.shutdownOnce.Do(func() {
 		process.closeControl()
-		if err := process.ops.terminateJob(process.job, 1); err != nil {
-			process.addOuterJobError(err)
-		}
+		process.terminateOuterJob()
 		process.closeOuterJob()
 		process.closeStatus()
 		process.closeOutputReaders()
 
 		var cleanupErr error
+		var hostCloseErr error
 		select {
 		case <-process.hostExited:
-			_ = process.closeHostHandle()
+			hostCloseErr = process.closeHostHandle()
 		default:
-			cleanupErr = winprocess.CleanupProcess(process.host, process.hostCleanupOperations(), 100*time.Millisecond)
+			host := process.hostOwner.Take()
+			if host != 0 && host != windows.InvalidHandle {
+				cleanupErr = winprocess.CleanupProcess(host, process.hostCleanupOperations(), 100*time.Millisecond)
+			}
 		}
 		if !waitWindowsClosed(process.outputDone, 100*time.Millisecond) {
 			process.closeOutput()
 		}
-		if cleanupErr != nil || process.outerJobError() != nil || process.hostHandleError() != nil {
+		if cleanupErr != nil || process.outerJobError() != nil || hostCloseErr != nil {
 			process.shutdownErr = errProcessHostFailed
 		}
 	})
@@ -524,32 +548,32 @@ func (process *windowsProcess) hostCleanupOperations() winprocess.Operations {
 		Terminate:       process.ops.terminateProcess,
 		NativeTerminate: process.ops.nativeTerminateProcess,
 		Wait: func(handle windows.Handle, timeout uint32) (uint32, error) {
-			result, err := process.ops.waitProcess(handle, timeout)
-			if err == nil && result == windows.WAIT_OBJECT_0 {
-				process.markHostExited()
-			}
-			return result, err
+			return process.ops.waitProcess(handle, timeout)
 		},
-		Close: func(windows.Handle) error { return process.closeHostHandle() },
+		Close: process.ops.closeHandle,
 	}
 }
 
 func (process *windowsProcess) closeOuterJob() {
-	process.jobCloseOnce.Do(func() {
-		process.addOuterJobError(process.ops.closeHandle(process.job))
-	})
+	err := process.jobOwner.CloseEventually()
+	process.jobErrMu.Lock()
+	process.jobCloseErr = err
+	process.jobErrMu.Unlock()
 }
 
-func (process *windowsProcess) addOuterJobError(err error) {
+func (process *windowsProcess) terminateOuterJob() {
+	_, err := process.jobOwner.UseExclusive(func(handle windows.Handle) error {
+		return process.ops.terminateJob(handle, 1)
+	})
 	process.jobErrMu.Lock()
-	defer process.jobErrMu.Unlock()
-	process.jobCloseErr = errors.Join(process.jobCloseErr, err)
+	process.jobOperationErr = errors.Join(process.jobOperationErr, err)
+	process.jobErrMu.Unlock()
 }
 
 func (process *windowsProcess) outerJobError() error {
 	process.jobErrMu.Lock()
 	defer process.jobErrMu.Unlock()
-	return process.jobCloseErr
+	return errors.Join(process.jobOperationErr, process.jobCloseErr)
 }
 
 func (process *windowsProcess) markHostExited() {
@@ -557,22 +581,16 @@ func (process *windowsProcess) markHostExited() {
 }
 
 func (process *windowsProcess) closeHostHandle() error {
-	process.hostErrMu.Lock()
-	defer process.hostErrMu.Unlock()
-	if process.hostClosed {
-		return nil
-	}
-	process.hostCloseErr = process.ops.closeHandle(process.host)
-	if process.hostCloseErr == nil {
-		process.hostClosed = true
-	}
-	return process.hostCloseErr
+	return process.hostOwner.CloseEventually()
 }
 
-func (process *windowsProcess) hostHandleError() error {
-	process.hostErrMu.Lock()
-	defer process.hostErrMu.Unlock()
-	return process.hostCloseErr
+func (process *windowsProcess) retryRetainedHandles() {
+	process.closeOuterJob()
+	select {
+	case <-process.hostExited:
+		_ = process.closeHostHandle()
+	default:
+	}
 }
 
 func (process *windowsProcess) closeControl() {
@@ -668,15 +686,36 @@ func waitWindowsHandle(ctx context.Context, wait func(windows.Handle, uint32) (u
 }
 
 func windowsStartIdentity(pid int) (string, error) {
+	return windowsStartIdentityWithOperations(
+		pid,
+		func(value uint32) (windows.Handle, error) {
+			return windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, value)
+		},
+		windowsStartIdentityFromHandle,
+		windows.CloseHandle,
+	)
+}
+
+func windowsStartIdentityWithOperations(pid int, openProcess func(uint32) (windows.Handle, error), identity func(windows.Handle) (string, error), closeHandle func(windows.Handle) error) (string, error) {
 	if pid <= 0 {
 		return "", ErrLeaseIdentityMismatch
 	}
-	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	handle, err := openProcess(uint32(pid))
 	if err != nil {
 		return "", err
 	}
-	defer windows.CloseHandle(handle) //nolint:errcheck
-	return windowsStartIdentityFromHandle(handle)
+	observerOwner := winprocess.NewHandleOwner(handle, closeHandle)
+	defer observerOwner.CloseEventually() //nolint:errcheck
+	return identity(handle)
+}
+
+func duplicateWindowsProcessObserver(process windows.Handle) (windows.Handle, error) {
+	var observer windows.Handle
+	current := windows.CurrentProcess()
+	if err := windows.DuplicateHandle(current, process, current, &observer, windows.SYNCHRONIZE, false, 0); err != nil {
+		return 0, err
+	}
+	return observer, nil
 }
 
 func windowsStartIdentityFromHandle(handle windows.Handle) (string, error) {
@@ -702,7 +741,7 @@ func createRunnerProtectedJob(limitFlags uint32) (windows.Handle, error) {
 	limits := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{}
 	limits.BasicLimitInformation.LimitFlags = limitFlags
 	if _, err := windows.SetInformationJobObject(job, windows.JobObjectExtendedLimitInformation, uintptr(unsafe.Pointer(&limits)), uint32(unsafe.Sizeof(limits))); err != nil {
-		_ = windows.CloseHandle(job)
+		_ = winprocess.NewHandleOwner(job, windows.CloseHandle).CloseEventually()
 		return 0, err
 	}
 	return job, nil

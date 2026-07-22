@@ -35,10 +35,7 @@ func FailCreatedProcess(process, thread windows.Handle, operations Operations, w
 	if process == 0 || process == windows.InvalidHandle || thread == 0 || thread == windows.InvalidHandle || !validOperations(operations) {
 		return ErrCleanupFailed
 	}
-	threadErr := operations.Close(thread)
-	if threadErr != nil {
-		go retryCloseHandle(thread, operations.Close)
-	}
+	threadErr := NewHandleOwner(thread, operations.Close).CloseEventually()
 	cleanupErr := CleanupProcess(process, operations, wait)
 	if cleanupErr != nil || threadErr != nil {
 		return ErrCleanupFailed
@@ -53,23 +50,13 @@ func CleanupProcess(process windows.Handle, operations Operations, wait time.Dur
 		return ErrCleanupFailed
 	}
 	if cleanupCreatedProcess(process, operations, wait) {
-		if err := operations.Close(process); err != nil {
-			go retryCloseHandle(process, operations.Close)
+		if err := NewHandleOwner(process, operations.Close).CloseEventually(); err != nil {
 			return ErrCleanupFailed
 		}
 		return nil
 	}
 	go reapCreatedProcess(process, operations)
 	return ErrCleanupFailed
-}
-
-func retryCloseHandle(handle windows.Handle, closeHandle func(windows.Handle) error) {
-	for {
-		if err := closeHandle(handle); err == nil {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
 }
 
 func validOperations(operations Operations) bool {
@@ -100,11 +87,12 @@ func waitCreatedProcess(process windows.Handle, wait func(windows.Handle, uint32
 }
 
 func reapCreatedProcess(process windows.Handle, operations Operations) {
+	owner := NewHandleOwner(process, operations.Close)
 	for {
 		_ = operations.Terminate(process, 1)
 		_ = operations.NativeTerminate(process, 1)
 		if waitCreatedProcess(process, operations.Wait, 100*time.Millisecond) {
-			retryCloseHandle(process, operations.Close)
+			_ = owner.CloseEventually()
 			return
 		}
 		time.Sleep(10 * time.Millisecond)

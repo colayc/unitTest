@@ -4,14 +4,17 @@ package processhost
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"golang.org/x/sys/windows"
 
 	"unit-test-ide.local/test-service/internal/processcontrol"
+	"unit-test-ide.local/test-service/internal/winprocess"
 )
 
 func TestWindowsTargetWaitConfirmsInnerJobEmptyBeforeClosingAndReturning(t *testing.T) {
@@ -34,7 +37,7 @@ func TestWindowsTargetWaitConfirmsInnerJobEmptyBeforeClosingAndReturning(t *test
 		}
 		return nil
 	}
-	target := &windowsTarget{process: 501, job: 502, pid: 503, ops: operations, waitDone: make(chan struct{}), cleanupWait: 50 * time.Millisecond}
+	target := &windowsTarget{processOwner: winprocess.NewHandleOwner(501, operations.closeHandle), jobOwner: winprocess.NewHandleOwner(502, operations.closeHandle), pid: 503, ops: operations, waitDone: make(chan struct{}), cleanupWait: 50 * time.Millisecond}
 	code, err := target.Wait()
 	if code != 17 || err != nil {
 		t.Fatalf("Wait = (%d, %v)", code, err)
@@ -59,7 +62,7 @@ func TestWindowsTargetActiveCountTimeoutOrErrorReturnsStableWaitFailure(t *testi
 			operations.terminateJob = func(windows.Handle, uint32) error { return nil }
 			operations.queryActiveProcesses = test.query
 			operations.closeHandle = func(windows.Handle) error { return nil }
-			target := &windowsTarget{process: 511, job: 512, pid: 513, ops: operations, waitDone: make(chan struct{}), cleanupWait: 20 * time.Millisecond}
+			target := &windowsTarget{processOwner: winprocess.NewHandleOwner(511, operations.closeHandle), jobOwner: winprocess.NewHandleOwner(512, operations.closeHandle), pid: 513, ops: operations, waitDone: make(chan struct{}), cleanupWait: 20 * time.Millisecond}
 			started := time.Now()
 			_, err := target.Wait()
 			if err == nil || err.Error() != "target job cleanup failed" {
@@ -79,7 +82,7 @@ func TestWindowsTargetTerminateActiveCountFailureStillReleasesWait(t *testing.T)
 	operations.terminateJob = func(windows.Handle, uint32) error { return errors.New("private terminate detail") }
 	operations.queryActiveProcesses = func(windows.Handle) (uint32, error) { return 1, nil }
 	operations.closeHandle = func(windows.Handle) error { return nil }
-	target := &windowsTarget{process: 521, job: 522, pid: 523, ops: operations, waitDone: make(chan struct{}), cleanupWait: 20 * time.Millisecond}
+	target := &windowsTarget{processOwner: winprocess.NewHandleOwner(521, operations.closeHandle), jobOwner: winprocess.NewHandleOwner(522, operations.closeHandle), pid: 523, ops: operations, waitDone: make(chan struct{}), cleanupWait: 20 * time.Millisecond}
 	platform := newWindowsPlatform(operations)
 	done := make(chan error, 1)
 	go func() { done <- platform.Terminate(target, 0) }()
@@ -143,5 +146,156 @@ func TestWindowsTargetAssignmentFailureUsesSharedFallbackBeforeProcessClose(t *t
 		if events[index] != want[index] {
 			t.Fatalf("events = %#v, want %#v", events, want)
 		}
+	}
+}
+
+func TestWindowsInnerJobCloseRetriesAfterFailure(t *testing.T) {
+	var attempts atomic.Int32
+	var successes atomic.Int32
+	operations := defaultWindowsTargetOperations()
+	operations.terminateJob = func(windows.Handle, uint32) error { return nil }
+	operations.queryActiveProcesses = func(windows.Handle) (uint32, error) { return 0, nil }
+	operations.closeHandle = func(handle windows.Handle) error {
+		if handle != 701 {
+			return nil
+		}
+		if attempts.Add(1) == 1 {
+			return errors.New("injected job close failure")
+		}
+		successes.Add(1)
+		return nil
+	}
+	target := &windowsTarget{processOwner: winprocess.NewHandleOwner(702, operations.closeHandle), jobOwner: winprocess.NewHandleOwner(701, operations.closeHandle), pid: 703, ops: operations, waitDone: make(chan struct{}), cleanupWait: time.Millisecond}
+	if err := target.closeJob(); err == nil {
+		t.Fatal("first close unexpectedly succeeded")
+	}
+	if err := target.closeJob(); err != nil {
+		t.Fatalf("second close = %v", err)
+	}
+	if got := attempts.Load(); got != 2 {
+		t.Fatalf("close attempts = %d", got)
+	}
+	if got := successes.Load(); got != 1 {
+		t.Fatalf("successful closes = %d", got)
+	}
+	if target.jobOwner.Open() {
+		t.Fatal("inner Job handle ownership was not released")
+	}
+}
+
+func TestWindowsTargetWaitRetriesProcessClose(t *testing.T) {
+	var attempts atomic.Int32
+	var successes atomic.Int32
+	operations := defaultWindowsTargetOperations()
+	operations.waitProcess = func(windows.Handle, uint32) (uint32, error) { return windows.WAIT_OBJECT_0, nil }
+	operations.exitCode = func(windows.Handle) (uint32, error) { return 0, nil }
+	operations.terminateJob = func(windows.Handle, uint32) error { return nil }
+	operations.queryActiveProcesses = func(windows.Handle) (uint32, error) { return 0, nil }
+	operations.closeHandle = func(handle windows.Handle) error {
+		if handle != 712 {
+			return nil
+		}
+		if attempts.Add(1) == 1 {
+			return errors.New("injected process close failure")
+		}
+		successes.Add(1)
+		return nil
+	}
+	target := &windowsTarget{processOwner: winprocess.NewHandleOwner(712, operations.closeHandle), jobOwner: winprocess.NewHandleOwner(711, operations.closeHandle), pid: 713, ops: operations, waitDone: make(chan struct{}), cleanupWait: time.Millisecond}
+	if _, err := target.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for successes.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := attempts.Load(); got < 2 {
+		t.Fatalf("close attempts = %d", got)
+	}
+	if got := successes.Load(); got != 1 {
+		t.Fatalf("successful closes = %d", got)
+	}
+	if target.processOwner.Open() {
+		t.Fatal("target process handle ownership was not released")
+	}
+}
+
+func TestWindowsRealTargetOwnerCleanup(t *testing.T) {
+	operations := defaultWindowsTargetOperations()
+	originalCreateJob := operations.createProtectedJob
+	originalCreate := operations.createSuspended
+	originalTerminateJob := operations.terminateJob
+	originalQuery := operations.queryActiveProcesses
+	originalClose := operations.closeHandle
+	var mu sync.Mutex
+	events := []string{}
+	appendEvent := func(format string, values ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		events = append(events, fmt.Sprintf(format, values...))
+	}
+	var job windows.Handle
+	var process windows.Handle
+	operations.createProtectedJob = func(flags uint32) (windows.Handle, error) {
+		value, err := originalCreateJob(flags)
+		job = value
+		return value, err
+	}
+	operations.createSuspended = func(spec processcontrol.Spec, stdin, stdout, stderr windows.Handle) (windows.ProcessInformation, error) {
+		info, err := originalCreate(spec, stdin, stdout, stderr)
+		process = info.Process
+		return info, err
+	}
+	operations.terminateJob = func(handle windows.Handle, code uint32) error {
+		err := originalTerminateJob(handle, code)
+		appendEvent("terminate(%d)=%v", handle, err)
+		return err
+	}
+	operations.queryActiveProcesses = func(handle windows.Handle) (uint32, error) {
+		active, err := originalQuery(handle)
+		appendEvent("query(%d)=(%d,%v)", handle, active, err)
+		return active, err
+	}
+	operations.closeHandle = func(handle windows.Handle) error {
+		err := originalClose(handle)
+		if handle == job || handle == process {
+			appendEvent("close(%d)=%v", handle, err)
+		}
+		return err
+	}
+	platform := newWindowsPlatform(operations)
+	platform.cleanupWait = 100 * time.Millisecond
+	target, err := platform.Start(processcontrol.Spec{Executable: os.Getenv("ComSpec"), Args: []string{"/c", "exit", "17"}}, os.Stdout, os.Stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, err := target.Wait()
+	if err != nil || code != 17 {
+		mu.Lock()
+		defer mu.Unlock()
+		t.Fatalf("Wait=(%d,%v), events=%v", code, err, events)
+	}
+}
+
+func TestWindowsTargetTerminateAfterNaturalWaitIsIdempotent(t *testing.T) {
+	operations := defaultWindowsTargetOperations()
+	operations.waitProcess = func(windows.Handle, uint32) (uint32, error) { return windows.WAIT_OBJECT_0, nil }
+	operations.exitCode = func(windows.Handle) (uint32, error) { return 17, nil }
+	operations.terminateJob = func(windows.Handle, uint32) error { return nil }
+	operations.queryActiveProcesses = func(windows.Handle) (uint32, error) { return 0, nil }
+	operations.closeHandle = func(windows.Handle) error { return nil }
+	target := &windowsTarget{
+		processOwner: winprocess.NewHandleOwner(721, operations.closeHandle),
+		jobOwner:     winprocess.NewHandleOwner(722, operations.closeHandle),
+		pid:          723,
+		ops:          operations,
+		waitDone:     make(chan struct{}),
+		cleanupWait:  time.Millisecond,
+	}
+	if code, err := target.Wait(); code != 17 || err != nil {
+		t.Fatalf("Wait = (%d, %v)", code, err)
+	}
+	if err := newWindowsPlatform(operations).Terminate(target, 0); err != nil {
+		t.Fatalf("Terminate after Wait = %v", err)
 	}
 }
