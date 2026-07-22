@@ -102,7 +102,8 @@ func defaultLinuxOperations() linuxOperations {
 }
 
 func (operations linuxOperations) signalHost(pid int, expected string, signal unix.Signal, group bool) error {
-	if err := operations.validateHost(pid, expected); err != nil {
+	present, err := operations.validateHostForSignal(pid, expected)
+	if err != nil || !present {
 		return err
 	}
 	if group {
@@ -112,17 +113,31 @@ func (operations linuxOperations) signalHost(pid int, expected string, signal un
 }
 
 func (operations linuxOperations) validateHost(pid int, expected string) error {
-	if pid <= 1 || expected == "" || operations.startIdentity == nil {
-		return ErrLeaseIdentityMismatch
-	}
-	identity, err := operations.startIdentity(pid)
+	present, err := operations.validateHostForSignal(pid, expected)
 	if err != nil {
+		return err
+	}
+	if !present {
 		return errProcessHostUnavailable
 	}
-	if identity != expected {
-		return ErrLeaseIdentityMismatch
-	}
 	return nil
+}
+
+func (operations linuxOperations) validateHostForSignal(pid int, expected string) (bool, error) {
+	if pid <= 1 || expected == "" || operations.startIdentity == nil {
+		return false, ErrLeaseIdentityMismatch
+	}
+	identity, err := operations.startIdentity(pid)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, errProcessHostUnavailable
+	}
+	if identity != expected {
+		return false, ErrLeaseIdentityMismatch
+	}
+	return true, nil
 }
 
 func (operations linuxOperations) signalTargetGroup(lease task.ProcessLease, hostExists bool, signal unix.Signal) error {
@@ -140,7 +155,7 @@ func (operations linuxOperations) signalTargetGroup(lease task.ProcessLease, hos
 		return nil
 	}
 	if hostExists {
-		if err := operations.validateHost(lease.HostPID, lease.HostStartIdentity); err != nil {
+		if _, err := operations.validateHostForSignal(lease.HostPID, lease.HostStartIdentity); err != nil {
 			return err
 		}
 	}
@@ -213,10 +228,7 @@ func (runner *unixRunner) Prepare(ctx context.Context, spec Spec, taskID, servic
 
 	identity, err := operations.startIdentity(host.Process.Pid)
 	if err != nil || identity == "" {
-		_ = controlWriter.Close()
-		close(identityReady)
-		_ = host.Wait()
-		closeFiles(controlWriter, statusReader, stdoutReader, stderrReader)
+		finishPrepareIdentityFailure(controlWriter, identityReady, host.Wait, statusReader, stdoutReader, stderrReader)
 		return nil, errProcessHostUnavailable
 	}
 	hostIdentity = identity
@@ -285,9 +297,11 @@ func (runner *unixRunner) Cleanup(ctx context.Context, lease task.ProcessLease, 
 			return nil
 		}
 		if hostExists {
-			if err := operations.validateHost(lease.HostPID, lease.HostStartIdentity); err != nil {
+			present, err := operations.validateHostForSignal(lease.HostPID, lease.HostStartIdentity)
+			if err != nil {
 				return err
 			}
+			hostExists = present
 		}
 	}
 	if grace < 0 {
@@ -753,4 +767,11 @@ func closeFiles(files ...io.Closer) {
 			_ = file.Close()
 		}
 	}
+}
+
+func finishPrepareIdentityFailure(control io.Closer, identityReady chan struct{}, wait func() error, remaining ...io.Closer) {
+	closeFiles(control)
+	close(identityReady)
+	_ = wait()
+	closeFiles(remaining...)
 }

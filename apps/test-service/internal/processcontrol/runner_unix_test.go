@@ -462,6 +462,168 @@ func TestLinuxHostSignalRevalidatesIdentityAfterWait(t *testing.T) {
 	}
 }
 
+func TestLinuxValidateHostForSignalTreatsDisappearedHostAsGone(t *testing.T) {
+	operations := linuxOperations{
+		startIdentity: func(int) (string, error) { return "", os.ErrNotExist },
+	}
+	present, err := operations.validateHostForSignal(200, "expected")
+	if err != nil || present {
+		t.Fatalf("validateHostForSignal = (%t, %v), want (false, nil)", present, err)
+	}
+}
+
+func TestLinuxHostSignalSkipsPIDAndGroupWhenHostDisappears(t *testing.T) {
+	for _, group := range []bool{false, true} {
+		t.Run(fmt.Sprintf("group=%t", group), func(t *testing.T) {
+			identityReads := 0
+			signals := 0
+			operations := linuxOperations{
+				startIdentity: func(int) (string, error) {
+					identityReads++
+					if identityReads == 1 {
+						return "expected", nil
+					}
+					return "", os.ErrNotExist
+				},
+				signalPID:   func(int, unix.Signal) error { signals++; return nil },
+				signalGroup: func(int, unix.Signal) error { signals++; return nil },
+			}
+			if err := operations.validateHost(200, "expected"); err != nil {
+				t.Fatalf("initial validation = %v", err)
+			}
+			if err := operations.signalHost(200, "expected", unix.SIGKILL, group); err != nil {
+				t.Fatalf("signalHost(group=%t) = %v, want already-gone success", group, err)
+			}
+			if signals != 0 {
+				t.Fatalf("signals = %d, want 0", signals)
+			}
+		})
+	}
+}
+
+func TestLinuxCleanupContinuesOwnedGroupCleanupWhenHostDisappearsAfterScan(t *testing.T) {
+	identityReads := 0
+	pidSignals := 0
+	var groupSignals []int
+	operations := linuxOperations{
+		startIdentity: func(int) (string, error) {
+			identityReads++
+			if identityReads == 1 {
+				return "expected", nil
+			}
+			return "", os.ErrNotExist
+		},
+		ownedGroup: func(int, int) (bool, error) { return true, nil },
+		signalPID: func(int, unix.Signal) error {
+			pidSignals++
+			return nil
+		},
+		signalGroup: func(group int, _ unix.Signal) error {
+			groupSignals = append(groupSignals, group)
+			return nil
+		},
+		pidExists:   func(int) bool { return false },
+		groupExists: func(int) bool { return false },
+	}
+	runner := &unixRunner{operations: operations}
+	err := runner.Cleanup(context.Background(), task.ProcessLease{
+		HostPID: 200, HostStartIdentity: "expected", TargetProcessGroup: 300,
+	}, 0)
+	if err != nil {
+		t.Fatalf("Cleanup = %v, want idempotent success", err)
+	}
+	if pidSignals != 0 {
+		t.Fatalf("Host PID signals = %d, want 0", pidSignals)
+	}
+	if len(groupSignals) != 1 || groupSignals[0] != 300 {
+		t.Fatalf("group signals = %v, want only owned target group 300", groupSignals)
+	}
+}
+
+func TestLinuxForceTerminateSkipsHostGroupEscalationWhenHostDisappears(t *testing.T) {
+	controlReader, controlWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controlReader.Close()
+
+	identityReads := 0
+	groupSignals := 0
+	hostExited := make(chan struct{})
+	operations := linuxOperations{
+		startIdentity: func(int) (string, error) {
+			identityReads++
+			if identityReads == 1 {
+				return "expected", nil
+			}
+			if identityReads == 3 {
+				close(hostExited)
+			}
+			return "", os.ErrNotExist
+		},
+		signalGroup: func(int, unix.Signal) error { groupSignals++; return nil },
+	}
+	process := &unixProcess{
+		control:    controlWriter,
+		hostExited: hostExited,
+		lease: task.ProcessLease{
+			HostPID: 200, HostStartIdentity: "expected",
+		},
+		operations: operations,
+	}
+	if err := process.forceTerminate(context.Background(), 0, nil); err != nil {
+		t.Fatalf("forceTerminate = %v, want already-gone success", err)
+	}
+	if groupSignals != 0 {
+		t.Fatalf("Host group signals = %d, want 0", groupSignals)
+	}
+}
+
+func TestLinuxPrepareIdentityFailureClosesEachOwnedFileOnce(t *testing.T) {
+	control := &linuxCountingCloser{}
+	status := &linuxCountingCloser{}
+	stdout := &linuxCountingCloser{}
+	stderr := &linuxCountingCloser{}
+	identityReady := make(chan struct{})
+	waited := false
+
+	finishPrepareIdentityFailure(control, identityReady, func() error {
+		waited = true
+		if control.closes != 1 {
+			t.Fatalf("control closes before wait = %d, want 1", control.closes)
+		}
+		if status.closes != 0 || stdout.closes != 0 || stderr.closes != 0 {
+			t.Fatal("remaining pipe readers closed before Host wait")
+		}
+		select {
+		case <-identityReady:
+		default:
+			t.Fatal("identity readiness not released before Host wait")
+		}
+		return nil
+	}, status, stdout, stderr)
+
+	if !waited {
+		t.Fatal("Host wait was not called")
+	}
+	for name, closer := range map[string]*linuxCountingCloser{
+		"control": control, "status": status, "stdout": stdout, "stderr": stderr,
+	} {
+		if closer.closes != 1 {
+			t.Fatalf("%s closes = %d, want 1", name, closer.closes)
+		}
+	}
+}
+
+type linuxCountingCloser struct {
+	closes int
+}
+
+func (closer *linuxCountingCloser) Close() error {
+	closer.closes++
+	return nil
+}
+
 func TestLinuxOwnedGroupScanFailsClosedOnUnreadableOrMalformedStat(t *testing.T) {
 	tests := []struct {
 		name string
