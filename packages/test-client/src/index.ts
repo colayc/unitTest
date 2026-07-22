@@ -1,4 +1,4 @@
-export { ProtocolClient } from "./client.js";
+export { MAX_ARTIFACT_BYTES, ProtocolClient } from "./client.js";
 export type {
   ArtifactPage,
   ConnectionConnector,

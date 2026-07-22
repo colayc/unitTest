@@ -4,6 +4,7 @@ import type { Duplex } from "node:stream";
 import { Ajv2020, type ValidateFunction } from "ajv/dist/2020.js";
 import * as formatsModule from "ajv-formats";
 import type { TaskEvent } from "@unit-test-ide/protocol-models";
+import { decodeTaskEvent } from "./decoders.js";
 import type { ErrorEnvelope, IncomingEnvelope, Method, ProtocolVersion, RequestEnvelope, ResponseEnvelope } from "./envelopes.js";
 import { ProtocolError } from "./envelopes.js";
 
@@ -22,7 +23,10 @@ const validators: Record<ProtocolVersion, ValidateFunction> = {
 };
 
 type Pending = {
+  version: ProtocolVersion;
   method: Method;
+  onResponse?: (payload: Record<string, unknown>) => void;
+  onError?: (error: ProtocolError) => void;
   resolve: (payload: Record<string, unknown>) => void;
   reject: (error: Error) => void;
 };
@@ -35,13 +39,22 @@ export class Connection {
   #closed = false;
   #closeError: Error | undefined;
 
+  get closed(): boolean { return this.#closed; }
+
   constructor(private readonly stream: Duplex) {
     stream.on("data", (chunk: Buffer | string) => this.#onData(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+    stream.on("end", () => this.#closeWithError(new Error("service connection ended")));
     stream.on("error", (error) => this.#closeWithError(error));
     stream.on("close", () => this.#closeWithError(new Error("service connection closed")));
   }
 
-  request(version: ProtocolVersion, method: Method, payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+  request(
+    version: ProtocolVersion,
+    method: Method,
+    payload: Record<string, unknown>,
+    onResponse?: (payload: Record<string, unknown>) => void,
+    onError?: (error: ProtocolError) => void
+  ): Promise<Record<string, unknown>> {
     if (this.#closed) return Promise.reject(new Error("service connection is closed"));
     const messageId = randomUUID().replaceAll("-", "");
     const request: RequestEnvelope = {
@@ -52,6 +65,10 @@ export class Connection {
       sentAt: new Date().toISOString(),
       payload
     };
+    const validator = validators[version];
+    if (!validator(request)) {
+      return Promise.reject(new Error(`invalid protocol request: ${ajv.errorsText(validator.errors)}`));
+    }
     const encoded = Buffer.from(`${JSON.stringify(request)}\n`, "utf8");
     if (encoded.byteLength - 1 > MAX_MESSAGE_BYTES) {
       const failure = new Error("protocol line exceeds the 1 MiB limit");
@@ -59,7 +76,7 @@ export class Connection {
       return Promise.reject(failure);
     }
     return new Promise((resolve, reject) => {
-      this.#pending.set(messageId, { method, resolve, reject });
+      this.#pending.set(messageId, { version, method, onResponse, onError, resolve, reject });
       this.stream.write(encoded, (error) => {
         if (!error) return;
         this.#closeWithError(error);
@@ -82,8 +99,8 @@ export class Connection {
     return () => this.#closeListeners.delete(listener);
   }
 
-  close(): void {
-    this.#closeWithError(new Error("service connection is closed"));
+  close(error = new Error("service connection is closed")): void {
+    this.#closeWithError(error);
   }
 
   #onData(chunk: Buffer): void {
@@ -131,20 +148,44 @@ export class Connection {
     }
     const message = value as IncomingEnvelope;
     if (message.kind === "event") {
-      for (const listener of [...this.#eventListeners]) listener(message);
+      let event: TaskEvent;
+      try {
+        event = decodeTaskEvent(message);
+      } catch (error) {
+        this.#closeWithError(error instanceof Error ? error : new Error(String(error)));
+        return false;
+      }
+      for (const listener of [...this.#eventListeners]) listener(event);
       return true;
     }
     const pending = this.#pending.get(message.requestId);
     if (!pending) return true;
+    if (message.protocolVersion !== pending.version) {
+      this.#closeWithError(new Error("response protocol version does not match request"));
+      return false;
+    }
     this.#pending.delete(message.requestId);
     if (message.kind === "error") {
       const failure = message as ErrorEnvelope;
-      pending.reject(new ProtocolError(failure.error.code, failure.error.message, failure.error.retryable));
+      const protocolError = new ProtocolError(failure.error.code, failure.error.message, failure.error.retryable);
+      try {
+        pending.onError?.(protocolError);
+      } catch (error) {
+        pending.reject(error instanceof Error ? error : new Error(String(error)));
+        return true;
+      }
+      pending.reject(protocolError);
       return true;
     }
     const response = message as ResponseEnvelope;
     if (response.method !== pending.method) {
       pending.reject(new Error("response method does not match request"));
+      return true;
+    }
+    try {
+      pending.onResponse?.(response.payload);
+    } catch (error) {
+      pending.reject(error instanceof Error ? error : new Error(String(error)));
       return true;
     }
     pending.resolve(response.payload);

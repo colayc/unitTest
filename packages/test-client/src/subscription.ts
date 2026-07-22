@@ -7,15 +7,20 @@ export class EventSubscription implements AsyncIterable<TaskEvent> {
   lastSequence: number;
 
   constructor(afterSequence: number) {
+    if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) {
+      throw new Error("event subscription sequence must be a non-negative safe integer");
+    }
     this.lastSequence = afterSequence;
   }
 
-  push(event: TaskEvent): void {
-    if (this.#closed || event.sequence <= this.lastSequence) return;
+  push(event: TaskEvent): boolean {
+    if (this.#closed || event.sequence <= this.lastSequence) return true;
+    if (!Number.isSafeInteger(event.sequence) || event.sequence !== this.lastSequence + 1) return false;
     this.lastSequence = event.sequence;
     const waiter = this.#waiters.shift();
     if (waiter) waiter({ value: event, done: false });
     else this.#queue.push(event);
+    return true;
   }
 
   close(): void {

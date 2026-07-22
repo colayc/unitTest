@@ -4,14 +4,16 @@ import { Duplex, PassThrough } from "node:stream";
 import { createInterface } from "node:readline";
 import test from "node:test";
 import { MAX_MESSAGE_BYTES, ProtocolClient } from "./client.js";
+import { Connection } from "./connection.js";
 import { ProtocolError } from "./envelopes.js";
-import type { EventSubscription } from "./subscription.js";
+import { EventSubscription } from "./subscription.js";
 
 type JsonObject = Record<string, unknown>;
 const MESSAGE_ID = "fedcba9876543210fedcba9876543210";
 const TASK_ID = "11111111111111111111111111111111";
 const ARTIFACT_ID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const SENT_AT = "2026-07-21T00:00:00Z";
+const CLIENT_MAX_ARTIFACT_BYTES = 64 * 1024 * 1024;
 
 function pair(emitClose = true): [Duplex, Duplex] {
   const leftToRight = new PassThrough();
@@ -88,12 +90,12 @@ function taskEvent(sequence: number, eventName: string, overrides: JsonObject = 
 }
 
 function responseLineOfSize(request: JsonObject, size: number): string {
-  const payload = { negotiatedProtocolVersion: "1.0", serviceVersion: "0.1.0", padding: "" };
-  let line = JSON.stringify(response(request, payload, "1.0"));
-  const paddingSize = size - Buffer.byteLength(line);
-  assert.ok(paddingSize >= 0, `requested line size ${size} is smaller than response envelope`);
-  payload.padding = "x".repeat(paddingSize);
-  line = JSON.stringify(response(request, payload, "1.0"));
+  const payload = { negotiatedProtocolVersion: "1.0", serviceVersion: "" };
+  let line = JSON.stringify(response(request, payload));
+  const serviceVersionSize = size - Buffer.byteLength(line);
+  assert.ok(serviceVersionSize >= 1, `requested line size ${size} is smaller than response envelope`);
+  payload.serviceVersion = "x".repeat(serviceVersionSize);
+  line = JSON.stringify(response(request, payload));
   assert.equal(Buffer.byteLength(line), size);
   return line;
 }
@@ -123,6 +125,10 @@ async function take(subscription: EventSubscription, count: number): Promise<Jso
   return values;
 }
 
+test("EventSubscription rejects an unsafe initial sequence", () => {
+  assert.throws(() => new EventSubscription(Number.MAX_SAFE_INTEGER + 1), /safe integer/i);
+});
+
 test("client performs handshake, capabilities, and shutdown in order", async () => {
   const [clientStream, serverStream] = pair();
   const methods: string[] = [];
@@ -134,7 +140,7 @@ test("client performs handshake, capabilities, and shutdown in order", async () 
       : request.method === "capabilities/get"
         ? { platform: "windows", transports: ["named-pipe"], toolchains: [], frameworks: [], coverageTools: [] }
         : { accepted: true };
-    serverStream.write(`${JSON.stringify(response(request, payload, "1.0"))}\n`);
+    serverStream.write(`${JSON.stringify(response(request, payload))}\n`);
   });
   const client = ProtocolClient.attach(clientStream);
   await client.handshake("0123456789abcdef", "test", "0.1.0");
@@ -163,7 +169,7 @@ test("client accepts a fragmented exact-limit response with CRLF", async () => {
   });
   const client = ProtocolClient.attach(clientStream);
   const result = await client.handshake("0123456789abcdef", "test", "0.1.0");
-  assert.equal(result.serviceVersion, "0.1.0");
+  assert.equal(result.negotiatedProtocolVersion, "1.0");
   client.close();
 });
 
@@ -202,6 +208,18 @@ test("manual close rejects pending requests when the stream does not emit close"
   });
   await assert.rejects(Promise.race([pending, timeout]), /service connection is closed/);
   serverStream.destroy();
+});
+
+test("readable EOF rejects a pending request even when the stream never emits close", async () => {
+  const [clientStream, serverStream] = pair(false);
+  const client = ProtocolClient.attach(clientStream);
+  const pending = client.handshake("0123456789abcdef", "test", "0.1.0");
+  serverStream.end();
+  const timeout = new Promise<never>((_, reject) => {
+    setTimeout(() => reject(new Error("pending request was not rejected after EOF")), 50);
+  });
+  await assert.rejects(Promise.race([pending, timeout]), /ended/);
+  client.close();
 });
 
 test("invalid JSON closes the connection and rejects every pending request", async () => {
@@ -251,6 +269,21 @@ test("client does not downgrade handshake errors other than UNSUPPORTED_PROTOCOL
   fixture.client.close();
 });
 
+test("a 1.0 fallback handshake rejects response payload fields outside the legacy shape", async () => {
+  const fixture = scriptedClient((request) => request.protocolVersion === "1.1"
+    ? error(request, "UNSUPPORTED_PROTOCOL", false, "1.1")
+    : response(request, {
+      negotiatedProtocolVersion: "1.0",
+      serviceVersion: "0.1.0",
+      supportedProtocolVersions: ["1.0"]
+    }, "1.0"));
+  await assert.rejects(
+    () => fixture.client.handshake("0123456789abcdef", "test", "0.2.0"),
+    /invalid handshake response/
+  );
+  fixture.client.close();
+});
+
 test("client routes interleaved responses and deduplicates events", async () => {
   const fixture = scriptedClient((request) => {
     if (request.method === "handshake") {
@@ -297,6 +330,97 @@ test("subscribe installs its event sink before the subscribe response can be fol
   client.close();
 });
 
+test("a replacement subscription keeps pre-ack events on the old subscription", async () => {
+  const [clientStream, serverStream] = pair();
+  let subscribeCount = 0;
+  let replacementRequest: JsonObject | undefined;
+  createInterface({ input: serverStream }).on("line", (line) => {
+    const request = JSON.parse(line) as JsonObject;
+    if (request.method === "handshake") {
+      serverStream.write(`${JSON.stringify(response(request, { negotiatedProtocolVersion: "1.1", serviceVersion: "0.1.0" }, "1.1"))}\n`);
+    } else if (subscribeCount++ === 0) {
+      serverStream.write(`${JSON.stringify(response(request, { afterSequence: 10 }, "1.1"))}\n`);
+    } else {
+      replacementRequest = request;
+    }
+  });
+  const client = ProtocolClient.attach(clientStream);
+  try {
+    await client.handshake("0123456789abcdef", "test", "0.2.0");
+    const oldSubscription = await client.subscribeEvents(10);
+    const replacementPromise = client.subscribeEvents(0);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.ok(replacementRequest);
+    serverStream.write(`${JSON.stringify(taskEvent(11, "task.output"))}\n`);
+    serverStream.write(
+      `${JSON.stringify(response(replacementRequest, { afterSequence: 0 }, "1.1"))}\n${JSON.stringify(taskEvent(1, "task.created"))}\n`
+    );
+    const replacement = await replacementPromise;
+    const oldNext = await Promise.race([
+      oldSubscription.next(),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("old subscription lost pre-ack event")), 50))
+    ]);
+    assert.equal(oldNext.value?.sequence, 11);
+    assert.equal((await replacement.next()).value?.sequence, 1);
+  } finally {
+    client.close();
+  }
+});
+
+test("a failed replacement subscription closes the retired old subscription", async () => {
+  const [clientStream, serverStream] = pair();
+  let subscribeCount = 0;
+  createInterface({ input: serverStream }).on("line", (line) => {
+    const request = JSON.parse(line) as JsonObject;
+    if (request.method === "handshake") {
+      serverStream.write(`${JSON.stringify(response(request, { negotiatedProtocolVersion: "1.1", serviceVersion: "0.1.0" }, "1.1"))}\n`);
+    } else if (subscribeCount++ === 0) {
+      serverStream.write(`${JSON.stringify(response(request, { afterSequence: 0 }, "1.1"))}\n`);
+    } else {
+      serverStream.write(
+        `${JSON.stringify(error(request, "STORAGE_UNAVAILABLE", true, "1.1"))}\n${JSON.stringify(taskEvent(2, "task.started"))}\n`
+      );
+    }
+  });
+  const client = ProtocolClient.attach(clientStream);
+  try {
+    await client.handshake("0123456789abcdef", "test", "0.2.0");
+    const oldSubscription = await client.subscribeEvents(0);
+    serverStream.write(`${JSON.stringify(taskEvent(1, "task.created"))}\n`);
+    assert.equal((await oldSubscription.next()).value?.sequence, 1);
+    await assert.rejects(() => client.subscribeEvents(1), /storage_unavailable/i);
+    assert.equal(oldSubscription.lastSequence, 1);
+    const closed = await Promise.race([
+      oldSubscription.next(),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("retired subscription stayed open")), 50))
+    ]);
+    assert.deepEqual(closed, { value: undefined, done: true });
+  } finally {
+    client.close();
+  }
+});
+
+test("subscribe rejects an acknowledgement for a different cursor", async () => {
+  const fixture = scriptedClient((request) => request.method === "handshake"
+    ? response(request, { negotiatedProtocolVersion: "1.1", serviceVersion: "0.1.0" }, "1.1")
+    : response(request, { afterSequence: 4 }, "1.1"));
+  await fixture.client.handshake("0123456789abcdef", "test", "0.2.0");
+  await assert.rejects(() => fixture.client.subscribeEvents(5), /cursor|afterSequence/);
+  fixture.client.close();
+});
+
+test("a forward event gap does not advance the cursor and invalidates the connection", async () => {
+  const fixture = scriptedClient((request) => request.method === "handshake"
+    ? response(request, { negotiatedProtocolVersion: "1.1", serviceVersion: "0.1.0" }, "1.1")
+    : response(request, { afterSequence: 0 }, "1.1"));
+  await fixture.client.handshake("0123456789abcdef", "test", "0.2.0");
+  const subscription = await fixture.client.subscribeEvents(0);
+  fixture.server.write(`${JSON.stringify(taskEvent(2, "task.started"))}\n`);
+  assert.deepEqual(await subscription.next(), { value: undefined, done: true });
+  assert.equal(subscription.lastSequence, 0);
+  await assert.rejects(() => fixture.client.getTask(TASK_ID), /closed|gap/);
+});
+
 test("an attached stream failure rejects pending requests and closes the subscription", async () => {
   const [clientStream, serverStream] = pair();
   createInterface({ input: serverStream }).on("line", (line) => {
@@ -320,7 +444,7 @@ test("phase 2 methods reject a negotiated 1.0 session locally", async () => {
   const fixture = scriptedClient((request) => response(
     request,
     { negotiatedProtocolVersion: "1.0", serviceVersion: "0.1.0" },
-    "1.0"
+    request.protocolVersion
   ));
   await fixture.client.handshake("0123456789abcdef", "test", "0.2.0");
   await assert.rejects(
@@ -338,6 +462,133 @@ test("typed task responses are validated instead of trusted as arbitrary objects
   await fixture.client.handshake("0123456789abcdef", "test", "0.2.0");
   await assert.rejects(() => fixture.client.getTask(TASK_ID), /invalid tasks\/get response/);
   fixture.client.close();
+});
+
+test("wire date-time strings decode to Date values in generated public models", async () => {
+  const fixture = scriptedClient((request) => {
+    if (request.method === "handshake") {
+      return response(request, { negotiatedProtocolVersion: "1.1", serviceVersion: "0.1.0" }, "1.1");
+    }
+    if (request.method === "events/subscribe") return response(request, { afterSequence: 0 }, "1.1");
+    if (request.method === "artifacts/list") return response(request, {
+      items: [{
+        artifactId: ARTIFACT_ID,
+        taskId: TASK_ID,
+        kind: "task-summary",
+        mimeType: "application/json",
+        sizeBytes: 0,
+        sha256: "0".repeat(64),
+        createdAt: SENT_AT
+      }]
+    }, "1.1");
+    return response(request, taskSnapshot({
+      status: "finished",
+      outcome: "succeeded",
+      finishedAt: SENT_AT
+    }), "1.1");
+  });
+  await fixture.client.handshake("0123456789abcdef", "test", "0.2.0");
+  const task = await fixture.client.getTask(TASK_ID);
+  const artifacts = await fixture.client.listArtifacts(TASK_ID);
+  const subscription = await fixture.client.subscribeEvents(0);
+  fixture.server.write(`${JSON.stringify(taskEvent(1, "task.created"))}\n`);
+  const event = (await subscription.next()).value;
+  assert.ok(task.createdAt instanceof Date);
+  assert.ok(task.startedAt instanceof Date);
+  assert.ok(task.finishedAt instanceof Date);
+  assert.ok(artifacts.items[0]?.createdAt instanceof Date);
+  assert.ok(event?.sentAt instanceof Date);
+  fixture.client.close();
+});
+
+test("a schema-valid date-time that cannot become a Date is rejected", async () => {
+  const fixture = scriptedClient((request) => request.method === "handshake"
+    ? response(request, { negotiatedProtocolVersion: "1.1", serviceVersion: "0.1.0" }, "1.1")
+    : response(request, taskSnapshot({ createdAt: "2026-12-31T23:59:60Z" }), "1.1"));
+  await fixture.client.handshake("0123456789abcdef", "test", "0.2.0");
+  await assert.rejects(() => fixture.client.getTask(TASK_ID), /date/i);
+  fixture.client.close();
+});
+
+test("generated task and artifact models reject unsafe sequence and size integers", async () => {
+  const fixture = scriptedClient((request) => {
+    if (request.method === "handshake") {
+      return response(request, { negotiatedProtocolVersion: "1.1", serviceVersion: "0.1.0" }, "1.1");
+    }
+    if (request.method === "artifacts/list") return response(request, {
+      items: [{
+        artifactId: ARTIFACT_ID,
+        taskId: TASK_ID,
+        kind: "task-summary",
+        mimeType: "application/json",
+        sizeBytes: Number.MAX_SAFE_INTEGER + 1,
+        sha256: "0".repeat(64),
+        createdAt: SENT_AT
+      }]
+    }, "1.1");
+    return response(request, taskSnapshot({ lastSequence: Number.MAX_SAFE_INTEGER + 1 }), "1.1");
+  });
+  await fixture.client.handshake("0123456789abcdef", "test", "0.2.0");
+  await assert.rejects(() => fixture.client.getTask(TASK_ID), /safe integer/i);
+  await assert.rejects(() => fixture.client.listArtifacts(TASK_ID), /safe integer/i);
+  fixture.client.close();
+});
+
+test("runtime-invalid requests are rejected locally without reaching the wire", async () => {
+  const fixture = scriptedClient((request) => request.method === "handshake"
+    ? response(request, { negotiatedProtocolVersion: "1.1", serviceVersion: "0.1.0" }, "1.1")
+    : error(request, "INVALID_MESSAGE", false, "1.1"));
+  await fixture.client.handshake("0123456789abcdef", "test", "0.2.0");
+  const requestsBeforeInvalidCalls = fixture.requests.length;
+  const invalidCalls: Array<() => Promise<unknown>> = [
+    () => fixture.client.startTask({ idempotencyKey: "bad", scenario: "success", timeoutMs: 1000 } as never),
+    () => fixture.client.startTask({ idempotencyKey: TASK_ID, scenario: "success", timeoutMs: 0 }),
+    () => fixture.client.startTask({ idempotencyKey: TASK_ID, scenario: "success", timeoutMs: Number.NaN }),
+    () => fixture.client.getTask("bad"),
+    () => fixture.client.cancelTask("bad"),
+    () => fixture.client.listTasks({ cursor: "" }),
+    () => fixture.client.listTasks({ limit: 201 }),
+    () => fixture.client.listTasks({ limit: Number.NaN }),
+    () => fixture.client.subscribeEvents(Number.NaN),
+    () => fixture.client.listArtifacts("bad", { cursor: "" }),
+    () => fixture.client.readArtifact("bad")
+  ];
+  for (const invalidCall of invalidCalls) await assert.rejects(invalidCall);
+  assert.equal(fixture.requests.length, requestsBeforeInvalidCalls);
+  fixture.client.close();
+});
+
+test("Connection validates both handshake request versions before writing", async () => {
+  const [clientStream, serverStream] = pair();
+  const requests: JsonObject[] = [];
+  createInterface({ input: serverStream }).on("line", (line) => {
+    const request = JSON.parse(line) as JsonObject;
+    requests.push(request);
+    serverStream.write(`${JSON.stringify(error(request, "INVALID_MESSAGE", false, request.protocolVersion))}\n`);
+  });
+  const connection = new Connection(clientStream);
+  await assert.rejects(() => connection.request("1.1", "handshake", {
+    token: "short",
+    clientName: "test",
+    clientVersion: "0.2.0",
+    supportedProtocolVersions: []
+  }));
+  await assert.rejects(() => connection.request("1.0", "handshake", {
+    token: "short",
+    clientName: "test",
+    clientVersion: "0.2.0"
+  }));
+  assert.equal(requests.length, 0);
+  connection.close();
+});
+
+test("a response protocol version mismatch closes the connection", async () => {
+  const fixture = scriptedClient((request) => request.method === "handshake"
+    ? response(request, { negotiatedProtocolVersion: "1.1", serviceVersion: "0.1.0" }, "1.1")
+    : response(request, { accepted: true }, "1.0"));
+  await fixture.client.handshake("0123456789abcdef", "test", "0.2.0");
+  await assert.rejects(() => fixture.client.shutdown(), /protocol version/);
+  await assert.rejects(() => fixture.client.getCapabilities(), /closed/);
 });
 
 test("task and artifact methods send typed payloads and validate list responses", async () => {
@@ -393,7 +644,7 @@ test("reconnect reuses credentials and the active subscription cursor", async ()
     return stream;
   });
   await client.handshake("0123456789abcdef", "test", "0.2.0");
-  const subscription = await client.subscribeEvents(0);
+  const subscription = await client.subscribeEvents(3);
   first[1].write(`${JSON.stringify(taskEvent(4, "task.started"))}\n`);
   assert.equal((await subscription.next()).value?.sequence, 4);
   await client.reconnect();
@@ -436,6 +687,29 @@ test("concurrent reconnect is rejected and does not create extra connections", a
   client.close();
 });
 
+test("close invalidates a reconnect waiting for its connector and destroys the late stream", async () => {
+  const first = pair();
+  const late = pair();
+  let connectorCalls = 0;
+  let resolveLate: ((stream: Duplex) => void) | undefined;
+  const lateStream = new Promise<Duplex>((resolve) => { resolveLate = resolve; });
+  createInterface({ input: first[1] }).on("line", (line) => {
+    const request = JSON.parse(line) as JsonObject;
+    first[1].write(`${JSON.stringify(response(request, { negotiatedProtocolVersion: "1.1", serviceVersion: "0.1.0" }, "1.1"))}\n`);
+  });
+  createInterface({ input: late[1] }).on("line", (line) => {
+    const request = JSON.parse(line) as JsonObject;
+    late[1].write(`${JSON.stringify(response(request, { negotiatedProtocolVersion: "1.1", serviceVersion: "0.1.0" }, "1.1"))}\n`);
+  });
+  const client = await ProtocolClient.connect(() => connectorCalls++ === 0 ? first[0] : lateStream);
+  await client.handshake("0123456789abcdef", "test", "0.2.0");
+  const reconnecting = client.reconnect();
+  client.close();
+  resolveLate?.(late[0]);
+  await assert.rejects(reconnecting, /closed|cancel/i);
+  assert.equal(late[0].destroyed, true);
+});
+
 test("reconnect rejects a downgraded session when an active subscription must be restored", async () => {
   const first = pair();
   const second = pair();
@@ -445,7 +719,7 @@ test("reconnect rejects a downgraded session when an active subscription must be
     const request = JSON.parse(line) as JsonObject;
     const payload = request.method === "handshake"
       ? { negotiatedProtocolVersion: "1.1", serviceVersion: "0.1.0" }
-      : { afterSequence: 0 };
+      : { afterSequence: (request.payload as JsonObject).afterSequence };
     first[1].write(`${JSON.stringify(response(request, payload, "1.1"))}\n`);
   });
   createInterface({ input: second[1] }).on("line", (line) => {
@@ -461,7 +735,7 @@ test("reconnect rejects a downgraded session when an active subscription must be
     return stream;
   });
   await client.handshake("0123456789abcdef", "test", "0.2.0");
-  const subscription = await client.subscribeEvents(0);
+  const subscription = await client.subscribeEvents(1);
   first[1].write(`${JSON.stringify(taskEvent(2, "task.started"))}\n`);
   assert.equal((await subscription.next()).value?.sequence, 2);
   await assert.rejects(
@@ -501,7 +775,7 @@ test("failed reconnect handshakes and subscriptions retain the active cursor for
     return stream;
   });
   await client.handshake("0123456789abcdef", "test", "0.2.0");
-  const subscription = await client.subscribeEvents(0);
+  const subscription = await client.subscribeEvents(6);
   pairs[0]?.[1].write(`${JSON.stringify(taskEvent(7, "task.output"))}\n`);
   assert.equal((await subscription.next()).value?.sequence, 7);
 
@@ -578,5 +852,55 @@ test("readArtifact rejects metadata changes between chunks", async () => {
       : { data: "Yg", nextOffset: 2, eof: true, sizeBytes: 3, sha256: "1".repeat(64) }, "1.1"));
   await fixture.client.handshake("0123456789abcdef", "test", "0.2.0");
   await assert.rejects(() => fixture.client.readArtifact(ARTIFACT_ID), /metadata changed/);
+  fixture.client.close();
+});
+
+test("readArtifact rejects a declared total above the client download limit", async () => {
+  let reads = 0;
+  const fixture = scriptedClient((request) => {
+    if (request.method === "handshake") {
+      return response(request, { negotiatedProtocolVersion: "1.1", serviceVersion: "0.1.0" }, "1.1");
+    }
+    reads++;
+    const offset = (request.payload as JsonObject).offset as number;
+    return response(request, offset === 0
+      ? { data: "YQ", nextOffset: 1, eof: false, sizeBytes: CLIENT_MAX_ARTIFACT_BYTES + 1, sha256: "0".repeat(64) }
+      : { data: "", nextOffset: 1, eof: true, sizeBytes: CLIENT_MAX_ARTIFACT_BYTES + 1, sha256: "0".repeat(64) }, "1.1");
+  });
+  await fixture.client.handshake("0123456789abcdef", "test", "0.2.0");
+  await assert.rejects(() => fixture.client.readArtifact(ARTIFACT_ID), /limit|too large/i);
+  assert.equal(reads, 1);
+  fixture.client.close();
+});
+
+test("readArtifact rejects unsafe size and offset integers", async () => {
+  for (const chunk of [
+    { data: "", nextOffset: 0, eof: true, sizeBytes: Number.MAX_SAFE_INTEGER + 1, sha256: "0".repeat(64) },
+    { data: "YQ", nextOffset: Number.MAX_SAFE_INTEGER + 1, eof: true, sizeBytes: 1, sha256: "0".repeat(64) }
+  ]) {
+    const fixture = scriptedClient((request) => request.method === "handshake"
+      ? response(request, { negotiatedProtocolVersion: "1.1", serviceVersion: "0.1.0" }, "1.1")
+      : response(request, chunk, "1.1"));
+    await fixture.client.handshake("0123456789abcdef", "test", "0.2.0");
+    await assert.rejects(() => fixture.client.readArtifact(ARTIFACT_ID), /safe integer/i);
+    fixture.client.close();
+  }
+});
+
+test("readArtifact rejects a non-EOF chunk that already reaches the declared size", async () => {
+  const digest = createHash("sha256").update("a").digest("hex");
+  let reads = 0;
+  const fixture = scriptedClient((request) => {
+    if (request.method === "handshake") {
+      return response(request, { negotiatedProtocolVersion: "1.1", serviceVersion: "0.1.0" }, "1.1");
+    }
+    reads++;
+    return response(request, reads === 1
+      ? { data: "YQ", nextOffset: 1, eof: false, sizeBytes: 1, sha256: digest }
+      : { data: "", nextOffset: 1, eof: true, sizeBytes: 1, sha256: digest }, "1.1");
+  });
+  await fixture.client.handshake("0123456789abcdef", "test", "0.2.0");
+  await assert.rejects(() => fixture.client.readArtifact(ARTIFACT_ID), /EOF/i);
+  assert.equal(reads, 1);
   fixture.client.close();
 });
