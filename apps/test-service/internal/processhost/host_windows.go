@@ -16,12 +16,14 @@ import (
 	"golang.org/x/sys/windows"
 
 	"unit-test-ide.local/test-service/internal/processcontrol"
+	"unit-test-ide.local/test-service/internal/winprocess"
 )
 
 const windowsPostKillWait = time.Second
 
 type windowsPlatform struct {
-	operations windowsTargetOperations
+	operations  windowsTargetOperations
+	cleanupWait time.Duration
 }
 
 var _ Platform = (*windowsPlatform)(nil)
@@ -32,32 +34,35 @@ type windowsTarget struct {
 	pid     int
 	ops     windowsTargetOperations
 
-	waitOnce sync.Once
-	waitDone chan struct{}
-	waitCode int
-	waitErr  error
-	jobOnce  sync.Once
-	jobErr   error
+	waitOnce    sync.Once
+	waitDone    chan struct{}
+	waitCode    int
+	waitErr     error
+	jobOnce     sync.Once
+	jobErr      error
+	cleanupWait time.Duration
 }
 
 var _ Target = (*windowsTarget)(nil)
 
 type windowsTargetOperations struct {
-	createProtectedJob func(uint32) (windows.Handle, error)
-	createSuspended    func(processcontrol.Spec, windows.Handle, windows.Handle, windows.Handle) (windows.ProcessInformation, error)
-	assignProcess      func(windows.Handle, windows.Handle) error
-	resumeThread       func(windows.Handle) error
-	terminateJob       func(windows.Handle, uint32) error
-	terminateProcess   func(windows.Handle, uint32) error
-	waitProcess        func(windows.Handle, uint32) (uint32, error)
-	exitCode           func(windows.Handle) (uint32, error)
-	closeHandle        func(windows.Handle) error
+	createProtectedJob     func(uint32) (windows.Handle, error)
+	createSuspended        func(processcontrol.Spec, windows.Handle, windows.Handle, windows.Handle) (windows.ProcessInformation, error)
+	assignProcess          func(windows.Handle, windows.Handle) error
+	resumeThread           func(windows.Handle) error
+	terminateJob           func(windows.Handle, uint32) error
+	terminateProcess       func(windows.Handle, uint32) error
+	nativeTerminateProcess func(windows.Handle, uint32) error
+	waitProcess            func(windows.Handle, uint32) (uint32, error)
+	exitCode               func(windows.Handle) (uint32, error)
+	queryActiveProcesses   func(windows.Handle) (uint32, error)
+	closeHandle            func(windows.Handle) error
 }
 
 func NewPlatform() Platform { return newWindowsPlatform(defaultWindowsTargetOperations()) }
 
 func newWindowsPlatform(operations windowsTargetOperations) *windowsPlatform {
-	return &windowsPlatform{operations: operations}
+	return &windowsPlatform{operations: operations, cleanupWait: windowsPostKillWait}
 }
 
 func defaultWindowsTargetOperations() windowsTargetOperations {
@@ -69,15 +74,17 @@ func defaultWindowsTargetOperations() windowsTargetOperations {
 			_, err := windows.ResumeThread(thread)
 			return err
 		},
-		terminateJob:     windows.TerminateJobObject,
-		terminateProcess: windows.TerminateProcess,
-		waitProcess:      windows.WaitForSingleObject,
+		terminateJob:           windows.TerminateJobObject,
+		terminateProcess:       windows.TerminateProcess,
+		nativeTerminateProcess: winprocess.NativeTerminateProcess,
+		waitProcess:            windows.WaitForSingleObject,
 		exitCode: func(process windows.Handle) (uint32, error) {
 			var code uint32
 			err := windows.GetExitCodeProcess(process, &code)
 			return code, err
 		},
-		closeHandle: windows.CloseHandle,
+		queryActiveProcesses: windowsJobActiveProcesses,
+		closeHandle:          windows.CloseHandle,
 	}
 }
 
@@ -102,34 +109,47 @@ func (platform *windowsPlatform) Start(spec processcontrol.Spec, stdout, stderr 
 		_ = platform.operations.closeHandle(job)
 		return nil, errors.New("target process could not start")
 	}
-	closeThread := func() { _ = platform.operations.closeHandle(info.Thread) }
-	failed := func() {
-		_ = platform.operations.terminateProcess(info.Process, 1)
-		_, _ = platform.operations.waitProcess(info.Process, windowsPostKillWaitMilliseconds)
-		closeThread()
-		_ = platform.operations.closeHandle(info.Process)
+	failed := func() error {
+		cleanupErr := winprocess.FailCreatedProcess(info.Process, info.Thread, platform.createdProcessOperations(), 250*time.Millisecond)
 		_ = platform.operations.closeHandle(job)
+		return cleanupErr
 	}
 	if err := platform.operations.assignProcess(job, info.Process); err != nil {
-		failed()
+		if cleanupErr := failed(); cleanupErr != nil {
+			return nil, errors.New("target process cleanup failed")
+		}
 		return nil, errors.New("target job assignment failed")
 	}
 	if err := platform.operations.resumeThread(info.Thread); err != nil {
 		_ = platform.operations.terminateJob(job, 1)
-		failed()
+		if cleanupErr := failed(); cleanupErr != nil {
+			return nil, errors.New("target process cleanup failed")
+		}
 		return nil, errors.New("target resume failed")
 	}
-	closeThread()
+	_ = platform.operations.closeHandle(info.Thread)
+	cleanupWait := platform.cleanupWait
+	if cleanupWait <= 0 {
+		cleanupWait = windowsPostKillWait
+	}
 	return &windowsTarget{
-		process:  info.Process,
-		job:      job,
-		pid:      int(info.ProcessId),
-		ops:      platform.operations,
-		waitDone: make(chan struct{}),
+		process:     info.Process,
+		job:         job,
+		pid:         int(info.ProcessId),
+		ops:         platform.operations,
+		waitDone:    make(chan struct{}),
+		cleanupWait: cleanupWait,
 	}, nil
 }
 
-const windowsPostKillWaitMilliseconds = uint32(1000)
+func (platform *windowsPlatform) createdProcessOperations() winprocess.Operations {
+	return winprocess.Operations{
+		Terminate:       platform.operations.terminateProcess,
+		NativeTerminate: platform.operations.nativeTerminateProcess,
+		Wait:            platform.operations.waitProcess,
+		Close:           platform.operations.closeHandle,
+	}
+}
 
 func (target *windowsTarget) PID() int          { return target.pid }
 func (target *windowsTarget) ProcessGroup() int { return target.pid }
@@ -178,10 +198,59 @@ func (platform *windowsPlatform) Terminate(value Target, _ time.Duration) error 
 func (target *windowsTarget) closeJob() error {
 	target.jobOnce.Do(func() {
 		terminateErr := target.ops.terminateJob(target.job, 1)
+		empty := waitWindowsJobEmpty(target.job, target.ops.queryActiveProcesses, target.cleanupWait)
+		if !empty {
+			_ = target.ops.terminateJob(target.job, 1)
+			_ = target.ops.nativeTerminateProcess(target.process, 1)
+		}
 		closeErr := target.ops.closeHandle(target.job)
-		target.jobErr = errors.Join(terminateErr, closeErr)
+		if terminateErr != nil || !empty || closeErr != nil {
+			target.jobErr = errors.New("target job cleanup failed")
+		}
 	})
 	return target.jobErr
+}
+
+func waitWindowsJobEmpty(job windows.Handle, query func(windows.Handle) (uint32, error), duration time.Duration) bool {
+	if job == 0 || job == windows.InvalidHandle || query == nil {
+		return false
+	}
+	if duration < 0 {
+		duration = 0
+	}
+	deadline := time.Now().Add(duration)
+	for {
+		active, err := query(job)
+		if err != nil {
+			return false
+		}
+		if active == 0 {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+type windowsJobAccountingInformation struct {
+	TotalUserTime             int64
+	TotalKernelTime           int64
+	ThisPeriodTotalUserTime   int64
+	ThisPeriodTotalKernelTime int64
+	TotalPageFaultCount       uint32
+	TotalProcesses            uint32
+	ActiveProcesses           uint32
+	TotalTerminatedProcesses  uint32
+}
+
+func windowsJobActiveProcesses(job windows.Handle) (uint32, error) {
+	accounting := windowsJobAccountingInformation{}
+	if err := windows.QueryInformationJobObject(job, windows.JobObjectBasicAccountingInformation, uintptr(unsafe.Pointer(&accounting)), uint32(unsafe.Sizeof(accounting)), nil); err != nil {
+		return 0, err
+	}
+	return accounting.ActiveProcesses, nil
 }
 
 func createWindowsProtectedJob(limitFlags uint32) (windows.Handle, error) {

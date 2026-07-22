@@ -21,6 +21,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"unit-test-ide.local/test-service/internal/task"
+	"unit-test-ide.local/test-service/internal/winprocess"
 )
 
 var (
@@ -41,16 +42,17 @@ type windowsRunner struct {
 var _ Runner = (*windowsRunner)(nil)
 
 type windowsRunnerOperations struct {
-	createProtectedJob func(uint32) (windows.Handle, error)
-	createHost         func(string, windows.Handle, windows.Handle, windows.Handle, windows.Handle) (windows.ProcessInformation, error)
-	assignProcess      func(windows.Handle, windows.Handle) error
-	resumeThread       func(windows.Handle) error
-	terminateJob       func(windows.Handle, uint32) error
-	terminateProcess   func(windows.Handle, uint32) error
-	waitProcess        func(windows.Handle, uint32) (uint32, error)
-	startIdentity      func(windows.Handle) (string, error)
-	openProcess        func(uint32) (windows.Handle, error)
-	closeHandle        func(windows.Handle) error
+	createProtectedJob     func(uint32) (windows.Handle, error)
+	createHost             func(string, windows.Handle, windows.Handle, windows.Handle, windows.Handle) (windows.ProcessInformation, error)
+	assignProcess          func(windows.Handle, windows.Handle) error
+	resumeThread           func(windows.Handle) error
+	terminateJob           func(windows.Handle, uint32) error
+	terminateProcess       func(windows.Handle, uint32) error
+	nativeTerminateProcess func(windows.Handle, uint32) error
+	waitProcess            func(windows.Handle, uint32) (uint32, error)
+	startIdentity          func(windows.Handle) (string, error)
+	openProcess            func(uint32) (windows.Handle, error)
+	closeHandle            func(windows.Handle) error
 }
 
 type windowsProcess struct {
@@ -80,15 +82,25 @@ type windowsProcess struct {
 	contextStop      chan struct{}
 	doneOnce         sync.Once
 	closeOnce        sync.Once
+	shutdownOnce     sync.Once
 	jobCloseOnce     sync.Once
-	hostCloseOnce    sync.Once
+	hostExitOnce     sync.Once
 	controlCloseOnce sync.Once
 	statusCloseOnce  sync.Once
+	streamCloseOnce  sync.Once
+	outputCloseOnce  sync.Once
 	discardOnce      sync.Once
 	contextStopOnce  sync.Once
 	outputOverflow   atomic.Bool
+	outputMu         sync.Mutex
+	outputClosed     bool
 	jobErrMu         sync.Mutex
 	jobCloseErr      error
+	hostErrMu        sync.Mutex
+	hostCloseErr     error
+	hostClosed       bool
+	closeErr         error
+	shutdownErr      error
 }
 
 var _ Process = (*windowsProcess)(nil)
@@ -106,10 +118,11 @@ func defaultWindowsRunnerOperations() windowsRunnerOperations {
 			_, err := windows.ResumeThread(thread)
 			return err
 		},
-		terminateJob:     windows.TerminateJobObject,
-		terminateProcess: windows.TerminateProcess,
-		waitProcess:      windows.WaitForSingleObject,
-		startIdentity:    windowsStartIdentityFromHandle,
+		terminateJob:           windows.TerminateJobObject,
+		terminateProcess:       windows.TerminateProcess,
+		nativeTerminateProcess: winprocess.NativeTerminateProcess,
+		waitProcess:            windows.WaitForSingleObject,
+		startIdentity:          windowsStartIdentityFromHandle,
 		openProcess: func(pid uint32) (windows.Handle, error) {
 			return windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.PROCESS_TERMINATE|windows.SYNCHRONIZE, false, pid)
 		},
@@ -159,36 +172,35 @@ func (runner *windowsRunner) Prepare(ctx context.Context, spec Spec, taskID, ser
 		return nil, errProcessHostUnavailable
 	}
 	closeWindowsFiles(controlReader, statusWriter, stdoutWriter, stderrWriter)
-	failCreatedHost := func(terminateJob bool) {
+	failCreatedHost := func(terminateJob bool) error {
 		if terminateJob {
 			_ = runner.operations.terminateJob(job, 1)
 		}
-		_ = runner.operations.terminateProcess(info.Process, 1)
-		_, _ = runner.operations.waitProcess(info.Process, 1000)
-		_ = runner.operations.closeHandle(info.Thread)
-		_ = runner.operations.closeHandle(info.Process)
+		cleanupErr := winprocess.FailCreatedProcess(info.Process, info.Thread, runner.createdProcessOperations(), 250*time.Millisecond)
 		closeWindowsFiles(controlWriter, statusReader, stdoutReader, stderrReader)
 		_ = runner.operations.closeHandle(job)
+		return cleanupErr
 	}
 	if err := runner.operations.assignProcess(job, info.Process); err != nil {
-		failCreatedHost(false)
+		if cleanupErr := failCreatedHost(false); cleanupErr != nil {
+			return nil, errProcessHostFailed
+		}
+		return nil, errProcessHostUnavailable
+	}
+	identity, err := runner.operations.startIdentity(info.Process)
+	if err != nil || identity == "" {
+		if cleanupErr := failCreatedHost(true); cleanupErr != nil {
+			return nil, errProcessHostFailed
+		}
 		return nil, errProcessHostUnavailable
 	}
 	if err := runner.operations.resumeThread(info.Thread); err != nil {
-		failCreatedHost(true)
+		if cleanupErr := failCreatedHost(true); cleanupErr != nil {
+			return nil, errProcessHostFailed
+		}
 		return nil, errProcessHostUnavailable
 	}
 	_ = runner.operations.closeHandle(info.Thread)
-	identity, err := runner.operations.startIdentity(info.Process)
-	if err != nil || identity == "" {
-		_ = runner.operations.terminateJob(job, 1)
-		_ = runner.operations.terminateProcess(info.Process, 1)
-		_, _ = runner.operations.waitProcess(info.Process, 1000)
-		_ = runner.operations.closeHandle(info.Process)
-		closeWindowsFiles(controlWriter, statusReader, stdoutReader, stderrReader)
-		_ = runner.operations.closeHandle(job)
-		return nil, errProcessHostUnavailable
-	}
 	process := &windowsProcess{
 		specValue: spec,
 		control:   controlWriter,
@@ -217,6 +229,15 @@ func (runner *windowsRunner) Prepare(ctx context.Context, spec Spec, taskID, ser
 	go process.copyOutput()
 	go process.watchContext(ctx)
 	return process, nil
+}
+
+func (runner *windowsRunner) createdProcessOperations() winprocess.Operations {
+	return winprocess.Operations{
+		Terminate:       runner.operations.terminateProcess,
+		NativeTerminate: runner.operations.nativeTerminateProcess,
+		Wait:            runner.operations.waitProcess,
+		Close:           runner.operations.closeHandle,
+	}
 }
 
 func (runner *windowsRunner) Cleanup(ctx context.Context, lease task.ProcessLease, grace time.Duration) error {
@@ -321,8 +342,8 @@ func (process *windowsProcess) Terminate(ctx context.Context, grace time.Duratio
 	process.mu.Unlock()
 	if !started {
 		process.closeControl()
-		process.forceHostExit()
-		process.finishAfterHost(Result{Err: errProcessHostFailed})
+		_ = process.shutdownHostBounded()
+		process.publish(Result{Err: errProcessHostFailed})
 		return nil
 	}
 	if grace < 0 {
@@ -342,24 +363,22 @@ func (process *windowsProcess) Close() error {
 		process.contextStopOnce.Do(func() { close(process.contextStop) })
 		process.closeControl()
 		process.discardOnce.Do(func() { close(process.outputDiscard) })
-		select {
-		case <-process.hostExited:
-		default:
-			process.forceHostExit()
+		if !waitWindowsClosed(process.finished, 100*time.Millisecond) {
+			if err := process.shutdownHostBounded(); err != nil {
+				process.closeErr = errProcessHostFailed
+			}
+			process.publish(Result{Err: errProcessHostFailed})
+		} else {
+			process.closeOuterJob()
+			if process.outerJobError() != nil {
+				process.closeErr = errProcessHostFailed
+			}
 		}
-		process.closeOuterJob()
-		process.mu.Lock()
-		started := process.started
-		process.mu.Unlock()
-		if !started {
-			process.finishAfterHost(Result{Err: errProcessHostFailed})
-		}
+		process.closeStatus()
+		process.closeOutputReaders()
+		process.closeOutput()
 	})
-	<-process.hostExited
-	<-process.outputDone
-	process.closeStatus()
-	process.closeHostHandle()
-	return redactWindowsOperationError(process.outerJobError())
+	return process.closeErr
 }
 
 func (process *windowsProcess) readStatus(ctx context.Context) (HostStatus, error) {
@@ -407,9 +426,11 @@ func (process *windowsProcess) watchContext(ctx context.Context) {
 }
 
 func (process *windowsProcess) waitHost() {
-	_, _ = process.ops.waitProcess(process.host, windows.INFINITE)
-	process.closeHostHandle()
-	close(process.hostExited)
+	result, err := process.ops.waitProcess(process.host, windows.INFINITE)
+	if err == nil && result == windows.WAIT_OBJECT_0 {
+		process.markHostExited()
+		_ = process.closeHostHandle()
+	}
 }
 
 func (process *windowsProcess) copyOutput() {
@@ -418,7 +439,7 @@ func (process *windowsProcess) copyOutput() {
 	go process.copyStream(&readers, process.stdout, StreamStdout)
 	go process.copyStream(&readers, process.stderr, StreamStderr)
 	readers.Wait()
-	close(process.output)
+	process.closeOutput()
 	close(process.outputDone)
 }
 
@@ -430,12 +451,7 @@ func (process *windowsProcess) copyStream(readers *sync.WaitGroup, reader *os.Fi
 		count, err := reader.Read(buffer)
 		if count > 0 {
 			data := append([]byte(nil), buffer[:count]...)
-			select {
-			case process.output <- Output{Stream: stream, Data: data}:
-			case <-process.outputDiscard:
-			default:
-				process.outputOverflow.Store(true)
-			}
+			process.sendOutput(Output{Stream: stream, Data: data})
 		}
 		if err != nil {
 			return
@@ -444,11 +460,22 @@ func (process *windowsProcess) copyStream(readers *sync.WaitGroup, reader *os.Fi
 }
 
 func (process *windowsProcess) finishAfterHost(result Result) {
-	<-process.hostExited
-	<-process.outputDone
+	if !waitWindowsClosed(process.hostExited, windowsHostShutdownWait) {
+		result.Err = errors.Join(result.Err, errProcessHostFailed)
+		_ = process.shutdownHostBounded()
+	}
+	if !waitWindowsClosed(process.outputDone, windowsHostShutdownWait) {
+		result.Err = errors.Join(result.Err, errProcessHostFailed)
+		process.closeOutputReaders()
+	}
+	process.closeOutput()
 	if result.Err == nil && process.outputOverflow.Load() {
 		result.Err = ErrProcessOutputOverflow
 	}
+	process.publish(result)
+}
+
+func (process *windowsProcess) publish(result Result) {
 	process.doneOnce.Do(func() {
 		process.done <- result
 		close(process.done)
@@ -458,30 +485,53 @@ func (process *windowsProcess) finishAfterHost(result Result) {
 
 func (process *windowsProcess) forceTerminate(ctx context.Context, prior error) error {
 	prior = errors.Join(prior, ctx.Err())
-	if err := process.ops.terminateJob(process.job, 1); err != nil {
-		prior = errors.Join(prior, errProcessHostFailed)
-		if terminateErr := process.ops.terminateProcess(process.host, 1); terminateErr != nil {
-			prior = errors.Join(prior, errProcessHostFailed)
-			process.closeOuterJob()
-		}
-	}
-	process.closeControl()
-	if !waitWindowsClosed(process.hostExited, windowsHostShutdownWait) {
-		process.closeOuterJob()
-		_ = process.ops.terminateProcess(process.host, 1)
-	}
-	if !waitWindowsClosed(process.hostExited, windowsHostShutdownWait) {
+	if err := process.shutdownHostBounded(); err != nil {
 		prior = errors.Join(prior, errProcessHostFailed)
 	}
+	process.publish(Result{Err: errProcessHostFailed})
 	return prior
 }
 
-func (process *windowsProcess) forceHostExit() {
-	if err := process.ops.terminateJob(process.job, 1); err != nil {
-		process.addOuterJobError(err)
-		_ = process.ops.terminateProcess(process.host, 1)
+func (process *windowsProcess) shutdownHostBounded() error {
+	process.shutdownOnce.Do(func() {
+		process.closeControl()
+		if err := process.ops.terminateJob(process.job, 1); err != nil {
+			process.addOuterJobError(err)
+		}
+		process.closeOuterJob()
+		process.closeStatus()
+		process.closeOutputReaders()
+
+		var cleanupErr error
+		select {
+		case <-process.hostExited:
+			_ = process.closeHostHandle()
+		default:
+			cleanupErr = winprocess.CleanupProcess(process.host, process.hostCleanupOperations(), 100*time.Millisecond)
+		}
+		if !waitWindowsClosed(process.outputDone, 100*time.Millisecond) {
+			process.closeOutput()
+		}
+		if cleanupErr != nil || process.outerJobError() != nil || process.hostHandleError() != nil {
+			process.shutdownErr = errProcessHostFailed
+		}
+	})
+	return process.shutdownErr
+}
+
+func (process *windowsProcess) hostCleanupOperations() winprocess.Operations {
+	return winprocess.Operations{
+		Terminate:       process.ops.terminateProcess,
+		NativeTerminate: process.ops.nativeTerminateProcess,
+		Wait: func(handle windows.Handle, timeout uint32) (uint32, error) {
+			result, err := process.ops.waitProcess(handle, timeout)
+			if err == nil && result == windows.WAIT_OBJECT_0 {
+				process.markHostExited()
+			}
+			return result, err
+		},
+		Close: func(windows.Handle) error { return process.closeHostHandle() },
 	}
-	process.closeOuterJob()
 }
 
 func (process *windowsProcess) closeOuterJob() {
@@ -502,8 +552,27 @@ func (process *windowsProcess) outerJobError() error {
 	return process.jobCloseErr
 }
 
-func (process *windowsProcess) closeHostHandle() {
-	process.hostCloseOnce.Do(func() { _ = process.ops.closeHandle(process.host) })
+func (process *windowsProcess) markHostExited() {
+	process.hostExitOnce.Do(func() { close(process.hostExited) })
+}
+
+func (process *windowsProcess) closeHostHandle() error {
+	process.hostErrMu.Lock()
+	defer process.hostErrMu.Unlock()
+	if process.hostClosed {
+		return nil
+	}
+	process.hostCloseErr = process.ops.closeHandle(process.host)
+	if process.hostCloseErr == nil {
+		process.hostClosed = true
+	}
+	return process.hostCloseErr
+}
+
+func (process *windowsProcess) hostHandleError() error {
+	process.hostErrMu.Lock()
+	defer process.hostErrMu.Unlock()
+	return process.hostCloseErr
 }
 
 func (process *windowsProcess) closeControl() {
@@ -516,6 +585,40 @@ func (process *windowsProcess) closeControl() {
 
 func (process *windowsProcess) closeStatus() {
 	process.statusCloseOnce.Do(func() { _ = process.status.Close() })
+}
+
+func (process *windowsProcess) closeOutputReaders() {
+	process.streamCloseOnce.Do(func() {
+		if process.stdout != nil {
+			_ = process.stdout.Close()
+		}
+		if process.stderr != nil {
+			_ = process.stderr.Close()
+		}
+	})
+}
+
+func (process *windowsProcess) sendOutput(value Output) {
+	process.outputMu.Lock()
+	defer process.outputMu.Unlock()
+	if process.outputClosed {
+		return
+	}
+	select {
+	case process.output <- value:
+	case <-process.outputDiscard:
+	default:
+		process.outputOverflow.Store(true)
+	}
+}
+
+func (process *windowsProcess) closeOutput() {
+	process.outputCloseOnce.Do(func() {
+		process.outputMu.Lock()
+		defer process.outputMu.Unlock()
+		process.outputClosed = true
+		close(process.output)
+	})
 }
 
 func validateWindowsStartedStatus(status HostStatus) error {

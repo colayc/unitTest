@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unsafe"
@@ -162,6 +163,7 @@ func TestWindowsPrepareAssignsOuterJobBeforeResumeAndFailsClosed(t *testing.T) {
 		events = append(events, "assign")
 		return nil
 	}
+	operations.startIdentity = func(windows.Handle) (string, error) { return "identity", nil }
 	operations.resumeThread = func(windows.Handle) error {
 		events = append(events, "resume")
 		return errors.New("injected resume failure")
@@ -223,6 +225,79 @@ func TestWindowsPrepareJobOrAssignmentFailureNeverResumes(t *testing.T) {
 			}
 			if resumed {
 				t.Fatal("Host resumed after protection failure")
+			}
+		})
+	}
+}
+
+func TestWindowsPrepareAssignmentCleanupUsesFallbackAndRetainsOwnershipOnFailure(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		allowInitially bool
+	}{
+		{name: "native fallback", allowInitially: true},
+		{name: "background retry", allowInitially: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var allowCleanup atomic.Bool
+			allowCleanup.Store(test.allowInitially)
+			var nativeCalled atomic.Bool
+			var processClosed atomic.Bool
+			var closedBeforeSignal atomic.Bool
+			operations := defaultWindowsRunnerOperations()
+			operations.createProtectedJob = func(uint32) (windows.Handle, error) { return 701, nil }
+			operations.createHost = func(string, windows.Handle, windows.Handle, windows.Handle, windows.Handle) (windows.ProcessInformation, error) {
+				return windows.ProcessInformation{Process: 702, Thread: 703, ProcessId: 704}, nil
+			}
+			operations.assignProcess = func(windows.Handle, windows.Handle) error { return errors.New("injected assignment failure") }
+			operations.terminateProcess = func(windows.Handle, uint32) error { return errors.New("injected primary failure") }
+			operations.nativeTerminateProcess = func(windows.Handle, uint32) error {
+				nativeCalled.Store(true)
+				if allowCleanup.Load() {
+					return nil
+				}
+				return errors.New("injected native failure")
+			}
+			operations.waitProcess = func(windows.Handle, uint32) (uint32, error) {
+				if allowCleanup.Load() {
+					return windows.WAIT_OBJECT_0, nil
+				}
+				return uint32(windows.WAIT_TIMEOUT), nil
+			}
+			operations.closeHandle = func(handle windows.Handle) error {
+				if handle == 702 {
+					if !allowCleanup.Load() {
+						closedBeforeSignal.Store(true)
+					}
+					processClosed.Store(true)
+				}
+				return nil
+			}
+			runner := &windowsRunner{executable: os.Args[0], operations: operations}
+			started := time.Now()
+			process, err := runner.Prepare(context.Background(), Spec{}, windowsTestID(59), windowsTestID(60))
+			if process != nil {
+				t.Fatalf("Prepare returned process %#v", process)
+			}
+			if test.allowInitially {
+				if !errors.Is(err, errProcessHostUnavailable) || !processClosed.Load() {
+					t.Fatalf("error=%v processClosed=%t", err, processClosed.Load())
+				}
+			} else {
+				if !errors.Is(err, errProcessHostFailed) || processClosed.Load() {
+					t.Fatalf("error=%v processClosed=%t", err, processClosed.Load())
+				}
+				if time.Since(started) > 500*time.Millisecond {
+					t.Fatalf("Prepare cleanup failure was not bounded: %s", time.Since(started))
+				}
+				allowCleanup.Store(true)
+				deadline := time.Now().Add(time.Second)
+				for !processClosed.Load() && time.Now().Before(deadline) {
+					time.Sleep(time.Millisecond)
+				}
+			}
+			if !nativeCalled.Load() || !processClosed.Load() || closedBeforeSignal.Load() {
+				t.Fatalf("native=%t processClosed=%t closedBeforeSignal=%t", nativeCalled.Load(), processClosed.Load(), closedBeforeSignal.Load())
 			}
 		})
 	}
@@ -483,6 +558,145 @@ func TestWindowsCloseIsIdempotentWithoutHandleOrGoroutineLeak(t *testing.T) {
 	}
 	if after := runtime.NumGoroutine(); after > beforeGoroutines+4 {
 		t.Fatalf("goroutine count grew from %d to %d", beforeGoroutines, after)
+	}
+}
+
+func TestWindowsCloseAndDoneAreBoundedWhenEveryNativeCleanupStageFails(t *testing.T) {
+	controlReader, controlWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controlReader.Close()
+	statusReader, statusWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer statusWriter.Close()
+	stdoutReader, stdoutWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdoutWriter.Close()
+	stderrReader, stderrWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stderrWriter.Close()
+
+	var allowCleanup atomic.Bool
+	var hostClosed atomic.Bool
+	operations := defaultWindowsRunnerOperations()
+	operations.terminateJob = func(windows.Handle, uint32) error { return errors.New("injected job termination failure") }
+	operations.terminateProcess = func(windows.Handle, uint32) error {
+		if allowCleanup.Load() {
+			return nil
+		}
+		return errors.New("injected process termination failure")
+	}
+	operations.nativeTerminateProcess = func(windows.Handle, uint32) error {
+		if allowCleanup.Load() {
+			return nil
+		}
+		return errors.New("injected native termination failure")
+	}
+	operations.waitProcess = func(windows.Handle, uint32) (uint32, error) {
+		if allowCleanup.Load() {
+			return windows.WAIT_OBJECT_0, nil
+		}
+		return windows.WAIT_FAILED, errors.New("injected wait failure")
+	}
+	operations.closeHandle = func(handle windows.Handle) error {
+		switch handle {
+		case 401:
+			return errors.New("injected job close failure")
+		case 402:
+			hostClosed.Store(true)
+		}
+		return nil
+	}
+	process := &windowsProcess{
+		control:       controlWriter,
+		status:        statusReader,
+		stdout:        stdoutReader,
+		stderr:        stderrReader,
+		job:           401,
+		host:          402,
+		ops:           operations,
+		started:       true,
+		hostExited:    make(chan struct{}),
+		output:        make(chan Output, 1),
+		outputDone:    make(chan struct{}),
+		outputDiscard: make(chan struct{}),
+		done:          make(chan Result, 1),
+		finished:      make(chan struct{}),
+		contextStop:   make(chan struct{}),
+	}
+	go process.copyOutput()
+
+	closed := make(chan error, 1)
+	go func() { closed <- process.Close() }()
+	select {
+	case err := <-closed:
+		if !errors.Is(err, errProcessHostFailed) {
+			t.Fatalf("Close error = %v", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Close blocked after native cleanup failures")
+	}
+	select {
+	case result, ok := <-process.Done():
+		if !ok || !errors.Is(result.Err, errProcessHostFailed) {
+			t.Fatalf("Done result = %#v, open=%t", result, ok)
+		}
+		if _, open := <-process.Done(); open {
+			t.Fatal("Done published more than one result")
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Done remained blocked")
+	}
+	select {
+	case _, open := <-process.Output():
+		if open {
+			t.Fatal("Output remained open")
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Output remained blocked")
+	}
+	if hostClosed.Load() {
+		t.Fatal("Host process handle was discarded before signaled")
+	}
+	allowCleanup.Store(true)
+	deadline := time.Now().Add(time.Second)
+	for !hostClosed.Load() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if !hostClosed.Load() {
+		t.Fatal("background cleanup did not close the signaled Host handle")
+	}
+	started := time.Now()
+	if err := process.Close(); !errors.Is(err, errProcessHostFailed) || time.Since(started) > 100*time.Millisecond {
+		t.Fatalf("second Close = %v after %s", err, time.Since(started))
+	}
+}
+
+func TestWindowsHostHandleCloseCanRetryAfterNativeFailure(t *testing.T) {
+	var attempts atomic.Int32
+	operations := defaultWindowsRunnerOperations()
+	operations.closeHandle = func(windows.Handle) error {
+		if attempts.Add(1) == 1 {
+			return errors.New("injected close failure")
+		}
+		return nil
+	}
+	process := &windowsProcess{host: 501, ops: operations}
+	if err := process.closeHostHandle(); err == nil {
+		t.Fatal("first close unexpectedly succeeded")
+	}
+	if err := process.closeHostHandle(); err != nil {
+		t.Fatalf("second close = %v", err)
+	}
+	if got := attempts.Load(); got != 2 {
+		t.Fatalf("close attempts = %d", got)
 	}
 }
 
