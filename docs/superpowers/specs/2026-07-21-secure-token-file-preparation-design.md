@@ -66,7 +66,7 @@ PowerShell 可以构造新的 ACL 并移除所有现有规则。这个方案起�
 
 Go 进程获取当前进程 token SID，并构建受保护的 security descriptor；其 DACL 包含一个 allow ACE，向该 SID 授予 full access。它将此 descriptor 传给 `CreateFile`，并使用 `CREATE_NEW`，使严格限制的 DACL 在创建空文件时原子地生效。当前用户是文件所有者。句柄会在准备模式退出前关闭。
 
-实现使用服务启动期间相同的 semantic SID comparison 验证生成的所有者和受保护的仅所有者 DACL。任何不匹配都是错误，并触发经身份检查的清理。
+实现使用服务启动期间相同的 SID 语义比较验证生成的所有者和受保护的仅所有者 DACL。任何不匹配都是错误，并触发经身份检查的清理。
 
 ### Linux
 
@@ -89,7 +89,7 @@ Go 进程以权限模式 `0600` 独占创建文件。它验证结果是归有效
 - Windows 测试证明创建的文件归当前 SID 所有，具有只包含该 SID 的 protected DACL，且不授予 `SY` 或 `WD` 访问权限。
 - Linux 测试证明权限模式 `0600` 和当前有效用户所有权。
 - CLI 测试证明准备模式与服务模式互斥。
-- TypeScript E2E 测试演练真实的准备命令，向现有文件写入 token，完成身份验证、读取 capabilities 并 shutdown。
+- TypeScript E2E 测试演练真实的准备命令，向现有文件写入 token，完成身份验证、读取 capabilities 并执行 shutdown。
 - 完整的 Windows/Ubuntu Actions matrix 仍是验收门槛。
 
 ## 文档影响

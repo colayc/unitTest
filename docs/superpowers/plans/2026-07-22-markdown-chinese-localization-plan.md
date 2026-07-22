@@ -1,6 +1,6 @@
 # Markdown 文档中文化实施计划
 
-> **面向 agentic workers：** 必需的 sub-skill：使用 `superpowers:subagent-driven-development`（推荐）或 `superpowers:executing-plans` 按任务实施本计划。步骤使用 checkbox（`- [ ]`）语法跟踪；最终声明完成前必须使用 `superpowers:verification-before-completion`。
+> **面向智能体工作者：** 必需的 sub-skill：使用 `superpowers:subagent-driven-development`（推荐）或 `superpowers:executing-plans` 按任务实施本计划。步骤使用 checkbox（`- [ ]`）语法跟踪；最终声明完成前必须使用 `superpowers:verification-before-completion`。
 
 **目标：** 将仓库中所有已跟踪 Markdown 文档的叙述性内容统一为自然、准确的中文，同时保持英文技术名词及所有不可翻译的技术内容不变。
 
@@ -189,7 +189,7 @@ if (mode === "capture") {
 }
 ````
 
-该校验器故意不比较普通叙述文本，只比较本次迁移必须保持不变的技术内容和 Markdown 结构。任何 mismatch 都必须定位并恢复原值，不得通过重新执行 `capture` 覆盖基线来绕过失败。
+该校验器故意不比较普通叙述文本，只比较本次迁移必须保持不变的技术内容和 Markdown 结构。任何不匹配都必须定位并恢复原值，不得通过重新执行 `capture` 覆盖基线来绕过失败。
 
 - [ ] **Step 3：捕获基线并证明校验器可用**
 
@@ -382,7 +382,7 @@ git commit -m "docs: localize foundation plan tasks 1 through 4"
 
 - [ ] **Step 5：做整份 foundation 计划的术语一致性复核**
 
-从头到尾复核同一概念只使用一个中文表达；English technical term 保持原格式。重点检查“请求/响应”“传输”“帧”“握手”“认证”“权限”“调度”“生命周期”“验收”等术语，确保前后任务不存在含义漂移。
+从头到尾复核同一概念只使用一个中文表达；英文技术术语保持原格式。重点检查“请求/响应”“传输”“帧”“握手”“认证”“权限”“调度”“生命周期”“验收”等术语，确保前后任务不存在含义漂移。
 
 - [ ] **Step 6：验证整份文档**
 
@@ -496,7 +496,7 @@ git commit -m "docs: localize secure token implementation plan"
 **接口：**
 
 - 输入：Task 1 至 Task 5 的全部文档 commit、不可变内容基线和现有 Draft PR #1。
-- 产出：本地与 hosted verification 证据、已推送的当前分支，以及干净的 worktree。
+- 产出：本地与托管验证证据、已推送的当前分支，以及干净的 worktree。
 
 - [ ] **Step 1：确认所有 Markdown 文件仍在基线范围内**
 

@@ -10,7 +10,7 @@
 
 ## 全局约束
 
-- 首个版本覆盖 Windows/MSVC、Windows/clang-cl、Linux/GCC 和 Linux/Clang。
+- 首个版本覆盖 Windows/MSVC、用于覆盖率的 Windows/clang-cl、Linux/GCC 和 Linux/Clang。
 - 服务不得依赖 Electron、DOM、Code-OSS 对象或 Shell 命令字符串。
 - TypeScript 边界使用工作区 URI；平台原生路径仍保留在 Go 服务内部。
 - IPC 在 Windows 上使用 Windows Named Pipe，在 Linux 上使用权限模式为 `0600` 的 Unix Socket。
