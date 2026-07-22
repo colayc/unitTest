@@ -300,6 +300,9 @@ func invalidPayload(version string, request protocol.Request) HandleResult {
 
 func backendFailure(version string, request protocol.Request, err error) HandleResult {
 	code, message, retryable := "SERVICE_UNHEALTHY", "task service is unavailable", true
+	if request.Method == "events/subscribe" {
+		code, message = "STORAGE_UNAVAILABLE", "event subscription storage is unavailable"
+	}
 	switch {
 	case errors.Is(err, task.ErrIdempotencyConflict):
 		code, message, retryable = "IDEMPOTENCY_CONFLICT", "idempotency key conflicts with an existing task", false
@@ -315,7 +318,12 @@ func backendFailure(version string, request protocol.Request, err error) HandleR
 		}
 		retryable = false
 	case errors.Is(err, task.ErrInvalidArgument):
-		code, message, retryable = "INVALID_TASK_SPEC", "task specification is invalid", false
+		if request.Method == "tasks/start" {
+			code, message = "INVALID_TASK_SPEC", "task specification is invalid"
+		} else {
+			code, message = "INVALID_MESSAGE", "request argument is invalid"
+		}
+		retryable = false
 	case errors.Is(err, artifactstore.ErrInvalidRange):
 		code, message, retryable = "INVALID_MESSAGE", "artifact range is invalid", false
 	case errors.Is(err, artifactstore.ErrArtifactChanged):

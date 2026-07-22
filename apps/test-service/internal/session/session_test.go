@@ -48,6 +48,7 @@ type fakeBackend struct {
 	listResult   task.Page[task.Task]
 	cancelResult task.Task
 	subscription *eventbroker.Subscription
+	subscribe    func(context.Context, int64) (*eventbroker.Subscription, error)
 	artifacts    task.Page[task.Artifact]
 	chunk        session.ArtifactChunk
 	err          error
@@ -73,8 +74,11 @@ func (b *fakeBackend) Cancel(_ context.Context, taskID string) (task.Task, error
 	return b.cancelResult, b.err
 }
 
-func (b *fakeBackend) Subscribe(_ context.Context, after int64) (*eventbroker.Subscription, error) {
+func (b *fakeBackend) Subscribe(ctx context.Context, after int64) (*eventbroker.Subscription, error) {
 	b.after = after
+	if b.subscribe != nil {
+		return b.subscribe(ctx, after)
+	}
 	return b.subscription, b.err
 }
 
@@ -227,6 +231,8 @@ func TestSessionMapsPhase2Errors(t *testing.T) {
 		{"idempotency conflict", "tasks/start", task.ErrIdempotencyConflict, "IDEMPOTENCY_CONFLICT", false},
 		{"storage unavailable", "tasks/list", task.ErrStorageUnavailable, "STORAGE_UNAVAILABLE", true},
 		{"invalid task", "tasks/start", task.ErrInvalidArgument, "INVALID_TASK_SPEC", false},
+		{"invalid task cursor", "tasks/list", task.ErrInvalidArgument, "INVALID_MESSAGE", false},
+		{"invalid artifact cursor", "artifacts/list", task.ErrInvalidArgument, "INVALID_MESSAGE", false},
 		{"invalid cursor", "events/subscribe", eventbroker.ErrInvalidCursor, "EVENT_CURSOR_INVALID", false},
 		{"slow subscriber", "events/subscribe", eventbroker.ErrSubscriberTooSlow, "SUBSCRIBER_TOO_SLOW", true},
 		{"invalid artifact range", "artifacts/read", artifactstore.ErrInvalidRange, "INVALID_MESSAGE", false},
@@ -243,6 +249,8 @@ func TestSessionMapsPhase2Errors(t *testing.T) {
 				payload = map[string]any{"idempotencyKey": id('2'), "scenario": "hang", "timeoutMs": 1}
 			case "events/subscribe":
 				payload["afterSequence"] = 0
+			case "artifacts/list":
+				payload = map[string]any{"taskId": id('1'), "cursor": "invalid", "limit": 10}
 			case "artifacts/read":
 				payload = map[string]any{"artifactId": id('a'), "offset": 0, "length": 1}
 			}
@@ -251,6 +259,26 @@ func TestSessionMapsPhase2Errors(t *testing.T) {
 				t.Fatalf("result=%#v", result)
 			}
 		})
+	}
+}
+
+type failingEventSource struct{ err error }
+
+func (s failingEventSource) Watermark(context.Context) (int64, error) { return 0, s.err }
+func (failingEventSource) EventsAfter(context.Context, int64, int64, int) ([]task.Event, error) {
+	return nil, nil
+}
+
+func TestSessionMapsSubscribeSetupFailureToStorageUnavailable(t *testing.T) {
+	broker, err := eventbroker.New(failingEventSource{err: task.ErrStorageUnavailable}, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &fakeBackend{subscribe: broker.Subscribe}
+	s := authenticatedV11(t, backend)
+	result := s.Handle(context.Background(), requestVersion(t, protocol.Version11, "events/subscribe", map[string]any{"afterSequence": 0}))
+	if result.Response.Error == nil || result.Response.Error.Code != "STORAGE_UNAVAILABLE" || !result.Response.Error.Retryable {
+		t.Fatalf("result=%#v", result)
 	}
 }
 

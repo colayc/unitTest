@@ -217,12 +217,53 @@ func (streamSource) EventsAfter(context.Context, int64, int64, int) ([]task.Even
 	return nil, nil
 }
 
+type replaySource struct {
+	events    []task.Event
+	mu        sync.Mutex
+	subscribe int
+	requested []chan struct{}
+	gates     []chan struct{}
+}
+
+func (s *replaySource) Watermark(context.Context) (int64, error) {
+	return int64(len(s.events)), nil
+}
+
+func (s *replaySource) EventsAfter(ctx context.Context, after, through int64, limit int) ([]task.Event, error) {
+	if after == 0 {
+		s.mu.Lock()
+		subscribe := s.subscribe
+		s.subscribe++
+		close(s.requested[subscribe])
+		gate := s.gates[subscribe]
+		s.mu.Unlock()
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	time.Sleep(5 * time.Millisecond)
+	result := make([]task.Event, 0, limit)
+	for _, event := range s.events {
+		if event.Sequence > after && event.Sequence <= through {
+			result = append(result, event)
+			if len(result) == limit {
+				break
+			}
+		}
+	}
+	return result, nil
+}
+
 type streamBackend struct {
-	broker              *eventbroker.Broker
-	get                 task.Task
-	getCalls            atomic.Int32
-	overflowOnSubscribe bool
-	subscribeContext    chan struct{}
+	broker           *eventbroker.Broker
+	subscription     *eventbroker.Subscription
+	get              task.Task
+	getCalls         atomic.Int32
+	subscribeContext chan struct{}
+	replayRequested  []chan struct{}
+	replayGates      []chan struct{}
 }
 
 func (b *streamBackend) Start(context.Context, task.StartRequest) (task.Task, error) {
@@ -237,16 +278,15 @@ func (b *streamBackend) List(context.Context, string, int) (task.Page[task.Task]
 }
 func (b *streamBackend) Cancel(context.Context, string) (task.Task, error) { return task.Task{}, nil }
 func (b *streamBackend) Subscribe(ctx context.Context, after int64) (*eventbroker.Subscription, error) {
+	if b.subscription != nil {
+		return b.subscription, nil
+	}
 	subscription, err := b.broker.Subscribe(ctx, after)
 	if err != nil {
 		return nil, err
 	}
 	if b.subscribeContext != nil {
 		go func() { <-ctx.Done(); close(b.subscribeContext) }()
-	}
-	if b.overflowOnSubscribe {
-		b.broker.Publish(task.Event{Sequence: 1, ID: testID('e'), EventDraft: task.EventDraft{TaskID: testID('1'), Type: task.EventTaskStarted, At: time.Now(), Payload: json.RawMessage(`{}`)}})
-		b.broker.Publish(task.Event{Sequence: 2, ID: testID('f'), EventDraft: task.EventDraft{TaskID: testID('1'), Type: task.EventTaskFinished, At: time.Now(), Payload: json.RawMessage(`{}`)}})
 	}
 	return subscription, nil
 }
@@ -266,6 +306,28 @@ func newStreamBackend(t *testing.T, queueSize int) *streamBackend {
 		t.Fatal(err)
 	}
 	return &streamBackend{broker: broker, get: task.Task{ID: testID('1'), Scenario: task.ScenarioHang, Timeout: time.Second, Status: task.StatusRunning, CreatedAt: time.Now().UTC(), LastSequence: 2}}
+}
+
+func newReplayBackend(t *testing.T, eventCount, queueSize int) *streamBackend {
+	t.Helper()
+	events := make([]task.Event, eventCount)
+	for index := range events {
+		sequence := int64(index + 1)
+		events[index] = task.Event{Sequence: sequence, ID: testID('e'), EventDraft: task.EventDraft{
+			TaskID: testID('1'), Type: task.EventTaskOutput, At: time.Unix(sequence, 0).UTC(), Payload: json.RawMessage(`{"stream":"stdout"}`),
+		}}
+	}
+	requested := []chan struct{}{make(chan struct{}), make(chan struct{})}
+	gates := []chan struct{}{make(chan struct{}), make(chan struct{})}
+	source := &replaySource{events: events, requested: requested, gates: gates}
+	broker, err := eventbroker.New(source, queueSize, queueSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &streamBackend{
+		broker: broker, replayRequested: requested, replayGates: gates,
+		get: task.Task{ID: testID('1'), Scenario: task.ScenarioHang, Timeout: time.Second, Status: task.StatusRunning, CreatedAt: time.Now().UTC(), LastSequence: int64(eventCount)},
+	}
 }
 
 func authenticateV11Connection(t *testing.T, connection net.Conn) {
@@ -345,10 +407,57 @@ func TestServeConnectionSendsSubscribeResponseBeforeEventsAndSerializesWrites(t 
 	}
 }
 
+func TestServeConnectionDrainsReplayLargerThanBrokerQueueForDuplicateSubscriptions(t *testing.T) {
+	client, serviceConn := net.Pipe()
+	backend := newReplayBackend(t, 10, 2)
+	go server.ServeConnection(serviceConn, session.New("0123456789abcdef", "linux", "unix-socket", backend))
+	defer client.Close()
+	_ = client.SetDeadline(time.Now().Add(5 * time.Second))
+	authenticateV11Connection(t, client)
+	encoder, decoder := json.NewEncoder(client), json.NewDecoder(client)
+
+	for attempt := range 2 {
+		payload, _ := json.Marshal(map[string]any{"afterSequence": 0})
+		requestID := strings.Repeat(string(rune('b'+attempt)), 32)
+		if err := encoder.Encode(protocol.Request{ProtocolVersion: protocol.Version11, Kind: "request", MessageID: requestID, Method: "events/subscribe", SentAt: sentAt, Payload: payload}); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-backend.replayRequested[attempt]:
+		case <-time.After(time.Second):
+			t.Fatalf("attempt %d replay did not start", attempt)
+		}
+		time.Sleep(25 * time.Millisecond)
+		close(backend.replayGates[attempt])
+		time.Sleep(50 * time.Millisecond)
+		var response protocol.Response
+		if err := decoder.Decode(&response); err != nil {
+			t.Fatal(err)
+		}
+		if response.Kind != "response" || response.Method != "events/subscribe" {
+			t.Fatalf("attempt %d first envelope=%#v", attempt, response)
+		}
+		for want := int64(1); want <= 10; want++ {
+			var envelope struct {
+				Kind     string              `json:"kind"`
+				Sequence int64               `json:"sequence"`
+				Error    *protocol.ErrorBody `json:"error"`
+			}
+			if err := decoder.Decode(&envelope); err != nil {
+				t.Fatalf("attempt %d sequence %d: %v", attempt, want, err)
+			}
+			if envelope.Error != nil || envelope.Kind != "event" || envelope.Sequence != want {
+				t.Fatalf("attempt %d want sequence %d, envelope=%#v", attempt, want, envelope)
+			}
+		}
+	}
+}
+
 func TestServeConnectionMapsSubscriptionErrorAndCloses(t *testing.T) {
 	client, serviceConn := net.Pipe()
-	backend := newStreamBackend(t, 1)
-	backend.overflowOnSubscribe = true
+	events := make(chan task.Event)
+	errorsChannel := make(chan error, 1)
+	backend := &streamBackend{subscription: &eventbroker.Subscription{Events: events, Errors: errorsChannel}}
 	go server.ServeConnection(serviceConn, session.New("0123456789abcdef", "linux", "unix-socket", backend))
 	defer client.Close()
 	authenticateV11Connection(t, client)
@@ -361,6 +470,9 @@ func TestServeConnectionMapsSubscriptionErrorAndCloses(t *testing.T) {
 	if err := decoder.Decode(&response); err != nil || response.Kind != "response" {
 		t.Fatalf("response=%#v err=%v", response, err)
 	}
+	errorsChannel <- eventbroker.ErrSubscriberTooSlow
+	close(errorsChannel)
+	close(events)
 	sawError := false
 	for range 3 {
 		var envelope protocol.Response

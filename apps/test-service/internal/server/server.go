@@ -17,6 +17,8 @@ import (
 
 const MaxMessageBytes = 1024 * 1024
 
+var errOutboundMessageTooLarge = errors.New("outbound message exceeds the 1 MiB limit")
+
 type ConnectionConfig struct {
 	HandshakeTimeout time.Duration
 	IdleTimeout      time.Duration
@@ -103,7 +105,8 @@ func ServeConnectionWithConfig(connection net.Conn, active *session.Session, con
 			return
 		}
 		result := active.Handle(connectionContext, request)
-		if err := sendAndWait(connectionContext, outbound, writerDone, result.Response); err != nil {
+		responseWritten, err := enqueueOutbound(connectionContext, outbound, writerDone, result.Response)
+		if err != nil {
 			return
 		}
 		if result.Subscription != nil {
@@ -119,6 +122,9 @@ func ServeConnectionWithConfig(connection net.Conn, active *session.Session, con
 				defer forwarders.Done()
 				forwardSubscription(connectionContext, subscription, subscribeRequest, outbound, writerDone, closeConnection)
 			}(result.Subscription, request)
+		}
+		if err := waitOutbound(connectionContext, writerDone, responseWritten); err != nil {
+			return
 		}
 		select {
 		case <-active.ShutdownRequested():
@@ -138,35 +144,99 @@ func ServeConnectionWithConfig(connection net.Conn, active *session.Session, con
 
 func connectionWriter(connection net.Conn, timeout time.Duration, outbound <-chan outboundMessage, done chan<- struct{}, closeConnection func()) {
 	defer close(done)
-	encoder := json.NewEncoder(connection)
 	for message := range outbound {
-		var err error
-		if timeout > 0 {
-			err = connection.SetWriteDeadline(time.Now().Add(timeout))
+		line, encodeErr := encodeOutboundLine(message.value)
+		terminal := encodeErr != nil
+		if encodeErr != nil {
+			line, _ = encodeOutboundLine(outboundLimitFailure(message.value))
 		}
-		if err == nil {
-			err = encoder.Encode(message.value)
+		var writeErr error
+		if timeout > 0 {
+			writeErr = connection.SetWriteDeadline(time.Now().Add(timeout))
+		}
+		if writeErr == nil {
+			if len(line) == 0 {
+				writeErr = encodeErr
+			} else {
+				writeErr = writeAll(connection, line)
+			}
+		}
+		resultErr := writeErr
+		if resultErr == nil {
+			resultErr = encodeErr
 		}
 		if message.done != nil {
-			message.done <- err
+			message.done <- resultErr
 			close(message.done)
 		}
-		if err != nil {
+		if terminal || writeErr != nil {
 			closeConnection()
 			return
 		}
 	}
 }
 
+func encodeOutboundLine(value any) ([]byte, error) {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	if len(encoded) > MaxMessageBytes {
+		return nil, errOutboundMessageTooLarge
+	}
+	return append(encoded, '\n'), nil
+}
+
+func outboundLimitFailure(value any) protocol.Response {
+	version := protocol.Version10
+	requestID := "00000000000000000000000000000000"
+	switch envelope := value.(type) {
+	case protocol.Response:
+		version = envelope.ProtocolVersion
+		if envelope.RequestID != "" {
+			requestID = envelope.RequestID
+		}
+	case protocol.Event:
+		version = envelope.ProtocolVersion
+	}
+	return protocol.Failure(version, protocol.Request{MessageID: requestID}, "SERVICE_UNHEALTHY", "outbound message exceeds the 1 MiB limit", true)
+}
+
+func writeAll(connection net.Conn, value []byte) error {
+	for len(value) > 0 {
+		written, err := connection.Write(value)
+		if err != nil {
+			return err
+		}
+		if written == 0 {
+			return net.ErrClosed
+		}
+		value = value[written:]
+	}
+	return nil
+}
+
 func sendAndWait(ctx context.Context, outbound chan<- outboundMessage, writerDone <-chan struct{}, value any) error {
+	written, err := enqueueOutbound(ctx, outbound, writerDone, value)
+	if err != nil {
+		return err
+	}
+	return waitOutbound(ctx, writerDone, written)
+}
+
+func enqueueOutbound(ctx context.Context, outbound chan<- outboundMessage, writerDone <-chan struct{}, value any) (<-chan error, error) {
 	written := make(chan error, 1)
 	select {
 	case outbound <- outboundMessage{value: value, done: written}:
 	case <-ctx.Done():
-		return ctx.Err()
+		return nil, ctx.Err()
 	case <-writerDone:
-		return net.ErrClosed
+		return nil, net.ErrClosed
 	}
+	return written, nil
+}
+
+func waitOutbound(ctx context.Context, writerDone <-chan struct{}, written <-chan error) error {
 	select {
 	case err := <-written:
 		return err
