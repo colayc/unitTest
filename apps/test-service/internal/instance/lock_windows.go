@@ -122,10 +122,23 @@ func validateOwnerOnlySecurity(handle windows.Handle, expectedOwner *windows.SID
 	if err != nil || control&windows.SE_DACL_PROTECTED == 0 {
 		return ErrLockUnavailable
 	}
+	if aclHasInheritedACE(dacl) {
+		return ErrLockUnavailable
+	}
 	if !ownerOnlyAllows(descriptor.String(), expectedOwner) {
 		return ErrLockUnavailable
 	}
 	return nil
+}
+
+func aclHasInheritedACE(acl *windows.ACL) bool {
+	for index := uint32(0); index < uint32(acl.AceCount); index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(acl, index, &ace); err != nil || ace == nil || ace.Header.AceFlags&windows.INHERITED_ACE != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func ownerOnlyAllows(sddl string, expectedOwner *windows.SID) bool {
@@ -151,6 +164,9 @@ func ownerOnlyAllows(sddl string, expectedOwner *windows.SID) bool {
 		case "D", "OD", "XD":
 			continue
 		case "A", "OA", "XA", "ZA":
+			if strings.Contains(fields[1], "ID") {
+				return false
+			}
 			if !trusteeMatches(fields[5], expectedOwner) {
 				return false
 			}

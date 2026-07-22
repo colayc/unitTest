@@ -21,7 +21,10 @@ const (
 	brokerQueueSize = 256
 	brokerPageSize  = 200
 	closeTimeout    = 10 * time.Second
+	adapterTimeout  = time.Second
 )
+
+var errAdapterCloseTimeout = errors.New("process adapter shutdown timed out")
 
 type Config struct {
 	DataDir           string
@@ -40,9 +43,12 @@ type Runtime struct {
 	manager   runtimeManager
 	runner    processcontrol.Runner
 	lock      io.Closer
+	guard     io.Closer
+	grace     time.Duration
 
-	closeOnce sync.Once
-	closeErr  error
+	shutdownOnce sync.Once
+	shutdownDone chan struct{}
+	shutdownErr  error
 }
 
 type runtimeStore interface {
@@ -65,7 +71,7 @@ type runtimeManager interface {
 }
 
 type dependencies struct {
-	prepareDataDir func(string) (Layout, error)
+	prepareDataDir func(string) (Layout, io.Closer, error)
 	lockInstance   func(string) (io.Closer, error)
 	openStore      func(string) (runtimeStore, error)
 	openArtifacts  func(string) (runtimeArtifacts, error)
@@ -76,7 +82,7 @@ type dependencies struct {
 
 func defaultDependencies() dependencies {
 	return dependencies{
-		prepareDataDir: PrepareDataDir,
+		prepareDataDir: prepareDataDirGuard,
 		lockInstance:   instance.Lock,
 		openStore: func(path string) (runtimeStore, error) {
 			return taskstore.Open(path)
@@ -135,16 +141,16 @@ func Open(config Config) (*Runtime, error) {
 		grace = 2 * time.Second
 	}
 
-	layout, err := deps.prepareDataDir(config.DataDir)
+	layout, guard, err := deps.prepareDataDir(config.DataDir)
 	if err != nil {
 		return nil, err
 	}
 	locked, err := deps.lockInstance(layout.Lock)
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(err, guard.Close())
 	}
 	failLocked := func(cause error) (*Runtime, error) {
-		return nil, errors.Join(cause, locked.Close())
+		return nil, errors.Join(cause, locked.Close(), guard.Close())
 	}
 
 	store, err := deps.openStore(layout.Database)
@@ -152,14 +158,14 @@ func Open(config Config) (*Runtime, error) {
 		return failLocked(err)
 	}
 	failStore := func(cause error) (*Runtime, error) {
-		return nil, errors.Join(cause, store.Close(), locked.Close())
+		return nil, errors.Join(cause, store.Close(), locked.Close(), guard.Close())
 	}
 	artifacts, err := deps.openArtifacts(layout.Artifacts)
 	if err != nil {
 		return failStore(err)
 	}
 	failArtifacts := func(cause error) (*Runtime, error) {
-		return nil, errors.Join(cause, artifacts.Close(), store.Close(), locked.Close())
+		return nil, errors.Join(cause, artifacts.Close(), store.Close(), locked.Close(), guard.Close())
 	}
 
 	runner := deps.newRunner(config.ServiceExecutable)
@@ -199,7 +205,10 @@ func Open(config Config) (*Runtime, error) {
 	if err != nil {
 		return failArtifacts(errors.Join(err, broker.Close()))
 	}
-	return &Runtime{store: store, artifacts: artifacts, broker: broker, manager: manager, runner: runner, lock: locked}, nil
+	return &Runtime{
+		store: store, artifacts: artifacts, broker: broker, manager: manager, runner: runner,
+		lock: locked, guard: guard, grace: grace, shutdownDone: make(chan struct{}),
+	}, nil
 }
 
 func clockNow(clock task.Clock) time.Time {
@@ -257,27 +266,63 @@ func (r *Runtime) Shutdown(ctx context.Context) error {
 	if r == nil {
 		return nil
 	}
-	r.closeOnce.Do(func() {
-		var managerErr error
-		if r.manager != nil {
-			managerErr = r.manager.Shutdown(ctx)
+	r.shutdownOnce.Do(func() { go r.finishShutdown() })
+	select {
+	case <-r.shutdownDone:
+		return r.shutdownErr
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (r *Runtime) finishShutdown() {
+	defer close(r.shutdownDone)
+	var quiesceErr error
+	if r.manager != nil {
+		attempt, cancel := context.WithTimeout(context.Background(), r.grace)
+		attemptErr := r.manager.Shutdown(attempt)
+		cancel()
+		if attemptErr != nil {
+			quiesceErr = errors.Join(r.forceCleanup(), r.manager.Shutdown(context.Background()))
 		}
-		var brokerErr, artifactErr, storeErr, lockErr error
-		if r.broker != nil {
-			brokerErr = r.broker.Close()
+	}
+	var brokerErr, artifactErr, storeErr, lockErr, guardErr error
+	if r.broker != nil {
+		brokerErr = r.broker.Close()
+	}
+	if r.artifacts != nil {
+		artifactErr = r.artifacts.Close()
+	}
+	if r.store != nil {
+		storeErr = r.store.Close()
+	}
+	if r.lock != nil {
+		lockErr = r.lock.Close()
+	}
+	if r.guard != nil {
+		guardErr = r.guard.Close()
+	}
+	r.shutdownErr = errors.Join(quiesceErr, brokerErr, artifactErr, storeErr, lockErr, guardErr)
+}
+
+func (r *Runtime) forceCleanup() error {
+	if r.store == nil || r.runner == nil {
+		return nil
+	}
+	leases, err := r.store.ActiveLeases(context.Background())
+	if err != nil {
+		return err
+	}
+	var cleanupErr error
+	for _, lease := range leases {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), r.grace+2*time.Second)
+		err := r.runner.Cleanup(cleanupCtx, lease, r.grace)
+		cancel()
+		if err != nil && !errors.Is(err, processcontrol.ErrLeaseIdentityMismatch) {
+			cleanupErr = errors.Join(cleanupErr, err)
 		}
-		if r.artifacts != nil {
-			artifactErr = r.artifacts.Close()
-		}
-		if r.store != nil {
-			storeErr = r.store.Close()
-		}
-		if r.lock != nil {
-			lockErr = r.lock.Close()
-		}
-		r.closeErr = errors.Join(managerErr, brokerErr, artifactErr, storeErr, lockErr)
-	})
-	return r.closeErr
+	}
+	return cleanupErr
 }
 
 func (r *Runtime) Close() error {
@@ -307,20 +352,54 @@ type managedProcess struct {
 	process processcontrol.Process
 	output  chan task.ProcessOutput
 	done    chan task.ProcessResult
+	stop    chan struct{}
+	wait    sync.WaitGroup
+
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func newManagedProcess(process processcontrol.Process) *managedProcess {
-	result := &managedProcess{process: process, output: make(chan task.ProcessOutput), done: make(chan task.ProcessResult, 1)}
+	result := &managedProcess{
+		process: process, output: make(chan task.ProcessOutput), done: make(chan task.ProcessResult, 1), stop: make(chan struct{}),
+	}
+	result.wait.Add(2)
 	go func() {
+		defer result.wait.Done()
 		defer close(result.output)
-		for value := range process.Output() {
-			result.output <- task.ProcessOutput{Stream: string(value.Stream), Data: append([]byte(nil), value.Data...)}
+		for {
+			select {
+			case <-result.stop:
+				return
+			case value, ok := <-process.Output():
+				if !ok {
+					return
+				}
+				select {
+				case <-result.stop:
+					return
+				case result.output <- task.ProcessOutput{Stream: string(value.Stream), Data: append([]byte(nil), value.Data...)}:
+				}
+			}
 		}
 	}()
 	go func() {
+		defer result.wait.Done()
 		defer close(result.done)
-		for value := range process.Done() {
-			result.done <- task.ProcessResult{ExitCode: value.ExitCode, Err: value.Err}
+		for {
+			select {
+			case <-result.stop:
+				return
+			case value, ok := <-process.Done():
+				if !ok {
+					return
+				}
+				select {
+				case <-result.stop:
+					return
+				case result.done <- task.ProcessResult{ExitCode: value.ExitCode, Err: value.Err}:
+				}
+			}
 		}
 	}()
 	return result
@@ -333,4 +412,21 @@ func (p *managedProcess) Done() <-chan task.ProcessResult   { return p.done }
 func (p *managedProcess) Terminate(ctx context.Context, grace time.Duration) error {
 	return p.process.Terminate(ctx, grace)
 }
-func (p *managedProcess) Close() error { return p.process.Close() }
+func (p *managedProcess) Close() error {
+	p.closeOnce.Do(func() {
+		close(p.stop)
+		processErr := p.process.Close()
+		stopped := make(chan struct{})
+		go func() {
+			p.wait.Wait()
+			close(stopped)
+		}()
+		select {
+		case <-stopped:
+			p.closeErr = processErr
+		case <-time.After(adapterTimeout):
+			p.closeErr = errors.Join(processErr, errAdapterCloseTimeout)
+		}
+	})
+	return p.closeErr
+}

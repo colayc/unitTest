@@ -3,18 +3,25 @@
 package runtime
 
 import (
+	"errors"
 	"fmt"
+	"io"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"unit-test-ide.local/test-service/internal/instance"
 )
 
 func TestPrepareDataDirCreatesProtectedOwnerOnlyWindowsDirectory(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "owner-only")
 	if _, err := PrepareDataDir(root); err != nil {
-		t.Fatal(err)
+		_, internalErr := pinOwnerOnlyDirectory(root)
+		t.Fatalf("PrepareDataDir: %v; internal pin: %v", err, internalErr)
 	}
 	if err := validateOwnerOnlyDirectory(root); err != nil {
 		t.Fatalf("created directory validation failed: %v", err)
@@ -41,5 +48,104 @@ func TestPrepareDataDirRejectsWindowsDirectoryWithNonOwnerAllowACE(t *testing.T)
 	}
 	if _, err := PrepareDataDir(root); err == nil {
 		t.Fatal("PrepareDataDir accepted a DACL granting access to Everyone")
+	}
+}
+
+func TestPrepareDataDirRejectsIntermediateWindowsJunction(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(base, "target")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "junction")
+	if err := exec.Command("cmd.exe", "/c", "mklink", "/J", link, target).Run(); err != nil {
+		t.Skipf("directory junctions are unavailable: %v", err)
+	}
+	if _, err := PrepareDataDir(filepath.Join(link, "nested")); !errors.Is(err, ErrUnsafeDataDir) {
+		t.Fatalf("PrepareDataDir through junction error = %v", err)
+	}
+}
+
+func TestRuntimePinsWindowsAncestorsUntilClose(t *testing.T) {
+	base := t.TempDir()
+	ancestor := filepath.Join(base, "shared-parent")
+	root := filepath.Join(ancestor, "data")
+	active, err := Open(Config{
+		DataDir: root, ServiceExecutable: os.Args[0], Platform: "windows",
+		dependencies: testDependencies(&recordingRunner{}, nil),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved := filepath.Join(base, "moved-parent")
+	if err := os.Rename(ancestor, moved); err == nil {
+		_ = active.Close()
+		t.Fatal("ancestor rename succeeded while Runtime owned the pinned path")
+	}
+	layout, err := PrepareDataDir(root)
+	if err != nil {
+		_ = active.Close()
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(layout.Database); err != nil {
+		_ = active.Close()
+		t.Fatalf("database is not under the pinned root: %v", err)
+	}
+	if err := active.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(ancestor, moved); err != nil {
+		t.Fatalf("ancestor remained pinned after Close: %v", err)
+	}
+}
+
+func TestRuntimePinsWindowsAncestorsBeforeInstanceLock(t *testing.T) {
+	base := t.TempDir()
+	ancestor := filepath.Join(base, "shared-parent")
+	root := filepath.Join(ancestor, "data")
+	deps := testDependencies(&recordingRunner{}, nil)
+	lockInstance := deps.lockInstance
+	moved := filepath.Join(base, "moved-parent")
+	var renameErr error
+	deps.lockInstance = func(path string) (io.Closer, error) {
+		renameErr = os.Rename(ancestor, moved)
+		if renameErr == nil {
+			if _, err := PrepareDataDir(root); err != nil {
+				return nil, err
+			}
+		}
+		return lockInstance(path)
+	}
+	active, err := Open(Config{DataDir: root, ServiceExecutable: os.Args[0], Platform: "windows", dependencies: deps})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer active.Close()
+	if renameErr == nil {
+		t.Fatal("ancestor replacement succeeded between validation and instance lock")
+	}
+	if !errors.Is(func() error {
+		_, err := instance.Lock(filepath.Join(root, "service.lock"))
+		return err
+	}(), instance.ErrAlreadyRunning) {
+		t.Fatal("runtime lock is not held under the original pinned root")
+	}
+}
+
+func TestOwnerOnlyACLValidationRejectsInheritedOwnerACE(t *testing.T) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptor, err := windows.SecurityDescriptorFromString(fmt.Sprintf("O:%sD:P(A;OICIID;GA;;;%s)", user.User.Sid.String(), user.User.Sid.String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !windowsACLHasInheritedACE(dacl) {
+		t.Fatal("owner-only ACL validator accepted an inherited owner ACE")
 	}
 }

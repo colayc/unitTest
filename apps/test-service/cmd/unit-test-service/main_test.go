@@ -191,3 +191,64 @@ func TestRunUnsafeDataDirNeverCreatesListenerOrPrintsReady(t *testing.T) {
 		t.Fatalf("stderr leaked data directory: %q", stderr.String())
 	}
 }
+
+func TestRunSanitizesListenerSetupFailure(t *testing.T) {
+	directory := t.TempDir()
+	tokenPath := preparedServiceToken(t, directory)
+	previous := listenTransport
+	listenTransport = func(string) (net.Listener, error) {
+		return nil, errors.New(`listen C:\secret\endpoint.sock with token 0123456789abcdef failed`)
+	}
+	defer func() { listenTransport = previous }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--endpoint", "test-endpoint", "--token-file", tokenPath, "--data-dir", filepath.Join(directory, "data")}, strings.NewReader(""), &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("run code = %d, want 1", code)
+	}
+	if stdout.Len() != 0 || stderr.String() != "local transport unavailable\n" {
+		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestRunSanitizesServeFailureAfterReady(t *testing.T) {
+	directory := t.TempDir()
+	tokenPath := preparedServiceToken(t, directory)
+	previous := listenTransport
+	listenTransport = func(string) (net.Listener, error) {
+		return failingListener{err: errors.New(`accept C:\secret\endpoint.sock with token 0123456789abcdef failed`)}, nil
+	}
+	defer func() { listenTransport = previous }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--endpoint", "test-endpoint", "--token-file", tokenPath, "--data-dir", filepath.Join(directory, "data")}, strings.NewReader(""), &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("run code = %d, want 1", code)
+	}
+	if stdout.String() != "READY test-endpoint\n" || stderr.String() != "service transport failed\n" {
+		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func preparedServiceToken(t *testing.T, directory string) string {
+	t.Helper()
+	path := filepath.Join(directory, "service-token")
+	if err := os.WriteFile(path, []byte("0123456789abcdef"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareTokenFileForTest(path); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+type failingListener struct{ err error }
+
+func (l failingListener) Accept() (net.Conn, error) { return nil, l.err }
+func (failingListener) Close() error                { return nil }
+func (failingListener) Addr() net.Addr              { return failingAddr("test") }
+
+type failingAddr string
+
+func (a failingAddr) Network() string { return string(a) }
+func (a failingAddr) String() string  { return string(a) }

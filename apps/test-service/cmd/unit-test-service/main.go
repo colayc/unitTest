@@ -143,7 +143,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	defer active.Close()
 	listener, err := listenTransport(*endpoint)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
+		fmt.Fprintln(stderr, "local transport unavailable")
 		return 1
 	}
 	defer listener.Close()
@@ -154,7 +154,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	go func() { <-ctx.Done(); service.Shutdown() }()
 	fmt.Fprintf(stdout, "READY %s\n", *endpoint)
 	if err := service.Serve(); err != nil {
-		fmt.Fprintln(stderr, err)
+		fmt.Fprintln(stderr, "service transport failed")
 		return 1
 	}
 	if err := active.Close(); err != nil {

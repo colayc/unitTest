@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"errors"
+	"io"
 	"path/filepath"
 )
 
@@ -15,21 +16,33 @@ type Layout struct {
 }
 
 func PrepareDataDir(root string) (Layout, error) {
-	if root == "" {
+	layout, guard, err := prepareDataDirGuard(root)
+	if err != nil {
+		return Layout{}, err
+	}
+	if err := guard.Close(); err != nil {
 		return Layout{}, ErrUnsafeDataDir
+	}
+	return layout, nil
+}
+
+func prepareDataDirGuard(root string) (Layout, io.Closer, error) {
+	if root == "" {
+		return Layout{}, nil, ErrUnsafeDataDir
 	}
 	absolute, err := filepath.Abs(root)
 	if err != nil {
-		return Layout{}, ErrUnsafeDataDir
+		return Layout{}, nil, ErrUnsafeDataDir
 	}
 	absolute = filepath.Clean(absolute)
-	if err := prepareOwnerOnlyDirectory(absolute); err != nil {
-		return Layout{}, ErrUnsafeDataDir
+	guard, err := pinOwnerOnlyDirectory(absolute)
+	if err != nil {
+		return Layout{}, nil, ErrUnsafeDataDir
 	}
 	return Layout{
 		Root:      absolute,
 		Database:  filepath.Join(absolute, "history.sqlite3"),
 		Artifacts: filepath.Join(absolute, "artifacts"),
 		Lock:      filepath.Join(absolute, "service.lock"),
-	}, nil
+	}, guard, nil
 }

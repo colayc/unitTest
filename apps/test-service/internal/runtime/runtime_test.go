@@ -209,10 +209,17 @@ func TestRuntimeArtifactBackendHidesPathsAndVerifiesContent(t *testing.T) {
 	}
 }
 
-func TestShutdownClosesBrokerAndReleasesLockAfterManagerTimeout(t *testing.T) {
+func TestShutdownRetainsOwnershipUntilManagerQuiescesAndCanBeRetried(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "data")
 	process := newBlockingProcess()
-	runner := &recordingRunner{prepared: process}
+	cleanupStarted := make(chan struct{})
+	allowCleanup := make(chan struct{})
+	runner := &recordingRunner{prepared: process, cleanup: func(task.ProcessLease) {
+		close(cleanupStarted)
+		<-allowCleanup
+		close(process.releaseTerminate)
+		process.complete(processcontrol.Result{Err: context.Canceled})
+	}}
 	active, err := Open(Config{DataDir: root, ServiceExecutable: os.Args[0], Platform: platformForTest(), TerminationGrace: time.Millisecond, dependencies: testDependencies(runner, nil)})
 	if err != nil {
 		t.Fatal(err)
@@ -230,22 +237,56 @@ func TestShutdownClosesBrokerAndReleasesLockAfterManagerTimeout(t *testing.T) {
 	if err := active.Shutdown(ctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Shutdown() error = %v, want deadline", err)
 	}
-	assertClosed(t, subscription.Events)
-	assertClosed(t, subscription.Errors)
+	select {
+	case <-cleanupStarted:
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not begin forced lease cleanup")
+	}
 	layout, err := PrepareDataDir(root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	locked, err := instance.Lock(layout.Lock)
+	if !errors.Is(err, instance.ErrAlreadyRunning) || locked != nil {
+		if locked != nil {
+			_ = locked.Close()
+		}
+		t.Fatalf("Shutdown released ownership before manager quiesced: lock=%#v error=%v", locked, err)
+	}
+	close(allowCleanup)
+	if err := active.Close(); err != nil {
+		t.Fatalf("retrying Close() after quiescence: %v", err)
+	}
+	assertClosed(t, subscription.Events)
+	assertClosed(t, subscription.Errors)
+	locked, err = instance.Lock(layout.Lock)
 	if err != nil {
-		t.Fatalf("Shutdown retained instance lock: %v", err)
+		t.Fatalf("Close retained instance lock after quiescence: %v", err)
 	}
 	_ = locked.Close()
-	close(process.releaseTerminate)
-	process.complete(processcontrol.Result{Err: context.Canceled})
-	if err := active.Close(); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("idempotent Close() error = %v", err)
+	if cleaned := runner.cleanupLeases(); len(cleaned) != 1 || cleaned[0].HostStartIdentity != "blocking-process" {
+		t.Fatalf("forced cleanup leases = %#v", cleaned)
 	}
+}
+
+func TestManagedProcessCloseStopsForwardersWhenUnderlyingChannelsRemainOpen(t *testing.T) {
+	process := newBlockingProcess()
+	managed := newManagedProcess(process)
+	received := make(chan struct{})
+	go func() {
+		process.output <- processcontrol.Output{Stream: processcontrol.StreamStdout, Data: []byte("pending")}
+		close(received)
+	}()
+	select {
+	case <-received:
+	case <-time.After(time.Second):
+		t.Fatal("output forwarder did not receive the underlying value")
+	}
+	if err := managed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	assertChannelClosedSoon(t, managed.Output())
+	assertChannelClosedSoon(t, managed.Done())
 }
 
 const interruptedTaskID = "11111111111111111111111111111111"
@@ -296,6 +337,7 @@ type recordingRunner struct {
 	mu         sync.Mutex
 	cleaned    []task.ProcessLease
 	cleanupErr error
+	cleanup    func(task.ProcessLease)
 	prepared   processcontrol.Process
 }
 
@@ -308,9 +350,13 @@ func (r *recordingRunner) Prepare(context.Context, processcontrol.Spec, string, 
 
 func (r *recordingRunner) Cleanup(_ context.Context, lease task.ProcessLease, _ time.Duration) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.cleaned = append(r.cleaned, lease)
-	return r.cleanupErr
+	cleanup, cleanupErr := r.cleanup, r.cleanupErr
+	r.mu.Unlock()
+	if cleanup != nil {
+		cleanup(lease)
+	}
+	return cleanupErr
 }
 
 func (r *recordingRunner) cleanupLeases() []task.ProcessLease {
@@ -326,7 +372,7 @@ func testDependencies(runner processcontrol.Runner, stage func(string)) *depende
 	value.newRunner = func(string) processcontrol.Runner { return runner }
 	if stage != nil {
 		prepare := value.prepareDataDir
-		value.prepareDataDir = func(path string) (Layout, error) {
+		value.prepareDataDir = func(path string) (Layout, io.Closer, error) {
 			stage("validate-data-dir")
 			return prepare(path)
 		}
@@ -460,6 +506,21 @@ func assertClosed[T any](t *testing.T, values <-chan T) {
 			}
 		case <-deadline:
 			t.Fatal("channel did not close")
+		}
+	}
+}
+
+func assertChannelClosedSoon[T any](t *testing.T, values <-chan T) {
+	t.Helper()
+	deadline := time.After(200 * time.Millisecond)
+	for {
+		select {
+		case _, ok := <-values:
+			if !ok {
+				return
+			}
+		case <-deadline:
+			t.Fatal("channel did not close after adapter Close")
 		}
 	}
 }

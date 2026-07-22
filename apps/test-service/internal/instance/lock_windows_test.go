@@ -3,6 +3,7 @@
 package instance
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -33,5 +34,23 @@ func TestLockFileHasProtectedOwnerOnlyDACL(t *testing.T) {
 	}
 	if err := validateOwnerOnlyFileHandle(handle, user.User.Sid); err != nil {
 		t.Fatalf("lock DACL validation failed: %v", err)
+	}
+}
+
+func TestLockACLValidationRejectsInheritedOwnerACE(t *testing.T) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptor, err := windows.SecurityDescriptorFromString(fmt.Sprintf("O:%sD:P(A;ID;GA;;;%s)", user.User.Sid.String(), user.User.Sid.String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !aclHasInheritedACE(dacl) {
+		t.Fatal("lock ACL validator accepted an inherited owner ACE")
 	}
 }

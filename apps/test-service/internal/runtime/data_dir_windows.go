@@ -5,39 +5,114 @@ package runtime
 import (
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
+	"sync"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
-func prepareOwnerOnlyDirectory(absolute string) error {
+type windowsDirectoryGuard struct {
+	handles []windows.Handle
+	once    sync.Once
+	err     error
+}
+
+func pinOwnerOnlyDirectory(absolute string) (io.Closer, error) {
 	user, descriptor, err := runtimeOwnerDescriptor()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	volume := filepath.VolumeName(absolute)
 	remainder := strings.TrimLeft(strings.TrimPrefix(absolute, volume), `\/`)
 	current := volume + string(filepath.Separator)
-	for _, segment := range strings.FieldsFunc(remainder, func(value rune) bool { return value == '\\' || value == '/' }) {
+	segments := strings.FieldsFunc(remainder, func(value rune) bool { return value == '\\' || value == '/' })
+	guard := &windowsDirectoryGuard{}
+	fail := func(cause error) (io.Closer, error) {
+		_ = guard.Close()
+		return nil, fmt.Errorf("pin data directory: %w", cause)
+	}
+	for segmentIndex, segment := range segments {
 		current = filepath.Join(current, segment)
-		attributes, attributeErr := windows.GetFileAttributes(mustWindowsPath(current))
-		switch {
-		case attributeErr == nil:
-			if attributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 || attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-				return ErrUnsafeDataDir
-			}
-		case errors.Is(attributeErr, windows.ERROR_FILE_NOT_FOUND), errors.Is(attributeErr, windows.ERROR_PATH_NOT_FOUND):
+		final := segmentIndex == len(segments)-1
+		handle, openErr := openAbsoluteWindowsDirectory(current, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, final)
+		if errors.Is(openErr, windows.ERROR_FILE_NOT_FOUND) || errors.Is(openErr, windows.ERROR_PATH_NOT_FOUND) {
 			security := &windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: descriptor}
 			if err := windows.CreateDirectory(mustWindowsPath(current), security); err != nil && !errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
-				return ErrUnsafeDataDir
+				return fail(fmt.Errorf("create segment: %w", err))
 			}
-		default:
-			return ErrUnsafeDataDir
+			handle, openErr = openAbsoluteWindowsDirectory(current, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, final)
 		}
+		if errors.Is(openErr, windows.ERROR_ACCESS_DENIED) && !final {
+			attributes, attributeErr := windows.GetFileAttributes(mustWindowsPath(current))
+			if attributeErr == nil && attributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 && attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+				continue
+			}
+		}
+		if openErr != nil {
+			return fail(fmt.Errorf("open segment %d: %w", segmentIndex, openErr))
+		}
+		if validateErr := validateWindowsDirectoryObject(handle); validateErr != nil {
+			_ = windows.CloseHandle(handle)
+			return fail(fmt.Errorf("validate segment: %w", validateErr))
+		}
+		guard.handles = append(guard.handles, handle)
 	}
-	return validateOwnerOnlyDirectoryWithSID(absolute, user.User.Sid)
+	if len(guard.handles) == 0 {
+		return fail(errors.New("missing data directory components"))
+	}
+	root := guard.handles[len(guard.handles)-1]
+	if validateOwnerOnlyDirectoryHandle(root, user.User.Sid) != nil {
+		return fail(errors.New("validate final directory"))
+	}
+	return guard, nil
+}
+
+func (g *windowsDirectoryGuard) Close() error {
+	if g == nil {
+		return nil
+	}
+	g.once.Do(func() {
+		for index := len(g.handles) - 1; index >= 0; index-- {
+			if err := windows.CloseHandle(g.handles[index]); err != nil {
+				g.err = ErrUnsafeDataDir
+			}
+		}
+		g.handles = nil
+	})
+	return g.err
+}
+
+func openAbsoluteWindowsDirectory(path string, share uint32, readControl bool) (windows.Handle, error) {
+	access := uint32(0)
+	if readControl {
+		access = windows.FILE_READ_ATTRIBUTES | windows.READ_CONTROL
+	}
+	return windows.CreateFile(
+		mustWindowsPath(path),
+		access,
+		share,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0,
+	)
+}
+
+func validateWindowsDirectoryObject(handle windows.Handle) error {
+	if handle == 0 || handle == windows.InvalidHandle {
+		return ErrUnsafeDataDir
+	}
+	var information windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &information); err != nil {
+		return fmt.Errorf("inspect directory handle: %w", err)
+	}
+	if information.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 || information.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return fmt.Errorf("unexpected directory attributes 0x%x", information.FileAttributes)
+	}
+	return nil
 }
 
 func validateOwnerOnlyDirectory(path string) error {
@@ -49,23 +124,16 @@ func validateOwnerOnlyDirectory(path string) error {
 }
 
 func validateOwnerOnlyDirectoryWithSID(path string, expected *windows.SID) error {
-	handle, err := windows.CreateFile(
-		mustWindowsPath(path),
-		windows.FILE_LIST_DIRECTORY|windows.READ_CONTROL,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
-		nil,
-		windows.OPEN_EXISTING,
-		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT,
-		0,
-	)
+	handle, err := openAbsoluteWindowsDirectory(path, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, true)
 	if err != nil {
 		return ErrUnsafeDataDir
 	}
 	defer windows.CloseHandle(handle)
-	var information windows.ByHandleFileInformation
-	if err := windows.GetFileInformationByHandle(handle, &information); err != nil ||
-		information.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 ||
-		information.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+	return validateOwnerOnlyDirectoryHandle(handle, expected)
+}
+
+func validateOwnerOnlyDirectoryHandle(handle windows.Handle, expected *windows.SID) error {
+	if err := validateWindowsDirectoryObject(handle); err != nil {
 		return ErrUnsafeDataDir
 	}
 	descriptor, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
@@ -81,10 +149,20 @@ func validateOwnerOnlyDirectoryWithSID(path string, expected *windows.SID) error
 		return ErrUnsafeDataDir
 	}
 	control, _, err := descriptor.Control()
-	if err != nil || control&windows.SE_DACL_PROTECTED == 0 || !runtimeOwnerOnlyAllows(descriptor.String(), expected) {
+	if err != nil || control&windows.SE_DACL_PROTECTED == 0 || windowsACLHasInheritedACE(dacl) || !runtimeOwnerOnlyAllows(descriptor.String(), expected) {
 		return ErrUnsafeDataDir
 	}
 	return nil
+}
+
+func windowsACLHasInheritedACE(acl *windows.ACL) bool {
+	for index := uint32(0); index < uint32(acl.AceCount); index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(acl, index, &ace); err != nil || ace == nil || ace.Header.AceFlags&windows.INHERITED_ACE != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func runtimeOwnerDescriptor() (*windows.Tokenuser, *windows.SECURITY_DESCRIPTOR, error) {
@@ -123,6 +201,9 @@ func runtimeOwnerOnlyAllows(sddl string, expected *windows.SID) bool {
 		case "D", "OD", "XD":
 			continue
 		case "A", "OA", "XA", "ZA":
+			if strings.Contains(fields[1], "ID") {
+				return false
+			}
 			descriptor, err := windows.SecurityDescriptorFromString("O:" + fields[5])
 			if err != nil {
 				return false
