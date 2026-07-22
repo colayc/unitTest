@@ -142,6 +142,7 @@ queued/running/cancelling ──服务重启恢复──► finished/interrupted
 - 因终止操作产生的非零退出码不能覆盖 `cancelled` 或 `timed_out`。
 - 进程已自然退出后到达的取消请求不改变结果。
 - 进程启动、I/O 或进程管理失败归类为 `infrastructure_failed`。
+- 主进程退出后，ProcessRunner 必须先终止或确认 Job/Process Group 中没有剩余后代，再允许任务进入 `finished`。
 
 ## 7. 模拟任务
 
@@ -161,10 +162,12 @@ Phase 2 使用当前 Go 服务可执行文件的内部 `--task-fixture` 模式�
 
 Phase 2 引入协议 `1.1`：
 
-- 新客户端在 handshake 中声明支持的协议版本。
+- 新客户端先使用 `1.1` envelope 发起 handshake，并声明支持的协议版本。
 - 服务选择双方支持的最高版本并返回 `negotiatedProtocolVersion`。
-- `1.0` 客户端仍可执行原有 handshake、`capabilities/get` 和 `shutdown`。
-- `1.1` 方法在较低协商版本下返回稳定的不支持错误。
+- 如果旧服务以 `UNSUPPORTED_PROTOCOL` 拒绝 `1.1`，新客户端使用完全符合现有 Schema、且不包含 `1.1` 字段的 `1.0` handshake 重试。
+- `1.0` 客户端仍可执行原有 handshake、`capabilities/get` 和 `shutdown`；新服务按协商版本返回严格的 `1.0` 响应形状，不向 `additionalProperties: false` 的旧模型添加字段。
+- handshake 完成后的每条消息必须使用已协商版本。
+- `1.1` 方法在较低协商版本下返回 `PROTOCOL_FEATURE_UNAVAILABLE`。
 
 ### 8.2 请求方法
 
@@ -177,6 +180,8 @@ Phase 2 引入协议 `1.1`：
 - `artifacts/read`
 
 `tasks/start` 包含客户端生成的幂等键。相同幂等键和相同规范化请求返回原任务；相同幂等键与不同请求返回 `IDEMPOTENCY_CONFLICT`。
+
+`tasks/list` 和 `artifacts/list` 使用不透明游标与服务限制的页大小。`artifacts/read` 接收 `artifactId`、字节偏移和请求长度，返回受消息尺寸约束的 Base64 分块及 `nextOffset`/`eof`；客户端从元数据获得总大小和 SHA-256，并在组装完成后校验。
 
 ### 8.3 事件
 
@@ -296,6 +301,7 @@ Phase 2 不自动删除已完成历史。保留策略和用户管理入口在 Ph
 - `STORAGE_UNAVAILABLE`
 - `SERVICE_UNHEALTHY`
 - `SUBSCRIBER_TOO_SLOW`
+- `PROTOCOL_FEATURE_UNAVAILABLE`
 
 规则：
 
