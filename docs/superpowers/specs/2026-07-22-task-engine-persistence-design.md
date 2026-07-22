@@ -1,8 +1,11 @@
 # Phase 2：任务引擎、进程控制与持久化设计
 
-**日期：** 2026-07-22  
-**状态：** 已确认  
-**目标分支：** `codex/task-engine-persistence`  
+**日期：** 2026-07-22
+
+**状态：** 已确认
+
+**目标分支：** `codex/task-engine-persistence`
+
 **基础分支：** `codex/foundation-protocol-service`
 
 ## 1. 背景
