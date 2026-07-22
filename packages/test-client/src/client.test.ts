@@ -243,7 +243,7 @@ test("unknown protocol versions close the connection", async () => {
 
 test("client falls back to an exact 1.0 handshake", async () => {
   const fixture = scriptedClient((request) => {
-    if (request.protocolVersion === "1.1") return error(request, "UNSUPPORTED_PROTOCOL", false, "1.1");
+    if (request.protocolVersion === "1.1") return error(request, "UNSUPPORTED_PROTOCOL", false, "1.0");
     return response(request, { negotiatedProtocolVersion: "1.0", serviceVersion: "0.1.0" }, "1.0");
   });
   const negotiated = await fixture.client.handshake("0123456789abcdef", "test", "0.2.0");
@@ -260,13 +260,29 @@ test("client falls back to an exact 1.0 handshake", async () => {
 });
 
 test("client does not downgrade handshake errors other than UNSUPPORTED_PROTOCOL", async () => {
-  const fixture = scriptedClient((request) => error(request, "AUTH_FAILED", false, "1.1"));
+  const fixture = scriptedClient((request) => error(request, "AUTH_FAILED", false, "1.0"));
   await assert.rejects(
     () => fixture.client.handshake("0123456789abcdef", "test", "0.2.0"),
     (failure: unknown) => failure instanceof ProtocolError && failure.code === "AUTH_FAILED"
   );
   assert.equal(fixture.requests.length, 1);
   fixture.client.close();
+});
+
+test("an authenticated connection rejects a legacy-version handshake error", async () => {
+  let handshakeCount = 0;
+  const fixture = scriptedClient((request) => {
+    if (request.method === "handshake" && handshakeCount++ === 0) {
+      return response(request, { negotiatedProtocolVersion: "1.1", serviceVersion: "0.1.0" }, "1.1");
+    }
+    return error(request, "AUTH_FAILED", false, "1.0");
+  });
+  await fixture.client.handshake("0123456789abcdef", "test", "0.2.0");
+  await assert.rejects(
+    () => fixture.client.handshake("0123456789abcdef", "test", "0.2.0"),
+    /protocol version/
+  );
+  await assert.rejects(() => fixture.client.getCapabilities(), /closed/);
 });
 
 test("a 1.0 fallback handshake rejects response payload fields outside the legacy shape", async () => {
@@ -558,6 +574,48 @@ test("runtime-invalid requests are rejected locally without reaching the wire", 
   fixture.client.close();
 });
 
+test("an oversized outbound request rejects only that request and leaves the connection usable", async () => {
+  const [clientStream, serverStream] = pair();
+  const requests: JsonObject[] = [];
+  let pendingCapabilitiesRequest: JsonObject | undefined;
+  const capabilities = {
+    platform: "windows",
+    transports: ["named-pipe"],
+    toolchains: [],
+    frameworks: [],
+    coverageTools: [],
+    taskExecution: true,
+    eventReplay: true,
+    sqliteHistory: true,
+    artifactRead: true,
+    processTreeControl: "job-object"
+  };
+  createInterface({ input: serverStream }).on("line", (line) => {
+    const request = JSON.parse(line) as JsonObject;
+    requests.push(request);
+    if (request.method === "handshake") {
+      serverStream.write(`${JSON.stringify(response(request, { negotiatedProtocolVersion: "1.1", serviceVersion: "0.1.0" }, "1.1"))}\n`);
+    } else if (!pendingCapabilitiesRequest) {
+      pendingCapabilitiesRequest = request;
+    } else {
+      serverStream.write(`${JSON.stringify(response(request, capabilities, "1.1"))}\n`);
+    }
+  });
+  const client = ProtocolClient.attach(clientStream);
+  await client.handshake("0123456789abcdef", "test", "0.2.0");
+  const pendingCapabilities = client.getCapabilities();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.ok(pendingCapabilitiesRequest);
+
+  await assert.rejects(() => client.listTasks({ cursor: "x".repeat(MAX_MESSAGE_BYTES) }), /1 MiB/);
+  assert.equal(requests.some(({ method }) => method === "tasks/list"), false);
+
+  serverStream.write(`${JSON.stringify(response(pendingCapabilitiesRequest, capabilities, "1.1"))}\n`);
+  assert.equal((await pendingCapabilities).platform, "windows");
+  assert.equal((await client.getCapabilities()).platform, "windows");
+  client.close();
+});
+
 test("Connection validates both handshake request versions before writing", async () => {
   const [clientStream, serverStream] = pair();
   const requests: JsonObject[] = [];
@@ -661,6 +719,78 @@ test("reconnect reuses credentials and the active subscription cursor", async ()
   client.close();
 });
 
+test("reconnect validates its acknowledgement before accepting a same-chunk replay event", async () => {
+  const first = pair();
+  const second = pair();
+  const streams = [first[0], second[0]];
+  let calls = 0;
+  createInterface({ input: first[1] }).on("line", (line) => {
+    const request = JSON.parse(line) as JsonObject;
+    const payload = request.method === "handshake"
+      ? { negotiatedProtocolVersion: "1.1", serviceVersion: "0.1.0" }
+      : { afterSequence: (request.payload as JsonObject).afterSequence };
+    first[1].write(`${JSON.stringify(response(request, payload, "1.1"))}\n`);
+  });
+  createInterface({ input: second[1] }).on("line", (line) => {
+    const request = JSON.parse(line) as JsonObject;
+    if (request.method === "handshake") {
+      second[1].write(`${JSON.stringify(response(request, { negotiatedProtocolVersion: "1.1", serviceVersion: "0.1.0" }, "1.1"))}\n`);
+      return;
+    }
+    second[1].write(
+      `${JSON.stringify(response(request, { afterSequence: 0 }, "1.1"))}\n${JSON.stringify(taskEvent(1, "task.created"))}\n`
+    );
+  });
+  const client = await ProtocolClient.connect(async () => {
+    const stream = streams[calls++];
+    assert.ok(stream);
+    return stream;
+  });
+  await client.handshake("0123456789abcdef", "test", "0.2.0");
+  const subscription = await client.subscribeEvents(0);
+
+  await client.reconnect();
+
+  assert.equal((await subscription.next()).value?.sequence, 1);
+  client.close();
+});
+
+test("reconnect discards a same-chunk replay event when the acknowledgement cursor mismatches", async () => {
+  const first = pair();
+  const second = pair();
+  const streams = [first[0], second[0]];
+  let calls = 0;
+  createInterface({ input: first[1] }).on("line", (line) => {
+    const request = JSON.parse(line) as JsonObject;
+    const payload = request.method === "handshake"
+      ? { negotiatedProtocolVersion: "1.1", serviceVersion: "0.1.0" }
+      : { afterSequence: (request.payload as JsonObject).afterSequence };
+    first[1].write(`${JSON.stringify(response(request, payload, "1.1"))}\n`);
+  });
+  createInterface({ input: second[1] }).on("line", (line) => {
+    const request = JSON.parse(line) as JsonObject;
+    if (request.method === "handshake") {
+      second[1].write(`${JSON.stringify(response(request, { negotiatedProtocolVersion: "1.1", serviceVersion: "0.1.0" }, "1.1"))}\n`);
+      return;
+    }
+    second[1].write(
+      `${JSON.stringify(response(request, { afterSequence: 99 }, "1.1"))}\n${JSON.stringify(taskEvent(1, "task.created"))}\n`
+    );
+  });
+  const client = await ProtocolClient.connect(async () => {
+    const stream = streams[calls++];
+    assert.ok(stream);
+    return stream;
+  });
+  await client.handshake("0123456789abcdef", "test", "0.2.0");
+  const subscription = await client.subscribeEvents(0);
+
+  await assert.rejects(() => client.reconnect(), /cursor|afterSequence/);
+
+  assert.equal(subscription.lastSequence, 0);
+  client.close();
+});
+
 test("concurrent reconnect is rejected and does not create extra connections", async () => {
   const first = pair();
   const second = pair();
@@ -685,6 +815,87 @@ test("concurrent reconnect is rejected and does not create extra connections", a
   await reconnecting;
   assert.equal(calls, 2);
   client.close();
+});
+
+test("subscribe is rejected without disturbing an active reconnect", async () => {
+  const first = pair();
+  const second = pair();
+  let connectorCalls = 0;
+  let resolveSecond: ((stream: Duplex) => void) | undefined;
+  const delayedSecond = new Promise<Duplex>((resolve) => { resolveSecond = resolve; });
+  createInterface({ input: first[1] }).on("line", (line) => {
+    const request = JSON.parse(line) as JsonObject;
+    const payload = request.method === "handshake"
+      ? { negotiatedProtocolVersion: "1.1", serviceVersion: "0.1.0" }
+      : { afterSequence: (request.payload as JsonObject).afterSequence };
+    first[1].write(`${JSON.stringify(response(request, payload, "1.1"))}\n`);
+  });
+  createInterface({ input: second[1] }).on("line", (line) => {
+    const request = JSON.parse(line) as JsonObject;
+    const payload = request.method === "handshake"
+      ? { negotiatedProtocolVersion: "1.1", serviceVersion: "0.1.0" }
+      : { afterSequence: (request.payload as JsonObject).afterSequence };
+    second[1].write(`${JSON.stringify(response(request, payload, "1.1"))}\n`);
+  });
+  const client = await ProtocolClient.connect(() => connectorCalls++ === 0 ? first[0] : delayedSecond);
+  try {
+    await client.handshake("0123456789abcdef", "test", "0.2.0");
+    const subscription = await client.subscribeEvents(0);
+    const reconnecting = client.reconnect();
+
+    await assert.rejects(
+      () => client.subscribeEvents(0),
+      /client lifecycle operation is already in progress/
+    );
+
+    resolveSecond?.(second[0]);
+    await reconnecting;
+    second[1].write(`${JSON.stringify(taskEvent(1, "task.created"))}\n`);
+    assert.equal((await subscription.next()).value?.sequence, 1);
+  } finally {
+    client.close();
+  }
+});
+
+test("reconnect is rejected without disturbing an active subscribe", async () => {
+  const first = pair();
+  const second = pair();
+  let connectorCalls = 0;
+  let subscribeRequest: JsonObject | undefined;
+  createInterface({ input: first[1] }).on("line", (line) => {
+    const request = JSON.parse(line) as JsonObject;
+    if (request.method === "handshake") {
+      first[1].write(`${JSON.stringify(response(request, { negotiatedProtocolVersion: "1.1", serviceVersion: "0.1.0" }, "1.1"))}\n`);
+    } else {
+      subscribeRequest = request;
+    }
+  });
+  createInterface({ input: second[1] }).on("line", (line) => {
+    const request = JSON.parse(line) as JsonObject;
+    second[1].write(`${JSON.stringify(response(request, { negotiatedProtocolVersion: "1.1", serviceVersion: "0.1.0" }, "1.1"))}\n`);
+  });
+  const client = await ProtocolClient.connect(() => connectorCalls++ === 0 ? first[0] : second[0]);
+  try {
+    await client.handshake("0123456789abcdef", "test", "0.2.0");
+    const subscribing = client.subscribeEvents(0);
+    void subscribing.catch(() => {});
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.ok(subscribeRequest);
+
+    await assert.rejects(
+      () => client.reconnect(),
+      /client lifecycle operation is already in progress/
+    );
+    assert.equal(connectorCalls, 1);
+
+    first[1].write(
+      `${JSON.stringify(response(subscribeRequest, { afterSequence: 0 }, "1.1"))}\n${JSON.stringify(taskEvent(1, "task.created"))}\n`
+    );
+    const subscription = await subscribing;
+    assert.equal((await subscription.next()).value?.sequence, 1);
+  } finally {
+    client.close();
+  }
 });
 
 test("close invalidates a reconnect waiting for its connector and destroys the late stream", async () => {

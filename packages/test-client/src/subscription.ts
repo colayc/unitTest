@@ -6,6 +6,8 @@ export class EventSubscription implements AsyncIterable<TaskEvent> {
   #closed = false;
   lastSequence: number;
 
+  get closed(): boolean { return this.#closed; }
+
   constructor(afterSequence: number) {
     if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) {
       throw new Error("event subscription sequence must be a non-negative safe integer");

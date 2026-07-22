@@ -25,11 +25,18 @@ const validators: Record<ProtocolVersion, ValidateFunction> = {
 type Pending = {
   version: ProtocolVersion;
   method: Method;
+  allowLegacyHandshakeError: boolean;
   onResponse?: (payload: Record<string, unknown>) => void;
   onError?: (error: ProtocolError) => void;
   resolve: (payload: Record<string, unknown>) => void;
   reject: (error: Error) => void;
 };
+
+export interface RequestOptions {
+  allowLegacyHandshakeError?: boolean;
+  onResponse?: (payload: Record<string, unknown>) => void;
+  onError?: (error: ProtocolError) => void;
+}
 
 export class Connection {
   readonly #pending = new Map<string, Pending>();
@@ -52,8 +59,7 @@ export class Connection {
     version: ProtocolVersion,
     method: Method,
     payload: Record<string, unknown>,
-    onResponse?: (payload: Record<string, unknown>) => void,
-    onError?: (error: ProtocolError) => void
+    options: RequestOptions = {}
   ): Promise<Record<string, unknown>> {
     if (this.#closed) return Promise.reject(new Error("service connection is closed"));
     const messageId = randomUUID().replaceAll("-", "");
@@ -71,12 +77,18 @@ export class Connection {
     }
     const encoded = Buffer.from(`${JSON.stringify(request)}\n`, "utf8");
     if (encoded.byteLength - 1 > MAX_MESSAGE_BYTES) {
-      const failure = new Error("protocol line exceeds the 1 MiB limit");
-      this.#closeWithError(failure);
-      return Promise.reject(failure);
+      return Promise.reject(new Error("protocol line exceeds the 1 MiB limit"));
     }
     return new Promise((resolve, reject) => {
-      this.#pending.set(messageId, { version, method, onResponse, onError, resolve, reject });
+      this.#pending.set(messageId, {
+        version,
+        method,
+        allowLegacyHandshakeError: options.allowLegacyHandshakeError === true,
+        onResponse: options.onResponse,
+        onError: options.onError,
+        resolve,
+        reject
+      });
       this.stream.write(encoded, (error) => {
         if (!error) return;
         this.#closeWithError(error);
@@ -160,7 +172,12 @@ export class Connection {
     }
     const pending = this.#pending.get(message.requestId);
     if (!pending) return true;
-    if (message.protocolVersion !== pending.version) {
+    const isAllowedLegacyHandshakeError = pending.allowLegacyHandshakeError
+      && pending.version === "1.1"
+      && pending.method === "handshake"
+      && message.kind === "error"
+      && message.protocolVersion === "1.0";
+    if (message.protocolVersion !== pending.version && !isAllowedLegacyHandshakeError) {
       this.#closeWithError(new Error("response protocol version does not match request"));
       return false;
     }

@@ -167,10 +167,9 @@ export class ProtocolClient {
   #activeSubscription: EventSubscription | undefined;
   #unsubscribeEvent: (() => void) | undefined;
   #unsubscribeClose: (() => void) | undefined;
-  #reconnecting = false;
+  #lifecycleOperation: "subscribe" | "reconnect" | undefined;
   #reconnectGeneration = 0;
   #reconnectCandidate: Connection | undefined;
-  #subscriptionChanging = false;
   #closed = false;
 
   private constructor(connection: Connection, connector?: ConnectionConnector) {
@@ -182,7 +181,7 @@ export class ProtocolClient {
   async handshake(token: string, clientName: string, clientVersion: string): Promise<HandshakeResult> {
     if (this.#closed) throw new Error("protocol client is closed");
     const credentials = { token, clientName, clientVersion };
-    const result = await this.#authenticate(this.#connection, credentials);
+    const result = await this.#authenticate(this.#connection, credentials, this.#negotiatedVersion === undefined);
     this.#credentials = credentials;
     this.#negotiatedVersion = result.negotiatedProtocolVersion;
     return result;
@@ -237,8 +236,7 @@ export class ProtocolClient {
     if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) {
       throw new Error("invalid protocol request: afterSequence must be a non-negative safe integer");
     }
-    if (this.#subscriptionChanging) throw new Error("event subscription change is already in progress");
-    this.#subscriptionChanging = true;
+    this.#beginLifecycleOperation("subscribe");
     const connection = this.#connection;
     const subscription = new EventSubscription(afterSequence);
     const previous = this.#activeSubscription;
@@ -251,18 +249,21 @@ export class ProtocolClient {
       }
     };
     try {
-      await connection.request("1.1", "events/subscribe", { afterSequence }, (payload) => {
-        try {
-          validateSubscriptionAcknowledgement(payload, afterSequence);
-          if (this.#closed || connection !== this.#connection) throw new Error("event subscription connection is no longer active");
-        } catch (error) {
-          retireUnacknowledgedSubscriptions();
-          throw error;
-        }
-        previous?.close();
-        this.#activeSubscription = subscription;
-        committed = true;
-      }, () => retireUnacknowledgedSubscriptions());
+      await connection.request("1.1", "events/subscribe", { afterSequence }, {
+        onResponse: (payload) => {
+          try {
+            validateSubscriptionAcknowledgement(payload, afterSequence);
+            if (this.#closed || connection !== this.#connection) throw new Error("event subscription connection is no longer active");
+          } catch (error) {
+            retireUnacknowledgedSubscriptions();
+            throw error;
+          }
+          previous?.close();
+          this.#activeSubscription = subscription;
+          committed = true;
+        },
+        onError: () => retireUnacknowledgedSubscriptions()
+      });
       return subscription;
     } catch (error) {
       if (!committed) {
@@ -272,7 +273,7 @@ export class ProtocolClient {
       }
       throw error;
     } finally {
-      this.#subscriptionChanging = false;
+      this.#endLifecycleOperation("subscribe");
     }
   }
 
@@ -342,8 +343,7 @@ export class ProtocolClient {
     if (!this.#connector) throw new Error("connection connector is not available; attach() clients cannot reconnect");
     if (!this.#credentials) throw new Error("handshake has not completed");
     if (this.#closed) throw new Error("protocol client is closed");
-    if (this.#reconnecting) throw new Error("reconnect is already in progress");
-    this.#reconnecting = true;
+    this.#beginLifecycleOperation("reconnect");
     const generation = ++this.#reconnectGeneration;
     const credentials = this.#credentials;
     const subscription = this.#activeSubscription;
@@ -367,11 +367,30 @@ export class ProtocolClient {
         throw new ProtocolError("PROTOCOL_FEATURE_UNAVAILABLE", "protocol 1.1 was not negotiated", false);
       }
       if (subscription) {
+        this.#requireActiveSubscription(subscription);
         const reconnectConnection = candidate;
+        const requestedAfterSequence = subscription.lastSequence;
         candidateEventUnsubscribe = reconnectConnection.onEvent((event) => this.#pushEvent(reconnectConnection, subscription, event));
-        const payload = await candidate.request("1.1", "events/subscribe", { afterSequence: subscription.lastSequence });
-        this.#requireCurrentReconnect(generation, candidate);
-        validateSubscriptionAcknowledgement(payload, subscription.lastSequence);
+        const invalidateCandidate = (error: Error) => {
+          candidateEventUnsubscribe?.();
+          candidateEventUnsubscribe = undefined;
+          reconnectConnection.close(error);
+        };
+        await reconnectConnection.request("1.1", "events/subscribe", { afterSequence: requestedAfterSequence }, {
+          onResponse: (payload) => {
+            try {
+              this.#requireCurrentReconnect(generation, reconnectConnection);
+              validateSubscriptionAcknowledgement(payload, requestedAfterSequence);
+            } catch (error) {
+              const failure = error instanceof Error ? error : new Error(String(error));
+              invalidateCandidate(failure);
+              throw failure;
+            }
+          },
+          onError: (error) => invalidateCandidate(error)
+        });
+        this.#requireCurrentReconnect(generation, reconnectConnection);
+        this.#requireActiveSubscription(subscription);
       }
       this.#requireCurrentReconnect(generation, candidate);
       this.#connection = candidate;
@@ -385,7 +404,7 @@ export class ProtocolClient {
       throw error;
     } finally {
       if (this.#reconnectCandidate === candidate) this.#reconnectCandidate = undefined;
-      this.#reconnecting = false;
+      this.#endLifecycleOperation("reconnect");
     }
   }
 
@@ -400,13 +419,17 @@ export class ProtocolClient {
     this.#connection.close();
   }
 
-  async #authenticate(connection: Connection, credentials: Credentials): Promise<HandshakeResult> {
+  async #authenticate(
+    connection: Connection,
+    credentials: Credentials,
+    allowLegacyHandshakeError = true
+  ): Promise<HandshakeResult> {
     let payload: Record<string, unknown>;
     try {
       payload = await connection.request("1.1", "handshake", {
         ...credentials,
         supportedProtocolVersions: ["1.1", "1.0"]
-      });
+      }, { allowLegacyHandshakeError });
     } catch (error) {
       if (!(error instanceof ProtocolError) || error.code !== "UNSUPPORTED_PROTOCOL") throw error;
       payload = await connection.request("1.0", "handshake", { ...credentials });
@@ -465,6 +488,20 @@ export class ProtocolClient {
     if (this.#reconnectIsCurrent(generation) && !candidate.closed) return;
     candidate.close();
     throw new Error("reconnect was cancelled because the protocol client is closed");
+  }
+
+  #beginLifecycleOperation(operation: "subscribe" | "reconnect"): void {
+    if (this.#lifecycleOperation) throw new Error("client lifecycle operation is already in progress");
+    this.#lifecycleOperation = operation;
+  }
+
+  #endLifecycleOperation(operation: "subscribe" | "reconnect"): void {
+    if (this.#lifecycleOperation === operation) this.#lifecycleOperation = undefined;
+  }
+
+  #requireActiveSubscription(subscription: EventSubscription): void {
+    if (this.#activeSubscription === subscription && !subscription.closed) return;
+    throw new Error("active event subscription changed during reconnect");
   }
 
   #pushEvent(connection: Connection, subscription: EventSubscription, event: TaskEvent): void {
