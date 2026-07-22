@@ -1,29 +1,29 @@
-# Foundation Protocol and Local Test Service Implementation Plan
+# 基础协议与本地测试服务实施计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **面向智能体工作者：** 必须使用以下子技能之一：superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans，按任务逐项实施本计划。步骤采用复选框（`- [ ]`）语法进行跟踪。
 
-**Goal:** Build a cross-platform vertical slice in which a TypeScript client authenticates to a Go service over Windows Named Pipe or Linux Unix Socket, queries capabilities, and shuts the service down through a versioned JSON protocol.
+**目标：** 构建一个跨平台垂直切片：TypeScript 客户端通过 Windows Named Pipe 或 Linux Unix Socket 向 Go 服务进行身份验证、查询能力，并通过带版本的 JSON 协议关闭该服务。
 
-**Architecture:** JSON Schema 2020-12 is the protocol source of truth. A deterministic generator produces the shared `Capabilities` model for TypeScript and Go; manually maintained envelopes contain transport semantics. The Go service owns IPC, authentication, and request dispatch, while the TypeScript package is transport-aware but independent of Code-OSS so the extension can consume it in a later phase.
+**架构：** JSON Schema 2020-12 是协议的唯一事实来源。确定性生成器为 TypeScript 和 Go 生成共享的 `Capabilities` 模型；手工维护的消息信封承载传输语义。Go 服务负责 IPC、身份验证和请求分派，而 TypeScript 包能够感知传输方式但不依赖 Code-OSS，以便扩展在后续阶段使用它。
 
-**Tech Stack:** Node.js 24.18.0 LTS, pnpm 11.4.0, TypeScript 6.0.3, `@types/node` 24.13.3, Go 1.26.5, JSON Schema 2020-12, quicktype 24.0.0, Ajv 8.20.0, ajv-formats 3.0.1, and `github.com/Microsoft/go-winio` 0.6.2.
+**技术栈：** Node.js 24.18.0 LTS、pnpm 11.4.0、TypeScript 6.0.3、`@types/node` 24.13.3、Go 1.26.5、JSON Schema 2020-12、quicktype 24.0.0、Ajv 8.20.0、ajv-formats 3.0.1，以及 `github.com/Microsoft/go-winio` 0.6.2。
 
-## Global Constraints
+## 全局约束
 
-- The first release supports Windows/MSVC, Windows/clang-cl coverage, Linux/GCC, and Linux/Clang.
-- The service must not depend on Electron, DOM, Code-OSS objects, or shell-command strings.
-- The TypeScript boundary uses workspace URIs; platform-native paths remain inside the Go service.
-- IPC is Windows Named Pipe on Windows and Unix Socket with mode `0600` on Linux.
-- Every connection must authenticate before any non-handshake request.
-- Protocol version `1.0` is the only accepted version in this phase.
-- Messages use UTF-8 NDJSON framing and have a maximum encoded line size of 1 MiB.
-- Protocol errors use stable codes separate from user-facing text.
-- Generated protocol files are committed and CI fails when regeneration changes them.
-- This phase does not execute workspace programs, compilers, CMake, or tests.
+- 首个版本支持 Windows/MSVC、Windows/clang-cl 覆盖率、Linux/GCC 和 Linux/Clang。
+- 服务不得依赖 Electron、DOM、Code-OSS 对象或 Shell 命令字符串。
+- TypeScript 边界使用工作区 URI；平台原生路径仍保留在 Go 服务内部。
+- IPC 在 Windows 上使用 Windows Named Pipe，在 Linux 上使用权限模式为 `0600` 的 Unix Socket。
+- 每个连接都必须先通过身份验证，才能发送任何非握手请求。
+- 此阶段只接受协议版本 `1.0`。
+- 消息采用 UTF-8 NDJSON 分帧，编码后每行的大小上限为 1 MiB。
+- 协议错误使用与面向用户文本分离的稳定错误码。
+- 生成的协议文件必须提交；如果重新生成后文件发生变化，CI 必须失败。
+- 此阶段不执行工作区程序、编译器、CMake 或测试。
 
 ---
 
-## Locked file structure
+## 锁定的文件结构
 
 ```text
 .editorconfig
@@ -87,28 +87,28 @@ tools/workspace-smoke/workspace-smoke.test.mjs
 docs/decisions/0001-local-ipc-and-protocol-v1.md
 ```
 
-### Task 1: Bootstrap the polyglot workspace
+### Task 1：引导多语言工作区
 
-**Files:**
+**文件：**
 
-- Create: `.editorconfig`
-- Create: `.gitattributes`
-- Create: `.gitignore`
-- Create: `.go-version`
-- Create: `.node-version`
-- Create: `package.json`
-- Create: `pnpm-workspace.yaml`
-- Create: `tsconfig.base.json`
-- Create: `go.work`
-- Create: `apps/test-service/go.mod`
-- Create: `tools/workspace-smoke/workspace-smoke.test.mjs`
+- 创建：`.editorconfig`
+- 创建：`.gitattributes`
+- 创建：`.gitignore`
+- 创建：`.go-version`
+- 创建：`.node-version`
+- 创建：`package.json`
+- 创建：`pnpm-workspace.yaml`
+- 创建：`tsconfig.base.json`
+- 创建：`go.work`
+- 创建：`apps/test-service/go.mod`
+- 创建：`tools/workspace-smoke/workspace-smoke.test.mjs`
 
-**Interfaces:**
+**接口：**
 
-- Consumes: none.
-- Produces: root `pnpm test`, `pnpm build`, `pnpm generate:protocol`, and `pnpm check:protocol-generated` commands used by every later task.
+- 输入：无。
+- 产出：根目录下的 `pnpm test`、`pnpm build`、`pnpm generate:protocol` 和 `pnpm check:protocol-generated` 命令，供后续所有任务使用。
 
-- [ ] **Step 1: Write the failing workspace smoke test**
+- [ ] **Step 1：编写会失败的工作区冒烟测试**
 
 ```js
 // tools/workspace-smoke/workspace-smoke.test.mjs
@@ -125,13 +125,13 @@ test("workspace pins supported toolchains", async () => {
 });
 ```
 
-- [ ] **Step 2: Run the smoke test and verify the missing bootstrap fails**
+- [ ] **Step 2：运行冒烟测试并验证缺少引导配置时测试失败**
 
-Run: `node --test tools/workspace-smoke/workspace-smoke.test.mjs`
+运行：`node --test tools/workspace-smoke/workspace-smoke.test.mjs`
 
-Expected: FAIL with `ENOENT` for `.node-version`.
+预期：测试以 FAIL 结束，报告 `ENOENT`，涉及 `.node-version`。
 
-- [ ] **Step 3: Add the workspace manifests and formatting rules**
+- [ ] **Step 3：添加工作区清单和格式规则**
 
 ```json
 {
@@ -249,43 +249,43 @@ node_modules/
 *.sock
 ```
 
-- [ ] **Step 4: Install dependencies and verify the workspace**
+- [ ] **Step 4：安装依赖并验证工作区**
 
-Run: `corepack enable`
+运行：`corepack enable`
 
-Run: `corepack prepare pnpm@11.4.0 --activate`
+运行：`corepack prepare pnpm@11.4.0 --activate`
 
-Run: `pnpm install`
+运行：`pnpm install`
 
-Run: `node --test tools/workspace-smoke/workspace-smoke.test.mjs`
+运行：`node --test tools/workspace-smoke/workspace-smoke.test.mjs`
 
-Expected: one passing test and a committed `pnpm-lock.yaml`.
+预期：一项测试通过，并且 `pnpm-lock.yaml` 已提交。
 
-- [ ] **Step 5: Commit the bootstrap**
+- [ ] **Step 5：提交引导配置**
 
 ```bash
 git add .editorconfig .gitattributes .gitignore .go-version .node-version go.work package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json apps/test-service/go.mod tools/workspace-smoke/workspace-smoke.test.mjs
 git commit -m "build: bootstrap TypeScript and Go workspace"
 ```
 
-### Task 2: Define protocol v1 and contract validation
+### Task 2：定义协议 v1 和契约验证
 
-**Files:**
+**文件：**
 
-- Create: `docs/decisions/0001-local-ipc-and-protocol-v1.md`
-- Create: `packages/protocol-schema/package.json`
-- Create: `packages/protocol-schema/schema/v1/capabilities.schema.json`
-- Create: `packages/protocol-schema/schema/v1/message.schema.json`
-- Create: `packages/protocol-schema/fixtures/v1/handshake.valid.json`
-- Create: `packages/protocol-schema/fixtures/v1/handshake-missing-token.invalid.json`
-- Create: `packages/protocol-schema/test/schema.test.mjs`
+- 创建：`docs/decisions/0001-local-ipc-and-protocol-v1.md`
+- 创建：`packages/protocol-schema/package.json`
+- 创建：`packages/protocol-schema/schema/v1/capabilities.schema.json`
+- 创建：`packages/protocol-schema/schema/v1/message.schema.json`
+- 创建：`packages/protocol-schema/fixtures/v1/handshake.valid.json`
+- 创建：`packages/protocol-schema/fixtures/v1/handshake-missing-token.invalid.json`
+- 创建：`packages/protocol-schema/test/schema.test.mjs`
 
-**Interfaces:**
+**接口：**
 
-- Consumes: root Ajv dependencies from Task 1.
-- Produces: protocol version `1.0`, methods `handshake`, `capabilities/get`, and `shutdown`, plus error codes `INVALID_MESSAGE`, `UNSUPPORTED_PROTOCOL`, `AUTH_REQUIRED`, `AUTH_FAILED`, and `METHOD_NOT_FOUND`.
+- 输入：Task 1 中根目录的 Ajv 依赖。
+- 产出：协议版本 `1.0`，方法 `handshake`、`capabilities/get` 和 `shutdown`，以及错误码 `INVALID_MESSAGE`、`UNSUPPORTED_PROTOCOL`、`AUTH_REQUIRED`、`AUTH_FAILED` 和 `METHOD_NOT_FOUND`。
 
-- [ ] **Step 1: Add valid and invalid handshake fixtures**
+- [ ] **Step 1：添加有效和无效的握手测试数据**
 
 ```json
 {
@@ -316,7 +316,7 @@ git commit -m "build: bootstrap TypeScript and Go workspace"
 }
 ```
 
-- [ ] **Step 2: Write the contract test and verify the absent schemas fail**
+- [ ] **Step 2：编写契约测试并验证缺少 Schema 时测试失败**
 
 ```js
 // packages/protocol-schema/test/schema.test.mjs
@@ -338,11 +338,11 @@ test("protocol v1 accepts authenticated handshake shape and rejects a missing to
 });
 ```
 
-Run: `node --test packages/protocol-schema/test/schema.test.mjs`
+运行：`node --test packages/protocol-schema/test/schema.test.mjs`
 
-Expected: FAIL with `ENOENT` for `message.schema.json`.
+预期：测试以 FAIL 结束，报告 `ENOENT`，涉及 `message.schema.json`。
 
-- [ ] **Step 3: Add the exact protocol schemas**
+- [ ] **Step 3：添加精确定义的协议 Schema**
 
 ```json
 {
@@ -486,41 +486,41 @@ Expected: FAIL with `ENOENT` for `message.schema.json`.
 }
 ```
 
-- [ ] **Step 4: Record the transport decision and run the contract test**
+- [ ] **Step 4：记录传输决策并运行契约测试**
 
-Write `docs/decisions/0001-local-ipc-and-protocol-v1.md` with these binding decisions: per-user Go service; Named Pipe on Windows; Unix Socket mode `0600` on Linux; NDJSON framing; 1 MiB line limit; handshake first; token supplied through a mode-restricted file and deleted after the service reads it; protocol `1.0`; error codes from the Schema; disconnect ends only that client session, not the service process.
+在 `docs/decisions/0001-local-ipc-and-protocol-v1.md` 中写入以下具有约束力的决策：每位用户一个 Go 服务；Windows 使用 Named Pipe；Linux 使用权限模式为 `0600` 的 Unix Socket；采用 NDJSON 分帧；每行上限为 1 MiB；必须先握手；令牌通过权限模式受限的文件提供，服务读取令牌后删除该文件；协议为 `1.0`；错误码来自 Schema；连接断开只结束对应的客户端会话，不结束服务进程。
 
-Run: `pnpm install`
+运行：`pnpm install`
 
-Run: `pnpm --filter @unit-test-ide/protocol-schema test`
+运行：`pnpm --filter @unit-test-ide/protocol-schema test`
 
-Expected: one passing contract test.
+预期：一项契约测试通过。
 
-- [ ] **Step 5: Commit the protocol contract**
+- [ ] **Step 5：提交协议契约**
 
 ```bash
 git add docs/decisions/0001-local-ipc-and-protocol-v1.md packages/protocol-schema pnpm-lock.yaml
 git commit -m "feat(protocol): define local IPC contract v1"
 ```
 
-### Task 3: Generate TypeScript and Go capability models
+### Task 3：生成 TypeScript 和 Go 能力模型
 
-**Files:**
+**文件：**
 
-- Create: `tools/protocol-gen/generate.mjs`
-- Create: `packages/protocol-models/package.json`
-- Create: `packages/protocol-models/tsconfig.json`
-- Create: `packages/protocol-models/src/index.ts`
-- Create: `packages/protocol-models/src/generated-contract.test.ts`
-- Generate: `packages/protocol-models/src/generated/capabilities.ts`
-- Generate: `apps/test-service/internal/protocolmodel/generated.go`
+- 创建：`tools/protocol-gen/generate.mjs`
+- 创建：`packages/protocol-models/package.json`
+- 创建：`packages/protocol-models/tsconfig.json`
+- 创建：`packages/protocol-models/src/index.ts`
+- 创建：`packages/protocol-models/src/generated-contract.test.ts`
+- 生成：`packages/protocol-models/src/generated/capabilities.ts`
+- 生成：`apps/test-service/internal/protocolmodel/generated.go`
 
-**Interfaces:**
+**接口：**
 
-- Consumes: `capabilities.schema.json` from Task 2.
-- Produces: TypeScript `Capabilities` and Go `protocolmodel.Capabilities` with fields `platform`, `transports`, `toolchains`, `frameworks`, and `coverageTools`.
+- 输入：Task 2 中的 `capabilities.schema.json`。
+- 产出：TypeScript `Capabilities` 和 Go `protocolmodel.Capabilities`，包含字段 `platform`、`transports`、`toolchains`、`frameworks` 和 `coverageTools`。
 
-- [ ] **Step 1: Write the TypeScript type contract before generation**
+- [ ] **Step 1：在生成前编写 TypeScript 类型契约**
 
 ```ts
 // packages/protocol-models/src/generated-contract.test.ts
@@ -540,11 +540,11 @@ test("generated capabilities represent an empty Windows service", () => {
 });
 ```
 
-Run: `pnpm --filter @unit-test-ide/protocol-models test`
+运行：`pnpm --filter @unit-test-ide/protocol-models test`
 
-Expected: FAIL because the package and generated model do not exist.
+预期：由于包和生成的模型尚不存在，测试以 FAIL 结束。
 
-- [ ] **Step 2: Add the deterministic generator**
+- [ ] **Step 2：添加确定性生成器**
 
 ```js
 // tools/protocol-gen/generate.mjs
@@ -593,7 +593,7 @@ try {
 }
 ```
 
-- [ ] **Step 3: Add the TypeScript model package and generate both languages**
+- [ ] **Step 3：添加 TypeScript 模型包并生成两种语言的模型**
 
 ```json
 {
@@ -627,44 +627,44 @@ try {
 export type { Capabilities } from "./generated/capabilities.js";
 ```
 
-Run: `pnpm install`
+运行：`pnpm install`
 
-Run: `pnpm generate:protocol`
+运行：`pnpm generate:protocol`
 
-Run: `pnpm --filter @unit-test-ide/protocol-models test`
+运行：`pnpm --filter @unit-test-ide/protocol-models test`
 
-Run: `pnpm check:protocol-generated`
+运行：`pnpm check:protocol-generated`
 
-Expected: TypeScript test passes and generation check exits 0 without changing files.
+预期：TypeScript 测试通过，生成检查以 0 退出且不更改任何文件。
 
-- [ ] **Step 4: Verify the generated Go model compiles**
+- [ ] **Step 4：验证生成的 Go 模型能够编译**
 
-Run: `go test ./apps/test-service/internal/protocolmodel`
+运行：`go test ./apps/test-service/internal/protocolmodel`
 
-Expected: package compiles with no test files.
+预期：包编译成功，且没有测试文件。
 
-- [ ] **Step 5: Commit generated models and generator**
+- [ ] **Step 5：提交生成的模型和生成器**
 
 ```bash
 git add tools/protocol-gen packages/protocol-models apps/test-service/internal/protocolmodel/generated.go pnpm-lock.yaml
 git commit -m "feat(protocol): generate TypeScript and Go capability models"
 ```
 
-### Task 4: Implement Go envelopes and authenticated session dispatch
+### Task 4：实现 Go 消息信封与经过身份验证的会话请求分派
 
-**Files:**
+**文件：**
 
-- Create: `apps/test-service/internal/protocol/envelope.go`
-- Create: `apps/test-service/internal/protocol/envelope_test.go`
-- Create: `apps/test-service/internal/session/session.go`
-- Create: `apps/test-service/internal/session/session_test.go`
+- 创建：`apps/test-service/internal/protocol/envelope.go`
+- 创建：`apps/test-service/internal/protocol/envelope_test.go`
+- 创建：`apps/test-service/internal/session/session.go`
+- 创建：`apps/test-service/internal/session/session_test.go`
 
-**Interfaces:**
+**接口：**
 
-- Consumes: `protocolmodel.Capabilities` from Task 3.
-- Produces: `protocol.DecodeRequest([]byte)`, `session.New(token, platform, transport)`, `(*Session).Handle(request)`, and `(*Session).ShutdownRequested()`.
+- 输入：Task 3 中的 `protocolmodel.Capabilities`。
+- 产出：`protocol.DecodeRequest([]byte)`、`session.New(token, platform, transport)`、`(*Session).Handle(request)` 和 `(*Session).ShutdownRequested()`。
 
-- [ ] **Step 1: Write failing codec and authentication tests**
+- [ ] **Step 1：编写会失败的编解码器和身份验证测试**
 
 ```go
 // apps/test-service/internal/session/session_test.go
@@ -702,11 +702,11 @@ func TestSessionRejectsWrongToken(t *testing.T) {
 }
 ```
 
-Run: `go test ./apps/test-service/internal/session -v`
+运行：`go test ./apps/test-service/internal/session -v`
 
-Expected: FAIL because the protocol and session packages do not exist.
+预期：由于 protocol 和 session 包尚不存在，测试以 FAIL 结束。
 
-- [ ] **Step 2: Implement strict request decoding and response envelopes**
+- [ ] **Step 2：实现严格的请求解码和响应消息信封**
 
 ```go
 // apps/test-service/internal/protocol/envelope.go
@@ -771,7 +771,7 @@ func Failure(request Request, code, message string, retryable bool) Response {
 func newID() string { var value [16]byte; if _, err := rand.Read(value[:]); err != nil { panic(err) }; return hex.EncodeToString(value[:]) }
 ```
 
-- [ ] **Step 3: Implement the session state machine**
+- [ ] **Step 3：实现会话状态机**
 
 ```go
 // apps/test-service/internal/session/session.go
@@ -815,7 +815,7 @@ func (s *Session) Handle(request protocol.Request) protocol.Response {
 }
 ```
 
-- [ ] **Step 4: Add the remaining codec and state-machine cases**
+- [ ] **Step 4：添加其余编解码器和状态机用例**
 
 ```go
 // apps/test-service/internal/protocol/envelope_test.go
@@ -842,7 +842,7 @@ func TestDecodeRequestRejectsTrailingJSON(t *testing.T) {
 }
 ```
 
-Append these cases to `session_test.go`:
+将这些用例追加到 `session_test.go`：
 
 ```go
 func TestSessionRejectsUnknownMethodAfterAuthentication(t *testing.T) {
@@ -861,13 +861,13 @@ func TestShutdownClosesSignalOnce(t *testing.T) {
 }
 ```
 
-Run: `gofmt -w apps/test-service/internal/protocol apps/test-service/internal/session`
+运行：`gofmt -w apps/test-service/internal/protocol apps/test-service/internal/session`
 
-Run: `go test ./apps/test-service/internal/protocol ./apps/test-service/internal/session -v`
+运行：`go test ./apps/test-service/internal/protocol ./apps/test-service/internal/session -v`
 
-Expected: all codec and session tests pass.
+预期：所有编解码器和会话测试均通过。
 
-- [ ] **Step 5: Commit the Go protocol session**
+- [ ] **Step 5：提交 Go 协议会话**
 
 ```bash
 git add apps/test-service/internal/protocol apps/test-service/internal/session
