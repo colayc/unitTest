@@ -101,7 +101,6 @@ type windowsProcess struct {
 	outputMu         sync.Mutex
 	outputClosed     bool
 	jobErrMu         sync.Mutex
-	jobOperationErr  error
 	jobCloseErr      error
 	closeMu          sync.Mutex
 	closeRunning     bool
@@ -438,7 +437,7 @@ func (process *windowsProcess) closeWindowsProcess(ctx context.Context) error {
 		}
 	} else {
 		process.closeOuterJob()
-		if process.outerJobError() != nil {
+		if process.currentCleanupError() != nil {
 			closeErr = errProcessHostFailed
 		}
 	}
@@ -568,7 +567,7 @@ func (process *windowsProcess) forceTerminate(ctx context.Context, prior error) 
 func (process *windowsProcess) shutdownHostBounded(ctx context.Context) error {
 	process.shutdownOnce.Do(func() {
 		process.closeControl()
-		process.terminateOuterJob()
+		jobOperationErr := process.terminateOuterJob()
 		process.closeOuterJob()
 		process.closeStatus()
 		process.closeOutputReaders()
@@ -587,7 +586,7 @@ func (process *windowsProcess) shutdownHostBounded(ctx context.Context) error {
 		if !waitWindowsClosedContext(ctx, process.outputDone, 100*time.Millisecond) {
 			process.closeOutput()
 		}
-		if cleanupErr != nil || process.outerJobError() != nil || hostCloseErr != nil {
+		if cleanupErr != nil || jobOperationErr != nil || process.outerJobError() != nil || hostCloseErr != nil {
 			process.shutdownErr = errProcessHostFailed
 		}
 	})
@@ -612,19 +611,32 @@ func (process *windowsProcess) closeOuterJob() {
 	process.jobErrMu.Unlock()
 }
 
-func (process *windowsProcess) terminateOuterJob() {
+func (process *windowsProcess) terminateOuterJob() error {
 	_, err := process.jobOwner.UseExclusive(func(handle windows.Handle) error {
 		return process.ops.terminateJob(handle, 1)
 	})
-	process.jobErrMu.Lock()
-	process.jobOperationErr = errors.Join(process.jobOperationErr, err)
-	process.jobErrMu.Unlock()
+	return err
 }
 
 func (process *windowsProcess) outerJobError() error {
 	process.jobErrMu.Lock()
 	defer process.jobErrMu.Unlock()
-	return errors.Join(process.jobOperationErr, process.jobCloseErr)
+	return process.jobCloseErr
+}
+
+func (process *windowsProcess) currentCleanupError() error {
+	if process.outerJobError() != nil || process.jobOwner.Open() {
+		return errProcessHostFailed
+	}
+	select {
+	case <-process.hostExited:
+		if process.closeHostHandle() != nil || process.hostOwner.Open() {
+			return errProcessHostFailed
+		}
+		return nil
+	default:
+		return errProcessHostFailed
+	}
 }
 
 func (process *windowsProcess) markHostExited() {

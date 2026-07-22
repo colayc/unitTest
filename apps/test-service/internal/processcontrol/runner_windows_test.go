@@ -622,6 +622,69 @@ func TestWindowsProcessCloseCanRetryAfterContextCancellation(t *testing.T) {
 	}
 }
 
+func TestWindowsCloseRetryClearsResolvedJobTerminationError(t *testing.T) {
+	controlReader, controlWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controlReader.Close()
+	statusReader, statusWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer statusWriter.Close()
+
+	var terminateCalls atomic.Int32
+	var jobClosed atomic.Bool
+	var hostClosed atomic.Bool
+	operations := defaultWindowsRunnerOperations()
+	operations.terminateJob = func(windows.Handle, uint32) error {
+		terminateCalls.Add(1)
+		return errors.New("injected transient job termination failure")
+	}
+	operations.closeHandle = func(handle windows.Handle) error {
+		switch handle {
+		case 701:
+			jobClosed.Store(true)
+		case 702:
+			hostClosed.Store(true)
+		}
+		return nil
+	}
+	hostExited := make(chan struct{})
+	close(hostExited)
+	outputDone := make(chan struct{})
+	close(outputDone)
+	process := &windowsProcess{
+		control:       controlWriter,
+		status:        statusReader,
+		jobOwner:      winprocess.NewHandleOwner(701, operations.closeHandle),
+		hostOwner:     winprocess.NewHandleOwner(702, operations.closeHandle),
+		ops:           operations,
+		hostExited:    hostExited,
+		output:        make(chan Output),
+		outputDone:    outputDone,
+		outputDiscard: make(chan struct{}),
+		done:          make(chan Result, 1),
+		finished:      make(chan struct{}),
+		contextStop:   make(chan struct{}),
+	}
+
+	if err := process.Close(context.Background()); !errors.Is(err, errProcessHostFailed) {
+		t.Fatalf("first Close = %v, want host failure", err)
+	}
+	if !jobClosed.Load() || !hostClosed.Load() || process.jobOwner.Open() || process.hostOwner.Open() {
+		t.Fatalf("cleanup state: jobClosed=%t hostClosed=%t jobOpen=%t hostOpen=%t",
+			jobClosed.Load(), hostClosed.Load(), process.jobOwner.Open(), process.hostOwner.Open())
+	}
+	if err := process.Close(context.Background()); err != nil {
+		t.Fatalf("retry Close = %v, want resolved cleanup", err)
+	}
+	if calls := terminateCalls.Load(); calls != 1 {
+		t.Fatalf("TerminateJobObject calls = %d, want 1", calls)
+	}
+}
+
 func TestWindowsCloseAndDoneAreBoundedWhenEveryNativeCleanupStageFails(t *testing.T) {
 	controlReader, controlWriter, err := os.Pipe()
 	if err != nil {

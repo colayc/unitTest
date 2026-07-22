@@ -55,10 +55,11 @@ type Manager struct {
 	processCloseTimeout time.Duration
 	outputFlushInterval time.Duration
 	commands            chan any
+	shutdownSignal      chan struct{}
 	stopped             chan struct{}
 	healthy             atomic.Bool
 	closing             atomic.Bool
-	shutdownEnqueued    atomic.Bool
+	shutdownPending     atomic.Bool
 	storageFailed       bool // command-loop owned
 }
 
@@ -79,7 +80,7 @@ type listCommand struct {
 	reply  chan listResponse
 }
 
-type shutdownCommand struct{ initiate bool }
+type shutdownCommand struct{}
 type outputCommand struct {
 	taskID string
 	value  ProcessOutput
@@ -173,7 +174,8 @@ func NewManager(config ManagerConfig) (*Manager, error) {
 		store: config.Store, publisher: config.Publisher, processes: config.Processes, artifacts: config.Artifacts,
 		clock: config.Clock, newID: config.NewID, serviceExecutable: config.ServiceExecutable,
 		serviceInstanceID: config.ServiceInstanceID, terminationGrace: config.TerminationGrace, processCloseTimeout: config.ProcessCloseTimeout,
-		outputFlushInterval: config.OutputFlushInterval, commands: make(chan any, config.CommandQueue), stopped: make(chan struct{}),
+		outputFlushInterval: config.OutputFlushInterval, commands: make(chan any, config.CommandQueue),
+		shutdownSignal: make(chan struct{}, 1), stopped: make(chan struct{}),
 	}
 	manager.healthy.Store(true)
 	go manager.loop()
@@ -269,16 +271,11 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	}
 	m.closing.Store(true)
 	m.healthy.Store(false)
-	initiate := m.shutdownEnqueued.CompareAndSwap(false, true)
-	select {
-	case m.commands <- shutdownCommand{initiate: initiate}:
-	case <-ctx.Done():
-		if initiate {
-			m.shutdownEnqueued.CompareAndSwap(true, false)
+	if m.shutdownPending.CompareAndSwap(false, true) {
+		select {
+		case m.shutdownSignal <- struct{}{}:
+		default:
 		}
-		return ctx.Err()
-	case <-m.stopped:
-		return nil
 	}
 	select {
 	case <-ctx.Done():
@@ -310,7 +307,19 @@ func (m *Manager) sendInternal(command any) bool {
 
 func (m *Manager) loop() {
 	active := make(map[string]*activeTask)
-	for command := range m.commands {
+	shutdownInitiated := false
+	for {
+		var command any
+		select {
+		case <-m.shutdownSignal:
+			command = shutdownCommand{}
+		default:
+			select {
+			case <-m.shutdownSignal:
+				command = shutdownCommand{}
+			case command = <-m.commands:
+			}
+		}
 		switch value := command.(type) {
 		case startCommand:
 			value.reply <- m.start(value.request, active)
@@ -375,12 +384,11 @@ func (m *Manager) loop() {
 				}
 			}
 		case shutdownCommand:
-			if value.initiate {
-				m.closing.Store(true)
-				m.healthy.Store(false)
-			}
+			m.shutdownPending.Store(false)
+			initiate := !shutdownInitiated
+			shutdownInitiated = true
 			for _, current := range active {
-				if value.initiate && current.task.Status != StatusFinished && current.cause == "" {
+				if initiate && current.task.Status != StatusFinished && current.cause == "" {
 					current.cause = OutcomeInterrupted
 					m.terminate(current)
 				}

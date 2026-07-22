@@ -302,6 +302,72 @@ func TestShutdownRetainsOwnershipUntilManagerQuiescesAndCanBeRetried(t *testing.
 	}
 }
 
+func TestShutdownRetryAfterProcessCloseFailureReleasesInstanceLock(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "data")
+	process := newRetryCloseProcess()
+	runner := &recordingRunner{prepared: process}
+	active, err := Open(Config{
+		DataDir: root, ServiceExecutable: os.Args[0], Platform: platformForTest(),
+		TerminationGrace: time.Millisecond, dependencies: testDependencies(runner, nil),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(process.releaseClose) }) }
+	t.Cleanup(func() { release(); _ = active.Close() })
+	started, err := active.Start(context.Background(), task.StartRequest{
+		IdempotencyKey: "retry-close-runtime", Scenario: task.ScenarioSuccess, Timeout: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	process.complete(processcontrol.Result{ExitCode: 0})
+	deadline := time.Now().Add(time.Second)
+	for process.closeCalls.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if process.closeCalls.Load() != 1 {
+		t.Fatalf("initial process Close calls = %d, want 1", process.closeCalls.Load())
+	}
+	finished, err := active.Get(context.Background(), started.ID)
+	if err != nil || finished.Status != task.StatusFinished {
+		t.Fatalf("finished task = %#v, %v", finished, err)
+	}
+
+	short, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	if err := active.Shutdown(short); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Shutdown after transient Close failure = %v, want deadline", err)
+	}
+	layout, err := PrepareDataDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	locked, err := instance.Lock(layout.Lock)
+	if !errors.Is(err, instance.ErrAlreadyRunning) || locked != nil {
+		if locked != nil {
+			_ = locked.Close()
+		}
+		t.Fatalf("failed Close released instance lock: lock=%#v error=%v", locked, err)
+	}
+
+	release()
+	long, cancelLong := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelLong()
+	if err := active.Shutdown(long); err != nil {
+		t.Fatalf("retry Shutdown = %v", err)
+	}
+	if calls := process.closeCalls.Load(); calls < 2 {
+		t.Fatalf("process Close calls = %d, want retry", calls)
+	}
+	locked, err = instance.Lock(layout.Lock)
+	if err != nil {
+		t.Fatalf("retry Shutdown retained instance lock: %v", err)
+	}
+	_ = locked.Close()
+}
+
 func TestManagedProcessCloseStopsForwardersWhenUnderlyingChannelsRemainOpen(t *testing.T) {
 	process := newBlockingProcess()
 	managed := newManagedProcess(process)
@@ -585,6 +651,42 @@ type contextBlockingProcess struct {
 	releaseClose chan struct{}
 	closeOnce    sync.Once
 	closeCalls   atomic.Int32
+}
+
+type retryCloseProcess struct {
+	output       chan processcontrol.Output
+	done         chan processcontrol.Result
+	releaseClose chan struct{}
+	completeOnce sync.Once
+	closeCalls   atomic.Int32
+}
+
+func newRetryCloseProcess() *retryCloseProcess {
+	return &retryCloseProcess{
+		output: make(chan processcontrol.Output), done: make(chan processcontrol.Result, 1), releaseClose: make(chan struct{}),
+	}
+}
+
+func (*retryCloseProcess) Lease() task.ProcessLease {
+	return task.ProcessLease{HostPID: 5252, HostStartIdentity: "retry-close-process", TargetProcessGroup: 5253, ServiceInstanceID: "runtime"}
+}
+func (*retryCloseProcess) Start(context.Context) error                    { return nil }
+func (p *retryCloseProcess) Output() <-chan processcontrol.Output         { return p.output }
+func (p *retryCloseProcess) Done() <-chan processcontrol.Result           { return p.done }
+func (*retryCloseProcess) Terminate(context.Context, time.Duration) error { return nil }
+func (p *retryCloseProcess) Close(ctx context.Context) error {
+	if p.closeCalls.Add(1) == 1 {
+		return errors.New("injected transient process close failure")
+	}
+	select {
+	case <-p.releaseClose:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+func (p *retryCloseProcess) complete(result processcontrol.Result) {
+	p.completeOnce.Do(func() { close(p.output); p.done <- result; close(p.done) })
 }
 
 func newContextBlockingProcess() *contextBlockingProcess {
