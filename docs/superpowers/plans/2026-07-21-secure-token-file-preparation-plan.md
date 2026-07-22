@@ -1,6 +1,6 @@
 # 安全令牌文件准备实施计划
 
-> **面向智能体工作者：** 必须使用子技能：使用 superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans，逐项实施本计划。各步骤使用复选框（`- [ ]`）语法跟踪。
+> **面向智能体工作者：** 必需的子技能：superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans，逐项实施本计划。各步骤使用复选框（`- [ ]`）语法跟踪。
 
 **目标：** 在 TypeScript 写入秘密之前，以平台原生的仅所有者权限创建身份验证令牌文件，随后沿用现有且经过验证的服务启动路径。
 
