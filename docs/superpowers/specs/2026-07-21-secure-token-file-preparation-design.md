@@ -72,7 +72,7 @@ Go 进程获取当前进程 token SID，并构建受保护的 security descripto
 
 Go 进程以权限模式 `0600` 独占创建文件。它验证结果是归有效用户所有、且没有组或其他用户权限位的普通文件，然后关闭句柄。
 
-## Launcher Data Flow
+## 启动器数据流
 
 1. TypeScript 创建临时工作目录，并在内存中生成 token。
 2. 它使用 `--prepare-token-file <path>` 执行服务二进制程序，并等待退出码 `0`。
