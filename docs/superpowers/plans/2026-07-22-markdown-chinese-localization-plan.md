@@ -14,7 +14,7 @@
 
 以下约束适用于全部任务：
 
-- 只修改已跟踪的 `*.md` 文件，不修改生产代码、测试代码、配置、依赖或目录结构。
+- Git 跟踪内容只修改已跟踪的 `*.md` 文件，不修改生产代码、测试代码、配置、依赖或目录结构；允许在已忽略的 `.superpowers/markdown-localization/` 中创建不提交的临时校验资产。
 - 不重命名任何文件、目录、标题锚点所依赖的技术标识或链接目标。
 - 叙述性内容使用自然中文，不保留整句英文原文，不制作中英双语版本。
 - TypeScript、Go、Code-OSS、Windows、Linux、MSVC、GCC、Clang、clang-cl、llvm-cov、Named Pipe、DACL、SID、JSON Schema、E2E、GitHub Actions、PowerShell、Node.js、pnpm 等技术名词保持英文格式。
