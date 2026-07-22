@@ -874,24 +874,24 @@ git add apps/test-service/internal/protocol apps/test-service/internal/session
 git commit -m "feat(service): add authenticated protocol session"
 ```
 
-### Task 5: Add platform IPC and the Go service executable
+### Task 5：添加平台 IPC 和 Go 服务可执行程序
 
-**Files:**
+**文件：**
 
-- Create: `apps/test-service/internal/transport/listener.go`
-- Create: `apps/test-service/internal/transport/listener_unix.go`
-- Create: `apps/test-service/internal/transport/listener_windows.go`
-- Create: `apps/test-service/internal/transport/listener_unix_test.go`
-- Create: `apps/test-service/internal/server/server.go`
-- Create: `apps/test-service/internal/server/server_test.go`
-- Create: `apps/test-service/cmd/unit-test-service/main.go`
+- 创建：`apps/test-service/internal/transport/listener.go`
+- 创建：`apps/test-service/internal/transport/listener_unix.go`
+- 创建：`apps/test-service/internal/transport/listener_windows.go`
+- 创建：`apps/test-service/internal/transport/listener_unix_test.go`
+- 创建：`apps/test-service/internal/server/server.go`
+- 创建：`apps/test-service/internal/server/server_test.go`
+- 创建：`apps/test-service/cmd/unit-test-service/main.go`
 
-**Interfaces:**
+**接口：**
 
-- Consumes: `protocol.DecodeRequest` and `session.Session` from Task 4.
-- Produces: `transport.Listen(endpoint)`, `transport.PlatformName()`, `transport.TransportName()`, and executable flags `--endpoint` and `--token-file`.
+- 输入：Task 4 的 `protocol.DecodeRequest` 和 `session.Session`。
+- 产出：`transport.Listen(endpoint)`、`transport.PlatformName()`、`transport.TransportName()`，以及可执行程序标志 `--endpoint` 和 `--token-file`。
 
-- [ ] **Step 1: Write a failing connection-server test**
+- [ ] **Step 1：编写会失败的连接处理测试**
 
 ```go
 // apps/test-service/internal/server/server_test.go
@@ -939,11 +939,11 @@ func TestServeConnectionRejectsOversizedLine(t *testing.T) {
 }
 ```
 
-Run: `go test ./apps/test-service/internal/server -v`
+运行：`go test ./apps/test-service/internal/server -v`
 
-Expected: FAIL because `server.ServeConnection` does not exist.
+预期：测试以 FAIL 结束，因为 `server.ServeConnection` 尚不存在。
 
-- [ ] **Step 2: Implement IPC listener variants**
+- [ ] **Step 2：实现各平台的 IPC 监听器**
 
 ```go
 // apps/test-service/internal/transport/listener.go
@@ -1024,7 +1024,7 @@ func TestUnixSocketIsOwnerOnly(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: Implement bounded NDJSON serving**
+- [ ] **Step 3：实现带大小限制的 NDJSON 服务端处理**
 
 ```go
 // apps/test-service/internal/server/server.go
@@ -1061,7 +1061,7 @@ func ServeConnection(connection net.Conn, active *session.Session) {
 }
 ```
 
-- [ ] **Step 4: Implement service startup, token consumption, and graceful exit**
+- [ ] **Step 4：实现服务启动、令牌读取与删除以及优雅退出**
 
 ```go
 // apps/test-service/cmd/unit-test-service/main.go
@@ -1122,40 +1122,40 @@ func run(args []string, stdout, stderr io.Writer) int {
 }
 ```
 
-Run: `go mod tidy`
+运行：`go mod tidy`
 
-Run: `gofmt -w apps/test-service`
+运行：`gofmt -w apps/test-service`
 
-Run: `go test ./apps/test-service/...`
+运行：`go test ./apps/test-service/...`
 
-Run: `go build ./apps/test-service/cmd/unit-test-service`
+运行：`go build ./apps/test-service/cmd/unit-test-service`
 
-Expected: all Go tests pass and the service binary builds.
+预期：所有 Go 测试均通过，且服务二进制文件构建成功。
 
-- [ ] **Step 5: Commit the IPC service**
+- [ ] **Step 5：提交 IPC 服务**
 
 ```bash
 git add apps/test-service
 git commit -m "feat(service): serve protocol over local IPC"
 ```
 
-### Task 6: Build the reusable TypeScript protocol client
+### Task 6：构建可复用的 TypeScript 协议客户端
 
-**Files:**
+**文件：**
 
-- Create: `packages/test-client/package.json`
-- Create: `packages/test-client/tsconfig.json`
-- Create: `packages/test-client/src/envelopes.ts`
-- Create: `packages/test-client/src/client.ts`
-- Create: `packages/test-client/src/client.test.ts`
-- Create: `packages/test-client/src/index.ts`
+- 创建：`packages/test-client/package.json`
+- 创建：`packages/test-client/tsconfig.json`
+- 创建：`packages/test-client/src/envelopes.ts`
+- 创建：`packages/test-client/src/client.ts`
+- 创建：`packages/test-client/src/client.test.ts`
+- 创建：`packages/test-client/src/index.ts`
 
-**Interfaces:**
+**接口：**
 
-- Consumes: `Capabilities` from `@unit-test-ide/protocol-models` and protocol Schema from `@unit-test-ide/protocol-schema`.
-- Produces: `ProtocolClient.connect(endpoint)`, test-only `ProtocolClient.attach(stream)`, `handshake(token, clientName, clientVersion)`, `getCapabilities()`, `shutdown()`, and `close()`.
+- 输入：`Capabilities`（来自 `@unit-test-ide/protocol-models`）以及协议 Schema（来自 `@unit-test-ide/protocol-schema`）。
+- 产出：`ProtocolClient.connect(endpoint)`、仅供测试使用的 `ProtocolClient.attach(stream)`、`handshake(token, clientName, clientVersion)`、`getCapabilities()`、`shutdown()` 和 `close()`。
 
-- [ ] **Step 1: Write failing client tests with an in-memory duplex pair**
+- [ ] **Step 1：使用内存双工流对编写会失败的客户端测试**
 
 ```ts
 // packages/test-client/src/client.test.ts
@@ -1227,11 +1227,11 @@ test("client rejects lines larger than 1 MiB", async () => {
 });
 ```
 
-Run: `pnpm --filter @unit-test-ide/test-client test`
+运行：`pnpm --filter @unit-test-ide/test-client test`
 
-Expected: FAIL because the package does not exist.
+预期：测试以 FAIL 结束，因为该包尚不存在。
 
-- [ ] **Step 2: Define TypeScript envelopes and errors**
+- [ ] **Step 2：定义 TypeScript 消息信封和错误**
 
 ```ts
 // packages/test-client/src/envelopes.ts
@@ -1243,7 +1243,7 @@ export type IncomingEnvelope = ResponseEnvelope | ErrorEnvelope;
 export class ProtocolError extends Error { constructor(readonly code: string, message: string, readonly retryable: boolean) { super(message); } }
 ```
 
-- [ ] **Step 3: Implement bounded NDJSON correlation and public methods**
+- [ ] **Step 3：实现带大小限制的 NDJSON 请求/响应关联和公共方法**
 
 ```ts
 // packages/test-client/src/client.ts
@@ -1352,7 +1352,7 @@ export class ProtocolClient {
 }
 ```
 
-- [ ] **Step 4: Add package configuration and run unit tests**
+- [ ] **Step 4：添加包配置并运行单元测试**
 
 ```json
 {
@@ -1394,37 +1394,37 @@ export { ProtocolClient } from "./client.js";
 export { ProtocolError } from "./envelopes.js";
 ```
 
-Run: `pnpm install`
+运行：`pnpm install`
 
-Run: `pnpm --filter @unit-test-ide/test-client test`
+运行：`pnpm --filter @unit-test-ide/test-client test`
 
-Expected: all client unit tests pass.
+预期：所有客户端单元测试均通过。
 
-- [ ] **Step 5: Commit the reusable client**
+- [ ] **Step 5：提交可复用客户端**
 
 ```bash
 git add packages/test-client pnpm-lock.yaml
 git commit -m "feat(client): add authenticated local service client"
 ```
 
-### Task 7: Prove the Windows/Linux end-to-end vertical slice
+### Task 7：验证 Windows/Linux 端到端垂直切片
 
-**Files:**
+**文件：**
 
-- Create: `tools/service-probe/package.json`
-- Create: `tools/service-probe/tsconfig.json`
-- Create: `tools/service-probe/build-service.mjs`
-- Create: `tools/service-probe/src/endpoint.ts`
-- Create: `tools/service-probe/src/probe.ts`
-- Create: `tools/service-probe/src/probe.test.ts`
-- Modify: `package.json`
+- 创建：`tools/service-probe/package.json`
+- 创建：`tools/service-probe/tsconfig.json`
+- 创建：`tools/service-probe/build-service.mjs`
+- 创建：`tools/service-probe/src/endpoint.ts`
+- 创建：`tools/service-probe/src/probe.ts`
+- 创建：`tools/service-probe/src/probe.test.ts`
+- 修改：`package.json`
 
-**Interfaces:**
+**接口：**
 
-- Consumes: Go service executable and `ProtocolClient`.
-- Produces: `pnpm test:e2e` and a diagnostic command that prints the service `Capabilities` JSON.
+- 输入：Go 服务可执行程序和 `ProtocolClient`。
+- 产出：`pnpm test:e2e`，以及打印服务 `Capabilities` JSON 的诊断命令。
 
-- [ ] **Step 1: Write the failing end-to-end test**
+- [ ] **Step 1：编写会失败的端到端测试**
 
 ```ts
 // tools/service-probe/src/probe.test.ts
@@ -1442,11 +1442,11 @@ test("probe authenticates, reads capabilities, and shuts the service down", asyn
 });
 ```
 
-Run: `pnpm --filter @unit-test-ide/service-probe test:e2e`
+运行：`pnpm --filter @unit-test-ide/service-probe test:e2e`
 
-Expected: FAIL because the probe package does not exist.
+预期：测试以 FAIL 结束，因为服务探测工具包尚不存在。
 
-- [ ] **Step 2: Implement endpoint and service lifecycle helpers**
+- [ ] **Step 2：实现 endpoint 和服务生命周期辅助函数**
 
 ```ts
 // tools/service-probe/src/endpoint.ts
@@ -1542,7 +1542,7 @@ if (entry && import.meta.url === pathToFileURL(entry).href) {
 }
 ```
 
-- [ ] **Step 3: Add cross-platform build and test scripts**
+- [ ] **Step 3：添加跨平台构建和测试脚本**
 
 ```js
 // tools/service-probe/build-service.mjs
@@ -1591,44 +1591,44 @@ if (result.status !== 0) process.exit(result.status ?? 1);
 }
 ```
 
-Add root script: `"test:e2e": "pnpm --filter @unit-test-ide/service-probe test:e2e"`.
+添加根脚本：`"test:e2e": "pnpm --filter @unit-test-ide/service-probe test:e2e"`。
 
-- [ ] **Step 4: Run the complete local gate**
+- [ ] **Step 4：运行完整的本地验收流程**
 
-Run: `pnpm install`
+运行：`pnpm install`
 
-Run: `pnpm check:protocol-generated`
+运行：`pnpm check:protocol-generated`
 
-Run: `pnpm build`
+运行：`pnpm build`
 
-Run: `pnpm test`
+运行：`pnpm test`
 
-Run: `pnpm test:e2e`
+运行：`pnpm test:e2e`
 
-Expected: generated files are clean; all TypeScript and Go tests pass; the probe reports the current OS and expected IPC transport.
+预期：生成文件没有漂移；所有 TypeScript 和 Go 测试均通过；服务探测工具报告当前操作系统和预期的 IPC 传输方式。
 
-- [ ] **Step 5: Commit the vertical slice**
+- [ ] **Step 5：提交垂直切片**
 
 ```bash
 git add package.json pnpm-lock.yaml tools/service-probe
 git commit -m "test: prove local service vertical slice"
 ```
 
-### Task 8: Add CI gates and developer handoff documentation
+### Task 8：添加 CI 门禁和开发者交接文档
 
-**Files:**
+**文件：**
 
-- Create: `.github/workflows/foundation.yml`
-- Modify: `README.md`
+- 创建：`.github/workflows/foundation.yml`
+- 修改：`README.md`
 
-**Interfaces:**
+**接口：**
 
-- Consumes: all commands delivered by Tasks 1-7.
-- Produces: required Windows/Linux CI verification and reproducible local setup instructions.
+- 输入：Tasks 1-7 交付的所有命令。
+- 产出：必需的 Windows/Linux CI 验证，以及可复现的本地环境设置说明。
 
-- [ ] **Step 1: Add the failing documentation check**
+- [ ] **Step 1：添加会失败的文档检查**
 
-Append this test to `tools/workspace-smoke/workspace-smoke.test.mjs`:
+将此测试追加到 `tools/workspace-smoke/workspace-smoke.test.mjs`：
 
 ```js
 test("README contains the complete local verification gate", async () => {
@@ -1639,13 +1639,13 @@ test("README contains the complete local verification gate", async () => {
 });
 ```
 
-Run: `pnpm test:workspace`
+运行：`pnpm test:workspace`
 
-Expected: FAIL because the current README does not contain the commands.
+预期：测试以 FAIL 结束，因为当前 README 不包含这些命令。
 
-- [ ] **Step 2: Write the developer README**
+- [ ] **Step 2：编写开发者 README**
 
-Use this complete Phase 1 README content:
+使用以下完整的 Phase 1 README 内容：
 
 ````markdown
 # C/C++ Unit Test IDE
@@ -1680,7 +1680,7 @@ Protocol models are generated from `packages/protocol-schema/schema/v1`. Generat
 The service listens on a random per-user Windows Named Pipe or a Linux Unix Socket with mode `0600`. Every connection must complete the token handshake before using another method.
 ````
 
-- [ ] **Step 3: Add the Windows/Linux CI matrix**
+- [ ] **Step 3：添加 Windows/Linux CI 矩阵**
 
 ```yaml
 # .github/workflows/foundation.yml
@@ -1720,46 +1720,46 @@ jobs:
       - run: git diff --exit-code
 ```
 
-- [ ] **Step 4: Run final Phase 1 verification**
+- [ ] **Step 4：运行 Phase 1 最终验证**
 
-Run: `pnpm install --frozen-lockfile`
+运行：`pnpm install --frozen-lockfile`
 
-Run: `pnpm check:protocol-generated`
+运行：`pnpm check:protocol-generated`
 
-Run: `pnpm build`
+运行：`pnpm build`
 
-Run: `pnpm test`
+运行：`pnpm test`
 
-Run: `pnpm test:e2e`
+运行：`pnpm test:e2e`
 
-Run: `git diff --check`
+运行：`git diff --check`
 
-Expected: every command exits 0; end-to-end output identifies Windows Named Pipe on Windows and Unix Socket on Linux; no generated drift or whitespace errors remain.
+预期：每条命令均以 0 退出；端到端输出在 Windows 上显示 Windows Named Pipe，在 Linux 上显示 Unix Socket；不存在生成文件漂移或空白错误。
 
-- [ ] **Step 5: Commit CI and documentation**
+- [ ] **Step 5：提交 CI 和文档**
 
 ```bash
 git add .github/workflows/foundation.yml README.md tools/workspace-smoke/workspace-smoke.test.mjs
 git commit -m "ci: verify protocol foundation on Windows and Linux"
 ```
 
-## Phase 1 completion evidence
+## Phase 1 完成证据
 
-Before declaring this plan complete, attach or retain:
+在宣布此计划完成之前，请附上或保留：
 
-- `pnpm check:protocol-generated` output.
-- TypeScript and Go unit-test summaries.
-- Windows end-to-end probe output showing `named-pipe`.
-- Linux end-to-end probe output showing `unix-socket`.
-- `git diff --exit-code` result after regeneration.
-- The commit hashes for all eight tasks.
+- `pnpm check:protocol-generated` 的输出。
+- TypeScript 和 Go 单元测试摘要。
+- 显示 `named-pipe` 的 Windows 端到端探测输出。
+- 显示 `unix-socket` 的 Linux 端到端探测输出。
+- 重新生成后 `git diff --exit-code` 的结果。
+- 全部八个任务的提交哈希。
 
-## Version references
+## 版本参考资料
 
-- [Node.js release schedule](https://nodejs.org/en/about/previous-releases)
-- [Go release history](https://go.dev/doc/devel/release)
-- [TypeScript releases](https://github.com/microsoft/TypeScript/releases)
-- [pnpm releases](https://github.com/pnpm/pnpm/releases)
-- [quicktype JSON Schema generation](https://www.npmjs.com/package/quicktype)
-- [Ajv JSON Schema validator](https://github.com/ajv-validator/ajv)
+- [Node.js 发布计划](https://nodejs.org/en/about/previous-releases)
+- [Go 发布历史](https://go.dev/doc/devel/release)
+- [TypeScript 发布版本](https://github.com/microsoft/TypeScript/releases)
+- [pnpm 发布版本](https://github.com/pnpm/pnpm/releases)
+- [quicktype JSON Schema 生成工具](https://www.npmjs.com/package/quicktype)
+- [Ajv JSON Schema 验证器](https://github.com/ajv-validator/ajv)
 - [Microsoft go-winio](https://github.com/microsoft/go-winio)
