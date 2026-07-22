@@ -25,7 +25,7 @@ const validators: Record<ProtocolVersion, ValidateFunction> = {
 type Pending = {
   version: ProtocolVersion;
   method: Method;
-  allowLegacyHandshakeError: boolean;
+  acceptLegacyUnsupportedProtocol: boolean;
   onResponse?: (payload: Record<string, unknown>) => void;
   onError?: (error: ProtocolError) => void;
   resolve: (payload: Record<string, unknown>) => void;
@@ -33,7 +33,6 @@ type Pending = {
 };
 
 export interface RequestOptions {
-  allowLegacyHandshakeError?: boolean;
   onResponse?: (payload: Record<string, unknown>) => void;
   onError?: (error: ProtocolError) => void;
 }
@@ -45,6 +44,7 @@ export class Connection {
   #buffer = Buffer.alloc(0);
   #closed = false;
   #closeError: Error | undefined;
+  #legacyHandshakeAvailable = true;
 
   get closed(): boolean { return this.#closed; }
 
@@ -79,11 +79,15 @@ export class Connection {
     if (encoded.byteLength - 1 > MAX_MESSAGE_BYTES) {
       return Promise.reject(new Error("protocol line exceeds the 1 MiB limit"));
     }
+    const acceptLegacyUnsupportedProtocol = this.#legacyHandshakeAvailable
+      && version === "1.1"
+      && method === "handshake";
+    if (acceptLegacyUnsupportedProtocol) this.#legacyHandshakeAvailable = false;
     return new Promise((resolve, reject) => {
       this.#pending.set(messageId, {
         version,
         method,
-        allowLegacyHandshakeError: options.allowLegacyHandshakeError === true,
+        acceptLegacyUnsupportedProtocol,
         onResponse: options.onResponse,
         onError: options.onError,
         resolve,
@@ -172,11 +176,12 @@ export class Connection {
     }
     const pending = this.#pending.get(message.requestId);
     if (!pending) return true;
-    const isAllowedLegacyHandshakeError = pending.allowLegacyHandshakeError
+    const isAllowedLegacyHandshakeError = pending.acceptLegacyUnsupportedProtocol
       && pending.version === "1.1"
       && pending.method === "handshake"
       && message.kind === "error"
-      && message.protocolVersion === "1.0";
+      && message.protocolVersion === "1.0"
+      && message.error.code === "UNSUPPORTED_PROTOCOL";
     if (message.protocolVersion !== pending.version && !isAllowedLegacyHandshakeError) {
       this.#closeWithError(new Error("response protocol version does not match request"));
       return false;

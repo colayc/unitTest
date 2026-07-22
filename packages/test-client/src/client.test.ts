@@ -259,14 +259,59 @@ test("client falls back to an exact 1.0 handshake", async () => {
   fixture.client.close();
 });
 
+test("a new Connection grants its first 1.1 handshake one legacy unsupported response", async () => {
+  const [clientStream, serverStream] = pair();
+  const requests: JsonObject[] = [];
+  createInterface({ input: serverStream }).on("line", (line) => {
+    const request = JSON.parse(line) as JsonObject;
+    requests.push(request);
+    const reply = request.protocolVersion === "1.1"
+      ? error(request, "UNSUPPORTED_PROTOCOL", false, "1.0")
+      : response(request, { negotiatedProtocolVersion: "1.0", serviceVersion: "0.1.0" }, "1.0");
+    serverStream.write(`${JSON.stringify(reply)}\n`);
+  });
+  const connection = new Connection(clientStream);
+  const handshakePayload = { token: "0123456789abcdef", clientName: "test", clientVersion: "0.2.0" };
+  await assert.rejects(
+    () => connection.request("1.1", "handshake", {
+      ...handshakePayload,
+      supportedProtocolVersions: ["1.1", "1.0"]
+    }),
+    (failure: unknown) => failure instanceof ProtocolError && failure.code === "UNSUPPORTED_PROTOCOL"
+  );
+  const negotiated = await connection.request("1.0", "handshake", handshakePayload);
+  assert.equal(negotiated.negotiatedProtocolVersion, "1.0");
+  assert.deepEqual(requests.map(({ protocolVersion }) => protocolVersion), ["1.1", "1.0"]);
+  connection.close();
+});
+
 test("client does not downgrade handshake errors other than UNSUPPORTED_PROTOCOL", async () => {
   const fixture = scriptedClient((request) => error(request, "AUTH_FAILED", false, "1.0"));
   await assert.rejects(
     () => fixture.client.handshake("0123456789abcdef", "test", "0.2.0"),
-    (failure: unknown) => failure instanceof ProtocolError && failure.code === "AUTH_FAILED"
+    /protocol version/
   );
   assert.equal(fixture.requests.length, 1);
-  fixture.client.close();
+  await assert.rejects(() => fixture.client.handshake("0123456789abcdef", "test", "0.2.0"), /closed/);
+});
+
+test("a same-version handshake failure consumes the Connection legacy opportunity", async () => {
+  let handshakeCount = 0;
+  const fixture = scriptedClient((request) => {
+    handshakeCount++;
+    if (handshakeCount === 1) return error(request, "AUTH_FAILED", false, "1.1");
+    if (handshakeCount === 2) return error(request, "UNSUPPORTED_PROTOCOL", false, "1.0");
+    return response(request, { negotiatedProtocolVersion: "1.0", serviceVersion: "0.1.0" }, "1.0");
+  });
+  await assert.rejects(
+    () => fixture.client.handshake("0123456789abcdef", "test", "0.2.0"),
+    (failure: unknown) => failure instanceof ProtocolError && failure.code === "AUTH_FAILED"
+  );
+  await assert.rejects(
+    () => fixture.client.handshake("0123456789abcdef", "test", "0.2.0"),
+    /protocol version/
+  );
+  assert.deepEqual(fixture.requests.map(({ protocolVersion }) => protocolVersion), ["1.1", "1.1"]);
 });
 
 test("an authenticated connection rejects a legacy-version handshake error", async () => {

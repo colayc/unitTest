@@ -181,7 +181,7 @@ export class ProtocolClient {
   async handshake(token: string, clientName: string, clientVersion: string): Promise<HandshakeResult> {
     if (this.#closed) throw new Error("protocol client is closed");
     const credentials = { token, clientName, clientVersion };
-    const result = await this.#authenticate(this.#connection, credentials, this.#negotiatedVersion === undefined);
+    const result = await this.#authenticate(this.#connection, credentials);
     this.#credentials = credentials;
     this.#negotiatedVersion = result.negotiatedProtocolVersion;
     return result;
@@ -419,17 +419,13 @@ export class ProtocolClient {
     this.#connection.close();
   }
 
-  async #authenticate(
-    connection: Connection,
-    credentials: Credentials,
-    allowLegacyHandshakeError = true
-  ): Promise<HandshakeResult> {
+  async #authenticate(connection: Connection, credentials: Credentials): Promise<HandshakeResult> {
     let payload: Record<string, unknown>;
     try {
       payload = await connection.request("1.1", "handshake", {
         ...credentials,
         supportedProtocolVersions: ["1.1", "1.0"]
-      }, { allowLegacyHandshakeError });
+      });
     } catch (error) {
       if (!(error instanceof ProtocolError) || error.code !== "UNSUPPORTED_PROTOCOL") throw error;
       payload = await connection.request("1.0", "handshake", { ...credentials });
