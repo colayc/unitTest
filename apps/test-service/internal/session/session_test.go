@@ -2,12 +2,257 @@ package session_test
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"testing"
+	"time"
 
+	"unit-test-ide.local/test-service/internal/artifactstore"
+	"unit-test-ide.local/test-service/internal/eventbroker"
 	"unit-test-ide.local/test-service/internal/protocol"
+	"unit-test-ide.local/test-service/internal/protocolmodel"
 	"unit-test-ide.local/test-service/internal/session"
+	"unit-test-ide.local/test-service/internal/task"
 )
+
+var fixedTime = time.Date(2026, 7, 22, 3, 4, 5, 0, time.UTC)
+
+func id(digit byte) string {
+	return string(make([]byte, 0)) + string(bytesOf(digit, 32))
+}
+
+func bytesOf(value byte, count int) []byte {
+	result := make([]byte, count)
+	for index := range result {
+		result[index] = value
+	}
+	return result
+}
+
+type fakeBackend struct {
+	startRequest task.StartRequest
+	getID        string
+	listCursor   string
+	listLimit    int
+	cancelID     string
+	after        int64
+	artifactTask string
+	artifactCur  string
+	artifactLim  int
+	artifactID   string
+	offset       int64
+	length       int
+
+	startResult  task.Task
+	getResult    task.Task
+	listResult   task.Page[task.Task]
+	cancelResult task.Task
+	subscription *eventbroker.Subscription
+	artifacts    task.Page[task.Artifact]
+	chunk        session.ArtifactChunk
+	err          error
+}
+
+func (b *fakeBackend) Start(_ context.Context, request task.StartRequest) (task.Task, error) {
+	b.startRequest = request
+	return b.startResult, b.err
+}
+
+func (b *fakeBackend) Get(_ context.Context, taskID string) (task.Task, error) {
+	b.getID = taskID
+	return b.getResult, b.err
+}
+
+func (b *fakeBackend) List(_ context.Context, cursor string, limit int) (task.Page[task.Task], error) {
+	b.listCursor, b.listLimit = cursor, limit
+	return b.listResult, b.err
+}
+
+func (b *fakeBackend) Cancel(_ context.Context, taskID string) (task.Task, error) {
+	b.cancelID = taskID
+	return b.cancelResult, b.err
+}
+
+func (b *fakeBackend) Subscribe(_ context.Context, after int64) (*eventbroker.Subscription, error) {
+	b.after = after
+	return b.subscription, b.err
+}
+
+func (b *fakeBackend) ListArtifacts(_ context.Context, taskID, cursor string, limit int) (task.Page[task.Artifact], error) {
+	b.artifactTask, b.artifactCur, b.artifactLim = taskID, cursor, limit
+	return b.artifacts, b.err
+}
+
+func (b *fakeBackend) ReadArtifact(_ context.Context, artifactID string, offset int64, length int) (session.ArtifactChunk, error) {
+	b.artifactID, b.offset, b.length = artifactID, offset, length
+	return b.chunk, b.err
+}
+
+func authenticatedV11(t *testing.T, backend session.Backend) *session.Session {
+	t.Helper()
+	s := session.New("0123456789abcdef", "linux", "unix-socket", backend)
+	result := s.Handle(context.Background(), requestVersion(t, protocol.Version11, "handshake", map[string]any{
+		"token": "0123456789abcdef", "clientName": "test", "clientVersion": "0.2.0",
+		"supportedProtocolVersions": []string{protocol.Version11},
+	}))
+	if result.Response.Kind != "response" {
+		t.Fatalf("handshake failed: %#v", result)
+	}
+	return s
+}
+
+func TestSessionRoutesControlledTaskStart(t *testing.T) {
+	backend := &fakeBackend{startResult: task.Task{ID: id('1'), Scenario: task.ScenarioHang, Status: task.StatusRunning, CreatedAt: fixedTime, LastSequence: 2}}
+	s := authenticatedV11(t, backend)
+	result := s.Handle(context.Background(), requestVersion(t, "1.1", "tasks/start", map[string]any{
+		"idempotencyKey": id('2'), "scenario": "hang", "timeoutMs": 30000,
+	}))
+	if result.Response.Kind != "response" || backend.startRequest.Scenario != task.ScenarioHang || backend.startRequest.Timeout != 30*time.Second {
+		t.Fatalf("result=%#v request=%#v", result, backend.startRequest)
+	}
+	snapshot, ok := result.Response.Payload.(protocolmodel.TaskSnapshot)
+	if !ok || snapshot.TaskID != id('1') || snapshot.Outcome != nil {
+		t.Fatalf("payload=%#v", result.Response.Payload)
+	}
+}
+
+func TestSessionRoutesRemainingPhase2Methods(t *testing.T) {
+	finished := fixedTime.Add(time.Minute)
+	artifact := task.Artifact{ID: id('a'), TaskID: id('1'), Kind: "task-summary", MIMEType: "application/json", Size: 3, SHA256: string(bytesOf('b', 64)), CreatedAt: fixedTime}
+	taskValue := task.Task{ID: id('1'), Scenario: task.ScenarioSuccess, Timeout: time.Second, Status: task.StatusFinished, Outcome: task.OutcomeSucceeded, CreatedAt: fixedTime, FinishedAt: &finished, LastSequence: 4}
+	backend := &fakeBackend{
+		getResult: taskValue, cancelResult: taskValue,
+		listResult: task.Page[task.Task]{Items: []task.Task{taskValue}, NextCursor: "next-task"},
+		artifacts:  task.Page[task.Artifact]{Items: []task.Artifact{artifact}, NextCursor: "next-artifact"},
+		chunk:      session.ArtifactChunk{Data: []byte{0xfb, 0xff}, NextOffset: 2, EOF: true, Metadata: artifact},
+	}
+	s := authenticatedV11(t, backend)
+
+	tests := []struct {
+		method  string
+		payload map[string]any
+		check   func(*testing.T, session.HandleResult)
+	}{
+		{"tasks/get", map[string]any{"taskId": id('1')}, func(t *testing.T, result session.HandleResult) {
+			if backend.getID != id('1') {
+				t.Fatalf("id=%q", backend.getID)
+			}
+		}},
+		{"tasks/list", map[string]any{"cursor": "cursor", "limit": 7}, func(t *testing.T, result session.HandleResult) {
+			if backend.listCursor != "cursor" || backend.listLimit != 7 {
+				t.Fatalf("cursor=%q limit=%d", backend.listCursor, backend.listLimit)
+			}
+		}},
+		{"tasks/cancel", map[string]any{"taskId": id('1')}, func(t *testing.T, result session.HandleResult) {
+			if backend.cancelID != id('1') {
+				t.Fatalf("id=%q", backend.cancelID)
+			}
+		}},
+		{"events/subscribe", map[string]any{"afterSequence": 3}, func(t *testing.T, result session.HandleResult) {
+			if backend.after != 3 || result.Subscription != backend.subscription {
+				t.Fatalf("after=%d subscription=%p", backend.after, result.Subscription)
+			}
+		}},
+		{"artifacts/list", map[string]any{"taskId": id('1'), "cursor": "artifact-cursor", "limit": 9}, func(t *testing.T, result session.HandleResult) {
+			if backend.artifactTask != id('1') || backend.artifactCur != "artifact-cursor" || backend.artifactLim != 9 {
+				t.Fatalf("task=%q cursor=%q limit=%d", backend.artifactTask, backend.artifactCur, backend.artifactLim)
+			}
+		}},
+		{"artifacts/read", map[string]any{"artifactId": id('a'), "offset": 0, "length": 64}, func(t *testing.T, result session.HandleResult) {
+			if backend.artifactID != id('a') || backend.offset != 0 || backend.length != 64 {
+				t.Fatalf("id=%q offset=%d length=%d", backend.artifactID, backend.offset, backend.length)
+			}
+			raw, _ := json.Marshal(result.Response.Payload)
+			var payload struct {
+				Data       string `json:"data"`
+				NextOffset int64  `json:"nextOffset"`
+				EOF        bool   `json:"eof"`
+				SizeBytes  int64  `json:"sizeBytes"`
+				SHA256     string `json:"sha256"`
+			}
+			if err := json.Unmarshal(raw, &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload.Data != base64.RawURLEncoding.EncodeToString([]byte{0xfb, 0xff}) || payload.NextOffset != 2 || !payload.EOF || payload.SizeBytes != 3 || payload.SHA256 != artifact.SHA256 {
+				t.Fatalf("payload=%s", raw)
+			}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.method, func(t *testing.T) {
+			result := s.Handle(context.Background(), requestVersion(t, protocol.Version11, test.method, test.payload))
+			if result.Response.Kind != "response" {
+				t.Fatalf("result=%#v", result)
+			}
+			test.check(t, result)
+		})
+	}
+}
+
+func TestSessionRejectsInvalidPhase2Payloads(t *testing.T) {
+	tests := []struct{ name, method, payload string }{
+		{"unknown field", "tasks/start", `{"idempotencyKey":"22222222222222222222222222222222","scenario":"hang","timeoutMs":1,"executable":"bad"}`},
+		{"multiple values", "tasks/get", `{"taskId":"11111111111111111111111111111111"} {}`},
+		{"invalid id", "tasks/get", `{"taskId":"../secret"}`},
+		{"empty cursor", "tasks/list", `{"cursor":""}`},
+		{"limit zero", "tasks/list", `{"limit":0}`},
+		{"limit too large", "tasks/list", `{"limit":201}`},
+		{"missing sequence", "events/subscribe", `{}`},
+		{"negative sequence", "events/subscribe", `{"afterSequence":-1}`},
+		{"missing offset", "artifacts/read", `{"artifactId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","length":1}`},
+		{"negative offset", "artifacts/read", `{"artifactId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","offset":-1,"length":1}`},
+		{"oversized read", "artifacts/read", `{"artifactId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","offset":0,"length":65537}`},
+		{"timeout too large", "tasks/start", `{"idempotencyKey":"22222222222222222222222222222222","scenario":"hang","timeoutMs":86400001}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			s := authenticatedV11(t, &fakeBackend{})
+			result := s.Handle(context.Background(), protocol.Request{ProtocolVersion: protocol.Version11, Kind: "request", MessageID: id('3'), Method: test.method, Payload: json.RawMessage(test.payload)})
+			if result.Response.Error == nil || result.Response.Error.Code != "INVALID_MESSAGE" || result.Response.Error.Retryable {
+				t.Fatalf("result=%#v", result)
+			}
+		})
+	}
+}
+
+func TestSessionMapsPhase2Errors(t *testing.T) {
+	tests := []struct {
+		name, method string
+		err          error
+		code         string
+		retryable    bool
+	}{
+		{"task missing", "tasks/get", task.ErrNotFound, "TASK_NOT_FOUND", false},
+		{"artifact missing", "artifacts/read", task.ErrNotFound, "ARTIFACT_NOT_FOUND", false},
+		{"idempotency conflict", "tasks/start", task.ErrIdempotencyConflict, "IDEMPOTENCY_CONFLICT", false},
+		{"storage unavailable", "tasks/list", task.ErrStorageUnavailable, "STORAGE_UNAVAILABLE", true},
+		{"invalid task", "tasks/start", task.ErrInvalidArgument, "INVALID_TASK_SPEC", false},
+		{"invalid cursor", "events/subscribe", eventbroker.ErrInvalidCursor, "EVENT_CURSOR_INVALID", false},
+		{"slow subscriber", "events/subscribe", eventbroker.ErrSubscriberTooSlow, "SUBSCRIBER_TOO_SLOW", true},
+		{"invalid artifact range", "artifacts/read", artifactstore.ErrInvalidRange, "INVALID_MESSAGE", false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			backend := &fakeBackend{err: test.err}
+			s := authenticatedV11(t, backend)
+			payload := map[string]any{}
+			switch test.method {
+			case "tasks/get":
+				payload["taskId"] = id('1')
+			case "tasks/start":
+				payload = map[string]any{"idempotencyKey": id('2'), "scenario": "hang", "timeoutMs": 1}
+			case "events/subscribe":
+				payload["afterSequence"] = 0
+			case "artifacts/read":
+				payload = map[string]any{"artifactId": id('a'), "offset": 0, "length": 1}
+			}
+			result := s.Handle(context.Background(), requestVersion(t, protocol.Version11, test.method, payload))
+			if result.Response.Error == nil || result.Response.Error.Code != test.code || result.Response.Error.Retryable != test.retryable {
+				t.Fatalf("result=%#v", result)
+			}
+		})
+	}
+}
 
 func request(t *testing.T, method string, payload any) protocol.Request {
 	return requestVersion(t, protocol.Version10, method, payload)

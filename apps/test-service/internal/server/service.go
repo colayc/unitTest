@@ -15,6 +15,7 @@ type ServiceConfig struct {
 type Service struct {
 	listener                   net.Listener
 	token, platform, transport string
+	backend                    session.Backend
 	config                     ServiceConfig
 	stop                       chan struct{}
 	stopOnce                   sync.Once
@@ -23,7 +24,7 @@ type Service struct {
 	handlers                   sync.WaitGroup
 }
 
-func NewService(listener net.Listener, token, platform, transport string, config ServiceConfig) *Service {
+func NewService(listener net.Listener, token, platform, transport string, backend session.Backend, config ServiceConfig) *Service {
 	if config.MaxConnections <= 0 {
 		config.MaxConnections = 64
 	}
@@ -32,7 +33,7 @@ func NewService(listener net.Listener, token, platform, transport string, config
 	}
 	return &Service{
 		listener: listener, token: token, platform: platform, transport: transport,
-		config: config, stop: make(chan struct{}), connections: make(map[net.Conn]struct{}),
+		backend: backend, config: config, stop: make(chan struct{}), connections: make(map[net.Conn]struct{}),
 	}
 }
 
@@ -66,7 +67,7 @@ func (s *Service) Serve() error {
 		go func() {
 			defer s.handlers.Done()
 			defer func() { <-capacity }()
-			active := session.New(s.token, s.platform, s.transport, nil)
+			active := session.New(s.token, s.platform, s.transport, s.backend)
 			ServeConnectionWithConfig(connection, active, s.config.Connection)
 			s.mu.Lock()
 			delete(s.connections, connection)
