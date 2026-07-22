@@ -1446,7 +1446,7 @@ test("probe authenticates, reads capabilities, and shuts the service down", asyn
 
 预期：测试以 FAIL 结束，因为服务探测工具包尚不存在。
 
-- [ ] **Step 2：实现 endpoint 和服务生命周期辅助函数**
+- [ ] **Step 2：实现 endpoint 和服务 lifecycle 辅助函数**
 
 ```ts
 // tools/service-probe/src/endpoint.ts
