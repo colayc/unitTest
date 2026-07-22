@@ -10,7 +10,11 @@ import (
 	"time"
 )
 
-const Version = "1.0"
+const (
+	Version10 = "1.0"
+	Version11 = "1.1"
+	Version   = Version10
+)
 
 type Request struct {
 	ProtocolVersion string          `json:"protocolVersion"`
@@ -45,6 +49,22 @@ type Response struct {
 	SentAt          string     `json:"sentAt"`
 	Payload         any        `json:"payload,omitempty"`
 	Error           *ErrorBody `json:"error,omitempty"`
+}
+
+type Event struct {
+	ProtocolVersion string          `json:"protocolVersion"`
+	Kind            string          `json:"kind"`
+	MessageID       string          `json:"messageId"`
+	SentAt          string          `json:"sentAt"`
+	Sequence        int64           `json:"sequence"`
+	Event           string          `json:"event"`
+	TaskID          string          `json:"taskId"`
+	PayloadVersion  int             `json:"payloadVersion"`
+	Payload         json.RawMessage `json:"payload"`
+}
+
+func SupportedVersion(version string) bool {
+	return version == Version10 || version == Version11
 }
 
 func DecodeRequest(line []byte) (Request, error) {
@@ -89,12 +109,19 @@ func validMessageID(value string) bool {
 	return true
 }
 
-func Success(request Request, payload any) Response {
-	return Response{ProtocolVersion: Version, Kind: "response", MessageID: newID(), RequestID: request.MessageID, Method: request.Method, SentAt: time.Now().UTC().Format(time.RFC3339Nano), Payload: payload}
+func Success(version string, request Request, payload any) Response {
+	return Response{ProtocolVersion: version, Kind: "response", MessageID: newID(), RequestID: request.MessageID, Method: request.Method, SentAt: time.Now().UTC().Format(time.RFC3339Nano), Payload: payload}
 }
 
-func Failure(request Request, code, message string, retryable bool) Response {
-	return Response{ProtocolVersion: Version, Kind: "error", MessageID: newID(), RequestID: request.MessageID, SentAt: time.Now().UTC().Format(time.RFC3339Nano), Error: &ErrorBody{Code: code, Message: message, Retryable: retryable}}
+func Failure(version string, request Request, code, message string, retryable bool) Response {
+	if !SupportedVersion(version) {
+		version = Version10
+	}
+	return Response{ProtocolVersion: version, Kind: "error", MessageID: newID(), RequestID: request.MessageID, SentAt: time.Now().UTC().Format(time.RFC3339Nano), Error: &ErrorBody{Code: code, Message: message, Retryable: retryable}}
+}
+
+func NewEvent(sequence int64, event, taskID string, at time.Time, payload json.RawMessage) Event {
+	return Event{ProtocolVersion: Version11, Kind: "event", MessageID: newID(), SentAt: at.UTC().Format(time.RFC3339Nano), Sequence: sequence, Event: event, TaskID: taskID, PayloadVersion: 1, Payload: payload}
 }
 
 func newID() string {

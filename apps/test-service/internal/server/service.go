@@ -66,7 +66,7 @@ func (s *Service) Serve() error {
 		go func() {
 			defer s.handlers.Done()
 			defer func() { <-capacity }()
-			active := session.New(s.token, s.platform, s.transport)
+			active := session.New(s.token, s.platform, s.transport, nil)
 			ServeConnectionWithConfig(connection, active, s.config.Connection)
 			s.mu.Lock()
 			delete(s.connections, connection)

@@ -2,6 +2,7 @@ package server
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"net"
@@ -54,15 +55,15 @@ func ServeConnectionWithConfig(connection net.Conn, active *session.Session, con
 			break
 		}
 		if len(scanner.Bytes()) > MaxMessageBytes {
-			writeResponse(connection, encoder, config.WriteTimeout, protocol.Failure(protocol.Request{MessageID: "00000000000000000000000000000000"}, "INVALID_MESSAGE", "message exceeds the 1 MiB limit", false))
+			writeResponse(connection, encoder, config.WriteTimeout, protocol.Failure(protocol.Version10, protocol.Request{MessageID: "00000000000000000000000000000000"}, "INVALID_MESSAGE", "message exceeds the 1 MiB limit", false))
 			return
 		}
 		request, err := protocol.DecodeRequest(scanner.Bytes())
 		if err != nil {
-			writeResponse(connection, encoder, config.WriteTimeout, protocol.Failure(protocol.Request{MessageID: "00000000000000000000000000000000"}, "INVALID_MESSAGE", "message is invalid", false))
+			writeResponse(connection, encoder, config.WriteTimeout, protocol.Failure(protocol.Version10, protocol.Request{MessageID: "00000000000000000000000000000000"}, "INVALID_MESSAGE", "message is invalid", false))
 			return
 		}
-		if err := writeResponse(connection, encoder, config.WriteTimeout, active.Handle(request)); err != nil {
+		if err := writeResponse(connection, encoder, config.WriteTimeout, active.Handle(context.Background(), request)); err != nil {
 			return
 		}
 		select {
@@ -76,7 +77,7 @@ func ServeConnectionWithConfig(connection net.Conn, active *session.Session, con
 		if errors.As(scanErr, &networkError) && networkError.Timeout() {
 			return
 		}
-		_ = writeResponse(connection, encoder, config.WriteTimeout, protocol.Failure(protocol.Request{MessageID: "00000000000000000000000000000000"}, "INVALID_MESSAGE", "message exceeds the 1 MiB limit", false))
+		_ = writeResponse(connection, encoder, config.WriteTimeout, protocol.Failure(protocol.Version10, protocol.Request{MessageID: "00000000000000000000000000000000"}, "INVALID_MESSAGE", "message exceeds the 1 MiB limit", false))
 	}
 }
 

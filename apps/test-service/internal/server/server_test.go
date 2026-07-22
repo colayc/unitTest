@@ -29,7 +29,7 @@ func exchange(t *testing.T, connection net.Conn, request protocol.Request) proto
 
 func TestServeConnectionHandlesHandshakeAndShutdown(t *testing.T) {
 	client, service := net.Pipe()
-	active := session.New("0123456789abcdef", "linux", "unix-socket")
+	active := session.New("0123456789abcdef", "linux", "unix-socket", nil)
 	go server.ServeConnection(service, active)
 	defer client.Close()
 	handshake, _ := json.Marshal(map[string]string{"token": "0123456789abcdef", "clientName": "test", "clientVersion": "0.1.0"})
@@ -45,7 +45,7 @@ func TestServeConnectionHandlesHandshakeAndShutdown(t *testing.T) {
 
 func TestServeConnectionRejectsNonEmptyAuthenticatedPayload(t *testing.T) {
 	client, service := net.Pipe()
-	active := session.New("0123456789abcdef", "linux", "unix-socket")
+	active := session.New("0123456789abcdef", "linux", "unix-socket", nil)
 	go server.ServeConnection(service, active)
 	defer client.Close()
 	handshake, _ := json.Marshal(map[string]string{"token": "0123456789abcdef", "clientName": "test", "clientVersion": "0.1.0"})
@@ -80,7 +80,7 @@ func (c *deadlineConn) SetWriteDeadline(value time.Time) error {
 func TestServeConnectionAppliesHandshakeIdleAndWriteDeadlines(t *testing.T) {
 	client, rawService := net.Pipe()
 	service := &deadlineConn{Conn: rawService}
-	active := session.New("0123456789abcdef", "linux", "unix-socket")
+	active := session.New("0123456789abcdef", "linux", "unix-socket", nil)
 	done := make(chan struct{})
 	go func() {
 		server.ServeConnectionWithConfig(service, active, server.ConnectionConfig{
@@ -116,7 +116,7 @@ func TestServeConnectionAppliesHandshakeIdleAndWriteDeadlines(t *testing.T) {
 func TestServeConnectionDoesNotExtendHandshakeDeadline(t *testing.T) {
 	client, rawService := net.Pipe()
 	service := &deadlineConn{Conn: rawService}
-	active := session.New("0123456789abcdef", "linux", "unix-socket")
+	active := session.New("0123456789abcdef", "linux", "unix-socket", nil)
 	done := make(chan struct{})
 	go func() {
 		server.ServeConnectionWithConfig(service, active, server.ConnectionConfig{
@@ -149,7 +149,7 @@ func TestServeConnectionDoesNotExtendHandshakeDeadline(t *testing.T) {
 
 func TestServeConnectionRejectsOversizedLine(t *testing.T) {
 	client, service := net.Pipe()
-	go server.ServeConnection(service, session.New("0123456789abcdef", "linux", "unix-socket"))
+	go server.ServeConnection(service, session.New("0123456789abcdef", "linux", "unix-socket", nil))
 	defer client.Close()
 	line := requestLineOfSize(t, server.MaxMessageBytes+1)
 	go func() { _, _ = client.Write(append(line, '\n')) }()
@@ -164,7 +164,7 @@ func TestServeConnectionRejectsOversizedLine(t *testing.T) {
 
 func TestServeConnectionAcceptsLineAtMaximumSize(t *testing.T) {
 	client, service := net.Pipe()
-	go server.ServeConnection(service, session.New("0123456789abcdef", "linux", "unix-socket"))
+	go server.ServeConnection(service, session.New("0123456789abcdef", "linux", "unix-socket", nil))
 	defer client.Close()
 	line := requestLineOfSize(t, server.MaxMessageBytes)
 	go func() { _, _ = client.Write(append(line, '\n')) }()
