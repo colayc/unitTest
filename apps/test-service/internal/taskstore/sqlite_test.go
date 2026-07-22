@@ -291,6 +291,11 @@ func TestArtifactPathsRequireCanonicalPortableRelativeForm(t *testing.T) {
 		"stdout.txt",
 		"task/stdout.txt",
 		"task-1/output_0.json",
+		"console.txt",
+		"com10.txt",
+		"lpt10.log",
+		"com0/auxiliary.data/nulled",
+		"safe nested/file name.with.dots",
 	}
 	for _, relativePath := range valid {
 		t.Run("valid_"+strings.ReplaceAll(relativePath, "/", "_"), func(t *testing.T) {
@@ -301,29 +306,74 @@ func TestArtifactPathsRequireCanonicalPortableRelativeForm(t *testing.T) {
 			}
 		})
 	}
-	invalid := []string{
-		".",
-		"./task/stdout.txt",
-		"task//stdout.txt",
-		"task/./stdout.txt",
-		"task/sub/../stdout.txt",
-		"task/stdout.txt/",
-		"../stdout.txt",
-		"task/../../stdout.txt",
-		"/root/stdout.txt",
-		"//server/share/stdout.txt",
-		`\root\stdout.txt`,
-		`task\stdout.txt`,
-		"C:/task/stdout.txt",
-		`C:\task\stdout.txt`,
-		"C:task/stdout.txt",
+	invalid := []struct {
+		name string
+		path string
+	}{
+		{"dot", "."},
+		{"leading_dot", "./task/stdout.txt"},
+		{"duplicate_slash", "task//stdout.txt"},
+		{"dot_segment", "task/./stdout.txt"},
+		{"cleaned_traversal", "task/sub/../stdout.txt"},
+		{"trailing_slash", "task/stdout.txt/"},
+		{"parent", "../stdout.txt"},
+		{"nested_parent", "task/../../stdout.txt"},
+		{"slash_rooted", "/root/stdout.txt"},
+		{"unc_slash", "//server/share/stdout.txt"},
+		{"backslash_rooted", `\root\stdout.txt`},
+		{"backslash_separator", `task\stdout.txt`},
+		{"drive_absolute", "C:/task/stdout.txt"},
+		{"drive_backslash", `C:\task\stdout.txt`},
+		{"drive_relative", "C:task/stdout.txt"},
+		{"trailing_dot", "task/stdout."},
+		{"nested_trailing_dot", "task./stdout.txt"},
+		{"trailing_space", "task/stdout.txt "},
+		{"nested_trailing_space", "task /stdout.txt"},
 	}
-	for index, relativePath := range invalid {
-		t.Run(fmt.Sprintf("invalid_%02d", index), func(t *testing.T) {
+	forbidden := []struct {
+		name string
+		char byte
+	}{
+		{"less_than", '<'},
+		{"greater_than", '>'},
+		{"colon", ':'},
+		{"quote", '"'},
+		{"pipe", '|'},
+		{"question", '?'},
+		{"asterisk", '*'},
+		{"backslash", '\\'},
+	}
+	for _, entry := range forbidden {
+		invalid = append(invalid, struct {
+			name string
+			path string
+		}{"forbidden_" + entry.name, "task/a" + string(entry.char) + "b.txt"})
+	}
+	for control := byte(0); control <= 0x1f; control++ {
+		invalid = append(invalid, struct {
+			name string
+			path string
+		}{fmt.Sprintf("control_%02x", control), "task/a" + string(control) + "b.txt"})
+	}
+	reserved := []string{"CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"}
+	for _, name := range reserved {
+		invalid = append(invalid,
+			struct {
+				name string
+				path string
+			}{"reserved_" + strings.ToLower(name), name},
+			struct {
+				name string
+				path string
+			}{"reserved_extension_" + strings.ToLower(name), "safe/" + strings.ToLower(name) + ".txt"},
+		)
+	}
+	for _, entry := range invalid {
+		t.Run("invalid_"+entry.name, func(t *testing.T) {
 			artifact := base
-			artifact.RelativePath = relativePath
+			artifact.RelativePath = entry.path
 			if validArtifact(artifact) {
-				t.Fatalf("validArtifact(%q) = true", relativePath)
+				t.Fatalf("validArtifact(%q) = true", entry.path)
 			}
 		})
 	}

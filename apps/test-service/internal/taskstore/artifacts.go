@@ -34,11 +34,40 @@ func validArtifact(value task.Artifact) bool {
 }
 
 func canonicalArtifactPath(value string) bool {
-	if value == "" || strings.ContainsAny(value, "\\:\x00") || path.IsAbs(value) {
+	if value == "" || path.IsAbs(value) {
 		return false
 	}
 	clean := path.Clean(value)
-	return clean == value && clean != "." && clean != ".." && !strings.HasPrefix(clean, "../")
+	if clean != value || clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+		return false
+	}
+	for _, segment := range strings.Split(value, "/") {
+		if !portableArtifactSegment(segment) {
+			return false
+		}
+	}
+	return true
+}
+
+func portableArtifactSegment(segment string) bool {
+	if segment == "" || strings.HasSuffix(segment, ".") || strings.HasSuffix(segment, " ") {
+		return false
+	}
+	for index := range len(segment) {
+		value := segment[index]
+		if value <= 0x1f || strings.ContainsRune(`<>:"|?*\`, rune(value)) {
+			return false
+		}
+	}
+	base, _, _ := strings.Cut(segment, ".")
+	upper := strings.ToUpper(base)
+	if upper == "CON" || upper == "PRN" || upper == "AUX" || upper == "NUL" {
+		return false
+	}
+	if len(upper) == 4 && (strings.HasPrefix(upper, "COM") || strings.HasPrefix(upper, "LPT")) && upper[3] >= '1' && upper[3] <= '9' {
+		return false
+	}
+	return true
 }
 
 func (s *Store) ListArtifacts(ctx context.Context, taskID, cursor string, limit int) (task.Page[task.Artifact], error) {
