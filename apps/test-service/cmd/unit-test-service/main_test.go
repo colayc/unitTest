@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -131,5 +133,61 @@ func TestRunRejectsPositionalArguments(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "positional arguments") {
 		t.Fatalf("stderr = %q, want positional argument error", stderr.String())
+	}
+}
+
+func TestRunServiceModeRequiresDataDirBeforeConsumingToken(t *testing.T) {
+	directory := t.TempDir()
+	tokenPath := filepath.Join(directory, "token")
+	if err := os.WriteFile(tokenPath, []byte("0123456789abcdef"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareTokenFileForTest(tokenPath); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--endpoint", "unused-endpoint", "--token-file", tokenPath}, strings.NewReader(""), &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("run code = %d, want 2; stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--data-dir") || stdout.Len() != 0 {
+		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if contents, err := os.ReadFile(tokenPath); err != nil || string(contents) != "0123456789abcdef" {
+		t.Fatalf("token was consumed before required-flag validation: %q, %v", contents, err)
+	}
+}
+
+func TestRunUnsafeDataDirNeverCreatesListenerOrPrintsReady(t *testing.T) {
+	directory := t.TempDir()
+	tokenPath := filepath.Join(directory, "token")
+	if err := os.WriteFile(tokenPath, []byte("0123456789abcdef"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareTokenFileForTest(tokenPath); err != nil {
+		t.Fatal(err)
+	}
+	unsafePath := filepath.Join(directory, "not-a-directory")
+	if err := os.WriteFile(unsafePath, []byte("private"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := listenTransport
+	listenerCalled := false
+	listenTransport = func(string) (net.Listener, error) {
+		listenerCalled = true
+		return nil, errors.New("listener must not be called")
+	}
+	defer func() { listenTransport = previous }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--endpoint", "unused-endpoint", "--token-file", tokenPath, "--data-dir", unsafePath}, strings.NewReader(""), &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("run code = %d, want 1; stderr = %q", code, stderr.String())
+	}
+	if listenerCalled || strings.Contains(stdout.String(), "READY") {
+		t.Fatalf("listenerCalled=%v stdout=%q", listenerCalled, stdout.String())
+	}
+	if strings.Contains(stderr.String(), unsafePath) {
+		t.Fatalf("stderr leaked data directory: %q", stderr.String())
 	}
 }

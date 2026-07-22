@@ -17,6 +17,7 @@ type Source interface {
 var (
 	ErrSubscriberTooSlow = errors.New("subscriber too slow")
 	ErrInvalidCursor     = errors.New("invalid event cursor")
+	ErrBrokerClosed      = errors.New("event broker is closed")
 
 	errInvalidConfiguration = errors.New("invalid event broker configuration")
 	errReadWatermark        = errors.New("read event watermark")
@@ -68,6 +69,7 @@ type Broker struct {
 	nextID        uint64
 	lastPublished int64
 	subscribers   map[uint64]*subscriber
+	closed        bool
 }
 
 func New(source Source, queueSize, pageSize int) (*Broker, error) {
@@ -85,6 +87,9 @@ func New(source Source, queueSize, pageSize int) (*Broker, error) {
 func (b *Broker) Publish(event task.Event) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.closed {
+		return
+	}
 
 	if event.Sequence <= b.lastPublished {
 		b.reportLocked(errNonIncreasingPublish)
@@ -125,6 +130,11 @@ func (b *Broker) Subscribe(ctx context.Context, afterSequence int64) (*Subscript
 		cancel: cancel,
 	}
 	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		cancel()
+		return nil, ErrBrokerClosed
+	}
 	b.nextID++
 	subscriber.id = b.nextID
 	b.subscribers[subscriber.id] = subscriber
@@ -161,6 +171,22 @@ func (b *Broker) Subscribe(ctx context.Context, afterSequence int64) (*Subscript
 		b.remove(subscriber, nil)
 	}()
 	return subscription, nil
+}
+
+func (b *Broker) Close() error {
+	if b == nil {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return nil
+	}
+	b.closed = true
+	for _, subscriber := range b.subscribers {
+		b.dropLocked(subscriber, nil)
+	}
+	return nil
 }
 
 func (b *Broker) activate(ctx context.Context, subscriber *subscriber, watermark int64) {

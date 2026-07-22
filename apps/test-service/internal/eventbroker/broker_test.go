@@ -732,3 +732,25 @@ func TestConcurrentPublishSubscribeCancelAndClose(t *testing.T) {
 		t.Fatal("concurrent operations did not finish")
 	}
 }
+
+func TestBrokerCloseClosesAllSubscriptionsAndRejectsNewOnes(t *testing.T) {
+	broker := mustBroker(t, newFakeSource(nil), 4, 2)
+	first := mustSubscribe(t, broker, context.Background(), 0)
+	second := mustSubscribe(t, broker, context.Background(), 0)
+	first.Activate()
+	second.Activate()
+
+	if err := broker.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if err := broker.Close(); err != nil {
+		t.Fatalf("second Close() error = %v", err)
+	}
+	requireClosed(t, first.Events)
+	requireClosed(t, first.Errors)
+	requireClosed(t, second.Events)
+	requireClosed(t, second.Errors)
+	if subscription, err := broker.Subscribe(context.Background(), 0); !errors.Is(err, ErrBrokerClosed) || subscription != nil {
+		t.Fatalf("Subscribe after Close = %#v, %v", subscription, err)
+	}
+}

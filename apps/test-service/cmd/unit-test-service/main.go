@@ -9,7 +9,9 @@ import (
 	"os/signal"
 	"strconv"
 	"syscall"
+	"time"
 
+	serviceruntime "unit-test-ide.local/test-service/internal/runtime"
 	"unit-test-ide.local/test-service/internal/server"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/taskfixture"
@@ -23,6 +25,8 @@ var processHostEntry = func(stdin io.Reader, stdout, stderr io.Writer) int {
 	return 1
 }
 
+var listenTransport = transport.Listen
+
 func main() { os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr)) }
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -30,6 +34,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	endpoint := flags.String("endpoint", "", "local IPC endpoint")
 	tokenFile := flags.String("token-file", "", "authentication token file")
+	dataDir := flags.String("data-dir", "", "owner-only service data directory")
 	prepareTokenFilePath := flags.String("prepare-token-file", "", "create an empty owner-only authentication token file")
 	processHost := flags.Bool("process-host", false, "run the internal process host")
 	taskFixtureScenario := flags.String("task-fixture", "", "run a built-in task fixture")
@@ -50,7 +55,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		switch parsedFlag.Name {
 		case "prepare-token-file":
 			prepareModeFlagProvided = true
-		case "endpoint", "token-file":
+		case "endpoint", "token-file", "data-dir":
 			serviceModeFlagProvided = true
 		case "process-host":
 			processHostFlagProvided = true
@@ -113,8 +118,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 		return 0
 	}
-	if *endpoint == "" || *tokenFile == "" {
-		fmt.Fprintln(stderr, "--endpoint and --token-file are required")
+	if *endpoint == "" || *tokenFile == "" || *dataDir == "" {
+		fmt.Fprintln(stderr, "--endpoint, --token-file, and --data-dir are required")
 		return 2
 	}
 	token, err := consumeTokenFile(*tokenFile)
@@ -122,7 +127,21 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	listener, err := transport.Listen(*endpoint)
+	executable, err := os.Executable()
+	if err != nil {
+		fmt.Fprintln(stderr, "service executable is unavailable")
+		return 1
+	}
+	active, err := serviceruntime.Open(serviceruntime.Config{
+		DataDir: *dataDir, ServiceExecutable: executable, Platform: transport.PlatformName(),
+		Clock: task.RealClock{}, NewID: task.NewID, TerminationGrace: 2 * time.Second,
+	})
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	defer active.Close()
+	listener, err := listenTransport(*endpoint)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -131,11 +150,15 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	service := server.NewService(listener, token, transport.PlatformName(), transport.TransportName(), nil, server.ServiceConfig{MaxConnections: 64})
+	service := server.NewService(listener, token, transport.PlatformName(), transport.TransportName(), active, server.ServiceConfig{MaxConnections: 64})
 	go func() { <-ctx.Done(); service.Shutdown() }()
 	fmt.Fprintf(stdout, "READY %s\n", *endpoint)
 	if err := service.Serve(); err != nil {
 		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	if err := active.Close(); err != nil {
+		fmt.Fprintln(stderr, "service runtime shutdown failed")
 		return 1
 	}
 	return 0
