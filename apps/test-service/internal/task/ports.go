@@ -44,3 +44,50 @@ type Store interface {
 type Publisher interface {
 	Publish(Event)
 }
+
+type ProcessFactory interface {
+	Prepare(context.Context, ProcessSpec, string, string) (ManagedProcess, error)
+}
+
+type ProcessSpec struct {
+	Executable string
+	Args       []string
+	Env        []string
+	Dir        string
+}
+
+type ProcessOutput struct {
+	Stream string
+	Data   []byte
+}
+
+type ProcessResult struct {
+	ExitCode int
+	Err      error
+}
+
+type ManagedProcess interface {
+	Lease() ProcessLease
+	Start(context.Context) error
+	Output() <-chan ProcessOutput
+	Done() <-chan ProcessResult
+	Terminate(context.Context, time.Duration) error
+	Close() error
+}
+
+type ArtifactWriter interface {
+	CommitJSON(context.Context, string, string, time.Time, any) (Artifact, error)
+}
+
+type Clock interface {
+	Now() time.Time
+	After(time.Duration) <-chan time.Time
+}
+
+type IDGenerator func() string
+
+type RealClock struct{}
+
+func (RealClock) Now() time.Time { return time.Now().UTC() }
+
+func (RealClock) After(delay time.Duration) <-chan time.Time { return time.After(delay) }
