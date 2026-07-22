@@ -56,7 +56,7 @@ type Manager struct {
 	stopped             chan struct{}
 	healthy             atomic.Bool
 	closing             atomic.Bool
-	storageFault        atomic.Bool
+	storageFailed       bool // command-loop owned
 }
 
 type startCommand struct {
@@ -89,9 +89,16 @@ type flushCommand struct {
 	taskID string
 	token  uint64
 }
-type cleanupCommand struct {
-	taskID  string
-	current *activeTask
+type terminationResultCommand struct {
+	taskID     string
+	cause      Outcome
+	generation uint64
+	err        error
+}
+type closeResultCommand struct {
+	taskID     string
+	generation uint64
+	err        error
 }
 
 type taskResponse struct {
@@ -110,24 +117,29 @@ type outputSegment struct {
 }
 
 type activeTask struct {
-	task             Task
-	process          ManagedProcess
-	cause            Outcome
-	terminating      bool
-	segments         []outputSegment
-	bufferedBytes    int
-	persistedBytes   int
-	truncated        bool
-	flushPending     bool
-	flushToken       uint64
-	timerStop        chan struct{}
-	timeoutStop      chan struct{}
-	watcherStop      chan struct{}
-	terminationDone  chan struct{}
-	terminationErr   error
-	processCompleted bool
-	cleanupScheduled bool
-	stoppedWatchers  bool
+	task                  Task
+	process               ManagedProcess
+	cause                 Outcome
+	terminating           bool
+	segments              []outputSegment
+	bufferedBytes         int
+	persistedBytes        int
+	truncated             bool
+	flushPending          bool
+	flushToken            uint64
+	timerStop             chan struct{}
+	timeoutStop           chan struct{}
+	watcherStop           chan struct{}
+	processCompleted      bool
+	terminationGeneration uint64
+	terminationComplete   bool
+	terminationFailed     bool
+	closeStarted          bool
+	closeComplete         bool
+	closeGeneration       uint64
+	recoveryRequired      bool
+	cleanupWithoutDone    bool
+	stoppedWatchers       bool
 }
 
 func NewManager(config ManagerConfig) (*Manager, error) {
@@ -320,15 +332,33 @@ func (m *Manager) loop() {
 		case processDoneCommand:
 			if current := active[value.taskID]; current != nil && !current.processCompleted {
 				current.processCompleted = true
-				if m.storageFault.Load() {
+				if m.storageFailed || current.recoveryRequired {
 					m.abandon(current)
 				} else {
 					m.finish(current, value.result, active)
 				}
+				if active[value.taskID] == current && m.canRemove(current) {
+					delete(active, value.taskID)
+				}
 			}
-		case cleanupCommand:
-			if active[value.taskID] == value.current {
-				delete(active, value.taskID)
+		case terminationResultCommand:
+			if current := active[value.taskID]; current != nil && current.terminationGeneration == value.generation {
+				current.terminationComplete = true
+				if value.err != nil {
+					current.terminationFailed = true
+					m.healthy.Store(false)
+				}
+				m.maybeStartClose(current)
+			}
+		case closeResultCommand:
+			if current := active[value.taskID]; current != nil && current.closeGeneration == value.generation {
+				current.closeComplete = true
+				if value.err != nil {
+					m.healthy.Store(false)
+				}
+				if m.canRemove(current) {
+					delete(active, value.taskID)
+				}
 			}
 		case shutdownCommand:
 			m.closing.Store(true)
@@ -387,7 +417,7 @@ func (m *Manager) start(request StartRequest, active map[string]*activeTask) tas
 	}
 	current := &activeTask{
 		task: stored, process: process, timerStop: make(chan struct{}), timeoutStop: make(chan struct{}),
-		watcherStop: make(chan struct{}), terminationDone: make(chan struct{}),
+		watcherStop: make(chan struct{}),
 	}
 	active[stored.ID] = current
 	startedAt := m.clock.Now()
@@ -405,6 +435,7 @@ func (m *Manager) start(request StartRequest, active map[string]*activeTask) tas
 		Events: []EventDraft{eventDraft(stored.ID, EventTaskStarted, startedAt, map[string]any{"status": StatusRunning})},
 	})
 	if err != nil {
+		current.cleanupWithoutDone = true
 		m.terminate(current)
 		if errors.Is(err, ErrStorageUnavailable) {
 			m.tripStorage(active)
@@ -419,6 +450,8 @@ func (m *Manager) start(request StartRequest, active map[string]*activeTask) tas
 	}
 	if err := process.Start(context.Background()); err != nil {
 		m.terminate(current)
+		current.cleanupWithoutDone = true
+		current.processCompleted = true
 		finished, finishErr := m.finishNow(current, ProcessResult{Err: err}, active)
 		if finishErr != nil {
 			m.abandon(current)
@@ -430,7 +463,6 @@ func (m *Manager) start(request StartRequest, active map[string]*activeTask) tas
 	updatedLease.ServiceInstanceID = m.serviceInstanceID
 	if err := m.store.UpdateLease(context.Background(), updatedLease); err != nil {
 		m.tripStorage(active)
-		m.abandon(current)
 		return taskResponse{err: err}
 	}
 	m.watch(current)
@@ -462,7 +494,6 @@ func (m *Manager) cancel(id string, active map[string]*activeTask) taskResponse 
 	if current.cause != "" {
 		return taskResponse{task: current.task}
 	}
-	current.cause = OutcomeCancelled
 	now := m.clock.Now()
 	cancelling, err := ApplyTransition(current.task, Transition{From: StatusRunning, To: StatusCancelling, At: now})
 	if err != nil {
@@ -479,6 +510,7 @@ func (m *Manager) cancel(id string, active map[string]*activeTask) taskResponse 
 		return taskResponse{task: current.task, err: err}
 	}
 	current.task = cancelling
+	current.cause = OutcomeCancelled
 	if !m.publishAll(events, active) {
 		return taskResponse{task: current.task, err: ErrStorageUnavailable}
 	}
@@ -488,12 +520,14 @@ func (m *Manager) cancel(id string, active map[string]*activeTask) taskResponse 
 
 func (m *Manager) watch(current *activeTask) {
 	taskID := current.task.ID
+	process := current.process
+	stop := current.watcherStop
 	go func() {
 		for {
 			select {
-			case value, ok := <-current.process.Output():
+			case value, ok := <-process.Output():
 				if !ok {
-					result, ok := <-current.process.Done()
+					result, ok := <-process.Done()
 					if !ok {
 						result = ProcessResult{Err: errors.New("process result unavailable")}
 					}
@@ -504,7 +538,7 @@ func (m *Manager) watch(current *activeTask) {
 				if !m.sendInternal(outputCommand{taskID: taskID, value: value}) {
 					return
 				}
-			case <-current.watcherStop:
+			case <-stop:
 				return
 			}
 		}
@@ -514,11 +548,12 @@ func (m *Manager) watch(current *activeTask) {
 func (m *Manager) armTimeout(current *activeTask) {
 	taskID := current.task.ID
 	wait := m.clock.After(current.task.Timeout)
+	stop := current.timeoutStop
 	go func() {
 		select {
 		case <-wait:
 			m.sendInternal(timeoutCommand(taskID))
-		case <-current.timeoutStop:
+		case <-stop:
 		case <-m.stopped:
 		}
 	}()
@@ -551,14 +586,14 @@ func (m *Manager) acceptOutput(current *activeTask, output ProcessOutput, active
 		current.bufferedBytes += len(part)
 		if current.bufferedBytes >= maxOutputBlock {
 			m.flushOutput(current, active)
-			if m.storageFault.Load() {
+			if m.storageFailed {
 				return
 			}
 		}
 	}
 	if overflow {
 		m.flushOutput(current, active)
-		if m.storageFault.Load() {
+		if m.storageFailed {
 			return
 		}
 		m.persistTruncation(current, active)
@@ -653,17 +688,23 @@ func (m *Manager) terminate(current *activeTask) {
 		return
 	}
 	current.terminating = true
+	current.terminationGeneration++
+	taskID := current.task.ID
+	cause := current.cause
+	generation := current.terminationGeneration
+	process := current.process
+	grace := m.terminationGrace
 	go func() {
-		defer close(current.terminationDone)
-		ctx, cancel := context.WithTimeout(context.Background(), m.terminationGrace+2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), grace+2*time.Second)
 		defer cancel()
-		current.terminationErr = current.process.Terminate(ctx, m.terminationGrace)
+		err := process.Terminate(ctx, grace)
+		m.sendInternal(terminationResultCommand{taskID: taskID, cause: cause, generation: generation, err: err})
 	}()
 }
 
 func (m *Manager) finish(current *activeTask, result ProcessResult, active map[string]*activeTask) {
 	m.flushOutput(current, active)
-	if m.storageFault.Load() {
+	if m.storageFailed {
 		m.abandon(current)
 		return
 	}
@@ -679,7 +720,7 @@ func (m *Manager) finishNow(current *activeTask, result ProcessResult, active ma
 	outcome := current.cause
 	if outcome == "" {
 		switch {
-		case result.Err != nil:
+		case current.terminationFailed || result.Err != nil:
 			outcome = OutcomeInfrastructureFailed
 		case result.ExitCode == 0:
 			outcome = OutcomeSucceeded
@@ -693,7 +734,7 @@ func (m *Manager) finishNow(current *activeTask, result ProcessResult, active ma
 	}
 	current.task = finished
 	m.stopActive(current)
-	m.scheduleCleanup(current)
+	m.maybeStartClose(current)
 	return finished, nil
 }
 
@@ -718,28 +759,20 @@ func (m *Manager) persistFinished(current Task, outcome Outcome, deleteLease boo
 	}{current.ID, current.Scenario, outcome, finishedAt.Format(time.RFC3339Nano)}
 	artifactID := m.newID()
 	artifact, artifactErr := m.artifacts.CommitJSON(context.Background(), current.ID, artifactID, finishedAt, summary)
-	artifacts := []Artifact(nil)
-	events := []EventDraft(nil)
-	if artifactErr == nil {
-		artifacts = []Artifact{artifact}
-		events = append(events, eventDraft(current.ID, EventArtifactCreated, finishedAt, map[string]any{
-			"artifactId": artifact.ID, "kind": artifact.Kind,
-		}))
-	} else {
-		outcome = OutcomeInfrastructureFailed
-		finished.Outcome = outcome
-		finished.ErrorCode = outcomeErrorCode(outcome)
-		finished.ErrorMessage = outcomeErrorMessage(outcome)
-		summary.Outcome = outcome
+	if artifactErr != nil {
+		m.tripStorage(active)
+		return current, ErrStorageUnavailable
 	}
+	artifacts := []Artifact{artifact}
+	events := []EventDraft{eventDraft(current.ID, EventArtifactCreated, finishedAt, map[string]any{
+		"artifactId": artifact.ID, "kind": artifact.Kind,
+	})}
 	events = append(events, eventDraft(current.ID, EventTaskFinished, finishedAt, map[string]any{"outcome": outcome}))
 	stored, committed, err := m.store.Apply(context.Background(), Mutation{
 		Task: finished, Expected: current.Status, Events: events, DeleteLease: deleteLease, Artifacts: artifacts,
 	})
 	if err != nil {
-		if errors.Is(err, ErrStorageUnavailable) {
-			m.tripStorage(active)
-		}
+		m.tripStorage(active)
 		return current, err
 	}
 	if !m.publishAll(committed, active) {
@@ -782,42 +815,58 @@ func (m *Manager) stopActive(current *activeTask) {
 
 func (m *Manager) abandon(current *activeTask) {
 	m.stopActive(current)
-	if current.process != nil {
-		if !current.terminating {
-			m.terminate(current)
-		}
+	if current.process != nil && !current.processCompleted && !current.terminating {
+		m.terminate(current)
 	}
-	m.scheduleCleanup(current)
+	m.maybeStartClose(current)
 }
 
-func (m *Manager) scheduleCleanup(current *activeTask) {
-	if current.cleanupScheduled {
+func (m *Manager) maybeStartClose(current *activeTask) {
+	if current.closeStarted || current.process == nil {
 		return
 	}
-	current.cleanupScheduled = true
+	if current.terminating && !current.terminationComplete {
+		return
+	}
+	ready := current.recoveryRequired || current.cleanupWithoutDone || current.processCompleted || current.terminationFailed
+	if !ready {
+		return
+	}
+	current.closeStarted = true
+	current.closeGeneration++
+	taskID := current.task.ID
+	generation := current.closeGeneration
+	process := current.process
 	go func() {
-		if current.process != nil {
-			if current.terminating {
-				<-current.terminationDone
-				if current.terminationErr != nil {
-					m.healthy.Store(false)
-				}
-			}
-			if current.process.Close() != nil {
-				m.healthy.Store(false)
-			}
-		}
-		m.sendInternal(cleanupCommand{taskID: current.task.ID, current: current})
+		err := process.Close()
+		m.sendInternal(closeResultCommand{taskID: taskID, generation: generation, err: err})
 	}()
 }
 
+func (m *Manager) canRemove(current *activeTask) bool {
+	if !current.closeComplete {
+		return false
+	}
+	if current.recoveryRequired || current.cleanupWithoutDone {
+		return true
+	}
+	return current.processCompleted && current.task.Status == StatusFinished
+}
+
 func (m *Manager) tripStorage(active map[string]*activeTask) {
-	m.storageFault.Store(true)
-	if !m.healthy.Swap(false) {
+	if m.storageFailed {
 		return
 	}
+	m.storageFailed = true
+	m.healthy.Store(false)
 	for _, current := range active {
-		m.terminate(current)
+		current.recoveryRequired = true
+		m.stopActive(current)
+		if current.processCompleted {
+			m.maybeStartClose(current)
+		} else if !current.terminating {
+			m.terminate(current)
+		}
 	}
 }
 

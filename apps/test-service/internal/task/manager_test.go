@@ -203,6 +203,50 @@ func TestManagerBlockedTerminateDoesNotBlockTerminalPersistence(t *testing.T) {
 	}
 }
 
+func TestManagerTerminateErrorReturnsThroughLoopAndKeepsQueueResponsive(t *testing.T) {
+	f := newManagerFixture(t)
+	f.process.terminateErr = errors.New("terminate failed at C:/private")
+	started, err := f.manager.Start(context.Background(), task.StartRequest{
+		IdempotencyKey: testID(34), Scenario: task.ScenarioHang, Timeout: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.manager.Cancel(context.Background(), started.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.awaitTerminate(t, 1)
+	f.awaitUnhealthy(t)
+	if got, err := f.manager.Get(context.Background(), started.ID); err != nil || got.Status != task.StatusCancelling {
+		t.Fatalf("Get = %#v, %v", got, err)
+	}
+	if page, err := f.manager.List(context.Background(), "", 10); err != nil || len(page.Items) != 1 {
+		t.Fatalf("List = %#v, %v", page, err)
+	}
+	if _, err := f.manager.Start(context.Background(), task.StartRequest{IdempotencyKey: testID(35), Scenario: task.ScenarioSuccess, Timeout: time.Second}); !errors.Is(err, task.ErrStorageUnavailable) {
+		t.Fatalf("Start after Terminate error = %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := f.manager.Shutdown(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Shutdown error = %v", err)
+	}
+	f.process.complete(task.ProcessResult{ExitCode: 1})
+	finished := f.awaitStoredTask(t, started.ID, task.StatusFinished)
+	if finished.Outcome != task.OutcomeCancelled {
+		t.Fatalf("first cause lost: %#v", finished)
+	}
+	terminal := 0
+	for _, kind := range f.publisher.types() {
+		if kind == task.EventTaskFinished {
+			terminal++
+		}
+	}
+	if terminal != 1 {
+		t.Fatalf("task.finished events = %d", terminal)
+	}
+}
+
 func TestManagerFirstTerminationCauseWins(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -398,17 +442,96 @@ func TestManagerStorageFailureTripsCircuitAndTerminates(t *testing.T) {
 	}
 }
 
-func TestManagerArtifactFailureFinishesInfrastructureFailureWithoutMetadata(t *testing.T) {
+func TestManagerStorageFaultStillTripsAfterEarlierCleanupFault(t *testing.T) {
 	f := newManagerFixture(t)
+	first := f.process
+	second := newFakeProcess()
+	third := newFakeProcess()
+	f.processes.queue = []*fakeProcess{first, second, third}
+	t.Cleanup(func() {
+		second.completeOnce(task.ProcessResult{Err: errors.New("cleanup")})
+		third.completeOnce(task.ProcessResult{Err: errors.New("cleanup")})
+	})
+	first.closeErr = errors.New("close failed")
+	firstTask, err := f.manager.Start(context.Background(), task.StartRequest{IdempotencyKey: testID(36), Scenario: task.ScenarioSuccess, Timeout: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.manager.Start(context.Background(), task.StartRequest{IdempotencyKey: testID(37), Scenario: task.ScenarioHang, Timeout: time.Hour}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.manager.Start(context.Background(), task.StartRequest{IdempotencyKey: testID(38), Scenario: task.ScenarioHang, Timeout: time.Hour}); err != nil {
+		t.Fatal(err)
+	}
+	first.complete(task.ProcessResult{ExitCode: 0})
+	f.awaitStoredTask(t, firstTask.ID, task.StatusFinished)
+	f.awaitProcessClose(t, first)
+	f.awaitUnhealthy(t)
+	f.store.failAppend = task.ErrStorageUnavailable
+	second.output(task.ProcessOutput{Stream: "stdout", Data: []byte(strings.Repeat("x", 16*1024))})
+	f.awaitProcessTerminate(t, second, 1)
+	f.awaitProcessTerminate(t, third, 1)
+	if second.terminateCalls() != 1 || third.terminateCalls() != 1 {
+		t.Fatalf("termination calls = second:%d third:%d", second.terminateCalls(), third.terminateCalls())
+	}
+}
+
+func TestManagerCancelApplyFailureDoesNotRecordCancelledCause(t *testing.T) {
+	f := newManagerFixture(t)
+	started, err := f.manager.Start(context.Background(), task.StartRequest{IdempotencyKey: testID(39), Scenario: task.ScenarioHang, Timeout: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.store.failApply = task.ErrStorageUnavailable
+	if _, err := f.manager.Cancel(context.Background(), started.ID); !errors.Is(err, task.ErrStorageUnavailable) {
+		t.Fatalf("Cancel error = %v", err)
+	}
+	f.awaitTerminate(t, 1)
+	f.process.complete(task.ProcessResult{ExitCode: 1})
+	f.awaitProcessClose(t, f.process)
+	stored, err := f.manager.Get(context.Background(), started.ID)
+	if err != nil || stored.Status != task.StatusRunning || stored.Outcome != "" {
+		t.Fatalf("stored = %#v, %v", stored, err)
+	}
+	for _, kind := range f.publisher.types() {
+		if kind == task.EventTaskCancellationRequested || kind == task.EventTaskFinished {
+			t.Fatalf("published uncommitted cancellation/terminal event %q", kind)
+		}
+	}
+}
+
+func TestManagerArtifactFailureTripsStorageCircuitWithoutTerminalPersistence(t *testing.T) {
+	f := newManagerFixture(t)
+	finishedProcess := f.process
+	otherProcess := newFakeProcess()
+	f.processes.queue = []*fakeProcess{finishedProcess, otherProcess}
+	t.Cleanup(func() { otherProcess.completeOnce(task.ProcessResult{Err: errors.New("cleanup")}) })
 	started, err := f.manager.Start(context.Background(), task.StartRequest{IdempotencyKey: testID(22), Scenario: task.ScenarioSuccess, Timeout: time.Hour})
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := f.manager.Start(context.Background(), task.StartRequest{IdempotencyKey: testID(40), Scenario: task.ScenarioHang, Timeout: time.Hour}); err != nil {
+		t.Fatal(err)
+	}
 	f.artifacts.fail = errors.New("artifact unavailable at C:/secret")
-	f.process.complete(task.ProcessResult{ExitCode: 0})
-	finished := f.awaitTask(t, started.ID, task.StatusFinished)
-	if finished.Outcome != task.OutcomeInfrastructureFailed || len(f.store.lastMutation().Artifacts) != 0 {
-		t.Fatalf("finished = %#v mutation = %#v", finished, f.store.lastMutation())
+	finishedProcess.complete(task.ProcessResult{ExitCode: 0})
+	f.awaitUnhealthy(t)
+	f.awaitProcessClose(t, finishedProcess)
+	f.awaitProcessTerminate(t, otherProcess, 1)
+	stored, err := f.manager.Get(context.Background(), started.ID)
+	if err != nil || stored.Status == task.StatusFinished || stored.Outcome != "" {
+		t.Fatalf("stored = %#v, %v", stored, err)
+	}
+	if len(f.store.artifactsCopy()) != 0 {
+		t.Fatalf("artifact metadata = %#v", f.store.artifactsCopy())
+	}
+	for _, kind := range f.publisher.types() {
+		if kind == task.EventArtifactCreated || kind == task.EventTaskFinished {
+			t.Fatalf("published terminal event %q", kind)
+		}
+	}
+	if _, err := f.manager.Start(context.Background(), task.StartRequest{IdempotencyKey: testID(41), Scenario: task.ScenarioSuccess, Timeout: time.Second}); !errors.Is(err, task.ErrStorageUnavailable) {
+		t.Fatalf("Start after artifact failure = %v", err)
 	}
 }
 
@@ -616,6 +739,42 @@ func (f *managerFixture) awaitTerminate(t *testing.T, calls int) {
 		select {
 		case <-deadline:
 			t.Fatalf("Terminate calls = %d, want %d", f.process.terminateCalls(), calls)
+		default:
+		}
+	}
+}
+
+func (f *managerFixture) awaitProcessTerminate(t *testing.T, process *fakeProcess, calls int) {
+	t.Helper()
+	deadline := time.After(time.Second)
+	for process.terminateCalls() < calls {
+		select {
+		case <-deadline:
+			t.Fatalf("Terminate calls = %d, want %d", process.terminateCalls(), calls)
+		default:
+		}
+	}
+}
+
+func (f *managerFixture) awaitProcessClose(t *testing.T, process *fakeProcess) {
+	t.Helper()
+	deadline := time.After(time.Second)
+	for process.closeCalls() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("process was not closed")
+		default:
+		}
+	}
+}
+
+func (f *managerFixture) awaitUnhealthy(t *testing.T) {
+	t.Helper()
+	deadline := time.After(time.Second)
+	for f.manager.Healthy() {
+		select {
+		case <-deadline:
+			t.Fatal("manager remained healthy")
 		default:
 		}
 	}
@@ -837,6 +996,12 @@ func (s *fakeStore) lease(id string) task.ProcessLease {
 	return s.leases[id]
 }
 
+func (s *fakeStore) artifactsCopy() []task.Artifact {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]task.Artifact(nil), s.artifacts...)
+}
+
 func (s *fakeStore) assertStrictSequences(t *testing.T) {
 	t.Helper()
 	s.mu.Lock()
@@ -890,6 +1055,7 @@ type fakeProcessFactory struct {
 	next       *fakeProcess
 	specs      []task.ProcessSpec
 	prepareErr error
+	queue      []*fakeProcess
 }
 
 func (f *fakeProcessFactory) Prepare(_ context.Context, spec task.ProcessSpec, taskID, serviceID string) (task.ManagedProcess, error) {
@@ -902,9 +1068,14 @@ func (f *fakeProcessFactory) Prepare(_ context.Context, spec task.ProcessSpec, t
 	if f.prepareErr != nil {
 		return nil, f.prepareErr
 	}
-	f.next.lease.TaskID = taskID
-	f.next.lease.ServiceInstanceID = serviceID
-	return f.next, nil
+	process := f.next
+	if len(f.queue) > 0 {
+		process = f.queue[0]
+		f.queue = f.queue[1:]
+	}
+	process.lease.TaskID = taskID
+	process.lease.ServiceInstanceID = serviceID
+	return process, nil
 }
 func (f *fakeProcessFactory) prepareCount() int {
 	f.mu.Lock()
@@ -928,6 +1099,8 @@ type fakeProcess struct {
 	closes         int
 	startErr       error
 	terminateBlock <-chan struct{}
+	terminateErr   error
+	closeErr       error
 }
 
 func newFakeProcess() *fakeProcess {
@@ -954,9 +1127,9 @@ func (p *fakeProcess) Terminate(context.Context, time.Duration) error {
 	if block != nil {
 		<-block
 	}
-	return nil
+	return p.terminateErr
 }
-func (p *fakeProcess) Close() error                      { p.mu.Lock(); defer p.mu.Unlock(); p.closes++; return nil }
+func (p *fakeProcess) Close() error                      { p.mu.Lock(); defer p.mu.Unlock(); p.closes++; return p.closeErr }
 func (p *fakeProcess) output(value task.ProcessOutput)   { p.outputs <- value }
 func (p *fakeProcess) complete(value task.ProcessResult) { p.completeOnce(value) }
 func (p *fakeProcess) completeOnce(value task.ProcessResult) {

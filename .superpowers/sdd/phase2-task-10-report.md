@@ -38,3 +38,21 @@ Implemented `TaskManager` as the single owner of task state changes, output buff
 - Watcher/timer stop channels close once; stale flush tokens are ignored; cleanup waits for termination before close and removes the active entry through the command queue.
 - Terminal publication uses committed global sequence order. DB failure after artifact commit retains the orphan and trips health.
 - No transport, server/session lifecycle, platform process code, or public executable/path/shell/env/cwd input was added.
+
+## Review fixes
+
+- RED evidence: focused review tests initially failed because a Terminate error left the manager healthy, a later Store fault after a Close error made zero termination calls to other active processes, and ArtifactWriter failure still committed a terminal task.
+- GREEN evidence: the focused review tests pass, and `go test -race ./apps/test-service/internal/task -run 'Manager|NewManager' -count=20` passes after the fixes.
+- Terminate and Close workers now capture immutable values and return generation-tagged typed commands to the command loop. Only the loop mutates active-task termination/cleanup state. A Terminate error immediately makes the manager unhealthy, rejects Start, starts Close without waiting silently for Done, keeps Get/List responsive, and retains the active entry so Shutdown remains context-bounded if Done never arrives.
+- The loop-owned one-shot `storageFailed` circuit is independent of general health. Its first storage, publisher, artifact, or terminal-persistence fault terminates all active processes exactly once even if a prior Terminate/Close error already made the manager unhealthy.
+- Cancellation cause is assigned only after the `cancelling` snapshot and `task.cancellation_requested` event commit. A failed Apply leaves no cancelled cause, row, or event.
+- ArtifactWriter failure is now storage-fatal: no artifact metadata, `artifact.created`, or `task.finished` is committed/published; the nonterminal row and lease remain for startup recovery, the completed process closes, and other active processes terminate.
+- DB failure after a successfully committed artifact retains the intentional orphan, publishes no uncommitted terminal event, and trips the same recovery-required storage circuit.
+
+## Review-fix verification
+
+- PASS: focused manager tests repeated 20 times and focused manager race tests repeated 20 times.
+- PASS: full `go test ./apps/test-service/...` and full `go test -race ./apps/test-service/...`.
+- PASS: Windows Go build, native processcontrol/processhost/command regressions, and Linux amd64 CGO-disabled cross-build.
+- PASS: protocol generated check, workspace smoke, recursive TypeScript build, recursive workspace tests, and task-package vet.
+- Unchanged known warning: full Go vet still reports only `internal/eventbroker/broker_test.go:579` and `:594`; no Task 6 file was edited.
