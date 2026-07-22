@@ -18,21 +18,28 @@ const testTimeout = 5 * time.Second
 type fakeSource struct {
 	mu sync.Mutex
 
-	events       []task.Event
-	watermarkErr error
-	replayErr    error
-	blockReplay  bool
-	replayStart  chan struct{}
-	replayGate   chan struct{}
-	replayOnce   sync.Once
-	calls        [][3]int64
+	events         []task.Event
+	watermarkErr   error
+	replayErr      error
+	emptyReplay    bool
+	blockWatermark bool
+	blockReplay    bool
+	watermarkStart chan struct{}
+	watermarkGate  chan struct{}
+	watermarkOnce  sync.Once
+	replayStart    chan struct{}
+	replayGate     chan struct{}
+	replayOnce     sync.Once
+	calls          [][3]int64
 }
 
 func newFakeSource(initial []task.Event) *fakeSource {
 	return &fakeSource{
-		events:      append([]task.Event(nil), initial...),
-		replayStart: make(chan struct{}),
-		replayGate:  make(chan struct{}),
+		events:         append([]task.Event(nil), initial...),
+		watermarkStart: make(chan struct{}),
+		watermarkGate:  make(chan struct{}),
+		replayStart:    make(chan struct{}),
+		replayGate:     make(chan struct{}),
 	}
 }
 
@@ -42,16 +49,28 @@ func newBlockingFakeSource(initial []task.Event) *fakeSource {
 	return source
 }
 
-func (s *fakeSource) Watermark(context.Context) (int64, error) {
+func (s *fakeSource) Watermark(ctx context.Context) (int64, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.watermarkErr != nil {
-		return 0, s.watermarkErr
+	block := s.blockWatermark
+	watermarkErr := s.watermarkErr
+	watermark := int64(0)
+	if len(s.events) != 0 {
+		watermark = s.events[len(s.events)-1].Sequence
 	}
-	if len(s.events) == 0 {
-		return 0, nil
+	s.mu.Unlock()
+
+	s.watermarkOnce.Do(func() { close(s.watermarkStart) })
+	if block {
+		select {
+		case <-s.watermarkGate:
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		}
 	}
-	return s.events[len(s.events)-1].Sequence, nil
+	if watermarkErr != nil {
+		return 0, watermarkErr
+	}
+	return watermark, nil
 }
 
 func (s *fakeSource) EventsAfter(ctx context.Context, after, through int64, limit int) ([]task.Event, error) {
@@ -59,6 +78,7 @@ func (s *fakeSource) EventsAfter(ctx context.Context, after, through int64, limi
 	s.calls = append(s.calls, [3]int64{after, through, int64(limit)})
 	block := s.blockReplay
 	replayErr := s.replayErr
+	emptyReplay := s.emptyReplay
 	s.mu.Unlock()
 
 	s.replayOnce.Do(func() { close(s.replayStart) })
@@ -71,6 +91,9 @@ func (s *fakeSource) EventsAfter(ctx context.Context, after, through int64, limi
 	}
 	if replayErr != nil {
 		return nil, replayErr
+	}
+	if emptyReplay {
+		return nil, nil
 	}
 
 	s.mu.Lock()
@@ -99,6 +122,15 @@ func (s *fakeSource) waitForReplayStart(t *testing.T) {
 	case <-s.replayStart:
 	case <-time.After(testTimeout):
 		t.Fatal("replay did not start")
+	}
+}
+
+func (s *fakeSource) waitForWatermarkStart(t *testing.T) {
+	t.Helper()
+	select {
+	case <-s.watermarkStart:
+	case <-time.After(testTimeout):
+		t.Fatal("watermark read did not start")
 	}
 }
 
@@ -416,6 +448,19 @@ func TestReplayFailureIsReportedAndClosesSubscription(t *testing.T) {
 	requireClosed(t, subscription.Errors)
 }
 
+func TestEmptyReplayPageBeforeWatermarkFailsClosed(t *testing.T) {
+	source := newFakeSource(events(1))
+	source.emptyReplay = true
+	broker := mustBroker(t, source, 2, 1)
+	subscription := mustSubscribe(t, broker, context.Background(), 0)
+
+	if err := readError(t, subscription.Errors); err == nil || err.Error() != "event replay failed" {
+		t.Fatalf("empty replay error = %v, want sanitized replay failure", err)
+	}
+	requireClosed(t, subscription.Events)
+	requireClosed(t, subscription.Errors)
+}
+
 func TestWatermarkFailureDoesNotReturnSubscription(t *testing.T) {
 	source := newFakeSource(nil)
 	source.watermarkErr = errors.New("database details must not escape")
@@ -423,6 +468,62 @@ func TestWatermarkFailureDoesNotReturnSubscription(t *testing.T) {
 
 	if subscription, err := broker.Subscribe(context.Background(), 0); subscription != nil || err == nil || err.Error() != "read event watermark" {
 		t.Fatalf("Subscribe() = (%v, %v), want nil sanitized error", subscription, err)
+	}
+}
+
+func TestSetupOverflowWhileWatermarkIsBlockedReturnsSubscriberTooSlow(t *testing.T) {
+	source := newFakeSource(nil)
+	source.blockWatermark = true
+	broker := mustBroker(t, source, 1, 1)
+	type subscribeResult struct {
+		subscription *Subscription
+		err          error
+	}
+	result := make(chan subscribeResult, 1)
+	go func() {
+		subscription, err := broker.Subscribe(context.Background(), 0)
+		result <- subscribeResult{subscription: subscription, err: err}
+	}()
+
+	source.waitForWatermarkStart(t)
+	broker.Publish(event(1))
+	broker.Publish(event(2))
+
+	select {
+	case got := <-result:
+		if got.subscription != nil || !errors.Is(got.err, ErrSubscriberTooSlow) {
+			t.Fatalf("Subscribe() = (%v, %v), want nil, ErrSubscriberTooSlow", got.subscription, got.err)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("Subscribe did not return after setup overflow canceled Watermark")
+	}
+}
+
+func TestCallerCancellationWhileWatermarkIsBlockedReturnsContextError(t *testing.T) {
+	source := newFakeSource(nil)
+	source.blockWatermark = true
+	broker := mustBroker(t, source, 1, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	type subscribeResult struct {
+		subscription *Subscription
+		err          error
+	}
+	result := make(chan subscribeResult, 1)
+	go func() {
+		subscription, err := broker.Subscribe(ctx, 0)
+		result <- subscribeResult{subscription: subscription, err: err}
+	}()
+
+	source.waitForWatermarkStart(t)
+	cancel()
+
+	select {
+	case got := <-result:
+		if got.subscription != nil || !errors.Is(got.err, context.Canceled) {
+			t.Fatalf("Subscribe() = (%v, %v), want nil, context.Canceled", got.subscription, got.err)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("Subscribe did not return after caller canceled Watermark")
 	}
 }
 

@@ -36,14 +36,15 @@ func (s *Subscription) Close() {
 }
 
 type subscriber struct {
-	id     uint64
-	after  int64
-	buffer []task.Event
-	live   bool
-	out    chan task.Event
-	errs   chan error
-	done   <-chan struct{}
-	cancel context.CancelFunc
+	id       uint64
+	after    int64
+	buffer   []task.Event
+	live     bool
+	out      chan task.Event
+	errs     chan error
+	done     <-chan struct{}
+	cancel   context.CancelFunc
+	terminal error
 }
 
 type Broker struct {
@@ -116,15 +117,14 @@ func (b *Broker) Subscribe(ctx context.Context, afterSequence int64) (*Subscript
 
 	watermark, err := b.source.Watermark(subscriptionContext)
 	if err != nil {
+		err = b.setupError(ctx, subscriber, errReadWatermark)
 		b.remove(subscriber, nil)
-		return nil, errReadWatermark
+		return nil, err
 	}
 	if err := subscriptionContext.Err(); err != nil {
+		err = b.setupError(ctx, subscriber, err)
 		b.remove(subscriber, nil)
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return nil, ErrSubscriberTooSlow
+		return nil, err
 	}
 	if afterSequence > watermark {
 		b.remove(subscriber, nil)
@@ -159,7 +159,8 @@ func (b *Broker) replay(ctx context.Context, subscriber *subscriber, watermark i
 			return
 		}
 		if len(page) == 0 {
-			break
+			b.remove(subscriber, errReplayFailed)
+			return
 		}
 
 		previousCursor := cursor
@@ -241,6 +242,22 @@ func (b *Broker) reportLocked(err error) {
 	}
 }
 
+func (b *Broker) setupError(ctx context.Context, subscriber *subscriber, sourceError error) error {
+	b.mu.Lock()
+	terminal := subscriber.terminal
+	b.mu.Unlock()
+	if errors.Is(terminal, ErrSubscriberTooSlow) {
+		return terminal
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if terminal != nil {
+		return terminal
+	}
+	return sourceError
+}
+
 func (b *Broker) remove(subscriber *subscriber, err error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -255,6 +272,7 @@ func (b *Broker) registeredLocked(subscriber *subscriber) bool {
 }
 
 func (b *Broker) dropLocked(subscriber *subscriber, err error) {
+	subscriber.terminal = err
 	delete(b.subscribers, subscriber.id)
 	subscriber.cancel()
 	if err != nil {
