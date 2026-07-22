@@ -1,0 +1,13 @@
+{
+  "protocolVersion": "1.1",
+  "kind": "request",
+  "messageId": "0123456789abcdef0123456789abcdef",
+  "method": "handshake",
+  "sentAt": "2026-07-22T00:00:00Z",
+  "payload": {
+    "token": "0123456789abcdef",
+    "clientName": "schema-test",
+    "clientVersion": "0.2.0",
+    "supportedProtocolVersions": ["1.1", "1.0"]
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:unit-test-ide:protocol:v1.1:artifact",
+  "title": "ArtifactMetadata",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["artifactId", "taskId", "kind", "mimeType", "sizeBytes", "sha256", "createdAt"],
+  "properties": {
+    "artifactId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "taskId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "kind": { "title": "ArtifactKind", "const": "task-summary" },
+    "mimeType": { "const": "application/json" },
+    "sizeBytes": { "type": "integer", "minimum": 0 },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "createdAt": { "type": "string", "format": "date-time" }
+  }
+}

@@ -5,7 +5,12 @@
   "type": "module",
   "exports": {
     "./v1/message": "./schema/v1/message.schema.json",
-    "./v1/capabilities": "./schema/v1/capabilities.schema.json"
+    "./v1/capabilities": "./schema/v1/capabilities.schema.json",
+    "./v1.1/message": "./schema/v1.1/message.schema.json",
+    "./v1.1/capabilities": "./schema/v1.1/capabilities.schema.json",
+    "./v1.1/task": "./schema/v1.1/task.schema.json",
+    "./v1.1/event": "./schema/v1.1/event.schema.json",
+    "./v1.1/artifact": "./schema/v1.1/artifact.schema.json"
   },
   "scripts": {
     "test": "node --test test/schema.test.mjs"
