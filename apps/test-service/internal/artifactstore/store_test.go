@@ -1,6 +1,7 @@
-package artifactstore_test
+package artifactstore
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -14,13 +15,12 @@ import (
 	"testing"
 	"time"
 
-	"unit-test-ide.local/test-service/internal/artifactstore"
 	"unit-test-ide.local/test-service/internal/task"
 )
 
 func TestCommitJSONAndReadChunk(t *testing.T) {
 	root := t.TempDir()
-	store, err := artifactstore.New(root)
+	store, err := newStore(t, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +40,7 @@ func TestCommitJSONAndReadChunk(t *testing.T) {
 	if err != nil || len(first) != 8 || next != 8 || eof {
 		t.Fatalf("chunk = %q, next = %d, eof = %v, err = %v", first, next, eof, err)
 	}
-	rest, next, eof, err := store.ReadChunk(context.Background(), artifact, next, artifactstore.MaxReadChunk)
+	rest, next, eof, err := store.ReadChunk(context.Background(), artifact, next, MaxReadChunk)
 	if err != nil || !eof || next != artifact.Size {
 		t.Fatalf("rest = %q, next = %d, eof = %v, err = %v", rest, next, eof, err)
 	}
@@ -66,8 +66,85 @@ func TestCommitJSONAndReadChunk(t *testing.T) {
 	}
 }
 
+func TestCommitJSONCanonicalizesFixedSummaryFields(t *testing.T) {
+	root := t.TempDir()
+	store, err := newStore(t, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	full := map[string]any{
+		"outcome":    "succeeded",
+		"finishedAt": "1970-01-01T00:00:00Z",
+		"scenario":   "success",
+		"taskId":     id(1),
+	}
+	artifact, err := store.CommitJSON(context.Background(), id(1), id(2), time.Unix(0, 0).UTC(), full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []byte(`{"taskId":"` + id(1) + `","scenario":"success","outcome":"succeeded","finishedAt":"1970-01-01T00:00:00Z"}` + "\n")
+	got, err := os.ReadFile(artifactPath(root, artifact))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("canonical summary = %q, want %q", got, want)
+	}
+
+	type reorderedSummary struct {
+		FinishedAt string `json:"finishedAt"`
+		Outcome    string `json:"outcome"`
+		TaskID     string `json:"taskId"`
+		Scenario   string `json:"scenario"`
+	}
+	artifact, err = store.CommitJSON(context.Background(), id(1), id(3), time.Unix(0, 0).UTC(), reorderedSummary{
+		FinishedAt: "1970-01-01T00:00:00Z", Outcome: "succeeded", TaskID: id(1), Scenario: "success",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err = os.ReadFile(artifactPath(root, artifact))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("struct summary = %q, want %q", got, want)
+	}
+}
+
+func TestCommitJSONRejectsNonSummaryOrSensitiveValues(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		value any
+	}{
+		{name: "unknown field", value: map[string]any{"outcome": "cancelled", "detail": "x"}},
+		{name: "environment field", value: map[string]any{"outcome": "cancelled", "environment": "production"}},
+		{name: "environment shaped value", value: map[string]any{"outcome": "cancelled", "scenario": "${SCENARIO}"}},
+		{name: "absolute Unix path", value: map[string]any{"outcome": "cancelled", "finishedAt": "/tmp/result"}},
+		{name: "absolute Windows path", value: map[string]any{"outcome": "cancelled", "finishedAt": `C:\result.json`}},
+		{name: "nested value", value: map[string]any{"outcome": "cancelled", "scenario": map[string]string{"name": "success"}}},
+		{name: "array value", value: map[string]any{"outcome": "cancelled", "scenario": []string{"success"}}},
+		{name: "boolean value", value: map[string]any{"outcome": true}},
+		{name: "null value", value: map[string]any{"outcome": nil}},
+		{name: "float value", value: map[string]any{"outcome": 1.5}},
+		{name: "missing outcome", value: map[string]any{"scenario": "success"}},
+		{name: "mismatched task", value: map[string]any{"taskId": id(9), "scenario": "success", "outcome": "succeeded", "finishedAt": "1970-01-01T00:00:00Z"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, err := newStore(t, t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = store.CommitJSON(context.Background(), id(1), id(2), time.Unix(0, 0).UTC(), test.value)
+			if !errors.Is(err, ErrInvalidArtifact) {
+				t.Fatalf("CommitJSON() error = %v", err)
+			}
+		})
+	}
+}
+
 func TestCommitJSONRejectsNonGeneratedIDs(t *testing.T) {
-	store, err := artifactstore.New(t.TempDir())
+	store, err := newStore(t, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +162,7 @@ func TestCommitJSONRejectsNonGeneratedIDs(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := store.CommitJSON(context.Background(), test.taskID, test.artifactID, time.Unix(0, 0).UTC(), struct{}{})
-			if !errors.Is(err, artifactstore.ErrInvalidArtifact) {
+			if !errors.Is(err, ErrInvalidArtifact) {
 				t.Fatalf("CommitJSON() error = %v", err)
 			}
 		})
@@ -101,12 +178,12 @@ func TestReadChunkValidatesRangeAndEOF(t *testing.T) {
 	}{
 		{name: "negative offset", offset: -1, length: 1},
 		{name: "zero length", offset: 0, length: 0},
-		{name: "oversized length", offset: 0, length: artifactstore.MaxReadChunk + 1},
+		{name: "oversized length", offset: 0, length: MaxReadChunk + 1},
 		{name: "past end", offset: artifact.Size + 1, length: 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			_, _, _, err := store.ReadChunk(context.Background(), artifact, test.offset, test.length)
-			if !errors.Is(err, artifactstore.ErrInvalidRange) {
+			if !errors.Is(err, ErrInvalidRange) {
 				t.Fatalf("ReadChunk() error = %v", err)
 			}
 		})
@@ -137,7 +214,7 @@ func TestReadChunkRejectsForgedMetadataWithoutUsingItsPath(t *testing.T) {
 
 	for _, forged := range []task.Artifact{abs, traversal, wrongTask, wrongID, wrongKind, wrongMIME, badDigest} {
 		_, _, _, err := store.ReadChunk(context.Background(), forged, 0, 1)
-		if !errors.Is(err, artifactstore.ErrInvalidArtifact) {
+		if !errors.Is(err, ErrInvalidArtifact) {
 			t.Fatalf("ReadChunk(%#v) error = %v", forged, err)
 		}
 	}
@@ -150,14 +227,14 @@ func TestReadChunkDetectsSizeAndDigestTampering(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, _, _, err := store.ReadChunk(context.Background(), artifact, 0, 1)
-		if !errors.Is(err, artifactstore.ErrArtifactChanged) {
+		if !errors.Is(err, ErrArtifactChanged) {
 			t.Fatalf("ReadChunk() error = %v", err)
 		}
 	})
 
 	t.Run("digest", func(t *testing.T) {
 		root := t.TempDir()
-		store, err := artifactstore.New(root)
+		store, err := newStore(t, root)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -174,15 +251,143 @@ func TestReadChunkDetectsSizeAndDigestTampering(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, _, _, err = store.ReadChunk(context.Background(), artifact, 0, 1)
-		if !errors.Is(err, artifactstore.ErrArtifactChanged) {
+		if !errors.Is(err, ErrArtifactChanged) {
 			t.Fatalf("ReadChunk() error = %v", err)
 		}
 	})
 }
 
+func TestReadChunkNeverReturnsBytesMutatedAfterVerifiedSnapshot(t *testing.T) {
+	store, artifact, root := committedArtifact(t)
+	target := artifactPath(root, artifact)
+	original, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutated := bytes.Repeat([]byte{'x'}, len(original))
+	store.hooks.afterVerifiedSnapshot = func() {
+		if err := os.WriteFile(target, mutated, 0o600); err != nil {
+			t.Errorf("mutate artifact: %v", err)
+		}
+	}
+
+	chunk, _, _, err := store.ReadChunk(context.Background(), artifact, 0, 8)
+	if err != nil && !errors.Is(err, ErrArtifactChanged) {
+		t.Fatalf("ReadChunk() error = %v", err)
+	}
+	if err == nil && !bytes.Equal(chunk, original[:8]) {
+		t.Fatalf("ReadChunk() returned unverified bytes %q, verified bytes were %q", chunk, original[:8])
+	}
+}
+
+func TestReadChunkTreatsTruncationDuringSnapshotAsArtifactChanged(t *testing.T) {
+	root := t.TempDir()
+	store, err := newStore(t, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := bytes.Repeat([]byte{'a'}, MaxReadChunk*2)
+	taskID, artifactID := id(1), id(2)
+	relative := artifactRelativePath(taskID, artifactID)
+	target := filepath.Join(root, filepath.FromSlash(relative))
+	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(data)
+	artifact := task.Artifact{
+		ID: artifactID, TaskID: taskID, Kind: "task-summary", RelativePath: relative,
+		MIMEType: "application/json", Size: int64(len(data)), SHA256: hex.EncodeToString(digest[:]), CreatedAt: time.Unix(0, 0).UTC(),
+	}
+	store.hooks.afterSnapshotRead = func(position int64) {
+		if position == MaxReadChunk {
+			if err := os.Truncate(target, position); err != nil {
+				t.Errorf("truncate artifact: %v", err)
+			}
+		}
+	}
+
+	_, _, _, err = store.ReadChunk(context.Background(), artifact, MaxReadChunk, 8)
+	if !errors.Is(err, ErrArtifactChanged) {
+		t.Fatalf("ReadChunk() error = %v", err)
+	}
+}
+
+func TestCommitJSONChecksCancellationImmediatelyBeforePublication(t *testing.T) {
+	root := t.TempDir()
+	store, err := newStore(t, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	store.hooks.afterTempSync = cancel
+	_, err = store.CommitJSON(ctx, id(1), id(2), time.Unix(0, 0).UTC(), map[string]string{"outcome": "cancelled"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("CommitJSON() error = %v", err)
+	}
+	target := filepath.Join(root, "tasks", id(1), id(2)+".json")
+	if _, err := os.Lstat(target); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cancelled commit published final artifact: %v", err)
+	}
+	assertNoTemporaryArtifacts(t, root)
+}
+
+func TestCommitJSONRollsBackPublicationWhenFinalizationFails(t *testing.T) {
+	root := t.TempDir()
+	store, err := newStore(t, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.hooks.finalizeDirectory = func() error { return errors.New("injected finalization failure") }
+	_, err = store.CommitJSON(context.Background(), id(1), id(2), time.Unix(0, 0).UTC(), map[string]string{"outcome": "cancelled"})
+	if !errors.Is(err, ErrStoreUnavailable) {
+		t.Fatalf("CommitJSON() error = %v", err)
+	}
+	target := filepath.Join(root, "tasks", id(1), id(2)+".json")
+	if _, err := os.Lstat(target); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed commit left visible final artifact: %v", err)
+	}
+	assertNoTemporaryArtifacts(t, root)
+}
+
+func TestCommitJSONAncestorSwapCannotPublishOutsideRoot(t *testing.T) {
+	root := t.TempDir()
+	store, err := newStore(t, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	parent := filepath.Join(root, "tasks", id(1))
+	moved := filepath.Join(root, "moved-task")
+	store.hooks.beforePublish = func(temporaryName string) {
+		if err := os.Rename(parent, moved); err != nil {
+			t.Fatalf("move artifact parent: %v", err)
+		}
+		if err := makeDirectoryLink(outside, parent); err != nil {
+			t.Skipf("directory links are unavailable: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(outside, temporaryName), []byte("outside temporary"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	_, err = store.CommitJSON(context.Background(), id(1), id(2), time.Unix(0, 0).UTC(), map[string]string{"outcome": "cancelled"})
+	if err == nil {
+		t.Fatal("CommitJSON() succeeded after its parent path was replaced")
+	}
+	if _, err := os.Lstat(filepath.Join(outside, id(2)+".json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("commit published outside root: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(outside, firstTemporaryName(t, outside))); err != nil || string(got) != "outside temporary" {
+		t.Fatalf("outside temporary changed: %q, %v", got, err)
+	}
+}
+
 func TestCleanupDeletesTempsAndOrphansButPreservesReferences(t *testing.T) {
 	root := t.TempDir()
-	store, err := artifactstore.New(root)
+	store, err := newStore(t, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +414,7 @@ func TestCleanupDeletesTempsAndOrphansButPreservesReferences(t *testing.T) {
 
 func TestCleanupPreservesCanonicalDatabaseReferencesFromOtherArtifactKinds(t *testing.T) {
 	root := t.TempDir()
-	store, err := artifactstore.New(root)
+	store, err := newStore(t, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,16 +435,50 @@ func TestCleanupPreservesCanonicalDatabaseReferencesFromOtherArtifactKinds(t *te
 	}
 }
 
+func TestCleanupAncestorSwapCannotDeleteOutsideRoot(t *testing.T) {
+	root := t.TempDir()
+	store, err := newStore(t, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact := commit(t, store, id(1), id(2))
+	parent := filepath.Join(root, "tasks", id(1))
+	moved := filepath.Join(root, "moved-task")
+	outside := t.TempDir()
+	outsideTarget := filepath.Join(outside, id(2)+".json")
+	if err := os.WriteFile(outsideTarget, []byte("outside must survive"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	swapped := false
+	store.hooks.beforeCleanupRemove = func(relative string) {
+		if swapped || relative != artifact.RelativePath {
+			return
+		}
+		swapped = true
+		if err := os.Rename(parent, moved); err != nil {
+			t.Fatalf("move artifact parent: %v", err)
+		}
+		if err := makeDirectoryLink(outside, parent); err != nil {
+			t.Skipf("directory links are unavailable: %v", err)
+		}
+	}
+
+	_ = store.Cleanup(context.Background(), nil)
+	if got, err := os.ReadFile(outsideTarget); err != nil || string(got) != "outside must survive" {
+		t.Fatalf("cleanup changed outside target: %q, %v", got, err)
+	}
+}
+
 func TestCleanupRejectsInvalidReferencesBeforeDeleting(t *testing.T) {
 	root := t.TempDir()
-	store, err := artifactstore.New(root)
+	store, err := newStore(t, root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	orphan := commit(t, store, id(1), id(2))
 	for _, invalid := range []string{"../escape", filepath.Join(root, "absolute.json"), "tasks/CON/file.json"} {
 		err := store.Cleanup(context.Background(), map[string]struct{}{invalid: {}})
-		if !errors.Is(err, artifactstore.ErrInvalidArtifact) {
+		if !errors.Is(err, ErrInvalidArtifact) {
 			t.Fatalf("Cleanup(%q) error = %v", invalid, err)
 		}
 		if _, err := os.Stat(artifactPath(root, orphan)); err != nil {
@@ -253,7 +492,7 @@ func TestCleanupRejectsUnknownFileTypesWithoutDeletingAnything(t *testing.T) {
 		t.Skip("Windows AF_UNIX socket files do not expose a removable filesystem entry")
 	}
 	root := t.TempDir()
-	store, err := artifactstore.New(root)
+	store, err := newStore(t, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +504,7 @@ func TestCleanupRejectsUnknownFileTypesWithoutDeletingAnything(t *testing.T) {
 	}
 	defer listener.Close()
 
-	if err := store.Cleanup(context.Background(), nil); !errors.Is(err, artifactstore.ErrUnsafePath) {
+	if err := store.Cleanup(context.Background(), nil); !errors.Is(err, ErrUnsafePath) {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
 	if _, err := os.Stat(artifactPath(root, orphan)); err != nil {
@@ -278,7 +517,7 @@ func TestCleanupRejectsUnknownFileTypesWithoutDeletingAnything(t *testing.T) {
 
 func TestReadAndCleanupRejectLinksWithoutTouchingOutside(t *testing.T) {
 	root := t.TempDir()
-	store, err := artifactstore.New(root)
+	store, err := newStore(t, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,10 +538,10 @@ func TestReadAndCleanupRejectLinksWithoutTouchingOutside(t *testing.T) {
 		t.Skipf("links are unavailable on this platform: %v", err)
 	}
 
-	if _, _, _, err := store.ReadChunk(context.Background(), artifact, 0, 1); !errors.Is(err, artifactstore.ErrUnsafePath) {
+	if _, _, _, err := store.ReadChunk(context.Background(), artifact, 0, 1); !errors.Is(err, ErrUnsafePath) {
 		t.Fatalf("ReadChunk() error = %v", err)
 	}
-	if err := store.Cleanup(context.Background(), nil); !errors.Is(err, artifactstore.ErrUnsafePath) {
+	if err := store.Cleanup(context.Background(), nil); !errors.Is(err, ErrUnsafePath) {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
 	if _, err := os.Lstat(target); err != nil {
@@ -315,7 +554,7 @@ func TestReadAndCleanupRejectLinksWithoutTouchingOutside(t *testing.T) {
 
 func TestReadAndCleanupRejectLinkedAncestorWithoutTouchingOutside(t *testing.T) {
 	root := t.TempDir()
-	store, err := artifactstore.New(root)
+	store, err := newStore(t, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,10 +579,10 @@ func TestReadAndCleanupRejectLinkedAncestorWithoutTouchingOutside(t *testing.T) 
 		CreatedAt: time.Unix(0, 0).UTC(),
 	}
 
-	if _, _, _, err := store.ReadChunk(context.Background(), artifact, 0, 1); !errors.Is(err, artifactstore.ErrUnsafePath) {
+	if _, _, _, err := store.ReadChunk(context.Background(), artifact, 0, 1); !errors.Is(err, ErrUnsafePath) {
 		t.Fatalf("ReadChunk() error = %v", err)
 	}
-	if err := store.Cleanup(context.Background(), nil); !errors.Is(err, artifactstore.ErrUnsafePath) {
+	if err := store.Cleanup(context.Background(), nil); !errors.Is(err, ErrUnsafePath) {
 		t.Fatalf("Cleanup() error = %v", err)
 	}
 	if got, err := os.ReadFile(filepath.Join(outside, artifactID+".json")); err != nil || string(got) != string(data) {
@@ -357,14 +596,14 @@ func TestNewRejectsLinkedRoot(t *testing.T) {
 	if err := makeDirectoryLink(outside, root); err != nil {
 		t.Skipf("directory links are unavailable on this platform: %v", err)
 	}
-	if _, err := artifactstore.New(root); !errors.Is(err, artifactstore.ErrUnsafePath) {
+	if _, err := New(root); !errors.Is(err, ErrUnsafePath) {
 		t.Fatalf("New() error = %v", err)
 	}
 }
 
 func TestOperationsHonorCancelledContextWithoutMutation(t *testing.T) {
 	root := t.TempDir()
-	store, err := artifactstore.New(root)
+	store, err := newStore(t, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,17 +620,17 @@ func TestOperationsHonorCancelledContextWithoutMutation(t *testing.T) {
 	}
 }
 
-func committedArtifact(t *testing.T) (*artifactstore.Store, task.Artifact, string) {
+func committedArtifact(t *testing.T) (*Store, task.Artifact, string) {
 	t.Helper()
 	root := t.TempDir()
-	store, err := artifactstore.New(root)
+	store, err := newStore(t, root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return store, commit(t, store, id(1), id(2)), root
 }
 
-func commit(t *testing.T, store *artifactstore.Store, taskID, artifactID string) task.Artifact {
+func commit(t *testing.T, store *Store, taskID, artifactID string) task.Artifact {
 	t.Helper()
 	artifact, err := store.CommitJSON(context.Background(), taskID, artifactID, time.Unix(0, 0).UTC(), map[string]string{"outcome": "cancelled"})
 	if err != nil {
@@ -406,6 +645,50 @@ func artifactPath(root string, artifact task.Artifact) string {
 
 func id(value byte) string {
 	return strings.Repeat(string("0123456789abcdef"[value%16]), 32)
+}
+
+func newStore(t *testing.T, root string) (*Store, error) {
+	t.Helper()
+	store, err := New(root)
+	if err == nil {
+		t.Cleanup(func() {
+			if err := store.Close(); err != nil {
+				t.Errorf("Close() error = %v", err)
+			}
+		})
+	}
+	return store, err
+}
+
+func assertNoTemporaryArtifacts(t *testing.T, root string) {
+	t.Helper()
+	err := filepath.WalkDir(root, func(_ string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() && temporaryArtifactName(entry.Name()) {
+			t.Errorf("temporary artifact remains: %s", entry.Name())
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func firstTemporaryName(t *testing.T, directory string) string {
+	t.Helper()
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if temporaryArtifactName(entry.Name()) {
+			return entry.Name()
+		}
+	}
+	t.Fatal("outside temporary file not found")
+	return ""
 }
 
 func makeDirectoryLink(target, link string) error {
