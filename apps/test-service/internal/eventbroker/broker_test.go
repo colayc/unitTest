@@ -184,7 +184,111 @@ func mustSubscribe(t *testing.T, broker *Broker, ctx context.Context, after int6
 	if err != nil {
 		t.Fatalf("Subscribe() error = %v", err)
 	}
+	subscription.Activate()
 	return subscription
+}
+
+type subscriptionActivator interface{ Activate() }
+
+func activateSubscription(t *testing.T, subscription *Subscription) {
+	t.Helper()
+	activator, ok := any(subscription).(subscriptionActivator)
+	if !ok {
+		t.Fatal("Subscription does not expose Activate")
+	}
+	activator.Activate()
+}
+
+func TestSubscribeReturnsPausedUntilActivate(t *testing.T) {
+	source := newFakeSource(events(1, 2, 3, 4, 5, 6, 7, 8, 9, 10))
+	broker := mustBroker(t, source, 2, 2)
+	subscription, err := broker.Subscribe(context.Background(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+
+	time.Sleep(25 * time.Millisecond)
+	if calls := source.replayCalls(); len(calls) != 0 {
+		t.Fatalf("replay started before Activate: %v", calls)
+	}
+	select {
+	case value := <-subscription.Events:
+		t.Fatalf("event delivered before Activate: %#v", value)
+	case err := <-subscription.Errors:
+		t.Fatalf("error delivered before Activate: %v", err)
+	default:
+	}
+
+	received := make(chan []int64, 1)
+	go func() {
+		sequences := make([]int64, 0, 10)
+		for range 10 {
+			value, ok := <-subscription.Events
+			if !ok {
+				break
+			}
+			sequences = append(sequences, value.Sequence)
+		}
+		received <- sequences
+	}()
+	activateSubscription(t, subscription)
+	select {
+	case sequences := <-received:
+		if !reflect.DeepEqual(sequences, []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}) {
+			t.Fatalf("sequences=%v", sequences)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("activated replay did not complete")
+	}
+}
+
+func TestSubscriptionActivateIsIdempotentAndCloseBeforeActivateStopsReplay(t *testing.T) {
+	t.Run("idempotent", func(t *testing.T) {
+		source := newFakeSource(events(1))
+		broker := mustBroker(t, source, 8, 8)
+		subscription, err := broker.Subscribe(context.Background(), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer subscription.Close()
+		var callers sync.WaitGroup
+		for range 20 {
+			callers.Add(1)
+			go func() { defer callers.Done(); activateSubscription(t, subscription) }()
+		}
+		callers.Wait()
+		if got := readEvent(t, subscription.Events).Sequence; got != 1 {
+			t.Fatalf("sequence=%d", got)
+		}
+		time.Sleep(25 * time.Millisecond)
+		if calls := source.replayCalls(); len(calls) != 1 {
+			t.Fatalf("replay calls=%v", calls)
+		}
+	})
+
+	t.Run("close before activate", func(t *testing.T) {
+		source := newFakeSource(events(1))
+		broker := mustBroker(t, source, 8, 8)
+		subscription, err := broker.Subscribe(context.Background(), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		subscription.Close()
+		activateSubscription(t, subscription)
+		time.Sleep(25 * time.Millisecond)
+		if calls := source.replayCalls(); len(calls) != 0 {
+			t.Fatalf("replay started after Close: %v", calls)
+		}
+		broker.mu.Lock()
+		registered := len(broker.subscribers)
+		broker.mu.Unlock()
+		if registered != 0 {
+			t.Fatalf("subscribers after Close-before-Activate=%d", registered)
+		}
+		requireClosed(t, subscription.Events)
+		requireClosed(t, subscription.Errors)
+	})
 }
 
 func readEvent(t *testing.T, events <-chan task.Event) task.Event {
@@ -234,6 +338,26 @@ func requireClosed[T any](t *testing.T, channel <-chan T) {
 	case <-time.After(testTimeout):
 		t.Fatal("timed out waiting for channel close")
 	}
+}
+
+func waitForLiveSubscribers(t *testing.T, broker *Broker, count int) {
+	t.Helper()
+	deadline := time.Now().Add(testTimeout)
+	for time.Now().Before(deadline) {
+		broker.mu.Lock()
+		live := 0
+		for _, subscriber := range broker.subscribers {
+			if subscriber.live {
+				live++
+			}
+		}
+		broker.mu.Unlock()
+		if live == count {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("live subscribers did not reach %d", count)
 }
 
 func TestSubscribeBridgesReplayAndLiveWithoutGap(t *testing.T) {
@@ -327,6 +451,7 @@ func TestSlowSubscriberDoesNotBlockPublisherOrFastSubscriber(t *testing.T) {
 	defer slow.Close()
 	fast := mustSubscribe(t, broker, context.Background(), 0)
 	defer fast.Close()
+	waitForLiveSubscribers(t, broker, 2)
 
 	broker.Publish(event(1))
 	if got := readEvent(t, fast.Events).Sequence; got != 1 {
@@ -377,6 +502,7 @@ func TestSlowSubscriberReceivesTerminalOverflowAfterEarlierInternalError(t *test
 	broker := mustBroker(t, newFakeSource(nil), 1, 1)
 	subscription := mustSubscribe(t, broker, context.Background(), 0)
 	defer subscription.Close()
+	waitForLiveSubscribers(t, broker, 1)
 
 	broker.Publish(event(1))
 	broker.Publish(event(1))

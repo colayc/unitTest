@@ -3,6 +3,7 @@ package server_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"strings"
 	"sync"
@@ -225,6 +226,26 @@ type replaySource struct {
 	gates     []chan struct{}
 }
 
+type fastReplaySource struct{ events []task.Event }
+
+func (s fastReplaySource) Watermark(context.Context) (int64, error) {
+	return int64(len(s.events)), nil
+}
+
+func (s fastReplaySource) EventsAfter(_ context.Context, after, through int64, limit int) ([]task.Event, error) {
+	time.Sleep(time.Millisecond)
+	result := make([]task.Event, 0, limit)
+	for _, event := range s.events {
+		if event.Sequence > after && event.Sequence <= through {
+			result = append(result, event)
+			if len(result) == limit {
+				break
+			}
+		}
+	}
+	return result, nil
+}
+
 func (s *replaySource) Watermark(context.Context) (int64, error) {
 	return int64(len(s.events)), nil
 }
@@ -259,11 +280,15 @@ func (s *replaySource) EventsAfter(ctx context.Context, after, through int64, li
 type streamBackend struct {
 	broker           *eventbroker.Broker
 	subscription     *eventbroker.Subscription
+	subscriptions    []*eventbroker.Subscription
+	subscribeCalls   int
+	beforeSubscribe  func(int)
 	get              task.Task
 	getCalls         atomic.Int32
 	subscribeContext chan struct{}
 	replayRequested  []chan struct{}
 	replayGates      []chan struct{}
+	subscribeDelay   time.Duration
 }
 
 func (b *streamBackend) Start(context.Context, task.StartRequest) (task.Task, error) {
@@ -278,12 +303,23 @@ func (b *streamBackend) List(context.Context, string, int) (task.Page[task.Task]
 }
 func (b *streamBackend) Cancel(context.Context, string) (task.Task, error) { return task.Task{}, nil }
 func (b *streamBackend) Subscribe(ctx context.Context, after int64) (*eventbroker.Subscription, error) {
+	call := b.subscribeCalls
+	b.subscribeCalls++
+	if b.beforeSubscribe != nil {
+		b.beforeSubscribe(call)
+	}
+	if call < len(b.subscriptions) {
+		return b.subscriptions[call], nil
+	}
 	if b.subscription != nil {
 		return b.subscription, nil
 	}
 	subscription, err := b.broker.Subscribe(ctx, after)
 	if err != nil {
 		return nil, err
+	}
+	if b.subscribeDelay > 0 {
+		time.Sleep(b.subscribeDelay)
 	}
 	if b.subscribeContext != nil {
 		go func() { <-ctx.Done(); close(b.subscribeContext) }()
@@ -328,6 +364,22 @@ func newReplayBackend(t *testing.T, eventCount, queueSize int) *streamBackend {
 		broker: broker, replayRequested: requested, replayGates: gates,
 		get: task.Task{ID: testID('1'), Scenario: task.ScenarioHang, Timeout: time.Second, Status: task.StatusRunning, CreatedAt: time.Now().UTC(), LastSequence: int64(eventCount)},
 	}
+}
+
+func newFastReplayBackend(t *testing.T, eventCount, queueSize int) *streamBackend {
+	t.Helper()
+	events := make([]task.Event, eventCount)
+	for index := range events {
+		sequence := int64(index + 1)
+		events[index] = task.Event{Sequence: sequence, ID: testID('e'), EventDraft: task.EventDraft{
+			TaskID: testID('1'), Type: task.EventTaskOutput, At: time.Unix(sequence, 0).UTC(), Payload: json.RawMessage(`{"stream":"stdout"}`),
+		}}
+	}
+	broker, err := eventbroker.New(fastReplaySource{events: events}, queueSize, queueSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &streamBackend{broker: broker, subscribeDelay: 50 * time.Millisecond}
 }
 
 func authenticateV11Connection(t *testing.T, connection net.Conn) {
@@ -450,6 +502,117 @@ func TestServeConnectionDrainsReplayLargerThanBrokerQueueForDuplicateSubscriptio
 				t.Fatalf("attempt %d want sequence %d, envelope=%#v", attempt, want, envelope)
 			}
 		}
+	}
+}
+
+func TestServeConnectionActivatesFastReplayAfterConsumerInstalled(t *testing.T) {
+	client, serviceConn := net.Pipe()
+	backend := newFastReplayBackend(t, 10, 2)
+	go server.ServeConnection(serviceConn, session.New("0123456789abcdef", "linux", "unix-socket", backend))
+	defer client.Close()
+	_ = client.SetDeadline(time.Now().Add(2 * time.Second))
+	authenticateV11Connection(t, client)
+	payload, _ := json.Marshal(map[string]any{"afterSequence": 0})
+	if err := json.NewEncoder(client).Encode(protocol.Request{ProtocolVersion: protocol.Version11, Kind: "request", MessageID: testID('b'), Method: "events/subscribe", SentAt: sentAt, Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+	decoder := json.NewDecoder(client)
+	var response protocol.Response
+	if err := decoder.Decode(&response); err != nil || response.Kind != "response" {
+		t.Fatalf("response=%#v err=%v", response, err)
+	}
+	for want := int64(1); want <= 10; want++ {
+		var envelope protocol.Event
+		if err := decoder.Decode(&envelope); err != nil {
+			t.Fatalf("sequence %d: %v", want, err)
+		}
+		if envelope.Kind != "event" || envelope.Sequence != want {
+			t.Fatalf("want sequence %d, envelope=%#v", want, envelope)
+		}
+	}
+}
+
+func TestServeConnectionRetiresOldForwarderBeforeDuplicateSubscription(t *testing.T) {
+	oldEvents := make(chan task.Event, 64)
+	oldErrors := make(chan error, 1)
+	for sequence := int64(1); sequence <= 64; sequence++ {
+		oldEvents <- task.Event{Sequence: sequence, ID: testID('e'), EventDraft: task.EventDraft{
+			TaskID: testID('1'), Type: task.EventTaskOutput, At: time.Unix(sequence, 0).UTC(), Payload: json.RawMessage(`{"old":true}`),
+		}}
+	}
+	newEvents := make(chan task.Event, 1)
+	newErrors := make(chan error, 1)
+	newEvents <- task.Event{Sequence: 100, ID: testID('f'), EventDraft: task.EventDraft{
+		TaskID: testID('1'), Type: task.EventTaskStarted, At: time.Unix(100, 0).UTC(), Payload: json.RawMessage(`{"new":true}`),
+	}}
+	backend := &streamBackend{
+		subscriptions: []*eventbroker.Subscription{
+			{Events: oldEvents, Errors: oldErrors},
+			{Events: newEvents, Errors: newErrors},
+		},
+		beforeSubscribe: func(call int) {
+			if call == 1 {
+				oldErrors <- errors.New("old subscription failed")
+			}
+		},
+		get: task.Task{ID: testID('1'), Scenario: task.ScenarioHang, Timeout: time.Second, Status: task.StatusRunning, CreatedAt: time.Now().UTC(), LastSequence: 100},
+	}
+	client, serviceConn := net.Pipe()
+	go server.ServeConnection(serviceConn, session.New("0123456789abcdef", "linux", "unix-socket", backend))
+	defer client.Close()
+	_ = client.SetDeadline(time.Now().Add(5 * time.Second))
+	authenticateV11Connection(t, client)
+	encoder, decoder := json.NewEncoder(client), json.NewDecoder(client)
+	payload, _ := json.Marshal(map[string]any{"afterSequence": 0})
+	if err := encoder.Encode(protocol.Request{ProtocolVersion: protocol.Version11, Kind: "request", MessageID: testID('b'), Method: "events/subscribe", SentAt: sentAt, Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+	var first protocol.Response
+	if err := decoder.Decode(&first); err != nil || first.Kind != "response" {
+		t.Fatalf("first response=%#v err=%v", first, err)
+	}
+	if err := encoder.Encode(protocol.Request{ProtocolVersion: protocol.Version11, Kind: "request", MessageID: testID('c'), Method: "events/subscribe", SentAt: sentAt, Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+
+	foundReplacement := false
+	for range 100 {
+		var envelope struct {
+			Kind      string              `json:"kind"`
+			RequestID string              `json:"requestId"`
+			Sequence  int64               `json:"sequence"`
+			Error     *protocol.ErrorBody `json:"error"`
+		}
+		if err := decoder.Decode(&envelope); err != nil {
+			t.Fatalf("waiting for replacement response: %v", err)
+		}
+		if envelope.Error != nil {
+			t.Fatalf("old error escaped during replacement: %#v", envelope)
+		}
+		if envelope.Kind == "response" && envelope.RequestID == testID('c') {
+			foundReplacement = true
+			break
+		}
+	}
+	if !foundReplacement {
+		t.Fatal("replacement response was not delivered")
+	}
+	var next struct {
+		Kind     string              `json:"kind"`
+		Sequence int64               `json:"sequence"`
+		Error    *protocol.ErrorBody `json:"error"`
+	}
+	if err := decoder.Decode(&next); err != nil {
+		t.Fatal(err)
+	}
+	if next.Error != nil || next.Kind != "event" || next.Sequence != 100 {
+		t.Fatalf("old stream crossed replacement response: %#v", next)
+	}
+
+	getPayload, _ := json.Marshal(map[string]any{"taskId": testID('1')})
+	response := exchange(t, client, protocol.Request{ProtocolVersion: protocol.Version11, Kind: "request", MessageID: testID('d'), Method: "tasks/get", SentAt: sentAt, Payload: getPayload})
+	if response.Kind != "response" {
+		t.Fatalf("connection closed by old subscription error: %#v", response)
 	}
 }
 

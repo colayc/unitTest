@@ -36,6 +36,12 @@ type outboundMessage struct {
 	done  chan error
 }
 
+type runningSubscription struct {
+	subscription *eventbroker.Subscription
+	cancel       context.CancelFunc
+	done         <-chan struct{}
+}
+
 func ServeConnection(connection net.Conn, active *session.Session) {
 	ServeConnectionWithConfig(connection, active, DefaultConnectionConfig)
 }
@@ -55,12 +61,24 @@ func ServeConnectionWithConfig(connection net.Conn, active *session.Session, con
 	go connectionWriter(connection, config.WriteTimeout, outbound, writerDone, closeConnection)
 
 	var forwarders sync.WaitGroup
-	var activeSubscription *eventbroker.Subscription
+	var subscriptionState sync.Mutex
+	var subscriptionGeneration uint64
+	var activeSubscription *runningSubscription
+	retireActiveSubscription := func() {
+		if activeSubscription == nil {
+			return
+		}
+		subscriptionState.Lock()
+		subscriptionGeneration++
+		subscriptionState.Unlock()
+		activeSubscription.cancel()
+		activeSubscription.subscription.Close()
+		<-activeSubscription.done
+		activeSubscription = nil
+	}
 	defer func() {
 		cancelConnection()
-		if activeSubscription != nil {
-			activeSubscription.Close()
-		}
+		retireActiveSubscription()
 		closeConnection()
 		forwarders.Wait()
 		close(outbound)
@@ -104,24 +122,42 @@ func ServeConnectionWithConfig(connection net.Conn, active *session.Session, con
 			_ = sendAndWait(connectionContext, outbound, writerDone, protocol.Failure(protocol.Version10, invalid, "INVALID_MESSAGE", "message is invalid", false))
 			return
 		}
+		if request.Method == "events/subscribe" {
+			retireActiveSubscription()
+		}
 		result := active.Handle(connectionContext, request)
 		responseWritten, err := enqueueOutbound(connectionContext, outbound, writerDone, result.Response)
 		if err != nil {
+			if result.Subscription != nil {
+				result.Subscription.Close()
+			}
 			return
 		}
 		if result.Subscription != nil {
-			if activeSubscription != nil {
-				activeSubscription.Close()
-			}
-			activeSubscription = result.Subscription
 			if err := connection.SetReadDeadline(time.Time{}); err != nil {
+				result.Subscription.Close()
 				return
 			}
+			forwarderContext, cancelForwarder := context.WithCancel(connectionContext)
+			forwarderDone := make(chan struct{})
+			subscriptionState.Lock()
+			subscriptionGeneration++
+			generation := subscriptionGeneration
+			subscriptionState.Unlock()
+			activeSubscription = &runningSubscription{subscription: result.Subscription, cancel: cancelForwarder, done: forwarderDone}
 			forwarders.Add(1)
 			go func(subscription *eventbroker.Subscription, subscribeRequest protocol.Request) {
 				defer forwarders.Done()
-				forwardSubscription(connectionContext, subscription, subscribeRequest, outbound, writerDone, closeConnection)
+				defer close(forwarderDone)
+				forwardSubscription(forwarderContext, subscription, subscribeRequest, outbound, writerDone, func() {
+					subscriptionState.Lock()
+					defer subscriptionState.Unlock()
+					if subscriptionGeneration == generation {
+						closeConnection()
+					}
+				})
 			}(result.Subscription, request)
+			result.Subscription.Activate()
 		}
 		if err := waitOutbound(connectionContext, writerDone, responseWritten); err != nil {
 			return

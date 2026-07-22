@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 
 	"unit-test-ide.local/test-service/internal/task"
 )
@@ -24,9 +25,19 @@ var (
 )
 
 type Subscription struct {
-	Events <-chan task.Event
-	Errors <-chan error
-	close  func()
+	Events   <-chan task.Event
+	Errors   <-chan error
+	activate func()
+	close    func()
+}
+
+// Activate starts replay after the caller has installed an Events/Errors
+// consumer. It is safe to call concurrently and more than once. A subscription
+// closed before activation never starts replay.
+func (s *Subscription) Activate() {
+	if s != nil && s.activate != nil {
+		s.activate()
+	}
 }
 
 func (s *Subscription) Close() {
@@ -36,15 +47,16 @@ func (s *Subscription) Close() {
 }
 
 type subscriber struct {
-	id       uint64
-	after    int64
-	buffer   []task.Event
-	live     bool
-	out      chan task.Event
-	errs     chan error
-	done     <-chan struct{}
-	cancel   context.CancelFunc
-	terminal error
+	id        uint64
+	after     int64
+	buffer    []task.Event
+	live      bool
+	activated bool
+	out       chan task.Event
+	errs      chan error
+	done      <-chan struct{}
+	cancel    context.CancelFunc
+	terminal  error
 }
 
 type Broker struct {
@@ -95,6 +107,9 @@ func (b *Broker) Publish(event task.Event) {
 	}
 }
 
+// Subscribe registers a paused subscriber and completes setup through the
+// current watermark. The caller must install Events and Errors consumers and
+// then call Subscription.Activate to begin replay.
 func (b *Broker) Subscribe(ctx context.Context, afterSequence int64) (*Subscription, error) {
 	if afterSequence < 0 {
 		return nil, ErrInvalidCursor
@@ -134,16 +149,29 @@ func (b *Broker) Subscribe(ctx context.Context, afterSequence int64) (*Subscript
 	subscription := &Subscription{
 		Events: subscriber.out,
 		Errors: subscriber.errs,
+		activate: func() {
+			b.activate(subscriptionContext, subscriber, watermark)
+		},
 		close: func() {
 			b.remove(subscriber, nil)
 		},
 	}
-	go b.replay(subscriptionContext, subscriber, watermark)
 	go func() {
 		<-subscriptionContext.Done()
 		b.remove(subscriber, nil)
 	}()
 	return subscription, nil
+}
+
+func (b *Broker) activate(ctx context.Context, subscriber *subscriber, watermark int64) {
+	b.mu.Lock()
+	if !b.registeredLocked(subscriber) || subscriber.activated {
+		b.mu.Unlock()
+		return
+	}
+	subscriber.activated = true
+	b.mu.Unlock()
+	go b.replay(ctx, subscriber, watermark)
 }
 
 func (b *Broker) replay(ctx context.Context, subscriber *subscriber, watermark int64) {
@@ -173,7 +201,7 @@ func (b *Broker) replay(ctx context.Context, subscriber *subscriber, watermark i
 				return
 			}
 			cursor = event.Sequence
-			if !b.send(subscriber, event) {
+			if !b.sendReplay(ctx, subscriber, event) {
 				return
 			}
 		}
@@ -183,30 +211,54 @@ func (b *Broker) replay(ctx context.Context, subscriber *subscriber, watermark i
 		}
 	}
 
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if !b.registeredLocked(subscriber) {
-		return
-	}
-	for _, event := range subscriber.buffer {
-		if event.Sequence <= subscriber.after {
-			continue
-		}
-		if !b.sendLocked(subscriber, event) {
+	for {
+		b.mu.Lock()
+		if !b.registeredLocked(subscriber) {
+			b.mu.Unlock()
 			return
 		}
+		buffered := subscriber.buffer
+		subscriber.buffer = nil
+		if len(buffered) == 0 {
+			subscriber.live = true
+			b.mu.Unlock()
+			return
+		}
+		b.mu.Unlock()
+		for _, event := range buffered {
+			if !b.sendReplay(ctx, subscriber, event) {
+				return
+			}
+		}
 	}
-	subscriber.buffer = nil
-	subscriber.live = true
 }
 
-func (b *Broker) send(subscriber *subscriber, event task.Event) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if !b.registeredLocked(subscriber) {
-		return false
+func (b *Broker) sendReplay(ctx context.Context, subscriber *subscriber, event task.Event) bool {
+	value := copyEvent(event)
+	for {
+		b.mu.Lock()
+		if !b.registeredLocked(subscriber) {
+			b.mu.Unlock()
+			return false
+		}
+		if event.Sequence <= subscriber.after {
+			b.mu.Unlock()
+			return true
+		}
+		select {
+		case subscriber.out <- value:
+			subscriber.after = event.Sequence
+			b.mu.Unlock()
+			return true
+		default:
+			b.mu.Unlock()
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(time.Millisecond):
+		}
 	}
-	return b.sendLocked(subscriber, event)
 }
 
 func (b *Broker) sendLocked(subscriber *subscriber, event task.Event) bool {
