@@ -10,7 +10,7 @@
 
 ## 全局约束
 
-- 首个版本支持 Windows/MSVC、Windows/clang-cl 覆盖率、Linux/GCC 和 Linux/Clang。
+- 首个版本覆盖 Windows/MSVC、Windows/clang-cl、Linux/GCC 和 Linux/Clang。
 - 服务不得依赖 Electron、DOM、Code-OSS 对象或 Shell 命令字符串。
 - TypeScript 边界使用工作区 URI；平台原生路径仍保留在 Go 服务内部。
 - IPC 在 Windows 上使用 Windows Named Pipe，在 Linux 上使用权限模式为 `0600` 的 Unix Socket。
@@ -129,7 +129,7 @@ test("workspace pins supported toolchains", async () => {
 
 运行：`node --test tools/workspace-smoke/workspace-smoke.test.mjs`
 
-预期：测试以 FAIL 结束，报告 `ENOENT`，涉及 `.node-version`。
+预期：测试以 FAIL 结束，报告 `ENOENT`（缺失文件为 `.node-version`）。
 
 - [ ] **Step 3：添加工作区清单和格式规则**
 
@@ -340,7 +340,7 @@ test("protocol v1 accepts authenticated handshake shape and rejects a missing to
 
 运行：`node --test packages/protocol-schema/test/schema.test.mjs`
 
-预期：测试以 FAIL 结束，报告 `ENOENT`，涉及 `message.schema.json`。
+预期：测试以 FAIL 结束，报告 `ENOENT`（缺失文件为 `message.schema.json`）。
 
 - [ ] **Step 3：添加精确定义的协议 Schema**
 
