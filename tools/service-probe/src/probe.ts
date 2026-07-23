@@ -392,6 +392,9 @@ export class TaskServiceFixture {
   readonly #directory: string;
   readonly #options: StartServiceOptions;
   #instance: ServiceInstance | undefined;
+  #lifecycleTail: Promise<void> = Promise.resolve();
+  #disposeRequested = false;
+  #disposePromise: Promise<void> | undefined;
   #disposed = false;
 
   constructor(serviceBinary: string, directory: string, instance: ServiceInstance, options: StartServiceOptions = {}) {
@@ -401,42 +404,56 @@ export class TaskServiceFixture {
     this.#options = options;
   }
 
+  #assertAvailable(): void {
+    if (this.#disposed || this.#disposeRequested) throw new Error("task service fixture is disposed");
+  }
+
+  #enqueueLifecycle<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.#lifecycleTail.then(operation);
+    this.#lifecycleTail = result.then(() => undefined, () => undefined);
+    return result;
+  }
+
   get client(): ProtocolClient {
-    if (this.#disposed) throw new Error("task service fixture is disposed");
+    this.#assertAvailable();
     if (!this.#instance) throw new Error("task service fixture is stopped");
     return this.#instance.client;
   }
 
   pauseNextReconnect(): ReconnectGate {
-    if (this.#disposed) throw new Error("task service fixture is disposed");
+    this.#assertAvailable();
     if (!this.#instance) throw new Error("task service fixture is stopped");
     return this.#instance.connector.pauseNext();
   }
 
-  async connectClient(): Promise<ProtocolClient> {
-    if (this.#disposed) throw new Error("task service fixture is disposed");
-    const instance = this.#instance;
-    if (!instance) throw new Error("task service fixture is stopped");
-    const timeoutMs = this.#options.timeoutMs ?? OPERATION_TIMEOUT_MS;
-    let client: ProtocolClient | undefined;
-    try {
-      client = await withNamedTimeout("secondary service connection", ProtocolClient.connect(instance.endpoint), timeoutMs);
-      const handshake = await withNamedTimeout(
-        "secondary protocol 1.1 handshake",
-        client.handshake(instance.token, "service-probe-secondary", "0.1.0"),
-        timeoutMs
-      );
-      if (handshake.negotiatedProtocolVersion !== "1.1") {
-        throw new Error(`secondary client negotiated protocol ${handshake.negotiatedProtocolVersion} instead of 1.1`);
+  connectClient(): Promise<ProtocolClient> {
+    this.#assertAvailable();
+    return this.#enqueueLifecycle(async () => {
+      this.#assertAvailable();
+      const instance = this.#instance;
+      if (!instance) throw new Error("task service fixture is stopped");
+      const timeoutMs = this.#options.timeoutMs ?? OPERATION_TIMEOUT_MS;
+      let client: ProtocolClient | undefined;
+      try {
+        client = await withNamedTimeout("secondary service connection", ProtocolClient.connect(instance.endpoint), timeoutMs);
+        const handshake = await withNamedTimeout(
+          "secondary protocol 1.1 handshake",
+          client.handshake(instance.token, "service-probe-secondary", "0.1.0"),
+          timeoutMs
+        );
+        if (handshake.negotiatedProtocolVersion !== "1.1") {
+          throw new Error(`secondary client negotiated protocol ${handshake.negotiatedProtocolVersion} instead of 1.1`);
+        }
+        this.#assertAvailable();
+        return client;
+      } catch (error) {
+        client?.close();
+        throw safeError(error, [instance.token, instance.endpoint, instance.dataDir, instance.directory, instance.serviceBinary]);
       }
-      return client;
-    } catch (error) {
-      client?.close();
-      throw safeError(error, [instance.token, instance.endpoint, instance.dataDir, instance.directory, instance.serviceBinary]);
-    }
+    });
   }
 
-  async stopGracefully(): Promise<void> {
+  async #stopGracefullyOwned(): Promise<void> {
     const instance = this.#instance;
     if (!instance) return;
     try {
@@ -461,7 +478,16 @@ export class TaskServiceFixture {
     }
   }
 
-  async kill(): Promise<void> {
+  stopGracefully(): Promise<void> {
+    if (this.#disposed) return Promise.resolve();
+    this.#assertAvailable();
+    return this.#enqueueLifecycle(async () => {
+      this.#assertAvailable();
+      await this.#stopGracefullyOwned();
+    });
+  }
+
+  async #killOwned(): Promise<void> {
     const instance = this.#instance;
     if (!instance) return;
     try {
@@ -473,26 +499,54 @@ export class TaskServiceFixture {
     }
   }
 
-  async restart(): Promise<TaskServiceFixture> {
-    if (this.#disposed) throw new Error("task service fixture is disposed");
-    if (this.#instance) await this.stopGracefully();
-    this.#instance = await launchService(this.#serviceBinary, this.#directory, this.#options);
-    return this;
+  kill(): Promise<void> {
+    if (this.#disposed) return Promise.resolve();
+    this.#assertAvailable();
+    return this.#enqueueLifecycle(async () => {
+      this.#assertAvailable();
+      await this.#killOwned();
+    });
   }
 
-  async dispose(): Promise<void> {
-    if (this.#disposed) return;
-    this.#disposed = true;
+  restart(): Promise<TaskServiceFixture> {
+    this.#assertAvailable();
+    return this.#enqueueLifecycle(async () => {
+      this.#assertAvailable();
+      if (this.#instance) await this.#stopGracefullyOwned();
+      const launched = await launchService(this.#serviceBinary, this.#directory, this.#options);
+      if (this.#disposeRequested) {
+        try {
+          await forceStop(launched);
+        } catch (error) {
+          this.#instance = launched;
+          const sensitive = [
+            launched.token,
+            launched.endpoint,
+            launched.tokenFile,
+            launched.dataDir,
+            launched.serviceBinary,
+            launched.directory
+          ];
+          throw safeError(error, sensitive, "; restart cancelled because task service fixture is disposed");
+        }
+        throw new Error("task service fixture is disposed during restart");
+      }
+      this.#instance = launched;
+      return this;
+    });
+  }
+
+  async #disposeOwned(): Promise<void> {
     const instance = this.#instance;
-    this.#instance = undefined;
     instance?.connector.releasePending();
-    let cleanupError: unknown;
     if (instance) {
       try {
         await forceStop(instance);
       } catch (error) {
-        cleanupError = error;
+        const sensitive = [instance.token, instance.endpoint, instance.tokenFile, instance.dataDir, instance.serviceBinary, instance.directory];
+        throw safeError(error, sensitive, `; ${diagnostics(instance)}`);
       }
+      if (this.#instance === instance) this.#instance = undefined;
     }
     try {
       await withNamedTimeout(
@@ -501,14 +555,32 @@ export class TaskServiceFixture {
         this.#options.timeoutMs
       );
     } catch (error) {
-      cleanupError ??= error;
-    }
-    if (cleanupError) {
       const sensitive = instance
         ? [instance.token, instance.endpoint, instance.tokenFile, instance.dataDir, instance.serviceBinary, instance.directory]
         : [this.#serviceBinary, this.#directory];
-      throw safeError(cleanupError, sensitive);
+      throw safeError(error, sensitive);
     }
+  }
+
+  dispose(): Promise<void> {
+    if (this.#disposed) return Promise.resolve();
+    if (this.#disposePromise) return this.#disposePromise;
+    this.#disposeRequested = true;
+    const operation = this.#enqueueLifecycle(() => this.#disposeOwned());
+    const tracked = operation.then(
+      () => {
+        this.#disposed = true;
+      },
+      (error: unknown) => {
+        this.#disposeRequested = false;
+        throw error;
+      }
+    );
+    const result = tracked.finally(() => {
+      if (this.#disposePromise === result) this.#disposePromise = undefined;
+    });
+    this.#disposePromise = result;
+    return result;
   }
 }
 

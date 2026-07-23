@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -81,6 +81,84 @@ test("owned startup timeout ignores late token preparation and removes its fixtu
     readFile(fixtureDirectory),
     (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT"
   );
+});
+
+test("dispose serializes with an in-flight restart and cleans the restarted service", async () => {
+  let fixtureDirectory: string | undefined;
+  let handshakeCount = 0;
+  let enterRestartHandshake!: () => void;
+  let releaseRestartHandshake!: () => void;
+  const restartHandshakeEntered = new Promise<void>((resolveEntered) => { enterRestartHandshake = resolveEntered; });
+  const restartHandshakeReleased = new Promise<void>((resolveReleased) => { releaseRestartHandshake = resolveReleased; });
+  const children: Array<{ child: ChildProcessWithoutNullStreams; exit: Promise<void> }> = [];
+  let gateReleased = false;
+  const releaseGate = () => {
+    if (gateReleased) return;
+    gateReleased = true;
+    releaseRestartHandshake();
+  };
+
+  let fixture: Awaited<ReturnType<typeof startTaskService>> | undefined;
+  try {
+    fixture = await startTaskService(binary, {
+      timeoutMs: 2_000,
+      operations: {
+        spawnService: (serviceBinary, args) => {
+          const child = spawn(serviceBinary, args, { windowsHide: true });
+          const exit = new Promise<void>((resolveExit) => { child.once("exit", () => resolveExit()); });
+          children.push({ child, exit });
+          const dataDirectoryIndex = args.indexOf("--data-dir");
+          const dataDirectory = args[dataDirectoryIndex + 1];
+          assert.ok(dataDirectory);
+          fixtureDirectory = dirname(dataDirectory);
+          return child;
+        },
+        handshakeClient: async (client, token) => {
+          handshakeCount++;
+          if (handshakeCount === 2) {
+            enterRestartHandshake();
+            await restartHandshakeReleased;
+          }
+          return client.handshake(token, "service-probe", "0.1.0");
+        }
+      }
+    });
+    await fixture.stopGracefully();
+
+    const restarting = fixture.restart();
+    await withNamedTimeout("restart handshake gate", restartHandshakeEntered, 2_000);
+    const restartChild = children.at(-1)?.child;
+    const restartPID = restartChild?.pid;
+    assert.ok(restartPID);
+
+    const disposing = fixture.dispose();
+    releaseGate();
+    const [restartResult, disposeResult] = await Promise.allSettled([restarting, disposing]);
+    assert.equal(
+      disposeResult.status,
+      "fulfilled",
+      disposeResult.status === "rejected" ? `dispose rejected: ${String(disposeResult.reason)}` : undefined
+    );
+    if (restartResult.status === "rejected") {
+      assert.match(String(restartResult.reason), /disposed/);
+    }
+    await assertProcessGone(restartPID);
+    assert.ok(fixtureDirectory);
+    await assert.rejects(
+      readFile(fixtureDirectory),
+      (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT"
+    );
+    await fixture.dispose();
+  } finally {
+    releaseGate();
+    for (const { child } of children) {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    }
+    await Promise.all(children.map(({ exit }) => withNamedTimeout("test child cleanup", exit, 8_000)));
+    if (fixtureDirectory) {
+      await rm(fixtureDirectory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  }
 });
 
 test("service fixture bounds a pending handshake RPC and cleans up its process", async () => {
