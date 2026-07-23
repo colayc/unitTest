@@ -1,8 +1,8 @@
 import { execFile as execFileCallback, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
@@ -12,6 +12,7 @@ import { endpoint } from "./endpoint.js";
 
 type Exit = [code: number | null, signal: NodeJS.Signals | null];
 const execFile = promisify(execFileCallback);
+const OPERATION_TIMEOUT_MS = 8_000;
 
 function within<T>(promise: Promise<T>, milliseconds: number, label: string): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -76,54 +77,214 @@ export async function prepareTokenFile(serviceBinary: string, tokenFile: string,
   await writeFile(tokenFile, token, { flag: "r+" });
 }
 
-async function terminate(child: ChildProcessWithoutNullStreams, exit: Promise<Exit>): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return;
-  child.kill();
+function scrubAbsolutePaths(value: string): string {
+  return value
+    .replace(/[A-Za-z]:\\[^\r\n"']+/g, "<absolute-path>")
+    .replace(/(^|[\s=("'])\/(?:[^\s\r\n"']+)/gm, "$1<absolute-path>");
+}
+
+function redact(value: string, sensitive: readonly string[]): string {
+  let result = value;
+  for (const item of sensitive) {
+    if (item) result = result.split(item).join("<redacted>");
+  }
+  return scrubAbsolutePaths(result);
+}
+
+interface ServiceInstance {
+  readonly client: ProtocolClient;
+  readonly child: ChildProcessWithoutNullStreams;
+  readonly exit: Promise<Exit>;
+  readonly endpoint: string;
+  readonly dataDir: string;
+  readonly tokenFile: string;
+  readonly token: string;
+  readonly serviceBinary: string;
+  readonly directory: string;
+  stdout: string;
+  stderr: string;
+}
+
+function diagnostics(instance: ServiceInstance): string {
+  const sensitive = [
+    instance.token,
+    instance.endpoint,
+    instance.tokenFile,
+    instance.dataDir,
+    instance.serviceBinary,
+    instance.directory
+  ];
+  return `stdout=${redact(instance.stdout, sensitive)}; stderr=${redact(instance.stderr, sensitive)}`;
+}
+
+async function forceStop(instance: ServiceInstance): Promise<void> {
+  instance.client.close();
+  if (instance.child.exitCode === null && instance.child.signalCode === null) {
+    instance.child.kill("SIGKILL");
+  }
+  await within(instance.exit, OPERATION_TIMEOUT_MS, "forced service process exit");
+}
+
+async function launchService(serviceBinary: string, directory: string): Promise<ServiceInstance> {
+  const token = randomBytes(32).toString("base64url");
+  const tokenFile = join(directory, `token-${randomUUID()}`);
+  const serviceEndpoint = endpoint(directory);
+  const dataDir = join(directory, "data");
+  await prepareTokenFile(serviceBinary, tokenFile, token);
+  const child = spawn(serviceBinary, [
+    "--endpoint", serviceEndpoint,
+    "--token-file", tokenFile,
+    "--data-dir", dataDir
+  ], { windowsHide: true });
+  const exit = new Promise<Exit>((resolve) => child.once("exit", (code, signal) => resolve([code, signal])));
+  const instance = {
+    child,
+    exit,
+    endpoint: serviceEndpoint,
+    dataDir,
+    tokenFile,
+    token,
+    serviceBinary,
+    directory,
+    stdout: "",
+    stderr: "",
+    client: undefined as unknown as ProtocolClient
+  };
+  child.stdout.on("data", (chunk: Buffer | string) => { instance.stdout += String(chunk); });
+  child.stderr.on("data", (chunk: Buffer | string) => { instance.stderr += String(chunk); });
+  child.on("error", (error) => { instance.stderr += `${error.message}\n`; });
+
+  let client: ProtocolClient | undefined;
   try {
-    await within(exit, 1000, "forced service shutdown");
-  } catch {
-    child.kill("SIGKILL");
-    await within(exit, 1000, "forced service kill").catch(() => undefined);
+    await within(ready(child, serviceEndpoint), OPERATION_TIMEOUT_MS, "service startup readiness");
+    await tokenWasConsumed(tokenFile);
+    client = await within(ProtocolClient.connect(serviceEndpoint), OPERATION_TIMEOUT_MS, "service connection");
+    instance.client = client;
+    const handshake = await within(
+      client.handshake(token, "service-probe", "0.1.0"),
+      OPERATION_TIMEOUT_MS,
+      "protocol 1.1 handshake"
+    );
+    if (handshake.negotiatedProtocolVersion !== "1.1") {
+      throw new Error(`service negotiated protocol ${handshake.negotiatedProtocolVersion} instead of 1.1`);
+    }
+    return instance;
+  } catch (error) {
+    client?.close();
+    instance.client = client ?? ({ close() {} } as ProtocolClient);
+    await forceStop(instance).catch(() => undefined);
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`${redact(message, [token, serviceEndpoint, tokenFile, dataDir, serviceBinary, directory])}; ${diagnostics(instance)}`, {
+      cause: error
+    });
   }
 }
 
-export async function runProbe(serviceBinary: string): Promise<Capabilities> {
-  const directory = await mkdtemp(join(tmpdir(), "unit-test-ide-probe-"));
-  const token = randomBytes(32).toString("base64url");
-  const tokenFile = join(directory, "token");
-  const serviceEndpoint = endpoint(directory);
-  let child: ChildProcessWithoutNullStreams | undefined;
-  let exit: Promise<Exit> | undefined;
-  let client: ProtocolClient | undefined;
-  let stdout = "";
-  let stderr = "";
+export class TaskServiceFixture {
+  readonly #serviceBinary: string;
+  readonly #directory: string;
+  #instance: ServiceInstance | undefined;
+  #disposed = false;
 
-  try {
-    await prepareTokenFile(serviceBinary, tokenFile, token);
-    child = spawn(serviceBinary, ["--endpoint", serviceEndpoint, "--token-file", tokenFile], { windowsHide: true });
-    exit = new Promise((resolve) => child?.once("exit", (code, signal) => resolve([code, signal])));
-    child.stdout.on("data", (chunk: Buffer | string) => { stdout += String(chunk); });
-    child.stderr.on("data", (chunk: Buffer | string) => { stderr += String(chunk); });
-    child.on("error", (error) => { stderr += `${error.message}\n`; });
+  constructor(serviceBinary: string, directory: string, instance: ServiceInstance) {
+    this.#serviceBinary = serviceBinary;
+    this.#directory = directory;
+    this.#instance = instance;
+  }
 
-    await within(ready(child, serviceEndpoint), 5000, "service startup");
-    await tokenWasConsumed(tokenFile);
-    client = await within(ProtocolClient.connect(serviceEndpoint), 5000, "service connection");
-    await within(client.handshake(token, "service-probe", "0.1.0"), 5000, "service handshake");
-    const capabilities = await within(client.getCapabilities(), 5000, "capabilities request");
-    await within(client.shutdown(), 5000, "service shutdown request");
-    const [code, signal] = await within(exit, 5000, "service shutdown");
-    if (code !== 0) {
-      throw new Error(`service exited with code ${String(code)} and signal ${String(signal)}`);
+  get client(): ProtocolClient {
+    if (this.#disposed) throw new Error("task service fixture is disposed");
+    if (!this.#instance) throw new Error("task service fixture is stopped");
+    return this.#instance.client;
+  }
+
+  async stopGracefully(): Promise<void> {
+    const instance = this.#instance;
+    if (!instance) return;
+    try {
+      await within(instance.client.shutdown(), OPERATION_TIMEOUT_MS, "graceful service shutdown request");
+      instance.client.close();
+      const [code, signal] = await within(instance.exit, OPERATION_TIMEOUT_MS, "graceful service process exit");
+      if (code !== 0) {
+        throw new Error(`service exited with code ${String(code)} and signal ${String(signal)}`);
+      }
+      this.#instance = undefined;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`${redact(message, [instance.token, instance.endpoint, instance.tokenFile, instance.dataDir, instance.serviceBinary, instance.directory])}; ${diagnostics(instance)}`, {
+        cause: error
+      });
     }
-    return capabilities;
+  }
+
+  async kill(): Promise<void> {
+    const instance = this.#instance;
+    if (!instance) return;
+    try {
+      await forceStop(instance);
+      this.#instance = undefined;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`${redact(message, [instance.token, instance.endpoint, instance.tokenFile, instance.dataDir, instance.serviceBinary, instance.directory])}; ${diagnostics(instance)}`, {
+        cause: error
+      });
+    }
+  }
+
+  async restart(): Promise<TaskServiceFixture> {
+    if (this.#disposed) throw new Error("task service fixture is disposed");
+    if (this.#instance) await this.stopGracefully();
+    this.#instance = await launchService(this.#serviceBinary, this.#directory);
+    return this;
+  }
+
+  async dispose(): Promise<void> {
+    if (this.#disposed) return;
+    this.#disposed = true;
+    const instance = this.#instance;
+    this.#instance = undefined;
+    if (instance) await forceStop(instance).catch(() => undefined);
+    await rm(this.#directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+}
+
+export async function startService(serviceBinary: string, directory: string): Promise<TaskServiceFixture> {
+  return new TaskServiceFixture(serviceBinary, directory, await launchService(serviceBinary, directory));
+}
+
+export async function startTaskService(serviceBinary: string): Promise<TaskServiceFixture> {
+  const directory = await mkdtemp(join(dirname(serviceBinary), "unit-test-ide-probe-"));
+  try {
+    return await startService(serviceBinary, directory);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`${message}; stdout=${stdout}; stderr=${stderr}`, { cause: error });
+    await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    throw error;
+  }
+}
+
+export async function assertProcessGone(pid: number): Promise<void> {
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("process PID must be a positive safe integer");
+  const deadline = Date.now() + OPERATION_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return;
+      throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`process ${pid} still exists after ${OPERATION_TIMEOUT_MS}ms`);
+}
+
+export async function runProbe(serviceBinary: string): Promise<Capabilities> {
+  const fixture = await startTaskService(serviceBinary);
+  try {
+    const capabilities = await within(fixture.client.getCapabilities(), OPERATION_TIMEOUT_MS, "capabilities request");
+    await fixture.stopGracefully();
+    return capabilities;
   } finally {
-    client?.close();
-    if (child && exit) await terminate(child, exit);
-    await rm(directory, { recursive: true, force: true });
+    await fixture.dispose();
   }
 }
 
