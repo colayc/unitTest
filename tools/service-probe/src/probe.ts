@@ -16,12 +16,16 @@ type Exit = [code: number | null, signal: NodeJS.Signals | null];
 const execFile = promisify(execFileCallback);
 const OPERATION_TIMEOUT_MS = 8_000;
 
+function namedTimeoutError(label: string, milliseconds: number): Error {
+  const error = new Error(`${label} timed out after ${milliseconds}ms`);
+  error.stack = `${error.name}: ${error.message}`;
+  return error;
+}
+
 export function withNamedTimeout<T>(label: string, promise: Promise<T>, milliseconds = OPERATION_TIMEOUT_MS): Promise<T> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
-      const error = new Error(`${label} timed out after ${milliseconds}ms`);
-      error.stack = `${error.name}: ${error.message}`;
-      reject(error);
+      reject(namedTimeoutError(label, milliseconds));
     }, milliseconds);
     promise.then(
       (value) => {
@@ -29,6 +33,37 @@ export function withNamedTimeout<T>(label: string, promise: Promise<T>, millisec
         resolve(value);
       },
       (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
+
+function acquireOwnedResource<T>(
+  label: string,
+  acquisition: Promise<T>,
+  cleanupLabel: string,
+  cleanup: (resource: T) => Promise<void>,
+  milliseconds = OPERATION_TIMEOUT_MS
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      reject(namedTimeoutError(label, milliseconds));
+    }, milliseconds);
+    acquisition.then(
+      (resource) => {
+        if (timedOut) {
+          void withNamedTimeout(cleanupLabel, cleanup(resource), milliseconds).catch(() => undefined);
+          return;
+        }
+        clearTimeout(timer);
+        resolve(resource);
+      },
+      (error: unknown) => {
+        if (timedOut) return;
         clearTimeout(timer);
         reject(error);
       }
@@ -167,8 +202,11 @@ async function tokenWasConsumed(tokenFile: string): Promise<void> {
 
 export async function prepareTokenFile(serviceBinary: string, tokenFile: string, token: string): Promise<void> {
   try {
-    await execFile(serviceBinary, ["--prepare-token-file", tokenFile], { windowsHide: true, timeout: OPERATION_TIMEOUT_MS });
-    await writeFile(tokenFile, token, { flag: "r+" });
+    await withNamedTimeout(
+      "token file permission preparation",
+      execFile(serviceBinary, ["--prepare-token-file", tokenFile], { windowsHide: true, timeout: OPERATION_TIMEOUT_MS })
+    );
+    await withNamedTimeout("token secret write", writeFile(tokenFile, token, { flag: "r+" }));
   } catch (error) {
     throw safeError(error, [serviceBinary, tokenFile, token]);
   }
@@ -262,7 +300,17 @@ async function launchService(serviceBinary: string, directory: string, options: 
   let stderr = "";
   let client: ProtocolClient | undefined;
   try {
-    endpointResource = await withNamedTimeout("endpoint allocation", endpointForDirectory(directory), timeoutMs);
+    endpointResource = await acquireOwnedResource(
+      "endpoint allocation",
+      endpointForDirectory(directory),
+      "late Unix endpoint cleanup",
+      async (resource) => {
+        if (resource.directory) {
+          await rm(resource.directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+        }
+      },
+      timeoutMs
+    );
     await withNamedTimeout(
       "token file preparation",
       (options.operations?.prepareTokenFile ?? prepareTokenFile)(serviceBinary, tokenFile, token),
@@ -284,7 +332,7 @@ async function launchService(serviceBinary: string, directory: string, options: 
     child.on("error", (error) => { stderr += `${error.message}\n`; });
 
     await withNamedTimeout("service startup readiness", ready(child, endpointResource.path), timeoutMs);
-    await tokenWasConsumed(tokenFile);
+    await withNamedTimeout("token file consumption confirmation", tokenWasConsumed(tokenFile), timeoutMs);
     const connector = new PausableConnector(endpointResource.path, timeoutMs);
     client = await withNamedTimeout(
       "service connection",
@@ -472,20 +520,34 @@ export async function startService(
   return new TaskServiceFixture(serviceBinary, directory, await launchService(serviceBinary, directory, options), options);
 }
 
-export async function startTaskService(serviceBinary: string): Promise<TaskServiceFixture> {
-  const directory = await mkdtemp(join(dirname(serviceBinary), "unit-test-ide-probe-"));
+export async function startTaskService(
+  serviceBinary: string,
+  options: StartServiceOptions = {}
+): Promise<TaskServiceFixture> {
+  const timeoutMs = options.timeoutMs ?? OPERATION_TIMEOUT_MS;
+  let directory: string | undefined;
   try {
-    return await startService(serviceBinary, directory);
+    directory = await acquireOwnedResource(
+      "fixture directory allocation",
+      mkdtemp(join(dirname(serviceBinary), "unit-test-ide-probe-")),
+      "late fixture directory cleanup",
+      (lateDirectory) => rm(lateDirectory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }),
+      timeoutMs
+    );
+    return await startService(serviceBinary, directory, options);
   } catch (error) {
-    try {
-      await withNamedTimeout(
-        "failed fixture directory cleanup",
-        rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
-      );
-    } catch {
-      // Preserve the already-sanitized launch error; cleanup remains bounded.
+    if (directory) {
+      try {
+        await withNamedTimeout(
+          "failed fixture directory cleanup",
+          rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }),
+          timeoutMs
+        );
+      } catch {
+        // Preserve the already-sanitized launch error; cleanup remains bounded.
+      }
     }
-    throw safeError(error, [serviceBinary, directory]);
+    throw safeError(error, [serviceBinary, directory ?? ""]);
   }
 }
 

@@ -53,6 +53,36 @@ test("service fixture bounds pending token preparation", async () => {
   }
 });
 
+test("owned startup timeout ignores late token preparation and removes its fixture directory", async () => {
+  let fixtureDirectory: string | undefined;
+  let spawnCalled = false;
+
+  await assert.rejects(
+    startTaskService(binary, {
+      timeoutMs: 100,
+      operations: {
+        prepareTokenFile: async (_serviceBinary: string, tokenFile: string) => {
+          fixtureDirectory = dirname(tokenFile);
+          await new Promise((resolveDelay) => setTimeout(resolveDelay, 300));
+        },
+        spawnService: () => {
+          spawnCalled = true;
+          throw new Error("late token preparation must not reach spawn");
+        }
+      }
+    }),
+    /token file preparation timed out after 100ms/
+  );
+
+  await new Promise((resolveDelay) => setTimeout(resolveDelay, 350));
+  assert.equal(spawnCalled, false);
+  assert.ok(fixtureDirectory);
+  await assert.rejects(
+    readFile(fixtureDirectory),
+    (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT"
+  );
+});
+
 test("service fixture bounds a pending handshake RPC and cleans up its process", async () => {
   const directory = await mkdtemp(join(dirname(binary), "unit-test-ide-rpc-timeout-"));
   let servicePID: number | undefined;
@@ -277,7 +307,7 @@ test("prepares the token file before writing the secret", async () => {
   const tokenFile = join(directory, "token");
   const token = "0123456789abcdef0123456789abcdef";
   try {
-    await withNamedTimeout("standalone token preparation", prepareTokenFile(binary, tokenFile, token), EVENT_TIMEOUT_MS);
+    await prepareTokenFile(binary, tokenFile, token);
     assert.equal(await readFile(tokenFile, "utf8"), token);
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -285,13 +315,13 @@ test("prepares the token file before writing the secret", async () => {
 });
 
 test("probe authenticates, reads capabilities, and shuts the service down", async () => {
-  const capabilities = await withNamedTimeout("phase 1 probe", runProbe(binary), EVENT_TIMEOUT_MS);
+  const capabilities = await runProbe(binary);
   assert.equal(capabilities.platform, process.platform === "win32" ? "windows" : "linux");
   assert.deepEqual(capabilities.transports, [process.platform === "win32" ? "named-pipe" : "unix-socket"]);
 });
 
 test("task survives reconnect, cancels its tree, persists history and artifact", async () => {
-  const fixture = await withNamedTimeout("task fixture startup", startTaskService(binary), EVENT_TIMEOUT_MS);
+  const fixture = await startTaskService(binary);
   const seen: TaskEvent[] = [];
   let secondary: ProtocolClient | undefined;
   let reconnectGate: ReturnType<typeof fixture.pauseNextReconnect> | undefined;
@@ -314,7 +344,7 @@ test("task survives reconnect, cancels its tree, persists history and artifact",
     reconnectGate = fixture.pauseNextReconnect();
     const reconnecting = withNamedTimeout("primary client reconnect", client.reconnect(), EVENT_TIMEOUT_MS);
     await withNamedTimeout("reconnect connector gate", reconnectGate.entered, EVENT_TIMEOUT_MS);
-    const secondaryClient = await withNamedTimeout("secondary client connection", fixture.connectClient(), EVENT_TIMEOUT_MS);
+    const secondaryClient = await fixture.connectClient();
     secondary = secondaryClient;
     const secondarySubscription = await withNamedTimeout(
       "secondary event subscription",
@@ -359,20 +389,20 @@ test("task survives reconnect, cancels its tree, persists history and artifact",
     assert.equal(summary.outcome, "cancelled");
     assert.equal(summary.taskId, running.taskId);
 
-    await withNamedTimeout("graceful fixture stop", fixture.stopGracefully(), EVENT_TIMEOUT_MS);
-    const restarted = await withNamedTimeout("fixture restart", fixture.restart(), EVENT_TIMEOUT_MS);
+    await fixture.stopGracefully();
+    const restarted = await fixture.restart();
     const persisted = await withNamedTimeout("persisted task lookup", restarted.client.getTask(running.taskId), EVENT_TIMEOUT_MS);
     assert.equal(persisted.status, "finished");
     assert.equal(persisted.outcome, "cancelled");
   } finally {
     reconnectGate?.release();
     secondary?.close();
-    await withNamedTimeout("task fixture disposal", fixture.dispose(), EVENT_TIMEOUT_MS);
+    await fixture.dispose();
   }
 });
 
 test("service crash recovers an active task exactly once as interrupted", async () => {
-  const fixture = await withNamedTimeout("crash fixture startup", startTaskService(binary), EVENT_TIMEOUT_MS);
+  const fixture = await startTaskService(binary);
   try {
     const subscription = await withNamedTimeout(
       "crash event subscription",
@@ -391,10 +421,10 @@ test("service crash recovers an active task exactly once as interrupted", async 
     assert.equal(running.status, "running");
     const beforeCrash: TaskEvent[] = [];
     const childPID = await waitForChildPID(subscription, running.taskId, beforeCrash);
-    await withNamedTimeout("forced service crash", fixture.kill(), EVENT_TIMEOUT_MS);
+    await fixture.kill();
     await assertProcessGone(childPID);
 
-    const restarted = await withNamedTimeout("crashed fixture restart", fixture.restart(), EVENT_TIMEOUT_MS);
+    const restarted = await fixture.restart();
     const recovered = await withNamedTimeout(
       "recovered task lookup",
       restarted.client.getTask(running.taskId),
@@ -413,6 +443,6 @@ test("service crash recovers an active task exactly once as interrupted", async 
     assert.equal(recoveredFinished[0]?.payload.outcome, "interrupted");
     assert.equal(JSON.stringify({ recovered, events }).includes("test_failed"), false);
   } finally {
-    await withNamedTimeout("crash fixture disposal", fixture.dispose(), EVENT_TIMEOUT_MS);
+    await fixture.dispose();
   }
 });
