@@ -759,10 +759,18 @@ type managerFixture struct {
 }
 
 func newManagerFixture(t *testing.T) *managerFixture {
-	return newManagerFixtureWithCloseTimeout(t, 0)
+	return newManagerFixtureWithOptions(t, 0, 0)
 }
 
 func newManagerFixtureWithCloseTimeout(t *testing.T, closeTimeout time.Duration) *managerFixture {
+	return newManagerFixtureWithOptions(t, closeTimeout, 0)
+}
+
+func newManagerFixtureWithCommandQueue(t *testing.T, commandQueue int) *managerFixture {
+	return newManagerFixtureWithOptions(t, 0, commandQueue)
+}
+
+func newManagerFixtureWithOptions(t *testing.T, closeTimeout time.Duration, commandQueue int) *managerFixture {
 	t.Helper()
 	clock := newFakeClock()
 	store := newFakeStore()
@@ -776,7 +784,7 @@ func newManagerFixtureWithCloseTimeout(t *testing.T, closeTimeout time.Duration)
 		Clock: clock, NewID: func() string { next++; return testID(next) },
 		ServiceExecutable: "trusted-service", ServiceInstanceID: testID(99),
 		TerminationGrace: time.Second, OutputFlushInterval: 25 * time.Millisecond,
-		ProcessCloseTimeout: closeTimeout,
+		ProcessCloseTimeout: closeTimeout, CommandQueue: commandQueue,
 	})
 	if err != nil {
 		t.Fatal(err)

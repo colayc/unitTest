@@ -300,9 +300,9 @@ func (m *Manager) startNextStep(current *activeTask, active map[string]*activeTa
 		PutLease: &lease,
 	})
 	if err != nil {
-		current.cause = OutcomeInfrastructureFailed
+		cause := current.execution.resolve(OutcomeInfrastructureFailed)
 		current.cleanupWithoutDone = true
-		current.failPendingStep = true
+		current.failPendingStep = cause == OutcomeInfrastructureFailed
 		current.processCompleted = true
 		m.terminate(current)
 		if errors.Is(err, ErrStorageUnavailable) {
@@ -337,11 +337,11 @@ func (m *Manager) startNextStep(current *activeTask, active map[string]*activeTa
 		return nil
 	}
 	if startErr != nil {
-		current.cause = OutcomeInfrastructureFailed
+		cause := current.execution.resolve(OutcomeInfrastructureFailed)
 		current.cleanupWithoutDone = true
 		current.processCompleted = true
 		m.terminate(current)
-		_, finishErr := m.finishExecution(current, ProcessResult{Err: startErr}, OutcomeInfrastructureFailed, false, active)
+		_, finishErr := m.finishExecution(current, ProcessResult{Err: startErr}, cause, false, active)
 		if finishErr != nil {
 			m.abandon(current)
 		}
@@ -382,7 +382,7 @@ func (m *Manager) setCurrentProcess(current *activeTask, process ManagedProcess)
 func (m *Manager) cleanupPreparedProcess(current *activeTask) {
 	current.cleanupWithoutDone = true
 	current.processCompleted = true
-	current.cause = OutcomeInfrastructureFailed
+	current.execution.resolve(OutcomeInfrastructureFailed)
 	current.failPendingStep = true
 	m.terminate(current)
 	m.maybeStartClose(current)
@@ -406,7 +406,7 @@ func (m *Manager) finish(current *activeTask, result ProcessResult, active map[s
 		return
 	}
 
-	outcome := current.cause
+	outcome := current.execution.currentCause()
 	if outcome == "" {
 		switch {
 		case current.terminationFailed || result.Err != nil:
@@ -445,7 +445,7 @@ func (m *Manager) persistSuccessfulStep(current *activeTask, result ProcessResul
 		DeleteLease: true,
 	})
 	if err != nil {
-		current.cause = OutcomeInfrastructureFailed
+		current.execution.resolve(OutcomeInfrastructureFailed)
 		current.failPendingStep = false
 		if errors.Is(err, ErrStorageUnavailable) {
 			m.tripStorage(active)
@@ -481,12 +481,8 @@ func (m *Manager) finishExecution(
 }
 
 func (m *Manager) finishAfterCloseFailure(current *activeTask, active map[string]*activeTask) (Task, error) {
-	outcome := current.cause
-	failPending := false
-	if outcome == "" {
-		outcome = OutcomeInfrastructureFailed
-		failPending = true
-	}
+	outcome := current.execution.resolve(OutcomeInfrastructureFailed)
+	failPending := outcome == OutcomeInfrastructureFailed
 	finished, err := m.persistTerminal(
 		current,
 		ProcessResult{Err: errors.New("process close failed")},
@@ -511,6 +507,10 @@ func (m *Manager) persistTerminal(
 	deleteLease bool,
 	active map[string]*activeTask,
 ) (Task, error) {
+	outcome = current.execution.resolve(outcome)
+	if outcome != OutcomeInfrastructureFailed {
+		failPending = false
+	}
 	for attempt := 0; attempt < 2; attempt++ {
 		finishedAt := m.clock.Now()
 		updatedTask := current.task
@@ -521,7 +521,7 @@ func (m *Manager) persistTerminal(
 			return finished, err
 		}
 		if attempt == 0 {
-			current.cause = OutcomeInfrastructureFailed
+			current.execution.replaceOutcome(OutcomeInfrastructureFailed)
 			current.failPendingStep = failPending
 			result = ProcessResult{Err: ErrConflict}
 			outcome = OutcomeInfrastructureFailed

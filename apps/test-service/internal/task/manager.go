@@ -89,7 +89,6 @@ type flushCommand struct {
 }
 type terminationResultCommand struct {
 	taskID     string
-	cause      Outcome
 	generation uint64
 	err        error
 }
@@ -120,7 +119,6 @@ type activeTask struct {
 	boundary              ExecutionBoundary
 	nextStep              int
 	process               ManagedProcess
-	cause                 Outcome
 	terminating           bool
 	segments              []outputSegment
 	bufferedBytes         int
@@ -147,10 +145,11 @@ type activeTask struct {
 }
 
 type executionSignal struct {
-	mu     sync.Mutex
-	ctx    context.Context
-	cancel context.CancelFunc
-	cause  Outcome
+	mu        sync.Mutex
+	ctx       context.Context
+	cancel    context.CancelFunc
+	requested Outcome
+	outcome   Outcome
 }
 
 func newExecutionSignal() *executionSignal {
@@ -164,11 +163,14 @@ func (s *executionSignal) claim(cause Outcome) Outcome {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.cause == "" {
-		s.cause = cause
+	if s.outcome != "" {
+		return s.outcome
+	}
+	if s.requested == "" {
+		s.requested = cause
 		s.cancel()
 	}
-	return s.cause
+	return s.requested
 }
 
 func (s *executionSignal) currentCause() Outcome {
@@ -177,7 +179,46 @@ func (s *executionSignal) currentCause() Outcome {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.cause
+	if s.outcome != "" {
+		return s.outcome
+	}
+	return s.requested
+}
+
+func (s *executionSignal) state() (requested, outcome Outcome) {
+	if s == nil {
+		return "", ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.requested, s.outcome
+}
+
+func (s *executionSignal) resolve(fallback Outcome) Outcome {
+	if s == nil {
+		return fallback
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.outcome == "" {
+		if s.requested != "" {
+			s.outcome = s.requested
+		} else {
+			s.outcome = fallback
+		}
+		s.cancel()
+	}
+	return s.outcome
+}
+
+func (s *executionSignal) replaceOutcome(outcome Outcome) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.outcome = outcome
+	s.cancel()
 }
 
 func (s *executionSignal) stop() {
@@ -291,11 +332,18 @@ func (m *Manager) Cancel(ctx context.Context, id string) (Task, error) {
 	if m == nil || id == "" {
 		return Task{}, ErrInvalidArgument
 	}
-	reply := make(chan taskResponse, 1)
-	if err := m.send(ctx, taskIDCommand{id: id, cancel: true, reply: reply}); err != nil {
+	if err := ctx.Err(); err != nil {
 		return Task{}, err
 	}
-	m.signalExecution(id, OutcomeCancelled)
+	reply := make(chan taskResponse, 1)
+	command := taskIDCommand{id: id, cancel: true, reply: reply}
+	if m.signalExecution(id, OutcomeCancelled) == OutcomeCancelled {
+		// Once a live request is accepted, caller cancellation only bounds
+		// waiting for the reply; command delivery and cleanup must continue.
+		go m.sendInternal(command)
+	} else if err := m.send(ctx, command); err != nil {
+		return Task{}, err
+	}
 	select {
 	case response := <-reply:
 		return response.task, publicError(response.err)
@@ -389,12 +437,11 @@ func (m *Manager) loop() {
 				m.flushOutput(current, active)
 			}
 		case timeoutCommand:
-			if current := active[string(value)]; current != nil && current.task.Status != StatusFinished && current.cause == "" {
-				cause := current.execution.claim(OutcomeTimedOut)
+			if current := active[string(value)]; current != nil && current.task.Status != StatusFinished {
+				cause := current.execution.resolve(OutcomeTimedOut)
 				if cause != OutcomeTimedOut {
 					break
 				}
-				current.cause = cause
 				if current.process == nil {
 					if _, err := m.finishExecution(current, ProcessResult{}, cause, false, active); err != nil {
 						m.abandon(current)
@@ -451,11 +498,11 @@ func (m *Manager) loop() {
 					current.closeFailed = false
 					if current.task.Status != StatusFinished && current.processCompleted &&
 						!m.storageFailed && !current.recoveryRequired {
-						if current.cause != "" {
+						if cause := current.execution.currentCause(); cause != "" {
 							if _, err := m.finishExecution(
 								current,
 								ProcessResult{},
-								current.cause,
+								current.execution.resolve(cause),
 								current.failPendingStep,
 								active,
 							); err != nil {
@@ -478,8 +525,8 @@ func (m *Manager) loop() {
 			initiate := !shutdownInitiated
 			shutdownInitiated = true
 			for _, current := range active {
-				if initiate && current.task.Status != StatusFinished && current.cause == "" {
-					current.cause = OutcomeInterrupted
+				if initiate && current.task.Status != StatusFinished && current.execution.currentCause() == "" {
+					current.execution.claim(OutcomeInterrupted)
 					if current.processCompleted {
 						m.maybeStartClose(current)
 					} else {
@@ -510,7 +557,8 @@ func (m *Manager) cancel(id string, active map[string]*activeTask) taskResponse 
 	if current == nil {
 		return taskResponse{task: stored, err: ErrConflict}
 	}
-	if current.cause != "" {
+	requested, outcome := current.execution.state()
+	if outcome != "" || (requested != "" && requested != OutcomeCancelled) {
 		return taskResponse{task: current.task}
 	}
 	if cause := current.execution.claim(OutcomeCancelled); cause != OutcomeCancelled {
@@ -528,11 +576,15 @@ func (m *Manager) cancel(id string, active map[string]*activeTask) taskResponse 
 	if err != nil {
 		if errors.Is(err, ErrStorageUnavailable) {
 			m.tripStorage(active)
+		} else if errors.Is(err, ErrConflict) {
+			current.execution.replaceOutcome(OutcomeInfrastructureFailed)
+			current.failPendingStep = false
+			m.finishCancellationConflict(current, active)
 		}
 		return taskResponse{task: current.task, err: err}
 	}
 	current.task = cancelling
-	current.cause = OutcomeCancelled
+	current.execution.resolve(OutcomeCancelled)
 	if !m.publishAll(events, active) {
 		return taskResponse{task: current.task, err: ErrStorageUnavailable}
 	}
@@ -556,6 +608,32 @@ func (m *Manager) cancel(id string, active map[string]*activeTask) taskResponse 
 		m.terminate(current)
 	}
 	return taskResponse{task: current.task}
+}
+
+func (m *Manager) finishCancellationConflict(current *activeTask, active map[string]*activeTask) {
+	if current.process == nil {
+		if _, err := m.finishExecution(
+			current,
+			ProcessResult{Err: ErrConflict},
+			OutcomeInfrastructureFailed,
+			false,
+			active,
+		); err != nil {
+			m.abandon(current)
+		}
+		if active[current.task.ID] == current && current.task.Status == StatusFinished {
+			delete(active, current.task.ID)
+		}
+		return
+	}
+	if current.cleanupWithoutDone && !current.terminating {
+		current.processCompleted = true
+		m.terminate(current)
+	} else if current.processCompleted {
+		m.maybeStartClose(current)
+	} else {
+		m.terminate(current)
+	}
 }
 
 func (m *Manager) watch(current *activeTask) {
@@ -732,7 +810,6 @@ func (m *Manager) terminate(current *activeTask) {
 	current.terminating = true
 	current.terminationGeneration++
 	taskID := current.task.ID
-	cause := current.cause
 	generation := current.terminationGeneration
 	process := current.process
 	grace := m.terminationGrace
@@ -740,7 +817,7 @@ func (m *Manager) terminate(current *activeTask) {
 		ctx, cancel := context.WithTimeout(context.Background(), grace+2*time.Second)
 		defer cancel()
 		err := process.Terminate(ctx, grace)
-		m.sendInternal(terminationResultCommand{taskID: taskID, cause: cause, generation: generation, err: err})
+		m.sendInternal(terminationResultCommand{taskID: taskID, generation: generation, err: err})
 	}()
 }
 

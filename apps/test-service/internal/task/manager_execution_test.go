@@ -227,6 +227,80 @@ func TestManagerCancellationDuringNextStepPreparePreventsStart(t *testing.T) {
 	}
 }
 
+func TestManagerCancelPreemptsBlockedPrepareWhenCommandQueueIsFull(t *testing.T) {
+	f := newManagerFixtureWithCommandQueue(t, 1)
+	second := newFakeProcess()
+	f.processes.queue = []*fakeProcess{f.process, second}
+	t.Cleanup(func() { second.completeOnce(task.ProcessResult{Err: errors.New("test cleanup")}) })
+	prepareEntered := make(chan struct{})
+	prepareCanceled := make(chan struct{})
+	releasePrepare := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(releasePrepare) }) })
+	f.processes.prepareBlockAt = 2
+	f.processes.prepareEntered = prepareEntered
+	f.processes.prepareCanceled = prepareCanceled
+	f.processes.prepareBlock = releasePrepare
+
+	started, err := f.manager.Start(context.Background(), twoStepStartRequest(testID(80), time.Minute, fixedBoundary{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.process.complete(task.ProcessResult{ExitCode: 0})
+	awaitSignal(t, prepareEntered, "second Prepare was not entered")
+
+	probeCtx, stopProbe := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer stopProbe()
+	if _, err := f.manager.Get(probeCtx, started.ID); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("queue-filling Get error = %v, want context deadline", err)
+	}
+
+	cancelCtx, stopCancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer stopCancel()
+	if _, err := f.manager.Cancel(cancelCtx, started.ID); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Cancel error = %v, want context deadline after cancellation acceptance", err)
+	}
+	awaitSignal(t, prepareCanceled, "accepted Cancel did not preempt Prepare while command queue was full")
+	releaseOnce.Do(func() { close(releasePrepare) })
+
+	f.awaitProcessTerminate(t, second, 1)
+	f.awaitProcessClose(t, second)
+	finished := f.awaitTask(t, started.ID, task.StatusFinished)
+	if finished.Outcome != task.OutcomeCancelled {
+		t.Fatalf("outcome = %s, want %s", finished.Outcome, task.OutcomeCancelled)
+	}
+	assertStepStatuses(t, finished, task.StepSucceeded, task.StepSkipped)
+	if got := second.startCalls(); got != 0 {
+		t.Fatalf("second Start calls after accepted Cancel = %d, want 0", got)
+	}
+}
+
+func TestManagerCancelWithAlreadyDoneContextIsNotAccepted(t *testing.T) {
+	f := newManagerFixture(t)
+	startCanceled := make(chan struct{})
+	f.process.startCanceled = startCanceled
+
+	started, err := f.manager.Start(context.Background(), task.StartRequest{
+		IdempotencyKey: testID(79), Scenario: task.ScenarioHang, Timeout: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelCtx, stopCancel := context.WithCancel(context.Background())
+	stopCancel()
+	if _, err := f.manager.Cancel(cancelCtx, started.ID); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Cancel error = %v, want context canceled", err)
+	}
+	select {
+	case <-startCanceled:
+		t.Fatal("already-done caller context was accepted as a cancellation request")
+	case <-time.After(50 * time.Millisecond):
+	}
+	if got := f.process.terminateCalls(); got != 0 {
+		t.Fatalf("Terminate calls after rejected cancellation = %d, want 0", got)
+	}
+}
+
 func TestManagerTotalTimeoutWinsWhenStepStartReturnsErrorAfterDeadline(t *testing.T) {
 	f := newManagerFixture(t)
 	second := newFakeProcess()
@@ -409,6 +483,8 @@ func TestManagerCloseFailurePreservesTotalTimeoutCause(t *testing.T) {
 	releaseClose := make(chan struct{})
 	f.process.closeBlock = releaseClose
 	f.process.closeErr = errors.New("first process close failed")
+	startCanceled := make(chan struct{})
+	f.process.startCanceled = startCanceled
 	const timeout = 9 * time.Second
 
 	started, err := f.manager.Start(context.Background(), twoStepStartRequest(testID(99), timeout, fixedBoundary{}))
@@ -418,6 +494,7 @@ func TestManagerCloseFailurePreservesTotalTimeoutCause(t *testing.T) {
 	f.process.complete(task.ProcessResult{ExitCode: 0})
 	f.awaitProcessClose(t, f.process)
 	f.clock.fire(t, timeout)
+	awaitSignal(t, startCanceled, "total timeout was not accepted before Close returned")
 	close(releaseClose)
 
 	finished := f.awaitTask(t, started.ID, task.StatusFinished)
@@ -564,6 +641,86 @@ func TestManagerRepeatedTerminalStoreConflictStopsAfterInfrastructureRetry(t *te
 	finishedNext := f.awaitTask(t, startedNext.ID, task.StatusFinished)
 	if finishedNext.Outcome != task.OutcomeSucceeded {
 		t.Fatalf("next outcome = %s, want %s", finishedNext.Outcome, task.OutcomeSucceeded)
+	}
+}
+
+func TestManagerCancelConflictCleansPreemptedPreparedProcessLocally(t *testing.T) {
+	f := newManagerFixture(t)
+	targetFirst := newFakeProcess()
+	targetSecond := newFakeProcess()
+	f.processes.queue = []*fakeProcess{f.process, targetFirst, targetSecond}
+	t.Cleanup(func() {
+		targetFirst.completeOnce(task.ProcessResult{Err: errors.New("test cleanup")})
+		targetSecond.completeOnce(task.ProcessResult{Err: errors.New("test cleanup")})
+	})
+	prepareEntered := make(chan struct{})
+	prepareCanceled := make(chan struct{})
+	releasePrepare := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(releasePrepare) }) })
+	f.processes.prepareBlockAt = 3
+	f.processes.prepareEntered = prepareEntered
+	f.processes.prepareCanceled = prepareCanceled
+	f.processes.prepareBlock = releasePrepare
+
+	unaffected, err := f.manager.Start(context.Background(), task.StartRequest{
+		IdempotencyKey: testID(76), Scenario: task.ScenarioHang, Timeout: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const targetTimeout = 17 * time.Second
+	target, err := f.manager.Start(context.Background(), twoStepStartRequest(testID(77), targetTimeout, fixedBoundary{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetFirst.complete(task.ProcessResult{ExitCode: 0})
+	awaitSignal(t, prepareEntered, "target second Prepare was not entered")
+	f.store.failApplyAt = f.store.applyCount() + 1
+	f.store.failApplyErr = task.ErrConflict
+
+	cancelResult := make(chan taskResponseResult, 1)
+	go func() {
+		got, cancelErr := f.manager.Cancel(context.Background(), target.ID)
+		cancelResult <- taskResponseResult{task: got, err: cancelErr}
+	}()
+	awaitSignal(t, prepareCanceled, "Cancel did not preempt target second Prepare")
+	releaseOnce.Do(func() { close(releasePrepare) })
+
+	select {
+	case result := <-cancelResult:
+		if !errors.Is(result.err, task.ErrConflict) {
+			t.Fatalf("Cancel error = %v, want task-local ErrConflict", result.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Cancel did not return after Prepare released")
+	}
+	f.awaitProcessTerminate(t, targetSecond, 1)
+	f.awaitProcessClose(t, targetSecond)
+	finishedTarget := f.awaitTask(t, target.ID, task.StatusFinished)
+	if finishedTarget.Outcome != task.OutcomeInfrastructureFailed {
+		t.Fatalf("target outcome = %s, want %s", finishedTarget.Outcome, task.OutcomeInfrastructureFailed)
+	}
+	assertStepStatuses(t, finishedTarget, task.StepSucceeded, task.StepSkipped)
+	if got := targetSecond.startCalls(); got != 0 {
+		t.Fatalf("target second Start calls = %d, want 0", got)
+	}
+	if !f.manager.Healthy() {
+		t.Fatal("manager became unhealthy after task-local cancellation conflict")
+	}
+	if got := f.process.terminateCalls(); got != 0 {
+		t.Fatalf("unaffected task Terminate calls = %d, want 0", got)
+	}
+
+	f.clock.fire(t, targetTimeout)
+	afterTimeout := f.awaitTask(t, target.ID, task.StatusFinished)
+	if afterTimeout.Outcome != task.OutcomeInfrastructureFailed {
+		t.Fatalf("target outcome after total timeout = %s, want stable %s", afterTimeout.Outcome, task.OutcomeInfrastructureFailed)
+	}
+	f.process.complete(task.ProcessResult{ExitCode: 0})
+	finishedOther := f.awaitTask(t, unaffected.ID, task.StatusFinished)
+	if finishedOther.Outcome != task.OutcomeSucceeded {
+		t.Fatalf("unaffected outcome = %s, want %s", finishedOther.Outcome, task.OutcomeSucceeded)
 	}
 }
 
