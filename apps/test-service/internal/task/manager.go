@@ -410,7 +410,7 @@ func (m *Manager) start(request StartRequest, active map[string]*activeTask) tas
 	created := Task{
 		ID: m.newID(), IdempotencyKey: request.IdempotencyKey, RequestHash: requestHash,
 		Kind: request.Kind, Request: append(json.RawMessage(nil), request.Request...), WorkspaceGeneration: request.WorkspaceGeneration,
-		PlanFingerprint: FingerprintPlan(request.Plan), Scenario: request.Scenario, Timeout: request.Timeout, Status: StatusQueued, CreatedAt: now,
+		Scenario: request.Scenario, Timeout: request.Timeout, Status: StatusQueued, CreatedAt: now,
 	}
 	draft := eventDraft(created.ID, EventTaskCreated, now, map[string]any{"status": StatusQueued})
 	stored, events, err := m.store.Create(context.Background(), created, draft)

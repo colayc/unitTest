@@ -20,6 +20,19 @@ func TestNewManagerRejectsMissingDependencies(t *testing.T) {
 	}
 }
 
+func TestLegacySimulationLeavesPlanFingerprintEmpty(t *testing.T) {
+	f := newManagerFixture(t)
+	started, err := f.manager.Start(context.Background(), task.StartRequest{
+		IdempotencyKey: testID(0), Scenario: task.ScenarioSuccess, Timeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if started.PlanFingerprint != "" {
+		t.Fatalf("legacy simulation plan fingerprint = %q, want empty", started.PlanFingerprint)
+	}
+}
+
 func TestManagerStartsAndCancelsOneTask(t *testing.T) {
 	f := newManagerFixture(t)
 	started, err := f.manager.Start(context.Background(), task.StartRequest{
