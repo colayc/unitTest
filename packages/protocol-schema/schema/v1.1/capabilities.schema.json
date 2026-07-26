@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:unit-test-ide:protocol:v1.1:capabilities",
+  "title": "CapabilitiesV11",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["platform", "transports", "toolchains", "frameworks", "coverageTools", "taskExecution", "eventReplay", "sqliteHistory", "artifactRead", "processTreeControl"],
+  "properties": {
+    "platform": { "enum": ["windows", "linux"] },
+    "transports": { "type": "array", "items": { "enum": ["named-pipe", "unix-socket"] } },
+    "toolchains": { "type": "array", "items": { "type": "string" } },
+    "frameworks": { "type": "array", "items": { "type": "string" } },
+    "coverageTools": { "type": "array", "items": { "type": "string" } },
+    "taskExecution": { "const": true },
+    "eventReplay": { "const": true },
+    "sqliteHistory": { "const": true },
+    "artifactRead": { "const": true },
+    "processTreeControl": { "enum": ["job-object", "process-group"] }
+  }
+}

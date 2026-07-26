@@ -3,10 +3,12 @@ package server_test
 import (
 	"errors"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"unit-test-ide.local/test-service/internal/protocol"
 	"unit-test-ide.local/test-service/internal/server"
 )
 
@@ -37,7 +39,7 @@ func (l *queuedListener) Accept() (net.Conn, error) {
 
 func TestServiceClosesConnectionAcceptedDuringShutdown(t *testing.T) {
 	listener := newQueuedListener()
-	service := server.NewService(listener, "0123456789abcdef", "linux", "unix-socket", server.ServiceConfig{
+	service := server.NewService(listener, "0123456789abcdef", "linux", "unix-socket", nil, server.ServiceConfig{
 		MaxConnections: 1,
 		Connection: server.ConnectionConfig{
 			HandshakeTimeout: time.Minute,
@@ -71,7 +73,7 @@ func (a stubAddr) String() string  { return string(a) }
 
 func TestServiceConnectionLimitExhaustionAndRecovery(t *testing.T) {
 	listener := newQueuedListener()
-	service := server.NewService(listener, "0123456789abcdef", "linux", "unix-socket", server.ServiceConfig{MaxConnections: 1})
+	service := server.NewService(listener, "0123456789abcdef", "linux", "unix-socket", nil, server.ServiceConfig{MaxConnections: 1})
 	done := make(chan error, 1)
 	go func() { done <- service.Serve() }()
 
@@ -102,5 +104,38 @@ func TestServiceConnectionLimitExhaustionAndRecovery(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("service did not close active connections and wait for handlers")
+	}
+}
+
+func TestServiceSharesBackendAcrossIndependentSessions(t *testing.T) {
+	listener := newQueuedListener()
+	backend := newStreamBackend(t, 8)
+	service := server.NewService(listener, "0123456789abcdef", "linux", "unix-socket", backend, server.ServiceConfig{MaxConnections: 2})
+	done := make(chan error, 1)
+	go func() { done <- service.Serve() }()
+
+	for index := range 2 {
+		client, accepted := net.Pipe()
+		listener.connections <- accepted
+		<-listener.accepted
+		authenticateV11Connection(t, client)
+		payload := []byte(`{"taskId":"11111111111111111111111111111111"}`)
+		response := exchange(t, client, protocol.Request{ProtocolVersion: protocol.Version11, Kind: "request", MessageID: strings.Repeat(string(rune('c'+index)), 32), Method: "tasks/get", SentAt: sentAt, Payload: payload})
+		if response.Kind != "response" {
+			t.Fatalf("response=%#v", response)
+		}
+		_ = client.Close()
+	}
+	if backend.getCalls.Load() != 2 {
+		t.Fatalf("backend get calls=%d", backend.getCalls.Load())
+	}
+	service.Shutdown()
+	select {
+	case err := <-done:
+		if err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("service did not stop")
 	}
 }

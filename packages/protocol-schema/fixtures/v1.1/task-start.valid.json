@@ -1,0 +1,12 @@
+{
+  "protocolVersion": "1.1",
+  "kind": "request",
+  "messageId": "0123456789abcdef0123456789abcdef",
+  "method": "tasks/start",
+  "sentAt": "2026-07-22T00:00:00Z",
+  "payload": {
+    "idempotencyKey": "fedcba9876543210fedcba9876543210",
+    "scenario": "spawn-child",
+    "timeoutMs": 30000
+  }
+}

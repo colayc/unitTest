@@ -1,6 +1,51 @@
-export type Method = "handshake" | "capabilities/get" | "shutdown";
-export interface RequestEnvelope { protocolVersion: "1.0"; kind: "request"; messageId: string; method: Method; sentAt: string; payload: Record<string, unknown>; }
-export interface ResponseEnvelope { protocolVersion: "1.0"; kind: "response"; messageId: string; requestId: string; method: Method; sentAt: string; payload: Record<string, unknown>; }
-export interface ErrorEnvelope { protocolVersion: "1.0"; kind: "error"; messageId: string; requestId: string; sentAt: string; error: { code: string; message: string; retryable: boolean }; }
-export type IncomingEnvelope = ResponseEnvelope | ErrorEnvelope;
-export class ProtocolError extends Error { constructor(readonly code: string, message: string, readonly retryable: boolean) { super(message); } }
+import type { TaskEvent } from "@unit-test-ide/protocol-models";
+
+export type ProtocolVersion = "1.0" | "1.1";
+export type Method =
+  | "handshake"
+  | "capabilities/get"
+  | "shutdown"
+  | "tasks/start"
+  | "tasks/get"
+  | "tasks/list"
+  | "tasks/cancel"
+  | "events/subscribe"
+  | "artifacts/list"
+  | "artifacts/read";
+
+export interface RequestEnvelope {
+  protocolVersion: ProtocolVersion;
+  kind: "request";
+  messageId: string;
+  method: Method;
+  sentAt: string;
+  payload: Record<string, unknown>;
+}
+
+export interface ResponseEnvelope {
+  protocolVersion: ProtocolVersion;
+  kind: "response";
+  messageId: string;
+  requestId: string;
+  method: Method;
+  sentAt: string;
+  payload: Record<string, unknown>;
+}
+
+export interface ErrorEnvelope {
+  protocolVersion: ProtocolVersion;
+  kind: "error";
+  messageId: string;
+  requestId: string;
+  sentAt: string;
+  error: { code: string; message: string; retryable: boolean };
+}
+
+export type IncomingEnvelope = ResponseEnvelope | ErrorEnvelope | TaskEvent;
+
+export class ProtocolError extends Error {
+  constructor(readonly code: string, message: string, readonly retryable: boolean) {
+    super(message);
+    this.name = "ProtocolError";
+  }
+}
