@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"embed"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"sort"
@@ -24,6 +25,8 @@ type migration struct {
 	checksum string
 	sql      string
 }
+
+const migrationCleanupTimeout = 5 * time.Second
 
 func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -54,11 +57,17 @@ func (s *Store) migrate(ctx context.Context) error {
 }
 
 func (s *Store) applyMigration(ctx context.Context, current migration) (resultErr error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return storageError("reserve migration connection", err)
+	}
+	defer conn.Close()
+
 	var foreignKeys int
-	if err := s.db.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil {
+	if err := conn.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil {
 		return storageError("read foreign key setting", err)
 	}
-	if _, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys=OFF`); err != nil {
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys=OFF`); err != nil {
 		return storageError("disable foreign keys", err)
 	}
 	restored := false
@@ -66,12 +75,15 @@ func (s *Store) applyMigration(ctx context.Context, current migration) (resultEr
 		if restored {
 			return
 		}
-		if err := restoreForeignKeys(ctx, s.db, foreignKeys); err != nil {
-			resultErr = storageError("restore foreign keys", err)
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), migrationCleanupTimeout)
+		defer cancel()
+		if err := s.restoreMigrationConnection(cleanupCtx, conn, foreignKeys); err != nil {
+			cleanupErr := errors.Join(storageError("restore foreign keys", err), err)
+			resultErr = errors.Join(resultErr, cleanupErr)
 		}
 	}()
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return storageError("begin migration", err)
 	}
@@ -93,27 +105,67 @@ func (s *Store) applyMigration(ctx context.Context, current migration) (resultEr
 	if err := tx.Commit(); err != nil {
 		return storageError("commit migration", err)
 	}
-	if err := restoreForeignKeys(ctx, s.db, foreignKeys); err != nil {
-		return storageError("restore foreign keys", err)
-	}
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), migrationCleanupTimeout)
+	defer cancel()
 	restored = true
-	if violations, err := countForeignKeyViolations(ctx, s.db); err != nil {
-		return storageError("check migrated foreign keys", err)
-	} else if violations != 0 {
-		return storageError("check migrated foreign keys", fmt.Errorf("%d violations", violations))
+	if err := s.restoreMigrationConnection(cleanupCtx, conn, foreignKeys); err != nil {
+		return errors.Join(storageError("restore foreign keys", err), err)
 	}
 	return nil
 }
 
+func (s *Store) restoreMigrationConnection(ctx context.Context, conn *sql.Conn, enabled int) error {
+	cleanupErrors := make([]error, 0, 6)
+	if err := restoreForeignKeys(ctx, conn, enabled); err != nil {
+		cleanupErrors = append(cleanupErrors, fmt.Errorf("restore pinned connection: %w", err))
+	}
+	if violations, err := countForeignKeyViolations(ctx, conn); err != nil {
+		cleanupErrors = append(cleanupErrors, fmt.Errorf("check pinned connection: %w", err))
+	} else if violations != 0 {
+		cleanupErrors = append(cleanupErrors, fmt.Errorf("check pinned connection: %d foreign key violations", violations))
+	}
+	if err := conn.Close(); err != nil {
+		cleanupErrors = append(cleanupErrors, fmt.Errorf("release pinned connection: %w", err))
+	}
+
+	replacement, err := s.db.Conn(ctx)
+	if err != nil {
+		cleanupErrors = append(cleanupErrors, fmt.Errorf("reserve effective pool connection: %w", err))
+		return errors.Join(cleanupErrors...)
+	}
+	if err := restoreForeignKeys(ctx, replacement, enabled); err != nil {
+		cleanupErrors = append(cleanupErrors, fmt.Errorf("restore effective pool connection: %w", err))
+	}
+	if violations, err := countForeignKeyViolations(ctx, replacement); err != nil {
+		cleanupErrors = append(cleanupErrors, fmt.Errorf("check effective pool connection: %w", err))
+	} else if violations != 0 {
+		cleanupErrors = append(cleanupErrors, fmt.Errorf("check effective pool connection: %d foreign key violations", violations))
+	}
+	if err := replacement.Close(); err != nil {
+		cleanupErrors = append(cleanupErrors, fmt.Errorf("release effective pool connection: %w", err))
+	}
+	return errors.Join(cleanupErrors...)
+}
+
 func restoreForeignKeys(ctx context.Context, db interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
 }, enabled int) error {
 	setting := "OFF"
 	if enabled != 0 {
 		setting = "ON"
 	}
-	_, err := db.ExecContext(ctx, `PRAGMA foreign_keys=`+setting)
-	return err
+	if _, err := db.ExecContext(ctx, `PRAGMA foreign_keys=`+setting); err != nil {
+		return err
+	}
+	var restored int
+	if err := db.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&restored); err != nil {
+		return err
+	}
+	if restored != enabled {
+		return fmt.Errorf("foreign key setting remained %d", restored)
+	}
+	return nil
 }
 
 func countForeignKeyViolations(ctx context.Context, queryer interface {

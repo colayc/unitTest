@@ -537,6 +537,36 @@ func TestMigration002UpgradesInitialTasksWithoutLosingRequests(t *testing.T) {
 	if err := store.db.QueryRow(`PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil || foreignKeys != 1 {
 		t.Fatalf("foreign_keys after migration = %d, %v", foreignKeys, err)
 	}
+
+	var eventTaskID string
+	if err := store.db.QueryRow(`SELECT task_id FROM task_events WHERE event_id=?`, id(124)).Scan(&eventTaskID); err != nil || eventTaskID != id(120) {
+		t.Fatalf("migrated event task = %q, %v", eventTaskID, err)
+	}
+	var leasePID int
+	if err := store.db.QueryRow(`SELECT host_pid FROM process_leases WHERE task_id=?`, id(121)).Scan(&leasePID); err != nil || leasePID != 42 {
+		t.Fatalf("migrated lease pid = %d, %v", leasePID, err)
+	}
+	var artifactTaskID, artifactPath string
+	if err := store.db.QueryRow(`SELECT task_id, relative_path FROM artifacts WHERE artifact_id=?`, id(126)).
+		Scan(&artifactTaskID, &artifactPath); err != nil || artifactTaskID != id(120) || artifactPath != "migration/stdout.txt" {
+		t.Fatalf("migrated artifact = task %q path %q, %v", artifactTaskID, artifactPath, err)
+	}
+	var indexCount int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN (
+		'task_events_task_sequence','tasks_history_order','artifacts_task_order'
+	)`).Scan(&indexCount); err != nil || indexCount != 3 {
+		t.Fatalf("preserved index count = %d, %v", indexCount, err)
+	}
+
+	stepTask := newTask(130, 131, time.Date(2026, 7, 22, 8, 2, 0, 0, time.UTC))
+	step := task.StepSnapshot{ID: "simulate", Kind: task.StepSimulation, Status: task.StepPending}
+	if _, _, err := store.Create(ctx, stepTask, []task.StepSnapshot{step}, draft(stepTask.ID, task.EventTaskCreated, stepTask.CreatedAt)); err != nil {
+		t.Fatal(err)
+	}
+	gotStepTask, err := store.Get(ctx, stepTask.ID)
+	if err != nil || len(gotStepTask.Steps) != 1 || gotStepTask.Steps[0] != step {
+		t.Fatalf("post-migration task steps = %#v, %v", gotStepTask.Steps, err)
+	}
 }
 
 func TestMigration002FailureRollsBackAndRestoresForeignKeys(t *testing.T) {
@@ -577,6 +607,68 @@ SELECT * FROM;`,
 	var probeCount int
 	if err := reopened.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='migration_probe'`).Scan(&probeCount); err != nil || probeCount != 0 {
 		t.Fatalf("migration probe survived rollback = %d, %v", probeCount, err)
+	}
+}
+
+func TestMigrationCancellationRestoresForeignKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.sqlite")
+	createMigration001Database(t, path)
+	db := openConfiguredDatabase(t, path)
+	defer db.Close()
+	store := &Store{db: db, newID: task.NewID}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	err := store.applyMigration(ctx, migration{
+		version:  2,
+		checksum: strings.Repeat("e", 64),
+		sql: `WITH RECURSIVE counter(value) AS (
+			SELECT 1
+			UNION ALL
+			SELECT value + 1 FROM counter WHERE value < 1000000000
+		)
+		SELECT sum(value) FROM counter;`,
+	})
+	if !errors.Is(err, task.ErrStorageUnavailable) || !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		t.Fatalf("applyMigration(deadline) error = %v, context = %v", err, ctx.Err())
+	}
+	var foreignKeys int
+	if err := db.QueryRow(`PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil || foreignKeys != 1 {
+		t.Fatalf("foreign_keys after cancelled migration = %d, %v", foreignKeys, err)
+	}
+}
+
+func TestMigrationForeignKeyCheckViolationRollsBack(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "history.sqlite")
+	createMigration001Database(t, path)
+	db := openConfiguredDatabase(t, path)
+	defer db.Close()
+	store := &Store{db: db, newID: task.NewID}
+
+	err := store.applyMigration(ctx, migration{
+		version:  2,
+		checksum: strings.Repeat("d", 64),
+		sql: `CREATE TABLE migration_probe(value TEXT);
+		INSERT INTO task_events(event_id, task_id, event_type, occurred_at, payload_json)
+		VALUES('orphan-event','missing-task','task.created','2026-07-22T08:00:00Z','{}');`,
+	})
+	if !errors.Is(err, task.ErrStorageUnavailable) {
+		t.Fatalf("applyMigration(foreign key violation) error = %v", err)
+	}
+	var migrationCount, probeCount, orphanCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&migrationCount); err != nil || migrationCount != 1 {
+		t.Fatalf("migration count after foreign-key rollback = %d, %v", migrationCount, err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='migration_probe'`).Scan(&probeCount); err != nil || probeCount != 0 {
+		t.Fatalf("migration probe survived foreign-key rollback = %d, %v", probeCount, err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM task_events WHERE event_id='orphan-event'`).Scan(&orphanCount); err != nil || orphanCount != 0 {
+		t.Fatalf("orphan event survived foreign-key rollback = %d, %v", orphanCount, err)
+	}
+	var foreignKeys int
+	if err := db.QueryRow(`PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil || foreignKeys != 1 {
+		t.Fatalf("foreign_keys after foreign-key rollback = %d, %v", foreignKeys, err)
 	}
 }
 
@@ -951,6 +1043,12 @@ func createMigration001Database(t *testing.T, path string) {
 	if _, err := db.Exec(`INSERT INTO process_leases(
 		task_id, host_pid, host_start_identity, service_instance_id
 	) VALUES(?,42,'start',?)`, id(121), id(125)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO artifacts(
+		artifact_id, task_id, kind, relative_path, mime_type, size_bytes, sha256, created_at, complete
+	) VALUES(?,?,'stdout','migration/stdout.txt','text/plain',7,?,'2026-07-22T08:00:02Z',1)`,
+		id(126), id(120), strings.Repeat("c", 64)); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
