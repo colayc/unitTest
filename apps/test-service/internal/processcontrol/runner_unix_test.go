@@ -586,6 +586,7 @@ func TestLinuxPrepareIdentityFailureClosesEachOwnedFileOnce(t *testing.T) {
 	stderr := &linuxCountingCloser{}
 	identityReady := make(chan struct{})
 	waited := false
+	released := false
 
 	finishPrepareIdentityFailure(control, identityReady, func() error {
 		waited = true
@@ -601,10 +602,21 @@ func TestLinuxPrepareIdentityFailureClosesEachOwnedFileOnce(t *testing.T) {
 			t.Fatal("identity readiness not released before Host wait")
 		}
 		return nil
+	}, func() {
+		released = true
+		if !waited {
+			t.Fatal("parent thread released before Host wait")
+		}
+		if status.closes != 0 || stdout.closes != 0 || stderr.closes != 0 {
+			t.Fatal("remaining pipe readers closed before parent thread release")
+		}
 	}, status, stdout, stderr)
 
 	if !waited {
 		t.Fatal("Host wait was not called")
+	}
+	if !released {
+		t.Fatal("parent thread was not released")
 	}
 	for name, closer := range map[string]*linuxCountingCloser{
 		"control": control, "status": status, "stdout": stdout, "stderr": stderr,

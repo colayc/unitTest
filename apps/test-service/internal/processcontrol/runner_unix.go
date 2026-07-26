@@ -19,6 +19,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"unit-test-ide.local/test-service/internal/linuxprocess"
 	"unit-test-ide.local/test-service/internal/task"
 )
 
@@ -44,6 +45,7 @@ var _ Runner = (*unixRunner)(nil)
 
 type unixProcess struct {
 	host         *exec.Cmd
+	parentThread *linuxprocess.ParentThread
 	specValue    Spec
 	control      *os.File
 	status       *os.File
@@ -219,7 +221,8 @@ func (runner *unixRunner) Prepare(ctx context.Context, spec Spec, taskID, servic
 		}
 		return err
 	}
-	if err := host.Start(); err != nil {
+	parentThread, err := linuxprocess.Start(host)
+	if err != nil {
 		close(identityReady)
 		closeFiles(controlReader, controlWriter, statusReader, statusWriter, stdoutReader, stdoutWriter, stderrReader, stderrWriter)
 		return nil, errProcessHostUnavailable
@@ -228,7 +231,7 @@ func (runner *unixRunner) Prepare(ctx context.Context, spec Spec, taskID, servic
 
 	identity, err := operations.startIdentity(host.Process.Pid)
 	if err != nil || identity == "" {
-		finishPrepareIdentityFailure(controlWriter, identityReady, host.Wait, statusReader, stdoutReader, stderrReader)
+		finishPrepareIdentityFailure(controlWriter, identityReady, host.Wait, parentThread.Release, statusReader, stdoutReader, stderrReader)
 		return nil, errProcessHostUnavailable
 	}
 	hostIdentity = identity
@@ -236,6 +239,7 @@ func (runner *unixRunner) Prepare(ctx context.Context, spec Spec, taskID, servic
 
 	process := &unixProcess{
 		host:         host,
+		parentThread: parentThread,
 		specValue:    spec,
 		control:      controlWriter,
 		status:       statusReader,
@@ -518,6 +522,7 @@ func (process *unixProcess) publish(result Result) {
 
 func (process *unixProcess) waitHost() {
 	_ = process.host.Wait()
+	process.parentThread.Release()
 	close(process.hostExited)
 }
 
@@ -779,9 +784,10 @@ func closeFiles(files ...io.Closer) {
 	}
 }
 
-func finishPrepareIdentityFailure(control io.Closer, identityReady chan struct{}, wait func() error, remaining ...io.Closer) {
+func finishPrepareIdentityFailure(control io.Closer, identityReady chan struct{}, wait func() error, release func(), remaining ...io.Closer) {
 	closeFiles(control)
 	close(identityReady)
 	_ = wait()
+	release()
 	closeFiles(remaining...)
 }

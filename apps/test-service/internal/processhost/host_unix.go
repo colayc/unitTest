@@ -15,6 +15,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"unit-test-ide.local/test-service/internal/linuxprocess"
 	"unit-test-ide.local/test-service/internal/processcontrol"
 )
 
@@ -29,6 +30,7 @@ var _ Platform = (*unixPlatform)(nil)
 
 type unixTarget struct {
 	cmd           *exec.Cmd
+	parentThread  *linuxprocess.ParentThread
 	pgid          int
 	session       int
 	startIdentity string
@@ -63,15 +65,20 @@ func (platform *unixPlatform) Start(spec processcontrol.Spec, stdout, stderr io.
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
-	if err := cmd.Start(); err != nil {
+	parentThread, err := linuxprocess.Start(cmd)
+	if err != nil {
 		return nil, err
 	}
 	identity, err := platform.startIdentity(cmd.Process.Pid)
 	if err != nil || identity == "" {
 		killAndReapFailedTarget(cmd)
+		parentThread.Release()
 		return nil, errors.New("target identity unavailable")
 	}
-	return &unixTarget{cmd: cmd, pgid: cmd.Process.Pid, session: session, startIdentity: identity, waitDone: make(chan struct{})}, nil
+	return &unixTarget{
+		cmd: cmd, parentThread: parentThread, pgid: cmd.Process.Pid,
+		session: session, startIdentity: identity, waitDone: make(chan struct{}),
+	}, nil
 }
 
 func killAndReapFailedTarget(cmd *exec.Cmd) {
@@ -103,6 +110,7 @@ func (target *unixTarget) ProcessGroup() int { return target.pgid }
 func (target *unixTarget) Wait() (int, error) {
 	target.waitOnce.Do(func() {
 		defer close(target.waitDone)
+		defer target.parentThread.Release()
 		err := target.cmd.Wait()
 		if err == nil {
 			target.waitCode = 0

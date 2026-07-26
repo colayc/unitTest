@@ -1242,7 +1242,7 @@ func windowsObjectType(handle windows.Handle) string {
 func buildWindowsService(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "unit-test-service.exe")
-	command := exec.Command(pinnedGoExecutable(t), "build", "-o", path, "../../cmd/unit-test-service")
+	command := exec.Command(goExecutable(t), "build", "-o", path, "../../cmd/unit-test-service")
 	command.Env = append(os.Environ(), "GOWORK="+workspaceFile(t))
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("build service: %v\n%s", err, output)
@@ -1250,11 +1250,11 @@ func buildWindowsService(t *testing.T) string {
 	return path
 }
 
-func pinnedGoExecutable(t *testing.T) string {
+func goExecutable(t *testing.T) string {
 	t.Helper()
-	path, err := filepath.Abs(filepath.Join("..", "..", "..", "..", ".superpowers", "runtime", "go1.26.5", "go", "bin", "go.exe"))
+	path, err := exec.LookPath("go")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("locate Go toolchain: %v", err)
 	}
 	return path
 }

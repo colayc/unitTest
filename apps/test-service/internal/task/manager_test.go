@@ -236,6 +236,7 @@ func TestManagerTerminateErrorReturnsThroughLoopAndKeepsQueueResponsive(t *testi
 	if finished.Outcome != task.OutcomeCancelled {
 		t.Fatalf("first cause lost: %#v", finished)
 	}
+	f.awaitEventType(t, task.EventTaskFinished, 1)
 	terminal := 0
 	for _, kind := range f.publisher.types() {
 		if kind == task.EventTaskFinished {
@@ -820,6 +821,18 @@ func (f *managerFixture) awaitEvents(t *testing.T, count int) {
 		select {
 		case <-deadline:
 			t.Fatalf("events = %d, want at least %d", len(f.publisher.events()), count)
+		default:
+		}
+	}
+}
+
+func (f *managerFixture) awaitEventType(t *testing.T, kind task.EventType, count int) {
+	t.Helper()
+	deadline := time.After(time.Second)
+	for len(f.publisher.ofType(kind)) < count {
+		select {
+		case <-deadline:
+			t.Fatalf("%s events = %d, want at least %d", kind, len(f.publisher.ofType(kind)), count)
 		default:
 		}
 	}
