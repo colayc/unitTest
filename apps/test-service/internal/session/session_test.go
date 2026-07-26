@@ -30,18 +30,20 @@ func bytesOf(value byte, count int) []byte {
 }
 
 type fakeBackend struct {
-	startRequest task.StartRequest
-	getID        string
-	listCursor   string
-	listLimit    int
-	cancelID     string
-	after        int64
-	artifactTask string
-	artifactCur  string
-	artifactLim  int
-	artifactID   string
-	offset       int64
-	length       int
+	startKey      string
+	startScenario task.Scenario
+	startTimeout  time.Duration
+	getID         string
+	listCursor    string
+	listLimit     int
+	cancelID      string
+	after         int64
+	artifactTask  string
+	artifactCur   string
+	artifactLim   int
+	artifactID    string
+	offset        int64
+	length        int
 
 	startResult  task.Task
 	getResult    task.Task
@@ -54,8 +56,8 @@ type fakeBackend struct {
 	err          error
 }
 
-func (b *fakeBackend) Start(_ context.Context, request task.StartRequest) (task.Task, error) {
-	b.startRequest = request
+func (b *fakeBackend) StartSimulation(_ context.Context, idempotencyKey string, scenario task.Scenario, timeout time.Duration) (task.Task, error) {
+	b.startKey, b.startScenario, b.startTimeout = idempotencyKey, scenario, timeout
 	return b.startResult, b.err
 }
 
@@ -111,8 +113,9 @@ func TestSessionRoutesControlledTaskStart(t *testing.T) {
 	result := s.Handle(context.Background(), requestVersion(t, "1.1", "tasks/start", map[string]any{
 		"idempotencyKey": id('2'), "scenario": "hang", "timeoutMs": 30000,
 	}))
-	if result.Response.Kind != "response" || backend.startRequest.Scenario != task.ScenarioHang || backend.startRequest.Timeout != 30*time.Second {
-		t.Fatalf("result=%#v request=%#v", result, backend.startRequest)
+	if result.Response.Kind != "response" || backend.startKey != id('2') ||
+		backend.startScenario != task.ScenarioHang || backend.startTimeout != 30*time.Second {
+		t.Fatalf("result=%#v start=(%q, %q, %s)", result, backend.startKey, backend.startScenario, backend.startTimeout)
 	}
 	snapshot, ok := result.Response.Payload.(protocolmodel.TaskSnapshot)
 	if !ok || snapshot.TaskID != id('1') || snapshot.Outcome != nil {

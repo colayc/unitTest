@@ -2,8 +2,6 @@ package task
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -116,6 +114,9 @@ type outputSegment struct {
 
 type activeTask struct {
 	task                  Task
+	plan                  ExecutionPlan
+	boundary              ExecutionBoundary
+	nextStep              int
 	process               ManagedProcess
 	cause                 Outcome
 	terminating           bool
@@ -138,6 +139,7 @@ type activeTask struct {
 	closeFailed           bool
 	recoveryRequired      bool
 	cleanupWithoutDone    bool
+	failPendingStep       bool
 	stoppedWatchers       bool
 }
 
@@ -179,13 +181,13 @@ func NewManager(config ManagerConfig) (*Manager, error) {
 func (m *Manager) Healthy() bool { return m != nil && m.healthy.Load() && !m.closing.Load() }
 
 func (m *Manager) Start(ctx context.Context, request StartRequest) (Task, error) {
-	if request.Kind == "" {
-		request.Kind = KindSimulation
-	}
-	if m == nil || request.IdempotencyKey == "" || request.Kind != KindSimulation || request.WorkspaceGeneration != "" || !ValidScenario(request.Scenario) ||
-		request.Timeout < time.Millisecond || request.Timeout > 24*time.Hour || request.Timeout%time.Millisecond != 0 {
+	if m == nil {
 		return Task{}, ErrInvalidArgument
 	}
+	if err := validateStartRequest(request); err != nil {
+		return Task{}, ErrInvalidArgument
+	}
+	request = cloneStartRequest(request)
 	if !m.Healthy() {
 		return Task{}, ErrStorageUnavailable
 	}
@@ -342,7 +344,11 @@ func (m *Manager) loop() {
 		case timeoutCommand:
 			if current := active[string(value)]; current != nil && current.task.Status != StatusFinished && current.cause == "" {
 				current.cause = OutcomeTimedOut
-				m.terminate(current)
+				if current.processCompleted {
+					m.maybeStartClose(current)
+				} else {
+					m.terminate(current)
+				}
 			}
 		case processDoneCommand:
 			if current := active[value.taskID]; current != nil && !current.processCompleted {
@@ -372,9 +378,33 @@ func (m *Manager) loop() {
 					current.closeStarted = false
 					current.closeComplete = false
 					current.closeFailed = true
+					if current.task.Status != StatusFinished {
+						if _, err := m.finishAfterCloseFailure(current, active); err != nil {
+							m.abandon(current)
+						}
+					}
 				} else {
 					current.closeComplete = true
 					current.closeFailed = false
+					if current.task.Status != StatusFinished && current.processCompleted &&
+						!m.storageFailed && !current.recoveryRequired {
+						if current.cause != "" {
+							if _, err := m.finishExecution(
+								current,
+								ProcessResult{},
+								current.cause,
+								current.failPendingStep,
+								active,
+							); err != nil {
+								m.abandon(current)
+							}
+						} else if current.nextStep < len(current.plan.Steps) {
+							current.process = nil
+							if err := m.startNextStep(current, active); err != nil && !errors.Is(err, ErrStorageUnavailable) {
+								m.abandon(current)
+							}
+						}
+					}
 				}
 				if value.err == nil && m.canRemove(current) {
 					delete(active, value.taskID)
@@ -387,7 +417,11 @@ func (m *Manager) loop() {
 			for _, current := range active {
 				if initiate && current.task.Status != StatusFinished && current.cause == "" {
 					current.cause = OutcomeInterrupted
-					m.terminate(current)
+					if current.processCompleted {
+						m.maybeStartClose(current)
+					} else {
+						m.terminate(current)
+					}
 				}
 				if current.closeFailed {
 					m.maybeStartClose(current)
@@ -399,107 +433,6 @@ func (m *Manager) loop() {
 			return
 		}
 	}
-}
-
-func (m *Manager) start(request StartRequest, active map[string]*activeTask) taskResponse {
-	if !m.Healthy() {
-		return taskResponse{err: ErrStorageUnavailable}
-	}
-	requestHash := hashStartRequest(request)
-	now := m.clock.Now()
-	created := Task{
-		ID: m.newID(), IdempotencyKey: request.IdempotencyKey, RequestHash: requestHash,
-		Kind: request.Kind, Request: append(json.RawMessage(nil), request.Request...), WorkspaceGeneration: request.WorkspaceGeneration,
-		Scenario: request.Scenario, Timeout: request.Timeout, Status: StatusQueued, CreatedAt: now,
-	}
-	draft := eventDraft(created.ID, EventTaskCreated, now, map[string]any{"status": StatusQueued})
-	stored, events, err := m.store.Create(context.Background(), created, nil, draft)
-	if err != nil {
-		if errors.Is(err, ErrStorageUnavailable) {
-			m.tripStorage(active)
-		}
-		return taskResponse{err: err}
-	}
-	if len(events) == 0 {
-		if stored.RequestHash != requestHash {
-			return taskResponse{err: ErrIdempotencyConflict}
-		}
-		return taskResponse{task: stored}
-	}
-	if !m.publishAll(events, active) {
-		return taskResponse{err: ErrStorageUnavailable}
-	}
-
-	spec := ProcessSpec{Executable: m.serviceExecutable, Args: []string{"--task-fixture", string(request.Scenario)}}
-	process, err := m.processes.Prepare(context.Background(), spec, stored.ID, m.serviceInstanceID)
-	if err != nil {
-		finished, finishErr := m.finishWithoutProcess(stored, OutcomeInfrastructureFailed, active)
-		return taskResponse{task: finished, err: finishErr}
-	}
-	current := &activeTask{
-		task: stored, process: process, timerStop: make(chan struct{}), timeoutStop: make(chan struct{}),
-		watcherStop: make(chan struct{}),
-	}
-	active[stored.ID] = current
-	startedAt := m.clock.Now()
-	running, err := ApplyTransition(stored, Transition{From: StatusQueued, To: StatusRunning, At: startedAt})
-	if err != nil {
-		delete(active, stored.ID)
-		closeCtx, cancel := context.WithTimeout(context.Background(), m.processCloseTimeout)
-		_ = process.Close(closeCtx)
-		cancel()
-		return taskResponse{err: err}
-	}
-	lease := process.Lease()
-	lease.TaskID = stored.ID
-	lease.ServiceInstanceID = m.serviceInstanceID
-	running, startedEvents, err := m.store.Apply(context.Background(), Mutation{
-		Task: running, Expected: StatusQueued, PutLease: &lease,
-		Events: []EventDraft{eventDraft(stored.ID, EventTaskStarted, startedAt, map[string]any{"status": StatusRunning})},
-	})
-	if err != nil {
-		current.cleanupWithoutDone = true
-		m.terminate(current)
-		if errors.Is(err, ErrStorageUnavailable) {
-			m.tripStorage(active)
-		}
-		m.abandon(current)
-		return taskResponse{err: err}
-	}
-	current.task = running
-	if !m.publishAll(startedEvents, active) {
-		m.abandon(current)
-		return taskResponse{err: ErrStorageUnavailable}
-	}
-	if err := process.Start(context.Background()); err != nil {
-		m.terminate(current)
-		current.cleanupWithoutDone = true
-		current.processCompleted = true
-		finished, finishErr := m.finishNow(current, ProcessResult{Err: err}, active)
-		if finishErr != nil {
-			m.abandon(current)
-		}
-		return taskResponse{task: finished, err: finishErr}
-	}
-	updatedLease := process.Lease()
-	updatedLease.TaskID = stored.ID
-	updatedLease.ServiceInstanceID = m.serviceInstanceID
-	if err := m.store.UpdateLease(context.Background(), updatedLease); err != nil {
-		m.tripStorage(active)
-		return taskResponse{err: err}
-	}
-	m.watch(current)
-	m.armTimeout(current)
-	return taskResponse{task: current.task}
-}
-
-func hashStartRequest(request StartRequest) string {
-	canonical, _ := json.Marshal(struct {
-		Scenario  Scenario `json:"scenario"`
-		TimeoutMS int64    `json:"timeoutMs"`
-	}{request.Scenario, request.Timeout.Milliseconds()})
-	sum := sha256.Sum256(canonical)
-	return hex.EncodeToString(sum[:])
 }
 
 func (m *Manager) cancel(id string, active map[string]*activeTask) taskResponse {
@@ -537,7 +470,11 @@ func (m *Manager) cancel(id string, active map[string]*activeTask) taskResponse 
 	if !m.publishAll(events, active) {
 		return taskResponse{task: current.task, err: ErrStorageUnavailable}
 	}
-	m.terminate(current)
+	if current.processCompleted {
+		m.maybeStartClose(current)
+	} else {
+		m.terminate(current)
+	}
 	return taskResponse{task: current.task}
 }
 
@@ -723,85 +660,6 @@ func (m *Manager) terminate(current *activeTask) {
 		err := process.Terminate(ctx, grace)
 		m.sendInternal(terminationResultCommand{taskID: taskID, cause: cause, generation: generation, err: err})
 	}()
-}
-
-func (m *Manager) finish(current *activeTask, result ProcessResult, active map[string]*activeTask) {
-	m.flushOutput(current, active)
-	if m.storageFailed {
-		m.abandon(current)
-		return
-	}
-	if active[current.task.ID] == nil {
-		return
-	}
-	if _, err := m.finishNow(current, result, active); err != nil {
-		m.abandon(current)
-	}
-}
-
-func (m *Manager) finishNow(current *activeTask, result ProcessResult, active map[string]*activeTask) (Task, error) {
-	outcome := current.cause
-	if outcome == "" {
-		switch {
-		case current.terminationFailed || result.Err != nil:
-			outcome = OutcomeInfrastructureFailed
-		case result.ExitCode == 0:
-			outcome = OutcomeSucceeded
-		default:
-			outcome = OutcomeCommandFailed
-		}
-	}
-	finished, err := m.persistFinished(current.task, outcome, current.process != nil, active)
-	if err != nil {
-		return current.task, err
-	}
-	current.task = finished
-	m.stopActive(current)
-	m.maybeStartClose(current)
-	return finished, nil
-}
-
-func (m *Manager) finishWithoutProcess(created Task, outcome Outcome, active map[string]*activeTask) (Task, error) {
-	return m.persistFinished(created, outcome, false, active)
-}
-
-func (m *Manager) persistFinished(current Task, outcome Outcome, deleteLease bool, active map[string]*activeTask) (Task, error) {
-	finishedAt := m.clock.Now()
-	finished, err := ApplyTransition(current, Transition{
-		From: current.Status, To: StatusFinished, Outcome: outcome, At: finishedAt,
-		ErrorCode: outcomeErrorCode(outcome), ErrorMessage: outcomeErrorMessage(outcome),
-	})
-	if err != nil {
-		return current, err
-	}
-	summary := struct {
-		TaskID     string   `json:"taskId"`
-		Scenario   Scenario `json:"scenario"`
-		Outcome    Outcome  `json:"outcome"`
-		FinishedAt string   `json:"finishedAt"`
-	}{current.ID, current.Scenario, outcome, finishedAt.Format(time.RFC3339Nano)}
-	artifactID := m.newID()
-	artifact, artifactErr := m.artifacts.CommitJSON(context.Background(), current.ID, artifactID, finishedAt, summary)
-	if artifactErr != nil {
-		m.tripStorage(active)
-		return current, ErrStorageUnavailable
-	}
-	artifacts := []Artifact{artifact}
-	events := []EventDraft{eventDraft(current.ID, EventArtifactCreated, finishedAt, map[string]any{
-		"artifactId": artifact.ID, "kind": artifact.Kind,
-	})}
-	events = append(events, eventDraft(current.ID, EventTaskFinished, finishedAt, map[string]any{"outcome": outcome}))
-	stored, committed, err := m.store.Apply(context.Background(), Mutation{
-		Task: finished, Expected: current.Status, Events: events, DeleteLease: deleteLease, Artifacts: artifacts,
-	})
-	if err != nil {
-		m.tripStorage(active)
-		return current, err
-	}
-	if !m.publishAll(committed, active) {
-		return stored, ErrStorageUnavailable
-	}
-	return stored, nil
 }
 
 func outcomeErrorCode(outcome Outcome) string {

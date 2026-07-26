@@ -20,7 +20,7 @@ func TestNewManagerRejectsMissingDependencies(t *testing.T) {
 	}
 }
 
-func TestLegacySimulationLeavesPlanFingerprintEmpty(t *testing.T) {
+func TestSimulationTaskPersistsGeneratedPlanFingerprint(t *testing.T) {
 	f := newManagerFixture(t)
 	started, err := f.manager.Start(context.Background(), task.StartRequest{
 		IdempotencyKey: testID(0), Scenario: task.ScenarioSuccess, Timeout: time.Second,
@@ -28,8 +28,8 @@ func TestLegacySimulationLeavesPlanFingerprintEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if started.PlanFingerprint != "" {
-		t.Fatalf("legacy simulation plan fingerprint = %q, want empty", started.PlanFingerprint)
+	if started.PlanFingerprint == "" {
+		t.Fatal("simulation plan fingerprint is empty")
 	}
 }
 
@@ -50,7 +50,7 @@ func TestManagerStartsAndCancelsOneTask(t *testing.T) {
 	if got := f.processes.prepareCount(); got != 1 {
 		t.Fatalf("Prepare calls = %d", got)
 	}
-	if spec := f.processes.lastSpec(); spec.Executable != "trusted-service" || !reflect.DeepEqual(spec.Args, []string{"--task-fixture", "spawn-child"}) || len(spec.Env) != 0 || spec.Dir != "" {
+	if spec := f.processes.lastSpec(); spec.Executable != "trusted-service" || !reflect.DeepEqual(spec.Args, []string{"--task-fixture", "spawn-child"}) || len(spec.Env) != 0 || spec.Dir != "simulation-dir" {
 		t.Fatalf("trusted spec = %#v", spec)
 	}
 
@@ -706,7 +706,7 @@ func TestManagerShutdownRetriesContextBoundProcessClose(t *testing.T) {
 }
 
 type managerFixture struct {
-	manager   *task.Manager
+	manager   *testManager
 	store     *fakeStore
 	publisher *recordingPublisher
 	processes *fakeProcessFactory
@@ -744,7 +744,42 @@ func newManagerFixtureWithCloseTimeout(t *testing.T, closeTimeout time.Duration)
 		defer cancel()
 		_ = manager.Shutdown(ctx)
 	})
-	return &managerFixture{manager, store, publisher, processes, process, artifacts, clock}
+	return &managerFixture{&testManager{Manager: manager}, store, publisher, processes, process, artifacts, clock}
+}
+
+type testManager struct{ *task.Manager }
+
+func (m *testManager) Start(ctx context.Context, request task.StartRequest) (task.Task, error) {
+	if len(request.Plan.Steps) == 0 {
+		request = simulationManagerRequest(request.IdempotencyKey, request.Scenario, request.Timeout)
+	}
+	return m.Manager.Start(ctx, request)
+}
+
+func simulationManagerRequest(idempotencyKey string, scenario task.Scenario, timeout time.Duration) task.StartRequest {
+	plan := task.ExecutionPlan{
+		Version: 1,
+		Steps: []task.ExecutionStep{{
+			ID:   "simulate",
+			Kind: task.StepSimulation,
+			Process: task.ProcessSpec{
+				Executable: "trusted-service",
+				Args:       []string{"--task-fixture", string(scenario)},
+				Dir:        "simulation-dir",
+			},
+		}},
+	}
+	plan.Fingerprint = task.FingerprintPlan(plan)
+	request, _ := json.Marshal(map[string]any{"scenario": scenario, "timeoutMs": timeout.Milliseconds()})
+	return task.StartRequest{
+		IdempotencyKey: idempotencyKey,
+		Kind:           task.KindSimulation,
+		Request:        request,
+		Scenario:       scenario,
+		Timeout:        timeout,
+		Plan:           plan,
+		Boundary:       fixedBoundary{},
+	}
 }
 
 func (f *managerFixture) awaitTask(t *testing.T, id string, status task.Status) task.Task {
@@ -884,23 +919,26 @@ func (f *managerFixture) awaitOutputTruncation(t *testing.T) {
 }
 
 type fakeStore struct {
-	mu          sync.Mutex
-	tasks       map[string]task.Task
-	keys        map[string]string
-	eventsValue []task.Event
-	artifacts   []task.Artifact
-	leases      map[string]task.ProcessLease
-	mutations   []task.Mutation
-	sequence    int64
-	failAppend  error
-	failApply   error
+	mu           sync.Mutex
+	tasks        map[string]task.Task
+	keys         map[string]string
+	eventsValue  []task.Event
+	artifacts    []task.Artifact
+	leases       map[string]task.ProcessLease
+	mutations    []task.Mutation
+	sequence     int64
+	failAppend   error
+	failApply    error
+	failApplyAt  int
+	failApplyErr error
+	applyCalls   int
 }
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{tasks: map[string]task.Task{}, keys: map[string]string{}, leases: map[string]task.ProcessLease{}}
 }
 
-func (s *fakeStore) Create(_ context.Context, value task.Task, _ []task.StepSnapshot, draft task.EventDraft) (task.Task, []task.Event, error) {
+func (s *fakeStore) Create(_ context.Context, value task.Task, steps []task.StepSnapshot, draft task.EventDraft) (task.Task, []task.Event, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if existingID, ok := s.keys[value.IdempotencyKey]; ok {
@@ -912,6 +950,7 @@ func (s *fakeStore) Create(_ context.Context, value task.Task, _ []task.StepSnap
 	}
 	event := s.appendLocked(draft)
 	value.LastSequence = event.Sequence
+	value.Steps = append([]task.StepSnapshot(nil), steps...)
 	s.tasks[value.ID] = value
 	s.keys[value.IdempotencyKey] = value.ID
 	return value, []task.Event{event}, nil
@@ -953,8 +992,12 @@ func (s *fakeStore) List(_ context.Context, _ string, limit int) (task.Page[task
 func (s *fakeStore) Apply(_ context.Context, mutation task.Mutation) (task.Task, []task.Event, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.applyCalls++
 	if s.failApply != nil {
 		return task.Task{}, nil, s.failApply
+	}
+	if s.failApplyAt > 0 && s.applyCalls == s.failApplyAt {
+		return task.Task{}, nil, s.failApplyErr
 	}
 	current, ok := s.tasks[mutation.Task.ID]
 	if !ok {
@@ -963,6 +1006,24 @@ func (s *fakeStore) Apply(_ context.Context, mutation task.Mutation) (task.Task,
 	if current.Status != mutation.Expected {
 		return task.Task{}, nil, task.ErrConflict
 	}
+	steps := append([]task.StepSnapshot(nil), current.Steps...)
+	for _, change := range mutation.Steps {
+		found := false
+		for index := range steps {
+			if steps[index].ID != change.Step.ID {
+				continue
+			}
+			if steps[index].Status != change.Expected {
+				return task.Task{}, nil, task.ErrConflict
+			}
+			steps[index] = change.Step
+			found = true
+			break
+		}
+		if !found {
+			return task.Task{}, nil, task.ErrConflict
+		}
+	}
 	events := make([]task.Event, 0, len(mutation.Events))
 	for _, draft := range mutation.Events {
 		events = append(events, s.appendLocked(draft))
@@ -970,6 +1031,7 @@ func (s *fakeStore) Apply(_ context.Context, mutation task.Mutation) (task.Task,
 	if len(events) > 0 {
 		mutation.Task.LastSequence = events[len(events)-1].Sequence
 	}
+	mutation.Task.Steps = steps
 	s.tasks[mutation.Task.ID] = mutation.Task
 	if mutation.PutLease != nil {
 		s.leases[mutation.Task.ID] = *mutation.PutLease
@@ -1298,6 +1360,18 @@ func (c *fakeClock) tryFire(delay time.Duration) bool {
 		}
 	}
 	return false
+}
+
+func (c *fakeClock) afterCalls(delay time.Duration) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	count := 0
+	for _, waiter := range c.waiters {
+		if waiter.delay == delay {
+			count++
+		}
+	}
+	return count
 }
 
 func testID(value byte) string { return fmt.Sprintf("%032x", value) }

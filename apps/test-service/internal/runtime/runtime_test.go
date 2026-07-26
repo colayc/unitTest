@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -245,7 +246,7 @@ func TestShutdownRetainsOwnershipUntilManagerQuiescesAndCanBeRetried(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := active.Start(context.Background(), task.StartRequest{IdempotencyKey: "shutdown-active", Scenario: task.ScenarioHang, Timeout: time.Minute}); err != nil {
+	if _, err := active.StartSimulation(context.Background(), "shutdown-active", task.ScenarioHang, time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	subscription, err := active.Subscribe(context.Background(), 0)
@@ -316,9 +317,7 @@ func TestShutdownRetryAfterProcessCloseFailureReleasesInstanceLock(t *testing.T)
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(process.releaseClose) }) }
 	t.Cleanup(func() { release(); _ = active.Close() })
-	started, err := active.Start(context.Background(), task.StartRequest{
-		IdempotencyKey: "retry-close-runtime", Scenario: task.ScenarioSuccess, Timeout: time.Minute,
-	})
+	started, err := active.StartSimulation(context.Background(), "retry-close-runtime", task.ScenarioSuccess, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -448,8 +447,12 @@ func seedInterruptedTask(t *testing.T, database string, lease task.ProcessLease)
 	}
 	defer store.Close()
 	now := time.Date(2026, 7, 23, 1, 2, 3, 0, time.UTC)
-	created := task.Task{ID: interruptedTaskID, IdempotencyKey: "recovery-key", RequestHash: strings.Repeat("a", 64), Scenario: task.ScenarioHang, Timeout: time.Minute, Status: task.StatusQueued, CreatedAt: now}
-	created, _, err = store.Create(context.Background(), created, task.EventDraft{TaskID: created.ID, Type: task.EventTaskCreated, At: now, Payload: []byte(`{"status":"queued"}`)})
+	created := task.Task{
+		ID: interruptedTaskID, IdempotencyKey: "recovery-key", RequestHash: strings.Repeat("a", 64),
+		Kind: task.KindSimulation, Request: json.RawMessage(`{"scenario":"hang"}`),
+		Scenario: task.ScenarioHang, Timeout: time.Minute, Status: task.StatusQueued, CreatedAt: now,
+	}
+	created, _, err = store.Create(context.Background(), created, nil, task.EventDraft{TaskID: created.ID, Type: task.EventTaskCreated, At: now, Payload: []byte(`{"status":"queued"}`)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -592,8 +595,12 @@ func seedFinishedArtifact(t *testing.T, layout Layout) task.Artifact {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 7, 23, 2, 3, 4, 0, time.UTC)
-	input := task.Task{ID: strings.Repeat("2", 32), IdempotencyKey: "finished-artifact", RequestHash: strings.Repeat("b", 64), Scenario: task.ScenarioSuccess, Timeout: time.Minute, Status: task.StatusQueued, CreatedAt: now}
-	input, _, err = store.Create(context.Background(), input, task.EventDraft{TaskID: input.ID, Type: task.EventTaskCreated, At: now, Payload: []byte(`{"status":"queued"}`)})
+	input := task.Task{
+		ID: strings.Repeat("2", 32), IdempotencyKey: "finished-artifact", RequestHash: strings.Repeat("b", 64),
+		Kind: task.KindSimulation, Request: json.RawMessage(`{"scenario":"success"}`),
+		Scenario: task.ScenarioSuccess, Timeout: time.Minute, Status: task.StatusQueued, CreatedAt: now,
+	}
+	input, _, err = store.Create(context.Background(), input, nil, task.EventDraft{TaskID: input.ID, Type: task.EventTaskCreated, At: now, Payload: []byte(`{"status":"queued"}`)})
 	if err != nil {
 		t.Fatal(err)
 	}

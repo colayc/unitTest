@@ -33,7 +33,7 @@ type ArtifactChunk struct {
 }
 
 type Backend interface {
-	Start(context.Context, task.StartRequest) (task.Task, error)
+	StartSimulation(context.Context, string, task.Scenario, time.Duration) (task.Task, error)
 	Get(context.Context, string) (task.Task, error)
 	List(context.Context, string, int) (task.Page[task.Task], error)
 	Cancel(context.Context, string) (task.Task, error)
@@ -211,7 +211,12 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 		if err != nil || !validID(payload.IdempotencyKey) || !task.ValidScenario(payload.Scenario) || payload.TimeoutMS < 1 || payload.TimeoutMS > maxTimeoutMS {
 			return invalidPayload(version, request)
 		}
-		value, err := s.backend.Start(ctx, task.StartRequest{IdempotencyKey: payload.IdempotencyKey, Scenario: payload.Scenario, Timeout: time.Duration(payload.TimeoutMS) * time.Millisecond})
+		value, err := s.backend.StartSimulation(
+			ctx,
+			payload.IdempotencyKey,
+			payload.Scenario,
+			time.Duration(payload.TimeoutMS)*time.Millisecond,
+		)
 		if err != nil {
 			return backendFailure(version, request, err)
 		}

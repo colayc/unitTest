@@ -291,7 +291,7 @@ type streamBackend struct {
 	subscribeDelay   time.Duration
 }
 
-func (b *streamBackend) Start(context.Context, task.StartRequest) (task.Task, error) {
+func (b *streamBackend) StartSimulation(context.Context, string, task.Scenario, time.Duration) (task.Task, error) {
 	return task.Task{}, nil
 }
 func (b *streamBackend) Get(context.Context, string) (task.Task, error) {

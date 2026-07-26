@@ -35,14 +35,16 @@ type Config struct {
 }
 
 type Runtime struct {
-	store     runtimeStore
-	artifacts runtimeArtifacts
-	broker    *eventbroker.Broker
-	manager   runtimeManager
-	runner    processcontrol.Runner
-	lock      io.Closer
-	guard     io.Closer
-	grace     time.Duration
+	store               runtimeStore
+	artifacts           runtimeArtifacts
+	broker              *eventbroker.Broker
+	manager             runtimeManager
+	runner              processcontrol.Runner
+	lock                io.Closer
+	guard               io.Closer
+	grace               time.Duration
+	serviceExecutable   string
+	simulationDirectory string
 
 	shutdownMu          sync.Mutex
 	shutdownRunning     bool
@@ -208,6 +210,7 @@ func Open(config Config) (*Runtime, error) {
 	return &Runtime{
 		store: store, artifacts: artifacts, broker: broker, manager: manager, runner: runner,
 		lock: locked, guard: guard, grace: grace,
+		serviceExecutable: config.ServiceExecutable, simulationDirectory: layout.Root,
 	}, nil
 }
 
@@ -218,7 +221,22 @@ func clockNow(clock task.Clock) time.Time {
 	return clock.Now()
 }
 
-func (r *Runtime) Start(ctx context.Context, request task.StartRequest) (task.Task, error) {
+func (r *Runtime) StartSimulation(
+	ctx context.Context,
+	idempotencyKey string,
+	scenario task.Scenario,
+	timeout time.Duration,
+) (task.Task, error) {
+	request, err := task.NewSimulationStartRequest(
+		idempotencyKey,
+		scenario,
+		timeout,
+		r.serviceExecutable,
+		r.simulationDirectory,
+	)
+	if err != nil {
+		return task.Task{}, err
+	}
 	return r.manager.Start(ctx, request)
 }
 
