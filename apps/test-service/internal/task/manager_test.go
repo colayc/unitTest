@@ -973,6 +973,7 @@ type fakeStore struct {
 	mu           sync.Mutex
 	tasks        map[string]task.Task
 	keys         map[string]string
+	getCalls     map[string]int
 	eventsValue  []task.Event
 	artifacts    []task.Artifact
 	leases       map[string]task.ProcessLease
@@ -987,7 +988,10 @@ type fakeStore struct {
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{tasks: map[string]task.Task{}, keys: map[string]string{}, leases: map[string]task.ProcessLease{}}
+	return &fakeStore{
+		tasks: map[string]task.Task{}, keys: map[string]string{}, getCalls: map[string]int{},
+		leases: map[string]task.ProcessLease{},
+	}
 }
 
 func (s *fakeStore) Create(_ context.Context, value task.Task, steps []task.StepSnapshot, draft task.EventDraft) (task.Task, []task.Event, error) {
@@ -1021,6 +1025,7 @@ func (s *fakeStore) FindByIdempotencyKey(_ context.Context, key string) (task.Ta
 func (s *fakeStore) Get(_ context.Context, id string) (task.Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.getCalls[id]++
 	value, ok := s.tasks[id]
 	if !ok {
 		return task.Task{}, task.ErrNotFound
@@ -1161,6 +1166,31 @@ func (s *fakeStore) applyCount() int {
 	return s.applyCalls
 }
 
+func (s *fakeStore) getCount(id string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.getCalls[id]
+}
+
+func (s *fakeStore) peekTask(id string) (task.Task, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	value, ok := s.tasks[id]
+	return value, ok
+}
+
+func (s *fakeStore) mutationCountFor(id string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	count := 0
+	for _, mutation := range s.mutations {
+		if mutation.Task.ID == id {
+			count++
+		}
+	}
+	return count
+}
+
 func (s *fakeStore) firstMutation() task.Mutation {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1194,18 +1224,32 @@ func (s *fakeStore) assertStrictSequences(t *testing.T) {
 }
 
 type recordingPublisher struct {
-	mu        sync.Mutex
-	value     []task.Event
-	panicType task.EventType
+	mu           sync.Mutex
+	value        []task.Event
+	panicType    task.EventType
+	blockType    task.EventType
+	blockEntered chan task.Event
+	block        <-chan struct{}
 }
 
 func (p *recordingPublisher) Publish(event task.Event) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if event.Type == p.panicType {
+		p.mu.Unlock()
 		panic("publisher failure")
 	}
 	p.value = append(p.value, event)
+	blockType, entered, block := p.blockType, p.blockEntered, p.block
+	p.mu.Unlock()
+	if event.Type != blockType {
+		return
+	}
+	if entered != nil {
+		entered <- event
+	}
+	if block != nil {
+		<-block
+	}
 }
 func (p *recordingPublisher) events() []task.Event {
 	p.mu.Lock()

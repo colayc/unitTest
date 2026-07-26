@@ -227,6 +227,272 @@ func TestManagerCancellationDuringNextStepPreparePreventsStart(t *testing.T) {
 	}
 }
 
+func TestManagerCancellationIsRegisteredBeforeCreatedEventVisibility(t *testing.T) {
+	f := newManagerFixture(t)
+	createdPublished := make(chan task.Event, 1)
+	releasePublish := make(chan struct{})
+	var releasePublishOnce sync.Once
+	t.Cleanup(func() { releasePublishOnce.Do(func() { close(releasePublish) }) })
+	f.publisher.blockType = task.EventTaskCreated
+	f.publisher.blockEntered = createdPublished
+	f.publisher.block = releasePublish
+	prepareEntered := make(chan struct{})
+	releasePrepare := make(chan struct{})
+	var releasePrepareOnce sync.Once
+	t.Cleanup(func() { releasePrepareOnce.Do(func() { close(releasePrepare) }) })
+	f.processes.prepareBlockAt = 1
+	f.processes.prepareEntered = prepareEntered
+	f.processes.prepareBlock = releasePrepare
+
+	startResult := make(chan taskResponseResult, 1)
+	go func() {
+		got, startErr := f.manager.Start(context.Background(), twoStepStartRequest(testID(78), time.Minute, fixedBoundary{}))
+		startResult <- taskResponseResult{task: got, err: startErr}
+	}()
+	var created task.Event
+	select {
+	case created = <-createdPublished:
+	case <-time.After(time.Second):
+		t.Fatal("task.created was not published")
+	}
+
+	cancelCtx, stopCancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer stopCancel()
+	if _, err := f.manager.Cancel(cancelCtx, created.TaskID); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Cancel during task.created publication error = %v, want context deadline", err)
+	}
+	releasePublishOnce.Do(func() { close(releasePublish) })
+
+	select {
+	case result := <-startResult:
+		if result.err != nil {
+			t.Fatalf("Start after visible cancellation = %#v, %v", result.task, result.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Start did not return after task.created publication released")
+	}
+	finished := f.awaitTask(t, created.TaskID, task.StatusFinished)
+	if finished.Outcome != task.OutcomeCancelled {
+		t.Fatalf("outcome = %s, want %s", finished.Outcome, task.OutcomeCancelled)
+	}
+	assertStepStatuses(t, finished, task.StepSkipped, task.StepSkipped)
+	select {
+	case <-prepareEntered:
+		t.Fatal("first Prepare started after cancellation of an externally visible task")
+	default:
+	}
+}
+
+func TestManagerCancellationConvergesWhileInitialPrepareIsBlocked(t *testing.T) {
+	tests := []struct {
+		name        string
+		prepareErr  error
+		wantProcess bool
+	}{
+		{name: "prepared process", wantProcess: true},
+		{name: "prepare error without process", prepareErr: errors.New("prepare failed")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newManagerFixture(t)
+			prepareEntered := make(chan struct{})
+			prepareCanceled := make(chan struct{})
+			releasePrepare := make(chan struct{})
+			var releaseOnce sync.Once
+			t.Cleanup(func() { releaseOnce.Do(func() { close(releasePrepare) }) })
+			f.processes.prepareErr = tt.prepareErr
+			f.processes.prepareBlockAt = 1
+			f.processes.prepareEntered = prepareEntered
+			f.processes.prepareCanceled = prepareCanceled
+			f.processes.prepareBlock = releasePrepare
+
+			startResult := make(chan taskResponseResult, 1)
+			go func() {
+				got, startErr := f.manager.Start(context.Background(), twoStepStartRequest(testID(77), time.Minute, fixedBoundary{}))
+				startResult <- taskResponseResult{task: got, err: startErr}
+			}()
+			awaitSignal(t, prepareEntered, "initial Prepare was not entered")
+			createdEvents := f.publisher.ofType(task.EventTaskCreated)
+			if len(createdEvents) != 1 {
+				t.Fatalf("task.created events = %d, want 1", len(createdEvents))
+			}
+			taskID := createdEvents[0].TaskID
+
+			cancelResult := make(chan taskResponseResult, 1)
+			go func() {
+				got, cancelErr := f.manager.Cancel(context.Background(), taskID)
+				cancelResult <- taskResponseResult{task: got, err: cancelErr}
+			}()
+			awaitSignal(t, prepareCanceled, "initial Prepare context was not cancelled")
+			releaseOnce.Do(func() { close(releasePrepare) })
+
+			select {
+			case result := <-startResult:
+				if result.err != nil {
+					t.Fatalf("Start after queued cancellation = %#v, %v", result.task, result.err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("Start did not return after initial Prepare was released")
+			}
+			select {
+			case result := <-cancelResult:
+				if result.err != nil {
+					t.Fatalf("Cancel while task was queued = %#v, %v", result.task, result.err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("Cancel did not return after initial Prepare was released")
+			}
+
+			if tt.wantProcess {
+				f.awaitProcessTerminate(t, f.process, 1)
+				f.awaitProcessClose(t, f.process)
+			} else {
+				if got := f.process.terminateCalls(); got != 0 {
+					t.Fatalf("Terminate calls without a prepared process = %d, want 0", got)
+				}
+				if got := f.process.closeCalls(); got != 0 {
+					t.Fatalf("Close calls without a prepared process = %d, want 0", got)
+				}
+			}
+			finished := f.awaitStoredTask(t, taskID, task.StatusFinished)
+			if finished.Outcome != task.OutcomeCancelled {
+				t.Fatalf("outcome = %s, want %s", finished.Outcome, task.OutcomeCancelled)
+			}
+			assertStepStatuses(t, finished, task.StepSkipped, task.StepSkipped)
+			if got := f.process.startCalls(); got != 0 {
+				t.Fatalf("Start calls after queued cancellation = %d, want 0", got)
+			}
+
+			shutdownCtx, stopShutdown := context.WithTimeout(context.Background(), time.Second)
+			defer stopShutdown()
+			if err := f.manager.Shutdown(shutdownCtx); err != nil {
+				t.Fatalf("Shutdown after queued cancellation = %v", err)
+			}
+		})
+	}
+}
+
+func TestManagerConcurrentCancellationDeliversOneQueuedCommand(t *testing.T) {
+	f := newManagerFixtureWithCommandQueue(t, 1)
+	prepareEntered := make(chan struct{})
+	prepareCanceled := make(chan struct{})
+	releasePrepare := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(releasePrepare) }) })
+	f.processes.prepareBlockAt = 1
+	f.processes.prepareEntered = prepareEntered
+	f.processes.prepareCanceled = prepareCanceled
+	f.processes.prepareBlock = releasePrepare
+
+	startResult := make(chan taskResponseResult, 1)
+	go func() {
+		got, startErr := f.manager.Start(context.Background(), twoStepStartRequest(testID(76), time.Minute, fixedBoundary{}))
+		startResult <- taskResponseResult{task: got, err: startErr}
+	}()
+	awaitSignal(t, prepareEntered, "initial Prepare was not entered")
+	createdEvents := f.publisher.ofType(task.EventTaskCreated)
+	if len(createdEvents) != 1 {
+		t.Fatalf("task.created events = %d, want 1", len(createdEvents))
+	}
+	taskID := createdEvents[0].TaskID
+
+	queueContext := newObservedCancelContext()
+	listResult := make(chan error, 1)
+	go func() {
+		_, listErr := f.manager.List(queueContext, "", 1)
+		listResult <- listErr
+	}()
+	awaitSignal(t, queueContext.waiting, "queue-filling List did not enqueue")
+	queueContext.cancel()
+	select {
+	case err := <-listResult:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("queue-filling List error = %v, want context canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("queue-filling List did not return")
+	}
+
+	const callers = 64
+	cancelContexts := make([]*observedCancelContext, callers)
+	cancelResults := make(chan error, callers)
+	for index := range cancelContexts {
+		cancelContexts[index] = newObservedCancelContext()
+		ctx := cancelContexts[index]
+		go func() {
+			_, cancelErr := f.manager.Cancel(ctx, taskID)
+			cancelResults <- cancelErr
+		}()
+	}
+	for _, ctx := range cancelContexts {
+		awaitSignal(t, ctx.waiting, "concurrent Cancel was not accepted before caller cancellation")
+	}
+	awaitSignal(t, prepareCanceled, "accepted concurrent Cancel did not cancel initial Prepare")
+	for _, ctx := range cancelContexts {
+		ctx.cancel()
+	}
+	for range callers {
+		select {
+		case err := <-cancelResults:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("concurrent Cancel error = %v, want context canceled", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("concurrent Cancel caller did not return")
+		}
+	}
+
+	releaseOnce.Do(func() { close(releasePrepare) })
+	select {
+	case result := <-startResult:
+		if result.err != nil {
+			t.Fatalf("Start after concurrent queued cancellation = %#v, %v", result.task, result.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Start did not return after initial Prepare was released")
+	}
+
+	deadline := time.After(time.Second)
+	var finished task.Task
+	for {
+		if got := f.store.getCount(taskID); got > 1 {
+			t.Fatalf("Store.Get calls from concurrent Cancel delivery = %d, want at most 1", got)
+		}
+		var ok bool
+		finished, ok = f.store.peekTask(taskID)
+		if ok && finished.Status == task.StatusFinished {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("queued task did not finish; got %#v", finished)
+		default:
+		}
+	}
+	if got := f.store.getCount(taskID); got != 1 {
+		t.Fatalf("Store.Get calls from concurrent Cancel delivery = %d, want 1", got)
+	}
+	if got := f.store.mutationCountFor(taskID); got != 1 {
+		t.Fatalf("successful task mutations from concurrent Cancel = %d, want 1", got)
+	}
+	if finished.Outcome != task.OutcomeCancelled {
+		t.Fatalf("outcome = %s, want %s", finished.Outcome, task.OutcomeCancelled)
+	}
+	assertStepStatuses(t, finished, task.StepSkipped, task.StepSkipped)
+	f.awaitProcessTerminate(t, f.process, 1)
+	f.awaitProcessClose(t, f.process)
+	if got := f.process.startCalls(); got != 0 {
+		t.Fatalf("Start calls after concurrent queued cancellation = %d, want 0", got)
+	}
+
+	shutdownCtx, stopShutdown := context.WithTimeout(context.Background(), time.Second)
+	defer stopShutdown()
+	if err := f.manager.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("Shutdown after concurrent queued cancellation = %v", err)
+	}
+}
+
 func TestManagerCancelPreemptsBlockedPrepareWhenCommandQueueIsFull(t *testing.T) {
 	f := newManagerFixtureWithCommandQueue(t, 1)
 	second := newFakeProcess()
@@ -378,6 +644,40 @@ func TestManagerTotalTimeoutWinsWhenStepStartSucceedsAfterDeadline(t *testing.T)
 type taskResponseResult struct {
 	task task.Task
 	err  error
+}
+
+type observedCancelContext struct {
+	context.Context
+	done        chan struct{}
+	waiting     chan struct{}
+	waitingOnce sync.Once
+	cancelOnce  sync.Once
+}
+
+func newObservedCancelContext() *observedCancelContext {
+	return &observedCancelContext{
+		Context: context.Background(),
+		done:    make(chan struct{}),
+		waiting: make(chan struct{}),
+	}
+}
+
+func (c *observedCancelContext) Done() <-chan struct{} {
+	c.waitingOnce.Do(func() { close(c.waiting) })
+	return c.done
+}
+
+func (c *observedCancelContext) Err() error {
+	select {
+	case <-c.done:
+		return context.Canceled
+	default:
+		return nil
+	}
+}
+
+func (c *observedCancelContext) cancel() {
+	c.cancelOnce.Do(func() { close(c.done) })
 }
 
 func awaitSignal(t *testing.T, signal <-chan struct{}, message string) {

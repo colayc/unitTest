@@ -214,6 +214,16 @@ func (m *Manager) start(request StartRequest, active map[string]*activeTask) tas
 		PlanFingerprint: request.Plan.Fingerprint, Scenario: request.Scenario, Timeout: request.Timeout,
 		Status: StatusQueued, CreatedAt: now,
 	}
+	execution := newExecutionSignal()
+	m.executionSignals.Store(created.ID, execution)
+	executionRetained := false
+	defer func() {
+		if executionRetained {
+			return
+		}
+		execution.stop()
+		m.executionSignals.CompareAndDelete(created.ID, execution)
+	}()
 	steps := initialStepSnapshots(request.Plan)
 	draft := eventDraft(created.ID, EventTaskCreated, now, map[string]any{"status": StatusQueued})
 	stored, events, err := m.store.Create(context.Background(), created, steps, draft)
@@ -236,10 +246,10 @@ func (m *Manager) start(request StartRequest, active map[string]*activeTask) tas
 	current := &activeTask{
 		task: stored, plan: request.Plan, boundary: request.Boundary,
 		timerStop: make(chan struct{}), timeoutStop: make(chan struct{}),
-		watcherStop: make(chan struct{}), execution: newExecutionSignal(),
+		watcherStop: make(chan struct{}), execution: execution,
 	}
-	m.executionSignals.Store(stored.ID, current.execution)
 	active[stored.ID] = current
+	executionRetained = true
 	m.armTimeout(current)
 	if err := m.startNextStep(current, active); err != nil {
 		return taskResponse{task: current.task, err: err}

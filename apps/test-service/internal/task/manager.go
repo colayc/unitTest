@@ -145,11 +145,15 @@ type activeTask struct {
 }
 
 type executionSignal struct {
-	mu        sync.Mutex
-	ctx       context.Context
-	cancel    context.CancelFunc
-	requested Outcome
-	outcome   Outcome
+	mu                 sync.Mutex
+	ctx                context.Context
+	cancel             context.CancelFunc
+	requested          Outcome
+	outcome            Outcome
+	cancelDelivery     bool
+	cancelCompleted    bool
+	cancelResponse     taskResponse
+	cancelReplyWaiters []chan taskResponse
 }
 
 func newExecutionSignal() *executionSignal {
@@ -228,6 +232,41 @@ func (s *executionSignal) stop() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cancel()
+}
+
+func (s *executionSignal) acceptCancellation(reply chan taskResponse) (deliver bool, completed *taskResponse) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.outcome == "" && s.requested == "" {
+		s.requested = OutcomeCancelled
+		s.cancel()
+	}
+	if s.cancelCompleted {
+		response := s.cancelResponse
+		return false, &response
+	}
+	s.cancelReplyWaiters = append(s.cancelReplyWaiters, reply)
+	if !s.cancelDelivery {
+		s.cancelDelivery = true
+		return true, nil
+	}
+	return false, nil
+}
+
+func (s *executionSignal) completeCancellation(response taskResponse) {
+	s.mu.Lock()
+	if s.cancelCompleted {
+		s.mu.Unlock()
+		return
+	}
+	s.cancelCompleted = true
+	s.cancelResponse = response
+	waiters := s.cancelReplyWaiters
+	s.cancelReplyWaiters = nil
+	s.mu.Unlock()
+	for _, waiter := range waiters {
+		waiter <- response
+	}
 }
 
 func NewManager(config ManagerConfig) (*Manager, error) {
@@ -336,12 +375,17 @@ func (m *Manager) Cancel(ctx context.Context, id string) (Task, error) {
 		return Task{}, err
 	}
 	reply := make(chan taskResponse, 1)
-	command := taskIDCommand{id: id, cancel: true, reply: reply}
-	if m.signalExecution(id, OutcomeCancelled) == OutcomeCancelled {
-		// Once a live request is accepted, caller cancellation only bounds
-		// waiting for the reply; command delivery and cleanup must continue.
-		go m.sendInternal(command)
-	} else if err := m.send(ctx, command); err != nil {
+	if value, ok := m.executionSignals.Load(id); ok {
+		signal := value.(*executionSignal)
+		deliver, completed := signal.acceptCancellation(reply)
+		if completed != nil {
+			reply <- *completed
+		} else if deliver {
+			// Once a live request is accepted, caller cancellation only bounds
+			// waiting; one signal-owned command continues for all callers.
+			go m.deliverCancellation(id, signal)
+		}
+	} else if err := m.send(ctx, taskIDCommand{id: id, cancel: true, reply: reply}); err != nil {
 		return Task{}, err
 	}
 	select {
@@ -351,6 +395,20 @@ func (m *Manager) Cancel(ctx context.Context, id string) (Task, error) {
 		return Task{}, ctx.Err()
 	case <-m.stopped:
 		return Task{}, ErrStorageUnavailable
+	}
+}
+
+func (m *Manager) deliverCancellation(id string, signal *executionSignal) {
+	reply := make(chan taskResponse, 1)
+	if !m.sendInternal(taskIDCommand{id: id, cancel: true, reply: reply}) {
+		signal.completeCancellation(taskResponse{err: ErrStorageUnavailable})
+		return
+	}
+	select {
+	case response := <-reply:
+		signal.completeCancellation(response)
+	case <-m.stopped:
+		signal.completeCancellation(taskResponse{err: ErrStorageUnavailable})
 	}
 }
 
@@ -562,6 +620,24 @@ func (m *Manager) cancel(id string, active map[string]*activeTask) taskResponse 
 		return taskResponse{task: current.task}
 	}
 	if cause := current.execution.claim(OutcomeCancelled); cause != OutcomeCancelled {
+		return taskResponse{task: current.task}
+	}
+	if current.task.Status == StatusQueued {
+		current.execution.resolve(OutcomeCancelled)
+		if current.process == nil {
+			finished, finishErr := m.finishExecution(current, ProcessResult{}, OutcomeCancelled, false, active)
+			if finishErr != nil {
+				m.abandon(current)
+				return taskResponse{task: current.task, err: finishErr}
+			}
+			if active[id] == current && current.task.Status == StatusFinished {
+				delete(active, id)
+			}
+			return taskResponse{task: finished}
+		}
+		current.cleanupWithoutDone = true
+		current.processCompleted = true
+		m.terminate(current)
 		return taskResponse{task: current.task}
 	}
 	now := m.clock.Now()
@@ -853,14 +929,6 @@ func (m *Manager) stopActive(current *activeTask) {
 	close(current.timerStop)
 	close(current.timeoutStop)
 	close(current.watcherStop)
-}
-
-func (m *Manager) signalExecution(taskID string, cause Outcome) Outcome {
-	value, ok := m.executionSignals.Load(taskID)
-	if !ok {
-		return ""
-	}
-	return value.(*executionSignal).claim(cause)
 }
 
 func (m *Manager) abandon(current *activeTask) {
