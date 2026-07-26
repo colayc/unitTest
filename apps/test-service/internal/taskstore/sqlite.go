@@ -70,3 +70,17 @@ func nullableTime(value *time.Time) any {
 	}
 	return formatTime(*value)
 }
+
+func nullableScenario(value task.Task) any {
+	if value.Kind != task.KindSimulation {
+		return nil
+	}
+	return string(value.Scenario)
+}
+
+func nullableInt(value *int) any {
+	if value == nil {
+		return nil
+	}
+	return *value
+}

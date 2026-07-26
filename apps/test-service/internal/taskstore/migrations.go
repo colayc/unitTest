@@ -3,6 +3,7 @@ package taskstore
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"embed"
 	"encoding/hex"
 	"fmt"
@@ -45,27 +46,92 @@ func (s *Store) migrate(ctx context.Context) error {
 		if applied[current.version] {
 			continue
 		}
-
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return storageError("begin migration", err)
-		}
-		if _, err := tx.ExecContext(ctx, current.sql); err != nil {
-			_ = tx.Rollback()
-			return storageError("apply migration", err)
-		}
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO schema_migrations(version, sha256, applied_at) VALUES(?,?,?)`,
-			current.version, current.checksum, formatTime(time.Now()),
-		); err != nil {
-			_ = tx.Rollback()
-			return storageError("record migration", err)
-		}
-		if err := tx.Commit(); err != nil {
-			return storageError("commit migration", err)
+		if err := s.applyMigration(ctx, current); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func (s *Store) applyMigration(ctx context.Context, current migration) (resultErr error) {
+	var foreignKeys int
+	if err := s.db.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil {
+		return storageError("read foreign key setting", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys=OFF`); err != nil {
+		return storageError("disable foreign keys", err)
+	}
+	restored := false
+	defer func() {
+		if restored {
+			return
+		}
+		if err := restoreForeignKeys(ctx, s.db, foreignKeys); err != nil {
+			resultErr = storageError("restore foreign keys", err)
+		}
+	}()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return storageError("begin migration", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, current.sql); err != nil {
+		return storageError("apply migration", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO schema_migrations(version, sha256, applied_at) VALUES(?,?,?)`,
+		current.version, current.checksum, formatTime(time.Now()),
+	); err != nil {
+		return storageError("record migration", err)
+	}
+	if violations, err := countForeignKeyViolations(ctx, tx); err != nil {
+		return storageError("check migration foreign keys", err)
+	} else if violations != 0 {
+		return storageError("check migration foreign keys", fmt.Errorf("%d violations", violations))
+	}
+	if err := tx.Commit(); err != nil {
+		return storageError("commit migration", err)
+	}
+	if err := restoreForeignKeys(ctx, s.db, foreignKeys); err != nil {
+		return storageError("restore foreign keys", err)
+	}
+	restored = true
+	if violations, err := countForeignKeyViolations(ctx, s.db); err != nil {
+		return storageError("check migrated foreign keys", err)
+	} else if violations != 0 {
+		return storageError("check migrated foreign keys", fmt.Errorf("%d violations", violations))
+	}
+	return nil
+}
+
+func restoreForeignKeys(ctx context.Context, db interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, enabled int) error {
+	setting := "OFF"
+	if enabled != 0 {
+		setting = "ON"
+	}
+	_, err := db.ExecContext(ctx, `PRAGMA foreign_keys=`+setting)
+	return err
+}
+
+func countForeignKeyViolations(ctx context.Context, queryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}) (int, error) {
+	rows, err := queryer.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func (s *Store) validateAppliedMigrations(ctx context.Context, migrations []migration) (map[int]bool, error) {

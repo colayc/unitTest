@@ -257,7 +257,7 @@ func TestPortContractsCompile(t *testing.T) {
 
 type contractStore struct{}
 
-func (*contractStore) Create(context.Context, task.Task, task.EventDraft) (task.Task, []task.Event, error) {
+func (*contractStore) Create(context.Context, task.Task, []task.StepSnapshot, task.EventDraft) (task.Task, []task.Event, error) {
 	return task.Task{}, nil, nil
 }
 func (*contractStore) FindByIdempotencyKey(context.Context, string) (task.Task, error) {

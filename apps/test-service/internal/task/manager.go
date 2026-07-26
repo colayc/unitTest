@@ -413,7 +413,7 @@ func (m *Manager) start(request StartRequest, active map[string]*activeTask) tas
 		Scenario: request.Scenario, Timeout: request.Timeout, Status: StatusQueued, CreatedAt: now,
 	}
 	draft := eventDraft(created.ID, EventTaskCreated, now, map[string]any{"status": StatusQueued})
-	stored, events, err := m.store.Create(context.Background(), created, draft)
+	stored, events, err := m.store.Create(context.Background(), created, nil, draft)
 	if err != nil {
 		if errors.Is(err, ErrStorageUnavailable) {
 			m.tripStorage(active)

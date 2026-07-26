@@ -17,14 +17,20 @@ var (
 type Mutation struct {
 	Task        Task
 	Expected    Status
+	Steps       []StepMutation
 	Events      []EventDraft
 	PutLease    *ProcessLease
 	DeleteLease bool
 	Artifacts   []Artifact
 }
 
+type StepMutation struct {
+	Step     StepSnapshot
+	Expected StepStatus
+}
+
 type Store interface {
-	Create(context.Context, Task, EventDraft) (Task, []Event, error)
+	Create(context.Context, Task, []StepSnapshot, EventDraft) (Task, []Event, error)
 	FindByIdempotencyKey(context.Context, string) (Task, error)
 	Get(context.Context, string) (Task, error)
 	List(context.Context, string, int) (Page[Task], error)

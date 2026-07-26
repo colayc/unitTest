@@ -2,6 +2,7 @@ package taskstore
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,9 +20,10 @@ func TestStoreCommitsSnapshotAndEventAtomically(t *testing.T) {
 	now := time.Date(2026, 7, 22, 0, 0, 0, 0, time.UTC)
 	created, events, err := store.Create(ctx, task.Task{
 		ID: id(1), IdempotencyKey: id(2), RequestHash: strings.Repeat("a", 64),
+		Kind: task.KindSimulation, Request: json.RawMessage(`{"scenario":"hang"}`),
 		Scenario: task.ScenarioHang, Timeout: 30 * time.Second,
 		Status: task.StatusQueued, CreatedAt: now,
-	}, task.EventDraft{TaskID: id(1), Type: "task.created", At: now, Payload: json.RawMessage(`{}`)})
+	}, nil, task.EventDraft{TaskID: id(1), Type: "task.created", At: now, Payload: json.RawMessage(`{}`)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,13 +58,13 @@ func TestCreateIsIdempotentByKeyAndRequestHash(t *testing.T) {
 	store := openTestStore(t)
 	now := time.Date(2026, 7, 22, 1, 0, 0, 0, time.UTC)
 	input := newTask(10, 11, now)
-	created, firstEvents, err := store.Create(ctx, input, draft(input.ID, task.EventTaskCreated, now))
+	created, firstEvents, err := store.Create(ctx, input, nil, draft(input.ID, task.EventTaskCreated, now))
 	if err != nil {
 		t.Fatal(err)
 	}
 	replayed := input
 	replayed.ID = id(12)
-	got, events, err := store.Create(ctx, replayed, draft(replayed.ID, task.EventTaskCreated, now))
+	got, events, err := store.Create(ctx, replayed, nil, draft(replayed.ID, task.EventTaskCreated, now))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +72,7 @@ func TestCreateIsIdempotentByKeyAndRequestHash(t *testing.T) {
 		t.Fatalf("idempotent Create() = %#v, %#v", got, events)
 	}
 	replayed.RequestHash = strings.Repeat("b", 64)
-	_, _, err = store.Create(ctx, replayed, draft(replayed.ID, task.EventTaskCreated, now))
+	_, _, err = store.Create(ctx, replayed, nil, draft(replayed.ID, task.EventTaskCreated, now))
 	if !errors.Is(err, task.ErrIdempotencyConflict) {
 		t.Fatalf("Create() error = %v, want ErrIdempotencyConflict", err)
 	}
@@ -162,16 +164,26 @@ func TestApplyRollsBackSnapshotWhenEventInsertFails(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	now := time.Date(2026, 7, 22, 2, 30, 0, 0, time.UTC)
-	created := createTask(t, store, newTask(28, 29, now))
+	input := newTask(28, 29, now)
+	initialStep := task.StepSnapshot{ID: "simulate", Kind: task.StepSimulation, Status: task.StepPending}
+	created, _, err := store.Create(ctx, input, []task.StepSnapshot{initialStep}, draft(input.ID, task.EventTaskCreated, now))
+	if err != nil {
+		t.Fatal(err)
+	}
 	var existingEventID string
 	if err := store.db.QueryRow(`SELECT event_id FROM task_events WHERE task_id=?`, created.ID).Scan(&existingEventID); err != nil {
 		t.Fatal(err)
 	}
 	store.newID = func() string { return existingEventID }
 	running := mustTransition(t, created, task.Transition{From: task.StatusQueued, To: task.StatusRunning, At: now.Add(time.Second)})
+	running.ActiveStep = initialStep.ID
+	runningStep := initialStep
+	runningStep.Status = task.StepRunning
+	runningStep.StartedAt = running.StartedAt
 	lease := task.ProcessLease{TaskID: created.ID, HostPID: 50, HostStartIdentity: "start", ServiceInstanceID: id(30)}
-	_, _, err := store.Apply(ctx, task.Mutation{
+	_, _, err = store.Apply(ctx, task.Mutation{
 		Task: running, Expected: task.StatusQueued,
+		Steps:    []task.StepMutation{{Step: runningStep, Expected: task.StepPending}},
 		Events:   []task.EventDraft{draft(created.ID, task.EventTaskStarted, now.Add(time.Second))},
 		PutLease: &lease,
 	})
@@ -179,7 +191,9 @@ func TestApplyRollsBackSnapshotWhenEventInsertFails(t *testing.T) {
 		t.Fatalf("Apply() error = %v, want ErrStorageUnavailable", err)
 	}
 	persisted, err := store.Get(ctx, created.ID)
-	if err != nil || persisted.Status != task.StatusQueued || persisted.StartedAt != nil || persisted.LastSequence != created.LastSequence {
+	if err != nil || persisted.Status != task.StatusQueued || persisted.StartedAt != nil || persisted.ActiveStep != "" ||
+		len(persisted.Steps) != 1 || persisted.Steps[0].Status != task.StepPending ||
+		persisted.LastSequence != created.LastSequence {
 		t.Fatalf("Get() after rollback = %#v, %v", persisted, err)
 	}
 	var leaseCount int
@@ -493,18 +507,190 @@ func TestRecoverInterruptedRollsBackAllTasksWhenEventInsertFails(t *testing.T) {
 	}
 }
 
+func TestMigration002UpgradesInitialTasksWithoutLosingRequests(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "history.sqlite")
+	createMigration001Database(t, path)
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	for _, taskID := range []string{id(120), id(121)} {
+		got, err := store.Get(ctx, taskID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Kind != task.KindSimulation || string(got.Request) != `{"scenario":"success"}` {
+			t.Fatalf("migration lost task request: %#v", got)
+		}
+		if got.WorkspaceGeneration != "" || got.Scenario != task.ScenarioSuccess {
+			t.Fatalf("migration lost simulation compatibility fields: %#v", got)
+		}
+	}
+	if rows := foreignKeyViolations(t, store.db); rows != 0 {
+		t.Fatalf("foreign key violations: %d", rows)
+	}
+	var foreignKeys int
+	if err := store.db.QueryRow(`PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil || foreignKeys != 1 {
+		t.Fatalf("foreign_keys after migration = %d, %v", foreignKeys, err)
+	}
+}
+
+func TestMigration002FailureRollsBackAndRestoresForeignKeys(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "history.sqlite")
+	createMigration001Database(t, path)
+	db := openConfiguredDatabase(t, path)
+	store := &Store{db: db, newID: task.NewID}
+
+	err := store.applyMigration(ctx, migration{
+		version:  2,
+		checksum: strings.Repeat("f", 64),
+		sql: `CREATE TABLE migration_probe(value TEXT);
+ALTER TABLE tasks RENAME TO tasks_broken;
+SELECT * FROM;`,
+	})
+	if !errors.Is(err, task.ErrStorageUnavailable) {
+		t.Fatalf("applyMigration() error = %v", err)
+	}
+	var foreignKeys int
+	if err := db.QueryRow(`PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil || foreignKeys != 1 {
+		t.Fatalf("foreign_keys after failed migration = %d, %v", foreignKeys, err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened := openConfiguredDatabase(t, path)
+	defer reopened.Close()
+	var scenario string
+	if err := reopened.QueryRow(`SELECT scenario FROM tasks WHERE task_id=?`, id(120)).Scan(&scenario); err != nil || scenario != "success" {
+		t.Fatalf("reopen v1 task scenario = %q, %v", scenario, err)
+	}
+	var migrationCount int
+	if err := reopened.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&migrationCount); err != nil || migrationCount != 1 {
+		t.Fatalf("migration count after rollback = %d, %v", migrationCount, err)
+	}
+	var probeCount int
+	if err := reopened.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='migration_probe'`).Scan(&probeCount); err != nil || probeCount != 0 {
+		t.Fatalf("migration probe survived rollback = %d, %v", probeCount, err)
+	}
+}
+
+func TestStepPersistenceAndAtomicMutation(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	now := time.Date(2026, 7, 22, 8, 30, 0, 0, time.UTC)
+	input := newTask(122, 123, now)
+	initialSteps := []task.StepSnapshot{{
+		ID: "simulate", Kind: task.StepSimulation, Status: task.StepPending,
+	}}
+	created, _, err := store.Create(ctx, input, initialSteps, draft(input.ID, task.EventTaskCreated, now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(created.Steps) != 1 || created.Steps[0] != initialSteps[0] {
+		t.Fatalf("Create() steps = %#v", created.Steps)
+	}
+	persisted, err := store.Get(ctx, input.ID)
+	if err != nil || len(persisted.Steps) != 1 || persisted.Steps[0] != initialSteps[0] {
+		t.Fatalf("Get() steps = %#v, %v", persisted.Steps, err)
+	}
+
+	startedAt := now.Add(time.Second)
+	running := created
+	running.Status = task.StatusRunning
+	running.StartedAt = ptrTime(startedAt)
+	running.ActiveStep = "simulate"
+	runningStep := initialSteps[0]
+	runningStep.Status = task.StepRunning
+	runningStep.StartedAt = ptrTime(startedAt)
+	running, events, err := store.Apply(ctx, task.Mutation{
+		Task: running, Expected: task.StatusQueued,
+		Steps:  []task.StepMutation{{Step: runningStep, Expected: task.StepPending}},
+		Events: []task.EventDraft{draft(input.ID, task.EventTaskStarted, startedAt)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || len(running.Steps) != 1 || running.Steps[0].Status != task.StepRunning {
+		t.Fatalf("Apply() = %#v, %#v", running, events)
+	}
+
+	conflictingTask := running
+	conflictingTask.Status = task.StatusFinished
+	conflictingTask.Outcome = task.OutcomeSucceeded
+	conflictingTask.FinishedAt = ptrTime(now.Add(2 * time.Second))
+	conflictingTask.ActiveStep = ""
+	succeededStep := runningStep
+	succeededStep.Status = task.StepSucceeded
+	succeededStep.FinishedAt = conflictingTask.FinishedAt
+	_, _, err = store.Apply(ctx, task.Mutation{
+		Task: conflictingTask, Expected: task.StatusRunning,
+		Steps:  []task.StepMutation{{Step: succeededStep, Expected: task.StepPending}},
+		Events: []task.EventDraft{draft(input.ID, task.EventTaskFinished, *conflictingTask.FinishedAt)},
+	})
+	if !errors.Is(err, task.ErrConflict) {
+		t.Fatalf("Apply(step conflict) error = %v", err)
+	}
+	afterConflict, err := store.Get(ctx, input.ID)
+	if err != nil || afterConflict.Status != task.StatusRunning || afterConflict.ActiveStep != "simulate" ||
+		len(afterConflict.Steps) != 1 || afterConflict.Steps[0].Status != task.StepRunning ||
+		afterConflict.LastSequence != events[0].Sequence {
+		t.Fatalf("task after step conflict = %#v, %v", afterConflict, err)
+	}
+}
+
+func TestStepPersistencePreservesCMakeTaskAndStepOrder(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	now := time.Date(2026, 7, 22, 8, 45, 0, 0, time.UTC)
+	input := task.Task{
+		ID: id(124), IdempotencyKey: id(125), RequestHash: strings.Repeat("c", 64),
+		Kind: task.KindCMakeBuild, Request: json.RawMessage(`{"sourceRoot":"src","buildRoot":"build"}`),
+		WorkspaceGeneration: strings.Repeat("d", 64), PlanFingerprint: strings.Repeat("e", 64),
+		Timeout: time.Minute, Status: task.StatusQueued, CreatedAt: now,
+	}
+	steps := []task.StepSnapshot{
+		{ID: "configure", Kind: task.StepConfigure, Status: task.StepPending},
+		{ID: "build", Kind: task.StepBuild, Status: task.StepPending},
+	}
+	if _, _, err := store.Create(ctx, input, steps, draft(input.ID, task.EventTaskCreated, now)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Get(ctx, input.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Kind != task.KindCMakeBuild || string(got.Request) != string(input.Request) ||
+		got.WorkspaceGeneration != input.WorkspaceGeneration || got.PlanFingerprint != input.PlanFingerprint ||
+		got.Scenario != "" || len(got.Steps) != 2 ||
+		got.Steps[0].ID != "configure" || got.Steps[0].Kind != task.StepConfigure ||
+		got.Steps[1].ID != "build" || got.Steps[1].Kind != task.StepBuild {
+		t.Fatalf("persisted cmake task = %#v", got)
+	}
+}
+
 func TestReopenDoesNotReapplyMigrationAndDetectsChecksumTampering(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "history.sqlite")
 	store, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if store != nil {
+			_ = store.Close()
+		}
+	})
 	var count int
 	var checksum string
 	if err := store.db.QueryRow(`SELECT COUNT(*), MIN(sha256) FROM schema_migrations`).Scan(&count, &checksum); err != nil {
 		t.Fatal(err)
 	}
-	if count != 1 || len(checksum) != 64 {
+	if count != 2 || len(checksum) != 64 {
 		t.Fatalf("schema_migrations count=%d checksum=%q", count, checksum)
 	}
 	if err := store.Close(); err != nil {
@@ -514,7 +700,7 @@ func TestReopenDoesNotReapplyMigrationAndDetectsChecksumTampering(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&count); err != nil || count != 1 {
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&count); err != nil || count != 2 {
 		t.Fatalf("reopen count=%d err=%v", count, err)
 	}
 	if _, err := store.db.Exec(`UPDATE schema_migrations SET sha256=? WHERE version=1`, strings.Repeat("0", 64)); err != nil {
@@ -693,13 +879,14 @@ func openTestStore(t *testing.T) *Store {
 func newTask(taskByte, keyByte byte, at time.Time) task.Task {
 	return task.Task{
 		ID: id(taskByte), IdempotencyKey: id(keyByte), RequestHash: strings.Repeat("a", 64),
+		Kind: task.KindSimulation, Request: json.RawMessage(`{"scenario":"success"}`),
 		Scenario: task.ScenarioSuccess, Timeout: 30 * time.Second, Status: task.StatusQueued, CreatedAt: at,
 	}
 }
 
 func createTask(t *testing.T, store *Store, input task.Task) task.Task {
 	t.Helper()
-	created, _, err := store.Create(context.Background(), input, draft(input.ID, task.EventTaskCreated, input.CreatedAt))
+	created, _, err := store.Create(context.Background(), input, nil, draft(input.ID, task.EventTaskCreated, input.CreatedAt))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -722,5 +909,86 @@ func mustTransition(t *testing.T, current task.Task, change task.Transition) tas
 func id(value byte) string { return strings.Repeat(string([]byte{'a' + value%6}), 32) }
 
 func ptrTime(value time.Time) *time.Time { return &value }
+
+func createMigration001Database(t *testing.T, path string) {
+	t.Helper()
+	db := openConfiguredDatabase(t, path)
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE schema_migrations (
+		version INTEGER PRIMARY KEY,
+		sha256 TEXT NOT NULL,
+		applied_at TEXT NOT NULL
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(migrations[0].sql); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO schema_migrations(version, sha256, applied_at) VALUES(1,?,?)`,
+		migrations[0].checksum, formatTime(time.Date(2026, 7, 22, 8, 0, 0, 0, time.UTC))); err != nil {
+		t.Fatal(err)
+	}
+	insert := `INSERT INTO tasks(
+		task_id, idempotency_key, request_hash, kind, scenario, timeout_ms, status, outcome,
+		created_at, started_at, finished_at, last_sequence, error_code, error_message
+	) VALUES(?,?,?,'simulation','success',30000,?,?,?,?,?,0,'','')`
+	if _, err := db.Exec(insert, id(120), id(122), strings.Repeat("a", 64), "finished", "succeeded",
+		"2026-07-22T08:00:00Z", "2026-07-22T08:00:01Z", "2026-07-22T08:00:02Z"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(insert, id(121), id(123), strings.Repeat("b", 64), "queued", nil,
+		"2026-07-22T08:01:00Z", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO task_events(
+		event_id, task_id, event_type, occurred_at, payload_json
+	) VALUES(?,?,'task.created','2026-07-22T08:00:00Z','{}')`, id(124), id(120)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO process_leases(
+		task_id, host_pid, host_start_identity, service_instance_id
+	) VALUES(?,42,'start',?)`, id(121), id(125)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func openConfiguredDatabase(t *testing.T, path string) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	for _, pragma := range []string{"PRAGMA journal_mode=WAL", "PRAGMA foreign_keys=ON", "PRAGMA synchronous=FULL"} {
+		if _, err := db.Exec(pragma); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+	}
+	return db
+}
+
+func foreignKeyViolations(t *testing.T, db *sql.DB) int {
+	t.Helper()
+	rows, err := db.Query(`PRAGMA foreign_key_check`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return count
+}
 
 var _ task.Store = (*Store)(nil)

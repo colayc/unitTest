@@ -900,7 +900,7 @@ func newFakeStore() *fakeStore {
 	return &fakeStore{tasks: map[string]task.Task{}, keys: map[string]string{}, leases: map[string]task.ProcessLease{}}
 }
 
-func (s *fakeStore) Create(_ context.Context, value task.Task, draft task.EventDraft) (task.Task, []task.Event, error) {
+func (s *fakeStore) Create(_ context.Context, value task.Task, _ []task.StepSnapshot, draft task.EventDraft) (task.Task, []task.Event, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if existingID, ok := s.keys[value.IdempotencyKey]; ok {
