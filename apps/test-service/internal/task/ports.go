@@ -50,6 +50,8 @@ type ProcessFactory interface {
 }
 
 type ProcessSpec struct {
+	// ProcessSpec is runtime-only service state. Its Env field must not be
+	// persisted or exposed through the protocol.
 	Executable string
 	Args       []string
 	Env        []string

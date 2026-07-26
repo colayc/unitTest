@@ -1,0 +1,206 @@
+package task
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"reflect"
+	"strings"
+	"time"
+)
+
+type Kind string
+
+const (
+	KindSimulation Kind = "simulation"
+	KindCMakeBuild Kind = "cmake_build"
+)
+
+type StepKind string
+
+const (
+	StepSimulation StepKind = "simulation"
+	StepConfigure  StepKind = "configure"
+	StepBuild      StepKind = "build"
+)
+
+type StepStatus string
+
+const (
+	StepPending   StepStatus = "pending"
+	StepRunning   StepStatus = "running"
+	StepSucceeded StepStatus = "succeeded"
+	StepFailed    StepStatus = "failed"
+	StepSkipped   StepStatus = "skipped"
+)
+
+type CommandSummary struct {
+	Executable string   `json:"executable"`
+	Args       []string `json:"args"`
+}
+
+type ExecutionStep struct {
+	ID      string
+	Kind    StepKind
+	Process ProcessSpec
+	Public  CommandSummary
+}
+
+type ExecutionPlan struct {
+	Version     int
+	Fingerprint string
+	Steps       []ExecutionStep
+}
+
+// ExecutionBoundary is runtime-only. It must never be persisted or exposed
+// through protocol types.
+type ExecutionBoundary interface {
+	ValidateExecutable(path string) error
+	ValidateWorkingDirectory(path string) error
+}
+
+type StartRequest struct {
+	IdempotencyKey      string
+	Kind                Kind
+	Request             json.RawMessage
+	WorkspaceGeneration string
+	Timeout             time.Duration
+	Plan                ExecutionPlan
+	Boundary            ExecutionBoundary
+
+	// Scenario remains an internal compatibility input while v1.1 simulation
+	// requests are projected into service-owned execution plans.
+	Scenario Scenario
+}
+
+func ValidatePlan(plan ExecutionPlan, boundary ExecutionBoundary) error {
+	if plan.Version != 1 || len(plan.Steps) < 1 || len(plan.Steps) > 8 || nilBoundary(boundary) {
+		return ErrInvalidArgument
+	}
+
+	ids := make(map[string]struct{}, len(plan.Steps))
+	for _, step := range plan.Steps {
+		if !validStepID(step.ID) || !validStepKind(step.Kind) || step.Process.Executable == "" || step.Process.Dir == "" ||
+			containsNUL(step.Process.Executable) || containsNUL(step.Process.Dir) {
+			return ErrInvalidArgument
+		}
+		if _, exists := ids[step.ID]; exists {
+			return ErrInvalidArgument
+		}
+		ids[step.ID] = struct{}{}
+		for _, argument := range step.Process.Args {
+			if containsNUL(argument) {
+				return ErrInvalidArgument
+			}
+		}
+		for _, value := range step.Process.Env {
+			if containsNUL(value) || !validEnvironment(value) {
+				return ErrInvalidArgument
+			}
+		}
+		if err := boundary.ValidateExecutable(step.Process.Executable); err != nil {
+			return ErrInvalidArgument
+		}
+		if err := boundary.ValidateWorkingDirectory(step.Process.Dir); err != nil {
+			return ErrInvalidArgument
+		}
+	}
+	return nil
+}
+
+func FingerprintPlan(plan ExecutionPlan) string {
+	type canonicalStep struct {
+		ID         string   `json:"id"`
+		Kind       StepKind `json:"kind"`
+		Executable string   `json:"executable"`
+		Args       []string `json:"args"`
+		Env        []string `json:"env"`
+		Dir        string   `json:"dir"`
+	}
+	type canonicalPlan struct {
+		Version int             `json:"version"`
+		Steps   []canonicalStep `json:"steps"`
+	}
+
+	canonical := canonicalPlan{Version: plan.Version, Steps: make([]canonicalStep, len(plan.Steps))}
+	for index, step := range plan.Steps {
+		canonical.Steps[index] = canonicalStep{
+			ID:         step.ID,
+			Kind:       step.Kind,
+			Executable: step.Process.Executable,
+			Args:       append([]string{}, step.Process.Args...),
+			Env:        append([]string{}, step.Process.Env...),
+			Dir:        step.Process.Dir,
+		}
+	}
+	raw, _ := json.Marshal(canonical)
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
+func validStepKind(value StepKind) bool {
+	switch value {
+	case StepSimulation, StepConfigure, StepBuild:
+		return true
+	default:
+		return false
+	}
+}
+
+func validStepID(value string) bool {
+	if len(value) < 1 || len(value) > 64 {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9' && index > 0) ||
+			(character == '-' && index > 0) || (character == '_' && index > 0) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validEnvironment(value string) bool {
+	key, _, found := strings.Cut(value, "=")
+	return found && validEnvironmentKey(key) && !serviceOwnedEnvironmentKey(key)
+}
+
+func validEnvironmentKey(value string) bool {
+	if value == "" {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if (character >= 'A' && character <= 'Z') || character == '_' || (character >= '0' && character <= '9' && index > 0) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func serviceOwnedEnvironmentKey(value string) bool {
+	switch strings.ToUpper(value) {
+	case "UNIT_TEST_SERVICE_TOKEN", "UNIT_TEST_IDE_TOKEN", "UNIT_TEST_IDE_STATUS_HANDLE":
+		return true
+	default:
+		return false
+	}
+}
+
+func containsNUL(value string) bool { return strings.IndexByte(value, 0) >= 0 }
+
+func nilBoundary(boundary ExecutionBoundary) bool {
+	if boundary == nil {
+		return true
+	}
+	value := reflect.ValueOf(boundary)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
+}

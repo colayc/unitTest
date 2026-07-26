@@ -21,12 +21,6 @@ const (
 	maxPersistedOutput      = 4 * 1024 * 1024
 )
 
-type StartRequest struct {
-	IdempotencyKey string
-	Scenario       Scenario
-	Timeout        time.Duration
-}
-
 type ManagerConfig struct {
 	Store               Store
 	Publisher           Publisher
@@ -185,7 +179,10 @@ func NewManager(config ManagerConfig) (*Manager, error) {
 func (m *Manager) Healthy() bool { return m != nil && m.healthy.Load() && !m.closing.Load() }
 
 func (m *Manager) Start(ctx context.Context, request StartRequest) (Task, error) {
-	if m == nil || request.IdempotencyKey == "" || !ValidScenario(request.Scenario) ||
+	if request.Kind == "" {
+		request.Kind = KindSimulation
+	}
+	if m == nil || request.IdempotencyKey == "" || request.Kind != KindSimulation || request.WorkspaceGeneration != "" || !ValidScenario(request.Scenario) ||
 		request.Timeout < time.Millisecond || request.Timeout > 24*time.Hour || request.Timeout%time.Millisecond != 0 {
 		return Task{}, ErrInvalidArgument
 	}
@@ -412,7 +409,8 @@ func (m *Manager) start(request StartRequest, active map[string]*activeTask) tas
 	now := m.clock.Now()
 	created := Task{
 		ID: m.newID(), IdempotencyKey: request.IdempotencyKey, RequestHash: requestHash,
-		Scenario: request.Scenario, Timeout: request.Timeout, Status: StatusQueued, CreatedAt: now,
+		Kind: request.Kind, Request: append(json.RawMessage(nil), request.Request...), WorkspaceGeneration: request.WorkspaceGeneration,
+		PlanFingerprint: FingerprintPlan(request.Plan), Scenario: request.Scenario, Timeout: request.Timeout, Status: StatusQueued, CreatedAt: now,
 	}
 	draft := eventDraft(created.ID, EventTaskCreated, now, map[string]any{"status": StatusQueued})
 	stored, events, err := m.store.Create(context.Background(), created, draft)

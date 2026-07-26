@@ -2,6 +2,7 @@ package task_test
 
 import (
 	"context"
+	"reflect"
 	"regexp"
 	"testing"
 	"time"
@@ -85,7 +86,7 @@ func TestApplyTransitionRejectsStateConflictWithoutMutatingCurrent(t *testing.T)
 	if err == nil {
 		t.Fatal("expected state conflict")
 	}
-	if got != (task.Task{}) {
+	if !reflect.DeepEqual(got, task.Task{}) {
 		t.Fatalf("failed transition returned task %#v, want zero value", got)
 	}
 	if current.Status != task.StatusQueued || current.ErrorCode != "existing_code" || current.ErrorMessage != "existing message" {

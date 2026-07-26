@@ -41,6 +41,12 @@ const (
 
 type Task struct {
 	ID, IdempotencyKey, RequestHash string
+	Kind                            Kind
+	Request                         json.RawMessage
+	WorkspaceGeneration             string
+	PlanFingerprint                 string
+	ActiveStep                      string
+	Steps                           []StepSnapshot
 	Scenario                        Scenario
 	Timeout                         time.Duration
 	Status                          Status
@@ -49,6 +55,16 @@ type Task struct {
 	StartedAt, FinishedAt           *time.Time
 	LastSequence                    int64
 	ErrorCode, ErrorMessage         string
+}
+
+type StepSnapshot struct {
+	ID         string
+	Kind       StepKind
+	Status     StepStatus
+	StartedAt  *time.Time
+	FinishedAt *time.Time
+	ExitCode   *int
+	ErrorCode  string
 }
 
 type EventDraft struct {
