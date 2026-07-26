@@ -225,6 +225,8 @@ Phase 2 引入协议 `1.1`：
 
 - 在新的 Process Group/Session 中启动进程。
 - 设置父进程死亡信号，并记录 PID、PGID 和进程启动标识。
+- Linux 将父进程死亡信号绑定到创建子进程的 OS thread；Process Host 和 target 必须由专用的 locked OS thread 启动，并在对应子进程完成 `Wait`、确认已回收后才释放该 thread。
+- Process Host 继承 control pipe 后，Linux CLI 必须创建带 `CLOEXEC`、`O_NONBLOCK` 且已注册 Go netpoll 的专用 fd 副本，再把该副本的所有权交给 Host 状态机。不得假设从另一个 goroutine 对普通 blocking fd 调用 `Close` 一定能中断正在执行的 `read`。
 - 取消时先向整个进程组发送 `SIGTERM`。
 - 超过内部宽限期后向整个进程组发送 `SIGKILL`。
 - 启动清理只有在 PID 与启动标识仍匹配时才终止残留进程，避免 PID 重用造成误杀。

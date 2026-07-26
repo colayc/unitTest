@@ -30,8 +30,35 @@ func init() {
 		}
 		unix.CloseOnExec(statusFD)
 		defer status.Close()
+		control, err := newInterruptibleProcessHostControl(stdin)
+		if err != nil {
+			fmt.Fprintln(stderr, "invalid process host control")
+			return 2
+		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		return processhost.Run(ctx, processhost.NewPlatform(), stdin, status, stdout, stderr)
+		return processhost.Run(ctx, processhost.NewPlatform(), control, status, stdout, stderr)
 	}
+}
+
+func newInterruptibleProcessHostControl(reader io.Reader) (*os.File, error) {
+	file, ok := reader.(*os.File)
+	if !ok {
+		return nil, os.ErrInvalid
+	}
+	fd, err := unix.Dup(int(file.Fd()))
+	if err != nil {
+		return nil, err
+	}
+	unix.CloseOnExec(fd)
+	if err := unix.SetNonblock(fd, true); err != nil {
+		_ = unix.Close(fd)
+		return nil, err
+	}
+	control := os.NewFile(uintptr(fd), "process-host-control")
+	if control == nil {
+		_ = unix.Close(fd)
+		return nil, os.ErrInvalid
+	}
+	return control, nil
 }

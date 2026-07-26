@@ -1789,6 +1789,8 @@ identity, err := linuxStartIdentity(host.Process.Pid)
 if err != nil { host.Process.Kill(); return nil, err }
 ```
 
+生产实现不能直接在任意 Go runtime thread 上调用上述 `host.Start()`。Linux 的 `Pdeathsig` 跟随创建子进程的 OS thread，因此 Host 和 target 都通过专用的 locked OS thread 启动；该 thread 一直保留到对应 `cmd.Wait()` 完成。身份读取失败时也必须先确保子进程退出并由 `Wait` 回收，再释放 thread：target 执行 kill-and-reap，Host 关闭 control 并等待其自行退出。
+
 `Start` 编码唯一 `start` command，读取唯一 `started/error` status，并把 target PGID 写入内存 lease。`Terminate` 先编码 `stop`，等待宽限期；超时后先 kill target PGID，再 kill Host Session。所有管道在 `Close` 中只关闭一次。
 
 - [ ] **Step 5：实现 `/proc` 身份校验和启动清理**
@@ -1809,14 +1811,16 @@ func init() {
 		status := os.NewFile(uintptr(statusFD), "process-host-status")
 		if status == nil { fmt.Fprintln(stderr, "invalid process host status handle"); return 2 }
 		defer status.Close()
+		control, err := newInterruptibleProcessHostControl(stdin)
+		if err != nil { fmt.Fprintln(stderr, "invalid process host control"); return 2 }
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		return processhost.Run(ctx, processhost.NewPlatform(), stdin, status, stdout, stderr)
+		return processhost.Run(ctx, processhost.NewPlatform(), control, status, stdout, stderr)
 	}
 }
 ```
 
-`processhost.NewPlatform()` 由 `host_unix.go` 提供。
+`newInterruptibleProcessHostControl` 只接受生产入口的 `*os.File` stdin：复制 fd 0，为副本设置 `CLOEXEC` 和 `O_NONBLOCK`，再通过 `os.NewFile` 把副本注册到 Go netpoll；成功后由 `processhost.Run` 独占并关闭该副本。这样 target 自然结束或 context 取消时，Host 状态机关闭 control owner 可以可靠唤醒另一个 goroutine 中阻塞的读取。不能只复制 blocking fd，也不能依赖对 blocking pipe 的跨 goroutine `Close`。`processhost.NewPlatform()` 由 `host_unix.go` 提供。
 
 - [ ] **Step 7：运行 Linux 测试与竞态检测**
 
@@ -1827,6 +1831,8 @@ gofmt -w apps/test-service/internal/processcontrol apps/test-service/internal/pr
 go test ./apps/test-service/internal/processcontrol ./apps/test-service/internal/processhost ./apps/test-service/cmd/unit-test-service
 go test -race ./apps/test-service/internal/processcontrol ./apps/test-service/internal/processhost
 ```
+
+Linux 原生测试必须额外覆盖两条回归路径：control 副本支持 read deadline 且 `Close` 能唤醒阻塞读取；target 自然退出后 Process Host 能关闭 stdout/stderr、发布 exit status 并退出，不能停在等待 control reader 的环形依赖中。
 
 预期：全部 PASS；孙进程 PID 在取消后不存在。
 
