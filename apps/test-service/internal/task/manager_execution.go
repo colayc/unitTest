@@ -236,8 +236,9 @@ func (m *Manager) start(request StartRequest, active map[string]*activeTask) tas
 	current := &activeTask{
 		task: stored, plan: request.Plan, boundary: request.Boundary,
 		timerStop: make(chan struct{}), timeoutStop: make(chan struct{}),
-		watcherStop: make(chan struct{}),
+		watcherStop: make(chan struct{}), execution: newExecutionSignal(),
 	}
+	m.executionSignals.Store(stored.ID, current.execution)
 	active[stored.ID] = current
 	m.armTimeout(current)
 	if err := m.startNextStep(current, active); err != nil {
@@ -257,7 +258,17 @@ func (m *Manager) startNextStep(current *activeTask, active map[string]*activeTa
 		return m.finishPendingStep(current, active)
 	}
 	step := current.plan.Steps[current.nextStep]
-	process, err := m.processes.Prepare(context.Background(), step.Process, current.task.ID, m.serviceInstanceID)
+	if current.execution.currentCause() != "" {
+		return nil
+	}
+	process, err := m.processes.Prepare(current.execution.ctx, step.Process, current.task.ID, m.serviceInstanceID)
+	if current.execution.currentCause() != "" {
+		if process != nil {
+			m.setCurrentProcess(current, process)
+			current.cleanupWithoutDone = true
+		}
+		return nil
+	}
 	if err != nil {
 		return m.finishPendingStep(current, active)
 	}
@@ -305,12 +316,32 @@ func (m *Manager) startNextStep(current *activeTask, active map[string]*activeTa
 		m.abandon(current)
 		return ErrStorageUnavailable
 	}
-	if err := process.Start(context.Background()); err != nil {
+	if current.execution.currentCause() != "" {
+		current.cleanupWithoutDone = true
+		return nil
+	}
+	startErr := process.Start(current.execution.ctx)
+	if current.execution.currentCause() != "" {
+		if startErr != nil {
+			current.cleanupWithoutDone = true
+			return nil
+		}
+		updatedLease := process.Lease()
+		updatedLease.TaskID = current.task.ID
+		updatedLease.ServiceInstanceID = m.serviceInstanceID
+		if err := m.store.UpdateLease(context.Background(), updatedLease); err != nil {
+			m.tripStorage(active)
+			return err
+		}
+		m.watch(current)
+		return nil
+	}
+	if startErr != nil {
 		current.cause = OutcomeInfrastructureFailed
 		current.cleanupWithoutDone = true
 		current.processCompleted = true
 		m.terminate(current)
-		_, finishErr := m.finishExecution(current, ProcessResult{Err: err}, OutcomeInfrastructureFailed, false, active)
+		_, finishErr := m.finishExecution(current, ProcessResult{Err: startErr}, OutcomeInfrastructureFailed, false, active)
 		if finishErr != nil {
 			m.abandon(current)
 		}
@@ -432,11 +463,14 @@ func (m *Manager) finishExecution(
 	failPending bool,
 	active map[string]*activeTask,
 ) (Task, error) {
-	finishedAt := m.clock.Now()
-	updatedTask := current.task
-	updatedTask.ActiveStep = ""
-	stepMutations := terminalStepMutations(current, result, outcome, failPending, finishedAt)
-	finished, err := m.persistFinished(updatedTask, outcome, current.process != nil, stepMutations, active)
+	finished, err := m.persistTerminal(
+		current,
+		result,
+		outcome,
+		failPending,
+		current.process != nil,
+		active,
+	)
 	if err != nil {
 		return current.task, err
 	}
@@ -447,23 +481,62 @@ func (m *Manager) finishExecution(
 }
 
 func (m *Manager) finishAfterCloseFailure(current *activeTask, active map[string]*activeTask) (Task, error) {
-	finishedAt := m.clock.Now()
-	updatedTask := current.task
-	updatedTask.ActiveStep = ""
-	steps := terminalStepMutations(
+	outcome := current.cause
+	failPending := false
+	if outcome == "" {
+		outcome = OutcomeInfrastructureFailed
+		failPending = true
+	}
+	finished, err := m.persistTerminal(
 		current,
 		ProcessResult{Err: errors.New("process close failed")},
-		OutcomeInfrastructureFailed,
-		true,
-		finishedAt,
+		outcome,
+		failPending,
+		false,
+		active,
 	)
-	finished, err := m.persistFinished(updatedTask, OutcomeInfrastructureFailed, false, steps, active)
 	if err != nil {
 		return current.task, err
 	}
 	current.task = finished
 	m.stopActive(current)
 	return finished, nil
+}
+
+func (m *Manager) persistTerminal(
+	current *activeTask,
+	result ProcessResult,
+	outcome Outcome,
+	failPending bool,
+	deleteLease bool,
+	active map[string]*activeTask,
+) (Task, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		finishedAt := m.clock.Now()
+		updatedTask := current.task
+		updatedTask.ActiveStep = ""
+		steps := terminalStepMutations(current, result, outcome, failPending, finishedAt)
+		finished, err := m.persistFinished(updatedTask, outcome, deleteLease, steps, active)
+		if !errors.Is(err, ErrConflict) {
+			return finished, err
+		}
+		if attempt == 0 {
+			current.cause = OutcomeInfrastructureFailed
+			current.failPendingStep = failPending
+			result = ProcessResult{Err: ErrConflict}
+			outcome = OutcomeInfrastructureFailed
+			continue
+		}
+		current.recoveryRequired = true
+		m.stopActive(current)
+		if current.process == nil {
+			delete(active, current.task.ID)
+		} else {
+			m.maybeStartClose(current)
+		}
+		return current.task, ErrConflict
+	}
+	panic("unreachable")
 }
 
 func terminalStepMutations(
@@ -551,7 +624,9 @@ func (m *Manager) persistFinished(
 		DeleteLease: deleteLease, Artifacts: []Artifact{artifact},
 	})
 	if err != nil {
-		m.tripStorage(active)
+		if !errors.Is(err, ErrConflict) {
+			m.tripStorage(active)
+		}
 		return current, err
 	}
 	if !m.publishAll(committed, active) {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
@@ -52,6 +53,7 @@ type Manager struct {
 	healthy             atomic.Bool
 	closing             atomic.Bool
 	shutdownPending     atomic.Bool
+	executionSignals    sync.Map
 	storageFailed       bool // command-loop owned
 }
 
@@ -141,6 +143,50 @@ type activeTask struct {
 	cleanupWithoutDone    bool
 	failPendingStep       bool
 	stoppedWatchers       bool
+	execution             *executionSignal
+}
+
+type executionSignal struct {
+	mu     sync.Mutex
+	ctx    context.Context
+	cancel context.CancelFunc
+	cause  Outcome
+}
+
+func newExecutionSignal() *executionSignal {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &executionSignal{ctx: ctx, cancel: cancel}
+}
+
+func (s *executionSignal) claim(cause Outcome) Outcome {
+	if s == nil {
+		return cause
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cause == "" {
+		s.cause = cause
+		s.cancel()
+	}
+	return s.cause
+}
+
+func (s *executionSignal) currentCause() Outcome {
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cause
+}
+
+func (s *executionSignal) stop() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cancel()
 }
 
 func NewManager(config ManagerConfig) (*Manager, error) {
@@ -249,6 +295,7 @@ func (m *Manager) Cancel(ctx context.Context, id string) (Task, error) {
 	if err := m.send(ctx, taskIDCommand{id: id, cancel: true, reply: reply}); err != nil {
 		return Task{}, err
 	}
+	m.signalExecution(id, OutcomeCancelled)
 	select {
 	case response := <-reply:
 		return response.task, publicError(response.err)
@@ -343,8 +390,24 @@ func (m *Manager) loop() {
 			}
 		case timeoutCommand:
 			if current := active[string(value)]; current != nil && current.task.Status != StatusFinished && current.cause == "" {
-				current.cause = OutcomeTimedOut
-				if current.processCompleted {
+				cause := current.execution.claim(OutcomeTimedOut)
+				if cause != OutcomeTimedOut {
+					break
+				}
+				current.cause = cause
+				if current.process == nil {
+					if _, err := m.finishExecution(current, ProcessResult{}, cause, false, active); err != nil {
+						m.abandon(current)
+					}
+					if active[string(value)] == current && current.task.Status == StatusFinished {
+						delete(active, string(value))
+					}
+					break
+				}
+				if current.cleanupWithoutDone && !current.terminating {
+					current.processCompleted = true
+					m.terminate(current)
+				} else if current.processCompleted {
 					m.maybeStartClose(current)
 				} else {
 					m.terminate(current)
@@ -450,6 +513,9 @@ func (m *Manager) cancel(id string, active map[string]*activeTask) taskResponse 
 	if current.cause != "" {
 		return taskResponse{task: current.task}
 	}
+	if cause := current.execution.claim(OutcomeCancelled); cause != OutcomeCancelled {
+		return taskResponse{task: current.task}
+	}
 	now := m.clock.Now()
 	cancelling, err := ApplyTransition(current.task, Transition{From: StatusRunning, To: StatusCancelling, At: now})
 	if err != nil {
@@ -470,7 +536,21 @@ func (m *Manager) cancel(id string, active map[string]*activeTask) taskResponse 
 	if !m.publishAll(events, active) {
 		return taskResponse{task: current.task, err: ErrStorageUnavailable}
 	}
-	if current.processCompleted {
+	if current.process == nil {
+		finished, finishErr := m.finishExecution(current, ProcessResult{}, OutcomeCancelled, false, active)
+		if finishErr != nil {
+			m.abandon(current)
+			return taskResponse{task: current.task, err: finishErr}
+		}
+		if active[id] == current && current.task.Status == StatusFinished {
+			delete(active, id)
+		}
+		return taskResponse{task: finished}
+	}
+	if current.cleanupWithoutDone && !current.terminating {
+		current.processCompleted = true
+		m.terminate(current)
+	} else if current.processCompleted {
 		m.maybeStartClose(current)
 	} else {
 		m.terminate(current)
@@ -512,7 +592,9 @@ func (m *Manager) armTimeout(current *activeTask) {
 	go func() {
 		select {
 		case <-wait:
-			m.sendInternal(timeoutCommand(taskID))
+			if current.execution.claim(OutcomeTimedOut) == OutcomeTimedOut {
+				m.sendInternal(timeoutCommand(taskID))
+			}
 		case <-stop:
 		case <-m.stopped:
 		}
@@ -689,9 +771,19 @@ func (m *Manager) stopActive(current *activeTask) {
 		return
 	}
 	current.stoppedWatchers = true
+	current.execution.stop()
+	m.executionSignals.Delete(current.task.ID)
 	close(current.timerStop)
 	close(current.timeoutStop)
 	close(current.watcherStop)
+}
+
+func (m *Manager) signalExecution(taskID string, cause Outcome) Outcome {
+	value, ok := m.executionSignals.Load(taskID)
+	if !ok {
+		return ""
+	}
+	return value.(*executionSignal).claim(cause)
 }
 
 func (m *Manager) abandon(current *activeTask) {
@@ -744,9 +836,13 @@ func (m *Manager) tripStorage(active map[string]*activeTask) {
 	}
 	m.storageFailed = true
 	m.healthy.Store(false)
-	for _, current := range active {
+	for taskID, current := range active {
 		current.recoveryRequired = true
 		m.stopActive(current)
+		if current.process == nil {
+			delete(active, taskID)
+			continue
+		}
 		if current.processCompleted {
 			m.maybeStartClose(current)
 		} else if !current.terminating {

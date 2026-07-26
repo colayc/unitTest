@@ -172,6 +172,49 @@ func TestManagerPrepareFailureFinishesQueuedTask(t *testing.T) {
 	}
 }
 
+func TestManagerPrepareFailureArtifactFaultDoesNotCrashAndQuiescesOtherActiveTask(t *testing.T) {
+	f := newManagerFixture(t)
+	other, err := f.manager.Start(context.Background(), task.StartRequest{
+		IdempotencyKey: testID(89), Scenario: task.ScenarioHang, Timeout: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.processes.prepareErr = errors.New("prepare failed before process allocation")
+	f.artifacts.fail = task.ErrStorageUnavailable
+
+	if _, err := f.manager.Start(context.Background(), task.StartRequest{
+		IdempotencyKey: testID(90), Scenario: task.ScenarioSuccess, Timeout: time.Hour,
+	}); !errors.Is(err, task.ErrStorageUnavailable) {
+		t.Fatalf("Start error = %v, want ErrStorageUnavailable", err)
+	}
+	f.awaitUnhealthy(t)
+	f.awaitProcessTerminate(t, f.process, 1)
+	f.process.complete(task.ProcessResult{Err: context.Canceled})
+	f.awaitProcessClose(t, f.process)
+
+	stored, err := f.store.Get(context.Background(), other.ID)
+	if err != nil || stored.Status != task.StatusRunning || stored.Outcome != "" {
+		t.Fatalf("other task after storage recovery = %#v, %v", stored, err)
+	}
+}
+
+func TestManagerPrepareFailureTerminalStoreFaultDoesNotCrash(t *testing.T) {
+	f := newManagerFixture(t)
+	f.processes.prepareErr = errors.New("prepare failed before process allocation")
+	f.store.failApply = task.ErrStorageUnavailable
+
+	if _, err := f.manager.Start(context.Background(), task.StartRequest{
+		IdempotencyKey: testID(91), Scenario: task.ScenarioSuccess, Timeout: time.Hour,
+	}); !errors.Is(err, task.ErrStorageUnavailable) {
+		t.Fatalf("Start error = %v, want ErrStorageUnavailable", err)
+	}
+	f.awaitUnhealthy(t)
+	if got := f.process.terminateCalls(); got != 0 {
+		t.Fatalf("Terminate calls without a prepared process = %d, want 0", got)
+	}
+}
+
 func TestManagerPublisherPanicTripsCircuitAfterCommittedEvent(t *testing.T) {
 	f := newManagerFixture(t)
 	f.publisher.panicType = task.EventTaskCreated
@@ -930,6 +973,7 @@ type fakeStore struct {
 	failAppend   error
 	failApply    error
 	failApplyAt  int
+	failApplyFor int
 	failApplyErr error
 	applyCalls   int
 }
@@ -996,7 +1040,8 @@ func (s *fakeStore) Apply(_ context.Context, mutation task.Mutation) (task.Task,
 	if s.failApply != nil {
 		return task.Task{}, nil, s.failApply
 	}
-	if s.failApplyAt > 0 && s.applyCalls == s.failApplyAt {
+	if s.failApplyAt > 0 && s.applyCalls >= s.failApplyAt &&
+		s.applyCalls < s.failApplyAt+max(s.failApplyFor, 1) {
 		return task.Task{}, nil, s.failApplyErr
 	}
 	current, ok := s.tasks[mutation.Task.ID]
@@ -1102,6 +1147,12 @@ func (s *fakeStore) lastMutation() task.Mutation {
 	return s.mutations[len(s.mutations)-1]
 }
 
+func (s *fakeStore) applyCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.applyCalls
+}
+
 func (s *fakeStore) firstMutation() task.Mutation {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1172,30 +1223,62 @@ func (p *recordingPublisher) ofType(kind task.EventType) []task.Event {
 }
 
 type fakeProcessFactory struct {
-	mu         sync.Mutex
-	next       *fakeProcess
-	specs      []task.ProcessSpec
-	prepareErr error
-	queue      []*fakeProcess
+	mu              sync.Mutex
+	next            *fakeProcess
+	specs           []task.ProcessSpec
+	prepareErr      error
+	queue           []*fakeProcess
+	prepareBlockAt  int
+	prepareBlock    <-chan struct{}
+	prepareEntered  chan struct{}
+	prepareCanceled chan struct{}
 }
 
-func (f *fakeProcessFactory) Prepare(_ context.Context, spec task.ProcessSpec, taskID, serviceID string) (task.ManagedProcess, error) {
+func (f *fakeProcessFactory) Prepare(ctx context.Context, spec task.ProcessSpec, taskID, serviceID string) (task.ManagedProcess, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	if taskID == "" || serviceID == "" {
+		f.mu.Unlock()
 		return nil, errors.New("missing ids")
 	}
 	f.specs = append(f.specs, spec)
-	if f.prepareErr != nil {
-		return nil, f.prepareErr
-	}
+	call := len(f.specs)
+	prepareErr := f.prepareErr
 	process := f.next
-	if len(f.queue) > 0 {
+	if prepareErr == nil && len(f.queue) > 0 {
 		process = f.queue[0]
 		f.queue = f.queue[1:]
 	}
+	var block <-chan struct{}
+	var entered chan struct{}
+	var canceled chan struct{}
+	if f.prepareBlockAt == call {
+		block = f.prepareBlock
+		entered = f.prepareEntered
+		canceled = f.prepareCanceled
+	}
+	f.mu.Unlock()
+	if entered != nil {
+		close(entered)
+	}
+	if canceled != nil {
+		go func() {
+			<-ctx.Done()
+			close(canceled)
+		}()
+	}
+	if block != nil {
+		<-block
+	}
+	if prepareErr != nil {
+		return nil, prepareErr
+	}
+	if process == nil {
+		return nil, errors.New("missing fake process")
+	}
+	process.mu.Lock()
 	process.lease.TaskID = taskID
 	process.lease.ServiceInstanceID = serviceID
+	process.mu.Unlock()
 	return process, nil
 }
 func (f *fakeProcessFactory) prepareCount() int {
@@ -1219,6 +1302,9 @@ type fakeProcess struct {
 	terminates     int
 	closes         int
 	startErr       error
+	startBlock     <-chan struct{}
+	startEntered   chan struct{}
+	startCanceled  chan struct{}
 	terminateBlock <-chan struct{}
 	terminateErr   error
 	closeErr       error
@@ -1232,12 +1318,25 @@ func newFakeProcess() *fakeProcess {
 	}
 }
 func (p *fakeProcess) Lease() task.ProcessLease { p.mu.Lock(); defer p.mu.Unlock(); return p.lease }
-func (p *fakeProcess) Start(context.Context) error {
+func (p *fakeProcess) Start(ctx context.Context) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	p.starts++
 	p.lease.TargetProcessGroup = 42
-	return p.startErr
+	block, entered, canceled, startErr := p.startBlock, p.startEntered, p.startCanceled, p.startErr
+	p.mu.Unlock()
+	if entered != nil {
+		close(entered)
+	}
+	if canceled != nil {
+		go func() {
+			<-ctx.Done()
+			close(canceled)
+		}()
+	}
+	if block != nil {
+		<-block
+	}
+	return startErr
 }
 func (p *fakeProcess) Output() <-chan task.ProcessOutput { return p.outputs }
 func (p *fakeProcess) Done() <-chan task.ProcessResult   { return p.done }
