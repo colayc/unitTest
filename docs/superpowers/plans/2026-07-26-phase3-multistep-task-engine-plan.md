@@ -14,6 +14,7 @@
 - Protocol 不能构造或传入 `ExecutionPlan`、`ProcessSpec`、executable、args、environment 或 working directory。
 - Task timeout 覆盖完整计划；取消、超时或 Step 失败后不得启动后续 Step。
 - v1.1 simulation 请求、Task Snapshot、事件枚举和 artifact wire shape 保持不变。
+- v1.1 simulation 的 `task.output` payload 继续严格输出 `{stream,text,truncated}`；journal 内部可保存 `stepId`，但只能在 v1.2 投影中暴露。
 - 运行中的 Service 重启后仍不重新附着原进程。
 - SQLite migration 必须原子化并通过 `PRAGMA foreign_key_check`。
 - 所有测试按 TDD 顺序先观察失败，再写最小实现。
@@ -84,6 +85,7 @@ type StartRequest struct {
 	IdempotencyKey string
 	Kind           Kind
 	Request        json.RawMessage
+	WorkspaceGeneration string
 	Timeout        time.Duration
 	Plan           ExecutionPlan
 	Boundary       ExecutionBoundary
@@ -131,7 +133,7 @@ go test ./apps/test-service/internal/task -run 'TestValidatePlan' -count=1
 
 在 `plan.go` 实现固定 `Version == 1`、1–8 个 Step、唯一且受限的 Step ID、已知 kind、非空 executable/Dir、参数与环境 NUL 检查、环境 key 检查和 fingerprint。每个 Step 还必须通过非空 `ExecutionBoundary` 的 executable/cwd 检查。`FingerprintPlan` 对完整执行字段进行规范 JSON + SHA-256，但只持久化 hash；runtime-only boundary 不进入 fingerprint 或数据库；`CommandSummary` 不得包含 environment。
 
-同时在 `model.go` 为 `Task` 增加 `Kind`、`Request`、`PlanFingerprint`、`ActiveStep` 和 `Steps []StepSnapshot`，其中：
+同时在 `model.go` 为 `Task` 增加 `Kind`、`Request`、`WorkspaceGeneration`、`PlanFingerprint`、`ActiveStep` 和 `Steps []StepSnapshot`。simulation 的 `WorkspaceGeneration` 固定为空；后续 `cmake_build` 必须使用 64 位 lowercase hex generation。其中：
 
 ```go
 type StepSnapshot struct {
@@ -206,6 +208,7 @@ type Store interface {
 
 - `kind == simulation`；
 - `request_json == {"scenario":"success"}`；
+- `workspace_generation == ""`；
 - `scenario` 保留；
 - `task_steps` 可写入/读取；
 - `PRAGMA foreign_key_check` 无结果；
@@ -240,10 +243,15 @@ go test ./apps/test-service/internal/taskstore -run 'TestMigration002|TestStepPe
 kind TEXT NOT NULL CHECK (kind IN ('simulation','cmake_build')),
 scenario TEXT,
 request_json TEXT NOT NULL CHECK (json_valid(request_json)),
+workspace_generation TEXT NOT NULL DEFAULT ''
+  CHECK (workspace_generation = '' OR (
+    length(workspace_generation) = 64 AND
+    workspace_generation NOT GLOB '*[^0-9a-f]*'
+  )),
 plan_fingerprint TEXT NOT NULL DEFAULT '',
 active_step TEXT NOT NULL DEFAULT '',
-CHECK ((kind = 'simulation' AND scenario IS NOT NULL) OR
-       (kind = 'cmake_build' AND scenario IS NULL))
+CHECK ((kind = 'simulation' AND scenario IS NOT NULL AND workspace_generation = '') OR
+       (kind = 'cmake_build' AND scenario IS NULL AND workspace_generation <> ''))
 ```
 
 新增 `task_steps`：
@@ -389,6 +397,8 @@ git commit -m "feat: execute service-owned plans step by step"
 - 修改： `apps/test-service/internal/taskstore/sqlite_test.go`
 - 修改： `apps/test-service/internal/artifactstore/store.go`
 - 修改： `apps/test-service/internal/artifactstore/store_test.go`
+- 修改： `apps/test-service/internal/server/server.go`
+- 修改： `apps/test-service/internal/server/server_test.go`
 
 **接口：**
 - 输入： Task/Step persistence 与 Phase 2 EventBroker/ArtifactStore。
@@ -414,7 +424,8 @@ type TaskSummary struct {
 断言：
 
 - `task.step_started` 与 Step running/lease 在同一 mutation；
-- `task.output` payload 带正确 `stepId`；
+- journal 内部的 `task.output` payload 带正确 `stepId`；
+- v1.1 subscription 投影移除 `stepId`，并保持原 `{stream,text,truncated}` payload；
 - Step finished 后才出现下一个 Step started；
 - simulation v1.1 不广播新增 Step event，以维持旧 event enum；
 - Task summary 对 simulation 仍能通过旧 wire artifact 投影；
@@ -447,25 +458,28 @@ go test ./apps/test-service/internal/task ./apps/test-service/internal/taskstore
 
 - [ ] **Step 3：实现事件、artifact registry 和恢复**
 
-`task.output` payload 改为：
+内部 journal 的 `task.output` payload 改为：
 
 ```json
 {
   "stepId": "simulation",
   "stream": "stdout",
-  "data": "Base64URL",
+  "text": "output",
   "truncated": false
 }
 ```
+
+`server.toProtocolEvent` 接收目标 Protocol version。v1.1 对 simulation `task.output` 明确投影回 `{stream,text,truncated}`；v1.2 在 Phase 3C 直接保留 `stepId`。不得把 journal 中的新字段直接透传给 v1.1。
 
 为 artifact validation 增加按 Task kind 的 writer，而不是把 `scenario` 固定为唯一 JSON shape。simulation 继续生成 wire kind `task-summary`；内部 summary 增加 kind/steps 时，由 simulation writer 输出旧兼容字段。
 
 `RecoverInterrupted` transaction 同时：
 
 - 删除 process lease；
-- 将 Task 改为 `finished/interrupted`；
+- 将 simulation 的 queued/running/cancelling Task 改为 `finished/interrupted`；
+- 将 `cmake_build` 的 running/cancelling Task 改为 `finished/interrupted`，但保留 queued Task，供 Phase 3C 重新验证和规划；
 - running Step 改为 failed 并写 `SERVICE_RESTARTED`；
-- pending Step 改为 skipped；
+- 仅对被标记 interrupted 的 Task 把 pending Step 改为 skipped；保留 queued `cmake_build` 的 pending Steps；
 - 追加一个 `task.finished` 事件。
 
 - [ ] **Step 4：运行完整 Go 测试和 race**
@@ -506,6 +520,7 @@ git commit -m "feat: journal multistep task execution"
 - v1.1 `tasks/start` 仍拒绝 `kind`、`steps`、`executable`、`args` 和 `env`；
 - simulation 的 Task Snapshot 仍满足现有 v1.1 Schema；
 - simulation 事件仍全部满足现有 v1.1 event enum；
+- simulation `task.output` 仍严格等于 `{stream,text,truncated}`，不出现 `stepId` 或 `data`；
 - E2E 的成功、取消、重连、崩溃恢复继续通过。
 
 Schema 测试输入：

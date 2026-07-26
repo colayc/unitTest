@@ -475,6 +475,11 @@ git commit -m "feat: plan validated cmake build tasks"
 - 修改： `apps/test-service/cmd/unit-test-service/main.go`
 - 修改： `apps/test-service/cmd/unit-test-service/main_test.go`
 - 修改： `apps/test-service/internal/session/session.go`
+- 修改： `apps/test-service/internal/task/manager.go`
+- 修改： `apps/test-service/internal/task/manager_execution.go`
+- 修改： `apps/test-service/internal/task/manager_execution_test.go`
+- 修改： `apps/test-service/internal/taskstore/recovery.go`
+- 修改： `apps/test-service/internal/taskstore/sqlite_test.go`
 - 修改： `tools/service-probe/src/probe.ts`
 - 修改： `tools/service-probe/src/probe.test.ts`
 
@@ -508,6 +513,9 @@ type Config struct {
 - data layout 包含 `build/`；
 - Runtime partial initialization failure 逆序关闭 Inspector/Store/Artifacts/lock；
 - untrusted workspace 可运行 simulation，但 Phase 3 methods 返回 `WORKSPACE_TRUST_REQUIRED`。
+- 重启时 simulation queued/running/cancelling 与 running/cancelling `cmake_build` 保持 interrupted 语义；
+- queued `cmake_build` 在 Coordinator 可用后从持久化的规范化 request 重新验证 generation/profile/toolchain/target 并生成新 Plan；
+- queued build 的 generation 或引用对象失效时以 `interrupted` 和 `WORKSPACE_CHANGED`/对应稳定错误码结束，不启动进程。
 
 - [ ] **Step 2：运行 Runtime/CLI tests 并确认失败**
 
@@ -529,11 +537,13 @@ Runtime Open 顺序：
 4. 清理 process leases；
 5. 打开 workspace root；
 6. 解析 CMake；
-7. 创建 probe runner、toolchain registry、Inspector、Coordinator；
-8. 恢复 tasks/artifacts；
-9. 创建 Broker/Manager。
+7. 创建 probe runner、toolchain registry、Inspector；
+8. 创建 Broker/Manager，恢复 simulation 与活动 `cmake_build`；
+9. 创建 Coordinator；
+10. 读取保留的 queued `cmake_build`，逐个重新验证并通过 `Manager.ResumeQueued` 装载新的 runtime-only Plan/boundary；
+11. 恢复 artifacts 并完成 Runtime publication。
 
-`Runtime` 实现 Session Backend 的 inspect/targets/startBuild。所有 Phase 3 method 先检查 `TrustedWorkspace`。
+`Manager.ResumeQueued` 只能接收 Store 已存在且仍为 queued 的 `cmake_build`，不得创建新 task/event 或改变原 idempotency identity；它在启动前执行与新任务相同的 plan fingerprint 和 boundary 校验。`Runtime` 实现 Session Backend 的 inspect/targets/startBuild。所有 Phase 3 method 先检查 `TrustedWorkspace`。
 
 Service probe `StartServiceOptions` 增加 workspace root、trusted flag、bundle root/dev CMake，并对这些路径执行现有 safe-error redaction。
 
