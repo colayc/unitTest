@@ -381,6 +381,119 @@ func TestManagerPublisherFailurePreservesClaimedShutdown(t *testing.T) {
 	assertPublisherFailureOutcome(t, stored, task.OutcomeInterrupted)
 }
 
+func TestManagerShutdownPreclaimFinishesQueuedTaskWithoutProcess(t *testing.T) {
+	f := newManagerFixture(t)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	f.publisher.blockType = task.EventTaskCreated
+	f.publisher.blockEntered = make(chan task.Event, 1)
+	f.publisher.block = release
+	key := testID(40)
+
+	startResult := make(chan taskResponseResult, 1)
+	go func() {
+		got, err := f.manager.Start(context.Background(), task.StartRequest{
+			IdempotencyKey: key,
+			Scenario:       task.ScenarioSuccess,
+			Timeout:        time.Second,
+		})
+		startResult <- taskResponseResult{task: got, err: err}
+	}()
+	select {
+	case <-f.publisher.blockEntered:
+	case <-time.After(time.Second):
+		t.Fatal("task.created publisher was not entered")
+	}
+
+	shutdownCtx := newObservedCancelContext()
+	shutdownResult := make(chan error, 1)
+	go func() { shutdownResult <- f.manager.Shutdown(shutdownCtx) }()
+	awaitSignal(t, shutdownCtx.waiting, "Shutdown did not claim the queued task")
+	releaseOnce.Do(func() { close(release) })
+
+	select {
+	case <-startResult:
+	case <-time.After(time.Second):
+		t.Fatal("Start did not return after task.created publisher release")
+	}
+	select {
+	case err := <-shutdownResult:
+		if err != nil {
+			t.Fatalf("Shutdown = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not finish queued task without Process")
+	}
+	stored, err := f.store.FindByIdempotencyKey(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertPublisherFailureOutcome(t, stored, task.OutcomeInterrupted)
+	if f.processes.prepareCount() != 0 || f.process.startCalls() != 0 ||
+		f.process.terminateCalls() != 0 || f.process.closeCalls() != 0 {
+		t.Fatalf("Process calls for preclaimed queued task: prepare=%d start=%d terminate=%d close=%d",
+			f.processes.prepareCount(), f.process.startCalls(), f.process.terminateCalls(), f.process.closeCalls())
+	}
+}
+
+func TestManagerShutdownPreclaimFinishesQueuedTaskAfterNilPrepare(t *testing.T) {
+	f := newManagerFixture(t)
+	prepareEntered := make(chan struct{})
+	prepareCanceled := make(chan struct{})
+	releasePrepare := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(releasePrepare) }) })
+	f.processes.prepareErr = errors.New("prepare returned no process")
+	f.processes.prepareBlockAt = 1
+	f.processes.prepareEntered = prepareEntered
+	f.processes.prepareCanceled = prepareCanceled
+	f.processes.prepareBlock = releasePrepare
+	key := testID(41)
+
+	startResult := make(chan taskResponseResult, 1)
+	go func() {
+		got, err := f.manager.Start(context.Background(), task.StartRequest{
+			IdempotencyKey: key,
+			Scenario:       task.ScenarioSuccess,
+			Timeout:        time.Second,
+		})
+		startResult <- taskResponseResult{task: got, err: err}
+	}()
+	awaitSignal(t, prepareEntered, "initial Prepare was not entered")
+
+	shutdownCtx := newObservedCancelContext()
+	shutdownResult := make(chan error, 1)
+	go func() { shutdownResult <- f.manager.Shutdown(shutdownCtx) }()
+	awaitSignal(t, shutdownCtx.waiting, "Shutdown did not enter closing wait")
+	awaitSignal(t, prepareCanceled, "Shutdown did not cancel blocked Prepare")
+	releaseOnce.Do(func() { close(releasePrepare) })
+
+	select {
+	case <-startResult:
+	case <-time.After(time.Second):
+		t.Fatal("Start did not return after nil Prepare")
+	}
+	select {
+	case err := <-shutdownResult:
+		if err != nil {
+			t.Fatalf("Shutdown = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not finish queued task after nil Prepare")
+	}
+	stored, err := f.store.FindByIdempotencyKey(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertPublisherFailureOutcome(t, stored, task.OutcomeInterrupted)
+	if f.processes.prepareCount() != 1 || f.process.startCalls() != 0 ||
+		f.process.terminateCalls() != 0 || f.process.closeCalls() != 0 {
+		t.Fatalf("Process calls after nil Prepare: prepare=%d start=%d terminate=%d close=%d",
+			f.processes.prepareCount(), f.process.startCalls(), f.process.terminateCalls(), f.process.closeCalls())
+	}
+}
+
 func TestManagerPublisherFailureRetriesTerminalConflictOnce(t *testing.T) {
 	f := newManagerFixture(t)
 	f.publisher.panicType = task.EventTaskCreated

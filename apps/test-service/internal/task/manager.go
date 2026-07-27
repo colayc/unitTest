@@ -591,7 +591,20 @@ func (m *Manager) loop() {
 			for _, current := range active {
 				if initiate && current.task.Status != StatusFinished &&
 					current.execution.claim(OutcomeInterrupted) == OutcomeInterrupted {
-					if current.processCompleted {
+					if current.process == nil {
+						if _, err := m.finishExecution(
+							current,
+							ProcessResult{},
+							OutcomeInterrupted,
+							false,
+							active,
+						); err != nil {
+							m.abandon(current)
+						}
+						if active[current.task.ID] == current && current.task.Status == StatusFinished {
+							delete(active, current.task.ID)
+						}
+					} else if current.processCompleted {
 						m.maybeStartClose(current)
 					} else {
 						m.terminate(current)
