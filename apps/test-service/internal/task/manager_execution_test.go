@@ -373,6 +373,119 @@ func TestManagerCancellationConvergesWhileInitialPrepareIsBlocked(t *testing.T) 
 	}
 }
 
+func TestManagerPersistsPreparedLeaseBeforeHandlingClaimedCause(t *testing.T) {
+	tests := []struct {
+		name  string
+		want  task.Outcome
+		claim func(*testing.T, *managerFixture, string) <-chan error
+	}{
+		{
+			name: "cancel",
+			want: task.OutcomeCancelled,
+			claim: func(_ *testing.T, f *managerFixture, taskID string) <-chan error {
+				done := make(chan error, 1)
+				go func() {
+					_, err := f.manager.Cancel(context.Background(), taskID)
+					done <- err
+				}()
+				return done
+			},
+		},
+		{
+			name: "timeout",
+			want: task.OutcomeTimedOut,
+			claim: func(t *testing.T, f *managerFixture, _ string) <-chan error {
+				f.clock.fire(t, time.Second)
+				return nil
+			},
+		},
+		{
+			name: "shutdown",
+			want: task.OutcomeInterrupted,
+			claim: func(_ *testing.T, f *managerFixture, _ string) <-chan error {
+				done := make(chan error, 1)
+				go func() { done <- f.manager.Shutdown(context.Background()) }()
+				return done
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newManagerFixture(t)
+			prepareEntered := make(chan struct{})
+			prepareCanceled := make(chan struct{})
+			releasePrepare := make(chan struct{})
+			var releaseOnce sync.Once
+			t.Cleanup(func() { releaseOnce.Do(func() { close(releasePrepare) }) })
+			f.processes.prepareBlockAt = 1
+			f.processes.prepareEntered = prepareEntered
+			f.processes.prepareCanceled = prepareCanceled
+			f.processes.prepareBlock = releasePrepare
+
+			startResult := make(chan taskResponseResult, 1)
+			go func() {
+				got, err := f.manager.Start(context.Background(), task.StartRequest{
+					IdempotencyKey: testID(76),
+					Scenario:       task.ScenarioSuccess,
+					Timeout:        time.Second,
+				})
+				startResult <- taskResponseResult{task: got, err: err}
+			}()
+			awaitSignal(t, prepareEntered, "initial Prepare was not entered")
+			createdEvents := f.publisher.ofType(task.EventTaskCreated)
+			if len(createdEvents) != 1 {
+				t.Fatalf("task.created events = %d, want 1", len(createdEvents))
+			}
+			taskID := createdEvents[0].TaskID
+			claimDone := tt.claim(t, f, taskID)
+			awaitSignal(t, prepareCanceled, "claimed cause did not cancel blocked Prepare")
+			releaseOnce.Do(func() { close(releasePrepare) })
+
+			select {
+			case result := <-startResult:
+				if result.err != nil {
+					t.Fatalf("Start after claimed cause = %#v, %v", result.task, result.err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("Start did not return after initial Prepare was released")
+			}
+			if claimDone != nil {
+				select {
+				case err := <-claimDone:
+					if err != nil {
+						t.Fatalf("%s claim = %v", tt.name, err)
+					}
+				case <-time.After(time.Second):
+					t.Fatalf("%s claim did not return", tt.name)
+				}
+			}
+
+			first := f.store.firstMutation()
+			if first.Task.Status != task.StatusQueued ||
+				first.Expected != task.StatusQueued ||
+				len(first.Steps) != 0 ||
+				len(first.Events) != 0 ||
+				first.PutLease == nil ||
+				first.PutLease.TaskID != taskID {
+				t.Fatalf("first mutation after %s claim = %#v, want queued pre-lease", tt.name, first)
+			}
+			if got := f.process.startCalls(); got != 0 {
+				t.Fatalf("Start calls after %s claim = %d, want 0", tt.name, got)
+			}
+			f.awaitProcessTerminate(t, f.process, 1)
+			f.awaitProcessClose(t, f.process)
+			finished := f.awaitStoredTask(t, taskID, task.StatusFinished)
+			if finished.Outcome != tt.want {
+				t.Fatalf("outcome after %s claim = %s, want %s", tt.name, finished.Outcome, tt.want)
+			}
+			if lease := f.store.lease(taskID); lease.TaskID != "" {
+				t.Fatalf("%s cleanup retained lease %#v", tt.name, lease)
+			}
+		})
+	}
+}
+
 func TestManagerConcurrentCancellationDeliversOneQueuedCommand(t *testing.T) {
 	f := newManagerFixtureWithCommandQueue(t, 1)
 	prepareEntered := make(chan struct{})
@@ -473,9 +586,10 @@ func TestManagerConcurrentCancellationDeliversOneQueuedCommand(t *testing.T) {
 	if got := f.store.getCount(taskID); got != 1 {
 		t.Fatalf("Store.Get calls from concurrent Cancel delivery = %d, want 1", got)
 	}
-	if got := f.store.mutationCountFor(taskID); got != 1 {
-		t.Fatalf("successful task mutations from concurrent Cancel = %d, want 1", got)
+	if got := f.store.mutationCountFor(taskID); got != 2 {
+		t.Fatalf("successful task mutations from concurrent Cancel = %d, want 2 including pre-lease", got)
 	}
+	assertPreparedLeaseMutationCount(t, f.store, taskID, 1)
 	if finished.Outcome != task.OutcomeCancelled {
 		t.Fatalf("outcome = %s, want %s", finished.Outcome, task.OutcomeCancelled)
 	}
@@ -762,16 +876,25 @@ func TestManagerCloseFailurePreservesCancellationCause(t *testing.T) {
 	}
 	close(releaseClose)
 
-	finished := f.awaitTask(t, started.ID, task.StatusFinished)
+	f.awaitUnhealthy(t)
 	f.process.mu.Lock()
 	f.process.closeErr = nil
 	f.process.mu.Unlock()
+	retry, cancelRetry := context.WithTimeout(context.Background(), time.Second)
+	defer cancelRetry()
+	if err := f.manager.Shutdown(retry); err != nil {
+		t.Fatalf("Shutdown retry after lease-free Close failure = %v", err)
+	}
+	finished := f.awaitStoredTask(t, started.ID, task.StatusFinished)
 	if finished.Outcome != task.OutcomeCancelled {
 		t.Fatalf("outcome = %s, want %s", finished.Outcome, task.OutcomeCancelled)
 	}
 	assertStepStatuses(t, finished, task.StepSucceeded, task.StepSkipped)
 	if got := f.processes.prepareCount(); got != 1 {
 		t.Fatalf("Prepare calls = %d, want 1", got)
+	}
+	if got := f.process.closeCalls(); got != 2 {
+		t.Fatalf("Close calls = %d, want retained-owner retry", got)
 	}
 }
 
@@ -797,10 +920,16 @@ func TestManagerCloseFailurePreservesTotalTimeoutCause(t *testing.T) {
 	awaitSignal(t, startCanceled, "total timeout was not accepted before Close returned")
 	close(releaseClose)
 
-	finished := f.awaitTask(t, started.ID, task.StatusFinished)
+	f.awaitUnhealthy(t)
 	f.process.mu.Lock()
 	f.process.closeErr = nil
 	f.process.mu.Unlock()
+	retry, cancelRetry := context.WithTimeout(context.Background(), time.Second)
+	defer cancelRetry()
+	if err := f.manager.Shutdown(retry); err != nil {
+		t.Fatalf("Shutdown retry after lease-free Close failure = %v", err)
+	}
+	finished := f.awaitStoredTask(t, started.ID, task.StatusFinished)
 	if finished.Outcome != task.OutcomeTimedOut {
 		t.Fatalf("outcome = %s, want %s", finished.Outcome, task.OutcomeTimedOut)
 	}
@@ -808,23 +937,29 @@ func TestManagerCloseFailurePreservesTotalTimeoutCause(t *testing.T) {
 	if got := f.processes.prepareCount(); got != 1 {
 		t.Fatalf("Prepare calls = %d, want 1", got)
 	}
+	if got := f.process.closeCalls(); got != 2 {
+		t.Fatalf("Close calls = %d, want retained-owner retry", got)
+	}
 }
 
 func TestManagerStoreConflictFinishesWithoutStartingLaterSteps(t *testing.T) {
 	tests := []struct {
-		name         string
-		failApplyAt  int
-		wantStatuses []task.StepStatus
+		name              string
+		failApplyAt       int
+		wantStatuses      []task.StepStatus
+		wantPreparedLease int
 	}{
 		{
-			name:         "persist completed step",
-			failApplyAt:  2,
-			wantStatuses: []task.StepStatus{task.StepFailed, task.StepSkipped},
+			name:              "persist completed step",
+			failApplyAt:       3,
+			wantStatuses:      []task.StepStatus{task.StepFailed, task.StepSkipped},
+			wantPreparedLease: 1,
 		},
 		{
-			name:         "persist next step start",
-			failApplyAt:  3,
-			wantStatuses: []task.StepStatus{task.StepSucceeded, task.StepFailed},
+			name:              "persist next step start",
+			failApplyAt:       5,
+			wantStatuses:      []task.StepStatus{task.StepSucceeded, task.StepFailed},
+			wantPreparedLease: 2,
 		},
 	}
 	for _, tt := range tests {
@@ -847,6 +982,7 @@ func TestManagerStoreConflictFinishesWithoutStartingLaterSteps(t *testing.T) {
 				t.Fatalf("outcome = %s, want %s", finished.Outcome, task.OutcomeInfrastructureFailed)
 			}
 			assertStepStatuses(t, finished, tt.wantStatuses...)
+			assertPreparedLeaseMutationCount(t, f.store, started.ID, tt.wantPreparedLease)
 			if got := second.startCalls(); got != 0 {
 				t.Fatalf("second Start calls = %d, want 0", got)
 			}
@@ -872,7 +1008,9 @@ func TestManagerTerminalStoreConflictIsTaskLocal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.store.failApplyAt = 3
+	assertPreparedLeaseMutationCount(t, f.store, conflicted.ID, 1)
+	assertPreparedLeaseMutationCount(t, f.store, unaffected.ID, 1)
+	f.store.failApplyAt = f.store.applyCount() + 1
 	f.store.failApplyErr = task.ErrConflict
 
 	f.process.complete(task.ProcessResult{ExitCode: 0})
@@ -907,20 +1045,23 @@ func TestManagerRepeatedTerminalStoreConflictStopsAfterInfrastructureRetry(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.store.failApplyAt = 2
+	assertPreparedLeaseMutationCount(t, f.store, conflicted.ID, 1)
+	f.store.failApplyAt = f.store.applyCount() + 1
 	f.store.failApplyFor = 2
 	f.store.failApplyErr = task.ErrConflict
 
 	f.process.complete(task.ProcessResult{ExitCode: 0})
 	f.awaitProcessClose(t, f.process)
 	deadline := time.Now().Add(time.Second)
-	for f.store.applyCount() < 3 && time.Now().Before(deadline) {
+	for f.store.applyCount() < 4 && time.Now().Before(deadline) {
 	}
-	if got := f.store.applyCount(); got != 3 {
-		t.Fatalf("Apply calls after repeated terminal conflict = %d, want 3", got)
+	if got := f.store.applyCount(); got != 4 {
+		t.Fatalf("Apply calls after repeated terminal conflict = %d, want 4 including pre-lease", got)
 	}
-	time.Sleep(50 * time.Millisecond)
-	if got := f.store.applyCount(); got != 3 {
+	if _, err := f.manager.Get(context.Background(), conflicted.ID); err != nil {
+		t.Fatalf("Get after repeated terminal conflict = %v", err)
+	}
+	if got := f.store.applyCount(); got != 4 {
 		t.Fatalf("Apply calls kept retrying after repeated terminal conflict: %d", got)
 	}
 	if !f.manager.Healthy() {
@@ -976,7 +1117,7 @@ func TestManagerCancelConflictCleansPreemptedPreparedProcessLocally(t *testing.T
 	}
 	targetFirst.complete(task.ProcessResult{ExitCode: 0})
 	awaitSignal(t, prepareEntered, "target second Prepare was not entered")
-	f.store.failApplyAt = f.store.applyCount() + 1
+	f.store.failApplyAt = f.store.applyCount() + 2
 	f.store.failApplyErr = task.ErrConflict
 
 	cancelResult := make(chan taskResponseResult, 1)
@@ -998,6 +1139,7 @@ func TestManagerCancelConflictCleansPreemptedPreparedProcessLocally(t *testing.T
 	f.awaitProcessTerminate(t, targetSecond, 1)
 	f.awaitProcessClose(t, targetSecond)
 	finishedTarget := f.awaitTask(t, target.ID, task.StatusFinished)
+	assertPreparedLeaseMutationCount(t, f.store, target.ID, 2)
 	if finishedTarget.Outcome != task.OutcomeInfrastructureFailed {
 		t.Fatalf("target outcome = %s, want %s", finishedTarget.Outcome, task.OutcomeInfrastructureFailed)
 	}
@@ -1029,21 +1171,49 @@ func TestManagerStorageFailureNeverPreparesNextStep(t *testing.T) {
 	second := newFakeProcess()
 	f.processes.queue = []*fakeProcess{f.process, second}
 	t.Cleanup(func() { second.completeOnce(task.ProcessResult{Err: errors.New("test cleanup")}) })
-	f.store.failApplyAt = 2
+	f.store.failApplyAt = 3
 	f.store.failApplyErr = task.ErrStorageUnavailable
 
-	if _, err := f.manager.Start(context.Background(), twoStepStartRequest(testID(97), time.Minute, fixedBoundary{})); err != nil {
+	started, err := f.manager.Start(context.Background(), twoStepStartRequest(testID(97), time.Minute, fixedBoundary{}))
+	if err != nil {
 		t.Fatal(err)
 	}
 	f.process.complete(task.ProcessResult{ExitCode: 0})
 	f.awaitProcessClose(t, f.process)
 	f.awaitUnhealthy(t)
+	assertPreparedLeaseMutationCount(t, f.store, started.ID, 1)
 
 	deadline := time.Now().Add(200 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		if f.processes.prepareCount() > 1 || second.startCalls() > 0 {
 			t.Fatalf("later step reached process factory: Prepare=%d Start=%d", f.processes.prepareCount(), second.startCalls())
 		}
+	}
+}
+
+func assertPreparedLeaseMutationCount(
+	t *testing.T,
+	store *fakeStore,
+	taskID string,
+	want int,
+) {
+	t.Helper()
+	count := 0
+	for _, mutation := range store.mutationsFor(taskID) {
+		if !isPreparedLeaseMutation(mutation) {
+			continue
+		}
+		count++
+		if mutation.Task.Status != mutation.Expected ||
+			len(mutation.Steps) != 0 ||
+			len(mutation.Events) != 0 ||
+			len(mutation.Artifacts) != 0 ||
+			mutation.DeleteLease {
+			t.Fatalf("prepared lease mutation = %#v", mutation)
+		}
+	}
+	if count != want {
+		t.Fatalf("prepared lease mutations for %s = %d, want %d", taskID, count, want)
 	}
 }
 

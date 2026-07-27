@@ -108,6 +108,42 @@ func TestOpenUsesRequiredOrderAndRecoversPersistentState(t *testing.T) {
 	}
 }
 
+func TestOpenCleansQueuedPreparedLeaseBeforeInterruptedRecovery(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "data")
+	layout, err := PrepareDataDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedQueuedPreparedTask(t, layout.Database, testLease())
+	runner := &recordingRunner{}
+	active, err := Open(Config{
+		DataDir:           root,
+		ServiceExecutable: os.Args[0],
+		Platform:          platformForTest(),
+		Clock:             task.RealClock{},
+		NewID:             task.NewID,
+		TerminationGrace:  time.Millisecond,
+		dependencies:      testDependencies(runner, nil),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer active.Close()
+	cleaned := runner.cleanupLeases()
+	if len(cleaned) != 1 || cleaned[0].TaskID != interruptedTaskID {
+		t.Fatalf("queued prepared cleanup leases = %#v", cleaned)
+	}
+	got, err := active.Get(context.Background(), interruptedTaskID)
+	if err != nil ||
+		got.Status != task.StatusFinished ||
+		got.Outcome != task.OutcomeInterrupted {
+		t.Fatalf("recovered queued prepared task = %#v, %v", got, err)
+	}
+	if leases := activeLeases(t, layout.Database); len(leases) != 0 {
+		t.Fatalf("recovery retained leases %#v", leases)
+	}
+}
+
 func TestOpenIgnoresLeaseIdentityMismatchButStillRecovers(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "data")
 	layout, err := PrepareDataDir(root)
@@ -438,6 +474,49 @@ func TestManagedProcessConcurrentCloseBoundsUnderlyingCloseAndStopsOutput(t *tes
 }
 
 const interruptedTaskID = "11111111111111111111111111111111"
+
+func seedQueuedPreparedTask(t *testing.T, database string, lease task.ProcessLease) {
+	t.Helper()
+	store, err := taskstore.Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Date(2026, 7, 27, 15, 0, 0, 0, time.UTC)
+	created := task.Task{
+		ID:             interruptedTaskID,
+		IdempotencyKey: "queued-prepared-recovery-key",
+		RequestHash:    strings.Repeat("c", 64),
+		Kind:           task.KindSimulation,
+		Request:        json.RawMessage(`{"scenario":"hang"}`),
+		Scenario:       task.ScenarioHang,
+		Timeout:        time.Minute,
+		Status:         task.StatusQueued,
+		CreatedAt:      now,
+	}
+	created, _, err = store.Create(
+		context.Background(),
+		created,
+		nil,
+		task.EventDraft{
+			TaskID:  created.ID,
+			Type:    task.EventTaskCreated,
+			At:      now,
+			Payload: []byte(`{"status":"queued"}`),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease.TaskID = created.ID
+	if _, _, err := store.Apply(context.Background(), task.Mutation{
+		Task:     created,
+		Expected: task.StatusQueued,
+		PutLease: &lease,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func seedInterruptedTask(t *testing.T, database string, lease task.ProcessLease) {
 	t.Helper()

@@ -111,8 +111,26 @@ func TestManagerPersistsPreparedLeaseBeforeStartAndRefreshesItAfterStart(t *test
 		t.Fatal(err)
 	}
 	mutation := f.store.firstMutation()
-	if mutation.PutLease == nil || mutation.PutLease.TaskID != started.ID || mutation.PutLease.TargetProcessGroup != 0 {
-		t.Fatalf("initial lease mutation = %#v", mutation)
+	if mutation.Task.Status != task.StatusQueued ||
+		mutation.Expected != task.StatusQueued ||
+		len(mutation.Steps) != 0 ||
+		len(mutation.Events) != 0 ||
+		mutation.PutLease == nil ||
+		mutation.PutLease.TaskID != started.ID ||
+		mutation.PutLease.TargetProcessGroup != 0 {
+		t.Fatalf("prepared lease mutation = %#v", mutation)
+	}
+	if got := eventTypes(f.store.eventsForTask(started.ID)); !reflect.DeepEqual(got, []task.EventType{
+		task.EventTaskCreated,
+		task.EventTaskStarted,
+	}) {
+		t.Fatalf("durable events = %v", got)
+	}
+	if got := f.publisher.types(); !reflect.DeepEqual(got, []task.EventType{
+		task.EventTaskCreated,
+		task.EventTaskStarted,
+	}) {
+		t.Fatalf("published events = %v", got)
 	}
 	lease := f.store.lease(started.ID)
 	if lease.TargetProcessGroup != 42 || lease.HostPID != 41 || lease.ServiceInstanceID != testID(99) {
@@ -153,6 +171,92 @@ func TestManagerApplyFailureTripsCircuitWithoutStartingTarget(t *testing.T) {
 	f.awaitTerminate(t, 1)
 }
 
+func TestManagerPreparedLeaseConflictKeepsOwnerUntilCleanup(t *testing.T) {
+	f := newManagerFixture(t)
+	f.store.failApplyMatch = func(mutation task.Mutation) error {
+		if isPreparedLeaseMutation(mutation) {
+			return task.ErrConflict
+		}
+		return nil
+	}
+	releaseClose := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(releaseClose) }) })
+	f.process.mu.Lock()
+	f.process.closeErr = errors.New("first Close failed after pre-lease conflict")
+	f.process.closeBlock = releaseClose
+	f.process.mu.Unlock()
+	t.Cleanup(func() {
+		f.process.mu.Lock()
+		f.process.closeErr = nil
+		f.process.mu.Unlock()
+	})
+
+	accepted, err := f.manager.Start(context.Background(), task.StartRequest{
+		IdempotencyKey: testID(95),
+		Scenario:       task.ScenarioSuccess,
+		Timeout:        time.Second,
+	})
+	if !errors.Is(err, task.ErrConflict) {
+		t.Fatalf("Start error = %v, want ErrConflict", err)
+	}
+	if accepted.ID == "" || accepted.Status != task.StatusQueued {
+		t.Fatalf("accepted task = %#v, want durable queued task", accepted)
+	}
+	if got := f.process.startCalls(); got != 0 {
+		t.Fatalf("Start calls = %d, want 0", got)
+	}
+	f.awaitTerminate(t, 1)
+	f.awaitProcessClose(t, f.process)
+	if !f.manager.Healthy() {
+		t.Fatal("pre-lease conflict tripped the Manager circuit before Close failed")
+	}
+	if lease := f.store.lease(accepted.ID); lease.TaskID != "" {
+		t.Fatalf("conflicted pre-lease unexpectedly persisted %#v", lease)
+	}
+	if got := eventTypes(f.store.eventsForTask(accepted.ID)); !reflect.DeepEqual(got, []task.EventType{
+		task.EventTaskCreated,
+	}) {
+		t.Fatalf("durable events before Close retry = %v", got)
+	}
+	if got := f.publisher.types(); !reflect.DeepEqual(got, []task.EventType{
+		task.EventTaskCreated,
+	}) {
+		t.Fatalf("published events before Close retry = %v", got)
+	}
+	if len(f.artifacts.summariesCopy()) != 0 {
+		t.Fatal("pre-lease conflict created a terminal artifact before cleanup")
+	}
+
+	releaseOnce.Do(func() { close(releaseClose) })
+	f.awaitUnhealthy(t)
+	durable, getErr := f.store.Get(context.Background(), accepted.ID)
+	if getErr != nil || durable.Status != task.StatusQueued || durable.Outcome != "" {
+		t.Fatalf("task after first Close error = %#v, %v", durable, getErr)
+	}
+
+	f.process.mu.Lock()
+	f.process.closeErr = nil
+	f.process.mu.Unlock()
+	retry, cancelRetry := context.WithTimeout(context.Background(), time.Second)
+	defer cancelRetry()
+	if err := f.manager.Shutdown(retry); err != nil {
+		t.Fatalf("retry Shutdown = %v", err)
+	}
+	finished, err := f.store.Get(context.Background(), accepted.ID)
+	if err != nil ||
+		finished.Status != task.StatusFinished ||
+		finished.Outcome != task.OutcomeInfrastructureFailed {
+		t.Fatalf("finished task after retained-owner retry = %#v, %v", finished, err)
+	}
+	if lease := f.store.lease(accepted.ID); lease.TaskID != "" {
+		t.Fatalf("final cleanup retained lease %#v", lease)
+	}
+	if got := f.process.closeCalls(); got != 2 {
+		t.Fatalf("Close calls = %d, want initial failure plus explicit retry", got)
+	}
+}
+
 func TestManagerPrepareFailureFinishesQueuedTask(t *testing.T) {
 	f := newManagerFixture(t)
 	f.processes.prepareErr = errors.New("private executable path")
@@ -169,6 +273,42 @@ func TestManagerPrepareFailureFinishesQueuedTask(t *testing.T) {
 		task.EventTaskCreated, task.EventArtifactCreated, task.EventTaskFinished,
 	}) {
 		t.Fatalf("events = %v", got)
+	}
+}
+
+func TestManagerPrepareErrorWithProcessPersistsLeaseBeforeCleanup(t *testing.T) {
+	f := newManagerFixture(t)
+	f.processes.prepareErr = errors.New("prepare returned a cleanup handle")
+	f.processes.processOnPrepareError = true
+
+	accepted, err := f.manager.Start(context.Background(), task.StartRequest{
+		IdempotencyKey: testID(96),
+		Scenario:       task.ScenarioSuccess,
+		Timeout:        time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.process.startCalls() != 0 {
+		t.Fatalf("Start calls = %d, want 0", f.process.startCalls())
+	}
+	if accepted.Status != task.StatusQueued {
+		t.Fatalf("accepted task = %#v, want queued until cleanup", accepted)
+	}
+	first := f.store.firstMutation()
+	if first.Task.Status != task.StatusQueued ||
+		len(first.Events) != 0 ||
+		first.PutLease == nil {
+		t.Fatalf("first mutation = %#v, want queued pre-lease", first)
+	}
+	f.awaitTerminate(t, 1)
+	f.awaitProcessClose(t, f.process)
+	finished := f.awaitStoredTask(t, accepted.ID, task.StatusFinished)
+	if finished.Outcome != task.OutcomeInfrastructureFailed {
+		t.Fatalf("outcome = %s", finished.Outcome)
+	}
+	if lease := f.store.lease(accepted.ID); lease.TaskID != "" {
+		t.Fatalf("terminal cleanup retained lease %#v", lease)
 	}
 }
 
@@ -1659,21 +1799,22 @@ func (f *managerFixture) awaitOutputTruncation(t *testing.T) {
 }
 
 type fakeStore struct {
-	mu           sync.Mutex
-	tasks        map[string]task.Task
-	keys         map[string]string
-	getCalls     map[string]int
-	eventsValue  []task.Event
-	artifacts    []task.Artifact
-	leases       map[string]task.ProcessLease
-	mutations    []task.Mutation
-	sequence     int64
-	failAppend   error
-	failApply    error
-	failApplyAt  int
-	failApplyFor int
-	failApplyErr error
-	applyCalls   int
+	mu             sync.Mutex
+	tasks          map[string]task.Task
+	keys           map[string]string
+	getCalls       map[string]int
+	eventsValue    []task.Event
+	artifacts      []task.Artifact
+	leases         map[string]task.ProcessLease
+	mutations      []task.Mutation
+	sequence       int64
+	failAppend     error
+	failApply      error
+	failApplyAt    int
+	failApplyFor   int
+	failApplyErr   error
+	failApplyMatch func(task.Mutation) error
+	applyCalls     int
 }
 
 func newFakeStore() *fakeStore {
@@ -1745,6 +1886,11 @@ func (s *fakeStore) Apply(_ context.Context, mutation task.Mutation) (task.Task,
 	if s.failApplyAt > 0 && s.applyCalls >= s.failApplyAt &&
 		s.applyCalls < s.failApplyAt+max(s.failApplyFor, 1) {
 		return task.Task{}, nil, s.failApplyErr
+	}
+	if s.failApplyMatch != nil {
+		if err := s.failApplyMatch(mutation); err != nil {
+			return task.Task{}, nil, err
+		}
 	}
 	current, ok := s.tasks[mutation.Task.ID]
 	if !ok {
@@ -1880,6 +2026,18 @@ func (s *fakeStore) mutationCountFor(id string) int {
 	return count
 }
 
+func (s *fakeStore) mutationsFor(id string) []task.Mutation {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var result []task.Mutation
+	for _, mutation := range s.mutations {
+		if mutation.Task.ID == id {
+			result = append(result, mutation)
+		}
+	}
+	return result
+}
+
 func (s *fakeStore) firstMutation() task.Mutation {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1930,6 +2088,15 @@ func (s *fakeStore) assertStrictSequences(t *testing.T) {
 			t.Fatalf("sequence[%d] = %d", index, event.Sequence)
 		}
 	}
+}
+
+func isPreparedLeaseMutation(mutation task.Mutation) bool {
+	return mutation.PutLease != nil &&
+		mutation.Task.Status == mutation.Expected &&
+		len(mutation.Steps) == 0 &&
+		len(mutation.Events) == 0 &&
+		len(mutation.Artifacts) == 0 &&
+		!mutation.DeleteLease
 }
 
 type recordingPublisher struct {
@@ -1988,15 +2155,16 @@ func (p *recordingPublisher) ofType(kind task.EventType) []task.Event {
 }
 
 type fakeProcessFactory struct {
-	mu              sync.Mutex
-	next            *fakeProcess
-	specs           []task.ProcessSpec
-	prepareErr      error
-	queue           []*fakeProcess
-	prepareBlockAt  int
-	prepareBlock    <-chan struct{}
-	prepareEntered  chan struct{}
-	prepareCanceled chan struct{}
+	mu                    sync.Mutex
+	next                  *fakeProcess
+	specs                 []task.ProcessSpec
+	prepareErr            error
+	queue                 []*fakeProcess
+	prepareBlockAt        int
+	prepareBlock          <-chan struct{}
+	prepareEntered        chan struct{}
+	prepareCanceled       chan struct{}
+	processOnPrepareError bool
 }
 
 func (f *fakeProcessFactory) Prepare(ctx context.Context, spec task.ProcessSpec, taskID, serviceID string) (task.ManagedProcess, error) {
@@ -2008,6 +2176,7 @@ func (f *fakeProcessFactory) Prepare(ctx context.Context, spec task.ProcessSpec,
 	f.specs = append(f.specs, spec)
 	call := len(f.specs)
 	prepareErr := f.prepareErr
+	processOnPrepareError := f.processOnPrepareError
 	process := f.next
 	if prepareErr == nil && len(f.queue) > 0 {
 		process = f.queue[0]
@@ -2035,6 +2204,13 @@ func (f *fakeProcessFactory) Prepare(ctx context.Context, spec task.ProcessSpec,
 		<-block
 	}
 	if prepareErr != nil {
+		if processOnPrepareError && process != nil {
+			process.mu.Lock()
+			process.lease.TaskID = taskID
+			process.lease.ServiceInstanceID = serviceID
+			process.mu.Unlock()
+			return process, prepareErr
+		}
 		return nil, prepareErr
 	}
 	if process == nil {

@@ -120,6 +120,7 @@ type activeTask struct {
 	boundary              ExecutionBoundary
 	nextStep              int
 	process               ManagedProcess
+	leasePersisted        bool
 	terminating           bool
 	segments              []outputSegment
 	bufferedBytes         int
@@ -549,10 +550,18 @@ func (m *Manager) loop() {
 			if current := active[value.taskID]; current != nil && current.closeGeneration == value.generation {
 				if value.err != nil {
 					m.healthy.Store(false)
-					if m.circuitFailed() || current.recoveryRequired {
+					recoveryHandoffSafe := current.task.Status != StatusFinished &&
+						current.leasePersisted
+					if (m.circuitFailed() || current.recoveryRequired) && recoveryHandoffSafe {
 						current.recoveryRequired = true
 						m.stopActive(current)
 						delete(active, value.taskID)
+					} else if m.circuitFailed() ||
+						current.recoveryRequired ||
+						!current.leasePersisted {
+						current.closeStarted = false
+						current.closeComplete = false
+						current.closeFailed = true
 					} else {
 						current.closeStarted = false
 						current.closeComplete = false
@@ -580,6 +589,7 @@ func (m *Manager) loop() {
 							}
 						} else if current.nextStep < len(current.plan.Steps) {
 							current.process = nil
+							current.leasePersisted = false
 							if err := m.startNextStep(current, active); err != nil && !errors.Is(err, ErrStorageUnavailable) {
 								m.abandon(current)
 							}
@@ -609,6 +619,10 @@ func (m *Manager) loop() {
 						}
 						if active[current.task.ID] == current && current.task.Status == StatusFinished {
 							delete(active, current.task.ID)
+						}
+					} else if current.cleanupWithoutDone && !current.terminationComplete {
+						if !current.terminating {
+							m.terminate(current)
 						}
 					} else if current.processCompleted {
 						m.maybeStartClose(current)
@@ -1026,6 +1040,12 @@ func (m *Manager) quiesceActive(active map[string]*activeTask) {
 		m.stopActive(current)
 		if current.process == nil {
 			delete(active, taskID)
+			continue
+		}
+		if current.cleanupWithoutDone && !current.terminationComplete {
+			if !current.terminating {
+				m.terminate(current)
+			}
 			continue
 		}
 		if current.processCompleted {

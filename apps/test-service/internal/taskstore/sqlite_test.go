@@ -430,6 +430,19 @@ func TestRecoverInterruptedFinishesAllActiveTasksAndDeletesLeases(t *testing.T) 
 	store := openTestStore(t)
 	base := time.Date(2026, 7, 22, 7, 0, 0, 0, time.UTC)
 	queued := createTask(t, store, newTask(80, 90, base))
+	queuedLease := task.ProcessLease{
+		TaskID:            queued.ID,
+		HostPID:           43,
+		HostStartIdentity: "queued-prepared",
+		ServiceInstanceID: id(94),
+	}
+	if _, _, err := store.Apply(ctx, task.Mutation{
+		Task:     queued,
+		Expected: task.StatusQueued,
+		PutLease: &queuedLease,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	running := createTask(t, store, newTask(81, 91, base.Add(time.Second)))
 	runningState := mustTransition(t, running, task.Transition{From: task.StatusQueued, To: task.StatusRunning, At: base.Add(2 * time.Second)})
 	lease := task.ProcessLease{TaskID: running.ID, HostPID: 42, HostStartIdentity: "start", ServiceInstanceID: id(92)}
@@ -447,6 +460,10 @@ func TestRecoverInterruptedFinishesAllActiveTasksAndDeletesLeases(t *testing.T) 
 	terminalState.FinishedAt = ptrTime(base.Add(5 * time.Second))
 	if _, _, err := store.Apply(ctx, task.Mutation{Task: terminalState, Expected: task.StatusQueued}); err != nil {
 		t.Fatal(err)
+	}
+	leases, err := store.ActiveLeases(ctx)
+	if err != nil || len(leases) != 2 {
+		t.Fatalf("ActiveLeases before recovery = %#v, %v", leases, err)
 	}
 
 	recoveredAt := base.Add(10 * time.Second)
@@ -467,13 +484,18 @@ func TestRecoverInterruptedFinishesAllActiveTasksAndDeletesLeases(t *testing.T) 
 	if gotTerminal.Outcome != task.OutcomeSucceeded {
 		t.Fatalf("terminal task changed: %#v", gotTerminal)
 	}
-	leases, err := store.ActiveLeases(ctx)
+	leases, err = store.ActiveLeases(ctx)
 	if err != nil || len(leases) != 0 {
 		t.Fatalf("ActiveLeases() = %#v, %v", leases, err)
 	}
-	var physicalLeaseCount int
-	if err := store.db.QueryRow(`SELECT COUNT(*) FROM process_leases WHERE task_id=?`, running.ID).Scan(&physicalLeaseCount); err != nil || physicalLeaseCount != 0 {
-		t.Fatalf("physical lease count = %d, %v", physicalLeaseCount, err)
+	for _, taskID := range []string{queued.ID, running.ID} {
+		var physicalLeaseCount int
+		if err := store.db.QueryRow(
+			`SELECT COUNT(*) FROM process_leases WHERE task_id=?`,
+			taskID,
+		).Scan(&physicalLeaseCount); err != nil || physicalLeaseCount != 0 {
+			t.Fatalf("physical lease count for %s = %d, %v", taskID, physicalLeaseCount, err)
+		}
 	}
 	again, err := store.RecoverInterrupted(ctx, recoveredAt.Add(time.Second))
 	if err != nil || len(again) != 0 {

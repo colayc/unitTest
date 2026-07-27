@@ -262,7 +262,16 @@ pre-lease 写入不得把 first-cause 改为 `infrastructure_failed`。
 
 ### 10.3 非 circuit Close error
 
-正常非 circuit Close failure 的既有 first-cause、terminalization 与 Shutdown retry 语义保持不变。本增量不重构该路径。
+当 `process != nil && leasePersisted=false` 时，ownership safety 同样约束非 circuit Close failure：
+
+- 保留 active owner并设置 `closeFailed=true`；
+- 不调用 `finishAfterCloseFailure`；
+- 不写 terminal Store mutation、artifact或 Publisher event；
+- 后续显式 `Shutdown(ctx)` 通过既有 bounded Close retry再次尝试释放 ownership；
+- 只有 retry Close成功后，才按已经 claim 的 first-cause完成 terminalization；
+- first-cause与最终 outcome保持不变，但 terminal visibility允许延迟到 ownership真正释放之后。
+
+这是仅针对“Process仍由 Manager实际持有但没有 durable lease”的窄例外。`leasePersisted=true` 且非 circuit的 Close failure继续保持既有 terminalization语义。
 
 ## 11. restart recovery
 
@@ -346,7 +355,7 @@ Runtime 启动时继续按现有顺序：
 - Close first-cause与 timeout；
 - nil Process；
 - transient/repeated conflict；
-- normal Close failure；
+- normal Close failure：有 durable lease时保持既有 terminalization；无 durable lease时保留 owner，并在显式 Shutdown Close retry成功后按原 first-cause/outcome完成；
 - focused stress、`-race`、Task 包、Runtime/Session、全 internal 与 `git diff --check`。
 
 ## 13. 兼容与范围
@@ -372,6 +381,6 @@ Runtime 启动时继续按现有顺序：
 3. Publisher circuit Close failure 只有在 durable lease 存在时才释放 active owner。
 4. restart recovery 能清理 queued Prepared Process。
 5. pre-lease Store failure 不启动 Process command、不丢 owner、不伪造 recovery handoff。
-6. first-cause、plan-wide timeout 与现有 Close 语义无回归。
+6. first-cause、plan-wide timeout 与最终 outcome无回归；无 durable lease的 normal Close failure仅延迟 terminal visibility，直到显式 Shutdown Close retry成功。
 7. Protocol、interface、schema、Task 4 范围保持不变。
 8. focused、stress、race、Task、Runtime/Session、全 internal 与 diff check 全部 fresh PASS。

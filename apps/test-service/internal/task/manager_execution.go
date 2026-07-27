@@ -279,24 +279,51 @@ func (m *Manager) startNextStep(current *activeTask, active map[string]*activeTa
 	if current.execution.currentCause() != "" {
 		return nil
 	}
-	process, err := m.processes.Prepare(current.execution.ctx, step.Process, current.task.ID, m.serviceInstanceID)
-	if current.execution.currentCause() != "" {
-		if process != nil {
-			m.setCurrentProcess(current, process)
-			current.cleanupWithoutDone = true
+	process, prepareErr := m.processes.Prepare(
+		current.execution.ctx,
+		step.Process,
+		current.task.ID,
+		m.serviceInstanceID,
+	)
+	if process == nil {
+		if prepareErr == nil {
+			prepareErr = errors.New("process preparation returned no process")
 		}
-		return nil
-	}
-	if err != nil {
 		return m.finishPendingStep(current, active)
 	}
 	m.setCurrentProcess(current, process)
+	if leaseErr := m.persistPreparedLease(current, active); leaseErr != nil {
+		cause := current.execution.resolve(OutcomeInfrastructureFailed)
+		current.cleanupWithoutDone = true
+		current.failPendingStep = cause == OutcomeInfrastructureFailed
+		current.processCompleted = true
+		if !current.terminating {
+			m.terminate(current)
+		}
+		m.maybeStartClose(current)
+		return leaseErr
+	}
+	if current.execution.currentCause() != "" {
+		current.cleanupWithoutDone = true
+		current.processCompleted = true
+		return nil
+	}
+	if prepareErr != nil {
+		current.execution.resolve(OutcomeInfrastructureFailed)
+		current.cleanupWithoutDone = true
+		current.failPendingStep = true
+		current.processCompleted = true
+		m.terminate(current)
+		m.maybeStartClose(current)
+		return nil
+	}
 
 	startedAt := m.clock.Now()
 	runningTask := current.task
 	expectedStatus := current.task.Status
 	events := []EventDraft(nil)
 	if current.task.Status == StatusQueued {
+		var err error
 		runningTask, err = ApplyTransition(current.task, Transition{From: StatusQueued, To: StatusRunning, At: startedAt})
 		if err != nil {
 			m.cleanupPreparedProcess(current)
@@ -308,14 +335,10 @@ func (m *Manager) startNextStep(current *activeTask, active map[string]*activeTa
 	runningStep := runningTask.Steps[current.nextStep]
 	runningStep.Status = StepRunning
 	runningStep.StartedAt = timePointer(startedAt)
-	lease := process.Lease()
-	lease.TaskID = current.task.ID
-	lease.ServiceInstanceID = m.serviceInstanceID
 	stored, committed, err := m.store.Apply(context.Background(), Mutation{
 		Task: runningTask, Expected: expectedStatus,
-		Steps:    []StepMutation{{Step: runningStep, Expected: StepPending}},
-		Events:   events,
-		PutLease: &lease,
+		Steps:  []StepMutation{{Step: runningStep, Expected: StepPending}},
+		Events: events,
 	})
 	if err != nil {
 		cause := current.execution.resolve(OutcomeInfrastructureFailed)
@@ -336,12 +359,14 @@ func (m *Manager) startNextStep(current *activeTask, active map[string]*activeTa
 	}
 	if current.execution.currentCause() != "" {
 		current.cleanupWithoutDone = true
+		current.processCompleted = true
 		return nil
 	}
 	startErr := process.Start(current.execution.ctx)
 	if current.execution.currentCause() != "" {
 		if startErr != nil {
 			current.cleanupWithoutDone = true
+			current.processCompleted = true
 			return nil
 		}
 		updatedLease := process.Lease()
@@ -376,6 +401,29 @@ func (m *Manager) startNextStep(current *activeTask, active map[string]*activeTa
 	return nil
 }
 
+func (m *Manager) persistPreparedLease(
+	current *activeTask,
+	active map[string]*activeTask,
+) error {
+	lease := current.process.Lease()
+	lease.TaskID = current.task.ID
+	lease.ServiceInstanceID = m.serviceInstanceID
+	stored, _, err := m.store.Apply(context.Background(), Mutation{
+		Task:     current.task,
+		Expected: current.task.Status,
+		PutLease: &lease,
+	})
+	if err != nil {
+		if errors.Is(err, ErrStorageUnavailable) {
+			m.tripStorage(active)
+		}
+		return err
+	}
+	current.task = stored
+	current.leasePersisted = true
+	return nil
+}
+
 func validateExecutionPlan(plan ExecutionPlan, boundary ExecutionBoundary) error {
 	if plan.Fingerprint == "" || plan.Fingerprint != FingerprintPlan(plan) {
 		return ErrInvalidArgument
@@ -385,6 +433,7 @@ func validateExecutionPlan(plan ExecutionPlan, boundary ExecutionBoundary) error
 
 func (m *Manager) setCurrentProcess(current *activeTask, process ManagedProcess) {
 	current.process = process
+	current.leasePersisted = false
 	current.processCompleted = false
 	current.terminating = false
 	current.terminationComplete = false
@@ -471,6 +520,7 @@ func (m *Manager) persistSuccessfulStep(current *activeTask, result ProcessResul
 		return err
 	}
 	current.task = stored
+	current.leasePersisted = false
 	return publishCommitted(m, events, active)
 }
 
@@ -493,6 +543,9 @@ func (m *Manager) finishExecution(
 		return current.task, err
 	}
 	current.task = finished
+	if current.process != nil {
+		current.leasePersisted = false
+	}
 	m.stopActive(current)
 	m.maybeStartClose(current)
 	return finished, nil
@@ -575,7 +628,7 @@ func (m *Manager) persistTerminal(
 		updatedTask := current.task
 		updatedTask.ActiveStep = ""
 		steps := terminalStepMutations(current, result, outcome, failPending, finishedAt)
-		finished, err := m.persistFinished(updatedTask, outcome, deleteLease, steps, active)
+		finished, err := m.persistFinished(current, updatedTask, outcome, deleteLease, steps, active)
 		if !errors.Is(err, ErrConflict) {
 			return finished, err
 		}
@@ -646,6 +699,7 @@ func terminalStepMutations(
 }
 
 func (m *Manager) persistFinished(
+	owner *activeTask,
 	current Task,
 	outcome Outcome,
 	deleteLease bool,
@@ -687,6 +741,10 @@ func (m *Manager) persistFinished(
 			m.tripStorage(active)
 		}
 		return current, err
+	}
+	owner.task = stored
+	if deleteLease && owner.process != nil {
+		owner.leasePersisted = false
 	}
 	if !m.publishAll(committed) {
 		m.tripPublisher(active)
