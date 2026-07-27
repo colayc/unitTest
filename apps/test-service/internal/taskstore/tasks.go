@@ -47,7 +47,8 @@ func (s *Store) Create(ctx context.Context, input task.Task, steps []task.StepSn
 	if err != nil {
 		existing, findErr := findTaskByIdempotencyKey(ctx, tx, input.IdempotencyKey)
 		if findErr == nil {
-			if existing.RequestHash == input.RequestHash {
+			if existing.RequestHash == input.RequestHash ||
+				task.EquivalentIdempotencyRequest(existing, input) {
 				return existing, nil, nil
 			}
 			return task.Task{}, nil, task.ErrIdempotencyConflict

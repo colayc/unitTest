@@ -134,7 +134,8 @@ func validTimeout(timeout time.Duration) bool {
 }
 
 func validateStartRequest(request StartRequest) error {
-	if request.IdempotencyKey == "" || !validTimeout(request.Timeout) || !json.Valid(request.Request) ||
+	if _, requestOK := canonicalRequestJSON(request.Request); request.IdempotencyKey == "" ||
+		!validTimeout(request.Timeout) || !requestOK ||
 		request.Plan.Fingerprint == "" || request.Plan.Fingerprint != FingerprintPlan(request.Plan) {
 		return ErrInvalidArgument
 	}
@@ -173,18 +174,20 @@ func cloneExecutionPlan(plan ExecutionPlan) ExecutionPlan {
 }
 
 func hashStartRequest(request StartRequest) string {
+	normalizedRequest, ok := canonicalRequestJSON(request.Request)
+	if !ok {
+		return ""
+	}
 	canonical, _ := json.Marshal(struct {
-		Kind                Kind            `json:"kind"`
-		Request             json.RawMessage `json:"request"`
-		WorkspaceGeneration string          `json:"workspaceGeneration"`
-		TimeoutMS           int64           `json:"timeoutMs"`
-		PlanFingerprint     string          `json:"planFingerprint"`
+		Kind                Kind   `json:"kind"`
+		Request             string `json:"request"`
+		WorkspaceGeneration string `json:"workspaceGeneration"`
+		TimeoutMS           int64  `json:"timeoutMs"`
 	}{
 		Kind:                request.Kind,
-		Request:             request.Request,
+		Request:             string(normalizedRequest),
 		WorkspaceGeneration: request.WorkspaceGeneration,
 		TimeoutMS:           request.Timeout.Milliseconds(),
-		PlanFingerprint:     request.Plan.Fingerprint,
 	})
 	sum := sha256.Sum256(canonical)
 	return hex.EncodeToString(sum[:])
@@ -237,7 +240,7 @@ func (m *Manager) start(request StartRequest, active map[string]*activeTask) tas
 		return taskResponse{err: err}
 	}
 	if len(events) == 0 {
-		if stored.RequestHash != requestHash {
+		if !EquivalentIdempotencyRequest(stored, created) {
 			return taskResponse{err: ErrIdempotencyConflict}
 		}
 		return taskResponse{task: stored}

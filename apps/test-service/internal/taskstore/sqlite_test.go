@@ -53,7 +53,7 @@ func TestStoreCommitsSnapshotAndEventAtomically(t *testing.T) {
 	}
 }
 
-func TestCreateIsIdempotentByKeyAndRequestHash(t *testing.T) {
+func TestCreateIsIdempotentByKeyAndRequestIdentity(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
 	now := time.Date(2026, 7, 22, 1, 0, 0, 0, time.UTC)
@@ -72,13 +72,67 @@ func TestCreateIsIdempotentByKeyAndRequestHash(t *testing.T) {
 		t.Fatalf("idempotent Create() = %#v, %#v", got, events)
 	}
 	replayed.RequestHash = strings.Repeat("b", 64)
-	_, _, err = store.Create(ctx, replayed, nil, draft(replayed.ID, task.EventTaskCreated, now))
-	if !errors.Is(err, task.ErrIdempotencyConflict) {
-		t.Fatalf("Create() error = %v, want ErrIdempotencyConflict", err)
+	replayed.Request = json.RawMessage(`{"scenario":"success"}`)
+	got, events, err = store.Create(ctx, replayed, nil, draft(replayed.ID, task.EventTaskCreated, now))
+	if err != nil || got.ID != created.ID || len(events) != 0 {
+		t.Fatalf("semantic fallback Create() = %#v, %#v, %v", got, events, err)
 	}
 	watermark, err := store.Watermark(ctx)
 	if err != nil || watermark != 1 {
 		t.Fatalf("Watermark() = %d, %v", watermark, err)
+	}
+}
+
+func TestCreateCMakeIdempotencyIdentityBoundaries(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	now := time.Date(2026, 7, 22, 1, 30, 0, 0, time.UTC)
+	input := newCMakeTask(12, 13, now)
+	input.Request = json.RawMessage(`{"sourceRoot":"src","buildRoot":"build","options":{"jobs":2}}`)
+	created := createTask(t, store, input)
+
+	replayed := input
+	replayed.ID = id(14)
+	replayed.RequestHash = strings.Repeat("f", 64)
+	replayed.Request = json.RawMessage(`{"options":{"jobs":2.0},"buildRoot":"build","sourceRoot":"src"}`)
+	replayed.PlanFingerprint = strings.Repeat("e", 64)
+	got, events, err := store.Create(ctx, replayed, nil, draft(replayed.ID, task.EventTaskCreated, now))
+	if err != nil || got.ID != created.ID || len(events) != 0 {
+		t.Fatalf("semantic CMake replay = %#v, %#v, %v", got, events, err)
+	}
+
+	tests := []struct {
+		name   string
+		change func(*task.Task)
+	}{
+		{name: "kind", change: func(value *task.Task) {
+			value.Kind = task.KindSimulation
+			value.Request = json.RawMessage(`{"scenario":"success","timeoutMs":60000}`)
+			value.WorkspaceGeneration = ""
+			value.Scenario = task.ScenarioSuccess
+		}},
+		{name: "request", change: func(value *task.Task) {
+			value.Request = json.RawMessage(`{"sourceRoot":"other","buildRoot":"build","options":{"jobs":2}}`)
+		}},
+		{name: "workspace generation", change: func(value *task.Task) {
+			value.WorkspaceGeneration = strings.Repeat("e", 64)
+		}},
+		{name: "timeout", change: func(value *task.Task) { value.Timeout += time.Millisecond }},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			conflict := replayed
+			conflict.ID = id(byte(15 + index))
+			test.change(&conflict)
+			if _, _, err := store.Create(
+				ctx,
+				conflict,
+				nil,
+				draft(conflict.ID, task.EventTaskCreated, now),
+			); !errors.Is(err, task.ErrIdempotencyConflict) {
+				t.Fatalf("Create() error = %v, want ErrIdempotencyConflict", err)
+			}
+		})
 	}
 }
 
@@ -781,7 +835,7 @@ func TestRecoverInterruptedRollsBackAllTasksWhenEventInsertFails(t *testing.T) {
 	}
 }
 
-func TestMigration002UpgradesInitialTasksWithoutLosingRequests(t *testing.T) {
+func TestMigrationsUpgradeInitialTasksForCurrentManagerReplay(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "history.sqlite")
 	createMigration001Database(t, path)
@@ -797,7 +851,7 @@ func TestMigration002UpgradesInitialTasksWithoutLosingRequests(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.Kind != task.KindSimulation || string(got.Request) != `{"scenario":"success"}` {
+		if got.Kind != task.KindSimulation || string(got.Request) != `{"scenario":"success","timeoutMs":30000}` {
 			t.Fatalf("migration lost task request: %#v", got)
 		}
 		if got.WorkspaceGeneration != "" || got.Scenario != task.ScenarioSuccess {
@@ -810,6 +864,26 @@ func TestMigration002UpgradesInitialTasksWithoutLosingRequests(t *testing.T) {
 	var foreignKeys int
 	if err := store.db.QueryRow(`PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil || foreignKeys != 1 {
 		t.Fatalf("foreign_keys after migration = %d, %v", foreignKeys, err)
+	}
+
+	manager, processes := newMigrationReplayManager(t, store)
+	replayed, err := manager.Start(ctx, migrationReplayRequest(id(123), task.ScenarioSuccess, 30*time.Second))
+	if err != nil || replayed.ID != id(121) || replayed.Status != task.StatusQueued {
+		t.Fatalf("Manager replay = %#v, %v", replayed, err)
+	}
+	if processes.calls != 0 {
+		t.Fatalf("Prepare calls during replay = %d, want 0", processes.calls)
+	}
+	for _, conflict := range []task.StartRequest{
+		migrationReplayRequest(id(123), task.ScenarioExitNonzero, 30*time.Second),
+		migrationReplayRequest(id(123), task.ScenarioSuccess, 31*time.Second),
+	} {
+		if _, err := manager.Start(ctx, conflict); !errors.Is(err, task.ErrIdempotencyConflict) {
+			t.Fatalf("Manager changed replay error = %v, want ErrIdempotencyConflict", err)
+		}
+	}
+	if watermark, err := store.Watermark(ctx); err != nil || watermark != 1 {
+		t.Fatalf("Watermark after replay = %d, %v, want 1", watermark, err)
 	}
 
 	var eventTaskID string
@@ -1056,7 +1130,7 @@ func TestReopenDoesNotReapplyMigrationAndDetectsChecksumTampering(t *testing.T) 
 	if err := store.db.QueryRow(`SELECT COUNT(*), MIN(sha256) FROM schema_migrations`).Scan(&count, &checksum); err != nil {
 		t.Fatal(err)
 	}
-	if count != 2 || len(checksum) != 64 {
+	if count != 3 || len(checksum) != 64 {
 		t.Fatalf("schema_migrations count=%d checksum=%q", count, checksum)
 	}
 	if err := store.Close(); err != nil {
@@ -1066,7 +1140,7 @@ func TestReopenDoesNotReapplyMigrationAndDetectsChecksumTampering(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&count); err != nil || count != 2 {
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&count); err != nil || count != 3 {
 		t.Fatalf("reopen count=%d err=%v", count, err)
 	}
 	if _, err := store.db.Exec(`UPDATE schema_migrations SET sha256=? WHERE version=1`, strings.Repeat("0", 64)); err != nil {
@@ -1322,6 +1396,118 @@ func mustTransition(t *testing.T, current task.Task, change task.Transition) tas
 func id(value byte) string { return strings.Repeat(string([]byte{'a' + value%6}), 32) }
 
 func ptrTime(value time.Time) *time.Time { return &value }
+
+type migrationReplayBoundary struct{}
+
+func (migrationReplayBoundary) ValidateExecutable(path string) error {
+	if path != "trusted-service" {
+		return task.ErrInvalidArgument
+	}
+	return nil
+}
+
+func (migrationReplayBoundary) ValidateWorkingDirectory(path string) error {
+	if path != "simulation-dir" {
+		return task.ErrInvalidArgument
+	}
+	return nil
+}
+
+type migrationReplayProcesses struct{ calls int }
+
+func (p *migrationReplayProcesses) Prepare(
+	context.Context,
+	task.ProcessSpec,
+	string,
+	string,
+) (task.ManagedProcess, error) {
+	p.calls++
+	return nil, errors.New("Prepare must not run during idempotent replay")
+}
+
+type migrationReplayPublisher struct{}
+
+func (migrationReplayPublisher) Publish(task.Event) {}
+
+type migrationReplayArtifacts struct{}
+
+func (migrationReplayArtifacts) CommitJSON(
+	context.Context,
+	string,
+	string,
+	time.Time,
+	any,
+) (task.Artifact, error) {
+	return task.Artifact{}, errors.New("artifact commit must not run during idempotent replay")
+}
+
+func newMigrationReplayManager(t *testing.T, store *Store) (*task.Manager, *migrationReplayProcesses) {
+	t.Helper()
+	processes := &migrationReplayProcesses{}
+	manager, err := task.NewManager(task.ManagerConfig{
+		Store:               store,
+		Publisher:           migrationReplayPublisher{},
+		Processes:           processes,
+		Artifacts:           migrationReplayArtifacts{},
+		Clock:               task.RealClock{},
+		NewID:               func() string { return id(127) },
+		ServiceExecutable:   "trusted-service",
+		ServiceInstanceID:   id(128),
+		TerminationGrace:    time.Millisecond,
+		ProcessCloseTimeout: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := manager.Shutdown(ctx); err != nil {
+			t.Errorf("Shutdown migration replay manager: %v", err)
+		}
+	})
+	return manager, processes
+}
+
+func migrationReplayRequest(
+	idempotencyKey string,
+	scenario task.Scenario,
+	timeout time.Duration,
+) task.StartRequest {
+	request, err := json.Marshal(struct {
+		Scenario  task.Scenario `json:"scenario"`
+		TimeoutMS int64         `json:"timeoutMs"`
+	}{Scenario: scenario, TimeoutMS: timeout.Milliseconds()})
+	if err != nil {
+		panic(err)
+	}
+	plan := task.ExecutionPlan{
+		Version: 1,
+		Steps: []task.ExecutionStep{{
+			ID:   "simulate",
+			Kind: task.StepSimulation,
+			Process: task.ProcessSpec{
+				Executable: "trusted-service",
+				Args:       []string{"--task-fixture", string(scenario)},
+				Dir:        "simulation-dir",
+			},
+			Public: task.CommandSummary{
+				Executable: "trusted-service",
+				Args:       []string{"--task-fixture", string(scenario)},
+			},
+		}},
+	}
+	plan.Fingerprint = task.FingerprintPlan(plan)
+	return task.StartRequest{
+		IdempotencyKey: idempotencyKey,
+		Kind:           task.KindSimulation,
+		Request:        request,
+		Timeout:        timeout,
+		Plan:           plan,
+		Boundary:       migrationReplayBoundary{},
+		Scenario:       scenario,
+	}
+}
 
 func createMigration001Database(t *testing.T, path string) {
 	t.Helper()
