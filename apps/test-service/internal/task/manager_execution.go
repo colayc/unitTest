@@ -561,25 +561,6 @@ func (m *Manager) finishExecution(
 	return finished, nil
 }
 
-func (m *Manager) finishAfterCloseFailure(current *activeTask, active map[string]*activeTask) (Task, error) {
-	outcome := current.execution.resolve(OutcomeInfrastructureFailed)
-	failPending := outcome == OutcomeInfrastructureFailed
-	finished, err := m.persistTerminal(
-		current,
-		ProcessResult{Err: errors.New("process close failed")},
-		outcome,
-		failPending,
-		false,
-		active,
-	)
-	if err != nil {
-		return current.task, err
-	}
-	current.task = finished
-	m.stopActive(current)
-	return finished, nil
-}
-
 func (m *Manager) persistCommittedCreateFailure(
 	current *activeTask,
 	active map[string]*activeTask,

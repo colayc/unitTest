@@ -556,21 +556,10 @@ func (m *Manager) loop() {
 						current.recoveryRequired = true
 						m.stopActive(current)
 						delete(active, value.taskID)
-					} else if m.circuitFailed() ||
-						current.recoveryRequired ||
-						!current.leasePersisted {
-						current.closeStarted = false
-						current.closeComplete = false
-						current.closeFailed = true
 					} else {
 						current.closeStarted = false
 						current.closeComplete = false
 						current.closeFailed = true
-						if current.task.Status != StatusFinished {
-							if _, err := m.finishAfterCloseFailure(current, active); err != nil {
-								m.abandon(current)
-							}
-						}
 					}
 				} else {
 					current.closeComplete = true
@@ -1030,8 +1019,7 @@ func (m *Manager) startClose(current *activeTask, retryFailed bool) {
 
 func (m *Manager) recordCloseFailure(current *activeTask) {
 	if !m.circuitFailed() &&
-		!current.recoveryRequired &&
-		!current.leasePersisted {
+		!current.recoveryRequired {
 		outcome := current.execution.resolve(OutcomeInfrastructureFailed)
 		current.failPendingStep = outcome == OutcomeInfrastructureFailed
 	}

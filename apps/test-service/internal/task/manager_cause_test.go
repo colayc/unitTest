@@ -9,29 +9,6 @@ import (
 	"time"
 )
 
-func TestManagerCloseFailureUsesClaimedTimeoutBeforeTimeoutCommand(t *testing.T) {
-	manager, current, active, store := newCauseBarrierFixture()
-	current.task.ActiveStep = ""
-	current.task.Steps = []StepSnapshot{
-		{ID: "first", Kind: StepSimulation, Status: StepSucceeded},
-		{ID: "second", Kind: StepSimulation, Status: StepPending},
-	}
-	current.nextStep = 1
-	store.task = current.task
-	current.execution.claim(OutcomeTimedOut)
-
-	finished, err := manager.finishAfterCloseFailure(current, active)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if finished.Outcome != OutcomeTimedOut || store.task.Outcome != OutcomeTimedOut {
-		t.Fatalf("terminal outcomes = memory:%s store:%s, want %s", finished.Outcome, store.task.Outcome, OutcomeTimedOut)
-	}
-	if got := store.task.Steps[1].Status; got != StepSkipped {
-		t.Fatalf("unstarted step status = %s, want %s", got, StepSkipped)
-	}
-}
-
 func TestManagerOrdinaryClosePathDoesNotRetryFailedClose(t *testing.T) {
 	process := newPreparedLeaseCircuitProcess()
 	manager := &Manager{

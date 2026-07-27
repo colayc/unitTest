@@ -319,6 +319,130 @@ func TestManagerPrepareErrorWithProcessPersistsLeaseBeforeCleanup(t *testing.T) 
 	}
 }
 
+func TestManagerPrepareErrorCloseFailureRetainsCleanupOwnershipUntilShutdown(t *testing.T) {
+	f := newManagerFixture(t)
+	f.processes.prepareErr = errors.New("prepare returned a cleanup handle")
+	f.processes.processOnPrepareError = true
+	f.process.closeErr = errors.New("first process close failed")
+
+	accepted, err := f.manager.Start(context.Background(), task.StartRequest{
+		IdempotencyKey: testID(97),
+		Scenario:       task.ScenarioSuccess,
+		Timeout:        time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.awaitTerminate(t, 1)
+	f.awaitProcessClose(t, f.process)
+	f.awaitUnhealthy(t)
+
+	if cancelled, err := f.manager.Cancel(context.Background(), accepted.ID); err != nil ||
+		cancelled.Status != task.StatusQueued {
+		t.Fatalf("Cancel after Close failure = %#v, %v", cancelled, err)
+	}
+	stored, err := f.store.Get(context.Background(), accepted.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != task.StatusQueued || stored.Outcome != "" || stored.FinishedAt != nil {
+		t.Fatalf("task after first Close failure = %#v, want queued/nonterminal", stored)
+	}
+	if got := eventTypes(f.store.eventsForTask(accepted.ID)); !reflect.DeepEqual(got, []task.EventType{
+		task.EventTaskCreated,
+	}) {
+		t.Fatalf("events after first Close failure = %v, want task.created only", got)
+	}
+	if artifacts := f.store.artifactsCopy(); len(artifacts) != 0 {
+		t.Fatalf("artifacts after first Close failure = %#v, want none", artifacts)
+	}
+	leases, err := f.store.ActiveLeases(context.Background())
+	if err != nil || len(leases) != 1 || leases[0].TaskID != accepted.ID {
+		t.Fatalf("ActiveLeases after first Close failure = %#v, %v", leases, err)
+	}
+	if got := f.process.closeCalls(); got != 1 {
+		t.Fatalf("Close calls before explicit Shutdown = %d, want 1", got)
+	}
+	if got := f.process.closeCalls(); got != 1 {
+		t.Fatalf("Close calls after ordinary Cancel = %d, want 1", got)
+	}
+
+	f.process.mu.Lock()
+	f.process.closeErr = nil
+	f.process.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := f.manager.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown retry = %v", err)
+	}
+
+	finished := f.awaitStoredTask(t, accepted.ID, task.StatusFinished)
+	if finished.Outcome != task.OutcomeInfrastructureFailed {
+		t.Fatalf("outcome = %s, want %s", finished.Outcome, task.OutcomeInfrastructureFailed)
+	}
+	assertStepStatuses(t, finished, task.StepFailed)
+	if mutation := f.store.lastMutation(); !mutation.DeleteLease {
+		t.Fatalf("terminal retry mutation DeleteLease = false: %#v", mutation)
+	}
+	if lease := f.store.lease(accepted.ID); lease.TaskID != "" {
+		t.Fatalf("successful Shutdown retry retained lease %#v", lease)
+	}
+	if got := f.process.closeCalls(); got != 2 {
+		t.Fatalf("Close calls after explicit Shutdown = %d, want 2", got)
+	}
+}
+
+func TestManagerPrepareErrorCloseRetryFailureKeepsTaskAndLeaseNonterminal(t *testing.T) {
+	f := newManagerFixture(t)
+	f.processes.prepareErr = errors.New("prepare returned a cleanup handle")
+	f.processes.processOnPrepareError = true
+	f.process.closeErr = errors.New("process close remains unavailable")
+
+	accepted, err := f.manager.Start(context.Background(), task.StartRequest{
+		IdempotencyKey: testID(98),
+		Scenario:       task.ScenarioSuccess,
+		Timeout:        time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.awaitTerminate(t, 1)
+	f.awaitProcessClose(t, f.process)
+	f.awaitUnhealthy(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	if err := f.manager.Shutdown(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Shutdown after failed retry = %v, want deadline", err)
+	}
+	if got := f.process.closeCalls(); got != 2 {
+		t.Fatalf("Close calls after failed explicit retry = %d, want 2", got)
+	}
+	stored, err := f.store.Get(context.Background(), accepted.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != task.StatusQueued || stored.Outcome != "" || stored.FinishedAt != nil {
+		t.Fatalf("task after failed retry = %#v, want queued/nonterminal", stored)
+	}
+	leases, err := f.store.ActiveLeases(context.Background())
+	if err != nil || len(leases) != 1 || leases[0].TaskID != accepted.ID {
+		t.Fatalf("ActiveLeases after failed retry = %#v, %v", leases, err)
+	}
+	if artifacts := f.store.artifactsCopy(); len(artifacts) != 0 {
+		t.Fatalf("artifacts after failed retry = %#v, want none", artifacts)
+	}
+
+	f.process.mu.Lock()
+	f.process.closeErr = nil
+	f.process.mu.Unlock()
+	cleanup, cleanupCancel := context.WithTimeout(context.Background(), time.Second)
+	defer cleanupCancel()
+	if err := f.manager.Shutdown(cleanup); err != nil {
+		t.Fatalf("cleanup Shutdown = %v", err)
+	}
+}
+
 func TestManagerPrepareFailureArtifactFaultDoesNotCrashAndQuiescesOtherActiveTask(t *testing.T) {
 	f := newManagerFixture(t)
 	other, err := f.manager.Start(context.Background(), task.StartRequest{
@@ -2032,7 +2156,18 @@ func (s *fakeStore) ListArtifacts(context.Context, string, string, int) (task.Pa
 func (s *fakeStore) GetArtifact(context.Context, string) (task.Artifact, error) {
 	return task.Artifact{}, task.ErrNotFound
 }
-func (s *fakeStore) ActiveLeases(context.Context) ([]task.ProcessLease, error) { return nil, nil }
+func (s *fakeStore) ActiveLeases(context.Context) ([]task.ProcessLease, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var result []task.ProcessLease
+	for taskID, lease := range s.leases {
+		status := s.tasks[taskID].Status
+		if status == task.StatusQueued || status == task.StatusRunning || status == task.StatusCancelling {
+			result = append(result, lease)
+		}
+	}
+	return result, nil
+}
 func (s *fakeStore) RecoverInterrupted(context.Context, time.Time) ([]task.Event, error) {
 	return nil, nil
 }
