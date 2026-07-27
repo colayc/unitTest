@@ -71,6 +71,7 @@ func TestPersistCommittedCreateFailurePreservesClaimedCause(t *testing.T) {
 			store.task = current.task
 			manager.executionSignals.Store(current.task.ID, current.execution)
 			current.execution.claim(want)
+			current.execution.claim(OutcomeInterrupted)
 
 			finished, err := manager.persistCommittedCreateFailure(current, active)
 			if err != nil {

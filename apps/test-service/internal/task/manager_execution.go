@@ -216,6 +216,9 @@ func (m *Manager) start(request StartRequest, active map[string]*activeTask) tas
 	}
 	execution := newExecutionSignal()
 	m.executionSignals.Store(created.ID, execution)
+	if m.closing.Load() {
+		execution.claim(OutcomeInterrupted)
+	}
 	executionRetained := false
 	defer func() {
 		if executionRetained {

@@ -494,6 +494,141 @@ func TestManagerShutdownPreclaimFinishesQueuedTaskAfterNilPrepare(t *testing.T) 
 	}
 }
 
+func TestManagerShutdownRegisterAfterSweepPreservesInterruptedPublisherFailure(t *testing.T) {
+	f := newManagerFixture(t)
+	releaseValidation := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(releaseValidation) }) })
+	boundary := &registrationBarrierBoundary{
+		blockAt: 2,
+		entered: make(chan struct{}),
+		release: releaseValidation,
+	}
+	f.publisher.panicType = task.EventTaskCreated
+	key := testID(42)
+	request := simulationManagerRequest(key, task.ScenarioSuccess, time.Second)
+	request.Boundary = boundary
+
+	startResult := make(chan taskResponseResult, 1)
+	go func() {
+		got, err := f.manager.Start(context.Background(), request)
+		startResult <- taskResponseResult{task: got, err: err}
+	}()
+	awaitSignal(t, boundary.entered, "command-loop validation did not block before signal registration")
+
+	shutdownCtx := newObservedCancelContext()
+	shutdownResult := make(chan error, 1)
+	go func() { shutdownResult <- f.manager.Shutdown(shutdownCtx) }()
+	awaitSignal(t, shutdownCtx.waiting, "Shutdown did not complete its visible decision sweep")
+	releaseOnce.Do(func() { close(releaseValidation) })
+
+	select {
+	case result := <-startResult:
+		if !errors.Is(result.err, task.ErrStorageUnavailable) {
+			t.Fatalf("Start error = %v, want ErrStorageUnavailable", result.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Start did not return after Publisher failure")
+	}
+	select {
+	case err := <-shutdownResult:
+		if err != nil {
+			t.Fatalf("Shutdown = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not return after Publisher failure")
+	}
+	stored, err := f.store.FindByIdempotencyKey(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertPublisherFailureOutcome(t, stored, task.OutcomeInterrupted)
+	if got := f.processes.prepareCount(); got != 0 {
+		t.Fatalf("Prepare calls after register-after-sweep shutdown = %d, want 0", got)
+	}
+}
+
+func TestManagerShutdownRegisterAfterSweepDoesNotLeavePrepareBlocked(t *testing.T) {
+	f := newManagerFixture(t)
+	releaseValidation := make(chan struct{})
+	var releaseValidationOnce sync.Once
+	t.Cleanup(func() { releaseValidationOnce.Do(func() { close(releaseValidation) }) })
+	boundary := &registrationBarrierBoundary{
+		blockAt: 2,
+		entered: make(chan struct{}),
+		release: releaseValidation,
+	}
+	prepareEntered := make(chan struct{})
+	prepareCanceled := make(chan struct{})
+	releasePrepare := make(chan struct{})
+	var releasePrepareOnce sync.Once
+	t.Cleanup(func() { releasePrepareOnce.Do(func() { close(releasePrepare) }) })
+	f.processes.prepareErr = context.Canceled
+	f.processes.prepareBlockAt = 1
+	f.processes.prepareEntered = prepareEntered
+	f.processes.prepareCanceled = prepareCanceled
+	f.processes.prepareBlock = releasePrepare
+	key := testID(43)
+	request := simulationManagerRequest(key, task.ScenarioSuccess, time.Second)
+	request.Boundary = boundary
+
+	startResult := make(chan taskResponseResult, 1)
+	go func() {
+		got, err := f.manager.Start(context.Background(), request)
+		startResult <- taskResponseResult{task: got, err: err}
+	}()
+	awaitSignal(t, boundary.entered, "command-loop validation did not block before signal registration")
+
+	shutdownCtx := newObservedCancelContext()
+	shutdownResult := make(chan error, 1)
+	go func() { shutdownResult <- f.manager.Shutdown(shutdownCtx) }()
+	awaitSignal(t, shutdownCtx.waiting, "Shutdown did not complete its visible decision sweep")
+	releaseValidationOnce.Do(func() { close(releaseValidation) })
+
+	shutdownReturned := false
+	prepareCancellationMissing := false
+	select {
+	case <-prepareEntered:
+		select {
+		case <-prepareCanceled:
+		case <-time.After(100 * time.Millisecond):
+			prepareCancellationMissing = true
+		}
+		releasePrepareOnce.Do(func() { close(releasePrepare) })
+	case err := <-shutdownResult:
+		shutdownReturned = true
+		if err != nil {
+			t.Fatalf("Shutdown = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("neither Prepare nor Shutdown made progress")
+	}
+
+	select {
+	case <-startResult:
+	case <-time.After(time.Second):
+		t.Fatal("Start did not return after register-after-sweep shutdown")
+	}
+	if !shutdownReturned {
+		select {
+		case err := <-shutdownResult:
+			if err != nil {
+				t.Fatalf("Shutdown = %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("Shutdown did not return after Prepare release")
+		}
+	}
+	if prepareCancellationMissing {
+		t.Fatal("Prepare context was not cancelled while shutdown command was queued")
+	}
+	stored, err := f.store.FindByIdempotencyKey(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertPublisherFailureOutcome(t, stored, task.OutcomeInterrupted)
+}
+
 func TestManagerPublisherFailureRetriesTerminalConflictOnce(t *testing.T) {
 	f := newManagerFixture(t)
 	f.publisher.panicType = task.EventTaskCreated
@@ -661,6 +796,88 @@ func TestManagerPublisherFailureQuiescesOtherActiveTaskForRecovery(t *testing.T)
 		t.Fatal("manager remained healthy after publisher failure")
 	}
 	shutdownPublisherFailureManager(t, f)
+}
+
+func TestManagerPublisherFailureCloseErrorHandsOffRecoveryWithoutTerminalization(t *testing.T) {
+	f := newManagerFixture(t)
+	first, err := f.manager.Start(context.Background(), task.StartRequest{
+		IdempotencyKey: testID(44),
+		Scenario:       task.ScenarioHang,
+		Timeout:        time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Status != task.StatusRunning {
+		t.Fatalf("first task status = %s, want running", first.Status)
+	}
+
+	releaseClose := make(chan struct{})
+	var closeReleaseOnce sync.Once
+	t.Cleanup(func() {
+		f.process.mu.Lock()
+		f.process.closeErr = nil
+		f.process.mu.Unlock()
+		closeReleaseOnce.Do(func() { close(releaseClose) })
+	})
+	f.process.mu.Lock()
+	f.process.closeErr = errors.New("close failed after publisher circuit")
+	f.process.closeBlock = releaseClose
+	f.process.mu.Unlock()
+
+	f.publisher.panicType = task.EventTaskCreated
+	secondKey := testID(45)
+	_, err = f.manager.Start(context.Background(), task.StartRequest{
+		IdempotencyKey: secondKey,
+		Scenario:       task.ScenarioSuccess,
+		Timeout:        time.Second,
+	})
+	if !errors.Is(err, task.ErrStorageUnavailable) {
+		t.Fatalf("second Start error = %v, want ErrStorageUnavailable", err)
+	}
+	second, err := f.store.FindByIdempotencyKey(context.Background(), secondKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertPublisherFailureOutcome(t, second, task.OutcomeInfrastructureFailed)
+
+	f.awaitProcessTerminate(t, f.process, 1)
+	f.awaitProcessClose(t, f.process)
+	select {
+	case releaseClose <- struct{}{}:
+	case <-time.After(time.Second):
+		t.Fatal("first Close did not wait on the test barrier")
+	}
+
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancelShutdown()
+	shutdownErr := f.manager.Shutdown(shutdownCtx)
+
+	durableFirst, getErr := f.store.Get(context.Background(), first.ID)
+	durableEvents := eventTypes(f.store.eventsForTask(first.ID))
+	publishedEvents := f.publisher.types()
+	artifactSummaries := f.artifacts.summariesCopy()
+	storedArtifacts := f.store.artifactsCopy()
+	closeCalls := f.process.closeCalls()
+	if shutdownErr != nil ||
+		getErr != nil ||
+		durableFirst.Status != task.StatusRunning ||
+		durableFirst.Outcome != "" ||
+		!reflect.DeepEqual(durableEvents, []task.EventType{
+			task.EventTaskCreated,
+			task.EventTaskStarted,
+		}) ||
+		!reflect.DeepEqual(publishedEvents, []task.EventType{
+			task.EventTaskCreated,
+			task.EventTaskStarted,
+		}) ||
+		len(artifactSummaries) != 0 ||
+		len(storedArtifacts) != 0 ||
+		closeCalls != 1 {
+		t.Fatalf("publisher circuit Close error did not hand off cleanly: Shutdown=%v Get=%v task=%#v durableEvents=%v publishedEvents=%v artifactSummaries=%d storedArtifacts=%d Close calls=%d",
+			shutdownErr, getErr, durableFirst, durableEvents, publishedEvents,
+			len(artifactSummaries), len(storedArtifacts), closeCalls)
+	}
 }
 
 func assertPublisherFailureOutcome(t *testing.T, stored task.Task, want task.Outcome) {
@@ -2022,3 +2239,34 @@ func (c *fakeClock) afterCalls(delay time.Duration) int {
 }
 
 func testID(value byte) string { return fmt.Sprintf("%032x", value) }
+
+type registrationBarrierBoundary struct {
+	mu              sync.Mutex
+	executableCalls int
+	blockAt         int
+	entered         chan struct{}
+	enteredOnce     sync.Once
+	release         <-chan struct{}
+}
+
+func (b *registrationBarrierBoundary) ValidateExecutable(path string) error {
+	if path != "trusted-service" {
+		return fmt.Errorf("unexpected executable %q", path)
+	}
+	b.mu.Lock()
+	b.executableCalls++
+	block := b.executableCalls == b.blockAt
+	b.mu.Unlock()
+	if block {
+		b.enteredOnce.Do(func() { close(b.entered) })
+		<-b.release
+	}
+	return nil
+}
+
+func (*registrationBarrierBoundary) ValidateWorkingDirectory(path string) error {
+	if path != "simulation-dir" {
+		return fmt.Errorf("unexpected working directory %q", path)
+	}
+	return nil
+}

@@ -549,12 +549,18 @@ func (m *Manager) loop() {
 			if current := active[value.taskID]; current != nil && current.closeGeneration == value.generation {
 				if value.err != nil {
 					m.healthy.Store(false)
-					current.closeStarted = false
-					current.closeComplete = false
-					current.closeFailed = true
-					if current.task.Status != StatusFinished {
-						if _, err := m.finishAfterCloseFailure(current, active); err != nil {
-							m.abandon(current)
+					if m.circuitFailed() || current.recoveryRequired {
+						current.recoveryRequired = true
+						m.stopActive(current)
+						delete(active, value.taskID)
+					} else {
+						current.closeStarted = false
+						current.closeComplete = false
+						current.closeFailed = true
+						if current.task.Status != StatusFinished {
+							if _, err := m.finishAfterCloseFailure(current, active); err != nil {
+								m.abandon(current)
+							}
 						}
 					}
 				} else {
