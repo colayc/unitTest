@@ -52,6 +52,14 @@ function sourceImportSpecs(source) {
   return imports;
 }
 
+function serverNetworkImportEscapes(sources) {
+  return sources.flatMap(({ filename, source }) =>
+    sourceImportSpecs(source)
+      .filter((entry) => isNetworkCapableImport(entry.path) && (entry.alias || entry.path !== "net"))
+      .map((entry) => ({ filename, ...entry }))
+  );
+}
+
 async function productionGoSources(directory) {
   const entries = await readdir(directory, { withFileTypes: true });
   return Promise.all(entries
@@ -126,11 +134,31 @@ test("production packages constrain network-capable code to local IPC boundaries
   }
 
   const serverSources = await productionGoSources("apps/test-service/internal/server");
-  const escapedServerImports = serverSources.flatMap(({ filename, source }) =>
-    sourceImportSpecs(source)
-      .filter((entry) => isNetworkCapableImport(entry.path) && (entry.alias || entry.path !== "net"))
-      .map((entry) => ({ filename, ...entry }))
+  const aliasMutants = [
+    {
+      filename: "named_alias.go",
+      source: `package server
+import netx "net"
+func outbound() { _, _ = netx.Dial("tcp", "example.invalid:443") }
+`
+    },
+    {
+      filename: "dot_import.go",
+      source: `package server
+import . "net"
+func outbound() { _, _ = Dial("tcp", "example.invalid:443") }
+`
+    }
+  ];
+  assert.deepEqual(
+    serverNetworkImportEscapes(aliasMutants),
+    [
+      { filename: "named_alias.go", alias: "netx", path: "net" },
+      { filename: "dot_import.go", alias: ".", path: "net" }
+    ],
+    "server import audit must catch named and dot aliases before selector checks"
   );
+  const escapedServerImports = serverNetworkImportEscapes(serverSources);
   assert.deepEqual(
     escapedServerImports,
     [],
