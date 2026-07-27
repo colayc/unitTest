@@ -584,9 +584,14 @@ func TestServeConnectionV11FailsClosedOnMalformedReplayOutput(t *testing.T) {
 		{name: "missing stream", payload: `{"text":"output","truncated":false}`},
 		{name: "missing text", payload: `{"stream":"stdout","truncated":false}`},
 		{name: "missing truncated", payload: `{"stream":"stdout","text":"output"}`},
+		{name: "root is not object", payload: `["stdout","output",false]`},
 		{name: "wrong field type", payload: `{"stream":"stdout","text":7,"truncated":false}`},
 		{name: "unknown field", payload: `{"stream":"stdout","text":"output","truncated":false,"extra":true}`},
 		{name: "trailing value", payload: `{"stream":"stdout","text":"output","truncated":false} {}`},
+		{name: "case variant field", payload: `{"STREAM":"stdout","text":"output","truncated":false}`},
+		{name: "duplicate wrong then valid", payload: `{"stream":7,"stream":"stdout","text":"output","truncated":false}`},
+		{name: "duplicate valid then wrong", payload: `{"stream":"stdout","stream":7,"text":"output","truncated":false}`},
+		{name: "duplicate valid values", payload: `{"stream":"stdout","stream":"stderr","text":"output","truncated":false}`},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -613,20 +618,34 @@ func TestServeConnectionV11FailsClosedOnMalformedReplayOutput(t *testing.T) {
 }
 
 func TestServeConnectionV11FailsClosedOnMalformedLiveOutput(t *testing.T) {
-	events := make(chan task.Event, 1)
-	subscriptionErrors := make(chan error)
-	backend := &streamBackend{
-		subscription: &eventbroker.Subscription{Events: events, Errors: subscriptionErrors},
+	tests := []struct {
+		name    string
+		payload string
+	}{
+		{name: "root is not object", payload: `null`},
+		{name: "case variant field", payload: `{"STREAM":"stdout","text":"live","truncated":false}`},
+		{name: "duplicate wrong then valid", payload: `{"stream":7,"stream":"stdout","text":"live","truncated":false}`},
+		{name: "duplicate valid then wrong", payload: `{"stream":"stdout","stream":7,"text":"live","truncated":false}`},
+		{name: "duplicate valid values", payload: `{"stream":"stdout","stream":"stderr","text":"live","truncated":false}`},
 	}
-	_, decoder := openV11Subscription(t, backend)
-	events <- eventForProjection(
-		1,
-		testID('1'),
-		task.EventTaskOutput,
-		time.Date(2026, 7, 27, 5, 30, 0, 0, time.UTC),
-		`{"stream":"stdout","text":"live","truncated":false,"extra":true}`,
-	)
-	assertSubscriptionCorruptionFailure(t, decoder)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			events := make(chan task.Event, 1)
+			subscriptionErrors := make(chan error)
+			backend := &streamBackend{
+				subscription: &eventbroker.Subscription{Events: events, Errors: subscriptionErrors},
+			}
+			_, decoder := openV11Subscription(t, backend)
+			events <- eventForProjection(
+				1,
+				testID('1'),
+				task.EventTaskOutput,
+				time.Date(2026, 7, 27, 5, 30, 0, 0, time.UTC),
+				test.payload,
+			)
+			assertSubscriptionCorruptionFailure(t, decoder)
+		})
+	}
 }
 
 func openV11Subscription(t *testing.T, backend *streamBackend) (net.Conn, *json.Decoder) {

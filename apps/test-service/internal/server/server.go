@@ -358,36 +358,77 @@ func toProtocolEvent(event task.Event, version string) (protocol.Event, error) {
 }
 
 func projectV11Output(payload json.RawMessage) (json.RawMessage, error) {
-	var fields struct {
-		StepID    json.RawMessage `json:"stepId"`
-		Stream    json.RawMessage `json:"stream"`
-		Text      json.RawMessage `json:"text"`
-		Truncated json.RawMessage `json:"truncated"`
-	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&fields); err != nil {
+	root, err := decoder.Token()
+	if err != nil {
 		return nil, err
 	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return nil, errors.New("task output payload has trailing data")
+	delimiter, ok := root.(json.Delim)
+	if !ok || delimiter != '{' {
+		return nil, errors.New("task output payload must be an object")
 	}
-	stream, ok := requiredJSONString(fields.Stream)
-	if !ok {
-		return nil, errors.New("task output payload requires stream")
-	}
-	text, ok := requiredJSONString(fields.Text)
-	if !ok {
-		return nil, errors.New("task output payload requires text")
-	}
-	truncated, ok := requiredJSONBool(fields.Truncated)
-	if !ok {
-		return nil, errors.New("task output payload requires truncated")
-	}
-	if len(fields.StepID) > 0 {
-		if _, ok := requiredJSONString(fields.StepID); !ok {
-			return nil, errors.New("task output payload stepId must be a string")
+
+	seen := make(map[string]bool, 4)
+	var stream, text string
+	var truncated bool
+	for decoder.More() {
+		nameToken, err := decoder.Token()
+		if err != nil {
+			return nil, err
 		}
+		name, ok := nameToken.(string)
+		if !ok {
+			return nil, errors.New("task output payload field name must be a string")
+		}
+		switch name {
+		case "stepId", "stream", "text", "truncated":
+		default:
+			return nil, errors.New("task output payload has an unknown field")
+		}
+		if seen[name] {
+			return nil, errors.New("task output payload has a duplicate field")
+		}
+		seen[name] = true
+
+		value, err := decoder.Token()
+		if err != nil {
+			return nil, err
+		}
+		switch name {
+		case "stepId":
+			if _, ok := value.(string); !ok {
+				return nil, errors.New("task output payload stepId must be a string")
+			}
+		case "stream":
+			stream, ok = value.(string)
+			if !ok {
+				return nil, errors.New("task output payload stream must be a string")
+			}
+		case "text":
+			text, ok = value.(string)
+			if !ok {
+				return nil, errors.New("task output payload text must be a string")
+			}
+		case "truncated":
+			truncated, ok = value.(bool)
+			if !ok {
+				return nil, errors.New("task output payload truncated must be a boolean")
+			}
+		}
+	}
+	end, err := decoder.Token()
+	if err != nil {
+		return nil, err
+	}
+	delimiter, ok = end.(json.Delim)
+	if !ok || delimiter != '}' {
+		return nil, errors.New("task output payload object is not closed")
+	}
+	if !seen["stream"] || !seen["text"] || !seen["truncated"] {
+		return nil, errors.New("task output payload is missing required fields")
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return nil, errors.New("task output payload has trailing data")
 	}
 	return json.Marshal(struct {
 		Stream    string `json:"stream"`
@@ -398,28 +439,6 @@ func projectV11Output(payload json.RawMessage) (json.RawMessage, error) {
 		Text:      text,
 		Truncated: truncated,
 	})
-}
-
-func requiredJSONString(raw json.RawMessage) (string, bool) {
-	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return "", false
-	}
-	var value string
-	if err := json.Unmarshal(raw, &value); err != nil {
-		return "", false
-	}
-	return value, true
-}
-
-func requiredJSONBool(raw json.RawMessage) (bool, bool) {
-	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return false, false
-	}
-	var value bool
-	if err := json.Unmarshal(raw, &value); err != nil {
-		return false, false
-	}
-	return value, true
 }
 
 func subscriptionFailure(request protocol.Request, err error) protocol.Response {
