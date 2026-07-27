@@ -50,16 +50,31 @@ test("protocol 1.1 tasks/start rejects every execution-plan injection field", as
   assert.equal(validate(request), true, JSON.stringify(validate.errors));
 
   for (const [field, value] of Object.entries({
-    kind: "cmake_build",
-    steps: [{ id: "configure" }],
+    kind: "cmakeBuild",
+    steps: [{
+      id: "configure",
+      kind: "configure",
+      executable: "cmake",
+      args: ["-S", ".", "-B", "build"],
+      workingDirectory: ".",
+      env: ["BUILD_MODE=debug"]
+    }],
     executable: "cmake",
     args: ["--build", "."],
-    env: ["SERVICE_TOKEN=attacker-controlled"]
+    env: ["BUILD_MODE=debug"]
   })) {
     assert.equal(
       validate({ ...request, payload: { ...request.payload, [field]: value } }),
       false,
       `tasks/start accepted forbidden field ${field}`
+    );
+    assert.ok(
+      validate.errors?.some((error) =>
+        error.instancePath === "/payload"
+        && error.keyword === "additionalProperties"
+        && error.params.additionalProperty === field
+      ),
+      `tasks/start rejected ${field} for the wrong reason: ${JSON.stringify(validate.errors)}`
     );
   }
 });
