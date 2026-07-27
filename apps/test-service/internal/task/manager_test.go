@@ -2246,7 +2246,6 @@ type fakeProcess struct {
 	startBlock     <-chan struct{}
 	startEntered   chan struct{}
 	startCanceled  chan struct{}
-	startDone      <-chan struct{}
 	terminateBlock <-chan struct{}
 	terminateErr   error
 	closeErr       error
@@ -2264,7 +2263,6 @@ func (p *fakeProcess) Start(ctx context.Context) error {
 	p.mu.Lock()
 	p.starts++
 	p.lease.TargetProcessGroup = 42
-	p.startDone = ctx.Done()
 	block, entered, canceled, startErr := p.startBlock, p.startEntered, p.startCanceled, p.startErr
 	p.mu.Unlock()
 	if entered != nil {
@@ -2315,11 +2313,6 @@ func (p *fakeProcess) completeOnce(value task.ProcessResult) {
 func (p *fakeProcess) terminateCalls() int { p.mu.Lock(); defer p.mu.Unlock(); return p.terminates }
 func (p *fakeProcess) closeCalls() int     { p.mu.Lock(); defer p.mu.Unlock(); return p.closes }
 func (p *fakeProcess) startCalls() int     { p.mu.Lock(); defer p.mu.Unlock(); return p.starts }
-func (p *fakeProcess) startContextDone() <-chan struct{} {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.startDone
-}
 
 type fakeArtifactWriter struct {
 	mu        sync.Mutex

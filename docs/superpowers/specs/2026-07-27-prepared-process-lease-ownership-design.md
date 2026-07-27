@@ -257,7 +257,7 @@ pre-lease 写入不得把 first-cause 改为 `infrastructure_failed`。
 - 不得执行 recovery handoff；
 - 保留 active owner；
 - 标记 cleanup attempt 失败；
-- 只允许通过现有显式 Shutdown retry 机制再次尝试；
+- 只允许通过现有显式 Shutdown retry 机制再次尝试；普通 timeout、cancel、termination result、process done与其他 cleanup command不得重试已失败的 Close；
 - caller context 保持等待上界。
 
 ### 10.3 非 circuit Close error
@@ -268,6 +268,7 @@ pre-lease 写入不得把 first-cause 改为 `infrastructure_failed`。
 - 不调用 `finishAfterCloseFailure`；
 - 不写 terminal Store mutation、artifact或 Publisher event；
 - 若尚无 first-cause，首次 Close error必须在对外发布 unhealthy之前用 `OutcomeInfrastructureFailed` claim；已有 cancel/timeout等 cause不被覆盖，`failPendingStep`按 resolve后 outcome设置；
+- `closeFailed=true` 是普通 Close启动路径的 retry gate；即使 timeout cause已经 claim但其 command稍后才被 command loop消费，也不得自动发起第二次 Close；
 - 后续显式 `Shutdown(ctx)` 通过既有 bounded Close retry再次尝试释放 ownership；
 - 只有 retry Close成功后，才按已经 claim 的 first-cause完成 terminalization；
 - first-cause与最终 outcome保持不变，但 terminal visibility允许延迟到 ownership真正释放之后。
@@ -354,6 +355,8 @@ Runtime 启动时继续按现有顺序：
 - Shutdown register-after-sweep；
 - queued Cancel；
 - Close first-cause与 timeout；
+- FIFO command-loop ordering：Close error先于已 claim timeout的 `timeoutCommand`消费，Close仍只调用一次且 Task保持 nonterminal；显式 Shutdown才调用第二次 Close并完成 `timed_out`；
+- 同 package内用受控 cause-resolution barrier确定性证明 cause/`failPendingStep`在 unhealthy publication之前固定；外部测试只负责 outcome与 Step状态；
 - nil Process；
 - transient/repeated conflict；
 - normal Close failure：有 durable lease时保持既有 terminalization；无 durable lease时保留 owner，并在显式 Shutdown Close retry成功后按原 first-cause/outcome完成；

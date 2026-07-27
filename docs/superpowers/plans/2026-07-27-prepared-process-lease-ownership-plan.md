@@ -21,7 +21,7 @@
 - cancel、timeout、shutdown 与 infrastructure failure 继续使用同一个 first-cause decision。
 - circuit Close error 只有在当前 Process 的 durable lease 已存在时才能释放 active owner。
 - lease 未提交且 cleanup 失败时必须保留 active owner；`Shutdown(ctx)` 可以按 caller deadline 返回，不能虚假宣称 cleanup 完成。
-- ownership safety裁决：当 `process != nil && leasePersisted=false` 时，任何 Close error都保留 active owner；normal非 circuit路径若尚无 cause，首次 Close error必须在对外发布 unhealthy之前 claim `infrastructure_failed`，已有 cause不被覆盖；terminal visibility延迟到后续显式 Shutdown Close retry成功，first-cause与最终 outcome保持不变。
+- ownership safety裁决：当 `process != nil && leasePersisted=false` 时，任何 Close error都保留 active owner；normal非 circuit路径若尚无 cause，首次 Close error必须在对外发布 unhealthy之前 claim `infrastructure_failed`，已有 cause不被覆盖；普通 timeout、cancel、termination result、process done与其他 cleanup command不得重试已失败的 Close，只有后续显式 Shutdown可以 retry；terminal visibility延迟到该 retry成功，first-cause与最终 outcome保持不变。
 - 不实现第二套 recovery journal、Task 4 recovery replay、Step events 或 Step artifact registry。
 - Markdown 叙述使用中文，English 技术名词保留原格式。
 
@@ -826,8 +826,10 @@ if value.err != nil {
 - durable handoff不写 Store/artifact/Publisher；
 - durable handoff同时要求 `leasePersisted=true` 与 Task nonterminal，因为 `ActiveLeases` 不返回 finished Task；
 - 任何 `leasePersisted=false && process != nil` 的 Close error都保留 active，不限于 circuit分支；
-- 后续显式 Shutdown可以通过 `closeFailed` 触发下一次 bounded Close；
+- `maybeStartClose`等普通 Close路径必须在 `closeFailed=true` 时返回；后续显式 Shutdown使用独立 retry入口触发下一次 bounded Close；
+- 即使 timeout cause已经 claim但 `timeoutCommand`排在 Close error之后消费，timeout、cancel、termination result、process done与其他 cleanup command也不得自动 retry；
 - normal非 circuit且无 durable lease的 Close failure不得 terminalize；若尚无 cause，Close error处理时必须先 `resolve(OutcomeInfrastructureFailed)`并按结果设置 `failPendingStep`，随后才能 `healthy.Store(false)`；
+- cause/health ordering由同 package确定性 barrier测试覆盖；外部行为测试继续断言最终 outcome与 Step状态，不再依赖 watcher scheduling证明内部 ordering；
 - 已有 cancel/timeout等 cause不得被 Close failure或后续 Shutdown覆盖；显式 Shutdown retry Close成功后才按固定的 first-cause与最终 outcome terminalize；
 - `leasePersisted=true` 的 normal非 circuit Close failure保持既有语义。
 
@@ -873,7 +875,8 @@ Run:
 ```powershell
 & $go test ./apps/test-service/internal/task -run '^(TestManagerPersistsPreparedLease|TestManagerPrepareErrorWithProcess|TestManagerPublisherFailureCloseErrorHandsOffQueuedPreparedLease|TestManagerPreparedLease)' -count=100
 & $go test ./apps/test-service/internal/task -run '^TestManagerPublisherFailure' -count=100
-& $go test ./apps/test-service/internal/task -run '^TestManagerCloseFailureUsesClaimedTimeoutBeforeTimeoutCommand$' -count=1000
+& $go test ./apps/test-service/internal/task -run '^(TestManagerCloseFailureUsesClaimedTimeoutBeforeTimeoutCommand|TestManagerTimeoutCommandDoesNotRetryFailedCloseBeforeShutdown)$' -count=1000
+& $go test ./apps/test-service/internal/task -run '^TestManagerRecordCloseFailureResolvesCauseBeforePublishingUnhealthy$' -count=1000
 & $go test -race ./apps/test-service/internal/task -run '^(TestManagerPersistsPreparedLease|TestManagerPrepareErrorWithProcess|TestManagerPublisherFailure|TestManagerPreparedLease|TestManagerCancellation|TestManagerCloseFailure)' -count=1
 ```
 
@@ -1000,7 +1003,7 @@ reviewer必须同时给出：
 - `queued + lease` 是否无客户端可见 running副作用；
 - `leasePersisted=false` 是否仍有 owner释放路径；
 - `leasePersisted=true` handoff是否由真实 `ActiveLeases`/Runtime recovery证明；
-- first-cause、Store/Publisher fault domain、Close retry与 Shutdown是否回归；
+- first-cause、Store/Publisher fault domain、Close retry与 Shutdown是否回归；特别检查 `closeFailed`只能由显式 Shutdown bypass；
 - Critical/Important/Minor findings；
 - `CLEAN — Ready` 或 `Changes required`。
 
@@ -1015,6 +1018,6 @@ reviewer不得以测试通过替代代码级 lifecycle推理，也不得要求�
 - [ ] Publisher circuit Close error只在 `leasePersisted=true` 时释放 active owner。
 - [ ] pre-lease Store failure + Close failure保留 active owner并受 caller deadline约束。
 - [ ] Runtime recovery真实清理 queued Prepared lease。
-- [ ] normal Start、multi-step、UpdateLease与 Publisher fail-closed无回归；无 durable lease的 normal Close failure仅延迟 terminal visibility，并由显式 Shutdown Close retry保留 first-cause与最终 outcome。
+- [ ] normal Start、multi-step、UpdateLease与 Publisher fail-closed无回归；无 durable lease的 normal Close failure仅延迟 terminal visibility，普通 command不得 retry，并由显式 Shutdown Close retry保留 first-cause与最终 outcome。
 - [ ] Protocol/interface/schema/Task 4均无越界。
 - [ ] focused、stress、race、Task、TaskStore、Runtime、Session、全 internal与 diff check全部 fresh PASS。

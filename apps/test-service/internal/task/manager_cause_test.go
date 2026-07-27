@@ -32,6 +32,210 @@ func TestManagerCloseFailureUsesClaimedTimeoutBeforeTimeoutCommand(t *testing.T)
 	}
 }
 
+func TestManagerOrdinaryClosePathDoesNotRetryFailedClose(t *testing.T) {
+	process := newPreparedLeaseCircuitProcess()
+	manager := &Manager{
+		commands:            make(chan any, 1),
+		processCloseTimeout: time.Second,
+	}
+	current := &activeTask{
+		task:             Task{ID: "00000000000000000000000000000001"},
+		process:          process,
+		processCompleted: true,
+		closeFailed:      true,
+	}
+
+	manager.maybeStartClose(current)
+
+	if current.closeStarted {
+		t.Fatal("ordinary close path retried a failed Close")
+	}
+	if got := process.closeCalls(); got != 0 {
+		t.Fatalf("Close calls = %d, want 0 before explicit Shutdown retry", got)
+	}
+}
+
+func TestManagerRecordCloseFailureResolvesCauseBeforePublishingUnhealthy(t *testing.T) {
+	manager := &Manager{}
+	manager.healthy.Store(true)
+	signal := newExecutionSignal()
+	resolveEntered := make(chan struct{})
+	releaseResolve := make(chan struct{})
+	defer func() {
+		select {
+		case <-releaseResolve:
+		default:
+			close(releaseResolve)
+		}
+	}()
+	originalCancel := signal.cancel
+	signal.cancel = func() {
+		close(resolveEntered)
+		<-releaseResolve
+		originalCancel()
+	}
+	current := &activeTask{execution: signal}
+	recorded := make(chan struct{})
+	go func() {
+		manager.recordCloseFailure(current)
+		close(recorded)
+	}()
+
+	awaitCauseSignal(t, resolveEntered, "Close failure did not enter cause resolution")
+	if !manager.Healthy() {
+		t.Fatal("Manager published unhealthy before Close failure cause resolution completed")
+	}
+
+	close(releaseResolve)
+	awaitCauseSignal(t, recorded, "Close failure recording did not complete")
+	if got := current.execution.currentCause(); got != OutcomeInfrastructureFailed {
+		t.Fatalf("Close failure cause = %s, want %s", got, OutcomeInfrastructureFailed)
+	}
+	if !current.failPendingStep {
+		t.Fatal("Close failure did not mark the pending step failed")
+	}
+	if manager.Healthy() {
+		t.Fatal("Manager remained healthy after Close failure was recorded")
+	}
+}
+
+func TestManagerTimeoutCommandDoesNotRetryFailedCloseBeforeShutdown(t *testing.T) {
+	store := newPreparedLeaseCircuitStore()
+	publisher := &preparedLeaseRecordingPublisher{}
+	first := newPreparedLeaseCircuitProcess()
+	second := newPreparedLeaseCircuitProcess()
+	first.setErrors(nil, errors.New("first Close failed after timeout was claimed"))
+	releaseClose := make(chan struct{})
+	first.setCloseBlock(releaseClose)
+	processes := &preparedLeaseQueueProcesses{queue: []*preparedLeaseCircuitProcess{first, second}}
+	artifacts := &preparedLeaseCircuitArtifacts{}
+	ids := []string{
+		"00000000000000000000000000000051",
+		"00000000000000000000000000000052",
+	}
+	nextID := 0
+	manager, err := NewManager(ManagerConfig{
+		Store:               store,
+		Publisher:           publisher,
+		Processes:           processes,
+		Artifacts:           artifacts,
+		Clock:               causeBarrierClock{now: time.Date(2026, 7, 27, 15, 0, 0, 0, time.UTC)},
+		NewID:               func() string { id := ids[nextID]; nextID++; return id },
+		ServiceExecutable:   "trusted-service",
+		ServiceInstanceID:   "00000000000000000000000000000099",
+		TerminationGrace:    time.Millisecond,
+		ProcessCloseTimeout: time.Second,
+		CommandQueue:        4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var releaseCloseOnce sync.Once
+	var releaseFirstGetOnce sync.Once
+	var releaseSecondGetOnce sync.Once
+	firstGetRelease := make(chan struct{})
+	secondGetRelease := make(chan struct{})
+	t.Cleanup(func() {
+		releaseCloseOnce.Do(func() { close(releaseClose) })
+		releaseFirstGetOnce.Do(func() { close(firstGetRelease) })
+		releaseSecondGetOnce.Do(func() { close(secondGetRelease) })
+		first.setCloseBlock(nil)
+		first.setErrors(nil, nil)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = manager.Shutdown(ctx)
+	})
+
+	started, err := manager.Start(
+		context.Background(),
+		preparedLeaseTwoStepRequest("00000000000000000000000000000053"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.complete(ProcessResult{ExitCode: 0})
+	awaitPreparedLeaseCloseCalls(t, first, 1)
+
+	firstGetEntered := make(chan struct{})
+	secondGetEntered := make(chan struct{})
+	store.setGetBarrier(1, firstGetEntered, firstGetRelease)
+	store.setGetBarrier(2, secondGetEntered, secondGetRelease)
+	firstGetReply := make(chan taskResponse, 1)
+	manager.commands <- taskIDCommand{id: started.ID, reply: firstGetReply}
+	awaitCauseSignal(t, firstGetEntered, "first command-loop barrier was not entered")
+
+	value, ok := manager.executionSignals.Load(started.ID)
+	if !ok {
+		t.Fatal("active task has no execution signal")
+	}
+	if got := value.(*executionSignal).claim(OutcomeTimedOut); got != OutcomeTimedOut {
+		t.Fatalf("claimed cause = %s, want %s", got, OutcomeTimedOut)
+	}
+	releaseCloseOnce.Do(func() { close(releaseClose) })
+	awaitCommandQueueLength(t, manager.commands, 1, "Close result was not enqueued")
+	manager.commands <- timeoutCommand(started.ID)
+	secondGetReply := make(chan taskResponse, 1)
+	manager.commands <- taskIDCommand{id: started.ID, reply: secondGetReply}
+	releaseFirstGetOnce.Do(func() { close(firstGetRelease) })
+	awaitCauseSignal(t, secondGetEntered, "timeout command was not consumed after Close result")
+
+	if got := first.closeCalls(); got != 1 {
+		t.Fatalf("Close calls before explicit Shutdown = %d, want 1", got)
+	}
+	durable, err := store.Get(context.Background(), started.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if durable.Status == StatusFinished || durable.Outcome != "" {
+		t.Fatalf("task before explicit Shutdown = %#v, want nonterminal without outcome", durable)
+	}
+	if got := processes.prepareCount(); got != 1 {
+		t.Fatalf("Prepare calls before explicit Shutdown = %d, want 1", got)
+	}
+
+	first.setCloseBlock(nil)
+	first.setErrors(nil, nil)
+	releaseSecondGetOnce.Do(func() { close(secondGetRelease) })
+	for name, reply := range map[string]<-chan taskResponse{
+		"first":  firstGetReply,
+		"second": secondGetReply,
+	} {
+		select {
+		case response := <-reply:
+			if response.err != nil {
+				t.Fatalf("%s command-loop barrier = %v", name, response.err)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("%s command-loop barrier did not return", name)
+		}
+	}
+
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), time.Second)
+	defer cancelShutdown()
+	if err := manager.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("explicit Shutdown retry = %v", err)
+	}
+	if got := first.closeCalls(); got != 2 {
+		t.Fatalf("Close calls after explicit Shutdown = %d, want 2", got)
+	}
+	finished, err := store.Get(context.Background(), started.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finished.Status != StatusFinished || finished.Outcome != OutcomeTimedOut {
+		t.Fatalf("task after explicit Shutdown = %#v, want finished/timed_out", finished)
+	}
+	if got := []StepStatus{finished.Steps[0].Status, finished.Steps[1].Status}; got[0] != StepSucceeded || got[1] != StepSkipped {
+		t.Fatalf("step statuses = %v, want [%s %s]", got, StepSucceeded, StepSkipped)
+	}
+	if got := processes.prepareCount(); got != 1 {
+		t.Fatalf("Prepare calls after explicit Shutdown = %d, want 1", got)
+	}
+	if got := second.startCalls(); got != 0 {
+		t.Fatalf("second Start calls = %d, want 0", got)
+	}
+}
+
 func TestManagerProcessDoneUsesClaimedTimeoutBeforeTimeoutCommand(t *testing.T) {
 	manager, current, active, store := newCauseBarrierFixture()
 	current.task.ActiveStep = "first"
@@ -721,6 +925,17 @@ func preparedLeaseCircuitRequest(key string) StartRequest {
 	}
 }
 
+func preparedLeaseTwoStepRequest(key string) StartRequest {
+	request := preparedLeaseCircuitRequest(key)
+	first := request.Plan.Steps[0]
+	first.ID = "first"
+	second := first
+	second.ID = "second"
+	request.Plan.Steps = []ExecutionStep{first, second}
+	request.Plan.Fingerprint = FingerprintPlan(request.Plan)
+	return request
+}
+
 func awaitCauseSignal(t *testing.T, signal <-chan struct{}, message string) {
 	t.Helper()
 	select {
@@ -968,6 +1183,36 @@ type preparedLeaseCircuitProcesses struct {
 	taskID   string
 }
 
+type preparedLeaseQueueProcesses struct {
+	mu       sync.Mutex
+	queue    []*preparedLeaseCircuitProcess
+	prepares int
+}
+
+func (p *preparedLeaseQueueProcesses) Prepare(
+	_ context.Context,
+	_ ProcessSpec,
+	taskID string,
+	serviceID string,
+) (ManagedProcess, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.queue) == 0 {
+		return nil, errors.New("no prepared process queued")
+	}
+	process := p.queue[0]
+	p.queue = p.queue[1:]
+	p.prepares++
+	process.setLeaseIDs(taskID, serviceID)
+	return process, nil
+}
+
+func (p *preparedLeaseQueueProcesses) prepareCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.prepares
+}
+
 func (p *preparedLeaseCircuitProcesses) Prepare(
 	ctx context.Context,
 	_ ProcessSpec,
@@ -1115,6 +1360,18 @@ func awaitPreparedLeaseProcessCalls(t *testing.T, process *preparedLeaseCircuitP
 		case <-deadline:
 			t.Fatalf("process calls: terminate=%d close=%d",
 				process.terminateCalls(), process.closeCalls())
+		default:
+		}
+	}
+}
+
+func awaitPreparedLeaseCloseCalls(t *testing.T, process *preparedLeaseCircuitProcess, want int) {
+	t.Helper()
+	deadline := time.After(time.Second)
+	for process.closeCalls() < want {
+		select {
+		case <-deadline:
+			t.Fatalf("Close calls = %d, want at least %d", process.closeCalls(), want)
 		default:
 		}
 	}

@@ -934,50 +934,12 @@ func TestManagerLeaseFreeCloseFailureClaimsInfrastructureCauseBeforeShutdown(t *
 	f.process.closeErr = nil
 	f.process.mu.Unlock()
 
-	executionDone := f.process.startContextDone()
-	if executionDone == nil {
-		t.Fatal("Process Start did not capture the execution context")
-	}
-	shutdownReady := make(chan struct{})
-	shutdownResult := make(chan struct {
-		causeFixed bool
-		err        error
-	}, 1)
-	go func() {
-		close(shutdownReady)
-		unhealthyDeadline := time.After(time.Second)
-		for f.manager.Healthy() {
-			select {
-			case <-unhealthyDeadline:
-				shutdownResult <- struct {
-					causeFixed bool
-					err        error
-				}{err: errors.New("Manager did not publish unhealthy after Close failed")}
-				return
-			default:
-			}
-		}
-		causeFixed := false
-		select {
-		case <-executionDone:
-			causeFixed = true
-		default:
-		}
-		retry, cancelRetry := context.WithTimeout(context.Background(), time.Second)
-		defer cancelRetry()
-		shutdownResult <- struct {
-			causeFixed bool
-			err        error
-		}{causeFixed: causeFixed, err: f.manager.Shutdown(retry)}
-	}()
-	awaitSignal(t, shutdownReady, "Shutdown watcher was not ready before Close returned")
 	releaseCloseOnce.Do(func() { close(releaseClose) })
-	shutdown := <-shutdownResult
-	if shutdown.err != nil {
-		t.Fatalf("Shutdown retry after lease-free Close failure = %v", shutdown.err)
-	}
-	if !shutdown.causeFixed {
-		t.Fatal("Manager published unhealthy before resolving the lease-free Close failure cause")
+	f.awaitUnhealthy(t)
+	retry, cancelRetry := context.WithTimeout(context.Background(), time.Second)
+	defer cancelRetry()
+	if err := f.manager.Shutdown(retry); err != nil {
+		t.Fatalf("Shutdown retry after lease-free Close failure = %v", err)
 	}
 
 	finished := f.awaitStoredTask(t, started.ID, task.StatusFinished)

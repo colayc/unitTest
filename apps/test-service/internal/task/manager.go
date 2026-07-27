@@ -549,13 +549,7 @@ func (m *Manager) loop() {
 		case closeResultCommand:
 			if current := active[value.taskID]; current != nil && current.closeGeneration == value.generation {
 				if value.err != nil {
-					if !m.circuitFailed() &&
-						!current.recoveryRequired &&
-						!current.leasePersisted {
-						outcome := current.execution.resolve(OutcomeInfrastructureFailed)
-						current.failPendingStep = outcome == OutcomeInfrastructureFailed
-					}
-					m.healthy.Store(false)
+					m.recordCloseFailure(current)
 					recoveryHandoffSafe := current.task.Status != StatusFinished &&
 						current.leasePersisted
 					if (m.circuitFailed() || current.recoveryRequired) && recoveryHandoffSafe {
@@ -637,7 +631,7 @@ func (m *Manager) loop() {
 					}
 				}
 				if current.closeFailed {
-					m.maybeStartClose(current)
+					m.retryClose(current)
 				}
 			}
 		}
@@ -992,7 +986,18 @@ func (m *Manager) abandon(current *activeTask) {
 }
 
 func (m *Manager) maybeStartClose(current *activeTask) {
+	m.startClose(current, false)
+}
+
+func (m *Manager) retryClose(current *activeTask) {
+	m.startClose(current, true)
+}
+
+func (m *Manager) startClose(current *activeTask, retryFailed bool) {
 	if current.closeStarted || current.process == nil {
+		return
+	}
+	if current.closeFailed && !retryFailed {
 		return
 	}
 	if current.terminating && !current.terminationComplete {
@@ -1015,6 +1020,16 @@ func (m *Manager) maybeStartClose(current *activeTask) {
 		err := process.Close(ctx)
 		m.sendInternal(closeResultCommand{taskID: taskID, generation: generation, err: err})
 	}()
+}
+
+func (m *Manager) recordCloseFailure(current *activeTask) {
+	if !m.circuitFailed() &&
+		!current.recoveryRequired &&
+		!current.leasePersisted {
+		outcome := current.execution.resolve(OutcomeInfrastructureFailed)
+		current.failPendingStep = outcome == OutcomeInfrastructureFailed
+	}
+	m.healthy.Store(false)
 }
 
 func (m *Manager) canRemove(current *activeTask) bool {
