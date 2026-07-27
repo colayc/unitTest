@@ -903,7 +903,11 @@ func TestManagerLeaseFreeCloseFailureClaimsInfrastructureCauseBeforeShutdown(t *
 	second := newFakeProcess()
 	f.processes.queue = []*fakeProcess{f.process, second}
 	t.Cleanup(func() { second.completeOnce(task.ProcessResult{Err: errors.New("test cleanup")}) })
+	releaseClose := make(chan struct{})
+	var releaseCloseOnce sync.Once
+	f.process.closeBlock = releaseClose
 	f.process.closeErr = errors.New("first process close failed without a prior cause")
+	t.Cleanup(func() { releaseCloseOnce.Do(func() { close(releaseClose) }) })
 
 	started, err := f.manager.Start(context.Background(), twoStepStartRequest(testID(95), time.Minute, fixedBoundary{}))
 	if err != nil {
@@ -911,9 +915,8 @@ func TestManagerLeaseFreeCloseFailureClaimsInfrastructureCauseBeforeShutdown(t *
 	}
 	f.process.complete(task.ProcessResult{ExitCode: 0})
 	f.awaitProcessClose(t, f.process)
-	f.awaitUnhealthy(t)
 
-	beforeRetry, err := f.store.Get(context.Background(), started.ID)
+	beforeRetry, err := f.manager.Get(context.Background(), started.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -930,10 +933,51 @@ func TestManagerLeaseFreeCloseFailureClaimsInfrastructureCauseBeforeShutdown(t *
 	f.process.mu.Lock()
 	f.process.closeErr = nil
 	f.process.mu.Unlock()
-	retry, cancelRetry := context.WithTimeout(context.Background(), time.Second)
-	defer cancelRetry()
-	if err := f.manager.Shutdown(retry); err != nil {
-		t.Fatalf("Shutdown retry after lease-free Close failure = %v", err)
+
+	executionDone := f.process.startContextDone()
+	if executionDone == nil {
+		t.Fatal("Process Start did not capture the execution context")
+	}
+	shutdownReady := make(chan struct{})
+	shutdownResult := make(chan struct {
+		causeFixed bool
+		err        error
+	}, 1)
+	go func() {
+		close(shutdownReady)
+		unhealthyDeadline := time.After(time.Second)
+		for f.manager.Healthy() {
+			select {
+			case <-unhealthyDeadline:
+				shutdownResult <- struct {
+					causeFixed bool
+					err        error
+				}{err: errors.New("Manager did not publish unhealthy after Close failed")}
+				return
+			default:
+			}
+		}
+		causeFixed := false
+		select {
+		case <-executionDone:
+			causeFixed = true
+		default:
+		}
+		retry, cancelRetry := context.WithTimeout(context.Background(), time.Second)
+		defer cancelRetry()
+		shutdownResult <- struct {
+			causeFixed bool
+			err        error
+		}{causeFixed: causeFixed, err: f.manager.Shutdown(retry)}
+	}()
+	awaitSignal(t, shutdownReady, "Shutdown watcher was not ready before Close returned")
+	releaseCloseOnce.Do(func() { close(releaseClose) })
+	shutdown := <-shutdownResult
+	if shutdown.err != nil {
+		t.Fatalf("Shutdown retry after lease-free Close failure = %v", shutdown.err)
+	}
+	if !shutdown.causeFixed {
+		t.Fatal("Manager published unhealthy before resolving the lease-free Close failure cause")
 	}
 
 	finished := f.awaitStoredTask(t, started.ID, task.StatusFinished)

@@ -549,6 +549,12 @@ func (m *Manager) loop() {
 		case closeResultCommand:
 			if current := active[value.taskID]; current != nil && current.closeGeneration == value.generation {
 				if value.err != nil {
+					if !m.circuitFailed() &&
+						!current.recoveryRequired &&
+						!current.leasePersisted {
+						outcome := current.execution.resolve(OutcomeInfrastructureFailed)
+						current.failPendingStep = outcome == OutcomeInfrastructureFailed
+					}
 					m.healthy.Store(false)
 					recoveryHandoffSafe := current.task.Status != StatusFinished &&
 						current.leasePersisted
@@ -559,12 +565,6 @@ func (m *Manager) loop() {
 					} else if m.circuitFailed() ||
 						current.recoveryRequired ||
 						!current.leasePersisted {
-						if !m.circuitFailed() &&
-							!current.recoveryRequired &&
-							!current.leasePersisted {
-							outcome := current.execution.resolve(OutcomeInfrastructureFailed)
-							current.failPendingStep = outcome == OutcomeInfrastructureFailed
-						}
 						current.closeStarted = false
 						current.closeComplete = false
 						current.closeFailed = true
