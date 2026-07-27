@@ -215,14 +215,373 @@ func TestManagerPrepareFailureTerminalStoreFaultDoesNotCrash(t *testing.T) {
 	}
 }
 
-func TestManagerPublisherPanicTripsCircuitAfterCommittedEvent(t *testing.T) {
+func TestManagerPublisherFailureFailClosedAfterCommittedCreate(t *testing.T) {
 	f := newManagerFixture(t)
 	f.publisher.panicType = task.EventTaskCreated
+	key := testID(31)
+
 	_, err := f.manager.Start(context.Background(), task.StartRequest{
-		IdempotencyKey: testID(31), Scenario: task.ScenarioSuccess, Timeout: time.Second,
+		IdempotencyKey: key,
+		Scenario:       task.ScenarioSuccess,
+		Timeout:        time.Second,
 	})
-	if !errors.Is(err, task.ErrStorageUnavailable) || f.manager.Healthy() || f.processes.prepareCount() != 0 {
-		t.Fatalf("Start error = %v healthy = %v prepare = %d", err, f.manager.Healthy(), f.processes.prepareCount())
+	if !errors.Is(err, task.ErrStorageUnavailable) {
+		t.Fatalf("Start error = %v, want ErrStorageUnavailable", err)
+	}
+	stored, findErr := f.store.FindByIdempotencyKey(context.Background(), key)
+	if findErr != nil {
+		t.Fatal(findErr)
+	}
+	if stored.Status != task.StatusFinished || stored.Outcome != task.OutcomeInfrastructureFailed {
+		t.Fatalf("stored task = %#v, want finished/infrastructure_failed", stored)
+	}
+	assertStepStatuses(t, stored, task.StepSkipped)
+	events := f.store.eventsForTask(stored.ID)
+	if got := eventTypes(events); !reflect.DeepEqual(got, []task.EventType{
+		task.EventTaskCreated,
+		task.EventTaskFinished,
+	}) {
+		t.Fatalf("durable event types = %v", got)
+	}
+	if f.processes.prepareCount() != 0 || f.process.startCalls() != 0 {
+		t.Fatalf("process calls after publisher failure: prepare=%d start=%d",
+			f.processes.prepareCount(), f.process.startCalls())
+	}
+	if len(f.artifacts.summariesCopy()) != 0 || len(f.store.artifactsCopy()) != 0 {
+		t.Fatal("publisher fail-closed path created an artifact")
+	}
+	if lease := f.store.lease(stored.ID); lease.TaskID != "" {
+		t.Fatalf("publisher fail-closed path created lease %#v", lease)
+	}
+	if f.manager.Healthy() {
+		t.Fatal("manager remained healthy after publisher failure")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := f.manager.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown after publisher failure = %v", err)
+	}
+}
+
+func TestManagerPublisherFailurePreservesAcceptedCancellation(t *testing.T) {
+	f := newManagerFixture(t)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	f.publisher.blockType = task.EventTaskCreated
+	f.publisher.panicAfterBlockType = task.EventTaskCreated
+	f.publisher.blockEntered = make(chan task.Event, 1)
+	f.publisher.block = release
+	key := testID(32)
+
+	startResult := make(chan taskResponseResult, 1)
+	go func() {
+		got, err := f.manager.Start(context.Background(), task.StartRequest{
+			IdempotencyKey: key,
+			Scenario:       task.ScenarioSuccess,
+			Timeout:        time.Second,
+		})
+		startResult <- taskResponseResult{task: got, err: err}
+	}()
+	var created task.Event
+	select {
+	case created = <-f.publisher.blockEntered:
+	case <-time.After(time.Second):
+		t.Fatal("task.created publisher was not entered")
+	}
+
+	cancelCtx := newObservedCancelContext()
+	cancelResult := make(chan taskResponseResult, 1)
+	go func() {
+		got, err := f.manager.Cancel(cancelCtx, created.TaskID)
+		cancelResult <- taskResponseResult{task: got, err: err}
+	}()
+	awaitSignal(t, cancelCtx.waiting, "Cancel did not enter its public wait")
+	releaseOnce.Do(func() { close(release) })
+
+	select {
+	case result := <-startResult:
+		if !errors.Is(result.err, task.ErrStorageUnavailable) {
+			t.Fatalf("Start error = %v, want ErrStorageUnavailable", result.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Start did not return after publisher failure")
+	}
+	select {
+	case result := <-cancelResult:
+		if !errors.Is(result.err, task.ErrStorageUnavailable) {
+			t.Fatalf("Cancel error = %v, want ErrStorageUnavailable", result.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("accepted Cancel did not return after publisher failure")
+	}
+
+	stored, err := f.store.FindByIdempotencyKey(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertPublisherFailureOutcome(t, stored, task.OutcomeCancelled)
+}
+
+func TestManagerPublisherFailurePreservesClaimedShutdown(t *testing.T) {
+	f := newManagerFixture(t)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	f.publisher.blockType = task.EventTaskCreated
+	f.publisher.panicAfterBlockType = task.EventTaskCreated
+	f.publisher.blockEntered = make(chan task.Event, 1)
+	f.publisher.block = release
+	key := testID(34)
+
+	startResult := make(chan taskResponseResult, 1)
+	go func() {
+		got, err := f.manager.Start(context.Background(), task.StartRequest{
+			IdempotencyKey: key,
+			Scenario:       task.ScenarioSuccess,
+			Timeout:        time.Second,
+		})
+		startResult <- taskResponseResult{task: got, err: err}
+	}()
+	select {
+	case <-f.publisher.blockEntered:
+	case <-time.After(time.Second):
+		t.Fatal("task.created publisher was not entered")
+	}
+
+	shutdownCtx := newObservedCancelContext()
+	shutdownResult := make(chan error, 1)
+	go func() { shutdownResult <- f.manager.Shutdown(shutdownCtx) }()
+	awaitSignal(t, shutdownCtx.waiting, "Shutdown did not enter closing wait")
+	if f.manager.Healthy() {
+		t.Fatal("Manager did not enter closing before publisher release")
+	}
+	releaseOnce.Do(func() { close(release) })
+
+	select {
+	case result := <-startResult:
+		if !errors.Is(result.err, task.ErrStorageUnavailable) {
+			t.Fatalf("Start error = %v, want ErrStorageUnavailable", result.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Start did not return after publisher failure")
+	}
+	select {
+	case err := <-shutdownResult:
+		if err != nil {
+			t.Fatalf("Shutdown after publisher failure = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not return after publisher failure")
+	}
+	stored, err := f.store.FindByIdempotencyKey(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertPublisherFailureOutcome(t, stored, task.OutcomeInterrupted)
+}
+
+func TestManagerPublisherFailureRetriesTerminalConflictOnce(t *testing.T) {
+	f := newManagerFixture(t)
+	f.publisher.panicType = task.EventTaskCreated
+	f.store.failApplyAt = 1
+	f.store.failApplyFor = 1
+	f.store.failApplyErr = task.ErrConflict
+	key := testID(35)
+
+	_, err := f.manager.Start(context.Background(), task.StartRequest{
+		IdempotencyKey: key,
+		Scenario:       task.ScenarioSuccess,
+		Timeout:        time.Second,
+	})
+	if !errors.Is(err, task.ErrStorageUnavailable) {
+		t.Fatalf("Start error = %v, want ErrStorageUnavailable", err)
+	}
+	if got := f.store.applyCount(); got != 2 {
+		t.Fatalf("fail-closed Apply calls = %d, want 2", got)
+	}
+	stored, err := f.store.FindByIdempotencyKey(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertPublisherFailureOutcome(t, stored, task.OutcomeInfrastructureFailed)
+	assertPublisherFailureNoExecutionSideEffects(t, f, stored.ID)
+	shutdownPublisherFailureManager(t, f)
+}
+
+func TestManagerPublisherFailureRepeatedConflictUsesRecovery(t *testing.T) {
+	f := newManagerFixture(t)
+	f.publisher.panicType = task.EventTaskCreated
+	f.store.failApplyAt = 1
+	f.store.failApplyFor = 2
+	f.store.failApplyErr = task.ErrConflict
+	key := testID(36)
+
+	_, err := f.manager.Start(context.Background(), task.StartRequest{
+		IdempotencyKey: key,
+		Scenario:       task.ScenarioSuccess,
+		Timeout:        time.Second,
+	})
+	if !errors.Is(err, task.ErrStorageUnavailable) {
+		t.Fatalf("Start error = %v, want ErrStorageUnavailable", err)
+	}
+	if got := f.store.applyCount(); got != 2 {
+		t.Fatalf("fail-closed Apply calls = %d, want 2", got)
+	}
+	stored, err := f.store.FindByIdempotencyKey(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != task.StatusQueued || stored.Outcome != "" {
+		t.Fatalf("durable task after repeated conflict = %#v, want queued for recovery", stored)
+	}
+	assertStepStatuses(t, stored, task.StepPending)
+	if got := eventTypes(f.store.eventsForTask(stored.ID)); !reflect.DeepEqual(got, []task.EventType{task.EventTaskCreated}) {
+		t.Fatalf("durable event types after repeated conflict = %v, want [task.created]", got)
+	}
+	assertPublisherFailureNoExecutionSideEffects(t, f, stored.ID)
+	if f.manager.Healthy() {
+		t.Fatal("manager remained healthy after publisher failure")
+	}
+	shutdownPublisherFailureManager(t, f)
+}
+
+func TestManagerPublisherFailureTerminalStoreUnavailableTripsStoreCircuit(t *testing.T) {
+	f := newManagerFixture(t)
+	f.publisher.panicType = task.EventTaskCreated
+	f.store.failApply = task.ErrStorageUnavailable
+	key := testID(37)
+
+	_, err := f.manager.Start(context.Background(), task.StartRequest{
+		IdempotencyKey: key,
+		Scenario:       task.ScenarioSuccess,
+		Timeout:        time.Second,
+	})
+	if !errors.Is(err, task.ErrStorageUnavailable) {
+		t.Fatalf("Start error = %v, want ErrStorageUnavailable", err)
+	}
+	if got := f.store.applyCount(); got != 1 {
+		t.Fatalf("fail-closed Apply calls = %d, want 1", got)
+	}
+	stored, err := f.store.FindByIdempotencyKey(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != task.StatusQueued || stored.Outcome != "" {
+		t.Fatalf("durable task after Store failure = %#v, want queued for recovery", stored)
+	}
+	assertStepStatuses(t, stored, task.StepPending)
+	if got := eventTypes(f.store.eventsForTask(stored.ID)); !reflect.DeepEqual(got, []task.EventType{task.EventTaskCreated}) {
+		t.Fatalf("durable event types after Store failure = %v, want [task.created]", got)
+	}
+	assertPublisherFailureNoExecutionSideEffects(t, f, stored.ID)
+	if f.manager.Healthy() {
+		t.Fatal("manager remained healthy after terminal Store failure")
+	}
+	shutdownPublisherFailureManager(t, f)
+}
+
+func TestManagerPublisherFailureQuiescesOtherActiveTaskForRecovery(t *testing.T) {
+	f := newManagerFixture(t)
+	first, err := f.manager.Start(context.Background(), task.StartRequest{
+		IdempotencyKey: testID(38),
+		Scenario:       task.ScenarioHang,
+		Timeout:        time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Status != task.StatusRunning {
+		t.Fatalf("first task status = %s, want running", first.Status)
+	}
+
+	f.publisher.panicType = task.EventTaskCreated
+	secondKey := testID(39)
+	_, err = f.manager.Start(context.Background(), task.StartRequest{
+		IdempotencyKey: secondKey,
+		Scenario:       task.ScenarioSuccess,
+		Timeout:        time.Second,
+	})
+	if !errors.Is(err, task.ErrStorageUnavailable) {
+		t.Fatalf("second Start error = %v, want ErrStorageUnavailable", err)
+	}
+	second, err := f.store.FindByIdempotencyKey(context.Background(), secondKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertPublisherFailureOutcome(t, second, task.OutcomeInfrastructureFailed)
+	if lease := f.store.lease(second.ID); lease.TaskID != "" {
+		t.Fatalf("publisher fail-closed task created lease %#v", lease)
+	}
+	if got := f.processes.prepareCount(); got != 1 {
+		t.Fatalf("Prepare calls = %d, want only the first task", got)
+	}
+	if got := f.process.startCalls(); got != 1 {
+		t.Fatalf("Start calls = %d, want only the first task", got)
+	}
+	if len(f.artifacts.summariesCopy()) != 0 || len(f.store.artifactsCopy()) != 0 {
+		t.Fatal("publisher failure path created an artifact")
+	}
+
+	f.awaitProcessTerminate(t, f.process, 1)
+	f.awaitProcessClose(t, f.process)
+	if got := f.process.terminateCalls(); got != 1 {
+		t.Fatalf("first task Terminate calls = %d, want 1", got)
+	}
+	if got := f.process.closeCalls(); got != 1 {
+		t.Fatalf("first task Close calls = %d, want 1", got)
+	}
+	durableFirst, err := f.store.Get(context.Background(), first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if durableFirst.Status != task.StatusRunning || durableFirst.Outcome != "" {
+		t.Fatalf("first durable task after Publisher circuit = %#v, want running for recovery", durableFirst)
+	}
+	if got := eventTypes(f.store.eventsForTask(first.ID)); !reflect.DeepEqual(got, []task.EventType{
+		task.EventTaskCreated,
+		task.EventTaskStarted,
+	}) {
+		t.Fatalf("first durable event types = %v, want no false terminal event", got)
+	}
+	if f.manager.Healthy() {
+		t.Fatal("manager remained healthy after publisher failure")
+	}
+	shutdownPublisherFailureManager(t, f)
+}
+
+func assertPublisherFailureOutcome(t *testing.T, stored task.Task, want task.Outcome) {
+	t.Helper()
+	if stored.Status != task.StatusFinished || stored.Outcome != want {
+		t.Fatalf("stored task = %#v, want finished/%s", stored, want)
+	}
+	for index, step := range stored.Steps {
+		if step.Status != task.StepSkipped {
+			t.Fatalf("step[%d] = %s, want skipped", index, step.Status)
+		}
+	}
+}
+
+func assertPublisherFailureNoExecutionSideEffects(t *testing.T, f *managerFixture, taskID string) {
+	t.Helper()
+	if f.processes.prepareCount() != 0 || f.process.startCalls() != 0 {
+		t.Fatalf("process calls after publisher failure: prepare=%d start=%d",
+			f.processes.prepareCount(), f.process.startCalls())
+	}
+	if len(f.artifacts.summariesCopy()) != 0 || len(f.store.artifactsCopy()) != 0 {
+		t.Fatal("publisher failure path created an artifact")
+	}
+	if lease := f.store.lease(taskID); lease.TaskID != "" {
+		t.Fatalf("publisher failure path created lease %#v", lease)
+	}
+}
+
+func shutdownPublisherFailureManager(t *testing.T, f *managerFixture) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := f.manager.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown after publisher failure = %v", err)
 	}
 }
 
@@ -1212,6 +1571,26 @@ func (s *fakeStore) artifactsCopy() []task.Artifact {
 	return append([]task.Artifact(nil), s.artifacts...)
 }
 
+func (s *fakeStore) eventsForTask(id string) []task.Event {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var result []task.Event
+	for _, event := range s.eventsValue {
+		if event.TaskID == id {
+			result = append(result, event)
+		}
+	}
+	return result
+}
+
+func eventTypes(events []task.Event) []task.EventType {
+	result := make([]task.EventType, len(events))
+	for index := range events {
+		result[index] = events[index].Type
+	}
+	return result
+}
+
 func (s *fakeStore) assertStrictSequences(t *testing.T) {
 	t.Helper()
 	s.mu.Lock()
@@ -1224,12 +1603,13 @@ func (s *fakeStore) assertStrictSequences(t *testing.T) {
 }
 
 type recordingPublisher struct {
-	mu           sync.Mutex
-	value        []task.Event
-	panicType    task.EventType
-	blockType    task.EventType
-	blockEntered chan task.Event
-	block        <-chan struct{}
+	mu                  sync.Mutex
+	value               []task.Event
+	panicType           task.EventType
+	panicAfterBlockType task.EventType
+	blockType           task.EventType
+	blockEntered        chan task.Event
+	block               <-chan struct{}
 }
 
 func (p *recordingPublisher) Publish(event task.Event) {
@@ -1239,16 +1619,19 @@ func (p *recordingPublisher) Publish(event task.Event) {
 		panic("publisher failure")
 	}
 	p.value = append(p.value, event)
+	panicAfterBlockType := p.panicAfterBlockType
 	blockType, entered, block := p.blockType, p.blockEntered, p.block
 	p.mu.Unlock()
-	if event.Type != blockType {
-		return
+	if event.Type == blockType {
+		if entered != nil {
+			entered <- event
+		}
+		if block != nil {
+			<-block
+		}
 	}
-	if entered != nil {
-		entered <- event
-	}
-	if block != nil {
-		<-block
+	if event.Type == panicAfterBlockType {
+		panic("publisher failure after block")
 	}
 }
 func (p *recordingPublisher) events() []task.Event {

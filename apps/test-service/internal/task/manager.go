@@ -55,6 +55,7 @@ type Manager struct {
 	shutdownPending     atomic.Bool
 	executionSignals    sync.Map
 	storageFailed       bool // command-loop owned
+	publisherFailed     bool // command-loop owned
 }
 
 type startCommand struct {
@@ -423,6 +424,10 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	}
 	m.closing.Store(true)
 	m.healthy.Store(false)
+	m.executionSignals.Range(func(_, value any) bool {
+		value.(*executionSignal).claim(OutcomeInterrupted)
+		return true
+	})
 	if m.shutdownPending.CompareAndSwap(false, true) {
 		select {
 		case m.shutdownSignal <- struct{}{}:
@@ -486,11 +491,12 @@ func (m *Manager) loop() {
 			page, err := m.store.List(context.Background(), value.cursor, value.limit)
 			value.reply <- listResponse{page: page, err: err}
 		case outputCommand:
-			if current := active[value.taskID]; current != nil && !current.processCompleted {
+			if current := active[value.taskID]; !m.circuitFailed() && current != nil && !current.processCompleted {
 				m.acceptOutput(current, value.value, active)
 			}
 		case flushCommand:
-			if current := active[value.taskID]; current != nil && current.flushPending && current.flushToken == value.token {
+			if current := active[value.taskID]; !m.circuitFailed() && current != nil &&
+				current.flushPending && current.flushToken == value.token {
 				current.flushPending = false
 				m.flushOutput(current, active)
 			}
@@ -521,7 +527,7 @@ func (m *Manager) loop() {
 		case processDoneCommand:
 			if current := active[value.taskID]; current != nil && !current.processCompleted {
 				current.processCompleted = true
-				if m.storageFailed || current.recoveryRequired {
+				if m.circuitFailed() || current.recoveryRequired {
 					m.abandon(current)
 				} else {
 					m.finish(current, value.result, active)
@@ -555,7 +561,7 @@ func (m *Manager) loop() {
 					current.closeComplete = true
 					current.closeFailed = false
 					if current.task.Status != StatusFinished && current.processCompleted &&
-						!m.storageFailed && !current.recoveryRequired {
+						!m.circuitFailed() && !current.recoveryRequired {
 						if cause := current.execution.currentCause(); cause != "" {
 							if _, err := m.finishExecution(
 								current,
@@ -583,8 +589,8 @@ func (m *Manager) loop() {
 			initiate := !shutdownInitiated
 			shutdownInitiated = true
 			for _, current := range active {
-				if initiate && current.task.Status != StatusFinished && current.execution.currentCause() == "" {
-					current.execution.claim(OutcomeInterrupted)
+				if initiate && current.task.Status != StatusFinished &&
+					current.execution.claim(OutcomeInterrupted) == OutcomeInterrupted {
 					if current.processCompleted {
 						m.maybeStartClose(current)
 					} else {
@@ -604,6 +610,9 @@ func (m *Manager) loop() {
 }
 
 func (m *Manager) cancel(id string, active map[string]*activeTask) taskResponse {
+	if m.circuitFailed() {
+		return taskResponse{err: ErrStorageUnavailable}
+	}
 	stored, err := m.store.Get(context.Background(), id)
 	if err != nil {
 		return taskResponse{err: err}
@@ -661,7 +670,8 @@ func (m *Manager) cancel(id string, active map[string]*activeTask) taskResponse 
 	}
 	current.task = cancelling
 	current.execution.resolve(OutcomeCancelled)
-	if !m.publishAll(events, active) {
+	if !m.publishAll(events) {
+		m.tripPublisher(active)
 		return taskResponse{task: current.task, err: ErrStorageUnavailable}
 	}
 	if current.process == nil {
@@ -782,14 +792,14 @@ func (m *Manager) acceptOutput(current *activeTask, output ProcessOutput, active
 		current.bufferedBytes += len(part)
 		if current.bufferedBytes >= maxOutputBlock {
 			m.flushOutput(current, active)
-			if m.storageFailed {
+			if m.circuitFailed() {
 				return
 			}
 		}
 	}
 	if overflow {
 		m.flushOutput(current, active)
-		if m.storageFailed {
+		if m.circuitFailed() {
 			return
 		}
 		m.persistTruncation(current, active)
@@ -834,7 +844,8 @@ func (m *Manager) flushOutput(current *activeTask, active map[string]*activeTask
 				return
 			}
 			current.task.LastSequence = event.Sequence
-			if !m.publish(event, active) {
+			if !m.publish(event) {
+				m.tripPublisher(active)
 				return
 			}
 		}
@@ -876,7 +887,9 @@ func (m *Manager) persistTruncation(current *activeTask, active map[string]*acti
 		return
 	}
 	current.task.LastSequence = event.Sequence
-	m.publish(event, active)
+	if !m.publish(event) {
+		m.tripPublisher(active)
+	}
 }
 
 func (m *Manager) terminate(current *activeTask) {
@@ -981,6 +994,14 @@ func (m *Manager) tripStorage(active map[string]*activeTask) {
 	}
 	m.storageFailed = true
 	m.healthy.Store(false)
+	m.quiesceActive(active)
+}
+
+func (m *Manager) circuitFailed() bool {
+	return m.storageFailed || m.publisherFailed
+}
+
+func (m *Manager) quiesceActive(active map[string]*activeTask) {
 	for taskID, current := range active {
 		current.recoveryRequired = true
 		m.stopActive(current)
@@ -996,21 +1017,31 @@ func (m *Manager) tripStorage(active map[string]*activeTask) {
 	}
 }
 
-func (m *Manager) publishAll(events []Event, active map[string]*activeTask) bool {
+func (m *Manager) tripPublisher(active map[string]*activeTask) {
+	if m.publisherFailed {
+		return
+	}
+	m.publisherFailed = true
+	m.healthy.Store(false)
+	if !m.storageFailed {
+		m.quiesceActive(active)
+	}
+}
+
+func (m *Manager) publishAll(events []Event) bool {
 	for _, event := range events {
-		if !m.publish(event, active) {
+		if !m.publish(event) {
 			return false
 		}
 	}
 	return true
 }
 
-func (m *Manager) publish(event Event, active map[string]*activeTask) (ok bool) {
+func (m *Manager) publish(event Event) (ok bool) {
 	ok = true
 	defer func() {
 		if recover() != nil {
 			ok = false
-			m.tripStorage(active)
 		}
 	}()
 	m.publisher.Publish(event)

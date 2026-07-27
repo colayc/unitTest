@@ -239,10 +239,6 @@ func (m *Manager) start(request StartRequest, active map[string]*activeTask) tas
 		}
 		return taskResponse{task: stored}
 	}
-	if !m.publishAll(events, active) {
-		return taskResponse{err: ErrStorageUnavailable}
-	}
-
 	current := &activeTask{
 		task: stored, plan: request.Plan, boundary: request.Boundary,
 		timerStop: make(chan struct{}), timeoutStop: make(chan struct{}),
@@ -251,6 +247,15 @@ func (m *Manager) start(request StartRequest, active map[string]*activeTask) tas
 	active[stored.ID] = current
 	executionRetained = true
 	m.armTimeout(current)
+
+	if !m.publishAll(events) {
+		terminal, terminalErr := m.persistCommittedCreateFailure(current, active)
+		m.tripPublisher(active)
+		if terminalErr != nil {
+			return taskResponse{task: current.task, err: ErrStorageUnavailable}
+		}
+		return taskResponse{task: terminal, err: ErrStorageUnavailable}
+	}
 	if err := m.startNextStep(current, active); err != nil {
 		return taskResponse{task: current.task, err: err}
 	}
@@ -322,8 +327,8 @@ func (m *Manager) startNextStep(current *activeTask, active map[string]*activeTa
 		return err
 	}
 	current.task = stored
-	if !m.publishAll(committed, active) {
-		m.abandon(current)
+	if !m.publishAll(committed) {
+		m.tripPublisher(active)
 		return ErrStorageUnavailable
 	}
 	if current.execution.currentCause() != "" {
@@ -408,7 +413,7 @@ func (m *Manager) finishPendingStep(current *activeTask, active map[string]*acti
 
 func (m *Manager) finish(current *activeTask, result ProcessResult, active map[string]*activeTask) {
 	m.flushOutput(current, active)
-	if m.storageFailed {
+	if m.circuitFailed() {
 		m.abandon(current)
 		return
 	}
@@ -507,6 +512,47 @@ func (m *Manager) finishAfterCloseFailure(current *activeTask, active map[string
 	current.task = finished
 	m.stopActive(current)
 	return finished, nil
+}
+
+func (m *Manager) persistCommittedCreateFailure(
+	current *activeTask,
+	active map[string]*activeTask,
+) (Task, error) {
+	outcome := current.execution.resolve(OutcomeInfrastructureFailed)
+	for attempt := 0; attempt < 2; attempt++ {
+		finishedAt := m.clock.Now()
+		finished, err := ApplyTransition(current.task, Transition{
+			From: current.task.Status, To: StatusFinished, Outcome: outcome, At: finishedAt,
+			ErrorCode: outcomeErrorCode(outcome), ErrorMessage: outcomeErrorMessage(outcome),
+		})
+		if err != nil {
+			return current.task, err
+		}
+		steps := terminalStepMutations(current, ProcessResult{}, outcome, false, finishedAt)
+		stored, _, err := m.store.Apply(context.Background(), Mutation{
+			Task: finished, Expected: StatusQueued, Steps: steps,
+			Events: []EventDraft{
+				eventDraft(current.task.ID, EventTaskFinished, finishedAt, map[string]any{"outcome": outcome}),
+			},
+		})
+		if err == nil {
+			current.task = stored
+			m.stopActive(current)
+			delete(active, current.task.ID)
+			return stored, nil
+		}
+		if errors.Is(err, ErrConflict) && attempt == 0 {
+			continue
+		}
+		current.recoveryRequired = true
+		m.stopActive(current)
+		delete(active, current.task.ID)
+		if !errors.Is(err, ErrConflict) {
+			m.tripStorage(active)
+		}
+		return current.task, err
+	}
+	panic("unreachable")
 }
 
 func (m *Manager) persistTerminal(
@@ -639,14 +685,16 @@ func (m *Manager) persistFinished(
 		}
 		return current, err
 	}
-	if !m.publishAll(committed, active) {
+	if !m.publishAll(committed) {
+		m.tripPublisher(active)
 		return stored, ErrStorageUnavailable
 	}
 	return stored, nil
 }
 
 func publishCommitted(m *Manager, events []Event, active map[string]*activeTask) error {
-	if !m.publishAll(events, active) {
+	if !m.publishAll(events) {
+		m.tripPublisher(active)
 		return ErrStorageUnavailable
 	}
 	return nil
