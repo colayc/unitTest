@@ -1,20 +1,35 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFile, readdir } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
+const goImportAuditTool = "./tools/workspace-smoke/go-import-audit.go";
 const serviceCommandPackage = "./apps/test-service/cmd/unit-test-service";
-const servicePackagePattern = "./apps/test-service/...";
+const serviceProductionRoot = "apps/test-service";
 const currentServicePlatform = process.platform === "win32" ? "windows" : "linux";
-const serverImportPath = "unit-test-ide.local/test-service/internal/server";
-const transportImportPath = "unit-test-ide.local/test-service/internal/transport";
 const winioImportPath = "github.com/Microsoft/go-winio";
+const allowedProductionNetworkImports = new Map([
+  ["apps/test-service/internal/server/server.go", new Set(["net"])],
+  ["apps/test-service/internal/server/service.go", new Set(["net"])],
+  ["apps/test-service/internal/transport/listener.go", new Set(["net"])],
+  ["apps/test-service/internal/transport/listener_unix.go", new Set(["net"])],
+  ["apps/test-service/internal/transport/listener_windows.go", new Set(["net", winioImportPath])]
+]);
 
 function goList(arguments_) {
   return execFileSync("go", arguments_, {
     encoding: "utf8",
     windowsHide: true
   }).trim().split(/\r?\n/).filter(Boolean);
+}
+
+function goImportAudit(paths) {
+  return JSON.parse(execFileSync("go", ["run", goImportAuditTool, "--", ...paths], {
+    encoding: "utf8",
+    windowsHide: true
+  }));
 }
 
 function isNetworkCapableImport(importPath) {
@@ -28,36 +43,16 @@ function isNetworkCapableImport(importPath) {
     || importPath === winioImportPath;
 }
 
-function packageImports(line) {
-  const separator = line.indexOf("|");
-  assert.notEqual(separator, -1, `unexpected go list output: ${line}`);
-  return {
-    importPath: line.slice(0, separator),
-    imports: line.slice(separator + 1).split(",").filter(Boolean)
-  };
+function productionNetworkImportEscapes(records) {
+  return records.filter(({ filename, path, alias }) =>
+    isNetworkCapableImport(path)
+    && (alias !== "" || !allowedProductionNetworkImports.get(filename)?.has(path))
+  );
 }
 
 function calledSelectors(source, packageName) {
   return [...source.matchAll(new RegExp(`\\b${packageName}\\.([A-Za-z_]\\w*)\\s*\\(`, "g"))]
     .map((match) => match[1]);
-}
-
-function sourceImportSpecs(source) {
-  const imports = [...source.matchAll(/\bimport\s+(?:([A-Za-z_.]\w*)\s+)?"([^"]+)"/g)]
-    .map((match) => ({ alias: match[1], path: match[2] }));
-  for (const block of source.matchAll(/\bimport\s*\(([\s\S]*?)\)/g)) {
-    imports.push(...[...block[1].matchAll(/^\s*(?:([A-Za-z_.]\w*)\s+)?"([^"]+)"\s*$/gm)]
-      .map((match) => ({ alias: match[1], path: match[2] })));
-  }
-  return imports;
-}
-
-function serverNetworkImportEscapes(sources) {
-  return sources.flatMap(({ filename, source }) =>
-    sourceImportSpecs(source)
-      .filter((entry) => isNetworkCapableImport(entry.path) && (entry.alias || entry.path !== "net"))
-      .map((entry) => ({ filename, ...entry }))
-  );
 }
 
 async function productionGoSources(directory) {
@@ -110,68 +105,55 @@ test("compiled Service runtime excludes HTTP, TLS, GitHub, and OAuth client stac
   assert.deepEqual(forbidden, [], `${currentServicePlatform} Service dependency graph contains outbound client stacks`);
 });
 
-test("production packages constrain network-capable code to local IPC boundaries", async () => {
-  const allowedImports = new Map([
-    [serverImportPath, new Set(["net"])],
-    [transportImportPath, new Set(["net", winioImportPath])]
-  ]);
-  const packages = goList([
-    "list",
-    "-f",
-    "{{.ImportPath}}|{{join .Imports \",\"}}",
-    servicePackagePattern
-  ]).map(packageImports);
-  for (const package_ of packages) {
-    const allowed = allowedImports.get(package_.importPath) ?? new Set();
-    const escaped = package_.imports.filter((importPath) =>
-      isNetworkCapableImport(importPath) && !allowed.has(importPath)
-    );
+test("Go import audit parses commented raw and aliased import specs before policy checks", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "go-import-audit-"));
+  const filename = join(directory, "mutant.go");
+  try {
+    await writeFile(filename, [
+      "package mutant",
+      "",
+      "import (",
+      "  netx `net` // trailing comment",
+      '  . "net/http" // trailing comment',
+      ")",
+      "",
+      "var _ netx.Conn",
+      "var _ = MethodGet",
+      ""
+    ].join("\n"));
+    const records = goImportAudit([filename]);
+    const normalizedFilename = filename.replaceAll("\\", "/");
+    assert.deepEqual(records, [
+      { filename: normalizedFilename, path: "net", alias: "netx" },
+      { filename: normalizedFilename, path: "net/http", alias: "." }
+    ]);
     assert.deepEqual(
-      escaped,
-      [],
-      `${currentServicePlatform} ${package_.importPath} imports network-capable code outside its local IPC boundary`
+      productionNetworkImportEscapes(records),
+      records,
+      "named and dot aliases in unknown files must fail production import policy"
     );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("production packages constrain network-capable code to local IPC boundaries", async () => {
+  const productionImports = goImportAudit([serviceProductionRoot]);
+  assert.deepEqual(
+    productionNetworkImportEscapes(productionImports),
+    [],
+    "production Go files import network-capable code outside the filename-level local IPC allowlist"
+  );
 
   const serverSources = await productionGoSources("apps/test-service/internal/server");
-  const aliasMutants = [
-    {
-      filename: "named_alias.go",
-      source: `package server
-import netx "net"
-func outbound() { _, _ = netx.Dial("tcp", "example.invalid:443") }
-`
-    },
-    {
-      filename: "dot_import.go",
-      source: `package server
-import . "net"
-func outbound() { _, _ = Dial("tcp", "example.invalid:443") }
-`
-    }
-  ];
-  assert.deepEqual(
-    serverNetworkImportEscapes(aliasMutants),
-    [
-      { filename: "named_alias.go", alias: "netx", path: "net" },
-      { filename: "dot_import.go", alias: ".", path: "net" }
-    ],
-    "server import audit must catch named and dot aliases before selector checks"
-  );
-  const escapedServerImports = serverNetworkImportEscapes(serverSources);
-  assert.deepEqual(
-    escapedServerImports,
-    [],
-    "internal/server must import unaliased net only for its local IPC connection surface"
-  );
   const allowedServerNetSelectors = new Set(["Addr", "Conn", "ErrClosed", "Error", "Listener"]);
-  const escapedServerSelectors = serverSources.flatMap(({ source }) =>
+  const escapedServerSelectors = serverSources.flatMap(({ filename, source }) =>
     [...source.matchAll(/\bnet\.([A-Za-z_]\w*)/g)]
-      .map((match) => match[1])
-      .filter((selector) => !allowedServerNetSelectors.has(selector))
+      .map((match) => ({ filename, selector: match[1] }))
+      .filter(({ selector }) => !allowedServerNetSelectors.has(selector))
   );
   assert.deepEqual(
-    [...new Set(escapedServerSelectors)].sort(),
+    escapedServerSelectors,
     [],
     "internal/server must use net only for local IPC connection, interface, type, and error handling"
   );
@@ -179,28 +161,12 @@ func outbound() { _, _ = Dial("tcp", "example.invalid:443") }
 
 test("cross-platform transports constrain network-capable calls to local IPC", async () => {
   const transportSources = await productionGoSources("apps/test-service/internal/transport");
-  const allowedImports = new Map([
-    ["listener.go", ["net"]],
-    ["listener_unix.go", ["net"]],
-    ["listener_windows.go", ["net", winioImportPath]]
-  ]);
   const allowedSelectors = new Map([
     ["listener.go", { net: ["Listener"], winio: [] }],
     ["listener_unix.go", { net: ["Listener", "DialTimeout", "Listen"], winio: [] }],
     ["listener_windows.go", { net: ["Listener"], winio: ["ListenPipe", "PipeConfig"] }]
   ]);
   for (const { filename, source } of transportSources) {
-    const imports = sourceImportSpecs(source);
-    assert.deepEqual(
-      imports.filter((entry) => entry.alias && isNetworkCapableImport(entry.path)),
-      [],
-      `${filename} must not alias network-capable imports`
-    );
-    assert.deepEqual(
-      imports.map((entry) => entry.path).filter(isNetworkCapableImport),
-      allowedImports.get(filename) ?? [],
-      `${filename} imports network-capable code outside its local IPC boundary`
-    );
     const selectors = allowedSelectors.get(filename) ?? { net: [], winio: [] };
     assert.deepEqual(
       [...source.matchAll(/\bnet\.([A-Za-z_]\w*)/g)].map((match) => match[1]),
