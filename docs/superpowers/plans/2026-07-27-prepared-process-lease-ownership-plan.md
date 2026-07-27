@@ -788,6 +788,12 @@ PutLease: &lease,
 
 ```go
 if value.err != nil {
+    if !m.circuitFailed() &&
+        !current.recoveryRequired &&
+        !current.leasePersisted {
+        outcome := current.execution.resolve(OutcomeInfrastructureFailed)
+        current.failPendingStep = outcome == OutcomeInfrastructureFailed
+    }
     m.healthy.Store(false)
     recoveryHandoffSafe := current.task.Status != StatusFinished &&
         current.leasePersisted
