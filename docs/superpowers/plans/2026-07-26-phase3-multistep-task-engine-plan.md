@@ -17,6 +17,8 @@
 - v1.1 simulation 的 `task.output` payload 继续严格输出 `{stream,text,truncated}`；journal 内部可保存 `stepId`，但只能在 v1.2 投影中暴露。
 - 运行中的 Service 重启后仍不重新附着原进程。
 - SQLite migration 必须原子化并通过 `PRAGMA foreign_key_check`。
+- 已发布 migration及 checksum不得修改；后续兼容修复只能新增下一号 migration。
+- 幂等 identity严格由 `Kind`、semantic `Request` JSON、`WorkspaceGeneration`与 `Timeout`组成；`RequestHash`仅作 fast path，`PlanFingerprint`、runtime-only `ExecutionPlan`与 `ExecutionBoundary`不参与。
 - 所有测试按 TDD 顺序先观察失败，再写最小实现。
 - 所有 Markdown 使用中文，English technical terms 保持 English 格式。
 
@@ -97,7 +99,7 @@ func FingerprintPlan(ExecutionPlan) string
 
 - [ ] **Step 1：写出失败的 Plan 校验测试**
 
-在 `plan_test.go` 添加表驱动测试，至少覆盖空 executable、boundary 不允许的 executable、重复 Step ID、NUL 参数、空 working directory、workspace/data root 外 cwd、未知 Step kind、环境中的 service token key，以及合法的双 Step 计划：
+在 `plan_test.go` 添加表驱动测试，至少覆盖空 executable、boundary 不允许的 executable、重复 Step ID、NUL 参数、空 working directory、workspace/data root 外 cwd、未知 Step kind、环境中的 service token key，以及合法的双 Step 计划。另用独立边界测试逐项证明每 Step `ProcessSpec.Args`、`ProcessSpec.Env`、`CommandSummary.Args` 的 256 项合法，257 项返回 `ErrInvalidArgument`：
 
 ```go
 func TestValidatePlanRejectsUnsafeSpecs(t *testing.T) {
@@ -131,7 +133,7 @@ go test ./apps/test-service/internal/task -run 'TestValidatePlan' -count=1
 
 - [ ] **Step 3：实现最小领域模型和校验**
 
-在 `plan.go` 实现固定 `Version == 1`、1–8 个 Step、唯一且受限的 Step ID、已知 kind、非空 executable/Dir、参数与环境 NUL 检查、环境 key 检查和 fingerprint。每个 Step 还必须通过非空 `ExecutionBoundary` 的 executable/cwd 检查。`FingerprintPlan` 对完整执行字段进行规范 JSON + SHA-256，但只持久化 hash；runtime-only boundary 不进入 fingerprint 或数据库；`CommandSummary` 不得包含 environment。
+在 `plan.go` 实现固定 `Version == 1`、1–8 个 Step、唯一且受限的 Step ID、已知 kind、非空 executable/Dir、参数与环境 NUL 检查、环境 key 检查和 fingerprint。命名并固定 `maxProcessSpecArgs=256`、`maxProcessSpecEnv=256`、`maxCommandSummaryArgs=256`；上限值合法，`limit+1`拒绝。每个 Step 还必须通过非空 `ExecutionBoundary` 的 executable/cwd 检查。`FingerprintPlan` 对完整执行字段进行规范 JSON + SHA-256，但只持久化 hash；runtime-only boundary 不进入 fingerprint 或数据库；`CommandSummary` 不得包含 environment。
 
 同时在 `model.go` 为 `Task` 增加 `Kind`、`Request`、`WorkspaceGeneration`、`PlanFingerprint`、`ActiveStep` 和 `Steps []StepSnapshot`。simulation 的 `WorkspaceGeneration` 固定为空；后续 `cmake_build` 必须使用 64 位 lowercase hex generation。其中：
 
@@ -168,6 +170,8 @@ git commit -m "refactor: define service-owned execution plans"
 
 **文件：**
 - 创建： `apps/test-service/internal/taskstore/migrations/002_multistep_tasks.sql`
+- 创建： `apps/test-service/internal/taskstore/migrations/003_normalize_simulation_requests.sql`
+- 创建： `apps/test-service/internal/task/idempotency.go`
 - 创建： `apps/test-service/internal/taskstore/steps.go`
 - 修改： `apps/test-service/internal/taskstore/migrations.go`
 - 修改： `apps/test-service/internal/taskstore/sqlite.go`
@@ -207,7 +211,7 @@ type Store interface {
 在 `sqlite_test.go` 创建只有 migration 001 的数据库，插入完成和活动 simulation task，再以当前 Store 打开。断言：
 
 - `kind == simulation`；
-- `request_json == {"scenario":"success"}`；
+- latest migration后 `request_json == {"scenario":"success","timeoutMs":30000}`；
 - `workspace_generation == ""`；
 - `scenario` 保留；
 - `task_steps` 可写入/读取；
@@ -217,7 +221,7 @@ type Store interface {
 测试核心断言：
 
 ```go
-if got.Kind != task.KindSimulation || string(got.Request) != `{"scenario":"success"}` {
+if got.Kind != task.KindSimulation || string(got.Request) != `{"scenario":"success","timeoutMs":30000}` {
 	t.Fatalf("migration lost task request: %#v", got)
 }
 if rows := foreignKeyViolations(t, store.db); rows != 0 {
@@ -254,6 +258,8 @@ CHECK ((kind = 'simulation' AND scenario IS NOT NULL AND workspace_generation = 
        (kind = 'cmake_build' AND scenario IS NULL AND workspace_generation <> ''))
 ```
 
+`002_multistep_tasks.sql` 是已发布 migration，不得回写或改变 checksum。新增 `003_normalize_simulation_requests.sql`，使用每行 `scenario` 与 `timeout_ms` 把 v1迁移 simulation请求补全为当前规范化形状，同时保留原 `request_hash`。
+
 新增 `task_steps`：
 
 ```sql
@@ -275,6 +281,8 @@ CREATE TABLE task_steps (
 在 migration 文件首行加入 `-- unit-test-ide: foreign-keys-off`。`migrations.go` 在 transaction 前关闭 foreign keys，提交后立即恢复并运行 `PRAGMA foreign_key_check`；任何错误都恢复连接设置并返回 `ErrStorageUnavailable`。
 
 `steps.go` 负责 transaction 内的 Step insert/update 与 Task 读取后的 Step hydration。不得把 environment 或 `ProcessSpec` 写入数据库。
+
+领域层提供 Manager与 `taskstore.Store` 共用的 semantic idempotency comparator。JSON object key顺序不影响结果，JSON number精确规范化，无效 JSON fail closed。`Store.Create` 保留 hash相等 fast replay；hash不等时按 `Kind`、semantic `Request`、`WorkspaceGeneration`、`Timeout` fallback，任一不同返回 `ErrIdempotencyConflict`，仅 `PlanFingerprint`不同仍 replay。migration测试必须通过真实 Manager/Store证明相同 v1.1请求返回原 Task且不新增 event，scenario或 timeout变化 conflict；当前 simulation/CMake行也覆盖 hash算法变化 fallback。
 
 - [ ] **Step 4：运行 Store 全套测试**
 
@@ -365,6 +373,7 @@ go test ./apps/test-service/internal/task -run 'TestManagerRunsPlanSteps|TestMan
 - Step 非零时将当前 Step 标记 failed、剩余 Step 标记 skipped、Task 结束为 `command_failed`；
 - Prepare/Start/Store 错误映射为 `infrastructure_failed`；
 - Task timeout timer 只启动一次，不在 Step 间重置。
+- `hashStartRequest` 的输入与 semantic idempotency identity完全一致并排除 `PlanFingerprint`；Store返回空 events时，Manager使用同一个 comparator验证 stored Task，不再直接比较 hash。
 
 `Runtime.StartSimulation` 使用 `NewSimulationStartRequest` 并构造 simulation boundary；Session 的 v1.1 `tasks/start` 仍只接收 scenario/timeout，不接触 Plan 或 boundary。
 
@@ -597,4 +606,6 @@ git commit -m "test: preserve protocol v1.1 on multistep engine"
 - [ ] `git diff --check`
 - [ ] `git status --short` 为空
 - [ ] Manager 在 Task 创建前与每个 Step 启动前执行 Service-owned executable/cwd boundary 校验
+- [ ] `ProcessSpec.Args`、`ProcessSpec.Env`、`CommandSummary.Args`均为 256合法、257拒绝
+- [ ] migration-1升级后的 v1.1 simulation与当前 simulation/CMake在 hash变化时按 semantic identity replay；冲突字段与 migration checksum/unknown-version测试通过
 - [ ] 独立评审确认没有 Protocol 到 `ExecutionPlan`/`ProcessSpec` 的直接入口

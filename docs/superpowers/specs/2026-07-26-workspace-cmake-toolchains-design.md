@@ -440,7 +440,7 @@ Execution Planner 只能接收已经验证的 Workspace、Build Profile、Toolch
 
 - executable 属于当前 CMake 或 Toolchain；
 - working directory 位于 workspace 或 Service data directory；
-- step、参数和环境数量均在上限内；
+- Step 总数最多 8；每个 Step 的 `ProcessSpec.Args` 最多 256 项、`ProcessSpec.Env` 最多 256 项，脱敏 `CommandSummary.Args` 同样最多 256 项；
 - 参数中不存在 NUL；
 - native target 已从 target ID 安全解析；
 - 环境中不存在 Service secret。
@@ -550,6 +550,8 @@ v1.2 使用严格的 discriminated union。原有 simulation 请求继续支持�
 - 同一 idempotency key 与相同规范化请求返回原任务；
 - 同一 idempotency key 与不同请求返回 `IDEMPOTENCY_CONFLICT`。
 
+幂等 identity 严格由 `Kind`、语义等价的规范化 `Request` JSON、`WorkspaceGeneration` 与 `Timeout` 组成。JSON object key 顺序不影响等价性，JSON number使用精确语义比较，不经不必要的浮点转换；无效 JSON fail closed。`RequestHash` 只是 fast path实现细节，`PlanFingerprint`、runtime-only `ExecutionPlan` 与 `ExecutionBoundary` 都不属于幂等 identity。hash算法变化或旧数据库保留历史 hash时，Manager与 Store必须共用同一个语义等价判断完成 replay。
+
 ### 14.3 Task Snapshot
 
 v1.2 `TaskSnapshot` 是联合类型：
@@ -614,6 +616,8 @@ v1.2 `capabilities/get` 报告 Service 支持的产品能力，例如：
 - 新增 `build_configurations`。
 
 由于现有 `tasks.kind` 使用 CHECK constraint，migration 使用事务化的新表、数据复制、索引重建和表交换方式修改约束。迁移失败必须回滚到原 Schema，不能留下半迁移数据库。
+
+已发布的 `002_multistep_tasks.sql` 及其 checksum保持不变。下一号 migration把由 v1 schema迁移来的 simulation `request_json` 规范化为同时包含行内 `scenario` 与 `timeout_ms` 的 `{"scenario":"success","timeoutMs":30000}` 形状，并保留历史 `request_hash`；当前语义 fallback负责兼容旧 hash。
 
 `task_steps` 记录：
 
@@ -749,9 +753,9 @@ ArtifactStore 从仅验证 simulation summary 扩展为按 task kind 注册 arti
 - Build Profile 稳定 ID。
 - MSVC、clang-cl、GCC 和 Clang discovery/probe。
 - MSVC 固定环境捕获模板和敏感变量清理。
-- ExecutionPlan 的 executable、args、cwd 和 environment 校验。
+- ExecutionPlan 的 executable、cwd、NUL、environment key/secret 校验，以及每 Step `ProcessSpec.Args <= 256`、`ProcessSpec.Env <= 256`、`CommandSummary.Args <= 256` 的精确边界。
 - configure/build Step 状态、取消、超时和失败短路。
-- SQLite migration、旧 simulation 回填与 queued 恢复。
+- SQLite migration、旧 simulation `scenario + timeoutMs` 回填、旧 hash语义 replay、checksum/unknown-version防护与 queued 恢复。
 - CMake/compiler/linker golden diagnostic parser。
 
 ### 19.2 Protocol Contract
@@ -832,6 +836,8 @@ CI 记录实际 compiler、generator 和 CMake version 作为构建制品，但 
 12. 客户端断线重连后通过 sequence 恢复全部事件。
 13. v1.0/v1.1 客户端仍按原协议运行。
 14. 整个流程不接受 Shell 或客户端 executable。
+15. migration-1 数据库升级后，相同 v1.1 simulation请求返回原 Task且不新增 event；scenario或 timeout变化返回 `IDEMPOTENCY_CONFLICT`。
+16. CMake replay只在 Kind、semantic Request、WorkspaceGeneration与 Timeout全部相同时成立；仅 PlanFingerprint变化不冲突。
 
 ## 21. 完成门禁
 
@@ -843,6 +849,8 @@ CI 记录实际 compiler、generator 和 CMake version 作为构建制品，但 
 - CMake、compiler 和 linker golden diagnostics 通过。
 - Protocol v1.0/v1.1 回归测试通过。
 - 多步骤取消、超时、重连和恢复测试通过。
+- ExecutionPlan三类参数/环境 collection均验证 256合法、257拒绝。
+- migration后 simulation与当前 simulation/CMake行在 hash变化时仍按 semantic identity replay。
 - Windows 与 Ubuntu Hosted CI 全绿。
 - 完整 `pnpm verify` 全绿。
 - 工作树无生成差异和未提交文件。

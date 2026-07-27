@@ -21,7 +21,7 @@
 - cancel、timeout、shutdown 与 infrastructure failure 继续使用同一个 first-cause decision。
 - circuit Close error 只有在当前 Process 的 durable lease 已存在时才能释放 active owner。
 - lease 未提交且 cleanup 失败时必须保留 active owner；`Shutdown(ctx)` 可以按 caller deadline 返回，不能虚假宣称 cleanup 完成。
-- ownership safety裁决：当 `process != nil && leasePersisted=false` 时，任何 Close error都保留 active owner；normal非 circuit路径若尚无 cause，首次 Close error必须在对外发布 unhealthy之前 claim `infrastructure_failed`，已有 cause不被覆盖；普通 timeout、cancel、termination result、process done与其他 cleanup command不得重试已失败的 Close，只有后续显式 Shutdown可以 retry；terminal visibility延迟到该 retry成功，first-cause与最终 outcome保持不变。
+- ownership safety裁决：任何 non-circuit、non-recovery Close error都保留 active owner与 nonterminal Task，不再按 durable/lease-free分叉；若尚无 cause，首次 Close error必须在对外发布 unhealthy之前 claim `infrastructure_failed`，已有 cause不被覆盖；普通 timeout、cancel、termination result、process done、Publisher callback与其他 cleanup command不得重试，只有后续显式 Shutdown可以 retry；retry成功的 terminal mutation原子设置 `DeleteLease=true`，first-cause与最终 outcome保持不变。
 - 不实现第二套 recovery journal、Task 4 recovery replay、Step events 或 Step artifact registry。
 - Markdown 叙述使用中文，English 技术名词保留原格式。
 
@@ -780,7 +780,7 @@ PutLease: &lease,
 
 `Start` 后两个 `UpdateLease` 分支保持不变。
 
-如果实现中 `Prepare error + non-nil Process` 需要等待 cleanup后才 terminalize，复用现有 command-loop cleanup/finish路径；不得在 Process仍可能存活时直接删除 lease并完成 Task。
+`Prepare error + non-nil Process` 必须等待 cleanup成功后才 terminalize，复用 command-loop cleanup/finish路径；Close失败时保持 queued/nonterminal、active owner和 durable lease，不得在 Process仍可能存活时删除 lease或完成 Task。
 
 - [ ] **Step 15：修正 circuit Close error ownership gate**
 
@@ -789,8 +789,7 @@ PutLease: &lease,
 ```go
 if value.err != nil {
     if !m.circuitFailed() &&
-        !current.recoveryRequired &&
-        !current.leasePersisted {
+        !current.recoveryRequired {
         outcome := current.execution.resolve(OutcomeInfrastructureFailed)
         current.failPendingStep = outcome == OutcomeInfrastructureFailed
     }
@@ -801,21 +800,10 @@ if value.err != nil {
         current.recoveryRequired = true
         m.stopActive(current)
         delete(active, value.taskID)
-    } else if m.circuitFailed() ||
-        current.recoveryRequired ||
-        !current.leasePersisted {
-        current.closeStarted = false
-        current.closeComplete = false
-        current.closeFailed = true
     } else {
         current.closeStarted = false
         current.closeComplete = false
         current.closeFailed = true
-        if current.task.Status != StatusFinished {
-            if _, err := m.finishAfterCloseFailure(current, active); err != nil {
-                m.abandon(current)
-            }
-        }
     }
 }
 ```
@@ -828,24 +816,24 @@ if value.err != nil {
 - 任何 `leasePersisted=false && process != nil` 的 Close error都保留 active，不限于 circuit分支；
 - `maybeStartClose`等普通 Close路径必须在 `closeFailed=true` 时返回；后续显式 Shutdown使用独立 retry入口触发下一次 bounded Close；
 - 即使 timeout cause已经 claim但 `timeoutCommand`排在 Close error之后消费，timeout、cancel、termination result、process done与其他 cleanup command也不得自动 retry；
-- normal非 circuit且无 durable lease的 Close failure不得 terminalize；若尚无 cause，Close error处理时必须先 `resolve(OutcomeInfrastructureFailed)`并按结果设置 `failPendingStep`，随后才能 `healthy.Store(false)`；
+- 任何 normal非 circuit Close failure都不得 terminalize，无论 durable lease是否存在；若尚无 cause，Close error处理时必须先 `resolve(OutcomeInfrastructureFailed)`并按结果设置 `failPendingStep`，随后才能 `healthy.Store(false)`；
 - cause/health ordering由同 package确定性 barrier测试覆盖；外部行为测试继续断言最终 outcome与 Step状态，不再依赖 watcher scheduling证明内部 ordering；
-- 已有 cancel/timeout等 cause不得被 Close failure或后续 Shutdown覆盖；显式 Shutdown retry Close成功后才按固定的 first-cause与最终 outcome terminalize；
-- `leasePersisted=true` 的 normal非 circuit Close failure保持既有语义。
+- 已有 cancel/timeout/interrupted等 cause不得被 Close failure或后续 Shutdown覆盖；显式 Shutdown retry Close成功后才按固定的 first-cause与最终 outcome terminalize，并用 `DeleteLease=true` 原子删除 durable lease；
+- 删除 `finishAfterCloseFailure` 终态化路径及直接测试；公开 Manager 状态机必须覆盖 prepare error + durable lease、retry成功、retry再次失败和 restart recovery。
 
 - [ ] **Step 16：运行 focused GREEN**
 
 Run:
 
 ```powershell
-& $go test ./apps/test-service/internal/task -run '^(TestManagerPersistsPreparedLeaseBeforeStartAndRefreshesItAfterStart|TestManagerPersistsPreparedLeaseBeforeHandlingClaimedCause|TestManagerPrepareErrorWithProcessPersistsLeaseBeforeCleanup|TestManagerPublisherFailureCloseErrorHandsOffQueuedPreparedLease|TestManagerPreparedLease)' -count=1 -v
+& $go test ./apps/test-service/internal/task -run '^(TestManagerPersistsPreparedLeaseBeforeStartAndRefreshesItAfterStart|TestManagerPersistsPreparedLeaseBeforeHandlingClaimedCause|TestManagerPrepareErrorWithProcessPersistsLeaseBeforeCleanup|TestManagerPrepareErrorCloseFailureRetainsCleanupOwnershipUntilShutdown|TestManagerPrepareErrorCloseRetryFailureKeepsTaskAndLeaseNonterminal|TestManagerPublisherFailureCloseErrorHandsOffQueuedPreparedLease|TestManagerPreparedLease)' -count=1 -v
 & $go test ./apps/test-service/internal/taskstore -run '^TestRecoverInterruptedFinishesAllActiveTasksAndDeletesLeases$' -count=1 -v
 & $go test ./apps/test-service/internal/runtime -run '^TestOpenCleansQueuedPreparedLeaseBeforeInterruptedRecovery$' -count=1 -v
 ```
 
 Expected: PASS。
 
-如果 first-cause、normal Close或旧 Publisher tests失败，修复 production ordering/state，不得删除断言或改成 sleep。无 durable lease的 normal Close回归必须断言：首次 Close error后 Task仍 nonterminal且 owner仍 active；无先行 cause时先固定 infrastructure failure，有 cancel/timeout时保留原 cause；显式 Shutdown触发 Close retry，retry成功后才出现固定 outcome的 terminal state。
+如果 first-cause、normal Close或旧 Publisher tests失败，修复 production ordering/state，不得删除断言或改成 sleep。durable与 lease-free normal Close回归都必须断言：首次 Close error后 Task仍 nonterminal且 owner仍 active；无先行 cause时先固定 infrastructure failure，有 cancel/timeout/interrupted时保留原 cause；普通 command不 retry；显式 Shutdown触发 Close retry，retry成功后才出现固定 outcome的 terminal state，durable lease通过 `DeleteLease=true` 原子删除。
 
 - [ ] **Step 17：运行 multi-step 与既有 lifecycle 回归**
 
@@ -866,18 +854,18 @@ Steps/Events/Artifacts empty
 DeleteLease == false
 ```
 
-既有 normal Close failure回归按 durable ownership分两类：`leasePersisted=true` 保持既有 terminalization；`leasePersisted=false` 采用 ownership-safety窄例外，断言 terminal visibility延迟到显式 Shutdown Close retry成功，且 first-cause与最终 outcome不变。
+既有 normal Close failure回归仍覆盖 durable与 lease-free两类，但两者统一保留 active owner和 nonterminal Task，terminal visibility都延迟到显式 Shutdown Close retry成功；first-cause与最终 outcome不变，durable路径额外断言 lease删除与 restart可见性。
 
 - [ ] **Step 18：运行 stress 与 race**
 
 Run:
 
 ```powershell
-& $go test ./apps/test-service/internal/task -run '^(TestManagerPersistsPreparedLease|TestManagerPrepareErrorWithProcess|TestManagerPublisherFailureCloseErrorHandsOffQueuedPreparedLease|TestManagerPreparedLease)' -count=100
+& $go test ./apps/test-service/internal/task -run '^(TestManagerPersistsPreparedLease|TestManagerPrepareErrorWithProcess|TestManagerPrepareErrorClose|TestManagerPublisherFailureCloseErrorHandsOffQueuedPreparedLease|TestManagerPreparedLease)' -count=100
 & $go test ./apps/test-service/internal/task -run '^TestManagerPublisherFailure' -count=100
-& $go test ./apps/test-service/internal/task -run '^(TestManagerCloseFailureUsesClaimedTimeoutBeforeTimeoutCommand|TestManagerTimeoutCommandDoesNotRetryFailedCloseBeforeShutdown)$' -count=1000
+& $go test ./apps/test-service/internal/task -run '^TestManagerTimeoutCommandDoesNotRetryFailedCloseBeforeShutdown$' -count=100
 & $go test ./apps/test-service/internal/task -run '^TestManagerRecordCloseFailureResolvesCauseBeforePublishingUnhealthy$' -count=1000
-& $go test -race ./apps/test-service/internal/task -run '^(TestManagerPersistsPreparedLease|TestManagerPrepareErrorWithProcess|TestManagerPublisherFailure|TestManagerPreparedLease|TestManagerCancellation|TestManagerCloseFailure)' -count=1
+& $go test -race ./apps/test-service/internal/task -run '^(TestManagerPersistsPreparedLease|TestManagerPrepareErrorWithProcess|TestManagerPrepareErrorClose|TestManagerPublisherFailure|TestManagerPreparedLease|TestManagerCancellation|TestManagerCloseFailure)' -count=1
 ```
 
 Expected: PASS，且无 data race、无 goroutine leak、无偶发 deadline。
@@ -948,7 +936,7 @@ running mutation不再首次 PutLease
 
 ```text
 Task 1: architecture reset approved (design 676fed0)
-Task 1: ownership-safety ruling approved (lease-free Close error retains active owner; terminal visibility is deferred until explicit Close retry succeeds)
+Task 1: ownership-safety ruling approved (all normal Close errors retain active owner/nonterminal Task; terminal visibility is deferred until explicit Close retry succeeds)
 Task 1: prepared-process lease implementation complete (review pending; commit 使用 Step 22 返回的完整 SHA)
 ```
 
@@ -956,7 +944,7 @@ Task 1: prepared-process lease implementation complete (review pending; commit �
 
 ```text
 Task 3: breaker architecture decision approved (prepared-process durable lease design 676fed0)
-Task 3: ownership-safety ruling approved (lease-free Close error retains active owner; terminal visibility is deferred until explicit Close retry succeeds)
+Task 3: ownership-safety ruling approved (all normal Close errors retain active owner/nonterminal Task; terminal visibility is deferred until explicit Close retry succeeds)
 Task 3: prepared-process lease ownership implementation complete (review pending; commit 使用 Step 22 返回的完整 SHA)
 ```
 
@@ -1018,6 +1006,6 @@ reviewer不得以测试通过替代代码级 lifecycle推理，也不得要求�
 - [ ] Publisher circuit Close error只在 `leasePersisted=true` 时释放 active owner。
 - [ ] pre-lease Store failure + Close failure保留 active owner并受 caller deadline约束。
 - [ ] Runtime recovery真实清理 queued Prepared lease。
-- [ ] normal Start、multi-step、UpdateLease与 Publisher fail-closed无回归；无 durable lease的 normal Close failure仅延迟 terminal visibility，普通 command不得 retry，并由显式 Shutdown Close retry保留 first-cause与最终 outcome。
+- [ ] normal Start、multi-step、UpdateLease与 Publisher fail-closed无回归；durable与 lease-free normal Close failure都保留 owner/nonterminal Task，普通 command不得 retry，并由显式 Shutdown Close retry保留 first-cause与最终 outcome；durable lease在成功 terminal mutation中原子删除。
 - [ ] Protocol/interface/schema/Task 4均无越界。
 - [ ] focused、stress、race、Task、TaskStore、Runtime、Session、全 internal与 diff check全部 fresh PASS。

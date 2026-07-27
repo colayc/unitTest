@@ -262,18 +262,19 @@ pre-lease 写入不得把 first-cause 改为 `infrastructure_failed`。
 
 ### 10.3 非 circuit Close error
 
-当 `process != nil && leasePersisted=false` 时，ownership safety 同样约束非 circuit Close failure：
+任何非 circuit、非 recovery 的 Close failure 都使用同一 ownership 规则，不再按 `leasePersisted` 分叉：
 
+- 若尚无 first-cause，首次 Close error必须先用 `OutcomeInfrastructureFailed` 固定 outcome，并把对应 pending Step 标为待失败；已有 cancel、timeout或 interrupted cause不被覆盖；
+- 只有 first-cause 与 `failPendingStep` 固定后才能对外发布 unhealthy；
+- Task 保持 nonterminal，不调用 `finishAfterCloseFailure`，不写 terminal Store mutation、artifact或 Publisher event；
 - 保留 active owner并设置 `closeFailed=true`；
-- 不调用 `finishAfterCloseFailure`；
-- 不写 terminal Store mutation、artifact或 Publisher event；
-- 若尚无 first-cause，首次 Close error必须在对外发布 unhealthy之前用 `OutcomeInfrastructureFailed` claim；已有 cancel/timeout等 cause不被覆盖，`failPendingStep`按 resolve后 outcome设置；
-- `closeFailed=true` 是普通 Close启动路径的 retry gate；即使 timeout cause已经 claim但其 command稍后才被 command loop消费，也不得自动发起第二次 Close；
-- 后续显式 `Shutdown(ctx)` 通过既有 bounded Close retry再次尝试释放 ownership；
-- 只有 retry Close成功后，才按已经 claim 的 first-cause完成 terminalization；
-- first-cause与最终 outcome保持不变，但 terminal visibility允许延迟到 ownership真正释放之后。
+- durable lease 已存在时继续保留，并确保 `ActiveLeases` 能观察该 nonterminal Task；durable lease 不存在时也不得释放 active owner；
+- `closeFailed=true` 是普通 Close启动路径的 retry gate；timeout、cancel、termination result、process done、Publisher callback和其他普通 command都不得发起第二次 Close；
+- 后续显式 `Shutdown(ctx)` 是唯一的同进程 retry入口；
+- retry成功后才按已固定的 first-cause完成 terminal persistence，并用同一个原子 mutation设置 `DeleteLease=true`，随后释放 active owner；
+- retry再次失败时继续保留 owner/lease与 nonterminal Task，不伪造 terminal success。
 
-这是仅针对“Process仍由 Manager实际持有但没有 durable lease”的窄例外。`leasePersisted=true` 且非 circuit的 Close failure继续保持既有 terminalization语义。
+若进程在显式 retry 前退出，durable lease 因 Task 仍 nonterminal而继续进入 restart recovery。只有 circuit/recovery handoff 才允许在“Task nonterminal且 durable lease已存在”时把 active owner交给 recovery。
 
 ## 11. restart recovery
 
@@ -359,7 +360,9 @@ Runtime 启动时继续按现有顺序：
 - 同 package内用受控 cause-resolution barrier确定性证明 cause/`failPendingStep`在 unhealthy publication之前固定；外部测试只负责 outcome与 Step状态；
 - nil Process；
 - transient/repeated conflict；
-- normal Close failure：有 durable lease时保持既有 terminalization；无 durable lease时保留 owner，并在显式 Shutdown Close retry成功后按原 first-cause/outcome完成；
+- normal Close failure：durable lease与 lease-free路径都保留 owner和 nonterminal Task；只有显式 Shutdown Close retry成功后才按原 first-cause/outcome完成，durable路径同时原子删除 lease；
+- `Prepare` 返回 non-nil Process与 error、pre-lease成功、首次 Close失败时，断言 queued/nonterminal、无 terminal event/artifact、Manager unhealthy、active owner与 `ActiveLeases` lease仍存在、Close仅一次；
+- 上述显式 retry再次失败时仍保持 owner/lease与 nonterminal Task；restart recovery能取得 queued prepared lease并完成 interrupted cleanup；
 - focused stress、`-race`、Task 包、Runtime/Session、全 internal 与 `git diff --check`。
 
 ## 13. 兼容与范围
@@ -385,6 +388,6 @@ Runtime 启动时继续按现有顺序：
 3. Publisher circuit Close failure 只有在 durable lease 存在时才释放 active owner。
 4. restart recovery 能清理 queued Prepared Process。
 5. pre-lease Store failure 不启动 Process command、不丢 owner、不伪造 recovery handoff。
-6. first-cause、plan-wide timeout 与最终 outcome无回归；无 durable lease的 normal Close failure仅延迟 terminal visibility，直到显式 Shutdown Close retry成功。
+6. first-cause、plan-wide timeout 与最终 outcome无回归；所有 normal Close failure都保持 active owner与 nonterminal Task，直到显式 Shutdown Close retry成功；durable lease在 retry成功的 terminal mutation中原子删除。
 7. Protocol、interface、schema、Task 4 范围保持不变。
 8. focused、stress、race、Task、Runtime/Session、全 internal 与 diff check 全部 fresh PASS。
