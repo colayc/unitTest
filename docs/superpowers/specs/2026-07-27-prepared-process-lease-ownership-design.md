@@ -267,6 +267,7 @@ pre-lease 写入不得把 first-cause 改为 `infrastructure_failed`。
 - 保留 active owner并设置 `closeFailed=true`；
 - 不调用 `finishAfterCloseFailure`；
 - 不写 terminal Store mutation、artifact或 Publisher event；
+- 若尚无 first-cause，首次 Close error立即用 `OutcomeInfrastructureFailed` claim；已有 cancel/timeout等 cause不被覆盖，`failPendingStep`按 resolve后 outcome设置；
 - 后续显式 `Shutdown(ctx)` 通过既有 bounded Close retry再次尝试释放 ownership；
 - 只有 retry Close成功后，才按已经 claim 的 first-cause完成 terminalization；
 - first-cause与最终 outcome保持不变，但 terminal visibility允许延迟到 ownership真正释放之后。

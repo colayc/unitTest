@@ -559,6 +559,12 @@ func (m *Manager) loop() {
 					} else if m.circuitFailed() ||
 						current.recoveryRequired ||
 						!current.leasePersisted {
+						if !m.circuitFailed() &&
+							!current.recoveryRequired &&
+							!current.leasePersisted {
+							outcome := current.execution.resolve(OutcomeInfrastructureFailed)
+							current.failPendingStep = outcome == OutcomeInfrastructureFailed
+						}
 						current.closeStarted = false
 						current.closeComplete = false
 						current.closeFailed = true

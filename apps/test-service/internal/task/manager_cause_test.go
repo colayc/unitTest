@@ -190,6 +190,9 @@ func TestManagerPublisherFailureCloseErrorHandsOffQueuedPreparedLease(t *testing
 		errors.New("terminate failed after Publisher circuit"),
 		errors.New("close failed after Publisher circuit"),
 	)
+	releaseClose := make(chan struct{})
+	var releaseCloseOnce sync.Once
+	process.setCloseBlock(releaseClose)
 	releasePrepare := make(chan struct{})
 	var releaseOnce sync.Once
 	processes := &preparedLeaseCircuitProcesses{
@@ -222,10 +225,14 @@ func TestManagerPublisherFailureCloseErrorHandsOffQueuedPreparedLease(t *testing
 	}
 	t.Cleanup(func() {
 		releaseOnce.Do(func() { close(releasePrepare) })
+		releaseCloseOnce.Do(func() { close(releaseClose) })
+		process.setErrors(nil, nil)
 		process.complete(ProcessResult{Err: errors.New("test cleanup")})
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
-		_ = manager.Shutdown(ctx)
+		if err := manager.Shutdown(ctx); err != nil {
+			t.Errorf("cleanup Shutdown = %v", err)
+		}
 	})
 
 	startA := make(chan taskResponse, 1)
@@ -273,6 +280,45 @@ func TestManagerPublisherFailureCloseErrorHandsOffQueuedPreparedLease(t *testing
 		t.Fatal("Task A Cancel did not return after Publisher circuit")
 	}
 	awaitPreparedLeaseProcessCalls(t, process)
+
+	firstGetEntered := make(chan struct{})
+	firstGetRelease := make(chan struct{})
+	secondGetEntered := make(chan struct{})
+	secondGetRelease := make(chan struct{})
+	store.setGetBarrier(1, firstGetEntered, firstGetRelease)
+	store.setGetBarrier(2, secondGetEntered, secondGetRelease)
+	firstGetReply := make(chan taskResponse, 1)
+	manager.commands <- taskIDCommand{id: taskAID, reply: firstGetReply}
+	awaitCauseSignal(t, firstGetEntered, "first command-loop barrier was not entered")
+	releaseCloseOnce.Do(func() { close(releaseClose) })
+	awaitCommandQueueLength(t, manager.commands, 1, "Close result was not enqueued")
+	secondGetReply := make(chan taskResponse, 1)
+	manager.commands <- taskIDCommand{id: taskAID, reply: secondGetReply}
+	close(firstGetRelease)
+	awaitCauseSignal(t, secondGetEntered, "Close result was not consumed before second barrier")
+	close(secondGetRelease)
+	for name, reply := range map[string]<-chan taskResponse{
+		"first":  firstGetReply,
+		"second": secondGetReply,
+	} {
+		select {
+		case response := <-reply:
+			if response.err != nil {
+				t.Fatalf("%s command-loop barrier = %v", name, response.err)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("%s command-loop barrier did not return", name)
+		}
+	}
+
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancelShutdown()
+	if err := manager.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("Shutdown after durable handoff = %v", err)
+	}
+	if got := process.closeCalls(); got != 1 {
+		t.Fatalf("Close calls after durable handoff Shutdown = %d, want 1", got)
+	}
 
 	durableA, err := store.Get(context.Background(), taskAID)
 	if err != nil ||

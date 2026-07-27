@@ -898,6 +898,57 @@ func TestManagerCloseFailurePreservesCancellationCause(t *testing.T) {
 	}
 }
 
+func TestManagerLeaseFreeCloseFailureClaimsInfrastructureCauseBeforeShutdown(t *testing.T) {
+	f := newManagerFixture(t)
+	second := newFakeProcess()
+	f.processes.queue = []*fakeProcess{f.process, second}
+	t.Cleanup(func() { second.completeOnce(task.ProcessResult{Err: errors.New("test cleanup")}) })
+	f.process.closeErr = errors.New("first process close failed without a prior cause")
+
+	started, err := f.manager.Start(context.Background(), twoStepStartRequest(testID(95), time.Minute, fixedBoundary{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.process.complete(task.ProcessResult{ExitCode: 0})
+	f.awaitProcessClose(t, f.process)
+	f.awaitUnhealthy(t)
+
+	beforeRetry, err := f.store.Get(context.Background(), started.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if beforeRetry.Status != task.StatusRunning || beforeRetry.Outcome != "" {
+		t.Fatalf("task before retained-owner retry = %#v, want running without outcome", beforeRetry)
+	}
+	if got := f.processes.prepareCount(); got != 1 {
+		t.Fatalf("Prepare calls before retained-owner retry = %d, want 1", got)
+	}
+	if got := second.startCalls(); got != 0 {
+		t.Fatalf("second Start calls before retained-owner retry = %d, want 0", got)
+	}
+
+	f.process.mu.Lock()
+	f.process.closeErr = nil
+	f.process.mu.Unlock()
+	retry, cancelRetry := context.WithTimeout(context.Background(), time.Second)
+	defer cancelRetry()
+	if err := f.manager.Shutdown(retry); err != nil {
+		t.Fatalf("Shutdown retry after lease-free Close failure = %v", err)
+	}
+
+	finished := f.awaitStoredTask(t, started.ID, task.StatusFinished)
+	if finished.Outcome != task.OutcomeInfrastructureFailed {
+		t.Fatalf("outcome = %s, want %s", finished.Outcome, task.OutcomeInfrastructureFailed)
+	}
+	assertStepStatuses(t, finished, task.StepSucceeded, task.StepFailed)
+	if got := f.process.closeCalls(); got != 2 {
+		t.Fatalf("Close calls = %d, want retained-owner retry", got)
+	}
+	if got := second.startCalls(); got != 0 {
+		t.Fatalf("second Start calls = %d, want 0", got)
+	}
+}
+
 func TestManagerCloseFailurePreservesTotalTimeoutCause(t *testing.T) {
 	f := newManagerFixture(t)
 	second := newFakeProcess()

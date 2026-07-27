@@ -21,7 +21,7 @@
 - cancel、timeout、shutdown 与 infrastructure failure 继续使用同一个 first-cause decision。
 - circuit Close error 只有在当前 Process 的 durable lease 已存在时才能释放 active owner。
 - lease 未提交且 cleanup 失败时必须保留 active owner；`Shutdown(ctx)` 可以按 caller deadline 返回，不能虚假宣称 cleanup 完成。
-- ownership safety裁决：当 `process != nil && leasePersisted=false` 时，任何 Close error都保留 active owner；非 circuit路径的 terminal visibility延迟到后续显式 Shutdown Close retry成功，first-cause与最终 outcome保持不变。
+- ownership safety裁决：当 `process != nil && leasePersisted=false` 时，任何 Close error都保留 active owner；normal非 circuit路径若尚无 cause，首次 Close error立即 claim `infrastructure_failed`，已有 cause不被覆盖；terminal visibility延迟到后续显式 Shutdown Close retry成功，first-cause与最终 outcome保持不变。
 - 不实现第二套 recovery journal、Task 4 recovery replay、Step events 或 Step artifact registry。
 - Markdown 叙述使用中文，English 技术名词保留原格式。
 
@@ -821,7 +821,8 @@ if value.err != nil {
 - durable handoff同时要求 `leasePersisted=true` 与 Task nonterminal，因为 `ActiveLeases` 不返回 finished Task；
 - 任何 `leasePersisted=false && process != nil` 的 Close error都保留 active，不限于 circuit分支；
 - 后续显式 Shutdown可以通过 `closeFailed` 触发下一次 bounded Close；
-- normal非 circuit且无 durable lease的 Close failure不得 terminalize；显式 Shutdown retry Close成功后才按原 first-cause与最终 outcome terminalize；
+- normal非 circuit且无 durable lease的 Close failure不得 terminalize；若尚无 cause，Close error处理时立即 `resolve(OutcomeInfrastructureFailed)`，并只在 resolve结果为 infrastructure failure时设置 `failPendingStep=true`；
+- 已有 cancel/timeout等 cause不得被 Close failure或后续 Shutdown覆盖；显式 Shutdown retry Close成功后才按固定的 first-cause与最终 outcome terminalize；
 - `leasePersisted=true` 的 normal非 circuit Close failure保持既有语义。
 
 - [ ] **Step 16：运行 focused GREEN**
@@ -836,7 +837,7 @@ Run:
 
 Expected: PASS。
 
-如果 first-cause、normal Close或旧 Publisher tests失败，修复 production ordering/state，不得删除断言或改成 sleep。无 durable lease的 normal Close回归必须断言：首次 Close error后 Task仍 nonterminal且 owner仍 active，显式 Shutdown触发 Close retry，retry成功后才出现保持原 first-cause/outcome的 terminal state。
+如果 first-cause、normal Close或旧 Publisher tests失败，修复 production ordering/state，不得删除断言或改成 sleep。无 durable lease的 normal Close回归必须断言：首次 Close error后 Task仍 nonterminal且 owner仍 active；无先行 cause时先固定 infrastructure failure，有 cancel/timeout时保留原 cause；显式 Shutdown触发 Close retry，retry成功后才出现固定 outcome的 terminal state。
 
 - [ ] **Step 17：运行 multi-step 与既有 lifecycle 回归**
 
