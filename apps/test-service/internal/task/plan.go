@@ -34,6 +34,12 @@ const (
 	StepSkipped   StepStatus = "skipped"
 )
 
+const (
+	maxProcessSpecArgs    = 256
+	maxProcessSpecEnv     = 256
+	maxCommandSummaryArgs = 256
+)
+
 type CommandSummary struct {
 	Executable string   `json:"executable"`
 	Args       []string `json:"args"`
@@ -81,7 +87,10 @@ func ValidatePlan(plan ExecutionPlan, boundary ExecutionBoundary) error {
 	ids := make(map[string]struct{}, len(plan.Steps))
 	for _, step := range plan.Steps {
 		if !validStepID(step.ID) || !validStepKind(step.Kind) || step.Process.Executable == "" || step.Process.Dir == "" ||
-			containsNUL(step.Process.Executable) || containsNUL(step.Process.Dir) {
+			containsNUL(step.Process.Executable) || containsNUL(step.Process.Dir) ||
+			len(step.Process.Args) > maxProcessSpecArgs ||
+			len(step.Process.Env) > maxProcessSpecEnv ||
+			len(step.Public.Args) > maxCommandSummaryArgs {
 			return ErrInvalidArgument
 		}
 		if _, exists := ids[step.ID]; exists {

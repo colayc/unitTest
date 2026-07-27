@@ -70,6 +70,57 @@ func TestValidatePlanAcceptsValidTwoStepPlan(t *testing.T) {
 	}
 }
 
+func TestValidatePlanEnforcesArgumentAndEnvironmentItemLimits(t *testing.T) {
+	boundary := fakeBoundary{executables: []string{"cmake"}, roots: []string{"src"}}
+	fields := []struct {
+		name string
+		set  func(*task.ExecutionStep, int)
+	}{
+		{
+			name: "ProcessSpec Args",
+			set: func(step *task.ExecutionStep, count int) {
+				step.Process.Args = make([]string, count)
+			},
+		},
+		{
+			name: "ProcessSpec Env",
+			set: func(step *task.ExecutionStep, count int) {
+				step.Process.Env = make([]string, count)
+				for index := range step.Process.Env {
+					step.Process.Env[index] = "CMAKE_OPTION=value"
+				}
+			},
+		},
+		{
+			name: "CommandSummary Args",
+			set: func(step *task.ExecutionStep, count int) {
+				step.Public.Args = make([]string, count)
+			},
+		},
+	}
+	for _, field := range fields {
+		t.Run(field.name, func(t *testing.T) {
+			atLimit := validConfigureStep()
+			field.set(&atLimit, 256)
+			if err := task.ValidatePlan(
+				task.ExecutionPlan{Version: 1, Steps: []task.ExecutionStep{atLimit}},
+				boundary,
+			); err != nil {
+				t.Fatalf("ValidatePlan(256 items) error = %v", err)
+			}
+
+			overLimit := validConfigureStep()
+			field.set(&overLimit, 257)
+			if err := task.ValidatePlan(
+				task.ExecutionPlan{Version: 1, Steps: []task.ExecutionStep{overLimit}},
+				boundary,
+			); !errors.Is(err, task.ErrInvalidArgument) {
+				t.Fatalf("ValidatePlan(257 items) error = %v, want ErrInvalidArgument", err)
+			}
+		})
+	}
+}
+
 func TestFingerprintPlanCoversExecutionFieldsAndExcludesNonExecutionFields(t *testing.T) {
 	plan := task.ExecutionPlan{Version: 1, Steps: []task.ExecutionStep{validConfigureStep()}}
 	if got, want := task.FingerprintPlan(plan), "24d3c4e47950028ec5c13edc3e78d3eaa8ebd63704c64df06ac07cab66905c49"; got != want {
