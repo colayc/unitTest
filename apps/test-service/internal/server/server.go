@@ -2,9 +2,11 @@ package server
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"sync"
 	"time"
@@ -311,9 +313,12 @@ func forwardSubscription(ctx context.Context, subscription *eventbroker.Subscrip
 				events = nil
 				continue
 			}
-			projected, include := toProtocolEvent(event, subscribeRequest.ProtocolVersion)
-			if !include {
-				continue
+			projected, err := toProtocolEvent(event, subscribeRequest.ProtocolVersion)
+			if err != nil {
+				response := subscriptionFailure(subscribeRequest, err)
+				_ = sendAndWait(ctx, outbound, writerDone, response)
+				closeConnection()
+				return
 			}
 			if !sendOutbound(ctx, outbound, writerDone, projected) {
 				return
@@ -331,31 +336,90 @@ func forwardSubscription(ctx context.Context, subscription *eventbroker.Subscrip
 	}
 }
 
-func toProtocolEvent(event task.Event, version string) (protocol.Event, bool) {
+func toProtocolEvent(event task.Event, version string) (protocol.Event, error) {
+	eventType := event.Type
 	payload := event.Payload
 	if version == protocol.Version11 {
 		switch event.Type {
 		case task.EventTaskStepStarted, task.EventTaskStepFinished:
-			return protocol.Event{}, false
+			eventType = task.EventTaskOutput
+			payload = json.RawMessage(`{"stream":"service","text":"","truncated":false}`)
 		case task.EventTaskOutput:
-			var output struct {
-				Stream    string `json:"stream"`
-				Text      string `json:"text"`
-				Truncated bool   `json:"truncated"`
-			}
-			if err := json.Unmarshal(event.Payload, &output); err != nil {
-				return protocol.Event{}, false
-			}
 			var err error
-			payload, err = json.Marshal(output)
+			payload, err = projectV11Output(event.Payload)
 			if err != nil {
-				return protocol.Event{}, false
+				return protocol.Event{}, err
 			}
 		}
 	}
-	projected := protocol.NewEvent(event.Sequence, string(event.Type), event.TaskID, event.At, payload)
+	projected := protocol.NewEvent(event.Sequence, string(eventType), event.TaskID, event.At, payload)
 	projected.ProtocolVersion = version
-	return projected, true
+	return projected, nil
+}
+
+func projectV11Output(payload json.RawMessage) (json.RawMessage, error) {
+	var fields struct {
+		StepID    json.RawMessage `json:"stepId"`
+		Stream    json.RawMessage `json:"stream"`
+		Text      json.RawMessage `json:"text"`
+		Truncated json.RawMessage `json:"truncated"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&fields); err != nil {
+		return nil, err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return nil, errors.New("task output payload has trailing data")
+	}
+	stream, ok := requiredJSONString(fields.Stream)
+	if !ok {
+		return nil, errors.New("task output payload requires stream")
+	}
+	text, ok := requiredJSONString(fields.Text)
+	if !ok {
+		return nil, errors.New("task output payload requires text")
+	}
+	truncated, ok := requiredJSONBool(fields.Truncated)
+	if !ok {
+		return nil, errors.New("task output payload requires truncated")
+	}
+	if len(fields.StepID) > 0 {
+		if _, ok := requiredJSONString(fields.StepID); !ok {
+			return nil, errors.New("task output payload stepId must be a string")
+		}
+	}
+	return json.Marshal(struct {
+		Stream    string `json:"stream"`
+		Text      string `json:"text"`
+		Truncated bool   `json:"truncated"`
+	}{
+		Stream:    stream,
+		Text:      text,
+		Truncated: truncated,
+	})
+}
+
+func requiredJSONString(raw json.RawMessage) (string, bool) {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return "", false
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", false
+	}
+	return value, true
+}
+
+func requiredJSONBool(raw json.RawMessage) (bool, bool) {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return false, false
+	}
+	var value bool
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return false, false
+	}
+	return value, true
 }
 
 func subscriptionFailure(request protocol.Request, err error) protocol.Response {

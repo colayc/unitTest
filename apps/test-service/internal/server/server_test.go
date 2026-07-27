@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"strings"
 	"sync"
@@ -374,7 +375,8 @@ func newReplayBackend(t *testing.T, eventCount, queueSize int) *streamBackend {
 	for index := range events {
 		sequence := int64(index + 1)
 		events[index] = task.Event{Sequence: sequence, ID: testID('e'), EventDraft: task.EventDraft{
-			TaskID: testID('1'), Type: task.EventTaskOutput, At: time.Unix(sequence, 0).UTC(), Payload: json.RawMessage(`{"stream":"stdout"}`),
+			TaskID: testID('1'), Type: task.EventTaskOutput, At: time.Unix(sequence, 0).UTC(),
+			Payload: json.RawMessage(`{"stream":"stdout","text":"","truncated":false}`),
 		}}
 	}
 	requested := []chan struct{}{make(chan struct{}), make(chan struct{})}
@@ -396,7 +398,8 @@ func newFastReplayBackend(t *testing.T, eventCount, queueSize int) *streamBacken
 	for index := range events {
 		sequence := int64(index + 1)
 		events[index] = task.Event{Sequence: sequence, ID: testID('e'), EventDraft: task.EventDraft{
-			TaskID: testID('1'), Type: task.EventTaskOutput, At: time.Unix(sequence, 0).UTC(), Payload: json.RawMessage(`{"stream":"stdout"}`),
+			TaskID: testID('1'), Type: task.EventTaskOutput, At: time.Unix(sequence, 0).UTC(),
+			Payload: json.RawMessage(`{"stream":"stdout","text":"","truncated":false}`),
 		}}
 	}
 	broker, err := eventbroker.New(fastReplaySource{events: events}, queueSize, queueSize)
@@ -483,7 +486,7 @@ func TestServeConnectionSendsSubscribeResponseBeforeEventsAndSerializesWrites(t 
 	}
 }
 
-func TestServeConnectionV11FiltersStepEventsAndStrictlyProjectsOutputForReplayAndLive(t *testing.T) {
+func TestServeConnectionV11ProjectsStepEventsAndStrictlyProjectsOutputForReplayAndLive(t *testing.T) {
 	taskID := testID('1')
 	at := time.Date(2026, 7, 27, 4, 0, 0, 0, time.UTC)
 	replayed := []task.Event{
@@ -535,7 +538,9 @@ func TestServeConnectionV11FiltersStepEventsAndStrictlyProjectsOutputForReplayAn
 
 	assertProjectedEventType(t, decoder, 1, task.EventTaskCreated)
 	assertProjectedEventType(t, decoder, 2, task.EventTaskStarted)
-	assertProjectedOutputEvent(t, decoder, 4, "stdout", "replay", false)
+	assertProjectedOutputEvent(t, decoder, 3, taskID, "service", "", false)
+	assertProjectedOutputEvent(t, decoder, 4, taskID, "stdout", "replay", false)
+	assertProjectedOutputEvent(t, decoder, 5, taskID, "service", "", false)
 	assertProjectedEventType(t, decoder, 6, task.EventArtifactCreated)
 	assertProjectedEventType(t, decoder, 7, task.EventTaskFinished)
 
@@ -544,8 +549,132 @@ func TestServeConnectionV11FiltersStepEventsAndStrictlyProjectsOutputForReplayAn
 	broker.Publish(eventForProjection(10, taskID, task.EventTaskStepFinished, at.Add(9*time.Second), `{"stepId":"build","kind":"build","status":"failed"}`))
 	broker.Publish(eventForProjection(11, taskID, task.EventTaskOutput, at.Add(10*time.Second), `{"stepId":"build","stream":"combined","text":"","truncated":true}`))
 
-	assertProjectedOutputEvent(t, decoder, 9, "stderr", "live", false)
-	assertProjectedOutputEvent(t, decoder, 11, "combined", "", true)
+	assertProjectedOutputEvent(t, decoder, 8, taskID, "service", "", false)
+	assertProjectedOutputEvent(t, decoder, 9, taskID, "stderr", "live", false)
+	assertProjectedOutputEvent(t, decoder, 10, taskID, "service", "", false)
+	assertProjectedOutputEvent(t, decoder, 11, taskID, "combined", "", true)
+}
+
+func TestServeConnectionV11ProjectsLegacyOutputWithoutStepID(t *testing.T) {
+	taskID := testID('1')
+	at := time.Date(2026, 7, 27, 4, 30, 0, 0, time.UTC)
+	broker, err := eventbroker.New(projectionSource{events: []task.Event{
+		eventForProjection(1, taskID, task.EventTaskOutput, at, `{"stream":"stdout","text":"legacy","truncated":false}`),
+	}}, 4, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = broker.Close() })
+	backend := &streamBackend{
+		broker: broker,
+		get: task.Task{
+			ID: taskID, Kind: task.KindSimulation, Scenario: task.ScenarioHang,
+			Timeout: time.Second, Status: task.StatusRunning, CreatedAt: at, LastSequence: 1,
+		},
+	}
+	_, decoder := openV11Subscription(t, backend)
+	assertProjectedOutputEvent(t, decoder, 1, taskID, "stdout", "legacy", false)
+}
+
+func TestServeConnectionV11FailsClosedOnMalformedReplayOutput(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+	}{
+		{name: "missing stream", payload: `{"text":"output","truncated":false}`},
+		{name: "missing text", payload: `{"stream":"stdout","truncated":false}`},
+		{name: "missing truncated", payload: `{"stream":"stdout","text":"output"}`},
+		{name: "wrong field type", payload: `{"stream":"stdout","text":7,"truncated":false}`},
+		{name: "unknown field", payload: `{"stream":"stdout","text":"output","truncated":false,"extra":true}`},
+		{name: "trailing value", payload: `{"stream":"stdout","text":"output","truncated":false} {}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			taskID := testID('1')
+			at := time.Date(2026, 7, 27, 5, 0, 0, 0, time.UTC)
+			broker, err := eventbroker.New(projectionSource{events: []task.Event{
+				eventForProjection(1, taskID, task.EventTaskOutput, at, test.payload),
+			}}, 4, 4)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = broker.Close() })
+			backend := &streamBackend{
+				broker: broker,
+				get: task.Task{
+					ID: taskID, Kind: task.KindSimulation, Scenario: task.ScenarioHang,
+					Timeout: time.Second, Status: task.StatusRunning, CreatedAt: at, LastSequence: 1,
+				},
+			}
+			_, decoder := openV11Subscription(t, backend)
+			assertSubscriptionCorruptionFailure(t, decoder)
+		})
+	}
+}
+
+func TestServeConnectionV11FailsClosedOnMalformedLiveOutput(t *testing.T) {
+	events := make(chan task.Event, 1)
+	subscriptionErrors := make(chan error)
+	backend := &streamBackend{
+		subscription: &eventbroker.Subscription{Events: events, Errors: subscriptionErrors},
+	}
+	_, decoder := openV11Subscription(t, backend)
+	events <- eventForProjection(
+		1,
+		testID('1'),
+		task.EventTaskOutput,
+		time.Date(2026, 7, 27, 5, 30, 0, 0, time.UTC),
+		`{"stream":"stdout","text":"live","truncated":false,"extra":true}`,
+	)
+	assertSubscriptionCorruptionFailure(t, decoder)
+}
+
+func openV11Subscription(t *testing.T, backend *streamBackend) (net.Conn, *json.Decoder) {
+	t.Helper()
+	client, serviceConn := net.Pipe()
+	go server.ServeConnection(serviceConn, session.New("0123456789abcdef", "linux", "unix-socket", backend))
+	t.Cleanup(func() { _ = client.Close() })
+	if err := client.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	authenticateV11Connection(t, client)
+	subscribePayload, _ := json.Marshal(map[string]any{"afterSequence": 0})
+	if err := json.NewEncoder(client).Encode(protocol.Request{
+		ProtocolVersion: protocol.Version11,
+		Kind:            "request",
+		MessageID:       testID('b'),
+		Method:          "events/subscribe",
+		SentAt:          sentAt,
+		Payload:         subscribePayload,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	decoder := json.NewDecoder(client)
+	var response protocol.Response
+	if err := decoder.Decode(&response); err != nil || response.Kind != "response" {
+		t.Fatalf("subscribe response = %#v, %v", response, err)
+	}
+	return client, decoder
+}
+
+func assertSubscriptionCorruptionFailure(t *testing.T, decoder *json.Decoder) {
+	t.Helper()
+	var failure protocol.Response
+	if err := decoder.Decode(&failure); err != nil {
+		t.Fatalf("decode subscription corruption failure: %v", err)
+	}
+	if failure.ProtocolVersion != protocol.Version11 ||
+		failure.Kind != "error" ||
+		failure.RequestID != testID('b') ||
+		failure.Error == nil ||
+		failure.Error.Code != "STORAGE_UNAVAILABLE" ||
+		!failure.Error.Retryable {
+		t.Fatalf("subscription corruption failure = %#v", failure)
+	}
+	var afterClose json.RawMessage
+	if err := decoder.Decode(&afterClose); !errors.Is(err, io.EOF) {
+		t.Fatalf("connection after corrupt journal event = %v, envelope = %s; want EOF", err, afterClose)
+	}
 }
 
 func timePointerForServer(value time.Time) *time.Time { return &value }
@@ -567,6 +696,7 @@ func assertProjectedOutputEvent(
 	t *testing.T,
 	decoder *json.Decoder,
 	wantSequence int64,
+	wantTaskID string,
 	wantStream string,
 	wantText string,
 	wantTruncated bool,
@@ -579,7 +709,8 @@ func assertProjectedOutputEvent(
 	if envelope.ProtocolVersion != protocol.Version11 ||
 		envelope.Kind != "event" ||
 		envelope.Sequence != wantSequence ||
-		envelope.Event != string(task.EventTaskOutput) {
+		envelope.Event != string(task.EventTaskOutput) ||
+		envelope.TaskID != wantTaskID {
 		t.Fatalf("projected event = %#v", envelope)
 	}
 	var fields map[string]json.RawMessage
@@ -699,7 +830,8 @@ func TestServeConnectionRetiresOldForwarderBeforeDuplicateSubscription(t *testin
 	oldErrors := make(chan error, 1)
 	for sequence := int64(1); sequence <= 64; sequence++ {
 		oldEvents <- task.Event{Sequence: sequence, ID: testID('e'), EventDraft: task.EventDraft{
-			TaskID: testID('1'), Type: task.EventTaskOutput, At: time.Unix(sequence, 0).UTC(), Payload: json.RawMessage(`{"old":true}`),
+			TaskID: testID('1'), Type: task.EventTaskOutput, At: time.Unix(sequence, 0).UTC(),
+			Payload: json.RawMessage(`{"stream":"stdout","text":"old","truncated":false}`),
 		}}
 	}
 	newEvents := make(chan task.Event, 1)

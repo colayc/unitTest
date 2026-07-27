@@ -174,6 +174,156 @@ func TestManagerStepEventPublisherFailureKeepsDurableProcessHandoff(t *testing.T
 	}
 }
 
+func TestManagerStepFinishedStoreFailureRetainsLeaseAndOwnerWithoutStartingNextStep(t *testing.T) {
+	f := newManagerFixture(t)
+	first := f.process
+	second := newFakeProcess()
+	f.processes.queue = []*fakeProcess{first, second}
+	t.Cleanup(func() { second.completeOnce(task.ProcessResult{Err: errors.New("test cleanup")}) })
+
+	releaseClose := make(chan struct{})
+	var releaseOnce sync.Once
+	first.closeBlock = releaseClose
+	t.Cleanup(func() { releaseOnce.Do(func() { close(releaseClose) }) })
+	f.store.failApplyMatch = func(mutation task.Mutation) error {
+		for _, event := range mutation.Events {
+			if event.Type == task.EventTaskStepFinished {
+				return task.ErrStorageUnavailable
+			}
+		}
+		return nil
+	}
+
+	started, err := f.manager.Start(context.Background(), twoStepStartRequest(testID(85), time.Minute, fixedBoundary{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.complete(task.ProcessResult{ExitCode: 0})
+	f.awaitProcessClose(t, first)
+	f.awaitUnhealthy(t)
+
+	stored, err := f.store.Get(context.Background(), started.ID)
+	if err != nil ||
+		stored.Status != task.StatusRunning ||
+		stored.ActiveStep != "first" ||
+		len(stored.Steps) != 2 ||
+		stored.Steps[0].Status != task.StepRunning ||
+		stored.Steps[1].Status != task.StepPending {
+		t.Fatalf("durable Task after Step-finished Store failure = %#v, %v", stored, err)
+	}
+	if lease := f.store.lease(started.ID); lease.TaskID != started.ID {
+		t.Fatalf("durable lease after Step-finished Store failure = %#v", lease)
+	}
+	if got := eventTypes(f.store.eventsForTask(started.ID)); !reflect.DeepEqual(got, []task.EventType{
+		task.EventTaskCreated,
+		task.EventTaskStarted,
+		task.EventTaskStepStarted,
+	}) {
+		t.Fatalf("durable events after Step-finished Store failure = %v", got)
+	}
+	if got := f.publisher.types(); !reflect.DeepEqual(got, []task.EventType{
+		task.EventTaskCreated,
+		task.EventTaskStarted,
+		task.EventTaskStepStarted,
+	}) {
+		t.Fatalf("published events after Step-finished Store failure = %v", got)
+	}
+	if got := f.processes.prepareCount(); got != 1 || second.startCalls() != 0 {
+		t.Fatalf("later Step after Store failure: Prepare=%d Start=%d", got, second.startCalls())
+	}
+
+	shutdownContext := newObservedCancelContext()
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- f.manager.Shutdown(shutdownContext) }()
+	awaitSignal(t, shutdownContext.waiting, "Shutdown did not wait for retained Process owner")
+	select {
+	case shutdownErr := <-shutdownDone:
+		t.Fatalf("Shutdown returned before retained Process Close: %v", shutdownErr)
+	default:
+	}
+	releaseOnce.Do(func() { close(releaseClose) })
+	select {
+	case shutdownErr := <-shutdownDone:
+		if shutdownErr != nil {
+			t.Fatalf("Shutdown after retained Process Close = %v", shutdownErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not finish after retained Process Close")
+	}
+}
+
+func TestManagerStepFinishedPublisherFailureRetainsOwnerWithoutStartingNextStep(t *testing.T) {
+	f := newManagerFixture(t)
+	first := f.process
+	second := newFakeProcess()
+	f.processes.queue = []*fakeProcess{first, second}
+	t.Cleanup(func() { second.completeOnce(task.ProcessResult{Err: errors.New("test cleanup")}) })
+
+	releaseClose := make(chan struct{})
+	var releaseOnce sync.Once
+	first.closeBlock = releaseClose
+	t.Cleanup(func() { releaseOnce.Do(func() { close(releaseClose) }) })
+	f.publisher.panicType = task.EventTaskStepFinished
+
+	started, err := f.manager.Start(context.Background(), twoStepStartRequest(testID(84), time.Minute, fixedBoundary{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.complete(task.ProcessResult{ExitCode: 0})
+	f.awaitProcessClose(t, first)
+	f.awaitUnhealthy(t)
+
+	stored, err := f.store.Get(context.Background(), started.ID)
+	if err != nil ||
+		stored.Status != task.StatusRunning ||
+		stored.ActiveStep != "" ||
+		len(stored.Steps) != 2 ||
+		stored.Steps[0].Status != task.StepSucceeded ||
+		stored.Steps[1].Status != task.StepPending {
+		t.Fatalf("durable Task after Step-finished Publisher failure = %#v, %v", stored, err)
+	}
+	if lease := f.store.lease(started.ID); lease.TaskID != "" {
+		t.Fatalf("lease survived committed Step finish = %#v", lease)
+	}
+	if got := eventTypes(f.store.eventsForTask(started.ID)); !reflect.DeepEqual(got, []task.EventType{
+		task.EventTaskCreated,
+		task.EventTaskStarted,
+		task.EventTaskStepStarted,
+		task.EventTaskStepFinished,
+	}) {
+		t.Fatalf("durable events after Step-finished Publisher failure = %v", got)
+	}
+	if got := f.publisher.types(); !reflect.DeepEqual(got, []task.EventType{
+		task.EventTaskCreated,
+		task.EventTaskStarted,
+		task.EventTaskStepStarted,
+	}) {
+		t.Fatalf("published events after Step-finished Publisher failure = %v", got)
+	}
+	if got := f.processes.prepareCount(); got != 1 || second.startCalls() != 0 {
+		t.Fatalf("later Step after Publisher failure: Prepare=%d Start=%d", got, second.startCalls())
+	}
+
+	shutdownContext := newObservedCancelContext()
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- f.manager.Shutdown(shutdownContext) }()
+	awaitSignal(t, shutdownContext.waiting, "Shutdown did not wait for retained Process owner")
+	select {
+	case shutdownErr := <-shutdownDone:
+		t.Fatalf("Shutdown returned before retained Process Close: %v", shutdownErr)
+	default:
+	}
+	releaseOnce.Do(func() { close(releaseClose) })
+	select {
+	case shutdownErr := <-shutdownDone:
+		if shutdownErr != nil {
+			t.Fatalf("Shutdown after retained Process Close = %v", shutdownErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not finish after retained Process Close")
+	}
+}
+
 func TestManagerRunsPlanStepsSequentially(t *testing.T) {
 	f := newManagerFixture(t)
 	first := f.process

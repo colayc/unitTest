@@ -535,15 +535,25 @@ func TestRecoverInterruptedDistinguishesTaskKindsAndReconcilesSteps(t *testing.T
 		t.Fatal(err)
 	}
 	runningBuild = startStoredStep(t, store, runningBuild, 0, base.Add(4*time.Second), 102)
-	cancellingBuild := mustTransition(t, runningBuild, task.Transition{
-		From: task.StatusRunning, To: task.StatusCancelling, At: base.Add(5 * time.Second),
+
+	cancellingBuildInput := newCMakeTask(3, 13, base.Add(5*time.Second))
+	cancellingBuild, _, err := store.Create(ctx, cancellingBuildInput, []task.StepSnapshot{
+		{ID: "configure", Kind: task.StepConfigure, Status: task.StepPending},
+		{ID: "build", Kind: task.StepBuild, Status: task.StepPending},
+	}, draft(cancellingBuildInput.ID, task.EventTaskCreated, cancellingBuildInput.CreatedAt))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancellingBuild = startStoredStep(t, store, cancellingBuild, 0, base.Add(6*time.Second), 103)
+	cancellingBuildState := mustTransition(t, cancellingBuild, task.Transition{
+		From: task.StatusRunning, To: task.StatusCancelling, At: base.Add(7 * time.Second),
 	})
-	if runningBuild, _, err = store.Apply(ctx, task.Mutation{
-		Task: cancellingBuild, Expected: task.StatusRunning,
+	if cancellingBuild, _, err = store.Apply(ctx, task.Mutation{
+		Task: cancellingBuildState, Expected: task.StatusRunning,
 		Events: []task.EventDraft{{
-			TaskID: runningBuild.ID,
+			TaskID: cancellingBuild.ID,
 			Type:   task.EventTaskCancellationRequested,
-			At:     base.Add(5 * time.Second),
+			At:     base.Add(7 * time.Second),
 			Payload: json.RawMessage(
 				`{"status":"cancelling"}`,
 			),
@@ -552,7 +562,7 @@ func TestRecoverInterruptedDistinguishesTaskKindsAndReconcilesSteps(t *testing.T
 		t.Fatal(err)
 	}
 
-	queuedBuildInput := newCMakeTask(3, 13, base.Add(6*time.Second))
+	queuedBuildInput := newCMakeTask(4, 14, base.Add(8*time.Second))
 	queuedBuild, _, err := store.Create(ctx, queuedBuildInput, []task.StepSnapshot{
 		{ID: "configure", Kind: task.StepConfigure, Status: task.StepPending},
 		{ID: "build", Kind: task.StepBuild, Status: task.StepPending},
@@ -560,7 +570,7 @@ func TestRecoverInterruptedDistinguishesTaskKindsAndReconcilesSteps(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	putTestLease(t, store, queuedBuild, 103)
+	putTestLease(t, store, queuedBuild, 104)
 	queuedBuildSequence := queuedBuild.LastSequence
 
 	recoveredAt := base.Add(time.Minute)
@@ -568,7 +578,7 @@ func TestRecoverInterruptedDistinguishesTaskKindsAndReconcilesSteps(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 3 {
+	if len(events) != 4 {
 		t.Fatalf("recovery events = %#v, want one for each interrupted Task", events)
 	}
 	for index, event := range events {
@@ -610,6 +620,18 @@ func TestRecoverInterruptedDistinguishesTaskKindsAndReconcilesSteps(t *testing.T
 		gotRunningBuild.Steps[1].FinishedAt == nil ||
 		!gotRunningBuild.Steps[1].FinishedAt.Equal(recoveredAt) {
 		t.Fatalf("recovered running cmake_build = %#v, %v", gotRunningBuild, err)
+	}
+	gotCancellingBuild, err := store.Get(ctx, cancellingBuild.ID)
+	if err != nil || gotCancellingBuild.Status != task.StatusFinished ||
+		gotCancellingBuild.Outcome != task.OutcomeInterrupted ||
+		gotCancellingBuild.ActiveStep != "" ||
+		len(gotCancellingBuild.Steps) != 2 ||
+		gotCancellingBuild.Steps[0].Status != task.StepFailed ||
+		gotCancellingBuild.Steps[0].ErrorCode != "SERVICE_RESTARTED" ||
+		gotCancellingBuild.Steps[1].Status != task.StepSkipped ||
+		gotCancellingBuild.Steps[1].FinishedAt == nil ||
+		!gotCancellingBuild.Steps[1].FinishedAt.Equal(recoveredAt) {
+		t.Fatalf("recovered cancelling cmake_build = %#v, %v", gotCancellingBuild, err)
 	}
 	gotQueuedBuild, err := store.Get(ctx, queuedBuild.ID)
 	if err != nil || gotQueuedBuild.Status != task.StatusQueued ||
@@ -676,6 +698,60 @@ func TestRecoverInterruptedRollsBackTaskStepsEventsAndLeaseWhenStepUpdateFails(t
 	leases, err := store.ActiveLeases(ctx)
 	if err != nil || len(leases) != 1 || leases[0].TaskID != running.ID {
 		t.Fatalf("lease after failed recovery = %#v, %v", leases, err)
+	}
+}
+
+func TestRecoverInterruptedRollsBackEarlierMutationsWhenLeaseDeleteFails(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	base := time.Date(2026, 7, 27, 3, 30, 0, 0, time.UTC)
+	input := newCMakeTask(5, 15, base)
+	created, _, err := store.Create(ctx, input, []task.StepSnapshot{
+		{ID: "configure", Kind: task.StepConfigure, Status: task.StepPending},
+		{ID: "build", Kind: task.StepBuild, Status: task.StepPending},
+	}, draft(input.ID, task.EventTaskCreated, base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	running := startStoredStep(t, store, created, 0, base.Add(time.Second), 111)
+	beforeWatermark, err := store.Watermark(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`CREATE TRIGGER fail_recovery_lease_delete
+		BEFORE DELETE ON process_leases
+		WHEN OLD.task_id = '` + running.ID + `'
+		BEGIN
+			SELECT RAISE(ABORT, 'forced recovery lease delete failure');
+		END`); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.RecoverInterrupted(ctx, base.Add(time.Minute)); !errors.Is(err, task.ErrStorageUnavailable) {
+		t.Fatalf("RecoverInterrupted() error = %v, want ErrStorageUnavailable", err)
+	}
+	got, err := store.Get(ctx, running.ID)
+	if err != nil ||
+		got.Status != task.StatusRunning ||
+		got.Outcome != "" ||
+		got.ActiveStep != "configure" ||
+		got.FinishedAt != nil ||
+		got.LastSequence != beforeWatermark ||
+		len(got.Steps) != 2 ||
+		got.Steps[0].Status != task.StepRunning ||
+		got.Steps[0].FinishedAt != nil ||
+		got.Steps[0].ErrorCode != "" ||
+		got.Steps[1].Status != task.StepPending ||
+		got.Steps[1].FinishedAt != nil {
+		t.Fatalf("Task after failed late recovery mutation = %#v, %v", got, err)
+	}
+	afterWatermark, err := store.Watermark(ctx)
+	if err != nil || afterWatermark != beforeWatermark {
+		t.Fatalf("watermark after failed late recovery mutation = %d, %v; want %d", afterWatermark, err, beforeWatermark)
+	}
+	leases, err := store.ActiveLeases(ctx)
+	if err != nil || len(leases) != 1 || leases[0].TaskID != running.ID {
+		t.Fatalf("lease after failed late recovery mutation = %#v, %v", leases, err)
 	}
 }
 
