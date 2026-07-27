@@ -427,24 +427,30 @@ type TaskSummary struct {
 - journal 内部的 `task.output` payload 带正确 `stepId`；
 - v1.1 subscription 投影移除 `stepId`，并保持原 `{stream,text,truncated}` payload；
 - Step finished 后才出现下一个 Step started；
-- simulation v1.1 不广播新增 Step event，以维持旧 event enum；
+- simulation v1.1 不暴露新增 Step event name；`task.step_started` 与
+  `task.step_finished` 以相同 `sequence`、相同 `taskId` 投影为旧
+  `task.output` event；
 - Task summary 对 simulation 仍能通过旧 wire artifact 投影；
 - recovery 把 running/cancelling 任务和所有非终止 Step 变成 interrupted/failed 或 skipped。
 
-事件顺序断言：
+内部 journal 事件顺序断言：
 
 ```go
 want := []EventType{
 	EventTaskCreated,
 	EventTaskStarted,
+	EventTaskStepStarted,
 	EventTaskOutput,
-	EventTaskFinished,
+	EventTaskStepFinished,
 	EventArtifactCreated,
+	EventTaskFinished,
 }
 assertEventTypes(t, events, want)
 ```
 
-该 simulation 断言故意不包含新 Step event；`cmake_build` 的新事件在 Phase 3C 启用。
+v1.1 wire projection 把上面的两个 Step event 原位映射为 `task.output`，因此仍只使用
+旧 event enum，且不会过滤、重编号或跳过 `sequence`。Step event name 与 `stepId`
+仅在 Phase 3C 的 Protocol v1.2 暴露。
 
 - [ ] **Step 2：运行聚焦测试并确认失败**
 
@@ -469,7 +475,12 @@ go test ./apps/test-service/internal/task ./apps/test-service/internal/taskstore
 }
 ```
 
-`server.toProtocolEvent` 接收目标 Protocol version。v1.1 对 simulation `task.output` 明确投影回 `{stream,text,truncated}`；v1.2 在 Phase 3C 直接保留 `stepId`。不得把 journal 中的新字段直接透传给 v1.1。
+`server.toProtocolEvent` 接收目标 Protocol version。v1.1 对 simulation 的实际
+`task.output` 明确投影回 `{stream,text,truncated}`；对
+`task.step_started` / `task.step_finished` 则以原 `sequence`、原 `taskId` 投影为
+payload 严格等于 `{"stream":"service","text":"","truncated":false}` 的
+compatibility `task.output`。v1.2 在 Phase 3C 直接保留 Step event name 与
+`stepId`。不得过滤 journal event、重编号或把内部字段直接透传给 v1.1。
 
 为 artifact validation 增加按 Task kind 的 writer，而不是把 `scenario` 固定为唯一 JSON shape。simulation 继续生成 wire kind `task-summary`；内部 summary 增加 kind/steps 时，由 simulation writer 输出旧兼容字段。
 

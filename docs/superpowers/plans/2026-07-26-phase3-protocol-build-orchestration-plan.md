@@ -208,14 +208,15 @@ Server subscription 根据 handshake version 投影每条 journal event。v1.1 �
 
 ```json
 {
-  "stepId": "compatibility",
   "stream": "service",
-  "data": "",
+  "text": "",
   "truncated": false
 }
 ```
 
-不得丢弃事件或跳过 sequence。
+compatibility payload 只能包含 `stream`、`text`、`truncated`，不得出现
+`stepId`、`data` 或其他字段。投影保留原 `sequence` 与 `taskId`，不得丢弃事件、
+重编号或跳过 sequence。
 
 - [ ] **Step 4：运行 Session/Server 全套测试**
 
