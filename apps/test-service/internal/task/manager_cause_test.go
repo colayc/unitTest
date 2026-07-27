@@ -736,7 +736,8 @@ func newCauseBarrierFixture() (*Manager, *activeTask, map[string]*activeTask, *c
 	}
 	current := &activeTask{
 		task: Task{
-			ID: "00000000000000000000000000000001", Status: StatusRunning,
+			ID:   "00000000000000000000000000000001",
+			Kind: KindSimulation, Scenario: ScenarioSuccess, Status: StatusRunning,
 			CreatedAt: now.Add(-time.Minute), StartedAt: timePointer(now.Add(-time.Minute)),
 		},
 		timerStop: make(chan struct{}), timeoutStop: make(chan struct{}),

@@ -33,6 +33,8 @@ const (
 
 	EventTaskCreated               EventType = "task.created"
 	EventTaskStarted               EventType = "task.started"
+	EventTaskStepStarted           EventType = "task.step_started"
+	EventTaskStepFinished          EventType = "task.step_finished"
 	EventTaskOutput                EventType = "task.output"
 	EventTaskCancellationRequested EventType = "task.cancellation_requested"
 	EventTaskFinished              EventType = "task.finished"
@@ -58,13 +60,21 @@ type Task struct {
 }
 
 type StepSnapshot struct {
-	ID         string
-	Kind       StepKind
-	Status     StepStatus
-	StartedAt  *time.Time
-	FinishedAt *time.Time
-	ExitCode   *int
-	ErrorCode  string
+	ID         string     `json:"id"`
+	Kind       StepKind   `json:"kind"`
+	Status     StepStatus `json:"status"`
+	StartedAt  *time.Time `json:"startedAt"`
+	FinishedAt *time.Time `json:"finishedAt"`
+	ExitCode   *int       `json:"exitCode"`
+	ErrorCode  string     `json:"errorCode"`
+}
+
+type TaskSummary struct {
+	TaskID     string         `json:"taskId"`
+	Kind       Kind           `json:"kind"`
+	Outcome    Outcome        `json:"outcome"`
+	FinishedAt time.Time      `json:"finishedAt"`
+	Steps      []StepSnapshot `json:"steps"`
 }
 
 type EventDraft struct {

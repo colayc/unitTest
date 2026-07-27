@@ -86,19 +86,24 @@ func (s *Store) RecoverInterrupted(ctx context.Context, at time.Time) ([]task.Ev
 		return nil, storageError("begin recovery", err)
 	}
 	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `SELECT task_id FROM tasks
+	rows, err := tx.QueryContext(ctx, `SELECT task_id, kind, status FROM tasks
 		WHERE status IN ('queued','running','cancelling') ORDER BY created_at, task_id`)
 	if err != nil {
 		return nil, storageError("list interrupted tasks", err)
 	}
-	taskIDs := make([]string, 0)
+	type recoveryCandidate struct {
+		taskID string
+		kind   task.Kind
+		status task.Status
+	}
+	candidates := make([]recoveryCandidate, 0)
 	for rows.Next() {
-		var taskID string
-		if err := rows.Scan(&taskID); err != nil {
+		var candidate recoveryCandidate
+		if err := rows.Scan(&candidate.taskID, &candidate.kind, &candidate.status); err != nil {
 			_ = rows.Close()
 			return nil, storageError("read interrupted task", err)
 		}
-		taskIDs = append(taskIDs, taskID)
+		candidates = append(candidates, candidate)
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
@@ -108,10 +113,28 @@ func (s *Store) RecoverInterrupted(ctx context.Context, at time.Time) ([]task.Ev
 		return nil, storageError("close interrupted tasks", err)
 	}
 
-	events := make([]task.Event, 0, len(taskIDs))
-	for _, taskID := range taskIDs {
-		result, err := tx.ExecContext(ctx, `UPDATE tasks SET status='finished', outcome='interrupted', finished_at=?
-			WHERE task_id=? AND status IN ('queued','running','cancelling')`, formatTime(at), taskID)
+	events := make([]task.Event, 0, len(candidates))
+	for _, candidate := range candidates {
+		interrupt := candidate.kind == task.KindSimulation ||
+			candidate.status == task.StatusRunning ||
+			candidate.status == task.StatusCancelling
+		if !interrupt {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE task_steps SET
+			status='failed', finished_at=?, exit_code=NULL, error_code='SERVICE_RESTARTED'
+			WHERE task_id=? AND status='running'`, formatTime(at), candidate.taskID); err != nil {
+			return nil, storageError("fail interrupted running step", err)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE task_steps SET
+			status='skipped', finished_at=?, exit_code=NULL, error_code=''
+			WHERE task_id=? AND status='pending'`, formatTime(at), candidate.taskID); err != nil {
+			return nil, storageError("skip interrupted pending steps", err)
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE tasks SET
+			status='finished', outcome='interrupted', finished_at=?, active_step=''
+			WHERE task_id=? AND status IN ('queued','running','cancelling')`,
+			formatTime(at), candidate.taskID)
 		if err != nil {
 			return nil, storageError("finish interrupted task", err)
 		}
@@ -123,7 +146,7 @@ func (s *Store) RecoverInterrupted(ctx context.Context, at time.Time) ([]task.Ev
 			return nil, task.ErrConflict
 		}
 		inserted, err := insertEvents(ctx, tx, []task.EventDraft{{
-			TaskID:  taskID,
+			TaskID:  candidate.taskID,
 			Type:    task.EventTaskFinished,
 			At:      at,
 			Payload: json.RawMessage(`{"outcome":"interrupted"}`),
@@ -131,13 +154,13 @@ func (s *Store) RecoverInterrupted(ctx context.Context, at time.Time) ([]task.Ev
 		if err != nil {
 			return nil, err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE tasks SET last_sequence=? WHERE task_id=?`, inserted[0].Sequence, taskID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE tasks SET last_sequence=? WHERE task_id=?`, inserted[0].Sequence, candidate.taskID); err != nil {
 			return nil, storageError("update recovered task sequence", err)
 		}
 		events = append(events, inserted[0])
 	}
-	for _, taskID := range taskIDs {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM process_leases WHERE task_id=?`, taskID); err != nil {
+	for _, candidate := range candidates {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM process_leases WHERE task_id=?`, candidate.taskID); err != nil {
 			return nil, storageError("delete recovered lease", err)
 		}
 	}

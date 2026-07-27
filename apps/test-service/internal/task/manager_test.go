@@ -44,7 +44,11 @@ func TestManagerStartsAndCancelsOneTask(t *testing.T) {
 	if started.Status != task.StatusRunning {
 		t.Fatalf("task = %#v", started)
 	}
-	if got := f.publisher.types(); !reflect.DeepEqual(got, []task.EventType{task.EventTaskCreated, task.EventTaskStarted}) {
+	if got := f.publisher.types(); !reflect.DeepEqual(got, []task.EventType{
+		task.EventTaskCreated,
+		task.EventTaskStarted,
+		task.EventTaskStepStarted,
+	}) {
 		t.Fatalf("events = %v", got)
 	}
 	if got := f.processes.prepareCount(); got != 1 {
@@ -74,7 +78,8 @@ func TestManagerStartsAndCancelsOneTask(t *testing.T) {
 		t.Fatalf("terminal cancel terminated %d times", f.process.terminateCalls())
 	}
 	if got := f.publisher.types(); !reflect.DeepEqual(got, []task.EventType{
-		task.EventTaskCreated, task.EventTaskStarted, task.EventTaskCancellationRequested,
+		task.EventTaskCreated, task.EventTaskStarted, task.EventTaskStepStarted,
+		task.EventTaskCancellationRequested, task.EventTaskStepFinished,
 		task.EventArtifactCreated, task.EventTaskFinished,
 	}) {
 		t.Fatalf("events = %v", got)
@@ -92,7 +97,7 @@ func TestManagerIdempotencyAndSerializedStarts(t *testing.T) {
 	if err != nil || replayed.ID != first.ID {
 		t.Fatalf("replay = %#v, %v", replayed, err)
 	}
-	if f.processes.prepareCount() != 1 || len(f.publisher.events()) != 2 {
+	if f.processes.prepareCount() != 1 || len(f.publisher.events()) != 3 {
 		t.Fatalf("replay performed side effects: prepare=%d events=%d", f.processes.prepareCount(), len(f.publisher.events()))
 	}
 	conflict := req
@@ -123,12 +128,14 @@ func TestManagerPersistsPreparedLeaseBeforeStartAndRefreshesItAfterStart(t *test
 	if got := eventTypes(f.store.eventsForTask(started.ID)); !reflect.DeepEqual(got, []task.EventType{
 		task.EventTaskCreated,
 		task.EventTaskStarted,
+		task.EventTaskStepStarted,
 	}) {
 		t.Fatalf("durable events = %v", got)
 	}
 	if got := f.publisher.types(); !reflect.DeepEqual(got, []task.EventType{
 		task.EventTaskCreated,
 		task.EventTaskStarted,
+		task.EventTaskStepStarted,
 	}) {
 		t.Fatalf("published events = %v", got)
 	}
@@ -929,6 +936,7 @@ func TestManagerPublisherFailureQuiescesOtherActiveTaskForRecovery(t *testing.T)
 	if got := eventTypes(f.store.eventsForTask(first.ID)); !reflect.DeepEqual(got, []task.EventType{
 		task.EventTaskCreated,
 		task.EventTaskStarted,
+		task.EventTaskStepStarted,
 	}) {
 		t.Fatalf("first durable event types = %v, want no false terminal event", got)
 	}
@@ -1006,10 +1014,12 @@ func TestManagerPublisherFailureCloseErrorHandsOffRecoveryWithoutTerminalization
 		!reflect.DeepEqual(durableEvents, []task.EventType{
 			task.EventTaskCreated,
 			task.EventTaskStarted,
+			task.EventTaskStepStarted,
 		}) ||
 		!reflect.DeepEqual(publishedEvents, []task.EventType{
 			task.EventTaskCreated,
 			task.EventTaskStarted,
+			task.EventTaskStepStarted,
 		}) ||
 		len(artifactSummaries) != 0 ||
 		len(storedArtifacts) != 0 ||
@@ -1172,7 +1182,7 @@ func TestManagerFirstTerminationCauseWins(t *testing.T) {
 	}
 }
 
-func TestManagerCoalescesCapsAndOrdersOutputBeforeCompletion(t *testing.T) {
+func TestManagerCoalescesCapsAndAttributesOutputToStepBeforeCompletion(t *testing.T) {
 	f := newManagerFixture(t)
 	started, err := f.manager.Start(context.Background(), task.StartRequest{IdempotencyKey: testID(4), Scenario: task.ScenarioEmitOutput, Timeout: time.Hour})
 	if err != nil {
@@ -1187,6 +1197,7 @@ func TestManagerCoalescesCapsAndOrdersOutputBeforeCompletion(t *testing.T) {
 	}
 	for i, want := range []struct{ stream, text string }{{"stdout", "one"}, {"stderr", "two"}} {
 		var got struct {
+			StepID    string `json:"stepId"`
 			Stream    string `json:"stream"`
 			Text      string `json:"text"`
 			Truncated bool   `json:"truncated"`
@@ -1194,7 +1205,7 @@ func TestManagerCoalescesCapsAndOrdersOutputBeforeCompletion(t *testing.T) {
 		if err := json.Unmarshal(outputEvents[i].Payload, &got); err != nil {
 			t.Fatal(err)
 		}
-		if got.Stream != want.stream || got.Text != want.text || got.Truncated {
+		if got.StepID != "simulate" || got.Stream != want.stream || got.Text != want.text || got.Truncated {
 			t.Fatalf("payload[%d] = %#v", i, got)
 		}
 	}
@@ -1224,7 +1235,7 @@ func TestManagerCoalescesCapsAndOrdersOutputBeforeCompletion(t *testing.T) {
 	f.store.assertStrictSequences(t)
 }
 
-func TestManagerOutputTotalLimitCreatesOneTruncationEvent(t *testing.T) {
+func TestManagerOutputTotalLimitCreatesOneTruncationEventWithStepID(t *testing.T) {
 	f := newManagerFixture(t)
 	_, err := f.manager.Start(context.Background(), task.StartRequest{IdempotencyKey: testID(5), Scenario: task.ScenarioEmitOutput, Timeout: time.Hour})
 	if err != nil {
@@ -1239,6 +1250,18 @@ func TestManagerOutputTotalLimitCreatesOneTruncationEvent(t *testing.T) {
 	persisted := 0
 	for _, event := range f.publisher.ofType(task.EventTaskOutput) {
 		if strings.Contains(string(event.Payload), `"truncated":true`) {
+			var payload struct {
+				StepID   string `json:"stepId"`
+				Stream   string `json:"stream"`
+				Text     string `json:"text"`
+				Truncate bool   `json:"truncated"`
+			}
+			if err := json.Unmarshal(event.Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload.StepID != "simulate" || payload.Stream != "combined" || payload.Text != "" || !payload.Truncate {
+				t.Fatalf("truncation payload = %#v", payload)
+			}
 			truncated++
 			continue
 		}
@@ -1285,7 +1308,10 @@ func TestManagerMapsProcessResultsAndCommitsSummaryAtomically(t *testing.T) {
 				t.Fatalf("sensitive error = %q", finished.ErrorMessage)
 			}
 			mutation := f.store.lastMutation()
-			if !mutation.DeleteLease || len(mutation.Artifacts) != 1 || len(mutation.Events) != 2 || mutation.Events[0].Type != task.EventArtifactCreated || mutation.Events[1].Type != task.EventTaskFinished {
+			if !mutation.DeleteLease || len(mutation.Artifacts) != 1 || len(mutation.Events) != 3 ||
+				mutation.Events[0].Type != task.EventTaskStepFinished ||
+				mutation.Events[1].Type != task.EventArtifactCreated ||
+				mutation.Events[2].Type != task.EventTaskFinished {
 				t.Fatalf("terminal mutation = %#v", mutation)
 			}
 			summary := f.artifacts.lastSummary()
@@ -1293,6 +1319,35 @@ func TestManagerMapsProcessResultsAndCommitsSummaryAtomically(t *testing.T) {
 				t.Fatalf("summary = %#v", summary)
 			}
 		})
+	}
+}
+
+func TestManagerBuildsGenericCMakeTaskSummaryThroughKindRegistry(t *testing.T) {
+	f := newManagerFixture(t)
+	second := newFakeProcess()
+	f.processes.queue = []*fakeProcess{f.process, second}
+	t.Cleanup(func() { second.completeOnce(task.ProcessResult{Err: errors.New("test cleanup")}) })
+
+	started, err := f.manager.Start(context.Background(), twoStepCMakeStartRequest(testID(74), time.Minute, fixedBoundary{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.process.complete(task.ProcessResult{ExitCode: 0})
+	awaitProcessStart(t, second)
+	second.complete(task.ProcessResult{ExitCode: 0})
+	finished := f.awaitTask(t, started.ID, task.StatusFinished)
+
+	value := f.artifacts.lastValue()
+	summary, ok := value.(task.TaskSummary)
+	if !ok {
+		t.Fatalf("artifact writer value = %T %#v, want task.TaskSummary", value, value)
+	}
+	if summary.TaskID != started.ID || summary.Kind != task.KindCMakeBuild ||
+		summary.Outcome != task.OutcomeSucceeded || summary.FinishedAt.IsZero() ||
+		len(summary.Steps) != 2 ||
+		summary.Steps[0].ID != "configure" || summary.Steps[0].Status != task.StepSucceeded ||
+		summary.Steps[1].ID != "build" || summary.Steps[1].Status != task.StepSucceeded {
+		t.Fatalf("generic TaskSummary = %#v; finished task = %#v", summary, finished)
 	}
 }
 
@@ -2318,6 +2373,7 @@ type fakeArtifactWriter struct {
 	mu        sync.Mutex
 	fail      error
 	summaries []map[string]string
+	values    []any
 }
 
 func (w *fakeArtifactWriter) CommitJSON(_ context.Context, taskID, artifactID string, at time.Time, value any) (task.Artifact, error) {
@@ -2326,6 +2382,7 @@ func (w *fakeArtifactWriter) CommitJSON(_ context.Context, taskID, artifactID st
 	if w.fail != nil {
 		return task.Artifact{}, w.fail
 	}
+	w.values = append(w.values, value)
 	raw, _ := json.Marshal(value)
 	var summary map[string]string
 	_ = json.Unmarshal(raw, &summary)
@@ -2341,6 +2398,14 @@ func (w *fakeArtifactWriter) summariesCopy() []map[string]string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return append([]map[string]string(nil), w.summaries...)
+}
+func (w *fakeArtifactWriter) lastValue() any {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.values) == 0 {
+		return nil
+	}
+	return w.values[len(w.values)-1]
 }
 
 type clockWaiter struct {

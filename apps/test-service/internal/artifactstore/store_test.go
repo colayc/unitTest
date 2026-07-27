@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
@@ -123,6 +124,60 @@ func TestCommitJSONCanonicalizesFixedSummaryFields(t *testing.T) {
 	}
 	if !bytes.Equal(got, want) {
 		t.Fatalf("struct summary = %q, want %q", got, want)
+	}
+}
+
+func TestCommitJSONUsesTaskKindRegistryForGenericCMakeSummary(t *testing.T) {
+	root := t.TempDir()
+	store, err := newStore(t, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startedAt := time.Date(2026, 7, 27, 1, 0, 0, 0, time.UTC)
+	finishedAt := startedAt.Add(time.Second)
+	exitCode := 0
+	summary := task.TaskSummary{
+		TaskID:     id(1),
+		Kind:       task.KindCMakeBuild,
+		Outcome:    task.OutcomeSucceeded,
+		FinishedAt: finishedAt,
+		Steps: []task.StepSnapshot{{
+			ID:         "configure",
+			Kind:       task.StepConfigure,
+			Status:     task.StepSucceeded,
+			StartedAt:  &startedAt,
+			FinishedAt: &finishedAt,
+			ExitCode:   &exitCode,
+		}},
+	}
+
+	artifact, err := store.CommitJSON(context.Background(), id(1), id(2), finishedAt, summary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifact.Kind != "task-summary" || artifact.MIMEType != "application/json" {
+		t.Fatalf("artifact = %#v", artifact)
+	}
+	data, err := os.ReadFile(artifactPath(root, artifact))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if len(fields) != 5 || fields["scenario"] != nil {
+		t.Fatalf("generic summary fields = %v; JSON = %s", fields, data)
+	}
+	var got task.TaskSummary
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.TaskID != summary.TaskID || got.Kind != task.KindCMakeBuild ||
+		got.Outcome != task.OutcomeSucceeded || !got.FinishedAt.Equal(finishedAt) ||
+		len(got.Steps) != 1 || got.Steps[0].ID != "configure" ||
+		got.Steps[0].Status != task.StepSucceeded {
+		t.Fatalf("stored generic summary = %#v; JSON = %s", got, data)
 	}
 }
 

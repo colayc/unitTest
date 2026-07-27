@@ -503,6 +503,182 @@ func TestRecoverInterruptedFinishesAllActiveTasksAndDeletesLeases(t *testing.T) 
 	}
 }
 
+func TestRecoverInterruptedDistinguishesTaskKindsAndReconcilesSteps(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	base := time.Date(2026, 7, 27, 2, 0, 0, 0, time.UTC)
+
+	queuedSimulationInput := newTask(0, 10, base)
+	queuedSimulation, _, err := store.Create(ctx, queuedSimulationInput, []task.StepSnapshot{{
+		ID: "simulate", Kind: task.StepSimulation, Status: task.StepPending,
+	}}, draft(queuedSimulationInput.ID, task.EventTaskCreated, base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	putTestLease(t, store, queuedSimulation, 100)
+
+	runningSimulationInput := newTask(1, 11, base.Add(time.Second))
+	runningSimulation, _, err := store.Create(ctx, runningSimulationInput, []task.StepSnapshot{{
+		ID: "simulate", Kind: task.StepSimulation, Status: task.StepPending,
+	}}, draft(runningSimulationInput.ID, task.EventTaskCreated, runningSimulationInput.CreatedAt))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runningSimulation = startStoredStep(t, store, runningSimulation, 0, base.Add(2*time.Second), 101)
+
+	runningBuildInput := newCMakeTask(2, 12, base.Add(3*time.Second))
+	runningBuild, _, err := store.Create(ctx, runningBuildInput, []task.StepSnapshot{
+		{ID: "configure", Kind: task.StepConfigure, Status: task.StepPending},
+		{ID: "build", Kind: task.StepBuild, Status: task.StepPending},
+	}, draft(runningBuildInput.ID, task.EventTaskCreated, runningBuildInput.CreatedAt))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runningBuild = startStoredStep(t, store, runningBuild, 0, base.Add(4*time.Second), 102)
+	cancellingBuild := mustTransition(t, runningBuild, task.Transition{
+		From: task.StatusRunning, To: task.StatusCancelling, At: base.Add(5 * time.Second),
+	})
+	if runningBuild, _, err = store.Apply(ctx, task.Mutation{
+		Task: cancellingBuild, Expected: task.StatusRunning,
+		Events: []task.EventDraft{{
+			TaskID: runningBuild.ID,
+			Type:   task.EventTaskCancellationRequested,
+			At:     base.Add(5 * time.Second),
+			Payload: json.RawMessage(
+				`{"status":"cancelling"}`,
+			),
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	queuedBuildInput := newCMakeTask(3, 13, base.Add(6*time.Second))
+	queuedBuild, _, err := store.Create(ctx, queuedBuildInput, []task.StepSnapshot{
+		{ID: "configure", Kind: task.StepConfigure, Status: task.StepPending},
+		{ID: "build", Kind: task.StepBuild, Status: task.StepPending},
+	}, draft(queuedBuildInput.ID, task.EventTaskCreated, queuedBuildInput.CreatedAt))
+	if err != nil {
+		t.Fatal(err)
+	}
+	putTestLease(t, store, queuedBuild, 103)
+	queuedBuildSequence := queuedBuild.LastSequence
+
+	recoveredAt := base.Add(time.Minute)
+	events, err := store.RecoverInterrupted(ctx, recoveredAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("recovery events = %#v, want one for each interrupted Task", events)
+	}
+	for index, event := range events {
+		if event.Type != task.EventTaskFinished ||
+			string(event.Payload) != `{"outcome":"interrupted"}` ||
+			(index > 0 && events[index-1].Sequence >= event.Sequence) {
+			t.Fatalf("recovery event[%d] = %#v", index, event)
+		}
+	}
+
+	gotQueuedSimulation, err := store.Get(ctx, queuedSimulation.ID)
+	if err != nil || gotQueuedSimulation.Status != task.StatusFinished ||
+		gotQueuedSimulation.Outcome != task.OutcomeInterrupted ||
+		len(gotQueuedSimulation.Steps) != 1 ||
+		gotQueuedSimulation.Steps[0].Status != task.StepSkipped ||
+		gotQueuedSimulation.Steps[0].FinishedAt == nil ||
+		!gotQueuedSimulation.Steps[0].FinishedAt.Equal(recoveredAt) {
+		t.Fatalf("recovered queued simulation = %#v, %v", gotQueuedSimulation, err)
+	}
+	gotRunningSimulation, err := store.Get(ctx, runningSimulation.ID)
+	if err != nil || gotRunningSimulation.Status != task.StatusFinished ||
+		gotRunningSimulation.Outcome != task.OutcomeInterrupted ||
+		gotRunningSimulation.ActiveStep != "" ||
+		len(gotRunningSimulation.Steps) != 1 ||
+		gotRunningSimulation.Steps[0].Status != task.StepFailed ||
+		gotRunningSimulation.Steps[0].ErrorCode != "SERVICE_RESTARTED" ||
+		gotRunningSimulation.Steps[0].FinishedAt == nil ||
+		!gotRunningSimulation.Steps[0].FinishedAt.Equal(recoveredAt) {
+		t.Fatalf("recovered running simulation = %#v, %v", gotRunningSimulation, err)
+	}
+	gotRunningBuild, err := store.Get(ctx, runningBuild.ID)
+	if err != nil || gotRunningBuild.Status != task.StatusFinished ||
+		gotRunningBuild.Outcome != task.OutcomeInterrupted ||
+		gotRunningBuild.ActiveStep != "" ||
+		len(gotRunningBuild.Steps) != 2 ||
+		gotRunningBuild.Steps[0].Status != task.StepFailed ||
+		gotRunningBuild.Steps[0].ErrorCode != "SERVICE_RESTARTED" ||
+		gotRunningBuild.Steps[1].Status != task.StepSkipped ||
+		gotRunningBuild.Steps[1].FinishedAt == nil ||
+		!gotRunningBuild.Steps[1].FinishedAt.Equal(recoveredAt) {
+		t.Fatalf("recovered running cmake_build = %#v, %v", gotRunningBuild, err)
+	}
+	gotQueuedBuild, err := store.Get(ctx, queuedBuild.ID)
+	if err != nil || gotQueuedBuild.Status != task.StatusQueued ||
+		gotQueuedBuild.Outcome != "" || gotQueuedBuild.FinishedAt != nil ||
+		gotQueuedBuild.LastSequence != queuedBuildSequence ||
+		len(gotQueuedBuild.Steps) != 2 ||
+		gotQueuedBuild.Steps[0].Status != task.StepPending ||
+		gotQueuedBuild.Steps[1].Status != task.StepPending {
+		t.Fatalf("preserved queued cmake_build = %#v, %v", gotQueuedBuild, err)
+	}
+
+	leases, err := store.ActiveLeases(ctx)
+	if err != nil || len(leases) != 0 {
+		t.Fatalf("ActiveLeases after recovery = %#v, %v", leases, err)
+	}
+	var queuedBuildLeaseCount int
+	if err := store.db.QueryRow(
+		`SELECT COUNT(*) FROM process_leases WHERE task_id=?`,
+		queuedBuild.ID,
+	).Scan(&queuedBuildLeaseCount); err != nil || queuedBuildLeaseCount != 0 {
+		t.Fatalf("queued cmake_build physical lease count = %d, %v", queuedBuildLeaseCount, err)
+	}
+}
+
+func TestRecoverInterruptedRollsBackTaskStepsEventsAndLeaseWhenStepUpdateFails(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	base := time.Date(2026, 7, 27, 3, 0, 0, 0, time.UTC)
+	input := newTask(0, 10, base)
+	created, _, err := store.Create(ctx, input, []task.StepSnapshot{{
+		ID: "simulate", Kind: task.StepSimulation, Status: task.StepPending,
+	}}, draft(input.ID, task.EventTaskCreated, base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	running := startStoredStep(t, store, created, 0, base.Add(time.Second), 110)
+	beforeWatermark, err := store.Watermark(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`CREATE TRIGGER fail_recovery_step_update
+		BEFORE UPDATE ON task_steps
+		WHEN OLD.task_id = '` + running.ID + `' AND NEW.status = 'failed'
+		BEGIN
+			SELECT RAISE(ABORT, 'forced recovery step failure');
+		END`); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.RecoverInterrupted(ctx, base.Add(time.Minute)); !errors.Is(err, task.ErrStorageUnavailable) {
+		t.Fatalf("RecoverInterrupted() error = %v, want ErrStorageUnavailable", err)
+	}
+	got, err := store.Get(ctx, running.ID)
+	if err != nil || got.Status != task.StatusRunning || got.Outcome != "" ||
+		got.ActiveStep != "simulate" || got.FinishedAt != nil ||
+		len(got.Steps) != 1 || got.Steps[0].Status != task.StepRunning ||
+		got.Steps[0].FinishedAt != nil || got.Steps[0].ErrorCode != "" {
+		t.Fatalf("Task after failed recovery = %#v, %v", got, err)
+	}
+	afterWatermark, err := store.Watermark(ctx)
+	if err != nil || afterWatermark != beforeWatermark {
+		t.Fatalf("watermark after failed recovery = %d, %v; want %d", afterWatermark, err, beforeWatermark)
+	}
+	leases, err := store.ActiveLeases(ctx)
+	if err != nil || len(leases) != 1 || leases[0].TaskID != running.ID {
+		t.Fatalf("lease after failed recovery = %#v, %v", leases, err)
+	}
+}
+
 func TestRecoverInterruptedRollsBackAllTasksWhenEventInsertFails(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -996,6 +1172,53 @@ func newTask(taskByte, keyByte byte, at time.Time) task.Task {
 		Kind: task.KindSimulation, Request: json.RawMessage(`{"scenario":"success"}`),
 		Scenario: task.ScenarioSuccess, Timeout: 30 * time.Second, Status: task.StatusQueued, CreatedAt: at,
 	}
+}
+
+func newCMakeTask(taskByte, keyByte byte, at time.Time) task.Task {
+	return task.Task{
+		ID: id(taskByte), IdempotencyKey: id(keyByte), RequestHash: strings.Repeat("b", 64),
+		Kind: task.KindCMakeBuild, Request: json.RawMessage(`{"sourceRoot":"src","buildRoot":"build"}`),
+		WorkspaceGeneration: strings.Repeat("c", 64), PlanFingerprint: strings.Repeat("d", 64),
+		Timeout: time.Minute, Status: task.StatusQueued, CreatedAt: at,
+	}
+}
+
+func putTestLease(t *testing.T, store *Store, value task.Task, pid int) {
+	t.Helper()
+	lease := task.ProcessLease{
+		TaskID: value.ID, HostPID: pid, HostStartIdentity: fmt.Sprintf("start-%d", pid),
+		ServiceInstanceID: id(20),
+	}
+	if _, _, err := store.Apply(context.Background(), task.Mutation{
+		Task: value, Expected: value.Status, PutLease: &lease,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func startStoredStep(t *testing.T, store *Store, value task.Task, ordinal int, at time.Time, pid int) task.Task {
+	t.Helper()
+	running := mustTransition(t, value, task.Transition{
+		From: task.StatusQueued, To: task.StatusRunning, At: at,
+	})
+	step := value.Steps[ordinal]
+	step.Status = task.StepRunning
+	step.StartedAt = ptrTime(at)
+	running.ActiveStep = step.ID
+	lease := task.ProcessLease{
+		TaskID: value.ID, HostPID: pid, HostStartIdentity: fmt.Sprintf("start-%d", pid),
+		ServiceInstanceID: id(21),
+	}
+	stored, _, err := store.Apply(context.Background(), task.Mutation{
+		Task: running, Expected: task.StatusQueued,
+		Steps:    []task.StepMutation{{Step: step, Expected: task.StepPending}},
+		Events:   []task.EventDraft{draft(value.ID, task.EventTaskStarted, at)},
+		PutLease: &lease,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return stored
 }
 
 func createTask(t *testing.T, store *Store, input task.Task) task.Task {

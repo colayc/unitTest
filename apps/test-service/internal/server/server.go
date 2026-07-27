@@ -311,7 +311,11 @@ func forwardSubscription(ctx context.Context, subscription *eventbroker.Subscrip
 				events = nil
 				continue
 			}
-			if !sendOutbound(ctx, outbound, writerDone, toProtocolEvent(event)) {
+			projected, include := toProtocolEvent(event, subscribeRequest.ProtocolVersion)
+			if !include {
+				continue
+			}
+			if !sendOutbound(ctx, outbound, writerDone, projected) {
 				return
 			}
 		case err, ok := <-subscriptionErrors:
@@ -327,8 +331,31 @@ func forwardSubscription(ctx context.Context, subscription *eventbroker.Subscrip
 	}
 }
 
-func toProtocolEvent(event task.Event) protocol.Event {
-	return protocol.NewEvent(event.Sequence, string(event.Type), event.TaskID, event.At, event.Payload)
+func toProtocolEvent(event task.Event, version string) (protocol.Event, bool) {
+	payload := event.Payload
+	if version == protocol.Version11 {
+		switch event.Type {
+		case task.EventTaskStepStarted, task.EventTaskStepFinished:
+			return protocol.Event{}, false
+		case task.EventTaskOutput:
+			var output struct {
+				Stream    string `json:"stream"`
+				Text      string `json:"text"`
+				Truncated bool   `json:"truncated"`
+			}
+			if err := json.Unmarshal(event.Payload, &output); err != nil {
+				return protocol.Event{}, false
+			}
+			var err error
+			payload, err = json.Marshal(output)
+			if err != nil {
+				return protocol.Event{}, false
+			}
+		}
+	}
+	projected := protocol.NewEvent(event.Sequence, string(event.Type), event.TaskID, event.At, payload)
+	projected.ProtocolVersion = version
+	return projected, true
 }
 
 func subscriptionFailure(request protocol.Request, err error) protocol.Response {

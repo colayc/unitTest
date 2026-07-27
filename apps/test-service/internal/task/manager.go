@@ -869,7 +869,10 @@ func (m *Manager) flushOutput(current *activeTask, active map[string]*activeTask
 	for _, segment := range segments {
 		for _, text := range validTextBlocks(segment.data) {
 			payload := eventDraft(current.task.ID, EventTaskOutput, m.clock.Now(), map[string]any{
-				"stream": segment.stream, "text": text, "truncated": false,
+				"stepId":    current.task.ActiveStep,
+				"stream":    segment.stream,
+				"text":      text,
+				"truncated": false,
 			})
 			event, err := m.store.AppendEvent(context.Background(), current.task.ID, payload)
 			if err != nil {
@@ -912,7 +915,10 @@ func (m *Manager) persistTruncation(current *activeTask, active map[string]*acti
 	}
 	current.truncated = true
 	draft := eventDraft(current.task.ID, EventTaskOutput, m.clock.Now(), map[string]any{
-		"stream": "combined", "text": "", "truncated": true,
+		"stepId":    current.task.ActiveStep,
+		"stream":    "combined",
+		"text":      "",
+		"truncated": true,
 	})
 	event, err := m.store.AppendEvent(context.Background(), current.task.ID, draft)
 	if err != nil {

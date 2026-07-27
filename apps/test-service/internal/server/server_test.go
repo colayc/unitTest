@@ -228,6 +228,30 @@ type replaySource struct {
 
 type fastReplaySource struct{ events []task.Event }
 
+type projectionSource struct {
+	events []task.Event
+}
+
+func (s projectionSource) Watermark(context.Context) (int64, error) {
+	if len(s.events) == 0 {
+		return 0, nil
+	}
+	return s.events[len(s.events)-1].Sequence, nil
+}
+
+func (s projectionSource) EventsAfter(_ context.Context, after, through int64, limit int) ([]task.Event, error) {
+	result := make([]task.Event, 0, limit)
+	for _, event := range s.events {
+		if event.Sequence > after && event.Sequence <= through {
+			result = append(result, event)
+			if len(result) == limit {
+				break
+			}
+		}
+	}
+	return result, nil
+}
+
 func (s fastReplaySource) Watermark(context.Context) (int64, error) {
 	return int64(len(s.events)), nil
 }
@@ -456,6 +480,144 @@ func TestServeConnectionSendsSubscribeResponseBeforeEventsAndSerializesWrites(t 
 	}
 	if !kinds["event"] || !kinds["response"] || probe.concurrent.Load() {
 		t.Fatalf("kinds=%v concurrent=%v", kinds, probe.concurrent.Load())
+	}
+}
+
+func TestServeConnectionV11FiltersStepEventsAndStrictlyProjectsOutputForReplayAndLive(t *testing.T) {
+	taskID := testID('1')
+	at := time.Date(2026, 7, 27, 4, 0, 0, 0, time.UTC)
+	replayed := []task.Event{
+		eventForProjection(1, taskID, task.EventTaskCreated, at, `{"status":"queued"}`),
+		eventForProjection(2, taskID, task.EventTaskStarted, at.Add(time.Second), `{"status":"running"}`),
+		eventForProjection(3, taskID, task.EventTaskStepStarted, at.Add(2*time.Second), `{"stepId":"configure","kind":"configure","status":"running"}`),
+		eventForProjection(4, taskID, task.EventTaskOutput, at.Add(3*time.Second), `{"stepId":"configure","stream":"stdout","text":"replay","truncated":false}`),
+		eventForProjection(5, taskID, task.EventTaskStepFinished, at.Add(4*time.Second), `{"stepId":"configure","kind":"configure","status":"succeeded"}`),
+		eventForProjection(6, taskID, task.EventArtifactCreated, at.Add(5*time.Second), `{"artifactId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","kind":"task-summary"}`),
+		eventForProjection(7, taskID, task.EventTaskFinished, at.Add(6*time.Second), `{"outcome":"succeeded"}`),
+	}
+	broker, err := eventbroker.New(projectionSource{events: replayed}, 16, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = broker.Close() })
+	backend := &streamBackend{
+		broker: broker,
+		get: task.Task{
+			ID: taskID, Kind: task.KindSimulation, Scenario: task.ScenarioHang,
+			Timeout: time.Second, Status: task.StatusFinished, Outcome: task.OutcomeSucceeded,
+			CreatedAt: at, FinishedAt: timePointerForServer(at.Add(6 * time.Second)), LastSequence: 7,
+		},
+	}
+
+	client, serviceConn := net.Pipe()
+	go server.ServeConnection(serviceConn, session.New("0123456789abcdef", "linux", "unix-socket", backend))
+	defer client.Close()
+	if err := client.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	authenticateV11Connection(t, client)
+	subscribePayload, _ := json.Marshal(map[string]any{"afterSequence": 0})
+	if err := json.NewEncoder(client).Encode(protocol.Request{
+		ProtocolVersion: protocol.Version11,
+		Kind:            "request",
+		MessageID:       testID('b'),
+		Method:          "events/subscribe",
+		SentAt:          sentAt,
+		Payload:         subscribePayload,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	decoder := json.NewDecoder(client)
+	var response protocol.Response
+	if err := decoder.Decode(&response); err != nil || response.Kind != "response" {
+		t.Fatalf("subscribe response = %#v, %v", response, err)
+	}
+
+	assertProjectedEventType(t, decoder, 1, task.EventTaskCreated)
+	assertProjectedEventType(t, decoder, 2, task.EventTaskStarted)
+	assertProjectedOutputEvent(t, decoder, 4, "stdout", "replay", false)
+	assertProjectedEventType(t, decoder, 6, task.EventArtifactCreated)
+	assertProjectedEventType(t, decoder, 7, task.EventTaskFinished)
+
+	broker.Publish(eventForProjection(8, taskID, task.EventTaskStepStarted, at.Add(7*time.Second), `{"stepId":"build","kind":"build","status":"running"}`))
+	broker.Publish(eventForProjection(9, taskID, task.EventTaskOutput, at.Add(8*time.Second), `{"stepId":"build","stream":"stderr","text":"live","truncated":false}`))
+	broker.Publish(eventForProjection(10, taskID, task.EventTaskStepFinished, at.Add(9*time.Second), `{"stepId":"build","kind":"build","status":"failed"}`))
+	broker.Publish(eventForProjection(11, taskID, task.EventTaskOutput, at.Add(10*time.Second), `{"stepId":"build","stream":"combined","text":"","truncated":true}`))
+
+	assertProjectedOutputEvent(t, decoder, 9, "stderr", "live", false)
+	assertProjectedOutputEvent(t, decoder, 11, "combined", "", true)
+}
+
+func timePointerForServer(value time.Time) *time.Time { return &value }
+
+func eventForProjection(sequence int64, taskID string, eventType task.EventType, at time.Time, payload string) task.Event {
+	return task.Event{
+		Sequence: sequence,
+		ID:       testID(byte('e' + sequence%2)),
+		EventDraft: task.EventDraft{
+			TaskID:  taskID,
+			Type:    eventType,
+			At:      at,
+			Payload: json.RawMessage(payload),
+		},
+	}
+}
+
+func assertProjectedOutputEvent(
+	t *testing.T,
+	decoder *json.Decoder,
+	wantSequence int64,
+	wantStream string,
+	wantText string,
+	wantTruncated bool,
+) {
+	t.Helper()
+	var envelope protocol.Event
+	if err := decoder.Decode(&envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.ProtocolVersion != protocol.Version11 ||
+		envelope.Kind != "event" ||
+		envelope.Sequence != wantSequence ||
+		envelope.Event != string(task.EventTaskOutput) {
+		t.Fatalf("projected event = %#v", envelope)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(envelope.Payload, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if len(fields) != 3 || fields["stepId"] != nil {
+		t.Fatalf("v1.1 output payload fields = %v; payload = %s", fields, envelope.Payload)
+	}
+	var payload struct {
+		Stream    string `json:"stream"`
+		Text      string `json:"text"`
+		Truncated bool   `json:"truncated"`
+	}
+	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Stream != wantStream || payload.Text != wantText || payload.Truncated != wantTruncated {
+		t.Fatalf("v1.1 output payload = %#v", payload)
+	}
+}
+
+func assertProjectedEventType(
+	t *testing.T,
+	decoder *json.Decoder,
+	wantSequence int64,
+	wantType task.EventType,
+) {
+	t.Helper()
+	var envelope protocol.Event
+	if err := decoder.Decode(&envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.ProtocolVersion != protocol.Version11 ||
+		envelope.Kind != "event" ||
+		envelope.Sequence != wantSequence ||
+		envelope.Event != string(wantType) {
+		t.Fatalf("projected event = %#v", envelope)
 	}
 }
 

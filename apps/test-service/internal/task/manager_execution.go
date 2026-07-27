@@ -335,6 +335,12 @@ func (m *Manager) startNextStep(current *activeTask, active map[string]*activeTa
 	runningStep := runningTask.Steps[current.nextStep]
 	runningStep.Status = StepRunning
 	runningStep.StartedAt = timePointer(startedAt)
+	events = append(events, eventDraft(
+		current.task.ID,
+		EventTaskStepStarted,
+		startedAt,
+		stepEventPayload(runningStep),
+	))
 	stored, committed, err := m.store.Apply(context.Background(), Mutation{
 		Task: runningTask, Expected: expectedStatus,
 		Steps:  []StepMutation{{Step: runningStep, Expected: StepPending}},
@@ -509,6 +515,7 @@ func (m *Manager) persistSuccessfulStep(current *activeTask, result ProcessResul
 	stored, events, err := m.store.Apply(context.Background(), Mutation{
 		Task: updatedTask, Expected: current.task.Status,
 		Steps:       []StepMutation{{Step: step, Expected: StepRunning}},
+		Events:      []EventDraft{eventDraft(current.task.ID, EventTaskStepFinished, finishedAt, stepEventPayload(step))},
 		DeleteLease: true,
 	})
 	if err != nil {
@@ -714,24 +721,34 @@ func (m *Manager) persistFinished(
 	if err != nil {
 		return current, err
 	}
-	summary := struct {
-		TaskID     string   `json:"taskId"`
-		Scenario   Scenario `json:"scenario"`
-		Outcome    Outcome  `json:"outcome"`
-		FinishedAt string   `json:"finishedAt"`
-	}{current.ID, current.Scenario, outcome, finishedAt.Format(time.RFC3339Nano)}
 	artifactID := m.newID()
-	artifact, artifactErr := m.artifacts.CommitJSON(context.Background(), current.ID, artifactID, finishedAt, summary)
+	artifact, artifactErr := m.commitTaskSummary(
+		context.Background(),
+		current,
+		artifactID,
+		finishedAt,
+		outcome,
+		steps,
+	)
 	if artifactErr != nil {
 		m.tripStorage(active)
 		return current, ErrStorageUnavailable
 	}
-	events := []EventDraft{
+	events := make([]EventDraft, 0, 3)
+	if step, ok := finishedRunningStep(steps); ok {
+		events = append(events, eventDraft(
+			current.ID,
+			EventTaskStepFinished,
+			finishedAt,
+			stepEventPayload(step),
+		))
+	}
+	events = append(events,
 		eventDraft(current.ID, EventArtifactCreated, finishedAt, map[string]any{
 			"artifactId": artifact.ID, "kind": artifact.Kind,
 		}),
 		eventDraft(current.ID, EventTaskFinished, finishedAt, map[string]any{"outcome": outcome}),
-	}
+	)
 	stored, committed, err := m.store.Apply(context.Background(), Mutation{
 		Task: finished, Expected: current.Status, Steps: steps, Events: events,
 		DeleteLease: deleteLease, Artifacts: []Artifact{artifact},
@@ -751,6 +768,15 @@ func (m *Manager) persistFinished(
 		return stored, ErrStorageUnavailable
 	}
 	return stored, nil
+}
+
+func finishedRunningStep(mutations []StepMutation) (StepSnapshot, bool) {
+	for _, mutation := range mutations {
+		if mutation.Expected == StepRunning {
+			return mutation.Step, true
+		}
+	}
+	return StepSnapshot{}, false
 }
 
 func publishCommitted(m *Manager, events []Event, active map[string]*activeTask) error {

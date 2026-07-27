@@ -515,11 +515,36 @@ func (directory *cleanupDirectory) closeChildren() {
 	}
 }
 
+type summaryEncoder func(string, []byte) ([]byte, error)
+
+var summaryEncoders = map[task.Kind]summaryEncoder{
+	task.KindSimulation: encodeSimulationSummary,
+	task.KindCMakeBuild: encodeCMakeSummary,
+}
+
 func canonicalSummary(taskID string, value any) ([]byte, error) {
 	raw, err := json.Marshal(value)
 	if err != nil {
 		return nil, ErrInvalidArtifact
 	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
+		return nil, ErrInvalidArtifact
+	}
+	kind := task.KindSimulation
+	if encodedKind, ok := fields["kind"]; ok {
+		if err := json.Unmarshal(encodedKind, &kind); err != nil {
+			return nil, ErrInvalidArtifact
+		}
+	}
+	encoder, ok := summaryEncoders[kind]
+	if !ok {
+		return nil, ErrInvalidArtifact
+	}
+	return encoder(taskID, raw)
+}
+
+func encodeSimulationSummary(taskID string, raw []byte) ([]byte, error) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
 	var fields map[string]any
@@ -575,6 +600,76 @@ func canonicalSummary(taskID string, value any) ([]byte, error) {
 	}
 	result = append(result, '}', '\n')
 	return result, nil
+}
+
+func encodeCMakeSummary(taskID string, raw []byte) ([]byte, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var summary task.TaskSummary
+	if err := decoder.Decode(&summary); err != nil {
+		return nil, ErrInvalidArtifact
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return nil, ErrInvalidArtifact
+	}
+	if summary.TaskID != taskID ||
+		summary.Kind != task.KindCMakeBuild ||
+		!validOutcome(string(summary.Outcome)) ||
+		summary.FinishedAt.IsZero() ||
+		len(summary.Steps) < 1 ||
+		len(summary.Steps) > 8 {
+		return nil, ErrInvalidArtifact
+	}
+	ids := make(map[string]struct{}, len(summary.Steps))
+	for _, step := range summary.Steps {
+		if !validSummaryStep(step) {
+			return nil, ErrInvalidArtifact
+		}
+		if _, exists := ids[step.ID]; exists {
+			return nil, ErrInvalidArtifact
+		}
+		ids[step.ID] = struct{}{}
+	}
+	encoded, err := json.Marshal(summary)
+	if err != nil {
+		return nil, ErrInvalidArtifact
+	}
+	return append(encoded, '\n'), nil
+}
+
+func validSummaryStep(step task.StepSnapshot) bool {
+	if !validSummaryStepID(step.ID) ||
+		(step.Kind != task.StepConfigure && step.Kind != task.StepBuild) ||
+		(step.Status != task.StepSucceeded && step.Status != task.StepFailed && step.Status != task.StepSkipped) ||
+		step.FinishedAt == nil ||
+		step.FinishedAt.IsZero() ||
+		len(step.ErrorCode) > 128 ||
+		strings.ContainsRune(step.ErrorCode, 0) ||
+		sensitiveSummaryString(step.ErrorCode) {
+		return false
+	}
+	if step.StartedAt != nil {
+		if step.StartedAt.IsZero() || step.StartedAt.After(*step.FinishedAt) {
+			return false
+		}
+	}
+	return true
+}
+
+func validSummaryStepID(value string) bool {
+	if len(value) < 1 || len(value) > 64 {
+		return false
+	}
+	for index := range len(value) {
+		character := value[index]
+		if (character >= 'a' && character <= 'z') ||
+			(index > 0 && character >= '0' && character <= '9') ||
+			(index > 0 && (character == '-' || character == '_')) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func sensitiveSummaryString(value string) bool {

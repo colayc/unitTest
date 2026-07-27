@@ -7,12 +7,172 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"unit-test-ide.local/test-service/internal/task"
 )
+
+func TestManagerJournalsStepStartWithRunningMutationAfterPurePrelease(t *testing.T) {
+	f := newManagerFixture(t)
+	started, err := f.manager.Start(context.Background(), twoStepStartRequest(testID(89), time.Minute, fixedBoundary{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mutations := f.store.mutationsFor(started.ID)
+	if len(mutations) < 2 {
+		t.Fatalf("mutations = %#v, want pre-lease then running transition", mutations)
+	}
+	prelease := mutations[0]
+	if !isPreparedLeaseMutation(prelease) {
+		t.Fatalf("first mutation = %#v, want pure pre-lease", prelease)
+	}
+	running := mutations[1]
+	if running.PutLease != nil || running.DeleteLease ||
+		running.Expected != task.StatusQueued || running.Task.Status != task.StatusRunning ||
+		len(running.Steps) != 1 ||
+		running.Steps[0].Expected != task.StepPending ||
+		running.Steps[0].Step.Status != task.StepRunning ||
+		!reflect.DeepEqual(eventDraftTypes(running.Events), []task.EventType{
+			task.EventTaskStarted,
+			task.EventTaskStepStarted,
+		}) {
+		t.Fatalf("running mutation = %#v", running)
+	}
+	var payload struct {
+		StepID string          `json:"stepId"`
+		Kind   task.StepKind   `json:"kind"`
+		Status task.StepStatus `json:"status"`
+	}
+	if err := json.Unmarshal(running.Events[1].Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.StepID != "first" || payload.Kind != task.StepSimulation || payload.Status != task.StepRunning {
+		t.Fatalf("step started payload = %#v", payload)
+	}
+
+	f.process.complete(task.ProcessResult{ExitCode: 0})
+}
+
+func TestManagerDoesNotPublishStepStartWhenRunningMutationRollsBack(t *testing.T) {
+	f := newManagerFixture(t)
+	f.store.failApplyAt = 2
+	f.store.failApplyErr = task.ErrStorageUnavailable
+
+	accepted, err := f.manager.Start(context.Background(), twoStepStartRequest(testID(88), time.Minute, fixedBoundary{}))
+	if !errors.Is(err, task.ErrStorageUnavailable) {
+		t.Fatalf("Start error = %v, want ErrStorageUnavailable", err)
+	}
+	if accepted.ID == "" {
+		t.Fatal("Start did not return the durably created task")
+	}
+	if got := eventTypes(f.store.eventsForTask(accepted.ID)); !reflect.DeepEqual(got, []task.EventType{
+		task.EventTaskCreated,
+	}) {
+		t.Fatalf("durable events after rolled-back running mutation = %v", got)
+	}
+	if got := f.publisher.types(); !reflect.DeepEqual(got, []task.EventType{
+		task.EventTaskCreated,
+	}) {
+		t.Fatalf("published events after rolled-back running mutation = %v", got)
+	}
+}
+
+func TestManagerJournalsStepFinishBeforeStartingNextStep(t *testing.T) {
+	f := newManagerFixture(t)
+	first := f.process
+	second := newFakeProcess()
+	f.processes.queue = []*fakeProcess{first, second}
+	t.Cleanup(func() { second.completeOnce(task.ProcessResult{Err: errors.New("test cleanup")}) })
+
+	releaseClose := make(chan struct{})
+	first.closeBlock = releaseClose
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(releaseClose) }) })
+
+	started, err := f.manager.Start(context.Background(), twoStepStartRequest(testID(87), time.Minute, fixedBoundary{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.complete(task.ProcessResult{ExitCode: 0})
+	f.awaitProcessClose(t, first)
+
+	if got := eventTypes(f.store.eventsForTask(started.ID)); !reflect.DeepEqual(got, []task.EventType{
+		task.EventTaskCreated,
+		task.EventTaskStarted,
+		task.EventTaskStepStarted,
+		task.EventTaskStepFinished,
+	}) {
+		t.Fatalf("events before first Close returns = %v", got)
+	}
+	mutations := f.store.mutationsFor(started.ID)
+	if len(mutations) < 3 {
+		t.Fatalf("mutations = %#v, want committed first Step finish", mutations)
+	}
+	finished := mutations[2]
+	if !finished.DeleteLease || len(finished.Steps) != 1 ||
+		finished.Steps[0].Expected != task.StepRunning ||
+		finished.Steps[0].Step.Status != task.StepSucceeded ||
+		!reflect.DeepEqual(eventDraftTypes(finished.Events), []task.EventType{task.EventTaskStepFinished}) {
+		t.Fatalf("first Step finish mutation = %#v", finished)
+	}
+
+	releaseOnce.Do(func() { close(releaseClose) })
+	f.awaitEventType(t, task.EventTaskStepStarted, 2)
+	if got := eventTypes(f.store.eventsForTask(started.ID)); !reflect.DeepEqual(got, []task.EventType{
+		task.EventTaskCreated,
+		task.EventTaskStarted,
+		task.EventTaskStepStarted,
+		task.EventTaskStepFinished,
+		task.EventTaskStepStarted,
+	}) {
+		t.Fatalf("events after second Step starts = %v", got)
+	}
+	second.complete(task.ProcessResult{ExitCode: 0})
+}
+
+func TestManagerStepEventPublisherFailureKeepsDurableProcessHandoff(t *testing.T) {
+	f := newManagerFixture(t)
+	f.publisher.panicType = task.EventTaskStepStarted
+
+	accepted, err := f.manager.Start(context.Background(), twoStepStartRequest(testID(86), time.Minute, fixedBoundary{}))
+	if !errors.Is(err, task.ErrStorageUnavailable) {
+		t.Fatalf("Start error = %v, want ErrStorageUnavailable", err)
+	}
+	if got := f.process.startCalls(); got != 0 {
+		t.Fatalf("Process Start calls = %d, want 0", got)
+	}
+	f.awaitProcessTerminate(t, f.process, 1)
+	f.awaitProcessClose(t, f.process)
+
+	stored, getErr := f.store.Get(context.Background(), accepted.ID)
+	if getErr != nil || stored.Status != task.StatusRunning || stored.Outcome != "" {
+		t.Fatalf("durable task after Publisher failure = %#v, %v", stored, getErr)
+	}
+	if lease := f.store.lease(accepted.ID); lease.TaskID != accepted.ID {
+		t.Fatalf("durable recovery lease = %#v", lease)
+	}
+	if got := eventTypes(f.store.eventsForTask(accepted.ID)); !reflect.DeepEqual(got, []task.EventType{
+		task.EventTaskCreated,
+		task.EventTaskStarted,
+		task.EventTaskStepStarted,
+	}) {
+		t.Fatalf("durable events = %v", got)
+	}
+	if got := f.publisher.types(); !reflect.DeepEqual(got, []task.EventType{
+		task.EventTaskCreated,
+		task.EventTaskStarted,
+	}) {
+		t.Fatalf("published events = %v", got)
+	}
+	if len(f.artifacts.summariesCopy()) != 0 || len(f.store.artifactsCopy()) != 0 {
+		t.Fatal("Publisher failure created a terminal artifact")
+	}
+}
 
 func TestManagerRunsPlanStepsSequentially(t *testing.T) {
 	f := newManagerFixture(t)
@@ -1347,6 +1507,49 @@ func twoStepStartRequest(idempotencyKey string, timeout time.Duration, boundary 
 		Plan:           plan,
 		Boundary:       boundary,
 	}
+}
+
+func twoStepCMakeStartRequest(idempotencyKey string, timeout time.Duration, boundary task.ExecutionBoundary) task.StartRequest {
+	plan := task.ExecutionPlan{
+		Version: 1,
+		Steps: []task.ExecutionStep{
+			{
+				ID: "configure", Kind: task.StepConfigure,
+				Process: task.ProcessSpec{
+					Executable: "trusted-service",
+					Args:       []string{"--configure"},
+					Dir:        "simulation-dir",
+				},
+			},
+			{
+				ID: "build", Kind: task.StepBuild,
+				Process: task.ProcessSpec{
+					Executable: "trusted-service",
+					Args:       []string{"--build"},
+					Dir:        "simulation-dir",
+				},
+			},
+		},
+	}
+	plan.Fingerprint = task.FingerprintPlan(plan)
+	request, _ := json.Marshal(map[string]any{"sourceRoot": "src", "buildRoot": "build"})
+	return task.StartRequest{
+		IdempotencyKey:      idempotencyKey,
+		Kind:                task.KindCMakeBuild,
+		Request:             request,
+		WorkspaceGeneration: strings.Repeat("a", 64),
+		Timeout:             timeout,
+		Plan:                plan,
+		Boundary:            boundary,
+	}
+}
+
+func eventDraftTypes(events []task.EventDraft) []task.EventType {
+	result := make([]task.EventType, len(events))
+	for index := range events {
+		result[index] = events[index].Type
+	}
+	return result
 }
 
 type fixedBoundary struct{}
