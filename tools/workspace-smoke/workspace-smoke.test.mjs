@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
@@ -28,4 +29,19 @@ test("documentation records pre-write token file preparation", async () => {
   assert.match(readme, /--prepare-token-file/);
   assert.match(decision, /--prepare-token-file/);
   assert.doesNotMatch(readme, /removes inherited Windows permissions after writing/i);
+});
+
+test("compiled Service runtime excludes outbound HTTP and GitHub API clients", () => {
+  const dependencies = execFileSync(
+    "go",
+    ["list", "-deps", "./apps/test-service/cmd/unit-test-service"],
+    { encoding: "utf8", windowsHide: true }
+  ).trim().split(/\r?\n/);
+  const forbidden = dependencies.filter((dependency) =>
+    dependency === "net/http"
+    || dependency.startsWith("net/http/")
+    || dependency.includes("github.com/google/go-github")
+    || dependency.includes("golang.org/x/oauth2")
+  );
+  assert.deepEqual(forbidden, []);
 });

@@ -470,6 +470,30 @@ test("subscribe rejects an acknowledgement for a different cursor", async () => 
   fixture.client.close();
 });
 
+test("legacy task.output keeps exact payload keys while contiguous sequence gaps remain fatal", async () => {
+  const subscription = new EventSubscription(0);
+  const created = taskEvent(1, "task.created");
+  const compatibilityOutput = taskEvent(2, "task.output", {
+    payload: { stream: "service", text: "", truncated: false }
+  });
+
+  assert.equal(subscription.push(created as never), true);
+  assert.equal(subscription.push(compatibilityOutput as never), true);
+  assert.equal(subscription.lastSequence, 2);
+  const events = await take(subscription, 2);
+  assert.deepEqual(events.map(({ sequence }) => sequence), [1, 2]);
+  assert.deepEqual(events[1]?.payload, { stream: "service", text: "", truncated: false });
+  assert.deepEqual(Object.keys(events[1]?.payload as JsonObject).sort(), ["stream", "text", "truncated"]);
+
+  assert.equal(
+    subscription.push(taskEvent(4, "task.output", {
+      payload: { stream: "service", text: "", truncated: false }
+    }) as never),
+    false
+  );
+  assert.equal(subscription.lastSequence, 2);
+});
+
 test("a forward event gap does not advance the cursor and invalidates the connection", async () => {
   const fixture = scriptedClient((request) => request.method === "handshake"
     ? response(request, { negotiatedProtocolVersion: "1.1", serviceVersion: "0.1.0" }, "1.1")
