@@ -51,7 +51,7 @@ func TestManagerRecordCloseFailureResolvesCauseBeforePublishingUnhealthy(t *test
 		<-releaseResolve
 		originalCancel()
 	}
-	current := &activeTask{execution: signal}
+	current := &activeTask{execution: signal, leasePersisted: true}
 	recorded := make(chan struct{})
 	go func() {
 		manager.recordCloseFailure(current)

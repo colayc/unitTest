@@ -58,6 +58,8 @@ func TestCreateIsIdempotentByKeyAndRequestIdentity(t *testing.T) {
 	store := openTestStore(t)
 	now := time.Date(2026, 7, 22, 1, 0, 0, 0, time.UTC)
 	input := newTask(10, 11, now)
+	input.Request = json.RawMessage(`{"scenario":"success","timeoutMs":30000}`)
+	input.PlanFingerprint = strings.Repeat("c", 64)
 	created, firstEvents, err := store.Create(ctx, input, nil, draft(input.ID, task.EventTaskCreated, now))
 	if err != nil {
 		t.Fatal(err)
@@ -72,7 +74,8 @@ func TestCreateIsIdempotentByKeyAndRequestIdentity(t *testing.T) {
 		t.Fatalf("idempotent Create() = %#v, %#v", got, events)
 	}
 	replayed.RequestHash = strings.Repeat("b", 64)
-	replayed.Request = json.RawMessage(`{"scenario":"success"}`)
+	replayed.Request = json.RawMessage(`{"timeoutMs":30000.0,"scenario":"success"}`)
+	replayed.PlanFingerprint = strings.Repeat("d", 64)
 	got, events, err = store.Create(ctx, replayed, nil, draft(replayed.ID, task.EventTaskCreated, now))
 	if err != nil || got.ID != created.ID || len(events) != 0 {
 		t.Fatalf("semantic fallback Create() = %#v, %#v, %v", got, events, err)
