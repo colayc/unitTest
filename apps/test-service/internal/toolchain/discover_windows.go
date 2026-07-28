@@ -67,12 +67,14 @@ type visualStudioInstallation struct {
 }
 
 type windowsDiscoveryOptions struct {
-	VSWherePath      string
-	CmdPath          string
-	NinjaPath        string
-	LLVMRoot         string
-	BaseEnvironment  []string
-	HostArchitecture string
+	VSWherePath                string
+	CmdPath                    string
+	NinjaPath                  string
+	LLVMRoot                   string
+	LLVMRootIdentity           string
+	BaseEnvironment            []string
+	HostArchitecture           string
+	afterEnvironmentValidation func()
 }
 
 type windowsAdapterOptions struct {
@@ -132,6 +134,16 @@ func newWindowsAdapters(
 	config.CmdPath = filepath.Clean(config.CmdPath)
 	config.NinjaPath = cleanOptionalPath(config.NinjaPath)
 	config.LLVMRoot = cleanOptionalPath(config.LLVMRoot)
+	if config.LLVMRoot != "" {
+		canonical, identity, canonicalErr := canonicalWindowsDirectoryIdentity(config.LLVMRoot)
+		if canonicalErr != nil {
+			config.LLVMRoot = ""
+			config.LLVMRootIdentity = ""
+		} else {
+			config.LLVMRoot = canonical
+			config.LLVMRootIdentity = identity
+		}
+	}
 	config.BaseEnvironment = baseEnvironment
 
 	ownedManual := append([]workspace.ToolchainConfig(nil), manual...)
@@ -259,6 +271,9 @@ func discoverVisualStudioInstallations(
 	}
 	result := make([]visualStudioInstallation, 0, len(parsed))
 	for _, candidate := range parsed {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		canonical, identity, err := canonicalWindowsDirectoryIdentity(candidate.Path)
 		if err != nil {
 			continue
@@ -266,6 +281,9 @@ func discoverVisualStudioInstallations(
 		candidate.Path = canonical
 		candidate.Identity = identity
 		result = append(result, candidate)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	if len(result) == 0 && len(parsed) != 0 {
 		return nil, invalidProbe("TOOLCHAIN_PROBE_FAILED", "Visual Studio installations are invalid")

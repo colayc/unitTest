@@ -133,6 +133,37 @@ func TestClangCLAdapterDowngradesMissingOrMismatchedCoverageCapability(t *testin
 				successfulWindowsOutput("LLVM version 17.0.6\r\n"),
 			)
 		},
+		"mismatched minor": func(fixture *windowsToolchainFixture, runner *windowsFakeRunner) {
+			runner.setOutput(
+				fixture.llvmProfdata,
+				[]string{"--version"},
+				successfulWindowsOutput("LLVM version 18.0.0\r\n"),
+			)
+			runner.setOutput(
+				fixture.llvmCov,
+				[]string{"--version"},
+				successfulWindowsOutput("LLVM version 18.0.0\r\n"),
+			)
+		},
+		"mismatched compiler patch": func(fixture *windowsToolchainFixture, runner *windowsFakeRunner) {
+			runner.setOutput(
+				fixture.llvmProfdata,
+				[]string{"--version"},
+				successfulWindowsOutput("LLVM version 18.1.7\r\n"),
+			)
+			runner.setOutput(
+				fixture.llvmCov,
+				[]string{"--version"},
+				successfulWindowsOutput("LLVM version 18.1.7\r\n"),
+			)
+		},
+		"mismatched coverage patch": func(fixture *windowsToolchainFixture, runner *windowsFakeRunner) {
+			runner.setOutput(
+				fixture.llvmCov,
+				[]string{"--version"},
+				successfulWindowsOutput("LLVM version 18.1.7\r\n"),
+			)
+		},
 		"missing tool": func(fixture *windowsToolchainFixture, _ *windowsFakeRunner) {
 			if err := os.Remove(fixture.llvmCov); err != nil {
 				panic(err)
@@ -233,6 +264,14 @@ func TestClangCLAdapterFallsBackToLaterCompatibleMSVCContext(t *testing.T) {
 	} {
 		writeWindowsTool(t, path)
 	}
+	for _, directory := range []string{
+		filepath.Join(secondToolset, "include"),
+		filepath.Join(secondToolset, "lib", "x64"),
+	} {
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	runner := newWindowsFakeRunner(fixture)
 	installations, err := json.Marshal([]map[string]any{
@@ -263,8 +302,25 @@ func TestClangCLAdapterFallsBackToLaterCompatibleMSVCContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	secondToolsetInclude := filepath.Join(secondToolset, "include")
+	secondToolsetLibrary := filepath.Join(secondToolset, "lib", "x64")
+	sdkIncludeRoot := filepath.Join(fixture.sdk, "Include", fixture.sdkVersion)
+	sdkLibraryRoot := filepath.Join(fixture.sdk, "Lib", fixture.sdkVersion)
 	secondEnvironment := strings.Join([]string{
-		"Path=" + filepath.Join(secondToolset, "bin", "Hostx64", "x64"),
+		"Path=" + filepath.Join(secondToolset, "bin", "Hostx64", "x64") +
+			";" + filepath.Dir(fixture.ninja),
+		"INCLUDE=" + strings.Join([]string{
+			secondToolsetInclude,
+			filepath.Join(sdkIncludeRoot, "ucrt"),
+			filepath.Join(sdkIncludeRoot, "um"),
+			filepath.Join(sdkIncludeRoot, "shared"),
+		}, ";"),
+		"LIB=" + strings.Join([]string{
+			secondToolsetLibrary,
+			filepath.Join(sdkLibraryRoot, "ucrt", "x64"),
+			filepath.Join(sdkLibraryRoot, "um", "x64"),
+		}, ";"),
+		"LIBPATH=" + secondToolsetLibrary,
 		"VCToolsInstallDir=" + secondToolset + string(filepath.Separator),
 		"VCToolsVersion=" + secondToolsetVersion,
 		"WindowsSdkDir=" + fixture.sdk + string(filepath.Separator),
@@ -312,6 +368,163 @@ func TestClangCLAdapterFallsBackToLaterCompatibleMSVCContext(t *testing.T) {
 	var carrier issueCarrier
 	if !errors.As(discoverErr, &carrier) || len(carrier.ToolchainIssues()) != 1 {
 		t.Fatalf("clang-cl Discover() error = %v, want one partial-success issue", discoverErr)
+	}
+}
+
+func TestClangCLAutomaticDiscoveryRejectsConfiguredLLVMRootReplacement(t *testing.T) {
+	fixture := newWindowsToolchainFixture(t)
+	runner := newWindowsFakeRunner(fixture)
+	adapters, err := newWindowsAdapters(runner, nil, fixture.options())
+	if err != nil {
+		t.Fatalf("newWindowsAdapters() error = %v", err)
+	}
+
+	llvmParent := filepath.Dir(fixture.llvmRoot)
+	outsideParent := filepath.Join(fixture.root, "outside-llvm")
+	if err := os.Rename(llvmParent, outsideParent); err != nil {
+		t.Fatal(err)
+	}
+	createWindowsToolchainJunction(t, llvmParent, outsideParent)
+	outsideRoot := filepath.Join(outsideParent, "bin")
+	for _, tool := range []struct {
+		path string
+		args []string
+		out  string
+	}{
+		{filepath.Join(outsideRoot, "clang-cl.exe"), []string{"--version"}, "clang version 18.1.8\r\nTarget: x86_64-pc-windows-msvc\r\n"},
+		{filepath.Join(outsideRoot, "lld-link.exe"), []string{"--version"}, "LLD 18.1.8\r\n"},
+		{filepath.Join(outsideRoot, "llvm-profdata.exe"), []string{"--version"}, "LLVM version 18.1.8\r\n"},
+		{filepath.Join(outsideRoot, "llvm-cov.exe"), []string{"--version"}, "LLVM version 18.1.8\r\n"},
+	} {
+		runner.setOutput(tool.path, tool.args, successfulWindowsOutput(tool.out))
+	}
+	instances, discoverErr := adapters[1].Discover(context.Background())
+	if len(instances) != 0 || discoverErr == nil {
+		t.Fatalf("clang-cl Discover(replaced LLVM root) = %#v, %v", instances, discoverErr)
+	}
+}
+
+func TestClangCLAutomaticDiscoveryRejectsLLVMToolFileEscapes(t *testing.T) {
+	tests := map[string]struct {
+		target       func(*windowsToolchainFixture) string
+		args         []string
+		output       string
+		wantInstance bool
+	}{
+		"compiler": {
+			target: func(fixture *windowsToolchainFixture) string { return fixture.clang },
+			args:   []string{"--version"},
+			output: "clang version 18.1.8\r\nTarget: x86_64-pc-windows-msvc\r\n",
+		},
+		"linker": {
+			target: func(fixture *windowsToolchainFixture) string { return fixture.lld },
+			args:   []string{"--version"},
+			output: "LLD 18.1.8\r\n",
+		},
+		"profdata": {
+			target:       func(fixture *windowsToolchainFixture) string { return fixture.llvmProfdata },
+			args:         []string{"--version"},
+			output:       "LLVM version 18.1.8\r\n",
+			wantInstance: true,
+		},
+		"coverage": {
+			target:       func(fixture *windowsToolchainFixture) string { return fixture.llvmCov },
+			args:         []string{"--version"},
+			output:       "LLVM version 18.1.8\r\n",
+			wantInstance: true,
+		},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			fixture := newWindowsToolchainFixture(t)
+			runner := newWindowsFakeRunner(fixture)
+			target := test.target(fixture)
+			outside := filepath.Join(fixture.root, "outside-llvm-tool", filepath.Base(target))
+			writeWindowsTool(t, outside)
+			if err := os.Remove(target); err != nil {
+				t.Fatal(err)
+			}
+			createWindowsToolchainFileSymlink(t, target, outside)
+			runner.setOutput(outside, test.args, successfulWindowsOutput(test.output))
+			adapters, err := newWindowsAdapters(runner, nil, fixture.options())
+			if err != nil {
+				t.Fatalf("newWindowsAdapters() error = %v", err)
+			}
+			instances, discoverErr := adapters[1].Discover(context.Background())
+			if !test.wantInstance {
+				if len(instances) != 0 || discoverErr == nil {
+					t.Fatalf(
+						"clang-cl Discover(core file escape) = %#v, %v, want rejection",
+						instances,
+						discoverErr,
+					)
+				}
+				return
+			}
+			if discoverErr != nil || len(instances) != 1 {
+				t.Fatalf(
+					"clang-cl Discover(coverage file escape) = %#v, %v",
+					instances,
+					discoverErr,
+				)
+			}
+			if instances[0].Coverage != (CoverageCapability{}) {
+				t.Fatalf("coverage file escape capability = %#v", instances[0].Coverage)
+			}
+		})
+	}
+}
+
+func TestClangCLManualCompilerUsesItsOwnTrustRoot(t *testing.T) {
+	fixture := newWindowsToolchainFixture(t)
+	runner := newWindowsFakeRunner(fixture)
+	manualRoot := filepath.Join(fixture.root, "manual-llvm")
+	manualClang := filepath.Join(manualRoot, "clang-cl.exe")
+	manualLLD := filepath.Join(manualRoot, "lld-link.exe")
+	manualProfdata := filepath.Join(manualRoot, "llvm-profdata.exe")
+	manualCov := filepath.Join(manualRoot, "llvm-cov.exe")
+	for _, path := range []string{manualClang, manualLLD, manualProfdata, manualCov} {
+		writeWindowsTool(t, path)
+	}
+	runner.setOutput(
+		manualClang,
+		[]string{"--version"},
+		successfulWindowsOutput(
+			"clang version 18.1.8\r\nTarget: x86_64-pc-windows-msvc\r\n",
+		),
+	)
+	runner.setOutput(
+		manualLLD,
+		[]string{"--version"},
+		successfulWindowsOutput("LLD 18.1.8\r\n"),
+	)
+	runner.setOutput(
+		manualProfdata,
+		[]string{"--version"},
+		successfulWindowsOutput("LLVM version 18.1.8\r\n"),
+	)
+	runner.setOutput(
+		manualCov,
+		[]string{"--version"},
+		successfulWindowsOutput("LLVM version 18.1.8\r\n"),
+	)
+	adapters, err := newWindowsAdapters(runner, []workspace.ToolchainConfig{{
+		ID:          "manual-outside-configured-root",
+		Family:      string(FamilyClangCL),
+		CCompiler:   manualClang,
+		CPPCompiler: manualClang,
+	}}, fixture.options())
+	if err != nil {
+		t.Fatalf("newWindowsAdapters() error = %v", err)
+	}
+	instances, discoverErr := adapters[1].Discover(context.Background())
+	if discoverErr != nil || len(instances) != 1 {
+		t.Fatalf("clang-cl Discover(manual trust root) = %#v, %v", instances, discoverErr)
+	}
+	if instances[0].CCompiler != manualClang ||
+		instances[0].Coverage.LLVMProfdata != manualProfdata ||
+		instances[0].Coverage.LLVMCov != manualCov {
+		t.Fatalf("manual clang-cl instance = %#v", instances[0])
 	}
 }
 

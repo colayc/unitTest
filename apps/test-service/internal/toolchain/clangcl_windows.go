@@ -163,6 +163,9 @@ func (adapter *clangCLAdapter) probeCandidate(
 	ctx context.Context,
 	candidate clangCLCandidate,
 ) (Instance, error) {
+	if err := adapter.verifyAutomaticLLVMRoot(ctx, candidate); err != nil {
+		return Instance{}, contextualWindowsProbeError(err, "configured LLVM root changed")
+	}
 	cCompiler, err := openWindowsToolSnapshot(ctx, candidate.cCompiler)
 	if err != nil {
 		return Instance{}, contextualWindowsProbeError(err, "clang-cl C compiler is invalid")
@@ -173,6 +176,11 @@ func (adapter *clangCLAdapter) probeCandidate(
 		return Instance{}, contextualWindowsProbeError(err, "clang-cl C++ compiler is invalid")
 	}
 	defer cxxCompiler.Close()
+	if !candidate.manual &&
+		(!pathWithinWindowsRoot(adapter.options.config.LLVMRoot, cCompiler.path) ||
+			!pathWithinWindowsRoot(adapter.options.config.LLVMRoot, cxxCompiler.path)) {
+		return Instance{}, invalidProbe("TOOLCHAIN_PROBE_FAILED", "automatic clang-cl leaves configured LLVM root")
+	}
 	if identityPath(filepath.Dir(cCompiler.path)) != identityPath(filepath.Dir(cxxCompiler.path)) {
 		return Instance{}, invalidProbe("TOOLCHAIN_PAIR_MISMATCH", "clang-cl compiler roots differ")
 	}
@@ -182,10 +190,17 @@ func (adapter *clangCLAdapter) probeCandidate(
 		return Instance{}, contextualWindowsProbeError(err, "lld-link is invalid")
 	}
 	defer lld.Close()
+	if !candidate.manual &&
+		!pathWithinWindowsRoot(adapter.options.config.LLVMRoot, lld.path) {
+		return Instance{}, invalidProbe("TOOLCHAIN_PAIR_MISMATCH", "automatic lld-link leaves configured LLVM root")
+	}
 	if identityPath(filepath.Dir(lld.path)) != identityPath(filepath.Dir(cCompiler.path)) {
 		return Instance{}, invalidProbe("TOOLCHAIN_PAIR_MISMATCH", "clang-cl and lld-link roots differ")
 	}
 	verify := func() error {
+		if err := adapter.verifyAutomaticLLVMRoot(ctx, candidate); err != nil {
+			return err
+		}
 		if err := candidate.context.verify(ctx); err != nil {
 			return err
 		}
@@ -283,6 +298,7 @@ func (adapter *clangCLAdapter) probeCandidate(
 			cCompiler.identity,
 			cxxCompiler.identity,
 			candidate.context.sdkIdentity+"\x00"+candidate.context.sdkVersion+
+				"\x00"+candidate.context.sdkVersionedIdentity+
 				"\x00"+candidate.context.installation.Identity+
 				"\x00"+candidate.context.toolsetIdentity+
 				"\x00"+lld.identity,
@@ -292,6 +308,26 @@ func (adapter *clangCLAdapter) probeCandidate(
 		}
 	}
 	return instance, nil
+}
+
+func (adapter *clangCLAdapter) verifyAutomaticLLVMRoot(
+	ctx context.Context,
+	candidate clangCLCandidate,
+) error {
+	if candidate.manual {
+		return ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if adapter.options.config.LLVMRoot == "" ||
+		adapter.options.config.LLVMRootIdentity == "" {
+		return errors.New("configured LLVM root is unavailable")
+	}
+	return verifyWindowsDirectory(
+		adapter.options.config.LLVMRoot,
+		adapter.options.config.LLVMRootIdentity,
+	)
 }
 
 func (adapter *clangCLAdapter) probeClangGenerator(
@@ -361,6 +397,11 @@ func (adapter *clangCLAdapter) probeCoverage(
 		identityPath(filepath.Dir(coverage.path)) != identityPath(root) {
 		return CoverageCapability{}, nil
 	}
+	if !candidate.manual &&
+		(!pathWithinWindowsRoot(adapter.options.config.LLVMRoot, profdata.path) ||
+			!pathWithinWindowsRoot(adapter.options.config.LLVMRoot, coverage.path)) {
+		return CoverageCapability{}, nil
+	}
 	verifyAll := func() error {
 		if err := verify(); err != nil {
 			return err
@@ -405,9 +446,9 @@ func (adapter *clangCLAdapter) probeCoverage(
 	profdataVersion, profdataErr := parseLLVMToolVersion(profdataOutput)
 	coverageVersion, coverageErr := parseLLVMToolVersion(coverageOutput)
 	if profdataErr != nil || coverageErr != nil ||
-		!sameVersionMajor(compilerVersion, profdataVersion) ||
-		!sameVersionMajor(compilerVersion, coverageVersion) ||
-		!sameVersionMajor(profdataVersion, coverageVersion) {
+		compilerVersion != profdataVersion ||
+		compilerVersion != coverageVersion ||
+		profdataVersion != coverageVersion {
 		return CoverageCapability{}, nil
 	}
 	return CoverageCapability{

@@ -18,9 +18,10 @@ import (
 )
 
 const (
-	maxCapturedEnvironmentBytes      = 64 * 1024
-	maxCapturedEnvironmentEntries    = 256
-	maxCapturedEnvironmentEntryBytes = 4096
+	maxCapturedEnvironmentBytes       = 64 * 1024
+	maxCapturedEnvironmentEntries     = 256
+	maxCapturedEnvironmentEntryBytes  = 4096
+	maxCapturedEnvironmentPathEntries = 64
 )
 
 var (
@@ -46,23 +47,30 @@ type msvcAdapter struct {
 	options windowsAdapterOptions
 }
 
+type windowsDirectoryReference struct {
+	path     string
+	identity string
+}
+
 type msvcContext struct {
-	id               string
-	manual           bool
-	installation     visualStudioInstallation
-	toolset          string
-	toolsetIdentity  string
-	config           MSVCConfig
-	environment      []string
-	sdk              string
-	sdkIdentity      string
-	sdkVersion       string
-	cl               string
-	link             string
-	msbuild          string
-	ninja            string
-	vsDevCmd         string
-	vsDevCmdIdentity string
+	id                   string
+	manual               bool
+	installation         visualStudioInstallation
+	toolset              string
+	toolsetIdentity      string
+	config               MSVCConfig
+	environment          []string
+	verifiedDirectories  []windowsDirectoryReference
+	sdk                  string
+	sdkIdentity          string
+	sdkVersion           string
+	sdkVersionedIdentity string
+	cl                   string
+	link                 string
+	msbuild              string
+	ninja                string
+	vsDevCmd             string
+	vsDevCmdIdentity     string
 }
 
 func newMSVCAdapter(options windowsAdapterOptions) *msvcAdapter {
@@ -165,8 +173,14 @@ func discoverMSVCContexts(
 	configurations := append([]workspace.ToolchainConfig(nil), manual...)
 	if len(configurations) == 0 {
 		for _, installation := range installations {
-			version, err := latestMSVCToolset(installation.Path)
+			if err := ctx.Err(); err != nil {
+				return nil, nil, err
+			}
+			version, err := latestMSVCToolset(ctx, installation.Path)
 			if err != nil {
+				if isContextError(err) {
+					return nil, nil, err
+				}
 				continue
 			}
 			configurations = append(configurations, workspace.ToolchainConfig{
@@ -206,10 +220,16 @@ func discoverMSVCContexts(
 	return contexts, issues, nil
 }
 
-func latestMSVCToolset(installation string) (string, error) {
+func latestMSVCToolset(ctx context.Context, installation string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	root := filepath.Join(installation, "VC", "Tools", "MSVC")
 	file, err := os.Open(root)
 	if err != nil {
+		return "", err
+	}
+	if err := ctx.Err(); err != nil {
 		return "", err
 	}
 	defer file.Close()
@@ -222,6 +242,9 @@ func latestMSVCToolset(installation string) (string, error) {
 	}
 	versions := make([]string, 0, len(entries))
 	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		if entry.IsDir() && versionPattern.MatchString(entry.Name()) &&
 			len(entry.Name()) <= maxVSWhereVersionBytes {
 			versions = append(versions, entry.Name())
@@ -237,6 +260,9 @@ func latestMSVCToolset(installation string) (string, error) {
 		}
 		return comparison < 0
 	})
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	return versions[len(versions)-1], nil
 }
 
@@ -327,7 +353,8 @@ func captureMSVCContext(
 		return msvcContext{}, invalidProbe("TOOLCHAIN_PROBE_FAILED", "VsDevCmd is invalid")
 	}
 	defer vsDevCmd.Close()
-	if !validVsDevCmdPath(vsDevCmd.path) {
+	if !validVsDevCmdPath(vsDevCmd.path) ||
+		!pathWithinWindowsRoot(installation.Path, vsDevCmd.path) {
 		return msvcContext{}, invalidProbe("TOOLCHAIN_PROBE_FAILED", "VsDevCmd path is unsafe")
 	}
 	cmd, err := openWindowsToolSnapshot(ctx, options.config.CmdPath)
@@ -393,26 +420,194 @@ func captureMSVCContext(
 		return msvcContext{}, invalidProbe("TOOLCHAIN_ENVIRONMENT_INVALID", "Windows SDK directory is invalid")
 	}
 	hostDirectory := "Host" + config.HostArchitecture
-	binaryDirectory := filepath.Join(toolset, "bin", hostDirectory, config.TargetArchitecture)
+	binaryDirectory, binaryIdentity, err := canonicalWindowsDirectoryIdentity(
+		filepath.Join(toolset, "bin", hostDirectory, config.TargetArchitecture),
+	)
+	if err != nil || !pathWithinWindowsRoot(toolset, binaryDirectory) {
+		return msvcContext{}, invalidProbe("TOOLCHAIN_ENVIRONMENT_INVALID", "MSVC binary directory is invalid")
+	}
+	verifiedDirectories := []windowsDirectoryReference{{
+		path: binaryDirectory, identity: binaryIdentity,
+	}}
+	toolsetInclude, err := captureWindowsDirectoryWithin(
+		filepath.Join(toolset, "include"),
+		toolset,
+	)
+	if err != nil {
+		return msvcContext{}, invalidProbe("TOOLCHAIN_ENVIRONMENT_INVALID", "MSVC include directory is invalid")
+	}
+	toolsetLibrary, err := captureWindowsDirectoryWithin(
+		filepath.Join(toolset, "lib", config.TargetArchitecture),
+		toolset,
+	)
+	if err != nil {
+		return msvcContext{}, invalidProbe("TOOLCHAIN_ENVIRONMENT_INVALID", "MSVC library directory is invalid")
+	}
+	sdkIncludeRoot := filepath.Join(sdk, "Include", sdkVersion)
+	sdkLibraryRoot := filepath.Join(sdk, "Lib", sdkVersion)
+	sdkIncludes := make([]windowsDirectoryReference, 0, 3)
+	for _, name := range []string{"ucrt", "um", "shared"} {
+		reference, referenceErr := captureWindowsDirectoryWithin(
+			filepath.Join(sdkIncludeRoot, name),
+			sdk,
+		)
+		if referenceErr != nil {
+			return msvcContext{}, invalidProbe(
+				"TOOLCHAIN_ENVIRONMENT_INVALID",
+				"Windows SDK include tree is invalid",
+			)
+		}
+		sdkIncludes = append(sdkIncludes, reference)
+	}
+	sdkLibraries := make([]windowsDirectoryReference, 0, 2)
+	for _, name := range []string{"ucrt", "um"} {
+		reference, referenceErr := captureWindowsDirectoryWithin(
+			filepath.Join(sdkLibraryRoot, name, config.TargetArchitecture),
+			sdk,
+		)
+		if referenceErr != nil {
+			return msvcContext{}, invalidProbe(
+				"TOOLCHAIN_ENVIRONMENT_INVALID",
+				"Windows SDK library tree is invalid",
+			)
+		}
+		sdkLibraries = append(sdkLibraries, reference)
+	}
+	requiredIncludes := append(
+		[]windowsDirectoryReference{toolsetInclude},
+		sdkIncludes...,
+	)
+	requiredLibraries := append(
+		[]windowsDirectoryReference{toolsetLibrary},
+		sdkLibraries...,
+	)
+	includeReferences, err := validateWindowsEnvironmentDirectoryList(
+		ctx,
+		values["INCLUDE"],
+		requiredIncludes,
+		[]string{toolset, sdk},
+	)
+	if err != nil {
+		return msvcContext{}, contextualWindowsProbeError(
+			err,
+			"MSVC INCLUDE environment is invalid",
+		)
+	}
+	libraryReferences, err := validateWindowsEnvironmentDirectoryList(
+		ctx,
+		values["LIB"],
+		requiredLibraries,
+		[]string{toolset, sdk},
+	)
+	if err != nil {
+		return msvcContext{}, contextualWindowsProbeError(
+			err,
+			"MSVC LIB environment is invalid",
+		)
+	}
+	libPathReferences, err := validateWindowsEnvironmentDirectoryList(
+		ctx,
+		values["LIBPATH"],
+		nil,
+		[]string{installation.Path, toolset, sdk},
+	)
+	if err != nil {
+		return msvcContext{}, contextualWindowsProbeError(
+			err,
+			"MSVC LIBPATH environment is invalid",
+		)
+	}
+	pathAllowedRoots := []string{installation.Path, toolset, sdk}
+	pathRequired := []windowsDirectoryReference{{
+		path: binaryDirectory, identity: binaryIdentity,
+	}}
+	baseValues := windowsEnvironmentValues(options.config.BaseEnvironment)
+	if systemRootValue := strings.TrimRight(baseValues["SYSTEMROOT"], `\/`); systemRootValue != "" {
+		systemRoot, systemRootIdentity, rootErr := canonicalWindowsDirectoryIdentity(systemRootValue)
+		if rootErr != nil {
+			return msvcContext{}, invalidProbe(
+				"TOOLCHAIN_ENVIRONMENT_INVALID",
+				"SystemRoot directory is invalid",
+			)
+		}
+		pathAllowedRoots = append(pathAllowedRoots, systemRoot)
+		verifiedDirectories = append(verifiedDirectories, windowsDirectoryReference{
+			path: systemRoot, identity: systemRootIdentity,
+		})
+	}
+	if options.config.NinjaPath != "" {
+		ninjaRoot, ninjaRootIdentity, ninjaErr := canonicalWindowsDirectoryIdentity(
+			filepath.Dir(options.config.NinjaPath),
+		)
+		if ninjaErr == nil {
+			ninjaReference := windowsDirectoryReference{
+				path: ninjaRoot, identity: ninjaRootIdentity,
+			}
+			pathAllowedRoots = append(pathAllowedRoots, ninjaRoot)
+			pathRequired = append(pathRequired, ninjaReference)
+			verifiedDirectories = append(verifiedDirectories, ninjaReference)
+		}
+	}
+	pathReferences, err := validateWindowsEnvironmentDirectoryList(
+		ctx,
+		values["PATH"],
+		pathRequired,
+		pathAllowedRoots,
+	)
+	if err != nil {
+		return msvcContext{}, contextualWindowsProbeError(
+			err,
+			"MSVC PATH environment is invalid",
+		)
+	}
+	verifiedDirectories = append(
+		verifiedDirectories,
+		toolsetInclude,
+		toolsetLibrary,
+	)
+	verifiedDirectories = append(verifiedDirectories, sdkIncludes...)
+	verifiedDirectories = append(verifiedDirectories, sdkLibraries...)
+	verifiedDirectories = append(verifiedDirectories, includeReferences...)
+	verifiedDirectories = append(verifiedDirectories, libraryReferences...)
+	verifiedDirectories = append(verifiedDirectories, libPathReferences...)
+	verifiedDirectories = append(verifiedDirectories, pathReferences...)
+	sdkVersionedIdentityParts := make([]string, 0, len(sdkIncludes)+len(sdkLibraries))
+	for _, reference := range append(
+		append([]windowsDirectoryReference(nil), sdkIncludes...),
+		sdkLibraries...,
+	) {
+		sdkVersionedIdentityParts = append(
+			sdkVersionedIdentityParts,
+			identityPath(reference.path)+"\x00"+reference.identity,
+		)
+	}
 	candidate := msvcContext{
-		id:               requested.ID,
-		manual:           requested.ID != "",
-		installation:     installation,
-		toolset:          toolset,
-		toolsetIdentity:  toolsetIdentity,
-		config:           config,
-		environment:      append([]string(nil), environment...),
-		sdk:              sdk,
-		sdkIdentity:      sdkIdentity,
-		sdkVersion:       sdkVersion,
-		cl:               filepath.Join(binaryDirectory, "cl.exe"),
-		link:             filepath.Join(binaryDirectory, "link.exe"),
-		msbuild:          filepath.Join(installation.Path, "MSBuild", "Current", "Bin", "MSBuild.exe"),
-		ninja:            options.config.NinjaPath,
-		vsDevCmd:         vsDevCmd.path,
-		vsDevCmdIdentity: vsDevCmd.identity,
+		id:                   requested.ID,
+		manual:               requested.ID != "",
+		installation:         installation,
+		toolset:              toolset,
+		toolsetIdentity:      toolsetIdentity,
+		config:               config,
+		environment:          append([]string(nil), environment...),
+		verifiedDirectories:  verifiedDirectories,
+		sdk:                  sdk,
+		sdkIdentity:          sdkIdentity,
+		sdkVersion:           sdkVersion,
+		sdkVersionedIdentity: strings.Join(sdkVersionedIdentityParts, "\x00"),
+		cl:                   filepath.Join(binaryDirectory, "cl.exe"),
+		link:                 filepath.Join(binaryDirectory, "link.exe"),
+		msbuild:              filepath.Join(installation.Path, "MSBuild", "Current", "Bin", "MSBuild.exe"),
+		ninja:                options.config.NinjaPath,
+		vsDevCmd:             vsDevCmd.path,
+		vsDevCmdIdentity:     vsDevCmd.identity,
+	}
+	if options.config.afterEnvironmentValidation != nil {
+		options.config.afterEnvironmentValidation()
 	}
 	if err := candidate.verify(ctx); err != nil {
+		if isContextError(err) {
+			return msvcContext{}, err
+		}
 		return msvcContext{}, invalidProbe("TOOLCHAIN_PROBE_FAILED", "MSVC context changed")
 	}
 	return candidate, nil
@@ -431,7 +626,86 @@ func (candidate msvcContext) verify(ctx context.Context) error {
 	if err := verifyWindowsDirectory(candidate.toolset, candidate.toolsetIdentity); err != nil {
 		return err
 	}
-	return verifyWindowsDirectory(candidate.sdk, candidate.sdkIdentity)
+	if err := verifyWindowsDirectory(candidate.sdk, candidate.sdkIdentity); err != nil {
+		return err
+	}
+	for _, reference := range candidate.verifiedDirectories {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := verifyWindowsDirectory(reference.path, reference.identity); err != nil {
+			return err
+		}
+	}
+	return ctx.Err()
+}
+
+func captureWindowsDirectoryWithin(
+	path string,
+	root string,
+) (windowsDirectoryReference, error) {
+	canonical, identity, err := canonicalWindowsDirectoryIdentity(path)
+	if err != nil || !pathWithinWindowsRoot(root, canonical) {
+		return windowsDirectoryReference{}, errors.New("directory leaves verified root")
+	}
+	return windowsDirectoryReference{path: canonical, identity: identity}, nil
+}
+
+func validateWindowsEnvironmentDirectoryList(
+	ctx context.Context,
+	value string,
+	required []windowsDirectoryReference,
+	allowedRoots []string,
+) ([]windowsDirectoryReference, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if value == "" || len(value) > maxCapturedEnvironmentBytes {
+		return nil, errors.New("environment directory list is empty or oversized")
+	}
+	paths := filepath.SplitList(value)
+	if len(paths) == 0 || len(paths) > maxCapturedEnvironmentPathEntries {
+		return nil, errors.New("environment directory list count is invalid")
+	}
+	result := make([]windowsDirectoryReference, 0, len(paths))
+	found := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		path = strings.TrimSpace(path)
+		if path == "" || len(path) > maxWindowsDirectoryPathBytes || !filepath.IsAbs(path) {
+			return nil, errors.New("environment directory is invalid")
+		}
+		canonical, identity, err := canonicalWindowsDirectoryIdentity(path)
+		if err != nil {
+			return nil, errors.New("environment directory is unavailable")
+		}
+		allowed := false
+		for _, root := range allowedRoots {
+			if pathWithinWindowsRoot(root, canonical) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return nil, errors.New("environment directory leaves verified roots")
+		}
+		key := identityPath(canonical)
+		found[key] = struct{}{}
+		result = append(result, windowsDirectoryReference{
+			path: canonical, identity: identity,
+		})
+	}
+	for _, reference := range required {
+		if _, ok := found[identityPath(reference.path)]; !ok {
+			return nil, errors.New("required environment directory is missing")
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func windowsEnvironmentValues(environment []string) map[string]string {
@@ -460,6 +734,10 @@ func (adapter *msvcAdapter) probeContext(
 		return Instance{}, contextualWindowsProbeError(err, "MSVC linker is invalid")
 	}
 	defer link.Close()
+	if !pathWithinWindowsRoot(candidate.toolset, cl.path) ||
+		!pathWithinWindowsRoot(candidate.toolset, link.path) {
+		return Instance{}, invalidProbe("TOOLCHAIN_PROBE_FAILED", "MSVC tools leave the selected toolset")
+	}
 	verify := func() error {
 		if err := candidate.verify(ctx); err != nil {
 			return err
@@ -534,6 +812,7 @@ func (adapter *msvcAdapter) probeContext(
 			cl.identity,
 			link.identity,
 			candidate.sdkIdentity+"\x00"+candidate.sdkVersion+
+				"\x00"+candidate.sdkVersionedIdentity+
 				"\x00"+candidate.installation.Identity+
 				"\x00"+candidate.toolsetIdentity,
 		)
@@ -551,18 +830,22 @@ func (adapter *msvcAdapter) probeMSVCGenerators(
 ) ([]string, error) {
 	generators := make([]string, 0, 2)
 	if msbuild, err := openWindowsToolSnapshot(ctx, candidate.msbuild); err == nil {
-		output, probeErr := runWindowsProbe(
-			ctx,
-			adapter.options.runner,
-			msbuild,
-			[]string{"-version", "-nologo"},
-			candidate.environment,
-			maxWindowsProbeOutput,
-			false,
-			verify,
-		)
+		var output []byte
+		var probeErr error
+		if pathWithinWindowsRoot(candidate.installation.Path, msbuild.path) {
+			output, probeErr = runWindowsProbe(
+				ctx,
+				adapter.options.runner,
+				msbuild,
+				[]string{"-version", "-nologo"},
+				candidate.environment,
+				maxWindowsProbeOutput,
+				false,
+				verify,
+			)
+		}
 		_ = msbuild.Close()
-		if probeErr == nil {
+		if probeErr == nil && output != nil {
 			version, parseErr := parseSingleLine(output, 128)
 			if parseErr == nil && sameVersionMajor(version, candidate.installation.Version) {
 				if generator := visualStudioGenerator(version); generator != "" {
@@ -738,12 +1021,34 @@ func sortWindowsInstances(instances []Instance) {
 }
 
 func finishWindowsDiscovery(instances []Instance, issues []Issue) ([]Instance, error) {
+	issues = append([]Issue(nil), issues...)
 	sort.Slice(issues, func(left, right int) bool {
 		return lessStrings(
-			[]string{issues[left].Code, issues[left].Message},
-			[]string{issues[right].Code, issues[right].Message},
+			[]string{
+				issues[left].Code,
+				issues[left].Message,
+				fmt.Sprintf("%t", issues[left].Blocking),
+			},
+			[]string{
+				issues[right].Code,
+				issues[right].Message,
+				fmt.Sprintf("%t", issues[right].Blocking),
+			},
 		)
 	})
+	unique := issues[:0]
+	for _, issue := range issues {
+		if len(unique) != 0 {
+			previous := unique[len(unique)-1]
+			if previous.Code == issue.Code &&
+				previous.Message == issue.Message &&
+				previous.Blocking == issue.Blocking {
+				continue
+			}
+		}
+		unique = append(unique, issue)
+	}
+	issues = unique
 	if len(issues) != 0 {
 		return cloneInstances(instances), &discoveryIssuesError{
 			issues: append([]Issue(nil), issues...),
