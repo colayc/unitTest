@@ -203,6 +203,59 @@ func TestRegistrySanitizesCarrierIssues(t *testing.T) {
 	}
 }
 
+func TestRegistrySanitizesWindowsCarrierIssuesWithFixedMessages(t *testing.T) {
+	t.Parallel()
+
+	registry, err := NewRegistry(&staticAdapter{err: carrierTestError{issues: []Issue{
+		{
+			Code:     "TOOLCHAIN_ENVIRONMENT_INVALID",
+			Message:  "environment contained TOKEN=super-secret under C:\\customer",
+			Blocking: true,
+		},
+		{
+			Code:     "TOOLCHAIN_MANUAL_SELECTION_FAILED",
+			Message:  "installationId=secret-customer-installation was absent",
+			Blocking: true,
+		},
+		{
+			Code:     "WINDOWS_BUILD_TOOL_NOT_FOUND",
+			Message:  "Ninja failed under C:\\customer\\TOKEN=secret",
+			Blocking: true,
+		},
+	}}})
+	if err != nil {
+		t.Fatalf("NewRegistry() error = %v", err)
+	}
+	_, issues := registry.Discover(context.Background())
+	want := []Issue{
+		{
+			Code:     "TOOLCHAIN_ENVIRONMENT_INVALID",
+			Message:  "Windows toolchain environment is invalid",
+			Blocking: false,
+		},
+		{
+			Code:     "TOOLCHAIN_MANUAL_SELECTION_FAILED",
+			Message:  "manual Windows toolchain selection was not found",
+			Blocking: false,
+		},
+		{
+			Code:     "WINDOWS_BUILD_TOOL_NOT_FOUND",
+			Message:  "Windows toolchain has no verified build generator",
+			Blocking: false,
+		},
+	}
+	if !reflect.DeepEqual(issues, want) {
+		t.Fatalf("Discover() issues = %+v, want %+v", issues, want)
+	}
+	for _, issue := range issues {
+		for _, secret := range []string{"TOKEN=", "super-secret", "C:\\customer", "secret-customer"} {
+			if strings.Contains(issue.Message, secret) {
+				t.Fatalf("Discover() issue %+v exposes %q", issue, secret)
+			}
+		}
+	}
+}
+
 func TestRegistryAcceptsExactInstanceFieldBudgets(t *testing.T) {
 	t.Parallel()
 
@@ -236,6 +289,39 @@ func TestRegistryAcceptsExactInstanceFieldBudgets(t *testing.T) {
 	instances, issues := registry.Discover(context.Background())
 	if len(instances) != 1 || len(issues) != 0 {
 		t.Fatalf("Discover() = (%d instances, %+v), want one instance and no issues", len(instances), issues)
+	}
+}
+
+func TestRegistryAcceptsOnlyPinnedVisualStudioGeneratorNames(t *testing.T) {
+	t.Parallel()
+
+	for _, generator := range []string{
+		"Visual Studio 17 2022",
+		"Visual Studio 18 2026",
+	} {
+		t.Run(generator, func(t *testing.T) {
+			instance := boundedRegistryInstance(0)
+			instance.Generators = []string{generator}
+			registry, err := NewRegistry(&staticAdapter{instances: []Instance{instance}})
+			if err != nil {
+				t.Fatalf("NewRegistry() error = %v", err)
+			}
+			instances, issues := registry.Discover(context.Background())
+			if len(instances) != 1 || len(issues) != 0 {
+				t.Fatalf("Discover() = %#v, %#v", instances, issues)
+			}
+		})
+	}
+
+	instance := boundedRegistryInstance(1)
+	instance.Generators = []string{"Visual Studio arbitrary"}
+	registry, err := NewRegistry(&staticAdapter{instances: []Instance{instance}})
+	if err != nil {
+		t.Fatalf("NewRegistry() error = %v", err)
+	}
+	instances, issues := registry.Discover(context.Background())
+	if len(instances) != 0 || len(issues) != 1 || issues[0].Code != "TOOLCHAIN_INVALID" {
+		t.Fatalf("Discover(arbitrary generator) = %#v, %#v", instances, issues)
 	}
 }
 

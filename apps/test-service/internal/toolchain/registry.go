@@ -285,7 +285,9 @@ func normalizeInstance(instance Instance) (Instance, bool) {
 	for _, value := range instance.Generators {
 		if !boundedString(value, maxRegistryGeneratorEntryBytes) ||
 			value != "Ninja" && value != "Unix Makefiles" &&
-				value != "Visual Studio 17 2022" && value != "NMake Makefiles" {
+				value != "Visual Studio 17 2022" &&
+				value != "Visual Studio 18 2026" &&
+				value != "NMake Makefiles" {
 			return Instance{}, false
 		}
 		generatorBytes += len(value)
@@ -391,6 +393,24 @@ func sanitizeCarrierIssue(adapterIndex int, issue Issue) Issue {
 			Code:     issue.Code,
 			Message:  "toolchain discovery limit exceeded",
 			Blocking: true,
+		}
+	case issue.Code == "TOOLCHAIN_ENVIRONMENT_INVALID":
+		return Issue{
+			Code:     issue.Code,
+			Message:  "Windows toolchain environment is invalid",
+			Blocking: false,
+		}
+	case issue.Code == "TOOLCHAIN_MANUAL_SELECTION_FAILED":
+		return Issue{
+			Code:     issue.Code,
+			Message:  "manual Windows toolchain selection was not found",
+			Blocking: false,
+		}
+	case issue.Code == "WINDOWS_BUILD_TOOL_NOT_FOUND":
+		return Issue{
+			Code:     issue.Code,
+			Message:  "Windows toolchain has no verified build generator",
+			Blocking: false,
 		}
 	default:
 		return invalidCarrierIssue(adapterIndex)
