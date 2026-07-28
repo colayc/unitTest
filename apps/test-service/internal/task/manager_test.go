@@ -148,16 +148,18 @@ func TestManagerPersistsPreparedLeaseBeforeStartAndRefreshesItAfterStart(t *test
 func TestManagerProcessStartFailureIsPersistedAsInfrastructureFailure(t *testing.T) {
 	f := newManagerFixture(t)
 	f.process.startErr = errors.New("C:/private/program.exe failed with TOKEN")
-	finished, err := f.manager.Start(context.Background(), task.StartRequest{
+	started, err := f.manager.Start(context.Background(), task.StartRequest{
 		IdempotencyKey: testID(27), Scenario: task.ScenarioSuccess, Timeout: time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	f.awaitTerminate(t, 1)
+	f.awaitProcessClose(t, f.process)
+	finished := f.awaitStoredTask(t, started.ID, task.StatusFinished)
 	if finished.Status != task.StatusFinished || finished.Outcome != task.OutcomeInfrastructureFailed || strings.Contains(finished.ErrorMessage, "private") {
 		t.Fatalf("finished = %#v", finished)
 	}
-	f.awaitTerminate(t, 1)
 }
 
 func TestManagerApplyFailureTripsCircuitWithoutStartingTarget(t *testing.T) {
@@ -1189,7 +1191,7 @@ func shutdownPublisherFailureManager(t *testing.T, f *managerFixture) {
 	}
 }
 
-func TestManagerBlockedTerminateDoesNotBlockTerminalPersistence(t *testing.T) {
+func TestManagerBlockedTerminateDefersTerminalPersistence(t *testing.T) {
 	f := newManagerFixture(t)
 	release := make(chan struct{})
 	f.process.terminateBlock = release
@@ -1204,21 +1206,18 @@ func TestManagerBlockedTerminateDoesNotBlockTerminalPersistence(t *testing.T) {
 	}
 	f.awaitTerminate(t, 1)
 	f.process.complete(task.ProcessResult{ExitCode: 1})
-	finished := f.awaitTask(t, started.ID, task.StatusFinished)
-	if finished.Outcome != task.OutcomeCancelled {
-		t.Fatalf("finished = %#v", finished)
+	beforeTerminate, err := f.store.Get(context.Background(), started.ID)
+	if err != nil || beforeTerminate.Status == task.StatusFinished {
+		t.Fatalf("Task before Terminate returns = %#v, %v", beforeTerminate, err)
 	}
 	if f.process.closeCalls() != 0 {
 		t.Fatal("process closed before Terminate returned")
 	}
 	close(release)
-	deadline := time.After(time.Second)
-	for f.process.closeCalls() == 0 {
-		select {
-		case <-deadline:
-			t.Fatal("process was not closed after Terminate returned")
-		default:
-		}
+	f.awaitProcessClose(t, f.process)
+	finished := f.awaitTask(t, started.ID, task.StatusFinished)
+	if finished.Outcome != task.OutcomeCancelled {
+		t.Fatalf("finished = %#v", finished)
 	}
 }
 
@@ -1236,7 +1235,10 @@ func TestManagerTerminateErrorReturnsThroughLoopAndKeepsQueueResponsive(t *testi
 	}
 	f.awaitTerminate(t, 1)
 	f.awaitUnhealthy(t)
-	if got, err := f.manager.Get(context.Background(), started.ID); err != nil || got.Status != task.StatusCancelling {
+	finished := f.awaitStoredTask(t, started.ID, task.StatusFinished)
+	if got, err := f.manager.Get(context.Background(), started.ID); err != nil ||
+		got.Status != task.StatusFinished ||
+		got.Outcome != task.OutcomeCancelled {
 		t.Fatalf("Get = %#v, %v", got, err)
 	}
 	if page, err := f.manager.List(context.Background(), "", 10); err != nil || len(page.Items) != 1 {
@@ -1251,7 +1253,7 @@ func TestManagerTerminateErrorReturnsThroughLoopAndKeepsQueueResponsive(t *testi
 		t.Fatalf("Shutdown error = %v", err)
 	}
 	f.process.complete(task.ProcessResult{ExitCode: 1})
-	finished := f.awaitStoredTask(t, started.ID, task.StatusFinished)
+	finished = f.awaitStoredTask(t, started.ID, task.StatusFinished)
 	if finished.Outcome != task.OutcomeCancelled {
 		t.Fatalf("first cause lost: %#v", finished)
 	}
@@ -1529,9 +1531,15 @@ func TestManagerStorageFaultStillTripsAfterEarlierCleanupFault(t *testing.T) {
 		t.Fatal(err)
 	}
 	first.complete(task.ProcessResult{ExitCode: 0})
-	f.awaitStoredTask(t, firstTask.ID, task.StatusFinished)
 	f.awaitProcessClose(t, first)
 	f.awaitUnhealthy(t)
+	stored, err := f.store.Get(context.Background(), firstTask.ID)
+	if err != nil || stored.Status == task.StatusFinished {
+		t.Fatalf("Task after cleanup fault = %#v, %v; want nonterminal", stored, err)
+	}
+	if lease := f.store.lease(firstTask.ID); lease.TaskID != firstTask.ID {
+		t.Fatalf("lease after cleanup fault = %#v", lease)
+	}
 	f.store.failAppend = task.ErrStorageUnavailable
 	second.output(task.ProcessOutput{Stream: "stdout", Data: []byte(strings.Repeat("x", 16*1024))})
 	f.awaitProcessTerminate(t, second, 1)
@@ -1737,8 +1745,8 @@ func TestManagerShutdownRetriesContextBoundProcessClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.process.complete(task.ProcessResult{ExitCode: 0})
-	f.awaitStoredTask(t, started.ID, task.StatusFinished)
 	f.awaitProcessClose(t, f.process)
+	f.awaitUnhealthy(t)
 
 	short, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
@@ -1753,6 +1761,10 @@ func TestManagerShutdownRetriesContextBoundProcessClose(t *testing.T) {
 	}
 	if calls := f.process.closeCalls(); calls < 2 {
 		t.Fatalf("process Close calls = %d, want retry", calls)
+	}
+	finished := f.awaitStoredTask(t, started.ID, task.StatusFinished)
+	if finished.Outcome != task.OutcomeInfrastructureFailed {
+		t.Fatalf("outcome = %s, want %s", finished.Outcome, task.OutcomeInfrastructureFailed)
 	}
 }
 

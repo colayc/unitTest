@@ -202,8 +202,8 @@ func TestManagerTimeoutCommandDoesNotRetryFailedCloseBeforeShutdown(t *testing.T
 	if finished.Status != StatusFinished || finished.Outcome != OutcomeTimedOut {
 		t.Fatalf("task after explicit Shutdown = %#v, want finished/timed_out", finished)
 	}
-	if got := []StepStatus{finished.Steps[0].Status, finished.Steps[1].Status}; got[0] != StepSucceeded || got[1] != StepSkipped {
-		t.Fatalf("step statuses = %v, want [%s %s]", got, StepSucceeded, StepSkipped)
+	if got := []StepStatus{finished.Steps[0].Status, finished.Steps[1].Status}; got[0] != StepFailed || got[1] != StepSkipped {
+		t.Fatalf("step statuses = %v, want [%s %s]", got, StepFailed, StepSkipped)
 	}
 	if got := processes.prepareCount(); got != 1 {
 		t.Fatalf("Prepare calls after explicit Shutdown = %d, want 1", got)
@@ -224,11 +224,14 @@ func TestManagerProcessDoneUsesClaimedTimeoutBeforeTimeoutCommand(t *testing.T) 
 		{ID: "first", Kind: StepSimulation},
 		{ID: "second", Kind: StepSimulation},
 	}}
-	current.processCompleted = true
 	store.task = current.task
 	current.execution.claim(OutcomeTimedOut)
 
 	manager.finish(current, ProcessResult{ExitCode: 0}, active)
+	current.closeComplete = true
+	if err := manager.commitClosedCompletion(current, active); err != nil {
+		t.Fatal(err)
+	}
 
 	if current.task.Outcome != OutcomeTimedOut || store.task.Outcome != OutcomeTimedOut {
 		t.Fatalf("terminal outcomes = memory:%s store:%s, want %s", current.task.Outcome, store.task.Outcome, OutcomeTimedOut)

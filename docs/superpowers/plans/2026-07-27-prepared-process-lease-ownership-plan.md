@@ -633,7 +633,8 @@ Expected: PASS。Runtime production code不应修改。
 在 `activeTask` 中增加：
 
 ```go
-leasePersisted bool
+leasePersisted    bool
+pendingCompletion *pendingProcessCompletion
 ```
 
 更新 `setCurrentProcess`：
@@ -642,6 +643,7 @@ leasePersisted bool
 func (m *Manager) setCurrentProcess(current *activeTask, process ManagedProcess) {
     current.process = process
     current.leasePersisted = false
+    current.pendingCompletion = nil
     current.processCompleted = false
     current.terminating = false
     current.terminationComplete = false
@@ -655,31 +657,57 @@ func (m *Manager) setCurrentProcess(current *activeTask, process ManagedProcess)
 }
 ```
 
-当成功 Close 后准备下一 Step并执行 `current.process = nil` 时，同步：
+最终实现由 `resetClosedProcess` 在 intermediate completion commit成功后统一重置：
 
 ```go
 current.process = nil
 current.leasePersisted = false
+current.pendingCompletion = nil
+current.processCompleted = false
+current.terminating = false
+current.terminationComplete = false
+current.terminationFailed = false
+current.closeStarted = false
+current.closeComplete = false
+current.closeFailed = false
+current.cleanupWithoutDone = false
+current.failPendingStep = false
 ```
 
-`persistSuccessfulStep` 的 `DeleteLease: true` commit成功后、调用 Publisher前同步：
+所有 Process completion先写入 runtime-only pending state：
 
 ```go
-current.task = stored
-current.leasePersisted = false
-return publishCommitted(m, events, active)
-```
+type pendingProcessCompletion struct {
+    Result      ProcessResult
+    FailPending bool
+}
 
-`finishExecution` 的 terminal mutation成功且 `current.process != nil` 时同步：
-
-```go
-current.task = finished
-if current.process != nil {
-    current.leasePersisted = false
+func (m *Manager) stageProcessCompletion(
+    current *activeTask,
+    result ProcessResult,
+    failPending bool,
+) {
+    if current.pendingCompletion != nil {
+        return
+    }
+    current.pendingCompletion = &pendingProcessCompletion{
+        Result: result, FailPending: failPending,
+    }
+    current.processCompleted = true
+    m.maybeStartClose(current)
 }
 ```
 
-这里必须在 Store commit成功后清零，不能在 mutation前清零。Store failure时 durable lease仍可能存在，错误清零会破坏 recovery handoff。
+`Close` success是唯一 normal completion commit入口：
+
+```go
+func (m *Manager) commitClosedCompletion(
+    current *activeTask,
+    active map[string]*activeTask,
+) error
+```
+
+intermediate commit严格执行 `result -> Close -> StepSucceeded/DeleteLease -> next Step`；final commit严格执行 `result -> Close -> terminal Step/Task/Artifact/events/DeleteLease`。只有 Store commit成功后才能清零 `leasePersisted`；Store failure时 durable Task仍 nonterminal且 lease仍存在，错误清零会破坏 recovery handoff。
 
 审计手工构造 `activeTask` 的测试 fixture：凡是模拟已持久化 running Process 的 fixture，显式设置 `leasePersisted: true`；模拟尚未写 lease的 Prepared Process则保持 `false`。
 
@@ -745,26 +773,23 @@ m.setCurrentProcess(current, process)
 if leaseErr := m.persistPreparedLease(current, active); leaseErr != nil {
     cause := current.execution.resolve(OutcomeInfrastructureFailed)
     current.cleanupWithoutDone = true
-    current.failPendingStep = cause == OutcomeInfrastructureFailed
-    current.processCompleted = true
     if !current.terminating {
         m.terminate(current)
     }
-    m.maybeStartClose(current)
+    m.stageProcessCompletion(
+        current,
+        ProcessResult{Err: leaseErr},
+        cause == OutcomeInfrastructureFailed,
+    )
     return leaseErr
 }
 
 if cause := current.execution.currentCause(); cause != "" {
-    current.cleanupWithoutDone = true
+    m.cleanupPreparedProcess(current)
     return nil
 }
 if prepareErr != nil {
-    current.execution.resolve(OutcomeInfrastructureFailed)
-    current.cleanupWithoutDone = true
-    current.failPendingStep = true
-    current.processCompleted = true
-    m.terminate(current)
-    m.maybeStartClose(current)
+    m.cleanupPreparedProcess(current)
     return nil
 }
 ```
@@ -780,7 +805,7 @@ PutLease: &lease,
 
 `Start` 后两个 `UpdateLease` 分支保持不变。
 
-`Prepare error + non-nil Process` 必须等待 cleanup成功后才 terminalize，复用 command-loop cleanup/finish路径；Close失败时保持 queued/nonterminal、active owner和 durable lease，不得在 Process仍可能存活时删除 lease或完成 Task。
+`Prepare error + non-nil Process` 必须先 stage pending completion，并等待 `Close`成功后才 terminalize；Close失败时保持 queued/nonterminal、active owner和 durable lease，不得在 Process仍可能存活时删除 lease或完成 Task。
 
 - [ ] **Step 15：修正 circuit Close error ownership gate**
 
@@ -997,6 +1022,16 @@ reviewer必须同时给出：
 
 reviewer不得以测试通过替代代码级 lifecycle推理，也不得要求实现 Task 4 或第二套 recovery journal。
 
+## 最终 completion barrier补充
+
+后续 close-before-terminalization实施取代本计划中任何允许 Process result后先调用 `persistSuccessfulStep`或`finishExecution`的旧顺序。最终测试矩阵固定为：
+
+- normal `Close`：`Close` block期间 current Step保持 `running`且 lease存在；release后才允许 Step/Task completion；
+- Store failure：发生在 `Close` success之后，durable Task保持 nonterminal、lease保留，由 restart recovery接管；
+- Publisher failure：发生在 Store commit之后，Process已关闭、Step mutation已 durable、lease已删除，下一 Step不启动；
+- restart：pending result不持久化，nonterminal Task与 lease组合保守恢复为 `interrupted`；
+- explicit `Shutdown`：是失败 `Close`的唯一同进程 retry authority，retry成功后才提交固定 first-cause对应的 completion。
+
 ## 完成门禁
 
 - [ ] non-nil Prepared Process 在后续 failure boundary前已经拥有 queued/running durable lease。
@@ -1006,6 +1041,7 @@ reviewer不得以测试通过替代代码级 lifecycle推理，也不得要求�
 - [ ] Publisher circuit Close error只在 `leasePersisted=true` 时释放 active owner。
 - [ ] pre-lease Store failure + Close failure保留 active owner并受 caller deadline约束。
 - [ ] Runtime recovery真实清理 queued Prepared lease。
-- [ ] normal Start、multi-step、UpdateLease与 Publisher fail-closed无回归；durable与 lease-free normal Close failure都保留 owner/nonterminal Task，普通 command不得 retry，并由显式 Shutdown Close retry保留 first-cause与最终 outcome；durable lease在成功 terminal mutation中原子删除。
+- [ ] 所有 non-nil Process completion都先 stage runtime-only result，再由 `Close` success后的单一入口提交；normal Start、multi-step、UpdateLease与 Publisher fail-closed无回归。
+- [ ] durable与 lease-free normal Close failure都保留 owner/nonterminal Task，普通 command不得 retry，并由显式 Shutdown Close retry保留 first-cause与最终 outcome；durable lease在成功 completion mutation中原子删除。
 - [ ] Protocol/interface/schema/Task 4均无越界。
 - [ ] focused、stress、race、Task、TaskStore、Runtime、Session、全 internal与 diff check全部 fresh PASS。

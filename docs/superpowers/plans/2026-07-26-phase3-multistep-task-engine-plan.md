@@ -331,7 +331,7 @@ func NewSimulationStartRequest(
 
 - [ ] **Step 1：写出双 Step 顺序、短路和总 timeout 测试**
 
-使用两个可控 fake process，断言第二个 Step 只有在第一个退出码 0 且 Close 完成后才 Prepare/Start。再覆盖第一个非零、取消和 timeout 时第二个永不启动：
+使用两个可控 fake process，断言第一 Process result只产生 runtime-only pending completion；只有该 Process `Close`成功并原子提交 `StepSucceeded`、`task.step_finished`与`DeleteLease=true`后，第二个 Step才可 Prepare/Start。再覆盖第一个非零、取消和 timeout 时第二个永不启动：
 
 ```go
 func TestManagerRunsPlanStepsSequentially(t *testing.T) {
@@ -368,8 +368,8 @@ go test ./apps/test-service/internal/task -run 'TestManagerRunsPlanSteps|TestMan
 - active task 保存完整内存 Plan 和 `nextStep` ordinal；
 - 第一个 Step 启动时 Task 从 queued 进入 running；
 - 每个 Step 启动前再次执行 boundary 校验，防止排队期间 executable/cwd identity 变化；每个 Step 使用独立 Process lease；
-- Step 成功后先持久化 finished Step，再 prepare 下一个；
-- 最后 Step 成功后结束 Task；
+- intermediate Step严格执行 `result -> Close -> StepSucceeded/DeleteLease -> next Step`；
+- final Step严格执行 `result -> Close -> terminal Step/Task/Artifact/events/DeleteLease`；
 - Step 非零时将当前 Step 标记 failed、剩余 Step 标记 skipped、Task 结束为 `command_failed`；
 - Prepare/Start/Store 错误映射为 `infrastructure_failed`；
 - Task timeout timer 只启动一次，不在 Step 间重置。
@@ -435,7 +435,8 @@ type TaskSummary struct {
 - `task.step_started` 与 Step running/lease 在同一 mutation；
 - journal 内部的 `task.output` payload 带正确 `stepId`；
 - v1.1 subscription 投影移除 `stepId`，并保持原 `{stream,text,truncated}` payload；
-- Step finished 后才出现下一个 Step started；
+- Process result到达但`Close`尚未返回时，当前 Step仍为 running、lease仍存在且`task.step_finished`不可见；
+- `Close`成功并提交 Step finished后才出现下一个 Step started；
 - simulation v1.1 不暴露新增 Step event name；`task.step_started` 与
   `task.step_finished` 以相同 `sequence`、相同 `taskId` 投影为旧
   `task.output` event；
@@ -501,6 +502,8 @@ compatibility `task.output`。v1.2 在 Phase 3C 直接保留 Step event name 与
 - running Step 改为 failed 并写 `SERVICE_RESTARTED`；
 - 仅对被标记 interrupted 的 Task 把 pending Step 改为 skipped；保留 queued `cmake_build` 的 pending Steps；
 - 追加一个 `task.finished` 事件。
+
+pending Process result只存在于 `activeTask`，不写入 SQLite。Service若在 result、`Close`或 completion transaction窗口退出，restart recovery仍通过 nonterminal Task与 durable lease取得 ownership，并把原结果保守折叠为 `interrupted`。
 
 - [ ] **Step 4：运行完整 Go 测试和 race**
 

@@ -120,6 +120,7 @@ type activeTask struct {
 	boundary              ExecutionBoundary
 	nextStep              int
 	process               ManagedProcess
+	pendingCompletion     *pendingProcessCompletion
 	leasePersisted        bool
 	terminating           bool
 	segments              []outputSegment
@@ -517,8 +518,12 @@ func (m *Manager) loop() {
 					break
 				}
 				if current.cleanupWithoutDone && !current.terminating {
-					current.processCompleted = true
 					m.terminate(current)
+					m.stageProcessCompletion(
+						current,
+						ProcessResult{Err: context.DeadlineExceeded},
+						current.failPendingStep,
+					)
 				} else if current.processCompleted {
 					m.maybeStartClose(current)
 				} else {
@@ -527,12 +532,7 @@ func (m *Manager) loop() {
 			}
 		case processDoneCommand:
 			if current := active[value.taskID]; current != nil && !current.processCompleted {
-				current.processCompleted = true
-				if m.circuitFailed() || current.recoveryRequired {
-					m.abandon(current)
-				} else {
-					m.finish(current, value.result, active)
-				}
+				m.finish(current, value.result, active)
 				if active[value.taskID] == current && m.canRemove(current) {
 					delete(active, value.taskID)
 				}
@@ -543,6 +543,11 @@ func (m *Manager) loop() {
 				if value.err != nil {
 					current.terminationFailed = true
 					m.healthy.Store(false)
+					m.stageProcessCompletion(
+						current,
+						ProcessResult{Err: value.err},
+						current.failPendingStep,
+					)
 				}
 				m.maybeStartClose(current)
 			}
@@ -564,24 +569,9 @@ func (m *Manager) loop() {
 				} else {
 					current.closeComplete = true
 					current.closeFailed = false
-					if current.task.Status != StatusFinished && current.processCompleted &&
-						!m.circuitFailed() && !current.recoveryRequired {
-						if cause := current.execution.currentCause(); cause != "" {
-							if _, err := m.finishExecution(
-								current,
-								ProcessResult{},
-								current.execution.resolve(cause),
-								current.failPendingStep,
-								active,
-							); err != nil {
-								m.abandon(current)
-							}
-						} else if current.nextStep < len(current.plan.Steps) {
-							current.process = nil
-							current.leasePersisted = false
-							if err := m.startNextStep(current, active); err != nil && !errors.Is(err, ErrStorageUnavailable) {
-								m.abandon(current)
-							}
+					if !m.circuitFailed() && !current.recoveryRequired {
+						if err := m.commitClosedCompletion(current, active); err != nil {
+							m.abandon(current)
 						}
 					}
 				}
@@ -613,6 +603,11 @@ func (m *Manager) loop() {
 						if !current.terminating {
 							m.terminate(current)
 						}
+						m.stageProcessCompletion(
+							current,
+							ProcessResult{Err: context.Canceled},
+							current.failPendingStep,
+						)
 					} else if current.processCompleted {
 						m.maybeStartClose(current)
 					} else {
@@ -667,8 +662,12 @@ func (m *Manager) cancel(id string, active map[string]*activeTask) taskResponse 
 			return taskResponse{task: finished}
 		}
 		current.cleanupWithoutDone = true
-		current.processCompleted = true
 		m.terminate(current)
+		m.stageProcessCompletion(
+			current,
+			ProcessResult{Err: context.Canceled},
+			current.failPendingStep,
+		)
 		return taskResponse{task: current.task}
 	}
 	now := m.clock.Now()
@@ -708,8 +707,12 @@ func (m *Manager) cancel(id string, active map[string]*activeTask) taskResponse 
 		return taskResponse{task: finished}
 	}
 	if current.cleanupWithoutDone && !current.terminating {
-		current.processCompleted = true
 		m.terminate(current)
+		m.stageProcessCompletion(
+			current,
+			ProcessResult{Err: context.Canceled},
+			current.failPendingStep,
+		)
 	} else if current.processCompleted {
 		m.maybeStartClose(current)
 	} else {
@@ -735,8 +738,12 @@ func (m *Manager) finishCancellationConflict(current *activeTask, active map[str
 		return
 	}
 	if current.cleanupWithoutDone && !current.terminating {
-		current.processCompleted = true
 		m.terminate(current)
+		m.stageProcessCompletion(
+			current,
+			ProcessResult{Err: ErrConflict},
+			current.failPendingStep,
+		)
 	} else if current.processCompleted {
 		m.maybeStartClose(current)
 	} else {
@@ -1027,13 +1034,12 @@ func (m *Manager) recordCloseFailure(current *activeTask) {
 }
 
 func (m *Manager) canRemove(current *activeTask) bool {
-	if !current.closeComplete {
-		return false
+	if current.recoveryRequired {
+		return current.closeComplete
 	}
-	if current.recoveryRequired || current.cleanupWithoutDone {
-		return true
-	}
-	return current.processCompleted && current.task.Status == StatusFinished
+	return current.closeComplete &&
+		current.task.Status == StatusFinished &&
+		current.pendingCompletion == nil
 }
 
 func (m *Manager) tripStorage(active map[string]*activeTask) {

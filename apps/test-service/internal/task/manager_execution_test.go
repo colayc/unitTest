@@ -105,10 +105,21 @@ func TestManagerJournalsStepFinishBeforeStartingNextStep(t *testing.T) {
 		task.EventTaskCreated,
 		task.EventTaskStarted,
 		task.EventTaskStepStarted,
-		task.EventTaskStepFinished,
 	}) {
 		t.Fatalf("events before first Close returns = %v", got)
 	}
+	beforeClose, err := f.store.Get(context.Background(), started.ID)
+	if err != nil ||
+		beforeClose.ActiveStep != "first" ||
+		beforeClose.Steps[0].Status != task.StepRunning {
+		t.Fatalf("Task before first Close returns = %#v, %v", beforeClose, err)
+	}
+	if lease := f.store.lease(started.ID); lease.TaskID != started.ID {
+		t.Fatalf("lease before first Close returns = %#v", lease)
+	}
+
+	releaseOnce.Do(func() { close(releaseClose) })
+	f.awaitEventType(t, task.EventTaskStepStarted, 2)
 	mutations := f.store.mutationsFor(started.ID)
 	if len(mutations) < 3 {
 		t.Fatalf("mutations = %#v, want committed first Step finish", mutations)
@@ -120,9 +131,6 @@ func TestManagerJournalsStepFinishBeforeStartingNextStep(t *testing.T) {
 		!reflect.DeepEqual(eventDraftTypes(finished.Events), []task.EventType{task.EventTaskStepFinished}) {
 		t.Fatalf("first Step finish mutation = %#v", finished)
 	}
-
-	releaseOnce.Do(func() { close(releaseClose) })
-	f.awaitEventType(t, task.EventTaskStepStarted, 2)
 	if got := eventTypes(f.store.eventsForTask(started.ID)); !reflect.DeepEqual(got, []task.EventType{
 		task.EventTaskCreated,
 		task.EventTaskStarted,
@@ -200,6 +208,21 @@ func TestManagerStepFinishedStoreFailureRetainsLeaseAndOwnerWithoutStartingNextS
 	}
 	first.complete(task.ProcessResult{ExitCode: 0})
 	f.awaitProcessClose(t, first)
+
+	beforeClose, err := f.store.Get(context.Background(), started.ID)
+	if err != nil ||
+		beforeClose.ActiveStep != "first" ||
+		beforeClose.Steps[0].Status != task.StepRunning {
+		t.Fatalf("durable Task before Close returns = %#v, %v", beforeClose, err)
+	}
+	if !f.manager.Healthy() {
+		t.Fatal("Step-finished Store failure occurred before Close returned")
+	}
+	if got := f.processes.prepareCount(); got != 1 || second.startCalls() != 0 {
+		t.Fatalf("later Step before Close returns: Prepare=%d Start=%d", got, second.startCalls())
+	}
+
+	releaseOnce.Do(func() { close(releaseClose) })
 	f.awaitUnhealthy(t)
 
 	stored, err := f.store.Get(context.Background(), started.ID)
@@ -232,23 +255,10 @@ func TestManagerStepFinishedStoreFailureRetainsLeaseAndOwnerWithoutStartingNextS
 		t.Fatalf("later Step after Store failure: Prepare=%d Start=%d", got, second.startCalls())
 	}
 
-	shutdownContext := newObservedCancelContext()
-	shutdownDone := make(chan error, 1)
-	go func() { shutdownDone <- f.manager.Shutdown(shutdownContext) }()
-	awaitSignal(t, shutdownContext.waiting, "Shutdown did not wait for retained Process owner")
-	select {
-	case shutdownErr := <-shutdownDone:
-		t.Fatalf("Shutdown returned before retained Process Close: %v", shutdownErr)
-	default:
-	}
-	releaseOnce.Do(func() { close(releaseClose) })
-	select {
-	case shutdownErr := <-shutdownDone:
-		if shutdownErr != nil {
-			t.Fatalf("Shutdown after retained Process Close = %v", shutdownErr)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("Shutdown did not finish after retained Process Close")
+	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), time.Second)
+	defer cancelShutdown()
+	if err := f.manager.Shutdown(shutdownContext); err != nil {
+		t.Fatalf("Shutdown after Store recovery handoff = %v", err)
 	}
 }
 
@@ -271,6 +281,21 @@ func TestManagerStepFinishedPublisherFailureRetainsOwnerWithoutStartingNextStep(
 	}
 	first.complete(task.ProcessResult{ExitCode: 0})
 	f.awaitProcessClose(t, first)
+
+	beforeClose, err := f.store.Get(context.Background(), started.ID)
+	if err != nil ||
+		beforeClose.ActiveStep != "first" ||
+		beforeClose.Steps[0].Status != task.StepRunning {
+		t.Fatalf("durable Task before Close returns = %#v, %v", beforeClose, err)
+	}
+	if lease := f.store.lease(started.ID); lease.TaskID != started.ID {
+		t.Fatalf("lease before Close returns = %#v", lease)
+	}
+	if !f.manager.Healthy() {
+		t.Fatal("Step-finished Publisher failure occurred before Close returned")
+	}
+
+	releaseOnce.Do(func() { close(releaseClose) })
 	f.awaitUnhealthy(t)
 
 	stored, err := f.store.Get(context.Background(), started.ID)
@@ -304,23 +329,10 @@ func TestManagerStepFinishedPublisherFailureRetainsOwnerWithoutStartingNextStep(
 		t.Fatalf("later Step after Publisher failure: Prepare=%d Start=%d", got, second.startCalls())
 	}
 
-	shutdownContext := newObservedCancelContext()
-	shutdownDone := make(chan error, 1)
-	go func() { shutdownDone <- f.manager.Shutdown(shutdownContext) }()
-	awaitSignal(t, shutdownContext.waiting, "Shutdown did not wait for retained Process owner")
-	select {
-	case shutdownErr := <-shutdownDone:
-		t.Fatalf("Shutdown returned before retained Process Close: %v", shutdownErr)
-	default:
-	}
-	releaseOnce.Do(func() { close(releaseClose) })
-	select {
-	case shutdownErr := <-shutdownDone:
-		if shutdownErr != nil {
-			t.Fatalf("Shutdown after retained Process Close = %v", shutdownErr)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("Shutdown did not finish after retained Process Close")
+	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), time.Second)
+	defer cancelShutdown()
+	if err := f.manager.Shutdown(shutdownContext); err != nil {
+		t.Fatalf("Shutdown after Publisher recovery handoff = %v", err)
 	}
 }
 
@@ -519,7 +531,7 @@ func TestManagerCancellationDuringNextStepPreparePreventsStart(t *testing.T) {
 
 	select {
 	case result := <-cancelResult:
-		if result.err != nil || result.task.Status != task.StatusCancelling {
+		if result.err != nil || result.task.Status != task.StatusRunning {
 			t.Fatalf("Cancel = %#v, %v", result.task, result.err)
 		}
 	case <-time.After(time.Second):
@@ -1151,6 +1163,16 @@ func TestManagerRevalidatesBoundaryBeforePreparingNextStep(t *testing.T) {
 	}
 	f.process.complete(task.ProcessResult{ExitCode: 0})
 	f.awaitProcessClose(t, f.process)
+	beforeClose, err := f.store.Get(context.Background(), started.ID)
+	if err != nil ||
+		beforeClose.ActiveStep != "first" ||
+		beforeClose.Steps[0].Status != task.StepRunning ||
+		beforeClose.Steps[1].Status != task.StepPending {
+		t.Fatalf("Task before Close returns = %#v, %v", beforeClose, err)
+	}
+	if lease := f.store.lease(started.ID); lease.TaskID != started.ID {
+		t.Fatalf("lease before Close returns = %#v", lease)
+	}
 	boundary.reject()
 	close(releaseClose)
 	released = true
@@ -1199,7 +1221,7 @@ func TestManagerCloseFailurePreservesCancellationCause(t *testing.T) {
 	if finished.Outcome != task.OutcomeCancelled {
 		t.Fatalf("outcome = %s, want %s", finished.Outcome, task.OutcomeCancelled)
 	}
-	assertStepStatuses(t, finished, task.StepSucceeded, task.StepSkipped)
+	assertStepStatuses(t, finished, task.StepFailed, task.StepSkipped)
 	if got := f.processes.prepareCount(); got != 1 {
 		t.Fatalf("Prepare calls = %d, want 1", got)
 	}
@@ -1256,7 +1278,7 @@ func TestManagerLeaseFreeCloseFailureClaimsInfrastructureCauseBeforeShutdown(t *
 	if finished.Outcome != task.OutcomeInfrastructureFailed {
 		t.Fatalf("outcome = %s, want %s", finished.Outcome, task.OutcomeInfrastructureFailed)
 	}
-	assertStepStatuses(t, finished, task.StepSucceeded, task.StepFailed)
+	assertStepStatuses(t, finished, task.StepFailed, task.StepSkipped)
 	if got := f.process.closeCalls(); got != 2 {
 		t.Fatalf("Close calls = %d, want retained-owner retry", got)
 	}
@@ -1300,7 +1322,7 @@ func TestManagerCloseFailurePreservesTotalTimeoutCause(t *testing.T) {
 	if finished.Outcome != task.OutcomeTimedOut {
 		t.Fatalf("outcome = %s, want %s", finished.Outcome, task.OutcomeTimedOut)
 	}
-	assertStepStatuses(t, finished, task.StepSucceeded, task.StepSkipped)
+	assertStepStatuses(t, finished, task.StepFailed, task.StepSkipped)
 	if got := f.processes.prepareCount(); got != 1 {
 		t.Fatalf("Prepare calls = %d, want 1", got)
 	}
@@ -1497,8 +1519,8 @@ func TestManagerCancelConflictCleansPreemptedPreparedProcessLocally(t *testing.T
 
 	select {
 	case result := <-cancelResult:
-		if !errors.Is(result.err, task.ErrConflict) {
-			t.Fatalf("Cancel error = %v, want task-local ErrConflict", result.err)
+		if result.err != nil || result.task.Status != task.StatusRunning {
+			t.Fatalf("Cancel = %#v, %v", result.task, result.err)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Cancel did not return after Prepare released")

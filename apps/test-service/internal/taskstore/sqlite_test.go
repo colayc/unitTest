@@ -560,6 +560,44 @@ func TestRecoverInterruptedFinishesAllActiveTasksAndDeletesLeases(t *testing.T) 
 	}
 }
 
+func TestRecoverInterruptedOwnsDeferredCompletionLease(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	now := time.Date(2026, 7, 28, 8, 0, 0, 0, time.UTC)
+	value := newTask(140, 141, now)
+	value.Steps = []task.StepSnapshot{{
+		ID: "simulate", Kind: task.StepSimulation, Status: task.StepPending,
+	}}
+	created, _, err := store.Create(
+		ctx,
+		value,
+		value.Steps,
+		draft(value.ID, task.EventTaskCreated, now),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	running := startStoredStep(t, store, created, 0, now.Add(time.Second), 4242)
+
+	leases, err := store.ActiveLeases(ctx)
+	if err != nil || len(leases) != 1 || leases[0].TaskID != running.ID {
+		t.Fatalf("deferred completion leases = %#v, %v", leases, err)
+	}
+	if _, err := store.RecoverInterrupted(ctx, now.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	finished, err := store.Get(ctx, running.ID)
+	if err != nil ||
+		finished.Status != task.StatusFinished ||
+		finished.Outcome != task.OutcomeInterrupted {
+		t.Fatalf("recovered Task = %#v, %v", finished, err)
+	}
+	leases, err = store.ActiveLeases(ctx)
+	if err != nil || len(leases) != 0 {
+		t.Fatalf("leases after recovery = %#v, %v", leases, err)
+	}
+}
+
 func TestRecoverInterruptedDistinguishesTaskKindsAndReconcilesSteps(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

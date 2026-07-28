@@ -100,14 +100,21 @@ circuit cleanup 的 Close error 只有在 `leasePersisted=true` 时才能：
 为当前 Process 增加 command-loop-owned 状态：
 
 ```go
-leasePersisted bool
+type pendingProcessCompletion struct {
+    Result      ProcessResult
+    FailPending bool
+}
+
+leasePersisted    bool
+pendingCompletion *pendingProcessCompletion
 ```
 
-其语义只对应 `current.process`：
+这两个字段只对应 `current.process`：
 
-- 设置新 Process 时重置为 `false`；
+- 设置新 Process 时把 `leasePersisted` 重置为 `false`，并清空 `pendingCompletion`；
 - pre-lease mutation commit 后设置为 `true`；
-- Process 被成功清理并释放、或 lease 被 terminal mutation 删除后重置为 `false`；
+- `Process.Done`、`Process.Start` error与 Prepared cleanup cause只写入 runtime-only `pendingCompletion`，不得提前完成 Step/Task；
+- Process `Close`成功且 completion mutation提交后，才清空 pending result并把 `leasePersisted` 重置为 `false`；
 - 切换到下一 Step 的新 Process 时重新开始一轮。
 
 不得用 Task status、`process != nil` 或 `recoveryRequired` 推断 lease 是否已持久化。
@@ -173,11 +180,14 @@ running mutation继续原子提交：
 
 每个 Step 的 Process 独立执行两阶段 lease：
 
-1. 上一个 Process cleanup 与 lease 删除完成；
-2. 下一 Step `Prepare`；
-3. 为新的 Process 写入 pre-lease；
-4. 进行下一 Step running mutation；
-5. `Start` 后更新 lease。
+1. 收到上一个 Process result并暂存 pending completion；
+2. 上一个 Process `Close`成功；
+3. 原子提交 `StepSucceeded`、`task.step_finished`与`DeleteLease=true`；
+4. 清除上一个 Process runtime state；
+5. 下一 Step `Prepare`；
+6. 为新的 Process写入 pre-lease；
+7. 进行下一 Step running mutation；
+8. `Start` 后更新 lease。
 
 不得把上一个 Step 的 `leasePersisted` 状态沿用到新 Process。
 
@@ -191,7 +201,7 @@ running mutation继续原子提交：
 - 不调用 `Start`；
 - outcome 保持原 first-cause；
 - 进入 bounded `Terminate/Close`；
-- cleanup 与 terminal persistence 成功后删除 lease。
+- `Close`成功后才提交 terminal persistence并删除 lease。
 
 pre-lease 写入不得把 first-cause 改为 `infrastructure_failed`。
 
@@ -275,6 +285,22 @@ pre-lease 写入不得把 first-cause 改为 `infrastructure_failed`。
 - retry再次失败时继续保留 owner/lease与 nonterminal Task，不伪造 terminal success。
 
 若进程在显式 retry 前退出，durable lease 因 Task 仍 nonterminal而继续进入 restart recovery。只有 circuit/recovery handoff 才允许在“Task nonterminal且 durable lease已存在”时把 active owner交给 recovery。
+
+### 10.4 completion commit与 crash window
+
+所有 non-nil Process共享同一个完成顺序：
+
+```text
+result / Start error / Prepared cleanup cause
+  -> runtime-only pending completion
+  -> Terminate（需要时）
+  -> Close
+  -> Step/Task completion transaction + DeleteLease
+```
+
+normal path只允许 `closeResultCommand` 的 success分支调用 `commitClosedCompletion`。intermediate Step先提交当前 `StepSucceeded`并删除旧 lease，再启动下一 Step；final Step在同一 transaction提交 terminal Step、Task、Artifact、events与 lease删除。Store failure发生在 `Close`成功后时，durable Task仍 nonterminal且 lease仍存在；Publisher failure发生在 Store commit后时，Process已经关闭且 committed events可由 replay恢复。
+
+pending Process result不写入 SQLite。Service若在 result已到达、`Close`进行中、`Close`失败或`Close`成功但 completion transaction尚未提交的窗口退出，restart recovery仍看到 nonterminal Task与 durable lease，并保守完成为 `interrupted`。
 
 ## 11. restart recovery
 

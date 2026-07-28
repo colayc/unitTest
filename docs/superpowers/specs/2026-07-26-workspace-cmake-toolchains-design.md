@@ -645,6 +645,14 @@ v1.2 `capabilities/get` 报告 Service 支持的产品能力，例如：
 - queued task 的 generation 已变化或引用对象失效时，以 `interrupted` 结束，并记录 `WORKSPACE_CHANGED` 或对应稳定错误。
 - 已完成任务、事件和 artifacts 保持可查询与重放。
 
+### 15.2 cleanup属于 completion
+
+Task/Step completion的最终所有权规则以[Close-before-terminalization 所有权设计](./2026-07-28-close-before-terminalization-design.md)为准。任何持有 non-nil `ManagedProcess` 的执行路径都先把 Process result或 Start/Prepare cleanup cause暂存在 runtime-only pending completion中；只有 Process `Close`成功后，才能提交 Step/Task completion、terminal Artifact/events或`DeleteLease=true`。
+
+intermediate Step顺序固定为 `result -> Close -> StepSucceeded/DeleteLease -> next Step`；final Step顺序固定为 `result -> Close -> terminal Step/Task/Artifact/events/DeleteLease`。normal `Close` failure保留 nonterminal Task、durable lease与 active owner，只允许显式 `Shutdown`在同进程 retry。若 Service在 result、`Close`或 completion transaction窗口退出，restart recovery通过仍存在的 lease取得 cleanup ownership，并把 runtime-only result保守恢复为 `interrupted`。
+
+该规则不新增 Protocol状态、SQLite migration或 Process host接口；v1.1 output payload、event sequence与 replay投影保持不变。
+
 ## 16. 结构化 Diagnostics
 
 统一模型：

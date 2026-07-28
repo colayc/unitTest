@@ -365,19 +365,26 @@ func TestShutdownRetryAfterProcessCloseFailureReleasesInstanceLock(t *testing.T)
 	if process.closeCalls.Load() != 1 {
 		t.Fatalf("initial process Close calls = %d, want 1", process.closeCalls.Load())
 	}
-	finished, err := active.Get(context.Background(), started.ID)
-	if err != nil || finished.Status != task.StatusFinished {
-		t.Fatalf("finished task = %#v, %v", finished, err)
+	beforeRetry, err := active.Get(context.Background(), started.ID)
+	if err != nil ||
+		beforeRetry.Status != task.StatusRunning ||
+		beforeRetry.Outcome != "" ||
+		beforeRetry.Steps[0].Status != task.StepRunning {
+		t.Fatalf("Task before Close retry = %#v, %v", beforeRetry, err)
+	}
+	layout, err := PrepareDataDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leases := activeLeases(t, layout.Database)
+	if len(leases) != 1 || leases[0].TaskID != started.ID {
+		t.Fatalf("leases before Close retry = %#v", leases)
 	}
 
 	short, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
 	if err := active.Shutdown(short); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Shutdown after transient Close failure = %v, want deadline", err)
-	}
-	layout, err := PrepareDataDir(root)
-	if err != nil {
-		t.Fatal(err)
 	}
 	locked, err := instance.Lock(layout.Lock)
 	if !errors.Is(err, instance.ErrAlreadyRunning) || locked != nil {
@@ -395,6 +402,21 @@ func TestShutdownRetryAfterProcessCloseFailureReleasesInstanceLock(t *testing.T)
 	}
 	if calls := process.closeCalls.Load(); calls < 2 {
 		t.Fatalf("process Close calls = %d, want retry", calls)
+	}
+	store, err := taskstore.Open(layout.Database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished, getErr := store.Get(context.Background(), started.ID)
+	closeErr := store.Close()
+	if getErr != nil ||
+		closeErr != nil ||
+		finished.Status != task.StatusFinished ||
+		finished.Outcome != task.OutcomeInfrastructureFailed {
+		t.Fatalf("Task after Close retry = %#v, get=%v close=%v", finished, getErr, closeErr)
+	}
+	if leases := activeLeases(t, layout.Database); len(leases) != 0 {
+		t.Fatalf("leases after Close retry = %#v", leases)
 	}
 	locked, err = instance.Lock(layout.Lock)
 	if err != nil {
