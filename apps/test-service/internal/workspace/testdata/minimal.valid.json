@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "projects": [
+    {
+      "id": "root",
+      "sourceDir": ".",
+      "fallback": {
+        "configurations": [
+          "Debug",
+          "Release"
+        ],
+        "preferredGenerator": "Ninja"
+      }
+    }
+  ]
+}

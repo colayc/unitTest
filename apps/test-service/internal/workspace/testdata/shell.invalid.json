@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "projects": [
+    {
+      "id": "root",
+      "sourceDir": ".",
+      "fallback": {
+        "command": "cmake",
+        "args": [
+          "-S",
+          "."
+        ],
+        "env": {
+          "TOKEN": "unsafe"
+        }
+      }
+    }
+  ]
+}

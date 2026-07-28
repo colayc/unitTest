@@ -1,0 +1,178 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Unit Test IDE Workspace Configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "cmake": {
+      "$ref": "#/$defs/cmake"
+    },
+    "projects": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/project"
+      }
+    },
+    "toolchains": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/toolchain"
+      }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "absolutePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?:/|[A-Za-z]:[\\\\/]|\\\\\\\\)"
+    },
+    "relativeWorkspacePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?![A-Za-z]:)(?![\\\\/])(?!.*(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$)).+$"
+    },
+    "cmake": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "executable": {
+          "$ref": "#/$defs/absolutePath"
+        }
+      }
+    },
+    "fallback": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "configurations": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "preferredGenerator": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "sourceDir"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "sourceDir": {
+          "$ref": "#/$defs/relativeWorkspacePath"
+        },
+        "fallback": {
+          "$ref": "#/$defs/fallback"
+        }
+      }
+    },
+    "compilerToolchain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "family",
+        "cCompiler",
+        "cppCompiler"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "family": {
+          "enum": [
+            "gcc",
+            "clang",
+            "clang-cl"
+          ]
+        },
+        "cCompiler": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "cppCompiler": {
+          "$ref": "#/$defs/absolutePath"
+        }
+      }
+    },
+    "msvcToolchain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "family",
+        "installationId",
+        "toolsetVersion",
+        "hostArchitecture",
+        "targetArchitecture"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "family": {
+          "const": "msvc"
+        },
+        "installationId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "toolsetVersion": {
+          "type": "string",
+          "minLength": 1
+        },
+        "hostArchitecture": {
+          "enum": [
+            "x86",
+            "x64",
+            "arm64"
+          ]
+        },
+        "targetArchitecture": {
+          "enum": [
+            "x86",
+            "x64",
+            "arm64"
+          ]
+        }
+      }
+    },
+    "toolchain": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/compilerToolchain"
+        },
+        {
+          "$ref": "#/$defs/msvcToolchain"
+        }
+      ]
+    }
+  }
+}

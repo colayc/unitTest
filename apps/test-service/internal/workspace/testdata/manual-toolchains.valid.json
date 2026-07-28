@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "cmake": {
+    "executable": "C:/Tools/CMake/bin/cmake.exe"
+  },
+  "projects": [
+    {
+      "id": "root",
+      "sourceDir": "."
+    }
+  ],
+  "toolchains": [
+    {
+      "id": "linux-clang",
+      "family": "clang",
+      "cCompiler": "/usr/bin/clang",
+      "cppCompiler": "/usr/bin/clang++"
+    },
+    {
+      "id": "windows-msvc",
+      "family": "msvc",
+      "installationId": "VisualStudio.18.Release",
+      "toolsetVersion": "14.50",
+      "hostArchitecture": "x64",
+      "targetArchitecture": "arm64"
+    }
+  ]
+}
