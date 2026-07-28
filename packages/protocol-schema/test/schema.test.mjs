@@ -136,3 +136,67 @@ test("protocol 1.0 capabilities remain closed to 1.1 fields", async () => {
     taskExecution: true
   }), false);
 });
+
+test("protocol 1.2 validates workspace builds and keeps v1.1 strict", async () => {
+  const ajvV12 = new Ajv2020({ allErrors: true, strict: true });
+  addFormats(ajvV12);
+  for (const name of ["capabilities", "diagnostic", "workspace", "task", "event", "artifact"]) {
+    ajvV12.addSchema(await load(`../schema/v1.2/${name}.schema.json`));
+  }
+  const validateV12 = ajvV12.compile(await load("../schema/v1.2/message.schema.json"));
+
+  const ajvV11 = new Ajv2020({ allErrors: true, strict: true });
+  addFormats(ajvV11);
+  for (const name of ["task", "artifact", "event"]) {
+    ajvV11.addSchema(await load(`../schema/v1.1/${name}.schema.json`));
+  }
+  const validateV11 = ajvV11.compile(await load("../schema/v1.1/message.schema.json"));
+
+  assert.equal(validateV12({
+    protocolVersion: "1.2",
+    kind: "request",
+    messageId: "0123456789abcdef0123456789abcdef",
+    method: "handshake",
+    sentAt: "2026-07-26T00:00:00Z",
+    payload: {
+      token: "0123456789abcdef",
+      clientName: "schema-test",
+      clientVersion: "0.3.0",
+      supportedProtocolVersions: ["1.2", "1.1", "1.0"]
+    }
+  }), true, JSON.stringify(validateV12.errors));
+  assert.equal(validateV12(await load("../fixtures/v1.2/workspace-inspect.valid.json")), true, JSON.stringify(validateV12.errors));
+  assert.equal(validateV12(await load("../fixtures/v1.2/targets-list.valid.json")), true, JSON.stringify(validateV12.errors));
+  assert.equal(validateV12(await load("../fixtures/v1.2/cmake-build-start.valid.json")), true, JSON.stringify(validateV12.errors));
+  assert.equal(validateV12(await load("../fixtures/v1.2/event-diagnostic.valid.json")), true, JSON.stringify(validateV12.errors));
+  assert.equal(validateV12(await load("../fixtures/v1.2/cmake-build-shell.invalid.json")), false);
+  assert.equal(validateV11(await load("../fixtures/v1.2/cmake-build-start.valid.json")), false);
+});
+
+test("protocol 1.2 refuses execution details and native workspace paths", async () => {
+  const ajv = new Ajv2020({ allErrors: true, strict: true });
+  addFormats(ajv);
+  for (const name of ["capabilities", "diagnostic", "workspace", "task", "event", "artifact"]) {
+    ajv.addSchema(await load(`../schema/v1.2/${name}.schema.json`));
+  }
+  const validate = ajv.compile(await load("../schema/v1.2/message.schema.json"));
+  const build = await load("../fixtures/v1.2/cmake-build-start.valid.json");
+  const workspace = await load("../fixtures/v1.2/workspace-inspect.valid.json");
+
+  for (const field of ["executable", "args", "env", "workingDirectory", "presetPath", "nativeToolOptions"]) {
+    assert.equal(validate({ ...build, payload: { ...build.payload, [field]: "forbidden" } }), false, field);
+  }
+  for (const field of ["compilerPath", "binaryDirectory", "serviceDataPath"]) {
+    assert.equal(validate({ ...workspace, payload: { ...workspace.payload, [field]: "forbidden" } }), false, field);
+  }
+});
+
+test("protocol 1.2 generates TargetList from the isolated workspace contract", async () => {
+  const workspace = await load("../schema/v1.2/workspace.schema.json");
+  const message = await load("../schema/v1.2/message.schema.json");
+  const generator = await readFile(new URL("../../../tools/protocol-gen/generate.mjs", import.meta.url), "utf8");
+
+  assert.ok(workspace.$defs.targetList);
+  assert.equal(message.$defs.targetList, undefined);
+  assert.match(generator, /schema: "workspace\.schema\.json", definition: "targetList", top: "TargetList"/);
+});

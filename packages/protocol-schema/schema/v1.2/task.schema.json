@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:unit-test-ide:protocol:v1.2:task",
+  "title": "TaskSnapshotV12",
+  "oneOf": [
+    { "$ref": "#/$defs/cmakeBuildTask" },
+    { "$ref": "#/$defs/simulationTask" }
+  ],
+  "$defs": {
+    "base": {
+      "type": "object",
+      "properties": {
+        "taskId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+        "status": { "enum": ["queued", "running", "cancelling", "finished"] },
+        "outcome": { "enum": ["succeeded", "command_failed", "cancelled", "timed_out", "interrupted", "infrastructure_failed"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "startedAt": { "type": "string", "format": "date-time" },
+        "finishedAt": { "type": "string", "format": "date-time" },
+        "timeoutMs": { "type": "integer", "minimum": 1, "maximum": 86400000 },
+        "lastSequence": { "type": "integer", "minimum": 1 },
+        "errorCode": { "type": "string" },
+        "errorMessage": { "type": "string" }
+      },
+      "required": ["taskId", "status", "createdAt", "lastSequence"]
+    },
+    "cmakeBuildTask": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "workspaceGeneration", "projectId", "buildProfileId", "targetIds", "jobs"],
+          "properties": {
+            "taskId": {}, "status": {}, "outcome": {}, "createdAt": {}, "startedAt": {}, "finishedAt": {}, "timeoutMs": {}, "lastSequence": {}, "errorCode": {}, "errorMessage": {},
+            "kind": { "const": "cmakeBuild" },
+            "workspaceGeneration": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "projectId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" },
+            "buildProfileId": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "targetIds": { "type": "array", "maxItems": 128, "uniqueItems": true, "items": { "type": "string", "pattern": "^[0-9a-f]{64}$" } },
+            "jobs": { "type": "integer", "minimum": 1, "maximum": 256 }
+          }
+        }
+      ]
+    },
+    "simulationTask": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "scenario"],
+          "properties": {
+            "taskId": {}, "status": {}, "outcome": {}, "createdAt": {}, "startedAt": {}, "finishedAt": {}, "timeoutMs": {}, "lastSequence": {}, "errorCode": {}, "errorMessage": {},
+            "kind": { "const": "simulation" },
+            "scenario": { "enum": ["success", "exit-nonzero", "hang", "spawn-child", "emit-output"] }
+          }
+        }
+      ]
+    }
+  }
+}

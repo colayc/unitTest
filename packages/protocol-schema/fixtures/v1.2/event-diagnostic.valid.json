@@ -1,0 +1,20 @@
+{
+  "protocolVersion": "1.2",
+  "kind": "event",
+  "messageId": "0123456789abcdef0123456789abcdef",
+  "sentAt": "2026-07-26T00:00:01Z",
+  "sequence": 1,
+  "event": "task.diagnostic",
+  "taskId": "fedcba9876543210fedcba9876543210",
+  "payloadVersion": 1,
+  "payload": {
+    "diagnostic": {
+      "severity": "error",
+      "code": "CMAKE_ERROR",
+      "message": "configuration failed",
+      "sourceUri": "file:///workspace/CMakeLists.txt",
+      "line": 3,
+      "column": 1
+    }
+  }
+}

@@ -1,0 +1,184 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:unit-test-ide:protocol:v1.2:message",
+  "title": "ProtocolMessageV12",
+  "oneOf": [
+    { "$ref": "#/$defs/handshakeRequest" },
+    { "$ref": "#/$defs/emptyRequest" },
+    { "$ref": "#/$defs/workspaceInspectRequest" },
+    { "$ref": "#/$defs/targetsListRequest" },
+    { "$ref": "#/$defs/taskStartRequest" },
+    { "$ref": "#/$defs/taskIDRequest" },
+    { "$ref": "#/$defs/tasksListRequest" },
+    { "$ref": "#/$defs/response" },
+    { "$ref": "#/$defs/error" },
+    { "$ref": "urn:unit-test-ide:protocol:v1.2:event" }
+  ],
+  "$defs": {
+    "base": {
+      "type": "object",
+      "properties": {
+        "protocolVersion": { "const": "1.2" },
+        "messageId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+        "sentAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["protocolVersion", "messageId", "sentAt"]
+    },
+    "handshakeRequest": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/base" }, {
+        "type": "object",
+        "properties": {
+          "kind": { "const": "request" }, "method": { "const": "handshake" },
+          "payload": {
+            "type": "object", "additionalProperties": false,
+            "required": ["token", "clientName", "clientVersion", "supportedProtocolVersions"],
+            "properties": {
+              "token": { "type": "string", "minLength": 16 },
+              "clientName": { "type": "string", "minLength": 1 },
+              "clientVersion": { "type": "string", "minLength": 1 },
+              "supportedProtocolVersions": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["1.2", "1.1", "1.0"] } }
+            }
+          }
+        }, "required": ["kind", "method", "payload"]
+      }], "unevaluatedProperties": false
+    },
+    "emptyRequest": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/base" }, {
+        "type": "object",
+        "properties": { "kind": { "const": "request" }, "method": { "enum": ["capabilities/get", "shutdown"] }, "payload": { "$ref": "#/$defs/emptyPayload" } },
+        "required": ["kind", "method", "payload"]
+      }], "unevaluatedProperties": false
+    },
+    "workspaceInspectRequest": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/base" }, {
+        "type": "object",
+        "properties": { "kind": { "const": "request" }, "method": { "const": "workspace/inspect" }, "payload": { "$ref": "#/$defs/emptyPayload" } },
+        "required": ["kind", "method", "payload"]
+      }], "unevaluatedProperties": false
+    },
+    "targetsListRequest": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/base" }, {
+        "type": "object",
+        "properties": {
+          "kind": { "const": "request" }, "method": { "const": "targets/list" },
+          "payload": {
+            "type": "object", "additionalProperties": false, "required": ["workspaceGeneration", "projectId"],
+            "properties": {
+              "workspaceGeneration": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+              "projectId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" }
+            }
+          }
+        }, "required": ["kind", "method", "payload"]
+      }], "unevaluatedProperties": false
+    },
+    "taskStartRequest": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/base" }, {
+        "type": "object",
+        "properties": { "kind": { "const": "request" }, "method": { "const": "tasks/start" }, "payload": { "$ref": "#/$defs/taskStartPayload" } },
+        "required": ["kind", "method", "payload"]
+      }], "unevaluatedProperties": false
+    },
+    "taskIDRequest": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/base" }, {
+        "type": "object",
+        "properties": {
+          "kind": { "const": "request" }, "method": { "enum": ["tasks/get", "tasks/cancel"] },
+          "payload": { "type": "object", "additionalProperties": false, "required": ["taskId"], "properties": { "taskId": { "type": "string", "pattern": "^[0-9a-f]{32}$" } } }
+        }, "required": ["kind", "method", "payload"]
+      }], "unevaluatedProperties": false
+    },
+    "tasksListRequest": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/base" }, {
+        "type": "object",
+        "properties": {
+          "kind": { "const": "request" }, "method": { "const": "tasks/list" },
+          "payload": { "type": "object", "additionalProperties": false, "properties": { "cursor": { "type": "string", "minLength": 1 }, "limit": { "type": "integer", "minimum": 1, "maximum": 200 } } }
+        }, "required": ["kind", "method", "payload"]
+      }], "unevaluatedProperties": false
+    },
+    "response": {
+      "oneOf": [
+        { "$ref": "#/$defs/capabilitiesResponse" },
+        { "$ref": "#/$defs/workspaceResponse" },
+        { "$ref": "#/$defs/targetsResponse" },
+        { "$ref": "#/$defs/taskResponse" }
+      ]
+    },
+    "responseBase": {
+      "allOf": [{ "$ref": "#/$defs/base" }, {
+        "type": "object",
+        "properties": { "kind": { "const": "response" }, "requestId": { "type": "string", "pattern": "^[0-9a-f]{32}$" }, "method": {}, "payload": {} },
+        "required": ["kind", "requestId", "method", "payload"]
+      }]
+    },
+    "capabilitiesResponse": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/responseBase" }, { "type": "object", "properties": { "method": { "const": "capabilities/get" }, "payload": { "$ref": "urn:unit-test-ide:protocol:v1.2:capabilities" } } }],
+      "unevaluatedProperties": false
+    },
+    "workspaceResponse": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/responseBase" }, { "type": "object", "properties": { "method": { "const": "workspace/inspect" }, "payload": { "$ref": "urn:unit-test-ide:protocol:v1.2:workspace" } } }],
+      "unevaluatedProperties": false
+    },
+    "targetsResponse": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/responseBase" }, { "type": "object", "properties": { "method": { "const": "targets/list" }, "payload": { "$ref": "urn:unit-test-ide:protocol:v1.2:workspace#/$defs/targetList" } } }],
+      "unevaluatedProperties": false
+    },
+    "taskResponse": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/responseBase" }, { "type": "object", "properties": { "method": { "enum": ["tasks/start", "tasks/get", "tasks/cancel"] }, "payload": { "$ref": "urn:unit-test-ide:protocol:v1.2:task" } } }],
+      "unevaluatedProperties": false
+    },
+    "taskStartPayload": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["idempotencyKey", "kind", "workspaceGeneration", "projectId", "buildProfileId", "targetIds", "jobs", "timeoutMs"],
+          "properties": {
+            "idempotencyKey": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+            "kind": { "const": "cmakeBuild" },
+            "workspaceGeneration": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "projectId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" },
+            "buildProfileId": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "targetIds": { "type": "array", "maxItems": 128, "uniqueItems": true, "items": { "type": "string", "pattern": "^[0-9a-f]{64}$" } },
+            "jobs": { "type": "integer", "minimum": 1, "maximum": 256 },
+            "timeoutMs": { "type": "integer", "minimum": 1, "maximum": 86400000 }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["idempotencyKey", "kind", "scenario", "timeoutMs"],
+          "properties": {
+            "idempotencyKey": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+            "kind": { "const": "simulation" },
+            "scenario": { "enum": ["success", "exit-nonzero", "hang", "spawn-child", "emit-output"] },
+            "timeoutMs": { "type": "integer", "minimum": 1, "maximum": 86400000 }
+          }
+        }
+      ]
+    },
+    "emptyPayload": { "type": "object", "additionalProperties": false, "maxProperties": 0 },
+    "error": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/base" }, {
+        "type": "object",
+        "properties": {
+          "kind": { "const": "error" }, "requestId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+          "error": {
+            "type": "object", "additionalProperties": false, "required": ["code", "message", "retryable"],
+            "properties": { "code": { "enum": ["INVALID_MESSAGE", "UNSUPPORTED_PROTOCOL", "AUTH_REQUIRED", "AUTH_FAILED", "METHOD_NOT_FOUND", "INVALID_TASK_SPEC", "TASK_NOT_FOUND", "IDEMPOTENCY_CONFLICT", "PROTOCOL_FEATURE_UNAVAILABLE"] }, "message": { "type": "string" }, "retryable": { "type": "boolean" } }
+          }
+        }, "required": ["kind", "requestId", "error"]
+      }], "unevaluatedProperties": false
+    }
+  }
+}

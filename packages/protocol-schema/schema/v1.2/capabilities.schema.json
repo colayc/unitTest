@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:unit-test-ide:protocol:v1.2:capabilities",
+  "title": "CapabilitiesV12",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["workspaceInspect", "targetList", "cmakeBuild"],
+  "properties": {
+    "workspaceInspect": { "const": true },
+    "targetList": { "const": true },
+    "cmakeBuild": { "const": true }
+  }
+}

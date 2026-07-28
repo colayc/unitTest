@@ -1,0 +1,21 @@
+{
+  "protocolVersion": "1.2",
+  "kind": "response",
+  "messageId": "0123456789abcdef0123456789abcdef",
+  "requestId": "fedcba9876543210fedcba9876543210",
+  "method": "workspace/inspect",
+  "sentAt": "2026-07-26T00:00:00Z",
+  "payload": {
+    "workspaceUri": "file:///workspace",
+    "workspaceGeneration": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "capabilities": { "workspaceInspect": true, "targetList": true, "cmakeBuild": true },
+    "projects": [{
+      "projectId": "example-project",
+      "sourceUri": "file:///workspace",
+      "buildProfiles": [{
+        "buildProfileId": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+        "name": "default"
+      }]
+    }]
+  }
+}

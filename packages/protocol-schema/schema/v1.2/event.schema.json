@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:unit-test-ide:protocol:v1.2:event",
+  "title": "TaskEventV12",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocolVersion", "kind", "messageId", "sentAt", "sequence", "event", "taskId", "payloadVersion", "payload"],
+  "properties": {
+    "protocolVersion": { "const": "1.2" },
+    "kind": { "const": "event" },
+    "messageId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "sentAt": { "type": "string", "format": "date-time" },
+    "sequence": { "type": "integer", "minimum": 1 },
+    "event": { "enum": ["task.created", "task.started", "task.output", "task.diagnostic", "task.cancellation_requested", "task.finished", "artifact.created"] },
+    "taskId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "payloadVersion": { "const": 1 },
+    "payload": {}
+  },
+  "allOf": [{
+    "oneOf": [
+      {
+        "properties": {
+          "event": { "const": "task.diagnostic" },
+          "payload": { "$ref": "#/$defs/diagnosticPayload" }
+        }
+      },
+      {
+        "properties": {
+          "event": { "enum": ["task.created", "task.started", "task.output", "task.cancellation_requested", "task.finished", "artifact.created"] },
+          "payload": { "$ref": "#/$defs/emptyPayload" }
+        }
+      }
+    ]
+  }],
+  "$defs": {
+    "emptyPayload": { "type": "object", "additionalProperties": false, "maxProperties": 0 },
+    "diagnosticPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["diagnostic"],
+      "properties": { "diagnostic": { "$ref": "#/$defs/diagnostic" } }
+    },
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["severity", "code", "message"],
+      "properties": {
+        "severity": { "enum": ["error", "warning", "info"] },
+        "code": { "type": "string", "minLength": 1 },
+        "message": { "type": "string", "minLength": 1 },
+        "sourceUri": { "type": "string", "format": "uri" },
+        "line": { "type": "integer", "minimum": 1 },
+        "column": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}

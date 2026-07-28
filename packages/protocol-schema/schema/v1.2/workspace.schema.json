@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:unit-test-ide:protocol:v1.2:workspace",
+  "title": "WorkspaceSnapshot",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["workspaceUri", "workspaceGeneration", "capabilities", "projects"],
+  "properties": {
+    "workspaceUri": { "type": "string", "format": "uri" },
+    "workspaceGeneration": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "capabilities": { "$ref": "#/$defs/capabilities" },
+    "projects": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/project" }
+    }
+  },
+  "$defs": {
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspaceInspect", "targetList", "cmakeBuild"],
+      "properties": {
+        "workspaceInspect": { "const": true },
+        "targetList": { "const": true },
+        "cmakeBuild": { "const": true }
+      }
+    },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["projectId", "sourceUri", "buildProfiles"],
+      "properties": {
+        "projectId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" },
+        "sourceUri": { "type": "string", "format": "uri" },
+        "buildProfiles": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/buildProfile" }
+        }
+      }
+    },
+    "buildProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["buildProfileId", "name"],
+      "properties": {
+        "buildProfileId": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "name": { "type": "string", "minLength": 1 }
+      }
+    },
+    "targetList": {
+      "title": "TargetList",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspaceGeneration", "projectId", "targets"],
+      "properties": {
+        "workspaceGeneration": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "projectId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" },
+        "targets": { "type": "array", "items": { "$ref": "#/$defs/target" } }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["targetId", "name"],
+      "properties": {
+        "targetId": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "name": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

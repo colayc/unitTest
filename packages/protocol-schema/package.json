@@ -10,7 +10,14 @@
     "./v1.1/capabilities": "./schema/v1.1/capabilities.schema.json",
     "./v1.1/task": "./schema/v1.1/task.schema.json",
     "./v1.1/event": "./schema/v1.1/event.schema.json",
-    "./v1.1/artifact": "./schema/v1.1/artifact.schema.json"
+    "./v1.1/artifact": "./schema/v1.1/artifact.schema.json",
+    "./v1.2/message": "./schema/v1.2/message.schema.json",
+    "./v1.2/capabilities": "./schema/v1.2/capabilities.schema.json",
+    "./v1.2/diagnostic": "./schema/v1.2/diagnostic.schema.json",
+    "./v1.2/workspace": "./schema/v1.2/workspace.schema.json",
+    "./v1.2/task": "./schema/v1.2/task.schema.json",
+    "./v1.2/event": "./schema/v1.2/event.schema.json",
+    "./v1.2/artifact": "./schema/v1.2/artifact.schema.json"
   },
   "scripts": {
     "test": "node --test test/schema.test.mjs"
