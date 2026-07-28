@@ -418,9 +418,12 @@ func (p *parser) flush(state *streamState) []Diagnostic {
 			"Diagnostic output was truncated",
 		)
 	}
-	countLimit := maxDiagnostics - 1
-	if p.notices["DIAGNOSTIC_TRUNCATED"] {
-		countLimit = maxDiagnostics
+	countLimit := maxDiagnostics
+	if !p.notices["DIAGNOSTIC_TRUNCATED"] {
+		countLimit--
+		if !p.notices["DIAGNOSTIC_INPUT_INVALID"] {
+			countLimit--
+		}
 	}
 	if p.count >= countLimit {
 		return p.notice(

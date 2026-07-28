@@ -512,6 +512,53 @@ func TestParserUsesEarlyTruncationNoticeAsOneOf4096Slots(t *testing.T) {
 	}
 }
 
+func TestParserReservesCountCapacityForInvalidAndTruncationNotices(t *testing.T) {
+	var ordinaryInput strings.Builder
+	for index := 0; index < maxDiagnostics-1; index++ {
+		ordinaryInput.WriteString("src/main.cpp:1:1: error: broken\n")
+	}
+	invalidInput := []byte{0xff, '\n'}
+	overlongInput := []byte(strings.Repeat("x", maxLineBytes+1) + "\n")
+
+	for _, invalidFirst := range []bool{false, true} {
+		parser := newTestParser(t, FamilyGNU)
+		var got []Diagnostic
+		if invalidFirst {
+			got = append(got, parser.Feed("stderr", invalidInput)...)
+		}
+		got = append(got, parser.Feed("stderr", []byte(ordinaryInput.String()))...)
+		if !invalidFirst {
+			got = append(got, parser.Feed("stderr", invalidInput)...)
+		}
+		got = append(got, parser.Feed("stderr", overlongInput)...)
+		got = append(got, parser.Close()...)
+
+		if len(got) != maxDiagnostics {
+			t.Fatalf("invalidFirst=%t diagnostic count=%d, want %d", invalidFirst, len(got), maxDiagnostics)
+		}
+		ordinary := 0
+		invalidNotices := 0
+		truncationNotices := 0
+		for _, value := range got {
+			switch value.Code {
+			case "COMPILER_ERROR":
+				ordinary++
+			case "DIAGNOSTIC_INPUT_INVALID":
+				invalidNotices++
+			case "DIAGNOSTIC_TRUNCATED":
+				truncationNotices++
+			}
+		}
+		if ordinary != maxDiagnostics-2 ||
+			invalidNotices != 1 || truncationNotices != 1 {
+			t.Fatalf(
+				"invalidFirst=%t ordinary=%d invalid notices=%d truncation notices=%d",
+				invalidFirst, ordinary, invalidNotices, truncationNotices,
+			)
+		}
+	}
+}
+
 func TestParserCapsSingleAggregatedDiagnostic(t *testing.T) {
 	parser := newTestParser(t, FamilyCMake)
 	var got []Diagnostic
