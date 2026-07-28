@@ -316,7 +316,7 @@ func discoverVisualStudioInstallations(
 		return nil, err
 	}
 	if err := config.verifyBaseDirectories(ctx); err != nil {
-		return nil, invalidProbe("TOOLCHAIN_PROBE_FAILED", "fixed Windows environment changed")
+		return nil, contextualWindowsProbeError(err, "fixed Windows environment changed")
 	}
 	vswhere, err := openWindowsToolSnapshot(ctx, config.VSWherePath)
 	if err != nil {
@@ -591,6 +591,28 @@ func canonicalWindowsFile(path string) (string, error) {
 		return "", errors.New("path is not a regular file")
 	}
 	return canonical, nil
+}
+
+func canonicalWindowsFileSystemIdentity(path string) (string, string, error) {
+	if path == "" || len(path) > maxVSWherePathBytes ||
+		strings.IndexByte(path, 0) >= 0 || !filepath.IsAbs(path) {
+		return "", "", errors.New("file path is invalid")
+	}
+	canonical, information, err := canonicalWindowsPathInformation(path, false)
+	if err != nil {
+		return "", "", err
+	}
+	if information.FileAttributes&
+		(windows.FILE_ATTRIBUTE_DIRECTORY|windows.FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+		information.FileIndexHigh == 0 && information.FileIndexLow == 0 {
+		return "", "", errors.New("file identity is unavailable")
+	}
+	return canonical, fmt.Sprintf(
+		"windows:%08x:%08x%08x",
+		information.VolumeSerialNumber,
+		information.FileIndexHigh,
+		information.FileIndexLow,
+	), nil
 }
 
 func canonicalWindowsDirectoryIdentity(path string) (string, string, error) {

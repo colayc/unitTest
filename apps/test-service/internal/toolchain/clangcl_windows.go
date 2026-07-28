@@ -37,6 +37,14 @@ type clangCLCandidate struct {
 	context   msvcContext
 }
 
+type clangGeneratorProbeResult struct {
+	names        []string
+	directories  []windowsDirectoryReference
+	toolPath     string
+	toolIdentity string
+	toolFileID   string
+}
+
 func newClangCLAdapter(options windowsAdapterOptions) *clangCLAdapter {
 	options.config.BaseEnvironment = append([]string(nil), options.config.BaseEnvironment...)
 	options.manual = append([]workspace.ToolchainConfig(nil), options.manual...)
@@ -275,9 +283,16 @@ func (adapter *clangCLAdapter) probeCandidate(
 	if err != nil {
 		return Instance{}, err
 	}
+	if err := verifyClangGenerator(ctx, generators); err != nil {
+		return Instance{}, contextualWindowsProbeError(err, "clang-cl Ninja changed")
+	}
 	if err := verify(); err != nil {
 		return Instance{}, contextualWindowsProbeError(err, "clang-cl identity changed")
 	}
+	instanceEnvironment := appendVerifiedGeneratorPaths(
+		candidate.context.environment,
+		generators.directories,
+	)
 	instance := Instance{
 		ID:                 candidate.id,
 		Family:             FamilyClangCL,
@@ -288,8 +303,8 @@ func (adapter *clangCLAdapter) probeCandidate(
 		HostArchitecture:   candidate.context.config.HostArchitecture,
 		TargetArchitecture: targetArchitecture,
 		Sysroot:            candidate.context.sdk,
-		Environment:        append([]string(nil), candidate.context.environment...),
-		Generators:         generators,
+		Environment:        instanceEnvironment,
+		Generators:         append([]string(nil), generators.names...),
 		Coverage:           coverage,
 	}
 	if !candidate.manual {
@@ -301,7 +316,11 @@ func (adapter *clangCLAdapter) probeCandidate(
 				"\x00"+candidate.context.environmentIdentity+
 				"\x00"+candidate.context.installation.Identity+
 				"\x00"+candidate.context.toolsetIdentity+
-				"\x00"+lld.identity,
+				"\x00"+lld.identity+
+				"\x00"+windowsDirectoryDescriptorIdentity(generators.directories)+
+				"\x00generator-ninja\x00"+identityPath(generators.toolPath)+
+				"\x00"+generators.toolFileID+
+				"\x00"+generators.toolIdentity,
 		)
 		if err != nil {
 			return Instance{}, invalidProbe("TOOLCHAIN_PROBE_FAILED", "construct clang-cl toolchain id")
@@ -334,19 +353,44 @@ func (adapter *clangCLAdapter) probeClangGenerator(
 	ctx context.Context,
 	candidate clangCLCandidate,
 	verify func() error,
-) ([]string, error) {
+) (clangGeneratorProbeResult, error) {
 	path := adapter.options.config.NinjaPath
 	if path == "" {
-		return nil, invalidProbe("BUILD_TOOL_NOT_FOUND", "clang-cl Ninja is unavailable")
+		return clangGeneratorProbeResult{},
+			invalidProbe("BUILD_TOOL_NOT_FOUND", "clang-cl Ninja is unavailable")
 	}
 	ninja, err := openWindowsToolSnapshot(ctx, path)
 	if err != nil {
 		if isContextError(err) {
-			return nil, err
+			return clangGeneratorProbeResult{}, err
 		}
-		return nil, invalidProbe("BUILD_TOOL_NOT_FOUND", "clang-cl Ninja is invalid")
+		return clangGeneratorProbeResult{},
+			invalidProbe("BUILD_TOOL_NOT_FOUND", "clang-cl Ninja is invalid")
 	}
 	defer ninja.Close()
+	toolPath, toolFileID, err := canonicalWindowsFileSystemIdentity(ninja.path)
+	if err != nil || identityPath(toolPath) != identityPath(ninja.path) {
+		return clangGeneratorProbeResult{},
+			invalidProbe("BUILD_TOOL_NOT_FOUND", "clang-cl Ninja identity is invalid")
+	}
+	if err := ninja.Verify(ctx); err != nil {
+		return clangGeneratorProbeResult{},
+			contextualWindowsProbeError(err, "clang-cl Ninja identity changed")
+	}
+	root, rootIdentity, err := canonicalWindowsDirectoryIdentity(filepath.Dir(ninja.path))
+	if err != nil || !pathWithinWindowsRoot(root, ninja.path) {
+		return clangGeneratorProbeResult{},
+			invalidProbe("BUILD_TOOL_NOT_FOUND", "clang-cl Ninja root is invalid")
+	}
+	rootReference := windowsDirectoryReference{
+		role: "path-generator-ninja", path: root, identity: rootIdentity,
+	}
+	verifyNinja := func() error {
+		if err := verify(); err != nil {
+			return err
+		}
+		return verifyWindowsDirectory(rootReference.path, rootReference.identity)
+	}
 	output, err := runWindowsProbe(
 		ctx,
 		adapter.options.runner,
@@ -355,19 +399,64 @@ func (adapter *clangCLAdapter) probeClangGenerator(
 		candidate.context.environment,
 		maxWindowsProbeOutput,
 		false,
-		verify,
+		verifyNinja,
 	)
 	if err != nil {
 		if isContextError(err) {
-			return nil, err
+			return clangGeneratorProbeResult{}, err
 		}
-		return nil, invalidProbe("BUILD_TOOL_NOT_FOUND", "clang-cl Ninja probe failed")
+		return clangGeneratorProbeResult{},
+			invalidProbe("BUILD_TOOL_NOT_FOUND", "clang-cl Ninja probe failed")
 	}
 	version, err := parseSingleLine(output, 128)
 	if err != nil || !versionPattern.MatchString(version) {
-		return nil, invalidProbe("BUILD_TOOL_NOT_FOUND", "clang-cl Ninja output is invalid")
+		return clangGeneratorProbeResult{},
+			invalidProbe("BUILD_TOOL_NOT_FOUND", "clang-cl Ninja output is invalid")
 	}
-	return []string{"Ninja"}, nil
+	return clangGeneratorProbeResult{
+		names:        []string{"Ninja"},
+		directories:  []windowsDirectoryReference{rootReference},
+		toolPath:     ninja.path,
+		toolIdentity: ninja.identity,
+		toolFileID:   toolFileID,
+	}, nil
+}
+
+func verifyClangGenerator(
+	ctx context.Context,
+	generator clangGeneratorProbeResult,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(generator.directories) != 1 ||
+		generator.directories[0].role != "path-generator-ninja" {
+		return errors.New("clang-cl Ninja descriptor is invalid")
+	}
+	root := generator.directories[0]
+	if err := verifyWindowsDirectory(root.path, root.identity); err != nil {
+		return err
+	}
+	ninja, err := openWindowsToolSnapshot(ctx, generator.toolPath)
+	if err != nil {
+		return err
+	}
+	defer ninja.Close()
+	toolPath, toolFileID, err := canonicalWindowsFileSystemIdentity(ninja.path)
+	if err != nil {
+		return err
+	}
+	if err := ninja.Verify(ctx); err != nil {
+		return err
+	}
+	if identityPath(ninja.path) != identityPath(generator.toolPath) ||
+		identityPath(toolPath) != identityPath(generator.toolPath) ||
+		toolFileID != generator.toolFileID ||
+		ninja.identity != generator.toolIdentity ||
+		!pathWithinWindowsRoot(root.path, ninja.path) {
+		return errors.New("clang-cl Ninja identity changed")
+	}
+	return ctx.Err()
 }
 
 func (adapter *clangCLAdapter) probeCoverage(

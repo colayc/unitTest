@@ -112,6 +112,57 @@ func TestMSVCTypedVsDevCmdArgumentsRunThroughProductionRunner(t *testing.T) {
 	}
 }
 
+func TestMSVCNoSpaceParenthesesAreRejectedOrSafelyRun(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "NoSpaces(x86)")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	batch := filepath.Join(root, "VsDevCmd.bat")
+	if err := os.WriteFile(
+		batch,
+		[]byte("@echo off\r\nset \"VSDEVCMD_TYPED_CAPTURE=ok\"\r\nset\r\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	args, err := buildVsDevCmdArguments(batch, MSVCConfig{
+		ToolsetVersion:     "14.40.33807",
+		HostArchitecture:   "x64",
+		TargetArchitecture: "x64",
+	})
+	if err != nil {
+		return
+	}
+	systemRoot := os.Getenv("SystemRoot")
+	if systemRoot == "" {
+		t.Skip("SystemRoot is unavailable")
+	}
+	cmd := filepath.Join(systemRoot, "System32", "cmd.exe")
+	result, runErr := probe.NewRunner().Run(context.Background(), probe.Spec{
+		Executable: cmd,
+		Args:       args,
+		Env: []string{
+			"ComSpec=" + cmd,
+			"Path=" + filepath.Join(systemRoot, "System32") + ";" + systemRoot,
+			"SystemRoot=" + systemRoot,
+			"TEMP=" + t.TempDir(),
+			"TMP=" + t.TempDir(),
+		},
+		Timeout:   windowsProbeTimeout,
+		MaxOutput: maxWindowsProbeOutput,
+	})
+	if runErr != nil || result.ExitCode != 0 ||
+		!strings.Contains(string(result.Stdout), "VSDEVCMD_TYPED_CAPTURE=ok") {
+		t.Fatalf(
+			"accepted no-space parentheses path was not safely executed: exit %d, stdout %q, stderr %q, error %v",
+			result.ExitCode,
+			result.Stdout,
+			result.Stderr,
+			runErr,
+		)
+	}
+}
+
 func TestMSVCRejectsVsDevCmdAndConfigCommandInjection(t *testing.T) {
 	base := MSVCConfig{
 		ToolsetVersion:     "14.40.33807",
@@ -127,6 +178,8 @@ func TestMSVCRejectsVsDevCmdAndConfigCommandInjection(t *testing.T) {
 		"C:\\VS<X\\VsDevCmd.bat",
 		"C:\\VS>X\\VsDevCmd.bat",
 		"C:\\VS\"X\\VsDevCmd.bat",
+		"C:\\VS\tX\\VsDevCmd.bat",
+		"C:\\VS\x01X\\VsDevCmd.bat",
 		"C:\\VS\rX\\VsDevCmd.bat",
 		"C:\\VS\nX\\VsDevCmd.bat",
 		"C:\\VS\x00X\\VsDevCmd.bat",
@@ -244,6 +297,62 @@ func TestMSVCCompilerBannerParsesLocalizedOEMFileVersionFallback(t *testing.T) {
 			architecture,
 			err,
 		)
+	}
+}
+
+func TestMSVCCompilerBannerRequiresConsistentUniqueEvidence(t *testing.T) {
+	consistent := []byte(strings.Join([]string{
+		"Microsoft (R) C/C++ Optimizing Compiler Version 19.44.35228 for x64",
+		`C:\VS\VC\Tools\MSVC\14.44\bin\Hostx64\x64\cl.exe: File version 19.44.35228.0`,
+	}, "\r\n"))
+	version, architecture, err := parseMSVCCompilerBanner(consistent)
+	if err != nil || version != "19.44.35228" || architecture != "x64" {
+		t.Fatalf(
+			"parseMSVCCompilerBanner(consistent mixed) = %q, %q, %v",
+			version,
+			architecture,
+			err,
+		)
+	}
+
+	invalid := map[string][]byte{
+		"version conflict": []byte(strings.Join([]string{
+			"Microsoft (R) C/C++ Optimizing Compiler Version 19.40.33811 for x64",
+			`C:\VS\VC\Tools\MSVC\14.40\bin\Hostx64\x64\cl.exe: File version 19.41.10000.0`,
+		}, "\r\n")),
+		"architecture conflict": []byte(strings.Join([]string{
+			"localized x86",
+			"Microsoft (R) C/C++ Optimizing Compiler Version 19.40.33811 for x64",
+			`C:\VS\VC\Tools\MSVC\14.40\bin\Hostx64\x64\cl.exe: File version 19.40.33811.0`,
+		}, "\r\n")),
+		"duplicate English banner": []byte(strings.Join([]string{
+			"Microsoft (R) C/C++ Optimizing Compiler Version 19.40.33811 for x64",
+			"Microsoft (R) C/C++ Optimizing Compiler Version 19.40.33811 for x64",
+		}, "\r\n")),
+		"duplicate file version": []byte(strings.Join([]string{
+			"localized x64",
+			`C:\VS\VC\Tools\MSVC\14.40\bin\Hostx64\x64\cl.exe: File version 19.40.33811.0`,
+			`C:\VS\VC\Tools\MSVC\14.40\bin\Hostx64\x64\cl.exe: File version 19.40.33811.0`,
+		}, "\r\n")),
+		"malformed file version": []byte(strings.Join([]string{
+			"Microsoft (R) C/C++ Optimizing Compiler Version 19.40.33811 for x64",
+			`C:\VS\VC\Tools\MSVC\14.40\bin\Hostx64\x64\cl.exe: File version unknown`,
+		}, "\r\n")),
+		"duplicate architecture": []byte(strings.Join([]string{
+			"localized x64 x64",
+			`C:\VS\VC\Tools\MSVC\14.40\bin\Hostx64\x64\cl.exe: File version 19.40.33811.0`,
+		}, "\r\n")),
+	}
+	for name, output := range invalid {
+		t.Run(name, func(t *testing.T) {
+			if version, architecture, err := parseMSVCCompilerBanner(output); err == nil {
+				t.Fatalf(
+					"parseMSVCCompilerBanner() = %q, %q, nil, want conflict rejection",
+					version,
+					architecture,
+				)
+			}
+		})
 	}
 }
 

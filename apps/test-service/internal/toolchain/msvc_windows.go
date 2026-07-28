@@ -1215,28 +1215,69 @@ func appendVerifiedGeneratorPaths(
 }
 
 func parseMSVCCompilerBanner(output []byte) (string, string, error) {
-	match := msvcCompilerBannerPattern.FindSubmatch(output)
-	if len(match) == 3 {
-		return string(match[1]), strings.ToLower(string(match[2])), nil
+	englishMatches := msvcCompilerBannerPattern.FindAllSubmatch(output, 2)
+	if len(englishMatches) > 1 {
+		return "", "", errors.New("duplicate MSVC compiler banner")
 	}
-	pathMarker := msvcCompilerPathMarkerPattern.FindIndex(output)
-	if pathMarker == nil {
-		return "", "", errors.New("unrecognized MSVC compiler banner")
+	var englishVersion, englishArchitecture string
+	if len(englishMatches) == 1 {
+		englishVersion = string(englishMatches[0][1])
+		englishArchitecture = strings.ToLower(string(englishMatches[0][2]))
 	}
-	versionLine := output[pathMarker[1]:]
+
+	pathMarkers := msvcCompilerPathMarkerPattern.FindAllIndex(output, 2)
+	if len(pathMarkers) > 1 {
+		return "", "", errors.New("duplicate MSVC compiler file version")
+	}
+	if len(pathMarkers) == 0 {
+		if englishVersion == "" {
+			return "", "", errors.New("unrecognized MSVC compiler banner")
+		}
+		return englishVersion, englishArchitecture, nil
+	}
+	versionLine := output[pathMarkers[0][1]:]
 	if end := bytes.IndexAny(versionLine, "\r\n"); end >= 0 {
 		versionLine = versionLine[:end]
 	}
-	version := msvcFileVersionPattern.FindSubmatch(versionLine)
+	versionMatches := msvcFileVersionPattern.FindAllSubmatch(versionLine, 2)
+	if len(versionMatches) != 1 {
+		return "", "", errors.New("malformed MSVC compiler file version")
+	}
+	fileVersion := string(versionMatches[0][1])
+
 	architectureLine := output
 	if end := bytes.IndexAny(architectureLine, "\r\n"); end >= 0 {
 		architectureLine = architectureLine[:end]
 	}
-	architecture := msvcArchitecturePattern.FindSubmatch(architectureLine)
-	if len(version) != 2 || len(architecture) != 2 {
-		return "", "", errors.New("unrecognized MSVC compiler banner")
+	architectureMatches := msvcArchitecturePattern.FindAllSubmatch(architectureLine, 2)
+	if len(architectureMatches) != 1 {
+		return "", "", errors.New("ambiguous MSVC compiler architecture")
 	}
-	return string(version[1]), strings.ToLower(string(architecture[1])), nil
+	fileArchitecture := strings.ToLower(string(architectureMatches[0][1]))
+	if englishVersion == "" {
+		return fileVersion, fileArchitecture, nil
+	}
+	if normalizedMSVCVersionEvidence(englishVersion) !=
+		normalizedMSVCVersionEvidence(fileVersion) ||
+		englishArchitecture != fileArchitecture {
+		return "", "", errors.New("conflicting MSVC compiler evidence")
+	}
+	return englishVersion, englishArchitecture, nil
+}
+
+func normalizedMSVCVersionEvidence(version string) string {
+	parts := strings.Split(version, ".")
+	for index, part := range parts {
+		part = strings.TrimLeft(part, "0")
+		if part == "" {
+			part = "0"
+		}
+		parts[index] = part
+	}
+	for len(parts) > 2 && parts[len(parts)-1] == "0" {
+		parts = parts[:len(parts)-1]
+	}
+	return strings.Join(parts, ".")
 }
 
 func parseMSVCLinkerBanner(output []byte) (string, error) {
@@ -1423,8 +1464,9 @@ func buildVsDevCmdArguments(path string, config MSVCConfig) ([]string, error) {
 
 func validVsDevCmdPath(path string) bool {
 	return filepath.IsAbs(path) &&
-		len(path) <= maxVSWherePathBytes &&
-		!strings.ContainsAny(path, "\x00\r\n\"%!^&|<>") &&
+		validBoundedWindowsText(path, maxVSWherePathBytes) &&
+		!strings.ContainsAny(path, "\"%!^&|<>") &&
+		(!strings.ContainsAny(path, "()") || strings.Contains(path, " ")) &&
 		strings.EqualFold(filepath.Ext(path), ".bat")
 }
 

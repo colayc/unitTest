@@ -4,14 +4,55 @@ package toolchain
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"unit-test-ide.local/test-service/internal/probe"
 )
+
+type stagedWindowsContext struct {
+	context.Context
+	mu        sync.Mutex
+	once      sync.Once
+	done      chan struct{}
+	calls     int
+	failAt    int
+	err       error
+	triggered bool
+}
+
+func newStagedWindowsContext(failAt int, err error) *stagedWindowsContext {
+	return &stagedWindowsContext{
+		Context: context.Background(),
+		done:    make(chan struct{}),
+		failAt:  failAt,
+		err:     err,
+	}
+}
+
+func (ctx *stagedWindowsContext) Done() <-chan struct{} {
+	return ctx.done
+}
+
+func (ctx *stagedWindowsContext) Err() error {
+	ctx.mu.Lock()
+	defer ctx.mu.Unlock()
+	if ctx.triggered {
+		return ctx.err
+	}
+	ctx.calls++
+	if ctx.calls < ctx.failAt {
+		return nil
+	}
+	ctx.triggered = true
+	ctx.once.Do(func() { close(ctx.done) })
+	return ctx.err
+}
 
 func TestWindowsDefaultDiscoveryBuildsFixedMinimumOSEnvironment(t *testing.T) {
 	untrustedPath := t.TempDir()
@@ -37,6 +78,72 @@ func TestWindowsDefaultDiscoveryBuildsFixedMinimumOSEnvironment(t *testing.T) {
 		strings.ToLower(untrustedPath),
 	) {
 		t.Fatalf("default fixed environment inherited user PATH %q", untrustedPath)
+	}
+}
+
+func TestWindowsInitialBaseDirectoryVerificationPreservesContextErrors(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+	}{
+		{name: "cancellation", err: context.Canceled},
+		{name: "deadline", err: context.DeadlineExceeded},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newWindowsToolchainFixture(t)
+			runner := newWindowsFakeRunner(fixture)
+			adapters, err := newWindowsAdapters(runner, nil, fixture.options())
+			if err != nil {
+				t.Fatal(err)
+			}
+			msvc := adapters[0].(*msvcAdapter)
+			ctx := newStagedWindowsContext(3, test.err)
+			installations, discoverErr := discoverVisualStudioInstallations(
+				ctx,
+				runner,
+				msvc.options.config,
+			)
+			if installations != nil || !errors.Is(discoverErr, test.err) {
+				t.Fatalf(
+					"initial base verification = %#v, %v, want %v",
+					installations,
+					discoverErr,
+					test.err,
+				)
+			}
+			var carrier issueCarrier
+			if errors.As(discoverErr, &carrier) {
+				t.Fatalf(
+					"initial base verification context error became issues: %#v",
+					carrier.ToolchainIssues(),
+				)
+			}
+			if runner.findCall(fixture.vswhere, vswhereArguments()) != nil {
+				t.Fatal("initial base verification probed vswhere after context error")
+			}
+		})
+	}
+}
+
+func TestWindowsInitialBaseDirectoryCancellationCreatesNoRegistryIssue(t *testing.T) {
+	fixture := newWindowsToolchainFixture(t)
+	runner := newWindowsFakeRunner(fixture)
+	adapters, err := newWindowsAdapters(runner, nil, fixture.options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := NewRegistry(adapters[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := newStagedWindowsContext(5, context.Canceled)
+	instances, issues := registry.Discover(ctx)
+	if instances != nil || issues != nil {
+		t.Fatalf(
+			"Registry Discover(initial cancellation) = %#v, %#v, want no ordinary issue",
+			instances,
+			issues,
+		)
 	}
 }
 

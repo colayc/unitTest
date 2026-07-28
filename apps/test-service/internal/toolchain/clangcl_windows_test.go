@@ -74,6 +74,173 @@ func TestClangCLAdapterCombinesValidatedMSVCEnvironmentAndLLVMTools(t *testing.T
 	runner.requireCall(t, fixture.ninja, []string{"--version"})
 }
 
+func TestClangCLAddsVerifiedNinjaToProductionShapedEnvironment(t *testing.T) {
+	fixture := newWindowsToolchainFixture(t)
+	runner := newWindowsFakeRunner(fixture)
+	runner.setOutput(
+		fixture.cmd,
+		fixture.vsDevCmdArgs("x64", "x64"),
+		successfulWindowsOutput(fixture.productionEnvironmentOutput("x64", "x64")),
+	)
+	manual := []workspace.ToolchainConfig{{
+		ID:          "manual-clang-cl",
+		Family:      string(FamilyClangCL),
+		CCompiler:   fixture.clang,
+		CPPCompiler: fixture.clang,
+	}}
+	adapters, err := newWindowsAdapters(runner, manual, fixture.options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	instances, discoverErr := adapters[1].Discover(context.Background())
+	if discoverErr != nil || len(instances) != 1 {
+		t.Fatalf("clang-cl Discover(production environment) = %#v, %v", instances, discoverErr)
+	}
+	if !windowsPathListContains(
+		map[string]string{
+			"PATH": windowsEnvironmentValues(instances[0].Environment)["PATH"],
+		},
+		filepath.Dir(fixture.ninja),
+	) {
+		t.Fatalf("clang-cl final PATH omitted verified Ninja: %#v", instances[0].Environment)
+	}
+	instances[0].Environment[0] = "MUTATED=1"
+	instances[0].Generators[0] = "MUTATED"
+	again, discoverErr := adapters[1].Discover(context.Background())
+	if discoverErr != nil || len(again) != 1 ||
+		again[0].Environment[0] == "MUTATED=1" ||
+		again[0].Generators[0] == "MUTATED" {
+		t.Fatalf("clang-cl Discover() leaked final environment mutation: %#v, %v", again, discoverErr)
+	}
+}
+
+func TestClangCLAutomaticIDTracksNinjaToolIdentity(t *testing.T) {
+	fixture := newWindowsToolchainFixture(t)
+	firstRunner := newWindowsFakeRunner(fixture)
+	firstRunner.setOutput(
+		fixture.cmd,
+		fixture.vsDevCmdArgs("x64", "x64"),
+		successfulWindowsOutput(fixture.productionEnvironmentOutput("x64", "x64")),
+	)
+	firstAdapters, err := newWindowsAdapters(firstRunner, nil, fixture.options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, discoverErr := firstAdapters[1].Discover(context.Background())
+	if discoverErr != nil || len(first) != 1 {
+		t.Fatalf("first automatic clang-cl Discover() = %#v, %v", first, discoverErr)
+	}
+	if err := os.Remove(fixture.ninja); err != nil {
+		t.Fatal(err)
+	}
+	writeWindowsTool(t, fixture.ninja)
+	secondRunner := newWindowsFakeRunner(fixture)
+	secondRunner.setOutput(
+		fixture.cmd,
+		fixture.vsDevCmdArgs("x64", "x64"),
+		successfulWindowsOutput(fixture.productionEnvironmentOutput("x64", "x64")),
+	)
+	secondAdapters, err := newWindowsAdapters(secondRunner, nil, fixture.options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, discoverErr := secondAdapters[1].Discover(context.Background())
+	if discoverErr != nil || len(second) != 1 {
+		t.Fatalf("second automatic clang-cl Discover() = %#v, %v", second, discoverErr)
+	}
+	if first[0].ID == second[0].ID {
+		t.Fatalf("clang-cl automatic ID ignored Ninja tool replacement: %q", first[0].ID)
+	}
+}
+
+func TestClangCLRejectsNinjaReplacementBeforeInstanceConstruction(t *testing.T) {
+	tests := map[string]func(*testing.T, *windowsToolchainFixture){
+		"tool": func(t *testing.T, fixture *windowsToolchainFixture) {
+			t.Helper()
+			if err := os.Remove(fixture.ninja); err != nil {
+				t.Fatal(err)
+			}
+			writeWindowsTool(t, fixture.ninja)
+		},
+		"directory": func(t *testing.T, fixture *windowsToolchainFixture) {
+			t.Helper()
+			root := filepath.Dir(fixture.ninja)
+			if err := os.RemoveAll(root); err != nil {
+				t.Fatal(err)
+			}
+			writeWindowsTool(t, fixture.ninja)
+		},
+	}
+	for name, replace := range tests {
+		t.Run(name, func(t *testing.T) {
+			fixture := newWindowsToolchainFixture(t)
+			runner := newWindowsFakeRunner(fixture)
+			runner.setOutput(
+				fixture.cmd,
+				fixture.vsDevCmdArgs("x64", "x64"),
+				successfulWindowsOutput(
+					fixture.productionEnvironmentOutput("x64", "x64"),
+				),
+			)
+			runner.setHook(fixture.llvmCov, []string{"--version"}, func() {
+				replace(t, fixture)
+			})
+			adapters, err := newWindowsAdapters(
+				runner,
+				[]workspace.ToolchainConfig{{
+					ID:          "manual-clang-cl",
+					Family:      string(FamilyClangCL),
+					CCompiler:   fixture.clang,
+					CPPCompiler: fixture.clang,
+				}},
+				fixture.options(),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			instances, discoverErr := adapters[1].Discover(context.Background())
+			if len(instances) != 0 || discoverErr == nil {
+				t.Fatalf(
+					"clang-cl Discover(replaced Ninja %s) = %#v, %v, want rejection",
+					name,
+					instances,
+					discoverErr,
+				)
+			}
+		})
+	}
+}
+
+func TestClangCLNinjaProbePropagatesDeadlineWithoutDiscoveryIssue(t *testing.T) {
+	fixture := newWindowsToolchainFixture(t)
+	runner := newWindowsFakeRunner(fixture)
+	ctx := &mutableWindowsContext{Context: context.Background()}
+	runner.setHook(fixture.ninja, []string{"--version"}, func() {
+		ctx.setError(context.DeadlineExceeded)
+	})
+	adapters, err := newWindowsAdapters(
+		runner,
+		[]workspace.ToolchainConfig{{
+			ID:          "manual-clang-cl",
+			Family:      string(FamilyClangCL),
+			CCompiler:   fixture.clang,
+			CPPCompiler: fixture.clang,
+		}},
+		fixture.options(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	instances, discoverErr := adapters[1].Discover(ctx)
+	if instances != nil || !errors.Is(discoverErr, context.DeadlineExceeded) {
+		t.Fatalf("clang-cl Discover(Ninja deadline) = %#v, %v", instances, discoverErr)
+	}
+	var carrier issueCarrier
+	if errors.As(discoverErr, &carrier) {
+		t.Fatalf("Ninja deadline was converted to discovery issues: %#v", carrier.ToolchainIssues())
+	}
+}
+
 func TestClangCLAdapterRejectsIncompatibleCompilerLinkerAndPair(t *testing.T) {
 	t.Run("lld major", func(t *testing.T) {
 		fixture := newWindowsToolchainFixture(t)
