@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "cmakeVersion": "4.3.4",
+  "license": "BSD-3-Clause",
+  "archives": {
+    "win32-x64": {
+      "url": "https://cmake.org/files/v4.3/cmake-4.3.4-windows-x86_64.zip",
+      "archiveSha256": "86e5fcafb38bdf58346a78b187c7b6b4f252ae5242cffe24c463a92bbd2e77d1",
+      "rootDirectory": "cmake-4.3.4-windows-x86_64",
+      "executable": "bin/cmake.exe",
+      "licensePath": "doc/cmake/LICENSE.rst",
+      "installedFiles": {
+        "bin/cmake.exe": "d323cee6566aca642fd337ba819efd61cc3883fac87a29d82dc21bae04169481",
+        "doc/cmake/LICENSE.rst": "cc1d3b0234846714b0aeda6cc34b057b4305bb83dd447fb88f816efeb59a4e96"
+      }
+    },
+    "linux-x64": {
+      "url": "https://cmake.org/files/v4.3/cmake-4.3.4-linux-x86_64.tar.gz",
+      "archiveSha256": "ca6f08ccbd5e6b0a9068d33317d0d1aff7278d08cccaed4529b8fbead7942a68",
+      "rootDirectory": "cmake-4.3.4-linux-x86_64",
+      "executable": "bin/cmake",
+      "licensePath": "doc/cmake/LICENSE.rst",
+      "installedFiles": {
+        "bin/cmake": "d323cee6566aca642fd337ba819efd61cc3883fac87a29d82dc21bae04169481",
+        "doc/cmake/LICENSE.rst": "cc1d3b0234846714b0aeda6cc34b057b4305bb83dd447fb88f816efeb59a4e96"
+      }
+    }
+  }
+}
