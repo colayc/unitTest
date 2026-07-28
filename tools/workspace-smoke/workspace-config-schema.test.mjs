@@ -106,3 +106,63 @@ test("workspace schema enforces family-discriminated manual toolchains", async (
     assert.match(JSON.stringify(validate.errors), /additionalProperties|oneOf/);
   }
 });
+
+test("workspace schema accepts missing optional fields and rejects explicit null", async () => {
+  const validate = await compileSchema();
+  const missingOptionalFields = [
+    { version: 1, projects: [], toolchains: [] },
+    { version: 1, cmake: {}, toolchains: [] },
+    { version: 1, cmake: {}, projects: [] },
+    { version: 1, cmake: {} },
+    { version: 1, projects: [{ id: "root", sourceDir: "." }] },
+    {
+      version: 1,
+      projects: [{
+        id: "root",
+        sourceDir: ".",
+        fallback: { preferredGenerator: "Ninja" }
+      }]
+    },
+    {
+      version: 1,
+      projects: [{
+        id: "root",
+        sourceDir: ".",
+        fallback: { configurations: ["Debug"] }
+      }]
+    }
+  ];
+  for (const configuration of missingOptionalFields) {
+    assert.equal(validate(configuration), true, JSON.stringify(validate.errors));
+  }
+
+  const nullOptionalFields = [
+    { version: 1, cmake: null },
+    { version: 1, projects: null },
+    { version: 1, toolchains: null },
+    { version: 1, cmake: { executable: null } },
+    {
+      version: 1,
+      projects: [{ id: "root", sourceDir: ".", fallback: null }]
+    },
+    {
+      version: 1,
+      projects: [{
+        id: "root",
+        sourceDir: ".",
+        fallback: { configurations: null }
+      }]
+    },
+    {
+      version: 1,
+      projects: [{
+        id: "root",
+        sourceDir: ".",
+        fallback: { preferredGenerator: null }
+      }]
+    }
+  ];
+  for (const configuration of nullOptionalFields) {
+    assert.equal(validate(configuration), false, JSON.stringify(configuration));
+  }
+});

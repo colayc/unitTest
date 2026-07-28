@@ -68,26 +68,31 @@ type LoadResult struct {
 	Issues []Issue
 }
 
+type nonNullOptional[T any] struct {
+	Value   T
+	Present bool
+}
+
 type configWire struct {
-	Version    int               `json:"version"`
-	CMake      *cmakeWire        `json:"cmake"`
-	Projects   []projectWire     `json:"projects"`
-	Toolchains []json.RawMessage `json:"toolchains"`
+	Version    int                                `json:"version"`
+	CMake      nonNullOptional[cmakeWire]         `json:"cmake"`
+	Projects   nonNullOptional[[]projectWire]     `json:"projects"`
+	Toolchains nonNullOptional[[]json.RawMessage] `json:"toolchains"`
 }
 
 type cmakeWire struct {
-	Executable *string `json:"executable"`
+	Executable nonNullOptional[string] `json:"executable"`
 }
 
 type projectWire struct {
-	ID        *string       `json:"id"`
-	SourceDir *string       `json:"sourceDir"`
-	Fallback  *fallbackWire `json:"fallback"`
+	ID        *string                       `json:"id"`
+	SourceDir *string                       `json:"sourceDir"`
+	Fallback  nonNullOptional[fallbackWire] `json:"fallback"`
 }
 
 type fallbackWire struct {
-	Configurations     []string `json:"configurations"`
-	PreferredGenerator *string  `json:"preferredGenerator"`
+	Configurations     nonNullOptional[[]string] `json:"configurations"`
+	PreferredGenerator nonNullOptional[string]   `json:"preferredGenerator"`
 }
 
 type familyWire struct {
@@ -175,23 +180,23 @@ func decodeConfig(root Root, data []byte) (Config, error) {
 	if wire.Version != 1 {
 		return Config{}, invalidConfig("version = %d, want 1", wire.Version)
 	}
-	if len(wire.Projects) > maxProjects {
-		return Config{}, invalidConfig("projects contains %d items, maximum is %d", len(wire.Projects), maxProjects)
+	if len(wire.Projects.Value) > maxProjects {
+		return Config{}, invalidConfig("projects contains %d items, maximum is %d", len(wire.Projects.Value), maxProjects)
 	}
-	if len(wire.Toolchains) > maxToolchains {
-		return Config{}, invalidConfig("toolchains contains %d items, maximum is %d", len(wire.Toolchains), maxToolchains)
+	if len(wire.Toolchains.Value) > maxToolchains {
+		return Config{}, invalidConfig("toolchains contains %d items, maximum is %d", len(wire.Toolchains.Value), maxToolchains)
 	}
 
 	config := Config{Version: wire.Version}
-	if wire.CMake != nil && wire.CMake.Executable != nil {
-		if !isPortableAbsolute(*wire.CMake.Executable) {
+	if wire.CMake.Present && wire.CMake.Value.Executable.Present {
+		if !isPortableAbsolute(wire.CMake.Value.Executable.Value) {
 			return Config{}, invalidConfig("cmake.executable must be an absolute path")
 		}
-		config.CMake.Executable = *wire.CMake.Executable
+		config.CMake.Executable = wire.CMake.Value.Executable.Value
 	}
 
-	projectIDs := make(map[string]struct{}, len(wire.Projects))
-	for index, project := range wire.Projects {
+	projectIDs := make(map[string]struct{}, len(wire.Projects.Value))
+	for index, project := range wire.Projects.Value {
 		decoded, err := decodeProject(root, index, project)
 		if err != nil {
 			return Config{}, err
@@ -203,8 +208,8 @@ func decodeConfig(root Root, data []byte) (Config, error) {
 		config.Projects = append(config.Projects, decoded)
 	}
 
-	toolchainIDs := make(map[string]struct{}, len(wire.Toolchains))
-	for index, raw := range wire.Toolchains {
+	toolchainIDs := make(map[string]struct{}, len(wire.Toolchains.Value))
+	for index, raw := range wire.Toolchains.Value {
 		toolchain, err := decodeToolchain(index, raw)
 		if err != nil {
 			return Config{}, err
@@ -230,19 +235,20 @@ func decodeProject(root Root, index int, wire projectWire) (ProjectConfig, error
 	}
 
 	project := ProjectConfig{ID: *wire.ID, SourceDir: *wire.SourceDir}
-	if wire.Fallback == nil {
+	if !wire.Fallback.Present {
 		return project, nil
 	}
-	if len(wire.Fallback.Configurations) > maxConfigurations {
+	configurations := wire.Fallback.Value.Configurations.Value
+	if len(configurations) > maxConfigurations {
 		return ProjectConfig{}, invalidConfig(
 			"projects[%d].fallback.configurations contains %d items, maximum is %d",
 			index,
-			len(wire.Fallback.Configurations),
+			len(configurations),
 			maxConfigurations,
 		)
 	}
-	seenConfigurations := make(map[string]struct{}, len(wire.Fallback.Configurations))
-	for configurationIndex, configuration := range wire.Fallback.Configurations {
+	seenConfigurations := make(map[string]struct{}, len(configurations))
+	for configurationIndex, configuration := range configurations {
 		if configuration == "" {
 			return ProjectConfig{}, invalidConfig(
 				"projects[%d].fallback.configurations[%d] must not be empty",
@@ -259,12 +265,12 @@ func decodeProject(root Root, index int, wire projectWire) (ProjectConfig, error
 		}
 		seenConfigurations[configuration] = struct{}{}
 	}
-	project.Fallback.Configurations = wire.Fallback.Configurations
-	if wire.Fallback.PreferredGenerator != nil {
-		if *wire.Fallback.PreferredGenerator == "" {
+	project.Fallback.Configurations = configurations
+	if wire.Fallback.Value.PreferredGenerator.Present {
+		if wire.Fallback.Value.PreferredGenerator.Value == "" {
 			return ProjectConfig{}, invalidConfig("projects[%d].fallback.preferredGenerator must not be empty", index)
 		}
-		project.Fallback.PreferredGenerator = *wire.Fallback.PreferredGenerator
+		project.Fallback.PreferredGenerator = wire.Fallback.Value.PreferredGenerator.Value
 	}
 	return project, nil
 }
@@ -341,6 +347,17 @@ func decodeStrict(data []byte, destination any) error {
 		}
 		return err
 	}
+	return nil
+}
+
+func (field *nonNullOptional[T]) UnmarshalJSON(data []byte) error {
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return errors.New("optional workspace field must not be null")
+	}
+	if err := decodeStrict(data, &field.Value); err != nil {
+		return err
+	}
+	field.Present = true
 	return nil
 }
 

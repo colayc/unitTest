@@ -64,6 +64,70 @@ func TestLoadConfigLoadsFamilyDiscriminatedManualToolchains(t *testing.T) {
 	}
 }
 
+func TestLoadConfigMatchesSchemaOptionalFieldPresence(t *testing.T) {
+	missingOptionalFields := map[string][]byte{
+		"cmake": []byte(
+			`{"version":1,"projects":[],"toolchains":[]}`,
+		),
+		"projects": []byte(
+			`{"version":1,"cmake":{},"toolchains":[]}`,
+		),
+		"toolchains": []byte(
+			`{"version":1,"cmake":{},"projects":[]}`,
+		),
+		"cmake executable": []byte(
+			`{"version":1,"cmake":{}}`,
+		),
+		"project fallback": []byte(
+			`{"version":1,"projects":[{"id":"root","sourceDir":"."}]}`,
+		),
+		"fallback configurations": []byte(
+			`{"version":1,"projects":[{"id":"root","sourceDir":".","fallback":{"preferredGenerator":"Ninja"}}]}`,
+		),
+		"fallback preferred generator": []byte(
+			`{"version":1,"projects":[{"id":"root","sourceDir":".","fallback":{"configurations":["Debug"]}}]}`,
+		),
+	}
+	for name, data := range missingOptionalFields {
+		t.Run("missing "+name, func(t *testing.T) {
+			if _, err := loadConfigBytes(t, data); err != nil {
+				t.Fatalf("LoadConfig error = %v, want missing optional field accepted", err)
+			}
+		})
+	}
+
+	nullOptionalFields := map[string][]byte{
+		"cmake": []byte(
+			`{"version":1,"cmake":null}`,
+		),
+		"projects": []byte(
+			`{"version":1,"projects":null}`,
+		),
+		"toolchains": []byte(
+			`{"version":1,"toolchains":null}`,
+		),
+		"cmake executable": []byte(
+			`{"version":1,"cmake":{"executable":null}}`,
+		),
+		"project fallback": []byte(
+			`{"version":1,"projects":[{"id":"root","sourceDir":".","fallback":null}]}`,
+		),
+		"fallback configurations": []byte(
+			`{"version":1,"projects":[{"id":"root","sourceDir":".","fallback":{"configurations":null}}]}`,
+		),
+		"fallback preferred generator": []byte(
+			`{"version":1,"projects":[{"id":"root","sourceDir":".","fallback":{"preferredGenerator":null}}]}`,
+		),
+	}
+	for name, data := range nullOptionalFields {
+		t.Run("null "+name, func(t *testing.T) {
+			if _, err := loadConfigBytes(t, data); !errors.Is(err, ErrInvalidConfig) {
+				t.Fatalf("LoadConfig error = %v, want ErrInvalidConfig for explicit null", err)
+			}
+		})
+	}
+}
+
 func TestLoadConfigRejectsInvalidStructuredInput(t *testing.T) {
 	tooManyProjects := make([]map[string]any, 65)
 	tooManyToolchains := make([]map[string]any, 65)
