@@ -22,6 +22,8 @@ func TestRunRejectsMixedInternalAndPublicModesBeforeSideEffects(t *testing.T) {
 		{name: "fixture and preparation", args: []string{"--task-fixture=success", "--prepare-token-file=PREPARE"}},
 		{name: "child and endpoint", args: []string{"--task-fixture-child", "--endpoint=unused"}},
 		{name: "multiple internal", args: []string{"--process-host", "--task-fixture=success"}},
+		{name: "probe supervisor and endpoint", args: []string{"--probe-supervisor", "--endpoint=unused"}},
+		{name: "probe supervisor and host", args: []string{"--probe-supervisor", "--process-host"}},
 	}
 
 	for _, test := range tests {
@@ -49,6 +51,23 @@ func TestRunRejectsMixedInternalAndPublicModesBeforeSideEffects(t *testing.T) {
 				t.Fatalf("preparation path was created: %v", err)
 			}
 		})
+	}
+}
+
+func TestRunProbeSupervisorDelegatesAsExclusiveInternalMode(t *testing.T) {
+	input := strings.NewReader("bounded-control-frame")
+	var stdout, stderr bytes.Buffer
+	previous := probeSupervisorEntry
+	probeSupervisorEntry = func(stdin io.Reader, gotStdout, gotStderr io.Writer) int {
+		if stdin != input || gotStdout != &stdout || gotStderr != &stderr {
+			t.Fatal("probe supervisor streams were not passed through")
+		}
+		return 29
+	}
+	defer func() { probeSupervisorEntry = previous }()
+
+	if code := run([]string{"--probe-supervisor"}, input, &stdout, &stderr); code != 29 {
+		t.Fatalf("code = %d, want 29; stderr = %q", code, stderr.String())
 	}
 }
 
