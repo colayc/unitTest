@@ -10,6 +10,7 @@ const serviceCommandPackage = "./apps/test-service/cmd/unit-test-service";
 const serviceProductionRoot = "apps/test-service";
 const currentServicePlatform = process.platform === "win32" ? "windows" : "linux";
 const winioImportPath = "github.com/Microsoft/go-winio";
+const pureParsingImports = new Set(["net/url"]);
 const allowedProductionNetworkImports = new Map([
   ["apps/test-service/internal/server/server.go", new Set(["net"])],
   ["apps/test-service/internal/server/service.go", new Set(["net"])],
@@ -33,14 +34,15 @@ function goImportAudit(paths) {
 }
 
 function isNetworkCapableImport(importPath) {
-  return importPath === "net"
-    || importPath.startsWith("net/")
-    || importPath === "crypto/tls"
-    || importPath.startsWith("github.com/google/go-github")
-    || importPath.startsWith("golang.org/x/oauth2")
-    || importPath === "golang.org/x/net"
-    || importPath.startsWith("golang.org/x/net/")
-    || importPath === winioImportPath;
+  return !pureParsingImports.has(importPath)
+    && (importPath === "net"
+      || importPath.startsWith("net/")
+      || importPath === "crypto/tls"
+      || importPath.startsWith("github.com/google/go-github")
+      || importPath.startsWith("golang.org/x/oauth2")
+      || importPath === "golang.org/x/net"
+      || importPath.startsWith("golang.org/x/net/")
+      || importPath === winioImportPath);
 }
 
 function productionNetworkImportEscapes(records) {
@@ -134,6 +136,13 @@ test("Go import audit parses commented raw and aliased import specs before polic
     );
   } finally {
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("network import policy permits pure URL parsing but still rejects transport stacks", () => {
+  assert.equal(isNetworkCapableImport("net/url"), false);
+  for (const importPath of ["net", "net/http", "net/http/httptest", "crypto/tls"]) {
+    assert.equal(isNetworkCapableImport(importPath), true, `${importPath} must remain network-capable`);
   }
 });
 
