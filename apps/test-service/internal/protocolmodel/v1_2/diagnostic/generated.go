@@ -1,4 +1,4 @@
-package protocolmodel
+package protocolmodelv12diagnostic
 
 type Diagnostic struct {
 	Code      string   `json:"code"`

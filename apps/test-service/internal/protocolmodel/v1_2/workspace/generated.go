@@ -1,4 +1,4 @@
-package protocolmodel
+package protocolmodelv12workspace
 
 type WorkspaceSnapshot struct {
 	Capabilities        Capabilities     `json:"capabilities"`

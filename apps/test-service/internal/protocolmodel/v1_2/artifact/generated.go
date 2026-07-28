@@ -1,4 +1,4 @@
-package protocolmodel
+package protocolmodelv12artifact
 
 import "time"
 

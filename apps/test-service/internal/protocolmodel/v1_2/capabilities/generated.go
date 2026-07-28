@@ -1,4 +1,4 @@
-package protocolmodel
+package protocolmodelv12capabilities
 
 type CapabilitiesV12 struct {
 	CmakeBuild       bool `json:"cmakeBuild"`

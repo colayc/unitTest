@@ -171,6 +171,38 @@ test("protocol 1.2 validates workspace builds and keeps v1.1 strict", async () =
   assert.equal(validateV12(await load("../fixtures/v1.2/event-diagnostic.valid.json")), true, JSON.stringify(validateV12.errors));
   assert.equal(validateV12(await load("../fixtures/v1.2/cmake-build-shell.invalid.json")), false);
   assert.equal(validateV11(await load("../fixtures/v1.2/cmake-build-start.valid.json")), false);
+
+  const targets = await load("../fixtures/v1.2/targets-list.valid.json");
+  assert.equal(validateV12(targets), true, JSON.stringify(validateV12.errors));
+  assert.equal(validateV12({ ...targets, method: "targets/list" }), false);
+
+  const stepStarted = {
+    protocolVersion: "1.2",
+    kind: "event",
+    messageId: "33333333333333333333333333333333",
+    sentAt: "2026-07-26T00:00:01Z",
+    sequence: 2,
+    event: "task.step_started",
+    taskId: "fedcba9876543210fedcba9876543210",
+    payloadVersion: 1,
+    payload: { step: "configure" }
+  };
+  const stepFinished = { ...stepStarted, sequence: 3, event: "task.step_finished", payload: { step: "build", outcome: "succeeded" } };
+  assert.equal(validateV12(stepStarted), true, JSON.stringify(validateV12.errors));
+  assert.equal(validateV12(stepFinished), true, JSON.stringify(validateV12.errors));
+  assert.equal(validateV12({ ...stepStarted, payload: { ...stepStarted.payload, executable: "cmake" } }), false);
+  assert.equal(validateV11(stepStarted), false);
+  assert.equal(validateV11(stepFinished), false);
+
+  const configureRequired = {
+    protocolVersion: "1.2",
+    kind: "error",
+    messageId: "44444444444444444444444444444444",
+    requestId: "55555555555555555555555555555555",
+    sentAt: "2026-07-26T00:00:01Z",
+    error: { code: "CONFIGURE_REQUIRED", message: "cmake/targets/list requires a valid File API reply", retryable: false }
+  };
+  assert.equal(validateV12(configureRequired), true, JSON.stringify(validateV12.errors));
 });
 
 test("protocol 1.2 refuses execution details and native workspace paths", async () => {

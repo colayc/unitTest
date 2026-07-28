@@ -5,8 +5,8 @@ import { ArtifactKind, MIMEType } from "./generated/artifact.js";
 import { Event, EventKind, ProtocolVersion } from "./generated/event.js";
 import { Outcome, Scenario, Status, TaskKind } from "./generated/task.js";
 import { Severity } from "./generated/diagnostic.js";
-import { Kind as TaskKindV12, Status as TaskStatusV12 } from "./generated/task-v1-2.js";
-import { Event as TaskEventNameV12, Kind as TaskEventKindV12, ProtocolVersion as TaskProtocolVersionV12 } from "./generated/event-v1-2.js";
+import { SimulationScenarioV12, TaskKindV12, TaskStatusV12 } from "./generated/task-v1-2.js";
+import { EventKindV12, EventProtocolVersionV12, TaskEventDiagnosticSeverityV12, TaskEventNameV12 } from "./generated/event-v1-2.js";
 import { Kind as ArtifactKindV12, MIMEType as ArtifactMIMETypeV12 } from "./generated/artifact-v1-2.js";
 
 test("generated capabilities represent an empty Windows service", () => {
@@ -78,20 +78,21 @@ test("generated protocol 1.2 models expose workspace build contracts", () => {
     buildProfileId: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
     targetIds: [],
     jobs: 4,
+    timeoutMs: 30000,
     status: TaskStatusV12.Queued,
     createdAt: new Date("2026-07-26T00:00:00Z"),
     lastSequence: 1
   };
   const event: TaskEventV12 = {
-    protocolVersion: TaskProtocolVersionV12.The12,
-    kind: TaskEventKindV12.Event,
+    protocolVersion: EventProtocolVersionV12.The12,
+    kind: EventKindV12.Event,
     messageId: task.taskId,
     sentAt: new Date("2026-07-26T00:00:00Z"),
     sequence: 1,
     event: TaskEventNameV12.TaskDiagnostic,
     taskId: task.taskId,
     payloadVersion: 1,
-    payload: { diagnostic }
+    payload: { diagnostic: { severity: TaskEventDiagnosticSeverityV12.Error, code: diagnostic.code, message: diagnostic.message } }
   };
   const artifact: ArtifactMetadataV12 = {
     artifactId: task.taskId,
@@ -105,4 +106,41 @@ test("generated protocol 1.2 models expose workspace build contracts", () => {
   };
 
   assert.equal(artifact.uri, "file:///workspace/task-summary.json");
+});
+
+test("generated protocol 1.2 models preserve discriminated branches", () => {
+  // @ts-expect-error cmakeBuild requires its workspace build identifiers.
+  const missingCmakeFields: TaskSnapshotV12 = {
+    taskId: "fedcba9876543210fedcba9876543210",
+    kind: TaskKindV12.CmakeBuild,
+    status: TaskStatusV12.Queued,
+    createdAt: new Date("2026-07-26T00:00:00Z"),
+    lastSequence: 1
+  };
+  // @ts-expect-error simulation must reject cmakeBuild-only fields.
+  const simulationWithBuildField: TaskSnapshotV12 = {
+    taskId: "fedcba9876543210fedcba9876543210",
+    kind: TaskKindV12.Simulation,
+    scenario: SimulationScenarioV12.Success,
+    workspaceGeneration: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    status: TaskStatusV12.Queued,
+    createdAt: new Date("2026-07-26T00:00:00Z"),
+    lastSequence: 1
+  };
+  // @ts-expect-error task.diagnostic requires diagnostic payload.
+  const diagnosticWithoutPayload: TaskEventV12 = {
+    protocolVersion: EventProtocolVersionV12.The12,
+    kind: EventKindV12.Event,
+    messageId: "fedcba9876543210fedcba9876543210",
+    sentAt: new Date("2026-07-26T00:00:00Z"),
+    sequence: 1,
+    event: TaskEventNameV12.TaskDiagnostic,
+    taskId: "fedcba9876543210fedcba9876543210",
+    payloadVersion: 1,
+    payload: {}
+  };
+
+  assert.equal(missingCmakeFields.kind, TaskKindV12.CmakeBuild);
+  assert.equal(simulationWithBuildField.kind, TaskKindV12.Simulation);
+  assert.equal(diagnosticWithoutPayload.event, TaskEventNameV12.TaskDiagnostic);
 });

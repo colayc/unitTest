@@ -64,7 +64,7 @@
       "allOf": [{ "$ref": "#/$defs/base" }, {
         "type": "object",
         "properties": {
-          "kind": { "const": "request" }, "method": { "const": "targets/list" },
+          "kind": { "const": "request" }, "method": { "const": "cmake/targets/list" },
           "payload": {
             "type": "object", "additionalProperties": false, "required": ["workspaceGeneration", "projectId"],
             "properties": {
@@ -130,7 +130,7 @@
     },
     "targetsResponse": {
       "type": "object",
-      "allOf": [{ "$ref": "#/$defs/responseBase" }, { "type": "object", "properties": { "method": { "const": "targets/list" }, "payload": { "$ref": "urn:unit-test-ide:protocol:v1.2:workspace#/$defs/targetList" } } }],
+      "allOf": [{ "$ref": "#/$defs/responseBase" }, { "type": "object", "properties": { "method": { "const": "cmake/targets/list" }, "payload": { "$ref": "urn:unit-test-ide:protocol:v1.2:workspace#/$defs/targetList" } } }],
       "unevaluatedProperties": false
     },
     "taskResponse": {
@@ -175,7 +175,7 @@
           "kind": { "const": "error" }, "requestId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
           "error": {
             "type": "object", "additionalProperties": false, "required": ["code", "message", "retryable"],
-            "properties": { "code": { "enum": ["INVALID_MESSAGE", "UNSUPPORTED_PROTOCOL", "AUTH_REQUIRED", "AUTH_FAILED", "METHOD_NOT_FOUND", "INVALID_TASK_SPEC", "TASK_NOT_FOUND", "IDEMPOTENCY_CONFLICT", "PROTOCOL_FEATURE_UNAVAILABLE"] }, "message": { "type": "string" }, "retryable": { "type": "boolean" } }
+            "properties": { "code": { "enum": ["INVALID_MESSAGE", "UNSUPPORTED_PROTOCOL", "AUTH_REQUIRED", "AUTH_FAILED", "METHOD_NOT_FOUND", "INVALID_TASK_SPEC", "TASK_NOT_FOUND", "IDEMPOTENCY_CONFLICT", "CONFIGURE_REQUIRED", "PROTOCOL_FEATURE_UNAVAILABLE"] }, "message": { "type": "string" }, "retryable": { "type": "boolean" } }
           }
         }, "required": ["kind", "requestId", "error"]
       }], "unevaluatedProperties": false

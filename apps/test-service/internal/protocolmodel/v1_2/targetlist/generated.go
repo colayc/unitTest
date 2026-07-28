@@ -1,4 +1,4 @@
-package protocolmodel
+package protocolmodelv12targetlist
 
 type TargetList struct {
 	ProjectID           string             `json:"projectId"`
