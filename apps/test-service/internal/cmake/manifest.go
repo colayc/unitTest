@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/url"
-	"os"
 	"path"
 	"path/filepath"
 	"reflect"
@@ -54,14 +53,30 @@ type bundleState struct {
 }
 
 func loadManifest(filePath string) (Manifest, error) {
+	manifest, snapshot, err := loadManifestSnapshot(filePath)
+	if snapshot != nil {
+		_ = snapshot.Close()
+	}
+	return manifest, err
+}
+
+func loadManifestSnapshot(filePath string) (Manifest, *fileSnapshot, error) {
 	var manifest Manifest
-	if err := decodeStrictFile(filePath, maxManifestSize, &manifest); err != nil {
-		return Manifest{}, fmt.Errorf("%w: %v", ErrInvalidManifest, err)
+	snapshot, err := captureFileSnapshot(filePath, maxManifestSize)
+	if err != nil {
+		return Manifest{}, nil, fmt.Errorf("%w: %v", ErrInvalidManifest, err)
+	}
+	fail := func(result error) (Manifest, *fileSnapshot, error) {
+		_ = snapshot.Close()
+		return Manifest{}, nil, result
+	}
+	if err := decodeStrictSnapshot(snapshot, maxManifestSize, &manifest); err != nil {
+		return fail(fmt.Errorf("%w: %v", ErrInvalidManifest, err))
 	}
 	if err := validateManifest(manifest); err != nil {
-		return Manifest{}, fmt.Errorf("%w: %v", ErrInvalidManifest, err)
+		return fail(fmt.Errorf("%w: %v", ErrInvalidManifest, err))
 	}
-	return manifest, nil
+	return manifest, snapshot, nil
 }
 
 func validateManifest(manifest Manifest) error {
@@ -88,6 +103,38 @@ func validateManifest(manifest Manifest) error {
 		}
 	}
 	return nil
+}
+
+func productionManifestPolicy() Manifest {
+	return Manifest{
+		SchemaVersion: 1,
+		CMakeVersion:  "4.3.4",
+		License:       "BSD-3-Clause",
+		Archives: map[string]Archive{
+			"win32-x64": {
+				URL:           "https://cmake.org/files/v4.3/cmake-4.3.4-windows-x86_64.zip",
+				ArchiveSha256: "86e5fcafb38bdf58346a78b187c7b6b4f252ae5242cffe24c463a92bbd2e77d1",
+				RootDirectory: "cmake-4.3.4-windows-x86_64",
+				Executable:    "bin/cmake.exe",
+				LicensePath:   "doc/cmake/LICENSE.rst",
+				InstalledFiles: map[string]string{
+					"bin/cmake.exe":         "1aa884bf1f4949327fffcc8ee4a97c2d684bdc1d0a64b71f01dc16321c7fbc64",
+					"doc/cmake/LICENSE.rst": "cd944d878806fee998ef3f88ca41ec060ae198bd8ba615e284f7d8d90c25593e",
+				},
+			},
+			"linux-x64": {
+				URL:           "https://cmake.org/files/v4.3/cmake-4.3.4-linux-x86_64.tar.gz",
+				ArchiveSha256: "ca6f08ccbd5e6b0a9068d33317d0d1aff7278d08cccaed4529b8fbead7942a68",
+				RootDirectory: "cmake-4.3.4-linux-x86_64",
+				Executable:    "bin/cmake",
+				LicensePath:   "doc/cmake/LICENSE.rst",
+				InstalledFiles: map[string]string{
+					"bin/cmake":             "8542b512ac147329e03de375583665a64f02afb65d6c4665099390be103ac2d0",
+					"doc/cmake/LICENSE.rst": "4382e7c1879ac90e3f101a395d23846fa4dbcaa1eed7265b43681e348754825d",
+				},
+			},
+		},
+	}
 }
 
 func validateArchive(version, key string, archive Archive) error {
@@ -150,9 +197,25 @@ func validateArchive(version, key string, archive Archive) error {
 }
 
 func loadBundleState(filePath string, manifest Manifest, key string, archive Archive) error {
+	snapshot, err := loadBundleStateSnapshot(filePath, manifest, key, archive)
+	if snapshot != nil {
+		_ = snapshot.Close()
+	}
+	return err
+}
+
+func loadBundleStateSnapshot(filePath string, manifest Manifest, key string, archive Archive) (*fileSnapshot, error) {
 	var state bundleState
-	if err := decodeStrictFile(filePath, maxManifestSize, &state); err != nil {
-		return fmt.Errorf("%w: read bundle state: %v", ErrBundleIntegrity, err)
+	snapshot, err := captureFileSnapshot(filePath, maxManifestSize)
+	if err != nil {
+		return nil, fmt.Errorf("%w: read bundle state: %v", ErrBundleIntegrity, err)
+	}
+	fail := func(result error) (*fileSnapshot, error) {
+		_ = snapshot.Close()
+		return nil, result
+	}
+	if err := decodeStrictSnapshot(snapshot, maxManifestSize, &state); err != nil {
+		return fail(fmt.Errorf("%w: read bundle state: %v", ErrBundleIntegrity, err))
 	}
 	expected := bundleState{
 		SchemaVersion:  manifest.SchemaVersion,
@@ -162,36 +225,25 @@ func loadBundleState(filePath string, manifest Manifest, key string, archive Arc
 		InstalledFiles: archive.InstalledFiles,
 	}
 	if !reflect.DeepEqual(state, expected) {
-		return fmt.Errorf("%w: bundle state does not match manifest", ErrBundleIntegrity)
+		return fail(fmt.Errorf("%w: bundle state does not match immutable policy", ErrBundleIntegrity))
 	}
-	return nil
+	return snapshot, nil
 }
 
 func decodeStrictFile(filePath string, maximum int64, destination any) error {
-	file, err := os.Open(filePath)
+	snapshot, err := captureFileSnapshot(filePath, maximum)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer snapshot.Close()
+	return decodeStrictSnapshot(snapshot, maximum, destination)
+}
 
-	info, err := file.Stat()
+func decodeStrictSnapshot(snapshot *fileSnapshot, maximum int64, destination any) error {
+	data, err := snapshot.ReadAll(maximum)
 	if err != nil {
 		return err
 	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("not a regular file")
-	}
-	if info.Size() > maximum {
-		return fmt.Errorf("file exceeds %d bytes", maximum)
-	}
-	data, err := io.ReadAll(io.LimitReader(file, maximum+1))
-	if err != nil {
-		return err
-	}
-	if int64(len(data)) > maximum {
-		return fmt.Errorf("file exceeds %d bytes", maximum)
-	}
-
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(destination); err != nil {

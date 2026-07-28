@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -156,6 +157,30 @@ func TestRunnerStopsOnStderrLimit(t *testing.T) {
 	}
 }
 
+func TestRunnerTimeoutTerminatesDescendant(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "descendant.pid")
+	spec := helperSpec(t, "spawn-descendant-hang", marker)
+	spec.Timeout = 500 * time.Millisecond
+
+	_, err := NewRunner().Run(context.Background(), spec)
+	if !errors.Is(err, ErrTimeout) {
+		t.Fatalf("error = %v, want ErrTimeout", err)
+	}
+	assertRecordedDescendantGone(t, marker)
+}
+
+func TestRunnerOutputLimitTerminatesDescendantAndConvergesPipes(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "descendant.pid")
+	spec := helperSpec(t, "spawn-descendant-output", marker)
+	spec.MaxOutput = 64
+
+	_, err := NewRunner().Run(context.Background(), spec)
+	if !errors.Is(err, ErrOutputLimit) {
+		t.Fatalf("error = %v, want ErrOutputLimit", err)
+	}
+	assertRecordedDescendantGone(t, marker)
+}
+
 func TestRunnerAppliesIndependentDefaultOutputLimits(t *testing.T) {
 	spec := helperSpec(t, "exact-streams", strconv.Itoa(defaultMaxOutput))
 
@@ -243,11 +268,76 @@ func TestProbeHelperProcess(t *testing.T) {
 		chunk := bytes.Repeat([]byte("x"), size)
 		_, _ = os.Stdout.Write(chunk)
 		_, _ = os.Stderr.Write(chunk)
+	case "spawn-descendant-hang":
+		spawnProbeDescendant(values, "descendant-hang")
+	case "spawn-descendant-output":
+		spawnProbeDescendant(values, "descendant-output")
+	case "descendant-hang":
+		time.Sleep(time.Hour)
+	case "descendant-output":
+		if len(values) != 1 {
+			os.Exit(2)
+		}
+		waitForMarker(values[0])
+		writeUntilClosed(os.Stdout)
+		time.Sleep(time.Hour)
 	default:
 		_, _ = fmt.Fprintf(os.Stderr, "unknown helper mode %q", mode)
 		os.Exit(2)
 	}
 	os.Exit(0)
+}
+
+func spawnProbeDescendant(values []string, mode string) {
+	if len(values) != 1 {
+		os.Exit(2)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		os.Exit(2)
+	}
+	marker := values[0]
+	child := exec.Command(executable, "-test.run=^TestProbeHelperProcess$", "--", mode, marker)
+	child.Env = []string{}
+	child.Stdout = os.Stdout
+	child.Stderr = os.Stderr
+	if err := child.Start(); err != nil {
+		os.Exit(2)
+	}
+	if err := os.WriteFile(marker, []byte(strconv.Itoa(child.Process.Pid)), 0o600); err != nil {
+		_ = child.Process.Kill()
+		os.Exit(2)
+	}
+	time.Sleep(time.Hour)
+}
+
+func waitForMarker(marker string) {
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(marker); err == nil {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	os.Exit(2)
+}
+
+func assertRecordedDescendantGone(t *testing.T, marker string) {
+	t.Helper()
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("read descendant marker: %v", err)
+	}
+	pid, err := strconv.Atoi(string(data))
+	if err != nil || pid <= 0 {
+		t.Fatalf("descendant PID = %q, error = %v", data, err)
+	}
+	t.Cleanup(func() {
+		terminateTestProcess(pid)
+	})
+	if !waitTestProcessGone(pid, 2*time.Second) {
+		t.Fatalf("descendant PID %d remained alive", pid)
+	}
 }
 
 func writeUntilClosed(file *os.File) {

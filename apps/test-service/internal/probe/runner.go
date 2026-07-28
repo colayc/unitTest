@@ -2,9 +2,9 @@ package probe
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -35,14 +35,8 @@ func (defaultRunner) Run(ctx context.Context, spec Spec) (Result, error) {
 
 	stdout := newLimitedBuffer(spec.MaxOutput)
 	stderr := newLimitedBuffer(spec.MaxOutput)
-	command := exec.CommandContext(runContext, spec.Executable, spec.Args...)
-	command.Env = append([]string{}, spec.Env...)
-	command.Dir = spec.Dir
-	command.Stdout = stdout
-	command.Stderr = stderr
-	command.WaitDelay = waitDelay
-
-	if err := command.Start(); err != nil {
+	process, err := startProcessTree(runContext, spec, stdout, stderr)
+	if err != nil {
 		if contextErr := ctx.Err(); contextErr != nil {
 			return Result{ExitCode: -1}, contextErr
 		}
@@ -50,40 +44,45 @@ func (defaultRunner) Run(ctx context.Context, spec Spec) (Result, error) {
 	}
 
 	processDone := make(chan struct{})
-	limitMonitorDone := make(chan struct{})
+	cleanupDone := make(chan error, 1)
 	go func() {
-		defer close(limitMonitorDone)
 		select {
 		case <-stdout.exceeded:
 			cancel()
-			_ = command.Process.Kill()
+			cleanupDone <- process.Terminate()
 		case <-stderr.exceeded:
 			cancel()
-			_ = command.Process.Kill()
+			cleanupDone <- process.Terminate()
+		case <-runContext.Done():
+			cleanupDone <- process.Terminate()
 		case <-processDone:
+			cleanupDone <- nil
 		}
 	}()
 
-	waitErr := command.Wait()
+	exitCode, waitErr := process.Wait()
 	close(processDone)
-	<-limitMonitorDone
+	cleanupErr := <-cleanupDone
 
 	result := Result{
-		ExitCode: command.ProcessState.ExitCode(),
+		ExitCode: exitCode,
 		Stdout:   stdout.bytes(),
 		Stderr:   stderr.bytes(),
 	}
 	if stdout.didExceed() || stderr.didExceed() {
 		result.ExitCode = -1
-		return result, ErrOutputLimit
+		return result, errors.Join(ErrOutputLimit, cleanupErr)
 	}
 	if contextErr := ctx.Err(); contextErr != nil {
 		result.ExitCode = -1
-		return result, contextErr
+		return result, errors.Join(contextErr, cleanupErr)
 	}
 	if runContext.Err() != nil {
 		result.ExitCode = -1
-		return result, ErrTimeout
+		return result, errors.Join(ErrTimeout, cleanupErr)
+	}
+	if cleanupErr != nil {
+		return result, fmt.Errorf("clean up probe process tree: %w", cleanupErr)
 	}
 	if waitErr != nil {
 		return result, fmt.Errorf("wait for probe: %w", waitErr)

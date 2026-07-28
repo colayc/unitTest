@@ -7,9 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"sort"
@@ -26,16 +26,24 @@ var (
 	ErrVersionMismatch   = errors.New("CMake version does not match bundle manifest")
 
 	humanVersionPattern = regexp.MustCompile(`(?m)^cmake version ([^\s]+)\s*$`)
+	errJSONSyntax       = errors.New("invalid CMake version JSON syntax")
 )
 
 const resolverOutputLimit = 256 * 1024
 
 func Resolve(ctx context.Context, runner probe.Runner, config ResolverConfig) (Installation, error) {
+	return resolveWithPolicy(ctx, runner, config, productionManifestPolicy())
+}
+
+func resolveWithPolicy(ctx context.Context, runner probe.Runner, config ResolverConfig, policy Manifest) (Installation, error) {
 	switch {
 	case config.Override != "":
 		return resolveStandalone(ctx, runner, config.Override, SourceOverride)
 	case config.BundleRoot != "":
-		return resolveBundle(ctx, runner, config)
+		if err := validateManifest(policy); err != nil {
+			return Installation{}, fmt.Errorf("%w: invalid resolver policy: %v", ErrInvalidManifest, err)
+		}
+		return resolveBundle(ctx, runner, config, policy)
 	case config.DevExecutable != "":
 		return resolveStandalone(ctx, runner, config.DevExecutable, SourceDev)
 	default:
@@ -44,20 +52,28 @@ func Resolve(ctx context.Context, runner probe.Runner, config ResolverConfig) (I
 }
 
 func resolveStandalone(ctx context.Context, runner probe.Runner, executable, source string) (Installation, error) {
-	canonical, digest, err := verifyStandaloneExecutable(executable)
+	canonical, snapshot, err := verifyStandaloneExecutable(executable)
 	if err != nil {
 		return Installation{}, err
 	}
-	version, err := probeVersion(ctx, runner, canonical)
-	if err != nil {
-		return Installation{}, err
+	defer snapshot.Close()
+	if err := verifyStandaloneSnapshot(canonical, snapshot); err != nil {
+		return Installation{}, fmt.Errorf("%w: verify executable before probe: %v", ErrInvalidExecutable, err)
+	}
+	version, probeErr := probeVersion(ctx, runner, canonical)
+	if err := verifyStandaloneSnapshot(canonical, snapshot); err != nil {
+		return Installation{}, fmt.Errorf("%w: verify executable after probe: %v", ErrInvalidExecutable, err)
+	}
+	if probeErr != nil {
+		return Installation{}, probeErr
 	}
 	identity, err := installationIdentity(identityInput{
 		Path:    canonical,
 		Version: version,
 		Source:  source,
 		FileIdentity: fileIdentity{
-			ExecutableSha256: digest,
+			ExecutableSha256:     snapshot.digest,
+			ExecutableOSIdentity: snapshot.osIdentity,
 		},
 	})
 	if err != nil {
@@ -71,7 +87,7 @@ func resolveStandalone(ctx context.Context, runner probe.Runner, executable, sou
 	}, nil
 }
 
-func resolveBundle(ctx context.Context, runner probe.Runner, config ResolverConfig) (Installation, error) {
+func resolveBundle(ctx context.Context, runner probe.Runner, config ResolverConfig, policy Manifest) (Installation, error) {
 	key, err := platformKey(config.Platform, config.Architecture)
 	if err != nil {
 		return Installation{}, err
@@ -84,20 +100,27 @@ func resolveBundle(ctx context.Context, runner probe.Runner, config ResolverConf
 	if err != nil {
 		return Installation{}, fmt.Errorf("%w: manifest: %v", ErrBundleIntegrity, err)
 	}
-	manifest, err := loadManifest(manifestPath)
+	manifest, manifestSnapshot, err := loadManifestSnapshot(manifestPath)
 	if err != nil {
 		return Installation{}, err
 	}
-	archive := manifest.Archives[key]
+	snapshots := []*fileSnapshot{manifestSnapshot}
+	defer func() { closeFileSnapshots(snapshots) }()
+	if !reflect.DeepEqual(manifest, policy) {
+		return Installation{}, fmt.Errorf("%w: manifest does not match immutable production policy", ErrInvalidManifest)
+	}
+	archive := policy.Archives[key]
 
-	platformRelative := filepath.Join(manifest.CMakeVersion, key)
+	platformRelative := filepath.Join(policy.CMakeVersion, key)
 	statePath, err := containedRegularPath(root, filepath.Join(platformRelative, "bundle-state.json"))
 	if err != nil {
 		return Installation{}, fmt.Errorf("%w: bundle state: %v", ErrBundleIntegrity, err)
 	}
-	if err := loadBundleState(statePath, manifest, key, archive); err != nil {
+	stateSnapshot, err := loadBundleStateSnapshot(statePath, policy, key, archive)
+	if err != nil {
 		return Installation{}, err
 	}
+	snapshots = append(snapshots, stateSnapshot)
 	installRoot, err := containedDirectoryPath(root, filepath.Join(platformRelative, filepath.FromSlash(archive.RootDirectory)))
 	if err != nil {
 		return Installation{}, fmt.Errorf("%w: install root: %v", ErrBundleIntegrity, err)
@@ -110,39 +133,54 @@ func resolveBundle(ctx context.Context, runner probe.Runner, config ResolverConf
 		if err != nil {
 			return Installation{}, fmt.Errorf("%w: installed file %q: %v", ErrBundleIntegrity, relative, err)
 		}
-		actualDigest, err := sha256File(filePath)
+		snapshot, err := captureFileSnapshot(filePath, 0)
 		if err != nil {
-			return Installation{}, fmt.Errorf("%w: hash installed file %q: %v", ErrBundleIntegrity, relative, err)
+			return Installation{}, fmt.Errorf("%w: snapshot installed file %q: %v", ErrBundleIntegrity, relative, err)
 		}
+		snapshots = append(snapshots, snapshot)
+		actualDigest := snapshot.digest
 		if actualDigest != expectedDigest {
 			return Installation{}, fmt.Errorf("%w: installed file %q digest mismatch", ErrBundleIntegrity, relative)
 		}
 		resolvedFiles[relative] = filePath
-		installed = append(installed, installedFileIdentity{Path: relative, Sha256: actualDigest})
+		installed = append(installed, installedFileIdentity{
+			Path: relative, Sha256: actualDigest, OSIdentity: snapshot.osIdentity,
+		})
 	}
 	sort.Slice(installed, func(left, right int) bool {
 		return installed[left].Path < installed[right].Path
 	})
 
 	executable := resolvedFiles[archive.Executable]
-	if err := requireExecutableMode(executable); err != nil {
+	executableSnapshot := snapshotsByPath(snapshots)[executable]
+	if executableSnapshot == nil {
+		return Installation{}, fmt.Errorf("%w: executable snapshot is missing", ErrBundleIntegrity)
+	}
+	if err := requireExecutableMode(executable, executableSnapshot.info); err != nil {
 		return Installation{}, err
 	}
-	version, err := probeVersion(ctx, runner, executable)
-	if err != nil {
-		return Installation{}, err
+	if err := verifyBundleSnapshots(root, snapshots); err != nil {
+		return Installation{}, fmt.Errorf("%w: verify bundle before probe: %v", ErrBundleIntegrity, err)
 	}
-	if version != manifest.CMakeVersion {
-		return Installation{}, fmt.Errorf("%w: got %q, want %q", ErrVersionMismatch, version, manifest.CMakeVersion)
+	version, probeErr := probeVersion(ctx, runner, executable)
+	if err := verifyBundleSnapshots(root, snapshots); err != nil {
+		return Installation{}, fmt.Errorf("%w: verify bundle after probe: %v", ErrBundleIntegrity, err)
+	}
+	if probeErr != nil {
+		return Installation{}, probeErr
+	}
+	if version != policy.CMakeVersion {
+		return Installation{}, fmt.Errorf("%w: got %q, want %q", ErrVersionMismatch, version, policy.CMakeVersion)
 	}
 	identity, err := installationIdentity(identityInput{
 		Path:    executable,
 		Version: version,
 		Source:  SourceBundle,
 		FileIdentity: fileIdentity{
-			ExecutableSha256: archive.InstalledFiles[archive.Executable],
-			ArchiveSha256:    archive.ArchiveSha256,
-			InstalledFiles:   installed,
+			ExecutableSha256:     archive.InstalledFiles[archive.Executable],
+			ExecutableOSIdentity: executableSnapshot.osIdentity,
+			ArchiveSha256:        archive.ArchiveSha256,
+			InstalledFiles:       installed,
 		},
 	})
 	if err != nil {
@@ -189,40 +227,37 @@ func canonicalBundleRoot(root string) (string, error) {
 	return boundary.NativePath, nil
 }
 
-func verifyStandaloneExecutable(executable string) (string, string, error) {
+func verifyStandaloneExecutable(executable string) (string, *fileSnapshot, error) {
 	if executable == "" || !filepath.IsAbs(executable) {
-		return "", "", fmt.Errorf("%w: path must be absolute", ErrInvalidExecutable)
+		return "", nil, fmt.Errorf("%w: path must be absolute", ErrInvalidExecutable)
 	}
 	info, err := os.Lstat(executable)
 	if err != nil {
-		return "", "", fmt.Errorf("%w: inspect path: %v", ErrInvalidExecutable, err)
+		return "", nil, fmt.Errorf("%w: inspect path: %v", ErrInvalidExecutable, err)
 	}
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-		return "", "", fmt.Errorf("%w: path is not a direct regular file", ErrInvalidExecutable)
+		return "", nil, fmt.Errorf("%w: path is not a direct regular file", ErrInvalidExecutable)
 	}
 	parent, err := workspace.OpenRoot(filepath.Dir(executable))
 	if err != nil {
-		return "", "", fmt.Errorf("%w: resolve path: %v", ErrInvalidExecutable, err)
+		return "", nil, fmt.Errorf("%w: resolve path: %v", ErrInvalidExecutable, err)
 	}
 	canonical, err := parent.ResolveRelative(filepath.Base(executable))
 	if err != nil {
-		return "", "", fmt.Errorf("%w: resolve executable: %v", ErrInvalidExecutable, err)
+		return "", nil, fmt.Errorf("%w: resolve executable: %v", ErrInvalidExecutable, err)
 	}
-	if err := requireExecutableMode(canonical); err != nil {
-		return "", "", err
-	}
-	digest, err := sha256File(canonical)
+	snapshot, err := captureFileSnapshot(canonical, 0)
 	if err != nil {
-		return "", "", fmt.Errorf("%w: hash executable: %v", ErrInvalidExecutable, err)
+		return "", nil, fmt.Errorf("%w: snapshot executable: %v", ErrInvalidExecutable, err)
 	}
-	return canonical, digest, nil
+	if err := requireExecutableMode(canonical, snapshot.info); err != nil {
+		_ = snapshot.Close()
+		return "", nil, err
+	}
+	return canonical, snapshot, nil
 }
 
-func requireExecutableMode(filePath string) error {
-	info, err := os.Stat(filePath)
-	if err != nil {
-		return fmt.Errorf("%w: inspect executable: %v", ErrInvalidExecutable, err)
-	}
+func requireExecutableMode(filePath string, info os.FileInfo) error {
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("%w: executable is not a regular file", ErrInvalidExecutable)
 	}
@@ -267,17 +302,52 @@ func containedPath(root, relative string, wantDirectory bool) (string, error) {
 	return canonical, nil
 }
 
-func sha256File(filePath string) (string, error) {
-	file, err := os.Open(filePath)
+func closeFileSnapshots(snapshots []*fileSnapshot) {
+	for _, snapshot := range snapshots {
+		_ = snapshot.Close()
+	}
+}
+
+func verifyStandaloneSnapshot(canonical string, snapshot *fileSnapshot) error {
+	parent, err := workspace.OpenRoot(filepath.Dir(canonical))
 	if err != nil {
-		return "", err
+		return fmt.Errorf("reopen executable parent boundary: %w", err)
 	}
-	defer file.Close()
-	hash := sha256.New()
-	if _, err := io.Copy(hash, file); err != nil {
-		return "", err
+	resolved, err := parent.ResolveRelative(filepath.Base(canonical))
+	if err != nil {
+		return fmt.Errorf("resolve executable in current boundary: %w", err)
 	}
-	return hex.EncodeToString(hash.Sum(nil)), nil
+	if identityPath(resolved) != identityPath(canonical) {
+		return fmt.Errorf("executable containment changed")
+	}
+	return snapshot.Verify()
+}
+
+func verifyBundleSnapshots(root string, snapshots []*fileSnapshot) error {
+	boundary, err := workspace.OpenRoot(root)
+	if err != nil {
+		return fmt.Errorf("reopen bundle boundary: %w", err)
+	}
+	if identityPath(boundary.NativePath) != identityPath(root) {
+		return fmt.Errorf("bundle root identity changed")
+	}
+	for _, snapshot := range snapshots {
+		if !boundary.Contains(snapshot.path) {
+			return fmt.Errorf("%q: no longer contained by bundle root", snapshot.path)
+		}
+		if err := snapshot.Verify(); err != nil {
+			return fmt.Errorf("%q: %w", snapshot.path, err)
+		}
+	}
+	return nil
+}
+
+func snapshotsByPath(snapshots []*fileSnapshot) map[string]*fileSnapshot {
+	result := make(map[string]*fileSnapshot, len(snapshots))
+	for _, snapshot := range snapshots {
+		result[snapshot.path] = snapshot
+	}
+	return result
 }
 
 func probeVersion(ctx context.Context, runner probe.Runner, executable string) (string, error) {
@@ -294,6 +364,9 @@ func probeVersion(ctx context.Context, runner probe.Runner, executable string) (
 	version, parseErr := parseJSONVersion(result.Stdout)
 	if parseErr == nil {
 		return version, nil
+	}
+	if !errors.Is(parseErr, errJSONSyntax) {
+		return "", fmt.Errorf("parse CMake JSON version: %w", parseErr)
 	}
 
 	result, err = runner.Run(ctx, versionSpec(executable, "--version"))
@@ -321,6 +394,9 @@ func versionSpec(executable, argument string) probe.Spec {
 }
 
 func parseJSONVersion(output []byte) (string, error) {
+	if !json.Valid(output) {
+		return "", errJSONSyntax
+	}
 	var document struct {
 		Program struct {
 			Name    string `json:"name"`
@@ -337,7 +413,7 @@ func parseJSONVersion(output []byte) (string, error) {
 		} `json:"version"`
 	}
 	if err := json.Unmarshal(output, &document); err != nil {
-		return "", err
+		return "", fmt.Errorf("decode valid CMake version JSON: %w", err)
 	}
 	if document.Version.Major != 1 || document.Program.Name != "cmake" ||
 		!cmakeVersionPattern.MatchString(document.Program.Version.String) {
@@ -363,14 +439,16 @@ func parseHumanVersion(output []byte) (string, error) {
 }
 
 type installedFileIdentity struct {
-	Path   string `json:"path"`
-	Sha256 string `json:"sha256"`
+	Path       string `json:"path"`
+	Sha256     string `json:"sha256"`
+	OSIdentity string `json:"osIdentity"`
 }
 
 type fileIdentity struct {
-	ExecutableSha256 string                  `json:"executableSha256"`
-	ArchiveSha256    string                  `json:"archiveSha256,omitempty"`
-	InstalledFiles   []installedFileIdentity `json:"installedFiles,omitempty"`
+	ExecutableSha256     string                  `json:"executableSha256"`
+	ExecutableOSIdentity string                  `json:"executableOsIdentity"`
+	ArchiveSha256        string                  `json:"archiveSha256,omitempty"`
+	InstalledFiles       []installedFileIdentity `json:"installedFiles,omitempty"`
 }
 
 type identityInput struct {

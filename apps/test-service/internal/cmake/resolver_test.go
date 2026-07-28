@@ -26,6 +26,23 @@ func TestResolverDoesNotSearchPath(t *testing.T) {
 	}
 }
 
+func TestResolverRejectsSelfConsistentBundleOutsideImmutableProductionPolicy(t *testing.T) {
+	bundle := createBundle(t, "linux-x64")
+	runner := &versionRunner{t: t, version: "4.3.4"}
+
+	_, err := Resolve(context.Background(), runner, ResolverConfig{
+		BundleRoot:   bundle,
+		Platform:     "linux",
+		Architecture: "x64",
+	})
+	if !errors.Is(err, ErrInvalidManifest) {
+		t.Fatalf("error = %v, want ErrInvalidManifest", err)
+	}
+	if len(runner.specs) != 0 {
+		t.Fatalf("probe calls = %d, want 0 before immutable policy is proven", len(runner.specs))
+	}
+}
+
 func TestResolverPrefersOverrideThenBundleThenDev(t *testing.T) {
 	override := currentExecutable(t)
 	bundle := createBundle(t, "linux-x64")
@@ -48,7 +65,7 @@ func TestResolverPrefersOverrideThenBundleThenDev(t *testing.T) {
 	runner.assertExecutables(t, canonicalPath(t, override))
 
 	runner = &versionRunner{t: t, version: "4.3.4"}
-	installation, err = Resolve(context.Background(), runner, ResolverConfig{
+	installation, err = resolveFixtureBundle(t, context.Background(), runner, ResolverConfig{
 		BundleRoot:    bundle,
 		DevExecutable: dev,
 		Platform:      "linux",
@@ -148,6 +165,51 @@ func TestResolverFallsBackOnlyWhenJSONCannotBeParsed(t *testing.T) {
 	runner.assertComplete(t)
 }
 
+func TestResolverDoesNotFallbackForValidInvalidJSONVersionDocuments(t *testing.T) {
+	executable := currentExecutable(t)
+	tests := []struct {
+		name   string
+		output string
+	}{
+		{
+			name:   "wrong program",
+			output: `{"dependencies":[],"program":{"name":"ctest","version":{"major":4,"minor":3,"patch":4,"string":"4.3.4"}},"version":{"major":1,"minor":0}}`,
+		},
+		{
+			name:   "wrong field type",
+			output: `{"dependencies":[],"program":{"name":"cmake","version":{"major":"4","minor":3,"patch":4,"string":"4.3.4"}},"version":{"major":1,"minor":0}}`,
+		},
+		{
+			name:   "wrong schema version",
+			output: `{"dependencies":[],"program":{"name":"cmake","version":{"major":4,"minor":3,"patch":4,"string":"4.3.4"}},"version":{"major":2,"minor":0}}`,
+		},
+		{
+			name:   "component string mismatch",
+			output: `{"dependencies":[],"program":{"name":"cmake","version":{"major":4,"minor":3,"patch":5,"string":"4.3.4"}},"version":{"major":1,"minor":0}}`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &scriptedRunner{t: t, steps: []runnerStep{{
+				want: expectedVersionSpec(canonicalPath(t, executable), "--version=json-v1"),
+				result: probe.Result{
+					ExitCode: 0,
+					Stdout:   []byte(test.output),
+				},
+			}}}
+
+			_, err := Resolve(context.Background(), runner, ResolverConfig{
+				Override: executable,
+			})
+			if err == nil {
+				t.Fatal("error = nil, want valid JSON rejection")
+			}
+			runner.assertComplete(t)
+		})
+	}
+}
+
 func TestResolverDoesNotFallbackAfterJSONProbeFailure(t *testing.T) {
 	executable := currentExecutable(t)
 	probeFailure := errors.New("probe failed")
@@ -207,7 +269,7 @@ func TestResolverDoesNotFallbackAfterParsedVersionMismatch(t *testing.T) {
 	bundle := createBundle(t, "linux-x64")
 	runner := &versionRunner{t: t, version: "4.3.5"}
 
-	_, err := Resolve(context.Background(), runner, ResolverConfig{
+	_, err := resolveFixtureBundle(t, context.Background(), runner, ResolverConfig{
 		BundleRoot:   bundle,
 		Platform:     "linux",
 		Architecture: "x64",
@@ -227,7 +289,7 @@ func TestResolverRejectsArchiveIdentityMismatch(t *testing.T) {
 		value["archiveSha256"] = strings.Repeat("0", 64)
 	})
 
-	_, err := Resolve(context.Background(), &versionRunner{t: t, version: "4.3.4"}, ResolverConfig{
+	_, err := resolveFixtureBundle(t, context.Background(), &versionRunner{t: t, version: "4.3.4"}, ResolverConfig{
 		BundleRoot:   bundle,
 		Platform:     "linux",
 		Architecture: "x64",
@@ -244,7 +306,7 @@ func TestResolverRejectsExecutableHashMismatch(t *testing.T) {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 
-	_, err := Resolve(context.Background(), &versionRunner{t: t, version: "4.3.4"}, ResolverConfig{
+	_, err := resolveFixtureBundle(t, context.Background(), &versionRunner{t: t, version: "4.3.4"}, ResolverConfig{
 		BundleRoot:   bundle,
 		Platform:     "linux",
 		Architecture: "x64",
@@ -261,7 +323,7 @@ func TestResolverRejectsLicenseHashMismatch(t *testing.T) {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 
-	_, err := Resolve(context.Background(), &versionRunner{t: t, version: "4.3.4"}, ResolverConfig{
+	_, err := resolveFixtureBundle(t, context.Background(), &versionRunner{t: t, version: "4.3.4"}, ResolverConfig{
 		BundleRoot:   bundle,
 		Platform:     "linux",
 		Architecture: "x64",
@@ -280,7 +342,7 @@ func TestResolverRejectsBundleSymlinkEscape(t *testing.T) {
 	outside := t.TempDir()
 	createDirectoryLink(t, platformDirectory, outside)
 
-	_, err := Resolve(context.Background(), &versionRunner{t: t, version: "4.3.4"}, ResolverConfig{
+	_, err := resolveFixtureBundle(t, context.Background(), &versionRunner{t: t, version: "4.3.4"}, ResolverConfig{
 		BundleRoot:   bundle,
 		Platform:     "linux",
 		Architecture: "x64",
@@ -294,13 +356,13 @@ func TestResolverIdentityIsDeterministicAndIncludesArchiveIdentity(t *testing.T)
 	firstBundle := createBundle(t, "linux-x64")
 	secondBundle := copyBundle(t, firstBundle)
 
-	first, err := Resolve(context.Background(), &versionRunner{t: t, version: "4.3.4"}, ResolverConfig{
+	first, err := resolveFixtureBundle(t, context.Background(), &versionRunner{t: t, version: "4.3.4"}, ResolverConfig{
 		BundleRoot: firstBundle, Platform: "linux", Architecture: "x64",
 	})
 	if err != nil {
 		t.Fatalf("Resolve(first) error = %v", err)
 	}
-	firstAgain, err := Resolve(context.Background(), &versionRunner{t: t, version: "4.3.4"}, ResolverConfig{
+	firstAgain, err := resolveFixtureBundle(t, context.Background(), &versionRunner{t: t, version: "4.3.4"}, ResolverConfig{
 		BundleRoot: firstBundle, Platform: "linux", Architecture: "x64",
 	})
 	if err != nil {
@@ -310,7 +372,7 @@ func TestResolverIdentityIsDeterministicAndIncludesArchiveIdentity(t *testing.T)
 		t.Fatalf("same installation identities differ: %q != %q", first.Identity, firstAgain.Identity)
 	}
 
-	second, err := Resolve(context.Background(), &versionRunner{t: t, version: "4.3.4"}, ResolverConfig{
+	second, err := resolveFixtureBundle(t, context.Background(), &versionRunner{t: t, version: "4.3.4"}, ResolverConfig{
 		BundleRoot: secondBundle, Platform: "linux", Architecture: "x64",
 	})
 	if err != nil {
@@ -331,9 +393,13 @@ func TestResolverIdentityIsDeterministicAndIncludesArchiveIdentity(t *testing.T)
 	mutateJSONFile(t, statePath, func(value map[string]any) {
 		value["archiveSha256"] = replacement
 	})
-	changedArchive, err := Resolve(context.Background(), &versionRunner{t: t, version: "4.3.4"}, ResolverConfig{
+	changedPolicy, err := loadManifest(manifestPath)
+	if err != nil {
+		t.Fatalf("loadManifest(changed archive) error = %v", err)
+	}
+	changedArchive, err := resolveWithPolicy(context.Background(), &versionRunner{t: t, version: "4.3.4"}, ResolverConfig{
 		BundleRoot: secondBundle, Platform: "linux", Architecture: "x64",
-	})
+	}, changedPolicy)
 	if err != nil {
 		t.Fatalf("Resolve(changed archive) error = %v", err)
 	}
@@ -342,9 +408,33 @@ func TestResolverIdentityIsDeterministicAndIncludesArchiveIdentity(t *testing.T)
 	}
 }
 
+func TestInstallationIdentityIncludesOSFileIdentity(t *testing.T) {
+	input := identityInput{
+		Path:    filepath.Join(t.TempDir(), "cmake"),
+		Version: "4.3.4",
+		Source:  SourceOverride,
+		FileIdentity: fileIdentity{
+			ExecutableSha256:     strings.Repeat("a", 64),
+			ExecutableOSIdentity: "test-volume:file-one",
+		},
+	}
+	first, err := installationIdentity(input)
+	if err != nil {
+		t.Fatalf("installationIdentity(first) error = %v", err)
+	}
+	input.FileIdentity.ExecutableOSIdentity = "test-volume:file-two"
+	second, err := installationIdentity(input)
+	if err != nil {
+		t.Fatalf("installationIdentity(second) error = %v", err)
+	}
+	if first == second {
+		t.Fatalf("different OS file identities produced %q", first)
+	}
+}
+
 func TestResolverBundleReturnsVerifiedLicensePath(t *testing.T) {
 	bundle := createBundle(t, "win32-x64")
-	installation, err := Resolve(context.Background(), &versionRunner{t: t, version: "4.3.4"}, ResolverConfig{
+	installation, err := resolveFixtureBundle(t, context.Background(), &versionRunner{t: t, version: "4.3.4"}, ResolverConfig{
 		BundleRoot:   bundle,
 		Platform:     "win32",
 		Architecture: "x64",
@@ -355,6 +445,76 @@ func TestResolverBundleReturnsVerifiedLicensePath(t *testing.T) {
 	want := filepath.Join(bundle, "4.3.4", "win32-x64", "cmake-4.3.4-windows-x86_64", "doc", "cmake", "LICENSE.rst")
 	if installation.LicensePath != canonicalPath(t, want) {
 		t.Fatalf("LicensePath = %q, want %q", installation.LicensePath, canonicalPath(t, want))
+	}
+}
+
+func TestResolverFailsClosedWhenExecutableChangesDuringProbe(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(string) error
+	}{
+		{
+			name: "content mutation",
+			mutate: func(target string) error {
+				return os.WriteFile(target, []byte("changed after verification"), 0o755)
+			},
+		},
+		{
+			name: "file identity replacement",
+			mutate: func(target string) error {
+				replacement := target + ".replacement"
+				if err := os.WriteFile(replacement, []byte("replacement after verification"), 0o755); err != nil {
+					return err
+				}
+				if err := os.Remove(target); err != nil {
+					return err
+				}
+				return os.Rename(replacement, target)
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run("bundle/"+test.name, func(t *testing.T) {
+			bundle := createBundle(t, "linux-x64")
+			runner := &mutatingVersionRunner{
+				versionRunner: versionRunner{t: t, version: "4.3.4"},
+				mutate:        test.mutate,
+			}
+
+			_, err := resolveFixtureBundle(t, context.Background(), runner, ResolverConfig{
+				BundleRoot: bundle, Platform: "linux", Architecture: "x64",
+			})
+			assertMutationFailsClosed(t, runner.mutationErr, err, ErrBundleIntegrity)
+		})
+
+		t.Run("override/"+test.name, func(t *testing.T) {
+			executable := copyExecutable(
+				t,
+				currentExecutable(t),
+				filepath.Join(t.TempDir(), executableName("race-cmake")),
+			)
+			runner := &mutatingVersionRunner{
+				versionRunner: versionRunner{t: t, version: "4.3.4"},
+				mutate:        test.mutate,
+			}
+
+			_, err := Resolve(context.Background(), runner, ResolverConfig{Override: executable})
+			assertMutationFailsClosed(t, runner.mutationErr, err, ErrInvalidExecutable)
+		})
+	}
+}
+
+func assertMutationFailsClosed(t *testing.T, mutationErr, resolveErr, want error) {
+	t.Helper()
+	if mutationErr == nil {
+		if !errors.Is(resolveErr, want) {
+			t.Fatalf("replacement succeeded; Resolve error = %v, want %v", resolveErr, want)
+		}
+		return
+	}
+	if resolveErr != nil {
+		t.Fatalf("replacement was blocked (%v), but Resolve error = %v", mutationErr, resolveErr)
 	}
 }
 
@@ -432,6 +592,17 @@ func (runner *versionRunner) assertCalls(t *testing.T, want ...probe.Spec) {
 	}
 }
 
+type mutatingVersionRunner struct {
+	versionRunner
+	mutate      func(string) error
+	mutationErr error
+}
+
+func (runner *mutatingVersionRunner) Run(ctx context.Context, spec probe.Spec) (probe.Result, error) {
+	runner.mutationErr = runner.mutate(spec.Executable)
+	return runner.versionRunner.Run(ctx, spec)
+}
+
 func expectedVersionSpec(executable, argument string) probe.Spec {
 	return probe.Spec{
 		Executable: executable,
@@ -488,6 +659,20 @@ func canonicalPath(t *testing.T, path string) string {
 		t.Fatalf("Abs(%q) error = %v", canonical, err)
 	}
 	return filepath.Clean(canonical)
+}
+
+func resolveFixtureBundle(
+	t *testing.T,
+	ctx context.Context,
+	runner probe.Runner,
+	config ResolverConfig,
+) (Installation, error) {
+	t.Helper()
+	policy, err := loadManifest(filepath.Join("testdata", "bundle-manifest.valid.json"))
+	if err != nil {
+		t.Fatalf("load fixture policy: %v", err)
+	}
+	return resolveWithPolicy(ctx, runner, config, policy)
 }
 
 func createBundle(t *testing.T, key string) string {
