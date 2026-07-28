@@ -1,0 +1,14 @@
+{
+  "kind": "cmakeFiles",
+  "version": {"major": 1, "minor": 1},
+  "paths": {
+    "source": "$SOURCE$",
+    "build": "$BUILD$"
+  },
+  "inputs": [
+    {"path": "CMakeLists.txt"},
+    {"path": "cmake/options.cmake"},
+    {"path": "CMakeLists.txt"},
+    {"path": "$BUILD$/CMakeFiles/4.3.4/CMakeSystem.cmake", "isGenerated": true}
+  ]
+}

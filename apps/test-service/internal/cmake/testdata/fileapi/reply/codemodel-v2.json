@@ -1,0 +1,44 @@
+{
+  "kind": "codemodel",
+  "version": {"major": 2, "minor": 9},
+  "paths": {
+    "source": "$SOURCE$",
+    "build": "$BUILD$"
+  },
+  "configurations": [
+    {
+      "name": "Debug",
+      "directories": [
+        {
+          "source": ".",
+          "build": ".",
+          "projectIndex": 0,
+          "targetIndexes": [0, 1]
+        }
+      ],
+      "projects": [
+        {
+          "name": "fixture",
+          "directoryIndexes": [0],
+          "targetIndexes": [0, 1]
+        }
+      ],
+      "targets": [
+        {
+          "name": "support",
+          "id": "support::@fixture",
+          "directoryIndex": 0,
+          "projectIndex": 0,
+          "jsonFile": "target-support-Debug.json"
+        },
+        {
+          "name": "app",
+          "id": "app::@fixture",
+          "directoryIndex": 0,
+          "projectIndex": 0,
+          "jsonFile": "target-app-Debug.json"
+        }
+      ]
+    }
+  ]
+}

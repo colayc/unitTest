@@ -1,0 +1,14 @@
+{
+  "codemodelVersion": {"major": 2, "minor": 9},
+  "name": "app",
+  "id": "app::@fixture",
+  "type": "EXECUTABLE",
+  "paths": {
+    "source": ".",
+    "build": "."
+  },
+  "artifacts": [
+    {"path": "bin/app"},
+    {"path": "bin/app"}
+  ]
+}
