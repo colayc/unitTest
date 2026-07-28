@@ -354,9 +354,11 @@ func (field *nonNullOptional[T]) UnmarshalJSON(data []byte) error {
 	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
 		return errors.New("optional workspace field must not be null")
 	}
-	if err := decodeStrict(data, &field.Value); err != nil {
+	var value T
+	if err := decodeStrict(data, &value); err != nil {
 		return err
 	}
+	field.Value = value
 	field.Present = true
 	return nil
 }

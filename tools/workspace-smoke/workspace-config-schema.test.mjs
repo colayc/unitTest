@@ -166,3 +166,18 @@ test("workspace schema accepts missing optional fields and rejects explicit null
     assert.equal(validate(configuration), false, JSON.stringify(configuration));
   }
 });
+
+test("workspace JSON parsing uses the last repeated object member before schema validation", async () => {
+  const validate = await compileSchema();
+  const repeatedCMake = JSON.parse(
+    `{"version":1,"cmake":{"executable":"C:/Tools/CMake/bin/cmake.exe"},"cmake":{}}`
+  );
+  assert.deepEqual(repeatedCMake.cmake, {});
+  assert.equal(validate(repeatedCMake), true, JSON.stringify(validate.errors));
+
+  const repeatedFallback = JSON.parse(
+    `{"version":1,"projects":[{"id":"root","sourceDir":".","fallback":{"configurations":["Debug"],"preferredGenerator":"Ninja"},"fallback":{}}]}`
+  );
+  assert.deepEqual(repeatedFallback.projects[0].fallback, {});
+  assert.equal(validate(repeatedFallback), true, JSON.stringify(validate.errors));
+});

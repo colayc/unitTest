@@ -128,6 +128,33 @@ func TestLoadConfigMatchesSchemaOptionalFieldPresence(t *testing.T) {
 	}
 }
 
+func TestLoadConfigUsesLastRepeatedObjectMemberWithoutStaleFields(t *testing.T) {
+	t.Run("cmake", func(t *testing.T) {
+		result, err := loadConfigBytes(t, []byte(
+			`{"version":1,"cmake":{"executable":"C:/Tools/CMake/bin/cmake.exe"},"cmake":{}}`,
+		))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Config.CMake.Executable != "" {
+			t.Fatalf("CMake executable = %q, want last empty cmake object to clear it", result.Config.CMake.Executable)
+		}
+	})
+
+	t.Run("project fallback", func(t *testing.T) {
+		result, err := loadConfigBytes(t, []byte(
+			`{"version":1,"projects":[{"id":"root","sourceDir":".","fallback":{"configurations":["Debug"],"preferredGenerator":"Ninja"},"fallback":{}}]}`,
+		))
+		if err != nil {
+			t.Fatal(err)
+		}
+		fallback := result.Config.Projects[0].Fallback
+		if len(fallback.Configurations) != 0 || fallback.PreferredGenerator != "" {
+			t.Fatalf("Fallback = %#v, want last empty fallback object to clear it", fallback)
+		}
+	})
+}
+
 func TestLoadConfigRejectsInvalidStructuredInput(t *testing.T) {
 	tooManyProjects := make([]map[string]any, 65)
 	tooManyToolchains := make([]map[string]any, 65)
