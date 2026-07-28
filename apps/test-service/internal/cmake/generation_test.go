@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -73,6 +74,68 @@ func TestWorkspaceGenerationCanonicalizesCollectionAndPathOrder(t *testing.T) {
 	}
 	if len(first) != 64 || strings.ToLower(first) != first {
 		t.Fatalf("generation = %q, want lowercase SHA-256", first)
+	}
+}
+
+func TestCanonicalPathIdentityUsesPlatformCaseSemantics(t *testing.T) {
+	firstSource := "Project/Src"
+	firstBinary := "Build/Debug"
+	if runtime.GOOS == "windows" {
+		firstSource = `Project\Src`
+		firstBinary = `Build\Debug`
+	}
+	secondSource := "project/src"
+	secondBinary := "build/debug"
+
+	firstConfig := workspace.Config{
+		Version:  1,
+		Projects: []workspace.ProjectConfig{{ID: "app", SourceDir: firstSource}},
+	}
+	secondConfig := workspace.Config{
+		Version:  1,
+		Projects: []workspace.ProjectConfig{{ID: "app", SourceDir: secondSource}},
+	}
+	firstProfile := BuildProfile{ProjectID: "app", Origin: "preset", BinaryDir: firstBinary}
+	secondProfile := BuildProfile{ProjectID: "app", Origin: "preset", BinaryDir: secondBinary}
+
+	firstProfileID, err := profileID(firstProfile)
+	if err != nil {
+		t.Fatalf("profileID(first) error = %v", err)
+	}
+	secondProfileID, err := profileID(secondProfile)
+	if err != nil {
+		t.Fatalf("profileID(second) error = %v", err)
+	}
+	firstGeneration := WorkspaceGeneration(firstConfig, Installation{}, []BuildProfile{firstProfile}, nil)
+	secondGeneration := WorkspaceGeneration(secondConfig, Installation{}, []BuildProfile{secondProfile}, nil)
+	relativePathsEqual := canonicalRelativePath(firstSource) == canonicalRelativePath(secondSource)
+
+	if runtime.GOOS == "windows" {
+		if firstProfileID != secondProfileID ||
+			firstGeneration != secondGeneration ||
+			!relativePathsEqual {
+			t.Fatalf(
+				"Windows-equivalent paths differ: profile IDs %q/%q, generations %q/%q, relativeEqual=%t",
+				firstProfileID,
+				secondProfileID,
+				firstGeneration,
+				secondGeneration,
+				relativePathsEqual,
+			)
+		}
+		return
+	}
+	if firstProfileID == secondProfileID ||
+		firstGeneration == secondGeneration ||
+		relativePathsEqual {
+		t.Fatalf(
+			"case-sensitive paths collapsed: profile IDs %q/%q, generations %q/%q, relativeEqual=%t",
+			firstProfileID,
+			secondProfileID,
+			firstGeneration,
+			secondGeneration,
+			relativePathsEqual,
+		)
 	}
 }
 

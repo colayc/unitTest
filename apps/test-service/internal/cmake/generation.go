@@ -184,8 +184,7 @@ func canonicalPortablePath(value string) string {
 	}
 	native := filepath.Clean(value)
 	canonical := path.Clean(filepath.ToSlash(native))
-	if runtime.GOOS == "windows" &&
-		(filepath.IsAbs(native) || filepath.VolumeName(native) != "") {
+	if runtime.GOOS == "windows" {
 		canonical = strings.ToLower(canonical)
 	}
 	return canonical

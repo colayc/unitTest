@@ -659,7 +659,25 @@ func expandPresetMacroString(
 			family = "vendor"
 			nameStart = index + len("$vendor{")
 		default:
-			return "", fmt.Errorf("unknown or malformed macro at byte %d", index)
+			namespaceEnd := index + 1
+			for namespaceEnd < len(value) &&
+				isPresetMacroNamespaceByte(value[namespaceEnd]) {
+				namespaceEnd++
+			}
+			if namespaceEnd > index+1 &&
+				namespaceEnd < len(value) &&
+				value[namespaceEnd] == '{' {
+				return "", fmt.Errorf(
+					"unknown macro namespace %q at byte %d",
+					value[index+1:namespaceEnd],
+					index,
+				)
+			}
+			if err := appendValue("$"); err != nil {
+				return "", err
+			}
+			index++
+			continue
 		}
 		closingOffset := strings.IndexByte(value[nameStart:], '}')
 		if closingOffset < 0 {
@@ -680,6 +698,13 @@ func expandPresetMacroString(
 		index = closing + 1
 	}
 	return expanded.String(), nil
+}
+
+func isPresetMacroNamespaceByte(value byte) bool {
+	return value >= 'a' && value <= 'z' ||
+		value >= 'A' && value <= 'Z' ||
+		value >= '0' && value <= '9' ||
+		value == '_'
 }
 
 func presetHostSystemName() string {

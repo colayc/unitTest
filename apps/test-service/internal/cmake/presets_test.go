@@ -77,9 +77,9 @@ func TestDiscoverPresetsUsesImplicitUserRelationshipLegalIncludeAndFixedListings
 	}
 
 	wantInputs := []string{
-		"project/CMakePresets.json",
-		"project/CMakeUserPresets.json",
-		"project/included.json",
+		canonicalRelativePath("project/CMakePresets.json"),
+		canonicalRelativePath("project/CMakeUserPresets.json"),
+		canonicalRelativePath("project/included.json"),
 	}
 	if !reflect.DeepEqual(discovery.Inputs, wantInputs) ||
 		!sort.StringsAreSorted(discovery.Inputs) {

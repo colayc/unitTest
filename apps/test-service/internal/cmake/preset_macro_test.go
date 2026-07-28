@@ -34,7 +34,10 @@ func TestDiscoverPresetsExpandsVersionedIncludeMacros(t *testing.T) {
 		if err != nil {
 			t.Fatalf("DiscoverPresets() error = %v", err)
 		}
-		want := []string{"project/CMakePresets.json", "project/included.json"}
+		want := []string{
+			canonicalRelativePath("project/CMakePresets.json"),
+			canonicalRelativePath("project/included.json"),
+		}
 		if !reflect.DeepEqual(discovery.Inputs, want) {
 			t.Fatalf("Inputs = %#v, want %#v", discovery.Inputs, want)
 		}
@@ -70,15 +73,68 @@ func TestDiscoverPresetsExpandsVersionedIncludeMacros(t *testing.T) {
 			t.Fatalf("DiscoverPresets() error = %v", err)
 		}
 		want := []string{
-			"project/CMakePresets.json",
-			"project/shared/source.json",
-			"project/sub/bridge.json",
-			"project/sub/nested.json",
+			canonicalRelativePath("project/CMakePresets.json"),
+			canonicalRelativePath("project/shared/source.json"),
+			canonicalRelativePath("project/sub/bridge.json"),
+			canonicalRelativePath("project/sub/nested.json"),
 		}
 		if !reflect.DeepEqual(discovery.Inputs, want) {
 			t.Fatalf("Inputs = %#v, want %#v", discovery.Inputs, want)
 		}
 	})
+}
+
+func TestDiscoverPresetsAcceptsLiteralDollarsInPaths(t *testing.T) {
+	root, project, sourceDir := newPresetWorkspace(t)
+	writePresetJSON(t, filepath.Join(sourceDir, "$shared.json"), map[string]any{"version": 9})
+	writePresetJSON(t, filepath.Join(sourceDir, "CMakePresets.json"), map[string]any{
+		"version": 9,
+		"include": []string{"$shared.json"},
+		"configurePresets": []map[string]any{
+			{
+				"name": "named", "generator": "Ninja",
+				"binaryDir": "${sourceDir}/out/$cache",
+			},
+			{
+				"name": "trailing", "generator": "Ninja",
+				"binaryDir": "out/cache$",
+			},
+			{
+				"name": "double", "generator": "Ninja",
+				"binaryDir": "out/$$/cache",
+			},
+		},
+	})
+
+	discovery, err := DiscoverPresets(
+		context.Background(),
+		successfulPresetRunner("named", "trailing", "double"),
+		presetTestInstallation(root),
+		root,
+		project,
+	)
+	if err != nil {
+		t.Fatalf("DiscoverPresets() error = %v", err)
+	}
+	wantInputs := []string{
+		canonicalRelativePath("project/$shared.json"),
+		canonicalRelativePath("project/CMakePresets.json"),
+	}
+	if !reflect.DeepEqual(discovery.Inputs, wantInputs) {
+		t.Fatalf("Inputs = %#v, want %#v", discovery.Inputs, wantInputs)
+	}
+	got := make(map[string]string, len(discovery.Profiles))
+	for _, profile := range discovery.Profiles {
+		got[profile.ConfigurePreset] = profile.BinaryDir
+	}
+	want := map[string]string{
+		"named":    filepath.Join(sourceDir, "out", "$cache"),
+		"trailing": filepath.Join(sourceDir, "out", "cache$"),
+		"double":   filepath.Join(sourceDir, "out", "$$", "cache"),
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("BinaryDirs = %#v, want %#v", got, want)
+	}
 }
 
 func TestDiscoverPresetsRejectsEscapingOrForbiddenIncludeMacrosBeforeProbe(t *testing.T) {
@@ -96,6 +152,7 @@ func TestDiscoverPresetsRejectsEscapingOrForbiddenIncludeMacrosBeforeProbe(t *te
 		{"presetName forbidden", 9, "${presetName}/included.json", ErrInvalidPresets},
 		{"generator forbidden", 9, "${generator}/included.json", ErrInvalidPresets},
 		{"vendor forbidden", 9, "$vendor{example}/included.json", ErrInvalidPresets},
+		{"unknown namespace forbidden", 9, "$foo{bar}/included.json", ErrInvalidPresets},
 		{"unknown forbidden", 9, "${unknown}/included.json", ErrInvalidPresets},
 		{"malformed forbidden", 9, "${sourceDir/included.json", ErrInvalidPresets},
 	}
@@ -351,6 +408,7 @@ func TestPresetMacroExpansionIsSinglePassBoundedAndRejectsMalformedInput(t *test
 
 	for _, malformed := range []string{
 		"${sourceDir",
+		"$env{UNFINISHED",
 		"${source${dollar}}",
 		"$unknown{value}",
 	} {
