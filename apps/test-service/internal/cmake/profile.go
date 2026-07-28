@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 )
 
 type BuildProfile struct {
@@ -19,10 +20,22 @@ type BuildProfile struct {
 	BinaryDir       string
 }
 
-func profileID(profile BuildProfile) (string, error) {
+func profileID(profile BuildProfile, inputGenerations ...string) (string, error) {
 	identity := canonicalProfile(profile)
 	identity.ID = ""
-	encoded, err := json.Marshal(identity)
+	var value any = identity
+	if len(inputGenerations) > 0 {
+		generations := append([]string{}, inputGenerations...)
+		sort.Strings(generations)
+		value = struct {
+			Profile          BuildProfile `json:"profile"`
+			InputGenerations []string     `json:"inputGenerations"`
+		}{
+			Profile:          identity,
+			InputGenerations: generations,
+		}
+	}
+	encoded, err := json.Marshal(value)
 	if err != nil {
 		return "", fmt.Errorf("encode build profile identity: %w", err)
 	}

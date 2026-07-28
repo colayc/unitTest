@@ -1,10 +1,13 @@
 package cmake
 
 import (
+	"context"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
+	"unit-test-ide.local/test-service/internal/probe"
 	"unit-test-ide.local/test-service/internal/workspace"
 )
 
@@ -174,5 +177,123 @@ func TestWorkspaceGenerationDoesNotMutateInputs(t *testing.T) {
 	}
 	if !reflect.DeepEqual(toolchains, wantToolchains) {
 		t.Fatalf("toolchains mutated: %#v", toolchains)
+	}
+}
+
+func TestPresetInputGenerationSaltsProfilesAndWorkspaceGeneration(t *testing.T) {
+	root, project, sourceDir := newPresetWorkspace(t)
+	installation := presetTestInstallation(root)
+	discover := func(cacheValue string) PresetDiscovery {
+		t.Helper()
+		writePresetJSON(t, filepath.Join(sourceDir, "CMakePresets.json"), map[string]any{
+			"version": 6,
+			"configurePresets": []map[string]any{{
+				"name":      "debug",
+				"generator": "Ninja",
+				"binaryDir": "out/debug",
+				"cacheVariables": map[string]any{
+					"UNCHANGED_NAME": cacheValue,
+				},
+			}},
+		})
+		runner := &presetTestRunner{results: []probe.Result{
+			{ExitCode: 0, Stdout: []byte("Available configure presets:\n  \"debug\"\n")},
+			{ExitCode: 0, Stdout: []byte("Available build presets:\n")},
+		}}
+		discovery, err := DiscoverPresets(
+			context.Background(),
+			runner,
+			installation,
+			root,
+			project,
+		)
+		if err != nil {
+			t.Fatalf("DiscoverPresets(%q) error = %v", cacheValue, err)
+		}
+		return discovery
+	}
+
+	first := discover("one")
+	second := discover("two")
+	if first.InputGeneration == "" || second.InputGeneration == "" {
+		t.Fatalf("InputGeneration = %q, %q, want SHA-256 values", first.InputGeneration, second.InputGeneration)
+	}
+	if first.InputGeneration == second.InputGeneration {
+		t.Fatalf("cacheVariables content change kept input generation %q", first.InputGeneration)
+	}
+	if len(first.Profiles) != 1 || len(second.Profiles) != 1 {
+		t.Fatalf("Profiles = %#v and %#v, want one each", first.Profiles, second.Profiles)
+	}
+	if first.Profiles[0].ID == second.Profiles[0].ID {
+		t.Fatalf("cacheVariables content change kept profile ID %q", first.Profiles[0].ID)
+	}
+
+	config := workspace.Config{Version: 1, Projects: []workspace.ProjectConfig{project}}
+	firstGeneration := WorkspaceGeneration(
+		config,
+		installation,
+		nil,
+		nil,
+		first.InputGeneration,
+	)
+	secondGeneration := WorkspaceGeneration(
+		config,
+		installation,
+		nil,
+		nil,
+		second.InputGeneration,
+	)
+	if firstGeneration == secondGeneration {
+		t.Fatalf("empty-profile workspace generation stayed %q after Preset content change", firstGeneration)
+	}
+}
+
+func TestPresetInputGenerationAndWorkspaceGenerationAreOrderStable(t *testing.T) {
+	root, project, sourceDir := newPresetWorkspace(t)
+	writePresetJSON(t, filepath.Join(sourceDir, "CMakePresets.json"), map[string]any{
+		"version": 6,
+		"include": []string{"z-last.json", "a-first.json"},
+		"configurePresets": []map[string]any{{
+			"name":      "debug",
+			"generator": "Ninja",
+			"binaryDir": "out/debug",
+		}},
+	})
+	writePresetJSON(t, filepath.Join(sourceDir, "z-last.json"), map[string]any{"version": 6})
+	writePresetJSON(t, filepath.Join(sourceDir, "a-first.json"), map[string]any{"version": 6})
+	installation := presetTestInstallation(root)
+	discover := func() PresetDiscovery {
+		t.Helper()
+		runner := &presetTestRunner{results: []probe.Result{
+			{ExitCode: 0, Stdout: []byte("Available configure presets:\n  \"debug\"\n")},
+			{ExitCode: 0, Stdout: []byte("Available build presets:\n")},
+		}}
+		discovery, err := DiscoverPresets(
+			context.Background(),
+			runner,
+			installation,
+			root,
+			project,
+		)
+		if err != nil {
+			t.Fatalf("DiscoverPresets() error = %v", err)
+		}
+		return discovery
+	}
+
+	first := discover()
+	second := discover()
+	if first.InputGeneration != second.InputGeneration {
+		t.Fatalf("same graph produced %q and %q", first.InputGeneration, second.InputGeneration)
+	}
+	if first.Profiles[0].ID != second.Profiles[0].ID {
+		t.Fatalf("same graph produced profile IDs %q and %q", first.Profiles[0].ID, second.Profiles[0].ID)
+	}
+
+	config := workspace.Config{Version: 1, Projects: []workspace.ProjectConfig{project}}
+	firstGeneration := WorkspaceGeneration(config, installation, nil, nil, "b", "a")
+	secondGeneration := WorkspaceGeneration(config, installation, nil, nil, "a", "b")
+	if firstGeneration != secondGeneration {
+		t.Fatalf("input generation order produced %q and %q", firstGeneration, secondGeneration)
 	}
 }

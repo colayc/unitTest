@@ -2,6 +2,7 @@ package cmake
 
 import (
 	"context"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -122,7 +123,8 @@ func TestPresetProfileExistsWithoutBuildPreset(t *testing.T) {
 	}
 	profile := discovery.Profiles[0]
 	if profile.ConfigurePreset != "debug" || profile.BuildPreset != "" ||
-		profile.Generator != "Ninja" || profile.BinaryDir != "${sourceDir}/out/debug" {
+		profile.Generator != "Ninja" ||
+		profile.BinaryDir != filepath.Join(sourceDir, "out", "debug") {
 		t.Fatalf("profile = %#v", profile)
 	}
 }

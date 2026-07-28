@@ -122,33 +122,52 @@ func TestDiscoverPresetsTreatsMissingTopLevelFilesAsNoPresets(t *testing.T) {
 	if len(discovery.Profiles) != 0 || len(discovery.Inputs) != 0 || len(discovery.Issues) != 0 {
 		t.Fatalf("Discovery = %#v, want normal empty result", discovery)
 	}
+	const emptyGraphGeneration = "62b512d8c76bbed3048fc81bd94bd2aeaab2de4d3b36edbed2f3d3dd8ff3e33e"
+	if discovery.InputGeneration != emptyGraphGeneration {
+		t.Fatalf("InputGeneration = %q, want %q", discovery.InputGeneration, emptyGraphGeneration)
+	}
 	if len(runner.specs) != 0 {
 		t.Fatalf("probe calls = %d, want 0", len(runner.specs))
 	}
 }
 
-func TestDiscoverPresetsRejectsUserPresetsWithoutProjectPresetsBeforeProbe(t *testing.T) {
+func TestDiscoverPresetsSupportsUserPresetsWithoutProjectPresets(t *testing.T) {
 	root, project, sourceDir := newPresetWorkspace(t)
 	writePresetJSON(t, filepath.Join(sourceDir, "CMakeUserPresets.json"), map[string]any{
 		"version": 6,
 		"configurePresets": []map[string]any{{
-			"name": "user-debug",
+			"name":      "user-debug",
+			"generator": "Ninja",
+			"binaryDir": "${sourceDir}/out/user-debug",
 		}},
 	})
-	runner := &presetTestRunner{}
+	runner := &presetTestRunner{results: []probe.Result{
+		{
+			ExitCode: 0,
+			Stdout:   []byte("Available configure presets:\n  \"user-debug\"\n"),
+		},
+		{
+			ExitCode: 0,
+			Stdout:   []byte("Available build presets:\n"),
+		},
+	}}
 
-	_, err := DiscoverPresets(
+	discovery, err := DiscoverPresets(
 		context.Background(),
 		runner,
 		presetTestInstallation(root),
 		root,
 		project,
 	)
-	if !errors.Is(err, ErrInvalidPresets) {
-		t.Fatalf("error = %v, want ErrInvalidPresets", err)
+	if err != nil {
+		t.Fatalf("DiscoverPresets() error = %v", err)
 	}
-	if len(runner.specs) != 0 {
-		t.Fatalf("probe calls = %d, want 0", len(runner.specs))
+	if len(runner.specs) != 2 {
+		t.Fatalf("probe calls = %d, want 2", len(runner.specs))
+	}
+	if len(discovery.Profiles) != 1 ||
+		discovery.Profiles[0].ConfigurePreset != "user-debug" {
+		t.Fatalf("Profiles = %#v, want user-debug", discovery.Profiles)
 	}
 }
 
@@ -597,6 +616,18 @@ func TestDiscoverPresetsRejectsAmbiguousListings(t *testing.T) {
 			output: "Available configure presets:\n  \"project-debug\" - \"Display\"\n",
 		},
 		{
+			name:   "tab alignment",
+			output: "Available configure presets:\n  \"project-debug\"\t- Display\n",
+		},
+		{
+			name:   "tab in display",
+			output: "Available configure presets:\n  \"project-debug\" - Dis\tplay\n",
+		},
+		{
+			name:   "trailing display whitespace",
+			output: "Available configure presets:\n  \"project-debug\" - Display \n",
+		},
+		{
 			name:   "duplicate name",
 			output: "Available configure presets:\n  \"project-debug\"\n  \"project-debug\" - Project Debug\n",
 		},
@@ -630,7 +661,49 @@ func TestDiscoverPresetsRejectsAmbiguousListings(t *testing.T) {
 			if !errors.Is(err, ErrPresetListing) {
 				t.Fatalf("error = %v, want ErrPresetListing", err)
 			}
+			if len(runner.specs) != 1 {
+				t.Fatalf("probe calls = %d, want parser rejection before build listing", len(runner.specs))
+			}
 		})
+	}
+}
+
+func TestDiscoverPresetsAcceptsSpaceAlignedDisplayColumns(t *testing.T) {
+	root, project, sourceDir := newPresetWorkspace(t)
+	writePresetJSON(t, filepath.Join(sourceDir, "CMakePresets.json"), map[string]any{
+		"version": 6,
+		"configurePresets": []map[string]any{
+			{"name": "short", "generator": "Ninja", "binaryDir": "out/short"},
+			{"name": "substantially-long", "generator": "Ninja", "binaryDir": "out/long"},
+		},
+	})
+	runner := &presetTestRunner{results: []probe.Result{
+		{
+			ExitCode: 0,
+			Stdout: []byte(
+				"Available configure presets:\n" +
+					"  \"short\"              - Short Display\n" +
+					"  \"substantially-long\" - Long Display\n",
+			),
+		},
+		{
+			ExitCode: 0,
+			Stdout:   []byte("Available build presets:\n"),
+		},
+	}}
+
+	discovery, err := DiscoverPresets(
+		context.Background(),
+		runner,
+		presetTestInstallation(root),
+		root,
+		project,
+	)
+	if err != nil {
+		t.Fatalf("DiscoverPresets() error = %v", err)
+	}
+	if len(discovery.Profiles) != 2 {
+		t.Fatalf("Profiles = %#v, want two aligned listing names", discovery.Profiles)
 	}
 }
 

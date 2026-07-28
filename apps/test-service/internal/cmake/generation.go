@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"path"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -12,10 +14,11 @@ import (
 )
 
 type generationPayload struct {
-	Config       generationConfig       `json:"config"`
-	Installation generationInstallation `json:"installation"`
-	Profiles     []BuildProfile         `json:"profiles"`
-	ToolchainIDs []string               `json:"toolchainIds"`
+	Config           generationConfig       `json:"config"`
+	Installation     generationInstallation `json:"installation"`
+	Profiles         []BuildProfile         `json:"profiles"`
+	ToolchainIDs     []string               `json:"toolchainIds"`
+	InputGenerations []string               `json:"inputGenerations,omitempty"`
 }
 
 type generationConfig struct {
@@ -64,14 +67,17 @@ func WorkspaceGeneration(
 	install Installation,
 	profiles []BuildProfile,
 	toolchainIDs []string,
+	inputGenerations ...string,
 ) string {
 	payload := generationPayload{
-		Config:       canonicalGenerationConfig(config),
-		Installation: canonicalGenerationInstallation(install),
-		Profiles:     canonicalProfiles(profiles),
-		ToolchainIDs: append([]string{}, toolchainIDs...),
+		Config:           canonicalGenerationConfig(config),
+		Installation:     canonicalGenerationInstallation(install),
+		Profiles:         canonicalProfiles(profiles),
+		ToolchainIDs:     append([]string{}, toolchainIDs...),
+		InputGenerations: append([]string{}, inputGenerations...),
 	}
 	sort.Strings(payload.ToolchainIDs)
+	sort.Strings(payload.InputGenerations)
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		panic("canonical workspace generation payload cannot fail to encode: " + err.Error())
@@ -176,5 +182,11 @@ func canonicalPortablePath(value string) string {
 	if value == "" {
 		return ""
 	}
-	return path.Clean(strings.ReplaceAll(value, `\`, "/"))
+	native := filepath.Clean(value)
+	canonical := path.Clean(filepath.ToSlash(native))
+	if runtime.GOOS == "windows" &&
+		(filepath.IsAbs(native) || filepath.VolumeName(native) != "") {
+		canonical = strings.ToLower(canonical)
+	}
+	return canonical
 }
