@@ -1,6 +1,6 @@
 {
   "kind": "toolchains",
-  "version": {"major": 1, "minor": 0},
+  "version": {"major": 1, "minor": 1},
   "toolchains": [
     {
       "language": "CXX",
@@ -8,7 +8,8 @@
         "path": "$SOURCE$/tools/clang++",
         "id": "Clang",
         "version": "18.1.8",
-        "target": "x86_64-pc-linux-gnu"
+        "target": "x86_64-pc-linux-gnu",
+        "commandFragment": "--target=x86_64-pc-linux-gnu -stdlib=libc++"
       }
     },
     {
@@ -17,7 +18,8 @@
         "path": "$SOURCE$/tools/clang",
         "id": "Clang",
         "version": "18.1.8",
-        "target": "x86_64-pc-linux-gnu"
+        "target": "x86_64-pc-linux-gnu",
+        "commandFragment": "--target=x86_64-pc-linux-gnu"
       }
     }
   ]

@@ -31,6 +31,7 @@ const (
 	maxFileAPIInputs         = 2048
 	maxFileAPIToolchains     = 64
 	maxFileAPICacheEntries   = 4096
+	maxCommandFragmentBytes  = 16 * 1024
 )
 
 var (
@@ -207,10 +208,11 @@ type fileAPIToolchains struct {
 	Toolchains []struct {
 		Language string `json:"language"`
 		Compiler struct {
-			Path    string `json:"path"`
-			ID      string `json:"id"`
-			Version string `json:"version"`
-			Target  string `json:"target"`
+			Path            string  `json:"path"`
+			ID              string  `json:"id"`
+			Version         string  `json:"version"`
+			Target          string  `json:"target"`
+			CommandFragment *string `json:"commandFragment"`
 		} `json:"compiler"`
 	} `json:"toolchains"`
 }
@@ -232,6 +234,12 @@ type fileAPIReader struct {
 	data         map[string][]byte
 	replyFiles   map[string]struct{}
 	totalBytes   int64
+}
+
+type fileAPIReplyCandidate struct {
+	Name    string
+	Suffix  string
+	IsError bool
 }
 
 func ReadReply(
@@ -267,17 +275,23 @@ func ReadReply(
 	}
 	defer reader.close()
 
-	indexName, err := reader.indexName()
+	current, err := reader.currentReply()
 	if err != nil {
 		return FileAPIReply{}, err
 	}
-	indexData, err := reader.read(indexName)
+	currentData, err := reader.read(current.Name)
 	if err != nil {
 		return FileAPIReply{}, err
+	}
+	if current.IsError {
+		if err := reader.verifyCurrentReply(current); err != nil {
+			return FileAPIReply{}, err
+		}
+		return FileAPIReply{}, fmt.Errorf("%w: current CMake reply is an error %q", ErrFileAPIReply, current.Name)
 	}
 	var index fileAPIIndex
-	if err := decodeFileAPIJSON(indexData, &index); err != nil {
-		return FileAPIReply{}, fmt.Errorf("%w: decode index %q: %v", ErrFileAPIReply, indexName, err)
+	if err := decodeFileAPIJSON(currentData, &index); err != nil {
+		return FileAPIReply{}, fmt.Errorf("%w: decode index %q: %v", ErrFileAPIReply, current.Name, err)
 	}
 	references, err := validateFileAPIIndex(index)
 	if err != nil {
@@ -308,7 +322,7 @@ func ReadReply(
 	if err != nil {
 		return FileAPIReply{}, err
 	}
-	if err := reader.verify(); err != nil {
+	if err := reader.verifyCurrentReply(current); err != nil {
 		return FileAPIReply{}, err
 	}
 	result.StateFiles = reader.states(reader.replyFiles)
@@ -356,22 +370,67 @@ func canonicalAllowedPath(value string, roots []workspace.Root) (string, error) 
 	return "", fmt.Errorf("path %q is not contained by an allowed root", value)
 }
 
-func (reader *fileAPIReader) indexName() (string, error) {
+func (reader *fileAPIReader) currentReply() (fileAPIReplyCandidate, error) {
 	entries, err := os.ReadDir(reader.replyRoot.NativePath)
 	if err != nil {
-		return "", fmt.Errorf("%w: enumerate reply directory: %v", ErrFileAPIReply, err)
+		return fileAPIReplyCandidate{}, fmt.Errorf("%w: enumerate reply directory: %v", ErrFileAPIReply, err)
 	}
-	indexes := make([]string, 0, 1)
+	bySuffix := make(map[string]fileAPIReplyCandidate)
+	var current fileAPIReplyCandidate
 	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasPrefix(entry.Name(), "index-") &&
-			strings.HasSuffix(entry.Name(), ".json") {
-			indexes = append(indexes, entry.Name())
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		prefix := ""
+		isError := false
+		switch {
+		case strings.HasPrefix(name, "index-"):
+			prefix = "index-"
+		case strings.HasPrefix(name, "error-"):
+			prefix = "error-"
+			isError = true
+		default:
+			continue
+		}
+		if !strings.HasSuffix(name, ".json") || len(name) <= len(prefix)+len(".json") {
+			continue
+		}
+		suffix := strings.TrimPrefix(name, prefix)
+		if previous, duplicate := bySuffix[suffix]; duplicate {
+			return fileAPIReplyCandidate{}, fmt.Errorf(
+				"%w: ambiguous CMake replies %q and %q",
+				ErrFileAPIReply,
+				previous.Name,
+				name,
+			)
+		}
+		candidate := fileAPIReplyCandidate{Name: name, Suffix: suffix, IsError: isError}
+		bySuffix[suffix] = candidate
+		if current.Name == "" || candidate.Suffix > current.Suffix {
+			current = candidate
 		}
 	}
-	if len(indexes) != 1 {
-		return "", fmt.Errorf("%w: expected exactly one reply index, got %d", ErrFileAPIReply, len(indexes))
+	if current.Name == "" {
+		return fileAPIReplyCandidate{}, fmt.Errorf("%w: no CMake reply index or error", ErrFileAPIReply)
 	}
-	return indexes[0], nil
+	return current, nil
+}
+
+func (reader *fileAPIReader) verifyCurrentReply(selected fileAPIReplyCandidate) error {
+	current, err := reader.currentReply()
+	if err != nil {
+		return err
+	}
+	if current != selected {
+		return fmt.Errorf(
+			"%w: current CMake reply changed from %q to %q while reading",
+			ErrFileAPIReply,
+			selected.Name,
+			current.Name,
+		)
+	}
+	return reader.verify()
 }
 
 func (reader *fileAPIReader) read(relative string) ([]byte, error) {
@@ -685,9 +744,29 @@ func (reader *fileAPIReader) assemble(
 	if len(toolchains.Toolchains) > maxFileAPIToolchains {
 		return FileAPIReply{}, fmt.Errorf("%w: toolchains exceed %d", ErrFileAPILimit, maxFileAPIToolchains)
 	}
+	toolchainByLanguage := make(map[string]string, len(toolchains.Toolchains))
 	for _, toolchain := range toolchains.Toolchains {
 		if toolchain.Language == "" {
 			return FileAPIReply{}, fmt.Errorf("%w: toolchain language is empty", ErrFileAPIReply)
+		}
+		commandFragment := ""
+		if toolchains.Version.Minor != nil && *toolchains.Version.Minor >= 1 {
+			if toolchain.Compiler.CommandFragment == nil {
+				return FileAPIReply{}, fmt.Errorf(
+					"%w: toolchain %q compiler commandFragment is missing",
+					ErrFileAPIReply,
+					toolchain.Language,
+				)
+			}
+			commandFragment = *toolchain.Compiler.CommandFragment
+			if len(commandFragment) > maxCommandFragmentBytes {
+				return FileAPIReply{}, fmt.Errorf(
+					"%w: toolchain %q compiler commandFragment exceeds %d bytes",
+					ErrFileAPILimit,
+					toolchain.Language,
+					maxCommandFragmentBytes,
+				)
+			}
 		}
 		compilerPath := ""
 		if toolchain.Compiler.Path != "" {
@@ -697,21 +776,34 @@ func (reader *fileAPIReader) assemble(
 			}
 		}
 		identity, err := canonicalSHA256(struct {
-			Language string `json:"language"`
-			Path     string `json:"path"`
-			ID       string `json:"id"`
-			Version  string `json:"version"`
-			Target   string `json:"target"`
+			Language        string `json:"language"`
+			Path            string `json:"path"`
+			ID              string `json:"id"`
+			Version         string `json:"version"`
+			Target          string `json:"target"`
+			CommandFragment string `json:"commandFragment"`
 		}{
-			Language: toolchain.Language,
-			Path:     canonicalPortablePath(compilerPath),
-			ID:       toolchain.Compiler.ID,
-			Version:  toolchain.Compiler.Version,
-			Target:   toolchain.Compiler.Target,
+			Language:        toolchain.Language,
+			Path:            canonicalPortablePath(compilerPath),
+			ID:              toolchain.Compiler.ID,
+			Version:         toolchain.Compiler.Version,
+			Target:          toolchain.Compiler.Target,
+			CommandFragment: commandFragment,
 		})
 		if err != nil {
 			return FileAPIReply{}, fmt.Errorf("%w: construct toolchain identity: %v", ErrFileAPIReply, err)
 		}
+		if previous, duplicate := toolchainByLanguage[toolchain.Language]; duplicate {
+			if previous != identity {
+				return FileAPIReply{}, fmt.Errorf(
+					"%w: conflicting toolchain descriptors for language %q",
+					ErrFileAPIReply,
+					toolchain.Language,
+				)
+			}
+			continue
+		}
+		toolchainByLanguage[toolchain.Language] = identity
 		result.ToolchainIDs = append(result.ToolchainIDs, identity)
 	}
 	result.ToolchainIDs = sortedUniqueStrings(result.ToolchainIDs)

@@ -284,6 +284,83 @@ func TestFileAPITargetIDIncludesProjectProfileConfigurationAndNativeIdentity(t *
 	}
 }
 
+func TestFileAPIToolchainIdentityIncludesBoundedCommandFragment(t *testing.T) {
+	t.Run("identity", func(t *testing.T) {
+		fixture := newFileAPIReplyFixture(t)
+		before := readWithFixture(t, fixture)
+		setFileAPIToolchainsMinor(t, fixture, 1)
+		mutateJSONFile(t, filepath.Join(fixture.replyDir, "toolchains-v1.json"), func(value map[string]any) {
+			toolchains := value["toolchains"].([]any)
+			for _, candidate := range toolchains {
+				candidate.(map[string]any)["compiler"].(map[string]any)["commandFragment"] = ""
+			}
+			toolchains[0].(map[string]any)["compiler"].(map[string]any)["commandFragment"] =
+				"--target=x86_64-pc-linux-gnu -stdlib=libc++"
+		})
+		after := readWithFixture(t, fixture)
+		if reflect.DeepEqual(after.ToolchainIDs, before.ToolchainIDs) {
+			t.Fatal("changing compiler.commandFragment did not change toolchain identity")
+		}
+	})
+	t.Run("length bound", func(t *testing.T) {
+		fixture := newFileAPIReplyFixture(t)
+		setFileAPIToolchainsMinor(t, fixture, 1)
+		mutateJSONFile(t, filepath.Join(fixture.replyDir, "toolchains-v1.json"), func(value map[string]any) {
+			toolchains := value["toolchains"].([]any)
+			for _, candidate := range toolchains {
+				candidate.(map[string]any)["compiler"].(map[string]any)["commandFragment"] = ""
+			}
+			toolchains[0].(map[string]any)["compiler"].(map[string]any)["commandFragment"] =
+				strings.Repeat("x", 16*1024+1)
+		})
+		expectFileAPIReadError(t, fixture)
+	})
+	t.Run("mandatory in version 1.1", func(t *testing.T) {
+		fixture := newFileAPIReplyFixture(t)
+		setFileAPIToolchainsMinor(t, fixture, 1)
+		mutateJSONFile(t, filepath.Join(fixture.replyDir, "toolchains-v1.json"), func(value map[string]any) {
+			toolchains := value["toolchains"].([]any)
+			delete(toolchains[0].(map[string]any)["compiler"].(map[string]any), "commandFragment")
+		})
+		expectFileAPIReadError(t, fixture)
+	})
+}
+
+func TestFileAPIToolchainsDeduplicateEquivalentLanguageAndRejectConflict(t *testing.T) {
+	t.Run("equivalent duplicate", func(t *testing.T) {
+		fixture := newFileAPIReplyFixture(t)
+		before := readWithFixture(t, fixture)
+		mutateJSONFile(t, filepath.Join(fixture.replyDir, "toolchains-v1.json"), func(value map[string]any) {
+			toolchains := value["toolchains"].([]any)
+			value["toolchains"] = append(toolchains, toolchains[0])
+		})
+		after := readWithFixture(t, fixture)
+		if !reflect.DeepEqual(after.ToolchainIDs, before.ToolchainIDs) {
+			t.Fatalf("equivalent language duplicate changed identities: %#v != %#v", after.ToolchainIDs, before.ToolchainIDs)
+		}
+	})
+	t.Run("conflicting duplicate", func(t *testing.T) {
+		fixture := newFileAPIReplyFixture(t)
+		setFileAPIToolchainsMinor(t, fixture, 1)
+		mutateJSONFile(t, filepath.Join(fixture.replyDir, "toolchains-v1.json"), func(value map[string]any) {
+			toolchains := value["toolchains"].([]any)
+			for _, candidate := range toolchains {
+				candidate.(map[string]any)["compiler"].(map[string]any)["commandFragment"] = ""
+			}
+			duplicate := map[string]any{
+				"language": toolchains[0].(map[string]any)["language"],
+				"compiler": map[string]any{},
+			}
+			for key, field := range toolchains[0].(map[string]any)["compiler"].(map[string]any) {
+				duplicate["compiler"].(map[string]any)[key] = field
+			}
+			duplicate["compiler"].(map[string]any)["commandFragment"] = "-stdlib=libstdc++"
+			value["toolchains"] = append(toolchains, duplicate)
+		})
+		expectFileAPIReadError(t, fixture)
+	})
+}
+
 func TestFileAPIReplyRequiresOneValidProfileWhenTargetsExist(t *testing.T) {
 	fixture := newFileAPIReplyFixture(t)
 	tests := []struct {
@@ -323,7 +400,7 @@ func TestFileAPIReplyValidatesCacheObjectEvenThoughItIsNotExposed(t *testing.T) 
 	}
 }
 
-func TestFileAPIReplyRejectsMissingOrAmbiguousIndex(t *testing.T) {
+func TestFileAPIReplySelectsCurrentIndexAndRejectsCurrentErrorOrAmbiguity(t *testing.T) {
 	t.Run("missing", func(t *testing.T) {
 		fixture := newFileAPIReplyFixture(t)
 		if err := os.Remove(filepath.Join(fixture.replyDir, "index-2026-07-26.json")); err != nil {
@@ -331,17 +408,62 @@ func TestFileAPIReplyRejectsMissingOrAmbiguousIndex(t *testing.T) {
 		}
 		expectFileAPIReadError(t, fixture)
 	})
-	t.Run("multiple", func(t *testing.T) {
+	t.Run("multiple success indexes select lexicographically current", func(t *testing.T) {
 		fixture := newFileAPIReplyFixture(t)
-		data, err := os.ReadFile(filepath.Join(fixture.replyDir, "index-2026-07-26.json"))
-		if err != nil {
+		if err := os.WriteFile(
+			filepath.Join(fixture.replyDir, "index-2026-07-25.json"),
+			[]byte(`{"this":"older index must not be read"}`),
+			0o600,
+		); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(fixture.replyDir, "index-2026-07-27.json"), data, 0o600); err != nil {
+		readWithFixture(t, fixture)
+	})
+	t.Run("newer error supersedes older success", func(t *testing.T) {
+		fixture := newFileAPIReplyFixture(t)
+		if err := os.WriteFile(
+			filepath.Join(fixture.replyDir, "error-2026-07-27.json"),
+			[]byte(`{"error":"configure failed"}`),
+			0o600,
+		); err != nil {
 			t.Fatal(err)
 		}
 		expectFileAPIReadError(t, fixture)
 	})
+	t.Run("same suffix success and error is ambiguous", func(t *testing.T) {
+		fixture := newFileAPIReplyFixture(t)
+		if err := os.WriteFile(
+			filepath.Join(fixture.replyDir, "error-2026-07-26.json"),
+			[]byte(`{"error":"ambiguous state"}`),
+			0o600,
+		); err != nil {
+			t.Fatal(err)
+		}
+		expectFileAPIReadError(t, fixture)
+	})
+}
+
+func TestFileAPIReaderRejectsNewCurrentReplyCreatedAfterSelection(t *testing.T) {
+	fixture := newFileAPIReplyFixture(t)
+	reader := newFileAPIReaderForTest(t, fixture)
+	defer reader.close()
+	selected, err := reader.currentReply()
+	if err != nil {
+		t.Fatalf("reader.currentReply() error = %v", err)
+	}
+	if _, err := reader.read(selected.Name); err != nil {
+		t.Fatalf("reader.read() error = %v", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(fixture.replyDir, "error-2026-07-27.json"),
+		[]byte(`{"error":"concurrent configure failed"}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.verifyCurrentReply(selected); err == nil {
+		t.Fatal("reader.verifyCurrentReply() error = nil after a newer error became current")
+	}
 }
 
 func TestFileAPIReplyRejectsUnsupportedOrMismatchedObjectIdentity(t *testing.T) {
@@ -982,6 +1104,26 @@ func mutateFileAPIReference(
 			reference := candidate.(map[string]any)
 			if reference["kind"] == kind {
 				reference["jsonFile"] = jsonFile
+			}
+		}
+	})
+}
+
+func setFileAPIToolchainsMinor(t *testing.T, fixture fileAPIReplyFixture, minor int) {
+	t.Helper()
+	mutateJSONFile(t, filepath.Join(fixture.replyDir, "toolchains-v1.json"), func(value map[string]any) {
+		value["version"].(map[string]any)["minor"] = float64(minor)
+	})
+	mutateJSONFile(t, filepath.Join(fixture.replyDir, "index-2026-07-26.json"), func(value map[string]any) {
+		for _, group := range []any{
+			value["objects"],
+			value["reply"].(map[string]any)["client-unit-test-ide"].(map[string]any)["query.json"].(map[string]any)["responses"],
+		} {
+			for _, candidate := range group.([]any) {
+				reference := candidate.(map[string]any)
+				if reference["kind"] == "toolchains" {
+					reference["version"].(map[string]any)["minor"] = float64(minor)
+				}
 			}
 		}
 	})

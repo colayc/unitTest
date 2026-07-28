@@ -215,6 +215,62 @@ func TestNeedsConfigureFailsClosedForStateAndConflictingFileIdentity(t *testing.
 	}
 }
 
+func TestFingerprintStateRejectsCrossCollectionConflictsAndAllowsEquivalentDuplicates(t *testing.T) {
+	type location struct {
+		name string
+		file func(*ProfileFingerprintInput) *FingerprintFile
+	}
+	locations := []location{
+		{
+			name: "preset inputs",
+			file: func(input *ProfileFingerprintInput) *FingerprintFile {
+				return &input.PresetInputs[0]
+			},
+		},
+		{
+			name: "CMake inputs",
+			file: func(input *ProfileFingerprintInput) *FingerprintFile {
+				return &input.CMakeInputStates[0]
+			},
+		},
+		{
+			name: "cache",
+			file: func(input *ProfileFingerprintInput) *FingerprintFile {
+				return &input.Cache
+			},
+		},
+		{
+			name: "File API state",
+			file: func(input *ProfileFingerprintInput) *FingerprintFile {
+				return &input.FileAPIState[0]
+			},
+		},
+	}
+	for first := 0; first < len(locations); first++ {
+		for second := first + 1; second < len(locations); second++ {
+			pairName := locations[first].name + "/" + locations[second].name
+			t.Run(pairName+"/conflict", func(t *testing.T) {
+				input := cloneProfileFingerprintInput(validFingerprintInputForTest())
+				source := *locations[first].file(&input)
+				conflict := source
+				conflict.Identity += "-replacement"
+				*locations[second].file(&input) = conflict
+				if validProfileFingerprintInput(input) {
+					t.Fatal("validProfileFingerprintInput() = true for same canonical path with conflicting identity")
+				}
+			})
+			t.Run(pairName+"/equivalent duplicate", func(t *testing.T) {
+				input := cloneProfileFingerprintInput(validFingerprintInputForTest())
+				source := *locations[first].file(&input)
+				*locations[second].file(&input) = source
+				if !validProfileFingerprintInput(input) {
+					t.Fatal("validProfileFingerprintInput() = false for equivalent cross-collection duplicate")
+				}
+			})
+		}
+	}
+}
+
 func TestOrdinaryCPPContentDoesNotAffectConfigureFingerprint(t *testing.T) {
 	source := filepath.Join(t.TempDir(), "ordinary.cpp")
 	if err := os.WriteFile(source, []byte("int value = 1;\n"), 0o600); err != nil {

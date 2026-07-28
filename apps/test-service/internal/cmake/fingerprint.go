@@ -68,16 +68,14 @@ func validProfileFingerprintInput(input ProfileFingerprintInput) bool {
 		!validFingerprintFile(input.Cache) {
 		return false
 	}
-	for _, files := range [][]FingerprintFile{
-		input.PresetInputs,
-		input.CMakeInputStates,
-		input.FileAPIState,
-	} {
-		if !validFingerprintFiles(files) {
-			return false
-		}
-	}
-	return true
+	files := make([]FingerprintFile, 0,
+		len(input.PresetInputs)+len(input.CMakeInputStates)+1+len(input.FileAPIState),
+	)
+	files = append(files, input.PresetInputs...)
+	files = append(files, input.CMakeInputStates...)
+	files = append(files, input.Cache)
+	files = append(files, input.FileAPIState...)
+	return validFingerprintFiles(files)
 }
 
 func validFingerprintFiles(files []FingerprintFile) bool {
