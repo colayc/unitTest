@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -13,7 +12,10 @@ import (
 	"unicode/utf8"
 )
 
-const maxGeneratedProfileFieldBytes = 256
+const (
+	maxGeneratedProfileIdentifierBytes = 64
+	maxGeneratedProfileWorkspaceBytes  = 256 * 1024
+)
 
 type BuildProfile struct {
 	ID              string
@@ -37,16 +39,17 @@ type GeneratedProfileSpec struct {
 
 func NewGeneratedProfile(spec GeneratedProfileSpec) (BuildProfile, error) {
 	fields := []struct {
-		name  string
-		value string
+		name     string
+		value    string
+		maxBytes int
 	}{
-		{name: "project ID", value: spec.ProjectID},
-		{name: "toolchain ID", value: spec.ToolchainID},
-		{name: "generator", value: spec.Generator},
-		{name: "configuration", value: spec.Configuration},
+		{name: "project ID", value: spec.ProjectID, maxBytes: maxGeneratedProfileIdentifierBytes},
+		{name: "toolchain ID", value: spec.ToolchainID, maxBytes: maxGeneratedProfileIdentifierBytes},
+		{name: "generator", value: spec.Generator, maxBytes: maxGeneratedProfileWorkspaceBytes},
+		{name: "configuration", value: spec.Configuration, maxBytes: maxGeneratedProfileWorkspaceBytes},
 	}
 	for _, field := range fields {
-		if err := validateGeneratedProfileField(field.name, field.value); err != nil {
+		if err := validateGeneratedProfileField(field.name, field.value, field.maxBytes); err != nil {
 			return BuildProfile{}, err
 		}
 	}
@@ -117,15 +120,15 @@ func hashCanonicalJSON(value any, description string) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-func validateGeneratedProfileField(name, value string) error {
+func validateGeneratedProfileField(name, value string, maxBytes int) error {
 	if value == "" {
 		return fmt.Errorf("generated profile %s must not be empty", name)
 	}
-	if len(value) > maxGeneratedProfileFieldBytes {
+	if len(value) > maxBytes {
 		return fmt.Errorf(
 			"generated profile %s exceeds %d bytes",
 			name,
-			maxGeneratedProfileFieldBytes,
+			maxBytes,
 		)
 	}
 	if !utf8.ValidString(value) {
@@ -146,6 +149,9 @@ func validateGeneratedBuildRoot(value string) (string, error) {
 	if strings.IndexByte(value, 0) >= 0 {
 		return "", fmt.Errorf("generated profile build root contains NUL")
 	}
+	if !utf8.ValidString(value) {
+		return "", fmt.Errorf("generated profile build root is not valid UTF-8")
+	}
 	if !filepath.IsAbs(value) {
 		return "", fmt.Errorf("generated profile build root must be absolute")
 	}
@@ -153,12 +159,8 @@ func validateGeneratedBuildRoot(value string) (string, error) {
 	if clean != value {
 		return "", fmt.Errorf("generated profile build root must be clean")
 	}
-	info, err := os.Stat(clean)
-	if err != nil {
-		return "", fmt.Errorf("inspect generated profile build root: %w", err)
-	}
-	if !info.IsDir() {
-		return "", fmt.Errorf("generated profile build root is not a directory")
+	if filepath.VolumeName(clean) != filepath.VolumeName(value) {
+		return "", fmt.Errorf("generated profile build root changed volume when cleaned")
 	}
 	return clean, nil
 }

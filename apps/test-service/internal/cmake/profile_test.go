@@ -2,6 +2,7 @@ package cmake
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	"unit-test-ide.local/test-service/internal/probe"
+	"unit-test-ide.local/test-service/internal/workspace"
 )
 
 func TestNewGeneratedProfileConstructsStableControlledProfile(t *testing.T) {
@@ -96,13 +98,14 @@ func TestNewGeneratedProfileRejectsInvalidSemanticFields(t *testing.T) {
 		BuildRoot:     t.TempDir(),
 	}
 	fields := []struct {
-		name string
-		set  func(*GeneratedProfileSpec, string)
+		name     string
+		maxBytes int
+		set      func(*GeneratedProfileSpec, string)
 	}{
-		{"project", func(spec *GeneratedProfileSpec, value string) { spec.ProjectID = value }},
-		{"toolchain", func(spec *GeneratedProfileSpec, value string) { spec.ToolchainID = value }},
-		{"generator", func(spec *GeneratedProfileSpec, value string) { spec.Generator = value }},
-		{"configuration", func(spec *GeneratedProfileSpec, value string) { spec.Configuration = value }},
+		{"project", 64, func(spec *GeneratedProfileSpec, value string) { spec.ProjectID = value }},
+		{"toolchain", 64, func(spec *GeneratedProfileSpec, value string) { spec.ToolchainID = value }},
+		{"generator", 256 * 1024, func(spec *GeneratedProfileSpec, value string) { spec.Generator = value }},
+		{"configuration", 256 * 1024, func(spec *GeneratedProfileSpec, value string) { spec.Configuration = value }},
 	}
 	invalidValues := []struct {
 		name  string
@@ -112,7 +115,6 @@ func TestNewGeneratedProfileRejectsInvalidSemanticFields(t *testing.T) {
 		{"control", "value\nnext"},
 		{"nul", "value\x00next"},
 		{"invalid UTF-8", string([]byte{'v', 0xff})},
-		{"over limit", strings.Repeat("x", 257)},
 	}
 
 	for _, field := range fields {
@@ -125,6 +127,86 @@ func TestNewGeneratedProfileRejectsInvalidSemanticFields(t *testing.T) {
 				}
 			})
 		}
+		t.Run(field.name+"/over limit", func(t *testing.T) {
+			spec := valid
+			field.set(&spec, strings.Repeat("x", field.maxBytes+1))
+			if profile, err := NewGeneratedProfile(spec); err == nil {
+				t.Fatalf("NewGeneratedProfile() = %#v, want error", profile)
+			}
+		})
+	}
+}
+
+func TestNewGeneratedProfileAcceptsWorkspaceSizedFallbackFields(t *testing.T) {
+	rootPath := t.TempDir()
+	configDirectory := filepath.Join(rootPath, ".unit-test-ide")
+	if err := os.Mkdir(configDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configuration := strings.Repeat("c", 257)
+	generator := strings.Repeat("g", 257)
+	configJSON, err := json.Marshal(map[string]any{
+		"version": 1,
+		"projects": []map[string]any{{
+			"id":        "app",
+			"sourceDir": ".",
+			"fallback": map[string]any{
+				"configurations":     []string{configuration},
+				"preferredGenerator": generator,
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(configDirectory, "workspace.json"),
+		configJSON,
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	root, err := workspace.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := workspace.LoadConfig(root)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	if len(loaded.Config.Projects) != 1 {
+		t.Fatalf("Projects = %#v", loaded.Config.Projects)
+	}
+	project := loaded.Config.Projects[0]
+	if project.Fallback.PreferredGenerator != generator ||
+		len(project.Fallback.Configurations) != 1 ||
+		project.Fallback.Configurations[0] != configuration {
+		t.Fatalf("loaded fallback = %#v", project.Fallback)
+	}
+	if len(loaded.Issues) != 0 {
+		t.Fatalf("Issues = %#v", loaded.Issues)
+	}
+	spec := GeneratedProfileSpec{
+		ProjectID:     project.ID,
+		ToolchainID:   "toolchain-0123",
+		Generator:     project.Fallback.PreferredGenerator,
+		Configuration: project.Fallback.Configurations[0],
+		BuildRoot:     filepath.Join(rootPath, "missing-build-root"),
+	}
+
+	first, err := NewGeneratedProfile(spec)
+	if err != nil {
+		t.Fatalf("NewGeneratedProfile(first) error = %v", err)
+	}
+	second, err := NewGeneratedProfile(spec)
+	if err != nil {
+		t.Fatalf("NewGeneratedProfile(second) error = %v", err)
+	}
+	if first.ID != second.ID {
+		t.Fatalf("workspace-sized fields produced unstable IDs %q and %q", first.ID, second.ID)
+	}
+	if _, err := os.Lstat(spec.BuildRoot); !os.IsNotExist(err) {
+		t.Fatalf("constructor changed missing BuildRoot: Lstat error = %v", err)
 	}
 }
 
@@ -136,19 +218,14 @@ func TestNewGeneratedProfileRejectsInvalidBuildRoot(t *testing.T) {
 		Configuration: "Debug",
 	}
 	root := t.TempDir()
-	filePath := filepath.Join(root, "not-a-directory")
-	if err := os.WriteFile(filePath, []byte("file"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 
 	cases := map[string]string{
 		"empty":          "",
 		"relative":       "relative-build-root",
 		"not clean":      root + string(filepath.Separator) + "child" + string(filepath.Separator) + "..",
 		"trailing slash": root + string(filepath.Separator),
-		"file":           filePath,
-		"missing":        filepath.Join(root, "missing"),
 		"nul":            root + "\x00",
+		"invalid UTF-8":  filepath.VolumeName(root) + string(filepath.Separator) + string([]byte{0xff}),
 	}
 	for name, buildRoot := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -156,6 +233,89 @@ func TestNewGeneratedProfileRejectsInvalidBuildRoot(t *testing.T) {
 			spec.BuildRoot = buildRoot
 			if profile, err := NewGeneratedProfile(spec); err == nil {
 				t.Fatalf("NewGeneratedProfile() = %#v, want error", profile)
+			}
+		})
+	}
+}
+
+func TestNewGeneratedProfileTreatsBuildRootAsTrustedMetadata(t *testing.T) {
+	parent := t.TempDir()
+	missingRoot := filepath.Join(parent, "missing-build-root")
+	spec := GeneratedProfileSpec{
+		ProjectID:     "app",
+		ToolchainID:   "toolchain-0123",
+		Generator:     "Ninja",
+		Configuration: "Debug",
+		BuildRoot:     missingRoot,
+	}
+
+	missingProfile, err := NewGeneratedProfile(spec)
+	if err != nil {
+		t.Fatalf("NewGeneratedProfile(missing root) error = %v", err)
+	}
+	if missingProfile.BinaryDir != filepath.Join(missingRoot, missingProfile.ID) {
+		t.Fatalf("missing-root BinaryDir = %q", missingProfile.BinaryDir)
+	}
+	if _, err := os.Lstat(missingRoot); !os.IsNotExist(err) {
+		t.Fatalf("constructor changed missing root state: Lstat error = %v", err)
+	}
+
+	fileRoot := filepath.Join(parent, "trusted-descriptor")
+	const fileContents = "descriptor remains a file"
+	if err := os.WriteFile(fileRoot, []byte(fileContents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	spec.BuildRoot = fileRoot
+	fileProfile, err := NewGeneratedProfile(spec)
+	if err != nil {
+		t.Fatalf("NewGeneratedProfile(file descriptor) error = %v", err)
+	}
+	if fileProfile.BinaryDir != filepath.Join(fileRoot, fileProfile.ID) {
+		t.Fatalf("file-root BinaryDir = %q", fileProfile.BinaryDir)
+	}
+	contents, err := os.ReadFile(fileRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != fileContents {
+		t.Fatalf("constructor changed file root contents to %q", contents)
+	}
+}
+
+func TestNewGeneratedProfileValidatesPlatformVolumeSyntax(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows volume and UNC syntax")
+	}
+	spec := GeneratedProfileSpec{
+		ProjectID:     "app",
+		ToolchainID:   "toolchain-0123",
+		Generator:     "Ninja",
+		Configuration: "Debug",
+	}
+	volume := filepath.VolumeName(t.TempDir())
+	accepted := []string{
+		volume + `\unit-test-ide-generated-profile-missing`,
+		`\\unit-test-ide.invalid\share\build`,
+	}
+	for _, buildRoot := range accepted {
+		t.Run("accept "+buildRoot, func(t *testing.T) {
+			spec.BuildRoot = buildRoot
+			profile, err := NewGeneratedProfile(spec)
+			if err != nil {
+				t.Fatalf("NewGeneratedProfile(%q) error = %v", buildRoot, err)
+			}
+			if profile.BinaryDir != filepath.Join(buildRoot, profile.ID) {
+				t.Fatalf("BinaryDir = %q", profile.BinaryDir)
+			}
+		})
+	}
+
+	rejected := []string{volume + "relative", `\root-relative`}
+	for _, buildRoot := range rejected {
+		t.Run("reject "+buildRoot, func(t *testing.T) {
+			spec.BuildRoot = buildRoot
+			if profile, err := NewGeneratedProfile(spec); err == nil {
+				t.Fatalf("NewGeneratedProfile(%q) = %#v, want error", buildRoot, profile)
 			}
 		})
 	}
