@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/url"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -109,7 +110,7 @@ func (p *parser) Feed(stream string, data []byte) []Diagnostic {
 		} else {
 			data = nil
 		}
-		if len(state.buffer)+len(segment) > maxLineBytes {
+		if logicalLineTooLong(state.buffer, segment, complete) {
 			state.buffer = nil
 			if !complete {
 				state.discardingLine = true
@@ -129,6 +130,19 @@ func (p *parser) Feed(stream string, data []byte) []Diagnostic {
 		}
 	}
 	return cloneDiagnostics(result)
+}
+
+func logicalLineTooLong(buffer, segment []byte, complete bool) bool {
+	size := len(buffer) + len(segment)
+	trailingCR := len(segment) != 0 && segment[len(segment)-1] == '\r' ||
+		len(segment) == 0 && len(buffer) != 0 && buffer[len(buffer)-1] == '\r'
+	if complete && trailingCR {
+		size--
+	}
+	if !complete && size == maxLineBytes+1 && trailingCR {
+		return false
+	}
+	return size > maxLineBytes
 }
 
 func (p *parser) Close() []Diagnostic {
@@ -189,6 +203,33 @@ func (p *parser) consumeCMakeLine(state *streamState, line string) []Diagnostic 
 		}
 		return result
 	}
+	if line == "CMake Generate step failed. Build files cannot be regenerated correctly." {
+		result := p.flush(state)
+		state.pending = &Diagnostic{
+			TaskID: p.options.TaskID, StepID: p.options.StepID,
+			Source: "cmake", Severity: "error", Code: "CMAKE_GENERATE_FAILED",
+			Message: "CMake generate step failed",
+		}
+		return result
+	}
+	if cmakeSourceDirectoryErrorPattern.MatchString(line) {
+		result := p.flush(state)
+		state.pending = &Diagnostic{
+			TaskID: p.options.TaskID, StepID: p.options.StepID,
+			Source: "cmake", Severity: "error", Code: "CMAKE_CONFIGURE_FAILED",
+			Message: "CMake source directory is invalid",
+		}
+		return result
+	}
+	if line == "-- Configuring incomplete, errors occurred!" {
+		result := p.flush(state)
+		state.pending = &Diagnostic{
+			TaskID: p.options.TaskID, StepID: p.options.StepID,
+			Source: "cmake", Severity: "error", Code: "CMAKE_CONFIGURE_FAILED",
+			Message: "CMake configure failed",
+		}
+		return result
+	}
 	if state.pending != nil {
 		if strings.TrimSpace(line) == "" {
 			return p.flush(state)
@@ -214,24 +255,6 @@ func (p *parser) consumeCMakeLine(state *streamState, line string) []Diagnostic 
 			return nil
 		}
 		return p.flush(state)
-	}
-	if line == "CMake Generate step failed. Build files cannot be regenerated correctly." {
-		result := p.flush(state)
-		state.pending = &Diagnostic{
-			TaskID: p.options.TaskID, StepID: p.options.StepID,
-			Source: "cmake", Severity: "error", Code: "CMAKE_GENERATE_FAILED",
-			Message: "CMake generate step failed",
-		}
-		return result
-	}
-	if cmakeSourceDirectoryErrorPattern.MatchString(line) {
-		result := p.flush(state)
-		state.pending = &Diagnostic{
-			TaskID: p.options.TaskID, StepID: p.options.StepID,
-			Source: "cmake", Severity: "error", Code: "CMAKE_CONFIGURE_FAILED",
-			Message: "CMake source directory is invalid",
-		}
-		return result
 	}
 	return nil
 }
@@ -341,6 +364,9 @@ func (p *parser) consumeLinkerLine(state *streamState, line string) []Diagnostic
 	case lldUndefinedSymbolPattern.MatchString(line):
 		match := lldUndefinedSymbolPattern.FindStringSubmatch(line)
 		code, message = "LLD_UNDEFINED_SYMBOL", "undefined symbol: "+match[1]
+	case lldLinkErrorPattern.MatchString(line):
+		match := lldLinkErrorPattern.FindStringSubmatch(line)
+		code, message = "LLD_LINK_ERROR", match[1]
 	case collect2ErrorPattern.MatchString(line):
 		match := collect2ErrorPattern.FindStringSubmatch(line)
 		code, message = "LD_ERROR", match[1]
@@ -378,13 +404,7 @@ func (p *parser) flush(state *streamState) []Diagnostic {
 	value := cloneDiagnostic(*state.pending)
 	state.pending = nil
 	valueBytes := diagnosticTextBytes(value)
-	retainedLimit := maxRetainedTextBytes
-	if !p.notices["DIAGNOSTIC_TRUNCATED"] {
-		retainedLimit -= p.noticeBytes(
-			"DIAGNOSTIC_TRUNCATED",
-			"Diagnostic output was truncated",
-		)
-	}
+	retainedLimit := maxRetainedTextBytes - p.noticeReservationBytes()
 	if valueBytes > maxDiagnosticBytes {
 		return p.notice(
 			"DIAGNOSTIC_TRUNCATED",
@@ -398,7 +418,11 @@ func (p *parser) flush(state *streamState) []Diagnostic {
 			"Diagnostic output was truncated",
 		)
 	}
-	if p.count >= maxDiagnostics-1 {
+	countLimit := maxDiagnostics - 1
+	if p.notices["DIAGNOSTIC_TRUNCATED"] {
+		countLimit = maxDiagnostics
+	}
+	if p.count >= countLimit {
 		return p.notice(
 			"DIAGNOSTIC_TRUNCATED",
 			"Diagnostic output was truncated",
@@ -432,6 +456,9 @@ func (p *parser) identityURI(value string) string {
 		return ""
 	}
 	root := strings.TrimSuffix(p.options.Root.URI, "/")
+	if identity, ok := windowsWorkspaceIdentityURI(root, value); ok {
+		return identity
+	}
 	if value == root {
 		return "workspace:///"
 	}
@@ -441,11 +468,50 @@ func (p *parser) identityURI(value string) string {
 	return value
 }
 
+func windowsWorkspaceIdentityURI(root, value string) (string, bool) {
+	if runtime.GOOS != "windows" {
+		return "", false
+	}
+	rootURL, rootErr := url.Parse(root)
+	valueURL, valueErr := url.Parse(value)
+	if rootErr != nil || valueErr != nil ||
+		!strings.EqualFold(rootURL.Scheme, "file") ||
+		!strings.EqualFold(valueURL.Scheme, "file") ||
+		rootURL.RawQuery != "" || rootURL.Fragment != "" ||
+		valueURL.RawQuery != "" || valueURL.Fragment != "" ||
+		!strings.EqualFold(rootURL.Host, valueURL.Host) {
+		return "", false
+	}
+	rootParts := fileURIPathParts(rootURL.Path)
+	valueParts := fileURIPathParts(valueURL.Path)
+	if rootURL.Host == "" &&
+		(len(rootParts) == 0 || len(rootParts[0]) != 2 || rootParts[0][1] != ':') {
+		return "", false
+	}
+	if len(valueParts) < len(rootParts) {
+		return "", false
+	}
+	for index := range rootParts {
+		if !strings.EqualFold(rootParts[index], valueParts[index]) {
+			return "", false
+		}
+	}
+	relative := strings.ToLower(strings.Join(valueParts[len(rootParts):], "/"))
+	return "workspace:///" + relative, true
+}
+
+func fileURIPathParts(value string) []string {
+	value = strings.Trim(value, "/")
+	if value == "" {
+		return nil
+	}
+	return strings.Split(value, "/")
+}
+
 func (p *parser) notice(code, message string) []Diagnostic {
 	if p.notices[code] || p.count >= maxDiagnostics {
 		return nil
 	}
-	p.notices[code] = true
 	value := Diagnostic{
 		TaskID: p.options.TaskID, StepID: p.options.StepID,
 		Source: "parser", ToolchainID: p.options.ToolchainID,
@@ -455,10 +521,28 @@ func (p *parser) notice(code, message string) []Diagnostic {
 	if p.retained+valueBytes > maxRetainedTextBytes {
 		return nil
 	}
+	p.notices[code] = true
 	value.ID = p.diagnosticID(value)
 	p.count++
 	p.retained += valueBytes
 	return []Diagnostic{value}
+}
+
+func (p *parser) noticeReservationBytes() int {
+	total := 0
+	if !p.notices["DIAGNOSTIC_TRUNCATED"] {
+		total += p.noticeBytes(
+			"DIAGNOSTIC_TRUNCATED",
+			"Diagnostic output was truncated",
+		)
+	}
+	if !p.notices["DIAGNOSTIC_INPUT_INVALID"] {
+		total += p.noticeBytes(
+			"DIAGNOSTIC_INPUT_INVALID",
+			"Diagnostic input was invalid",
+		)
+	}
+	return total
 }
 
 func (p *parser) noticeBytes(code, message string) int {

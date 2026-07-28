@@ -7,7 +7,7 @@ var (
 		`^(.+)\(([0-9]+)(?:,([0-9]+))?\): (fatal error|error|warning|note) ([A-Z]+[0-9]+): (.+)$`,
 	)
 	msvcLinkPattern = regexp.MustCompile(
-		`^LINK : fatal error (LNK[0-9]+): (.+)$`,
+		`^(?:LINK|.+\.(?i:obj|exe)) : (?:fatal )?error (LNK[0-9]+): (.+)$`,
 	)
 	msvcNotePattern = regexp.MustCompile(
 		`^(.+)\(([0-9]+)(?:,([0-9]+))?\): note: (.+)$`,

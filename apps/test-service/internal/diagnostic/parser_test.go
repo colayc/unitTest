@@ -2,6 +2,7 @@ package diagnostic
 
 import (
 	"bytes"
+	"math/rand"
 	"os"
 	"reflect"
 	"strings"
@@ -113,6 +114,79 @@ func TestLinkerGoldenRecognizesErrorsAndIgnoresOrdinaryOutput(t *testing.T) {
 	}
 }
 
+func TestLinkerParsersRecognizeRestrictedMSVCAndLLDLinkShapes(t *testing.T) {
+	tests := []struct {
+		name    string
+		family  Family
+		input   string
+		code    string
+		message string
+	}{
+		{
+			name: "object error", family: FamilyLinker,
+			input: "foo.obj : error LNK2019: unresolved external symbol run [app.vcxproj]\n",
+			code:  "LNK2019", message: "unresolved external symbol run",
+		},
+		{
+			name: "executable fatal", family: FamilyMSVC,
+			input: "foo.exe : fatal error LNK1120: 1 unresolved externals\n",
+			code:  "LNK1120", message: "1 unresolved externals",
+		},
+		{
+			name: "lld-link error", family: FamilyLinker,
+			input: "lld-link: error: undefined symbol: run\n",
+			code:  "LLD_LINK_ERROR", message: "undefined symbol: run",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			parser := newTestParser(t, test.family)
+			got := append(parser.Feed("stderr", []byte(test.input)), parser.Close()...)
+			if len(got) != 1 || got[0].Source != "linker" ||
+				got[0].Severity != "error" || got[0].Code != test.code ||
+				got[0].Message != test.message {
+				t.Fatalf("diagnostics=%#v", got)
+			}
+		})
+	}
+}
+
+func TestCMakeFixedConfigureFailureReprocessesPendingLine(t *testing.T) {
+	parser := newTestParser(t, FamilyCMake)
+	got := append(parser.Feed("stderr", []byte(
+		"CMake Error at CMakeLists.txt:4 (message):\n"+
+			"  primary failure\n"+
+			"-- Configuring incomplete, errors occurred!\n",
+	)), parser.Close()...)
+	if len(got) != 2 ||
+		got[0].Code != "CMAKE_ERROR" || got[0].Message != "primary failure" ||
+		got[1].Code != "CMAKE_CONFIGURE_FAILED" ||
+		got[1].Message != "CMake configure failed" {
+		t.Fatalf("diagnostics=%#v", got)
+	}
+}
+
+func TestLinkerAndCMakeParsersIgnoreSimilarOrdinaryOutput(t *testing.T) {
+	linker := newTestParser(t, FamilyLinker)
+	linkerValues := append(linker.Feed("stderr", []byte(
+		"foo.lib : warning LNK4099: debug symbols unavailable\n"+
+			"foo.obj: error LNK2019: missing diagnostic separator\n"+
+			"lld-link: warning: unused argument\n",
+	)), linker.Close()...)
+	if len(linkerValues) != 0 {
+		t.Fatalf("ordinary linker output diagnostics=%#v", linkerValues)
+	}
+
+	cmake := newTestParser(t, FamilyCMake)
+	cmakeValues := append(cmake.Feed("stdout", []byte(
+		"-- Configuring done\n"+
+			"-- Generating incomplete metadata\n",
+	)), cmake.Close()...)
+	if len(cmakeValues) != 0 {
+		t.Fatalf("ordinary CMake output diagnostics=%#v", cmakeValues)
+	}
+}
+
 func TestCMakeGoldenRecognizesFixedGenerateFailure(t *testing.T) {
 	parser := newTestParser(t, FamilyCMake)
 	got := feedFixture(t, parser, "cmake.txt")
@@ -167,6 +241,68 @@ func TestParserAcceptsSplitUTF8AndExactLineLimitButTruncatesLimitPlusOne(t *test
 	if len(got) != 1 || got[0].Code != "DIAGNOSTIC_TRUNCATED" ||
 		strings.Contains(got[0].Message, strings.Repeat("x", 32)) {
 		t.Fatalf("overlong diagnostics = %#v", got)
+	}
+}
+
+func TestParserLogicalLineLimitIsDelimiterAndChunkInvariant(t *testing.T) {
+	root, err := workspace.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := Options{Root: root, WorkingDirectory: root.NativePath}
+	newParser := func() Parser {
+		value, err := NewParser(FamilyGNU, options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+
+	const prefix = "src/main.cpp:1:1: error: "
+	exactLine := prefix + strings.Repeat("x", maxLineBytes-len(prefix))
+	overLine := exactLine + "x"
+	var exactID string
+	for _, delimiter := range []string{"\n", "\r\n"} {
+		for _, chunks := range []string{"whole", "byte", "random"} {
+			got := feedParserChunks(t, newParser(), "stderr", []byte(exactLine+delimiter), chunks)
+			if len(got) != 1 || got[0].Code != "COMPILER_ERROR" {
+				t.Fatalf("exact delimiter=%q chunks=%s diagnostics=%#v", delimiter, chunks, got)
+			}
+			if exactID == "" {
+				exactID = got[0].ID
+			} else if got[0].ID != exactID {
+				t.Fatalf("exact delimiter=%q chunks=%s ID=%q, want %q", delimiter, chunks, got[0].ID, exactID)
+			}
+
+			got = feedParserChunks(t, newParser(), "stderr", []byte(overLine+delimiter), chunks)
+			if len(got) != 1 || got[0].Code != "DIAGNOSTIC_TRUNCATED" {
+				t.Fatalf("limit+1 delimiter=%q chunks=%s diagnostics=%#v", delimiter, chunks, got)
+			}
+		}
+	}
+
+	concrete := newParser().(*parser)
+	if got := concrete.Feed("stderr", []byte(exactLine)); len(got) != 0 {
+		t.Fatalf("exact partial diagnostics=%#v", got)
+	}
+	if got := concrete.Feed("stderr", []byte{'\r'}); len(got) != 0 {
+		t.Fatalf("pending delimiter CR diagnostics=%#v", got)
+	}
+	if got := len(concrete.streams["stderr"].buffer); got > maxLineBytes+1 {
+		t.Fatalf("pending line retained %d bytes", got)
+	}
+	got := append(concrete.Feed("stderr", []byte{'x'}), concrete.Close()...)
+	if len(got) != 1 || got[0].Code != "DIAGNOSTIC_TRUNCATED" {
+		t.Fatalf("CR followed by non-LF diagnostics=%#v", got)
+	}
+
+	bounded := newParser().(*parser)
+	bounded.Feed("stderr", bytes.Repeat([]byte{'x'}, 1024*1024))
+	if got := len(bounded.streams["stderr"].buffer); got > maxLineBytes+1 {
+		t.Fatalf("overlong partial retained %d bytes", got)
+	}
+	if !bounded.streams["stderr"].discardingLine {
+		t.Fatal("overlong partial did not enter bounded discard mode")
 	}
 }
 
@@ -303,6 +439,79 @@ func TestParserCapsDiagnosticCountWithOneStableTruncationNotice(t *testing.T) {
 	}
 }
 
+func TestParserUsesEarlyTruncationNoticeAsOneOf4096Slots(t *testing.T) {
+	triggers := []struct {
+		name string
+		feed func(Parser) []Diagnostic
+	}{
+		{
+			name: "line limit",
+			feed: func(parser Parser) []Diagnostic {
+				return parser.Feed("stderr", []byte(
+					strings.Repeat("x", maxLineBytes+1)+"\n",
+				))
+			},
+		},
+		{
+			name: "related limit",
+			feed: func(parser Parser) []Diagnostic {
+				var input strings.Builder
+				input.WriteString("src/main.cpp:1:1: error: primary\n")
+				for index := 0; index < maxRelatedRecords+1; index++ {
+					input.WriteString("src/header.hpp:2:1: note: related\n")
+				}
+				input.WriteString("ordinary separator\n")
+				return parser.Feed("stderr", []byte(input.String()))
+			},
+		},
+		{
+			name: "single diagnostic limit",
+			feed: func(parser Parser) []Diagnostic {
+				const notePrefix = "src/header.hpp:2:1: note: "
+				longNote := notePrefix +
+					strings.Repeat("n", maxLineBytes-len(notePrefix)) + "\n"
+				var input strings.Builder
+				input.WriteString("src/main.cpp:1:1: error: primary\n")
+				for index := 0; index < 17; index++ {
+					input.WriteString(longNote)
+				}
+				input.WriteString("ordinary separator\n")
+				return parser.Feed("stderr", []byte(input.String()))
+			},
+		},
+	}
+
+	for _, trigger := range triggers {
+		t.Run(trigger.name, func(t *testing.T) {
+			for _, extra := range []int{0, 1} {
+				parser := newTestParser(t, FamilyGNU)
+				got := trigger.feed(parser)
+				if !hasDiagnosticCode(got, "DIAGNOSTIC_TRUNCATED") {
+					t.Fatalf("extra=%d trigger did not emit early notice: %#v", extra, got)
+				}
+				var input strings.Builder
+				for index := 0; index < maxDiagnostics-len(got)+extra; index++ {
+					input.WriteString("src/main.cpp:1:1: error: broken\n")
+				}
+				got = append(got, parser.Feed("stderr", []byte(input.String()))...)
+				got = append(got, parser.Close()...)
+				if len(got) != maxDiagnostics {
+					t.Fatalf("extra=%d diagnostic count=%d, want %d", extra, len(got), maxDiagnostics)
+				}
+				notices := 0
+				for _, value := range got {
+					if value.Code == "DIAGNOSTIC_TRUNCATED" {
+						notices++
+					}
+				}
+				if notices != 1 {
+					t.Fatalf("extra=%d truncation notices=%d, want one", extra, notices)
+				}
+			}
+		})
+	}
+}
+
 func TestParserCapsSingleAggregatedDiagnostic(t *testing.T) {
 	parser := newTestParser(t, FamilyCMake)
 	var got []Diagnostic
@@ -324,13 +533,16 @@ func TestParserCapsSingleAggregatedDiagnostic(t *testing.T) {
 	}
 }
 
-func TestParserReservesEightMiBTextBudgetForOneTruncationNotice(t *testing.T) {
+func TestParserReservesEightMiBTextBudgetForStableNotices(t *testing.T) {
 	const (
-		smallMessageBytes = 65506
-		smallDiagnostics  = 127
-		ordinaryBaseBytes = len("linker") + len("toolchain-1") + len("error") + len("LD_ERROR")
-		noticeBytes       = len("parser") + len("toolchain-1") + len("info") +
+		smallMessageBytes     = 65506
+		smallDiagnostics      = 127
+		ordinaryBaseBytes     = len("linker") + len("toolchain-1") + len("error") + len("LD_ERROR")
+		truncationNoticeBytes = len("parser") + len("toolchain-1") + len("info") +
 			len("DIAGNOSTIC_TRUNCATED") + len("Diagnostic output was truncated")
+		invalidNoticeBytes = len("parser") + len("toolchain-1") + len("info") +
+			len("DIAGNOSTIC_INPUT_INVALID") + len("Diagnostic input was invalid")
+		reservedNoticeBytes = truncationNoticeBytes + invalidNoticeBytes
 	)
 	var prefix strings.Builder
 	for index := 0; index < smallDiagnostics; index++ {
@@ -339,7 +551,8 @@ func TestParserReservesEightMiBTextBudgetForOneTruncationNotice(t *testing.T) {
 		prefix.WriteByte('\n')
 	}
 	finalMessageBytes := 8*1024*1024 -
-		smallDiagnostics*(ordinaryBaseBytes+smallMessageBytes) - noticeBytes - ordinaryBaseBytes
+		smallDiagnostics*(ordinaryBaseBytes+smallMessageBytes) -
+		reservedNoticeBytes - ordinaryBaseBytes
 	if finalMessageBytes <= 0 {
 		t.Fatal("invalid hand-derived fixture size")
 	}
@@ -351,7 +564,7 @@ func TestParserReservesEightMiBTextBudgetForOneTruncationNotice(t *testing.T) {
 	if hasDiagnosticCode(exactValues, "DIAGNOSTIC_TRUNCATED") {
 		t.Fatalf("exact retained-text budget was truncated")
 	}
-	if got := retainedDiagnosticText(exactValues); got != 8*1024*1024-noticeBytes {
+	if got := retainedDiagnosticText(exactValues); got != 8*1024*1024-reservedNoticeBytes {
 		t.Fatalf("exact retained text = %d", got)
 	}
 
@@ -369,6 +582,66 @@ func TestParserReservesEightMiBTextBudgetForOneTruncationNotice(t *testing.T) {
 	for _, value := range overValues {
 		if value.Message == "later" {
 			t.Fatal("parser retained content after total text limit")
+		}
+	}
+}
+
+func TestParserReservesTextBudgetForStableNoticesRegardlessOfOrder(t *testing.T) {
+	const (
+		smallMessageBytes = 65506
+		smallDiagnostics  = 127
+		ordinaryBaseBytes = len("linker") + len("toolchain-1") + len("error") + len("LD_ERROR")
+		truncationBytes   = len("parser") + len("toolchain-1") + len("info") +
+			len("DIAGNOSTIC_TRUNCATED") + len("Diagnostic output was truncated")
+	)
+	var prefix strings.Builder
+	for index := 0; index < smallDiagnostics; index++ {
+		prefix.WriteString("collect2: error: ")
+		prefix.WriteString(strings.Repeat("x", smallMessageBytes))
+		prefix.WriteByte('\n')
+	}
+	finalMessageBytes := maxRetainedTextBytes -
+		smallDiagnostics*(ordinaryBaseBytes+smallMessageBytes) -
+		truncationBytes - ordinaryBaseBytes
+	if finalMessageBytes <= 0 || finalMessageBytes > maxLineBytes-len("collect2: error: ") {
+		t.Fatal("invalid hand-derived fixture size")
+	}
+	normalInput := prefix.String() +
+		"collect2: error: " + strings.Repeat("y", finalMessageBytes) + "\n"
+	invalidInput := []byte{0xff, '\n'}
+	overlongInput := []byte(strings.Repeat("z", maxLineBytes+1) + "\n")
+
+	for _, invalidFirst := range []bool{false, true} {
+		parser := newTestParser(t, FamilyLinker)
+		var got []Diagnostic
+		if invalidFirst {
+			got = append(got, parser.Feed("stderr", invalidInput)...)
+		}
+		got = append(got, parser.Feed("stderr", []byte(normalInput))...)
+		if !invalidFirst {
+			got = append(got, parser.Feed("stderr", invalidInput)...)
+		}
+		got = append(got, parser.Feed("stderr", overlongInput)...)
+		got = append(got, parser.Close()...)
+
+		invalidNotices := 0
+		truncationNotices := 0
+		for _, value := range got {
+			switch value.Code {
+			case "DIAGNOSTIC_INPUT_INVALID":
+				invalidNotices++
+			case "DIAGNOSTIC_TRUNCATED":
+				truncationNotices++
+			}
+		}
+		if invalidNotices != 1 || truncationNotices != 1 {
+			t.Fatalf(
+				"invalidFirst=%t invalid notices=%d truncation notices=%d",
+				invalidFirst, invalidNotices, truncationNotices,
+			)
+		}
+		if retained := retainedDiagnosticText(got); retained > maxRetainedTextBytes {
+			t.Fatalf("invalidFirst=%t retained text=%d, exceeds 8 MiB", invalidFirst, retained)
 		}
 	}
 }
@@ -536,4 +809,30 @@ func feedFixture(t *testing.T, parser Parser, name string) []Diagnostic {
 		t.Fatal(err)
 	}
 	return append(parser.Feed("stderr", data), parser.Close()...)
+}
+
+func feedParserChunks(t *testing.T, parser Parser, stream string, data []byte, chunks string) []Diagnostic {
+	t.Helper()
+	var got []Diagnostic
+	switch chunks {
+	case "whole":
+		got = append(got, parser.Feed(stream, data)...)
+	case "byte":
+		for _, value := range data {
+			got = append(got, parser.Feed(stream, []byte{value})...)
+		}
+	case "random":
+		random := rand.New(rand.NewSource(20260729))
+		for len(data) != 0 {
+			size := random.Intn(4096) + 1
+			if size > len(data) {
+				size = len(data)
+			}
+			got = append(got, parser.Feed(stream, data[:size])...)
+			data = data[size:]
+		}
+	default:
+		t.Fatalf("unknown chunk mode %q", chunks)
+	}
+	return append(got, parser.Close()...)
 }
