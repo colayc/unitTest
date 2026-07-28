@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"path"
-	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -182,8 +181,14 @@ func canonicalPortablePath(value string) string {
 	if value == "" {
 		return ""
 	}
-	native := filepath.Clean(value)
-	canonical := path.Clean(filepath.ToSlash(native))
+	portable := strings.ReplaceAll(value, `\`, "/")
+	unc := strings.HasPrefix(portable, "//") &&
+		len(portable) > 2 &&
+		portable[2] != '/'
+	canonical := path.Clean(portable)
+	if unc && strings.HasPrefix(canonical, "/") && !strings.HasPrefix(canonical, "//") {
+		canonical = "/" + canonical
+	}
 	if runtime.GOOS == "windows" {
 		canonical = strings.ToLower(canonical)
 	}

@@ -77,6 +77,30 @@ func TestWorkspaceGenerationCanonicalizesCollectionAndPathOrder(t *testing.T) {
 	}
 }
 
+func TestCanonicalPortablePathNormalizesSeparatorsBeforeCleaning(t *testing.T) {
+	want := "C:/Tools/CMake/bin"
+	if runtime.GOOS == "windows" {
+		want = strings.ToLower(want)
+	}
+
+	got := canonicalPortablePath(`C:\Tools\SDK\..\CMake/bin`)
+	if got != want {
+		t.Fatalf("canonicalPortablePath() = %q, want %q", got, want)
+	}
+}
+
+func TestCanonicalPortablePathPreservesUNCPrefix(t *testing.T) {
+	want := "//Server/Share/CMake/bin"
+	if runtime.GOOS == "windows" {
+		want = strings.ToLower(want)
+	}
+
+	got := canonicalPortablePath(`\\Server\Share\SDK\..\CMake/bin`)
+	if got != want {
+		t.Fatalf("canonicalPortablePath() = %q, want %q", got, want)
+	}
+}
+
 func TestCanonicalPathIdentityUsesPlatformCaseSemantics(t *testing.T) {
 	firstSource := "Project/Src"
 	firstBinary := "Build/Debug"
