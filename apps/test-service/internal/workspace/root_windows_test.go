@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
 func TestWindowsResolveRelativeRejectsJunctionEscapeWithMissingTail(t *testing.T) {
@@ -103,6 +105,83 @@ func TestWindowsVolumeRootContainsMissingDescendant(t *testing.T) {
 	descendant := filepath.Join(volumeRoot, "unit-test-ide-missing-descendant")
 	if !root.Contains(descendant) {
 		t.Fatalf("Contains(%q) = false for drive-root descendant", descendant)
+	}
+}
+
+func TestWindowsUNCFinalPathUsesShareIdentityWithoutVolumeGUID(t *testing.T) {
+	query := func(flags uint32) (string, error) {
+		if flags == 0 {
+			return `\\?\UNC\BuildServer\Team Share\Workspace`, nil
+		}
+		return "", windows.ERROR_PATH_NOT_FOUND
+	}
+
+	nativePath, volumeIdentity, err := canonicalWindowsPathAndVolume(query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nativePath != `\\BuildServer\Team Share\Workspace` {
+		t.Fatalf("native path = %q", nativePath)
+	}
+	if volumeIdentity != "buildserver/team share" {
+		t.Fatalf("volume identity = %q, want buildserver/team share", volumeIdentity)
+	}
+}
+
+func TestWindowsUNCIdentityIsStableAcrossAliasCase(t *testing.T) {
+	firstPath, firstVolume, err := canonicalWindowsPathAndVolume(func(flags uint32) (string, error) {
+		if flags == 0 {
+			return `\\?\UNC\BuildServer\TeamShare\Workspace`, nil
+		}
+		return "", windows.ERROR_PATH_NOT_FOUND
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondPath, secondVolume, err := canonicalWindowsPathAndVolume(func(flags uint32) (string, error) {
+		if flags == 0 {
+			return `\\?\UNC\buildserver\teamshare\workspace`, nil
+		}
+		return "", windows.ERROR_PATH_NOT_FOUND
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstID, err := rootID(firstPath, firstVolume)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondID, err := rootID(secondPath, secondVolume)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstVolume != "buildserver/teamshare" || secondVolume != firstVolume {
+		t.Fatalf("UNC identities = %q and %q", firstVolume, secondVolume)
+	}
+	if firstID != secondID {
+		t.Fatalf("UNC alias IDs differ: %q != %q", firstID, secondID)
+	}
+}
+
+func TestWindowsLocalFinalPathKeepsVolumeGUIDIdentity(t *testing.T) {
+	nativePath, volumeIdentity, err := canonicalWindowsPathAndVolume(func(flags uint32) (string, error) {
+		switch flags {
+		case 0:
+			return `\\?\C:\Workspace`, nil
+		case volumeNameGUID:
+			return `\\?\Volume{ABCDEF}\Workspace`, nil
+		default:
+			return "", windows.ERROR_INVALID_PARAMETER
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nativePath != `C:\Workspace` {
+		t.Fatalf("native path = %q", nativePath)
+	}
+	if volumeIdentity != `\\?\Volume{ABCDEF}` {
+		t.Fatalf("volume identity = %q", volumeIdentity)
 	}
 }
 

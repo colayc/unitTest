@@ -32,11 +32,28 @@ func finalExistingPath(path string) (string, string, error) {
 	}
 	defer windows.CloseHandle(handle)
 
-	dosPath, err := finalPathName(handle, 0)
+	return canonicalWindowsPathAndVolume(func(flags uint32) (string, error) {
+		return finalPathName(handle, flags)
+	})
+}
+
+func canonicalWindowsPathAndVolume(query func(uint32) (string, error)) (string, string, error) {
+	dosPath, err := query(0)
 	if err != nil {
 		return "", "", err
 	}
-	guidPath, err := finalPathName(handle, volumeNameGUID)
+	nativePath := filepath.Clean(normalizeWindowsFinalPath(dosPath))
+	slashPath := filepath.ToSlash(nativePath)
+	if strings.HasPrefix(slashPath, "//") {
+		volume := strings.TrimPrefix(filepath.ToSlash(filepath.VolumeName(nativePath)), "//")
+		server, share, ok := strings.Cut(volume, "/")
+		if !ok || server == "" || share == "" {
+			return "", "", fmt.Errorf("UNC final path %q is missing server or share", dosPath)
+		}
+		return nativePath, strings.ToLower(server + "/" + share), nil
+	}
+
+	guidPath, err := query(volumeNameGUID)
 	if err != nil {
 		return "", "", err
 	}
@@ -44,7 +61,7 @@ func finalExistingPath(path string) (string, string, error) {
 	if volume == "" {
 		return "", "", fmt.Errorf("final path %q has no volume identity", guidPath)
 	}
-	return filepath.Clean(normalizeWindowsFinalPath(dosPath)), volume, nil
+	return nativePath, volume, nil
 }
 
 func finalPathName(handle windows.Handle, flags uint32) (string, error) {
