@@ -715,6 +715,7 @@ func TestConcurrentPublishSubscribeCancelAndClose(t *testing.T) {
 					cancel()
 				} else {
 					subscription.Close()
+					cancel()
 				}
 			}
 		}()
