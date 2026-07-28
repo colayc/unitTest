@@ -266,20 +266,9 @@ func normalizeInstance(instance Instance) (Instance, bool) {
 		len(instance.HostArchitecture) + len(instance.TargetArchitecture) +
 		len(instance.Sysroot) + len(instance.Coverage.LLVMProfdata) +
 		len(instance.Coverage.LLVMCov) + len(instance.Coverage.GCov)
-	if len(instance.Environment) > maxRegistryEnvironmentEntries ||
-		len(instance.Generators) > maxRegistryGeneratorEntries {
+	environmentBytes, environmentOK := registryEnvironmentBytes(instance.Environment)
+	if !environmentOK || len(instance.Generators) > maxRegistryGeneratorEntries {
 		return Instance{}, false
-	}
-	environmentBytes := 0
-	for _, value := range instance.Environment {
-		if !boundedString(value, maxRegistryEnvironmentEntryBytes) ||
-			value == "" || !strings.Contains(value, "=") {
-			return Instance{}, false
-		}
-		environmentBytes += len(value)
-		if environmentBytes > maxRegistryEnvironmentTotalBytes {
-			return Instance{}, false
-		}
 	}
 	generatorBytes := 0
 	for _, value := range instance.Generators {
@@ -301,6 +290,24 @@ func normalizeInstance(instance Instance) (Instance, bool) {
 	instance.Environment = sortedUnique(instance.Environment)
 	instance.Generators = sortedUnique(instance.Generators)
 	return instance, true
+}
+
+func registryEnvironmentBytes(environment []string) (int, bool) {
+	if len(environment) > maxRegistryEnvironmentEntries {
+		return 0, false
+	}
+	total := 0
+	for _, value := range environment {
+		if !boundedString(value, maxRegistryEnvironmentEntryBytes) ||
+			value == "" || !strings.Contains(value, "=") {
+			return 0, false
+		}
+		total += len(value)
+		if total > maxRegistryEnvironmentTotalBytes {
+			return 0, false
+		}
+	}
+	return total, true
 }
 
 func cloneInstances(instances []Instance) []Instance {

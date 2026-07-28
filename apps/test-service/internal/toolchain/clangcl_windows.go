@@ -289,10 +289,13 @@ func (adapter *clangCLAdapter) probeCandidate(
 	if err := verify(); err != nil {
 		return Instance{}, contextualWindowsProbeError(err, "clang-cl identity changed")
 	}
-	instanceEnvironment := appendVerifiedGeneratorPaths(
+	instanceEnvironment, err := appendVerifiedGeneratorPaths(
 		candidate.context.environment,
 		generators.directories,
 	)
+	if err != nil {
+		return Instance{}, err
+	}
 	instance := Instance{
 		ID:                 candidate.id,
 		Family:             FamilyClangCL,

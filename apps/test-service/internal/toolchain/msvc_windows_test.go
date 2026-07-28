@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -280,6 +281,149 @@ func TestMSVCEnvironmentRejectsMalformedConflictingAndOversizedInput(t *testing.
 	}
 }
 
+func TestAppendVerifiedGeneratorPathsEnforcesRegistryEnvironmentBounds(t *testing.T) {
+	ninjaRoot := `C:\Verified Ninja`
+	references := []windowsDirectoryReference{{
+		role: "path-generator-ninja",
+		path: ninjaRoot,
+	}}
+	entryEnvironment := func(finalBytes int) []string {
+		baseBytes := finalBytes - len("Path=") - 1 - len(ninjaRoot)
+		base := `C:\Base\` + strings.Repeat("x", baseBytes-len(`C:\Base\`))
+		return []string{"Path=" + base}
+	}
+	pathEnvironment := func(finalCount int) []string {
+		paths := make([]string, finalCount-1)
+		for index := range paths {
+			paths[index] = fmt.Sprintf(`C:\Path\%03d`, index)
+		}
+		return []string{"Path=" + strings.Join(paths, ";")}
+	}
+	entryCountEnvironment := func(count int) []string {
+		result := make([]string, count)
+		result[0] = "Path=" + ninjaRoot
+		for index := 1; index < count; index++ {
+			result[index] = fmt.Sprintf("KEY_%03d=v", index)
+		}
+		return result
+	}
+	totalEnvironment := func(total int) []string {
+		const count = 18
+		result := make([]string, count)
+		result[0] = "Path=" + ninjaRoot
+		used := len(result[0])
+		for index := 1; index < count; index++ {
+			result[index] = fmt.Sprintf("KEY_%03d=", index)
+			used += len(result[index])
+		}
+		remaining := total - used
+		for index := 1; index < len(result); index++ {
+			capacity := maxRegistryEnvironmentEntryBytes - len(result[index])
+			add := min(remaining, capacity)
+			result[index] += strings.Repeat("v", add)
+			remaining -= add
+		}
+		if remaining != 0 {
+			panic("test environment total cannot be represented")
+		}
+		return result
+	}
+
+	tests := []struct {
+		name        string
+		environment []string
+		wantError   bool
+	}{
+		{
+			name:        "entry exact",
+			environment: entryEnvironment(maxRegistryEnvironmentEntryBytes),
+		},
+		{
+			name:        "entry plus one",
+			environment: entryEnvironment(maxRegistryEnvironmentEntryBytes + 1),
+			wantError:   true,
+		},
+		{
+			name:        "environment entries exact",
+			environment: entryCountEnvironment(maxRegistryEnvironmentEntries),
+		},
+		{
+			name:        "environment entries plus one",
+			environment: entryCountEnvironment(maxRegistryEnvironmentEntries + 1),
+			wantError:   true,
+		},
+		{
+			name:        "environment total exact",
+			environment: totalEnvironment(maxRegistryEnvironmentTotalBytes),
+		},
+		{
+			name:        "environment total plus one",
+			environment: totalEnvironment(maxRegistryEnvironmentTotalBytes + 1),
+			wantError:   true,
+		},
+		{
+			name:        "PATH entries exact",
+			environment: pathEnvironment(maxCapturedEnvironmentPathEntries),
+		},
+		{
+			name:        "PATH entries plus one",
+			environment: pathEnvironment(maxCapturedEnvironmentPathEntries + 1),
+			wantError:   true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := appendVerifiedGeneratorPaths(test.environment, references)
+			if test.wantError {
+				if got != nil || err == nil ||
+					issueCodeFromProbeError(err) != "TOOLCHAIN_ENVIRONMENT_INVALID" {
+					t.Fatalf(
+						"appendVerifiedGeneratorPaths() = %#v, %v, want typed rejection",
+						got,
+						err,
+					)
+				}
+				if strings.Contains(err.Error(), ninjaRoot) {
+					t.Fatalf("bounded merge error leaked raw path: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("appendVerifiedGeneratorPaths() error = %v", err)
+			}
+			instance := boundedRegistryInstance(0)
+			instance.Environment = got
+			if _, ok := normalizeInstance(instance); !ok {
+				t.Fatalf("bounded merge produced Registry-invalid environment: %#v", got)
+			}
+		})
+	}
+}
+
+func TestAppendVerifiedGeneratorPathsDeduplicatesAndDefensivelyCopies(t *testing.T) {
+	environment := []string{`Path=C:\Tools;C:\Verified Ninja`, "LANG=C"}
+	references := []windowsDirectoryReference{{
+		role: "path-generator-ninja",
+		path: `C:\Verified Ninja`,
+	}}
+	got, err := appendVerifiedGeneratorPaths(environment, references)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path := windowsEnvironmentValues(got)["PATH"]; path != `C:\Tools;C:\Verified Ninja` {
+		t.Fatalf("duplicate Ninja root changed PATH: %q", path)
+	}
+	got[0] = "MUTATED=1"
+	if environment[0] != `Path=C:\Tools;C:\Verified Ninja` {
+		t.Fatalf("bounded merge leaked caller mutation: %#v", environment)
+	}
+	again, err := appendVerifiedGeneratorPaths(environment, references)
+	if err != nil || windowsEnvironmentValues(again)["PATH"] !=
+		`C:\Tools;C:\Verified Ninja` {
+		t.Fatalf("second bounded merge = %#v, %v", again, err)
+	}
+}
+
 func TestMSVCCompilerBannerParsesLocalizedOEMFileVersionFallback(t *testing.T) {
 	output := append(
 		[]byte{0xd6, 0xd0, 0xce, 0xc4, ' ', 'x', '6', '4', '\r', '\n'},
@@ -537,6 +681,184 @@ func TestMSVCAcceptsProductionShapedEnvironmentAndFiltersUntrustedPaths(t *testi
 		strings.ToLower(filepath.Join(fixture.root, "untrusted inherited")),
 	) {
 		t.Fatalf("final environment leaked an untrusted path: %#v", instance.Environment)
+	}
+}
+
+func TestMSVCGeneratorEnvironmentBoundaryKeepsOrDropsOptionalNinja(t *testing.T) {
+	tests := []struct {
+		name           string
+		finalPathBytes int
+		wantGenerators []string
+	}{
+		{
+			name:           "exact Registry entry limit keeps Ninja",
+			finalPathBytes: maxRegistryEnvironmentEntryBytes,
+			wantGenerators: []string{"Ninja", "Visual Studio 17 2022"},
+		},
+		{
+			name:           "Registry entry limit plus one drops Ninja",
+			finalPathBytes: maxRegistryEnvironmentEntryBytes + 1,
+			wantGenerators: []string{"Visual Studio 17 2022"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newWindowsToolchainFixture(t)
+			runner := newWindowsFakeRunner(fixture)
+			runner.setOutput(
+				fixture.cmd,
+				fixture.vsDevCmdArgs("x64", "x64"),
+				successfulWindowsOutput(
+					fixture.environmentOutputWithFinalNinjaPathEntryBytes(
+						t,
+						"x64",
+						"x64",
+						test.finalPathBytes,
+					),
+				),
+			)
+			adapters, err := newWindowsAdapters(runner, nil, fixture.options())
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			direct, discoverErr := adapters[0].Discover(context.Background())
+			if discoverErr != nil || len(direct) != 1 {
+				t.Fatalf("MSVC direct Discover() = %#v, %v", direct, discoverErr)
+			}
+			if !reflect.DeepEqual(direct[0].Generators, test.wantGenerators) {
+				t.Fatalf(
+					"MSVC direct generators = %#v, want %#v",
+					direct[0].Generators,
+					test.wantGenerators,
+				)
+			}
+			pathEntry := "Path=" + windowsEnvironmentValues(direct[0].Environment)["PATH"]
+			if len(pathEntry) > maxRegistryEnvironmentEntryBytes {
+				t.Fatalf(
+					"MSVC direct PATH bytes = %d, Registry maximum = %d",
+					len(pathEntry),
+					maxRegistryEnvironmentEntryBytes,
+				)
+			}
+
+			registry, err := NewRegistry(adapters[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			registered, issues := registry.Discover(context.Background())
+			if len(registered) != 1 || len(issues) != 0 {
+				t.Fatalf("MSVC Registry Discover() = %#v, %#v", registered, issues)
+			}
+			if !reflect.DeepEqual(registered[0].Generators, test.wantGenerators) ||
+				registered[0].ID != direct[0].ID {
+				t.Fatalf(
+					"MSVC Registry descriptor = %#v, want generators %#v and ID %q",
+					registered[0],
+					test.wantGenerators,
+					direct[0].ID,
+				)
+			}
+			if test.finalPathBytes > maxRegistryEnvironmentEntryBytes {
+				optionsWithoutNinja := fixture.options()
+				optionsWithoutNinja.NinjaPath = ""
+				withoutNinjaAdapters, err := newWindowsAdapters(
+					runner,
+					nil,
+					optionsWithoutNinja,
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+				withoutNinja, withoutNinjaErr :=
+					withoutNinjaAdapters[0].Discover(context.Background())
+				if withoutNinjaErr != nil || len(withoutNinja) != 1 {
+					t.Fatalf(
+						"MSVC Discover(no configured Ninja) = %#v, %v",
+						withoutNinja,
+						withoutNinjaErr,
+					)
+				}
+				if direct[0].ID != withoutNinja[0].ID ||
+					!reflect.DeepEqual(direct[0].Environment, withoutNinja[0].Environment) ||
+					!reflect.DeepEqual(direct[0].Generators, withoutNinja[0].Generators) {
+					t.Fatalf(
+						"MSVC downgraded descriptor = %#v, no-Ninja descriptor = %#v",
+						direct[0],
+						withoutNinja[0],
+					)
+				}
+			}
+
+			direct[0].Environment[0] = "MUTATED=1"
+			direct[0].Generators[0] = "MUTATED"
+			again, discoverErr := adapters[0].Discover(context.Background())
+			if discoverErr != nil || len(again) != 1 ||
+				again[0].Environment[0] == "MUTATED=1" ||
+				again[0].Generators[0] == "MUTATED" {
+				t.Fatalf("MSVC bounded result leaked caller mutation: %#v, %v", again, discoverErr)
+			}
+		})
+	}
+}
+
+func TestMSVCOnlyNinjaEnvironmentOverflowFailsClosedForAdapterAndRegistry(t *testing.T) {
+	fixture := newWindowsToolchainFixture(t)
+	if err := os.Remove(fixture.msbuild); err != nil {
+		t.Fatal(err)
+	}
+	runner := newWindowsFakeRunner(fixture)
+	runner.setOutput(
+		fixture.cmd,
+		fixture.vsDevCmdArgs("x64", "x64"),
+		successfulWindowsOutput(
+			fixture.environmentOutputWithFinalNinjaPathEntryBytes(
+				t,
+				"x64",
+				"x64",
+				maxRegistryEnvironmentEntryBytes+1,
+			),
+		),
+	)
+	adapters, err := newWindowsAdapters(runner, fixture.manualMSVC(), fixture.options())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertWindowsEnvironmentIssue := func(t *testing.T, instances []Instance, err error) {
+		t.Helper()
+		if len(instances) != 0 || err == nil {
+			t.Fatalf("MSVC only-Ninja overflow = %#v, %v, want rejection", instances, err)
+		}
+		var carrier issueCarrier
+		if !errors.As(err, &carrier) {
+			t.Fatalf("MSVC only-Ninja overflow error = %v, want fixed issue", err)
+		}
+		want := []Issue{{
+			Code:    "TOOLCHAIN_ENVIRONMENT_INVALID",
+			Message: "Windows toolchain environment is invalid",
+		}}
+		if got := carrier.ToolchainIssues(); !reflect.DeepEqual(got, want) {
+			t.Fatalf("MSVC only-Ninja overflow issues = %#v, want %#v", got, want)
+		}
+		if strings.Contains(err.Error(), fixture.root) {
+			t.Fatalf("MSVC only-Ninja overflow leaked raw path: %v", err)
+		}
+	}
+
+	direct, discoverErr := adapters[0].Discover(context.Background())
+	assertWindowsEnvironmentIssue(t, direct, discoverErr)
+
+	registry, err := NewRegistry(adapters[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, issues := registry.Discover(context.Background())
+	if len(registered) != 0 || !reflect.DeepEqual(issues, []Issue{{
+		Code:    "TOOLCHAIN_ENVIRONMENT_INVALID",
+		Message: "Windows toolchain environment is invalid",
+	}}) {
+		t.Fatalf("MSVC only-Ninja Registry Discover() = %#v, %#v", registered, issues)
 	}
 }
 
@@ -1780,6 +2102,66 @@ func (fixture *windowsToolchainFixture) environmentOutput(host, target string) s
 		"UNIT_TEST_IDE_TOKEN=ide-secret",
 		"GITHUB_TOKEN=github-secret",
 	}, "\r\n") + "\r\n"
+}
+
+func (fixture *windowsToolchainFixture) environmentOutputWithFinalNinjaPathEntryBytes(
+	t *testing.T,
+	host string,
+	target string,
+	finalEntryBytes int,
+) string {
+	t.Helper()
+	ninjaRoot := filepath.Dir(fixture.ninja)
+	capturedEntryBytes := finalEntryBytes - 1 - len(ninjaRoot)
+	targetPathValueBytes := capturedEntryBytes - len("Path=")
+	binaryDirectory := filepath.Join(
+		fixture.toolset,
+		"bin",
+		"Host"+host,
+		target,
+	)
+	if targetPathValueBytes <= len(binaryDirectory) {
+		t.Fatalf("target PATH value %d is too short for fixture", targetPathValueBytes)
+	}
+
+	paths := []string{binaryDirectory}
+	remaining := targetPathValueBytes - len(binaryDirectory)
+	const maximumNameBytes = 96
+	for index := 0; remaining > 0; index++ {
+		prefix := fmt.Sprintf("generator-bound-%02d-", index)
+		minimumContribution := len(fixture.installation) + 2 + len(prefix)
+		if remaining < minimumContribution {
+			t.Fatalf("cannot represent remaining PATH bytes %d", remaining)
+		}
+		maximumContribution := len(fixture.installation) + 2 + maximumNameBytes
+		contribution := min(remaining, maximumContribution)
+		left := remaining - contribution
+		if left > 0 && left < minimumContribution {
+			contribution -= minimumContribution - left
+		}
+		nameBytes := contribution - len(fixture.installation) - 2
+		name := prefix + strings.Repeat("x", nameBytes-len(prefix))
+		path := filepath.Join(fixture.installation, name)
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, path)
+		remaining -= contribution
+	}
+	pathLine := "Path=" + strings.Join(paths, ";")
+	if len(pathLine) != capturedEntryBytes {
+		t.Fatalf("captured PATH bytes = %d, want %d", len(pathLine), capturedEntryBytes)
+	}
+
+	lines := strings.Split(fixture.environmentOutput(host, target), "\r\n")
+	for index, line := range lines {
+		if strings.HasPrefix(strings.ToUpper(line), "PATH=") {
+			lines[index] = pathLine
+			return strings.Join(lines, "\r\n")
+		}
+	}
+	t.Fatal("fixture environment omitted PATH")
+	return ""
 }
 
 func (fixture *windowsToolchainFixture) productionEnvironmentOutput(host, target string) string {

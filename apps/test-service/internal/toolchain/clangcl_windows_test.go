@@ -114,6 +114,132 @@ func TestClangCLAddsVerifiedNinjaToProductionShapedEnvironment(t *testing.T) {
 	}
 }
 
+func TestClangCLGeneratorEnvironmentBoundaryFailsClosedForAdapterAndRegistry(t *testing.T) {
+	tests := []struct {
+		name          string
+		finalPathByte int
+		wantInstance  bool
+	}{
+		{
+			name:          "exact Registry entry limit",
+			finalPathByte: maxRegistryEnvironmentEntryBytes,
+			wantInstance:  true,
+		},
+		{
+			name:          "Registry entry limit plus one",
+			finalPathByte: maxRegistryEnvironmentEntryBytes + 1,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newWindowsToolchainFixture(t)
+			runner := newWindowsFakeRunner(fixture)
+			runner.setOutput(
+				fixture.cmd,
+				fixture.vsDevCmdArgs("x64", "x64"),
+				successfulWindowsOutput(
+					fixture.environmentOutputWithFinalNinjaPathEntryBytes(
+						t,
+						"x64",
+						"x64",
+						test.finalPathByte,
+					),
+				),
+			)
+			adapters, err := newWindowsAdapters(
+				runner,
+				[]workspace.ToolchainConfig{{
+					ID:          "manual-clang-cl-boundary",
+					Family:      string(FamilyClangCL),
+					CCompiler:   fixture.clang,
+					CPPCompiler: fixture.clang,
+				}},
+				fixture.options(),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			direct, discoverErr := adapters[1].Discover(context.Background())
+			if test.wantInstance {
+				if discoverErr != nil || len(direct) != 1 {
+					t.Fatalf("clang-cl direct Discover(exact) = %#v, %v", direct, discoverErr)
+				}
+				pathEntry := "Path=" +
+					windowsEnvironmentValues(direct[0].Environment)["PATH"]
+				if len(pathEntry) != maxRegistryEnvironmentEntryBytes {
+					t.Fatalf(
+						"clang-cl exact PATH bytes = %d, want %d",
+						len(pathEntry),
+						maxRegistryEnvironmentEntryBytes,
+					)
+				}
+			} else {
+				if len(direct) != 0 || discoverErr == nil {
+					t.Fatalf(
+						"clang-cl direct Discover(plus one) = %#v, %v, want rejection",
+						direct,
+						discoverErr,
+					)
+				}
+				var carrier issueCarrier
+				if !errors.As(discoverErr, &carrier) {
+					t.Fatalf("clang-cl overflow error = %v, want fixed issue", discoverErr)
+				}
+				want := []Issue{{
+					Code:    "TOOLCHAIN_ENVIRONMENT_INVALID",
+					Message: "Windows toolchain environment is invalid",
+				}}
+				if got := carrier.ToolchainIssues(); !reflect.DeepEqual(got, want) {
+					t.Fatalf("clang-cl overflow issues = %#v, want %#v", got, want)
+				}
+				if strings.Contains(discoverErr.Error(), fixture.root) {
+					t.Fatalf("clang-cl overflow leaked raw path: %v", discoverErr)
+				}
+			}
+
+			registry, err := NewRegistry(adapters[1])
+			if err != nil {
+				t.Fatal(err)
+			}
+			registered, issues := registry.Discover(context.Background())
+			if test.wantInstance {
+				if len(registered) != 1 || len(issues) != 0 {
+					t.Fatalf(
+						"clang-cl Registry Discover(exact) = %#v, %#v",
+						registered,
+						issues,
+					)
+				}
+				registered[0].Environment[0] = "MUTATED=1"
+				registered[0].Generators[0] = "MUTATED"
+				again, againIssues := registry.Discover(context.Background())
+				if len(again) != 1 || len(againIssues) != 0 ||
+					again[0].Environment[0] == "MUTATED=1" ||
+					again[0].Generators[0] == "MUTATED" {
+					t.Fatalf(
+						"clang-cl Registry leaked caller mutation: %#v, %#v",
+						again,
+						againIssues,
+					)
+				}
+			} else {
+				want := []Issue{{
+					Code:    "TOOLCHAIN_ENVIRONMENT_INVALID",
+					Message: "Windows toolchain environment is invalid",
+				}}
+				if len(registered) != 0 || !reflect.DeepEqual(issues, want) {
+					t.Fatalf(
+						"clang-cl Registry Discover(plus one) = %#v, %#v",
+						registered,
+						issues,
+					)
+				}
+			}
+		})
+	}
+}
+
 func TestClangCLAutomaticIDTracksNinjaToolIdentity(t *testing.T) {
 	fixture := newWindowsToolchainFixture(t)
 	firstRunner := newWindowsFakeRunner(fixture)

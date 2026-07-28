@@ -1018,10 +1018,17 @@ func (adapter *msvcAdapter) probeContext(
 	if err := verify(); err != nil {
 		return Instance{}, contextualWindowsProbeError(err, "MSVC identity changed")
 	}
-	instanceEnvironment := appendVerifiedGeneratorPaths(
+	instanceEnvironment, environmentErr := appendVerifiedGeneratorPaths(
 		candidate.environment,
 		generators.directories,
 	)
+	if environmentErr != nil {
+		generators = withoutNinjaGenerator(generators)
+		if len(generators.names) == 0 {
+			return Instance{}, environmentErr
+		}
+		instanceEnvironment = append([]string(nil), candidate.environment...)
+	}
 	instance := Instance{
 		ID:                 candidate.id,
 		Family:             FamilyMSVC,
@@ -1180,8 +1187,14 @@ func (adapter *msvcAdapter) probeMSVCGenerators(
 func appendVerifiedGeneratorPaths(
 	environment []string,
 	references []windowsDirectoryReference,
-) []string {
+) ([]string, error) {
 	values := windowsEnvironmentValues(environment)
+	if _, present := values["PATH"]; !present {
+		return nil, invalidProbe(
+			"TOOLCHAIN_ENVIRONMENT_INVALID",
+			"Windows generator environment is invalid",
+		)
+	}
 	paths := filepath.SplitList(values["PATH"])
 	seen := make(map[string]struct{}, len(paths)+len(references))
 	result := make([]string, 0, len(paths)+len(references))
@@ -1208,10 +1221,49 @@ func appendVerifiedGeneratorPaths(
 		seen[key] = struct{}{}
 		result = append(result, reference.path)
 	}
-	return replaceWindowsEnvironmentPathLists(
+	if len(result) > maxCapturedEnvironmentPathEntries {
+		return nil, invalidProbe(
+			"TOOLCHAIN_ENVIRONMENT_INVALID",
+			"Windows generator environment is invalid",
+		)
+	}
+	merged := replaceWindowsEnvironmentPathLists(
 		environment,
 		map[string]string{"PATH": strings.Join(result, ";")},
 	)
+	if _, ok := registryEnvironmentBytes(merged); !ok {
+		return nil, invalidProbe(
+			"TOOLCHAIN_ENVIRONMENT_INVALID",
+			"Windows generator environment is invalid",
+		)
+	}
+	return merged, nil
+}
+
+func withoutNinjaGenerator(
+	result windowsGeneratorProbeResult,
+) windowsGeneratorProbeResult {
+	filtered := windowsGeneratorProbeResult{
+		names:          make([]string, 0, len(result.names)),
+		directories:    make([]windowsDirectoryReference, 0, len(result.directories)),
+		toolIdentities: make([]string, 0, len(result.toolIdentities)),
+	}
+	for _, name := range result.names {
+		if name != "Ninja" {
+			filtered.names = append(filtered.names, name)
+		}
+	}
+	for _, reference := range result.directories {
+		if reference.role != "path-generator-ninja" {
+			filtered.directories = append(filtered.directories, reference)
+		}
+	}
+	for _, identity := range result.toolIdentities {
+		if !strings.HasPrefix(identity, "ninja\x00") {
+			filtered.toolIdentities = append(filtered.toolIdentities, identity)
+		}
+	}
+	return filtered
 }
 
 func parseMSVCCompilerBanner(output []byte) (string, string, error) {
