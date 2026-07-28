@@ -9,11 +9,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"strconv"
-	"strings"
 	"sync"
 	"syscall"
-	"time"
 
 	"golang.org/x/sys/unix"
 
@@ -23,213 +20,215 @@ import (
 type unixProcessTree struct {
 	command       *exec.Cmd
 	parentThread  *linuxprocess.ParentThread
+	controlWriter *os.File
+	statusReader  *os.File
+	pidfd         int
 	pgid          int
-	session       int
-	startIdentity string
+	operations    linuxSupervisorOperations
 
-	terminateOnce sync.Once
-	terminateErr  error
+	closeControlOnce sync.Once
+	closeStatusOnce  sync.Once
+	closePidfdOnce   sync.Once
+	terminateOnce    sync.Once
+	terminateErr     error
+	waitOnce         sync.Once
+	waitDone         chan struct{}
+	waitErr          error
 }
 
 func startProcessTree(ctx context.Context, spec Spec, stdout, stderr io.Writer) (processTree, error) {
-	session, err := unix.Getsid(0)
-	if err != nil || session <= 1 {
-		return nil, errors.New("probe process identity unavailable")
+	supervisorExecutable, err := os.Executable()
+	if err != nil {
+		return nil, errors.New("probe supervisor executable unavailable")
 	}
-	command := exec.CommandContext(ctx, spec.Executable, spec.Args...)
-	command.Env = append([]string{}, spec.Env...)
-	command.Dir = spec.Dir
+	controlReader, controlWriter, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+	statusReader, statusWriter, err := os.Pipe()
+	if err != nil {
+		closeProbeUnixFiles(controlReader, controlWriter)
+		return nil, err
+	}
+
+	command := exec.Command(supervisorExecutable, probeSupervisorArgument)
+	command.Env = []string{}
+	command.Stdin = controlReader
 	command.Stdout = stdout
 	command.Stderr = stderr
+	command.ExtraFiles = []*os.File{statusWriter}
 	command.WaitDelay = waitDelay
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
 	parentThread, err := linuxprocess.Start(command)
 	if err != nil {
+		closeProbeUnixFiles(controlReader, controlWriter, statusReader, statusWriter)
 		return nil, err
 	}
+	closeProbeUnixFiles(controlReader, statusWriter)
 	if command.Process == nil || command.Process.Pid <= 1 {
-		if command.Process != nil {
-			_ = command.Process.Kill()
-		}
-		_ = command.Wait()
-		parentThread.Release()
-		return nil, errors.New("probe process group unavailable")
+		closeProbeUnixFiles(controlWriter, statusReader)
+		killAndReapProbeSupervisor(command, parentThread)
+		return nil, errors.New("probe supervisor process unavailable")
 	}
-	identity, err := probeProcessStartIdentity(command.Process.Pid)
-	if err != nil || identity == "" {
-		_ = unix.Kill(-command.Process.Pid, unix.SIGKILL)
-		_ = command.Process.Kill()
-		_ = command.Wait()
-		parentThread.Release()
-		return nil, errors.New("probe process identity unavailable")
+	pgid := command.Process.Pid
+	actualGroup, err := unix.Getpgid(pgid)
+	if err != nil || actualGroup != pgid {
+		closeProbeUnixFiles(controlWriter, statusReader)
+		killAndReapProbeSupervisor(command, parentThread)
+		return nil, errors.New("probe supervisor did not become process-group leader")
 	}
-	return &unixProcessTree{
+	pidfd, err := unix.PidfdOpen(pgid, 0)
+	if err != nil {
+		closeProbeUnixFiles(controlWriter, statusReader)
+		killAndReapProbeSupervisor(command, parentThread)
+		return nil, fmt.Errorf("open probe supervisor pidfd: %w", err)
+	}
+	unix.CloseOnExec(pidfd)
+	tree := &unixProcessTree{
 		command:       command,
 		parentThread:  parentThread,
-		pgid:          command.Process.Pid,
-		session:       session,
-		startIdentity: identity,
-	}, nil
+		controlWriter: controlWriter,
+		statusReader:  statusReader,
+		pidfd:         pidfd,
+		pgid:          pgid,
+		operations:    defaultLinuxSupervisorOperations(),
+		waitDone:      make(chan struct{}),
+	}
+	if err := writeSupervisorFrame(controlWriter, supervisorRequest{
+		Version: supervisorProtocolVersion,
+		Spec:    spec,
+	}); err != nil {
+		cleanupErr := tree.stopAndReap()
+		return nil, errors.Join(fmt.Errorf("write probe supervisor request: %w", err), cleanupErr)
+	}
+	type statusResult struct {
+		status supervisorStatus
+		err    error
+	}
+	started := make(chan statusResult, 1)
+	go func() {
+		var status supervisorStatus
+		err := readSupervisorFrame(statusReader, &status)
+		started <- statusResult{status: status, err: err}
+	}()
+	select {
+	case <-ctx.Done():
+		cleanupErr := tree.stopAndReap()
+		return nil, errors.Join(ctx.Err(), cleanupErr)
+	case result := <-started:
+		if result.err != nil {
+			cleanupErr := tree.stopAndReap()
+			return nil, errors.Join(fmt.Errorf("read probe supervisor start status: %w", result.err), cleanupErr)
+		}
+		if result.status.Version != supervisorProtocolVersion ||
+			result.status.Kind != supervisorStatusStarted ||
+			result.status.PID <= 1 {
+			cleanupErr := tree.stopAndReap()
+			return nil, errors.Join(errors.New("probe supervisor rejected target start"), cleanupErr)
+		}
+	}
+	return tree, nil
+}
+
+func killAndReapProbeSupervisor(command *exec.Cmd, parentThread *linuxprocess.ParentThread) {
+	if command != nil && command.Process != nil {
+		_ = command.Process.Kill()
+		_ = command.Wait()
+	}
+	parentThread.Release()
 }
 
 func (tree *unixProcessTree) Terminate() error {
 	tree.terminateOnce.Do(func() {
-		err := signalProbeProcessGroup(tree, unix.SIGKILL)
-		if err != nil && tree.command.Process != nil {
-			err = errors.Join(err, tree.command.Process.Kill())
+		tree.terminateErr = terminateLinuxSupervisorGroup(
+			tree.pidfd,
+			tree.pgid,
+			tree.operations,
+		)
+		if tree.terminateErr != nil {
+			// If the pidfd pin or the pinned group signal fails, never fall
+			// back to a parent-issued numeric group signal. Wake a possibly
+			// stopped supervisor, then release its control pipe so the live
+			// group leader safely kills its own group.
+			_ = tree.operations.pidfdSendSignal(tree.pidfd, unix.SIGCONT, nil, 0)
 		}
-		tree.terminateErr = err
+		tree.closeControl()
 	})
 	return tree.terminateErr
 }
 
 func (tree *unixProcessTree) Wait() (int, error) {
-	waitErr := tree.command.Wait()
-	tree.parentThread.Release()
+	var targetStatus supervisorStatus
+	statusErr := readSupervisorFrame(tree.statusReader, &targetStatus)
 	cleanupErr := tree.Terminate()
-	if !waitUnixProcessGroupGone(tree.pgid, time.Second) {
-		cleanupErr = errors.Join(cleanupErr, errors.New("probe process group remained alive"))
-	}
+	supervisorWaitErr := tree.reapSupervisor()
+
 	exitCode := -1
-	if tree.command.ProcessState != nil {
-		exitCode = tree.command.ProcessState.ExitCode()
+	var targetErr error
+	if statusErr != nil {
+		targetErr = fmt.Errorf("read probe supervisor exit status: %w", statusErr)
+	} else if targetStatus.Version != supervisorProtocolVersion ||
+		targetStatus.Kind != supervisorStatusExited {
+		targetErr = errors.New("probe supervisor returned invalid exit status")
+	} else {
+		exitCode = targetStatus.ExitCode
+		switch {
+		case targetStatus.ErrorCode != "":
+			targetErr = errors.New("probe supervisor could not wait for target")
+		case exitCode != 0:
+			targetErr = fmt.Errorf("probe target exited with %d", exitCode)
+		}
+	}
+	if cleanupErr == nil {
+		// The supervisor is intentionally killed with its group after the
+		// target status is captured.
+		supervisorWaitErr = nil
 	}
 	if cleanupErr != nil {
-		cleanupErr = fmt.Errorf("terminate probe process group: %w", cleanupErr)
+		cleanupErr = fmt.Errorf("terminate pinned probe supervisor group: %w", cleanupErr)
 	}
-	return exitCode, errors.Join(waitErr, cleanupErr)
+	return exitCode, errors.Join(targetErr, cleanupErr, supervisorWaitErr)
 }
 
-func signalProbeProcessGroup(tree *unixProcessTree, signal unix.Signal) error {
-	if tree == nil || tree.pgid <= 1 || tree.session <= 1 || tree.startIdentity == "" {
-		return errors.New("invalid probe process group")
-	}
-	exists, owned, err := probeProcessGroupOwnedBySession(tree.pgid, tree.session, tree.startIdentity)
-	if err != nil {
-		return err
-	}
-	if !exists {
-		if probeProcessGroupExists(tree.pgid) {
-			return errors.New("probe process group identity mismatch")
-		}
-		return nil
-	}
-	if !owned {
-		return errors.New("probe process group identity mismatch")
-	}
-	if err := validateProbeLeaderIdentity(tree.pgid, tree.startIdentity); err != nil {
-		return err
-	}
-	err = unix.Kill(-tree.pgid, signal)
-	if errors.Is(err, unix.ESRCH) {
-		return nil
-	}
-	return err
+func (tree *unixProcessTree) stopAndReap() error {
+	return errors.Join(tree.Terminate(), tree.reapSupervisor())
 }
 
-func validateProbeLeaderIdentity(pgid int, expected string) error {
-	contents, err := os.ReadFile("/proc/" + strconv.Itoa(pgid) + "/stat")
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return errors.New("probe process group identity unavailable")
-	}
-	_, _, identity, err := parseProbeProcessStat(contents)
-	if err != nil {
-		return errors.New("probe process group identity unavailable")
-	}
-	if identity != expected {
-		return errors.New("probe process group identity mismatch")
-	}
-	return nil
+func (tree *unixProcessTree) reapSupervisor() error {
+	tree.waitOnce.Do(func() {
+		tree.waitErr = tree.command.Wait()
+		tree.parentThread.Release()
+		tree.closeControl()
+		tree.closeStatus()
+		tree.closePidfd()
+		close(tree.waitDone)
+	})
+	<-tree.waitDone
+	return tree.waitErr
 }
 
-func probeProcessGroupOwnedBySession(pgid, session int, leaderIdentity string) (bool, bool, error) {
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return false, false, errors.New("probe process group identity unavailable")
-	}
-	found := false
-	for _, entry := range entries {
-		pid, err := strconv.Atoi(entry.Name())
-		if err != nil || pid <= 0 {
-			continue
-		}
-		contents, err := os.ReadFile("/proc/" + entry.Name() + "/stat")
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return false, false, errors.New("probe process group identity unavailable")
-		}
-		group, gotSession, identity, err := parseProbeProcessStat(contents)
-		if err != nil {
-			return false, false, errors.New("probe process group identity unavailable")
-		}
-		if group != pgid {
-			continue
-		}
-		found = true
-		if gotSession != session {
-			return true, false, nil
-		}
-		if pid == pgid && identity != leaderIdentity {
-			return true, false, nil
-		}
-	}
-	return found, found, nil
+func (tree *unixProcessTree) closeControl() {
+	tree.closeControlOnce.Do(func() {
+		_ = tree.controlWriter.Close()
+	})
 }
 
-func probeProcessStartIdentity(pid int) (string, error) {
-	contents, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
-	if err != nil {
-		return "", err
-	}
-	_, _, identity, err := parseProbeProcessStat(contents)
-	return identity, err
+func (tree *unixProcessTree) closeStatus() {
+	tree.closeStatusOnce.Do(func() {
+		_ = tree.statusReader.Close()
+	})
 }
 
-func parseProbeProcessStat(contents []byte) (int, int, string, error) {
-	closing := strings.LastIndexByte(string(contents), ')')
-	if closing < 0 || closing+1 >= len(contents) {
-		return 0, 0, "", errors.New("invalid process identity")
-	}
-	fields := strings.Fields(string(contents[closing+1:]))
-	if len(fields) <= 19 {
-		return 0, 0, "", errors.New("invalid process identity")
-	}
-	group, err := strconv.Atoi(fields[2])
-	if err != nil || group < 0 {
-		return 0, 0, "", errors.New("invalid process identity")
-	}
-	session, err := strconv.Atoi(fields[3])
-	if err != nil || session < 0 {
-		return 0, 0, "", errors.New("invalid process identity")
-	}
-	if _, err := strconv.ParseUint(fields[19], 10, 64); err != nil {
-		return 0, 0, "", errors.New("invalid process identity")
-	}
-	return group, session, fields[19], nil
+func (tree *unixProcessTree) closePidfd() {
+	tree.closePidfdOnce.Do(func() {
+		_ = unix.Close(tree.pidfd)
+	})
 }
 
-func probeProcessGroupExists(pgid int) bool {
-	if pgid <= 1 {
-		return false
-	}
-	err := unix.Kill(-pgid, 0)
-	return err == nil || errors.Is(err, unix.EPERM)
-}
-
-func waitUnixProcessGroupGone(pgid int, maximum time.Duration) bool {
-	deadline := time.Now().Add(maximum)
-	for {
-		if !probeProcessGroupExists(pgid) {
-			return true
+func closeProbeUnixFiles(files ...*os.File) {
+	for _, file := range files {
+		if file != nil {
+			_ = file.Close()
 		}
-		if !time.Now().Before(deadline) {
-			return false
-		}
-		time.Sleep(10 * time.Millisecond)
 	}
 }

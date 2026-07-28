@@ -181,6 +181,21 @@ func TestRunnerOutputLimitTerminatesDescendantAndConvergesPipes(t *testing.T) {
 	assertRecordedDescendantGone(t, marker)
 }
 
+func TestRunnerNaturalTargetExitTerminatesLingeringDescendant(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "descendant.pid")
+	result, err := NewRunner().Run(
+		context.Background(),
+		helperSpec(t, "spawn-descendant-exit", marker),
+	)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, want 0", result.ExitCode)
+	}
+	assertRecordedDescendantGone(t, marker)
+}
+
 func TestRunnerAppliesIndependentDefaultOutputLimits(t *testing.T) {
 	spec := helperSpec(t, "exact-streams", strconv.Itoa(defaultMaxOutput))
 
@@ -269,9 +284,11 @@ func TestProbeHelperProcess(t *testing.T) {
 		_, _ = os.Stdout.Write(chunk)
 		_, _ = os.Stderr.Write(chunk)
 	case "spawn-descendant-hang":
-		spawnProbeDescendant(values, "descendant-hang")
+		spawnProbeDescendant(values, "descendant-hang", true)
 	case "spawn-descendant-output":
-		spawnProbeDescendant(values, "descendant-output")
+		spawnProbeDescendant(values, "descendant-output", true)
+	case "spawn-descendant-exit":
+		spawnProbeDescendant(values, "descendant-hang", false)
 	case "descendant-hang":
 		time.Sleep(time.Hour)
 	case "descendant-output":
@@ -288,7 +305,7 @@ func TestProbeHelperProcess(t *testing.T) {
 	os.Exit(0)
 }
 
-func spawnProbeDescendant(values []string, mode string) {
+func spawnProbeDescendant(values []string, mode string, keepParentAlive bool) {
 	if len(values) != 1 {
 		os.Exit(2)
 	}
@@ -308,7 +325,9 @@ func spawnProbeDescendant(values []string, mode string) {
 		_ = child.Process.Kill()
 		os.Exit(2)
 	}
-	time.Sleep(time.Hour)
+	if keepParentAlive {
+		time.Sleep(time.Hour)
+	}
 }
 
 func waitForMarker(marker string) {
