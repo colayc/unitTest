@@ -225,11 +225,17 @@ func (adapter *gnuAdapter) Probe(ctx context.Context, candidate Candidate) (Inst
 
 	cCompiler, err := openExecutableSnapshot(ctx, candidate.CCompiler)
 	if err != nil {
+		if isContextError(err) {
+			return Instance{}, err
+		}
 		return Instance{}, invalidProbe("TOOLCHAIN_PROBE_FAILED", "C compiler executable is invalid")
 	}
 	defer cCompiler.Close()
 	cxxCompiler, err := openExecutableSnapshot(ctx, candidate.CXXCompiler)
 	if err != nil {
+		if isContextError(err) {
+			return Instance{}, err
+		}
 		return Instance{}, invalidProbe("TOOLCHAIN_PROBE_FAILED", "C++ compiler executable is invalid")
 	}
 	defer cxxCompiler.Close()

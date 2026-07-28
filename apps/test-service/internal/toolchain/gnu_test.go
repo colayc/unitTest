@@ -331,6 +331,84 @@ func TestGNUProbeCancellationDuringSnapshotVerificationPropagatesContext(t *test
 	}
 }
 
+func TestGNUProbePreservesCCompilerInitialSnapshotHashCancellation(t *testing.T) {
+	t.Parallel()
+
+	fixture := newGNUFixture(t)
+	runner := newGNUFakeRunner(t, fixture)
+	adapter, err := newGNUAdapter(runner, FamilyGCC, nil, "x64")
+	if err != nil {
+		t.Fatalf("newGNUAdapter() error = %v", err)
+	}
+	ctx := &errOnContextCheck{
+		Context: context.Background(),
+		trigger: 4,
+		err:     context.Canceled,
+	}
+
+	_, err = adapter.Probe(ctx, Candidate{
+		Family:      FamilyGCC,
+		CCompiler:   fixture.gcc,
+		CXXCompiler: fixture.gxx,
+		Ninja:       fixture.ninja,
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Probe() error = %v, want C snapshot context.Canceled", err)
+	}
+}
+
+func TestGNUProbePreservesCXXCompilerInitialSnapshotHashCancellation(t *testing.T) {
+	t.Parallel()
+
+	fixture := newGNUFixture(t)
+	runner := newGNUFakeRunner(t, fixture)
+	adapter, err := newGNUAdapter(runner, FamilyGCC, nil, "x64")
+	if err != nil {
+		t.Fatalf("newGNUAdapter() error = %v", err)
+	}
+	ctx := &errOnContextCheck{
+		Context: context.Background(),
+		trigger: 14,
+		err:     context.Canceled,
+	}
+
+	_, err = adapter.Probe(ctx, Candidate{
+		Family:      FamilyGCC,
+		CCompiler:   fixture.gcc,
+		CXXCompiler: fixture.gxx,
+		Ninja:       fixture.ninja,
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Probe() error = %v, want C++ snapshot context.Canceled", err)
+	}
+}
+
+func TestGNUProbePreservesInitialSnapshotHashDeadline(t *testing.T) {
+	t.Parallel()
+
+	fixture := newGNUFixture(t)
+	runner := newGNUFakeRunner(t, fixture)
+	adapter, err := newGNUAdapter(runner, FamilyGCC, nil, "x64")
+	if err != nil {
+		t.Fatalf("newGNUAdapter() error = %v", err)
+	}
+	ctx := &errOnContextCheck{
+		Context: context.Background(),
+		trigger: 4,
+		err:     context.DeadlineExceeded,
+	}
+
+	_, err = adapter.Probe(ctx, Candidate{
+		Family:      FamilyGCC,
+		CCompiler:   fixture.gcc,
+		CXXCompiler: fixture.gxx,
+		Ninja:       fixture.ninja,
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Probe() error = %v, want snapshot context.DeadlineExceeded", err)
+	}
+}
+
 func TestGNUDiscoverPrefersManualIDAndDeduplicatesEquivalentCandidates(t *testing.T) {
 	t.Parallel()
 
@@ -737,6 +815,21 @@ func successfulOutput(stdout string) probe.Result {
 type cancelAfterFirstChunkReader struct {
 	cancel context.CancelFunc
 	reads  int
+}
+
+type errOnContextCheck struct {
+	context.Context
+	trigger int
+	calls   int
+	err     error
+}
+
+func (ctx *errOnContextCheck) Err() error {
+	ctx.calls++
+	if ctx.calls >= ctx.trigger {
+		return ctx.err
+	}
+	return nil
 }
 
 func (reader *cancelAfterFirstChunkReader) Read(buffer []byte) (int, error) {
