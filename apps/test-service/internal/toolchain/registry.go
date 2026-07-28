@@ -121,6 +121,11 @@ func (registry *Registry) Discover(ctx context.Context) ([]Instance, []Issue) {
 }
 
 func normalizeRegistryResults(results []adapterResult) ([]Instance, []Issue) {
+	for _, result := range results {
+		if isContextError(result.err) {
+			return nil, nil
+		}
+	}
 	sort.Slice(results, func(left, right int) bool {
 		return results[left].index < results[right].index
 	})

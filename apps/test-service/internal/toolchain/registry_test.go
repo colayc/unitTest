@@ -499,6 +499,30 @@ func TestRegistryCancellationReturnsPromptlyWithoutOrdinaryIssue(t *testing.T) {
 	}
 }
 
+func TestNormalizeRegistryResultsTreatsContextErrorsAsGlobalCancellation(t *testing.T) {
+	t.Parallel()
+
+	for _, contextErr := range []error{
+		context.Canceled,
+		context.DeadlineExceeded,
+		fmt.Errorf("wrapped cancellation: %w", context.Canceled),
+		fmt.Errorf("wrapped deadline: %w", context.DeadlineExceeded),
+	} {
+		instances, issues := normalizeRegistryResults([]adapterResult{{
+			index: 0,
+			err:   contextErr,
+		}})
+		if instances != nil || issues != nil {
+			t.Fatalf(
+				"normalizeRegistryResults(%v) = (%+v, %+v), want (nil, nil)",
+				contextErr,
+				instances,
+				issues,
+			)
+		}
+	}
+}
+
 func TestNewRegistryRejectsNilDuplicateAndExcessAdapters(t *testing.T) {
 	t.Parallel()
 
