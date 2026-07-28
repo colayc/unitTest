@@ -28,10 +28,18 @@ const (
 	maxGNUCandiates       = 128
 	maxGNUInstances       = 128
 	maxGNUDiscoveryIssues = 128
+	defaultGCCSysrootID   = "gcc-default-sysroot-v1"
+
+	// GCC, Clang and the later clang-cl adapter are expected to be comfortably
+	// below 512 MiB. The bound prevents a regular-file candidate from turning
+	// discovery into unbounded disk I/O while still hashing every accepted byte.
+	maxToolchainExecutableBytes int64 = 512 * 1024 * 1024
+	executableDigestChunkBytes        = 64 * 1024
 )
 
 var (
-	ErrInvalidToolchain = errors.New("invalid toolchain")
+	ErrInvalidToolchain   = errors.New("invalid toolchain")
+	errExecutableTooLarge = errors.New("toolchain executable exceeds size limit")
 
 	gccVersionPattern   = regexp.MustCompile(`(?i)\b(?:gcc|g\+\+|gnu compiler collection)\b[^\r\n]*?\b([0-9]+\.[0-9]+(?:\.[0-9]+)?)\b`)
 	clangVersionPattern = regexp.MustCompile(`(?i)\bclang version ([0-9]+\.[0-9]+(?:\.[0-9]+)?)\b`)
@@ -59,6 +67,7 @@ type executableSnapshot struct {
 	info     os.FileInfo
 	digest   string
 	identity string
+	maximum  int64
 }
 
 type toolchainProbeError struct {
@@ -214,22 +223,28 @@ func (adapter *gnuAdapter) Probe(ctx context.Context, candidate Candidate) (Inst
 		return Instance{}, invalidProbe("TOOLCHAIN_PROBE_FAILED", "manual candidate id is invalid")
 	}
 
-	cCompiler, err := openExecutableSnapshot(candidate.CCompiler)
+	cCompiler, err := openExecutableSnapshot(ctx, candidate.CCompiler)
 	if err != nil {
-		return Instance{}, invalidProbe("TOOLCHAIN_PROBE_FAILED", "C compiler executable is invalid: "+err.Error())
+		return Instance{}, invalidProbe("TOOLCHAIN_PROBE_FAILED", "C compiler executable is invalid")
 	}
 	defer cCompiler.Close()
-	cxxCompiler, err := openExecutableSnapshot(candidate.CXXCompiler)
+	cxxCompiler, err := openExecutableSnapshot(ctx, candidate.CXXCompiler)
 	if err != nil {
-		return Instance{}, invalidProbe("TOOLCHAIN_PROBE_FAILED", "C++ compiler executable is invalid: "+err.Error())
+		return Instance{}, invalidProbe("TOOLCHAIN_PROBE_FAILED", "C++ compiler executable is invalid")
 	}
 	defer cxxCompiler.Close()
 	verifyCompilers := func() error {
-		if err := cCompiler.Verify(); err != nil {
-			return fmt.Errorf("C compiler changed: %w", err)
+		if err := cCompiler.Verify(ctx); err != nil {
+			if isContextError(err) {
+				return err
+			}
+			return errors.New("C compiler executable changed")
 		}
-		if err := cxxCompiler.Verify(); err != nil {
-			return fmt.Errorf("C++ compiler changed: %w", err)
+		if err := cxxCompiler.Verify(ctx); err != nil {
+			if isContextError(err) {
+				return err
+			}
+			return errors.New("C++ compiler executable changed")
 		}
 		return nil
 	}
@@ -262,12 +277,21 @@ func (adapter *gnuAdapter) Probe(ctx context.Context, candidate Candidate) (Inst
 		return Instance{}, err
 	}
 	if err := verifyCompilers(); err != nil {
-		return Instance{}, invalidProbe("TOOLCHAIN_PROBE_FAILED", err.Error())
+		if isContextError(err) {
+			return Instance{}, err
+		}
+		return Instance{}, invalidProbe("TOOLCHAIN_PROBE_FAILED", "compiler executable verification failed")
 	}
-	currentSDK, currentSDKIdentity, err := canonicalDirectoryIdentity(cDescriptor.sdk)
-	if err != nil || identityPath(currentSDK) != identityPath(cDescriptor.sdk) ||
-		currentSDKIdentity != cDescriptor.identity {
-		return Instance{}, invalidProbe("TOOLCHAIN_PROBE_FAILED", "compiler SDK identity changed")
+	if cDescriptor.sdk == "" {
+		if cDescriptor.identity != defaultGCCSysrootID {
+			return Instance{}, invalidProbe("TOOLCHAIN_PROBE_FAILED", "compiler SDK identity changed")
+		}
+	} else {
+		currentSDK, currentSDKIdentity, err := canonicalDirectoryIdentity(cDescriptor.sdk)
+		if err != nil || identityPath(currentSDK) != identityPath(cDescriptor.sdk) ||
+			currentSDKIdentity != cDescriptor.identity {
+			return Instance{}, invalidProbe("TOOLCHAIN_PROBE_FAILED", "compiler SDK identity changed")
+		}
 	}
 
 	instance := Instance{
@@ -337,13 +361,17 @@ func (adapter *gnuAdapter) probeCompiler(
 	if err != nil {
 		return compilerDescriptor{}, err
 	}
-	sdkPath, err := parseSingleLine(sdkOutput, 4096)
-	if err != nil {
+	sdkPath, defaultSysroot, err := parseOptionalSingleLine(sdkOutput, 4096)
+	if err != nil || adapter.family == FamilyClang && defaultSysroot {
 		return compilerDescriptor{}, invalidProbe("TOOLCHAIN_PROBE_FAILED", "compiler SDK output is malformed")
 	}
-	canonicalSDK, sdkIdentity, err := canonicalDirectoryIdentity(sdkPath)
-	if err != nil {
-		return compilerDescriptor{}, invalidProbe("TOOLCHAIN_PROBE_FAILED", "compiler SDK path is invalid")
+	canonicalSDK := ""
+	sdkIdentity := defaultGCCSysrootID
+	if !defaultSysroot {
+		canonicalSDK, sdkIdentity, err = canonicalDirectoryIdentity(sdkPath)
+		if err != nil {
+			return compilerDescriptor{}, invalidProbe("TOOLCHAIN_PROBE_FAILED", "compiler SDK path is invalid")
+		}
 	}
 	return compilerDescriptor{
 		version:  version,
@@ -384,7 +412,7 @@ func (adapter *gnuAdapter) validBuildTool(
 	kind Family,
 	verifyCompilers func() error,
 ) bool {
-	snapshot, err := openExecutableSnapshot(path)
+	snapshot, err := openExecutableSnapshot(ctx, path)
 	if err != nil {
 		return false
 	}
@@ -393,7 +421,7 @@ func (adapter *gnuAdapter) validBuildTool(
 		if err := verifyCompilers(); err != nil {
 			return err
 		}
-		return snapshot.Verify()
+		return snapshot.Verify(ctx)
 	}
 	output, err := adapter.runProbe(ctx, snapshot.path, argument, verify)
 	if err != nil {
@@ -421,7 +449,10 @@ func (adapter *gnuAdapter) runProbe(
 	verify func() error,
 ) ([]byte, error) {
 	if err := verify(); err != nil {
-		return nil, invalidProbe("TOOLCHAIN_PROBE_FAILED", err.Error())
+		if isContextError(err) {
+			return nil, err
+		}
+		return nil, invalidProbe("TOOLCHAIN_PROBE_FAILED", "probe executable verification failed")
 	}
 	result, err := adapter.runner.Run(ctx, probe.Spec{
 		Executable: executable,
@@ -431,7 +462,10 @@ func (adapter *gnuAdapter) runProbe(
 		MaxOutput:  maxGNUProbeOutput,
 	})
 	if verifyErr := verify(); verifyErr != nil {
-		return nil, invalidProbe("TOOLCHAIN_PROBE_FAILED", verifyErr.Error())
+		if isContextError(verifyErr) {
+			return nil, verifyErr
+		}
+		return nil, invalidProbe("TOOLCHAIN_PROBE_FAILED", "probe executable verification failed")
 	}
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -456,7 +490,33 @@ func (adapter *gnuAdapter) runProbe(
 	return append([]byte(nil), result.Stdout...), nil
 }
 
-func openExecutableSnapshot(path string) (*executableSnapshot, error) {
+func openExecutableSnapshot(ctx context.Context, path string) (*executableSnapshot, error) {
+	return openExecutableSnapshotWithLimit(ctx, path, maxToolchainExecutableBytes)
+}
+
+func openExecutableSnapshotWithLimit(
+	ctx context.Context,
+	path string,
+	maximum int64,
+) (*executableSnapshot, error) {
+	return openExecutableSnapshotWithLimitAndHook(ctx, path, maximum, nil)
+}
+
+func openExecutableSnapshotWithLimitAndHook(
+	ctx context.Context,
+	path string,
+	maximum int64,
+	beforeDigest func(),
+) (*executableSnapshot, error) {
+	if ctx == nil {
+		return nil, errors.New("snapshot context is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if maximum <= 0 {
+		return nil, errors.New("invalid executable size limit")
+	}
 	if path == "" || strings.IndexByte(path, 0) >= 0 || !filepath.IsAbs(path) {
 		return nil, fmt.Errorf("executable path must be absolute")
 	}
@@ -484,7 +544,13 @@ func openExecutableSnapshot(path string) (*executableSnapshot, error) {
 	if err != nil || !info.Mode().IsRegular() || !os.SameFile(pathInfo, info) {
 		return fail(fmt.Errorf("executable identity changed while opening"))
 	}
-	digest, err := digestOpenFile(file)
+	if info.Size() < 0 || info.Size() > maximum {
+		return fail(errExecutableTooLarge)
+	}
+	if beforeDigest != nil {
+		beforeDigest()
+	}
+	digest, _, err := digestOpenFile(ctx, file, maximum)
 	if err != nil {
 		return fail(err)
 	}
@@ -499,9 +565,9 @@ func openExecutableSnapshot(path string) (*executableSnapshot, error) {
 	identitySum := sha256.Sum256(encoded)
 	snapshot := &executableSnapshot{
 		path: canonical, file: file, info: info, digest: digest,
-		identity: hex.EncodeToString(identitySum[:]),
+		identity: hex.EncodeToString(identitySum[:]), maximum: maximum,
 	}
-	if err := snapshot.Verify(); err != nil {
+	if err := snapshot.Verify(ctx); err != nil {
 		return fail(err)
 	}
 	return snapshot, nil
@@ -514,9 +580,15 @@ func (snapshot *executableSnapshot) Close() error {
 	return snapshot.file.Close()
 }
 
-func (snapshot *executableSnapshot) Verify() error {
+func (snapshot *executableSnapshot) Verify(ctx context.Context) error {
 	if snapshot == nil || snapshot.file == nil {
 		return errors.New("snapshot is closed")
+	}
+	if ctx == nil {
+		return errors.New("snapshot context is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	pathInfo, err := os.Stat(snapshot.path)
 	if err != nil {
@@ -530,7 +602,13 @@ func (snapshot *executableSnapshot) Verify() error {
 		!os.SameFile(snapshot.info, pathInfo) || !os.SameFile(snapshot.info, handleInfo) {
 		return errors.New("path now names a different executable")
 	}
-	digest, err := digestOpenFile(snapshot.file)
+	if handleInfo.Size() < 0 || handleInfo.Size() > snapshot.maximum {
+		return errExecutableTooLarge
+	}
+	if handleInfo.Size() != snapshot.info.Size() {
+		return errors.New("executable size changed")
+	}
+	digest, _, err := digestOpenFile(ctx, snapshot.file, snapshot.maximum)
 	if err != nil {
 		return err
 	}
@@ -540,18 +618,62 @@ func (snapshot *executableSnapshot) Verify() error {
 	return nil
 }
 
-func digestOpenFile(file *os.File) (string, error) {
+func digestOpenFile(ctx context.Context, file *os.File, maximum int64) (string, int64, error) {
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return "", err
+		return "", 0, err
+	}
+	digest, count, err := digestBounded(ctx, file, maximum)
+	if err != nil {
+		return "", count, err
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return "", count, err
+	}
+	return digest, count, nil
+}
+
+func digestBounded(
+	ctx context.Context,
+	reader io.Reader,
+	maximum int64,
+) (string, int64, error) {
+	if ctx == nil {
+		return "", 0, errors.New("digest context is nil")
+	}
+	if maximum <= 0 {
+		return "", 0, errors.New("invalid digest size limit")
 	}
 	hash := sha256.New()
-	if _, err := io.Copy(hash, file); err != nil {
-		return "", err
+	limited := io.LimitReader(reader, maximum+1)
+	buffer := make([]byte, executableDigestChunkBytes)
+	var total int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", total, err
+		}
+		count, readErr := limited.Read(buffer)
+		total += int64(count)
+		if total > maximum {
+			return "", total, errExecutableTooLarge
+		}
+		if err := ctx.Err(); err != nil {
+			return "", total, err
+		}
+		if count > 0 {
+			if _, err := hash.Write(buffer[:count]); err != nil {
+				return "", total, err
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			return hex.EncodeToString(hash.Sum(nil)), total, nil
+		}
+		if readErr != nil {
+			return "", total, readErr
+		}
+		if count == 0 {
+			return "", total, io.ErrNoProgress
+		}
 	}
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func canonicalDirectoryIdentity(path string) (string, string, error) {
@@ -642,6 +764,17 @@ func parseSingleLine(output []byte, maximum int) (string, error) {
 	return text, nil
 }
 
+func parseOptionalSingleLine(output []byte, maximum int) (string, bool, error) {
+	if len(output) > maximum {
+		return "", false, errors.New("output exceeds limit")
+	}
+	if strings.TrimSpace(string(output)) == "" {
+		return "", true, nil
+	}
+	value, err := parseSingleLine(output, maximum)
+	return value, false, err
+}
+
 func architectureFromTriple(triple string) (string, error) {
 	architecture := strings.ToLower(strings.SplitN(triple, "-", 2)[0])
 	switch architecture {
@@ -698,6 +831,10 @@ func candidateIssueMessage(family Family, code string) string {
 
 func invalidProbe(code, text string) error {
 	return &toolchainProbeError{code: code, text: ErrInvalidToolchain.Error() + ": " + text}
+}
+
+func isContextError(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 func nilRunner(runner probe.Runner) bool {

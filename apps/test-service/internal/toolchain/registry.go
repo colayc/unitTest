@@ -16,6 +16,22 @@ const (
 	maxRegistryWorkers  = 4
 	maxRegistryResults  = 256
 	maxRegistryIssues   = 256
+
+	maxRegistryAdapterResults        = 256
+	maxRegistryIDBytes               = 128
+	maxRegistryPathBytes             = 4096
+	maxRegistryVersionBytes          = 128
+	maxRegistryTripleBytes           = 256
+	maxRegistryArchitectureBytes     = 16
+	maxRegistryEnvironmentEntries    = 256
+	maxRegistryEnvironmentEntryBytes = 4096
+	maxRegistryEnvironmentTotalBytes = 64 * 1024
+	maxRegistryGeneratorEntries      = 4
+	maxRegistryGeneratorEntryBytes   = 64
+	maxRegistryGeneratorTotalBytes   = 256
+	maxRegistryInstanceTotalBytes    = 128 * 1024
+	maxRegistryIssueCodeBytes        = 64
+	maxRegistryIssueMessageBytes     = 256
 )
 
 type Registry struct {
@@ -71,7 +87,7 @@ func (registry *Registry) Discover(ctx context.Context) ([]Instance, []Issue) {
 			defer workers.Done()
 			for index := range jobs {
 				instances, err := registry.adapters[index].Discover(ctx)
-				results <- adapterResult{index: index, instances: cloneInstances(instances), err: err}
+				results <- adapterResult{index: index, instances: instances, err: err}
 			}
 		}()
 	}
@@ -113,47 +129,75 @@ func normalizeRegistryResults(results []adapterResult) ([]Instance, []Issue) {
 	byID := make(map[string]int)
 	byDescriptor := make(map[string]int)
 
+	resultLimitReached := false
+	issueLimitReached := false
 	for _, result := range results {
 		if result.err != nil {
 			var carried issueCarrier
 			if reflect.TypeOf(result.err) != nil && asIssueCarrier(result.err, &carried) {
 				for _, issue := range carried.ToolchainIssues() {
-					appendIssue(&issues, issue)
+					if !appendIssue(&issues, sanitizeCarrierIssue(result.index, issue)) {
+						issueLimitReached = true
+						break
+					}
 				}
 			} else {
-				appendIssue(&issues, Issue{
+				if !appendIssue(&issues, Issue{
 					Code:     "TOOLCHAIN_DISCOVERY_FAILED",
 					Message:  fmt.Sprintf("toolchain adapter %d failed", result.index),
 					Blocking: false,
-				})
+				}) {
+					issueLimitReached = true
+				}
 			}
 		}
-		for _, instance := range result.instances {
+		if issueLimitReached {
+			break
+		}
+		adapterInstances := result.instances
+		if len(adapterInstances) > maxRegistryAdapterResults {
+			adapterInstances = adapterInstances[:maxRegistryAdapterResults]
+			if !appendIssue(&issues, Issue{
+				Code:     "TOOLCHAIN_LIMIT_EXCEEDED",
+				Message:  fmt.Sprintf("toolchain adapter %d result limit exceeded", result.index),
+				Blocking: true,
+			}) {
+				break
+			}
+		}
+		for _, instance := range adapterInstances {
 			if len(instances) >= maxRegistryResults {
 				appendIssue(&issues, Issue{
 					Code:     "TOOLCHAIN_LIMIT_EXCEEDED",
-					Message:  fmt.Sprintf("toolchain discovery exceeded %d instances", maxRegistryResults),
+					Message:  "toolchain result limit exceeded",
 					Blocking: true,
 				})
+				resultLimitReached = true
 				break
 			}
 			normalized, ok := normalizeInstance(instance)
 			if !ok {
-				appendIssue(&issues, Issue{
+				if !appendIssue(&issues, Issue{
 					Code:     "TOOLCHAIN_INVALID",
 					Message:  fmt.Sprintf("toolchain adapter %d returned an invalid descriptor", result.index),
 					Blocking: false,
-				})
+				}) {
+					issueLimitReached = true
+					break
+				}
 				continue
 			}
 			descriptor := descriptorKey(normalized)
 			if existing, duplicate := byID[normalized.ID]; duplicate {
 				if descriptorKey(instances[existing]) != descriptor {
-					appendIssue(&issues, Issue{
+					if !appendIssue(&issues, Issue{
 						Code:     "TOOLCHAIN_ID_CONFLICT",
 						Message:  fmt.Sprintf("toolchain id %q has conflicting descriptors", normalized.ID),
 						Blocking: true,
-					})
+					}) {
+						issueLimitReached = true
+						break
+					}
 				}
 				continue
 			}
@@ -168,6 +212,9 @@ func normalizeRegistryResults(results []adapterResult) ([]Instance, []Issue) {
 			byID[normalized.ID] = len(instances)
 			byDescriptor[descriptor] = len(instances)
 			instances = append(instances, normalized)
+		}
+		if resultLimitReached || issueLimitReached {
+			break
 		}
 	}
 
@@ -193,29 +240,64 @@ func normalizeRegistryResults(results []adapterResult) ([]Instance, []Issue) {
 			[]string{b.Code, b.Message, fmt.Sprint(b.Blocking)},
 		)
 	})
-	return cloneInstances(instances), append([]Issue(nil), issues...)
+	return instances, append([]Issue(nil), issues...)
 }
 
 func normalizeInstance(instance Instance) (Instance, bool) {
-	if !validInstanceID(instance.ID) || !validFamily(instance.Family) ||
+	if !boundedString(instance.ID, maxRegistryIDBytes) ||
+		!validInstanceID(instance.ID) || !validFamily(instance.Family) ||
 		instance.CCompiler == "" || instance.CXXCompiler == "" ||
 		instance.Version == "" || instance.TargetTriple == "" ||
-		instance.HostArchitecture == "" || instance.TargetArchitecture == "" {
+		instance.HostArchitecture == "" || instance.TargetArchitecture == "" ||
+		!boundedString(instance.CCompiler, maxRegistryPathBytes) ||
+		!boundedString(instance.CXXCompiler, maxRegistryPathBytes) ||
+		!boundedString(instance.Version, maxRegistryVersionBytes) ||
+		!boundedString(instance.TargetTriple, maxRegistryTripleBytes) ||
+		!boundedString(instance.HostArchitecture, maxRegistryArchitectureBytes) ||
+		!boundedString(instance.TargetArchitecture, maxRegistryArchitectureBytes) ||
+		!boundedString(instance.Sysroot, maxRegistryPathBytes) ||
+		!boundedString(instance.Coverage.LLVMProfdata, maxRegistryPathBytes) ||
+		!boundedString(instance.Coverage.LLVMCov, maxRegistryPathBytes) ||
+		!boundedString(instance.Coverage.GCov, maxRegistryPathBytes) {
+		return Instance{}, false
+	}
+	totalBytes := len(instance.ID) + len(instance.CCompiler) + len(instance.CXXCompiler) +
+		len(instance.Version) + len(instance.TargetTriple) +
+		len(instance.HostArchitecture) + len(instance.TargetArchitecture) +
+		len(instance.Sysroot) + len(instance.Coverage.LLVMProfdata) +
+		len(instance.Coverage.LLVMCov) + len(instance.Coverage.GCov)
+	if len(instance.Environment) > maxRegistryEnvironmentEntries ||
+		len(instance.Generators) > maxRegistryGeneratorEntries {
+		return Instance{}, false
+	}
+	environmentBytes := 0
+	for _, value := range instance.Environment {
+		if !boundedString(value, maxRegistryEnvironmentEntryBytes) ||
+			value == "" || !strings.Contains(value, "=") {
+			return Instance{}, false
+		}
+		environmentBytes += len(value)
+		if environmentBytes > maxRegistryEnvironmentTotalBytes {
+			return Instance{}, false
+		}
+	}
+	generatorBytes := 0
+	for _, value := range instance.Generators {
+		if !boundedString(value, maxRegistryGeneratorEntryBytes) ||
+			value != "Ninja" && value != "Unix Makefiles" &&
+				value != "Visual Studio 17 2022" && value != "NMake Makefiles" {
+			return Instance{}, false
+		}
+		generatorBytes += len(value)
+		if generatorBytes > maxRegistryGeneratorTotalBytes {
+			return Instance{}, false
+		}
+	}
+	if totalBytes+environmentBytes+generatorBytes > maxRegistryInstanceTotalBytes {
 		return Instance{}, false
 	}
 	instance.Environment = sortedUnique(instance.Environment)
 	instance.Generators = sortedUnique(instance.Generators)
-	for _, value := range instance.Environment {
-		if value == "" || strings.IndexByte(value, 0) >= 0 || !strings.Contains(value, "=") {
-			return Instance{}, false
-		}
-	}
-	for _, value := range instance.Generators {
-		if value != "Ninja" && value != "Unix Makefiles" &&
-			value != "Visual Studio 17 2022" && value != "NMake Makefiles" {
-			return Instance{}, false
-		}
-	}
 	return instance, true
 }
 
@@ -251,12 +333,91 @@ func descriptorKey(instance Instance) string {
 	return strings.Join(values, "\x00")
 }
 
-func appendIssue(issues *[]Issue, issue Issue) {
-	if len(*issues) >= maxRegistryIssues || issue.Code == "" || issue.Message == "" ||
-		strings.IndexByte(issue.Code, 0) >= 0 || strings.IndexByte(issue.Message, 0) >= 0 {
-		return
+func appendIssue(issues *[]Issue, issue Issue) bool {
+	if len(*issues) >= maxRegistryIssues-1 {
+		appendIssueLimit(issues)
+		return false
+	}
+	if !boundedString(issue.Code, maxRegistryIssueCodeBytes) ||
+		!boundedString(issue.Message, maxRegistryIssueMessageBytes) ||
+		issue.Code == "" || issue.Message == "" {
+		return true
 	}
 	*issues = append(*issues, issue)
+	return true
+}
+
+func appendIssueLimit(issues *[]Issue) {
+	limit := Issue{
+		Code:     "TOOLCHAIN_LIMIT_EXCEEDED",
+		Message:  "toolchain issue limit exceeded",
+		Blocking: true,
+	}
+	if len(*issues) < maxRegistryIssues {
+		*issues = append(*issues, limit)
+		return
+	}
+	(*issues)[maxRegistryIssues-1] = limit
+}
+
+func boundedString(value string, maximum int) bool {
+	return len(value) <= maximum && strings.IndexByte(value, 0) < 0
+}
+
+func sanitizeCarrierIssue(adapterIndex int, issue Issue) Issue {
+	switch {
+	case !validIssueCode(issue.Code):
+		return invalidCarrierIssue(adapterIndex)
+	case issue.Code == "BUILD_TOOL_NOT_FOUND":
+		return Issue{
+			Code:     issue.Code,
+			Message:  "toolchain candidate has no verified Ninja or Make build tool",
+			Blocking: false,
+		}
+	case issue.Code == "TOOLCHAIN_PROBE_FAILED":
+		return Issue{
+			Code:     issue.Code,
+			Message:  "toolchain candidate probe failed",
+			Blocking: false,
+		}
+	case issue.Code == "TOOLCHAIN_PAIR_MISMATCH":
+		return Issue{
+			Code:     issue.Code,
+			Message:  "toolchain compiler pair is incompatible",
+			Blocking: false,
+		}
+	case issue.Code == "TOOLCHAIN_LIMIT_EXCEEDED":
+		return Issue{
+			Code:     issue.Code,
+			Message:  "toolchain discovery limit exceeded",
+			Blocking: true,
+		}
+	default:
+		return invalidCarrierIssue(adapterIndex)
+	}
+}
+
+func invalidCarrierIssue(adapterIndex int) Issue {
+	return Issue{
+		Code:     "TOOLCHAIN_DISCOVERY_FAILED",
+		Message:  fmt.Sprintf("toolchain adapter %d returned an invalid issue", adapterIndex),
+		Blocking: false,
+	}
+}
+
+func validIssueCode(code string) bool {
+	if len(code) == 0 || len(code) > 64 || code[0] < 'A' || code[0] > 'Z' {
+		return false
+	}
+	for _, character := range code[1:] {
+		if character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' ||
+			character == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func validFamily(family Family) bool {
@@ -264,7 +425,7 @@ func validFamily(family Family) bool {
 }
 
 func validInstanceID(value string) bool {
-	if len(value) == 0 || len(value) > 128 {
+	if len(value) == 0 || len(value) > maxRegistryIDBytes {
 		return false
 	}
 	for _, character := range value {

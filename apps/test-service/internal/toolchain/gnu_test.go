@@ -64,6 +64,87 @@ func TestGCCProbeUsesFixedArgumentsAndBuildsDescriptor(t *testing.T) {
 	)
 }
 
+func TestGCCProbeAcceptsDefaultEmptySysroot(t *testing.T) {
+	t.Parallel()
+
+	fixture := newGNUFixture(t)
+	runner := newGNUFakeRunner(t, fixture)
+	runner.outputs[probeKey(fixture.gcc, "--print-sysroot")] = successfulOutput(" \r\n\t")
+	runner.outputs[probeKey(fixture.gxx, "--print-sysroot")] = successfulOutput("\n")
+	adapter, err := newGNUAdapter(runner, FamilyGCC, nil, "x64")
+	if err != nil {
+		t.Fatalf("newGNUAdapter() error = %v", err)
+	}
+
+	instance, err := adapter.Probe(context.Background(), Candidate{
+		Family:      FamilyGCC,
+		CCompiler:   fixture.gcc,
+		CXXCompiler: fixture.gxx,
+		Ninja:       fixture.ninja,
+	})
+	if err != nil {
+		t.Fatalf("Probe() error = %v", err)
+	}
+	if instance.Sysroot != "" {
+		t.Fatalf("Probe() Sysroot = %q, want empty default sysroot", instance.Sysroot)
+	}
+	if instance.ID == "" {
+		t.Fatal("Probe() automatic ID is empty")
+	}
+}
+
+func TestGCCProbeRejectsDefaultAndExplicitSysrootPair(t *testing.T) {
+	t.Parallel()
+
+	fixture := newGNUFixture(t)
+	runner := newGNUFakeRunner(t, fixture)
+	runner.outputs[probeKey(fixture.gcc, "--print-sysroot")] = successfulOutput("\n")
+	adapter, err := newGNUAdapter(runner, FamilyGCC, nil, "x64")
+	if err != nil {
+		t.Fatalf("newGNUAdapter() error = %v", err)
+	}
+
+	_, err = adapter.Probe(context.Background(), Candidate{
+		Family:      FamilyGCC,
+		CCompiler:   fixture.gcc,
+		CXXCompiler: fixture.gxx,
+		Ninja:       fixture.ninja,
+	})
+	if !errors.Is(err, ErrInvalidToolchain) || !strings.Contains(err.Error(), "SDK identity") {
+		t.Fatalf("Probe() error = %v, want default/explicit SDK mismatch", err)
+	}
+}
+
+func TestGCCAutomaticIDDistinguishesDefaultAndExplicitSysroot(t *testing.T) {
+	t.Parallel()
+
+	fixture := newGNUFixture(t)
+	defaultRunner := newGNUFakeRunner(t, fixture)
+	defaultRunner.outputs[probeKey(fixture.gcc, "--print-sysroot")] = successfulOutput("\n")
+	defaultRunner.outputs[probeKey(fixture.gxx, "--print-sysroot")] = successfulOutput("\n")
+	explicitRunner := newGNUFakeRunner(t, fixture)
+	defaultAdapter, _ := newGNUAdapter(defaultRunner, FamilyGCC, nil, "x64")
+	explicitAdapter, _ := newGNUAdapter(explicitRunner, FamilyGCC, nil, "x64")
+	candidate := Candidate{
+		Family:      FamilyGCC,
+		CCompiler:   fixture.gcc,
+		CXXCompiler: fixture.gxx,
+		Ninja:       fixture.ninja,
+	}
+
+	defaultInstance, err := defaultAdapter.Probe(context.Background(), candidate)
+	if err != nil {
+		t.Fatalf("default Probe() error = %v", err)
+	}
+	explicitInstance, err := explicitAdapter.Probe(context.Background(), candidate)
+	if err != nil {
+		t.Fatalf("explicit Probe() error = %v", err)
+	}
+	if defaultInstance.ID == explicitInstance.ID {
+		t.Fatalf("default and explicit sysroot share automatic ID %q", defaultInstance.ID)
+	}
+}
+
 func TestClangProbeUsesFixedArgumentsAndResourceIdentity(t *testing.T) {
 	t.Parallel()
 
@@ -193,6 +274,63 @@ func TestGNUProbeRejectsWrongFamilyAndMalformedProbeResults(t *testing.T) {
 	}
 }
 
+func TestGNUProbeErrorDoesNotExposeInvalidExecutablePath(t *testing.T) {
+	t.Parallel()
+
+	fixture := newGNUFixture(t)
+	runner := newGNUFakeRunner(t, fixture)
+	adapter, err := newGNUAdapter(runner, FamilyGCC, nil, "x64")
+	if err != nil {
+		t.Fatalf("newGNUAdapter() error = %v", err)
+	}
+	sensitivePath := filepath.Join(t.TempDir(), "customer-secret-TOKEN=abcdef-gcc")
+
+	_, err = adapter.Probe(context.Background(), Candidate{
+		Family:      FamilyGCC,
+		CCompiler:   sensitivePath,
+		CXXCompiler: fixture.gxx,
+		Ninja:       fixture.ninja,
+	})
+	if !errors.Is(err, ErrInvalidToolchain) {
+		t.Fatalf("Probe() error = %v, want ErrInvalidToolchain", err)
+	}
+	for _, secret := range []string{sensitivePath, filepath.Dir(sensitivePath), "customer-secret", "TOKEN=", "abcdef"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("Probe() error %q exposes %q", err, secret)
+		}
+	}
+	if got, want := err.Error(), "invalid toolchain: C compiler executable is invalid"; got != want {
+		t.Fatalf("Probe() error = %q, want stable %q", got, want)
+	}
+}
+
+func TestGNUProbeCancellationDuringSnapshotVerificationPropagatesContext(t *testing.T) {
+	t.Parallel()
+
+	fixture := newGNUFixture(t)
+	runner := newGNUFakeRunner(t, fixture)
+	ctx, cancel := context.WithCancel(context.Background())
+	runner.afterCall = func(call probeCall) {
+		if call == (probeCall{fixture.gcc, "--version"}) {
+			cancel()
+		}
+	}
+	adapter, err := newGNUAdapter(runner, FamilyGCC, nil, "x64")
+	if err != nil {
+		t.Fatalf("newGNUAdapter() error = %v", err)
+	}
+
+	_, err = adapter.Probe(ctx, Candidate{
+		Family:      FamilyGCC,
+		CCompiler:   fixture.gcc,
+		CXXCompiler: fixture.gxx,
+		Ninja:       fixture.ninja,
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Probe() error = %v, want context.Canceled", err)
+	}
+}
+
 func TestGNUDiscoverPrefersManualIDAndDeduplicatesEquivalentCandidates(t *testing.T) {
 	t.Parallel()
 
@@ -311,8 +449,9 @@ func TestGNUProbeRejectsExecutableMutation(t *testing.T) {
 		CXXCompiler: fixture.gxx,
 		Ninja:       fixture.ninja,
 	})
-	if !errors.Is(err, ErrInvalidToolchain) || !strings.Contains(err.Error(), "changed") {
-		t.Fatalf("Probe() error = %v, want executable change rejection", err)
+	if !errors.Is(err, ErrInvalidToolchain) ||
+		err.Error() != "invalid toolchain: probe executable verification failed" {
+		t.Fatalf("Probe() error = %v, want stable executable verification rejection", err)
 	}
 }
 
@@ -347,8 +486,103 @@ func TestGNUProbeRejectsExecutableTailMutation(t *testing.T) {
 		CXXCompiler: fixture.gxx,
 		Ninja:       fixture.ninja,
 	})
-	if !errors.Is(err, ErrInvalidToolchain) || !strings.Contains(err.Error(), "changed") {
-		t.Fatalf("Probe() error = %v, want executable tail change rejection", err)
+	if !errors.Is(err, ErrInvalidToolchain) ||
+		err.Error() != "invalid toolchain: probe executable verification failed" {
+		t.Fatalf("Probe() error = %v, want stable executable tail verification rejection", err)
+	}
+}
+
+func TestExecutableSnapshotAcceptsExactLimitAndRejectsLimitPlusOne(t *testing.T) {
+	t.Parallel()
+
+	const limit = int64(4096)
+	exact := filepath.Join(t.TempDir(), "exact-compiler")
+	if err := os.WriteFile(exact, make([]byte, limit), 0o755); err != nil {
+		t.Fatalf("WriteFile(exact): %v", err)
+	}
+	snapshot, err := openExecutableSnapshotWithLimit(context.Background(), exact, limit)
+	if err != nil {
+		t.Fatalf("openExecutableSnapshotWithLimit(exact) error = %v", err)
+	}
+	if err := snapshot.Close(); err != nil {
+		t.Fatalf("Close(exact): %v", err)
+	}
+
+	excess := filepath.Join(t.TempDir(), "excess-compiler")
+	if err := os.WriteFile(excess, make([]byte, limit+1), 0o755); err != nil {
+		t.Fatalf("WriteFile(excess): %v", err)
+	}
+	if _, err := openExecutableSnapshotWithLimit(context.Background(), excess, limit); !errors.Is(err, errExecutableTooLarge) {
+		t.Fatalf("openExecutableSnapshotWithLimit(limit+1) error = %v, want errExecutableTooLarge", err)
+	}
+}
+
+func TestExecutableSnapshotHonorsCancellationDuringOpenAndVerify(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "compiler")
+	if err := os.WriteFile(path, []byte("compiler"), 0o755); err != nil {
+		t.Fatalf("WriteFile(compiler): %v", err)
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := openExecutableSnapshotWithLimit(cancelled, path, 4096); !errors.Is(err, context.Canceled) {
+		t.Fatalf("openExecutableSnapshotWithLimit(cancelled) error = %v, want context.Canceled", err)
+	}
+
+	snapshot, err := openExecutableSnapshotWithLimit(context.Background(), path, 4096)
+	if err != nil {
+		t.Fatalf("openExecutableSnapshotWithLimit() error = %v", err)
+	}
+	defer snapshot.Close()
+	if err := snapshot.Verify(cancelled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Verify(cancelled) error = %v, want context.Canceled", err)
+	}
+}
+
+func TestExecutableDigestStopsBetweenChunksAfterCancellation(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	reader := &cancelAfterFirstChunkReader{cancel: cancel}
+	_, _, err := digestBounded(ctx, reader, 4096)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("digestBounded() error = %v, want context.Canceled", err)
+	}
+	if reader.reads != 1 {
+		t.Fatalf("digestBounded() reads = %d, want stop after first chunk", reader.reads)
+	}
+}
+
+func TestExecutableSnapshotRejectsGrowthBetweenHandleCheckAndDigest(t *testing.T) {
+	t.Parallel()
+
+	const limit = int64(4096)
+	path := filepath.Join(t.TempDir(), "growing-compiler")
+	if err := os.WriteFile(path, make([]byte, limit), 0o755); err != nil {
+		t.Fatalf("WriteFile(compiler): %v", err)
+	}
+	grow := func() {
+		file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatalf("OpenFile(compiler): %v", err)
+		}
+		if _, err := file.Write([]byte{1}); err != nil {
+			_ = file.Close()
+			t.Fatalf("append compiler: %v", err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatalf("Close(compiler): %v", err)
+		}
+	}
+
+	if _, err := openExecutableSnapshotWithLimitAndHook(
+		context.Background(),
+		path,
+		limit,
+		grow,
+	); !errors.Is(err, errExecutableTooLarge) {
+		t.Fatalf("openExecutableSnapshotWithLimitAndHook() error = %v, want errExecutableTooLarge", err)
 	}
 }
 
@@ -498,4 +732,21 @@ func probeKey(executable, argument string) string {
 
 func successfulOutput(stdout string) probe.Result {
 	return probe.Result{ExitCode: 0, Stdout: []byte(stdout)}
+}
+
+type cancelAfterFirstChunkReader struct {
+	cancel context.CancelFunc
+	reads  int
+}
+
+func (reader *cancelAfterFirstChunkReader) Read(buffer []byte) (int, error) {
+	reader.reads++
+	if reader.reads == 1 {
+		for index := range min(len(buffer), 1024) {
+			buffer[index] = byte(index)
+		}
+		reader.cancel()
+		return min(len(buffer), 1024), nil
+	}
+	return 0, errors.New("digest read after cancellation")
 }

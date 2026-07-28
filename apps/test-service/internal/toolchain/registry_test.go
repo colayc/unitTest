@@ -3,7 +3,9 @@ package toolchain
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -157,6 +159,236 @@ func TestRegistryReportsConflictingStableIDs(t *testing.T) {
 	}
 }
 
+func TestRegistrySanitizesCarrierIssues(t *testing.T) {
+	t.Parallel()
+
+	registry, err := NewRegistry(&staticAdapter{err: carrierTestError{issues: []Issue{
+		{
+			Code:     "BUILD_TOOL_NOT_FOUND",
+			Message:  "failed under /secret/customer/TOKEN=abcdef with full probe output",
+			Blocking: true,
+		},
+		{
+			Code:     "INVALID/CODE/TOKEN",
+			Message:  strings.Repeat("secret-output-", 1024),
+			Blocking: true,
+		},
+	}}})
+	if err != nil {
+		t.Fatalf("NewRegistry() error = %v", err)
+	}
+
+	_, issues := registry.Discover(context.Background())
+	want := []Issue{
+		{
+			Code:     "BUILD_TOOL_NOT_FOUND",
+			Message:  "toolchain candidate has no verified Ninja or Make build tool",
+			Blocking: false,
+		},
+		{
+			Code:     "TOOLCHAIN_DISCOVERY_FAILED",
+			Message:  "toolchain adapter 0 returned an invalid issue",
+			Blocking: false,
+		},
+	}
+	if !reflect.DeepEqual(issues, want) {
+		t.Fatalf("Discover() issues = %+v, want %+v", issues, want)
+	}
+	for _, issue := range issues {
+		for _, secret := range []string{"/secret/customer", "TOKEN=", "abcdef", "secret-output"} {
+			if strings.Contains(issue.Code, secret) || strings.Contains(issue.Message, secret) {
+				t.Fatalf("Discover() issue %+v exposes %q", issue, secret)
+			}
+		}
+	}
+}
+
+func TestRegistryAcceptsExactInstanceFieldBudgets(t *testing.T) {
+	t.Parallel()
+
+	instance := boundedRegistryInstance(0)
+	instance.ID = "i" + strings.Repeat("a", maxRegistryIDBytes-1)
+	instance.CCompiler = "/" + strings.Repeat("c", maxRegistryPathBytes-1)
+	instance.CXXCompiler = "/" + strings.Repeat("x", maxRegistryPathBytes-1)
+	instance.Version = strings.Repeat("1", maxRegistryVersionBytes)
+	instance.TargetTriple = strings.Repeat("t", maxRegistryTripleBytes)
+	instance.Sysroot = "/" + strings.Repeat("s", maxRegistryPathBytes-1)
+	instance.Coverage = CoverageCapability{
+		LLVMProfdata: "/" + strings.Repeat("p", maxRegistryPathBytes-1),
+		LLVMCov:      "/" + strings.Repeat("l", maxRegistryPathBytes-1),
+		GCov:         "/" + strings.Repeat("g", maxRegistryPathBytes-1),
+	}
+	instance.Environment = environmentWithExactCountAndTotal(
+		maxRegistryEnvironmentEntries,
+		maxRegistryEnvironmentTotalBytes,
+	)
+	instance.Generators = []string{
+		"NMake Makefiles",
+		"Ninja",
+		"Unix Makefiles",
+		"Visual Studio 17 2022",
+	}
+	registry, err := NewRegistry(&staticAdapter{instances: []Instance{instance}})
+	if err != nil {
+		t.Fatalf("NewRegistry() error = %v", err)
+	}
+
+	instances, issues := registry.Discover(context.Background())
+	if len(instances) != 1 || len(issues) != 0 {
+		t.Fatalf("Discover() = (%d instances, %+v), want one instance and no issues", len(instances), issues)
+	}
+}
+
+func TestRegistryRejectsInstanceFieldBudgetPlusOne(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		change func(*Instance)
+	}{
+		{
+			name: "id bytes",
+			change: func(instance *Instance) {
+				instance.ID = "i" + strings.Repeat("a", maxRegistryIDBytes)
+			},
+		},
+		{
+			name: "path bytes",
+			change: func(instance *Instance) {
+				instance.CCompiler = "/" + strings.Repeat("c", maxRegistryPathBytes)
+			},
+		},
+		{
+			name: "version bytes",
+			change: func(instance *Instance) {
+				instance.Version = strings.Repeat("1", maxRegistryVersionBytes+1)
+			},
+		},
+		{
+			name: "triple bytes",
+			change: func(instance *Instance) {
+				instance.TargetTriple = strings.Repeat("t", maxRegistryTripleBytes+1)
+			},
+		},
+		{
+			name: "environment entries",
+			change: func(instance *Instance) {
+				instance.Environment = make([]string, maxRegistryEnvironmentEntries+1)
+				for index := range instance.Environment {
+					instance.Environment[index] = fmt.Sprintf("K%d=v", index)
+				}
+			},
+		},
+		{
+			name: "environment entry bytes",
+			change: func(instance *Instance) {
+				instance.Environment = []string{"A=" + strings.Repeat("v", maxRegistryEnvironmentEntryBytes-1)}
+			},
+		},
+		{
+			name: "environment total bytes",
+			change: func(instance *Instance) {
+				instance.Environment = environmentWithTotalBytes(maxRegistryEnvironmentTotalBytes + 1)
+			},
+		},
+		{
+			name: "generator entries",
+			change: func(instance *Instance) {
+				instance.Generators = []string{"Ninja", "Ninja", "Ninja", "Ninja", "Ninja"}
+			},
+		},
+		{
+			name: "coverage path bytes",
+			change: func(instance *Instance) {
+				instance.Coverage.LLVMProfdata = "/" + strings.Repeat("p", maxRegistryPathBytes)
+			},
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			instance := boundedRegistryInstance(0)
+			test.change(&instance)
+			registry, err := NewRegistry(&staticAdapter{instances: []Instance{instance}})
+			if err != nil {
+				t.Fatalf("NewRegistry() error = %v", err)
+			}
+
+			instances, issues := registry.Discover(context.Background())
+			if len(instances) != 0 {
+				t.Fatalf("Discover() instances = %+v, want invalid instance rejected", instances)
+			}
+			if len(issues) != 1 || issues[0].Code != "TOOLCHAIN_INVALID" {
+				t.Fatalf("Discover() issues = %+v, want TOOLCHAIN_INVALID", issues)
+			}
+		})
+	}
+}
+
+func TestRegistryBoundsPerAdapterResultsBeforeNormalization(t *testing.T) {
+	t.Parallel()
+
+	exact := make([]Instance, maxRegistryAdapterResults)
+	for index := range exact {
+		exact[index] = boundedRegistryInstance(index)
+	}
+	registry, _ := NewRegistry(&staticAdapter{instances: exact})
+	instances, issues := registry.Discover(context.Background())
+	if len(instances) != maxRegistryAdapterResults || len(issues) != 0 {
+		t.Fatalf("exact Discover() = (%d instances, %+v)", len(instances), issues)
+	}
+
+	excess := append(append([]Instance(nil), exact...), boundedRegistryInstance(maxRegistryAdapterResults))
+	excess[len(excess)-1].Environment = []string{"TOKEN=" + strings.Repeat("secret", 4096)}
+	registry, _ = NewRegistry(&staticAdapter{instances: excess})
+	instances, issues = registry.Discover(context.Background())
+	if len(instances) != maxRegistryAdapterResults {
+		t.Fatalf("excess Discover() instances = %d, want %d", len(instances), maxRegistryAdapterResults)
+	}
+	want := []Issue{{
+		Code:     "TOOLCHAIN_LIMIT_EXCEEDED",
+		Message:  "toolchain adapter 0 result limit exceeded",
+		Blocking: true,
+	}}
+	if !reflect.DeepEqual(issues, want) {
+		t.Fatalf("excess Discover() issues = %+v, want %+v", issues, want)
+	}
+}
+
+func TestRegistryStopsAtIssueBudgetWithStableLimitIssue(t *testing.T) {
+	t.Parallel()
+
+	carried := make([]Issue, maxRegistryIssues+10)
+	for index := range carried {
+		carried[index] = Issue{
+			Code:    "TOOLCHAIN_PROBE_FAILED",
+			Message: strings.Repeat("raw-secret-payload", 32),
+		}
+	}
+	registry, _ := NewRegistry(&staticAdapter{err: carrierTestError{issues: carried}})
+
+	_, issues := registry.Discover(context.Background())
+	if len(issues) != maxRegistryIssues {
+		t.Fatalf("Discover() issues = %d, want exact budget %d", len(issues), maxRegistryIssues)
+	}
+	limitCount := 0
+	for _, issue := range issues {
+		if issue.Code == "TOOLCHAIN_LIMIT_EXCEEDED" &&
+			issue.Message == "toolchain issue limit exceeded" &&
+			issue.Blocking {
+			limitCount++
+		}
+		if strings.Contains(issue.Message, "raw-secret") {
+			t.Fatalf("Discover() leaked carrier payload in %+v", issue)
+		}
+	}
+	if limitCount != 1 {
+		t.Fatalf("Discover() limit issue count = %d, want 1", limitCount)
+	}
+}
+
 func TestRegistryCancellationReturnsPromptlyWithoutOrdinaryIssue(t *testing.T) {
 	t.Parallel()
 
@@ -220,6 +452,18 @@ type staticAdapter struct {
 	discover  func(context.Context) ([]Instance, error)
 }
 
+type carrierTestError struct {
+	issues []Issue
+}
+
+func (carrier carrierTestError) Error() string {
+	return "carrier error"
+}
+
+func (carrier carrierTestError) ToolchainIssues() []Issue {
+	return carrier.issues
+}
+
 func (adapter *staticAdapter) Discover(ctx context.Context) ([]Instance, error) {
 	if adapter.discover != nil {
 		return adapter.discover(ctx)
@@ -237,4 +481,57 @@ func instanceIDs(instances []Instance) []string {
 		ids[index] = instances[index].ID
 	}
 	return ids
+}
+
+func boundedRegistryInstance(index int) Instance {
+	return Instance{
+		ID:                 fmt.Sprintf("gcc-%03d", index),
+		Family:             FamilyGCC,
+		CCompiler:          fmt.Sprintf("/tools/gcc-%03d", index),
+		CXXCompiler:        fmt.Sprintf("/tools/g++-%03d", index),
+		Version:            "13.2.0",
+		TargetTriple:       "x86_64-linux-gnu",
+		HostArchitecture:   "x64",
+		TargetArchitecture: "x64",
+		Sysroot:            "/",
+		Environment:        []string{"LANG=C"},
+		Generators:         []string{"Ninja"},
+	}
+}
+
+func environmentWithTotalBytes(total int) []string {
+	const maximumValueBytes = maxRegistryEnvironmentEntryBytes - len("KEY_000=")
+	var result []string
+	for total > 0 {
+		index := len(result)
+		prefix := fmt.Sprintf("KEY_%03d=", index)
+		valueBytes := min(total-len(prefix), maximumValueBytes)
+		if valueBytes < 0 {
+			valueBytes = 0
+		}
+		entry := prefix + strings.Repeat("v", valueBytes)
+		result = append(result, entry)
+		total -= len(entry)
+	}
+	return result
+}
+
+func environmentWithExactCountAndTotal(count, total int) []string {
+	result := make([]string, count)
+	used := 0
+	for index := range result {
+		result[index] = fmt.Sprintf("KEY_%03d=", index)
+		used += len(result[index])
+	}
+	remaining := total - used
+	for index := range result {
+		capacity := maxRegistryEnvironmentEntryBytes - len(result[index])
+		add := min(remaining, capacity)
+		result[index] += strings.Repeat("v", add)
+		remaining -= add
+	}
+	if remaining != 0 {
+		panic("test environment budget cannot be represented")
+	}
+	return result
 }
