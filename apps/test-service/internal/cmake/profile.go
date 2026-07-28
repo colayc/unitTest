@@ -29,14 +29,30 @@ type BuildProfile struct {
 	BinaryDir       string
 }
 
+// GeneratedProfileSpec describes the semantic identity and trusted build-root
+// descriptor for a Service-generated CMake profile. BuildRoot may only come
+// from a caller-validated, Service-owned trusted build-root provider or
+// configuration; workspace or Protocol input is not a trusted source.
 type GeneratedProfileSpec struct {
 	ProjectID     string
 	ToolchainID   string
 	Generator     string
 	Configuration string
-	BuildRoot     string
+	// BuildRoot is a lexical descriptor. Supplying a nonexistent path or a path
+	// that is currently a file does not establish or imply trust.
+	BuildRoot string
 }
 
+// NewGeneratedProfile constructs pure profile metadata. It never stats,
+// creates, opens, or otherwise accesses the filesystem. It validates
+// BuildRoot only as valid UTF-8 without NUL, absolute, and clean, then derives
+// a lexically contained child whose name is the fixed lowercase hexadecimal
+// profile ID.
+//
+// The caller and the Phase 3C execution layer remain responsible for secure
+// directory creation and for validating directory type, symlink, junction and
+// reparse-point boundaries, ownership and ACLs, filesystem identity, and the
+// trusted root again before every execution.
 func NewGeneratedProfile(spec GeneratedProfileSpec) (BuildProfile, error) {
 	fields := []struct {
 		name     string
