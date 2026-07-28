@@ -1,0 +1,4 @@
+/usr/bin/ld: app.o: undefined reference to `missing_symbol'
+ld.lld: error: undefined symbol: other_symbol
+collect2: error: ld returned 1 exit status
+linking target app

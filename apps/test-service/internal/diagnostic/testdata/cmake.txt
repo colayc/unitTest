@@ -1,0 +1,4 @@
+CMake Warning at cmake/Flags.cmake:3 (message):
+  Unsafe flag was ignored
+
+CMake Generate step failed. Build files cannot be regenerated correctly.

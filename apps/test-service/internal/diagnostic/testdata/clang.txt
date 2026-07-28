@@ -1,0 +1,2 @@
+C:\工作\main.cpp:4:7: error: use of undeclared identifier 'value'
+C:\工作\header.hpp:2:1: note: declared here
