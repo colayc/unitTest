@@ -90,11 +90,12 @@ Close failure
 当 `current.process != nil && !current.closeComplete` 时：
 
 - Task 必须保持 `queued`、`running` 或 `cancelling`；
-- 对应 durable lease 必须继续存在；
+- 当 `current.leasePersisted=true` 时，对应 durable lease 必须继续存在；
+- 当 `current.leasePersisted=false` 时，pre-lease Store failure 必须继续保留本地 active owner；该 lease-free 路径不得宣称可以由 restart recovery 接管；
 - 不得提交 `DeleteLease=true`；
 - 不得发布 terminal Task/Step event；
 - 不得创建 terminal Task summary Artifact；
-- active owner 不得释放，除非 circuit/recovery handoff 已确认 Task nonterminal 且 durable lease 存在。
+- active owner 不得释放，除非 circuit/recovery handoff 已确认 Task nonterminal、`leasePersisted=true` 且 durable lease 存在。
 
 ### 4.2 Close-before-persistence invariant
 

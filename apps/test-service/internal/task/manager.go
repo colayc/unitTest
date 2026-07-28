@@ -1037,6 +1037,10 @@ func (m *Manager) canRemove(current *activeTask) bool {
 	if current.recoveryRequired {
 		return current.closeComplete
 	}
+	if current.process == nil {
+		return current.task.Status == StatusFinished &&
+			current.pendingCompletion == nil
+	}
 	return current.closeComplete &&
 		current.task.Status == StatusFinished &&
 		current.pendingCompletion == nil

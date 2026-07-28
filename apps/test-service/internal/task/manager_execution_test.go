@@ -1187,6 +1187,78 @@ func TestManagerRevalidatesBoundaryBeforePreparingNextStep(t *testing.T) {
 	}
 }
 
+func TestManagerShutdownAfterIntermediateBoundaryFailureReleasesProcessFreeTerminalOwner(t *testing.T) {
+	f := newManagerFixture(t)
+	second := newFakeProcess()
+	f.processes.queue = []*fakeProcess{f.process, second}
+	t.Cleanup(func() { second.completeOnce(task.ProcessResult{Err: errors.New("test cleanup")}) })
+	boundary := &switchableBoundary{}
+
+	releaseClose := make(chan struct{})
+	f.process.closeBlock = releaseClose
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(releaseClose) }) })
+
+	started, err := f.manager.Start(context.Background(), twoStepStartRequest(testID(100), time.Minute, boundary))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.process.complete(task.ProcessResult{ExitCode: 0})
+	f.awaitProcessClose(t, f.process)
+	boundary.reject()
+	releaseOnce.Do(func() { close(releaseClose) })
+
+	finished := f.awaitTask(t, started.ID, task.StatusFinished)
+	if finished.Outcome != task.OutcomeInfrastructureFailed {
+		t.Fatalf("outcome = %s, want %s", finished.Outcome, task.OutcomeInfrastructureFailed)
+	}
+	assertStepStatuses(t, finished, task.StepSucceeded, task.StepFailed)
+	if got := f.processes.prepareCount(); got != 1 {
+		t.Fatalf("Prepare calls after boundary changed = %d, want 1", got)
+	}
+
+	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), time.Second)
+	defer cancelShutdown()
+	if err := f.manager.Shutdown(shutdownContext); err != nil {
+		t.Fatalf("Shutdown after process-free next-Step boundary failure = %v; terminal Task retained an active owner", err)
+	}
+}
+
+func TestManagerShutdownAfterIntermediateNilPrepareReleasesProcessFreeTerminalOwner(t *testing.T) {
+	f := newManagerFixture(t)
+
+	releaseClose := make(chan struct{})
+	f.process.closeBlock = releaseClose
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(releaseClose) }) })
+
+	started, err := f.manager.Start(context.Background(), twoStepStartRequest(testID(101), time.Minute, fixedBoundary{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.process.complete(task.ProcessResult{ExitCode: 0})
+	f.awaitProcessClose(t, f.process)
+	f.processes.mu.Lock()
+	f.processes.prepareErr = errors.New("second Prepare returned no process")
+	f.processes.mu.Unlock()
+	releaseOnce.Do(func() { close(releaseClose) })
+
+	finished := f.awaitTask(t, started.ID, task.StatusFinished)
+	if finished.Outcome != task.OutcomeInfrastructureFailed {
+		t.Fatalf("outcome = %s, want %s", finished.Outcome, task.OutcomeInfrastructureFailed)
+	}
+	assertStepStatuses(t, finished, task.StepSucceeded, task.StepFailed)
+	if got := f.processes.prepareCount(); got != 2 {
+		t.Fatalf("Prepare calls after nil second Process = %d, want 2", got)
+	}
+
+	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), time.Second)
+	defer cancelShutdown()
+	if err := f.manager.Shutdown(shutdownContext); err != nil {
+		t.Fatalf("Shutdown after process-free next-Step Prepare failure = %v; terminal Task retained an active owner", err)
+	}
+}
+
 func TestManagerCloseFailurePreservesCancellationCause(t *testing.T) {
 	f := newManagerFixture(t)
 	second := newFakeProcess()
