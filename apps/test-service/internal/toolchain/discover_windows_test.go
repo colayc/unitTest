@@ -6,9 +6,39 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	"unit-test-ide.local/test-service/internal/probe"
 )
+
+func TestWindowsDefaultDiscoveryBuildsFixedMinimumOSEnvironment(t *testing.T) {
+	untrustedPath := t.TempDir()
+	t.Setenv("PATH", untrustedPath)
+	options, err := defaultWindowsDiscoveryOptions()
+	if err != nil {
+		t.Fatalf("defaultWindowsDiscoveryOptions() error = %v", err)
+	}
+	systemRoot := os.Getenv("SystemRoot")
+	want := map[string]string{
+		"COMSPEC":     filepath.Join(systemRoot, "System32", "cmd.exe"),
+		"PATH":        filepath.Join(systemRoot, "System32") + ";" + systemRoot,
+		"PROGRAMDATA": os.Getenv("ProgramData"),
+		"SYSTEMROOT":  systemRoot,
+		"TEMP":        os.Getenv("TEMP"),
+		"TMP":         os.Getenv("TMP"),
+	}
+	if got := windowsEnvironmentValues(options.BaseEnvironment); !reflect.DeepEqual(got, want) {
+		t.Fatalf("default fixed environment = %#v, want %#v", got, want)
+	}
+	if strings.Contains(
+		strings.ToLower(windowsEnvironmentValues(options.BaseEnvironment)["PATH"]),
+		strings.ToLower(untrustedPath),
+	) {
+		t.Fatalf("default fixed environment inherited user PATH %q", untrustedPath)
+	}
+}
 
 func TestWindowsVSWhereUsesOnlyFixedArguments(t *testing.T) {
 	want := []string{
@@ -28,6 +58,81 @@ func TestWindowsVSWhereUsesOnlyFixedArguments(t *testing.T) {
 	got[0] = "-latest"
 	if next := vswhereArguments(); next[0] != "-all" {
 		t.Fatalf("vswhereArguments() leaked caller mutation: %#v", next)
+	}
+}
+
+func TestWindowsVSWhereDistinguishesExpectedMetadataFromNoInstallation(t *testing.T) {
+	for _, test := range []struct {
+		name             string
+		metadataExpected bool
+		wantError        bool
+	}{
+		{name: "metadata expected", metadataExpected: true, wantError: true},
+		{name: "no metadata", metadataExpected: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newWindowsToolchainFixture(t)
+			runner := newWindowsFakeRunner(fixture)
+			runner.setOutput(
+				fixture.vswhere,
+				vswhereArguments(),
+				successfulWindowsOutput("[]"),
+			)
+			options := fixture.options()
+			options.VSInstallationMetadataExpected = test.metadataExpected
+			adapters, err := newWindowsAdapters(runner, nil, options)
+			if err != nil {
+				t.Fatalf("newWindowsAdapters() error = %v", err)
+			}
+			instances, discoverErr := adapters[0].Discover(context.Background())
+			if len(instances) != 0 || (discoverErr != nil) != test.wantError {
+				t.Fatalf(
+					"MSVC Discover(empty vswhere) = %#v, %v, want error %t",
+					instances,
+					discoverErr,
+					test.wantError,
+				)
+			}
+			if discoverErr != nil && strings.Contains(
+				discoverErr.Error(),
+				fixture.programData,
+			) {
+				t.Fatalf("empty metadata issue leaked ProgramData path: %v", discoverErr)
+			}
+		})
+	}
+}
+
+func TestWindowsProductionVSWhereFindsExpectedFixedMetadata(t *testing.T) {
+	options, err := defaultWindowsDiscoveryOptions()
+	if err != nil {
+		t.Skipf("fixed Windows discovery environment is unavailable: %v", err)
+	}
+	if !options.VSInstallationMetadataExpected {
+		t.Skip("fixed Visual Studio installation metadata is not present")
+	}
+	if _, err := os.Stat(options.VSWherePath); err != nil {
+		t.Skipf("fixed vswhere is unavailable: %v", err)
+	}
+	adapters, err := newWindowsAdapters(probe.NewRunner(), nil, options)
+	if err != nil {
+		t.Fatalf("newWindowsAdapters(production) error = %v", err)
+	}
+	msvc, ok := adapters[0].(*msvcAdapter)
+	if !ok {
+		t.Fatalf("production MSVC adapter = %T", adapters[0])
+	}
+	installations, discoverErr := discoverVisualStudioInstallations(
+		context.Background(),
+		probe.NewRunner(),
+		msvc.options.config,
+	)
+	if discoverErr != nil || len(installations) == 0 {
+		t.Fatalf(
+			"production vswhere installations = %#v, %v",
+			installations,
+			discoverErr,
+		)
 	}
 }
 

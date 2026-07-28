@@ -298,7 +298,7 @@ func (adapter *clangCLAdapter) probeCandidate(
 			cCompiler.identity,
 			cxxCompiler.identity,
 			candidate.context.sdkIdentity+"\x00"+candidate.context.sdkVersion+
-				"\x00"+candidate.context.sdkVersionedIdentity+
+				"\x00"+candidate.context.environmentIdentity+
 				"\x00"+candidate.context.installation.Identity+
 				"\x00"+candidate.context.toolsetIdentity+
 				"\x00"+lld.identity,

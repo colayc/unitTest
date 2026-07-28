@@ -28,6 +28,11 @@ var (
 	msvcCompilerBannerPattern = regexp.MustCompile(
 		`(?i)\bCompiler Version ([0-9]+\.[0-9]+(?:\.[0-9]+){0,2}) for (x86|x64|arm64)\b`,
 	)
+	msvcCompilerPathMarkerPattern = regexp.MustCompile(`(?i)\\cl\.exe:`)
+	msvcFileVersionPattern        = regexp.MustCompile(
+		`\b([0-9]+\.[0-9]+(?:\.[0-9]+){0,2})\b`,
+	)
+	msvcArchitecturePattern = regexp.MustCompile(`(?i)\b(x86|x64|arm64)\b`)
 	msvcLinkerBannerPattern = regexp.MustCompile(
 		`(?i)\bLinker Version ([0-9]+\.[0-9]+(?:\.[0-9]+){0,2})\b`,
 	)
@@ -48,29 +53,42 @@ type msvcAdapter struct {
 }
 
 type windowsDirectoryReference struct {
+	role     string
 	path     string
 	identity string
 }
 
+type windowsDirectoryRule struct {
+	role  string
+	root  string
+	exact bool
+}
+
+type windowsGeneratorProbeResult struct {
+	names          []string
+	directories    []windowsDirectoryReference
+	toolIdentities []string
+}
+
 type msvcContext struct {
-	id                   string
-	manual               bool
-	installation         visualStudioInstallation
-	toolset              string
-	toolsetIdentity      string
-	config               MSVCConfig
-	environment          []string
-	verifiedDirectories  []windowsDirectoryReference
-	sdk                  string
-	sdkIdentity          string
-	sdkVersion           string
-	sdkVersionedIdentity string
-	cl                   string
-	link                 string
-	msbuild              string
-	ninja                string
-	vsDevCmd             string
-	vsDevCmdIdentity     string
+	id                  string
+	manual              bool
+	installation        visualStudioInstallation
+	toolset             string
+	toolsetIdentity     string
+	config              MSVCConfig
+	environment         []string
+	verifiedDirectories []windowsDirectoryReference
+	sdk                 string
+	sdkIdentity         string
+	sdkVersion          string
+	environmentIdentity string
+	cl                  string
+	link                string
+	msbuild             string
+	ninja               string
+	vsDevCmd            string
+	vsDevCmdIdentity    string
 }
 
 func newMSVCAdapter(options windowsAdapterOptions) *msvcAdapter {
@@ -370,6 +388,9 @@ func captureMSVCContext(
 		return msvcContext{}, invalidProbe("TOOLCHAIN_PROBE_FAILED", "VsDevCmd arguments are invalid")
 	}
 	verifyRoots := func() error {
+		if err := options.config.verifyBaseDirectories(ctx); err != nil {
+			return err
+		}
 		if err := vsDevCmd.Verify(ctx); err != nil {
 			return err
 		}
@@ -426,9 +447,9 @@ func captureMSVCContext(
 	if err != nil || !pathWithinWindowsRoot(toolset, binaryDirectory) {
 		return msvcContext{}, invalidProbe("TOOLCHAIN_ENVIRONMENT_INVALID", "MSVC binary directory is invalid")
 	}
-	verifiedDirectories := []windowsDirectoryReference{{
-		path: binaryDirectory, identity: binaryIdentity,
-	}}
+	binaryReference := windowsDirectoryReference{
+		role: "path-msvc-bin", path: binaryDirectory, identity: binaryIdentity,
+	}
 	toolsetInclude, err := captureWindowsDirectoryWithin(
 		filepath.Join(toolset, "include"),
 		toolset,
@@ -436,6 +457,7 @@ func captureMSVCContext(
 	if err != nil {
 		return msvcContext{}, invalidProbe("TOOLCHAIN_ENVIRONMENT_INVALID", "MSVC include directory is invalid")
 	}
+	toolsetInclude.role = "include-toolset"
 	toolsetLibrary, err := captureWindowsDirectoryWithin(
 		filepath.Join(toolset, "lib", config.TargetArchitecture),
 		toolset,
@@ -443,6 +465,7 @@ func captureMSVCContext(
 	if err != nil {
 		return msvcContext{}, invalidProbe("TOOLCHAIN_ENVIRONMENT_INVALID", "MSVC library directory is invalid")
 	}
+	toolsetLibrary.role = "lib-toolset-" + config.TargetArchitecture
 	sdkIncludeRoot := filepath.Join(sdk, "Include", sdkVersion)
 	sdkLibraryRoot := filepath.Join(sdk, "Lib", sdkVersion)
 	sdkIncludes := make([]windowsDirectoryReference, 0, 3)
@@ -457,6 +480,7 @@ func captureMSVCContext(
 				"Windows SDK include tree is invalid",
 			)
 		}
+		reference.role = "include-sdk-" + name
 		sdkIncludes = append(sdkIncludes, reference)
 	}
 	sdkLibraries := make([]windowsDirectoryReference, 0, 2)
@@ -471,21 +495,42 @@ func captureMSVCContext(
 				"Windows SDK library tree is invalid",
 			)
 		}
+		reference.role = "lib-sdk-" + name + "-" + config.TargetArchitecture
 		sdkLibraries = append(sdkLibraries, reference)
 	}
 	requiredIncludes := append(
 		[]windowsDirectoryReference{toolsetInclude},
 		sdkIncludes...,
 	)
+	allowedIncludes := append(
+		[]windowsDirectoryReference(nil),
+		requiredIncludes...,
+	)
+	if auxiliary, ok := captureOptionalWindowsDirectoryWithin(
+		filepath.Join(installation.Path, "VC", "Auxiliary", "VS", "include"),
+		installation.Path,
+		"include-vs-auxiliary",
+	); ok {
+		allowedIncludes = append(allowedIncludes, auxiliary)
+	}
+	for _, name := range []string{"winrt", "cppwinrt"} {
+		if optional, ok := captureOptionalWindowsDirectoryWithin(
+			filepath.Join(sdkIncludeRoot, name),
+			sdk,
+			"include-sdk-"+name,
+		); ok {
+			allowedIncludes = append(allowedIncludes, optional)
+		}
+	}
 	requiredLibraries := append(
 		[]windowsDirectoryReference{toolsetLibrary},
 		sdkLibraries...,
 	)
-	includeReferences, err := validateWindowsEnvironmentDirectoryList(
+	includeValue, includeReferences, err := filterWindowsEnvironmentDirectoryList(
 		ctx,
 		values["INCLUDE"],
 		requiredIncludes,
-		[]string{toolset, sdk},
+		exactWindowsDirectoryRules(allowedIncludes),
 	)
 	if err != nil {
 		return msvcContext{}, contextualWindowsProbeError(
@@ -493,11 +538,11 @@ func captureMSVCContext(
 			"MSVC INCLUDE environment is invalid",
 		)
 	}
-	libraryReferences, err := validateWindowsEnvironmentDirectoryList(
+	libraryValue, libraryReferences, err := filterWindowsEnvironmentDirectoryList(
 		ctx,
 		values["LIB"],
 		requiredLibraries,
-		[]string{toolset, sdk},
+		exactWindowsDirectoryRules(requiredLibraries),
 	)
 	if err != nil {
 		return msvcContext{}, contextualWindowsProbeError(
@@ -505,11 +550,81 @@ func captureMSVCContext(
 			"MSVC LIB environment is invalid",
 		)
 	}
-	libPathReferences, err := validateWindowsEnvironmentDirectoryList(
+	baseValues := windowsEnvironmentValues(options.config.BaseEnvironment)
+	systemRoot, _, rootErr := canonicalWindowsDirectoryIdentity(
+		strings.TrimRight(baseValues["SYSTEMROOT"], `\/`),
+	)
+	if rootErr != nil {
+		return msvcContext{}, invalidProbe(
+			"TOOLCHAIN_ENVIRONMENT_INVALID",
+			"SystemRoot directory is invalid",
+		)
+	}
+	toolsetLibRoot, _, toolsetLibErr := canonicalWindowsDirectoryIdentity(
+		filepath.Join(toolset, "lib"),
+	)
+	if toolsetLibErr != nil || !pathWithinWindowsRoot(toolset, toolsetLibRoot) {
+		return msvcContext{}, invalidProbe(
+			"TOOLCHAIN_ENVIRONMENT_INVALID",
+			"MSVC library root is invalid",
+		)
+	}
+	libPathRules := []windowsDirectoryRule{{
+		role: "libpath-toolset", root: toolsetLibRoot,
+	}}
+	for _, optional := range []struct {
+		path string
+		role string
+	}{
+		{
+			path: filepath.Join(sdk, "UnionMetadata", sdkVersion),
+			role: "libpath-sdk-union-metadata",
+		},
+		{
+			path: filepath.Join(sdk, "References", sdkVersion),
+			role: "libpath-sdk-references",
+		},
+	} {
+		if reference, ok := captureOptionalWindowsDirectoryWithin(
+			optional.path,
+			sdk,
+			optional.role,
+		); ok {
+			libPathRules = append(libPathRules, windowsDirectoryRule{
+				role: reference.role, root: reference.path,
+			})
+		}
+	}
+	if dotNet, ok := captureOptionalWindowsDirectoryWithin(
+		filepath.Join(systemRoot, "Microsoft.NET"),
+		systemRoot,
+		"libpath-system-dotnet",
+	); ok {
+		libPathRules = append(libPathRules, windowsDirectoryRule{
+			role: dotNet.role, root: dotNet.path,
+		})
+	}
+	var netFXReference windowsDirectoryReference
+	var netFXRoot string
+	if value := strings.TrimRight(values["NETFXSDKDIR"], `\/`); value != "" {
+		netFXParent := filepath.Join(filepath.Dir(sdk), "NETFXSDK")
+		if reference, ok := captureOptionalWindowsDirectoryWithin(
+			value,
+			netFXParent,
+			"environment-netfx-sdk-root",
+		); ok {
+			netFXReference = reference
+			netFXRoot = reference.path
+			libPathRules = append(libPathRules, windowsDirectoryRule{
+				role: "libpath-netfx-sdk", root: reference.path,
+			})
+		}
+	}
+	libPathValue, libPathReferences, err := filterWindowsEnvironmentDirectoryList(
 		ctx,
 		values["LIBPATH"],
-		nil,
-		[]string{installation.Path, toolset, sdk},
+		[]windowsDirectoryReference{toolsetLibrary},
+		libPathRules,
 	)
 	if err != nil {
 		return msvcContext{}, contextualWindowsProbeError(
@@ -517,42 +632,22 @@ func captureMSVCContext(
 			"MSVC LIBPATH environment is invalid",
 		)
 	}
-	pathAllowedRoots := []string{installation.Path, toolset, sdk}
-	pathRequired := []windowsDirectoryReference{{
-		path: binaryDirectory, identity: binaryIdentity,
-	}}
-	baseValues := windowsEnvironmentValues(options.config.BaseEnvironment)
-	if systemRootValue := strings.TrimRight(baseValues["SYSTEMROOT"], `\/`); systemRootValue != "" {
-		systemRoot, systemRootIdentity, rootErr := canonicalWindowsDirectoryIdentity(systemRootValue)
-		if rootErr != nil {
-			return msvcContext{}, invalidProbe(
-				"TOOLCHAIN_ENVIRONMENT_INVALID",
-				"SystemRoot directory is invalid",
-			)
-		}
-		pathAllowedRoots = append(pathAllowedRoots, systemRoot)
-		verifiedDirectories = append(verifiedDirectories, windowsDirectoryReference{
-			path: systemRoot, identity: systemRootIdentity,
+	pathRules := []windowsDirectoryRule{
+		{role: "path-toolset", root: toolset},
+		{role: "path-installation", root: installation.Path},
+		{role: "path-sdk", root: sdk},
+		{role: "path-system", root: systemRoot},
+	}
+	if netFXRoot != "" {
+		pathRules = append(pathRules, windowsDirectoryRule{
+			role: "path-netfx-sdk", root: netFXRoot,
 		})
 	}
-	if options.config.NinjaPath != "" {
-		ninjaRoot, ninjaRootIdentity, ninjaErr := canonicalWindowsDirectoryIdentity(
-			filepath.Dir(options.config.NinjaPath),
-		)
-		if ninjaErr == nil {
-			ninjaReference := windowsDirectoryReference{
-				path: ninjaRoot, identity: ninjaRootIdentity,
-			}
-			pathAllowedRoots = append(pathAllowedRoots, ninjaRoot)
-			pathRequired = append(pathRequired, ninjaReference)
-			verifiedDirectories = append(verifiedDirectories, ninjaReference)
-		}
-	}
-	pathReferences, err := validateWindowsEnvironmentDirectoryList(
+	pathValue, pathReferences, err := filterWindowsEnvironmentDirectoryList(
 		ctx,
 		values["PATH"],
-		pathRequired,
-		pathAllowedRoots,
+		[]windowsDirectoryReference{binaryReference},
+		pathRules,
 	)
 	if err != nil {
 		return msvcContext{}, contextualWindowsProbeError(
@@ -560,46 +655,52 @@ func captureMSVCContext(
 			"MSVC PATH environment is invalid",
 		)
 	}
-	verifiedDirectories = append(
-		verifiedDirectories,
-		toolsetInclude,
-		toolsetLibrary,
+	replacements := map[string]string{
+		"INCLUDE": includeValue,
+		"LIB":     libraryValue,
+		"LIBPATH": libPathValue,
+		"PATH":    pathValue,
+	}
+	removals := map[string]struct{}{"NETFXSDKDIR": {}}
+	if netFXRoot != "" {
+		replacements["NETFXSDKDIR"] = netFXRoot + string(filepath.Separator)
+		delete(removals, "NETFXSDKDIR")
+	}
+	environment = replaceWindowsEnvironmentValues(
+		environment,
+		replacements,
+		removals,
 	)
-	verifiedDirectories = append(verifiedDirectories, sdkIncludes...)
-	verifiedDirectories = append(verifiedDirectories, sdkLibraries...)
+	verifiedDirectories := make([]windowsDirectoryReference, 0,
+		len(includeReferences)+len(libraryReferences)+
+			len(libPathReferences)+len(pathReferences)+1)
 	verifiedDirectories = append(verifiedDirectories, includeReferences...)
 	verifiedDirectories = append(verifiedDirectories, libraryReferences...)
 	verifiedDirectories = append(verifiedDirectories, libPathReferences...)
 	verifiedDirectories = append(verifiedDirectories, pathReferences...)
-	sdkVersionedIdentityParts := make([]string, 0, len(sdkIncludes)+len(sdkLibraries))
-	for _, reference := range append(
-		append([]windowsDirectoryReference(nil), sdkIncludes...),
-		sdkLibraries...,
-	) {
-		sdkVersionedIdentityParts = append(
-			sdkVersionedIdentityParts,
-			identityPath(reference.path)+"\x00"+reference.identity,
-		)
+	if netFXRoot != "" {
+		verifiedDirectories = append(verifiedDirectories, netFXReference)
 	}
+	environmentIdentity := windowsDirectoryDescriptorIdentity(verifiedDirectories)
 	candidate := msvcContext{
-		id:                   requested.ID,
-		manual:               requested.ID != "",
-		installation:         installation,
-		toolset:              toolset,
-		toolsetIdentity:      toolsetIdentity,
-		config:               config,
-		environment:          append([]string(nil), environment...),
-		verifiedDirectories:  verifiedDirectories,
-		sdk:                  sdk,
-		sdkIdentity:          sdkIdentity,
-		sdkVersion:           sdkVersion,
-		sdkVersionedIdentity: strings.Join(sdkVersionedIdentityParts, "\x00"),
-		cl:                   filepath.Join(binaryDirectory, "cl.exe"),
-		link:                 filepath.Join(binaryDirectory, "link.exe"),
-		msbuild:              filepath.Join(installation.Path, "MSBuild", "Current", "Bin", "MSBuild.exe"),
-		ninja:                options.config.NinjaPath,
-		vsDevCmd:             vsDevCmd.path,
-		vsDevCmdIdentity:     vsDevCmd.identity,
+		id:                  requested.ID,
+		manual:              requested.ID != "",
+		installation:        installation,
+		toolset:             toolset,
+		toolsetIdentity:     toolsetIdentity,
+		config:              config,
+		environment:         append([]string(nil), environment...),
+		verifiedDirectories: verifiedDirectories,
+		sdk:                 sdk,
+		sdkIdentity:         sdkIdentity,
+		sdkVersion:          sdkVersion,
+		environmentIdentity: environmentIdentity,
+		cl:                  filepath.Join(binaryDirectory, "cl.exe"),
+		link:                filepath.Join(binaryDirectory, "link.exe"),
+		msbuild:             filepath.Join(installation.Path, "MSBuild", "Current", "Bin", "MSBuild.exe"),
+		ninja:               options.config.NinjaPath,
+		vsDevCmd:            vsDevCmd.path,
+		vsDevCmdIdentity:    vsDevCmd.identity,
 	}
 	if options.config.afterEnvironmentValidation != nil {
 		options.config.afterEnvironmentValidation()
@@ -651,61 +752,169 @@ func captureWindowsDirectoryWithin(
 	return windowsDirectoryReference{path: canonical, identity: identity}, nil
 }
 
-func validateWindowsEnvironmentDirectoryList(
+func filterWindowsEnvironmentDirectoryList(
 	ctx context.Context,
 	value string,
 	required []windowsDirectoryReference,
-	allowedRoots []string,
-) ([]windowsDirectoryReference, error) {
+	rules []windowsDirectoryRule,
+) (string, []windowsDirectoryReference, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return "", nil, err
 	}
-	if value == "" || len(value) > maxCapturedEnvironmentBytes {
-		return nil, errors.New("environment directory list is empty or oversized")
+	if len(value) > maxCapturedEnvironmentBytes {
+		return "", nil, errors.New("environment directory list is oversized")
 	}
 	paths := filepath.SplitList(value)
-	if len(paths) == 0 || len(paths) > maxCapturedEnvironmentPathEntries {
-		return nil, errors.New("environment directory list count is invalid")
+	if len(paths) > maxCapturedEnvironmentPathEntries {
+		return "", nil, errors.New("environment directory list count is invalid")
 	}
 	result := make([]windowsDirectoryReference, 0, len(paths))
+	acceptedPaths := make([]string, 0, len(paths))
 	found := make(map[string]struct{}, len(paths))
 	for _, path := range paths {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return "", nil, err
 		}
 		path = strings.TrimSpace(path)
+		if len(path) >= 2 && path[0] == '"' && path[len(path)-1] == '"' {
+			path = strings.TrimSpace(path[1 : len(path)-1])
+		}
 		if path == "" || len(path) > maxWindowsDirectoryPathBytes || !filepath.IsAbs(path) {
-			return nil, errors.New("environment directory is invalid")
+			continue
 		}
 		canonical, identity, err := canonicalWindowsDirectoryIdentity(path)
 		if err != nil {
-			return nil, errors.New("environment directory is unavailable")
+			continue
 		}
-		allowed := false
-		for _, root := range allowedRoots {
-			if pathWithinWindowsRoot(root, canonical) {
-				allowed = true
+		role := ""
+		for _, rule := range rules {
+			if rule.exact && identityPath(canonical) == identityPath(rule.root) ||
+				!rule.exact && pathWithinWindowsRoot(rule.root, canonical) {
+				role = rule.role
 				break
 			}
 		}
-		if !allowed {
-			return nil, errors.New("environment directory leaves verified roots")
+		if role == "" {
+			continue
 		}
 		key := identityPath(canonical)
+		if _, duplicate := found[key]; duplicate {
+			continue
+		}
 		found[key] = struct{}{}
+		acceptedPaths = append(acceptedPaths, canonical)
 		result = append(result, windowsDirectoryReference{
-			path: canonical, identity: identity,
+			role: role, path: canonical, identity: identity,
 		})
 	}
 	for _, reference := range required {
 		if _, ok := found[identityPath(reference.path)]; !ok {
-			return nil, errors.New("required environment directory is missing")
+			return "", nil, errors.New("required environment directory is missing")
 		}
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return "", nil, err
 	}
-	return result, nil
+	return strings.Join(acceptedPaths, ";"), result, nil
+}
+
+func exactWindowsDirectoryRules(
+	references []windowsDirectoryReference,
+) []windowsDirectoryRule {
+	result := make([]windowsDirectoryRule, 0, len(references))
+	for _, reference := range references {
+		result = append(result, windowsDirectoryRule{
+			role: reference.role, root: reference.path, exact: true,
+		})
+	}
+	return result
+}
+
+func captureOptionalWindowsDirectoryWithin(
+	path string,
+	root string,
+	role string,
+) (windowsDirectoryReference, bool) {
+	reference, err := captureWindowsDirectoryWithin(path, root)
+	if err != nil {
+		return windowsDirectoryReference{}, false
+	}
+	reference.role = role
+	return reference, true
+}
+
+func replaceWindowsEnvironmentPathLists(
+	environment []string,
+	replacements map[string]string,
+) []string {
+	return replaceWindowsEnvironmentValues(environment, replacements, nil)
+}
+
+func replaceWindowsEnvironmentValues(
+	environment []string,
+	replacements map[string]string,
+	removals map[string]struct{},
+) []string {
+	result := make([]string, 0, len(environment))
+	for _, entry := range environment {
+		separator := strings.IndexByte(entry, '=')
+		if separator <= 0 {
+			continue
+		}
+		key := strings.ToUpper(entry[:separator])
+		if _, remove := removals[key]; remove {
+			continue
+		}
+		if value, ok := replacements[key]; ok {
+			result = append(result, canonicalWindowsEnvironmentKey(key)+"="+value)
+			continue
+		}
+		result = append(result, entry)
+	}
+	sort.Slice(result, func(left, right int) bool {
+		return strings.ToUpper(result[left]) < strings.ToUpper(result[right])
+	})
+	return result
+}
+
+func canonicalWindowsEnvironmentKey(key string) string {
+	if key == "PATH" {
+		return "Path"
+	}
+	return key
+}
+
+func windowsDirectoryDescriptorIdentity(
+	references []windowsDirectoryReference,
+) string {
+	owned := append([]windowsDirectoryReference(nil), references...)
+	sort.Slice(owned, func(left, right int) bool {
+		return lessStrings(
+			[]string{
+				owned[left].role,
+				identityPath(owned[left].path),
+				owned[left].identity,
+			},
+			[]string{
+				owned[right].role,
+				identityPath(owned[right].path),
+				owned[right].identity,
+			},
+		)
+	})
+	parts := make([]string, 0, len(owned)*3)
+	previous := ""
+	for _, reference := range owned {
+		descriptor := reference.role + "\x00" +
+			identityPath(reference.path) + "\x00" +
+			reference.identity
+		if descriptor == previous {
+			continue
+		}
+		previous = descriptor
+		parts = append(parts, descriptor)
+	}
+	return strings.Join(parts, "\x00")
 }
 
 func windowsEnvironmentValues(environment []string) map[string]string {
@@ -747,7 +956,7 @@ func (adapter *msvcAdapter) probeContext(
 		}
 		return link.Verify(ctx)
 	}
-	compilerOutput, err := runWindowsProbe(
+	compilerOutput, err := runWindowsProbeWithPolicy(
 		ctx,
 		adapter.options.runner,
 		cl,
@@ -756,6 +965,10 @@ func (adapter *msvcAdapter) probeContext(
 		maxWindowsProbeOutput,
 		true,
 		verify,
+		windowsProbeOutputPolicy{
+			acceptedExitCodes: []int{0, 2},
+			allowNonUTF8:      true,
+		},
 	)
 	if err != nil {
 		return Instance{}, err
@@ -765,7 +978,7 @@ func (adapter *msvcAdapter) probeContext(
 		!strings.EqualFold(compilerArchitecture, candidate.config.TargetArchitecture) {
 		return Instance{}, invalidProbe("TOOLCHAIN_PROBE_FAILED", "MSVC compiler output is incompatible")
 	}
-	linkerOutput, err := runWindowsProbe(
+	linkerOutput, err := runWindowsProbeWithPolicy(
 		ctx,
 		adapter.options.runner,
 		link,
@@ -774,6 +987,10 @@ func (adapter *msvcAdapter) probeContext(
 		maxWindowsProbeOutput,
 		true,
 		verify,
+		windowsProbeOutputPolicy{
+			acceptedExitCodes: []int{0, 1100},
+			allowNonUTF8:      true,
+		},
 	)
 	if err != nil {
 		return Instance{}, err
@@ -790,9 +1007,21 @@ func (adapter *msvcAdapter) probeContext(
 	if err != nil {
 		return Instance{}, err
 	}
+	for _, reference := range generators.directories {
+		if err := verifyWindowsDirectory(reference.path, reference.identity); err != nil {
+			return Instance{}, invalidProbe(
+				"TOOLCHAIN_PROBE_FAILED",
+				"MSVC generator directory changed",
+			)
+		}
+	}
 	if err := verify(); err != nil {
 		return Instance{}, contextualWindowsProbeError(err, "MSVC identity changed")
 	}
+	instanceEnvironment := appendVerifiedGeneratorPaths(
+		candidate.environment,
+		generators.directories,
+	)
 	instance := Instance{
 		ID:                 candidate.id,
 		Family:             FamilyMSVC,
@@ -803,8 +1032,8 @@ func (adapter *msvcAdapter) probeContext(
 		HostArchitecture:   candidate.config.HostArchitecture,
 		TargetArchitecture: candidate.config.TargetArchitecture,
 		Sysroot:            candidate.sdk,
-		Environment:        append([]string(nil), candidate.environment...),
-		Generators:         generators,
+		Environment:        instanceEnvironment,
+		Generators:         append([]string(nil), generators.names...),
 	}
 	if !candidate.manual {
 		instance.ID, err = automaticToolchainID(
@@ -812,9 +1041,11 @@ func (adapter *msvcAdapter) probeContext(
 			cl.identity,
 			link.identity,
 			candidate.sdkIdentity+"\x00"+candidate.sdkVersion+
-				"\x00"+candidate.sdkVersionedIdentity+
+				"\x00"+candidate.environmentIdentity+
 				"\x00"+candidate.installation.Identity+
-				"\x00"+candidate.toolsetIdentity,
+				"\x00"+candidate.toolsetIdentity+
+				"\x00"+windowsDirectoryDescriptorIdentity(generators.directories)+
+				"\x00"+strings.Join(generators.toolIdentities, "\x00"),
 		)
 		if err != nil {
 			return Instance{}, invalidProbe("TOOLCHAIN_PROBE_FAILED", "construct MSVC toolchain id")
@@ -827,12 +1058,30 @@ func (adapter *msvcAdapter) probeMSVCGenerators(
 	ctx context.Context,
 	candidate msvcContext,
 	verify func() error,
-) ([]string, error) {
-	generators := make([]string, 0, 2)
+) (windowsGeneratorProbeResult, error) {
+	result := windowsGeneratorProbeResult{
+		names:          make([]string, 0, 2),
+		directories:    make([]windowsDirectoryReference, 0, 2),
+		toolIdentities: make([]string, 0, 2),
+	}
 	if msbuild, err := openWindowsToolSnapshot(ctx, candidate.msbuild); err == nil {
+		root, rootIdentity, rootErr := canonicalWindowsDirectoryIdentity(
+			filepath.Dir(msbuild.path),
+		)
+		verifyMSBuild := verify
+		if rootErr == nil {
+			verifyMSBuild = func() error {
+				if err := verify(); err != nil {
+					return err
+				}
+				return verifyWindowsDirectory(root, rootIdentity)
+			}
+		}
 		var output []byte
 		var probeErr error
-		if pathWithinWindowsRoot(candidate.installation.Path, msbuild.path) {
+		if rootErr == nil &&
+			pathWithinWindowsRoot(candidate.installation.Path, root) &&
+			pathWithinWindowsRoot(root, msbuild.path) {
 			output, probeErr = runWindowsProbe(
 				ctx,
 				adapter.options.runner,
@@ -841,7 +1090,7 @@ func (adapter *msvcAdapter) probeMSVCGenerators(
 				candidate.environment,
 				maxWindowsProbeOutput,
 				false,
-				verify,
+				verifyMSBuild,
 			)
 		}
 		_ = msbuild.Close()
@@ -849,17 +1098,40 @@ func (adapter *msvcAdapter) probeMSVCGenerators(
 			version, parseErr := parseSingleLine(output, 128)
 			if parseErr == nil && sameVersionMajor(version, candidate.installation.Version) {
 				if generator := visualStudioGenerator(version); generator != "" {
-					generators = append(generators, generator)
+					result.names = append(result.names, generator)
+					result.directories = append(
+						result.directories,
+						windowsDirectoryReference{
+							role: "generator-msbuild",
+							path: root, identity: rootIdentity,
+						},
+					)
+					result.toolIdentities = append(
+						result.toolIdentities,
+						"msbuild\x00"+msbuild.identity,
+					)
 				}
 			}
 		} else if isContextError(probeErr) {
-			return nil, probeErr
+			return windowsGeneratorProbeResult{}, probeErr
 		}
 	} else if isContextError(err) {
-		return nil, err
+		return windowsGeneratorProbeResult{}, err
 	}
 	if candidate.ninja != "" {
 		if ninja, err := openWindowsToolSnapshot(ctx, candidate.ninja); err == nil {
+			ninjaRoot, ninjaRootIdentity, rootErr := canonicalWindowsDirectoryIdentity(
+				filepath.Dir(ninja.path),
+			)
+			verifyNinja := verify
+			if rootErr == nil {
+				verifyNinja = func() error {
+					if err := verify(); err != nil {
+						return err
+					}
+					return verifyWindowsDirectory(ninjaRoot, ninjaRootIdentity)
+				}
+			}
 			output, probeErr := runWindowsProbe(
 				ctx,
 				adapter.options.runner,
@@ -868,34 +1140,103 @@ func (adapter *msvcAdapter) probeMSVCGenerators(
 				candidate.environment,
 				maxWindowsProbeOutput,
 				false,
-				verify,
+				verifyNinja,
 			)
 			_ = ninja.Close()
 			if probeErr == nil {
 				version, parseErr := parseSingleLine(output, 128)
-				if parseErr == nil && versionPattern.MatchString(version) {
-					generators = append(generators, "Ninja")
+				if parseErr == nil && versionPattern.MatchString(version) &&
+					rootErr == nil &&
+					pathWithinWindowsRoot(ninjaRoot, ninja.path) {
+					result.names = append(result.names, "Ninja")
+					result.directories = append(
+						result.directories,
+						windowsDirectoryReference{
+							role: "path-generator-ninja",
+							path: ninjaRoot, identity: ninjaRootIdentity,
+						},
+					)
+					result.toolIdentities = append(
+						result.toolIdentities,
+						"ninja\x00"+ninja.identity,
+					)
 				}
 			} else if isContextError(probeErr) {
-				return nil, probeErr
+				return windowsGeneratorProbeResult{}, probeErr
 			}
 		} else if isContextError(err) {
-			return nil, err
+			return windowsGeneratorProbeResult{}, err
 		}
 	}
-	if len(generators) == 0 {
-		return nil, invalidProbe("BUILD_TOOL_NOT_FOUND", "MSVC generator is unavailable")
+	if len(result.names) == 0 {
+		return windowsGeneratorProbeResult{},
+			invalidProbe("BUILD_TOOL_NOT_FOUND", "MSVC generator is unavailable")
 	}
-	sort.Strings(generators)
-	return generators, nil
+	sort.Strings(result.names)
+	sort.Strings(result.toolIdentities)
+	return result, nil
+}
+
+func appendVerifiedGeneratorPaths(
+	environment []string,
+	references []windowsDirectoryReference,
+) []string {
+	values := windowsEnvironmentValues(environment)
+	paths := filepath.SplitList(values["PATH"])
+	seen := make(map[string]struct{}, len(paths)+len(references))
+	result := make([]string, 0, len(paths)+len(references))
+	for _, path := range paths {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		key := identityPath(path)
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, path)
+	}
+	for _, reference := range references {
+		if reference.role != "path-generator-ninja" {
+			continue
+		}
+		key := identityPath(reference.path)
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, reference.path)
+	}
+	return replaceWindowsEnvironmentPathLists(
+		environment,
+		map[string]string{"PATH": strings.Join(result, ";")},
+	)
 }
 
 func parseMSVCCompilerBanner(output []byte) (string, string, error) {
 	match := msvcCompilerBannerPattern.FindSubmatch(output)
-	if len(match) != 3 {
+	if len(match) == 3 {
+		return string(match[1]), strings.ToLower(string(match[2])), nil
+	}
+	pathMarker := msvcCompilerPathMarkerPattern.FindIndex(output)
+	if pathMarker == nil {
 		return "", "", errors.New("unrecognized MSVC compiler banner")
 	}
-	return string(match[1]), strings.ToLower(string(match[2])), nil
+	versionLine := output[pathMarker[1]:]
+	if end := bytes.IndexAny(versionLine, "\r\n"); end >= 0 {
+		versionLine = versionLine[:end]
+	}
+	version := msvcFileVersionPattern.FindSubmatch(versionLine)
+	architectureLine := output
+	if end := bytes.IndexAny(architectureLine, "\r\n"); end >= 0 {
+		architectureLine = architectureLine[:end]
+	}
+	architecture := msvcArchitecturePattern.FindSubmatch(architectureLine)
+	if len(version) != 2 || len(architecture) != 2 {
+		return "", "", errors.New("unrecognized MSVC compiler banner")
+	}
+	return string(version[1]), strings.ToLower(string(architecture[1])), nil
 }
 
 func parseMSVCLinkerBanner(output []byte) (string, error) {
@@ -1065,14 +1406,19 @@ func buildVsDevCmdArguments(path string, config MSVCConfig) ([]string, error) {
 		len(config.ToolsetVersion) > maxVSWhereVersionBytes {
 		return nil, fmt.Errorf("%w: invalid VsDevCmd invocation", ErrInvalidToolchain)
 	}
-	command := fmt.Sprintf(
-		`"call \"%s\" -no_logo -host_arch=%s -arch=%s -vcvars_ver=%s && set"`,
+	return []string{
+		"/d",
+		"/s",
+		"/c",
+		"call",
 		filepath.Clean(path),
-		config.HostArchitecture,
-		config.TargetArchitecture,
-		config.ToolsetVersion,
-	)
-	return []string{"/d", "/s", "/c", command}, nil
+		"-no_logo",
+		"-host_arch=" + config.HostArchitecture,
+		"-arch=" + config.TargetArchitecture,
+		"-vcvars_ver=" + config.ToolsetVersion,
+		"&&",
+		"set",
+	}, nil
 }
 
 func validVsDevCmdPath(path string) bool {

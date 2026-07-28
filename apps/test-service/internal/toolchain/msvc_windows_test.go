@@ -18,7 +18,7 @@ import (
 	"unit-test-ide.local/test-service/internal/workspace"
 )
 
-func TestMSVCBuildsSingleFixedVsDevCmdArgument(t *testing.T) {
+func TestMSVCBuildsTypedFixedVsDevCmdArguments(t *testing.T) {
 	config := MSVCConfig{
 		ToolsetVersion:     "14.40.33807",
 		HostArchitecture:   "x64",
@@ -33,15 +33,82 @@ func TestMSVCBuildsSingleFixedVsDevCmdArgument(t *testing.T) {
 		"/d",
 		"/s",
 		"/c",
-		`"call \"C:\Program Files\微软 Visual Studio\Common7\Tools\VsDevCmd.bat\" -no_logo -host_arch=x64 -arch=arm64 -vcvars_ver=14.40.33807 && set"`,
+		"call",
+		`C:\Program Files\微软 Visual Studio\Common7\Tools\VsDevCmd.bat`,
+		"-no_logo",
+		"-host_arch=x64",
+		"-arch=arm64",
+		"-vcvars_ver=14.40.33807",
+		"&&",
+		"set",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("buildVsDevCmdArguments() = %#v, want %#v", got, want)
 	}
-	got[3] = "changed"
+	got[4] = "changed"
 	next, err := buildVsDevCmdArguments(path, config)
-	if err != nil || next[3] != want[3] {
+	if err != nil || next[4] != want[4] {
 		t.Fatalf("buildVsDevCmdArguments() leaked caller mutation: %#v, %v", next, err)
+	}
+}
+
+func TestMSVCTypedVsDevCmdArgumentsRunThroughProductionRunner(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "Unicode 空 格 (x86)")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	batch := filepath.Join(root, "VsDevCmd.bat")
+	content := []byte(
+		"@echo off\r\n" +
+			"echo VSDEVCMD_TYPED_ARGS=%*\r\n" +
+			"set \"VSDEVCMD_TYPED_CAPTURE=ok\"\r\n" +
+			"set\r\n",
+	)
+	if err := os.WriteFile(batch, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	systemRoot := os.Getenv("SystemRoot")
+	if systemRoot == "" {
+		t.Skip("SystemRoot is unavailable")
+	}
+	cmd := filepath.Join(systemRoot, "System32", "cmd.exe")
+	for _, target := range []string{"x86", "x64", "arm64"} {
+		t.Run(target, func(t *testing.T) {
+			args, err := buildVsDevCmdArguments(batch, MSVCConfig{
+				ToolsetVersion:     "14.40.33807",
+				HostArchitecture:   "x64",
+				TargetArchitecture: target,
+			})
+			if err != nil {
+				t.Fatalf("buildVsDevCmdArguments() error = %v", err)
+			}
+			result, runErr := probe.NewRunner().Run(context.Background(), probe.Spec{
+				Executable: cmd,
+				Args:       args,
+				Env: []string{
+					"ComSpec=" + cmd,
+					"Path=" + filepath.Join(systemRoot, "System32") + ";" + systemRoot,
+					"SystemRoot=" + systemRoot,
+					"TEMP=" + t.TempDir(),
+					"TMP=" + t.TempDir(),
+				},
+				Timeout:   windowsProbeTimeout,
+				MaxOutput: maxWindowsProbeOutput,
+			})
+			if runErr != nil || result.ExitCode != 0 || len(result.Stderr) != 0 {
+				t.Fatalf(
+					"production Runner typed batch = exit %d, stderr %q, error %v",
+					result.ExitCode,
+					result.Stderr,
+					runErr,
+				)
+			}
+			output := string(result.Stdout)
+			if !strings.Contains(output, "VSDEVCMD_TYPED_CAPTURE=ok") ||
+				!strings.Contains(output, "-host_arch=x64 -arch="+target) {
+				t.Fatalf("production Runner output omitted typed arguments: %q", output)
+			}
+		})
 	}
 }
 
@@ -160,6 +227,89 @@ func TestMSVCEnvironmentRejectsMalformedConflictingAndOversizedInput(t *testing.
 	}
 }
 
+func TestMSVCCompilerBannerParsesLocalizedOEMFileVersionFallback(t *testing.T) {
+	output := append(
+		[]byte{0xd6, 0xd0, 0xce, 0xc4, ' ', 'x', '6', '4', '\r', '\n'},
+		[]byte(
+			`C:\Program Files (x86)\Microsoft Visual Studio\VC\Tools\MSVC\14.44\bin\Hostx64\x64\cl.exe:`,
+		)...,
+	)
+	output = append(output, 0xb0, 0xe6, 0xb1, 0xbe, ':', ' ')
+	output = append(output, []byte("19.44.35228.0\r\n")...)
+	version, architecture, err := parseMSVCCompilerBanner(output)
+	if err != nil || version != "19.44.35228.0" || architecture != "x64" {
+		t.Fatalf(
+			"parseMSVCCompilerBanner(localized OEM) = %q, %q, %v",
+			version,
+			architecture,
+			err,
+		)
+	}
+}
+
+func TestMSVCAdapterUsesBoundedLocalizedOEMProbePolicies(t *testing.T) {
+	localizedCompilerOutput := append(
+		[]byte{0xd6, 0xd0, 0xce, 0xc4, ' ', 'x', '6', '4', '\r', '\n'},
+		[]byte(
+			`C:\Program Files (x86)\Microsoft Visual Studio\VC\Tools\MSVC\14.40\bin\Hostx64\x64\cl.exe:`,
+		)...,
+	)
+	localizedCompilerOutput = append(
+		localizedCompilerOutput,
+		0xb0, 0xe6, 0xb1, 0xbe, ':', ' ',
+	)
+	localizedCompilerOutput = append(
+		localizedCompilerOutput,
+		[]byte("19.40.33811.0\r\n")...,
+	)
+	for _, test := range []struct {
+		name             string
+		compilerExitCode int
+		wantSuccess      bool
+	}{
+		{name: "documented localized exit", compilerExitCode: 2, wantSuccess: true},
+		{name: "unexpected exit", compilerExitCode: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newWindowsToolchainFixture(t)
+			runner := newWindowsFakeRunner(fixture)
+			runner.setOutput(fixture.cl, []string{"/Bv"}, probe.Result{
+				ExitCode: test.compilerExitCode,
+				Stderr:   localizedCompilerOutput,
+			})
+			runner.setOutput(fixture.link, []string{"/?"}, probe.Result{
+				ExitCode: 1100,
+				Stdout: []byte(
+					"Microsoft (R) Incremental Linker Version 14.40.33811.0\r\n",
+				),
+				Stderr: []byte{0xb0, 0xe6, 0xb1, 0xbe},
+			})
+			adapters, err := newWindowsAdapters(
+				runner,
+				fixture.manualMSVC(),
+				fixture.options(),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			instances, discoverErr := adapters[0].Discover(context.Background())
+			if test.wantSuccess {
+				if discoverErr != nil || len(instances) != 1 {
+					t.Fatalf("localized MSVC Discover() = %#v, %v", instances, discoverErr)
+				}
+				return
+			}
+			if len(instances) != 0 || discoverErr == nil {
+				t.Fatalf(
+					"MSVC Discover(unexpected exit) = %#v, %v, want rejection",
+					instances,
+					discoverErr,
+				)
+			}
+		})
+	}
+}
+
 func TestMSVCAdapterDiscoversValidatedManualToolchain(t *testing.T) {
 	fixture := newWindowsToolchainFixture(t)
 	runner := newWindowsFakeRunner(fixture)
@@ -218,6 +368,254 @@ func TestMSVCAdapterDiscoversValidatedManualToolchain(t *testing.T) {
 		again[0].Environment[0] == "MUTATED=1" ||
 		again[0].Generators[0] == "MUTATED" {
 		t.Fatalf("MSVC Discover() leaked caller mutation: %#v, %v", again, err)
+	}
+}
+
+func TestMSVCAcceptsProductionShapedEnvironmentAndFiltersUntrustedPaths(t *testing.T) {
+	fixture := newWindowsToolchainFixture(t)
+	runner := newWindowsFakeRunner(fixture)
+	runner.setOutput(
+		fixture.cmd,
+		fixture.vsDevCmdArgs("x64", "x64"),
+		successfulWindowsOutput(fixture.productionEnvironmentOutput("x64", "x64")),
+	)
+	adapters, err := newWindowsAdapters(runner, fixture.manualMSVC(), fixture.options())
+	if err != nil {
+		t.Fatalf("newWindowsAdapters() error = %v", err)
+	}
+	instances, discoverErr := adapters[0].Discover(context.Background())
+	if discoverErr != nil || len(instances) != 1 {
+		t.Fatalf("MSVC Discover(production environment) = %#v, %v", instances, discoverErr)
+	}
+	instance := instances[0]
+	if !reflect.DeepEqual(
+		instance.Generators,
+		[]string{"Ninja", "Visual Studio 17 2022"},
+	) {
+		t.Fatalf("production generators = %#v", instance.Generators)
+	}
+	values := windowsEnvironmentValues(instance.Environment)
+	for _, required := range []string{
+		filepath.Join(fixture.installation, "VC", "Auxiliary", "VS", "include"),
+		filepath.Join(fixture.sdk, "Include", fixture.sdkVersion, "winrt"),
+		filepath.Join(fixture.sdk, "Include", fixture.sdkVersion, "cppwinrt"),
+		filepath.Join(
+			fixture.netFXSDK,
+			"References",
+			"CommonConfiguration",
+			"Neutral",
+		),
+		filepath.Join(
+			fixture.root,
+			"Windows",
+			"Microsoft.NET",
+			"Framework64",
+			"v4.0.30319",
+		),
+	} {
+		if !windowsPathListContains(values, required) {
+			t.Fatalf("filtered environment omitted verified path %q: %#v", required, values)
+		}
+	}
+	if !windowsPathListContains(
+		map[string]string{"PATH": values["PATH"]},
+		filepath.Dir(fixture.ninja),
+	) {
+		t.Fatalf("verified Ninja root missing from final PATH: %q", values["PATH"])
+	}
+	if strings.Contains(
+		strings.ToLower(strings.Join(instance.Environment, "\n")),
+		strings.ToLower(filepath.Join(fixture.root, "untrusted inherited")),
+	) {
+		t.Fatalf("final environment leaked an untrusted path: %#v", instance.Environment)
+	}
+}
+
+func TestMSVCProductionShapedEnvironmentSupportsAllTargetArchitectures(t *testing.T) {
+	for _, test := range []struct {
+		target string
+		triple string
+	}{
+		{target: "x86", triple: "i686-pc-windows-msvc"},
+		{target: "x64", triple: "x86_64-pc-windows-msvc"},
+		{target: "arm64", triple: "aarch64-pc-windows-msvc"},
+	} {
+		t.Run(test.target, func(t *testing.T) {
+			fixture := newWindowsToolchainFixture(t)
+			binaryDirectory := filepath.Join(
+				fixture.toolset,
+				"bin",
+				"Hostx64",
+				test.target,
+			)
+			cl := filepath.Join(binaryDirectory, "cl.exe")
+			link := filepath.Join(binaryDirectory, "link.exe")
+			for _, directory := range []string{
+				filepath.Join(fixture.toolset, "lib", test.target),
+				filepath.Join(
+					fixture.sdk,
+					"Lib",
+					fixture.sdkVersion,
+					"ucrt",
+					test.target,
+				),
+				filepath.Join(
+					fixture.sdk,
+					"Lib",
+					fixture.sdkVersion,
+					"um",
+					test.target,
+				),
+				filepath.Join(fixture.sdk, "bin", fixture.sdkVersion, test.target),
+			} {
+				if err := os.MkdirAll(directory, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writeWindowsTool(t, cl)
+			writeWindowsTool(t, link)
+			runner := newWindowsFakeRunner(fixture)
+			runner.setOutput(
+				fixture.cmd,
+				fixture.vsDevCmdArgs("x64", test.target),
+				successfulWindowsOutput(
+					fixture.productionEnvironmentOutput("x64", test.target),
+				),
+			)
+			runner.setOutput(
+				cl,
+				[]string{"/Bv"},
+				successfulWindowsOutput(
+					"Microsoft (R) C/C++ Optimizing Compiler Version 19.40.33811 for "+
+						test.target+"\r\n",
+				),
+			)
+			runner.setOutput(
+				link,
+				[]string{"/?"},
+				successfulWindowsOutput(
+					"Microsoft (R) Incremental Linker Version 14.40.33811.0\r\n",
+				),
+			)
+			manual := []workspace.ToolchainConfig{{
+				ID:                 "manual-msvc-" + test.target,
+				Family:             string(FamilyMSVC),
+				InstallationID:     fixture.installationID,
+				ToolsetVersion:     fixture.toolsetVersion,
+				HostArchitecture:   "x64",
+				TargetArchitecture: test.target,
+			}}
+			adapters, err := newWindowsAdapters(runner, manual, fixture.options())
+			if err != nil {
+				t.Fatal(err)
+			}
+			instances, discoverErr := adapters[0].Discover(context.Background())
+			if discoverErr != nil || len(instances) != 1 {
+				t.Fatalf("MSVC Discover(%s) = %#v, %v", test.target, instances, discoverErr)
+			}
+			if instances[0].TargetArchitecture != test.target ||
+				instances[0].TargetTriple != test.triple {
+				t.Fatalf("MSVC %s instance = %#v", test.target, instances[0])
+			}
+		})
+	}
+}
+
+func TestMSVCFiltersUntrustedNETFXSDKDirectory(t *testing.T) {
+	fixture := newWindowsToolchainFixture(t)
+	runner := newWindowsFakeRunner(fixture)
+	untrusted := filepath.Join(fixture.root, "untrusted inherited")
+	output := strings.Replace(
+		fixture.productionEnvironmentOutput("x64", "x64"),
+		"NETFXSDKDir="+fixture.netFXSDK,
+		"NETFXSDKDir="+untrusted,
+		1,
+	)
+	runner.setOutput(
+		fixture.cmd,
+		fixture.vsDevCmdArgs("x64", "x64"),
+		successfulWindowsOutput(output),
+	)
+	adapters, err := newWindowsAdapters(runner, fixture.manualMSVC(), fixture.options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	instances, discoverErr := adapters[0].Discover(context.Background())
+	if discoverErr != nil || len(instances) != 1 {
+		t.Fatalf("MSVC Discover(untrusted NETFXSDKDir) = %#v, %v", instances, discoverErr)
+	}
+	if strings.Contains(
+		strings.ToLower(strings.Join(instances[0].Environment, "\n")),
+		strings.ToLower(untrusted),
+	) {
+		t.Fatalf("final environment leaked untrusted NETFXSDKDir: %#v", instances[0].Environment)
+	}
+}
+
+func TestMSVCProductionDiscoveryFindsInstalledVisualStudio(t *testing.T) {
+	options, err := defaultWindowsDiscoveryOptions()
+	if err != nil {
+		t.Skipf("fixed Windows discovery environment is unavailable: %v", err)
+	}
+	if !options.VSInstallationMetadataExpected {
+		t.Skip("fixed Visual Studio installation metadata is not present")
+	}
+	adapters, err := newWindowsAdapters(probe.NewRunner(), nil, options)
+	if err != nil {
+		t.Fatalf("newWindowsAdapters(production) error = %v", err)
+	}
+	msvc, ok := adapters[0].(*msvcAdapter)
+	if !ok {
+		t.Fatalf("production MSVC adapter = %T", adapters[0])
+	}
+	installations, err := discoverVisualStudioInstallations(
+		context.Background(),
+		probe.NewRunner(),
+		msvc.options.config,
+	)
+	if err != nil || len(installations) == 0 {
+		t.Fatalf("production vswhere stage = %#v, %v", installations, err)
+	}
+	toolsetVersion, err := latestMSVCToolset(
+		context.Background(),
+		installations[0].Path,
+	)
+	if err != nil {
+		t.Fatalf("production toolset stage error = %v", err)
+	}
+	captured, err := captureMSVCContext(
+		context.Background(),
+		msvc.options,
+		installations[0],
+		workspace.ToolchainConfig{
+			Family:             string(FamilyMSVC),
+			InstallationID:     installations[0].ID,
+			ToolsetVersion:     toolsetVersion,
+			HostArchitecture:   msvc.options.config.HostArchitecture,
+			TargetArchitecture: msvc.options.config.HostArchitecture,
+		},
+	)
+	if err != nil {
+		t.Fatalf("production VsDevCmd capture stage error = %v", err)
+	}
+	if _, err := msvc.probeContext(context.Background(), captured); err != nil {
+		t.Fatalf("production compiler/generator stage error = %v", err)
+	}
+	instances, discoverErr := adapters[0].Discover(context.Background())
+	if discoverErr != nil || len(instances) == 0 {
+		t.Fatalf("production MSVC Discover() = %#v, %v", instances, discoverErr)
+	}
+	foundVisualStudioGenerator := false
+	for _, instance := range instances {
+		for _, generator := range instance.Generators {
+			if generator == "Visual Studio 17 2022" ||
+				generator == "Visual Studio 18 2026" {
+				foundVisualStudioGenerator = true
+			}
+		}
+	}
+	if !foundVisualStudioGenerator {
+		t.Fatalf("production MSVC instances lack Visual Studio generator: %#v", instances)
 	}
 }
 
@@ -546,6 +944,174 @@ func TestMSVCAutomaticIDIncludesSelectedWindowsSDKVersion(t *testing.T) {
 	}
 }
 
+func TestMSVCAutomaticIDTracksAcceptedEnvironmentDirectoryIdentity(t *testing.T) {
+	fixture := newWindowsToolchainFixture(t)
+	runner := newWindowsFakeRunner(fixture)
+	runner.setOutput(
+		fixture.cmd,
+		fixture.vsDevCmdArgs("x64", "x64"),
+		successfulWindowsOutput(fixture.productionEnvironmentOutput("x64", "x64")),
+	)
+	firstAdapters, err := newWindowsAdapters(runner, nil, fixture.options())
+	if err != nil {
+		t.Fatalf("newWindowsAdapters(first) error = %v", err)
+	}
+	first, err := firstAdapters[0].Discover(context.Background())
+	if err != nil || len(first) != 1 {
+		t.Fatalf("first Discover() = %#v, %v", first, err)
+	}
+	accepted := filepath.Join(fixture.toolset, "lib", "x86", "store", "references")
+	if err := os.RemoveAll(accepted); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(accepted, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	secondAdapters, err := newWindowsAdapters(runner, nil, fixture.options())
+	if err != nil {
+		t.Fatalf("newWindowsAdapters(second) error = %v", err)
+	}
+	second, err := secondAdapters[0].Discover(context.Background())
+	if err != nil || len(second) != 1 {
+		t.Fatalf("second Discover() = %#v, %v", second, err)
+	}
+	if first[0].ID == second[0].ID {
+		t.Fatalf("automatic ID did not track accepted LIBPATH identity: %q", first[0].ID)
+	}
+}
+
+func TestMSVCAutomaticIDTracksOptionalEnvironmentAndGeneratorCapability(t *testing.T) {
+	t.Run("optional SDK include", func(t *testing.T) {
+		fixture := newWindowsToolchainFixture(t)
+		firstRunner := newWindowsFakeRunner(fixture)
+		firstOutput := fixture.productionEnvironmentOutput("x64", "x64")
+		firstRunner.setOutput(
+			fixture.cmd,
+			fixture.vsDevCmdArgs("x64", "x64"),
+			successfulWindowsOutput(firstOutput),
+		)
+		firstAdapters, err := newWindowsAdapters(firstRunner, nil, fixture.options())
+		if err != nil {
+			t.Fatal(err)
+		}
+		first, err := firstAdapters[0].Discover(context.Background())
+		if err != nil || len(first) != 1 {
+			t.Fatalf("first Discover() = %#v, %v", first, err)
+		}
+
+		secondRunner := newWindowsFakeRunner(fixture)
+		winrt := ";" + filepath.Join(
+			fixture.sdk,
+			"Include",
+			fixture.sdkVersion,
+			"winrt",
+		)
+		secondOutput := strings.Replace(firstOutput, winrt, "", 1)
+		secondRunner.setOutput(
+			fixture.cmd,
+			fixture.vsDevCmdArgs("x64", "x64"),
+			successfulWindowsOutput(secondOutput),
+		)
+		secondAdapters, err := newWindowsAdapters(secondRunner, nil, fixture.options())
+		if err != nil {
+			t.Fatal(err)
+		}
+		second, err := secondAdapters[0].Discover(context.Background())
+		if err != nil || len(second) != 1 {
+			t.Fatalf("second Discover() = %#v, %v", second, err)
+		}
+		if first[0].ID == second[0].ID {
+			t.Fatalf("automatic ID ignored optional include removal: %q", first[0].ID)
+		}
+	})
+
+	t.Run("Ninja capability", func(t *testing.T) {
+		fixture := newWindowsToolchainFixture(t)
+		firstRunner := newWindowsFakeRunner(fixture)
+		firstRunner.setOutput(
+			fixture.cmd,
+			fixture.vsDevCmdArgs("x64", "x64"),
+			successfulWindowsOutput(fixture.productionEnvironmentOutput("x64", "x64")),
+		)
+		firstAdapters, err := newWindowsAdapters(firstRunner, nil, fixture.options())
+		if err != nil {
+			t.Fatal(err)
+		}
+		first, err := firstAdapters[0].Discover(context.Background())
+		if err != nil || len(first) != 1 {
+			t.Fatalf("first Discover() = %#v, %v", first, err)
+		}
+		if err := os.Remove(fixture.ninja); err != nil {
+			t.Fatal(err)
+		}
+		secondRunner := newWindowsFakeRunner(fixture)
+		secondRunner.setOutput(
+			fixture.cmd,
+			fixture.vsDevCmdArgs("x64", "x64"),
+			successfulWindowsOutput(fixture.productionEnvironmentOutput("x64", "x64")),
+		)
+		secondAdapters, err := newWindowsAdapters(secondRunner, nil, fixture.options())
+		if err != nil {
+			t.Fatal(err)
+		}
+		second, err := secondAdapters[0].Discover(context.Background())
+		if err != nil || len(second) != 1 {
+			t.Fatalf("second Discover() = %#v, %v", second, err)
+		}
+		if !reflect.DeepEqual(second[0].Generators, []string{"Visual Studio 17 2022"}) {
+			t.Fatalf("generators without Ninja = %#v", second[0].Generators)
+		}
+		if first[0].ID == second[0].ID {
+			t.Fatalf("automatic ID ignored Ninja capability removal: %q", first[0].ID)
+		}
+	})
+}
+
+func TestMSVCAutomaticIDNormalizesEquivalentEnvironmentPathVariants(t *testing.T) {
+	fixture := newWindowsToolchainFixture(t)
+	firstOutput := fixture.productionEnvironmentOutput("x64", "x64")
+	firstRunner := newWindowsFakeRunner(fixture)
+	firstRunner.setOutput(
+		fixture.cmd,
+		fixture.vsDevCmdArgs("x64", "x64"),
+		successfulWindowsOutput(firstOutput),
+	)
+	firstAdapters, err := newWindowsAdapters(firstRunner, nil, fixture.options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := firstAdapters[0].Discover(context.Background())
+	if err != nil || len(first) != 1 {
+		t.Fatalf("first Discover() = %#v, %v", first, err)
+	}
+
+	auxiliary := filepath.Join(fixture.installation, "VC", "Auxiliary", "VS", "include")
+	equivalent := strings.Replace(
+		firstOutput,
+		`"`+strings.ToUpper(auxiliary)+`"`,
+		auxiliary,
+		1,
+	)
+	equivalent = strings.ReplaceAll(equivalent, ";\r\n", "\r\n")
+	secondRunner := newWindowsFakeRunner(fixture)
+	secondRunner.setOutput(
+		fixture.cmd,
+		fixture.vsDevCmdArgs("x64", "x64"),
+		successfulWindowsOutput(equivalent),
+	)
+	secondAdapters, err := newWindowsAdapters(secondRunner, nil, fixture.options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := secondAdapters[0].Discover(context.Background())
+	if err != nil || len(second) != 1 {
+		t.Fatalf("second Discover() = %#v, %v", second, err)
+	}
+	if first[0].ID != second[0].ID {
+		t.Fatalf("equivalent path variants changed ID: %q != %q", first[0].ID, second[0].ID)
+	}
+}
+
 func TestWindowsAdaptersRejectProbeTimeExecutableMutation(t *testing.T) {
 	tests := map[string]func(*windowsToolchainFixture, *windowsFakeRunner) string{
 		"vswhere": func(fixture *windowsToolchainFixture, runner *windowsFakeRunner) string {
@@ -581,6 +1147,34 @@ func TestWindowsAdaptersRejectProbeTimeExecutableMutation(t *testing.T) {
 				t.Fatalf("MSVC Discover(mutated executable) = %#v, %v", instances, discoverErr)
 			}
 		})
+	}
+}
+
+func TestWindowsDiscoveryRejectsFixedBaseDirectoryReplacement(t *testing.T) {
+	fixture := newWindowsToolchainFixture(t)
+	runner := newWindowsFakeRunner(fixture)
+	adapters, err := newWindowsAdapters(runner, fixture.manualMSVC(), fixture.options())
+	if err != nil {
+		t.Fatalf("newWindowsAdapters() error = %v", err)
+	}
+	outside := filepath.Join(fixture.root, "outside-program-data")
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(fixture.programData); err != nil {
+		t.Fatal(err)
+	}
+	createWindowsToolchainJunction(t, fixture.programData, outside)
+	instances, discoverErr := adapters[0].Discover(context.Background())
+	if len(instances) != 0 || discoverErr == nil {
+		t.Fatalf(
+			"MSVC Discover(replaced ProgramData) = %#v, %v, want rejection",
+			instances,
+			discoverErr,
+		)
+	}
+	if runner.findCall(fixture.vswhere, vswhereArguments()) != nil {
+		t.Fatal("MSVC discovery probed vswhere after fixed base root replacement")
 	}
 }
 
@@ -862,6 +1456,38 @@ func TestMSVCRejectsSDKDirectoryReplacementAfterEnvironmentValidation(t *testing
 	}
 }
 
+func TestMSVCRejectsAcceptedLIBPATHReplacementAfterEnvironmentValidation(t *testing.T) {
+	fixture := newWindowsToolchainFixture(t)
+	runner := newWindowsFakeRunner(fixture)
+	runner.setOutput(
+		fixture.cmd,
+		fixture.vsDevCmdArgs("x64", "x64"),
+		successfulWindowsOutput(fixture.productionEnvironmentOutput("x64", "x64")),
+	)
+	replaced := filepath.Join(fixture.toolset, "lib", "x86", "store", "references")
+	options := fixture.options()
+	options.afterEnvironmentValidation = func() {
+		if err := os.RemoveAll(replaced); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(replaced, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	adapters, err := newWindowsAdapters(runner, fixture.manualMSVC(), options)
+	if err != nil {
+		t.Fatalf("newWindowsAdapters() error = %v", err)
+	}
+	instances, discoverErr := adapters[0].Discover(context.Background())
+	if len(instances) != 0 || discoverErr == nil {
+		t.Fatalf(
+			"MSVC Discover(replaced LIBPATH directory) = %#v, %v, want rejection",
+			instances,
+			discoverErr,
+		)
+	}
+}
+
 type windowsToolchainFixture struct {
 	root            string
 	vswhere         string
@@ -878,12 +1504,15 @@ type windowsToolchainFixture struct {
 	msbuild         string
 	sdk             string
 	sdkVersion      string
+	netFXSDK        string
 	llvmRoot        string
 	clang           string
 	lld             string
 	llvmProfdata    string
 	llvmCov         string
 	baseEnvironment []string
+	programData     string
+	vsMetadata      string
 }
 
 func newWindowsToolchainFixture(t *testing.T) *windowsToolchainFixture {
@@ -900,7 +1529,9 @@ func newWindowsToolchainFixture(t *testing.T) *windowsToolchainFixture {
 		toolsetVersion:  "14.40.33807",
 		sdk:             filepath.Join(root, "Windows Kits", "10"),
 		sdkVersion:      "10.0.22621.0",
+		netFXSDK:        filepath.Join(root, "Windows Kits", "NETFXSDK", "4.8"),
 		llvmRoot:        filepath.Join(root, "LLVM", "bin"),
+		programData:     filepath.Join(root, "ProgramData"),
 	}
 	fixture.vsDevCmd = filepath.Join(fixture.installation, "Common7", "Tools", "VsDevCmd.bat")
 	fixture.toolset = filepath.Join(
@@ -913,22 +1544,54 @@ func newWindowsToolchainFixture(t *testing.T) *windowsToolchainFixture {
 	fixture.lld = filepath.Join(fixture.llvmRoot, "lld-link.exe")
 	fixture.llvmProfdata = filepath.Join(fixture.llvmRoot, "llvm-profdata.exe")
 	fixture.llvmCov = filepath.Join(fixture.llvmRoot, "llvm-cov.exe")
+	fixture.vsMetadata = filepath.Join(
+		fixture.programData,
+		"Microsoft",
+		"VisualStudio",
+		"Packages",
+		"_Instances",
+	)
 	fixture.baseEnvironment = []string{
 		"ComSpec=" + fixture.cmd,
+		"Path=" + filepath.Dir(fixture.cmd) + ";" + filepath.Join(root, "Windows"),
+		"ProgramData=" + fixture.programData,
 		"SystemRoot=" + filepath.Join(root, "Windows"),
 		"TEMP=" + filepath.Join(root, "Temp"),
 		"TMP=" + filepath.Join(root, "Temp"),
 	}
 	for _, directory := range []string{
 		fixture.sdk,
+		fixture.programData,
+		fixture.vsMetadata,
 		filepath.Join(root, "Temp"),
 		filepath.Join(fixture.toolset, "include"),
 		filepath.Join(fixture.toolset, "lib", "x64"),
 		filepath.Join(fixture.sdk, "Include", fixture.sdkVersion, "ucrt"),
 		filepath.Join(fixture.sdk, "Include", fixture.sdkVersion, "um"),
 		filepath.Join(fixture.sdk, "Include", fixture.sdkVersion, "shared"),
+		filepath.Join(fixture.sdk, "Include", fixture.sdkVersion, "winrt"),
+		filepath.Join(fixture.sdk, "Include", fixture.sdkVersion, "cppwinrt"),
 		filepath.Join(fixture.sdk, "Lib", fixture.sdkVersion, "ucrt", "x64"),
 		filepath.Join(fixture.sdk, "Lib", fixture.sdkVersion, "um", "x64"),
+		filepath.Join(fixture.installation, "VC", "Auxiliary", "VS", "include"),
+		filepath.Join(fixture.toolset, "lib", "x86", "store", "references"),
+		filepath.Join(fixture.sdk, "UnionMetadata", fixture.sdkVersion),
+		filepath.Join(fixture.sdk, "References", fixture.sdkVersion),
+		filepath.Join(fixture.sdk, "bin", fixture.sdkVersion, "x64"),
+		filepath.Join(
+			fixture.netFXSDK,
+			"References",
+			"CommonConfiguration",
+			"Neutral",
+		),
+		filepath.Join(
+			root,
+			"Windows",
+			"Microsoft.NET",
+			"Framework64",
+			"v4.0.30319",
+		),
+		filepath.Join(root, "untrusted inherited"),
 	} {
 		if err := os.MkdirAll(directory, 0o755); err != nil {
 			t.Fatal(err)
@@ -946,12 +1609,13 @@ func newWindowsToolchainFixture(t *testing.T) *windowsToolchainFixture {
 
 func (fixture *windowsToolchainFixture) options() windowsDiscoveryOptions {
 	return windowsDiscoveryOptions{
-		VSWherePath:      fixture.vswhere,
-		CmdPath:          fixture.cmd,
-		NinjaPath:        fixture.ninja,
-		LLVMRoot:         fixture.llvmRoot,
-		BaseEnvironment:  append([]string(nil), fixture.baseEnvironment...),
-		HostArchitecture: "x64",
+		VSWherePath:                fixture.vswhere,
+		CmdPath:                    fixture.cmd,
+		NinjaPath:                  fixture.ninja,
+		LLVMRoot:                   fixture.llvmRoot,
+		BaseEnvironment:            append([]string(nil), fixture.baseEnvironment...),
+		VSInstallationMetadataPath: fixture.vsMetadata,
+		HostArchitecture:           "x64",
 	}
 }
 
@@ -979,12 +1643,13 @@ func (fixture *windowsToolchainFixture) vsDevCmdArgs(host, target string) []stri
 }
 
 func (fixture *windowsToolchainFixture) environmentOutput(host, target string) string {
+	binaryDirectory := filepath.Join(fixture.toolset, "bin", "Host"+host, target)
 	toolsetInclude := filepath.Join(fixture.toolset, "include")
 	toolsetLibrary := filepath.Join(fixture.toolset, "lib", target)
 	sdkIncludeRoot := filepath.Join(fixture.sdk, "Include", fixture.sdkVersion)
 	sdkLibraryRoot := filepath.Join(fixture.sdk, "Lib", fixture.sdkVersion)
 	return strings.Join([]string{
-		"Path=" + filepath.Dir(fixture.cl) + ";" + filepath.Dir(fixture.ninja),
+		"Path=" + binaryDirectory + ";" + filepath.Dir(fixture.ninja),
 		"INCLUDE=" + strings.Join([]string{
 			toolsetInclude,
 			filepath.Join(sdkIncludeRoot, "ucrt"),
@@ -1006,6 +1671,88 @@ func (fixture *windowsToolchainFixture) environmentOutput(host, target string) s
 		"UNIT_TEST_IDE_TOKEN=ide-secret",
 		"GITHUB_TOKEN=github-secret",
 	}, "\r\n") + "\r\n"
+}
+
+func (fixture *windowsToolchainFixture) productionEnvironmentOutput(host, target string) string {
+	binaryDirectory := filepath.Join(fixture.toolset, "bin", "Host"+host, target)
+	toolsetLibrary := filepath.Join(fixture.toolset, "lib", target)
+	sdkIncludeRoot := filepath.Join(fixture.sdk, "Include", fixture.sdkVersion)
+	sdkLibraryRoot := filepath.Join(fixture.sdk, "Lib", fixture.sdkVersion)
+	untrusted := filepath.Join(fixture.root, "untrusted inherited")
+	include := []string{
+		filepath.Join(fixture.toolset, "include"),
+		`"` + strings.ToUpper(
+			filepath.Join(fixture.installation, "VC", "Auxiliary", "VS", "include"),
+		) + `"`,
+		filepath.Join(sdkIncludeRoot, "ucrt"),
+		filepath.Join(sdkIncludeRoot, "um"),
+		filepath.Join(sdkIncludeRoot, "shared"),
+		filepath.Join(sdkIncludeRoot, "winrt"),
+		filepath.Join(sdkIncludeRoot, "cppwinrt"),
+		untrusted,
+		"",
+	}
+	libraries := []string{
+		toolsetLibrary,
+		filepath.Join(sdkLibraryRoot, "ucrt", target),
+		filepath.Join(sdkLibraryRoot, "um", target),
+		untrusted,
+		"",
+	}
+	libPath := []string{
+		toolsetLibrary,
+		filepath.Join(fixture.toolset, "lib", "x86", "store", "references"),
+		filepath.Join(fixture.sdk, "UnionMetadata", fixture.sdkVersion),
+		filepath.Join(fixture.sdk, "References", fixture.sdkVersion),
+		filepath.Join(
+			fixture.netFXSDK,
+			"References",
+			"CommonConfiguration",
+			"Neutral",
+		),
+		filepath.Join(
+			fixture.root,
+			"Windows",
+			"Microsoft.NET",
+			"Framework64",
+			"v4.0.30319",
+		),
+		untrusted,
+		"",
+	}
+	path := []string{
+		binaryDirectory,
+		filepath.Join(fixture.installation, "Common7", "Tools"),
+		filepath.Join(fixture.sdk, "bin", fixture.sdkVersion, target),
+		filepath.Join(fixture.root, "Windows", "System32"),
+		filepath.Join(fixture.root, "Windows"),
+		untrusted,
+		"",
+	}
+	return strings.Join([]string{
+		"Path=" + strings.Join(path, ";"),
+		"INCLUDE=" + strings.Join(include, ";"),
+		"LIB=" + strings.Join(libraries, ";"),
+		"LIBPATH=" + strings.Join(libPath, ";"),
+		"VCToolsInstallDir=" + fixture.toolset + string(filepath.Separator),
+		"VCToolsVersion=" + fixture.toolsetVersion,
+		"WindowsSdkDir=" + fixture.sdk + string(filepath.Separator),
+		"WindowsSDKVersion=" + fixture.sdkVersion + string(filepath.Separator),
+		"NETFXSDKDir=" + fixture.netFXSDK,
+		"VSCMD_ARG_HOST_ARCH=" + host,
+		"VSCMD_ARG_TGT_ARCH=" + target,
+	}, "\r\n") + "\r\n"
+}
+
+func windowsPathListContains(values map[string]string, want string) bool {
+	for _, key := range []string{"INCLUDE", "LIB", "LIBPATH", "PATH"} {
+		for _, path := range filepath.SplitList(values[key]) {
+			if identityPath(strings.TrimSpace(path)) == identityPath(want) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func writeWindowsTool(t *testing.T, path string) {

@@ -67,20 +67,28 @@ type visualStudioInstallation struct {
 }
 
 type windowsDiscoveryOptions struct {
-	VSWherePath                string
-	CmdPath                    string
-	NinjaPath                  string
-	LLVMRoot                   string
-	LLVMRootIdentity           string
-	BaseEnvironment            []string
-	HostArchitecture           string
-	afterEnvironmentValidation func()
+	VSWherePath                    string
+	CmdPath                        string
+	NinjaPath                      string
+	LLVMRoot                       string
+	LLVMRootIdentity               string
+	BaseEnvironment                []string
+	baseDirectories                []windowsDirectoryReference
+	VSInstallationMetadataPath     string
+	VSInstallationMetadataExpected bool
+	HostArchitecture               string
+	afterEnvironmentValidation     func()
 }
 
 type windowsAdapterOptions struct {
 	runner probe.Runner
 	config windowsDiscoveryOptions
 	manual []workspace.ToolchainConfig
+}
+
+type windowsProbeOutputPolicy struct {
+	acceptedExitCodes []int
+	allowNonUTF8      bool
 }
 
 type windowsFailedAdapter struct{}
@@ -144,7 +152,25 @@ func newWindowsAdapters(
 			config.LLVMRootIdentity = identity
 		}
 	}
-	config.BaseEnvironment = baseEnvironment
+	config.BaseEnvironment, config.baseDirectories, err =
+		canonicalizeWindowsBaseEnvironment(config, baseEnvironment)
+	if err != nil {
+		return nil, fmt.Errorf("%w: invalid Windows base directories", ErrInvalidToolchain)
+	}
+	if config.VSInstallationMetadataExpected {
+		programData := windowsEnvironmentValues(config.BaseEnvironment)["PROGRAMDATA"]
+		metadata, identity, metadataErr := canonicalWindowsDirectoryIdentity(
+			config.VSInstallationMetadataPath,
+		)
+		if metadataErr != nil || !pathWithinWindowsRoot(programData, metadata) {
+			return nil, fmt.Errorf("%w: invalid Visual Studio metadata root", ErrInvalidToolchain)
+		}
+		config.VSInstallationMetadataPath = metadata
+		config.baseDirectories = append(
+			config.baseDirectories,
+			windowsDirectoryReference{path: metadata, identity: identity},
+		)
+	}
 
 	ownedManual := append([]workspace.ToolchainConfig(nil), manual...)
 	sort.SliceStable(ownedManual, func(left, right int) bool {
@@ -191,15 +217,32 @@ func newWindowsAdapters(
 func defaultWindowsDiscoveryOptions() (windowsDiscoveryOptions, error) {
 	programFilesX86 := os.Getenv("ProgramFiles(x86)")
 	programFiles := os.Getenv("ProgramFiles")
+	programData := os.Getenv("ProgramData")
 	systemRoot := os.Getenv("SystemRoot")
 	temporary := os.Getenv("TEMP")
 	if temporary == "" {
 		temporary = os.Getenv("TMP")
 	}
-	if programFilesX86 == "" || programFiles == "" || systemRoot == "" || temporary == "" {
+	if programFilesX86 == "" || programFiles == "" || programData == "" ||
+		systemRoot == "" || temporary == "" {
 		return windowsDiscoveryOptions{}, fmt.Errorf("%w: fixed Windows roots are unavailable", ErrInvalidToolchain)
 	}
 	cmd := filepath.Join(systemRoot, "System32", "cmd.exe")
+	system32 := filepath.Join(systemRoot, "System32")
+	metadataPath := filepath.Join(
+		programData,
+		"Microsoft",
+		"VisualStudio",
+		"Packages",
+		"_Instances",
+	)
+	metadataExpected, err := fixedVisualStudioMetadataPresent(metadataPath)
+	if err != nil {
+		return windowsDiscoveryOptions{}, fmt.Errorf(
+			"%w: inspect fixed Visual Studio metadata",
+			ErrInvalidToolchain,
+		)
+	}
 	return windowsDiscoveryOptions{
 		VSWherePath: filepath.Join(
 			programFilesX86,
@@ -212,12 +255,40 @@ func defaultWindowsDiscoveryOptions() (windowsDiscoveryOptions, error) {
 		LLVMRoot:  filepath.Join(programFiles, "LLVM", "bin"),
 		BaseEnvironment: []string{
 			"ComSpec=" + cmd,
+			"Path=" + system32 + ";" + systemRoot,
+			"ProgramData=" + programData,
 			"SystemRoot=" + systemRoot,
 			"TEMP=" + temporary,
 			"TMP=" + temporary,
 		},
-		HostArchitecture: windowsNativeArchitecture(),
+		VSInstallationMetadataPath:     metadataPath,
+		VSInstallationMetadataExpected: metadataExpected,
+		HostArchitecture:               windowsNativeArchitecture(),
 	}, nil
+}
+
+func fixedVisualStudioMetadataPresent(path string) (bool, error) {
+	file, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer file.Close()
+	entries, err := file.ReadDir(maxVSWhereInstallations + 1)
+	if err != nil {
+		return false, err
+	}
+	if len(entries) > maxVSWhereInstallations {
+		return false, errors.New("Visual Studio metadata count exceeds limit")
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func windowsNativeArchitecture() string {
@@ -244,6 +315,9 @@ func discoverVisualStudioInstallations(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if err := config.verifyBaseDirectories(ctx); err != nil {
+		return nil, invalidProbe("TOOLCHAIN_PROBE_FAILED", "fixed Windows environment changed")
+	}
 	vswhere, err := openWindowsToolSnapshot(ctx, config.VSWherePath)
 	if err != nil {
 		if isContextError(err) {
@@ -260,7 +334,7 @@ func discoverVisualStudioInstallations(
 		config.BaseEnvironment,
 		maxVSWhereOutputBytes,
 		false,
-		func() error { return nil },
+		func() error { return config.verifyBaseDirectories(ctx) },
 	)
 	if err != nil {
 		return nil, err
@@ -268,6 +342,12 @@ func discoverVisualStudioInstallations(
 	parsed, err := parseVSWhereOutput(output)
 	if err != nil {
 		return nil, invalidProbe("TOOLCHAIN_PROBE_FAILED", "vswhere output is invalid")
+	}
+	if len(parsed) == 0 && config.VSInstallationMetadataExpected {
+		return nil, invalidProbe(
+			"TOOLCHAIN_PROBE_FAILED",
+			"fixed Visual Studio metadata was not discovered",
+		)
 	}
 	result := make([]visualStudioInstallation, 0, len(parsed))
 	for _, candidate := range parsed {
@@ -291,6 +371,100 @@ func discoverVisualStudioInstallations(
 	return result, nil
 }
 
+func canonicalizeWindowsBaseEnvironment(
+	config windowsDiscoveryOptions,
+	environment []string,
+) ([]string, []windowsDirectoryReference, error) {
+	values := windowsEnvironmentValues(environment)
+	if len(values) != 6 {
+		return nil, nil, errors.New("fixed environment shape is invalid")
+	}
+	cmd, err := canonicalWindowsFile(values["COMSPEC"])
+	if err != nil {
+		return nil, nil, err
+	}
+	configuredCmd, err := canonicalWindowsFile(config.CmdPath)
+	if err != nil || identityPath(cmd) != identityPath(configuredCmd) {
+		return nil, nil, errors.New("fixed command shell is invalid")
+	}
+	type fixedDirectory struct {
+		key  string
+		path string
+	}
+	directories := []fixedDirectory{
+		{key: "PROGRAMDATA", path: values["PROGRAMDATA"]},
+		{key: "SYSTEMROOT", path: values["SYSTEMROOT"]},
+		{key: "TEMP", path: values["TEMP"]},
+		{key: "TMP", path: values["TMP"]},
+	}
+	references := make([]windowsDirectoryReference, 0, len(directories)+2)
+	canonicalValues := make(map[string]string, len(values))
+	canonicalValues["COMSPEC"] = cmd
+	for _, directory := range directories {
+		canonical, identity, canonicalErr := canonicalWindowsDirectoryIdentity(directory.path)
+		if canonicalErr != nil {
+			return nil, nil, canonicalErr
+		}
+		canonicalValues[directory.key] = canonical
+		references = append(references, windowsDirectoryReference{
+			path: canonical, identity: identity,
+		})
+	}
+	systemRoot := canonicalValues["SYSTEMROOT"]
+	system32, system32Identity, err := canonicalWindowsDirectoryIdentity(
+		filepath.Join(systemRoot, "System32"),
+	)
+	if err != nil || !pathWithinWindowsRoot(systemRoot, system32) {
+		return nil, nil, errors.New("fixed System32 directory is invalid")
+	}
+	pathEntries := filepath.SplitList(values["PATH"])
+	if len(pathEntries) != 2 {
+		return nil, nil, errors.New("fixed PATH shape is invalid")
+	}
+	seen := make(map[string]struct{}, len(pathEntries))
+	for _, path := range pathEntries {
+		canonical, _, pathErr := canonicalWindowsDirectoryIdentity(strings.TrimSpace(path))
+		if pathErr != nil {
+			return nil, nil, pathErr
+		}
+		seen[identityPath(canonical)] = struct{}{}
+	}
+	if _, ok := seen[identityPath(system32)]; !ok {
+		return nil, nil, errors.New("fixed PATH omits System32")
+	}
+	if _, ok := seen[identityPath(systemRoot)]; !ok {
+		return nil, nil, errors.New("fixed PATH omits SystemRoot")
+	}
+	references = append(references, windowsDirectoryReference{
+		path: system32, identity: system32Identity,
+	})
+	canonicalValues["PATH"] = system32 + ";" + systemRoot
+	result := []string{
+		"ComSpec=" + canonicalValues["COMSPEC"],
+		"Path=" + canonicalValues["PATH"],
+		"ProgramData=" + canonicalValues["PROGRAMDATA"],
+		"SystemRoot=" + canonicalValues["SYSTEMROOT"],
+		"TEMP=" + canonicalValues["TEMP"],
+		"TMP=" + canonicalValues["TMP"],
+	}
+	return result, references, nil
+}
+
+func (config windowsDiscoveryOptions) verifyBaseDirectories(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	for _, reference := range config.baseDirectories {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := verifyWindowsDirectory(reference.path, reference.identity); err != nil {
+			return err
+		}
+	}
+	return ctx.Err()
+}
+
 func runWindowsProbe(
 	ctx context.Context,
 	runner probe.Runner,
@@ -301,8 +475,35 @@ func runWindowsProbe(
 	allowStderr bool,
 	verify func() error,
 ) ([]byte, error) {
+	return runWindowsProbeWithPolicy(
+		ctx,
+		runner,
+		executable,
+		args,
+		environment,
+		maximum,
+		allowStderr,
+		verify,
+		windowsProbeOutputPolicy{acceptedExitCodes: []int{0}},
+	)
+}
+
+func runWindowsProbeWithPolicy(
+	ctx context.Context,
+	runner probe.Runner,
+	executable *executableSnapshot,
+	args []string,
+	environment []string,
+	maximum int,
+	allowStderr bool,
+	verify func() error,
+	policy windowsProbeOutputPolicy,
+) ([]byte, error) {
 	if ctx == nil || runner == nil || executable == nil || maximum <= 0 {
 		return nil, invalidProbe("TOOLCHAIN_PROBE_FAILED", "Windows probe is not initialized")
+	}
+	if len(policy.acceptedExitCodes) == 0 || len(policy.acceptedExitCodes) > 8 {
+		return nil, invalidProbe("TOOLCHAIN_PROBE_FAILED", "Windows probe policy is invalid")
 	}
 	verifyAll := func() error {
 		if err := executable.Verify(ctx); err != nil {
@@ -338,9 +539,17 @@ func runWindowsProbe(
 		}
 		return nil, invalidProbe("TOOLCHAIN_PROBE_FAILED", "Windows probe runner failed")
 	}
-	if result.ExitCode != 0 ||
+	exitAccepted := false
+	for _, code := range policy.acceptedExitCodes {
+		if result.ExitCode == code {
+			exitAccepted = true
+			break
+		}
+	}
+	if !exitAccepted ||
 		len(result.Stdout)+len(result.Stderr) > maximum ||
-		!utf8.Valid(result.Stdout) || !utf8.Valid(result.Stderr) ||
+		!policy.allowNonUTF8 &&
+			(!utf8.Valid(result.Stdout) || !utf8.Valid(result.Stderr)) ||
 		bytesContainNUL(result.Stdout) || bytesContainNUL(result.Stderr) {
 		return nil, invalidProbe("TOOLCHAIN_PROBE_FAILED", "Windows probe output is invalid")
 	}
