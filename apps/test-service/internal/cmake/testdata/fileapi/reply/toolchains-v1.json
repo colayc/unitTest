@@ -18,8 +18,7 @@
         "path": "$SOURCE$/tools/clang",
         "id": "Clang",
         "version": "18.1.8",
-        "target": "x86_64-pc-linux-gnu",
-        "commandFragment": "--target=x86_64-pc-linux-gnu"
+        "target": "x86_64-pc-linux-gnu"
       }
     }
   ]

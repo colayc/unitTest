@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -19,19 +20,22 @@ const (
 	fileAPIQueryRelativePath = ".cmake/api/v1/query/client-unit-test-ide/query.json"
 	fileAPIReplyRelativePath = ".cmake/api/v1/reply"
 
-	maxFileAPIFileBytes      = 512 * 1024
-	maxFileAPITotalBytes     = 4 * 1024 * 1024
-	maxFileAPITotalFiles     = 140
-	maxFileAPIObjects        = 64
-	maxFileAPIConfigs        = 64
-	maxFileAPITargets        = 1024
-	maxFileAPITargetFiles    = 256
-	maxFileAPIArtifacts      = 128
-	maxFileAPITotalArtifacts = 4096
-	maxFileAPIInputs         = 2048
-	maxFileAPIToolchains     = 64
-	maxFileAPICacheEntries   = 4096
-	maxCommandFragmentBytes  = 16 * 1024
+	maxFileAPIFileBytes        = 512 * 1024
+	maxFileAPITotalBytes       = 4 * 1024 * 1024
+	maxFileAPITotalFiles       = 140
+	maxFileAPIObjects          = 64
+	maxFileAPIConfigs          = 64
+	maxFileAPITargets          = 1024
+	maxFileAPITargetFiles      = 256
+	maxFileAPIArtifacts        = 128
+	maxFileAPITotalArtifacts   = 4096
+	maxFileAPIInputs           = 2048
+	maxFileAPIToolchains       = 64
+	maxFileAPICacheEntries     = 4096
+	maxCommandFragmentBytes    = 16 * 1024
+	fileAPIReplyReadBatchSize  = 64
+	maxFileAPIDirectoryEntries = 1024
+	maxFileAPIReplyCandidates  = 256
 )
 
 var (
@@ -371,44 +375,76 @@ func canonicalAllowedPath(value string, roots []workspace.Root) (string, error) 
 }
 
 func (reader *fileAPIReader) currentReply() (fileAPIReplyCandidate, error) {
-	entries, err := os.ReadDir(reader.replyRoot.NativePath)
+	directory, err := os.Open(reader.replyRoot.NativePath)
 	if err != nil {
-		return fileAPIReplyCandidate{}, fmt.Errorf("%w: enumerate reply directory: %v", ErrFileAPIReply, err)
+		return fileAPIReplyCandidate{}, fmt.Errorf("%w: open reply directory: %v", ErrFileAPIReply, err)
 	}
+	defer directory.Close()
 	bySuffix := make(map[string]fileAPIReplyCandidate)
 	var current fileAPIReplyCandidate
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
+	entryCount := 0
+	candidateCount := 0
+	for {
+		entries, readErr := directory.ReadDir(fileAPIReplyReadBatchSize)
+		for _, entry := range entries {
+			entryCount++
+			if entryCount > maxFileAPIDirectoryEntries {
+				return fileAPIReplyCandidate{}, fmt.Errorf(
+					"%w: reply directory entries exceed %d",
+					ErrFileAPILimit,
+					maxFileAPIDirectoryEntries,
+				)
+			}
+			if entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			prefix := ""
+			isError := false
+			switch {
+			case strings.HasPrefix(name, "index-"):
+				prefix = "index-"
+			case strings.HasPrefix(name, "error-"):
+				prefix = "error-"
+				isError = true
+			default:
+				continue
+			}
+			if !strings.HasSuffix(name, ".json") || len(name) <= len(prefix)+len(".json") {
+				continue
+			}
+			candidateCount++
+			if candidateCount > maxFileAPIReplyCandidates {
+				return fileAPIReplyCandidate{}, fmt.Errorf(
+					"%w: reply index/error candidates exceed %d",
+					ErrFileAPILimit,
+					maxFileAPIReplyCandidates,
+				)
+			}
+			suffix := strings.TrimPrefix(name, prefix)
+			if previous, duplicate := bySuffix[suffix]; duplicate {
+				return fileAPIReplyCandidate{}, fmt.Errorf(
+					"%w: ambiguous CMake replies %q and %q",
+					ErrFileAPIReply,
+					previous.Name,
+					name,
+				)
+			}
+			candidate := fileAPIReplyCandidate{Name: name, Suffix: suffix, IsError: isError}
+			bySuffix[suffix] = candidate
+			if current.Name == "" || candidate.Suffix > current.Suffix {
+				current = candidate
+			}
 		}
-		name := entry.Name()
-		prefix := ""
-		isError := false
-		switch {
-		case strings.HasPrefix(name, "index-"):
-			prefix = "index-"
-		case strings.HasPrefix(name, "error-"):
-			prefix = "error-"
-			isError = true
-		default:
-			continue
+		if errors.Is(readErr, io.EOF) {
+			break
 		}
-		if !strings.HasSuffix(name, ".json") || len(name) <= len(prefix)+len(".json") {
-			continue
-		}
-		suffix := strings.TrimPrefix(name, prefix)
-		if previous, duplicate := bySuffix[suffix]; duplicate {
+		if readErr != nil {
 			return fileAPIReplyCandidate{}, fmt.Errorf(
-				"%w: ambiguous CMake replies %q and %q",
+				"%w: enumerate reply directory: %v",
 				ErrFileAPIReply,
-				previous.Name,
-				name,
+				readErr,
 			)
-		}
-		candidate := fileAPIReplyCandidate{Name: name, Suffix: suffix, IsError: isError}
-		bySuffix[suffix] = candidate
-		if current.Name == "" || candidate.Suffix > current.Suffix {
-			current = candidate
 		}
 	}
 	if current.Name == "" {
@@ -750,14 +786,7 @@ func (reader *fileAPIReader) assemble(
 			return FileAPIReply{}, fmt.Errorf("%w: toolchain language is empty", ErrFileAPIReply)
 		}
 		commandFragment := ""
-		if toolchains.Version.Minor != nil && *toolchains.Version.Minor >= 1 {
-			if toolchain.Compiler.CommandFragment == nil {
-				return FileAPIReply{}, fmt.Errorf(
-					"%w: toolchain %q compiler commandFragment is missing",
-					ErrFileAPIReply,
-					toolchain.Language,
-				)
-			}
+		if toolchain.Compiler.CommandFragment != nil {
 			commandFragment = *toolchain.Compiler.CommandFragment
 			if len(commandFragment) > maxCommandFragmentBytes {
 				return FileAPIReply{}, fmt.Errorf(

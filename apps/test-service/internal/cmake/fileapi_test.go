@@ -295,7 +295,7 @@ func TestFileAPIToolchainIdentityIncludesBoundedCommandFragment(t *testing.T) {
 				candidate.(map[string]any)["compiler"].(map[string]any)["commandFragment"] = ""
 			}
 			toolchains[0].(map[string]any)["compiler"].(map[string]any)["commandFragment"] =
-				"--target=x86_64-pc-linux-gnu -stdlib=libc++"
+				"--target=x86_64-pc-linux-gnu -stdlib=libstdc++"
 		})
 		after := readWithFixture(t, fixture)
 		if reflect.DeepEqual(after.ToolchainIDs, before.ToolchainIDs) {
@@ -315,15 +315,51 @@ func TestFileAPIToolchainIdentityIncludesBoundedCommandFragment(t *testing.T) {
 		})
 		expectFileAPIReadError(t, fixture)
 	})
-	t.Run("mandatory in version 1.1", func(t *testing.T) {
+	t.Run("absent and present empty are equivalent", func(t *testing.T) {
 		fixture := newFileAPIReplyFixture(t)
-		setFileAPIToolchainsMinor(t, fixture, 1)
 		mutateJSONFile(t, filepath.Join(fixture.replyDir, "toolchains-v1.json"), func(value map[string]any) {
 			toolchains := value["toolchains"].([]any)
 			delete(toolchains[0].(map[string]any)["compiler"].(map[string]any), "commandFragment")
 		})
-		expectFileAPIReadError(t, fixture)
+		absent := readWithFixture(t, fixture)
+		mutateJSONFile(t, filepath.Join(fixture.replyDir, "toolchains-v1.json"), func(value map[string]any) {
+			toolchains := value["toolchains"].([]any)
+			toolchains[0].(map[string]any)["compiler"].(map[string]any)["commandFragment"] = ""
+		})
+		presentEmpty := readWithFixture(t, fixture)
+		if !reflect.DeepEqual(absent.ToolchainIDs, presentEmpty.ToolchainIDs) {
+			t.Fatalf("absent and present-empty commandFragment differ: %#v != %#v", absent.ToolchainIDs, presentEmpty.ToolchainIDs)
+		}
 	})
+}
+
+func TestFileAPIToolchainsVersion11AcceptsOptionalCommandFragmentForCompilerFamilies(t *testing.T) {
+	tests := []struct {
+		name    string
+		id      string
+		path    string
+		target  string
+		version string
+	}{
+		{name: "GCC", id: "GNU", path: "g++", target: "x86_64-linux-gnu", version: "14.2.0"},
+		{name: "Clang", id: "Clang", path: "clang++", target: "x86_64-pc-linux-gnu", version: "18.1.8"},
+		{name: "MSVC", id: "MSVC", path: "cl.exe", target: "x64", version: "19.42"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newFileAPIReplyFixture(t)
+			mutateJSONFile(t, filepath.Join(fixture.replyDir, "toolchains-v1.json"), func(value map[string]any) {
+				toolchains := value["toolchains"].([]any)
+				compiler := toolchains[0].(map[string]any)["compiler"].(map[string]any)
+				compiler["path"] = filepath.ToSlash(filepath.Join(fixture.sourceDir, "tools", test.path))
+				compiler["id"] = test.id
+				compiler["target"] = test.target
+				compiler["version"] = test.version
+				delete(compiler, "commandFragment")
+			})
+			readWithFixture(t, fixture)
+		})
+	}
 }
 
 func TestFileAPIToolchainsDeduplicateEquivalentLanguageAndRejectConflict(t *testing.T) {
@@ -464,6 +500,33 @@ func TestFileAPIReaderRejectsNewCurrentReplyCreatedAfterSelection(t *testing.T) 
 	if err := reader.verifyCurrentReply(selected); err == nil {
 		t.Fatal("reader.verifyCurrentReply() error = nil after a newer error became current")
 	}
+}
+
+func TestFileAPIReplyDirectoryEnumerationIsBounded(t *testing.T) {
+	const (
+		maxDirectoryEntries = 1024
+		maxReplyCandidates  = 256
+	)
+	t.Run("directory entries exact limit", func(t *testing.T) {
+		fixture := newFileAPIReplyFixture(t)
+		fillFileAPIReplyDirectory(t, fixture, maxDirectoryEntries)
+		readWithFixture(t, fixture)
+	})
+	t.Run("directory entries limit plus one", func(t *testing.T) {
+		fixture := newFileAPIReplyFixture(t)
+		fillFileAPIReplyDirectory(t, fixture, maxDirectoryEntries+1)
+		expectFileAPILimitError(t, fixture)
+	})
+	t.Run("index and error candidates exact limit", func(t *testing.T) {
+		fixture := newFileAPIReplyFixture(t)
+		fillFileAPIReplyCandidates(t, fixture, maxReplyCandidates)
+		readWithFixture(t, fixture)
+	})
+	t.Run("index and error candidates limit plus one", func(t *testing.T) {
+		fixture := newFileAPIReplyFixture(t)
+		fillFileAPIReplyCandidates(t, fixture, maxReplyCandidates+1)
+		expectFileAPILimitError(t, fixture)
+	})
 }
 
 func TestFileAPIReplyRejectsUnsupportedOrMismatchedObjectIdentity(t *testing.T) {
@@ -1078,6 +1141,64 @@ func expectFileAPIReadError(t *testing.T, fixture fileAPIReplyFixture) {
 		fixture.profile,
 	); err == nil {
 		t.Fatal("ReadReply() error = nil, want rejection")
+	}
+}
+
+func expectFileAPILimitError(t *testing.T, fixture fileAPIReplyFixture) {
+	t.Helper()
+	_, err := ReadReply(
+		fixture.buildDir,
+		[]string{fixture.sourceDir, fixture.buildDir},
+		fixture.profile,
+	)
+	if !errors.Is(err, ErrFileAPILimit) {
+		t.Fatalf("ReadReply() error = %v, want ErrFileAPILimit", err)
+	}
+}
+
+func fillFileAPIReplyDirectory(t *testing.T, fixture fileAPIReplyFixture, total int) {
+	t.Helper()
+	entries, err := os.ReadDir(fixture.replyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) > total {
+		t.Fatalf("fixture has %d directory entries, exceeds requested total %d", len(entries), total)
+	}
+	for index := len(entries); index < total; index++ {
+		name := "unrelated-limit-" + leftPadDecimal(index, 6) + ".tmp"
+		if err := os.WriteFile(filepath.Join(fixture.replyDir, name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func fillFileAPIReplyCandidates(t *testing.T, fixture fileAPIReplyFixture, total int) {
+	t.Helper()
+	entries, err := os.ReadDir(fixture.replyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".json") &&
+			(strings.HasPrefix(entry.Name(), "index-") || strings.HasPrefix(entry.Name(), "error-")) {
+			count++
+		}
+	}
+	if count > total {
+		t.Fatalf("fixture has %d reply candidates, exceeds requested total %d", count, total)
+	}
+	for count < total {
+		prefix := "index-"
+		if count%2 == 0 {
+			prefix = "error-"
+		}
+		name := prefix + leftPadDecimal(count, 8) + ".json"
+		if err := os.WriteFile(filepath.Join(fixture.replyDir, name), []byte(`{}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		count++
 	}
 }
 
