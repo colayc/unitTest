@@ -52,6 +52,31 @@ type TaskStepFinishedEventV12 struct {
 
 func (TaskStepFinishedEventV12) isTaskEventV12() {}
 
+type TaskEmptyEventV12 struct {
+	ProtocolVersion EventProtocolVersionV12 `json:"protocolVersion"`
+	Kind            EventKindV12            `json:"kind"`
+	MessageID       string                  `json:"messageId"`
+	SentAt          time.Time               `json:"sentAt"`
+	Sequence        int64                   `json:"sequence"`
+	Event           TaskEmptyEventNameV12   `json:"event"`
+	TaskID          string                  `json:"taskId"`
+	PayloadVersion  float64                 `json:"payloadVersion"`
+	Payload         struct{}                `json:"payload"`
+}
+
+func (TaskEmptyEventV12) isTaskEventV12() {}
+
+type TaskEmptyEventNameV12 string
+
+const (
+	EmptyTaskCreated               TaskEmptyEventNameV12 = "task.created"
+	EmptyTaskStarted               TaskEmptyEventNameV12 = "task.started"
+	EmptyTaskOutput                TaskEmptyEventNameV12 = "task.output"
+	EmptyTaskCancellationRequested TaskEmptyEventNameV12 = "task.cancellation_requested"
+	EmptyTaskFinished              TaskEmptyEventNameV12 = "task.finished"
+	EmptyArtifactCreated           TaskEmptyEventNameV12 = "artifact.created"
+)
+
 type TaskPayloadV12 struct {
 	Diagnostic *TaskEventDiagnosticV12 `json:"diagnostic,omitempty"`
 	Step       *TaskStepNameV12        `json:"step,omitempty"`
