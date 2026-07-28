@@ -2,13 +2,270 @@ package cmake
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
 	"unit-test-ide.local/test-service/internal/probe"
 )
+
+func TestNewGeneratedProfileConstructsStableControlledProfile(t *testing.T) {
+	buildRoot := t.TempDir()
+	spec := GeneratedProfileSpec{
+		ProjectID:     "app",
+		ToolchainID:   "toolchain-0123",
+		Generator:     "Ninja",
+		Configuration: "Debug",
+		BuildRoot:     buildRoot,
+	}
+
+	first, err := NewGeneratedProfile(spec)
+	if err != nil {
+		t.Fatalf("NewGeneratedProfile(first) error = %v", err)
+	}
+	second, err := NewGeneratedProfile(spec)
+	if err != nil {
+		t.Fatalf("NewGeneratedProfile(second) error = %v", err)
+	}
+
+	const wantID = "fb080d0bb678643a4b3cd01833d9dab76f833526611d2c0f0387575db7ae55fa"
+	if first.ID != wantID || second.ID != wantID {
+		t.Fatalf("IDs = %q and %q, want stable %q", first.ID, second.ID, wantID)
+	}
+	if first.ProjectID != spec.ProjectID ||
+		first.Origin != "generated" ||
+		first.ConfigurePreset != "" ||
+		first.BuildPreset != "" ||
+		first.ToolchainID != spec.ToolchainID ||
+		first.Generator != spec.Generator ||
+		first.Configuration != spec.Configuration {
+		t.Fatalf("profile = %#v", first)
+	}
+	if want := filepath.Join(filepath.Clean(buildRoot), wantID); first.BinaryDir != want {
+		t.Fatalf("BinaryDir = %q, want %q", first.BinaryDir, want)
+	}
+}
+
+func TestNewGeneratedProfileIDChangesForEverySemanticField(t *testing.T) {
+	buildRoot := t.TempDir()
+	base := GeneratedProfileSpec{
+		ProjectID:     "app",
+		ToolchainID:   "toolchain-0123",
+		Generator:     "Ninja",
+		Configuration: "Debug",
+		BuildRoot:     buildRoot,
+	}
+	baseProfile, err := NewGeneratedProfile(base)
+	if err != nil {
+		t.Fatalf("NewGeneratedProfile(base) error = %v", err)
+	}
+
+	mutations := []struct {
+		name   string
+		mutate func(*GeneratedProfileSpec)
+	}{
+		{"project", func(value *GeneratedProfileSpec) { value.ProjectID = "other" }},
+		{"toolchain", func(value *GeneratedProfileSpec) { value.ToolchainID = "toolchain-4567" }},
+		{"generator", func(value *GeneratedProfileSpec) { value.Generator = "Unix Makefiles" }},
+		{"configuration", func(value *GeneratedProfileSpec) { value.Configuration = "Release" }},
+	}
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			changed := base
+			mutation.mutate(&changed)
+			changedProfile, err := NewGeneratedProfile(changed)
+			if err != nil {
+				t.Fatalf("NewGeneratedProfile(changed) error = %v", err)
+			}
+			if changedProfile.ID == baseProfile.ID {
+				t.Fatalf("semantic field change kept profile ID %q", baseProfile.ID)
+			}
+		})
+	}
+}
+
+func TestNewGeneratedProfileRejectsInvalidSemanticFields(t *testing.T) {
+	valid := GeneratedProfileSpec{
+		ProjectID:     "app",
+		ToolchainID:   "toolchain-0123",
+		Generator:     "Ninja",
+		Configuration: "Debug",
+		BuildRoot:     t.TempDir(),
+	}
+	fields := []struct {
+		name string
+		set  func(*GeneratedProfileSpec, string)
+	}{
+		{"project", func(spec *GeneratedProfileSpec, value string) { spec.ProjectID = value }},
+		{"toolchain", func(spec *GeneratedProfileSpec, value string) { spec.ToolchainID = value }},
+		{"generator", func(spec *GeneratedProfileSpec, value string) { spec.Generator = value }},
+		{"configuration", func(spec *GeneratedProfileSpec, value string) { spec.Configuration = value }},
+	}
+	invalidValues := []struct {
+		name  string
+		value string
+	}{
+		{"empty", ""},
+		{"control", "value\nnext"},
+		{"nul", "value\x00next"},
+		{"invalid UTF-8", string([]byte{'v', 0xff})},
+		{"over limit", strings.Repeat("x", 257)},
+	}
+
+	for _, field := range fields {
+		for _, invalid := range invalidValues {
+			t.Run(field.name+"/"+invalid.name, func(t *testing.T) {
+				spec := valid
+				field.set(&spec, invalid.value)
+				if profile, err := NewGeneratedProfile(spec); err == nil {
+					t.Fatalf("NewGeneratedProfile() = %#v, want error", profile)
+				}
+			})
+		}
+	}
+}
+
+func TestNewGeneratedProfileRejectsInvalidBuildRoot(t *testing.T) {
+	valid := GeneratedProfileSpec{
+		ProjectID:     "app",
+		ToolchainID:   "toolchain-0123",
+		Generator:     "Ninja",
+		Configuration: "Debug",
+	}
+	root := t.TempDir()
+	filePath := filepath.Join(root, "not-a-directory")
+	if err := os.WriteFile(filePath, []byte("file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := map[string]string{
+		"empty":          "",
+		"relative":       "relative-build-root",
+		"not clean":      root + string(filepath.Separator) + "child" + string(filepath.Separator) + "..",
+		"trailing slash": root + string(filepath.Separator),
+		"file":           filePath,
+		"missing":        filepath.Join(root, "missing"),
+		"nul":            root + "\x00",
+	}
+	for name, buildRoot := range cases {
+		t.Run(name, func(t *testing.T) {
+			spec := valid
+			spec.BuildRoot = buildRoot
+			if profile, err := NewGeneratedProfile(spec); err == nil {
+				t.Fatalf("NewGeneratedProfile() = %#v, want error", profile)
+			}
+		})
+	}
+}
+
+func TestNewGeneratedProfileBuildRootRelocationPreservesID(t *testing.T) {
+	firstRoot := t.TempDir()
+	secondRoot := t.TempDir()
+	spec := GeneratedProfileSpec{
+		ProjectID:     "app",
+		ToolchainID:   "toolchain-0123",
+		Generator:     "Ninja",
+		Configuration: "Debug",
+		BuildRoot:     firstRoot,
+	}
+
+	first, err := NewGeneratedProfile(spec)
+	if err != nil {
+		t.Fatalf("NewGeneratedProfile(first) error = %v", err)
+	}
+	spec.BuildRoot = secondRoot
+	second, err := NewGeneratedProfile(spec)
+	if err != nil {
+		t.Fatalf("NewGeneratedProfile(second) error = %v", err)
+	}
+
+	if first.ID != second.ID {
+		t.Fatalf("relocation changed ID from %q to %q", first.ID, second.ID)
+	}
+	if first.BinaryDir == second.BinaryDir {
+		t.Fatalf("relocation kept BinaryDir %q", first.BinaryDir)
+	}
+	if first.BinaryDir != filepath.Join(firstRoot, first.ID) {
+		t.Fatalf("first BinaryDir = %q", first.BinaryDir)
+	}
+	if second.BinaryDir != filepath.Join(secondRoot, second.ID) {
+		t.Fatalf("second BinaryDir = %q", second.BinaryDir)
+	}
+}
+
+func TestGeneratedBuildDirectoryContainmentUsesPathComponents(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "build")
+	inside := filepath.Join(root, "profile")
+	prefixSibling := filepath.Join(parent, "build-other", "profile")
+
+	if !generatedBuildDirectoryWithinRoot(root, inside) {
+		t.Fatalf("inside path %q was rejected", inside)
+	}
+	if generatedBuildDirectoryWithinRoot(root, prefixSibling) {
+		t.Fatalf("prefix sibling %q was accepted under %q", prefixSibling, root)
+	}
+}
+
+func TestNewGeneratedProfileUsesPlatformPathCaseSemantics(t *testing.T) {
+	spec := GeneratedProfileSpec{
+		ProjectID:     "app",
+		ToolchainID:   "toolchain-0123",
+		Generator:     "Ninja",
+		Configuration: "Debug",
+	}
+
+	if runtime.GOOS == "windows" {
+		firstRoot := t.TempDir()
+		secondRoot := strings.ToUpper(firstRoot)
+		spec.BuildRoot = firstRoot
+		first, err := NewGeneratedProfile(spec)
+		if err != nil {
+			t.Fatalf("NewGeneratedProfile(first) error = %v", err)
+		}
+		spec.BuildRoot = secondRoot
+		second, err := NewGeneratedProfile(spec)
+		if err != nil {
+			t.Fatalf("NewGeneratedProfile(second) error = %v", err)
+		}
+		if first.ID != second.ID {
+			t.Fatalf("Windows path spelling changed ID from %q to %q", first.ID, second.ID)
+		}
+		if !strings.EqualFold(first.BinaryDir, second.BinaryDir) {
+			t.Fatalf("Windows BinaryDirs %q and %q are not case-equivalent", first.BinaryDir, second.BinaryDir)
+		}
+		return
+	}
+
+	parent := t.TempDir()
+	firstRoot := filepath.Join(parent, "Build")
+	secondRoot := filepath.Join(parent, "build")
+	if err := os.Mkdir(firstRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(secondRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	spec.BuildRoot = firstRoot
+	first, err := NewGeneratedProfile(spec)
+	if err != nil {
+		t.Fatalf("NewGeneratedProfile(first) error = %v", err)
+	}
+	spec.BuildRoot = secondRoot
+	second, err := NewGeneratedProfile(spec)
+	if err != nil {
+		t.Fatalf("NewGeneratedProfile(second) error = %v", err)
+	}
+	if first.ID != second.ID {
+		t.Fatalf("Linux relocation changed ID from %q to %q", first.ID, second.ID)
+	}
+	if first.BinaryDir == second.BinaryDir {
+		t.Fatalf("Linux case-distinct roots produced the same BinaryDir %q", first.BinaryDir)
+	}
+}
 
 func TestPresetProfilesAreStableAcrossMachineListingOrder(t *testing.T) {
 	root, project, sourceDir := newPresetWorkspace(t)

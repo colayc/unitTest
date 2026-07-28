@@ -5,8 +5,15 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
+	"strings"
+	"unicode"
+	"unicode/utf8"
 )
+
+const maxGeneratedProfileFieldBytes = 256
 
 type BuildProfile struct {
 	ID              string
@@ -18,6 +25,52 @@ type BuildProfile struct {
 	Generator       string
 	Configuration   string
 	BinaryDir       string
+}
+
+type GeneratedProfileSpec struct {
+	ProjectID     string
+	ToolchainID   string
+	Generator     string
+	Configuration string
+	BuildRoot     string
+}
+
+func NewGeneratedProfile(spec GeneratedProfileSpec) (BuildProfile, error) {
+	fields := []struct {
+		name  string
+		value string
+	}{
+		{name: "project ID", value: spec.ProjectID},
+		{name: "toolchain ID", value: spec.ToolchainID},
+		{name: "generator", value: spec.Generator},
+		{name: "configuration", value: spec.Configuration},
+	}
+	for _, field := range fields {
+		if err := validateGeneratedProfileField(field.name, field.value); err != nil {
+			return BuildProfile{}, err
+		}
+	}
+
+	buildRoot, err := validateGeneratedBuildRoot(spec.BuildRoot)
+	if err != nil {
+		return BuildProfile{}, err
+	}
+	profile := BuildProfile{
+		ProjectID:     spec.ProjectID,
+		Origin:        "generated",
+		ToolchainID:   spec.ToolchainID,
+		Generator:     spec.Generator,
+		Configuration: spec.Configuration,
+	}
+	profile.ID, err = generatedProfileID(profile)
+	if err != nil {
+		return BuildProfile{}, err
+	}
+	profile.BinaryDir = filepath.Join(buildRoot, profile.ID)
+	if !generatedBuildDirectoryWithinRoot(buildRoot, profile.BinaryDir) {
+		return BuildProfile{}, fmt.Errorf("generated build directory is outside build root")
+	}
+	return profile, nil
 }
 
 func profileID(profile BuildProfile, inputGenerations ...string) (string, error) {
@@ -35,12 +88,91 @@ func profileID(profile BuildProfile, inputGenerations ...string) (string, error)
 			InputGenerations: generations,
 		}
 	}
+	return hashCanonicalJSON(value, "build profile identity")
+}
+
+func generatedProfileID(profile BuildProfile) (string, error) {
+	identity := struct {
+		ProjectID     string `json:"projectId"`
+		Origin        string `json:"origin"`
+		ToolchainID   string `json:"toolchainId"`
+		Generator     string `json:"generator"`
+		Configuration string `json:"configuration"`
+	}{
+		ProjectID:     profile.ProjectID,
+		Origin:        "generated",
+		ToolchainID:   profile.ToolchainID,
+		Generator:     profile.Generator,
+		Configuration: profile.Configuration,
+	}
+	return hashCanonicalJSON(identity, "generated build profile identity")
+}
+
+func hashCanonicalJSON(value any, description string) (string, error) {
 	encoded, err := json.Marshal(value)
 	if err != nil {
-		return "", fmt.Errorf("encode build profile identity: %w", err)
+		return "", fmt.Errorf("encode %s: %w", description, err)
 	}
 	sum := sha256.Sum256(encoded)
 	return hex.EncodeToString(sum[:]), nil
+}
+
+func validateGeneratedProfileField(name, value string) error {
+	if value == "" {
+		return fmt.Errorf("generated profile %s must not be empty", name)
+	}
+	if len(value) > maxGeneratedProfileFieldBytes {
+		return fmt.Errorf(
+			"generated profile %s exceeds %d bytes",
+			name,
+			maxGeneratedProfileFieldBytes,
+		)
+	}
+	if !utf8.ValidString(value) {
+		return fmt.Errorf("generated profile %s is not valid UTF-8", name)
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return fmt.Errorf("generated profile %s contains a control character", name)
+		}
+	}
+	return nil
+}
+
+func validateGeneratedBuildRoot(value string) (string, error) {
+	if value == "" {
+		return "", fmt.Errorf("generated profile build root must not be empty")
+	}
+	if strings.IndexByte(value, 0) >= 0 {
+		return "", fmt.Errorf("generated profile build root contains NUL")
+	}
+	if !filepath.IsAbs(value) {
+		return "", fmt.Errorf("generated profile build root must be absolute")
+	}
+	clean := filepath.Clean(value)
+	if clean != value {
+		return "", fmt.Errorf("generated profile build root must be clean")
+	}
+	info, err := os.Stat(clean)
+	if err != nil {
+		return "", fmt.Errorf("inspect generated profile build root: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("generated profile build root is not a directory")
+	}
+	return clean, nil
+}
+
+func generatedBuildDirectoryWithinRoot(root, candidate string) bool {
+	if !filepath.IsAbs(root) || !filepath.IsAbs(candidate) {
+		return false
+	}
+	relative, err := filepath.Rel(filepath.Clean(root), filepath.Clean(candidate))
+	if err != nil || filepath.IsAbs(relative) {
+		return false
+	}
+	return relative != ".." &&
+		!strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 func canonicalProfile(profile BuildProfile) BuildProfile {
