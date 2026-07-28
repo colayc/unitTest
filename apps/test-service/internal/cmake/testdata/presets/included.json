@@ -1,0 +1,18 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "included-release",
+      "displayName": "Included Release",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/release"
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "included-build",
+      "configurePreset": "included-release",
+      "configuration": "Release"
+    }
+  ]
+}

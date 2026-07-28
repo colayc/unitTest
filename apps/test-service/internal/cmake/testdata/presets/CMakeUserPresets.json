@@ -1,0 +1,18 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "user-debug",
+      "displayName": "User Debug",
+      "inherits": "project-debug"
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "user-build",
+      "displayName": "User Build",
+      "configurePreset": "user-debug",
+      "configuration": "Debug"
+    }
+  ]
+}
