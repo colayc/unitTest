@@ -423,6 +423,21 @@ func TestMSVCTrailingNoteBecomesRelatedAndLinkerFamilyAcceptsLNK(t *testing.T) {
 	}
 }
 
+func TestMSVCParserAcceptsClangCLDiagnosticWithoutNumericCode(t *testing.T) {
+	parser := newTestParser(t, FamilyMSVC)
+	got := append(parser.Feed("stderr", []byte(
+		"src/main.cpp(3,21): error: use of undeclared identifier 'UNIT_TEST_IDE_UNKNOWN_IDENTIFIER'\n",
+	)), parser.Close()...)
+	if len(got) != 1 || got[0].Source != "compiler" ||
+		got[0].Severity != "error" || got[0].Code != "" ||
+		got[0].Message !=
+			"use of undeclared identifier 'UNIT_TEST_IDE_UNKNOWN_IDENTIFIER'" ||
+		got[0].Range == nil ||
+		got[0].Range.Start != (Position{Line: 2, Character: 20}) {
+		t.Fatalf("clang-cl diagnostic = %#v", got)
+	}
+}
+
 func TestCMakeParserRecognizesFixedConfigureFatalWithoutEchoingPath(t *testing.T) {
 	parser := newTestParser(t, FamilyCMake)
 	got := append(parser.Feed("stderr", []byte(

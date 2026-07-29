@@ -260,6 +260,22 @@ func (p *parser) consumeCMakeLine(state *streamState, line string) []Diagnostic 
 }
 
 func (p *parser) consumeMSVCLine(state *streamState, line string) []Diagnostic {
+	if match := msvcNotePattern.FindStringSubmatch(line); match != nil &&
+		state.pending != nil && state.pending.Severity != "note" {
+		location := p.location(match[1], parsePositive(match[2]), parsePositive(match[3]))
+		message := msvcProjectSuffixPattern.ReplaceAllString(match[4], "")
+		if len(state.pending.Related) >= maxRelatedRecords ||
+			diagnosticTextBytes(*state.pending)+len(message)+len(location.uri) > maxDiagnosticBytes {
+			return p.notice(
+				"DIAGNOSTIC_TRUNCATED",
+				"Diagnostic output was truncated",
+			)
+		}
+		state.pending.Related = append(state.pending.Related, Related{
+			Message: message, FileURI: location.uri, Range: location.rangeValue,
+		})
+		return nil
+	}
 	if match := msvcLocationPattern.FindStringSubmatch(line); match != nil {
 		result := p.flush(state)
 		severity := match[4]
@@ -276,22 +292,6 @@ func (p *parser) consumeMSVCLine(state *streamState, line string) []Diagnostic {
 			External: location.external,
 		}
 		return result
-	}
-	if match := msvcNotePattern.FindStringSubmatch(line); match != nil &&
-		state.pending != nil && state.pending.Severity != "note" {
-		location := p.location(match[1], parsePositive(match[2]), parsePositive(match[3]))
-		message := msvcProjectSuffixPattern.ReplaceAllString(match[4], "")
-		if len(state.pending.Related) >= maxRelatedRecords ||
-			diagnosticTextBytes(*state.pending)+len(message)+len(location.uri) > maxDiagnosticBytes {
-			return p.notice(
-				"DIAGNOSTIC_TRUNCATED",
-				"Diagnostic output was truncated",
-			)
-		}
-		state.pending.Related = append(state.pending.Related, Related{
-			Message: message, FileURI: location.uri, Range: location.rangeValue,
-		})
-		return nil
 	}
 	if match := msvcLinkPattern.FindStringSubmatch(line); match != nil {
 		result := p.flush(state)
