@@ -781,6 +781,7 @@ ArtifactStore 从仅验证 simulation summary 扩展为按 task kind 注册 arti
 - MSVC 固定环境捕获模板和敏感变量清理。
 - 跨平台 E2E 的首次 `workspace/inspect` 使用独立的 cold-discovery 外层预算：Linux 为 30 秒，Windows 为 60 秒，以容纳 hosted runner 首次加载 Visual Studio Installer 与 MSBuild 的延迟；每个 production probe 自身的固定参数、输出上限和 5 秒命令预算保持不变。
 - Windows production discovery smoke test 只在宿主机同时提供固定 Visual Studio metadata 与可验证 generator 时执行完整断言；generator 暂不可用时跳过该宿主机能力测试。CI 随后的 Native E2E 仍通过 `UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS=msvc,clang-cl` 强制验收项目支持矩阵，不能由 smoke test 跳过替代。
+- 普通 CMake E2E 在首次 Start 因 optimistic-concurrency 返回 `WORKSPACE_CHANGED` 时，重新执行 `workspace/inspect`、重新选择 project/profile，并以新的 idempotency key 有界重试一次；拒绝发生在 Task 创建前，不会产生重复 Task。刷新后再次 stale 或基线建立后的 generation 漂移仍作为失败。
 - Native E2E 在 Service recovery 场景开始前重新执行 `workspace/inspect`，用最新 generation/profile 完成基线构建并解析 slow target；重启后同时验证持久 Task 收敛为 `interrupted`，以及未变更 workspace 的 generation 保持稳定。
 - Native E2E 等待 terminal event 时使用有界 liveness heartbeat：持续保留同一个 pending subscription read，查询 durable Task 状态；连接失活时由客户端执行 reconnect/replay，durable Task 已 terminal 但事件尚未到达时最多触发一次 terminal replay。验收仍要求收到连续 sequence 的 `task.finished`，不能用轮询快照替代事件契约。
 - ExecutionPlan 的 executable、cwd、NUL、environment key/secret 校验，以及每 Step `ProcessSpec.Args <= 256`、`ProcessSpec.Env <= 256`、`CommandSummary.Args <= 256` 的精确边界。

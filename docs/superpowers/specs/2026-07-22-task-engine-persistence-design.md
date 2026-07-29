@@ -222,6 +222,7 @@ Phase 2 引入协议 `1.1`：
 - Job Object 设置 `KILL_ON_JOB_CLOSE`。
 - 取消和超时使用 `TerminateJobObject` 终止整个进程树。
 - 外层 Host 强制清理只有在原始进程句柄的 signaled wait 成功后才算成功；该成功事务必须同步发布 `hostExited`，不能因 observer goroutine 调度滞后把随后到达的 `Close` 误判为清理失败并将 Task 留在 `cancelling`。
+- Windows/Linux Process wrapper 必须先关闭内部 `finished` gate，再向公开 `Done()` channel 发布结果；因此调用方一旦观察到 `Done()`，随后调用 `Terminate` 必须按已完成操作幂等成功，不能再次访问已经退出的 Process Host。
 - 不能安全加入 Job Object 时启动失败并记录为 `infrastructure_failed`，不得降级为无进程树保护的执行。
 
 ### 9.2 Linux

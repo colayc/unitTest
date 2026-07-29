@@ -514,9 +514,11 @@ func (process *unixProcess) applyOutputOverflow(result Result) Result {
 
 func (process *unixProcess) publish(result Result) {
 	process.doneOnce.Do(func() {
+		// Make completion visible to Terminate before the public Done result can
+		// be observed, so Terminate-after-Done is always idempotent.
+		close(process.finished)
 		process.done <- result
 		close(process.done)
-		close(process.finished)
 	})
 }
 

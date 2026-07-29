@@ -7,6 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import {
   EventSubscription,
+  ProtocolError,
   type ProtocolClient,
   type ProtocolTaskEvent,
   type ProtocolTaskSnapshot
@@ -592,15 +593,19 @@ test("trusted workspace completes deterministic CMake builds and skips the secon
       devCMakeExecutable: cmakeFixture
     });
     stage = "inspect workspace";
-    const workspace = await withNamedTimeout(
+    let workspace = await withNamedTimeout(
       "deterministic workspace inspection",
       fixture.client.inspectWorkspace(),
       WORKSPACE_INSPECTION_TIMEOUT_MS
     );
-    const project = workspace.projects.find((candidate) => candidate.projectId === "root");
-    const profile = project?.buildProfiles[0];
-    assert.ok(project, "fixture project must be inspectable");
-    assert.ok(profile, "fixture project must have a verified platform toolchain profile");
+    const selectFixtureProfile = (snapshot: typeof workspace) => {
+      const selectedProject = snapshot.projects.find((candidate) => candidate.projectId === "root");
+      const selectedProfile = selectedProject?.buildProfiles[0];
+      assert.ok(selectedProject, "fixture project must be inspectable");
+      assert.ok(selectedProfile, "fixture project must have a verified platform toolchain profile");
+      return { project: selectedProject, profile: selectedProfile };
+    };
+    let selected = selectFixtureProfile(workspace);
 
     stage = "subscribe first build";
     const firstSubscription = await withNamedTimeout(
@@ -609,19 +614,37 @@ test("trusted workspace completes deterministic CMake builds and skips the secon
       EVENT_TIMEOUT_MS
     );
     stage = "start first build";
-    const first = await withNamedTimeout(
-      "first deterministic CMake build",
-      fixture.client.startCMakeBuild({
-        idempotencyKey: randomBytes(16).toString("hex"),
-        workspaceGeneration: workspace.workspaceGeneration,
-        projectId: project.projectId,
-        buildProfileId: profile.buildProfileId,
-        targetIds: [],
-        jobs: 2,
-        timeoutMs: 30_000
-      }),
-      EVENT_TIMEOUT_MS
-    );
+    const startFirstBuild = () =>
+      withNamedTimeout(
+        "first deterministic CMake build",
+        fixture!.client.startCMakeBuild({
+          idempotencyKey: randomBytes(16).toString("hex"),
+          workspaceGeneration: workspace.workspaceGeneration,
+          projectId: selected.project.projectId,
+          buildProfileId: selected.profile.buildProfileId,
+          targetIds: [],
+          jobs: 2,
+          timeoutMs: 30_000
+        }),
+        EVENT_TIMEOUT_MS
+      );
+    let first;
+    try {
+      first = await startFirstBuild();
+    } catch (error) {
+      if (!(error instanceof ProtocolError) || error.code !== "WORKSPACE_CHANGED") {
+        throw error;
+      }
+      stage = "refresh workspace after stale generation";
+      workspace = await withNamedTimeout(
+        "stale-generation workspace refresh",
+        fixture.client.inspectWorkspace(),
+        WORKSPACE_INSPECTION_TIMEOUT_MS
+      );
+      selected = selectFixtureProfile(workspace);
+      stage = "retry first build";
+      first = await startFirstBuild();
+    }
     const firstEvents: ProtocolTaskEvent[] = [];
     stage = "wait for first build";
     const firstFinished = await waitForFinished(firstSubscription, first.taskId, firstEvents);
@@ -678,8 +701,8 @@ test("trusted workspace completes deterministic CMake builds and skips the secon
       "deterministic CMake target list",
       fixture.client.listCMakeTargets({
         workspaceGeneration: workspace.workspaceGeneration,
-        projectId: project.projectId,
-        buildProfileId: profile.buildProfileId
+        projectId: selected.project.projectId,
+        buildProfileId: selected.profile.buildProfileId
       }),
       EVENT_TIMEOUT_MS
     );
@@ -703,8 +726,8 @@ test("trusted workspace completes deterministic CMake builds and skips the secon
       fixture.client.startCMakeBuild({
         idempotencyKey: randomBytes(16).toString("hex"),
         workspaceGeneration: workspace.workspaceGeneration,
-        projectId: project.projectId,
-        buildProfileId: profile.buildProfileId,
+        projectId: selected.project.projectId,
+        buildProfileId: selected.profile.buildProfileId,
         targetIds: [],
         jobs: 2,
         timeoutMs: 30_000
