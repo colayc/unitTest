@@ -780,7 +780,7 @@ ArtifactStore 从仅验证 simulation summary 扩展为按 task kind 注册 arti
 - Build Profile 稳定 ID。
 - MSVC、clang-cl、GCC 和 Clang discovery/probe。
 - MSVC 固定环境捕获模板和敏感变量清理。
-- 跨平台 E2E 的首次 `workspace/inspect` 使用独立的 cold-discovery 外层预算：Linux 为 30 秒，Windows 为 60 秒，以容纳 hosted runner 首次加载 Visual Studio Installer 与 MSBuild 的延迟；每个 production probe 自身的固定参数、输出上限和 5 秒命令预算保持不变。
+- 跨平台 E2E 的首次 `workspace/inspect` 使用独立的 cold-discovery 外层预算：Linux 为 30 秒，Windows 为 120 秒。Windows 预算覆盖全量 Go race 后的 hosted runner 高负载，以及 MSVC/clang-cl 多 adapter 依次组合固定 probe 的最坏路径；它只约束测试客户端等待时间，每个 production probe 自身的固定参数、输出上限和 5 秒命令预算保持不变。
 - Windows production discovery smoke test 只在宿主机同时提供固定 Visual Studio metadata 与可验证 compiler/generator 时执行完整断言；generator 不可用，或底层 production runner 明确返回 `probe.ErrTimeout` 表示任一 5 秒固定 probe 预算在当前宿主负载下耗尽时，跳过该宿主机能力测试。其他 identity、格式、输出和环境错误仍失败。CI 随后的 Native E2E 仍通过 `UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS=msvc,clang-cl` 强制验收项目支持矩阵，不能由 smoke test 跳过替代。
 - 普通 CMake E2E 在首次 Start 因 optimistic-concurrency 返回 `WORKSPACE_CHANGED` 时，重新执行 `workspace/inspect`、重新选择 project/profile，并以新的 idempotency key 有界重试一次；拒绝发生在 Task 创建前，不会产生重复 Task。刷新后再次 stale 或基线建立后的 generation 漂移仍作为失败。
 - Native E2E 在 Service recovery 场景开始前重新执行 `workspace/inspect`，用最新 generation/profile 完成基线构建并解析 slow target；重启后同时验证持久 Task 收敛为 `interrupted`，以及未变更 workspace 的 generation 保持稳定。
