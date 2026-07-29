@@ -128,6 +128,7 @@ type activeTask struct {
 	task                  Task
 	plan                  ExecutionPlan
 	boundary              ExecutionBoundary
+	artifactSink          ArtifactSink
 	boundaryReleased      bool
 	nextStep              int
 	process               ManagedProcess
@@ -844,17 +845,35 @@ func (m *Manager) armTimeout(current *activeTask) {
 type timeoutCommand string
 
 func (m *Manager) acceptOutput(current *activeTask, output ProcessOutput, active map[string]*activeTask) {
-	if current.nextStep < len(current.plan.Steps) {
-		if parser := current.plan.Steps[current.nextStep].DiagnosticParser; parser != nil {
-			m.persistDiagnostics(current, parser.Feed(output.Stream, output.Data), active)
-			if m.circuitFailed() {
-				return
-			}
-		}
-	}
-	if len(output.Data) == 0 || current.truncated {
+	if current.artifactSink == nil ||
+		current.artifactSink.AppendOutput(
+			context.Background(), current.task.ActiveStep, output.Stream, output.Data,
+		) != nil {
+		m.tripStorage(active)
 		return
 	}
+	if len(output.Data) != 0 && !current.truncated {
+		m.bufferOutput(current, output, active)
+		if m.circuitFailed() {
+			return
+		}
+	}
+	values, failed := feedDiagnosticParser(current, output)
+	if failed {
+		current.plan.Steps[current.nextStep].DiagnosticParser = nil
+		return
+	}
+	if len(values) == 0 {
+		return
+	}
+	m.flushOutput(current, active)
+	if m.circuitFailed() {
+		return
+	}
+	m.persistDiagnostics(current, values, active)
+}
+
+func (m *Manager) bufferOutput(current *activeTask, output ProcessOutput, active map[string]*activeTask) {
 	remaining := maxPersistedOutput - current.persistedBytes - current.bufferedBytes
 	accepted := output.Data
 	overflow := false
@@ -893,6 +912,26 @@ func (m *Manager) acceptOutput(current *activeTask, output ProcessOutput, active
 	}
 }
 
+func feedDiagnosticParser(
+	current *activeTask,
+	output ProcessOutput,
+) (values []diagnostic.Diagnostic, failed bool) {
+	if current.nextStep >= len(current.plan.Steps) {
+		return nil, false
+	}
+	parser := current.plan.Steps[current.nextStep].DiagnosticParser
+	if parser == nil {
+		return nil, false
+	}
+	defer func() {
+		if recover() != nil {
+			values = nil
+			failed = true
+		}
+	}()
+	return parser.Feed(output.Stream, output.Data), false
+}
+
 func (m *Manager) closeDiagnosticParser(current *activeTask, active map[string]*activeTask) {
 	if current.nextStep >= len(current.plan.Steps) {
 		return
@@ -901,7 +940,24 @@ func (m *Manager) closeDiagnosticParser(current *activeTask, active map[string]*
 	if parser == nil {
 		return
 	}
-	m.persistDiagnostics(current, parser.Close(), active)
+	values, failed := closeParserSafely(parser)
+	if failed {
+		current.plan.Steps[current.nextStep].DiagnosticParser = nil
+		return
+	}
+	m.persistDiagnostics(current, values, active)
+}
+
+func closeParserSafely(
+	parser diagnostic.Parser,
+) (values []diagnostic.Diagnostic, failed bool) {
+	defer func() {
+		if recover() != nil {
+			values = nil
+			failed = true
+		}
+	}()
+	return parser.Close(), false
 }
 
 func (m *Manager) persistDiagnostics(
@@ -910,6 +966,15 @@ func (m *Manager) persistDiagnostics(
 	active map[string]*activeTask,
 ) {
 	for _, value := range values {
+		value.TaskID = current.task.ID
+		if value.StepID == "" {
+			value.StepID = current.task.ActiveStep
+		}
+		if current.artifactSink == nil ||
+			current.artifactSink.AppendDiagnostic(context.Background(), value) != nil {
+			m.tripStorage(active)
+			return
+		}
 		payload := map[string]any{
 			"severity": value.Severity,
 			"code":     value.Code,

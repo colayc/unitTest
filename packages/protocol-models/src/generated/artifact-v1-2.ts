@@ -10,9 +10,16 @@ export interface ArtifactMetadataV12 {
 }
 
 export enum Kind {
+    BuildSummary = "build-summary",
+    Diagnostics = "diagnostics",
+    ExecutionPlan = "execution-plan",
+    Stderr = "stderr",
+    Stdout = "stdout",
     TaskSummary = "task-summary",
 }
 
 export enum MIMEType {
     ApplicationJSON = "application/json",
+    ApplicationOctetStream = "application/octet-stream",
+    ApplicationXNdjson = "application/x-ndjson",
 }

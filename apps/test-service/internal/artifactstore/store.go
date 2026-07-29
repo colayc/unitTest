@@ -118,7 +118,29 @@ func (s *Store) CommitJSON(ctx context.Context, taskID, artifactID string, at ti
 	if err != nil {
 		return task.Artifact{}, err
 	}
-	relative := artifactRelativePath(taskID, artifactID)
+	return s.commitArtifactData(ctx, taskID, artifactID, "task-summary", at, data)
+}
+
+func (s *Store) commitArtifactData(
+	ctx context.Context,
+	taskID string,
+	artifactID string,
+	kind string,
+	at time.Time,
+	data []byte,
+) (artifact task.Artifact, resultErr error) {
+	if s == nil || s.root == nil || ctx == nil {
+		return task.Artifact{}, ErrStoreUnavailable
+	}
+	if err := ctx.Err(); err != nil {
+		return task.Artifact{}, err
+	}
+	mimeType, extension, ok := artifactDescriptor(kind)
+	if !validGeneratedID(taskID) || !validGeneratedID(artifactID) || at.IsZero() ||
+		!ok {
+		return task.Artifact{}, ErrInvalidArtifact
+	}
+	relative := artifactRelativePathFor(taskID, artifactID, extension)
 	parentRelative := path.Dir(relative)
 	if err := validateRootPath(s.root, parentRelative, true); err != nil {
 		return task.Artifact{}, err
@@ -262,9 +284,9 @@ func (s *Store) CommitJSON(ctx context.Context, taskID, artifactID string, at ti
 	return task.Artifact{
 		ID:           artifactID,
 		TaskID:       taskID,
-		Kind:         "task-summary",
+		Kind:         kind,
 		RelativePath: relative,
-		MIMEType:     "application/json",
+		MIMEType:     mimeType,
 		Size:         int64(len(data)),
 		SHA256:       hex.EncodeToString(sum[:]),
 		CreatedAt:    at,
@@ -284,7 +306,7 @@ func (s *Store) ReadChunk(ctx context.Context, artifact task.Artifact, offset in
 	if offset > artifact.Size {
 		return nil, 0, false, ErrInvalidRange
 	}
-	relative := artifactRelativePath(artifact.TaskID, artifact.ID)
+	relative := artifact.RelativePath
 	file, info, err := openVerifiedFile(s.root, relative)
 	if err != nil {
 		return nil, 0, false, err
@@ -823,9 +845,11 @@ func nativePath(relative string) string {
 }
 
 func validArtifact(value task.Artifact) bool {
-	if !validGeneratedID(value.ID) || !validGeneratedID(value.TaskID) || value.Kind != "task-summary" ||
-		value.MIMEType != "application/json" || value.Size < 0 || value.CreatedAt.IsZero() ||
-		value.RelativePath != artifactRelativePath(value.TaskID, value.ID) || len(value.SHA256) != sha256.Size*2 ||
+	mimeType, extension, ok := artifactDescriptor(value.Kind)
+	if !validGeneratedID(value.ID) || !validGeneratedID(value.TaskID) || !ok ||
+		value.MIMEType != mimeType || value.Size < 0 || value.CreatedAt.IsZero() ||
+		value.RelativePath != artifactRelativePathFor(value.TaskID, value.ID, extension) ||
+		len(value.SHA256) != sha256.Size*2 ||
 		strings.ToLower(value.SHA256) != value.SHA256 {
 		return false
 	}
@@ -846,7 +870,24 @@ func validGeneratedID(value string) bool {
 }
 
 func artifactRelativePath(taskID, artifactID string) string {
-	return path.Join("tasks", taskID, artifactID+".json")
+	return artifactRelativePathFor(taskID, artifactID, ".json")
+}
+
+func artifactRelativePathFor(taskID, artifactID, extension string) string {
+	return path.Join("tasks", taskID, artifactID+extension)
+}
+
+func artifactDescriptor(kind string) (mimeType, extension string, ok bool) {
+	switch kind {
+	case "task-summary", "build-summary", "execution-plan":
+		return "application/json", ".json", true
+	case "diagnostics":
+		return "application/x-ndjson", ".jsonl", true
+	case "stdout", "stderr":
+		return "application/octet-stream", ".log", true
+	default:
+		return "", "", false
+	}
 }
 
 func validArtifactRelativePath(relative string) bool {

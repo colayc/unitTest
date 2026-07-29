@@ -16,11 +16,18 @@ type ArtifactMetadataV12 struct {
 type Kind string
 
 const (
-	TaskSummary Kind = "task-summary"
+	BuildSummary  Kind = "build-summary"
+	Diagnostics   Kind = "diagnostics"
+	ExecutionPlan Kind = "execution-plan"
+	Stderr        Kind = "stderr"
+	Stdout        Kind = "stdout"
+	TaskSummary   Kind = "task-summary"
 )
 
 type MIMEType string
 
 const (
-	ApplicationJSON MIMEType = "application/json"
+	ApplicationJSON        MIMEType = "application/json"
+	ApplicationOctetStream MIMEType = "application/octet-stream"
+	ApplicationXNdjson     MIMEType = "application/x-ndjson"
 )

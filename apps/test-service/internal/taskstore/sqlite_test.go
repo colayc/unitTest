@@ -1491,14 +1491,12 @@ func (migrationReplayPublisher) Publish(task.Event) {}
 
 type migrationReplayArtifacts struct{}
 
-func (migrationReplayArtifacts) CommitJSON(
+func (migrationReplayArtifacts) OpenTask(
 	context.Context,
 	string,
-	string,
-	time.Time,
-	any,
-) (task.Artifact, error) {
-	return task.Artifact{}, errors.New("artifact commit must not run during idempotent replay")
+	task.Kind,
+) (task.ArtifactSink, error) {
+	return nil, errors.New("artifact sink must not open during idempotent replay")
 }
 
 func newMigrationReplayManager(t *testing.T, store *Store) (*task.Manager, *migrationReplayProcesses) {

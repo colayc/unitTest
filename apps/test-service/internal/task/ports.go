@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"unit-test-ide.local/test-service/internal/diagnostic"
 )
 
 var (
@@ -97,8 +99,16 @@ type ManagedProcess interface {
 	Close(context.Context) error
 }
 
+type ArtifactSink interface {
+	AppendOutput(context.Context, string, string, []byte) error
+	AppendDiagnostic(context.Context, diagnostic.Diagnostic) error
+	CommitJSON(context.Context, string, string, any) error
+	Finalize(context.Context, time.Time) ([]Artifact, error)
+	Abort(context.Context) error
+}
+
 type ArtifactWriter interface {
-	CommitJSON(context.Context, string, string, time.Time, any) (Artifact, error)
+	OpenTask(context.Context, string, Kind) (ArtifactSink, error)
 }
 
 type Clock interface {

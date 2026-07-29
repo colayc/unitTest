@@ -677,6 +677,7 @@ type storedBuildRequest struct {
 	BuildProfileID string   `json:"buildProfileId"`
 	TargetIDs      []string `json:"targetIds"`
 	Jobs           int64    `json:"jobs"`
+	TimeoutMS      int64    `json:"timeoutMs"`
 }
 
 func toProtocolTaskV12(value task.Task) (taskv12.TaskSnapshotV12, error) {
@@ -699,8 +700,10 @@ func toProtocolTaskV12(value task.Task) (taskv12.TaskSnapshotV12, error) {
 	case task.KindCMakeBuild:
 		request, err := decodeStrict[storedBuildRequest](value.Request)
 		if err != nil || !validProjectID(request.ProjectID) || !validHash(request.BuildProfileID) ||
-			!validTargetIDs(request.TargetIDs) || request.Jobs < 1 || request.Jobs > 256 ||
-			!validHash(value.WorkspaceGeneration) || value.Timeout < time.Millisecond || value.Timeout > 24*time.Hour {
+			request.TargetIDs == nil || !validTargetIDs(request.TargetIDs) ||
+			request.Jobs < 1 || request.Jobs > 256 ||
+			!validHash(value.WorkspaceGeneration) || value.Timeout < time.Millisecond || value.Timeout > 24*time.Hour ||
+			request.TimeoutMS != value.Timeout.Milliseconds() {
 			return nil, errors.New("invalid persisted CMake task")
 		}
 		result := taskv12.CmakeBuildTaskSnapshotV12{
@@ -709,7 +712,7 @@ func toProtocolTaskV12(value task.Task) (taskv12.TaskSnapshotV12, error) {
 			WorkspaceGeneration: value.WorkspaceGeneration,
 			ProjectID:           request.ProjectID,
 			BuildProfileID:      request.BuildProfileID,
-			TargetIDs:           append([]string(nil), request.TargetIDs...),
+			TargetIDs:           append([]string{}, request.TargetIDs...),
 			Jobs:                request.Jobs,
 			TimeoutMS:           value.Timeout.Milliseconds(),
 			Status:              taskv12.TaskStatusV12(value.Status),

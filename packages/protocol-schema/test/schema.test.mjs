@@ -424,3 +424,29 @@ test("protocol 1.2 generates TargetList from the isolated workspace contract", a
   assert.equal(message.$defs.targetList, undefined);
   assert.match(generator, /schema: "workspace\.schema\.json", definition: "targetList", top: "TargetList"/);
 });
+
+test("protocol 1.2 accepts the complete CMake build artifact surface", async () => {
+  const ajv = new Ajv2020({ allErrors: true, strict: true });
+  addFormats(ajv);
+  const validate = ajv.compile(await load("../schema/v1.2/artifact.schema.json"));
+  const base = {
+    artifactId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    taskId: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    sizeBytes: 0,
+    sha256: "c".repeat(64),
+    createdAt: "2026-07-26T00:00:00Z",
+    uri: "unit-test-ide://artifact/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  };
+  const artifacts = [
+    { kind: "build-summary", mimeType: "application/json" },
+    { kind: "execution-plan", mimeType: "application/json" },
+    { kind: "diagnostics", mimeType: "application/x-ndjson" },
+    { kind: "stdout", mimeType: "application/octet-stream" },
+    { kind: "stderr", mimeType: "application/octet-stream" }
+  ];
+
+  for (const artifact of artifacts) {
+    assert.equal(validate({ ...base, ...artifact }), true, JSON.stringify(validate.errors));
+  }
+  assert.equal(validate({ ...base, kind: "process-environment", mimeType: "application/json" }), false);
+});

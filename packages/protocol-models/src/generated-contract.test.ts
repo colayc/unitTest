@@ -126,8 +126,22 @@ test("generated protocol 1.2 models expose workspace build contracts", () => {
     createdAt: event.sentAt,
     uri: "file:///workspace/task-summary.json"
   };
+  const buildArtifactKinds: ArtifactKindV12[] = [
+    ArtifactKindV12.BuildSummary,
+    ArtifactKindV12.ExecutionPlan,
+    ArtifactKindV12.Diagnostics,
+    ArtifactKindV12.Stdout,
+    ArtifactKindV12.Stderr
+  ];
+  const buildArtifactMIMETypes: ArtifactMIMETypeV12[] = [
+    ArtifactMIMETypeV12.ApplicationJSON,
+    ArtifactMIMETypeV12.ApplicationXNdjson,
+    ArtifactMIMETypeV12.ApplicationOctetStream
+  ];
 
   assert.equal(artifact.uri, "file:///workspace/task-summary.json");
+  assert.equal(buildArtifactKinds.length, 5);
+  assert.equal(buildArtifactMIMETypes.length, 3);
   assert.equal(outputEvent.event, TaskEventNameV12.TaskOutput);
   assert.equal(simulationStepEvent.payload.kind, TaskStepKindV12.Simulation);
 });

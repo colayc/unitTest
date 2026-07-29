@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
@@ -16,6 +16,7 @@ import { assertProcessGone, prepareTokenFile, runProbe, startService, startTaskS
 
 const root = resolve(import.meta.dirname, "../../..");
 const binary = join(root, "build", process.platform === "win32" ? "unit-test-service.exe" : "unit-test-service");
+const cmakeFixture = join(root, "build", process.platform === "win32" ? "cmake-fixture.exe" : "cmake-fixture");
 const EVENT_TIMEOUT_MS = 8_000;
 const V11_EVENT_NAMES = new Set([
   "task.created",
@@ -520,22 +521,15 @@ test("successful simulation preserves the complete negotiated event stream", asy
     const finished = await waitForFinished(subscription, started.taskId, seen);
     assert.equal((finished.payload as { outcome?: unknown }).outcome, "succeeded");
     assertSimulationProtocolEvents(seen);
-    if (seen[0]?.protocolVersion === "1.1") {
-      const compatibilityOutputs = seen.filter((event) => event.event === "task.output");
-      assert.deepEqual(
-        compatibilityOutputs.map((event) => event.payload),
-        [
-          { stream: "service", text: "", truncated: false },
-          { stream: "service", text: "", truncated: false }
-        ]
-      );
-    } else {
-      assert.deepEqual(
-        seen.filter((event) => event.event === "task.step_started" || event.event === "task.step_finished")
-          .map((event) => event.event),
-        ["task.step_started", "task.step_finished"]
-      );
-    }
+    assert.deepEqual(
+      seen.filter((event) =>
+        event.event === "task.step_started" ||
+        event.event === "task.step_finished" ||
+        event.event === "task.diagnostic"
+      ),
+      [],
+      "simulation tasks must not expose CMake step or diagnostic events"
+    );
     const artifactIndex = seen.findIndex((event) => event.event === "artifact.created");
     const finishedIndex = seen.findIndex((event) => event.event === "task.finished");
     assert.ok(artifactIndex >= 0 && artifactIndex < finishedIndex, "artifact.created must precede task.finished");
@@ -551,6 +545,201 @@ test("successful simulation preserves the complete negotiated event stream", asy
     assert.equal(durable.lastSequence, seen.at(-1)?.sequence);
   } finally {
     await fixture.dispose();
+  }
+});
+
+test("trusted workspace completes deterministic CMake builds and skips the second configure", async () => {
+  const workspaceDirectory = await mkdtemp(join(dirname(binary), "unit-test-ide-cmake-workspace-"));
+  const serviceDirectory = await mkdtemp(join(dirname(binary), "unit-test-ide-cmake-service-"));
+  let fixture: Awaited<ReturnType<typeof startService>> | undefined;
+  let stage = "prepare workspace";
+  try {
+    await mkdir(join(workspaceDirectory, ".unit-test-ide"), { recursive: true });
+    await writeFile(
+      join(workspaceDirectory, ".unit-test-ide", "workspace.json"),
+      JSON.stringify({
+        version: 1,
+        projects: [{
+          id: "root",
+          sourceDir: ".",
+          fallback: { configurations: ["Debug"] }
+        }]
+      })
+    );
+    await writeFile(
+      join(workspaceDirectory, "CMakeLists.txt"),
+      "cmake_minimum_required(VERSION 3.25)\nproject(fixture LANGUAGES CXX)\nadd_executable(fixture-app main.cpp)\n"
+    );
+    await writeFile(join(workspaceDirectory, "main.cpp"), "int main() { return 0; }\n");
+    await writeFile(
+      join(workspaceDirectory, "CMakePresets.json"),
+      JSON.stringify({
+        version: 6,
+        configurePresets: [{
+          name: "fixture",
+          generator: "Ninja",
+          binaryDir: "${sourceDir}/build-fixture"
+        }]
+      })
+    );
+
+    stage = "start trusted service";
+    fixture = await startService(binary, serviceDirectory, {
+      workspaceRoot: workspaceDirectory,
+      trustedWorkspace: true,
+      devCMakeExecutable: cmakeFixture
+    });
+    stage = "inspect workspace";
+    const workspace = await withNamedTimeout(
+      "deterministic workspace inspection",
+      fixture.client.inspectWorkspace(),
+      EVENT_TIMEOUT_MS
+    );
+    const project = workspace.projects.find((candidate) => candidate.projectId === "root");
+    const profile = project?.buildProfiles[0];
+    assert.ok(project, "fixture project must be inspectable");
+    assert.ok(profile, "fixture project must have a verified platform toolchain profile");
+
+    stage = "subscribe first build";
+    const firstSubscription = await withNamedTimeout(
+      "first CMake event subscription",
+      fixture.client.subscribeEvents(0),
+      EVENT_TIMEOUT_MS
+    );
+    stage = "start first build";
+    const first = await withNamedTimeout(
+      "first deterministic CMake build",
+      fixture.client.startCMakeBuild({
+        idempotencyKey: randomBytes(16).toString("hex"),
+        workspaceGeneration: workspace.workspaceGeneration,
+        projectId: project.projectId,
+        buildProfileId: profile.buildProfileId,
+        targetIds: [],
+        jobs: 2,
+        timeoutMs: 30_000
+      }),
+      EVENT_TIMEOUT_MS
+    );
+    const firstEvents: ProtocolTaskEvent[] = [];
+    stage = "wait for first build";
+    const firstFinished = await waitForFinished(firstSubscription, first.taskId, firstEvents);
+    assert.equal((firstFinished.payload as { outcome?: unknown }).outcome, "succeeded");
+    assertContinuousUniqueSequences(firstEvents);
+    assert.deepEqual(
+      firstEvents
+        .filter((event) => event.event === "task.step_started")
+        .map((event) => (event.payload as { stepId?: unknown }).stepId),
+      ["configure", "build"]
+    );
+    assert.deepEqual(
+      firstEvents
+        .filter((event) => event.event === "task.step_finished")
+        .map((event) => (event.payload as { stepId?: unknown }).stepId),
+      ["configure", "build"]
+    );
+    const diagnostics = firstEvents.filter((event) => event.event === "task.diagnostic");
+    assert.ok(diagnostics.length >= 1, "build output must produce a diagnostic event");
+    assert.equal(
+      diagnostics.some((event) =>
+        (event.payload as { diagnostic?: { severity?: unknown } }).diagnostic?.severity === "warning"
+      ),
+      true
+    );
+
+    stage = "list first artifacts";
+    const artifacts = await withNamedTimeout(
+      "first CMake artifact list",
+      fixture.client.listArtifacts(first.taskId),
+      EVENT_TIMEOUT_MS
+    );
+    assert.deepEqual(
+      artifacts.items.map((artifact) => artifact.kind).sort(),
+      ["build-summary", "diagnostics", "execution-plan", "stderr", "stdout"]
+    );
+    assert.deepEqual(
+      firstEvents
+        .filter((event) => event.event === "artifact.created")
+        .map((event) => (event.payload as { kind?: unknown }).kind)
+        .sort(),
+      ["build-summary", "diagnostics", "execution-plan", "stderr", "stdout"]
+    );
+    stage = "read first artifacts";
+    const artifactText = (
+      await Promise.all(artifacts.items.map((artifact) => fixture!.client.readArtifact(artifact.artifactId)))
+    ).map((bytes) => new TextDecoder().decode(bytes)).join("\n");
+    for (const forbidden of ["UNIT_TEST_SERVICE_TOKEN", "UNIT_TEST_IDE_TOKEN", "\"env\"", "\"environment\""]) {
+      assert.equal(artifactText.includes(forbidden), false, `artifact leaked ${forbidden}`);
+    }
+
+    stage = "list CMake targets";
+    const targets = await withNamedTimeout(
+      "deterministic CMake target list",
+      fixture.client.listCMakeTargets({
+        workspaceGeneration: workspace.workspaceGeneration,
+        projectId: project.projectId,
+        buildProfileId: profile.buildProfileId
+      }),
+      EVENT_TIMEOUT_MS
+    );
+    assert.deepEqual(targets.targets.map((target) => target.name), ["fixture-app"]);
+
+    stage = "read first durable task";
+    const firstDurable = await withNamedTimeout(
+      "first deterministic durable task",
+      fixture.client.getTask(first.taskId),
+      EVENT_TIMEOUT_MS
+    );
+    stage = "subscribe second build";
+    const secondSubscription = await withNamedTimeout(
+      "second CMake event subscription",
+      fixture.client.subscribeEvents(firstDurable.lastSequence),
+      EVENT_TIMEOUT_MS
+    );
+    stage = "start second build";
+    const second = await withNamedTimeout(
+      "second deterministic CMake build",
+      fixture.client.startCMakeBuild({
+        idempotencyKey: randomBytes(16).toString("hex"),
+        workspaceGeneration: workspace.workspaceGeneration,
+        projectId: project.projectId,
+        buildProfileId: profile.buildProfileId,
+        targetIds: [],
+        jobs: 2,
+        timeoutMs: 30_000
+      }),
+      EVENT_TIMEOUT_MS
+    );
+    const secondEvents: ProtocolTaskEvent[] = [];
+    stage = "wait for second build";
+    const secondFinished = await waitForFinished(secondSubscription, second.taskId, secondEvents);
+    assert.equal((secondFinished.payload as { outcome?: unknown }).outcome, "succeeded");
+    assertContinuousUniqueSequences(secondEvents);
+    assert.equal(secondEvents[0]?.sequence, firstDurable.lastSequence + 1);
+    assert.deepEqual(
+      secondEvents
+        .filter((event) => event.event === "task.step_started")
+        .map((event) => (event.payload as { stepId?: unknown }).stepId),
+      ["build"],
+      "second build must skip configure"
+    );
+
+    stage = "read fixture state";
+    const state = JSON.parse(
+      await readFile(
+        join(workspaceDirectory, "build-fixture", ".unit-test-ide-cmake-fixture.json"),
+        "utf8"
+      )
+    ) as { configureCount?: unknown; buildCount?: unknown };
+    assert.deepEqual(
+      { configureCount: state.configureCount, buildCount: state.buildCount },
+      { configureCount: 1, buildCount: 2 }
+    );
+  } catch (error) {
+    throw new Error(`deterministic CMake E2E failed during ${stage}`, { cause: error });
+  } finally {
+    await fixture?.dispose();
+    await rm(workspaceDirectory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(serviceDirectory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
 

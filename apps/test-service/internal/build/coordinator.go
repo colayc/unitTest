@@ -285,7 +285,7 @@ func (c *Coordinator) prepare(
 		TimeoutMS      int64    `json:"timeoutMs"`
 	}{
 		ProjectID: request.ProjectID, BuildProfileID: request.BuildProfileID,
-		TargetIDs: append([]string(nil), request.TargetIDs...),
+		TargetIDs: append([]string{}, request.TargetIDs...),
 		Jobs:      request.Jobs, TimeoutMS: request.Timeout.Milliseconds(),
 	})
 	if err != nil {
@@ -401,7 +401,7 @@ func (c *Coordinator) configureState(
 		AllowedRoots: []string{
 			c.config.WorkspaceRoot.NativePath, c.config.ServiceDataRoot,
 		},
-		TargetIDs: append([]string(nil), targetIDs...), TargetNames: targetNames,
+		TargetIDs: append([]string{}, targetIDs...), TargetNames: targetNames,
 	})
 	if err != nil {
 		return nil, task.ErrInvalidArgument

@@ -12,6 +12,17 @@ var taskSummaryProjectors = map[Kind]taskSummaryProjector{
 	KindCMakeBuild: projectCMakeSummary,
 }
 
+type executionPlanArtifact struct {
+	Version int                 `json:"version"`
+	Steps   []executionPlanStep `json:"steps"`
+}
+
+type executionPlanStep struct {
+	ID      string         `json:"id"`
+	Kind    StepKind       `json:"kind"`
+	Command CommandSummary `json:"command"`
+}
+
 type simulationSummary struct {
 	TaskID     string   `json:"taskId"`
 	Scenario   Scenario `json:"scenario"`
@@ -38,17 +49,72 @@ func projectCMakeSummary(current Task, summary TaskSummary) (any, error) {
 	return summary, nil
 }
 
-func (m *Manager) commitTaskSummary(
+func (m *Manager) openTaskArtifacts(
+	current *activeTask,
+	active map[string]*activeTask,
+) error {
+	if err := m.createTaskArtifacts(current); err != nil {
+		m.tripStorage(active)
+		return ErrStorageUnavailable
+	}
+	return nil
+}
+
+func (m *Manager) createTaskArtifacts(current *activeTask) error {
+	if current == nil {
+		return ErrInvalidArgument
+	}
+	if current.artifactSink != nil {
+		return nil
+	}
+	sink, err := m.artifacts.OpenTask(
+		context.Background(), current.task.ID, current.task.Kind,
+	)
+	if err != nil || sink == nil {
+		return ErrStorageUnavailable
+	}
+	current.artifactSink = sink
+	if current.task.Kind != KindCMakeBuild {
+		return nil
+	}
+	plan := executionPlanArtifact{
+		Version: current.plan.Version,
+		Steps:   make([]executionPlanStep, len(current.plan.Steps)),
+	}
+	for index, step := range current.plan.Steps {
+		plan.Steps[index] = executionPlanStep{
+			ID: step.ID, Kind: step.Kind,
+			Command: CommandSummary{
+				Executable: step.Public.Executable,
+				Args:       append([]string(nil), step.Public.Args...),
+			},
+		}
+	}
+	if err := sink.CommitJSON(
+		context.Background(), m.newID(), "execution-plan", plan,
+	); err != nil {
+		return ErrStorageUnavailable
+	}
+	return nil
+}
+
+func (m *Manager) finalizeTaskArtifacts(
 	ctx context.Context,
+	owner *activeTask,
 	current Task,
-	artifactID string,
 	finishedAt time.Time,
 	outcome Outcome,
 	mutations []StepMutation,
-) (Artifact, error) {
+) ([]Artifact, error) {
+	if owner == nil {
+		return nil, ErrStorageUnavailable
+	}
+	if err := m.createTaskArtifacts(owner); err != nil {
+		return nil, err
+	}
 	projector, ok := taskSummaryProjectors[current.Kind]
 	if !ok {
-		return Artifact{}, ErrInvalidArgument
+		return nil, ErrInvalidArgument
 	}
 	summary := TaskSummary{
 		TaskID:     current.ID,
@@ -59,9 +125,23 @@ func (m *Manager) commitTaskSummary(
 	}
 	value, err := projector(current, summary)
 	if err != nil {
-		return Artifact{}, err
+		return nil, err
 	}
-	return m.artifacts.CommitJSON(ctx, current.ID, artifactID, finishedAt, value)
+	kind := "task-summary"
+	if current.Kind == KindCMakeBuild {
+		kind = "build-summary"
+	}
+	if err := owner.artifactSink.CommitJSON(
+		ctx, m.newID(), kind, value,
+	); err != nil {
+		return nil, err
+	}
+	artifacts, err := owner.artifactSink.Finalize(ctx, finishedAt)
+	if err != nil {
+		return nil, err
+	}
+	owner.artifactSink = nil
+	return artifacts, nil
 }
 
 func summarySteps(current []StepSnapshot, mutations []StepMutation) []StepSnapshot {

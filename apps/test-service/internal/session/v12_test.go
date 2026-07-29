@@ -163,7 +163,7 @@ func TestSessionVersion12RoutesWorkspaceInspectTargetsAndBuild(t *testing.T) {
 		targets: []cmake.Target{{ID: targetID, Name: "unit-tests"}},
 		startResult: task.Task{
 			ID: id('1'), Kind: task.KindCMakeBuild,
-			Request:             json.RawMessage(`{"projectId":"core","buildProfileId":"` + profileID + `","targetIds":["` + targetID + `"],"jobs":8}`),
+			Request:             json.RawMessage(`{"projectId":"core","buildProfileId":"` + profileID + `","targetIds":["` + targetID + `"],"jobs":8,"timeoutMs":600000}`),
 			WorkspaceGeneration: generation, Timeout: 10 * time.Minute,
 			Status: task.StatusQueued, CreatedAt: fixedTime, LastSequence: 1,
 		},
@@ -195,6 +195,32 @@ func TestSessionVersion12RoutesWorkspaceInspectTargetsAndBuild(t *testing.T) {
 		backend.buildInput.BuildProfileID != profileID || backend.buildInput.Jobs != 8 ||
 		backend.buildInput.Timeout != 10*time.Minute || !strings.Contains(string(startJSON), `"kind":"cmakeBuild"`) {
 		t.Fatalf("start = %#v input=%#v (%s)", start, backend.buildInput, startJSON)
+	}
+}
+
+func TestProtocolTaskV12RejectsNonCanonicalPersistedBuildRequest(t *testing.T) {
+	base := task.Task{
+		ID: id('1'), Kind: task.KindCMakeBuild,
+		WorkspaceGeneration: strings.Repeat("a", 64),
+		Timeout:             time.Minute,
+		Status:              task.StatusQueued,
+		CreatedAt:           fixedTime,
+	}
+	for name, request := range map[string]string{
+		"null target IDs":    `{"projectId":"core","buildProfileId":"` + strings.Repeat("b", 64) + `","targetIds":null,"jobs":1,"timeoutMs":60000}`,
+		"mismatched timeout": `{"projectId":"core","buildProfileId":"` + strings.Repeat("b", 64) + `","targetIds":[],"jobs":1,"timeoutMs":1}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			value := base
+			value.Request = json.RawMessage(request)
+			s := authenticatedV12(t, &v12Backend{getResult: value})
+			result := s.Handle(context.Background(), requestVersion(t, protocol.Version12, "tasks/get", map[string]any{
+				"taskId": value.ID,
+			}))
+			if result.Error == nil || result.Error.Code != "SERVICE_UNHEALTHY" {
+				t.Fatalf("tasks/get accepted a non-canonical persisted build request: %#v", result)
+			}
+		})
 	}
 }
 

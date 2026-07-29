@@ -55,6 +55,17 @@ func TestCoordinatorPlansConfigureThenSkipsItForUnchangedSuccessfulState(t *test
 	if started.ID == "" || len(fixture.starter.request.Plan.Steps) != 2 {
 		t.Fatalf("first task = %#v, plan = %#v", started, fixture.starter.request.Plan)
 	}
+	var persistedRequest struct {
+		TargetIDs []string `json:"targetIds"`
+		TimeoutMS int64    `json:"timeoutMs"`
+	}
+	if err := json.Unmarshal(fixture.starter.request.Request, &persistedRequest); err != nil {
+		t.Fatal(err)
+	}
+	if persistedRequest.TargetIDs == nil || len(persistedRequest.TargetIDs) != 0 ||
+		persistedRequest.TimeoutMS != fixture.request.Timeout.Milliseconds() {
+		t.Fatalf("persisted build request = %#v, want [] targetIds and matching timeout", persistedRequest)
+	}
 
 	reply := fixture.validReply()
 	fixture.reader.reply = reply

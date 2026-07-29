@@ -256,6 +256,9 @@ func (m *Manager) start(request StartRequest, active map[string]*activeTask) tas
 	}
 	active[stored.ID] = current
 	executionRetained = true
+	if err := m.openTaskArtifacts(current, active); err != nil {
+		return taskResponse{task: current.task, err: err}
+	}
 	m.armTimeout(current)
 
 	if !m.publishAll(events) {
@@ -324,6 +327,9 @@ func (m *Manager) resumeQueued(
 		watcherStop: make(chan struct{}), execution: execution,
 	}
 	active[stored.ID] = current
+	if err := m.openTaskArtifacts(current, active); err != nil {
+		return taskResponse{task: current.task, err: err}
+	}
 	m.armTimeout(current)
 	if err := m.startNextStep(current, active); err != nil {
 		return taskResponse{task: current.task, err: err}
@@ -410,12 +416,14 @@ func (m *Manager) startNextStep(current *activeTask, active map[string]*activeTa
 	runningStep := runningTask.Steps[current.nextStep]
 	runningStep.Status = StepRunning
 	runningStep.StartedAt = timePointer(startedAt)
-	events = append(events, eventDraft(
-		current.task.ID,
-		EventTaskStepStarted,
-		startedAt,
-		stepEventPayload(runningStep),
-	))
+	if current.task.Kind == KindCMakeBuild {
+		events = append(events, eventDraft(
+			current.task.ID,
+			EventTaskStepStarted,
+			startedAt,
+			stepEventPayload(runningStep),
+		))
+	}
 	stored, committed, err := m.store.Apply(context.Background(), Mutation{
 		Task: runningTask, Expected: expectedStatus,
 		Steps:  []StepMutation{{Step: runningStep, Expected: StepPending}},
@@ -567,10 +575,19 @@ func (m *Manager) persistSuccessfulStep(current *activeTask, result ProcessResul
 	step.ExitCode = intPointer(result.ExitCode)
 	updatedTask := current.task
 	updatedTask.ActiveStep = ""
-	stored, events, err := m.store.Apply(context.Background(), Mutation{
+	eventDrafts := []EventDraft(nil)
+	if current.task.Kind == KindCMakeBuild {
+		eventDrafts = append(eventDrafts, eventDraft(
+			current.task.ID,
+			EventTaskStepFinished,
+			finishedAt,
+			stepEventPayload(step),
+		))
+	}
+	stored, committed, err := m.store.Apply(context.Background(), Mutation{
 		Task: updatedTask, Expected: current.task.Status,
 		Steps:       []StepMutation{{Step: step, Expected: StepRunning}},
-		Events:      []EventDraft{eventDraft(current.task.ID, EventTaskStepFinished, finishedAt, stepEventPayload(step))},
+		Events:      eventDrafts,
 		DeleteLease: true,
 	})
 	if err != nil {
@@ -583,7 +600,7 @@ func (m *Manager) persistSuccessfulStep(current *activeTask, result ProcessResul
 	}
 	current.task = stored
 	current.leasePersisted = false
-	return publishCommitted(m, events, active)
+	return publishCommitted(m, committed, active)
 }
 
 func (m *Manager) finishExecution(
@@ -711,9 +728,18 @@ func releaseExecutionBoundary(current *activeTask) {
 func removeActiveTask(active map[string]*activeTask, taskID string) {
 	current := active[taskID]
 	if current != nil {
+		abortArtifactSink(current)
 		releaseExecutionBoundary(current)
 	}
 	delete(active, taskID)
+}
+
+func abortArtifactSink(current *activeTask) {
+	if current == nil || current.artifactSink == nil {
+		return
+	}
+	_ = current.artifactSink.Abort(context.Background())
+	current.artifactSink = nil
 }
 
 func terminalStepMutations(
@@ -779,11 +805,10 @@ func (m *Manager) persistFinished(
 	if err != nil {
 		return current, err
 	}
-	artifactID := m.newID()
-	artifact, artifactErr := m.commitTaskSummary(
+	artifacts, artifactErr := m.finalizeTaskArtifacts(
 		context.Background(),
+		owner,
 		current,
-		artifactID,
 		finishedAt,
 		outcome,
 		steps,
@@ -792,8 +817,9 @@ func (m *Manager) persistFinished(
 		m.tripStorage(active)
 		return current, ErrStorageUnavailable
 	}
-	events := make([]EventDraft, 0, 3)
-	if step, ok := finishedRunningStep(steps); ok {
+	events := make([]EventDraft, 0, len(artifacts)+2)
+	if step, ok := finishedRunningStep(steps); ok &&
+		current.Kind == KindCMakeBuild {
 		events = append(events, eventDraft(
 			current.ID,
 			EventTaskStepFinished,
@@ -801,15 +827,20 @@ func (m *Manager) persistFinished(
 			stepEventPayload(step),
 		))
 	}
+	for _, artifact := range artifacts {
+		events = append(events, eventDraft(
+			current.ID,
+			EventArtifactCreated,
+			finishedAt,
+			map[string]any{"artifactId": artifact.ID, "kind": artifact.Kind},
+		))
+	}
 	events = append(events,
-		eventDraft(current.ID, EventArtifactCreated, finishedAt, map[string]any{
-			"artifactId": artifact.ID, "kind": artifact.Kind,
-		}),
 		eventDraft(current.ID, EventTaskFinished, finishedAt, map[string]any{"outcome": outcome}),
 	)
 	stored, committed, err := m.store.Apply(context.Background(), Mutation{
 		Task: finished, Expected: current.Status, Steps: steps, Events: events,
-		DeleteLease: deleteLease, Artifacts: []Artifact{artifact},
+		DeleteLease: deleteLease, Artifacts: artifacts,
 	})
 	if err != nil {
 		if !errors.Is(err, ErrConflict) {

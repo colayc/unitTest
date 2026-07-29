@@ -8,8 +8,23 @@
   "properties": {
     "artifactId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
     "taskId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
-    "kind": { "const": "task-summary" },
-    "mimeType": { "const": "application/json" },
+    "kind": {
+      "enum": [
+        "task-summary",
+        "build-summary",
+        "execution-plan",
+        "diagnostics",
+        "stdout",
+        "stderr"
+      ]
+    },
+    "mimeType": {
+      "enum": [
+        "application/json",
+        "application/x-ndjson",
+        "application/octet-stream"
+      ]
+    },
     "sizeBytes": { "type": "integer", "minimum": 0 },
     "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "createdAt": { "type": "string", "format": "date-time" },

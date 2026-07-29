@@ -52,7 +52,7 @@ func TestManagerJournalsStepStartWithRunningMutationAfterPurePrelease(t *testing
 	if err := json.Unmarshal(running.Events[1].Payload, &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload.StepID != "first" || payload.Kind != task.StepSimulation || payload.Status != task.StepRunning {
+	if payload.StepID != "first" || payload.Kind != task.StepConfigure || payload.Status != task.StepRunning {
 		t.Fatalf("step started payload = %#v", payload)
 	}
 
@@ -337,6 +337,92 @@ func TestManagerPublishesStructuredDiagnosticsFromRuntimeOnlyStepParser(t *testi
 	f.process.complete(task.ProcessResult{ExitCode: 1})
 }
 
+func TestManagerWritesOutputAndDiagnosticsToSinkBeforeJournal(t *testing.T) {
+	f := newManagerFixture(t)
+	request := twoStepCMakeStartRequest(testID(102), time.Minute, fixedBoundary{})
+	request.Plan.Steps = request.Plan.Steps[1:]
+	request.Plan.Steps[0].DiagnosticParser = &staticDiagnosticParser{
+		values: []diagnostic.Diagnostic{{
+			Severity: "warning", Code: "W200", Message: "ordered warning",
+			StepID: "build",
+		}},
+	}
+	request.Plan.Fingerprint = task.FingerprintPlan(request.Plan)
+	started, err := f.manager.Start(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var operationsMu sync.Mutex
+	operations := make([]string, 0, 4)
+	appendOperation := func(value string) {
+		operationsMu.Lock()
+		operations = append(operations, value)
+		operationsMu.Unlock()
+	}
+	f.artifacts.onAppendOutput = func() { appendOperation("sink.output") }
+	f.artifacts.onAppendDiagnostic = func() { appendOperation("sink.diagnostic") }
+	f.store.onAppendEvent = func(draft task.EventDraft) {
+		switch draft.Type {
+		case task.EventTaskOutput:
+			appendOperation("journal.output")
+		case task.EventTaskDiagnostic:
+			appendOperation("journal.diagnostic")
+		}
+	}
+
+	f.process.output(task.ProcessOutput{
+		Stream: "stderr", Data: []byte("warning: deterministic\n"),
+	})
+	f.awaitEventType(t, task.EventTaskDiagnostic, 1)
+	operationsMu.Lock()
+	got := append([]string(nil), operations...)
+	operationsMu.Unlock()
+	if want := []string{
+		"sink.output", "journal.output", "sink.diagnostic", "journal.diagnostic",
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("artifact/journal order = %v, want %v; task=%s", got, want, started.ID)
+	}
+	f.process.complete(task.ProcessResult{ExitCode: 0})
+}
+
+func TestManagerIgnoresDiagnosticParserPanicForProcessOutcome(t *testing.T) {
+	f := newManagerFixture(t)
+	request := twoStepCMakeStartRequest(testID(103), time.Minute, fixedBoundary{})
+	request.Plan.Steps = request.Plan.Steps[1:]
+	request.Plan.Steps[0].DiagnosticParser = panickingDiagnosticParser{}
+	request.Plan.Fingerprint = task.FingerprintPlan(request.Plan)
+	started, err := f.manager.Start(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.process.output(task.ProcessOutput{Stream: "stderr", Data: []byte("parser input\n")})
+	f.process.complete(task.ProcessResult{ExitCode: 0})
+	finished := f.awaitTask(t, started.ID, task.StatusFinished)
+	if finished.Outcome != task.OutcomeSucceeded || !f.manager.Healthy() {
+		t.Fatalf("parser panic changed process outcome: task=%#v healthy=%v", finished, f.manager.Healthy())
+	}
+}
+
+func TestManagerArtifactSinkFailureTerminatesProcessAndTripsCircuit(t *testing.T) {
+	f := newManagerFixture(t)
+	request := twoStepCMakeStartRequest(testID(104), time.Minute, fixedBoundary{})
+	request.Plan.Steps = request.Plan.Steps[1:]
+	request.Plan.Fingerprint = task.FingerprintPlan(request.Plan)
+	started, err := f.manager.Start(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.artifacts.fail = errors.New("artifact sink unavailable")
+	f.process.output(task.ProcessOutput{Stream: "stdout", Data: []byte("output")})
+	f.awaitUnhealthy(t)
+	f.awaitTerminate(t, 1)
+	stored, err := f.manager.Get(context.Background(), started.ID)
+	if err != nil || stored.Status == task.StatusFinished {
+		t.Fatalf("sink failure fabricated terminal state: %#v, %v", stored, err)
+	}
+}
+
 type recordingStepObserver struct {
 	calls  int
 	taskID string
@@ -362,6 +448,16 @@ func (p *staticDiagnosticParser) Feed(string, []byte) []diagnostic.Diagnostic {
 }
 
 func (p *staticDiagnosticParser) Close() []diagnostic.Diagnostic { return nil }
+
+type panickingDiagnosticParser struct{}
+
+func (panickingDiagnosticParser) Feed(string, []byte) []diagnostic.Diagnostic {
+	panic("parser failure")
+}
+
+func (panickingDiagnosticParser) Close() []diagnostic.Diagnostic {
+	panic("parser failure")
+}
 
 func (b *recordingManagedBoundary) Adopt(taskID string) {
 	b.mu.Lock()
@@ -1973,33 +2069,35 @@ func twoStepStartRequest(idempotencyKey string, timeout time.Duration, boundary 
 		Version: 1,
 		Steps: []task.ExecutionStep{
 			{
-				ID: "first", Kind: task.StepSimulation,
+				ID: "first", Kind: task.StepConfigure,
 				Process: task.ProcessSpec{
 					Executable: "trusted-service",
 					Args:       []string{"--task-fixture", "success"},
 					Dir:        "simulation-dir",
 				},
+				Public: task.CommandSummary{Executable: "cmake", Args: []string{"--configure"}},
 			},
 			{
-				ID: "second", Kind: task.StepSimulation,
+				ID: "second", Kind: task.StepBuild,
 				Process: task.ProcessSpec{
 					Executable: "trusted-service",
 					Args:       []string{"--task-fixture", "success"},
 					Dir:        "simulation-dir",
 				},
+				Public: task.CommandSummary{Executable: "cmake", Args: []string{"--build"}},
 			},
 		},
 	}
 	plan.Fingerprint = task.FingerprintPlan(plan)
-	request, _ := json.Marshal(map[string]any{"scenario": task.ScenarioSuccess, "timeoutMs": timeout.Milliseconds()})
+	request, _ := json.Marshal(map[string]any{"sourceRoot": "src", "buildRoot": "build"})
 	return task.StartRequest{
-		IdempotencyKey: idempotencyKey,
-		Kind:           task.KindSimulation,
-		Request:        request,
-		Scenario:       task.ScenarioSuccess,
-		Timeout:        timeout,
-		Plan:           plan,
-		Boundary:       boundary,
+		IdempotencyKey:      idempotencyKey,
+		Kind:                task.KindCMakeBuild,
+		Request:             request,
+		WorkspaceGeneration: strings.Repeat("a", 64),
+		Timeout:             timeout,
+		Plan:                plan,
+		Boundary:            boundary,
 	}
 }
 
