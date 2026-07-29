@@ -357,7 +357,7 @@ func (adapter *clangCLAdapter) probeClangGenerator(
 	candidate clangCLCandidate,
 	verify func() error,
 ) (clangGeneratorProbeResult, error) {
-	path := adapter.options.config.NinjaPath
+	path := candidate.context.ninja
 	if path == "" {
 		return clangGeneratorProbeResult{},
 			invalidProbe("BUILD_TOOL_NOT_FOUND", "clang-cl Ninja is unavailable")

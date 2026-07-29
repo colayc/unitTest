@@ -17,7 +17,7 @@ Native E2E 不是直接调用 CMake 的 smoke script，而是使用真实 TypeSc
 
 | 平台 | required family | 主要 generator |
 | --- | --- | --- |
-| Windows | MSVC、clang-cl | Visual Studio 18 2026 或经过验证的 Ninja |
+| Windows | MSVC、clang-cl | Visual Studio 18 2026；clang-cl 使用经过验证的独立 Ninja，或已验证 Visual Studio 实例随附的 Ninja |
 | Linux | GCC、Clang | 经过验证的 Ninja；不可用时为 Unix Makefiles |
 
 产品提供 CMake runtime，不提供 compiler。缺少 compiler 时应安装平台工具链，而不是把 compiler 下载逻辑加入产品运行时。

@@ -685,6 +685,14 @@ func captureMSVCContext(
 		verifiedDirectories = append(verifiedDirectories, netFXReference)
 	}
 	environmentIdentity := windowsDirectoryDescriptorIdentity(verifiedDirectories)
+	ninja, err := discoverWindowsNinjaPath(
+		ctx,
+		options.config.NinjaPath,
+		installation,
+	)
+	if err != nil {
+		return msvcContext{}, err
+	}
 	candidate := msvcContext{
 		id:                  requested.ID,
 		manual:              requested.ID != "",
@@ -701,7 +709,7 @@ func captureMSVCContext(
 		cl:                  filepath.Join(binaryDirectory, "cl.exe"),
 		link:                filepath.Join(binaryDirectory, "link.exe"),
 		msbuild:             filepath.Join(installation.Path, "MSBuild", "Current", "Bin", "MSBuild.exe"),
-		ninja:               options.config.NinjaPath,
+		ninja:               ninja,
 		vsDevCmd:            vsDevCmd.path,
 		vsDevCmdIdentity:    vsDevCmd.identity,
 	}
@@ -715,6 +723,76 @@ func captureMSVCContext(
 		return msvcContext{}, invalidProbe("TOOLCHAIN_PROBE_FAILED", "MSVC context changed")
 	}
 	return candidate, nil
+}
+
+func discoverWindowsNinjaPath(
+	ctx context.Context,
+	configured string,
+	installation visualStudioInstallation,
+) (string, error) {
+	candidates := []struct {
+		path string
+		root string
+	}{
+		{path: configured},
+		{
+			path: filepath.Join(
+				installation.Path,
+				"Common7",
+				"IDE",
+				"CommonExtensions",
+				"Microsoft",
+				"CMake",
+				"Ninja",
+				"ninja.exe",
+			),
+			root: installation.Path,
+		},
+	}
+	seen := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		if candidate.path == "" {
+			continue
+		}
+		key := identityPath(candidate.path)
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		ninja, err := openWindowsToolSnapshot(ctx, candidate.path)
+		if err != nil {
+			if isContextError(err) {
+				return "", err
+			}
+			continue
+		}
+		toolPath, _, identityErr := canonicalWindowsFileSystemIdentity(ninja.path)
+		verifyErr := ninja.Verify(ctx)
+		_ = ninja.Close()
+		if isContextError(identityErr) {
+			return "", identityErr
+		}
+		if isContextError(verifyErr) {
+			return "", verifyErr
+		}
+		if identityErr != nil || verifyErr != nil ||
+			identityPath(toolPath) != identityPath(ninja.path) {
+			continue
+		}
+		if candidate.root != "" &&
+			(!pathWithinWindowsRoot(candidate.root, toolPath) ||
+				verifyWindowsDirectory(
+					installation.Path,
+					installation.Identity,
+				) != nil) {
+			continue
+		}
+		return toolPath, nil
+	}
+	return "", nil
 }
 
 func (candidate msvcContext) verify(ctx context.Context) error {

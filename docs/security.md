@@ -37,7 +37,7 @@ CMake build 由 Service 根据已验证的 Workspace、Build Profile、Toolchain
 - version 与 capability probe 通过；
 - 路径不来自 Protocol request。
 
-产品捆绑 CMake runtime，但不捆绑 compiler。MSVC、clang-cl、GCC、Clang 和 build tool 都在固定目录或受限 PATH 内发现并验证；Service 不继承不受信任的用户 PATH 来决定执行目标。
+产品捆绑 CMake runtime，但不捆绑 compiler。MSVC、clang-cl、GCC、Clang 和 build tool 都在固定目录或受限 PATH 内发现并验证；Service 不继承不受信任的用户 PATH 来决定执行目标。Windows 优先检查固定的独立 CMake/Ninja 位置；该位置不可用时，只回退到已由 `vswhere` 发现并固定 identity 的 Visual Studio 实例内 `Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja/ninja.exe`，并在 probe 前后复验 executable、父目录和安装根 identity。
 
 ## IPC、token 与数据
 

@@ -400,6 +400,7 @@ Toolchain ID 根据 family、规范 executable identity、version、target tripl
 ### 12.3 Windows clang-cl
 
 - 检测 LLVM 安装中的 `clang-cl`、`lld-link` 和版本。
+- Ninja 先从固定的独立 CMake 安装位置发现；若该位置不存在，只允许回退到当前已验证 Visual Studio 实例随附的 `Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja/ninja.exe`。回退路径必须仍位于该实例固定 identity 的安装根内，probe 前后复验 executable、Ninja 父目录和 Visual Studio 安装根，不能从用户 `PATH` 补全。
 - 组合已验证的 MSVC/Windows SDK environment。
 - 验证 CMake generator 是否支持该组合。
 - Phase 3 完成真实构建与诊断；只记录 `llvm-profdata`/`llvm-cov` capability，不执行覆盖率。

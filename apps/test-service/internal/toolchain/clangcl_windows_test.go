@@ -114,6 +114,63 @@ func TestClangCLAddsVerifiedNinjaToProductionShapedEnvironment(t *testing.T) {
 	}
 }
 
+func TestClangCLFallsBackToVisualStudioBundledNinja(t *testing.T) {
+	fixture := newWindowsToolchainFixture(t)
+	if err := os.Remove(fixture.ninja); err != nil {
+		t.Fatal(err)
+	}
+	visualStudioNinja := filepath.Join(
+		fixture.installation,
+		"Common7",
+		"IDE",
+		"CommonExtensions",
+		"Microsoft",
+		"CMake",
+		"Ninja",
+		"ninja.exe",
+	)
+	writeWindowsTool(t, visualStudioNinja)
+	runner := newWindowsFakeRunner(fixture)
+	runner.setOutput(
+		visualStudioNinja,
+		[]string{"--version"},
+		successfulWindowsOutput("1.12.1\r\n"),
+	)
+	manual := []workspace.ToolchainConfig{{
+		ID:          "manual-clang-cl",
+		Family:      string(FamilyClangCL),
+		CCompiler:   fixture.clang,
+		CPPCompiler: fixture.clang,
+	}}
+	adapters, err := newWindowsAdapters(runner, manual, fixture.options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	instances, discoverErr := adapters[1].Discover(context.Background())
+	if discoverErr != nil || len(instances) != 1 {
+		t.Fatalf(
+			"clang-cl Discover(Visual Studio Ninja) = %#v, %v",
+			instances,
+			discoverErr,
+		)
+	}
+	if !reflect.DeepEqual(instances[0].Generators, []string{"Ninja"}) {
+		t.Fatalf("clang-cl generators = %#v, want Ninja", instances[0].Generators)
+	}
+	if !windowsPathListContains(
+		map[string]string{
+			"PATH": windowsEnvironmentValues(instances[0].Environment)["PATH"],
+		},
+		filepath.Dir(visualStudioNinja),
+	) {
+		t.Fatalf(
+			"clang-cl PATH omitted Visual Studio Ninja: %#v",
+			instances[0].Environment,
+		)
+	}
+	runner.requireCall(t, visualStudioNinja, []string{"--version"})
+}
+
 func TestClangCLGeneratorEnvironmentBoundaryFailsClosedForAdapterAndRegistry(t *testing.T) {
 	tests := []struct {
 		name          string

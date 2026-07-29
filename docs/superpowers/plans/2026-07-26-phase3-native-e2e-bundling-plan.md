@@ -611,6 +611,7 @@ fake discovery snapshot 覆盖：
 
 - MSVC 必须选择 generated profile、Visual Studio generator 和明确 architecture；
 - clang-cl 必须同时具备 LLVM、MSVC environment、Windows SDK 和可用 generator；
+- Windows Ninja discovery 优先使用固定的独立 CMake/Ninja；该文件不存在时，只回退到已验证 Visual Studio instance 内固定布局的随附 Ninja，并把 executable、父目录与安装根 identity 纳入 probe 复验；
 - 只安装 `clang.exe` 而没有 `clang-cl.exe` 不算 clang-cl；
 - required `msvc,clang-cl` 中任一 family 缺失即失败；
 - report 只保留 Visual Studio instance ID/toolset version，不保存安装绝对路径或捕获 environment。
