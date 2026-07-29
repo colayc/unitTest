@@ -145,6 +145,7 @@ queued/running/cancelling ──服务重启恢复──► finished/interrupted
 - 因终止操作产生的非零退出码不能覆盖 `cancelled` 或 `timed_out`。
 - 进程已自然退出后到达的取消请求不改变结果。
 - 进程启动、I/O 或进程管理失败归类为 `infrastructure_failed`。
+- `Shutdown(ctx)` 在线性化 shutdown intent 后等待 Manager 停止；若等待期间 `ctx.Done()` 与 `stopped` 同时可读，返回 `ctx.Err()`，避免随机报告成功。调用入口已经停止的 Manager 仍幂等返回 `nil`。
 - 主进程退出后，ProcessRunner 必须先终止或确认 Job/Process Group 中没有剩余后代，再允许任务进入 `finished`。
 
 ## 7. 模拟任务

@@ -486,6 +486,9 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-m.stopped:
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		return nil
 	}
 }

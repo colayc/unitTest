@@ -3,6 +3,7 @@ package task
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 )
@@ -29,4 +30,32 @@ func TestShutdownPublishesOneIntentWithoutBlockingOnFullCommandQueue(t *testing.
 	if got := len(manager.shutdownSignal); got != 1 {
 		t.Fatalf("shutdown intents after retry = %d, want 1", got)
 	}
+}
+
+func TestShutdownCancellationWinsWhenStopCompletesDuringWait(t *testing.T) {
+	for range 64 {
+		stopped := make(chan struct{})
+		manager := &Manager{
+			shutdownSignal: make(chan struct{}, 1),
+			stopped:        stopped,
+		}
+		base, cancel := context.WithCancel(context.Background())
+		cancel()
+		ctx := &stopWhenDoneContext{Context: base, stopped: stopped}
+
+		if err := manager.Shutdown(ctx); !errors.Is(err, context.Canceled) {
+			t.Fatalf("Shutdown error = %v, want cancellation", err)
+		}
+	}
+}
+
+type stopWhenDoneContext struct {
+	context.Context
+	stopped chan struct{}
+	once    sync.Once
+}
+
+func (c *stopWhenDoneContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.stopped) })
+	return c.Context.Done()
 }

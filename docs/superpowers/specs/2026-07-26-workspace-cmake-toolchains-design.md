@@ -776,6 +776,7 @@ ArtifactStore 从仅验证 simulation summary 扩展为按 task kind 注册 arti
 - Build Profile 稳定 ID。
 - MSVC、clang-cl、GCC 和 Clang discovery/probe。
 - MSVC 固定环境捕获模板和敏感变量清理。
+- 跨平台 E2E 的首次 `workspace/inspect` 使用独立的 30 秒 cold-discovery 外层预算，以容纳 Windows hosted runner 首次加载 Visual Studio Installer 与 MSBuild 的延迟；每个 production probe 自身的固定参数、输出上限和 5 秒命令预算保持不变。
 - ExecutionPlan 的 executable、cwd、NUL、environment key/secret 校验，以及每 Step `ProcessSpec.Args <= 256`、`ProcessSpec.Env <= 256`、`CommandSummary.Args <= 256` 的精确边界。
 - configure/build Step 状态、取消、超时和失败短路。
 - SQLite migration、旧 simulation `scenario + timeoutMs` 回填、旧 hash语义 replay、checksum/unknown-version防护与 queued 恢复。

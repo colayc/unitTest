@@ -18,6 +18,7 @@ const root = resolve(import.meta.dirname, "../../..");
 const binary = join(root, "build", process.platform === "win32" ? "unit-test-service.exe" : "unit-test-service");
 const cmakeFixture = join(root, "build", process.platform === "win32" ? "cmake-fixture.exe" : "cmake-fixture");
 const EVENT_TIMEOUT_MS = 8_000;
+const WORKSPACE_INSPECTION_TIMEOUT_MS = 30_000;
 const V11_EVENT_NAMES = new Set([
   "task.created",
   "task.started",
@@ -585,6 +586,7 @@ test("trusted workspace completes deterministic CMake builds and skips the secon
 
     stage = "start trusted service";
     fixture = await startService(binary, serviceDirectory, {
+      timeoutMs: WORKSPACE_INSPECTION_TIMEOUT_MS,
       workspaceRoot: workspaceDirectory,
       trustedWorkspace: true,
       devCMakeExecutable: cmakeFixture
@@ -593,7 +595,7 @@ test("trusted workspace completes deterministic CMake builds and skips the secon
     const workspace = await withNamedTimeout(
       "deterministic workspace inspection",
       fixture.client.inspectWorkspace(),
-      EVENT_TIMEOUT_MS
+      WORKSPACE_INSPECTION_TIMEOUT_MS
     );
     const project = workspace.projects.find((candidate) => candidate.projectId === "root");
     const profile = project?.buildProfiles[0];
