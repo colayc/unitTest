@@ -514,15 +514,54 @@ async function executeCoreScenarios(
         await symlink(outside, join(workspaceRoot, "linked-project"), "dir");
         await overwriteWorkspaceConfig(workspaceRoot, "linked-project");
       },
-      "PROJECT_INVALID",
+      "WORKSPACE_INVALID_CONFIG",
     );
   }
 
   reportNativeScenario(context.family, "service-recovery");
+  const recoverySnapshot = await withNamedTimeout(
+    `${context.family} recovery workspace inspection`,
+    context.fixture.client.inspectWorkspace(),
+    nativeTimeoutMs,
+  );
+  const recoverySelected = selectGeneratedProfile(recoverySnapshot, context.family);
+  if (recoverySelected === undefined) {
+    throw new Error(`${context.family} recovery toolchain profile is absent`);
+  }
+  const recoveryContext: FamilyExecutionContext = {
+    ...context,
+    ...recoverySelected,
+  };
+  const recoveryReady = await startBuild(
+    context.fixture.client,
+    recoveryContext,
+    [],
+    60_000,
+  );
+  await waitForTask(
+    context.fixture.client,
+    subscription,
+    recoveryReady.taskId,
+  );
+  const recoveryTargets = await withNamedTimeout(
+    `${context.family} recovery target listing`,
+    context.fixture.client.listCMakeTargets({
+      workspaceGeneration: recoverySnapshot.workspaceGeneration,
+      projectId: recoverySelected.projectId,
+      buildProfileId: recoverySelected.profile.buildProfileId,
+    }),
+    nativeTimeoutMs,
+  );
+  const recoverySlow = recoveryTargets.targets.find(
+    (target) => target.name === "slow_target",
+  );
+  if (recoverySlow === undefined) {
+    throw new Error(`${context.family} recovery target slow_target is absent`);
+  }
   const recoverable = await startBuild(
     context.fixture.client,
-    context,
-    [slow.targetId],
+    recoveryContext,
+    [recoverySlow.targetId],
     60_000,
   );
   await waitForStep(subscription, recoverable.taskId, "build");
@@ -536,6 +575,17 @@ async function executeCoreScenarios(
   if (recovered.status !== "finished" || recovered.outcome !== "interrupted") {
     throw new Error(
       `${context.family} recovered task = ${recovered.status}/${String(recovered.outcome)}`,
+    );
+  }
+  const restartedSnapshot = await withNamedTimeout(
+    `${context.family} restarted workspace inspection`,
+    context.fixture.client.inspectWorkspace(),
+    nativeTimeoutMs,
+  );
+  if (restartedSnapshot.workspaceGeneration !== recoverySnapshot.workspaceGeneration) {
+    throw new Error(
+      `${context.family} workspace generation changed across restart: ` +
+      `${recoverySnapshot.workspaceGeneration} -> ${restartedSnapshot.workspaceGeneration}`,
     );
   }
   return {

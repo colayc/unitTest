@@ -49,6 +49,26 @@ func TestUnixResolveRelativeRejectsSymlinkEscapeWithMissingTail(t *testing.T) {
 	}
 }
 
+func TestUnixLoadConfigRejectsSourceDirectorySymlinkEscape(t *testing.T) {
+	base := t.TempDir()
+	rootPath := filepath.Join(base, "root")
+	outside := filepath.Join(base, "outside")
+	if err := os.Mkdir(rootPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(rootPath, "linked-project")); err != nil {
+		t.Fatal(err)
+	}
+
+	data := []byte(`{"version":1,"projects":[{"id":"linked","sourceDir":"linked-project"}]}`)
+	if _, err := loadConfigAtRoot(t, rootPath, data); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("LoadConfig error = %v, want ErrInvalidConfig for sourceDir symlink escape", err)
+	}
+}
+
 func TestUnixSymlinkAliasHasSameStableIdentity(t *testing.T) {
 	base := t.TempDir()
 	target := filepath.Join(base, "target")

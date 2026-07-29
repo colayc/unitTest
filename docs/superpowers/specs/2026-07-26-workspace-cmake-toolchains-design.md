@@ -528,6 +528,8 @@ Toolchain 只投影 family、version、target triple、host/target architecture�
 
 workspace 配置无效或超过大小上限时，Runtime 忽略其中的 CMake override 与 manual toolchain，不在 pre-READY 阶段退出；Service 以安全空配置启动，并由 `workspace/inspect` 返回 `WORKSPACE_INVALID_CONFIG` 或 `WORKSPACE_CONFIG_TOO_LARGE` 阻断诊断。这样客户端可以解释和修复配置，同时无效配置不会获得执行能力。
 
+`sourceDir` 在配置解码阶段按 workspace root 解析真实路径。Linux symlink 或 Windows junction/reparse point 指向 workspace 外部时，配置在 project inspection 与进程创建之前被拒绝，并由 `workspace/inspect` 返回 `WORKSPACE_INVALID_CONFIG`；`PROJECT_INVALID` 仅用于已通过配置解码、但项目内容本身无效的情况。
+
 #### `cmake/targets/list`
 
 请求包含：
@@ -770,6 +772,7 @@ ArtifactStore 从仅验证 simulation summary 扩展为按 task kind 注册 arti
 - Workspace Config Schema、大小、深度和数量限制。
 - Windows/Linux path containment。
 - symlink、junction 和 reparse point 越界。
+- Native E2E 验证 `sourceDir` symlink 越界在配置层返回 `WORKSPACE_INVALID_CONFIG`，且不会进入 project inspection 或创建进程。
 - CMake Resolver、bundle manifest 和摘要验证。
 - Preset include 图、cycle、unsupported version 和外部 include。
 - Workspace Generation 与 Configure Fingerprint。
@@ -777,6 +780,7 @@ ArtifactStore 从仅验证 simulation summary 扩展为按 task kind 注册 arti
 - MSVC、clang-cl、GCC 和 Clang discovery/probe。
 - MSVC 固定环境捕获模板和敏感变量清理。
 - 跨平台 E2E 的首次 `workspace/inspect` 使用独立的 30 秒 cold-discovery 外层预算，以容纳 Windows hosted runner 首次加载 Visual Studio Installer 与 MSBuild 的延迟；每个 production probe 自身的固定参数、输出上限和 5 秒命令预算保持不变。
+- Native E2E 在 Service recovery 场景开始前重新执行 `workspace/inspect`，用最新 generation/profile 完成基线构建并解析 slow target；重启后同时验证持久 Task 收敛为 `interrupted`，以及未变更 workspace 的 generation 保持稳定。
 - Native E2E 等待 terminal event 时使用有界 liveness heartbeat：持续保留同一个 pending subscription read，查询 durable Task 状态；连接失活时由客户端执行 reconnect/replay，durable Task 已 terminal 但事件尚未到达时最多触发一次 terminal replay。验收仍要求收到连续 sequence 的 `task.finished`，不能用轮询快照替代事件契约。
 - ExecutionPlan 的 executable、cwd、NUL、environment key/secret 校验，以及每 Step `ProcessSpec.Args <= 256`、`ProcessSpec.Env <= 256`、`CommandSummary.Args <= 256` 的精确边界。
 - configure/build Step 状态、取消、超时和失败短路。
