@@ -429,7 +429,7 @@ func TestMSVCParserAcceptsClangCLDiagnosticWithoutNumericCode(t *testing.T) {
 		"src/main.cpp(3,21): error: use of undeclared identifier 'UNIT_TEST_IDE_UNKNOWN_IDENTIFIER'\n",
 	)), parser.Close()...)
 	if len(got) != 1 || got[0].Source != "compiler" ||
-		got[0].Severity != "error" || got[0].Code != "" ||
+		got[0].Severity != "error" || got[0].Code != "COMPILER_ERROR" ||
 		got[0].Message !=
 			"use of undeclared identifier 'UNIT_TEST_IDE_UNKNOWN_IDENTIFIER'" ||
 		got[0].Range == nil ||

@@ -283,11 +283,15 @@ func (p *parser) consumeMSVCLine(state *streamState, line string) []Diagnostic {
 			severity = "error"
 		}
 		location := p.location(match[1], parsePositive(match[2]), parsePositive(match[3]))
+		message := msvcProjectSuffixPattern.ReplaceAllString(match[6], "")
+		code := match[5]
+		if code == "" {
+			message, code = compilerMessageAndCode(message, severity)
+		}
 		state.pending = &Diagnostic{
 			TaskID: p.options.TaskID, StepID: p.options.StepID,
 			Source: "compiler", ToolchainID: p.options.ToolchainID,
-			Severity: severity, Code: match[5],
-			Message: msvcProjectSuffixPattern.ReplaceAllString(match[6], ""),
+			Severity: severity, Code: code, Message: message,
 			FileURI: location.uri, Range: location.rangeValue,
 			External: location.external,
 		}

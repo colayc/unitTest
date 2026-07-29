@@ -5,7 +5,7 @@
       "severity": "error",
       "file": "<workspace>/src/main.cpp",
       "line": 3,
-      "codePattern": "^(C[0-9]+|)$",
+      "codePattern": "^(C[0-9]+|COMPILER_ERROR)$",
       "messageContains": "UNIT_TEST_IDE_UNKNOWN_IDENTIFIER"
     }
   ]
