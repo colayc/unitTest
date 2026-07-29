@@ -274,7 +274,7 @@ Preset 模式：
 Generated 模式：
 
 - 必须选择已验证 toolchain；
-- Windows MSVC 使用对应 Visual Studio generator 和 architecture；
+- Windows MSVC 优先使用对应 Visual Studio generator 和 architecture；若该 Visual Studio generator capability 未通过验证，但同一已验证 Visual Studio 实例提供的 Ninja 已通过固定路径、identity 与 version probe，则允许使用 Ninja，并继续显式传递已捕获的 MSVC/Windows SDK environment 与 compiler path；
 - Linux GCC/Clang 显式选择经过检测的 generator；
 - Linux 优先使用可用的 Ninja，否则使用经过验证的 Unix Makefiles；
 - Windows clang-cl 仅在所需 LLVM、MSVC/Windows SDK 环境及 generator 均可用时生成 Profile；
@@ -391,6 +391,7 @@ Toolchain ID 根据 family、规范 executable identity、version、target tripl
 - 使用 Visual Studio 安装器附带的 `vswhere` 定位包含 C++ workload 的实例。
 - `vswhere` 会把可扩展的 Visual Studio Installer property store 投影到顶层 JSON。Adapter 先执行总大小、UTF-8、NUL、重复 key 和 installation 数量边界校验，再只把 `instanceId`、`installationPath`、`installationVersion`、`isComplete`、`isLaunchable` 投影到发现模型；其他有界 metadata 不参与 path、argument、environment 或 executable 决策，Visual Studio Installer 增加字段时也不会扩大执行面。
 - Visual Studio generator capability 需要安装实例内、已固定 identity 的 `MSBuild.exe` 以固定参数成功返回有界 version 输出；parser 同时支持单行 numeric 形式与 VS 2026 的 banner 加 numeric 形式，拒绝互相冲突的 major，并要求其 major 与 `vswhere installationVersion` 一致。generator 名称只由该已验证 installation major 决定。
+- MSVC generated profile 按 `Visual Studio 18 2026`、`Visual Studio 17 2022`、`Ninja` 的封闭顺序选择 generator。Ninja 只作为 Visual Studio generator capability 不可用时的回退；它必须来自已验证的固定位置，构建仍使用该 MSVC 实例捕获并验证的 compiler、linker、Windows SDK 与 environment，不把 `PATH` 提升为发现入口。
 - 使用固定模板调用安装实例自己的 `VsDevCmd.bat`，捕获特定 host/target architecture 的环境。
 - `.bat` 调用是受信任 MSVC Adapter 的发现步骤，不是 Build Task 的 Shell 执行入口。
 - `VsDevCmd.bat` 路径来自已验证 Visual Studio 实例；architecture、toolset 和 SDK 参数来自枚举，不能包含客户端文本。

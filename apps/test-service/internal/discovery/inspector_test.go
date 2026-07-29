@@ -364,6 +364,7 @@ func TestInspectorAppliesFamilyGeneratorPolicyAndDoesNotGuessConfigurations(t *t
 		testToolchain("gcc", toolchain.FamilyGCC, "Unix Makefiles", "Ninja"),
 		testToolchain("clang", toolchain.FamilyClang, "Unix Makefiles"),
 		testToolchain("msvc", toolchain.FamilyMSVC, "Visual Studio 17 2022", "Ninja"),
+		testToolchain("msvc-ninja", toolchain.FamilyMSVC, "Ninja"),
 		testToolchain("clang-cl", toolchain.FamilyClangCL, "Visual Studio 17 2022", "Ninja"),
 	}
 	config := workspace.Config{
@@ -396,7 +397,7 @@ func TestInspectorAppliesFamilyGeneratorPolicyAndDoesNotGuessConfigurations(t *t
 	}
 	want := map[string]string{
 		"gcc": "Ninja", "clang": "Unix Makefiles",
-		"msvc": "Visual Studio 17 2022", "clang-cl": "Ninja",
+		"msvc": "Visual Studio 17 2022", "msvc-ninja": "Ninja", "clang-cl": "Ninja",
 	}
 	if !reflect.DeepEqual(got, want) ||
 		!strings.Contains(diagnosticsText(snapshot), "PROJECT_HAS_NO_BUILD_PROFILE") {

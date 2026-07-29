@@ -1062,15 +1062,16 @@ func TestMSVCProductionDiscoveryFindsInstalledVisualStudio(t *testing.T) {
 		}
 		t.Fatalf("production compiler/generator stage error = %v", probeErr)
 	}
-	foundVisualStudioGenerator := false
+	foundSupportedGenerator := false
 	for _, generator := range instance.Generators {
 		if generator == "Visual Studio 17 2022" ||
-			generator == "Visual Studio 18 2026" {
-			foundVisualStudioGenerator = true
+			generator == "Visual Studio 18 2026" ||
+			generator == "Ninja" {
+			foundSupportedGenerator = true
 		}
 	}
-	if !foundVisualStudioGenerator {
-		t.Fatalf("production MSVC instance lacks Visual Studio generator: %#v", instance)
+	if !foundSupportedGenerator {
+		t.Fatalf("production MSVC instance lacks a supported generator: %#v", instance)
 	}
 }
 

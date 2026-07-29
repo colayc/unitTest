@@ -132,6 +132,41 @@ func TestPlannerNormalizesToolchainEnvironmentAndOmitsBuildTypeForMultiConfig(t 
 	}
 }
 
+func TestPlannerUsesMSVCEnvironmentWithNinjaFallback(t *testing.T) {
+	fixture := newPlannerFixture(t)
+	fixture.toolchain.Family = toolchain.FamilyMSVC
+	fixture.toolchain.Environment = []string{"Path=trusted-msvc", "INCLUDE=sdk"}
+	plan, err := Plan(PlanInput{
+		Installation:  fixture.installation,
+		WorkspaceRoot: fixture.root,
+		Project:       fixture.project,
+		Profile:       fixture.profile,
+		Toolchain:     fixture.toolchain,
+		Jobs:          2,
+		Configure:     true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	arguments := strings.Join(plan.Steps[0].Process.Args, "\n")
+	for _, expected := range []string{
+		"-G\nNinja",
+		"-DCMAKE_BUILD_TYPE=Debug",
+		"-DCMAKE_C_COMPILER=" + filepath.ToSlash(fixture.toolchain.CCompiler),
+		"-DCMAKE_CXX_COMPILER=" + filepath.ToSlash(fixture.toolchain.CXXCompiler),
+	} {
+		if !strings.Contains(arguments, expected) {
+			t.Fatalf("MSVC Ninja configure args lack %q: %#v", expected, plan.Steps[0].Process.Args)
+		}
+	}
+	if !reflect.DeepEqual(
+		plan.Steps[0].Process.Env,
+		[]string{"INCLUDE=sdk", "PATH=trusted-msvc"},
+	) {
+		t.Fatalf("MSVC Ninja environment = %#v", plan.Steps[0].Process.Env)
+	}
+}
+
 func TestExecutionBoundaryRejectsExecutableIdentityReplacement(t *testing.T) {
 	fixture := newPlannerFixture(t)
 	boundary, err := NewExecutionBoundary(fixture.installation, fixture.root, fixture.dataRoot)

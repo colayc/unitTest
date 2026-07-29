@@ -581,6 +581,7 @@ Native matrix runner、离线 bundle preflight、required-family policy、路径
 - File API 错误地拒绝 workspace 外的 compiler identity 和已校验 CMake/toolchain root；
 - invalid workspace config 在 Runtime pre-READY 阶段退出，客户端无法读取阻断诊断；
 - Native E2E 的 Service data path 过长，触发 MSBuild `MSB3491`/`.tlog` 路径失败。
+- Hosted Runner 升级到 Visual Studio 18 后，MSVC 已验证成功但 Visual Studio generator capability 未生成；generated profile policy 现保持 Visual Studio generator 优先，并在同一实例随附 Ninja 已通过固定路径、identity 与 version probe 时有界回退到 Ninja。
 
 本地验证证据：
 
@@ -609,7 +610,7 @@ Linux GCC/Clang 与 Windows clang-cl 的真实 required-family 运行仍必须�
 
 fake discovery snapshot 覆盖：
 
-- MSVC 必须选择 generated profile、Visual Studio generator 和明确 architecture；
+- MSVC 必须选择 generated profile、明确 architecture，以及优先 Visual Studio、仅在该 capability 不可用时回退到已验证 Ninja 的封闭 generator policy；
 - clang-cl 必须同时具备 LLVM、MSVC environment、Windows SDK 和可用 generator；
 - Windows Ninja discovery 优先使用固定的独立 CMake/Ninja；该文件不存在时，只回退到已验证 Visual Studio instance 内固定布局的随附 Ninja，并把 executable、父目录与安装根 identity 纳入 probe 复验；
 - 只安装 `clang.exe` 而没有 `clang-cl.exe` 不算 clang-cl；
@@ -631,7 +632,7 @@ pnpm --filter @unit-test-ide/service-probe test:e2e:native:windows
 
 使用 discovery 返回的 MSVC generated profile 驱动 Task 3 的全部正常 lifecycle 场景，并额外断言：
 
-- generator 属于 Adapter 已验证的 Visual Studio generator；
+- generator 属于 Adapter 已验证的 Visual Studio generator；若该 capability 不可用，则只允许使用同一已验证 Visual Studio 实例随附并通过固定路径、identity 与 version probe 的 Ninja；
 - `configuration` 明确为 `Debug`；
 - environment 仅由 Service 内部 MSVC Adapter 构造；
 - build artifact 是当前 architecture 的 PE executable；
@@ -776,6 +777,7 @@ env:
 - native runner 在动态加载矩阵实现前安装 Node.js HTTP(S) network guard，覆盖 `http`、`https`、`http2` 与全局 `fetch`，同时保留本地 IPC 所需的 `net`；
 - Windows native data/build 根不再使用用户 profile temp：普通 clone 使用 checkout 的 `.native-e2e/work`，managed worktree 使用主 checkout 的同名目录。这保留了 MSBuild 短路径预算，也避免因用户 profile 祖先无法以“不共享 delete”方式固定而错误放宽 Service owner-only/TOCTOU 架构；
 - 本地 Windows 已在 guard 启用时通过 MSVC 19.44/Visual Studio 17 2022 全场景；本机 clang-cl 不满足 production discovery 前提，Windows clang-cl 与 Linux GCC/Clang 仍等待 fixed Hosted CI required-family 证据。
+- Hosted Windows Runner 已升级到 Visual Studio 18；production discovery 能验证 MSVC 19.51 与 VS-bundled Ninja。为避免把 CMake/Visual Studio generator 支持版本与 compiler family 可用性错误绑定，MSVC generated profile 继续优先 Visual Studio generator，并在其 capability 缺失时回退到已验证 Ninja。
 
 - [ ] **Step 5：执行完整本地门禁**
 

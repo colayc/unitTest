@@ -559,7 +559,7 @@ func preferredGenerator(explicit string, instance toolchain.Instance) string {
 	case toolchain.FamilyGCC, toolchain.FamilyClang:
 		policy = []string{"Ninja", "Unix Makefiles"}
 	case toolchain.FamilyMSVC:
-		policy = []string{"Visual Studio 18 2026", "Visual Studio 17 2022"}
+		policy = []string{"Visual Studio 18 2026", "Visual Studio 17 2022", "Ninja"}
 	case toolchain.FamilyClangCL:
 		policy = []string{"Ninja"}
 	default:
