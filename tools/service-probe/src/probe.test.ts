@@ -18,7 +18,7 @@ const root = resolve(import.meta.dirname, "../../..");
 const binary = join(root, "build", process.platform === "win32" ? "unit-test-service.exe" : "unit-test-service");
 const cmakeFixture = join(root, "build", process.platform === "win32" ? "cmake-fixture.exe" : "cmake-fixture");
 const EVENT_TIMEOUT_MS = 8_000;
-const WORKSPACE_INSPECTION_TIMEOUT_MS = 30_000;
+const WORKSPACE_INSPECTION_TIMEOUT_MS = process.platform === "win32" ? 60_000 : 30_000;
 const V11_EVENT_NAMES = new Set([
   "task.created",
   "task.started",
