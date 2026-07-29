@@ -311,7 +311,7 @@ func (p *parser) consumeGNULine(state *streamState, line string) []Diagnostic {
 	if match == nil {
 		lineMatch := gnuLinePattern.FindStringSubmatch(line)
 		if lineMatch == nil {
-			return p.flush(state)
+			return p.consumeLinkerLine(state, line)
 		}
 		match = []string{
 			lineMatch[0], lineMatch[1], lineMatch[2], "",

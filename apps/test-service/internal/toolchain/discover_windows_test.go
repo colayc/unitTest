@@ -261,15 +261,35 @@ func TestWindowsVSWhereStrictlyBoundsAndValidatesInstallations(t *testing.T) {
 		installations[0].Version != "17.10.4" {
 		t.Fatalf("parseVSWhereOutput(valid) = %#v", installations)
 	}
+	extended := `[{
+		"instanceId":"visual-studio-18",
+		"installationPath":"C:\\Program Files\\Microsoft Visual Studio\\18\\Enterprise",
+		"installationVersion":"18.6.11819.183",
+		"isComplete":true,
+		"isLaunchable":true,
+		"installChannelUri":"https://aka.ms/vs/18/release/channel",
+		"installCatalogUri":"https://aka.ms/vs/18/release/catalog",
+		"futureMetadata":{"command":"ignored","values":[1,true,"bounded"]}
+	}]`
+	installations, err = parseVSWhereOutput([]byte(extended))
+	if err != nil {
+		t.Fatalf("parseVSWhereOutput(extended metadata) error = %v", err)
+	}
+	if len(installations) != 1 ||
+		installations[0].ID != "visual-studio-18" ||
+		installations[0].Path != `C:\Program Files\Microsoft Visual Studio\18\Enterprise` ||
+		installations[0].Version != "18.6.11819.183" {
+		t.Fatalf("parseVSWhereOutput(extended metadata) = %#v", installations)
+	}
 
 	cases := map[string]string{
-		"malformed":         `[`,
-		"trailing value":    valid + `{}`,
-		"duplicate key":     `[{"instanceId":"a","instanceId":"b","installationPath":"C:\\VS","installationVersion":"17.0","isComplete":true,"isLaunchable":true}]`,
-		"missing id":        `[{"installationPath":"C:\\VS","installationVersion":"17.0","isComplete":true,"isLaunchable":true}]`,
-		"missing state":     `[{"instanceId":"a","installationPath":"C:\\VS","installationVersion":"17.0"}]`,
-		"duplicate install": `[{"instanceId":"a","installationPath":"C:\\VS1","installationVersion":"17.0","isComplete":true,"isLaunchable":true},{"instanceId":"A","installationPath":"C:\\VS2","installationVersion":"17.0","isComplete":true,"isLaunchable":true}]`,
-		"unknown field":     `[{"instanceId":"a","installationPath":"C:\\VS","installationVersion":"17.0","isComplete":true,"isLaunchable":true,"command":"bad"}]`,
+		"malformed":               `[`,
+		"trailing value":          valid + `{}`,
+		"duplicate key":           `[{"instanceId":"a","instanceId":"b","installationPath":"C:\\VS","installationVersion":"17.0","isComplete":true,"isLaunchable":true}]`,
+		"duplicate extension key": `[{"instanceId":"a","installationPath":"C:\\VS","installationVersion":"17.0","isComplete":true,"isLaunchable":true,"futureMetadata":{"value":1,"VALUE":2}}]`,
+		"missing id":              `[{"installationPath":"C:\\VS","installationVersion":"17.0","isComplete":true,"isLaunchable":true}]`,
+		"missing state":           `[{"instanceId":"a","installationPath":"C:\\VS","installationVersion":"17.0"}]`,
+		"duplicate install":       `[{"instanceId":"a","installationPath":"C:\\VS1","installationVersion":"17.0","isComplete":true,"isLaunchable":true},{"instanceId":"A","installationPath":"C:\\VS2","installationVersion":"17.0","isComplete":true,"isLaunchable":true}]`,
 	}
 	for name, input := range cases {
 		t.Run(name, func(t *testing.T) {

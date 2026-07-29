@@ -114,6 +114,23 @@ func TestLinkerGoldenRecognizesErrorsAndIgnoresOrdinaryOutput(t *testing.T) {
 	}
 }
 
+func TestGNUParserRecognizesUbuntuLinkerFailureFromBuildStep(t *testing.T) {
+	parser := newTestParser(t, FamilyGNU)
+	got := append(parser.Feed("stderr", []byte(
+		"/usr/bin/ld: CMakeFiles/linker_failure.dir/src/main.cpp.o: in function `main':\n"+
+			"/home/runner/work/unitTest/unitTest/src/main.cpp:4:(.text+0x5): undefined reference to `native_missing_symbol()'\n"+
+			"collect2: error: ld returned 1 exit status\n",
+	)), parser.Close()...)
+	if len(got) != 2 ||
+		got[0].Source != "linker" ||
+		got[0].Severity != "error" ||
+		got[0].Code != "LD_UNDEFINED_REFERENCE" ||
+		!strings.Contains(got[0].Message, "native_missing_symbol") ||
+		got[1].Code != "LD_ERROR" {
+		t.Fatalf("GNU build-step linker diagnostics = %#v", got)
+	}
+}
+
 func TestLinkerParsersRecognizeRestrictedMSVCAndLLDLinkShapes(t *testing.T) {
 	tests := []struct {
 		name    string

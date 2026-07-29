@@ -769,7 +769,9 @@ func parseVSWhereOutput(output []byte) ([]visualStudioInstallation, error) {
 	}
 	var wire []vswhereInstallationWire
 	decoder := json.NewDecoder(bytes.NewReader(output))
-	decoder.DisallowUnknownFields()
+	// vswhere projects extensible Visual Studio Installer property stores into
+	// the top-level object. Only the typed fields below participate in
+	// discovery; bounded extension metadata is deliberately ignored.
 	decoder.UseNumber()
 	if err := decoder.Decode(&wire); err != nil {
 		return nil, fmt.Errorf("%w: decode vswhere JSON", ErrInvalidToolchain)

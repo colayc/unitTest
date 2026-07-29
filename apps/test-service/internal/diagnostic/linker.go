@@ -4,7 +4,7 @@ import "regexp"
 
 var (
 	gnuUndefinedReferencePattern = regexp.MustCompile(
-		`^(?:.+/)?ld(?:\.exe)?: (.+): undefined reference to (.+)$`,
+		`^(?:(?:.+/)?ld(?:\.exe)?: )?(.+): undefined reference to (.+)$`,
 	)
 	lldUndefinedSymbolPattern = regexp.MustCompile(
 		`^ld\.lld: error: undefined symbol: (.+)$`,

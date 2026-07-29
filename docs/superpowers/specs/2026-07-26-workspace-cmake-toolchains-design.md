@@ -389,6 +389,7 @@ Toolchain ID 根据 family、规范 executable identity、version、target tripl
 ### 12.2 Windows MSVC
 
 - 使用 Visual Studio 安装器附带的 `vswhere` 定位包含 C++ workload 的实例。
+- `vswhere` 会把可扩展的 Visual Studio Installer property store 投影到顶层 JSON。Adapter 先执行总大小、UTF-8、NUL、重复 key 和 installation 数量边界校验，再只把 `instanceId`、`installationPath`、`installationVersion`、`isComplete`、`isLaunchable` 投影到发现模型；其他有界 metadata 不参与 path、argument、environment 或 executable 决策，Visual Studio Installer 增加字段时也不会扩大执行面。
 - 使用固定模板调用安装实例自己的 `VsDevCmd.bat`，捕获特定 host/target architecture 的环境。
 - `.bat` 调用是受信任 MSVC Adapter 的发现步骤，不是 Build Task 的 Shell 执行入口。
 - `VsDevCmd.bat` 路径来自已验证 Visual Studio 实例；architecture、toolset 和 SDK 参数来自枚举，不能包含客户端文本。
@@ -695,6 +696,7 @@ Protocol 中的 line/column 使用零起始、结束位置不包含在范围内�
 - clang-cl 的 MSVC 风格或 Clang 风格输出；
 - GCC/Clang `file:line:column`；
 - GNU ld、LLD、lld-link、link.exe 常见 linker error；
+- GCC/Clang build Step 使用同一个 `FamilyGNU` 流式 parser：先匹配 compiler diagnostic；未匹配时只回落到受限的 GNU ld/LLD/`collect2` linker pattern，从而覆盖 Ubuntu GCC 把 `undefined reference` 绑定到 source-location 行的输出，同时不把普通 output 提升为 Diagnostic；
 - template instantiation、included-from 和 note chain。
 
 ### 16.2 流式处理
