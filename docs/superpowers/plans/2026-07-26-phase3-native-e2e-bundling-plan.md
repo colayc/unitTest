@@ -696,7 +696,7 @@ git commit -m "test: cover windows msvc and clang-cl builds"
 - 输入： Phase 3A–3D 全部交付。
 - 输出： 固定的 Windows/Linux CI、用户/开发者说明、PR readiness evidence。
 
-- [ ] **Step 1：先写 CI 结构检查**
+- [x] **Step 1：先写 CI 结构检查**
 
 扩展 `tools/workspace-smoke/workspace-smoke.test.mjs`，解析 workflow text 并断言：
 
@@ -708,7 +708,7 @@ git commit -m "test: cover windows msvc and clang-cl builds"
 - 两个 job 都上传 `toolchain-report.json`；
 - workflow 不使用 `windows-latest` 或 `ubuntu-latest`。
 
-- [ ] **Step 2：运行 workspace smoke 并确认失败**
+- [x] **Step 2：运行 workspace smoke 并确认失败**
 
 运行：
 
@@ -718,7 +718,7 @@ pnpm test:workspace
 
 预期： FAIL，原因是 workflow 仍使用浮动 matrix labels。
 
-- [ ] **Step 3：将 workflow 拆成固定平台 job**
+- [x] **Step 3：将 workflow 拆成固定平台 job**
 
 保留现有 Node/Go/pnpm 固定版本，把单一 matrix job 改为 `verify-windows` 与 `verify-linux`。两个 job 的核心顺序：
 
@@ -754,7 +754,7 @@ env:
 
 `prepare:cmake-bundle` 是 CI 唯一允许的 CMake 网络准备步骤；native E2E 开始前设置 test harness network guard，任何 HTTP(S) 请求都使测试失败。
 
-- [ ] **Step 4：更新中文文档**
+- [x] **Step 4：更新中文文档**
 
 文档必须清楚说明：
 
@@ -766,6 +766,15 @@ env:
 - 自定义 CMake 只允许受信任 workspace 的绝对 executable，并经过固定 probe；
 - 如何显式准备 bundle、运行 local native E2E、查看无敏感信息报告；
 - Phase 5 才实现 clang-cl/Clang/GCC coverage，Phase 8 才实现签名安装包和升级/回滚。
+
+**2026-07-29 实施记录：**
+
+- workspace smoke 已先在旧 `windows-latest`/`ubuntu-latest` matrix 上按预期失败，再在固定双 job workflow 上通过；
+- Windows job 固定 `windows-2025-vs2026` 并强制 `msvc,clang-cl`，Linux job 固定 `ubuntu-24.04` 并强制 `gcc,clang`；
+- 每个 job 都按 `verify → prepare:cmake-bundle → test:e2e:native` 顺序执行，并只上传对应平台的 `toolchain-report.json`；
+- native runner 在动态加载矩阵实现前安装 Node.js HTTP(S) network guard，覆盖 `http`、`https`、`http2` 与全局 `fetch`，同时保留本地 IPC 所需的 `net`；
+- Windows native data/build 根不再使用用户 profile temp：普通 clone 使用 checkout 的 `.native-e2e/work`，managed worktree 使用主 checkout 的同名目录。这保留了 MSBuild 短路径预算，也避免因用户 profile 祖先无法以“不共享 delete”方式固定而错误放宽 Service owner-only/TOCTOU 架构；
+- 本地 Windows 已在 guard 启用时通过 MSVC 19.44/Visual Studio 17 2022 全场景；本机 clang-cl 不满足 production discovery 前提，Windows clang-cl 与 Linux GCC/Clang 仍等待 fixed Hosted CI required-family 证据。
 
 - [ ] **Step 5：执行完整本地门禁**
 

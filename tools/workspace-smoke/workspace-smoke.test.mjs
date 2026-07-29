@@ -82,6 +82,61 @@ test("README contains the complete local verification gate", async () => {
   }
 });
 
+test("Phase 3 documentation records desktop, bundle, native, and security boundaries", async () => {
+  const readme = await readFile("README.md", "utf8");
+  const development = await readFile("docs/development.md", "utf8");
+  const security = await readFile("docs/security.md", "utf8");
+  const bundle = await readFile("docs/cmake-bundle.md", "utf8");
+  const native = await readFile("docs/native-e2e.md", "utf8");
+  assert.match(readme, /Code-OSS desktop/);
+  assert.match(readme, /最终用户运行产品不必连接 GitHub/);
+  assert.doesNotMatch(readme, /不会执行工作区代码、CMake/);
+  assert.match(development, /pnpm install --frozen-lockfile --offline/);
+  assert.match(security, /Protocol request[\s\S]*executable[\s\S]*raw args[\s\S]*environment[\s\S]*cwd/);
+  assert.match(bundle, /archive SHA-256[\s\S]*license[\s\S]*installed-file SHA-256/);
+  assert.match(native, /windows-2025-vs2026[\s\S]*ubuntu-24\.04/);
+  assert.match(native, /Phase 5[\s\S]*llvm-cov/);
+  assert.match(native, /Phase 8[\s\S]*签名安装包/);
+});
+
+test("Hosted CI pins native toolchain runners and enforces the complete matrix", async () => {
+  const workflow = await readFile(".github/workflows/foundation.yml", "utf8");
+  assert.doesNotMatch(workflow, /\b(?:windows|ubuntu)-latest\b/);
+  assert.match(workflow, /^\s{2}verify-windows:\s*$/m);
+  assert.match(workflow, /^\s{4}runs-on:\s*windows-2025-vs2026\s*$/m);
+  assert.match(
+    workflow,
+    /^\s{6}UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS:\s*msvc,clang-cl\s*$/m,
+  );
+  assert.match(workflow, /^\s{2}verify-linux:\s*$/m);
+  assert.match(workflow, /^\s{4}runs-on:\s*ubuntu-24\.04\s*$/m);
+  assert.match(
+    workflow,
+    /^\s{6}UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS:\s*gcc,clang\s*$/m,
+  );
+
+  for (const [job, platform] of [
+    ["verify-windows", "windows"],
+    ["verify-linux", "linux"],
+  ]) {
+    const start = workflow.indexOf(`  ${job}:`);
+    assert.notEqual(start, -1);
+    const nextJob = workflow.indexOf("\n  verify-", start + 3);
+    const source = workflow.slice(start, nextJob === -1 ? undefined : nextJob);
+    const verify = source.indexOf("pnpm verify");
+    const prepare = source.indexOf("pnpm prepare:cmake-bundle");
+    const native = source.indexOf("pnpm test:e2e:native");
+    assert.ok(verify !== -1 && prepare > verify && native > prepare);
+    assert.match(source, /uses:\s*actions\/upload-artifact@v7/);
+    assert.match(source, /if:\s*always\(\)/);
+    assert.match(
+      source,
+      new RegExp(`path:\\s*\\.native-e2e/artifacts/${platform}/toolchain-report\\.json`),
+    );
+    assert.match(source, /run:\s*git diff --exit-code/);
+  }
+});
+
 test("dependency metadata uses the official npm registry", async () => {
   assert.equal((await readFile(".npmrc", "utf8")).trim(), "registry=https://registry.npmjs.org/");
   assert.doesNotMatch(await readFile("pnpm-lock.yaml", "utf8"), /registry\.npmmirror\.com/);

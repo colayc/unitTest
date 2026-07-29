@@ -1,10 +1,11 @@
 import { resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
-import {
-  runNativeMatrix,
-  type RequiredToolchainFamily,
-} from "./native-build.js";
+import type { RequiredToolchainFamily } from "./native-build.js";
+import { installNativeHttpNetworkGuard } from "./native-network-guard.js";
+import { resolveNativeWorkDirectory } from "./native-work-root.js";
+
+installNativeHttpNetworkGuard();
 
 const repositoryRoot = resolve(import.meta.dirname, "../../..");
 
@@ -26,6 +27,7 @@ function parsePlatform(arguments_: readonly string[]): "linux" | "win32" {
 }
 
 export async function main(arguments_: readonly string[] = process.argv.slice(2)): Promise<void> {
+  const { runNativeMatrix } = await import("./native-build.js");
   const platform = parsePlatform(arguments_);
   if (platform !== process.platform) {
     throw new Error(`native E2E for ${platform} must run on ${platform}`);
@@ -42,7 +44,7 @@ export async function main(arguments_: readonly string[] = process.argv.slice(2)
       "artifacts",
       platform === "linux" ? "linux" : "windows",
     ),
-    workDirectory: resolve(tmpdir(), "uti-native"),
+    workDirectory: resolveNativeWorkDirectory(repositoryRoot, platform, tmpdir()),
   });
   process.stdout.write(`${JSON.stringify({
     platform,

@@ -295,7 +295,7 @@ Build Profile ID 由 project、origin、Preset 或生成配置、toolchain ident
 
 每个 build directory 使用进程内互斥与文件锁双重保护，避免并发 Service 或并发任务同时 configure/build 同一目录。
 
-Windows generated profile 传给 CMake 的 compiler path 统一规范化为 `/` 分隔符，避免 CMake 生成的内部脚本把 `\P` 等片段解释为转义。Native E2E 的短生命周期 Service data root 使用受控短目录键，为 Visual Studio generator 的 `CMakeScratch/TryCompile` 和 MSBuild `.tlog` 保留传统 260 字符路径预算；workspace 本身仍覆盖空格与 Unicode。正式客户端同样必须把 Service data root 放在短、固定、owner-only 的产品目录。
+Windows generated profile 传给 CMake 的 compiler path 统一规范化为 `/` 分隔符，避免 CMake 生成的内部脚本把 `\P` 等片段解释为转义。Native E2E 的短生命周期 Service data root 使用 repository 管理的 `.native-e2e/work`：普通 clone 位于当前 checkout，`.worktrees/<name>` managed worktree 位于主 checkout。它不使用用户 profile temp，因此 Service 仍能以不共享 delete 的句柄固定全部祖先；同时为 Visual Studio generator 的 `CMakeScratch/TryCompile` 和 MSBuild `.tlog` 保留传统 260 字符路径预算。workspace 本身仍覆盖空格与 Unicode。正式客户端同样必须把 Service data root 放在短、固定、owner-only 且祖先可固定的产品目录，不能通过放宽 owner-only/TOCTOU 验证来兼容任意 temp 路径。
 
 ## 10. Workspace Generation 与 Configure Fingerprint
 

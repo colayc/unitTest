@@ -1,12 +1,16 @@
 # C/C++ Unit Test IDE
 
-Phase 2 提供带版本的协议、可复用的 TypeScript 客户端和本地 Go 任务服务。当前服务只执行 `success`、`exit-nonzero`、`hang`、`spawn-child`、`emit-output` 五种受控 simulation；协议不接受程序路径、Shell 字符串、任意参数、任意环境变量或任意工作目录，也不会执行工作区代码、CMake、编译器、测试框架或覆盖率工具。本阶段没有 Code-OSS UI。
+当前仓库已推进到 Phase 3D：在 Phase 2 的版本化协议、TypeScript 客户端和本地 Go Service 基础上，加入 Protocol v1.2、CMake workspace 检查、MSVC/clang-cl/GCC/Clang 工具链发现、固定 CMake runtime，以及通过真实 Service lifecycle 执行的 native configure/build E2E。Phase 2 的受控 simulation 仍保留；协议仍不接受客户端 executable、Shell 字符串、任意参数、任意环境变量或任意工作目录。
+
+最终产品是 Code-OSS desktop 客户端：TypeScript 负责桌面 UI 与 IDE 集成，Go Service 在用户本机完成 workspace、构建、测试和覆盖率工作。它不是依赖 GitHub 的浏览器服务；GitHub 只用于源码托管、PR、CI 和发布准备，最终用户运行产品不必连接 GitHub。当前阶段尚未实现 Code-OSS UI。
 
 ## 前置条件
 
 - Node.js 24.18.0
 - 通过 Corepack 使用 pnpm 11.4.0
 - Go 1.26.5
+- Windows native 验证：MSVC 与 Windows SDK；clang-cl 场景还需要 LLVM
+- Linux native 验证：GCC 或 Clang；推荐 Ninja，缺少 Ninja 时可使用经过验证的 Unix Makefiles
 
 ## 安装与验证
 
@@ -29,13 +33,39 @@ pnpm test:go:race
 pnpm test:e2e
 ```
 
+## CMake runtime 与 native E2E
+
+产品固定使用 CMake 4.3.4 runtime，但不捆绑 compiler。开发环境或 CI 必须显式准备经过 manifest、archive、executable、installed-file 和 license 摘要验证的 bundle：
+
+```sh
+pnpm prepare:cmake-bundle
+pnpm test:e2e:native
+```
+
+本地运行允许记录未安装的非必需工具链为 `skipped`。要求完整平台矩阵时，Windows PowerShell 使用：
+
+```powershell
+$env:UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS='msvc,clang-cl'
+pnpm test:e2e:native
+```
+
+Linux 使用：
+
+```sh
+UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS=gcc,clang pnpm test:e2e:native
+```
+
+报告写入 `.native-e2e/artifacts/<platform>/toolchain-report.json`，只包含 compiler family/version、generator、CMake version 和场景状态，不记录 token、环境变量或主机绝对路径。native E2E 启动时会安装 HTTP(S) network guard；bundle 下载只允许发生在显式的 `prepare:cmake-bundle` 阶段。
+
+更多说明见 [开发指南](docs/development.md)、[安全边界](docs/security.md)、[CMake bundle](docs/cmake-bundle.md) 和 [native E2E](docs/native-e2e.md)。
+
 ## 协议与安全边界
 
 协议模型由 `packages/protocol-schema/schema` 生成。生成的 TypeScript 和 Go 文件已提交；请编辑 Schema 并运行 `pnpm generate:protocol`，不要直接编辑生成文件。消息继续使用 UTF-8 NDJSON，每行编码后上限为 1 MiB。
 
 服务会监听随机的 per-user Windows Named Pipe，或权限模式为 `0600` 的 Linux Unix Socket。每个连接在使用其他方法前都必须完成 token handshake。身份验证 token 文件必须归当前用户所有，且只能由该用户访问：Unix 使用仅所有者可用的权限位，Windows 使用受保护的仅所有者 DACL。写入 token 前，启动器运行 `unit-test-service --prepare-token-file <path>`，使 Go 二进制程序以平台原生的仅所有者权限创建空文件。服务独立验证该文件，并在使用 token 后将其删除。
 
-协议 `1.0` 保留 Phase 1 的严格响应形状，可完成 handshake、查询旧能力和关闭服务。协议 `1.1` 新增受控任务、事件重放、持久化与制品能力。新客户端优先协商 `1.1`，仅在服务明确拒绝时回退到 `1.0`；`1.0` 连接不能调用 Phase 2 方法。
+协议 `1.0` 保留 Phase 1 的严格响应形状，可完成 handshake、查询旧能力和关闭服务。协议 `1.1` 新增受控任务、事件重放、持久化与制品能力。协议 `1.2` 新增 workspace、Build Profile、Toolchain、Target、CMake build 与结构化 Diagnostic。客户端只调用封闭的语义方法；`1.0`/`1.1` compatibility gate 继续保留。
 
 ## 任务生命周期
 
