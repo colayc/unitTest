@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import type { WorkspaceSnapshot } from "@unit-test-ide/protocol-models";
+import { ProtocolError, type ProtocolClient } from "@unit-test-ide/test-client";
 import type { TaskServiceFixture } from "./probe.js";
 import {
   __testing,
@@ -186,6 +187,73 @@ test("declared required family absence fails and bundle preflight stays before l
   );
   assert.equal(launches, 0);
   assert.equal(workspaces, 0);
+});
+
+test("diagnostic fixture refreshes one stale generation before Task creation", async () => {
+  const requests: Array<{ idempotencyKey: string; workspaceGeneration: string }> = [];
+  let inspections = 0;
+  const refreshed = workspaceSnapshot("gcc");
+  refreshed.workspaceGeneration = "b".repeat(64);
+  const client = {
+    inspectWorkspace: async () => {
+      inspections++;
+      return refreshed;
+    },
+    startCMakeBuild: async (
+      request: { idempotencyKey: string; workspaceGeneration: string },
+    ) => {
+      requests.push(request);
+      if (requests.length === 1) {
+        throw new ProtocolError("WORKSPACE_CHANGED", "workspace generation is stale", true);
+      }
+      return { taskId: "task-after-refresh" };
+    },
+  } as unknown as ProtocolClient;
+
+  const selected = __testing.selectGeneratedProfile(workspaceSnapshot("gcc"), "gcc");
+  assert.ok(selected);
+  const task = await __testing.startFailureBuildWithStaleRetry(
+    client,
+    selected,
+    "gcc",
+    "linker-failure",
+  );
+
+  assert.equal(task.taskId, "task-after-refresh");
+  assert.equal(inspections, 1);
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0]?.workspaceGeneration, "a".repeat(64));
+  assert.equal(requests[1]?.workspaceGeneration, "b".repeat(64));
+  assert.notEqual(requests[0]?.idempotencyKey, requests[1]?.idempotencyKey);
+});
+
+test("diagnostic fixture stale-generation retry is bounded to one", async () => {
+  let starts = 0;
+  let inspections = 0;
+  const client = {
+    inspectWorkspace: async () => {
+      inspections++;
+      return workspaceSnapshot("gcc");
+    },
+    startCMakeBuild: async () => {
+      starts++;
+      throw new ProtocolError("WORKSPACE_CHANGED", "workspace generation is stale", true);
+    },
+  } as unknown as ProtocolClient;
+  const selected = __testing.selectGeneratedProfile(workspaceSnapshot("gcc"), "gcc");
+  assert.ok(selected);
+
+  await assert.rejects(
+    __testing.startFailureBuildWithStaleRetry(
+      client,
+      selected,
+      "gcc",
+      "linker-failure",
+    ),
+    (error) => error instanceof ProtocolError && error.code === "WORKSPACE_CHANGED",
+  );
+  assert.equal(starts, 2);
+  assert.equal(inspections, 1);
 });
 
 test("native report contains stable summaries and rejects absolute tool paths", () => {

@@ -696,7 +696,12 @@ async function runFailureScenario(
       fixture.client.subscribeEvents(0),
       nativeTimeoutMs,
     );
-    const task = await startBuild(fixture.client, selected, [], 60_000);
+    const task = await startFailureBuildWithStaleRetry(
+      fixture.client,
+      selected,
+      context.family,
+      fixtureName,
+    );
     const events = await waitForTask(
       fixture.client,
       subscription,
@@ -764,6 +769,23 @@ async function inspectEstablishedFamily(
       codes.length === 0 ? "none" : codes.join(",")
     }`,
   );
+}
+
+async function startFailureBuildWithStaleRetry(
+  client: ProtocolClient,
+  selected: SelectedProfile,
+  family: RequiredToolchainFamily,
+  scenario: string,
+) {
+  try {
+    return await startBuild(client, selected, [], 60_000);
+  } catch (error) {
+    if (!(error instanceof ProtocolError) || error.code !== "WORKSPACE_CHANGED") {
+      throw error;
+    }
+  }
+  const refreshed = await inspectEstablishedFamily(client, family, scenario);
+  return startBuild(client, refreshed, [], 60_000);
 }
 
 async function loadGoldenDiagnostics(
@@ -1277,4 +1299,5 @@ function withinRoot(root: string, candidate: string): boolean {
 export const __testing = Object.freeze({
   runNativeMatrixWithDependencies,
   selectGeneratedProfile,
+  startFailureBuildWithStaleRetry,
 });
