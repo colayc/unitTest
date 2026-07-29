@@ -1,6 +1,7 @@
 package build
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -12,6 +13,7 @@ import (
 
 type executionBoundary struct {
 	executable     string
+	executableFile *os.File
 	executableInfo os.FileInfo
 	workspaceRoot  workspace.Root
 	workspaceInfo  os.FileInfo
@@ -20,6 +22,8 @@ type executionBoundary struct {
 	lock           *DirectoryLock
 	mu             sync.Mutex
 	adoptedTaskID  string
+	releaseOnce    sync.Once
+	releaseErr     error
 }
 
 func NewExecutionBoundary(
@@ -43,27 +47,32 @@ func newExecutionBoundary(
 	if err != nil || filepath.Clean(executable) != installation.Executable {
 		return nil, task.ErrInvalidArgument
 	}
-	executableInfo, err := os.Stat(executable)
-	if err != nil || executableInfo.IsDir() {
+	executableFile, executableInfo, err := pinExecutable(executable)
+	if err != nil {
+		return nil, task.ErrInvalidArgument
+	}
+	fail := func() (*executionBoundary, error) {
+		_ = executableFile.Close()
 		return nil, task.ErrInvalidArgument
 	}
 	workspaceInfo, err := os.Stat(workspaceRoot.NativePath)
 	if err != nil || !workspaceInfo.IsDir() {
-		return nil, task.ErrInvalidArgument
+		return fail()
 	}
 	dataRoot, err := workspace.OpenRoot(serviceDataRoot)
 	if err != nil || dataRoot.ID == workspaceRoot.ID ||
 		dataRoot.Contains(workspaceRoot.NativePath) ||
 		workspaceRoot.Contains(dataRoot.NativePath) {
-		return nil, task.ErrInvalidArgument
+		return fail()
 	}
 	dataInfo, err := os.Stat(dataRoot.NativePath)
 	if err != nil || !dataInfo.IsDir() {
-		return nil, task.ErrInvalidArgument
+		return fail()
 	}
 	return &executionBoundary{
-		executable: executable, executableInfo: executableInfo,
-		workspaceRoot: workspaceRoot, workspaceInfo: workspaceInfo,
+		executable: executable, executableFile: executableFile,
+		executableInfo: executableInfo,
+		workspaceRoot:  workspaceRoot, workspaceInfo: workspaceInfo,
 		dataRoot: dataRoot, dataInfo: dataInfo, lock: lock,
 	}, nil
 }
@@ -72,12 +81,20 @@ func (b *executionBoundary) ValidateExecutable(path string) error {
 	if b == nil {
 		return task.ErrInvalidArgument
 	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.executableFile == nil {
+		return task.ErrInvalidArgument
+	}
 	absolute, err := filepath.Abs(path)
 	if err != nil || filepath.Clean(absolute) != b.executable {
 		return task.ErrInvalidArgument
 	}
-	current, err := os.Stat(absolute)
-	if err != nil || current.IsDir() || !os.SameFile(b.executableInfo, current) {
+	if err := validatePinnedExecutable(
+		b.executableFile,
+		b.executableInfo,
+		absolute,
+	); err != nil {
 		return task.ErrInvalidArgument
 	}
 	return nil
@@ -98,14 +115,28 @@ func (b *executionBoundary) Release() error {
 	if b == nil {
 		return nil
 	}
+	b.releaseOnce.Do(func() {
+		b.mu.Lock()
+		lock := b.lock
+		executableFile := b.executableFile
+		b.lock = nil
+		b.executableFile = nil
+		b.mu.Unlock()
+
+		var result error
+		if lock != nil {
+			result = errors.Join(result, lock.Release())
+		}
+		if executableFile != nil {
+			result = errors.Join(result, executableFile.Close())
+		}
+		b.mu.Lock()
+		b.releaseErr = result
+		b.mu.Unlock()
+	})
 	b.mu.Lock()
-	lock := b.lock
-	b.lock = nil
-	b.mu.Unlock()
-	if lock == nil {
-		return nil
-	}
-	return lock.Release()
+	defer b.mu.Unlock()
+	return b.releaseErr
 }
 
 func (b *executionBoundary) adopted() bool {
@@ -119,6 +150,11 @@ func (b *executionBoundary) adopted() bool {
 
 func (b *executionBoundary) ValidateWorkingDirectory(path string) error {
 	if b == nil || path == "" {
+		return task.ErrInvalidArgument
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.executableFile == nil {
 		return task.ErrInvalidArgument
 	}
 	workspaceInfo, workspaceErr := os.Stat(b.workspaceRoot.NativePath)

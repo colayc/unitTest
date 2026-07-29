@@ -57,7 +57,10 @@ test("copyNativeFixture supports a new workspace directory containing spaces and
   assert.equal(destination, join(parent, "native 空格 Ω"));
   assert.equal(
     await readFile(join(destination, "src", "main.cpp"), "utf8"),
-    "int main() {\n  return 0;\n}\n",
+    await readFile(
+      join(fixtureRoot, "fallback-project", "src", "main.cpp"),
+      "utf8",
+    ),
   );
   await assert.rejects(
     copyNativeFixture("fallback-project", parent, "native 空格 Ω"),

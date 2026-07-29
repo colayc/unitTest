@@ -18,6 +18,13 @@ Protocol request 只表达封闭的语义操作。客户端不能提交：
 
 CMake build 由 Service 根据已验证的 Workspace、Build Profile、Toolchain、Target 和固定策略生成 `ExecutionPlan`。CMake project 与 Presets 属于受信任 workspace 的原生语义，不会变成远程命令入口。
 
+每个 build `ExecutionBoundary` 在任务被采用前固定已验证的 CMake executable，并在任务终结时统一释放：
+
+- Linux 使用 `O_NOFOLLOW` 打开并持续持有只读 FD，使已经 unlink 的 inode 在边界存续期间不能被回收复用；每个 Step 启动前仍会重新比较路径与固定 FD 的文件身份。
+- Windows 使用 `FILE_FLAG_OPEN_REPARSE_POINT` 且不共享 write/delete 的 handle，拒绝 reparse point，并在边界存续期间阻止 executable 被修改、删除或替换。
+
+构造期探测和 build directory 校验使用短生命周期边界并立即释放；进入 Task Manager 的边界则与任务和目录锁共同释放。边界释放后不能再次用于 executable 或 working directory 校验。
+
 ## Workspace Trust 与 CMake
 
 固定 CMake bundle 通过 tracked manifest 绑定版本、archive SHA-256、安装布局、executable、license 和 installed-file SHA-256。运行时不自动下载。

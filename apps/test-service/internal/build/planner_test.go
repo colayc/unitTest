@@ -67,6 +67,9 @@ func TestPlannerBuildsValidatedConfigureAndBuildSteps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		_ = boundary.(task.ManagedExecutionBoundary).Release()
+	})
 	if err := task.ValidatePlan(plan, boundary); err != nil {
 		t.Fatalf("ValidatePlan() error = %v", err)
 	}
@@ -135,17 +138,47 @@ func TestExecutionBoundaryRejectsExecutableIdentityReplacement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	managed := boundary.(task.ManagedExecutionBoundary)
+	t.Cleanup(func() { _ = managed.Release() })
 	if err := boundary.ValidateExecutable(fixture.installation.Executable); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(fixture.installation.Executable); err != nil {
-		t.Fatal(err)
+	removeErr := os.Remove(fixture.installation.Executable)
+	if removeErr != nil {
+		if err := boundary.ValidateExecutable(fixture.installation.Executable); err != nil {
+			t.Fatalf("blocked replacement changed the pinned executable: %v", err)
+		}
+		return
 	}
 	if err := os.WriteFile(fixture.installation.Executable, []byte("replacement"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := boundary.ValidateExecutable(fixture.installation.Executable); err == nil {
 		t.Fatal("ValidateExecutable() accepted a replacement file at the trusted path")
+	}
+}
+
+func TestExecutionBoundaryReleaseClosesExecutablePin(t *testing.T) {
+	fixture := newPlannerFixture(t)
+	boundary, err := NewExecutionBoundary(fixture.installation, fixture.root, fixture.dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	managed := boundary.(task.ManagedExecutionBoundary)
+	if err := managed.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if err := managed.Release(); err != nil {
+		t.Fatalf("second Release() error = %v", err)
+	}
+	if err := boundary.ValidateExecutable(fixture.installation.Executable); err == nil {
+		t.Fatal("released boundary accepted executable validation")
+	}
+	if err := boundary.ValidateWorkingDirectory(fixture.sourceDir); err == nil {
+		t.Fatal("released boundary accepted working directory validation")
+	}
+	if err := os.Remove(fixture.installation.Executable); err != nil {
+		t.Fatalf("released executable remained pinned: %v", err)
 	}
 }
 

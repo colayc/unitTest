@@ -75,9 +75,13 @@ func newCoordinator(
 		dependencies.writeQuery == nil || dependencies.now == nil {
 		return nil, task.ErrInvalidArgument
 	}
-	if _, err := NewExecutionBoundary(
-		config.Installation, config.WorkspaceRoot, config.ServiceDataRoot,
-	); err != nil {
+	boundary, err := newExecutionBoundary(
+		config.Installation, config.WorkspaceRoot, config.ServiceDataRoot, nil,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if err := boundary.Release(); err != nil {
 		return nil, err
 	}
 	return &Coordinator{config: config, dependencies: dependencies}, nil
@@ -277,6 +281,13 @@ func (c *Coordinator) prepare(
 	if err != nil {
 		return nil, err
 	}
+	lockOwned = false
+	boundaryOwned := true
+	defer func() {
+		if boundaryOwned {
+			_ = boundary.Release()
+		}
+	}()
 	requestJSON, err := json.Marshal(struct {
 		ProjectID      string   `json:"projectId"`
 		BuildProfileID string   `json:"buildProfileId"`
@@ -296,7 +307,7 @@ func (c *Coordinator) prepare(
 		Request: requestJSON, WorkspaceGeneration: request.WorkspaceGeneration,
 		Timeout: request.Timeout, Plan: plan, Boundary: boundary,
 	}
-	lockOwned = false
+	boundaryOwned = false
 	return &preparedBuild{request: internalRequest, boundary: boundary}, nil
 }
 
@@ -528,13 +539,15 @@ func (c *Coordinator) ensureBuildDirectory(path string) error {
 	if err := os.MkdirAll(resolved, 0o700); err != nil {
 		return task.ErrInvalidArgument
 	}
-	boundary, err := NewExecutionBoundary(
-		c.config.Installation, c.config.WorkspaceRoot, c.config.ServiceDataRoot,
+	boundary, err := newExecutionBoundary(
+		c.config.Installation, c.config.WorkspaceRoot, c.config.ServiceDataRoot, nil,
 	)
 	if err != nil {
 		return err
 	}
-	return boundary.ValidateWorkingDirectory(resolved)
+	validationErr := boundary.ValidateWorkingDirectory(resolved)
+	releaseErr := boundary.Release()
+	return errors.Join(validationErr, releaseErr)
 }
 
 func (c *Coordinator) buildDirectoryIdentity(path string) (string, error) {
