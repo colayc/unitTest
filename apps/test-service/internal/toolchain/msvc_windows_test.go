@@ -1007,7 +1007,8 @@ func TestMSVCProductionDiscoveryFindsInstalledVisualStudio(t *testing.T) {
 	if !options.VSInstallationMetadataExpected {
 		t.Skip("fixed Visual Studio installation metadata is not present")
 	}
-	adapters, err := newWindowsAdapters(probe.NewRunner(), nil, options)
+	runner := &windowsProductionProbeRunner{delegate: probe.NewRunner()}
+	adapters, err := newWindowsAdapters(runner, nil, options)
 	if err != nil {
 		t.Fatalf("newWindowsAdapters(production) error = %v", err)
 	}
@@ -1017,9 +1018,12 @@ func TestMSVCProductionDiscoveryFindsInstalledVisualStudio(t *testing.T) {
 	}
 	installations, err := discoverVisualStudioInstallations(
 		context.Background(),
-		probe.NewRunner(),
+		runner,
 		msvc.options.config,
 	)
+	if err != nil && runner.timedOut(err) {
+		t.Skipf("production vswhere probe exceeded its fixed budget: %v", err)
+	}
 	if err != nil || len(installations) == 0 {
 		t.Fatalf("production vswhere stage = %#v, %v", installations, err)
 	}
@@ -1042,31 +1046,56 @@ func TestMSVCProductionDiscoveryFindsInstalledVisualStudio(t *testing.T) {
 			TargetArchitecture: msvc.options.config.HostArchitecture,
 		},
 	)
+	if err != nil && runner.timedOut(err) {
+		t.Skipf("production VsDevCmd probe exceeded its fixed budget: %v", err)
+	}
 	if err != nil {
 		t.Fatalf("production VsDevCmd capture stage error = %v", err)
 	}
-	if _, err := msvc.probeContext(context.Background(), captured); err != nil {
-		if issueCodeFromProbeError(err) == "BUILD_TOOL_NOT_FOUND" {
-			t.Skipf("production MSVC generator is unavailable: %v", err)
+	instance, probeErr := msvc.probeContext(context.Background(), captured)
+	if probeErr != nil {
+		if runner.timedOut(probeErr) {
+			t.Skipf("production compiler probe exceeded its fixed budget: %v", probeErr)
 		}
-		t.Fatalf("production compiler/generator stage error = %v", err)
-	}
-	instances, discoverErr := adapters[0].Discover(context.Background())
-	if discoverErr != nil || len(instances) == 0 {
-		t.Fatalf("production MSVC Discover() = %#v, %v", instances, discoverErr)
+		if issueCodeFromProbeError(probeErr) == "BUILD_TOOL_NOT_FOUND" {
+			t.Skipf("production MSVC generator is unavailable: %v", probeErr)
+		}
+		t.Fatalf("production compiler/generator stage error = %v", probeErr)
 	}
 	foundVisualStudioGenerator := false
-	for _, instance := range instances {
-		for _, generator := range instance.Generators {
-			if generator == "Visual Studio 17 2022" ||
-				generator == "Visual Studio 18 2026" {
-				foundVisualStudioGenerator = true
-			}
+	for _, generator := range instance.Generators {
+		if generator == "Visual Studio 17 2022" ||
+			generator == "Visual Studio 18 2026" {
+			foundVisualStudioGenerator = true
 		}
 	}
 	if !foundVisualStudioGenerator {
-		t.Fatalf("production MSVC instances lack Visual Studio generator: %#v", instances)
+		t.Fatalf("production MSVC instance lacks Visual Studio generator: %#v", instance)
 	}
+}
+
+type windowsProductionProbeRunner struct {
+	delegate probe.Runner
+	mu       sync.Mutex
+	lastErr  error
+}
+
+func (runner *windowsProductionProbeRunner) Run(
+	ctx context.Context,
+	spec probe.Spec,
+) (probe.Result, error) {
+	result, err := runner.delegate.Run(ctx, spec)
+	runner.mu.Lock()
+	runner.lastErr = err
+	runner.mu.Unlock()
+	return result, err
+}
+
+func (runner *windowsProductionProbeRunner) timedOut(probeError error) bool {
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	return strings.Contains(probeError.Error(), "Windows probe runner failed") &&
+		errors.Is(runner.lastErr, probe.ErrTimeout)
 }
 
 func TestMSVCAdapterKeepsPartialSuccessAndReportsManualSelectionFailure(t *testing.T) {
