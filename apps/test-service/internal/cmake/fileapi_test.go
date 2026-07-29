@@ -387,6 +387,29 @@ func TestFileAPIToolchainCompilerPathAllowsBoundedExternalIdentityMetadata(t *te
 	expectFileAPIReadError(t, fixture)
 }
 
+func TestFileAPIToolchainsIgnoreAuxiliaryLanguageDescriptors(t *testing.T) {
+	fixture := newFileAPIReplyFixture(t)
+	before := readWithFixture(t, fixture)
+	mutateJSONFile(t, filepath.Join(fixture.replyDir, "toolchains-v1.json"), func(value map[string]any) {
+		toolchains := value["toolchains"].([]any)
+		value["toolchains"] = append(toolchains, map[string]any{
+			"language": "RC",
+			"compiler": map[string]any{
+				"path": "rc",
+				"id":   "MSVC",
+			},
+		})
+	})
+	after := readWithFixture(t, fixture)
+	if !reflect.DeepEqual(after.ToolchainIDs, before.ToolchainIDs) {
+		t.Fatalf(
+			"auxiliary RC descriptor changed C/CXX identities: %#v != %#v",
+			after.ToolchainIDs,
+			before.ToolchainIDs,
+		)
+	}
+}
+
 func TestFileAPIToolchainsDeduplicateEquivalentLanguageAndRejectConflict(t *testing.T) {
 	t.Run("equivalent duplicate", func(t *testing.T) {
 		fixture := newFileAPIReplyFixture(t)

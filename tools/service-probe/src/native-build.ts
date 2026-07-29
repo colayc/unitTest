@@ -15,11 +15,12 @@ import {
 import { arch as hostArchitecture, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
-import type {
-  BuildProfileElement,
-  Diagnostic,
-  ToolchainElement,
-  WorkspaceSnapshot,
+import {
+  Generator,
+  type BuildProfileElement,
+  type Diagnostic,
+  type ToolchainElement,
+  type WorkspaceSnapshot,
 } from "@unit-test-ide/protocol-models";
 import {
   ProtocolError,
@@ -475,6 +476,9 @@ async function executeCoreScenarios(
   );
   await waitForTask(client, subscription, timed.taskId, "timed_out");
 
+  reportNativeScenario(context.family, "preset-build");
+  await runPresetBuildScenario(context);
+
   const compilerGolden = context.family === "msvc" || context.family === "clang-cl"
     ? "compiler-msvc-clang-cl.json"
     : "compiler-gcc-clang.json";
@@ -605,6 +609,7 @@ async function executeCoreScenarios(
     "stale-generation-rejected": "passed",
     cancellation: "passed",
     timeout: "passed",
+    "preset-build": "passed",
     "compiler-diagnostic": "passed",
     "linker-diagnostic": "passed",
     "configure-diagnostic": "passed",
@@ -622,6 +627,206 @@ function reportNativeScenario(
   scenario: string,
 ): void {
   process.stderr.write(`native-e2e: ${family} ${scenario}\n`);
+}
+
+async function runPresetBuildScenario(
+  context: FamilyExecutionContext,
+): Promise<void> {
+  const parent = dirname(context.workspaceRoot);
+  const suffix = randomBytes(6).toString("hex");
+  const workspaceRoot = await copyNativeFixture(
+    "preset-project",
+    parent,
+    `preset-build-${suffix}`,
+  );
+  const serviceDirectory = join(parent, `p-${suffix}`);
+  await mkdir(serviceDirectory, { mode: 0o700 });
+  let fixture: TaskServiceFixture | undefined;
+  try {
+    const expectedCompiler = await configurePresetFixture(
+      workspaceRoot,
+      context.family,
+      context.snapshot,
+    );
+    await writeWorkspaceConfig(workspaceRoot);
+    fixture = await startService(context.serviceBinary, serviceDirectory, {
+      timeoutMs: nativeTimeoutMs,
+      workspaceRoot,
+      trustedWorkspace: true,
+      cmakeBundleRoot: context.bundle.bundleRoot,
+    });
+    const selected = await inspectPresetProfile(
+      fixture.client,
+      context.toolchain,
+      `${context.family} preset-build`,
+    );
+    const subscription = await withNamedTimeout(
+      `${context.family} preset event subscription`,
+      fixture.client.subscribeEvents(0),
+      nativeTimeoutMs,
+    );
+    const task = await startPresetBuildWithStaleRetry(
+      fixture.client,
+      selected,
+      context.toolchain,
+      `${context.family} preset-build`,
+    );
+    const events = await waitForTask(
+      fixture.client,
+      subscription,
+      task.taskId,
+    );
+    assertStepOrder(events, ["configure", "build"], `${context.family} preset build`);
+    assertPresetCompiler(
+      events,
+      context.family,
+      expectedCompiler,
+      context.toolchain.version,
+    );
+  } finally {
+    await fixture?.dispose();
+    await rm(workspaceRoot, { recursive: true, force: true });
+    await rm(serviceDirectory, { recursive: true, force: true });
+  }
+}
+
+async function configurePresetFixture(
+  workspaceRoot: string,
+  family: RequiredToolchainFamily,
+  snapshot: WorkspaceSnapshot,
+): Promise<string> {
+  const path = join(workspaceRoot, "CMakePresets.json");
+  const document = JSON.parse(await readFile(path, "utf8")) as {
+    configurePresets?: Array<Record<string, unknown>>;
+    buildPresets?: Array<Record<string, unknown>>;
+  };
+  const configure = document.configurePresets?.[0];
+  const build = document.buildPresets?.[0];
+  if (configure === undefined || build === undefined) {
+    throw new Error("native preset fixture has no configure/build preset");
+  }
+  build.configuration = "Debug";
+  switch (family) {
+    case "gcc":
+      requirePresetGenerator(snapshot, family, Generator.Ninja);
+      configure.cacheVariables = {
+        CMAKE_BUILD_TYPE: "Debug",
+        CMAKE_CXX_COMPILER: "g++",
+      };
+      break;
+    case "clang":
+      requirePresetGenerator(snapshot, family, Generator.Ninja);
+      configure.cacheVariables = {
+        CMAKE_BUILD_TYPE: "Debug",
+        CMAKE_CXX_COMPILER: "clang++",
+      };
+      break;
+    case "msvc":
+      configure.generator = requireVisualStudioGenerator(snapshot);
+      configure.architecture = "x64";
+      delete configure.cacheVariables;
+      break;
+    case "clang-cl":
+      requirePresetGenerator(snapshot, family, Generator.Ninja);
+      configure.generator = Generator.Ninja;
+      configure.cacheVariables = {
+        CMAKE_BUILD_TYPE: "Debug",
+        CMAKE_CXX_COMPILER: "clang-cl",
+      };
+      break;
+  }
+  await writeFile(path, `${JSON.stringify(document, null, 2)}\n`);
+  return family === "gcc" ? "GNU" : family === "msvc" ? "MSVC" : "Clang";
+}
+
+function requirePresetGenerator(
+  snapshot: WorkspaceSnapshot,
+  family: RequiredToolchainFamily,
+  generator: Generator,
+): void {
+  if (
+    !snapshot.toolchains.some((toolchain) =>
+      toolchain.family === family && toolchain.generators.includes(generator)
+    )
+  ) {
+    throw new Error(`native preset fixture requires verified ${family} ${generator}`);
+  }
+}
+
+function requireVisualStudioGenerator(snapshot: WorkspaceSnapshot): string {
+  const msvc = snapshot.toolchains.filter((toolchain) => toolchain.family === "msvc");
+  for (const generator of [
+    Generator.VisualStudio182026,
+    Generator.VisualStudio172022,
+  ]) {
+    if (msvc.some((toolchain) => toolchain.generators.includes(generator))) {
+      return generator;
+    }
+  }
+  throw new Error("native preset fixture requires a verified Visual Studio generator");
+}
+
+async function inspectPresetProfile(
+  client: ProtocolClient,
+  toolchain: ToolchainElement,
+  scenario: string,
+): Promise<SelectedProfile> {
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const snapshot = await withNamedTimeout(
+      `${scenario} inspection attempt ${attempt}`,
+      client.inspectWorkspace(),
+      nativeTimeoutMs,
+    );
+    for (const project of snapshot.projects) {
+      const profile = project.buildProfiles.find((candidate) =>
+        candidate.origin === "preset" &&
+        candidate.name === "unit-test-ide-debug"
+      );
+      if (profile !== undefined) {
+        return { snapshot, projectId: project.projectId, profile, toolchain };
+      }
+    }
+  }
+  throw new Error(`${scenario} preset profile is absent after one bounded retry`);
+}
+
+async function startPresetBuildWithStaleRetry(
+  client: ProtocolClient,
+  selected: SelectedProfile,
+  toolchain: ToolchainElement,
+  scenario: string,
+) {
+  try {
+    return await startBuild(client, selected, [], 60_000);
+  } catch (error) {
+    if (!(error instanceof ProtocolError) || error.code !== "WORKSPACE_CHANGED") {
+      throw error;
+    }
+  }
+  const refreshed = await inspectPresetProfile(client, toolchain, scenario);
+  return startBuild(client, refreshed, [], 60_000);
+}
+
+function assertPresetCompiler(
+  events: readonly ProtocolTaskEvent[],
+  family: RequiredToolchainFamily,
+  expectedCompiler: string,
+  expectedVersion: string,
+): void {
+  const output = events
+    .filter((event) => event.event === "task.output")
+    .map((event) => String((event.payload as { text?: unknown }).text ?? ""))
+    .join("");
+  if (
+    !output.includes(`CXX compiler identification is ${expectedCompiler}`) ||
+    !output.includes(expectedVersion)
+  ) {
+    throw new Error(
+      `${family} preset build did not identify ${expectedCompiler} ${expectedVersion}; output=${
+        scrubNativeErrorText(output)
+      }`,
+    );
+  }
 }
 
 async function runWorkspaceRejectionScenario(

@@ -4,8 +4,9 @@
 
 Native E2E 不是直接调用 CMake 的 smoke script，而是使用真实 TypeScript Client、Named Pipe/Unix Socket、Protocol v1.2 和 Go Service lifecycle 验证：
 
-- workspace inspect、Toolchain 与 generated Build Profile；
+- workspace inspect、Toolchain、generated Build Profile 与 CMake Preset Build Profile；
 - CMake configure、无变化复用和 input 变化失效；
+- 每个 required compiler family 都以受信任 Preset 自己的 compiler/toolset 语义完成额外真实构建，并核对 CMake 报告的 compiler family/version；
 - 默认 target 与指定 target；
 - compiler、linker 和 configure Diagnostic；
 - 空格与 Unicode workspace；
@@ -37,6 +38,8 @@ pnpm test:e2e:native
 ```
 
 Windows 不使用用户 profile temp 作为 Service data/build 根。普通 clone 使用 checkout 内的 `.native-e2e/work`；位于 `.worktrees/<name>` 的 managed worktree 使用主 checkout 的 `.native-e2e/work`。这样既控制 MSBuild 路径长度，也允许 Service 以不共享 delete 的目录句柄固定全部祖先，不需要放宽 owner-only/TOCTOU 安全策略。Linux 继续使用系统 temp 下的 `uti-native`。
+
+Preset 场景不会通过 Protocol 传入 compiler executable、args 或 environment。测试只在隔离的受信任 fixture 中写入 CMake 原生 compiler 语义，再把 Service 返回的 Preset profile ID 交回 Protocol。Windows MSVC Preset 使用已验证 Visual Studio generator，clang-cl Preset 使用已验证 Ninja 和 `clang-cl` compiler semantic。configure 后的 File API 只把 `C`/`CXX` compiler descriptor 纳入 toolchain identity；Visual Studio 附带的 `RC` 等辅助描述不会成为执行或文件读取权限。
 
 Windows PowerShell 强制完整矩阵：
 

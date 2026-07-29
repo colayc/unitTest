@@ -111,7 +111,7 @@ func (c *Coordinator) Targets(
 	if err != nil {
 		return nil, err
 	}
-	reply, err := c.readReply(profile, instance)
+	reply, err := c.readReply(profile, instance, snapshot.Toolchains)
 	if err != nil {
 		return nil, ErrConfigureRequired
 	}
@@ -226,7 +226,7 @@ func (c *Coordinator) prepare(
 		}
 	}()
 
-	reply, replyErr := c.readReply(profile, instance)
+	reply, replyErr := c.readReply(profile, instance, snapshot.Toolchains)
 	targets := []cmake.Target{}
 	if replyErr == nil {
 		targets = reply.Targets
@@ -409,7 +409,7 @@ func (c *Coordinator) configureState(
 		ProjectID:           project.ID, Profile: profile, ToolchainID: instance.ID,
 		CMakeIdentity:  c.config.Installation.Identity,
 		BuildDirectory: buildDirectory,
-		AllowedRoots:   c.fileAPIAllowedRoots(instance),
+		AllowedRoots:   c.fileAPIAllowedRoots(profile, instance, snapshot.Toolchains),
 		TargetIDs:      append([]string{}, targetIDs...), TargetNames: targetNames,
 	})
 	if err != nil {
@@ -475,15 +475,18 @@ func (c *Coordinator) resolve(
 func (c *Coordinator) readReply(
 	profile cmake.BuildProfile,
 	instance toolchain.Instance,
+	discovered []toolchain.Instance,
 ) (cmake.FileAPIReply, error) {
 	return c.dependencies.readReply(
-		profile.BinaryDir,
-		c.fileAPIAllowedRoots(instance),
-		profile,
+		profile.BinaryDir, c.fileAPIAllowedRoots(profile, instance, discovered), profile,
 	)
 }
 
-func (c *Coordinator) fileAPIAllowedRoots(instance toolchain.Instance) []string {
+func (c *Coordinator) fileAPIAllowedRoots(
+	profile cmake.BuildProfile,
+	instance toolchain.Instance,
+	discovered []toolchain.Instance,
+) []string {
 	candidates := []string{
 		c.config.WorkspaceRoot.NativePath,
 		c.config.ServiceDataRoot,
@@ -492,14 +495,20 @@ func (c *Coordinator) fileAPIAllowedRoots(instance toolchain.Instance) []string 
 	if c.config.Installation.Root == "" {
 		candidates[2] = filepath.Dir(c.config.Installation.Executable)
 	}
-	if instance.CCompiler != "" {
-		candidates = append(candidates, filepath.Dir(instance.CCompiler))
+	instances := []toolchain.Instance{instance}
+	if profile.Origin == "preset" {
+		instances = discovered
 	}
-	if instance.CXXCompiler != "" {
-		candidates = append(candidates, filepath.Dir(instance.CXXCompiler))
-	}
-	if instance.Sysroot != "" {
-		candidates = append(candidates, instance.Sysroot)
+	for _, candidate := range instances {
+		if candidate.CCompiler != "" {
+			candidates = append(candidates, filepath.Dir(candidate.CCompiler))
+		}
+		if candidate.CXXCompiler != "" {
+			candidates = append(candidates, filepath.Dir(candidate.CXXCompiler))
+		}
+		if candidate.Sysroot != "" {
+			candidates = append(candidates, candidate.Sysroot)
+		}
 	}
 	result := make([]string, 0, len(candidates))
 	seen := make(map[string]struct{}, len(candidates))

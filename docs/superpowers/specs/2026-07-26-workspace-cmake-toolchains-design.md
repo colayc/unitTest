@@ -351,8 +351,8 @@ configure 成功后：
 
 File API 路径按用途划分边界：
 
-- reply、target、artifact、cache 和需要 snapshot 的 CMake input 必须位于 workspace、Service data root、已校验的 bundled CMake install root，或当前 verified toolchain 的 compiler/sysroot root；
-- compiler path 是 toolchain identity metadata，允许位于 workspace 外，但只接受有界的规范绝对路径；解析器不打开它，也不因此授予执行或任意文件读取权限；
+- reply、target、artifact、cache 和需要 snapshot 的 CMake input 必须位于 workspace、Service data root、已校验的 bundled CMake install root，或当前 verified toolchain 的 compiler/sysroot root；Preset configure 前没有单一 toolchain identity 时，只允许使用同一次 Service discovery snapshot 中全部已验证 toolchain 的这些 root；
+- `C`/`CXX` compiler path 是 toolchain identity metadata，允许位于 workspace 外，但只接受有界的规范绝对路径；解析器不打开它，也不因此授予执行或任意文件读取权限；Visual Studio File API 额外返回的 `RC` 等辅助语言 descriptor 不参与 C/C++ identity；
 - CMake executable 的执行权限仍只来自 Resolver 固定的 `Installation`，File API 不能新增 executable authority。
 
 `cmake/targets/list` 只读取最近一次成功 configure 的有效 File API reply，不隐式执行项目代码。如果尚未 configure，返回 `CONFIGURE_REQUIRED`。

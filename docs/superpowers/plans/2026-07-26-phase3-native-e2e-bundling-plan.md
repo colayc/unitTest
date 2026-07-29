@@ -291,6 +291,8 @@ pnpm --filter @unit-test-ide/service-probe test -- native-fixture.test
 }
 ```
 
+Native runner 只修改复制后的受信任 fixture，不修改 tracked source：Linux Preset 以 CMake cache semantic 显式选择 `g++`/`clang++`；Windows MSVC Preset 使用已验证 Visual Studio generator，clang-cl Preset 使用已验证 Ninja 和 `clang-cl` compiler semantic。Protocol 仍只接收 Service 返回的 Preset profile ID。configure 成功后 runner 必须从事件输出核对 CMake 识别出的 compiler family 与完整 version；Service 的 File API 只把 `C`/`CXX` descriptor 纳入 identity，并只允许 Preset CMake input 读取同一次 discovery snapshot 中已验证 toolchain 的 compiler/sysroot roots。
+
 `preset-project/CMakeLists.txt`：
 
 ```cmake
@@ -582,6 +584,7 @@ Native matrix runner、离线 bundle preflight、required-family policy、路径
 - invalid workspace config 在 Runtime pre-READY 阶段退出，客户端无法读取阻断诊断；
 - Native E2E 的 Service data path 过长，触发 MSBuild `MSB3491`/`.tlog` 路径失败。
 - Hosted Runner 升级到 Visual Studio 18 后，MSVC 已验证成功但 Visual Studio generator capability 未生成；generated profile policy 现保持 Visual Studio generator 优先，并在同一实例随附 Ninja 已通过固定路径、identity 与 version probe 时有界回退到 Ninja。
+- Preset profile 在 configure 前没有单一 `toolchainId`；File API 的 CMake input 边界现只扩展到同一次 discovery snapshot 中全部已验证 toolchain roots，generated profile 仍只使用自己选定的 toolchain root。Visual Studio 额外报告的相对 `RC` descriptor 不再被错误当成 C/C++ identity。
 
 本地验证证据：
 
@@ -589,8 +592,9 @@ Native matrix runner、离线 bundle preflight、required-family policy、路径
 - `go test -race ./apps/test-service/...` PASS；
 - 既有 Windows Service E2E 19/19 PASS；
 - Windows MSVC native report 位于 ignored `.native-e2e/artifacts/windows/toolchain-report.json`，不包含 token、environment 或绝对路径。
+- Windows MSVC 的额外 Preset profile 已使用 bundled CMake 4.3.4、Visual Studio 17 2022 和 MSVC 19.44 完成真实 configure/build，并核对 CMake compiler identity/version。
 
-Linux GCC/Clang 与 Windows clang-cl 的真实 required-family 运行仍必须由固定 Hosted CI 完成；在该证据到位前，Task 3 Step 2/7、Task 4 和 Phase 3D 总完成门禁保持未勾选。
+固定 Hosted CI 运行 `30461135479` 已让 Linux GCC 13.3、Clang 18.1.3、Windows MSVC 19.51 与 clang-cl 20.1.8 的 generated fallback 全场景通过，并上传双平台报告。该证据关闭了 required-family、generator、diagnostic、取消/超时与恢复门禁；新增 Preset 真实构建仍需下一次固定 Hosted CI 报告验证，完成检查在该证据到位前保持未勾选。
 
 ---
 
@@ -776,7 +780,7 @@ env:
 - 每个 job 都按 `verify → prepare:cmake-bundle → test:e2e:native` 顺序执行，并只上传对应平台的 `toolchain-report.json`；
 - native runner 在动态加载矩阵实现前安装 Node.js HTTP(S) network guard，覆盖 `http`、`https`、`http2` 与全局 `fetch`，同时保留本地 IPC 所需的 `net`；
 - Windows native data/build 根不再使用用户 profile temp：普通 clone 使用 checkout 的 `.native-e2e/work`，managed worktree 使用主 checkout 的同名目录。这保留了 MSBuild 短路径预算，也避免因用户 profile 祖先无法以“不共享 delete”方式固定而错误放宽 Service owner-only/TOCTOU 架构；
-- 本地 Windows 已在 guard 启用时通过 MSVC 19.44/Visual Studio 17 2022 全场景；本机 clang-cl 不满足 production discovery 前提，Windows clang-cl 与 Linux GCC/Clang 仍等待 fixed Hosted CI required-family 证据。
+- 本地 Windows 已在 guard 启用时通过 MSVC 19.44/Visual Studio 17 2022 全场景；本机 clang-cl 不满足 production discovery 前提。固定 Hosted CI 运行 `30461135479` 已验证 Windows clang-cl 与 Linux GCC/Clang 的 generated fallback required-family 全场景；新增 Preset 场景等待后续固定 Hosted CI 证据。
 - Hosted Windows Runner 已升级到 Visual Studio 18；production discovery 能验证 MSVC 19.51 与 VS-bundled Ninja。为避免把 CMake/Visual Studio generator 支持版本与 compiler family 可用性错误绑定，MSVC generated profile 继续优先 Visual Studio generator，并在其 capability 缺失时回退到已验证 Ninja。
 
 - [ ] **Step 5：执行完整本地门禁**

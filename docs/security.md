@@ -18,6 +18,8 @@ Protocol request 只表达封闭的语义操作。客户端不能提交：
 
 CMake build 由 Service 根据已验证的 Workspace、Build Profile、Toolchain、Target 和固定策略生成 `ExecutionPlan`。CMake project 与 Presets 属于受信任 workspace 的原生语义，不会变成远程命令入口。
 
+Preset 在 configure 前可能没有单一 `toolchainId`。此时 File API 对 CMake input 的读取边界只能扩展到同一次 workspace snapshot 中由 Service 已发现并验证的 compiler/sysroot roots，不能采用 Protocol 或 File API 自报的新 root。File API 的 compiler path 仅作为有界的规范绝对路径参与 `C`/`CXX` toolchain identity，不会被打开或取得执行权限；`RC` 等辅助语言 descriptor 被忽略。
+
 每个 build `ExecutionBoundary` 在任务被采用前固定已验证的 CMake executable，并在任务终结时统一释放：
 
 - Linux 使用 `O_NOFOLLOW` 打开并持续持有只读 FD，使已经 unlink 的 inode 在边界存续期间不能被回收复用；每个 Step 启动前仍会重新比较路径与固定 FD 的文件身份。

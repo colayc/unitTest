@@ -786,6 +786,9 @@ func (reader *fileAPIReader) assemble(
 		if toolchain.Language == "" {
 			return FileAPIReply{}, fmt.Errorf("%w: toolchain language is empty", ErrFileAPIReply)
 		}
+		if toolchain.Language != "C" && toolchain.Language != "CXX" {
+			continue
+		}
 		commandFragment := ""
 		if toolchain.Compiler.CommandFragment != nil {
 			commandFragment = *toolchain.Compiler.CommandFragment

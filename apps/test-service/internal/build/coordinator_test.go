@@ -46,6 +46,13 @@ func TestCoordinatorRejectsStaleAndUnknownWorkspaceReferencesBeforeTaskCreation(
 
 func TestCoordinatorPlansConfigureThenSkipsItForUnchangedSuccessfulState(t *testing.T) {
 	fixture := newCoordinatorFixture(t)
+	unselectedCompilerRoot := filepath.Join(t.TempDir(), "unselected", "bin")
+	fixture.snapshot.Toolchains = append(fixture.snapshot.Toolchains, toolchain.Instance{
+		ID:          "unselected-clang",
+		Family:      toolchain.FamilyClang,
+		CCompiler:   filepath.Join(unselectedCompilerRoot, "clang"),
+		CXXCompiler: filepath.Join(unselectedCompilerRoot, "clang++"),
+	})
 	fixture.request.TargetIDs = nil
 	fixture.reader.reply = cmake.FileAPIReply{}
 	started, err := fixture.coordinator.Start(context.Background(), fixture.request)
@@ -63,6 +70,12 @@ func TestCoordinatorPlansConfigureThenSkipsItForUnchangedSuccessfulState(t *test
 		if !containsCanonicalBoundaryPath(fixture.reader.allowedRoots, want) {
 			t.Fatalf("File API allowed roots = %#v, missing trusted root %q", fixture.reader.allowedRoots, want)
 		}
+	}
+	if containsCanonicalBoundaryPath(fixture.reader.allowedRoots, unselectedCompilerRoot) {
+		t.Fatalf(
+			"generated profile File API roots included unselected toolchain root: %#v",
+			fixture.reader.allowedRoots,
+		)
 	}
 	var persistedRequest struct {
 		TargetIDs []string `json:"targetIds"`
@@ -107,6 +120,51 @@ func TestCoordinatorPlansConfigureThenSkipsItForUnchangedSuccessfulState(t *test
 	}
 	if len(fixture.starter.request.Plan.Steps) != 2 {
 		t.Fatalf("changed generation plan = %#v, want configure + build", fixture.starter.request.Plan)
+	}
+}
+
+func TestPresetFileAPIRootsIncludeOnlyServiceDiscoveredToolchains(t *testing.T) {
+	fixture := newCoordinatorFixture(t)
+	preset := fixture.profile
+	preset.ID = strings.Repeat("8", 64)
+	preset.Origin = "preset"
+	preset.ConfigurePreset = "unit-test-ide-debug"
+	preset.BuildPreset = "unit-test-ide-debug"
+	preset.ToolchainID = ""
+	preset.Generator = "Ninja"
+	preset.Configuration = "Debug"
+	preset.BinaryDir = filepath.Join(fixture.root.NativePath, "preset-build")
+	fixture.profile = preset
+	fixture.snapshot.Profiles = []cmake.BuildProfile{preset}
+	fixture.request.BuildProfileID = preset.ID
+	fixture.request.TargetIDs = nil
+	fixture.reader.reply = cmake.FileAPIReply{}
+
+	secondRoot := filepath.Join(t.TempDir(), "verified-clang")
+	secondSysroot := filepath.Join(secondRoot, "sysroot")
+	fixture.snapshot.Toolchains = append(fixture.snapshot.Toolchains, toolchain.Instance{
+		ID:          "verified-clang",
+		Family:      toolchain.FamilyClang,
+		CCompiler:   filepath.Join(secondRoot, "bin", "clang"),
+		CXXCompiler: filepath.Join(secondRoot, "bin", "clang++"),
+		Sysroot:     secondSysroot,
+	})
+
+	if _, err := fixture.coordinator.Start(context.Background(), fixture.request); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		filepath.Dir(fixture.toolchain.CXXCompiler),
+		filepath.Join(secondRoot, "bin"),
+		secondSysroot,
+	} {
+		if !containsCanonicalBoundaryPath(fixture.reader.allowedRoots, want) {
+			t.Fatalf(
+				"preset File API roots = %#v, missing verified toolchain root %q",
+				fixture.reader.allowedRoots,
+				want,
+			)
+		}
 	}
 }
 
