@@ -189,6 +189,161 @@ test("declared required family absence fails and bundle preflight stays before l
   assert.equal(workspaces, 0);
 });
 
+test("late named-target build establishes a fresh workspace checkpoint", async () => {
+  const inspections: string[] = [];
+  const listings: Array<{ workspaceGeneration: string }> = [];
+  const starts: Array<{
+    idempotencyKey: string;
+    workspaceGeneration: string;
+    targetIds: string[];
+  }> = [];
+  const snapshot = workspaceSnapshot("gcc");
+  snapshot.workspaceGeneration = "c".repeat(64);
+  const targetId = "d".repeat(64);
+  const client = {
+    inspectWorkspace: async () => {
+      inspections.push(snapshot.workspaceGeneration);
+      return snapshot;
+    },
+    listCMakeTargets: async (request: { workspaceGeneration: string }) => {
+      listings.push(request);
+      return {
+        workspaceGeneration: request.workspaceGeneration,
+        projectId: "root",
+        buildProfileId: "b".repeat(64),
+        targets: [{ targetId, name: "slow_target" }],
+      };
+    },
+    startCMakeBuild: async (
+      request: {
+        idempotencyKey: string;
+        workspaceGeneration: string;
+        targetIds: string[];
+      },
+    ) => {
+      starts.push(request);
+      return { taskId: "task-at-checkpoint" };
+    },
+  } as unknown as ProtocolClient;
+
+  const task = await __testing.startNamedTargetBuildAtCheckpoint(
+    client,
+    "gcc",
+    "timeout",
+    "slow_target",
+    1_000,
+  );
+
+  assert.equal(task.taskId, "task-at-checkpoint");
+  assert.deepEqual(inspections, ["c".repeat(64)]);
+  assert.deepEqual(listings.map((request) => request.workspaceGeneration), ["c".repeat(64)]);
+  assert.equal(starts.length, 1);
+  assert.equal(starts[0]?.workspaceGeneration, "c".repeat(64));
+  assert.deepEqual(starts[0]?.targetIds, [targetId]);
+});
+
+test("late named-target build relists its target after one stale checkpoint", async () => {
+  let inspections = 0;
+  const listings: Array<{ workspaceGeneration: string }> = [];
+  const starts: Array<{
+    idempotencyKey: string;
+    workspaceGeneration: string;
+    targetIds: string[];
+  }> = [];
+  const client = {
+    inspectWorkspace: async () => {
+      inspections++;
+      const snapshot = workspaceSnapshot("gcc");
+      snapshot.workspaceGeneration = (inspections === 1 ? "c" : "e").repeat(64);
+      return snapshot;
+    },
+    listCMakeTargets: async (request: { workspaceGeneration: string }) => {
+      listings.push(request);
+      const targetId = request.workspaceGeneration === "c".repeat(64)
+        ? "d".repeat(64)
+        : "f".repeat(64);
+      return {
+        workspaceGeneration: request.workspaceGeneration,
+        projectId: "root",
+        buildProfileId: "b".repeat(64),
+        targets: [{ targetId, name: "slow_target" }],
+      };
+    },
+    startCMakeBuild: async (
+      request: {
+        idempotencyKey: string;
+        workspaceGeneration: string;
+        targetIds: string[];
+      },
+    ) => {
+      starts.push(request);
+      if (starts.length === 1) {
+        throw new ProtocolError("WORKSPACE_CHANGED", "workspace generation is stale", true);
+      }
+      return { taskId: "task-after-checkpoint-refresh" };
+    },
+  } as unknown as ProtocolClient;
+
+  const task = await __testing.startNamedTargetBuildAtCheckpoint(
+    client,
+    "gcc",
+    "cancellation-reconnect",
+    "slow_target",
+    60_000,
+  );
+
+  assert.equal(task.taskId, "task-after-checkpoint-refresh");
+  assert.equal(inspections, 2);
+  assert.deepEqual(
+    listings.map((request) => request.workspaceGeneration),
+    ["c".repeat(64), "e".repeat(64)],
+  );
+  assert.deepEqual(starts.map((request) => request.targetIds), [
+    ["d".repeat(64)],
+    ["f".repeat(64)],
+  ]);
+  assert.notEqual(starts[0]?.idempotencyKey, starts[1]?.idempotencyKey);
+});
+
+test("late named-target stale-checkpoint retry is bounded to one", async () => {
+  let inspections = 0;
+  let listings = 0;
+  let starts = 0;
+  const client = {
+    inspectWorkspace: async () => {
+      inspections++;
+      return workspaceSnapshot("gcc");
+    },
+    listCMakeTargets: async () => {
+      listings++;
+      return {
+        workspaceGeneration: "a".repeat(64),
+        projectId: "root",
+        buildProfileId: "b".repeat(64),
+        targets: [{ targetId: "d".repeat(64), name: "slow_target" }],
+      };
+    },
+    startCMakeBuild: async () => {
+      starts++;
+      throw new ProtocolError("WORKSPACE_CHANGED", "workspace generation is stale", true);
+    },
+  } as unknown as ProtocolClient;
+
+  await assert.rejects(
+    __testing.startNamedTargetBuildAtCheckpoint(
+      client,
+      "gcc",
+      "timeout",
+      "slow_target",
+      1_000,
+    ),
+    (error) => error instanceof ProtocolError && error.code === "WORKSPACE_CHANGED",
+  );
+  assert.equal(inspections, 2);
+  assert.equal(listings, 2);
+  assert.equal(starts, 2);
+});
+
 test("diagnostic fixture refreshes one stale generation before Task creation", async () => {
   const requests: Array<{ idempotencyKey: string; workspaceGeneration: string }> = [];
   let inspections = 0;

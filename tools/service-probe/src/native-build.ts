@@ -397,12 +397,8 @@ async function executeCoreScenarios(
     nativeTimeoutMs,
   );
   const secondary = targets.targets.find((target) => target.name === "secondary_app");
-  const slow = targets.targets.find((target) => target.name === "slow_target");
   if (secondary === undefined) {
     throw new Error(`${context.family} native target secondary_app is absent`);
-  }
-  if (slow === undefined) {
-    throw new Error(`${context.family} native target slow_target is absent`);
   }
   reportNativeScenario(context.family, "secondary-target");
   const second = await startBuild(client, context, [secondary.targetId], 60_000);
@@ -438,7 +434,13 @@ async function executeCoreScenarios(
   );
 
   reportNativeScenario(context.family, "cancellation-reconnect");
-  const cancellable = await startBuild(client, context, [slow.targetId], 60_000);
+  const cancellable = await startNamedTargetBuildAtCheckpoint(
+    client,
+    context.family,
+    "cancellation-reconnect",
+    "slow_target",
+    60_000,
+  );
   const cancellationEvents = await waitForStep(
     subscription,
     cancellable.taskId,
@@ -464,7 +466,13 @@ async function executeCoreScenarios(
   assertContinuousSequences(cancelledEvents, `${context.family} cancellation reconnect`);
 
   reportNativeScenario(context.family, "timeout");
-  const timed = await startBuild(client, context, [slow.targetId], 1_000);
+  const timed = await startNamedTargetBuildAtCheckpoint(
+    client,
+    context.family,
+    "timeout",
+    "slow_target",
+    1_000,
+  );
   await waitForTask(client, subscription, timed.taskId, "timed_out");
 
   const compilerGolden = context.family === "msvc" || context.family === "clang-cl"
@@ -769,6 +777,43 @@ async function inspectEstablishedFamily(
       codes.length === 0 ? "none" : codes.join(",")
     }`,
   );
+}
+
+async function startNamedTargetBuildAtCheckpoint(
+  client: ProtocolClient,
+  family: RequiredToolchainFamily,
+  scenario: string,
+  targetName: string,
+  timeoutMs: number,
+) {
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const selected = await inspectEstablishedFamily(client, family, scenario);
+    const targets = await withNamedTimeout(
+      `${family} ${scenario} target listing attempt ${attempt}`,
+      client.listCMakeTargets({
+        workspaceGeneration: selected.snapshot.workspaceGeneration,
+        projectId: selected.projectId,
+        buildProfileId: selected.profile.buildProfileId,
+      }),
+      nativeTimeoutMs,
+    );
+    const target = targets.targets.find((candidate) => candidate.name === targetName);
+    if (target === undefined) {
+      throw new Error(`${family} ${scenario} target ${targetName} is absent`);
+    }
+    try {
+      return await startBuild(client, selected, [target.targetId], timeoutMs);
+    } catch (error) {
+      if (
+        !(error instanceof ProtocolError) ||
+        error.code !== "WORKSPACE_CHANGED" ||
+        attempt === 2
+      ) {
+        throw error;
+      }
+    }
+  }
+  throw new Error(`${family} ${scenario} exhausted checkpoint retries`);
 }
 
 async function startFailureBuildWithStaleRetry(
@@ -1299,5 +1344,6 @@ function withinRoot(root: string, candidate: string): boolean {
 export const __testing = Object.freeze({
   runNativeMatrixWithDependencies,
   selectGeneratedProfile,
+  startNamedTargetBuildAtCheckpoint,
   startFailureBuildWithStaleRetry,
 });
