@@ -5,7 +5,12 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
-import { EventSubscription, type ProtocolClient, type TaskEvent, type TaskSnapshot } from "@unit-test-ide/test-client";
+import {
+  EventSubscription,
+  type ProtocolClient,
+  type ProtocolTaskEvent,
+  type ProtocolTaskSnapshot
+} from "@unit-test-ide/test-client";
 import { endpointForDirectory } from "./endpoint.js";
 import { assertProcessGone, prepareTokenFile, runProbe, startService, startTaskService, withNamedTimeout } from "./probe.js";
 
@@ -19,6 +24,12 @@ const V11_EVENT_NAMES = new Set([
   "task.cancellation_requested",
   "task.finished",
   "artifact.created"
+]);
+const V12_EVENT_NAMES = new Set([
+  ...V11_EVENT_NAMES,
+  "task.step_started",
+  "task.step_finished",
+  "task.diagnostic"
 ]);
 
 test("Unix endpoint stays within sockaddr_un when the workspace path is long", async () => {
@@ -185,7 +196,7 @@ test("service fixture bounds a pending handshake RPC and cleans up its process",
           handshakeClient: () => new Promise<never>(() => undefined)
         }
       }),
-      /protocol 1\.1 handshake timed out after 500ms/
+      /task protocol handshake timed out after 500ms/
     );
     assert.ok(servicePID);
     await assertProcessGone(servicePID);
@@ -299,17 +310,17 @@ test("handshake failures recursively redact nested diagnostics", async () => {
   }, captured, environmentSentinel);
 });
 
-function eventWithin(subscription: EventSubscription, label: string): Promise<IteratorResult<TaskEvent>> {
+function eventWithin(subscription: EventSubscription, label: string): Promise<IteratorResult<ProtocolTaskEvent>> {
   return withNamedTimeout(label, subscription.next(), EVENT_TIMEOUT_MS);
 }
 
 async function waitForEvent(
   subscription: EventSubscription,
   taskId: string,
-  predicate: (event: TaskEvent) => boolean,
+  predicate: (event: ProtocolTaskEvent) => boolean,
   label: string,
-  seen: TaskEvent[]
-): Promise<TaskEvent> {
+  seen: ProtocolTaskEvent[]
+): Promise<ProtocolTaskEvent> {
   for (;;) {
     const next = await eventWithin(subscription, label);
     if (next.done) throw new Error(`${label} ended before the expected event`);
@@ -318,11 +329,16 @@ async function waitForEvent(
   }
 }
 
-async function waitForChildPID(subscription: EventSubscription, taskId: string, seen: TaskEvent[]): Promise<number> {
+async function waitForChildPID(
+  subscription: EventSubscription,
+  taskId: string,
+  seen: ProtocolTaskEvent[]
+): Promise<number> {
   let output = "";
   for (;;) {
     const event = await waitForEvent(subscription, taskId, (value) => value.event === "task.output", "child PID event", seen);
-    output += typeof event.payload.text === "string" ? event.payload.text : "";
+    const payload = event.payload as { text?: unknown };
+    output += typeof payload.text === "string" ? payload.text : "";
     const match = /(?:^|\n)CHILD_PID=(\d+)(?:\n|$)/.exec(output);
     if (!match?.[1]) continue;
     const pid = Number(match[1]);
@@ -331,7 +347,11 @@ async function waitForChildPID(subscription: EventSubscription, taskId: string, 
   }
 }
 
-async function waitForFinished(subscription: EventSubscription, taskId: string, seen: TaskEvent[]): Promise<TaskEvent> {
+async function waitForFinished(
+  subscription: EventSubscription,
+  taskId: string,
+  seen: ProtocolTaskEvent[]
+): Promise<ProtocolTaskEvent> {
   return waitForEvent(subscription, taskId, (event) => event.event === "task.finished", "task finished event", seen);
 }
 
@@ -340,8 +360,8 @@ async function collectThroughSequence(
   sequence: number,
   afterSequence = 0,
   label = "event replay"
-): Promise<TaskEvent[]> {
-  const events: TaskEvent[] = [];
+): Promise<ProtocolTaskEvent[]> {
+  const events: ProtocolTaskEvent[] = [];
   let lastConsumedSequence = afterSequence;
   while (lastConsumedSequence < sequence) {
     const next = await eventWithin(subscription, label);
@@ -353,7 +373,7 @@ async function collectThroughSequence(
   return events;
 }
 
-function queuedTaskEvent(sequence: number): TaskEvent {
+function queuedTaskEvent(sequence: number): ProtocolTaskEvent {
   return {
     event: sequence === 4 ? "task.finished" : "task.output",
     kind: "event",
@@ -364,7 +384,7 @@ function queuedTaskEvent(sequence: number): TaskEvent {
     sentAt: new Date("2026-07-23T00:00:00.000Z"),
     sequence,
     taskId: "1".repeat(32)
-  } as TaskEvent;
+  } as ProtocolTaskEvent;
 }
 
 test("collector consumes queued replay through the stable target sequence", async () => {
@@ -375,7 +395,7 @@ test("collector consumes queued replay through the stable target sequence", asyn
   assert.deepEqual(events.map((event) => event.sequence), [1, 2, 3, 4]);
 });
 
-function assertContinuousUniqueSequences(events: TaskEvent[]): void {
+function assertContinuousUniqueSequences(events: ProtocolTaskEvent[]): void {
   assert.ok(events.length > 0);
   assert.equal(new Set(events.map((event) => event.sequence)).size, events.length, "event sequences must be unique");
   for (let index = 1; index < events.length; index++) {
@@ -383,33 +403,39 @@ function assertContinuousUniqueSequences(events: TaskEvent[]): void {
   }
 }
 
-function assertV11CompatibilityEvents(events: TaskEvent[], afterSequence = 0): void {
+function assertSimulationProtocolEvents(events: ProtocolTaskEvent[], afterSequence = 0): void {
   assertContinuousUniqueSequences(events);
   assert.equal(events[0]?.sequence, afterSequence + 1, "event replay must start immediately after its cursor");
+  const version = events[0]?.protocolVersion;
   for (const event of events) {
-    assert.equal(event.protocolVersion, "1.1");
-    assert.equal(V11_EVENT_NAMES.has(event.event), true, `v1.1 leaked event type ${event.event}`);
+    assert.equal(event.protocolVersion, version, "event replay mixed protocol versions");
+    const allowedNames = version === "1.2" ? V12_EVENT_NAMES : V11_EVENT_NAMES;
+    assert.equal(allowedNames.has(event.event), true, `${version} leaked event type ${event.event}`);
     if (event.event !== "task.output") continue;
+    const expectedKeys = version === "1.2"
+      ? ["stepId", "stream", "text", "truncated"]
+      : ["stream", "text", "truncated"];
     assert.deepEqual(
       Object.keys(event.payload).sort(),
-      ["stream", "text", "truncated"],
-      `v1.1 task.output sequence ${event.sequence} changed its exact payload`
+      expectedKeys,
+      `${version} task.output sequence ${event.sequence} changed its exact payload`
     );
-    assert.equal(typeof event.payload.stream, "string");
-    assert.equal(typeof event.payload.text, "string");
-    assert.equal(typeof event.payload.truncated, "boolean");
+    const payload = event.payload as { stream?: unknown; text?: unknown; truncated?: unknown };
+    assert.equal(typeof payload.stream, "string");
+    assert.equal(typeof payload.text, "string");
+    assert.equal(typeof payload.truncated, "boolean");
   }
 }
 
-function assertV11SimulationSnapshot(snapshot: TaskSnapshot): void {
+function assertSimulationSnapshot(snapshot: ProtocolTaskSnapshot): void {
   assert.equal(snapshot.kind, "simulation");
   for (const field of ["activeStep", "steps", "workspaceGeneration", "planFingerprint", "request"]) {
-    assert.equal(field in snapshot, false, `v1.1 Task Snapshot leaked ${field}`);
+    assert.equal(field in snapshot, false, `simulation Task Snapshot leaked ${field}`);
   }
 }
 
-function assertInterrupted(snapshot: TaskSnapshot): void {
-  assertV11SimulationSnapshot(snapshot);
+function assertInterrupted(snapshot: ProtocolTaskSnapshot): void {
+  assertSimulationSnapshot(snapshot);
   assert.equal(snapshot.status, "finished");
   assert.equal(snapshot.outcome, "interrupted");
 }
@@ -428,11 +454,10 @@ test("prepares the token file before writing the secret", async () => {
 
 test("probe authenticates, reads capabilities, and shuts the service down", async () => {
   const capabilities = await runProbe(binary);
-  assert.equal(capabilities.platform, process.platform === "win32" ? "windows" : "linux");
-  assert.deepEqual(capabilities.transports, [process.platform === "win32" ? "named-pipe" : "unix-socket"]);
+  assert.deepEqual(capabilities, { workspaceInspect: true, targetList: true, cmakeBuild: true });
 });
 
-test("successful simulation preserves the complete v1.1 compatibility event stream", async () => {
+test("successful simulation preserves the complete negotiated event stream", async () => {
   const fixture = await startTaskService(binary);
   try {
     const subscription = await withNamedTimeout(
@@ -449,20 +474,28 @@ test("successful simulation preserves the complete v1.1 compatibility event stre
       }),
       EVENT_TIMEOUT_MS
     );
-    assertV11SimulationSnapshot(started);
+    assertSimulationSnapshot(started);
 
-    const seen: TaskEvent[] = [];
+    const seen: ProtocolTaskEvent[] = [];
     const finished = await waitForFinished(subscription, started.taskId, seen);
-    assert.equal(finished.payload.outcome, "succeeded");
-    assertV11CompatibilityEvents(seen);
-    const compatibilityOutputs = seen.filter((event) => event.event === "task.output");
-    assert.deepEqual(
-      compatibilityOutputs.map((event) => event.payload),
-      [
-        { stream: "service", text: "", truncated: false },
-        { stream: "service", text: "", truncated: false }
-      ]
-    );
+    assert.equal((finished.payload as { outcome?: unknown }).outcome, "succeeded");
+    assertSimulationProtocolEvents(seen);
+    if (seen[0]?.protocolVersion === "1.1") {
+      const compatibilityOutputs = seen.filter((event) => event.event === "task.output");
+      assert.deepEqual(
+        compatibilityOutputs.map((event) => event.payload),
+        [
+          { stream: "service", text: "", truncated: false },
+          { stream: "service", text: "", truncated: false }
+        ]
+      );
+    } else {
+      assert.deepEqual(
+        seen.filter((event) => event.event === "task.step_started" || event.event === "task.step_finished")
+          .map((event) => event.event),
+        ["task.step_started", "task.step_finished"]
+      );
+    }
     const artifactIndex = seen.findIndex((event) => event.event === "artifact.created");
     const finishedIndex = seen.findIndex((event) => event.event === "task.finished");
     assert.ok(artifactIndex >= 0 && artifactIndex < finishedIndex, "artifact.created must precede task.finished");
@@ -472,7 +505,7 @@ test("successful simulation preserves the complete v1.1 compatibility event stre
       fixture.client.getTask(started.taskId),
       EVENT_TIMEOUT_MS
     );
-    assertV11SimulationSnapshot(durable);
+    assertSimulationSnapshot(durable);
     assert.equal(durable.status, "finished");
     assert.equal(durable.outcome, "succeeded");
     assert.equal(durable.lastSequence, seen.at(-1)?.sequence);
@@ -483,7 +516,7 @@ test("successful simulation preserves the complete v1.1 compatibility event stre
 
 test("task survives reconnect, cancels its tree, persists history and artifact", async () => {
   const fixture = await startTaskService(binary);
-  const seen: TaskEvent[] = [];
+  const seen: ProtocolTaskEvent[] = [];
   let secondary: ProtocolClient | undefined;
   let reconnectGate: ReturnType<typeof fixture.pauseNextReconnect> | undefined;
   try {
@@ -501,8 +534,8 @@ test("task survives reconnect, cancels its tree, persists history and artifact",
     const childPID = await waitForChildPID(subscription, running.taskId, seen);
     const beforeReconnect = seen.at(-1)?.sequence;
     assert.ok(beforeReconnect);
-    assertV11SimulationSnapshot(running);
-    assertV11CompatibilityEvents(seen);
+    assertSimulationSnapshot(running);
+    assertSimulationProtocolEvents(seen);
 
     reconnectGate = fixture.pauseNextReconnect();
     const reconnecting = withNamedTimeout("primary client reconnect", client.reconnect(), EVENT_TIMEOUT_MS);
@@ -515,12 +548,12 @@ test("task survives reconnect, cancels its tree, persists history and artifact",
       EVENT_TIMEOUT_MS
     );
     await withNamedTimeout("secondary task cancellation", secondaryClient.cancelTask(running.taskId), EVENT_TIMEOUT_MS);
-    const secondarySeen: TaskEvent[] = [];
+    const secondarySeen: ProtocolTaskEvent[] = [];
     const secondaryFinished = await waitForFinished(secondarySubscription, running.taskId, secondarySeen);
-    assertV11CompatibilityEvents(secondarySeen, beforeReconnect);
-    assert.equal(secondaryFinished.payload.outcome, "cancelled");
+    assertSimulationProtocolEvents(secondarySeen, beforeReconnect);
+    assert.equal((secondaryFinished.payload as { outcome?: unknown }).outcome, "cancelled");
     const durable = await withNamedTimeout("secondary durable task lookup", secondaryClient.getTask(running.taskId), EVENT_TIMEOUT_MS);
-    assertV11SimulationSnapshot(durable);
+    assertSimulationSnapshot(durable);
     assert.equal(durable.status, "finished");
     assert.equal(durable.outcome, "cancelled");
     assert.ok(durable.lastSequence > beforeReconnect);
@@ -541,7 +574,7 @@ test("task survives reconnect, cancels its tree, persists history and artifact",
       Array.from({ length: durable.lastSequence - beforeReconnect }, (_, index) => beforeReconnect + index + 1)
     );
     assert.equal(new Set(replayed.map((event) => event.sequence)).size, replayed.length);
-    assertV11CompatibilityEvents(replayed, beforeReconnect);
+    assertSimulationProtocolEvents(replayed, beforeReconnect);
     await assertProcessGone(childPID);
 
     const artifacts = await withNamedTimeout("artifact list", client.listArtifacts(running.taskId), EVENT_TIMEOUT_MS);
@@ -558,7 +591,7 @@ test("task survives reconnect, cancels its tree, persists history and artifact",
     await fixture.stopGracefully();
     const restarted = await fixture.restart();
     const persisted = await withNamedTimeout("persisted task lookup", restarted.client.getTask(running.taskId), EVENT_TIMEOUT_MS);
-    assertV11SimulationSnapshot(persisted);
+    assertSimulationSnapshot(persisted);
     assert.equal(persisted.status, "finished");
     assert.equal(persisted.outcome, "cancelled");
   } finally {
@@ -586,10 +619,10 @@ test("service crash recovers an active task exactly once as interrupted", async 
       EVENT_TIMEOUT_MS
     );
     assert.equal(running.status, "running");
-    const beforeCrash: TaskEvent[] = [];
+    const beforeCrash: ProtocolTaskEvent[] = [];
     const childPID = await waitForChildPID(subscription, running.taskId, beforeCrash);
-    assertV11SimulationSnapshot(running);
-    assertV11CompatibilityEvents(beforeCrash);
+    assertSimulationSnapshot(running);
+    assertSimulationProtocolEvents(beforeCrash);
     await fixture.kill();
     await assertProcessGone(childPID);
 
@@ -606,10 +639,10 @@ test("service crash recovers an active task exactly once as interrupted", async 
       EVENT_TIMEOUT_MS
     );
     const events = await collectThroughSequence(recoverySubscription, recovered.lastSequence, 0, "recovery event replay");
-    assertV11CompatibilityEvents(events);
+    assertSimulationProtocolEvents(events);
     const recoveredFinished = events.filter((event) => event.taskId === running.taskId && event.event === "task.finished");
     assert.equal(recoveredFinished.length, 1);
-    assert.equal(recoveredFinished[0]?.payload.outcome, "interrupted");
+    assert.equal((recoveredFinished[0]?.payload as { outcome?: unknown }).outcome, "interrupted");
     assert.equal(JSON.stringify({ recovered, events }).includes("test_failed"), false);
   } finally {
     await fixture.dispose();

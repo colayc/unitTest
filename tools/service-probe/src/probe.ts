@@ -8,7 +8,7 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import type { Capabilities } from "@unit-test-ide/protocol-models";
+import type { Capabilities, CapabilitiesV11, CapabilitiesV12 } from "@unit-test-ide/protocol-models";
 import { ProtocolClient, type ConnectionConnector, type HandshakeResult } from "@unit-test-ide/test-client";
 import { endpointForDirectory, type EndpointResource } from "./endpoint.js";
 
@@ -342,7 +342,7 @@ async function launchService(serviceBinary: string, directory: string, options: 
       timeoutMs
     );
     const handshake = await withNamedTimeout(
-      "protocol 1.1 handshake",
+      "task protocol handshake",
       (options.operations?.handshakeClient ?? ((value, secret) => value.handshake(secret, "service-probe", "0.1.0")))(
         client,
         token,
@@ -350,8 +350,8 @@ async function launchService(serviceBinary: string, directory: string, options: 
       ),
       timeoutMs
     );
-    if (handshake.negotiatedProtocolVersion !== "1.1") {
-      throw new Error(`service negotiated protocol ${handshake.negotiatedProtocolVersion} instead of 1.1`);
+    if (handshake.negotiatedProtocolVersion === "1.0") {
+      throw new Error("service negotiated protocol 1.0 without task support");
     }
     return {
       child,
@@ -437,12 +437,12 @@ export class TaskServiceFixture {
       try {
         client = await withNamedTimeout("secondary service connection", ProtocolClient.connect(instance.endpoint), timeoutMs);
         const handshake = await withNamedTimeout(
-          "secondary protocol 1.1 handshake",
+          "secondary task protocol handshake",
           client.handshake(instance.token, "service-probe-secondary", "0.1.0"),
           timeoutMs
         );
-        if (handshake.negotiatedProtocolVersion !== "1.1") {
-          throw new Error(`secondary client negotiated protocol ${handshake.negotiatedProtocolVersion} instead of 1.1`);
+        if (handshake.negotiatedProtocolVersion === "1.0") {
+          throw new Error("secondary client negotiated protocol 1.0 without task support");
         }
         this.#assertAvailable();
         return client;
@@ -638,7 +638,7 @@ export async function assertProcessGone(pid: number): Promise<void> {
   throw new Error(`process ${pid} still exists after ${OPERATION_TIMEOUT_MS}ms`);
 }
 
-export async function runProbe(serviceBinary: string): Promise<Capabilities> {
+export async function runProbe(serviceBinary: string): Promise<Capabilities | CapabilitiesV11 | CapabilitiesV12> {
   const fixture = await startTaskService(serviceBinary);
   try {
     const capabilities = await withNamedTimeout("capabilities request", fixture.client.getCapabilities());

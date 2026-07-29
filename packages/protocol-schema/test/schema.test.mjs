@@ -295,6 +295,108 @@ test("protocol 1.2 accepts the Service journal event payloads without weakening 
   }), false);
 });
 
+test("protocol 1.2 preserves the complete task, subscription, and artifact method surface", async () => {
+  const ajv = new Ajv2020({ allErrors: true, strict: true });
+  addFormats(ajv);
+  for (const name of ["capabilities", "diagnostic", "workspace", "task", "event", "artifact"]) {
+    ajv.addSchema(await load(`../schema/v1.2/${name}.schema.json`));
+  }
+  const validateV12 = ajv.compile(await load("../schema/v1.2/message.schema.json"));
+  const base = {
+    protocolVersion: "1.2",
+    messageId: "88888888888888888888888888888888",
+    sentAt: "2026-07-29T00:00:00Z"
+  };
+  const task = {
+    taskId: "11111111111111111111111111111111",
+    kind: "cmakeBuild",
+    workspaceGeneration: "2".repeat(64),
+    projectId: "core",
+    buildProfileId: "3".repeat(64),
+    targetIds: ["4".repeat(64)],
+    jobs: 8,
+    timeoutMs: 600000,
+    status: "running",
+    createdAt: "2026-07-29T00:00:00Z",
+    lastSequence: 2
+  };
+  const artifact = {
+    artifactId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    taskId: "11111111111111111111111111111111",
+    kind: "task-summary",
+    mimeType: "application/json",
+    sizeBytes: 2,
+    sha256: "0".repeat(64),
+    createdAt: "2026-07-29T00:00:00Z",
+    uri: "unit-test-ide://artifact/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  };
+  const messages = [
+    {
+      ...base,
+      kind: "response",
+      requestId: "11111111111111111111111111111111",
+      method: "handshake",
+      payload: { negotiatedProtocolVersion: "1.2", serviceVersion: "0.3.0" }
+    },
+    {
+      ...base,
+      kind: "response",
+      requestId: "11111111111111111111111111111111",
+      method: "shutdown",
+      payload: { accepted: true }
+    },
+    {
+      ...base,
+      kind: "request",
+      method: "events/subscribe",
+      payload: { afterSequence: 0 }
+    },
+    {
+      ...base,
+      kind: "response",
+      requestId: "11111111111111111111111111111111",
+      method: "events/subscribe",
+      payload: { afterSequence: 0 }
+    },
+    {
+      ...base,
+      kind: "response",
+      requestId: "11111111111111111111111111111111",
+      method: "tasks/list",
+      payload: { items: [task] }
+    },
+    {
+      ...base,
+      kind: "request",
+      method: "artifacts/list",
+      payload: { taskId: "11111111111111111111111111111111", limit: 10 }
+    },
+    {
+      ...base,
+      kind: "response",
+      requestId: "11111111111111111111111111111111",
+      method: "artifacts/list",
+      payload: { items: [artifact] }
+    },
+    {
+      ...base,
+      kind: "request",
+      method: "artifacts/read",
+      payload: { artifactId: artifact.artifactId, offset: 0, length: 65536 }
+    },
+    {
+      ...base,
+      kind: "response",
+      requestId: "11111111111111111111111111111111",
+      method: "artifacts/read",
+      payload: { data: "e30", nextOffset: 2, eof: true, sizeBytes: 2, sha256: artifact.sha256 }
+    }
+  ];
+  for (const message of messages) {
+    assert.equal(validateV12(message), true, `${message.method}: ${JSON.stringify(validateV12.errors)}`);
+  }
+});
+
 test("protocol 1.2 refuses execution details and native workspace paths", async () => {
   const ajv = new Ajv2020({ allErrors: true, strict: true });
   addFormats(ajv);

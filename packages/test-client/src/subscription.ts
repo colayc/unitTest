@@ -1,8 +1,8 @@
-import type { TaskEvent } from "@unit-test-ide/protocol-models";
+import type { ProtocolTaskEvent } from "./envelopes.js";
 
-export class EventSubscription implements AsyncIterable<TaskEvent> {
-  readonly #queue: TaskEvent[] = [];
-  readonly #waiters: Array<(value: IteratorResult<TaskEvent>) => void> = [];
+export class EventSubscription implements AsyncIterable<ProtocolTaskEvent> {
+  readonly #queue: ProtocolTaskEvent[] = [];
+  readonly #waiters: Array<(value: IteratorResult<ProtocolTaskEvent>) => void> = [];
   #closed = false;
   lastSequence: number;
 
@@ -15,7 +15,7 @@ export class EventSubscription implements AsyncIterable<TaskEvent> {
     this.lastSequence = afterSequence;
   }
 
-  push(event: TaskEvent): boolean {
+  push(event: ProtocolTaskEvent): boolean {
     if (this.#closed || event.sequence <= this.lastSequence) return true;
     if (!Number.isSafeInteger(event.sequence) || event.sequence !== this.lastSequence + 1) return false;
     this.lastSequence = event.sequence;
@@ -31,11 +31,11 @@ export class EventSubscription implements AsyncIterable<TaskEvent> {
     for (const waiter of this.#waiters.splice(0)) waiter({ value: undefined, done: true });
   }
 
-  [Symbol.asyncIterator](): AsyncIterator<TaskEvent> {
+  [Symbol.asyncIterator](): AsyncIterator<ProtocolTaskEvent> {
     return { next: () => this.next() };
   }
 
-  next(): Promise<IteratorResult<TaskEvent>> {
+  next(): Promise<IteratorResult<ProtocolTaskEvent>> {
     const event = this.#queue.shift();
     if (event) return Promise.resolve({ value: event, done: false });
     if (this.#closed) return Promise.resolve({ value: undefined, done: true });

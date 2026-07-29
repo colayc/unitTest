@@ -10,6 +10,9 @@
     { "$ref": "#/$defs/taskStartRequest" },
     { "$ref": "#/$defs/taskIDRequest" },
     { "$ref": "#/$defs/tasksListRequest" },
+    { "$ref": "#/$defs/eventsSubscribeRequest" },
+    { "$ref": "#/$defs/artifactsListRequest" },
+    { "$ref": "#/$defs/artifactReadRequest" },
     { "$ref": "#/$defs/response" },
     { "$ref": "#/$defs/error" },
     { "$ref": "urn:unit-test-ide:protocol:v1.2:event" }
@@ -104,12 +107,80 @@
         }, "required": ["kind", "method", "payload"]
       }], "unevaluatedProperties": false
     },
+    "eventsSubscribeRequest": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/base" }, {
+        "type": "object",
+        "properties": {
+          "kind": { "const": "request" },
+          "method": { "const": "events/subscribe" },
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["afterSequence"],
+            "properties": { "afterSequence": { "type": "integer", "minimum": 0 } }
+          }
+        },
+        "required": ["kind", "method", "payload"]
+      }],
+      "unevaluatedProperties": false
+    },
+    "artifactsListRequest": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/base" }, {
+        "type": "object",
+        "properties": {
+          "kind": { "const": "request" },
+          "method": { "const": "artifacts/list" },
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["taskId"],
+            "properties": {
+              "taskId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+              "cursor": { "type": "string", "minLength": 1 },
+              "limit": { "type": "integer", "minimum": 1, "maximum": 200 }
+            }
+          }
+        },
+        "required": ["kind", "method", "payload"]
+      }],
+      "unevaluatedProperties": false
+    },
+    "artifactReadRequest": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/base" }, {
+        "type": "object",
+        "properties": {
+          "kind": { "const": "request" },
+          "method": { "const": "artifacts/read" },
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["artifactId", "offset", "length"],
+            "properties": {
+              "artifactId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+              "offset": { "type": "integer", "minimum": 0 },
+              "length": { "type": "integer", "minimum": 1, "maximum": 65536 }
+            }
+          }
+        },
+        "required": ["kind", "method", "payload"]
+      }],
+      "unevaluatedProperties": false
+    },
     "response": {
       "oneOf": [
+        { "$ref": "#/$defs/handshakeResponse" },
         { "$ref": "#/$defs/capabilitiesResponse" },
+        { "$ref": "#/$defs/shutdownResponse" },
         { "$ref": "#/$defs/workspaceResponse" },
         { "$ref": "#/$defs/targetsResponse" },
-        { "$ref": "#/$defs/taskResponse" }
+        { "$ref": "#/$defs/taskResponse" },
+        { "$ref": "#/$defs/tasksListResponse" },
+        { "$ref": "#/$defs/eventsSubscribeResponse" },
+        { "$ref": "#/$defs/artifactsListResponse" },
+        { "$ref": "#/$defs/artifactReadResponse" }
       ]
     },
     "responseBase": {
@@ -119,9 +190,44 @@
         "required": ["kind", "requestId", "method", "payload"]
       }]
     },
+    "handshakeResponse": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/responseBase" }, {
+        "type": "object",
+        "properties": {
+          "method": { "const": "handshake" },
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["negotiatedProtocolVersion", "serviceVersion"],
+            "properties": {
+              "negotiatedProtocolVersion": { "const": "1.2" },
+              "serviceVersion": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }],
+      "unevaluatedProperties": false
+    },
     "capabilitiesResponse": {
       "type": "object",
       "allOf": [{ "$ref": "#/$defs/responseBase" }, { "type": "object", "properties": { "method": { "const": "capabilities/get" }, "payload": { "$ref": "urn:unit-test-ide:protocol:v1.2:capabilities" } } }],
+      "unevaluatedProperties": false
+    },
+    "shutdownResponse": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/responseBase" }, {
+        "type": "object",
+        "properties": {
+          "method": { "const": "shutdown" },
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["accepted"],
+            "properties": { "accepted": { "const": true } }
+          }
+        }
+      }],
       "unevaluatedProperties": false
     },
     "workspaceResponse": {
@@ -137,6 +243,82 @@
     "taskResponse": {
       "type": "object",
       "allOf": [{ "$ref": "#/$defs/responseBase" }, { "type": "object", "properties": { "method": { "enum": ["tasks/start", "tasks/get", "tasks/cancel"] }, "payload": { "$ref": "urn:unit-test-ide:protocol:v1.2:task" } } }],
+      "unevaluatedProperties": false
+    },
+    "tasksListResponse": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/responseBase" }, {
+        "type": "object",
+        "properties": {
+          "method": { "const": "tasks/list" },
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["items"],
+            "properties": {
+              "items": { "type": "array", "items": { "$ref": "urn:unit-test-ide:protocol:v1.2:task" } },
+              "nextCursor": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }],
+      "unevaluatedProperties": false
+    },
+    "eventsSubscribeResponse": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/responseBase" }, {
+        "type": "object",
+        "properties": {
+          "method": { "const": "events/subscribe" },
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["afterSequence"],
+            "properties": { "afterSequence": { "type": "integer", "minimum": 0 } }
+          }
+        }
+      }],
+      "unevaluatedProperties": false
+    },
+    "artifactsListResponse": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/responseBase" }, {
+        "type": "object",
+        "properties": {
+          "method": { "const": "artifacts/list" },
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["items"],
+            "properties": {
+              "items": { "type": "array", "items": { "$ref": "urn:unit-test-ide:protocol:v1.2:artifact" } },
+              "nextCursor": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }],
+      "unevaluatedProperties": false
+    },
+    "artifactReadResponse": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/responseBase" }, {
+        "type": "object",
+        "properties": {
+          "method": { "const": "artifacts/read" },
+          "payload": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["data", "nextOffset", "eof", "sizeBytes", "sha256"],
+            "properties": {
+              "data": { "type": "string" },
+              "nextOffset": { "type": "integer", "minimum": 0 },
+              "eof": { "type": "boolean" },
+              "sizeBytes": { "type": "integer", "minimum": 0 },
+              "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+            }
+          }
+        }
+      }],
       "unevaluatedProperties": false
     },
     "taskStartPayload": {

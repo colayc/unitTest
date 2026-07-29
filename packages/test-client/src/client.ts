@@ -7,14 +7,25 @@ import { Ajv2020, type ValidateFunction } from "ajv/dist/2020.js";
 import * as formatsModule from "ajv-formats";
 import type {
   ArtifactMetadata,
+  ArtifactMetadataV12,
   Capabilities,
   CapabilitiesV11,
-  TaskEvent,
-  TaskSnapshot
+  CapabilitiesV12,
+  TargetList,
+  TaskSnapshot,
+  TaskSnapshotV12,
+  WorkspaceSnapshot
 } from "@unit-test-ide/protocol-models";
 import { Connection, MAX_MESSAGE_BYTES } from "./connection.js";
-import { decodeArtifactMetadata, decodeTaskSnapshot } from "./decoders.js";
-import type { ProtocolVersion } from "./envelopes.js";
+import {
+  decodeArtifactMetadata,
+  decodeArtifactMetadataV12,
+  decodeTargetList,
+  decodeTaskSnapshot,
+  decodeTaskSnapshotV12,
+  decodeWorkspaceSnapshot
+} from "./decoders.js";
+import type { Method, ProtocolTaskEvent, ProtocolVersion } from "./envelopes.js";
 import { ProtocolError } from "./envelopes.js";
 import { EventSubscription } from "./subscription.js";
 
@@ -28,9 +39,25 @@ export interface StartTaskInput {
   scenario: SimulationScenario;
   timeoutMs: number;
 }
+export interface CMakeBuildInput {
+  idempotencyKey: string;
+  workspaceGeneration: string;
+  projectId: string;
+  buildProfileId: string;
+  targetIds: string[];
+  jobs: number;
+  timeoutMs: number;
+}
+export interface CMakeTargetsInput {
+  workspaceGeneration: string;
+  projectId: string;
+  buildProfileId: string;
+}
 export interface PageInput { cursor?: string; limit?: number }
-export interface TaskPage { items: TaskSnapshot[]; nextCursor?: string }
-export interface ArtifactPage { items: ArtifactMetadata[]; nextCursor?: string }
+export type ProtocolTaskSnapshot = TaskSnapshot | TaskSnapshotV12;
+export type ProtocolArtifactMetadata = ArtifactMetadata | ArtifactMetadataV12;
+export interface TaskPage { items: ProtocolTaskSnapshot[]; nextCursor?: string }
+export interface ArtifactPage { items: ProtocolArtifactMetadata[]; nextCursor?: string }
 export interface HandshakeResult { negotiatedProtocolVersion: ProtocolVersion; serviceVersion: string }
 export type ConnectionConnector = () => Duplex | Promise<Duplex>;
 
@@ -55,6 +82,11 @@ const addFormats = formatsModule.default as unknown as (instance: Ajv2020) => vo
 addFormats(payloadAjv);
 payloadAjv.addSchema(require("@unit-test-ide/protocol-schema/v1.1/task"));
 payloadAjv.addSchema(require("@unit-test-ide/protocol-schema/v1.1/artifact"));
+payloadAjv.addSchema(require("@unit-test-ide/protocol-schema/v1.2/capabilities"));
+payloadAjv.addSchema(require("@unit-test-ide/protocol-schema/v1.2/diagnostic"));
+payloadAjv.addSchema(require("@unit-test-ide/protocol-schema/v1.2/workspace"));
+payloadAjv.addSchema(require("@unit-test-ide/protocol-schema/v1.2/task"));
+payloadAjv.addSchema(require("@unit-test-ide/protocol-schema/v1.2/artifact"));
 
 const validateHandshakeV10 = payloadAjv.compile({
   type: "object",
@@ -65,18 +97,24 @@ const validateHandshakeV10 = payloadAjv.compile({
     serviceVersion: { type: "string", minLength: 1 }
   }
 });
-const validateHandshakeV11 = payloadAjv.compile({
+const validateHandshakeV12 = payloadAjv.compile({
   type: "object",
   additionalProperties: false,
   required: ["negotiatedProtocolVersion", "serviceVersion"],
   properties: {
-    negotiatedProtocolVersion: { enum: ["1.0", "1.1"] },
+    negotiatedProtocolVersion: { enum: ["1.0", "1.1", "1.2"] },
     serviceVersion: { type: "string", minLength: 1 }
   }
 });
 const validateCapabilitiesV10 = payloadAjv.compile(require("@unit-test-ide/protocol-schema/v1/capabilities"));
 const validateCapabilitiesV11 = payloadAjv.compile(require("@unit-test-ide/protocol-schema/v1.1/capabilities"));
+const validateCapabilitiesV12 = payloadAjv.getSchema("urn:unit-test-ide:protocol:v1.2:capabilities") as ValidateFunction;
 const validateTask = payloadAjv.getSchema("urn:unit-test-ide:protocol:v1.1:task") as ValidateFunction;
+const validateTaskV12 = payloadAjv.getSchema("urn:unit-test-ide:protocol:v1.2:task") as ValidateFunction;
+const validateWorkspaceV12 = payloadAjv.getSchema("urn:unit-test-ide:protocol:v1.2:workspace") as ValidateFunction;
+const validateTargetListV12 = payloadAjv.compile({
+  $ref: "urn:unit-test-ide:protocol:v1.2:workspace#/$defs/targetList"
+});
 const validateTaskPage = payloadAjv.compile({
   type: "object",
   additionalProperties: false,
@@ -86,12 +124,30 @@ const validateTaskPage = payloadAjv.compile({
     nextCursor: { type: "string", minLength: 1 }
   }
 });
+const validateTaskPageV12 = payloadAjv.compile({
+  type: "object",
+  additionalProperties: false,
+  required: ["items"],
+  properties: {
+    items: { type: "array", items: { $ref: "urn:unit-test-ide:protocol:v1.2:task" } },
+    nextCursor: { type: "string", minLength: 1 }
+  }
+});
 const validateArtifactPage = payloadAjv.compile({
   type: "object",
   additionalProperties: false,
   required: ["items"],
   properties: {
     items: { type: "array", items: { $ref: "urn:unit-test-ide:protocol:v1.1:artifact" } },
+    nextCursor: { type: "string", minLength: 1 }
+  }
+});
+const validateArtifactPageV12 = payloadAjv.compile({
+  type: "object",
+  additionalProperties: false,
+  required: ["items"],
+  properties: {
+    items: { type: "array", items: { $ref: "urn:unit-test-ide:protocol:v1.2:artifact" } },
     nextCursor: { type: "string", minLength: 1 }
   }
 });
@@ -150,6 +206,51 @@ function validateSubscriptionAcknowledgement(payload: Record<string, unknown>, e
   }
 }
 
+type TaskProtocolVersion = Exclude<ProtocolVersion, "1.0">;
+
+function decodeTaskResponse(
+  method: string,
+  version: TaskProtocolVersion,
+  payload: Record<string, unknown>
+): ProtocolTaskSnapshot {
+  if (version === "1.2") {
+    validatePayload(method, validateTaskV12, payload);
+    return decodeTaskSnapshotV12(payload);
+  }
+  validatePayload(method, validateTask, payload);
+  return decodeTaskSnapshot(payload);
+}
+
+function validateCMakeContext(input: CMakeTargetsInput): void {
+  if (!/^[0-9a-f]{64}$/.test(input.workspaceGeneration)) {
+    throw new Error("workspaceGeneration must be a 64-character lowercase hexadecimal value");
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(input.projectId)) {
+    throw new Error("projectId is invalid");
+  }
+  if (!/^[0-9a-f]{64}$/.test(input.buildProfileId)) {
+    throw new Error("buildProfileId must be a 64-character lowercase hexadecimal value");
+  }
+}
+
+function validateCMakeBuildInput(input: CMakeBuildInput): void {
+  validateCMakeContext(input);
+  if (!/^[0-9a-f]{32}$/.test(input.idempotencyKey)) {
+    throw new Error("idempotencyKey must be a 32-character lowercase hexadecimal value");
+  }
+  if (!Array.isArray(input.targetIds) || input.targetIds.length > 128 ||
+    input.targetIds.some((targetId) => !/^[0-9a-f]{64}$/.test(targetId)) ||
+    new Set(input.targetIds).size !== input.targetIds.length) {
+    throw new Error("targetIds must contain at most 128 unique 64-character lowercase hexadecimal values");
+  }
+  if (!Number.isSafeInteger(input.jobs) || input.jobs < 1 || input.jobs > 256) {
+    throw new Error("jobs must be a safe integer between 1 and 256");
+  }
+  if (!Number.isSafeInteger(input.timeoutMs) || input.timeoutMs < 1 || input.timeoutMs > 86_400_000) {
+    throw new Error("timeoutMs must be a safe integer between 1 and 86400000");
+  }
+}
+
 export class ProtocolClient {
   static attach(stream: Duplex): ProtocolClient {
     return new ProtocolClient(new Connection(stream));
@@ -187,9 +288,13 @@ export class ProtocolClient {
     return result;
   }
 
-  async getCapabilities(): Promise<Capabilities | CapabilitiesV11> {
+  async getCapabilities(): Promise<Capabilities | CapabilitiesV11 | CapabilitiesV12> {
     const version = this.#requireAuthentication();
     const payload = await this.#connection.request(version, "capabilities/get", {});
+    if (version === "1.2") {
+      validatePayload("capabilities/get", validateCapabilitiesV12, payload);
+      return payload as unknown as CapabilitiesV12;
+    }
     if (version === "1.1") {
       validatePayload("capabilities/get", validateCapabilitiesV11, payload);
       return payload as unknown as CapabilitiesV11;
@@ -204,35 +309,61 @@ export class ProtocolClient {
     validatePayload("shutdown", validateShutdown, payload);
   }
 
-  async startTask(input: StartTaskInput): Promise<TaskSnapshot> {
-    const payload = await this.#requestV11("tasks/start", { ...input });
-    validatePayload("tasks/start", validateTask, payload);
-    return decodeTaskSnapshot(payload);
+  async inspectWorkspace(): Promise<WorkspaceSnapshot> {
+    const payload = await this.#requestV12("workspace/inspect", {});
+    validatePayload("workspace/inspect", validateWorkspaceV12, payload);
+    return decodeWorkspaceSnapshot(payload);
   }
 
-  async getTask(taskId: string): Promise<TaskSnapshot> {
-    const payload = await this.#requestV11("tasks/get", { taskId });
-    validatePayload("tasks/get", validateTask, payload);
-    return decodeTaskSnapshot(payload);
+  async listCMakeTargets(input: CMakeTargetsInput): Promise<TargetList> {
+    this.#requireV12();
+    validateCMakeContext(input);
+    const payload = await this.#requestV12("cmake/targets/list", { ...input });
+    validatePayload("cmake/targets/list", validateTargetListV12, payload);
+    return decodeTargetList(payload);
+  }
+
+  async startCMakeBuild(input: CMakeBuildInput): Promise<TaskSnapshotV12> {
+    this.#requireV12();
+    validateCMakeBuildInput(input);
+    const payload = await this.#requestV12("tasks/start", { ...input, kind: "cmakeBuild" });
+    validatePayload("tasks/start", validateTaskV12, payload);
+    return decodeTaskSnapshotV12(payload);
+  }
+
+  async startTask(input: StartTaskInput): Promise<ProtocolTaskSnapshot> {
+    const version = this.#requireTaskProtocol();
+    const payload = await this.#connection.request(
+      version,
+      "tasks/start",
+      version === "1.2" ? { ...input, kind: "simulation" } : { ...input }
+    );
+    return decodeTaskResponse("tasks/start", version, payload);
+  }
+
+  async getTask(taskId: string): Promise<ProtocolTaskSnapshot> {
+    const { version, payload } = await this.#requestTaskProtocol("tasks/get", { taskId });
+    return decodeTaskResponse("tasks/get", version, payload);
   }
 
   async listTasks(input: PageInput = {}): Promise<TaskPage> {
-    const payload = await this.#requestV11("tasks/list", { ...input });
-    validatePayload("tasks/list", validateTaskPage, payload);
+    const { version, payload } = await this.#requestTaskProtocol("tasks/list", { ...input });
+    const validator = version === "1.2" ? validateTaskPageV12 : validateTaskPage;
+    validatePayload("tasks/list", validator, payload);
     return {
-      items: (payload.items as Record<string, unknown>[]).map(decodeTaskSnapshot),
+      items: (payload.items as Record<string, unknown>[]).map((item) =>
+        version === "1.2" ? decodeTaskSnapshotV12(item) : decodeTaskSnapshot(item)),
       ...(typeof payload.nextCursor === "string" ? { nextCursor: payload.nextCursor } : {})
     };
   }
 
-  async cancelTask(taskId: string): Promise<TaskSnapshot> {
-    const payload = await this.#requestV11("tasks/cancel", { taskId });
-    validatePayload("tasks/cancel", validateTask, payload);
-    return decodeTaskSnapshot(payload);
+  async cancelTask(taskId: string): Promise<ProtocolTaskSnapshot> {
+    const { version, payload } = await this.#requestTaskProtocol("tasks/cancel", { taskId });
+    return decodeTaskResponse("tasks/cancel", version, payload);
   }
 
   async subscribeEvents(afterSequence: number): Promise<EventSubscription> {
-    this.#requireV11();
+    const version = this.#requireTaskProtocol();
     if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) {
       throw new Error("invalid protocol request: afterSequence must be a non-negative safe integer");
     }
@@ -249,7 +380,7 @@ export class ProtocolClient {
       }
     };
     try {
-      await connection.request("1.1", "events/subscribe", { afterSequence }, {
+      await connection.request(version, "events/subscribe", { afterSequence }, {
         onResponse: (payload) => {
           try {
             validateSubscriptionAcknowledgement(payload, afterSequence);
@@ -278,23 +409,25 @@ export class ProtocolClient {
   }
 
   async listArtifacts(taskId: string, input: PageInput = {}): Promise<ArtifactPage> {
-    const payload = await this.#requestV11("artifacts/list", { taskId, ...input });
-    validatePayload("artifacts/list", validateArtifactPage, payload);
+    const { version, payload } = await this.#requestTaskProtocol("artifacts/list", { taskId, ...input });
+    const validator = version === "1.2" ? validateArtifactPageV12 : validateArtifactPage;
+    validatePayload("artifacts/list", validator, payload);
     return {
-      items: (payload.items as Record<string, unknown>[]).map(decodeArtifactMetadata),
+      items: (payload.items as Record<string, unknown>[]).map((item) =>
+        version === "1.2" ? decodeArtifactMetadataV12(item) : decodeArtifactMetadata(item)),
       ...(typeof payload.nextCursor === "string" ? { nextCursor: payload.nextCursor } : {})
     };
   }
 
   async readArtifact(artifactId: string): Promise<Uint8Array> {
-    this.#requireV11();
+    const version = this.#requireTaskProtocol();
     const hash = createHash("sha256");
     let result: Buffer | undefined;
     let offset = 0;
     let expectedSize: number | undefined;
     let expectedDigest: string | undefined;
     for (;;) {
-      const payload = await this.#requestV11("artifacts/read", { artifactId, offset, length: 65_536 });
+      const payload = await this.#connection.request(version, "artifacts/read", { artifactId, offset, length: 65_536 });
       validatePayload("artifacts/read", validateArtifactChunk, payload);
       const chunk: ArtifactChunk = {
         data: payload.data as string,
@@ -363,8 +496,8 @@ export class ProtocolClient {
       this.#reconnectCandidate = candidate;
       const negotiated = await this.#authenticate(candidate, credentials);
       this.#requireCurrentReconnect(generation, candidate);
-      if (subscription && negotiated.negotiatedProtocolVersion !== "1.1") {
-        throw new ProtocolError("PROTOCOL_FEATURE_UNAVAILABLE", "protocol 1.1 was not negotiated", false);
+      if (subscription && negotiated.negotiatedProtocolVersion === "1.0") {
+        throw new ProtocolError("PROTOCOL_FEATURE_UNAVAILABLE", "protocol 1.1 or newer was not negotiated", false);
       }
       if (subscription) {
         this.#requireActiveSubscription(subscription);
@@ -376,7 +509,7 @@ export class ProtocolClient {
           candidateEventUnsubscribe = undefined;
           reconnectConnection.close(error);
         };
-        await reconnectConnection.request("1.1", "events/subscribe", { afterSequence: requestedAfterSequence }, {
+        await reconnectConnection.request(negotiated.negotiatedProtocolVersion, "events/subscribe", { afterSequence: requestedAfterSequence }, {
           onResponse: (payload) => {
             try {
               this.#requireCurrentReconnect(generation, reconnectConnection);
@@ -422,9 +555,9 @@ export class ProtocolClient {
   async #authenticate(connection: Connection, credentials: Credentials): Promise<HandshakeResult> {
     let payload: Record<string, unknown>;
     try {
-      payload = await connection.request("1.1", "handshake", {
+      payload = await connection.request("1.2", "handshake", {
         ...credentials,
-        supportedProtocolVersions: ["1.1", "1.0"]
+        supportedProtocolVersions: ["1.2", "1.1", "1.0"]
       });
     } catch (error) {
       if (!(error instanceof ProtocolError) || error.code !== "UNSUPPORTED_PROTOCOL") throw error;
@@ -435,7 +568,7 @@ export class ProtocolClient {
         serviceVersion: payload.serviceVersion as string
       };
     }
-    validatePayload("handshake", validateHandshakeV11, payload);
+    validatePayload("handshake", validateHandshakeV12, payload);
     return {
       negotiatedProtocolVersion: payload.negotiatedProtocolVersion as ProtocolVersion,
       serviceVersion: payload.serviceVersion as string
@@ -447,20 +580,36 @@ export class ProtocolClient {
     return this.#negotiatedVersion;
   }
 
-  #requireV11(): void {
+  #requireTaskProtocol(): TaskProtocolVersion {
     const version = this.#requireAuthentication();
-    if (version !== "1.1") {
-      throw new ProtocolError("PROTOCOL_FEATURE_UNAVAILABLE", "protocol 1.1 was not negotiated", false);
+    if (version === "1.0") {
+      throw new ProtocolError("PROTOCOL_FEATURE_UNAVAILABLE", "protocol 1.1 or newer was not negotiated", false);
+    }
+    return version;
+  }
+
+  #requireV12(): void {
+    const version = this.#requireAuthentication();
+    if (version !== "1.2") {
+      throw new ProtocolError("PROTOCOL_FEATURE_UNAVAILABLE", "protocol 1.2 was not negotiated", false);
     }
   }
 
-  async #requestV11(method: Parameters<Connection["request"]>[1], payload: Record<string, unknown>): Promise<Record<string, unknown>> {
-    this.#requireV11();
-    return this.#connection.request("1.1", method, payload);
+  async #requestTaskProtocol(
+    method: Method,
+    payload: Record<string, unknown>
+  ): Promise<{ version: TaskProtocolVersion; payload: Record<string, unknown> }> {
+    const version = this.#requireTaskProtocol();
+    return { version, payload: await this.#connection.request(version, method, payload) };
+  }
+
+  async #requestV12(method: Method, payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    this.#requireV12();
+    return this.#connection.request("1.2", method, payload);
   }
 
   #installConnectionListeners(connection: Connection, eventUnsubscribe?: () => void): void {
-    this.#unsubscribeEvent = eventUnsubscribe ?? connection.onEvent((event: TaskEvent) => {
+    this.#unsubscribeEvent = eventUnsubscribe ?? connection.onEvent((event: ProtocolTaskEvent) => {
       const subscription = this.#activeSubscription;
       if (subscription) this.#pushEvent(connection, subscription, event);
     });
@@ -500,7 +649,7 @@ export class ProtocolClient {
     throw new Error("active event subscription changed during reconnect");
   }
 
-  #pushEvent(connection: Connection, subscription: EventSubscription, event: TaskEvent): void {
+  #pushEvent(connection: Connection, subscription: EventSubscription, event: ProtocolTaskEvent): void {
     if (subscription.push(event)) return;
     connection.close(new Error(`event sequence gap after ${subscription.lastSequence}`));
   }

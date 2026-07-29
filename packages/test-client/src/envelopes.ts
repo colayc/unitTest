@@ -1,6 +1,6 @@
-import type { TaskEvent } from "@unit-test-ide/protocol-models";
+import type { TaskEvent, TaskEventV12 } from "@unit-test-ide/protocol-models";
 
-export type ProtocolVersion = "1.0" | "1.1";
+export type ProtocolVersion = "1.0" | "1.1" | "1.2";
 export type Method =
   | "handshake"
   | "capabilities/get"
@@ -11,7 +11,11 @@ export type Method =
   | "tasks/cancel"
   | "events/subscribe"
   | "artifacts/list"
-  | "artifacts/read";
+  | "artifacts/read"
+  | "workspace/inspect"
+  | "cmake/targets/list";
+
+export type ProtocolTaskEvent = TaskEvent | TaskEventV12;
 
 export interface RequestEnvelope {
   protocolVersion: ProtocolVersion;
@@ -41,7 +45,7 @@ export interface ErrorEnvelope {
   error: { code: string; message: string; retryable: boolean };
 }
 
-export type IncomingEnvelope = ResponseEnvelope | ErrorEnvelope | TaskEvent;
+export type IncomingEnvelope = ResponseEnvelope | ErrorEnvelope | ProtocolTaskEvent;
 
 export class ProtocolError extends Error {
   constructor(readonly code: string, message: string, readonly retryable: boolean) {

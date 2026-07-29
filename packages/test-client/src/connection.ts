@@ -3,9 +3,8 @@ import { createRequire } from "node:module";
 import type { Duplex } from "node:stream";
 import { Ajv2020, type ValidateFunction } from "ajv/dist/2020.js";
 import * as formatsModule from "ajv-formats";
-import type { TaskEvent } from "@unit-test-ide/protocol-models";
 import { decodeTaskEvent } from "./decoders.js";
-import type { ErrorEnvelope, IncomingEnvelope, Method, ProtocolVersion, RequestEnvelope, ResponseEnvelope } from "./envelopes.js";
+import type { ErrorEnvelope, IncomingEnvelope, Method, ProtocolTaskEvent, ProtocolVersion, RequestEnvelope, ResponseEnvelope } from "./envelopes.js";
 import { ProtocolError } from "./envelopes.js";
 
 export const MAX_MESSAGE_BYTES = 1024 * 1024;
@@ -17,15 +16,23 @@ addFormats(ajv);
 ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.1/task"));
 ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.1/event"));
 ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.1/artifact"));
+ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.2/capabilities"));
+ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.2/diagnostic"));
+ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.2/workspace"));
+ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.2/task"));
+ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.2/event"));
+ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.2/artifact"));
 const validators: Record<ProtocolVersion, ValidateFunction> = {
   "1.0": ajv.compile(require("@unit-test-ide/protocol-schema/v1/message")),
-  "1.1": ajv.compile(require("@unit-test-ide/protocol-schema/v1.1/message"))
+  "1.1": ajv.compile(require("@unit-test-ide/protocol-schema/v1.1/message")),
+  "1.2": ajv.compile(require("@unit-test-ide/protocol-schema/v1.2/message"))
 };
 
 type Pending = {
   version: ProtocolVersion;
   method: Method;
   acceptLegacyUnsupportedProtocol: boolean;
+  offeredProtocolVersions: ProtocolVersion[];
   onResponse?: (payload: Record<string, unknown>) => void;
   onError?: (error: ProtocolError) => void;
   resolve: (payload: Record<string, unknown>) => void;
@@ -39,7 +46,7 @@ export interface RequestOptions {
 
 export class Connection {
   readonly #pending = new Map<string, Pending>();
-  readonly #eventListeners = new Set<(event: TaskEvent) => void>();
+  readonly #eventListeners = new Set<(event: ProtocolTaskEvent) => void>();
   readonly #closeListeners = new Set<(error: Error) => void>();
   #buffer = Buffer.alloc(0);
   #closed = false;
@@ -80,14 +87,18 @@ export class Connection {
       return Promise.reject(new Error("protocol line exceeds the 1 MiB limit"));
     }
     const acceptLegacyUnsupportedProtocol = this.#legacyHandshakeAvailable
-      && version === "1.1"
+      && version !== "1.0"
       && method === "handshake";
     if (acceptLegacyUnsupportedProtocol) this.#legacyHandshakeAvailable = false;
+    const offeredProtocolVersions = method === "handshake" && Array.isArray(payload.supportedProtocolVersions)
+      ? payload.supportedProtocolVersions.filter(isProtocolVersion)
+      : [];
     return new Promise((resolve, reject) => {
       this.#pending.set(messageId, {
         version,
         method,
         acceptLegacyUnsupportedProtocol,
+        offeredProtocolVersions,
         onResponse: options.onResponse,
         onError: options.onError,
         resolve,
@@ -100,7 +111,7 @@ export class Connection {
     });
   }
 
-  onEvent(listener: (event: TaskEvent) => void): () => void {
+  onEvent(listener: (event: ProtocolTaskEvent) => void): () => void {
     if (this.#closed) return () => {};
     this.#eventListeners.add(listener);
     return () => this.#eventListeners.delete(listener);
@@ -153,7 +164,7 @@ export class Connection {
       return false;
     }
     const version = (value as { protocolVersion?: unknown }).protocolVersion;
-    if (version !== "1.0" && version !== "1.1") {
+    if (!isProtocolVersion(version)) {
       this.#closeWithError(new Error("service returned an unsupported protocol version"));
       return false;
     }
@@ -164,7 +175,7 @@ export class Connection {
     }
     const message = value as IncomingEnvelope;
     if (message.kind === "event") {
-      let event: TaskEvent;
+      let event: ProtocolTaskEvent;
       try {
         event = decodeTaskEvent(message);
       } catch (error) {
@@ -177,12 +188,16 @@ export class Connection {
     const pending = this.#pending.get(message.requestId);
     if (!pending) return true;
     const isAllowedLegacyHandshakeError = pending.acceptLegacyUnsupportedProtocol
-      && pending.version === "1.1"
       && pending.method === "handshake"
       && message.kind === "error"
       && message.protocolVersion === "1.0"
       && message.error.code === "UNSUPPORTED_PROTOCOL";
-    if (message.protocolVersion !== pending.version && !isAllowedLegacyHandshakeError) {
+    const isAllowedNegotiatedHandshakeResponse = pending.method === "handshake"
+      && message.kind === "response"
+      && pending.offeredProtocolVersions.includes(message.protocolVersion)
+      && message.payload.negotiatedProtocolVersion === message.protocolVersion
+      && protocolRank(message.protocolVersion) <= protocolRank(pending.version);
+    if (message.protocolVersion !== pending.version && !isAllowedLegacyHandshakeError && !isAllowedNegotiatedHandshakeResponse) {
       this.#closeWithError(new Error("response protocol version does not match request"));
       return false;
     }
@@ -225,4 +240,12 @@ export class Connection {
     this.#closeListeners.clear();
     this.stream.destroy();
   }
+}
+
+function isProtocolVersion(value: unknown): value is ProtocolVersion {
+  return value === "1.0" || value === "1.1" || value === "1.2";
+}
+
+function protocolRank(version: ProtocolVersion): number {
+  return { "1.0": 0, "1.1": 1, "1.2": 2 }[version];
 }

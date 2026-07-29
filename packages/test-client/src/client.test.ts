@@ -12,6 +12,9 @@ type JsonObject = Record<string, unknown>;
 const MESSAGE_ID = "fedcba9876543210fedcba9876543210";
 const TASK_ID = "11111111111111111111111111111111";
 const ARTIFACT_ID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const WORKSPACE_GENERATION = "2".repeat(64);
+const BUILD_PROFILE_ID = "3".repeat(64);
+const TARGET_ID = "4".repeat(64);
 const SENT_AT = "2026-07-21T00:00:00Z";
 const CLIENT_MAX_ARTIFACT_BYTES = 64 * 1024 * 1024;
 
@@ -74,6 +77,24 @@ function taskSnapshot(overrides: JsonObject = {}): JsonObject {
   };
 }
 
+function cmakeTaskSnapshot(overrides: JsonObject = {}): JsonObject {
+  return {
+    taskId: TASK_ID,
+    kind: "cmakeBuild",
+    workspaceGeneration: WORKSPACE_GENERATION,
+    projectId: "core",
+    buildProfileId: BUILD_PROFILE_ID,
+    targetIds: [TARGET_ID],
+    jobs: 8,
+    timeoutMs: 600_000,
+    status: "running",
+    createdAt: SENT_AT,
+    startedAt: SENT_AT,
+    lastSequence: 2,
+    ...overrides
+  };
+}
+
 function taskEvent(sequence: number, eventName: string, overrides: JsonObject = {}): JsonObject {
   return {
     protocolVersion: "1.1",
@@ -91,11 +112,11 @@ function taskEvent(sequence: number, eventName: string, overrides: JsonObject = 
 
 function responseLineOfSize(request: JsonObject, size: number): string {
   const payload = { negotiatedProtocolVersion: "1.0", serviceVersion: "" };
-  let line = JSON.stringify(response(request, payload));
+  let line = JSON.stringify(response(request, payload, "1.0"));
   const serviceVersionSize = size - Buffer.byteLength(line);
   assert.ok(serviceVersionSize >= 1, `requested line size ${size} is smaller than response envelope`);
   payload.serviceVersion = "x".repeat(serviceVersionSize);
-  line = JSON.stringify(response(request, payload));
+  line = JSON.stringify(response(request, payload, "1.0"));
   assert.equal(Buffer.byteLength(line), size);
   return line;
 }
@@ -129,6 +150,218 @@ test("EventSubscription rejects an unsafe initial sequence", () => {
   assert.throws(() => new EventSubscription(Number.MAX_SAFE_INTEGER + 1), /safe integer/i);
 });
 
+test("client prefers protocol 1.2 and accepts a negotiated 1.1 downgrade", async () => {
+  for (const negotiated of ["1.2", "1.1"] as const) {
+    const fixture = scriptedClient((request) => response(request, {
+      negotiatedProtocolVersion: negotiated,
+      serviceVersion: "0.3.0"
+    }, negotiated));
+    const result = await fixture.client.handshake("0123456789abcdef", "test", "0.3.0");
+    assert.equal(result.negotiatedProtocolVersion, negotiated);
+    assert.equal(fixture.requests[0]?.protocolVersion, "1.2");
+    assert.deepEqual((fixture.requests[0]?.payload as JsonObject).supportedProtocolVersions, ["1.2", "1.1", "1.0"]);
+    fixture.client.close();
+  }
+});
+
+test("protocol 1.2 client routes workspace, target, and CMake build APIs", async () => {
+  const fixture = scriptedClient((request) => {
+    if (request.method === "handshake") {
+      return response(request, { negotiatedProtocolVersion: "1.2", serviceVersion: "0.3.0" }, "1.2");
+    }
+    if (request.method === "workspace/inspect") {
+      return response(request, {
+        workspaceUri: "file:///workspace",
+        workspaceGeneration: WORKSPACE_GENERATION,
+        capabilities: { workspaceInspect: true, targetList: true, cmakeBuild: true },
+        projects: [{
+          projectId: "core",
+          sourceUri: "file:///workspace/core",
+          buildProfiles: [{ buildProfileId: BUILD_PROFILE_ID, name: "Debug" }]
+        }]
+      }, "1.2");
+    }
+    if (request.method === "cmake/targets/list") {
+      return response(request, {
+        workspaceGeneration: WORKSPACE_GENERATION,
+        projectId: "core",
+        buildProfileId: BUILD_PROFILE_ID,
+        targets: [{ targetId: TARGET_ID, name: "unit-tests" }]
+      }, "1.2");
+    }
+    if (request.method === "artifacts/list") {
+      return response(request, {
+        items: [{
+          artifactId: ARTIFACT_ID,
+          taskId: TASK_ID,
+          kind: "task-summary",
+          mimeType: "application/json",
+          sizeBytes: 2,
+          sha256: "0".repeat(64),
+          createdAt: SENT_AT,
+          uri: `unit-test-ide://artifact/${ARTIFACT_ID}`
+        }]
+      }, "1.2");
+    }
+    if (request.method === "tasks/start" && (request.payload as JsonObject).kind === "simulation") {
+      return response(request, taskSnapshot(), "1.2");
+    }
+    return response(request, cmakeTaskSnapshot(), "1.2");
+  });
+  await fixture.client.handshake("0123456789abcdef", "test", "0.3.0");
+  const workspace = await fixture.client.inspectWorkspace();
+  const targets = await fixture.client.listCMakeTargets({
+    workspaceGeneration: WORKSPACE_GENERATION,
+    projectId: "core",
+    buildProfileId: BUILD_PROFILE_ID
+  });
+  const build = await fixture.client.startCMakeBuild({
+    idempotencyKey: TASK_ID,
+    workspaceGeneration: WORKSPACE_GENERATION,
+    projectId: "core",
+    buildProfileId: BUILD_PROFILE_ID,
+    targetIds: [TARGET_ID],
+    jobs: 8,
+    timeoutMs: 600_000
+  });
+  const simulation = await fixture.client.startTask({
+    idempotencyKey: TASK_ID,
+    scenario: "success",
+    timeoutMs: 1_000
+  });
+  const artifacts = await fixture.client.listArtifacts(TASK_ID);
+  assert.equal(workspace.projects[0]?.sourceUri, "file:///workspace/core");
+  assert.equal(targets.buildProfileId, BUILD_PROFILE_ID);
+  assert.equal(build.kind, "cmakeBuild");
+  assert.ok(build.createdAt instanceof Date);
+  assert.equal(simulation.kind, "simulation");
+  assert.ok(artifacts.items[0]?.createdAt instanceof Date);
+  assert.equal("uri" in artifacts.items[0]!, true);
+  assert.deepEqual(fixture.requests.map(({ method }) => method), [
+    "handshake",
+    "workspace/inspect",
+    "cmake/targets/list",
+    "tasks/start",
+    "tasks/start",
+    "artifacts/list"
+  ]);
+  assert.equal((fixture.requests[3]?.payload as JsonObject).kind, "cmakeBuild");
+  assert.equal((fixture.requests[4]?.payload as JsonObject).kind, "simulation");
+  fixture.client.close();
+});
+
+test("protocol 1.1 rejects Phase 3 methods locally without writing", async () => {
+  const fixture = scriptedClient((request) => response(request, {
+    negotiatedProtocolVersion: "1.1",
+    serviceVersion: "0.2.0"
+  }, "1.1"));
+  await fixture.client.handshake("0123456789abcdef", "test", "0.3.0");
+  const before = fixture.requests.length;
+  await assert.rejects(() => fixture.client.inspectWorkspace(), /protocol 1\.2/i);
+  await assert.rejects(() => fixture.client.listCMakeTargets({
+    workspaceGeneration: WORKSPACE_GENERATION,
+    projectId: "core",
+    buildProfileId: BUILD_PROFILE_ID
+  }), /protocol 1\.2/i);
+  await assert.rejects(() => fixture.client.startCMakeBuild({
+    idempotencyKey: TASK_ID,
+    workspaceGeneration: WORKSPACE_GENERATION,
+    projectId: "core",
+    buildProfileId: BUILD_PROFILE_ID,
+    targetIds: [],
+    jobs: 8,
+    timeoutMs: 600_000
+  }), /protocol 1\.2/i);
+  assert.equal(fixture.requests.length, before);
+  fixture.client.close();
+});
+
+test("CMake build inputs are rejected locally before reaching the wire", async () => {
+  const fixture = scriptedClient((request) => request.method === "handshake"
+    ? response(request, { negotiatedProtocolVersion: "1.2", serviceVersion: "0.3.0" }, "1.2")
+    : response(request, cmakeTaskSnapshot(), "1.2"));
+  await fixture.client.handshake("0123456789abcdef", "test", "0.3.0");
+  const valid = {
+    idempotencyKey: TASK_ID,
+    workspaceGeneration: WORKSPACE_GENERATION,
+    projectId: "core",
+    buildProfileId: BUILD_PROFILE_ID,
+    targetIds: [TARGET_ID],
+    jobs: 8,
+    timeoutMs: 600_000
+  };
+  const invalid = [
+    { ...valid, workspaceGeneration: "bad" },
+    { ...valid, projectId: "/outside" },
+    { ...valid, buildProfileId: "bad" },
+    { ...valid, targetIds: ["bad"] },
+    { ...valid, jobs: 0 },
+    { ...valid, jobs: Number.NaN },
+    { ...valid, timeoutMs: 0 },
+    { ...valid, timeoutMs: Number.MAX_SAFE_INTEGER + 1 }
+  ];
+  for (const input of invalid) await assert.rejects(() => fixture.client.startCMakeBuild(input));
+  assert.equal(fixture.requests.length, 1);
+  fixture.client.close();
+});
+
+test("protocol 1.2 task decoder rejects unsafe integers, invalid dates, and unknown union kinds", async () => {
+  for (const invalidTask of [
+    cmakeTaskSnapshot({ lastSequence: Number.MAX_SAFE_INTEGER + 1 }),
+    cmakeTaskSnapshot({ createdAt: "999999-01-01T00:00:00Z" }),
+    cmakeTaskSnapshot({ kind: "shell" })
+  ]) {
+    const fixture = scriptedClient((request) => request.method === "handshake"
+      ? response(request, { negotiatedProtocolVersion: "1.2", serviceVersion: "0.3.0" }, "1.2")
+      : response(request, invalidTask, "1.2"));
+    await fixture.client.handshake("0123456789abcdef", "test", "0.3.0");
+    await assert.rejects(() => fixture.client.startCMakeBuild({
+      idempotencyKey: TASK_ID,
+      workspaceGeneration: WORKSPACE_GENERATION,
+      projectId: "core",
+      buildProfileId: BUILD_PROFILE_ID,
+      targetIds: [TARGET_ID],
+      jobs: 8,
+      timeoutMs: 600_000
+    }));
+    fixture.client.close();
+  }
+});
+
+test("EventSubscription accepts protocol 1.2 events and preserves sequence", async () => {
+  const [clientStream, serverStream] = pair();
+  createInterface({ input: serverStream }).on("line", (line) => {
+    const request = JSON.parse(line) as JsonObject;
+    if (request.method === "handshake") {
+      serverStream.write(`${JSON.stringify(response(request, {
+        negotiatedProtocolVersion: "1.2",
+        serviceVersion: "0.3.0"
+      }, "1.2"))}\n`);
+      return;
+    }
+    serverStream.write(`${JSON.stringify(response(request, { afterSequence: 0 }, "1.2"))}\n`);
+    serverStream.write(`${JSON.stringify({
+      protocolVersion: "1.2",
+      kind: "event",
+      messageId: MESSAGE_ID,
+      sentAt: SENT_AT,
+      sequence: 1,
+      event: "task.step_started",
+      taskId: TASK_ID,
+      payloadVersion: 1,
+      payload: { stepId: "configure", kind: "configure", status: "running" }
+    })}\n`);
+  });
+  const client = ProtocolClient.attach(clientStream);
+  await client.handshake("0123456789abcdef", "test", "0.3.0");
+  const subscription = await client.subscribeEvents(0);
+  const event = (await take(subscription, 1))[0];
+  assert.equal(event?.protocolVersion, "1.2");
+  assert.equal(event?.sequence, 1);
+  assert.equal(subscription.lastSequence, 1);
+  client.close();
+});
+
 test("client performs handshake, capabilities, and shutdown in order", async () => {
   const [clientStream, serverStream] = pair();
   const methods: string[] = [];
@@ -140,18 +373,20 @@ test("client performs handshake, capabilities, and shutdown in order", async () 
       : request.method === "capabilities/get"
         ? { platform: "windows", transports: ["named-pipe"], toolchains: [], frameworks: [], coverageTools: [] }
         : { accepted: true };
-    serverStream.write(`${JSON.stringify(response(request, payload))}\n`);
+    serverStream.write(`${JSON.stringify(response(request, payload, request.method === "handshake" ? "1.0" : request.protocolVersion))}\n`);
   });
   const client = ProtocolClient.attach(clientStream);
   await client.handshake("0123456789abcdef", "test", "0.1.0");
-  assert.equal((await client.getCapabilities()).platform, "windows");
+  const capabilities = await client.getCapabilities();
+  assert.ok("platform" in capabilities);
+  assert.equal(capabilities.platform, "windows");
   await client.shutdown();
   assert.deepEqual(methods, ["handshake", "capabilities/get", "shutdown"]);
   client.close();
 });
 
 test("client exposes stable server error codes", async () => {
-  const { client } = scriptedClient((request) => error(request, "AUTH_FAILED", false, "1.1"));
+  const { client } = scriptedClient((request) => error(request, "AUTH_FAILED", false, "1.2"));
   await assert.rejects(
     () => client.handshake("wrong-token-value", "test", "0.1.0"),
     (failure: unknown) => failure instanceof ProtocolError && failure.code === "AUTH_FAILED"
@@ -243,17 +478,17 @@ test("unknown protocol versions close the connection", async () => {
 
 test("client falls back to an exact 1.0 handshake", async () => {
   const fixture = scriptedClient((request) => {
-    if (request.protocolVersion === "1.1") return error(request, "UNSUPPORTED_PROTOCOL", false, "1.0");
+    if (request.protocolVersion === "1.2") return error(request, "UNSUPPORTED_PROTOCOL", false, "1.0");
     return response(request, { negotiatedProtocolVersion: "1.0", serviceVersion: "0.1.0" }, "1.0");
   });
   const negotiated = await fixture.client.handshake("0123456789abcdef", "test", "0.2.0");
   assert.equal(negotiated.negotiatedProtocolVersion, "1.0");
-  assert.deepEqual(fixture.requests.map(({ protocolVersion }) => protocolVersion), ["1.1", "1.0"]);
+  assert.deepEqual(fixture.requests.map(({ protocolVersion }) => protocolVersion), ["1.2", "1.0"]);
   assert.deepEqual(fixture.requests[0]?.payload, {
     token: "0123456789abcdef",
     clientName: "test",
     clientVersion: "0.2.0",
-    supportedProtocolVersions: ["1.1", "1.0"]
+    supportedProtocolVersions: ["1.2", "1.1", "1.0"]
   });
   assert.equal("supportedProtocolVersions" in (fixture.requests[1]?.payload as JsonObject), false);
   fixture.client.close();
@@ -299,7 +534,7 @@ test("a same-version handshake failure consumes the Connection legacy opportunit
   let handshakeCount = 0;
   const fixture = scriptedClient((request) => {
     handshakeCount++;
-    if (handshakeCount === 1) return error(request, "AUTH_FAILED", false, "1.1");
+    if (handshakeCount === 1) return error(request, "AUTH_FAILED", false, "1.2");
     if (handshakeCount === 2) return error(request, "UNSUPPORTED_PROTOCOL", false, "1.0");
     return response(request, { negotiatedProtocolVersion: "1.0", serviceVersion: "0.1.0" }, "1.0");
   });
@@ -311,7 +546,7 @@ test("a same-version handshake failure consumes the Connection legacy opportunit
     () => fixture.client.handshake("0123456789abcdef", "test", "0.2.0"),
     /protocol version/
   );
-  assert.deepEqual(fixture.requests.map(({ protocolVersion }) => protocolVersion), ["1.1", "1.1"]);
+  assert.deepEqual(fixture.requests.map(({ protocolVersion }) => protocolVersion), ["1.2", "1.2"]);
 });
 
 test("an authenticated connection rejects a legacy-version handshake error", async () => {
@@ -529,7 +764,7 @@ test("phase 2 methods reject a negotiated 1.0 session locally", async () => {
   const fixture = scriptedClient((request) => response(
     request,
     { negotiatedProtocolVersion: "1.0", serviceVersion: "0.1.0" },
-    request.protocolVersion
+    "1.0"
   ));
   await fixture.client.handshake("0123456789abcdef", "test", "0.2.0");
   await assert.rejects(
@@ -680,12 +915,15 @@ test("an oversized outbound request rejects only that request and leaves the con
   assert.equal(requests.some(({ method }) => method === "tasks/list"), false);
 
   serverStream.write(`${JSON.stringify(response(pendingCapabilitiesRequest, capabilities, "1.1"))}\n`);
-  assert.equal((await pendingCapabilities).platform, "windows");
-  assert.equal((await client.getCapabilities()).platform, "windows");
+  const firstCapabilities = await pendingCapabilities;
+  const secondCapabilities = await client.getCapabilities();
+  assert.ok("platform" in firstCapabilities && "platform" in secondCapabilities);
+  assert.equal(firstCapabilities.platform, "windows");
+  assert.equal(secondCapabilities.platform, "windows");
   client.close();
 });
 
-test("Connection validates both handshake request versions before writing", async () => {
+test("Connection validates all handshake request versions before writing", async () => {
   const [clientStream, serverStream] = pair();
   const requests: JsonObject[] = [];
   createInterface({ input: serverStream }).on("line", (line) => {
@@ -694,6 +932,12 @@ test("Connection validates both handshake request versions before writing", asyn
     serverStream.write(`${JSON.stringify(error(request, "INVALID_MESSAGE", false, request.protocolVersion))}\n`);
   });
   const connection = new Connection(clientStream);
+  await assert.rejects(() => connection.request("1.2", "handshake", {
+    token: "short",
+    clientName: "test",
+    clientVersion: "0.3.0",
+    supportedProtocolVersions: []
+  }));
   await assert.rejects(() => connection.request("1.1", "handshake", {
     token: "short",
     clientName: "test",
@@ -776,7 +1020,7 @@ test("reconnect reuses credentials and the active subscription cursor", async ()
   assert.equal((await subscription.next()).value?.sequence, 4);
   await client.reconnect();
   assert.equal(calls, 2);
-  assert.deepEqual((requests[1]?.[0]?.payload as JsonObject).supportedProtocolVersions, ["1.1", "1.0"]);
+  assert.deepEqual((requests[1]?.[0]?.payload as JsonObject).supportedProtocolVersions, ["1.2", "1.1", "1.0"]);
   assert.deepEqual(requests[1]?.[1]?.payload, { afterSequence: 4 });
 
   first[1].write(`${JSON.stringify(taskEvent(5, "task.output", { payload: { old: true } }))}\n`);
@@ -1037,7 +1281,7 @@ test("failed reconnect handshakes and subscriptions retain the active cursor for
       requests[index]?.push(request);
       let reply: JsonObject;
       if (index === 1) {
-        reply = error(request, "AUTH_FAILED", false, "1.1");
+        reply = error(request, "AUTH_FAILED", false, request.protocolVersion);
       } else if (index === 2 && request.method === "events/subscribe") {
         reply = error(request, "STORAGE_UNAVAILABLE", true, "1.1");
       } else {
