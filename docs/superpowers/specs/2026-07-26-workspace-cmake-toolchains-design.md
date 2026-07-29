@@ -701,6 +701,7 @@ Protocol 中的 line/column 使用零起始、结束位置不包含在范围内�
 - clang-cl 的 MSVC 风格或 Clang 风格输出；其中 MSVC-style location 允许 MSVC 的 `Cnnnn` code，也允许 clang-cl 只输出 `error:`/`warning:` 而没有 numeric code；无 numeric code 时规范化为非空的 `COMPILER_ERROR`/`COMPILER_WARNING`/`COMPILER_NOTE`，满足 Protocol 与 ArtifactStore 的非空 code 不变量；
 - GCC/Clang `file:line:column`；
 - GNU ld、LLD、lld-link、link.exe 常见 linker error；
+- MSVC/clang-cl build parser 在 compiler 与 `LNKxxxx` shape 均不匹配时委托给共享 Linker parser，使 `lld-link: error:` 规范化为非空的 `LLD_LINK_ERROR`；该委托只复用封闭的 linker regex，不接受普通输出或任意前缀；
 - GCC/Clang build Step 使用同一个 `FamilyGNU` 流式 parser：先匹配 compiler diagnostic；未匹配时只回落到受限的 GNU ld/LLD/`collect2` linker pattern，从而覆盖 Ubuntu GCC 把 `undefined reference` 绑定到 source-location 行的输出，同时不把普通 output 提升为 Diagnostic；
 - template instantiation、included-from 和 note chain。
 

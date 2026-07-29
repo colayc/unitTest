@@ -407,7 +407,7 @@ Golden 只记录跨版本稳定基准：
 }
 ```
 
-不同 compiler family 分文件记录允许的 `codePattern`；MSVC/clang-cl 文件使用 `^(C[0-9]+|COMPILER_ERROR)$`，GCC/Clang 文件使用 `^COMPILER_ERROR$`。clang-cl 未输出 numeric code 时由 Service 规范化为 `COMPILER_ERROR`，不能产生违反 Protocol/ArtifactStore 非空 code 不变量的 Diagnostic。Linker golden 的 `messageContains` 固定为 `native_missing_symbol`，configure golden 固定为 `UNIT_TEST_IDE_CONFIGURE_FAILURE`。完整原始 message 只检查 marker，不逐字固定 Hosted Runner 文案。
+不同 compiler family 分文件记录允许的 `codePattern`；MSVC/clang-cl 文件使用 `^(C[0-9]+|COMPILER_ERROR)$`，GCC/Clang 文件使用 `^COMPILER_ERROR$`。clang-cl 未输出 numeric code 时由 Service 规范化为 `COMPILER_ERROR`，不能产生违反 Protocol/ArtifactStore 非空 code 不变量的 Diagnostic。MSVC/clang-cl build parser 对未匹配 compiler/`LNKxxxx` shape 的行继续调用共享 Linker parser，因此 `lld-link: error:` 规范化为 `LLD_LINK_ERROR`；两份 linker golden 都必须拒绝空 code。Linker golden 的 `messageContains` 固定为 `native_missing_symbol`，configure golden 固定为 `UNIT_TEST_IDE_CONFIGURE_FAILURE`。完整原始 message 只检查 marker，不逐字固定 Hosted Runner 文案。
 
 - [x] **Step 5：实现安全复制和规范化**
 

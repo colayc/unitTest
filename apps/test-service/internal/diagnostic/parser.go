@@ -297,17 +297,7 @@ func (p *parser) consumeMSVCLine(state *streamState, line string) []Diagnostic {
 		}
 		return result
 	}
-	if match := msvcLinkPattern.FindStringSubmatch(line); match != nil {
-		result := p.flush(state)
-		state.pending = &Diagnostic{
-			TaskID: p.options.TaskID, StepID: p.options.StepID,
-			Source: "linker", ToolchainID: p.options.ToolchainID,
-			Severity: "error", Code: match[1],
-			Message: msvcProjectSuffixPattern.ReplaceAllString(match[2], ""),
-		}
-		return result
-	}
-	return p.flush(state)
+	return p.consumeLinkerLine(state, line)
 }
 
 func (p *parser) consumeGNULine(state *streamState, line string) []Diagnostic {

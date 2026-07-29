@@ -3,7 +3,7 @@
     {
       "kind": "linker",
       "severity": "error",
-      "codePattern": "^(LNK[0-9]+|LLD_UNDEFINED_SYMBOL|LLD_LINK_ERROR|)$",
+      "codePattern": "^(LNK[0-9]+|LLD_UNDEFINED_SYMBOL|LLD_LINK_ERROR)$",
       "messageContains": "native_missing_symbol"
     }
   ]

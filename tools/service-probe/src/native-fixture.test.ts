@@ -254,7 +254,8 @@ test("tracked golden diagnostics keep the cross-compiler minimum contract", asyn
       }
       if (expectation.codePattern !== undefined) {
         const codePattern = expectation.codePattern;
-        assert.doesNotThrow(() => new RegExp(codePattern));
+        const pattern = new RegExp(codePattern);
+        assert.equal(pattern.test(""), false, `${name} accepts an empty diagnostic code`);
       }
     }
   }

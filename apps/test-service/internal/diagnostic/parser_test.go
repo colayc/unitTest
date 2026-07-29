@@ -154,6 +154,12 @@ func TestLinkerParsersRecognizeRestrictedMSVCAndLLDLinkShapes(t *testing.T) {
 			input: "lld-link: error: undefined symbol: run\n",
 			code:  "LLD_LINK_ERROR", message: "undefined symbol: run",
 		},
+		{
+			name: "lld-link error through clang-cl build parser", family: FamilyMSVC,
+			input:   "lld-link: error: undefined symbol: int __cdecl native_missing_symbol(void)\n",
+			code:    "LLD_LINK_ERROR",
+			message: "undefined symbol: int __cdecl native_missing_symbol(void)",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
