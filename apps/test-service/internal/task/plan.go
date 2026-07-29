@@ -90,6 +90,12 @@ type StartRequest struct {
 	Scenario Scenario
 }
 
+type ResumeRequest struct {
+	Task     Task
+	Plan     ExecutionPlan
+	Boundary ExecutionBoundary
+}
+
 func ValidatePlan(plan ExecutionPlan, boundary ExecutionBoundary) error {
 	if plan.Version != 1 || len(plan.Steps) < 1 || len(plan.Steps) > 8 || nilBoundary(boundary) {
 		return ErrInvalidArgument

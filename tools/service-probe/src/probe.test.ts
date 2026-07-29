@@ -284,6 +284,46 @@ test("spawn failures recursively redact nested diagnostics", async () => {
   }, captured, environmentSentinel);
 });
 
+test("service launch forwards workspace trust and CMake options as isolated arguments", async () => {
+  const directory = await mkdtemp(join(dirname(binary), "unit-test-ide-options-"));
+  const workspaceRoot = join(directory, "workspace");
+  const cmakeBundleRoot = join(directory, "cmake-bundle");
+  const devCMakeExecutable = join(directory, "cmake-dev");
+  let checked = false;
+  try {
+    await assert.rejects(
+      startService(binary, directory, {
+        workspaceRoot,
+        trustedWorkspace: true,
+        cmakeBundleRoot,
+        devCMakeExecutable,
+        operations: {
+          spawnService: (_serviceBinary, args) => {
+            assert.deepEqual(args.slice(-7), [
+              "--workspace-root", workspaceRoot,
+              "--trusted-workspace=true",
+              "--cmake-bundle-root", cmakeBundleRoot,
+              "--dev-cmake-executable", devCMakeExecutable
+            ]);
+            checked = true;
+            throw new Error(`expected launch stop ${workspaceRoot} ${cmakeBundleRoot} ${devCMakeExecutable}`);
+          }
+        }
+      }),
+      (error: unknown) => {
+        const serialized = serializeErrorTree(error);
+        for (const sensitive of [workspaceRoot, cmakeBundleRoot, devCMakeExecutable]) {
+          assert.equal(serialized.includes(sensitive), false);
+        }
+        return true;
+      }
+    );
+    assert.equal(checked, true);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("connect failures recursively redact nested diagnostics", async () => {
   const captured: string[] = [];
   const environmentSentinel = "CONNECT_SECRET_ENV=do-not-print";

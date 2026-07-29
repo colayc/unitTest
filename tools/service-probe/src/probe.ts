@@ -80,6 +80,10 @@ interface ProbeOperations {
 
 export interface StartServiceOptions {
   timeoutMs?: number;
+  workspaceRoot?: string;
+  trustedWorkspace?: boolean;
+  cmakeBundleRoot?: string;
+  devCMakeExecutable?: string;
   operations?: ProbeOperations;
 }
 
@@ -246,19 +250,29 @@ interface ServiceInstance {
   readonly connector: PausableConnector;
   readonly serviceBinary: string;
   readonly directory: string;
+  readonly workspaceRoot: string;
+  readonly cmakeBundleRoot?: string;
+  readonly devCMakeExecutable?: string;
   stdout: string;
   stderr: string;
 }
 
-function diagnostics(instance: ServiceInstance): string {
-  const sensitive = [
+function serviceSensitive(instance: ServiceInstance): string[] {
+  return [
     instance.token,
     instance.endpoint,
     instance.tokenFile,
     instance.dataDir,
+    instance.workspaceRoot,
+    instance.cmakeBundleRoot ?? "",
+    instance.devCMakeExecutable ?? "",
     instance.serviceBinary,
     instance.directory
   ];
+}
+
+function diagnostics(instance: ServiceInstance): string {
+  const sensitive = serviceSensitive(instance);
   return `stdout=${redact(instance.stdout, sensitive)}; stderr=${redact(instance.stderr, sensitive)}`;
 }
 
@@ -292,6 +306,7 @@ async function launchService(serviceBinary: string, directory: string, options: 
   const token = randomBytes(32).toString("base64url");
   const tokenFile = join(directory, `token-${randomUUID()}`);
   const dataDir = join(directory, "data");
+  const workspaceRoot = options.workspaceRoot ?? directory;
   const timeoutMs = options.timeoutMs ?? OPERATION_TIMEOUT_MS;
   let endpointResource: EndpointResource | undefined;
   let child: ChildProcessWithoutNullStreams | undefined;
@@ -319,8 +334,18 @@ async function launchService(serviceBinary: string, directory: string, options: 
     const serviceArguments = [
       "--endpoint", endpointResource.path,
       "--token-file", tokenFile,
-      "--data-dir", dataDir
+      "--data-dir", dataDir,
+      "--workspace-root", workspaceRoot
     ];
+    if (options.trustedWorkspace !== undefined) {
+      serviceArguments.push(`--trusted-workspace=${String(options.trustedWorkspace)}`);
+    }
+    if (options.cmakeBundleRoot) {
+      serviceArguments.push("--cmake-bundle-root", options.cmakeBundleRoot);
+    }
+    if (options.devCMakeExecutable) {
+      serviceArguments.push("--dev-cmake-executable", options.devCMakeExecutable);
+    }
     child = (options.operations?.spawnService ?? ((binary, args) => spawn(binary, args, { windowsHide: true })))(
       serviceBinary,
       serviceArguments
@@ -364,6 +389,9 @@ async function launchService(serviceBinary: string, directory: string, options: 
       connector,
       serviceBinary,
       directory,
+      workspaceRoot,
+      ...(options.cmakeBundleRoot ? { cmakeBundleRoot: options.cmakeBundleRoot } : {}),
+      ...(options.devCMakeExecutable ? { devCMakeExecutable: options.devCMakeExecutable } : {}),
       get stdout() { return stdout; },
       get stderr() { return stderr; },
       client
@@ -381,7 +409,10 @@ async function launchService(serviceBinary: string, directory: string, options: 
         timeoutMs
       ).catch(() => undefined);
     }
-    const sensitive = [token, endpointResource?.path ?? "", tokenFile, dataDir, serviceBinary, directory];
+    const sensitive = [
+      token, endpointResource?.path ?? "", tokenFile, dataDir, workspaceRoot,
+      options.cmakeBundleRoot ?? "", options.devCMakeExecutable ?? "", serviceBinary, directory
+    ];
     const details = `; stdout=${redact(stdout, sensitive)}; stderr=${redact(stderr, sensitive)}`;
     throw safeError(error, sensitive, details);
   }
@@ -448,7 +479,7 @@ export class TaskServiceFixture {
         return client;
       } catch (error) {
         client?.close();
-        throw safeError(error, [instance.token, instance.endpoint, instance.dataDir, instance.directory, instance.serviceBinary]);
+        throw safeError(error, serviceSensitive(instance));
       }
     });
   }
@@ -473,7 +504,7 @@ export class TaskServiceFixture {
       }
       this.#instance = undefined;
     } catch (error) {
-      const sensitive = [instance.token, instance.endpoint, instance.tokenFile, instance.dataDir, instance.serviceBinary, instance.directory];
+      const sensitive = serviceSensitive(instance);
       throw safeError(error, sensitive, `; ${diagnostics(instance)}`);
     }
   }
@@ -494,7 +525,7 @@ export class TaskServiceFixture {
       await forceStop(instance);
       this.#instance = undefined;
     } catch (error) {
-      const sensitive = [instance.token, instance.endpoint, instance.tokenFile, instance.dataDir, instance.serviceBinary, instance.directory];
+      const sensitive = serviceSensitive(instance);
       throw safeError(error, sensitive, `; ${diagnostics(instance)}`);
     }
   }
@@ -519,14 +550,7 @@ export class TaskServiceFixture {
           await forceStop(launched);
         } catch (error) {
           this.#instance = launched;
-          const sensitive = [
-            launched.token,
-            launched.endpoint,
-            launched.tokenFile,
-            launched.dataDir,
-            launched.serviceBinary,
-            launched.directory
-          ];
+          const sensitive = serviceSensitive(launched);
           throw safeError(error, sensitive, "; restart cancelled because task service fixture is disposed");
         }
         throw new Error("task service fixture is disposed during restart");
@@ -543,7 +567,7 @@ export class TaskServiceFixture {
       try {
         await forceStop(instance);
       } catch (error) {
-        const sensitive = [instance.token, instance.endpoint, instance.tokenFile, instance.dataDir, instance.serviceBinary, instance.directory];
+        const sensitive = serviceSensitive(instance);
         throw safeError(error, sensitive, `; ${diagnostics(instance)}`);
       }
       if (this.#instance === instance) this.#instance = undefined;
@@ -556,7 +580,7 @@ export class TaskServiceFixture {
       );
     } catch (error) {
       const sensitive = instance
-        ? [instance.token, instance.endpoint, instance.tokenFile, instance.dataDir, instance.serviceBinary, instance.directory]
+        ? serviceSensitive(instance)
         : [this.#serviceBinary, this.#directory];
       throw safeError(error, sensitive);
     }

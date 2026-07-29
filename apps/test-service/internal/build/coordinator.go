@@ -128,23 +128,92 @@ func (c *Coordinator) Start(
 	ctx context.Context,
 	request StartRequest,
 ) (task.Task, error) {
+	prepared, err := c.prepare(ctx, request)
+	if err != nil {
+		return task.Task{}, err
+	}
+	defer prepared.releaseUnlessAdopted()
+	return c.config.Tasks.Start(ctx, prepared.request)
+}
+
+type queuedTaskResumer interface {
+	ResumeQueued(context.Context, task.ResumeRequest) (task.Task, error)
+}
+
+func (c *Coordinator) Resume(
+	ctx context.Context,
+	persisted task.Task,
+) (task.Task, error) {
+	if c == nil || ctx == nil || persisted.ID == "" ||
+		persisted.IdempotencyKey == "" || persisted.Kind != task.KindCMakeBuild ||
+		persisted.Status != task.StatusQueued ||
+		persisted.WorkspaceGeneration == "" {
+		return task.Task{}, task.ErrInvalidArgument
+	}
+	var payload struct {
+		ProjectID      string   `json:"projectId"`
+		BuildProfileID string   `json:"buildProfileId"`
+		TargetIDs      []string `json:"targetIds"`
+		Jobs           int      `json:"jobs"`
+		TimeoutMS      int64    `json:"timeoutMs"`
+	}
+	if err := strictJSON(persisted.Request, &payload); err != nil ||
+		payload.TimeoutMS != persisted.Timeout.Milliseconds() {
+		return task.Task{}, task.ErrInvalidArgument
+	}
+	prepared, err := c.prepare(ctx, StartRequest{
+		IdempotencyKey:      persisted.IdempotencyKey,
+		WorkspaceGeneration: persisted.WorkspaceGeneration,
+		ProjectID:           payload.ProjectID, BuildProfileID: payload.BuildProfileID,
+		TargetIDs: append([]string(nil), payload.TargetIDs...),
+		Jobs:      payload.Jobs, Timeout: persisted.Timeout,
+	})
+	if err != nil {
+		return task.Task{}, err
+	}
+	defer prepared.releaseUnlessAdopted()
+	resumer, ok := c.config.Tasks.(queuedTaskResumer)
+	if !ok {
+		return task.Task{}, task.ErrStorageUnavailable
+	}
+	return resumer.ResumeQueued(ctx, task.ResumeRequest{
+		Task: persisted, Plan: prepared.request.Plan,
+		Boundary: prepared.request.Boundary,
+	})
+}
+
+type preparedBuild struct {
+	request  task.StartRequest
+	boundary *executionBoundary
+}
+
+func (p *preparedBuild) releaseUnlessAdopted() {
+	if p != nil && p.boundary != nil && !p.boundary.adopted() {
+		_ = p.boundary.Release()
+	}
+}
+
+func (c *Coordinator) prepare(
+	ctx context.Context,
+	request StartRequest,
+) (*preparedBuild, error) {
 	if c == nil || ctx == nil || request.IdempotencyKey == "" ||
 		request.Jobs < 1 || request.Jobs > 256 ||
 		request.Timeout < time.Millisecond || request.Timeout > 24*time.Hour {
-		return task.Task{}, task.ErrInvalidArgument
+		return nil, task.ErrInvalidArgument
 	}
 	snapshot, project, profile, instance, err := c.resolve(
 		ctx, request.WorkspaceGeneration, request.ProjectID, request.BuildProfileID,
 	)
 	if err != nil {
-		return task.Task{}, err
+		return nil, err
 	}
 	if err := c.ensureBuildDirectory(profile.BinaryDir); err != nil {
-		return task.Task{}, err
+		return nil, err
 	}
 	lock, err := c.config.Locks.Acquire(profile.BinaryDir)
 	if err != nil {
-		return task.Task{}, err
+		return nil, err
 	}
 	lockOwned := true
 	defer func() {
@@ -160,9 +229,9 @@ func (c *Coordinator) Start(
 	}
 	if _, err := resolveTargetNames(targets, request.TargetIDs); err != nil {
 		if replyErr != nil && len(request.TargetIDs) != 0 {
-			return task.Task{}, ErrConfigureRequired
+			return nil, ErrConfigureRequired
 		}
-		return task.Task{}, err
+		return nil, err
 	}
 
 	needsConfigure := true
@@ -170,7 +239,7 @@ func (c *Coordinator) Start(
 		ctx, c.config.WorkspaceRoot.ID, project.ID, profile.ID,
 	)
 	if configurationErr != nil && !errors.Is(configurationErr, task.ErrNotFound) {
-		return task.Task{}, configurationErr
+		return nil, configurationErr
 	}
 	toolchainIdentity := effectiveToolchainIdentity(profile, instance, reply)
 	if configurationErr == nil && replyErr == nil {
@@ -186,11 +255,11 @@ func (c *Coordinator) Start(
 		snapshot, project, profile, instance, reply, request.TargetIDs,
 	)
 	if err != nil {
-		return task.Task{}, err
+		return nil, err
 	}
 	if needsConfigure {
 		if err := c.dependencies.writeQuery(profile.BinaryDir); err != nil {
-			return task.Task{}, ErrConfigureRequired
+			return nil, ErrConfigureRequired
 		}
 	}
 	plan, err := Plan(PlanInput{
@@ -200,13 +269,13 @@ func (c *Coordinator) Start(
 		Configure: needsConfigure, ConfigureState: state,
 	})
 	if err != nil {
-		return task.Task{}, err
+		return nil, err
 	}
 	boundary, err := newExecutionBoundary(
 		c.config.Installation, c.config.WorkspaceRoot, c.config.ServiceDataRoot, lock,
 	)
 	if err != nil {
-		return task.Task{}, err
+		return nil, err
 	}
 	requestJSON, err := json.Marshal(struct {
 		ProjectID      string   `json:"projectId"`
@@ -220,17 +289,15 @@ func (c *Coordinator) Start(
 		Jobs:      request.Jobs, TimeoutMS: request.Timeout.Milliseconds(),
 	})
 	if err != nil {
-		return task.Task{}, task.ErrInvalidArgument
+		return nil, task.ErrInvalidArgument
 	}
-	started, startErr := c.config.Tasks.Start(ctx, task.StartRequest{
+	internalRequest := task.StartRequest{
 		IdempotencyKey: request.IdempotencyKey, Kind: task.KindCMakeBuild,
 		Request: requestJSON, WorkspaceGeneration: request.WorkspaceGeneration,
 		Timeout: request.Timeout, Plan: plan, Boundary: boundary,
-	})
-	if boundary.adopted() {
-		lockOwned = false
 	}
-	return started, startErr
+	lockOwned = false
+	return &preparedBuild{request: internalRequest, boundary: boundary}, nil
 }
 
 func (c *Coordinator) Succeeded(

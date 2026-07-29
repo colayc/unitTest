@@ -67,6 +67,11 @@ type startCommand struct {
 	reply   chan taskResponse
 }
 
+type resumeCommand struct {
+	request ResumeRequest
+	reply   chan taskResponse
+}
+
 type taskIDCommand struct {
 	id     string
 	cancel bool
@@ -341,6 +346,34 @@ func (m *Manager) Start(ctx context.Context, request StartRequest) (Task, error)
 	}
 }
 
+func (m *Manager) ResumeQueued(ctx context.Context, request ResumeRequest) (Task, error) {
+	if m == nil || request.Task.ID == "" || request.Task.Kind != KindCMakeBuild ||
+		request.Task.Status != StatusQueued ||
+		request.Plan.Fingerprint == "" ||
+		request.Plan.Fingerprint != FingerprintPlan(request.Plan) ||
+		ValidatePlan(request.Plan, request.Boundary) != nil {
+		return Task{}, ErrInvalidArgument
+	}
+	request.Task.Request = append(json.RawMessage(nil), request.Task.Request...)
+	request.Task.Steps = append([]StepSnapshot(nil), request.Task.Steps...)
+	request.Plan = cloneExecutionPlan(request.Plan)
+	if !m.Healthy() {
+		return Task{}, ErrStorageUnavailable
+	}
+	reply := make(chan taskResponse, 1)
+	if err := m.send(ctx, resumeCommand{request: request, reply: reply}); err != nil {
+		return Task{}, err
+	}
+	select {
+	case response := <-reply:
+		return response.task, publicError(response.err)
+	case <-ctx.Done():
+		return Task{}, ctx.Err()
+	case <-m.stopped:
+		return Task{}, ErrStorageUnavailable
+	}
+}
+
 func (m *Manager) Get(ctx context.Context, id string) (Task, error) {
 	if m == nil || id == "" {
 		return Task{}, ErrInvalidArgument
@@ -494,6 +527,8 @@ func (m *Manager) loop() {
 		switch value := command.(type) {
 		case startCommand:
 			value.reply <- m.start(value.request, active)
+		case resumeCommand:
+			value.reply <- m.resumeQueued(value.request, active)
 		case taskIDCommand:
 			if value.cancel {
 				value.reply <- m.cancel(value.id, active)

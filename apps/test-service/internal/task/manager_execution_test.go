@@ -235,6 +235,61 @@ func TestManagerOwnsManagedBoundaryUntilTerminalCommit(t *testing.T) {
 	}
 }
 
+func TestManagerResumesExistingQueuedBuildWithoutCreatingAnotherTask(t *testing.T) {
+	f := newManagerFixture(t)
+	boundary := &recordingManagedBoundary{}
+	request := twoStepCMakeStartRequest(testID(67), time.Minute, boundary)
+	request.Plan.Steps = request.Plan.Steps[1:]
+	request.Plan.Fingerprint = task.FingerprintPlan(request.Plan)
+	now := f.clock.Now()
+	persisted := task.Task{
+		ID: testID(68), IdempotencyKey: request.IdempotencyKey,
+		RequestHash: strings.Repeat("b", 64), Kind: task.KindCMakeBuild,
+		Request:             append(json.RawMessage(nil), request.Request...),
+		WorkspaceGeneration: request.WorkspaceGeneration,
+		PlanFingerprint:     strings.Repeat("c", 64), Timeout: request.Timeout,
+		Status: task.StatusQueued, CreatedAt: now,
+	}
+	persisted, _, err := f.store.Create(
+		context.Background(), persisted,
+		[]task.StepSnapshot{
+			{ID: "configure", Kind: task.StepConfigure, Status: task.StepPending},
+			{ID: "build", Kind: task.StepBuild, Status: task.StepPending},
+		},
+		task.EventDraft{
+			TaskID: persisted.ID, Type: task.EventTaskCreated, At: now,
+			Payload: json.RawMessage(`{"status":"queued"}`),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := f.manager.Manager.ResumeQueued(context.Background(), task.ResumeRequest{
+		Task: persisted, Plan: request.Plan, Boundary: boundary,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.ID != persisted.ID || resumed.Status != task.StatusRunning ||
+		resumed.PlanFingerprint != request.Plan.Fingerprint ||
+		len(resumed.Steps) != 1 || resumed.Steps[0].ID != "build" {
+		t.Fatalf("resumed task = %#v", resumed)
+	}
+	if got := eventTypes(f.store.eventsForTask(persisted.ID)); !reflect.DeepEqual(got, []task.EventType{
+		task.EventTaskCreated, task.EventTaskStarted, task.EventTaskStepStarted,
+	}) {
+		t.Fatalf("resume event types = %v", got)
+	}
+	if adopted, releases := boundary.state(); adopted != persisted.ID || releases != 0 {
+		t.Fatalf("resume boundary = adopted %q releases %d", adopted, releases)
+	}
+	f.process.complete(task.ProcessResult{ExitCode: 0})
+	f.awaitEventType(t, task.EventTaskFinished, 1)
+	if _, releases := boundary.state(); releases != 1 {
+		t.Fatalf("resume boundary releases = %d, want 1", releases)
+	}
+}
+
 func TestManagerPublishesStructuredDiagnosticsFromRuntimeOnlyStepParser(t *testing.T) {
 	f := newManagerFixture(t)
 	request := twoStepStartRequest(testID(65), time.Minute, fixedBoundary{})

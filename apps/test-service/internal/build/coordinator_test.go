@@ -2,6 +2,7 @@ package build
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -123,6 +124,47 @@ func TestConfigureObserverWritesStateAndRejectsDisappearedOrRemappedTarget(t *te
 	}
 }
 
+func TestCoordinatorRevalidatesAndResumesPersistedQueuedBuild(t *testing.T) {
+	fixture := newCoordinatorFixture(t)
+	requestJSON, err := json.Marshal(map[string]any{
+		"projectId": fixture.project.ID, "buildProfileId": fixture.profile.ID,
+		"targetIds": []string{fixture.target.ID}, "jobs": 4, "timeoutMs": 60_000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted := task.Task{
+		ID: strings.Repeat("7", 32), IdempotencyKey: fixture.request.IdempotencyKey,
+		RequestHash: strings.Repeat("6", 64), Kind: task.KindCMakeBuild,
+		Request: requestJSON, WorkspaceGeneration: fixture.snapshot.Generation,
+		PlanFingerprint: strings.Repeat("5", 64), Timeout: time.Minute,
+		Status: task.StatusQueued, CreatedAt: time.Now().UTC(),
+	}
+	resumed, err := fixture.coordinator.Resume(context.Background(), persisted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if boundary, ok := fixture.starter.resumeRequest.Boundary.(task.ManagedExecutionBoundary); ok {
+			_ = boundary.Release()
+		}
+	})
+	if resumed.ID != persisted.ID || fixture.starter.resumeCalls != 1 ||
+		fixture.starter.calls != 0 ||
+		fixture.starter.resumeRequest.Task.ID != persisted.ID ||
+		len(fixture.starter.resumeRequest.Plan.Steps) != 2 {
+		t.Fatalf("resumed = %#v, starter = %#v", resumed, fixture.starter)
+	}
+
+	persisted.WorkspaceGeneration = strings.Repeat("9", 64)
+	if _, err := fixture.coordinator.Resume(context.Background(), persisted); !errors.Is(err, ErrWorkspaceChanged) {
+		t.Fatalf("stale Resume() error = %v, want ErrWorkspaceChanged", err)
+	}
+	if fixture.starter.resumeCalls != 1 {
+		t.Fatalf("stale queued build reached Manager: %d calls", fixture.starter.resumeCalls)
+	}
+}
+
 type coordinatorFixture struct {
 	coordinator    *Coordinator
 	inspector      *fakeBuildInspector
@@ -222,14 +264,28 @@ func (f *fakeBuildInspector) Inspect(context.Context) (discovery.Snapshot, error
 }
 
 type fakeTaskStarter struct {
-	calls   int
-	request task.StartRequest
+	calls         int
+	request       task.StartRequest
+	resumeCalls   int
+	resumeRequest task.ResumeRequest
 }
 
 func (f *fakeTaskStarter) Start(_ context.Context, request task.StartRequest) (task.Task, error) {
 	f.calls++
 	f.request = request
 	return task.Task{ID: strings.Repeat("2", 32), Kind: task.KindCMakeBuild}, nil
+}
+
+func (f *fakeTaskStarter) ResumeQueued(
+	_ context.Context,
+	request task.ResumeRequest,
+) (task.Task, error) {
+	f.resumeCalls++
+	f.resumeRequest = request
+	if boundary, ok := request.Boundary.(task.ManagedExecutionBoundary); ok {
+		boundary.Adopt(request.Task.ID)
+	}
+	return request.Task, nil
 }
 
 type fakeConfigurationStore struct {

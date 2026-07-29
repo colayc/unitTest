@@ -531,6 +531,8 @@ func backendFailure(version string, request protocol.Request, err error) HandleR
 		code, message = "STORAGE_UNAVAILABLE", "event subscription storage is unavailable"
 	}
 	switch {
+	case errors.Is(err, build.ErrWorkspaceTrustRequired):
+		code, message, retryable = "WORKSPACE_TRUST_REQUIRED", "workspace trust is required", false
 	case errors.Is(err, build.ErrWorkspaceChanged):
 		code, message, retryable = "WORKSPACE_CHANGED", "workspace generation is stale", false
 	case errors.Is(err, build.ErrProjectNotFound):

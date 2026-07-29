@@ -14,10 +14,13 @@ import (
 	"unit-test-ide.local/test-service/internal/discovery"
 	"unit-test-ide.local/test-service/internal/eventbroker"
 	"unit-test-ide.local/test-service/internal/instance"
+	"unit-test-ide.local/test-service/internal/probe"
 	"unit-test-ide.local/test-service/internal/processcontrol"
 	"unit-test-ide.local/test-service/internal/session"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/taskstore"
+	"unit-test-ide.local/test-service/internal/toolchain"
+	"unit-test-ide.local/test-service/internal/workspace"
 )
 
 const (
@@ -28,13 +31,17 @@ const (
 )
 
 type Config struct {
-	DataDir           string
-	ServiceExecutable string
-	Platform          string
-	Clock             task.Clock
-	NewID             task.IDGenerator
-	TerminationGrace  time.Duration
-	dependencies      *dependencies
+	DataDir            string
+	ServiceExecutable  string
+	WorkspaceRoot      string
+	TrustedWorkspace   bool
+	CMakeBundleRoot    string
+	DevCMakeExecutable string
+	Platform           string
+	Clock              task.Clock
+	NewID              task.IDGenerator
+	TerminationGrace   time.Duration
+	dependencies       *dependencies
 }
 
 type Runtime struct {
@@ -43,11 +50,14 @@ type Runtime struct {
 	broker              *eventbroker.Broker
 	manager             runtimeManager
 	runner              processcontrol.Runner
+	coordinator         runtimeCoordinator
 	lock                io.Closer
 	guard               io.Closer
 	grace               time.Duration
 	serviceExecutable   string
 	simulationDirectory string
+	workspaceRoot       workspace.Root
+	trustedWorkspace    bool
 
 	shutdownMu          sync.Mutex
 	shutdownRunning     bool
@@ -58,6 +68,9 @@ type Runtime struct {
 
 type runtimeStore interface {
 	task.Store
+	build.ConfigurationStore
+	task.QueuedPlanStore
+	FailQueuedBuild(context.Context, string, string, time.Time) (task.Task, []task.Event, error)
 }
 
 type runtimeArtifacts interface {
@@ -72,7 +85,16 @@ type runtimeManager interface {
 	Get(context.Context, string) (task.Task, error)
 	List(context.Context, string, int, ...task.Kind) (task.Page[task.Task], error)
 	Cancel(context.Context, string) (task.Task, error)
+	ResumeQueued(context.Context, task.ResumeRequest) (task.Task, error)
 	Shutdown(context.Context) error
+}
+
+type runtimeCoordinator interface {
+	task.StepObserver
+	Inspect(context.Context) (discovery.Snapshot, error)
+	Targets(context.Context, build.TargetsRequest) ([]cmake.Target, error)
+	Start(context.Context, build.StartRequest) (task.Task, error)
+	Resume(context.Context, task.Task) (task.Task, error)
 }
 
 type dependencies struct {
@@ -80,6 +102,13 @@ type dependencies struct {
 	lockInstance   func(string) (io.Closer, error)
 	openStore      func(string) (runtimeStore, error)
 	openArtifacts  func(string) (runtimeArtifacts, error)
+	openWorkspace  func(string) (workspace.Root, error)
+	loadWorkspace  func(workspace.Root) (workspace.LoadResult, error)
+	newProbeRunner func() probe.Runner
+	resolveCMake   func(context.Context, probe.Runner, cmake.ResolverConfig) (cmake.Installation, error)
+	newRegistry    func(string, probe.Runner, []workspace.ToolchainConfig) (*toolchain.Registry, error)
+	newInspector   func(workspace.Root, probe.Runner, cmake.ResolverConfig, *toolchain.Registry, string) (*discovery.Inspector, error)
+	newCoordinator func(build.CoordinatorConfig) (runtimeCoordinator, error)
 	newRunner      func(string) processcontrol.Runner
 	newBroker      func(eventbroker.Source, int, int) (*eventbroker.Broker, error)
 	newManager     func(task.ManagerConfig) (runtimeManager, error)
@@ -94,6 +123,23 @@ func defaultDependencies() dependencies {
 		},
 		openArtifacts: func(path string) (runtimeArtifacts, error) {
 			return artifactstore.New(path)
+		},
+		openWorkspace:  workspace.OpenRoot,
+		loadWorkspace:  workspace.LoadConfig,
+		newProbeRunner: probe.NewRunner,
+		resolveCMake:   cmake.Resolve,
+		newRegistry: func(platform string, runner probe.Runner, manual []workspace.ToolchainConfig) (*toolchain.Registry, error) {
+			var adapters []toolchain.Adapter
+			if platform == "windows" {
+				adapters = toolchain.NewWindowsAdapters(runner, manual)
+			} else {
+				adapters = toolchain.NewUnixAdapters(runner, manual)
+			}
+			return toolchain.NewRegistry(adapters...)
+		},
+		newInspector: discovery.NewInspector,
+		newCoordinator: func(config build.CoordinatorConfig) (runtimeCoordinator, error) {
+			return build.NewCoordinator(config)
 		},
 		newRunner: processcontrol.NewRunner,
 		newBroker: eventbroker.New,
@@ -117,6 +163,27 @@ func (d dependencies) complete() dependencies {
 	if d.openArtifacts == nil {
 		d.openArtifacts = defaults.openArtifacts
 	}
+	if d.openWorkspace == nil {
+		d.openWorkspace = defaults.openWorkspace
+	}
+	if d.loadWorkspace == nil {
+		d.loadWorkspace = defaults.loadWorkspace
+	}
+	if d.newProbeRunner == nil {
+		d.newProbeRunner = defaults.newProbeRunner
+	}
+	if d.resolveCMake == nil {
+		d.resolveCMake = defaults.resolveCMake
+	}
+	if d.newRegistry == nil {
+		d.newRegistry = defaults.newRegistry
+	}
+	if d.newInspector == nil {
+		d.newInspector = defaults.newInspector
+	}
+	if d.newCoordinator == nil {
+		d.newCoordinator = defaults.newCoordinator
+	}
 	if d.newRunner == nil {
 		d.newRunner = defaults.newRunner
 	}
@@ -130,7 +197,8 @@ func (d dependencies) complete() dependencies {
 }
 
 func Open(config Config) (*Runtime, error) {
-	if config.DataDir == "" || config.ServiceExecutable == "" || config.Platform != goruntime.GOOS {
+	if config.DataDir == "" || config.ServiceExecutable == "" || config.WorkspaceRoot == "" ||
+		config.Platform != goruntime.GOOS {
 		return nil, task.ErrInvalidArgument
 	}
 	deps := defaultDependencies()
@@ -198,22 +266,87 @@ func Open(config Config) (*Runtime, error) {
 	if err := artifacts.Cleanup(ctx, references); err != nil {
 		return failArtifacts(err)
 	}
+	workspaceRoot, err := deps.openWorkspace(config.WorkspaceRoot)
+	if err != nil {
+		return failArtifacts(task.ErrInvalidArgument)
+	}
+	var (
+		inspector    *discovery.Inspector
+		installation cmake.Installation
+		observer     *stepObserverProxy
+	)
+	if config.TrustedWorkspace {
+		loaded, err := deps.loadWorkspace(workspaceRoot)
+		if err != nil {
+			return failArtifacts(err)
+		}
+		probeRunner := deps.newProbeRunner()
+		if probeRunner == nil {
+			return failArtifacts(task.ErrInvalidArgument)
+		}
+		resolverConfig := cmake.ResolverConfig{
+			BundleRoot: config.CMakeBundleRoot, DevExecutable: config.DevCMakeExecutable,
+			Platform: cmakePlatform(config.Platform), Architecture: cmakeArchitecture(),
+		}
+		if loaded.Config.CMake.Executable != "" {
+			resolverConfig.Override = loaded.Config.CMake.Executable
+		}
+		installation, err = deps.resolveCMake(ctx, probeRunner, resolverConfig)
+		if err != nil {
+			return failArtifacts(err)
+		}
+		registry, err := deps.newRegistry(config.Platform, probeRunner, loaded.Config.Toolchains)
+		if err != nil {
+			return failArtifacts(err)
+		}
+		inspector, err = deps.newInspector(
+			workspaceRoot, probeRunner, resolverConfig, registry, layout.Build,
+		)
+		if err != nil {
+			return failArtifacts(err)
+		}
+		observer = &stepObserverProxy{}
+	}
 	broker, err := deps.newBroker(store, brokerQueueSize, brokerPageSize)
 	if err != nil {
 		return failArtifacts(err)
 	}
 	manager, err := deps.newManager(task.ManagerConfig{
 		Store: store, Publisher: broker, Processes: processFactory{runner: runner}, Artifacts: artifacts,
-		Clock: config.Clock, NewID: newID, ServiceExecutable: config.ServiceExecutable,
+		StepObserver: observer,
+		Clock:        config.Clock, NewID: newID, ServiceExecutable: config.ServiceExecutable,
 		ServiceInstanceID: newID(), TerminationGrace: grace,
 	})
 	if err != nil {
 		return failArtifacts(errors.Join(err, broker.Close()))
 	}
+	var coordinator runtimeCoordinator
+	if config.TrustedWorkspace {
+		coordinator, err = deps.newCoordinator(build.CoordinatorConfig{
+			Inspector: inspector, Tasks: manager, Configurations: store,
+			Installation: installation, WorkspaceRoot: workspaceRoot,
+			ServiceDataRoot: layout.Build, Locks: build.NewDirectoryLocks(),
+		})
+		if err != nil {
+			shutdownContext, cancel := context.WithTimeout(context.Background(), grace)
+			shutdownErr := manager.Shutdown(shutdownContext)
+			cancel()
+			return failArtifacts(errors.Join(err, shutdownErr, broker.Close()))
+		}
+		observer.Set(coordinator)
+		if err := resumeQueuedBuilds(ctx, store, coordinator, broker, clockNow(config.Clock)); err != nil {
+			shutdownContext, cancel := context.WithTimeout(context.Background(), closeTimeout)
+			shutdownErr := manager.Shutdown(shutdownContext)
+			cancel()
+			return failArtifacts(errors.Join(err, shutdownErr, broker.Close()))
+		}
+	}
 	return &Runtime{
 		store: store, artifacts: artifacts, broker: broker, manager: manager, runner: runner,
-		lock: locked, guard: guard, grace: grace,
+		coordinator: coordinator,
+		lock:        locked, guard: guard, grace: grace,
 		serviceExecutable: config.ServiceExecutable, simulationDirectory: layout.Root,
+		workspaceRoot: workspaceRoot, trustedWorkspace: config.TrustedWorkspace,
 	}, nil
 }
 
@@ -222,6 +355,65 @@ func clockNow(clock task.Clock) time.Time {
 		return time.Now().UTC()
 	}
 	return clock.Now()
+}
+
+func resumeQueuedBuilds(
+	ctx context.Context,
+	store runtimeStore,
+	coordinator runtimeCoordinator,
+	broker *eventbroker.Broker,
+	at time.Time,
+) error {
+	cursor := ""
+	for {
+		page, err := store.List(ctx, cursor, brokerPageSize, task.KindCMakeBuild)
+		if err != nil {
+			return err
+		}
+		for _, persisted := range page.Items {
+			if persisted.Status != task.StatusQueued {
+				continue
+			}
+			if _, err := coordinator.Resume(ctx, persisted); err != nil {
+				errorCode, recoverable := queuedBuildRecoveryCode(err)
+				if !recoverable {
+					return err
+				}
+				_, events, failErr := store.FailQueuedBuild(
+					ctx, persisted.ID, errorCode, at,
+				)
+				if failErr != nil {
+					return failErr
+				}
+				for _, event := range events {
+					broker.Publish(event)
+				}
+			}
+		}
+		if page.NextCursor == "" {
+			return nil
+		}
+		cursor = page.NextCursor
+	}
+}
+
+func queuedBuildRecoveryCode(err error) (string, bool) {
+	switch {
+	case errors.Is(err, build.ErrWorkspaceChanged):
+		return "WORKSPACE_CHANGED", true
+	case errors.Is(err, build.ErrProjectNotFound):
+		return "PROJECT_NOT_FOUND", true
+	case errors.Is(err, build.ErrBuildProfileNotFound):
+		return "BUILD_PROFILE_NOT_FOUND", true
+	case errors.Is(err, build.ErrTargetNotFound):
+		return "TARGET_NOT_FOUND", true
+	case errors.Is(err, build.ErrConfigureRequired):
+		return "CONFIGURE_REQUIRED", true
+	case errors.Is(err, task.ErrInvalidArgument):
+		return "INVALID_TASK_SPEC", true
+	default:
+		return "", false
+	}
 }
 
 func (r *Runtime) StartSimulation(
@@ -241,16 +433,34 @@ func (r *Runtime) StartSimulation(
 	return r.manager.Start(ctx, request)
 }
 
-func (r *Runtime) InspectWorkspace(context.Context) (discovery.Snapshot, error) {
-	return discovery.Snapshot{}, task.ErrStorageUnavailable
+func (r *Runtime) InspectWorkspace(ctx context.Context) (discovery.Snapshot, error) {
+	if r == nil || !r.trustedWorkspace || r.coordinator == nil {
+		if r != nil && r.trustedWorkspace {
+			return discovery.Snapshot{}, task.ErrStorageUnavailable
+		}
+		return discovery.Snapshot{}, build.ErrWorkspaceTrustRequired
+	}
+	return r.coordinator.Inspect(ctx)
 }
 
-func (r *Runtime) ListTargets(context.Context, build.TargetsRequest) ([]cmake.Target, error) {
-	return nil, task.ErrStorageUnavailable
+func (r *Runtime) ListTargets(ctx context.Context, request build.TargetsRequest) ([]cmake.Target, error) {
+	if r == nil || !r.trustedWorkspace || r.coordinator == nil {
+		if r != nil && r.trustedWorkspace {
+			return nil, task.ErrStorageUnavailable
+		}
+		return nil, build.ErrWorkspaceTrustRequired
+	}
+	return r.coordinator.Targets(ctx, request)
 }
 
-func (r *Runtime) StartBuild(context.Context, build.StartRequest) (task.Task, error) {
-	return task.Task{}, task.ErrStorageUnavailable
+func (r *Runtime) StartBuild(ctx context.Context, request build.StartRequest) (task.Task, error) {
+	if r == nil || !r.trustedWorkspace || r.coordinator == nil {
+		if r != nil && r.trustedWorkspace {
+			return task.Task{}, task.ErrStorageUnavailable
+		}
+		return task.Task{}, build.ErrWorkspaceTrustRequired
+	}
+	return r.coordinator.Start(ctx, request)
 }
 
 func (r *Runtime) Get(ctx context.Context, id string) (task.Task, error) {
@@ -400,6 +610,41 @@ func (r *Runtime) Close() error {
 }
 
 var _ session.Backend = (*Runtime)(nil)
+
+type stepObserverProxy struct {
+	mu       sync.RWMutex
+	observer task.StepObserver
+}
+
+func (p *stepObserverProxy) Set(observer task.StepObserver) {
+	p.mu.Lock()
+	p.observer = observer
+	p.mu.Unlock()
+}
+
+func (p *stepObserverProxy) Succeeded(ctx context.Context, current task.Task, step task.ExecutionStep) error {
+	p.mu.RLock()
+	observer := p.observer
+	p.mu.RUnlock()
+	if observer == nil {
+		return task.ErrStorageUnavailable
+	}
+	return observer.Succeeded(ctx, current, step)
+}
+
+func cmakePlatform(platform string) string {
+	if platform == "windows" {
+		return "win32"
+	}
+	return platform
+}
+
+func cmakeArchitecture() string {
+	if goruntime.GOARCH == "amd64" {
+		return "x64"
+	}
+	return goruntime.GOARCH
+}
 
 type processFactory struct{ runner processcontrol.Runner }
 

@@ -34,6 +34,19 @@ var listenTransport = transport.Listen
 var prepareTokenFileForRun = prepareTokenFile
 var consumeTokenFileForRun = consumeTokenFile
 
+type explicitBool struct{ value bool }
+
+func (b *explicitBool) String() string { return strconv.FormatBool(b.value) }
+
+func (b *explicitBool) Set(value string) error {
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return err
+	}
+	b.value = parsed
+	return nil
+}
+
 func main() { os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr)) }
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -42,6 +55,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	endpoint := flags.String("endpoint", "", "local IPC endpoint")
 	tokenFile := flags.String("token-file", "", "authentication token file")
 	dataDir := flags.String("data-dir", "", "owner-only service data directory")
+	workspaceRoot := flags.String("workspace-root", "", "workspace root")
+	var trustedWorkspace explicitBool
+	flags.Var(&trustedWorkspace, "trusted-workspace", "allow workspace build execution (explicit true or false)")
+	cmakeBundleRoot := flags.String("cmake-bundle-root", "", "verified CMake bundle root")
+	devCMakeExecutable := flags.String("dev-cmake-executable", "", "development CMake executable")
 	prepareTokenFilePath := flags.String("prepare-token-file", "", "create an empty owner-only authentication token file")
 	processHost := flags.Bool("process-host", false, "run the internal process host")
 	probeSupervisor := flags.Bool("probe-supervisor", false, "run the internal probe supervisor")
@@ -64,7 +82,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		switch parsedFlag.Name {
 		case "prepare-token-file":
 			prepareModeFlagProvided = true
-		case "endpoint", "token-file", "data-dir":
+		case "endpoint", "token-file", "data-dir", "workspace-root", "trusted-workspace",
+			"cmake-bundle-root", "dev-cmake-executable":
 			serviceModeFlagProvided = true
 		case "process-host":
 			processHostFlagProvided = true
@@ -140,8 +159,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 		return 0
 	}
-	if *endpoint == "" || *tokenFile == "" || *dataDir == "" {
-		fmt.Fprintln(stderr, "--endpoint, --token-file, and --data-dir are required")
+	if *endpoint == "" || *tokenFile == "" || *dataDir == "" || *workspaceRoot == "" {
+		fmt.Fprintln(stderr, "--endpoint, --token-file, --data-dir, and --workspace-root are required")
 		return 2
 	}
 	token, err := consumeTokenFileForRun(*tokenFile)
@@ -155,8 +174,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 	active, err := serviceruntime.Open(serviceruntime.Config{
-		DataDir: *dataDir, ServiceExecutable: executable, Platform: transport.PlatformName(),
-		Clock: task.RealClock{}, NewID: task.NewID, TerminationGrace: 2 * time.Second,
+		DataDir: *dataDir, ServiceExecutable: executable,
+		WorkspaceRoot: *workspaceRoot, TrustedWorkspace: trustedWorkspace.value,
+		CMakeBundleRoot: *cmakeBundleRoot, DevCMakeExecutable: *devCMakeExecutable,
+		Platform: transport.PlatformName(),
+		Clock:    task.RealClock{}, NewID: task.NewID, TerminationGrace: 2 * time.Second,
 	})
 	if err != nil {
 		fmt.Fprintln(stderr, err)

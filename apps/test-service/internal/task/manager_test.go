@@ -2199,6 +2199,29 @@ func (s *fakeStore) ActiveLeases(context.Context) ([]task.ProcessLease, error) {
 func (s *fakeStore) RecoverInterrupted(context.Context, time.Time) ([]task.Event, error) {
 	return nil, nil
 }
+func (s *fakeStore) ReplaceQueuedPlan(
+	_ context.Context,
+	taskID string,
+	requestHash string,
+	planFingerprint string,
+	steps []task.StepSnapshot,
+) (task.Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok := s.tasks[taskID]
+	if !ok {
+		return task.Task{}, task.ErrNotFound
+	}
+	if current.Status != task.StatusQueued || current.Kind != task.KindCMakeBuild ||
+		current.RequestHash != requestHash {
+		return task.Task{}, task.ErrConflict
+	}
+	current.PlanFingerprint = planFingerprint
+	current.ActiveStep = ""
+	current.Steps = append([]task.StepSnapshot(nil), steps...)
+	s.tasks[taskID] = current
+	return current, nil
+}
 func (s *fakeStore) ReferencedArtifactPaths(context.Context) (map[string]struct{}, error) {
 	return nil, nil
 }

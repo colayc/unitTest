@@ -107,11 +107,11 @@ func (windowsFailedAdapter) Probe(context.Context, Candidate) (Instance, error) 
 func NewWindowsAdapters(runner probe.Runner, manual []workspace.ToolchainConfig) []Adapter {
 	config, err := defaultWindowsDiscoveryOptions()
 	if err != nil {
-		return []Adapter{windowsFailedAdapter{}, windowsFailedAdapter{}}
+		return []Adapter{windowsFailedAdapter{}}
 	}
 	adapters, err := newWindowsAdapters(runner, manual, config)
 	if err != nil {
-		return []Adapter{windowsFailedAdapter{}, windowsFailedAdapter{}}
+		return []Adapter{windowsFailedAdapter{}}
 	}
 	return adapters
 }

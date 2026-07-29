@@ -275,6 +275,78 @@ func (m *Manager) start(request StartRequest, active map[string]*activeTask) tas
 	return taskResponse{task: current.task}
 }
 
+func (m *Manager) resumeQueued(
+	request ResumeRequest,
+	active map[string]*activeTask,
+) taskResponse {
+	if !m.Healthy() {
+		return taskResponse{err: ErrStorageUnavailable}
+	}
+	if active[request.Task.ID] != nil {
+		return taskResponse{err: ErrConflict}
+	}
+	stored, err := m.store.Get(context.Background(), request.Task.ID)
+	if err != nil {
+		if errors.Is(err, ErrStorageUnavailable) {
+			m.tripStorage(active)
+		}
+		return taskResponse{err: err}
+	}
+	if !sameQueuedTaskIdentity(stored, request.Task) {
+		return taskResponse{task: stored, err: ErrConflict}
+	}
+	planStore, ok := m.store.(QueuedPlanStore)
+	if !ok {
+		m.tripStorage(active)
+		return taskResponse{task: stored, err: ErrStorageUnavailable}
+	}
+	stored, err = planStore.ReplaceQueuedPlan(
+		context.Background(), stored.ID, stored.RequestHash,
+		request.Plan.Fingerprint, initialStepSnapshots(request.Plan),
+	)
+	if err != nil {
+		if errors.Is(err, ErrStorageUnavailable) {
+			m.tripStorage(active)
+		}
+		return taskResponse{task: stored, err: err}
+	}
+	execution := newExecutionSignal()
+	m.executionSignals.Store(stored.ID, execution)
+	if m.closing.Load() {
+		execution.claim(OutcomeInterrupted)
+	}
+	if boundary, ok := request.Boundary.(ManagedExecutionBoundary); ok {
+		boundary.Adopt(stored.ID)
+	}
+	current := &activeTask{
+		task: stored, plan: request.Plan, boundary: request.Boundary,
+		timerStop: make(chan struct{}), timeoutStop: make(chan struct{}),
+		watcherStop: make(chan struct{}), execution: execution,
+	}
+	active[stored.ID] = current
+	m.armTimeout(current)
+	if err := m.startNextStep(current, active); err != nil {
+		return taskResponse{task: current.task, err: err}
+	}
+	if current.task.Status == StatusFinished && current.process == nil {
+		removeActiveTask(active, stored.ID)
+	}
+	return taskResponse{task: current.task}
+}
+
+func sameQueuedTaskIdentity(stored, supplied Task) bool {
+	return stored.ID == supplied.ID &&
+		stored.IdempotencyKey == supplied.IdempotencyKey &&
+		stored.RequestHash == supplied.RequestHash &&
+		stored.Kind == KindCMakeBuild &&
+		stored.Status == StatusQueued &&
+		supplied.Kind == KindCMakeBuild &&
+		supplied.Status == StatusQueued &&
+		stored.WorkspaceGeneration == supplied.WorkspaceGeneration &&
+		stored.Timeout == supplied.Timeout &&
+		string(stored.Request) == string(supplied.Request)
+}
+
 func (m *Manager) startNextStep(current *activeTask, active map[string]*activeTask) error {
 	if current.nextStep >= len(current.plan.Steps) {
 		return nil

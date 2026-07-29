@@ -53,6 +53,10 @@ type Store interface {
 	Close() error
 }
 
+type QueuedPlanStore interface {
+	ReplaceQueuedPlan(context.Context, string, string, string, []StepSnapshot) (Task, error)
+}
+
 type Publisher interface {
 	Publish(Event)
 }

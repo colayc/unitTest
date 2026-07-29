@@ -16,12 +16,230 @@ import (
 	"time"
 
 	"unit-test-ide.local/test-service/internal/artifactstore"
+	"unit-test-ide.local/test-service/internal/build"
+	"unit-test-ide.local/test-service/internal/cmake"
+	"unit-test-ide.local/test-service/internal/discovery"
 	"unit-test-ide.local/test-service/internal/eventbroker"
 	"unit-test-ide.local/test-service/internal/instance"
+	"unit-test-ide.local/test-service/internal/probe"
 	"unit-test-ide.local/test-service/internal/processcontrol"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/taskstore"
 )
+
+func TestUntrustedRuntimeAllowsNoWorkspaceMethods(t *testing.T) {
+	root := t.TempDir()
+	active, err := Open(Config{
+		DataDir: filepath.Join(root, "data"), ServiceExecutable: os.Args[0],
+		WorkspaceRoot: root, TrustedWorkspace: false, Platform: platformForTest(),
+		dependencies: testDependencies(&recordingRunner{}, nil),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = active.Close() })
+	if _, err := active.InspectWorkspace(context.Background()); !errors.Is(err, build.ErrWorkspaceTrustRequired) {
+		t.Fatalf("InspectWorkspace() error = %v, want ErrWorkspaceTrustRequired", err)
+	}
+}
+
+func TestTrustedRuntimeDelegatesWorkspaceMethodsToCoordinator(t *testing.T) {
+	base := t.TempDir()
+	workspaceRoot := filepath.Join(base, "workspace")
+	if err := os.MkdirAll(workspaceRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	deps := testDependencies(&recordingRunner{}, nil)
+	deps.resolveCMake = func(context.Context, probe.Runner, cmake.ResolverConfig) (cmake.Installation, error) {
+		return cmake.Installation{
+			Executable: os.Args[0], Identity: strings.Repeat("a", 64),
+			Version: "test", Source: cmake.SourceDev,
+		}, nil
+	}
+	fake := &fakeRuntimeCoordinator{
+		snapshot: discovery.Snapshot{
+			WorkspaceID: strings.Repeat("b", 64),
+			Generation:  strings.Repeat("c", 64),
+		},
+		targets: []cmake.Target{{ID: strings.Repeat("d", 64), Name: "tests"}},
+		started: task.Task{ID: strings.Repeat("e", 32), Kind: task.KindCMakeBuild},
+	}
+	deps.newCoordinator = func(config build.CoordinatorConfig) (runtimeCoordinator, error) {
+		fake.config = config
+		return fake, nil
+	}
+	active, err := Open(Config{
+		DataDir: filepath.Join(base, "data"), ServiceExecutable: os.Args[0],
+		WorkspaceRoot: workspaceRoot, TrustedWorkspace: true,
+		DevCMakeExecutable: os.Args[0], Platform: platformForTest(),
+		dependencies: deps,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = active.Close() })
+	snapshot, err := active.InspectWorkspace(context.Background())
+	if err != nil || snapshot.Generation != fake.snapshot.Generation {
+		t.Fatalf("InspectWorkspace() = %#v, %v", snapshot, err)
+	}
+	targets, err := active.ListTargets(context.Background(), build.TargetsRequest{})
+	if err != nil || !reflect.DeepEqual(targets, fake.targets) {
+		t.Fatalf("ListTargets() = %#v, %v", targets, err)
+	}
+	started, err := active.StartBuild(context.Background(), build.StartRequest{})
+	if err != nil || started.ID != fake.started.ID {
+		t.Fatalf("StartBuild() = %#v, %v", started, err)
+	}
+	if fake.config.Inspector == nil || fake.config.Tasks == nil ||
+		fake.config.Configurations == nil || fake.config.Locks == nil ||
+		fake.config.ServiceDataRoot == "" {
+		t.Fatalf("Coordinator config = %#v", fake.config)
+	}
+}
+
+func TestTrustedRuntimeFailsInvalidQueuedBuildWithStableRecoveryCode(t *testing.T) {
+	base := t.TempDir()
+	workspaceRoot := filepath.Join(base, "workspace")
+	if err := os.MkdirAll(workspaceRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dataRoot := filepath.Join(base, "data")
+	layout, err := PrepareDataDir(dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 29, 7, 0, 0, 0, time.UTC)
+	input := seedQueuedRuntimeBuild(t, layout.Database, now)
+
+	deps := testDependencies(&recordingRunner{}, nil)
+	deps.resolveCMake = func(context.Context, probe.Runner, cmake.ResolverConfig) (cmake.Installation, error) {
+		return cmake.Installation{
+			Executable: os.Args[0], Identity: strings.Repeat("a", 64),
+			Version: "test", Source: cmake.SourceDev,
+		}, nil
+	}
+	fake := &fakeRuntimeCoordinator{resumeErr: build.ErrWorkspaceChanged}
+	deps.newCoordinator = func(build.CoordinatorConfig) (runtimeCoordinator, error) {
+		return fake, nil
+	}
+	active, err := Open(Config{
+		DataDir: dataRoot, ServiceExecutable: os.Args[0],
+		WorkspaceRoot: workspaceRoot, TrustedWorkspace: true,
+		DevCMakeExecutable: os.Args[0], Platform: platformForTest(),
+		Clock: fixedRuntimeClock{at: now.Add(time.Minute)}, dependencies: deps,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = active.Close() })
+	recovered, err := active.Get(context.Background(), input.ID)
+	if err != nil || recovered.Status != task.StatusFinished ||
+		recovered.Outcome != task.OutcomeInterrupted ||
+		recovered.ErrorCode != "WORKSPACE_CHANGED" ||
+		len(recovered.Steps) != 2 ||
+		recovered.Steps[0].Status != task.StepSkipped ||
+		recovered.Steps[1].Status != task.StepSkipped ||
+		fake.resumeCalls != 1 {
+		t.Fatalf("recovered queued build = %#v, err = %v, resume calls = %d", recovered, err, fake.resumeCalls)
+	}
+}
+
+func TestUntrustedRuntimePreservesQueuedBuildForTrustedRestart(t *testing.T) {
+	base := t.TempDir()
+	workspaceRoot := filepath.Join(base, "workspace")
+	if err := os.MkdirAll(workspaceRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dataRoot := filepath.Join(base, "data")
+	layout, err := PrepareDataDir(dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := seedQueuedRuntimeBuild(
+		t,
+		layout.Database,
+		time.Date(2026, 7, 29, 8, 0, 0, 0, time.UTC),
+	)
+	active, err := Open(Config{
+		DataDir: dataRoot, ServiceExecutable: os.Args[0],
+		WorkspaceRoot: workspaceRoot, TrustedWorkspace: false,
+		Platform: platformForTest(), dependencies: testDependencies(&recordingRunner{}, nil),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = active.Close() })
+	preserved, err := active.Get(context.Background(), input.ID)
+	if err != nil || preserved.Status != task.StatusQueued ||
+		preserved.Outcome != "" || preserved.ErrorCode != "" {
+		t.Fatalf("preserved queued build = %#v, err = %v", preserved, err)
+	}
+}
+
+func seedQueuedRuntimeBuild(t *testing.T, database string, now time.Time) task.Task {
+	t.Helper()
+	store, err := taskstore.Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	input := task.Task{
+		ID: strings.Repeat("1", 32), IdempotencyKey: strings.Repeat("2", 32),
+		RequestHash: strings.Repeat("3", 64), Kind: task.KindCMakeBuild,
+		Request:             json.RawMessage(`{"projectId":"core","buildProfileId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","targetIds":[],"jobs":1,"timeoutMs":60000}`),
+		WorkspaceGeneration: strings.Repeat("4", 64),
+		PlanFingerprint:     strings.Repeat("5", 64), Timeout: time.Minute,
+		Status: task.StatusQueued, CreatedAt: now,
+	}
+	if _, _, err := store.Create(context.Background(), input, []task.StepSnapshot{
+		{ID: "configure", Kind: task.StepConfigure, Status: task.StepPending},
+		{ID: "build", Kind: task.StepBuild, Status: task.StepPending},
+	}, task.EventDraft{
+		TaskID: input.ID, Type: task.EventTaskCreated, At: now,
+		Payload: json.RawMessage(`{"status":"queued"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return input
+}
+
+type fakeRuntimeCoordinator struct {
+	config      build.CoordinatorConfig
+	snapshot    discovery.Snapshot
+	targets     []cmake.Target
+	started     task.Task
+	resumeErr   error
+	resumeCalls int
+}
+
+func (f *fakeRuntimeCoordinator) Inspect(context.Context) (discovery.Snapshot, error) {
+	return f.snapshot, nil
+}
+
+func (f *fakeRuntimeCoordinator) Targets(context.Context, build.TargetsRequest) ([]cmake.Target, error) {
+	return append([]cmake.Target(nil), f.targets...), nil
+}
+
+func (f *fakeRuntimeCoordinator) Start(context.Context, build.StartRequest) (task.Task, error) {
+	return f.started, nil
+}
+
+func (f *fakeRuntimeCoordinator) Resume(context.Context, task.Task) (task.Task, error) {
+	f.resumeCalls++
+	return task.Task{}, f.resumeErr
+}
+
+func (*fakeRuntimeCoordinator) Succeeded(context.Context, task.Task, task.ExecutionStep) error {
+	return nil
+}
+
+type fixedRuntimeClock struct{ at time.Time }
+
+func (c fixedRuntimeClock) Now() time.Time { return c.at }
+
+func (fixedRuntimeClock) After(time.Duration) <-chan time.Time {
+	return make(chan time.Time)
+}
 
 func TestMain(m *testing.M) {
 	root, err := os.MkdirTemp(".", ".runtime-test-tmp-")
@@ -56,7 +274,7 @@ func TestOpenUsesRequiredOrderAndRecoversPersistentState(t *testing.T) {
 	runner := &recordingRunner{}
 	var stages []string
 	active, err := Open(Config{
-		DataDir: root, ServiceExecutable: os.Args[0], Platform: platformForTest(),
+		DataDir: root, ServiceExecutable: os.Args[0], WorkspaceRoot: filepath.Dir(root), Platform: platformForTest(),
 		Clock: task.RealClock{}, NewID: task.NewID, TerminationGrace: time.Millisecond,
 		dependencies: testDependencies(runner, func(stage string) { stages = append(stages, stage) }),
 	})
@@ -119,6 +337,7 @@ func TestOpenCleansQueuedPreparedLeaseBeforeInterruptedRecovery(t *testing.T) {
 	active, err := Open(Config{
 		DataDir:           root,
 		ServiceExecutable: os.Args[0],
+		WorkspaceRoot:     filepath.Dir(root),
 		Platform:          platformForTest(),
 		Clock:             task.RealClock{},
 		NewID:             task.NewID,
@@ -153,7 +372,7 @@ func TestOpenIgnoresLeaseIdentityMismatchButStillRecovers(t *testing.T) {
 	seedInterruptedTask(t, layout.Database, testLease())
 	runner := &recordingRunner{cleanupErr: processcontrol.ErrLeaseIdentityMismatch}
 	active, err := Open(Config{
-		DataDir: root, ServiceExecutable: os.Args[0], Platform: platformForTest(),
+		DataDir: root, ServiceExecutable: os.Args[0], WorkspaceRoot: filepath.Dir(root), Platform: platformForTest(),
 		TerminationGrace: time.Millisecond, dependencies: testDependencies(runner, nil),
 	})
 	if err != nil {
@@ -171,7 +390,7 @@ func TestOpenIgnoresLeaseIdentityMismatchButStillRecovers(t *testing.T) {
 
 func TestOpenRejectsSecondRuntimeAndCloseReleasesInstanceLock(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "data")
-	config := Config{DataDir: root, ServiceExecutable: os.Args[0], Platform: platformForTest(), dependencies: testDependencies(&recordingRunner{}, nil)}
+	config := Config{DataDir: root, ServiceExecutable: os.Args[0], WorkspaceRoot: filepath.Dir(root), Platform: platformForTest(), dependencies: testDependencies(&recordingRunner{}, nil)}
 	first, err := Open(config)
 	if err != nil {
 		t.Fatal(err)
@@ -202,7 +421,7 @@ func TestOpenFailureReleasesLockAndClosesOpenedStores(t *testing.T) {
 		return openedBroker, err
 	}
 	deps.newManager = func(task.ManagerConfig) (runtimeManager, error) { return nil, managerFailure }
-	if active, err := Open(Config{DataDir: root, ServiceExecutable: os.Args[0], Platform: platformForTest(), dependencies: deps}); !errors.Is(err, managerFailure) || active != nil {
+	if active, err := Open(Config{DataDir: root, ServiceExecutable: os.Args[0], WorkspaceRoot: filepath.Dir(root), Platform: platformForTest(), dependencies: deps}); !errors.Is(err, managerFailure) || active != nil {
 		t.Fatalf("Open() = %#v, %v", active, err)
 	}
 	layout, err := PrepareDataDir(root)
@@ -228,6 +447,82 @@ func TestOpenFailureReleasesLockAndClosesOpenedStores(t *testing.T) {
 	}
 }
 
+func TestTrustedOpenCoordinatorFailureClosesPartialInitializationInReverseOrder(t *testing.T) {
+	base := t.TempDir()
+	workspaceRoot := filepath.Join(base, "workspace")
+	if err := os.MkdirAll(workspaceRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	deps := testDependencies(&recordingRunner{}, nil)
+	var closed []string
+	track := func(name string) { closed = append(closed, name) }
+
+	prepareDataDir := deps.prepareDataDir
+	deps.prepareDataDir = func(path string) (Layout, io.Closer, error) {
+		layout, guard, err := prepareDataDir(path)
+		if err != nil {
+			return Layout{}, nil, err
+		}
+		return layout, &trackedCloser{Closer: guard, name: "guard", track: track}, nil
+	}
+	lockInstance := deps.lockInstance
+	deps.lockInstance = func(path string) (io.Closer, error) {
+		lock, err := lockInstance(path)
+		if err != nil {
+			return nil, err
+		}
+		return &trackedCloser{Closer: lock, name: "lock", track: track}, nil
+	}
+	openStore := deps.openStore
+	deps.openStore = func(path string) (runtimeStore, error) {
+		store, err := openStore(path)
+		if err != nil {
+			return nil, err
+		}
+		return &trackedRuntimeStore{runtimeStore: store, track: track}, nil
+	}
+	openArtifacts := deps.openArtifacts
+	deps.openArtifacts = func(path string) (runtimeArtifacts, error) {
+		artifacts, err := openArtifacts(path)
+		if err != nil {
+			return nil, err
+		}
+		return &trackedRuntimeArtifacts{runtimeArtifacts: artifacts, track: track}, nil
+	}
+	newManager := deps.newManager
+	deps.newManager = func(config task.ManagerConfig) (runtimeManager, error) {
+		manager, err := newManager(config)
+		if err != nil {
+			return nil, err
+		}
+		return &trackedRuntimeManager{runtimeManager: manager, track: track}, nil
+	}
+	deps.resolveCMake = func(context.Context, probe.Runner, cmake.ResolverConfig) (cmake.Installation, error) {
+		return cmake.Installation{
+			Executable: os.Args[0], Identity: strings.Repeat("a", 64),
+			Version: "test", Source: cmake.SourceDev,
+		}, nil
+	}
+	coordinatorFailure := errors.New("coordinator construction failed")
+	deps.newCoordinator = func(build.CoordinatorConfig) (runtimeCoordinator, error) {
+		return nil, coordinatorFailure
+	}
+
+	active, err := Open(Config{
+		DataDir: filepath.Join(base, "data"), ServiceExecutable: os.Args[0],
+		WorkspaceRoot: workspaceRoot, TrustedWorkspace: true,
+		DevCMakeExecutable: os.Args[0], Platform: platformForTest(),
+		dependencies: deps,
+	})
+	if !errors.Is(err, coordinatorFailure) || active != nil {
+		t.Fatalf("Open() = %#v, %v", active, err)
+	}
+	want := []string{"manager", "artifacts", "store", "lock", "guard"}
+	if !reflect.DeepEqual(closed, want) {
+		t.Fatalf("close order = %v, want %v", closed, want)
+	}
+}
+
 func TestRuntimeArtifactBackendHidesPathsAndVerifiesContent(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "data")
 	layout, err := PrepareDataDir(root)
@@ -235,7 +530,7 @@ func TestRuntimeArtifactBackendHidesPathsAndVerifiesContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	artifact := seedFinishedArtifact(t, layout)
-	active, err := Open(Config{DataDir: root, ServiceExecutable: os.Args[0], Platform: platformForTest(), dependencies: testDependencies(&recordingRunner{}, nil)})
+	active, err := Open(Config{DataDir: root, ServiceExecutable: os.Args[0], WorkspaceRoot: filepath.Dir(root), Platform: platformForTest(), dependencies: testDependencies(&recordingRunner{}, nil)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,7 +573,7 @@ func TestShutdownRetainsOwnershipUntilManagerQuiescesAndCanBeRetried(t *testing.
 			return nil
 		}
 	}}
-	active, err := Open(Config{DataDir: root, ServiceExecutable: os.Args[0], Platform: platformForTest(), TerminationGrace: time.Millisecond, dependencies: testDependencies(runner, nil)})
+	active, err := Open(Config{DataDir: root, ServiceExecutable: os.Args[0], WorkspaceRoot: filepath.Dir(root), Platform: platformForTest(), TerminationGrace: time.Millisecond, dependencies: testDependencies(runner, nil)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -348,7 +643,7 @@ func TestShutdownRetryAfterProcessCloseFailureReleasesInstanceLock(t *testing.T)
 	process := newRetryCloseProcess()
 	runner := &recordingRunner{prepared: process}
 	active, err := Open(Config{
-		DataDir: root, ServiceExecutable: os.Args[0], Platform: platformForTest(),
+		DataDir: root, ServiceExecutable: os.Args[0], WorkspaceRoot: filepath.Dir(root), Platform: platformForTest(),
 		TerminationGrace: time.Millisecond, dependencies: testDependencies(runner, nil),
 	})
 	if err != nil {
@@ -691,6 +986,47 @@ type stageArtifacts struct {
 func (s *stageArtifacts) Cleanup(ctx context.Context, referenced map[string]struct{}) error {
 	s.stage("cleanup-artifacts")
 	return s.runtimeArtifacts.Cleanup(ctx, referenced)
+}
+
+type trackedCloser struct {
+	io.Closer
+	name  string
+	track func(string)
+}
+
+func (c *trackedCloser) Close() error {
+	c.track(c.name)
+	return c.Closer.Close()
+}
+
+type trackedRuntimeStore struct {
+	runtimeStore
+	track func(string)
+}
+
+func (s *trackedRuntimeStore) Close() error {
+	s.track("store")
+	return s.runtimeStore.Close()
+}
+
+type trackedRuntimeArtifacts struct {
+	runtimeArtifacts
+	track func(string)
+}
+
+func (a *trackedRuntimeArtifacts) Close() error {
+	a.track("artifacts")
+	return a.runtimeArtifacts.Close()
+}
+
+type trackedRuntimeManager struct {
+	runtimeManager
+	track func(string)
+}
+
+func (m *trackedRuntimeManager) Shutdown(ctx context.Context) error {
+	m.track("manager")
+	return m.runtimeManager.Shutdown(ctx)
 }
 
 func seedFinishedArtifact(t *testing.T, layout Layout) task.Artifact {

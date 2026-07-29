@@ -239,6 +239,7 @@ func TestSessionVersion12MapsWorkspaceBuildErrors(t *testing.T) {
 		name, method, code string
 		err                error
 	}{
+		{"workspace trust required", "cmake/targets/list", "WORKSPACE_TRUST_REQUIRED", build.ErrWorkspaceTrustRequired},
 		{"workspace changed", "cmake/targets/list", "WORKSPACE_CHANGED", build.ErrWorkspaceChanged},
 		{"project missing", "cmake/targets/list", "PROJECT_NOT_FOUND", build.ErrProjectNotFound},
 		{"profile missing", "cmake/targets/list", "BUILD_PROFILE_NOT_FOUND", build.ErrBuildProfileNotFound},
