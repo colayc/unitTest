@@ -278,7 +278,14 @@ func Open(config Config) (*Runtime, error) {
 	if config.TrustedWorkspace {
 		loaded, err := deps.loadWorkspace(workspaceRoot)
 		if err != nil {
-			return failArtifacts(err)
+			if !errors.Is(err, workspace.ErrInvalidConfig) &&
+				!errors.Is(err, workspace.ErrConfigTooLarge) {
+				return failArtifacts(err)
+			}
+			// Keep the Service available so Inspector can return the stable,
+			// blocking workspace diagnostic. Invalid untrusted configuration
+			// must not contribute a CMake override or manual toolchain.
+			loaded = workspace.LoadResult{}
 		}
 		probeRunner := deps.newProbeRunner()
 		if probeRunner == nil {

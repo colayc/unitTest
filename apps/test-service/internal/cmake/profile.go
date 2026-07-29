@@ -13,8 +13,9 @@ import (
 )
 
 const (
-	maxGeneratedProfileIdentifierBytes = 64
-	maxGeneratedProfileWorkspaceBytes  = 256 * 1024
+	maxGeneratedProfileProjectIDBytes   = 64
+	maxGeneratedProfileToolchainIDBytes = 128
+	maxGeneratedProfileWorkspaceBytes   = 256 * 1024
 )
 
 type BuildProfile struct {
@@ -59,8 +60,8 @@ func NewGeneratedProfile(spec GeneratedProfileSpec) (BuildProfile, error) {
 		value    string
 		maxBytes int
 	}{
-		{name: "project ID", value: spec.ProjectID, maxBytes: maxGeneratedProfileIdentifierBytes},
-		{name: "toolchain ID", value: spec.ToolchainID, maxBytes: maxGeneratedProfileIdentifierBytes},
+		{name: "project ID", value: spec.ProjectID, maxBytes: maxGeneratedProfileProjectIDBytes},
+		{name: "toolchain ID", value: spec.ToolchainID, maxBytes: maxGeneratedProfileToolchainIDBytes},
 		{name: "generator", value: spec.Generator, maxBytes: maxGeneratedProfileWorkspaceBytes},
 		{name: "configuration", value: spec.Configuration, maxBytes: maxGeneratedProfileWorkspaceBytes},
 	}

@@ -129,7 +129,28 @@ func (i *Inspector) Inspect(ctx context.Context) (Snapshot, error) {
 	}
 	loaded, err := i.loadConfig()
 	if err != nil {
-		return Snapshot{}, err
+		switch {
+		case errors.Is(err, workspace.ErrInvalidConfig):
+			loaded = workspace.LoadResult{
+				Config: workspace.Config{Version: 1},
+				Issues: []workspace.Issue{{
+					Code:     "workspace.invalid-config",
+					Message:  "workspace configuration is invalid",
+					Blocking: true,
+				}},
+			}
+		case errors.Is(err, workspace.ErrConfigTooLarge):
+			loaded = workspace.LoadResult{
+				Config: workspace.Config{Version: 1},
+				Issues: []workspace.Issue{{
+					Code:     "workspace.config-too-large",
+					Message:  "workspace configuration is too large",
+					Blocking: true,
+				}},
+			}
+		default:
+			return Snapshot{}, err
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return Snapshot{}, err
@@ -821,7 +842,8 @@ func issueSeverity(blocking bool) string {
 }
 
 func workspaceIssueCode(value string) string {
-	value = strings.ToUpper(strings.ReplaceAll(value, ".", "_"))
+	value = strings.NewReplacer(".", "_", "-", "_").Replace(value)
+	value = strings.ToUpper(value)
 	if value == "" {
 		return "WORKSPACE_ISSUE"
 	}

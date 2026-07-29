@@ -81,6 +81,7 @@ func resolveStandalone(ctx context.Context, runner probe.Runner, executable, sou
 	}
 	return Installation{
 		Executable: canonical,
+		Root:       filepath.Dir(canonical),
 		Version:    version,
 		Source:     source,
 		Identity:   identity,
@@ -188,6 +189,7 @@ func resolveBundle(ctx context.Context, runner probe.Runner, config ResolverConf
 	}
 	return Installation{
 		Executable:  executable,
+		Root:        installRoot,
 		Version:     version,
 		Source:      SourceBundle,
 		Identity:    identity,

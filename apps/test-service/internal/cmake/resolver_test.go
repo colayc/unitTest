@@ -59,7 +59,9 @@ func TestResolverPrefersOverrideThenBundleThenDev(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve(override) error = %v", err)
 	}
-	if installation.Source != SourceOverride || installation.Executable != canonicalPath(t, override) {
+	if installation.Source != SourceOverride ||
+		installation.Executable != canonicalPath(t, override) ||
+		installation.Root != filepath.Dir(canonicalPath(t, override)) {
 		t.Fatalf("override installation = %#v", installation)
 	}
 	runner.assertExecutables(t, canonicalPath(t, override))
@@ -75,7 +77,9 @@ func TestResolverPrefersOverrideThenBundleThenDev(t *testing.T) {
 		t.Fatalf("Resolve(bundle) error = %v", err)
 	}
 	bundleExecutable := filepath.Join(bundle, "4.3.4", "linux-x64", "cmake-4.3.4-linux-x86_64", "bin", "cmake")
-	if installation.Source != SourceBundle || installation.Executable != canonicalPath(t, bundleExecutable) {
+	if installation.Source != SourceBundle ||
+		installation.Executable != canonicalPath(t, bundleExecutable) ||
+		installation.Root != canonicalPath(t, filepath.Dir(filepath.Dir(bundleExecutable))) {
 		t.Fatalf("bundle installation = %#v", installation)
 	}
 	runner.assertExecutables(t, canonicalPath(t, bundleExecutable))
@@ -89,7 +93,9 @@ func TestResolverPrefersOverrideThenBundleThenDev(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve(dev) error = %v", err)
 	}
-	if installation.Source != SourceDev || installation.Executable != canonicalPath(t, dev) {
+	if installation.Source != SourceDev ||
+		installation.Executable != canonicalPath(t, dev) ||
+		installation.Root != filepath.Dir(canonicalPath(t, dev)) {
 		t.Fatalf("dev installation = %#v", installation)
 	}
 	runner.assertExecutables(t, canonicalPath(t, dev))

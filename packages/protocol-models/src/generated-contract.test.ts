@@ -5,6 +5,7 @@ import { ArtifactKind, MIMEType } from "./generated/artifact.js";
 import { Event, EventKind, ProtocolVersion } from "./generated/event.js";
 import { Outcome, Scenario, Status, TaskKind } from "./generated/task.js";
 import { Severity } from "./generated/diagnostic.js";
+import { CoverageDriver, Family, Generator, TArchitecture } from "./generated/workspace.js";
 import { SimulationScenarioV12, TaskKindV12, TaskStatusV12 } from "./generated/task-v1-2.js";
 import { EventKindV12, EventProtocolVersionV12, TaskEventDiagnosticSeverityV12, TaskEventNameV12, TaskOutputStreamV12, TaskStepKindV12, TaskStepStatusV12 } from "./generated/event-v1-2.js";
 import { Kind as ArtifactKindV12, MIMEType as ArtifactMIMETypeV12 } from "./generated/artifact-v1-2.js";
@@ -62,6 +63,17 @@ test("generated protocol 1.2 models expose workspace build contracts", () => {
     workspaceUri: "file:///workspace",
     workspaceGeneration: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     capabilities,
+    diagnostics: [],
+    toolchains: [{
+      toolchainId: "gcc-test",
+      family: Family.GCC,
+      version: "15.1.0",
+      targetTriple: "x86_64-linux-gnu",
+      hostArchitecture: TArchitecture.X64,
+      targetArchitecture: TArchitecture.X64,
+      generators: [Generator.Ninja],
+      capabilities: { coverageDrivers: [CoverageDriver.Gcov] }
+    }],
     projects: []
   };
   const targets: TargetList = {

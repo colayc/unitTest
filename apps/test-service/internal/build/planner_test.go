@@ -42,8 +42,8 @@ func TestPlannerBuildsValidatedConfigureAndBuildSteps(t *testing.T) {
 		"-B", fixture.profile.BinaryDir,
 		"-G", "Ninja",
 		"-DCMAKE_BUILD_TYPE=Debug",
-		"-DCMAKE_C_COMPILER=" + fixture.toolchain.CCompiler,
-		"-DCMAKE_CXX_COMPILER=" + fixture.toolchain.CXXCompiler,
+		"-DCMAKE_C_COMPILER=" + filepath.ToSlash(fixture.toolchain.CCompiler),
+		"-DCMAKE_CXX_COMPILER=" + filepath.ToSlash(fixture.toolchain.CXXCompiler),
 	}
 	if !reflect.DeepEqual(plan.Steps[0].Process.Args, wantConfigure) {
 		t.Fatalf("configure args = %#v, want %#v", plan.Steps[0].Process.Args, wantConfigure)
@@ -201,7 +201,8 @@ func newPlannerFixture(t *testing.T) plannerFixture {
 			Environment: []string{"PATH=trusted"},
 		},
 		installation: cmake.Installation{
-			Executable: cmakePath, Version: "4.3.0", Source: cmake.SourceBundle,
+			Executable: cmakePath, Root: filepath.Dir(cmakePath),
+			Version: "4.3.0", Source: cmake.SourceBundle,
 			Identity: strings.Repeat("c", 64),
 		},
 		generation: strings.Repeat("d", 64),

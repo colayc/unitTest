@@ -33,6 +33,7 @@ const (
 	maxFileAPIToolchains       = 64
 	maxFileAPICacheEntries     = 4096
 	maxCommandFragmentBytes    = 16 * 1024
+	maxFileAPIToolPathBytes    = 4096
 	fileAPIReplyReadBatchSize  = 64
 	maxFileAPIDirectoryEntries = 1024
 	maxFileAPIReplyCandidates  = 256
@@ -799,9 +800,9 @@ func (reader *fileAPIReader) assemble(
 		}
 		compilerPath := ""
 		if toolchain.Compiler.Path != "" {
-			compilerPath, err = canonicalAllowedPath(toolchain.Compiler.Path, reader.allowedRoots)
+			compilerPath, err = canonicalFileAPIToolPath(toolchain.Compiler.Path)
 			if err != nil {
-				return FileAPIReply{}, fmt.Errorf("%w: toolchain compiler path: %v", ErrFileAPIBoundary, err)
+				return FileAPIReply{}, fmt.Errorf("%w: toolchain compiler path: %v", ErrFileAPIReply, err)
 			}
 		}
 		identity, err := canonicalSHA256(struct {
@@ -837,6 +838,22 @@ func (reader *fileAPIReader) assemble(
 	}
 	result.ToolchainIDs = sortedUniqueStrings(result.ToolchainIDs)
 	return result, nil
+}
+
+// canonicalFileAPIToolPath validates and normalizes a compiler descriptor
+// without opening or statting it. Compiler executables normally live outside
+// the workspace and Service data roots; unlike CMake inputs and artifacts,
+// their File API paths are identity metadata and are never used as an
+// execution or filesystem-read authority.
+func canonicalFileAPIToolPath(raw string) (string, error) {
+	if raw == "" || strings.ContainsRune(raw, 0) || len(raw) > maxFileAPIToolPathBytes {
+		return "", errors.New("invalid tool path")
+	}
+	native := filepath.FromSlash(raw)
+	if !filepath.IsAbs(native) {
+		return "", errors.New("tool path is not absolute")
+	}
+	return canonicalPortablePath(filepath.Clean(native)), nil
 }
 
 func resolveFileAPIPath(raw, relativeRoot string, allowedRoots []workspace.Root) (string, error) {

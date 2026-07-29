@@ -349,7 +349,10 @@ test("offline preparation publishes an immutable verified bundle and exact manif
 
   const result = await prepareOffline({ outputRoot, manifest });
   const target = join(outputRoot, VERSION, "linux-x64");
+  const installRoot = join(target, manifest.archives["linux-x64"].rootDirectory);
   assert.equal(result.root, target);
+  assert.equal(result.installRoot, installRoot);
+  assert.equal(result.executable, join(installRoot, manifest.archives["linux-x64"].executable));
   assert.equal(result.reused, false);
   assert.deepEqual(await readFile(join(outputRoot, "manifest.json")), manifestBytes(manifest));
   assert.deepEqual(
@@ -465,10 +468,11 @@ test("a publish race keeps the existing valid target and discards staging", asyn
   const operations = offlineOperations({
     beforePublish: async ({ target }) => {
       racedTarget = target;
-      await mkdir(join(target, "bin"), { recursive: true });
-      await mkdir(join(target, "doc", "cmake"), { recursive: true });
-      await writeFile(join(target, archive.executable), EXECUTABLE_BYTES);
-      await writeFile(join(target, archive.licensePath), LICENSE_BYTES);
+      const installRoot = join(target, archive.rootDirectory);
+      await mkdir(join(installRoot, "bin"), { recursive: true });
+      await mkdir(join(installRoot, "doc", "cmake"), { recursive: true });
+      await writeFile(join(installRoot, archive.executable), EXECUTABLE_BYTES);
+      await writeFile(join(installRoot, archive.licensePath), LICENSE_BYTES);
       await writeFile(join(target, "race-marker"), "existing");
       await writeFile(join(target, "bundle-state.json"), `${JSON.stringify({
         schemaVersion: 1,

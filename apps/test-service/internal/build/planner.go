@@ -87,8 +87,8 @@ func configureStep(input PlanInput, sourceDir string) (task.ExecutionStep, error
 			args = append(args, "-DCMAKE_BUILD_TYPE="+input.Profile.Configuration)
 		}
 		args = append(args,
-			"-DCMAKE_C_COMPILER="+input.Toolchain.CCompiler,
-			"-DCMAKE_CXX_COMPILER="+input.Toolchain.CXXCompiler,
+			"-DCMAKE_C_COMPILER="+filepath.ToSlash(input.Toolchain.CCompiler),
+			"-DCMAKE_CXX_COMPILER="+filepath.ToSlash(input.Toolchain.CXXCompiler),
 		)
 	default:
 		return task.ExecutionStep{}, task.ErrInvalidArgument

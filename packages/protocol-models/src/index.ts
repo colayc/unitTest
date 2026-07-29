@@ -5,7 +5,19 @@ export type { TaskEvent } from "./generated/event.js";
 export type { ArtifactMetadata } from "./generated/artifact.js";
 export type { CapabilitiesV12 } from "./generated/capabilities-v1-2.js";
 export type { Diagnostic } from "./generated/diagnostic.js";
-export type { WorkspaceSnapshot } from "./generated/workspace.js";
+export type {
+  BuildProfileElement,
+  ToolchainCapabilities,
+  ToolchainElement,
+  WorkspaceSnapshot
+} from "./generated/workspace.js";
+export {
+  CoverageDriver,
+  Family,
+  Generator,
+  Origin,
+  TArchitecture
+} from "./generated/workspace.js";
 export type { TargetList } from "./generated/target-list.js";
 export type { TaskSnapshotV12 } from "./generated/task-v1-2.js";
 export type { TaskEventV12 } from "./generated/event-v1-2.js";

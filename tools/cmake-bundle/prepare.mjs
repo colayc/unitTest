@@ -37,6 +37,7 @@ const supportedKeys = ["linux-x64", "win32-x64"];
 const maximumArchiveBytes = 512 * 1024 * 1024;
 const maximumArchiveListingBytes = 64 * 1024 * 1024;
 const maximumCapabilitiesBytes = 1024 * 1024;
+const downloadTimeoutMs = 5 * 60 * 1000;
 const redirectCodes = new Set([301, 302, 303, 307, 308]);
 const digestPattern = /^[0-9a-f]{64}$/;
 
@@ -564,8 +565,12 @@ async function verifyExistingBundle(target, key, manifest, operations) {
   } catch (error) {
     throw new Error("existing CMake bundle state is invalid", { cause: error });
   }
-  await verifyInstalledFiles(target, archive.installedFiles);
-  const capabilities = await operations.readCapabilities(join(target, ...archive.executable.split("/")));
+  const installRoot = join(target, archive.rootDirectory);
+  await auditDirectoryRoot(installRoot);
+  await verifyInstalledFiles(installRoot, archive.installedFiles);
+  const capabilities = await operations.readCapabilities(
+    join(installRoot, ...archive.executable.split("/")),
+  );
   verifyCapabilities(capabilities, manifest.cmakeVersion);
 }
 
@@ -654,12 +659,16 @@ async function prepareBundleFromManifest({
     );
     verifyCapabilities(capabilities, manifest.cmakeVersion);
 
+    const publishRoot = join(staging, "publish");
+    await mkdir(publishRoot, { mode: 0o700 });
+    await ops.renameDirectory(stagedRoot, join(publishRoot, archive.rootDirectory));
     const stateBytes = Buffer.from(`${JSON.stringify(bundleState(key, manifest), null, 2)}\n`);
-    await writeDurableFile(join(stagedRoot, "bundle-state.json"), stateBytes);
-    await syncDirectory(stagedRoot);
-    await ops.beforePublish?.({ stagedRoot, target });
+    await writeDurableFile(join(publishRoot, "bundle-state.json"), stateBytes);
+    await syncDirectory(join(publishRoot, archive.rootDirectory));
+    await syncDirectory(publishRoot);
+    await ops.beforePublish?.({ stagedRoot: publishRoot, target });
     try {
-      await ops.renameDirectory(stagedRoot, target);
+      await ops.renameDirectory(publishRoot, target);
       await syncDirectory(versionRoot);
       return bundleResult(target, key, manifest, false);
     } catch (error) {
@@ -676,12 +685,14 @@ async function prepareBundleFromManifest({
 
 function bundleResult(root, key, manifest, reused) {
   const archive = manifest.archives[key];
+  const installRoot = join(root, archive.rootDirectory);
   return {
     root,
+    installRoot,
     key,
     cmakeVersion: manifest.cmakeVersion,
-    executable: join(root, ...archive.executable.split("/")),
-    licensePath: join(root, ...archive.licensePath.split("/")),
+    executable: join(installRoot, ...archive.executable.split("/")),
+    licensePath: join(installRoot, ...archive.licensePath.split("/")),
     reused,
   };
 }
@@ -767,7 +778,7 @@ async function downloadArchive(lockedURL, destination) {
     validateDistributionURL(current, lockedURL);
     const response = await fetch(current, {
       redirect: "manual",
-      signal: AbortSignal.timeout(120_000),
+      signal: AbortSignal.timeout(downloadTimeoutMs),
     });
     if (redirectCodes.has(response.status)) {
       const location = response.headers.get("location");

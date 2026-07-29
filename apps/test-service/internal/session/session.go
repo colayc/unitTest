@@ -16,6 +16,7 @@ import (
 	"unit-test-ide.local/test-service/internal/artifactstore"
 	"unit-test-ide.local/test-service/internal/build"
 	"unit-test-ide.local/test-service/internal/cmake"
+	"unit-test-ide.local/test-service/internal/diagnostic"
 	"unit-test-ide.local/test-service/internal/discovery"
 	"unit-test-ide.local/test-service/internal/eventbroker"
 	"unit-test-ide.local/test-service/internal/protocol"
@@ -26,6 +27,7 @@ import (
 	taskv12 "unit-test-ide.local/test-service/internal/protocolmodel/v1_2/task"
 	workspacev12 "unit-test-ide.local/test-service/internal/protocolmodel/v1_2/workspace"
 	"unit-test-ide.local/test-service/internal/task"
+	"unit-test-ide.local/test-service/internal/toolchain"
 )
 
 const (
@@ -626,12 +628,36 @@ func toProtocolWorkspace(value discovery.Snapshot) (workspacev12.WorkspaceSnapsh
 	result := workspacev12.WorkspaceSnapshot{
 		WorkspaceURI:        value.WorkspaceURI,
 		WorkspaceGeneration: value.Generation,
-		Capabilities: workspacev12.Capabilities{
+		Capabilities: workspacev12.WorkspaceSnapshotCapabilities{
 			WorkspaceInspect: true,
 			TargetList:       true,
 			CmakeBuild:       true,
 		},
-		Projects: make([]workspacev12.ProjectElement, len(value.Projects)),
+		Toolchains:  []workspacev12.ToolchainElement{},
+		Diagnostics: []workspacev12.DiagnosticElement{},
+		Projects:    make([]workspacev12.ProjectElement, len(value.Projects)),
+	}
+	toolchainIDs := make(map[string]struct{}, len(value.Toolchains))
+	for _, instance := range value.Toolchains {
+		projected, err := toProtocolToolchain(instance)
+		if err != nil {
+			return workspacev12.WorkspaceSnapshot{}, err
+		}
+		if _, duplicate := toolchainIDs[instance.ID]; duplicate {
+			return workspacev12.WorkspaceSnapshot{}, errors.New("duplicate workspace toolchain")
+		}
+		toolchainIDs[instance.ID] = struct{}{}
+		result.Toolchains = append(result.Toolchains, projected)
+	}
+	if len(value.Diagnostics) > 4096 {
+		return workspacev12.WorkspaceSnapshot{}, errors.New("workspace diagnostic limit exceeded")
+	}
+	for _, value := range value.Diagnostics {
+		projected, err := toProtocolWorkspaceDiagnostic(value)
+		if err != nil {
+			return workspacev12.WorkspaceSnapshot{}, err
+		}
+		result.Diagnostics = append(result.Diagnostics, projected)
 	}
 	for index, project := range value.Projects {
 		if !validProjectID(project.ID) || project.SourceDir == "" {
@@ -653,14 +679,158 @@ func toProtocolWorkspace(value discovery.Snapshot) (workspacev12.WorkspaceSnapsh
 			if !validHash(profile.ID) {
 				return workspacev12.WorkspaceSnapshot{}, errors.New("invalid build profile")
 			}
-			projected.BuildProfiles = append(projected.BuildProfiles, workspacev12.BuildProfileElement{
-				BuildProfileID: profile.ID,
-				Name:           profileDisplayName(profile),
-			})
+			profileProjection, err := toProtocolBuildProfile(profile, toolchainIDs)
+			if err != nil {
+				return workspacev12.WorkspaceSnapshot{}, err
+			}
+			projected.BuildProfiles = append(projected.BuildProfiles, profileProjection)
 		}
 		result.Projects[index] = projected
 	}
 	return result, nil
+}
+
+func toProtocolWorkspaceDiagnostic(
+	value diagnostic.Diagnostic,
+) (workspacev12.DiagnosticElement, error) {
+	if (value.Severity != "error" && value.Severity != "warning" && value.Severity != "info") ||
+		!boundedProtocolString(value.Code, 256) ||
+		!boundedProtocolString(value.Message, 1024*1024) {
+		return workspacev12.DiagnosticElement{}, errors.New("invalid workspace diagnostic")
+	}
+	result := workspacev12.DiagnosticElement{
+		Severity: workspacev12.Severity(value.Severity),
+		Code:     value.Code,
+		Message:  value.Message,
+	}
+	if value.FileURI != "" {
+		parsed, err := url.Parse(value.FileURI)
+		if err != nil || parsed.Scheme == "" {
+			return workspacev12.DiagnosticElement{}, errors.New("invalid workspace diagnostic URI")
+		}
+		result.SourceURI = &value.FileURI
+	}
+	if value.Range != nil {
+		line := int64(value.Range.Start.Line + 1)
+		column := int64(value.Range.Start.Character + 1)
+		if line < 1 || column < 1 {
+			return workspacev12.DiagnosticElement{}, errors.New("invalid workspace diagnostic range")
+		}
+		result.Line = &line
+		result.Column = &column
+	}
+	return result, nil
+}
+
+func toProtocolBuildProfile(
+	profile cmake.BuildProfile,
+	toolchainIDs map[string]struct{},
+) (workspacev12.BuildProfileElement, error) {
+	name := profileDisplayName(profile)
+	if profile.Origin != "preset" && profile.Origin != "generated" ||
+		!boundedProtocolString(name, 256) || !validProtocolGenerator(profile.Generator) {
+		return workspacev12.BuildProfileElement{}, errors.New("invalid build profile metadata")
+	}
+	result := workspacev12.BuildProfileElement{
+		BuildProfileID: profile.ID,
+		Name:           name,
+		Origin:         workspacev12.Origin(profile.Origin),
+		Generator:      workspacev12.Generator(profile.Generator),
+	}
+	if profile.Configuration != "" {
+		if !boundedProtocolString(profile.Configuration, 256) {
+			return workspacev12.BuildProfileElement{}, errors.New("invalid build profile configuration")
+		}
+		result.Configuration = &profile.Configuration
+	}
+	if profile.ToolchainID != "" {
+		if !validProtocolToolchainID(profile.ToolchainID) {
+			return workspacev12.BuildProfileElement{}, errors.New("invalid build profile toolchain")
+		}
+		if _, exists := toolchainIDs[profile.ToolchainID]; !exists {
+			return workspacev12.BuildProfileElement{}, errors.New("build profile toolchain is absent")
+		}
+		result.ToolchainID = &profile.ToolchainID
+	} else if profile.Origin == "generated" {
+		return workspacev12.BuildProfileElement{}, errors.New("generated build profile has no toolchain")
+	}
+	return result, nil
+}
+
+func toProtocolToolchain(instance toolchain.Instance) (workspacev12.ToolchainElement, error) {
+	if !validProtocolToolchainID(instance.ID) ||
+		!validProtocolToolchainFamily(instance.Family) ||
+		!boundedProtocolString(instance.Version, 128) ||
+		!boundedProtocolString(instance.TargetTriple, 256) ||
+		!validProtocolArchitecture(instance.HostArchitecture) ||
+		!validProtocolArchitecture(instance.TargetArchitecture) ||
+		len(instance.Generators) > 4 {
+		return workspacev12.ToolchainElement{}, errors.New("invalid workspace toolchain")
+	}
+	generators := make([]workspacev12.Generator, len(instance.Generators))
+	seenGenerators := make(map[string]struct{}, len(instance.Generators))
+	for index, generator := range instance.Generators {
+		if !validProtocolGenerator(generator) {
+			return workspacev12.ToolchainElement{}, errors.New("invalid workspace toolchain generator")
+		}
+		if _, duplicate := seenGenerators[generator]; duplicate {
+			return workspacev12.ToolchainElement{}, errors.New("duplicate workspace toolchain generator")
+		}
+		seenGenerators[generator] = struct{}{}
+		generators[index] = workspacev12.Generator(generator)
+	}
+	coverage := []workspacev12.CoverageDriver{}
+	if instance.Coverage.GCov != "" {
+		coverage = append(coverage, workspacev12.Gcov)
+	}
+	if instance.Coverage.LLVMProfdata != "" && instance.Coverage.LLVMCov != "" {
+		coverage = append(coverage, workspacev12.LlvmCov)
+	}
+	return workspacev12.ToolchainElement{
+		ToolchainID:        instance.ID,
+		Family:             workspacev12.Family(instance.Family),
+		Version:            instance.Version,
+		TargetTriple:       instance.TargetTriple,
+		HostArchitecture:   workspacev12.TArchitecture(instance.HostArchitecture),
+		TargetArchitecture: workspacev12.TArchitecture(instance.TargetArchitecture),
+		Generators:         generators,
+		Capabilities:       workspacev12.ToolchainCapabilities{CoverageDrivers: coverage},
+	}, nil
+}
+
+func boundedProtocolString(value string, maximumRunes int) bool {
+	return value != "" && utf8.ValidString(value) && utf8.RuneCountInString(value) <= maximumRunes
+}
+
+func validProtocolToolchainID(value string) bool {
+	if len(value) == 0 || len(value) > 128 {
+		return false
+	}
+	for _, character := range value {
+		if character >= 'a' && character <= 'z' ||
+			character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' ||
+			character == '.' || character == '_' || character == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validProtocolToolchainFamily(value toolchain.Family) bool {
+	return value == toolchain.FamilyGCC || value == toolchain.FamilyClang ||
+		value == toolchain.FamilyMSVC || value == toolchain.FamilyClangCL
+}
+
+func validProtocolArchitecture(value string) bool {
+	return value == "x86" || value == "x64" || value == "arm64"
+}
+
+func validProtocolGenerator(value string) bool {
+	return value == "Ninja" || value == "Unix Makefiles" ||
+		value == "Visual Studio 17 2022" || value == "Visual Studio 18 2026" ||
+		value == "NMake Makefiles"
 }
 
 func profileDisplayName(profile cmake.BuildProfile) string {

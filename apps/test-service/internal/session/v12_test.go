@@ -11,11 +11,13 @@ import (
 
 	"unit-test-ide.local/test-service/internal/build"
 	"unit-test-ide.local/test-service/internal/cmake"
+	"unit-test-ide.local/test-service/internal/diagnostic"
 	"unit-test-ide.local/test-service/internal/discovery"
 	"unit-test-ide.local/test-service/internal/eventbroker"
 	"unit-test-ide.local/test-service/internal/protocol"
 	"unit-test-ide.local/test-service/internal/session"
 	"unit-test-ide.local/test-service/internal/task"
+	"unit-test-ide.local/test-service/internal/toolchain"
 	"unit-test-ide.local/test-service/internal/workspace"
 )
 
@@ -158,7 +160,20 @@ func TestSessionVersion12RoutesWorkspaceInspectTargetsAndBuild(t *testing.T) {
 			WorkspaceURI: "file:///workspace",
 			Generation:   generation,
 			Projects:     []workspace.ProjectConfig{{ID: "core", SourceDir: "src/core"}},
-			Profiles:     []cmake.BuildProfile{{ID: profileID, ProjectID: "core", Configuration: "Debug"}},
+			Profiles: []cmake.BuildProfile{{
+				ID: profileID, ProjectID: "core", Origin: "generated",
+				ToolchainID: "gcc-test", Generator: "Ninja", Configuration: "Debug",
+			}},
+			Toolchains: []toolchain.Instance{{
+				ID: "gcc-test", Family: toolchain.FamilyGCC, Version: "15.1.0",
+				TargetTriple: "x86_64-linux-gnu", HostArchitecture: "x64", TargetArchitecture: "x64",
+				Generators: []string{"Ninja", "Unix Makefiles"},
+				Coverage:   toolchain.CoverageCapability{GCov: "/usr/bin/gcov"},
+			}},
+			Diagnostics: []diagnostic.Diagnostic{{
+				Severity: "warning", Code: "TOOLCHAIN_NOTICE",
+				Message: "toolchain notice", FileURI: "file:///workspace/CMakeLists.txt",
+			}},
 		},
 		targets: []cmake.Target{{ID: targetID, Name: "unit-tests"}},
 		startResult: task.Task{
@@ -173,7 +188,11 @@ func TestSessionVersion12RoutesWorkspaceInspectTargetsAndBuild(t *testing.T) {
 	inspect := s.Handle(context.Background(), requestVersion(t, protocol.Version12, "workspace/inspect", map[string]any{}))
 	inspectJSON, _ := json.Marshal(inspect.Payload)
 	if inspect.Kind != "response" || !strings.Contains(string(inspectJSON), `"sourceUri":"file:///workspace/src/core"`) ||
-		!strings.Contains(string(inspectJSON), `"buildProfileId":"`+profileID+`"`) {
+		!strings.Contains(string(inspectJSON), `"buildProfileId":"`+profileID+`"`) ||
+		!strings.Contains(string(inspectJSON), `"family":"gcc"`) ||
+		!strings.Contains(string(inspectJSON), `"toolchainId":"gcc-test"`) ||
+		!strings.Contains(string(inspectJSON), `"code":"TOOLCHAIN_NOTICE"`) ||
+		strings.Contains(string(inspectJSON), "/usr/bin/gcov") {
 		t.Fatalf("inspect = %#v (%s)", inspect, inspectJSON)
 	}
 

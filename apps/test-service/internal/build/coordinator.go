@@ -94,7 +94,7 @@ func (c *Coordinator) Targets(
 	ctx context.Context,
 	request TargetsRequest,
 ) ([]cmake.Target, error) {
-	snapshot, project, profile, _, err := c.resolve(ctx, request.WorkspaceGeneration, request.ProjectID, request.BuildProfileID)
+	snapshot, project, profile, instance, err := c.resolve(ctx, request.WorkspaceGeneration, request.ProjectID, request.BuildProfileID)
 	if err != nil {
 		return nil, err
 	}
@@ -107,7 +107,7 @@ func (c *Coordinator) Targets(
 	if err != nil {
 		return nil, err
 	}
-	reply, err := c.readReply(profile)
+	reply, err := c.readReply(profile, instance)
 	if err != nil {
 		return nil, ErrConfigureRequired
 	}
@@ -222,7 +222,7 @@ func (c *Coordinator) prepare(
 		}
 	}()
 
-	reply, replyErr := c.readReply(profile)
+	reply, replyErr := c.readReply(profile, instance)
 	targets := []cmake.Target{}
 	if replyErr == nil {
 		targets = reply.Targets
@@ -398,10 +398,8 @@ func (c *Coordinator) configureState(
 		ProjectID:           project.ID, Profile: profile, ToolchainID: instance.ID,
 		CMakeIdentity:  c.config.Installation.Identity,
 		BuildDirectory: buildDirectory,
-		AllowedRoots: []string{
-			c.config.WorkspaceRoot.NativePath, c.config.ServiceDataRoot,
-		},
-		TargetIDs: append([]string{}, targetIDs...), TargetNames: targetNames,
+		AllowedRoots:   c.fileAPIAllowedRoots(instance),
+		TargetIDs:      append([]string{}, targetIDs...), TargetNames: targetNames,
 	})
 	if err != nil {
 		return nil, task.ErrInvalidArgument
@@ -463,12 +461,58 @@ func (c *Coordinator) resolve(
 	return snapshot, project, profile, instance, nil
 }
 
-func (c *Coordinator) readReply(profile cmake.BuildProfile) (cmake.FileAPIReply, error) {
+func (c *Coordinator) readReply(
+	profile cmake.BuildProfile,
+	instance toolchain.Instance,
+) (cmake.FileAPIReply, error) {
 	return c.dependencies.readReply(
 		profile.BinaryDir,
-		[]string{c.config.WorkspaceRoot.NativePath, c.config.ServiceDataRoot},
+		c.fileAPIAllowedRoots(instance),
 		profile,
 	)
+}
+
+func (c *Coordinator) fileAPIAllowedRoots(instance toolchain.Instance) []string {
+	candidates := []string{
+		c.config.WorkspaceRoot.NativePath,
+		c.config.ServiceDataRoot,
+		c.config.Installation.Root,
+	}
+	if c.config.Installation.Root == "" {
+		candidates[2] = filepath.Dir(c.config.Installation.Executable)
+	}
+	if instance.CCompiler != "" {
+		candidates = append(candidates, filepath.Dir(instance.CCompiler))
+	}
+	if instance.CXXCompiler != "" {
+		candidates = append(candidates, filepath.Dir(instance.CXXCompiler))
+	}
+	if instance.Sysroot != "" {
+		candidates = append(candidates, instance.Sysroot)
+	}
+	result := make([]string, 0, len(candidates))
+	seen := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		clean := filepath.Clean(candidate)
+		key := canonicalPortablePathForBoundary(clean)
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, clean)
+	}
+	return result
+}
+
+func canonicalPortablePathForBoundary(value string) string {
+	value = filepath.ToSlash(value)
+	if filepath.Separator == '\\' {
+		value = strings.ToLower(value)
+	}
+	return value
 }
 
 func (c *Coordinator) ensureBuildDirectory(path string) error {

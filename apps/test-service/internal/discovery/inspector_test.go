@@ -285,6 +285,43 @@ func TestInspectorPropagatesFoundationalAndCancellationErrors(t *testing.T) {
 	}
 }
 
+func TestInspectorProjectsInvalidWorkspaceConfigurationAsBlockingDiagnostic(t *testing.T) {
+	root := openProjectRoot(t, ".")
+	for name, test := range map[string]struct {
+		loadErr error
+		code    string
+	}{
+		"invalid": {
+			loadErr: fmt.Errorf("decode workspace: %w", workspace.ErrInvalidConfig),
+			code:    "WORKSPACE_INVALID_CONFIG",
+		},
+		"too-large": {
+			loadErr: fmt.Errorf("read workspace: %w", workspace.ErrConfigTooLarge),
+			code:    "WORKSPACE_CONFIG_TOO_LARGE",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			inspector := newTestInspector(t, root, fakeToolchainDiscovery{}, inspectorDependencies{
+				loadConfig: func(workspace.Root) (workspace.LoadResult, error) {
+					return workspace.LoadResult{}, test.loadErr
+				},
+				resolve:         successfulResolve(testInstallation()),
+				discoverPresets: noPresetDiscovery,
+			})
+			snapshot, err := inspector.Inspect(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(snapshot.Projects) != 0 || len(snapshot.Profiles) != 0 ||
+				len(snapshot.Diagnostics) != 1 ||
+				snapshot.Diagnostics[0].Severity != "error" ||
+				snapshot.Diagnostics[0].Code != test.code {
+				t.Fatalf("snapshot = %#v", snapshot)
+			}
+		})
+	}
+}
+
 func TestInspectorKeepsValidProjectWhenAnotherProjectIsInvalid(t *testing.T) {
 	root := openProjectRoot(t, "good")
 	config := workspace.Config{

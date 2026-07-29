@@ -169,6 +169,21 @@ export function decodeWorkspaceSnapshot(value: unknown): WorkspaceSnapshot {
     workspaceUri: wire.workspaceUri,
     workspaceGeneration: wire.workspaceGeneration,
     capabilities: { ...record(wire.capabilities, "workspace capabilities") },
+    diagnostics: (wire.diagnostics as unknown[]).map((diagnostic) => ({
+      ...record(diagnostic, "workspace diagnostic")
+    })),
+    toolchains: (wire.toolchains as unknown[]).map((toolchainValue) => {
+      const toolchain = record(toolchainValue, "workspace toolchain");
+      const capabilities = record(toolchain.capabilities, "workspace toolchain capabilities");
+      return {
+        ...toolchain,
+        generators: [...(toolchain.generators as unknown[])],
+        capabilities: {
+          ...capabilities,
+          coverageDrivers: [...(capabilities.coverageDrivers as unknown[])]
+        }
+      };
+    }),
     projects: (wire.projects as unknown[]).map((projectValue) => {
       const project = record(projectValue, "workspace project");
       return {

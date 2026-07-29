@@ -174,10 +174,32 @@ test("protocol 1.2 client routes workspace, target, and CMake build APIs", async
         workspaceUri: "file:///workspace",
         workspaceGeneration: WORKSPACE_GENERATION,
         capabilities: { workspaceInspect: true, targetList: true, cmakeBuild: true },
+        diagnostics: [{
+          severity: "warning",
+          code: "TOOLCHAIN_NOT_FOUND",
+          message: "toolchain unavailable"
+        }],
+        toolchains: [{
+          toolchainId: "gcc-test",
+          family: "gcc",
+          version: "15.1.0",
+          targetTriple: "x86_64-linux-gnu",
+          hostArchitecture: "x64",
+          targetArchitecture: "x64",
+          generators: ["Ninja"],
+          capabilities: { coverageDrivers: ["gcov"] }
+        }],
         projects: [{
           projectId: "core",
           sourceUri: "file:///workspace/core",
-          buildProfiles: [{ buildProfileId: BUILD_PROFILE_ID, name: "Debug" }]
+          buildProfiles: [{
+            buildProfileId: BUILD_PROFILE_ID,
+            name: "Debug",
+            origin: "generated",
+            toolchainId: "gcc-test",
+            generator: "Ninja",
+            configuration: "Debug"
+          }]
         }]
       }, "1.2");
     }
@@ -231,6 +253,9 @@ test("protocol 1.2 client routes workspace, target, and CMake build APIs", async
   });
   const artifacts = await fixture.client.listArtifacts(TASK_ID);
   assert.equal(workspace.projects[0]?.sourceUri, "file:///workspace/core");
+  assert.equal(workspace.diagnostics[0]?.code, "TOOLCHAIN_NOT_FOUND");
+  assert.equal(workspace.toolchains[0]?.family, "gcc");
+  assert.deepEqual(workspace.toolchains[0]?.capabilities.coverageDrivers, ["gcov"]);
   assert.equal(targets.buildProfileId, BUILD_PROFILE_ID);
   assert.equal(build.kind, "cmakeBuild");
   assert.ok(build.createdAt instanceof Date);

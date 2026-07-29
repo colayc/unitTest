@@ -413,6 +413,17 @@ test("protocol 1.2 refuses execution details and native workspace paths", async 
   for (const field of ["compilerPath", "binaryDirectory", "serviceDataPath"]) {
     assert.equal(validate({ ...workspace, payload: { ...workspace.payload, [field]: "forbidden" } }), false, field);
   }
+
+  const safeToolchain = workspace.payload.toolchains[0];
+  for (const field of ["cCompiler", "cxxCompiler", "environment", "sysroot", "coverageToolPath"]) {
+    assert.equal(validate({
+      ...workspace,
+      payload: {
+        ...workspace.payload,
+        toolchains: [{ ...safeToolchain, [field]: "forbidden" }]
+      }
+    }), false, `toolchain.${field}`);
+  }
 });
 
 test("protocol 1.2 generates TargetList from the isolated workspace contract", async () => {

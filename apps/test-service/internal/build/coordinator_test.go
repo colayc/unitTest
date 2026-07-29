@@ -55,6 +55,15 @@ func TestCoordinatorPlansConfigureThenSkipsItForUnchangedSuccessfulState(t *test
 	if started.ID == "" || len(fixture.starter.request.Plan.Steps) != 2 {
 		t.Fatalf("first task = %#v, plan = %#v", started, fixture.starter.request.Plan)
 	}
+	for _, want := range []string{
+		fixture.root.NativePath,
+		fixture.installation.Root,
+		filepath.Dir(fixture.toolchain.CXXCompiler),
+	} {
+		if !containsCanonicalBoundaryPath(fixture.reader.allowedRoots, want) {
+			t.Fatalf("File API allowed roots = %#v, missing trusted root %q", fixture.reader.allowedRoots, want)
+		}
+	}
 	var persistedRequest struct {
 		TargetIDs []string `json:"targetIds"`
 		TimeoutMS int64    `json:"timeoutMs"`
@@ -330,10 +339,26 @@ func (f *fakeConfigurationStore) PutBuildConfiguration(
 }
 
 type fakeFileAPIReader struct {
-	reply cmake.FileAPIReply
-	err   error
+	reply        cmake.FileAPIReply
+	err          error
+	allowedRoots []string
 }
 
-func (f *fakeFileAPIReader) Read(string, []string, ...cmake.BuildProfile) (cmake.FileAPIReply, error) {
+func (f *fakeFileAPIReader) Read(
+	_ string,
+	allowedRoots []string,
+	_ ...cmake.BuildProfile,
+) (cmake.FileAPIReply, error) {
+	f.allowedRoots = append([]string(nil), allowedRoots...)
 	return f.reply, f.err
+}
+
+func containsCanonicalBoundaryPath(values []string, want string) bool {
+	want = canonicalPortablePathForBoundary(filepath.Clean(want))
+	for _, value := range values {
+		if canonicalPortablePathForBoundary(filepath.Clean(value)) == want {
+			return true
+		}
+	}
+	return false
 }

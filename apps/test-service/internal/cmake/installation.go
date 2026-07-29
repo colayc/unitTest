@@ -8,6 +8,7 @@ const (
 
 type Installation struct {
 	Executable  string
+	Root        string
 	Version     string
 	Source      string
 	Identity    string

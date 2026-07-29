@@ -103,7 +103,7 @@ func TestNewGeneratedProfileRejectsInvalidSemanticFields(t *testing.T) {
 		set      func(*GeneratedProfileSpec, string)
 	}{
 		{"project", 64, func(spec *GeneratedProfileSpec, value string) { spec.ProjectID = value }},
-		{"toolchain", 64, func(spec *GeneratedProfileSpec, value string) { spec.ToolchainID = value }},
+		{"toolchain", 128, func(spec *GeneratedProfileSpec, value string) { spec.ToolchainID = value }},
 		{"generator", 256 * 1024, func(spec *GeneratedProfileSpec, value string) { spec.Generator = value }},
 		{"configuration", 256 * 1024, func(spec *GeneratedProfileSpec, value string) { spec.Configuration = value }},
 	}
@@ -134,6 +134,22 @@ func TestNewGeneratedProfileRejectsInvalidSemanticFields(t *testing.T) {
 				t.Fatalf("NewGeneratedProfile() = %#v, want error", profile)
 			}
 		})
+	}
+}
+
+func TestNewGeneratedProfileAcceptsAutomaticToolchainID(t *testing.T) {
+	profile, err := NewGeneratedProfile(GeneratedProfileSpec{
+		ProjectID:     "root",
+		ToolchainID:   "msvc-" + strings.Repeat("a", 64),
+		Generator:     "Visual Studio 17 2022",
+		Configuration: "Debug",
+		BuildRoot:     t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("NewGeneratedProfile(automatic toolchain ID) error = %v", err)
+	}
+	if profile.ToolchainID != "msvc-"+strings.Repeat("a", 64) {
+		t.Fatalf("ToolchainID = %q", profile.ToolchainID)
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 	"unit-test-ide.local/test-service/internal/artifactstore"
 	"unit-test-ide.local/test-service/internal/build"
 	"unit-test-ide.local/test-service/internal/cmake"
+	"unit-test-ide.local/test-service/internal/diagnostic"
 	"unit-test-ide.local/test-service/internal/discovery"
 	"unit-test-ide.local/test-service/internal/eventbroker"
 	"unit-test-ide.local/test-service/internal/instance"
@@ -25,6 +26,8 @@ import (
 	"unit-test-ide.local/test-service/internal/processcontrol"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/taskstore"
+	"unit-test-ide.local/test-service/internal/toolchain"
+	"unit-test-ide.local/test-service/internal/workspace"
 )
 
 func TestUntrustedRuntimeAllowsNoWorkspaceMethods(t *testing.T) {
@@ -94,6 +97,61 @@ func TestTrustedRuntimeDelegatesWorkspaceMethodsToCoordinator(t *testing.T) {
 		fake.config.Configurations == nil || fake.config.Locks == nil ||
 		fake.config.ServiceDataRoot == "" {
 		t.Fatalf("Coordinator config = %#v", fake.config)
+	}
+}
+
+func TestTrustedRuntimeKeepsInvalidWorkspaceAvailableForInspectorDiagnostics(t *testing.T) {
+	base := t.TempDir()
+	workspaceRoot := filepath.Join(base, "workspace")
+	if err := os.MkdirAll(workspaceRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	deps := testDependencies(&recordingRunner{}, nil)
+	deps.loadWorkspace = func(workspace.Root) (workspace.LoadResult, error) {
+		return workspace.LoadResult{}, workspace.ErrInvalidConfig
+	}
+	deps.resolveCMake = func(context.Context, probe.Runner, cmake.ResolverConfig) (cmake.Installation, error) {
+		return cmake.Installation{
+			Executable: os.Args[0], Root: filepath.Dir(os.Args[0]),
+			Identity: strings.Repeat("a", 64), Version: "test", Source: cmake.SourceDev,
+		}, nil
+	}
+	var manual []workspace.ToolchainConfig
+	newRegistry := deps.newRegistry
+	deps.newRegistry = func(
+		platform string,
+		runner probe.Runner,
+		configured []workspace.ToolchainConfig,
+	) (*toolchain.Registry, error) {
+		manual = append([]workspace.ToolchainConfig(nil), configured...)
+		return newRegistry(platform, runner, configured)
+	}
+	fake := &fakeRuntimeCoordinator{
+		snapshot: discovery.Snapshot{Diagnostics: []diagnostic.Diagnostic{{
+			Source: "workspace", Severity: "error", Code: "WORKSPACE_INVALID_CONFIG",
+			Message: "Workspace configuration is invalid",
+		}}},
+	}
+	deps.newCoordinator = func(build.CoordinatorConfig) (runtimeCoordinator, error) {
+		return fake, nil
+	}
+	active, err := Open(Config{
+		DataDir: filepath.Join(base, "data"), ServiceExecutable: os.Args[0],
+		WorkspaceRoot: workspaceRoot, TrustedWorkspace: true,
+		DevCMakeExecutable: os.Args[0], Platform: platformForTest(),
+		dependencies: deps,
+	})
+	if err != nil {
+		t.Fatalf("Open() rejected invalid workspace before Inspector could report it: %v", err)
+	}
+	t.Cleanup(func() { _ = active.Close() })
+	if len(manual) != 0 {
+		t.Fatalf("invalid workspace supplied manual toolchains: %#v", manual)
+	}
+	snapshot, err := active.InspectWorkspace(context.Background())
+	if err != nil || len(snapshot.Diagnostics) != 1 ||
+		snapshot.Diagnostics[0].Code != "WORKSPACE_INVALID_CONFIG" {
+		t.Fatalf("InspectWorkspace() = %#v, %v", snapshot, err)
 	}
 }
 

@@ -362,6 +362,26 @@ func TestFileAPIToolchainsVersion11AcceptsOptionalCommandFragmentForCompilerFami
 	}
 }
 
+func TestFileAPIToolchainCompilerPathAllowsBoundedExternalIdentityMetadata(t *testing.T) {
+	fixture := newFileAPIReplyFixture(t)
+	externalCompiler := filepath.Join(t.TempDir(), "toolchain", "cxx")
+	mutateJSONFile(t, filepath.Join(fixture.replyDir, "toolchains-v1.json"), func(value map[string]any) {
+		toolchains := value["toolchains"].([]any)
+		toolchains[0].(map[string]any)["compiler"].(map[string]any)["path"] =
+			filepath.ToSlash(externalCompiler)
+	})
+	reply := readWithFixture(t, fixture)
+	if len(reply.ToolchainIDs) == 0 {
+		t.Fatal("external compiler identity metadata produced no toolchain identity")
+	}
+
+	mutateJSONFile(t, filepath.Join(fixture.replyDir, "toolchains-v1.json"), func(value map[string]any) {
+		toolchains := value["toolchains"].([]any)
+		toolchains[0].(map[string]any)["compiler"].(map[string]any)["path"] = "relative/cxx"
+	})
+	expectFileAPIReadError(t, fixture)
+}
+
 func TestFileAPIToolchainsDeduplicateEquivalentLanguageAndRejectConflict(t *testing.T) {
 	t.Run("equivalent duplicate", func(t *testing.T) {
 		fixture := newFileAPIReplyFixture(t)

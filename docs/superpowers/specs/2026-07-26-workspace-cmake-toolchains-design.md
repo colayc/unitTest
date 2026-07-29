@@ -295,6 +295,8 @@ Build Profile ID 由 project、origin、Preset 或生成配置、toolchain ident
 
 每个 build directory 使用进程内互斥与文件锁双重保护，避免并发 Service 或并发任务同时 configure/build 同一目录。
 
+Windows generated profile 传给 CMake 的 compiler path 统一规范化为 `/` 分隔符，避免 CMake 生成的内部脚本把 `\P` 等片段解释为转义。Native E2E 的短生命周期 Service data root 使用受控短目录键，为 Visual Studio generator 的 `CMakeScratch/TryCompile` 和 MSBuild `.tlog` 保留传统 260 字符路径预算；workspace 本身仍覆盖空格与 Unicode。正式客户端同样必须把 Service data root 放在短、固定、owner-only 的产品目录。
+
 ## 10. Workspace Generation 与 Configure Fingerprint
 
 `workspace/inspect` 返回 `workspaceGeneration`。它是以下规范化信息的 SHA-256：
@@ -346,6 +348,12 @@ configure 成功后：
 3. 读取 projects、configurations、targets、source/build path 和实际 toolchain。
 4. 把原生 target name 映射为稳定的 `targetId`。
 5. 保存用于 configure invalidation 的 CMake input 信息。
+
+File API 路径按用途划分边界：
+
+- reply、target、artifact、cache 和需要 snapshot 的 CMake input 必须位于 workspace、Service data root、已校验的 bundled CMake install root，或当前 verified toolchain 的 compiler/sysroot root；
+- compiler path 是 toolchain identity metadata，允许位于 workspace 外，但只接受有界的规范绝对路径；解析器不打开它，也不因此授予执行或任意文件读取权限；
+- CMake executable 的执行权限仍只来自 Resolver 固定的 `Installation`，File API 不能新增 executable authority。
 
 `cmake/targets/list` 只读取最近一次成功 configure 的有效 File API reply，不隐式执行项目代码。如果尚未 configure，返回 `CONFIGURE_REQUIRED`。
 
@@ -513,6 +521,10 @@ Diagnostic 数量不替代进程退出码。存在 warning 的成功构建仍是
 - Toolchains
 
 该方法可以读取配置、运行固定的 CMake preset listing 和 compiler capability probe，但不执行项目 configure 或 build。
+
+Toolchain 只投影 family、version、target triple、host/target architecture、已验证 generator 和 `gcov`/`llvm-cov` capability 名称；不返回 compiler path、environment、sysroot 或 coverage executable path。Build Profile 返回 `origin`、安全的 `toolchainId` 关联、generator 和 configuration。
+
+workspace 配置无效或超过大小上限时，Runtime 忽略其中的 CMake override 与 manual toolchain，不在 pre-READY 阶段退出；Service 以安全空配置启动，并由 `workspace/inspect` 返回 `WORKSPACE_INVALID_CONFIG` 或 `WORKSPACE_CONFIG_TOO_LARGE` 阻断诊断。这样客户端可以解释和修复配置，同时无效配置不会获得执行能力。
 
 #### `cmake/targets/list`
 
