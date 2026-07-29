@@ -390,6 +390,7 @@ Toolchain ID 根据 family、规范 executable identity、version、target tripl
 
 - 使用 Visual Studio 安装器附带的 `vswhere` 定位包含 C++ workload 的实例。
 - `vswhere` 会把可扩展的 Visual Studio Installer property store 投影到顶层 JSON。Adapter 先执行总大小、UTF-8、NUL、重复 key 和 installation 数量边界校验，再只把 `instanceId`、`installationPath`、`installationVersion`、`isComplete`、`isLaunchable` 投影到发现模型；其他有界 metadata 不参与 path、argument、environment 或 executable 决策，Visual Studio Installer 增加字段时也不会扩大执行面。
+- Visual Studio generator capability 需要安装实例内、已固定 identity 的 `MSBuild.exe` 以固定参数成功返回有界 version 输出；parser 同时支持单行 numeric 形式与 VS 2026 的 banner 加 numeric 形式，拒绝互相冲突的 major，并要求其 major 与 `vswhere installationVersion` 一致。generator 名称只由该已验证 installation major 决定。
 - 使用固定模板调用安装实例自己的 `VsDevCmd.bat`，捕获特定 host/target architecture 的环境。
 - `.bat` 调用是受信任 MSVC Adapter 的发现步骤，不是 Build Task 的 Shell 执行入口。
 - `VsDevCmd.bat` 路径来自已验证 Visual Studio 实例；architecture、toolset 和 SDK 参数来自枚举，不能包含客户端文本。

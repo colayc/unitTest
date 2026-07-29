@@ -36,6 +36,9 @@ var (
 	msvcLinkerBannerPattern = regexp.MustCompile(
 		`(?i)\bLinker Version ([0-9]+\.[0-9]+(?:\.[0-9]+){0,2})\b`,
 	)
+	msbuildVersionPattern = regexp.MustCompile(
+		`(?:^|[ \t\r\n])([0-9]+(?:\.[0-9]+){1,3})(?:\+[A-Za-z0-9._-]+)?(?:$|[ \t\r\n])`,
+	)
 	windowsSDKVersionPattern = regexp.MustCompile(
 		`^[0-9]+(?:\.[0-9]+){1,3}$`,
 	)
@@ -1102,9 +1105,9 @@ func (adapter *msvcAdapter) probeMSVCGenerators(
 		}
 		_ = msbuild.Close()
 		if probeErr == nil && output != nil {
-			version, parseErr := parseSingleLine(output, 128)
+			version, parseErr := parseMSBuildVersion(output)
 			if parseErr == nil && sameVersionMajor(version, candidate.installation.Version) {
-				if generator := visualStudioGenerator(version); generator != "" {
+				if generator := visualStudioGenerator(candidate.installation.Version); generator != "" {
 					result.names = append(result.names, generator)
 					result.directories = append(
 						result.directories,
@@ -1349,6 +1352,24 @@ func compatibleMSVCVersions(compiler, linker, toolset string) bool {
 		toolsetParts[0] == "14" &&
 		compilerParts[1] == linkerParts[1] &&
 		compilerParts[1] == toolsetParts[1]
+}
+
+func parseMSBuildVersion(output []byte) (string, error) {
+	if len(output) == 0 || len(output) > 1024 ||
+		!utf8.Valid(output) || bytesContainNUL(output) {
+		return "", errors.New("invalid MSBuild version output")
+	}
+	matches := msbuildVersionPattern.FindAllSubmatch(output, -1)
+	if len(matches) == 0 || len(matches) > 4 {
+		return "", errors.New("unrecognized MSBuild version output")
+	}
+	version := string(matches[0][1])
+	for _, match := range matches[1:] {
+		if !sameVersionMajor(version, string(match[1])) {
+			return "", errors.New("conflicting MSBuild version output")
+		}
+	}
+	return version, nil
 }
 
 func sameVersionMajor(left, right string) bool {

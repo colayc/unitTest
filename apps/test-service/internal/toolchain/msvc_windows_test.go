@@ -500,6 +500,22 @@ func TestMSVCCompilerBannerRequiresConsistentUniqueEvidence(t *testing.T) {
 	}
 }
 
+func TestParseMSBuildVersionAcceptsVS2026BannerAndNumericLine(t *testing.T) {
+	output := []byte(
+		"MSBuild version 18.7.0+012345678 for .NET Framework\r\n" +
+			"18.7.0.12345\r\n",
+	)
+	version, err := parseMSBuildVersion(output)
+	if err != nil || version != "18.7.0" {
+		t.Fatalf("parseMSBuildVersion() = %q, %v, want 18.7.0", version, err)
+	}
+	if _, err := parseMSBuildVersion([]byte(
+		"MSBuild version 18.7.0 for .NET Framework\r\n17.14.0\r\n",
+	)); err == nil {
+		t.Fatal("parseMSBuildVersion() accepted conflicting major versions")
+	}
+}
+
 func TestMSVCAdapterUsesBoundedLocalizedOEMProbePolicies(t *testing.T) {
 	localizedCompilerOutput := append(
 		[]byte{0xd6, 0xd0, 0xce, 0xc4, ' ', 'x', '6', '4', '\r', '\n'},

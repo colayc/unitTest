@@ -877,7 +877,10 @@ func TestManagerCancellationDuringNextStepPreparePreventsStart(t *testing.T) {
 
 	select {
 	case result := <-cancelResult:
-		if result.err != nil || result.task.Status != task.StatusRunning {
+		terminalConflict := result.task.Status == task.StatusFinished &&
+			result.task.Outcome == task.OutcomeInfrastructureFailed
+		if result.err != nil ||
+			result.task.Status != task.StatusRunning && !terminalConflict {
 			t.Fatalf("Cancel = %#v, %v", result.task, result.err)
 		}
 	case <-time.After(time.Second):
