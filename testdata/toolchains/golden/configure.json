@@ -1,0 +1,9 @@
+{
+  "minimum": [
+    {
+      "kind": "configure",
+      "severity": "error",
+      "messageContains": "UNIT_TEST_IDE_CONFIGURE_FAILURE"
+    }
+  ]
+}

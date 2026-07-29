@@ -240,7 +240,7 @@ export interface GoldenDiagnosticExpectation {
 }
 ```
 
-- [ ] **Step 1：写 fixture copy 与 diagnostic normalization 测试**
+- [x] **Step 1：写 fixture copy 与 diagnostic normalization 测试**
 
 测试覆盖：
 
@@ -252,7 +252,7 @@ export interface GoldenDiagnosticExpectation {
 - diagnostic `code`、`severity`、line/column 不被丢失；
 - normalizer 不替换 source message 中与路径无关的普通文本。
 
-- [ ] **Step 2：运行 fixture tests 并确认失败**
+- [x] **Step 2：运行 fixture tests 并确认失败**
 
 运行：
 
@@ -262,7 +262,7 @@ pnpm --filter @unit-test-ide/service-probe test -- native-fixture.test
 
 预期： FAIL，原因是 helper 和 fixture 尚不存在。
 
-- [ ] **Step 3：建立 preset 与 generated fallback 正常项目**
+- [x] **Step 3：建立 preset 与 generated fallback 正常项目**
 
 `preset-project/CMakePresets.json` 使用 CMake Presets version `10`，包含 `unit-test-ide-debug` configure preset 和同名 build preset；binary directory 固定为 `${sourceDir}/.native-e2e/build/preset`，generator 由该 preset 明确选择 `Ninja`。它验证“Preset 语义由 CMake 保留”的路径：
 
@@ -342,7 +342,7 @@ int main() {
 }
 ```
 
-- [ ] **Step 4：建立确定性失败项目与 golden**
+- [x] **Step 4：建立确定性失败项目与 golden**
 
 Compiler fixture 使用一个明确的未知 identifier，确保所有 compiler 在同一源文件行产生 error：
 
@@ -405,13 +405,13 @@ Golden 只记录跨版本稳定基准：
 
 不同 compiler family 分文件记录允许的 `codePattern`；MSVC/clang-cl 文件使用 `^(C[0-9]+|)$`，GCC/Clang 文件允许空 code。Linker golden 的 `messageContains` 固定为 `native_missing_symbol`，configure golden 固定为 `UNIT_TEST_IDE_CONFIGURE_FAILURE`。完整原始 message 只检查 marker，不逐字固定 Hosted Runner 文案。
 
-- [ ] **Step 5：实现安全复制和规范化**
+- [x] **Step 5：实现安全复制和规范化**
 
 复制 helper 使用 `lstat` 后只允许 regular file/directory，按 code point 排序逐项复制；拒绝 symlink、junction/reparse point 和 device。destination 必须是 helper 新建的空目录。
 
 normalizer 在分隔符统一前先使用 Phase 3B path identity 比较；只将已证明位于 workspace/build root 内的路径替换为 `<workspace>`/`<build>`。
 
-- [ ] **Step 6：运行 tests 并提交**
+- [x] **Step 6：运行 tests 并提交**
 
 运行：
 
