@@ -87,6 +87,8 @@
 
 完成门禁：Windows 与 Ubuntu Native E2E、完整 `pnpm verify`、Hosted CI 和 `git diff --exit-code` 全部通过。
 
+状态：已于 2026-07-29 完成。固定 Hosted CI 运行 [`30464939729`](https://github.com/colayc/unitTest/actions/runs/30464939729) 验证 CMake 4.3.4 下 Windows MSVC/clang-cl 与 Linux GCC/Clang 的 generated fallback、Preset 和完整 Native E2E 场景，双平台报告均已上传并核验 digest；Phase 3A–3D 全部门禁关闭。
+
 ## 提交与评审边界
 
 - 每份子计划从前一份计划的绿色提交开始。

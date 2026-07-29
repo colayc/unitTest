@@ -68,7 +68,9 @@ docs/
 
 依赖：Phase 2 的任务/进程引擎。
 
-验收标准：Windows/MSVC、Linux/GCC 和 Linux/Clang 示例项目可通过服务完成配置和构建，并产生基准诊断结果。
+验收标准：Windows/MSVC、Windows/clang-cl、Linux/GCC 和 Linux/Clang 示例项目可通过服务完成配置和构建，并产生基准诊断结果。
+
+状态：已于 2026-07-29 完成。固定 Hosted CI 运行 [`30464939729`](https://github.com/colayc/unitTest/actions/runs/30464939729) 已验证四种 compiler family 的 generated fallback、Preset、诊断、取消/超时、路径边界与恢复场景，并通过 Protocol compatibility、完整 `pnpm verify` 和双平台报告门禁。
 
 ### Phase 4：测试框架发现与执行
 
