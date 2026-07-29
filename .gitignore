@@ -7,3 +7,5 @@ node_modules/
 *.profraw
 *.profdata
 *.sock
+.bundled-tools/
+.native-e2e/

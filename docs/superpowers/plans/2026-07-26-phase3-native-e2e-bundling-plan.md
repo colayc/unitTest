@@ -47,7 +47,7 @@ export function verifyInstalledFiles(root, files)
 export async function prepareBundle({ key, outputRoot, download })
 ```
 
-- [ ] **Step 1：写 manifest 解析、平台选择和摘要失败测试**
+- [x] **Step 1：写 manifest 解析、平台选择和摘要失败测试**
 
 `prepare.test.mjs` 使用 `node:test`、临时目录和本地 byte fixtures，不访问网络。至少覆盖：
 
@@ -77,7 +77,7 @@ test("digest mismatch never publishes staging", async () => {
 });
 ```
 
-- [ ] **Step 2：运行准备工具测试并确认失败**
+- [x] **Step 2：运行准备工具测试并确认失败**
 
 运行：
 
@@ -87,7 +87,7 @@ node --test tools/cmake-bundle/prepare.test.mjs
 
 预期： FAIL，原因是 manifest 与 `prepare.mjs` 尚不存在。
 
-- [ ] **Step 3：提交固定 manifest**
+- [x] **Step 3：提交固定 manifest**
 
 `manifest.json` 写入已由 CMake 官方 SHA-256 清单和官方归档复核的固定值：
 
@@ -123,7 +123,7 @@ node --test tools/cmake-bundle/prepare.test.mjs
 }
 ```
 
-- [ ] **Step 4：实现显式下载、校验、解压和原子发布**
+- [x] **Step 4：实现显式下载、校验、解压和原子发布**
 
 `prepare.mjs` 必须：
 
@@ -140,7 +140,7 @@ node --test tools/cmake-bundle/prepare.test.mjs
 
 下载函数只允许 manifest 中的 URL，并在 redirect 后再次要求最终 URL 为 HTTPS `cmake.org` 固定路径；禁止调用方传入 URL、header、proxy credential 或 executable。`--output` 必须位于 repository root 或 CI 显式提供的临时根内。
 
-- [ ] **Step 5：加入离线与显式联网脚本**
+- [x] **Step 5：加入离线与显式联网脚本**
 
 `.gitignore` 加入：
 
@@ -162,7 +162,7 @@ node --test tools/cmake-bundle/prepare.test.mjs
 
 `test:cmake-bundle` 进入普通 `test` 链；`prepare:cmake-bundle` 不进入 `test` 或 `verify` 链。
 
-- [ ] **Step 6：写中文供应链说明并运行测试**
+- [x] **Step 6：写中文供应链说明并运行测试**
 
 `README.md` 记录固定来源、摘要更新流程、BSD 3-Clause 分发义务、显式准备命令、输出 layout、离线边界和 Phase 8 签名责任。
 
@@ -176,7 +176,7 @@ git diff --check
 
 预期： PASS；测试过程中没有外网请求，`.bundled-tools` 不出现在 tracked files。
 
-- [ ] **Step 7：提交**
+- [x] **Step 7：提交**
 
 ```powershell
 git add .gitignore package.json tools/cmake-bundle
