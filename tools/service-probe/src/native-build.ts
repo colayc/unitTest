@@ -686,15 +686,11 @@ async function runFailureScenario(
       trustedWorkspace: true,
       cmakeBundleRoot: context.bundle.bundleRoot,
     });
-    const snapshot = await withNamedTimeout(
-      `${context.family} ${fixtureName} inspection`,
-      fixture.client.inspectWorkspace(),
-      nativeTimeoutMs,
+    const selected = await inspectEstablishedFamily(
+      fixture.client,
+      context.family,
+      fixtureName,
     );
-    const selected = selectGeneratedProfile(snapshot, context.family);
-    if (selected === undefined) {
-      throw new Error(`${context.family} disappeared in ${fixtureName}`);
-    }
     const subscription = await withNamedTimeout(
       `${context.family} ${fixtureName} event subscription`,
       fixture.client.subscribeEvents(0),
@@ -740,6 +736,34 @@ async function runFailureScenario(
     await rm(workspaceRoot, { recursive: true, force: true });
     await rm(serviceDirectory, { recursive: true, force: true });
   }
+}
+
+async function inspectEstablishedFamily(
+  client: ProtocolClient,
+  family: RequiredToolchainFamily,
+  scenario: string,
+): Promise<SelectedProfile> {
+  let lastSnapshot: WorkspaceSnapshot | undefined;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const snapshot = await withNamedTimeout(
+      `${family} ${scenario} inspection attempt ${attempt}`,
+      client.inspectWorkspace(),
+      nativeTimeoutMs,
+    );
+    const selected = selectGeneratedProfile(snapshot, family);
+    if (selected !== undefined) {
+      return selected;
+    }
+    lastSnapshot = snapshot;
+  }
+  const codes = [
+    ...new Set((lastSnapshot?.diagnostics ?? []).map((diagnostic) => diagnostic.code)),
+  ];
+  throw new Error(
+    `${family} disappeared in ${scenario} after one bounded retry; diagnostics=${
+      codes.length === 0 ? "none" : codes.join(",")
+    }`,
+  );
 }
 
 async function loadGoldenDiagnostics(
