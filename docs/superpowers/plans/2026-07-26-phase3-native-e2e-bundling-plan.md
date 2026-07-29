@@ -227,7 +227,11 @@ export async function copyNativeFixture(
 
 export function normalizeNativeDiagnostic(
   diagnostic: Diagnostic,
-  roots: { workspace: string; build: string },
+  roots: {
+    workspace: string;
+    build: string;
+    external?: readonly string[];
+  },
 ): Diagnostic;
 
 export interface GoldenDiagnosticExpectation {
@@ -459,10 +463,11 @@ export async function runNativeMatrix(options: {
   platform: NodeJS.Platform;
   requiredFamilies: readonly RequiredToolchainFamily[];
   artifactDirectory: string;
+  workDirectory?: string;
 }): Promise<readonly NativeScenarioResult[]>;
 ```
 
-- [ ] **Step 1：写 bundle 缺失与 required family 测试**
+- [x] **Step 1：写 bundle 缺失与 required family 测试**
 
 使用 dependency injection 的 fake Service launcher/discovery snapshot，先覆盖：
 
@@ -483,7 +488,7 @@ UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS=gcc,clang pnpm --filter @unit-test-ide/
 
 预期： FAIL，原因是 native runner 和 scripts 尚不存在。
 
-- [ ] **Step 3：实现每个 toolchain 独立的真实 Service 生命周期**
+- [x] **Step 3：实现每个 toolchain 独立的真实 Service 生命周期**
 
 对 GCC、Clang 分别：
 
@@ -497,7 +502,7 @@ UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS=gcc,clang pnpm --filter @unit-test-ide/
 
 禁止把 compiler executable、args 或 environment 从 test 直接传到 Protocol；test 只能按 discovery 返回的 `toolchainFamily` 选择 profile ID。
 
-- [ ] **Step 4：覆盖 configure lifecycle**
+- [x] **Step 4：覆盖 configure lifecycle**
 
 每个 family 的同一 profile 连续执行：
 
@@ -509,7 +514,7 @@ UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS=gcc,clang pnpm --filter @unit-test-ide/
 
 断言读取 task steps、event sequence 和 configure fingerprint artifact，不依赖 wall-clock 推断。
 
-- [ ] **Step 5：覆盖 diagnostics、Unicode、取消、超时和恢复**
+- [x] **Step 5：覆盖 diagnostics、Unicode、取消、超时和恢复**
 
 对 GCC 与 Clang 至少覆盖：
 
@@ -523,7 +528,7 @@ UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS=gcc,clang pnpm --filter @unit-test-ide/
 
 取消/超时 fixture 由 CMake project 构建受控的长运行 custom target；native runner 等待 `task.step_started` 后再 cancel，禁止固定 sleep 作为同步机制。
 
-- [ ] **Step 6：写稳定工具链报告**
+- [x] **Step 6：写稳定工具链报告**
 
 将以下内容写入 `.native-e2e/artifacts/linux/toolchain-report.json`：
 
@@ -562,6 +567,29 @@ git diff --check
 git add package.json tools/service-probe
 git commit -m "test: cover linux gcc and clang builds"
 ```
+
+#### 2026-07-29 实施记录
+
+Native matrix runner、离线 bundle preflight、required-family policy、路径无关报告及全部 scenario 已实现。Windows 本机使用 bundled CMake 4.3.4 与 MSVC 19.44 / Visual Studio 17 2022 完成真实验证，所有 scenario PASS；本机未安装符合生产发现策略的 clang-cl，因此按 local policy 记录为 `skipped`。
+
+真实 MSVC 运行同时发现并修复了以下架构缺口：
+
+- bundle prepare 的发布 layout 与 Go Resolver 约定不一致；
+- Protocol v1.2 缺少选择 generated profile 所需的安全 Toolchain/Profile 关联与 workspace diagnostics；
+- automatic toolchain ID 长度超过 generated profile 的旧上限；
+- Windows compiler path 未转换为 CMake-safe `/` 形式；
+- File API 错误地拒绝 workspace 外的 compiler identity 和已校验 CMake/toolchain root；
+- invalid workspace config 在 Runtime pre-READY 阶段退出，客户端无法读取阻断诊断；
+- Native E2E 的 Service data path 过长，触发 MSBuild `MSB3491`/`.tlog` 路径失败。
+
+本地验证证据：
+
+- `pnpm check:protocol-generated`、`pnpm build`、`pnpm test` PASS；
+- `go test -race ./apps/test-service/...` PASS；
+- 既有 Windows Service E2E 19/19 PASS；
+- Windows MSVC native report 位于 ignored `.native-e2e/artifacts/windows/toolchain-report.json`，不包含 token、environment 或绝对路径。
+
+Linux GCC/Clang 与 Windows clang-cl 的真实 required-family 运行仍必须由固定 Hosted CI 完成；在该证据到位前，Task 3 Step 2/7、Task 4 和 Phase 3D 总完成门禁保持未勾选。
 
 ---
 
@@ -795,8 +823,8 @@ git status --short
 
 ## Phase 3D 完成检查
 
-- [ ] CMake 4.3.4 archive、executable 和 license digest 均由 manifest 固定并验证。
-- [ ] 普通 `pnpm verify` 与产品运行不联网。
+- [x] CMake 4.3.4 archive、executable 和 license digest 均由 manifest 固定并验证。
+- [x] 普通 `pnpm verify` 与产品运行不联网。
 - [ ] Preset 与 generated fallback 都通过真实构建。
 - [ ] Windows/MSVC、Windows/clang-cl、Linux/GCC、Linux/Clang 全部通过。
 - [ ] configure 首次执行、无变化跳过、CMake input 变化后重新执行。

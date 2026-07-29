@@ -159,6 +159,27 @@ test("normalizeNativeDiagnostic handles POSIX paths and prioritizes the build ro
   );
 });
 
+test("normalizeNativeDiagnostic maps explicitly trusted external roots without exposing host paths", () => {
+  const diagnostic: Diagnostic = {
+    severity: errorSeverity,
+    code: "CMAKE_ERROR",
+    message: String.raw`C:\Tools\CMake\share\Modules\Compiler.cmake: failed`,
+    sourceUri: "file:///C:/Tools/CMake/share/Modules/Compiler.cmake",
+  };
+  assert.deepEqual(
+    normalizeNativeDiagnostic(diagnostic, {
+      workspace: String.raw`C:\workspace`,
+      build: String.raw`C:\service\build`,
+      external: [String.raw`C:\Tools\CMake`],
+    }),
+    {
+      ...diagnostic,
+      sourceUri: "<external>/share/Modules/Compiler.cmake",
+      message: "<external>/share/Modules/Compiler.cmake: failed",
+    },
+  );
+});
+
 test("normalization preserves diagnostic identity and unrelated source text", () => {
   const diagnostic: Diagnostic = {
     severity: errorSeverity,

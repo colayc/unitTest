@@ -18,6 +18,7 @@
     "test:go:race": "go test -race ./apps/test-service/...",
     "test": "pnpm run test:cmake-bundle && pnpm run test:workspace && pnpm -r --if-present test && pnpm run test:go",
     "test:e2e": "pnpm --filter @unit-test-ide/service-probe test:e2e",
+    "test:e2e:native": "pnpm --filter @unit-test-ide/service-probe test:e2e:native",
     "verify": "pnpm check:protocol-generated && pnpm build && pnpm test && pnpm test:go:race && pnpm test:e2e"
   },
   "devDependencies": {

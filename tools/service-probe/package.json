@@ -13,7 +13,10 @@
   },
   "scripts": {
     "build": "tsc -b tsconfig.json",
-    "test": "pnpm run build && node --test dist/native-fixture.test.js",
-    "test:e2e": "node build-service.mjs && pnpm run build && node --test dist/probe.test.js"
+    "test": "pnpm run build && node --test dist/native-fixture.test.js dist/native-build-linux.test.js",
+    "test:e2e": "node build-service.mjs && pnpm run build && node --test dist/probe.test.js",
+    "test:e2e:native": "node build-service.mjs && pnpm run build && node dist/native-run.js",
+    "test:e2e:native:linux": "node build-service.mjs && pnpm run build && node dist/native-run.js --platform linux",
+    "test:e2e:native:windows": "node build-service.mjs && pnpm run build && node dist/native-run.js --platform win32"
   }
 }

@@ -210,15 +210,19 @@ interface NativePath {
 }
 
 interface RootMapping extends NativePath {
-  marker: "<workspace>" | "<build>";
+  marker: "<workspace>" | "<build>" | "<external>";
 }
 
 export function normalizeNativeDiagnostic(
   diagnostic: Diagnostic,
-  roots: { workspace: string; build: string },
+  roots: { workspace: string; build: string; external?: readonly string[] },
 ): Diagnostic {
   const mappings: RootMapping[] = [
     { ...requireNativeAbsolutePath(roots.build), marker: "<build>" },
+    ...(roots.external ?? []).map((root): RootMapping => ({
+      ...requireNativeAbsolutePath(root),
+      marker: "<external>",
+    })),
     { ...requireNativeAbsolutePath(roots.workspace), marker: "<workspace>" },
   ];
   let sourceUri = diagnostic.sourceUri;
@@ -328,7 +332,7 @@ function replaceRootInMessage(message: string, root: RootMapping): string {
 
 function normalizeMarkerSeparators(message: string): string {
   return message.replace(
-    /<(workspace|build)>(?:[\\/][^():\r\n]*)*/gu,
+    /<(workspace|build|external)>(?:[\\/][^():\r\n]*)*/gu,
     (value) => value.replaceAll("\\", "/"),
   );
 }
