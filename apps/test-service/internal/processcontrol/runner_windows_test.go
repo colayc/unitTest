@@ -444,6 +444,39 @@ func TestWindowsContextCancellationAndCloseKillTargetTrees(t *testing.T) {
 	}
 }
 
+func TestWindowsConcurrentContextCancellationAndTerminateConverge(t *testing.T) {
+	binary := buildWindowsService(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	process, err := NewRunner(binary).Prepare(
+		ctx,
+		Spec{Executable: binary, Args: []string{"--task-fixture", "spawn-child"}},
+		windowsTestID(73),
+		windowsTestID(74),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer process.Close(context.Background())
+	if err := process.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	childPID := readWindowsChildPID(t, process.Output())
+
+	terminated := make(chan error, 1)
+	terminateCtx, stopTerminate := context.WithTimeout(context.Background(), 4*time.Second)
+	defer stopTerminate()
+	cancel()
+	go func() { terminated <- process.Terminate(terminateCtx, 2*time.Second) }()
+
+	select {
+	case <-terminated:
+	case <-time.After(5 * time.Second):
+		t.Fatal("explicit Terminate did not converge with context-driven termination")
+	}
+	_ = receiveWindowsResult(t, process.Done())
+	assertWindowsProcessGone(t, childPID)
+}
+
 func TestWindowsControlEOFAndUnexpectedHostExitCleanTargetTrees(t *testing.T) {
 	for _, test := range []struct {
 		name string
@@ -801,6 +834,56 @@ func TestWindowsCloseAndDoneAreBoundedWhenEveryNativeCleanupStageFails(t *testin
 	started := time.Now()
 	if err := process.Close(context.Background()); !errors.Is(err, errProcessHostFailed) || time.Since(started) > 100*time.Millisecond {
 		t.Fatalf("second Close = %v after %s", err, time.Since(started))
+	}
+}
+
+func TestWindowsSuccessfulForcedHostCleanupMarksExitBeforeClose(t *testing.T) {
+	controlReader, controlWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controlReader.Close()
+	statusReader, statusWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer statusWriter.Close()
+
+	operations := defaultWindowsRunnerOperations()
+	operations.terminateJob = func(windows.Handle, uint32) error { return nil }
+	operations.terminateProcess = func(windows.Handle, uint32) error { return nil }
+	operations.nativeTerminateProcess = func(windows.Handle, uint32) error { return nil }
+	operations.waitProcess = func(windows.Handle, uint32) (uint32, error) {
+		return windows.WAIT_OBJECT_0, nil
+	}
+	operations.closeHandle = func(windows.Handle) error { return nil }
+	outputDone := make(chan struct{})
+	close(outputDone)
+	process := &windowsProcess{
+		control:       controlWriter,
+		status:        statusReader,
+		jobOwner:      winprocess.NewHandleOwner(801, operations.closeHandle),
+		hostOwner:     winprocess.NewHandleOwner(802, operations.closeHandle),
+		ops:           operations,
+		hostExited:    make(chan struct{}),
+		output:        make(chan Output),
+		outputDone:    outputDone,
+		outputDiscard: make(chan struct{}),
+		done:          make(chan Result, 1),
+		finished:      make(chan struct{}),
+		contextStop:   make(chan struct{}),
+	}
+
+	if err := process.shutdownHostBounded(context.Background()); err != nil {
+		t.Fatalf("shutdownHostBounded = %v", err)
+	}
+	select {
+	case <-process.hostExited:
+	default:
+		t.Fatal("successful forced cleanup did not synchronously mark Host exit")
+	}
+	if err := process.currentCleanupError(); err != nil {
+		t.Fatalf("currentCleanupError after proven Host exit = %v", err)
 	}
 }
 

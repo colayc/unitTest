@@ -343,6 +343,11 @@ func (m *Manager) Start(ctx context.Context, request StartRequest) (Task, error)
 	case <-ctx.Done():
 		return Task{}, ctx.Err()
 	case <-m.stopped:
+		select {
+		case response := <-reply:
+			return response.task, publicError(response.err)
+		default:
+		}
 		return Task{}, ErrStorageUnavailable
 	}
 }

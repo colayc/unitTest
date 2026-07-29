@@ -26,6 +26,7 @@ import {
   type EventSubscription,
   type ProtocolClient,
   type ProtocolTaskEvent,
+  type ProtocolTaskSnapshot,
 } from "@unit-test-ide/test-client";
 import {
   copyNativeFixture,
@@ -44,6 +45,7 @@ import { writeNativeToolchainReport } from "./native-report.js";
 const execFile = promisify(execFileCallback);
 const repositoryRoot = resolve(import.meta.dirname, "../../..");
 const nativeTimeoutMs = 120_000;
+const nativeEventHeartbeatMs = 5_000;
 const requiredEnvironmentName = "UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS";
 const families = ["gcc", "clang", "msvc", "clang-cl"] as const;
 const platformFamilies: Readonly<Record<"linux" | "win32", readonly RequiredToolchainFamily[]>> = {
@@ -382,7 +384,7 @@ async function executeCoreScenarios(
     nativeTimeoutMs,
   );
   const first = await startBuild(client, context, [], 60_000);
-  const firstEvents = await waitForTask(subscription, first.taskId);
+  const firstEvents = await waitForTask(client, subscription, first.taskId);
   assertStepOrder(firstEvents, ["configure", "build"], "first native build");
 
   const targets = await withNamedTimeout(
@@ -404,7 +406,7 @@ async function executeCoreScenarios(
   }
   reportNativeScenario(context.family, "secondary-target");
   const second = await startBuild(client, context, [secondary.targetId], 60_000);
-  const secondEvents = await waitForTask(subscription, second.taskId);
+  const secondEvents = await waitForTask(client, subscription, second.taskId);
   assertStepOrder(secondEvents, ["build"], "unchanged native build");
 
   reportNativeScenario(context.family, "configure-invalidation");
@@ -414,7 +416,7 @@ async function executeCoreScenarios(
     "utf8",
   );
   const third = await startBuild(client, context, [], 60_000);
-  const thirdEvents = await waitForTask(subscription, third.taskId);
+  const thirdEvents = await waitForTask(client, subscription, third.taskId);
   assertStepOrder(thirdEvents, ["configure", "build"], "changed CMake input build");
 
   reportNativeScenario(context.family, "typed-rejections");
@@ -453,6 +455,7 @@ async function executeCoreScenarios(
     nativeTimeoutMs,
   );
   const cancelledEvents = await waitForTask(
+    client,
     subscription,
     cancellable.taskId,
     "cancelled",
@@ -462,7 +465,7 @@ async function executeCoreScenarios(
 
   reportNativeScenario(context.family, "timeout");
   const timed = await startBuild(client, context, [slow.targetId], 1_000);
-  await waitForTask(subscription, timed.taskId, "timed_out");
+  await waitForTask(client, subscription, timed.taskId, "timed_out");
 
   const compilerGolden = context.family === "msvc" || context.family === "clang-cl"
     ? "compiler-msvc-clang-cl.json"
@@ -648,7 +651,12 @@ async function runFailureScenario(
       nativeTimeoutMs,
     );
     const task = await startBuild(fixture.client, selected, [], 60_000);
-    const events = await waitForTask(subscription, task.taskId, "command_failed");
+    const events = await waitForTask(
+      fixture.client,
+      subscription,
+      task.taskId,
+      "command_failed",
+    );
     const diagnostics = events
       .filter((event) => event.event === "task.diagnostic")
       .map((event) =>
@@ -748,18 +756,65 @@ function startBuild(
 }
 
 async function waitForTask(
+  client: ProtocolClient,
   subscription: EventSubscription,
   taskId: string,
   expectedOutcome = "succeeded",
   initialEvents: ProtocolTaskEvent[] = [],
 ): Promise<ProtocolTaskEvent[]> {
   const events = [...initialEvents];
+  const deadline = Date.now() + nativeTimeoutMs;
+  let pending = subscription.next();
+  let lastSnapshot: ProtocolTaskSnapshot | undefined;
+  let terminalReplayRequested = false;
   for (;;) {
-    const next = await withNamedTimeout(
-      `native task ${taskId} completion`,
-      subscription.next(),
-      nativeTimeoutMs,
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      throw nativeTaskCompletionTimeout(
+        taskId,
+        subscription.lastSequence,
+        lastSnapshot,
+      );
+    }
+    const result = await waitForNativeEvent(
+      pending,
+      Math.min(nativeEventHeartbeatMs, remaining),
     );
+    if (result.kind === "heartbeat") {
+      try {
+        lastSnapshot = await withNamedTimeout(
+          `native task ${taskId} liveness lookup`,
+          client.getTask(taskId),
+          Math.min(nativeEventHeartbeatMs, Math.max(deadline - Date.now(), 1)),
+        );
+        if (lastSnapshot.status === "finished" && !terminalReplayRequested) {
+          terminalReplayRequested = true;
+          await withNamedTimeout(
+            `native task ${taskId} terminal replay reconnect`,
+            client.reconnect(),
+            Math.min(nativeEventHeartbeatMs, Math.max(deadline - Date.now(), 1)),
+          );
+        }
+      } catch (error) {
+        if (error instanceof ProtocolError) {
+          throw error;
+        }
+        await withNamedTimeout(
+          `native task ${taskId} liveness reconnect`,
+          client.reconnect(),
+          Math.min(nativeEventHeartbeatMs, Math.max(deadline - Date.now(), 1)),
+        ).catch((reconnectError: unknown) => {
+          throw new Error(
+            `native task ${taskId} liveness recovery failed after sequence ` +
+            `${subscription.lastSequence}`,
+            { cause: reconnectError },
+          );
+        });
+      }
+      continue;
+    }
+    const next = result.next;
+    pending = subscription.next();
     if (next.done) {
       throw new Error(`native event subscription closed before task ${taskId} finished`);
     }
@@ -818,6 +873,45 @@ async function waitForTask(
       return events;
     }
   }
+}
+
+function waitForNativeEvent(
+  pending: Promise<IteratorResult<ProtocolTaskEvent>>,
+  milliseconds: number,
+): Promise<
+  | { kind: "event"; next: IteratorResult<ProtocolTaskEvent> }
+  | { kind: "heartbeat" }
+> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => resolve({ kind: "heartbeat" }),
+      milliseconds,
+    );
+    pending.then(
+      (next) => {
+        clearTimeout(timer);
+        resolve({ kind: "event", next });
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+function nativeTaskCompletionTimeout(
+  taskId: string,
+  lastSequence: number,
+  snapshot: ProtocolTaskSnapshot | undefined,
+): Error {
+  const state = snapshot === undefined
+    ? "unavailable"
+    : `${snapshot.status}/${String(snapshot.outcome ?? "")}`;
+  return new Error(
+    `native task ${taskId} completion timed out after ${nativeTimeoutMs}ms; ` +
+    `lastSequence=${lastSequence}; durableState=${state}`,
+  );
 }
 
 function scrubNativeErrorText(value: string): string {

@@ -581,6 +581,12 @@ func (process *windowsProcess) shutdownHostBounded(ctx context.Context) error {
 			host := process.hostOwner.Take()
 			if host != 0 && host != windows.InvalidHandle {
 				cleanupErr = winprocess.CleanupProcess(host, process.hostCleanupOperations(), boundedWindowsWait(ctx, 100*time.Millisecond))
+				if cleanupErr == nil {
+					// CleanupProcess only succeeds after a signaled wait. Publish
+					// that proof synchronously so an immediate Manager Close
+					// cannot mistake observer scheduling latency for a live Host.
+					process.markHostExited()
+				}
 			}
 		}
 		if !waitWindowsClosedContext(ctx, process.outputDone, 100*time.Millisecond) {

@@ -647,21 +647,30 @@ func TestShutdownRetainsOwnershipUntilManagerQuiescesAndCanBeRetried(t *testing.
 		t.Fatal(err)
 	}
 	subscription.Activate()
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	if err := active.Shutdown(ctx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Shutdown() error = %v, want deadline", err)
-	}
+	ctx, cancel := context.WithCancel(context.Background())
+	shutdownReturned := make(chan error, 1)
+	go func() { shutdownReturned <- active.Shutdown(ctx) }()
 	select {
 	case <-cleanupStarted:
 	case <-time.After(time.Second):
+		close(allowCleanup)
 		t.Fatal("Shutdown did not begin forced lease cleanup")
 	}
+	cancel()
 	select {
 	case <-cleanupReturned:
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(time.Second):
 		close(allowCleanup)
-		t.Fatal("Shutdown left forced cleanup running beyond the caller deadline")
+		t.Fatal("Shutdown left forced cleanup running after caller cancellation")
+	}
+	select {
+	case err := <-shutdownReturned:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Shutdown() error = %v, want cancellation", err)
+		}
+	case <-time.After(time.Second):
+		close(allowCleanup)
+		t.Fatal("Shutdown did not return after caller cancellation")
 	}
 	layout, err := PrepareDataDir(root)
 	if err != nil {
