@@ -11,12 +11,17 @@ import (
 )
 
 func TestOpenRootCanonicalizesAbsolutePathAndKeepsIdentityStable(t *testing.T) {
-	base := t.TempDir()
+	workingDirectory := mustWorkingDirectory(t)
+	base, err := os.MkdirTemp(workingDirectory, ".workspace-root-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
 	rootPath := filepath.Join(base, "workspace with #")
 	if err := os.Mkdir(rootPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	relative, err := filepath.Rel(mustWorkingDirectory(t), rootPath)
+	relative, err := filepath.Rel(workingDirectory, rootPath)
 	if err != nil {
 		t.Fatal(err)
 	}

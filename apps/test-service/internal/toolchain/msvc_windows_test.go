@@ -1949,6 +1949,11 @@ type windowsToolchainFixture struct {
 func newWindowsToolchainFixture(t *testing.T) *windowsToolchainFixture {
 	t.Helper()
 	root := t.TempDir()
+	rootIdentity, err := workspace.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root = rootIdentity.NativePath
 	fixture := &windowsToolchainFixture{
 		root:            root,
 		vswhere:         filepath.Join(root, "Installer", "vswhere.exe"),
@@ -2127,26 +2132,36 @@ func (fixture *windowsToolchainFixture) environmentOutputWithFinalNinjaPathEntry
 	paths := []string{binaryDirectory}
 	remaining := targetPathValueBytes - len(binaryDirectory)
 	const maximumNameBytes = 96
-	for index := 0; remaining > 0; index++ {
+	prefixes := make([]string, 0, maxCapturedEnvironmentPathEntries-1)
+	minimumTotal := 0
+	maximumTotal := 0
+	selectedCount := 0
+	for index := 0; index < maxCapturedEnvironmentPathEntries-1; index++ {
 		prefix := fmt.Sprintf("generator-bound-%02d-", index)
-		minimumContribution := len(fixture.installation) + 2 + len(prefix)
-		if remaining < minimumContribution {
-			t.Fatalf("cannot represent remaining PATH bytes %d", remaining)
+		prefixes = append(prefixes, prefix)
+		minimumTotal += len(fixture.installation) + 2 + len(prefix)
+		maximumTotal += len(fixture.installation) + 2 + maximumNameBytes
+		if remaining >= minimumTotal && remaining <= maximumTotal {
+			selectedCount = index + 1
+			break
 		}
-		maximumContribution := len(fixture.installation) + 2 + maximumNameBytes
-		contribution := min(remaining, maximumContribution)
-		left := remaining - contribution
-		if left > 0 && left < minimumContribution {
-			contribution -= minimumContribution - left
-		}
-		nameBytes := contribution - len(fixture.installation) - 2
-		name := prefix + strings.Repeat("x", nameBytes-len(prefix))
+	}
+	if selectedCount == 0 {
+		t.Fatalf("cannot represent remaining PATH bytes %d", remaining)
+	}
+	extraNameBytes := remaining - minimumTotal
+	for _, prefix := range prefixes[:selectedCount] {
+		additional := min(extraNameBytes, maximumNameBytes-len(prefix))
+		name := prefix + strings.Repeat("x", additional)
+		extraNameBytes -= additional
 		path := filepath.Join(fixture.installation, name)
 		if err := os.MkdirAll(path, 0o755); err != nil {
 			t.Fatal(err)
 		}
 		paths = append(paths, path)
-		remaining -= contribution
+	}
+	if extraNameBytes != 0 {
+		t.Fatalf("unallocated PATH bytes = %d", extraNameBytes)
 	}
 	pathLine := "Path=" + strings.Join(paths, ";")
 	if len(pathLine) != capturedEntryBytes {

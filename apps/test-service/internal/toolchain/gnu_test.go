@@ -64,6 +64,31 @@ func TestGCCProbeUsesFixedArgumentsAndBuildsDescriptor(t *testing.T) {
 	)
 }
 
+func TestParseCompilerVersionAcceptsUbuntuGCCAndGXXBanners(t *testing.T) {
+	t.Parallel()
+
+	for name, test := range map[string]struct {
+		banner string
+		want   string
+	}{
+		"gcc": {
+			banner: "gcc (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0",
+			want:   "13.3.0",
+		},
+		"g++": {
+			banner: "g++ (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0",
+			want:   "13.3.0",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := parseCompilerVersion(FamilyGCC, []byte(test.banner+"\n"))
+			if err != nil || got != test.want {
+				t.Fatalf("parseCompilerVersion() = %q, %v, want %q", got, err, test.want)
+			}
+		})
+	}
+}
+
 func TestGCCProbeAcceptsDefaultEmptySysroot(t *testing.T) {
 	t.Parallel()
 
@@ -735,8 +760,13 @@ type gnuFakeRunner struct {
 func newGNUFakeRunner(t *testing.T, fixture *gnuFixture) *gnuFakeRunner {
 	t.Helper()
 	outputs := map[string]probe.Result{}
-	for _, executable := range []string{fixture.gcc, fixture.gxx, fixture.gcc2, fixture.gxx2} {
-		outputs[probeKey(executable, "--version")] = successfulOutput("gcc (GCC) 13.2.0\nCopyright (C) Free Software Foundation\n")
+	for _, executable := range []string{fixture.gcc, fixture.gcc2} {
+		outputs[probeKey(executable, "--version")] = successfulOutput("gcc (Ubuntu 13.2.0-1ubuntu1) 13.2.0\n")
+		outputs[probeKey(executable, "-dumpmachine")] = successfulOutput("x86_64-linux-gnu\n")
+		outputs[probeKey(executable, "--print-sysroot")] = successfulOutput(fixture.sysroot + "\n")
+	}
+	for _, executable := range []string{fixture.gxx, fixture.gxx2} {
+		outputs[probeKey(executable, "--version")] = successfulOutput("g++ (Ubuntu 13.2.0-1ubuntu1) 13.2.0\n")
 		outputs[probeKey(executable, "-dumpmachine")] = successfulOutput("x86_64-linux-gnu\n")
 		outputs[probeKey(executable, "--print-sysroot")] = successfulOutput(fixture.sysroot + "\n")
 	}

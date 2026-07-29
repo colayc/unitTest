@@ -41,7 +41,7 @@ var (
 	ErrInvalidToolchain   = errors.New("invalid toolchain")
 	errExecutableTooLarge = errors.New("toolchain executable exceeds size limit")
 
-	gccVersionPattern   = regexp.MustCompile(`(?i)\b(?:gcc|g\+\+|gnu compiler collection)\b[^\r\n]*?\b([0-9]+\.[0-9]+(?:\.[0-9]+)?)\b`)
+	gccVersionPattern   = regexp.MustCompile(`(?i)(?:\bgcc\b|(?:^|[^A-Za-z0-9_])g\+\+(?:$|[^A-Za-z0-9_])|\bgnu compiler collection\b)[^\r\n]*?\b([0-9]+\.[0-9]+(?:\.[0-9]+)?)\b`)
 	clangVersionPattern = regexp.MustCompile(`(?i)\bclang version ([0-9]+\.[0-9]+(?:\.[0-9]+)?)\b`)
 	versionPattern      = regexp.MustCompile(`^[0-9]+\.[0-9]+(?:\.[0-9]+)?$`)
 	triplePattern       = regexp.MustCompile(`^[A-Za-z0-9_+.]+(?:-[A-Za-z0-9_+.]+)+$`)

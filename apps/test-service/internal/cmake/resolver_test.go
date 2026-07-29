@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"unit-test-ide.local/test-service/internal/probe"
+	"unit-test-ide.local/test-service/internal/workspace"
 )
 
 func TestResolverDoesNotSearchPath(t *testing.T) {
@@ -650,11 +651,26 @@ func copyExecutable(t *testing.T, source, target string) string {
 func canonicalPath(t *testing.T, path string) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
-		canonical, err := filepath.Abs(path)
+		info, err := os.Stat(path)
 		if err != nil {
-			t.Fatalf("Abs(%q) error = %v", path, err)
+			t.Fatalf("Stat(%q) error = %v", path, err)
 		}
-		return filepath.Clean(canonical)
+		if info.IsDir() {
+			root, err := workspace.OpenRoot(path)
+			if err != nil {
+				t.Fatalf("OpenRoot(%q) error = %v", path, err)
+			}
+			return root.NativePath
+		}
+		parent, err := workspace.OpenRoot(filepath.Dir(path))
+		if err != nil {
+			t.Fatalf("OpenRoot(parent %q) error = %v", path, err)
+		}
+		canonical, err := parent.ResolveRelative(filepath.Base(path))
+		if err != nil {
+			t.Fatalf("ResolveRelative(%q) error = %v", path, err)
+		}
+		return canonical
 	}
 	canonical, err := filepath.EvalSymlinks(path)
 	if err != nil {

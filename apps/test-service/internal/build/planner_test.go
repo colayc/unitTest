@@ -220,6 +220,19 @@ func newPlannerFixture(t *testing.T) plannerFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	sourceDir, err = root.ResolveRelative("project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dataRootIdentity, err := workspace.OpenRoot(dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dataRoot = dataRootIdentity.NativePath
+	buildDir = filepath.Join(dataRoot, "build", "profile")
+	cmakePath = canonicalPlannerFile(t, cmakePath)
+	cCompiler = canonicalPlannerFile(t, cCompiler)
+	cxxCompiler = canonicalPlannerFile(t, cxxCompiler)
 	return plannerFixture{
 		root: root, dataRoot: dataRoot, sourceDir: sourceDir,
 		project: workspace.ProjectConfig{ID: "core", SourceDir: "project"},
@@ -241,4 +254,17 @@ func newPlannerFixture(t *testing.T) plannerFixture {
 		generation: strings.Repeat("d", 64),
 		targetID:   strings.Repeat("f", 64),
 	}
+}
+
+func canonicalPlannerFile(t *testing.T, path string) string {
+	t.Helper()
+	parent, err := workspace.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := parent.ResolveRelative(filepath.Base(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return canonical
 }

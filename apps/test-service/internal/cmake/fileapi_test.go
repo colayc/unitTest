@@ -123,6 +123,11 @@ func TestWriteQueryFailureCleansTemporaryFileAndPreservesDestination(t *testing.
 
 func TestWriteQueryInjectedPublishFailurePreservesOldQuery(t *testing.T) {
 	buildDir := t.TempDir()
+	buildRoot, err := workspace.OpenRoot(buildDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buildDir = buildRoot.NativePath
 	queryDir := filepath.Join(buildDir, ".cmake", "api", "v1", "query", "client-unit-test-ide")
 	if err := os.MkdirAll(queryDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -134,7 +139,7 @@ func TestWriteQueryInjectedPublishFailurePreservesOldQuery(t *testing.T) {
 	}
 	publishError := errors.New("injected publish failure")
 
-	err := writeQueryWithPublisher(buildDir, func(source, destination string) error {
+	err = writeQueryWithPublisher(buildDir, func(source, destination string) error {
 		if filepath.Dir(source) != queryDir || destination != queryPath {
 			t.Fatalf("publish paths = (%q, %q), want same-dir temp and %q", source, destination, queryPath)
 		}
@@ -1087,6 +1092,11 @@ func newFileAPIReaderForTest(t *testing.T, fixture fileAPIReplyFixture) *fileAPI
 func newFileAPIReplyFixture(t *testing.T) fileAPIReplyFixture {
 	t.Helper()
 	root := t.TempDir()
+	rootIdentity, err := workspace.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root = rootIdentity.NativePath
 	fixture := fileAPIReplyFixture{
 		sourceDir: filepath.Join(root, "source"),
 		buildDir:  filepath.Join(root, "build"),
