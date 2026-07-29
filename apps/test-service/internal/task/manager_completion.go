@@ -1,6 +1,9 @@
 package task
 
-import "errors"
+import (
+	"context"
+	"errors"
+)
 
 type pendingProcessCompletion struct {
 	Result      ProcessResult
@@ -50,7 +53,17 @@ func (m *Manager) commitClosedCompletion(
 	outcome := processCompletionOutcome(current, pending)
 	if outcome == OutcomeSucceeded &&
 		current.nextStep+1 < len(current.plan.Steps) {
-		if err := m.persistSuccessfulStep(current, pending.Result, active); err != nil {
+		var observerErr error
+		if m.stepObserver != nil {
+			observerErr = m.stepObserver.Succeeded(
+				context.Background(), current.task, current.plan.Steps[current.nextStep],
+			)
+		}
+		if observerErr != nil {
+			pending.Result = ProcessResult{Err: observerErr}
+			pending.FailPending = false
+			outcome = OutcomeInfrastructureFailed
+		} else if err := m.persistSuccessfulStep(current, pending.Result, active); err != nil {
 			if !errors.Is(err, ErrConflict) {
 				return err
 			}

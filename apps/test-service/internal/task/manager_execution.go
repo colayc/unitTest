@@ -169,6 +169,7 @@ func cloneExecutionPlan(plan ExecutionPlan) ExecutionPlan {
 		result.Steps[index].Process.Args = append([]string(nil), step.Process.Args...)
 		result.Steps[index].Process.Env = append([]string(nil), step.Process.Env...)
 		result.Steps[index].Public.Args = append([]string(nil), step.Public.Args...)
+		result.Steps[index].State = append(json.RawMessage(nil), step.State...)
 	}
 	return result
 }
@@ -245,6 +246,9 @@ func (m *Manager) start(request StartRequest, active map[string]*activeTask) tas
 		}
 		return taskResponse{task: stored}
 	}
+	if boundary, ok := request.Boundary.(ManagedExecutionBoundary); ok {
+		boundary.Adopt(stored.ID)
+	}
 	current := &activeTask{
 		task: stored, plan: request.Plan, boundary: request.Boundary,
 		timerStop: make(chan struct{}), timeoutStop: make(chan struct{}),
@@ -266,7 +270,7 @@ func (m *Manager) start(request StartRequest, active map[string]*activeTask) tas
 		return taskResponse{task: current.task, err: err}
 	}
 	if current.task.Status == StatusFinished && current.process == nil {
-		delete(active, stored.ID)
+		removeActiveTask(active, stored.ID)
 	}
 	return taskResponse{task: current.task}
 }
@@ -463,13 +467,17 @@ func (m *Manager) cleanupPreparedProcess(current *activeTask) {
 func (m *Manager) finishPendingStep(current *activeTask, active map[string]*activeTask) error {
 	_, err := m.finishExecution(current, ProcessResult{Err: errors.New("step preparation failed")}, OutcomeInfrastructureFailed, true, active)
 	if err == nil && m.canRemove(current) {
-		delete(active, current.task.ID)
+		removeActiveTask(active, current.task.ID)
 	}
 	return err
 }
 
 func (m *Manager) finish(current *activeTask, result ProcessResult, active map[string]*activeTask) {
 	m.flushOutput(current, active)
+	if active[current.task.ID] == nil {
+		return
+	}
+	m.closeDiagnosticParser(current, active)
 	if active[current.task.ID] == nil {
 		return
 	}
@@ -556,8 +564,9 @@ func (m *Manager) persistCommittedCreateFailure(
 		})
 		if err == nil {
 			current.task = stored
+			releaseExecutionBoundary(current)
 			m.stopActive(current)
-			delete(active, current.task.ID)
+			removeActiveTask(active, current.task.ID)
 			return stored, nil
 		}
 		if errors.Is(err, ErrConflict) && attempt == 0 {
@@ -565,7 +574,7 @@ func (m *Manager) persistCommittedCreateFailure(
 		}
 		current.recoveryRequired = true
 		m.stopActive(current)
-		delete(active, current.task.ID)
+		removeActiveTask(active, current.task.ID)
 		if !errors.Is(err, ErrConflict) {
 			m.tripStorage(active)
 		}
@@ -608,13 +617,31 @@ func (m *Manager) persistTerminal(
 		current.recoveryRequired = true
 		m.stopActive(current)
 		if current.process == nil {
-			delete(active, current.task.ID)
+			removeActiveTask(active, current.task.ID)
 		} else {
 			m.maybeStartClose(current)
 		}
 		return current.task, ErrConflict
 	}
 	panic("unreachable")
+}
+
+func releaseExecutionBoundary(current *activeTask) {
+	if current == nil || current.boundaryReleased {
+		return
+	}
+	current.boundaryReleased = true
+	if boundary, ok := current.boundary.(ManagedExecutionBoundary); ok {
+		_ = boundary.Release()
+	}
+}
+
+func removeActiveTask(active map[string]*activeTask, taskID string) {
+	current := active[taskID]
+	if current != nil {
+		releaseExecutionBoundary(current)
+	}
+	delete(active, taskID)
 }
 
 func terminalStepMutations(
@@ -719,6 +746,7 @@ func (m *Manager) persistFinished(
 		return current, err
 	}
 	owner.task = stored
+	releaseExecutionBoundary(owner)
 	if deleteLease && owner.process != nil {
 		owner.leasePersisted = false
 	}

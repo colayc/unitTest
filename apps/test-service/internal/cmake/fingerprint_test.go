@@ -130,6 +130,7 @@ func TestConfigureFingerprintIsCanonicalAndTracksConfigureGraph(t *testing.T) {
 		name   string
 		mutate func(*ProfileFingerprintInput)
 	}{
+		{"workspace generation", func(value *ProfileFingerprintInput) { value.WorkspaceGeneration = strings.Repeat("9", 64) }},
 		{"project", func(value *ProfileFingerprintInput) { value.Profile.ProjectID = "other" }},
 		{"profile", func(value *ProfileFingerprintInput) { value.Profile.ID = strings.Repeat("b", 64) }},
 		{"preset", func(value *ProfileFingerprintInput) { value.Profile.ConfigurePreset = "release" }},
@@ -290,6 +291,7 @@ func TestOrdinaryCPPContentDoesNotAffectConfigureFingerprint(t *testing.T) {
 
 func validFingerprintInputForTest() ProfileFingerprintInput {
 	return ProfileFingerprintInput{
+		WorkspaceGeneration: strings.Repeat("0", 64),
 		Profile: BuildProfile{
 			ID:              strings.Repeat("a", 64),
 			ProjectID:       "fixture",

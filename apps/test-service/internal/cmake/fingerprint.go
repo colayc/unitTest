@@ -13,13 +13,14 @@ type FingerprintFile struct {
 }
 
 type ProfileFingerprintInput struct {
-	Profile           BuildProfile
-	CMakeIdentity     string
-	ToolchainIdentity string
-	PresetInputs      []FingerprintFile
-	CMakeInputStates  []FingerprintFile
-	Cache             FingerprintFile
-	FileAPIState      []FingerprintFile
+	WorkspaceGeneration string
+	Profile             BuildProfile
+	CMakeIdentity       string
+	ToolchainIdentity   string
+	PresetInputs        []FingerprintFile
+	CMakeInputStates    []FingerprintFile
+	Cache               FingerprintFile
+	FileAPIState        []FingerprintFile
 }
 
 type BuildConfiguration struct {
@@ -28,24 +29,26 @@ type BuildConfiguration struct {
 }
 
 type configureFingerprintPayload struct {
-	Profile           BuildProfile      `json:"profile"`
-	CMakeIdentity     string            `json:"cmakeIdentity"`
-	ToolchainIdentity string            `json:"toolchainIdentity"`
-	PresetInputs      []FingerprintFile `json:"presetInputs"`
-	CMakeInputs       []FingerprintFile `json:"cmakeInputs"`
-	Cache             FingerprintFile   `json:"cache"`
-	FileAPIState      []FingerprintFile `json:"fileApiState"`
+	WorkspaceGeneration string            `json:"workspaceGeneration"`
+	Profile             BuildProfile      `json:"profile"`
+	CMakeIdentity       string            `json:"cmakeIdentity"`
+	ToolchainIdentity   string            `json:"toolchainIdentity"`
+	PresetInputs        []FingerprintFile `json:"presetInputs"`
+	CMakeInputs         []FingerprintFile `json:"cmakeInputs"`
+	Cache               FingerprintFile   `json:"cache"`
+	FileAPIState        []FingerprintFile `json:"fileApiState"`
 }
 
 func ConfigureFingerprint(input ProfileFingerprintInput) string {
 	payload := configureFingerprintPayload{
-		Profile:           canonicalProfile(input.Profile),
-		CMakeIdentity:     input.CMakeIdentity,
-		ToolchainIdentity: input.ToolchainIdentity,
-		PresetInputs:      canonicalFingerprintFiles(input.PresetInputs),
-		CMakeInputs:       canonicalFingerprintFiles(input.CMakeInputStates),
-		Cache:             canonicalFingerprintFile(input.Cache),
-		FileAPIState:      canonicalFingerprintFiles(input.FileAPIState),
+		WorkspaceGeneration: input.WorkspaceGeneration,
+		Profile:             canonicalProfile(input.Profile),
+		CMakeIdentity:       input.CMakeIdentity,
+		ToolchainIdentity:   input.ToolchainIdentity,
+		PresetInputs:        canonicalFingerprintFiles(input.PresetInputs),
+		CMakeInputs:         canonicalFingerprintFiles(input.CMakeInputStates),
+		Cache:               canonicalFingerprintFile(input.Cache),
+		FileAPIState:        canonicalFingerprintFiles(input.FileAPIState),
 	}
 	sum, err := canonicalSHA256(payload)
 	if err != nil {
@@ -62,7 +65,8 @@ func NeedsConfigure(previous BuildConfiguration, current ProfileFingerprintInput
 }
 
 func validProfileFingerprintInput(input ProfileFingerprintInput) bool {
-	if input.Profile.ID == "" || input.Profile.ProjectID == "" ||
+	if input.WorkspaceGeneration == "" ||
+		input.Profile.ID == "" || input.Profile.ProjectID == "" ||
 		input.CMakeIdentity == "" || input.ToolchainIdentity == "" ||
 		len(input.CMakeInputStates) == 0 || len(input.FileAPIState) == 0 ||
 		!validFingerprintFile(input.Cache) {

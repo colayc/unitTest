@@ -1074,11 +1074,10 @@ func TestManagerPublisherFailureQuiescesOtherActiveTaskForRecovery(t *testing.T)
 
 func TestManagerPublisherFailureCloseErrorHandsOffRecoveryWithoutTerminalization(t *testing.T) {
 	f := newManagerFixture(t)
-	first, err := f.manager.Start(context.Background(), task.StartRequest{
-		IdempotencyKey: testID(44),
-		Scenario:       task.ScenarioHang,
-		Timeout:        time.Hour,
-	})
+	boundary := &recordingManagedBoundary{}
+	firstRequest := simulationManagerRequest(testID(44), task.ScenarioHang, time.Hour)
+	firstRequest.Boundary = boundary
+	first, err := f.manager.Start(context.Background(), firstRequest)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1153,6 +1152,9 @@ func TestManagerPublisherFailureCloseErrorHandsOffRecoveryWithoutTerminalization
 		t.Fatalf("publisher circuit Close error did not hand off cleanly: Shutdown=%v Get=%v task=%#v durableEvents=%v publishedEvents=%v artifactSummaries=%d storedArtifacts=%d Close calls=%d",
 			shutdownErr, getErr, durableFirst, durableEvents, publishedEvents,
 			len(artifactSummaries), len(storedArtifacts), closeCalls)
+	}
+	if _, releases := boundary.state(); releases != 1 {
+		t.Fatalf("managed boundary releases after recovery handoff = %d, want 1", releases)
 	}
 }
 
@@ -1779,18 +1781,31 @@ type managerFixture struct {
 }
 
 func newManagerFixture(t *testing.T) *managerFixture {
-	return newManagerFixtureWithOptions(t, 0, 0)
+	return newManagerFixtureWithOptionsAndObserver(t, 0, 0, nil)
 }
 
 func newManagerFixtureWithCloseTimeout(t *testing.T, closeTimeout time.Duration) *managerFixture {
-	return newManagerFixtureWithOptions(t, closeTimeout, 0)
+	return newManagerFixtureWithOptionsAndObserver(t, closeTimeout, 0, nil)
 }
 
 func newManagerFixtureWithCommandQueue(t *testing.T, commandQueue int) *managerFixture {
-	return newManagerFixtureWithOptions(t, 0, commandQueue)
+	return newManagerFixtureWithOptionsAndObserver(t, 0, commandQueue, nil)
 }
 
 func newManagerFixtureWithOptions(t *testing.T, closeTimeout time.Duration, commandQueue int) *managerFixture {
+	return newManagerFixtureWithOptionsAndObserver(t, closeTimeout, commandQueue, nil)
+}
+
+func newManagerFixtureWithObserver(t *testing.T, observer task.StepObserver) *managerFixture {
+	return newManagerFixtureWithOptionsAndObserver(t, 0, 0, observer)
+}
+
+func newManagerFixtureWithOptionsAndObserver(
+	t *testing.T,
+	closeTimeout time.Duration,
+	commandQueue int,
+	observer task.StepObserver,
+) *managerFixture {
 	t.Helper()
 	clock := newFakeClock()
 	store := newFakeStore()
@@ -1801,7 +1816,8 @@ func newManagerFixtureWithOptions(t *testing.T, closeTimeout time.Duration, comm
 	var next byte = 100
 	manager, err := task.NewManager(task.ManagerConfig{
 		Store: store, Publisher: publisher, Processes: processes, Artifacts: artifacts,
-		Clock: clock, NewID: func() string { next++; return testID(next) },
+		StepObserver: observer,
+		Clock:        clock, NewID: func() string { next++; return testID(next) },
 		ServiceExecutable: "trusted-service", ServiceInstanceID: testID(99),
 		TerminationGrace: time.Second, OutputFlushInterval: 25 * time.Millisecond,
 		ProcessCloseTimeout: closeTimeout, CommandQueue: commandQueue,

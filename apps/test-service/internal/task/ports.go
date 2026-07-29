@@ -61,6 +61,10 @@ type ProcessFactory interface {
 	Prepare(context.Context, ProcessSpec, string, string) (ManagedProcess, error)
 }
 
+type StepObserver interface {
+	Succeeded(context.Context, Task, ExecutionStep) error
+}
+
 type ProcessSpec struct {
 	// ProcessSpec is runtime-only service state. Its Env field must not be
 	// persisted or exposed through the protocol.

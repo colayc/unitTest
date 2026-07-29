@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"unit-test-ide.local/test-service/internal/diagnostic"
 	"unit-test-ide.local/test-service/internal/task"
 )
 
@@ -141,6 +142,200 @@ func TestManagerJournalsStepFinishBeforeStartingNextStep(t *testing.T) {
 		t.Fatalf("events after second Step starts = %v", got)
 	}
 	second.complete(task.ProcessResult{ExitCode: 0})
+}
+
+func TestManagerRunsSuccessfulStepObserverBeforeStartingNextStep(t *testing.T) {
+	observer := &recordingStepObserver{}
+	f := newManagerFixtureWithObserver(t, observer)
+	first := f.process
+	second := newFakeProcess()
+	f.processes.queue = []*fakeProcess{first, second}
+	t.Cleanup(func() { second.completeOnce(task.ProcessResult{Err: errors.New("test cleanup")}) })
+
+	started, err := f.manager.Start(
+		context.Background(),
+		twoStepStartRequest(testID(68), time.Minute, fixedBoundary{}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.complete(task.ProcessResult{ExitCode: 0})
+	f.awaitEventType(t, task.EventTaskStepStarted, 2)
+	if observer.calls != 1 || observer.taskID != started.ID || observer.step.ID != "first" {
+		t.Fatalf("observer = %#v", observer)
+	}
+	if second.startCalls() != 1 {
+		t.Fatalf("second Process Start calls = %d, want 1", second.startCalls())
+	}
+	second.complete(task.ProcessResult{ExitCode: 0})
+}
+
+func TestManagerObserverFailureDoesNotStartNextStep(t *testing.T) {
+	observer := &recordingStepObserver{err: task.ErrStorageUnavailable}
+	f := newManagerFixtureWithObserver(t, observer)
+	first := f.process
+	second := newFakeProcess()
+	f.processes.queue = []*fakeProcess{first, second}
+
+	started, err := f.manager.Start(
+		context.Background(),
+		twoStepStartRequest(testID(67), time.Minute, fixedBoundary{}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.complete(task.ProcessResult{ExitCode: 0})
+	f.awaitEventType(t, task.EventTaskFinished, 1)
+	if observer.calls != 1 {
+		t.Fatalf("observer calls = %d, want 1", observer.calls)
+	}
+	if second.startCalls() != 0 {
+		t.Fatalf("second Process Start calls = %d, want 0", second.startCalls())
+	}
+	finished, err := f.manager.Get(context.Background(), started.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finished.Outcome != task.OutcomeInfrastructureFailed ||
+		finished.Steps[0].Status != task.StepFailed ||
+		finished.Steps[1].Status != task.StepSkipped {
+		t.Fatalf("finished task = %#v", finished)
+	}
+}
+
+func TestManagerOwnsManagedBoundaryUntilTerminalCommit(t *testing.T) {
+	boundary := &recordingManagedBoundary{}
+	f := newManagerFixture(t)
+	first := f.process
+	second := newFakeProcess()
+	f.processes.queue = []*fakeProcess{first, second}
+
+	started, err := f.manager.Start(
+		context.Background(),
+		twoStepStartRequest(testID(66), time.Minute, boundary),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adoptedTaskID, releases := boundary.state()
+	if adoptedTaskID != started.ID || releases != 0 {
+		t.Fatalf("boundary after Start = task %q releases %d", adoptedTaskID, releases)
+	}
+	first.complete(task.ProcessResult{ExitCode: 0})
+	f.awaitEventType(t, task.EventTaskStepStarted, 2)
+	_, releases = boundary.state()
+	if releases != 0 {
+		t.Fatalf("boundary releases before final Step = %d", releases)
+	}
+	second.complete(task.ProcessResult{ExitCode: 0})
+	f.awaitEventType(t, task.EventTaskFinished, 1)
+	_, releases = boundary.state()
+	if releases != 1 {
+		t.Fatalf("boundary releases after terminal commit = %d, want 1", releases)
+	}
+}
+
+func TestManagerPublishesStructuredDiagnosticsFromRuntimeOnlyStepParser(t *testing.T) {
+	f := newManagerFixture(t)
+	request := twoStepStartRequest(testID(65), time.Minute, fixedBoundary{})
+	request.Plan.Steps[0].DiagnosticParser = &staticDiagnosticParser{
+		values: []diagnostic.Diagnostic{{
+			Severity: "error", Code: "C100", Message: "compile failed",
+			FileURI: "file:///workspace/main.cpp",
+			Range:   &diagnostic.Range{Start: diagnostic.Position{Line: 11, Character: 2}},
+		}},
+	}
+	started, err := f.manager.Start(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.process.output(task.ProcessOutput{Stream: "stderr", Data: []byte("diagnostic\n")})
+	f.awaitEventType(t, task.EventTaskDiagnostic, 1)
+	events := f.store.eventsForTask(started.ID)
+	var payload struct {
+		Diagnostic struct {
+			Severity  string `json:"severity"`
+			Code      string `json:"code"`
+			Message   string `json:"message"`
+			SourceURI string `json:"sourceUri"`
+			Line      int    `json:"line"`
+			Column    int    `json:"column"`
+		} `json:"diagnostic"`
+	}
+	found := false
+	for _, event := range events {
+		if event.Type != task.EventTaskDiagnostic {
+			continue
+		}
+		found = true
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !found || payload.Diagnostic.Severity != "error" ||
+		payload.Diagnostic.Code != "C100" ||
+		payload.Diagnostic.Message != "compile failed" ||
+		payload.Diagnostic.SourceURI != "file:///workspace/main.cpp" ||
+		payload.Diagnostic.Line != 12 || payload.Diagnostic.Column != 3 {
+		t.Fatalf("diagnostic payload = %#v", payload)
+	}
+	f.process.complete(task.ProcessResult{ExitCode: 1})
+}
+
+type recordingStepObserver struct {
+	calls  int
+	taskID string
+	step   task.ExecutionStep
+	err    error
+}
+
+type recordingManagedBoundary struct {
+	fixedBoundary
+	mu            sync.Mutex
+	adoptedTaskID string
+	releases      int
+}
+
+type staticDiagnosticParser struct {
+	values []diagnostic.Diagnostic
+}
+
+func (p *staticDiagnosticParser) Feed(string, []byte) []diagnostic.Diagnostic {
+	values := p.values
+	p.values = nil
+	return values
+}
+
+func (p *staticDiagnosticParser) Close() []diagnostic.Diagnostic { return nil }
+
+func (b *recordingManagedBoundary) Adopt(taskID string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.adoptedTaskID = taskID
+}
+
+func (b *recordingManagedBoundary) Release() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.releases++
+	return nil
+}
+
+func (b *recordingManagedBoundary) state() (string, int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.adoptedTaskID, b.releases
+}
+
+func (o *recordingStepObserver) Succeeded(
+	_ context.Context,
+	value task.Task,
+	step task.ExecutionStep,
+) error {
+	o.calls++
+	o.taskID = value.ID
+	o.step = step
+	return o.err
 }
 
 func TestManagerStepEventPublisherFailureKeepsDurableProcessHandoff(t *testing.T) {

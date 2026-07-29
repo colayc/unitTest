@@ -7,6 +7,8 @@ import (
 	"reflect"
 	"strings"
 	"time"
+
+	"unit-test-ide.local/test-service/internal/diagnostic"
 )
 
 type Kind string
@@ -38,6 +40,7 @@ const (
 	maxProcessSpecArgs    = 256
 	maxProcessSpecEnv     = 256
 	maxCommandSummaryArgs = 256
+	maxExecutionStepState = 256 * 1024
 )
 
 type CommandSummary struct {
@@ -46,10 +49,12 @@ type CommandSummary struct {
 }
 
 type ExecutionStep struct {
-	ID      string
-	Kind    StepKind
-	Process ProcessSpec
-	Public  CommandSummary
+	ID               string
+	Kind             StepKind
+	Process          ProcessSpec
+	Public           CommandSummary
+	State            json.RawMessage
+	DiagnosticParser diagnostic.Parser
 }
 
 type ExecutionPlan struct {
@@ -63,6 +68,12 @@ type ExecutionPlan struct {
 type ExecutionBoundary interface {
 	ValidateExecutable(path string) error
 	ValidateWorkingDirectory(path string) error
+}
+
+type ManagedExecutionBoundary interface {
+	ExecutionBoundary
+	Adopt(string)
+	Release() error
 }
 
 type StartRequest struct {
@@ -90,7 +101,9 @@ func ValidatePlan(plan ExecutionPlan, boundary ExecutionBoundary) error {
 			containsNUL(step.Process.Executable) || containsNUL(step.Process.Dir) ||
 			len(step.Process.Args) > maxProcessSpecArgs ||
 			len(step.Process.Env) > maxProcessSpecEnv ||
-			len(step.Public.Args) > maxCommandSummaryArgs {
+			len(step.Public.Args) > maxCommandSummaryArgs ||
+			len(step.State) > maxExecutionStepState ||
+			len(step.State) != 0 && !json.Valid(step.State) {
 			return ErrInvalidArgument
 		}
 		if _, exists := ids[step.ID]; exists {

@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
+
+	"unit-test-ide.local/test-service/internal/diagnostic"
 )
 
 const (
@@ -25,6 +27,7 @@ type ManagerConfig struct {
 	Publisher           Publisher
 	Processes           ProcessFactory
 	Artifacts           ArtifactWriter
+	StepObserver        StepObserver
 	Clock               Clock
 	NewID               IDGenerator
 	ServiceExecutable   string
@@ -40,6 +43,7 @@ type Manager struct {
 	publisher           Publisher
 	processes           ProcessFactory
 	artifacts           ArtifactWriter
+	stepObserver        StepObserver
 	clock               Clock
 	newID               IDGenerator
 	serviceExecutable   string
@@ -119,6 +123,7 @@ type activeTask struct {
 	task                  Task
 	plan                  ExecutionPlan
 	boundary              ExecutionBoundary
+	boundaryReleased      bool
 	nextStep              int
 	process               ManagedProcess
 	pendingCompletion     *pendingProcessCompletion
@@ -298,7 +303,8 @@ func NewManager(config ManagerConfig) (*Manager, error) {
 	}
 	manager := &Manager{
 		store: config.Store, publisher: config.Publisher, processes: config.Processes, artifacts: config.Artifacts,
-		clock: config.Clock, newID: config.NewID, serviceExecutable: config.ServiceExecutable,
+		stepObserver: config.StepObserver,
+		clock:        config.Clock, newID: config.NewID, serviceExecutable: config.ServiceExecutable,
 		serviceInstanceID: config.ServiceInstanceID, terminationGrace: config.TerminationGrace, processCloseTimeout: config.ProcessCloseTimeout,
 		outputFlushInterval: config.OutputFlushInterval, commands: make(chan any, config.CommandQueue),
 		shutdownSignal: make(chan struct{}, 1), stopped: make(chan struct{}),
@@ -519,7 +525,7 @@ func (m *Manager) loop() {
 						m.abandon(current)
 					}
 					if active[string(value)] == current && current.task.Status == StatusFinished {
-						delete(active, string(value))
+						removeActiveTask(active, string(value))
 					}
 					break
 				}
@@ -540,7 +546,7 @@ func (m *Manager) loop() {
 			if current := active[value.taskID]; current != nil && !current.processCompleted {
 				m.finish(current, value.result, active)
 				if active[value.taskID] == current && m.canRemove(current) {
-					delete(active, value.taskID)
+					removeActiveTask(active, value.taskID)
 				}
 			}
 		case terminationResultCommand:
@@ -566,7 +572,7 @@ func (m *Manager) loop() {
 					if (m.circuitFailed() || current.recoveryRequired) && recoveryHandoffSafe {
 						current.recoveryRequired = true
 						m.stopActive(current)
-						delete(active, value.taskID)
+						removeActiveTask(active, value.taskID)
 					} else {
 						current.closeStarted = false
 						current.closeComplete = false
@@ -582,7 +588,7 @@ func (m *Manager) loop() {
 					}
 				}
 				if value.err == nil && m.canRemove(current) {
-					delete(active, value.taskID)
+					removeActiveTask(active, value.taskID)
 				}
 			}
 		case shutdownCommand:
@@ -603,7 +609,7 @@ func (m *Manager) loop() {
 							m.abandon(current)
 						}
 						if active[current.task.ID] == current && current.task.Status == StatusFinished {
-							delete(active, current.task.ID)
+							removeActiveTask(active, current.task.ID)
 						}
 					} else if current.cleanupWithoutDone && !current.terminationComplete {
 						if !current.terminating {
@@ -663,7 +669,7 @@ func (m *Manager) cancel(id string, active map[string]*activeTask) taskResponse 
 				return taskResponse{task: current.task, err: finishErr}
 			}
 			if active[id] == current && current.task.Status == StatusFinished {
-				delete(active, id)
+				removeActiveTask(active, id)
 			}
 			return taskResponse{task: finished}
 		}
@@ -708,7 +714,7 @@ func (m *Manager) cancel(id string, active map[string]*activeTask) taskResponse 
 			return taskResponse{task: current.task, err: finishErr}
 		}
 		if active[id] == current && current.task.Status == StatusFinished {
-			delete(active, id)
+			removeActiveTask(active, id)
 		}
 		return taskResponse{task: finished}
 	}
@@ -739,7 +745,7 @@ func (m *Manager) finishCancellationConflict(current *activeTask, active map[str
 			m.abandon(current)
 		}
 		if active[current.task.ID] == current && current.task.Status == StatusFinished {
-			delete(active, current.task.ID)
+			removeActiveTask(active, current.task.ID)
 		}
 		return
 	}
@@ -803,6 +809,14 @@ func (m *Manager) armTimeout(current *activeTask) {
 type timeoutCommand string
 
 func (m *Manager) acceptOutput(current *activeTask, output ProcessOutput, active map[string]*activeTask) {
+	if current.nextStep < len(current.plan.Steps) {
+		if parser := current.plan.Steps[current.nextStep].DiagnosticParser; parser != nil {
+			m.persistDiagnostics(current, parser.Feed(output.Stream, output.Data), active)
+			if m.circuitFailed() {
+				return
+			}
+		}
+	}
 	if len(output.Data) == 0 || current.truncated {
 		return
 	}
@@ -841,6 +855,54 @@ func (m *Manager) acceptOutput(current *activeTask, output ProcessOutput, active
 	}
 	if current.bufferedBytes > 0 && !current.flushPending {
 		m.armFlush(current)
+	}
+}
+
+func (m *Manager) closeDiagnosticParser(current *activeTask, active map[string]*activeTask) {
+	if current.nextStep >= len(current.plan.Steps) {
+		return
+	}
+	parser := current.plan.Steps[current.nextStep].DiagnosticParser
+	if parser == nil {
+		return
+	}
+	m.persistDiagnostics(current, parser.Close(), active)
+}
+
+func (m *Manager) persistDiagnostics(
+	current *activeTask,
+	values []diagnostic.Diagnostic,
+	active map[string]*activeTask,
+) {
+	for _, value := range values {
+		payload := map[string]any{
+			"severity": value.Severity,
+			"code":     value.Code,
+			"message":  value.Message,
+		}
+		if value.FileURI != "" {
+			payload["sourceUri"] = value.FileURI
+		}
+		if value.Range != nil {
+			payload["line"] = value.Range.Start.Line + 1
+			payload["column"] = value.Range.Start.Character + 1
+		}
+		event, err := m.store.AppendEvent(
+			context.Background(),
+			current.task.ID,
+			eventDraft(current.task.ID, EventTaskDiagnostic, m.clock.Now(), map[string]any{
+				"diagnostic": payload,
+			}),
+		)
+		if err != nil {
+			m.tripStorage(active)
+			return
+		}
+		current.task.LastSequence = event.Sequence
+		if !m.publish(event) {
+			m.tripPublisher(active)
+			return
+		}
 	}
 }
 
@@ -1070,7 +1132,7 @@ func (m *Manager) quiesceActive(active map[string]*activeTask) {
 		current.recoveryRequired = true
 		m.stopActive(current)
 		if current.process == nil {
-			delete(active, taskID)
+			removeActiveTask(active, taskID)
 			continue
 		}
 		if current.cleanupWithoutDone && !current.terminationComplete {
