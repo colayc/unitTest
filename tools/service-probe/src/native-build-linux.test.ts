@@ -242,6 +242,53 @@ test("late named-target build establishes a fresh workspace checkpoint", async (
   assert.deepEqual(starts[0]?.targetIds, [targetId]);
 });
 
+test("late named-target build repeats its checkpoint when target listing is stale", async () => {
+  let inspections = 0;
+  const listings: string[] = [];
+  const starts: Array<{ workspaceGeneration: string; targetIds: string[] }> = [];
+  const client = {
+    inspectWorkspace: async () => {
+      inspections++;
+      const snapshot = workspaceSnapshot("gcc");
+      snapshot.workspaceGeneration = (inspections === 1 ? "c" : "e").repeat(64);
+      return snapshot;
+    },
+    listCMakeTargets: async (request: { workspaceGeneration: string }) => {
+      listings.push(request.workspaceGeneration);
+      if (listings.length === 1) {
+        throw new ProtocolError("WORKSPACE_CHANGED", "workspace generation is stale", true);
+      }
+      return {
+        workspaceGeneration: request.workspaceGeneration,
+        projectId: "root",
+        buildProfileId: "b".repeat(64),
+        targets: [{ targetId: "f".repeat(64), name: "slow_target" }],
+      };
+    },
+    startCMakeBuild: async (
+      request: { workspaceGeneration: string; targetIds: string[] },
+    ) => {
+      starts.push(request);
+      return { taskId: "task-after-target-list-refresh" };
+    },
+  } as unknown as ProtocolClient;
+
+  const task = await __testing.startNamedTargetBuildAtCheckpoint(
+    client,
+    "gcc",
+    "cancellation-reconnect",
+    "slow_target",
+    60_000,
+  );
+
+  assert.equal(task.taskId, "task-after-target-list-refresh");
+  assert.equal(inspections, 2);
+  assert.deepEqual(listings, ["c".repeat(64), "e".repeat(64)]);
+  assert.equal(starts.length, 1);
+  assert.equal(starts[0]?.workspaceGeneration, "e".repeat(64));
+  assert.deepEqual(starts[0]?.targetIds, ["f".repeat(64)]);
+});
+
 test("late named-target build relists its target after one stale checkpoint", async () => {
   let inspections = 0;
   const listings: Array<{ workspaceGeneration: string }> = [];

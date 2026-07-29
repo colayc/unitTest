@@ -271,7 +271,7 @@ Code-OSS 产品外壳
 - 状态、诊断和制品使用 Golden File 验证。
 - Windows 路径、Linux 路径和远程 URI 分别测试。
 - 取消、超时、断线、重连和服务重启必须覆盖。
-- 长运行 E2E 场景在提交后期 target 任务前必须重新 inspect workspace，并按最新 `workspaceGeneration` 重新 list target；若 Task 创建前收到一次 `WORKSPACE_CHANGED`，允许将 inspect、target list 和 Start 整体重试一次，禁止复用旧 generation 的 target ID 或无界重试。
+- 长运行 E2E 场景在提交后期 target 任务前必须重新 inspect workspace，并按最新 `workspaceGeneration` 重新 list target；若 target list 或 Start 收到一次 `WORKSPACE_CHANGED`，允许将 inspect、target list 和 Start 整体重试一次，禁止复用旧 generation 的 target ID 或无界重试。
 
 ### 13.3 集成测试
 

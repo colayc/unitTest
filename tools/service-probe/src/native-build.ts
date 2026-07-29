@@ -788,20 +788,20 @@ async function startNamedTargetBuildAtCheckpoint(
 ) {
   for (let attempt = 1; attempt <= 2; attempt++) {
     const selected = await inspectEstablishedFamily(client, family, scenario);
-    const targets = await withNamedTimeout(
-      `${family} ${scenario} target listing attempt ${attempt}`,
-      client.listCMakeTargets({
-        workspaceGeneration: selected.snapshot.workspaceGeneration,
-        projectId: selected.projectId,
-        buildProfileId: selected.profile.buildProfileId,
-      }),
-      nativeTimeoutMs,
-    );
-    const target = targets.targets.find((candidate) => candidate.name === targetName);
-    if (target === undefined) {
-      throw new Error(`${family} ${scenario} target ${targetName} is absent`);
-    }
     try {
+      const targets = await withNamedTimeout(
+        `${family} ${scenario} target listing attempt ${attempt}`,
+        client.listCMakeTargets({
+          workspaceGeneration: selected.snapshot.workspaceGeneration,
+          projectId: selected.projectId,
+          buildProfileId: selected.profile.buildProfileId,
+        }),
+        nativeTimeoutMs,
+      );
+      const target = targets.targets.find((candidate) => candidate.name === targetName);
+      if (target === undefined) {
+        throw new Error(`${family} ${scenario} target ${targetName} is absent`);
+      }
       return await startBuild(client, selected, [target.targetId], timeoutMs);
     } catch (error) {
       if (

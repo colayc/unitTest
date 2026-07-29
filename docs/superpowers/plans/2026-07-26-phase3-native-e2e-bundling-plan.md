@@ -407,7 +407,7 @@ Golden 只记录跨版本稳定基准：
 }
 ```
 
-不同 compiler family 分文件记录允许的 `codePattern`；MSVC/clang-cl 文件使用 `^(C[0-9]+|COMPILER_ERROR)$`，GCC/Clang 文件使用 `^COMPILER_ERROR$`。clang-cl 未输出 numeric code 时由 Service 规范化为 `COMPILER_ERROR`，不能产生违反 Protocol/ArtifactStore 非空 code 不变量的 Diagnostic。MSVC/clang-cl build parser 对未匹配 compiler/`LNKxxxx` shape 的行继续调用共享 Linker parser，因此 `lld-link: error:` 规范化为 `LLD_LINK_ERROR`；两份 linker golden 都必须拒绝空 code。每个隔离 diagnostic fixture 若在首次 Start 收到 Task 创建前的 `WORKSPACE_CHANGED`，只重新 inspect 并用新 idempotency key 重试一次，第二次 stale 或其他错误仍失败。长运行主矩阵的 cancellation/timeout 场景在 Start 前建立新 checkpoint：重新 inspect、按该 generation list `slow_target`，并在首次 `WORKSPACE_CHANGED` 后将整个 checkpoint 流程重试一次；target ID 不得跨 generation 复用。Linker golden 的 `messageContains` 固定为 `native_missing_symbol`，configure golden 固定为 `UNIT_TEST_IDE_CONFIGURE_FAILURE`。完整原始 message 只检查 marker，不逐字固定 Hosted Runner 文案。
+不同 compiler family 分文件记录允许的 `codePattern`；MSVC/clang-cl 文件使用 `^(C[0-9]+|COMPILER_ERROR)$`，GCC/Clang 文件使用 `^COMPILER_ERROR$`。clang-cl 未输出 numeric code 时由 Service 规范化为 `COMPILER_ERROR`，不能产生违反 Protocol/ArtifactStore 非空 code 不变量的 Diagnostic。MSVC/clang-cl build parser 对未匹配 compiler/`LNKxxxx` shape 的行继续调用共享 Linker parser，因此 `lld-link: error:` 规范化为 `LLD_LINK_ERROR`；两份 linker golden 都必须拒绝空 code。每个隔离 diagnostic fixture 若在首次 Start 收到 Task 创建前的 `WORKSPACE_CHANGED`，只重新 inspect 并用新 idempotency key 重试一次，第二次 stale 或其他错误仍失败。长运行主矩阵的 cancellation/timeout 场景在 Start 前建立新 checkpoint：重新 inspect、按该 generation list `slow_target`，并在 target list 或 Start 首次返回 `WORKSPACE_CHANGED` 后将整个 checkpoint 流程重试一次；target ID 不得跨 generation 复用。Linker golden 的 `messageContains` 固定为 `native_missing_symbol`，configure golden 固定为 `UNIT_TEST_IDE_CONFIGURE_FAILURE`。完整原始 message 只检查 marker，不逐字固定 Hosted Runner 文案。
 
 - [x] **Step 5：实现安全复制和规范化**
 
@@ -526,7 +526,7 @@ UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS=gcc,clang pnpm --filter @unit-test-ide/
 - 断线后以 sequence 重连，不重复或遗漏 Step/Diagnostic event；
 - `../`、workspace 外 Preset include 与 symlink escape 在进程创建前拒绝。
 
-取消/超时 fixture 由 CMake project 构建受控的长运行 custom target；native runner 在每个后期场景前重新 inspect workspace，并按最新 generation 重新 list `slow_target`。首次 Start 若因并发 workspace 变化返回 `WORKSPACE_CHANGED`，只允许重新建立一次完整 checkpoint，第二次 stale 直接失败。runner 等待 `task.step_started` 后再 cancel，禁止固定 sleep 作为同步机制。
+取消/超时 fixture 由 CMake project 构建受控的长运行 custom target；native runner 在每个后期场景前重新 inspect workspace，并按最新 generation 重新 list `slow_target`。target list 或 Start 首次因并发 workspace 变化返回 `WORKSPACE_CHANGED` 时，只允许重新建立一次完整 checkpoint，第二次 stale 直接失败。runner 等待 `task.step_started` 后再 cancel，禁止固定 sleep 作为同步机制。
 
 - [x] **Step 6：写稳定工具链报告**
 
