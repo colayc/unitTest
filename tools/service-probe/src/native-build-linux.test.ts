@@ -189,6 +189,82 @@ test("declared required family absence fails and bundle preflight stays before l
   assert.equal(workspaces, 0);
 });
 
+test("generated family build repeats its fresh checkpoint after one stale Start", async () => {
+  let inspections = 0;
+  const starts: Array<{
+    idempotencyKey: string;
+    workspaceGeneration: string;
+    targetIds: string[];
+  }> = [];
+  const client = {
+    inspectWorkspace: async () => {
+      inspections++;
+      const snapshot = workspaceSnapshot("gcc");
+      snapshot.workspaceGeneration = (inspections === 1 ? "c" : "e").repeat(64);
+      return snapshot;
+    },
+    startCMakeBuild: async (
+      request: {
+        idempotencyKey: string;
+        workspaceGeneration: string;
+        targetIds: string[];
+      },
+    ) => {
+      starts.push(request);
+      if (starts.length === 1) {
+        throw new ProtocolError("WORKSPACE_CHANGED", "workspace generation is stale", true);
+      }
+      return { taskId: "task-after-family-refresh" };
+    },
+  } as unknown as ProtocolClient;
+
+  const task = await __testing.startFamilyBuildAtCheckpoint(
+    client,
+    "gcc",
+    "configure-invalidation",
+    [],
+    60_000,
+  );
+
+  assert.equal(task.taskId, "task-after-family-refresh");
+  assert.equal(task.selected.snapshot.workspaceGeneration, "e".repeat(64));
+  assert.equal(inspections, 2);
+  assert.deepEqual(
+    starts.map((request) => request.workspaceGeneration),
+    ["c".repeat(64), "e".repeat(64)],
+  );
+  assert.deepEqual(starts.map((request) => request.targetIds), [[], []]);
+  assert.notEqual(starts[0]?.idempotencyKey, starts[1]?.idempotencyKey);
+});
+
+test("generated family stale-checkpoint retry is bounded to one", async () => {
+  let inspections = 0;
+  let starts = 0;
+  const client = {
+    inspectWorkspace: async () => {
+      inspections++;
+      return workspaceSnapshot("gcc");
+    },
+    startCMakeBuild: async () => {
+      starts++;
+      throw new ProtocolError("WORKSPACE_CHANGED", "workspace generation is stale", true);
+    },
+  } as unknown as ProtocolClient;
+
+  await assert.rejects(
+    __testing.startFamilyBuildAtCheckpoint(
+      client,
+      "gcc",
+      "default-build",
+      [],
+      60_000,
+    ),
+    (error) => error instanceof ProtocolError && error.code === "WORKSPACE_CHANGED",
+  );
+  assert.equal(inspections, 2);
+  assert.equal(starts, 2);
+});
+
 test("late named-target build establishes a fresh workspace checkpoint", async () => {
   const inspections: string[] = [];
   const listings: Array<{ workspaceGeneration: string }> = [];

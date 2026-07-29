@@ -384,25 +384,24 @@ async function executeCoreScenarios(
     client.subscribeEvents(0),
     nativeTimeoutMs,
   );
-  const first = await startBuild(client, context, [], 60_000);
+  const first = await startFamilyBuildAtCheckpoint(
+    client,
+    context.family,
+    "default-build",
+    [],
+    60_000,
+  );
   const firstEvents = await waitForTask(client, subscription, first.taskId);
   assertStepOrder(firstEvents, ["configure", "build"], "first native build");
 
-  const targets = await withNamedTimeout(
-    `${context.family} target listing`,
-    client.listCMakeTargets({
-      workspaceGeneration: context.snapshot.workspaceGeneration,
-      projectId: context.projectId,
-      buildProfileId: context.profile.buildProfileId,
-    }),
-    nativeTimeoutMs,
-  );
-  const secondary = targets.targets.find((target) => target.name === "secondary_app");
-  if (secondary === undefined) {
-    throw new Error(`${context.family} native target secondary_app is absent`);
-  }
   reportNativeScenario(context.family, "secondary-target");
-  const second = await startBuild(client, context, [secondary.targetId], 60_000);
+  const second = await startNamedTargetBuildAtCheckpoint(
+    client,
+    context.family,
+    "secondary-target",
+    "secondary_app",
+    60_000,
+  );
   const secondEvents = await waitForTask(client, subscription, second.taskId);
   assertStepOrder(secondEvents, ["build"], "unchanged native build");
 
@@ -412,26 +411,44 @@ async function executeCoreScenarios(
     "\n# Native E2E configure invalidation\n",
     "utf8",
   );
-  const third = await startBuild(client, context, [], 60_000);
+  const third = await startFamilyBuildAtCheckpoint(
+    client,
+    context.family,
+    "configure-invalidation",
+    [],
+    60_000,
+  );
   const thirdEvents = await waitForTask(client, subscription, third.taskId);
   assertStepOrder(thirdEvents, ["configure", "build"], "changed CMake input build");
 
   reportNativeScenario(context.family, "typed-rejections");
-  await expectProtocolError(
-    () => startBuild(client, context, ["f".repeat(64)], 60_000),
-    "TARGET_NOT_FOUND",
+  await withEstablishedFamilyCheckpoint(
+    client,
+    context.family,
+    "unknown-target-rejected",
+    (selected) =>
+      expectProtocolError(
+        () => startBuild(client, selected, ["f".repeat(64)], 60_000),
+        "TARGET_NOT_FOUND",
+      ),
   );
-  await expectProtocolError(
-    () => client.startCMakeBuild({
-      idempotencyKey: randomBytes(16).toString("hex"),
-      workspaceGeneration: "0".repeat(64),
-      projectId: context.projectId,
-      buildProfileId: context.profile.buildProfileId,
-      targetIds: [],
-      jobs: 2,
-      timeoutMs: 60_000,
-    }),
-    "WORKSPACE_CHANGED",
+  await withEstablishedFamilyCheckpoint(
+    client,
+    context.family,
+    "stale-generation-rejected",
+    (selected) =>
+      expectProtocolError(
+        () => client.startCMakeBuild({
+          idempotencyKey: randomBytes(16).toString("hex"),
+          workspaceGeneration: "0".repeat(64),
+          projectId: selected.projectId,
+          buildProfileId: selected.profile.buildProfileId,
+          targetIds: [],
+          jobs: 2,
+          timeoutMs: 60_000,
+        }),
+        "WORKSPACE_CHANGED",
+      ),
   );
 
   reportNativeScenario(context.family, "cancellation-reconnect");
@@ -531,22 +548,10 @@ async function executeCoreScenarios(
   }
 
   reportNativeScenario(context.family, "service-recovery");
-  const recoverySnapshot = await withNamedTimeout(
-    `${context.family} recovery workspace inspection`,
-    context.fixture.client.inspectWorkspace(),
-    nativeTimeoutMs,
-  );
-  const recoverySelected = selectGeneratedProfile(recoverySnapshot, context.family);
-  if (recoverySelected === undefined) {
-    throw new Error(`${context.family} recovery toolchain profile is absent`);
-  }
-  const recoveryContext: FamilyExecutionContext = {
-    ...context,
-    ...recoverySelected,
-  };
-  const recoveryReady = await startBuild(
+  const recoveryReady = await startFamilyBuildAtCheckpoint(
     context.fixture.client,
-    recoveryContext,
+    context.family,
+    "service-recovery-ready",
     [],
     60_000,
   );
@@ -555,25 +560,11 @@ async function executeCoreScenarios(
     subscription,
     recoveryReady.taskId,
   );
-  const recoveryTargets = await withNamedTimeout(
-    `${context.family} recovery target listing`,
-    context.fixture.client.listCMakeTargets({
-      workspaceGeneration: recoverySnapshot.workspaceGeneration,
-      projectId: recoverySelected.projectId,
-      buildProfileId: recoverySelected.profile.buildProfileId,
-    }),
-    nativeTimeoutMs,
-  );
-  const recoverySlow = recoveryTargets.targets.find(
-    (target) => target.name === "slow_target",
-  );
-  if (recoverySlow === undefined) {
-    throw new Error(`${context.family} recovery target slow_target is absent`);
-  }
-  const recoverable = await startBuild(
+  const recoverable = await startNamedTargetBuildAtCheckpoint(
     context.fixture.client,
-    recoveryContext,
-    [recoverySlow.targetId],
+    context.family,
+    "service-recovery-interruption",
+    "slow_target",
     60_000,
   );
   await waitForStep(subscription, recoverable.taskId, "build");
@@ -594,10 +585,14 @@ async function executeCoreScenarios(
     context.fixture.client.inspectWorkspace(),
     nativeTimeoutMs,
   );
-  if (restartedSnapshot.workspaceGeneration !== recoverySnapshot.workspaceGeneration) {
+  if (
+    restartedSnapshot.workspaceGeneration !==
+      recoverable.selected.snapshot.workspaceGeneration
+  ) {
     throw new Error(
       `${context.family} workspace generation changed across restart: ` +
-      `${recoverySnapshot.workspaceGeneration} -> ${restartedSnapshot.workspaceGeneration}`,
+      `${recoverable.selected.snapshot.workspaceGeneration} -> ` +
+      `${restartedSnapshot.workspaceGeneration}`,
     );
   }
   return {
@@ -984,30 +979,19 @@ async function inspectEstablishedFamily(
   );
 }
 
-async function startNamedTargetBuildAtCheckpoint(
+async function withEstablishedFamilyCheckpoint<T>(
   client: ProtocolClient,
   family: RequiredToolchainFamily,
   scenario: string,
-  targetName: string,
-  timeoutMs: number,
-) {
+  operation: (selected: SelectedProfile) => Promise<T>,
+): Promise<{ value: T; selected: SelectedProfile }> {
   for (let attempt = 1; attempt <= 2; attempt++) {
     const selected = await inspectEstablishedFamily(client, family, scenario);
     try {
-      const targets = await withNamedTimeout(
-        `${family} ${scenario} target listing attempt ${attempt}`,
-        client.listCMakeTargets({
-          workspaceGeneration: selected.snapshot.workspaceGeneration,
-          projectId: selected.projectId,
-          buildProfileId: selected.profile.buildProfileId,
-        }),
-        nativeTimeoutMs,
-      );
-      const target = targets.targets.find((candidate) => candidate.name === targetName);
-      if (target === undefined) {
-        throw new Error(`${family} ${scenario} target ${targetName} is absent`);
-      }
-      return await startBuild(client, selected, [target.targetId], timeoutMs);
+      return {
+        value: await operation(selected),
+        selected,
+      };
     } catch (error) {
       if (
         !(error instanceof ProtocolError) ||
@@ -1019,6 +1003,59 @@ async function startNamedTargetBuildAtCheckpoint(
     }
   }
   throw new Error(`${family} ${scenario} exhausted checkpoint retries`);
+}
+
+async function startFamilyBuildAtCheckpoint(
+  client: ProtocolClient,
+  family: RequiredToolchainFamily,
+  scenario: string,
+  targetIds: string[],
+  timeoutMs: number,
+): Promise<ProtocolTaskSnapshot & { selected: SelectedProfile }> {
+  const checkpoint = await withEstablishedFamilyCheckpoint(
+    client,
+    family,
+    scenario,
+    (selected) => startBuild(client, selected, targetIds, timeoutMs),
+  );
+  return {
+    ...checkpoint.value,
+    selected: checkpoint.selected,
+  };
+}
+
+async function startNamedTargetBuildAtCheckpoint(
+  client: ProtocolClient,
+  family: RequiredToolchainFamily,
+  scenario: string,
+  targetName: string,
+  timeoutMs: number,
+): Promise<ProtocolTaskSnapshot & { selected: SelectedProfile }> {
+  const checkpoint = await withEstablishedFamilyCheckpoint(
+    client,
+    family,
+    scenario,
+    async (selected) => {
+      const targets = await withNamedTimeout(
+        `${family} ${scenario} target listing`,
+        client.listCMakeTargets({
+          workspaceGeneration: selected.snapshot.workspaceGeneration,
+          projectId: selected.projectId,
+          buildProfileId: selected.profile.buildProfileId,
+        }),
+        nativeTimeoutMs,
+      );
+      const target = targets.targets.find((candidate) => candidate.name === targetName);
+      if (target === undefined) {
+        throw new Error(`${family} ${scenario} target ${targetName} is absent`);
+      }
+      return startBuild(client, selected, [target.targetId], timeoutMs);
+    },
+  );
+  return {
+    ...checkpoint.value,
+    selected: checkpoint.selected,
+  };
 }
 
 async function startFailureBuildWithStaleRetry(
@@ -1549,6 +1586,7 @@ function withinRoot(root: string, candidate: string): boolean {
 export const __testing = Object.freeze({
   runNativeMatrixWithDependencies,
   selectGeneratedProfile,
+  startFamilyBuildAtCheckpoint,
   startNamedTargetBuildAtCheckpoint,
   startFailureBuildWithStaleRetry,
 });
