@@ -1046,6 +1046,9 @@ func TestMSVCProductionDiscoveryFindsInstalledVisualStudio(t *testing.T) {
 		t.Fatalf("production VsDevCmd capture stage error = %v", err)
 	}
 	if _, err := msvc.probeContext(context.Background(), captured); err != nil {
+		if issueCodeFromProbeError(err) == "BUILD_TOOL_NOT_FOUND" {
+			t.Skipf("production MSVC generator is unavailable: %v", err)
+		}
 		t.Fatalf("production compiler/generator stage error = %v", err)
 	}
 	instances, discoverErr := adapters[0].Discover(context.Background())
