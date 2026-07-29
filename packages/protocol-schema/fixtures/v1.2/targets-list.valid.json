@@ -8,6 +8,7 @@
   "payload": {
     "workspaceGeneration": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     "projectId": "example-project",
+    "buildProfileId": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
     "targets": [{
       "targetId": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
       "name": "example"

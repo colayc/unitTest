@@ -12,6 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"unit-test-ide.local/test-service/internal/build"
+	"unit-test-ide.local/test-service/internal/cmake"
+	"unit-test-ide.local/test-service/internal/discovery"
 	"unit-test-ide.local/test-service/internal/eventbroker"
 	"unit-test-ide.local/test-service/internal/protocol"
 	"unit-test-ide.local/test-service/internal/server"
@@ -316,14 +319,23 @@ type streamBackend struct {
 	subscribeDelay   time.Duration
 }
 
-func (b *streamBackend) StartSimulation(context.Context, string, task.Scenario, time.Duration) (task.Task, error) {
+func (b *streamBackend) StartSimulation(context.Context, task.SimulationStart) (task.Task, error) {
+	return task.Task{}, nil
+}
+func (b *streamBackend) InspectWorkspace(context.Context) (discovery.Snapshot, error) {
+	return discovery.Snapshot{}, nil
+}
+func (b *streamBackend) ListTargets(context.Context, build.TargetsRequest) ([]cmake.Target, error) {
+	return nil, nil
+}
+func (b *streamBackend) StartBuild(context.Context, build.StartRequest) (task.Task, error) {
 	return task.Task{}, nil
 }
 func (b *streamBackend) Get(context.Context, string) (task.Task, error) {
 	b.getCalls.Add(1)
 	return b.get, nil
 }
-func (b *streamBackend) List(context.Context, string, int) (task.Page[task.Task], error) {
+func (b *streamBackend) List(context.Context, string, int, []task.Kind) (task.Page[task.Task], error) {
 	return task.Page[task.Task]{}, nil
 }
 func (b *streamBackend) Cancel(context.Context, string) (task.Task, error) { return task.Task{}, nil }
@@ -366,7 +378,7 @@ func newStreamBackend(t *testing.T, queueSize int) *streamBackend {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &streamBackend{broker: broker, get: task.Task{ID: testID('1'), Scenario: task.ScenarioHang, Timeout: time.Second, Status: task.StatusRunning, CreatedAt: time.Now().UTC(), LastSequence: 2}}
+	return &streamBackend{broker: broker, get: task.Task{ID: testID('1'), Kind: task.KindSimulation, Scenario: task.ScenarioHang, Timeout: time.Second, Status: task.StatusRunning, CreatedAt: time.Now().UTC(), LastSequence: 2}}
 }
 
 func newReplayBackend(t *testing.T, eventCount, queueSize int) *streamBackend {
@@ -388,7 +400,7 @@ func newReplayBackend(t *testing.T, eventCount, queueSize int) *streamBackend {
 	}
 	return &streamBackend{
 		broker: broker, replayRequested: requested, replayGates: gates,
-		get: task.Task{ID: testID('1'), Scenario: task.ScenarioHang, Timeout: time.Second, Status: task.StatusRunning, CreatedAt: time.Now().UTC(), LastSequence: int64(eventCount)},
+		get: task.Task{ID: testID('1'), Kind: task.KindSimulation, Scenario: task.ScenarioHang, Timeout: time.Second, Status: task.StatusRunning, CreatedAt: time.Now().UTC(), LastSequence: int64(eventCount)},
 	}
 }
 
@@ -868,7 +880,7 @@ func TestServeConnectionRetiresOldForwarderBeforeDuplicateSubscription(t *testin
 				oldErrors <- errors.New("old subscription failed")
 			}
 		},
-		get: task.Task{ID: testID('1'), Scenario: task.ScenarioHang, Timeout: time.Second, Status: task.StatusRunning, CreatedAt: time.Now().UTC(), LastSequence: 100},
+		get: task.Task{ID: testID('1'), Kind: task.KindSimulation, Scenario: task.ScenarioHang, Timeout: time.Second, Status: task.StatusRunning, CreatedAt: time.Now().UTC(), LastSequence: 100},
 	}
 	client, serviceConn := net.Pipe()
 	go server.ServeConnection(serviceConn, session.New("0123456789abcdef", "linux", "unix-socket", backend))

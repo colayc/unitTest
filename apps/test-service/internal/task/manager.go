@@ -72,6 +72,7 @@ type taskIDCommand struct {
 type listCommand struct {
 	cursor string
 	limit  int
+	kinds  []Kind
 	reply  chan listResponse
 }
 
@@ -352,12 +353,17 @@ func (m *Manager) Get(ctx context.Context, id string) (Task, error) {
 	}
 }
 
-func (m *Manager) List(ctx context.Context, cursor string, limit int) (Page[Task], error) {
-	if m == nil || limit < 1 {
+func (m *Manager) List(ctx context.Context, cursor string, limit int, kinds ...Kind) (Page[Task], error) {
+	if m == nil || limit < 1 || len(kinds) > 2 {
 		return Page[Task]{}, ErrInvalidArgument
 	}
 	reply := make(chan listResponse, 1)
-	if err := m.send(ctx, listCommand{cursor: cursor, limit: limit, reply: reply}); err != nil {
+	if err := m.send(ctx, listCommand{
+		cursor: cursor,
+		limit:  limit,
+		kinds:  append([]Kind(nil), kinds...),
+		reply:  reply,
+	}); err != nil {
 		return Page[Task]{}, err
 	}
 	select {
@@ -490,7 +496,7 @@ func (m *Manager) loop() {
 				value.reply <- taskResponse{task: got, err: err}
 			}
 		case listCommand:
-			page, err := m.store.List(context.Background(), value.cursor, value.limit)
+			page, err := m.store.List(context.Background(), value.cursor, value.limit, value.kinds...)
 			value.reply <- listResponse{page: page, err: err}
 		case outputCommand:
 			if current := active[value.taskID]; !m.circuitFailed() && current != nil && !current.processCompleted {

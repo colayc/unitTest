@@ -8,14 +8,23 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/url"
 	"sync"
 	"time"
 	"unicode/utf8"
 
 	"unit-test-ide.local/test-service/internal/artifactstore"
+	"unit-test-ide.local/test-service/internal/build"
+	"unit-test-ide.local/test-service/internal/cmake"
+	"unit-test-ide.local/test-service/internal/discovery"
 	"unit-test-ide.local/test-service/internal/eventbroker"
 	"unit-test-ide.local/test-service/internal/protocol"
 	"unit-test-ide.local/test-service/internal/protocolmodel"
+	artifactv12 "unit-test-ide.local/test-service/internal/protocolmodel/v1_2/artifact"
+	capabilitiesv12 "unit-test-ide.local/test-service/internal/protocolmodel/v1_2/capabilities"
+	targetlistv12 "unit-test-ide.local/test-service/internal/protocolmodel/v1_2/targetlist"
+	taskv12 "unit-test-ide.local/test-service/internal/protocolmodel/v1_2/task"
+	workspacev12 "unit-test-ide.local/test-service/internal/protocolmodel/v1_2/workspace"
 	"unit-test-ide.local/test-service/internal/task"
 )
 
@@ -33,9 +42,12 @@ type ArtifactChunk struct {
 }
 
 type Backend interface {
-	StartSimulation(context.Context, string, task.Scenario, time.Duration) (task.Task, error)
+	StartSimulation(context.Context, task.SimulationStart) (task.Task, error)
+	InspectWorkspace(context.Context) (discovery.Snapshot, error)
+	ListTargets(context.Context, build.TargetsRequest) ([]cmake.Target, error)
+	StartBuild(context.Context, build.StartRequest) (task.Task, error)
 	Get(context.Context, string) (task.Task, error)
-	List(context.Context, string, int) (task.Page[task.Task], error)
+	List(context.Context, string, int, []task.Kind) (task.Page[task.Task], error)
 	Cancel(context.Context, string) (task.Task, error)
 	Subscribe(context.Context, int64) (*eventbroker.Subscription, error)
 	ListArtifacts(context.Context, string, string, int) (task.Page[task.Artifact], error)
@@ -70,6 +82,34 @@ type startPayload struct {
 	TimeoutMS      int64         `json:"timeoutMs"`
 }
 
+type startKindPayload struct {
+	Kind string `json:"kind"`
+}
+
+type simulationStartPayloadV12 struct {
+	IdempotencyKey string        `json:"idempotencyKey"`
+	Kind           string        `json:"kind"`
+	Scenario       task.Scenario `json:"scenario"`
+	TimeoutMS      int64         `json:"timeoutMs"`
+}
+
+type buildStartPayloadV12 struct {
+	IdempotencyKey      string   `json:"idempotencyKey"`
+	Kind                string   `json:"kind"`
+	WorkspaceGeneration string   `json:"workspaceGeneration"`
+	ProjectID           string   `json:"projectId"`
+	BuildProfileID      string   `json:"buildProfileId"`
+	TargetIDs           []string `json:"targetIds"`
+	Jobs                int      `json:"jobs"`
+	TimeoutMS           int64    `json:"timeoutMs"`
+}
+
+type targetsPayloadV12 struct {
+	WorkspaceGeneration string `json:"workspaceGeneration"`
+	ProjectID           string `json:"projectId"`
+	BuildProfileID      string `json:"buildProfileId"`
+}
+
 type taskIDPayload struct {
 	TaskID string `json:"taskId"`
 }
@@ -100,9 +140,19 @@ type taskPagePayload struct {
 	NextCursor string                       `json:"nextCursor,omitempty"`
 }
 
+type taskPagePayloadV12 struct {
+	Items      []taskv12.TaskSnapshotV12 `json:"items"`
+	NextCursor string                    `json:"nextCursor,omitempty"`
+}
+
 type artifactPagePayload struct {
 	Items      []protocolmodel.ArtifactMetadata `json:"items"`
 	NextCursor string                           `json:"nextCursor,omitempty"`
+}
+
+type artifactPagePayloadV12 struct {
+	Items      []artifactv12.ArtifactMetadataV12 `json:"items"`
+	NextCursor string                            `json:"nextCursor,omitempty"`
 }
 
 type artifactChunkPayload struct {
@@ -169,6 +219,13 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 		if err := decodeEmpty(request.Payload); err != nil {
 			return handled(protocol.Failure(responseVersion, request, "INVALID_MESSAGE", "payload must be an empty object", false))
 		}
+		if s.negotiatedVersion == protocol.Version12 {
+			return handled(protocol.Success(responseVersion, request, capabilitiesv12.CapabilitiesV12{
+				WorkspaceInspect: true,
+				TargetList:       true,
+				CmakeBuild:       true,
+			}))
+		}
 		if s.negotiatedVersion == protocol.Version11 {
 			return handled(protocol.Success(responseVersion, request, protocolmodel.CapabilitiesV11{
 				Platform:           protocolmodel.Platform(s.platform),
@@ -192,6 +249,15 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 		return handled(protocol.Success(responseVersion, request, map[string]bool{"accepted": true}))
 	}
 
+	if phase3Method(request.Method) {
+		if s.negotiatedVersion != protocol.Version12 {
+			return handled(protocol.Failure(responseVersion, request, "PROTOCOL_FEATURE_UNAVAILABLE", "method requires protocol 1.2", false))
+		}
+		if s.backend == nil {
+			return handled(protocol.Failure(responseVersion, request, "SERVICE_UNHEALTHY", "workspace service is unavailable", true))
+		}
+		return s.handlePhase3(ctx, responseVersion, request)
+	}
 	if phase2Method(request.Method) {
 		if s.negotiatedVersion == protocol.Version10 {
 			return handled(protocol.Failure(responseVersion, request, "PROTOCOL_FEATURE_UNAVAILABLE", "method requires protocol 1.1", false))
@@ -207,15 +273,20 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 func (s *Session) handlePhase2(ctx context.Context, version string, request protocol.Request) HandleResult {
 	switch request.Method {
 	case "tasks/start":
+		if version == protocol.Version12 {
+			return s.handleV12TaskStart(ctx, version, request)
+		}
 		payload, err := decodeStrict[startPayload](request.Payload)
 		if err != nil || !validID(payload.IdempotencyKey) || !task.ValidScenario(payload.Scenario) || payload.TimeoutMS < 1 || payload.TimeoutMS > maxTimeoutMS {
 			return invalidPayload(version, request)
 		}
 		value, err := s.backend.StartSimulation(
 			ctx,
-			payload.IdempotencyKey,
-			payload.Scenario,
-			time.Duration(payload.TimeoutMS)*time.Millisecond,
+			task.SimulationStart{
+				IdempotencyKey: payload.IdempotencyKey,
+				Scenario:       payload.Scenario,
+				Timeout:        time.Duration(payload.TimeoutMS) * time.Millisecond,
+			},
 		)
 		if err != nil {
 			return backendFailure(version, request, err)
@@ -226,14 +297,25 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 		if err != nil || !validID(payload.TaskID) {
 			return invalidPayload(version, request)
 		}
-		var value task.Task
-		if request.Method == "tasks/get" {
-			value, err = s.backend.Get(ctx, payload.TaskID)
-		} else {
+		value, err := s.backend.Get(ctx, payload.TaskID)
+		if err != nil {
+			return backendFailure(version, request, err)
+		}
+		if version == protocol.Version11 && value.Kind != task.KindSimulation {
+			return taskNotFound(version, request)
+		}
+		if request.Method == "tasks/cancel" {
 			value, err = s.backend.Cancel(ctx, payload.TaskID)
 		}
 		if err != nil {
 			return backendFailure(version, request, err)
+		}
+		if version == protocol.Version12 {
+			projected, projectErr := toProtocolTaskV12(value)
+			if projectErr != nil {
+				return backendFailure(version, request, projectErr)
+			}
+			return handled(protocol.Success(version, request, projected))
 		}
 		return handled(protocol.Success(version, request, toProtocolTask(value)))
 	case "tasks/list":
@@ -242,12 +324,29 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 		if err != nil {
 			return invalidPayload(version, request)
 		}
-		page, err := s.backend.List(ctx, cursor, limit)
+		var kinds []task.Kind
+		if version == protocol.Version11 {
+			kinds = []task.Kind{task.KindSimulation}
+		}
+		page, err := s.backend.List(ctx, cursor, limit, kinds)
 		if err != nil {
 			return backendFailure(version, request, err)
 		}
+		if version == protocol.Version12 {
+			items := make([]taskv12.TaskSnapshotV12, len(page.Items))
+			for index := range page.Items {
+				items[index], err = toProtocolTaskV12(page.Items[index])
+				if err != nil {
+					return backendFailure(version, request, err)
+				}
+			}
+			return handled(protocol.Success(version, request, taskPagePayloadV12{Items: items, NextCursor: page.NextCursor}))
+		}
 		items := make([]protocolmodel.TaskSnapshot, len(page.Items))
 		for index := range page.Items {
+			if page.Items[index].Kind != task.KindSimulation {
+				return backendFailure(version, request, errors.New("legacy task list contains unsupported kind"))
+			}
 			items[index] = toProtocolTask(page.Items[index])
 		}
 		return handled(protocol.Success(version, request, taskPagePayload{Items: items, NextCursor: page.NextCursor}))
@@ -270,9 +369,25 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 		if err != nil {
 			return invalidPayload(version, request)
 		}
+		if version == protocol.Version11 {
+			parent, getErr := s.backend.Get(ctx, payload.TaskID)
+			if getErr != nil {
+				return backendFailure(version, request, getErr)
+			}
+			if parent.Kind != task.KindSimulation {
+				return taskNotFound(version, request)
+			}
+		}
 		page, err := s.backend.ListArtifacts(ctx, payload.TaskID, cursor, limit)
 		if err != nil {
 			return backendFailure(version, request, err)
+		}
+		if version == protocol.Version12 {
+			items := make([]artifactv12.ArtifactMetadataV12, len(page.Items))
+			for index := range page.Items {
+				items[index] = toProtocolArtifactV12(page.Items[index])
+			}
+			return handled(protocol.Success(version, request, artifactPagePayloadV12{Items: items, NextCursor: page.NextCursor}))
 		}
 		items := make([]protocolmodel.ArtifactMetadata, len(page.Items))
 		for index := range page.Items {
@@ -288,12 +403,119 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 		if err != nil {
 			return backendFailure(version, request, err)
 		}
+		if version == protocol.Version11 {
+			parent, getErr := s.backend.Get(ctx, chunk.Metadata.TaskID)
+			if getErr != nil {
+				return backendFailure(version, request, getErr)
+			}
+			if parent.Kind != task.KindSimulation {
+				return taskNotFound(version, request)
+			}
+		}
 		return handled(protocol.Success(version, request, artifactChunkPayload{
 			Data: base64.RawURLEncoding.EncodeToString(chunk.Data), NextOffset: chunk.NextOffset, EOF: chunk.EOF,
 			SizeBytes: chunk.Metadata.Size, SHA256: chunk.Metadata.SHA256,
 		}))
 	default:
 		return handled(protocol.Failure(version, request, "METHOD_NOT_FOUND", "method is not supported", false))
+	}
+}
+
+func (s *Session) handlePhase3(ctx context.Context, version string, request protocol.Request) HandleResult {
+	switch request.Method {
+	case "workspace/inspect":
+		if err := decodeEmpty(request.Payload); err != nil {
+			return invalidPayload(version, request)
+		}
+		snapshot, err := s.backend.InspectWorkspace(ctx)
+		if err != nil {
+			return backendFailure(version, request, err)
+		}
+		projected, err := toProtocolWorkspace(snapshot)
+		if err != nil {
+			return backendFailure(version, request, err)
+		}
+		return handled(protocol.Success(version, request, projected))
+	case "cmake/targets/list":
+		payload, err := decodeStrict[targetsPayloadV12](request.Payload)
+		if err != nil || !validHash(payload.WorkspaceGeneration) || !validProjectID(payload.ProjectID) || !validHash(payload.BuildProfileID) {
+			return invalidPayload(version, request)
+		}
+		targets, err := s.backend.ListTargets(ctx, build.TargetsRequest{
+			WorkspaceGeneration: payload.WorkspaceGeneration,
+			ProjectID:           payload.ProjectID,
+			BuildProfileID:      payload.BuildProfileID,
+		})
+		if err != nil {
+			return backendFailure(version, request, err)
+		}
+		items := make([]targetlistv12.TargetListSchema, len(targets))
+		for index, target := range targets {
+			if !validHash(target.ID) || target.Name == "" {
+				return backendFailure(version, request, errors.New("invalid target projection"))
+			}
+			items[index] = targetlistv12.TargetListSchema{TargetID: target.ID, Name: target.Name}
+		}
+		return handled(protocol.Success(version, request, targetlistv12.TargetList{
+			WorkspaceGeneration: payload.WorkspaceGeneration,
+			ProjectID:           payload.ProjectID,
+			BuildProfileID:      payload.BuildProfileID,
+			Targets:             items,
+		}))
+	default:
+		return handled(protocol.Failure(version, request, "METHOD_NOT_FOUND", "method is not supported", false))
+	}
+}
+
+func (s *Session) handleV12TaskStart(ctx context.Context, version string, request protocol.Request) HandleResult {
+	var kind startKindPayload
+	if err := json.Unmarshal(request.Payload, &kind); err != nil || kind.Kind == "" {
+		return invalidPayload(version, request)
+	}
+	switch kind.Kind {
+	case "simulation":
+		payload, err := decodeStrict[simulationStartPayloadV12](request.Payload)
+		if err != nil || !validID(payload.IdempotencyKey) || !task.ValidScenario(payload.Scenario) ||
+			payload.TimeoutMS < 1 || payload.TimeoutMS > maxTimeoutMS {
+			return invalidPayload(version, request)
+		}
+		value, err := s.backend.StartSimulation(ctx, task.SimulationStart{
+			IdempotencyKey: payload.IdempotencyKey,
+			Scenario:       payload.Scenario,
+			Timeout:        time.Duration(payload.TimeoutMS) * time.Millisecond,
+		})
+		if err != nil {
+			return backendFailure(version, request, err)
+		}
+		projected, err := toProtocolTaskV12(value)
+		if err != nil {
+			return backendFailure(version, request, err)
+		}
+		return handled(protocol.Success(version, request, projected))
+	case "cmakeBuild":
+		payload, err := decodeStrict[buildStartPayloadV12](request.Payload)
+		if err != nil || !validBuildStart(payload) {
+			return invalidPayload(version, request)
+		}
+		value, err := s.backend.StartBuild(ctx, build.StartRequest{
+			IdempotencyKey:      payload.IdempotencyKey,
+			WorkspaceGeneration: payload.WorkspaceGeneration,
+			ProjectID:           payload.ProjectID,
+			BuildProfileID:      payload.BuildProfileID,
+			TargetIDs:           append([]string(nil), payload.TargetIDs...),
+			Jobs:                payload.Jobs,
+			Timeout:             time.Duration(payload.TimeoutMS) * time.Millisecond,
+		})
+		if err != nil {
+			return backendFailure(version, request, err)
+		}
+		projected, err := toProtocolTaskV12(value)
+		if err != nil {
+			return backendFailure(version, request, err)
+		}
+		return handled(protocol.Success(version, request, projected))
+	default:
+		return invalidPayload(version, request)
 	}
 }
 
@@ -309,6 +531,16 @@ func backendFailure(version string, request protocol.Request, err error) HandleR
 		code, message = "STORAGE_UNAVAILABLE", "event subscription storage is unavailable"
 	}
 	switch {
+	case errors.Is(err, build.ErrWorkspaceChanged):
+		code, message, retryable = "WORKSPACE_CHANGED", "workspace generation is stale", false
+	case errors.Is(err, build.ErrProjectNotFound):
+		code, message, retryable = "PROJECT_NOT_FOUND", "project was not found", false
+	case errors.Is(err, build.ErrBuildProfileNotFound):
+		code, message, retryable = "BUILD_PROFILE_NOT_FOUND", "build profile was not found", false
+	case errors.Is(err, build.ErrTargetNotFound):
+		code, message, retryable = "TARGET_NOT_FOUND", "target was not found", false
+	case errors.Is(err, build.ErrConfigureRequired):
+		code, message, retryable = "CONFIGURE_REQUIRED", "CMake configure is required", false
 	case errors.Is(err, task.ErrIdempotencyConflict):
 		code, message, retryable = "IDEMPOTENCY_CONFLICT", "idempotency key conflicts with an existing task", false
 	case errors.Is(err, eventbroker.ErrInvalidCursor):
@@ -339,6 +571,10 @@ func backendFailure(version string, request protocol.Request, err error) HandleR
 		code, message, retryable = "STORAGE_UNAVAILABLE", "storage is unavailable", true
 	}
 	return handled(protocol.Failure(version, request, code, message, retryable))
+}
+
+func taskNotFound(version string, request protocol.Request) HandleResult {
+	return handled(protocol.Failure(version, request, "TASK_NOT_FOUND", "task was not found", false))
 }
 
 func decodeList(raw json.RawMessage) (listPayload, string, int, error) {
@@ -381,6 +617,138 @@ func decodeStrict[T any](raw json.RawMessage) (T, error) {
 	return value, nil
 }
 
+func toProtocolWorkspace(value discovery.Snapshot) (workspacev12.WorkspaceSnapshot, error) {
+	if value.WorkspaceURI == "" || !validHash(value.Generation) {
+		return workspacev12.WorkspaceSnapshot{}, errors.New("invalid workspace snapshot")
+	}
+	result := workspacev12.WorkspaceSnapshot{
+		WorkspaceURI:        value.WorkspaceURI,
+		WorkspaceGeneration: value.Generation,
+		Capabilities: workspacev12.Capabilities{
+			WorkspaceInspect: true,
+			TargetList:       true,
+			CmakeBuild:       true,
+		},
+		Projects: make([]workspacev12.ProjectElement, len(value.Projects)),
+	}
+	for index, project := range value.Projects {
+		if !validProjectID(project.ID) || project.SourceDir == "" {
+			return workspacev12.WorkspaceSnapshot{}, errors.New("invalid workspace project")
+		}
+		sourceURI, err := url.JoinPath(value.WorkspaceURI, project.SourceDir)
+		if err != nil {
+			return workspacev12.WorkspaceSnapshot{}, errors.New("invalid workspace project URI")
+		}
+		projected := workspacev12.ProjectElement{
+			ProjectID:     project.ID,
+			SourceURI:     sourceURI,
+			BuildProfiles: []workspacev12.BuildProfileElement{},
+		}
+		for _, profile := range value.Profiles {
+			if profile.ProjectID != project.ID {
+				continue
+			}
+			if !validHash(profile.ID) {
+				return workspacev12.WorkspaceSnapshot{}, errors.New("invalid build profile")
+			}
+			projected.BuildProfiles = append(projected.BuildProfiles, workspacev12.BuildProfileElement{
+				BuildProfileID: profile.ID,
+				Name:           profileDisplayName(profile),
+			})
+		}
+		result.Projects[index] = projected
+	}
+	return result, nil
+}
+
+func profileDisplayName(profile cmake.BuildProfile) string {
+	for _, candidate := range []string{profile.BuildPreset, profile.ConfigurePreset, profile.Configuration, profile.ID} {
+		if candidate != "" {
+			return candidate
+		}
+	}
+	return "CMake"
+}
+
+type storedBuildRequest struct {
+	ProjectID      string   `json:"projectId"`
+	BuildProfileID string   `json:"buildProfileId"`
+	TargetIDs      []string `json:"targetIds"`
+	Jobs           int64    `json:"jobs"`
+}
+
+func toProtocolTaskV12(value task.Task) (taskv12.TaskSnapshotV12, error) {
+	switch value.Kind {
+	case task.KindSimulation:
+		result := taskv12.SimulationTaskSnapshotV12{
+			TaskID:       value.ID,
+			Kind:         taskv12.Simulation,
+			Scenario:     taskv12.SimulationScenarioV12(value.Scenario),
+			Status:       taskv12.TaskStatusV12(value.Status),
+			CreatedAt:    value.CreatedAt,
+			LastSequence: value.LastSequence,
+		}
+		if value.Timeout > 0 {
+			timeout := value.Timeout.Milliseconds()
+			result.TimeoutMS = &timeout
+		}
+		projectV12TaskCompletion(value, &result.Outcome, &result.StartedAt, &result.FinishedAt, &result.ErrorCode, &result.ErrorMessage)
+		return result, nil
+	case task.KindCMakeBuild:
+		request, err := decodeStrict[storedBuildRequest](value.Request)
+		if err != nil || !validProjectID(request.ProjectID) || !validHash(request.BuildProfileID) ||
+			!validTargetIDs(request.TargetIDs) || request.Jobs < 1 || request.Jobs > 256 ||
+			!validHash(value.WorkspaceGeneration) || value.Timeout < time.Millisecond || value.Timeout > 24*time.Hour {
+			return nil, errors.New("invalid persisted CMake task")
+		}
+		result := taskv12.CmakeBuildTaskSnapshotV12{
+			TaskID:              value.ID,
+			Kind:                taskv12.CmakeBuild,
+			WorkspaceGeneration: value.WorkspaceGeneration,
+			ProjectID:           request.ProjectID,
+			BuildProfileID:      request.BuildProfileID,
+			TargetIDs:           append([]string(nil), request.TargetIDs...),
+			Jobs:                request.Jobs,
+			TimeoutMS:           value.Timeout.Milliseconds(),
+			Status:              taskv12.TaskStatusV12(value.Status),
+			CreatedAt:           value.CreatedAt,
+			LastSequence:        value.LastSequence,
+		}
+		projectV12TaskCompletion(value, &result.Outcome, &result.StartedAt, &result.FinishedAt, &result.ErrorCode, &result.ErrorMessage)
+		return result, nil
+	default:
+		return nil, errors.New("unsupported task kind")
+	}
+}
+
+func projectV12TaskCompletion(
+	value task.Task,
+	outcome **taskv12.TaskOutcomeV12,
+	startedAt, finishedAt **time.Time,
+	errorCode, errorMessage **string,
+) {
+	if value.Status == task.StatusFinished {
+		projected := taskv12.TaskOutcomeV12(value.Outcome)
+		*outcome = &projected
+	}
+	if value.StartedAt != nil {
+		projected := *value.StartedAt
+		*startedAt = &projected
+	}
+	if value.FinishedAt != nil {
+		projected := *value.FinishedAt
+		*finishedAt = &projected
+	}
+	if value.ErrorCode != "" {
+		projected := value.ErrorCode
+		*errorCode = &projected
+	}
+	if value.ErrorMessage != "" {
+		projected := value.ErrorMessage
+		*errorMessage = &projected
+	}
+}
+
 func toProtocolTask(value task.Task) protocolmodel.TaskSnapshot {
 	result := protocolmodel.TaskSnapshot{
 		TaskID: value.ID, Kind: protocolmodel.Simulation, Scenario: protocolmodel.Scenario(value.Scenario),
@@ -420,6 +788,19 @@ func toProtocolArtifact(value task.Artifact) protocolmodel.ArtifactMetadata {
 	}
 }
 
+func toProtocolArtifactV12(value task.Artifact) artifactv12.ArtifactMetadataV12 {
+	return artifactv12.ArtifactMetadataV12{
+		ArtifactID: value.ID,
+		TaskID:     value.TaskID,
+		Kind:       artifactv12.Kind(value.Kind),
+		MIMEType:   artifactv12.MIMEType(value.MIMEType),
+		SizeBytes:  value.Size,
+		Sha256:     value.SHA256,
+		CreatedAt:  value.CreatedAt,
+		URI:        (&url.URL{Scheme: "unit-test-ide", Host: "artifact", Path: "/" + value.ID}).String(),
+	}
+}
+
 func validID(value string) bool {
 	if len(value) != 32 {
 		return false
@@ -432,14 +813,80 @@ func validID(value string) bool {
 	return true
 }
 
+func validHash(value string) bool {
+	return len(value) == 64 && validLowerHex(value)
+}
+
+func validLowerHex(value string) bool {
+	for _, character := range value {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func validProjectID(value string) bool {
+	if len(value) < 1 || len(value) > 64 {
+		return false
+	}
+	for index := range len(value) {
+		character := value[index]
+		if (character >= 'A' && character <= 'Z') ||
+			(character >= 'a' && character <= 'z') ||
+			(character >= '0' && character <= '9') ||
+			(index > 0 && (character == '.' || character == '_' || character == '-')) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validTargetIDs(values []string) bool {
+	if len(values) > 128 {
+		return false
+	}
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if !validHash(value) {
+			return false
+		}
+		if _, exists := seen[value]; exists {
+			return false
+		}
+		seen[value] = struct{}{}
+	}
+	return true
+}
+
+func validBuildStart(value buildStartPayloadV12) bool {
+	return validID(value.IdempotencyKey) &&
+		value.Kind == "cmakeBuild" &&
+		validHash(value.WorkspaceGeneration) &&
+		validProjectID(value.ProjectID) &&
+		validHash(value.BuildProfileID) &&
+		validTargetIDs(value.TargetIDs) &&
+		value.Jobs >= 1 && value.Jobs <= 256 &&
+		value.TimeoutMS >= 1 && value.TimeoutMS <= maxTimeoutMS
+}
+
 func negotiate(envelopeVersion string, supported []string) (string, bool) {
 	if envelopeVersion == protocol.Version10 && len(supported) == 0 {
 		return protocol.Version10, true
 	}
-	for _, candidate := range []string{protocol.Version11, protocol.Version10} {
-		if candidate != envelopeVersion {
-			continue
+	candidates := []string{protocol.Version12, protocol.Version11, protocol.Version10}
+	maximum := -1
+	for index, candidate := range candidates {
+		if candidate == envelopeVersion {
+			maximum = index
+			break
 		}
+	}
+	if maximum < 0 {
+		return "", false
+	}
+	for _, candidate := range candidates[maximum:] {
 		for _, offered := range supported {
 			if offered == candidate {
 				return candidate, true
@@ -452,6 +899,15 @@ func negotiate(envelopeVersion string, supported []string) (string, bool) {
 func phase2Method(method string) bool {
 	switch method {
 	case "tasks/start", "tasks/get", "tasks/list", "tasks/cancel", "events/subscribe", "artifacts/list", "artifacts/read":
+		return true
+	default:
+		return false
+	}
+}
+
+func phase3Method(method string) bool {
+	switch method {
+	case "workspace/inspect", "cmake/targets/list":
 		return true
 	default:
 		return false
@@ -485,8 +941,8 @@ func decodeHandshake(raw json.RawMessage, version string) (handshake, error) {
 	if _, offered := fields["supportedProtocolVersions"]; version == protocol.Version10 && offered {
 		return handshake{}, errors.New("protocol 1.0 handshake contains a version offer")
 	}
-	if version == protocol.Version11 && len(payload.SupportedProtocolVersions) == 0 {
-		return handshake{}, errors.New("protocol 1.1 handshake requires a version offer")
+	if version != protocol.Version10 && len(payload.SupportedProtocolVersions) == 0 {
+		return handshake{}, errors.New("protocol handshake requires a version offer")
 	}
 	return payload, nil
 }

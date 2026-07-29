@@ -39,6 +39,7 @@ const (
 	EventTaskCancellationRequested EventType = "task.cancellation_requested"
 	EventTaskFinished              EventType = "task.finished"
 	EventArtifactCreated           EventType = "artifact.created"
+	EventTaskDiagnostic            EventType = "task.diagnostic"
 )
 
 type Task struct {

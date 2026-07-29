@@ -14,6 +14,12 @@ var (
 	ErrStorageUnavailable  = errors.New("storage unavailable")
 )
 
+type SimulationStart struct {
+	IdempotencyKey string
+	Scenario       Scenario
+	Timeout        time.Duration
+}
+
 type Mutation struct {
 	Task        Task
 	Expected    Status
@@ -33,7 +39,7 @@ type Store interface {
 	Create(context.Context, Task, []StepSnapshot, EventDraft) (Task, []Event, error)
 	FindByIdempotencyKey(context.Context, string) (Task, error)
 	Get(context.Context, string) (Task, error)
-	List(context.Context, string, int) (Page[Task], error)
+	List(context.Context, string, int, ...Kind) (Page[Task], error)
 	Apply(context.Context, Mutation) (Task, []Event, error)
 	AppendEvent(context.Context, string, EventDraft) (Event, error)
 	UpdateLease(context.Context, ProcessLease) error

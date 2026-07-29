@@ -3,85 +3,131 @@ package protocolmodelv12event
 import "time"
 
 type TaskEventV12 interface{ isTaskEventV12() }
-type TaskDiagnosticEventV12 struct {
+type TaskEventBaseV12 struct {
 	ProtocolVersion EventProtocolVersionV12 `json:"protocolVersion"`
 	Kind            EventKindV12            `json:"kind"`
 	MessageID       string                  `json:"messageId"`
 	SentAt          time.Time               `json:"sentAt"`
 	Sequence        int64                   `json:"sequence"`
-	Event           TaskEventNameV12        `json:"event"`
 	TaskID          string                  `json:"taskId"`
 	PayloadVersion  float64                 `json:"payloadVersion"`
-	Payload         struct {
+}
+type TaskCreatedEventV12 struct {
+	TaskEventBaseV12
+	Event   TaskEventNameV12 `json:"event"`
+	Payload struct {
+		Status string `json:"status"`
+	} `json:"payload"`
+}
+
+func (TaskCreatedEventV12) isTaskEventV12() {}
+
+type TaskStartedEventV12 struct {
+	TaskEventBaseV12
+	Event   TaskEventNameV12 `json:"event"`
+	Payload struct {
+		Status string `json:"status"`
+	} `json:"payload"`
+}
+
+func (TaskStartedEventV12) isTaskEventV12() {}
+
+type TaskStepStartedEventV12 struct {
+	TaskEventBaseV12
+	Event   TaskEventNameV12 `json:"event"`
+	Payload struct {
+		StepID string            `json:"stepId"`
+		Kind   TaskStepKindV12   `json:"kind"`
+		Status TaskStepStatusV12 `json:"status"`
+	} `json:"payload"`
+}
+
+func (TaskStepStartedEventV12) isTaskEventV12() {}
+
+type TaskOutputEventV12 struct {
+	TaskEventBaseV12
+	Event   TaskEventNameV12 `json:"event"`
+	Payload struct {
+		StepID    string              `json:"stepId"`
+		Stream    TaskOutputStreamV12 `json:"stream"`
+		Text      string              `json:"text"`
+		Truncated bool                `json:"truncated"`
+	} `json:"payload"`
+}
+
+func (TaskOutputEventV12) isTaskEventV12() {}
+
+type TaskStepFinishedEventV12 struct {
+	TaskEventBaseV12
+	Event   TaskEventNameV12 `json:"event"`
+	Payload struct {
+		StepID    string            `json:"stepId"`
+		Kind      TaskStepKindV12   `json:"kind"`
+		Status    TaskStepStatusV12 `json:"status"`
+		ExitCode  *int64            `json:"exitCode,omitempty"`
+		ErrorCode *string           `json:"errorCode,omitempty"`
+	} `json:"payload"`
+}
+
+func (TaskStepFinishedEventV12) isTaskEventV12() {}
+
+type TaskCancellationRequestedEventV12 struct {
+	TaskEventBaseV12
+	Event   TaskEventNameV12 `json:"event"`
+	Payload struct {
+		Status string `json:"status"`
+	} `json:"payload"`
+}
+
+func (TaskCancellationRequestedEventV12) isTaskEventV12() {}
+
+type ArtifactCreatedEventV12 struct {
+	TaskEventBaseV12
+	Event   TaskEventNameV12 `json:"event"`
+	Payload struct {
+		ArtifactID string `json:"artifactId"`
+		Kind       string `json:"kind"`
+	} `json:"payload"`
+}
+
+func (ArtifactCreatedEventV12) isTaskEventV12() {}
+
+type TaskFinishedEventV12 struct {
+	TaskEventBaseV12
+	Event   TaskEventNameV12 `json:"event"`
+	Payload struct {
+		Outcome TaskOutcomeV12 `json:"outcome"`
+	} `json:"payload"`
+}
+
+func (TaskFinishedEventV12) isTaskEventV12() {}
+
+type TaskDiagnosticEventV12 struct {
+	TaskEventBaseV12
+	Event   TaskEventNameV12 `json:"event"`
+	Payload struct {
 		Diagnostic TaskEventDiagnosticV12 `json:"diagnostic"`
 	} `json:"payload"`
 }
 
 func (TaskDiagnosticEventV12) isTaskEventV12() {}
 
-type TaskStepStartedEventV12 struct {
-	ProtocolVersion EventProtocolVersionV12 `json:"protocolVersion"`
-	Kind            EventKindV12            `json:"kind"`
-	MessageID       string                  `json:"messageId"`
-	SentAt          time.Time               `json:"sentAt"`
-	Sequence        int64                   `json:"sequence"`
-	Event           TaskEventNameV12        `json:"event"`
-	TaskID          string                  `json:"taskId"`
-	PayloadVersion  float64                 `json:"payloadVersion"`
-	Payload         struct {
-		Step TaskStepNameV12 `json:"step"`
-	} `json:"payload"`
-}
-
-func (TaskStepStartedEventV12) isTaskEventV12() {}
-
-type TaskStepFinishedEventV12 struct {
-	ProtocolVersion EventProtocolVersionV12 `json:"protocolVersion"`
-	Kind            EventKindV12            `json:"kind"`
-	MessageID       string                  `json:"messageId"`
-	SentAt          time.Time               `json:"sentAt"`
-	Sequence        int64                   `json:"sequence"`
-	Event           TaskEventNameV12        `json:"event"`
-	TaskID          string                  `json:"taskId"`
-	PayloadVersion  float64                 `json:"payloadVersion"`
-	Payload         struct {
-		Step    TaskStepNameV12    `json:"step"`
-		Outcome TaskStepOutcomeV12 `json:"outcome"`
-	} `json:"payload"`
-}
-
-func (TaskStepFinishedEventV12) isTaskEventV12() {}
-
-type TaskEmptyEventV12 struct {
-	ProtocolVersion EventProtocolVersionV12 `json:"protocolVersion"`
-	Kind            EventKindV12            `json:"kind"`
-	MessageID       string                  `json:"messageId"`
-	SentAt          time.Time               `json:"sentAt"`
-	Sequence        int64                   `json:"sequence"`
-	Event           TaskEmptyEventNameV12   `json:"event"`
-	TaskID          string                  `json:"taskId"`
-	PayloadVersion  float64                 `json:"payloadVersion"`
-	Payload         struct{}                `json:"payload"`
-}
-
-func (TaskEmptyEventV12) isTaskEventV12() {}
-
-type TaskEmptyEventNameV12 string
+type TaskStepKindV12 string
 
 const (
-	EmptyTaskCreated               TaskEmptyEventNameV12 = "task.created"
-	EmptyTaskStarted               TaskEmptyEventNameV12 = "task.started"
-	EmptyTaskOutput                TaskEmptyEventNameV12 = "task.output"
-	EmptyTaskCancellationRequested TaskEmptyEventNameV12 = "task.cancellation_requested"
-	EmptyTaskFinished              TaskEmptyEventNameV12 = "task.finished"
-	EmptyArtifactCreated           TaskEmptyEventNameV12 = "artifact.created"
+	StepSimulation TaskStepKindV12 = "simulation"
+	StepConfigure  TaskStepKindV12 = "configure"
+	StepBuild      TaskStepKindV12 = "build"
 )
 
-type TaskPayloadV12 struct {
-	Diagnostic *TaskEventDiagnosticV12 `json:"diagnostic,omitempty"`
-	Step       *TaskStepNameV12        `json:"step,omitempty"`
-	Outcome    *TaskStepOutcomeV12     `json:"outcome,omitempty"`
-}
+type TaskStepStatusV12 string
+
+const (
+	StepRunning   TaskStepStatusV12 = "running"
+	StepSucceeded TaskStepStatusV12 = "succeeded"
+	StepFailed    TaskStepStatusV12 = "failed"
+	StepSkipped   TaskStepStatusV12 = "skipped"
+)
 
 type TaskEventDiagnosticV12 struct {
 	Code      string                         `json:"code"`
@@ -91,7 +137,6 @@ type TaskEventDiagnosticV12 struct {
 	Severity  TaskEventDiagnosticSeverityV12 `json:"severity"`
 	SourceURI *string                        `json:"sourceUri,omitempty"`
 }
-
 type TaskEventNameV12 string
 
 const (
@@ -108,9 +153,7 @@ const (
 
 type EventKindV12 string
 
-const (
-	Event EventKindV12 = "event"
-)
+const Event EventKindV12 = "event"
 
 type TaskEventDiagnosticSeverityV12 string
 
@@ -120,26 +163,25 @@ const (
 	Warning TaskEventDiagnosticSeverityV12 = "warning"
 )
 
-type TaskStepOutcomeV12 string
+type TaskOutcomeV12 string
 
 const (
-	Cancelled            TaskStepOutcomeV12 = "cancelled"
-	CommandFailed        TaskStepOutcomeV12 = "command_failed"
-	InfrastructureFailed TaskStepOutcomeV12 = "infrastructure_failed"
-	Interrupted          TaskStepOutcomeV12 = "interrupted"
-	Succeeded            TaskStepOutcomeV12 = "succeeded"
-	TimedOut             TaskStepOutcomeV12 = "timed_out"
+	OutcomeCancelled            TaskOutcomeV12 = "cancelled"
+	OutcomeCommandFailed        TaskOutcomeV12 = "command_failed"
+	OutcomeInfrastructureFailed TaskOutcomeV12 = "infrastructure_failed"
+	OutcomeInterrupted          TaskOutcomeV12 = "interrupted"
+	OutcomeSucceeded            TaskOutcomeV12 = "succeeded"
+	OutcomeTimedOut             TaskOutcomeV12 = "timed_out"
 )
 
-type TaskStepNameV12 string
+type TaskOutputStreamV12 string
 
 const (
-	Build     TaskStepNameV12 = "build"
-	Configure TaskStepNameV12 = "configure"
+	OutputCombined TaskOutputStreamV12 = "combined"
+	OutputStderr   TaskOutputStreamV12 = "stderr"
+	OutputStdout   TaskOutputStreamV12 = "stdout"
 )
 
 type EventProtocolVersionV12 string
 
-const (
-	The12 EventProtocolVersionV12 = "1.2"
-)
+const The12 EventProtocolVersionV12 = "1.2"

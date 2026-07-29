@@ -1,0 +1,30 @@
+package build
+
+import (
+	"errors"
+	"time"
+)
+
+var (
+	ErrWorkspaceChanged     = errors.New("workspace changed")
+	ErrProjectNotFound      = errors.New("project not found")
+	ErrBuildProfileNotFound = errors.New("build profile not found")
+	ErrTargetNotFound       = errors.New("target not found")
+	ErrConfigureRequired    = errors.New("configure required")
+)
+
+type StartRequest struct {
+	IdempotencyKey      string
+	WorkspaceGeneration string
+	ProjectID           string
+	BuildProfileID      string
+	TargetIDs           []string
+	Jobs                int
+	Timeout             time.Duration
+}
+
+type TargetsRequest struct {
+	WorkspaceGeneration string
+	ProjectID           string
+	BuildProfileID      string
+}

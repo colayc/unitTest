@@ -53,6 +53,25 @@ func TestStoreCommitsSnapshotAndEventAtomically(t *testing.T) {
 	}
 }
 
+func TestListFiltersTaskKindsWithoutBreakingPagination(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	base := time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC)
+	createTask(t, store, newTask(2, 12, base))
+	createTask(t, store, newCMakeTask(3, 13, base.Add(time.Second)))
+	createTask(t, store, newTask(4, 14, base.Add(2*time.Second)))
+
+	first, err := store.List(ctx, "", 1, task.KindSimulation)
+	if err != nil || len(first.Items) != 1 || first.Items[0].Kind != task.KindSimulation || first.NextCursor == "" {
+		t.Fatalf("first filtered page = %#v, %v", first, err)
+	}
+	second, err := store.List(ctx, first.NextCursor, 1, task.KindSimulation)
+	if err != nil || len(second.Items) != 1 || second.Items[0].Kind != task.KindSimulation ||
+		second.Items[0].ID == first.Items[0].ID || second.NextCursor != "" {
+		t.Fatalf("second filtered page = %#v, %v", second, err)
+	}
+}
+
 func TestCreateIsIdempotentByKeyAndRequestIdentity(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

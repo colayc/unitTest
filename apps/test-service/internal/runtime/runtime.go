@@ -9,6 +9,9 @@ import (
 	"time"
 
 	"unit-test-ide.local/test-service/internal/artifactstore"
+	"unit-test-ide.local/test-service/internal/build"
+	"unit-test-ide.local/test-service/internal/cmake"
+	"unit-test-ide.local/test-service/internal/discovery"
 	"unit-test-ide.local/test-service/internal/eventbroker"
 	"unit-test-ide.local/test-service/internal/instance"
 	"unit-test-ide.local/test-service/internal/processcontrol"
@@ -67,7 +70,7 @@ type runtimeArtifacts interface {
 type runtimeManager interface {
 	Start(context.Context, task.StartRequest) (task.Task, error)
 	Get(context.Context, string) (task.Task, error)
-	List(context.Context, string, int) (task.Page[task.Task], error)
+	List(context.Context, string, int, ...task.Kind) (task.Page[task.Task], error)
 	Cancel(context.Context, string) (task.Task, error)
 	Shutdown(context.Context) error
 }
@@ -223,14 +226,12 @@ func clockNow(clock task.Clock) time.Time {
 
 func (r *Runtime) StartSimulation(
 	ctx context.Context,
-	idempotencyKey string,
-	scenario task.Scenario,
-	timeout time.Duration,
+	input task.SimulationStart,
 ) (task.Task, error) {
 	request, err := task.NewSimulationStartRequest(
-		idempotencyKey,
-		scenario,
-		timeout,
+		input.IdempotencyKey,
+		input.Scenario,
+		input.Timeout,
 		r.serviceExecutable,
 		r.simulationDirectory,
 	)
@@ -240,12 +241,24 @@ func (r *Runtime) StartSimulation(
 	return r.manager.Start(ctx, request)
 }
 
+func (r *Runtime) InspectWorkspace(context.Context) (discovery.Snapshot, error) {
+	return discovery.Snapshot{}, task.ErrStorageUnavailable
+}
+
+func (r *Runtime) ListTargets(context.Context, build.TargetsRequest) ([]cmake.Target, error) {
+	return nil, task.ErrStorageUnavailable
+}
+
+func (r *Runtime) StartBuild(context.Context, build.StartRequest) (task.Task, error) {
+	return task.Task{}, task.ErrStorageUnavailable
+}
+
 func (r *Runtime) Get(ctx context.Context, id string) (task.Task, error) {
 	return r.manager.Get(ctx, id)
 }
 
-func (r *Runtime) List(ctx context.Context, cursor string, limit int) (task.Page[task.Task], error) {
-	return r.manager.List(ctx, cursor, limit)
+func (r *Runtime) List(ctx context.Context, cursor string, limit int, kinds []task.Kind) (task.Page[task.Task], error) {
+	return r.manager.List(ctx, cursor, limit, kinds...)
 }
 
 func (r *Runtime) Cancel(ctx context.Context, id string) (task.Task, error) {

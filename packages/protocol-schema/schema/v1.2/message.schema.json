@@ -66,10 +66,11 @@
         "properties": {
           "kind": { "const": "request" }, "method": { "const": "cmake/targets/list" },
           "payload": {
-            "type": "object", "additionalProperties": false, "required": ["workspaceGeneration", "projectId"],
+            "type": "object", "additionalProperties": false, "required": ["workspaceGeneration", "projectId", "buildProfileId"],
             "properties": {
               "workspaceGeneration": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-              "projectId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" }
+              "projectId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" },
+              "buildProfileId": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
             }
           }
         }, "required": ["kind", "method", "payload"]
@@ -175,7 +176,7 @@
           "kind": { "const": "error" }, "requestId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
           "error": {
             "type": "object", "additionalProperties": false, "required": ["code", "message", "retryable"],
-            "properties": { "code": { "enum": ["INVALID_MESSAGE", "UNSUPPORTED_PROTOCOL", "AUTH_REQUIRED", "AUTH_FAILED", "METHOD_NOT_FOUND", "INVALID_TASK_SPEC", "TASK_NOT_FOUND", "IDEMPOTENCY_CONFLICT", "CONFIGURE_REQUIRED", "PROTOCOL_FEATURE_UNAVAILABLE"] }, "message": { "type": "string" }, "retryable": { "type": "boolean" } }
+            "properties": { "code": { "enum": ["INVALID_MESSAGE", "UNSUPPORTED_PROTOCOL", "AUTH_REQUIRED", "AUTH_FAILED", "METHOD_NOT_FOUND", "INVALID_TASK_SPEC", "TASK_NOT_FOUND", "IDEMPOTENCY_CONFLICT", "EVENT_CURSOR_INVALID", "ARTIFACT_NOT_FOUND", "ARTIFACT_NOT_READY", "STORAGE_UNAVAILABLE", "SERVICE_UNHEALTHY", "SUBSCRIBER_TOO_SLOW", "PROTOCOL_FEATURE_UNAVAILABLE", "WORKSPACE_CHANGED", "PROJECT_NOT_FOUND", "BUILD_PROFILE_NOT_FOUND", "TARGET_NOT_FOUND", "CONFIGURE_REQUIRED", "WORKSPACE_TRUST_REQUIRED"] }, "message": { "type": "string" }, "retryable": { "type": "boolean" } }
           }
         }, "required": ["kind", "requestId", "error"]
       }], "unevaluatedProperties": false

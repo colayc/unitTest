@@ -3,65 +3,282 @@
   "$id": "urn:unit-test-ide:protocol:v1.2:event",
   "title": "TaskEventV12",
   "oneOf": [
-    { "$ref": "#/$defs/diagnosticEvent" },
+    { "$ref": "#/$defs/taskCreatedEvent" },
+    { "$ref": "#/$defs/taskStartedEvent" },
     { "$ref": "#/$defs/stepStartedEvent" },
+    { "$ref": "#/$defs/outputEvent" },
     { "$ref": "#/$defs/stepFinishedEvent" },
-    { "$ref": "#/$defs/emptyEvent" }
+    { "$ref": "#/$defs/cancellationRequestedEvent" },
+    { "$ref": "#/$defs/artifactCreatedEvent" },
+    { "$ref": "#/$defs/taskFinishedEvent" },
+    { "$ref": "#/$defs/diagnosticEvent" }
   ],
   "$defs": {
-    "diagnosticEvent": {
-      "title": "TaskDiagnosticEventV12",
+    "eventBase": {
       "type": "object",
-      "additionalProperties": false,
       "required": ["protocolVersion", "kind", "messageId", "sentAt", "sequence", "event", "taskId", "payloadVersion", "payload"],
       "properties": {
         "protocolVersion": { "title": "EventProtocolVersionV12", "const": "1.2" },
         "kind": { "title": "EventKindV12", "const": "event" },
-        "messageId": { "type": "string", "pattern": "^[0-9a-f]{32}$" }, "sentAt": { "type": "string", "format": "date-time" }, "sequence": { "type": "integer", "minimum": 1 },
-        "event": { "title": "TaskEventNameV12", "const": "task.diagnostic" }, "taskId": { "type": "string", "pattern": "^[0-9a-f]{32}$" }, "payloadVersion": { "const": 1 },
-        "payload": { "$ref": "#/$defs/diagnosticPayload" }
+        "messageId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+        "sentAt": { "type": "string", "format": "date-time" },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "event": {
+          "title": "TaskEventNameV12",
+          "enum": [
+            "task.created",
+            "task.started",
+            "task.step_started",
+            "task.output",
+            "task.step_finished",
+            "task.cancellation_requested",
+            "artifact.created",
+            "task.finished",
+            "task.diagnostic"
+          ]
+        },
+        "taskId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+        "payloadVersion": { "const": 1 },
+        "payload": { "type": "object" }
       }
+    },
+    "taskCreatedEvent": {
+      "title": "TaskCreatedEventV12",
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/eventBase" },
+        {
+          "type": "object",
+          "properties": {
+            "event": { "const": "task.created" },
+            "payload": { "$ref": "#/$defs/taskCreatedPayload" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "taskStartedEvent": {
+      "title": "TaskStartedEventV12",
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/eventBase" },
+        {
+          "type": "object",
+          "properties": {
+            "event": { "const": "task.started" },
+            "payload": { "$ref": "#/$defs/taskStartedPayload" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
     },
     "stepStartedEvent": {
       "title": "TaskStepStartedEventV12",
       "type": "object",
-      "additionalProperties": false,
-      "required": ["protocolVersion", "kind", "messageId", "sentAt", "sequence", "event", "taskId", "payloadVersion", "payload"],
-      "properties": {
-        "protocolVersion": { "title": "EventProtocolVersionV12", "const": "1.2" }, "kind": { "title": "EventKindV12", "const": "event" },
-        "messageId": { "type": "string", "pattern": "^[0-9a-f]{32}$" }, "sentAt": { "type": "string", "format": "date-time" }, "sequence": { "type": "integer", "minimum": 1 },
-        "event": { "title": "TaskEventNameV12", "const": "task.step_started" }, "taskId": { "type": "string", "pattern": "^[0-9a-f]{32}$" }, "payloadVersion": { "const": 1 },
-        "payload": { "$ref": "#/$defs/stepStartedPayload" }
-      }
+      "allOf": [
+        { "$ref": "#/$defs/eventBase" },
+        {
+          "type": "object",
+          "properties": {
+            "event": { "const": "task.step_started" },
+            "payload": { "$ref": "#/$defs/stepStartedPayload" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "outputEvent": {
+      "title": "TaskOutputEventV12",
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/eventBase" },
+        {
+          "type": "object",
+          "properties": {
+            "event": { "const": "task.output" },
+            "payload": { "$ref": "#/$defs/outputPayload" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
     },
     "stepFinishedEvent": {
       "title": "TaskStepFinishedEventV12",
       "type": "object",
-      "additionalProperties": false,
-      "required": ["protocolVersion", "kind", "messageId", "sentAt", "sequence", "event", "taskId", "payloadVersion", "payload"],
-      "properties": {
-        "protocolVersion": { "title": "EventProtocolVersionV12", "const": "1.2" }, "kind": { "title": "EventKindV12", "const": "event" },
-        "messageId": { "type": "string", "pattern": "^[0-9a-f]{32}$" }, "sentAt": { "type": "string", "format": "date-time" }, "sequence": { "type": "integer", "minimum": 1 },
-        "event": { "title": "TaskEventNameV12", "const": "task.step_finished" }, "taskId": { "type": "string", "pattern": "^[0-9a-f]{32}$" }, "payloadVersion": { "const": 1 },
-        "payload": { "$ref": "#/$defs/stepFinishedPayload" }
-      }
+      "allOf": [
+        { "$ref": "#/$defs/eventBase" },
+        {
+          "type": "object",
+          "properties": {
+            "event": { "const": "task.step_finished" },
+            "payload": { "$ref": "#/$defs/stepFinishedPayload" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
     },
-    "emptyEvent": {
-      "title": "TaskEmptyEventV12",
+    "cancellationRequestedEvent": {
+      "title": "TaskCancellationRequestedEventV12",
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/eventBase" },
+        {
+          "type": "object",
+          "properties": {
+            "event": { "const": "task.cancellation_requested" },
+            "payload": { "$ref": "#/$defs/cancellationRequestedPayload" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "artifactCreatedEvent": {
+      "title": "ArtifactCreatedEventV12",
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/eventBase" },
+        {
+          "type": "object",
+          "properties": {
+            "event": { "const": "artifact.created" },
+            "payload": { "$ref": "#/$defs/artifactCreatedPayload" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "taskFinishedEvent": {
+      "title": "TaskFinishedEventV12",
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/eventBase" },
+        {
+          "type": "object",
+          "properties": {
+            "event": { "const": "task.finished" },
+            "payload": { "$ref": "#/$defs/taskFinishedPayload" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "diagnosticEvent": {
+      "title": "TaskDiagnosticEventV12",
+      "type": "object",
+      "allOf": [
+        { "$ref": "#/$defs/eventBase" },
+        {
+          "type": "object",
+          "properties": {
+            "event": { "const": "task.diagnostic" },
+            "payload": { "$ref": "#/$defs/diagnosticPayload" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "taskCreatedPayload": {
+      "title": "TaskCreatedPayloadV12",
       "type": "object",
       "additionalProperties": false,
-      "required": ["protocolVersion", "kind", "messageId", "sentAt", "sequence", "event", "taskId", "payloadVersion", "payload"],
+      "required": ["status"],
+      "properties": { "status": { "const": "queued" } }
+    },
+    "taskStartedPayload": {
+      "title": "TaskStartedPayloadV12",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": { "status": { "const": "running" } }
+    },
+    "stepStartedPayload": {
+      "title": "TaskStepStartedPayloadV12",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stepId", "kind", "status"],
       "properties": {
-        "protocolVersion": { "title": "EventProtocolVersionV12", "const": "1.2" }, "kind": { "title": "EventKindV12", "const": "event" },
-        "messageId": { "type": "string", "pattern": "^[0-9a-f]{32}$" }, "sentAt": { "type": "string", "format": "date-time" }, "sequence": { "type": "integer", "minimum": 1 },
-        "event": { "title": "TaskEventNameV12", "enum": ["task.created", "task.started", "task.output", "task.cancellation_requested", "task.finished", "artifact.created"] }, "taskId": { "type": "string", "pattern": "^[0-9a-f]{32}$" }, "payloadVersion": { "const": 1 },
-        "payload": { "$ref": "#/$defs/emptyPayload" }
+        "stepId": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$" },
+        "kind": { "$ref": "#/$defs/stepKind" },
+        "status": { "const": "running" }
       }
     },
-    "emptyPayload": { "title": "TaskEmptyEventPayloadV12", "type": "object", "additionalProperties": false, "maxProperties": 0 },
-    "diagnosticPayload": { "title": "TaskDiagnosticPayloadV12", "type": "object", "additionalProperties": false, "required": ["diagnostic"], "properties": { "diagnostic": { "$ref": "#/$defs/eventDiagnostic" } } },
-    "eventDiagnostic": { "title": "TaskEventDiagnosticV12", "type": "object", "additionalProperties": false, "required": ["severity", "code", "message"], "properties": { "severity": { "title": "TaskEventDiagnosticSeverityV12", "enum": ["error", "warning", "info"] }, "code": { "type": "string", "minLength": 1 }, "message": { "type": "string", "minLength": 1 }, "sourceUri": { "type": "string", "format": "uri" }, "line": { "type": "integer", "minimum": 1 }, "column": { "type": "integer", "minimum": 1 } } },
-    "stepStartedPayload": { "title": "TaskStepStartedPayloadV12", "type": "object", "additionalProperties": false, "required": ["step"], "properties": { "step": { "title": "TaskStepNameV12", "enum": ["configure", "build"] } } },
-    "stepFinishedPayload": { "title": "TaskStepFinishedPayloadV12", "type": "object", "additionalProperties": false, "required": ["step", "outcome"], "properties": { "step": { "title": "TaskStepNameV12", "enum": ["configure", "build"] }, "outcome": { "title": "TaskStepOutcomeV12", "enum": ["succeeded", "command_failed", "cancelled", "timed_out", "interrupted", "infrastructure_failed"] } } }
+    "outputPayload": {
+      "title": "TaskOutputPayloadV12",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stepId", "stream", "text", "truncated"],
+      "properties": {
+        "stepId": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$" },
+        "stream": { "title": "TaskOutputStreamV12", "enum": ["stdout", "stderr", "combined"] },
+        "text": { "type": "string" },
+        "truncated": { "type": "boolean" }
+      }
+    },
+    "stepFinishedPayload": {
+      "title": "TaskStepFinishedPayloadV12",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stepId", "kind", "status"],
+      "properties": {
+        "stepId": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$" },
+        "kind": { "$ref": "#/$defs/stepKind" },
+        "status": { "title": "TaskStepFinishedStatusV12", "enum": ["succeeded", "failed", "skipped"] },
+        "exitCode": { "type": "integer" },
+        "errorCode": { "type": "string", "minLength": 1 }
+      }
+    },
+    "cancellationRequestedPayload": {
+      "title": "TaskCancellationRequestedPayloadV12",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": { "status": { "const": "cancelling" } }
+    },
+    "artifactCreatedPayload": {
+      "title": "ArtifactCreatedPayloadV12",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifactId", "kind"],
+      "properties": {
+        "artifactId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+        "kind": { "type": "string", "minLength": 1, "maxLength": 64 }
+      }
+    },
+    "taskFinishedPayload": {
+      "title": "TaskFinishedPayloadV12",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["outcome"],
+      "properties": { "outcome": { "$ref": "#/$defs/taskOutcome" } }
+    },
+    "diagnosticPayload": {
+      "title": "TaskDiagnosticPayloadV12",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["diagnostic"],
+      "properties": { "diagnostic": { "$ref": "#/$defs/eventDiagnostic" } }
+    },
+    "eventDiagnostic": {
+      "title": "TaskEventDiagnosticV12",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["severity", "code", "message"],
+      "properties": {
+        "severity": { "title": "TaskEventDiagnosticSeverityV12", "enum": ["error", "warning", "info"] },
+        "code": { "type": "string", "minLength": 1 },
+        "message": { "type": "string", "minLength": 1 },
+        "sourceUri": { "type": "string", "format": "uri" },
+        "line": { "type": "integer", "minimum": 1 },
+        "column": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "stepKind": {
+      "title": "TaskStepKindV12",
+      "enum": ["simulation", "configure", "build"]
+    },
+    "taskOutcome": {
+      "title": "TaskOutcomeV12",
+      "enum": ["succeeded", "command_failed", "cancelled", "timed_out", "interrupted", "infrastructure_failed"]
+    }
   }
 }

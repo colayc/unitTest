@@ -264,7 +264,7 @@ func (*contractStore) FindByIdempotencyKey(context.Context, string) (task.Task, 
 	return task.Task{}, nil
 }
 func (*contractStore) Get(context.Context, string) (task.Task, error) { return task.Task{}, nil }
-func (*contractStore) List(context.Context, string, int) (task.Page[task.Task], error) {
+func (*contractStore) List(context.Context, string, int, ...task.Kind) (task.Page[task.Task], error) {
 	return task.Page[task.Task]{}, nil
 }
 func (*contractStore) Apply(context.Context, task.Mutation) (task.Task, []task.Event, error) {

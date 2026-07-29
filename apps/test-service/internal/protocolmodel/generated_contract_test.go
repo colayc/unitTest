@@ -10,8 +10,9 @@ import (
 func TestGeneratedModelsCompile(t *testing.T) {
 	var task taskv12.TaskSnapshotV12 = taskv12.CmakeBuildTaskSnapshotV12{}
 	var event eventv12.TaskEventV12 = eventv12.TaskDiagnosticEventV12{}
-	var emptyEvent eventv12.TaskEventV12 = eventv12.TaskEmptyEventV12{Event: eventv12.EmptyTaskCreated}
-	if task == nil || event == nil || emptyEvent == nil {
+	var createdEvent eventv12.TaskEventV12 = eventv12.TaskCreatedEventV12{Event: eventv12.TaskCreated}
+	var outputEvent eventv12.TaskEventV12 = eventv12.TaskOutputEventV12{Event: eventv12.TaskOutput}
+	if task == nil || event == nil || createdEvent == nil || outputEvent == nil {
 		t.Fatal("generated v1.2 branch models must satisfy their union interfaces")
 	}
 }

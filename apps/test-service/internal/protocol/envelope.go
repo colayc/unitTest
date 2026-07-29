@@ -13,6 +13,7 @@ import (
 const (
 	Version10 = "1.0"
 	Version11 = "1.1"
+	Version12 = "1.2"
 	Version   = Version10
 )
 
@@ -64,7 +65,7 @@ type Event struct {
 }
 
 func SupportedVersion(version string) bool {
-	return version == Version10 || version == Version11
+	return version == Version10 || version == Version11 || version == Version12
 }
 
 func DecodeRequest(line []byte) (Request, error) {
@@ -120,8 +121,8 @@ func Failure(version string, request Request, code, message string, retryable bo
 	return Response{ProtocolVersion: version, Kind: "error", MessageID: newID(), RequestID: request.MessageID, SentAt: time.Now().UTC().Format(time.RFC3339Nano), Error: &ErrorBody{Code: code, Message: message, Retryable: retryable}}
 }
 
-func NewEvent(sequence int64, event, taskID string, at time.Time, payload json.RawMessage) Event {
-	return Event{ProtocolVersion: Version11, Kind: "event", MessageID: newID(), SentAt: at.UTC().Format(time.RFC3339Nano), Sequence: sequence, Event: event, TaskID: taskID, PayloadVersion: 1, Payload: payload}
+func NewEvent(version string, sequence int64, event, taskID string, at time.Time, payload json.RawMessage) Event {
+	return Event{ProtocolVersion: version, Kind: "event", MessageID: newID(), SentAt: at.UTC().Format(time.RFC3339Nano), Sequence: sequence, Event: event, TaskID: taskID, PayloadVersion: 1, Payload: payload}
 }
 
 func newID() string {

@@ -2054,7 +2054,7 @@ func (s *fakeStore) Get(_ context.Context, id string) (task.Task, error) {
 	return value, nil
 }
 
-func (s *fakeStore) List(_ context.Context, _ string, limit int) (task.Page[task.Task], error) {
+func (s *fakeStore) List(_ context.Context, _ string, limit int, _ ...task.Kind) (task.Page[task.Task], error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	result := task.Page[task.Task]{}

@@ -114,19 +114,39 @@ func (s *Store) Get(ctx context.Context, taskID string) (task.Task, error) {
 	return result, nil
 }
 
-func (s *Store) List(ctx context.Context, cursor string, limit int) (task.Page[task.Task], error) {
-	if limit < 1 || limit > maxPageSize {
+func (s *Store) List(ctx context.Context, cursor string, limit int, kinds ...task.Kind) (task.Page[task.Task], error) {
+	if limit < 1 || limit > maxPageSize || len(kinds) > 2 {
 		return task.Page[task.Task]{}, task.ErrInvalidArgument
 	}
 	query := taskSelect
-	args := make([]any, 0, 3)
+	args := make([]any, 0, 5)
+	conditions := make([]string, 0, 2)
+	if len(kinds) > 0 {
+		seen := make(map[task.Kind]struct{}, len(kinds))
+		placeholders := make([]string, 0, len(kinds))
+		for _, kind := range kinds {
+			if kind != task.KindSimulation && kind != task.KindCMakeBuild {
+				return task.Page[task.Task]{}, task.ErrInvalidArgument
+			}
+			if _, exists := seen[kind]; exists {
+				continue
+			}
+			seen[kind] = struct{}{}
+			placeholders = append(placeholders, "?")
+			args = append(args, string(kind))
+		}
+		conditions = append(conditions, "kind IN ("+strings.Join(placeholders, ",")+")")
+	}
 	if cursor != "" {
 		createdAt, taskID, err := decodeCursor(cursor)
 		if err != nil {
 			return task.Page[task.Task]{}, task.ErrInvalidArgument
 		}
-		query += ` WHERE (created_at < ? OR (created_at = ? AND task_id < ?))`
+		conditions = append(conditions, `(created_at < ? OR (created_at = ? AND task_id < ?))`)
 		args = append(args, formatTime(createdAt), formatTime(createdAt), taskID)
+	}
+	if len(conditions) > 0 {
+		query += ` WHERE ` + strings.Join(conditions, ` AND `)
 	}
 	query += ` ORDER BY created_at DESC, task_id DESC LIMIT ?`
 	args = append(args, limit+1)

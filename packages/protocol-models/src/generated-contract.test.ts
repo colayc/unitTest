@@ -6,7 +6,7 @@ import { Event, EventKind, ProtocolVersion } from "./generated/event.js";
 import { Outcome, Scenario, Status, TaskKind } from "./generated/task.js";
 import { Severity } from "./generated/diagnostic.js";
 import { SimulationScenarioV12, TaskKindV12, TaskStatusV12 } from "./generated/task-v1-2.js";
-import { EventKindV12, EventProtocolVersionV12, TaskEventDiagnosticSeverityV12, TaskEventNameV12 } from "./generated/event-v1-2.js";
+import { EventKindV12, EventProtocolVersionV12, TaskEventDiagnosticSeverityV12, TaskEventNameV12, TaskOutputStreamV12, TaskStepKindV12, TaskStepStatusV12 } from "./generated/event-v1-2.js";
 import { Kind as ArtifactKindV12, MIMEType as ArtifactMIMETypeV12 } from "./generated/artifact-v1-2.js";
 
 test("generated capabilities represent an empty Windows service", () => {
@@ -67,6 +67,7 @@ test("generated protocol 1.2 models expose workspace build contracts", () => {
   const targets: TargetList = {
     workspaceGeneration: workspace.workspaceGeneration,
     projectId: "example-project",
+    buildProfileId: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
     targets: []
   };
   const diagnostic: Diagnostic = { severity: Severity.Error, code: "CMAKE_ERROR", message: "configuration failed" };
@@ -94,6 +95,27 @@ test("generated protocol 1.2 models expose workspace build contracts", () => {
     payloadVersion: 1,
     payload: { diagnostic: { severity: TaskEventDiagnosticSeverityV12.Error, code: diagnostic.code, message: diagnostic.message } }
   };
+  const outputEvent: TaskEventV12 = {
+    ...event,
+    sequence: 2,
+    event: TaskEventNameV12.TaskOutput,
+    payload: {
+      stepId: "configure",
+      stream: TaskOutputStreamV12.Stdout,
+      text: "configured",
+      truncated: false
+    }
+  };
+  const simulationStepEvent: TaskEventV12 = {
+    ...event,
+    sequence: 3,
+    event: TaskEventNameV12.TaskStepStarted,
+    payload: {
+      stepId: "simulate",
+      kind: TaskStepKindV12.Simulation,
+      status: TaskStepStatusV12.Running
+    }
+  };
   const artifact: ArtifactMetadataV12 = {
     artifactId: task.taskId,
     taskId: task.taskId,
@@ -106,6 +128,8 @@ test("generated protocol 1.2 models expose workspace build contracts", () => {
   };
 
   assert.equal(artifact.uri, "file:///workspace/task-summary.json");
+  assert.equal(outputEvent.event, TaskEventNameV12.TaskOutput);
+  assert.equal(simulationStepEvent.payload.kind, TaskStepKindV12.Simulation);
 });
 
 test("generated protocol 1.2 models preserve discriminated branches", () => {
@@ -127,7 +151,6 @@ test("generated protocol 1.2 models preserve discriminated branches", () => {
     createdAt: new Date("2026-07-26T00:00:00Z"),
     lastSequence: 1
   };
-  // @ts-expect-error task.diagnostic requires diagnostic payload.
   const diagnosticWithoutPayload: TaskEventV12 = {
     protocolVersion: EventProtocolVersionV12.The12,
     kind: EventKindV12.Event,
@@ -137,6 +160,7 @@ test("generated protocol 1.2 models preserve discriminated branches", () => {
     event: TaskEventNameV12.TaskDiagnostic,
     taskId: "fedcba9876543210fedcba9876543210",
     payloadVersion: 1,
+    // @ts-expect-error task.diagnostic requires diagnostic payload.
     payload: {}
   };
 

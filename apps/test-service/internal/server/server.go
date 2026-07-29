@@ -341,7 +341,7 @@ func toProtocolEvent(event task.Event, version string) (protocol.Event, error) {
 	payload := event.Payload
 	if version == protocol.Version11 {
 		switch event.Type {
-		case task.EventTaskStepStarted, task.EventTaskStepFinished:
+		case task.EventTaskStepStarted, task.EventTaskStepFinished, task.EventTaskDiagnostic:
 			eventType = task.EventTaskOutput
 			payload = json.RawMessage(`{"stream":"service","text":"","truncated":false}`)
 		case task.EventTaskOutput:
@@ -352,9 +352,7 @@ func toProtocolEvent(event task.Event, version string) (protocol.Event, error) {
 			}
 		}
 	}
-	projected := protocol.NewEvent(event.Sequence, string(eventType), event.TaskID, event.At, payload)
-	projected.ProtocolVersion = version
-	return projected, nil
+	return protocol.NewEvent(version, event.Sequence, string(eventType), event.TaskID, event.At, payload), nil
 }
 
 func projectV11Output(payload json.RawMessage) (json.RawMessage, error) {
@@ -443,7 +441,7 @@ func projectV11Output(payload json.RawMessage) (json.RawMessage, error) {
 
 func subscriptionFailure(request protocol.Request, err error) protocol.Response {
 	if errors.Is(err, eventbroker.ErrSubscriberTooSlow) {
-		return protocol.Failure(protocol.Version11, request, "SUBSCRIBER_TOO_SLOW", "event subscriber is too slow", true)
+		return protocol.Failure(request.ProtocolVersion, request, "SUBSCRIBER_TOO_SLOW", "event subscriber is too slow", true)
 	}
-	return protocol.Failure(protocol.Version11, request, "STORAGE_UNAVAILABLE", "event subscription failed", true)
+	return protocol.Failure(request.ProtocolVersion, request, "STORAGE_UNAVAILABLE", "event subscription failed", true)
 }

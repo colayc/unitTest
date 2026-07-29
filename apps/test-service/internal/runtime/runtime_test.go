@@ -282,7 +282,11 @@ func TestShutdownRetainsOwnershipUntilManagerQuiescesAndCanBeRetried(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := active.StartSimulation(context.Background(), "shutdown-active", task.ScenarioHang, time.Minute); err != nil {
+	if _, err := active.StartSimulation(context.Background(), task.SimulationStart{
+		IdempotencyKey: "shutdown-active",
+		Scenario:       task.ScenarioHang,
+		Timeout:        time.Minute,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	subscription, err := active.Subscribe(context.Background(), 0)
@@ -353,7 +357,11 @@ func TestShutdownRetryAfterProcessCloseFailureReleasesInstanceLock(t *testing.T)
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(process.releaseClose) }) }
 	t.Cleanup(func() { release(); _ = active.Close() })
-	started, err := active.StartSimulation(context.Background(), "retry-close-runtime", task.ScenarioSuccess, time.Minute)
+	started, err := active.StartSimulation(context.Background(), task.SimulationStart{
+		IdempotencyKey: "retry-close-runtime",
+		Scenario:       task.ScenarioSuccess,
+		Timeout:        time.Minute,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

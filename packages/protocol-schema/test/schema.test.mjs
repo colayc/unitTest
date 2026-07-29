@@ -175,6 +175,21 @@ test("protocol 1.2 validates workspace builds and keeps v1.1 strict", async () =
   const targets = await load("../fixtures/v1.2/targets-list.valid.json");
   assert.equal(validateV12(targets), true, JSON.stringify(validateV12.errors));
   assert.equal(validateV12({ ...targets, method: "targets/list" }), false);
+  const targetsRequest = {
+    protocolVersion: "1.2",
+    kind: "request",
+    messageId: "66666666666666666666666666666666",
+    sentAt: "2026-07-26T00:00:01Z",
+    method: "cmake/targets/list",
+    payload: {
+      workspaceGeneration: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      projectId: "example-project",
+      buildProfileId: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+    }
+  };
+  assert.equal(validateV12(targetsRequest), true, JSON.stringify(validateV12.errors));
+  const { buildProfileId: _omittedProfile, ...targetsWithoutProfile } = targetsRequest.payload;
+  assert.equal(validateV12({ ...targetsRequest, payload: targetsWithoutProfile }), false);
 
   const stepStarted = {
     protocolVersion: "1.2",
@@ -185,9 +200,14 @@ test("protocol 1.2 validates workspace builds and keeps v1.1 strict", async () =
     event: "task.step_started",
     taskId: "fedcba9876543210fedcba9876543210",
     payloadVersion: 1,
-    payload: { step: "configure" }
+    payload: { stepId: "configure", kind: "configure", status: "running" }
   };
-  const stepFinished = { ...stepStarted, sequence: 3, event: "task.step_finished", payload: { step: "build", outcome: "succeeded" } };
+  const stepFinished = {
+    ...stepStarted,
+    sequence: 3,
+    event: "task.step_finished",
+    payload: { stepId: "build", kind: "build", status: "succeeded", exitCode: 0 }
+  };
   assert.equal(validateV12(stepStarted), true, JSON.stringify(validateV12.errors));
   assert.equal(validateV12(stepFinished), true, JSON.stringify(validateV12.errors));
   assert.equal(validateV12({ ...stepStarted, payload: { ...stepStarted.payload, executable: "cmake" } }), false);
@@ -203,6 +223,76 @@ test("protocol 1.2 validates workspace builds and keeps v1.1 strict", async () =
     error: { code: "CONFIGURE_REQUIRED", message: "cmake/targets/list requires a valid File API reply", retryable: false }
   };
   assert.equal(validateV12(configureRequired), true, JSON.stringify(validateV12.errors));
+
+  for (const code of [
+    "WORKSPACE_CHANGED",
+    "PROJECT_NOT_FOUND",
+    "BUILD_PROFILE_NOT_FOUND",
+    "TARGET_NOT_FOUND"
+  ]) {
+    assert.equal(
+      validateV12({ ...configureRequired, error: { ...configureRequired.error, code } }),
+      true,
+      `${code}: ${JSON.stringify(validateV12.errors)}`
+    );
+  }
+});
+
+test("protocol 1.2 accepts the Service journal event payloads without weakening them", async () => {
+  const ajv = new Ajv2020({ allErrors: true, strict: true });
+  addFormats(ajv);
+  const validate = ajv.compile(await load("../schema/v1.2/event.schema.json"));
+  const base = {
+    protocolVersion: "1.2",
+    kind: "event",
+    messageId: "77777777777777777777777777777777",
+    sentAt: "2026-07-29T00:00:00Z",
+    sequence: 1,
+    taskId: "11111111111111111111111111111111",
+    payloadVersion: 1
+  };
+  const events = [
+    { event: "task.created", payload: { status: "queued" } },
+    { event: "task.started", payload: { status: "running" } },
+    {
+      event: "task.step_started",
+      payload: { stepId: "configure", kind: "configure", status: "running" }
+    },
+    {
+      event: "task.step_started",
+      payload: { stepId: "simulate", kind: "simulation", status: "running" }
+    },
+    {
+      event: "task.output",
+      payload: { stepId: "configure", stream: "stdout", text: "hello", truncated: false }
+    },
+    {
+      event: "task.step_finished",
+      payload: { stepId: "configure", kind: "configure", status: "succeeded", exitCode: 0 }
+    },
+    { event: "task.cancellation_requested", payload: { status: "cancelling" } },
+    {
+      event: "artifact.created",
+      payload: { artifactId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", kind: "task-summary" }
+    },
+    { event: "task.finished", payload: { outcome: "succeeded" } },
+    {
+      event: "task.diagnostic",
+      payload: { diagnostic: { severity: "warning", code: "C123", message: "warning" } }
+    }
+  ];
+  for (const [index, event] of events.entries()) {
+    assert.equal(
+      validate({ ...base, sequence: index + 1, ...event }),
+      true,
+      `${event.event}: ${JSON.stringify(validate.errors)}`
+    );
+  }
+  assert.equal(validate({
+    ...base,
+    event: "task.output",
+    payload: { stepId: "configure", stream: "stdout", text: "hello", truncated: false, executable: "cmake" }
+  }), false);
 });
 
 test("protocol 1.2 refuses execution details and native workspace paths", async () => {
