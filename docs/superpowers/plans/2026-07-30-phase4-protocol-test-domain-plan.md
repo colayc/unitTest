@@ -29,6 +29,8 @@
 - 创建：`apps/test-service/internal/workspace/testdata/tests-v2.valid.json`
 - 创建：`apps/test-service/internal/workspace/testdata/tests-command.invalid.json`
 - 创建：`apps/test-service/internal/workspace/testdata/tests-duplicate.invalid.json`
+- 修改：`apps/test-service/internal/cmake/generation.go`
+- 修改：`apps/test-service/internal/cmake/generation_test.go`
 - 修改：`tools/workspace-smoke/workspace-config-schema.test.mjs`
 
 **接口：**
@@ -47,19 +49,19 @@ type TestContainerMapping struct {
 }
 ```
 
-- [ ] **Step 1：写出 v1 compatibility、v2 valid 和 unsafe field 失败测试**
+- [x] **Step 1：写出 v1 compatibility、v2 valid 和 unsafe field 失败测试**
 
 覆盖：
 
 - v1 minimal config 仍通过；
 - v2 exact CTest name + enum framework 通过；
 - duplicate `ctestName` 拒绝；
-- regex/glob intent、空名称、超长名称拒绝；
+- `ctestPattern`/glob 等非 exact-name 字段、空名称、超长名称拒绝；
 - command/executable/args/environment/workingDirectory/hook 拒绝；
 - `additionalProperties: false`；
 - config canonical hash 包含 tests mapping。
 
-- [ ] **Step 2：运行聚焦测试并确认失败**
+- [x] **Step 2：运行聚焦测试并确认失败**
 
 ```powershell
 go test ./apps/test-service/internal/workspace -run 'ConfigV2|TestContainer|Unsafe' -count=1
@@ -68,11 +70,11 @@ pnpm test:workspace
 
 预期：FAIL，v2 Schema 和 model 尚不存在。
 
-- [ ] **Step 3：实现 strict v1/v2 loader**
+- [x] **Step 3：实现 strict v1/v2 loader**
 
 Loader 根据顶层 `version` 选择 Schema 分支。`ctestName` 使用 UTF-8、长度和 NUL 校验，只保存 exact string；不得编译 regex。framework 使用 closed enum。
 
-- [ ] **Step 4：运行 Workspace 全套测试**
+- [x] **Step 4：运行 Workspace 全套测试**
 
 ```powershell
 go test ./apps/test-service/internal/workspace -count=1
@@ -82,10 +84,10 @@ git diff --check
 
 预期：PASS。
 
-- [ ] **Step 5：提交 Workspace config v2**
+- [x] **Step 5：提交 Workspace config v2**
 
 ```powershell
-git add apps/test-service/internal/workspace tools/workspace-smoke
+git add apps/test-service/internal/workspace apps/test-service/internal/cmake/generation.go apps/test-service/internal/cmake/generation_test.go tools/workspace-smoke
 git commit -m "feat: define workspace test mappings"
 ```
 

@@ -1,0 +1,18 @@
+{
+  "version": 2,
+  "projects": [
+    {
+      "id": "root",
+      "sourceDir": ".",
+      "tests": {
+        "containers": [
+          {
+            "ctestName": "unsafe",
+            "framework": "cpputest",
+            "command": "powershell -Command whoami"
+          }
+        ]
+      }
+    }
+  ]
+}

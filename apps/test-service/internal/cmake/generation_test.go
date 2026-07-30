@@ -77,6 +77,49 @@ func TestWorkspaceGenerationCanonicalizesCollectionAndPathOrder(t *testing.T) {
 	}
 }
 
+func TestWorkspaceGenerationCanonicalizesAndTracksTestMappings(t *testing.T) {
+	projectWithMappings := func(containers []workspace.TestContainerMapping) workspace.ProjectConfig {
+		return workspace.ProjectConfig{
+			ID:        "app",
+			SourceDir: ".",
+			Tests: workspace.ProjectTestsConfig{
+				Containers: containers,
+			},
+		}
+	}
+	configA := workspace.Config{
+		Version: 2,
+		Projects: []workspace.ProjectConfig{projectWithMappings([]workspace.TestContainerMapping{
+			{CTestName: "z-unity", Framework: workspace.FrameworkUnity},
+			{CTestName: "a-cpputest", Framework: workspace.FrameworkCppUTest},
+		})},
+	}
+	configB := workspace.Config{
+		Version: 2,
+		Projects: []workspace.ProjectConfig{projectWithMappings([]workspace.TestContainerMapping{
+			{CTestName: "a-cpputest", Framework: workspace.FrameworkCppUTest},
+			{CTestName: "z-unity", Framework: workspace.FrameworkUnity},
+		})},
+	}
+	configChanged := workspace.Config{
+		Version: 2,
+		Projects: []workspace.ProjectConfig{projectWithMappings([]workspace.TestContainerMapping{
+			{CTestName: "a-cpputest", Framework: workspace.FrameworkCppUTest},
+			{CTestName: "z-unity", Framework: workspace.FrameworkCppUTest},
+		})},
+	}
+
+	first := WorkspaceGeneration(configA, Installation{}, nil, nil)
+	reordered := WorkspaceGeneration(configB, Installation{}, nil, nil)
+	changed := WorkspaceGeneration(configChanged, Installation{}, nil, nil)
+	if first != reordered {
+		t.Fatalf("mapping order produced %q and %q", first, reordered)
+	}
+	if first == changed {
+		t.Fatalf("framework mapping change kept generation %q", first)
+	}
+}
+
 func TestCanonicalPortablePathNormalizesSeparatorsBeforeCleaning(t *testing.T) {
 	want := "C:/Tools/CMake/bin"
 	if runtime.GOOS == "windows" {
@@ -238,9 +281,16 @@ func TestWorkspaceGenerationChangesWithSemanticInputs(t *testing.T) {
 
 func TestWorkspaceGenerationDoesNotMutateInputs(t *testing.T) {
 	config := workspace.Config{
-		Version: 1,
+		Version: 2,
 		Projects: []workspace.ProjectConfig{
-			{ID: "b", SourceDir: "b"},
+			{
+				ID:        "b",
+				SourceDir: "b",
+				Tests: workspace.ProjectTestsConfig{Containers: []workspace.TestContainerMapping{
+					{CTestName: "z", Framework: workspace.FrameworkUnity},
+					{CTestName: "a", Framework: workspace.FrameworkCppUTest},
+				}},
+			},
 			{ID: "a", SourceDir: "a"},
 		},
 	}
@@ -251,6 +301,10 @@ func TestWorkspaceGenerationDoesNotMutateInputs(t *testing.T) {
 	toolchains := []string{"b", "a"}
 	wantConfig := config
 	wantConfig.Projects = append([]workspace.ProjectConfig(nil), config.Projects...)
+	wantConfig.Projects[0].Tests.Containers = append(
+		[]workspace.TestContainerMapping(nil),
+		config.Projects[0].Tests.Containers...,
+	)
 	wantProfiles := append([]BuildProfile(nil), profiles...)
 	wantToolchains := append([]string(nil), toolchains...)
 

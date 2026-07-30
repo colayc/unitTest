@@ -64,6 +64,128 @@ func TestLoadConfigLoadsFamilyDiscriminatedManualToolchains(t *testing.T) {
 	}
 }
 
+func TestLoadConfigLoadsV2TestContainerMappings(t *testing.T) {
+	result, err := loadConfigBytes(t, configFixture(t, "tests-v2.valid.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if result.Config.Version != 2 {
+		t.Fatalf("Version = %d, want 2", result.Config.Version)
+	}
+	if len(result.Config.Projects) != 1 {
+		t.Fatalf("Projects = %#v, want one project", result.Config.Projects)
+	}
+	containers := result.Config.Projects[0].Tests.Containers
+	want := []TestContainerMapping{
+		{CTestName: "core.cpputest[debug]", Framework: FrameworkCppUTest},
+		{CTestName: "core-unity", Framework: FrameworkUnity},
+	}
+	if len(containers) != len(want) {
+		t.Fatalf("Test containers = %#v, want %#v", containers, want)
+	}
+	for index := range want {
+		if containers[index] != want[index] {
+			t.Fatalf("Test containers[%d] = %#v, want %#v", index, containers[index], want[index])
+		}
+	}
+}
+
+func TestLoadConfigRejectsUnsafeOrAmbiguousTestMappings(t *testing.T) {
+	tooManyMappings := make([]map[string]any, 257)
+	for index := range tooManyMappings {
+		tooManyMappings[index] = map[string]any{
+			"ctestName": fmt.Sprintf("test-%d", index),
+			"framework": "cpputest",
+		}
+	}
+	invalidUTF8Name := []byte(
+		`{"version":2,"projects":[{"id":"root","sourceDir":".","tests":{"containers":[{"ctestName":"`,
+	)
+	invalidUTF8Name = append(invalidUTF8Name, 0xff)
+	invalidUTF8Name = append(
+		invalidUTF8Name,
+		[]byte(`","framework":"cpputest"}]}}]}`)...,
+	)
+
+	testCases := map[string][]byte{
+		"v1 tests field": []byte(
+			`{"version":1,"projects":[{"id":"root","sourceDir":".","tests":{"containers":[]}}]}`,
+		),
+		"command fixture":   configFixture(t, "tests-command.invalid.json"),
+		"duplicate fixture": configFixture(t, "tests-duplicate.invalid.json"),
+		"duplicate name with different framework": []byte(
+			`{"version":2,"projects":[{"id":"root","sourceDir":".","tests":{"containers":[{"ctestName":"same","framework":"cpputest"},{"ctestName":"same","framework":"unity"}]}}]}`,
+		),
+		"pattern field": []byte(
+			`{"version":2,"projects":[{"id":"root","sourceDir":".","tests":{"containers":[{"ctestPattern":".*","framework":"cpputest"}]}}]}`,
+		),
+		"unsupported framework": []byte(
+			`{"version":2,"projects":[{"id":"root","sourceDir":".","tests":{"containers":[{"ctestName":"tests","framework":"gtest"}]}}]}`,
+		),
+		"empty name": []byte(
+			`{"version":2,"projects":[{"id":"root","sourceDir":".","tests":{"containers":[{"ctestName":"","framework":"cpputest"}]}}]}`,
+		),
+		"NUL name": []byte(
+			"{\"version\":2,\"projects\":[{\"id\":\"root\",\"sourceDir\":\".\",\"tests\":{\"containers\":[{\"ctestName\":\"bad\\u0000name\",\"framework\":\"cpputest\"}]}}]}",
+		),
+		"invalid UTF-8 name": invalidUTF8Name,
+		"too long name": []byte(
+			`{"version":2,"projects":[{"id":"root","sourceDir":".","tests":{"containers":[{"ctestName":"` +
+				strings.Repeat("x", 513) +
+				`","framework":"cpputest"}]}}]}`,
+		),
+		"too many mappings": mustJSON(t, map[string]any{
+			"version": 2,
+			"projects": []map[string]any{{
+				"id":        "root",
+				"sourceDir": ".",
+				"tests": map[string]any{
+					"containers": tooManyMappings,
+				},
+			}},
+		}),
+		"null tests": []byte(
+			`{"version":2,"projects":[{"id":"root","sourceDir":".","tests":null}]}`,
+		),
+		"null containers": []byte(
+			`{"version":2,"projects":[{"id":"root","sourceDir":".","tests":{"containers":null}}]}`,
+		),
+	}
+	for field, value := range map[string]any{
+		"args":             []string{"--run", "all"},
+		"environment":      map[string]string{"TOKEN": "secret"},
+		"executable":       "C:/unsafe.exe",
+		"glob":             "*",
+		"hook":             "before",
+		"shell":            true,
+		"workingDirectory": "C:/outside",
+	} {
+		testCases["unsafe field "+field] = mustJSON(t, map[string]any{
+			"version": 2,
+			"projects": []map[string]any{{
+				"id":        "root",
+				"sourceDir": ".",
+				"tests": map[string]any{
+					"containers": []map[string]any{{
+						"ctestName": "tests",
+						"framework": "cpputest",
+						field:       value,
+					}},
+				},
+			}},
+		})
+	}
+
+	for name, data := range testCases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := loadConfigBytes(t, data); !errors.Is(err, ErrInvalidConfig) {
+				t.Fatalf("LoadConfig error = %v, want ErrInvalidConfig", err)
+			}
+		})
+	}
+}
+
 func TestLoadConfigMatchesSchemaOptionalFieldPresence(t *testing.T) {
 	missingOptionalFields := map[string][]byte{
 		"cmake": []byte(
@@ -177,7 +299,7 @@ func TestLoadConfigRejectsInvalidStructuredInput(t *testing.T) {
 			`{"version":1,"projects":[],"unexpected":true}`,
 		),
 		"wrong version": []byte(
-			`{"version":2,"projects":[]}`,
+			`{"version":3,"projects":[]}`,
 		),
 		"absolute POSIX source directory": []byte(
 			`{"version":1,"projects":[{"id":"outside","sourceDir":"/outside"}]}`,

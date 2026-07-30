@@ -1,36 +1,67 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Unit Test IDE Workspace Configuration",
-  "type": "object",
-  "additionalProperties": false,
-  "required": [
-    "version"
-  ],
-  "properties": {
-    "version": {
-      "const": 1
+  "oneOf": [
+    {
+      "$ref": "#/$defs/workspaceV1"
     },
-    "cmake": {
-      "$ref": "#/$defs/cmake"
-    },
-    "projects": {
-      "type": "array",
-      "maxItems": 64,
-      "uniqueItems": true,
-      "items": {
-        "$ref": "#/$defs/project"
-      }
-    },
-    "toolchains": {
-      "type": "array",
-      "maxItems": 64,
-      "uniqueItems": true,
-      "items": {
-        "$ref": "#/$defs/toolchain"
-      }
+    {
+      "$ref": "#/$defs/workspaceV2"
     }
-  },
+  ],
   "$defs": {
+    "workspaceV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "cmake": {
+          "$ref": "#/$defs/cmake"
+        },
+        "projects": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/projectV1"
+          }
+        },
+        "toolchains": {
+          "$ref": "#/$defs/toolchains"
+        }
+      }
+    },
+    "workspaceV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version"
+      ],
+      "properties": {
+        "version": {
+          "const": 2
+        },
+        "cmake": {
+          "$ref": "#/$defs/cmake"
+        },
+        "projects": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/projectV2"
+          }
+        },
+        "toolchains": {
+          "$ref": "#/$defs/toolchains"
+        }
+      }
+    },
     "identifier": {
       "type": "string",
       "minLength": 1,
@@ -75,7 +106,7 @@
         }
       }
     },
-    "project": {
+    "projectV1": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -92,6 +123,72 @@
         "fallback": {
           "$ref": "#/$defs/fallback"
         }
+      }
+    },
+    "projectV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "sourceDir"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "sourceDir": {
+          "$ref": "#/$defs/relativeWorkspacePath"
+        },
+        "fallback": {
+          "$ref": "#/$defs/fallback"
+        },
+        "tests": {
+          "$ref": "#/$defs/projectTests"
+        }
+      }
+    },
+    "projectTests": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "containers": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/testContainerMapping"
+          }
+        }
+      }
+    },
+    "testContainerMapping": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ctestName",
+        "framework"
+      ],
+      "properties": {
+        "ctestName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "framework": {
+          "enum": [
+            "cpputest",
+            "unity"
+          ]
+        }
+      }
+    },
+    "toolchains": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/toolchain"
       }
     },
     "compilerToolchain": {

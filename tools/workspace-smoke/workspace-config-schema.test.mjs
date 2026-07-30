@@ -22,12 +22,15 @@ test("workspace schema accepts supported structured configuration", async () => 
   const validate = await compileSchema();
   assert.equal(validate(await fixture("minimal.valid.json")), true, JSON.stringify(validate.errors));
   assert.equal(validate(await fixture("manual-toolchains.valid.json")), true, JSON.stringify(validate.errors));
+  assert.equal(validate(await fixture("tests-v2.valid.json")), true, JSON.stringify(validate.errors));
 });
 
 test("workspace schema rejects shell-shaped fields as additional properties", async () => {
   const validate = await compileSchema();
   assert.equal(validate(await fixture("shell.invalid.json")), false);
   assert.match(JSON.stringify(validate.errors), /additionalProperties/);
+  assert.equal(validate(await fixture("tests-command.invalid.json")), false);
+  assert.match(JSON.stringify(validate.errors), /additionalProperties|oneOf/);
 });
 
 test("workspace schema rejects unsafe paths, duplicates, limits, and versions", async () => {
@@ -41,7 +44,7 @@ test("workspace schema rejects unsafe paths, duplicates, limits, and versions", 
   };
 
   const invalidConfigurations = [
-    { ...minimal, version: 2 },
+    { ...minimal, version: 3 },
     { ...minimal, unknown: true },
     {
       version: 1,
@@ -78,6 +81,66 @@ test("workspace schema rejects unsafe paths, duplicates, limits, and versions", 
   for (const configuration of invalidConfigurations) {
     assert.equal(validate(configuration), false, JSON.stringify(configuration));
   }
+
+  assert.equal(validate(await fixture("tests-duplicate.invalid.json")), false);
+  for (const [field, value] of Object.entries({
+    args: ["--run", "all"],
+    environment: { TOKEN: "secret" },
+    executable: "C:/unsafe.exe",
+    glob: "*",
+    hook: "before",
+    shell: true,
+    workingDirectory: "C:/outside"
+  })) {
+    assert.equal(validate({
+      version: 2,
+      projects: [{
+        id: "root",
+        sourceDir: ".",
+        tests: {
+          containers: [{
+            ctestName: "tests",
+            framework: "cpputest",
+            [field]: value
+          }]
+        }
+      }]
+    }), false, field);
+  }
+  assert.equal(validate({
+    version: 1,
+    projects: [{
+      id: "root",
+      sourceDir: ".",
+      tests: { containers: [] }
+    }]
+  }), false);
+  assert.equal(validate({
+    version: 2,
+    projects: [{
+      id: "root",
+      sourceDir: ".",
+      tests: {
+        containers: [{
+          ctestPattern: ".*",
+          framework: "cpputest"
+        }]
+      }
+    }]
+  }), false);
+  assert.equal(validate({
+    version: 2,
+    projects: [{
+      id: "root",
+      sourceDir: ".",
+      tests: {
+        containers: [{
+          ctestName: "tests",
+          framework: "gtest"
+        }]
+      }
+    }]
+  }), false);
 });
 
 test("workspace schema enforces family-discriminated manual toolchains", async () => {
@@ -130,6 +193,18 @@ test("workspace schema accepts missing optional fields and rejects explicit null
         sourceDir: ".",
         fallback: { configurations: ["Debug"] }
       }]
+    },
+    {
+      version: 2,
+      projects: [{ id: "root", sourceDir: "." }]
+    },
+    {
+      version: 2,
+      projects: [{
+        id: "root",
+        sourceDir: ".",
+        tests: {}
+      }]
     }
   ];
   for (const configuration of missingOptionalFields) {
@@ -159,6 +234,18 @@ test("workspace schema accepts missing optional fields and rejects explicit null
         id: "root",
         sourceDir: ".",
         fallback: { preferredGenerator: null }
+      }]
+    },
+    {
+      version: 2,
+      projects: [{ id: "root", sourceDir: ".", tests: null }]
+    },
+    {
+      version: 2,
+      projects: [{
+        id: "root",
+        sourceDir: ".",
+        tests: { containers: null }
       }]
     }
   ];

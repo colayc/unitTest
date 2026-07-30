@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"unicode/utf8"
 )
 
 const (
@@ -17,6 +18,8 @@ const (
 	maxToolchains       = 64
 	maxConfigurations   = 64
 	maxIdentifierBytes  = 64
+	maxTestContainers   = 256
+	maxCTestNameBytes   = 512
 )
 
 var (
@@ -36,14 +39,31 @@ type CMakeConfig struct {
 }
 
 type ProjectConfig struct {
-	ID        string         `json:"id"`
-	SourceDir string         `json:"sourceDir"`
-	Fallback  FallbackConfig `json:"fallback,omitempty"`
+	ID        string             `json:"id"`
+	SourceDir string             `json:"sourceDir"`
+	Fallback  FallbackConfig     `json:"fallback,omitempty"`
+	Tests     ProjectTestsConfig `json:"tests,omitempty"`
 }
 
 type FallbackConfig struct {
 	Configurations     []string `json:"configurations,omitempty"`
 	PreferredGenerator string   `json:"preferredGenerator,omitempty"`
+}
+
+type Framework string
+
+const (
+	FrameworkCppUTest Framework = "cpputest"
+	FrameworkUnity    Framework = "unity"
+)
+
+type ProjectTestsConfig struct {
+	Containers []TestContainerMapping `json:"containers,omitempty"`
+}
+
+type TestContainerMapping struct {
+	CTestName string    `json:"ctestName"`
+	Framework Framework `json:"framework"`
 }
 
 type ToolchainConfig struct {
@@ -85,14 +105,24 @@ type cmakeWire struct {
 }
 
 type projectWire struct {
-	ID        *string                       `json:"id"`
-	SourceDir *string                       `json:"sourceDir"`
-	Fallback  nonNullOptional[fallbackWire] `json:"fallback"`
+	ID        *string                           `json:"id"`
+	SourceDir *string                           `json:"sourceDir"`
+	Fallback  nonNullOptional[fallbackWire]     `json:"fallback"`
+	Tests     nonNullOptional[projectTestsWire] `json:"tests"`
 }
 
 type fallbackWire struct {
 	Configurations     nonNullOptional[[]string] `json:"configurations"`
 	PreferredGenerator nonNullOptional[string]   `json:"preferredGenerator"`
+}
+
+type projectTestsWire struct {
+	Containers nonNullOptional[[]testContainerMappingWire] `json:"containers"`
+}
+
+type testContainerMappingWire struct {
+	CTestName *string    `json:"ctestName"`
+	Framework *Framework `json:"framework"`
 }
 
 type familyWire struct {
@@ -173,12 +203,15 @@ func loadDefaultConfig(root Root) (LoadResult, error) {
 }
 
 func decodeConfig(root Root, data []byte) (Config, error) {
+	if !utf8.Valid(data) {
+		return Config{}, invalidConfig("workspace JSON must be valid UTF-8")
+	}
 	var wire configWire
 	if err := decodeStrict(data, &wire); err != nil {
 		return Config{}, invalidConfig("decode JSON: %v", err)
 	}
-	if wire.Version != 1 {
-		return Config{}, invalidConfig("version = %d, want 1", wire.Version)
+	if wire.Version != 1 && wire.Version != 2 {
+		return Config{}, invalidConfig("version = %d, want 1 or 2", wire.Version)
 	}
 	if len(wire.Projects.Value) > maxProjects {
 		return Config{}, invalidConfig("projects contains %d items, maximum is %d", len(wire.Projects.Value), maxProjects)
@@ -197,7 +230,7 @@ func decodeConfig(root Root, data []byte) (Config, error) {
 
 	projectIDs := make(map[string]struct{}, len(wire.Projects.Value))
 	for index, project := range wire.Projects.Value {
-		decoded, err := decodeProject(root, index, project)
+		decoded, err := decodeProject(root, wire.Version, index, project)
 		if err != nil {
 			return Config{}, err
 		}
@@ -223,7 +256,7 @@ func decodeConfig(root Root, data []byte) (Config, error) {
 	return config, nil
 }
 
-func decodeProject(root Root, index int, wire projectWire) (ProjectConfig, error) {
+func decodeProject(root Root, configVersion, index int, wire projectWire) (ProjectConfig, error) {
 	if wire.ID == nil || !validIdentifier(*wire.ID) {
 		return ProjectConfig{}, invalidConfig("projects[%d].id is not a valid identifier", index)
 	}
@@ -234,45 +267,104 @@ func decodeProject(root Root, index int, wire projectWire) (ProjectConfig, error
 		return ProjectConfig{}, invalidConfig("projects[%d].sourceDir: %v", index, err)
 	}
 
+	if configVersion == 1 && wire.Tests.Present {
+		return ProjectConfig{}, invalidConfig("projects[%d].tests requires workspace version 2", index)
+	}
+
 	project := ProjectConfig{ID: *wire.ID, SourceDir: *wire.SourceDir}
-	if !wire.Fallback.Present {
-		return project, nil
-	}
-	configurations := wire.Fallback.Value.Configurations.Value
-	if len(configurations) > maxConfigurations {
-		return ProjectConfig{}, invalidConfig(
-			"projects[%d].fallback.configurations contains %d items, maximum is %d",
-			index,
-			len(configurations),
-			maxConfigurations,
-		)
-	}
-	seenConfigurations := make(map[string]struct{}, len(configurations))
-	for configurationIndex, configuration := range configurations {
-		if configuration == "" {
+	if wire.Fallback.Present {
+		configurations := wire.Fallback.Value.Configurations.Value
+		if len(configurations) > maxConfigurations {
 			return ProjectConfig{}, invalidConfig(
-				"projects[%d].fallback.configurations[%d] must not be empty",
+				"projects[%d].fallback.configurations contains %d items, maximum is %d",
 				index,
-				configurationIndex,
+				len(configurations),
+				maxConfigurations,
 			)
 		}
-		if _, duplicate := seenConfigurations[configuration]; duplicate {
-			return ProjectConfig{}, invalidConfig(
-				"projects[%d].fallback.configurations contains duplicate %q",
-				index,
-				configuration,
-			)
+		seenConfigurations := make(map[string]struct{}, len(configurations))
+		for configurationIndex, configuration := range configurations {
+			if configuration == "" {
+				return ProjectConfig{}, invalidConfig(
+					"projects[%d].fallback.configurations[%d] must not be empty",
+					index,
+					configurationIndex,
+				)
+			}
+			if _, duplicate := seenConfigurations[configuration]; duplicate {
+				return ProjectConfig{}, invalidConfig(
+					"projects[%d].fallback.configurations contains duplicate %q",
+					index,
+					configuration,
+				)
+			}
+			seenConfigurations[configuration] = struct{}{}
 		}
-		seenConfigurations[configuration] = struct{}{}
+		project.Fallback.Configurations = append([]string(nil), configurations...)
+		if wire.Fallback.Value.PreferredGenerator.Present {
+			if wire.Fallback.Value.PreferredGenerator.Value == "" {
+				return ProjectConfig{}, invalidConfig("projects[%d].fallback.preferredGenerator must not be empty", index)
+			}
+			project.Fallback.PreferredGenerator = wire.Fallback.Value.PreferredGenerator.Value
+		}
 	}
-	project.Fallback.Configurations = configurations
-	if wire.Fallback.Value.PreferredGenerator.Present {
-		if wire.Fallback.Value.PreferredGenerator.Value == "" {
-			return ProjectConfig{}, invalidConfig("projects[%d].fallback.preferredGenerator must not be empty", index)
+	if wire.Tests.Present {
+		containers, err := decodeTestContainers(index, wire.Tests.Value.Containers.Value)
+		if err != nil {
+			return ProjectConfig{}, err
 		}
-		project.Fallback.PreferredGenerator = wire.Fallback.Value.PreferredGenerator.Value
+		project.Tests.Containers = containers
 	}
 	return project, nil
+}
+
+func decodeTestContainers(projectIndex int, wires []testContainerMappingWire) ([]TestContainerMapping, error) {
+	if len(wires) > maxTestContainers {
+		return nil, invalidConfig(
+			"projects[%d].tests.containers contains %d items, maximum is %d",
+			projectIndex,
+			len(wires),
+			maxTestContainers,
+		)
+	}
+
+	result := make([]TestContainerMapping, 0, len(wires))
+	seenNames := make(map[string]struct{}, len(wires))
+	for mappingIndex, wire := range wires {
+		if wire.CTestName == nil ||
+			len(*wire.CTestName) == 0 ||
+			len(*wire.CTestName) > maxCTestNameBytes ||
+			strings.ContainsRune(*wire.CTestName, '\x00') {
+			return nil, invalidConfig(
+				"projects[%d].tests.containers[%d].ctestName must contain 1 to %d bytes without NUL",
+				projectIndex,
+				mappingIndex,
+				maxCTestNameBytes,
+			)
+		}
+		if _, duplicate := seenNames[*wire.CTestName]; duplicate {
+			return nil, invalidConfig(
+				"projects[%d].tests.containers contains duplicate ctestName %q",
+				projectIndex,
+				*wire.CTestName,
+			)
+		}
+		if wire.Framework == nil ||
+			(*wire.Framework != FrameworkCppUTest && *wire.Framework != FrameworkUnity) {
+			return nil, invalidConfig(
+				"projects[%d].tests.containers[%d].framework is not supported",
+				projectIndex,
+				mappingIndex,
+			)
+		}
+
+		seenNames[*wire.CTestName] = struct{}{}
+		result = append(result, TestContainerMapping{
+			CTestName: *wire.CTestName,
+			Framework: *wire.Framework,
+		})
+	}
+	return result, nil
 }
 
 func decodeToolchain(index int, raw json.RawMessage) (ToolchainConfig, error) {

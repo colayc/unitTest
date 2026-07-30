@@ -32,14 +32,24 @@ type generationCMakeConfig struct {
 }
 
 type generationProject struct {
-	ID        string             `json:"id"`
-	SourceDir string             `json:"sourceDir"`
-	Fallback  generationFallback `json:"fallback"`
+	ID        string                 `json:"id"`
+	SourceDir string                 `json:"sourceDir"`
+	Fallback  generationFallback     `json:"fallback"`
+	Tests     generationProjectTests `json:"tests"`
 }
 
 type generationFallback struct {
 	Configurations     []string `json:"configurations"`
 	PreferredGenerator string   `json:"preferredGenerator"`
+}
+
+type generationProjectTests struct {
+	Containers []generationTestContainerMapping `json:"containers"`
+}
+
+type generationTestContainerMapping struct {
+	CTestName string              `json:"ctestName"`
+	Framework workspace.Framework `json:"framework"`
 }
 
 type generationToolchain struct {
@@ -97,6 +107,19 @@ func canonicalGenerationConfig(config workspace.Config) generationConfig {
 	for _, project := range config.Projects {
 		configurations := append([]string{}, project.Fallback.Configurations...)
 		sort.Strings(configurations)
+		containers := make([]generationTestContainerMapping, 0, len(project.Tests.Containers))
+		for _, container := range project.Tests.Containers {
+			containers = append(containers, generationTestContainerMapping{
+				CTestName: container.CTestName,
+				Framework: container.Framework,
+			})
+		}
+		sort.Slice(containers, func(first, second int) bool {
+			if containers[first].CTestName != containers[second].CTestName {
+				return containers[first].CTestName < containers[second].CTestName
+			}
+			return containers[first].Framework < containers[second].Framework
+		})
 		result.Projects = append(result.Projects, generationProject{
 			ID:        project.ID,
 			SourceDir: canonicalRelativePath(project.SourceDir),
@@ -104,6 +127,7 @@ func canonicalGenerationConfig(config workspace.Config) generationConfig {
 				Configurations:     configurations,
 				PreferredGenerator: project.Fallback.PreferredGenerator,
 			},
+			Tests: generationProjectTests{Containers: containers},
 		})
 	}
 	sort.Slice(result.Projects, func(first, second int) bool {
