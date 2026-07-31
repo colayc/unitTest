@@ -7,7 +7,8 @@ const build = join(root, "build");
 await mkdir(build, { recursive: true });
 const programs = [
   ["unit-test-service", "./apps/test-service/cmd/unit-test-service"],
-  ["cmake-fixture", "./apps/test-service/cmd/cmake-fixture"]
+  ["cmake-fixture", "./apps/test-service/cmd/cmake-fixture"],
+  ["ctest", "./apps/test-service/cmd/cmake-fixture"]
 ];
 for (const [name, pkg] of programs) {
   const output = join(build, process.platform === "win32" ? `${name}.exe` : name);

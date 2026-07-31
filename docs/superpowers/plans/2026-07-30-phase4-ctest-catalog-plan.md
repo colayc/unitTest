@@ -293,22 +293,30 @@ git commit -m "feat: build versioned test catalogs"
 
 - 创建：`apps/test-service/internal/ctest/runner.go`
 - 创建：`apps/test-service/internal/ctest/runner_test.go`
-- 创建：`apps/test-service/internal/ctest/selection.go`
-- 创建：`apps/test-service/internal/ctest/selection_test.go`
+- 创建：`apps/test-service/internal/ctest/semantic.go`
+- 创建：`apps/test-service/internal/ctest/semantic_test.go`
+- 修改：`apps/test-service/internal/ctest/descriptor.go`
+- 修改：`apps/test-service/internal/ctest/model.go`
+- 修改：`apps/test-service/internal/ctest/json.go`
 - 创建：`apps/test-service/internal/testdiscovery/service.go`
 - 创建：`apps/test-service/internal/testdiscovery/service_test.go`
 - 修改：`apps/test-service/internal/cmake/installation.go`
-- 创建：`apps/test-service/internal/cmake/installation_test.go`
 - 修改：`apps/test-service/internal/cmake/resolver.go`
 - 修改：`apps/test-service/internal/cmake/resolver_test.go`
 - 修改：`apps/test-service/internal/cmake/manifest.go`
 - 修改：`apps/test-service/internal/cmake/manifest_test.go`
-- 修改：`apps/test-service/internal/build/coordinator.go`
-- 修改：`apps/test-service/internal/build/coordinator_test.go`
+- 修改：`apps/test-service/internal/cmake/generation.go`
+- 修改：`apps/test-service/internal/cmake/generation_test.go`
+- 修改：`apps/test-service/internal/build/boundary.go`
+- 修改：`apps/test-service/internal/build/planner_test.go`
 - 修改：`apps/test-service/internal/task/plan.go`
 - 修改：`apps/test-service/internal/task/plan_test.go`
+- 修改：`tools/cmake-bundle/manifest.json`
 - 修改：`tools/cmake-bundle/prepare.mjs`
 - 修改：`tools/cmake-bundle/prepare.test.mjs`
+- 修改：`apps/test-service/cmd/cmake-fixture/main.go`
+- 修改：`apps/test-service/cmd/cmake-fixture/main_test.go`
+- 修改：`tools/service-probe/build-service.mjs`
 
 **接口：**
 
@@ -318,7 +326,12 @@ func (r *Runner) OpaqueRunPlan(descriptor ExecutionDescriptor, timeout time.Dura
 func (s *Service) DiscoverAfterBuild(context.Context, DiscoveryInput) (testdomain.Catalog, error)
 ```
 
-- [ ] **Step 1：写出 Service-owned CTest plan 失败测试**
+> 实施修正：Phase 4B 只建立 Service-owned CTest step 与同步 discovery/publication
+> boundary，不把它附加到现有 CMake Build Task。动态 continuation、Test Task kind 和
+> Protocol projection 仍由既定 Phase 4E Task 3/4 接入。Build execution boundary 在本
+> Task 同时固定并验证配套 `cmake`/`ctest`，为后续 continuation 做准备。
+
+- [x] **Step 1：写出 Service-owned CTest plan 失败测试**
 
 覆盖：
 
@@ -332,7 +345,7 @@ func (s *Service) DiscoverAfterBuild(context.Context, DiscoveryInput) (testdomai
 - show-only failure 不替换旧 Catalog；
 - Catalog artifact 成功后才发布 metadata/event。
 
-- [ ] **Step 2：运行 Runner/Service tests 并确认失败**
+- [x] **Step 2：运行 Runner/Service tests 并确认失败**
 
 ```powershell
 go test ./apps/test-service/internal/ctest ./apps/test-service/internal/testdiscovery ./apps/test-service/internal/build -run 'Runner|Opaque|DiscoverAfterBuild' -count=1
@@ -340,11 +353,11 @@ go test ./apps/test-service/internal/ctest ./apps/test-service/internal/testdisc
 
 预期：FAIL。
 
-- [ ] **Step 3：实现 CTest plan 与 publication boundary**
+- [x] **Step 3：实现 CTest plan 与 publication boundary**
 
 `Runner` 使用 CMake installation 中配套 `ctest`，不搜索 PATH。CMake bundle manifest 同时固定 `cmake` 与 `ctest` relative path、version 和文件 identity；自定义 CMake installation 也必须解析同目录配套 `ctest` 并验证版本一致。CTest logical name 经过 CTest regex 语义的锚定转义；测试覆盖所有 metacharacter。
 
-- [ ] **Step 4：运行 Go 全套与 race**
+- [x] **Step 4：运行 Go 全套与 race**
 
 ```powershell
 go test ./apps/test-service/internal/ctest ./apps/test-service/internal/testframework ./apps/test-service/internal/testdiscovery ./apps/test-service/internal/cmake ./apps/test-service/internal/build ./apps/test-service/internal/taskstore -count=1
@@ -354,7 +367,7 @@ pnpm test:cmake-bundle
 
 预期：PASS。
 
-- [ ] **Step 5：提交 CTest Catalog integration**
+- [x] **Step 5：提交 CTest Catalog integration**
 
 ```powershell
 git add apps/test-service/internal/ctest apps/test-service/internal/testframework apps/test-service/internal/testdiscovery apps/test-service/internal/cmake apps/test-service/internal/build apps/test-service/internal/task apps/test-service/internal/taskstore tools/cmake-bundle
@@ -363,12 +376,12 @@ git commit -m "feat: discover ctest containers safely"
 
 ## Phase 4B 完成检查
 
-- [ ] CTest JSON Windows/Linux/multi-config Golden File
-- [ ] property allowlist/degradation tests
-- [ ] unknown framework never probed
-- [ ] Opaque exact CTest execution
-- [ ] stable Catalog revision/stale tests
-- [ ] Catalog atomic publication
-- [ ] Go unit/race tests
-- [ ] `pnpm verify`
-- [ ] 独立安全评审确认 Protocol 未进入 CTest command/args
+- [x] CTest JSON Windows/Linux/multi-config Golden File
+- [x] property allowlist/degradation tests
+- [x] unknown framework never probed
+- [x] Opaque exact CTest execution
+- [x] stable Catalog revision/stale tests
+- [x] Catalog atomic publication
+- [x] Go unit/race tests
+- [x] `pnpm verify`
+- [x] 独立安全边界审查确认 Protocol 未进入 CTest command/args

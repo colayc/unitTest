@@ -46,12 +46,14 @@ const fixedArchives = {
     url: "https://cmake.org/files/v4.3/cmake-4.3.4-windows-x86_64.zip",
     rootDirectory: "cmake-4.3.4-windows-x86_64",
     executable: "bin/cmake.exe",
+    ctestExecutable: "bin/ctest.exe",
     licensePath: "doc/cmake/LICENSE.rst",
   },
   "linux-x64": {
     url: "https://cmake.org/files/v4.3/cmake-4.3.4-linux-x86_64.tar.gz",
     rootDirectory: "cmake-4.3.4-linux-x86_64",
     executable: "bin/cmake",
+    ctestExecutable: "bin/ctest",
     licensePath: "doc/cmake/LICENSE.rst",
   },
 };
@@ -94,6 +96,7 @@ function validateArchiveManifest(key, archive) {
     "archiveSha256",
     "rootDirectory",
     "executable",
+    "ctestExecutable",
     "licensePath",
     "installedFiles",
   ]);
@@ -102,6 +105,7 @@ function validateArchiveManifest(key, archive) {
     archive.url !== fixed.url ||
     archive.rootDirectory !== fixed.rootDirectory ||
     archive.executable !== fixed.executable ||
+    archive.ctestExecutable !== fixed.ctestExecutable ||
     archive.licensePath !== fixed.licensePath ||
     !digestPattern.test(archive.archiveSha256)
   ) {
@@ -109,7 +113,11 @@ function validateArchiveManifest(key, archive) {
   }
   validateDistributionURL(archive.url, archive.url);
   requireObject(archive.installedFiles);
-  requireExactKeys(archive.installedFiles, [archive.executable, archive.licensePath]);
+  requireExactKeys(archive.installedFiles, [
+    archive.executable,
+    archive.ctestExecutable,
+    archive.licensePath,
+  ]);
   for (const [path, digest] of Object.entries(archive.installedFiles)) {
     if (!portableRelativePath(path) || !digestPattern.test(digest)) {
       throw new Error(`invalid installed file ${path}`);
@@ -301,6 +309,7 @@ function validateArchiveEntries(entries, archive) {
   }
   const seen = new Set();
   let executableFound = false;
+  let ctestExecutableFound = false;
   let licenseFound = false;
   for (const entry of entries) {
     if (
@@ -326,11 +335,17 @@ function validateArchiveEntries(entries, archive) {
     if (path === `${archive.rootDirectory}/${archive.executable}` && entry.type === "file") {
       executableFound = true;
     }
+    if (
+      path === `${archive.rootDirectory}/${archive.ctestExecutable}` &&
+      entry.type === "file"
+    ) {
+      ctestExecutableFound = true;
+    }
     if (path === `${archive.rootDirectory}/${archive.licensePath}` && entry.type === "file") {
       licenseFound = true;
     }
   }
-  if (!executableFound || !licenseFound) {
+  if (!executableFound || !ctestExecutableFound || !licenseFound) {
     throw new Error("unsafe archive entry: required files are absent");
   }
 }
@@ -437,6 +452,26 @@ async function readCapabilities(executable) {
   } catch (error) {
     throw new Error("bundled CMake capabilities are invalid", { cause: error });
   }
+}
+
+async function readCTestVersion(executable) {
+  let stdout;
+  try {
+    ({ stdout } = await execFile(executable, ["--version"], {
+      encoding: "utf8",
+      env: controlledChildEnvironment(),
+      windowsHide: true,
+      timeout: 15_000,
+      maxBuffer: maximumCapabilitiesBytes,
+    }));
+  } catch (error) {
+    throw new Error("bundled CTest version probe failed", { cause: error });
+  }
+  const match = /^ctest version ([0-9]+\.[0-9]+\.[0-9]+)\s*$/m.exec(stdout);
+  if (match === null) {
+    throw new Error("bundled CTest version output is invalid");
+  }
+  return match[1];
 }
 
 function verifyCapabilities(capabilities, version) {
@@ -572,6 +607,12 @@ async function verifyExistingBundle(target, key, manifest, operations) {
     join(installRoot, ...archive.executable.split("/")),
   );
   verifyCapabilities(capabilities, manifest.cmakeVersion);
+  const ctestVersion = await operations.readCTestVersion(
+    join(installRoot, ...archive.ctestExecutable.split("/")),
+  );
+  if (ctestVersion !== manifest.cmakeVersion) {
+    throw new Error("bundled CTest version mismatch");
+  }
 }
 
 async function auditDirectoryRoot(root) {
@@ -613,6 +654,7 @@ async function prepareBundleFromManifest({
     inspectArchive,
     extractArchive,
     readCapabilities,
+    readCTestVersion,
     renameDirectory: rename,
     ...operations,
   };
@@ -658,6 +700,12 @@ async function prepareBundleFromManifest({
       join(stagedRoot, ...archive.executable.split("/")),
     );
     verifyCapabilities(capabilities, manifest.cmakeVersion);
+    const ctestVersion = await ops.readCTestVersion(
+      join(stagedRoot, ...archive.ctestExecutable.split("/")),
+    );
+    if (ctestVersion !== manifest.cmakeVersion) {
+      throw new Error("bundled CTest version mismatch");
+    }
 
     const publishRoot = join(staging, "publish");
     await mkdir(publishRoot, { mode: 0o700 });
@@ -692,6 +740,7 @@ function bundleResult(root, key, manifest, reused) {
     key,
     cmakeVersion: manifest.cmakeVersion,
     executable: join(installRoot, ...archive.executable.split("/")),
+    ctestExecutable: join(installRoot, ...archive.ctestExecutable.split("/")),
     licensePath: join(installRoot, ...archive.licensePath.split("/")),
     reused,
   };

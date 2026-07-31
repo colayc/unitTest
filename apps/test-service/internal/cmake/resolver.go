@@ -24,8 +24,10 @@ var (
 	ErrCMakeUnavailable  = errors.New("CMake is unavailable")
 	ErrInvalidExecutable = errors.New("invalid CMake executable")
 	ErrVersionMismatch   = errors.New("CMake version does not match bundle manifest")
+	ErrCTestUnavailable  = errors.New("paired CTest is unavailable")
 
 	humanVersionPattern = regexp.MustCompile(`(?m)^cmake version ([^\s]+)\s*$`)
+	ctestVersionPattern = regexp.MustCompile(`(?m)^ctest version ([^\s]+)\s*$`)
 	errJSONSyntax       = errors.New("invalid CMake version JSON syntax")
 )
 
@@ -57,34 +59,74 @@ func resolveStandalone(ctx context.Context, runner probe.Runner, executable, sou
 		return Installation{}, err
 	}
 	defer snapshot.Close()
-	if err := verifyStandaloneSnapshot(canonical, snapshot); err != nil {
+	ctestPath := filepath.Join(filepath.Dir(canonical), pairedCTestName())
+	ctestCanonical, ctestSnapshot, err := verifyStandaloneExecutable(ctestPath)
+	if err != nil {
+		return Installation{}, fmt.Errorf("%w: %v", ErrCTestUnavailable, err)
+	}
+	defer ctestSnapshot.Close()
+	if err := verifyStandalonePair(
+		canonical,
+		snapshot,
+		ctestCanonical,
+		ctestSnapshot,
+	); err != nil {
 		return Installation{}, fmt.Errorf("%w: verify executable before probe: %v", ErrInvalidExecutable, err)
 	}
 	version, probeErr := probeVersion(ctx, runner, canonical)
-	if err := verifyStandaloneSnapshot(canonical, snapshot); err != nil {
+	if err := verifyStandalonePair(
+		canonical,
+		snapshot,
+		ctestCanonical,
+		ctestSnapshot,
+	); err != nil {
 		return Installation{}, fmt.Errorf("%w: verify executable after probe: %v", ErrInvalidExecutable, err)
 	}
 	if probeErr != nil {
 		return Installation{}, probeErr
 	}
+	ctestVersion, probeErr := probeCTestVersion(ctx, runner, ctestCanonical)
+	if err := verifyStandalonePair(
+		canonical,
+		snapshot,
+		ctestCanonical,
+		ctestSnapshot,
+	); err != nil {
+		return Installation{}, fmt.Errorf("%w: verify paired CTest after probe: %v", ErrInvalidExecutable, err)
+	}
+	if probeErr != nil {
+		return Installation{}, probeErr
+	}
+	if ctestVersion != version {
+		return Installation{}, fmt.Errorf(
+			"%w: CMake %q, CTest %q",
+			ErrVersionMismatch,
+			version,
+			ctestVersion,
+		)
+	}
 	identity, err := installationIdentity(identityInput{
-		Path:    canonical,
-		Version: version,
-		Source:  source,
+		Path:      canonical,
+		CTestPath: ctestCanonical,
+		Version:   version,
+		Source:    source,
 		FileIdentity: fileIdentity{
 			ExecutableSha256:     snapshot.digest,
 			ExecutableOSIdentity: snapshot.osIdentity,
+			CTestSha256:          ctestSnapshot.digest,
+			CTestOSIdentity:      ctestSnapshot.osIdentity,
 		},
 	})
 	if err != nil {
 		return Installation{}, fmt.Errorf("construct CMake identity: %w", err)
 	}
 	return Installation{
-		Executable: canonical,
-		Root:       filepath.Dir(canonical),
-		Version:    version,
-		Source:     source,
-		Identity:   identity,
+		Executable:      canonical,
+		CTestExecutable: ctestCanonical,
+		Root:            filepath.Dir(canonical),
+		Version:         version,
+		Source:          source,
+		Identity:        identity,
 	}, nil
 }
 
@@ -160,6 +202,14 @@ func resolveBundle(ctx context.Context, runner probe.Runner, config ResolverConf
 	if err := requireExecutableMode(executable, executableSnapshot.info); err != nil {
 		return Installation{}, err
 	}
+	ctestExecutable := resolvedFiles[archive.CTestExecutable]
+	ctestSnapshot := snapshotsByPath(snapshots)[ctestExecutable]
+	if ctestSnapshot == nil {
+		return Installation{}, fmt.Errorf("%w: CTest executable snapshot is missing", ErrBundleIntegrity)
+	}
+	if err := requireExecutableMode(ctestExecutable, ctestSnapshot.info); err != nil {
+		return Installation{}, err
+	}
 	if err := verifyBundleSnapshots(root, snapshots); err != nil {
 		return Installation{}, fmt.Errorf("%w: verify bundle before probe: %v", ErrBundleIntegrity, err)
 	}
@@ -173,13 +223,31 @@ func resolveBundle(ctx context.Context, runner probe.Runner, config ResolverConf
 	if version != policy.CMakeVersion {
 		return Installation{}, fmt.Errorf("%w: got %q, want %q", ErrVersionMismatch, version, policy.CMakeVersion)
 	}
+	ctestVersion, probeErr := probeCTestVersion(ctx, runner, ctestExecutable)
+	if err := verifyBundleSnapshots(root, snapshots); err != nil {
+		return Installation{}, fmt.Errorf("%w: verify bundle after CTest probe: %v", ErrBundleIntegrity, err)
+	}
+	if probeErr != nil {
+		return Installation{}, probeErr
+	}
+	if ctestVersion != version {
+		return Installation{}, fmt.Errorf(
+			"%w: CMake %q, CTest %q",
+			ErrVersionMismatch,
+			version,
+			ctestVersion,
+		)
+	}
 	identity, err := installationIdentity(identityInput{
-		Path:    executable,
-		Version: version,
-		Source:  SourceBundle,
+		Path:      executable,
+		CTestPath: ctestExecutable,
+		Version:   version,
+		Source:    SourceBundle,
 		FileIdentity: fileIdentity{
 			ExecutableSha256:     archive.InstalledFiles[archive.Executable],
 			ExecutableOSIdentity: executableSnapshot.osIdentity,
+			CTestSha256:          archive.InstalledFiles[archive.CTestExecutable],
+			CTestOSIdentity:      ctestSnapshot.osIdentity,
 			ArchiveSha256:        archive.ArchiveSha256,
 			InstalledFiles:       installed,
 		},
@@ -188,12 +256,13 @@ func resolveBundle(ctx context.Context, runner probe.Runner, config ResolverConf
 		return Installation{}, fmt.Errorf("construct CMake identity: %w", err)
 	}
 	return Installation{
-		Executable:  executable,
-		Root:        installRoot,
-		Version:     version,
-		Source:      SourceBundle,
-		Identity:    identity,
-		LicensePath: resolvedFiles[archive.LicensePath],
+		Executable:      executable,
+		CTestExecutable: ctestExecutable,
+		Root:            installRoot,
+		Version:         version,
+		Source:          SourceBundle,
+		Identity:        identity,
+		LicensePath:     resolvedFiles[archive.LicensePath],
 	}, nil
 }
 
@@ -325,6 +394,21 @@ func verifyStandaloneSnapshot(canonical string, snapshot *fileSnapshot) error {
 	return snapshot.Verify()
 }
 
+func verifyStandalonePair(
+	cmakePath string,
+	cmakeSnapshot *fileSnapshot,
+	ctestPath string,
+	ctestSnapshot *fileSnapshot,
+) error {
+	if filepath.Dir(cmakePath) != filepath.Dir(ctestPath) {
+		return fmt.Errorf("CMake and CTest are not in the same installation directory")
+	}
+	if err := verifyStandaloneSnapshot(cmakePath, cmakeSnapshot); err != nil {
+		return err
+	}
+	return verifyStandaloneSnapshot(ctestPath, ctestSnapshot)
+}
+
 func verifyBundleSnapshots(root string, snapshots []*fileSnapshot) error {
 	boundary, err := workspace.OpenRoot(root)
 	if err != nil {
@@ -383,6 +467,28 @@ func probeVersion(ctx context.Context, runner probe.Runner, executable string) (
 		return "", fmt.Errorf("parse CMake version: JSON: %v; text: %w", parseErr, err)
 	}
 	return version, nil
+}
+
+func probeCTestVersion(
+	ctx context.Context,
+	runner probe.Runner,
+	executable string,
+) (string, error) {
+	if runner == nil {
+		return "", fmt.Errorf("CTest version probe runner is nil")
+	}
+	result, err := runner.Run(ctx, versionSpec(executable, "--version"))
+	if err != nil {
+		return "", fmt.Errorf("probe CTest version: %w", err)
+	}
+	if result.ExitCode != 0 {
+		return "", fmt.Errorf("probe CTest version exited with %d", result.ExitCode)
+	}
+	match := ctestVersionPattern.FindSubmatch(result.Stdout)
+	if len(match) != 2 || !cmakeVersionPattern.Match(match[1]) {
+		return "", fmt.Errorf("unrecognized CTest version output")
+	}
+	return string(match[1]), nil
 }
 
 func versionSpec(executable, argument string) probe.Spec {
@@ -449,12 +555,15 @@ type installedFileIdentity struct {
 type fileIdentity struct {
 	ExecutableSha256     string                  `json:"executableSha256"`
 	ExecutableOSIdentity string                  `json:"executableOsIdentity"`
+	CTestSha256          string                  `json:"ctestSha256"`
+	CTestOSIdentity      string                  `json:"ctestOsIdentity"`
 	ArchiveSha256        string                  `json:"archiveSha256,omitempty"`
 	InstalledFiles       []installedFileIdentity `json:"installedFiles,omitempty"`
 }
 
 type identityInput struct {
 	Path         string       `json:"path"`
+	CTestPath    string       `json:"ctestPath"`
 	FileIdentity fileIdentity `json:"fileIdentity"`
 	Version      string       `json:"version"`
 	Source       string       `json:"source"`
@@ -462,12 +571,20 @@ type identityInput struct {
 
 func installationIdentity(input identityInput) (string, error) {
 	input.Path = identityPath(input.Path)
+	input.CTestPath = identityPath(input.CTestPath)
 	encoded, err := json.Marshal(input)
 	if err != nil {
 		return "", err
 	}
 	sum := sha256.Sum256(encoded)
 	return hex.EncodeToString(sum[:]), nil
+}
+
+func pairedCTestName() string {
+	if runtime.GOOS == "windows" {
+		return "ctest.exe"
+	}
+	return "ctest"
 }
 
 func identityPath(filePath string) string {

@@ -7,12 +7,13 @@ const (
 )
 
 type Installation struct {
-	Executable  string
-	Root        string
-	Version     string
-	Source      string
-	Identity    string
-	LicensePath string
+	Executable      string
+	CTestExecutable string
+	Root            string
+	Version         string
+	Source          string
+	Identity        string
+	LicensePath     string
 }
 
 type ResolverConfig struct {

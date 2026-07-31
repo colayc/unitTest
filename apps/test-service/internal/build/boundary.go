@@ -12,18 +12,21 @@ import (
 )
 
 type executionBoundary struct {
-	executable     string
-	executableFile *os.File
-	executableInfo os.FileInfo
-	workspaceRoot  workspace.Root
-	workspaceInfo  os.FileInfo
-	dataRoot       workspace.Root
-	dataInfo       os.FileInfo
-	lock           *DirectoryLock
-	mu             sync.Mutex
-	adoptedTaskID  string
-	releaseOnce    sync.Once
-	releaseErr     error
+	executable      string
+	executableFile  *os.File
+	executableInfo  os.FileInfo
+	ctestExecutable string
+	ctestFile       *os.File
+	ctestInfo       os.FileInfo
+	workspaceRoot   workspace.Root
+	workspaceInfo   os.FileInfo
+	dataRoot        workspace.Root
+	dataInfo        os.FileInfo
+	lock            *DirectoryLock
+	mu              sync.Mutex
+	adoptedTaskID   string
+	releaseOnce     sync.Once
+	releaseErr      error
 }
 
 func NewExecutionBoundary(
@@ -51,9 +54,26 @@ func newExecutionBoundary(
 	if err != nil {
 		return nil, task.ErrInvalidArgument
 	}
+	var ctestExecutable string
+	var ctestFile *os.File
+	var ctestInfo os.FileInfo
 	fail := func() (*executionBoundary, error) {
+		if ctestFile != nil {
+			_ = ctestFile.Close()
+		}
 		_ = executableFile.Close()
 		return nil, task.ErrInvalidArgument
+	}
+	if installation.CTestExecutable != "" {
+		ctestExecutable, err = filepath.Abs(installation.CTestExecutable)
+		if err != nil || filepath.Clean(ctestExecutable) != installation.CTestExecutable ||
+			ctestExecutable == executable {
+			return fail()
+		}
+		ctestFile, ctestInfo, err = pinExecutable(ctestExecutable)
+		if err != nil {
+			return fail()
+		}
 	}
 	workspaceInfo, err := os.Stat(workspaceRoot.NativePath)
 	if err != nil || !workspaceInfo.IsDir() {
@@ -71,8 +91,10 @@ func newExecutionBoundary(
 	}
 	return &executionBoundary{
 		executable: executable, executableFile: executableFile,
-		executableInfo: executableInfo,
-		workspaceRoot:  workspaceRoot, workspaceInfo: workspaceInfo,
+		executableInfo:  executableInfo,
+		ctestExecutable: ctestExecutable, ctestFile: ctestFile,
+		ctestInfo:     ctestInfo,
+		workspaceRoot: workspaceRoot, workspaceInfo: workspaceInfo,
 		dataRoot: dataRoot, dataInfo: dataInfo, lock: lock,
 	}, nil
 }
@@ -87,12 +109,25 @@ func (b *executionBoundary) ValidateExecutable(path string) error {
 		return task.ErrInvalidArgument
 	}
 	absolute, err := filepath.Abs(path)
-	if err != nil || filepath.Clean(absolute) != b.executable {
+	if err != nil {
+		return task.ErrInvalidArgument
+	}
+	var file *os.File
+	var info os.FileInfo
+	switch filepath.Clean(absolute) {
+	case b.executable:
+		file, info = b.executableFile, b.executableInfo
+	case b.ctestExecutable:
+		file, info = b.ctestFile, b.ctestInfo
+	default:
+		return task.ErrInvalidArgument
+	}
+	if file == nil {
 		return task.ErrInvalidArgument
 	}
 	if err := validatePinnedExecutable(
-		b.executableFile,
-		b.executableInfo,
+		file,
+		info,
 		absolute,
 	); err != nil {
 		return task.ErrInvalidArgument
@@ -119,8 +154,10 @@ func (b *executionBoundary) Release() error {
 		b.mu.Lock()
 		lock := b.lock
 		executableFile := b.executableFile
+		ctestFile := b.ctestFile
 		b.lock = nil
 		b.executableFile = nil
+		b.ctestFile = nil
 		b.mu.Unlock()
 
 		var result error
@@ -129,6 +166,9 @@ func (b *executionBoundary) Release() error {
 		}
 		if executableFile != nil {
 			result = errors.Join(result, executableFile.Close())
+		}
+		if ctestFile != nil {
+			result = errors.Join(result, ctestFile.Close())
 		}
 		b.mu.Lock()
 		b.releaseErr = result

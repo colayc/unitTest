@@ -53,6 +53,37 @@ func TestFixtureSupportsOnlyDeterministicProbeCommands(t *testing.T) {
 	}
 }
 
+func TestFixtureSupportsPairedCTestVersionProbe(t *testing.T) {
+	for _, test := range []struct {
+		program string
+		want    bool
+	}{
+		{program: "ctest", want: true},
+		{program: filepath.Join("tools", "ctest"+filepath.Ext(os.Args[0])), want: true},
+		{program: "cmake", want: false},
+		{program: "ctest-helper", want: false},
+	} {
+		if got := isCTestProgram(test.program); got != test.want {
+			t.Fatalf("isCTestProgram(%q) = %t, want %t", test.program, got, test.want)
+		}
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if code := runCTest([]string{"--version"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("CTest version exit = %d, stderr = %q", code, stderr.String())
+	}
+	if want := "ctest version " + fixtureVersion + "\n"; stdout.String() != want {
+		t.Fatalf("CTest version = %q, want %q", stdout.String(), want)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runCTest([]string{"--show-only=json-v1"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("unsupported CTest command exit = %d, want 2", code)
+	}
+}
+
 func TestFixtureConfigureWritesReadableFileAPIAndBuildWarning(t *testing.T) {
 	root := t.TempDir()
 	sourceDir := filepath.Join(root, "source")

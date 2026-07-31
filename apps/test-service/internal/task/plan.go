@@ -21,9 +21,11 @@ const (
 type StepKind string
 
 const (
-	StepSimulation StepKind = "simulation"
-	StepConfigure  StepKind = "configure"
-	StepBuild      StepKind = "build"
+	StepSimulation    StepKind = "simulation"
+	StepConfigure     StepKind = "configure"
+	StepBuild         StepKind = "build"
+	StepTestDiscovery StepKind = "test-discovery"
+	StepTestRun       StepKind = "test-run"
 )
 
 type StepStatus string
@@ -168,7 +170,7 @@ func FingerprintPlan(plan ExecutionPlan) string {
 
 func validStepKind(value StepKind) bool {
 	switch value {
-	case StepSimulation, StepConfigure, StepBuild:
+	case StepSimulation, StepConfigure, StepBuild, StepTestDiscovery, StepTestRun:
 		return true
 	default:
 		return false

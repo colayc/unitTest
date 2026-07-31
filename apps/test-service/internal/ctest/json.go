@@ -20,7 +20,7 @@ type showOnlyDecoder struct {
 }
 
 func ParseShowOnlyJSON(data []byte, limits Limits) (Snapshot, error) {
-	if !limits.valid() {
+	if !limits.Valid() {
 		return Snapshot{}, ErrInvalidLimits
 	}
 	if len(data) > limits.MaxDocumentBytes {

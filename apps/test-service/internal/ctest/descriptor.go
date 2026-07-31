@@ -16,6 +16,7 @@ var ErrInvalidDescriptor = errors.New("invalid CTest execution descriptor")
 
 type ExecutionDescriptor struct {
 	LogicalName        string
+	TestDirectory      string
 	Configuration      string
 	TargetID           string
 	Executable         cmake.FingerprintFile
@@ -46,6 +47,7 @@ func BuildDescriptor(
 	settings, compatibility := ClassifyProperties(container.Properties)
 	result := ExecutionDescriptor{
 		LogicalName:        container.Name,
+		TestDirectory:      profile.BinaryDir,
 		Configuration:      container.Config,
 		Arguments:          append([]string(nil), container.Command[1:]...),
 		Environment:        append([]EnvironmentEntry(nil), settings.Environment...),

@@ -62,6 +62,7 @@ func TestResolverPrefersOverrideThenBundleThenDev(t *testing.T) {
 	}
 	if installation.Source != SourceOverride ||
 		installation.Executable != canonicalPath(t, override) ||
+		installation.CTestExecutable != pairedCTestPath(t, override) ||
 		installation.Root != filepath.Dir(canonicalPath(t, override)) {
 		t.Fatalf("override installation = %#v", installation)
 	}
@@ -80,6 +81,10 @@ func TestResolverPrefersOverrideThenBundleThenDev(t *testing.T) {
 	bundleExecutable := filepath.Join(bundle, "4.3.4", "linux-x64", "cmake-4.3.4-linux-x86_64", "bin", "cmake")
 	if installation.Source != SourceBundle ||
 		installation.Executable != canonicalPath(t, bundleExecutable) ||
+		installation.CTestExecutable != canonicalPath(
+			t,
+			filepath.Join(filepath.Dir(bundleExecutable), pairedCTestFixtureName(bundleExecutable)),
+		) ||
 		installation.Root != canonicalPath(t, filepath.Dir(filepath.Dir(bundleExecutable))) {
 		t.Fatalf("bundle installation = %#v", installation)
 	}
@@ -96,6 +101,7 @@ func TestResolverPrefersOverrideThenBundleThenDev(t *testing.T) {
 	}
 	if installation.Source != SourceDev ||
 		installation.Executable != canonicalPath(t, dev) ||
+		installation.CTestExecutable != pairedCTestPath(t, dev) ||
 		installation.Root != filepath.Dir(canonicalPath(t, dev)) {
 		t.Fatalf("dev installation = %#v", installation)
 	}
@@ -127,6 +133,21 @@ func TestResolverRejectsNonRegularOverride(t *testing.T) {
 	}
 }
 
+func TestResolverRejectsMissingPairedCTest(t *testing.T) {
+	executable := currentExecutable(t)
+	if err := os.Remove(filepath.Join(filepath.Dir(executable), pairedCTestName())); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Resolve(
+		context.Background(),
+		&versionRunner{t: t, version: "4.3.4"},
+		ResolverConfig{Override: executable},
+	)
+	if !errors.Is(err, ErrCTestUnavailable) {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+}
+
 func TestResolverProbesJSONVersionWithFixedBounds(t *testing.T) {
 	executable := currentExecutable(t)
 	runner := &versionRunner{t: t, version: "4.3.4"}
@@ -142,7 +163,11 @@ func TestResolverProbesJSONVersionWithFixedBounds(t *testing.T) {
 	if installation.Version != "4.3.4" {
 		t.Fatalf("Version = %q", installation.Version)
 	}
-	runner.assertCalls(t, expectedVersionSpec(canonicalPath(t, executable), "--version=json-v1"))
+	runner.assertCalls(
+		t,
+		expectedVersionSpec(canonicalPath(t, executable), "--version=json-v1"),
+		expectedVersionSpec(pairedCTestPath(t, executable), "--version"),
+	)
 }
 
 func TestResolverFallsBackOnlyWhenJSONCannotBeParsed(t *testing.T) {
@@ -155,6 +180,10 @@ func TestResolverFallsBackOnlyWhenJSONCannotBeParsed(t *testing.T) {
 		{
 			want:   expectedVersionSpec(canonicalPath(t, executable), "--version"),
 			result: probe.Result{ExitCode: 0, Stdout: []byte("cmake version 4.3.4\r\n\r\nCMake suite maintained and supported by Kitware.")},
+		},
+		{
+			want:   expectedVersionSpec(pairedCTestPath(t, executable), "--version"),
+			result: probe.Result{ExitCode: 0, Stdout: []byte("ctest version 4.3.4\r\n")},
 		},
 	}}
 
@@ -289,6 +318,27 @@ func TestResolverDoesNotFallbackAfterParsedVersionMismatch(t *testing.T) {
 	}
 }
 
+func TestResolverRejectsPairedCTestVersionMismatch(t *testing.T) {
+	executable := currentExecutable(t)
+	runner := &scriptedRunner{t: t, steps: []runnerStep{
+		{
+			want: expectedVersionSpec(canonicalPath(t, executable), "--version=json-v1"),
+			result: probe.Result{ExitCode: 0, Stdout: []byte(
+				`{"dependencies":[],"program":{"name":"cmake","version":{"major":4,"minor":3,"patch":4,"string":"4.3.4"}},"version":{"major":1,"minor":0}}`,
+			)},
+		},
+		{
+			want:   expectedVersionSpec(pairedCTestPath(t, executable), "--version"),
+			result: probe.Result{ExitCode: 0, Stdout: []byte("ctest version 4.3.5\n")},
+		},
+	}}
+	_, err := Resolve(context.Background(), runner, ResolverConfig{Override: executable})
+	if !errors.Is(err, ErrVersionMismatch) {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	runner.assertComplete(t)
+}
+
 func TestResolverRejectsArchiveIdentityMismatch(t *testing.T) {
 	bundle := createBundle(t, "linux-x64")
 	statePath := filepath.Join(bundle, "4.3.4", "linux-x64", "bundle-state.json")
@@ -417,12 +467,15 @@ func TestResolverIdentityIsDeterministicAndIncludesArchiveIdentity(t *testing.T)
 
 func TestInstallationIdentityIncludesOSFileIdentity(t *testing.T) {
 	input := identityInput{
-		Path:    filepath.Join(t.TempDir(), "cmake"),
-		Version: "4.3.4",
-		Source:  SourceOverride,
+		Path:      filepath.Join(t.TempDir(), "cmake"),
+		CTestPath: filepath.Join(t.TempDir(), "ctest"),
+		Version:   "4.3.4",
+		Source:    SourceOverride,
 		FileIdentity: fileIdentity{
 			ExecutableSha256:     strings.Repeat("a", 64),
 			ExecutableOSIdentity: "test-volume:file-one",
+			CTestSha256:          strings.Repeat("b", 64),
+			CTestOSIdentity:      "test-volume:ctest-one",
 		},
 	}
 	first, err := installationIdentity(input)
@@ -436,6 +489,14 @@ func TestInstallationIdentityIncludesOSFileIdentity(t *testing.T) {
 	}
 	if first == second {
 		t.Fatalf("different OS file identities produced %q", first)
+	}
+	input.FileIdentity.CTestOSIdentity = "test-volume:ctest-two"
+	third, err := installationIdentity(input)
+	if err != nil {
+		t.Fatalf("installationIdentity(third) error = %v", err)
+	}
+	if second == third {
+		t.Fatalf("different CTest OS file identities produced %q", second)
 	}
 }
 
@@ -566,8 +627,17 @@ type versionRunner struct {
 func (runner *versionRunner) Run(_ context.Context, spec probe.Spec) (probe.Result, error) {
 	runner.t.Helper()
 	runner.specs = append(runner.specs, spec)
+	if reflect.DeepEqual(spec.Args, []string{"--version"}) &&
+		(filepath.Base(spec.Executable) == "ctest" ||
+			filepath.Base(spec.Executable) == "ctest.exe") {
+		return probe.Result{
+			ExitCode: 0,
+			Stdout:   []byte("ctest version " + runner.version + "\n"),
+			Stderr:   []byte{},
+		}, nil
+	}
 	if !reflect.DeepEqual(spec.Args, []string{"--version=json-v1"}) {
-		runner.t.Fatalf("probe args = %#v, want --version=json-v1", spec.Args)
+		runner.t.Fatalf("probe args = %#v, want CMake JSON or CTest text version", spec.Args)
 	}
 	var major, minor, patch int
 	if _, err := fmt.Sscanf(runner.version, "%d.%d.%d", &major, &minor, &patch); err != nil {
@@ -582,12 +652,16 @@ func (runner *versionRunner) Run(_ context.Context, spec probe.Spec) (probe.Resu
 
 func (runner *versionRunner) assertExecutables(t *testing.T, want ...string) {
 	t.Helper()
-	if len(runner.specs) != len(want) {
-		t.Fatalf("probe calls = %d, want %d", len(runner.specs), len(want))
+	expanded := make([]string, 0, len(want)*2)
+	for _, executable := range want {
+		expanded = append(expanded, executable, pairedCTestPath(t, executable))
 	}
-	for index := range want {
-		if runner.specs[index].Executable != want[index] {
-			t.Fatalf("probe executable[%d] = %q, want %q", index, runner.specs[index].Executable, want[index])
+	if len(runner.specs) != len(expanded) {
+		t.Fatalf("probe calls = %d, want %d", len(runner.specs), len(expanded))
+	}
+	for index := range expanded {
+		if runner.specs[index].Executable != expanded[index] {
+			t.Fatalf("probe executable[%d] = %q, want %q", index, runner.specs[index].Executable, expanded[index])
 		}
 	}
 }
@@ -622,11 +696,16 @@ func expectedVersionSpec(executable, argument string) probe.Spec {
 
 func currentExecutable(t *testing.T) string {
 	t.Helper()
-	path, err := os.Executable()
+	source, err := os.Executable()
 	if err != nil {
 		t.Fatalf("os.Executable() error = %v", err)
 	}
-	return path
+	root := t.TempDir()
+	cmakePath := filepath.Join(root, executableName("cmake"))
+	ctestPath := filepath.Join(root, pairedCTestName())
+	copyExecutableFile(t, source, cmakePath)
+	copyExecutableFile(t, source, ctestPath)
+	return cmakePath
 }
 
 func executableName(base string) string {
@@ -638,6 +717,20 @@ func executableName(base string) string {
 
 func copyExecutable(t *testing.T, source, target string) string {
 	t.Helper()
+	copyExecutableFile(t, source, target)
+	sourceCTest := filepath.Join(filepath.Dir(source), pairedCTestName())
+	if _, err := os.Stat(sourceCTest); err == nil {
+		copyExecutableFile(
+			t,
+			sourceCTest,
+			filepath.Join(filepath.Dir(target), pairedCTestName()),
+		)
+	}
+	return target
+}
+
+func copyExecutableFile(t *testing.T, source, target string) {
+	t.Helper()
 	data, err := os.ReadFile(source)
 	if err != nil {
 		t.Fatalf("ReadFile(%q) error = %v", source, err)
@@ -645,7 +738,21 @@ func copyExecutable(t *testing.T, source, target string) string {
 	if err := os.WriteFile(target, data, 0o755); err != nil {
 		t.Fatalf("WriteFile(%q) error = %v", target, err)
 	}
-	return target
+}
+
+func pairedCTestPath(t *testing.T, cmakePath string) string {
+	t.Helper()
+	return canonicalPath(t, filepath.Join(
+		filepath.Dir(cmakePath),
+		pairedCTestFixtureName(cmakePath),
+	))
+}
+
+func pairedCTestFixtureName(cmakePath string) string {
+	if strings.HasSuffix(strings.ToLower(filepath.Base(cmakePath)), ".exe") {
+		return "ctest.exe"
+	}
+	return "ctest"
 }
 
 func canonicalPath(t *testing.T, path string) string {
@@ -719,15 +826,16 @@ func createBundle(t *testing.T, key string) string {
 	platformDirectory := filepath.Join(bundle, manifest.CMakeVersion, key)
 	installRoot := filepath.Join(platformDirectory, filepath.FromSlash(archive.RootDirectory))
 	for relative, content := range map[string]string{
-		archive.Executable:  "fake-cmake",
-		archive.LicensePath: "license",
+		archive.Executable:      "fake-cmake",
+		archive.CTestExecutable: "fake-ctest",
+		archive.LicensePath:     "license",
 	} {
 		path := filepath.Join(installRoot, filepath.FromSlash(relative))
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatalf("MkdirAll(%q) error = %v", filepath.Dir(path), err)
 		}
 		mode := os.FileMode(0o644)
-		if relative == archive.Executable {
+		if relative == archive.Executable || relative == archive.CTestExecutable {
 			mode = 0o755
 		}
 		if err := os.WriteFile(path, []byte(content), mode); err != nil {

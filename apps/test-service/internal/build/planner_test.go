@@ -193,6 +193,26 @@ func TestExecutionBoundaryRejectsExecutableIdentityReplacement(t *testing.T) {
 	}
 }
 
+func TestExecutionBoundaryPinsPairedCTest(t *testing.T) {
+	fixture := newPlannerFixture(t)
+	boundary, err := NewExecutionBoundary(
+		fixture.installation,
+		fixture.root,
+		fixture.dataRoot,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	managed := boundary.(task.ManagedExecutionBoundary)
+	defer managed.Release()
+	if err := boundary.ValidateExecutable(fixture.installation.CTestExecutable); err != nil {
+		t.Fatalf("paired CTest rejected: %v", err)
+	}
+	if err := boundary.ValidateExecutable(fixture.toolchain.CCompiler); err == nil {
+		t.Fatal("unregistered executable accepted")
+	}
+}
+
 func TestExecutionBoundaryReleaseClosesExecutablePin(t *testing.T) {
 	fixture := newPlannerFixture(t)
 	boundary, err := NewExecutionBoundary(fixture.installation, fixture.root, fixture.dataRoot)
@@ -244,9 +264,10 @@ func newPlannerFixture(t *testing.T) plannerFixture {
 		t.Fatal(err)
 	}
 	cmakePath := filepath.Join(t.TempDir(), "cmake.exe")
+	ctestPath := filepath.Join(filepath.Dir(cmakePath), "ctest.exe")
 	cCompiler := filepath.Join(t.TempDir(), "cc.exe")
 	cxxCompiler := filepath.Join(t.TempDir(), "cxx.exe")
-	for _, path := range []string{cmakePath, cCompiler, cxxCompiler} {
+	for _, path := range []string{cmakePath, ctestPath, cCompiler, cxxCompiler} {
 		if err := os.WriteFile(path, []byte(path), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -266,6 +287,7 @@ func newPlannerFixture(t *testing.T) plannerFixture {
 	dataRoot = dataRootIdentity.NativePath
 	buildDir = filepath.Join(dataRoot, "build", "profile")
 	cmakePath = canonicalPlannerFile(t, cmakePath)
+	ctestPath = canonicalPlannerFile(t, ctestPath)
 	cCompiler = canonicalPlannerFile(t, cCompiler)
 	cxxCompiler = canonicalPlannerFile(t, cxxCompiler)
 	return plannerFixture{
@@ -282,7 +304,8 @@ func newPlannerFixture(t *testing.T) plannerFixture {
 			Environment: []string{"PATH=trusted"},
 		},
 		installation: cmake.Installation{
-			Executable: cmakePath, Root: filepath.Dir(cmakePath),
+			Executable: cmakePath, CTestExecutable: ctestPath,
+			Root:    filepath.Dir(cmakePath),
 			Version: "4.3.0", Source: cmake.SourceBundle,
 			Identity: strings.Repeat("c", 64),
 		},

@@ -32,7 +32,27 @@ type fixturePresetDocument struct {
 }
 
 func main() {
+	if isCTestProgram(os.Args[0]) {
+		os.Exit(runCTest(os.Args[1:], os.Stdout, os.Stderr))
+	}
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+func isCTestProgram(program string) bool {
+	return strings.EqualFold(strings.TrimSuffix(filepath.Base(program), filepath.Ext(program)), "ctest")
+}
+
+func runCTest(args []string, stdout, stderr io.Writer) int {
+	if equalArgs(args, "--version") {
+		_, err := fmt.Fprintf(stdout, "ctest version %s\n", fixtureVersion)
+		if err == nil {
+			return 0
+		}
+		_, _ = fmt.Fprintf(stderr, "ctest-fixture: write version: %v\n", err)
+		return 2
+	}
+	_, _ = fmt.Fprintf(stderr, "ctest-fixture: unsupported arguments: %q\n", args)
+	return 2
 }
 
 func run(args []string, stdout, stderr io.Writer) int {

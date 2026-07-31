@@ -36,7 +36,7 @@ func DefaultLimits() Limits {
 	}
 }
 
-func (limits Limits) valid() bool {
+func (limits Limits) Valid() bool {
 	return limits.MaxDocumentBytes >= 0 &&
 		limits.MaxTests >= 0 &&
 		limits.MaxCommandArguments >= 0 &&

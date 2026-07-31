@@ -21,6 +21,7 @@ func TestManifestMatchesProductionBundleShape(t *testing.T) {
 	if windows.URL != "https://cmake.org/files/v4.3/cmake-4.3.4-windows-x86_64.zip" ||
 		windows.RootDirectory != "cmake-4.3.4-windows-x86_64" ||
 		windows.Executable != "bin/cmake.exe" ||
+		windows.CTestExecutable != "bin/ctest.exe" ||
 		windows.LicensePath != "doc/cmake/LICENSE.rst" {
 		t.Fatalf("win32-x64 archive = %#v", windows)
 	}
@@ -28,6 +29,7 @@ func TestManifestMatchesProductionBundleShape(t *testing.T) {
 	if linux.URL != "https://cmake.org/files/v4.3/cmake-4.3.4-linux-x86_64.tar.gz" ||
 		linux.RootDirectory != "cmake-4.3.4-linux-x86_64" ||
 		linux.Executable != "bin/cmake" ||
+		linux.CTestExecutable != "bin/ctest" ||
 		linux.LicensePath != "doc/cmake/LICENSE.rst" {
 		t.Fatalf("linux-x64 archive = %#v", linux)
 	}
@@ -71,6 +73,21 @@ func TestManifestRejectsExecutableMissingFromInstalledFiles(t *testing.T) {
 		return strings.Replace(source, `"bin/cmake": "d323cee6566aca642fd337ba819efd61cc3883fac87a29d82dc21bae04169481",`, `"bin/not-cmake": "d323cee6566aca642fd337ba819efd61cc3883fac87a29d82dc21bae04169481",`, 1)
 	})
 
+	_, err := loadManifest(path)
+	if !errors.Is(err, ErrInvalidManifest) {
+		t.Fatalf("error = %v, want ErrInvalidManifest", err)
+	}
+}
+
+func TestManifestRejectsCTestMissingFromInstalledFiles(t *testing.T) {
+	path := writeManifestMutation(t, func(source string) string {
+		return strings.Replace(
+			source,
+			`"bin/ctest": "44794330f90c8cc9c1e7cbf9d81ffb97b4d8bc88e347f8cc5a290ff7d38aec21",`,
+			`"bin/not-ctest": "44794330f90c8cc9c1e7cbf9d81ffb97b4d8bc88e347f8cc5a290ff7d38aec21",`,
+			1,
+		)
+	})
 	_, err := loadManifest(path)
 	if !errors.Is(err, ErrInvalidManifest) {
 		t.Fatalf("error = %v, want ErrInvalidManifest", err)

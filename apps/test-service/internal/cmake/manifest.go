@@ -36,12 +36,13 @@ type Manifest struct {
 }
 
 type Archive struct {
-	URL            string            `json:"url"`
-	ArchiveSha256  string            `json:"archiveSha256"`
-	RootDirectory  string            `json:"rootDirectory"`
-	Executable     string            `json:"executable"`
-	LicensePath    string            `json:"licensePath"`
-	InstalledFiles map[string]string `json:"installedFiles"`
+	URL             string            `json:"url"`
+	ArchiveSha256   string            `json:"archiveSha256"`
+	RootDirectory   string            `json:"rootDirectory"`
+	Executable      string            `json:"executable"`
+	CTestExecutable string            `json:"ctestExecutable"`
+	LicensePath     string            `json:"licensePath"`
+	InstalledFiles  map[string]string `json:"installedFiles"`
 }
 
 type bundleState struct {
@@ -112,24 +113,28 @@ func productionManifestPolicy() Manifest {
 		License:       "BSD-3-Clause",
 		Archives: map[string]Archive{
 			"win32-x64": {
-				URL:           "https://cmake.org/files/v4.3/cmake-4.3.4-windows-x86_64.zip",
-				ArchiveSha256: "86e5fcafb38bdf58346a78b187c7b6b4f252ae5242cffe24c463a92bbd2e77d1",
-				RootDirectory: "cmake-4.3.4-windows-x86_64",
-				Executable:    "bin/cmake.exe",
-				LicensePath:   "doc/cmake/LICENSE.rst",
+				URL:             "https://cmake.org/files/v4.3/cmake-4.3.4-windows-x86_64.zip",
+				ArchiveSha256:   "86e5fcafb38bdf58346a78b187c7b6b4f252ae5242cffe24c463a92bbd2e77d1",
+				RootDirectory:   "cmake-4.3.4-windows-x86_64",
+				Executable:      "bin/cmake.exe",
+				CTestExecutable: "bin/ctest.exe",
+				LicensePath:     "doc/cmake/LICENSE.rst",
 				InstalledFiles: map[string]string{
 					"bin/cmake.exe":         "1aa884bf1f4949327fffcc8ee4a97c2d684bdc1d0a64b71f01dc16321c7fbc64",
+					"bin/ctest.exe":         "73baacbeb272ca6f40422b4f789403390af678beb491783cef1727d69cd3e1cb",
 					"doc/cmake/LICENSE.rst": "cd944d878806fee998ef3f88ca41ec060ae198bd8ba615e284f7d8d90c25593e",
 				},
 			},
 			"linux-x64": {
-				URL:           "https://cmake.org/files/v4.3/cmake-4.3.4-linux-x86_64.tar.gz",
-				ArchiveSha256: "ca6f08ccbd5e6b0a9068d33317d0d1aff7278d08cccaed4529b8fbead7942a68",
-				RootDirectory: "cmake-4.3.4-linux-x86_64",
-				Executable:    "bin/cmake",
-				LicensePath:   "doc/cmake/LICENSE.rst",
+				URL:             "https://cmake.org/files/v4.3/cmake-4.3.4-linux-x86_64.tar.gz",
+				ArchiveSha256:   "ca6f08ccbd5e6b0a9068d33317d0d1aff7278d08cccaed4529b8fbead7942a68",
+				RootDirectory:   "cmake-4.3.4-linux-x86_64",
+				Executable:      "bin/cmake",
+				CTestExecutable: "bin/ctest",
+				LicensePath:     "doc/cmake/LICENSE.rst",
 				InstalledFiles: map[string]string{
 					"bin/cmake":             "8542b512ac147329e03de375583665a64f02afb65d6c4665099390be103ac2d0",
+					"bin/ctest":             "189eaf845c588c3dabe9862dad16ca0b1f62ed6155e064692e811e6f14fbd6c7",
 					"doc/cmake/LICENSE.rst": "4382e7c1879ac90e3f101a395d23846fa4dbcaa1eed7265b43681e348754825d",
 				},
 			},
@@ -143,15 +148,17 @@ func validateArchive(version, key string, archive Archive) error {
 		majorMinor = majorMinor[:separator]
 	}
 
-	var expectedURL, expectedRoot, expectedExecutable string
+	var expectedURL, expectedRoot, expectedExecutable, expectedCTestExecutable string
 	switch key {
 	case "win32-x64":
 		expectedRoot = "cmake-" + version + "-windows-x86_64"
 		expectedExecutable = "bin/cmake.exe"
+		expectedCTestExecutable = "bin/ctest.exe"
 		expectedURL = "https://cmake.org/files/v" + majorMinor + "/" + expectedRoot + ".zip"
 	case "linux-x64":
 		expectedRoot = "cmake-" + version + "-linux-x86_64"
 		expectedExecutable = "bin/cmake"
+		expectedCTestExecutable = "bin/ctest"
 		expectedURL = "https://cmake.org/files/v" + majorMinor + "/" + expectedRoot + ".tar.gz"
 	default:
 		return fmt.Errorf("unsupported platform key")
@@ -173,10 +180,14 @@ func validateArchive(version, key string, archive Archive) error {
 	if archive.Executable != expectedExecutable || !safeManifestPath(archive.Executable) {
 		return fmt.Errorf("executable = %q", archive.Executable)
 	}
+	if archive.CTestExecutable != expectedCTestExecutable ||
+		!safeManifestPath(archive.CTestExecutable) {
+		return fmt.Errorf("ctestExecutable = %q", archive.CTestExecutable)
+	}
 	if archive.LicensePath != "doc/cmake/LICENSE.rst" || !safeManifestPath(archive.LicensePath) {
 		return fmt.Errorf("licensePath = %q", archive.LicensePath)
 	}
-	if len(archive.InstalledFiles) != 2 {
+	if len(archive.InstalledFiles) != 3 {
 		return fmt.Errorf("installedFiles has %d entries", len(archive.InstalledFiles))
 	}
 	for relative, digest := range archive.InstalledFiles {
@@ -189,6 +200,9 @@ func validateArchive(version, key string, archive Archive) error {
 	}
 	if _, ok := archive.InstalledFiles[archive.Executable]; !ok {
 		return fmt.Errorf("executable is missing from installedFiles")
+	}
+	if _, ok := archive.InstalledFiles[archive.CTestExecutable]; !ok {
+		return fmt.Errorf("ctestExecutable is missing from installedFiles")
 	}
 	if _, ok := archive.InstalledFiles[archive.LicensePath]; !ok {
 		return fmt.Errorf("license is missing from installedFiles")

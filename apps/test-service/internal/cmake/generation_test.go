@@ -212,10 +212,11 @@ func TestWorkspaceGenerationChangesWithSemanticInputs(t *testing.T) {
 		Projects: []workspace.ProjectConfig{{ID: "app", SourceDir: "."}},
 	}
 	install := Installation{
-		Executable: "/opt/cmake/bin/cmake",
-		Version:    "4.3.4",
-		Source:     SourceBundle,
-		Identity:   strings.Repeat("a", 64),
+		Executable:      "/opt/cmake/bin/cmake",
+		CTestExecutable: "/opt/cmake/bin/ctest",
+		Version:         "4.3.4",
+		Source:          SourceBundle,
+		Identity:        strings.Repeat("a", 64),
 	}
 	profiles := []BuildProfile{{
 		ID:              strings.Repeat("b", 64),
@@ -249,6 +250,15 @@ func TestWorkspaceGenerationChangesWithSemanticInputs(t *testing.T) {
 			install:    Installation{Executable: install.Executable, Version: install.Version, Source: install.Source, Identity: strings.Repeat("c", 64)},
 			profiles:   profiles,
 			toolchains: []string{"clang"},
+		},
+		{
+			name:   "ctest executable",
+			config: config,
+			install: Installation{
+				Executable: install.Executable, CTestExecutable: "/opt/other/bin/ctest",
+				Version: install.Version, Source: install.Source, Identity: install.Identity,
+			},
+			profiles: profiles, toolchains: []string{"clang"},
 		},
 		{
 			name:    "profile field",

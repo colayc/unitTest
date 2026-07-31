@@ -70,6 +70,30 @@ func TestValidatePlanAcceptsValidTwoStepPlan(t *testing.T) {
 	}
 }
 
+func TestValidatePlanAcceptsServiceOwnedCTestStepKinds(t *testing.T) {
+	for _, kind := range []task.StepKind{
+		task.StepTestDiscovery,
+		task.StepTestRun,
+	} {
+		step := task.ExecutionStep{
+			ID:   "ctest",
+			Kind: kind,
+			Process: task.ProcessSpec{
+				Executable: "ctest",
+				Args:       []string{"--test-dir", "build"},
+				Env:        []string{},
+				Dir:        "build",
+			},
+		}
+		if err := task.ValidatePlan(
+			task.ExecutionPlan{Version: 1, Steps: []task.ExecutionStep{step}},
+			fakeBoundary{executables: []string{"ctest"}, roots: []string{"build"}},
+		); err != nil {
+			t.Fatalf("ValidatePlan(%s) error = %v", kind, err)
+		}
+	}
+}
+
 func TestValidatePlanEnforcesArgumentAndEnvironmentItemLimits(t *testing.T) {
 	boundary := fakeBoundary{executables: []string{"cmake"}, roots: []string{"src"}}
 	fields := []struct {

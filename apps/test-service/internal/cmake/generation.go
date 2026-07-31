@@ -64,11 +64,12 @@ type generationToolchain struct {
 }
 
 type generationInstallation struct {
-	Executable  string `json:"executable"`
-	Version     string `json:"version"`
-	Source      string `json:"source"`
-	Identity    string `json:"identity"`
-	LicensePath string `json:"licensePath"`
+	Executable      string `json:"executable"`
+	CTestExecutable string `json:"ctestExecutable"`
+	Version         string `json:"version"`
+	Source          string `json:"source"`
+	Identity        string `json:"identity"`
+	LicensePath     string `json:"licensePath"`
 }
 
 func WorkspaceGeneration(
@@ -166,11 +167,12 @@ func generationToolchainKey(toolchain generationToolchain) string {
 
 func canonicalGenerationInstallation(install Installation) generationInstallation {
 	return generationInstallation{
-		Executable:  canonicalPortablePath(install.Executable),
-		Version:     install.Version,
-		Source:      install.Source,
-		Identity:    install.Identity,
-		LicensePath: canonicalPortablePath(install.LicensePath),
+		Executable:      canonicalPortablePath(install.Executable),
+		CTestExecutable: canonicalPortablePath(install.CTestExecutable),
+		Version:         install.Version,
+		Source:          install.Source,
+		Identity:        install.Identity,
+		LicensePath:     canonicalPortablePath(install.LicensePath),
 	}
 }
 

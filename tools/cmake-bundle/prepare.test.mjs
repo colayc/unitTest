@@ -31,6 +31,7 @@ const execFileAsync = promisify(execFile);
 const VERSION = "4.3.4";
 const ARCHIVE_BYTES = Buffer.from("offline archive fixture");
 const EXECUTABLE_BYTES = Buffer.from("deterministic cmake executable");
+const CTEST_BYTES = Buffer.from("deterministic ctest executable");
 const LICENSE_BYTES = Buffer.from("BSD 3-Clause fixture license");
 
 function digest(bytes) {
@@ -48,9 +49,11 @@ function manifestFixture() {
         archiveSha256: digest(ARCHIVE_BYTES),
         rootDirectory: "cmake-4.3.4-windows-x86_64",
         executable: "bin/cmake.exe",
+        ctestExecutable: "bin/ctest.exe",
         licensePath: "doc/cmake/LICENSE.rst",
         installedFiles: {
           "bin/cmake.exe": digest(EXECUTABLE_BYTES),
+          "bin/ctest.exe": digest(CTEST_BYTES),
           "doc/cmake/LICENSE.rst": digest(LICENSE_BYTES),
         },
       },
@@ -59,9 +62,11 @@ function manifestFixture() {
         archiveSha256: digest(ARCHIVE_BYTES),
         rootDirectory: "cmake-4.3.4-linux-x86_64",
         executable: "bin/cmake",
+        ctestExecutable: "bin/ctest",
         licensePath: "doc/cmake/LICENSE.rst",
         installedFiles: {
           "bin/cmake": digest(EXECUTABLE_BYTES),
+          "bin/ctest": digest(CTEST_BYTES),
           "doc/cmake/LICENSE.rst": digest(LICENSE_BYTES),
         },
       },
@@ -91,6 +96,7 @@ async function exists(path) {
 
 function offlineOperations({
   executableBytes = EXECUTABLE_BYTES,
+  ctestBytes = CTEST_BYTES,
   licenseBytes = LICENSE_BYTES,
   entries,
   beforePublish,
@@ -99,16 +105,20 @@ function offlineOperations({
     inspectArchive: async (_archive, archive) => entries ?? [
       { path: `${archive.rootDirectory}/`, type: "directory" },
       { path: `${archive.rootDirectory}/${archive.executable}`, type: "file" },
+      { path: `${archive.rootDirectory}/${archive.ctestExecutable}`, type: "file" },
       { path: `${archive.rootDirectory}/${archive.licensePath}`, type: "file" },
     ],
     extractArchive: async (_archivePath, destination, archive) => {
       const root = join(destination, archive.rootDirectory);
       await mkdir(join(root, dirname(archive.executable)), { recursive: true });
+      await mkdir(join(root, dirname(archive.ctestExecutable)), { recursive: true });
       await mkdir(join(root, dirname(archive.licensePath)), { recursive: true });
       await writeFile(join(root, archive.executable), executableBytes);
+      await writeFile(join(root, archive.ctestExecutable), ctestBytes);
       await writeFile(join(root, archive.licensePath), licenseBytes);
     },
     readCapabilities: async () => ({ version: { string: VERSION } }),
+    readCTestVersion: async () => VERSION,
     beforePublish,
     renameDirectory: rename,
   };
@@ -166,7 +176,9 @@ test("validateManifest accepts only the fixed closed supply-chain contract", () 
     ["redirect override", (value) => { value.archives["linux-x64"].redirectUrl = "https://example.com/archive"; }],
     ["unsafe root", (value) => { value.archives["linux-x64"].rootDirectory = "../cmake"; }],
     ["unsafe executable", (value) => { value.archives["linux-x64"].executable = "../cmake"; }],
+    ["unsafe CTest executable", (value) => { value.archives["linux-x64"].ctestExecutable = "../ctest"; }],
     ["missing executable digest", (value) => { delete value.archives["linux-x64"].installedFiles["bin/cmake"]; }],
+    ["missing CTest digest", (value) => { delete value.archives["linux-x64"].installedFiles["bin/ctest"]; }],
     ["invalid digest", (value) => { value.archives["linux-x64"].archiveSha256 = "not-a-digest"; }],
   ];
 
@@ -186,17 +198,21 @@ test("tracked manifest keeps the reviewed CMake 4.3.4 trust anchors", async () =
     {
       windowsArchive: manifest.archives["win32-x64"].archiveSha256,
       windowsExecutable: manifest.archives["win32-x64"].installedFiles["bin/cmake.exe"],
+      windowsCTest: manifest.archives["win32-x64"].installedFiles["bin/ctest.exe"],
       windowsLicense: manifest.archives["win32-x64"].installedFiles["doc/cmake/LICENSE.rst"],
       linuxArchive: manifest.archives["linux-x64"].archiveSha256,
       linuxExecutable: manifest.archives["linux-x64"].installedFiles["bin/cmake"],
+      linuxCTest: manifest.archives["linux-x64"].installedFiles["bin/ctest"],
       linuxLicense: manifest.archives["linux-x64"].installedFiles["doc/cmake/LICENSE.rst"],
     },
     {
       windowsArchive: "86e5fcafb38bdf58346a78b187c7b6b4f252ae5242cffe24c463a92bbd2e77d1",
       windowsExecutable: "1aa884bf1f4949327fffcc8ee4a97c2d684bdc1d0a64b71f01dc16321c7fbc64",
+      windowsCTest: "73baacbeb272ca6f40422b4f789403390af678beb491783cef1727d69cd3e1cb",
       windowsLicense: "cd944d878806fee998ef3f88ca41ec060ae198bd8ba615e284f7d8d90c25593e",
       linuxArchive: "ca6f08ccbd5e6b0a9068d33317d0d1aff7278d08cccaed4529b8fbead7942a68",
       linuxExecutable: "8542b512ac147329e03de375583665a64f02afb65d6c4665099390be103ac2d0",
+      linuxCTest: "189eaf845c588c3dabe9862dad16ca0b1f62ed6155e064692e811e6f14fbd6c7",
       linuxLicense: "4382e7c1879ac90e3f101a395d23846fa4dbcaa1eed7265b43681e348754825d",
     },
   );
@@ -353,6 +369,10 @@ test("offline preparation publishes an immutable verified bundle and exact manif
   assert.equal(result.root, target);
   assert.equal(result.installRoot, installRoot);
   assert.equal(result.executable, join(installRoot, manifest.archives["linux-x64"].executable));
+  assert.equal(
+    result.ctestExecutable,
+    join(installRoot, manifest.archives["linux-x64"].ctestExecutable),
+  );
   assert.equal(result.reused, false);
   assert.deepEqual(await readFile(join(outputRoot, "manifest.json")), manifestBytes(manifest));
   assert.deepEqual(
@@ -368,9 +388,10 @@ test("offline preparation publishes an immutable verified bundle and exact manif
   assert.deepEqual(await stagingEntries(outputRoot), []);
 });
 
-test("installed executable or license mismatch removes staging and preserves no target", async (t) => {
+test("installed executable, CTest, or license mismatch removes staging and preserves no target", async (t) => {
   for (const [name, operations] of [
     ["executable", offlineOperations({ executableBytes: Buffer.from("wrong executable") })],
+    ["ctest", offlineOperations({ ctestBytes: Buffer.from("wrong CTest") })],
     ["license", offlineOperations({ licenseBytes: Buffer.from("wrong license") })],
   ]) {
     await t.test(name, async (t) => {
@@ -384,6 +405,18 @@ test("installed executable or license mismatch removes staging and preserves no 
       assert.deepEqual(await stagingEntries(outputRoot), []);
     });
   }
+});
+
+test("bundled CTest version must match the pinned CMake version", async (t) => {
+  const outputRoot = await mkdtemp(join(tmpdir(), "cmake-bundle-ctest-version-"));
+  t.after(() => rm(outputRoot, { recursive: true, force: true }));
+  const operations = offlineOperations();
+  operations.readCTestVersion = async () => "4.3.5";
+  await assert.rejects(
+    prepareOffline({ outputRoot, operations }),
+    /bundled CTest version mismatch/,
+  );
+  assert.equal(await exists(join(outputRoot, VERSION, "linux-x64")), false);
 });
 
 test("post-extraction audit rejects a symlink or junction omitted from the listing", async (t) => {
@@ -472,6 +505,7 @@ test("a publish race keeps the existing valid target and discards staging", asyn
       await mkdir(join(installRoot, "bin"), { recursive: true });
       await mkdir(join(installRoot, "doc", "cmake"), { recursive: true });
       await writeFile(join(installRoot, archive.executable), EXECUTABLE_BYTES);
+      await writeFile(join(installRoot, archive.ctestExecutable), CTEST_BYTES);
       await writeFile(join(installRoot, archive.licensePath), LICENSE_BYTES);
       await writeFile(join(target, "race-marker"), "existing");
       await writeFile(join(target, "bundle-state.json"), `${JSON.stringify({
