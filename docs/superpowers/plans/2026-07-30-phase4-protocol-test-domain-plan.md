@@ -183,7 +183,7 @@ git commit -m "feat: define protocol v1.3 test contracts"
 - 修改：`packages/test-client/src/connection.ts`
 - 修改：`packages/test-client/src/client.ts`
 - 修改：`packages/test-client/src/decoders.ts`
-- 修改：`packages/test-client/src/subscription.ts`
+- 复用（无需修改）：`packages/test-client/src/subscription.ts`
 - 修改：`packages/test-client/src/index.ts`
 - 修改：`packages/test-client/src/client.test.ts`
 
@@ -197,7 +197,7 @@ getTestRun(runId: string): Promise<TestRun>;
 listTestRuns(input: TestRunListInput): Promise<TestRunPage>;
 ```
 
-- [ ] **Step 1：写出 negotiation、本地校验和 runtime decoder 失败测试**
+- [x] **Step 1：写出 negotiation、本地校验和 runtime decoder 失败测试**
 
 覆盖：
 
@@ -208,7 +208,7 @@ listTestRuns(input: TestRunListInput): Promise<TestRunPage>;
 - v1.3 test event sequence 保持；
 - v1.2 subscription projection 行为不变。
 
-- [ ] **Step 2：运行 Client tests 并确认失败**
+- [x] **Step 2：运行 Client tests 并确认失败**
 
 ```powershell
 pnpm --filter @unit-test-ide/test-client test
@@ -216,11 +216,11 @@ pnpm --filter @unit-test-ide/test-client test
 
 预期：FAIL。
 
-- [ ] **Step 3：实现 version-aware API 和 strict decoder**
+- [x] **Step 3：实现 version-aware API 和 strict decoder**
 
 Client 不构造任何 framework 参数。Filter 仅保留 generated type 中定义的字段。Decoder 对 Catalog tree reference、summary count、iteration 和 `partial` 做交叉校验。
 
-- [ ] **Step 4：运行 TypeScript build/tests**
+- [x] **Step 4：运行 TypeScript build/tests**
 
 ```powershell
 pnpm --filter @unit-test-ide/protocol-models build
@@ -229,7 +229,7 @@ pnpm --filter @unit-test-ide/test-client test
 
 预期：PASS。
 
-- [ ] **Step 5：提交 TypeScript Client**
+- [x] **Step 5：提交 TypeScript Client**
 
 ```powershell
 git add packages/test-client

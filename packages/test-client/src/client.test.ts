@@ -5,7 +5,9 @@ import { createInterface } from "node:readline";
 import test from "node:test";
 import { MAX_MESSAGE_BYTES, ProtocolClient } from "./client.js";
 import { Connection } from "./connection.js";
+import { decodeTaskEvent, decodeTestCatalog, decodeTestRun } from "./decoders.js";
 import { ProtocolError } from "./envelopes.js";
+import { TestSelectionModeV13 } from "./index.js";
 import { EventSubscription } from "./subscription.js";
 
 type JsonObject = Record<string, unknown>;
@@ -15,6 +17,11 @@ const ARTIFACT_ID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const WORKSPACE_GENERATION = "2".repeat(64);
 const BUILD_PROFILE_ID = "3".repeat(64);
 const TARGET_ID = "4".repeat(64);
+const CATALOG_REVISION = "5".repeat(64);
+const RESULT_REVISION = "6".repeat(64);
+const RUN_ID = "77777777777777777777777777777777";
+const CONTAINER_ID = `utid-v1-${"8".repeat(64)}`;
+const ITEM_ID = `utid-v1-${"9".repeat(64)}`;
 const SENT_AT = "2026-07-21T00:00:00Z";
 const CLIENT_MAX_ARTIFACT_BYTES = 64 * 1024 * 1024;
 
@@ -95,6 +102,96 @@ function cmakeTaskSnapshot(overrides: JsonObject = {}): JsonObject {
   };
 }
 
+function testRunTaskSnapshot(overrides: JsonObject = {}): JsonObject {
+  return {
+    taskId: TASK_ID,
+    kind: "testRun",
+    projectId: "core",
+    profileId: BUILD_PROFILE_ID,
+    catalogRevision: CATALOG_REVISION,
+    runId: RUN_ID,
+    repeatCount: 1,
+    status: "running",
+    createdAt: SENT_AT,
+    startedAt: SENT_AT,
+    lastSequence: 2,
+    ...overrides
+  };
+}
+
+function testCatalog(overrides: JsonObject = {}): JsonObject {
+  return {
+    projectId: "core",
+    profileId: BUILD_PROFILE_ID,
+    revision: CATALOG_REVISION,
+    generatedAt: SENT_AT,
+    containers: [{
+      id: CONTAINER_ID,
+      projectId: "core",
+      ctestLogicalName: "core.cpputest",
+      displayName: "Core CppUTest",
+      framework: "cpputest",
+      capabilities: {
+        canDiscoverCases: true,
+        canRunCase: true,
+        canReportSkipped: true,
+        canReportSourceLocation: true,
+        canReportMockDetails: true
+      },
+      labels: [],
+      disabled: false
+    }],
+    items: [{
+      id: ITEM_ID,
+      containerId: CONTAINER_ID,
+      kind: "case",
+      framework: "cpputest",
+      logicalName: "adds_numbers",
+      displayName: "adds_numbers",
+      labels: [],
+      disabled: false
+    }],
+    diagnostics: [],
+    partial: false,
+    ...overrides
+  };
+}
+
+function testRun(overrides: JsonObject = {}): JsonObject {
+  return {
+    runId: RUN_ID,
+    taskId: TASK_ID,
+    projectId: "core",
+    profileId: BUILD_PROFILE_ID,
+    toolchainId: "linux-clang",
+    catalogRevision: CATALOG_REVISION,
+    selectionSnapshot: {
+      mode: "items",
+      containerIds: [],
+      itemIds: [ITEM_ID]
+    },
+    status: "completed",
+    outcome: "passed",
+    startedAt: SENT_AT,
+    finishedAt: SENT_AT,
+    summary: {
+      total: 1,
+      completed: 1,
+      passed: 1,
+      failed: 0,
+      skipped: 0,
+      errored: 0,
+      cancelled: 0,
+      timedOut: 0,
+      notRun: 0,
+      iterations: 1
+    },
+    resultRevision: RESULT_REVISION,
+    incomplete: false,
+    ...overrides
+  };
+}
+
 function taskEvent(sequence: number, eventName: string, overrides: JsonObject = {}): JsonObject {
   return {
     protocolVersion: "1.1",
@@ -150,18 +247,354 @@ test("EventSubscription rejects an unsafe initial sequence", () => {
   assert.throws(() => new EventSubscription(Number.MAX_SAFE_INTEGER + 1), /safe integer/i);
 });
 
-test("client prefers protocol 1.2 and accepts a negotiated 1.1 downgrade", async () => {
-  for (const negotiated of ["1.2", "1.1"] as const) {
+test("client prefers protocol 1.3 and accepts negotiated 1.2 and 1.1 downgrades", async () => {
+  for (const negotiated of ["1.3", "1.2", "1.1"] as const) {
     const fixture = scriptedClient((request) => response(request, {
       negotiatedProtocolVersion: negotiated,
       serviceVersion: "0.3.0"
     }, negotiated));
     const result = await fixture.client.handshake("0123456789abcdef", "test", "0.3.0");
     assert.equal(result.negotiatedProtocolVersion, negotiated);
-    assert.equal(fixture.requests[0]?.protocolVersion, "1.2");
-    assert.deepEqual((fixture.requests[0]?.payload as JsonObject).supportedProtocolVersions, ["1.2", "1.1", "1.0"]);
+    assert.equal(fixture.requests[0]?.protocolVersion, "1.3");
+    assert.deepEqual((fixture.requests[0]?.payload as JsonObject).supportedProtocolVersions, ["1.3", "1.2", "1.1", "1.0"]);
     fixture.client.close();
   }
+});
+
+test("protocol 1.3 client routes typed discovery, run, catalog, and run query APIs", async () => {
+  const fixture = scriptedClient((request) => {
+    if (request.method === "handshake") {
+      return response(request, { negotiatedProtocolVersion: "1.3", serviceVersion: "0.4.0" }, "1.3");
+    }
+    if (request.method === "capabilities/get") {
+      return response(request, {
+        workspaceInspect: true,
+        targetList: true,
+        cmakeBuild: true,
+        testDiscovery: true,
+        testRun: true,
+        frameworkAdapters: [],
+        opaqueCTestFallback: true,
+        ctestJson: true,
+        maxRepeatCount: 100,
+        maxSelectionSize: 100000,
+        maxCatalogPageSize: 1000,
+        unityHelperContractVersion: "1",
+        unityRunnerContractVersion: "utide.runner.v1"
+      }, "1.3");
+    }
+    if (request.method === "tests/catalog/get") return response(request, testCatalog(), "1.3");
+    if (request.method === "tests/runs/get") return response(request, testRun(), "1.3");
+    if (request.method === "tests/runs/list") {
+      return response(request, { items: [testRun()], nextCursor: "next-run" }, "1.3");
+    }
+    const payload = request.payload as JsonObject;
+    if (payload.kind === "simulation") return response(request, taskSnapshot(), "1.3");
+    if (payload.kind === "cmakeBuild") return response(request, cmakeTaskSnapshot(), "1.3");
+    if (payload.kind === "testDiscovery") {
+      return response(request, {
+        taskId: TASK_ID,
+        kind: "testDiscovery",
+        projectId: "core",
+        profileId: BUILD_PROFILE_ID,
+        catalogRevision: CATALOG_REVISION,
+        status: "finished",
+        outcome: "succeeded",
+        createdAt: SENT_AT,
+        finishedAt: SENT_AT,
+        lastSequence: 4
+      }, "1.3");
+    }
+    return response(request, testRunTaskSnapshot(), "1.3");
+  });
+
+  await fixture.client.handshake("0123456789abcdef", "test", "0.4.0");
+  const capabilities = await fixture.client.getCapabilities();
+  const simulation = await fixture.client.startTask({
+    idempotencyKey: "c".repeat(32),
+    scenario: "hang",
+    timeoutMs: 1000
+  });
+  const cmakeBuild = await fixture.client.startCMakeBuild({
+    idempotencyKey: "d".repeat(32),
+    workspaceGeneration: WORKSPACE_GENERATION,
+    projectId: "core",
+    buildProfileId: BUILD_PROFILE_ID,
+    targetIds: [TARGET_ID],
+    jobs: 8,
+    timeoutMs: 600_000
+  });
+  const discovery = await fixture.client.discoverTests({
+    idempotencyKey: "a".repeat(32),
+    projectId: "core",
+    profileId: BUILD_PROFILE_ID
+  });
+  const runTask = await fixture.client.runTests({
+    idempotencyKey: "b".repeat(32),
+    projectId: "core",
+    profileId: BUILD_PROFILE_ID,
+    catalogRevision: CATALOG_REVISION,
+    selection: { mode: TestSelectionModeV13.Items, itemIds: [ITEM_ID] },
+    repeatCount: 1
+  });
+  const catalog = await fixture.client.getTestCatalog({
+    projectId: "core",
+    profileId: BUILD_PROFILE_ID,
+    limit: 1000
+  });
+  const run = await fixture.client.getTestRun(RUN_ID);
+  const page = await fixture.client.listTestRuns({
+    projectId: "core",
+    profileId: BUILD_PROFILE_ID,
+    limit: 1000
+  });
+
+  assert.equal(discovery.kind, "testDiscovery");
+  assert.equal(runTask.kind, "testRun");
+  assert.equal(simulation.kind, "simulation");
+  assert.equal(cmakeBuild.kind, "cmakeBuild");
+  assert.equal("testRun" in capabilities && capabilities.testRun, true);
+  assert.ok(catalog.generatedAt instanceof Date);
+  assert.ok(run.startedAt instanceof Date);
+  assert.equal(page.items[0]?.runId, RUN_ID);
+  assert.deepEqual(fixture.requests.slice(1).map(({ method }) => method), [
+    "capabilities/get",
+    "tasks/start",
+    "tasks/start",
+    "tasks/start",
+    "tasks/start",
+    "tests/catalog/get",
+    "tests/runs/get",
+    "tests/runs/list"
+  ]);
+  const runRequest = fixture.requests.find((request) =>
+    (request.payload as JsonObject).kind === "testRun");
+  assert.deepEqual(runRequest?.payload, {
+    idempotencyKey: "b".repeat(32),
+    kind: "testRun",
+    projectId: "core",
+    profileId: BUILD_PROFILE_ID,
+    catalogRevision: CATALOG_REVISION,
+    selection: { mode: TestSelectionModeV13.Items, itemIds: [ITEM_ID] },
+    repeatCount: 1
+  });
+  fixture.client.close();
+});
+
+test("protocol 1.2 sessions reject every test API locally without writing", async () => {
+  const fixture = scriptedClient((request) => response(request, {
+    negotiatedProtocolVersion: "1.2",
+    serviceVersion: "0.3.0"
+  }, "1.2"));
+  await fixture.client.handshake("0123456789abcdef", "test", "0.4.0");
+
+  const calls = [
+    () => fixture.client.discoverTests({ idempotencyKey: "a".repeat(32), projectId: "core", profileId: BUILD_PROFILE_ID }),
+    () => fixture.client.runTests({
+      idempotencyKey: "b".repeat(32),
+      projectId: "core",
+      profileId: BUILD_PROFILE_ID,
+      catalogRevision: CATALOG_REVISION,
+      selection: { mode: TestSelectionModeV13.All },
+      repeatCount: 1
+    }),
+    () => fixture.client.getTestCatalog({ projectId: "core", profileId: BUILD_PROFILE_ID }),
+    () => fixture.client.getTestRun(RUN_ID),
+    () => fixture.client.listTestRuns()
+  ];
+  for (const call of calls) {
+    await assert.rejects(call, (failure: unknown) =>
+      failure instanceof ProtocolError && failure.code === "PROTOCOL_FEATURE_UNAVAILABLE");
+  }
+  assert.equal(fixture.requests.length, 1);
+  fixture.client.close();
+});
+
+test("protocol 1.3 test request bounds and execution-plan fields are rejected before wire write", async () => {
+  const fixture = scriptedClient((request) => response(request, {
+    negotiatedProtocolVersion: "1.3",
+    serviceVersion: "0.4.0"
+  }, "1.3"));
+  await fixture.client.handshake("0123456789abcdef", "test", "0.4.0");
+  const validRun = {
+    idempotencyKey: "b".repeat(32),
+    projectId: "core",
+    profileId: BUILD_PROFILE_ID,
+    catalogRevision: CATALOG_REVISION,
+    selection: { mode: TestSelectionModeV13.Items, itemIds: [ITEM_ID] },
+    repeatCount: 1
+  } satisfies Parameters<ProtocolClient["runTests"]>[0];
+
+  await assert.rejects(() => fixture.client.runTests({ ...validRun, repeatCount: 0 }), /repeatCount|invalid protocol request/i);
+  await assert.rejects(() => fixture.client.runTests({
+    ...validRun,
+    selection: { mode: TestSelectionModeV13.Items, itemIds: ["bad"] }
+  }), /selection|invalid protocol request/i);
+  await assert.rejects(() => fixture.client.listTestRuns({ limit: 1001 }), /limit|invalid protocol request/i);
+  await assert.rejects(() => fixture.client.getTestRun("bad"), /runId|invalid protocol request/i);
+  await assert.rejects(() => fixture.client.runTests({
+    ...validRun,
+    command: "ctest"
+  } as never), /additional properties|invalid protocol request/i);
+  assert.equal(fixture.requests.length, 1);
+  fixture.client.close();
+});
+
+test("protocol 1.3 decoders enforce catalog references, summary counts, iteration, and partial semantics", () => {
+  const danglingCatalog = testCatalog({
+    items: [{
+      id: ITEM_ID,
+      containerId: `utid-v1-${"a".repeat(64)}`,
+      kind: "case",
+      framework: "cpputest",
+      logicalName: "adds_numbers",
+      displayName: "adds_numbers",
+      labels: [],
+      disabled: false
+    }]
+  });
+  assert.throws(() => decodeTestCatalog(danglingCatalog), /container reference/i);
+
+  const inconsistentRun = testRun({
+    summary: {
+      total: 2,
+      completed: 1,
+      passed: 1,
+      failed: 0,
+      skipped: 0,
+      errored: 0,
+      cancelled: 0,
+      timedOut: 0,
+      notRun: 0,
+      iterations: 1
+    }
+  });
+  assert.throws(() => decodeTestRun(inconsistentRun), /summary/i);
+
+  const event = {
+    protocolVersion: "1.3",
+    kind: "event",
+    messageId: MESSAGE_ID,
+    sentAt: SENT_AT,
+    sequence: 1,
+    event: "test.item.finished",
+    taskId: TASK_ID,
+    payloadVersion: 1,
+    payload: {
+      runId: RUN_ID,
+      result: {
+        itemId: ITEM_ID,
+        containerId: CONTAINER_ID,
+        iteration: 101,
+        outcome: "not_run",
+        failureDetails: [],
+        outputRefs: [],
+        partial: false,
+        reason: "selection_aborted"
+      }
+    }
+  };
+  assert.throws(() => decodeTaskEvent(event), /iteration/i);
+  (event.payload.result as JsonObject).iteration = 1;
+  assert.throws(() => decodeTaskEvent(event), /partial/i);
+});
+
+test("protocol 1.3 response validation rejects unknown outcomes, unsafe integers, invalid URI, and invalid dates", async () => {
+  const cases: Array<{
+    payload: JsonObject;
+    method: "tests/catalog/get" | "tests/runs/get";
+    invoke: (client: ProtocolClient) => Promise<unknown>;
+  }> = [
+    {
+      method: "tests/runs/get",
+      payload: testRun({ outcome: "unknown" }),
+      invoke: (client) => client.getTestRun(RUN_ID)
+    },
+    {
+      method: "tests/runs/get",
+      payload: testRun({
+        summary: {
+          ...(testRun().summary as JsonObject),
+          total: Number.MAX_SAFE_INTEGER + 1
+        }
+      }),
+      invoke: (client) => client.getTestRun(RUN_ID)
+    },
+    {
+      method: "tests/runs/get",
+      payload: testRun({ startedAt: "not-a-date" }),
+      invoke: (client) => client.getTestRun(RUN_ID)
+    },
+    {
+      method: "tests/catalog/get",
+      payload: testCatalog({
+        containers: [{
+          ...(testCatalog().containers as JsonObject[])[0],
+          sourceLocation: {
+            uri: "not a uri",
+            navigable: true,
+            provenance: "ctest-backtrace"
+          }
+        }]
+      }),
+      invoke: (client) => client.getTestCatalog({ projectId: "core", profileId: BUILD_PROFILE_ID })
+    }
+  ];
+
+  for (const item of cases) {
+    const fixture = scriptedClient((request) => request.method === "handshake"
+      ? response(request, { negotiatedProtocolVersion: "1.3", serviceVersion: "0.4.0" }, "1.3")
+      : request.method === item.method ? response(request, item.payload, "1.3") : undefined);
+    await fixture.client.handshake("0123456789abcdef", "test", "0.4.0");
+    await assert.rejects(() => item.invoke(fixture.client), /invalid protocol message|invalid .* response/i);
+    fixture.client.close();
+  }
+});
+
+test("EventSubscription accepts protocol 1.3 test events and preserves sequence", async () => {
+  const [clientStream, serverStream] = pair();
+  createInterface({ input: serverStream }).on("line", (line) => {
+    const request = JSON.parse(line) as JsonObject;
+    if (request.method === "handshake") {
+      serverStream.write(`${JSON.stringify(response(request, {
+        negotiatedProtocolVersion: "1.3",
+        serviceVersion: "0.4.0"
+      }, "1.3"))}\n`);
+      return;
+    }
+    serverStream.write(`${JSON.stringify(response(request, { afterSequence: 0 }, "1.3"))}\n`);
+    serverStream.write(`${JSON.stringify({
+      protocolVersion: "1.3",
+      kind: "event",
+      messageId: MESSAGE_ID,
+      sentAt: SENT_AT,
+      sequence: 1,
+      event: "test.item.finished",
+      taskId: TASK_ID,
+      payloadVersion: 1,
+      payload: {
+        runId: RUN_ID,
+        result: {
+          itemId: ITEM_ID,
+          containerId: CONTAINER_ID,
+          iteration: 1,
+          outcome: "passed",
+          failureDetails: [],
+          outputRefs: [],
+          partial: false
+        }
+      }
+    })}\n`);
+  });
+  const client = ProtocolClient.attach(clientStream);
+  await client.handshake("0123456789abcdef", "test", "0.4.0");
+  const subscription = await client.subscribeEvents(0);
+  const event = (await take(subscription, 1))[0];
+  assert.equal(event?.protocolVersion, "1.3");
+  assert.equal(event?.sequence, 1);
+  assert.ok(event?.sentAt instanceof Date);
+  assert.equal(subscription.lastSequence, 1);
+  client.close();
 });
 
 test("protocol 1.2 client routes workspace, target, and CMake build APIs", async () => {
@@ -411,7 +844,7 @@ test("client performs handshake, capabilities, and shutdown in order", async () 
 });
 
 test("client exposes stable server error codes", async () => {
-  const { client } = scriptedClient((request) => error(request, "AUTH_FAILED", false, "1.2"));
+  const { client } = scriptedClient((request) => error(request, "AUTH_FAILED", false, "1.3"));
   await assert.rejects(
     () => client.handshake("wrong-token-value", "test", "0.1.0"),
     (failure: unknown) => failure instanceof ProtocolError && failure.code === "AUTH_FAILED"
@@ -503,17 +936,17 @@ test("unknown protocol versions close the connection", async () => {
 
 test("client falls back to an exact 1.0 handshake", async () => {
   const fixture = scriptedClient((request) => {
-    if (request.protocolVersion === "1.2") return error(request, "UNSUPPORTED_PROTOCOL", false, "1.0");
+    if (request.protocolVersion === "1.3") return error(request, "UNSUPPORTED_PROTOCOL", false, "1.0");
     return response(request, { negotiatedProtocolVersion: "1.0", serviceVersion: "0.1.0" }, "1.0");
   });
   const negotiated = await fixture.client.handshake("0123456789abcdef", "test", "0.2.0");
   assert.equal(negotiated.negotiatedProtocolVersion, "1.0");
-  assert.deepEqual(fixture.requests.map(({ protocolVersion }) => protocolVersion), ["1.2", "1.0"]);
+  assert.deepEqual(fixture.requests.map(({ protocolVersion }) => protocolVersion), ["1.3", "1.0"]);
   assert.deepEqual(fixture.requests[0]?.payload, {
     token: "0123456789abcdef",
     clientName: "test",
     clientVersion: "0.2.0",
-    supportedProtocolVersions: ["1.2", "1.1", "1.0"]
+    supportedProtocolVersions: ["1.3", "1.2", "1.1", "1.0"]
   });
   assert.equal("supportedProtocolVersions" in (fixture.requests[1]?.payload as JsonObject), false);
   fixture.client.close();
@@ -559,7 +992,7 @@ test("a same-version handshake failure consumes the Connection legacy opportunit
   let handshakeCount = 0;
   const fixture = scriptedClient((request) => {
     handshakeCount++;
-    if (handshakeCount === 1) return error(request, "AUTH_FAILED", false, "1.2");
+    if (handshakeCount === 1) return error(request, "AUTH_FAILED", false, "1.3");
     if (handshakeCount === 2) return error(request, "UNSUPPORTED_PROTOCOL", false, "1.0");
     return response(request, { negotiatedProtocolVersion: "1.0", serviceVersion: "0.1.0" }, "1.0");
   });
@@ -571,7 +1004,7 @@ test("a same-version handshake failure consumes the Connection legacy opportunit
     () => fixture.client.handshake("0123456789abcdef", "test", "0.2.0"),
     /protocol version/
   );
-  assert.deepEqual(fixture.requests.map(({ protocolVersion }) => protocolVersion), ["1.2", "1.2"]);
+  assert.deepEqual(fixture.requests.map(({ protocolVersion }) => protocolVersion), ["1.3", "1.3"]);
 });
 
 test("an authenticated connection rejects a legacy-version handshake error", async () => {
@@ -1045,7 +1478,7 @@ test("reconnect reuses credentials and the active subscription cursor", async ()
   assert.equal((await subscription.next()).value?.sequence, 4);
   await client.reconnect();
   assert.equal(calls, 2);
-  assert.deepEqual((requests[1]?.[0]?.payload as JsonObject).supportedProtocolVersions, ["1.2", "1.1", "1.0"]);
+  assert.deepEqual((requests[1]?.[0]?.payload as JsonObject).supportedProtocolVersions, ["1.3", "1.2", "1.1", "1.0"]);
   assert.deepEqual(requests[1]?.[1]?.payload, { afterSequence: 4 });
 
   first[1].write(`${JSON.stringify(taskEvent(5, "task.output", { payload: { old: true } }))}\n`);
