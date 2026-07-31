@@ -4,3 +4,4 @@
 *.md text eol=lf
 *.ts text eol=lf
 *.yaml text eol=lf
+apps/test-service/internal/testframework/cpputest/testdata/list-crlf.valid.txt text eol=crlf

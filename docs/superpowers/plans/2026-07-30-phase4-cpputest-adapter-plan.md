@@ -30,6 +30,7 @@
 - 创建：`apps/test-service/internal/testframework/cpputest/testdata/list-crlf.valid.txt`
 - 创建：`apps/test-service/internal/testframework/cpputest/testdata/list-duplicate.invalid.txt`
 - 创建：`apps/test-service/internal/testframework/cpputest/testdata/list-malformed.invalid.txt`
+- 修改：`.gitattributes`，固定 CRLF Golden File 的跨平台 checkout 行尾
 
 **接口：**
 
@@ -37,7 +38,7 @@
 func ParseList(reader io.Reader, limits Limits) ([]CaseIdentity, error)
 ```
 
-- [ ] **Step 1：写出 list grammar 失败测试**
+- [x] **Step 1：写出 list grammar 失败测试**
 
 覆盖：
 
@@ -51,7 +52,7 @@ func ParseList(reader io.Reader, limits Limits) ([]CaseIdentity, error)
 - token/document 上限；
 - partial final token。
 
-- [ ] **Step 2：运行 parser tests 并确认失败**
+- [x] **Step 2：运行 parser tests 并确认失败**
 
 ```powershell
 go test ./apps/test-service/internal/testframework/cpputest -run 'ParseList|Discovery' -count=1
@@ -59,11 +60,11 @@ go test ./apps/test-service/internal/testframework/cpputest -run 'ParseList|Disc
 
 预期：FAIL。
 
-- [ ] **Step 3：实现有界 tokenizer**
+- [x] **Step 3：实现有界 tokenizer**
 
 Parser 不使用无限长 `bufio.Scanner` 默认 token，也不根据输出中出现 `CppUTest` 单词判断成功。完整输入关闭且全部 token 合法后才返回 cases。
 
-- [ ] **Step 4：运行 unit/fuzz seed**
+- [x] **Step 4：运行 unit/fuzz seed**
 
 ```powershell
 go test ./apps/test-service/internal/testframework/cpputest -count=1
@@ -71,7 +72,7 @@ go test ./apps/test-service/internal/testframework/cpputest -count=1
 
 预期：PASS。
 
-- [ ] **Step 5：提交 CppUTest discovery**
+- [x] **Step 5：提交 CppUTest discovery**
 
 ```powershell
 git add apps/test-service/internal/testframework/cpputest
@@ -304,7 +305,7 @@ git commit -m "feat: integrate cpputest adapter"
 
 ## Phase 4C 完成检查
 
-- [ ] `-ln` valid/malformed/chunk tests
+- [x] `-ln` valid/malformed/chunk tests
 - [ ] exact group/case argv tests
 - [ ] pass/fail/skip/crash/timeout evidence tests
 - [ ] CppUMock subtype/detail/source tests
