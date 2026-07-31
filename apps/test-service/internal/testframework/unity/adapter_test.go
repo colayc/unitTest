@@ -41,7 +41,7 @@ func TestAdapterDiscoversManifestBoundCasesThroughOwnedControlFile(t *testing.T)
 		!capabilities.CanRunCase ||
 		!capabilities.CanReportSkipped ||
 		!capabilities.CanReportSourceLocation ||
-		capabilities.CanReportMockDetails {
+		!capabilities.CanReportMockDetails {
 		t.Fatalf("capabilities = %#v", capabilities)
 	}
 	discovery, err := adapter.Discover(context.Background(), fixture.descriptor)

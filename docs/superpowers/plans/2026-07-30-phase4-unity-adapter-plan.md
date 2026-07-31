@@ -370,7 +370,7 @@ git commit -m "feat: integrate unity runner protocol"
 - 修改：`apps/test-service/internal/testdomain/model.go`
 - 修改：`apps/test-service/internal/testdomain/model_test.go`
 
-- [ ] **Step 1：写出 CMock detail 和 generated C compile 失败测试**
+- [x] **Step 1：写出 CMock detail 和 generated C compile 失败测试**
 
 覆盖：
 
@@ -383,7 +383,7 @@ git commit -m "feat: integrate unity runner protocol"
 - stdout malformed 不覆盖 control-file status；
 - control-file failure 与 stdout assertion 不一致时 `framework_output_invalid`。
 
-- [ ] **Step 2：运行 integration tests 并确认失败**
+- [x] **Step 2：运行 integration tests 并确认失败**
 
 ```powershell
 go test ./apps/test-service/internal/unityrunner ./apps/test-service/internal/testframework/unity ./apps/test-service/internal/testdomain -run 'Compile|CMock|ControlConsistency' -count=1
@@ -391,11 +391,11 @@ go test ./apps/test-service/internal/unityrunner ./apps/test-service/internal/te
 
 预期：FAIL。
 
-- [ ] **Step 3：实现 output enrichment**
+- [x] **Step 3：实现 output enrichment**
 
 Control file 是 status 事实来源；stdout parser 只补充 failure detail/source。无法结构化 CMock detail 时保留原 message，不改变 assertion。
 
-- [ ] **Step 4：运行 Unity 全套与完整 Go tests**
+- [x] **Step 4：运行 Unity 全套与完整 Go tests**
 
 ```powershell
 go test ./apps/test-service/internal/unityrunner ./apps/test-service/internal/testframework/unity ./apps/test-service/internal/testdomain -count=1
@@ -405,7 +405,7 @@ pnpm test:go
 
 预期：PASS。
 
-- [ ] **Step 5：提交 Unity/CMock integration**
+- [x] **Step 5：提交 Unity/CMock integration**
 
 ```powershell
 git add apps/test-service/internal/unityrunner apps/test-service/internal/testframework/unity apps/test-service/internal/testdomain
@@ -417,10 +417,10 @@ git commit -m "feat: normalize unity and cmock results"
 - [x] declared-source parser 不扫描未 opt-in Project
 - [x] deterministic runner/manifest Golden File
 - [x] helper strict keyword/security tests
-- [ ] generated C Windows/Linux compile tests
+- [x] generated C Windows/Linux current-platform compile tests
 - [x] list/exact-run protocol tests
 - [x] pass/fail/skip/crash/partial tests
-- [ ] CMock detail tests
+- [x] CMock detail tests
 - [x] 无 Ruby/Ceedling runtime dependency
-- [ ] Go unit/race、workspace smoke、`pnpm verify`
+- [x] Go unit/race、workspace smoke、`pnpm verify`
 - [ ] 独立评审确认 result path 和 control argv 只能由 Service 生成

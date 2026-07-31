@@ -102,6 +102,7 @@ func (adapter *Adapter) Verify(
 		CanRunCase:              true,
 		CanReportSkipped:        true,
 		CanReportSourceLocation: true,
+		CanReportMockDetails:    true,
 	}, nil
 }
 

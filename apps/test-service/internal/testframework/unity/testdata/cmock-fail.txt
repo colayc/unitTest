@@ -1,0 +1,5 @@
+testdata/basic.c:18:test_adds_numbers:FAIL:Expected 7 Was 20. Function dependency_write Argument value. Function called with unexpected value.
+
+-----------------------
+1 Tests 1 Failures 0 Ignored
+FAIL

@@ -357,6 +357,8 @@ type Parser struct {
 	testCase    unityrunner.TestCase
 	buffer      []byte
 	outputBytes int
+	stdout      []byte
+	stderr      []byte
 	result      *testframework.ParsedCaseResult
 	finished    bool
 	feedErr     error
@@ -404,7 +406,18 @@ func (parser *Parser) Feed(
 		return nil, parser.fail(ErrProtocolLimit)
 	}
 	parser.outputBytes += len(data)
-	if stream != testframework.StreamControl {
+	if stream == testframework.StreamStdout {
+		if len(data) > maxCapturedOutputBytes-len(parser.stdout) {
+			return nil, parser.fail(ErrProtocolLimit)
+		}
+		parser.stdout = append(parser.stdout, data...)
+		return nil, nil
+	}
+	if stream == testframework.StreamStderr {
+		if len(data) > maxCapturedOutputBytes-len(parser.stderr) {
+			return nil, parser.fail(ErrProtocolLimit)
+		}
+		parser.stderr = append(parser.stderr, data...)
 		return nil, nil
 	}
 	parser.buffer = append(parser.buffer, data...)
@@ -521,6 +534,22 @@ func (parser *Parser) Finish(
 			))
 		}
 	}
+	if parser.result != nil {
+		detail, observed, invalid := parser.enrichFromOutput()
+		if invalid {
+			complete = false
+			diagnostics = append(diagnostics, resultDiagnostic(
+				"framework_output_invalid",
+				"test.unity.output_inconsistent",
+				"Unity stdout 与 control-file testFinished record 不一致。",
+			))
+		} else if observed && detail != nil {
+			parser.result.Message = detail.Message
+			parser.result.FailureDetails = []testframework.ParsedFailureDetail{
+				*detail,
+			}
+		}
+	}
 
 	cases := make([]testframework.ParsedCaseResult, 0, 1)
 	if parser.result == nil {
@@ -541,6 +570,48 @@ func (parser *Parser) Finish(
 		Diagnostics: diagnostics,
 		Complete:    complete,
 	}, nil
+}
+
+func (parser *Parser) enrichFromOutput() (
+	*testframework.ParsedFailureDetail,
+	bool,
+	bool,
+) {
+	records := parseUnityOutput(parser.stdout)
+	if len(records) == 0 {
+		return nil, false, false
+	}
+	var matched *unityOutputRecord
+	for index := range records {
+		record := &records[index]
+		if record.identity != parser.expected.LogicalName ||
+			!manifestContainsSource(parser.evidence.manifest, record.path) ||
+			matched != nil {
+			return nil, true, true
+		}
+		matched = record
+	}
+	if matched == nil || parser.result == nil ||
+		matched.status != parser.result.Status {
+		return nil, true, true
+	}
+	if matched.status != testframework.CaseFailed {
+		return nil, true, false
+	}
+	detail := outputFailureDetail(*matched)
+	return &detail, true, false
+}
+
+func manifestContainsSource(
+	manifest unityrunner.Manifest,
+	path string,
+) bool {
+	for _, source := range manifest.Sources {
+		if source == path {
+			return true
+		}
+	}
+	return false
 }
 
 func (parser *Parser) fail(err error) error {
