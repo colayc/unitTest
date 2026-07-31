@@ -305,13 +305,19 @@ git commit -m "feat: add stable test domain models"
 **文件：**
 
 - 创建：`apps/test-service/internal/taskstore/migrations/005_test_catalogs.sql`
-- 修改：`apps/test-service/internal/taskstore/migrations.go`
 - 创建：`apps/test-service/internal/taskstore/test_catalogs.go`
 - 创建：`apps/test-service/internal/taskstore/test_catalogs_test.go`
 - 修改：`apps/test-service/internal/taskstore/sqlite_test.go`
 - 修改：`apps/test-service/internal/task/ports.go`
 - 修改：`apps/test-service/internal/artifactstore/store.go`
-- 修改：`apps/test-service/internal/artifactstore/store_test.go`
+- 创建：`apps/test-service/internal/artifactstore/test_catalog.go`
+- 创建：`apps/test-service/internal/artifactstore/test_catalog_test.go`
+- 创建：`apps/test-service/internal/testdomain/catalog_page.go`
+- 创建：`apps/test-service/internal/testdomain/encoding.go`
+- 修改：`apps/test-service/internal/testdomain/errors.go`
+- 修改：`apps/test-service/internal/testdomain/id.go`
+- 修改：`apps/test-service/internal/testdomain/model.go`
+- 修改：`apps/test-service/internal/testdomain/model_test.go`
 
 **接口：**
 
@@ -323,7 +329,7 @@ type TestCatalogRepository interface {
 }
 ```
 
-- [ ] **Step 1：写出 migration、atomic publish 和 cursor 失败测试**
+- [x] **Step 1：写出 migration、atomic publish 和 cursor 失败测试**
 
 覆盖：
 
@@ -337,7 +343,7 @@ type TestCatalogRepository interface {
 - restart 后读取一致；
 - concurrent reader 只看到旧或新完整 Catalog。
 
-- [ ] **Step 2：运行 Store tests 并确认失败**
+- [x] **Step 2：运行 Store tests 并确认失败**
 
 ```powershell
 go test ./apps/test-service/internal/taskstore ./apps/test-service/internal/artifactstore -run 'Catalog|Migration005' -count=1
@@ -345,11 +351,11 @@ go test ./apps/test-service/internal/taskstore ./apps/test-service/internal/arti
 
 预期：FAIL。
 
-- [ ] **Step 3：实现 Catalog repository**
+- [x] **Step 3：实现 Catalog repository**
 
 SQLite 保存 revision、project/profile、summary、artifact reference 和查询索引；完整 Catalog JSON 通过 ArtifactStore 原子提交。Publication 顺序必须避免 dangling metadata。
 
-- [ ] **Step 4：运行 Store 全套与 race**
+- [x] **Step 4：运行 Store 全套与 race**
 
 ```powershell
 go test ./apps/test-service/internal/taskstore ./apps/test-service/internal/artifactstore -count=1
@@ -358,7 +364,7 @@ go test -race ./apps/test-service/internal/taskstore ./apps/test-service/interna
 
 预期：PASS。
 
-- [ ] **Step 5：提交 Catalog persistence**
+- [x] **Step 5：提交 Catalog persistence**
 
 ```powershell
 git add apps/test-service/internal/taskstore apps/test-service/internal/task/ports.go apps/test-service/internal/artifactstore
@@ -367,13 +373,13 @@ git commit -m "feat: persist immutable test catalogs"
 
 ## Phase 4A 完成检查
 
-- [ ] Workspace v1/v2 compatibility
-- [ ] Protocol v1.0–v1.3 contract tests
-- [ ] execution injection negative fixtures
-- [ ] deterministic generated model drift
-- [ ] TypeScript Client strict tests
-- [ ] stable ID cross-platform unit tests
-- [ ] Catalog atomic publication/restart tests
-- [ ] `pnpm verify`
-- [ ] `git diff --check`
-- [ ] 独立评审确认本计划没有启动 CTest/framework process
+- [x] Workspace v1/v2 compatibility
+- [x] Protocol v1.0–v1.3 contract tests
+- [x] execution injection negative fixtures
+- [x] deterministic generated model drift
+- [x] TypeScript Client strict tests
+- [x] stable ID cross-platform unit tests
+- [x] Catalog atomic publication/restart tests
+- [x] `pnpm verify`
+- [x] `git diff --check`
+- [x] 独立评审确认本计划没有启动 CTest/framework process

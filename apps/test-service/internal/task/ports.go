@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"unit-test-ide.local/test-service/internal/diagnostic"
+	"unit-test-ide.local/test-service/internal/testdomain"
 )
 
 var (
@@ -53,6 +54,12 @@ type Store interface {
 	RecoverInterrupted(context.Context, time.Time) ([]Event, error)
 	ReferencedArtifactPaths(context.Context) (map[string]struct{}, error)
 	Close() error
+}
+
+type TestCatalogRepository interface {
+	PublishCatalog(context.Context, testdomain.Catalog, Artifact) error
+	GetCatalog(context.Context, string, string) (testdomain.Catalog, error)
+	PageCatalog(context.Context, testdomain.CatalogPageRequest) (testdomain.CatalogPage, error)
 }
 
 type QueuedPlanStore interface {

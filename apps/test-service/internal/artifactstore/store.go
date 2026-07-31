@@ -879,7 +879,7 @@ func artifactRelativePathFor(taskID, artifactID, extension string) string {
 
 func artifactDescriptor(kind string) (mimeType, extension string, ok bool) {
 	switch kind {
-	case "task-summary", "build-summary", "execution-plan":
+	case "task-summary", "build-summary", "execution-plan", "test-catalog":
 		return "application/json", ".json", true
 	case "diagnostics":
 		return "application/x-ndjson", ".jsonl", true

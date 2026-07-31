@@ -7,37 +7,37 @@ import (
 )
 
 type Capabilities struct {
-	CanDiscoverCases        bool
-	CanRunCase              bool
-	CanReportSkipped        bool
-	CanReportSourceLocation bool
-	CanReportMockDetails    bool
+	CanDiscoverCases        bool `json:"canDiscoverCases"`
+	CanRunCase              bool `json:"canRunCase"`
+	CanReportSkipped        bool `json:"canReportSkipped"`
+	CanReportSourceLocation bool `json:"canReportSourceLocation"`
+	CanReportMockDetails    bool `json:"canReportMockDetails"`
 }
 
 type SourceLocation struct {
-	URI        string
-	Line       int
-	Column     int
-	Navigable  bool
-	Provenance string
+	URI        string `json:"uri"`
+	Line       int    `json:"line,omitempty"`
+	Column     int    `json:"column,omitempty"`
+	Navigable  bool   `json:"navigable"`
+	Provenance string `json:"provenance"`
 }
 
 type Parameter struct {
-	Name  string
-	Value string
+	Name  string `json:"name"`
+	Value string `json:"value"`
 }
 
 type Container struct {
-	ID               ID
-	ProjectID        string
-	CTestLogicalName string
-	DisplayName      string
-	Framework        Framework
-	Capabilities     Capabilities
-	Labels           []string
-	SourceLocation   *SourceLocation
-	Disabled         bool
-	DegradedReason   string
+	ID               ID              `json:"id"`
+	ProjectID        string          `json:"projectId"`
+	CTestLogicalName string          `json:"ctestLogicalName"`
+	DisplayName      string          `json:"displayName"`
+	Framework        Framework       `json:"framework"`
+	Capabilities     Capabilities    `json:"capabilities"`
+	Labels           []string        `json:"labels"`
+	SourceLocation   *SourceLocation `json:"sourceLocation,omitempty"`
+	Disabled         bool            `json:"disabled"`
+	DegradedReason   string          `json:"degradedReason,omitempty"`
 }
 
 type ItemKind string
@@ -58,38 +58,38 @@ func (kind ItemKind) Valid() bool {
 }
 
 type Item struct {
-	ID             ID
-	ContainerID    ID
-	ParentID       ID
-	Kind           ItemKind
-	Framework      Framework
-	LogicalName    string
-	DisplayName    string
-	Labels         []string
-	SourceLocation *SourceLocation
-	Disabled       bool
-	Parameters     []Parameter
+	ID             ID              `json:"id"`
+	ContainerID    ID              `json:"containerId"`
+	ParentID       ID              `json:"parentId,omitempty"`
+	Kind           ItemKind        `json:"kind"`
+	Framework      Framework       `json:"framework"`
+	LogicalName    string          `json:"logicalName"`
+	DisplayName    string          `json:"displayName"`
+	Labels         []string        `json:"labels"`
+	SourceLocation *SourceLocation `json:"sourceLocation,omitempty"`
+	Disabled       bool            `json:"disabled"`
+	Parameters     []Parameter     `json:"parameters,omitempty"`
 }
 
 type Diagnostic struct {
-	Severity  string
-	Category  string
-	Code      string
-	Message   string
-	SourceURI string
-	Line      int
-	Column    int
+	Severity  string `json:"severity"`
+	Category  string `json:"category"`
+	Code      string `json:"code"`
+	Message   string `json:"message"`
+	SourceURI string `json:"sourceUri,omitempty"`
+	Line      int    `json:"line,omitempty"`
+	Column    int    `json:"column,omitempty"`
 }
 
 type Catalog struct {
-	ProjectID   string
-	ProfileID   string
-	Revision    string
-	GeneratedAt time.Time
-	Containers  []Container
-	Items       []Item
-	Diagnostics []Diagnostic
-	Partial     bool
+	ProjectID   string       `json:"projectId"`
+	ProfileID   string       `json:"profileId"`
+	Revision    string       `json:"revision"`
+	GeneratedAt time.Time    `json:"generatedAt"`
+	Containers  []Container  `json:"containers"`
+	Items       []Item       `json:"items"`
+	Diagnostics []Diagnostic `json:"diagnostics"`
+	Partial     bool         `json:"partial"`
 }
 
 func NewContainer(value Container) (Container, error) {
@@ -100,6 +100,9 @@ func NewContainer(value Container) (Container, error) {
 	var err error
 	if result.ProjectID, err = normalizeIdentityText(result.ProjectID, false); err != nil {
 		return Container{}, invalid(ErrInvalidCatalog, "container.projectId", err.Error())
+	}
+	if !validProjectID(result.ProjectID) {
+		return Container{}, invalid(ErrInvalidCatalog, "container.projectId", "has an invalid format")
 	}
 	if result.CTestLogicalName, err = normalizeIdentityText(result.CTestLogicalName, false); err != nil {
 		return Container{}, invalid(ErrInvalidCatalog, "container.ctestLogicalName", err.Error())
@@ -121,7 +124,7 @@ func NewContainer(value Container) (Container, error) {
 		return Container{}, invalid(ErrInvalidCatalog, "container.sourceLocation", err.Error())
 	}
 	if result.DegradedReason != "" {
-		if result.DegradedReason, err = normalizeIdentityText(result.DegradedReason, true); err != nil {
+		if result.DegradedReason, err = normalizeBoundedText(result.DegradedReason, true, 2048); err != nil {
 			return Container{}, invalid(ErrInvalidCatalog, "container.degradedReason", err.Error())
 		}
 	}
@@ -167,6 +170,9 @@ func NewCatalog(value Catalog) (Catalog, error) {
 	if err != nil {
 		return Catalog{}, invalid(ErrInvalidCatalog, "projectId", err.Error())
 	}
+	if !validProjectID(projectID) {
+		return Catalog{}, invalid(ErrInvalidCatalog, "projectId", "has an invalid format")
+	}
 	if !validHex(value.ProfileID, 64) {
 		return Catalog{}, invalid(ErrInvalidCatalog, "profileId", "must be 64 lowercase hexadecimal characters")
 	}
@@ -176,17 +182,17 @@ func NewCatalog(value Catalog) (Catalog, error) {
 	if value.GeneratedAt.IsZero() {
 		return Catalog{}, invalid(ErrInvalidCatalog, "generatedAt", "must not be zero")
 	}
-	if len(value.Containers) > 100_000 || len(value.Items) > 100_000 {
+	if len(value.Containers) > 10_000 || len(value.Items) > 100_000 || len(value.Diagnostics) > 1_000 {
 		return Catalog{}, invalid(ErrInvalidCatalog, "items", "Catalog exceeds the domain limit")
 	}
 	result := Catalog{
 		ProjectID:   projectID,
 		ProfileID:   value.ProfileID,
 		Revision:    value.Revision,
-		GeneratedAt: value.GeneratedAt,
+		GeneratedAt: value.GeneratedAt.UTC(),
 		Containers:  make([]Container, len(value.Containers)),
 		Items:       make([]Item, len(value.Items)),
-		Diagnostics: append([]Diagnostic(nil), value.Diagnostics...),
+		Diagnostics: make([]Diagnostic, len(value.Diagnostics)),
 	}
 	containers := make(map[ID]Container, len(value.Containers))
 	allIDs := make(map[ID]struct{}, len(value.Containers)+len(value.Items))
@@ -223,6 +229,13 @@ func NewCatalog(value Catalog) (Catalog, error) {
 	}
 	if err := validateUniqueLogicalItems(result.Items); err != nil {
 		return Catalog{}, err
+	}
+	for index, candidate := range value.Diagnostics {
+		diagnostic, err := newDiagnostic(candidate)
+		if err != nil {
+			return Catalog{}, err
+		}
+		result.Diagnostics[index] = diagnostic
 	}
 	return result, nil
 }
@@ -302,6 +315,9 @@ func validateUniqueLogicalItems(items []Item) error {
 }
 
 func canonicalLabels(values []string) ([]string, error) {
+	if len(values) > 256 {
+		return nil, invalid(ErrInvalidCatalog, "labels", "must not contain more than 256 values")
+	}
 	result := append([]string(nil), values...)
 	seen := make(map[string]struct{}, len(result))
 	for index, value := range result {
@@ -350,7 +366,45 @@ func cloneAndValidateLocation(value *SourceLocation) (*SourceLocation, error) {
 	if result.Line < 0 || result.Column < 0 {
 		return nil, invalid(ErrInvalidCatalog, "location", "line and column must be non-negative")
 	}
+	switch result.Provenance {
+	case "ctest-backtrace", "framework-manifest", "framework-output",
+		"mock-expectation", "mock-actual-call", "test-declaration":
+	default:
+		return nil, invalid(ErrInvalidCatalog, "provenance", "unsupported value")
+	}
 	return &result, nil
+}
+
+func newDiagnostic(value Diagnostic) (Diagnostic, error) {
+	switch value.Severity {
+	case "error", "warning", "info":
+	default:
+		return Diagnostic{}, invalid(ErrInvalidCatalog, "diagnostic.severity", "unsupported value")
+	}
+	switch value.Category {
+	case "configuration_error", "build_error", "assertion_failure", "test_process_crash",
+		"test_timeout", "cancelled", "framework_output_invalid", "infrastructure_error",
+		"unexpected_exit", "inconsistent_exit_status":
+	default:
+		return Diagnostic{}, invalid(ErrInvalidCatalog, "diagnostic.category", "unsupported value")
+	}
+	var err error
+	if value.Code, err = normalizeBoundedText(value.Code, false, 128); err != nil {
+		return Diagnostic{}, invalid(ErrInvalidCatalog, "diagnostic.code", err.Error())
+	}
+	if value.Message, err = normalizeBoundedText(value.Message, false, 8192); err != nil {
+		return Diagnostic{}, invalid(ErrInvalidCatalog, "diagnostic.message", err.Error())
+	}
+	if value.SourceURI != "" {
+		parsed, err := url.ParseRequestURI(value.SourceURI)
+		if err != nil || parsed.Scheme == "" {
+			return Diagnostic{}, invalid(ErrInvalidCatalog, "diagnostic.sourceUri", "must be an absolute URI")
+		}
+	}
+	if value.Line < 0 || value.Column < 0 {
+		return Diagnostic{}, invalid(ErrInvalidCatalog, "diagnostic.location", "line and column must be non-negative")
+	}
+	return value, nil
 }
 
 func validHex(value string, size int) bool {
@@ -361,6 +415,23 @@ func validHex(value string, size int) bool {
 		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
 			return false
 		}
+	}
+	return true
+}
+
+func validProjectID(value string) bool {
+	if len(value) < 1 || len(value) > 64 {
+		return false
+	}
+	for index := range len(value) {
+		character := value[index]
+		if character >= 'A' && character <= 'Z' ||
+			character >= 'a' && character <= 'z' ||
+			character >= '0' && character <= '9' ||
+			index > 0 && (character == '.' || character == '_' || character == '-') {
+			continue
+		}
+		return false
 	}
 	return true
 }

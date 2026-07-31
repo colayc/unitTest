@@ -156,6 +156,10 @@ func identityFields(fields ...identityField) ([]identityField, error) {
 }
 
 func normalizeIdentityText(value string, optional bool) (string, error) {
+	return normalizeBoundedText(value, optional, 512)
+}
+
+func normalizeBoundedText(value string, optional bool, maximumBytes int) (string, error) {
 	if !utf8.ValidString(value) {
 		return "", invalid(ErrInvalidIdentity, "", "must be valid UTF-8")
 	}
@@ -166,13 +170,16 @@ func normalizeIdentityText(value string, optional bool) (string, error) {
 	if strings.IndexByte(normalized, 0) >= 0 {
 		return "", invalid(ErrInvalidIdentity, "", "must not contain NUL")
 	}
-	if len([]byte(normalized)) > 512 {
-		return "", invalid(ErrInvalidIdentity, "", "must not exceed 512 UTF-8 bytes")
+	if len([]byte(normalized)) > maximumBytes {
+		return "", invalid(ErrInvalidIdentity, "", "exceeds the UTF-8 byte limit")
 	}
 	return normalized, nil
 }
 
 func canonicalParameters(parameters []Parameter) ([]Parameter, error) {
+	if len(parameters) > 64 {
+		return nil, invalid(ErrInvalidIdentity, "parameters", "must not contain more than 64 values")
+	}
 	result := append([]Parameter(nil), parameters...)
 	seen := make(map[string]struct{}, len(result))
 	for index := range result {

@@ -15,6 +15,7 @@ var (
 	ErrSelectionTooLarge         = errors.New("test selection exceeds limit")
 	ErrUnknownSelectionID        = errors.New("unknown test selection id")
 	ErrFailedRunResolverRequired = errors.New("failedFromRun requires persisted run resolver")
+	ErrCatalogStale              = errors.New("test catalog cursor is stale")
 )
 
 type ValidationError struct {

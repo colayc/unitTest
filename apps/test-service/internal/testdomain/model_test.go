@@ -78,6 +78,22 @@ func TestNewCatalogRejectsBrokenTreeAndPartialSnapshots(t *testing.T) {
 			t.Fatalf("partial catalog error = %v", err)
 		}
 	})
+	t.Run("diagnostic enum", func(t *testing.T) {
+		input := validCatalogInput(t)
+		input.Diagnostics[0].Severity = "fatal"
+		if _, err := NewCatalog(input); !errors.Is(err, ErrInvalidCatalog) {
+			t.Fatalf("invalid diagnostic error = %v", err)
+		}
+	})
+	t.Run("source provenance", func(t *testing.T) {
+		input := validCatalogInput(t)
+		input.Items[0].SourceLocation = &SourceLocation{
+			URI: "file:///workspace/test.cpp", Navigable: true, Provenance: "guessed",
+		}
+		if _, err := NewCatalog(input); !errors.Is(err, ErrInvalidCatalog) {
+			t.Fatalf("invalid source provenance error = %v", err)
+		}
+	})
 }
 
 func validCatalogInput(t *testing.T) Catalog {
