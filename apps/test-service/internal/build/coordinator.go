@@ -140,6 +140,104 @@ func (c *Coordinator) Start(
 	return c.config.Tasks.Start(ctx, prepared.request)
 }
 
+type PreparedPlan struct {
+	prepared *preparedBuild
+}
+
+func (c *Coordinator) PreparePlan(
+	ctx context.Context,
+	request StartRequest,
+) (*PreparedPlan, error) {
+	prepared, err := c.prepare(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	return &PreparedPlan{prepared: prepared}, nil
+}
+
+func (plan *PreparedPlan) Plan() task.ExecutionPlan {
+	if plan == nil || plan.prepared == nil {
+		return task.ExecutionPlan{}
+	}
+	return cloneBuildExecutionPlan(plan.prepared.request.Plan)
+}
+
+func (plan *PreparedPlan) Boundary() task.ExecutionBoundary {
+	if plan == nil || plan.prepared == nil {
+		return nil
+	}
+	return plan.prepared.request.Boundary
+}
+
+func (plan *PreparedPlan) WorkspaceGeneration() string {
+	if plan == nil || plan.prepared == nil {
+		return ""
+	}
+	return plan.prepared.snapshot.Generation
+}
+
+func (plan *PreparedPlan) Project() workspace.ProjectConfig {
+	if plan == nil || plan.prepared == nil {
+		return workspace.ProjectConfig{}
+	}
+	result := plan.prepared.project
+	result.Fallback.Configurations = append(
+		[]string(nil),
+		plan.prepared.project.Fallback.Configurations...,
+	)
+	result.Tests.Containers = append(
+		[]workspace.TestContainerMapping(nil),
+		plan.prepared.project.Tests.Containers...,
+	)
+	return result
+}
+
+func (plan *PreparedPlan) Profile() cmake.BuildProfile {
+	if plan == nil || plan.prepared == nil {
+		return cmake.BuildProfile{}
+	}
+	return plan.prepared.profile
+}
+
+func (plan *PreparedPlan) Toolchain() toolchain.Instance {
+	if plan == nil || plan.prepared == nil {
+		return toolchain.Instance{}
+	}
+	result := plan.prepared.toolchain
+	result.Environment = append(
+		[]string(nil),
+		plan.prepared.toolchain.Environment...,
+	)
+	result.Generators = append(
+		[]string(nil),
+		plan.prepared.toolchain.Generators...,
+	)
+	return result
+}
+
+func (plan *PreparedPlan) Targets() []cmake.Target {
+	if plan == nil || plan.prepared == nil {
+		return nil
+	}
+	return cloneTargets(plan.prepared.targets)
+}
+
+func (plan *PreparedPlan) AllowTestExecutable(
+	state cmake.FingerprintFile,
+) error {
+	if plan == nil || plan.prepared == nil ||
+		plan.prepared.boundary == nil {
+		return task.ErrInvalidArgument
+	}
+	return plan.prepared.boundary.allowTestExecutable(state)
+}
+
+func (plan *PreparedPlan) ReleaseIfUnadopted() {
+	if plan != nil && plan.prepared != nil {
+		plan.prepared.releaseUnlessAdopted()
+	}
+}
+
 type queuedTaskResumer interface {
 	ResumeQueued(context.Context, task.ResumeRequest) (task.Task, error)
 }
@@ -187,8 +285,13 @@ func (c *Coordinator) Resume(
 }
 
 type preparedBuild struct {
-	request  task.StartRequest
-	boundary *executionBoundary
+	request   task.StartRequest
+	boundary  *executionBoundary
+	snapshot  discovery.Snapshot
+	project   workspace.ProjectConfig
+	profile   cmake.BuildProfile
+	toolchain toolchain.Instance
+	targets   []cmake.Target
 }
 
 func (p *preparedBuild) releaseUnlessAdopted() {
@@ -308,7 +411,36 @@ func (c *Coordinator) prepare(
 		Timeout: request.Timeout, Plan: plan, Boundary: boundary,
 	}
 	boundaryOwned = false
-	return &preparedBuild{request: internalRequest, boundary: boundary}, nil
+	return &preparedBuild{
+		request: internalRequest, boundary: boundary,
+		snapshot: snapshot, project: project, profile: profile,
+		toolchain: instance, targets: cloneTargets(targets),
+	}, nil
+}
+
+func cloneBuildExecutionPlan(value task.ExecutionPlan) task.ExecutionPlan {
+	result := value
+	result.Steps = make([]task.ExecutionStep, len(value.Steps))
+	for index, step := range value.Steps {
+		result.Steps[index] = step
+		result.Steps[index].Process.Args = append(
+			[]string(nil),
+			step.Process.Args...,
+		)
+		result.Steps[index].Process.Env = append(
+			[]string(nil),
+			step.Process.Env...,
+		)
+		result.Steps[index].Public.Args = append(
+			[]string(nil),
+			step.Public.Args...,
+		)
+		result.Steps[index].State = append(
+			json.RawMessage(nil),
+			step.State...,
+		)
+	}
+	return result
 }
 
 func (c *Coordinator) Succeeded(

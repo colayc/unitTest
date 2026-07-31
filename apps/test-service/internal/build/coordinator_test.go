@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -121,6 +122,101 @@ func TestCoordinatorPlansConfigureThenSkipsItForUnchangedSuccessfulState(t *test
 	}
 	if len(fixture.starter.request.Plan.Steps) != 2 {
 		t.Fatalf("changed generation plan = %#v, want configure + build", fixture.starter.request.Plan)
+	}
+}
+
+func TestCoordinatorPreparePlanSharesBoundaryWithoutCreatingNestedTask(
+	t *testing.T,
+) {
+	fixture := newCoordinatorFixture(t)
+	fixture.request.TargetIDs = nil
+	fixture.project.Tests.Containers = []workspace.TestContainerMapping{{
+		CTestName: "framework-tests",
+		Framework: workspace.FrameworkCppUTest,
+	}}
+	fixture.snapshot.Projects[0] = fixture.project
+	executable := filepath.Join(
+		fixture.profile.BinaryDir,
+		"framework-tests.exe",
+	)
+	if err := os.MkdirAll(fixture.profile.BinaryDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		executable,
+		[]byte("trusted test executable"),
+		0o700,
+	); err != nil {
+		t.Fatal(err)
+	}
+	target := cmake.Target{
+		ID: fixture.target.ID, Name: fixture.target.Name,
+		Type: "EXECUTABLE", ProjectID: fixture.project.ID,
+		ProfileID: fixture.profile.ID,
+		ProjectSourceDir: filepath.Join(
+			fixture.root.NativePath,
+			fixture.project.SourceDir,
+		),
+		ProjectBuildDir: fixture.profile.BinaryDir,
+		Artifacts:       []string{executable},
+	}
+	fixture.target = target
+	fixture.reader.reply = fixture.validReply()
+	state, err := cmake.SnapshotTargetArtifact(
+		fixture.profile,
+		target,
+		executable,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prepared, err := fixture.coordinator.PreparePlan(
+		context.Background(),
+		fixture.request,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.ReleaseIfUnadopted()
+	if fixture.starter.calls != 0 ||
+		prepared.WorkspaceGeneration() != fixture.snapshot.Generation ||
+		prepared.Project().ID != fixture.project.ID ||
+		prepared.Profile().ID != fixture.profile.ID ||
+		prepared.Toolchain().ID != fixture.toolchain.ID ||
+		len(prepared.Plan().Steps) != 2 ||
+		prepared.Boundary() == nil {
+		t.Fatalf("prepared plan = %#v", prepared)
+	}
+	first := prepared.Plan()
+	first.Steps[0].Process.Args[0] = "mutated"
+	if prepared.Plan().Steps[0].Process.Args[0] == "mutated" {
+		t.Fatal("PreparedPlan.Plan returned aliased runtime state")
+	}
+	project := prepared.Project()
+	project.Tests.Containers[0].CTestName = "mutated"
+	if prepared.Project().Tests.Containers[0].CTestName == "mutated" {
+		t.Fatal("PreparedPlan.Project returned aliased runtime state")
+	}
+	toolchain := prepared.Toolchain()
+	toolchain.Environment[0] = "MUTATED=1"
+	if prepared.Toolchain().Environment[0] == "MUTATED=1" {
+		t.Fatal("PreparedPlan.Toolchain returned aliased runtime state")
+	}
+	if err := prepared.AllowTestExecutable(state); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepared.Boundary().ValidateExecutable(executable); err != nil {
+		t.Fatalf("ValidateExecutable() = %v", err)
+	}
+	writeErr := os.WriteFile(
+		executable,
+		[]byte("mutated executable"),
+		0o700,
+	)
+	if writeErr == nil &&
+		prepared.Boundary().ValidateExecutable(executable) == nil {
+		t.Fatal("mutated test executable remained inside boundary")
 	}
 }
 

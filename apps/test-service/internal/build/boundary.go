@@ -25,6 +25,7 @@ type executionBoundary struct {
 	unityRunnerGeneratorFile   *os.File
 	unityRunnerGeneratorInfo   os.FileInfo
 	unityRunnerGeneratorSHA256 string
+	testExecutables            map[string]pinnedTestExecutable
 	workspaceRoot              workspace.Root
 	workspaceInfo              os.FileInfo
 	dataRoot                   workspace.Root
@@ -34,6 +35,12 @@ type executionBoundary struct {
 	adoptedTaskID              string
 	releaseOnce                sync.Once
 	releaseErr                 error
+}
+
+type pinnedTestExecutable struct {
+	file   *os.File
+	info   os.FileInfo
+	sha256 string
 }
 
 func NewExecutionBoundary(
@@ -129,6 +136,7 @@ func newExecutionBoundary(
 		unityRunnerGeneratorFile:   unityRunnerGeneratorFile,
 		unityRunnerGeneratorInfo:   unityRunnerGeneratorInfo,
 		unityRunnerGeneratorSHA256: installation.UnityRunnerGenerator.SHA256,
+		testExecutables:            make(map[string]pinnedTestExecutable),
 		workspaceRoot:              workspaceRoot, workspaceInfo: workspaceInfo,
 		dataRoot: dataRoot, dataInfo: dataInfo, lock: lock,
 	}, nil
@@ -157,7 +165,11 @@ func (b *executionBoundary) ValidateExecutable(path string) error {
 	case b.unityRunnerGenerator:
 		file, info = b.unityRunnerGeneratorFile, b.unityRunnerGeneratorInfo
 	default:
-		return task.ErrInvalidArgument
+		testExecutable, exists := b.testExecutables[filepath.Clean(absolute)]
+		if !exists {
+			return task.ErrInvalidArgument
+		}
+		file, info = testExecutable.file, testExecutable.info
 	}
 	if file == nil {
 		return task.ErrInvalidArgument
@@ -181,6 +193,55 @@ func (b *executionBoundary) ValidateExecutable(path string) error {
 		if err != nil || digest != b.unityRunnerGeneratorSHA256 {
 			return task.ErrInvalidArgument
 		}
+	}
+	return nil
+}
+
+func (b *executionBoundary) allowTestExecutable(
+	state cmake.FingerprintFile,
+) error {
+	if b == nil || cmake.VerifyTargetArtifact(state) != nil {
+		return task.ErrInvalidArgument
+	}
+	path, err := filepath.Abs(filepath.FromSlash(state.Path))
+	if err != nil || filepath.Clean(path) != path {
+		return task.ErrInvalidArgument
+	}
+	file, info, err := pinExecutable(path)
+	if err != nil {
+		return task.ErrInvalidArgument
+	}
+	fail := func() error {
+		_ = file.Close()
+		return task.ErrInvalidArgument
+	}
+	if cmake.VerifyTargetArtifact(state) != nil {
+		return fail()
+	}
+	current, err := os.Stat(path)
+	if err != nil || !os.SameFile(info, current) {
+		return fail()
+	}
+	digest, err := pinnedExecutableDigest(file)
+	if err != nil || digest != state.SHA256 {
+		return fail()
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.executableFile == nil {
+		return fail()
+	}
+	if existing, exists := b.testExecutables[path]; exists {
+		_ = file.Close()
+		if existing.sha256 != state.SHA256 ||
+			!os.SameFile(existing.info, info) {
+			return task.ErrInvalidArgument
+		}
+		return nil
+	}
+	b.testExecutables[path] = pinnedTestExecutable{
+		file: file, info: info, sha256: state.SHA256,
 	}
 	return nil
 }
@@ -223,10 +284,12 @@ func (b *executionBoundary) Release() error {
 		executableFile := b.executableFile
 		ctestFile := b.ctestFile
 		unityRunnerGeneratorFile := b.unityRunnerGeneratorFile
+		testExecutables := b.testExecutables
 		b.lock = nil
 		b.executableFile = nil
 		b.ctestFile = nil
 		b.unityRunnerGeneratorFile = nil
+		b.testExecutables = nil
 		b.mu.Unlock()
 
 		var result error
@@ -241,6 +304,9 @@ func (b *executionBoundary) Release() error {
 		}
 		if unityRunnerGeneratorFile != nil {
 			result = errors.Join(result, unityRunnerGeneratorFile.Close())
+		}
+		for _, executable := range testExecutables {
+			result = errors.Join(result, executable.file.Close())
 		}
 		b.mu.Lock()
 		b.releaseErr = result
