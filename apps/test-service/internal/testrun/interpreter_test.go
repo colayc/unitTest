@@ -79,6 +79,54 @@ func TestInterpreterPersistsValidatedAssertionAndAcceptsNonzeroExit(
 	}
 }
 
+func TestInterpreterPreservesGenericAssertionEvidence(
+	t *testing.T,
+) {
+	containerID, itemID := interpreterIDs(t)
+	failed := testframework.ParsedCaseResult{
+		ItemID: itemID, ParentLogicalName: "Group",
+		LogicalName: "Case", Status: testframework.CaseFailed,
+		Category: "assertion_failure", Message: "expected 1 but was 2",
+		FailureDetails: []testframework.ParsedFailureDetail{},
+	}
+	parser := &recordingResultParser{
+		finish: testframework.ParseResult{
+			Cases:    []testframework.ParsedCaseResult{failed},
+			Complete: true,
+		},
+	}
+	store := newResultAppender()
+	interpreter := newTestInterpreter(
+		t,
+		store,
+		containerID,
+		itemID,
+		parser,
+		nil,
+	)
+	current, step := interpreterTaskAndStep(interpreter)
+
+	verdict, err := interpreter.Interpret(
+		context.Background(),
+		current,
+		step,
+		task.ProcessResult{ExitCode: 1},
+	)
+	if err != nil || verdict != task.StepVerdictSucceeded {
+		t.Fatalf("Interpret() = %s, %v", verdict, err)
+	}
+	results := store.results()
+	if len(results) != 1 ||
+		results[0].Outcome != testdomain.ItemFailed ||
+		len(results[0].FailureDetails) != 1 ||
+		results[0].FailureDetails[0].Category !=
+			"assertion_failure" ||
+		results[0].FailureDetails[0].Message !=
+			"expected 1 but was 2" {
+		t.Fatalf("generic assertion result = %#v", results)
+	}
+}
+
 func TestInterpreterTurnsMalformedFrameworkOutputIntoDomainError(
 	t *testing.T,
 ) {

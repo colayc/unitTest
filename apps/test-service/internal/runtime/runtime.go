@@ -19,6 +19,9 @@ import (
 	"unit-test-ide.local/test-service/internal/session"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/taskstore"
+	"unit-test-ide.local/test-service/internal/testdiscovery"
+	"unit-test-ide.local/test-service/internal/testdomain"
+	"unit-test-ide.local/test-service/internal/testrun"
 	"unit-test-ide.local/test-service/internal/toolchain"
 	"unit-test-ide.local/test-service/internal/workspace"
 )
@@ -28,6 +31,8 @@ const (
 	brokerPageSize  = 200
 	closeTimeout    = 10 * time.Second
 	adapterTimeout  = time.Second
+	testTaskTimeout = 30 * time.Minute
+	maxTestWorkers  = 16
 )
 
 type Config struct {
@@ -51,6 +56,8 @@ type Runtime struct {
 	manager             runtimeManager
 	runner              processcontrol.Runner
 	coordinator         runtimeCoordinator
+	tests               runtimeTestCoordinator
+	testResources       io.Closer
 	lock                io.Closer
 	guard               io.Closer
 	grace               time.Duration
@@ -69,12 +76,17 @@ type Runtime struct {
 type runtimeStore interface {
 	task.Store
 	build.ConfigurationStore
+	task.TestCatalogRepository
+	task.TestRunRepository
 	task.QueuedPlanStore
 	FailQueuedBuild(context.Context, string, string, time.Time) (task.Task, []task.Event, error)
+	FailQueuedTask(context.Context, string, string, time.Time) (task.Task, []task.Event, error)
+	GetRunForTask(context.Context, string) (testdomain.TestRun, error)
 }
 
 type runtimeArtifacts interface {
 	task.ArtifactWriter
+	testdiscovery.CatalogArtifactWriter
 	ReadChunk(context.Context, task.Artifact, int64, int) ([]byte, int64, bool, error)
 	Cleanup(context.Context, map[string]struct{}) error
 	Close() error
@@ -97,21 +109,37 @@ type runtimeCoordinator interface {
 	Resume(context.Context, task.Task) (task.Task, error)
 }
 
+type runtimeTestCoordinator interface {
+	StartDiscovery(
+		context.Context,
+		testrun.DiscoveryRequest,
+	) (task.Task, error)
+	StartRun(
+		context.Context,
+		testrun.RunRequest,
+	) (task.Task, testdomain.TestRun, error)
+	ResumeDiscovery(context.Context, task.Task) (task.Task, error)
+	ResumeRun(context.Context, task.Task) (task.Task, error)
+}
+
 type dependencies struct {
-	prepareDataDir func(string) (Layout, io.Closer, error)
-	lockInstance   func(string) (io.Closer, error)
-	openStore      func(string) (runtimeStore, error)
-	openArtifacts  func(string) (runtimeArtifacts, error)
-	openWorkspace  func(string) (workspace.Root, error)
-	loadWorkspace  func(workspace.Root) (workspace.LoadResult, error)
-	newProbeRunner func() probe.Runner
-	resolveCMake   func(context.Context, probe.Runner, cmake.ResolverConfig) (cmake.Installation, error)
-	newRegistry    func(string, probe.Runner, []workspace.ToolchainConfig) (*toolchain.Registry, error)
-	newInspector   func(workspace.Root, probe.Runner, cmake.ResolverConfig, *toolchain.Registry, string) (*discovery.Inspector, error)
-	newCoordinator func(build.CoordinatorConfig) (runtimeCoordinator, error)
-	newRunner      func(string) processcontrol.Runner
-	newBroker      func(eventbroker.Source, int, int) (*eventbroker.Broker, error)
-	newManager     func(task.ManagerConfig) (runtimeManager, error)
+	prepareDataDir     func(string) (Layout, io.Closer, error)
+	lockInstance       func(string) (io.Closer, error)
+	openStore          func(string) (runtimeStore, error)
+	openArtifacts      func(string) (runtimeArtifacts, error)
+	openWorkspace      func(string) (workspace.Root, error)
+	loadWorkspace      func(workspace.Root) (workspace.LoadResult, error)
+	newProbeRunner     func() probe.Runner
+	resolveCMake       func(context.Context, probe.Runner, cmake.ResolverConfig) (cmake.Installation, error)
+	newRegistry        func(string, probe.Runner, []workspace.ToolchainConfig) (*toolchain.Registry, error)
+	newInspector       func(workspace.Root, probe.Runner, cmake.ResolverConfig, *toolchain.Registry, string) (*discovery.Inspector, error)
+	newCoordinator     func(build.CoordinatorConfig) (runtimeCoordinator, error)
+	newTestCoordinator func(
+		testCoordinatorConfig,
+	) (runtimeTestCoordinator, io.Closer, error)
+	newRunner  func(string) processcontrol.Runner
+	newBroker  func(eventbroker.Source, int, int) (*eventbroker.Broker, error)
+	newManager func(task.ManagerConfig) (runtimeManager, error)
 }
 
 func defaultDependencies() dependencies {
@@ -141,8 +169,9 @@ func defaultDependencies() dependencies {
 		newCoordinator: func(config build.CoordinatorConfig) (runtimeCoordinator, error) {
 			return build.NewCoordinator(config)
 		},
-		newRunner: processcontrol.NewRunner,
-		newBroker: eventbroker.New,
+		newTestCoordinator: newRuntimeTestCoordinator,
+		newRunner:          processcontrol.NewRunner,
+		newBroker:          eventbroker.New,
 		newManager: func(config task.ManagerConfig) (runtimeManager, error) {
 			return task.NewManager(config)
 		},
@@ -183,6 +212,9 @@ func (d dependencies) complete() dependencies {
 	}
 	if d.newCoordinator == nil {
 		d.newCoordinator = defaults.newCoordinator
+	}
+	if d.newTestCoordinator == nil {
+		d.newTestCoordinator = defaults.newTestCoordinator
 	}
 	if d.newRunner == nil {
 		d.newRunner = defaults.newRunner
@@ -274,6 +306,7 @@ func Open(config Config) (*Runtime, error) {
 		inspector    *discovery.Inspector
 		installation cmake.Installation
 		observer     *stepObserverProxy
+		probeRunner  probe.Runner
 	)
 	if config.TrustedWorkspace {
 		loaded, err := deps.loadWorkspace(workspaceRoot)
@@ -287,7 +320,7 @@ func Open(config Config) (*Runtime, error) {
 			// must not contribute a CMake override or manual toolchain.
 			loaded = workspace.LoadResult{}
 		}
-		probeRunner := deps.newProbeRunner()
+		probeRunner = deps.newProbeRunner()
 		if probeRunner == nil {
 			return failArtifacts(task.ErrInvalidArgument)
 		}
@@ -328,6 +361,8 @@ func Open(config Config) (*Runtime, error) {
 		return failArtifacts(errors.Join(err, broker.Close()))
 	}
 	var coordinator runtimeCoordinator
+	var tests runtimeTestCoordinator
+	var testResources io.Closer
 	if config.TrustedWorkspace {
 		coordinator, err = deps.newCoordinator(build.CoordinatorConfig{
 			Inspector: inspector, Tasks: manager, Configurations: store,
@@ -341,17 +376,70 @@ func Open(config Config) (*Runtime, error) {
 			return failArtifacts(errors.Join(err, shutdownErr, broker.Close()))
 		}
 		observer.Set(coordinator)
-		if err := resumeQueuedBuilds(ctx, store, coordinator, broker, clockNow(config.Clock)); err != nil {
-			shutdownContext, cancel := context.WithTimeout(context.Background(), closeTimeout)
+		tests, testResources, err = deps.newTestCoordinator(
+			testCoordinatorConfig{
+				Build:         coordinator,
+				Tasks:         manager,
+				Store:         store,
+				Artifacts:     artifacts,
+				Probe:         probeRunner,
+				Installation:  installation,
+				WorkspaceRoot: workspaceRoot,
+				BuildDataRoot: layout.Build,
+				ControlRoot:   layout.Controls,
+				Clock:         config.Clock,
+				NewID:         newID,
+			},
+		)
+		if err != nil {
+			shutdownContext, cancel := context.WithTimeout(
+				context.Background(),
+				grace,
+			)
 			shutdownErr := manager.Shutdown(shutdownContext)
 			cancel()
-			return failArtifacts(errors.Join(err, shutdownErr, broker.Close()))
+			return failArtifacts(errors.Join(
+				err,
+				shutdownErr,
+				broker.Close(),
+			))
+		}
+		failTrustedRuntime := func(cause error) (*Runtime, error) {
+			shutdownContext, cancel := context.WithTimeout(
+				context.Background(),
+				closeTimeout,
+			)
+			shutdownErr := manager.Shutdown(shutdownContext)
+			cancel()
+			var resourceErr error
+			if testResources != nil {
+				resourceErr = testResources.Close()
+			}
+			return failArtifacts(errors.Join(
+				cause,
+				shutdownErr,
+				resourceErr,
+				broker.Close(),
+			))
+		}
+		if err := resumeQueuedBuilds(ctx, store, coordinator, broker, clockNow(config.Clock)); err != nil {
+			return failTrustedRuntime(err)
+		}
+		if err := resumeQueuedTests(
+			ctx,
+			store,
+			tests,
+			broker,
+			clockNow(config.Clock),
+		); err != nil {
+			return failTrustedRuntime(err)
 		}
 	}
 	return &Runtime{
 		store: store, artifacts: artifacts, broker: broker, manager: manager, runner: runner,
-		coordinator: coordinator,
-		lock:        locked, guard: guard, grace: grace,
+		coordinator: coordinator, tests: tests,
+		testResources: testResources,
+		lock:          locked, guard: guard, grace: grace,
 		serviceExecutable: config.ServiceExecutable, simulationDirectory: layout.Root,
 		workspaceRoot: workspaceRoot, trustedWorkspace: config.TrustedWorkspace,
 	}, nil
@@ -423,6 +511,87 @@ func queuedBuildRecoveryCode(err error) (string, bool) {
 	}
 }
 
+func resumeQueuedTests(
+	ctx context.Context,
+	store runtimeStore,
+	tests runtimeTestCoordinator,
+	broker *eventbroker.Broker,
+	at time.Time,
+) error {
+	if tests == nil {
+		return task.ErrStorageUnavailable
+	}
+	cursor := ""
+	for {
+		page, err := store.List(
+			ctx,
+			cursor,
+			brokerPageSize,
+			task.KindTestDiscovery,
+			task.KindTestRun,
+		)
+		if err != nil {
+			return err
+		}
+		for _, persisted := range page.Items {
+			if persisted.Status != task.StatusQueued {
+				continue
+			}
+			switch persisted.Kind {
+			case task.KindTestDiscovery:
+				_, err = tests.ResumeDiscovery(ctx, persisted)
+			case task.KindTestRun:
+				_, err = tests.ResumeRun(ctx, persisted)
+			default:
+				err = task.ErrInvalidArgument
+			}
+			if err == nil {
+				continue
+			}
+			errorCode, recoverable :=
+				queuedTestRecoveryCode(err)
+			if !recoverable {
+				return err
+			}
+			_, events, failErr := store.FailQueuedTask(
+				ctx,
+				persisted.ID,
+				errorCode,
+				at,
+			)
+			if failErr != nil {
+				return failErr
+			}
+			for _, event := range events {
+				broker.Publish(event)
+			}
+		}
+		if page.NextCursor == "" {
+			return nil
+		}
+		cursor = page.NextCursor
+	}
+}
+
+func queuedTestRecoveryCode(err error) (string, bool) {
+	if code, recoverable := queuedBuildRecoveryCode(err); recoverable {
+		return code, true
+	}
+	switch {
+	case errors.Is(err, testdomain.ErrCatalogStale),
+		errors.Is(err, task.ErrNotFound):
+		return "CATALOG_STALE", true
+	case errors.Is(err, testdomain.ErrEmptySelection):
+		return "EMPTY_TEST_SELECTION", true
+	case errors.Is(err, testdomain.ErrInvalidSelection),
+		errors.Is(err, testdomain.ErrUnknownSelectionID),
+		errors.Is(err, testdomain.ErrSelectionTooLarge):
+		return "TEST_SELECTION_INVALID", true
+	default:
+		return "", false
+	}
+}
+
 func (r *Runtime) StartSimulation(
 	ctx context.Context,
 	input task.SimulationStart,
@@ -468,6 +637,111 @@ func (r *Runtime) StartBuild(ctx context.Context, request build.StartRequest) (t
 		return task.Task{}, build.ErrWorkspaceTrustRequired
 	}
 	return r.coordinator.Start(ctx, request)
+}
+
+func (r *Runtime) StartTestDiscovery(
+	ctx context.Context,
+	input session.TestDiscoveryStart,
+) (task.Task, error) {
+	if err := r.requireTestRuntime(); err != nil {
+		return task.Task{}, err
+	}
+	snapshot, err := r.coordinator.Inspect(ctx)
+	if err != nil {
+		return task.Task{}, err
+	}
+	return r.tests.StartDiscovery(
+		ctx,
+		testrun.DiscoveryRequest{
+			IdempotencyKey:      input.IdempotencyKey,
+			WorkspaceGeneration: snapshot.Generation,
+			ProjectID:           input.ProjectID,
+			BuildProfileID:      input.ProfileID,
+			TargetIDs:           []string{},
+			Jobs:                runtimeTestJobs(),
+			Timeout:             testTaskTimeout,
+		},
+	)
+}
+
+func (r *Runtime) StartTestRun(
+	ctx context.Context,
+	input session.TestRunStart,
+) (task.Task, testdomain.TestRun, error) {
+	if err := r.requireTestRuntime(); err != nil {
+		return task.Task{}, testdomain.TestRun{}, err
+	}
+	snapshot, err := r.coordinator.Inspect(ctx)
+	if err != nil {
+		return task.Task{}, testdomain.TestRun{}, err
+	}
+	return r.tests.StartRun(
+		ctx,
+		testrun.RunRequest{
+			IdempotencyKey:      input.IdempotencyKey,
+			WorkspaceGeneration: snapshot.Generation,
+			ProjectID:           input.ProjectID,
+			BuildProfileID:      input.ProfileID,
+			CatalogRevision:     input.CatalogRevision,
+			TargetIDs:           []string{},
+			Jobs:                runtimeTestJobs(),
+			Timeout:             testTaskTimeout,
+			RepeatCount:         input.RepeatCount,
+			MaxConcurrency:      runtimeTestConcurrency(),
+			Selection:           input.Selection,
+		},
+	)
+}
+
+func (r *Runtime) GetTestCatalog(
+	ctx context.Context,
+	request testdomain.CatalogPageRequest,
+) (testdomain.CatalogPage, error) {
+	if err := r.requireTestRuntime(); err != nil {
+		return testdomain.CatalogPage{}, err
+	}
+	return r.store.PageCatalog(ctx, request)
+}
+
+func (r *Runtime) GetTestRun(
+	ctx context.Context,
+	runID string,
+) (testdomain.TestRun, error) {
+	if err := r.requireTestRuntime(); err != nil {
+		return testdomain.TestRun{}, err
+	}
+	return r.store.GetRun(ctx, runID)
+}
+
+func (r *Runtime) GetTestRunForTask(
+	ctx context.Context,
+	taskID string,
+) (testdomain.TestRun, error) {
+	if err := r.requireTestRuntime(); err != nil {
+		return testdomain.TestRun{}, err
+	}
+	return r.store.GetRunForTask(ctx, taskID)
+}
+
+func (r *Runtime) ListTestRuns(
+	ctx context.Context,
+	request testdomain.RunPageRequest,
+) (testdomain.RunPage, error) {
+	if err := r.requireTestRuntime(); err != nil {
+		return testdomain.RunPage{}, err
+	}
+	return r.store.ListRuns(ctx, request)
+}
+
+func (r *Runtime) requireTestRuntime() error {
+	if r == nil || !r.trustedWorkspace || r.tests == nil ||
+		r.coordinator == nil || r.store == nil {
+		if r != nil && r.trustedWorkspace {
+			return task.ErrStorageUnavailable
+		}
+		return build.ErrWorkspaceTrustRequired
+	}
+	return nil
 }
 
 func (r *Runtime) Get(ctx context.Context, id string) (task.Task, error) {
@@ -573,7 +847,10 @@ func (r *Runtime) shutdownAttempt(ctx context.Context) error {
 }
 
 func (r *Runtime) closeResources() error {
-	var brokerErr, artifactErr, storeErr, lockErr, guardErr error
+	var testErr, brokerErr, artifactErr, storeErr, lockErr, guardErr error
+	if r.testResources != nil {
+		testErr = r.testResources.Close()
+	}
 	if r.broker != nil {
 		brokerErr = r.broker.Close()
 	}
@@ -589,7 +866,14 @@ func (r *Runtime) closeResources() error {
 	if r.guard != nil {
 		guardErr = r.guard.Close()
 	}
-	return errors.Join(brokerErr, artifactErr, storeErr, lockErr, guardErr)
+	return errors.Join(
+		testErr,
+		brokerErr,
+		artifactErr,
+		storeErr,
+		lockErr,
+		guardErr,
+	)
 }
 
 func (r *Runtime) forceCleanup(ctx context.Context) error {
@@ -617,6 +901,7 @@ func (r *Runtime) Close() error {
 }
 
 var _ session.Backend = (*Runtime)(nil)
+var _ session.TestBackend = (*Runtime)(nil)
 
 type stepObserverProxy struct {
 	mu       sync.RWMutex

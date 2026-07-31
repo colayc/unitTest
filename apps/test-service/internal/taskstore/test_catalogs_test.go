@@ -137,6 +137,189 @@ func TestCatalogPublicationIsAtomicCurrentAndRestartSafe(t *testing.T) {
 	}
 }
 
+func TestCatalogPublicationRefreshesIdenticalRevisionIdempotently(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	artifacts, err := artifactstore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = artifacts.Close() })
+
+	first := catalogFixture(t, "8", "one", "two")
+	firstTask := createTask(
+		t,
+		store,
+		newTask(70, 71, first.GeneratedAt),
+	)
+	firstArtifact, err := artifacts.CommitTestCatalog(
+		ctx,
+		firstTask.ID,
+		id(72),
+		first.GeneratedAt,
+		first,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PublishCatalog(
+		ctx,
+		first,
+		firstArtifact,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	second := first
+	second.GeneratedAt = first.GeneratedAt.Add(time.Minute)
+	secondTask := createTask(
+		t,
+		store,
+		newTask(73, 74, second.GeneratedAt),
+	)
+	secondArtifact, err := artifacts.CommitTestCatalog(
+		ctx,
+		secondTask.ID,
+		id(75),
+		second.GeneratedAt,
+		second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PublishCatalog(
+		ctx,
+		second,
+		secondArtifact,
+	); err != nil {
+		t.Fatalf("republish identical revision: %v", err)
+	}
+
+	got, err := store.GetCatalog(
+		ctx,
+		second.ProjectID,
+		second.ProfileID,
+	)
+	if err != nil || !reflect.DeepEqual(got, second) {
+		t.Fatalf(
+			"refreshed Catalog = %#v, %v; want %#v",
+			got,
+			err,
+			second,
+		)
+	}
+	var catalogCount int
+	var entryCount int
+	var artifactCount int
+	var currentArtifactID string
+	if err := store.db.QueryRow(
+		`SELECT COUNT(*) FROM test_catalogs`,
+	).Scan(&catalogCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow(
+		`SELECT COUNT(*) FROM test_catalog_entries`,
+	).Scan(&entryCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow(
+		`SELECT COUNT(*) FROM artifacts
+		WHERE artifact_id IN (?,?)`,
+		firstArtifact.ID,
+		secondArtifact.ID,
+	).Scan(&artifactCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow(
+		`SELECT artifact_id FROM test_catalogs
+		WHERE project_id=? AND profile_id=? AND revision=?`,
+		second.ProjectID,
+		second.ProfileID,
+		second.Revision,
+	).Scan(&currentArtifactID); err != nil {
+		t.Fatal(err)
+	}
+	if catalogCount != 1 ||
+		entryCount != len(second.Containers)+len(second.Items) ||
+		artifactCount != 2 ||
+		currentArtifactID != secondArtifact.ID {
+		t.Fatalf(
+			"catalogs=%d entries=%d artifacts=%d currentArtifact=%q",
+			catalogCount,
+			entryCount,
+			artifactCount,
+			currentArtifactID,
+		)
+	}
+}
+
+func TestCatalogPublicationRejectsRevisionContentConflict(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	artifacts, err := artifactstore.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = artifacts.Close() })
+
+	first := catalogFixture(t, "9", "original")
+	publishCatalogFixture(t, store, artifacts, first, 80)
+	conflicting := catalogFixture(t, "9", "different")
+	conflicting.GeneratedAt = first.GeneratedAt.Add(time.Minute)
+	conflictTask := createTask(
+		t,
+		store,
+		newTask(83, 84, conflicting.GeneratedAt),
+	)
+	conflictArtifact, err := artifacts.CommitTestCatalog(
+		ctx,
+		conflictTask.ID,
+		id(85),
+		conflicting.GeneratedAt,
+		conflicting,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PublishCatalog(
+		ctx,
+		conflicting,
+		conflictArtifact,
+	); !errors.Is(err, task.ErrConflict) {
+		t.Fatalf("conflicting revision error = %v", err)
+	}
+
+	got, err := store.GetCatalog(
+		ctx,
+		first.ProjectID,
+		first.ProfileID,
+	)
+	if err != nil || !reflect.DeepEqual(got, first) {
+		t.Fatalf(
+			"Catalog after conflict = %#v, %v; want %#v",
+			got,
+			err,
+			first,
+		)
+	}
+	var artifactCount int
+	if err := store.db.QueryRow(
+		`SELECT COUNT(*) FROM artifacts WHERE artifact_id=?`,
+		conflictArtifact.ID,
+	).Scan(&artifactCount); err != nil ||
+		artifactCount != 0 {
+		t.Fatalf(
+			"conflicting artifact count = %d, %v",
+			artifactCount,
+			err,
+		)
+	}
+}
+
 func TestCatalogPaginationBindsCursorToCurrentRevision(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

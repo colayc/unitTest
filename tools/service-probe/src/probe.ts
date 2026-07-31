@@ -8,7 +8,12 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import type { Capabilities, CapabilitiesV11, CapabilitiesV12 } from "@unit-test-ide/protocol-models";
+import type {
+  Capabilities,
+  CapabilitiesV11,
+  CapabilitiesV12,
+  CapabilitiesV13
+} from "@unit-test-ide/protocol-models";
 import { ProtocolClient, type ConnectionConnector, type HandshakeResult } from "@unit-test-ide/test-client";
 import { endpointForDirectory, type EndpointResource } from "./endpoint.js";
 
@@ -662,7 +667,14 @@ export async function assertProcessGone(pid: number): Promise<void> {
   throw new Error(`process ${pid} still exists after ${OPERATION_TIMEOUT_MS}ms`);
 }
 
-export async function runProbe(serviceBinary: string): Promise<Capabilities | CapabilitiesV11 | CapabilitiesV12> {
+export async function runProbe(
+  serviceBinary: string
+): Promise<
+  Capabilities |
+  CapabilitiesV11 |
+  CapabilitiesV12 |
+  CapabilitiesV13
+> {
   const fixture = await startTaskService(serviceBinary);
   try {
     const capabilities = await withNamedTimeout("capabilities request", fixture.client.getCapabilities());

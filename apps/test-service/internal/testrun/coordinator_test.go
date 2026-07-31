@@ -282,6 +282,109 @@ func TestCoordinatorRejectsStaleCatalogBeforeTaskCreation(t *testing.T) {
 	}
 }
 
+func TestCoordinatorResumesQueuedRunWithRevalidatedRuntimeState(
+	t *testing.T,
+) {
+	fixture := newCoordinatorRunFixture(t)
+	started, run, err := fixture.coordinator.StartRun(
+		context.Background(),
+		fixture.request,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted := started
+	persisted.IdempotencyKey = fixture.request.IdempotencyKey
+	persisted.Request = append(
+		[]byte(nil),
+		fixture.tasks.request.Request...,
+	)
+	persisted.WorkspaceGeneration =
+		fixture.request.WorkspaceGeneration
+	persisted.PlanFingerprint =
+		fixture.tasks.request.Plan.Fingerprint
+	persisted.Timeout = fixture.request.Timeout
+	persisted.Status = task.StatusQueued
+
+	resumed, err := fixture.coordinator.ResumeRun(
+		context.Background(),
+		persisted,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.ID != persisted.ID ||
+		fixture.prepareCalls != 2 ||
+		fixture.tasks.resumeCalls != 1 ||
+		fixture.tasks.resumeRequest.Task.ID != persisted.ID ||
+		fixture.tasks.resumeRequest.Continuation == nil ||
+		fixture.tasks.resumeRequest.ResultInterpreter == nil ||
+		fixture.runs.run.RunID != run.RunID {
+		t.Fatalf(
+			"resumed Task = %#v, prepare=%d resume=%d request=%#v",
+			resumed,
+			fixture.prepareCalls,
+			fixture.tasks.resumeCalls,
+			fixture.tasks.resumeRequest,
+		)
+	}
+}
+
+func TestCoordinatorResumesQueuedDiscoveryWithRevalidatedRuntimeState(
+	t *testing.T,
+) {
+	fixture := newCoordinatorRunFixture(t)
+	request := DiscoveryRequest{
+		IdempotencyKey:      strings.Repeat("3", 32),
+		WorkspaceGeneration: fixture.prepared.generation,
+		ProjectID:           fixture.catalog.ProjectID,
+		BuildProfileID:      fixture.catalog.ProfileID,
+		Jobs:                2,
+		Timeout:             time.Minute,
+	}
+	started, err := fixture.coordinator.StartDiscovery(
+		context.Background(),
+		request,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted := started
+	persisted.IdempotencyKey = request.IdempotencyKey
+	persisted.Request = append(
+		[]byte(nil),
+		fixture.tasks.request.Request...,
+	)
+	persisted.WorkspaceGeneration =
+		request.WorkspaceGeneration
+	persisted.PlanFingerprint =
+		fixture.tasks.request.Plan.Fingerprint
+	persisted.Timeout = request.Timeout
+	persisted.Status = task.StatusQueued
+
+	resumed, err := fixture.coordinator.ResumeDiscovery(
+		context.Background(),
+		persisted,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.ID != persisted.ID ||
+		fixture.prepareCalls != 2 ||
+		fixture.tasks.resumeCalls != 1 ||
+		fixture.tasks.resumeRequest.Task.ID != persisted.ID ||
+		fixture.tasks.resumeRequest.Continuation == nil ||
+		fixture.tasks.resumeRequest.ResultInterpreter == nil {
+		t.Fatalf(
+			"resumed discovery = %#v, prepare=%d resume=%d request=%#v",
+			resumed,
+			fixture.prepareCalls,
+			fixture.tasks.resumeCalls,
+			fixture.tasks.resumeRequest,
+		)
+	}
+}
+
 func TestCoordinatorDoesNotAppendProcessForDeletedSelectedID(
 	t *testing.T,
 ) {
@@ -611,11 +714,13 @@ func (refresh *coordinatorCatalogRefresh) AfterStep(
 }
 
 type coordinatorTaskStarter struct {
-	taskID  string
-	now     time.Time
-	runs    *coordinatorRunStore
-	request task.StartRequest
-	calls   int
+	taskID        string
+	now           time.Time
+	runs          *coordinatorRunStore
+	request       task.StartRequest
+	resumeRequest task.ResumeRequest
+	calls         int
+	resumeCalls   int
 }
 
 func (starter *coordinatorTaskStarter) Start(
@@ -624,16 +729,29 @@ func (starter *coordinatorTaskStarter) Start(
 ) (task.Task, error) {
 	starter.calls++
 	starter.request = request
-	run := request.TestRun.Clone()
-	run.TaskID = starter.taskID
-	run.CreatedAt = starter.now
-	if err := starter.runs.create(run); err != nil {
-		return task.Task{}, err
+	if request.TestRun != nil {
+		run := request.TestRun.Clone()
+		run.TaskID = starter.taskID
+		run.CreatedAt = starter.now
+		if err := starter.runs.create(run); err != nil {
+			return task.Task{}, err
+		}
 	}
 	return task.Task{
 		ID: starter.taskID, Kind: request.Kind,
 		Status: task.StatusQueued, CreatedAt: starter.now,
 	}, nil
+}
+
+func (starter *coordinatorTaskStarter) ResumeQueued(
+	_ context.Context,
+	request task.ResumeRequest,
+) (task.Task, error) {
+	starter.resumeCalls++
+	starter.resumeRequest = request
+	resumed := request.Task
+	resumed.Status = task.StatusRunning
+	return resumed, nil
 }
 
 type coordinatorRunStore struct {

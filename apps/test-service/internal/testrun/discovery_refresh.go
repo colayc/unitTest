@@ -2,7 +2,6 @@ package testrun
 
 import (
 	"context"
-	"reflect"
 
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/testdiscovery"
@@ -43,8 +42,7 @@ func (refresher *TaskCatalogRefresher) PrepareAfterBuild(
 		return nil, RefreshProgress{}, err
 	}
 	if input.TaskID != request.TaskID ||
-		input.Profile != request.Profile ||
-		!reflect.DeepEqual(input.Targets, request.Targets) {
+		input.Profile != request.Profile {
 		return nil, RefreshProgress{}, task.ErrInvalidArgument
 	}
 	execution, progress, err :=

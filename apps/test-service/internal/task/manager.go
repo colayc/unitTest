@@ -355,7 +355,8 @@ func (m *Manager) Start(ctx context.Context, request StartRequest) (Task, error)
 }
 
 func (m *Manager) ResumeQueued(ctx context.Context, request ResumeRequest) (Task, error) {
-	if m == nil || request.Task.ID == "" || request.Task.Kind != KindCMakeBuild ||
+	if m == nil || request.Task.ID == "" ||
+		!resumableQueuedKind(request.Task.Kind) ||
 		request.Task.Status != StatusQueued ||
 		request.Plan.Fingerprint == "" ||
 		request.Plan.Fingerprint != FingerprintPlan(request.Plan) ||
@@ -379,6 +380,15 @@ func (m *Manager) ResumeQueued(ctx context.Context, request ResumeRequest) (Task
 		return Task{}, ctx.Err()
 	case <-m.stopped:
 		return Task{}, ErrStorageUnavailable
+	}
+}
+
+func resumableQueuedKind(kind Kind) bool {
+	switch kind {
+	case KindCMakeBuild, KindTestDiscovery, KindTestRun:
+		return true
+	default:
+		return false
 	}
 }
 

@@ -32,7 +32,9 @@ func (s *Store) ReplaceQueuedPlan(
 	defer tx.Rollback()
 	result, err := tx.ExecContext(ctx, `UPDATE tasks
 		SET plan_fingerprint=?, active_step=''
-		WHERE task_id=? AND request_hash=? AND kind='cmake_build' AND status='queued'`,
+		WHERE task_id=? AND request_hash=?
+		AND kind IN ('cmake_build','test_discovery','test_run')
+		AND status='queued'`,
 		planFingerprint, taskID, requestHash,
 	)
 	if err != nil {
@@ -70,7 +72,39 @@ func (s *Store) FailQueuedBuild(
 	errorCode string,
 	at time.Time,
 ) (task.Task, []task.Event, error) {
-	if s == nil || ctx == nil || taskID == "" || !validQueuedBuildErrorCode(errorCode) ||
+	return s.failQueuedTask(
+		ctx,
+		taskID,
+		errorCode,
+		at,
+		task.KindCMakeBuild,
+	)
+}
+
+func (s *Store) FailQueuedTask(
+	ctx context.Context,
+	taskID string,
+	errorCode string,
+	at time.Time,
+) (task.Task, []task.Event, error) {
+	return s.failQueuedTask(
+		ctx,
+		taskID,
+		errorCode,
+		at,
+		"",
+	)
+}
+
+func (s *Store) failQueuedTask(
+	ctx context.Context,
+	taskID string,
+	errorCode string,
+	at time.Time,
+	expectedKind task.Kind,
+) (task.Task, []task.Event, error) {
+	if s == nil || ctx == nil || taskID == "" ||
+		!validQueuedTaskErrorCode(errorCode) ||
 		at.IsZero() {
 		return task.Task{}, nil, task.ErrInvalidArgument
 	}
@@ -79,10 +113,27 @@ func (s *Store) FailQueuedBuild(
 		return task.Task{}, nil, storageError("begin queued build failure", err)
 	}
 	defer tx.Rollback()
+	var kind task.Kind
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT kind FROM tasks WHERE task_id=? AND status='queued'`,
+		taskID,
+	).Scan(&kind); isNoRows(err) {
+		return task.Task{}, nil, task.ErrConflict
+	} else if err != nil {
+		return task.Task{}, nil,
+			storageError("read queued task kind", err)
+	}
+	if expectedKind != "" && kind != expectedKind ||
+		kind != task.KindCMakeBuild &&
+			kind != task.KindTestDiscovery &&
+			kind != task.KindTestRun {
+		return task.Task{}, nil, task.ErrConflict
+	}
 	result, err := tx.ExecContext(ctx, `UPDATE tasks SET
 		status='finished', outcome='interrupted', finished_at=?, active_step='',
 		error_code=?, error_message=''
-		WHERE task_id=? AND kind='cmake_build' AND status='queued'`,
+		WHERE task_id=? AND status='queued'`,
 		formatTime(at), errorCode, taskID,
 	)
 	if err != nil {
@@ -103,17 +154,37 @@ func (s *Store) FailQueuedBuild(
 	if _, err := tx.ExecContext(ctx, `DELETE FROM process_leases WHERE task_id=?`, taskID); err != nil {
 		return task.Task{}, nil, storageError("delete invalid queued build lease", err)
 	}
-	payload, _ := json.Marshal(map[string]any{"outcome": task.OutcomeInterrupted})
-	events, err := insertEvents(ctx, tx, []task.EventDraft{{
-		TaskID: taskID, Type: task.EventTaskFinished, At: at, Payload: payload,
-	}}, s.newID)
+	drafts := make([]task.EventDraft, 0, 2)
+	if kind == task.KindTestRun {
+		finishedRun, err := recoverInterruptedTestRun(
+			ctx,
+			tx,
+			taskID,
+			at,
+		)
+		if err != nil {
+			return task.Task{}, nil, err
+		}
+		drafts = append(drafts, finishedRun)
+	}
+	payload, _ := json.Marshal(
+		map[string]any{"outcome": task.OutcomeInterrupted},
+	)
+	drafts = append(drafts, task.EventDraft{
+		TaskID:  taskID,
+		Type:    task.EventTaskFinished,
+		At:      at,
+		Payload: payload,
+	})
+	events, err := insertEvents(ctx, tx, drafts, s.newID)
 	if err != nil {
 		return task.Task{}, nil, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE tasks SET last_sequence=? WHERE task_id=?`,
-		events[0].Sequence, taskID,
+		events[len(events)-1].Sequence, taskID,
 	); err != nil {
-		return task.Task{}, nil, storageError("update invalid queued build sequence", err)
+		return task.Task{}, nil,
+			storageError("update invalid queued task sequence", err)
 	}
 	updated, err := scanTask(tx.QueryRowContext(ctx, taskSelect+` WHERE task_id=?`, taskID))
 	if err != nil {
@@ -129,10 +200,15 @@ func (s *Store) FailQueuedBuild(
 }
 
 func validQueuedBuildErrorCode(value string) bool {
+	return validQueuedTaskErrorCode(value)
+}
+
+func validQueuedTaskErrorCode(value string) bool {
 	switch value {
 	case "WORKSPACE_CHANGED", "PROJECT_NOT_FOUND", "BUILD_PROFILE_NOT_FOUND",
 		"TARGET_NOT_FOUND", "CONFIGURE_REQUIRED", "INVALID_TASK_SPEC",
-		"WORKSPACE_TRUST_REQUIRED":
+		"WORKSPACE_TRUST_REQUIRED", "CATALOG_STALE",
+		"EMPTY_TEST_SELECTION", "TEST_SELECTION_INVALID":
 		return true
 	default:
 		return false

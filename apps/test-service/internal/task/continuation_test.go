@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"sync"
 	"testing"
+	"time"
 
 	"unit-test-ide.local/test-service/internal/task"
 )
@@ -83,6 +84,25 @@ func TestManagerRejectsUnvalidatedContinuationWithoutStartingProcess(t *testing.
 			step: func() task.ExecutionStep {
 				step := continuationStep("test-run")
 				step.Process.Executable = "untrusted"
+				return step
+			}(),
+		},
+		{
+			name: "boundary rejected batch executable",
+			step: func() task.ExecutionStep {
+				step := continuationStep("test-run")
+				step.Process = task.ProcessSpec{
+					Batch: []task.ProcessBatchItem{
+						{
+							ID: "test-000001", Executable: "trusted-service",
+							Dir: "simulation-dir", Timeout: time.Second,
+						},
+						{
+							ID: "test-000002", Executable: "untrusted",
+							Dir: "simulation-dir", Timeout: time.Second,
+						},
+					},
+				}
 				return step
 			}(),
 		},

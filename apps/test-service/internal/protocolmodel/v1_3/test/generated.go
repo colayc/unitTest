@@ -107,7 +107,7 @@ type TestRun struct {
 	CatalogRevision   string                   `json:"catalogRevision"`
 	FinishedAt        *time.Time               `json:"finishedAt,omitempty"`
 	Incomplete        bool                     `json:"incomplete"`
-	Outcome           TestRunOutcomeV13        `json:"outcome"`
+	Outcome           *TestRunOutcomeV13       `json:"outcome,omitempty"`
 	ProfileID         string                   `json:"profileId"`
 	ProjectID         string                   `json:"projectId"`
 	ResultRevision    string                   `json:"resultRevision"`

@@ -413,6 +413,8 @@ git commit -m "feat: persist test events and artifacts"
 
 ### Task 6：Protocol Session、Runtime、recovery 与 deterministic E2E
 
+> 实施说明：Task 6 已完成 Protocol v1.3 的 strict routing、TypeScript/Go model、Session handler、旧版本 compatibility projection，以及 Runtime 中 Build/TestDiscovery/TestRun Coordinator、repositories 和 restart recovery 的组合。确定性 CMake/CppUTest fixture 覆盖 inspect→discover→run→event replay→failedFromRun，并验证 cancel、reconnect 与 crash recovery。重复发现同一 Catalog revision 现在按内容校验后幂等刷新，冲突内容会被拒绝；`test-selection` 已纳入 v1.3 artifact kind；普通 assertion 的 category/message 会持久化为 FailureDetail，保证 failed rerun 不会扩大选择范围。continuation 的单进程和 batch item 都必须通过同一 `ExecutionBoundary`，计划持久化成功后才允许启动下一进程。
+
 **文件：**
 
 - 修改：`apps/test-service/internal/protocol/envelope.go`
@@ -427,15 +429,15 @@ git commit -m "feat: persist test events and artifacts"
 - 修改：`apps/test-service/internal/runtime/runtime_test.go`
 - 修改：`apps/test-service/internal/taskstore/recovery.go`
 - 修改：`apps/test-service/internal/taskstore/sqlite_test.go`
-- 创建：`apps/test-service/cmd/ctest-fixture/main.go`
-- 创建：`apps/test-service/cmd/ctest-fixture/main_test.go`
+- 修改：`apps/test-service/cmd/cmake-fixture/main.go`
+- 修改：`apps/test-service/cmd/cmake-fixture/main_test.go`
 - 修改：`tools/service-probe/build-service.mjs`
 - 修改：`tools/service-probe/src/probe.ts`
 - 修改：`tools/service-probe/src/probe.test.ts`
 - 创建：`tools/service-probe/src/test-framework-fixture.ts`
 - 创建：`tools/service-probe/src/test-framework-fixture.test.ts`
 
-- [ ] **Step 1：写出 v1.3 routing、compat projection 和 recovery 失败测试**
+- [x] **Step 1：写出 v1.3 routing、compat projection 和 recovery 失败测试**
 
 覆盖：
 
@@ -452,7 +454,7 @@ git commit -m "feat: persist test events and artifacts"
 - deterministic inspect→discover→run→failed rerun；
 -断线 cursor replay。
 
-- [ ] **Step 2：运行 Session/Runtime/Probe tests 并确认失败**
+- [x] **Step 2：运行 Session/Runtime/Probe tests 并确认失败**
 
 ```powershell
 go test ./apps/test-service/internal/protocol ./apps/test-service/internal/session ./apps/test-service/internal/server ./apps/test-service/internal/runtime ./apps/test-service/internal/taskstore ./apps/test-service/cmd/ctest-fixture -run 'V13|TestRun|Recovery|CTestFixture' -count=1
@@ -461,11 +463,11 @@ pnpm --filter @unit-test-ide/service-probe test
 
 预期：FAIL。
 
-- [ ] **Step 3：实现 Runtime composition 与 version projection**
+- [x] **Step 3：实现 Runtime composition 与 version projection**
 
 Runtime 注册 CTest/Framework/Test Coordinator 和 repositories。queued request 只保存结构化 ID/limits；恢复时重建所有 runtime-only plan/parser/boundary。
 
-- [ ] **Step 4：运行完整 Phase 4E 门禁**
+- [x] **Step 4：运行完整 Phase 4E 门禁**
 
 ```powershell
 pnpm check:protocol-generated
@@ -478,7 +480,9 @@ git diff --check
 
 预期：全部 PASS。
 
-- [ ] **Step 5：提交 Protocol/Test Runtime vertical slice**
+验证结果：protocol generated check、TypeScript build/test、CMake bundle/workspace、Go 全包 test、Windows race、Windows vet、`linux/amd64` cross-build/vet，以及 20 项 deterministic E2E 全部通过。完整 Go/race 门禁因单次运行时长拆为覆盖相同 package 集合的分组执行。
+
+- [x] **Step 5：提交 Protocol/Test Runtime vertical slice**
 
 ```powershell
 git add apps/test-service packages/test-client tools/service-probe
@@ -492,8 +496,8 @@ git commit -m "feat: expose protocol v1.3 test execution"
 - [x] result-aware Task completion
 - [x] discovery/run Service-owned continuation
 - [x] test events/artifacts durable ordering
-- [ ] v1.3 Session/Runtime/Client E2E
-- [ ] v1.0–v1.2 compatibility projection
-- [ ] cancel/timeout/reconnect/restart recovery
-- [ ] `pnpm verify`
-- [ ] 独立评审确认 continuation 不能绕过 ExecutionBoundary
+- [x] v1.3 Session/Runtime/Client E2E
+- [x] v1.0–v1.2 compatibility projection
+- [x] cancel/timeout/reconnect/restart recovery
+- [x] `pnpm verify`
+- [x] 独立评审确认 continuation 不能绕过 ExecutionBoundary

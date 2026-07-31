@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"unit-test-ide.local/test-service/internal/cmake"
+	"unit-test-ide.local/test-service/internal/ctest"
 )
 
 func TestFixtureSupportsOnlyDeterministicProbeCommands(t *testing.T) {
@@ -84,8 +85,80 @@ func TestFixtureSupportsPairedCTestVersionProbe(t *testing.T) {
 	}
 }
 
+func TestFixtureCTestShowsDeterministicFrameworkDescriptor(
+	t *testing.T,
+) {
+	buildDir := t.TempDir()
+	sourceDir := t.TempDir()
+	if err := writeFixtureState(buildDir, fixtureState{
+		SourceDir:      sourceDir,
+		ConfigureCount: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runCTest(
+		[]string{
+			"--test-dir",
+			buildDir,
+			"-C",
+			"Debug",
+			"--show-only=json-v1",
+		},
+		&stdout,
+		&stderr,
+	)
+	if code != 0 || stderr.Len() != 0 {
+		t.Fatalf(
+			"runCTest() = %d, stdout=%q, stderr=%q",
+			code,
+			stdout.String(),
+			stderr.String(),
+		)
+	}
+	var document struct {
+		Tests []struct {
+			Name    string   `json:"name"`
+			Command []string `json:"command"`
+		} `json:"tests"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &document); err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Tests) != 1 ||
+		document.Tests[0].Name != "framework-tests" ||
+		len(document.Tests[0].Command) != 3 ||
+		document.Tests[0].Command[1] !=
+			"--fixture-scenario" ||
+		document.Tests[0].Command[2] != "normal" ||
+		!filepath.IsAbs(document.Tests[0].Command[0]) {
+		t.Fatalf("show-only document = %#v", document)
+	}
+}
+
 func TestFixtureConfigureWritesReadableFileAPIAndBuildWarning(t *testing.T) {
 	root := t.TempDir()
+	originalLocate := locateFixtureExecutable
+	locateFixtureExecutable = func() (string, error) {
+		return filepath.Join(
+			root,
+			fixtureExecutableName("cmake-fixture"),
+		), nil
+	}
+	t.Cleanup(func() {
+		locateFixtureExecutable = originalLocate
+	})
+	if err := os.WriteFile(
+		filepath.Join(
+			root,
+			fixtureExecutableName("test-framework-fixture"),
+		),
+		[]byte("fixture executable"),
+		0o700,
+	); err != nil {
+		t.Fatal(err)
+	}
 	sourceDir := filepath.Join(root, "source")
 	buildDir := filepath.Join(root, "build")
 	if err := os.MkdirAll(sourceDir, 0o700); err != nil {
@@ -125,6 +198,47 @@ func TestFixtureConfigureWritesReadableFileAPIAndBuildWarning(t *testing.T) {
 	stderr.Reset()
 	if code := run([]string{"--build", buildDir, "--parallel", "2"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("build exit = %d, stderr = %q", code, stderr.String())
+	}
+	materialized, err := os.ReadFile(filepath.Join(
+		buildDir,
+		"bin",
+		fixtureExecutableName("fixture-app"),
+	))
+	if err != nil || string(materialized) != "fixture executable" {
+		t.Fatalf(
+			"materialized fixture = %q, %v",
+			materialized,
+			err,
+		)
+	}
+	var ctestOutput bytes.Buffer
+	if err := writeCTestShowOnly(buildDir, &ctestOutput); err != nil {
+		t.Fatal(err)
+	}
+	ctestSnapshot, err := ctest.ParseShowOnlyJSON(
+		ctestOutput.Bytes(),
+		ctest.DefaultLimits(),
+	)
+	if err != nil || len(ctestSnapshot.Tests) != 1 {
+		t.Fatalf(
+			"CTest snapshot = %#v, %v",
+			ctestSnapshot,
+			err,
+		)
+	}
+	descriptor, err := ctest.BuildDescriptor(
+		ctestSnapshot.Tests[0],
+		profile,
+		reply.Targets,
+	)
+	if err != nil ||
+		descriptor.Blocked ||
+		!descriptor.Compatibility.CaseLevel {
+		t.Fatalf(
+			"CTest descriptor = %#v, %v",
+			descriptor,
+			err,
+		)
 	}
 	for _, warning := range []string{":7:3: warning:", "(8,3): warning C4996:"} {
 		if !strings.Contains(stdout.String(), warning) {

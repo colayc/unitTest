@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -62,27 +63,59 @@ func (s *Store) PublishCatalog(
 		return storageError("begin Catalog publication", err)
 	}
 	defer tx.Rollback()
+	existing, err := validateExistingCatalog(
+		ctx,
+		tx,
+		catalog,
+		diagnosticsJSON,
+		entries,
+	)
+	if err != nil {
+		return err
+	}
 	if err := insertArtifact(ctx, tx, artifact); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO test_catalogs(
-		project_id, profile_id, revision, generated_at, artifact_id,
-		container_count, item_count, diagnostic_count, diagnostics_json, partial
-	) VALUES(?,?,?,?,?,?,?,?,?,0)`,
-		catalog.ProjectID, catalog.ProfileID, catalog.Revision, formatTime(catalog.GeneratedAt),
-		artifact.ID, len(catalog.Containers), len(catalog.Items), len(catalog.Diagnostics),
-		string(diagnosticsJSON),
-	); err != nil {
-		return storageError("insert Catalog metadata", err)
-	}
-	for ordinal, entry := range entries {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO test_catalog_entries(
-			project_id, profile_id, revision, ordinal, entry_kind, stable_id, payload_json
-		) VALUES(?,?,?,?,?,?,?)`,
-			catalog.ProjectID, catalog.ProfileID, catalog.Revision, ordinal,
-			entry.kind, entry.id.String(), string(entry.json),
+	if existing {
+		result, err := tx.ExecContext(ctx, `UPDATE test_catalogs
+			SET generated_at=?, artifact_id=?
+			WHERE project_id=? AND profile_id=? AND revision=?`,
+			formatTime(catalog.GeneratedAt),
+			artifact.ID,
+			catalog.ProjectID,
+			catalog.ProfileID,
+			catalog.Revision,
+		)
+		if err != nil {
+			return storageError("refresh Catalog metadata", err)
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return storageError("read Catalog refresh result", err)
+		}
+		if affected != 1 {
+			return task.ErrConflict
+		}
+	} else {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO test_catalogs(
+			project_id, profile_id, revision, generated_at, artifact_id,
+			container_count, item_count, diagnostic_count, diagnostics_json, partial
+		) VALUES(?,?,?,?,?,?,?,?,?,0)`,
+			catalog.ProjectID, catalog.ProfileID, catalog.Revision, formatTime(catalog.GeneratedAt),
+			artifact.ID, len(catalog.Containers), len(catalog.Items), len(catalog.Diagnostics),
+			string(diagnosticsJSON),
 		); err != nil {
-			return storageError("insert Catalog index", err)
+			return storageError("insert Catalog metadata", err)
+		}
+		for ordinal, entry := range entries {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO test_catalog_entries(
+				project_id, profile_id, revision, ordinal, entry_kind, stable_id, payload_json
+			) VALUES(?,?,?,?,?,?,?)`,
+				catalog.ProjectID, catalog.ProfileID, catalog.Revision, ordinal,
+				entry.kind, entry.id.String(), string(entry.json),
+			); err != nil {
+				return storageError("insert Catalog index", err)
+			}
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO current_test_catalogs(project_id, profile_id, revision)
@@ -96,6 +129,109 @@ func (s *Store) PublishCatalog(
 		return storageError("commit Catalog publication", err)
 	}
 	return nil
+}
+
+func validateExistingCatalog(
+	ctx context.Context,
+	tx *sql.Tx,
+	catalog testdomain.Catalog,
+	diagnosticsJSON []byte,
+	entries []catalogEntry,
+) (bool, error) {
+	var containerCount int
+	var itemCount int
+	var diagnosticCount int
+	var storedDiagnostics []byte
+	var partial int
+	err := tx.QueryRowContext(ctx, `SELECT
+		container_count, item_count, diagnostic_count,
+		diagnostics_json, partial
+		FROM test_catalogs
+		WHERE project_id=? AND profile_id=? AND revision=?`,
+		catalog.ProjectID,
+		catalog.ProfileID,
+		catalog.Revision,
+	).Scan(
+		&containerCount,
+		&itemCount,
+		&diagnosticCount,
+		&storedDiagnostics,
+		&partial,
+	)
+	if isNoRows(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, storageError(
+			"read existing Catalog metadata",
+			err,
+		)
+	}
+	if containerCount != len(catalog.Containers) ||
+		itemCount != len(catalog.Items) ||
+		diagnosticCount != len(catalog.Diagnostics) ||
+		partial != 0 ||
+		!bytes.Equal(storedDiagnostics, diagnosticsJSON) {
+		return true, task.ErrConflict
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT
+		ordinal, entry_kind, stable_id, payload_json
+		FROM test_catalog_entries
+		WHERE project_id=? AND profile_id=? AND revision=?
+		ORDER BY ordinal`,
+		catalog.ProjectID,
+		catalog.ProfileID,
+		catalog.Revision,
+	)
+	if err != nil {
+		return false, storageError(
+			"read existing Catalog index",
+			err,
+		)
+	}
+	defer rows.Close()
+	for ordinal, expected := range entries {
+		if !rows.Next() {
+			if err := rows.Err(); err != nil {
+				return false, storageError(
+					"read existing Catalog index",
+					err,
+				)
+			}
+			return true, task.ErrConflict
+		}
+		var storedOrdinal int
+		var kind string
+		var stableID string
+		var payload []byte
+		if err := rows.Scan(
+			&storedOrdinal,
+			&kind,
+			&stableID,
+			&payload,
+		); err != nil {
+			return false, storageError(
+				"decode existing Catalog index",
+				err,
+			)
+		}
+		if storedOrdinal != ordinal ||
+			kind != expected.kind ||
+			stableID != expected.id.String() ||
+			!bytes.Equal(payload, expected.json) {
+			return true, task.ErrConflict
+		}
+	}
+	if rows.Next() {
+		return true, task.ErrConflict
+	}
+	if err := rows.Err(); err != nil {
+		return false, storageError(
+			"read existing Catalog index",
+			err,
+		)
+	}
+	return true, nil
 }
 
 func (s *Store) GetCatalog(ctx context.Context, projectID, profileID string) (testdomain.Catalog, error) {

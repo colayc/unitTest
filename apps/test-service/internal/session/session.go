@@ -26,13 +26,18 @@ import (
 	targetlistv12 "unit-test-ide.local/test-service/internal/protocolmodel/v1_2/targetlist"
 	taskv12 "unit-test-ide.local/test-service/internal/protocolmodel/v1_2/task"
 	workspacev12 "unit-test-ide.local/test-service/internal/protocolmodel/v1_2/workspace"
+	capabilitiesv13 "unit-test-ide.local/test-service/internal/protocolmodel/v1_3/capabilities"
+	taskv13 "unit-test-ide.local/test-service/internal/protocolmodel/v1_3/task"
+	testv13 "unit-test-ide.local/test-service/internal/protocolmodel/v1_3/test"
 	"unit-test-ide.local/test-service/internal/task"
+	"unit-test-ide.local/test-service/internal/testdomain"
 	"unit-test-ide.local/test-service/internal/toolchain"
 )
 
 const (
 	defaultPageLimit = 100
 	maxPageLimit     = 200
+	maxTestPageLimit = 1000
 	maxTimeoutMS     = int64((24 * time.Hour) / time.Millisecond)
 )
 
@@ -54,6 +59,48 @@ type Backend interface {
 	Subscribe(context.Context, int64) (*eventbroker.Subscription, error)
 	ListArtifacts(context.Context, string, string, int) (task.Page[task.Artifact], error)
 	ReadArtifact(context.Context, string, int64, int) (ArtifactChunk, error)
+}
+
+type TestBackend interface {
+	StartTestDiscovery(
+		context.Context,
+		TestDiscoveryStart,
+	) (task.Task, error)
+	StartTestRun(
+		context.Context,
+		TestRunStart,
+	) (task.Task, testdomain.TestRun, error)
+	GetTestCatalog(
+		context.Context,
+		testdomain.CatalogPageRequest,
+	) (testdomain.CatalogPage, error)
+	GetTestRun(
+		context.Context,
+		string,
+	) (testdomain.TestRun, error)
+	GetTestRunForTask(
+		context.Context,
+		string,
+	) (testdomain.TestRun, error)
+	ListTestRuns(
+		context.Context,
+		testdomain.RunPageRequest,
+	) (testdomain.RunPage, error)
+}
+
+type TestDiscoveryStart struct {
+	IdempotencyKey string
+	ProjectID      string
+	ProfileID      string
+}
+
+type TestRunStart struct {
+	IdempotencyKey  string
+	ProjectID       string
+	ProfileID       string
+	CatalogRevision string
+	Selection       testdomain.Selection
+	RepeatCount     int64
 }
 
 type HandleResult struct {
@@ -135,6 +182,41 @@ type artifactReadPayload struct {
 	ArtifactID string `json:"artifactId"`
 	Offset     *int64 `json:"offset"`
 	Length     int    `json:"length"`
+}
+
+type testDiscoveryStartPayloadV13 struct {
+	IdempotencyKey string `json:"idempotencyKey"`
+	Kind           string `json:"kind"`
+	ProjectID      string `json:"projectId"`
+	ProfileID      string `json:"profileId"`
+}
+
+type testRunStartPayloadV13 struct {
+	IdempotencyKey  string          `json:"idempotencyKey"`
+	Kind            string          `json:"kind"`
+	ProjectID       string          `json:"projectId"`
+	ProfileID       string          `json:"profileId"`
+	CatalogRevision string          `json:"catalogRevision"`
+	Selection       json.RawMessage `json:"selection"`
+	RepeatCount     int64           `json:"repeatCount"`
+}
+
+type testCatalogPayloadV13 struct {
+	ProjectID string  `json:"projectId"`
+	ProfileID string  `json:"profileId"`
+	Cursor    *string `json:"cursor"`
+	Limit     *int    `json:"limit"`
+}
+
+type testRunIDPayloadV13 struct {
+	RunID string `json:"runId"`
+}
+
+type testRunsListPayloadV13 struct {
+	ProjectID *string `json:"projectId"`
+	ProfileID *string `json:"profileId"`
+	Cursor    *string `json:"cursor"`
+	Limit     *int    `json:"limit"`
 }
 
 type taskPagePayload struct {
@@ -221,6 +303,13 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 		if err := decodeEmpty(request.Payload); err != nil {
 			return handled(protocol.Failure(responseVersion, request, "INVALID_MESSAGE", "payload must be an empty object", false))
 		}
+		if s.negotiatedVersion == protocol.Version13 {
+			return handled(protocol.Success(
+				responseVersion,
+				request,
+				capabilitiesV13(),
+			))
+		}
 		if s.negotiatedVersion == protocol.Version12 {
 			return handled(protocol.Success(responseVersion, request, capabilitiesv12.CapabilitiesV12{
 				WorkspaceInspect: true,
@@ -252,13 +341,50 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 	}
 
 	if phase3Method(request.Method) {
-		if s.negotiatedVersion != protocol.Version12 {
+		if s.negotiatedVersion != protocol.Version12 &&
+			s.negotiatedVersion != protocol.Version13 {
 			return handled(protocol.Failure(responseVersion, request, "PROTOCOL_FEATURE_UNAVAILABLE", "method requires protocol 1.2", false))
 		}
 		if s.backend == nil {
 			return handled(protocol.Failure(responseVersion, request, "SERVICE_UNHEALTHY", "workspace service is unavailable", true))
 		}
 		return s.handlePhase3(ctx, responseVersion, request)
+	}
+	if phase4Method(request.Method) {
+		if s.negotiatedVersion != protocol.Version13 {
+			return handled(protocol.Failure(
+				responseVersion,
+				request,
+				"PROTOCOL_FEATURE_UNAVAILABLE",
+				"method requires protocol 1.3",
+				false,
+			))
+		}
+		if s.backend == nil {
+			return handled(protocol.Failure(
+				responseVersion,
+				request,
+				"SERVICE_UNHEALTHY",
+				"test service is unavailable",
+				true,
+			))
+		}
+		backend, ok := s.backend.(TestBackend)
+		if !ok {
+			return handled(protocol.Failure(
+				responseVersion,
+				request,
+				"SERVICE_UNHEALTHY",
+				"test service is unavailable",
+				true,
+			))
+		}
+		return s.handlePhase4(
+			ctx,
+			responseVersion,
+			request,
+			backend,
+		)
 	}
 	if phase2Method(request.Method) {
 		if s.negotiatedVersion == protocol.Version10 {
@@ -275,6 +401,24 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 func (s *Session) handlePhase2(ctx context.Context, version string, request protocol.Request) HandleResult {
 	switch request.Method {
 	case "tasks/start":
+		if version == protocol.Version13 {
+			backend, ok := s.backend.(TestBackend)
+			if !ok {
+				return handled(protocol.Failure(
+					version,
+					request,
+					"SERVICE_UNHEALTHY",
+					"test service is unavailable",
+					true,
+				))
+			}
+			return s.handleV13TaskStart(
+				ctx,
+				version,
+				request,
+				backend,
+			)
+		}
 		if version == protocol.Version12 {
 			return s.handleV12TaskStart(ctx, version, request)
 		}
@@ -303,7 +447,7 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 		if err != nil {
 			return backendFailure(version, request, err)
 		}
-		if version == protocol.Version11 && value.Kind != task.KindSimulation {
+		if legacyTaskHidden(version, value.Kind) {
 			return taskNotFound(version, request)
 		}
 		if request.Method == "tasks/cancel" {
@@ -311,6 +455,46 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 		}
 		if err != nil {
 			return backendFailure(version, request, err)
+		}
+		if version == protocol.Version13 {
+			var run *testdomain.TestRun
+			if value.Kind == task.KindTestRun {
+				testBackend, ok := s.backend.(TestBackend)
+				if !ok {
+					return backendFailure(
+						version,
+						request,
+						task.ErrStorageUnavailable,
+					)
+				}
+				persisted, runErr :=
+					testBackend.GetTestRunForTask(
+						ctx,
+						value.ID,
+					)
+				if runErr != nil {
+					return backendFailure(
+						version,
+						request,
+						runErr,
+					)
+				}
+				run = &persisted
+			}
+			projected, projectErr :=
+				toProtocolTaskV13(value, run)
+			if projectErr != nil {
+				return backendFailure(
+					version,
+					request,
+					projectErr,
+				)
+			}
+			return handled(protocol.Success(
+				version,
+				request,
+				projected,
+			))
 		}
 		if version == protocol.Version12 {
 			projected, projectErr := toProtocolTaskV12(value)
@@ -329,10 +513,70 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 		var kinds []task.Kind
 		if version == protocol.Version11 {
 			kinds = []task.Kind{task.KindSimulation}
+		} else if version == protocol.Version12 {
+			kinds = []task.Kind{
+				task.KindSimulation,
+				task.KindCMakeBuild,
+			}
 		}
 		page, err := s.backend.List(ctx, cursor, limit, kinds)
 		if err != nil {
 			return backendFailure(version, request, err)
+		}
+		if version == protocol.Version13 {
+			testBackend, ok := s.backend.(TestBackend)
+			if !ok {
+				return backendFailure(
+					version,
+					request,
+					task.ErrStorageUnavailable,
+				)
+			}
+			items := make(
+				[]taskv13.TaskSnapshotV13,
+				len(page.Items),
+			)
+			for index := range page.Items {
+				var run *testdomain.TestRun
+				if page.Items[index].Kind ==
+					task.KindTestRun {
+					persisted, runErr :=
+						testBackend.GetTestRunForTask(
+							ctx,
+							page.Items[index].ID,
+						)
+					if runErr != nil {
+						return backendFailure(
+							version,
+							request,
+							runErr,
+						)
+					}
+					run = &persisted
+				}
+				items[index], err = toProtocolTaskV13(
+					page.Items[index],
+					run,
+				)
+				if err != nil {
+					return backendFailure(
+						version,
+						request,
+						err,
+					)
+				}
+			}
+			return handled(protocol.Success(
+				version,
+				request,
+				struct {
+					Items      []taskv13.TaskSnapshotV13 `json:"items"`
+					NextCursor string                    `json:"nextCursor,omitempty"`
+				}{
+					Items:      items,
+					NextCursor: page.NextCursor,
+				},
+			))
 		}
 		if version == protocol.Version12 {
 			items := make([]taskv12.TaskSnapshotV12, len(page.Items))
@@ -371,12 +615,13 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 		if err != nil {
 			return invalidPayload(version, request)
 		}
-		if version == protocol.Version11 {
+		if version == protocol.Version11 ||
+			version == protocol.Version12 {
 			parent, getErr := s.backend.Get(ctx, payload.TaskID)
 			if getErr != nil {
 				return backendFailure(version, request, getErr)
 			}
-			if parent.Kind != task.KindSimulation {
+			if legacyTaskHidden(version, parent.Kind) {
 				return taskNotFound(version, request)
 			}
 		}
@@ -384,7 +629,8 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 		if err != nil {
 			return backendFailure(version, request, err)
 		}
-		if version == protocol.Version12 {
+		if version == protocol.Version12 ||
+			version == protocol.Version13 {
 			items := make([]artifactv12.ArtifactMetadataV12, len(page.Items))
 			for index := range page.Items {
 				items[index] = toProtocolArtifactV12(page.Items[index])
@@ -405,12 +651,13 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 		if err != nil {
 			return backendFailure(version, request, err)
 		}
-		if version == protocol.Version11 {
+		if version == protocol.Version11 ||
+			version == protocol.Version12 {
 			parent, getErr := s.backend.Get(ctx, chunk.Metadata.TaskID)
 			if getErr != nil {
 				return backendFailure(version, request, getErr)
 			}
-			if parent.Kind != task.KindSimulation {
+			if legacyTaskHidden(version, parent.Kind) {
 				return taskNotFound(version, request)
 			}
 		}
@@ -420,6 +667,115 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 		}))
 	default:
 		return handled(protocol.Failure(version, request, "METHOD_NOT_FOUND", "method is not supported", false))
+	}
+}
+
+func (s *Session) handlePhase4(
+	ctx context.Context,
+	version string,
+	request protocol.Request,
+	backend TestBackend,
+) HandleResult {
+	switch request.Method {
+	case "tests/catalog/get":
+		payload, err :=
+			decodeStrict[testCatalogPayloadV13](request.Payload)
+		cursor, limit, pageErr := normalizedTestPage(
+			payload.Cursor,
+			payload.Limit,
+			testdomain.DefaultCatalogPageSize,
+		)
+		if err != nil || pageErr != nil ||
+			!validProjectID(payload.ProjectID) ||
+			!validHash(payload.ProfileID) {
+			return invalidPayload(version, request)
+		}
+		page, err := backend.GetTestCatalog(
+			ctx,
+			testdomain.CatalogPageRequest{
+				ProjectID: payload.ProjectID,
+				ProfileID: payload.ProfileID,
+				Cursor:    cursor,
+				Limit:     limit,
+			},
+		)
+		if err != nil {
+			return backendFailure(version, request, err)
+		}
+		projected, err := toProtocolTestCatalog(page)
+		if err != nil {
+			return backendFailure(version, request, err)
+		}
+		return handled(protocol.Success(
+			version,
+			request,
+			projected,
+		))
+	case "tests/runs/get":
+		payload, err :=
+			decodeStrict[testRunIDPayloadV13](request.Payload)
+		if err != nil || !validID(payload.RunID) {
+			return invalidPayload(version, request)
+		}
+		run, err := backend.GetTestRun(ctx, payload.RunID)
+		if err != nil {
+			return backendFailure(version, request, err)
+		}
+		projected, err := toProtocolTestRun(run)
+		if err != nil {
+			return backendFailure(version, request, err)
+		}
+		return handled(protocol.Success(
+			version,
+			request,
+			projected,
+		))
+	case "tests/runs/list":
+		payload, err :=
+			decodeStrict[testRunsListPayloadV13](request.Payload)
+		cursor, limit, pageErr := normalizedTestPage(
+			payload.Cursor,
+			payload.Limit,
+			testdomain.DefaultRunPageSize,
+		)
+		if err != nil || pageErr != nil ||
+			payload.ProjectID != nil &&
+				!validProjectID(*payload.ProjectID) ||
+			payload.ProfileID != nil &&
+				!validHash(*payload.ProfileID) {
+			return invalidPayload(version, request)
+		}
+		pageRequest := testdomain.RunPageRequest{
+			Cursor: cursor,
+			Limit:  limit,
+		}
+		if payload.ProjectID != nil {
+			pageRequest.ProjectID = *payload.ProjectID
+		}
+		if payload.ProfileID != nil {
+			pageRequest.ProfileID = *payload.ProfileID
+		}
+		page, err := backend.ListTestRuns(ctx, pageRequest)
+		if err != nil {
+			return backendFailure(version, request, err)
+		}
+		projected, err := toProtocolTestRunPage(page)
+		if err != nil {
+			return backendFailure(version, request, err)
+		}
+		return handled(protocol.Success(
+			version,
+			request,
+			projected,
+		))
+	default:
+		return handled(protocol.Failure(
+			version,
+			request,
+			"METHOD_NOT_FOUND",
+			"method is not supported",
+			false,
+		))
 	}
 }
 
@@ -521,6 +877,132 @@ func (s *Session) handleV12TaskStart(ctx context.Context, version string, reques
 	}
 }
 
+func (s *Session) handleV13TaskStart(
+	ctx context.Context,
+	version string,
+	request protocol.Request,
+	backend TestBackend,
+) HandleResult {
+	var kind startKindPayload
+	if err := json.Unmarshal(request.Payload, &kind); err != nil ||
+		kind.Kind == "" {
+		return invalidPayload(version, request)
+	}
+	var (
+		started task.Task
+		run     *testdomain.TestRun
+		err     error
+	)
+	switch kind.Kind {
+	case "simulation":
+		payload, decodeErr :=
+			decodeStrict[simulationStartPayloadV12](request.Payload)
+		if decodeErr != nil ||
+			!validID(payload.IdempotencyKey) ||
+			!task.ValidScenario(payload.Scenario) ||
+			payload.TimeoutMS < 1 ||
+			payload.TimeoutMS > maxTimeoutMS {
+			return invalidPayload(version, request)
+		}
+		started, err = s.backend.StartSimulation(
+			ctx,
+			task.SimulationStart{
+				IdempotencyKey: payload.IdempotencyKey,
+				Scenario:       payload.Scenario,
+				Timeout: time.Duration(
+					payload.TimeoutMS,
+				) * time.Millisecond,
+			},
+		)
+	case "cmakeBuild":
+		payload, decodeErr :=
+			decodeStrict[buildStartPayloadV12](request.Payload)
+		if decodeErr != nil || !validBuildStart(payload) {
+			return invalidPayload(version, request)
+		}
+		started, err = s.backend.StartBuild(
+			ctx,
+			build.StartRequest{
+				IdempotencyKey: payload.IdempotencyKey,
+				WorkspaceGeneration: payload.
+					WorkspaceGeneration,
+				ProjectID:      payload.ProjectID,
+				BuildProfileID: payload.BuildProfileID,
+				TargetIDs: append(
+					[]string(nil),
+					payload.TargetIDs...,
+				),
+				Jobs: payload.Jobs,
+				Timeout: time.Duration(
+					payload.TimeoutMS,
+				) * time.Millisecond,
+			},
+		)
+	case "testDiscovery":
+		payload, decodeErr :=
+			decodeStrict[testDiscoveryStartPayloadV13](
+				request.Payload,
+			)
+		if decodeErr != nil ||
+			!validID(payload.IdempotencyKey) ||
+			!validProjectID(payload.ProjectID) ||
+			!validHash(payload.ProfileID) {
+			return invalidPayload(version, request)
+		}
+		started, err = backend.StartTestDiscovery(
+			ctx,
+			TestDiscoveryStart{
+				IdempotencyKey: payload.IdempotencyKey,
+				ProjectID:      payload.ProjectID,
+				ProfileID:      payload.ProfileID,
+			},
+		)
+	case "testRun":
+		payload, decodeErr :=
+			decodeStrict[testRunStartPayloadV13](
+				request.Payload,
+			)
+		if decodeErr != nil ||
+			!validID(payload.IdempotencyKey) ||
+			!validProjectID(payload.ProjectID) ||
+			!validHash(payload.ProfileID) ||
+			!validHash(payload.CatalogRevision) ||
+			payload.RepeatCount < 1 ||
+			payload.RepeatCount > 100 {
+			return invalidPayload(version, request)
+		}
+		selection, decodeErr := decodeTestSelection(
+			payload.Selection,
+		)
+		if decodeErr != nil {
+			return invalidPayload(version, request)
+		}
+		var value testdomain.TestRun
+		started, value, err = backend.StartTestRun(
+			ctx,
+			TestRunStart{
+				IdempotencyKey:  payload.IdempotencyKey,
+				ProjectID:       payload.ProjectID,
+				ProfileID:       payload.ProfileID,
+				CatalogRevision: payload.CatalogRevision,
+				Selection:       selection,
+				RepeatCount:     payload.RepeatCount,
+			},
+		)
+		run = &value
+	default:
+		return invalidPayload(version, request)
+	}
+	if err != nil {
+		return backendFailure(version, request, err)
+	}
+	projected, err := toProtocolTaskV13(started, run)
+	if err != nil {
+		return backendFailure(version, request, err)
+	}
+	return handled(protocol.Success(version, request, projected))
+}
+
 func handled(response protocol.Response) HandleResult { return HandleResult{Response: response} }
 
 func invalidPayload(version string, request protocol.Request) HandleResult {
@@ -545,6 +1027,14 @@ func backendFailure(version string, request protocol.Request, err error) HandleR
 		code, message, retryable = "TARGET_NOT_FOUND", "target was not found", false
 	case errors.Is(err, build.ErrConfigureRequired):
 		code, message, retryable = "CONFIGURE_REQUIRED", "CMake configure is required", false
+	case errors.Is(err, testdomain.ErrCatalogStale):
+		code, message, retryable = "CATALOG_STALE", "test Catalog is stale", false
+	case errors.Is(err, testdomain.ErrEmptySelection),
+		errors.Is(err, testdomain.ErrSelectionTooLarge),
+		errors.Is(err, testdomain.ErrUnknownSelectionID),
+		errors.Is(err, testdomain.ErrInvalidSelection),
+		errors.Is(err, testdomain.ErrFailedRunResolverRequired):
+		code, message, retryable = "INVALID_TASK_SPEC", "test selection is invalid", false
 	case errors.Is(err, task.ErrIdempotencyConflict):
 		code, message, retryable = "IDEMPOTENCY_CONFLICT", "idempotency key conflicts with an existing task", false
 	case errors.Is(err, eventbroker.ErrInvalidCursor):
@@ -590,6 +1080,28 @@ func decodeList(raw json.RawMessage) (listPayload, string, int, error) {
 	return payload, cursor, limit, err
 }
 
+func normalizedTestPage(
+	cursorValue *string,
+	limitValue *int,
+	defaultLimit int,
+) (string, int, error) {
+	cursor := ""
+	if cursorValue != nil {
+		if *cursorValue == "" || len(*cursorValue) > 4096 {
+			return "", 0, errors.New("invalid cursor")
+		}
+		cursor = *cursorValue
+	}
+	limit := defaultLimit
+	if limitValue != nil {
+		if *limitValue < 1 || *limitValue > maxTestPageLimit {
+			return "", 0, errors.New("invalid limit")
+		}
+		limit = *limitValue
+	}
+	return cursor, limit, nil
+}
+
 func normalizedPage(cursorValue *string, limitValue *int) (string, int, error) {
 	cursor := ""
 	if cursorValue != nil {
@@ -606,6 +1118,98 @@ func normalizedPage(cursorValue *string, limitValue *int) (string, int, error) {
 		limit = *limitValue
 	}
 	return cursor, limit, nil
+}
+
+func decodeTestSelection(
+	raw json.RawMessage,
+) (testdomain.Selection, error) {
+	var discriminator struct {
+		Mode testdomain.SelectionMode `json:"mode"`
+	}
+	if err := json.Unmarshal(raw, &discriminator); err != nil ||
+		!discriminator.Mode.Valid() {
+		return testdomain.Selection{}, errors.New(
+			"invalid test selection discriminator",
+		)
+	}
+	var selection testdomain.Selection
+	switch discriminator.Mode {
+	case testdomain.SelectionAll:
+		value, err := decodeStrict[struct {
+			Mode testdomain.SelectionMode `json:"mode"`
+		}](raw)
+		if err != nil {
+			return testdomain.Selection{}, err
+		}
+		selection.Mode = value.Mode
+	case testdomain.SelectionContainers:
+		value, err := decodeStrict[struct {
+			Mode         testdomain.SelectionMode `json:"mode"`
+			ContainerIDs []testdomain.ID          `json:"containerIds"`
+		}](raw)
+		if err != nil {
+			return testdomain.Selection{}, err
+		}
+		selection.Mode = value.Mode
+		selection.ContainerIDs = value.ContainerIDs
+	case testdomain.SelectionItems:
+		value, err := decodeStrict[struct {
+			Mode    testdomain.SelectionMode `json:"mode"`
+			ItemIDs []testdomain.ID          `json:"itemIds"`
+		}](raw)
+		if err != nil {
+			return testdomain.Selection{}, err
+		}
+		selection.Mode = value.Mode
+		selection.ItemIDs = value.ItemIDs
+	case testdomain.SelectionFilter:
+		type filterPayload struct {
+			Group          *string         `json:"group"`
+			Suite          *string         `json:"suite"`
+			Label          *string         `json:"label"`
+			NameContains   *string         `json:"nameContains"`
+			IncludeItemIDs []testdomain.ID `json:"includeItemIds"`
+			ExcludeItemIDs []testdomain.ID `json:"excludeItemIds"`
+		}
+		value, err := decodeStrict[struct {
+			Mode   testdomain.SelectionMode `json:"mode"`
+			Filter filterPayload            `json:"filter"`
+		}](raw)
+		if err != nil {
+			return testdomain.Selection{}, err
+		}
+		selection.Mode = value.Mode
+		if value.Filter.Group != nil {
+			selection.Filter.Group = *value.Filter.Group
+		}
+		if value.Filter.Suite != nil {
+			selection.Filter.Suite = *value.Filter.Suite
+		}
+		if value.Filter.Label != nil {
+			selection.Filter.Label = *value.Filter.Label
+		}
+		if value.Filter.NameContains != nil {
+			selection.Filter.NameContains =
+				*value.Filter.NameContains
+		}
+		selection.Filter.IncludeItemIDs =
+			value.Filter.IncludeItemIDs
+		selection.Filter.ExcludeItemIDs =
+			value.Filter.ExcludeItemIDs
+	case testdomain.SelectionFailedFromRun:
+		value, err := decodeStrict[struct {
+			Mode  testdomain.SelectionMode `json:"mode"`
+			RunID string                   `json:"runId"`
+		}](raw)
+		if err != nil || !validID(value.RunID) {
+			return testdomain.Selection{}, errors.New(
+				"invalid failed run selection",
+			)
+		}
+		selection.Mode = value.Mode
+		selection.RunID = value.RunID
+	}
+	return testdomain.NewSelection(selection)
 }
 
 func decodeStrict[T any](raw json.RawMessage) (T, error) {
@@ -850,6 +1454,186 @@ type storedBuildRequest struct {
 	TimeoutMS      int64    `json:"timeoutMs"`
 }
 
+type storedTestDiscoveryRequest struct {
+	ProjectID      string   `json:"projectId"`
+	BuildProfileID string   `json:"buildProfileId"`
+	TargetIDs      []string `json:"targetIds"`
+	Jobs           int64    `json:"jobs"`
+	TimeoutMS      int64    `json:"timeoutMs"`
+}
+
+func toProtocolTaskV13(
+	value task.Task,
+	run *testdomain.TestRun,
+) (taskv13.TaskSnapshotV13, error) {
+	switch value.Kind {
+	case task.KindSimulation:
+		result := taskv13.SimulationTaskSnapshotV13{
+			TaskID:       value.ID,
+			Kind:         taskv13.Simulation,
+			Scenario:     taskv13.SimulationScenarioV13(value.Scenario),
+			Status:       taskv13.TaskStatusV13(value.Status),
+			CreatedAt:    value.CreatedAt,
+			LastSequence: value.LastSequence,
+		}
+		if value.Timeout > 0 {
+			timeout := value.Timeout.Milliseconds()
+			result.TimeoutMS = &timeout
+		}
+		projectV13TaskCompletion(
+			value,
+			&result.Outcome,
+			&result.StartedAt,
+			&result.FinishedAt,
+			&result.ErrorCode,
+			&result.ErrorMessage,
+		)
+		return result, nil
+	case task.KindCMakeBuild:
+		request, err :=
+			decodeStrict[storedBuildRequest](value.Request)
+		if err != nil ||
+			!validProjectID(request.ProjectID) ||
+			!validHash(request.BuildProfileID) ||
+			request.TargetIDs == nil ||
+			!validTargetIDs(request.TargetIDs) ||
+			request.Jobs < 1 || request.Jobs > 256 ||
+			!validHash(value.WorkspaceGeneration) ||
+			value.Timeout < time.Millisecond ||
+			value.Timeout > 24*time.Hour ||
+			request.TimeoutMS != value.Timeout.Milliseconds() {
+			return nil, errors.New(
+				"invalid persisted CMake task",
+			)
+		}
+		result := taskv13.CmakeBuildTaskSnapshotV13{
+			TaskID:              value.ID,
+			Kind:                taskv13.CmakeBuild,
+			WorkspaceGeneration: value.WorkspaceGeneration,
+			ProjectID:           request.ProjectID,
+			BuildProfileID:      request.BuildProfileID,
+			TargetIDs: append(
+				[]string{},
+				request.TargetIDs...,
+			),
+			Jobs:         request.Jobs,
+			TimeoutMS:    value.Timeout.Milliseconds(),
+			Status:       taskv13.TaskStatusV13(value.Status),
+			CreatedAt:    value.CreatedAt,
+			LastSequence: value.LastSequence,
+		}
+		projectV13TaskCompletion(
+			value,
+			&result.Outcome,
+			&result.StartedAt,
+			&result.FinishedAt,
+			&result.ErrorCode,
+			&result.ErrorMessage,
+		)
+		return result, nil
+	case task.KindTestDiscovery:
+		request, err :=
+			decodeStrict[storedTestDiscoveryRequest](
+				value.Request,
+			)
+		if err != nil ||
+			!validProjectID(request.ProjectID) ||
+			!validHash(request.BuildProfileID) ||
+			request.TargetIDs == nil ||
+			!validTargetIDs(request.TargetIDs) ||
+			request.Jobs < 1 || request.Jobs > 256 ||
+			!validHash(value.WorkspaceGeneration) ||
+			value.Timeout < time.Millisecond ||
+			value.Timeout > 24*time.Hour ||
+			request.TimeoutMS !=
+				value.Timeout.Milliseconds() {
+			return nil, errors.New(
+				"invalid persisted test discovery task",
+			)
+		}
+		result := taskv13.TestDiscoveryTaskSnapshotV13{
+			TaskID:       value.ID,
+			Kind:         taskv13.TestDiscovery,
+			ProjectID:    request.ProjectID,
+			ProfileID:    request.BuildProfileID,
+			Status:       taskv13.TaskStatusV13(value.Status),
+			CreatedAt:    value.CreatedAt,
+			LastSequence: value.LastSequence,
+		}
+		projectV13TaskCompletion(
+			value,
+			&result.Outcome,
+			&result.StartedAt,
+			&result.FinishedAt,
+			&result.ErrorCode,
+			&result.ErrorMessage,
+		)
+		return result, nil
+	case task.KindTestRun:
+		if run == nil || run.TaskID != value.ID ||
+			run.Summary.Iterations < 1 ||
+			!validProjectID(run.ProjectID) ||
+			!validHash(run.ProfileID) ||
+			!validHash(run.CatalogRevision) ||
+			!validID(run.RunID) {
+			return nil, errors.New(
+				"invalid persisted test run task",
+			)
+		}
+		result := taskv13.TestRunTaskSnapshotV13{
+			TaskID:          value.ID,
+			Kind:            taskv13.TestRun,
+			ProjectID:       run.ProjectID,
+			ProfileID:       run.ProfileID,
+			CatalogRevision: run.CatalogRevision,
+			RunID:           run.RunID,
+			RepeatCount:     run.Summary.Iterations,
+			Status:          taskv13.TaskStatusV13(value.Status),
+			CreatedAt:       value.CreatedAt,
+			LastSequence:    value.LastSequence,
+		}
+		projectV13TaskCompletion(
+			value,
+			&result.Outcome,
+			&result.StartedAt,
+			&result.FinishedAt,
+			&result.ErrorCode,
+			&result.ErrorMessage,
+		)
+		return result, nil
+	default:
+		return nil, errors.New("unsupported task kind")
+	}
+}
+
+func projectV13TaskCompletion(
+	value task.Task,
+	outcome **taskv13.TaskOutcomeV13,
+	startedAt, finishedAt **time.Time,
+	errorCode, errorMessage **string,
+) {
+	if value.Status == task.StatusFinished {
+		projected := taskv13.TaskOutcomeV13(value.Outcome)
+		*outcome = &projected
+	}
+	if value.StartedAt != nil {
+		projected := *value.StartedAt
+		*startedAt = &projected
+	}
+	if value.FinishedAt != nil {
+		projected := *value.FinishedAt
+		*finishedAt = &projected
+	}
+	if value.ErrorCode != "" {
+		projected := value.ErrorCode
+		*errorCode = &projected
+	}
+	if value.ErrorMessage != "" {
+		projected := value.ErrorMessage
+		*errorMessage = &projected
+	}
+}
+
 func toProtocolTaskV12(value task.Task) (taskv12.TaskSnapshotV12, error) {
 	switch value.Kind {
 	case task.KindSimulation:
@@ -976,6 +1760,262 @@ func toProtocolArtifactV12(value task.Artifact) artifactv12.ArtifactMetadataV12 
 	}
 }
 
+func toProtocolTestCatalog(
+	page testdomain.CatalogPage,
+) (testv13.TestCatalog, error) {
+	if !validProjectID(page.ProjectID) ||
+		!validHash(page.ProfileID) ||
+		!validHash(page.Revision) ||
+		page.GeneratedAt.IsZero() ||
+		page.Partial ||
+		len(page.Containers) > maxTestPageLimit ||
+		len(page.Items) > maxTestPageLimit ||
+		len(page.Diagnostics) > maxTestPageLimit {
+		return testv13.TestCatalog{}, errors.New(
+			"invalid persisted test Catalog page",
+		)
+	}
+	result := testv13.TestCatalog{
+		ProjectID:   page.ProjectID,
+		ProfileID:   page.ProfileID,
+		Revision:    page.Revision,
+		GeneratedAt: page.GeneratedAt.UTC(),
+		Containers: make(
+			[]testv13.TestContainer,
+			len(page.Containers),
+		),
+		Items: make(
+			[]testv13.TestItem,
+			len(page.Items),
+		),
+		Diagnostics: make(
+			[]testv13.DiagnosticV13,
+			len(page.Diagnostics),
+		),
+		Partial: false,
+	}
+	if page.NextCursor != "" {
+		cursor := page.NextCursor
+		result.NextCursor = &cursor
+	}
+	for index, container := range page.Containers {
+		result.Containers[index] = testv13.TestContainer{
+			ID:               container.ID.String(),
+			ProjectID:        container.ProjectID,
+			CtestLogicalName: container.CTestLogicalName,
+			DisplayName:      container.DisplayName,
+			Framework: testv13.TestFrameworkV13(
+				container.Framework,
+			),
+			Capabilities: testv13.TestCapabilitiesV13{
+				CanDiscoverCases: container.Capabilities.
+					CanDiscoverCases,
+				CanRunCase: container.Capabilities.
+					CanRunCase,
+				CanReportSkipped: container.Capabilities.
+					CanReportSkipped,
+				CanReportSourceLocation: container.
+					Capabilities.CanReportSourceLocation,
+				CanReportMockDetails: container.Capabilities.
+					CanReportMockDetails,
+			},
+			Labels:   append([]string{}, container.Labels...),
+			Disabled: container.Disabled,
+		}
+		if container.DegradedReason != "" {
+			reason := container.DegradedReason
+			result.Containers[index].DegradedReason = &reason
+		}
+		result.Containers[index].SourceLocation =
+			toProtocolTestLocation(container.SourceLocation)
+	}
+	for index, item := range page.Items {
+		result.Items[index] = testv13.TestItem{
+			ID:          item.ID.String(),
+			ContainerID: item.ContainerID.String(),
+			Kind: testv13.TestItemKindV13(
+				item.Kind,
+			),
+			Framework: testv13.TestFrameworkV13(
+				item.Framework,
+			),
+			LogicalName: item.LogicalName,
+			DisplayName: item.DisplayName,
+			Labels:      append([]string{}, item.Labels...),
+			Disabled:    item.Disabled,
+			Parameters: make(
+				[]testv13.TestParameterV13,
+				len(item.Parameters),
+			),
+			SourceLocation: toProtocolTestLocation(
+				item.SourceLocation,
+			),
+		}
+		if item.ParentID != "" {
+			parent := item.ParentID.String()
+			result.Items[index].ParentID = &parent
+		}
+		for parameterIndex, parameter := range item.Parameters {
+			value := parameter.Value
+			result.Items[index].Parameters[parameterIndex] =
+				testv13.TestParameterV13{
+					Name: parameter.Name,
+					Value: &testv13.Value{
+						String: &value,
+					},
+				}
+		}
+	}
+	for index, value := range page.Diagnostics {
+		result.Diagnostics[index] =
+			toProtocolTestDiagnostic(value)
+	}
+	return result, nil
+}
+
+func toProtocolTestRun(
+	value testdomain.TestRun,
+) (testv13.TestRun, error) {
+	validated, err := testdomain.NewTestRun(value)
+	if err != nil {
+		return testv13.TestRun{}, err
+	}
+	result := testv13.TestRun{
+		RunID:           validated.RunID,
+		TaskID:          validated.TaskID,
+		ProjectID:       validated.ProjectID,
+		ProfileID:       validated.ProfileID,
+		ToolchainID:     validated.ToolchainID,
+		CatalogRevision: validated.CatalogRevision,
+		SelectionSnapshot: testv13.TestSelectionSnapshotV13{
+			Mode: testv13.TestSelectionModeV13(
+				validated.SelectionSnapshot.Mode,
+			),
+			ContainerIDS: testIDsToStrings(
+				validated.SelectionSnapshot.ContainerIDs,
+			),
+			ItemIDS: testIDsToStrings(
+				validated.SelectionSnapshot.ItemIDs,
+			),
+		},
+		Status:         testv13.TestRunStatusV13(validated.Status),
+		StartedAt:      cloneProtocolTime(validated.StartedAt),
+		FinishedAt:     cloneProtocolTime(validated.FinishedAt),
+		Summary:        toProtocolTestRunSummary(validated.Summary),
+		ResultRevision: validated.ResultRevision,
+		Incomplete:     validated.Incomplete,
+	}
+	if validated.Outcome != "" {
+		outcome := testv13.TestRunOutcomeV13(validated.Outcome)
+		result.Outcome = &outcome
+	}
+	return result, nil
+}
+
+func toProtocolTestRunPage(
+	page testdomain.RunPage,
+) (testv13.TestRunPage, error) {
+	if len(page.Items) > maxTestPageLimit {
+		return testv13.TestRunPage{}, errors.New(
+			"test run page exceeds the protocol limit",
+		)
+	}
+	result := testv13.TestRunPage{
+		Items: make([]testv13.TestRun, len(page.Items)),
+	}
+	if page.NextCursor != "" {
+		cursor := page.NextCursor
+		result.NextCursor = &cursor
+	}
+	for index, run := range page.Items {
+		projected, err := toProtocolTestRun(run)
+		if err != nil {
+			return testv13.TestRunPage{}, err
+		}
+		result.Items[index] = projected
+	}
+	return result, nil
+}
+
+func toProtocolTestRunSummary(
+	value testdomain.RunSummary,
+) testv13.TestRunSummaryV13 {
+	return testv13.TestRunSummaryV13{
+		Total:      value.Total,
+		Completed:  value.Completed,
+		Passed:     value.Passed,
+		Failed:     value.Failed,
+		Skipped:    value.Skipped,
+		Errored:    value.Errored,
+		Cancelled:  value.Cancelled,
+		TimedOut:   value.TimedOut,
+		NotRun:     value.NotRun,
+		Iterations: value.Iterations,
+	}
+}
+
+func toProtocolTestLocation(
+	value *testdomain.SourceLocation,
+) *testv13.TestSourceLocationV13 {
+	if value == nil {
+		return nil
+	}
+	result := &testv13.TestSourceLocationV13{
+		URI:        value.URI,
+		Navigable:  value.Navigable,
+		Provenance: testv13.TestSourceProvenanceV13(value.Provenance),
+	}
+	if value.Line > 0 {
+		line := int64(value.Line)
+		result.Line = &line
+	}
+	if value.Column > 0 {
+		column := int64(value.Column)
+		result.Column = &column
+	}
+	return result
+}
+
+func toProtocolTestDiagnostic(
+	value testdomain.Diagnostic,
+) testv13.DiagnosticV13 {
+	result := testv13.DiagnosticV13{
+		Severity: testv13.DiagnosticSeverityV13(value.Severity),
+		Category: testv13.CategoryV13(value.Category),
+		Code:     value.Code,
+		Message:  value.Message,
+	}
+	if value.SourceURI != "" {
+		source := value.SourceURI
+		result.SourceURI = &source
+	}
+	if value.Line > 0 {
+		line := int64(value.Line)
+		result.Line = &line
+	}
+	if value.Column > 0 {
+		column := int64(value.Column)
+		result.Column = &column
+	}
+	return result
+}
+
+func testIDsToStrings(values []testdomain.ID) []string {
+	result := make([]string, len(values))
+	for index, value := range values {
+		result[index] = value.String()
+	}
+	return result
+}
+
+func cloneProtocolTime(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	copy := value.UTC()
+	return &copy
+}
+
 func validID(value string) bool {
 	if len(value) != 32 {
 		return false
@@ -1046,11 +2086,67 @@ func validBuildStart(value buildStartPayloadV12) bool {
 		value.TimeoutMS >= 1 && value.TimeoutMS <= maxTimeoutMS
 }
 
+func legacyTaskHidden(version string, kind task.Kind) bool {
+	switch version {
+	case protocol.Version11:
+		return kind != task.KindSimulation
+	case protocol.Version12:
+		return kind != task.KindSimulation &&
+			kind != task.KindCMakeBuild
+	default:
+		return false
+	}
+}
+
+func capabilitiesV13() capabilitiesv13.CapabilitiesV13 {
+	return capabilitiesv13.CapabilitiesV13{
+		WorkspaceInspect:           true,
+		TargetList:                 true,
+		CmakeBuild:                 true,
+		TestDiscovery:              true,
+		TestRun:                    true,
+		OpaqueCTestFallback:        true,
+		CtestJSON:                  true,
+		MaxRepeatCount:             100,
+		MaxSelectionSize:           100_000,
+		MaxCatalogPageSize:         1_000,
+		UnityHelperContractVersion: "1",
+		UnityRunnerContractVersion: "utide.runner.v1",
+		FrameworkAdapters: []capabilitiesv13.FrameworkAdapterCapabilityV13{
+			{
+				ID:                      capabilitiesv13.Cpputest,
+				ContractVersion:         "cpputest.v1",
+				DisplayName:             "CppUTest / CppUMock",
+				CanDiscoverCases:        true,
+				CanRunCase:              true,
+				CanReportSkipped:        true,
+				CanReportSourceLocation: true,
+				CanReportMockDetails:    true,
+			},
+			{
+				ID:                      capabilitiesv13.Unity,
+				ContractVersion:         "utide.runner.v1",
+				DisplayName:             "Unity / CMock",
+				CanDiscoverCases:        true,
+				CanRunCase:              true,
+				CanReportSkipped:        true,
+				CanReportSourceLocation: true,
+				CanReportMockDetails:    true,
+			},
+		},
+	}
+}
+
 func negotiate(envelopeVersion string, supported []string) (string, bool) {
 	if envelopeVersion == protocol.Version10 && len(supported) == 0 {
 		return protocol.Version10, true
 	}
-	candidates := []string{protocol.Version12, protocol.Version11, protocol.Version10}
+	candidates := []string{
+		protocol.Version13,
+		protocol.Version12,
+		protocol.Version11,
+		protocol.Version10,
+	}
 	maximum := -1
 	for index, candidate := range candidates {
 		if candidate == envelopeVersion {
@@ -1083,6 +2179,17 @@ func phase2Method(method string) bool {
 func phase3Method(method string) bool {
 	switch method {
 	case "workspace/inspect", "cmake/targets/list":
+		return true
+	default:
+		return false
+	}
+}
+
+func phase4Method(method string) bool {
+	switch method {
+	case "tests/catalog/get",
+		"tests/runs/get",
+		"tests/runs/list":
 		return true
 	default:
 		return false

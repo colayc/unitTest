@@ -285,19 +285,15 @@ func (coordinator *Coordinator) StartRun(
 		return task.Task{}, testdomain.TestRun{},
 			task.ErrInvalidArgument
 	}
-	execution := &runExecution{
-		runID:          runID,
-		prepared:       prepared,
-		refresher:      coordinator.config.Refresher,
-		runs:           coordinator.config.Runs,
-		runner:         coordinator.config.Runner,
-		selection:      selection.Clone(),
-		repeatCount:    request.RepeatCount,
-		taskTimeout:    request.Timeout,
-		maxConcurrency: request.MaxConcurrency,
-		runtimeSteps:   len(plan.Steps),
+	execution, err := coordinator.newRunExecution(
+		prepared,
+		runID,
+		selection,
+		request,
+	)
+	if err != nil {
+		return task.Task{}, testdomain.TestRun{}, err
 	}
-	execution.lastBuildStep = plan.Steps[len(plan.Steps)-1].ID
 	started, err := coordinator.config.Tasks.Start(
 		ctx,
 		task.StartRequest{
@@ -328,6 +324,41 @@ func (coordinator *Coordinator) StartRun(
 			task.ErrConflict
 	}
 	return started, persisted, nil
+}
+
+func (coordinator *Coordinator) newRunExecution(
+	prepared PreparedBuild,
+	runID string,
+	selection testdomain.SelectionSnapshot,
+	request RunRequest,
+) (*runExecution, error) {
+	if coordinator == nil || nilCoordinatorPort(prepared) ||
+		!lowerHexID(runID, 32) ||
+		request.RepeatCount < 1 ||
+		request.RepeatCount > MaxRepeatCount ||
+		request.Timeout < time.Millisecond ||
+		request.Timeout > 24*time.Hour ||
+		request.MaxConcurrency < 1 ||
+		request.MaxConcurrency > maxScheduleConcurrency {
+		return nil, task.ErrInvalidArgument
+	}
+	plan := prepared.Plan()
+	if len(plan.Steps) == 0 {
+		return nil, task.ErrInvalidArgument
+	}
+	return &runExecution{
+		runID:          runID,
+		lastBuildStep:  plan.Steps[len(plan.Steps)-1].ID,
+		prepared:       prepared,
+		refresher:      coordinator.config.Refresher,
+		runs:           coordinator.config.Runs,
+		runner:         coordinator.config.Runner,
+		selection:      selection.Clone(),
+		repeatCount:    request.RepeatCount,
+		taskTimeout:    request.Timeout,
+		maxConcurrency: request.MaxConcurrency,
+		runtimeSteps:   len(plan.Steps),
+	}, nil
 }
 
 type runExecution struct {

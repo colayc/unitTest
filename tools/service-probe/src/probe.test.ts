@@ -12,8 +12,10 @@ import {
   type ProtocolTaskEvent,
   type ProtocolTaskSnapshot
 } from "@unit-test-ide/test-client";
+import { TestSelectionModeV13 } from "@unit-test-ide/protocol-models";
 import { endpointForDirectory } from "./endpoint.js";
 import { assertProcessGone, prepareTokenFile, runProbe, startService, startTaskService, withNamedTimeout } from "./probe.js";
+import { prepareTestFrameworkWorkspace } from "./test-framework-fixture.js";
 
 const root = resolve(import.meta.dirname, "../../..");
 const binary = join(root, "build", process.platform === "win32" ? "unit-test-service.exe" : "unit-test-service");
@@ -452,10 +454,12 @@ function assertSimulationProtocolEvents(events: ProtocolTaskEvent[], afterSequen
   const version = events[0]?.protocolVersion;
   for (const event of events) {
     assert.equal(event.protocolVersion, version, "event replay mixed protocol versions");
-    const allowedNames = version === "1.2" ? V12_EVENT_NAMES : V11_EVENT_NAMES;
+    const allowedNames = version === "1.2" || version === "1.3"
+      ? V12_EVENT_NAMES
+      : V11_EVENT_NAMES;
     assert.equal(allowedNames.has(event.event), true, `${version} leaked event type ${event.event}`);
     if (event.event !== "task.output") continue;
-    const expectedKeys = version === "1.2"
+    const expectedKeys = version === "1.2" || version === "1.3"
       ? ["stepId", "stream", "text", "truncated"]
       : ["stream", "text", "truncated"];
     assert.deepEqual(
@@ -497,7 +501,24 @@ test("prepares the token file before writing the secret", async () => {
 
 test("probe authenticates, reads capabilities, and shuts the service down", async () => {
   const capabilities = await runProbe(binary);
-  assert.deepEqual(capabilities, { workspaceInspect: true, targetList: true, cmakeBuild: true });
+  assert.equal(
+    "workspaceInspect" in capabilities &&
+      capabilities.workspaceInspect,
+    true
+  );
+  assert.equal(
+    "targetList" in capabilities && capabilities.targetList,
+    true
+  );
+  assert.equal(
+    "cmakeBuild" in capabilities && capabilities.cmakeBuild,
+    true
+  );
+  assert.equal(
+    "testDiscovery" in capabilities && capabilities.testDiscovery,
+    true
+  );
+  assert.equal("testRun" in capabilities && capabilities.testRun, true);
 });
 
 test("successful simulation preserves the complete negotiated event stream", async () => {
@@ -765,6 +786,290 @@ test("trusted workspace completes deterministic CMake builds and skips the secon
     await fixture?.dispose();
     await rm(workspaceDirectory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     await rm(serviceDirectory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
+test("protocol v1.3 discovers, runs, replays, and reruns deterministic CppUTest failures", async () => {
+  const workspaceDirectory = await mkdtemp(
+    join(dirname(binary), "unit-test-ide-test-workspace-")
+  );
+  const serviceDirectory = await mkdtemp(
+    join(dirname(binary), "unit-test-ide-test-service-")
+  );
+  let fixture: Awaited<ReturnType<typeof startService>> | undefined;
+  let secondary: ProtocolClient | undefined;
+  let stage = "prepare test workspace";
+  try {
+    await prepareTestFrameworkWorkspace(workspaceDirectory);
+    stage = "start trusted test service";
+    fixture = await startService(binary, serviceDirectory, {
+      timeoutMs: WORKSPACE_INSPECTION_TIMEOUT_MS,
+      workspaceRoot: workspaceDirectory,
+      trustedWorkspace: true,
+      devCMakeExecutable: cmakeFixture
+    });
+    stage = "inspect test workspace";
+    const workspace = await withNamedTimeout(
+      "test workspace inspection",
+      fixture.client.inspectWorkspace(),
+      WORKSPACE_INSPECTION_TIMEOUT_MS
+    );
+    const project = workspace.projects.find(
+      (candidate) => candidate.projectId === "root"
+    );
+    const profile = project?.buildProfiles[0];
+    assert.ok(project, "test fixture project must be inspectable");
+    assert.ok(profile, "test fixture must expose a build profile");
+
+    stage = "subscribe test events";
+    const subscription = await withNamedTimeout(
+      "test event subscription",
+      fixture.client.subscribeEvents(0),
+      EVENT_TIMEOUT_MS
+    );
+    stage = "start test discovery";
+    const discovery = await withNamedTimeout(
+      "deterministic test discovery",
+      fixture.client.discoverTests({
+        idempotencyKey: randomBytes(16).toString("hex"),
+        projectId: project.projectId,
+        profileId: profile.buildProfileId
+      }),
+      EVENT_TIMEOUT_MS
+    );
+    const discoveryEvents: ProtocolTaskEvent[] = [];
+    stage = "wait for test discovery";
+    const discoveryFinished = await waitForFinished(
+      subscription,
+      discovery.taskId,
+      discoveryEvents
+    );
+    assert.equal(
+      (discoveryFinished.payload as { outcome?: unknown }).outcome,
+      "succeeded"
+    );
+    assert.deepEqual(
+      discoveryEvents
+        .filter((event) =>
+          event.taskId === discovery.taskId &&
+          event.event.startsWith("test.")
+        )
+        .map((event) => event.event),
+      [
+        "test.discovery.started",
+        "test.container.discovered",
+        "test.catalog.published"
+      ]
+    );
+    const discoveryDurable = await withNamedTimeout(
+      "durable test discovery",
+      fixture.client.getTask(discovery.taskId),
+      EVENT_TIMEOUT_MS
+    );
+    stage = "read deterministic catalog";
+    const catalog = await withNamedTimeout(
+      "deterministic test catalog",
+      fixture.client.getTestCatalog({
+        projectId: project.projectId,
+        profileId: profile.buildProfileId,
+        limit: 1000
+      }),
+      EVENT_TIMEOUT_MS
+    );
+    assert.equal(catalog.partial, false);
+    assert.equal(catalog.containers.length, 1);
+    assert.deepEqual(
+      catalog.items
+        .filter((item) => item.kind === "case")
+        .map((item) => item.logicalName)
+        .sort(),
+      ["fails", "passes"]
+    );
+
+    stage = "run all deterministic tests";
+    const firstRunTask = await withNamedTimeout(
+      "deterministic test run",
+      fixture.client.runTests({
+        idempotencyKey: randomBytes(16).toString("hex"),
+        projectId: project.projectId,
+        profileId: profile.buildProfileId,
+        catalogRevision: catalog.revision,
+        selection: { mode: TestSelectionModeV13.All },
+        repeatCount: 1
+      }),
+      EVENT_TIMEOUT_MS
+    );
+    const firstRunEvents: ProtocolTaskEvent[] = [];
+    stage = "wait for deterministic test run";
+    const firstTaskFinished = await waitForFinished(
+      subscription,
+      firstRunTask.taskId,
+      firstRunEvents
+    );
+    assert.equal(
+      (firstTaskFinished.payload as { outcome?: unknown }).outcome,
+      "succeeded",
+      "a fully captured assertion failure must not fail orchestration"
+    );
+    const firstRunFinished = firstRunEvents.find(
+      (event) =>
+        event.taskId === firstRunTask.taskId &&
+        event.event === "test.run.finished"
+    );
+    assert.ok(firstRunFinished, "test.run.finished must be durable");
+    const firstRunIdValue = (
+      firstRunFinished.payload as { runId?: unknown }
+    ).runId;
+    if (typeof firstRunIdValue !== "string") {
+      throw new Error("test.run.finished omitted runId");
+    }
+    const firstRunId = firstRunIdValue;
+    const firstRun = await withNamedTimeout(
+      "first TestRun lookup",
+      fixture.client.getTestRun(firstRunId),
+      EVENT_TIMEOUT_MS
+    );
+    assert.equal(firstRun.status, "completed");
+    assert.equal(firstRun.outcome, "failed");
+    assert.deepEqual(
+      {
+        total: firstRun.summary.total,
+        completed: firstRun.summary.completed,
+        passed: firstRun.summary.passed,
+        failed: firstRun.summary.failed
+      },
+      { total: 2, completed: 2, passed: 1, failed: 1 }
+    );
+    stage = "list first TestRun artifacts";
+    const firstRunArtifacts = await withNamedTimeout(
+      "first TestRun artifact list",
+      fixture.client.listArtifacts(firstRunTask.taskId),
+      EVENT_TIMEOUT_MS
+    );
+    assert.deepEqual(
+      firstRunArtifacts.items.map((artifact) => artifact.kind).sort(),
+      [
+        "diagnostics",
+        "execution-plan",
+        "stderr",
+        "stdout",
+        "task-summary",
+        "test-catalog",
+        "test-results",
+        "test-run-summary",
+        "test-selection"
+      ]
+    );
+
+    stage = "replay first TestRun from durable cursor";
+    const firstRunDurable = await withNamedTimeout(
+      "durable first TestRun task",
+      fixture.client.getTask(firstRunTask.taskId),
+      EVENT_TIMEOUT_MS
+    );
+    secondary = await fixture.connectClient();
+    const replay = await withNamedTimeout(
+      "TestRun replay subscription",
+      secondary.subscribeEvents(discoveryDurable.lastSequence),
+      EVENT_TIMEOUT_MS
+    );
+    const replayed = await collectThroughSequence(
+      replay,
+      firstRunDurable.lastSequence,
+      discoveryDurable.lastSequence,
+      "TestRun event replay"
+    );
+    assertContinuousUniqueSequences(replayed);
+    assert.ok(
+      replayed.some((event) =>
+        event.taskId === firstRunTask.taskId &&
+        event.event === "test.run.finished"
+      ),
+      "cursor replay must retain test.run.finished"
+    );
+
+    stage = "rerun deterministic failures";
+    const rerunTask = await withNamedTimeout(
+      "failed TestRun rerun",
+      fixture.client.runTests({
+        idempotencyKey: randomBytes(16).toString("hex"),
+        projectId: project.projectId,
+        profileId: profile.buildProfileId,
+        catalogRevision: catalog.revision,
+        selection: {
+          mode: TestSelectionModeV13.FailedFromRun,
+          runId: firstRunId
+        },
+        repeatCount: 1
+      }),
+      EVENT_TIMEOUT_MS
+    );
+    const rerunEvents: ProtocolTaskEvent[] = [];
+    const rerunTaskFinished = await waitForFinished(
+      subscription,
+      rerunTask.taskId,
+      rerunEvents
+    );
+    assert.equal(
+      (rerunTaskFinished.payload as { outcome?: unknown }).outcome,
+      "succeeded"
+    );
+    const rerunFinished = rerunEvents.find(
+      (event) =>
+        event.taskId === rerunTask.taskId &&
+        event.event === "test.run.finished"
+    );
+    assert.ok(rerunFinished, "rerun must finish its TestRun");
+    const rerunIdValue = (
+      rerunFinished.payload as { runId?: unknown }
+    ).runId;
+    if (typeof rerunIdValue !== "string") {
+      throw new Error("rerun test.run.finished omitted runId");
+    }
+    const rerunId = rerunIdValue;
+    const rerun = await withNamedTimeout(
+      "rerun TestRun lookup",
+      fixture.client.getTestRun(rerunId),
+      EVENT_TIMEOUT_MS
+    );
+    assert.equal(rerun.selectionSnapshot.mode, "failedFromRun");
+    assert.deepEqual(
+      {
+        total: rerun.summary.total,
+        completed: rerun.summary.completed,
+        failed: rerun.summary.failed
+      },
+      { total: 1, completed: 1, failed: 1 }
+    );
+    const runs = await withNamedTimeout(
+      "TestRun history",
+      fixture.client.listTestRuns({
+        projectId: project.projectId,
+        profileId: profile.buildProfileId,
+        limit: 1000
+      }),
+      EVENT_TIMEOUT_MS
+    );
+    assert.deepEqual(
+      new Set(runs.items.map((run) => run.runId)),
+      new Set([firstRunId, rerunId])
+    );
+  } catch (error) {
+    throw new Error(
+      `deterministic Protocol v1.3 E2E failed during ${stage}`,
+      { cause: error }
+    );
+  } finally {
+    secondary?.close();
+    await fixture?.dispose();
+    await rm(
+      workspaceDirectory,
+      { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }
+    );
+    await rm(
+      serviceDirectory,
+      { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }
+    );
   }
 });
 

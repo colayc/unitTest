@@ -27,6 +27,7 @@ const (
 	TestOutput      ArtifactKindV13 = "test-output"
 	TestResults     ArtifactKindV13 = "test-results"
 	TestRunSummary  ArtifactKindV13 = "test-run-summary"
+	TestSelection   ArtifactKindV13 = "test-selection"
 )
 
 type ArtifactMIMETypeV13 string

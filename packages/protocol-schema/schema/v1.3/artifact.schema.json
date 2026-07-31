@@ -33,6 +33,7 @@
         "stdout",
         "stderr",
         "test-catalog",
+        "test-selection",
         "test-run-summary",
         "test-results",
         "test-diagnostics",

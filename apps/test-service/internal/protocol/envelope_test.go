@@ -8,11 +8,12 @@ import (
 	"unit-test-ide.local/test-service/internal/protocol"
 )
 
-func TestSupportedVersionRecognizesV10V11AndV12(t *testing.T) {
+func TestSupportedVersionRecognizesEveryShippedVersion(t *testing.T) {
 	if !protocol.SupportedVersion(protocol.Version10) ||
 		!protocol.SupportedVersion(protocol.Version11) ||
-		!protocol.SupportedVersion(protocol.Version12) {
-		t.Fatal("expected protocol 1.0, 1.1 and 1.2 to be supported")
+		!protocol.SupportedVersion(protocol.Version12) ||
+		!protocol.SupportedVersion(protocol.Version13) {
+		t.Fatal("expected protocol 1.0 through 1.3 to be supported")
 	}
 	if protocol.SupportedVersion("2.0") {
 		t.Fatal("expected unknown protocol version to be rejected")

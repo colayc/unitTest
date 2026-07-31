@@ -491,6 +491,15 @@ func parsedDomainResult(
 			EvidenceRefs: []string{},
 		}
 	}
+	if value.Status == testframework.CaseFailed &&
+		len(details) == 0 {
+		details = append(details, testdomain.FailureDetail{
+			Category:     value.Category,
+			Message:      value.Message,
+			Locations:    []testdomain.SourceLocation{},
+			EvidenceRefs: []string{},
+		})
+	}
 	if value.Status == testframework.CaseNotRun &&
 		termination == testframework.ProcessTimedOut {
 		details = append(details, testdomain.FailureDetail{

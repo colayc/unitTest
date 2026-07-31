@@ -20,10 +20,15 @@ func TestPrepareDataDirReturnsFixedAbsoluteLayout(t *testing.T) {
 	if layout.Root != absolute || layout.Database != filepath.Join(absolute, "history.sqlite3") ||
 		layout.Artifacts != filepath.Join(absolute, "artifacts") ||
 		layout.Build != filepath.Join(absolute, "build") ||
+		layout.Controls != filepath.Join(absolute, "controls") ||
 		layout.Lock != filepath.Join(absolute, "service.lock") {
 		t.Fatalf("layout = %#v", layout)
 	}
-	for _, directory := range []string{layout.Root, layout.Build} {
+	for _, directory := range []string{
+		layout.Root,
+		layout.Build,
+		layout.Controls,
+	} {
 		info, err := os.Stat(directory)
 		if err != nil || !info.IsDir() {
 			t.Fatalf("data directory %q = %#v, %v", directory, info, err)

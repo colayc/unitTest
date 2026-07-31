@@ -169,7 +169,7 @@ export interface TestRun {
     catalogRevision:   string;
     finishedAt?:       Date;
     incomplete:        boolean;
-    outcome:           TestRunOutcomeV13;
+    outcome?:          TestRunOutcomeV13;
     profileId:         string;
     projectId:         string;
     resultRevision:    string;

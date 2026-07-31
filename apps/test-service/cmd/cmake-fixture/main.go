@@ -15,6 +15,8 @@ const (
 	fixtureStateName = ".unit-test-ide-cmake-fixture.json"
 )
 
+var locateFixtureExecutable = os.Executable
+
 type fixtureState struct {
 	SourceDir      string `json:"sourceDir"`
 	ConfigureCount int    `json:"configureCount"`
@@ -51,8 +53,93 @@ func runCTest(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "ctest-fixture: write version: %v\n", err)
 		return 2
 	}
+	testDir, ok := ctestShowOnlyDirectory(args)
+	if ok {
+		if err := writeCTestShowOnly(testDir, stdout); err == nil {
+			return 0
+		} else {
+			_, _ = fmt.Fprintf(
+				stderr,
+				"ctest-fixture: show-only: %v\n",
+				err,
+			)
+			return 2
+		}
+	}
 	_, _ = fmt.Fprintf(stderr, "ctest-fixture: unsupported arguments: %q\n", args)
 	return 2
+}
+
+func ctestShowOnlyDirectory(args []string) (string, bool) {
+	if (len(args) != 3 && len(args) != 5) ||
+		args[0] != "--test-dir" ||
+		args[len(args)-1] != "--show-only=json-v1" {
+		return "", false
+	}
+	if len(args) == 5 &&
+		(args[2] != "-C" || args[3] == "") {
+		return "", false
+	}
+	directory, err := cleanAbsoluteDirectory(args[1])
+	return directory, err == nil
+}
+
+func writeCTestShowOnly(testDir string, stdout io.Writer) error {
+	state, err := readFixtureState(testDir)
+	if err != nil {
+		return fmt.Errorf("read configured state: %w", err)
+	}
+	executable := filepath.Join(
+		testDir,
+		"bin",
+		fixtureExecutableName("fixture-app"),
+	)
+	document := map[string]any{
+		"kind": "ctestInfo",
+		"version": map[string]any{
+			"major": 1,
+			"minor": 0,
+		},
+		"backtraceGraph": map[string]any{
+			"commands": []string{"add_test"},
+			"files": []string{
+				filepath.Join(state.SourceDir, "CMakeLists.txt"),
+			},
+			"nodes": []map[string]any{{
+				"file":    0,
+				"line":    4,
+				"command": 0,
+			}},
+		},
+		"tests": []map[string]any{{
+			"name":   "framework-tests",
+			"config": "Debug",
+			"command": []string{
+				executable,
+				"--fixture-scenario",
+				"normal",
+			},
+			"backtrace": 0,
+			"properties": []map[string]any{
+				{
+					"name":  "WORKING_DIRECTORY",
+					"value": testDir,
+				},
+				{
+					"name":  "LABELS",
+					"value": []string{"deterministic", "cpputest"},
+				},
+				{
+					"name":  "TIMEOUT",
+					"value": 30,
+				},
+			},
+		}},
+	}
+	if err := json.NewEncoder(stdout).Encode(document); err != nil {
+		return fmt.Errorf("encode show-only response: %w", err)
+	}
+	return nil
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
@@ -275,11 +362,53 @@ func build(args []string, stdout io.Writer) error {
 	if err := writeFixtureState(buildDir, state); err != nil {
 		return err
 	}
+	if err := materializeFixtureExecutable(buildDir); err != nil {
+		return err
+	}
 
 	gnuPath := filepath.ToSlash(filepath.Join(state.SourceDir, "main.cpp"))
 	msvcPath := filepath.Join(state.SourceDir, "main.cpp")
 	_, _ = fmt.Fprintf(stdout, "%s:7:3: warning: deterministic fixture warning [-Wfixture]\n", gnuPath)
 	_, _ = fmt.Fprintf(stdout, "%s(8,3): warning C4996: deterministic fixture warning\n", msvcPath)
+	return nil
+}
+
+func materializeFixtureExecutable(buildDir string) error {
+	source, err := locateFixtureExecutable()
+	if err != nil {
+		return fmt.Errorf("locate CMake fixture: %w", err)
+	}
+	source = filepath.Join(
+		filepath.Dir(source),
+		fixtureExecutableName("test-framework-fixture"),
+	)
+	input, err := os.Open(source)
+	if err != nil {
+		return fmt.Errorf("open test framework fixture: %w", err)
+	}
+	defer input.Close()
+	targetDirectory := filepath.Join(buildDir, "bin")
+	if err := os.MkdirAll(targetDirectory, 0o700); err != nil {
+		return fmt.Errorf("create fixture target directory: %w", err)
+	}
+	target := filepath.Join(
+		targetDirectory,
+		fixtureExecutableName("fixture-app"),
+	)
+	output, err := os.OpenFile(
+		target,
+		os.O_CREATE|os.O_WRONLY|os.O_TRUNC,
+		0o700,
+	)
+	if err != nil {
+		return fmt.Errorf("create fixture target: %w", err)
+	}
+	_, copyErr := io.Copy(output, input)
+	chmodErr := output.Chmod(0o700)
+	closeErr := output.Close()
+	if err := errors.Join(copyErr, chmodErr, closeErr); err != nil {
+		return fmt.Errorf("copy fixture target: %w", err)
+	}
 	return nil
 }
 
@@ -366,7 +495,14 @@ func writeFileAPIReply(sourceDir, buildDir string) error {
 		"id":               "fixture-app::@fixture",
 		"type":             "EXECUTABLE",
 		"paths":            map[string]any{"source": ".", "build": "."},
-		"artifacts":        []map[string]any{{"path": "bin/fixture-app"}},
+		"artifacts": []map[string]any{{
+			"path": filepath.ToSlash(
+				filepath.Join(
+					"bin",
+					fixtureExecutableName("fixture-app"),
+				),
+			),
+		}},
 	}
 	cache := map[string]any{
 		"kind": "cache", "version": map[string]any{"major": 2, "minor": 0},
@@ -406,6 +542,13 @@ func writeFileAPIReply(sourceDir, buildDir string) error {
 		return fmt.Errorf("write CMakeCache.txt: %w", err)
 	}
 	return nil
+}
+
+func fixtureExecutableName(name string) string {
+	if filepath.Ext(os.Args[0]) == ".exe" {
+		return name + ".exe"
+	}
+	return name
 }
 
 func writeJSON(path string, value any) error {

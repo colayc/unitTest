@@ -586,7 +586,6 @@
         "catalogRevision",
         "selectionSnapshot",
         "status",
-        "outcome",
         "summary",
         "resultRevision",
         "incomplete"

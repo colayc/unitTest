@@ -21,6 +21,7 @@ export enum ArtifactKindV13 {
     TestOutput = "test-output",
     TestResults = "test-results",
     TestRunSummary = "test-run-summary",
+    TestSelection = "test-selection",
 }
 
 export enum ArtifactMIMETypeV13 {

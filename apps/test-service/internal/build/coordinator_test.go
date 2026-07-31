@@ -247,8 +247,25 @@ func TestPresetFileAPIRootsIncludeOnlyServiceDiscoveredToolchains(t *testing.T) 
 		Sysroot:     secondSysroot,
 	})
 
-	if _, err := fixture.coordinator.Start(context.Background(), fixture.request); err != nil {
+	prepared, err := fixture.coordinator.PreparePlan(
+		context.Background(),
+		fixture.request,
+	)
+	if err != nil {
 		t.Fatal(err)
+	}
+	defer prepared.ReleaseIfUnadopted()
+	wantToolchainID := effectiveToolchainIdentity(
+		preset,
+		toolchain.Instance{},
+		cmake.FileAPIReply{},
+	)
+	if prepared.Toolchain().ID != wantToolchainID {
+		t.Fatalf(
+			"preset prepared Toolchain ID = %q, want %q",
+			prepared.Toolchain().ID,
+			wantToolchainID,
+		)
 	}
 	for _, want := range []string{
 		filepath.Dir(fixture.toolchain.CXXCompiler),

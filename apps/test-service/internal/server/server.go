@@ -339,7 +339,17 @@ func forwardSubscription(ctx context.Context, subscription *eventbroker.Subscrip
 func toProtocolEvent(event task.Event, version string) (protocol.Event, error) {
 	eventType := event.Type
 	payload := event.Payload
-	if version == protocol.Version11 {
+	if version != protocol.Version13 && testDomainEvent(event.Type) {
+		eventType = task.EventTaskOutput
+		payload = compatibilityOutput(version)
+	} else if version == protocol.Version13 &&
+		event.Type == task.EventTaskDiagnostic {
+		var err error
+		payload, err = projectV13Diagnostic(event.Payload)
+		if err != nil {
+			return protocol.Event{}, err
+		}
+	} else if version == protocol.Version11 {
 		switch event.Type {
 		case task.EventTaskStepStarted, task.EventTaskStepFinished, task.EventTaskDiagnostic:
 			eventType = task.EventTaskOutput
@@ -351,8 +361,94 @@ func toProtocolEvent(event task.Event, version string) (protocol.Event, error) {
 				return protocol.Event{}, err
 			}
 		}
+	} else if version == protocol.Version12 &&
+		(event.Type == task.EventTaskStepStarted ||
+			event.Type == task.EventTaskStepFinished) {
+		testStep, err := testStepPayload(event.Payload)
+		if err != nil {
+			return protocol.Event{}, err
+		}
+		if testStep {
+			eventType = task.EventTaskOutput
+			payload = compatibilityOutput(version)
+		}
 	}
-	return protocol.NewEvent(version, event.Sequence, string(eventType), event.TaskID, event.At, payload), nil
+	projected := protocol.NewEvent(
+		version,
+		event.Sequence,
+		string(eventType),
+		event.TaskID,
+		event.At,
+		payload,
+	)
+	if event.ID != "" {
+		projected.MessageID = event.ID
+	}
+	return projected, nil
+}
+
+func projectV13Diagnostic(
+	payload json.RawMessage,
+) (json.RawMessage, error) {
+	var value struct {
+		Diagnostic map[string]any `json:"diagnostic"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&value); err != nil ||
+		value.Diagnostic == nil {
+		return nil, errors.New(
+			"task diagnostic payload is invalid",
+		)
+	}
+	if _, exists := value.Diagnostic["category"]; !exists {
+		value.Diagnostic["category"] = "build_error"
+	}
+	projected, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	return projected, nil
+}
+
+func compatibilityOutput(version string) json.RawMessage {
+	if version == protocol.Version12 {
+		return json.RawMessage(
+			`{"stepId":"test-compatibility","stream":"combined","text":"","truncated":false}`,
+		)
+	}
+	return json.RawMessage(
+		`{"stream":"service","text":"","truncated":false}`,
+	)
+}
+
+func testDomainEvent(value task.EventType) bool {
+	switch value {
+	case task.EventTestDiscoveryStarted,
+		task.EventTestContainerDiscovered,
+		task.EventTestCatalogPublished,
+		task.EventTestRunStarted,
+		task.EventTestContainerStarted,
+		task.EventTestItemStarted,
+		task.EventTestOutput,
+		task.EventTestItemFinished,
+		task.EventTestContainerFinished,
+		task.EventTestRunFinished:
+		return true
+	default:
+		return false
+	}
+}
+
+func testStepPayload(payload json.RawMessage) (bool, error) {
+	var value struct {
+		Kind task.StepKind `json:"kind"`
+	}
+	if err := json.Unmarshal(payload, &value); err != nil {
+		return false, err
+	}
+	return value.Kind == task.StepTestDiscovery ||
+		value.Kind == task.StepTestRun, nil
 }
 
 func projectV11Output(payload json.RawMessage) (json.RawMessage, error) {

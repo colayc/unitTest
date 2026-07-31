@@ -13,6 +13,7 @@ type Layout struct {
 	Database  string
 	Artifacts string
 	Build     string
+	Controls  string
 	Lock      string
 }
 
@@ -45,13 +46,26 @@ func prepareDataDirGuard(root string) (Layout, io.Closer, error) {
 		Database:  filepath.Join(absolute, "history.sqlite3"),
 		Artifacts: filepath.Join(absolute, "artifacts"),
 		Build:     filepath.Join(absolute, "build"),
+		Controls:  filepath.Join(absolute, "controls"),
 		Lock:      filepath.Join(absolute, "service.lock"),
 	}
 	buildGuard, err := pinOwnerOnlyDirectory(layout.Build)
 	if err != nil {
 		return Layout{}, nil, errors.Join(ErrUnsafeDataDir, guard.Close())
 	}
-	return layout, directoryGuardSet{buildGuard, guard}, nil
+	controlGuard, err := pinOwnerOnlyDirectory(layout.Controls)
+	if err != nil {
+		return Layout{}, nil, errors.Join(
+			ErrUnsafeDataDir,
+			buildGuard.Close(),
+			guard.Close(),
+		)
+	}
+	return layout, directoryGuardSet{
+		controlGuard,
+		buildGuard,
+		guard,
+	}, nil
 }
 
 type directoryGuardSet []io.Closer

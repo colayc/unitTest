@@ -123,6 +123,38 @@ func (s *Store) GetRun(
 	return validated, nil
 }
 
+func (s *Store) GetRunForTask(
+	ctx context.Context,
+	taskID string,
+) (testdomain.TestRun, error) {
+	if s == nil || ctx == nil || !lowerHex(taskID, 32) {
+		return testdomain.TestRun{}, task.ErrInvalidArgument
+	}
+	run, err := scanTestRun(s.db.QueryRowContext(
+		ctx,
+		testRunSelect+` WHERE task_id=?`,
+		taskID,
+	))
+	if isNoRows(err) {
+		return testdomain.TestRun{}, task.ErrNotFound
+	}
+	if err != nil {
+		return testdomain.TestRun{},
+			storageError("get TestRun for Task", err)
+	}
+	results, err := loadRunResults(ctx, s.db, run.RunID)
+	if err != nil {
+		return testdomain.TestRun{}, err
+	}
+	run.Results = results
+	validated, err := testdomain.NewTestRun(run)
+	if err != nil {
+		return testdomain.TestRun{},
+			storageError("validate TestRun for Task", err)
+	}
+	return validated, nil
+}
+
 func (s *Store) StartRun(
 	ctx context.Context,
 	runID string,

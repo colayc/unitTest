@@ -411,10 +411,19 @@ func (c *Coordinator) prepare(
 		Timeout: request.Timeout, Plan: plan, Boundary: boundary,
 	}
 	boundaryOwned = false
+	preparedToolchain := instance
+	if preparedToolchain.ID == "" {
+		preparedToolchain.ID = effectiveToolchainIdentity(
+			profile,
+			instance,
+			reply,
+		)
+	}
 	return &preparedBuild{
 		request: internalRequest, boundary: boundary,
 		snapshot: snapshot, project: project, profile: profile,
-		toolchain: instance, targets: cloneTargets(targets),
+		toolchain: preparedToolchain,
+		targets:   cloneTargets(targets),
 	}, nil
 }
 

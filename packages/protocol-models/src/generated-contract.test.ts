@@ -398,6 +398,7 @@ test("generated protocol 1.3 models expose closed test contracts", () => {
   assert.equal(finishedEvent.payload.outcome, TaskOutcomeV13.Succeeded);
   assert.equal(diagnostic.category, DiagnosticCategoryV13.AssertionFailure);
   assert.equal(artifact.kind, ArtifactKindV13.TestResults);
+  assert.equal(ArtifactKindV13.TestSelection, "test-selection");
   assert.equal(capabilities.maxSelectionSize, 100000);
 });
 

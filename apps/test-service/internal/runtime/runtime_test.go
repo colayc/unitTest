@@ -24,8 +24,11 @@ import (
 	"unit-test-ide.local/test-service/internal/instance"
 	"unit-test-ide.local/test-service/internal/probe"
 	"unit-test-ide.local/test-service/internal/processcontrol"
+	"unit-test-ide.local/test-service/internal/session"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/taskstore"
+	"unit-test-ide.local/test-service/internal/testdomain"
+	"unit-test-ide.local/test-service/internal/testrun"
 	"unit-test-ide.local/test-service/internal/toolchain"
 	"unit-test-ide.local/test-service/internal/workspace"
 )
@@ -43,6 +46,24 @@ func TestUntrustedRuntimeAllowsNoWorkspaceMethods(t *testing.T) {
 	t.Cleanup(func() { _ = active.Close() })
 	if _, err := active.InspectWorkspace(context.Background()); !errors.Is(err, build.ErrWorkspaceTrustRequired) {
 		t.Fatalf("InspectWorkspace() error = %v, want ErrWorkspaceTrustRequired", err)
+	}
+	if _, err := active.StartTestDiscovery(
+		context.Background(),
+		session.TestDiscoveryStart{},
+	); !errors.Is(err, build.ErrWorkspaceTrustRequired) {
+		t.Fatalf(
+			"StartTestDiscovery() error = %v, want trust error",
+			err,
+		)
+	}
+	if _, _, err := active.StartTestRun(
+		context.Background(),
+		session.TestRunStart{},
+	); !errors.Is(err, build.ErrWorkspaceTrustRequired) {
+		t.Fatalf(
+			"StartTestRun() error = %v, want trust error",
+			err,
+		)
 	}
 }
 
@@ -97,6 +118,302 @@ func TestTrustedRuntimeDelegatesWorkspaceMethodsToCoordinator(t *testing.T) {
 		fake.config.Configurations == nil || fake.config.Locks == nil ||
 		fake.config.ServiceDataRoot == "" {
 		t.Fatalf("Coordinator config = %#v", fake.config)
+	}
+}
+
+func TestTrustedRuntimeOwnsTestExecutionDefaultsAndGeneration(
+	t *testing.T,
+) {
+	base := t.TempDir()
+	workspaceRoot := filepath.Join(base, "workspace")
+	if err := os.MkdirAll(workspaceRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	deps := testDependencies(&recordingRunner{}, nil)
+	deps.resolveCMake = func(
+		context.Context,
+		probe.Runner,
+		cmake.ResolverConfig,
+	) (cmake.Installation, error) {
+		return cmake.Installation{
+			Executable: os.Args[0],
+			Identity:   strings.Repeat("a", 64),
+			Version:    "test",
+			Source:     cmake.SourceDev,
+		}, nil
+	}
+	generation := strings.Repeat("c", 64)
+	buildCoordinator := &fakeRuntimeCoordinator{
+		snapshot: discovery.Snapshot{
+			WorkspaceID: strings.Repeat("b", 64),
+			Generation:  generation,
+		},
+	}
+	deps.newCoordinator = func(
+		build.CoordinatorConfig,
+	) (runtimeCoordinator, error) {
+		return buildCoordinator, nil
+	}
+	tests := &fakeRuntimeTestCoordinator{
+		discoveryTask: task.Task{
+			ID:   strings.Repeat("d", 32),
+			Kind: task.KindTestDiscovery,
+		},
+		runTask: task.Task{
+			ID:   strings.Repeat("e", 32),
+			Kind: task.KindTestRun,
+		},
+		run: testdomain.TestRun{
+			RunID: strings.Repeat("f", 32),
+		},
+	}
+	var composition testCoordinatorConfig
+	deps.newTestCoordinator = func(
+		config testCoordinatorConfig,
+	) (runtimeTestCoordinator, io.Closer, error) {
+		composition = config
+		return tests, nil, nil
+	}
+	active, err := Open(Config{
+		DataDir:            filepath.Join(base, "data"),
+		ServiceExecutable:  os.Args[0],
+		WorkspaceRoot:      workspaceRoot,
+		TrustedWorkspace:   true,
+		DevCMakeExecutable: os.Args[0],
+		Platform:           platformForTest(),
+		dependencies:       deps,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = active.Close() })
+	profileID := strings.Repeat("1", 64)
+	catalogRevision := strings.Repeat("2", 64)
+	discovered, err := active.StartTestDiscovery(
+		context.Background(),
+		session.TestDiscoveryStart{
+			IdempotencyKey: strings.Repeat("3", 32),
+			ProjectID:      "core",
+			ProfileID:      profileID,
+		},
+	)
+	if err != nil || discovered.ID != tests.discoveryTask.ID {
+		t.Fatalf("StartTestDiscovery() = %#v, %v", discovered, err)
+	}
+	selection := testdomain.Selection{
+		Mode: testdomain.SelectionAll,
+	}
+	started, run, err := active.StartTestRun(
+		context.Background(),
+		session.TestRunStart{
+			IdempotencyKey:  strings.Repeat("4", 32),
+			ProjectID:       "core",
+			ProfileID:       profileID,
+			CatalogRevision: catalogRevision,
+			Selection:       selection,
+			RepeatCount:     3,
+		},
+	)
+	if err != nil || started.ID != tests.runTask.ID ||
+		run.RunID != tests.run.RunID {
+		t.Fatalf(
+			"StartTestRun() = %#v / %#v / %v",
+			started,
+			run,
+			err,
+		)
+	}
+	if tests.discoveryInput.WorkspaceGeneration != generation ||
+		tests.discoveryInput.ProjectID != "core" ||
+		tests.discoveryInput.BuildProfileID != profileID ||
+		tests.discoveryInput.Jobs != runtimeTestJobs() ||
+		tests.discoveryInput.Timeout != testTaskTimeout ||
+		len(tests.discoveryInput.TargetIDs) != 0 ||
+		tests.runInput.WorkspaceGeneration != generation ||
+		tests.runInput.CatalogRevision != catalogRevision ||
+		tests.runInput.RepeatCount != 3 ||
+		tests.runInput.MaxConcurrency != runtimeTestConcurrency() ||
+		!reflect.DeepEqual(tests.runInput.Selection, selection) {
+		t.Fatalf(
+			"test runtime inputs = %#v / %#v",
+			tests.discoveryInput,
+			tests.runInput,
+		)
+	}
+	if composition.ControlRoot == "" ||
+		composition.BuildDataRoot == "" ||
+		composition.Build != buildCoordinator ||
+		composition.Tasks == nil ||
+		composition.Store == nil ||
+		composition.Artifacts == nil {
+		t.Fatalf("test composition = %#v", composition)
+	}
+}
+
+func TestRuntimeBuildDirectoryIdentityRestrictsOwnedRoots(
+	t *testing.T,
+) {
+	base := t.TempDir()
+	workspaceRoot := filepath.Join(base, "workspace")
+	serviceRoot := filepath.Join(base, "service-builds")
+	for _, root := range []string{workspaceRoot, serviceRoot} {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tests := []struct {
+		name string
+		path string
+		want string
+		ok   bool
+	}{
+		{
+			name: "workspace build",
+			path: filepath.Join(workspaceRoot, "out", "debug"),
+			want: "workspace/out/debug",
+			ok:   true,
+		},
+		{
+			name: "service build",
+			path: filepath.Join(serviceRoot, "root", "profile"),
+			want: "service/root/profile",
+			ok:   true,
+		},
+		{
+			name: "sibling is outside",
+			path: filepath.Join(base, "workspace-sibling", "build"),
+		},
+		{
+			name: "relative path",
+			path: filepath.Join("relative", "build"),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := runtimeBuildDirectoryIdentity(
+				workspaceRoot,
+				serviceRoot,
+				test.path,
+			)
+			if test.ok {
+				if err != nil || got != test.want {
+					t.Fatalf(
+						"runtimeBuildDirectoryIdentity() = %q, %v; want %q",
+						got,
+						err,
+						test.want,
+					)
+				}
+				return
+			}
+			if !errors.Is(err, task.ErrInvalidArgument) {
+				t.Fatalf(
+					"runtimeBuildDirectoryIdentity() error = %v",
+					err,
+				)
+			}
+		})
+	}
+}
+
+func TestRuntimeTestDiscoveryRefreshesTargetsAfterBuild(
+	t *testing.T,
+) {
+	base := t.TempDir()
+	workspaceRoot := filepath.Join(base, "workspace")
+	serviceRoot := filepath.Join(base, "service-builds")
+	buildDirectory := filepath.Join(workspaceRoot, "out", "debug")
+	for _, root := range []string{
+		workspaceRoot,
+		serviceRoot,
+		buildDirectory,
+	} {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store, err := taskstore.Open(
+		filepath.Join(base, "history.sqlite"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	workspaceID := strings.Repeat("1", 64)
+	profileID := strings.Repeat("2", 64)
+	cmakeIdentity := strings.Repeat("3", 64)
+	fileAPIIdentity := strings.Repeat("4", 64)
+	if err := store.PutBuildConfiguration(
+		context.Background(),
+		taskstore.BuildConfiguration{
+			WorkspaceID:     workspaceID,
+			ProjectID:       "core",
+			ProfileID:       profileID,
+			Fingerprint:     strings.Repeat("5", 64),
+			BuildDirectory:  "workspace/out/debug",
+			CMakeIdentity:   cmakeIdentity,
+			FileAPIIdentity: fileAPIIdentity,
+			ConfiguredAt:    time.Now().UTC(),
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	freshTarget := cmake.Target{
+		ID:        strings.Repeat("6", 64),
+		Name:      "fresh-tests",
+		Artifacts: []string{filepath.Join(buildDirectory, "tests")},
+	}
+	buildCoordinator := &fakeRuntimeCoordinator{
+		targets: []cmake.Target{freshTarget},
+	}
+	factory := newTaskDiscoveryInputFactory(
+		testCoordinatorConfig{
+			Build:        buildCoordinator,
+			Store:        store,
+			Installation: cmake.Installation{Identity: cmakeIdentity},
+			WorkspaceRoot: workspace.Root{
+				ID:         workspaceID,
+				NativePath: workspaceRoot,
+			},
+			BuildDataRoot: serviceRoot,
+			NewID:         task.NewID,
+		},
+	)
+	input, err := factory(
+		context.Background(),
+		testrun.RefreshRequest{
+			TaskID:              strings.Repeat("7", 32),
+			WorkspaceGeneration: strings.Repeat("8", 64),
+			Project: workspace.ProjectConfig{
+				ID: "core",
+			},
+			Profile: cmake.BuildProfile{
+				ID:        profileID,
+				ProjectID: "core",
+				BinaryDir: buildDirectory,
+			},
+			Toolchain: toolchain.Instance{ID: "preset-toolchain"},
+			Targets: []cmake.Target{{
+				ID:   strings.Repeat("9", 64),
+				Name: "stale-before-build",
+			}},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(
+		input.Targets,
+		[]cmake.Target{freshTarget},
+	) {
+		t.Fatalf(
+			"refreshed discovery targets = %#v",
+			input.Targets,
+		)
+	}
+	buildCoordinator.targets[0].Artifacts[0] = "mutated"
+	if input.Targets[0].Artifacts[0] == "mutated" {
+		t.Fatal("refreshed discovery target aliases coordinator state")
 	}
 }
 
@@ -202,6 +519,166 @@ func TestTrustedRuntimeFailsInvalidQueuedBuildWithStableRecoveryCode(t *testing.
 	}
 }
 
+func TestTrustedRuntimeRevalidatesAndFailsQueuedTestDiscovery(
+	t *testing.T,
+) {
+	base := t.TempDir()
+	workspaceRoot := filepath.Join(base, "workspace")
+	if err := os.MkdirAll(workspaceRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dataRoot := filepath.Join(base, "data")
+	layout, err := PrepareDataDir(dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 31, 9, 0, 0, 0, time.UTC)
+	input := seedQueuedRuntimeTestDiscovery(
+		t,
+		layout.Database,
+		now,
+	)
+	deps := testDependencies(&recordingRunner{}, nil)
+	deps.resolveCMake = func(
+		context.Context,
+		probe.Runner,
+		cmake.ResolverConfig,
+	) (cmake.Installation, error) {
+		return cmake.Installation{
+			Executable: os.Args[0],
+			Identity:   strings.Repeat("a", 64),
+			Version:    "test",
+			Source:     cmake.SourceDev,
+		}, nil
+	}
+	deps.newCoordinator = func(
+		build.CoordinatorConfig,
+	) (runtimeCoordinator, error) {
+		return &fakeRuntimeCoordinator{}, nil
+	}
+	tests := &fakeRuntimeTestCoordinator{
+		resumeErr: build.ErrWorkspaceChanged,
+	}
+	deps.newTestCoordinator = func(
+		testCoordinatorConfig,
+	) (runtimeTestCoordinator, io.Closer, error) {
+		return tests, nil, nil
+	}
+	active, err := Open(Config{
+		DataDir:            dataRoot,
+		ServiceExecutable:  os.Args[0],
+		WorkspaceRoot:      workspaceRoot,
+		TrustedWorkspace:   true,
+		DevCMakeExecutable: os.Args[0],
+		Platform:           platformForTest(),
+		Clock: fixedRuntimeClock{
+			at: now.Add(time.Minute),
+		},
+		dependencies: deps,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = active.Close() })
+	recovered, err := active.Get(
+		context.Background(),
+		input.ID,
+	)
+	if err != nil ||
+		recovered.Status != task.StatusFinished ||
+		recovered.Outcome != task.OutcomeInterrupted ||
+		recovered.ErrorCode != "WORKSPACE_CHANGED" ||
+		len(recovered.Steps) != 1 ||
+		recovered.Steps[0].Status != task.StepSkipped ||
+		tests.resumeDiscoveryCalls != 1 {
+		t.Fatalf(
+			"recovered queued test discovery = %#v, %v; calls=%d",
+			recovered,
+			err,
+			tests.resumeDiscoveryCalls,
+		)
+	}
+}
+
+func TestTrustedRuntimeResumeFailureClosesTestResourcesAndReleasesLock(
+	t *testing.T,
+) {
+	base := t.TempDir()
+	workspaceRoot := filepath.Join(base, "workspace")
+	if err := os.MkdirAll(workspaceRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dataRoot := filepath.Join(base, "data")
+	layout, err := PrepareDataDir(dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 7, 31, 10, 0, 0, 0, time.UTC)
+	seedQueuedRuntimeTestDiscovery(t, layout.Database, now)
+	deps := testDependencies(&recordingRunner{}, nil)
+	deps.resolveCMake = func(
+		context.Context,
+		probe.Runner,
+		cmake.ResolverConfig,
+	) (cmake.Installation, error) {
+		return cmake.Installation{
+			Executable: os.Args[0],
+			Identity:   strings.Repeat("c", 64),
+			Version:    "test",
+			Source:     cmake.SourceDev,
+		}, nil
+	}
+	deps.newCoordinator = func(
+		build.CoordinatorConfig,
+	) (runtimeCoordinator, error) {
+		return &fakeRuntimeCoordinator{}, nil
+	}
+	resumeFailure := errors.New("test resume storage failure")
+	resource := &recordingCloser{}
+	deps.newTestCoordinator = func(
+		testCoordinatorConfig,
+	) (runtimeTestCoordinator, io.Closer, error) {
+		return &fakeRuntimeTestCoordinator{
+			resumeErr: resumeFailure,
+		}, resource, nil
+	}
+	active, err := Open(Config{
+		DataDir:            dataRoot,
+		ServiceExecutable:  os.Args[0],
+		WorkspaceRoot:      workspaceRoot,
+		TrustedWorkspace:   true,
+		DevCMakeExecutable: os.Args[0],
+		Platform:           platformForTest(),
+		Clock: fixedRuntimeClock{
+			at: now.Add(time.Minute),
+		},
+		dependencies: deps,
+	})
+	if active != nil || !errors.Is(err, resumeFailure) {
+		t.Fatalf("Open() = %#v, %v", active, err)
+	}
+	if resource.closeCalls.Load() != 1 {
+		t.Fatalf(
+			"test resource Close calls = %d, want 1",
+			resource.closeCalls.Load(),
+		)
+	}
+	locked, err := instance.Lock(layout.Lock)
+	if err != nil {
+		t.Fatalf("failed Open retained instance lock: %v", err)
+	}
+	if err := locked.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := taskstore.Open(layout.Database)
+	if err != nil {
+		t.Fatalf("failed Open retained SQLite store: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestUntrustedRuntimePreservesQueuedBuildForTrustedRestart(t *testing.T) {
 	base := t.TempDir()
 	workspaceRoot := filepath.Join(base, "workspace")
@@ -261,6 +738,55 @@ func seedQueuedRuntimeBuild(t *testing.T, database string, now time.Time) task.T
 	return input
 }
 
+func seedQueuedRuntimeTestDiscovery(
+	t *testing.T,
+	database string,
+	now time.Time,
+) task.Task {
+	t.Helper()
+	store, err := taskstore.Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	input := task.Task{
+		ID:             strings.Repeat("6", 32),
+		IdempotencyKey: strings.Repeat("7", 32),
+		RequestHash:    strings.Repeat("8", 64),
+		Kind:           task.KindTestDiscovery,
+		Request: json.RawMessage(
+			`{"projectId":"core","buildProfileId":"` +
+				strings.Repeat("9", 64) +
+				`","targetIds":[],"jobs":1,"timeoutMs":60000}`,
+		),
+		WorkspaceGeneration: strings.Repeat("a", 64),
+		PlanFingerprint:     strings.Repeat("b", 64),
+		Timeout:             time.Minute,
+		Status:              task.StatusQueued,
+		CreatedAt:           now,
+	}
+	if _, _, err := store.Create(
+		context.Background(),
+		input,
+		[]task.StepSnapshot{{
+			ID:     "build",
+			Kind:   task.StepBuild,
+			Status: task.StepPending,
+		}},
+		task.EventDraft{
+			TaskID: input.ID,
+			Type:   task.EventTaskCreated,
+			At:     now,
+			Payload: json.RawMessage(
+				`{"status":"queued"}`,
+			),
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	return input
+}
+
 type fakeRuntimeCoordinator struct {
 	config      build.CoordinatorConfig
 	snapshot    discovery.Snapshot
@@ -289,6 +815,51 @@ func (f *fakeRuntimeCoordinator) Resume(context.Context, task.Task) (task.Task, 
 
 func (*fakeRuntimeCoordinator) Succeeded(context.Context, task.Task, task.ExecutionStep) error {
 	return nil
+}
+
+type fakeRuntimeTestCoordinator struct {
+	discoveryTask        task.Task
+	runTask              task.Task
+	run                  testdomain.TestRun
+	discoveryInput       testrun.DiscoveryRequest
+	runInput             testrun.RunRequest
+	discoveryErr         error
+	runErr               error
+	resumeErr            error
+	resumeDiscoveryCalls int
+	resumeRunCalls       int
+}
+
+func (fake *fakeRuntimeTestCoordinator) StartDiscovery(
+	_ context.Context,
+	input testrun.DiscoveryRequest,
+) (task.Task, error) {
+	fake.discoveryInput = input
+	return fake.discoveryTask, fake.discoveryErr
+}
+
+func (fake *fakeRuntimeTestCoordinator) StartRun(
+	_ context.Context,
+	input testrun.RunRequest,
+) (task.Task, testdomain.TestRun, error) {
+	fake.runInput = input
+	return fake.runTask, fake.run, fake.runErr
+}
+
+func (fake *fakeRuntimeTestCoordinator) ResumeDiscovery(
+	context.Context,
+	task.Task,
+) (task.Task, error) {
+	fake.resumeDiscoveryCalls++
+	return task.Task{}, fake.resumeErr
+}
+
+func (fake *fakeRuntimeTestCoordinator) ResumeRun(
+	context.Context,
+	task.Task,
+) (task.Task, error) {
+	fake.resumeRunCalls++
+	return task.Task{}, fake.resumeErr
 }
 
 type fixedRuntimeClock struct{ at time.Time }
@@ -993,6 +1564,11 @@ func platformForTest() string { return goruntime.GOOS }
 func testDependencies(runner processcontrol.Runner, stage func(string)) *dependencies {
 	value := defaultDependencies()
 	value.newRunner = func(string) processcontrol.Runner { return runner }
+	value.newTestCoordinator = func(
+		testCoordinatorConfig,
+	) (runtimeTestCoordinator, io.Closer, error) {
+		return &fakeRuntimeTestCoordinator{}, nil, nil
+	}
 	if stage != nil {
 		prepare := value.prepareDataDir
 		value.prepareDataDir = func(path string) (Layout, io.Closer, error) {
@@ -1064,6 +1640,15 @@ type trackedCloser struct {
 func (c *trackedCloser) Close() error {
 	c.track(c.name)
 	return c.Closer.Close()
+}
+
+type recordingCloser struct {
+	closeCalls atomic.Int32
+}
+
+func (closer *recordingCloser) Close() error {
+	closer.closeCalls.Add(1)
+	return nil
 }
 
 type trackedRuntimeStore struct {

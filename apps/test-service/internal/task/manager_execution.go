@@ -423,9 +423,9 @@ func sameQueuedTaskIdentity(stored, supplied Task) bool {
 	return stored.ID == supplied.ID &&
 		stored.IdempotencyKey == supplied.IdempotencyKey &&
 		stored.RequestHash == supplied.RequestHash &&
-		stored.Kind == KindCMakeBuild &&
+		resumableQueuedKind(stored.Kind) &&
 		stored.Status == StatusQueued &&
-		supplied.Kind == KindCMakeBuild &&
+		supplied.Kind == stored.Kind &&
 		supplied.Status == StatusQueued &&
 		stored.WorkspaceGeneration == supplied.WorkspaceGeneration &&
 		stored.Timeout == supplied.Timeout &&
