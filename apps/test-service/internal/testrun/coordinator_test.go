@@ -99,12 +99,138 @@ func TestCoordinatorContinuesBuildIntoPinnedFrameworkRunSteps(
 	if len(continued.Steps) != 2 ||
 		continued.Steps[0].Kind != task.StepTestRun ||
 		continued.Steps[1].Kind != task.StepTestRun ||
+		len(continued.Steps[0].Process.Batch) != 1 ||
+		len(continued.Steps[1].Process.Batch) != 1 ||
 		fixture.prepared.allowCalls != 1 {
 		t.Fatalf(
 			"run continuation = %#v, pins=%d",
 			continued,
 			fixture.prepared.allowCalls,
 		)
+	}
+}
+
+func TestRunExecutionBuildsAndInterpretsConcurrentWave(t *testing.T) {
+	firstContainer, err := testdomain.ContainerID(
+		"project",
+		"first",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondContainer, err := testdomain.ContainerID(
+		"project",
+		"second",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planned := PlannedRun{
+		Invocations: []PlannedInvocation{
+			opaquePlannedInvocation(
+				"test-000001",
+				firstContainer,
+				"first",
+			),
+			opaquePlannedInvocation(
+				"test-000002",
+				secondContainer,
+				"second",
+			),
+		},
+		Waves: []ScheduleWave{{Jobs: []ScheduledJob{
+			{
+				ID: "test-000001", ContainerID: firstContainer,
+				Iteration: 1,
+			},
+			{
+				ID: "test-000002", ContainerID: secondContainer,
+				Iteration: 1,
+			},
+		}}},
+	}
+	steps, invocationSteps, waveInvocations, err :=
+		buildRunWaveSteps(planned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(steps) != 1 ||
+		steps[0].ID != "run-wave-000001" ||
+		len(steps[0].Process.Batch) != 2 ||
+		steps[0].Process.Batch[0].ID != "test-000001" ||
+		steps[0].Process.Batch[1].ID != "test-000002" {
+		t.Fatalf("wave steps = %#v", steps)
+	}
+	store := newResultAppender()
+	interpreter, err := NewInterpreter(
+		strings.Repeat("1", 32),
+		store,
+		planned,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution := &runExecution{
+		interpreter:     interpreter,
+		invocationSteps: invocationSteps,
+		waveInvocations: waveInvocations,
+	}
+	verdict, err := execution.Interpret(
+		context.Background(),
+		task.Task{ID: strings.Repeat("2", 32)},
+		steps[0],
+		task.ProcessResult{Children: []task.ProcessChildResult{
+			{ID: "test-000002", TimedOut: true},
+			{ID: "test-000001"},
+		}},
+	)
+	if err != nil || verdict != task.StepVerdictSucceeded {
+		t.Fatalf("Interpret() = %q, %v", verdict, err)
+	}
+	results := store.results()
+	outcomes := make(
+		map[testdomain.ID]testdomain.ItemOutcome,
+		len(results),
+	)
+	for _, result := range results {
+		outcomes[result.ItemID] = result.Outcome
+	}
+	if len(results) != 2 ||
+		outcomes[firstContainer] != testdomain.ItemPassed ||
+		outcomes[secondContainer] != testdomain.ItemTimedOut {
+		t.Fatalf("wave results = %#v", results)
+	}
+}
+
+func opaquePlannedInvocation(
+	id string,
+	containerID testdomain.ID,
+	name string,
+) PlannedInvocation {
+	step := task.ExecutionStep{
+		ID: id, Kind: task.StepTestRun,
+		Process: task.ProcessSpec{
+			Executable: "ctest",
+			Args:       []string{"-R", name},
+			Dir:        ".",
+		},
+		Public: task.CommandSummary{
+			Executable: "ctest",
+			Args:       []string{"-R", name},
+		},
+	}
+	return PlannedInvocation{
+		Job: ScheduledJob{
+			ID: id, ContainerID: containerID,
+			Iteration: 1,
+		},
+		Step:        step,
+		ContainerID: containerID,
+		Framework:   testdomain.FrameworkOpaqueCTest,
+		ExpectedCases: []testframework.ExpectedCase{{
+			ItemID: containerID, LogicalName: name,
+		}},
+		Timeout: time.Second,
 	}
 }
 

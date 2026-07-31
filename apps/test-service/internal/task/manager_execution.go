@@ -202,8 +202,26 @@ func cloneExecutionPlan(plan ExecutionPlan) ExecutionPlan {
 			[]string(nil),
 			step.Process.EnvUnset...,
 		)
+		result.Steps[index].Process.Batch =
+			cloneProcessBatch(step.Process.Batch)
 		result.Steps[index].Public.Args = append([]string(nil), step.Public.Args...)
 		result.Steps[index].State = append(json.RawMessage(nil), step.State...)
+	}
+	return result
+}
+
+func cloneProcessBatch(
+	values []ProcessBatchItem,
+) []ProcessBatchItem {
+	result := make([]ProcessBatchItem, len(values))
+	for index, value := range values {
+		result[index] = value
+		result[index].Args = append([]string(nil), value.Args...)
+		result[index].Env = append([]string(nil), value.Env...)
+		result[index].EnvUnset = append(
+			[]string(nil),
+			value.EnvUnset...,
+		)
 	}
 	return result
 }

@@ -45,6 +45,7 @@ const (
 const (
 	maxProcessSpecArgs    = 256
 	maxProcessSpecEnv     = 256
+	maxProcessBatchItems  = 256
 	maxCommandSummaryArgs = 256
 	maxExecutionStepState = 256 * 1024
 	maxInitialPlanSteps   = 8
@@ -147,11 +148,8 @@ func validateExecutionSteps(
 	}
 	ids := make(map[string]struct{}, len(steps))
 	for _, step := range steps {
-		if !validStepID(step.ID) || !validStepKind(step.Kind) || step.Process.Executable == "" || step.Process.Dir == "" ||
-			containsNUL(step.Process.Executable) || containsNUL(step.Process.Dir) ||
-			len(step.Process.Args) > maxProcessSpecArgs ||
-			len(step.Process.Env) > maxProcessSpecEnv ||
-			len(step.Process.EnvUnset) > maxProcessSpecEnv ||
+		if !validStepID(step.ID) || !validStepKind(step.Kind) ||
+			!validProcessSpec(step.Process, boundary) ||
 			len(step.Public.Args) > maxCommandSummaryArgs ||
 			len(step.State) > maxExecutionStepState ||
 			len(step.State) != 0 && !json.Valid(step.State) {
@@ -161,25 +159,79 @@ func validateExecutionSteps(
 			return ErrInvalidArgument
 		}
 		ids[step.ID] = struct{}{}
-		for _, argument := range step.Process.Args {
-			if containsNUL(argument) {
-				return ErrInvalidArgument
-			}
-		}
-		if !validProcessEnvironment(
-			step.Process.Env,
-			step.Process.EnvUnset,
-		) {
-			return ErrInvalidArgument
-		}
-		if err := boundary.ValidateExecutable(step.Process.Executable); err != nil {
-			return ErrInvalidArgument
-		}
-		if err := boundary.ValidateWorkingDirectory(step.Process.Dir); err != nil {
-			return ErrInvalidArgument
-		}
 	}
 	return nil
+}
+
+func validProcessSpec(
+	spec ProcessSpec,
+	boundary ExecutionBoundary,
+) bool {
+	if len(spec.Batch) == 0 {
+		return validProcessTarget(
+			spec.Executable,
+			spec.Args,
+			spec.Env,
+			spec.EnvUnset,
+			spec.Dir,
+			boundary,
+		)
+	}
+	if spec.Executable != "" || len(spec.Args) != 0 ||
+		len(spec.Env) != 0 || len(spec.EnvUnset) != 0 ||
+		spec.Dir != "" ||
+		len(spec.Batch) > maxProcessBatchItems {
+		return false
+	}
+	ids := make(map[string]struct{}, len(spec.Batch))
+	for _, item := range spec.Batch {
+		if !validStepID(item.ID) ||
+			item.Timeout < time.Millisecond ||
+			item.Timeout > 24*time.Hour ||
+			item.Timeout%time.Millisecond != 0 ||
+			!validProcessTarget(
+				item.Executable,
+				item.Args,
+				item.Env,
+				item.EnvUnset,
+				item.Dir,
+				boundary,
+			) {
+			return false
+		}
+		if _, duplicate := ids[item.ID]; duplicate {
+			return false
+		}
+		ids[item.ID] = struct{}{}
+	}
+	return true
+}
+
+func validProcessTarget(
+	executable string,
+	arguments, environment, unset []string,
+	directory string,
+	boundary ExecutionBoundary,
+) bool {
+	if executable == "" || directory == "" ||
+		containsNUL(executable) || containsNUL(directory) ||
+		len(arguments) > maxProcessSpecArgs ||
+		len(environment) > maxProcessSpecEnv ||
+		len(unset) > maxProcessSpecEnv {
+		return false
+	}
+	for _, argument := range arguments {
+		if containsNUL(argument) {
+			return false
+		}
+	}
+	if !validProcessEnvironment(environment, unset) {
+		return false
+	}
+	if err := boundary.ValidateExecutable(executable); err != nil {
+		return false
+	}
+	return boundary.ValidateWorkingDirectory(directory) == nil
 }
 
 func extendExecutionPlan(
@@ -209,14 +261,24 @@ func extendExecutionPlan(
 }
 
 func FingerprintPlan(plan ExecutionPlan) string {
-	type canonicalStep struct {
+	type canonicalBatchProcess struct {
 		ID         string   `json:"id"`
-		Kind       StepKind `json:"kind"`
 		Executable string   `json:"executable"`
 		Args       []string `json:"args"`
 		Env        []string `json:"env"`
 		EnvUnset   []string `json:"envUnset"`
 		Dir        string   `json:"dir"`
+		TimeoutMS  int64    `json:"timeoutMs"`
+	}
+	type canonicalStep struct {
+		ID         string                  `json:"id"`
+		Kind       StepKind                `json:"kind"`
+		Executable string                  `json:"executable"`
+		Args       []string                `json:"args"`
+		Env        []string                `json:"env"`
+		EnvUnset   []string                `json:"envUnset"`
+		Dir        string                  `json:"dir"`
+		Batch      []canonicalBatchProcess `json:"batch,omitempty"`
 	}
 	type canonicalPlan struct {
 		Version int             `json:"version"`
@@ -236,6 +298,23 @@ func FingerprintPlan(plan ExecutionPlan) string {
 				step.Process.EnvUnset...,
 			),
 			Dir: step.Process.Dir,
+		}
+		for _, item := range step.Process.Batch {
+			canonical.Steps[index].Batch = append(
+				canonical.Steps[index].Batch,
+				canonicalBatchProcess{
+					ID:         item.ID,
+					Executable: item.Executable,
+					Args:       append([]string{}, item.Args...),
+					Env:        append([]string{}, item.Env...),
+					EnvUnset: append(
+						[]string{},
+						item.EnvUnset...,
+					),
+					Dir:       item.Dir,
+					TimeoutMS: item.Timeout.Milliseconds(),
+				},
+			)
 		}
 	}
 	raw, _ := json.Marshal(canonical)

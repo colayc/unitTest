@@ -301,7 +301,12 @@ func (runner *windowsRunner) Cleanup(ctx context.Context, lease task.ProcessLeas
 func (process *windowsProcess) Lease() task.ProcessLease {
 	process.mu.Lock()
 	defer process.mu.Unlock()
-	return process.lease
+	result := process.lease
+	result.TargetProcessGroups = append(
+		[]int(nil),
+		process.lease.TargetProcessGroups...,
+	)
+	return result
 }
 
 func (process *windowsProcess) Start(ctx context.Context) error {
@@ -326,7 +331,13 @@ func (process *windowsProcess) Start(ctx context.Context) error {
 		process.finishAfterHost(Result{Err: errProcessStartFailed})
 		return errProcessStartFailed
 	}
-	if validateWindowsStartedStatus(status) != nil {
+	if len(process.specValue.Batch) == 0 &&
+		validateWindowsStartedStatus(status) != nil ||
+		len(process.specValue.Batch) != 0 &&
+			validateBatchStartedStatus(
+				status,
+				process.specValue.Batch,
+			) != nil {
 		process.closeControl()
 		process.finishAfterHost(Result{Err: errProcessHostFailed})
 		return errProcessHostFailed
@@ -334,6 +345,10 @@ func (process *windowsProcess) Start(ctx context.Context) error {
 	process.mu.Lock()
 	process.started = true
 	process.lease.TargetProcessGroup = status.ProcessGroup
+	process.lease.TargetProcessGroups = append(
+		[]int(nil),
+		status.TargetProcessGroups...,
+	)
 	process.mu.Unlock()
 	go process.watchExit()
 	return nil
@@ -469,15 +484,51 @@ func (process *windowsProcess) readStatus(ctx context.Context) (HostStatus, erro
 }
 
 func (process *windowsProcess) watchExit() {
-	status, err := process.readStatus(context.Background())
 	result := Result{}
-	if err != nil || status.Kind != "exit" {
-		result.Err = errProcessHostFailed
-	} else {
+	for {
+		status, err := process.readStatus(context.Background())
+		if err != nil {
+			result.Err = errProcessHostFailed
+			break
+		}
+		if status.Kind == "output" {
+			if !validBatchOutputStatus(
+				status,
+				len(process.specValue.Batch) != 0,
+			) {
+				result.Err = errProcessHostFailed
+				break
+			}
+			process.sendOutput(Output{
+				Source: status.Source,
+				Stream: status.Stream,
+				Data: append(
+					[]byte(nil),
+					status.Data...,
+				),
+			})
+			continue
+		}
+		if status.Kind != "exit" {
+			result.Err = errProcessHostFailed
+			break
+		}
+		children, valid := hostChildResults(
+			status.Children,
+			process.specValue.Batch,
+		)
+		if !valid ||
+			len(process.specValue.Batch) == 0 &&
+				len(children) != 0 {
+			result.Err = errProcessHostFailed
+			break
+		}
 		result.ExitCode = status.ExitCode
+		result.Children = children
 		if status.ErrorCode != "" {
 			result.Err = errProcessHostFailed
 		}
+		break
 	}
 	process.finishAfterHost(result)
 }
@@ -510,7 +561,6 @@ func (process *windowsProcess) copyOutput() {
 	go process.copyStream(&readers, process.stdout, StreamStdout)
 	go process.copyStream(&readers, process.stderr, StreamStderr)
 	readers.Wait()
-	process.closeOutput()
 	close(process.outputDone)
 }
 
@@ -711,7 +761,9 @@ func (process *windowsProcess) closeOutput() {
 }
 
 func validateWindowsStartedStatus(status HostStatus) error {
-	if status.Kind != "started" || status.PID <= 0 || status.ProcessGroup != status.PID {
+	if status.Kind != "started" || status.PID <= 0 ||
+		status.ProcessGroup != status.PID ||
+		len(status.TargetProcessGroups) != 0 {
 		return errProcessHostFailed
 	}
 	return nil

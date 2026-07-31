@@ -84,6 +84,7 @@ func TestManagerResultOutputFailureTerminatesBeforeDomainCompletion(t *testing.T
 		t.Fatal(err)
 	}
 	f.process.output(task.ProcessOutput{
+		Source: "test-000001",
 		Stream: "stdout",
 		Data:   []byte("test output\n"),
 	})
@@ -100,6 +101,9 @@ func TestManagerResultOutputFailureTerminatesBeforeDomainCompletion(t *testing.T
 			observeCalls,
 			interpretCalls,
 		)
+	}
+	if output := interpreter.outputValue(); output.Source != "test-000001" {
+		t.Fatalf("observed output = %#v", output)
 	}
 }
 
@@ -218,6 +222,12 @@ func (interpreter *recordingResultInterpreter) outputState() (int, int) {
 	interpreter.mu.Lock()
 	defer interpreter.mu.Unlock()
 	return interpreter.observeCalls, interpreter.calls
+}
+
+func (interpreter *recordingResultInterpreter) outputValue() task.ProcessOutput {
+	interpreter.mu.Lock()
+	defer interpreter.mu.Unlock()
+	return interpreter.lastOutput
 }
 
 func oneStepBuildRequest(idempotencyKey string) task.StartRequest {

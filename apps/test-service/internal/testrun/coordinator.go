@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"sort"
 	"sync"
@@ -349,6 +350,8 @@ type runExecution struct {
 	interpreter       *Interpreter
 	refresh           CatalogRefresh
 	steps             []task.ExecutionStep
+	invocationSteps   map[string]task.ExecutionStep
+	waveInvocations   map[string]map[string]struct{}
 	next              int
 	lastIssued        string
 	pinned            map[string]struct{}
@@ -537,13 +540,14 @@ func (execution *runExecution) initialize(
 	if err != nil {
 		return err
 	}
-	execution.steps = make(
-		[]task.ExecutionStep,
-		len(planned.Invocations),
-	)
-	for index, invocation := range planned.Invocations {
-		execution.steps[index] = invocation.Step
+	steps, invocationSteps, waveInvocations, err :=
+		buildRunWaveSteps(planned)
+	if err != nil {
+		return err
 	}
+	execution.steps = steps
+	execution.invocationSteps = invocationSteps
+	execution.waveInvocations = waveInvocations
 	execution.interpreter = interpreter
 	execution.initialized = true
 	return nil
@@ -635,17 +639,42 @@ func (execution *runExecution) Interpret(
 	}
 	execution.mu.Lock()
 	interpreter := execution.interpreter
+	invocations := execution.waveInvocations[step.ID]
+	invocationSteps := execution.invocationSteps
 	execution.mu.Unlock()
-	if interpreter == nil {
+	if interpreter == nil || len(invocations) == 0 ||
+		len(result.Children) != len(invocations) {
 		return task.StepVerdictDefault,
 			task.ErrInvalidArgument
 	}
-	return interpreter.Interpret(
-		ctx,
-		current,
-		step,
-		result,
-	)
+	seen := make(map[string]struct{}, len(result.Children))
+	for _, child := range result.Children {
+		if _, expected := invocations[child.ID]; !expected ||
+			child.Err != nil {
+			return task.StepVerdictDefault,
+				task.ErrInvalidArgument
+		}
+		if _, duplicate := seen[child.ID]; duplicate {
+			return task.StepVerdictDefault,
+				task.ErrInvalidArgument
+		}
+		seen[child.ID] = struct{}{}
+		invocationStep := invocationSteps[child.ID]
+		verdict, err := interpreter.Interpret(
+			ctx,
+			current,
+			invocationStep,
+			task.ProcessResult{
+				ExitCode: child.ExitCode,
+				TimedOut: child.TimedOut,
+			},
+		)
+		if err != nil ||
+			verdict != task.StepVerdictSucceeded {
+			return task.StepVerdictDefault, err
+		}
+	}
+	return task.StepVerdictSucceeded, nil
 }
 
 func (execution *runExecution) ObserveOutput(
@@ -671,16 +700,127 @@ func (execution *runExecution) ObserveOutput(
 	}
 	execution.mu.Lock()
 	interpreter := execution.interpreter
+	invocations := execution.waveInvocations[step.ID]
+	invocationStep := execution.invocationSteps[output.Source]
 	execution.mu.Unlock()
-	if interpreter == nil {
+	if interpreter == nil || len(invocations) == 0 {
+		return task.ErrInvalidArgument
+	}
+	if _, expected := invocations[output.Source]; !expected {
 		return task.ErrInvalidArgument
 	}
 	return interpreter.ObserveOutput(
 		ctx,
 		current,
-		step,
-		output,
+		invocationStep,
+		task.ProcessOutput{
+			Stream: output.Stream,
+			Data:   append([]byte(nil), output.Data...),
+		},
 	)
+}
+
+func buildRunWaveSteps(
+	planned PlannedRun,
+) (
+	[]task.ExecutionStep,
+	map[string]task.ExecutionStep,
+	map[string]map[string]struct{},
+	error,
+) {
+	if len(planned.Invocations) == 0 ||
+		len(planned.Waves) == 0 {
+		return nil, nil, nil, task.ErrInvalidArgument
+	}
+	invocations := make(
+		map[string]PlannedInvocation,
+		len(planned.Invocations),
+	)
+	invocationSteps := make(
+		map[string]task.ExecutionStep,
+		len(planned.Invocations),
+	)
+	for _, invocation := range planned.Invocations {
+		if _, duplicate := invocations[invocation.Job.ID]; duplicate {
+			return nil, nil, nil, task.ErrInvalidArgument
+		}
+		invocations[invocation.Job.ID] = invocation
+		invocationSteps[invocation.Job.ID] =
+			cloneCoordinatorSteps(
+				[]task.ExecutionStep{invocation.Step},
+			)[0]
+	}
+	steps := make([]task.ExecutionStep, len(planned.Waves))
+	waveInvocations := make(
+		map[string]map[string]struct{},
+		len(planned.Waves),
+	)
+	seen := make(map[string]struct{}, len(planned.Invocations))
+	for index, wave := range planned.Waves {
+		if len(wave.Jobs) == 0 ||
+			len(wave.Jobs) > maxScheduleConcurrency {
+			return nil, nil, nil, task.ErrInvalidArgument
+		}
+		stepID := fmt.Sprintf("run-wave-%06d", index+1)
+		step := task.ExecutionStep{
+			ID:   stepID,
+			Kind: task.StepTestRun,
+			Public: task.CommandSummary{
+				Executable: "test-wave",
+				Args:       make([]string, 0, len(wave.Jobs)),
+			},
+			Process: task.ProcessSpec{
+				Batch: make(
+					[]task.ProcessBatchItem,
+					0,
+					len(wave.Jobs),
+				),
+			},
+		}
+		members := make(
+			map[string]struct{},
+			len(wave.Jobs),
+		)
+		for _, job := range wave.Jobs {
+			invocation, exists := invocations[job.ID]
+			if !exists || invocation.Timeout < time.Millisecond {
+				return nil, nil, nil, task.ErrInvalidArgument
+			}
+			if _, duplicate := seen[job.ID]; duplicate {
+				return nil, nil, nil, task.ErrInvalidArgument
+			}
+			seen[job.ID] = struct{}{}
+			members[job.ID] = struct{}{}
+			step.Public.Args = append(step.Public.Args, job.ID)
+			step.Process.Batch = append(
+				step.Process.Batch,
+				task.ProcessBatchItem{
+					ID:         job.ID,
+					Executable: invocation.Step.Process.Executable,
+					Args: append(
+						[]string(nil),
+						invocation.Step.Process.Args...,
+					),
+					Env: append(
+						[]string(nil),
+						invocation.Step.Process.Env...,
+					),
+					EnvUnset: append(
+						[]string(nil),
+						invocation.Step.Process.EnvUnset...,
+					),
+					Dir:     invocation.Step.Process.Dir,
+					Timeout: invocation.Timeout,
+				},
+			)
+		}
+		steps[index] = step
+		waveInvocations[stepID] = members
+	}
+	if len(seen) != len(planned.Invocations) {
+		return nil, nil, nil, task.ErrInvalidArgument
+	}
+	return steps, invocationSteps, waveInvocations, nil
 }
 
 func encodeRunRequest(request RunRequest) ([]byte, error) {
@@ -802,6 +942,19 @@ func cloneCoordinatorSteps(
 			[]string(nil),
 			value.Process.EnvUnset...,
 		)
+		result[index].Process.Batch = make(
+			[]task.ProcessBatchItem,
+			len(value.Process.Batch),
+		)
+		for batchIndex, item := range value.Process.Batch {
+			result[index].Process.Batch[batchIndex] = item
+			result[index].Process.Batch[batchIndex].Args =
+				append([]string(nil), item.Args...)
+			result[index].Process.Batch[batchIndex].Env =
+				append([]string(nil), item.Env...)
+			result[index].Process.Batch[batchIndex].EnvUnset =
+				append([]string(nil), item.EnvUnset...)
+		}
 		result[index].Public.Args = append(
 			[]string(nil),
 			value.Public.Args...,

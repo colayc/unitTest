@@ -132,15 +132,36 @@ type ProcessSpec struct {
 	Env        []string
 	EnvUnset   []string
 	Dir        string
+	Batch      []ProcessBatchItem
+}
+
+type ProcessBatchItem struct {
+	ID         string
+	Executable string
+	Args       []string
+	Env        []string
+	EnvUnset   []string
+	Dir        string
+	Timeout    time.Duration
 }
 
 type ProcessOutput struct {
+	Source string
 	Stream string
 	Data   []byte
 }
 
 type ProcessResult struct {
 	ExitCode int
+	TimedOut bool
+	Err      error
+	Children []ProcessChildResult
+}
+
+type ProcessChildResult struct {
+	ID       string
+	ExitCode int
+	TimedOut bool
 	Err      error
 }
 

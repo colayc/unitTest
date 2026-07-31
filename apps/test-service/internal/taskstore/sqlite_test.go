@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -485,11 +486,17 @@ func TestUpdateLeaseRequiresExistingLeaseOnActiveTask(t *testing.T) {
 	}
 	missing.HostPID = 11
 	missing.TargetProcessGroup = 12
+	missing.TargetProcessGroups = []int{13, 14}
 	if err := store.UpdateLease(ctx, missing); err != nil {
 		t.Fatal(err)
 	}
 	leases, _ := store.ActiveLeases(ctx)
-	if len(leases) != 1 || leases[0].HostPID != 11 || leases[0].TargetProcessGroup != 12 {
+	if len(leases) != 1 || leases[0].HostPID != 11 ||
+		leases[0].TargetProcessGroup != 12 ||
+		!reflect.DeepEqual(
+			leases[0].TargetProcessGroups,
+			[]int{13, 14},
+		) {
 		t.Fatalf("ActiveLeases() = %#v", leases)
 	}
 	finished := mustTransition(t, running, task.Transition{From: task.StatusRunning, To: task.StatusFinished, Outcome: task.OutcomeSucceeded, At: now.Add(2 * time.Second)})
@@ -1190,7 +1197,7 @@ func TestReopenDoesNotReapplyMigrationAndDetectsChecksumTampering(t *testing.T) 
 	if err := store.db.QueryRow(`SELECT COUNT(*), MIN(sha256) FROM schema_migrations`).Scan(&count, &checksum); err != nil {
 		t.Fatal(err)
 	}
-	if count != 7 || len(checksum) != 64 {
+	if count != 8 || len(checksum) != 64 {
 		t.Fatalf("schema_migrations count=%d checksum=%q", count, checksum)
 	}
 	if err := store.Close(); err != nil {
@@ -1200,7 +1207,7 @@ func TestReopenDoesNotReapplyMigrationAndDetectsChecksumTampering(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&count); err != nil || count != 7 {
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&count); err != nil || count != 8 {
 		t.Fatalf("reopen count=%d err=%v", count, err)
 	}
 	if _, err := store.db.Exec(`UPDATE schema_migrations SET sha256=? WHERE version=1`, strings.Repeat("0", 64)); err != nil {

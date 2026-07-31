@@ -250,10 +250,15 @@ git commit -m "feat: interpret test task domain results"
 > interpreter、确定性 bounded wave scheduler，以及跨 Windows/Linux 的
 > `ENVIRONMENT_MODIFICATION` runtime-only overlay/unset replay。CTest、
 > CppUTest 与 Unity discovery 已改为可取消的 `test-discovery` Task steps，
-> continuation 不再直接执行 framework 外部进程。Task 4 尚未完成：Task
-> Engine 目前仍按 step 串行执行，wave 还没有并发执行语义，且
-> per-invocation timeout 尚未进入进程终止与领域结果映射；在这两项完成前
-> 不勾选本 Task。
+> continuation 不再直接执行 framework 外部进程。Task 4 已完成：scheduler
+> 的每个 wave 现在被编译为一个 runtime-only `ProcessSpec.Batch` step，
+> Process Host 在 wave 内并发启动不同 container，同时保持 wave 之间和同
+> container invocation 的确定性顺序。每个 batch item 独立计时和终止，
+> timeout 经 child result 映射为 `ProcessTimedOut`/`timed_out`，不会把同
+> wave 的其他目标误杀。Windows 使用 inner/outer Job；Linux 使用独立 process
+> group，并通过 SQLite migration 008 持久化多 group lease，restart recovery
+> 在信号前逐一校验 session ownership。Windows 真实 E2E、Go 全套、`go vet`、
+> race 与 Linux cross-compile 均通过。
 
 **文件：**
 
@@ -274,6 +279,14 @@ git commit -m "feat: interpret test task domain results"
 - 修改：`apps/test-service/internal/build/coordinator.go`
 - 修改：`apps/test-service/internal/build/coordinator_test.go`
 - 修改：`apps/test-service/internal/build/planner.go`
+- 修改：`apps/test-service/internal/processhost/host.go`
+- 修改：`apps/test-service/internal/processcontrol/process.go`
+- 修改：`apps/test-service/internal/processcontrol/runner_windows.go`
+- 修改：`apps/test-service/internal/processcontrol/runner_unix.go`
+- 修改：`apps/test-service/internal/task/ports.go`
+- 修改：`apps/test-service/internal/runtime/runtime.go`
+- 修改：`apps/test-service/internal/taskstore/recovery.go`
+- 创建：`apps/test-service/internal/taskstore/migrations/008_batch_process_leases.sql`
 
 **接口：**
 
@@ -282,7 +295,7 @@ func (c *Coordinator) StartDiscovery(context.Context, DiscoveryRequest) (task.Ta
 func (c *Coordinator) StartRun(context.Context, RunRequest) (task.Task, testdomain.TestRun, error)
 ```
 
-- [ ] **Step 1：写出 build→refresh→run 失败测试**
+- [x] **Step 1：写出 build→refresh→run 失败测试**
 
 覆盖：
 
@@ -300,7 +313,7 @@ func (c *Coordinator) StartRun(context.Context, RunRequest) (task.Task, testdoma
 - idempotency 同 request 返回同 Task/Run；
 - idempotency key 同而 payload 不同拒绝。
 
-- [ ] **Step 2：运行 Coordinator tests 并确认失败**
+- [x] **Step 2：运行 Coordinator tests 并确认失败**
 
 ```powershell
 go test ./apps/test-service/internal/testrun ./apps/test-service/internal/testdiscovery ./apps/test-service/internal/build -run 'Coordinator|Planner|Scheduler|Rebind' -count=1
@@ -308,11 +321,11 @@ go test ./apps/test-service/internal/testrun ./apps/test-service/internal/testdi
 
 预期：FAIL。
 
-- [ ] **Step 3：实现 Service-owned orchestration**
+- [x] **Step 3：实现 Service-owned orchestration**
 
 Build Coordinator 提供内部 `PreparePlan`，不创建嵌套 Task。Test Coordinator 是唯一 continuation provider；每次动态 step 都绑定 Catalog revision、container/item ID 和 Adapter version。
 
-- [ ] **Step 4：运行领域全套与 race**
+- [x] **Step 4：运行领域全套与 race**
 
 ```powershell
 go test ./apps/test-service/internal/testrun ./apps/test-service/internal/testdiscovery ./apps/test-service/internal/testframework/... ./apps/test-service/internal/build ./apps/test-service/internal/task -count=1
@@ -321,7 +334,7 @@ go test -race ./apps/test-service/internal/testrun ./apps/test-service/internal/
 
 预期：PASS。
 
-- [ ] **Step 5：提交 Test Coordinator**
+- [x] **Step 5：提交 Test Coordinator**
 
 ```powershell
 git add apps/test-service/internal/testrun apps/test-service/internal/testdiscovery apps/test-service/internal/build apps/test-service/internal/task

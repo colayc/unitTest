@@ -524,6 +524,99 @@ func TestWindowsOrdinaryNonzeroExitIsAResult(t *testing.T) {
 	}
 }
 
+func TestWindowsBatchRunsWaveAndTimesOutOnlySlowTarget(
+	t *testing.T,
+) {
+	binary := buildWindowsService(t)
+	directory := filepath.Dir(binary)
+	process, err := NewRunner(binary).Prepare(
+		context.Background(),
+		Spec{Batch: []BatchItem{
+			{
+				ID: "fast", Executable: binary,
+				Args: []string{"--task-fixture", "emit-output"},
+				Dir:  directory, TimeoutMS: 2_000,
+			},
+			{
+				ID: "failed", Executable: binary,
+				Args: []string{"--task-fixture", "exit-nonzero"},
+				Dir:  directory, TimeoutMS: 2_000,
+			},
+			{
+				ID: "slow", Executable: binary,
+				Args: []string{"--task-fixture", "hang"},
+				Dir:  directory, TimeoutMS: 50,
+			},
+		}},
+		windowsTestID(59),
+		windowsTestID(60),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer process.Close(context.Background())
+	if err := process.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	lease := process.Lease()
+	if lease.TargetProcessGroup != 0 ||
+		len(lease.TargetProcessGroups) != 3 {
+		t.Fatalf("batch lease = %#v", lease)
+	}
+	outputs := make(map[string]string)
+	var result Result
+	finished := false
+	for !finished {
+		select {
+		case output, ok := <-process.Output():
+			if !ok {
+				continue
+			}
+			key := output.Source + "/" + string(output.Stream)
+			outputs[key] += string(output.Data)
+		case result = <-process.Done():
+			finished = true
+		case <-time.After(5 * time.Second):
+			t.Fatal("batch process did not finish")
+		}
+	}
+	for {
+		select {
+		case output, ok := <-process.Output():
+			if !ok {
+				goto outputDrained
+			}
+			key := output.Source + "/" + string(output.Stream)
+			outputs[key] += string(output.Data)
+		default:
+			goto outputDrained
+		}
+	}
+
+outputDrained:
+	if result.Err != nil || len(result.Children) != 3 {
+		t.Fatalf("result = %#v", result)
+	}
+	if outputs["fast/stdout"] != "fixture stdout\n" ||
+		outputs["fast/stderr"] != "fixture stderr\n" ||
+		outputs["failed/stderr"] !=
+			"fixture exits with code 17\n" {
+		t.Fatalf("outputs = %#v", outputs)
+	}
+	children := make(map[string]ChildResult, len(result.Children))
+	for _, child := range result.Children {
+		children[child.ID] = child
+	}
+	if children["failed"].ExitCode != 17 ||
+		children["failed"].Err != nil ||
+		children["fast"].ExitCode != 0 ||
+		children["fast"].Err != nil ||
+		!children["slow"].TimedOut ||
+		children["slow"].Err != nil {
+		t.Fatalf("children = %#v", result.Children)
+	}
+}
+
 func TestWindowsNoisyTargetDoesNotBlockDoneOrCloseWithoutOutputConsumer(t *testing.T) {
 	binary := buildWindowsService(t)
 	process, err := NewRunner(binary).Prepare(context.Background(), windowsHelperSpec("noisy"), windowsTestID(15), windowsTestID(16))

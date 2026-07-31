@@ -717,6 +717,26 @@ Preflight
 
 Test Coordinator 可以在不同 container 之间做有界并发，同一 container 默认串行。Service-wide maximum 是受控配置，Client 不能突破 capability 上限。
 
+确定性 scheduler 把 invocation 划分为有序 wave。Task Engine 仍然一次拥有一个
+Managed Process，但每个 test-run step 表示一个完整 wave，其 runtime-only
+`ProcessSpec.Batch` 包含该 wave 的 1 到 `maxConcurrency` 个目标进程。Process
+Host 在发出 `started` 后并发等待这些目标，并使用 invocation step ID 标记每个
+stdout/stderr frame 和 child result；Test Coordinator 只把匹配当前 wave 的 ID
+路由回对应 Framework Adapter，未知、重复或缺失 ID 一律作为 host protocol
+failure 关闭。
+
+每个 batch item 都携带独立 timeout。计时从目标进程启动时开始；到期后 Process
+Host 只终止该目标的进程树，并把 `timedOut` child result 映射为
+`ProcessTimedOut`。Task 的 plan-wide timeout 仍由 Task Manager 独立控制，并会
+终止整个 wave，因此 per-invocation timeout 不能扩大总预算。
+
+Windows 下每个目标使用独立 inner Job，Process Host 及全部 inner Job 同时受
+service-owned outer Job 保护。Linux 下每个目标使用独立 process group；
+`ProcessLease.TargetProcessGroups` 通过 SQLite migration 008 持久化全部 group。
+restart recovery 会先用 Host PID、Host start identity 和 session ownership
+逐一验证 group，再依次发送 TERM/KILL。这样单目标 timeout 与整 wave 的
+crash/restart cleanup 都不会退化为按 PID 猜测或遗留子进程树。
+
 ### 15.3 全部、容器和 case
 
 - `all`：运行 Catalog 中全部未 disabled container/item；

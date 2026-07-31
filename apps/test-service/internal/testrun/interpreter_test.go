@@ -249,6 +249,159 @@ func TestInterpreterMapsOpaqueCTestExitToDomainResult(t *testing.T) {
 	}
 }
 
+func TestInterpreterMapsFrameworkTimeoutToTimedOutResult(
+	t *testing.T,
+) {
+	containerID, itemID := interpreterIDs(t)
+	parser := &recordingResultParser{
+		finish: testframework.ParseResult{
+			Cases: []testframework.ParsedCaseResult{{
+				ItemID:            itemID,
+				ParentLogicalName: "Group",
+				LogicalName:       "Case",
+				Status:            testframework.CaseNotRun,
+				Partial:           true,
+			}},
+			Complete: false,
+		},
+	}
+	store := newResultAppender()
+	interpreter := newTestInterpreter(
+		t,
+		store,
+		containerID,
+		itemID,
+		parser,
+		nil,
+	)
+	current, step := interpreterTaskAndStep(interpreter)
+
+	verdict, err := interpreter.Interpret(
+		context.Background(),
+		current,
+		step,
+		task.ProcessResult{TimedOut: true},
+	)
+	if err != nil || verdict != task.StepVerdictSucceeded {
+		t.Fatalf("Interpret() = %s, %v", verdict, err)
+	}
+	results := store.results()
+	if len(results) != 1 ||
+		results[0].Outcome != testdomain.ItemTimedOut ||
+		!results[0].Partial ||
+		results[0].Reason != "" ||
+		len(results[0].FailureDetails) != 1 ||
+		results[0].FailureDetails[0].Category != "test_timeout" {
+		t.Fatalf("timeout result = %#v", results)
+	}
+}
+
+func TestInterpreterMarksOnlyFirstMissingCaseTimedOut(
+	t *testing.T,
+) {
+	containerID, firstID := interpreterIDs(t)
+	secondID, err := testdomain.CaseID(
+		testdomain.CaseIdentity{
+			ProjectID: "project", CTestName: "tests",
+			Framework: testdomain.FrameworkCppUTest,
+			Group:     "Group", Name: "CaseTwo",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parser := &recordingResultParser{
+		finish: testframework.ParseResult{
+			Cases: []testframework.ParsedCaseResult{
+				{
+					ItemID:            firstID,
+					ParentLogicalName: "Group",
+					LogicalName:       "Case",
+					Status:            testframework.CaseNotRun,
+					Partial:           true,
+				},
+				{
+					ItemID:            secondID,
+					ParentLogicalName: "Group",
+					LogicalName:       "CaseTwo",
+					Status:            testframework.CaseNotRun,
+					Partial:           true,
+				},
+			},
+			Complete: false,
+		},
+	}
+	adapter := &interpreterAdapter{parser: parser}
+	step := task.ExecutionStep{
+		ID: "test-000001", Kind: task.StepTestRun,
+	}
+	plan := PlannedRun{
+		Invocations: []PlannedInvocation{{
+			Job: ScheduledJob{
+				ID: "test-000001", ContainerID: containerID,
+				Iteration: 1,
+			},
+			Step:        step,
+			ContainerID: containerID,
+			Framework:   testdomain.FrameworkCppUTest,
+			ExpectedCases: []testframework.ExpectedCase{
+				{
+					ItemID:            firstID,
+					ParentLogicalName: "Group",
+					LogicalName:       "Case",
+				},
+				{
+					ItemID:            secondID,
+					ParentLogicalName: "Group",
+					LogicalName:       "CaseTwo",
+				},
+			},
+			Adapter:        adapter,
+			AdapterVersion: adapter.ContractVersion(),
+			ParseInput: testframework.ParseInput{
+				Items: []testframework.RunItem{
+					{
+						ItemID:            firstID,
+						ParentLogicalName: "Group",
+						LogicalName:       "Case",
+					},
+					{
+						ItemID:            secondID,
+						ParentLogicalName: "Group",
+						LogicalName:       "CaseTwo",
+					},
+				},
+			},
+		}},
+	}
+	store := newResultAppender()
+	interpreter, err := NewInterpreter(
+		strings.Repeat("1", 32),
+		store,
+		plan,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verdict, err := interpreter.Interpret(
+		context.Background(),
+		task.Task{ID: strings.Repeat("2", 32)},
+		step,
+		task.ProcessResult{TimedOut: true},
+	)
+	if err != nil || verdict != task.StepVerdictSucceeded {
+		t.Fatalf("Interpret() = %q, %v", verdict, err)
+	}
+	results := store.results()
+	if len(results) != 2 ||
+		results[0].Outcome != testdomain.ItemTimedOut ||
+		results[1].Outcome != testdomain.ItemNotRun ||
+		results[1].Reason !=
+			testdomain.ReasonContainerTerminated {
+		t.Fatalf("timeout results = %#v", results)
+	}
+}
+
 func newTestInterpreter(
 	t *testing.T,
 	store *recordingResultAppender,

@@ -21,7 +21,7 @@ func TestMigration007PreservesTaskRelationsAndRollsBackFailure(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(migrations) != 7 || migrations[6].version != 7 {
+	if len(migrations) < 7 || migrations[6].version != 7 {
 		t.Fatalf("loaded migrations = %#v", migrations)
 	}
 	db := openConfiguredDatabase(

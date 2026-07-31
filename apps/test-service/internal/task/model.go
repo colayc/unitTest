@@ -100,6 +100,7 @@ type Artifact struct {
 type ProcessLease struct {
 	TaskID, HostStartIdentity, ServiceInstanceID string
 	HostPID, TargetProcessGroup                  int
+	TargetProcessGroups                          []int
 }
 
 type Page[T any] struct {

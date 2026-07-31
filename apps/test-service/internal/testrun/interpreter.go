@@ -153,6 +153,7 @@ func (interpreter *Interpreter) ObserveOutput(
 		state,
 		events,
 		true,
+		testframework.ProcessExited,
 	)
 }
 
@@ -188,27 +189,34 @@ func (interpreter *Interpreter) Interpret(
 		return state.verdict, nil
 	}
 
+	termination := testframework.ProcessExited
+	if result.TimedOut {
+		termination = testframework.ProcessTimedOut
+	}
 	if state.parseErr == nil && state.invocation.ControlFile != nil {
 		encoded, readErr := state.invocation.ControlFile.Read(
 			ctx,
 			maxControlResultBytes,
 		)
-		if readErr != nil {
+		if readErr != nil && !result.TimedOut {
 			return task.StepVerdictDefault, readErr
 		}
-		events, feedErr := state.parser.Feed(
-			testframework.StreamControl,
-			encoded,
-		)
-		if feedErr != nil {
-			state.parseErr = feedErr
-		} else if err := interpreter.persistEvents(
-			ctx,
-			state,
-			events,
-			true,
-		); err != nil {
-			return task.StepVerdictDefault, err
+		if readErr == nil {
+			events, feedErr := state.parser.Feed(
+				testframework.StreamControl,
+				encoded,
+			)
+			if feedErr != nil {
+				state.parseErr = feedErr
+			} else if err := interpreter.persistEvents(
+				ctx,
+				state,
+				events,
+				true,
+				termination,
+			); err != nil {
+				return task.StepVerdictDefault, err
+			}
 		}
 	}
 	if state.parseErr != nil {
@@ -223,7 +231,7 @@ func (interpreter *Interpreter) Interpret(
 	parsed, finishErr := state.parser.Finish(
 		testframework.ProcessResult{
 			ExitCode:    result.ExitCode,
-			Termination: testframework.ProcessExited,
+			Termination: termination,
 		},
 	)
 	if finishErr != nil {
@@ -235,11 +243,23 @@ func (interpreter *Interpreter) Interpret(
 		state.verdict = task.StepVerdictSucceeded
 		return state.verdict, nil
 	}
+	timeoutAssigned := false
 	for _, candidate := range parsed.Cases {
+		candidateTermination := termination
+		if termination == testframework.ProcessTimedOut &&
+			candidate.Status == testframework.CaseNotRun {
+			if timeoutAssigned {
+				candidateTermination =
+					testframework.ProcessExited
+			} else {
+				timeoutAssigned = true
+			}
+		}
 		domainResult, err := parsedDomainResult(
 			state,
 			candidate,
 			false,
+			candidateTermination,
 		)
 		if err != nil {
 			state.parseErr = err
@@ -282,12 +302,14 @@ func (interpreter *Interpreter) persistEvents(
 	state *invocationInterpreter,
 	events []testframework.ResultEvent,
 	provisional bool,
+	termination testframework.ProcessTermination,
 ) error {
 	for _, event := range events {
 		result, err := parsedDomainResult(
 			state,
 			event.Case,
 			provisional,
+			termination,
 		)
 		if err != nil {
 			state.parseErr = err
@@ -352,7 +374,16 @@ func (interpreter *Interpreter) persistOpaque(
 ) error {
 	expected := state.invocation.ExpectedCases[0]
 	outcome := testdomain.ItemPassed
-	if process.ExitCode != 0 {
+	failureDetails := []testdomain.FailureDetail{}
+	if process.TimedOut {
+		outcome = testdomain.ItemTimedOut
+		failureDetails = []testdomain.FailureDetail{{
+			Category:     "test_timeout",
+			Message:      "CTest invocation exceeded its timeout",
+			Locations:    []testdomain.SourceLocation{},
+			EvidenceRefs: []string{},
+		}}
+	} else if process.ExitCode != 0 {
 		outcome = testdomain.ItemFailed
 	}
 	return interpreter.persistResult(
@@ -363,8 +394,9 @@ func (interpreter *Interpreter) persistOpaque(
 			ContainerID:    state.invocation.ContainerID,
 			Iteration:      state.invocation.Job.Iteration,
 			Outcome:        outcome,
-			FailureDetails: []testdomain.FailureDetail{},
+			FailureDetails: failureDetails,
 			OutputRefs:     []string{},
+			Partial:        process.TimedOut,
 		},
 	)
 }
@@ -373,6 +405,7 @@ func parsedDomainResult(
 	state *invocationInterpreter,
 	value testframework.ParsedCaseResult,
 	provisional bool,
+	termination testframework.ProcessTermination,
 ) (testdomain.TestItemResult, error) {
 	expected := expectedCase(
 		state.invocation.ExpectedCases,
@@ -394,8 +427,12 @@ func parsedDomainResult(
 	case testframework.CaseSkipped:
 		outcome = testdomain.ItemSkipped
 	case testframework.CaseNotRun:
-		outcome = testdomain.ItemNotRun
-		reason = testdomain.ReasonContainerTerminated
+		if termination == testframework.ProcessTimedOut {
+			outcome = testdomain.ItemTimedOut
+		} else {
+			outcome = testdomain.ItemNotRun
+			reason = testdomain.ReasonContainerTerminated
+		}
 	default:
 		return testdomain.TestItemResult{}, task.ErrInvalidArgument
 	}
@@ -414,6 +451,15 @@ func parsedDomainResult(
 			Locations:    []testdomain.SourceLocation{},
 			EvidenceRefs: []string{},
 		}
+	}
+	if value.Status == testframework.CaseNotRun &&
+		termination == testframework.ProcessTimedOut {
+		details = append(details, testdomain.FailureDetail{
+			Category:     "test_timeout",
+			Message:      "test invocation exceeded its timeout",
+			Locations:    []testdomain.SourceLocation{},
+			EvidenceRefs: []string{},
+		})
 	}
 	result := testdomain.TestItemResult{
 		ItemID:         value.ItemID,

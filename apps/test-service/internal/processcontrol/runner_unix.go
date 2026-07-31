@@ -71,6 +71,7 @@ type unixProcess struct {
 	closeOnce        sync.Once
 	controlCloseOnce sync.Once
 	statusCloseOnce  sync.Once
+	outputCloseOnce  sync.Once
 	discardOnce      sync.Once
 	outputOverflow   atomic.Bool
 	operations       linuxOperations
@@ -273,10 +274,9 @@ func (runner *unixRunner) Cleanup(ctx context.Context, lease task.ProcessLease, 
 	if lease.HostPID <= 1 || lease.HostStartIdentity == "" {
 		return ErrLeaseIdentityMismatch
 	}
-	if lease.TargetProcessGroup != 0 {
-		if err := validateLinuxSignalTarget(lease.TargetProcessGroup); err != nil {
-			return err
-		}
+	groups, err := linuxLeaseTargetGroups(lease)
+	if err != nil {
+		return err
 	}
 	identity, err := operations.startIdentity(lease.HostPID)
 	hostExists := err == nil
@@ -286,19 +286,19 @@ func (runner *unixRunner) Cleanup(ctx context.Context, lease task.ProcessLease, 
 	if hostExists && identity != lease.HostStartIdentity {
 		return ErrLeaseIdentityMismatch
 	}
-	if !hostExists && lease.TargetProcessGroup == 0 {
+	if !hostExists && len(groups) == 0 {
 		return nil
 	}
-	if lease.TargetProcessGroup > 1 {
-		exists, err := operations.ownedGroup(lease.TargetProcessGroup, lease.HostPID)
+	for _, group := range groups {
+		exists, err := operations.ownedGroup(
+			group,
+			lease.HostPID,
+		)
 		if err != nil {
 			return err
 		}
-		if !exists && operations.groupExists(lease.TargetProcessGroup) {
+		if !exists && operations.groupExists(group) {
 			return ErrLeaseIdentityMismatch
-		}
-		if !exists && !hostExists {
-			return nil
 		}
 		if hostExists {
 			present, err := operations.validateHostForSignal(lease.HostPID, lease.HostStartIdentity)
@@ -313,8 +313,14 @@ func (runner *unixRunner) Cleanup(ctx context.Context, lease task.ProcessLease, 
 	}
 
 	var cleanupErr error
-	if lease.TargetProcessGroup > 1 {
-		if err := operations.signalTargetGroup(lease, hostExists, unix.SIGTERM); err != nil {
+	for _, group := range groups {
+		groupLease := lease
+		groupLease.TargetProcessGroup = group
+		if err := operations.signalTargetGroup(
+			groupLease,
+			hostExists,
+			unix.SIGTERM,
+		); err != nil {
 			return redactLinuxOperationError(err)
 		}
 	}
@@ -335,8 +341,14 @@ func (runner *unixRunner) Cleanup(ctx context.Context, lease task.ProcessLease, 
 	if hostExists && identity != lease.HostStartIdentity {
 		return errors.Join(cleanupErr, ErrLeaseIdentityMismatch)
 	}
-	if lease.TargetProcessGroup > 1 {
-		if err := operations.signalTargetGroup(lease, hostExists, unix.SIGKILL); err != nil {
+	for _, group := range groups {
+		groupLease := lease
+		groupLease.TargetProcessGroup = group
+		if err := operations.signalTargetGroup(
+			groupLease,
+			hostExists,
+			unix.SIGKILL,
+		); err != nil {
 			return errors.Join(cleanupErr, redactLinuxOperationError(err))
 		}
 	}
@@ -358,10 +370,42 @@ func redactLinuxOperationError(err error) error {
 	return errProcessHostFailed
 }
 
+func linuxLeaseTargetGroups(
+	lease task.ProcessLease,
+) ([]int, error) {
+	values := make(
+		[]int,
+		0,
+		1+len(lease.TargetProcessGroups),
+	)
+	if lease.TargetProcessGroup != 0 {
+		values = append(values, lease.TargetProcessGroup)
+	}
+	values = append(values, lease.TargetProcessGroups...)
+	seen := make(map[int]struct{}, len(values))
+	result := make([]int, 0, len(values))
+	for _, group := range values {
+		if err := validateLinuxSignalTarget(group); err != nil {
+			return nil, err
+		}
+		if _, duplicate := seen[group]; duplicate {
+			continue
+		}
+		seen[group] = struct{}{}
+		result = append(result, group)
+	}
+	return result, nil
+}
+
 func (process *unixProcess) Lease() task.ProcessLease {
 	process.mu.Lock()
 	defer process.mu.Unlock()
-	return process.lease
+	result := process.lease
+	result.TargetProcessGroups = append(
+		[]int(nil),
+		process.lease.TargetProcessGroups...,
+	)
+	return result
 }
 
 func (process *unixProcess) Start(ctx context.Context) error {
@@ -388,7 +432,13 @@ func (process *unixProcess) Start(ctx context.Context) error {
 		process.finishAfterHost(Result{Err: errProcessStartFailed})
 		return errProcessStartFailed
 	}
-	if err := validateLinuxStartedStatus(status); err != nil {
+	if len(process.specValue.Batch) == 0 &&
+		validateLinuxStartedStatus(status) != nil ||
+		len(process.specValue.Batch) != 0 &&
+			validateBatchStartedStatus(
+				status,
+				process.specValue.Batch,
+			) != nil {
 		process.closeControl()
 		process.finishAfterHost(Result{Err: errProcessHostFailed})
 		return errProcessHostFailed
@@ -396,6 +446,10 @@ func (process *unixProcess) Start(ctx context.Context) error {
 	process.mu.Lock()
 	process.started = true
 	process.lease.TargetProcessGroup = status.ProcessGroup
+	process.lease.TargetProcessGroups = append(
+		[]int(nil),
+		status.TargetProcessGroups...,
+	)
 	process.mu.Unlock()
 	go process.watchExit()
 	return nil
@@ -460,6 +514,12 @@ func (process *unixProcess) Close(ctx context.Context) error {
 		process.closeStatus()
 		return ctx.Err()
 	}
+	select {
+	case <-process.finished:
+	case <-ctx.Done():
+		process.closeStatus()
+		return ctx.Err()
+	}
 	process.closeStatus()
 	return nil
 }
@@ -486,15 +546,51 @@ func (process *unixProcess) readStatus(ctx context.Context) (HostStatus, error) 
 }
 
 func (process *unixProcess) watchExit() {
-	status, err := process.readStatus(context.Background())
 	result := Result{}
-	if err != nil || status.Kind != "exit" {
-		result.Err = errProcessHostFailed
-	} else {
+	for {
+		status, err := process.readStatus(context.Background())
+		if err != nil {
+			result.Err = errProcessHostFailed
+			break
+		}
+		if status.Kind == "output" {
+			if !validBatchOutputStatus(
+				status,
+				len(process.specValue.Batch) != 0,
+			) {
+				result.Err = errProcessHostFailed
+				break
+			}
+			process.sendOutput(Output{
+				Source: status.Source,
+				Stream: status.Stream,
+				Data: append(
+					[]byte(nil),
+					status.Data...,
+				),
+			})
+			continue
+		}
+		if status.Kind != "exit" {
+			result.Err = errProcessHostFailed
+			break
+		}
+		children, valid := hostChildResults(
+			status.Children,
+			process.specValue.Batch,
+		)
+		if !valid ||
+			len(process.specValue.Batch) == 0 &&
+				len(children) != 0 {
+			result.Err = errProcessHostFailed
+			break
+		}
 		result.ExitCode = status.ExitCode
+		result.Children = children
 		if status.ErrorCode != "" {
 			result.Err = errProcessHostFailed
 		}
+		break
 	}
 	process.finishAfterHost(result)
 }
@@ -502,6 +598,7 @@ func (process *unixProcess) watchExit() {
 func (process *unixProcess) finishAfterHost(result Result) {
 	<-process.hostExited
 	<-process.outputDone
+	process.closeOutput()
 	process.publish(process.applyOutputOverflow(result))
 }
 
@@ -534,8 +631,13 @@ func (process *unixProcess) copyOutput() {
 	go process.copyStream(&readers, process.stdout, StreamStdout)
 	go process.copyStream(&readers, process.stderr, StreamStderr)
 	readers.Wait()
-	close(process.output)
 	close(process.outputDone)
+}
+
+func (process *unixProcess) closeOutput() {
+	process.outputCloseOnce.Do(func() {
+		close(process.output)
+	})
 }
 
 func (process *unixProcess) copyStream(readers *sync.WaitGroup, reader *os.File, stream Stream) {
@@ -546,12 +648,10 @@ func (process *unixProcess) copyStream(readers *sync.WaitGroup, reader *os.File,
 		count, err := reader.Read(buffer)
 		if count > 0 {
 			data := append([]byte(nil), buffer[:count]...)
-			select {
-			case process.output <- Output{Stream: stream, Data: data}:
-			case <-process.outputDiscard:
-			default:
-				process.outputOverflow.Store(true)
-			}
+			process.sendOutput(Output{
+				Stream: stream,
+				Data:   data,
+			})
 		}
 		if err != nil {
 			return
@@ -559,8 +659,20 @@ func (process *unixProcess) copyStream(readers *sync.WaitGroup, reader *os.File,
 	}
 }
 
+func (process *unixProcess) sendOutput(value Output) {
+	select {
+	case process.output <- value:
+	case <-process.outputDiscard:
+	default:
+		process.outputOverflow.Store(true)
+	}
+}
+
 func validateLinuxStartedStatus(status HostStatus) error {
-	if status.Kind != "started" || status.PID <= 1 || status.ProcessGroup <= 1 || status.PID != status.ProcessGroup {
+	if status.Kind != "started" || status.PID <= 1 ||
+		status.ProcessGroup <= 1 ||
+		status.PID != status.ProcessGroup ||
+		len(status.TargetProcessGroups) != 0 {
 		return errProcessHostFailed
 	}
 	return nil
@@ -582,8 +694,21 @@ func (process *unixProcess) forceTerminate(ctx context.Context, wait time.Durati
 	prior = errors.Join(prior, ctx.Err())
 	lease := process.Lease()
 	if err := process.operations.validateHost(lease.HostPID, lease.HostStartIdentity); err == nil {
-		if lease.TargetProcessGroup > 1 {
-			if err := process.operations.signalTargetGroup(lease, true, unix.SIGKILL); err != nil {
+		groups, groupErr := linuxLeaseTargetGroups(lease)
+		if groupErr != nil {
+			prior = errors.Join(
+				prior,
+				redactLinuxOperationError(groupErr),
+			)
+		}
+		for _, group := range groups {
+			groupLease := lease
+			groupLease.TargetProcessGroup = group
+			if err := process.operations.signalTargetGroup(
+				groupLease,
+				true,
+				unix.SIGKILL,
+			); err != nil {
 				prior = errors.Join(prior, redactLinuxOperationError(err))
 			}
 		}
@@ -621,11 +746,21 @@ func waitClosed(ctx context.Context, done <-chan struct{}, duration time.Duratio
 }
 
 func waitLeaseGone(ctx context.Context, lease task.ProcessLease, duration time.Duration, operations linuxOperations) bool {
+	groups, err := linuxLeaseTargetGroups(lease)
+	if err != nil {
+		return false
+	}
 	deadline := time.Now().Add(duration)
 	for {
 		hostGone := !operations.pidExists(lease.HostPID)
-		groupGone := lease.TargetProcessGroup <= 0 || !operations.groupExists(lease.TargetProcessGroup)
-		if hostGone && groupGone {
+		groupsGone := true
+		for _, group := range groups {
+			if operations.groupExists(group) {
+				groupsGone = false
+				break
+			}
+		}
+		if hostGone && groupsGone {
 			return true
 		}
 		if time.Now().After(deadline) {

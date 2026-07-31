@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"unit-test-ide.local/test-service/internal/task"
 )
@@ -101,6 +102,132 @@ func TestValidatePlanAcceptsServiceOwnedCTestStepKinds(t *testing.T) {
 		); err != nil {
 			t.Fatalf("ValidatePlan(%s) error = %v", kind, err)
 		}
+	}
+}
+
+func TestValidatePlanAcceptsBoundedProcessBatchAndFingerprintsIt(
+	t *testing.T,
+) {
+	step := task.ExecutionStep{
+		ID: "run-wave-000001", Kind: task.StepTestRun,
+		Process: task.ProcessSpec{
+			Batch: []task.ProcessBatchItem{
+				{
+					ID: "test-000001", Executable: "ctest",
+					Args: []string{"-R", "first"},
+					Env:  []string{"MODE=one"},
+					Dir:  "build", Timeout: time.Second,
+				},
+				{
+					ID: "test-000002", Executable: "ctest",
+					Args:     []string{"-R", "second"},
+					EnvUnset: []string{"LEGACY_MODE"},
+					Dir:      "build", Timeout: 2 * time.Second,
+				},
+			},
+		},
+		Public: task.CommandSummary{
+			Executable: "test-wave",
+			Args: []string{
+				"test-000001",
+				"test-000002",
+			},
+		},
+	}
+	plan := task.ExecutionPlan{
+		Version: 1,
+		Steps:   []task.ExecutionStep{step},
+	}
+	boundary := fakeBoundary{
+		executables: []string{"ctest"},
+		roots:       []string{"build"},
+	}
+	if err := task.ValidatePlan(plan, boundary); err != nil {
+		t.Fatal(err)
+	}
+	changed := plan
+	changed.Steps = append(
+		[]task.ExecutionStep(nil),
+		plan.Steps...,
+	)
+	changed.Steps[0].Process.Batch = append(
+		[]task.ProcessBatchItem(nil),
+		step.Process.Batch...,
+	)
+	changed.Steps[0].Process.Batch[1].Timeout =
+		3 * time.Second
+	if task.FingerprintPlan(plan) ==
+		task.FingerprintPlan(changed) {
+		t.Fatal("batch timeout was absent from plan fingerprint")
+	}
+}
+
+func TestValidatePlanRejectsInvalidProcessBatch(t *testing.T) {
+	valid := task.ExecutionStep{
+		ID: "run-wave-000001", Kind: task.StepTestRun,
+		Process: task.ProcessSpec{
+			Batch: []task.ProcessBatchItem{{
+				ID: "test-000001", Executable: "ctest",
+				Dir: "build", Timeout: time.Second,
+			}},
+		},
+	}
+	tests := []struct {
+		name   string
+		change func(*task.ExecutionStep)
+	}{
+		{
+			name: "mixed single and batch",
+			change: func(step *task.ExecutionStep) {
+				step.Process.Executable = "ctest"
+			},
+		},
+		{
+			name: "duplicate item ID",
+			change: func(step *task.ExecutionStep) {
+				step.Process.Batch = append(
+					step.Process.Batch,
+					step.Process.Batch[0],
+				)
+			},
+		},
+		{
+			name: "sub-millisecond timeout",
+			change: func(step *task.ExecutionStep) {
+				step.Process.Batch[0].Timeout =
+					time.Microsecond
+			},
+		},
+		{
+			name: "blocked executable",
+			change: func(step *task.ExecutionStep) {
+				step.Process.Batch[0].Executable = "ninja"
+			},
+		},
+	}
+	boundary := fakeBoundary{
+		executables: []string{"ctest"},
+		roots:       []string{"build"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			step := valid
+			step.Process.Batch = append(
+				[]task.ProcessBatchItem(nil),
+				valid.Process.Batch...,
+			)
+			test.change(&step)
+			err := task.ValidatePlan(
+				task.ExecutionPlan{
+					Version: 1,
+					Steps:   []task.ExecutionStep{step},
+				},
+				boundary,
+			)
+			if !errors.Is(err, task.ErrInvalidArgument) {
+				t.Fatalf("ValidatePlan() error = %v", err)
+			}
+		})
 	}
 }
 

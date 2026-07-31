@@ -870,6 +870,7 @@ func (m *Manager) acceptOutput(current *activeTask, output ProcessOutput, active
 				cloneRuntimeTask(current.task),
 				cloneRuntimeStep(current.plan.Steps[current.nextStep]),
 				ProcessOutput{
+					Source: output.Source,
 					Stream: output.Stream,
 					Data:   append([]byte(nil), output.Data...),
 				},

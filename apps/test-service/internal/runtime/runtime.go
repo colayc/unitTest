@@ -656,6 +656,21 @@ func cmakeArchitecture() string {
 type processFactory struct{ runner processcontrol.Runner }
 
 func (f processFactory) Prepare(ctx context.Context, spec task.ProcessSpec, taskID, serviceID string) (task.ManagedProcess, error) {
+	batch := make([]processcontrol.BatchItem, len(spec.Batch))
+	for index, item := range spec.Batch {
+		batch[index] = processcontrol.BatchItem{
+			ID:         item.ID,
+			Executable: item.Executable,
+			Args:       append([]string(nil), item.Args...),
+			Env:        append([]string(nil), item.Env...),
+			EnvUnset: append(
+				[]string(nil),
+				item.EnvUnset...,
+			),
+			Dir:       item.Dir,
+			TimeoutMS: item.Timeout.Milliseconds(),
+		}
+	}
 	process, err := f.runner.Prepare(ctx, processcontrol.Spec{
 		Executable: spec.Executable,
 		Args:       append([]string(nil), spec.Args...),
@@ -664,7 +679,8 @@ func (f processFactory) Prepare(ctx context.Context, spec task.ProcessSpec, task
 			[]string(nil),
 			spec.EnvUnset...,
 		),
-		Dir: spec.Dir,
+		Dir:   spec.Dir,
+		Batch: batch,
 	}, taskID, serviceID)
 	if err != nil {
 		return nil, err
@@ -710,7 +726,14 @@ func newManagedProcess(process processcontrol.Process) *managedProcess {
 				select {
 				case <-result.stop:
 					return
-				case result.output <- task.ProcessOutput{Stream: string(value.Stream), Data: append([]byte(nil), value.Data...)}:
+				case result.output <- task.ProcessOutput{
+					Source: value.Source,
+					Stream: string(value.Stream),
+					Data: append(
+						[]byte(nil),
+						value.Data...,
+					),
+				}:
 				}
 			}
 		}
@@ -729,7 +752,25 @@ func newManagedProcess(process processcontrol.Process) *managedProcess {
 				select {
 				case <-result.stop:
 					return
-				case result.done <- task.ProcessResult{ExitCode: value.ExitCode, Err: value.Err}:
+				default:
+				}
+				children := make(
+					[]task.ProcessChildResult,
+					len(value.Children),
+				)
+				for index, child := range value.Children {
+					children[index] = task.ProcessChildResult{
+						ID: child.ID, ExitCode: child.ExitCode,
+						TimedOut: child.TimedOut,
+						Err:      child.Err,
+					}
+				}
+				select {
+				case result.done <- task.ProcessResult{
+					ExitCode: value.ExitCode,
+					Err:      value.Err,
+					Children: children,
+				}:
 				}
 			}
 		}

@@ -14,33 +14,69 @@ func upsertLease(ctx context.Context, tx *sql.Tx, lease task.ProcessLease) error
 	if !validLease(lease) {
 		return task.ErrInvalidArgument
 	}
+	groups, err := encodeLeaseTargetGroups(
+		lease.TargetProcessGroups,
+	)
+	if err != nil {
+		return task.ErrInvalidArgument
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO process_leases(
-		task_id, host_pid, host_start_identity, target_process_group, service_instance_id
-	) VALUES(?,?,?,?,?) ON CONFLICT(task_id) DO UPDATE SET
+		task_id, host_pid, host_start_identity, target_process_group,
+		target_process_groups_json, service_instance_id
+	) VALUES(?,?,?,?,?,?) ON CONFLICT(task_id) DO UPDATE SET
 		host_pid=excluded.host_pid,
 		host_start_identity=excluded.host_start_identity,
 		target_process_group=excluded.target_process_group,
+		target_process_groups_json=excluded.target_process_groups_json,
 		service_instance_id=excluded.service_instance_id`,
-		lease.TaskID, lease.HostPID, lease.HostStartIdentity, lease.TargetProcessGroup, lease.ServiceInstanceID); err != nil {
+		lease.TaskID, lease.HostPID, lease.HostStartIdentity,
+		lease.TargetProcessGroup, string(groups),
+		lease.ServiceInstanceID); err != nil {
 		return storageError("put process lease", err)
 	}
 	return nil
 }
 
 func validLease(lease task.ProcessLease) bool {
-	return lease.TaskID != "" && lease.HostPID > 0 && lease.HostStartIdentity != "" && lease.ServiceInstanceID != ""
+	if lease.TaskID == "" || lease.HostPID <= 0 ||
+		lease.HostStartIdentity == "" ||
+		lease.ServiceInstanceID == "" ||
+		lease.TargetProcessGroup < 0 ||
+		len(lease.TargetProcessGroups) > 256 {
+		return false
+	}
+	seen := make(map[int]struct{}, len(lease.TargetProcessGroups))
+	for _, group := range lease.TargetProcessGroups {
+		if group <= 1 {
+			return false
+		}
+		if _, duplicate := seen[group]; duplicate {
+			return false
+		}
+		seen[group] = struct{}{}
+	}
+	return true
 }
 
 func (s *Store) UpdateLease(ctx context.Context, lease task.ProcessLease) error {
 	if !validLease(lease) {
 		return task.ErrInvalidArgument
 	}
+	groups, err := encodeLeaseTargetGroups(
+		lease.TargetProcessGroups,
+	)
+	if err != nil {
+		return task.ErrInvalidArgument
+	}
 	result, err := s.db.ExecContext(ctx, `UPDATE process_leases SET
-		host_pid=?, host_start_identity=?, target_process_group=?, service_instance_id=?
+		host_pid=?, host_start_identity=?, target_process_group=?,
+		target_process_groups_json=?, service_instance_id=?
 		WHERE task_id=? AND EXISTS (
 			SELECT 1 FROM tasks WHERE tasks.task_id=process_leases.task_id
 			AND tasks.status IN ('queued','running','cancelling')
-		)`, lease.HostPID, lease.HostStartIdentity, lease.TargetProcessGroup, lease.ServiceInstanceID, lease.TaskID)
+		)`, lease.HostPID, lease.HostStartIdentity,
+		lease.TargetProcessGroup, string(groups),
+		lease.ServiceInstanceID, lease.TaskID)
 	if err != nil {
 		return storageError("update process lease", err)
 	}
@@ -56,7 +92,8 @@ func (s *Store) UpdateLease(ctx context.Context, lease task.ProcessLease) error 
 
 func (s *Store) ActiveLeases(ctx context.Context) ([]task.ProcessLease, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT process_leases.task_id, host_pid, host_start_identity,
-		target_process_group, service_instance_id
+		target_process_group, target_process_groups_json,
+		service_instance_id
 		FROM process_leases JOIN tasks ON tasks.task_id=process_leases.task_id
 		WHERE tasks.status IN ('queued','running','cancelling') ORDER BY process_leases.task_id`)
 	if err != nil {
@@ -66,8 +103,28 @@ func (s *Store) ActiveLeases(ctx context.Context) ([]task.ProcessLease, error) {
 	leases := make([]task.ProcessLease, 0)
 	for rows.Next() {
 		var lease task.ProcessLease
-		if err := rows.Scan(&lease.TaskID, &lease.HostPID, &lease.HostStartIdentity, &lease.TargetProcessGroup, &lease.ServiceInstanceID); err != nil {
+		var groupsJSON string
+		if err := rows.Scan(
+			&lease.TaskID,
+			&lease.HostPID,
+			&lease.HostStartIdentity,
+			&lease.TargetProcessGroup,
+			&groupsJSON,
+			&lease.ServiceInstanceID,
+		); err != nil {
 			return nil, storageError("read active lease", err)
+		}
+		if err := json.Unmarshal(
+			[]byte(groupsJSON),
+			&lease.TargetProcessGroups,
+		); err != nil || !validLease(lease) {
+			return nil, storageError(
+				"validate active lease",
+				task.ErrInvalidArgument,
+			)
+		}
+		if len(lease.TargetProcessGroups) == 0 {
+			lease.TargetProcessGroups = nil
 		}
 		leases = append(leases, lease)
 	}
@@ -75,6 +132,13 @@ func (s *Store) ActiveLeases(ctx context.Context) ([]task.ProcessLease, error) {
 		return nil, storageError("list active leases", err)
 	}
 	return leases, nil
+}
+
+func encodeLeaseTargetGroups(values []int) ([]byte, error) {
+	if values == nil {
+		values = []int{}
+	}
+	return json.Marshal(values)
 }
 
 func (s *Store) RecoverInterrupted(ctx context.Context, at time.Time) ([]task.Event, error) {
