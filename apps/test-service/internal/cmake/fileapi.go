@@ -40,18 +40,25 @@ const (
 )
 
 var (
-	ErrFileAPIReply    = errors.New("invalid CMake File API reply")
-	ErrFileAPIBoundary = errors.New("CMake File API path is outside allowed roots")
-	ErrFileAPILimit    = errors.New("CMake File API reply exceeds limit")
+	ErrFileAPIReply          = errors.New("invalid CMake File API reply")
+	ErrFileAPIBoundary       = errors.New("CMake File API path is outside allowed roots")
+	ErrFileAPILimit          = errors.New("CMake File API reply exceeds limit")
+	ErrTargetArtifact        = errors.New("invalid CMake executable target artifact")
+	ErrTargetArtifactChanged = errors.New("CMake executable target artifact changed")
 )
 
 type Target struct {
-	ID        string
-	Name      string
-	Type      string
-	SourceDir string
-	BuildDir  string
-	Artifacts []string
+	ID               string
+	Name             string
+	Type             string
+	ProjectID        string
+	ProfileID        string
+	Configuration    string
+	SourceDir        string
+	BuildDir         string
+	ProjectSourceDir string
+	ProjectBuildDir  string
+	Artifacts        []string
 }
 
 type FileAPIReply struct {
@@ -724,7 +731,11 @@ func (reader *fileAPIReader) assemble(
 			}
 			target := Target{
 				ID: identity, Name: object.Name, Type: object.Type,
-				SourceDir: targetSource, BuildDir: targetBuild, Artifacts: artifacts,
+				ProjectID: profiles[0].ProjectID, ProfileID: profiles[0].ID,
+				Configuration: configuration.Name,
+				SourceDir:     targetSource, BuildDir: targetBuild,
+				ProjectSourceDir: sourcePath, ProjectBuildDir: buildPath,
+				Artifacts: artifacts,
 			}
 			if previous, duplicate := targetsByID[target.ID]; duplicate && !equalTargets(previous, target) {
 				return FileAPIReply{}, fmt.Errorf("%w: conflicting duplicate target identity %q", ErrFileAPIReply, target.ID)
@@ -952,6 +963,87 @@ func equalTargets(first, second Target) bool {
 	firstJSON, firstErr := json.Marshal(first)
 	secondJSON, secondErr := json.Marshal(second)
 	return firstErr == nil && secondErr == nil && bytes.Equal(firstJSON, secondJSON)
+}
+
+const maxTargetArtifactBytes = 1024 * 1024 * 1024
+
+func SnapshotTargetArtifact(
+	profile BuildProfile,
+	target Target,
+	command string,
+) (FingerprintFile, error) {
+	if profile.ID == "" || profile.ProjectID == "" || profile.BinaryDir == "" ||
+		target.ID == "" || target.Type != "EXECUTABLE" ||
+		target.ProjectID != profile.ProjectID || target.ProfileID != profile.ID ||
+		target.ProjectSourceDir == "" || target.ProjectBuildDir == "" ||
+		command == "" || strings.IndexByte(command, 0) >= 0 {
+		return FingerprintFile{}, ErrTargetArtifact
+	}
+	if !sameDirectory(profile.BinaryDir, target.ProjectBuildDir) {
+		return FingerprintFile{}, ErrTargetArtifact
+	}
+	absolute, err := filepath.Abs(command)
+	if err != nil || filepath.Clean(absolute) != absolute {
+		return FingerprintFile{}, ErrTargetArtifact
+	}
+	if !pathInsideRoots(absolute, target.ProjectSourceDir, target.ProjectBuildDir) {
+		return FingerprintFile{}, ErrTargetArtifact
+	}
+	snapshot, err := captureFileSnapshot(absolute, maxTargetArtifactBytes)
+	if err != nil {
+		return FingerprintFile{}, fmt.Errorf("%w: %v", ErrTargetArtifact, err)
+	}
+	defer snapshot.Close()
+	if err := snapshot.Verify(); err != nil {
+		return FingerprintFile{}, fmt.Errorf("%w: %v", ErrTargetArtifactChanged, err)
+	}
+	matched := false
+	for _, artifact := range target.Artifacts {
+		info, err := os.Stat(artifact)
+		if err == nil && os.SameFile(snapshot.info, info) {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		return FingerprintFile{}, ErrTargetArtifact
+	}
+	return fingerprintFileFromSnapshot(snapshot), nil
+}
+
+func VerifyTargetArtifact(state FingerprintFile) error {
+	if !validFingerprintFile(state) {
+		return ErrTargetArtifact
+	}
+	snapshot, err := captureFileSnapshot(filepath.FromSlash(state.Path), maxTargetArtifactBytes)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrTargetArtifactChanged, err)
+	}
+	defer snapshot.Close()
+	if err := snapshot.Verify(); err != nil ||
+		snapshot.osIdentity != state.Identity ||
+		snapshot.digest != strings.ToLower(state.SHA256) {
+		return ErrTargetArtifactChanged
+	}
+	return nil
+}
+
+func sameDirectory(first, second string) bool {
+	firstInfo, firstErr := os.Stat(first)
+	secondInfo, secondErr := os.Stat(second)
+	return firstErr == nil && secondErr == nil &&
+		firstInfo.IsDir() && secondInfo.IsDir() &&
+		os.SameFile(firstInfo, secondInfo)
+}
+
+func pathInsideRoots(candidate string, roots ...string) bool {
+	for _, value := range roots {
+		root, err := workspace.OpenRoot(value)
+		if err == nil && root.Contains(candidate) {
+			return true
+		}
+	}
+	return false
 }
 
 func (reader *fileAPIReader) verify() error {

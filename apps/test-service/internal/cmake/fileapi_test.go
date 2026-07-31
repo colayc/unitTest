@@ -198,7 +198,12 @@ func TestFileAPIReplyFollowsObjectGraphAndReturnsCanonicalTargets(t *testing.T) 
 		if len(target.ID) != 64 || target.ID == target.Name || strings.ToLower(target.ID) != target.ID {
 			t.Fatalf("target %q ID = %q, want opaque lowercase SHA-256", target.Name, target.ID)
 		}
-		if target.SourceDir != fixture.sourceDir || target.BuildDir != fixture.buildDir {
+		if target.ProjectID != fixture.profile.ProjectID ||
+			target.ProfileID != fixture.profile.ID ||
+			target.Configuration != "Debug" ||
+			target.ProjectSourceDir != fixture.sourceDir ||
+			target.ProjectBuildDir != fixture.buildDir ||
+			target.SourceDir != fixture.sourceDir || target.BuildDir != fixture.buildDir {
 			t.Fatalf("target %q paths = (%q, %q)", target.Name, target.SourceDir, target.BuildDir)
 		}
 	}
@@ -287,6 +292,63 @@ func TestFileAPITargetIDIncludesProjectProfileConfigurationAndNativeIdentity(t *
 	if reflect.DeepEqual(targetIDs(base.Targets), targetIDs(changedNative.Targets)) {
 		t.Fatal("changing native target identity did not change target IDs")
 	}
+}
+
+func TestCTestTargetArtifactSnapshotBindsIdentityAndRejectsBoundaryEscape(t *testing.T) {
+	t.Run("identity replacement", func(t *testing.T) {
+		fixture := newFileAPIReplyFixture(t)
+		executable := filepath.Join(fixture.buildDir, "bin", "app")
+		if err := os.MkdirAll(filepath.Dir(executable), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(executable, []byte("first executable"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		target := readWithFixture(t, fixture).Targets[0]
+		fixture.profile.BinaryDir = fixture.buildDir
+		state, err := SnapshotTargetArtifact(fixture.profile, target, executable)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if state.Path != executable || state.Identity == "" || len(state.SHA256) != 64 {
+			t.Fatalf("artifact state = %#v", state)
+		}
+		replacement := executable + ".replacement"
+		if err := os.WriteFile(replacement, []byte("first executable"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(executable); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(replacement, executable); err != nil {
+			t.Fatal(err)
+		}
+		if err := VerifyTargetArtifact(state); !errors.Is(err, ErrTargetArtifactChanged) {
+			t.Fatalf("VerifyTargetArtifact() error = %v", err)
+		}
+	})
+
+	t.Run("junction or symlink escape", func(t *testing.T) {
+		fixture := newFileAPIReplyFixture(t)
+		outside := t.TempDir()
+		if err := os.WriteFile(filepath.Join(outside, "app"), []byte("outside"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		escape := filepath.Join(fixture.buildDir, "escape")
+		createDirectoryLink(t, escape, outside)
+		executable := filepath.Join(escape, "app")
+		fixture.profile.BinaryDir = fixture.buildDir
+		target := Target{
+			ID: strings.Repeat("f", 64), Name: "escape", Type: "EXECUTABLE",
+			ProjectID: fixture.profile.ProjectID, ProfileID: fixture.profile.ID,
+			Configuration: "Debug", SourceDir: fixture.sourceDir, BuildDir: fixture.buildDir,
+			ProjectSourceDir: fixture.sourceDir, ProjectBuildDir: fixture.buildDir,
+			Artifacts: []string{executable},
+		}
+		if _, err := SnapshotTargetArtifact(fixture.profile, target, executable); !errors.Is(err, ErrTargetArtifact) {
+			t.Fatalf("SnapshotTargetArtifact(escape) error = %v", err)
+		}
+	})
 }
 
 func TestFileAPIToolchainIdentityIncludesBoundedCommandFragment(t *testing.T) {

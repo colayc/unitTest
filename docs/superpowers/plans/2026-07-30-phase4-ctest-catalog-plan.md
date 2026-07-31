@@ -98,11 +98,15 @@ func BuildDescriptor(
 	container RawTest,
 	profile cmake.BuildProfile,
 	targets []cmake.Target,
-	boundary build.ExecutionBoundary,
 ) (ExecutionDescriptor, error)
 ```
 
-- [ ] **Step 1：写出 direct compatibility 与降级失败测试**
+> 实施修正：`ctest` 不依赖 `build`，避免 Task 5 组装 `build → testdiscovery → ctest`
+> 时形成 import cycle。File API `Target` 携带 configuration 与 Project root metadata，
+> `cmake` 提供 target artifact 的安全快照/复核；runtime `ExecutionBoundary` 仍由 Task 5
+> 在生成 Service-owned plan 时建立。
+
+- [x] **Step 1：写出 direct compatibility 与降级失败测试**
 
 覆盖：
 
@@ -118,7 +122,7 @@ func BuildDescriptor(
 - symlink/junction/reparse escape；
 - executable identity 在校验后替换。
 
-- [ ] **Step 2：运行 descriptor tests 并确认失败**
+- [x] **Step 2：运行 descriptor tests 并确认失败**
 
 ```powershell
 go test ./apps/test-service/internal/ctest ./apps/test-service/internal/cmake -run 'Descriptor|Property|CTestTarget' -count=1
@@ -126,7 +130,7 @@ go test ./apps/test-service/internal/ctest ./apps/test-service/internal/cmake -r
 
 预期：FAIL。
 
-- [ ] **Step 3：实现显式 property classifier**
+- [x] **Step 3：实现显式 property classifier**
 
 Property classifier 返回：
 
@@ -140,7 +144,7 @@ type Compatibility struct {
 
 任何未知 behavior property 都使 `CaseLevel=false`。Metadata-only property 可以保留，不影响 compatibility。
 
-- [ ] **Step 4：运行 unit/race 与平台路径测试**
+- [x] **Step 4：运行 unit/race 与平台路径测试**
 
 ```powershell
 go test ./apps/test-service/internal/ctest ./apps/test-service/internal/cmake -count=1
@@ -149,7 +153,7 @@ go test -race ./apps/test-service/internal/ctest -count=1
 
 预期：PASS。
 
-- [ ] **Step 5：提交 CTest descriptor**
+- [x] **Step 5：提交 CTest descriptor**
 
 ```powershell
 git add apps/test-service/internal/ctest apps/test-service/internal/cmake
