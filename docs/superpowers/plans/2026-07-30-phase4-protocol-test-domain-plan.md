@@ -257,7 +257,7 @@ func CaseID(identity CaseIdentity) (ID, error)
 func ResolveSelection(catalog Catalog, selection Selection, limits Limits) (SelectionSnapshot, error)
 ```
 
-- [ ] **Step 1：写出 stable ID 与 selection 失败测试**
+- [x] **Step 1：写出 stable ID 与 selection 失败测试**
 
 覆盖：
 
@@ -272,7 +272,7 @@ func ResolveSelection(catalog Catalog, selection Selection, limits Limits) (Sele
 - disabled item 默认排除；
 - 输入数组顺序不影响 selection snapshot。
 
-- [ ] **Step 2：运行 testdomain tests 并确认失败**
+- [x] **Step 2：运行 testdomain tests 并确认失败**
 
 ```powershell
 go test ./apps/test-service/internal/testdomain -count=1
@@ -280,11 +280,11 @@ go test ./apps/test-service/internal/testdomain -count=1
 
 预期：FAIL。
 
-- [ ] **Step 3：实现不可变 domain model**
+- [x] **Step 3：实现不可变 domain model**
 
 所有 constructor 完成 validation 和 defensive copy。ID tuple 使用字段名、byte length、NFC UTF-8 和 SHA-256；不得使用 `fmt.Sprintf` 拼接 identity。
 
-- [ ] **Step 4：运行 unit/race**
+- [x] **Step 4：运行 unit/race**
 
 ```powershell
 go test ./apps/test-service/internal/testdomain -count=1
@@ -293,7 +293,7 @@ go test -race ./apps/test-service/internal/testdomain -count=1
 
 预期：PASS。
 
-- [ ] **Step 5：提交 Test Domain**
+- [x] **Step 5：提交 Test Domain**
 
 ```powershell
 git add apps/test-service/internal/testdomain
