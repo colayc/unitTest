@@ -241,7 +241,7 @@ unit_test_ide_add_unity_test(
 )
 ```
 
-- [ ] **Step 1：写出 CMake helper smoke 失败测试**
+- [x] **Step 1：写出 CMake helper smoke 失败测试**
 
 覆盖：
 
@@ -256,7 +256,7 @@ unit_test_ide_add_unity_test(
 - helper 拒绝未解析 keyword 和 unsafe keyword；
 - configure 两次 output deterministic。
 
-- [ ] **Step 2：运行 smoke 并确认失败**
+- [x] **Step 2：运行 smoke 并确认失败**
 
 ```powershell
 pnpm test:workspace
@@ -264,7 +264,7 @@ pnpm test:workspace
 
 预期：FAIL，helper 尚不存在。
 
-- [ ] **Step 3：实现 strict CMake functions**
+- [x] **Step 3：实现 strict CMake functions**
 
 使用 `cmake_parse_arguments` 后检查 `UNPARSED_ARGUMENTS`。CTest labels 固定为：
 
@@ -276,7 +276,7 @@ utide.runner.v1
 
 helper 不设置 Project environment/working directory，不接受 raw command。
 
-- [ ] **Step 4：运行 smoke 与 diff check**
+- [x] **Step 4：运行 smoke 与 diff check**
 
 ```powershell
 pnpm test:workspace
@@ -285,7 +285,7 @@ git diff --check
 
 预期：PASS。
 
-- [ ] **Step 5：提交 CMake helper**
+- [x] **Step 5：提交 CMake helper**
 
 ```powershell
 git add sdk/cmake testdata/frameworks/helper-smoke tools/workspace-smoke package.json
@@ -411,13 +411,13 @@ git commit -m "feat: normalize unity and cmock results"
 
 ## Phase 4D 完成检查
 
-- [ ] declared-source parser 不扫描未 opt-in Project
-- [ ] deterministic runner/manifest Golden File
-- [ ] helper strict keyword/security tests
+- [x] declared-source parser 不扫描未 opt-in Project
+- [x] deterministic runner/manifest Golden File
+- [x] helper strict keyword/security tests
 - [ ] generated C Windows/Linux compile tests
 - [ ] list/exact-run protocol tests
 - [ ] pass/fail/skip/crash/partial tests
 - [ ] CMock detail tests
-- [ ] 无 Ruby/Ceedling runtime dependency
+- [x] 无 Ruby/Ceedling runtime dependency
 - [ ] Go unit/race、workspace smoke、`pnpm verify`
 - [ ] 独立评审确认 result path 和 control argv 只能由 Service 生成
