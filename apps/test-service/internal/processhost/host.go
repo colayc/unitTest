@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -15,6 +16,13 @@ import (
 )
 
 const maxHostFrameBytes = 64 * 1024
+
+func serviceOwnedTargetEnvironmentKey(value string) bool {
+	upper := strings.ToUpper(value)
+	return strings.HasPrefix(upper, "UTIDE_") ||
+		strings.HasPrefix(upper, "UNIT_TEST_IDE_") ||
+		upper == "UNIT_TEST_SERVICE_TOKEN"
+}
 
 type Target interface {
 	PID() int

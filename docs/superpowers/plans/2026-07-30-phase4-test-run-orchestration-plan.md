@@ -248,10 +248,12 @@ git commit -m "feat: interpret test task domain results"
 > `PreparePlan` 复用、Catalog revision preflight、build 后 stable-ID
 > rebind、test executable pin、framework/Opaque run planning、结果
 > interpreter、确定性 bounded wave scheduler，以及跨 Windows/Linux 的
-> `ENVIRONMENT_MODIFICATION` runtime-only overlay/unset replay。Task 4 尚未完成：
-> Task Engine 目前仍按 step 串行执行，wave 还没有并发执行语义；framework
-> discovery 也仍需改造成可取消的 Task step，不能由 continuation 回调直接
-> 执行外部进程。在这两项完成前不勾选本 Task。
+> `ENVIRONMENT_MODIFICATION` runtime-only overlay/unset replay。CTest、
+> CppUTest 与 Unity discovery 已改为可取消的 `test-discovery` Task steps，
+> continuation 不再直接执行 framework 外部进程。Task 4 尚未完成：Task
+> Engine 目前仍按 step 串行执行，wave 还没有并发执行语义，且
+> per-invocation timeout 尚未进入进程终止与领域结果映射；在这两项完成前
+> 不勾选本 Task。
 
 **文件：**
 
@@ -263,6 +265,10 @@ git commit -m "feat: interpret test task domain results"
 - 创建：`apps/test-service/internal/testrun/scheduler_test.go`
 - 创建：`apps/test-service/internal/testrun/interpreter.go`
 - 创建：`apps/test-service/internal/testrun/interpreter_test.go`
+- 创建：`apps/test-service/internal/testrun/discovery_refresh.go`
+- 创建：`apps/test-service/internal/testdiscovery/task_execution.go`
+- 创建：`apps/test-service/internal/testframework/cpputest/task_discovery.go`
+- 创建：`apps/test-service/internal/testframework/unity/task_discovery.go`
 - 修改：`apps/test-service/internal/testdiscovery/service.go`
 - 修改：`apps/test-service/internal/testdiscovery/service_test.go`
 - 修改：`apps/test-service/internal/build/coordinator.go`

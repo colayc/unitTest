@@ -66,15 +66,43 @@ func TestCoordinatorContinuesBuildIntoPinnedFrameworkRunSteps(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(continued.Steps) != 2 ||
-		continued.Steps[0].Kind != task.StepTestRun ||
-		continued.Steps[1].Kind != task.StepTestRun ||
+	if len(continued.Steps) != 1 ||
+		continued.Steps[0].Kind != task.StepTestDiscovery ||
 		fixture.refresher.calls != 1 ||
 		fixture.prepared.allowCalls != 1 {
 		t.Fatalf(
-			"run continuation = %#v, refresh=%d pins=%d",
+			"discovery continuation = %#v, refresh=%d pins=%d",
 			continued,
 			fixture.refresher.calls,
+			fixture.prepared.allowCalls,
+		)
+	}
+	discoveryStep := continued.Steps[0]
+	verdict, err := internal.ResultInterpreter.Interpret(
+		context.Background(),
+		current,
+		discoveryStep,
+		task.ProcessResult{ExitCode: 0},
+	)
+	if err != nil || verdict != task.StepVerdictSucceeded {
+		t.Fatalf("discovery verdict = %q, %v", verdict, err)
+	}
+	continued, err = internal.Continuation.AfterStep(
+		context.Background(),
+		current,
+		discoveryStep,
+		task.StepResult{Verdict: verdict},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(continued.Steps) != 2 ||
+		continued.Steps[0].Kind != task.StepTestRun ||
+		continued.Steps[1].Kind != task.StepTestRun ||
+		fixture.prepared.allowCalls != 1 {
+		t.Fatalf(
+			"run continuation = %#v, pins=%d",
+			continued,
 			fixture.prepared.allowCalls,
 		)
 	}
@@ -120,9 +148,32 @@ func TestCoordinatorDoesNotAppendProcessForDeletedSelectedID(
 		internal.Plan.Steps[len(internal.Plan.Steps)-1],
 		task.StepResult{Verdict: task.StepVerdictSucceeded},
 	)
+	if err != nil || len(continued.Steps) != 1 {
+		t.Fatalf(
+			"discovery continuation = %#v, %v",
+			continued,
+			err,
+		)
+	}
+	discoveryStep := continued.Steps[0]
+	verdict, err := internal.ResultInterpreter.Interpret(
+		context.Background(),
+		task.Task{ID: started.ID, Kind: task.KindTestRun},
+		discoveryStep,
+		task.ProcessResult{ExitCode: 0},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	continued, err = internal.Continuation.AfterStep(
+		context.Background(),
+		task.Task{ID: started.ID, Kind: task.KindTestRun},
+		discoveryStep,
+		task.StepResult{Verdict: verdict},
+	)
 	if !errors.Is(err, task.ErrInvalidArgument) ||
 		len(continued.Steps) != 0 ||
-		fixture.prepared.allowCalls != 0 {
+		fixture.prepared.allowCalls != 1 {
 		t.Fatalf(
 			"deleted-ID continuation = %#v, %v, pins=%d",
 			continued,
@@ -333,12 +384,74 @@ type coordinatorCatalogRefresher struct {
 	calls  int
 }
 
-func (refresher *coordinatorCatalogRefresher) RefreshAfterBuild(
+func (refresher *coordinatorCatalogRefresher) PrepareAfterBuild(
 	context.Context,
 	RefreshRequest,
-) (RefreshedCatalog, error) {
+) (CatalogRefresh, RefreshProgress, error) {
 	refresher.calls++
-	return refresher.result.Clone(), nil
+	descriptor := refresher.result.Bindings[0].Descriptor
+	step := task.ExecutionStep{
+		ID:   "framework-discovery-000001",
+		Kind: task.StepTestDiscovery,
+		Process: task.ProcessSpec{
+			Executable: descriptor.Executable.Path,
+			Dir:        descriptor.WorkingDirectory,
+		},
+		Public: task.CommandSummary{
+			Executable: "framework-tests",
+			Args: []string{
+				"<service-owned-discovery-invocation>",
+			},
+		},
+	}
+	session := &coordinatorCatalogRefresh{
+		stepID: step.ID,
+		result: refresher.result.Clone(),
+	}
+	return session, RefreshProgress{
+		Steps: []task.ExecutionStep{step},
+		Pins:  []cmake.FingerprintFile{descriptor.Executable},
+	}, nil
+}
+
+type coordinatorCatalogRefresh struct {
+	stepID   string
+	result   RefreshedCatalog
+	finished bool
+}
+
+func (*coordinatorCatalogRefresh) ObserveOutput(
+	context.Context,
+	task.ExecutionStep,
+	task.ProcessOutput,
+) error {
+	return nil
+}
+
+func (refresh *coordinatorCatalogRefresh) Interpret(
+	_ context.Context,
+	step task.ExecutionStep,
+	result task.ProcessResult,
+) (task.StepVerdict, error) {
+	if step.ID != refresh.stepID || refresh.finished {
+		return task.StepVerdictDefault, task.ErrInvalidArgument
+	}
+	if result.Err != nil || result.ExitCode != 0 {
+		return task.StepVerdictDefault, nil
+	}
+	refresh.finished = true
+	return task.StepVerdictSucceeded, nil
+}
+
+func (refresh *coordinatorCatalogRefresh) AfterStep(
+	_ context.Context,
+	step task.ExecutionStep,
+) (RefreshProgress, error) {
+	if step.ID != refresh.stepID || !refresh.finished {
+		return RefreshProgress{}, task.ErrInvalidArgument
+	}
+	result := refresh.result.Clone()
+	return RefreshProgress{Snapshot: &result}, nil
 }
 
 type coordinatorTaskStarter struct {

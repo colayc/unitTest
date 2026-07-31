@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"unit-test-ide.local/test-service/internal/ctest"
+	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/testdomain"
 )
 
@@ -29,6 +30,27 @@ type Adapter interface {
 	Discover(context.Context, ctest.ExecutionDescriptor) (DiscoveryResult, error)
 	PlanRun(context.Context, RunInput) (RunPlan, error)
 	NewParser(ParseInput) (ResultParser, error)
+}
+
+// TaskDiscoveryAdapter is the optional Task Engine discovery contract used by
+// built-in adapters. It keeps framework subprocesses inside the same durable
+// Task lifecycle as build and test-run processes.
+type TaskDiscoveryAdapter interface {
+	PrepareDiscovery(
+		context.Context,
+		ctest.ExecutionDescriptor,
+	) (DiscoveryExecution, error)
+}
+
+type DiscoveryExecution struct {
+	Process task.ProcessSpec
+	Public  task.CommandSummary
+	Parser  DiscoveryParser
+}
+
+type DiscoveryParser interface {
+	Feed(Stream, []byte) error
+	Finish(context.Context, ProcessResult) (DiscoveryResult, error)
 }
 
 type DiscoveredItem struct {

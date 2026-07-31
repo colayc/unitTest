@@ -75,6 +75,92 @@ func TestServiceReturnsRuntimeBindingsWithPublishedCatalog(
 	}
 }
 
+func TestServiceRunsFrameworkDiscoveryAsCancelableTaskSteps(
+	t *testing.T,
+) {
+	fixture := newServiceFixture(t)
+	execution, progress, err := fixture.service.PrepareTaskDiscovery(
+		context.Background(),
+		fixture.input,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(progress.Steps) != 1 ||
+		progress.Steps[0].Kind != task.StepTestDiscovery ||
+		len(fixture.executor.steps) != 0 {
+		t.Fatalf(
+			"initial progress = %#v, synchronous executions=%d",
+			progress,
+			len(fixture.executor.steps),
+		)
+	}
+	ctestStep := progress.Steps[0]
+	if err := execution.ObserveOutput(
+		context.Background(),
+		ctestStep,
+		task.ProcessOutput{
+			Stream: "stdout",
+			Data:   fixture.executor.output,
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	verdict, err := execution.Interpret(
+		context.Background(),
+		ctestStep,
+		task.ProcessResult{ExitCode: 0},
+	)
+	if err != nil || verdict != task.StepVerdictSucceeded {
+		t.Fatalf("CTest verdict = %q, %v", verdict, err)
+	}
+	progress, err = execution.AfterStep(
+		context.Background(),
+		ctestStep,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(progress.Steps) != 1 ||
+		len(progress.Pins) != 1 ||
+		progress.Snapshot != nil ||
+		fixture.adapter.prepareCalls != 1 ||
+		fixture.adapter.discoverCalls != 0 {
+		t.Fatalf(
+			"framework progress = %#v, prepare=%d discover=%d",
+			progress,
+			fixture.adapter.prepareCalls,
+			fixture.adapter.discoverCalls,
+		)
+	}
+	frameworkStep := progress.Steps[0]
+	verdict, err = execution.Interpret(
+		context.Background(),
+		frameworkStep,
+		task.ProcessResult{ExitCode: 0},
+	)
+	if err != nil || verdict != task.StepVerdictSucceeded {
+		t.Fatalf("framework verdict = %q, %v", verdict, err)
+	}
+	progress, err = execution.AfterStep(
+		context.Background(),
+		frameworkStep,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if progress.Snapshot == nil ||
+		len(progress.Snapshot.Catalog.Items) != 1 ||
+		len(progress.Snapshot.Bindings) != 1 ||
+		strings.Join(*fixture.order, ",") != "commit,publish" {
+		t.Fatalf(
+			"terminal discovery progress = %#v, order=%#v",
+			progress,
+			*fixture.order,
+		)
+	}
+}
+
 func TestServiceKeepsPreviousCatalogWhenShowOnlyOrArtifactFails(t *testing.T) {
 	failures := map[string]func(*serviceFixture){
 		"show-only": func(fixture *serviceFixture) {
@@ -132,6 +218,7 @@ type serviceFixture struct {
 	executor  *fakeCTestExecutor
 	writer    *fakeCatalogArtifactWriter
 	publisher *fakeCatalogPublisher
+	adapter   *taskServiceDiscoveryAdapter
 	order     *[]string
 }
 
@@ -184,7 +271,7 @@ func newServiceFixture(t *testing.T) *serviceFixture {
 	executor := &fakeCTestExecutor{output: showOnly, order: &order}
 	writer := &fakeCatalogArtifactWriter{order: &order}
 	publisher := &fakeCatalogPublisher{order: &order}
-	adapter := &discoveryAdapter{
+	baseAdapter := &discoveryAdapter{
 		framework: testdomain.FrameworkCppUTest,
 		version:   "cpputest.v1",
 		results: map[string]testframework.DiscoveryResult{
@@ -194,6 +281,9 @@ func newServiceFixture(t *testing.T) *serviceFixture {
 				}},
 			},
 		},
+	}
+	adapter := &taskServiceDiscoveryAdapter{
+		discoveryAdapter: baseAdapter,
 	}
 	registry, err := testframework.NewRegistry(adapter)
 	if err != nil {
@@ -218,7 +308,7 @@ func newServiceFixture(t *testing.T) *serviceFixture {
 	}
 	return &serviceFixture{
 		service: service, executor: executor, writer: writer,
-		publisher: publisher, order: &order,
+		publisher: publisher, adapter: adapter, order: &order,
 		input: DiscoveryInput{
 			TaskID: "11111111111111111111111111111111", ArtifactID: "22222222222222222222222222222222",
 			Profile: profile,
@@ -235,6 +325,52 @@ func newServiceFixture(t *testing.T) *serviceFixture {
 			Fingerprint: fingerprintFixture(profileID),
 		},
 	}
+}
+
+type taskServiceDiscoveryAdapter struct {
+	*discoveryAdapter
+	prepareCalls int
+}
+
+func (adapter *taskServiceDiscoveryAdapter) PrepareDiscovery(
+	_ context.Context,
+	descriptor ctest.ExecutionDescriptor,
+) (testframework.DiscoveryExecution, error) {
+	adapter.prepareCalls++
+	result := adapter.results[descriptor.LogicalName]
+	return testframework.DiscoveryExecution{
+		Process: task.ProcessSpec{
+			Executable: descriptor.Executable.Path,
+			Dir:        descriptor.WorkingDirectory,
+		},
+		Public: task.CommandSummary{
+			Executable: filepath.Base(
+				descriptor.Executable.Path,
+			),
+			Args: []string{
+				"<service-owned-discovery-invocation>",
+			},
+		},
+		Parser: &serviceDiscoveryParser{result: result},
+	}, nil
+}
+
+type serviceDiscoveryParser struct {
+	result testframework.DiscoveryResult
+}
+
+func (*serviceDiscoveryParser) Feed(
+	testframework.Stream,
+	[]byte,
+) error {
+	return nil
+}
+
+func (parser *serviceDiscoveryParser) Finish(
+	context.Context,
+	testframework.ProcessResult,
+) (testframework.DiscoveryResult, error) {
+	return parser.result, nil
 }
 
 type fakeCTestExecutor struct {

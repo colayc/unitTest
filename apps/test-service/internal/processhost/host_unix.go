@@ -107,7 +107,7 @@ func targetEnvironment(
 	overridden := make(map[string]struct{}, len(extra))
 	for _, entry := range extra {
 		key, _, found := strings.Cut(entry, "=")
-		if found && key != "UNIT_TEST_IDE_STATUS_HANDLE" {
+		if found && !serviceOwnedTargetEnvironmentKey(key) {
 			overridden[key] = struct{}{}
 		}
 	}
@@ -116,7 +116,7 @@ func targetEnvironment(
 	for _, entry := range inherited {
 		key, _, found := strings.Cut(entry, "=")
 		if !found ||
-			key == "UNIT_TEST_IDE_STATUS_HANDLE" {
+			serviceOwnedTargetEnvironmentKey(key) {
 			continue
 		}
 		if _, exists := removed[key]; exists {
@@ -128,10 +128,8 @@ func targetEnvironment(
 		result = append(result, entry)
 	}
 	for _, entry := range extra {
-		if strings.HasPrefix(
-			entry,
-			"UNIT_TEST_IDE_STATUS_HANDLE=",
-		) {
+		key, _, found := strings.Cut(entry, "=")
+		if !found || serviceOwnedTargetEnvironmentKey(key) {
 			continue
 		}
 		result = append(result, entry)

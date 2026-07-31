@@ -359,7 +359,7 @@ func targetWindowsEnvironment(
 		separator := strings.IndexByte(entry, '=')
 		if separator > 0 {
 			key := strings.ToUpper(entry[:separator])
-			if key != "UNIT_TEST_IDE_STATUS_HANDLE" {
+			if !serviceOwnedTargetEnvironmentKey(key) {
 				overrides[key] = entry
 			}
 		}
@@ -381,7 +381,7 @@ func targetWindowsEnvironment(
 			continue
 		}
 		key := strings.ToUpper(entry[:separator])
-		if key == "UNIT_TEST_IDE_STATUS_HANDLE" {
+		if serviceOwnedTargetEnvironmentKey(key) {
 			continue
 		}
 		if _, exists := removed[key]; exists {
@@ -402,6 +402,9 @@ func targetWindowsEnvironment(
 			continue
 		}
 		key := strings.ToUpper(entry[:separator])
+		if serviceOwnedTargetEnvironmentKey(key) {
+			continue
+		}
 		if _, exists := removed[key]; exists {
 			continue
 		}

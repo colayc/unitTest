@@ -414,6 +414,65 @@ func TestCppUTestDiscoveryEnvironmentAppliesCTestSemantics(t *testing.T) {
 	}
 }
 
+func TestCppUTestPreparesTaskOwnedDiscovery(t *testing.T) {
+	t.Setenv("UNIT_TEST_SERVICE_TOKEN", "must-not-reach-target")
+	t.Setenv("UTIDE_PRIVATE_VALUE", "must-not-reach-target")
+	fixture := newPlannerFixture(t)
+	adapter, err := NewAdapter(&integrationProbeRunner{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution, err := adapter.PrepareDiscovery(
+		context.Background(),
+		fixture.descriptor,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if execution.Process.Executable !=
+		fixture.descriptor.Executable.Path ||
+		execution.Process.Dir != fixture.descriptor.WorkingDirectory ||
+		!reflect.DeepEqual(
+			execution.Public.Args,
+			[]string{"<service-owned-discovery-invocation>"},
+		) ||
+		execution.Parser == nil {
+		t.Fatalf("discovery execution = %#v", execution)
+	}
+	for _, entry := range execution.Process.Env {
+		upper := strings.ToUpper(entry)
+		if strings.HasPrefix(upper, "UTIDE_") ||
+			strings.HasPrefix(upper, "UNIT_TEST_IDE_") ||
+			strings.HasPrefix(
+				upper,
+				"UNIT_TEST_SERVICE_TOKEN=",
+			) {
+			t.Fatalf("service environment leaked: %q", entry)
+		}
+	}
+	if err := execution.Parser.Feed(
+		testframework.StreamStdout,
+		readFixture(t, "list.valid.txt"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	discovery, err := execution.Parser.Finish(
+		context.Background(),
+		testframework.ProcessResult{
+			ExitCode:    0,
+			Termination: testframework.ProcessExited,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(discovery.Items) != 7 ||
+		discovery.Items[0].Kind != testdomain.ItemGroup ||
+		discovery.Items[1].Kind != testdomain.ItemCase {
+		t.Fatalf("task discovery = %#v", discovery)
+	}
+}
+
 func TestCppUTestDiscoveryEnvironmentRejectsForgedDescriptor(t *testing.T) {
 	tests := map[string]ctest.ExecutionDescriptor{
 		"reserved environment": {

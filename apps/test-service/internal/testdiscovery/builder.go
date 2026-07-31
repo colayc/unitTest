@@ -23,10 +23,12 @@ var (
 )
 
 type ContainerInput struct {
-	Descriptor     ctest.ExecutionDescriptor
-	Selection      testframework.Selection
-	DisplayName    string
-	SourceLocation *testdomain.SourceLocation
+	Descriptor      ctest.ExecutionDescriptor
+	Selection       testframework.Selection
+	Discovery       *testframework.DiscoveryResult
+	DiscoveryFailed bool
+	DisplayName     string
+	SourceLocation  *testdomain.SourceLocation
 }
 
 type BuildInput struct {
@@ -171,10 +173,24 @@ func buildOneContainer(
 		return testdomain.Container{}, nil, nil, ErrInvalidBuild
 	}
 
-	discovery, discoverErr := input.Selection.Adapter.Discover(
-		ctx,
-		cloneDescriptor(input.Descriptor),
+	if input.Discovery != nil && input.DiscoveryFailed {
+		return testdomain.Container{}, nil, nil, ErrInvalidBuild
+	}
+	var (
+		discovery   testframework.DiscoveryResult
+		discoverErr error
 	)
+	switch {
+	case input.DiscoveryFailed:
+		discoverErr = errMalformedDiscovery
+	case input.Discovery != nil:
+		discovery = cloneDiscoveryResult(*input.Discovery)
+	default:
+		discovery, discoverErr = input.Selection.Adapter.Discover(
+			ctx,
+			cloneDescriptor(input.Descriptor),
+		)
+	}
 	if err := ctx.Err(); err != nil {
 		return testdomain.Container{}, nil, nil, err
 	}
@@ -205,6 +221,35 @@ func buildOneContainer(
 		return degradedContainer(catalog, container, DegradedDiscoveryMalformed)
 	}
 	return validated.Containers[0], validated.Items, validated.Diagnostics, nil
+}
+
+func cloneDiscoveryResult(
+	value testframework.DiscoveryResult,
+) testframework.DiscoveryResult {
+	result := value
+	result.Items = append(
+		[]testframework.DiscoveredItem(nil),
+		value.Items...,
+	)
+	for index := range result.Items {
+		result.Items[index].Labels = append(
+			[]string(nil),
+			value.Items[index].Labels...,
+		)
+		result.Items[index].Parameters = append(
+			[]testdomain.Parameter(nil),
+			value.Items[index].Parameters...,
+		)
+		if value.Items[index].SourceLocation != nil {
+			location := *value.Items[index].SourceLocation
+			result.Items[index].SourceLocation = &location
+		}
+	}
+	result.Diagnostics = append(
+		[]testdomain.Diagnostic(nil),
+		value.Diagnostics...,
+	)
+	return result
 }
 
 func degradedContainer(

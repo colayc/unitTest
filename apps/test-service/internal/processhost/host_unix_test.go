@@ -25,8 +25,13 @@ func TestTargetEnvironmentAppliesOverlayAndUnset(t *testing.T) {
 	t.Setenv("UT_PROCESSHOST_KEEP", "inherited")
 	t.Setenv("UT_PROCESSHOST_REMOVE", "private")
 	t.Setenv("UT_PROCESSHOST_REPLACE", "old")
+	t.Setenv("UNIT_TEST_SERVICE_TOKEN", "service-secret")
+	t.Setenv("UTIDE_PRIVATE_VALUE", "service-private")
 	environment := targetEnvironment(
-		[]string{"UT_PROCESSHOST_REPLACE=new"},
+		[]string{
+			"UT_PROCESSHOST_REPLACE=new",
+			"UNIT_TEST_SERVICE_TOKEN=override-attempt",
+		},
 		[]string{"UT_PROCESSHOST_REMOVE"},
 	)
 	values := make(map[string]string)
@@ -42,6 +47,12 @@ func TestTargetEnvironmentAppliesOverlayAndUnset(t *testing.T) {
 	}
 	if _, exists := values["UT_PROCESSHOST_REMOVE"]; exists {
 		t.Fatalf("unset environment remained = %#v", values)
+	}
+	if _, exists := values["UNIT_TEST_SERVICE_TOKEN"]; exists {
+		t.Fatalf("service token reached target = %#v", values)
+	}
+	if _, exists := values["UTIDE_PRIVATE_VALUE"]; exists {
+		t.Fatalf("service-owned value reached target = %#v", values)
 	}
 }
 

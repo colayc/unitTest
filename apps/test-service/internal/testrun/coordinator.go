@@ -50,10 +50,33 @@ type CatalogReader interface {
 }
 
 type CatalogRefresher interface {
-	RefreshAfterBuild(
+	PrepareAfterBuild(
 		context.Context,
 		RefreshRequest,
-	) (RefreshedCatalog, error)
+	) (CatalogRefresh, RefreshProgress, error)
+}
+
+type CatalogRefresh interface {
+	ObserveOutput(
+		context.Context,
+		task.ExecutionStep,
+		task.ProcessOutput,
+	) error
+	Interpret(
+		context.Context,
+		task.ExecutionStep,
+		task.ProcessResult,
+	) (task.StepVerdict, error)
+	AfterStep(
+		context.Context,
+		task.ExecutionStep,
+	) (RefreshProgress, error)
+}
+
+type RefreshProgress struct {
+	Steps    []task.ExecutionStep
+	Pins     []cmake.FingerprintFile
+	Snapshot *RefreshedCatalog
 }
 
 type TaskStarter interface {
@@ -271,7 +294,7 @@ func (coordinator *Coordinator) StartRun(
 		repeatCount:    request.RepeatCount,
 		taskTimeout:    request.Timeout,
 		maxConcurrency: request.MaxConcurrency,
-		initialSteps:   len(plan.Steps),
+		runtimeSteps:   len(plan.Steps),
 	}
 	execution.lastBuildStep = plan.Steps[len(plan.Steps)-1].ID
 	started, err := coordinator.config.Tasks.Start(
@@ -319,14 +342,17 @@ type runExecution struct {
 	repeatCount    int64
 	taskTimeout    time.Duration
 	maxConcurrency int
-	initialSteps   int
+	runtimeSteps   int
 
-	taskID      string
-	initialized bool
-	interpreter *Interpreter
-	steps       []task.ExecutionStep
-	next        int
-	lastIssued  string
+	taskID            string
+	initialized       bool
+	interpreter       *Interpreter
+	refresh           CatalogRefresh
+	steps             []task.ExecutionStep
+	next              int
+	lastIssued        string
+	pinned            map[string]struct{}
+	refreshLastIssued string
 }
 
 func (execution *runExecution) AfterStep(
@@ -350,13 +376,57 @@ func (execution *runExecution) AfterStep(
 		return task.Continuation{}, task.ErrInvalidArgument
 	}
 	if !execution.initialized {
-		if step.ID != execution.lastBuildStep {
+		if execution.refresh == nil {
+			if step.ID != execution.lastBuildStep {
+				return task.Continuation{}, nil
+			}
+			refresh, progress, err :=
+				execution.refresher.PrepareAfterBuild(
+					ctx,
+					RefreshRequest{
+						TaskID:              current.ID,
+						WorkspaceGeneration: execution.prepared.WorkspaceGeneration(),
+						Project:             execution.prepared.Project(),
+						Profile:             execution.prepared.Profile(),
+						Toolchain:           execution.prepared.Toolchain(),
+						Targets:             execution.prepared.Targets(),
+					},
+				)
+			if err != nil {
+				return task.Continuation{}, err
+			}
+			if nilCoordinatorPort(refresh) {
+				return task.Continuation{},
+					task.ErrStorageUnavailable
+			}
+			execution.refresh = refresh
+			if progress.Snapshot == nil &&
+				len(progress.Steps) == 0 {
+				return task.Continuation{},
+					task.ErrInvalidArgument
+			}
+			return execution.applyRefreshProgress(
+				ctx,
+				progress,
+			)
+		}
+		if step.Kind != task.StepTestDiscovery {
 			return task.Continuation{}, nil
 		}
-		if err := execution.initialize(ctx, current.ID); err != nil {
+		progress, err := execution.refresh.AfterStep(
+			ctx,
+			step,
+		)
+		if err != nil {
 			return task.Continuation{}, err
 		}
-		return execution.nextContinuation(), nil
+		if progress.Snapshot == nil &&
+			len(progress.Steps) == 0 &&
+			step.ID == execution.refreshLastIssued {
+			return task.Continuation{},
+				task.ErrInvalidArgument
+		}
+		return execution.applyRefreshProgress(ctx, progress)
 	}
 	if step.Kind != task.StepTestRun ||
 		step.ID != execution.lastIssued {
@@ -365,25 +435,53 @@ func (execution *runExecution) AfterStep(
 	return execution.nextContinuation(), nil
 }
 
+func (execution *runExecution) applyRefreshProgress(
+	ctx context.Context,
+	progress RefreshProgress,
+) (task.Continuation, error) {
+	if ctx == nil {
+		return task.Continuation{}, task.ErrInvalidArgument
+	}
+	if progress.Snapshot != nil &&
+		len(progress.Steps) != 0 {
+		return task.Continuation{}, task.ErrInvalidArgument
+	}
+	if len(progress.Steps) >
+		maxCoordinatorRuntimeSteps-execution.runtimeSteps {
+		return task.Continuation{}, task.ErrInvalidArgument
+	}
+	for _, step := range progress.Steps {
+		if step.Kind != task.StepTestDiscovery {
+			return task.Continuation{},
+				task.ErrInvalidArgument
+		}
+	}
+	if err := execution.pinFiles(progress.Pins); err != nil {
+		return task.Continuation{}, err
+	}
+	if progress.Snapshot == nil {
+		if len(progress.Steps) != 0 {
+			execution.runtimeSteps += len(progress.Steps)
+			execution.refreshLastIssued =
+				progress.Steps[len(progress.Steps)-1].ID
+		}
+		return task.Continuation{
+			Steps: cloneCoordinatorSteps(progress.Steps),
+		}, nil
+	}
+	if err := execution.initialize(
+		ctx,
+		progress.Snapshot.Clone(),
+	); err != nil {
+		return task.Continuation{}, err
+	}
+	return execution.nextContinuation(), nil
+}
+
 func (execution *runExecution) initialize(
 	ctx context.Context,
-	taskID string,
+	refreshed RefreshedCatalog,
 ) error {
-	refreshed, err := execution.refresher.RefreshAfterBuild(
-		ctx,
-		RefreshRequest{
-			TaskID:              taskID,
-			WorkspaceGeneration: execution.prepared.WorkspaceGeneration(),
-			Project:             execution.prepared.Project(),
-			Profile:             execution.prepared.Profile(),
-			Toolchain:           execution.prepared.Toolchain(),
-			Targets:             execution.prepared.Targets(),
-		},
-	)
-	if err != nil {
-		return err
-	}
-	refreshed = refreshed.Clone()
 	catalog, err := testdomain.NewCatalog(refreshed.Catalog)
 	if err != nil ||
 		catalog.ProjectID != execution.prepared.Project().ID ||
@@ -406,7 +504,7 @@ func (execution *runExecution) initialize(
 		return err
 	}
 	if len(planned.Invocations) >
-		maxCoordinatorRuntimeSteps-execution.initialSteps {
+		maxCoordinatorRuntimeSteps-execution.runtimeSteps {
 		return task.ErrInvalidArgument
 	}
 	if catalog.Revision != refreshed.Catalog.Revision {
@@ -464,14 +562,31 @@ func (execution *runExecution) currentCatalogRevision(
 func (execution *runExecution) pinInvocations(
 	planned PlannedRun,
 ) error {
-	seen := make(map[string]struct{})
+	files := make([]cmake.FingerprintFile, 0)
 	for _, invocation := range planned.Invocations {
 		state := invocation.ParseInput.Descriptor.Executable
 		if state.Path == "" {
 			continue
 		}
-		key := state.Path + "\x00" + state.SHA256
-		if _, exists := seen[key]; exists {
+		files = append(files, state)
+	}
+	return execution.pinFiles(files)
+}
+
+func (execution *runExecution) pinFiles(
+	files []cmake.FingerprintFile,
+) error {
+	if execution.pinned == nil {
+		execution.pinned = make(map[string]struct{})
+	}
+	for _, state := range files {
+		if state.Path == "" || state.Identity == "" ||
+			state.SHA256 == "" {
+			return task.ErrInvalidArgument
+		}
+		key := state.Path + "\x00" + state.Identity +
+			"\x00" + state.SHA256
+		if _, exists := execution.pinned[key]; exists {
 			continue
 		}
 		if err := execution.prepared.AllowTestExecutable(
@@ -479,7 +594,7 @@ func (execution *runExecution) pinInvocations(
 		); err != nil {
 			return err
 		}
-		seen[key] = struct{}{}
+		execution.pinned[key] = struct{}{}
 	}
 	return nil
 }
@@ -508,6 +623,14 @@ func (execution *runExecution) Interpret(
 	result task.ProcessResult,
 ) (task.StepVerdict, error) {
 	if step.Kind != task.StepTestRun {
+		execution.mu.Lock()
+		refresh := execution.refresh
+		initialized := execution.initialized
+		execution.mu.Unlock()
+		if step.Kind == task.StepTestDiscovery &&
+			!initialized && refresh != nil {
+			return refresh.Interpret(ctx, step, result)
+		}
 		return task.StepVerdictDefault, nil
 	}
 	execution.mu.Lock()
@@ -532,6 +655,18 @@ func (execution *runExecution) ObserveOutput(
 	output task.ProcessOutput,
 ) error {
 	if step.Kind != task.StepTestRun {
+		execution.mu.Lock()
+		refresh := execution.refresh
+		initialized := execution.initialized
+		execution.mu.Unlock()
+		if step.Kind == task.StepTestDiscovery &&
+			!initialized && refresh != nil {
+			return refresh.ObserveOutput(
+				ctx,
+				step,
+				output,
+			)
+		}
 		return nil
 	}
 	execution.mu.Lock()

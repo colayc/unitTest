@@ -85,6 +85,81 @@ func TestAdapterDiscoversManifestBoundCasesThroughOwnedControlFile(t *testing.T)
 	}
 }
 
+func TestAdapterPreparesTaskOwnedDiscovery(t *testing.T) {
+	t.Setenv("UNIT_TEST_SERVICE_TOKEN", "must-not-reach-target")
+	t.Setenv("UTIDE_PRIVATE_VALUE", "must-not-reach-target")
+	fixture := newAdapterFixture(t)
+	allocator := &fakeControlAllocator{
+		root: fixture.controlDir,
+		data: [][]byte{readUnityTestdata(t, "list.jsonl")},
+	}
+	runner := &fakeRunner{}
+	adapter, err := NewAdapter(runner, allocator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution, err := adapter.PrepareDiscovery(
+		context.Background(),
+		fixture.descriptor,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.specs) != 0 ||
+		execution.Process.Executable !=
+			fixture.descriptor.Executable.Path ||
+		execution.Process.Dir != fixture.descriptor.WorkingDirectory ||
+		len(allocator.files) != 1 ||
+		execution.Parser == nil {
+		t.Fatalf(
+			"task discovery execution = %#v, probe calls=%d",
+			execution,
+			len(runner.specs),
+		)
+	}
+	if strings.Contains(
+		strings.Join(execution.Public.Args, "\x00"),
+		allocator.files[0].path,
+	) {
+		t.Fatalf(
+			"public args exposed control path: %#v",
+			execution.Public.Args,
+		)
+	}
+	for _, entry := range execution.Process.Env {
+		upper := strings.ToUpper(entry)
+		if strings.HasPrefix(upper, "UTIDE_") ||
+			strings.HasPrefix(upper, "UNIT_TEST_IDE_") ||
+			strings.HasPrefix(
+				upper,
+				"UNIT_TEST_SERVICE_TOKEN=",
+			) {
+			t.Fatalf("service environment leaked: %q", entry)
+		}
+	}
+	if err := execution.Parser.Feed(
+		testframework.StreamStdout,
+		[]byte("framework output"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	discovery, err := execution.Parser.Finish(
+		context.Background(),
+		testframework.ProcessResult{
+			ExitCode:    0,
+			Termination: testframework.ProcessExited,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(discovery.Items) != 3 ||
+		discovery.Items[0].Kind != testdomain.ItemGroup ||
+		discovery.Items[1].Kind != testdomain.ItemCase {
+		t.Fatalf("task discovery = %#v", discovery)
+	}
+}
+
 func TestAdapterRejectsListAndManifestMismatches(t *testing.T) {
 	tests := map[string]func([]byte) []byte{
 		"magic": func(data []byte) []byte {

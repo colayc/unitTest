@@ -20,7 +20,8 @@ func discoveryEnvironment(
 	current := make(map[string]environmentValue)
 	for _, encoded := range os.Environ() {
 		name, value, ok := strings.Cut(encoded, "=")
-		if !ok || !validEnvironmentEntry(name, value) {
+		if !ok || !validEnvironmentEntry(name, value) ||
+			reservedEnvironmentName(name) {
 			continue
 		}
 		key := environmentKey(name)
@@ -144,7 +145,8 @@ func validEnvironmentEntry(name, value string) bool {
 func reservedEnvironmentName(value string) bool {
 	upper := strings.ToUpper(value)
 	return strings.HasPrefix(upper, "UTIDE_") ||
-		strings.HasPrefix(upper, "UNIT_TEST_IDE_")
+		strings.HasPrefix(upper, "UNIT_TEST_IDE_") ||
+		upper == "UNIT_TEST_SERVICE_TOKEN"
 }
 
 func environmentKey(name string) string {

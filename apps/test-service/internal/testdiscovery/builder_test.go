@@ -155,6 +155,50 @@ func TestBuilderDegradesOnlyMalformedContainer(t *testing.T) {
 	}
 }
 
+func TestBuilderUsesTaskOwnedDiscoveryWithoutAdapterProcess(
+	t *testing.T,
+) {
+	adapter := &discoveryAdapter{
+		framework: testdomain.FrameworkCppUTest,
+		version:   "cpputest.v1",
+	}
+	discovery := testframework.DiscoveryResult{
+		Items: []testframework.DiscoveredItem{
+			{
+				Kind:        testdomain.ItemGroup,
+				LogicalName: "math", DisplayName: "math",
+			},
+			{
+				Kind:              testdomain.ItemCase,
+				ParentKind:        testdomain.ItemGroup,
+				ParentLogicalName: "math",
+				LogicalName:       "adds", DisplayName: "adds",
+			},
+		},
+	}
+	catalog := mustBuildCatalog(t, BuildInput{
+		ProjectID:   "core",
+		ProfileID:   strings.Repeat("1", 64),
+		GeneratedAt: fixedGeneratedAt,
+		Fingerprint: fingerprintFixture(strings.Repeat("1", 64)),
+		Containers: []ContainerInput{{
+			Descriptor: compatibleDiscoveryDescriptor("math.tests"),
+			Selection:  frameworkSelection(adapter),
+			Discovery:  &discovery,
+		}},
+	})
+	if adapter.discoverCalls != 0 ||
+		len(catalog.Items) != 2 ||
+		catalog.Containers[0].Framework !=
+			testdomain.FrameworkCppUTest {
+		t.Fatalf(
+			"task-owned catalog = %#v, adapter calls=%d",
+			catalog,
+			adapter.discoverCalls,
+		)
+	}
+}
+
 func TestBuilderDegradesDuplicateCaseIdentity(t *testing.T) {
 	adapter := &discoveryAdapter{
 		framework: testdomain.FrameworkCppUTest,
@@ -267,10 +311,11 @@ func containersByName(containers []testdomain.Container) map[string]testdomain.C
 }
 
 type discoveryAdapter struct {
-	framework testdomain.Framework
-	version   string
-	results   map[string]testframework.DiscoveryResult
-	errs      map[string]error
+	framework     testdomain.Framework
+	version       string
+	results       map[string]testframework.DiscoveryResult
+	errs          map[string]error
+	discoverCalls int
 }
 
 func (adapter *discoveryAdapter) Framework() testdomain.Framework {
@@ -292,6 +337,7 @@ func (adapter *discoveryAdapter) Discover(
 	_ context.Context,
 	descriptor ctest.ExecutionDescriptor,
 ) (testframework.DiscoveryResult, error) {
+	adapter.discoverCalls++
 	if err := adapter.errs[descriptor.LogicalName]; err != nil {
 		return testframework.DiscoveryResult{}, err
 	}
