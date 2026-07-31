@@ -26,6 +26,8 @@ const (
 	SourceOpaque    Source = "opaque"
 )
 
+const UnityRunnerV1 = "utide.runner.v1"
+
 const (
 	DegradedNoMetadata          = "framework_metadata_missing"
 	DegradedDescriptor          = "ctest_descriptor_incompatible"

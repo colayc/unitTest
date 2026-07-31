@@ -21,6 +21,7 @@ func TestBuildDescriptorMapsDirectFileAPITarget(t *testing.T) {
 		descriptor.Configuration != "Debug" ||
 		descriptor.TargetID != fixture.target.ID ||
 		descriptor.Executable.Path != fixture.executable ||
+		descriptor.SourceDirectory != fixture.sourceDir ||
 		len(descriptor.Executable.SHA256) != 64 ||
 		!slices.Equal(descriptor.Arguments, []string{"--fixture", "value"}) ||
 		descriptor.WorkingDirectory != fixture.buildDir ||

@@ -11,7 +11,7 @@ import (
 
 func TestRegistryUsesHelperThenExactWorkspaceMapping(t *testing.T) {
 	cpp := &fakeAdapter{framework: testdomain.FrameworkCppUTest, version: "cpputest.v1"}
-	unity := &fakeAdapter{framework: testdomain.FrameworkUnity, version: "unity.v1"}
+	unity := &fakeAdapter{framework: testdomain.FrameworkUnity, version: UnityRunnerV1}
 	registry, err := NewRegistry(cpp, unity)
 	if err != nil {
 		t.Fatal(err)
@@ -42,7 +42,7 @@ func TestRegistryUsesHelperThenExactWorkspaceMapping(t *testing.T) {
 			Descriptor: descriptor,
 			Helper: &Declaration{
 				CTestName: "core.tests", Framework: testdomain.FrameworkUnity,
-				ContractVersion: "unity.v1",
+				ContractVersion: UnityRunnerV1,
 			},
 			Mappings: []Mapping{{CTestName: "core.tests", Framework: testdomain.FrameworkUnity}},
 		})
@@ -70,7 +70,7 @@ func TestRegistryUsesHelperThenExactWorkspaceMapping(t *testing.T) {
 func TestRegistryRejectsHelperMappingConflict(t *testing.T) {
 	registry, err := NewRegistry(
 		&fakeAdapter{framework: testdomain.FrameworkCppUTest, version: "cpputest.v1"},
-		&fakeAdapter{framework: testdomain.FrameworkUnity, version: "unity.v1"},
+		&fakeAdapter{framework: testdomain.FrameworkUnity, version: UnityRunnerV1},
 	)
 	if err != nil {
 		t.Fatal(err)

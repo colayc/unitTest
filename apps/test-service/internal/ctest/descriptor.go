@@ -17,6 +17,7 @@ var ErrInvalidDescriptor = errors.New("invalid CTest execution descriptor")
 type ExecutionDescriptor struct {
 	LogicalName        string
 	TestDirectory      string
+	SourceDirectory    string
 	Configuration      string
 	TargetID           string
 	Executable         cmake.FingerprintFile
@@ -100,6 +101,7 @@ func BuildDescriptor(
 		} else {
 			result.TargetID = matched.ID
 			result.Executable = state
+			result.SourceDirectory = matched.ProjectSourceDir
 		}
 	}
 

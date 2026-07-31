@@ -306,10 +306,13 @@ git commit -m "feat: add opt-in test cmake helper"
 - 创建：`apps/test-service/internal/testframework/unity/testdata/fail.jsonl`
 - 创建：`apps/test-service/internal/testframework/unity/testdata/crash-partial.jsonl`
 - 创建：`apps/test-service/internal/testframework/unity/testdata/malformed.jsonl`
+- 修改：`apps/test-service/internal/testframework/adapter.go`
 - 修改：`apps/test-service/internal/testframework/registry.go`
 - 修改：`apps/test-service/internal/testframework/registry_test.go`
+- 修改：`apps/test-service/internal/ctest/descriptor.go`
+- 修改：`apps/test-service/internal/ctest/descriptor_test.go`
 
-- [ ] **Step 1：写出 protocol/list/exact-run 失败测试**
+- [x] **Step 1：写出 protocol/list/exact-run 失败测试**
 
 覆盖：
 
@@ -327,7 +330,7 @@ git commit -m "feat: add opt-in test cmake helper"
 - runner/executable/manifest fingerprint mismatch；
 - reserved control arg conflict。
 
-- [ ] **Step 2：运行 Unity Adapter tests 并确认失败**
+- [x] **Step 2：运行 Unity Adapter tests 并确认失败**
 
 ```powershell
 go test ./apps/test-service/internal/testframework/unity ./apps/test-service/internal/testframework -count=1
@@ -335,11 +338,11 @@ go test ./apps/test-service/internal/testframework/unity ./apps/test-service/int
 
 预期：FAIL。
 
-- [ ] **Step 3：实现 Adapter 与 Service-owned RunPlan**
+- [x] **Step 3：实现 Adapter 与 Service-owned RunPlan**
 
 Control argv 只由 Adapter 常量、manifest case identity、contract version 和 ArtifactStore 分配的 result path组成。Client/Workspace mapping 不能提供 flag 或 path。
 
-- [ ] **Step 4：运行 unit/race**
+- [x] **Step 4：运行 unit/race**
 
 ```powershell
 go test ./apps/test-service/internal/testframework/unity ./apps/test-service/internal/testframework ./apps/test-service/internal/unityrunner -count=1
@@ -348,7 +351,7 @@ go test -race ./apps/test-service/internal/testframework/unity ./apps/test-servi
 
 预期：PASS。
 
-- [ ] **Step 5：提交 Unity Adapter**
+- [x] **Step 5：提交 Unity Adapter**
 
 ```powershell
 git add apps/test-service/internal/testframework/unity apps/test-service/internal/testframework/registry.go apps/test-service/internal/testframework/registry_test.go
@@ -415,8 +418,8 @@ git commit -m "feat: normalize unity and cmock results"
 - [x] deterministic runner/manifest Golden File
 - [x] helper strict keyword/security tests
 - [ ] generated C Windows/Linux compile tests
-- [ ] list/exact-run protocol tests
-- [ ] pass/fail/skip/crash/partial tests
+- [x] list/exact-run protocol tests
+- [x] pass/fail/skip/crash/partial tests
 - [ ] CMock detail tests
 - [x] 无 Ruby/Ceedling runtime dependency
 - [ ] Go unit/race、workspace smoke、`pnpm verify`

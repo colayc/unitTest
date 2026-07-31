@@ -7,6 +7,18 @@ import (
 	"unit-test-ide.local/test-service/internal/testdomain"
 )
 
+// ControlFile is an opaque Service-owned file capability. Framework adapters
+// may pass its path to a trusted test executable, but clients and workspace
+// configuration never get a surface for choosing that path.
+type ControlFile interface {
+	Path() string
+	Read(context.Context, int64) ([]byte, error)
+}
+
+type ControlFileAllocator interface {
+	Allocate(context.Context) (ControlFile, error)
+}
+
 // Adapter is the stable boundary between generic CTest discovery and a
 // framework-specific implementation. It deliberately exposes neither a
 // process handle nor Protocol-generated types.
@@ -67,6 +79,7 @@ type ExpectedCase struct {
 type RunInvocation struct {
 	Arguments     []string
 	ExpectedCases []ExpectedCase
+	ControlFile   ControlFile
 }
 
 // RunPlan contains framework-owned invocations for a Service-owned execution
@@ -83,8 +96,9 @@ type RunPlan struct {
 type Stream string
 
 const (
-	StreamStdout Stream = "stdout"
-	StreamStderr Stream = "stderr"
+	StreamStdout  Stream = "stdout"
+	StreamStderr  Stream = "stderr"
+	StreamControl Stream = "control"
 )
 
 type ParseInput struct {
