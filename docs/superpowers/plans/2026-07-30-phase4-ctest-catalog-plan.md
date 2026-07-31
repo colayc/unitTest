@@ -183,7 +183,7 @@ type Adapter interface {
 }
 ```
 
-- [ ] **Step 1：写出 metadata priority、conflict 和 unknown fallback 测试**
+- [x] **Step 1：写出 metadata priority、conflict 和 unknown fallback 测试**
 
 覆盖：
 
@@ -196,7 +196,7 @@ type Adapter interface {
 - Registry duplicate framework/version 拒绝；
 - Registry 不执行 unknown binary。
 
-- [ ] **Step 2：运行 Registry tests 并确认失败**
+- [x] **Step 2：运行 Registry tests 并确认失败**
 
 ```powershell
 go test ./apps/test-service/internal/testframework -count=1
@@ -204,11 +204,11 @@ go test ./apps/test-service/internal/testframework -count=1
 
 预期：FAIL。
 
-- [ ] **Step 3：实现小型稳定 Adapter port**
+- [x] **Step 3：实现小型稳定 Adapter port**
 
 接口不暴露 `processcontrol.Process`，只返回受控 `RunPlan`/Parser。Registry 不依赖 Protocol generated model。
 
-- [ ] **Step 4：运行 unit/race**
+- [x] **Step 4：运行 unit/race**
 
 ```powershell
 go test ./apps/test-service/internal/testframework -count=1
@@ -217,7 +217,7 @@ go test -race ./apps/test-service/internal/testframework -count=1
 
 预期：PASS。
 
-- [ ] **Step 5：提交 Framework Registry**
+- [x] **Step 5：提交 Framework Registry**
 
 ```powershell
 git add apps/test-service/internal/testframework
