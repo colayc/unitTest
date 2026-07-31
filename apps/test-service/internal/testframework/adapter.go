@@ -21,6 +21,7 @@ type Adapter interface {
 
 type DiscoveredItem struct {
 	Kind              testdomain.ItemKind
+	ParentKind        testdomain.ItemKind
 	ParentLogicalName string
 	LogicalName       string
 	DisplayName       string

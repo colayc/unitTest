@@ -241,7 +241,11 @@ func (b *Builder) Build(context.Context, BuildInput) (testdomain.Catalog, error)
 func ValidateRevision(context.Context, testdomain.Catalog, FingerprintSource) (RevisionStatus, error)
 ```
 
-- [ ] **Step 1：写出 Catalog 构建与 stale 失败测试**
+> 实施补充：`testframework.DiscoveredItem` 使用显式 `ParentKind + ParentLogicalName`
+> 表达 tree edge，避免 group/suite 同名时猜测父节点。Revision fingerprint 不包含 mtime，
+> 只接受 semantic identity 与文件 SHA-256。
+
+- [x] **Step 1：写出 Catalog 构建与 stale 失败测试**
 
 覆盖：
 
@@ -255,7 +259,7 @@ func ValidateRevision(context.Context, testdomain.Catalog, FingerprintSource) (R
 - mtime 相同但 executable content 改变时 stale；
 - stale rebind 全部 ID 存在/部分缺失。
 
-- [ ] **Step 2：运行 Builder tests 并确认失败**
+- [x] **Step 2：运行 Builder tests 并确认失败**
 
 ```powershell
 go test ./apps/test-service/internal/testdiscovery -count=1
@@ -263,11 +267,11 @@ go test ./apps/test-service/internal/testdiscovery -count=1
 
 预期：FAIL。
 
-- [ ] **Step 3：实现 deterministic Builder**
+- [x] **Step 3：实现 deterministic Builder**
 
 Container 按 logical name 排序，tree item 按 logical identity 排序。排序不进入 ID。Adapter 返回 partial/malformed 时丢弃该 container 的全部 case。
 
-- [ ] **Step 4：运行 unit/race**
+- [x] **Step 4：运行 unit/race**
 
 ```powershell
 go test ./apps/test-service/internal/testdiscovery -count=1
@@ -276,7 +280,7 @@ go test -race ./apps/test-service/internal/testdiscovery -count=1
 
 预期：PASS。
 
-- [ ] **Step 5：提交 Catalog Builder**
+- [x] **Step 5：提交 Catalog Builder**
 
 ```powershell
 git add apps/test-service/internal/testdiscovery
