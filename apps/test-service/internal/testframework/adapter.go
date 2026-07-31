@@ -44,8 +44,17 @@ type RunItem struct {
 	Parameters        []testdomain.Parameter
 }
 
+type RunSelectionMode string
+
+const (
+	RunSelectionAll   RunSelectionMode = "all"
+	RunSelectionGroup RunSelectionMode = "group"
+	RunSelectionCases RunSelectionMode = "cases"
+)
+
 type RunInput struct {
 	Descriptor ctest.ExecutionDescriptor
+	Mode       RunSelectionMode
 	Items      []RunItem
 }
 

@@ -292,16 +292,30 @@ git commit -m "feat: normalize cppumock failures"
 
 - 创建：`apps/test-service/cmd/test-framework-fixture/main.go`
 - 创建：`apps/test-service/cmd/test-framework-fixture/main_test.go`
-- 修改：`apps/test-service/internal/testframework/registry.go`
-- 修改：`apps/test-service/internal/testframework/registry_test.go`
+- 验证：`apps/test-service/internal/testframework/registry.go`
+- 验证：`apps/test-service/internal/testframework/registry_test.go`
+- 修改：`apps/test-service/internal/testframework/adapter.go`
+- 修改：`apps/test-service/internal/testframework/cpputest/adapter.go`
+- 创建：`apps/test-service/internal/testframework/cpputest/framework.go`
+- 创建：`apps/test-service/internal/testframework/cpputest/environment.go`
 - 创建：`apps/test-service/internal/testframework/cpputest/integration_test.go`
+- 创建：`apps/test-service/internal/testframework/cpputest/fixture_process_test.go`
 - 修改：`tools/service-probe/build-service.mjs`
 
-- [ ] **Step 1：写出 list/run/crash/timeout integration 失败测试**
+> 实施修正：通用 `RunInput` 原先只有 case 列表，无法无歧义表达“全部 / group /
+> 精确 cases”。本 Task 增加 closed framework-neutral run mode；CppUTest Adapter
+> 不根据 case 数量猜测 mode，group 名只从已展开的稳定 `RunItem` 派生，不新增
+> Client 自由文本入口。
+>
+> Registry 已提供显式 Adapter 注入，不在父 package 导入 `cpputest` 子 package，
+> 避免形成循环依赖；concrete registration 由集成测试和后续 Runtime composition
+> 验证。
+
+- [x] **Step 1：写出 list/run/crash/timeout integration 失败测试**
 
 Fixture 只实现固定 CppUTest-like scenarios，不启动外部命令。测试验证 Registry → Verify → Discover → Plan → Parser 的完整内部切片。
 
-- [ ] **Step 2：运行 integration tests 并确认失败**
+- [x] **Step 2：运行 integration tests 并确认失败**
 
 ```powershell
 go test ./apps/test-service/cmd/test-framework-fixture ./apps/test-service/internal/testframework/... -run 'Fixture|Integration' -count=1
@@ -309,11 +323,11 @@ go test ./apps/test-service/cmd/test-framework-fixture ./apps/test-service/inter
 
 预期：FAIL。
 
-- [ ] **Step 3：实现 fixture 与 Adapter registration**
+- [x] **Step 3：实现 fixture 与 Adapter registration**
 
 Fixture 未知参数退出 2；scenario 来自构建时固定表，不接受 command/env/cwd。
 
-- [ ] **Step 4：运行 Adapter 全套和完整 Go tests**
+- [x] **Step 4：运行 Adapter 全套和完整 Go tests**
 
 ```powershell
 go test ./apps/test-service/internal/testframework/... ./apps/test-service/cmd/test-framework-fixture -count=1
@@ -323,7 +337,7 @@ pnpm test:go
 
 预期：PASS。
 
-- [ ] **Step 5：提交 CppUTest integration**
+- [x] **Step 5：提交 CppUTest integration**
 
 ```powershell
 git add apps/test-service/internal/testframework apps/test-service/cmd/test-framework-fixture tools/service-probe/build-service.mjs
@@ -337,7 +351,7 @@ git commit -m "feat: integrate cpputest adapter"
 - [x] pass/fail/skip/crash/timeout evidence tests
 - [x] CppUMock subtype/detail/source tests
 - [x] partial result 不伪造 pass
-- [ ] unknown executable 不探测
-- [ ] Go unit/race tests
-- [ ] `pnpm verify`
-- [ ] 独立评审确认 Client 文本不能进入 CppUTest argv
+- [x] unknown executable 不探测
+- [x] Go unit/race tests
+- [x] `pnpm verify`
+- [x] 独立评审确认 Client 文本不能进入 CppUTest argv

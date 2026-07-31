@@ -7,6 +7,8 @@ import (
 )
 
 var (
+	ErrInvalidAdapter         = errors.New("invalid CppUTest adapter")
+	ErrDiscoveryFailed        = errors.New("CppUTest discovery failed")
 	ErrInvalidList            = errors.New("invalid CppUTest discovery list")
 	ErrLimitExceeded          = errors.New("CppUTest discovery limit exceeded")
 	ErrInvalidLimits          = errors.New("invalid CppUTest discovery limits")
