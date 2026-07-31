@@ -62,6 +62,14 @@ type TestCatalogRepository interface {
 	PageCatalog(context.Context, testdomain.CatalogPageRequest) (testdomain.CatalogPage, error)
 }
 
+type TestRunRepository interface {
+	CreateRun(context.Context, testdomain.TestRun) error
+	AppendResult(context.Context, string, testdomain.TestItemResult) error
+	FinishRun(context.Context, testdomain.TestRun, []Artifact) error
+	GetRun(context.Context, string) (testdomain.TestRun, error)
+	ListRuns(context.Context, testdomain.RunPageRequest) (testdomain.RunPage, error)
+}
+
 type QueuedPlanStore interface {
 	ReplaceQueuedPlan(context.Context, string, string, string, []StepSnapshot) (Task, error)
 }

@@ -45,15 +45,15 @@ type Selection struct {
 }
 
 type SelectionSnapshot struct {
-	Mode         SelectionMode
-	ContainerIDs []ID
-	ItemIDs      []ID
-	SourceRunID  string
+	Mode         SelectionMode `json:"mode"`
+	ContainerIDs []ID          `json:"containerIds"`
+	ItemIDs      []ID          `json:"itemIds"`
+	SourceRunID  string        `json:"sourceRunId,omitempty"`
 }
 
 func (snapshot SelectionSnapshot) Clone() SelectionSnapshot {
-	snapshot.ContainerIDs = append([]ID(nil), snapshot.ContainerIDs...)
-	snapshot.ItemIDs = append([]ID(nil), snapshot.ItemIDs...)
+	snapshot.ContainerIDs = append([]ID{}, snapshot.ContainerIDs...)
+	snapshot.ItemIDs = append([]ID{}, snapshot.ItemIDs...)
 	return snapshot
 }
 

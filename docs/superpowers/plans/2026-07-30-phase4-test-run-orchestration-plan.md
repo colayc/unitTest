@@ -35,6 +35,8 @@
 - 修改：`apps/test-service/internal/artifactstore/task_sink.go`
 - 修改：`apps/test-service/internal/artifactstore/task_sink_test.go`
 
+> 实施说明：Task 1 已完成 Artifact metadata 与 TestRun terminal transaction 的原子关联。`ArtifactSink` 的 test artifact kind 接线保留到 Task 5，在 Task 4 引入 `testDiscovery`/`testRun` Task kind 后统一完成，避免 persistence Task 提前扩大 Task Engine 的可执行面。result persistence 测试集中在 `test_runs_test.go`，领域 canonicalization 测试位于 `testdomain/run_test.go`。
+
 **接口：**
 
 ```go
@@ -47,7 +49,7 @@ type TestRunRepository interface {
 }
 ```
 
-- [ ] **Step 1：写出 migration、append 和 terminal transaction 失败测试**
+- [x] **Step 1：写出 migration、append 和 terminal transaction 失败测试**
 
 覆盖：
 
@@ -64,7 +66,7 @@ type TestRunRepository interface {
 - pagination cursor 绑定 query；
 - failedFromRun 查询 assertion 和 container-level error。
 
-- [ ] **Step 2：运行 Store tests 并确认失败**
+- [x] **Step 2：运行 Store tests 并确认失败**
 
 ```powershell
 go test ./apps/test-service/internal/taskstore ./apps/test-service/internal/artifactstore -run 'TestRun|TestResult|Migration006' -count=1
@@ -72,11 +74,11 @@ go test ./apps/test-service/internal/taskstore ./apps/test-service/internal/arti
 
 预期：FAIL。
 
-- [ ] **Step 3：实现 normalized tables 与 atomic finish**
+- [x] **Step 3：实现 normalized tables 与 atomic finish**
 
 SQLite 保存可查询字段；完整 failure/output evidence 通过 ArtifactStore。`FinishRun` 与 Task terminal snapshot 的提交顺序由 Task completion boundary 统一协调。
 
-- [ ] **Step 4：运行 Store 全套与 race**
+- [x] **Step 4：运行 Store 全套与 race**
 
 ```powershell
 go test ./apps/test-service/internal/taskstore ./apps/test-service/internal/artifactstore -count=1
@@ -85,7 +87,7 @@ go test -race ./apps/test-service/internal/taskstore ./apps/test-service/interna
 
 预期：PASS。
 
-- [ ] **Step 5：提交 TestRun persistence**
+- [x] **Step 5：提交 TestRun persistence**
 
 ```powershell
 git add apps/test-service/internal/taskstore apps/test-service/internal/task/ports.go apps/test-service/internal/artifactstore
