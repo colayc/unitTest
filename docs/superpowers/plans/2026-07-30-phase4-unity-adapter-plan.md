@@ -98,7 +98,7 @@ git commit -m "feat: parse declared unity test sources"
 func Generate(input GenerateInput) (runnerC []byte, manifestJSON []byte, err error)
 ```
 
-- [ ] **Step 1：写出 deterministic C/manifest 失败测试**
+- [x] **Step 1：写出 deterministic C/manifest 失败测试**
 
 覆盖：
 
@@ -113,7 +113,7 @@ func Generate(input GenerateInput) (runnerC []byte, manifestJSON []byte, err err
 - generator version 写入 C 与 manifest；
 - absolute source/build path 不写入输出。
 
-- [ ] **Step 2：运行 generator tests 并确认失败**
+- [x] **Step 2：运行 generator tests 并确认失败**
 
 ```powershell
 go test ./apps/test-service/internal/unityrunner -run 'Generate|Golden|Escape' -count=1
@@ -121,7 +121,7 @@ go test ./apps/test-service/internal/unityrunner -run 'Generate|Golden|Escape' -
 
 预期：FAIL。
 
-- [ ] **Step 3：实现 embedded template 与 atomic output**
+- [x] **Step 3：实现 embedded template 与 atomic output**
 
 Generated runner：
 
@@ -136,7 +136,7 @@ Generated runner：
 
 Generator 返回 bytes；CLI 负责 temp + fsync + atomic replace。
 
-- [ ] **Step 4：运行 Golden 和 race**
+- [x] **Step 4：运行 Golden 和 race**
 
 ```powershell
 go test ./apps/test-service/internal/unityrunner -count=1
@@ -145,7 +145,7 @@ go test -race ./apps/test-service/internal/unityrunner -count=1
 
 预期：PASS，第二次 generation 无 diff。
 
-- [ ] **Step 5：提交 Unity generator**
+- [x] **Step 5：提交 Unity generator**
 
 ```powershell
 git add apps/test-service/internal/unityrunner

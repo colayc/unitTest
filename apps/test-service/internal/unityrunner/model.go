@@ -68,12 +68,13 @@ type TestCase struct {
 }
 
 type Manifest struct {
-	Version  string          `json:"version"`
-	SHA256   string          `json:"sha256"`
-	Sources  []string        `json:"sources"`
-	SetUp    *SourceLocation `json:"setUp,omitempty"`
-	TearDown *SourceLocation `json:"tearDown,omitempty"`
-	Cases    []TestCase      `json:"cases"`
+	Version          string          `json:"version"`
+	GeneratorVersion string          `json:"generatorVersion,omitempty"`
+	SHA256           string          `json:"sha256"`
+	Sources          []string        `json:"sources"`
+	SetUp            *SourceLocation `json:"setUp,omitempty"`
+	TearDown         *SourceLocation `json:"tearDown,omitempty"`
+	Cases            []TestCase      `json:"cases"`
 }
 
 func (manifest Manifest) Verify() error {
@@ -116,13 +117,14 @@ func sealManifest(manifest Manifest) (Manifest, error) {
 
 func manifestDigest(manifest Manifest) (string, error) {
 	payload := struct {
-		Version  string          `json:"version"`
-		Sources  []string        `json:"sources"`
-		SetUp    *SourceLocation `json:"setUp,omitempty"`
-		TearDown *SourceLocation `json:"tearDown,omitempty"`
-		Cases    []TestCase      `json:"cases"`
+		Version          string          `json:"version"`
+		GeneratorVersion string          `json:"generatorVersion,omitempty"`
+		Sources          []string        `json:"sources"`
+		SetUp            *SourceLocation `json:"setUp,omitempty"`
+		TearDown         *SourceLocation `json:"tearDown,omitempty"`
+		Cases            []TestCase      `json:"cases"`
 	}{
-		Version: manifest.Version, Sources: manifest.Sources,
+		Version: manifest.Version, GeneratorVersion: manifest.GeneratorVersion, Sources: manifest.Sources,
 		SetUp: manifest.SetUp, TearDown: manifest.TearDown, Cases: manifest.Cases,
 	}
 	encoded, err := json.Marshal(payload)
@@ -134,6 +136,10 @@ func manifestDigest(manifest Manifest) (string, error) {
 }
 
 func validateManifestContent(manifest Manifest) error {
+	if manifest.GeneratorVersion != "" &&
+		(!validText(manifest.GeneratorVersion) || len(manifest.GeneratorVersion) > 128) {
+		return fmt.Errorf("%w: malformed generator version", ErrInvalidManifest)
+	}
 	if len(manifest.Sources) == 0 {
 		return fmt.Errorf("%w: sources must not be empty", ErrInvalidManifest)
 	}
@@ -208,7 +214,7 @@ func lessTestCase(left, right TestCase) bool {
 func validManifestPath(value string) bool {
 	return validText(value) && value != "." && !strings.HasPrefix(value, "/") &&
 		!strings.Contains(value, "\\") && path.Clean(value) == value &&
-		value != ".." && !strings.HasPrefix(value, "../")
+		!hasPortableVolume(value) && value != ".." && !strings.HasPrefix(value, "../")
 }
 
 func validIdentifier(value string) bool {

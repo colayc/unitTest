@@ -1,0 +1,36 @@
+{
+  "version": "utide.unity.manifest.v1",
+  "generatorVersion": "1.0.0",
+  "sha256": "8fc8771747f61531a21ec26fc7138506849ba4a7b4396557e39285ac832dfb81",
+  "sources": [
+    "testdata/basic.c"
+  ],
+  "setUp": {
+    "path": "testdata/basic.c",
+    "line": 3
+  },
+  "tearDown": {
+    "path": "testdata/basic.c",
+    "line": 7
+  },
+  "cases": [
+    {
+      "name": "test_adds_numbers",
+      "identity": "test_adds_numbers",
+      "parameters": "void",
+      "location": {
+        "path": "testdata/basic.c",
+        "line": 16
+      }
+    },
+    {
+      "name": "test_handles_zero",
+      "identity": "test_handles_zero",
+      "parameters": "void",
+      "location": {
+        "path": "testdata/basic.c",
+        "line": 21
+      }
+    }
+  ]
+}
