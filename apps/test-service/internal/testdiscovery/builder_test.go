@@ -313,8 +313,11 @@ func (*discoveryAdapter) NewParser(
 
 type discoveryParser struct{}
 
-func (*discoveryParser) Write(testframework.Stream, []byte) error {
-	return nil
+func (*discoveryParser) Feed(
+	testframework.Stream,
+	[]byte,
+) ([]testframework.ResultEvent, error) {
+	return nil, nil
 }
 
 func (*discoveryParser) Finish(

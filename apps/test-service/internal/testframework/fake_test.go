@@ -57,8 +57,8 @@ func (*fakeAdapter) NewParser(ParseInput) (ResultParser, error) {
 
 type fakeParser struct{}
 
-func (*fakeParser) Write(Stream, []byte) error {
-	return nil
+func (*fakeParser) Feed(Stream, []byte) ([]ResultEvent, error) {
+	return nil, nil
 }
 
 func (*fakeParser) Finish(ProcessResult) (ParseResult, error) {

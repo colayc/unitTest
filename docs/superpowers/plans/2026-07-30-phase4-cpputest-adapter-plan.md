@@ -152,16 +152,25 @@ git commit -m "feat: plan exact cpputest runs"
 - 创建：`apps/test-service/internal/testframework/cpputest/testdata/ignored.txt`
 - 创建：`apps/test-service/internal/testframework/cpputest/testdata/crash-partial.txt`
 - 创建：`apps/test-service/internal/testframework/cpputest/testdata/malformed-summary.txt`
+- 修改：`apps/test-service/internal/testframework/adapter.go`，补充流式事件、typed outcome、原始 source path 和互斥 termination
+- 修改：`apps/test-service/internal/testframework/fake_test.go`
+- 修改：`apps/test-service/internal/testdiscovery/builder_test.go`
 
 **接口：**
 
 ```go
 type Parser struct
-func (p *Parser) Feed(stream string, data []byte) []testframework.ResultEvent
-func (p *Parser) Close(termination processcontrol.Termination) testframework.ParseResult
+func (p *Parser) Feed(stream testframework.Stream, data []byte) ([]testframework.ResultEvent, error)
+func (p *Parser) Finish(result testframework.ProcessResult) (testframework.ParseResult, error)
 ```
 
-- [ ] **Step 1：写出 pass/fail/skip/partial 失败测试**
+> 实施修正：现有共享合同没有 `processcontrol.Termination`，且 `Write` 无法把完整
+> record 的 terminal event 及时交给 Coordinator。本 Task 将共享合同收敛为
+> `Feed/Finish`，使用互斥的 `ProcessTermination` 表示 exited/timeout/crash/cancel，
+> 并在 Adapter 边界保留未信任的 source path；路径归一化、trusted root 校验和
+> `file://` URI 构造由后续 Coordinator 完成。
+
+- [x] **Step 1：写出 pass/fail/skip/partial 失败测试**
 
 覆盖：
 
@@ -180,7 +189,7 @@ func (p *Parser) Close(termination processcontrol.Termination) testframework.Par
 - stdout/stderr interleave；
 - ANSI、CRLF、chunk 和 UTF-8。
 
-- [ ] **Step 2：运行 parser tests 并确认失败**
+- [x] **Step 2：运行 parser tests 并确认失败**
 
 ```powershell
 go test ./apps/test-service/internal/testframework/cpputest -run 'Parser|Result|Summary' -count=1
@@ -188,11 +197,11 @@ go test ./apps/test-service/internal/testframework/cpputest -run 'Parser|Result|
 
 预期：FAIL。
 
-- [ ] **Step 3：实现 evidence-based parser**
+- [x] **Step 3：实现 evidence-based parser**
 
 只在完整 record 后发出 terminal item event。Summary mismatch 产生 `framework_output_invalid`；已完整结果保留 `partial=true`，其余 `not_run`。
 
-- [ ] **Step 4：运行 unit/race**
+- [x] **Step 4：运行 unit/race**
 
 ```powershell
 go test ./apps/test-service/internal/testframework/cpputest -count=1
@@ -201,7 +210,7 @@ go test -race ./apps/test-service/internal/testframework/cpputest -count=1
 
 预期：PASS。
 
-- [ ] **Step 5：提交 CppUTest result parser**
+- [x] **Step 5：提交 CppUTest result parser**
 
 ```powershell
 git add apps/test-service/internal/testframework/cpputest
@@ -311,9 +320,9 @@ git commit -m "feat: integrate cpputest adapter"
 
 - [x] `-ln` valid/malformed/chunk tests
 - [x] exact group/case argv tests
-- [ ] pass/fail/skip/crash/timeout evidence tests
+- [x] pass/fail/skip/crash/timeout evidence tests
 - [ ] CppUMock subtype/detail/source tests
-- [ ] partial result 不伪造 pass
+- [x] partial result 不伪造 pass
 - [ ] unknown executable 不探测
 - [ ] Go unit/race tests
 - [ ] `pnpm verify`

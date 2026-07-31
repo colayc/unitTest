@@ -1,0 +1,4 @@
+TEST(Core, passes) - 2 ms
+TEST(Unicode_组, 案例_一) - 3 ms
+
+OK (2 tests, 2 ran, 2 checks, 0 ignored, 0 filtered out, 5 ms)

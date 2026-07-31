@@ -84,15 +84,48 @@ type ParseInput struct {
 }
 
 type ProcessResult struct {
-	ExitCode int
-	TimedOut bool
+	ExitCode    int
+	Termination ProcessTermination
+}
+
+type ProcessTermination string
+
+const (
+	ProcessExited    ProcessTermination = "exited"
+	ProcessTimedOut  ProcessTermination = "timed_out"
+	ProcessCrashed   ProcessTermination = "crashed"
+	ProcessCancelled ProcessTermination = "cancelled"
+)
+
+type CaseStatus string
+
+const (
+	CasePassed  CaseStatus = "passed"
+	CaseFailed  CaseStatus = "failed"
+	CaseSkipped CaseStatus = "skipped"
+	CaseNotRun  CaseStatus = "not_run"
+)
+
+type ParsedSourceLocation struct {
+	Path   string
+	Line   int
+	Column int
 }
 
 type ParsedCaseResult struct {
-	LogicalName string
-	Status      string
-	DurationMS  int64
-	Message     string
+	ItemID            testdomain.ID
+	ParentLogicalName string
+	LogicalName       string
+	Status            CaseStatus
+	DurationMS        int64
+	Category          string
+	Message           string
+	SourceLocation    *ParsedSourceLocation
+	Partial           bool
+}
+
+type ResultEvent struct {
+	Case ParsedCaseResult
 }
 
 type ParseResult struct {
@@ -102,6 +135,6 @@ type ParseResult struct {
 }
 
 type ResultParser interface {
-	Write(Stream, []byte) error
+	Feed(Stream, []byte) ([]ResultEvent, error)
 	Finish(ProcessResult) (ParseResult, error)
 }

@@ -13,6 +13,8 @@ var (
 	ErrInvalidRunPlan         = errors.New("invalid CppUTest run plan")
 	ErrIncompatibleDescriptor = errors.New("incompatible CTest execution descriptor")
 	ErrReservedArguments      = errors.New("reserved CppUTest argument conflict")
+	ErrInvalidResult          = errors.New("invalid CppUTest result")
+	ErrResultLimitExceeded    = errors.New("CppUTest result limit exceeded")
 )
 
 const ContractVersion = "cpputest.v1"
