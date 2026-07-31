@@ -39,7 +39,7 @@
 func ParseSources(root string, sources []string, limits Limits) (Manifest, error)
 ```
 
-- [ ] **Step 1：写出 declared-source grammar 失败测试**
+- [x] **Step 1：写出 declared-source grammar 失败测试**
 
 覆盖：
 
@@ -54,7 +54,7 @@ func ParseSources(root string, sources []string, limits Limits) (Manifest, error
 - 超大 source、超长 case、过多 parameter instance；
 - input order 不影响 manifest order/hash。
 
-- [ ] **Step 2：运行 parser tests 并确认失败**
+- [x] **Step 2：运行 parser tests 并确认失败**
 
 ```powershell
 go test ./apps/test-service/internal/unityrunner -run 'ParseSources|Manifest' -count=1
@@ -62,11 +62,11 @@ go test ./apps/test-service/internal/unityrunner -run 'ParseSources|Manifest' -c
 
 预期：FAIL。
 
-- [ ] **Step 3：实现受控 lexer/parser**
+- [x] **Step 3：实现受控 lexer/parser**
 
 不使用简单 `test_*` regex 扫描完整文件。Parser 只支持设计明确列出的 Unity grammar；不支持形式返回 source diagnostic，不猜测。
 
-- [ ] **Step 4：运行 unit/fuzz seed**
+- [x] **Step 4：运行 unit/fuzz seed**
 
 ```powershell
 go test ./apps/test-service/internal/unityrunner -count=1
@@ -74,7 +74,7 @@ go test ./apps/test-service/internal/unityrunner -count=1
 
 预期：PASS。
 
-- [ ] **Step 5：提交 Unity manifest parser**
+- [x] **Step 5：提交 Unity manifest parser**
 
 ```powershell
 git add apps/test-service/internal/unityrunner
