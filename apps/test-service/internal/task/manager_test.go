@@ -2192,6 +2192,10 @@ func (s *fakeStore) Apply(_ context.Context, mutation task.Mutation) (task.Task,
 		delete(s.leases, mutation.Task.ID)
 	}
 	s.artifacts = append(s.artifacts, mutation.Artifacts...)
+	if mutation.FinishRun != nil {
+		s.testRuns[mutation.FinishRun.RunID] =
+			mutation.FinishRun.Clone()
+	}
 	s.mutations = append(s.mutations, mutation)
 	return mutation.Task, events, nil
 }
@@ -2702,6 +2706,24 @@ func (s *fakeArtifactSink) CommitJSON(
 	return nil
 }
 
+func (s *fakeArtifactSink) CommitJSONLines(
+	_ context.Context,
+	artifactID string,
+	kind string,
+	values []json.RawMessage,
+) error {
+	copied := make([]json.RawMessage, len(values))
+	for index, value := range values {
+		copied[index] = append(json.RawMessage(nil), value...)
+	}
+	return s.CommitJSON(
+		context.Background(),
+		artifactID,
+		kind,
+		copied,
+	)
+}
+
 func (s *fakeArtifactSink) Finalize(
 	_ context.Context,
 	at time.Time,
@@ -2725,7 +2747,8 @@ func (s *fakeArtifactSink) Finalize(
 		mimeType := "application/json"
 		if value.kind == "stdout" || value.kind == "stderr" {
 			mimeType = "application/octet-stream"
-		} else if value.kind == "diagnostics" {
+		} else if value.kind == "diagnostics" ||
+			value.kind == "test-results" {
 			mimeType = "application/x-ndjson"
 		}
 		result[index] = task.Artifact{

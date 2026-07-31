@@ -42,6 +42,7 @@
 ```go
 type TestRunRepository interface {
 	CreateRun(context.Context, testdomain.TestRun) error
+	StartRun(context.Context, string, time.Time) error
 	AppendResult(context.Context, string, testdomain.TestItemResult) error
 	FinishRun(context.Context, testdomain.TestRun, []task.Artifact) error
 	GetRun(context.Context, string) (testdomain.TestRun, error)
@@ -343,6 +344,8 @@ git commit -m "feat: orchestrate test discovery and runs"
 
 ### Task 5：test events、artifacts 与 terminal ordering
 
+> 实施说明：Task 5 已将 TestRun completion 合并到 Task Engine 的 `Store.Apply` 事务。`TestItemResult` 先由 result repository 持久化，随后 Task Manager 才把 runtime-only interpreter 产生的领域事件写入单一 Task journal 并发布；终态时 `test-selection`、`test-results`、`test-run-summary`、diagnostics 与 stdout/stderr metadata、TestRun summary、Task snapshot 和 `test.run.finished` 在同一 SQLite transaction 中提交。TestRun 在首个执行 wave 前先持久化为 `running`；Catalog 只按有界的 container 集合生成 `test.container.discovered`，不按 10,000 个静态 item 展开 journal。Artifact kind 继续作为稳定逻辑名称，物理文件名由 ArtifactStore 使用不可预测 ID 生成。
+
 **文件：**
 
 - 创建：`apps/test-service/internal/testrun/events.go`
@@ -366,7 +369,7 @@ diagnostics.jsonl
 stdout/stderr step logs
 ```
 
-- [ ] **Step 1：写出事件顺序和 artifact failure 失败测试**
+- [x] **Step 1：写出事件顺序和 artifact failure 失败测试**
 
 覆盖：
 
@@ -380,7 +383,7 @@ stdout/stderr step logs
 - 10,000 item 使用 batch/page，不产生 10,000 catalog journal events；
 - artifact 中不含 token/env/native secret。
 
-- [ ] **Step 2：运行 event/artifact tests 并确认失败**
+- [x] **Step 2：运行 event/artifact tests 并确认失败**
 
 ```powershell
 go test ./apps/test-service/internal/testrun ./apps/test-service/internal/task ./apps/test-service/internal/taskstore ./apps/test-service/internal/artifactstore -run 'Event|Artifact|Terminal|Late' -count=1
@@ -388,11 +391,11 @@ go test ./apps/test-service/internal/testrun ./apps/test-service/internal/task .
 
 预期：FAIL。
 
-- [ ] **Step 3：实现 durable-before-publish boundary**
+- [x] **Step 3：实现 durable-before-publish boundary**
 
 复用 Phase 2 publisher ownership 和 close-before-terminalization 规则。TestRun completion 不另建并行 journal。
 
-- [ ] **Step 4：运行全套与 race**
+- [x] **Step 4：运行全套与 race**
 
 ```powershell
 go test ./apps/test-service/internal/testrun ./apps/test-service/internal/task ./apps/test-service/internal/taskstore ./apps/test-service/internal/artifactstore -count=1
@@ -401,7 +404,7 @@ go test -race ./apps/test-service/internal/testrun ./apps/test-service/internal/
 
 预期：PASS。
 
-- [ ] **Step 5：提交 test events/artifacts**
+- [x] **Step 5：提交 test events/artifacts**
 
 ```powershell
 git add apps/test-service/internal/testrun apps/test-service/internal/task apps/test-service/internal/taskstore apps/test-service/internal/artifactstore
@@ -486,9 +489,9 @@ git commit -m "feat: expose protocol v1.3 test execution"
 
 - [x] TestRun/result migration 与 terminal transaction
 - [x] selection/filter/repeat/failedFromRun
-- [ ] result-aware Task completion
-- [ ] discovery/run Service-owned continuation
-- [ ] test events/artifacts durable ordering
+- [x] result-aware Task completion
+- [x] discovery/run Service-owned continuation
+- [x] test events/artifacts durable ordering
 - [ ] v1.3 Session/Runtime/Client E2E
 - [ ] v1.0–v1.2 compatibility projection
 - [ ] cancel/timeout/reconnect/restart recovery

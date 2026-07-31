@@ -358,9 +358,14 @@ func cloneTestRun(value TestRun) TestRun {
 		finished := *value.FinishedAt
 		result.FinishedAt = &finished
 	}
-	result.Results = make([]TestItemResult, len(value.Results))
-	for index, item := range value.Results {
-		result.Results[index] = cloneTestItemResult(item)
+	if value.Results != nil {
+		result.Results = make(
+			[]TestItemResult,
+			len(value.Results),
+		)
+		for index, item := range value.Results {
+			result.Results[index] = cloneTestItemResult(item)
+		}
 	}
 	return result
 }

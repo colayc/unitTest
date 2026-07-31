@@ -878,6 +878,10 @@ func (m *Manager) acceptOutput(current *activeTask, output ProcessOutput, active
 				m.failResultObservation(current, err)
 				return
 			}
+			if err := m.persistDomainEvents(current, active); err != nil {
+				m.failResultObservation(current, err)
+				return
+			}
 		}
 	}
 	if len(output.Data) != 0 && !current.truncated {
@@ -899,6 +903,45 @@ func (m *Manager) acceptOutput(current *activeTask, output ProcessOutput, active
 		return
 	}
 	m.persistDiagnostics(current, values, active)
+}
+
+func (m *Manager) persistDomainEvents(
+	current *activeTask,
+	active map[string]*activeTask,
+) error {
+	source, ok := current.resultInterpreter.(DomainEventSource)
+	if !ok {
+		return nil
+	}
+	for _, pending := range source.DrainDomainEvents() {
+		if pending.Type == "" || !json.Valid(pending.Payload) {
+			m.tripStorage(active)
+			return ErrStorageUnavailable
+		}
+		event, err := m.store.AppendEvent(
+			context.Background(),
+			current.task.ID,
+			EventDraft{
+				TaskID: current.task.ID,
+				Type:   pending.Type,
+				At:     m.clock.Now(),
+				Payload: append(
+					json.RawMessage(nil),
+					pending.Payload...,
+				),
+			},
+		)
+		if err != nil {
+			m.tripStorage(active)
+			return ErrStorageUnavailable
+		}
+		current.task.LastSequence = event.Sequence
+		if !m.publish(event) {
+			m.tripPublisher(active)
+			return ErrStorageUnavailable
+		}
+	}
+	return nil
 }
 
 func (m *Manager) failResultObservation(

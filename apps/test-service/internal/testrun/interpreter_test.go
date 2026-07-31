@@ -117,6 +117,54 @@ func TestInterpreterTurnsMalformedFrameworkOutputIntoDomainError(
 	}
 }
 
+func TestInterpreterDoesNotPersistServiceTokenMarkerFromFrameworkOutput(
+	t *testing.T,
+) {
+	containerID, itemID := interpreterIDs(t)
+	parser := &recordingResultParser{
+		finish: testframework.ParseResult{
+			Cases: []testframework.ParsedCaseResult{{
+				ItemID: itemID, ParentLogicalName: "Group",
+				LogicalName: "Case",
+				Status:      testframework.CaseFailed,
+				FailureDetails: []testframework.ParsedFailureDetail{{
+					Category: "assertion_failure",
+					Message: "UNIT_TEST_SERVICE_TOKEN " +
+						"must stay private",
+				}},
+			}},
+			Complete: true,
+		},
+	}
+	store := newResultAppender()
+	interpreter := newTestInterpreter(
+		t,
+		store,
+		containerID,
+		itemID,
+		parser,
+		nil,
+	)
+	current, step := interpreterTaskAndStep(interpreter)
+	if verdict, err := interpreter.Interpret(
+		context.Background(),
+		current,
+		step,
+		task.ProcessResult{ExitCode: 1},
+	); err != nil || verdict != task.StepVerdictSucceeded {
+		t.Fatalf("Interpret() = %q, %v", verdict, err)
+	}
+	results := store.results()
+	if len(results) != 1 ||
+		results[0].Outcome != testdomain.ItemErrored ||
+		strings.Contains(
+			results[0].FailureDetails[0].Message,
+			"UNIT_TEST_SERVICE_TOKEN",
+		) {
+		t.Fatalf("sanitized results = %#v", results)
+	}
+}
+
 func TestInterpreterReadsServiceOwnedControlFileBeforeFinish(
 	t *testing.T,
 ) {

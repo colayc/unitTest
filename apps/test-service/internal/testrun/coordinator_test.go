@@ -87,6 +87,29 @@ func TestCoordinatorContinuesBuildIntoPinnedFrameworkRunSteps(
 	if err != nil || verdict != task.StepVerdictSucceeded {
 		t.Fatalf("discovery verdict = %q, %v", verdict, err)
 	}
+	eventSource := internal.ResultInterpreter.(task.DomainEventSource)
+	discoveryEvents := eventSource.DrainDomainEvents()
+	if len(discoveryEvents) != 1 ||
+		discoveryEvents[0].Type !=
+			task.EventTestDiscoveryStarted {
+		t.Fatalf("discovery events = %#v", discoveryEvents)
+	}
+	var discoveryStarted struct {
+		ProjectID string `json:"projectId"`
+		ProfileID string `json:"profileId"`
+	}
+	decodeDomainPayload(
+		t,
+		discoveryEvents[0],
+		&discoveryStarted,
+	)
+	if discoveryStarted.ProjectID != fixture.catalog.ProjectID ||
+		discoveryStarted.ProfileID != fixture.catalog.ProfileID {
+		t.Fatalf(
+			"discovery started payload = %#v",
+			discoveryStarted,
+		)
+	}
 	continued, err = internal.Continuation.AfterStep(
 		context.Background(),
 		current,
@@ -107,6 +130,13 @@ func TestCoordinatorContinuesBuildIntoPinnedFrameworkRunSteps(
 			continued,
 			fixture.prepared.allowCalls,
 		)
+	}
+	catalogEvents := eventSource.DrainDomainEvents()
+	if len(catalogEvents) !=
+		len(fixture.catalog.Containers)+1 ||
+		catalogEvents[len(catalogEvents)-1].Type !=
+			task.EventTestCatalogPublished {
+		t.Fatalf("catalog events = %#v", catalogEvents)
 	}
 }
 
@@ -626,6 +656,28 @@ func (*coordinatorRunStore) CreateRun(
 	testdomain.TestRun,
 ) error {
 	panic("Task starter owns atomic creation")
+}
+
+func (store *coordinatorRunStore) StartRun(
+	_ context.Context,
+	runID string,
+	startedAt time.Time,
+) error {
+	if store.run.RunID != runID {
+		return task.ErrNotFound
+	}
+	if store.run.Status == testdomain.RunRunning &&
+		store.run.StartedAt != nil &&
+		store.run.StartedAt.Equal(startedAt) {
+		return nil
+	}
+	if store.run.Status != testdomain.RunQueued ||
+		startedAt.Before(store.run.CreatedAt) {
+		return task.ErrConflict
+	}
+	store.run.Status = testdomain.RunRunning
+	store.run.StartedAt = &startedAt
+	return nil
 }
 
 func (*coordinatorRunStore) AppendResult(

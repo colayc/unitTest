@@ -260,6 +260,40 @@ func (s *Store) Apply(ctx context.Context, mutation task.Mutation) (task.Task, [
 			return task.Task{}, nil, task.ErrInvalidArgument
 		}
 	}
+	if mutation.FinishRun != nil {
+		run, err := testdomain.NewTestRun(mutation.FinishRun.Clone())
+		if err != nil {
+			return task.Task{}, nil, fmt.Errorf(
+				"validate terminal TestRun: %w",
+				task.ErrInvalidArgument,
+			)
+		}
+		if run.Status != testdomain.RunCompleted ||
+			mutation.Task.Kind != task.KindTestRun ||
+			mutation.Task.Status != task.StatusFinished ||
+			run.TaskID != mutation.Task.ID {
+			return task.Task{}, nil, fmt.Errorf(
+				"match terminal TestRun to Task: %w",
+				task.ErrInvalidArgument,
+			)
+		}
+		if err := validateRunArtifacts(run.TaskID, mutation.Artifacts); err != nil {
+			return task.Task{}, nil, err
+		}
+		hasRunFinished := false
+		for _, event := range mutation.Events {
+			if event.Type == task.EventTestRunFinished {
+				hasRunFinished = true
+				break
+			}
+		}
+		if !hasRunFinished {
+			return task.Task{}, nil, fmt.Errorf(
+				"terminal TestRun event is missing: %w",
+				task.ErrInvalidArgument,
+			)
+		}
+	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -298,7 +332,10 @@ func (s *Store) Apply(ctx context.Context, mutation task.Mutation) (task.Task, [
 	}
 	events, err := insertEvents(ctx, tx, mutation.Events, s.newID)
 	if err != nil {
-		return task.Task{}, nil, err
+		return task.Task{}, nil, fmt.Errorf(
+			"insert Task mutation events: %w",
+			err,
+		)
 	}
 	if mutation.PutLease != nil {
 		if err := upsertLease(ctx, tx, *mutation.PutLease); err != nil {
@@ -312,7 +349,24 @@ func (s *Store) Apply(ctx context.Context, mutation task.Mutation) (task.Task, [
 	}
 	for _, artifact := range mutation.Artifacts {
 		if err := insertArtifact(ctx, tx, artifact); err != nil {
-			return task.Task{}, nil, err
+			return task.Task{}, nil, fmt.Errorf(
+				"insert Task mutation artifact: %w",
+				err,
+			)
+		}
+	}
+	if mutation.FinishRun != nil {
+		if err := finishRunTx(
+			ctx,
+			tx,
+			mutation.FinishRun.Clone(),
+			mutation.Artifacts,
+			false,
+		); err != nil {
+			return task.Task{}, nil, fmt.Errorf(
+				"finish TestRun in Task mutation: %w",
+				err,
+			)
 		}
 	}
 	var last int64

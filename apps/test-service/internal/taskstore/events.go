@@ -31,7 +31,10 @@ func insertEvents(ctx context.Context, tx *sql.Tx, drafts []task.EventDraft, new
 }
 
 func validEventDraft(value task.EventDraft) bool {
-	return value.TaskID != "" && value.Type != "" && !value.At.IsZero() && json.Valid(value.Payload)
+	return value.TaskID != "" &&
+		task.ValidEventType(value.Type) &&
+		!value.At.IsZero() &&
+		json.Valid(value.Payload)
 }
 
 func (s *Store) AppendEvent(ctx context.Context, taskID string, draft task.EventDraft) (task.Event, error) {

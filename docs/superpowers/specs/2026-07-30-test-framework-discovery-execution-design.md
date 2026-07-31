@@ -886,6 +886,21 @@ Catalog item 通过分页响应或有界 batch event 发布，不为 10,000 个�
 
 终态后到达的 stdout/stderr 按 Phase 2 bounded checkpoint 规则处理，不能修改已发布的 TestRun outcome。
 
+实现中由 Task Manager 独占 journal ownership：
+
+1. runtime-only `ResultInterpreter` 可以产生有界的 domain event draft，但不能直接发布；
+2. `TestItemResult` append 成功后，Task Manager 才调用 `Store.AppendEvent`；
+3. `Store.AppendEvent` 提交后，Publisher 才能看到 item/container/output event；
+4. completion hook 在 ArtifactSink 封口前生成 `test-selection.json`、`test-results.jsonl` 与 `test-run-summary.json`；
+5. `Store.Apply` 在一个 SQLite transaction 内提交 Task terminal snapshot、step snapshot、artifact metadata、TestRun terminal summary、artifact link 和 `test.run.finished`；
+6. transaction commit 成功后，Task Manager 按全局 `sequence` 发布已提交事件。
+
+因此不存在独立的 TestRun journal，也不存在“Task 已完成但 TestRun 仍为 queued”或“`test.run.finished` 已发布但 Artifact metadata 尚未提交”的可见中间状态。若 Publisher 在 commit 后失败，durable state 仍可通过 cursor replay 恢复；若 Store 或 ArtifactSink 在 commit 前失败，则不发布 terminal event。
+
+`test.run.started` 也遵循相同方向：TestRun 先由 `queued` 持久化为 `running`，随后 started event 才进入 Task journal。Catalog discovery 只为有界 container 集合生成 event；完整 item tree 继续由 Catalog Artifact 和分页 API 承载，10,000 个静态 item 不会被展开为 10,000 条 journal event。
+
+`test.catalog.published` 是 discovery 的 terminal event；它只会在完整 Catalog Artifact 与 catalog metadata 已经持久化后产生，不再定义第二个语义重复的 `test.discovery.finished`。
+
 ### 18.3 SQLite
 
 在现有 Repository 层新增：
@@ -898,6 +913,17 @@ Catalog item 通过分页响应或有界 batch event 发布，不为 10,000 个�
 - result-to-artifact reference。
 
 大体积日志和完整 Catalog JSON 保存在 ArtifactStore；SQLite 保存索引、summary 和可查询字段。
+
+TestRun 终态 Artifact logical kind 为：
+
+- `test-selection`：canonical selection snapshot，JSON；
+- `test-results`：按稳定 `(itemId, iteration)` 顺序输出的 JSON Lines；
+- `test-run-summary`：run outcome、summary、revision、incomplete 与 lifecycle time，JSON；
+- `diagnostics`：有界 JSON Lines；
+- `stdout` / `stderr`：有界原始日志；
+- `execution-plan` 与 `task-summary`：Task Engine 公共 Artifact。
+
+ArtifactStore 不接受 environment、完整 process specification 或 service token marker。`execution-plan` 只保存已经过边界校验的 public command summary，不保存 runtime `Env`、`EnvUnset`、working directory、control file 或原生 `ProcessSpec`。
 
 ### 18.4 重连
 

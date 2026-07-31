@@ -2,6 +2,7 @@ package task
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -1190,6 +1191,20 @@ func (s *causeArtifactSink) CommitJSON(
 		s.committed()
 	}
 	return nil
+}
+
+func (s *causeArtifactSink) CommitJSONLines(
+	_ context.Context,
+	artifactID string,
+	kind string,
+	_ []json.RawMessage,
+) error {
+	return s.CommitJSON(
+		context.Background(),
+		artifactID,
+		kind,
+		nil,
+	)
 }
 
 func (s *causeArtifactSink) Finalize(

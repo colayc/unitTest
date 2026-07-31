@@ -2,6 +2,7 @@ package testrun
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -23,19 +24,25 @@ type ResultAppender interface {
 }
 
 type invocationInterpreter struct {
-	invocation PlannedInvocation
-	parser     testframework.ResultParser
-	persisted  map[testdomain.ID]testdomain.TestItemResult
-	parseErr   error
-	completed  bool
-	verdict    task.StepVerdict
+	invocation    PlannedInvocation
+	parser        testframework.ResultParser
+	persisted     map[testdomain.ID]testdomain.TestItemResult
+	finishedItems map[testdomain.ID]struct{}
+	parseErr      error
+	started       bool
+	finished      bool
+	completed     bool
+	verdict       task.StepVerdict
 }
 
 type Interpreter struct {
-	mu          sync.Mutex
-	runID       string
-	results     ResultAppender
-	invocations map[string]*invocationInterpreter
+	mu               sync.Mutex
+	runID            string
+	results          ResultAppender
+	invocations      map[string]*invocationInterpreter
+	events           []task.DomainEvent
+	eventOutputBytes int
+	outputTruncated  bool
 }
 
 func NewInterpreter(
@@ -135,10 +142,20 @@ func (interpreter *Interpreter) ObserveOutput(
 	if state.completed || state.parser == nil || state.parseErr != nil {
 		return nil
 	}
+	if err := interpreter.ensureInvocationStarted(state); err != nil {
+		return err
+	}
 	stream, ok := frameworkStream(output.Stream)
 	if !ok {
 		state.parseErr = errors.New("unsupported framework output stream")
 		return nil
+	}
+	if err := interpreter.recordOutputEvent(
+		state,
+		stream,
+		output.Data,
+	); err != nil {
+		return err
 	}
 	events, err := state.parser.Feed(
 		stream,
@@ -176,6 +193,9 @@ func (interpreter *Interpreter) Interpret(
 	if state.completed {
 		return state.verdict, nil
 	}
+	if err := interpreter.ensureInvocationStarted(state); err != nil {
+		return task.StepVerdictDefault, err
+	}
 	if state.parser == nil {
 		if err := interpreter.persistOpaque(
 			ctx,
@@ -186,6 +206,9 @@ func (interpreter *Interpreter) Interpret(
 		}
 		state.completed = true
 		state.verdict = task.StepVerdictSucceeded
+		if err := interpreter.recordContainerFinished(state); err != nil {
+			return task.StepVerdictDefault, err
+		}
 		return state.verdict, nil
 	}
 
@@ -225,6 +248,9 @@ func (interpreter *Interpreter) Interpret(
 		}
 		state.completed = true
 		state.verdict = task.StepVerdictSucceeded
+		if err := interpreter.recordContainerFinished(state); err != nil {
+			return task.StepVerdictDefault, err
+		}
 		return state.verdict, nil
 	}
 
@@ -241,6 +267,9 @@ func (interpreter *Interpreter) Interpret(
 		}
 		state.completed = true
 		state.verdict = task.StepVerdictSucceeded
+		if err := interpreter.recordContainerFinished(state); err != nil {
+			return task.StepVerdictDefault, err
+		}
 		return state.verdict, nil
 	}
 	timeoutAssigned := false
@@ -282,6 +311,9 @@ func (interpreter *Interpreter) Interpret(
 	}
 	state.completed = true
 	state.verdict = task.StepVerdictSucceeded
+	if err := interpreter.recordContainerFinished(state); err != nil {
+		return task.StepVerdictDefault, err
+	}
 	return state.verdict, nil
 }
 
@@ -327,6 +359,10 @@ func (interpreter *Interpreter) persistResult(
 	state *invocationInterpreter,
 	result testdomain.TestItemResult,
 ) error {
+	existing, exists := state.persisted[result.ItemID]
+	if exists && reflect.DeepEqual(existing, result) {
+		return nil
+	}
 	if err := interpreter.results.AppendResult(
 		ctx,
 		interpreter.runID,
@@ -335,6 +371,9 @@ func (interpreter *Interpreter) persistResult(
 		return err
 	}
 	state.persisted[result.ItemID] = result
+	if !result.Partial {
+		return interpreter.recordItemFinished(state, result)
+	}
 	return nil
 }
 
@@ -476,7 +515,27 @@ func parsedDomainResult(
 	if err != nil {
 		return testdomain.TestItemResult{}, task.ErrInvalidArgument
 	}
+	if testResultContainsSensitiveMarker(validated) {
+		return testdomain.TestItemResult{}, task.ErrInvalidArgument
+	}
 	return validated, nil
+}
+
+func testResultContainsSensitiveMarker(
+	value testdomain.TestItemResult,
+) bool {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return true
+	}
+	upper := strings.ToUpper(string(encoded))
+	return strings.Contains(
+		upper,
+		"UNIT_TEST_SERVICE_TOKEN",
+	) || strings.Contains(
+		upper,
+		"UNIT_TEST_IDE_TOKEN",
+	)
 }
 
 func expectedCase(

@@ -2,6 +2,7 @@ package task
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -32,6 +33,7 @@ type Mutation struct {
 	PutLease    *ProcessLease
 	DeleteLease bool
 	Artifacts   []Artifact
+	FinishRun   *testdomain.TestRun
 }
 
 type StepMutation struct {
@@ -75,6 +77,7 @@ type TestCatalogRepository interface {
 
 type TestRunRepository interface {
 	CreateRun(context.Context, testdomain.TestRun) error
+	StartRun(context.Context, string, time.Time) error
 	AppendResult(context.Context, string, testdomain.TestItemResult) error
 	FinishRun(context.Context, testdomain.TestRun, []Artifact) error
 	GetRun(context.Context, string) (testdomain.TestRun, error)
@@ -122,6 +125,37 @@ type ResultOutputObserver interface {
 		ExecutionStep,
 		ProcessOutput,
 	) error
+}
+
+// DomainEventSource exposes bounded domain events that were produced by a
+// runtime-only interpreter. The Manager remains the only owner of the durable
+// Task journal and publishes each event only after Store.AppendEvent commits.
+type DomainEventSource interface {
+	DrainDomainEvents() []DomainEvent
+}
+
+type DomainEvent struct {
+	Type    EventType
+	Payload json.RawMessage
+}
+
+// CompletionPreparer projects domain state and writes domain artifacts before
+// the Task terminal mutation. Store.Apply then commits the returned TestRun,
+// artifact metadata, Task snapshot, and terminal events in one transaction.
+type CompletionPreparer interface {
+	PrepareCompletion(
+		context.Context,
+		Task,
+		time.Time,
+		Outcome,
+		ArtifactSink,
+		IDGenerator,
+	) (DomainCompletion, error)
+}
+
+type DomainCompletion struct {
+	TestRun *testdomain.TestRun
+	Events  []DomainEvent
 }
 
 type ProcessSpec struct {
@@ -178,6 +212,7 @@ type ArtifactSink interface {
 	AppendOutput(context.Context, string, string, []byte) error
 	AppendDiagnostic(context.Context, diagnostic.Diagnostic) error
 	CommitJSON(context.Context, string, string, any) error
+	CommitJSONLines(context.Context, string, string, []json.RawMessage) error
 	Finalize(context.Context, time.Time) ([]Artifact, error)
 	Abort(context.Context) error
 }

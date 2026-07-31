@@ -356,6 +356,11 @@ type runExecution struct {
 	lastIssued        string
 	pinned            map[string]struct{}
 	refreshLastIssued string
+	expectedResults   int64
+	events            []task.DomainEvent
+	discoveryStarted  bool
+	catalogPublished  bool
+	runStarted        bool
 }
 
 func (execution *runExecution) AfterStep(
@@ -478,6 +483,14 @@ func (execution *runExecution) applyRefreshProgress(
 	); err != nil {
 		return task.Continuation{}, err
 	}
+	if err := execution.ensureDiscoveryStarted(); err != nil {
+		return task.Continuation{}, err
+	}
+	if err := execution.recordCatalogPublished(
+		progress.Snapshot.Catalog,
+	); err != nil {
+		return task.Continuation{}, err
+	}
 	return execution.nextContinuation(), nil
 }
 
@@ -549,6 +562,11 @@ func (execution *runExecution) initialize(
 	execution.invocationSteps = invocationSteps
 	execution.waveInvocations = waveInvocations
 	execution.interpreter = interpreter
+	for _, invocation := range planned.Invocations {
+		execution.expectedResults += int64(
+			len(invocation.ExpectedCases),
+		)
+	}
 	execution.initialized = true
 	return nil
 }
@@ -630,6 +648,13 @@ func (execution *runExecution) Interpret(
 		execution.mu.Lock()
 		refresh := execution.refresh
 		initialized := execution.initialized
+		if step.Kind == task.StepTestDiscovery &&
+			!initialized && refresh != nil {
+			if err := execution.ensureDiscoveryStarted(); err != nil {
+				execution.mu.Unlock()
+				return task.StepVerdictDefault, err
+			}
+		}
 		execution.mu.Unlock()
 		if step.Kind == task.StepTestDiscovery &&
 			!initialized && refresh != nil {
@@ -638,6 +663,10 @@ func (execution *runExecution) Interpret(
 		return task.StepVerdictDefault, nil
 	}
 	execution.mu.Lock()
+	if err := execution.ensureRunStarted(ctx, current); err != nil {
+		execution.mu.Unlock()
+		return task.StepVerdictDefault, err
+	}
 	interpreter := execution.interpreter
 	invocations := execution.waveInvocations[step.ID]
 	invocationSteps := execution.invocationSteps
@@ -699,6 +728,10 @@ func (execution *runExecution) ObserveOutput(
 		return nil
 	}
 	execution.mu.Lock()
+	if err := execution.ensureRunStarted(ctx, current); err != nil {
+		execution.mu.Unlock()
+		return err
+	}
 	interpreter := execution.interpreter
 	invocations := execution.waveInvocations[step.ID]
 	invocationStep := execution.invocationSteps[output.Source]

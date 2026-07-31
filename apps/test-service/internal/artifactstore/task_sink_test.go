@@ -13,6 +13,7 @@ import (
 
 	"unit-test-ide.local/test-service/internal/diagnostic"
 	"unit-test-ide.local/test-service/internal/task"
+	"unit-test-ide.local/test-service/internal/testdomain"
 )
 
 func TestArtifactSinkFinalizesDeterministicCMakeArtifactSet(t *testing.T) {
@@ -205,6 +206,54 @@ func TestArtifactSinkSupportsTestRunExecutionArtifacts(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
+	containerID := testdomain.ID(
+		"utid-v1-" + strings.Repeat("1", 64),
+	)
+	itemID := testdomain.ID(
+		"utid-v1-" + strings.Repeat("2", 64),
+	)
+	if err := sink.CommitJSON(
+		context.Background(),
+		id(12),
+		"test-selection",
+		testdomain.SelectionSnapshot{
+			Mode:    testdomain.SelectionItems,
+			ItemIDs: []testdomain.ID{itemID},
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	resultJSON, err := json.Marshal(testdomain.TestItemResult{
+		ItemID:         itemID,
+		ContainerID:    containerID,
+		Iteration:      1,
+		Outcome:        testdomain.ItemPassed,
+		FailureDetails: []testdomain.FailureDetail{},
+		OutputRefs:     []string{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.CommitJSONLines(
+		context.Background(),
+		id(13),
+		"test-results",
+		[]json.RawMessage{resultJSON},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.CommitJSON(
+		context.Background(),
+		id(14),
+		"test-run-summary",
+		map[string]any{
+			"runId":   id(15),
+			"taskId":  taskID,
+			"outcome": "passed",
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
 	artifacts, err := sink.Finalize(
 		context.Background(),
 		finishedAt,
@@ -224,9 +273,55 @@ func TestArtifactSinkSupportsTestRunExecutionArtifacts(t *testing.T) {
 			"stderr",
 			"stdout",
 			"task-summary",
+			"test-results",
+			"test-run-summary",
+			"test-selection",
 		},
 	) {
 		t.Fatalf("test task artifact kinds = %#v", kinds)
+	}
+}
+
+func TestArtifactSinkRejectsServiceTokenMarkerInTestResults(
+	t *testing.T,
+) {
+	store, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	sink, err := store.OpenTask(
+		context.Background(),
+		id(20),
+		task.KindTestRun,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(testdomain.TestItemResult{
+		ItemID:      testdomain.ID("utid-v1-" + strings.Repeat("1", 64)),
+		ContainerID: testdomain.ID("utid-v1-" + strings.Repeat("2", 64)),
+		Iteration:   1,
+		Outcome:     testdomain.ItemErrored,
+		FailureDetails: []testdomain.FailureDetail{{
+			Category:     "framework_output_invalid",
+			Message:      "UNIT_TEST_SERVICE_TOKEN must stay private",
+			Locations:    []testdomain.SourceLocation{},
+			EvidenceRefs: []string{},
+		}},
+		OutputRefs: []string{},
+		Partial:    true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.CommitJSONLines(
+		context.Background(),
+		id(21),
+		"test-results",
+		[]json.RawMessage{encoded},
+	); err != ErrInvalidArtifact {
+		t.Fatalf("CommitJSONLines() error = %v", err)
 	}
 }
 

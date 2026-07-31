@@ -57,6 +57,12 @@ func (m *Manager) commitClosedCompletion(
 			current,
 			pending,
 		)
+		if eventErr := m.persistDomainEvents(
+			current,
+			active,
+		); eventErr != nil {
+			return eventErr
+		}
 		if interpretationErr != nil {
 			pending.Result = ProcessResult{Err: interpretationErr}
 			pending.FailPending = false
@@ -83,6 +89,12 @@ func (m *Manager) commitClosedCompletion(
 				cloneRuntimeStep(current.plan.Steps[current.nextStep]),
 				StepResult{Process: pending.Result, Verdict: verdict},
 			)
+			if eventErr := m.persistDomainEvents(
+				current,
+				active,
+			); eventErr != nil {
+				return eventErr
+			}
 			if callbackErr == nil {
 				nextPlan, appendedSnapshots, callbackErr =
 					extendExecutionPlan(

@@ -123,6 +123,68 @@ func (s *Store) GetRun(
 	return validated, nil
 }
 
+func (s *Store) StartRun(
+	ctx context.Context,
+	runID string,
+	startedAt time.Time,
+) error {
+	if s == nil || ctx == nil ||
+		!lowerHex(runID, 32) ||
+		startedAt.IsZero() {
+		return task.ErrInvalidArgument
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return storageError("begin TestRun start", err)
+	}
+	defer tx.Rollback()
+	run, err := scanTestRun(tx.QueryRowContext(
+		ctx,
+		testRunSelect+` WHERE run_id=?`,
+		runID,
+	))
+	if isNoRows(err) {
+		return task.ErrNotFound
+	}
+	if err != nil {
+		return storageError("get TestRun for start", err)
+	}
+	switch run.Status {
+	case testdomain.RunQueued:
+		if startedAt.Before(run.CreatedAt) {
+			return task.ErrInvalidArgument
+		}
+	case testdomain.RunRunning:
+		if run.StartedAt != nil &&
+			run.StartedAt.Equal(startedAt) {
+			return nil
+		}
+		return task.ErrConflict
+	default:
+		return task.ErrConflict
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE test_runs SET
+		status='running', started_at=?
+		WHERE run_id=? AND status='queued'`,
+		formatTime(startedAt),
+		runID,
+	)
+	if err != nil {
+		return storageError("start TestRun", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return storageError("read TestRun start result", err)
+	}
+	if affected != 1 {
+		return task.ErrConflict
+	}
+	if err := tx.Commit(); err != nil {
+		return storageError("commit TestRun start", err)
+	}
+	return nil
+}
+
 func (s *Store) RebindQueuedRun(
 	ctx context.Context,
 	runID string,

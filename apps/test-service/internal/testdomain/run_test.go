@@ -153,6 +153,19 @@ func TestTestRunJSONUsesArraysForEmptySnapshotAndResultCollections(t *testing.T)
 	}
 }
 
+func TestTestRunClonePreservesUnloadedResults(t *testing.T) {
+	run := validRunInput()
+	run.ResultRevision = strings.Repeat("a", 64)
+	run.Results = nil
+	cloned := run.Clone()
+	if cloned.Results != nil {
+		t.Fatalf(
+			"Clone() changed unloaded Results to %#v",
+			cloned.Results,
+		)
+	}
+}
+
 func TestTestItemResultRequiresNotRunReasonAndUniqueArtifacts(t *testing.T) {
 	input := TestItemResult{
 		ItemID: runStableID("1"), ContainerID: runStableID("2"),

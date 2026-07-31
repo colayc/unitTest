@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"sort"
 
@@ -147,6 +148,22 @@ func (s *Store) FinishRun(
 		return storageError("begin TestRun finish", err)
 	}
 	defer tx.Rollback()
+	if err := finishRunTx(ctx, tx, run, artifacts, true); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return storageError("commit TestRun finish", err)
+	}
+	return nil
+}
+
+func finishRunTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	run testdomain.TestRun,
+	artifacts []task.Artifact,
+	insertArtifacts bool,
+) error {
 	persisted, err := scanTestRun(tx.QueryRowContext(
 		ctx,
 		testRunSelect+` WHERE run_id=?`,
@@ -186,15 +203,35 @@ func (s *Store) FinishRun(
 	}
 	summary, incomplete := summarizeResults(results, run.Summary.Iterations)
 	if !reflect.DeepEqual(summary, run.Summary) ||
-		incomplete != run.Incomplete {
-		return task.ErrInvalidArgument
+		incomplete && !run.Incomplete {
+		return fmt.Errorf(
+			"TestRun terminal summary mismatch: %w",
+			task.ErrInvalidArgument,
+		)
 	}
 	for _, artifact := range artifacts {
 		if artifact.TaskID != run.TaskID {
-			return task.ErrInvalidArgument
+			return fmt.Errorf(
+				"TestRun artifact owner mismatch: %w",
+				task.ErrInvalidArgument,
+			)
 		}
-		if err := insertArtifact(ctx, tx, artifact); err != nil {
-			return err
+		if insertArtifacts {
+			if err := insertArtifact(ctx, tx, artifact); err != nil {
+				return err
+			}
+		} else {
+			var owner string
+			if err := tx.QueryRowContext(
+				ctx,
+				`SELECT task_id FROM artifacts WHERE artifact_id=?`,
+				artifact.ID,
+			).Scan(&owner); err != nil {
+				return storageError("find TestRun artifact", err)
+			}
+			if owner != run.TaskID {
+				return task.ErrConflict
+			}
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO test_run_artifacts(
 			run_id, artifact_id
@@ -224,9 +261,6 @@ func (s *Store) FinishRun(
 	}
 	if affected, err := update.RowsAffected(); err != nil || affected != 1 {
 		return task.ErrConflict
-	}
-	if err := tx.Commit(); err != nil {
-		return storageError("commit TestRun finish", err)
 	}
 	return nil
 }

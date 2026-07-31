@@ -244,6 +244,171 @@ func TestRunFinishArtifactFailureKeepsRunNonTerminal(t *testing.T) {
 	}
 }
 
+func TestApplyCommitsTaskRunArtifactsAndTerminalEventAtomically(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	createdAt := time.Date(2026, 7, 31, 11, 0, 0, 0, time.UTC)
+	input := testRunTaskFixture(200, 201, createdAt)
+	run := runFixture(input, 202, stableID("1"))
+	created, _, err := store.CreateTestTask(
+		ctx,
+		input,
+		[]task.StepSnapshot{{
+			ID: "test-000001", Kind: task.StepTestRun,
+			Status: task.StepPending,
+		}},
+		draft(input.ID, task.EventTaskCreated, createdAt),
+		run,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startedAt := createdAt.Add(time.Second)
+	running := startStoredStep(
+		t,
+		store,
+		created,
+		0,
+		startedAt,
+		3001,
+	)
+	if err := store.StartRun(
+		ctx,
+		run.RunID,
+		startedAt,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StartRun(
+		ctx,
+		run.RunID,
+		startedAt,
+	); err != nil {
+		t.Fatalf("idempotent StartRun() error = %v", err)
+	}
+	result := resultFixture(stableID("1"), stableID("2"))
+	if err := store.AppendResult(ctx, run.RunID, result); err != nil {
+		t.Fatal(err)
+	}
+	persistedRun, err := store.GetRun(ctx, run.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finishedAt := startedAt.Add(time.Second)
+	terminalRun := persistedRun
+	terminalRun.Results = nil
+	terminalRun.Status = testdomain.RunCompleted
+	terminalRun.Outcome = testdomain.RunPassed
+	terminalRun.StartedAt = &startedAt
+	terminalRun.FinishedAt = &finishedAt
+	terminalRun.Summary = testdomain.RunSummary{
+		Total: 1, Completed: 1, Passed: 1, Iterations: 1,
+	}
+	terminalRun.Incomplete = false
+	finishedTask := mustTransition(t, running, task.Transition{
+		From: task.StatusRunning, To: task.StatusFinished,
+		Outcome: task.OutcomeSucceeded, At: finishedAt,
+	})
+	finishedTask.ActiveStep = ""
+	step := running.Steps[0]
+	step.Status = task.StepSucceeded
+	step.FinishedAt = &finishedAt
+	exitCode := 0
+	step.ExitCode = &exitCode
+	artifact := task.Artifact{
+		ID: id(203), TaskID: running.ID,
+		Kind:         "test-run-summary",
+		RelativePath: "tasks/" + running.ID + "/summary.json",
+		MIMEType:     "application/json",
+		Size:         2,
+		SHA256:       strings.Repeat("a", 64),
+		CreatedAt:    finishedAt,
+	}
+	if _, err := store.db.Exec(`CREATE TRIGGER reject_atomic_run_finish
+		BEFORE UPDATE OF status ON test_runs
+		WHEN NEW.status='completed'
+		BEGIN
+			SELECT RAISE(ABORT, 'injected atomic finish failure');
+		END`); err != nil {
+		t.Fatal(err)
+	}
+	mutation := task.Mutation{
+		Task: finishedTask, Expected: task.StatusRunning,
+		Steps: []task.StepMutation{{
+			Step: step, Expected: task.StepRunning,
+		}},
+		Events: []task.EventDraft{
+			draft(running.ID, task.EventArtifactCreated, finishedAt),
+			draft(running.ID, task.EventTestRunFinished, finishedAt),
+			draft(running.ID, task.EventTaskFinished, finishedAt),
+		},
+		DeleteLease: true,
+		Artifacts:   []task.Artifact{artifact},
+		FinishRun:   &terminalRun,
+	}
+	if err := validateTask(mutation.Task); err != nil {
+		t.Fatalf("terminal Task validation error = %v", err)
+	}
+	if err := validateStepMutations(mutation.Steps); err != nil {
+		t.Fatalf("terminal Step validation error = %v", err)
+	}
+	for _, event := range mutation.Events {
+		if event.TaskID != mutation.Task.ID ||
+			!validEventDraft(event) {
+			t.Fatalf("terminal Event validation error = %#v", event)
+		}
+	}
+	if _, err := testdomain.NewTestRun(terminalRun); err != nil {
+		t.Fatalf("terminal TestRun validation error = %v", err)
+	}
+	if err := validateRunArtifacts(
+		running.ID,
+		mutation.Artifacts,
+	); err != nil {
+		t.Fatalf("terminal Artifact validation error = %v", err)
+	}
+	if _, _, err := store.Apply(ctx, mutation); !errors.Is(
+		err,
+		task.ErrStorageUnavailable,
+	) {
+		t.Fatalf("injected Apply() error = %v", err)
+	}
+	if current, err := store.Get(ctx, running.ID); err != nil ||
+		current.Status != task.StatusRunning {
+		t.Fatalf("Task after rollback = %#v, %v", current, err)
+	}
+	if current, err := store.GetRun(ctx, run.RunID); err != nil ||
+		current.Status == testdomain.RunCompleted {
+		t.Fatalf("TestRun after rollback = %#v, %v", current, err)
+	}
+	if _, err := store.GetArtifact(
+		ctx, artifact.ID,
+	); !errors.Is(err, task.ErrNotFound) {
+		t.Fatalf("Artifact after rollback error = %v", err)
+	}
+	if _, err := store.db.Exec(
+		`DROP TRIGGER reject_atomic_run_finish`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	stored, events, err := store.Apply(ctx, mutation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != task.StatusFinished ||
+		len(events) != 3 ||
+		events[1].Type != task.EventTestRunFinished {
+		t.Fatalf("terminal mutation = %#v / %#v", stored, events)
+	}
+	if current, err := store.GetRun(ctx, run.RunID); err != nil ||
+		current.Status != testdomain.RunCompleted ||
+		current.Outcome != testdomain.RunPassed {
+		t.Fatalf("terminal TestRun = %#v, %v", current, err)
+	}
+}
+
 func TestRunFinishRequiresIncompleteForPartialOrNotRunResults(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -289,6 +454,34 @@ func TestRunFinishRequiresIncompleteForPartialOrNotRunResults(t *testing.T) {
 	current.Incomplete = true
 	if err := store.FinishRun(ctx, current, nil); err != nil {
 		t.Fatalf("incomplete terminal error = %v", err)
+	}
+}
+
+func TestRunFinishAllowsIncompleteSelectionWithNoResultRows(
+	t *testing.T,
+) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	input := createTask(
+		t,
+		store,
+		newTask(
+			117,
+			118,
+			time.Date(2026, 7, 31, 2, 45, 0, 0, time.UTC),
+		),
+	)
+	run := runFixture(input, 119, stableID("6"))
+	if err := store.CreateRun(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	finished := run.CreatedAt.Add(time.Second)
+	run.Status = testdomain.RunCompleted
+	run.Outcome = testdomain.RunBlocked
+	run.FinishedAt = &finished
+	run.Incomplete = true
+	if err := store.FinishRun(ctx, run, nil); err != nil {
+		t.Fatalf("FinishRun(incomplete empty run) error = %v", err)
 	}
 }
 

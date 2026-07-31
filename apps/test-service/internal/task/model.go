@@ -40,6 +40,16 @@ const (
 	EventTaskFinished              EventType = "task.finished"
 	EventArtifactCreated           EventType = "artifact.created"
 	EventTaskDiagnostic            EventType = "task.diagnostic"
+	EventTestDiscoveryStarted      EventType = "test.discovery.started"
+	EventTestContainerDiscovered   EventType = "test.container.discovered"
+	EventTestCatalogPublished      EventType = "test.catalog.published"
+	EventTestRunStarted            EventType = "test.run.started"
+	EventTestContainerStarted      EventType = "test.container.started"
+	EventTestItemStarted           EventType = "test.item.started"
+	EventTestOutput                EventType = "test.output"
+	EventTestItemFinished          EventType = "test.item.finished"
+	EventTestContainerFinished     EventType = "test.container.finished"
+	EventTestRunFinished           EventType = "test.run.finished"
 )
 
 type Task struct {
@@ -119,6 +129,33 @@ func NewID() string {
 func ValidScenario(value Scenario) bool {
 	switch value {
 	case ScenarioSuccess, ScenarioExitNonzero, ScenarioHang, ScenarioSpawnChild, ScenarioEmitOutput:
+		return true
+	default:
+		return false
+	}
+}
+
+func ValidEventType(value EventType) bool {
+	switch value {
+	case EventTaskCreated,
+		EventTaskStarted,
+		EventTaskStepStarted,
+		EventTaskStepFinished,
+		EventTaskOutput,
+		EventTaskCancellationRequested,
+		EventTaskFinished,
+		EventArtifactCreated,
+		EventTaskDiagnostic,
+		EventTestDiscoveryStarted,
+		EventTestContainerDiscovered,
+		EventTestCatalogPublished,
+		EventTestRunStarted,
+		EventTestContainerStarted,
+		EventTestItemStarted,
+		EventTestOutput,
+		EventTestItemFinished,
+		EventTestContainerFinished,
+		EventTestRunFinished:
 		return true
 	default:
 		return false

@@ -14,12 +14,14 @@ import (
 
 	"unit-test-ide.local/test-service/internal/diagnostic"
 	"unit-test-ide.local/test-service/internal/task"
+	"unit-test-ide.local/test-service/internal/testdomain"
 )
 
 const (
 	maxStreamArtifactBytes     = 64 * 1024 * 1024
 	maxDiagnosticArtifactBytes = 32 * 1024 * 1024
 	maxJSONArtifactBytes       = 4 * 1024 * 1024
+	maxTestResultArtifactBytes = 128 * 1024 * 1024
 )
 
 type taskSink struct {
@@ -169,6 +171,9 @@ func (s *taskSink) CommitJSON(
 		s.taskKind == task.KindTestRun) &&
 		kind == "execution-plan":
 		encoded, err = safeExecutionPlanJSON(value)
+	case s.taskKind == task.KindTestRun &&
+		(kind == "test-selection" || kind == "test-run-summary"):
+		encoded, err = safeDomainJSON(value)
 	default:
 		return ErrInvalidArtifact
 	}
@@ -190,6 +195,60 @@ func (s *taskSink) CommitJSON(
 	}
 	s.json[kind] = pendingArtifact{
 		id: artifactID, kind: kind, data: append([]byte(nil), encoded...),
+	}
+	return nil
+}
+
+func (s *taskSink) CommitJSONLines(
+	ctx context.Context,
+	artifactID string,
+	kind string,
+	values []json.RawMessage,
+) error {
+	if ctx == nil || kind != "test-results" ||
+		s.taskKind != task.KindTestRun ||
+		!validGeneratedID(artifactID) {
+		return ErrInvalidArtifact
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	var encoded bytes.Buffer
+	for _, raw := range values {
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.DisallowUnknownFields()
+		var candidate testdomain.TestItemResult
+		if err := decoder.Decode(&candidate); err != nil ||
+			decoder.Decode(&struct{}{}) != io.EOF {
+			return ErrInvalidArtifact
+		}
+		validated, err := testdomain.NewTestItemResult(candidate)
+		if err != nil {
+			return ErrInvalidArtifact
+		}
+		line, err := safeDomainJSON(validated)
+		if err != nil ||
+			encoded.Len()+len(line) > maxTestResultArtifactBytes {
+			return ErrInvalidArtifact
+		}
+		_, _ = encoded.Write(line)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.unavailable() {
+		return ErrStoreUnavailable
+	}
+	if _, exists := s.json[kind]; exists {
+		return ErrInvalidArtifact
+	}
+	for _, pending := range s.json {
+		if pending.id == artifactID {
+			return ErrInvalidArtifact
+		}
+	}
+	s.json[kind] = pendingArtifact{
+		id: artifactID, kind: kind,
+		data: append([]byte(nil), encoded.Bytes()...),
 	}
 	return nil
 }
@@ -285,8 +344,21 @@ func (s *taskSink) pendingArtifacts() ([]pendingArtifact, error) {
 	case task.KindTestDiscovery, task.KindTestRun:
 		executionPlan, hasPlan := s.json["execution-plan"]
 		summary, hasSummary := s.json["task-summary"]
-		if !hasPlan || !hasSummary || len(s.json) != 2 {
+		expectedJSON := 2
+		if s.taskKind == task.KindTestRun {
+			expectedJSON = 5
+		}
+		if !hasPlan || !hasSummary || len(s.json) != expectedJSON {
 			return nil, ErrInvalidArtifact
+		}
+		if s.taskKind == task.KindTestRun {
+			selection, hasSelection := s.json["test-selection"]
+			results, hasResults := s.json["test-results"]
+			runSummary, hasRunSummary := s.json["test-run-summary"]
+			if !hasSelection || !hasResults || !hasRunSummary {
+				return nil, ErrInvalidArtifact
+			}
+			result = append(result, selection, results, runSummary)
 		}
 		stdoutID, err := newGeneratedID()
 		if err != nil {
@@ -367,6 +439,22 @@ func safeExecutionPlanJSON(value any) ([]byte, error) {
 		return nil, ErrInvalidArtifact
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF ||
+		executionPlanContainsSecret(decoded) {
+		return nil, ErrInvalidArtifact
+	}
+	return append(encoded, '\n'), nil
+}
+
+func safeDomainJSON(value any) ([]byte, error) {
+	encoded, err := json.Marshal(value)
+	if err != nil || len(encoded) == 0 {
+		return nil, ErrInvalidArtifact
+	}
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.UseNumber()
+	var decoded any
+	if err := decoder.Decode(&decoded); err != nil ||
+		decoder.Decode(&struct{}{}) != io.EOF ||
 		executionPlanContainsSecret(decoded) {
 		return nil, ErrInvalidArtifact
 	}

@@ -735,11 +735,71 @@ func (m *Manager) persistCommittedCreateFailure(
 			return current.task, err
 		}
 		steps := terminalStepMutations(current, ProcessResult{}, outcome, false, finishedAt)
+		events := []EventDraft{
+			eventDraft(current.task.ID, EventTaskFinished, finishedAt, map[string]any{"outcome": outcome}),
+		}
+		artifacts := []Artifact(nil)
+		var finishedRun *testdomain.TestRun
+		if current.task.Kind == KindTestRun {
+			completion, completionErr := m.prepareDomainCompletion(
+				current,
+				finished,
+				finishedAt,
+				outcome,
+			)
+			if completionErr != nil {
+				return current.task, completionErr
+			}
+			artifacts, completionErr = m.finalizeTaskArtifacts(
+				context.Background(),
+				current,
+				current.task,
+				finishedAt,
+				outcome,
+				steps,
+			)
+			if completionErr != nil {
+				return current.task, completionErr
+			}
+			events = make(
+				[]EventDraft,
+				0,
+				len(artifacts)+len(completion.Events)+1,
+			)
+			for _, artifact := range artifacts {
+				events = append(events, eventDraft(
+					current.task.ID,
+					EventArtifactCreated,
+					finishedAt,
+					map[string]any{
+						"artifactId": artifact.ID,
+						"kind":       artifact.Kind,
+					},
+				))
+			}
+			for _, domainEvent := range completion.Events {
+				events = append(events, EventDraft{
+					TaskID: current.task.ID,
+					Type:   domainEvent.Type,
+					At:     finishedAt,
+					Payload: append(
+						json.RawMessage(nil),
+						domainEvent.Payload...,
+					),
+				})
+			}
+			events = append(events, eventDraft(
+				current.task.ID,
+				EventTaskFinished,
+				finishedAt,
+				map[string]any{"outcome": outcome},
+			))
+			finishedRun = completion.TestRun
+		}
 		stored, _, err := m.store.Apply(context.Background(), Mutation{
 			Task: finished, Expected: StatusQueued, Steps: steps,
-			Events: []EventDraft{
-				eventDraft(current.task.ID, EventTaskFinished, finishedAt, map[string]any{"outcome": outcome}),
-			},
+			Events: events, Artifacts: artifacts,
+			FinishRun: finishedRun,
 		})
 		if err == nil {
 			current.task = stored
@@ -895,6 +955,16 @@ func (m *Manager) persistFinished(
 	if err != nil {
 		return current, err
 	}
+	completion, completionErr := m.prepareDomainCompletion(
+		owner,
+		finished,
+		finishedAt,
+		outcome,
+	)
+	if completionErr != nil {
+		m.tripStorage(active)
+		return current, ErrStorageUnavailable
+	}
 	artifacts, artifactErr := m.finalizeTaskArtifacts(
 		context.Background(),
 		owner,
@@ -925,12 +995,24 @@ func (m *Manager) persistFinished(
 			map[string]any{"artifactId": artifact.ID, "kind": artifact.Kind},
 		))
 	}
+	for _, domainEvent := range completion.Events {
+		events = append(events, EventDraft{
+			TaskID: current.ID,
+			Type:   domainEvent.Type,
+			At:     finishedAt,
+			Payload: append(
+				json.RawMessage(nil),
+				domainEvent.Payload...,
+			),
+		})
+	}
 	events = append(events,
 		eventDraft(current.ID, EventTaskFinished, finishedAt, map[string]any{"outcome": outcome}),
 	)
 	stored, committed, err := m.store.Apply(context.Background(), Mutation{
 		Task: finished, Expected: current.Status, Steps: steps, Events: events,
 		DeleteLease: deleteLease, Artifacts: artifacts,
+		FinishRun: completion.TestRun,
 	})
 	if err != nil {
 		if !errors.Is(err, ErrConflict) {
@@ -948,6 +1030,56 @@ func (m *Manager) persistFinished(
 		return stored, ErrStorageUnavailable
 	}
 	return stored, nil
+}
+
+func (m *Manager) prepareDomainCompletion(
+	owner *activeTask,
+	current Task,
+	finishedAt time.Time,
+	outcome Outcome,
+) (DomainCompletion, error) {
+	if owner == nil {
+		return DomainCompletion{}, ErrInvalidArgument
+	}
+	preparer, ok := owner.resultInterpreter.(CompletionPreparer)
+	if !ok {
+		return DomainCompletion{}, nil
+	}
+	if owner.artifactSink == nil {
+		return DomainCompletion{}, ErrStorageUnavailable
+	}
+	return callCompletionPreparer(
+		preparer,
+		current,
+		finishedAt,
+		outcome,
+		owner.artifactSink,
+		m.newID,
+	)
+}
+
+func callCompletionPreparer(
+	preparer CompletionPreparer,
+	current Task,
+	finishedAt time.Time,
+	outcome Outcome,
+	sink ArtifactSink,
+	newID IDGenerator,
+) (completion DomainCompletion, resultErr error) {
+	defer func() {
+		if recover() != nil {
+			completion = DomainCompletion{}
+			resultErr = errors.New("completion preparer panicked")
+		}
+	}()
+	return preparer.PrepareCompletion(
+		context.Background(),
+		cloneRuntimeTask(current),
+		finishedAt,
+		outcome,
+		sink,
+		newID,
+	)
 }
 
 func finishedRunningStep(mutations []StepMutation) (StepSnapshot, bool) {
