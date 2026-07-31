@@ -108,7 +108,12 @@ git commit -m "feat: persist test run results"
 **接口：**
 
 ```go
+type TestRunReader interface {
+	GetRun(context.Context, string) (testdomain.TestRun, error)
+}
+
 func Resolve(
+	ctx context.Context,
 	catalog testdomain.Catalog,
 	request testdomain.Selection,
 	previous TestRunReader,
@@ -116,7 +121,7 @@ func Resolve(
 ) (testdomain.SelectionSnapshot, error)
 ```
 
-- [ ] **Step 1：写出 selection/retry/summary 失败测试**
+- [x] **Step 1：写出 selection/retry/summary 失败测试**
 
 覆盖：
 
@@ -133,7 +138,7 @@ func Resolve(
 - 多 iteration aggregate summary；
 - empty/oversized selection。
 
-- [ ] **Step 2：运行 testrun tests 并确认失败**
+- [x] **Step 2：运行 testrun tests 并确认失败**
 
 ```powershell
 go test ./apps/test-service/internal/testrun -count=1
@@ -141,11 +146,11 @@ go test ./apps/test-service/internal/testrun -count=1
 
 预期：FAIL。
 
-- [ ] **Step 3：实现 immutable selection snapshot**
+- [x] **Step 3：实现 immutable selection snapshot**
 
 Resolver 不修改 Catalog 或旧 TestRun。failedFromRun 创建新的 selection snapshot，并保存来源 runId。
 
-- [ ] **Step 4：运行 unit/race**
+- [x] **Step 4：运行 unit/race**
 
 ```powershell
 go test ./apps/test-service/internal/testrun -count=1
@@ -154,7 +159,7 @@ go test -race ./apps/test-service/internal/testrun -count=1
 
 预期：PASS。
 
-- [ ] **Step 5：提交 Test Selection**
+- [x] **Step 5：提交 Test Selection**
 
 ```powershell
 git add apps/test-service/internal/testrun
@@ -446,8 +451,8 @@ git commit -m "feat: expose protocol v1.3 test execution"
 
 ## Phase 4E 完成检查
 
-- [ ] TestRun/result migration 与 terminal transaction
-- [ ] selection/filter/repeat/failedFromRun
+- [x] TestRun/result migration 与 terminal transaction
+- [x] selection/filter/repeat/failedFromRun
 - [ ] result-aware Task completion
 - [ ] discovery/run Service-owned continuation
 - [ ] test events/artifacts durable ordering

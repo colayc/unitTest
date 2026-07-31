@@ -244,6 +244,54 @@ func TestRunFinishArtifactFailureKeepsRunNonTerminal(t *testing.T) {
 	}
 }
 
+func TestRunFinishRequiresIncompleteForPartialOrNotRunResults(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	input := createTask(
+		t,
+		store,
+		newTask(114, 115, time.Date(2026, 7, 31, 2, 30, 0, 0, time.UTC)),
+	)
+	run := runFixture(input, 116, stableID("4"))
+	if err := store.CreateRun(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	partial := resultFixture(stableID("4"), stableID("5"))
+	partial.Outcome = testdomain.ItemErrored
+	partial.Partial = true
+	if err := store.AppendResult(ctx, run.RunID, partial); err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.GetRun(ctx, run.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := run.CreatedAt.Add(time.Second)
+	finished := started.Add(time.Second)
+	current.Results = nil
+	current.Status = testdomain.RunCompleted
+	current.Outcome = testdomain.RunErrored
+	current.StartedAt, current.FinishedAt = &started, &finished
+	current.Summary = testdomain.RunSummary{
+		Total: 1, Completed: 1, Errored: 1, Iterations: 1,
+	}
+	current.Incomplete = false
+	if err := store.FinishRun(ctx, current, nil); !errors.Is(
+		err,
+		task.ErrInvalidArgument,
+	) {
+		t.Fatalf("complete terminal with partial result error = %v", err)
+	}
+	persisted, err := store.GetRun(ctx, run.RunID)
+	if err != nil || persisted.Status == testdomain.RunCompleted {
+		t.Fatalf("run after inconsistent finish = %#v, %v", persisted, err)
+	}
+	current.Incomplete = true
+	if err := store.FinishRun(ctx, current, nil); err != nil {
+		t.Fatalf("incomplete terminal error = %v", err)
+	}
+}
+
 func TestRunIdempotencyPaginationAndFailureDetails(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

@@ -184,7 +184,9 @@ func (s *Store) FinishRun(
 	if err != nil || revision != run.ResultRevision {
 		return task.ErrConflict
 	}
-	if summary := summarizeResults(results, run.Summary.Iterations); !reflect.DeepEqual(summary, run.Summary) {
+	summary, incomplete := summarizeResults(results, run.Summary.Iterations)
+	if !reflect.DeepEqual(summary, run.Summary) ||
+		incomplete != run.Incomplete {
 		return task.ErrInvalidArgument
 	}
 	for _, artifact := range artifacts {
@@ -364,12 +366,14 @@ func equivalentFinishedRun(first, second testdomain.TestRun) bool {
 func summarizeResults(
 	results []testdomain.TestItemResult,
 	iterations int64,
-) testdomain.RunSummary {
+) (testdomain.RunSummary, bool) {
 	summary := testdomain.RunSummary{
 		Total:      int64(len(results)),
 		Iterations: iterations,
 	}
+	incomplete := false
 	for _, result := range results {
+		incomplete = incomplete || result.Partial
 		switch result.Outcome {
 		case testdomain.ItemPassed:
 			summary.Passed++
@@ -391,7 +395,8 @@ func summarizeResults(
 			summary.Completed++
 		case testdomain.ItemNotRun:
 			summary.NotRun++
+			incomplete = true
 		}
 	}
-	return summary
+	return summary, incomplete
 }
