@@ -21,6 +21,30 @@ import (
 
 const identityFailureHelperEnvironment = "UNIT_TEST_PROCESSHOST_IDENTITY_FAILURE_HELPER"
 
+func TestTargetEnvironmentAppliesOverlayAndUnset(t *testing.T) {
+	t.Setenv("UT_PROCESSHOST_KEEP", "inherited")
+	t.Setenv("UT_PROCESSHOST_REMOVE", "private")
+	t.Setenv("UT_PROCESSHOST_REPLACE", "old")
+	environment := targetEnvironment(
+		[]string{"UT_PROCESSHOST_REPLACE=new"},
+		[]string{"UT_PROCESSHOST_REMOVE"},
+	)
+	values := make(map[string]string)
+	for _, entry := range environment {
+		name, value, found := strings.Cut(entry, "=")
+		if found {
+			values[name] = value
+		}
+	}
+	if values["UT_PROCESSHOST_KEEP"] != "inherited" ||
+		values["UT_PROCESSHOST_REPLACE"] != "new" {
+		t.Fatalf("target environment = %#v", values)
+	}
+	if _, exists := values["UT_PROCESSHOST_REMOVE"]; exists {
+		t.Fatalf("unset environment remained = %#v", values)
+	}
+}
+
 func TestLinuxIdentityFailureHelper(t *testing.T) {
 	if os.Getenv(identityFailureHelperEnvironment) == "" {
 		return

@@ -3,6 +3,7 @@ package testrun
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -185,15 +186,6 @@ func TestPlannerRejectsStaleBlockedAndUnreplayableInputs(t *testing.T) {
 			}
 			return value
 		},
-		"environment modification": func(value PlannerInput) PlannerInput {
-			value.Bindings[0].Adapter = &plannerAdapter{
-				version: "cpputest.v1",
-				environmentChanges: []ctest.EnvironmentModification{{
-					Name: "PATH", Operation: "path_list_append", Value: "bin",
-				}},
-			}
-			return value
-		},
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -205,6 +197,143 @@ func TestPlannerRejectsStaleBlockedAndUnreplayableInputs(t *testing.T) {
 				t.Fatalf("PlanRun() error = %v", err)
 			}
 		})
+	}
+}
+
+func TestPlannerReplaysCTestEnvironmentModifications(
+	t *testing.T,
+) {
+	t.Setenv("PLANNER_REMOVE", "inherited")
+	catalog, container, cases := plannerCatalog(
+		t,
+		testdomain.FrameworkCppUTest,
+		"framework-tests",
+		"Group",
+		"CaseA",
+	)
+	adapter := &plannerAdapter{
+		version: "cpputest.v1",
+		environmentChanges: []ctest.EnvironmentModification{
+			{
+				Name:      "FRAMEWORK_MODE",
+				Operation: "string_append",
+				Value:     "-changed",
+			},
+			{
+				Name:      "PLANNER_REMOVE",
+				Operation: "unset",
+			},
+		},
+	}
+	plan, err := PlanRun(
+		context.Background(),
+		PlannerInput{
+			Catalog: catalog,
+			Selection: testdomain.SelectionSnapshot{
+				Mode:    testdomain.SelectionItems,
+				ItemIDs: []testdomain.ID{cases[0].ID},
+			},
+			Bindings: []ContainerBinding{{
+				ContainerID: container.ID,
+				Descriptor: plannerDescriptor(
+					t,
+					container.CTestLogicalName,
+				),
+				Adapter: adapter,
+			}},
+			RepeatCount:    1,
+			TaskTimeout:    time.Minute,
+			MaxConcurrency: 1,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Invocations) != 1 ||
+		!reflect.DeepEqual(
+			plan.Invocations[0].Step.Process.Env,
+			[]string{"FRAMEWORK_MODE=test-changed"},
+		) ||
+		!reflect.DeepEqual(
+			plan.Invocations[0].Step.Process.EnvUnset,
+			[]string{"PLANNER_REMOVE"},
+		) {
+		t.Fatalf(
+			"planned environment = %#v / %#v",
+			plan.Invocations[0].Step.Process.Env,
+			plan.Invocations[0].Step.Process.EnvUnset,
+		)
+	}
+}
+
+func TestPlannerEnvironmentReplaysAllCTestOperations(t *testing.T) {
+	t.Setenv("PLANNER_INHERITED", "parent")
+	environment, unset, err := plannerEnvironment(
+		[]ctest.EnvironmentEntry{
+			{Name: "CMAKE_LIST", Value: "middle"},
+			{Name: "EXPLICIT_RESET", Value: "original"},
+			{Name: "PATH_LIST", Value: "middle"},
+			{Name: "STRING_VALUE", Value: "middle"},
+		},
+		[]ctest.EnvironmentModification{
+			{
+				Name: "STRING_VALUE", Operation: "string_prepend",
+				Value: "before-",
+			},
+			{
+				Name: "STRING_VALUE", Operation: "string_append",
+				Value: "-after",
+			},
+			{
+				Name: "PATH_LIST", Operation: "path_list_prepend",
+				Value: "before",
+			},
+			{
+				Name: "PATH_LIST", Operation: "path_list_append",
+				Value: "after",
+			},
+			{
+				Name: "CMAKE_LIST", Operation: "cmake_list_prepend",
+				Value: "before",
+			},
+			{
+				Name: "CMAKE_LIST", Operation: "cmake_list_append",
+				Value: "after",
+			},
+			{
+				Name: "EXPLICIT_RESET", Operation: "set",
+				Value: "changed",
+			},
+			{Name: "EXPLICIT_RESET", Operation: "reset"},
+			{
+				Name: "PLANNER_INHERITED", Operation: "string_append",
+				Value: "-changed",
+			},
+			{Name: "PLANNER_INHERITED", Operation: "reset"},
+			{Name: "REMOVE_ME", Operation: "set", Value: "temporary"},
+			{Name: "REMOVE_ME", Operation: "unset"},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pathSeparator := string(os.PathListSeparator)
+	wantEnvironment := []string{
+		"CMAKE_LIST=before;middle;after",
+		"EXPLICIT_RESET=original",
+		"PATH_LIST=before" + pathSeparator + "middle" +
+			pathSeparator + "after",
+		"STRING_VALUE=before-middle-after",
+	}
+	if !reflect.DeepEqual(environment, wantEnvironment) ||
+		!reflect.DeepEqual(unset, []string{"REMOVE_ME"}) {
+		t.Fatalf(
+			"plannerEnvironment = %#v / %#v, want %#v / %#v",
+			environment,
+			unset,
+			wantEnvironment,
+			[]string{"REMOVE_ME"},
+		)
 	}
 }
 

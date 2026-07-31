@@ -33,6 +33,16 @@ func TestValidatePlanRejectsUnsafeSpecs(t *testing.T) {
 		{name: "NUL environment", plan: planWith(func(step *task.ExecutionStep) { step.Process.Env = []string{"CMAKE_GENERATOR=Ni\x00nja"} })},
 		{name: "invalid environment key", plan: planWith(func(step *task.ExecutionStep) { step.Process.Env = []string{"CMAKE-GENERATOR=Ninja"} })},
 		{name: "service token environment key", plan: planWith(func(step *task.ExecutionStep) { step.Process.Env = []string{"UNIT_TEST_SERVICE_TOKEN=secret"} })},
+		{name: "service-owned environment prefix", plan: planWith(func(step *task.ExecutionStep) {
+			step.Process.Env = []string{"UTIDE_PRIVATE=secret"}
+		})},
+		{name: "environment unset collision", plan: planWith(func(step *task.ExecutionStep) {
+			step.Process.Env = []string{"PATH=trusted"}
+			step.Process.EnvUnset = []string{"PATH"}
+		})},
+		{name: "invalid environment unset", plan: planWith(func(step *task.ExecutionStep) {
+			step.Process.EnvUnset = []string{"INVALID-NAME"}
+		})},
 		{name: "nil boundary", plan: planWith(func(*task.ExecutionStep) {}), useBoundary: true},
 		{name: "typed nil boundary", plan: planWith(func(*task.ExecutionStep) {}), boundary: (*nilFakeBoundary)(nil), useBoundary: true},
 	}
@@ -111,7 +121,22 @@ func TestValidatePlanEnforcesArgumentAndEnvironmentItemLimits(t *testing.T) {
 			set: func(step *task.ExecutionStep, count int) {
 				step.Process.Env = make([]string, count)
 				for index := range step.Process.Env {
-					step.Process.Env[index] = "CMAKE_OPTION=value"
+					step.Process.Env[index] = fmt.Sprintf(
+						"CMAKE_OPTION_%03d=value",
+						index,
+					)
+				}
+			},
+		},
+		{
+			name: "ProcessSpec EnvUnset",
+			set: func(step *task.ExecutionStep, count int) {
+				step.Process.EnvUnset = make([]string, count)
+				for index := range step.Process.EnvUnset {
+					step.Process.EnvUnset[index] = fmt.Sprintf(
+						"VAR_%03d",
+						index,
+					)
 				}
 			},
 		},
@@ -147,7 +172,7 @@ func TestValidatePlanEnforcesArgumentAndEnvironmentItemLimits(t *testing.T) {
 
 func TestFingerprintPlanCoversExecutionFieldsAndExcludesNonExecutionFields(t *testing.T) {
 	plan := task.ExecutionPlan{Version: 1, Steps: []task.ExecutionStep{validConfigureStep()}}
-	if got, want := task.FingerprintPlan(plan), "24d3c4e47950028ec5c13edc3e78d3eaa8ebd63704c64df06ac07cab66905c49"; got != want {
+	if got, want := task.FingerprintPlan(plan), "68c6e32d3ec23957664ef8f61fc3c657f993a7952b4862023764c9b9f05fb7c8"; got != want {
 		t.Fatalf("FingerprintPlan() = %q, want fixed digest %q", got, want)
 	}
 
@@ -161,6 +186,9 @@ func TestFingerprintPlanCoversExecutionFieldsAndExcludesNonExecutionFields(t *te
 		{name: "executable", change: func(value *task.ExecutionPlan) { value.Steps[0].Process.Executable = "ninja" }},
 		{name: "arguments", change: func(value *task.ExecutionPlan) { value.Steps[0].Process.Args = []string{"--build", "build"} }},
 		{name: "environment", change: func(value *task.ExecutionPlan) { value.Steps[0].Process.Env = []string{"CMAKE_GENERATOR=Ninja"} }},
+		{name: "environment unset", change: func(value *task.ExecutionPlan) {
+			value.Steps[0].Process.EnvUnset = []string{"CMAKE_GENERATOR"}
+		}},
 		{name: "working directory", change: func(value *task.ExecutionPlan) { value.Steps[0].Process.Dir = "build" }},
 	}
 	for _, tt := range executionChanges {

@@ -198,6 +198,10 @@ func cloneExecutionPlan(plan ExecutionPlan) ExecutionPlan {
 		result.Steps[index] = step
 		result.Steps[index].Process.Args = append([]string(nil), step.Process.Args...)
 		result.Steps[index].Process.Env = append([]string(nil), step.Process.Env...)
+		result.Steps[index].Process.EnvUnset = append(
+			[]string(nil),
+			step.Process.EnvUnset...,
+		)
 		result.Steps[index].Public.Args = append([]string(nil), step.Public.Args...)
 		result.Steps[index].State = append(json.RawMessage(nil), step.State...)
 	}

@@ -663,6 +663,10 @@ func cloneCoordinatorSteps(
 			[]string(nil),
 			value.Process.Env...,
 		)
+		result[index].Process.EnvUnset = append(
+			[]string(nil),
+			value.Process.EnvUnset...,
+		)
 		result[index].Public.Args = append(
 			[]string(nil),
 			value.Public.Args...,

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"reflect"
+	"runtime"
 	"strings"
 	"time"
 
@@ -150,6 +151,7 @@ func validateExecutionSteps(
 			containsNUL(step.Process.Executable) || containsNUL(step.Process.Dir) ||
 			len(step.Process.Args) > maxProcessSpecArgs ||
 			len(step.Process.Env) > maxProcessSpecEnv ||
+			len(step.Process.EnvUnset) > maxProcessSpecEnv ||
 			len(step.Public.Args) > maxCommandSummaryArgs ||
 			len(step.State) > maxExecutionStepState ||
 			len(step.State) != 0 && !json.Valid(step.State) {
@@ -164,10 +166,11 @@ func validateExecutionSteps(
 				return ErrInvalidArgument
 			}
 		}
-		for _, value := range step.Process.Env {
-			if containsNUL(value) || !validEnvironment(value) {
-				return ErrInvalidArgument
-			}
+		if !validProcessEnvironment(
+			step.Process.Env,
+			step.Process.EnvUnset,
+		) {
+			return ErrInvalidArgument
 		}
 		if err := boundary.ValidateExecutable(step.Process.Executable); err != nil {
 			return ErrInvalidArgument
@@ -212,6 +215,7 @@ func FingerprintPlan(plan ExecutionPlan) string {
 		Executable string   `json:"executable"`
 		Args       []string `json:"args"`
 		Env        []string `json:"env"`
+		EnvUnset   []string `json:"envUnset"`
 		Dir        string   `json:"dir"`
 	}
 	type canonicalPlan struct {
@@ -227,7 +231,11 @@ func FingerprintPlan(plan ExecutionPlan) string {
 			Executable: step.Process.Executable,
 			Args:       append([]string{}, step.Process.Args...),
 			Env:        append([]string{}, step.Process.Env...),
-			Dir:        step.Process.Dir,
+			EnvUnset: append(
+				[]string{},
+				step.Process.EnvUnset...,
+			),
+			Dir: step.Process.Dir,
 		}
 	}
 	raw, _ := json.Marshal(canonical)
@@ -259,9 +267,40 @@ func validStepID(value string) bool {
 	return true
 }
 
-func validEnvironment(value string) bool {
-	key, _, found := strings.Cut(value, "=")
-	return found && validEnvironmentKey(key) && !serviceOwnedEnvironmentKey(key)
+func validProcessEnvironment(
+	environment []string,
+	unset []string,
+) bool {
+	if len(environment)+len(unset) > maxProcessSpecEnv {
+		return false
+	}
+	seen := make(map[string]struct{}, len(environment)+len(unset))
+	for _, value := range environment {
+		key, _, found := strings.Cut(value, "=")
+		if !found || containsNUL(value) ||
+			!validEnvironmentKey(key) ||
+			serviceOwnedEnvironmentKey(key) {
+			return false
+		}
+		canonical := environmentKey(key)
+		if _, duplicate := seen[canonical]; duplicate {
+			return false
+		}
+		seen[canonical] = struct{}{}
+	}
+	for _, key := range unset {
+		if containsNUL(key) ||
+			!validEnvironmentKey(key) ||
+			serviceOwnedEnvironmentKey(key) {
+			return false
+		}
+		canonical := environmentKey(key)
+		if _, duplicate := seen[canonical]; duplicate {
+			return false
+		}
+		seen[canonical] = struct{}{}
+	}
+	return true
 }
 
 func validEnvironmentKey(value string) bool {
@@ -270,7 +309,10 @@ func validEnvironmentKey(value string) bool {
 	}
 	for index := 0; index < len(value); index++ {
 		character := value[index]
-		if (character >= 'A' && character <= 'Z') || character == '_' || (character >= '0' && character <= '9' && index > 0) {
+		if (character >= 'A' && character <= 'Z') ||
+			(character >= 'a' && character <= 'z') ||
+			character == '_' ||
+			(character >= '0' && character <= '9' && index > 0) {
 			continue
 		}
 		return false
@@ -279,12 +321,17 @@ func validEnvironmentKey(value string) bool {
 }
 
 func serviceOwnedEnvironmentKey(value string) bool {
-	switch strings.ToUpper(value) {
-	case "UNIT_TEST_SERVICE_TOKEN", "UNIT_TEST_IDE_TOKEN", "UNIT_TEST_IDE_STATUS_HANDLE":
-		return true
-	default:
-		return false
+	upper := strings.ToUpper(value)
+	return strings.HasPrefix(upper, "UTIDE_") ||
+		strings.HasPrefix(upper, "UNIT_TEST_IDE_") ||
+		upper == "UNIT_TEST_SERVICE_TOKEN"
+}
+
+func environmentKey(value string) string {
+	if runtime.GOOS == "windows" {
+		return strings.ToUpper(value)
 	}
+	return value
 }
 
 func containsNUL(value string) bool { return strings.IndexByte(value, 0) >= 0 }

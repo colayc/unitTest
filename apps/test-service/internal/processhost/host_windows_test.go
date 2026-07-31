@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -16,6 +17,30 @@ import (
 	"unit-test-ide.local/test-service/internal/processcontrol"
 	"unit-test-ide.local/test-service/internal/winprocess"
 )
+
+func TestTargetWindowsEnvironmentAppliesOverlayAndUnset(t *testing.T) {
+	t.Setenv("UT_PROCESSHOST_KEEP", "inherited")
+	t.Setenv("UT_PROCESSHOST_REMOVE", "private")
+	t.Setenv("UT_PROCESSHOST_REPLACE", "old")
+	environment := targetWindowsEnvironment(
+		[]string{"UT_PROCESSHOST_REPLACE=new"},
+		[]string{"ut_processhost_remove"},
+	)
+	values := make(map[string]string)
+	for _, entry := range environment {
+		name, value, found := strings.Cut(entry, "=")
+		if found {
+			values[strings.ToUpper(name)] = value
+		}
+	}
+	if values["UT_PROCESSHOST_KEEP"] != "inherited" ||
+		values["UT_PROCESSHOST_REPLACE"] != "new" {
+		t.Fatalf("target environment = %#v", values)
+	}
+	if _, exists := values["UT_PROCESSHOST_REMOVE"]; exists {
+		t.Fatalf("unset environment remained = %#v", values)
+	}
+}
 
 func TestWindowsTargetWaitConfirmsInnerJobEmptyBeforeClosingAndReturning(t *testing.T) {
 	queries := 0

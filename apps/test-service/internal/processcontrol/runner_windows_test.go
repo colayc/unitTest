@@ -593,6 +593,38 @@ func TestWindowsTargetEnvironmentPrefersSpecValues(t *testing.T) {
 	}
 }
 
+func TestWindowsTargetEnvironmentRemovesInheritedValue(t *testing.T) {
+	t.Setenv("UNIT_TEST_WINDOWS_ENV_VALUE", "parent")
+	binary := buildWindowsService(t)
+	spec := windowsHelperSpec("report-environment")
+	spec.EnvUnset = []string{"unit_test_windows_env_value"}
+	process, err := NewRunner(binary).Prepare(
+		context.Background(),
+		spec,
+		windowsTestID(55),
+		windowsTestID(56),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer process.Close(context.Background())
+	if err := process.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var output strings.Builder
+	for item := range process.Output() {
+		if item.Stream == StreamStdout {
+			output.Write(item.Data)
+		}
+	}
+	if result := receiveWindowsResult(t, process.Done()); result.Err != nil {
+		t.Fatal(result.Err)
+	}
+	if !strings.Contains(output.String(), "WINDOWS_ENV_VALUE=\n") {
+		t.Fatalf("output = %q", output.String())
+	}
+}
+
 func TestWindowsCloseIsIdempotentWithoutHandleOrGoroutineLeak(t *testing.T) {
 	binary := buildWindowsService(t)
 	beforeHandleSnapshot := windowsHandleSnapshot(t)

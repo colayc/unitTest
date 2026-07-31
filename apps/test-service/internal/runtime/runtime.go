@@ -660,7 +660,11 @@ func (f processFactory) Prepare(ctx context.Context, spec task.ProcessSpec, task
 		Executable: spec.Executable,
 		Args:       append([]string(nil), spec.Args...),
 		Env:        append([]string(nil), spec.Env...),
-		Dir:        spec.Dir,
+		EnvUnset: append(
+			[]string(nil),
+			spec.EnvUnset...,
+		),
+		Dir: spec.Dir,
 	}, taskID, serviceID)
 	if err != nil {
 		return nil, err

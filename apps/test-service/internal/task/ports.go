@@ -130,6 +130,7 @@ type ProcessSpec struct {
 	Executable string
 	Args       []string
 	Env        []string
+	EnvUnset   []string
 	Dir        string
 }
 

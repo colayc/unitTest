@@ -7,8 +7,10 @@ import (
 	"errors"
 	"io"
 	"math"
+	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -399,11 +401,13 @@ func frameworkInvocations(
 ) ([]PlannedInvocation, error) {
 	if len(plan.Invocations) == 0 ||
 		len(plan.Invocations) > maxPlannedInvocations ||
-		len(plan.EnvironmentChanges) != 0 ||
 		plan.WorkingDirectory == "" {
 		return nil, task.ErrInvalidArgument
 	}
-	environment, err := plannerEnvironment(plan.Environment)
+	environment, environmentUnset, err := plannerEnvironment(
+		plan.Environment,
+		plan.EnvironmentChanges,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -459,6 +463,10 @@ func frameworkInvocations(
 						candidate.Arguments...,
 					),
 					Env: append([]string(nil), environment...),
+					EnvUnset: append(
+						[]string(nil),
+						environmentUnset...,
+					),
 					Dir: plan.WorkingDirectory,
 				},
 				Public: task.CommandSummary{
@@ -489,28 +497,233 @@ func frameworkInvocations(
 
 func plannerEnvironment(
 	values []ctest.EnvironmentEntry,
-) ([]string, error) {
-	result := make([]string, len(values))
-	seen := make(map[string]struct{}, len(values))
-	for index, value := range values {
-		upper := strings.ToUpper(value.Name)
-		if value.Name == "" ||
-			strings.ContainsRune(value.Name, '=') ||
-			strings.ContainsRune(value.Name, '\x00') ||
-			strings.ContainsRune(value.Value, '\x00') ||
-			upper == "UNIT_TEST_SERVICE_TOKEN" ||
-			upper == "UNIT_TEST_IDE_TOKEN" ||
-			upper == "UNIT_TEST_IDE_STATUS_HANDLE" {
-			return nil, task.ErrInvalidArgument
-		}
-		if _, duplicate := seen[upper]; duplicate {
-			return nil, task.ErrInvalidArgument
-		}
-		seen[upper] = struct{}{}
-		result[index] = value.Name + "=" + value.Value
+	changes []ctest.EnvironmentModification,
+) ([]string, []string, error) {
+	if len(values) > 256 || len(changes) > 256 {
+		return nil, nil, task.ErrInvalidArgument
 	}
-	sort.Strings(result)
-	return result, nil
+	base := plannerBaseEnvironment()
+	overrides := make(map[string]plannerEnvironmentValue)
+	removed := make(map[string]string)
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if !validPlannerEnvironmentEntry(
+			value.Name,
+			value.Value,
+		) {
+			return nil, nil, task.ErrInvalidArgument
+		}
+		key := plannerEnvironmentKey(value.Name)
+		if _, duplicate := seen[key]; duplicate {
+			return nil, nil, task.ErrInvalidArgument
+		}
+		seen[key] = struct{}{}
+		overrides[key] = plannerEnvironmentValue{
+			name: value.Name, value: value.Value,
+		}
+	}
+	baseline := make(
+		map[string]plannerEnvironmentValue,
+		len(overrides),
+	)
+	for key, value := range overrides {
+		baseline[key] = value
+	}
+	current := func(
+		key string,
+	) (plannerEnvironmentValue, bool) {
+		if _, unset := removed[key]; unset {
+			return plannerEnvironmentValue{}, false
+		}
+		if value, exists := overrides[key]; exists {
+			return value, true
+		}
+		value, exists := base[key]
+		return value, exists
+	}
+	for _, change := range changes {
+		if !validPlannerEnvironmentEntry(
+			change.Name,
+			change.Value,
+		) {
+			return nil, nil, task.ErrInvalidArgument
+		}
+		key := plannerEnvironmentKey(change.Name)
+		value, exists := current(key)
+		if !exists {
+			value.name = change.Name
+		}
+		switch change.Operation {
+		case "reset":
+			if change.Value != "" {
+				return nil, nil, task.ErrInvalidArgument
+			}
+			delete(removed, key)
+			if original, explicit := baseline[key]; explicit {
+				overrides[key] = original
+			} else {
+				delete(overrides, key)
+			}
+		case "set":
+			delete(removed, key)
+			overrides[key] = plannerEnvironmentValue{
+				name: change.Name, value: change.Value,
+			}
+		case "unset":
+			if change.Value != "" {
+				return nil, nil, task.ErrInvalidArgument
+			}
+			delete(overrides, key)
+			removed[key] = change.Name
+		case "string_append":
+			delete(removed, key)
+			value.value += change.Value
+			overrides[key] = value
+		case "string_prepend":
+			delete(removed, key)
+			value.value = change.Value + value.value
+			overrides[key] = value
+		case "path_list_append":
+			delete(removed, key)
+			value.value = appendPlannerEnvironmentList(
+				value.value,
+				change.Value,
+				string(os.PathListSeparator),
+			)
+			overrides[key] = value
+		case "path_list_prepend":
+			delete(removed, key)
+			value.value = prependPlannerEnvironmentList(
+				value.value,
+				change.Value,
+				string(os.PathListSeparator),
+			)
+			overrides[key] = value
+		case "cmake_list_append":
+			delete(removed, key)
+			value.value = appendPlannerEnvironmentList(
+				value.value,
+				change.Value,
+				";",
+			)
+			overrides[key] = value
+		case "cmake_list_prepend":
+			delete(removed, key)
+			value.value = prependPlannerEnvironmentList(
+				value.value,
+				change.Value,
+				";",
+			)
+			overrides[key] = value
+		default:
+			return nil, nil, task.ErrInvalidArgument
+		}
+	}
+	if len(overrides)+len(removed) > 256 {
+		return nil, nil, task.ErrInvalidArgument
+	}
+	overrideKeys := make([]string, 0, len(overrides))
+	for key := range overrides {
+		overrideKeys = append(overrideKeys, key)
+	}
+	sort.Strings(overrideKeys)
+	environment := make([]string, len(overrideKeys))
+	for index, key := range overrideKeys {
+		value := overrides[key]
+		environment[index] = value.name + "=" + value.value
+	}
+	removedKeys := make([]string, 0, len(removed))
+	for key := range removed {
+		removedKeys = append(removedKeys, key)
+	}
+	sort.Strings(removedKeys)
+	unset := make([]string, len(removedKeys))
+	for index, key := range removedKeys {
+		unset[index] = removed[key]
+	}
+	return environment, unset, nil
+}
+
+type plannerEnvironmentValue struct {
+	name  string
+	value string
+}
+
+func plannerBaseEnvironment() map[string]plannerEnvironmentValue {
+	result := make(map[string]plannerEnvironmentValue)
+	for _, encoded := range os.Environ() {
+		name, value, found := strings.Cut(encoded, "=")
+		if !found ||
+			!validPlannerEnvironmentEntry(name, value) ||
+			plannerServiceEnvironmentKey(name) {
+			continue
+		}
+		result[plannerEnvironmentKey(name)] =
+			plannerEnvironmentValue{name: name, value: value}
+	}
+	return result
+}
+
+func validPlannerEnvironmentEntry(name, value string) bool {
+	if name == "" ||
+		strings.ContainsAny(name, "=\x00") ||
+		strings.ContainsRune(value, '\x00') ||
+		plannerServiceEnvironmentKey(name) {
+		return false
+	}
+	for index, character := range []byte(name) {
+		if character >= 'A' && character <= 'Z' ||
+			character >= 'a' && character <= 'z' ||
+			index > 0 && character >= '0' &&
+				character <= '9' ||
+			character == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func plannerServiceEnvironmentKey(value string) bool {
+	upper := strings.ToUpper(value)
+	return strings.HasPrefix(upper, "UTIDE_") ||
+		strings.HasPrefix(upper, "UNIT_TEST_IDE_") ||
+		upper == "UNIT_TEST_SERVICE_TOKEN"
+}
+
+func plannerEnvironmentKey(value string) string {
+	if runtime.GOOS == "windows" {
+		return strings.ToUpper(value)
+	}
+	return value
+}
+
+func appendPlannerEnvironmentList(
+	current string,
+	value string,
+	separator string,
+) string {
+	if current == "" {
+		return value
+	}
+	if value == "" {
+		return current
+	}
+	return current + separator + value
+}
+
+func prependPlannerEnvironmentList(
+	current string,
+	value string,
+	separator string,
+) string {
+	if current == "" {
+		return value
+	}
+	if value == "" {
+		return current
+	}
+	return value + separator + current
 }
 
 func effectiveInvocationTimeout(
@@ -561,6 +774,10 @@ func clonePlannedInvocation(
 	result.Step.Process.Env = append(
 		[]string(nil),
 		value.Step.Process.Env...,
+	)
+	result.Step.Process.EnvUnset = append(
+		[]string(nil),
+		value.Step.Process.EnvUnset...,
 	)
 	result.Step.Public.Args = append(
 		[]string(nil),

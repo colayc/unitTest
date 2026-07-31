@@ -19,6 +19,7 @@ type Spec struct {
 	Args       []string
 	Dir        string
 	Env        []string
+	EnvUnset   []string
 }
 
 type Output struct {

@@ -431,6 +431,10 @@ func cloneBuildExecutionPlan(value task.ExecutionPlan) task.ExecutionPlan {
 			[]string(nil),
 			step.Process.Env...,
 		)
+		result.Steps[index].Process.EnvUnset = append(
+			[]string(nil),
+			step.Process.EnvUnset...,
+		)
 		result.Steps[index].Public.Args = append(
 			[]string(nil),
 			step.Public.Args...,

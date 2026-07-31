@@ -61,7 +61,7 @@ func (platform *unixPlatform) Start(spec processcontrol.Spec, stdout, stderr io.
 	}
 	cmd := exec.Command(spec.Executable, spec.Args...)
 	cmd.Dir = spec.Dir
-	cmd.Env = targetEnvironment(spec.Env)
+	cmd.Env = targetEnvironment(spec.Env, spec.EnvUnset)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
@@ -92,11 +92,46 @@ func killAndReapFailedTarget(cmd *exec.Cmd) {
 	_ = cmd.Wait()
 }
 
-func targetEnvironment(extra []string) []string {
-	combined := append(os.Environ(), extra...)
-	result := make([]string, 0, len(combined))
-	for _, entry := range combined {
-		if strings.HasPrefix(entry, "UNIT_TEST_IDE_STATUS_HANDLE=") {
+func targetEnvironment(
+	extra []string,
+	unsetValues ...[]string,
+) []string {
+	var unset []string
+	if len(unsetValues) != 0 {
+		unset = unsetValues[0]
+	}
+	removed := make(map[string]struct{}, len(unset))
+	for _, key := range unset {
+		removed[key] = struct{}{}
+	}
+	overridden := make(map[string]struct{}, len(extra))
+	for _, entry := range extra {
+		key, _, found := strings.Cut(entry, "=")
+		if found && key != "UNIT_TEST_IDE_STATUS_HANDLE" {
+			overridden[key] = struct{}{}
+		}
+	}
+	inherited := os.Environ()
+	result := make([]string, 0, len(inherited)+len(extra))
+	for _, entry := range inherited {
+		key, _, found := strings.Cut(entry, "=")
+		if !found ||
+			key == "UNIT_TEST_IDE_STATUS_HANDLE" {
+			continue
+		}
+		if _, exists := removed[key]; exists {
+			continue
+		}
+		if _, exists := overridden[key]; exists {
+			continue
+		}
+		result = append(result, entry)
+	}
+	for _, entry := range extra {
+		if strings.HasPrefix(
+			entry,
+			"UNIT_TEST_IDE_STATUS_HANDLE=",
+		) {
 			continue
 		}
 		result = append(result, entry)

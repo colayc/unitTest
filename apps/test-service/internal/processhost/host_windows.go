@@ -284,7 +284,10 @@ func createWindowsProtectedJob(limitFlags uint32) (windows.Handle, error) {
 }
 
 func createSuspendedWindowsTarget(spec processcontrol.Spec, stdin, stdout, stderr windows.Handle) (windows.ProcessInformation, error) {
-	environment := targetWindowsEnvironment(spec.Env)
+	environment := targetWindowsEnvironment(
+		spec.Env,
+		spec.EnvUnset,
+	)
 	return createSuspendedWindowsProcess(spec.Executable, spec.Args, spec.Dir, environment, stdin, stdout, stderr, []windows.Handle{stdin, stdout, stderr})
 }
 
@@ -339,12 +342,32 @@ func createSuspendedWindowsProcess(executable string, args []string, dir string,
 	return info, err
 }
 
-func targetWindowsEnvironment(extra []string) []string {
-	combined := append(os.Environ(), extra...)
-	result := make([]string, 0, len(combined))
-	seen := make(map[string]struct{}, len(combined))
-	for index := len(combined) - 1; index >= 0; index-- {
-		entry := combined[index]
+func targetWindowsEnvironment(
+	extra []string,
+	unsetValues ...[]string,
+) []string {
+	var unset []string
+	if len(unsetValues) != 0 {
+		unset = unsetValues[0]
+	}
+	removed := make(map[string]struct{}, len(unset))
+	for _, key := range unset {
+		removed[strings.ToUpper(key)] = struct{}{}
+	}
+	overrides := make(map[string]string, len(extra))
+	for _, entry := range extra {
+		separator := strings.IndexByte(entry, '=')
+		if separator > 0 {
+			key := strings.ToUpper(entry[:separator])
+			if key != "UNIT_TEST_IDE_STATUS_HANDLE" {
+				overrides[key] = entry
+			}
+		}
+	}
+	inherited := os.Environ()
+	result := make([]string, 0, len(inherited)+len(extra))
+	seen := make(map[string]struct{}, len(inherited)+len(extra))
+	for _, entry := range inherited {
 		separator := strings.IndexByte(entry, '=')
 		if separator == 0 {
 			if next := strings.IndexByte(entry[1:], '='); next >= 0 {
@@ -361,14 +384,32 @@ func targetWindowsEnvironment(extra []string) []string {
 		if key == "UNIT_TEST_IDE_STATUS_HANDLE" {
 			continue
 		}
+		if _, exists := removed[key]; exists {
+			continue
+		}
+		if _, exists := overrides[key]; exists {
+			continue
+		}
 		if _, exists := seen[key]; exists {
 			continue
 		}
 		seen[key] = struct{}{}
 		result = append(result, entry)
 	}
-	for left, right := 0, len(result)-1; left < right; left, right = left+1, right-1 {
-		result[left], result[right] = result[right], result[left]
+	for _, entry := range extra {
+		separator := strings.IndexByte(entry, '=')
+		if separator <= 0 {
+			continue
+		}
+		key := strings.ToUpper(entry[:separator])
+		if _, exists := removed[key]; exists {
+			continue
+		}
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, entry)
 	}
 	return result
 }
