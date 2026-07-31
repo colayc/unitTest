@@ -53,7 +53,7 @@ func (s *Store) OpenTask(
 		return nil, err
 	}
 	if !validGeneratedID(taskID) ||
-		(kind != task.KindSimulation && kind != task.KindCMakeBuild) {
+		!supportedTaskKind(kind) {
 		return nil, ErrInvalidArtifact
 	}
 	return &taskSink{
@@ -82,7 +82,7 @@ func (s *taskSink) AppendOutput(
 	if s.unavailable() {
 		return ErrStoreUnavailable
 	}
-	if s.taskKind != task.KindCMakeBuild || len(data) == 0 {
+	if s.taskKind == task.KindSimulation || len(data) == 0 {
 		return nil
 	}
 	destination := &s.stdout
@@ -115,7 +115,7 @@ func (s *taskSink) AppendDiagnostic(
 	if s.unavailable() {
 		return ErrStoreUnavailable
 	}
-	if s.taskKind != task.KindCMakeBuild {
+	if s.taskKind == task.KindSimulation {
 		return nil
 	}
 	if value.TaskID != "" && value.TaskID != s.taskID ||
@@ -160,6 +160,14 @@ func (s *taskSink) CommitJSON(
 	case s.taskKind == task.KindCMakeBuild && kind == "build-summary":
 		encoded, err = canonicalSummary(s.taskID, value)
 	case s.taskKind == task.KindCMakeBuild && kind == "execution-plan":
+		encoded, err = safeExecutionPlanJSON(value)
+	case (s.taskKind == task.KindTestDiscovery ||
+		s.taskKind == task.KindTestRun) &&
+		kind == "task-summary":
+		encoded, err = canonicalSummary(s.taskID, value)
+	case (s.taskKind == task.KindTestDiscovery ||
+		s.taskKind == task.KindTestRun) &&
+		kind == "execution-plan":
 		encoded, err = safeExecutionPlanJSON(value)
 	default:
 		return ErrInvalidArtifact
@@ -274,6 +282,41 @@ func (s *taskSink) pendingArtifacts() ([]pendingArtifact, error) {
 			pendingArtifact{id: stderrID, kind: "stderr", data: append([]byte(nil), s.stderr.Bytes()...)},
 			pendingArtifact{id: diagnosticsID, kind: "diagnostics", data: append([]byte(nil), s.diagnostics.Bytes()...)},
 		)
+	case task.KindTestDiscovery, task.KindTestRun:
+		executionPlan, hasPlan := s.json["execution-plan"]
+		summary, hasSummary := s.json["task-summary"]
+		if !hasPlan || !hasSummary || len(s.json) != 2 {
+			return nil, ErrInvalidArtifact
+		}
+		stdoutID, err := newGeneratedID()
+		if err != nil {
+			return nil, err
+		}
+		stderrID, err := newGeneratedID()
+		if err != nil {
+			return nil, err
+		}
+		diagnosticsID, err := newGeneratedID()
+		if err != nil {
+			return nil, err
+		}
+		result = append(
+			result,
+			executionPlan,
+			summary,
+			pendingArtifact{
+				id: stdoutID, kind: "stdout",
+				data: append([]byte(nil), s.stdout.Bytes()...),
+			},
+			pendingArtifact{
+				id: stderrID, kind: "stderr",
+				data: append([]byte(nil), s.stderr.Bytes()...),
+			},
+			pendingArtifact{
+				id: diagnosticsID, kind: "diagnostics",
+				data: append([]byte(nil), s.diagnostics.Bytes()...),
+			},
+		)
 	default:
 		return nil, ErrInvalidArtifact
 	}
@@ -281,6 +324,16 @@ func (s *taskSink) pendingArtifacts() ([]pendingArtifact, error) {
 		return result[left].kind < result[right].kind
 	})
 	return result, nil
+}
+
+func supportedTaskKind(value task.Kind) bool {
+	switch value {
+	case task.KindSimulation, task.KindCMakeBuild,
+		task.KindTestDiscovery, task.KindTestRun:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *taskSink) unavailable() bool {

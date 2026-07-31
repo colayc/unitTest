@@ -9,13 +9,16 @@ import (
 	"time"
 
 	"unit-test-ide.local/test-service/internal/diagnostic"
+	"unit-test-ide.local/test-service/internal/testdomain"
 )
 
 type Kind string
 
 const (
-	KindSimulation Kind = "simulation"
-	KindCMakeBuild Kind = "cmake_build"
+	KindSimulation    Kind = "simulation"
+	KindCMakeBuild    Kind = "cmake_build"
+	KindTestDiscovery Kind = "test_discovery"
+	KindTestRun       Kind = "test_run"
 )
 
 type StepKind string
@@ -108,6 +111,7 @@ type StartRequest struct {
 	Boundary            ExecutionBoundary
 	Continuation        PlanContinuation
 	ResultInterpreter   ResultInterpreter
+	TestRun             *testdomain.TestRun
 
 	// Scenario remains an internal compatibility input while v1.1 simulation
 	// requests are projected into service-owned execution plans.

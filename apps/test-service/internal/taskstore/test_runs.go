@@ -31,10 +31,6 @@ func (s *Store) CreateRun(
 	if err != nil || len(run.Results) != 0 {
 		return task.ErrInvalidArgument
 	}
-	selectionJSON, summaryJSON, err := encodeRunMetadata(run)
-	if err != nil {
-		return task.ErrInvalidArgument
-	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return storageError("begin TestRun creation", err)
@@ -53,6 +49,24 @@ func (s *Store) CreateRun(
 	}
 	if !isNoRows(findErr) {
 		return storageError("find TestRun idempotency key", findErr)
+	}
+	if err := insertTestRun(ctx, tx, run); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return storageError("commit TestRun creation", err)
+	}
+	return nil
+}
+
+func insertTestRun(
+	ctx context.Context,
+	tx *sql.Tx,
+	run testdomain.TestRun,
+) error {
+	selectionJSON, summaryJSON, err := encodeRunMetadata(run)
+	if err != nil {
+		return task.ErrInvalidArgument
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO test_runs(
 		run_id, task_id, idempotency_key, project_id, profile_id, toolchain_id,
@@ -75,9 +89,6 @@ func (s *Store) CreateRun(
 			return task.ErrConflict
 		}
 		return storageError("insert TestRun", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return storageError("commit TestRun creation", err)
 	}
 	return nil
 }

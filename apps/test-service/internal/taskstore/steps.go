@@ -220,7 +220,8 @@ func validStoredStepID(value string) bool {
 
 func validStepKind(value task.StepKind) bool {
 	switch value {
-	case task.StepSimulation, task.StepConfigure, task.StepBuild:
+	case task.StepSimulation, task.StepConfigure, task.StepBuild,
+		task.StepTestDiscovery, task.StepTestRun:
 		return true
 	default:
 		return false

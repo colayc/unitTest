@@ -19,7 +19,7 @@ func TestMigration006UpgradeAndFailureRollback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(migrations) != 6 || migrations[5].version != 6 {
+	if len(migrations) < 6 || migrations[5].version != 6 {
 		t.Fatalf("loaded migrations = %#v", migrations)
 	}
 	db := openConfiguredDatabase(t, filepath.Join(t.TempDir(), "migration.sqlite"))

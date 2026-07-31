@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"unit-test-ide.local/test-service/internal/task"
+	"unit-test-ide.local/test-service/internal/testdomain"
 )
 
 const maxPageSize = 200
@@ -19,6 +20,35 @@ type rowScanner interface {
 }
 
 func (s *Store) Create(ctx context.Context, input task.Task, steps []task.StepSnapshot, event task.EventDraft) (task.Task, []task.Event, error) {
+	return s.createTask(ctx, input, steps, event, nil)
+}
+
+func (s *Store) CreateTestTask(
+	ctx context.Context,
+	input task.Task,
+	steps []task.StepSnapshot,
+	event task.EventDraft,
+	run testdomain.TestRun,
+) (task.Task, []task.Event, error) {
+	if input.Kind != task.KindTestRun ||
+		run.TaskID != input.ID {
+		return task.Task{}, nil, task.ErrInvalidArgument
+	}
+	validated, err := testdomain.NewTestRun(run)
+	if err != nil || len(validated.Results) != 0 ||
+		validated.Status != testdomain.RunQueued {
+		return task.Task{}, nil, task.ErrInvalidArgument
+	}
+	return s.createTask(ctx, input, steps, event, &validated)
+}
+
+func (s *Store) createTask(
+	ctx context.Context,
+	input task.Task,
+	steps []task.StepSnapshot,
+	event task.EventDraft,
+	run *testdomain.TestRun,
+) (task.Task, []task.Event, error) {
 	if err := validateTask(input); err != nil {
 		return task.Task{}, nil, err
 	}
@@ -54,6 +84,11 @@ func (s *Store) Create(ctx context.Context, input task.Task, steps []task.StepSn
 			return task.Task{}, nil, task.ErrIdempotencyConflict
 		}
 		return task.Task{}, nil, storageError("create task", err)
+	}
+	if run != nil {
+		if err := insertTestRun(ctx, tx, *run); err != nil {
+			return task.Task{}, nil, err
+		}
 	}
 	if err := insertSteps(ctx, tx, input.ID, steps); err != nil {
 		return task.Task{}, nil, err
@@ -115,7 +150,7 @@ func (s *Store) Get(ctx context.Context, taskID string) (task.Task, error) {
 }
 
 func (s *Store) List(ctx context.Context, cursor string, limit int, kinds ...task.Kind) (task.Page[task.Task], error) {
-	if limit < 1 || limit > maxPageSize || len(kinds) > 2 {
+	if limit < 1 || limit > maxPageSize || len(kinds) > 4 {
 		return task.Page[task.Task]{}, task.ErrInvalidArgument
 	}
 	query := taskSelect
@@ -125,7 +160,7 @@ func (s *Store) List(ctx context.Context, cursor string, limit int, kinds ...tas
 		seen := make(map[task.Kind]struct{}, len(kinds))
 		placeholders := make([]string, 0, len(kinds))
 		for _, kind := range kinds {
-			if kind != task.KindSimulation && kind != task.KindCMakeBuild {
+			if !validTaskKind(kind) {
 				return task.Page[task.Task]{}, task.ErrInvalidArgument
 			}
 			if _, exists := seen[kind]; exists {
@@ -310,7 +345,7 @@ func validateTask(value task.Task) error {
 		if !task.ValidScenario(value.Scenario) || value.WorkspaceGeneration != "" {
 			return task.ErrInvalidArgument
 		}
-	case task.KindCMakeBuild:
+	case task.KindCMakeBuild, task.KindTestDiscovery, task.KindTestRun:
 		if value.Scenario != "" || !validWorkspaceGeneration(value.WorkspaceGeneration) {
 			return task.ErrInvalidArgument
 		}
@@ -325,6 +360,16 @@ func validateTask(value task.Task) error {
 		return task.ErrInvalidArgument
 	}
 	return nil
+}
+
+func validTaskKind(value task.Kind) bool {
+	switch value {
+	case task.KindSimulation, task.KindCMakeBuild,
+		task.KindTestDiscovery, task.KindTestRun:
+		return true
+	default:
+		return false
+	}
 }
 
 func validWorkspaceGeneration(value string) bool {

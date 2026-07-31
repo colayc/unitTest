@@ -57,6 +57,16 @@ type Store interface {
 	Close() error
 }
 
+type TestTaskStore interface {
+	CreateTestTask(
+		context.Context,
+		Task,
+		[]StepSnapshot,
+		EventDraft,
+		testdomain.TestRun,
+	) (Task, []Event, error)
+}
+
 type TestCatalogRepository interface {
 	PublishCatalog(context.Context, testdomain.Catalog, Artifact) error
 	GetCatalog(context.Context, string, string) (testdomain.Catalog, error)

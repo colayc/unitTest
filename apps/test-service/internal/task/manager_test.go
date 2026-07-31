@@ -14,6 +14,7 @@ import (
 
 	"unit-test-ide.local/test-service/internal/diagnostic"
 	"unit-test-ide.local/test-service/internal/task"
+	"unit-test-ide.local/test-service/internal/testdomain"
 )
 
 func TestNewManagerRejectsMissingDependencies(t *testing.T) {
@@ -2030,6 +2031,7 @@ type fakeStore struct {
 	leases         map[string]task.ProcessLease
 	mutations      []task.Mutation
 	sequence       int64
+	testRuns       map[string]testdomain.TestRun
 	failAppend     error
 	failApply      error
 	failApplyAt    int
@@ -2043,7 +2045,8 @@ type fakeStore struct {
 func newFakeStore() *fakeStore {
 	return &fakeStore{
 		tasks: map[string]task.Task{}, keys: map[string]string{}, getCalls: map[string]int{},
-		leases: map[string]task.ProcessLease{},
+		leases:   map[string]task.ProcessLease{},
+		testRuns: map[string]testdomain.TestRun{},
 	}
 }
 
@@ -2063,6 +2066,31 @@ func (s *fakeStore) Create(_ context.Context, value task.Task, steps []task.Step
 	s.tasks[value.ID] = value
 	s.keys[value.IdempotencyKey] = value.ID
 	return value, []task.Event{event}, nil
+}
+
+func (s *fakeStore) CreateTestTask(
+	ctx context.Context,
+	value task.Task,
+	steps []task.StepSnapshot,
+	draft task.EventDraft,
+	run testdomain.TestRun,
+) (task.Task, []task.Event, error) {
+	created, events, err := s.Create(ctx, value, steps, draft)
+	if err != nil {
+		return task.Task{}, nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(events) != 0 {
+		s.testRuns[run.RunID] = run.Clone()
+	}
+	return created, events, nil
+}
+
+func (s *fakeStore) testRun(id string) testdomain.TestRun {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.testRuns[id].Clone()
 }
 
 func (s *fakeStore) FindByIdempotencyKey(_ context.Context, key string) (task.Task, error) {

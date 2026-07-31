@@ -540,8 +540,10 @@ func (directory *cleanupDirectory) closeChildren() {
 type summaryEncoder func(string, []byte) ([]byte, error)
 
 var summaryEncoders = map[task.Kind]summaryEncoder{
-	task.KindSimulation: encodeSimulationSummary,
-	task.KindCMakeBuild: encodeCMakeSummary,
+	task.KindSimulation:    encodeSimulationSummary,
+	task.KindCMakeBuild:    encodeCMakeSummary,
+	task.KindTestDiscovery: encodeTestDiscoverySummary,
+	task.KindTestRun:       encodeTestRunSummary,
 }
 
 func canonicalSummary(taskID string, value any) ([]byte, error) {
@@ -625,6 +627,44 @@ func encodeSimulationSummary(taskID string, raw []byte) ([]byte, error) {
 }
 
 func encodeCMakeSummary(taskID string, raw []byte) ([]byte, error) {
+	return encodeExecutionSummary(
+		taskID,
+		task.KindCMakeBuild,
+		8,
+		raw,
+	)
+}
+
+func encodeTestDiscoverySummary(
+	taskID string,
+	raw []byte,
+) ([]byte, error) {
+	return encodeExecutionSummary(
+		taskID,
+		task.KindTestDiscovery,
+		10_000,
+		raw,
+	)
+}
+
+func encodeTestRunSummary(
+	taskID string,
+	raw []byte,
+) ([]byte, error) {
+	return encodeExecutionSummary(
+		taskID,
+		task.KindTestRun,
+		10_000,
+		raw,
+	)
+}
+
+func encodeExecutionSummary(
+	taskID string,
+	expectedKind task.Kind,
+	maximumSteps int,
+	raw []byte,
+) ([]byte, error) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	var summary task.TaskSummary
@@ -635,16 +675,16 @@ func encodeCMakeSummary(taskID string, raw []byte) ([]byte, error) {
 		return nil, ErrInvalidArtifact
 	}
 	if summary.TaskID != taskID ||
-		summary.Kind != task.KindCMakeBuild ||
+		summary.Kind != expectedKind ||
 		!validOutcome(string(summary.Outcome)) ||
 		summary.FinishedAt.IsZero() ||
 		len(summary.Steps) < 1 ||
-		len(summary.Steps) > 8 {
+		len(summary.Steps) > maximumSteps {
 		return nil, ErrInvalidArtifact
 	}
 	ids := make(map[string]struct{}, len(summary.Steps))
 	for _, step := range summary.Steps {
-		if !validSummaryStep(step) {
+		if !validSummaryStep(step, expectedKind) {
 			return nil, ErrInvalidArtifact
 		}
 		if _, exists := ids[step.ID]; exists {
@@ -659,9 +699,12 @@ func encodeCMakeSummary(taskID string, raw []byte) ([]byte, error) {
 	return append(encoded, '\n'), nil
 }
 
-func validSummaryStep(step task.StepSnapshot) bool {
+func validSummaryStep(
+	step task.StepSnapshot,
+	taskKind task.Kind,
+) bool {
 	if !validSummaryStepID(step.ID) ||
-		(step.Kind != task.StepConfigure && step.Kind != task.StepBuild) ||
+		!validSummaryStepKind(step.Kind, taskKind) ||
 		(step.Status != task.StepSucceeded && step.Status != task.StepFailed && step.Status != task.StepSkipped) ||
 		step.FinishedAt == nil ||
 		step.FinishedAt.IsZero() ||
@@ -676,6 +719,27 @@ func validSummaryStep(step task.StepSnapshot) bool {
 		}
 	}
 	return true
+}
+
+func validSummaryStepKind(
+	stepKind task.StepKind,
+	taskKind task.Kind,
+) bool {
+	switch taskKind {
+	case task.KindCMakeBuild:
+		return stepKind == task.StepConfigure ||
+			stepKind == task.StepBuild
+	case task.KindTestDiscovery, task.KindTestRun:
+		switch stepKind {
+		case task.StepConfigure, task.StepBuild,
+			task.StepTestDiscovery, task.StepTestRun:
+			return true
+		default:
+			return false
+		}
+	default:
+		return false
+	}
 }
 
 func validSummaryStepID(value string) bool {

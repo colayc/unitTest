@@ -136,6 +136,100 @@ func TestArtifactSinkAbortLeavesNoPublishedArtifacts(t *testing.T) {
 	}
 }
 
+func TestArtifactSinkSupportsTestRunExecutionArtifacts(t *testing.T) {
+	root := t.TempDir()
+	store, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	taskID := id(9)
+	sink, err := store.OpenTask(
+		context.Background(),
+		taskID,
+		task.KindTestRun,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.AppendOutput(
+		context.Background(),
+		"test-000001",
+		"stdout",
+		[]byte("test output\n"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.CommitJSON(
+		context.Background(),
+		id(10),
+		"execution-plan",
+		map[string]any{
+			"version": 1,
+			"steps": []map[string]any{{
+				"id":   "build",
+				"kind": "build",
+				"command": map[string]any{
+					"executable": "cmake",
+					"args":       []string{"--build"},
+				},
+			}},
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	finishedAt := time.Date(
+		2026,
+		7,
+		31,
+		9,
+		0,
+		0,
+		0,
+		time.UTC,
+	)
+	if err := sink.CommitJSON(
+		context.Background(),
+		id(11),
+		"task-summary",
+		task.TaskSummary{
+			TaskID:     taskID,
+			Kind:       task.KindTestRun,
+			Outcome:    task.OutcomeSucceeded,
+			FinishedAt: finishedAt,
+			Steps: []task.StepSnapshot{{
+				ID: "test-000001", Kind: task.StepTestRun,
+				Status: task.StepSucceeded, FinishedAt: &finishedAt,
+			}},
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	artifacts, err := sink.Finalize(
+		context.Background(),
+		finishedAt,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kinds := make([]string, len(artifacts))
+	for index, artifact := range artifacts {
+		kinds[index] = artifact.Kind
+	}
+	if !reflect.DeepEqual(
+		kinds,
+		[]string{
+			"diagnostics",
+			"execution-plan",
+			"stderr",
+			"stdout",
+			"task-summary",
+		},
+	) {
+		t.Fatalf("test task artifact kinds = %#v", kinds)
+	}
+}
+
 func assertArtifactContent(t *testing.T, root string, artifact task.Artifact, want string) {
 	t.Helper()
 	if got := artifactContent(t, root, artifact); got != want {

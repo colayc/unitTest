@@ -8,8 +8,10 @@ import (
 type taskSummaryProjector func(Task, TaskSummary) (any, error)
 
 var taskSummaryProjectors = map[Kind]taskSummaryProjector{
-	KindSimulation: projectSimulationSummary,
-	KindCMakeBuild: projectCMakeSummary,
+	KindSimulation:    projectSimulationSummary,
+	KindCMakeBuild:    projectCMakeSummary,
+	KindTestDiscovery: projectTestTaskSummary,
+	KindTestRun:       projectTestTaskSummary,
 }
 
 type executionPlanArtifact struct {
@@ -49,6 +51,17 @@ func projectCMakeSummary(current Task, summary TaskSummary) (any, error) {
 	return summary, nil
 }
 
+func projectTestTaskSummary(
+	current Task,
+	summary TaskSummary,
+) (any, error) {
+	if current.Kind != KindTestDiscovery &&
+		current.Kind != KindTestRun {
+		return nil, ErrInvalidArgument
+	}
+	return summary, nil
+}
+
 func (m *Manager) openTaskArtifacts(
 	current *activeTask,
 	active map[string]*activeTask,
@@ -74,7 +87,9 @@ func (m *Manager) createTaskArtifacts(current *activeTask) error {
 		return ErrStorageUnavailable
 	}
 	current.artifactSink = sink
-	if current.task.Kind != KindCMakeBuild {
+	if current.task.Kind != KindCMakeBuild &&
+		current.task.Kind != KindTestDiscovery &&
+		current.task.Kind != KindTestRun {
 		return nil
 	}
 	plan := executionPlanArtifact{

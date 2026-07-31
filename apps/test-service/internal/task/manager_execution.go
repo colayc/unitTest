@@ -8,7 +8,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+
+	"unit-test-ide.local/test-service/internal/testdomain"
 )
 
 // NewSimulationStartRequest projects the protocol-owned simulation inputs into
@@ -145,7 +148,18 @@ func validateStartRequest(request StartRequest) error {
 			return ErrInvalidArgument
 		}
 	case KindCMakeBuild:
-		if request.Scenario != "" || request.WorkspaceGeneration == "" {
+		if request.Scenario != "" || request.WorkspaceGeneration == "" ||
+			request.TestRun != nil {
+			return ErrInvalidArgument
+		}
+	case KindTestDiscovery:
+		if request.Scenario != "" || request.WorkspaceGeneration == "" ||
+			request.TestRun != nil {
+			return ErrInvalidArgument
+		}
+	case KindTestRun:
+		if request.Scenario != "" || request.WorkspaceGeneration == "" ||
+			!validAssociatedTestRun(request.TestRun) {
 			return ErrInvalidArgument
 		}
 	default:
@@ -158,7 +172,23 @@ func cloneStartRequest(request StartRequest) StartRequest {
 	result := request
 	result.Request = append(json.RawMessage(nil), request.Request...)
 	result.Plan = cloneExecutionPlan(request.Plan)
+	if request.TestRun != nil {
+		cloned := request.TestRun.Clone()
+		result.TestRun = &cloned
+	}
 	return result
+}
+
+func validAssociatedTestRun(value *testdomain.TestRun) bool {
+	if value == nil || value.TaskID != "" || !value.CreatedAt.IsZero() ||
+		value.Status != testdomain.RunQueued {
+		return false
+	}
+	candidate := value.Clone()
+	candidate.TaskID = strings.Repeat("0", 32)
+	candidate.CreatedAt = time.Unix(0, 0).UTC()
+	validated, err := testdomain.NewTestRun(candidate)
+	return err == nil && len(validated.Results) == 0
 }
 
 func cloneExecutionPlan(plan ExecutionPlan) ExecutionPlan {
@@ -233,7 +263,32 @@ func (m *Manager) start(request StartRequest, active map[string]*activeTask) tas
 	}()
 	steps := initialStepSnapshots(request.Plan)
 	draft := eventDraft(created.ID, EventTaskCreated, now, map[string]any{"status": StatusQueued})
-	stored, events, err := m.store.Create(context.Background(), created, steps, draft)
+	var stored Task
+	var events []Event
+	var err error
+	if request.TestRun == nil {
+		stored, events, err = m.store.Create(
+			context.Background(),
+			created,
+			steps,
+			draft,
+		)
+	} else {
+		testStore, ok := m.store.(TestTaskStore)
+		if !ok {
+			return taskResponse{err: ErrStorageUnavailable}
+		}
+		run := request.TestRun.Clone()
+		run.TaskID = created.ID
+		run.CreatedAt = now
+		stored, events, err = testStore.CreateTestTask(
+			context.Background(),
+			created,
+			steps,
+			draft,
+			run,
+		)
+	}
 	if err != nil {
 		if errors.Is(err, ErrStorageUnavailable) {
 			m.tripStorage(active)
