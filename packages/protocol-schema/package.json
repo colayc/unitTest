@@ -17,7 +17,14 @@
     "./v1.2/workspace": "./schema/v1.2/workspace.schema.json",
     "./v1.2/task": "./schema/v1.2/task.schema.json",
     "./v1.2/event": "./schema/v1.2/event.schema.json",
-    "./v1.2/artifact": "./schema/v1.2/artifact.schema.json"
+    "./v1.2/artifact": "./schema/v1.2/artifact.schema.json",
+    "./v1.3/message": "./schema/v1.3/message.schema.json",
+    "./v1.3/capabilities": "./schema/v1.3/capabilities.schema.json",
+    "./v1.3/diagnostic": "./schema/v1.3/diagnostic.schema.json",
+    "./v1.3/test": "./schema/v1.3/test.schema.json",
+    "./v1.3/task": "./schema/v1.3/task.schema.json",
+    "./v1.3/event": "./schema/v1.3/event.schema.json",
+    "./v1.3/artifact": "./schema/v1.3/artifact.schema.json"
   },
   "scripts": {
     "test": "node --test test/schema.test.mjs"

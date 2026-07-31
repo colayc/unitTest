@@ -1,0 +1,347 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:unit-test-ide:protocol:v1.3:task",
+  "title": "TaskSnapshotV13",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/cmakeBuildTask"
+    },
+    {
+      "$ref": "#/$defs/simulationTask"
+    },
+    {
+      "$ref": "#/$defs/testDiscoveryTask"
+    },
+    {
+      "$ref": "#/$defs/testRunTask"
+    }
+  ],
+  "$defs": {
+    "taskId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "projectId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+    },
+    "profileId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "revision": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "taskStatus": {
+      "title": "TaskStatusV13",
+      "enum": [
+        "queued",
+        "running",
+        "cancelling",
+        "finished"
+      ]
+    },
+    "taskOutcome": {
+      "title": "TaskOutcomeV13",
+      "enum": [
+        "succeeded",
+        "command_failed",
+        "cancelled",
+        "timed_out",
+        "interrupted",
+        "infrastructure_failed"
+      ]
+    },
+    "commonProperties": {
+      "type": "object"
+    },
+    "cmakeBuildTask": {
+      "title": "CmakeBuildTaskSnapshotV13",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "taskId",
+        "kind",
+        "workspaceGeneration",
+        "projectId",
+        "buildProfileId",
+        "targetIds",
+        "jobs",
+        "timeoutMs",
+        "status",
+        "createdAt",
+        "lastSequence"
+      ],
+      "properties": {
+        "taskId": {
+          "$ref": "#/$defs/taskId"
+        },
+        "kind": {
+          "const": "cmakeBuild"
+        },
+        "workspaceGeneration": {
+          "$ref": "#/$defs/revision"
+        },
+        "projectId": {
+          "$ref": "#/$defs/projectId"
+        },
+        "buildProfileId": {
+          "$ref": "#/$defs/profileId"
+        },
+        "targetIds": {
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/revision"
+          }
+        },
+        "jobs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 256
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400000
+        },
+        "status": {
+          "$ref": "#/$defs/taskStatus"
+        },
+        "outcome": {
+          "$ref": "#/$defs/taskOutcome"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "startedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "finishedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "lastSequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "errorCode": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "errorMessage": {
+          "type": "string",
+          "maxLength": 8192
+        }
+      }
+    },
+    "simulationTask": {
+      "title": "SimulationTaskSnapshotV13",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "taskId",
+        "kind",
+        "scenario",
+        "status",
+        "createdAt",
+        "lastSequence"
+      ],
+      "properties": {
+        "taskId": {
+          "$ref": "#/$defs/taskId"
+        },
+        "kind": {
+          "const": "simulation"
+        },
+        "scenario": {
+          "title": "SimulationScenarioV13",
+          "enum": [
+            "success",
+            "exit-nonzero",
+            "hang",
+            "spawn-child",
+            "emit-output"
+          ]
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400000
+        },
+        "status": {
+          "$ref": "#/$defs/taskStatus"
+        },
+        "outcome": {
+          "$ref": "#/$defs/taskOutcome"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "startedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "finishedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "lastSequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "errorCode": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "errorMessage": {
+          "type": "string",
+          "maxLength": 8192
+        }
+      }
+    },
+    "testDiscoveryTask": {
+      "title": "TestDiscoveryTaskSnapshotV13",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "taskId",
+        "kind",
+        "projectId",
+        "profileId",
+        "status",
+        "createdAt",
+        "lastSequence"
+      ],
+      "properties": {
+        "taskId": {
+          "$ref": "#/$defs/taskId"
+        },
+        "kind": {
+          "const": "testDiscovery"
+        },
+        "projectId": {
+          "$ref": "#/$defs/projectId"
+        },
+        "profileId": {
+          "$ref": "#/$defs/profileId"
+        },
+        "catalogRevision": {
+          "$ref": "#/$defs/revision"
+        },
+        "status": {
+          "$ref": "#/$defs/taskStatus"
+        },
+        "outcome": {
+          "$ref": "#/$defs/taskOutcome"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "startedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "finishedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "lastSequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "errorCode": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "errorMessage": {
+          "type": "string",
+          "maxLength": 8192
+        }
+      }
+    },
+    "testRunTask": {
+      "title": "TestRunTaskSnapshotV13",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "taskId",
+        "kind",
+        "projectId",
+        "profileId",
+        "catalogRevision",
+        "runId",
+        "repeatCount",
+        "status",
+        "createdAt",
+        "lastSequence"
+      ],
+      "properties": {
+        "taskId": {
+          "$ref": "#/$defs/taskId"
+        },
+        "kind": {
+          "const": "testRun"
+        },
+        "projectId": {
+          "$ref": "#/$defs/projectId"
+        },
+        "profileId": {
+          "$ref": "#/$defs/profileId"
+        },
+        "catalogRevision": {
+          "$ref": "#/$defs/revision"
+        },
+        "runId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "repeatCount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "status": {
+          "$ref": "#/$defs/taskStatus"
+        },
+        "outcome": {
+          "$ref": "#/$defs/taskOutcome"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "startedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "finishedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "lastSequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "errorCode": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "errorMessage": {
+          "type": "string",
+          "maxLength": 8192
+        }
+      }
+    }
+  }
+}

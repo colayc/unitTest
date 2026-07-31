@@ -1,0 +1,19 @@
+{
+  "protocolVersion": "1.3",
+  "kind": "request",
+  "messageId": "99999999999999999999999999999999",
+  "method": "tasks/start",
+  "sentAt": "2026-07-31T00:00:04Z",
+  "payload": {
+    "idempotencyKey": "cccccccccccccccccccccccccccccccc",
+    "kind": "testRun",
+    "projectId": "core",
+    "profileId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "catalogRevision": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "selection": {
+      "mode": "all"
+    },
+    "repeatCount": 1,
+    "command": "ctest --output-on-failure"
+  }
+}

@@ -1,0 +1,77 @@
+{
+  "protocolVersion": "1.3",
+  "kind": "response",
+  "messageId": "33333333333333333333333333333333",
+  "requestId": "44444444444444444444444444444444",
+  "method": "tests/catalog/get",
+  "sentAt": "2026-07-31T00:00:02Z",
+  "payload": {
+    "projectId": "core",
+    "profileId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "revision": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "generatedAt": "2026-07-31T00:00:02Z",
+    "containers": [
+      {
+        "id": "utid-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "projectId": "core",
+        "ctestLogicalName": "core.cpputest[debug]",
+        "displayName": "Core CppUTest",
+        "framework": "cpputest",
+        "capabilities": {
+          "canDiscoverCases": true,
+          "canRunCase": true,
+          "canReportSkipped": true,
+          "canReportSourceLocation": true,
+          "canReportMockDetails": true
+        },
+        "labels": [
+          "unit"
+        ],
+        "sourceLocation": {
+          "uri": "file:///workspace/CMakeLists.txt",
+          "line": 42,
+          "column": 1,
+          "navigable": true,
+          "provenance": "ctest-backtrace"
+        },
+        "disabled": false
+      }
+    ],
+    "items": [
+      {
+        "id": "utid-v1-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "containerId": "utid-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "kind": "group",
+        "framework": "cpputest",
+        "logicalName": "Math",
+        "displayName": "Math",
+        "labels": [
+          "unit"
+        ],
+        "disabled": false
+      },
+      {
+        "id": "utid-v1-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "containerId": "utid-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "parentId": "utid-v1-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "kind": "case",
+        "framework": "cpputest",
+        "logicalName": "adds_numbers",
+        "displayName": "Math.adds_numbers",
+        "labels": [
+          "unit"
+        ],
+        "sourceLocation": {
+          "uri": "file:///workspace/tests/test_math.cpp",
+          "line": 10,
+          "column": 1,
+          "navigable": true,
+          "provenance": "test-declaration"
+        },
+        "disabled": false
+      }
+    ],
+    "diagnostics": [],
+    "partial": false
+  }
+}

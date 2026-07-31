@@ -9,6 +9,44 @@ import { CoverageDriver, Family, Generator, TArchitecture } from "./generated/wo
 import { SimulationScenarioV12, TaskKindV12, TaskStatusV12 } from "./generated/task-v1-2.js";
 import { EventKindV12, EventProtocolVersionV12, TaskEventDiagnosticSeverityV12, TaskEventNameV12, TaskOutputStreamV12, TaskStepKindV12, TaskStepStatusV12 } from "./generated/event-v1-2.js";
 import { Kind as ArtifactKindV12, MIMEType as ArtifactMIMETypeV12 } from "./generated/artifact-v1-2.js";
+import type {
+  ArtifactMetadataV13,
+  CapabilitiesV13,
+  DiagnosticV13,
+  TaskEventV13,
+  TaskSnapshotV13,
+  TestCatalog,
+  TestItemResult,
+  TestRun,
+  TestSelection
+} from "./index.js";
+import { TaskOutcomeV13 } from "./index.js";
+import {
+  TestFrameworkV13,
+  TestItemKindV13,
+  TestItemOutcomeV13,
+  TestRunOutcomeV13,
+  TestRunStatusV13,
+  TestSelectionModeV13
+} from "./generated/test-v1-3.js";
+import {
+  SimulationScenarioV13,
+  TaskKindV13,
+  TaskStatusV13
+} from "./generated/task-v1-3.js";
+import {
+  EventKindV13,
+  EventProtocolVersionV13,
+  TaskEventNameV13
+} from "./generated/event-v1-3.js";
+import {
+  ArtifactKindV13,
+  ArtifactMIMETypeV13
+} from "./generated/artifact-v1-3.js";
+import {
+  DiagnosticCategoryV13,
+  DiagnosticSeverityV13
+} from "./generated/diagnostic-v1-3.js";
 
 test("generated capabilities represent an empty Windows service", () => {
   const value: Capabilities = {
@@ -193,4 +231,189 @@ test("generated protocol 1.2 models preserve discriminated branches", () => {
   assert.equal(missingCmakeFields.kind, TaskKindV12.CmakeBuild);
   assert.equal(simulationWithBuildField.kind, TaskKindV12.Simulation);
   assert.equal(diagnosticWithoutPayload.event, TaskEventNameV12.TaskDiagnostic);
+});
+
+test("generated protocol 1.3 models expose closed test contracts", () => {
+  const stableContainerId = `utid-v1-${"a".repeat(64)}`;
+  const stableItemId = `utid-v1-${"b".repeat(64)}`;
+  const profileId = "c".repeat(64);
+  const revision = "d".repeat(64);
+  const selection: TestSelection = {
+    mode: TestSelectionModeV13.Items,
+    itemIds: [stableItemId]
+  };
+  const catalog: TestCatalog = {
+    projectId: "core",
+    profileId,
+    revision,
+    generatedAt: new Date("2026-07-31T00:00:00Z"),
+    containers: [{
+      id: stableContainerId,
+      projectId: "core",
+      ctestLogicalName: "core.cpputest",
+      displayName: "Core CppUTest",
+      framework: TestFrameworkV13.Cpputest,
+      capabilities: {
+        canDiscoverCases: true,
+        canRunCase: true,
+        canReportSkipped: true,
+        canReportSourceLocation: true,
+        canReportMockDetails: true
+      },
+      labels: [],
+      disabled: false
+    }],
+    items: [{
+      id: stableItemId,
+      containerId: stableContainerId,
+      kind: TestItemKindV13.Case,
+      framework: TestFrameworkV13.Cpputest,
+      logicalName: "adds_numbers",
+      displayName: "adds_numbers",
+      labels: [],
+      disabled: false
+    }],
+    diagnostics: [],
+    partial: false
+  };
+  const result: TestItemResult = {
+    itemId: stableItemId,
+    containerId: stableContainerId,
+    iteration: 1,
+    outcome: TestItemOutcomeV13.Passed,
+    failureDetails: [],
+    outputRefs: [],
+    partial: false
+  };
+  const run: TestRun = {
+    runId: "1".repeat(32),
+    taskId: "2".repeat(32),
+    projectId: "core",
+    profileId,
+    toolchainId: "linux-clang",
+    catalogRevision: revision,
+    selectionSnapshot: {
+      mode: TestSelectionModeV13.Items,
+      containerIds: [],
+      itemIds: [stableItemId]
+    },
+    status: TestRunStatusV13.Completed,
+    outcome: TestRunOutcomeV13.Passed,
+    summary: {
+      total: 1,
+      completed: 1,
+      passed: 1,
+      failed: 0,
+      skipped: 0,
+      errored: 0,
+      cancelled: 0,
+      timedOut: 0,
+      notRun: 0,
+      iterations: 1
+    },
+    resultRevision: revision,
+    incomplete: false
+  };
+  const task: TaskSnapshotV13 = {
+    taskId: run.taskId,
+    kind: TaskKindV13.TestRun,
+    projectId: run.projectId,
+    profileId,
+    catalogRevision: revision,
+    runId: run.runId,
+    repeatCount: 1,
+    status: TaskStatusV13.Finished,
+    createdAt: new Date("2026-07-31T00:00:00Z"),
+    lastSequence: 7
+  };
+  const event: TaskEventV13 = {
+    protocolVersion: EventProtocolVersionV13.The13,
+    kind: EventKindV13.Event,
+    messageId: "3".repeat(32),
+    sentAt: new Date("2026-07-31T00:00:01Z"),
+    sequence: 7,
+    event: TaskEventNameV13.TestItemFinished,
+    taskId: task.taskId,
+    payloadVersion: 1,
+    payload: { runId: run.runId, result }
+  };
+  const finishedEvent: TaskEventV13 = {
+    protocolVersion: EventProtocolVersionV13.The13,
+    kind: EventKindV13.Event,
+    messageId: "6".repeat(32),
+    sentAt: new Date("2026-07-31T00:00:02Z"),
+    sequence: 8,
+    event: TaskEventNameV13.TaskFinished,
+    taskId: task.taskId,
+    payloadVersion: 1,
+    payload: { outcome: TaskOutcomeV13.Succeeded }
+  };
+  const diagnostic: DiagnosticV13 = {
+    severity: DiagnosticSeverityV13.Error,
+    category: DiagnosticCategoryV13.AssertionFailure,
+    code: "ASSERTION_FAILED",
+    message: "expected 4 but got 5"
+  };
+  const artifact: ArtifactMetadataV13 = {
+    artifactId: "4".repeat(32),
+    taskId: task.taskId,
+    kind: ArtifactKindV13.TestResults,
+    mimeType: ArtifactMIMETypeV13.ApplicationJSON,
+    sizeBytes: 2,
+    sha256: "5".repeat(64),
+    createdAt: event.sentAt,
+    uri: "unit-test-ide://artifact/44444444444444444444444444444444"
+  };
+  const capabilities: CapabilitiesV13 = {
+    workspaceInspect: true,
+    targetList: true,
+    cmakeBuild: true,
+    testDiscovery: true,
+    testRun: true,
+    frameworkAdapters: [],
+    opaqueCTestFallback: true,
+    ctestJson: true,
+    maxRepeatCount: 100,
+    maxSelectionSize: 100000,
+    maxCatalogPageSize: 1000,
+    unityHelperContractVersion: "1",
+    unityRunnerContractVersion: "utide.runner.v1"
+  };
+
+  assert.equal(selection.mode, TestSelectionModeV13.Items);
+  assert.equal(catalog.items[0]!.kind, TestItemKindV13.Case);
+  assert.equal(event.event, TaskEventNameV13.TestItemFinished);
+  assert.equal(finishedEvent.payload.outcome, TaskOutcomeV13.Succeeded);
+  assert.equal(diagnostic.category, DiagnosticCategoryV13.AssertionFailure);
+  assert.equal(artifact.kind, ArtifactKindV13.TestResults);
+  assert.equal(capabilities.maxSelectionSize, 100000);
+});
+
+test("generated protocol 1.3 selections and tasks preserve discriminated branches", () => {
+  // @ts-expect-error failedFromRun accepts only runId.
+  const failedRunWithItems: TestSelection = {
+    mode: TestSelectionModeV13.FailedFromRun,
+    runId: "1".repeat(32),
+    itemIds: []
+  };
+  // @ts-expect-error testRun task requires run and catalog identity.
+  const testRunWithoutIdentity: TaskSnapshotV13 = {
+    taskId: "2".repeat(32),
+    kind: TaskKindV13.TestRun,
+    status: TaskStatusV13.Queued,
+    createdAt: new Date("2026-07-31T00:00:00Z"),
+    lastSequence: 1
+  };
+  const simulation: TaskSnapshotV13 = {
+    taskId: "3".repeat(32),
+    kind: TaskKindV13.Simulation,
+    scenario: SimulationScenarioV13.Success,
+    status: TaskStatusV13.Finished,
+    createdAt: new Date("2026-07-31T00:00:00Z"),
+    lastSequence: 1
+  };
+
+  assert.equal(failedRunWithItems.mode, TestSelectionModeV13.FailedFromRun);
+  assert.equal(testRunWithoutIdentity.kind, TaskKindV13.TestRun);
+  assert.equal(simulation.kind, TaskKindV13.Simulation);
 });

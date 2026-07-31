@@ -461,3 +461,247 @@ test("protocol 1.2 accepts the complete CMake build artifact surface", async () 
   }
   assert.equal(validate({ ...base, kind: "process-environment", mimeType: "application/json" }), false);
 });
+
+async function compileV13Message() {
+  const ajv = new Ajv2020({ allErrors: true, strict: true });
+  addFormats(ajv);
+  ajv.addSchema(await load("../schema/v1.2/workspace.schema.json"));
+  for (const name of ["capabilities", "diagnostic", "test", "task", "event", "artifact"]) {
+    ajv.addSchema(await load(`../schema/v1.3/${name}.schema.json`));
+  }
+  return ajv.compile(await load("../schema/v1.3/message.schema.json"));
+}
+
+test("protocol 1.3 accepts test discovery, run, catalog, and result contracts", async () => {
+  const validate = await compileV13Message();
+  for (const fixture of [
+    "test-discovery-start.valid.json",
+    "test-run-start.valid.json",
+    "test-catalog.valid.json",
+    "test-result.valid.json"
+  ]) {
+    const message = await load(`../fixtures/v1.3/${fixture}`);
+    assert.equal(validate(message), true, `${fixture}: ${JSON.stringify(validate.errors)}`);
+  }
+
+  const capabilities = {
+    protocolVersion: "1.3",
+    kind: "response",
+    messageId: "cccccccccccccccccccccccccccccccc",
+    requestId: "dddddddddddddddddddddddddddddddd",
+    method: "capabilities/get",
+    sentAt: "2026-07-31T00:00:07Z",
+    payload: {
+      workspaceInspect: true,
+      targetList: true,
+      cmakeBuild: true,
+      testDiscovery: true,
+      testRun: true,
+      frameworkAdapters: [{
+        id: "cpputest",
+        contractVersion: "1",
+        displayName: "CppUTest",
+        canDiscoverCases: true,
+        canRunCase: true,
+        canReportSkipped: true,
+        canReportSourceLocation: true,
+        canReportMockDetails: true
+      }],
+      opaqueCTestFallback: true,
+      ctestJson: true,
+      maxRepeatCount: 100,
+      maxSelectionSize: 100000,
+      maxCatalogPageSize: 1000,
+      unityHelperContractVersion: "1",
+      unityRunnerContractVersion: "utide.runner.v1"
+    }
+  };
+  assert.equal(validate(capabilities), true, JSON.stringify(validate.errors));
+
+  const catalogRequest = {
+    protocolVersion: "1.3",
+    kind: "request",
+    messageId: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    method: "tests/catalog/get",
+    sentAt: "2026-07-31T00:00:08Z",
+    payload: {
+      projectId: "core",
+      profileId: "b".repeat(64),
+      limit: 1000
+    }
+  };
+  const runGetRequest = {
+    ...catalogRequest,
+    messageId: "ffffffffffffffffffffffffffffffff",
+    method: "tests/runs/get",
+    payload: { runId: "7".repeat(32) }
+  };
+  const runListRequest = {
+    ...catalogRequest,
+    messageId: "0123456789abcdef0123456789abcdef",
+    method: "tests/runs/list",
+    payload: { projectId: "core", profileId: "b".repeat(64), limit: 1000 }
+  };
+  for (const request of [catalogRequest, runGetRequest, runListRequest]) {
+    assert.equal(validate(request), true, `${request.method}: ${JSON.stringify(validate.errors)}`);
+  }
+});
+
+test("protocol 1.3 rejects every execution-plan injection field at every test request boundary", async () => {
+  const validate = await compileV13Message();
+  const discovery = await load("../fixtures/v1.3/test-discovery-start.valid.json");
+  const run = await load("../fixtures/v1.3/test-run-start.valid.json");
+  const forbidden = {
+    executable: "ctest",
+    command: "ctest --output-on-failure",
+    args: ["--output-on-failure"],
+    argv: ["ctest"],
+    shell: true,
+    script: "ctest",
+    env: { PATH: "/tmp/attacker" },
+    environment: { PATH: "/tmp/attacker" },
+    cwd: "/tmp",
+    workingDirectory: "/tmp",
+    hook: "before",
+    preHook: "before",
+    postHook: "after",
+    resultPath: "/tmp/result.json"
+  };
+
+  for (const [field, value] of Object.entries(forbidden)) {
+    for (const request of [discovery, run]) {
+      assert.equal(
+        validate({ ...request, payload: { ...request.payload, [field]: value } }),
+        false,
+        `${request.payload.kind} accepted payload.${field}`
+      );
+    }
+    assert.equal(
+      validate({
+        ...run,
+        payload: {
+          ...run.payload,
+          selection: { ...run.payload.selection, [field]: value }
+        }
+      }),
+      false,
+      `testRun accepted selection.${field}`
+    );
+  }
+
+  for (const fixture of [
+    "test-run-command.invalid.json",
+    "test-run-environment.invalid.json",
+    "test-run-args.invalid.json"
+  ]) {
+    assert.equal(validate(await load(`../fixtures/v1.3/${fixture}`)), false, fixture);
+  }
+});
+
+test("protocol 1.3 enforces closed selections, stable IDs, safe integers, and bounded pages", async () => {
+  const validate = await compileV13Message();
+  const run = await load("../fixtures/v1.3/test-run-start.valid.json");
+  const result = await load("../fixtures/v1.3/test-result.valid.json");
+  const catalogRequest = {
+    protocolVersion: "1.3",
+    kind: "request",
+    messageId: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    method: "tests/catalog/get",
+    sentAt: "2026-07-31T00:00:08Z",
+    payload: { projectId: "core", profileId: "b".repeat(64) }
+  };
+
+  for (const repeatCount of [0, 101, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.equal(validate({
+      ...run,
+      payload: { ...run.payload, repeatCount }
+    }), false, `repeatCount=${repeatCount}`);
+  }
+  for (const limit of [0, 1001, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.equal(validate({
+      ...catalogRequest,
+      payload: { ...catalogRequest.payload, limit }
+    }), false, `limit=${limit}`);
+  }
+
+  const invalidSelections = [
+    { mode: "items", itemIds: ["not-a-stable-id"] },
+    { mode: "items", itemIds: [run.payload.selection.itemIds[0]], containerIds: [] },
+    { mode: "failedFromRun", runId: "7".repeat(32), itemIds: [] },
+    { mode: "filter", filter: {} },
+    { mode: "unknown" }
+  ];
+  for (const selection of invalidSelections) {
+    assert.equal(validate({
+      ...run,
+      payload: { ...run.payload, selection }
+    }), false, JSON.stringify(selection));
+  }
+
+  const tooManyItemIds = Array.from(
+    { length: 100001 },
+    (_, index) => `utid-v1-${index.toString(16).padStart(64, "0")}`
+  );
+  const selectionAjv = new Ajv2020({ allErrors: false, strict: true });
+  addFormats(selectionAjv);
+  selectionAjv.addSchema(await load("../schema/v1.3/diagnostic.schema.json"));
+  selectionAjv.addSchema(await load("../schema/v1.3/test.schema.json"));
+  const validateSelection = selectionAjv.compile({
+    "$ref": "urn:unit-test-ide:protocol:v1.3:test#/$defs/testSelection"
+  });
+  assert.equal(
+    validateSelection({ mode: "items", itemIds: tooManyItemIds }),
+    false,
+    "selection accepted more than 100,000 items"
+  );
+
+  assert.equal(validate({
+    ...result,
+    payload: {
+      ...result.payload,
+      result: { ...result.payload.result, outcome: "unknown" }
+    }
+  }), false, "result accepted unknown outcome");
+  assert.equal(validate({
+    ...result,
+    payload: {
+      ...result.payload,
+      result: { ...result.payload.result, iteration: Number.MAX_SAFE_INTEGER + 1 }
+    }
+  }), false, "result accepted unsafe integer");
+  assert.equal(validate({
+    ...result,
+    payload: {
+      ...result.payload,
+      result: {
+        ...result.payload.result,
+        sourceLocation: { ...result.payload.result.sourceLocation, uri: "not a uri" }
+      }
+    }
+  }), false, "result accepted invalid URI");
+  assert.equal(validate({
+    ...result,
+    sentAt: "not a date"
+  }), false, "result accepted invalid date-time");
+});
+
+test("protocol 1.3 preserves v1.0-v1.2 contracts without backporting test messages", async () => {
+  const validateV13 = await compileV13Message();
+  const ajvV12 = new Ajv2020({ allErrors: true, strict: true });
+  addFormats(ajvV12);
+  for (const name of ["capabilities", "diagnostic", "workspace", "task", "event", "artifact"]) {
+    ajvV12.addSchema(await load(`../schema/v1.2/${name}.schema.json`));
+  }
+  const validateV12 = ajvV12.compile(await load("../schema/v1.2/message.schema.json"));
+
+  const v12Build = await load("../fixtures/v1.2/cmake-build-start.valid.json");
+  const v13Run = await load("../fixtures/v1.3/test-run-start.valid.json");
+  assert.equal(validateV12(v12Build), true, JSON.stringify(validateV12.errors));
+  assert.equal(validateV12(v13Run), false);
+  assert.equal(validateV13(v12Build), false);
+
+  const ajvV1 = new Ajv2020({ allErrors: true, strict: true });
+  addFormats(ajvV1);
+  const v1 = ajvV1.compile(await load("../schema/v1/message.schema.json"));
+  assert.equal(v1(await load("../fixtures/v1/handshake.valid.json")), true);
+});

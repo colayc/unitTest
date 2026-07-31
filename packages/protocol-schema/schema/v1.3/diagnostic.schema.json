@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:unit-test-ide:protocol:v1.3:diagnostic",
+  "title": "DiagnosticV13",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "severity",
+    "category",
+    "code",
+    "message"
+  ],
+  "properties": {
+    "severity": {
+      "title": "DiagnosticSeverityV13",
+      "enum": [
+        "error",
+        "warning",
+        "info"
+      ]
+    },
+    "category": {
+      "title": "DiagnosticCategoryV13",
+      "enum": [
+        "configuration_error",
+        "build_error",
+        "assertion_failure",
+        "test_process_crash",
+        "test_timeout",
+        "cancelled",
+        "framework_output_invalid",
+        "infrastructure_error",
+        "unexpected_exit",
+        "inconsistent_exit_status"
+      ]
+    },
+    "code": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 8192
+    },
+    "sourceUri": {
+      "type": "string",
+      "format": "uri"
+    },
+    "line": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "column": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    }
+  }
+}

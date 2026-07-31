@@ -109,10 +109,12 @@ git commit -m "feat: define workspace test mappings"
 - 创建：`packages/protocol-schema/fixtures/v1.3/test-run-command.invalid.json`
 - 创建：`packages/protocol-schema/fixtures/v1.3/test-run-environment.invalid.json`
 - 创建：`packages/protocol-schema/fixtures/v1.3/test-run-args.invalid.json`
+- 修改：`packages/protocol-schema/package.json`
 - 修改：`packages/protocol-schema/test/schema.test.mjs`
 - 修改：`tools/protocol-gen/generate.mjs`
 - 修改：`packages/protocol-models/src/index.ts`
 - 修改：`packages/protocol-models/src/generated-contract.test.ts`
+- 修改：`apps/test-service/internal/protocolmodel/generated_contract_test.go`
 - 创建：generated v1.3 TypeScript files under `packages/protocol-models/src/generated/`
 - 创建：generated v1.3 Go files under `apps/test-service/internal/protocolmodel/v1_3/`
 
@@ -130,7 +132,7 @@ TaskSnapshotV13
 TaskEventV13
 ```
 
-- [ ] **Step 1：写出 v1.3 valid、negative injection 和 compatibility 测试**
+- [x] **Step 1：写出 v1.3 valid、negative injection 和 compatibility 测试**
 
 至少逐字段测试：
 
@@ -141,7 +143,7 @@ cwd workingDirectory hook preHook postHook resultPath
 
 同时验证 repeat 1..100、page 1..1000、item selection 最大 100,000、closed unions、稳定 ID pattern 和安全 integer。
 
-- [ ] **Step 2：运行 Schema tests 并确认失败**
+- [x] **Step 2：运行 Schema tests 并确认失败**
 
 ```powershell
 pnpm --filter @unit-test-ide/protocol-schema test
@@ -149,13 +151,13 @@ pnpm --filter @unit-test-ide/protocol-schema test
 
 预期：FAIL，v1.3 schemas 尚不存在。
 
-- [ ] **Step 3：实现 v1.3 closed schemas 与 deterministic generation**
+- [x] **Step 3：实现 v1.3 closed schemas 与 deterministic generation**
 
 `tasks/start` v1.3 使用 closed `oneOf`，保留 simulation/cmakeBuild 并增加 testDiscovery/testRun。只读方法增加 `tests/catalog/get`、`tests/runs/get`、`tests/runs/list`。
 
 v1.3 Test Selection 只能表达 ID 和结构化 Catalog filter。`failedFromRun` 只包含 `runId`。
 
-- [ ] **Step 4：生成并验证 drift**
+- [x] **Step 4：生成并验证 drift**
 
 ```powershell
 pnpm generate:protocol
@@ -166,7 +168,7 @@ pnpm check:protocol-generated
 
 预期：PASS，第二次 generation 无 diff。
 
-- [ ] **Step 5：提交 Protocol v1.3 contract**
+- [x] **Step 5：提交 Protocol v1.3 contract**
 
 ```powershell
 git add packages/protocol-schema packages/protocol-models apps/test-service/internal/protocolmodel tools/protocol-gen/generate.mjs
