@@ -44,6 +44,37 @@ func TestServiceDiscoversThenCommitsArtifactBeforePublication(t *testing.T) {
 	}
 }
 
+func TestServiceReturnsRuntimeBindingsWithPublishedCatalog(
+	t *testing.T,
+) {
+	fixture := newServiceFixture(t)
+	snapshot, err := fixture.service.DiscoverSnapshotAfterBuild(
+		context.Background(),
+		fixture.input,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Bindings) != 1 ||
+		snapshot.Bindings[0].ContainerID !=
+			snapshot.Catalog.Containers[0].ID ||
+		snapshot.Bindings[0].Descriptor.LogicalName !=
+			snapshot.Catalog.Containers[0].CTestLogicalName ||
+		snapshot.Bindings[0].Adapter == nil ||
+		snapshot.Bindings[0].Adapter.Framework() !=
+			testdomain.FrameworkCppUTest {
+		t.Fatalf("discovery snapshot = %#v", snapshot)
+	}
+	second := snapshot.Clone()
+	snapshot.Bindings[0].Descriptor.Arguments = append(
+		snapshot.Bindings[0].Descriptor.Arguments,
+		"mutated",
+	)
+	if len(second.Bindings[0].Descriptor.Arguments) != 0 {
+		t.Fatal("DiscoverySnapshot.Clone returned aliased descriptor")
+	}
+}
+
 func TestServiceKeepsPreviousCatalogWhenShowOnlyOrArtifactFails(t *testing.T) {
 	failures := map[string]func(*serviceFixture){
 		"show-only": func(fixture *serviceFixture) {

@@ -123,6 +123,101 @@ func (s *Store) GetRun(
 	return validated, nil
 }
 
+func (s *Store) RebindQueuedRun(
+	ctx context.Context,
+	runID string,
+	expectedRevision string,
+	catalogValue testdomain.Catalog,
+	selection testdomain.SelectionSnapshot,
+) error {
+	if s == nil || ctx == nil ||
+		!lowerHex(runID, 32) ||
+		!lowerHex(expectedRevision, 64) {
+		return task.ErrInvalidArgument
+	}
+	catalog, err := testdomain.NewCatalog(catalogValue)
+	if err != nil {
+		return task.ErrInvalidArgument
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return storageError("begin queued TestRun rebind", err)
+	}
+	defer tx.Rollback()
+	run, err := scanTestRun(tx.QueryRowContext(
+		ctx,
+		testRunSelect+` WHERE run_id=?`,
+		runID,
+	))
+	if isNoRows(err) {
+		return task.ErrNotFound
+	}
+	if err != nil {
+		return storageError("read queued TestRun rebind", err)
+	}
+	if run.Status != testdomain.RunQueued ||
+		run.ProjectID != catalog.ProjectID ||
+		run.ProfileID != catalog.ProfileID {
+		return task.ErrConflict
+	}
+	candidate := run
+	candidate.CatalogRevision = catalog.Revision
+	candidate.SelectionSnapshot = selection.Clone()
+	validated, err := testdomain.NewTestRun(candidate)
+	if err != nil {
+		return task.ErrInvalidArgument
+	}
+	if run.CatalogRevision == catalog.Revision &&
+		reflect.DeepEqual(
+			run.SelectionSnapshot,
+			validated.SelectionSnapshot,
+		) {
+		return nil
+	}
+	if run.CatalogRevision != expectedRevision {
+		return task.ErrConflict
+	}
+	var resultCount int
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM test_run_results WHERE run_id=?`,
+		runID,
+	).Scan(&resultCount); err != nil {
+		return storageError("read queued TestRun results", err)
+	}
+	if resultCount != 0 {
+		return task.ErrConflict
+	}
+	selectionJSON, _, err := encodeRunMetadata(validated)
+	if err != nil {
+		return task.ErrInvalidArgument
+	}
+	result, err := tx.ExecContext(
+		ctx,
+		`UPDATE test_runs
+		SET catalog_revision=?, selection_json=?
+		WHERE run_id=? AND status='queued' AND catalog_revision=?`,
+		catalog.Revision,
+		string(selectionJSON),
+		runID,
+		expectedRevision,
+	)
+	if err != nil {
+		return storageError("update queued TestRun rebind", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return storageError("read queued TestRun rebind result", err)
+	}
+	if affected != 1 {
+		return task.ErrConflict
+	}
+	if err := tx.Commit(); err != nil {
+		return storageError("commit queued TestRun rebind", err)
+	}
+	return nil
+}
+
 func (s *Store) ListRuns(
 	ctx context.Context,
 	request testdomain.RunPageRequest,

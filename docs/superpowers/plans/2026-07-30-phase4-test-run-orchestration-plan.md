@@ -244,6 +244,14 @@ git commit -m "feat: interpret test task domain results"
 
 ### Task 4：Test Coordinator、Discovery/Run plan 与 bounded scheduler
 
+> 实施进度：已完成 TestRun Task/queued TestRun 原子创建、Build
+> `PreparePlan` 复用、Catalog revision preflight、build 后 stable-ID
+> rebind、test executable pin、framework/Opaque run planning、结果
+> interpreter，以及确定性 bounded wave scheduler。Task 4 尚未完成：
+> Task Engine 目前仍按 step 串行执行，wave 还没有并发执行语义；framework
+> discovery 也仍需改造成可取消的 Task step，不能由 continuation 回调直接
+> 执行外部进程。在这两项完成前不勾选本 Task。
+
 **文件：**
 
 - 创建：`apps/test-service/internal/testrun/coordinator.go`

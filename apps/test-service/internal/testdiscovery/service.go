@@ -75,18 +75,56 @@ type DiscoveryInput struct {
 	Fingerprint Fingerprint
 }
 
+type RuntimeBinding struct {
+	ContainerID testdomain.ID
+	Descriptor  ctest.ExecutionDescriptor
+	Adapter     testframework.Adapter
+}
+
+type DiscoverySnapshot struct {
+	Catalog  testdomain.Catalog
+	Bindings []RuntimeBinding
+}
+
+func (snapshot DiscoverySnapshot) Clone() DiscoverySnapshot {
+	result := DiscoverySnapshot{
+		Catalog:  snapshot.Catalog.Clone(),
+		Bindings: make([]RuntimeBinding, len(snapshot.Bindings)),
+	}
+	for index, binding := range snapshot.Bindings {
+		result.Bindings[index] = binding
+		result.Bindings[index].Descriptor =
+			cloneRuntimeDescriptor(binding.Descriptor)
+	}
+	return result
+}
+
 func (service *Service) DiscoverAfterBuild(
 	ctx context.Context,
 	input DiscoveryInput,
 ) (testdomain.Catalog, error) {
+	snapshot, err := service.DiscoverSnapshotAfterBuild(
+		ctx,
+		input,
+	)
+	if err != nil {
+		return testdomain.Catalog{}, err
+	}
+	return snapshot.Catalog, nil
+}
+
+func (service *Service) DiscoverSnapshotAfterBuild(
+	ctx context.Context,
+	input DiscoveryInput,
+) (DiscoverySnapshot, error) {
 	if service == nil || ctx == nil || !validOpaqueID(input.TaskID) ||
 		!validOpaqueID(input.ArtifactID) ||
 		input.Profile.ID == "" || input.Profile.ProjectID == "" {
-		return testdomain.Catalog{}, ErrInvalidService
+		return DiscoverySnapshot{}, ErrInvalidService
 	}
 	step, err := service.config.Runner.ShowOnlyPlan(input.Profile)
 	if err != nil {
-		return testdomain.Catalog{}, err
+		return DiscoverySnapshot{}, err
 	}
 	encoded, err := service.config.Executor.Execute(
 		ctx,
@@ -94,22 +132,23 @@ func (service *Service) DiscoverAfterBuild(
 		service.config.Limits.MaxDocumentBytes,
 	)
 	if err != nil {
-		return testdomain.Catalog{}, err
+		return DiscoverySnapshot{}, err
 	}
 	snapshot, err := ctest.ParseShowOnlyJSON(encoded, service.config.Limits)
 	if err != nil {
-		return testdomain.Catalog{}, err
+		return DiscoverySnapshot{}, err
 	}
 
 	containerInputs := make([]ContainerInput, 0, len(snapshot.Tests))
+	bindings := make([]RuntimeBinding, 0, len(snapshot.Tests))
 	executables := make([]cmake.FingerprintFile, 0, len(snapshot.Tests))
 	for _, raw := range snapshot.Tests {
 		if err := ctx.Err(); err != nil {
-			return testdomain.Catalog{}, err
+			return DiscoverySnapshot{}, err
 		}
 		descriptor, err := ctest.BuildDescriptor(raw, input.Profile, input.Targets)
 		if err != nil {
-			return testdomain.Catalog{}, err
+			return DiscoverySnapshot{}, err
 		}
 		selectionInput := testframework.SelectionInput{
 			Descriptor: descriptor,
@@ -121,11 +160,23 @@ func (service *Service) DiscoverAfterBuild(
 		}
 		selection, err := service.config.Registry.Select(ctx, selectionInput)
 		if err != nil {
-			return testdomain.Catalog{}, err
+			return DiscoverySnapshot{}, err
 		}
 		containerInputs = append(containerInputs, ContainerInput{
 			Descriptor: descriptor,
 			Selection:  selection,
+		})
+		containerID, err := testdomain.ContainerID(
+			input.Profile.ProjectID,
+			raw.Name,
+		)
+		if err != nil {
+			return DiscoverySnapshot{}, err
+		}
+		bindings = append(bindings, RuntimeBinding{
+			ContainerID: containerID,
+			Descriptor:  cloneRuntimeDescriptor(descriptor),
+			Adapter:     selection.Adapter,
 		})
 		if descriptor.TargetID != "" {
 			executables = append(executables, descriptor.Executable)
@@ -142,7 +193,7 @@ func (service *Service) DiscoverAfterBuild(
 		Containers:  containerInputs,
 	})
 	if err != nil {
-		return testdomain.Catalog{}, err
+		return DiscoverySnapshot{}, err
 	}
 	artifact, err := service.config.Artifacts.CommitTestCatalog(
 		ctx,
@@ -152,12 +203,36 @@ func (service *Service) DiscoverAfterBuild(
 		catalog,
 	)
 	if err != nil {
-		return testdomain.Catalog{}, err
+		return DiscoverySnapshot{}, err
 	}
 	if err := service.config.Catalogs.PublishCatalog(ctx, catalog, artifact); err != nil {
-		return testdomain.Catalog{}, err
+		return DiscoverySnapshot{}, err
 	}
-	return catalog, nil
+	return DiscoverySnapshot{
+		Catalog:  catalog,
+		Bindings: bindings,
+	}.Clone(), nil
+}
+
+func cloneRuntimeDescriptor(
+	value ctest.ExecutionDescriptor,
+) ctest.ExecutionDescriptor {
+	result := value
+	result.Arguments = append([]string(nil), value.Arguments...)
+	result.Environment = append(
+		[]ctest.EnvironmentEntry(nil),
+		value.Environment...,
+	)
+	result.EnvironmentChanges = append(
+		[]ctest.EnvironmentModification(nil),
+		value.EnvironmentChanges...,
+	)
+	result.Labels = append([]string(nil), value.Labels...)
+	result.Compatibility.Reasons = append(
+		[]ctest.Reason(nil),
+		value.Compatibility.Reasons...,
+	)
+	return result
 }
 
 func uniqueExecutableFingerprints(

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"unit-test-ide.local/test-service/internal/task"
+	"unit-test-ide.local/test-service/internal/testdomain"
 )
 
 func TestMigration007PreservesTaskRelationsAndRollsBackFailure(
@@ -173,6 +174,64 @@ func TestCreateTestTaskRollsBackTaskWhenRunInsertFails(t *testing.T) {
 		task.ErrNotFound,
 	) {
 		t.Fatalf("rolled-back task lookup error = %v", err)
+	}
+}
+
+func TestRebindQueuedRunAdvancesCatalogBeforeAnyResult(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	now := time.Date(2026, 7, 31, 9, 30, 0, 0, time.UTC)
+	input := testRunTaskFixture(177, 178, now)
+	oldCatalog := catalogFixture(t, "8", "old")
+	newCatalog := catalogFixture(t, "9", "new")
+	run := runFixture(input, 179, oldCatalog.Items[0].ID)
+	run.ProfileID = oldCatalog.ProfileID
+	run.CatalogRevision = oldCatalog.Revision
+	run.SelectionSnapshot.ItemIDs = []testdomain.ID{
+		newCatalog.Items[0].ID,
+	}
+	if _, _, err := store.CreateTestTask(
+		ctx,
+		input,
+		[]task.StepSnapshot{{
+			ID: "build", Kind: task.StepBuild,
+			Status: task.StepPending,
+		}},
+		draft(input.ID, task.EventTaskCreated, now),
+		run,
+	); err != nil {
+		t.Fatal(err)
+	}
+	selection := testdomain.SelectionSnapshot{
+		Mode: testdomain.SelectionItems,
+		ItemIDs: []testdomain.ID{
+			newCatalog.Items[0].ID,
+		},
+	}
+	if err := store.RebindQueuedRun(
+		ctx,
+		run.RunID,
+		oldCatalog.Revision,
+		newCatalog,
+		selection,
+	); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := store.GetRun(ctx, run.RunID)
+	if err != nil ||
+		persisted.CatalogRevision != newCatalog.Revision ||
+		persisted.SelectionSnapshot.ItemIDs[0] !=
+			newCatalog.Items[0].ID {
+		t.Fatalf("rebound TestRun = %#v, %v", persisted, err)
+	}
+	if err := store.RebindQueuedRun(
+		ctx,
+		run.RunID,
+		oldCatalog.Revision,
+		newCatalog,
+		selection,
+	); err != nil {
+		t.Fatalf("idempotent RebindQueuedRun() error = %v", err)
 	}
 }
 
