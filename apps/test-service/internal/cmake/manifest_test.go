@@ -1,11 +1,17 @@
 package cmake
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+
+	"unit-test-ide.local/test-service/internal/unityrunner"
 )
 
 func TestManifestMatchesProductionBundleShape(t *testing.T) {
@@ -92,6 +98,118 @@ func TestManifestRejectsCTestMissingFromInstalledFiles(t *testing.T) {
 	if !errors.Is(err, ErrInvalidManifest) {
 		t.Fatalf("error = %v, want ErrInvalidManifest", err)
 	}
+}
+
+func TestUnityRunnerGeneratorIdentityComesFromProductManifest(t *testing.T) {
+	platform := "linux"
+	if runtime.GOOS == "windows" {
+		platform = "win32"
+	}
+	firstRoot := writeProductManifestFixture(t, platform, []byte("fixed generator bytes"))
+	secondRoot := writeProductManifestFixture(t, platform, []byte("fixed generator bytes"))
+	t.Setenv("PATH", t.TempDir())
+
+	first, err := ResolveUnityRunnerGenerator(firstRoot, platform, "x64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := ResolveUnityRunnerGenerator(secondRoot, platform, "x64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Path == "" || !filepath.IsAbs(first.Path) ||
+		first.RelativePath != expectedUnityRunnerGeneratorPath(platform) ||
+		first.Version != unityrunner.CurrentGeneratorVersion ||
+		len(first.SHA256) != 64 || len(first.Identity) != 64 {
+		t.Fatalf("generator = %#v", first)
+	}
+	if first.Identity != second.Identity {
+		t.Fatalf("install root changed product identity: %q != %q", first.Identity, second.Identity)
+	}
+	if filepath.Dir(first.Path) == os.Getenv("PATH") {
+		t.Fatalf("generator was searched from PATH: %#v", first)
+	}
+}
+
+func TestUnityRunnerGeneratorManifestRejectsUnsafeOrMismatchedEntry(t *testing.T) {
+	platform := "linux"
+	if runtime.GOOS == "windows" {
+		platform = "win32"
+	}
+	tests := map[string]struct {
+		mutate func(*ProductManifest)
+		want   error
+	}{
+		"path": {mutate: func(value *ProductManifest) {
+			value.UnityRunnerGenerator.RelativePath = "../generator"
+		}, want: ErrInvalidProductManifest},
+		"version": {mutate: func(value *ProductManifest) {
+			value.UnityRunnerGenerator.Version = "latest"
+		}, want: ErrInvalidProductManifest},
+		"digest": {mutate: func(value *ProductManifest) {
+			value.UnityRunnerGenerator.SHA256 = strings.Repeat("0", 64)
+		}, want: ErrProductIntegrity},
+		"platform": {mutate: func(value *ProductManifest) {
+			value.UnityRunnerGenerator.Platform = "darwin"
+		}, want: ErrInvalidProductManifest},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			root := writeProductManifestFixture(t, platform, []byte("fixed generator bytes"))
+			manifestPath := filepath.Join(root, productManifestName)
+			var manifest ProductManifest
+			data, err := os.ReadFile(manifestPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(data, &manifest); err != nil {
+				t.Fatal(err)
+			}
+			test.mutate(&manifest)
+			data, err = json.Marshal(manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(manifestPath, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ResolveUnityRunnerGenerator(root, platform, "x64"); !errors.Is(err, test.want) {
+				t.Fatalf("error = %v, want %v", err, test.want)
+			}
+		})
+	}
+}
+
+func writeProductManifestFixture(t *testing.T, platform string, executable []byte) string {
+	t.Helper()
+	root := t.TempDir()
+	relative := expectedUnityRunnerGeneratorPath(platform)
+	path := filepath.Join(root, filepath.FromSlash(relative))
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, executable, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(executable)
+	manifest := ProductManifest{
+		SchemaVersion: 1,
+		UnityRunnerGenerator: ProductExecutableManifest{
+			RelativePath: relative,
+			Version:      unityrunner.CurrentGeneratorVersion,
+			SHA256:       hex.EncodeToString(sum[:]),
+			Platform:     platform,
+			Architecture: "x64",
+		},
+	}
+	encoded, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, productManifestName), encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return root
 }
 
 func writeManifestMutation(t *testing.T, mutate func(string) string) string {

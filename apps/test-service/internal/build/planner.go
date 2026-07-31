@@ -32,7 +32,9 @@ func Plan(input PlanInput) (task.ExecutionPlan, error) {
 	if input.Installation.Executable == "" || input.WorkspaceRoot.NativePath == "" ||
 		input.Project.ID == "" || input.Profile.ID == "" ||
 		input.Profile.ProjectID != input.Project.ID || input.Profile.BinaryDir == "" ||
-		input.Jobs < 1 || input.Jobs > 256 {
+		input.Jobs < 1 || input.Jobs > 256 ||
+		(input.Installation.UnityRunnerGenerator != (cmake.ProductExecutable{}) &&
+			!input.Installation.UnityRunnerGenerator.Valid()) {
 		return task.ExecutionPlan{}, task.ErrInvalidArgument
 	}
 	sourceDir, err := input.WorkspaceRoot.ResolveRelative(input.Project.SourceDir)
@@ -92,6 +94,12 @@ func configureStep(input PlanInput, sourceDir string) (task.ExecutionStep, error
 		)
 	default:
 		return task.ExecutionStep{}, task.ErrInvalidArgument
+	}
+	if input.Installation.UnityRunnerGenerator.Valid() {
+		args = append(args,
+			"-DUTIDE_UNITY_RUNNER_GENERATOR:FILEPATH="+
+				filepath.ToSlash(input.Installation.UnityRunnerGenerator.Path),
+		)
 	}
 	parser, err := diagnostic.NewParser(diagnostic.FamilyCMake, diagnostic.Options{
 		Root: input.WorkspaceRoot, WorkingDirectory: sourceDir, StepID: "configure",

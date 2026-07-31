@@ -253,12 +253,13 @@ func TestSessionVersion12StrictlyRejectsUnsafeOrInvalidBuildFields(t *testing.T)
 		"jobs": 8, "timeoutMs": 600000,
 	}
 	tests := map[string]any{
-		"executable":        "cmake",
-		"args":              []string{"--build"},
-		"env":               map[string]string{"PATH": "unsafe"},
-		"workingDirectory":  "C:/workspace",
-		"presetPath":        "CMakePresets.json",
-		"nativeToolOptions": []string{"/m"},
+		"executable":           "cmake",
+		"args":                 []string{"--build"},
+		"env":                  map[string]string{"PATH": "unsafe"},
+		"workingDirectory":     "C:/workspace",
+		"presetPath":           "CMakePresets.json",
+		"nativeToolOptions":    []string{"/m"},
+		"unityRunnerGenerator": "C:/product/bin/unity-runner-generator.exe",
 	}
 	for name, value := range tests {
 		t.Run(name, func(t *testing.T) {

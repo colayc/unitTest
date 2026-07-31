@@ -8,25 +8,207 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"os"
 	"path"
 	"path/filepath"
 	"reflect"
 	"regexp"
 	"strings"
+
+	"unit-test-ide.local/test-service/internal/unityrunner"
+	"unit-test-ide.local/test-service/internal/workspace"
 )
 
 const (
 	manifestSchemaVersion = 1
 	manifestLicense       = "BSD-3-Clause"
 	maxManifestSize       = 256 * 1024
+	productManifestName   = "product-manifest.json"
 )
 
 var (
-	ErrInvalidManifest = errors.New("invalid CMake bundle manifest")
-	ErrBundleIntegrity = errors.New("CMake bundle integrity check failed")
+	ErrInvalidManifest        = errors.New("invalid CMake bundle manifest")
+	ErrBundleIntegrity        = errors.New("CMake bundle integrity check failed")
+	ErrInvalidProductManifest = errors.New("invalid product installation manifest")
+	ErrProductIntegrity       = errors.New("product installation integrity check failed")
 
 	cmakeVersionPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
 )
+
+type ProductManifest struct {
+	SchemaVersion        int                       `json:"schemaVersion"`
+	UnityRunnerGenerator ProductExecutableManifest `json:"unityRunnerGenerator"`
+}
+
+type ProductExecutableManifest struct {
+	RelativePath string `json:"relativePath"`
+	Version      string `json:"version"`
+	SHA256       string `json:"sha256"`
+	Platform     string `json:"platform"`
+	Architecture string `json:"architecture"`
+}
+
+type ProductExecutable struct {
+	Path         string
+	RelativePath string
+	Version      string
+	SHA256       string
+	Platform     string
+	Architecture string
+	Identity     string
+}
+
+func (executable ProductExecutable) Valid() bool {
+	entry := ProductExecutableManifest{
+		RelativePath: executable.RelativePath,
+		Version:      executable.Version,
+		SHA256:       executable.SHA256,
+		Platform:     executable.Platform,
+		Architecture: executable.Architecture,
+	}
+	return executable.Path != "" && filepath.IsAbs(executable.Path) &&
+		filepath.Clean(executable.Path) == executable.Path &&
+		validateProductExecutableManifest(entry, entry.Platform, entry.Architecture) == nil &&
+		executable.Identity == ProductExecutableIdentity(entry)
+}
+
+func ProductExecutableIdentity(entry ProductExecutableManifest) string {
+	identity, err := canonicalSHA256(struct {
+		Kind         string `json:"kind"`
+		RelativePath string `json:"relativePath"`
+		Version      string `json:"version"`
+		SHA256       string `json:"sha256"`
+		Platform     string `json:"platform"`
+		Architecture string `json:"architecture"`
+	}{
+		Kind:         "unity-runner-generator",
+		RelativePath: entry.RelativePath,
+		Version:      entry.Version, SHA256: entry.SHA256,
+		Platform: entry.Platform, Architecture: entry.Architecture,
+	})
+	if err != nil {
+		return ""
+	}
+	return identity
+}
+
+func ResolveUnityRunnerGenerator(productRoot, platform, architecture string) (ProductExecutable, error) {
+	if productRoot == "" || !filepath.IsAbs(productRoot) {
+		return ProductExecutable{}, fmt.Errorf("%w: product root must be absolute", ErrInvalidProductManifest)
+	}
+	rootInfo, err := os.Lstat(productRoot)
+	if err != nil || !rootInfo.IsDir() || rootInfo.Mode()&os.ModeSymlink != 0 {
+		return ProductExecutable{}, fmt.Errorf("%w: product root is not a direct directory", ErrInvalidProductManifest)
+	}
+	root, err := workspace.OpenRoot(productRoot)
+	if err != nil {
+		return ProductExecutable{}, fmt.Errorf("%w: open product root: %v", ErrInvalidProductManifest, err)
+	}
+	manifestPath := filepath.Join(root.NativePath, productManifestName)
+	manifestInfo, err := os.Lstat(manifestPath)
+	if err != nil || !manifestInfo.Mode().IsRegular() || manifestInfo.Mode()&os.ModeSymlink != 0 {
+		return ProductExecutable{}, fmt.Errorf("%w: product manifest is not a direct regular file", ErrInvalidProductManifest)
+	}
+	var manifest ProductManifest
+	if err := decodeStrictFile(manifestPath, maxManifestSize, &manifest); err != nil {
+		return ProductExecutable{}, fmt.Errorf("%w: %v", ErrInvalidProductManifest, err)
+	}
+	if manifest.SchemaVersion != 1 {
+		return ProductExecutable{}, fmt.Errorf("%w: schemaVersion = %d", ErrInvalidProductManifest, manifest.SchemaVersion)
+	}
+	entry := manifest.UnityRunnerGenerator
+	if err := validateProductExecutableManifest(entry, platform, architecture); err != nil {
+		return ProductExecutable{}, fmt.Errorf("%w: Unity runner generator: %v", ErrInvalidProductManifest, err)
+	}
+	executablePath, err := directProductFile(root, filepath.FromSlash(entry.RelativePath))
+	if err != nil {
+		return ProductExecutable{}, fmt.Errorf("%w: Unity runner generator: %v", ErrProductIntegrity, err)
+	}
+	snapshot, err := captureFileSnapshot(executablePath, 0)
+	if err != nil {
+		return ProductExecutable{}, fmt.Errorf("%w: snapshot Unity runner generator: %v", ErrProductIntegrity, err)
+	}
+	defer snapshot.Close()
+	if snapshot.digest != entry.SHA256 {
+		return ProductExecutable{}, fmt.Errorf("%w: Unity runner generator digest mismatch", ErrProductIntegrity)
+	}
+	if err := requireExecutableMode(executablePath, snapshot.info); err != nil {
+		return ProductExecutable{}, fmt.Errorf("%w: %v", ErrProductIntegrity, err)
+	}
+	result := ProductExecutable{
+		Path: executablePath, RelativePath: entry.RelativePath,
+		Version: entry.Version, SHA256: entry.SHA256,
+		Platform: entry.Platform, Architecture: entry.Architecture,
+		Identity: ProductExecutableIdentity(entry),
+	}
+	if !result.Valid() {
+		return ProductExecutable{}, fmt.Errorf("%w: resolved generator identity is invalid", ErrProductIntegrity)
+	}
+	return result, nil
+}
+
+func validateProductExecutableManifest(
+	entry ProductExecutableManifest,
+	platform string,
+	architecture string,
+) error {
+	if platform != "win32" && platform != "linux" {
+		return fmt.Errorf("unsupported platform %q", platform)
+	}
+	if architecture != "x64" {
+		return fmt.Errorf("unsupported architecture %q", architecture)
+	}
+	if entry.Platform != platform || entry.Architecture != architecture {
+		return fmt.Errorf("platform or architecture does not match the installation")
+	}
+	if entry.RelativePath != expectedUnityRunnerGeneratorPath(platform) ||
+		!safeManifestPath(entry.RelativePath) {
+		return fmt.Errorf("relativePath = %q", entry.RelativePath)
+	}
+	if entry.Version != unityrunner.CurrentGeneratorVersion {
+		return fmt.Errorf("version = %q", entry.Version)
+	}
+	if !validSHA256(entry.SHA256) {
+		return fmt.Errorf("invalid SHA-256")
+	}
+	return nil
+}
+
+func expectedUnityRunnerGeneratorPath(platform string) string {
+	if platform == "win32" {
+		return "bin/unity-runner-generator.exe"
+	}
+	return "bin/unity-runner-generator"
+}
+
+func directProductFile(root workspace.Root, relative string) (string, error) {
+	current := root.NativePath
+	for _, component := range strings.Split(filepath.Clean(relative), string(filepath.Separator)) {
+		if component == "" || component == "." {
+			continue
+		}
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if err != nil {
+			return "", err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", errors.New("path contains a symbolic link or junction")
+		}
+	}
+	canonical, err := root.ResolveRelative(relative)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Lstat(canonical)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return "", errors.New("path is not a direct regular file")
+	}
+	return canonical, nil
+}
 
 type Manifest struct {
 	SchemaVersion int                `json:"schemaVersion"`

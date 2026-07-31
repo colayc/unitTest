@@ -138,6 +138,9 @@ func TestConfigureFingerprintIsCanonicalAndTracksConfigureGraph(t *testing.T) {
 		{"configuration", func(value *ProfileFingerprintInput) { value.Profile.Configuration = "Release" }},
 		{"binary directory", func(value *ProfileFingerprintInput) { value.Profile.BinaryDir = "out/release" }},
 		{"cmake identity", func(value *ProfileFingerprintInput) { value.CMakeIdentity = strings.Repeat("c", 64) }},
+		{"Unity runner generator identity", func(value *ProfileFingerprintInput) {
+			value.UnityRunnerGeneratorIdentity = strings.Repeat("8", 64)
+		}},
 		{"toolchain identity", func(value *ProfileFingerprintInput) { value.ToolchainIdentity = strings.Repeat("d", 64) }},
 		{"preset content", func(value *ProfileFingerprintInput) { value.PresetInputs[0].SHA256 = strings.Repeat("e", 64) }},
 		{"preset file identity", func(value *ProfileFingerprintInput) { value.PresetInputs[0].Identity = "preset-two" }},
@@ -303,8 +306,9 @@ func validFingerprintInputForTest() ProfileFingerprintInput {
 			Configuration:   "Debug",
 			BinaryDir:       "out/debug",
 		},
-		CMakeIdentity:     strings.Repeat("a", 64),
-		ToolchainIdentity: strings.Repeat("b", 64),
+		CMakeIdentity:                strings.Repeat("a", 64),
+		UnityRunnerGeneratorIdentity: strings.Repeat("f", 64),
+		ToolchainIdentity:            strings.Repeat("b", 64),
 		PresetInputs: []FingerprintFile{
 			fingerprintFileForTest("CMakePresets.json", "preset-one", "1"),
 			fingerprintFileForTest("included.json", "preset-include", "2"),

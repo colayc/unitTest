@@ -1,10 +1,14 @@
 package build
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -164,6 +168,134 @@ func TestPlannerUsesMSVCEnvironmentWithNinjaFallback(t *testing.T) {
 		[]string{"INCLUDE=sdk", "PATH=trusted-msvc"},
 	) {
 		t.Fatalf("MSVC Ninja environment = %#v", plan.Steps[0].Process.Env)
+	}
+}
+
+func TestPlannerInjectsOnlyManifestBoundUnityRunnerForPresetAndGeneratedConfigure(t *testing.T) {
+	for _, origin := range []string{"generated", "preset"} {
+		t.Run(origin, func(t *testing.T) {
+			fixture := newPlannerFixture(t)
+			generatorPath := filepath.Join(t.TempDir(), "unity-runner-generator.exe")
+			if err := os.WriteFile(generatorPath, []byte("generator"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			generatorPath = canonicalPlannerFile(t, generatorPath)
+			entry := cmake.ProductExecutableManifest{
+				RelativePath: "bin/unity-runner-generator.exe",
+				Version:      "1.0.0", SHA256: strings.Repeat("1", 64),
+				Platform: "win32", Architecture: "x64",
+			}
+			fixture.installation.UnityRunnerGenerator = cmake.ProductExecutable{
+				Path: generatorPath, RelativePath: "bin/unity-runner-generator.exe",
+				Version: "1.0.0", SHA256: strings.Repeat("1", 64),
+				Platform: "win32", Architecture: "x64",
+				Identity: cmake.ProductExecutableIdentity(entry),
+			}
+			fixture.profile.Origin = origin
+			if origin == "preset" {
+				fixture.profile.ConfigurePreset = "debug"
+			}
+			plan, err := Plan(PlanInput{
+				Installation: fixture.installation, WorkspaceRoot: fixture.root,
+				Project: fixture.project, Profile: fixture.profile,
+				Toolchain: fixture.toolchain, Jobs: 1, Configure: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			args := plan.Steps[0].Process.Args
+			want := "-DUTIDE_UNITY_RUNNER_GENERATOR:FILEPATH=" + filepath.ToSlash(generatorPath)
+			count := 0
+			for _, argument := range args {
+				if strings.HasPrefix(argument, "-DUTIDE_") {
+					count++
+					if argument != want {
+						t.Fatalf("unexpected reserved cache argument %q", argument)
+					}
+				}
+			}
+			if count != 1 {
+				t.Fatalf("reserved cache args = %#v, want exactly %q", args, want)
+			}
+		})
+	}
+}
+
+func TestPlannerRejectsPartialUnityRunnerInstallationIdentity(t *testing.T) {
+	fixture := newPlannerFixture(t)
+	fixture.installation.UnityRunnerGenerator = cmake.ProductExecutable{
+		Path: filepath.Join(t.TempDir(), "generator.exe"),
+	}
+	if _, err := Plan(PlanInput{
+		Installation: fixture.installation, WorkspaceRoot: fixture.root,
+		Project: fixture.project, Profile: fixture.profile,
+		Toolchain: fixture.toolchain, Jobs: 1, Configure: true,
+	}); !errors.Is(err, task.ErrInvalidArgument) {
+		t.Fatalf("Plan() error = %v, want task.ErrInvalidArgument", err)
+	}
+}
+
+func TestExecutionBoundaryPinsManifestBoundUnityRunnerGenerator(t *testing.T) {
+	fixture := newPlannerFixture(t)
+	generatorBytes := []byte("manifest-bound generator")
+	generatorPath := filepath.Join(t.TempDir(), "unity-runner-generator")
+	platform := "linux"
+	relativePath := "bin/unity-runner-generator"
+	if runtime.GOOS == "windows" {
+		platform = "win32"
+		relativePath += ".exe"
+		generatorPath += ".exe"
+	}
+	if err := os.WriteFile(generatorPath, generatorBytes, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	generatorPath = canonicalPlannerFile(t, generatorPath)
+	sum := sha256.Sum256(generatorBytes)
+	entry := cmake.ProductExecutableManifest{
+		RelativePath: relativePath,
+		Version:      "1.0.0",
+		SHA256:       hex.EncodeToString(sum[:]),
+		Platform:     platform,
+		Architecture: "x64",
+	}
+	fixture.installation.UnityRunnerGenerator = cmake.ProductExecutable{
+		Path:         generatorPath,
+		RelativePath: entry.RelativePath,
+		Version:      entry.Version,
+		SHA256:       entry.SHA256,
+		Platform:     entry.Platform,
+		Architecture: entry.Architecture,
+		Identity:     cmake.ProductExecutableIdentity(entry),
+	}
+	boundary, err := NewExecutionBoundary(
+		fixture.installation,
+		fixture.root,
+		fixture.dataRoot,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	managed := boundary.(task.ManagedExecutionBoundary)
+	t.Cleanup(func() { _ = managed.Release() })
+	if err := boundary.ValidateExecutable(fixture.installation.Executable); err != nil {
+		t.Fatalf("CMake validation did not retain the generator pin: %v", err)
+	}
+	if err := boundary.ValidateExecutable(generatorPath); err != nil {
+		t.Fatalf("generator validation failed: %v", err)
+	}
+
+	if err := managed.Release(); err != nil {
+		t.Fatal(err)
+	}
+	fixture.installation.UnityRunnerGenerator.SHA256 = strings.Repeat("0", 64)
+	entry.SHA256 = fixture.installation.UnityRunnerGenerator.SHA256
+	fixture.installation.UnityRunnerGenerator.Identity = cmake.ProductExecutableIdentity(entry)
+	if _, err := NewExecutionBoundary(
+		fixture.installation,
+		fixture.root,
+		fixture.dataRoot,
+	); !errors.Is(err, task.ErrInvalidArgument) {
+		t.Fatalf("NewExecutionBoundary() error = %v, want task.ErrInvalidArgument", err)
 	}
 }
 

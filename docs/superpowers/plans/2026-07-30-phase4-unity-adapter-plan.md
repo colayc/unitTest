@@ -177,7 +177,7 @@ unity-runner-generator generate
   --source <validated-repeatable>
 ```
 
-- [ ] **Step 1：写出 CLI/path/fingerprint 失败测试**
+- [x] **Step 1：写出 CLI/path/fingerprint 失败测试**
 
 覆盖：
 
@@ -190,7 +190,7 @@ unity-runner-generator generate
 - Preset/generated configure 都只注入保留 cache variable；
 - Protocol 不能指定 generator path。
 
-- [ ] **Step 2：运行 CLI/CMake tests 并确认失败**
+- [x] **Step 2：运行 CLI/CMake tests 并确认失败**
 
 ```powershell
 go test ./apps/test-service/cmd/unity-runner-generator ./apps/test-service/internal/cmake ./apps/test-service/internal/build -run 'UnityRunner|GeneratorIdentity' -count=1
@@ -198,11 +198,11 @@ go test ./apps/test-service/cmd/unity-runner-generator ./apps/test-service/inter
 
 预期：FAIL。
 
-- [ ] **Step 3：实现 CLI 与 manifest binding**
+- [x] **Step 3：实现 CLI 与 manifest binding**
 
 CLI 使用与 Service 相同的 canonical root 类型。Product manifest 中 generator entry 固定 relative path、version、SHA-256 和 platform；不从 PATH 搜索。
 
-- [ ] **Step 4：运行 unit/race**
+- [x] **Step 4：运行 unit/race**
 
 ```powershell
 go test ./apps/test-service/cmd/unity-runner-generator ./apps/test-service/internal/cmake ./apps/test-service/internal/build -count=1
@@ -211,7 +211,7 @@ go test -race ./apps/test-service/internal/unityrunner -count=1
 
 预期：PASS。
 
-- [ ] **Step 5：提交 generator CLI**
+- [x] **Step 5：提交 generator CLI**
 
 ```powershell
 git add apps/test-service/cmd/unity-runner-generator apps/test-service/internal/cmake apps/test-service/internal/build

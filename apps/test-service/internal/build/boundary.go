@@ -1,7 +1,10 @@
 package build
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -12,21 +15,25 @@ import (
 )
 
 type executionBoundary struct {
-	executable      string
-	executableFile  *os.File
-	executableInfo  os.FileInfo
-	ctestExecutable string
-	ctestFile       *os.File
-	ctestInfo       os.FileInfo
-	workspaceRoot   workspace.Root
-	workspaceInfo   os.FileInfo
-	dataRoot        workspace.Root
-	dataInfo        os.FileInfo
-	lock            *DirectoryLock
-	mu              sync.Mutex
-	adoptedTaskID   string
-	releaseOnce     sync.Once
-	releaseErr      error
+	executable                 string
+	executableFile             *os.File
+	executableInfo             os.FileInfo
+	ctestExecutable            string
+	ctestFile                  *os.File
+	ctestInfo                  os.FileInfo
+	unityRunnerGenerator       string
+	unityRunnerGeneratorFile   *os.File
+	unityRunnerGeneratorInfo   os.FileInfo
+	unityRunnerGeneratorSHA256 string
+	workspaceRoot              workspace.Root
+	workspaceInfo              os.FileInfo
+	dataRoot                   workspace.Root
+	dataInfo                   os.FileInfo
+	lock                       *DirectoryLock
+	mu                         sync.Mutex
+	adoptedTaskID              string
+	releaseOnce                sync.Once
+	releaseErr                 error
 }
 
 func NewExecutionBoundary(
@@ -57,7 +64,13 @@ func newExecutionBoundary(
 	var ctestExecutable string
 	var ctestFile *os.File
 	var ctestInfo os.FileInfo
+	var unityRunnerGenerator string
+	var unityRunnerGeneratorFile *os.File
+	var unityRunnerGeneratorInfo os.FileInfo
 	fail := func() (*executionBoundary, error) {
+		if unityRunnerGeneratorFile != nil {
+			_ = unityRunnerGeneratorFile.Close()
+		}
 		if ctestFile != nil {
 			_ = ctestFile.Close()
 		}
@@ -72,6 +85,24 @@ func newExecutionBoundary(
 		}
 		ctestFile, ctestInfo, err = pinExecutable(ctestExecutable)
 		if err != nil {
+			return fail()
+		}
+	}
+	if installation.UnityRunnerGenerator != (cmake.ProductExecutable{}) {
+		if !installation.UnityRunnerGenerator.Valid() {
+			return fail()
+		}
+		unityRunnerGenerator, err = filepath.Abs(installation.UnityRunnerGenerator.Path)
+		if err != nil || filepath.Clean(unityRunnerGenerator) != installation.UnityRunnerGenerator.Path ||
+			unityRunnerGenerator == executable || unityRunnerGenerator == ctestExecutable {
+			return fail()
+		}
+		unityRunnerGeneratorFile, unityRunnerGeneratorInfo, err = pinExecutable(unityRunnerGenerator)
+		if err != nil {
+			return fail()
+		}
+		digest, digestErr := pinnedExecutableDigest(unityRunnerGeneratorFile)
+		if digestErr != nil || digest != installation.UnityRunnerGenerator.SHA256 {
 			return fail()
 		}
 	}
@@ -93,8 +124,12 @@ func newExecutionBoundary(
 		executable: executable, executableFile: executableFile,
 		executableInfo:  executableInfo,
 		ctestExecutable: ctestExecutable, ctestFile: ctestFile,
-		ctestInfo:     ctestInfo,
-		workspaceRoot: workspaceRoot, workspaceInfo: workspaceInfo,
+		ctestInfo:                  ctestInfo,
+		unityRunnerGenerator:       unityRunnerGenerator,
+		unityRunnerGeneratorFile:   unityRunnerGeneratorFile,
+		unityRunnerGeneratorInfo:   unityRunnerGeneratorInfo,
+		unityRunnerGeneratorSHA256: installation.UnityRunnerGenerator.SHA256,
+		workspaceRoot:              workspaceRoot, workspaceInfo: workspaceInfo,
 		dataRoot: dataRoot, dataInfo: dataInfo, lock: lock,
 	}, nil
 }
@@ -119,6 +154,8 @@ func (b *executionBoundary) ValidateExecutable(path string) error {
 		file, info = b.executableFile, b.executableInfo
 	case b.ctestExecutable:
 		file, info = b.ctestFile, b.ctestInfo
+	case b.unityRunnerGenerator:
+		file, info = b.unityRunnerGeneratorFile, b.unityRunnerGeneratorInfo
 	default:
 		return task.ErrInvalidArgument
 	}
@@ -132,7 +169,37 @@ func (b *executionBoundary) ValidateExecutable(path string) error {
 	); err != nil {
 		return task.ErrInvalidArgument
 	}
+	if b.unityRunnerGeneratorFile != nil {
+		if err := validatePinnedExecutable(
+			b.unityRunnerGeneratorFile,
+			b.unityRunnerGeneratorInfo,
+			b.unityRunnerGenerator,
+		); err != nil {
+			return task.ErrInvalidArgument
+		}
+		digest, err := pinnedExecutableDigest(b.unityRunnerGeneratorFile)
+		if err != nil || digest != b.unityRunnerGeneratorSHA256 {
+			return task.ErrInvalidArgument
+		}
+	}
 	return nil
+}
+
+func pinnedExecutableDigest(file *os.File) (string, error) {
+	if file == nil {
+		return "", errors.New("executable pin is closed")
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return "", err
+	}
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func (b *executionBoundary) Adopt(taskID string) {
@@ -155,9 +222,11 @@ func (b *executionBoundary) Release() error {
 		lock := b.lock
 		executableFile := b.executableFile
 		ctestFile := b.ctestFile
+		unityRunnerGeneratorFile := b.unityRunnerGeneratorFile
 		b.lock = nil
 		b.executableFile = nil
 		b.ctestFile = nil
+		b.unityRunnerGeneratorFile = nil
 		b.mu.Unlock()
 
 		var result error
@@ -169,6 +238,9 @@ func (b *executionBoundary) Release() error {
 		}
 		if ctestFile != nil {
 			result = errors.Join(result, ctestFile.Close())
+		}
+		if unityRunnerGeneratorFile != nil {
+			result = errors.Join(result, unityRunnerGeneratorFile.Close())
 		}
 		b.mu.Lock()
 		b.releaseErr = result

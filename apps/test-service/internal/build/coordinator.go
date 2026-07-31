@@ -118,7 +118,7 @@ func (c *Coordinator) Targets(
 	toolchainIdentity := effectiveToolchainIdentity(profile, toolchain.Instance{}, reply)
 	current := fingerprintInput(
 		snapshot.Generation, profile, c.config.Installation.Identity,
-		toolchainIdentity, reply,
+		toolchainIdentity, reply, c.config.Installation.UnityRunnerGenerator.Identity,
 	)
 	if cmake.NeedsConfigure(cmake.BuildConfiguration{
 		Fingerprint: previous.Fingerprint, Succeeded: true,
@@ -251,7 +251,7 @@ func (c *Coordinator) prepare(
 			cmake.BuildConfiguration{Fingerprint: previous.Fingerprint, Succeeded: true},
 			fingerprintInput(
 				snapshot.Generation, profile, c.config.Installation.Identity,
-				toolchainIdentity, reply,
+				toolchainIdentity, reply, c.config.Installation.UnityRunnerGenerator.Identity,
 			),
 		)
 	}
@@ -349,7 +349,7 @@ func (c *Coordinator) Succeeded(
 	)
 	fingerprint := configureFingerprint(
 		state.WorkspaceGeneration, state.Profile, state.CMakeIdentity,
-		toolchainIdentity, reply,
+		toolchainIdentity, reply, state.UnityRunnerGeneratorIdentity,
 	)
 	if fingerprint == "" {
 		return ErrConfigureRequired
@@ -368,16 +368,17 @@ func (c *Coordinator) Succeeded(
 }
 
 type configureStepState struct {
-	WorkspaceID         string             `json:"workspaceId"`
-	WorkspaceGeneration string             `json:"workspaceGeneration"`
-	ProjectID           string             `json:"projectId"`
-	Profile             cmake.BuildProfile `json:"profile"`
-	ToolchainID         string             `json:"toolchainId"`
-	CMakeIdentity       string             `json:"cmakeIdentity"`
-	BuildDirectory      string             `json:"buildDirectory"`
-	AllowedRoots        []string           `json:"allowedRoots"`
-	TargetIDs           []string           `json:"targetIds"`
-	TargetNames         map[string]string  `json:"targetNames"`
+	WorkspaceID                  string             `json:"workspaceId"`
+	WorkspaceGeneration          string             `json:"workspaceGeneration"`
+	ProjectID                    string             `json:"projectId"`
+	Profile                      cmake.BuildProfile `json:"profile"`
+	ToolchainID                  string             `json:"toolchainId"`
+	CMakeIdentity                string             `json:"cmakeIdentity"`
+	UnityRunnerGeneratorIdentity string             `json:"unityRunnerGeneratorIdentity,omitempty"`
+	BuildDirectory               string             `json:"buildDirectory"`
+	AllowedRoots                 []string           `json:"allowedRoots"`
+	TargetIDs                    []string           `json:"targetIds"`
+	TargetNames                  map[string]string  `json:"targetNames"`
 }
 
 func (c *Coordinator) configureState(
@@ -407,10 +408,11 @@ func (c *Coordinator) configureState(
 		WorkspaceID:         c.config.WorkspaceRoot.ID,
 		WorkspaceGeneration: snapshot.Generation,
 		ProjectID:           project.ID, Profile: profile, ToolchainID: instance.ID,
-		CMakeIdentity:  c.config.Installation.Identity,
-		BuildDirectory: buildDirectory,
-		AllowedRoots:   c.fileAPIAllowedRoots(profile, instance, snapshot.Toolchains),
-		TargetIDs:      append([]string{}, targetIDs...), TargetNames: targetNames,
+		CMakeIdentity:                c.config.Installation.Identity,
+		UnityRunnerGeneratorIdentity: c.config.Installation.UnityRunnerGenerator.Identity,
+		BuildDirectory:               buildDirectory,
+		AllowedRoots:                 c.fileAPIAllowedRoots(profile, instance, snapshot.Toolchains),
+		TargetIDs:                    append([]string{}, targetIDs...), TargetNames: targetNames,
 	})
 	if err != nil {
 		return nil, task.ErrInvalidArgument
@@ -494,6 +496,12 @@ func (c *Coordinator) fileAPIAllowedRoots(
 	}
 	if c.config.Installation.Root == "" {
 		candidates[2] = filepath.Dir(c.config.Installation.Executable)
+	}
+	if c.config.Installation.UnityRunnerGenerator.Path != "" {
+		candidates = append(
+			candidates,
+			filepath.Dir(c.config.Installation.UnityRunnerGenerator.Path),
+		)
 	}
 	instances := []toolchain.Instance{instance}
 	if profile.Origin == "preset" {
@@ -582,11 +590,14 @@ func fingerprintInput(
 	cmakeIdentity string,
 	toolchainIdentity string,
 	reply cmake.FileAPIReply,
+	unityRunnerGeneratorIdentity string,
 ) cmake.ProfileFingerprintInput {
 	return cmake.ProfileFingerprintInput{
 		WorkspaceGeneration: generation, Profile: profile,
-		CMakeIdentity: cmakeIdentity, ToolchainIdentity: toolchainIdentity,
-		CMakeInputStates: reply.CMakeInputStates, Cache: reply.Cache,
+		CMakeIdentity:                cmakeIdentity,
+		UnityRunnerGeneratorIdentity: unityRunnerGeneratorIdentity,
+		ToolchainIdentity:            toolchainIdentity,
+		CMakeInputStates:             reply.CMakeInputStates, Cache: reply.Cache,
 		FileAPIState: reply.StateFiles,
 	}
 }
@@ -597,9 +608,11 @@ func configureFingerprint(
 	cmakeIdentity string,
 	toolchainIdentity string,
 	reply cmake.FileAPIReply,
+	unityRunnerGeneratorIdentity string,
 ) string {
 	return cmake.ConfigureFingerprint(fingerprintInput(
 		generation, profile, cmakeIdentity, toolchainIdentity, reply,
+		unityRunnerGeneratorIdentity,
 	))
 }
 

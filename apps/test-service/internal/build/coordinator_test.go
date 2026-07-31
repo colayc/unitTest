@@ -97,6 +97,7 @@ func TestCoordinatorPlansConfigureThenSkipsItForUnchangedSuccessfulState(t *test
 		fixture.installation.Identity,
 		fixture.toolchain.ID,
 		reply,
+		"",
 	)
 	fixture.configurations.value = taskstore.BuildConfiguration{
 		WorkspaceID: fixture.root.ID, ProjectID: fixture.project.ID,
