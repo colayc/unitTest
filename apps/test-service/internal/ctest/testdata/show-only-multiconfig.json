@@ -1,0 +1,42 @@
+{
+  "kind": "ctestInfo",
+  "version": {
+    "major": 1,
+    "minor": 0
+  },
+  "backtraceGraph": {
+    "commands": [
+      "add_test"
+    ],
+    "files": [
+      "tests/CMakeLists.txt"
+    ],
+    "nodes": [
+      {
+        "file": 0,
+        "line": 7,
+        "command": 0
+      }
+    ]
+  },
+  "tests": [
+    {
+      "name": "multi.config",
+      "config": "Debug",
+      "command": [
+        "/workspace/build/Debug/multi-runner",
+        "--configuration",
+        "Debug"
+      ],
+      "backtrace": 0,
+      "properties": [
+        {
+          "name": "LABELS",
+          "value": [
+            "multi-config"
+          ]
+        }
+      ]
+    }
+  ]
+}

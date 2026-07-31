@@ -37,7 +37,7 @@
 func ParseShowOnlyJSON(data []byte, limits Limits) (Snapshot, error)
 ```
 
-- [ ] **Step 1：写出 CTest JSON parser 失败测试**
+- [x] **Step 1：写出 CTest JSON parser 失败测试**
 
 覆盖：
 
@@ -50,7 +50,7 @@ func ParseShowOnlyJSON(data []byte, limits Limits) (Snapshot, error)
 - broken backtrace index；
 - command 为空。
 
-- [ ] **Step 2：运行 parser tests 并确认失败**
+- [x] **Step 2：运行 parser tests 并确认失败**
 
 ```powershell
 go test ./apps/test-service/internal/ctest -run 'Parse|ShowOnly' -count=1
@@ -58,11 +58,11 @@ go test ./apps/test-service/internal/ctest -run 'Parse|ShowOnly' -count=1
 
 预期：FAIL。
 
-- [ ] **Step 3：实现有界 streaming decode 与 canonical model**
+- [x] **Step 3：实现有界 streaming decode 与 canonical model**
 
 使用 `json.Decoder` 和明确上限，不对整个不可信 JSON 构造 `map[string]any`。保留 CTest logical string，不执行 regex normalization。
 
-- [ ] **Step 4：运行 unit/fuzz seed tests**
+- [x] **Step 4：运行 unit/fuzz seed tests**
 
 ```powershell
 go test ./apps/test-service/internal/ctest -count=1
@@ -71,7 +71,7 @@ go test ./apps/test-service/internal/ctest -run Fuzz -count=1
 
 预期：PASS。
 
-- [ ] **Step 5：提交 CTest JSON parser**
+- [x] **Step 5：提交 CTest JSON parser**
 
 ```powershell
 git add apps/test-service/internal/ctest
