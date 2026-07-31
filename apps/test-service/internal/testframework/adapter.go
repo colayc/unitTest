@@ -38,8 +38,10 @@ type DiscoveryResult struct {
 }
 
 type RunItem struct {
-	LogicalName string
-	Parameters  []testdomain.Parameter
+	ItemID            testdomain.ID
+	ParentLogicalName string
+	LogicalName       string
+	Parameters        []testdomain.Parameter
 }
 
 type RunInput struct {
@@ -47,10 +49,22 @@ type RunInput struct {
 	Items      []RunItem
 }
 
-// RunPlan contains framework-owned additions to a Service-owned execution
-// plan. The executable remains fixed by the verified CTest descriptor.
+type ExpectedCase struct {
+	ItemID            testdomain.ID
+	ParentLogicalName string
+	LogicalName       string
+}
+
+type RunInvocation struct {
+	Arguments     []string
+	ExpectedCases []ExpectedCase
+}
+
+// RunPlan contains framework-owned invocations for a Service-owned execution
+// plan. The executable remains fixed by the verified CTest descriptor, and
+// every invocation records the stable items whose output it may complete.
 type RunPlan struct {
-	Arguments          []string
+	Invocations        []RunInvocation
 	Environment        []ctest.EnvironmentEntry
 	EnvironmentChanges []ctest.EnvironmentModification
 	WorkingDirectory   string

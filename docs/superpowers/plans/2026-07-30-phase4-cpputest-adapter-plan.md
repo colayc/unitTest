@@ -86,7 +86,7 @@ git commit -m "feat: discover cpputest cases"
 - 创建：`apps/test-service/internal/testframework/cpputest/planner.go`
 - 创建：`apps/test-service/internal/testframework/cpputest/planner_test.go`
 - 修改：`apps/test-service/internal/testframework/cpputest/adapter.go`
-- 修改：`apps/test-service/internal/testframework/registry_test.go`
+- 修改：`apps/test-service/internal/testframework/adapter.go`，补充多 invocation 和 expected case boundary
 
 **接口：**
 
@@ -94,7 +94,7 @@ git commit -m "feat: discover cpputest cases"
 func BuildRunPlan(descriptor ctest.ExecutionDescriptor, selection Selection) (testframework.RunPlan, error)
 ```
 
-- [ ] **Step 1：写出受控参数和 conflict 失败测试**
+- [x] **Step 1：写出受控参数和 conflict 失败测试**
 
 覆盖：
 
@@ -108,7 +108,7 @@ func BuildRunPlan(descriptor ctest.ExecutionDescriptor, selection Selection) (te
 - client filter text 不进入 argv；
 - executable pin 与 working directory 来自 descriptor。
 
-- [ ] **Step 2：运行 planner tests 并确认失败**
+- [x] **Step 2：运行 planner tests 并确认失败**
 
 ```powershell
 go test ./apps/test-service/internal/testframework/cpputest -run 'RunPlan|Reserved' -count=1
@@ -116,11 +116,15 @@ go test ./apps/test-service/internal/testframework/cpputest -run 'RunPlan|Reserv
 
 预期：FAIL。
 
-- [ ] **Step 3：实现 immutable RunPlan**
+- [x] **Step 3：实现 immutable RunPlan**
 
 Adapter 返回 framework-neutral RunPlan，不直接启动 process。每个 plan 记录 selection item ID 与预期 case boundary，供结果 parser 交叉验证。
 
-- [ ] **Step 4：运行 unit/race**
+> 实施修正：多个离散 case 各生成一个独立 invocation，并按稳定逻辑身份排序，避免
+> CppUTest 多 `-sg/-sn` 组合产生 group/name 交叉选择。Adapter registration 与
+> Registry 集成测试仍在 Task 5 完成。
+
+- [x] **Step 4：运行 unit/race**
 
 ```powershell
 go test ./apps/test-service/internal/testframework/cpputest ./apps/test-service/internal/testframework -count=1
@@ -129,10 +133,10 @@ go test -race ./apps/test-service/internal/testframework/cpputest -count=1
 
 预期：PASS。
 
-- [ ] **Step 5：提交 CppUTest planner**
+- [x] **Step 5：提交 CppUTest planner**
 
 ```powershell
-git add apps/test-service/internal/testframework/cpputest apps/test-service/internal/testframework/registry_test.go
+git add apps/test-service/internal/testframework/cpputest apps/test-service/internal/testframework/adapter.go
 git commit -m "feat: plan exact cpputest runs"
 ```
 
@@ -306,7 +310,7 @@ git commit -m "feat: integrate cpputest adapter"
 ## Phase 4C 完成检查
 
 - [x] `-ln` valid/malformed/chunk tests
-- [ ] exact group/case argv tests
+- [x] exact group/case argv tests
 - [ ] pass/fail/skip/crash/timeout evidence tests
 - [ ] CppUMock subtype/detail/source tests
 - [ ] partial result 不伪造 pass
