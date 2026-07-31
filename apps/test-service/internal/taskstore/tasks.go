@@ -193,6 +193,23 @@ func (s *Store) Apply(ctx context.Context, mutation task.Mutation) (task.Task, [
 	if err := validateStepMutations(mutation.Steps); err != nil {
 		return task.Task{}, nil, err
 	}
+	if err := validateAppendedSteps(mutation.AppendSteps); err != nil {
+		return task.Task{}, nil, err
+	}
+	if len(mutation.AppendSteps) != 0 &&
+		(mutation.Expected != task.StatusRunning ||
+			mutation.Task.Status != task.StatusRunning) {
+		return task.Task{}, nil, task.ErrInvalidArgument
+	}
+	mutatedStepIDs := make(map[string]struct{}, len(mutation.Steps))
+	for _, changed := range mutation.Steps {
+		mutatedStepIDs[changed.Step.ID] = struct{}{}
+	}
+	for _, appended := range mutation.AppendSteps {
+		if _, exists := mutatedStepIDs[appended.ID]; exists {
+			return task.Task{}, nil, task.ErrInvalidArgument
+		}
+	}
 	for _, event := range mutation.Events {
 		if event.TaskID != mutation.Task.ID || !validEventDraft(event) {
 			return task.Task{}, nil, task.ErrInvalidArgument
@@ -234,6 +251,14 @@ func (s *Store) Apply(ctx context.Context, mutation task.Mutation) (task.Task, [
 		return task.Task{}, nil, task.ErrConflict
 	}
 	if err := applyStepMutations(ctx, tx, mutation.Task.ID, mutation.Steps); err != nil {
+		return task.Task{}, nil, err
+	}
+	if err := appendSteps(
+		ctx,
+		tx,
+		mutation.Task.ID,
+		mutation.AppendSteps,
+	); err != nil {
 		return task.Task{}, nil, err
 	}
 	events, err := insertEvents(ctx, tx, mutation.Events, s.newID)

@@ -128,6 +128,8 @@ type activeTask struct {
 	task                  Task
 	plan                  ExecutionPlan
 	boundary              ExecutionBoundary
+	continuation          PlanContinuation
+	resultInterpreter     ResultInterpreter
 	artifactSink          ArtifactSink
 	boundaryReleased      bool
 	nextStep              int
@@ -860,6 +862,23 @@ func (m *Manager) acceptOutput(current *activeTask, output ProcessOutput, active
 		m.tripStorage(active)
 		return
 	}
+	if current.execution.currentCause() == "" {
+		if observer, ok := current.resultInterpreter.(ResultOutputObserver); ok {
+			if err := callResultOutputObserver(
+				current.execution.ctx,
+				observer,
+				cloneRuntimeTask(current.task),
+				cloneRuntimeStep(current.plan.Steps[current.nextStep]),
+				ProcessOutput{
+					Stream: output.Stream,
+					Data:   append([]byte(nil), output.Data...),
+				},
+			); err != nil {
+				m.failResultObservation(current, err)
+				return
+			}
+		}
+	}
 	if len(output.Data) != 0 && !current.truncated {
 		m.bufferOutput(current, output, active)
 		if m.circuitFailed() {
@@ -879,6 +898,26 @@ func (m *Manager) acceptOutput(current *activeTask, output ProcessOutput, active
 		return
 	}
 	m.persistDiagnostics(current, values, active)
+}
+
+func (m *Manager) failResultObservation(
+	current *activeTask,
+	err error,
+) {
+	if current == nil || current.processCompleted {
+		return
+	}
+	current.execution.resolve(OutcomeInfrastructureFailed)
+	current.cleanupWithoutDone = true
+	current.failPendingStep = false
+	if !current.terminating {
+		m.terminate(current)
+	}
+	m.stageProcessCompletion(
+		current,
+		ProcessResult{Err: err},
+		false,
+	)
 }
 
 func (m *Manager) bufferOutput(current *activeTask, output ProcessOutput, active map[string]*activeTask) {

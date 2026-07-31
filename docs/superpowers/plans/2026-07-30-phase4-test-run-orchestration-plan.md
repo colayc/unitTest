@@ -181,6 +181,9 @@ git commit -m "feat: resolve structured test selections"
 - 修改：`apps/test-service/internal/task/manager_artifacts.go`
 - 创建：`apps/test-service/internal/task/continuation_test.go`
 - 创建：`apps/test-service/internal/task/domain_result_test.go`
+- 修改：`apps/test-service/internal/taskstore/tasks.go`
+- 修改：`apps/test-service/internal/taskstore/steps.go`
+- 创建：`apps/test-service/internal/taskstore/continuation_steps_test.go`
 
 **内部接口：**
 
@@ -194,7 +197,7 @@ type ResultInterpreter interface {
 }
 ```
 
-- [ ] **Step 1：写出 continuation 安全与 completion 失败测试**
+- [x] **Step 1：写出 continuation 安全与 completion 失败测试**
 
 覆盖：
 
@@ -209,7 +212,7 @@ type ResultInterpreter interface {
 - appended step sequence 单调；
 - crash/timeout process tree cleanup 不变。
 
-- [ ] **Step 2：运行 Task tests 并确认失败**
+- [x] **Step 2：运行 Task tests 并确认失败**
 
 ```powershell
 go test ./apps/test-service/internal/task -run 'Continuation|DomainResult|TestStep' -count=1
@@ -217,11 +220,13 @@ go test ./apps/test-service/internal/task -run 'Continuation|DomainResult|TestSt
 
 预期：FAIL。
 
-- [ ] **Step 3：实现最小 runtime-only extension**
+- [x] **Step 3：实现最小 runtime-only extension**
 
 非 Test Task 不配置 continuation/interpreter，行为 byte-for-byte 保持。Continuation output 重新经过 Manager 的 `ExecutionBoundary.Validate`，不得直接信任 Adapter。
 
-- [ ] **Step 4：运行 Task 全套与 race**
+> 实施说明：Task 3 已实现 runtime-only `PlanContinuation`、`ResultInterpreter`、流式 `ResultOutputObserver`，以及当前 step completion 与 appended step snapshot 的 SQLite 原子事务。初始 plan 仍限制为 8 steps；受控 continuation 每次最多追加 256 steps，runtime plan 总量最多 10,000 steps。旧 `StepObserver` 仍只在既有中间 step 上调用，simulation/CMake 非 Test 路径不扩张。具体 CppUTest/Unity/Opaque 的 crash、malformed、assertion 映射与 `testDiscovery`/`testRun` Task kind schema 扩展由 Task 4 接线。
+
+- [x] **Step 4：运行 Task 全套与 race**
 
 ```powershell
 go test ./apps/test-service/internal/task -count=1
@@ -230,7 +235,7 @@ go test -race ./apps/test-service/internal/task -count=1
 
 预期：PASS。
 
-- [ ] **Step 5：提交 Task Engine test extension**
+- [x] **Step 5：提交 Task Engine test extension**
 
 ```powershell
 git add apps/test-service/internal/task

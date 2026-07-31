@@ -43,6 +43,9 @@ const (
 	maxProcessSpecEnv     = 256
 	maxCommandSummaryArgs = 256
 	maxExecutionStepState = 256 * 1024
+	maxInitialPlanSteps   = 8
+	maxContinuationSteps  = 256
+	maxRuntimePlanSteps   = 10_000
 )
 
 type CommandSummary struct {
@@ -63,6 +66,23 @@ type ExecutionPlan struct {
 	Version     int
 	Fingerprint string
 	Steps       []ExecutionStep
+}
+
+type StepVerdict string
+
+const (
+	StepVerdictDefault   StepVerdict = ""
+	StepVerdictSucceeded StepVerdict = "succeeded"
+	StepVerdictFailed    StepVerdict = "failed"
+)
+
+type StepResult struct {
+	Process ProcessResult
+	Verdict StepVerdict
+}
+
+type Continuation struct {
+	Steps []ExecutionStep
 }
 
 // ExecutionBoundary is runtime-only. It must never be persisted or exposed
@@ -86,6 +106,8 @@ type StartRequest struct {
 	Timeout             time.Duration
 	Plan                ExecutionPlan
 	Boundary            ExecutionBoundary
+	Continuation        PlanContinuation
+	ResultInterpreter   ResultInterpreter
 
 	// Scenario remains an internal compatibility input while v1.1 simulation
 	// requests are projected into service-owned execution plans.
@@ -93,18 +115,33 @@ type StartRequest struct {
 }
 
 type ResumeRequest struct {
-	Task     Task
-	Plan     ExecutionPlan
-	Boundary ExecutionBoundary
+	Task              Task
+	Plan              ExecutionPlan
+	Boundary          ExecutionBoundary
+	Continuation      PlanContinuation
+	ResultInterpreter ResultInterpreter
 }
 
 func ValidatePlan(plan ExecutionPlan, boundary ExecutionBoundary) error {
-	if plan.Version != 1 || len(plan.Steps) < 1 || len(plan.Steps) > 8 || nilBoundary(boundary) {
+	if plan.Version != 1 ||
+		len(plan.Steps) < 1 ||
+		len(plan.Steps) > maxInitialPlanSteps ||
+		nilBoundary(boundary) {
 		return ErrInvalidArgument
 	}
+	return validateExecutionSteps(plan.Steps, boundary)
+}
 
-	ids := make(map[string]struct{}, len(plan.Steps))
-	for _, step := range plan.Steps {
+func validateExecutionSteps(
+	steps []ExecutionStep,
+	boundary ExecutionBoundary,
+) error {
+	if len(steps) < 1 || len(steps) > maxRuntimePlanSteps ||
+		nilBoundary(boundary) {
+		return ErrInvalidArgument
+	}
+	ids := make(map[string]struct{}, len(steps))
+	for _, step := range steps {
 		if !validStepID(step.ID) || !validStepKind(step.Kind) || step.Process.Executable == "" || step.Process.Dir == "" ||
 			containsNUL(step.Process.Executable) || containsNUL(step.Process.Dir) ||
 			len(step.Process.Args) > maxProcessSpecArgs ||
@@ -136,6 +173,32 @@ func ValidatePlan(plan ExecutionPlan, boundary ExecutionBoundary) error {
 		}
 	}
 	return nil
+}
+
+func extendExecutionPlan(
+	plan ExecutionPlan,
+	continuation Continuation,
+	boundary ExecutionBoundary,
+) (ExecutionPlan, []StepSnapshot, error) {
+	if len(continuation.Steps) == 0 {
+		return plan, nil, nil
+	}
+	if len(continuation.Steps) > maxContinuationSteps ||
+		len(continuation.Steps) > maxRuntimePlanSteps-len(plan.Steps) {
+		return ExecutionPlan{}, nil, ErrInvalidArgument
+	}
+	combined := cloneExecutionPlan(plan)
+	appended := cloneExecutionPlan(ExecutionPlan{
+		Version: plan.Version,
+		Steps:   continuation.Steps,
+	})
+	combined.Steps = append(combined.Steps, appended.Steps...)
+	if err := validateExecutionSteps(combined.Steps, boundary); err != nil {
+		return ExecutionPlan{}, nil, err
+	}
+	combined.Fingerprint = FingerprintPlan(combined)
+	snapshots := initialStepSnapshots(appended)
+	return combined, snapshots, nil
 }
 
 func FingerprintPlan(plan ExecutionPlan) string {

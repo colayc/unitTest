@@ -27,6 +27,7 @@ type Mutation struct {
 	Task        Task
 	Expected    Status
 	Steps       []StepMutation
+	AppendSteps []StepSnapshot
 	Events      []EventDraft
 	PutLease    *ProcessLease
 	DeleteLease bool
@@ -84,6 +85,33 @@ type ProcessFactory interface {
 
 type StepObserver interface {
 	Succeeded(context.Context, Task, ExecutionStep) error
+}
+
+type PlanContinuation interface {
+	AfterStep(
+		context.Context,
+		Task,
+		ExecutionStep,
+		StepResult,
+	) (Continuation, error)
+}
+
+type ResultInterpreter interface {
+	Interpret(
+		context.Context,
+		Task,
+		ExecutionStep,
+		ProcessResult,
+	) (StepVerdict, error)
+}
+
+type ResultOutputObserver interface {
+	ObserveOutput(
+		context.Context,
+		Task,
+		ExecutionStep,
+		ProcessOutput,
+	) error
 }
 
 type ProcessSpec struct {

@@ -2140,6 +2140,14 @@ func (s *fakeStore) Apply(_ context.Context, mutation task.Mutation) (task.Task,
 			return task.Task{}, nil, task.ErrConflict
 		}
 	}
+	for _, appended := range mutation.AppendSteps {
+		for _, existing := range steps {
+			if existing.ID == appended.ID {
+				return task.Task{}, nil, task.ErrConflict
+			}
+		}
+		steps = append(steps, appended)
+	}
 	events := make([]task.Event, 0, len(mutation.Events))
 	for _, draft := range mutation.Events {
 		events = append(events, s.appendLocked(draft))

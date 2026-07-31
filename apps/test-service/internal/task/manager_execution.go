@@ -251,6 +251,7 @@ func (m *Manager) start(request StartRequest, active map[string]*activeTask) tas
 	}
 	current := &activeTask{
 		task: stored, plan: request.Plan, boundary: request.Boundary,
+		continuation: request.Continuation, resultInterpreter: request.ResultInterpreter,
 		timerStop: make(chan struct{}), timeoutStop: make(chan struct{}),
 		watcherStop: make(chan struct{}), execution: execution,
 	}
@@ -323,6 +324,7 @@ func (m *Manager) resumeQueued(
 	}
 	current := &activeTask{
 		task: stored, plan: request.Plan, boundary: request.Boundary,
+		continuation: request.Continuation, resultInterpreter: request.ResultInterpreter,
 		timerStop: make(chan struct{}), timeoutStop: make(chan struct{}),
 		watcherStop: make(chan struct{}), execution: execution,
 	}
@@ -511,10 +513,12 @@ func (m *Manager) persistPreparedLease(
 }
 
 func validateExecutionPlan(plan ExecutionPlan, boundary ExecutionBoundary) error {
-	if plan.Fingerprint == "" || plan.Fingerprint != FingerprintPlan(plan) {
+	if plan.Version != 1 ||
+		plan.Fingerprint == "" ||
+		plan.Fingerprint != FingerprintPlan(plan) {
 		return ErrInvalidArgument
 	}
-	return ValidatePlan(plan, boundary)
+	return validateExecutionSteps(plan.Steps, boundary)
 }
 
 func (m *Manager) setCurrentProcess(current *activeTask, process ManagedProcess) {
@@ -564,7 +568,13 @@ func (m *Manager) finish(current *activeTask, result ProcessResult, active map[s
 	m.stageProcessCompletion(current, result, false)
 }
 
-func (m *Manager) persistSuccessfulStep(current *activeTask, result ProcessResult, active map[string]*activeTask) error {
+func (m *Manager) persistSuccessfulStep(
+	current *activeTask,
+	result ProcessResult,
+	nextPlan ExecutionPlan,
+	appended []StepSnapshot,
+	active map[string]*activeTask,
+) error {
 	if current.process != nil && !current.closeComplete {
 		return ErrConflict
 	}
@@ -575,6 +585,7 @@ func (m *Manager) persistSuccessfulStep(current *activeTask, result ProcessResul
 	step.ExitCode = intPointer(result.ExitCode)
 	updatedTask := current.task
 	updatedTask.ActiveStep = ""
+	updatedTask.PlanFingerprint = nextPlan.Fingerprint
 	eventDrafts := []EventDraft(nil)
 	if current.task.Kind == KindCMakeBuild {
 		eventDrafts = append(eventDrafts, eventDraft(
@@ -587,6 +598,7 @@ func (m *Manager) persistSuccessfulStep(current *activeTask, result ProcessResul
 	stored, committed, err := m.store.Apply(context.Background(), Mutation{
 		Task: updatedTask, Expected: current.task.Status,
 		Steps:       []StepMutation{{Step: step, Expected: StepRunning}},
+		AppendSteps: appended,
 		Events:      eventDrafts,
 		DeleteLease: true,
 	})
@@ -599,6 +611,7 @@ func (m *Manager) persistSuccessfulStep(current *activeTask, result ProcessResul
 		return err
 	}
 	current.task = stored
+	current.plan = nextPlan
 	current.leasePersisted = false
 	return publishCommitted(m, committed, active)
 }
