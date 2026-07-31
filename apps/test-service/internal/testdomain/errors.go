@@ -9,6 +9,7 @@ var (
 	ErrInvalidIdentity           = errors.New("invalid test identity")
 	ErrInvalidFramework          = errors.New("invalid test framework")
 	ErrInvalidCatalog            = errors.New("invalid test catalog")
+	ErrInvalidResult             = errors.New("invalid test result")
 	ErrDuplicateIdentity         = errors.New("duplicate test identity")
 	ErrInvalidSelection          = errors.New("invalid test selection")
 	ErrEmptySelection            = errors.New("empty test selection")

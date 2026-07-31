@@ -100,6 +100,7 @@ type TestFailureDetailV13 struct {
 	Expected     *string                 `json:"expected,omitempty"`
 	Locations    []TestSourceLocationV13 `json:"locations"`
 	Message      string                  `json:"message"`
+	Subtype      *TestFailureSubtypeV13  `json:"subtype,omitempty"`
 }
 
 type TestRun struct {
@@ -235,6 +236,15 @@ const (
 	Case  TestItemKindV13 = "case"
 	Group TestItemKindV13 = "group"
 	Suite TestItemKindV13 = "suite"
+)
+
+type TestFailureSubtypeV13 string
+
+const (
+	MockFailure           TestFailureSubtypeV13 = "mock_failure"
+	MockMissingCall       TestFailureSubtypeV13 = "mock_missing_call"
+	MockParameterMismatch TestFailureSubtypeV13 = "mock_parameter_mismatch"
+	MockUnexpectedCall    TestFailureSubtypeV13 = "mock_unexpected_call"
 )
 
 type TestItemOutcomeV13 string

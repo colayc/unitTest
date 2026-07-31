@@ -107,9 +107,19 @@ const (
 )
 
 type ParsedSourceLocation struct {
-	Path   string
-	Line   int
-	Column int
+	Path       string
+	Line       int
+	Column     int
+	Provenance string
+}
+
+type ParsedFailureDetail struct {
+	Category  string
+	Subtype   testdomain.FailureSubtype
+	Message   string
+	Expected  string
+	Actual    string
+	Locations []ParsedSourceLocation
 }
 
 type ParsedCaseResult struct {
@@ -121,6 +131,7 @@ type ParsedCaseResult struct {
 	Category          string
 	Message           string
 	SourceLocation    *ParsedSourceLocation
+	FailureDetails    []ParsedFailureDetail
 	Partial           bool
 }
 

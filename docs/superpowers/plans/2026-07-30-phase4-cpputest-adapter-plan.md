@@ -227,11 +227,23 @@ git commit -m "feat: parse cpputest results"
 - 创建：`apps/test-service/internal/testframework/cpputest/testdata/mock-missing-call.txt`
 - 创建：`apps/test-service/internal/testframework/cpputest/testdata/mock-parameter-mismatch.txt`
 - 修改：`apps/test-service/internal/testframework/cpputest/parser.go`
-- 修改：`apps/test-service/internal/testframework/cpputest/parser_test.go`
 - 修改：`apps/test-service/internal/testdomain/model.go`
 - 修改：`apps/test-service/internal/testdomain/model_test.go`
+- 修改：`apps/test-service/internal/testframework/adapter.go`
+- 修改：`packages/protocol-schema/schema/v1.3/test.schema.json`
+- 修改：`packages/protocol-schema/fixtures/v1.3/test-result.valid.json`
+- 修改：`packages/protocol-schema/test/schema.test.mjs`
+- 修改：Protocol v1.3 generated Go/TypeScript models 与 export/compile tests
+- 修改：`packages/test-client/src/index.ts`
+- 修改：`packages/test-client/src/client.test.ts`
+- 修改：`apps/test-service/internal/testdomain/errors.go`
 
-- [ ] **Step 1：写出 CppUMock subtype/detail 失败测试**
+> 实施修正：已确认设计要求保留结构化 Mock detail subtype，但当前 Protocol v1.3
+> `failureDetail` 缺少承载字段。项目尚未发布，本 Task 增加可选的 closed
+> `TestFailureSubtypeV13` enum；不带 subtype 的既有 v1.3 消息仍有效，Service
+> 产生的 Mock detail 则不会在跨进程边界丢失类型。
+
+- [x] **Step 1：写出 CppUMock subtype/detail 失败测试**
 
 覆盖：
 
@@ -240,11 +252,11 @@ git commit -m "feat: parse cpputest results"
 - parameter mismatch；
 - expected/actual 可提取时结构化；
 - 无法结构化时保留 message；
-- expectation declaration 与 actual call 多位置；
+- test declaration 与 actual call 多位置；官方输出未携带 expectation call site 时不伪造位置；
 - 所有 mock failure 仍是 `assertion_failure`；
 - memory address/ANSI 不进入 identity。
 
-- [ ] **Step 2：运行 Mock tests 并确认失败**
+- [x] **Step 2：运行 Mock tests 并确认失败**
 
 ```powershell
 go test ./apps/test-service/internal/testframework/cpputest ./apps/test-service/internal/testdomain -run 'Mock|FailureDetail' -count=1
@@ -252,11 +264,11 @@ go test ./apps/test-service/internal/testframework/cpputest ./apps/test-service/
 
 预期：FAIL。
 
-- [ ] **Step 3：实现 best-effort detail parser**
+- [x] **Step 3：实现 best-effort detail parser**
 
 基础 subtype、message 和首个 source location 是必需结果；expected/actual 和附加位置是可选字段。字段解析失败不能丢失原 assertion。
 
-- [ ] **Step 4：运行 CppUTest Adapter 全套**
+- [x] **Step 4：运行 CppUTest Adapter 全套**
 
 ```powershell
 go test ./apps/test-service/internal/testframework/cpputest ./apps/test-service/internal/testdomain -count=1
@@ -265,10 +277,12 @@ go test -race ./apps/test-service/internal/testframework/cpputest -count=1
 
 预期：PASS。
 
-- [ ] **Step 5：提交 CppUMock details**
+- [x] **Step 5：提交 CppUMock details**
 
 ```powershell
-git add apps/test-service/internal/testframework/cpputest apps/test-service/internal/testdomain
+git add apps/test-service/internal/testframework apps/test-service/internal/testdomain `
+  apps/test-service/internal/protocolmodel/v1_3/test packages/protocol-schema `
+  packages/protocol-models packages/test-client
 git commit -m "feat: normalize cppumock failures"
 ```
 
@@ -321,7 +335,7 @@ git commit -m "feat: integrate cpputest adapter"
 - [x] `-ln` valid/malformed/chunk tests
 - [x] exact group/case argv tests
 - [x] pass/fail/skip/crash/timeout evidence tests
-- [ ] CppUMock subtype/detail/source tests
+- [x] CppUMock subtype/detail/source tests
 - [x] partial result 不伪造 pass
 - [ ] unknown executable 不探测
 - [ ] Go unit/race tests

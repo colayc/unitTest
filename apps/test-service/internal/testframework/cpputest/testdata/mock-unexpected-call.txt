@@ -1,0 +1,11 @@
+TEST(MockGroup, unexpectedCall)
+/workspace/tests/mock_tests.cpp:20: error: Failure in TEST(MockGroup, unexpectedCall)
+	Mock Failure: Unexpected call to function: dependency_read
+	EXPECTED calls that WERE NOT fulfilled:
+		<none>
+	EXPECTED calls that WERE fulfilled:
+		<none>
+
+ - 3 ms
+
+Errors (1 failures, 1 tests, 1 ran, 0 checks, 0 ignored, 0 filtered out, 3 ms)

@@ -16,12 +16,14 @@ import type {
   TaskEventV13,
   TaskSnapshotV13,
   TestCatalog,
+  TestFailureDetailV13,
   TestItemResult,
   TestRun,
   TestSelection
 } from "./index.js";
-import { TaskOutcomeV13 } from "./index.js";
+import { TaskOutcomeV13, TestFailureCategoryV13 } from "./index.js";
 import {
+  TestFailureSubtypeV13,
   TestFrameworkV13,
   TestItemKindV13,
   TestItemOutcomeV13,
@@ -285,6 +287,15 @@ test("generated protocol 1.3 models expose closed test contracts", () => {
     outputRefs: [],
     partial: false
   };
+  const mockDetail: TestFailureDetailV13 = {
+    category: TestFailureCategoryV13.AssertionFailure,
+    subtype: TestFailureSubtypeV13.MockParameterMismatch,
+    message: "mock parameter mismatch",
+    expected: "7",
+    actual: "20",
+    locations: [],
+    evidenceRefs: []
+  };
   const run: TestRun = {
     runId: "1".repeat(32),
     taskId: "2".repeat(32),
@@ -383,6 +394,7 @@ test("generated protocol 1.3 models expose closed test contracts", () => {
   assert.equal(selection.mode, TestSelectionModeV13.Items);
   assert.equal(catalog.items[0]!.kind, TestItemKindV13.Case);
   assert.equal(event.event, TaskEventNameV13.TestItemFinished);
+  assert.equal(mockDetail.subtype, TestFailureSubtypeV13.MockParameterMismatch);
   assert.equal(finishedEvent.payload.outcome, TaskOutcomeV13.Succeeded);
   assert.equal(diagnostic.category, DiagnosticCategoryV13.AssertionFailure);
   assert.equal(artifact.kind, ArtifactKindV13.TestResults);

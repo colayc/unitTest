@@ -136,6 +136,14 @@ export interface TestFailureDetailV13 {
     expected?:    string;
     locations:    TestSourceLocationV13[];
     message:      string;
+    subtype?:     TestFailureSubtypeV13;
+}
+
+export enum TestFailureSubtypeV13 {
+    MockFailure = "mock_failure",
+    MockMissingCall = "mock_missing_call",
+    MockParameterMismatch = "mock_parameter_mismatch",
+    MockUnexpectedCall = "mock_unexpected_call",
 }
 
 export enum TestItemOutcomeV13 {

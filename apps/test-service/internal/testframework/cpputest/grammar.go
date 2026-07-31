@@ -22,7 +22,9 @@ var (
 	msvcFailurePattern = regexp.MustCompile(
 		`^(.+)\(([0-9]+)\): error: Failure in (TEST|IGNORE_TEST)\(([^,\r\n]+), ([^)\r\n]+)\)$`,
 	)
-	okSummaryPattern = regexp.MustCompile(
+	gccBareErrorPattern  = regexp.MustCompile(`^(.+):([0-9]+): error:$`)
+	msvcBareErrorPattern = regexp.MustCompile(`^(.+)\(([0-9]+)\): error:$`)
+	okSummaryPattern     = regexp.MustCompile(
 		`^OK \(([0-9]+) tests, ([0-9]+) ran, ([0-9]+) checks, ([0-9]+) ignored, ([0-9]+) filtered out, ([0-9]+) ms\)$`,
 	)
 	errorSummaryPattern = regexp.MustCompile(
@@ -109,6 +111,21 @@ func parseFailure(line string) (grammarFailure, bool) {
 		group: match[4],
 		name:  match[5],
 	}, true
+}
+
+func parseBareErrorLocation(line string) (grammarFailure, bool) {
+	match := msvcBareErrorPattern.FindStringSubmatch(line)
+	if match == nil {
+		match = gccBareErrorPattern.FindStringSubmatch(line)
+	}
+	if match == nil {
+		return grammarFailure{}, false
+	}
+	lineNumber, err := strconv.Atoi(match[2])
+	if err != nil || lineNumber <= 0 {
+		return grammarFailure{}, false
+	}
+	return grammarFailure{path: match[1], line: lineNumber}, true
 }
 
 func parseSummary(line string) (grammarSummary, bool) {

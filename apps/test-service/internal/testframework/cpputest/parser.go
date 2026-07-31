@@ -40,6 +40,7 @@ type activeRecord struct {
 	messageLines   []string
 	messageBytes   int
 	source         *testframework.ParsedSourceLocation
+	locations      []testframework.ParsedSourceLocation
 }
 
 type Parser struct {
@@ -208,12 +209,19 @@ func (parser *Parser) consumeStdoutLine(
 			failure.name != parser.active.identity.name {
 			parser.invalid = true
 		}
-		if parser.active.source == nil {
-			parser.active.source = &testframework.ParsedSourceLocation{
-				Path: failure.path,
-				Line: failure.line,
-			}
-		}
+		parser.active.addLocation(testframework.ParsedSourceLocation{
+			Path:       failure.path,
+			Line:       failure.line,
+			Provenance: "framework-output",
+		})
+		return testframework.ResultEvent{}, false, nil
+	}
+	if location, ok := parseBareErrorLocation(line); ok && parser.active.hadFailure {
+		parser.active.addLocation(testframework.ParsedSourceLocation{
+			Path:       location.path,
+			Line:       location.line,
+			Provenance: "framework-output",
+		})
 		return testframework.ResultEvent{}, false, nil
 	}
 	if _, ok := parseCaseStart(line); ok {
@@ -223,6 +231,16 @@ func (parser *Parser) consumeStdoutLine(
 		return testframework.ResultEvent{}, false, err
 	}
 	return testframework.ResultEvent{}, false, nil
+}
+
+func (record *activeRecord) addLocation(
+	location testframework.ParsedSourceLocation,
+) {
+	record.locations = append(record.locations, location)
+	if record.source == nil {
+		copy := location
+		record.source = &copy
+	}
 }
 
 func (parser *Parser) appendMessageLine(line string) error {
@@ -256,6 +274,7 @@ func (parser *Parser) completeRecord(
 	category := ""
 	message := ""
 	var source *testframework.ParsedSourceLocation
+	var failureDetails []testframework.ParsedFailureDetail
 	failureRecords := 0
 	if record.macro == "IGNORE_TEST" {
 		status = testframework.CaseSkipped
@@ -276,6 +295,13 @@ func (parser *Parser) completeRecord(
 			failureRecords = 1
 		}
 		parser.failures += failureRecords
+		if detail, ok := parseMockFailure(message, active.locations); ok {
+			failureDetails = []testframework.ParsedFailureDetail{detail}
+			if len(detail.Locations) != 0 {
+				copy := detail.Locations[0]
+				source = &copy
+			}
+		}
 	}
 	if !expected {
 		return testframework.ResultEvent{}, false, nil
@@ -290,6 +316,7 @@ func (parser *Parser) completeRecord(
 		Category:          category,
 		Message:           message,
 		SourceLocation:    cloneParsedLocation(source),
+		FailureDetails:    cloneParsedFailureDetails(failureDetails),
 	}
 	parser.cases = append(parser.cases, result)
 	return testframework.ResultEvent{Case: cloneParsedCase(result)}, true, nil
@@ -513,5 +540,23 @@ func cloneParsedCase(
 	value testframework.ParsedCaseResult,
 ) testframework.ParsedCaseResult {
 	value.SourceLocation = cloneParsedLocation(value.SourceLocation)
+	value.FailureDetails = cloneParsedFailureDetails(value.FailureDetails)
 	return value
+}
+
+func cloneParsedFailureDetails(
+	values []testframework.ParsedFailureDetail,
+) []testframework.ParsedFailureDetail {
+	if values == nil {
+		return nil
+	}
+	result := make([]testframework.ParsedFailureDetail, len(values))
+	for index, value := range values {
+		result[index] = value
+		result[index].Locations = append(
+			[]testframework.ParsedSourceLocation(nil),
+			value.Locations...,
+		)
+	}
+	return result
 }

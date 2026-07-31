@@ -483,6 +483,13 @@ test("protocol 1.3 accepts test discovery, run, catalog, and result contracts", 
     const message = await load(`../fixtures/v1.3/${fixture}`);
     assert.equal(validate(message), true, `${fixture}: ${JSON.stringify(validate.errors)}`);
   }
+  const resultWithoutSubtype = await load("../fixtures/v1.3/test-result.valid.json");
+  delete resultWithoutSubtype.payload.result.failureDetails[0].subtype;
+  assert.equal(
+    validate(resultWithoutSubtype),
+    true,
+    `v1.3 detail without subtype: ${JSON.stringify(validate.errors)}`
+  );
 
   const capabilities = {
     protocolVersion: "1.3",
@@ -662,6 +669,32 @@ test("protocol 1.3 enforces closed selections, stable IDs, safe integers, and bo
       result: { ...result.payload.result, outcome: "unknown" }
     }
   }), false, "result accepted unknown outcome");
+  assert.equal(validate({
+    ...result,
+    payload: {
+      ...result.payload,
+      result: {
+        ...result.payload.result,
+        failureDetails: [{
+          ...result.payload.result.failureDetails[0],
+          subtype: "shell_command"
+        }]
+      }
+    }
+  }), false, "result accepted unknown failure subtype");
+  assert.equal(validate({
+    ...result,
+    payload: {
+      ...result.payload,
+      result: {
+        ...result.payload.result,
+        failureDetails: [{
+          ...result.payload.result.failureDetails[0],
+          category: "unexpected_exit"
+        }]
+      }
+    }
+  }), false, "result accepted mock subtype outside assertion_failure");
   assert.equal(validate({
     ...result,
     payload: {

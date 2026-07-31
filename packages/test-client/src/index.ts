@@ -19,7 +19,11 @@ export type {
 export { ProtocolError } from "./envelopes.js";
 export type { Method, ProtocolTaskEvent, ProtocolVersion } from "./envelopes.js";
 export { EventSubscription } from "./subscription.js";
-export { TestSelectionModeV13 } from "@unit-test-ide/protocol-models";
+export {
+  TestFailureCategoryV13,
+  TestFailureSubtypeV13,
+  TestSelectionModeV13
+} from "@unit-test-ide/protocol-models";
 export type {
   ArtifactMetadata,
   ArtifactMetadataV12,

@@ -55,6 +55,8 @@ export type {
   TestSourceLocationV13
 } from "./generated/test-v1-3.js";
 export {
+  CategoryV13 as TestFailureCategoryV13,
+  TestFailureSubtypeV13,
   TestFrameworkV13,
   TestItemKindV13,
   TestItemOutcomeV13,

@@ -96,6 +96,98 @@ func TestNewCatalogRejectsBrokenTreeAndPartialSnapshots(t *testing.T) {
 	})
 }
 
+func TestNewFailureDetailValidatesAndDefensivelyCopies(t *testing.T) {
+	input := FailureDetail{
+		Category: "assertion_failure",
+		Subtype:  FailureSubtypeMockParameterMismatch,
+		Message:  "mock parameter mismatch",
+		Expected: "int value: <7>",
+		Actual:   "int value: <20>",
+		Locations: []SourceLocation{
+			{
+				URI:        "file:///workspace/tests/mock_tests.cpp",
+				Line:       60,
+				Column:     1,
+				Navigable:  true,
+				Provenance: "mock-expectation",
+			},
+			{
+				URI:        "file:///workspace/src/controller.cpp",
+				Line:       44,
+				Column:     1,
+				Navigable:  true,
+				Provenance: "mock-actual-call",
+			},
+		},
+		EvidenceRefs: []string{strings.Repeat("a", 32)},
+	}
+	detail, err := NewFailureDetail(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.Locations[0].URI = "file:///mutated"
+	input.EvidenceRefs[0] = strings.Repeat("b", 32)
+	if detail.Locations[0].URI != "file:///workspace/tests/mock_tests.cpp" ||
+		detail.EvidenceRefs[0] != strings.Repeat("a", 32) {
+		t.Fatalf("detail retained caller-owned slices: %#v", detail)
+	}
+}
+
+func TestNewFailureDetailRejectsInvalidFields(t *testing.T) {
+	valid := FailureDetail{
+		Category: "assertion_failure",
+		Subtype:  FailureSubtypeMockFailure,
+		Message:  "mock failure",
+	}
+	tests := map[string]func(*FailureDetail){
+		"empty message": func(value *FailureDetail) {
+			value.Message = ""
+		},
+		"unknown subtype": func(value *FailureDetail) {
+			value.Subtype = "shell_command"
+		},
+		"mock subtype on non-assertion": func(value *FailureDetail) {
+			value.Category = "unexpected_exit"
+		},
+		"too many locations": func(value *FailureDetail) {
+			value.Locations = make([]SourceLocation, 17)
+		},
+		"invalid location": func(value *FailureDetail) {
+			value.Locations = []SourceLocation{{
+				URI: "relative.cpp", Provenance: "framework-output",
+			}}
+		},
+		"duplicate evidence": func(value *FailureDetail) {
+			value.EvidenceRefs = []string{
+				strings.Repeat("a", 32),
+				strings.Repeat("a", 32),
+			}
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			value := valid
+			mutate(&value)
+			if _, err := NewFailureDetail(value); !errors.Is(err, ErrInvalidResult) {
+				t.Fatalf("NewFailureDetail error = %v", err)
+			}
+		})
+	}
+}
+
+func TestNewFailureDetailNormalizesRequiredCollections(t *testing.T) {
+	detail, err := NewFailureDetail(FailureDetail{
+		Category: "assertion_failure",
+		Message:  "assertion failed",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Locations == nil || detail.EvidenceRefs == nil {
+		t.Fatalf("required collections must be arrays: %#v", detail)
+	}
+}
+
 func validCatalogInput(t *testing.T) Catalog {
 	t.Helper()
 	containerID := mustContainerID(t, "core", "core.tests")

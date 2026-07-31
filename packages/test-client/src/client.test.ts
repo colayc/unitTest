@@ -7,7 +7,7 @@ import { MAX_MESSAGE_BYTES, ProtocolClient } from "./client.js";
 import { Connection } from "./connection.js";
 import { decodeTaskEvent, decodeTestCatalog, decodeTestRun } from "./decoders.js";
 import { ProtocolError } from "./envelopes.js";
-import { TestSelectionModeV13 } from "./index.js";
+import { TestFailureSubtypeV13, TestSelectionModeV13 } from "./index.js";
 import { EventSubscription } from "./subscription.js";
 
 type JsonObject = Record<string, unknown>;
@@ -522,6 +522,46 @@ test("protocol 1.3 decoders enforce catalog references, summary counts, iteratio
   assert.throws(() => decodeTaskEvent(event), /iteration/i);
   (event.payload.result as JsonObject).iteration = 1;
   assert.throws(() => decodeTaskEvent(event), /partial/i);
+});
+
+test("protocol 1.3 decoder preserves closed mock failure subtype", () => {
+  const decoded = decodeTaskEvent({
+    protocolVersion: "1.3",
+    kind: "event",
+    messageId: MESSAGE_ID,
+    sentAt: SENT_AT,
+    sequence: 1,
+    event: "test.item.finished",
+    taskId: TASK_ID,
+    payloadVersion: 1,
+    payload: {
+      runId: RUN_ID,
+      result: {
+        itemId: ITEM_ID,
+        containerId: CONTAINER_ID,
+        iteration: 1,
+        outcome: "failed",
+        failureDetails: [{
+          category: "assertion_failure",
+          subtype: "mock_parameter_mismatch",
+          message: "mock parameter mismatch",
+          expected: "7",
+          actual: "20",
+          locations: [],
+          evidenceRefs: []
+        }],
+        outputRefs: [],
+        partial: false
+      }
+    }
+  });
+  if (decoded.event !== "test.item.finished") {
+    assert.fail(`unexpected event ${decoded.event}`);
+  }
+  assert.equal(
+    decoded.payload.result.failureDetails[0]?.subtype,
+    TestFailureSubtypeV13.MockParameterMismatch
+  );
 });
 
 test("protocol 1.3 response validation rejects unknown outcomes, unsafe integers, invalid URI, and invalid dates", async () => {

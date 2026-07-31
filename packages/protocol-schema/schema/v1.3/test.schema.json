@@ -668,10 +668,38 @@
         "inconsistent_exit_status"
       ]
     },
+    "failureSubtype": {
+      "title": "TestFailureSubtypeV13",
+      "enum": [
+        "mock_unexpected_call",
+        "mock_missing_call",
+        "mock_parameter_mismatch",
+        "mock_failure"
+      ]
+    },
     "failureDetail": {
       "title": "TestFailureDetailV13",
       "type": "object",
       "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "subtype": {}
+            },
+            "required": [
+              "subtype"
+            ]
+          },
+          "then": {
+            "properties": {
+              "category": {
+                "const": "assertion_failure"
+              }
+            }
+          }
+        }
+      ],
       "required": [
         "category",
         "message",
@@ -681,6 +709,9 @@
       "properties": {
         "category": {
           "$ref": "#/$defs/failureCategory"
+        },
+        "subtype": {
+          "$ref": "#/$defs/failureSubtype"
         },
         "message": {
           "type": "string",

@@ -25,6 +25,7 @@
       "failureDetails": [
         {
           "category": "assertion_failure",
+          "subtype": "mock_parameter_mismatch",
           "message": "expected 4 but got 5",
           "locations": [
             {

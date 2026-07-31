@@ -81,6 +81,38 @@ type Diagnostic struct {
 	Column    int    `json:"column,omitempty"`
 }
 
+type FailureSubtype string
+
+const (
+	FailureSubtypeMockUnexpectedCall    FailureSubtype = "mock_unexpected_call"
+	FailureSubtypeMockMissingCall       FailureSubtype = "mock_missing_call"
+	FailureSubtypeMockParameterMismatch FailureSubtype = "mock_parameter_mismatch"
+	FailureSubtypeMockFailure           FailureSubtype = "mock_failure"
+)
+
+func (subtype FailureSubtype) Valid() bool {
+	switch subtype {
+	case "",
+		FailureSubtypeMockUnexpectedCall,
+		FailureSubtypeMockMissingCall,
+		FailureSubtypeMockParameterMismatch,
+		FailureSubtypeMockFailure:
+		return true
+	default:
+		return false
+	}
+}
+
+type FailureDetail struct {
+	Category     string           `json:"category"`
+	Subtype      FailureSubtype   `json:"subtype,omitempty"`
+	Message      string           `json:"message"`
+	Expected     string           `json:"expected,omitempty"`
+	Actual       string           `json:"actual,omitempty"`
+	Locations    []SourceLocation `json:"locations"`
+	EvidenceRefs []string         `json:"evidenceRefs"`
+}
+
 type Catalog struct {
 	ProjectID   string       `json:"projectId"`
 	ProfileID   string       `json:"profileId"`
@@ -90,6 +122,100 @@ type Catalog struct {
 	Items       []Item       `json:"items"`
 	Diagnostics []Diagnostic `json:"diagnostics"`
 	Partial     bool         `json:"partial"`
+}
+
+func NewFailureDetail(value FailureDetail) (FailureDetail, error) {
+	result := value
+	if !validFailureCategory(result.Category) {
+		return FailureDetail{}, invalid(
+			ErrInvalidResult,
+			"failureDetail.category",
+			"unsupported value",
+		)
+	}
+	if !result.Subtype.Valid() {
+		return FailureDetail{}, invalid(
+			ErrInvalidResult,
+			"failureDetail.subtype",
+			"unsupported value",
+		)
+	}
+	if result.Subtype != "" && result.Category != "assertion_failure" {
+		return FailureDetail{}, invalid(
+			ErrInvalidResult,
+			"failureDetail.subtype",
+			"mock subtype requires assertion_failure category",
+		)
+	}
+	var err error
+	if result.Message, err = normalizeBoundedText(result.Message, false, 8192); err != nil {
+		return FailureDetail{}, invalid(
+			ErrInvalidResult,
+			"failureDetail.message",
+			err.Error(),
+		)
+	}
+	if result.Expected, err = normalizeBoundedText(result.Expected, true, 8192); err != nil {
+		return FailureDetail{}, invalid(
+			ErrInvalidResult,
+			"failureDetail.expected",
+			err.Error(),
+		)
+	}
+	if result.Actual, err = normalizeBoundedText(result.Actual, true, 8192); err != nil {
+		return FailureDetail{}, invalid(
+			ErrInvalidResult,
+			"failureDetail.actual",
+			err.Error(),
+		)
+	}
+	if len(result.Locations) > 16 {
+		return FailureDetail{}, invalid(
+			ErrInvalidResult,
+			"failureDetail.locations",
+			"must not contain more than 16 values",
+		)
+	}
+	result.Locations = make([]SourceLocation, len(value.Locations))
+	for index := range value.Locations {
+		location, locationErr := cloneAndValidateLocation(&value.Locations[index])
+		if locationErr != nil {
+			return FailureDetail{}, invalid(
+				ErrInvalidResult,
+				"failureDetail.locations",
+				locationErr.Error(),
+			)
+		}
+		result.Locations[index] = *location
+	}
+	if len(result.EvidenceRefs) > 64 {
+		return FailureDetail{}, invalid(
+			ErrInvalidResult,
+			"failureDetail.evidenceRefs",
+			"must not contain more than 64 values",
+		)
+	}
+	result.EvidenceRefs = make([]string, len(value.EvidenceRefs))
+	copy(result.EvidenceRefs, value.EvidenceRefs)
+	seenEvidence := make(map[string]struct{}, len(result.EvidenceRefs))
+	for _, reference := range result.EvidenceRefs {
+		if !validHex(reference, 32) {
+			return FailureDetail{}, invalid(
+				ErrInvalidResult,
+				"failureDetail.evidenceRefs",
+				"must contain artifact IDs",
+			)
+		}
+		if _, duplicate := seenEvidence[reference]; duplicate {
+			return FailureDetail{}, invalid(
+				ErrInvalidResult,
+				"failureDetail.evidenceRefs",
+				"must not contain duplicates",
+			)
+		}
+		seenEvidence[reference] = struct{}{}
+	}
+	return result, nil
 }
 
 func NewContainer(value Container) (Container, error) {
@@ -381,11 +507,7 @@ func newDiagnostic(value Diagnostic) (Diagnostic, error) {
 	default:
 		return Diagnostic{}, invalid(ErrInvalidCatalog, "diagnostic.severity", "unsupported value")
 	}
-	switch value.Category {
-	case "configuration_error", "build_error", "assertion_failure", "test_process_crash",
-		"test_timeout", "cancelled", "framework_output_invalid", "infrastructure_error",
-		"unexpected_exit", "inconsistent_exit_status":
-	default:
+	if !validFailureCategory(value.Category) {
 		return Diagnostic{}, invalid(ErrInvalidCatalog, "diagnostic.category", "unsupported value")
 	}
 	var err error
@@ -405,6 +527,17 @@ func newDiagnostic(value Diagnostic) (Diagnostic, error) {
 		return Diagnostic{}, invalid(ErrInvalidCatalog, "diagnostic.location", "line and column must be non-negative")
 	}
 	return value, nil
+}
+
+func validFailureCategory(value string) bool {
+	switch value {
+	case "configuration_error", "build_error", "assertion_failure", "test_process_crash",
+		"test_timeout", "cancelled", "framework_output_invalid", "infrastructure_error",
+		"unexpected_exit", "inconsistent_exit_status":
+		return true
+	default:
+		return false
+	}
 }
 
 func validHex(value string, size int) bool {
