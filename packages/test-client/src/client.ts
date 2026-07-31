@@ -685,22 +685,31 @@ export class ProtocolClient {
   }
 
   async #authenticate(connection: Connection, credentials: Credentials): Promise<HandshakeResult> {
-    let payload: Record<string, unknown>;
-    try {
-      payload = await connection.request("1.3", "handshake", {
-        ...credentials,
-        supportedProtocolVersions: ["1.3", "1.2", "1.1", "1.0"]
-      });
-    } catch (error) {
-      if (!(error instanceof ProtocolError) || error.code !== "UNSUPPORTED_PROTOCOL") throw error;
-      payload = await connection.request("1.0", "handshake", { ...credentials });
-      validatePayload("handshake", validateHandshakeV10, payload);
-      return {
-        negotiatedProtocolVersion: payload.negotiatedProtocolVersion as ProtocolVersion,
-        serviceVersion: payload.serviceVersion as string
-      };
+    const attempts: ReadonlyArray<{
+      version: "1.3" | "1.2" | "1.1";
+      offered: ProtocolVersion[];
+    }> = [
+      { version: "1.3", offered: ["1.3", "1.2", "1.1", "1.0"] },
+      { version: "1.2", offered: ["1.2", "1.1", "1.0"] },
+      { version: "1.1", offered: ["1.1", "1.0"] }
+    ];
+    for (const attempt of attempts) {
+      try {
+        const payload = await connection.request(attempt.version, "handshake", {
+          ...credentials,
+          supportedProtocolVersions: attempt.offered
+        });
+        validatePayload("handshake", validateHandshakeV12, payload);
+        return {
+          negotiatedProtocolVersion: payload.negotiatedProtocolVersion as ProtocolVersion,
+          serviceVersion: payload.serviceVersion as string
+        };
+      } catch (error) {
+        if (!(error instanceof ProtocolError) || error.code !== "UNSUPPORTED_PROTOCOL") throw error;
+      }
     }
-    validatePayload("handshake", validateHandshakeV12, payload);
+    const payload = await connection.request("1.0", "handshake", { ...credentials });
+    validatePayload("handshake", validateHandshakeV10, payload);
     return {
       negotiatedProtocolVersion: payload.negotiatedProtocolVersion as ProtocolVersion,
       serviceVersion: payload.serviceVersion as string

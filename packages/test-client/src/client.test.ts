@@ -261,6 +261,31 @@ test("client prefers protocol 1.3 and accepts negotiated 1.2 and 1.1 downgrades"
   }
 });
 
+test("client retries a legacy service with the newest envelope version it understands", async () => {
+  for (const negotiated of ["1.2", "1.1"] as const) {
+    const fixture = scriptedClient((request) => {
+      if (request.protocolVersion === negotiated) {
+        return response(request, {
+          negotiatedProtocolVersion: negotiated,
+          serviceVersion: "0.2.0"
+        }, negotiated);
+      }
+      return error(request, "UNSUPPORTED_PROTOCOL", false, "1.0");
+    });
+    const result = await fixture.client.handshake("0123456789abcdef", "test", "0.3.0");
+    assert.equal(result.negotiatedProtocolVersion, negotiated);
+    const expectedVersions = negotiated === "1.2"
+      ? ["1.3", "1.2"]
+      : ["1.3", "1.2", "1.1"];
+    assert.deepEqual(fixture.requests.map(({ protocolVersion }) => protocolVersion), expectedVersions);
+    assert.deepEqual(
+      (fixture.requests.at(-1)?.payload as JsonObject).supportedProtocolVersions,
+      negotiated === "1.2" ? ["1.2", "1.1", "1.0"] : ["1.1", "1.0"]
+    );
+    fixture.client.close();
+  }
+});
+
 test("protocol 1.3 client routes typed discovery, run, catalog, and run query APIs", async () => {
   const fixture = scriptedClient((request) => {
     if (request.method === "handshake") {
@@ -936,19 +961,22 @@ test("unknown protocol versions close the connection", async () => {
 
 test("client falls back to an exact 1.0 handshake", async () => {
   const fixture = scriptedClient((request) => {
-    if (request.protocolVersion === "1.3") return error(request, "UNSUPPORTED_PROTOCOL", false, "1.0");
+    if (request.protocolVersion !== "1.0") return error(request, "UNSUPPORTED_PROTOCOL", false, "1.0");
     return response(request, { negotiatedProtocolVersion: "1.0", serviceVersion: "0.1.0" }, "1.0");
   });
   const negotiated = await fixture.client.handshake("0123456789abcdef", "test", "0.2.0");
   assert.equal(negotiated.negotiatedProtocolVersion, "1.0");
-  assert.deepEqual(fixture.requests.map(({ protocolVersion }) => protocolVersion), ["1.3", "1.0"]);
+  assert.deepEqual(
+    fixture.requests.map(({ protocolVersion }) => protocolVersion),
+    ["1.3", "1.2", "1.1", "1.0"]
+  );
   assert.deepEqual(fixture.requests[0]?.payload, {
     token: "0123456789abcdef",
     clientName: "test",
     clientVersion: "0.2.0",
     supportedProtocolVersions: ["1.3", "1.2", "1.1", "1.0"]
   });
-  assert.equal("supportedProtocolVersions" in (fixture.requests[1]?.payload as JsonObject), false);
+  assert.equal("supportedProtocolVersions" in (fixture.requests[3]?.payload as JsonObject), false);
   fixture.client.close();
 });
 

@@ -58,7 +58,7 @@ export class Connection {
   #buffer = Buffer.alloc(0);
   #closed = false;
   #closeError: Error | undefined;
-  #legacyHandshakeAvailable = true;
+  #legacyHandshakeCeiling = Number.POSITIVE_INFINITY;
 
   get closed(): boolean { return this.#closed; }
 
@@ -93,10 +93,11 @@ export class Connection {
     if (encoded.byteLength - 1 > MAX_MESSAGE_BYTES) {
       return Promise.reject(new Error("protocol line exceeds the 1 MiB limit"));
     }
-    const acceptLegacyUnsupportedProtocol = this.#legacyHandshakeAvailable
+    const handshakeAttempt = method === "handshake";
+    const acceptLegacyUnsupportedProtocol = handshakeAttempt
       && version !== "1.0"
-      && method === "handshake";
-    if (acceptLegacyUnsupportedProtocol) this.#legacyHandshakeAvailable = false;
+      && protocolRank(version) < this.#legacyHandshakeCeiling;
+    if (handshakeAttempt) this.#legacyHandshakeCeiling = Number.NEGATIVE_INFINITY;
     const offeredProtocolVersions = method === "handshake" && Array.isArray(payload.supportedProtocolVersions)
       ? payload.supportedProtocolVersions.filter(isProtocolVersion)
       : [];
@@ -207,6 +208,9 @@ export class Connection {
     if (message.protocolVersion !== pending.version && !isAllowedLegacyHandshakeError && !isAllowedNegotiatedHandshakeResponse) {
       this.#closeWithError(new Error("response protocol version does not match request"));
       return false;
+    }
+    if (isAllowedLegacyHandshakeError) {
+      this.#legacyHandshakeCeiling = protocolRank(pending.version);
     }
     this.#pending.delete(message.requestId);
     if (message.kind === "error") {
