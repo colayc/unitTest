@@ -50,8 +50,8 @@ try {
     await writeNormalized(target, generated);
     if (check) {
       let committed;
-      try { committed = normalized(await readFile(destination, "utf8")); } catch { committed = undefined; }
-      if (committed !== await readFile(generated, "utf8")) drifted.push(relative(root, destination).replaceAll("\\", "/"));
+      try { committed = await readFile(destination); } catch { committed = undefined; }
+      if (!committed?.equals(await readFile(generated))) drifted.push(relative(root, destination).replaceAll("\\", "/"));
       continue;
     }
     await mkdir(dirname(destination), { recursive: true });
