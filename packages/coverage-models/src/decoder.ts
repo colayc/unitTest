@@ -24,6 +24,10 @@ export function decodeCoverageDocumentV1(value: unknown): CoverageDocumentV1 {
 }
 
 export function validateCoverageDocumentV1(value: CoverageDocumentV1): void {
+  assertUTF8ByteLength(value.provenance.compiler.version, 1, 128, "provenance.compiler.version");
+  assertUTF8ByteLength(value.provenance.driver.version, 1, 128, "provenance.driver.version");
+  assertUTF8ByteLength(value.provenance.collector.version, 1, 128, "provenance.collector.version");
+  assertUTF8ByteLength(value.provenance.normalizerVersion, 1, 128, "provenance.normalizerVersion");
   assertCompleteness(value.completeness);
   assertSummary(value.summary, "summary");
   let aggregate = emptySummary();
@@ -101,7 +105,32 @@ function assertCompleteness(value: CoverageCompletenessV1): void {
   }
 }
 
+function assertUTF8ByteLength(value: string, minimum: number, maximum: number, field: string): void {
+  if (!isWellFormedUnicode(value)) {
+    fail(field + " is not a well-formed Unicode string");
+  }
+  const length = Buffer.byteLength(value, "utf8");
+  if (length < minimum || length > maximum) {
+    fail(field + " is not " + minimum + ".." + maximum + " UTF-8 bytes");
+  }
+}
+
+function isWellFormedUnicode(value: string): boolean {
+  for (let index = 0; index < value.length; index++) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next < 0xdc00 || next > 0xdfff) return false;
+      index++;
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function assertCanonicalURI(uri: string): void {
+  assertUTF8ByteLength(uri, 1, 4096, "file.uri");
   const segments = uri.split("/");
   if (uri.length === 0 || uri !== uri.normalize("NFC") ||
       uri.startsWith("/") || uri.includes("\\") || uri.includes("?") ||
