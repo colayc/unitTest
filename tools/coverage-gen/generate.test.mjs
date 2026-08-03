@@ -58,7 +58,7 @@ test("normal generation restores every destination and removes transaction files
   const originalQuicktype = await readFile(quicktype);
   const originalTypeScript = await readFile(target);
   const originalGo = await readFile(goTarget);
-  const temporary = await mkdtemp(join(tmpdir(), "coverage-gen-transaction-test-"));
+  const temporary = await mkdtemp(join(tmpdir(), "coverage gen transaction test-"));
   const preload = join(temporary, "fail-go-rename.cjs");
   const changedQuicktype = `const fs = require("node:fs");
 const language = process.argv[process.argv.indexOf("--lang") + 1];
@@ -85,12 +85,12 @@ syncBuiltinESMExports();
   try {
     await writeFile(quicktype, changedQuicktype);
     await writeFile(preload, failGoRename);
-    const result = spawnSync(process.execPath, [generator], {
+    const result = spawnSync(process.execPath, ["--require", preload, generator], {
       cwd: root,
-      encoding: "utf8",
-      env: { ...process.env, NODE_OPTIONS: `--require=${preload}` }
+      encoding: "utf8"
     });
     assert.notEqual(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stderr, /injected Go destination rename failure/);
     assert.deepEqual(await readFile(target), originalTypeScript);
     assert.deepEqual(await readFile(goTarget), originalGo);
     for (const destination of [target, goTarget]) {
