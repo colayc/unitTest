@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import type {
   CoverageDocumentV1,
@@ -30,4 +31,14 @@ test("generated Coverage JSON v1 types expose stable wire names", () => {
     files: [file]
   };
   assert.equal(document.files[0]?.uri, "src/calculator.cpp");
+});
+
+test("root verify includes the non-mutating Coverage generated drift gate", async () => {
+  const root = JSON.parse(await readFile(new URL("../../../package.json", import.meta.url), "utf8"));
+  assert.equal(root.scripts["generate:coverage"], "node tools/coverage-gen/generate.mjs");
+  assert.equal(root.scripts["check:coverage-generated"], "node tools/coverage-gen/generate.mjs --check");
+  assert.match(
+    root.scripts.verify,
+    /^pnpm check:protocol-generated && pnpm check:coverage-generated && /
+  );
 });
