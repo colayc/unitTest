@@ -80,6 +80,8 @@ docs/
 
 验收标准：两个框架都能在支持矩阵上发现并运行单个测试，包括失败、崩溃、跳过、超时和格式错误输出的测试夹具。
 
+状态：已于 2026-08-01 完成。提交 `69dd3d8` 已完成 CTest、CppUTest/CppUMock、Unity/CMock、Protocol v1.3、TestRun recovery 和 deterministic E2E，并同步到 GitHub 与 Gitee。
+
 ### Phase 5：覆盖率与报告管道
 
 实现 Windows clang-cl/llvm-cov、Linux GCC/gcovr 和 Linux Clang/llvm-cov 适配器；规范化路径；合并 profile；导出版本化 JSON、JUnit XML 和 HTML 制品；并强制执行 LLVM 工具版本兼容性。
@@ -87,6 +89,10 @@ docs/
 依赖：Phase 4 的框架执行能力。
 
 验收标准：在所有已声明的覆盖率配置中，源码、行、分支和汇总覆盖率均可复现，且每份报告都显示实际工具链。
+
+详细设计：`docs/superpowers/specs/2026-08-03-coverage-report-pipeline-design.md`
+
+状态：设计已于 2026-08-03 确认，待编写详细实施计划。
 
 ### Phase 6：Code-OSS 外壳与内置扩展
 
