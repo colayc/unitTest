@@ -40,29 +40,46 @@ async function writeNormalized(target, output) {
 }
 
 const temporary = await mkdtemp(join(tmpdir(), "unit-test-ide-coverage-"));
+const stagedPaths = [];
 try {
-  const drifted = [];
+  const generatedTargets = [];
   for (const [index, target] of targets.entries()) {
     const destination = join(root, target.output);
     const generated = join(temporary, String(index));
     await mkdir(dirname(generated), { recursive: true });
     generate(target, generated);
     await writeNormalized(target, generated);
-    if (check) {
+    generatedTargets.push({
+      destination,
+      content: await readFile(generated),
+      staged: `${destination}.tmp-${process.pid}-${index}`
+    });
+  }
+
+  if (check) {
+    const drifted = [];
+    for (const { destination, content } of generatedTargets) {
       let committed;
       try { committed = await readFile(destination); } catch { committed = undefined; }
-      if (!committed?.equals(await readFile(generated))) drifted.push(relative(root, destination).replaceAll("\\", "/"));
-      continue;
+      if (!committed?.equals(content)) drifted.push(relative(root, destination).replaceAll("\\", "/"));
     }
-    await mkdir(dirname(destination), { recursive: true });
-    const staged = `${destination}.tmp-${process.pid}-${index}`;
-    await writeFile(staged, await readFile(generated));
-    await rename(staged, destination);
-  }
-  if (drifted.length) {
-    for (const path of drifted) console.error(`Generated file is stale: ${path}`);
-    process.exitCode = 1;
+    if (drifted.length) {
+      for (const path of drifted) console.error(`Generated file is stale: ${path}`);
+      process.exitCode = 1;
+    }
+  } else {
+    for (const { destination, content, staged } of generatedTargets) {
+      stagedPaths.push(staged);
+      await mkdir(dirname(destination), { recursive: true });
+      await writeFile(staged, content);
+    }
+    for (const { destination, staged } of generatedTargets) await rename(staged, destination);
   }
 } finally {
-  await rm(temporary, { recursive: true, force: true });
+  const cleanupErrors = [];
+  for (const staged of stagedPaths) {
+    try { await rm(staged, { force: true }); } catch (error) { cleanupErrors.push(error); }
+  }
+  try { await rm(temporary, { recursive: true, force: true }); } catch (error) { cleanupErrors.push(error); }
+  if (cleanupErrors.length) throw new AggregateError(cleanupErrors, "Unable to remove coverage generator temporary files");
 }
