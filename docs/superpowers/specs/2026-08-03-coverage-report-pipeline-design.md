@@ -284,11 +284,11 @@ clang-cl/Clang、`llvm-profdata`、`llvm-cov` 必须：
 1. 按 canonical path 枚举当前 run manifest 中的 `.profraw`；
 2. 拒绝 symlink/reparse point、未知 owner、重复 identity 和越界文件；
 3. 使用 `llvm-profdata merge -sparse` 生成当前 run 的 `.profdata`；
-4. 对经过 fingerprint 校验的 instrumented binary 执行 `llvm-cov export`；
+4. 按 stable ID 排序所有经过 fingerprint 校验的 instrumented binary，对首个 binary 执行 `llvm-cov export`，其余 binary 通过固定的 additional object 参数加入；
 5. 在 bounded parser 中转换为内部 LLVM domain object；
 6. 删除 raw/indexed profile 和第三方 export JSON。
 
-raw profile 与 instrumented binary 不匹配、LLVM JSON major version 不受支持或 mapping 无法读取时，CoverageRun `unavailable`。
+同一 CoverageRun 可以包含多个 CTest container/binary，但每个 binary 都必须属于当前 build manifest、通过 `ExecutionBoundary` 固定并进入 export object set。raw profile 与任一 instrumented binary 不匹配、LLVM JSON major version 不受支持或 mapping 无法读取时，CoverageRun `unavailable`。
 
 ## 11. GCC/gcovr coverage pipeline
 

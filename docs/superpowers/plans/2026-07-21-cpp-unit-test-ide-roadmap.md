@@ -92,7 +92,9 @@ docs/
 
 详细设计：`docs/superpowers/specs/2026-08-03-coverage-report-pipeline-design.md`
 
-状态：设计已于 2026-08-03 确认，待编写详细实施计划。
+状态：设计已于 2026-08-03 确认，详细实施计划已完成，待确认后执行 Phase 5A。
+
+实施计划索引：`docs/superpowers/plans/2026-08-03-phase5-coverage-implementation-index.md`
 
 ### Phase 6：Code-OSS 外壳与内置扩展
 
