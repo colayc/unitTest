@@ -525,6 +525,20 @@ func TestLoadConfigAcceptsSupportedCoverageMetacharacters(t *testing.T) {
 	}
 }
 
+func TestLoadConfigAcceptsLiteralCoverageDollarAndColon(t *testing.T) {
+	result, err := loadConfigBytes(t, coverageConfigJSON(
+		t,
+		[]string{"src/cost$center.cpp", "src/type:traits.hpp"},
+		nil,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := result.Config.CoverageProfiles[0].Include, []string{"src/cost$center.cpp", "src/type:traits.hpp"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Include = %#v, want %#v", got, want)
+	}
+}
+
 func TestLoadConfigRejectsUnsafeCoverageProfiles(t *testing.T) {
 	cases := map[string][]byte{
 		"v2 coverage field":                 []byte(`{"version":2,"coverageProfiles":[]}`),
@@ -578,6 +592,34 @@ func TestConfigCloneIsolatesCoverageSlices(t *testing.T) {
 		len(result.Config.CoverageProfiles) != 1 {
 		t.Fatalf("source Config mutated: %#v", result.Config)
 	}
+}
+
+func TestConfigClonePreservesNonNilEmptyCoverageSlices(t *testing.T) {
+	t.Run("missing coverage profiles", func(t *testing.T) {
+		result, err := loadConfigBytes(t, []byte(`{"version":3}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Config.CoverageProfiles == nil {
+			t.Fatal("loaded CoverageProfiles = nil, want non-nil empty slice")
+		}
+		if cloned := result.Config.Clone(); cloned.CoverageProfiles == nil || len(cloned.CoverageProfiles) != 0 {
+			t.Fatalf("cloned CoverageProfiles = %#v, want non-nil empty slice", cloned.CoverageProfiles)
+		}
+	})
+
+	t.Run("empty exclude", func(t *testing.T) {
+		result, err := loadConfigBytes(t, coverageConfigJSON(t, []string{"src/**"}, []string{}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Config.CoverageProfiles[0].Exclude == nil {
+			t.Fatal("loaded Exclude = nil, want non-nil empty slice")
+		}
+		if cloned := result.Config.Clone(); cloned.CoverageProfiles[0].Exclude == nil || len(cloned.CoverageProfiles[0].Exclude) != 0 {
+			t.Fatalf("cloned Exclude = %#v, want non-nil empty slice", cloned.CoverageProfiles[0].Exclude)
+		}
+	})
 }
 
 func coverageConfigJSON(t *testing.T, include, exclude []string) []byte {

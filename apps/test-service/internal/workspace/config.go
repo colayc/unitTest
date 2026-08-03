@@ -331,8 +331,8 @@ func validateCoverageGlob(value string) (int, error) {
 	if value == "" || len(value) > maxCoverageGlobBytes || !utf8.ValidString(value) {
 		return 0, invalidConfig("coverage glob must contain 1 to %d valid UTF-8 bytes", maxCoverageGlobBytes)
 	}
-	if strings.Contains(value, `\`) || strings.HasPrefix(value, "/") || hasPortableVolume(value) || strings.Contains(value, ":") ||
-		strings.ContainsAny(value, "[]{}$`") {
+	if strings.Contains(value, `\`) || strings.HasPrefix(value, "/") || hasPortableVolume(value) || hasCoverageURIScheme(value) ||
+		strings.Contains(value, "$(") || strings.Contains(value, "${") || strings.ContainsAny(value, "[]{}`") {
 		return 0, invalidConfig("coverage glob contains an unsupported path or expansion form")
 	}
 	segments := strings.Split(value, "/")
@@ -351,6 +351,23 @@ func validateCoverageGlob(value string) (int, error) {
 		}
 	}
 	return states, nil
+}
+
+func hasCoverageURIScheme(value string) bool {
+	if len(value) == 0 || !isASCIIAlpha(value[0]) {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if character == ':' {
+			return index > 0
+		}
+		if character == '/' ||
+			!(isASCIIAlphaNumeric(character) || character == '+' || character == '-' || character == '.') {
+			return false
+		}
+	}
+	return false
 }
 
 func coverageGlobSegmentCost(segment string) (int, error) {
@@ -424,17 +441,26 @@ func decodeCoverageProfiles(wires []coverageProfileWire) ([]CoverageProfile, err
 
 func (config Config) Clone() Config {
 	clone := config
-	clone.Projects = append([]ProjectConfig(nil), config.Projects...)
+	clone.Projects = cloneSlice(config.Projects)
 	for index := range clone.Projects {
-		clone.Projects[index].Fallback.Configurations = append([]string(nil), config.Projects[index].Fallback.Configurations...)
-		clone.Projects[index].Tests.Containers = append([]TestContainerMapping(nil), config.Projects[index].Tests.Containers...)
+		clone.Projects[index].Fallback.Configurations = cloneSlice(config.Projects[index].Fallback.Configurations)
+		clone.Projects[index].Tests.Containers = cloneSlice(config.Projects[index].Tests.Containers)
 	}
-	clone.Toolchains = append([]ToolchainConfig(nil), config.Toolchains...)
-	clone.CoverageProfiles = append([]CoverageProfile(nil), config.CoverageProfiles...)
+	clone.Toolchains = cloneSlice(config.Toolchains)
+	clone.CoverageProfiles = cloneSlice(config.CoverageProfiles)
 	for index := range clone.CoverageProfiles {
-		clone.CoverageProfiles[index].Include = append([]string(nil), config.CoverageProfiles[index].Include...)
-		clone.CoverageProfiles[index].Exclude = append([]string(nil), config.CoverageProfiles[index].Exclude...)
+		clone.CoverageProfiles[index].Include = cloneSlice(config.CoverageProfiles[index].Include)
+		clone.CoverageProfiles[index].Exclude = cloneSlice(config.CoverageProfiles[index].Exclude)
 	}
+	return clone
+}
+
+func cloneSlice[T any](source []T) []T {
+	if source == nil {
+		return nil
+	}
+	clone := make([]T, len(source))
+	copy(clone, source)
 	return clone
 }
 
