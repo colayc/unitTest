@@ -7,19 +7,28 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
+	"unicode"
 	"unicode/utf8"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 const (
-	workspaceConfigPath = ".unit-test-ide/workspace.json"
-	maxConfigBytes      = 256 * 1024
-	maxProjects         = 64
-	maxToolchains       = 64
-	maxConfigurations   = 64
-	maxIdentifierBytes  = 64
-	maxTestContainers   = 256
-	maxCTestNameBytes   = 512
+	workspaceConfigPath            = ".unit-test-ide/workspace.json"
+	maxConfigBytes                 = 256 * 1024
+	maxProjects                    = 64
+	maxToolchains                  = 64
+	maxConfigurations              = 64
+	maxIdentifierBytes             = 64
+	maxTestContainers              = 256
+	maxCTestNameBytes              = 512
+	maxCoverageProfiles            = 64
+	maxCoverageGlobsPerList        = 128
+	maxCoverageGlobBytes           = 512
+	maxCoverageProfileStates       = 8_192
+	maxCoverageConfigurationStates = 65_536
 )
 
 var (
@@ -28,10 +37,18 @@ var (
 )
 
 type Config struct {
-	Version    int               `json:"version"`
-	CMake      CMakeConfig       `json:"cmake,omitempty"`
-	Projects   []ProjectConfig   `json:"projects,omitempty"`
-	Toolchains []ToolchainConfig `json:"toolchains,omitempty"`
+	Version          int               `json:"version"`
+	CMake            CMakeConfig       `json:"cmake,omitempty"`
+	Projects         []ProjectConfig   `json:"projects,omitempty"`
+	Toolchains       []ToolchainConfig `json:"toolchains,omitempty"`
+	CoverageProfiles []CoverageProfile `json:"coverageProfiles,omitempty"`
+}
+
+type CoverageProfile struct {
+	ID                 string   `json:"id"`
+	BaseBuildProfileID string   `json:"baseBuildProfileId"`
+	Include            []string `json:"include"`
+	Exclude            []string `json:"exclude"`
 }
 
 type CMakeConfig struct {
@@ -94,10 +111,18 @@ type nonNullOptional[T any] struct {
 }
 
 type configWire struct {
-	Version    int                                `json:"version"`
-	CMake      nonNullOptional[cmakeWire]         `json:"cmake"`
-	Projects   nonNullOptional[[]projectWire]     `json:"projects"`
-	Toolchains nonNullOptional[[]json.RawMessage] `json:"toolchains"`
+	Version          int                                    `json:"version"`
+	CMake            nonNullOptional[cmakeWire]             `json:"cmake"`
+	Projects         nonNullOptional[[]projectWire]         `json:"projects"`
+	Toolchains       nonNullOptional[[]json.RawMessage]     `json:"toolchains"`
+	CoverageProfiles nonNullOptional[[]coverageProfileWire] `json:"coverageProfiles"`
+}
+
+type coverageProfileWire struct {
+	ID                 *string                   `json:"id"`
+	BaseBuildProfileID *string                   `json:"baseBuildProfileId"`
+	Include            nonNullOptional[[]string] `json:"include"`
+	Exclude            nonNullOptional[[]string] `json:"exclude"`
 }
 
 type cmakeWire struct {
@@ -210,8 +235,11 @@ func decodeConfig(root Root, data []byte) (Config, error) {
 	if err := decodeStrict(data, &wire); err != nil {
 		return Config{}, invalidConfig("decode JSON: %v", err)
 	}
-	if wire.Version != 1 && wire.Version != 2 {
-		return Config{}, invalidConfig("version = %d, want 1 or 2", wire.Version)
+	if wire.Version != 1 && wire.Version != 2 && wire.Version != 3 {
+		return Config{}, invalidConfig("version = %d, want 1, 2 or 3", wire.Version)
+	}
+	if wire.Version < 3 && wire.CoverageProfiles.Present {
+		return Config{}, invalidConfig("coverageProfiles requires workspace version 3")
 	}
 	if len(wire.Projects.Value) > maxProjects {
 		return Config{}, invalidConfig("projects contains %d items, maximum is %d", len(wire.Projects.Value), maxProjects)
@@ -253,7 +281,161 @@ func decodeConfig(root Root, data []byte) (Config, error) {
 		toolchainIDs[toolchain.ID] = struct{}{}
 		config.Toolchains = append(config.Toolchains, toolchain)
 	}
+	if wire.Version == 3 {
+		coverageProfiles, err := decodeCoverageProfiles(wire.CoverageProfiles.Value)
+		if err != nil {
+			return Config{}, err
+		}
+		config.CoverageProfiles = coverageProfiles
+	}
 	return config, nil
+}
+
+func canonicalCoverageGlobs(values []string, present, defaultInclude bool) ([]string, int, error) {
+	if defaultInclude && !present {
+		cost, err := validateCoverageGlob("**")
+		if err != nil {
+			return nil, 0, err
+		}
+		return []string{"**"}, cost, nil
+	}
+	if len(values) == 0 {
+		if defaultInclude {
+			return nil, 0, invalidConfig("coverage include must not be empty")
+		}
+		return []string{}, 0, nil
+	}
+	if len(values) > maxCoverageGlobsPerList {
+		return nil, 0, invalidConfig("coverage globs contains %d items, maximum is %d", len(values), maxCoverageGlobsPerList)
+	}
+	canonical := make([]string, len(values))
+	for index, value := range values {
+		canonical[index] = norm.NFC.String(value)
+	}
+	sort.Strings(canonical)
+	states := 0
+	for index, value := range canonical {
+		if index > 0 && value == canonical[index-1] {
+			return nil, 0, invalidConfig("coverage globs contains duplicate %q", value)
+		}
+		cost, err := validateCoverageGlob(value)
+		if err != nil {
+			return nil, 0, err
+		}
+		states += cost
+	}
+	return canonical, states, nil
+}
+
+func validateCoverageGlob(value string) (int, error) {
+	if value == "" || len(value) > maxCoverageGlobBytes || !utf8.ValidString(value) {
+		return 0, invalidConfig("coverage glob must contain 1 to %d valid UTF-8 bytes", maxCoverageGlobBytes)
+	}
+	if strings.Contains(value, `\`) || strings.HasPrefix(value, "/") || hasPortableVolume(value) || strings.Contains(value, ":") ||
+		strings.ContainsAny(value, "[]{}$`") {
+		return 0, invalidConfig("coverage glob contains an unsupported path or expansion form")
+	}
+	segments := strings.Split(value, "/")
+	states := 1
+	for index, segment := range segments {
+		if segment == "" || segment == "." || segment == ".." {
+			return 0, invalidConfig("coverage glob contains an unsafe path segment")
+		}
+		cost, err := coverageGlobSegmentCost(segment)
+		if err != nil {
+			return 0, err
+		}
+		states += cost
+		if index > 0 {
+			states++
+		}
+	}
+	return states, nil
+}
+
+func coverageGlobSegmentCost(segment string) (int, error) {
+	if segment == "**" {
+		return 2, nil
+	}
+	cost := 0
+	for _, character := range segment {
+		if unicode.IsControl(character) {
+			return 0, invalidConfig("coverage glob contains a control character")
+		}
+		switch character {
+		case '*':
+			cost += 2
+		case '?':
+			cost++
+		default:
+			cost++
+		}
+	}
+	if strings.Contains(segment, "**") {
+		return 0, invalidConfig("coverage glob contains embedded globstar")
+	}
+	return cost, nil
+}
+
+func decodeCoverageProfiles(wires []coverageProfileWire) ([]CoverageProfile, error) {
+	if len(wires) > maxCoverageProfiles {
+		return nil, invalidConfig("coverageProfiles contains %d items, maximum is %d", len(wires), maxCoverageProfiles)
+	}
+	profiles := make([]CoverageProfile, 0, len(wires))
+	seenIDs := make(map[string]struct{}, len(wires))
+	totalStates := 0
+	for index, wire := range wires {
+		if wire.ID == nil || !validIdentifier(*wire.ID) {
+			return nil, invalidConfig("coverageProfiles[%d].id is not a valid identifier", index)
+		}
+		if wire.BaseBuildProfileID == nil || !validIdentifier(*wire.BaseBuildProfileID) {
+			return nil, invalidConfig("coverageProfiles[%d].baseBuildProfileId is not a valid identifier", index)
+		}
+		if _, duplicate := seenIDs[*wire.ID]; duplicate {
+			return nil, invalidConfig("coverageProfiles contains duplicate id %q", *wire.ID)
+		}
+		include, includeStates, err := canonicalCoverageGlobs(wire.Include.Value, wire.Include.Present, true)
+		if err != nil {
+			return nil, err
+		}
+		exclude, excludeStates, err := canonicalCoverageGlobs(wire.Exclude.Value, wire.Exclude.Present, false)
+		if err != nil {
+			return nil, err
+		}
+		profileStates := includeStates + excludeStates
+		if profileStates > maxCoverageProfileStates {
+			return nil, invalidConfig("coverageProfiles[%d] contains %d states, maximum is %d", index, profileStates, maxCoverageProfileStates)
+		}
+		totalStates += profileStates
+		if totalStates > maxCoverageConfigurationStates {
+			return nil, invalidConfig("coverageProfiles contains %d states, maximum is %d", totalStates, maxCoverageConfigurationStates)
+		}
+		seenIDs[*wire.ID] = struct{}{}
+		profiles = append(profiles, CoverageProfile{ID: *wire.ID, BaseBuildProfileID: *wire.BaseBuildProfileID, Include: include, Exclude: exclude})
+	}
+	sort.Slice(profiles, func(left, right int) bool {
+		if profiles[left].ID != profiles[right].ID {
+			return profiles[left].ID < profiles[right].ID
+		}
+		return profiles[left].BaseBuildProfileID < profiles[right].BaseBuildProfileID
+	})
+	return profiles, nil
+}
+
+func (config Config) Clone() Config {
+	clone := config
+	clone.Projects = append([]ProjectConfig(nil), config.Projects...)
+	for index := range clone.Projects {
+		clone.Projects[index].Fallback.Configurations = append([]string(nil), config.Projects[index].Fallback.Configurations...)
+		clone.Projects[index].Tests.Containers = append([]TestContainerMapping(nil), config.Projects[index].Tests.Containers...)
+	}
+	clone.Toolchains = append([]ToolchainConfig(nil), config.Toolchains...)
+	clone.CoverageProfiles = append([]CoverageProfile(nil), config.CoverageProfiles...)
+	for index := range clone.CoverageProfiles {
+		clone.CoverageProfiles[index].Include = append([]string(nil), config.CoverageProfiles[index].Include...)
+		clone.CoverageProfiles[index].Exclude = append([]string(nil), config.CoverageProfiles[index].Exclude...)
+	}
+	return clone
 }
 
 func decodeProject(root Root, configVersion, index int, wire projectWire) (ProjectConfig, error) {

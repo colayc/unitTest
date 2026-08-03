@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -299,7 +300,7 @@ func TestLoadConfigRejectsInvalidStructuredInput(t *testing.T) {
 			`{"version":1,"projects":[],"unexpected":true}`,
 		),
 		"wrong version": []byte(
-			`{"version":3,"projects":[]}`,
+			`{"version":4,"projects":[]}`,
 		),
 		"absolute POSIX source directory": []byte(
 			`{"version":1,"projects":[{"id":"outside","sourceDir":"/outside"}]}`,
@@ -453,6 +454,206 @@ func TestLoadConfigUsesOnlyExplicitNestedProjects(t *testing.T) {
 func TestValidRelativeWorkspacePathRejectsWindowsRootedPathOnEveryPlatform(t *testing.T) {
 	if validRelativeWorkspacePath(`\outside`) {
 		t.Fatal(`validRelativeWorkspacePath("\\outside") = true, want false`)
+	}
+}
+
+func TestLoadConfigLoadsCanonicalCoverageV3WithoutChangingV1V2(t *testing.T) {
+	result, err := loadConfigBytes(t, configFixture(t, "coverage-v3.valid.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Config.Version != 3 || len(result.Config.CoverageProfiles) != 1 {
+		t.Fatalf("Config = %#v", result.Config)
+	}
+	got := result.Config.CoverageProfiles[0]
+	want := CoverageProfile{
+		ID: "coverage-debug", BaseBuildProfileID: "debug-clang",
+		Include: []string{"include/**", "src/**"},
+		Exclude: []string{"tests/**", "third_party/**"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("CoverageProfile = %#v, want %#v", got, want)
+	}
+
+	for _, fixtureName := range []string{"minimal.valid.json", "tests-v2.valid.json"} {
+		loaded, loadErr := loadConfigBytes(t, configFixture(t, fixtureName))
+		if loadErr != nil {
+			t.Fatalf("%s: %v", fixtureName, loadErr)
+		}
+		if len(loaded.Config.CoverageProfiles) != 0 {
+			t.Fatalf("%s coverage profiles = %#v", fixtureName, loaded.Config.CoverageProfiles)
+		}
+	}
+}
+
+func TestLoadConfigCanonicalizesCoverageDefaultsNFCAndOrder(t *testing.T) {
+	data := []byte(`{"version":3,"coverageProfiles":[` +
+		`{"id":"z","baseBuildProfileId":"base","exclude":["tests/**"]},` +
+		`{"id":"a","baseBuildProfileId":"base","include":["src/e\u0301.cpp","include/**"],"exclude":[]}` +
+		`]}`)
+	result, err := loadConfigBytes(t, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := result.Config.CoverageProfiles[0].ID; got != "a" {
+		t.Fatalf("first ID = %q", got)
+	}
+	if got := result.Config.CoverageProfiles[0].Include; !reflect.DeepEqual(got, []string{"include/**", "src/é.cpp"}) {
+		t.Fatalf("NFC include = %#v", got)
+	}
+	if got := result.Config.CoverageProfiles[0].Exclude; got == nil || len(got) != 0 {
+		t.Fatalf("empty exclude = %#v, want non-nil empty slice", got)
+	}
+	if got := result.Config.CoverageProfiles[1].Include; !reflect.DeepEqual(got, []string{"**"}) {
+		t.Fatalf("default include = %#v", got)
+	}
+}
+
+func TestLoadConfigAcceptsSupportedCoverageMetacharacters(t *testing.T) {
+	result, err := loadConfigBytes(t, coverageConfigJSON(
+		t,
+		[]string{"**", "include/?.hpp", "src/*.cpp"},
+		[]string{},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := result.Config.CoverageProfiles[0]
+	if !reflect.DeepEqual(got.Include, []string{"**", "include/?.hpp", "src/*.cpp"}) ||
+		got.Exclude == nil || len(got.Exclude) != 0 {
+		t.Fatalf("CoverageProfile = %#v", got)
+	}
+}
+
+func TestLoadConfigRejectsUnsafeCoverageProfiles(t *testing.T) {
+	cases := map[string][]byte{
+		"v2 coverage field":                 []byte(`{"version":2,"coverageProfiles":[]}`),
+		"command fixture":                   configFixture(t, "coverage-command.invalid.json"),
+		"path fixture":                      configFixture(t, "coverage-path.invalid.json"),
+		"duplicate fixture":                 configFixture(t, "coverage-duplicate.invalid.json"),
+		"duplicate ID with different globs": []byte(`{"version":3,"coverageProfiles":[{"id":"coverage","baseBuildProfileId":"base","include":["src/**"]},{"id":"coverage","baseBuildProfileId":"base","include":["include/**"]}]}`),
+		"missing base":                      []byte(`{"version":3,"coverageProfiles":[{"id":"coverage"}]}`),
+		"empty include":                     []byte(`{"version":3,"coverageProfiles":[{"id":"coverage","baseBuildProfileId":"base","include":[]}]}`),
+		"empty glob":                        coverageConfigJSON(t, []string{""}, nil),
+		"backslash":                         coverageConfigJSON(t, []string{`src\\**`}, nil),
+		"absolute":                          coverageConfigJSON(t, []string{"/src/**"}, nil),
+		"drive":                             coverageConfigJSON(t, []string{"C:/src/**"}, nil),
+		"UNC":                               coverageConfigJSON(t, []string{"//server/share/**"}, nil),
+		"URI scheme":                        coverageConfigJSON(t, []string{"file:src/**"}, nil),
+		"dot segment":                       coverageConfigJSON(t, []string{"src/./**"}, nil),
+		"empty segment":                     coverageConfigJSON(t, []string{"src//**"}, nil),
+		"trailing slash":                    coverageConfigJSON(t, []string{"src/"}, nil),
+		"embedded globstar":                 coverageConfigJSON(t, []string{"src/**.cpp"}, nil),
+		"class expansion":                   coverageConfigJSON(t, []string{"src/[ab].cpp"}, nil),
+		"brace expansion":                   coverageConfigJSON(t, []string{"src/{a,b}.cpp"}, nil),
+		"command substitution":              coverageConfigJSON(t, []string{"src/$(whoami).cpp"}, nil),
+		"environment substitution":          coverageConfigJSON(t, []string{"src/${TOKEN}.cpp"}, nil),
+		"backtick":                          coverageConfigJSON(t, []string{"src/`whoami`.cpp"}, nil),
+		"NUL":                               coverageConfigJSON(t, []string{"src/\x00.cpp"}, nil),
+		"control":                           coverageConfigJSON(t, []string{"src/\x01.cpp"}, nil),
+		"NFC duplicate":                     coverageConfigJSON(t, []string{"src/é.cpp", "src/e\u0301.cpp"}, nil),
+		"long ASCII glob":                   coverageConfigJSON(t, []string{"src/" + strings.Repeat("x", 509)}, nil),
+		"long multibyte glob":               coverageConfigJSON(t, []string{strings.Repeat("界", 171)}, nil),
+	}
+	for name, data := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := loadConfigBytes(t, data); !errors.Is(err, ErrInvalidConfig) {
+				t.Fatalf("error = %v, want ErrInvalidConfig", err)
+			}
+		})
+	}
+}
+
+func TestConfigCloneIsolatesCoverageSlices(t *testing.T) {
+	result, err := loadConfigBytes(t, configFixture(t, "coverage-v3.valid.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cloned := result.Config.Clone()
+	cloned.CoverageProfiles[0].Include[0] = "mutated/**"
+	cloned.CoverageProfiles[0].Exclude[0] = "mutated/**"
+	cloned.CoverageProfiles = append(cloned.CoverageProfiles, CoverageProfile{ID: "extra"})
+	if result.Config.CoverageProfiles[0].Include[0] != "include/**" ||
+		result.Config.CoverageProfiles[0].Exclude[0] != "tests/**" ||
+		len(result.Config.CoverageProfiles) != 1 {
+		t.Fatalf("source Config mutated: %#v", result.Config)
+	}
+}
+
+func coverageConfigJSON(t *testing.T, include, exclude []string) []byte {
+	t.Helper()
+	profile := map[string]any{
+		"id": "coverage", "baseBuildProfileId": "base", "include": include,
+	}
+	if exclude != nil {
+		profile["exclude"] = exclude
+	}
+	return mustJSON(t, map[string]any{"version": 3, "coverageProfiles": []any{profile}})
+}
+
+func literalCoverageGlobs(prefix string, lengths ...int) []string {
+	result := make([]string, 0, len(lengths))
+	for index, length := range lengths {
+		head := fmt.Sprintf("%s-%02d-", prefix, index)
+		result = append(result, head+strings.Repeat("x", length-len(head)))
+	}
+	return result
+}
+
+func repeatedLength(length, count int) []int {
+	result := make([]int, count)
+	for index := range result {
+		result[index] = length
+	}
+	return result
+}
+
+func TestLoadConfigRejectsCoverageBounds(t *testing.T) {
+	profiles := make([]any, 65)
+	for index := range profiles {
+		profiles[index] = map[string]any{
+			"id": fmt.Sprintf("coverage-%02d", index), "baseBuildProfileId": "base",
+		}
+	}
+	includes := make([]string, 129)
+	for index := range includes {
+		includes[index] = fmt.Sprintf("src/file-%03d.cpp", index)
+	}
+
+	perProfile := literalCoverageGlobs("per", repeatedLength(511, 15)...)
+	perProfile = append(perProfile, literalCoverageGlobs("tail", 510)...)
+	perProfile = append(perProfile, "z")
+
+	totalProfiles := make([]any, 0, 9)
+	for index := 0; index < 7; index++ {
+		totalProfiles = append(totalProfiles, map[string]any{
+			"id": fmt.Sprintf("total-%02d", index), "baseBuildProfileId": "base",
+			"include": literalCoverageGlobs(fmt.Sprintf("p%02d", index), repeatedLength(511, 16)...),
+		})
+	}
+	totalProfiles = append(totalProfiles, map[string]any{
+		"id": "total-07", "baseBuildProfileId": "base",
+		"include": append(
+			literalCoverageGlobs("p07", repeatedLength(511, 15)...),
+			literalCoverageGlobs("p07-tail", 510)...,
+		),
+	})
+	totalProfiles = append(totalProfiles, map[string]any{
+		"id": "total-08", "baseBuildProfileId": "base", "include": []string{"z"},
+	})
+
+	cases := map[string][]byte{
+		"65 profiles":         mustJSON(t, map[string]any{"version": 3, "coverageProfiles": profiles}),
+		"129 includes":        coverageConfigJSON(t, includes, nil),
+		"8193 profile states": coverageConfigJSON(t, perProfile, nil),
+		"65537 total states":  mustJSON(t, map[string]any{"version": 3, "coverageProfiles": totalProfiles}),
+	}
+	for name, data := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := loadConfigBytes(t, data); !errors.Is(err, ErrInvalidConfig) {
+				t.Fatalf("error = %v, want ErrInvalidConfig", err)
+			}
+		})
 	}
 }
 
