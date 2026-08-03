@@ -21,6 +21,8 @@
 
 ### Task 1：Coverage JSON v1 Schema 与 generated models
 
+**writing-plans 详细执行计划：** [2026-08-03-coverage-json-v1-contract-plan.md](./2026-08-03-coverage-json-v1-contract-plan.md)
+
 **文件：**
 
 - 创建：`packages/coverage-schema/package.json`
