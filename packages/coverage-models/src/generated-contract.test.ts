@@ -33,10 +33,18 @@ test("generated Coverage JSON v1 types expose stable wire names", () => {
   assert.equal(document.files[0]?.uri, "src/calculator.cpp");
 });
 
-test("root verify includes the non-mutating Coverage generated drift gate", async () => {
+test("root scripts gate Coverage generation drift and regressions", async () => {
   const root = JSON.parse(await readFile(new URL("../../../package.json", import.meta.url), "utf8"));
   assert.equal(root.scripts["generate:coverage"], "node tools/coverage-gen/generate.mjs");
   assert.equal(root.scripts["check:coverage-generated"], "node tools/coverage-gen/generate.mjs --check");
+  assert.equal(
+    root.scripts["test:coverage-gen"],
+    "node --test tools/coverage-gen/generate.test.mjs"
+  );
+  assert.equal(
+    root.scripts.test,
+    "pnpm run test:coverage-gen && pnpm run test:cmake-bundle && pnpm run test:workspace && pnpm -r --if-present test && pnpm run test:go"
+  );
   assert.equal(
     root.scripts.verify,
     "pnpm check:protocol-generated && pnpm check:coverage-generated && pnpm build && pnpm test && pnpm test:go:race && pnpm test:e2e"

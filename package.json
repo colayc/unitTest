@@ -14,11 +14,12 @@
     "generate:coverage": "node tools/coverage-gen/generate.mjs",
     "check:coverage-generated": "node tools/coverage-gen/generate.mjs --check",
     "prepare:cmake-bundle": "node tools/cmake-bundle/prepare.mjs",
+    "test:coverage-gen": "node --test tools/coverage-gen/generate.test.mjs",
     "test:cmake-bundle": "node --test tools/cmake-bundle/prepare.test.mjs",
     "test:workspace": "node --test tools/workspace-smoke/workspace-smoke.test.mjs tools/workspace-smoke/workspace-config-schema.test.mjs tools/workspace-smoke/unit-test-ide-cmake-helper.test.mjs",
     "test:go": "go test ./apps/test-service/...",
     "test:go:race": "go test -race ./apps/test-service/...",
-    "test": "pnpm run test:cmake-bundle && pnpm run test:workspace && pnpm -r --if-present test && pnpm run test:go",
+    "test": "pnpm run test:coverage-gen && pnpm run test:cmake-bundle && pnpm run test:workspace && pnpm -r --if-present test && pnpm run test:go",
     "test:e2e": "pnpm --filter @unit-test-ide/service-probe test:e2e",
     "test:e2e:native": "pnpm --filter @unit-test-ide/service-probe test:e2e:native",
     "verify": "pnpm check:protocol-generated && pnpm check:coverage-generated && pnpm build && pnpm test && pnpm test:go:race && pnpm test:e2e"

@@ -393,6 +393,7 @@ git commit -m "feat: define coverage json schema"
 **Files:**
 
 - Create: `tools/coverage-gen/generate.mjs`
+- Create: `tools/coverage-gen/generate.test.mjs`
 - Create: `packages/coverage-models/package.json`
 - Create: `packages/coverage-models/tsconfig.json`
 - Create: `packages/coverage-models/src/index.ts`
@@ -407,7 +408,9 @@ git commit -m "feat: define coverage json schema"
 - Produces: exact TypeScript names from Task 1 and Go package `coveragemodelv1` with identical JSON property names.
 - Produces CLI `node tools/coverage-gen/generate.mjs` and non-mutating `--check`.
 
-- [ ] **Step 1: Write the failing generated-contract tests**
+- [ ] **Step 1: Write the failing generated-contract and generator regression tests**
+
+创建 `tools/coverage-gen/generate.test.mjs`，覆盖 raw-byte drift（CRLF、缺少末尾 LF）以及生成失败/替换失败时的原子性与临时文件清理。
 
 Create `packages/coverage-models/package.json`:
 
@@ -507,9 +510,10 @@ func TestGeneratedCoverageV1UsesStableJSONFields(t *testing.T) {
 ~~~powershell
 pnpm --filter @unit-test-ide/coverage-models test
 go test ./apps/test-service/internal/coveragemodel/... -run Generated -count=1
+node --test tools/coverage-gen/generate.test.mjs
 ~~~
 
-Expected: both commands FAIL because generated types do not exist.
+Expected: commands FAIL because generated types and generator behavior do not exist.
 
 - [ ] **Step 3: Write the deterministic generator**
 
@@ -550,6 +554,7 @@ export type {
 
 ~~~powershell
 node tools/coverage-gen/generate.mjs
+node --test tools/coverage-gen/generate.test.mjs
 pnpm --filter @unit-test-ide/coverage-models test
 go test ./apps/test-service/internal/coveragemodel/... -run Generated -count=1
 node tools/coverage-gen/generate.mjs --check
@@ -1037,7 +1042,7 @@ git commit -m "feat: validate coverage json in go"
 **Interfaces:**
 
 - Consumes: generator and validators from Tasks 1–4.
-- Produces: `pnpm generate:coverage`、`pnpm check:coverage-generated` and default `verify` ordering Protocol drift → Coverage drift → build → tests → Go race → service E2E.
+- Produces: `pnpm generate:coverage`、`pnpm check:coverage-generated`、`pnpm test:coverage-gen`; root `test` 必跑 generator regression，且 default `verify` ordering 保持 Protocol drift → Coverage drift → build → tests → Go race → service E2E.
 
 - [ ] **Step 1: Write the failing root-script assertion**
 
@@ -1046,12 +1051,15 @@ Add to `generated-contract.test.ts`:
 ~~~ts
 import { readFile } from "node:fs/promises";
 
-test("root verify includes the non-mutating Coverage generated drift gate", async () => {
+test("root scripts gate Coverage generation drift and regressions", async () => {
   const root = JSON.parse(await readFile(new URL("../../../package.json", import.meta.url), "utf8"));
   assert.equal(root.scripts["generate:coverage"], "node tools/coverage-gen/generate.mjs");
   assert.equal(root.scripts["check:coverage-generated"], "node tools/coverage-gen/generate.mjs --check");
-  assert.match(root.scripts.verify,
-    /^pnpm check:protocol-generated && pnpm check:coverage-generated && /);
+  assert.equal(root.scripts["test:coverage-gen"], "node --test tools/coverage-gen/generate.test.mjs");
+  assert.equal(root.scripts.test,
+    "pnpm run test:coverage-gen && pnpm run test:cmake-bundle && pnpm run test:workspace && pnpm -r --if-present test && pnpm run test:go");
+  assert.equal(root.scripts.verify,
+    "pnpm check:protocol-generated && pnpm check:coverage-generated && pnpm build && pnpm test && pnpm test:go:race && pnpm test:e2e");
 });
 ~~~
 
@@ -1071,17 +1079,20 @@ Add:
 {
   "generate:coverage": "node tools/coverage-gen/generate.mjs",
   "check:coverage-generated": "node tools/coverage-gen/generate.mjs --check",
+  "test:coverage-gen": "node --test tools/coverage-gen/generate.test.mjs",
+  "test": "pnpm run test:coverage-gen && pnpm run test:cmake-bundle && pnpm run test:workspace && pnpm -r --if-present test && pnpm run test:go",
   "verify": "pnpm check:protocol-generated && pnpm check:coverage-generated && pnpm build && pnpm test && pnpm test:go:race && pnpm test:e2e"
 }
 ~~~
 
-Do not add `prepare`、`postinstall` or networked generation hooks. Run `pnpm install --lockfile-only` to record only workspace importer changes. Add the detailed-plan link directly under Phase 5A Task 1.
+Do not add `prepare`、`postinstall` or networked generation hooks. Lockfile 只新增两个 Coverage workspace importer，既有 `packages:` resolution records 必须保持 byte-identical；使用仓库固定 pnpm 的 frozen/offline 只读流程验证，不再运行会重写 resolution metadata 的 lockfile-only 命令。同时在 Phase 5A Task 1 下直接添加详细计划链接。
 
 - [ ] **Step 4: Run the complete Coverage contract gate**
 
 ~~~powershell
 pnpm generate:coverage
 pnpm check:coverage-generated
+pnpm test:coverage-gen
 pnpm --filter @unit-test-ide/coverage-schema test
 pnpm --filter @unit-test-ide/coverage-models test
 go test ./apps/test-service/internal/coveragemodel/... -count=1
