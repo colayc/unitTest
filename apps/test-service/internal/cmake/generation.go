@@ -163,9 +163,16 @@ func uniqueBuildProfileByID(buildProfiles []BuildProfile, id string) (BuildProfi
 }
 
 func cloneCoverageProfile(profile workspace.CoverageProfile) workspace.CoverageProfile {
-	profile.Include = append([]string(nil), profile.Include...)
-	profile.Exclude = append([]string(nil), profile.Exclude...)
+	profile.Include = cloneCoverageGlobList(profile.Include)
+	profile.Exclude = cloneCoverageGlobList(profile.Exclude)
 	return profile
+}
+
+func cloneCoverageGlobList(globs []string) []string {
+	if globs == nil {
+		return nil
+	}
+	return append([]string{}, globs...)
 }
 
 func WorkspaceGeneration(

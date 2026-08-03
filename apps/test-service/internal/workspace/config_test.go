@@ -699,6 +699,46 @@ func TestLoadConfigRejectsCoverageBounds(t *testing.T) {
 	}
 }
 
+func TestLoadConfigAcceptsExactCoverageBounds(t *testing.T) {
+	profiles := make([]any, 64)
+	for index := range profiles {
+		profiles[index] = map[string]any{
+			"id": fmt.Sprintf("coverage-%02d", index), "baseBuildProfileId": "base",
+		}
+	}
+	includeAtMaximum := literalCoverageGlobs("include", repeatedLength(16, 128)...)
+	excludeAtMaximum := literalCoverageGlobs("exclude", repeatedLength(16, 128)...)
+	utf8AtMaximum := strings.Repeat("界", 170) + "xx"
+	if got := len(utf8AtMaximum); got != 512 {
+		t.Fatalf("UTF-8 glob bytes = %d, want 512", got)
+	}
+
+	// Each 511-byte literal has one accept state plus 511 literal states.
+	profileAtMaximum := literalCoverageGlobs("profile", repeatedLength(511, 16)...)
+	totalAtMaximum := make([]any, 8)
+	for index := range totalAtMaximum {
+		totalAtMaximum[index] = map[string]any{
+			"id": fmt.Sprintf("total-%02d", index), "baseBuildProfileId": "base",
+			"include": literalCoverageGlobs(fmt.Sprintf("total-%02d", index), repeatedLength(511, 16)...),
+		}
+	}
+
+	cases := map[string][]byte{
+		"64 profiles":               mustJSON(t, map[string]any{"version": 3, "coverageProfiles": profiles}),
+		"128 includes and excludes": coverageConfigJSON(t, includeAtMaximum, excludeAtMaximum),
+		"512 UTF-8 bytes":           coverageConfigJSON(t, []string{utf8AtMaximum}, nil),
+		"8192 profile states":       coverageConfigJSON(t, profileAtMaximum, nil),
+		"65536 total states":        mustJSON(t, map[string]any{"version": 3, "coverageProfiles": totalAtMaximum}),
+	}
+	for name, data := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := loadConfigBytes(t, data); err != nil {
+				t.Fatalf("error = %v, want exact maximum accepted", err)
+			}
+		})
+	}
+}
+
 func loadConfigBytes(t *testing.T, data []byte) (LoadResult, error) {
 	t.Helper()
 	return loadConfigAtRoot(t, t.TempDir(), data)

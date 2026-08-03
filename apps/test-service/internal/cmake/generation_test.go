@@ -368,8 +368,26 @@ func TestCoverageProfileReferencesAndProjectBinding(t *testing.T) {
 		t.Fatalf("coverage/base/error = %#v / %#v / %v", coverage, base, err)
 	}
 	coverage.Include[0] = "mutated/**"
-	if coverageProfiles[0].Include[0] != "src/**" {
+	coverage.Exclude[0] = "mutated/**"
+	if coverageProfiles[0].Include[0] != "src/**" || coverageProfiles[0].Exclude[0] != "tests/**" {
 		t.Fatal("ResolveCoverageProfile returned an alias")
+	}
+
+	canonicalEmptyExclude := []workspace.CoverageProfile{{
+		ID: "coverage-empty-exclude", BaseBuildProfileID: "build-debug",
+		Include: []string{"src/**"}, Exclude: []string{},
+	}}
+	resolvedEmptyExclude, _, resolveEmptyExcludeErr := ResolveCoverageProfile(
+		canonicalEmptyExclude, buildProfiles, "app", "coverage-empty-exclude",
+	)
+	if resolveEmptyExcludeErr != nil {
+		t.Fatal(resolveEmptyExcludeErr)
+	}
+	if resolvedEmptyExclude.Exclude == nil || len(resolvedEmptyExclude.Exclude) != 0 {
+		t.Fatalf("resolved empty Exclude = %#v, want non-nil empty slice", resolvedEmptyExclude.Exclude)
+	}
+	if canonicalEmptyExclude[0].Exclude == nil || len(canonicalEmptyExclude[0].Exclude) != 0 {
+		t.Fatalf("source empty Exclude mutated: %#v", canonicalEmptyExclude[0].Exclude)
 	}
 
 	tests := []struct {

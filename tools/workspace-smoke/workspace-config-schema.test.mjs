@@ -330,3 +330,35 @@ test("workspace v3 schema rejects coverage injection, unsafe path, duplicates, a
     }]
   }), false, "129 includes");
 });
+
+test("workspace v3 schema accepts exact coarse coverage maxima", async () => {
+  const validate = await compileSchema();
+  const base = {
+    version: 3,
+    projects: [{ id: "app", sourceDir: "." }],
+    coverageProfiles: [{ id: "coverage", baseBuildProfileId: "debug", include: ["src/**"] }]
+  };
+  const profilesAtMaximum = {
+    ...base,
+    coverageProfiles: Array.from({ length: 64 }, (_, index) => ({
+      id: `coverage-${index}`,
+      baseBuildProfileId: "debug"
+    }))
+  };
+  assert.equal(validate(profilesAtMaximum), true, JSON.stringify(validate.errors));
+
+  const listsAtMaximum = structuredClone(base);
+  listsAtMaximum.coverageProfiles[0].include = Array.from(
+    { length: 128 },
+    (_, index) => `include-${index}`
+  );
+  listsAtMaximum.coverageProfiles[0].exclude = Array.from(
+    { length: 128 },
+    (_, index) => `exclude-${index}`
+  );
+  assert.equal(validate(listsAtMaximum), true, JSON.stringify(validate.errors));
+
+  const unicodeAtMaximum = structuredClone(base);
+  unicodeAtMaximum.coverageProfiles[0].include = ["界".repeat(512)];
+  assert.equal(validate(unicodeAtMaximum), true, JSON.stringify(validate.errors));
+});
