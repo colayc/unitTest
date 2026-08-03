@@ -15,5 +15,17 @@
     "branches": { "covered": 1, "total": 2 },
     "functions": { "covered": 1, "total": 1 }
   },
-  "files": []
+  "files": [{
+    "uri": "src/calculator.cpp",
+    "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "summary": {
+      "lines": { "covered": 1, "total": 2 },
+      "branches": { "covered": 1, "total": 2 },
+      "functions": { "covered": 1, "total": 1 }
+    },
+    "lines": [
+      { "line": 10, "count": 1, "branches": { "covered": 1, "total": 2 } },
+      { "line": 11, "count": 0, "branches": { "covered": 0, "total": 0 } }
+    ]
+  }]
 }

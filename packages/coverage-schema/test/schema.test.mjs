@@ -37,3 +37,22 @@ test("Coverage JSON v1 rejects forbidden operational metadata", async () => {
     assert.equal(validate({ ...valid, [field]: value }), false, "accepted " + field);
   }
 });
+
+test("Coverage JSON v1 invalid fixtures each contain exactly one planned mutation", async () => {
+  const valid = await load("../fixtures/v1/report.valid.json");
+
+  const nativePathFixture = await load("../fixtures/v1/report-native-path.invalid.json");
+  const { nativePath, ...nativePathRestored } = nativePathFixture;
+  assert.equal(nativePath, "C:\\workspace\\src\\calculator.cpp");
+  assert.deepEqual(nativePathRestored, valid);
+
+  const floatFixture = await load("../fixtures/v1/report-float.invalid.json");
+  assert.equal(floatFixture.summary.lines.covered, 0.5);
+  floatFixture.summary.lines.covered = valid.summary.lines.covered;
+  assert.deepEqual(floatFixture, valid);
+
+  const unsafeCountFixture = await load("../fixtures/v1/report-unsafe-count.invalid.json");
+  assert.equal(unsafeCountFixture.summary.lines.total, 9007199254740992);
+  unsafeCountFixture.summary.lines.total = valid.summary.lines.total;
+  assert.deepEqual(unsafeCountFixture, valid);
+});
