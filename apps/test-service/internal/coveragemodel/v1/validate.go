@@ -19,6 +19,9 @@ var ErrInvalidDocument = errors.New("invalid Coverage JSON v1")
 
 // Decode parses, validates, and defensively clones a Coverage JSON v1 document.
 func Decode(data []byte) (CoverageDocumentV1, error) {
+	if err := validateJSONStructure(data); err != nil {
+		return CoverageDocumentV1{}, err
+	}
 	var value CoverageDocumentV1
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
@@ -33,6 +36,177 @@ func Decode(data []byte) (CoverageDocumentV1, error) {
 		return CoverageDocumentV1{}, err
 	}
 	return Clone(value), nil
+}
+
+type rawValidator func(*json.Decoder) error
+
+func validateJSONStructure(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := validateRawDocument(decoder); err != nil {
+		return invalid("structure")
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return invalid("trailing JSON value")
+	}
+	return nil
+}
+
+func validateRawDocument(decoder *json.Decoder) error {
+	return validateRawObject(decoder, map[string]rawValidator{
+		"schemaVersion": validateRawString,
+		"provenance":    validateRawProvenance,
+		"completeness":  validateRawCompleteness,
+		"summary":       validateRawSummary,
+		"files":         validateRawFiles,
+	})
+}
+
+func validateRawProvenance(decoder *json.Decoder) error {
+	return validateRawObject(decoder, map[string]rawValidator{
+		"platform":                     validateRawString,
+		"architecture":                 validateRawString,
+		"compiler":                     validateRawCompiler,
+		"driver":                       validateRawDriver,
+		"collector":                    validateRawCollector,
+		"normalizerVersion":            validateRawString,
+		"instrumentationFingerprint":   validateRawString,
+	})
+}
+
+func validateRawCompiler(decoder *json.Decoder) error {
+	return validateRawObject(decoder, map[string]rawValidator{"family": validateRawString, "version": validateRawString})
+}
+
+func validateRawDriver(decoder *json.Decoder) error {
+	return validateRawObject(decoder, map[string]rawValidator{"name": validateRawString, "version": validateRawString})
+}
+
+func validateRawCollector(decoder *json.Decoder) error {
+	return validateRawObject(decoder, map[string]rawValidator{"name": validateRawString, "version": validateRawString})
+}
+
+func validateRawCompleteness(decoder *json.Decoder) error {
+	return validateRawObject(decoder, map[string]rawValidator{"outcome": validateRawString, "reasons": validateRawReasons})
+}
+
+func validateRawReasons(decoder *json.Decoder) error {
+	return validateRawArray(decoder, validateRawString)
+}
+
+func validateRawSummary(decoder *json.Decoder) error {
+	return validateRawObject(decoder, map[string]rawValidator{
+		"lines": validateRawMetric, "branches": validateRawMetric, "functions": validateRawMetric,
+	})
+}
+
+func validateRawMetric(decoder *json.Decoder) error {
+	return validateRawObject(decoder, map[string]rawValidator{"covered": validateRawNumber, "total": validateRawNumber})
+}
+
+func validateRawFiles(decoder *json.Decoder) error {
+	return validateRawArray(decoder, validateRawFile)
+}
+
+func validateRawFile(decoder *json.Decoder) error {
+	return validateRawObject(decoder, map[string]rawValidator{
+		"uri": validateRawString, "sha256": validateRawString, "summary": validateRawSummary, "lines": validateRawLines,
+	})
+}
+
+func validateRawLines(decoder *json.Decoder) error {
+	return validateRawArray(decoder, validateRawLine)
+}
+
+func validateRawLine(decoder *json.Decoder) error {
+	return validateRawObject(decoder, map[string]rawValidator{
+		"line": validateRawNumber, "count": validateRawNumber, "branches": validateRawMetric,
+	})
+}
+
+func validateRawObject(decoder *json.Decoder, fields map[string]rawValidator) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if delimiter, ok := token.(json.Delim); !ok || delimiter != '{' {
+		return errors.New("expected object")
+	}
+	seen := make(map[string]struct{}, len(fields))
+	for decoder.More() {
+		token, err = decoder.Token()
+		if err != nil {
+			return err
+		}
+		name, ok := token.(string)
+		if !ok {
+			return errors.New("expected field name")
+		}
+		validator, ok := fields[name]
+		if !ok {
+			return errors.New("unknown field")
+		}
+		if _, duplicate := seen[name]; duplicate {
+			return errors.New("duplicate field")
+		}
+		seen[name] = struct{}{}
+		if err := validator(decoder); err != nil {
+			return err
+		}
+	}
+	token, err = decoder.Token()
+	if err != nil {
+		return err
+	}
+	if delimiter, ok := token.(json.Delim); !ok || delimiter != '}' || len(seen) != len(fields) {
+		return errors.New("missing required field")
+	}
+	return nil
+}
+
+func validateRawArray(decoder *json.Decoder, element rawValidator) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if delimiter, ok := token.(json.Delim); !ok || delimiter != '[' {
+		return errors.New("expected array")
+	}
+	for decoder.More() {
+		if err := element(decoder); err != nil {
+			return err
+		}
+	}
+	token, err = decoder.Token()
+	if err != nil {
+		return err
+	}
+	if delimiter, ok := token.(json.Delim); !ok || delimiter != ']' {
+		return errors.New("expected array end")
+	}
+	return nil
+}
+
+func validateRawString(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if _, ok := token.(string); !ok {
+		return errors.New("expected string")
+	}
+	return nil
+}
+
+func validateRawNumber(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if _, ok := token.(json.Number); !ok {
+		return errors.New("expected number")
+	}
+	return nil
 }
 
 // Validate checks the schema-independent semantic rules for Coverage JSON v1.

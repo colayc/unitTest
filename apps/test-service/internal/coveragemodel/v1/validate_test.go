@@ -1,9 +1,11 @@
 package coveragemodelv1
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -54,6 +56,50 @@ func TestDecodeRejectsUnknownAndTrailingJSON(t *testing.T) {
 			t.Fatalf("Decode() error = %v, want ErrInvalidDocument", err)
 		}
 	}
+}
+
+func TestDecodeRejectsMissingNullWrongCaseAndDuplicateStructure(t *testing.T) {
+	tests := map[string][]byte{
+		"missing nested summary metric": mutatedFixture(t, func(document map[string]any) {
+			delete(document["summary"].(map[string]any), "functions")
+		}),
+		"missing line branches": mutatedFixture(t, func(document map[string]any) {
+			file := document["files"].([]any)[0].(map[string]any)
+			delete(file["lines"].([]any)[0].(map[string]any), "branches")
+		}),
+		"missing file summary": mutatedFixture(t, func(document map[string]any) {
+			delete(document["files"].([]any)[0].(map[string]any), "summary")
+		}),
+		"null object": mutatedFixture(t, func(document map[string]any) { document["summary"] = nil }),
+		"null files":  mutatedFixture(t, func(document map[string]any) { document["files"] = nil }),
+		"null reasons": mutatedFixture(t, func(document map[string]any) {
+			document["completeness"].(map[string]any)["reasons"] = nil
+		}),
+		"wrong case key": []byte(strings.Replace(string(validFixture(t)), `"schemaVersion"`, `"SchemaVersion"`, 1)),
+		"duplicate key": []byte(strings.Replace(string(validFixture(t)),
+			`"schemaVersion": "1.0",`, `"schemaVersion": "1.0", "schemaVersion": "1.0",`, 1)),
+	}
+	for name, data := range tests {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Decode(data); !errors.Is(err, ErrInvalidDocument) {
+				t.Fatalf("Decode() error = %v, want ErrInvalidDocument", err)
+			}
+		})
+	}
+}
+
+func mutatedFixture(t *testing.T, mutate func(map[string]any)) []byte {
+	t.Helper()
+	var document map[string]any
+	if err := json.Unmarshal(validFixture(t), &document); err != nil {
+		t.Fatal(err)
+	}
+	mutate(document)
+	data, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }
 
 func TestValidateRejectsSemanticViolations(t *testing.T) {
