@@ -150,6 +150,55 @@ func TestInspectorUsesPresetPriorityAndGeneratedProfilesUseCMakeConstructor(t *t
 	}
 }
 
+func TestInspectorReportsUnavailableCoverageBaseProfile(t *testing.T) {
+	root := openProjectRoot(t, ".")
+	config := workspace.Config{
+		Version:  3,
+		Projects: []workspace.ProjectConfig{{ID: "root", SourceDir: "."}},
+		CoverageProfiles: []workspace.CoverageProfile{{
+			ID: "coverage", BaseBuildProfileID: "missing-build", Include: []string{"**"},
+		}},
+	}
+	inspector := newTestInspector(t, root, fakeToolchainDiscovery{
+		instances: []toolchain.Instance{testToolchain("gcc", toolchain.FamilyGCC, "Ninja")},
+	}, inspectorDependencies{
+		loadConfig: func(workspace.Root) (workspace.LoadResult, error) {
+			return workspace.LoadResult{Config: config}, nil
+		},
+		resolve: successfulResolve(testInstallation()),
+		discoverPresets: func(
+			context.Context, probe.Runner, cmake.Installation,
+			workspace.Root, workspace.ProjectConfig,
+		) (cmake.PresetDiscovery, error) {
+			return cmake.PresetDiscovery{
+				Profiles: []cmake.BuildProfile{{
+					ID: "available-build", ProjectID: "root", Origin: "preset",
+				}},
+				Inputs: []string{"CMakePresets.json"}, InputGeneration: "coverage-profile-input",
+			}, nil
+		},
+	})
+
+	snapshot, err := inspector.Inspect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(diagnosticsText(snapshot), "COVERAGE_PROFILE_INVALID") {
+		t.Fatalf("diagnostics = %#v", snapshot.Diagnostics)
+	}
+
+	t.Run("valid reference", func(t *testing.T) {
+		config.CoverageProfiles[0].BaseBuildProfileID = "available-build"
+		snapshot, err := inspector.Inspect(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(diagnosticsText(snapshot), "COVERAGE_PROFILE_INVALID") {
+			t.Fatalf("diagnostics = %#v", snapshot.Diagnostics)
+		}
+	})
+}
+
 func TestInspectorRunsCMakeAndToolchainDiscoveryConcurrently(t *testing.T) {
 	root := openProjectRoot(t, ".")
 	cmakeStarted := make(chan struct{})

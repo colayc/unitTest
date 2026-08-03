@@ -252,6 +252,15 @@ func (i *Inspector) Inspect(ctx context.Context) (Snapshot, error) {
 
 	sortProjects(projects)
 	sortProfiles(profiles)
+	if err := cmake.ValidateCoverageProfileReferences(loaded.Config.CoverageProfiles, profiles); err != nil {
+		diagnostics = append(diagnostics, inspectorDiagnostic(
+			"workspace",
+			"error",
+			"COVERAGE_PROFILE_INVALID",
+			"Coverage profile base build profile is unavailable",
+			"",
+		))
+	}
 	instances = cloneToolchains(instances)
 	sortToolchains(instances)
 	diagnostics = boundDiagnostics(diagnostics)
