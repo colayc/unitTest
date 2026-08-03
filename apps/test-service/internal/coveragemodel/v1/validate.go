@@ -24,6 +24,9 @@ var ErrInvalidDocument = errors.New("invalid Coverage JSON v1")
 
 // Decode parses, validates, and defensively clones a Coverage JSON v1 document.
 func Decode(data []byte) (CoverageDocumentV1, error) {
+	if err := validateJSONUnicode(data); err != nil {
+		return CoverageDocumentV1{}, err
+	}
 	if err := validateJSONStructure(data); err != nil {
 		return CoverageDocumentV1{}, err
 	}
@@ -45,6 +48,89 @@ func Decode(data []byte) (CoverageDocumentV1, error) {
 		return CoverageDocumentV1{}, err
 	}
 	return Clone(value), nil
+}
+
+func validateJSONUnicode(data []byte) error {
+	if !utf8.Valid(data) {
+		return invalid("unicode")
+	}
+	nextToken:
+	for index := 0; index < len(data); {
+		if data[index] != '"' {
+			index++
+			continue
+		}
+		index++
+		for index < len(data) {
+			switch data[index] {
+			case '"':
+				index++
+				continue nextToken
+			case '\\':
+				if index == len(data)-1 {
+					return nil
+				}
+				if data[index+1] != 'u' {
+					index += 2
+					continue
+				}
+				codeUnit, ok := jsonHexQuad(data, index+2)
+				if !ok {
+					index += 2
+					continue
+				}
+				if codeUnit >= 0xD800 && codeUnit <= 0xDBFF {
+					nextEscape := index + 6
+					if nextEscape > len(data) || len(data)-nextEscape < 6 ||
+						data[nextEscape] != '\\' || data[nextEscape+1] != 'u' {
+						return invalid("unicode")
+					}
+					lowSurrogate, paired := jsonHexQuad(data, nextEscape+2)
+					if !paired || lowSurrogate < 0xDC00 || lowSurrogate > 0xDFFF {
+						return invalid("unicode")
+					}
+					index = nextEscape + 6
+					continue
+				}
+				if codeUnit >= 0xDC00 && codeUnit <= 0xDFFF {
+					return invalid("unicode")
+				}
+				index += 6
+			default:
+				index++
+			}
+		}
+		return nil
+	}
+	return nil
+}
+
+func jsonHexQuad(data []byte, start int) (uint16, bool) {
+	if start < 0 || start > len(data) || len(data)-start < 4 {
+		return 0, false
+	}
+	var value uint16
+	for index := start; index < start+4; index++ {
+		digit, ok := jsonHexDigit(data[index])
+		if !ok {
+			return 0, false
+		}
+		value = value*16 + digit
+	}
+	return value, true
+}
+
+func jsonHexDigit(value byte) (uint16, bool) {
+	switch {
+	case value >= '0' && value <= '9':
+		return uint16(value - '0'), true
+	case value >= 'a' && value <= 'f':
+		return uint16(value-'a') + 10, true
+	case value >= 'A' && value <= 'F':
+		return uint16(value-'A') + 10, true
+	default:
+		return 0, false
+	}
 }
 
 func normalizeJSONNumbers(data []byte) ([]byte, error) {

@@ -1,6 +1,7 @@
 package coveragemodelv1
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -118,6 +119,78 @@ func TestDecodeEnforcesMultibyteUTF8ByteLimits(t *testing.T) {
 	if _, err := Decode(invalidURI); !errors.Is(err, ErrInvalidDocument) {
 		t.Fatalf("4098-byte URI error = %v, want ErrInvalidDocument", err)
 	}
+}
+
+func TestDecodeRejectsUnpairedSurrogateEscapes(t *testing.T) {
+	targets := []struct {
+		name        string
+		original    string
+		replacement string
+	}{
+		{"version", `"normalizerVersion": "1.0.0"`, `"normalizerVersion": "`},
+		{"URI", `"uri": "src/calculator.cpp"`, `"uri": "`},
+	}
+	invalidEscapes := []struct {
+		name  string
+		value string
+	}{
+		{"lone high", `\ud800`},
+		{"lone low", `\udc00`},
+		{"high plus non-low", `\ud800\u0041`},
+	}
+	for _, target := range targets {
+		for _, escaped := range invalidEscapes {
+			t.Run(target.name+"/"+escaped.name, func(t *testing.T) {
+				data := replaceFixtureText(t, target.original, target.replacement+escaped.value+`"`)
+				if _, err := Decode(data); !errors.Is(err, ErrInvalidDocument) {
+					t.Fatalf("Decode() error = %v, want ErrInvalidDocument", err)
+				}
+			})
+		}
+	}
+}
+
+func TestDecodeAcceptsPairedSurrogateAndRealReplacementCharacter(t *testing.T) {
+	paired := replaceFixtureText(t, `"normalizerVersion": "1.0.0"`,
+		`"normalizerVersion": "\ud83d\ude00"`)
+	value, err := Decode(paired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value.Provenance.NormalizerVersion != "😀" {
+		t.Fatalf("normalizerVersion = %q, want paired surrogate value", value.Provenance.NormalizerVersion)
+	}
+
+	replacement := mutatedFixture(t, func(document map[string]any) {
+		document["provenance"].(map[string]any)["normalizerVersion"] = "�"
+	})
+	value, err = Decode(replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value.Provenance.NormalizerVersion != "�" {
+		t.Fatalf("normalizerVersion = %q, want real U+FFFD", value.Provenance.NormalizerVersion)
+	}
+}
+
+func TestDecodeRejectsRawInvalidUTF8(t *testing.T) {
+	data := bytes.Replace(validFixture(t), []byte("1.0.0"), []byte{0xff}, 1)
+	if bytes.Equal(data, validFixture(t)) {
+		t.Fatal("fixture version was not replaced")
+	}
+	if _, err := Decode(data); !errors.Is(err, ErrInvalidDocument) {
+		t.Fatalf("Decode() error = %v, want ErrInvalidDocument", err)
+	}
+}
+
+func replaceFixtureText(t *testing.T, original, replacement string) []byte {
+	t.Helper()
+	fixture := string(validFixture(t))
+	updated := strings.Replace(fixture, original, replacement, 1)
+	if updated == fixture {
+		t.Fatalf("fixture did not contain %q", original)
+	}
+	return []byte(updated)
 }
 
 func validDocument(t *testing.T) CoverageDocumentV1 {
