@@ -7,6 +7,9 @@
     },
     {
       "$ref": "#/$defs/workspaceV2"
+    },
+    {
+      "$ref": "#/$defs/workspaceV3"
     }
   ],
   "$defs": {
@@ -59,6 +62,40 @@
         },
         "toolchains": {
           "$ref": "#/$defs/toolchains"
+        }
+      }
+    },
+    "workspaceV3": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version"
+      ],
+      "properties": {
+        "version": {
+          "const": 3
+        },
+        "cmake": {
+          "$ref": "#/$defs/cmake"
+        },
+        "projects": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/projectV2"
+          }
+        },
+        "toolchains": {
+          "$ref": "#/$defs/toolchains"
+        },
+        "coverageProfiles": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/coverageProfile"
+          }
         }
       }
     },
@@ -160,6 +197,51 @@
           }
         }
       }
+    },
+    "coverageProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "baseBuildProfileId"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "baseBuildProfileId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "include": {
+          "$ref": "#/$defs/coverageIncludeGlobList"
+        },
+        "exclude": {
+          "$ref": "#/$defs/coverageExcludeGlobList"
+        }
+      }
+    },
+    "coverageIncludeGlobList": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/coverageGlob"
+      }
+    },
+    "coverageExcludeGlobList": {
+      "type": "array",
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/coverageGlob"
+      }
+    },
+    "coverageGlob": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?![A-Za-z][A-Za-z0-9+.-]*:)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*//)(?!.*/$)(?!.*[\\[\\]{}])(?!.*[\\u0000-\\u001F\\u007F])(?!.*`)(?!.*\\$[({]).+$"
     },
     "testContainerMapping": {
       "type": "object",

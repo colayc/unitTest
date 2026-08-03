@@ -44,7 +44,7 @@ test("workspace schema rejects unsafe paths, duplicates, limits, and versions", 
   };
 
   const invalidConfigurations = [
-    { ...minimal, version: 3 },
+    { ...minimal, version: 4 },
     { ...minimal, unknown: true },
     {
       version: 1,
@@ -267,4 +267,66 @@ test("workspace JSON parsing uses the last repeated object member before schema 
   );
   assert.deepEqual(repeatedFallback.projects[0].fallback, {});
   assert.equal(validate(repeatedFallback), true, JSON.stringify(validate.errors));
+});
+
+test("workspace schema accepts closed v3 coverage profiles without widening v1 or v2", async () => {
+  const validate = await compileSchema();
+  assert.equal(validate(await fixture("coverage-v3.valid.json")), true, JSON.stringify(validate.errors));
+
+  for (const version of [1, 2]) {
+    assert.equal(validate({
+      version,
+      projects: [{ id: "app", sourceDir: "." }],
+      coverageProfiles: [{ id: "coverage", baseBuildProfileId: "debug" }]
+    }), false, `version ${version} accepted coverageProfiles`);
+  }
+});
+
+test("workspace v3 schema rejects coverage injection, unsafe path, duplicates, and structural limits", async () => {
+  const validate = await compileSchema();
+  for (const name of [
+    "coverage-command.invalid.json",
+    "coverage-path.invalid.json",
+    "coverage-duplicate.invalid.json"
+  ]) {
+    assert.equal(validate(await fixture(name)), false, name);
+  }
+
+  const base = {
+    version: 3,
+    projects: [{ id: "app", sourceDir: "." }],
+    coverageProfiles: [{ id: "coverage", baseBuildProfileId: "debug", include: ["src/**"] }]
+  };
+  const forbidden = [
+    "flags", "compilerArgs", "environment", "gcovrConfig", "script",
+    "plugin", "driver", "threshold"
+  ];
+  for (const field of forbidden) {
+    const value = structuredClone(base);
+    value.coverageProfiles[0][field] = field === "environment" ? { TOKEN: "secret" } : "unsafe";
+    assert.equal(validate(value), false, field);
+  }
+
+  const emptyExclude = structuredClone(base);
+  emptyExclude.coverageProfiles[0].exclude = [];
+  assert.equal(validate(emptyExclude), true, JSON.stringify(validate.errors));
+  const emptyInclude = structuredClone(base);
+  emptyInclude.coverageProfiles[0].include = [];
+  assert.equal(validate(emptyInclude), false, "empty include");
+
+  assert.equal(validate({
+    ...base,
+    coverageProfiles: Array.from({ length: 65 }, (_, index) => ({
+      id: `coverage-${index}`,
+      baseBuildProfileId: "debug"
+    }))
+  }), false, "65 profiles");
+  assert.equal(validate({
+    ...base,
+    coverageProfiles: [{
+      id: "coverage",
+      baseBuildProfileId: "debug",
+      include: Array.from({ length: 129 }, (_, index) => `src/file-${index}.cpp`)
+    }]
+  }), false, "129 includes");
 });
