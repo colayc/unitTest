@@ -11,13 +11,113 @@ import (
 
 func validFixture(t *testing.T) []byte {
 	t.Helper()
+	return coverageFixture(t, "report.valid.json")
+}
+
+func coverageFixture(t *testing.T, name string) []byte {
+	t.Helper()
 	path := filepath.Join("..", "..", "..", "..", "..",
-		"packages", "coverage-schema", "fixtures", "v1", "report.valid.json")
+		"packages", "coverage-schema", "fixtures", "v1", name)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return data
+}
+
+func TestDecodeRejectsSharedInvalidFixtures(t *testing.T) {
+	for _, name := range []string{
+		"report-native-path.invalid.json",
+		"report-float.invalid.json",
+		"report-unsafe-count.invalid.json",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Decode(coverageFixture(t, name)); !errors.Is(err, ErrInvalidDocument) {
+				t.Fatalf("Decode() error = %v, want ErrInvalidDocument", err)
+			}
+		})
+	}
+}
+
+func TestDecodeAcceptsIntegerValuedDecimalAndExponentNumbers(t *testing.T) {
+	for _, lexeme := range []string{"1.0", "1e0"} {
+		t.Run(lexeme, func(t *testing.T) {
+			value, err := Decode(replaceFixtureNumber(t, "1", lexeme))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if value.Summary.Lines.Covered != 1 {
+				t.Fatalf("summary.lines.covered = %d, want 1", value.Summary.Lines.Covered)
+			}
+		})
+	}
+}
+
+func TestDecodeRejectsNonIntegerAndUnsafeNumberLexemes(t *testing.T) {
+	for _, lexeme := range []string{"1.5", "1e100", "-1", "NaN"} {
+		t.Run(lexeme, func(t *testing.T) {
+			if _, err := Decode(replaceFixtureNumber(t, "1", lexeme)); !errors.Is(err, ErrInvalidDocument) {
+				t.Fatalf("Decode() error = %v, want ErrInvalidDocument", err)
+			}
+		})
+	}
+}
+
+func replaceFixtureNumber(t *testing.T, original, replacement string) []byte {
+	t.Helper()
+	old := `"covered": ` + original + `, "total": 2`
+	updated := strings.Replace(string(validFixture(t)), old,
+		`"covered": `+replacement+`, "total": 2`, 1)
+	if updated == string(validFixture(t)) {
+		t.Fatalf("fixture did not contain %q", old)
+	}
+	return []byte(updated)
+}
+
+func TestDecodeEnforcesMultibyteUTF8ByteLimits(t *testing.T) {
+	versionSetters := map[string]func(map[string]any, string){
+		"compiler.version": func(document map[string]any, value string) {
+			document["provenance"].(map[string]any)["compiler"].(map[string]any)["version"] = value
+		},
+		"driver.version": func(document map[string]any, value string) {
+			document["provenance"].(map[string]any)["driver"].(map[string]any)["version"] = value
+		},
+		"collector.version": func(document map[string]any, value string) {
+			document["provenance"].(map[string]any)["collector"].(map[string]any)["version"] = value
+		},
+		"normalizerVersion": func(document map[string]any, value string) {
+			document["provenance"].(map[string]any)["normalizerVersion"] = value
+		},
+	}
+	for name, setVersion := range versionSetters {
+		t.Run(name, func(t *testing.T) {
+			valid := mutatedFixture(t, func(document map[string]any) {
+				setVersion(document, strings.Repeat("é", 64))
+			})
+			if _, err := Decode(valid); err != nil {
+				t.Fatalf("128-byte version: %v", err)
+			}
+			invalid := mutatedFixture(t, func(document map[string]any) {
+				setVersion(document, strings.Repeat("é", 65))
+			})
+			if _, err := Decode(invalid); !errors.Is(err, ErrInvalidDocument) {
+				t.Fatalf("130-byte version error = %v, want ErrInvalidDocument", err)
+			}
+		})
+	}
+
+	validURI := mutatedFixture(t, func(document map[string]any) {
+		document["files"].([]any)[0].(map[string]any)["uri"] = strings.Repeat("é", 2046) + ".cpp"
+	})
+	if _, err := Decode(validURI); err != nil {
+		t.Fatalf("4096-byte URI: %v", err)
+	}
+	invalidURI := mutatedFixture(t, func(document map[string]any) {
+		document["files"].([]any)[0].(map[string]any)["uri"] = strings.Repeat("é", 2047) + ".cpp"
+	})
+	if _, err := Decode(invalidURI); !errors.Is(err, ErrInvalidDocument) {
+		t.Fatalf("4098-byte URI error = %v, want ErrInvalidDocument", err)
+	}
 }
 
 func validDocument(t *testing.T) CoverageDocumentV1 {

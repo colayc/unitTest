@@ -6,14 +6,19 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
 	"golang.org/x/text/unicode/norm"
 )
 
-const maxSafeInteger int64 = 9_007_199_254_740_991
+const (
+	maxSafeInteger     int64 = 9_007_199_254_740_991
+	maxSafeIntegerText       = "9007199254740991"
+)
 
 var ErrInvalidDocument = errors.New("invalid Coverage JSON v1")
 
@@ -22,8 +27,12 @@ func Decode(data []byte) (CoverageDocumentV1, error) {
 	if err := validateJSONStructure(data); err != nil {
 		return CoverageDocumentV1{}, err
 	}
+	normalized, err := normalizeJSONNumbers(data)
+	if err != nil {
+		return CoverageDocumentV1{}, err
+	}
 	var value CoverageDocumentV1
-	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder := json.NewDecoder(bytes.NewReader(normalized))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&value); err != nil {
 		return CoverageDocumentV1{}, fmt.Errorf("%w: decode: %v", ErrInvalidDocument, err)
@@ -36,6 +45,123 @@ func Decode(data []byte) (CoverageDocumentV1, error) {
 		return CoverageDocumentV1{}, err
 	}
 	return Clone(value), nil
+}
+
+func normalizeJSONNumbers(data []byte) ([]byte, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, invalid("number")
+	}
+	if err := normalizeJSONValue(value); err != nil {
+		return nil, err
+	}
+	normalized, err := json.Marshal(value)
+	if err != nil {
+		return nil, invalid("number")
+	}
+	return normalized, nil
+}
+
+func normalizeJSONValue(value any) error {
+	switch current := value.(type) {
+	case map[string]any:
+		for name, child := range current {
+			if number, ok := child.(json.Number); ok {
+				integer, err := exactSafeInteger(number)
+				if err != nil {
+					return err
+				}
+				current[name] = integer
+				continue
+			}
+			if err := normalizeJSONValue(child); err != nil {
+				return err
+			}
+		}
+	case []any:
+		for index, child := range current {
+			if number, ok := child.(json.Number); ok {
+				integer, err := exactSafeInteger(number)
+				if err != nil {
+					return err
+				}
+				current[index] = integer
+				continue
+			}
+			if err := normalizeJSONValue(child); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func exactSafeInteger(number json.Number) (int64, error) {
+	text := number.String()
+	negative := strings.HasPrefix(text, "-")
+	if negative {
+		text = text[1:]
+	}
+
+	mantissa := text
+	exponentText := "0"
+	if exponentIndex := strings.IndexAny(text, "eE"); exponentIndex >= 0 {
+		mantissa = text[:exponentIndex]
+		exponentText = text[exponentIndex+1:]
+	}
+	fractionDigits := 0
+	digits := mantissa
+	if decimalIndex := strings.IndexByte(mantissa, '.'); decimalIndex >= 0 {
+		fractionDigits = len(mantissa) - decimalIndex - 1
+		digits = mantissa[:decimalIndex] + mantissa[decimalIndex+1:]
+	}
+	if strings.Trim(digits, "0") == "" {
+		return 0, nil
+	}
+	if negative {
+		return 0, invalid("number")
+	}
+
+	exponent, ok := new(big.Int).SetString(exponentText, 10)
+	if !ok {
+		return 0, invalid("number")
+	}
+	shift := new(big.Int).Sub(exponent, big.NewInt(int64(fractionDigits)))
+	integerDigits := digits
+	if shift.Sign() >= 0 {
+		if !shift.IsInt64() || shift.Int64() > int64(len(maxSafeIntegerText)) {
+			return 0, invalid("number")
+		}
+		integerDigits += strings.Repeat("0", int(shift.Int64()))
+	} else {
+		division := new(big.Int).Neg(shift)
+		if !division.IsInt64() || division.Int64() >= int64(len(digits)) {
+			return 0, invalid("number")
+		}
+		divisionDigits := int(division.Int64())
+		for _, digit := range digits[len(digits)-divisionDigits:] {
+			if digit != '0' {
+				return 0, invalid("number")
+			}
+		}
+		integerDigits = digits[:len(digits)-divisionDigits]
+	}
+
+	integerDigits = strings.TrimLeft(integerDigits, "0")
+	if len(integerDigits) == 0 {
+		return 0, nil
+	}
+	if len(integerDigits) > len(maxSafeIntegerText) ||
+		(len(integerDigits) == len(maxSafeIntegerText) && integerDigits > maxSafeIntegerText) {
+		return 0, invalid("number")
+	}
+	integer, err := strconv.ParseInt(integerDigits, 10, 64)
+	if err != nil {
+		return 0, invalid("number")
+	}
+	return integer, nil
 }
 
 type rawValidator func(*json.Decoder) error
