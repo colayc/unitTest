@@ -121,6 +121,8 @@ git commit -m "feat: define coverage report contracts"
 
 ### Task 2：Workspace config v3 coverage profiles
 
+**writing-plans 详细执行计划：** [2026-08-03-workspace-config-v3-coverage-profiles-plan.md](./2026-08-03-workspace-config-v3-coverage-profiles-plan.md)
+
 **文件：**
 
 - 修改：`apps/test-service/internal/workspace/workspace.schema.json`
@@ -132,6 +134,8 @@ git commit -m "feat: define coverage report contracts"
 - 创建：`apps/test-service/internal/workspace/testdata/coverage-duplicate.invalid.json`
 - 修改：`apps/test-service/internal/cmake/generation.go`
 - 修改：`apps/test-service/internal/cmake/generation_test.go`
+- 修改：`apps/test-service/internal/discovery/inspector.go`
+- 修改：`apps/test-service/internal/discovery/inspector_test.go`
 - 修改：`tools/workspace-smoke/workspace-config-schema.test.mjs`
 
 **接口：**
