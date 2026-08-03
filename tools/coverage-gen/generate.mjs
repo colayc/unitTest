@@ -1,0 +1,68 @@
+import { spawnSync } from "node:child_process";
+import { mkdtemp, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, relative, resolve } from "node:path";
+
+const root = resolve(import.meta.dirname, "../..");
+const quicktype = join(root, "node_modules", "quicktype", "dist", "index.js");
+const schema = join(root, "packages", "coverage-schema", "schema", "v1", "coverage.schema.json");
+const check = process.argv.includes("--check");
+const targets = [
+  {
+    language: "typescript",
+    output: "packages/coverage-models/src/generated/coverage-v1.ts",
+    extra: ["--just-types", "--prefer-unions"]
+  },
+  {
+    language: "go",
+    output: "apps/test-service/internal/coveragemodel/v1/generated.go",
+    extra: ["--package", "coveragemodelv1", "--just-types"]
+  }
+];
+
+function normalized(value) {
+  return value.replaceAll("\r\n", "\n").replace(/\n*$/, "\n");
+}
+
+function generate(target, output) {
+  const result = spawnSync(process.execPath, [
+    quicktype, "--quiet", "--src-lang", "schema", "--src", schema,
+    "--lang", target.language, "--top-level", "CoverageDocumentV1", ...target.extra,
+    "--out", output
+  ], { cwd: root, stdio: "inherit" });
+  if (result.status !== 0) throw new Error(`quicktype failed for ${target.output} with status ${result.status ?? 1}`);
+}
+
+async function writeNormalized(target, output) {
+  let source = normalized(await readFile(output, "utf8"));
+  if (target.language === "go") source = `package coveragemodelv1\n\n${source}`;
+  await writeFile(output, normalized(source), "utf8");
+}
+
+const temporary = await mkdtemp(join(tmpdir(), "unit-test-ide-coverage-"));
+try {
+  const drifted = [];
+  for (const [index, target] of targets.entries()) {
+    const destination = join(root, target.output);
+    const generated = join(temporary, String(index));
+    await mkdir(dirname(generated), { recursive: true });
+    generate(target, generated);
+    await writeNormalized(target, generated);
+    if (check) {
+      let committed;
+      try { committed = normalized(await readFile(destination, "utf8")); } catch { committed = undefined; }
+      if (committed !== await readFile(generated, "utf8")) drifted.push(relative(root, destination).replaceAll("\\", "/"));
+      continue;
+    }
+    await mkdir(dirname(destination), { recursive: true });
+    const staged = `${destination}.tmp-${process.pid}-${index}`;
+    await writeFile(staged, await readFile(generated));
+    await rename(staged, destination);
+  }
+  if (drifted.length) {
+    for (const path of drifted) console.error(`Generated file is stale: ${path}`);
+    process.exitCode = 1;
+  }
+} finally {
+  await rm(temporary, { recursive: true, force: true });
+}
