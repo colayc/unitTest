@@ -39,10 +39,65 @@ async function writeNormalized(target, output) {
   await writeFile(output, normalized(source), "utf8");
 }
 
+async function replaceAtomically(generatedTargets, backupPaths) {
+  for (const entry of generatedTargets) {
+    try {
+      entry.original = await readFile(entry.destination);
+      entry.originalExists = true;
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      entry.originalExists = false;
+      continue;
+    }
+    backupPaths.push(entry.backup);
+    await writeFile(entry.backup, entry.original);
+  }
+
+  try {
+    for (const entry of generatedTargets) {
+      entry.replacementAttempted = true;
+      await rename(entry.staged, entry.destination);
+    }
+  } catch (replacementError) {
+    const rollbackErrors = [];
+    for (const entry of [...generatedTargets].reverse()) {
+      if (!entry.replacementAttempted) continue;
+      try {
+        await rm(entry.destination, { force: true });
+      } catch (error) {
+        rollbackErrors.push(error);
+      }
+      if (!entry.originalExists) continue;
+      try {
+        await rename(entry.backup, entry.destination);
+      } catch (error) {
+        rollbackErrors.push(error);
+        try {
+          await writeFile(entry.destination, entry.original);
+        } catch (fallbackError) {
+          rollbackErrors.push(fallbackError);
+        }
+      }
+    }
+    if (rollbackErrors.length) {
+      throw new AggregateError(
+        [replacementError, ...rollbackErrors],
+        "Coverage model replacement failed and rollback was incomplete",
+        { cause: replacementError }
+      );
+    }
+    throw replacementError;
+  }
+}
+
 const temporary = await mkdtemp(join(tmpdir(), "unit-test-ide-coverage-"));
 const stagedPaths = [];
+const backupPaths = [];
+let operationError;
+const cleanupErrors = [];
 try {
   const generatedTargets = [];
+  const transactionId = `${process.pid}-${Date.now().toString(36)}`;
   for (const [index, target] of targets.entries()) {
     const destination = join(root, target.output);
     const generated = join(temporary, String(index));
@@ -52,7 +107,10 @@ try {
     generatedTargets.push({
       destination,
       content: await readFile(generated),
-      staged: `${destination}.tmp-${process.pid}-${index}`
+      staged: `${destination}.tmp-${transactionId}-${index}`,
+      backup: `${destination}.backup-${transactionId}-${index}`,
+      originalExists: false,
+      replacementAttempted: false
     });
   }
 
@@ -73,13 +131,23 @@ try {
       await mkdir(dirname(destination), { recursive: true });
       await writeFile(staged, content);
     }
-    for (const { destination, staged } of generatedTargets) await rename(staged, destination);
+    await replaceAtomically(generatedTargets, backupPaths);
   }
+} catch (error) {
+  operationError = error;
 } finally {
-  const cleanupErrors = [];
-  for (const staged of stagedPaths) {
-    try { await rm(staged, { force: true }); } catch (error) { cleanupErrors.push(error); }
+  for (const path of [...stagedPaths, ...backupPaths]) {
+    try { await rm(path, { force: true }); } catch (error) { cleanupErrors.push(error); }
   }
   try { await rm(temporary, { recursive: true, force: true }); } catch (error) { cleanupErrors.push(error); }
-  if (cleanupErrors.length) throw new AggregateError(cleanupErrors, "Unable to remove coverage generator temporary files");
 }
+
+if (operationError && cleanupErrors.length) {
+  throw new AggregateError(
+    [operationError, ...cleanupErrors],
+    "Coverage model generation failed and temporary cleanup was incomplete",
+    { cause: operationError }
+  );
+}
+if (operationError) throw operationError;
+if (cleanupErrors.length) throw new AggregateError(cleanupErrors, "Unable to remove coverage generator temporary files");
