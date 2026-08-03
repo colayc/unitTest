@@ -37,8 +37,8 @@ test("root verify includes the non-mutating Coverage generated drift gate", asyn
   const root = JSON.parse(await readFile(new URL("../../../package.json", import.meta.url), "utf8"));
   assert.equal(root.scripts["generate:coverage"], "node tools/coverage-gen/generate.mjs");
   assert.equal(root.scripts["check:coverage-generated"], "node tools/coverage-gen/generate.mjs --check");
-  assert.match(
+  assert.equal(
     root.scripts.verify,
-    /^pnpm check:protocol-generated && pnpm check:coverage-generated && /
+    "pnpm check:protocol-generated && pnpm check:coverage-generated && pnpm build && pnpm test && pnpm test:go:race && pnpm test:e2e"
   );
 });
