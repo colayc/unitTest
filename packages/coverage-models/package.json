@@ -7,7 +7,7 @@
   "types": "./dist/index.d.ts",
   "scripts": {
     "build": "tsc -b tsconfig.json",
-    "test": "pnpm run build && node --test dist/generated-contract.test.js"
+    "test": "pnpm run build && node --test dist/generated-contract.test.js dist/decoder.test.js"
   },
   "dependencies": {
     "@unit-test-ide/coverage-schema": "workspace:*",

@@ -7,3 +7,8 @@ export type {
   CoverageProvenanceV1,
   CoverageSummaryV1
 } from "./generated/coverage-v1.js";
+
+export {
+  decodeCoverageDocumentV1,
+  validateCoverageDocumentV1
+} from "./decoder.js";
