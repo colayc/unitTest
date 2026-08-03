@@ -4,6 +4,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"path"
 	"runtime"
 	"sort"
@@ -21,10 +23,18 @@ type generationPayload struct {
 }
 
 type generationConfig struct {
-	Version    int                   `json:"version"`
-	CMake      generationCMakeConfig `json:"cmake"`
-	Projects   []generationProject   `json:"projects"`
-	Toolchains []generationToolchain `json:"toolchains"`
+	Version          int                         `json:"version"`
+	CMake            generationCMakeConfig       `json:"cmake"`
+	Projects         []generationProject         `json:"projects"`
+	Toolchains       []generationToolchain       `json:"toolchains"`
+	CoverageProfiles []generationCoverageProfile `json:"coverageProfiles,omitempty"`
+}
+
+type generationCoverageProfile struct {
+	ID                 string   `json:"id"`
+	BaseBuildProfileID string   `json:"baseBuildProfileId"`
+	Include            []string `json:"include"`
+	Exclude            []string `json:"exclude"`
 }
 
 type generationCMakeConfig struct {
@@ -70,6 +80,92 @@ type generationInstallation struct {
 	Source          string `json:"source"`
 	Identity        string `json:"identity"`
 	LicensePath     string `json:"licensePath"`
+}
+
+var ErrInvalidCoverageProfile = errors.New("invalid coverage profile")
+
+// ValidateCoverageProfileReferences verifies that each coverage profile refers
+// to one, and only one, discovered build profile.
+func ValidateCoverageProfileReferences(
+	coverageProfiles []workspace.CoverageProfile,
+	buildProfiles []BuildProfile,
+) error {
+	buildByID, err := uniqueBuildProfiles(buildProfiles)
+	if err != nil {
+		return err
+	}
+	coverageByID := make(map[string]struct{}, len(coverageProfiles))
+	for _, coverage := range coverageProfiles {
+		if _, exists := coverageByID[coverage.ID]; exists {
+			return fmt.Errorf("%w: duplicate coverage profile ID", ErrInvalidCoverageProfile)
+		}
+		coverageByID[coverage.ID] = struct{}{}
+		if _, ok := buildByID[coverage.BaseBuildProfileID]; !ok {
+			return fmt.Errorf("%w: base build profile is not discovered", ErrInvalidCoverageProfile)
+		}
+	}
+	return nil
+}
+
+// ResolveCoverageProfile returns a detached coverage profile and its base build
+// profile when that base belongs to projectID.
+func ResolveCoverageProfile(
+	coverageProfiles []workspace.CoverageProfile,
+	buildProfiles []BuildProfile,
+	projectID string,
+	coverageProfileID string,
+) (workspace.CoverageProfile, BuildProfile, error) {
+	if err := ValidateCoverageProfileReferences(coverageProfiles, buildProfiles); err != nil {
+		return workspace.CoverageProfile{}, BuildProfile{}, err
+	}
+
+	var coverage workspace.CoverageProfile
+	found := false
+	for _, candidate := range coverageProfiles {
+		if candidate.ID != coverageProfileID {
+			continue
+		}
+		if found {
+			return workspace.CoverageProfile{}, BuildProfile{}, fmt.Errorf("%w: coverage profile is ambiguous", ErrInvalidCoverageProfile)
+		}
+		coverage = candidate
+		found = true
+	}
+	if !found {
+		return workspace.CoverageProfile{}, BuildProfile{}, fmt.Errorf("%w: coverage profile is not discovered", ErrInvalidCoverageProfile)
+	}
+
+	base, ok := uniqueBuildProfileByID(buildProfiles, coverage.BaseBuildProfileID)
+	if !ok || base.ProjectID != projectID {
+		return workspace.CoverageProfile{}, BuildProfile{}, fmt.Errorf("%w: base build profile does not belong to project", ErrInvalidCoverageProfile)
+	}
+	return cloneCoverageProfile(coverage), base, nil
+}
+
+func uniqueBuildProfiles(buildProfiles []BuildProfile) (map[string]BuildProfile, error) {
+	result := make(map[string]BuildProfile, len(buildProfiles))
+	for _, profile := range buildProfiles {
+		if _, exists := result[profile.ID]; exists {
+			return nil, fmt.Errorf("%w: duplicate build profile ID", ErrInvalidCoverageProfile)
+		}
+		result[profile.ID] = profile
+	}
+	return result, nil
+}
+
+func uniqueBuildProfileByID(buildProfiles []BuildProfile, id string) (BuildProfile, bool) {
+	for _, profile := range buildProfiles {
+		if profile.ID == id {
+			return profile, true
+		}
+	}
+	return BuildProfile{}, false
+}
+
+func cloneCoverageProfile(profile workspace.CoverageProfile) workspace.CoverageProfile {
+	profile.Include = append([]string(nil), profile.Include...)
+	profile.Exclude = append([]string(nil), profile.Exclude...)
+	return profile
 }
 
 func WorkspaceGeneration(
@@ -153,6 +249,32 @@ func canonicalGenerationConfig(config workspace.Config) generationConfig {
 	sort.Slice(result.Toolchains, func(first, second int) bool {
 		return generationToolchainKey(result.Toolchains[first]) <
 			generationToolchainKey(result.Toolchains[second])
+	})
+	if config.Version == 3 {
+		result.CoverageProfiles = canonicalCoverageProfiles(config.CoverageProfiles)
+	}
+	return result
+}
+
+func canonicalCoverageProfiles(profiles []workspace.CoverageProfile) []generationCoverageProfile {
+	result := make([]generationCoverageProfile, len(profiles))
+	for index, profile := range profiles {
+		include := append([]string{}, profile.Include...)
+		exclude := append([]string{}, profile.Exclude...)
+		sort.Strings(include)
+		sort.Strings(exclude)
+		result[index] = generationCoverageProfile{
+			ID:                 profile.ID,
+			BaseBuildProfileID: profile.BaseBuildProfileID,
+			Include:            include,
+			Exclude:            exclude,
+		}
+	}
+	sort.Slice(result, func(first, second int) bool {
+		if result[first].ID != result[second].ID {
+			return result[first].ID < result[second].ID
+		}
+		return result[first].BaseBuildProfileID < result[second].BaseBuildProfileID
 	})
 	return result
 }

@@ -1,7 +1,10 @@
 package cmake
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -291,7 +294,11 @@ func TestWorkspaceGenerationChangesWithSemanticInputs(t *testing.T) {
 
 func TestWorkspaceGenerationDoesNotMutateInputs(t *testing.T) {
 	config := workspace.Config{
-		Version: 2,
+		Version: 3,
+		CoverageProfiles: []workspace.CoverageProfile{{
+			ID: "coverage", BaseBuildProfileID: "base",
+			Include: []string{"src/**", "include/**"}, Exclude: []string{"tests/**"},
+		}},
 		Projects: []workspace.ProjectConfig{
 			{
 				ID:        "b",
@@ -315,6 +322,9 @@ func TestWorkspaceGenerationDoesNotMutateInputs(t *testing.T) {
 		[]workspace.TestContainerMapping(nil),
 		config.Projects[0].Tests.Containers...,
 	)
+	wantConfig.CoverageProfiles = append([]workspace.CoverageProfile(nil), config.CoverageProfiles...)
+	wantConfig.CoverageProfiles[0].Include = append([]string(nil), config.CoverageProfiles[0].Include...)
+	wantConfig.CoverageProfiles[0].Exclude = append([]string(nil), config.CoverageProfiles[0].Exclude...)
 	wantProfiles := append([]BuildProfile(nil), profiles...)
 	wantToolchains := append([]string(nil), toolchains...)
 
@@ -328,6 +338,93 @@ func TestWorkspaceGenerationDoesNotMutateInputs(t *testing.T) {
 	}
 	if !reflect.DeepEqual(toolchains, wantToolchains) {
 		t.Fatalf("toolchains mutated: %#v", toolchains)
+	}
+}
+
+func TestCoverageProfileReferencesAndProjectBinding(t *testing.T) {
+	coverageProfiles := []workspace.CoverageProfile{{
+		ID: "coverage-debug", BaseBuildProfileID: "build-debug",
+		Include: []string{"src/**"}, Exclude: []string{"tests/**"},
+	}}
+	buildProfiles := []BuildProfile{{ID: "build-debug", ProjectID: "app"}}
+	if err := ValidateCoverageProfileReferences(coverageProfiles, buildProfiles); err != nil {
+		t.Fatal(err)
+	}
+	for name, profiles := range map[string][]BuildProfile{
+		"missing base": nil,
+		"duplicate build ID": {
+			{ID: "build-debug", ProjectID: "app"},
+			{ID: "build-debug", ProjectID: "other"},
+		},
+	} {
+		t.Run("validate "+name, func(t *testing.T) {
+			if validateErr := ValidateCoverageProfileReferences(coverageProfiles, profiles); !errors.Is(validateErr, ErrInvalidCoverageProfile) {
+				t.Fatalf("error = %v", validateErr)
+			}
+		})
+	}
+	coverage, base, err := ResolveCoverageProfile(coverageProfiles, buildProfiles, "app", "coverage-debug")
+	if err != nil || coverage.ID != "coverage-debug" || base.ID != "build-debug" {
+		t.Fatalf("coverage/base/error = %#v / %#v / %v", coverage, base, err)
+	}
+	coverage.Include[0] = "mutated/**"
+	if coverageProfiles[0].Include[0] != "src/**" {
+		t.Fatal("ResolveCoverageProfile returned an alias")
+	}
+
+	tests := []struct {
+		name          string
+		projectID     string
+		coverageID    string
+		buildProfiles []BuildProfile
+	}{
+		{name: "missing base", projectID: "app", coverageID: "coverage-debug"},
+		{name: "wrong project", projectID: "other", coverageID: "coverage-debug", buildProfiles: buildProfiles},
+		{name: "missing coverage", projectID: "app", coverageID: "unknown", buildProfiles: buildProfiles},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, _, resolveErr := ResolveCoverageProfile(coverageProfiles, test.buildProfiles, test.projectID, test.coverageID)
+			if !errors.Is(resolveErr, ErrInvalidCoverageProfile) {
+				t.Fatalf("error = %v", resolveErr)
+			}
+		})
+	}
+	duplicateCoverage := append(append([]workspace.CoverageProfile{}, coverageProfiles...), coverageProfiles[0])
+	if _, _, duplicateErr := ResolveCoverageProfile(duplicateCoverage, buildProfiles, "app", "coverage-debug"); !errors.Is(duplicateErr, ErrInvalidCoverageProfile) {
+		t.Fatalf("duplicate coverage error = %v", duplicateErr)
+	}
+}
+
+func TestWorkspaceGenerationCanonicalizesCoverageProfiles(t *testing.T) {
+	configA := workspace.Config{Version: 3, CoverageProfiles: []workspace.CoverageProfile{
+		{ID: "z", BaseBuildProfileID: "build-z", Include: []string{"src/**", "include/**"}},
+		{ID: "a", BaseBuildProfileID: "build-a", Exclude: []string{"tests/**", "third_party/**"}},
+	}}
+	configB := workspace.Config{Version: 3, CoverageProfiles: []workspace.CoverageProfile{
+		{ID: "a", BaseBuildProfileID: "build-a", Exclude: []string{"third_party/**", "tests/**"}},
+		{ID: "z", BaseBuildProfileID: "build-z", Include: []string{"include/**", "src/**"}},
+	}}
+	first := WorkspaceGeneration(configA, Installation{}, nil, nil)
+	second := WorkspaceGeneration(configB, Installation{}, nil, nil)
+	if first != second {
+		t.Fatalf("coverage order changed generation: %q / %q", first, second)
+	}
+	configB.CoverageProfiles[0].Exclude[0] = "generated/**"
+	if changed := WorkspaceGeneration(configB, Installation{}, nil, nil); changed == first {
+		t.Fatalf("coverage semantic change kept generation %q", first)
+	}
+}
+
+func TestCanonicalGenerationOmitsCoverageFieldForV1V2(t *testing.T) {
+	for _, version := range []int{1, 2} {
+		encoded, err := json.Marshal(canonicalGenerationConfig(workspace.Config{Version: version, CoverageProfiles: []workspace.CoverageProfile{{ID: "must-be-ignored", BaseBuildProfileID: "base", Include: []string{"**"}}}}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(encoded, []byte("coverageProfiles")) {
+			t.Fatalf("v%d canonical config widened: %s", version, encoded)
+		}
 	}
 }
 
