@@ -1800,15 +1800,55 @@ func assertCoverageMigrationLegacyData(t *testing.T, db *sql.DB, legacy coverage
 
 func assertCoverageMigrationSchema(t *testing.T, db *sql.DB) {
 	t.Helper()
-	var coverageTableCount int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('coverage_runs','coverage_reports')`).Scan(&coverageTableCount); err != nil || coverageTableCount != 2 {
-		t.Fatalf("coverage table count = %d, %v", coverageTableCount, err)
+	wantTables := map[string]bool{
+		"schema_migrations":     true,
+		"tasks":                 true,
+		"task_events":           true,
+		"artifacts":             true,
+		"process_leases":        true,
+		"task_steps":            true,
+		"build_configurations":  true,
+		"test_catalogs":         true,
+		"current_test_catalogs": true,
+		"test_catalog_entries":  true,
+		"test_runs":             true,
+		"test_run_results":      true,
+		"test_run_artifacts":    true,
+		"coverage_runs":         true,
+		"coverage_reports":      true,
 	}
-	var payloadTableCount int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('coverage_files','coverage_lines')`).Scan(&payloadTableCount); err != nil || payloadTableCount != 0 {
-		t.Fatalf("coverage payload table count = %d, %v", payloadTableCount, err)
+	rows, err := db.Query(`SELECT name FROM sqlite_master
+		WHERE type='table' AND name NOT LIKE 'sqlite_%'
+		ORDER BY name`)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, tableName := range []string{"tasks", "task_steps"} {
+	tables := make([]string, 0, len(wantTables))
+	for rows.Next() {
+		var tableName string
+		if err := rows.Scan(&tableName); err != nil {
+			t.Fatal(err)
+		}
+		if !wantTables[tableName] {
+			t.Fatalf("unexpected table %q could store coverage payload data", tableName)
+		}
+		tables = append(tables, tableName)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		t.Fatal(err)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(tables) != len(wantTables) {
+		t.Fatalf("schema tables = %v, want exactly %d approved tables", tables, len(wantTables))
+	}
+
+	for _, tableName := range tables {
+		if tableName == "coverage_runs" || tableName == "coverage_reports" {
+			continue
+		}
 		rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, tableName)
 		if err != nil {
 			t.Fatal(err)
@@ -1819,7 +1859,9 @@ func assertCoverageMigrationSchema(t *testing.T, db *sql.DB) {
 				_ = rows.Close()
 				t.Fatal(err)
 			}
-			if strings.Contains(column, "coverage") || strings.Contains(column, "file") || strings.Contains(column, "line") {
+			name := strings.ToLower(column)
+			if strings.Contains(name, "coverage") ||
+				(strings.HasSuffix(name, "_json") && (strings.Contains(name, "file") || strings.Contains(name, "line"))) {
 				_ = rows.Close()
 				t.Fatalf("%s unexpectedly stores coverage payload column %q", tableName, column)
 			}
