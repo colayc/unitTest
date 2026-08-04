@@ -45,7 +45,8 @@
     "version": {
       "type": "string",
       "minLength": 1,
-      "maxLength": 128
+      "maxLength": 128,
+      "pattern": "^[^\\x00]+$"
     },
     "metric": {
       "title": "CoverageMetricV14",
@@ -158,9 +159,10 @@
       "title": "CoverageRunV14",
       "type": "object",
       "additionalProperties": false,
-      "required": ["coverageRunId", "testRunId", "workspaceGeneration", "projectId", "coverageProfileId", "catalogRevision", "selectionSnapshot", "repeatCount", "timeoutMs", "status", "createdAt", "lastSequence"],
+      "required": ["coverageRunId", "taskId", "testRunId", "workspaceGeneration", "projectId", "coverageProfileId", "catalogRevision", "selectionSnapshot", "repeatCount", "timeoutMs", "status", "createdAt", "lastSequence"],
       "properties": {
         "coverageRunId": { "$ref": "#/$defs/id" },
+        "taskId": { "$ref": "#/$defs/id" },
         "testRunId": { "$ref": "#/$defs/id" },
         "workspaceGeneration": { "$ref": "#/$defs/generation" },
         "projectId": { "$ref": "#/$defs/projectId" },

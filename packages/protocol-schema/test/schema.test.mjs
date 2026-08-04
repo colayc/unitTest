@@ -812,6 +812,7 @@ test("protocol 1.4 enforces coverage ranges, outcomes, completeness, and metadat
   const run = await load("../fixtures/v1.4/coverage-run.valid.json");
   const report = await load("../fixtures/v1.4/coverage-report.valid.json");
   const { reportId, ...runWithoutReport } = run.payload;
+  const { taskId, ...runWithoutTaskId } = run.payload;
 
   for (const repeatCount of [0, 101, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
     assert.equal(validate.start({ ...start.payload, repeatCount }), false, `repeatCount=${repeatCount}`);
@@ -828,6 +829,7 @@ test("protocol 1.4 enforces coverage ranges, outcomes, completeness, and metadat
     "unsafe summary count"
   );
   assert.equal(validate.run({ ...run.payload, outcome: "unknown" }), false, "unknown outcome");
+  assert.equal(validate.run(runWithoutTaskId), false, "coverage run requires taskId");
   assert.equal(validate.run({ ...runWithoutReport, outcome: "unavailable", reason: "unknown" }), false, "unknown reason");
   assert.equal(validate.run({ ...run.payload, outcome: "available", reason: "build_failed" }), false, "available run reason");
   assert.equal(validate.run({ ...runWithoutReport, outcome: "unavailable" }), false, "unavailable needs reason");
@@ -845,4 +847,25 @@ test("protocol 1.4 enforces coverage ranges, outcomes, completeness, and metadat
   for (const field of ["files", "lines"]) {
     assert.equal(validate.report({ ...report.payload, [field]: [] }), false, `report.${field}`);
   }
+  for (const field of ["compiler", "driver", "collector"]) {
+    assert.equal(
+      validate.report({
+        ...report.payload,
+        toolProvenance: {
+          ...report.payload.toolProvenance,
+          [field]: { ...report.payload.toolProvenance[field], version: "\u0000" }
+        }
+      }),
+      false,
+      `${field}.version rejects NUL`
+    );
+  }
+  assert.equal(
+    validate.report({
+      ...report.payload,
+      toolProvenance: { ...report.payload.toolProvenance, normalizerVersion: "\u0000" }
+    }),
+    false,
+    "normalizerVersion rejects NUL"
+  );
 });

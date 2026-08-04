@@ -7,6 +7,7 @@
   "sentAt": "2026-08-04T00:00:04Z",
   "payload": {
     "coverageRunId": "55555555555555555555555555555555",
+    "taskId": "66666666666666666666666666666666",
     "testRunId": "77777777777777777777777777777777",
     "workspaceGeneration": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "projectId": "core",
