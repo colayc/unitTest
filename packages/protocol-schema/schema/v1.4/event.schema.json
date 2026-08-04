@@ -1,0 +1,1138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:unit-test-ide:protocol:v1.4:event",
+  "title": "TaskEventV14",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/taskCreatedEvent"
+    },
+    {
+      "$ref": "#/$defs/taskStartedEvent"
+    },
+    {
+      "$ref": "#/$defs/stepStartedEvent"
+    },
+    {
+      "$ref": "#/$defs/outputEvent"
+    },
+    {
+      "$ref": "#/$defs/stepFinishedEvent"
+    },
+    {
+      "$ref": "#/$defs/cancellationRequestedEvent"
+    },
+    {
+      "$ref": "#/$defs/artifactCreatedEvent"
+    },
+    {
+      "$ref": "#/$defs/taskFinishedEvent"
+    },
+    {
+      "$ref": "#/$defs/diagnosticEvent"
+    },
+    {
+      "$ref": "#/$defs/testDiscoveryStartedEvent"
+    },
+    {
+      "$ref": "#/$defs/testContainerDiscoveredEvent"
+    },
+    {
+      "$ref": "#/$defs/testCatalogPublishedEvent"
+    },
+    {
+      "$ref": "#/$defs/testRunStartedEvent"
+    },
+    {
+      "$ref": "#/$defs/testContainerStartedEvent"
+    },
+    {
+      "$ref": "#/$defs/testItemStartedEvent"
+    },
+    {
+      "$ref": "#/$defs/testOutputEvent"
+    },
+    {
+      "$ref": "#/$defs/testItemFinishedEvent"
+    },
+    {
+      "$ref": "#/$defs/testContainerFinishedEvent"
+    },
+    {
+      "$ref": "#/$defs/testRunFinishedEvent"
+    },
+    {
+      "$ref": "#/$defs/coverageRunStartedEvent"
+    },
+    {
+      "$ref": "#/$defs/coverageBuildFinishedEvent"
+    },
+    {
+      "$ref": "#/$defs/coverageCollectionStartedEvent"
+    },
+    {
+      "$ref": "#/$defs/coverageReportAvailableEvent"
+    },
+    {
+      "$ref": "#/$defs/coverageRunFinishedEvent"
+    }
+  ],
+  "$defs": {
+    "eventBase": {
+      "type": "object",
+      "required": [
+        "protocolVersion",
+        "kind",
+        "messageId",
+        "sentAt",
+        "sequence",
+        "event",
+        "taskId",
+        "payloadVersion",
+        "payload"
+      ],
+      "properties": {
+        "protocolVersion": {
+          "title": "EventProtocolVersionV14",
+          "const": "1.4"
+        },
+        "kind": {
+          "title": "EventKindV14",
+          "const": "event"
+        },
+        "messageId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "sentAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "event": {
+          "title": "TaskEventNameV14",
+          "enum": [
+            "task.created",
+            "task.started",
+            "task.step_started",
+            "task.output",
+            "task.step_finished",
+            "task.cancellation_requested",
+            "artifact.created",
+            "task.finished",
+            "task.diagnostic",
+            "test.discovery.started",
+            "test.container.discovered",
+            "test.catalog.published",
+            "test.run.started",
+            "test.container.started",
+            "test.item.started",
+            "test.output",
+            "test.item.finished",
+            "test.container.finished",
+            "test.run.finished",
+            "coverage.run.started",
+            "coverage.build.finished",
+            "coverage.collection.started",
+            "coverage.report.available",
+            "coverage.run.finished"
+          ]
+        },
+        "taskId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "payloadVersion": {
+          "const": 1
+        },
+        "payload": {
+          "type": "object"
+        }
+      }
+    },
+    "taskCreatedEvent": {
+      "title": "TaskCreatedEventV14",
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/eventBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "const": "task.created"
+            },
+            "payload": {
+              "$ref": "#/$defs/taskCreatedPayload"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "taskStartedEvent": {
+      "title": "TaskStartedEventV14",
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/eventBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "const": "task.started"
+            },
+            "payload": {
+              "$ref": "#/$defs/taskStartedPayload"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "stepStartedEvent": {
+      "title": "TaskStepStartedEventV14",
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/eventBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "const": "task.step_started"
+            },
+            "payload": {
+              "$ref": "#/$defs/stepStartedPayload"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "outputEvent": {
+      "title": "TaskOutputEventV14",
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/eventBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "const": "task.output"
+            },
+            "payload": {
+              "$ref": "#/$defs/outputPayload"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "stepFinishedEvent": {
+      "title": "TaskStepFinishedEventV14",
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/eventBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "const": "task.step_finished"
+            },
+            "payload": {
+              "$ref": "#/$defs/stepFinishedPayload"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "cancellationRequestedEvent": {
+      "title": "TaskCancellationRequestedEventV14",
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/eventBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "const": "task.cancellation_requested"
+            },
+            "payload": {
+              "$ref": "#/$defs/cancellationRequestedPayload"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "artifactCreatedEvent": {
+      "title": "ArtifactCreatedEventV14",
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/eventBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "const": "artifact.created"
+            },
+            "payload": {
+              "$ref": "#/$defs/artifactCreatedPayload"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "taskFinishedEvent": {
+      "title": "TaskFinishedEventV14",
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/eventBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "const": "task.finished"
+            },
+            "payload": {
+              "$ref": "#/$defs/taskFinishedPayload"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "diagnosticEvent": {
+      "title": "TaskDiagnosticEventV14",
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/eventBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "const": "task.diagnostic"
+            },
+            "payload": {
+              "$ref": "#/$defs/diagnosticPayload"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "testDiscoveryStartedEvent": {
+      "title": "TestDiscoveryStartedEventV14",
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/eventBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "const": "test.discovery.started"
+            },
+            "payload": {
+              "$ref": "#/$defs/testDiscoveryStartedPayload"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "testContainerDiscoveredEvent": {
+      "title": "TestContainerDiscoveredEventV14",
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/eventBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "const": "test.container.discovered"
+            },
+            "payload": {
+              "$ref": "#/$defs/testContainerDiscoveredPayload"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "testCatalogPublishedEvent": {
+      "title": "TestCatalogPublishedEventV14",
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/eventBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "const": "test.catalog.published"
+            },
+            "payload": {
+              "$ref": "#/$defs/testCatalogPublishedPayload"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "testRunStartedEvent": {
+      "title": "TestRunStartedEventV14",
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/eventBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "const": "test.run.started"
+            },
+            "payload": {
+              "$ref": "#/$defs/testRunStartedPayload"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "testContainerStartedEvent": {
+      "title": "TestContainerStartedEventV14",
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/eventBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "const": "test.container.started"
+            },
+            "payload": {
+              "$ref": "#/$defs/testContainerStartedPayload"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "testItemStartedEvent": {
+      "title": "TestItemStartedEventV14",
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/eventBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "const": "test.item.started"
+            },
+            "payload": {
+              "$ref": "#/$defs/testItemStartedPayload"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "testOutputEvent": {
+      "title": "TestOutputEventV14",
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/eventBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "const": "test.output"
+            },
+            "payload": {
+              "$ref": "#/$defs/testOutputPayload"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "testItemFinishedEvent": {
+      "title": "TestItemFinishedEventV14",
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/eventBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "const": "test.item.finished"
+            },
+            "payload": {
+              "$ref": "#/$defs/testItemFinishedPayload"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "testContainerFinishedEvent": {
+      "title": "TestContainerFinishedEventV14",
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/eventBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "const": "test.container.finished"
+            },
+            "payload": {
+              "$ref": "#/$defs/testContainerFinishedPayload"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "testRunFinishedEvent": {
+      "title": "TestRunFinishedEventV14",
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/eventBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "event": {
+              "const": "test.run.finished"
+            },
+            "payload": {
+              "$ref": "#/$defs/testRunFinishedPayload"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "coverageRunStartedEvent": {
+      "title": "CoverageRunStartedEventV14",
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/eventBase" }, { "type": "object", "properties": { "event": { "const": "coverage.run.started" }, "payload": { "$ref": "#/$defs/coverageRunStartedPayload" } } }],
+      "unevaluatedProperties": false
+    },
+    "coverageBuildFinishedEvent": {
+      "title": "CoverageBuildFinishedEventV14",
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/eventBase" }, { "type": "object", "properties": { "event": { "const": "coverage.build.finished" }, "payload": { "$ref": "#/$defs/coverageBuildFinishedPayload" } } }],
+      "unevaluatedProperties": false
+    },
+    "coverageCollectionStartedEvent": {
+      "title": "CoverageCollectionStartedEventV14",
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/eventBase" }, { "type": "object", "properties": { "event": { "const": "coverage.collection.started" }, "payload": { "$ref": "#/$defs/coverageCollectionStartedPayload" } } }],
+      "unevaluatedProperties": false
+    },
+    "coverageReportAvailableEvent": {
+      "title": "CoverageReportAvailableEventV14",
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/eventBase" }, { "type": "object", "properties": { "event": { "const": "coverage.report.available" }, "payload": { "$ref": "#/$defs/coverageReportAvailablePayload" } } }],
+      "unevaluatedProperties": false
+    },
+    "coverageRunFinishedEvent": {
+      "title": "CoverageRunFinishedEventV14",
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/eventBase" }, { "type": "object", "properties": { "event": { "const": "coverage.run.finished" }, "payload": { "$ref": "#/$defs/coverageRunFinishedPayload" } } }],
+      "unevaluatedProperties": false
+    },
+    "coverageRunStartedPayload": {
+      "type": "object", "additionalProperties": false,
+      "required": ["coverageRunId", "testRunId", "catalogRevision", "repeatCount"],
+      "properties": { "coverageRunId": { "$ref": "#/$defs/runId" }, "testRunId": { "$ref": "#/$defs/runId" }, "catalogRevision": { "$ref": "#/$defs/revision" }, "repeatCount": { "type": "integer", "minimum": 1, "maximum": 100 } }
+    },
+    "coverageBuildFinishedPayload": {
+      "type": "object", "additionalProperties": false, "required": ["coverageRunId"],
+      "properties": { "coverageRunId": { "$ref": "#/$defs/runId" } }
+    },
+    "coverageCollectionStartedPayload": {
+      "type": "object", "additionalProperties": false, "required": ["coverageRunId", "testRunId"],
+      "properties": { "coverageRunId": { "$ref": "#/$defs/runId" }, "testRunId": { "$ref": "#/$defs/runId" } }
+    },
+    "coverageReportAvailablePayload": {
+      "type": "object", "additionalProperties": false,
+      "required": ["coverageRunId", "reportId", "artifactId", "completeness", "summary"],
+      "properties": {
+        "coverageRunId": { "$ref": "#/$defs/runId" }, "reportId": { "$ref": "#/$defs/runId" }, "artifactId": { "$ref": "#/$defs/artifactId" },
+        "completeness": { "$ref": "urn:unit-test-ide:protocol:v1.4:coverage#/$defs/completeness" },
+        "summary": { "$ref": "urn:unit-test-ide:protocol:v1.4:coverage#/$defs/summary" }
+      }
+    },
+    "coverageRunFinishedPayload": {
+      "type": "object", "additionalProperties": false, "required": ["coverageRunId", "outcome"],
+      "properties": {
+        "coverageRunId": { "$ref": "#/$defs/runId" },
+        "outcome": { "enum": ["available", "partial", "unavailable", "cancelled"] },
+        "reason": { "enum": ["user_cancelled", "task_timed_out", "instrumentation_failed", "build_failed", "profile_collection_failed", "merge_failed", "normalization_failed", "report_generation_failed", "persistence_failed", "service_restarted"] },
+        "reportId": { "$ref": "#/$defs/runId" }
+      },
+      "allOf": [
+        { "if": { "properties": { "outcome": { "enum": ["available", "partial"] } }, "required": ["outcome"] }, "then": { "properties": { "reportId": {} }, "required": ["reportId"], "not": { "properties": { "reason": {} }, "required": ["reason"] } } },
+        { "if": { "properties": { "outcome": { "const": "unavailable" } }, "required": ["outcome"] }, "then": { "required": ["reason"], "properties": { "reason": { "enum": ["instrumentation_failed", "build_failed", "profile_collection_failed", "merge_failed", "normalization_failed", "report_generation_failed", "persistence_failed", "service_restarted"] } }, "not": { "properties": { "reportId": {} }, "required": ["reportId"] } } },
+        { "if": { "properties": { "outcome": { "const": "cancelled" } }, "required": ["outcome"] }, "then": { "required": ["reason"], "properties": { "reason": { "enum": ["user_cancelled", "task_timed_out"] } }, "not": { "properties": { "reportId": {} }, "required": ["reportId"] } } }
+      ]
+    },
+    "taskCreatedPayload": {
+      "title": "TaskCreatedPayloadV14",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "const": "queued"
+        }
+      }
+    },
+    "taskStartedPayload": {
+      "title": "TaskStartedPayloadV14",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "const": "running"
+        }
+      }
+    },
+    "stepStartedPayload": {
+      "title": "TaskStepStartedPayloadV14",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stepId",
+        "kind",
+        "status"
+      ],
+      "properties": {
+        "stepId": {
+          "type": "string",
+          "pattern": "^[a-z][A-Za-z0-9_-]{0,63}$"
+        },
+        "kind": {
+          "$ref": "#/$defs/stepKind"
+        },
+        "status": {
+          "const": "running"
+        }
+      }
+    },
+    "outputPayload": {
+      "title": "TaskOutputPayloadV14",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stepId",
+        "stream",
+        "text",
+        "truncated"
+      ],
+      "properties": {
+        "stepId": {
+          "type": "string",
+          "pattern": "^[a-z][A-Za-z0-9_-]{0,63}$"
+        },
+        "stream": {
+          "$ref": "#/$defs/outputStream"
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 262144
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      }
+    },
+    "stepFinishedPayload": {
+      "title": "TaskStepFinishedPayloadV14",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stepId",
+        "kind",
+        "status"
+      ],
+      "properties": {
+        "stepId": {
+          "type": "string",
+          "pattern": "^[a-z][A-Za-z0-9_-]{0,63}$"
+        },
+        "kind": {
+          "$ref": "#/$defs/stepKind"
+        },
+        "status": {
+          "title": "TaskStepFinishedStatusV14",
+          "enum": [
+            "succeeded",
+            "failed",
+            "skipped"
+          ]
+        },
+        "exitCode": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "errorCode": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      }
+    },
+    "cancellationRequestedPayload": {
+      "title": "TaskCancellationRequestedPayloadV14",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "const": "cancelling"
+        }
+      }
+    },
+    "artifactCreatedPayload": {
+      "title": "ArtifactCreatedPayloadV14",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifactId",
+        "kind"
+      ],
+      "properties": {
+        "artifactId": {
+          "$ref": "#/$defs/artifactId"
+        },
+        "kind": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      }
+    },
+    "taskFinishedPayload": {
+      "title": "TaskFinishedPayloadV14",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "outcome"
+      ],
+      "properties": {
+        "outcome": {
+          "$ref": "#/$defs/taskOutcome"
+        }
+      }
+    },
+    "diagnosticPayload": {
+      "title": "TaskDiagnosticPayloadV14",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "diagnostic"
+      ],
+      "properties": {
+        "diagnostic": {
+          "$ref": "urn:unit-test-ide:protocol:v1.4:diagnostic"
+        }
+      }
+    },
+    "testDiscoveryStartedPayload": {
+      "title": "TestDiscoveryStartedPayloadV14",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "projectId",
+        "profileId"
+      ],
+      "properties": {
+        "projectId": {
+          "$ref": "#/$defs/projectId"
+        },
+        "profileId": {
+          "$ref": "#/$defs/profileId"
+        }
+      }
+    },
+    "testContainerDiscoveredPayload": {
+      "title": "TestContainerDiscoveredPayloadV14",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "containerId",
+        "framework",
+        "displayName"
+      ],
+      "properties": {
+        "containerId": {
+          "$ref": "#/$defs/stableId"
+        },
+        "framework": {
+          "$ref": "#/$defs/testFramework"
+        },
+        "displayName": {
+          "$ref": "#/$defs/boundedName"
+        }
+      }
+    },
+    "testCatalogPublishedPayload": {
+      "title": "TestCatalogPublishedPayloadV14",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "projectId",
+        "profileId",
+        "revision",
+        "containerCount",
+        "itemCount"
+      ],
+      "properties": {
+        "projectId": {
+          "$ref": "#/$defs/projectId"
+        },
+        "profileId": {
+          "$ref": "#/$defs/profileId"
+        },
+        "revision": {
+          "$ref": "#/$defs/revision"
+        },
+        "containerCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "itemCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000
+        }
+      }
+    },
+    "testRunStartedPayload": {
+      "title": "TestRunStartedPayloadV14",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runId",
+        "catalogRevision",
+        "total"
+      ],
+      "properties": {
+        "runId": {
+          "$ref": "#/$defs/runId"
+        },
+        "catalogRevision": {
+          "$ref": "#/$defs/revision"
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "testContainerStartedPayload": {
+      "title": "TestContainerStartedPayloadV14",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runId",
+        "containerId",
+        "iteration"
+      ],
+      "properties": {
+        "runId": {
+          "$ref": "#/$defs/runId"
+        },
+        "containerId": {
+          "$ref": "#/$defs/stableId"
+        },
+        "iteration": {
+          "$ref": "#/$defs/iteration"
+        }
+      }
+    },
+    "testItemStartedPayload": {
+      "title": "TestItemStartedPayloadV14",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runId",
+        "itemId",
+        "containerId",
+        "iteration"
+      ],
+      "properties": {
+        "runId": {
+          "$ref": "#/$defs/runId"
+        },
+        "itemId": {
+          "$ref": "#/$defs/stableId"
+        },
+        "containerId": {
+          "$ref": "#/$defs/stableId"
+        },
+        "iteration": {
+          "$ref": "#/$defs/iteration"
+        }
+      }
+    },
+    "testOutputPayload": {
+      "title": "TestOutputPayloadV14",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runId",
+        "containerId",
+        "iteration",
+        "stream",
+        "text",
+        "truncated"
+      ],
+      "properties": {
+        "runId": {
+          "$ref": "#/$defs/runId"
+        },
+        "containerId": {
+          "$ref": "#/$defs/stableId"
+        },
+        "itemId": {
+          "$ref": "#/$defs/stableId"
+        },
+        "iteration": {
+          "$ref": "#/$defs/iteration"
+        },
+        "stream": {
+          "$ref": "#/$defs/outputStream"
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 262144
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      }
+    },
+    "testItemFinishedPayload": {
+      "title": "TestItemFinishedPayloadV14",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runId",
+        "result"
+      ],
+      "properties": {
+        "runId": {
+          "$ref": "#/$defs/runId"
+        },
+        "result": {
+          "$ref": "urn:unit-test-ide:protocol:v1.4:test#/$defs/testItemResult"
+        }
+      }
+    },
+    "testContainerFinishedPayload": {
+      "title": "TestContainerFinishedPayloadV14",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runId",
+        "containerId",
+        "iteration",
+        "outcome"
+      ],
+      "properties": {
+        "runId": {
+          "$ref": "#/$defs/runId"
+        },
+        "containerId": {
+          "$ref": "#/$defs/stableId"
+        },
+        "iteration": {
+          "$ref": "#/$defs/iteration"
+        },
+        "outcome": {
+          "title": "TestContainerOutcomeV14",
+          "enum": [
+            "passed",
+            "failed",
+            "errored",
+            "cancelled",
+            "timed_out",
+            "not_run"
+          ]
+        }
+      }
+    },
+    "testRunFinishedPayload": {
+      "title": "TestRunFinishedPayloadV14",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runId",
+        "outcome",
+        "summary",
+        "resultRevision",
+        "incomplete"
+      ],
+      "properties": {
+        "runId": {
+          "$ref": "#/$defs/runId"
+        },
+        "outcome": {
+          "$ref": "#/$defs/testRunOutcome"
+        },
+        "summary": {
+          "$ref": "urn:unit-test-ide:protocol:v1.4:test#/$defs/testRunSummary"
+        },
+        "resultRevision": {
+          "$ref": "#/$defs/revision"
+        },
+        "incomplete": {
+          "type": "boolean"
+        }
+      }
+    },
+    "projectId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+    },
+    "profileId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "revision": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "runId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "artifactId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "stableId": {
+      "type": "string",
+      "pattern": "^utid-v1-[0-9a-f]{64}$"
+    },
+    "boundedName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "iteration": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "testFramework": {
+      "title": "TestEventFrameworkV14",
+      "enum": [
+        "cpputest",
+        "unity",
+        "opaque-ctest"
+      ]
+    },
+    "outputStream": {
+      "title": "TaskOutputStreamV14",
+      "enum": [
+        "stdout",
+        "stderr",
+        "combined"
+      ]
+    },
+    "stepKind": {
+      "title": "TaskStepKindV14",
+      "enum": [
+        "simulation",
+        "configure",
+        "build",
+        "test-discovery",
+        "test-run",
+        "coverage-configure",
+        "coverage-build",
+        "coverage-test",
+        "coverage-merge",
+        "coverage-normalize",
+        "coverage-report",
+        "coverage-publish"
+      ]
+    },
+    "taskOutcome": {
+      "title": "TaskOutcomeV14",
+      "enum": [
+        "succeeded",
+        "command_failed",
+        "cancelled",
+        "timed_out",
+        "interrupted",
+        "infrastructure_failed"
+      ]
+    },
+    "testRunOutcome": {
+      "title": "TestEventRunOutcomeV14",
+      "enum": [
+        "passed",
+        "failed",
+        "blocked",
+        "errored",
+        "cancelled",
+        "timed_out",
+        "interrupted"
+      ]
+    }
+  }
+}

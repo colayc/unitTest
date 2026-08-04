@@ -869,3 +869,171 @@ test("protocol 1.4 enforces coverage ranges, outcomes, completeness, and metadat
     "normalizerVersion rejects NUL"
   );
 });
+
+async function compileV14Message() {
+  const ajv = new Ajv2020({ allErrors: true, strict: true });
+  addFormats(ajv);
+  ajv.addSchema(await load("../schema/v1.2/workspace.schema.json"));
+  for (const name of ["capabilities", "diagnostic", "test", "coverage", "task", "event", "artifact"]) {
+    ajv.addSchema(await load(`../schema/v1.4/${name}.schema.json`));
+  }
+  return ajv.compile(await load("../schema/v1.4/message.schema.json"));
+}
+
+test("protocol 1.4 exposes coverage messages as closed whole-message contracts", async () => {
+  const validate = await compileV14Message();
+  const [start, run, report] = await Promise.all([
+    load("../fixtures/v1.4/coverage-run-start.valid.json"),
+    load("../fixtures/v1.4/coverage-run.valid.json"),
+    load("../fixtures/v1.4/coverage-report.valid.json")
+  ]);
+  for (const fixture of [start, run, report]) {
+    assert.equal(validate(fixture), true, JSON.stringify(validate.errors));
+  }
+  for (const fixture of [
+    "coverage-run-command.invalid.json",
+    "coverage-run-driver.invalid.json",
+    "coverage-run-environment.invalid.json"
+  ]) {
+    assert.equal(validate(await load(`../fixtures/v1.4/${fixture}`)), false, fixture);
+  }
+});
+
+test("protocol 1.4 coverage request boundaries and pages are closed and bounded", async () => {
+  const validate = await compileV14Message();
+  const start = await load("../fixtures/v1.4/coverage-run-start.valid.json");
+  const run = await load("../fixtures/v1.4/coverage-run.valid.json");
+  const base = {
+    protocolVersion: "1.4",
+    kind: "request",
+    messageId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    sentAt: "2026-08-04T00:00:00Z"
+  };
+  const requests = [
+    start,
+    { ...base, method: "coverage/runs/get", payload: { coverageRunId: "5".repeat(32) } },
+    { ...base, method: "coverage/runs/list", payload: { projectId: "core", coverageProfileId: "coverage-debug", cursor: "page-1", limit: 200 } },
+    { ...base, method: "coverage/reports/get", payload: { reportId: "8".repeat(32) } }
+  ];
+  for (const request of requests) {
+    assert.equal(validate(request), true, `${request.method}: ${JSON.stringify(validate.errors)}`);
+  }
+  const list = requests[2];
+  for (const limit of [0, 201, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.equal(validate({ ...list, payload: { ...list.payload, limit } }), false, `limit=${limit}`);
+  }
+  for (const cursor of ["", "x".repeat(4097)]) {
+    assert.equal(validate({ ...list, payload: { ...list.payload, cursor } }), false, `cursor=${cursor.length}`);
+  }
+  assert.equal(validate({ ...requests[1], payload: { coverageRunId: "bad" } }), false, "malformed coverageRunId");
+  assert.equal(validate({ ...list, payload: { ...list.payload, extra: true } }), false, "open list request");
+
+  const page = {
+    ...run,
+    method: "coverage/runs/list",
+    payload: { items: Array.from({ length: 200 }, () => run.payload) }
+  };
+  assert.equal(validate(page), true, JSON.stringify(validate.errors));
+  assert.equal(validate({ ...page, payload: { items: [...page.payload.items, run.payload] } }), false, "201 coverage runs");
+});
+
+test("protocol 1.4 capabilities and artifacts add only the public coverage surface", async () => {
+  const validate = await compileV14Message();
+  const base = {
+    protocolVersion: "1.4", kind: "response", messageId: "a".repeat(32), requestId: "b".repeat(32),
+    sentAt: "2026-08-04T00:00:00Z", method: "capabilities/get"
+  };
+  const payload = {
+    workspaceInspect: true, targetList: true, cmakeBuild: true, testDiscovery: true, testRun: true,
+    frameworkAdapters: [], opaqueCTestFallback: true, ctestJson: true, maxRepeatCount: 100,
+    maxSelectionSize: 100000, maxCatalogPageSize: 1000, unityHelperContractVersion: "1",
+    unityRunnerContractVersion: "utide.runner.v1", coverageRun: true, coverageReport: true,
+    maxCoveragePageSize: 200, maxCoverageTimeoutMs: 86400000
+  };
+  assert.equal(validate({ ...base, payload }), true, JSON.stringify(validate.errors));
+  const { coverageRun: _coverageRun, ...missing } = payload;
+  assert.equal(validate({ ...base, payload: missing }), false, "missing coverage field");
+  assert.equal(validate({ ...base, payload: { ...payload, coverageRun: false } }), false, "false coverage constant");
+  assert.equal(validate({ ...base, payload: { ...payload, coverageExtra: true } }), false, "unknown capability");
+  assert.equal(validate({ ...base, payload: { ...payload, maxCoveragePageSize: 201 } }), false, "coverage page size");
+  assert.equal(validate({ ...base, payload: { ...payload, maxCoverageTimeoutMs: 86400001 } }), false, "coverage timeout");
+
+  const ajv = new Ajv2020({ allErrors: true, strict: true });
+  addFormats(ajv);
+  const validateArtifact = ajv.compile(await load("../schema/v1.4/artifact.schema.json"));
+  const artifact = { artifactId: "a".repeat(32), taskId: "b".repeat(32), sizeBytes: 1, sha256: "c".repeat(64), createdAt: "2026-08-04T00:00:00Z", uri: "unit-test-ide://artifact/a" };
+  for (const [kind, mimeType] of [["coverage-json", "application/json"], ["junit-xml", "application/xml"], ["coverage-html", "text/html"]]) {
+    assert.equal(validateArtifact({ ...artifact, kind, mimeType }), true, `${kind}: ${JSON.stringify(validateArtifact.errors)}`);
+  }
+  for (const kind of ["raw-profile", "indexed-profile", "gcda", "third-party-json"]) {
+    assert.equal(validateArtifact({ ...artifact, kind, mimeType: "application/json" }), false, kind);
+  }
+  assert.equal(validateArtifact({ ...artifact, kind: "coverage-html", mimeType: "application/json" }), false, "coverage artifact MIME pairing");
+  assert.equal(validateArtifact({ ...artifact, kind: "coverage-json", mimeType: "text/plain" }), false, "unknown MIME");
+});
+
+test("protocol 1.4 coverage tasks and journal events preserve closed task invariants", async () => {
+  const validate = await compileV14Message();
+  const run = await load("../fixtures/v1.4/coverage-run.valid.json");
+  const task = {
+    taskId: run.payload.taskId, kind: "coverageRun", workspaceGeneration: run.payload.workspaceGeneration,
+    projectId: run.payload.projectId, coverageProfileId: run.payload.coverageProfileId,
+    catalogRevision: run.payload.catalogRevision, coverageRunId: run.payload.coverageRunId,
+    testRunId: run.payload.testRunId, repeatCount: run.payload.repeatCount, timeoutMs: run.payload.timeoutMs,
+    status: "finished", outcome: "succeeded", createdAt: run.payload.createdAt, lastSequence: 42
+  };
+  const response = { protocolVersion: "1.4", kind: "response", messageId: "a".repeat(32), requestId: "b".repeat(32), sentAt: "2026-08-04T00:00:04Z", method: "tasks/get", payload: task };
+  for (const method of ["tasks/get", "tasks/cancel"]) assert.equal(validate({ ...response, method }), true, method);
+  assert.equal(validate({ ...response, method: "tasks/list", payload: { items: [task] } }), true, "tasks/list");
+  assert.equal(validate({ ...response, payload: { ...task, coverageRunId: "bad" } }), false, "malformed coverage task id");
+  assert.equal(validate({ ...response, payload: { ...task, unexpected: true } }), false, "open coverage task");
+  assert.equal(validate({ ...(await load("../fixtures/v1.4/coverage-run-start.valid.json")), method: "tasks/start", payload: { kind: "coverageRun" } }), false, "tasks/start coverage");
+
+  const eventBase = { protocolVersion: "1.4", kind: "event", messageId: "c".repeat(32), sentAt: "2026-08-04T00:00:05Z", sequence: 43, taskId: task.taskId, payloadVersion: 1 };
+  const summary = (await load("../fixtures/v1.4/coverage-report.valid.json")).payload.summary;
+  const events = [
+    ["coverage.run.started", { coverageRunId: task.coverageRunId, testRunId: task.testRunId, catalogRevision: task.catalogRevision, repeatCount: 2 }],
+    ["coverage.build.finished", { coverageRunId: task.coverageRunId }],
+    ["coverage.collection.started", { coverageRunId: task.coverageRunId, testRunId: task.testRunId }],
+    ["coverage.report.available", { coverageRunId: task.coverageRunId, reportId: "8".repeat(32), artifactId: "9".repeat(32), completeness: { outcome: "available", reasons: [] }, summary }],
+    ["coverage.run.finished", { coverageRunId: task.coverageRunId, outcome: "available", reportId: "8".repeat(32) }]
+  ];
+  for (const [event, payload] of events) assert.equal(validate({ ...eventBase, event, payload }), true, `${event}: ${JSON.stringify(validate.errors)}`);
+  assert.equal(validate({ ...eventBase, sequence: Number.MAX_SAFE_INTEGER + 1, event: events[0][0], payload: events[0][1] }), false, "unsafe event sequence");
+  for (const kind of ["coverage-configure", "coverage-build", "coverage-test", "coverage-merge", "coverage-normalize", "coverage-report", "coverage-publish"]) {
+    assert.equal(validate({ ...eventBase, event: "task.step_started", payload: { stepId: "coverage", kind, status: "running" } }), true, kind);
+  }
+  assert.equal(validate({ ...eventBase, event: "coverage.run.finished", payload: { coverageRunId: task.coverageRunId, outcome: "available", reason: "build_failed" } }), false, "coverage finished invariant");
+  assert.equal(validate({ ...eventBase, event: "coverage.file.finished", payload: {} }), false, "coverage.file event");
+  assert.equal(validate({ ...eventBase, event: "coverage.line.finished", payload: {} }), false, "coverage.line event");
+});
+
+test("protocol 1.4 keeps earlier protocol validators strict and leaves tasks/start coverage-free", async () => {
+  const validateV14 = await compileV14Message();
+  const validateV13 = await compileV13Message();
+  const v13Run = await load("../fixtures/v1.3/test-run-start.valid.json");
+  const v14Start = await load("../fixtures/v1.4/coverage-run-start.valid.json");
+  assert.equal(validateV13(v13Run), true, JSON.stringify(validateV13.errors));
+  assert.equal(validateV13(v14Start), false, "v1.3 coverage start");
+  for (const fixture of [
+    "coverage-run.valid.json",
+    "coverage-report.valid.json",
+    "coverage-run-command.invalid.json",
+    "coverage-run-driver.invalid.json",
+    "coverage-run-environment.invalid.json"
+  ]) {
+    assert.equal(validateV13(await load(`../fixtures/v1.4/${fixture}`)), false, fixture);
+  }
+  assert.equal(validateV14({ ...v13Run, protocolVersion: "1.4" }), true, JSON.stringify(validateV14.errors));
+  const v13Capabilities = await load("../schema/v1.3/capabilities.schema.json");
+  const ajv = new Ajv2020({ allErrors: true, strict: true });
+  addFormats(ajv);
+  const validateCapabilities = ajv.compile(v13Capabilities);
+  assert.equal(validateCapabilities({ workspaceInspect: true, targetList: true, cmakeBuild: true, testDiscovery: true, testRun: true, frameworkAdapters: [], opaqueCTestFallback: true, ctestJson: true, maxRepeatCount: 100, maxSelectionSize: 100000, maxCatalogPageSize: 1000, unityHelperContractVersion: "1", unityRunnerContractVersion: "1", coverageRun: true }), false);
+  const eventAjv = new Ajv2020({ allErrors: true, strict: true });
+  addFormats(eventAjv);
+  eventAjv.addSchema(await load("../schema/v1.3/diagnostic.schema.json"));
+  eventAjv.addSchema(await load("../schema/v1.3/test.schema.json"));
+  const validateV13Event = eventAjv.compile(await load("../schema/v1.3/event.schema.json"));
+  assert.equal(validateV13Event({ protocolVersion: "1.3", kind: "event", messageId: "c".repeat(32), sentAt: "2026-08-04T00:00:05Z", sequence: 1, event: "coverage.run.started", taskId: "d".repeat(32), payloadVersion: 1, payload: {} }), false, "v1.3 coverage event");
+});
