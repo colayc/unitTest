@@ -164,6 +164,24 @@ type Report struct {
 	ArtifactID    string
 }
 
+type RunPageRequest struct {
+	WorkspaceGeneration string
+	ProjectID           string
+	CoverageProfileID   string
+	Cursor              string
+	Limit               int
+}
+
+type RunPage struct {
+	Items      []Run
+	NextCursor string
+}
+
+const (
+	DefaultRunPageSize = 100
+	MaxRunPageSize     = 200
+)
+
 func NewRun(value Run) (Run, error) {
 	request, err := NewRequest(value.Request)
 	if err != nil {

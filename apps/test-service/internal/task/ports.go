@@ -6,6 +6,7 @@ import (
 	"errors"
 	"time"
 
+	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/diagnostic"
 	"unit-test-ide.local/test-service/internal/testdomain"
 )
@@ -25,15 +26,22 @@ type SimulationStart struct {
 }
 
 type Mutation struct {
-	Task        Task
-	Expected    Status
-	Steps       []StepMutation
-	AppendSteps []StepSnapshot
-	Events      []EventDraft
-	PutLease    *ProcessLease
-	DeleteLease bool
-	Artifacts   []Artifact
-	FinishRun   *testdomain.TestRun
+	Task           Task
+	Expected       Status
+	Steps          []StepMutation
+	AppendSteps    []StepSnapshot
+	Events         []EventDraft
+	PutLease       *ProcessLease
+	DeleteLease    bool
+	Artifacts      []Artifact
+	FinishRun      *testdomain.TestRun
+	FinishCoverage *CoverageCompletion
+}
+
+type CoverageCompletion struct {
+	Run      coveragedomain.Run
+	Expected coveragedomain.Status
+	Report   *coveragedomain.Report
 }
 
 type StepMutation struct {
@@ -67,6 +75,23 @@ type TestTaskStore interface {
 		EventDraft,
 		testdomain.TestRun,
 	) (Task, []Event, error)
+}
+
+type CoverageTaskStore interface {
+	CreateCoverageTask(
+		context.Context,
+		Task,
+		[]StepSnapshot,
+		EventDraft,
+		coveragedomain.Run,
+		testdomain.TestRun,
+	) (Task, []Event, error)
+}
+
+type CoverageRepository interface {
+	GetCoverageRun(context.Context, string) (coveragedomain.Run, error)
+	ListCoverageRuns(context.Context, coveragedomain.RunPageRequest) (coveragedomain.RunPage, error)
+	GetCoverageReport(context.Context, string) (coveragedomain.Report, error)
 }
 
 type TestCatalogRepository interface {
