@@ -441,39 +441,9 @@ func (s *Store) Apply(ctx context.Context, mutation task.Mutation) (task.Task, [
 			return task.Task{}, nil, task.ErrInvalidArgument
 		}
 	}
-	if mutation.FinishRun != nil {
-		run, err := testdomain.NewTestRun(mutation.FinishRun.Clone())
-		if err != nil {
-			return task.Task{}, nil, fmt.Errorf(
-				"validate terminal TestRun: %w",
-				task.ErrInvalidArgument,
-			)
-		}
-		if run.Status != testdomain.RunCompleted ||
-			mutation.Task.Kind != task.KindTestRun ||
-			mutation.Task.Status != task.StatusFinished ||
-			run.TaskID != mutation.Task.ID {
-			return task.Task{}, nil, fmt.Errorf(
-				"match terminal TestRun to Task: %w",
-				task.ErrInvalidArgument,
-			)
-		}
-		if err := validateRunArtifacts(run.TaskID, mutation.Artifacts); err != nil {
-			return task.Task{}, nil, err
-		}
-		hasRunFinished := false
-		for _, event := range mutation.Events {
-			if event.Type == task.EventTestRunFinished {
-				hasRunFinished = true
-				break
-			}
-		}
-		if !hasRunFinished {
-			return task.Task{}, nil, fmt.Errorf(
-				"terminal TestRun event is missing: %w",
-				task.ErrInvalidArgument,
-			)
-		}
+	terminalTestRun, terminalCoverage, err := validateTerminalMutation(mutation)
+	if err != nil {
+		return task.Task{}, nil, err
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -498,7 +468,40 @@ func (s *Store) Apply(ctx context.Context, mutation task.Mutation) (task.Task, [
 		return task.Task{}, nil, storageError("read mutation result", err)
 	}
 	if affected != 1 {
+		if terminalCoverage != nil {
+			replayed, identical, replayErr := equivalentCoverageTerminalReplay(
+				ctx,
+				tx,
+				mutation,
+				*terminalTestRun,
+				*terminalCoverage,
+			)
+			if replayErr != nil {
+				return task.Task{}, nil, replayErr
+			}
+			if identical {
+				return replayed, nil, nil
+			}
+		}
 		return task.Task{}, nil, task.ErrConflict
+	}
+	if terminalCoverage != nil {
+		persisted, readErr := scanCoverageRun(tx.QueryRowContext(
+			ctx,
+			coverageRunSelect+` WHERE coverage_run_id=? AND task_id=? AND test_run_id=?`,
+			terminalCoverage.Run.ID,
+			mutation.Task.ID,
+			terminalTestRun.RunID,
+		))
+		if isNoRows(readErr) {
+			return task.Task{}, nil, task.ErrConflict
+		}
+		if readErr != nil {
+			return task.Task{}, nil, storageError("get CoverageRun for finish", readErr)
+		}
+		if !coverageRunCanComplete(persisted, terminalCoverage.Run, terminalCoverage.Expected) {
+			return task.Task{}, nil, task.ErrConflict
+		}
 	}
 	if err := applyStepMutations(ctx, tx, mutation.Task.ID, mutation.Steps); err != nil {
 		return task.Task{}, nil, err
@@ -536,11 +539,11 @@ func (s *Store) Apply(ctx context.Context, mutation task.Mutation) (task.Task, [
 			)
 		}
 	}
-	if mutation.FinishRun != nil {
+	if terminalTestRun != nil {
 		if err := finishRunTx(
 			ctx,
 			tx,
-			mutation.FinishRun.Clone(),
+			terminalTestRun.Clone(),
 			mutation.Artifacts,
 			false,
 		); err != nil {
@@ -550,14 +553,58 @@ func (s *Store) Apply(ctx context.Context, mutation task.Mutation) (task.Task, [
 			)
 		}
 	}
+	if terminalCoverage != nil {
+		if terminalCoverage.Report != nil {
+			if err := insertCoverageReport(
+				ctx,
+				tx,
+				terminalCoverage.Report.Clone(),
+				terminalCoverage.Run,
+				mutation.Task.ID,
+			); err != nil {
+				return task.Task{}, nil, fmt.Errorf("insert terminal CoverageReport: %w", err)
+			}
+		}
+		if err := finishCoverageRunTx(
+			ctx,
+			tx,
+			terminalCoverage.Run,
+			terminalCoverage.Expected,
+		); err != nil {
+			return task.Task{}, nil, err
+		}
+	}
 	var last int64
 	if len(events) > 0 {
 		last = events[len(events)-1].Sequence
 	} else if err := tx.QueryRowContext(ctx, `SELECT last_sequence FROM tasks WHERE task_id=?`, mutation.Task.ID).Scan(&last); err != nil {
 		return task.Task{}, nil, storageError("read task sequence", err)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE tasks SET last_sequence=? WHERE task_id=?`, last, mutation.Task.ID); err != nil {
+	sequenceResult, err := tx.ExecContext(ctx, `UPDATE tasks SET last_sequence=? WHERE task_id=?`, last, mutation.Task.ID)
+	if err != nil {
 		return task.Task{}, nil, storageError("update task sequence", err)
+	}
+	if terminalCoverage != nil {
+		affected, err := sequenceResult.RowsAffected()
+		if err != nil {
+			return task.Task{}, nil, storageError("read task sequence update result", err)
+		}
+		if affected != 1 {
+			return task.Task{}, nil, task.ErrConflict
+		}
+		coverageSequenceResult, err := tx.ExecContext(ctx, `UPDATE coverage_runs SET last_sequence=?
+			WHERE coverage_run_id=? AND task_id=? AND test_run_id=? AND status='finished'`,
+			last, terminalCoverage.Run.ID, mutation.Task.ID, terminalTestRun.RunID)
+		if err != nil {
+			return task.Task{}, nil, storageError("update CoverageRun sequence", err)
+		}
+		affected, err = coverageSequenceResult.RowsAffected()
+		if err != nil {
+			return task.Task{}, nil, storageError("read CoverageRun sequence update result", err)
+		}
+		if affected != 1 {
+			return task.Task{}, nil, task.ErrConflict
+		}
 	}
 	mutation.Task.LastSequence = last
 	if err := hydrateTaskSteps(ctx, tx, &mutation.Task); err != nil {
@@ -567,6 +614,218 @@ func (s *Store) Apply(ctx context.Context, mutation task.Mutation) (task.Task, [
 		return task.Task{}, nil, storageError("commit mutation", err)
 	}
 	return mutation.Task, events, nil
+}
+
+func validateTerminalMutation(mutation task.Mutation) (*testdomain.TestRun, *task.CoverageCompletion, error) {
+	if mutation.FinishCoverage != nil {
+		if mutation.FinishRun == nil || mutation.Task.Kind != task.KindCoverageRun ||
+			mutation.Task.Status != task.StatusFinished || mutation.Expected == task.StatusFinished ||
+			(mutation.FinishCoverage.Expected != coveragedomain.StatusQueued &&
+				mutation.FinishCoverage.Expected != coveragedomain.StatusRunning) ||
+			!hasTaskFinishedEvent(mutation.Events) {
+			return nil, nil, task.ErrInvalidArgument
+		}
+		run, err := coveragedomain.NewRun(mutation.FinishCoverage.Run.Clone())
+		if err != nil {
+			return nil, nil, task.ErrInvalidArgument
+		}
+		canonicalRequest, err := run.Request.CanonicalJSON()
+		if err != nil || run.Status != coveragedomain.StatusFinished ||
+			run.TaskID != mutation.Task.ID ||
+			run.Request.IdempotencyKey != mutation.Task.IdempotencyKey ||
+			run.Request.WorkspaceGeneration != mutation.Task.WorkspaceGeneration ||
+			run.Request.Timeout != mutation.Task.Timeout ||
+			!bytesEqual(mutation.Task.Request, canonicalRequest) ||
+			!run.CreatedAt.Equal(mutation.Task.CreatedAt) ||
+			mutation.Task.Outcome != task.CoverageTaskOutcome(run.Outcome, run.Reason) {
+			return nil, nil, task.ErrInvalidArgument
+		}
+		testRun, err := testdomain.NewTestRun(mutation.FinishRun.Clone())
+		if err != nil || testRun.Status != testdomain.RunCompleted ||
+			testRun.TaskID != mutation.Task.ID || testRun.RunID != run.TestRunID ||
+			testRun.IdempotencyKey != run.Request.IdempotencyKey ||
+			testRun.ProjectID != run.Request.ProjectID ||
+			testRun.CatalogRevision != run.Request.CatalogRevision ||
+			testRun.Summary.Iterations != run.Request.RepeatCount ||
+			!reflect.DeepEqual(testRun.SelectionSnapshot, run.SelectionSnapshot) ||
+			!testRun.CreatedAt.Equal(run.CreatedAt) {
+			return nil, nil, task.ErrInvalidArgument
+		}
+		if err := validateCoverageArtifacts(run, mutation.Artifacts); err != nil {
+			return nil, nil, err
+		}
+		reportBearing := run.Outcome == coveragedomain.OutcomeAvailable || run.Outcome == coveragedomain.OutcomePartial
+		if reportBearing != (mutation.FinishCoverage.Report != nil) {
+			return nil, nil, task.ErrInvalidArgument
+		}
+		completion := &task.CoverageCompletion{Run: run, Expected: mutation.FinishCoverage.Expected}
+		if mutation.FinishCoverage.Report != nil {
+			report, err := validateCoverageReportForRun(
+				mutation.FinishCoverage.Report.Clone(),
+				run,
+				mutation.Task.ID,
+			)
+			if err != nil {
+				return nil, nil, err
+			}
+			completion.Report = &report
+		}
+		return &testRun, completion, nil
+	}
+	if mutation.FinishRun == nil {
+		if mutation.Task.Kind == task.KindCoverageRun && mutation.Task.Status == task.StatusFinished {
+			return nil, nil, task.ErrInvalidArgument
+		}
+		return nil, nil, nil
+	}
+	if mutation.Task.Kind == task.KindCoverageRun {
+		return nil, nil, task.ErrInvalidArgument
+	}
+	run, err := testdomain.NewTestRun(mutation.FinishRun.Clone())
+	if err != nil {
+		return nil, nil, fmt.Errorf("validate terminal TestRun: %w", task.ErrInvalidArgument)
+	}
+	if run.Status != testdomain.RunCompleted || mutation.Task.Kind != task.KindTestRun ||
+		mutation.Task.Status != task.StatusFinished || run.TaskID != mutation.Task.ID {
+		return nil, nil, fmt.Errorf("match terminal TestRun to Task: %w", task.ErrInvalidArgument)
+	}
+	if err := validateRunArtifacts(run.TaskID, mutation.Artifacts); err != nil {
+		return nil, nil, err
+	}
+	hasRunFinished := false
+	for _, event := range mutation.Events {
+		if event.Type == task.EventTestRunFinished {
+			hasRunFinished = true
+			break
+		}
+	}
+	if !hasRunFinished {
+		return nil, nil, fmt.Errorf("terminal TestRun event is missing: %w", task.ErrInvalidArgument)
+	}
+	return &run, nil, nil
+}
+
+func equivalentCoverageTerminalReplay(
+	ctx context.Context,
+	tx *sql.Tx,
+	mutation task.Mutation,
+	testRun testdomain.TestRun,
+	completion task.CoverageCompletion,
+) (task.Task, bool, error) {
+	persistedTask, err := scanTask(tx.QueryRowContext(ctx, taskSelect+` WHERE task_id=?`, mutation.Task.ID))
+	if isNoRows(err) {
+		return task.Task{}, false, nil
+	}
+	if err != nil {
+		return task.Task{}, false, storageError("read terminal Task replay", err)
+	}
+	if err := hydrateTaskSteps(ctx, tx, &persistedTask); err != nil {
+		return task.Task{}, false, storageError("read terminal Task replay steps", err)
+	}
+	incomingTask := mutation.Task
+	incomingTask.LastSequence = persistedTask.LastSequence
+	persistedSteps := persistedTask.Steps
+	incomingSteps := cloneSteps(incomingTask.Steps)
+	persistedTask.Steps, incomingTask.Steps = nil, nil
+	taskMatches := reflect.DeepEqual(persistedTask, incomingTask) &&
+		equivalentTerminalSteps(persistedSteps, incomingSteps, mutation.Steps, mutation.AppendSteps)
+	persistedTask.Steps = persistedSteps
+	if !taskMatches {
+		return task.Task{}, false, nil
+	}
+	persistedTestRun, err := scanTestRun(tx.QueryRowContext(
+		ctx,
+		testRunSelect+` WHERE run_id=? AND task_id=?`,
+		testRun.RunID,
+		mutation.Task.ID,
+	))
+	if isNoRows(err) {
+		return task.Task{}, false, nil
+	}
+	if err != nil {
+		return task.Task{}, false, storageError("read terminal TestRun replay", err)
+	}
+	if !equivalentFinishedRun(persistedTestRun, testRun) {
+		return task.Task{}, false, nil
+	}
+	equivalentArtifacts, err := runArtifactsEqual(ctx, tx, testRun.RunID, mutation.Artifacts)
+	if err != nil {
+		return task.Task{}, false, err
+	}
+	if !equivalentArtifacts {
+		return task.Task{}, false, nil
+	}
+	persistedRun, err := scanCoverageRun(tx.QueryRowContext(
+		ctx,
+		coverageRunSelect+` WHERE coverage_run_id=? AND task_id=? AND test_run_id=?`,
+		completion.Run.ID,
+		mutation.Task.ID,
+		testRun.RunID,
+	))
+	if isNoRows(err) {
+		return task.Task{}, false, nil
+	}
+	if err != nil {
+		return task.Task{}, false, storageError("read terminal CoverageRun replay", err)
+	}
+	if persistedTask.LastSequence != persistedRun.LastSequence ||
+		!equivalentFinishedCoverageRun(persistedRun, completion.Run) {
+		return task.Task{}, false, nil
+	}
+	if completion.Report != nil {
+		persistedReport, err := scanCoverageReport(tx.QueryRowContext(
+			ctx,
+			coverageReportSelect+` WHERE report_id=? AND coverage_run_id=?`,
+			completion.Report.ID,
+			completion.Run.ID,
+		))
+		if isNoRows(err) {
+			return task.Task{}, false, nil
+		}
+		if err != nil {
+			return task.Task{}, false, storageError("read terminal CoverageReport replay", err)
+		}
+		if !reflect.DeepEqual(persistedReport, *completion.Report) {
+			return task.Task{}, false, nil
+		}
+	} else {
+		var reportCount int
+		if err := tx.QueryRowContext(
+			ctx,
+			`SELECT COUNT(*) FROM coverage_reports WHERE coverage_run_id=?`,
+			completion.Run.ID,
+		).Scan(&reportCount); err != nil {
+			return task.Task{}, false, storageError("count terminal CoverageReport replay", err)
+		}
+		if reportCount != 0 {
+			return task.Task{}, false, nil
+		}
+	}
+	return persistedTask, true, nil
+}
+
+func equivalentTerminalSteps(
+	persisted []task.StepSnapshot,
+	before []task.StepSnapshot,
+	mutations []task.StepMutation,
+	appended []task.StepSnapshot,
+) bool {
+	expected := cloneSteps(before)
+	for _, mutation := range mutations {
+		found := false
+		for index := range expected {
+			if expected[index].ID == mutation.Step.ID {
+				expected[index] = mutation.Step
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	expected = append(expected, cloneSteps(appended)...)
+	return reflect.DeepEqual(persisted, expected)
 }
 
 func validateTask(value task.Task) error {

@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"time"
 
@@ -242,6 +243,69 @@ func insertCoverageRun(ctx context.Context, tx *sql.Tx, value coveragedomain.Run
 		return storageError("insert CoverageRun", err)
 	}
 	return nil
+}
+
+func finishCoverageRunTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	run coveragedomain.Run,
+	expected coveragedomain.Status,
+) error {
+	var summaryJSON any
+	if run.Summary != nil {
+		encoded, err := json.Marshal(summaryWireFrom(*run.Summary))
+		if err != nil {
+			return task.ErrInvalidArgument
+		}
+		summaryJSON = string(encoded)
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE coverage_runs SET
+		status=?, outcome=?, reason=?, summary_json=?, report_id=?,
+		coverage_json_artifact_id=?, junit_xml_artifact_id=?,
+		coverage_html_artifact_id=?, started_at=?, finished_at=?
+		WHERE coverage_run_id=? AND task_id=? AND test_run_id=? AND status=?`,
+		string(run.Status), nullableCoverageString(string(run.Outcome)), nullableCoverageString(string(run.Reason)),
+		summaryJSON, nullableCoverageString(run.ReportID), nullableCoverageString(run.Artifacts.CoverageJSONID),
+		nullableCoverageString(run.Artifacts.JUnitXMLID), nullableCoverageString(run.Artifacts.CoverageHTMLID),
+		nullableCoverageTime(run.StartedAt), nullableCoverageTime(run.FinishedAt),
+		run.ID, run.TaskID, run.TestRunID, string(expected),
+	)
+	if err != nil {
+		return storageError("finish CoverageRun", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return storageError("read CoverageRun finish result", err)
+	}
+	if affected != 1 {
+		return task.ErrConflict
+	}
+	return nil
+}
+
+func coverageRunCanComplete(
+	persisted coveragedomain.Run,
+	terminal coveragedomain.Run,
+	expected coveragedomain.Status,
+) bool {
+	if persisted.Status != expected || terminal.Status != coveragedomain.StatusFinished ||
+		persisted.ID != terminal.ID || persisted.TaskID != terminal.TaskID ||
+		persisted.TestRunID != terminal.TestRunID ||
+		!reflect.DeepEqual(persisted.Request, terminal.Request) ||
+		!reflect.DeepEqual(persisted.SelectionSnapshot, terminal.SelectionSnapshot) ||
+		!reflect.DeepEqual(persisted.Toolchain, terminal.Toolchain) ||
+		!persisted.CreatedAt.Equal(terminal.CreatedAt) || persisted.LastSequence != terminal.LastSequence {
+		return false
+	}
+	if expected == coveragedomain.StatusRunning {
+		return persisted.StartedAt != nil && terminal.StartedAt != nil && persisted.StartedAt.Equal(*terminal.StartedAt)
+	}
+	return expected == coveragedomain.StatusQueued
+}
+
+func equivalentFinishedCoverageRun(first, second coveragedomain.Run) bool {
+	second.LastSequence = first.LastSequence
+	return reflect.DeepEqual(first, second)
 }
 
 func scanCoverageRun(row rowScanner) (coveragedomain.Run, error) {

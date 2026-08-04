@@ -37,6 +37,15 @@ func validEventDraft(value task.EventDraft) bool {
 		json.Valid(value.Payload)
 }
 
+func hasTaskFinishedEvent(drafts []task.EventDraft) bool {
+	for _, draft := range drafts {
+		if draft.Type == task.EventTaskFinished {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Store) AppendEvent(ctx context.Context, taskID string, draft task.EventDraft) (task.Event, error) {
 	if taskID == "" || draft.TaskID != taskID || !validEventDraft(draft) {
 		return task.Event{}, task.ErrInvalidArgument

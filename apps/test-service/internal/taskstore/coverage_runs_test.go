@@ -271,6 +271,351 @@ func TestCoverageRunCorruptRowsReturnStorageUnavailable(t *testing.T) {
 	}
 }
 
+func TestCoverageCompletionPersistsAggregateAtomically(t *testing.T) {
+	ctx := context.Background()
+	for index, outcome := range []coveragedomain.Outcome{
+		coveragedomain.OutcomeAvailable,
+		coveragedomain.OutcomePartial,
+	} {
+		t.Run(string(outcome), func(t *testing.T) {
+			store := openTestStore(t)
+			mutation := coverageCompletionFixture(t, store, 200+index, outcome, "")
+			finished, events, err := store.Apply(ctx, mutation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			persistedRun, err := store.GetCoverageRun(ctx, mutation.FinishCoverage.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			persistedTestRun, err := store.GetRun(ctx, mutation.FinishRun.RunID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if finished.Status != task.StatusFinished || persistedTestRun.Status != testdomain.RunCompleted ||
+				persistedRun.Status != coveragedomain.StatusFinished || len(events) != 1 ||
+				finished.LastSequence != events[0].Sequence || persistedRun.LastSequence != events[0].Sequence {
+				t.Fatalf("terminal aggregate = task %#v, run %#v, test %#v, events %#v", finished, persistedRun, persistedTestRun, events)
+			}
+			for _, artifact := range mutation.Artifacts {
+				got, err := store.GetArtifact(ctx, artifact.ID)
+				if err != nil || !reflect.DeepEqual(got, artifact) {
+					t.Fatalf("GetArtifact(%s) = %#v, %v; want %#v", artifact.ID, got, err, artifact)
+				}
+			}
+			var reports, links int
+			if err := store.db.QueryRow(`SELECT COUNT(*) FROM coverage_reports WHERE coverage_run_id=?`, persistedRun.ID).Scan(&reports); err != nil || reports != 1 {
+				t.Fatalf("report count = %d, %v", reports, err)
+			}
+			if err := store.db.QueryRow(`SELECT COUNT(*) FROM test_run_artifacts WHERE run_id=?`, persistedTestRun.RunID).Scan(&links); err != nil || links != 3 {
+				t.Fatalf("artifact links = %d, %v", links, err)
+			}
+		})
+	}
+}
+
+func TestCoverageCompletionAdvancesRunningAggregate(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	mutation := coverageCompletionFixture(t, store, 220, coveragedomain.OutcomeAvailable, "")
+	queued := mutation.Task
+	queued.Status, queued.Outcome, queued.FinishedAt = task.StatusQueued, "", nil
+	startedAt := queued.CreatedAt.Add(time.Second)
+	running := mustTransition(t, queued, task.Transition{From: task.StatusQueued, To: task.StatusRunning, At: startedAt})
+	running, _, err := store.Apply(ctx, task.Mutation{
+		Task: running, Expected: task.StatusQueued,
+		Events: []task.EventDraft{draft(running.ID, task.EventTaskStarted, startedAt)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE coverage_runs SET status='running', started_at=? WHERE coverage_run_id=?`, formatCoverageTime(startedAt), mutation.FinishCoverage.Run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StartRun(ctx, mutation.FinishRun.RunID, startedAt); err != nil {
+		t.Fatal(err)
+	}
+	mutation.Task = mustTransition(t, running, task.Transition{From: task.StatusRunning, To: task.StatusFinished, Outcome: task.OutcomeSucceeded, At: *mutation.Task.FinishedAt})
+	mutation.Expected = task.StatusRunning
+	mutation.FinishCoverage.Expected = coveragedomain.StatusRunning
+	mutation.FinishCoverage.Run.StartedAt = ptrTime(startedAt)
+	mutation.FinishRun.StartedAt = ptrTime(startedAt)
+	finished, events, err := store.Apply(ctx, mutation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := store.GetCoverageRun(ctx, mutation.FinishCoverage.Run.ID)
+	if err != nil || persisted.StartedAt == nil || !persisted.StartedAt.Equal(startedAt) ||
+		persisted.LastSequence != finished.LastSequence || len(events) != 1 {
+		t.Fatalf("running completion = task %#v, run %#v, events %#v, err %v", finished, persisted, events, err)
+	}
+}
+
+func TestCoverageCompletionRejectsMismatchedTerminalGraph(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name   string
+		mutate func(*task.Mutation)
+	}{
+		{name: "wrong report run", mutate: func(m *task.Mutation) { m.FinishCoverage.Report.RunID = coverageHex(9910) }},
+		{name: "wrong report test run", mutate: func(m *task.Mutation) { m.FinishCoverage.Report.TestRunID = coverageHex(9911) }},
+		{name: "wrong coverage run owner", mutate: func(m *task.Mutation) { m.FinishCoverage.Run.TaskID = coverageHex(9908) }},
+		{name: "wrong coverage test run", mutate: func(m *task.Mutation) { m.FinishCoverage.Run.TestRunID = coverageHex(9909) }},
+		{name: "wrong report ID", mutate: func(m *task.Mutation) { m.FinishCoverage.Report.ID = coverageHex(9912) }},
+		{name: "wrong report summary", mutate: func(m *task.Mutation) { m.FinishCoverage.Report.Summary.Lines.Covered-- }},
+		{name: "wrong report toolchain", mutate: func(m *task.Mutation) { m.FinishCoverage.Report.Toolchain = coverageToolchain(999) }},
+		{name: "wrong completeness", mutate: func(m *task.Mutation) {
+			m.FinishCoverage.Report.Completeness = coveragedomain.Completeness{Outcome: coveragedomain.OutcomePartial, Reasons: []coveragedomain.CompletenessReason{coveragedomain.CompletenessReasonTestCrashed}}
+		}},
+		{name: "wrong report artifact", mutate: func(m *task.Mutation) { m.FinishCoverage.Report.ArtifactID = m.FinishCoverage.Run.Artifacts.JUnitXMLID }},
+		{name: "missing coverage JSON ref", mutate: func(m *task.Mutation) { m.FinishCoverage.Run.Artifacts.CoverageJSONID = "" }},
+		{name: "missing JUnit XML ref", mutate: func(m *task.Mutation) { m.FinishCoverage.Run.Artifacts.JUnitXMLID = "" }},
+		{name: "missing coverage HTML ref", mutate: func(m *task.Mutation) { m.FinishCoverage.Run.Artifacts.CoverageHTMLID = "" }},
+		{name: "report before run", mutate: func(m *task.Mutation) {
+			m.FinishCoverage.Report.CreatedAt = m.FinishCoverage.Run.CreatedAt.Add(-time.Nanosecond)
+		}},
+		{name: "report after run", mutate: func(m *task.Mutation) {
+			m.FinishCoverage.Report.CreatedAt = m.FinishCoverage.Run.FinishedAt.Add(time.Nanosecond)
+		}},
+		{name: "missing report", mutate: func(m *task.Mutation) { m.FinishCoverage.Report = nil }},
+		{name: "wrong task outcome", mutate: func(m *task.Mutation) { m.Task.Outcome = task.OutcomeInfrastructureFailed }},
+		{name: "missing task finished event", mutate: func(m *task.Mutation) { m.Events = nil }},
+		{name: "coverage without test completion", mutate: func(m *task.Mutation) { m.FinishRun = nil }},
+		{name: "coverage task finished without aggregate completion", mutate: func(m *task.Mutation) {
+			m.FinishRun, m.FinishCoverage = nil, nil
+		}},
+		{name: "nonterminal test run", mutate: func(m *task.Mutation) {
+			m.FinishRun.Status = testdomain.RunQueued
+			m.FinishRun.Outcome = ""
+			m.FinishRun.FinishedAt = nil
+		}},
+		{name: "wrong test run identity", mutate: func(m *task.Mutation) { m.FinishRun.RunID = coverageHex(9913) }},
+		{name: "terminal test run without coverage", mutate: func(m *task.Mutation) { m.FinishCoverage = nil }},
+		{name: "unavailable with report", mutate: func(m *task.Mutation) {
+			m.FinishCoverage.Run.Outcome, m.FinishCoverage.Run.Reason = coveragedomain.OutcomeUnavailable, coveragedomain.ReasonBuildFailed
+			m.FinishCoverage.Run.Summary, m.FinishCoverage.Run.ReportID, m.FinishCoverage.Run.Artifacts = nil, "", coveragedomain.ArtifactRefs{}
+			m.Task.Outcome = task.OutcomeCommandFailed
+		}},
+		{name: "unavailable with summary", mutate: func(m *task.Mutation) {
+			m.FinishCoverage.Run.Outcome, m.FinishCoverage.Run.Reason = coveragedomain.OutcomeUnavailable, coveragedomain.ReasonBuildFailed
+			m.FinishCoverage.Run.ReportID, m.FinishCoverage.Run.Artifacts = "", coveragedomain.ArtifactRefs{}
+			m.FinishCoverage.Report, m.Artifacts, m.Task.Outcome = nil, nil, task.OutcomeCommandFailed
+		}},
+		{name: "unavailable with public artifacts", mutate: func(m *task.Mutation) {
+			m.FinishCoverage.Run.Outcome, m.FinishCoverage.Run.Reason = coveragedomain.OutcomeUnavailable, coveragedomain.ReasonBuildFailed
+			m.FinishCoverage.Run.Summary, m.FinishCoverage.Run.ReportID, m.FinishCoverage.Run.Artifacts = nil, "", coveragedomain.ArtifactRefs{}
+			m.FinishCoverage.Report, m.Task.Outcome = nil, task.OutcomeCommandFailed
+		}},
+	}
+	for index, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := openTestStore(t)
+			mutation := coverageCompletionFixture(t, store, 230+index, coveragedomain.OutcomeAvailable, "")
+			before, _ := store.Watermark(ctx)
+			coverageRunID, testRunID := mutation.FinishCoverage.Run.ID, mutation.FinishRun.RunID
+			tc.mutate(&mutation)
+			if _, _, err := store.Apply(ctx, mutation); !errors.Is(err, task.ErrInvalidArgument) {
+				t.Fatalf("Apply() error = %v", err)
+			}
+			assertCoverageTerminalRolledBack(t, store, mutation.Task.ID, coverageRunID, testRunID, before)
+		})
+	}
+}
+
+func TestCoverageTerminalReplayIsIdempotentAndImmutable(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	mutation := coverageCompletionFixture(t, store, 260, coveragedomain.OutcomeAvailable, "")
+	finishedStep := mutation.Task.Steps[0]
+	finishedStep.Status = task.StepSucceeded
+	finishedStep.FinishedAt = mutation.Task.FinishedAt
+	mutation.Steps = []task.StepMutation{{Step: finishedStep, Expected: task.StepPending}}
+	first, events, err := store.Apply(ctx, mutation)
+	if err != nil || len(events) != 1 {
+		t.Fatalf("first Apply() = %#v, %#v, %v", first, events, err)
+	}
+	before := coverageTerminalCounts(t, store)
+	beforeTask, _ := store.Get(ctx, mutation.Task.ID)
+	beforeRun, _ := store.GetCoverageRun(ctx, mutation.FinishCoverage.Run.ID)
+	beforeTestRun, _ := store.GetRun(ctx, mutation.FinishRun.RunID)
+	beforeReport, _ := store.GetCoverageReport(ctx, mutation.FinishCoverage.Report.ID)
+	replayed, replayEvents, err := store.Apply(ctx, mutation)
+	if err != nil || len(replayEvents) != 0 || !reflect.DeepEqual(replayed, first) {
+		t.Fatalf("identical replay = %#v, %#v, %v; want %#v", replayed, replayEvents, err, first)
+	}
+	if after := coverageTerminalCounts(t, store); !reflect.DeepEqual(after, before) {
+		t.Fatalf("counts after replay = %v, want %v", after, before)
+	}
+
+	changed := mutation
+	changed.Task = mutation.Task
+	changed.Task.StartedAt = ptrTime(changed.Task.CreatedAt.Add(time.Second))
+	changed.Expected = task.StatusRunning
+	changed.FinishCoverage = &task.CoverageCompletion{Run: mutation.FinishCoverage.Run.Clone(), Expected: coveragedomain.StatusRunning, Report: ptrReport(mutation.FinishCoverage.Report.Clone())}
+	changed.FinishCoverage.Run.StartedAt = ptrTime(changed.Task.CreatedAt.Add(time.Second))
+	changed.FinishCoverage.Run.Outcome = coveragedomain.OutcomePartial
+	changed.FinishCoverage.Report.Completeness = coveragedomain.Completeness{Outcome: coveragedomain.OutcomePartial, Reasons: []coveragedomain.CompletenessReason{coveragedomain.CompletenessReasonTestCrashed}}
+	if _, _, err := store.Apply(ctx, changed); !errors.Is(err, task.ErrConflict) {
+		t.Fatalf("changed replay error = %v", err)
+	}
+	if after := coverageTerminalCounts(t, store); !reflect.DeepEqual(after, before) {
+		t.Fatalf("counts after changed replay = %v, want %v", after, before)
+	}
+	afterTask, _ := store.Get(ctx, mutation.Task.ID)
+	afterRun, _ := store.GetCoverageRun(ctx, mutation.FinishCoverage.Run.ID)
+	afterTestRun, _ := store.GetRun(ctx, mutation.FinishRun.RunID)
+	afterReport, _ := store.GetCoverageReport(ctx, mutation.FinishCoverage.Report.ID)
+	if !reflect.DeepEqual(afterTask, beforeTask) || !reflect.DeepEqual(afterRun, beforeRun) ||
+		!reflect.DeepEqual(afterTestRun, beforeTestRun) || !reflect.DeepEqual(afterReport, beforeReport) {
+		t.Fatalf("durable terminal graph changed after conflict")
+	}
+}
+
+func TestCoverageCompletionFaultsRollBackEveryTerminalRow(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct{ name, trigger string }{
+		{name: "final event", trigger: `CREATE TRIGGER reject_coverage_terminal BEFORE INSERT ON task_events BEGIN SELECT RAISE(ABORT, 'event'); END`},
+		{name: "artifact metadata", trigger: `CREATE TRIGGER reject_coverage_terminal BEFORE INSERT ON artifacts BEGIN SELECT RAISE(ABORT, 'artifact'); END`},
+		{name: "artifact link", trigger: `CREATE TRIGGER reject_coverage_terminal BEFORE INSERT ON test_run_artifacts BEGIN SELECT RAISE(ABORT, 'link'); END`},
+		{name: "test run", trigger: `CREATE TRIGGER reject_coverage_terminal BEFORE UPDATE OF status ON test_runs WHEN NEW.status='completed' BEGIN SELECT RAISE(ABORT, 'test-run'); END`},
+		{name: "report", trigger: `CREATE TRIGGER reject_coverage_terminal BEFORE INSERT ON coverage_reports BEGIN SELECT RAISE(ABORT, 'report'); END`},
+		{name: "coverage run", trigger: `CREATE TRIGGER reject_coverage_terminal BEFORE UPDATE OF status ON coverage_runs WHEN NEW.status='finished' BEGIN SELECT RAISE(ABORT, 'coverage-run'); END`},
+	}
+	for index, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := openTestStore(t)
+			mutation := coverageCompletionFixture(t, store, 280+index, coveragedomain.OutcomeAvailable, "")
+			before, _ := store.Watermark(ctx)
+			if _, err := store.db.Exec(tc.trigger); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := store.Apply(ctx, mutation); !errors.Is(err, task.ErrStorageUnavailable) {
+				t.Fatalf("Apply() error = %v", err)
+			}
+			assertCoverageTerminalRolledBack(t, store, mutation.Task.ID, mutation.FinishCoverage.Run.ID, mutation.FinishRun.RunID, before)
+			if violations := foreignKeyViolations(t, store.db); violations != 0 {
+				t.Fatalf("foreign key violations = %d", violations)
+			}
+		})
+	}
+}
+
+func TestCoverageTerminalUnavailableAndCancelledReasonsAreImmutable(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		outcome         coveragedomain.Outcome
+		reason, changed coveragedomain.Reason
+	}{
+		{coveragedomain.OutcomeUnavailable, coveragedomain.ReasonBuildFailed, coveragedomain.ReasonInstrumentationFailed},
+		{coveragedomain.OutcomeCancelled, coveragedomain.ReasonUserCancelled, coveragedomain.ReasonTaskTimedOut},
+	}
+	for index, tc := range cases {
+		t.Run(string(tc.outcome), func(t *testing.T) {
+			store := openTestStore(t)
+			mutation := coverageCompletionFixture(t, store, 400+index, tc.outcome, tc.reason)
+			first, _, err := store.Apply(ctx, mutation)
+			if err != nil || len(mutation.Artifacts) != 0 || mutation.FinishCoverage.Report != nil {
+				t.Fatalf("Apply() = %#v, %v", first, err)
+			}
+			persisted, err := store.GetCoverageRun(ctx, mutation.FinishCoverage.Run.ID)
+			if err != nil || persisted.Reason != tc.reason {
+				t.Fatalf("persisted reason = %q, %v", persisted.Reason, err)
+			}
+			changed := mutation
+			changed.Task = mutation.Task
+			changed.FinishCoverage = &task.CoverageCompletion{Run: mutation.FinishCoverage.Run.Clone(), Expected: mutation.FinishCoverage.Expected}
+			changed.FinishCoverage.Run.Reason = tc.changed
+			changed.Task.Outcome = task.CoverageTaskOutcome(tc.outcome, tc.changed)
+			if _, _, err := store.Apply(ctx, changed); !errors.Is(err, task.ErrConflict) {
+				t.Fatalf("changed reason replay error = %v", err)
+			}
+			again, _ := store.GetCoverageRun(ctx, mutation.FinishCoverage.Run.ID)
+			if again.Reason != tc.reason {
+				t.Fatalf("reason changed to %q", again.Reason)
+			}
+			if _, err := store.GetCoverageReport(ctx, coverageHex(9997)); !errors.Is(err, task.ErrNotFound) {
+				t.Fatalf("unexpected report error = %v", err)
+			}
+		})
+	}
+}
+
+func coverageCompletionFixture(t *testing.T, store *Store, seed int, outcome coveragedomain.Outcome, reason coveragedomain.Reason) task.Mutation {
+	t.Helper()
+	input, steps, event, run, testRun := coverageCreationFixture(t, seed)
+	created, _, err := store.CreateCoverageTask(context.Background(), input, steps, event, run, testRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finishedAt := created.CreatedAt.Add(2 * time.Second)
+	run.Status, run.Outcome, run.Reason = coveragedomain.StatusFinished, outcome, reason
+	run.LastSequence = created.LastSequence
+	run.FinishedAt = ptrTime(finishedAt)
+	if outcome == coveragedomain.OutcomeAvailable || outcome == coveragedomain.OutcomePartial {
+		run.Summary = &coveragedomain.Summary{Lines: coveragedomain.Metric{Covered: 8, Total: 10}, Branches: coveragedomain.Metric{Covered: 3, Total: 4}, Functions: coveragedomain.Metric{Covered: 1, Total: 1}}
+		run.ReportID = coverageHex(5000 + seed)
+		run.Artifacts = coveragedomain.ArtifactRefs{CoverageJSONID: coverageHex(6000 + seed), JUnitXMLID: coverageHex(7000 + seed), CoverageHTMLID: coverageHex(8000 + seed)}
+	}
+	run = validCoverageRun(t, run)
+	testRun.Status, testRun.Outcome = testdomain.RunCompleted, testdomain.RunPassed
+	testRun.FinishedAt = ptrTime(finishedAt)
+	validatedTestRun, err := testdomain.NewTestRun(testRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminalTask := mustTransition(t, created, task.Transition{From: task.StatusQueued, To: task.StatusFinished, Outcome: task.CoverageTaskOutcome(outcome, reason), At: finishedAt})
+	completion := &task.CoverageCompletion{Run: run, Expected: coveragedomain.StatusQueued}
+	artifacts := []task.Artifact(nil)
+	if run.Summary != nil {
+		report := coverageReportFixture(t, run)
+		completion.Report = &report
+		artifacts = coverageArtifactsFixture(run)
+	}
+	return task.Mutation{Task: terminalTask, Expected: task.StatusQueued, Events: []task.EventDraft{draft(created.ID, task.EventTaskFinished, finishedAt)}, Artifacts: artifacts, FinishRun: &validatedTestRun, FinishCoverage: completion}
+}
+
+func ptrReport(value coveragedomain.Report) *coveragedomain.Report { return &value }
+
+func coverageTerminalCounts(t *testing.T, store *Store) []int {
+	t.Helper()
+	result := make([]int, 0, 5)
+	for _, table := range []string{"task_events", "artifacts", "test_run_artifacts", "coverage_reports", "coverage_runs"} {
+		var count int
+		if err := store.db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		result = append(result, count)
+	}
+	return result
+}
+
+func assertCoverageTerminalRolledBack(t *testing.T, store *Store, taskID, coverageRunID, testRunID string, watermark int64) {
+	t.Helper()
+	ctx := context.Background()
+	if current, err := store.Get(ctx, taskID); err != nil || current.Status != task.StatusQueued || current.LastSequence != watermark {
+		t.Fatalf("Task after rejection = %#v, %v", current, err)
+	}
+	if coverageRunID != "" {
+		if current, err := store.GetCoverageRun(ctx, coverageRunID); err != nil || current.Status != coveragedomain.StatusQueued || current.LastSequence != watermark {
+			t.Fatalf("CoverageRun after rejection = %#v, %v", current, err)
+		}
+	}
+	if testRunID != "" {
+		if current, err := store.GetRun(ctx, testRunID); err != nil || current.Status != testdomain.RunQueued {
+			t.Fatalf("TestRun after rejection = %#v, %v", current, err)
+		}
+	}
+	for _, table := range []string{"coverage_reports", "artifacts", "test_run_artifacts"} {
+		var count int
+		if err := store.db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("%s count = %d, %v; want 0", table, count, err)
+		}
+	}
+	if got, err := store.Watermark(ctx); err != nil || got != watermark {
+		t.Fatalf("watermark = %d, %v; want %d", got, err, watermark)
+	}
+}
+
 func insertCoverageRunForTest(t *testing.T, store *Store, run coveragedomain.Run) {
 	t.Helper()
 	if _, err := store.db.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
