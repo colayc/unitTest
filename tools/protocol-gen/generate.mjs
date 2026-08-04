@@ -720,6 +720,7 @@ try {
           ], "Unable to create v1.4 event template");
           assertContainsAll(typescriptEventV14, [
             "diagnostic: DiagnosticV14;",
+            "outcome: TaskOutcomeV14;",
             "result: TestItemResult;",
             "outcome: TestRunOutcomeV14; summary: TestRunSummaryV14;",
             "completeness: CoverageCompletenessV14; summary: CoverageSummaryV14;",
