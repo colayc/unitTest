@@ -108,6 +108,9 @@ func TestCreateCoverageTaskRejectsInvalidAlignmentWithoutRows(t *testing.T) {
 		{"test run iterations", func(_ *task.Task, _ *[]task.StepSnapshot, _ *task.EventDraft, _ *coveragedomain.Run, run *testdomain.TestRun) {
 			run.Summary.Iterations++
 		}},
+		{"test run nonzero queued summary", func(_ *task.Task, _ *[]task.StepSnapshot, _ *task.EventDraft, _ *coveragedomain.Run, run *testdomain.TestRun) {
+			run.Summary.Total, run.Summary.Completed, run.Summary.Passed = 1, 1, 1
+		}},
 		{"test run status", func(_ *task.Task, _ *[]task.StepSnapshot, _ *task.EventDraft, _ *coveragedomain.Run, run *testdomain.TestRun) {
 			run.Status = testdomain.RunRunning
 			now := run.CreatedAt.Add(time.Second)
@@ -136,6 +139,9 @@ func TestCreateCoverageTaskRejectsInvalidAlignmentWithoutRows(t *testing.T) {
 				t.Fatalf("CreateCoverageTask() error = %v", err)
 			}
 			assertCoverageCreationAbsent(t, store, input.ID, run.ID, testRun.RunID, input.Request)
+			if watermark, err := store.Watermark(ctx); err != nil || watermark != 0 {
+				t.Fatalf("invalid create watermark = %d, %v; want 0", watermark, err)
+			}
 		})
 	}
 }

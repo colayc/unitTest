@@ -186,6 +186,7 @@ func validateCoverageTaskCreation(
 		event.TaskID != input.ID || event.Type != task.EventTaskCreated || !validEventDraft(event) ||
 		run.Status != coveragedomain.StatusQueued || run.LastSequence != 0 ||
 		testRun.Status != testdomain.RunQueued || len(testRun.Results) != 0 ||
+		!zeroQueuedTestRunSummary(testRun.Summary) ||
 		run.TaskID != input.ID || testRun.TaskID != input.ID || run.TestRunID != testRun.RunID ||
 		run.Request.IdempotencyKey != input.IdempotencyKey || run.Request.IdempotencyKey != testRun.IdempotencyKey ||
 		run.Request.WorkspaceGeneration != input.WorkspaceGeneration ||
@@ -202,6 +203,12 @@ func validateCoverageTaskCreation(
 		return task.ErrInvalidArgument
 	}
 	return nil
+}
+
+func zeroQueuedTestRunSummary(value testdomain.RunSummary) bool {
+	return value.Total == 0 && value.Completed == 0 && value.Passed == 0 &&
+		value.Failed == 0 && value.Skipped == 0 && value.Errored == 0 &&
+		value.Cancelled == 0 && value.TimedOut == 0 && value.NotRun == 0
 }
 
 func validCoverageSteps(steps []task.StepSnapshot) bool {
