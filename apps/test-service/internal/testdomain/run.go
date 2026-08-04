@@ -329,6 +329,10 @@ func newSelectionSnapshot(value SelectionSnapshot) (SelectionSnapshot, error) {
 	return result, nil
 }
 
+func NewSelectionSnapshot(value SelectionSnapshot) (SelectionSnapshot, error) {
+	return newSelectionSnapshot(value)
+}
+
 func strictlySortedIDs(values []ID) bool {
 	for index, value := range values {
 		if !ValidID(value) || index > 0 && values[index-1] >= value {
