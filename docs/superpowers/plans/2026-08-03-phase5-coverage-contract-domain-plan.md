@@ -281,6 +281,8 @@ git commit -m "feat: define protocol v1.4 coverage contracts"
 
 ### Task 4：Go CoverageRun/Report domain 与 validation
 
+**详细实施计划：** [2026-08-04-coverage-run-report-domain-plan.md](./2026-08-04-coverage-run-report-domain-plan.md)
+
 **文件：**
 
 - 创建：`apps/test-service/internal/coveragedomain/model.go`
