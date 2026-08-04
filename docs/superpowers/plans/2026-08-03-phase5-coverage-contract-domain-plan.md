@@ -340,6 +340,8 @@ git commit -m "feat: model coverage runs and reports"
 
 ### Task 5：SQLite migration 009、repositories 与 atomic creation
 
+**详细实施计划：** [2026-08-04-coverage-run-persistence-plan.md](./2026-08-04-coverage-run-persistence-plan.md)
+
 **文件：**
 
 - 创建：`apps/test-service/internal/taskstore/migrations/009_coverage_runs.sql`
