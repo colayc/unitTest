@@ -179,6 +179,31 @@ func TestCoverageRunFractionalTimestampPaging(t *testing.T) {
 	}
 }
 
+func TestCoverageRunNonCanonicalTimestampRowsReturnStorageUnavailable(t *testing.T) {
+	ctx := context.Background()
+	for _, column := range []string{"created_at", "started_at", "finished_at"} {
+		t.Run(column, func(t *testing.T) {
+			store := openTestStore(t)
+			run := coverageRunFixture(t, 80, time.Date(2026, 8, 4, 13, 0, 0, 0, time.UTC), coveragedomain.StatusFinished, coveragedomain.OutcomeAvailable, "")
+			insertCoverageRunForTest(t, store, run)
+			value := map[string]string{
+				"created_at":  "2026-08-04T13:00:00Z",
+				"started_at":  "2026-08-04T13:00:01Z",
+				"finished_at": "2026-08-04T13:00:02Z",
+			}[column]
+			if _, err := store.db.Exec(`UPDATE coverage_runs SET `+column+`=? WHERE coverage_run_id=?`, value, run.ID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.GetCoverageRun(ctx, run.ID); !errors.Is(err, task.ErrStorageUnavailable) {
+				t.Fatalf("GetCoverageRun non-canonical %s error = %v", column, err)
+			}
+			if _, err := store.ListCoverageRuns(ctx, coveragedomain.RunPageRequest{WorkspaceGeneration: run.Request.WorkspaceGeneration}); !errors.Is(err, task.ErrStorageUnavailable) {
+				t.Fatalf("ListCoverageRuns non-canonical %s error = %v", column, err)
+			}
+		})
+	}
+}
+
 func TestCoverageRunCursorAndArgumentValidation(t *testing.T) {
 	ctx := context.Background()
 	var nilStore *Store

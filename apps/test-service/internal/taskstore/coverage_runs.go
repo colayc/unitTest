@@ -421,7 +421,7 @@ func nullableCoverageTime(value *time.Time) any {
 
 func parseCoverageTime(value string) (time.Time, error) {
 	parsed, err := time.Parse(time.RFC3339Nano, value)
-	if err != nil || parsed.IsZero() || !strings.HasSuffix(value, "Z") || parsed.Location() != time.UTC {
+	if err != nil || parsed.IsZero() || !strings.HasSuffix(value, "Z") || parsed.Location() != time.UTC || value != formatCoverageTime(parsed) {
 		return time.Time{}, errors.New("invalid CoverageRun timestamp")
 	}
 	return parsed, nil
