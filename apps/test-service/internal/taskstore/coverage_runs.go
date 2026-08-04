@@ -24,6 +24,8 @@ const coverageRunSelect = `SELECT
 	finished_at, last_sequence
 	FROM coverage_runs`
 
+const coverageTimeLayout = "2006-01-02T15:04:05.000000000Z"
+
 // coverageRunCursor deliberately binds a cursor to the complete history scope.
 type coverageRunCursor struct {
 	WorkspaceGeneration string    `json:"workspaceGeneration"`
@@ -160,7 +162,7 @@ func (s *Store) ListCoverageRuns(ctx context.Context, request coveragedomain.Run
 	}
 	if request.Cursor != "" {
 		conditions = append(conditions, "(created_at < ? OR (created_at = ? AND coverage_run_id < ?))")
-		args = append(args, formatTime(cursor.CreatedAt), formatTime(cursor.CreatedAt), cursor.CoverageRunID)
+		args = append(args, formatCoverageTime(cursor.CreatedAt), formatCoverageTime(cursor.CreatedAt), cursor.CoverageRunID)
 	}
 	query := coverageRunSelect + " WHERE " + strings.Join(conditions, " AND ") + " ORDER BY created_at DESC, coverage_run_id DESC LIMIT ?"
 	args = append(args, limit+1)
@@ -234,7 +236,7 @@ func insertCoverageRun(ctx context.Context, tx *sql.Tx, value coveragedomain.Run
 		nullableCoverageString(string(run.Outcome)), nullableCoverageString(string(run.Reason)), string(toolchainJSON), summaryJSON,
 		nullableCoverageString(run.ReportID), nullableCoverageString(run.Artifacts.CoverageJSONID),
 		nullableCoverageString(run.Artifacts.JUnitXMLID), nullableCoverageString(run.Artifacts.CoverageHTMLID),
-		formatTime(run.CreatedAt), nullableTime(run.StartedAt), nullableTime(run.FinishedAt), run.LastSequence,
+		formatCoverageTime(run.CreatedAt), nullableCoverageTime(run.StartedAt), nullableCoverageTime(run.FinishedAt), run.LastSequence,
 	)
 	if err != nil {
 		return storageError("insert CoverageRun", err)
@@ -404,6 +406,17 @@ func nullableCoverageString(value string) any {
 		return nil
 	}
 	return value
+}
+
+func formatCoverageTime(value time.Time) string {
+	return value.UTC().Format(coverageTimeLayout)
+}
+
+func nullableCoverageTime(value *time.Time) any {
+	if value == nil {
+		return nil
+	}
+	return formatCoverageTime(*value)
 }
 
 func parseCoverageTime(value string) (time.Time, error) {

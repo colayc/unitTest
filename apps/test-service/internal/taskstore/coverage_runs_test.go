@@ -135,6 +135,50 @@ func TestCoverageRunListAndCursor(t *testing.T) {
 	}
 }
 
+func TestCoverageRunFractionalTimestampPaging(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	base := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
+	runs := []coveragedomain.Run{
+		coverageRunFixture(t, 70, base, coveragedomain.StatusQueued, "", ""),
+		coverageRunFixture(t, 71, base.Add(time.Nanosecond), coveragedomain.StatusQueued, "", ""),
+		coverageRunFixture(t, 72, base.Add(100*time.Millisecond), coveragedomain.StatusQueued, "", ""),
+		coverageRunFixture(t, 73, base.Add(900*time.Millisecond), coveragedomain.StatusQueued, "", ""),
+	}
+	for _, run := range runs {
+		insertCoverageRunForTest(t, store, run)
+	}
+	for _, run := range runs {
+		var stored string
+		if err := store.db.QueryRow(`SELECT created_at FROM coverage_runs WHERE coverage_run_id=?`, run.ID).Scan(&stored); err != nil {
+			t.Fatal(err)
+		}
+		if want := run.CreatedAt.UTC().Format("2006-01-02T15:04:05.000000000Z"); stored != want {
+			t.Fatalf("stored timestamp = %q, want fixed-width %q", stored, want)
+		}
+	}
+	sort.Slice(runs, func(i, j int) bool { return runs[i].CreatedAt.After(runs[j].CreatedAt) })
+	request := coveragedomain.RunPageRequest{WorkspaceGeneration: runs[0].Request.WorkspaceGeneration, Limit: 1}
+	var got []string
+	for {
+		page, err := store.ListCoverageRuns(ctx, request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page.Items) > 0 {
+			got = append(got, page.Items[0].ID)
+		}
+		if page.NextCursor == "" {
+			break
+		}
+		request.Cursor = page.NextCursor
+	}
+	want := []string{runs[0].ID, runs[1].ID, runs[2].ID, runs[3].ID}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("fractional timestamp paging = %v, want %v", got, want)
+	}
+}
+
 func TestCoverageRunCursorAndArgumentValidation(t *testing.T) {
 	ctx := context.Background()
 	var nilStore *Store
