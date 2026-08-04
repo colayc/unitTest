@@ -49,6 +49,39 @@ import {
   DiagnosticCategoryV13,
   DiagnosticSeverityV13
 } from "./generated/diagnostic-v1-3.js";
+import type {
+  ArtifactMetadataV14,
+  CapabilitiesV14,
+  CoverageEventV14,
+  CoverageReport,
+  CoverageRun,
+  CoverageRunPage,
+  CoverageRunStartRequest,
+  CoverageRunTaskSnapshotV14,
+  ItemsTestSelectionV14,
+  TaskEventV14,
+  TaskSnapshotV14
+} from "./index.js";
+import {
+  ArtifactKindV14,
+  ArtifactMIMETypeV14,
+  CoverageArchitectureV14,
+  CoverageCollectorNameV14,
+  CoverageCompletenessOutcomeV14,
+  CoverageCompilerFamilyV14,
+  CoverageDriverNameV14,
+  CoveragePlatformV14,
+  CoverageRunOutcomeV14,
+  CoverageRunStatusV14,
+  CoverageSchemaVersionV14,
+  EventKindV14,
+  EventProtocolVersionV14,
+  TaskEventNameV14,
+  TaskKindV14,
+  TaskOutcomeV14,
+  TaskStatusV14,
+  TestSelectionModeV14
+} from "./index.js";
 
 test("generated capabilities represent an empty Windows service", () => {
   const value: Capabilities = {
@@ -429,4 +462,175 @@ test("generated protocol 1.3 selections and tasks preserve discriminated branche
   assert.equal(failedRunWithItems.mode, TestSelectionModeV13.FailedFromRun);
   assert.equal(testRunWithoutIdentity.kind, TaskKindV13.TestRun);
   assert.equal(simulation.kind, TaskKindV13.Simulation);
+});
+
+test("generated protocol 1.4 models expose the closed coverage contract", () => {
+  const capabilities: CapabilitiesV14 = {
+    workspaceInspect: true,
+    targetList: true,
+    cmakeBuild: true,
+    testDiscovery: true,
+    testRun: true,
+    coverageRun: true,
+    coverageReport: true,
+    frameworkAdapters: [],
+    opaqueCTestFallback: true,
+    ctestJson: true,
+    maxRepeatCount: 100,
+    maxSelectionSize: 100000,
+    maxCatalogPageSize: 1000,
+    maxCoveragePageSize: 100,
+    maxCoverageTimeoutMs: 600000,
+    unityHelperContractVersion: "1",
+    unityRunnerContractVersion: "utide.runner.v1"
+  };
+  const selection: ItemsTestSelectionV14 = { mode: TestSelectionModeV14.Items, itemIds: ["item-1"] };
+  const finishedAt = new Date("2026-08-04T00:00:02Z");
+  const reportId = "4".repeat(32);
+  const request: CoverageRunStartRequest = {
+    idempotencyKey: "idempotency-key",
+    workspaceGeneration: "a".repeat(64),
+    projectId: "core",
+    coverageProfileId: "windows-clang-cl",
+    catalogRevision: "b".repeat(64),
+    selection,
+    repeatCount: 2,
+    timeoutMs: 30000
+  };
+  const run: CoverageRun = {
+    coverageRunId: "1".repeat(32),
+    taskId: "2".repeat(32),
+    testRunId: "3".repeat(32),
+    workspaceGeneration: request.workspaceGeneration,
+    projectId: request.projectId,
+    coverageProfileId: request.coverageProfileId,
+    catalogRevision: request.catalogRevision,
+    selectionSnapshot: { mode: TestSelectionModeV14.Items, containerIds: [], itemIds: ["item-1"] },
+    repeatCount: request.repeatCount,
+    timeoutMs: request.timeoutMs,
+    status: CoverageRunStatusV14.Finished,
+    outcome: CoverageRunOutcomeV14.Available,
+    createdAt: new Date("2026-08-04T00:00:00Z"),
+    startedAt: new Date("2026-08-04T00:00:01Z"),
+    finishedAt,
+    reportId,
+    lastSequence: 5
+  };
+  const report: CoverageReport = {
+    reportId,
+    coverageRunId: run.coverageRunId,
+    testRunId: run.testRunId,
+    schemaVersion: CoverageSchemaVersionV14.The10,
+    createdAt: finishedAt,
+    completeness: { outcome: CoverageCompletenessOutcomeV14.Available, reasons: [] },
+    summary: {
+      lines: { covered: 10, total: 10 },
+      branches: { covered: 4, total: 4 },
+      functions: { covered: 2, total: 2 }
+    },
+    toolProvenance: {
+      platform: CoveragePlatformV14.Windows,
+      architecture: CoverageArchitectureV14.X64,
+      compiler: { family: CoverageCompilerFamilyV14.ClangCl, version: "19.1.0" },
+      driver: { name: CoverageDriverNameV14.LlvmCov, version: "19.1.0" },
+      collector: { name: CoverageCollectorNameV14.LlvmCov, version: "19.1.0" },
+      normalizerVersion: "1.0.0",
+      instrumentationFingerprint: "c".repeat(64)
+    },
+    artifactId: "5".repeat(32)
+  };
+  const page: CoverageRunPage = { items: [run] };
+  const task: CoverageRunTaskSnapshotV14 = {
+    taskId: run.taskId,
+    kind: TaskKindV14.CoverageRun,
+    workspaceGeneration: run.workspaceGeneration,
+    projectId: run.projectId,
+    coverageProfileId: run.coverageProfileId,
+    catalogRevision: run.catalogRevision,
+    coverageRunId: run.coverageRunId,
+    testRunId: run.testRunId,
+    repeatCount: run.repeatCount,
+    timeoutMs: run.timeoutMs,
+    status: TaskStatusV14.Finished,
+    outcome: TaskOutcomeV14.Succeeded,
+    createdAt: run.createdAt,
+    finishedAt,
+    lastSequence: run.lastSequence
+  };
+  const taskSnapshot: TaskSnapshotV14 = task;
+  const coverageEvents: CoverageEventV14[] = [
+    {
+      protocolVersion: EventProtocolVersionV14.The14,
+      kind: EventKindV14.Event,
+      messageId: "6".repeat(32),
+      sentAt: run.createdAt,
+      sequence: 1,
+      event: TaskEventNameV14.CoverageRunStarted,
+      taskId: run.taskId,
+      payloadVersion: 1,
+      payload: { coverageRunId: run.coverageRunId, testRunId: run.testRunId, catalogRevision: run.catalogRevision, repeatCount: run.repeatCount }
+    },
+    {
+      protocolVersion: EventProtocolVersionV14.The14,
+      kind: EventKindV14.Event,
+      messageId: "7".repeat(32),
+      sentAt: run.createdAt,
+      sequence: 2,
+      event: TaskEventNameV14.CoverageBuildFinished,
+      taskId: run.taskId,
+      payloadVersion: 1,
+      payload: { coverageRunId: run.coverageRunId }
+    },
+    {
+      protocolVersion: EventProtocolVersionV14.The14,
+      kind: EventKindV14.Event,
+      messageId: "8".repeat(32),
+      sentAt: run.createdAt,
+      sequence: 3,
+      event: TaskEventNameV14.CoverageCollectionStarted,
+      taskId: run.taskId,
+      payloadVersion: 1,
+      payload: { coverageRunId: run.coverageRunId, testRunId: run.testRunId }
+    },
+    {
+      protocolVersion: EventProtocolVersionV14.The14,
+      kind: EventKindV14.Event,
+      messageId: "9".repeat(32),
+      sentAt: finishedAt,
+      sequence: 4,
+      event: TaskEventNameV14.CoverageReportAvailable,
+      taskId: run.taskId,
+      payloadVersion: 1,
+      payload: { coverageRunId: run.coverageRunId, reportId: report.reportId, artifactId: report.artifactId, completeness: report.completeness, summary: report.summary }
+    },
+    {
+      protocolVersion: EventProtocolVersionV14.The14,
+      kind: EventKindV14.Event,
+      messageId: "a".repeat(32),
+      sentAt: finishedAt,
+      sequence: 5,
+      event: TaskEventNameV14.CoverageRunFinished,
+      taskId: run.taskId,
+      payloadVersion: 1,
+      payload: { coverageRunId: run.coverageRunId, outcome: CoverageRunOutcomeV14.Available, reportId: report.reportId }
+    }
+  ];
+  const taskEvents: TaskEventV14[] = coverageEvents;
+  const artifacts: ArtifactMetadataV14[] = [
+    { artifactId: "b".repeat(32), taskId: run.taskId, kind: ArtifactKindV14.CoverageJSON, mimeType: ArtifactMIMETypeV14.ApplicationJSON, sizeBytes: 1, sha256: "d".repeat(64), createdAt: finishedAt, uri: "unit-test-ide://artifact/coverage.json" },
+    { artifactId: "c".repeat(32), taskId: run.taskId, kind: ArtifactKindV14.JunitXML, mimeType: ArtifactMIMETypeV14.ApplicationXML, sizeBytes: 1, sha256: "e".repeat(64), createdAt: finishedAt, uri: "unit-test-ide://artifact/junit.xml" },
+    { artifactId: "d".repeat(32), taskId: run.taskId, kind: ArtifactKindV14.CoverageHTML, mimeType: ArtifactMIMETypeV14.TextHTML, sizeBytes: 1, sha256: "f".repeat(64), createdAt: finishedAt, uri: "unit-test-ide://artifact/index.html" }
+  ];
+
+  assert.equal(capabilities.coverageRun, true);
+  assert.equal(taskSnapshot.kind, TaskKindV14.CoverageRun);
+  assert.equal(page.items[0]?.outcome, CoverageRunOutcomeV14.Available);
+  assert.equal(taskEvents.length, 5);
+  assert.equal(EventProtocolVersionV14.The14, "1.4");
+  assert.equal(TaskEventNameV14.CoverageReportAvailable, "coverage.report.available");
+  assert.equal(CoverageCompilerFamilyV14.ClangCl, "clang-cl");
+  assert.equal(ArtifactKindV14.CoverageJSON, "coverage-json");
+  assert.equal(ArtifactMIMETypeV14.TextHTML, "text/html");
+  assert.equal(TaskOutcomeV13.Succeeded, "succeeded");
+  assert.equal(artifacts.length, 3);
 });

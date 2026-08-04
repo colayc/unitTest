@@ -131,3 +131,159 @@ export {
   ArtifactKindV13,
   ArtifactMIMETypeV13
 } from "./generated/artifact-v1-3.js";
+export type {
+  CapabilitiesV14,
+  FrameworkAdapterCapabilityV14
+} from "./generated/capabilities-v1-4.js";
+export { FrameworkAdapterIDV14 } from "./generated/capabilities-v1-4.js";
+export type {
+  CoverageCollectorV14,
+  CoverageCompletenessV14,
+  CoverageCompilerV14,
+  CoverageContractV14,
+  CoverageDriverV14,
+  CoverageMetricV14,
+  CoverageReport,
+  CoverageRun,
+  CoverageRunPage,
+  CoverageRunStartRequest,
+  CoverageSummaryV14,
+  CoverageToolProvenanceV14
+} from "./generated/coverage-v1-4.js";
+export {
+  CoverageArchitectureV14,
+  CoverageCollectorNameV14,
+  CoverageCompletenessOutcomeV14,
+  CoverageCompilerFamilyV14,
+  CoverageDriverNameV14,
+  CoverageIncompleteReasonV14,
+  CoveragePlatformV14,
+  CoverageRunOutcomeV14,
+  CoverageRunReasonV14,
+  CoverageRunStatusV14,
+  CoverageSchemaVersionV14
+} from "./generated/coverage-v1-4.js";
+export type { DiagnosticV14 } from "./generated/diagnostic-v1-4.js";
+export {
+  DiagnosticCategoryV14,
+  DiagnosticSeverityV14
+} from "./generated/diagnostic-v1-4.js";
+export type {
+  AllTestSelectionV14,
+  ContainersTestSelectionV14,
+  FailedFromRunTestSelectionV14,
+  FilterTestSelectionV14,
+  ItemsTestSelectionV14,
+  TestCapabilitiesV14,
+  TestCatalog as TestCatalogV14,
+  TestContainer as TestContainerV14,
+  TestContractV14,
+  DiagnosticV14 as TestDiagnosticV14,
+  TestFailureDetailV14,
+  TestFilterV14,
+  TestItem as TestItemV14,
+  TestItemResult as TestItemResultV14,
+  TestParameterV14,
+  TestRun as TestRunV14,
+  TestRunPage as TestRunPageV14,
+  TestRunSummaryV14,
+  TestSelectionSnapshotV14,
+  TestSelectionV14,
+  TestSourceLocationV14
+} from "./generated/test-v1-4.js";
+export {
+  CategoryV14 as TestFailureCategoryV14,
+  DiagnosticSeverityV14 as TestDiagnosticSeverityV14,
+  TestFailureSubtypeV14,
+  TestFrameworkV14,
+  TestItemKindV14,
+  TestItemOutcomeV14,
+  TestResultReasonV14,
+  TestRunOutcomeV14,
+  TestRunStatusV14,
+  TestSelectionModeV14,
+  TestSourceProvenanceV14
+} from "./generated/test-v1-4.js";
+export type {
+  CmakeBuildTaskSnapshotV14,
+  CoverageRunTaskSnapshotV14,
+  SimulationTaskSnapshotV14,
+  TaskSnapshotBaseV14,
+  TaskSnapshotV14,
+  TestDiscoveryTaskSnapshotV14,
+  TestRunTaskSnapshotV14
+} from "./generated/task-v1-4.js";
+export {
+  SimulationScenarioV14,
+  TaskKindV14,
+  TaskOutcomeV14,
+  TaskStatusV14
+} from "./generated/task-v1-4.js";
+export type {
+  ArtifactCreatedEventV14,
+  ArtifactCreatedPayloadV14,
+  CoverageBuildFinishedEventV14,
+  CoverageBuildFinishedPayloadV14,
+  CoverageCollectionStartedEventV14,
+  CoverageCollectionStartedPayloadV14,
+  CoverageEventV14,
+  CoverageReportAvailableEventV14,
+  CoverageReportAvailablePayloadV14,
+  CoverageRunFinishedEventV14,
+  CoverageRunFinishedPayloadV14,
+  CoverageRunStartedEventV14,
+  CoverageRunStartedPayloadV14,
+  TaskCancellationRequestedEventV14,
+  TaskCancellationRequestedPayloadV14,
+  TaskCreatedEventV14,
+  TaskCreatedPayloadV14,
+  TaskDiagnosticEventV14,
+  TaskDiagnosticPayloadV14,
+  TaskEventBaseV14,
+  TaskEventV14,
+  TaskFinishedEventV14,
+  TaskFinishedPayloadV14,
+  TaskOutputEventV14,
+  TaskOutputPayloadV14,
+  TaskStartedEventV14,
+  TaskStartedPayloadV14,
+  TaskStepFinishedEventV14,
+  TaskStepFinishedPayloadV14,
+  TaskStepStartedEventV14,
+  TaskStepStartedPayloadV14,
+  TestCatalogPublishedEventV14,
+  TestCatalogPublishedPayloadV14,
+  TestContainerDiscoveredEventV14,
+  TestContainerDiscoveredPayloadV14,
+  TestContainerFinishedEventV14,
+  TestContainerFinishedPayloadV14,
+  TestContainerStartedEventV14,
+  TestContainerStartedPayloadV14,
+  TestDiscoveryStartedEventV14,
+  TestDiscoveryStartedPayloadV14,
+  TestItemFinishedEventV14,
+  TestItemFinishedPayloadV14,
+  TestItemStartedEventV14,
+  TestItemStartedPayloadV14,
+  TestOutputEventV14,
+  TestOutputPayloadV14,
+  TestRunFinishedEventV14,
+  TestRunFinishedPayloadV14,
+  TestRunStartedEventV14,
+  TestRunStartedPayloadV14
+} from "./generated/event-v1-4.js";
+export {
+  EventKindV14,
+  EventProtocolVersionV14,
+  TaskEventNameV14,
+  TaskOutputStreamV14,
+  TaskStepFinishedStatusV14,
+  TaskStepKindV14,
+  TestContainerOutcomeV14,
+  TestEventFrameworkV14
+} from "./generated/event-v1-4.js";
+export type { ArtifactMetadataV14 } from "./generated/artifact-v1-4.js";
+export {
+  ArtifactKindV14,
+  ArtifactMIMETypeV14
+} from "./generated/artifact-v1-4.js";
