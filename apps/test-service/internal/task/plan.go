@@ -20,16 +20,24 @@ const (
 	KindCMakeBuild    Kind = "cmake_build"
 	KindTestDiscovery Kind = "test_discovery"
 	KindTestRun       Kind = "test_run"
+	KindCoverageRun   Kind = "coverage_run"
 )
 
 type StepKind string
 
 const (
-	StepSimulation    StepKind = "simulation"
-	StepConfigure     StepKind = "configure"
-	StepBuild         StepKind = "build"
-	StepTestDiscovery StepKind = "test-discovery"
-	StepTestRun       StepKind = "test-run"
+	StepSimulation        StepKind = "simulation"
+	StepConfigure         StepKind = "configure"
+	StepBuild             StepKind = "build"
+	StepTestDiscovery     StepKind = "test-discovery"
+	StepTestRun           StepKind = "test-run"
+	StepCoverageConfigure StepKind = "coverage-configure"
+	StepCoverageBuild     StepKind = "coverage-build"
+	StepCoverageTest      StepKind = "coverage-test"
+	StepCoverageMerge     StepKind = "coverage-merge"
+	StepCoverageNormalize StepKind = "coverage-normalize"
+	StepCoverageReport    StepKind = "coverage-report"
+	StepCoveragePublish   StepKind = "coverage-publish"
 )
 
 type StepStatus string
@@ -324,7 +332,9 @@ func FingerprintPlan(plan ExecutionPlan) string {
 
 func validStepKind(value StepKind) bool {
 	switch value {
-	case StepSimulation, StepConfigure, StepBuild, StepTestDiscovery, StepTestRun:
+	case StepSimulation, StepConfigure, StepBuild, StepTestDiscovery, StepTestRun,
+		StepCoverageConfigure, StepCoverageBuild, StepCoverageTest, StepCoverageMerge,
+		StepCoverageNormalize, StepCoverageReport, StepCoveragePublish:
 		return true
 	default:
 		return false

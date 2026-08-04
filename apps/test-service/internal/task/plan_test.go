@@ -105,6 +105,52 @@ func TestValidatePlanAcceptsServiceOwnedCTestStepKinds(t *testing.T) {
 	}
 }
 
+func TestValidatePlanAcceptsCoverageStepKindsAndFingerprintsThem(t *testing.T) {
+	kinds := []task.StepKind{
+		task.StepCoverageConfigure,
+		task.StepCoverageBuild,
+		task.StepCoverageTest,
+		task.StepCoverageMerge,
+		task.StepCoverageNormalize,
+		task.StepCoverageReport,
+		task.StepCoveragePublish,
+	}
+	boundary := fakeBoundary{executables: []string{"coverage-service"}, roots: []string{"build"}}
+	for _, kind := range kinds {
+		t.Run(string(kind), func(t *testing.T) {
+			plan := task.ExecutionPlan{Version: 1, Steps: []task.ExecutionStep{{
+				ID: "coverage", Kind: kind,
+				Process: task.ProcessSpec{Executable: "coverage-service", Dir: "build"},
+			}}}
+			if err := task.ValidatePlan(plan, boundary); err != nil {
+				t.Fatalf("ValidatePlan() error = %v", err)
+			}
+			changed := plan
+			changed.Steps = append([]task.ExecutionStep(nil), plan.Steps...)
+			changed.Steps[0].Kind = task.StepConfigure
+			if task.FingerprintPlan(plan) == task.FingerprintPlan(changed) {
+				t.Fatal("FingerprintPlan() did not change after step kind changed")
+			}
+		})
+	}
+
+	for _, kind := range []task.StepKind{"coverage-collect", "coverage-export", "coverage-file"} {
+		plan := task.ExecutionPlan{Version: 1, Steps: []task.ExecutionStep{{
+			ID: "coverage", Kind: kind,
+			Process: task.ProcessSpec{Executable: "coverage-service", Dir: "build"},
+		}}}
+		if err := task.ValidatePlan(plan, boundary); !errors.Is(err, task.ErrInvalidArgument) {
+			t.Fatalf("ValidatePlan(%q) error = %v, want ErrInvalidArgument", kind, err)
+		}
+	}
+}
+
+func TestKindCoverageRunValue(t *testing.T) {
+	if task.KindCoverageRun != "coverage_run" {
+		t.Fatalf("KindCoverageRun = %q, want %q", task.KindCoverageRun, "coverage_run")
+	}
+}
+
 func TestValidatePlanAcceptsBoundedProcessBatchAndFingerprintsIt(
 	t *testing.T,
 ) {

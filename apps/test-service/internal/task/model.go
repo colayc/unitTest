@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"time"
+
+	"unit-test-ide.local/test-service/internal/coveragedomain"
 )
 
 type Status string
@@ -159,5 +161,47 @@ func ValidEventType(value EventType) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func CoverageTaskOutcome(
+	outcome coveragedomain.Outcome,
+	reason coveragedomain.Reason,
+) Outcome {
+	switch outcome {
+	case coveragedomain.OutcomeAvailable, coveragedomain.OutcomePartial:
+		switch reason {
+		case "":
+			return OutcomeSucceeded
+		default:
+			return ""
+		}
+	case coveragedomain.OutcomeUnavailable:
+		switch reason {
+		case coveragedomain.ReasonBuildFailed:
+			return OutcomeCommandFailed
+		case coveragedomain.ReasonServiceRestarted:
+			return OutcomeInterrupted
+		case coveragedomain.ReasonInstrumentationFailed,
+			coveragedomain.ReasonProfileCollectionFailed,
+			coveragedomain.ReasonMergeFailed,
+			coveragedomain.ReasonNormalizationFailed,
+			coveragedomain.ReasonReportGenerationFailed,
+			coveragedomain.ReasonPersistenceFailed:
+			return OutcomeInfrastructureFailed
+		default:
+			return ""
+		}
+	case coveragedomain.OutcomeCancelled:
+		switch reason {
+		case coveragedomain.ReasonUserCancelled:
+			return OutcomeCancelled
+		case coveragedomain.ReasonTaskTimedOut:
+			return OutcomeTimedOut
+		default:
+			return ""
+		}
+	default:
+		return ""
 	}
 }
