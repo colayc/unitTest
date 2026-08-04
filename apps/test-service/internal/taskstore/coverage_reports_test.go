@@ -119,12 +119,12 @@ func TestCoverageArtifactContractRejectsInvalidPublicationSets(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			store := openTestStore(t)
 			mutation := coverageCompletionFixture(t, store, 350+index, coveragedomain.OutcomeAvailable, "")
-			before, _ := store.Watermark(ctx)
+			before := captureCoverageTerminalSnapshot(t, store, mutation.Task.ID, mutation.FinishCoverage.Run.ID, mutation.FinishRun.RunID)
 			tc.mutate(&mutation)
 			if _, _, err := store.Apply(ctx, mutation); !errors.Is(err, task.ErrInvalidArgument) {
 				t.Fatalf("Apply() error = %v", err)
 			}
-			assertCoverageTerminalRolledBack(t, store, mutation.Task.ID, mutation.FinishCoverage.Run.ID, mutation.FinishRun.RunID, before)
+			assertCoverageTerminalRolledBack(t, store, before)
 		})
 	}
 }

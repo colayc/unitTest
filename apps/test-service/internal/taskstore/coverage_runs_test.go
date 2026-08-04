@@ -317,29 +317,8 @@ func TestCoverageCompletionPersistsAggregateAtomically(t *testing.T) {
 func TestCoverageCompletionAdvancesRunningAggregate(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
-	mutation := coverageCompletionFixture(t, store, 220, coveragedomain.OutcomeAvailable, "")
-	queued := mutation.Task
-	queued.Status, queued.Outcome, queued.FinishedAt = task.StatusQueued, "", nil
-	startedAt := queued.CreatedAt.Add(time.Second)
-	running := mustTransition(t, queued, task.Transition{From: task.StatusQueued, To: task.StatusRunning, At: startedAt})
-	running, _, err := store.Apply(ctx, task.Mutation{
-		Task: running, Expected: task.StatusQueued,
-		Events: []task.EventDraft{draft(running.ID, task.EventTaskStarted, startedAt)},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.db.Exec(`UPDATE coverage_runs SET status='running', started_at=? WHERE coverage_run_id=?`, formatCoverageTime(startedAt), mutation.FinishCoverage.Run.ID); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.StartRun(ctx, mutation.FinishRun.RunID, startedAt); err != nil {
-		t.Fatal(err)
-	}
-	mutation.Task = mustTransition(t, running, task.Transition{From: task.StatusRunning, To: task.StatusFinished, Outcome: task.OutcomeSucceeded, At: *mutation.Task.FinishedAt})
-	mutation.Expected = task.StatusRunning
-	mutation.FinishCoverage.Expected = coveragedomain.StatusRunning
-	mutation.FinishCoverage.Run.StartedAt = ptrTime(startedAt)
-	mutation.FinishRun.StartedAt = ptrTime(startedAt)
+	mutation := coverageRunningCompletionFixture(t, store, 220)
+	startedAt := *mutation.FinishCoverage.Run.StartedAt
 	finished, events, err := store.Apply(ctx, mutation)
 	if err != nil {
 		t.Fatal(err)
@@ -348,6 +327,70 @@ func TestCoverageCompletionAdvancesRunningAggregate(t *testing.T) {
 	if err != nil || persisted.StartedAt == nil || !persisted.StartedAt.Equal(startedAt) ||
 		persisted.LastSequence != finished.LastSequence || len(events) != 1 {
 		t.Fatalf("running completion = task %#v, run %#v, events %#v, err %v", finished, persisted, events, err)
+	}
+}
+
+func TestCoverageCompletionRejectsImmutableRunMutation(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name   string
+		mutate func(*testing.T, *task.Mutation)
+	}{
+		{name: "request", mutate: func(t *testing.T, mutation *task.Mutation) {
+			// CoverageRun ID is derived from Request, so a valid changed Request cannot retain
+			// the persisted ID. Recompute the ID and align the Task/Report; the transaction
+			// then rejects the absent immutable identity before any terminal write.
+			request := mutation.FinishCoverage.Run.Request.Clone()
+			request.CoverageProfileID = "coverage-changed"
+			request, err := coveragedomain.NewRequest(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mutation.FinishCoverage.Run.Request = request
+			mutation.FinishCoverage.Run.ID, err = coveragedomain.CoverageRunID(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mutation.FinishCoverage.Report.RunID = mutation.FinishCoverage.Run.ID
+			mutation.Task.Request, err = request.CanonicalJSON()
+			if err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "selection snapshot", mutate: func(_ *testing.T, mutation *task.Mutation) {
+			snapshot := testdomain.SelectionSnapshot{Mode: testdomain.SelectionItems, ItemIDs: []testdomain.ID{stableID("b")}}
+			mutation.FinishCoverage.Run.SelectionSnapshot = snapshot
+			mutation.FinishRun.SelectionSnapshot = snapshot
+		}},
+		{name: "toolchain", mutate: func(_ *testing.T, mutation *task.Mutation) {
+			mutation.FinishCoverage.Run.Toolchain.NormalizerVersion = "changed"
+			mutation.FinishCoverage.Report.Toolchain = mutation.FinishCoverage.Run.Toolchain
+		}},
+		{name: "created time", mutate: func(_ *testing.T, mutation *task.Mutation) {
+			changed := mutation.FinishCoverage.Run.CreatedAt.Add(time.Nanosecond)
+			mutation.FinishCoverage.Run.CreatedAt = changed
+			mutation.FinishRun.CreatedAt = changed
+			mutation.Task.CreatedAt = changed
+		}},
+		{name: "last sequence", mutate: func(_ *testing.T, mutation *task.Mutation) {
+			mutation.FinishCoverage.Run.LastSequence++
+		}},
+		{name: "running started time", mutate: func(_ *testing.T, mutation *task.Mutation) {
+			changed := mutation.FinishCoverage.Run.StartedAt.Add(time.Nanosecond)
+			mutation.FinishCoverage.Run.StartedAt = &changed
+		}},
+	}
+	for index, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := openTestStore(t)
+			mutation := coverageRunningCompletionFixture(t, store, 221+index)
+			before := captureCoverageTerminalSnapshot(t, store, mutation.Task.ID, mutation.FinishCoverage.Run.ID, mutation.FinishRun.RunID)
+			tc.mutate(t, &mutation)
+			if _, _, err := store.Apply(ctx, mutation); !errors.Is(err, task.ErrConflict) {
+				t.Fatalf("Apply() error = %v, want %v", err, task.ErrConflict)
+			}
+			assertCoverageTerminalRolledBack(t, store, before)
+		})
 	}
 }
 
@@ -411,13 +454,13 @@ func TestCoverageCompletionRejectsMismatchedTerminalGraph(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			store := openTestStore(t)
 			mutation := coverageCompletionFixture(t, store, 230+index, coveragedomain.OutcomeAvailable, "")
-			before, _ := store.Watermark(ctx)
 			coverageRunID, testRunID := mutation.FinishCoverage.Run.ID, mutation.FinishRun.RunID
+			before := captureCoverageTerminalSnapshot(t, store, mutation.Task.ID, coverageRunID, testRunID)
 			tc.mutate(&mutation)
 			if _, _, err := store.Apply(ctx, mutation); !errors.Is(err, task.ErrInvalidArgument) {
 				t.Fatalf("Apply() error = %v", err)
 			}
-			assertCoverageTerminalRolledBack(t, store, mutation.Task.ID, coverageRunID, testRunID, before)
+			assertCoverageTerminalRolledBack(t, store, before)
 		})
 	}
 }
@@ -485,14 +528,14 @@ func TestCoverageCompletionFaultsRollBackEveryTerminalRow(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			store := openTestStore(t)
 			mutation := coverageCompletionFixture(t, store, 280+index, coveragedomain.OutcomeAvailable, "")
-			before, _ := store.Watermark(ctx)
+			before := captureCoverageTerminalSnapshot(t, store, mutation.Task.ID, mutation.FinishCoverage.Run.ID, mutation.FinishRun.RunID)
 			if _, err := store.db.Exec(tc.trigger); err != nil {
 				t.Fatal(err)
 			}
 			if _, _, err := store.Apply(ctx, mutation); !errors.Is(err, task.ErrStorageUnavailable) {
 				t.Fatalf("Apply() error = %v", err)
 			}
-			assertCoverageTerminalRolledBack(t, store, mutation.Task.ID, mutation.FinishCoverage.Run.ID, mutation.FinishRun.RunID, before)
+			assertCoverageTerminalRolledBack(t, store, before)
 			if violations := foreignKeyViolations(t, store.db); violations != 0 {
 				t.Fatalf("foreign key violations = %d", violations)
 			}
@@ -574,6 +617,38 @@ func coverageCompletionFixture(t *testing.T, store *Store, seed int, outcome cov
 	return task.Mutation{Task: terminalTask, Expected: task.StatusQueued, Events: []task.EventDraft{draft(created.ID, task.EventTaskFinished, finishedAt)}, Artifacts: artifacts, FinishRun: &validatedTestRun, FinishCoverage: completion}
 }
 
+func coverageRunningCompletionFixture(t *testing.T, store *Store, seed int) task.Mutation {
+	t.Helper()
+	ctx := context.Background()
+	mutation := coverageCompletionFixture(t, store, seed, coveragedomain.OutcomeAvailable, "")
+	queued := mutation.Task
+	queued.Status, queued.Outcome, queued.FinishedAt = task.StatusQueued, "", nil
+	startedAt := queued.CreatedAt.Add(time.Second)
+	running := mustTransition(t, queued, task.Transition{From: task.StatusQueued, To: task.StatusRunning, At: startedAt})
+	running, _, err := store.Apply(ctx, task.Mutation{
+		Task: running, Expected: task.StatusQueued,
+		Events: []task.EventDraft{draft(running.ID, task.EventTaskStarted, startedAt)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE coverage_runs SET status='running', started_at=? WHERE coverage_run_id=?`, formatCoverageTime(startedAt), mutation.FinishCoverage.Run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StartRun(ctx, mutation.FinishRun.RunID, startedAt); err != nil {
+		t.Fatal(err)
+	}
+	mutation.Task = mustTransition(t, running, task.Transition{
+		From: task.StatusRunning, To: task.StatusFinished,
+		Outcome: task.OutcomeSucceeded, At: *mutation.Task.FinishedAt,
+	})
+	mutation.Expected = task.StatusRunning
+	mutation.FinishCoverage.Expected = coveragedomain.StatusRunning
+	mutation.FinishCoverage.Run.StartedAt = ptrTime(startedAt)
+	mutation.FinishRun.StartedAt = ptrTime(startedAt)
+	return mutation
+}
+
 func ptrReport(value coveragedomain.Report) *coveragedomain.Report { return &value }
 
 func coverageTerminalCounts(t *testing.T, store *Store) []int {
@@ -589,21 +664,50 @@ func coverageTerminalCounts(t *testing.T, store *Store) []int {
 	return result
 }
 
-func assertCoverageTerminalRolledBack(t *testing.T, store *Store, taskID, coverageRunID, testRunID string, watermark int64) {
+type coverageTerminalSnapshot struct {
+	task      task.Task
+	run       coveragedomain.Run
+	testRun   testdomain.TestRun
+	events    []task.Event
+	watermark int64
+}
+
+func captureCoverageTerminalSnapshot(t *testing.T, store *Store, taskID, coverageRunID, testRunID string) coverageTerminalSnapshot {
 	t.Helper()
 	ctx := context.Background()
-	if current, err := store.Get(ctx, taskID); err != nil || current.Status != task.StatusQueued || current.LastSequence != watermark {
-		t.Fatalf("Task after rejection = %#v, %v", current, err)
+	value := coverageTerminalSnapshot{}
+	var err error
+	if value.task, err = store.Get(ctx, taskID); err != nil {
+		t.Fatal(err)
 	}
-	if coverageRunID != "" {
-		if current, err := store.GetCoverageRun(ctx, coverageRunID); err != nil || current.Status != coveragedomain.StatusQueued || current.LastSequence != watermark {
-			t.Fatalf("CoverageRun after rejection = %#v, %v", current, err)
-		}
+	if value.run, err = store.GetCoverageRun(ctx, coverageRunID); err != nil {
+		t.Fatal(err)
 	}
-	if testRunID != "" {
-		if current, err := store.GetRun(ctx, testRunID); err != nil || current.Status != testdomain.RunQueued {
-			t.Fatalf("TestRun after rejection = %#v, %v", current, err)
-		}
+	if value.testRun, err = store.GetRun(ctx, testRunID); err != nil {
+		t.Fatal(err)
+	}
+	if value.watermark, err = store.Watermark(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if value.events, err = store.EventsAfter(ctx, 0, value.watermark, int(value.watermark)+1); err != nil {
+		t.Fatal(err)
+	}
+	return value
+}
+
+func assertCoverageTerminalRolledBack(t *testing.T, store *Store, before coverageTerminalSnapshot) {
+	t.Helper()
+	ctx := context.Background()
+	currentTask, taskErr := store.Get(ctx, before.task.ID)
+	currentRun, runErr := store.GetCoverageRun(ctx, before.run.ID)
+	currentTestRun, testRunErr := store.GetRun(ctx, before.testRun.RunID)
+	if taskErr != nil || runErr != nil || testRunErr != nil ||
+		!reflect.DeepEqual(currentTask, before.task) ||
+		!reflect.DeepEqual(currentRun, before.run) ||
+		!reflect.DeepEqual(currentTestRun, before.testRun) {
+		t.Fatalf("aggregate changed after rollback: Task=%#v (%v), CoverageRun=%#v (%v), TestRun=%#v (%v); want Task=%#v, CoverageRun=%#v, TestRun=%#v",
+			currentTask, taskErr, currentRun, runErr, currentTestRun, testRunErr,
+			before.task, before.run, before.testRun)
 	}
 	for _, table := range []string{"coverage_reports", "artifacts", "test_run_artifacts"} {
 		var count int
@@ -611,8 +715,11 @@ func assertCoverageTerminalRolledBack(t *testing.T, store *Store, taskID, covera
 			t.Fatalf("%s count = %d, %v; want 0", table, count, err)
 		}
 	}
-	if got, err := store.Watermark(ctx); err != nil || got != watermark {
-		t.Fatalf("watermark = %d, %v; want %d", got, err, watermark)
+	if got, err := store.Watermark(ctx); err != nil || got != before.watermark {
+		t.Fatalf("watermark = %d, %v; want %d", got, err, before.watermark)
+	}
+	if events, err := store.EventsAfter(ctx, 0, before.watermark, int(before.watermark)+1); err != nil || !reflect.DeepEqual(events, before.events) {
+		t.Fatalf("events after rollback = %#v, %v; want %#v", events, err, before.events)
 	}
 }
 
