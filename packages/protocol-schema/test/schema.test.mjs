@@ -738,3 +738,111 @@ test("protocol 1.3 preserves v1.0-v1.2 contracts without backporting test messag
   const v1 = ajvV1.compile(await load("../schema/v1/message.schema.json"));
   assert.equal(v1(await load("../fixtures/v1/handshake.valid.json")), true);
 });
+
+async function compileV14Coverage() {
+  const ajv = new Ajv2020({ allErrors: true, strict: true });
+  addFormats(ajv);
+  ajv.addSchema(await load("../schema/v1.4/diagnostic.schema.json"));
+  ajv.addSchema(await load("../schema/v1.4/test.schema.json"));
+  ajv.addSchema(await load("../schema/v1.4/coverage.schema.json"));
+  return {
+    start: ajv.compile({ "$ref": "urn:unit-test-ide:protocol:v1.4:coverage#/$defs/coverageRunStartRequest" }),
+    run: ajv.compile({ "$ref": "urn:unit-test-ide:protocol:v1.4:coverage#/$defs/coverageRun" }),
+    report: ajv.compile({ "$ref": "urn:unit-test-ide:protocol:v1.4:coverage#/$defs/coverageReport" })
+  };
+}
+
+test("protocol 1.4 accepts standalone coverage start, run, and report payloads", async () => {
+  const validate = await compileV14Coverage();
+  const start = await load("../fixtures/v1.4/coverage-run-start.valid.json");
+  const run = await load("../fixtures/v1.4/coverage-run.valid.json");
+  const report = await load("../fixtures/v1.4/coverage-report.valid.json");
+  assert.equal(validate.start(start.payload), true, JSON.stringify(validate.start.errors));
+  assert.equal(validate.run(run.payload), true, JSON.stringify(validate.run.errors));
+  assert.equal(validate.report(report.payload), true, JSON.stringify(validate.report.errors));
+});
+
+test("protocol 1.4 rejects execution-plan injection fields in coverage starts and selections", async () => {
+  const { start: validate } = await compileV14Coverage();
+  const request = await load("../fixtures/v1.4/coverage-run-start.valid.json");
+  const forbidden = {
+    executable: "llvm-cov",
+    command: "llvm-cov export",
+    args: ["export"],
+    argv: ["llvm-cov"],
+    flags: ["--format=json"],
+    shell: true,
+    script: "collect",
+    env: { PATH: "C:/attacker" },
+    environment: { PATH: "C:/attacker" },
+    cwd: "C:/tmp",
+    workingDirectory: "C:/tmp",
+    hook: "before",
+    resultPath: "C:/tmp/result.json",
+    driver: "llvm-cov",
+    collector: "gcovr",
+    gcovrConfig: "attacker.cfg",
+    python: "python",
+    module: "gcovr",
+    plugin: "attacker",
+    template: "custom",
+    threshold: 80
+  };
+
+  for (const [field, value] of Object.entries(forbidden)) {
+    assert.equal(validate({ ...request.payload, [field]: value }), false, `payload.${field}`);
+    assert.equal(
+      validate({ ...request.payload, selection: { ...request.payload.selection, [field]: value } }),
+      false,
+      `selection.${field}`
+    );
+  }
+  for (const fixture of [
+    "coverage-run-command.invalid.json",
+    "coverage-run-environment.invalid.json",
+    "coverage-run-driver.invalid.json"
+  ]) {
+    assert.equal(validate((await load(`../fixtures/v1.4/${fixture}`)).payload), false, fixture);
+  }
+});
+
+test("protocol 1.4 enforces coverage ranges, outcomes, completeness, and metadata boundaries", async () => {
+  const validate = await compileV14Coverage();
+  const start = await load("../fixtures/v1.4/coverage-run-start.valid.json");
+  const run = await load("../fixtures/v1.4/coverage-run.valid.json");
+  const report = await load("../fixtures/v1.4/coverage-report.valid.json");
+  const { reportId, ...runWithoutReport } = run.payload;
+
+  for (const repeatCount of [0, 101, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.equal(validate.start({ ...start.payload, repeatCount }), false, `repeatCount=${repeatCount}`);
+  }
+  for (const timeoutMs of [0, 86400001, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.equal(validate.start({ ...start.payload, timeoutMs }), false, `timeoutMs=${timeoutMs}`);
+  }
+  for (const selection of [{ mode: "unknown" }, { mode: "filter", filter: {} }]) {
+    assert.equal(validate.start({ ...start.payload, selection }), false, JSON.stringify(selection));
+  }
+  assert.equal(
+    validate.report({ ...report.payload, summary: { ...report.payload.summary, lines: { covered: Number.MAX_SAFE_INTEGER + 1, total: 12 } } }),
+    false,
+    "unsafe summary count"
+  );
+  assert.equal(validate.run({ ...run.payload, outcome: "unknown" }), false, "unknown outcome");
+  assert.equal(validate.run({ ...runWithoutReport, outcome: "unavailable", reason: "unknown" }), false, "unknown reason");
+  assert.equal(validate.run({ ...run.payload, outcome: "available", reason: "build_failed" }), false, "available run reason");
+  assert.equal(validate.run({ ...runWithoutReport, outcome: "unavailable" }), false, "unavailable needs reason");
+  assert.equal(validate.run({ ...runWithoutReport, outcome: "cancelled", reason: "build_failed" }), false, "cancel reason pair");
+  assert.equal(
+    validate.report({ ...report.payload, completeness: { outcome: "partial", reasons: [] } }),
+    false,
+    "partial completeness needs reasons"
+  );
+  assert.equal(
+    validate.report({ ...report.payload, completeness: { outcome: "available", reasons: ["test_crashed"] } }),
+    false,
+    "available completeness forbids reasons"
+  );
+  for (const field of ["files", "lines"]) {
+    assert.equal(validate.report({ ...report.payload, [field]: [] }), false, `report.${field}`);
+  }
+});

@@ -1,0 +1,18 @@
+{
+  "protocolVersion": "1.4",
+  "kind": "request",
+  "messageId": "22222222222222222222222222222222",
+  "method": "coverage/runs/start",
+  "sentAt": "2026-08-04T00:00:00Z",
+  "payload": {
+    "idempotencyKey": "cccccccccccccccccccccccccccccccc",
+    "workspaceGeneration": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "projectId": "core",
+    "coverageProfileId": "coverage-debug",
+    "catalogRevision": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "selection": { "mode": "items", "itemIds": ["utid-v1-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"] },
+    "repeatCount": 2,
+    "timeoutMs": 60000,
+    "environment": { "PATH": "C:/attacker" }
+  }
+}

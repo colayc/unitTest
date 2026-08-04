@@ -1,0 +1,31 @@
+{
+  "protocolVersion": "1.4",
+  "kind": "response",
+  "messageId": "44444444444444444444444444444444",
+  "requestId": "33333333333333333333333333333333",
+  "method": "coverage/reports/get",
+  "sentAt": "2026-08-04T00:00:04Z",
+  "payload": {
+    "reportId": "88888888888888888888888888888888",
+    "coverageRunId": "55555555555555555555555555555555",
+    "testRunId": "77777777777777777777777777777777",
+    "schemaVersion": "1.0",
+    "createdAt": "2026-08-04T00:00:03Z",
+    "completeness": { "outcome": "available", "reasons": [] },
+    "summary": {
+      "lines": { "covered": 10, "total": 12 },
+      "branches": { "covered": 4, "total": 6 },
+      "functions": { "covered": 3, "total": 3 }
+    },
+    "toolProvenance": {
+      "platform": "windows",
+      "architecture": "x64",
+      "compiler": { "family": "clang-cl", "version": "22.1.0" },
+      "driver": { "name": "llvm-cov", "version": "22.1.0" },
+      "collector": { "name": "llvm-cov", "version": "22.1.0" },
+      "normalizerVersion": "1.0.0",
+      "instrumentationFingerprint": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    "artifactId": "99999999999999999999999999999999"
+  }
+}
