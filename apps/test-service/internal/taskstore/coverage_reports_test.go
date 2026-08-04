@@ -85,6 +85,162 @@ func TestCoverageReportMissingAndCorruptRowsFailClosed(t *testing.T) {
 	}
 }
 
+func TestCoverageReportRejectsCanonicalCrossAggregateCorruption(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name    string
+		corrupt func(*testing.T, *Store, task.Mutation)
+	}{
+		{name: "task kind", corrupt: func(t *testing.T, store *Store, mutation task.Mutation) {
+			if _, err := store.db.Exec(`UPDATE tasks SET kind='test_run' WHERE task_id=?`, mutation.Task.ID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "task owner", corrupt: func(t *testing.T, store *Store, mutation task.Mutation) {
+			other := coverageCompletionFixture(t, store, 9100, coveragedomain.OutcomeAvailable, "")
+			execCoverageCorruptionWithoutForeignKeys(
+				t,
+				store,
+				`UPDATE coverage_reports SET task_id=? WHERE report_id=?`,
+				other.Task.ID,
+				mutation.FinishCoverage.Report.ID,
+			)
+		}},
+		{name: "linked run", corrupt: func(t *testing.T, store *Store, mutation task.Mutation) {
+			other := coverageCompletionFixture(t, store, 9101, coveragedomain.OutcomeAvailable, "")
+			execCoverageCorruptionWithoutForeignKeys(
+				t,
+				store,
+				`UPDATE coverage_reports SET coverage_run_id=? WHERE report_id=?`,
+				other.FinishCoverage.Run.ID,
+				mutation.FinishCoverage.Report.ID,
+			)
+		}},
+		{name: "summary", corrupt: func(t *testing.T, store *Store, mutation task.Mutation) {
+			changed := mutation.FinishCoverage.Report.Clone()
+			changed.Summary.Lines.Covered--
+			changed = validCoverageReport(t, changed)
+			_, summaryJSON, _, err := encodeCoverageReportMetadata(changed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.db.Exec(`UPDATE coverage_reports SET summary_json=? WHERE report_id=?`, string(summaryJSON), changed.ID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "toolchain", corrupt: func(t *testing.T, store *Store, mutation task.Mutation) {
+			changed := mutation.FinishCoverage.Report.Clone()
+			changed.Toolchain.NormalizerVersion = "2.0.0"
+			changed = validCoverageReport(t, changed)
+			_, _, toolchainJSON, err := encodeCoverageReportMetadata(changed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.db.Exec(`UPDATE coverage_reports SET toolchain_json=? WHERE report_id=?`, string(toolchainJSON), changed.ID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "completeness", corrupt: func(t *testing.T, store *Store, mutation task.Mutation) {
+			changed := mutation.FinishCoverage.Report.Clone()
+			changed.Completeness = coveragedomain.Completeness{
+				Outcome: coveragedomain.OutcomePartial,
+				Reasons: []coveragedomain.CompletenessReason{coveragedomain.CompletenessReasonTestCrashed},
+			}
+			changed = validCoverageReport(t, changed)
+			completenessJSON, _, _, err := encodeCoverageReportMetadata(changed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.db.Exec(`UPDATE coverage_reports SET completeness_json=? WHERE report_id=?`, string(completenessJSON), changed.ID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "artifact link", corrupt: func(t *testing.T, store *Store, mutation task.Mutation) {
+			if _, err := store.db.Exec(
+				`UPDATE coverage_reports SET artifact_id=? WHERE report_id=?`,
+				mutation.FinishCoverage.Run.Artifacts.JUnitXMLID,
+				mutation.FinishCoverage.Report.ID,
+			); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "artifact owner", corrupt: func(t *testing.T, store *Store, mutation task.Mutation) {
+			other := coverageCompletionFixture(t, store, 9102, coveragedomain.OutcomeAvailable, "")
+			execCoverageCorruptionWithoutForeignKeys(
+				t,
+				store,
+				`UPDATE artifacts SET task_id=? WHERE artifact_id=?`,
+				other.Task.ID,
+				mutation.FinishCoverage.Run.Artifacts.CoverageJSONID,
+			)
+		}},
+		{name: "artifact kind", corrupt: func(t *testing.T, store *Store, mutation task.Mutation) {
+			if _, err := store.db.Exec(
+				`UPDATE artifacts SET kind='diagnostics' WHERE artifact_id=?`,
+				mutation.FinishCoverage.Run.Artifacts.CoverageJSONID,
+			); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "artifact MIME", corrupt: func(t *testing.T, store *Store, mutation task.Mutation) {
+			if _, err := store.db.Exec(
+				`UPDATE artifacts SET mime_type='application/octet-stream' WHERE artifact_id=?`,
+				mutation.FinishCoverage.Run.Artifacts.CoverageJSONID,
+			); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+
+	for index, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := openTestStore(t)
+			mutation := coverageCompletionFixture(t, store, 420+index, coveragedomain.OutcomeAvailable, "")
+			if _, _, err := store.Apply(ctx, mutation); err != nil {
+				t.Fatal(err)
+			}
+			tc.corrupt(t, store, mutation)
+			if _, err := store.GetCoverageReport(ctx, mutation.FinishCoverage.Report.ID); !errors.Is(err, task.ErrStorageUnavailable) {
+				t.Fatalf("GetCoverageReport() error = %v, want %v", err, task.ErrStorageUnavailable)
+			}
+		})
+	}
+}
+
+func validCoverageReport(t *testing.T, value coveragedomain.Report) coveragedomain.Report {
+	t.Helper()
+	validated, err := coveragedomain.NewReport(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return validated
+}
+
+func execCoverageCorruptionWithoutForeignKeys(
+	t *testing.T,
+	store *Store,
+	statement string,
+	args ...any,
+) {
+	t.Helper()
+	if _, err := store.db.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
+		t.Fatal(err)
+	}
+	restored := false
+	defer func() {
+		if !restored {
+			_, _ = store.db.Exec(`PRAGMA foreign_keys=ON`)
+		}
+	}()
+	if _, err := store.db.Exec(statement, args...); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`PRAGMA foreign_keys=ON`); err != nil {
+		t.Fatal(err)
+	}
+	restored = true
+}
+
 func TestCoverageArtifactContractRejectsInvalidPublicationSets(t *testing.T) {
 	ctx := context.Background()
 	cases := []struct {

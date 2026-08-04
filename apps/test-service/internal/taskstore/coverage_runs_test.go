@@ -3,6 +3,7 @@ package taskstore
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -314,6 +315,29 @@ func TestCoverageCompletionPersistsAggregateAtomically(t *testing.T) {
 	}
 }
 
+func TestCoverageOwnedTestRunRejectsPublicFinishRunWithoutChangingAggregate(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	mutation := coverageCompletionFixture(t, store, 219, coveragedomain.OutcomeAvailable, "")
+	before := captureCoverageTerminalSnapshot(
+		t,
+		store,
+		mutation.Task.ID,
+		mutation.FinishCoverage.Run.ID,
+		mutation.FinishRun.RunID,
+	)
+
+	err := store.FinishRun(ctx, mutation.FinishRun.Clone(), mutation.Artifacts)
+	if !errors.Is(err, task.ErrInvalidArgument) {
+		t.Fatalf("FinishRun(coverage-owned) error = %v, want %v", err, task.ErrInvalidArgument)
+	}
+
+	assertCoverageTerminalRolledBack(t, store, before)
+	if violations := foreignKeyViolations(t, store.db); violations != 0 {
+		t.Fatalf("foreign key violations = %d", violations)
+	}
+}
+
 func TestCoverageCompletionAdvancesRunningAggregate(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -423,6 +447,17 @@ func TestCoverageCompletionRejectsMismatchedTerminalGraph(t *testing.T) {
 		{name: "missing report", mutate: func(m *task.Mutation) { m.FinishCoverage.Report = nil }},
 		{name: "wrong task outcome", mutate: func(m *task.Mutation) { m.Task.Outcome = task.OutcomeInfrastructureFailed }},
 		{name: "missing task finished event", mutate: func(m *task.Mutation) { m.Events = nil }},
+		{name: "duplicate task finished event", mutate: func(m *task.Mutation) {
+			m.Events = append(append([]task.EventDraft(nil), m.Events...), m.Events[0])
+		}},
+		{name: "event after task finished", mutate: func(m *task.Mutation) {
+			m.Events = append(append([]task.EventDraft(nil), m.Events...), task.EventDraft{
+				TaskID:  m.Task.ID,
+				Type:    task.EventTaskDiagnostic,
+				At:      *m.Task.FinishedAt,
+				Payload: json.RawMessage(`{"diagnostic":"late"}`),
+			})
+		}},
 		{name: "coverage without test completion", mutate: func(m *task.Mutation) { m.FinishRun = nil }},
 		{name: "coverage task finished without aggregate completion", mutate: func(m *task.Mutation) {
 			m.FinishRun, m.FinishCoverage = nil, nil
@@ -488,6 +523,42 @@ func TestCoverageTerminalReplayIsIdempotentAndImmutable(t *testing.T) {
 	}
 	if after := coverageTerminalCounts(t, store); !reflect.DeepEqual(after, before) {
 		t.Fatalf("counts after replay = %v, want %v", after, before)
+	}
+
+	eventReplayCases := []struct {
+		name   string
+		mutate func(*task.Mutation)
+	}{
+		{name: "changed payload", mutate: func(candidate *task.Mutation) {
+			candidate.Events[0].Payload = json.RawMessage(`{"changed":true}`)
+		}},
+		{name: "changed time", mutate: func(candidate *task.Mutation) {
+			candidate.Events[0].At = candidate.Events[0].At.Add(time.Nanosecond)
+		}},
+		{name: "extra event", mutate: func(candidate *task.Mutation) {
+			candidate.Events = append([]task.EventDraft{{
+				TaskID:  candidate.Task.ID,
+				Type:    task.EventTaskDiagnostic,
+				At:      candidate.Events[0].At.Add(-time.Nanosecond),
+				Payload: json.RawMessage(`{"diagnostic":"extra"}`),
+			}}, candidate.Events...)
+		}},
+	}
+	for _, tc := range eventReplayCases {
+		t.Run(tc.name, func(t *testing.T) {
+			candidate := mutation
+			candidate.Events = append([]task.EventDraft(nil), mutation.Events...)
+			for index := range candidate.Events {
+				candidate.Events[index].Payload = append(json.RawMessage(nil), candidate.Events[index].Payload...)
+			}
+			tc.mutate(&candidate)
+			if _, _, err := store.Apply(ctx, candidate); !errors.Is(err, task.ErrConflict) {
+				t.Fatalf("event replay error = %v, want %v", err, task.ErrConflict)
+			}
+			if after := coverageTerminalCounts(t, store); !reflect.DeepEqual(after, before) {
+				t.Fatalf("counts after event replay = %v, want %v", after, before)
+			}
+		})
 	}
 
 	changed := mutation

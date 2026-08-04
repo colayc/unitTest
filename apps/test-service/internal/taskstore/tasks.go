@@ -622,7 +622,7 @@ func validateTerminalMutation(mutation task.Mutation) (*testdomain.TestRun, *tas
 			mutation.Task.Status != task.StatusFinished || mutation.Expected == task.StatusFinished ||
 			(mutation.FinishCoverage.Expected != coveragedomain.StatusQueued &&
 				mutation.FinishCoverage.Expected != coveragedomain.StatusRunning) ||
-			!hasTaskFinishedEvent(mutation.Events) {
+			!hasSingleFinalTaskFinishedEvent(mutation.Events) {
 			return nil, nil, task.ErrInvalidArgument
 		}
 		run, err := coveragedomain.NewRun(mutation.FinishCoverage.Run.Clone())
@@ -731,6 +731,19 @@ func equivalentCoverageTerminalReplay(
 		equivalentTerminalSteps(persistedSteps, incomingSteps, mutation.Steps, mutation.AppendSteps)
 	persistedTask.Steps = persistedSteps
 	if !taskMatches {
+		return task.Task{}, false, nil
+	}
+	persistedEvents, err := loadEventDraftsBetween(
+		ctx,
+		tx,
+		mutation.Task.ID,
+		mutation.Task.LastSequence,
+		persistedTask.LastSequence,
+	)
+	if err != nil {
+		return task.Task{}, false, storageError("read terminal Task replay events", err)
+	}
+	if !equivalentEventDrafts(persistedEvents, mutation.Events) {
 		return task.Task{}, false, nil
 	}
 	persistedTestRun, err := scanTestRun(tx.QueryRowContext(

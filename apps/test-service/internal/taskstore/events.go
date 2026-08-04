@@ -1,9 +1,11 @@
 package taskstore
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"unit-test-ide.local/test-service/internal/task"
@@ -37,13 +39,75 @@ func validEventDraft(value task.EventDraft) bool {
 		json.Valid(value.Payload)
 }
 
-func hasTaskFinishedEvent(drafts []task.EventDraft) bool {
-	for _, draft := range drafts {
-		if draft.Type == task.EventTaskFinished {
-			return true
+func hasSingleFinalTaskFinishedEvent(drafts []task.EventDraft) bool {
+	finished := 0
+	for index, draft := range drafts {
+		if draft.Type != task.EventTaskFinished {
+			continue
+		}
+		finished++
+		if index != len(drafts)-1 {
+			return false
 		}
 	}
-	return false
+	return finished == 1
+}
+
+func loadEventDraftsBetween(
+	ctx context.Context,
+	tx *sql.Tx,
+	taskID string,
+	after int64,
+	through int64,
+) ([]task.EventDraft, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT event_type, occurred_at, payload_json
+		FROM task_events
+		WHERE task_id=? AND sequence>? AND sequence<=?
+		ORDER BY sequence`, taskID, after, through)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	drafts := make([]task.EventDraft, 0)
+	for rows.Next() {
+		var eventType, occurredAt, payload string
+		if err := rows.Scan(&eventType, &occurredAt, &payload); err != nil {
+			return nil, err
+		}
+		at, err := parseEventTime(occurredAt)
+		if err != nil {
+			return nil, err
+		}
+		draft := task.EventDraft{
+			TaskID:  taskID,
+			Type:    task.EventType(eventType),
+			At:      at,
+			Payload: json.RawMessage(payload),
+		}
+		if !validEventDraft(draft) {
+			return nil, errors.New("invalid persisted event draft")
+		}
+		drafts = append(drafts, draft)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return drafts, nil
+}
+
+func equivalentEventDrafts(persisted, incoming []task.EventDraft) bool {
+	if len(persisted) != len(incoming) {
+		return false
+	}
+	for index := range persisted {
+		if persisted[index].TaskID != incoming[index].TaskID ||
+			persisted[index].Type != incoming[index].Type ||
+			!persisted[index].At.Equal(incoming[index].At) ||
+			!bytes.Equal(persisted[index].Payload, incoming[index].Payload) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Store) AppendEvent(ctx context.Context, taskID string, draft task.EventDraft) (task.Event, error) {

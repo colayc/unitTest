@@ -26,14 +26,61 @@ func (s *Store) GetCoverageReport(ctx context.Context, reportID string) (coverag
 	if s == nil || ctx == nil || !lowerHex(reportID, 32) {
 		return coveragedomain.Report{}, task.ErrInvalidArgument
 	}
-	report, err := scanCoverageReport(s.db.QueryRowContext(ctx, coverageReportSelect+` WHERE report_id=?`, reportID))
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return coveragedomain.Report{}, storageError("begin CoverageReport read", err)
+	}
+	defer tx.Rollback()
+	report, err := scanCoverageReport(tx.QueryRowContext(ctx, coverageReportSelect+` WHERE report_id=?`, reportID))
 	if isNoRows(err) {
 		return coveragedomain.Report{}, task.ErrNotFound
 	}
 	if err != nil {
 		return coveragedomain.Report{}, storageError("get CoverageReport", err)
 	}
-	return report.Clone(), nil
+	var taskID string
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT task_id FROM coverage_reports WHERE report_id=?`,
+		reportID,
+	).Scan(&taskID); err != nil {
+		return coveragedomain.Report{}, storageError("get CoverageReport owner", err)
+	}
+	owner, err := scanTask(tx.QueryRowContext(ctx, taskSelect+` WHERE task_id=?`, taskID))
+	if err != nil || validateTask(owner) != nil || owner.Kind != task.KindCoverageRun ||
+		owner.Status != task.StatusFinished {
+		return coveragedomain.Report{}, storageError("validate CoverageReport owner", err)
+	}
+	run, err := scanCoverageRun(tx.QueryRowContext(
+		ctx,
+		coverageRunSelect+` WHERE coverage_run_id=? AND task_id=?`,
+		report.RunID,
+		taskID,
+	))
+	if err != nil {
+		return coveragedomain.Report{}, storageError("get CoverageReport run", err)
+	}
+	validated, err := validateCoverageReportForRun(report, run, taskID)
+	if err != nil || owner.Outcome != task.CoverageTaskOutcome(run.Outcome, run.Reason) ||
+		owner.LastSequence != run.LastSequence {
+		return coveragedomain.Report{}, storageError("validate CoverageReport graph", err)
+	}
+	artifact, err := scanArtifact(tx.QueryRowContext(
+		ctx,
+		artifactSelect+` WHERE artifact_id=? AND task_id=?`,
+		validated.ArtifactID,
+		taskID,
+	))
+	if err != nil || !validArtifact(artifact) ||
+		artifact.ID != run.Artifacts.CoverageJSONID ||
+		artifact.Kind != coverageJSONArtifactKind ||
+		artifact.MIMEType != applicationJSONMIMEType {
+		return coveragedomain.Report{}, storageError("validate CoverageReport artifact", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return coveragedomain.Report{}, storageError("commit CoverageReport read", err)
+	}
+	return validated.Clone(), nil
 }
 
 func insertCoverageReport(

@@ -148,6 +148,24 @@ func (s *Store) FinishRun(
 		return storageError("begin TestRun finish", err)
 	}
 	defer tx.Rollback()
+	var ownerTaskID string
+	var ownerKind sql.NullString
+	err = tx.QueryRowContext(ctx, `SELECT r.task_id, t.kind
+		FROM test_runs r
+		LEFT JOIN tasks t ON t.task_id=r.task_id
+		WHERE r.run_id=?`, run.RunID).Scan(&ownerTaskID, &ownerKind)
+	if isNoRows(err) {
+		return task.ErrNotFound
+	}
+	if err != nil || !ownerKind.Valid || !validTaskKind(task.Kind(ownerKind.String)) {
+		return storageError("resolve TestRun owner", err)
+	}
+	if task.Kind(ownerKind.String) == task.KindCoverageRun {
+		return task.ErrInvalidArgument
+	}
+	if ownerTaskID != run.TaskID {
+		return task.ErrConflict
+	}
 	if err := finishRunTx(ctx, tx, run, artifacts, true); err != nil {
 		return err
 	}

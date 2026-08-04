@@ -1845,10 +1845,47 @@ func assertCoverageMigrationSchema(t *testing.T, db *sql.DB) {
 		t.Fatalf("schema tables = %v, want exactly %d approved tables", tables, len(wantTables))
 	}
 
-	for _, tableName := range tables {
-		if tableName == "coverage_runs" || tableName == "coverage_reports" {
-			continue
+	coverageColumns := map[string][]string{
+		"coverage_runs": {
+			"coverage_run_id", "task_id", "test_run_id", "idempotency_key",
+			"request_json", "workspace_generation", "project_id", "coverage_profile_id",
+			"catalog_revision", "selection_snapshot_json", "repeat_count", "timeout_ms",
+			"status", "outcome", "reason", "toolchain_json", "summary_json", "report_id",
+			"coverage_json_artifact_id", "junit_xml_artifact_id", "coverage_html_artifact_id",
+			"created_at", "started_at", "finished_at", "last_sequence",
+		},
+		"coverage_reports": {
+			"report_id", "coverage_run_id", "task_id", "test_run_id", "schema_version",
+			"created_at", "completeness_json", "summary_json", "toolchain_json", "artifact_id",
+		},
+	}
+	for tableName, wantColumns := range coverageColumns {
+		rows, err := db.Query(`SELECT name FROM pragma_table_info(?) ORDER BY cid`, tableName)
+		if err != nil {
+			t.Fatal(err)
 		}
+		columns := make([]string, 0, len(wantColumns))
+		for rows.Next() {
+			var column string
+			if err := rows.Scan(&column); err != nil {
+				_ = rows.Close()
+				t.Fatal(err)
+			}
+			columns = append(columns, column)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			t.Fatal(err)
+		}
+		if err := rows.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(columns, wantColumns) {
+			t.Fatalf("%s columns = %v, want exactly %v", tableName, columns, wantColumns)
+		}
+	}
+
+	for _, tableName := range tables {
 		rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, tableName)
 		if err != nil {
 			t.Fatal(err)
@@ -1860,10 +1897,18 @@ func assertCoverageMigrationSchema(t *testing.T, db *sql.DB) {
 				t.Fatal(err)
 			}
 			name := strings.ToLower(column)
-			if strings.Contains(name, "coverage") ||
-				(strings.HasSuffix(name, "_json") && (strings.Contains(name, "file") || strings.Contains(name, "line"))) {
+			fileOrLine, payload := false, false
+			for _, token := range strings.Split(name, "_") {
+				switch token {
+				case "file", "files", "line", "lines":
+					fileOrLine = true
+				case "json", "payload", "body", "content", "blob":
+					payload = true
+				}
+			}
+			if fileOrLine && payload {
 				_ = rows.Close()
-				t.Fatalf("%s unexpectedly stores coverage payload column %q", tableName, column)
+				t.Fatalf("%s unexpectedly stores file/line coverage payload column %q", tableName, column)
 			}
 		}
 		if err := rows.Close(); err != nil {
