@@ -21,9 +21,10 @@ import (
 var migrationFiles embed.FS
 
 type migration struct {
-	version  int
-	checksum string
-	sql      string
+	version             int
+	checksum            string
+	compatibleChecksums []string
+	sql                 string
 }
 
 const migrationCleanupTimeout = 5 * time.Second
@@ -187,9 +188,9 @@ func countForeignKeyViolations(ctx context.Context, queryer interface {
 }
 
 func (s *Store) validateAppliedMigrations(ctx context.Context, migrations []migration) (map[int]bool, error) {
-	expected := make(map[int]string, len(migrations))
+	expected := make(map[int]migration, len(migrations))
 	for _, current := range migrations {
-		expected[current.version] = current.checksum
+		expected[current.version] = current
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT version, sha256 FROM schema_migrations ORDER BY version`)
 	if err != nil {
@@ -203,11 +204,11 @@ func (s *Store) validateAppliedMigrations(ctx context.Context, migrations []migr
 		if err := rows.Scan(&version, &checksum); err != nil {
 			return nil, storageError("read migration state", err)
 		}
-		expectedChecksum, ok := expected[version]
+		expectedMigration, ok := expected[version]
 		if !ok {
 			return nil, fmt.Errorf("%w: unknown migration version %d", task.ErrStorageUnavailable, version)
 		}
-		if checksum != expectedChecksum {
+		if !expectedMigration.acceptsChecksum(checksum) {
 			return nil, fmt.Errorf("%w: migration %d checksum mismatch", task.ErrStorageUnavailable, version)
 		}
 		applied[version] = true
@@ -257,8 +258,21 @@ func loadMigrations() ([]migration, error) {
 		if err != nil {
 			return nil, err
 		}
-		digest := sha256.Sum256(contents)
-		result = append(result, migration{version: version, checksum: hex.EncodeToString(digest[:]), sql: string(contents)})
+		canonicalSQL := strings.ReplaceAll(string(contents), "\r\n", "\n")
+		canonicalDigest := sha256.Sum256([]byte(canonicalSQL))
+		crlfDigest := sha256.Sum256([]byte(strings.ReplaceAll(canonicalSQL, "\n", "\r\n")))
+		canonicalChecksum := hex.EncodeToString(canonicalDigest[:])
+		crlfChecksum := hex.EncodeToString(crlfDigest[:])
+		compatibleChecksums := make([]string, 0, 1)
+		if crlfChecksum != canonicalChecksum {
+			compatibleChecksums = append(compatibleChecksums, crlfChecksum)
+		}
+		result = append(result, migration{
+			version:             version,
+			checksum:            canonicalChecksum,
+			compatibleChecksums: compatibleChecksums,
+			sql:                 canonicalSQL,
+		})
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].version < result[j].version })
 	for index := range result {
@@ -267,4 +281,16 @@ func loadMigrations() ([]migration, error) {
 		}
 	}
 	return result, nil
+}
+
+func (m migration) acceptsChecksum(checksum string) bool {
+	if checksum == m.checksum {
+		return true
+	}
+	for _, compatible := range m.compatibleChecksums {
+		if checksum == compatible {
+			return true
+		}
+	}
+	return false
 }

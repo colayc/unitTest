@@ -1040,9 +1040,9 @@ func TestMigration009UpgradesCoverageSchemaAndPreservesRelations(t *testing.T) {
 		t.Fatalf("migration tail = %#v, want version 9", migrations)
 	}
 	wantLegacyChecksums := []string{
-		"b70e6fce0b2f262c5bb5c7b6288344812c66377ddb3fd5268c97a94d437880d3",
-		"47201f3fef416e516fa647dac9e46ac3f4e3cf455a04168c7e0101c543ec71a2",
-		"d158eeddf0251b4d4c7692527650e71fc35faae67f7cf5dd8896b7b0c39436cc",
+		"2f3f3db3d9811852897799f6e5b210e615edb47002dde34a51bb21432b8a3158",
+		"6d4a171589c89435d710d1dccdd849ff101646f0e1c28eb05f4fa183bd5c95be",
+		"73992c95549eb16f4b8a3398e2b319059bdc468e69649c96a6cfe7422c556eae",
 		"2cf08a34c001b79bbfa495ddd9e892e47120bb195845d93a515ddda3d50f57c9",
 		"9c18580478d744c7bf4b36ba3e8fcd4f5a34ba5021cb98ed886946996c7b3719",
 		"fb9b6d985853a01c6b44164ef2f59ca89b839109c57f276c3e760dcb55029d86",
@@ -1333,6 +1333,35 @@ func TestReopenDoesNotReapplyMigrationAndDetectsChecksumTampering(t *testing.T) 
 	}
 	if _, err := Open(path); err == nil || !errors.Is(err, task.ErrStorageUnavailable) {
 		t.Fatalf("Open(tampered migration) error = %v", err)
+	}
+}
+
+func TestReopenAcceptsEquivalentCRLFMigrationChecksum(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.sqlite")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const crlfMigration001Checksum = "b70e6fce0b2f262c5bb5c7b6288344812c66377ddb3fd5268c97a94d437880d3"
+	if _, err := store.db.Exec(`UPDATE schema_migrations SET sha256=? WHERE version=1`, crlfMigration001Checksum); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open(CRLF migration history) error = %v", err)
+	}
+	defer reopened.Close()
+	var checksum string
+	if err := reopened.db.QueryRow(`SELECT sha256 FROM schema_migrations WHERE version=1`).Scan(&checksum); err != nil {
+		t.Fatal(err)
+	}
+	if checksum != crlfMigration001Checksum {
+		t.Fatalf("migration 1 checksum = %q, want preserved CRLF compatibility checksum", checksum)
 	}
 }
 
