@@ -6,11 +6,11 @@ type CapabilitiesV14 struct {
 	CoverageRun                bool                            `json:"coverageRun"`
 	CtestJSON                  bool                            `json:"ctestJson"`
 	FrameworkAdapters          []FrameworkAdapterCapabilityV14 `json:"frameworkAdapters"`
-	MaxCatalogPageSize         float64                         `json:"maxCatalogPageSize"`
-	MaxCoveragePageSize        float64                         `json:"maxCoveragePageSize"`
-	MaxCoverageTimeoutMS       float64                         `json:"maxCoverageTimeoutMs"`
-	MaxRepeatCount             float64                         `json:"maxRepeatCount"`
-	MaxSelectionSize           float64                         `json:"maxSelectionSize"`
+	MaxCatalogPageSize         int64                           `json:"maxCatalogPageSize"`
+	MaxCoveragePageSize        int64                           `json:"maxCoveragePageSize"`
+	MaxCoverageTimeoutMS       int64                           `json:"maxCoverageTimeoutMs"`
+	MaxRepeatCount             int64                           `json:"maxRepeatCount"`
+	MaxSelectionSize           int64                           `json:"maxSelectionSize"`
 	OpaqueCTestFallback        bool                            `json:"opaqueCTestFallback"`
 	TargetList                 bool                            `json:"targetList"`
 	TestDiscovery              bool                            `json:"testDiscovery"`

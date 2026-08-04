@@ -25,7 +25,7 @@ const models = [
   { directory: "v1.3", schema: "task.schema.json", top: "TaskSnapshotV13", template: "taskV13", ts: "task-v1-3.ts", go: "v1_3/task/generated.go", goPackage: "protocolmodelv13task" },
   { directory: "v1.3", schema: "event.schema.json", top: "TaskEventV13", bundle: ["diagnostic.schema.json", "test.schema.json"], template: "eventV13", ts: "event-v1-3.ts", go: "v1_3/event/generated.go", goPackage: "protocolmodelv13event" },
   { directory: "v1.3", schema: "artifact.schema.json", top: "ArtifactMetadataV13", ts: "artifact-v1-3.ts", go: "v1_3/artifact/generated.go", goPackage: "protocolmodelv13artifact" },
-  { directory: "v1.4", schema: "capabilities.schema.json", top: "CapabilitiesV14", ts: "capabilities-v1-4.ts", go: "v1_4/capabilities/generated.go", goPackage: "protocolmodelv14capabilities" },
+  { directory: "v1.4", schema: "capabilities.schema.json", top: "CapabilitiesV14", goRewrite: "capabilitiesV14", ts: "capabilities-v1-4.ts", go: "v1_4/capabilities/generated.go", goPackage: "protocolmodelv14capabilities" },
   { directory: "v1.4", schema: "diagnostic.schema.json", top: "DiagnosticV14", ts: "diagnostic-v1-4.ts", go: "v1_4/diagnostic/generated.go", goPackage: "protocolmodelv14diagnostic" },
   { directory: "v1.4", schema: "test.schema.json", top: "TestContractV14", bundle: ["diagnostic.schema.json"], template: "testV14", ts: "test-v1-4.ts", go: "v1_4/test/generated.go", goPackage: "protocolmodelv14test" },
   { directory: "v1.4", schema: "coverage.schema.json", top: "CoverageContractV14", bundle: ["test.schema.json"], template: "coverageV14", ts: "coverage-v1-4.ts", go: "v1_4/coverage/generated.go", goPackage: "protocolmodelv14coverage" },
@@ -569,6 +569,37 @@ const ( ContainerPassedV13 TestContainerOutcomeV13 = "passed"; ContainerFailedV1
 };
 const temp = await mkdtemp(join(tmpdir(), "unit-test-ide-protocol-"));
 
+function assertContainsAll(source, expected, error) {
+  if (expected.some((value) => !source.includes(value))) throw new Error(error);
+}
+
+function assertExactLines(source, expected, error) {
+  const lines = new Set(source.replaceAll("\r\n", "\n").split("\n").map((line) => line.trim()));
+  if (expected.some((value) => !lines.has(value))) throw new Error(error);
+}
+
+function assertMatchesAll(source, expected, error) {
+  if (expected.some((pattern) => !pattern.test(source))) throw new Error(error);
+}
+
+function assertExactMarkerMethods(source, method, branches, error) {
+  const expected = branches.map((branch) => `func (${branch}) ${method}() {}`);
+  const actual = source.match(new RegExp(`func \\([^)]+\\) ${method}\\(\\) \\{\\}`, "g")) ?? [];
+  if (actual.length !== expected.length || expected.some((value) => !actual.includes(value))) throw new Error(error);
+}
+
+function rewriteGoCapabilitiesV14(source) {
+  const fields = ["MaxCatalogPageSize", "MaxCoveragePageSize", "MaxCoverageTimeoutMS", "MaxRepeatCount", "MaxSelectionSize"];
+  let result = source;
+  for (const field of fields) {
+    const pattern = new RegExp(`(${field}\\s+)float64(\\s+)`);
+    const replaced = result.replace(pattern, "$1int64$2");
+    if (replaced === result) throw new Error("Unable to create v1.4 capabilities template");
+    result = replaced;
+  }
+  return result;
+}
+
 function rewriteReferences(value, transform) {
   if (Array.isArray(value)) {
     return value.map((item) => rewriteReferences(item, transform));
@@ -681,13 +712,31 @@ try {
       if (result.status !== 0) throw new Error(`quicktype failed for ${model.top} with status ${result.status ?? 1}`);
       if (!target.packageName && model.template) {
         if (model.template === "eventV14") {
-          if (!typescriptEventV14.includes('from "./diagnostic-v1-4.js"') || !typescriptEventV14.includes('from "./test-v1-4.js"') || !typescriptEventV14.includes('from "./coverage-v1-4.js"')) throw new Error("Unable to create v1.4 event template");
+          assertExactLines(typescriptEventV14, [
+            'import type { CoverageCompletenessV14, CoverageRunOutcomeV14, CoverageRunReasonV14, CoverageSummaryV14 } from "./coverage-v1-4.js";',
+            'import type { DiagnosticV14 } from "./diagnostic-v1-4.js";',
+            'import type { TaskOutcomeV14 } from "./task-v1-4.js";',
+            'import type { TestItemResult, TestRunOutcomeV14, TestRunSummaryV14 } from "./test-v1-4.js";'
+          ], "Unable to create v1.4 event template");
+          assertContainsAll(typescriptEventV14, [
+            "diagnostic: DiagnosticV14;",
+            "result: TestItemResult;",
+            "outcome: TestRunOutcomeV14; summary: TestRunSummaryV14;",
+            "completeness: CoverageCompletenessV14; summary: CoverageSummaryV14;",
+            "outcome: CoverageRunOutcomeV14; reason?: CoverageRunReasonV14;"
+          ], "Unable to create v1.4 event template");
           await writeFile(output, typescriptEventV14);
         } else if (model.template === "taskV14") {
           if (!typescriptTaskV14.includes("CoverageRunTaskSnapshotV14")) throw new Error("Unable to create v1.4 task template");
           await writeFile(output, typescriptTaskV14);
         } else if (model.template === "coverageV14") {
-          if (!typescriptCoverageV14.includes('from "./test-v1-4.js"')) throw new Error("Unable to create v1.4 coverage template");
+          assertExactLines(typescriptCoverageV14, [
+            'import type { TestSelectionSnapshotV14, TestSelectionV14 } from "./test-v1-4.js";'
+          ], "Unable to create v1.4 coverage template");
+          assertContainsAll(typescriptCoverageV14, [
+            "selection: TestSelectionV14;",
+            "selectionSnapshot: TestSelectionSnapshotV14;"
+          ], "Unable to create v1.4 coverage template");
           await writeFile(output, typescriptCoverageV14);
         } else if (model.template === "testV13" || model.template === "testV14") {
           const generated = await readFile(output, "utf8");
@@ -705,13 +754,37 @@ try {
       }
       if (target.packageName && model.template) {
         if (model.template === "eventV14") {
-          if (!goEventV14.includes("protocolmodelv14diagnostic") || !goEventV14.includes("protocolmodelv14test") || !goEventV14.includes("protocolmodelv14coverage") || !goEventV14.includes("isCoverageEventV14()")) throw new Error("Unable to create v1.4 event template");
+          assertExactLines(goEventV14, [
+            'protocolmodelv14coverage "unit-test-ide.local/test-service/internal/protocolmodel/v1_4/coverage"',
+            'protocolmodelv14diagnostic "unit-test-ide.local/test-service/internal/protocolmodel/v1_4/diagnostic"',
+            'protocolmodelv14test "unit-test-ide.local/test-service/internal/protocolmodel/v1_4/test"'
+          ], "Unable to create v1.4 event template");
+          assertMatchesAll(goEventV14, [
+            /\bDiagnostic\s+protocolmodelv14diagnostic\.DiagnosticV14\s+`json:"diagnostic"`/,
+            /\bResult\s+protocolmodelv14test\.TestItemResult\s+`json:"result"`/,
+            /\bOutcome\s+protocolmodelv14test\.TestRunOutcomeV14\s+`json:"outcome"`/,
+            /\bSummary\s+protocolmodelv14test\.TestRunSummaryV14\s+`json:"summary"`/,
+            /\bCompleteness\s+protocolmodelv14coverage\.CoverageCompletenessV14\s+`json:"completeness"`/,
+            /\bSummary\s+protocolmodelv14coverage\.CoverageSummaryV14\s+`json:"summary"`/,
+            /\bOutcome\s+protocolmodelv14coverage\.CoverageRunOutcomeV14\s+`json:"outcome"`/,
+            /\bReason\s+\*protocolmodelv14coverage\.CoverageRunReasonV14\s+`json:"reason,omitempty"`/
+          ], "Unable to create v1.4 event template");
+          const taskEventBranches = ["TaskCreatedEventV14", "TaskStartedEventV14", "TaskStepStartedEventV14", "TaskOutputEventV14", "TaskStepFinishedEventV14", "TaskCancellationRequestedEventV14", "ArtifactCreatedEventV14", "TaskFinishedEventV14", "TaskDiagnosticEventV14", "TestDiscoveryStartedEventV14", "TestContainerDiscoveredEventV14", "TestCatalogPublishedEventV14", "TestRunStartedEventV14", "TestContainerStartedEventV14", "TestItemStartedEventV14", "TestOutputEventV14", "TestItemFinishedEventV14", "TestContainerFinishedEventV14", "TestRunFinishedEventV14", "CoverageRunStartedEventV14", "CoverageBuildFinishedEventV14", "CoverageCollectionStartedEventV14", "CoverageReportAvailableEventV14", "CoverageRunFinishedEventV14"];
+          const coverageEventBranches = ["CoverageRunStartedEventV14", "CoverageBuildFinishedEventV14", "CoverageCollectionStartedEventV14", "CoverageReportAvailableEventV14", "CoverageRunFinishedEventV14"];
+          assertExactMarkerMethods(goEventV14, "isTaskEventV14", taskEventBranches, "Unable to create v1.4 event template");
+          assertExactMarkerMethods(goEventV14, "isCoverageEventV14", coverageEventBranches, "Unable to create v1.4 event template");
           await writeFile(output, goEventV14);
         } else if (model.template === "taskV14") {
-          if (!goTaskV14.includes("func (CoverageRunTaskSnapshotV14) isTaskSnapshotV14()")) throw new Error("Unable to create v1.4 task template");
+          assertExactMarkerMethods(goTaskV14, "isTaskSnapshotV14", ["CmakeBuildTaskSnapshotV14", "SimulationTaskSnapshotV14", "TestDiscoveryTaskSnapshotV14", "TestRunTaskSnapshotV14", "CoverageRunTaskSnapshotV14"], "Unable to create v1.4 task template");
           await writeFile(output, goTaskV14);
         } else if (model.template === "coverageV14") {
-          if (!goCoverageV14.includes("protocolmodelv14test")) throw new Error("Unable to create v1.4 coverage template");
+          assertExactLines(goCoverageV14, [
+            'protocolmodelv14test "unit-test-ide.local/test-service/internal/protocolmodel/v1_4/test"'
+          ], "Unable to create v1.4 coverage template");
+          assertMatchesAll(goCoverageV14, [
+            /\bSelection\s+protocolmodelv14test\.TestSelectionV14\s+`json:"selection"`/,
+            /\bSelectionSnapshot\s+protocolmodelv14test\.TestSelectionSnapshotV14\s+`json:"selectionSnapshot"`/
+          ], "Unable to create v1.4 coverage template");
           await writeFile(output, goCoverageV14);
         } else if (model.template === "event" || model.template === "eventV13") {
           const imports = model.template === "event" ? `import "time"\n\n` : "";
@@ -724,6 +797,9 @@ try {
           if (replaced === renamed) throw new Error(`Unable to create Go union for ${unionType}`);
           await writeFile(output, replaced);
         }
+      }
+      if (target.packageName && model.goRewrite === "capabilitiesV14") {
+        await writeFile(output, rewriteGoCapabilitiesV14(await readFile(output, "utf8")));
       }
       if (target.packageName) {
         const sourceWithImports = normalizeGoImports(await readFile(output, "utf8"));
