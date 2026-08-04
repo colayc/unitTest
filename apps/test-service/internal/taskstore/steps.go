@@ -221,7 +221,11 @@ func validStoredStepID(value string) bool {
 func validStepKind(value task.StepKind) bool {
 	switch value {
 	case task.StepSimulation, task.StepConfigure, task.StepBuild,
-		task.StepTestDiscovery, task.StepTestRun:
+		task.StepTestDiscovery, task.StepTestRun,
+		task.StepCoverageConfigure, task.StepCoverageBuild,
+		task.StepCoverageTest, task.StepCoverageMerge,
+		task.StepCoverageNormalize, task.StepCoverageReport,
+		task.StepCoveragePublish:
 		return true
 	default:
 		return false

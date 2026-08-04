@@ -6,9 +6,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
+	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/testdomain"
 )
@@ -20,6 +22,9 @@ type rowScanner interface {
 }
 
 func (s *Store) Create(ctx context.Context, input task.Task, steps []task.StepSnapshot, event task.EventDraft) (task.Task, []task.Event, error) {
+	if input.Kind == task.KindCoverageRun {
+		return task.Task{}, nil, task.ErrInvalidArgument
+	}
 	return s.createTask(ctx, input, steps, event, nil)
 }
 
@@ -39,7 +44,48 @@ func (s *Store) CreateTestTask(
 		validated.Status != testdomain.RunQueued {
 		return task.Task{}, nil, task.ErrInvalidArgument
 	}
-	return s.createTask(ctx, input, steps, event, &validated)
+	return s.createTask(ctx, input, steps, event, &taskCreationRelations{
+		testRun: &validated,
+	})
+}
+
+func (s *Store) CreateCoverageTask(
+	ctx context.Context,
+	input task.Task,
+	steps []task.StepSnapshot,
+	event task.EventDraft,
+	run coveragedomain.Run,
+	testRun testdomain.TestRun,
+) (task.Task, []task.Event, error) {
+	if s == nil || ctx == nil {
+		return task.Task{}, nil, task.ErrInvalidArgument
+	}
+	validatedRun, err := coveragedomain.NewRun(run)
+	if err != nil {
+		return task.Task{}, nil, task.ErrInvalidArgument
+	}
+	validatedTestRun, err := testdomain.NewTestRun(testRun)
+	if err != nil {
+		return task.Task{}, nil, task.ErrInvalidArgument
+	}
+	if err := validateCoverageTaskCreation(
+		input,
+		steps,
+		event,
+		validatedRun,
+		validatedTestRun,
+	); err != nil {
+		return task.Task{}, nil, err
+	}
+	return s.createTask(ctx, input, steps, event, &taskCreationRelations{
+		coverageRun: &validatedRun,
+		testRun:     &validatedTestRun,
+	})
+}
+
+type taskCreationRelations struct {
+	coverageRun *coveragedomain.Run
+	testRun     *testdomain.TestRun
 }
 
 func (s *Store) createTask(
@@ -47,8 +93,11 @@ func (s *Store) createTask(
 	input task.Task,
 	steps []task.StepSnapshot,
 	event task.EventDraft,
-	run *testdomain.TestRun,
+	relations *taskCreationRelations,
 ) (task.Task, []task.Event, error) {
+	if s == nil || ctx == nil {
+		return task.Task{}, nil, task.ErrInvalidArgument
+	}
 	if err := validateTask(input); err != nil {
 		return task.Task{}, nil, err
 	}
@@ -77,6 +126,12 @@ func (s *Store) createTask(
 	if err != nil {
 		existing, findErr := findTaskByIdempotencyKey(ctx, tx, input.IdempotencyKey)
 		if findErr == nil {
+			if relations != nil && relations.coverageRun != nil {
+				if relations.testRun != nil && equivalentCoverageTaskCreation(ctx, tx, existing, input, *relations.coverageRun, *relations.testRun) {
+					return existing, nil, nil
+				}
+				return task.Task{}, nil, task.ErrIdempotencyConflict
+			}
 			if existing.RequestHash == input.RequestHash ||
 				task.EquivalentIdempotencyRequest(existing, input) {
 				return existing, nil, nil
@@ -85,8 +140,13 @@ func (s *Store) createTask(
 		}
 		return task.Task{}, nil, storageError("create task", err)
 	}
-	if run != nil {
-		if err := insertTestRun(ctx, tx, *run); err != nil {
+	if relations != nil && relations.coverageRun != nil {
+		if err := insertCoverageRun(ctx, tx, *relations.coverageRun); err != nil {
+			return task.Task{}, nil, err
+		}
+	}
+	if relations != nil && relations.testRun != nil {
+		if err := insertTestRun(ctx, tx, *relations.testRun); err != nil {
 			return task.Task{}, nil, err
 		}
 	}
@@ -101,11 +161,125 @@ func (s *Store) createTask(
 	if _, err := tx.ExecContext(ctx, `UPDATE tasks SET last_sequence=? WHERE task_id=?`, input.LastSequence, input.ID); err != nil {
 		return task.Task{}, nil, storageError("update task sequence", err)
 	}
+	if relations != nil && relations.coverageRun != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE coverage_runs SET last_sequence=? WHERE coverage_run_id=? AND task_id=?`, input.LastSequence, relations.coverageRun.ID, input.ID); err != nil {
+			return task.Task{}, nil, storageError("update CoverageRun sequence", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return task.Task{}, nil, storageError("commit create", err)
 	}
 	input.Steps = cloneSteps(steps)
 	return input, events, nil
+}
+
+func validateCoverageTaskCreation(
+	input task.Task,
+	steps []task.StepSnapshot,
+	event task.EventDraft,
+	run coveragedomain.Run,
+	testRun testdomain.TestRun,
+) error {
+	if err := validateTask(input); err != nil ||
+		input.Kind != task.KindCoverageRun || input.Status != task.StatusQueued || input.LastSequence != 0 ||
+		validateSteps(steps) != nil || !validCoverageSteps(steps) ||
+		event.TaskID != input.ID || event.Type != task.EventTaskCreated || !validEventDraft(event) ||
+		run.Status != coveragedomain.StatusQueued || run.LastSequence != 0 ||
+		testRun.Status != testdomain.RunQueued || len(testRun.Results) != 0 ||
+		run.TaskID != input.ID || testRun.TaskID != input.ID || run.TestRunID != testRun.RunID ||
+		run.Request.IdempotencyKey != input.IdempotencyKey || run.Request.IdempotencyKey != testRun.IdempotencyKey ||
+		run.Request.WorkspaceGeneration != input.WorkspaceGeneration ||
+		run.Request.ProjectID != testRun.ProjectID ||
+		run.Request.CatalogRevision != testRun.CatalogRevision ||
+		run.Request.Timeout != input.Timeout ||
+		run.Request.RepeatCount != testRun.Summary.Iterations ||
+		!reflect.DeepEqual(run.SelectionSnapshot, testRun.SelectionSnapshot) ||
+		!input.CreatedAt.Equal(run.CreatedAt) || !input.CreatedAt.Equal(testRun.CreatedAt) || !input.CreatedAt.Equal(event.At) {
+		return task.ErrInvalidArgument
+	}
+	canonical, err := run.Request.CanonicalJSON()
+	if err != nil || !bytesEqual(input.Request, canonical) {
+		return task.ErrInvalidArgument
+	}
+	return nil
+}
+
+func validCoverageSteps(steps []task.StepSnapshot) bool {
+	for _, step := range steps {
+		switch step.Kind {
+		case task.StepCoverageConfigure, task.StepCoverageBuild,
+			task.StepCoverageTest, task.StepCoverageMerge,
+			task.StepCoverageNormalize, task.StepCoverageReport,
+			task.StepCoveragePublish:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func bytesEqual(first, second []byte) bool {
+	if len(first) != len(second) {
+		return false
+	}
+	for index := range first {
+		if first[index] != second[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func equivalentCoverageTaskCreation(
+	ctx context.Context,
+	tx *sql.Tx,
+	existing task.Task,
+	incoming task.Task,
+	incomingRun coveragedomain.Run,
+	incomingTestRun testdomain.TestRun,
+) bool {
+	if !task.EquivalentIdempotencyRequest(existing, incoming) {
+		return false
+	}
+	existingRun, err := scanCoverageRun(tx.QueryRowContext(
+		ctx,
+		coverageRunSelect+` WHERE task_id=?`,
+		existing.ID,
+	))
+	if err != nil || existingRun.Status != coveragedomain.StatusQueued ||
+		existingRun.TaskID != existing.ID || existingRun.LastSequence != existing.LastSequence {
+		return false
+	}
+	existingTestRun, err := scanTestRun(tx.QueryRowContext(
+		ctx,
+		testRunSelect+` WHERE run_id=? AND task_id=?`,
+		existingRun.TestRunID,
+		existing.ID,
+	))
+	if err != nil || existingTestRun.Status != testdomain.RunQueued ||
+		existingTestRun.TaskID != existing.ID ||
+		existingTestRun.IdempotencyKey != existing.IdempotencyKey {
+		return false
+	}
+	var resultCount int
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM test_run_results WHERE run_id=?`,
+		existingTestRun.RunID,
+	).Scan(&resultCount); err != nil || resultCount != 0 {
+		return false
+	}
+
+	incomingRun.TaskID = existing.ID
+	incomingRun.TestRunID = existingTestRun.RunID
+	incomingRun.CreatedAt = existingRun.CreatedAt
+	incomingRun.LastSequence = existingRun.LastSequence
+	incomingTestRun.RunID = existingTestRun.RunID
+	incomingTestRun.TaskID = existing.ID
+	incomingTestRun.CreatedAt = existingTestRun.CreatedAt
+	incomingTestRun.Results = nil
+	return reflect.DeepEqual(existingRun, incomingRun) &&
+		reflect.DeepEqual(existingTestRun, incomingTestRun)
 }
 
 func (s *Store) FindByIdempotencyKey(ctx context.Context, key string) (task.Task, error) {
@@ -150,7 +324,7 @@ func (s *Store) Get(ctx context.Context, taskID string) (task.Task, error) {
 }
 
 func (s *Store) List(ctx context.Context, cursor string, limit int, kinds ...task.Kind) (task.Page[task.Task], error) {
-	if limit < 1 || limit > maxPageSize || len(kinds) > 4 {
+	if limit < 1 || limit > maxPageSize || len(kinds) > 5 {
 		return task.Page[task.Task]{}, task.ErrInvalidArgument
 	}
 	query := taskSelect
@@ -399,7 +573,7 @@ func validateTask(value task.Task) error {
 		if !task.ValidScenario(value.Scenario) || value.WorkspaceGeneration != "" {
 			return task.ErrInvalidArgument
 		}
-	case task.KindCMakeBuild, task.KindTestDiscovery, task.KindTestRun:
+	case task.KindCMakeBuild, task.KindTestDiscovery, task.KindTestRun, task.KindCoverageRun:
 		if value.Scenario != "" || !validWorkspaceGeneration(value.WorkspaceGeneration) {
 			return task.ErrInvalidArgument
 		}
@@ -419,7 +593,7 @@ func validateTask(value task.Task) error {
 func validTaskKind(value task.Kind) bool {
 	switch value {
 	case task.KindSimulation, task.KindCMakeBuild,
-		task.KindTestDiscovery, task.KindTestRun:
+		task.KindTestDiscovery, task.KindTestRun, task.KindCoverageRun:
 		return true
 	default:
 		return false
