@@ -36,16 +36,31 @@ func validRequest() Request {
 
 func TestRequestValidatesProtocolBounds(t *testing.T) {
 	for name, mutate := range map[string]func(*Request){
-		"repeat below minimum":      func(v *Request) { v.RepeatCount = 0 },
-		"repeat above maximum":      func(v *Request) { v.RepeatCount = 101 },
-		"timeout below millisecond": func(v *Request) { v.Timeout = time.Millisecond - time.Nanosecond },
-		"timeout zero":              func(v *Request) { v.Timeout = 0 },
-		"timeout above maximum":     func(v *Request) { v.Timeout = 24*time.Hour + time.Millisecond },
-		"uppercase id":              func(v *Request) { v.IdempotencyKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" },
-		"short id":                  func(v *Request) { v.IdempotencyKey = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
-		"invalid project":           func(v *Request) { v.ProjectID = "-bad" },
-		"invalid coverage profile":  func(v *Request) { v.CoverageProfileID = "bad profile" },
-		"empty selection":           func(v *Request) { v.Selection.ItemIDs = nil },
+		"repeat minimum":  func(v *Request) { v.RepeatCount = 1 },
+		"repeat maximum":  func(v *Request) { v.RepeatCount = 100 },
+		"timeout minimum": func(v *Request) { v.Timeout = time.Millisecond },
+		"timeout maximum": func(v *Request) { v.Timeout = 24 * time.Hour },
+	} {
+		t.Run(name, func(t *testing.T) {
+			value := validRequest()
+			mutate(&value)
+			if _, err := NewRequest(value); err != nil {
+				t.Fatalf("NewRequest() error = %v, want nil", err)
+			}
+		})
+	}
+	for name, mutate := range map[string]func(*Request){
+		"repeat below minimum":            func(v *Request) { v.RepeatCount = 0 },
+		"repeat above maximum":            func(v *Request) { v.RepeatCount = 101 },
+		"timeout below millisecond":       func(v *Request) { v.Timeout = time.Millisecond - time.Nanosecond },
+		"timeout not millisecond aligned": func(v *Request) { v.Timeout = time.Millisecond + time.Nanosecond },
+		"timeout zero":                    func(v *Request) { v.Timeout = 0 },
+		"timeout above maximum":           func(v *Request) { v.Timeout = 24*time.Hour + time.Millisecond },
+		"uppercase id":                    func(v *Request) { v.IdempotencyKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" },
+		"short id":                        func(v *Request) { v.IdempotencyKey = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+		"invalid project":                 func(v *Request) { v.ProjectID = "-bad" },
+		"invalid coverage profile":        func(v *Request) { v.CoverageProfileID = "bad profile" },
+		"empty selection":                 func(v *Request) { v.Selection.ItemIDs = nil },
 	} {
 		t.Run(name, func(t *testing.T) {
 			value := validRequest()
