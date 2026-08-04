@@ -192,6 +192,8 @@ git commit -m "feat: define workspace coverage profiles"
 
 ### Task 3：Protocol v1.4 Schema、fixtures 与 generated models
 
+**writing-plans 详细执行计划：** [2026-08-04-protocol-v1-4-coverage-contracts-plan.md](./2026-08-04-protocol-v1-4-coverage-contracts-plan.md)
+
 **文件：**
 
 - 创建：`packages/protocol-schema/schema/v1.4/capabilities.schema.json`
@@ -209,6 +211,7 @@ git commit -m "feat: define workspace coverage profiles"
 - 创建：`packages/protocol-schema/fixtures/v1.4/coverage-run-environment.invalid.json`
 - 创建：`packages/protocol-schema/fixtures/v1.4/coverage-run-driver.invalid.json`
 - 修改：`packages/protocol-schema/test/schema.test.mjs`
+- 修改：`packages/protocol-schema/package.json`
 - 修改：`tools/protocol-gen/generate.mjs`
 - 修改：`packages/protocol-models/src/index.ts`
 - 修改：`packages/protocol-models/src/generated-contract.test.ts`
