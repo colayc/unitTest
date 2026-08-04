@@ -15,10 +15,16 @@ import (
 
 var ErrInvalidRequest = errors.New("invalid coverage request")
 
-// ValidationError identifies the invalid request field without exposing another domain's error type.
+const (
+	maxSelectionContainerIDs = 10_000
+	maxSelectionItemIDs      = 100_000
+)
+
+// ValidationError identifies the invalid request field while retaining any wrapped domain cause.
 type ValidationError struct {
 	Field  string
 	Detail string
+	cause  error
 }
 
 func (e *ValidationError) Error() string {
@@ -28,7 +34,14 @@ func (e *ValidationError) Error() string {
 	return fmt.Sprintf("%v: %s: %s", ErrInvalidRequest, e.Field, e.Detail)
 }
 
-func (e *ValidationError) Unwrap() error { return ErrInvalidRequest }
+func (e *ValidationError) Unwrap() error {
+	if e.cause != nil {
+		return e.cause
+	}
+	return ErrInvalidRequest
+}
+
+func (e *ValidationError) Is(target error) bool { return target == ErrInvalidRequest }
 
 // Request is the closed input used to create an immutable coverage run.
 type Request struct {
@@ -65,9 +78,12 @@ func NewRequest(value Request) (Request, error) {
 	if value.Timeout < time.Millisecond || value.Timeout > 24*time.Hour || value.Timeout%time.Millisecond != 0 {
 		return Request{}, invalid("timeout", "must be millisecond aligned and between 1ms and 24h")
 	}
+	if err := validateSelectionCardinality(value.Selection); err != nil {
+		return Request{}, err
+	}
 	selection, err := testdomain.NewSelection(value.Selection)
 	if err != nil {
-		return Request{}, fmt.Errorf("%w: %w", ErrInvalidRequest, err)
+		return Request{}, invalidSelection(err)
 	}
 	sortSelectionIDs(&selection)
 	return Request{
@@ -161,6 +177,37 @@ func sortSelectionIDs(value *testdomain.Selection) {
 }
 
 func invalid(field, detail string) error { return &ValidationError{Field: field, Detail: detail} }
+
+func invalidSelection(cause error) error {
+	field, detail := "selection", cause.Error()
+	var selectionError *testdomain.ValidationError
+	if errors.As(cause, &selectionError) {
+		if selectionError.Field != "" {
+			field += "." + selectionError.Field
+		}
+		detail = selectionError.Detail
+	}
+	return &ValidationError{Field: field, Detail: detail, cause: cause}
+}
+
+func validateSelectionCardinality(value testdomain.Selection) error {
+	fields := []struct {
+		name   string
+		length int
+		max    int
+	}{
+		{name: "selection.containerIds", length: len(value.ContainerIDs), max: maxSelectionContainerIDs},
+		{name: "selection.itemIds", length: len(value.ItemIDs), max: maxSelectionItemIDs},
+		{name: "selection.filter.includeItemIds", length: len(value.Filter.IncludeItemIDs), max: maxSelectionItemIDs},
+		{name: "selection.filter.excludeItemIds", length: len(value.Filter.ExcludeItemIDs), max: maxSelectionItemIDs},
+	}
+	for _, field := range fields {
+		if field.length > field.max {
+			return invalid(field.name, fmt.Sprintf("must contain at most %d IDs", field.max))
+		}
+	}
+	return nil
+}
 
 func validHex(value string, length int) bool {
 	if len(value) != length {

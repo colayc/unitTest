@@ -65,6 +65,55 @@ func finishedRun(outcome Outcome) Run {
 	return value
 }
 
+func TestCoverageWireVocabularyLiterals(t *testing.T) {
+	values := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{name: "StatusQueued", got: string(StatusQueued), want: "queued"},
+		{name: "StatusRunning", got: string(StatusRunning), want: "running"},
+		{name: "StatusFinished", got: string(StatusFinished), want: "finished"},
+		{name: "OutcomeAvailable", got: string(OutcomeAvailable), want: "available"},
+		{name: "OutcomePartial", got: string(OutcomePartial), want: "partial"},
+		{name: "OutcomeUnavailable", got: string(OutcomeUnavailable), want: "unavailable"},
+		{name: "OutcomeCancelled", got: string(OutcomeCancelled), want: "cancelled"},
+		{name: "ReasonUserCancelled", got: string(ReasonUserCancelled), want: "user_cancelled"},
+		{name: "ReasonTaskTimedOut", got: string(ReasonTaskTimedOut), want: "task_timed_out"},
+		{name: "ReasonInstrumentationFailed", got: string(ReasonInstrumentationFailed), want: "instrumentation_failed"},
+		{name: "ReasonBuildFailed", got: string(ReasonBuildFailed), want: "build_failed"},
+		{name: "ReasonProfileCollectionFailed", got: string(ReasonProfileCollectionFailed), want: "profile_collection_failed"},
+		{name: "ReasonMergeFailed", got: string(ReasonMergeFailed), want: "merge_failed"},
+		{name: "ReasonNormalizationFailed", got: string(ReasonNormalizationFailed), want: "normalization_failed"},
+		{name: "ReasonReportGenerationFailed", got: string(ReasonReportGenerationFailed), want: "report_generation_failed"},
+		{name: "ReasonPersistenceFailed", got: string(ReasonPersistenceFailed), want: "persistence_failed"},
+		{name: "ReasonServiceRestarted", got: string(ReasonServiceRestarted), want: "service_restarted"},
+		{name: "CompletenessReasonTestCrashed", got: string(CompletenessReasonTestCrashed), want: "test_crashed"},
+		{name: "CompletenessReasonTestTimedOut", got: string(CompletenessReasonTestTimedOut), want: "test_timed_out"},
+		{name: "CompletenessReasonProfileMissingForFailedInvocation", got: string(CompletenessReasonProfileMissingForFailedInvocation), want: "profile_missing_for_failed_invocation"},
+		{name: "PlatformWindows", got: string(PlatformWindows), want: "windows"},
+		{name: "PlatformLinux", got: string(PlatformLinux), want: "linux"},
+		{name: "ArchitectureX86", got: string(ArchitectureX86), want: "x86"},
+		{name: "ArchitectureX64", got: string(ArchitectureX64), want: "x64"},
+		{name: "ArchitectureARM64", got: string(ArchitectureARM64), want: "arm64"},
+		{name: "CompilerFamilyGCC", got: string(CompilerFamilyGCC), want: "gcc"},
+		{name: "CompilerFamilyClang", got: string(CompilerFamilyClang), want: "clang"},
+		{name: "CompilerFamilyClangCL", got: string(CompilerFamilyClangCL), want: "clang-cl"},
+		{name: "DriverGCov", got: string(DriverGCov), want: "gcov"},
+		{name: "DriverLLVMCov", got: string(DriverLLVMCov), want: "llvm-cov"},
+		{name: "CollectorGCovr", got: string(CollectorGCovr), want: "gcovr"},
+		{name: "CollectorLLVMCov", got: string(CollectorLLVMCov), want: "llvm-cov"},
+		{name: "SchemaVersion10", got: SchemaVersion10, want: "1.0"},
+	}
+	for _, value := range values {
+		t.Run(value.name, func(t *testing.T) {
+			if value.got != value.want {
+				t.Fatalf("%s = %q, want Protocol literal %q", value.name, value.got, value.want)
+			}
+		})
+	}
+}
+
 func TestRunLifecycleAndClosedEnums(t *testing.T) {
 	queued := validRun()
 	if _, err := NewRun(queued); err != nil {

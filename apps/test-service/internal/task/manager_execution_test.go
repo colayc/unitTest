@@ -290,6 +290,66 @@ func TestManagerResumesExistingQueuedBuildWithoutCreatingAnotherTask(t *testing.
 	}
 }
 
+func TestManagerRejectsCoverageRunStartWithoutSideEffects(t *testing.T) {
+	f := newManagerFixture(t)
+	request := oneStepBuildRequest(testID(201))
+	request.Kind = task.KindCoverageRun
+
+	got, err := f.manager.Manager.Start(context.Background(), request)
+	if !errors.Is(err, task.ErrInvalidArgument) || !reflect.DeepEqual(got, task.Task{}) {
+		t.Fatalf("Manager.Start(coverage_run) = %#v, %v; want zero Task, ErrInvalidArgument", got, err)
+	}
+	assertNoManagerCoverageSideEffects(t, f)
+}
+
+func TestManagerRejectsCoverageRunResumeQueuedWithoutSideEffects(t *testing.T) {
+	f := newManagerFixture(t)
+	request := oneStepBuildRequest(testID(202))
+	queued := task.Task{
+		ID:                  testID(203),
+		IdempotencyKey:      request.IdempotencyKey,
+		RequestHash:         strings.Repeat("b", 64),
+		Kind:                task.KindCoverageRun,
+		Request:             append(json.RawMessage(nil), request.Request...),
+		WorkspaceGeneration: request.WorkspaceGeneration,
+		PlanFingerprint:     request.Plan.Fingerprint,
+		Timeout:             request.Timeout,
+		Status:              task.StatusQueued,
+		CreatedAt:           f.clock.Now(),
+	}
+
+	got, err := f.manager.Manager.ResumeQueued(context.Background(), task.ResumeRequest{
+		Task: queued, Plan: request.Plan, Boundary: request.Boundary,
+	})
+	if !errors.Is(err, task.ErrInvalidArgument) || !reflect.DeepEqual(got, task.Task{}) {
+		t.Fatalf("Manager.ResumeQueued(coverage_run) = %#v, %v; want zero Task, ErrInvalidArgument", got, err)
+	}
+	if gets := f.store.getCount(queued.ID); gets != 0 {
+		t.Fatalf("Store.Get calls = %d, want 0", gets)
+	}
+	assertNoManagerCoverageSideEffects(t, f)
+}
+
+func assertNoManagerCoverageSideEffects(t *testing.T, f *managerFixture) {
+	t.Helper()
+	creates, applies, replacements, events, artifacts, leases := f.store.writeSideEffectCounts()
+	if creates != 0 || applies != 0 || replacements != 0 || events != 0 || artifacts != 0 || leases != 0 {
+		t.Fatalf(
+			"Store side effects = create:%d apply:%d replace:%d events:%d artifacts:%d leases:%d; want all zero",
+			creates, applies, replacements, events, artifacts, leases,
+		)
+	}
+	if prepares, starts, terminates, closes := f.processes.prepareCount(), f.process.startCalls(), f.process.terminateCalls(), f.process.closeCalls(); prepares != 0 || starts != 0 || terminates != 0 || closes != 0 {
+		t.Fatalf(
+			"process side effects = prepare:%d start:%d terminate:%d close:%d; want all zero",
+			prepares, starts, terminates, closes,
+		)
+	}
+	if published := len(f.publisher.events()); published != 0 {
+		t.Fatalf("published events = %d, want 0", published)
+	}
+}
+
 func TestManagerPublishesStructuredDiagnosticsFromRuntimeOnlyStepParser(t *testing.T) {
 	f := newManagerFixture(t)
 	request := twoStepStartRequest(testID(65), time.Minute, fixedBoundary{})

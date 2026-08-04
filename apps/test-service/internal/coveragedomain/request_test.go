@@ -3,6 +3,7 @@ package coveragedomain
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -73,6 +74,74 @@ func TestRequestValidatesProtocolBounds(t *testing.T) {
 	}
 }
 
+func TestRequestSelectionCardinalityBounds(t *testing.T) {
+	tests := []struct {
+		name  string
+		field string
+		max   int
+		set   func(*Request, []testdomain.ID)
+	}{
+		{
+			name: "container IDs", field: "selection.containerIds", max: 10_000,
+			set: func(value *Request, ids []testdomain.ID) {
+				value.Selection = testdomain.Selection{Mode: testdomain.SelectionContainers, ContainerIDs: ids}
+			},
+		},
+		{
+			name: "item IDs", field: "selection.itemIds", max: 100_000,
+			set: func(value *Request, ids []testdomain.ID) {
+				value.Selection = testdomain.Selection{Mode: testdomain.SelectionItems, ItemIDs: ids}
+			},
+		},
+		{
+			name: "filter include item IDs", field: "selection.filter.includeItemIds", max: 100_000,
+			set: func(value *Request, ids []testdomain.ID) {
+				value.Selection = testdomain.Selection{
+					Mode:   testdomain.SelectionFilter,
+					Filter: testdomain.Filter{IncludeItemIDs: ids},
+				}
+			},
+		},
+		{
+			name: "filter exclude item IDs", field: "selection.filter.excludeItemIds", max: 100_000,
+			set: func(value *Request, ids []testdomain.ID) {
+				value.Selection = testdomain.Selection{
+					Mode:   testdomain.SelectionFilter,
+					Filter: testdomain.Filter{ExcludeItemIDs: ids},
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ids := requestStableIDs(test.max + 1)
+
+			atMaximum := validRequest()
+			test.set(&atMaximum, ids[:test.max])
+			if _, err := NewRequest(atMaximum); err != nil {
+				t.Fatalf("NewRequest(exact maximum %d) error = %v", test.max, err)
+			}
+
+			overMaximum := validRequest()
+			test.set(&overMaximum, ids)
+			if _, err := NewRequest(overMaximum); !errors.Is(err, ErrInvalidRequest) {
+				t.Fatalf("NewRequest(maximum+1) error = %v, want ErrInvalidRequest", err)
+			} else {
+				var validation *ValidationError
+				if !errors.As(err, &validation) || validation.Field != test.field {
+					t.Fatalf("NewRequest(maximum+1) error = %#v, want local ValidationError field %q", err, test.field)
+				}
+			}
+			if raw, err := overMaximum.CanonicalJSON(); raw != nil || !errors.Is(err, ErrInvalidRequest) {
+				t.Fatalf("CanonicalJSON(maximum+1) = %q, %v; want nil, ErrInvalidRequest", raw, err)
+			}
+			if id, err := CoverageRunID(overMaximum); id != "" || !errors.Is(err, ErrInvalidRequest) {
+				t.Fatalf("CoverageRunID(maximum+1) = %q, %v; want empty, ErrInvalidRequest", id, err)
+			}
+		})
+	}
+}
+
 func TestRequestReusesSelectionValidation(t *testing.T) {
 	for name, mutate := range map[string]func(*Request){
 		"duplicate":    func(v *Request) { v.Selection.ItemIDs = []testdomain.ID{firstStableID, firstStableID} },
@@ -96,6 +165,67 @@ func TestRequestReusesSelectionValidation(t *testing.T) {
 			}
 			if !errors.Is(err, ErrInvalidRequest) {
 				t.Fatalf("NewRequest() error = %v, want ErrInvalidRequest", err)
+			}
+		})
+	}
+}
+
+func TestRequestSelectionFailuresExposeLocalValidationErrorAndPreserveCause(t *testing.T) {
+	tests := []struct {
+		name            string
+		mutate          func(*Request)
+		localField      string
+		localDetail     string
+		underlyingKind  error
+		underlyingField string
+	}{
+		{
+			name: "duplicate item ID",
+			mutate: func(value *Request) {
+				value.Selection.ItemIDs = []testdomain.ID{firstStableID, firstStableID}
+			},
+			localField: "selection.itemIds", localDetail: "contains a duplicate stable ID",
+			underlyingKind: testdomain.ErrDuplicateIdentity, underlyingField: "itemIds",
+		},
+		{
+			name: "invalid mode",
+			mutate: func(value *Request) {
+				value.Selection.Mode = "nope"
+			},
+			localField: "selection.mode", localDetail: "unsupported value",
+			underlyingKind: testdomain.ErrInvalidSelection, underlyingField: "mode",
+		},
+		{
+			name: "invalid failed from run",
+			mutate: func(value *Request) {
+				value.Selection = testdomain.Selection{Mode: testdomain.SelectionFailedFromRun, RunID: "bad"}
+			},
+			localField: "selection.failedFromRun", localDetail: "requires only a 32-character runId",
+			underlyingKind: testdomain.ErrInvalidSelection, underlyingField: "failedFromRun",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			value := validRequest()
+			test.mutate(&value)
+			_, err := NewRequest(value)
+
+			var local *ValidationError
+			if !errors.As(err, &local) || local.Field != test.localField || local.Detail != test.localDetail {
+				t.Fatalf(
+					"NewRequest() error = %#v, want local ValidationError field/detail %q/%q",
+					err, test.localField, test.localDetail,
+				)
+			}
+			var underlying *testdomain.ValidationError
+			if !errors.As(err, &underlying) || underlying.Field != test.underlyingField {
+				t.Fatalf("NewRequest() underlying error = %#v, want testdomain.ValidationError field %q", err, test.underlyingField)
+			}
+			if unwrapped := errors.Unwrap(local); unwrapped != underlying {
+				t.Fatalf("errors.Unwrap(local) = %#v, want original testdomain error %#v", unwrapped, underlying)
+			}
+			if !errors.Is(err, ErrInvalidRequest) || !errors.Is(err, test.underlyingKind) {
+				t.Fatalf("NewRequest() error = %v, want ErrInvalidRequest and %v", err, test.underlyingKind)
 			}
 		})
 	}
@@ -181,6 +311,26 @@ func TestRequestCanonicalJSONIsClosedAndUsesMilliseconds(t *testing.T) {
 	}
 }
 
+func TestRequestCanonicalJSONAndCoverageRunIDGoldens(t *testing.T) {
+	const wantCanonical = `{"idempotencyKey":"11111111111111111111111111111111","workspaceGeneration":"2222222222222222222222222222222222222222222222222222222222222222","projectId":"core","coverageProfileId":"coverage.default","catalogRevision":"3333333333333333333333333333333333333333333333333333333333333333","selection":{"mode":"items","itemIds":["utid-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","utid-v1-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]},"repeatCount":2,"timeoutMs":5000}`
+	const wantID = "c0f78bf62c0f096a8c753219dc26072d"
+
+	raw, err := validRequest().CanonicalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(raw); got != wantCanonical {
+		t.Fatalf("CanonicalJSON() = %q, want exact golden %q", got, wantCanonical)
+	}
+	id, err := CoverageRunID(validRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != wantID {
+		t.Fatalf("CoverageRunID() = %q, want fixed digest %q", id, wantID)
+	}
+}
+
 func TestCoverageRunIDIsStableForSetOrderAndSensitiveToInputs(t *testing.T) {
 	base := validRequest()
 	baseID, err := CoverageRunID(base)
@@ -194,6 +344,10 @@ func TestCoverageRunIDIsStableForSetOrderAndSensitiveToInputs(t *testing.T) {
 		t.Fatalf("CoverageRunID(reordered) = %q, %v; want %q", got, err, baseID)
 	}
 	for name, mutate := range map[string]func(*Request){
+		"idempotency key": func(v *Request) { v.IdempotencyKey = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+		"workspace generation": func(v *Request) {
+			v.WorkspaceGeneration = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		},
 		"project": func(v *Request) { v.ProjectID = "other" },
 		"profile": func(v *Request) { v.CoverageProfileID = "other" },
 		"catalog": func(v *Request) {
@@ -238,4 +392,12 @@ func assertClosedJSON(t *testing.T, value any, allowed map[string]bool, top bool
 			assertClosedJSON(t, nested, allowed, false)
 		}
 	}
+}
+
+func requestStableIDs(count int) []testdomain.ID {
+	result := make([]testdomain.ID, count)
+	for index := range result {
+		result[index] = testdomain.ID(fmt.Sprintf("utid-v1-%064x", index))
+	}
+	return result
 }

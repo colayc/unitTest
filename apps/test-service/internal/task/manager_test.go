@@ -2040,6 +2040,8 @@ type fakeStore struct {
 	failApplyMatch func(task.Mutation) error
 	onAppendEvent  func(task.EventDraft)
 	applyCalls     int
+	createCalls    int
+	replaceCalls   int
 }
 
 func newFakeStore() *fakeStore {
@@ -2053,6 +2055,7 @@ func newFakeStore() *fakeStore {
 func (s *fakeStore) Create(_ context.Context, value task.Task, steps []task.StepSnapshot, draft task.EventDraft) (task.Task, []task.Event, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.createCalls++
 	if existingID, ok := s.keys[value.IdempotencyKey]; ok {
 		existing := s.tasks[existingID]
 		if existing.RequestHash != value.RequestHash {
@@ -2267,6 +2270,7 @@ func (s *fakeStore) ReplaceQueuedPlan(
 ) (task.Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.replaceCalls++
 	current, ok := s.tasks[taskID]
 	if !ok {
 		return task.Task{}, task.ErrNotFound
@@ -2299,6 +2303,12 @@ func (s *fakeStore) applyCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.applyCalls
+}
+
+func (s *fakeStore) writeSideEffectCounts() (creates, applies, replacements, events, artifacts, leases int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.createCalls, s.applyCalls, s.replaceCalls, len(s.eventsValue), len(s.artifacts), len(s.leases)
 }
 
 func (s *fakeStore) getCount(id string) int {

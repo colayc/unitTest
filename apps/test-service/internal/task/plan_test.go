@@ -105,6 +105,30 @@ func TestValidatePlanAcceptsServiceOwnedCTestStepKinds(t *testing.T) {
 	}
 }
 
+func TestCoverageTaskWireVocabularyLiterals(t *testing.T) {
+	values := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{name: "KindCoverageRun", got: string(task.KindCoverageRun), want: "coverage_run"},
+		{name: "StepCoverageConfigure", got: string(task.StepCoverageConfigure), want: "coverage-configure"},
+		{name: "StepCoverageBuild", got: string(task.StepCoverageBuild), want: "coverage-build"},
+		{name: "StepCoverageTest", got: string(task.StepCoverageTest), want: "coverage-test"},
+		{name: "StepCoverageMerge", got: string(task.StepCoverageMerge), want: "coverage-merge"},
+		{name: "StepCoverageNormalize", got: string(task.StepCoverageNormalize), want: "coverage-normalize"},
+		{name: "StepCoverageReport", got: string(task.StepCoverageReport), want: "coverage-report"},
+		{name: "StepCoveragePublish", got: string(task.StepCoveragePublish), want: "coverage-publish"},
+	}
+	for _, value := range values {
+		t.Run(value.name, func(t *testing.T) {
+			if value.got != value.want {
+				t.Fatalf("%s = %q, want Protocol literal %q", value.name, value.got, value.want)
+			}
+		})
+	}
+}
+
 func TestValidatePlanAcceptsCoverageStepKindsAndFingerprintsThem(t *testing.T) {
 	kinds := []task.StepKind{
 		task.StepCoverageConfigure,
@@ -142,12 +166,6 @@ func TestValidatePlanAcceptsCoverageStepKindsAndFingerprintsThem(t *testing.T) {
 		if err := task.ValidatePlan(plan, boundary); !errors.Is(err, task.ErrInvalidArgument) {
 			t.Fatalf("ValidatePlan(%q) error = %v, want ErrInvalidArgument", kind, err)
 		}
-	}
-}
-
-func TestKindCoverageRunValue(t *testing.T) {
-	if task.KindCoverageRun != "coverage_run" {
-		t.Fatalf("KindCoverageRun = %q, want %q", task.KindCoverageRun, "coverage_run")
 	}
 }
 
