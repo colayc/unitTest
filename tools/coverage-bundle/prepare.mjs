@@ -12,6 +12,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join, posix, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -32,6 +33,15 @@ const maximumDownloadBytes = 512 * 1024 * 1024;
 const maximumExpandedArchiveBytes = 1024 * 1024 * 1024;
 const allowedHosts = new Set(["www.python.org", "files.pythonhosted.org"]);
 const fixedLinuxImage = "quay.io/pypa/manylinux_2_28_x86_64@sha256:c7123a4aebb153c1e45b8152f07a64bd950d65e630cfb633a029cc45ee21897c";
+const recipeName = "coverage-bundle-recipe-v2";
+const recipeFiles = [
+  "build-linux.sh",
+  "layout.mjs",
+  "prepare.mjs",
+  "runner/NOTICE.txt",
+  "runner/__main__.py",
+  "runner/contract.py",
+];
 
 function plainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
@@ -186,24 +196,37 @@ export function validateArchiveEntries(entries) {
 }
 
 function findEndOfCentralDirectory(buffer) {
+  if (buffer.length < 22) throw new Error("invalid ZIP: file is too short");
   for (let index = buffer.length - 22; index >= Math.max(0, buffer.length - 65_557); index--) {
-    if (buffer.readUInt32LE(index) === 0x06054b50) return index;
+    if (buffer.readUInt32LE(index) === 0x06054b50 && index + 22 + buffer.readUInt16LE(index + 20) === buffer.length) return index;
   }
   throw new Error("invalid ZIP: end record not found");
 }
 
+function requireBufferRange(buffer, offset, length, label) {
+  if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(length) || offset < 0 || length < 0 || offset + length > buffer.length) throw new Error(`invalid ZIP ${label}`);
+}
+
 function parseZip(buffer) {
   const end = findEndOfCentralDirectory(buffer);
+  if (buffer.readUInt16LE(end + 4) !== 0 || buffer.readUInt16LE(end + 6) !== 0 || buffer.readUInt16LE(end + 8) !== buffer.readUInt16LE(end + 10) || buffer.readUInt16LE(end + 20) !== 0) throw new Error("unsupported multi-disk or commented ZIP");
   const count = buffer.readUInt16LE(end + 10);
   const centralSize = buffer.readUInt32LE(end + 12);
   let offset = buffer.readUInt32LE(end + 16);
-  if (count === 0xffff || centralSize === 0xffffffff || offset === 0xffffffff || offset + centralSize > end) throw new Error("unsupported ZIP64 or invalid ZIP");
+  const centralStart = offset;
+  if (count === 0xffff || centralSize === 0xffffffff || offset === 0xffffffff || offset + centralSize !== end) throw new Error("unsupported ZIP64 or invalid ZIP bounds");
   const entries = [];
   let expandedTotal = 0;
+  let expectedLocalOffset = 0;
   for (let index = 0; index < count; index++) {
+    requireBufferRange(buffer, offset, 46, "central directory bounds");
     if (buffer.readUInt32LE(offset) !== 0x02014b50) throw new Error("invalid ZIP central directory");
+    const versionMadeBy = buffer.readUInt16LE(offset + 4);
+    const versionNeeded = buffer.readUInt16LE(offset + 6);
     const flags = buffer.readUInt16LE(offset + 8);
     const method = buffer.readUInt16LE(offset + 10);
+    const modifiedTime = buffer.readUInt16LE(offset + 12);
+    const modifiedDate = buffer.readUInt16LE(offset + 14);
     const crc = buffer.readUInt32LE(offset + 16);
     const compressedSize = buffer.readUInt32LE(offset + 20);
     const size = buffer.readUInt32LE(offset + 24);
@@ -212,49 +235,103 @@ function parseZip(buffer) {
     const commentLength = buffer.readUInt16LE(offset + 32);
     const external = buffer.readUInt32LE(offset + 38);
     const localOffset = buffer.readUInt32LE(offset + 42);
-    const name = buffer.subarray(offset + 46, offset + 46 + nameLength).toString("utf8");
+    const recordLength = 46 + nameLength + extraLength + commentLength;
+    requireBufferRange(buffer, offset, recordLength, "central entry bounds");
+    if (offset + recordLength > end || extraLength !== 0 || commentLength !== 0 || buffer.readUInt16LE(offset + 34) !== 0 || ![0, 0x800].includes(flags) || ![0, 8].includes(method)) throw new Error("unsafe ZIP metadata");
+    const nameBytes = buffer.subarray(offset + 46, offset + 46 + nameLength);
+    if (nameBytes.length === 0 || [...nameBytes].some((byte) => byte < 0x20 || byte > 0x7e)) throw new Error("unsafe archive entry: non-portable ZIP name");
+    const name = nameBytes.toString("ascii");
     expandedTotal += size;
-    if ((flags & 1) !== 0 || ![0, 8].includes(method) || size > maximumExpandedArchiveBytes || expandedTotal > maximumExpandedArchiveBytes) throw new Error(`unsafe archive entry: ${name}`);
+    if (size > maximumExpandedArchiveBytes || expandedTotal > maximumExpandedArchiveBytes) throw new Error(`unsafe archive entry: ${name}`);
     const mode = external >>> 16;
     const fileType = mode & 0o170000;
-    let type = name.endsWith("/") || fileType === 0o040000 ? "directory" : "file";
-    if (fileType === 0o120000) type = "symlink";
-    entries.push({ path: name, type, method, crc, compressedSize, size, localOffset });
-    offset += 46 + nameLength + extraLength + commentLength;
+    const creator = versionMadeBy >>> 8;
+    if (![0, 3].includes(creator) || ![0, 0o100000, 0o040000].includes(fileType)) throw new Error(`unsafe archive entry: unsupported ZIP type ${name}`);
+    const directoryByName = name.endsWith("/");
+    const directoryByMode = fileType === 0o040000;
+    if ((directoryByMode && !directoryByName) || (directoryByName && fileType === 0o100000)) throw new Error(`unsafe archive entry: inconsistent ZIP directory ${name}`);
+    const type = directoryByName ? "directory" : "file";
+    if (type === "directory" && (size !== 0 || compressedSize !== 0)) throw new Error(`unsafe archive entry: non-empty ZIP directory ${name}`);
+    if (localOffset !== expectedLocalOffset) throw new Error("invalid ZIP local entry order or hidden data");
+    requireBufferRange(buffer, localOffset, 30, "local header bounds");
+    if (buffer.readUInt32LE(localOffset) !== 0x04034b50) throw new Error(`invalid ZIP local header: ${name}`);
+    const localVersionNeeded = buffer.readUInt16LE(localOffset + 4);
+    const localFlags = buffer.readUInt16LE(localOffset + 6);
+    const localMethod = buffer.readUInt16LE(localOffset + 8);
+    const localModifiedTime = buffer.readUInt16LE(localOffset + 10);
+    const localModifiedDate = buffer.readUInt16LE(localOffset + 12);
+    const localCrc = buffer.readUInt32LE(localOffset + 14);
+    const localCompressedSize = buffer.readUInt32LE(localOffset + 18);
+    const localSize = buffer.readUInt32LE(localOffset + 22);
+    const localNameLength = buffer.readUInt16LE(localOffset + 26);
+    const localExtraLength = buffer.readUInt16LE(localOffset + 28);
+    const localRecordLength = 30 + localNameLength + localExtraLength + compressedSize;
+    requireBufferRange(buffer, localOffset, localRecordLength, "local entry bounds");
+    const localName = buffer.subarray(localOffset + 30, localOffset + 30 + localNameLength);
+    if (localExtraLength !== 0 || localVersionNeeded !== versionNeeded || localFlags !== flags || localMethod !== method || localModifiedTime !== modifiedTime || localModifiedDate !== modifiedDate || localCrc !== crc || localCompressedSize !== compressedSize || localSize !== size || !localName.equals(nameBytes)) throw new Error(`invalid ZIP local/central identity: ${name}`);
+    const dataStart = localOffset + 30 + localNameLength;
+    expectedLocalOffset = dataStart + compressedSize;
+    if (expectedLocalOffset > centralStart) throw new Error(`invalid ZIP data bounds: ${name}`);
+    entries.push({ path: name, type, method, crc, compressedSize, size, localOffset, dataStart });
+    offset += recordLength;
   }
+  if (offset !== end || expectedLocalOffset !== centralStart) throw new Error("invalid ZIP central/local bounds");
   validateArchiveEntries(entries.map(({ path, type }) => ({ path, type })));
+  for (const entry of entries) if (entry.type === "file") zipEntryBytes(buffer, entry);
   return entries;
 }
 
 function zipEntryBytes(buffer, entry) {
-  const offset = entry.localOffset;
-  if (buffer.readUInt32LE(offset) !== 0x04034b50) throw new Error(`invalid ZIP local header: ${entry.path}`);
-  const nameLength = buffer.readUInt16LE(offset + 26);
-  const extraLength = buffer.readUInt16LE(offset + 28);
-  const start = offset + 30 + nameLength + extraLength;
-  const compressed = buffer.subarray(start, start + entry.compressedSize);
+  const compressed = buffer.subarray(entry.dataStart, entry.dataStart + entry.compressedSize);
   if (compressed.length !== entry.compressedSize) throw new Error(`truncated ZIP entry: ${entry.path}`);
-  const bytes = entry.method === 0 ? Buffer.from(compressed) : inflateRawSync(compressed, { maxOutputLength: maximumExpandedArchiveBytes });
+  let bytes;
+  try {
+    bytes = entry.method === 0 ? Buffer.from(compressed) : inflateRawSync(compressed, { maxOutputLength: maximumExpandedArchiveBytes });
+  } catch (error) {
+    throw new Error(`corrupt ZIP entry: ${entry.path}`, { cause: error });
+  }
   if (bytes.length !== entry.size || crc32(bytes) !== entry.crc) throw new Error(`corrupt ZIP entry: ${entry.path}`);
   return bytes;
 }
 
 function parseTarString(buffer, offset, length) {
-  return buffer.subarray(offset, offset + length).toString("utf8").replace(/\0.*$/su, "").trim();
+  const field = buffer.subarray(offset, offset + length);
+  const nul = field.indexOf(0);
+  const content = nul < 0 ? field : field.subarray(0, nul);
+  if (nul >= 0 && field.subarray(nul).some((byte) => byte !== 0)) throw new Error("unsafe archive entry: malformed TAR string");
+  return content.toString("utf8");
 }
 
-function parsePax(buffer) {
+function parseTarOctal(buffer, offset, length, label) {
+  const field = buffer.subarray(offset, offset + length);
+  if ((field[0] & 0x80) !== 0) throw new Error(`unsafe archive entry: unsupported TAR ${label} encoding`);
+  const text = field.toString("ascii").replace(/[\0 ]+$/u, "").replace(/^ +/u, "");
+  if (text && !/^[0-7]+$/u.test(text)) throw new Error(`unsafe archive entry: invalid TAR ${label}`);
+  const value = Number.parseInt(text || "0", 8);
+  if (!Number.isSafeInteger(value) || value < 0) throw new Error(`unsafe archive entry: invalid TAR ${label}`);
+  return value;
+}
+
+function parsePax(buffer, global) {
   const values = {};
+  const allowed = new Set(["path", "mtime", "atime", "ctime", "uid", "gid", "uname", "gname"]);
   let offset = 0;
   while (offset < buffer.length) {
     const space = buffer.indexOf(0x20, offset);
     if (space < 0) throw new Error("unsafe archive entry: malformed PAX record");
     const length = Number.parseInt(buffer.subarray(offset, space).toString("ascii"), 10);
     if (!Number.isSafeInteger(length) || length <= 0 || offset + length > buffer.length) throw new Error("unsafe archive entry: malformed PAX length");
+    if (buffer[offset + length - 1] !== 0x0a) throw new Error("unsafe archive entry: malformed PAX terminator");
     const record = buffer.subarray(space + 1, offset + length - 1).toString("utf8");
     const equals = record.indexOf("=");
     if (equals <= 0) throw new Error("unsafe archive entry: malformed PAX value");
-    values[record.slice(0, equals)] = record.slice(equals + 1);
+    const key = record.slice(0, equals);
+    if (!allowed.has(key) || (global && key === "path") || Object.hasOwn(values, key)) throw new Error(`unsafe archive entry: unsupported PAX key ${key}`);
+    const value = record.slice(equals + 1);
+    if (/[\u0000-\u001f\u007f]/u.test(value)) throw new Error(`unsafe archive entry: malformed PAX value ${key}`);
+    if (["uid", "gid"].includes(key) && !/^\d+$/u.test(value)) throw new Error(`unsafe archive entry: malformed PAX value ${key}`);
+    if (["mtime", "atime", "ctime"].includes(key) && !/^-?\d+(?:\.\d+)?$/u.test(value)) throw new Error(`unsafe archive entry: malformed PAX value ${key}`);
+    values[key] = value;
     offset += length;
   }
   return values;
@@ -267,32 +344,55 @@ function parseTar(buffer) {
   let globalPax = {};
   let localPax = {};
   let expandedTotal = 0;
+  let ended = false;
   while (offset + 512 <= buffer.length) {
     const header = buffer.subarray(offset, offset + 512);
-    if (header.every((byte) => byte === 0)) break;
+    if (header.every((byte) => byte === 0)) {
+      if (offset + 1024 > buffer.length || !buffer.subarray(offset, offset + 1024).every((byte) => byte === 0) || !buffer.subarray(offset + 1024).every((byte) => byte === 0)) throw new Error("unsafe archive entry: malformed TAR end markers");
+      ended = true;
+      break;
+    }
+    const storedChecksum = parseTarOctal(header, 148, 8, "checksum");
+    const checksumHeader = Buffer.from(header);
+    checksumHeader.fill(0x20, 148, 156);
+    const actualChecksum = [...checksumHeader].reduce((sum, byte) => sum + byte, 0);
+    if (storedChecksum !== actualChecksum) throw new Error("unsafe archive entry: TAR checksum mismatch");
+    const magic = header.subarray(257, 263).toString("binary");
+    if (magic !== "ustar\0" && magic !== "ustar ") throw new Error("unsafe archive entry: unsupported TAR format");
     const name = parseTarString(header, 0, 100);
     const prefix = parseTarString(header, 345, 155);
-    const sizeText = parseTarString(header, 124, 12);
-    const size = Number.parseInt(sizeText || "0", 8);
+    const linkName = parseTarString(header, 157, 100);
+    const size = parseTarOctal(header, 124, 12, "size");
     expandedTotal += size;
     if (!Number.isSafeInteger(size) || size < 0 || size > maximumExpandedArchiveBytes || expandedTotal > maximumExpandedArchiveBytes) throw new Error("unsafe archive entry: invalid TAR size");
     const typeFlag = String.fromCharCode(header[156] || 48);
     const dataStart = offset + 512;
+    const dataEnd = dataStart + size;
+    const nextOffset = dataStart + Math.ceil(size / 512) * 512;
+    if (dataEnd > buffer.length || nextOffset > buffer.length) throw new Error("unsafe archive entry: truncated TAR data");
+    const headerPath = prefix ? `${prefix}/${name}` : name;
+    if (!(typeFlag === "L" && headerPath === "././@LongLink") && !portablePath(headerPath)) throw new Error(`unsafe archive entry: ${headerPath}`);
     if (typeFlag === "L") {
-      longName = buffer.subarray(dataStart, dataStart + size).toString("utf8").replace(/\0.*$/su, "");
+      const data = buffer.subarray(dataStart, dataEnd);
+      if (longName !== undefined || data.length < 2 || data.at(-1) !== 0 || data.subarray(0, -1).includes(0)) throw new Error("unsafe archive entry: malformed GNU longname");
+      longName = data.subarray(0, -1).toString("utf8");
     } else if (typeFlag === "x") {
-      localPax = parsePax(buffer.subarray(dataStart, dataStart + size));
+      if (Object.keys(localPax).length !== 0) throw new Error("unsafe archive entry: duplicate local PAX header");
+      localPax = parsePax(buffer.subarray(dataStart, dataEnd), false);
     } else if (typeFlag === "g") {
-      globalPax = { ...globalPax, ...parsePax(buffer.subarray(dataStart, dataStart + size)) };
+      globalPax = { ...globalPax, ...parsePax(buffer.subarray(dataStart, dataEnd), true) };
     } else {
-      const path = localPax.path ?? globalPax.path ?? longName ?? (prefix ? `${prefix}/${name}` : name);
+      if (!["0", "\0", "5"].includes(typeFlag) || linkName) throw new Error(`unsafe archive entry: unsupported TAR type ${typeFlag}`);
+      const path = localPax.path ?? longName ?? (prefix ? `${prefix}/${name}` : name);
       longName = undefined;
       localPax = {};
-      const type = typeFlag === "0" || typeFlag === "\0" ? "file" : typeFlag === "5" ? "directory" : typeFlag === "2" ? "symlink" : "other";
+      const type = typeFlag === "5" ? "directory" : "file";
+      if (type === "directory" && size !== 0) throw new Error(`unsafe archive entry: non-empty TAR directory ${path}`);
       entries.push({ path: type === "directory" && !path.endsWith("/") ? `${path}/` : path, type });
     }
-    offset = dataStart + Math.ceil(size / 512) * 512;
+    offset = nextOffset;
   }
+  if (!ended || longName !== undefined || Object.keys(localPax).length !== 0) throw new Error("unsafe archive entry: incomplete TAR metadata");
   return validateArchiveEntries(entries);
 }
 
@@ -367,8 +467,8 @@ async function createApplicationArchive(wheelPaths, destination) {
     if ([...files.keys()].some((existing) => existing.toLowerCase() === key)) throw new Error(`duplicate application archive entry: ${name}`);
     files.set(name, bytes);
   };
-  add("__main__.py", await readFile(join(toolDirectory, "runner", "__main__.py")));
-  add("contract.py", await readFile(join(toolDirectory, "runner", "contract.py")));
+  add("__main__.py", Buffer.from((await readFile(join(toolDirectory, "runner", "__main__.py"), "utf8")).replace(/\r\n?/gu, "\n")));
+  add("contract.py", Buffer.from((await readFile(join(toolDirectory, "runner", "contract.py"), "utf8")).replace(/\r\n?/gu, "\n")));
   for (const path of wheelPaths) {
     const buffer = await readFile(path);
     for (const entry of parseZip(buffer)) if (entry.type === "file") add(entry.path, zipEntryBytes(buffer, entry));
@@ -418,9 +518,68 @@ async function walk(root, current = root) {
   return result;
 }
 
+async function validateExactLayout(root, published) {
+  const expectedTop = published
+    ? ["READY", "app", "licenses", resolvedName, "python"]
+    : ["app", "licenses", "python"];
+  const top = (await readdir(root)).sort();
+  if (top.length !== expectedTop.length || top.some((name, index) => name !== expectedTop[index])) throw new Error("unexpected bundle top-level entry");
+  for (const directory of ["app", "licenses", "python"]) {
+    if (!(await lstat(join(root, directory))).isDirectory()) throw new Error(`unexpected bundle top-level entry: ${directory}`);
+  }
+  if (published) {
+    for (const file of [readyName, resolvedName]) if (!(await lstat(join(root, file))).isFile()) throw new Error(`unexpected bundle top-level entry: ${file}`);
+  }
+  const applicationEntries = (await readdir(join(root, "app"))).sort();
+  if (applicationEntries.length !== 1 || applicationEntries[0] !== "gcovr-runner.pyz") throw new Error("unexpected bundle app entry");
+  if (!(await lstat(join(root, "app", "gcovr-runner.pyz"))).isFile()) throw new Error("unexpected bundle app entry");
+}
+
+async function recipeIdentity() {
+  const hash = createHash("sha256");
+  for (const path of recipeFiles) {
+    hash.update(path);
+    hash.update("\0");
+    hash.update((await readFile(join(toolDirectory, ...path.split("/")), "utf8")).replace(/\r\n?/gu, "\n"));
+    hash.update("\0");
+  }
+  return { name: recipeName, sha256: hash.digest("hex") };
+}
+
+async function resolvedInputs(manifest, key) {
+  const artifacts = collectArtifacts(manifest, key);
+  return {
+    pythonArtifact: {
+      kind: artifacts[0].kind,
+      filename: artifacts[0].filename,
+      url: artifacts[0].url,
+      sha256: artifacts[0].sha256,
+    },
+    wheels: manifest.gcovr.wheels.map((wheel) => {
+      const file = wheel.files.find(({ platforms }) => platforms.includes(key));
+      return {
+        project: wheel.project,
+        version: wheel.version,
+        kind: wheel.kind,
+        filename: file.filename,
+        url: file.url,
+        sha256: file.sha256,
+      };
+    }).sort((left, right) => left.project < right.project ? -1 : left.project > right.project ? 1 : 0),
+    provenance: {
+      recipe: await recipeIdentity(),
+      builderImage: key === "linux-x64" ? manifest.linux.builder.image : null,
+      glibcBaseline: key === "linux-x64" ? manifest.linux.glibcBaseline : null,
+    },
+  };
+}
+
 function forbiddenOutputPath(path) {
   const segments = path.toLowerCase().split("/");
-  return segments.some((segment) => ["pip", "ensurepip", "test", "tests", "idle", "idlelib", "tk", "tkinter", "include", "includes", "headers", "build", "build-tools"].includes(segment)) || /\.(?:a|lib|h|hpp)$/iu.test(path);
+  return segments.some((segment) =>
+    ["pip", "ensurepip", "test", "tests", "idle", "idlelib", "tk", "tkinter", "include", "includes", "headers", "build", "build-tools"].includes(segment) ||
+    /^_tkinter(?:[._-]|$)/u.test(segment) || /^tcl(?:\d|[._-]|$)/u.test(segment) || /^tk(?:\d|[._-]|$)/u.test(segment)
+  ) || /\.(?:a|lib|h|hpp)$/iu.test(path);
 }
 
 function validateWindowsIsolation(files) {
@@ -432,11 +591,7 @@ function validateWindowsIsolation(files) {
 }
 
 export async function createResolvedManifest(root, key, manifest) {
-  const top = (await readdir(root)).sort();
-  const expectedTop = ["app", "licenses", "python"];
-  if (top.length !== expectedTop.length || top.some((name, index) => name !== expectedTop[index])) throw new Error("unexpected bundle top-level entry");
-  const applicationEntries = await readdir(join(root, "app"));
-  if (applicationEntries.length !== 1 || applicationEntries[0] !== "gcovr-runner.pyz") throw new Error("unexpected bundle app entry");
+  await validateExactLayout(root, false);
   const files = (await walk(root)).filter(({ path }) => ![resolvedName, readyName].includes(path)).sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
   for (const { path } of files) if (forbiddenOutputPath(path)) throw new Error(`forbidden bundle path: ${path}`);
   if (key === "windows-x64") await validateWindowsIsolation(files);
@@ -445,6 +600,7 @@ export async function createResolvedManifest(root, key, manifest) {
     platform: key,
     pythonVersion: manifest.python.version,
     gcovrVersion: manifest.gcovr.version,
+    inputs: await resolvedInputs(manifest, key),
     outputs: [],
   };
   for (const { path, absolute } of files) resolved.outputs.push({ path, sha256: await sha256File(absolute), kind: "regular-file" });
@@ -453,9 +609,16 @@ export async function createResolvedManifest(root, key, manifest) {
   return resolved;
 }
 
-function validateResolvedShape(value, key, manifest) {
-  exactKeys(value, ["schemaVersion", "platform", "pythonVersion", "gcovrVersion", "outputs"], "resolved manifest");
+function validateResolvedShape(value, key, manifest, expectedInputs) {
+  exactKeys(value, ["schemaVersion", "platform", "pythonVersion", "gcovrVersion", "inputs", "outputs"], "resolved manifest");
   if (value.schemaVersion !== 1 || value.platform !== key || value.pythonVersion !== manifest.python.version || value.gcovrVersion !== manifest.gcovr.version || !Array.isArray(value.outputs) || value.outputs.length === 0) throw new Error("resolved manifest identity mismatch");
+  exactKeys(value.inputs, ["pythonArtifact", "wheels", "provenance"], "resolved inputs");
+  exactKeys(value.inputs.pythonArtifact, ["kind", "filename", "url", "sha256"], "resolved Python input");
+  if (!Array.isArray(value.inputs.wheels)) throw new Error("resolved wheel inputs must be an array");
+  for (const wheel of value.inputs.wheels) exactKeys(wheel, ["project", "version", "kind", "filename", "url", "sha256"], "resolved wheel input");
+  exactKeys(value.inputs.provenance, ["recipe", "builderImage", "glibcBaseline"], "resolved provenance");
+  exactKeys(value.inputs.provenance.recipe, ["name", "sha256"], "resolved recipe");
+  if (JSON.stringify(value.inputs) !== JSON.stringify(expectedInputs)) throw new Error("resolved input/provenance mismatch");
   let previous = "";
   const names = new Set();
   for (const output of value.outputs) {
@@ -467,9 +630,10 @@ function validateResolvedShape(value, key, manifest) {
 }
 
 export async function verifyResolvedBundle(root, key, manifest) {
+  await validateExactLayout(root, true);
   if ((await readFile(join(root, readyName), "utf8")) !== "ready\n") throw new Error("coverage bundle is not READY");
   const resolved = JSON.parse(await readFile(join(root, resolvedName), "utf8"));
-  validateResolvedShape(resolved, key, manifest);
+  validateResolvedShape(resolved, key, manifest, await resolvedInputs(manifest, key));
   const actualFiles = (await walk(root)).map(({ path }) => path).sort();
   const expectedFiles = [...resolved.outputs.map(({ path }) => path), readyName, resolvedName].sort();
   if (actualFiles.length !== expectedFiles.length || actualFiles.some((path, index) => path !== expectedFiles[index])) throw new Error("resolved output list does not match bundle files");
@@ -531,12 +695,81 @@ async function loadManifest() {
   return JSON.parse(await readFile(manifestPath, "utf8"));
 }
 
+export function sanitizePythonEnvironment(environment = process.env) {
+  return Object.fromEntries(Object.entries(environment).filter(([name]) => {
+    const upper = name.toUpperCase();
+    return !upper.startsWith("PYTHON") && !upper.startsWith("PIP_") &&
+      !["VIRTUAL_ENV", "CONDA_PREFIX", "CONDA_DEFAULT_ENV"].includes(upper);
+  }));
+}
+
+export function pythonInvocationArguments(key, application, arguments_) {
+  if (!["windows-x64", "linux-x64"].includes(key)) throw new Error(`unsupported coverage bundle platform: ${key}`);
+  return ["-I", "-S", application, ...arguments_];
+}
+
 async function smokeBundle(root, key, manifest) {
   const executable = key === "windows-x64" ? join(root, "python", "python.exe") : join(root, "python", "bin", "python3");
   const application = join(root, "app", "gcovr-runner.pyz");
-  const { stdout } = await execFile(executable, [application, "--self-check"], { cwd: root, timeout: 60_000, maxBuffer: 1024 * 1024, windowsHide: true });
-  const result = JSON.parse(stdout.trim());
-  if (result.python !== manifest.python.version || result.gcovr !== manifest.gcovr.version) throw new Error("coverage bundle self-check version mismatch");
+  const scratch = await mkdtemp(join(tmpdir(), "coverage-bundle-smoke-"));
+  try {
+    const hostile = join(scratch, "hostile");
+    const userSiteWindows = join(scratch, "user", "Python314", "site-packages");
+    const userSiteLinux = join(scratch, "user", "lib", "python3.14", "site-packages");
+    const rootDirectory = join(scratch, "root");
+    const objectDirectory = join(scratch, "objects");
+    const outputPath = join(scratch, "coverage.json");
+    const descriptorPath = join(scratch, "descriptor.json");
+    await Promise.all([
+      mkdir(hostile, { recursive: true }),
+      mkdir(userSiteWindows, { recursive: true }),
+      mkdir(userSiteLinux, { recursive: true }),
+      mkdir(rootDirectory, { recursive: true }),
+      mkdir(objectDirectory, { recursive: true }),
+    ]);
+    const markers = [];
+    for (const [directory, module] of [
+      [hostile, "sitecustomize"],
+      [hostile, "usercustomize"],
+      [hostile, "gcovr"],
+      [hostile, "contract"],
+      [userSiteWindows, "sitecustomize"],
+      [userSiteLinux, "usercustomize"],
+    ]) {
+      const marker = join(scratch, `${markers.length}-${module}.imported`);
+      markers.push(marker);
+      await writeFile(join(directory, `${module}.py`), `from pathlib import Path\nPath(${JSON.stringify(marker)}).write_text("hostile", encoding="utf-8")\nraise RuntimeError("hostile ${module} imported")\n`);
+    }
+    const environment = sanitizePythonEnvironment({
+      ...process.env,
+      PYTHONPATH: hostile,
+      PYTHONUSERBASE: join(scratch, "user"),
+      PYTHONSTARTUP: join(hostile, "startup.py"),
+      VIRTUAL_ENV: join(scratch, "venv"),
+      CONDA_PREFIX: join(scratch, "conda"),
+    });
+    const run = (arguments_) => execFile(
+      executable,
+      pythonInvocationArguments(key, application, arguments_),
+      { cwd: hostile, env: environment, timeout: 60_000, maxBuffer: 1024 * 1024, windowsHide: true },
+    );
+    const { stdout } = await run(["--self-check"]);
+    const result = JSON.parse(stdout.trim());
+    if (result.python !== manifest.python.version || result.gcovr !== manifest.gcovr.version) throw new Error("coverage bundle self-check version mismatch");
+    await writeFile(descriptorPath, `${JSON.stringify({
+      schemaVersion: 1,
+      root: rootDirectory,
+      objectDirectory,
+      gcovExecutable: executable,
+      outputPath,
+    }, null, 2)}\n`);
+    await run([descriptorPath]);
+    const coverage = JSON.parse(await readFile(outputPath, "utf8"));
+    if (!plainObject(coverage) || !Array.isArray(coverage.files)) throw new Error("coverage runner descriptor smoke produced invalid JSON");
+    for (const marker of markers) if (await exists(marker)) throw new Error(`hostile Python module was imported: ${marker}`);
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
+  }
 }
 
 function parseCLI(arguments_) {
@@ -573,7 +806,9 @@ export const __testing = Object.freeze({
   inspectArchive,
   obtainArtifact,
   parseCLI,
+  pythonInvocationArguments,
   prepareBundleFromManifest,
+  sanitizePythonEnvironment,
   validateArchiveEntries,
   verifyResolvedBundle,
 });

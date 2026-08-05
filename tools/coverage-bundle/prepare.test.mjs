@@ -4,11 +4,119 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
+import { gzipSync } from "node:zlib";
 
 import { bundleDirectory, platformKey } from "./layout.mjs";
 import { __testing } from "./prepare.mjs";
 
 const digest = (value) => createHash("sha256").update(value).digest("hex");
+
+const fixtureCrcTable = (() => {
+  const table = new Uint32Array(256);
+  for (let index = 0; index < 256; index++) {
+    let value = index;
+    for (let bit = 0; bit < 8; bit++) value = (value & 1) ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+    table[index] = value >>> 0;
+  }
+  return table;
+})();
+
+function fixtureCrc32(bytes) {
+  let value = 0xffffffff;
+  for (const byte of bytes) value = fixtureCrcTable[(value ^ byte) & 0xff] ^ (value >>> 8);
+  return (value ^ 0xffffffff) >>> 0;
+}
+
+function rawZip(entries) {
+  const localRecords = [];
+  const centralRecords = [];
+  let offset = 0;
+  for (const fixture of entries) {
+    const data = Buffer.from(fixture.data ?? "fixture");
+    const name = Buffer.from(fixture.name, "ascii");
+    const localName = Buffer.from(fixture.localName ?? fixture.name, "ascii");
+    const localExtra = Buffer.from(fixture.localExtra ?? []);
+    const centralExtra = Buffer.from(fixture.centralExtra ?? []);
+    const size = fixture.declaredSize ?? data.length;
+    const crc = fixtureCrc32(data);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(0, 6);
+    local.writeUInt16LE(0, 8);
+    local.writeUInt32LE(crc, 14);
+    local.writeUInt32LE(size, 18);
+    local.writeUInt32LE(size, 22);
+    local.writeUInt16LE(localName.length, 26);
+    local.writeUInt16LE(localExtra.length, 28);
+    localRecords.push(local, localName, localExtra, data);
+
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(0x0314, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(0, 8);
+    central.writeUInt16LE(0, 10);
+    central.writeUInt32LE(crc, 16);
+    central.writeUInt32LE(size, 20);
+    central.writeUInt32LE(size, 24);
+    central.writeUInt16LE(name.length, 28);
+    central.writeUInt16LE(centralExtra.length, 30);
+    central.writeUInt32LE(((fixture.mode ?? 0o100644) << 16) >>> 0, 38);
+    central.writeUInt32LE(offset, 42);
+    centralRecords.push(central, name, centralExtra);
+    offset += local.length + localName.length + localExtra.length + data.length;
+  }
+  const central = Buffer.concat(centralRecords);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(entries.length, 8);
+  end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(central.length, 12);
+  end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...localRecords, central, end]);
+}
+
+function tarOctal(value, length) {
+  return `${value.toString(8).padStart(length - 1, "0")}\0`;
+}
+
+function tarHeader({ name, type = "0", size = 0, linkName = "", corruptChecksum = false }) {
+  const header = Buffer.alloc(512);
+  header.write(name, 0, 100, "utf8");
+  header.write(tarOctal(0o644, 8), 100, 8, "ascii");
+  header.write(tarOctal(0, 8), 108, 8, "ascii");
+  header.write(tarOctal(0, 8), 116, 8, "ascii");
+  header.write(tarOctal(size, 12), 124, 12, "ascii");
+  header.write(tarOctal(0, 12), 136, 12, "ascii");
+  header.fill(0x20, 148, 156);
+  header.write(type, 156, 1, "ascii");
+  header.write(linkName, 157, 100, "utf8");
+  header.write("ustar\0", 257, 6, "ascii");
+  header.write("00", 263, 2, "ascii");
+  const checksum = [...header].reduce((sum, byte) => sum + byte, 0) + (corruptChecksum ? 1 : 0);
+  header.write(`${checksum.toString(8).padStart(6, "0")}\0 `, 148, 8, "ascii");
+  return header;
+}
+
+function rawTar(entries) {
+  const records = [];
+  for (const entry of entries) {
+    const data = Buffer.from(entry.data ?? "");
+    const declaredSize = entry.declaredSize ?? data.length;
+    records.push(tarHeader({ ...entry, size: declaredSize }), data);
+    const padding = (512 - (data.length % 512)) % 512;
+    if (padding) records.push(Buffer.alloc(padding));
+  }
+  records.push(Buffer.alloc(1024));
+  return Buffer.concat(records);
+}
+
+function paxRecord(key, value) {
+  let length = key.length + value.length + 4;
+  while (`${length} ${key}=${value}\n`.length !== length) length = `${length} ${key}=${value}\n`.length;
+  return `${length} ${key}=${value}\n`;
+}
 
 function artifact(filename, url, bytes, kind = "wheel") {
   return { filename, url, sha256: digest(bytes), kind };
@@ -253,6 +361,30 @@ test("interrupted prepare leaves no consumable bundle", async (t) => {
   assert.deepEqual((await readdir(outputRoot)).filter((name) => name.startsWith(".coverage-bundle-")), []);
 });
 
+test("post-install build failure leaves host-side staging removable and unpublished", async (t) => {
+  const root = await temporary(t, "coverage-bundle-post-install-");
+  const { manifest, pythonBytes, wheelBytes } = fixture();
+  const outputRoot = join(root, "runtime");
+  await assert.rejects(
+    __testing.prepareBundleFromManifest({
+      manifest,
+      key: "windows-x64",
+      outputRoot,
+      cacheRoot: join(root, "cache"),
+      download: async (url, destination) => writeFile(destination, url.includes("python.org") ? pythonBytes : wheelBytes),
+      operations: operations({
+        build: async ({ stagingRoot }) => {
+          await writeOutput(stagingRoot);
+          throw new Error("post-install failure");
+        },
+      }),
+    }),
+    /post-install failure/u,
+  );
+  assert.equal(await exists(join(outputRoot, "windows-x64", "READY")), false);
+  assert.deepEqual((await readdir(outputRoot)).filter((name) => name.startsWith(".coverage-bundle-")), []);
+});
+
 test("cache hit performs full resolved-manifest verification and detects tampering", async (t) => {
   const prepared = await prepareFixture(t);
   let downloads = 0;
@@ -282,6 +414,46 @@ test("cache hit performs full resolved-manifest verification and detects tamperi
   assert.equal(downloads, 0);
 });
 
+test("cache identity binds exact selected inputs and deterministic recipe provenance", async (t) => {
+  const prepared = await prepareFixture(t);
+  const resolved = JSON.parse(await readFile(join(prepared.result.root, "manifest.resolved.json"), "utf8"));
+  assert.deepEqual(Object.keys(resolved.inputs).sort(), ["provenance", "pythonArtifact", "wheels"]);
+  assert.deepEqual(Object.keys(resolved.inputs.provenance).sort(), ["builderImage", "glibcBaseline", "recipe"]);
+  assert.match(resolved.inputs.provenance.recipe.name, /coverage-bundle/u);
+  assert.match(resolved.inputs.provenance.recipe.sha256, /^[0-9a-f]{64}$/u);
+  assert.equal(resolved.inputs.pythonArtifact.sha256, prepared.manifest.python.artifacts["windows-x64"].sha256);
+  assert.deepEqual(resolved.inputs.wheels.map(({ project }) => project), ["gcovr"]);
+  assert.equal(resolved.inputs.provenance.builderImage, null);
+  assert.equal(resolved.inputs.provenance.glibcBaseline, null);
+
+  const linuxRoot = await temporary(t, "coverage-bundle-linux-provenance-");
+  await writeOutput(linuxRoot);
+  const linuxResolved = await __testing.createResolvedManifest(linuxRoot, "linux-x64", prepared.manifest);
+  assert.equal(linuxResolved.inputs.provenance.builderImage, prepared.manifest.linux.builder.image);
+  assert.equal(linuxResolved.inputs.provenance.glibcBaseline, "2.28");
+
+  const changed = structuredClone(prepared.manifest);
+  changed.python.artifacts["windows-x64"].sha256 = digest("different locked Python input");
+  await assert.rejects(
+    __testing.prepareBundleFromManifest({
+      manifest: changed,
+      key: "windows-x64",
+      outputRoot: prepared.outputRoot,
+      cacheRoot: prepared.cacheRoot,
+      download: async () => assert.fail("identity mismatch must fail before download"),
+      operations: operations(),
+    }),
+    /resolved input.*mismatch/iu,
+  );
+
+  resolved.inputs.provenance.recipe.sha256 = digest("stale preparation recipe");
+  await writeFile(join(prepared.result.root, "manifest.resolved.json"), `${JSON.stringify(resolved, null, 2)}\n`);
+  await assert.rejects(
+    __testing.verifyResolvedBundle(prepared.result.root, "windows-x64", prepared.manifest),
+    /resolved input.*mismatch/iu,
+  );
+});
+
 test("resolved output list and bytes are deterministic and include only regular generated files", async (t) => {
   const first = await prepareFixture(t);
   const second = await prepareFixture(t);
@@ -289,7 +461,7 @@ test("resolved output list and bytes are deterministic and include only regular 
   const two = await readFile(join(second.result.root, "manifest.resolved.json"), "utf8");
   assert.equal(one, two);
   const resolved = JSON.parse(one);
-  assert.deepEqual(Object.keys(resolved).sort(), ["gcovrVersion", "outputs", "platform", "pythonVersion", "schemaVersion"]);
+  assert.deepEqual(Object.keys(resolved).sort(), ["gcovrVersion", "inputs", "outputs", "platform", "pythonVersion", "schemaVersion"]);
   assert.deepEqual(resolved.outputs.map(({ path }) => path), [...resolved.outputs.map(({ path }) => path)].sort());
   assert.ok(resolved.outputs.every((entry) => entry.kind === "regular-file" && /^[0-9a-f]{64}$/u.test(entry.sha256)));
   assert.equal(resolved.outputs.some(({ path }) => path === "READY" || path === "manifest.resolved.json"), false);
@@ -335,6 +507,99 @@ test("resolved layout rejects unexpected top-level and app files", async (t) => 
   }
 });
 
+test("cache verification reapplies exact app layout even when output digests were rewritten", async (t) => {
+  const prepared = await prepareFixture(t);
+  const extraPath = join(prepared.result.root, "app", "forwarded-options.json");
+  await writeFile(extraPath, "unexpected");
+  const manifestPath = join(prepared.result.root, "manifest.resolved.json");
+  const resolved = JSON.parse(await readFile(manifestPath, "utf8"));
+  resolved.outputs.push({ path: "app/forwarded-options.json", sha256: digest("unexpected"), kind: "regular-file" });
+  resolved.outputs.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+  await writeFile(manifestPath, `${JSON.stringify(resolved, null, 2)}\n`);
+  await assert.rejects(
+    __testing.verifyResolvedBundle(prepared.result.root, "windows-x64", prepared.manifest),
+    /unexpected bundle app entry/u,
+  );
+});
+
+test("byte-level ZIP audit rejects unsafe paths, aliases, types, metadata and expansion", async (t) => {
+  const root = await temporary(t, "coverage-bundle-unsafe-zip-");
+  const cases = [
+    ["traversal", [{ name: "../escape" }]],
+    ["absolute", [{ name: "/absolute" }]],
+    ["drive", [{ name: "C:/escape" }]],
+    ["ADS", [{ name: "safe/file:stream" }]],
+    ["symlink", [{ name: "safe/link", mode: 0o120777 }]],
+    ["unsupported FIFO", [{ name: "safe/fifo", mode: 0o010644 }]],
+    ["duplicate", [{ name: "same" }, { name: "same" }]],
+    ["case alias", [{ name: "Same" }, { name: "same" }]],
+    ["local-central mismatch", [{ name: "safe/name", localName: "evil/name" }]],
+    ["unsupported hardlink metadata", [{ name: "safe/link", centralExtra: Buffer.from([0x0d, 0x00, 0x00, 0x00]) }]],
+    ["malformed local metadata", [{ name: "safe/name", localExtra: Buffer.from([0x55]) }]],
+    ["expansion overflow", [{ name: "safe/huge", declaredSize: 1024 * 1024 * 1024 + 1 }]],
+  ];
+  for (const [name, entries] of cases) {
+    const path = join(root, `${name.replaceAll(" ", "-")}.zip`);
+    await writeFile(path, rawZip(entries));
+    await assert.rejects(__testing.inspectArchive(path), /archive|ZIP/iu, name);
+  }
+});
+
+test("byte-level TAR audit rejects unsafe paths, links, types, metadata and expansion", async (t) => {
+  const root = await temporary(t, "coverage-bundle-unsafe-tar-");
+  const cases = [
+    ["traversal", [{ name: "../escape", data: "x" }]],
+    ["absolute", [{ name: "/absolute", data: "x" }]],
+    ["drive", [{ name: "C:/escape", data: "x" }]],
+    ["ADS", [{ name: "safe/file:stream", data: "x" }]],
+    ["symlink", [{ name: "safe/link", type: "2", linkName: "../escape" }]],
+    ["hardlink", [{ name: "safe/link", type: "1", linkName: "safe/target" }]],
+    ["unsupported device", [{ name: "safe/device", type: "3" }]],
+    ["duplicate", [{ name: "same", data: "a" }, { name: "same", data: "b" }]],
+    ["case alias", [{ name: "Same", data: "a" }, { name: "same", data: "b" }]],
+    ["bad checksum", [{ name: "safe/file", data: "x", corruptChecksum: true }]],
+    ["unsupported PAX size", [
+      { name: "PaxHeader", type: "x", data: paxRecord("size", "100") },
+      { name: "safe/file", data: "x" },
+    ]],
+    ["malformed PAX record", [
+      { name: "PaxHeader", type: "x", data: "12 path=x\n" },
+      { name: "safe/file", data: "x" },
+    ]],
+    ["expansion overflow", [{ name: "safe/huge", declaredSize: 1024 * 1024 * 1024 + 1 }]],
+  ];
+  for (const [name, entries] of cases) {
+    const path = join(root, `${name.replaceAll(" ", "-")}.tgz`);
+    await writeFile(path, gzipSync(rawTar(entries)));
+    await assert.rejects(__testing.inspectArchive(path), /archive|TAR|PAX/iu, name);
+  }
+});
+
+test("TAR audit accepts a safe GNU longname with identical extraction semantics", async (t) => {
+  const root = await temporary(t, "coverage-bundle-safe-tar-");
+  const longPath = `Python-3.14.6/${"long-directory/".repeat(8)}module.py`;
+  const archive = rawTar([
+    { name: "././@LongLink", type: "L", data: `${longPath}\0` },
+    { name: "placeholder", data: "safe" },
+  ]);
+  const path = join(root, "safe.tgz");
+  await writeFile(path, gzipSync(archive));
+  assert.deepEqual(await __testing.inspectArchive(path), [{ path: longPath, type: "file" }]);
+});
+
+test("TAR audit accepts only path-safe local PAX and metadata-only global PAX semantics", async (t) => {
+  const root = await temporary(t, "coverage-bundle-safe-pax-");
+  const paxPath = `Python-3.14.6/${"pax-directory/".repeat(8)}module.py`;
+  const archive = rawTar([
+    { name: "GlobalPaxHeader", type: "g", data: paxRecord("mtime", "0") },
+    { name: "PaxHeader", type: "x", data: paxRecord("path", paxPath) },
+    { name: "placeholder", data: "safe" },
+  ]);
+  const path = join(root, "safe-pax.tgz");
+  await writeFile(path, gzipSync(archive));
+  assert.deepEqual(await __testing.inspectArchive(path), [{ path: paxPath, type: "file" }]);
+});
+
 test("Linux builder contract pins image ABI, configure flags, source epoch and disables network", async () => {
   const script = await readFile(new URL("./build-linux.sh", import.meta.url), "utf8");
   assert.match(script, /manylinux_2_28/u);
@@ -345,6 +610,42 @@ test("Linux builder contract pins image ABI, configure flags, source epoch and d
   assert.match(script, /--without-static-libpython/u);
   assert.match(script, /--enable-shared/u);
   assert.match(script, /--network[= ]none/u);
+  assert.match(script, /\*disabled\*[\s\S]*_tkinter/u);
+  assert.match(script, /HOST_UID/u);
+  assert.match(script, /HOST_GID/u);
+  assert.match(script, /trap[^\n]+EXIT/u);
+  assert.match(script, /chown\s+-R/u);
+  assert.ok(script.indexOf("trap restore_output_ownership EXIT") < script.indexOf("make -j1"));
+});
+
+test("final layout rejects native Tk and Tcl/Tk runtime paths", async (t) => {
+  for (const extra of ["python/DLLs/_tkinter.pyd", "python/lib/tcl8.6/init.tcl", "python/lib/tk8.6/tk.tcl"]) {
+    const root = await temporary(t, "coverage-bundle-tk-");
+    await writeOutput(root);
+    await mkdir(dirname(join(root, extra)), { recursive: true });
+    await writeFile(join(root, extra), "forbidden");
+    await assert.rejects(
+      __testing.createResolvedManifest(root, "windows-x64", fixture().manifest),
+      /forbidden bundle path/u,
+      extra,
+    );
+  }
+});
+
+test("Linux Python invocation is isolated and Python-related environment is sanitized", () => {
+  assert.deepEqual(
+    __testing.pythonInvocationArguments("linux-x64", "/bundle/app/gcovr-runner.pyz", ["descriptor.json"]),
+    ["-I", "-S", "/bundle/app/gcovr-runner.pyz", "descriptor.json"],
+  );
+  const clean = __testing.sanitizePythonEnvironment({
+    PATH: "/trusted/bin",
+    PYTHONPATH: "/hostile",
+    PythonUserBase: "/hostile-user",
+    PYTHONSTARTUP: "/hostile/startup.py",
+    VIRTUAL_ENV: "/hostile-venv",
+    CONDA_PREFIX: "/hostile-conda",
+  });
+  assert.deepEqual(clean, { PATH: "/trusted/bin" });
 });
 
 test("runner descriptor is closed and maps only fixed root/object/gcov/output fields", async () => {
@@ -358,4 +659,8 @@ test("runner descriptor is closed and maps only fixed root/object/gcov/output fi
   assert.match(main, /shell=False/u);
   assert.doesNotMatch(main, /shell=True|pip\s+install/iu);
   assert.match(main, /gcovr/u);
+  assert.ok(contract.indexOf('"--json"') < contract.indexOf('descriptor["outputPath"]'));
+  assert.ok(contract.indexOf('descriptor["outputPath"]') < contract.indexOf('"--json-pretty"'));
+  assert.match(main, /"-I"[\s\S]*"-S"/u);
+  assert.match(main, /PYTHON/iu);
 });

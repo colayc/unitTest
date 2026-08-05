@@ -13,6 +13,20 @@ import zipfile
 from pathlib import Path
 
 
+def _sanitized_environment() -> dict[str, str]:
+    environment: dict[str, str] = {}
+    for key, value in os.environ.items():
+        upper = key.upper()
+        if upper.startswith(("PYTHON", "PIP_")) or upper in {
+            "VIRTUAL_ENV",
+            "CONDA_PREFIX",
+            "CONDA_DEFAULT_ENV",
+        }:
+            continue
+        environment[key] = value
+    return environment
+
+
 def _materialize_application(destination: Path) -> None:
     archive = Path(sys.argv[0]).resolve()
     with zipfile.ZipFile(archive) as source:
@@ -57,10 +71,10 @@ def main() -> int:
         with tempfile.TemporaryDirectory(prefix="unit-test-ide-gcovr-") as temporary:
             directory = Path(temporary)
             _materialize_application(directory)
-            environment = os.environ.copy()
+            environment = _sanitized_environment()
             environment["UNIT_TEST_IDE_GCOVR_MATERIALIZED"] = "1"
             completed = subprocess.run(
-                [sys.executable, str(directory / "__main__.py"), *sys.argv[1:]],
+                [sys.executable, "-I", "-S", str(directory / "__main__.py"), *sys.argv[1:]],
                 check=False,
                 env=environment,
                 shell=False,

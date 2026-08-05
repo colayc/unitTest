@@ -55,6 +55,7 @@ def gcovr_arguments(descriptor: dict[str, Any]) -> list[str]:
         descriptor["objectDirectory"],
         "--gcov-executable",
         descriptor["gcovExecutable"],
-        "--json-pretty",
+        "--json",
         descriptor["outputPath"],
+        "--json-pretty",
     ]
