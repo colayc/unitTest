@@ -578,7 +578,8 @@ function forbiddenOutputPath(path) {
   const segments = path.toLowerCase().split("/");
   return segments.some((segment) =>
     ["pip", "ensurepip", "test", "tests", "idle", "idlelib", "tk", "tkinter", "include", "includes", "headers", "build", "build-tools"].includes(segment) ||
-    /^_tkinter(?:[._-]|$)/u.test(segment) || /^tcl(?:\d|[._-]|$)/u.test(segment) || /^tk(?:\d|[._-]|$)/u.test(segment)
+    /^_tkinter(?:[._-]|$)/u.test(segment) || /^(?:lib)?tcl(?:\d|[._-]|$)/u.test(segment) ||
+    /^(?:lib)?tk(?:\d|[._-]|$)/u.test(segment) || /^lib-tk(?:\d|[._-]|$)/u.test(segment)
   ) || /\.(?:a|lib|h|hpp)$/iu.test(path);
 }
 

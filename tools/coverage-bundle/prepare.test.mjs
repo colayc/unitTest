@@ -619,7 +619,14 @@ test("Linux builder contract pins image ABI, configure flags, source epoch and d
 });
 
 test("final layout rejects native Tk and Tcl/Tk runtime paths", async (t) => {
-  for (const extra of ["python/DLLs/_tkinter.pyd", "python/lib/tcl8.6/init.tcl", "python/lib/tk8.6/tk.tcl"]) {
+  for (const extra of [
+    "python/DLLs/_tkinter.pyd",
+    "python/lib/tcl8.6/init.tcl",
+    "python/lib/tk8.6/tk.tcl",
+    "python/lib/libtcl8.6.so",
+    "python/lib/libtk8.6.so",
+    "python/lib/python3.14/lib-tk/tkinter.py",
+  ]) {
     const root = await temporary(t, "coverage-bundle-tk-");
     await writeOutput(root);
     await mkdir(dirname(join(root, extra)), { recursive: true });
