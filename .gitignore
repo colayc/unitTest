@@ -1,4 +1,7 @@
 .superpowers/
+# Coverage preparation downloads and runtime outputs are never source artifacts.
+.superpowers/cache/coverage-bundle/
+.superpowers/runtime/coverage-bundle/
 .worktrees/
 /build/
 dist/

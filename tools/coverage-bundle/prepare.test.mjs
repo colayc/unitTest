@@ -1,0 +1,361 @@
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import test from "node:test";
+
+import { bundleDirectory, platformKey } from "./layout.mjs";
+import { __testing } from "./prepare.mjs";
+
+const digest = (value) => createHash("sha256").update(value).digest("hex");
+
+function artifact(filename, url, bytes, kind = "wheel") {
+  return { filename, url, sha256: digest(bytes), kind };
+}
+
+function fixture() {
+  const pythonBytes = Buffer.from("python archive fixture");
+  const wheelBytes = Buffer.from("wheel archive fixture");
+  return {
+    pythonBytes,
+    wheelBytes,
+    manifest: {
+      schemaVersion: 1,
+      python: {
+        version: "3.14.6",
+        license: "PSF-2.0",
+        artifacts: {
+          "windows-x64": artifact(
+            "python-3.14.6-embed-amd64.zip",
+            "https://www.python.org/ftp/python/3.14.6/python-3.14.6-embed-amd64.zip",
+            pythonBytes,
+            "embedded-archive",
+          ),
+          "linux-x64": artifact(
+            "Python-3.14.6.tgz",
+            "https://www.python.org/ftp/python/3.14.6/Python-3.14.6.tgz",
+            pythonBytes,
+            "source-archive",
+          ),
+        },
+      },
+      gcovr: {
+        version: "8.6",
+        license: "BSD-3-Clause",
+        wheels: [{
+          project: "gcovr",
+          version: "8.6",
+          kind: "wheel",
+          files: [{
+            ...(({ filename, url, sha256 }) => ({ filename, url, sha256 }))(artifact(
+              "gcovr-8.6-py3-none-any.whl",
+              "https://files.pythonhosted.org/packages/fixture/gcovr.whl",
+              wheelBytes,
+            )),
+            platforms: ["windows-x64", "linux-x64"],
+          }],
+        }],
+      },
+      linux: {
+        builder: {
+          image: "quay.io/pypa/manylinux_2_28_x86_64@sha256:c7123a4aebb153c1e45b8152f07a64bd950d65e630cfb633a029cc45ee21897c",
+          sourceUrl: "https://quay.io/repository/pypa/manylinux_2_28_x86_64",
+        },
+        glibcBaseline: "2.28",
+        muslPolicy: "unsupported",
+      },
+    },
+  };
+}
+
+async function exists(path) {
+  try {
+    await readFile(path);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT" || error?.code === "EISDIR") return false;
+    throw error;
+  }
+}
+
+async function temporary(t, prefix) {
+  const root = await mkdtemp(join(tmpdir(), prefix));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  return root;
+}
+
+async function writeOutput(root, pth = "python314.zip\n.\n../app/gcovr-runner.pyz\n") {
+  await mkdir(join(root, "python"), { recursive: true });
+  await mkdir(join(root, "app"), { recursive: true });
+  await mkdir(join(root, "licenses"), { recursive: true });
+  await writeFile(join(root, "python", "python.exe"), "python");
+  await writeFile(join(root, "python", "python314._pth"), pth);
+  await writeFile(join(root, "app", "gcovr-runner.pyz"), "application");
+  await writeFile(join(root, "licenses", "NOTICE.txt"), "licenses");
+}
+
+function operations({ inspect, build, beforeReady, beforePublish } = {}) {
+  return {
+    inspectArchive: inspect ?? (async () => [{ path: "safe/archive", type: "file" }]),
+    buildBundle: build ?? (async ({ stagingRoot }) => writeOutput(stagingRoot)),
+    beforeReady,
+    beforePublish,
+  };
+}
+
+async function prepareFixture(t, overrides = {}) {
+  const root = await temporary(t, "coverage-bundle-");
+  const cacheRoot = join(root, "cache");
+  const outputRoot = join(root, "runtime");
+  const { manifest, pythonBytes, wheelBytes } = fixture();
+  const downloads = [];
+  const byUrl = new Map([
+    [manifest.python.artifacts["windows-x64"].url, pythonBytes],
+    [manifest.gcovr.wheels[0].files[0].url, wheelBytes],
+  ]);
+  const download = async (url, destination) => {
+    downloads.push(url);
+    await writeFile(destination, byUrl.get(url) ?? "unexpected");
+  };
+  const result = await __testing.prepareBundleFromManifest({
+    manifest,
+    key: "windows-x64",
+    outputRoot,
+    cacheRoot,
+    download,
+    operations: operations(),
+    ...overrides,
+  });
+  return { root, cacheRoot, outputRoot, manifest, downloads, result, download };
+}
+
+test("layout accepts only the separate Windows/Linux x64 bundle keys", () => {
+  assert.equal(platformKey("win32", "x64"), "windows-x64");
+  assert.equal(platformKey("linux", "x64"), "linux-x64");
+  assert.throws(() => platformKey("darwin", "x64"), /unsupported coverage bundle platform/u);
+  assert.throws(() => platformKey("win32", "arm64"), /unsupported coverage bundle platform/u);
+  assert.match(bundleDirectory("C:/repo", "windows-x64"), /coverage-bundle[\\/]windows-x64$/u);
+});
+
+test("cold prepare downloads only the platform manifest allowlist and verifies before inspection", async (t) => {
+  const order = [];
+  const { manifest } = fixture();
+  const expected = [
+    manifest.python.artifacts["windows-x64"].url,
+    manifest.gcovr.wheels[0].files[0].url,
+  ];
+  const prepared = await prepareFixture(t, {
+    download: async (url, destination) => {
+      order.push(`download:${url}`);
+      const bytes = url === expected[0] ? Buffer.from("python archive fixture") : Buffer.from("wheel archive fixture");
+      await writeFile(destination, bytes);
+    },
+    operations: operations({
+      inspect: async (path) => {
+        order.push(`inspect:${path}`);
+        return [{ path: "safe/file", type: "file" }];
+      },
+    }),
+  });
+  assert.deepEqual(prepared.downloads, []);
+  assert.deepEqual(order.filter((item) => item.startsWith("download:")), expected.map((url) => `download:${url}`));
+  assert.equal(order[0].startsWith("download:"), true);
+  assert.equal(order[1].startsWith("inspect:"), true);
+});
+
+test("tampered and interrupted downloads never reach inspection or leave partial cache files", async (t) => {
+  const root = await temporary(t, "coverage-bundle-download-");
+  const { manifest } = fixture();
+  let inspections = 0;
+  await assert.rejects(
+    __testing.prepareBundleFromManifest({
+      manifest,
+      key: "windows-x64",
+      outputRoot: join(root, "runtime"),
+      cacheRoot: join(root, "cache"),
+      download: async (_url, destination) => writeFile(destination, "tampered"),
+      operations: operations({ inspect: async () => { inspections++; return []; } }),
+    }),
+    /SHA-256 mismatch/u,
+  );
+  assert.equal(inspections, 0);
+  assert.deepEqual(await readdir(join(root, "cache")), []);
+
+  await assert.rejects(
+    __testing.obtainArtifact(manifest.python.artifacts["windows-x64"], join(root, "cache"), async (_url, destination) => {
+      await writeFile(destination, "partial");
+      throw new Error("network interrupted");
+    }),
+    /network interrupted/u,
+  );
+  assert.deepEqual(await readdir(join(root, "cache")), []);
+});
+
+test("archive audit rejects traversal, symlink and duplicate entries before extraction", () => {
+  for (const entries of [
+    [{ path: "../escape", type: "file" }],
+    [{ path: "/absolute", type: "file" }],
+    [{ path: "C:/escape", type: "file" }],
+    [{ path: "safe/link", type: "symlink" }],
+    [{ path: "same", type: "file" }, { path: "same", type: "file" }],
+  ]) {
+    assert.throws(() => __testing.validateArchiveEntries(entries), /unsafe archive entry/u);
+  }
+});
+
+test("prepare builds in a temp directory, writes READY last, and atomically publishes", async (t) => {
+  let sawTargetDuringBuild = false;
+  let sawReadyBeforeHook = true;
+  let sawReadyAtPublish = false;
+  const root = await temporary(t, "coverage-bundle-publish-");
+  const outputRoot = join(root, "runtime");
+  const target = join(outputRoot, "windows-x64");
+  const { manifest, pythonBytes, wheelBytes } = fixture();
+  await __testing.prepareBundleFromManifest({
+    manifest,
+    key: "windows-x64",
+    outputRoot,
+    cacheRoot: join(root, "cache"),
+    download: async (url, destination) => writeFile(destination, url.includes("python.org") ? pythonBytes : wheelBytes),
+    operations: operations({
+      build: async ({ stagingRoot }) => {
+        sawTargetDuringBuild = await exists(join(target, "READY"));
+        await writeOutput(stagingRoot);
+      },
+      beforeReady: async ({ stagingRoot }) => { sawReadyBeforeHook = await exists(join(stagingRoot, "READY")); },
+      beforePublish: async ({ stagingRoot }) => { sawReadyAtPublish = await exists(join(stagingRoot, "READY")); },
+    }),
+  });
+  assert.equal(sawTargetDuringBuild, false);
+  assert.equal(sawReadyBeforeHook, false);
+  assert.equal(sawReadyAtPublish, true);
+  assert.equal(await readFile(join(target, "READY"), "utf8"), "ready\n");
+  assert.deepEqual((await readdir(outputRoot)).filter((name) => name.startsWith(".coverage-bundle-")), []);
+});
+
+test("interrupted prepare leaves no consumable bundle", async (t) => {
+  const root = await temporary(t, "coverage-bundle-interrupt-");
+  const { manifest, pythonBytes, wheelBytes } = fixture();
+  const outputRoot = join(root, "runtime");
+  await assert.rejects(
+    __testing.prepareBundleFromManifest({
+      manifest,
+      key: "windows-x64",
+      outputRoot,
+      cacheRoot: join(root, "cache"),
+      download: async (url, destination) => writeFile(destination, url.includes("python.org") ? pythonBytes : wheelBytes),
+      operations: operations({ beforePublish: async () => { throw new Error("interrupted"); } }),
+    }),
+    /interrupted/u,
+  );
+  assert.equal(await exists(join(outputRoot, "windows-x64", "READY")), false);
+  assert.deepEqual((await readdir(outputRoot)).filter((name) => name.startsWith(".coverage-bundle-")), []);
+});
+
+test("cache hit performs full resolved-manifest verification and detects tampering", async (t) => {
+  const prepared = await prepareFixture(t);
+  let downloads = 0;
+  const reused = await __testing.prepareBundleFromManifest({
+    manifest: prepared.manifest,
+    key: "windows-x64",
+    outputRoot: prepared.outputRoot,
+    cacheRoot: prepared.cacheRoot,
+    download: async () => { downloads++; },
+    operations: operations(),
+  });
+  assert.equal(reused.reused, true);
+  assert.equal(downloads, 0);
+
+  await writeFile(join(prepared.result.root, "app", "gcovr-runner.pyz"), "tampered");
+  await assert.rejects(
+    __testing.prepareBundleFromManifest({
+      manifest: prepared.manifest,
+      key: "windows-x64",
+      outputRoot: prepared.outputRoot,
+      cacheRoot: prepared.cacheRoot,
+      download: async () => { downloads++; },
+      operations: operations(),
+    }),
+    /output SHA-256 mismatch/u,
+  );
+  assert.equal(downloads, 0);
+});
+
+test("resolved output list and bytes are deterministic and include only regular generated files", async (t) => {
+  const first = await prepareFixture(t);
+  const second = await prepareFixture(t);
+  const one = await readFile(join(first.result.root, "manifest.resolved.json"), "utf8");
+  const two = await readFile(join(second.result.root, "manifest.resolved.json"), "utf8");
+  assert.equal(one, two);
+  const resolved = JSON.parse(one);
+  assert.deepEqual(Object.keys(resolved).sort(), ["gcovrVersion", "outputs", "platform", "pythonVersion", "schemaVersion"]);
+  assert.deepEqual(resolved.outputs.map(({ path }) => path), [...resolved.outputs.map(({ path }) => path)].sort());
+  assert.ok(resolved.outputs.every((entry) => entry.kind === "regular-file" && /^[0-9a-f]{64}$/u.test(entry.sha256)));
+  assert.equal(resolved.outputs.some(({ path }) => path === "READY" || path === "manifest.resolved.json"), false);
+});
+
+test("deterministic application ZIP round-trips every regular entry", async (t) => {
+  const root = await temporary(t, "coverage-bundle-zip-");
+  const archive = join(root, "application.pyz");
+  await writeFile(archive, __testing.deterministicZip(new Map([
+    ["__main__.py", Buffer.from("print('ok')\n")],
+    ["package/module.py", Buffer.from("VALUE = 1\n")],
+  ])));
+  assert.deepEqual(await __testing.inspectArchive(archive), [
+    { path: "__main__.py", type: "file" },
+    { path: "package/module.py", type: "file" },
+  ]);
+});
+
+test("Windows isolation path excludes import site and forbidden final layout entries", async (t) => {
+  const prepared = await prepareFixture(t);
+  const pth = await readFile(join(prepared.result.root, "python", "python314._pth"), "utf8");
+  assert.doesNotMatch(pth, /^\s*import\s+site\s*$/mu);
+  assert.match(pth, /^\.\.\/app\/gcovr-runner\.pyz$/mu);
+  await assert.rejects(async () => {
+    const root = await temporary(t, "coverage-bundle-forbidden-");
+    await writeOutput(root);
+    await mkdir(join(root, "python", "Lib", "ensurepip"), { recursive: true });
+    await writeFile(join(root, "python", "Lib", "ensurepip", "__init__.py"), "bad");
+    await __testing.createResolvedManifest(root, "windows-x64", fixture().manifest);
+  }, /forbidden bundle path/u);
+});
+
+test("resolved layout rejects unexpected top-level and app files", async (t) => {
+  for (const extra of ["unexpected.txt", "app/forwarded-options.json"]) {
+    const root = await temporary(t, "coverage-bundle-extra-");
+    await writeOutput(root);
+    await mkdir(dirname(join(root, extra)), { recursive: true });
+    await writeFile(join(root, extra), "unexpected");
+    await assert.rejects(
+      __testing.createResolvedManifest(root, "windows-x64", fixture().manifest),
+      /unexpected bundle (?:top-level|app) entry/u,
+    );
+  }
+});
+
+test("Linux builder contract pins image ABI, configure flags, source epoch and disables network", async () => {
+  const script = await readFile(new URL("./build-linux.sh", import.meta.url), "utf8");
+  assert.match(script, /manylinux_2_28/u);
+  assert.match(script, /glibc[^\n]*2\.28|2\.28[^\n]*glibc/iu);
+  assert.match(script, /SOURCE_DATE_EPOCH=\d+/u);
+  assert.match(script, /--with-ensurepip=no/u);
+  assert.match(script, /--disable-test-modules/u);
+  assert.match(script, /--without-static-libpython/u);
+  assert.match(script, /--enable-shared/u);
+  assert.match(script, /--network[= ]none/u);
+});
+
+test("runner descriptor is closed and maps only fixed root/object/gcov/output fields", async () => {
+  const contract = await readFile(new URL("./runner/contract.py", import.meta.url), "utf8");
+  const main = await readFile(new URL("./runner/__main__.py", import.meta.url), "utf8");
+  assert.match(contract, /schemaVersion/u);
+  for (const field of ["root", "objectDirectory", "gcovExecutable", "outputPath"]) assert.match(contract, new RegExp(field, "u"));
+  assert.match(contract, /set\([^\n]+\)\s*!=\s*|keys\(\)[^\n]+!=/u);
+  assert.doesNotMatch(contract, /include|exclude/iu);
+  assert.match(main, /sys\.executable/u);
+  assert.match(main, /shell=False/u);
+  assert.doesNotMatch(main, /shell=True|pip\s+install/iu);
+  assert.match(main, /gcovr/u);
+});

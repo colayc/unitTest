@@ -1,0 +1,4 @@
+Unit Test IDE coverage runner
+
+This runner is product-owned glue code. The bundled Python, gcovr, and dependency
+license and notice materials are copied into the adjacent licenses directory.
