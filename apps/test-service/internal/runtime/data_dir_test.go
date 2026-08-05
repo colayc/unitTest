@@ -20,6 +20,7 @@ func TestPrepareDataDirReturnsFixedAbsoluteLayout(t *testing.T) {
 	if layout.Root != absolute || layout.Database != filepath.Join(absolute, "history.sqlite3") ||
 		layout.Artifacts != filepath.Join(absolute, "artifacts") ||
 		layout.Build != filepath.Join(absolute, "build") ||
+		layout.Coverage != filepath.Join(absolute, "coverage") ||
 		layout.Controls != filepath.Join(absolute, "controls") ||
 		layout.Lock != filepath.Join(absolute, "service.lock") {
 		t.Fatalf("layout = %#v", layout)
@@ -27,12 +28,27 @@ func TestPrepareDataDirReturnsFixedAbsoluteLayout(t *testing.T) {
 	for _, directory := range []string{
 		layout.Root,
 		layout.Build,
+		layout.Coverage,
 		layout.Controls,
 	} {
 		info, err := os.Stat(directory)
 		if err != nil || !info.IsDir() {
 			t.Fatalf("data directory %q = %#v, %v", directory, info, err)
 		}
+	}
+}
+
+func TestCoverageDataDirectoryIsServiceOwned(t *testing.T) {
+	layout, err := PrepareDataDir(filepath.Join(t.TempDir(), "private", "service-data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if layout.Coverage == "" || filepath.Dir(layout.Coverage) != layout.Root {
+		t.Fatalf("coverage layout = %#v", layout)
+	}
+	info, err := os.Stat(layout.Coverage)
+	if err != nil || !info.IsDir() {
+		t.Fatalf("coverage data directory = %#v, %v", info, err)
 	}
 }
 
