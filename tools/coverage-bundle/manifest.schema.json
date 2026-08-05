@@ -15,7 +15,17 @@
     "sha256": {
       "type": "string",
       "pattern": "^[0-9a-f]{64}$",
-      "not": { "pattern": "^0{64}$" }
+      "allOf": [
+        { "not": { "pattern": "^([0-9a-f])\\1{63}$" } },
+        {
+          "not": {
+            "enum": [
+              "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+              "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            ]
+          }
+        }
+      ]
     },
     "platform": {
       "type": "string",

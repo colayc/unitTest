@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
@@ -35,6 +36,41 @@ function clone(value) {
 function hasUniqueProjects(manifest) {
   const projects = manifest.gcovr.wheels.map(({ project }) => project);
   return new Set(projects).size === projects.length;
+}
+
+function sha256Text(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function assertLicenseVersions(manifest, dependencies) {
+  assert.equal(dependencies.python.version, manifest.python.version);
+  assert.equal(dependencies.gcovr.version, manifest.gcovr.version);
+  assert.deepEqual(
+    Object.fromEntries(dependencies.packages.map(({ project, version }) => [project, version])),
+    Object.fromEntries(manifest.gcovr.wheels.map(({ project, version }) => [project, version])),
+  );
+}
+
+function assertLxmlWheelLicenseFiles(dependencies) {
+  const lxml = dependencies.packages.find(({ project }) => project === "lxml");
+  assert.deepEqual(lxml?.wheelLicenseFiles, [
+    {
+      platform: "windows-x64",
+      wheelFilename: "lxml-6.0.2-cp314-cp314-win_amd64.whl",
+      files: {
+        "lxml-6.0.2.dist-info/licenses/LICENSE.txt": "e7c3ce8d76331b0101cc46790ab43958ea90a364bcf962ed8763d5a818340e69",
+        "lxml-6.0.2.dist-info/licenses/LICENSES.txt": "ce53f508d0cb88bdb4621e236ca34881a3fa1805f97dfccf38960128a4e2ead9",
+      },
+    },
+    {
+      platform: "linux-x64",
+      wheelFilename: "lxml-6.0.2-cp314-cp314-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl",
+      files: {
+        "lxml-6.0.2.dist-info/licenses/LICENSE.txt": "8fc2b568133516e46845d2147917adeee1648e70ae9ab5ed6c5417afef4ce855",
+        "lxml-6.0.2.dist-info/licenses/LICENSES.txt": "41d49dd406aa0e1548a6d5f21a30d6bf638b3cd96eb7289dd348d83ed2e40392",
+      },
+    },
+  ]);
 }
 
 test("tracked manifest fixes the Python 3.14.6 and gcovr 8.6 source lock", async () => {
@@ -130,6 +166,7 @@ test("license contract is complete for each locked package and the two bundled l
     readFile(new URL("licenses/gcovr-8.6.txt", root), "utf8"),
   ]);
   assert.match(pythonLicense, /PYTHON SOFTWARE FOUNDATION LICENSE VERSION 2/u);
+  assert.equal(sha256Text(pythonLicense), "b0e25a78cffb43f4d92de8b61ccfa1f1f98ecbc22330b54b5251e7b6ba010231");
   assert.match(gcovrLicense, /BSD 3-Clause License/u);
   assert.equal(dependencies.schemaVersion, 1);
   assert.equal(dependencies.python.licenseFile, "Python-3.14.6.txt");
@@ -138,6 +175,8 @@ test("license contract is complete for each locked package and the two bundled l
     dependencies.packages.map(({ project }) => project).sort(),
     manifest.gcovr.wheels.map(({ project }) => project).sort(),
   );
+  assertLicenseVersions(manifest, dependencies);
+  assertLxmlWheelLicenseFiles(dependencies);
   for (const dependency of dependencies.packages) {
     assert.match(dependency.version, exactVersion);
     assert.match(dependency.license, /\S/u);
@@ -145,6 +184,27 @@ test("license contract is complete for each locked package and the two bundled l
     assert.match(dependencies.licenseTexts[dependency.licenseTextId], /\S[\s\S]{80,}/u);
     assert.match(dependency.notice, /\S[\s\S]{20,}/u);
     assert.equal(new URL(dependency.licenseSource).protocol, "https:");
+  }
+});
+
+test("license contract rejects version drift and missing or truncated fixed lxml wheel materials", async () => {
+  const [manifest, dependencies] = await Promise.all([
+    readJson("manifest.json"),
+    readJson("licenses/dependencies.json"),
+  ]);
+  for (const mutate of [
+    (value) => { value.python.version = "3.14.7"; },
+    (value) => { value.gcovr.version = "8.6.1"; },
+    (value) => { value.packages.find(({ project }) => project === "lxml").version = "6.0.3"; },
+    (value) => { delete value.packages.find(({ project }) => project === "lxml").wheelLicenseFiles[0].files["lxml-6.0.2.dist-info/licenses/LICENSE.txt"]; },
+    (value) => { value.packages.find(({ project }) => project === "lxml").wheelLicenseFiles[1].files["lxml-6.0.2.dist-info/licenses/LICENSES.txt"] = "a".repeat(64); },
+  ]) {
+    const value = clone(dependencies);
+    mutate(value);
+    assert.throws(() => {
+      assertLicenseVersions(manifest, value);
+      assertLxmlWheelLicenseFiles(value);
+    });
   }
 });
 
@@ -180,7 +240,7 @@ test("schema predefines a closed resolved output record without pre-creating Tas
   const schema = await readJson("manifest.schema.json");
   const valid = {
     path: "runtime/python/python.exe",
-    sha256: "a".repeat(64),
+    sha256: sha256Text("resolved output contract fixture\n"),
     kind: "regular-file",
   };
   const outputSchema = { $defs: schema.$defs, $ref: "#/$defs/resolvedOutput" };
@@ -189,6 +249,9 @@ test("schema predefines a closed resolved output record without pre-creating Tas
     (value) => { delete value.sha256; },
     (value) => { value.sha256 = "A".repeat(64); },
     (value) => { value.sha256 = "0".repeat(64); },
+    (value) => { value.sha256 = "a".repeat(64); },
+    (value) => { value.sha256 = "deadbeef".repeat(8); },
+    (value) => { value.sha256 = "0123456789abcdef".repeat(4); },
     (value) => { value.path = "../escape"; },
     (value) => { value.extra = true; },
   ]) {
