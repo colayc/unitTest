@@ -1,0 +1,138 @@
+{
+  "schemaVersion": 1,
+  "python": {
+    "version": "3.14.6",
+    "license": "PSF-2.0",
+    "artifacts": {
+      "windows-x64": {
+        "kind": "embedded-archive",
+        "filename": "python-3.14.6-embed-amd64.zip",
+        "url": "https://www.python.org/ftp/python/3.14.6/python-3.14.6-embed-amd64.zip",
+        "sha256": "df901e84a896ff1ee720ad03377e0c8d8c2244fda79808aeeaff6316df1cb75c"
+      },
+      "linux-x64": {
+        "kind": "source-archive",
+        "filename": "Python-3.14.6.tgz",
+        "url": "https://www.python.org/ftp/python/3.14.6/Python-3.14.6.tgz",
+        "sha256": "74d0d71d0600e477651a077101d6e62d1e2e69b8e992ba18c993dd643b7ba222"
+      }
+    }
+  },
+  "gcovr": {
+    "version": "8.6",
+    "license": "BSD-3-Clause",
+    "wheels": [
+      {
+        "project": "gcovr",
+        "version": "8.6",
+        "kind": "wheel",
+        "files": [
+          {
+            "platforms": ["windows-x64", "linux-x64"],
+            "filename": "gcovr-8.6-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/92/be/f722c843e7875c7cf92cf0e0c1604cddda55a70278c768c6327a78fdba79/gcovr-8.6-py3-none-any.whl",
+            "sha256": "dbf9d87c38042752ad6f530aa8210427e22b526611bb7b7bfed0e81977d1f1ef"
+          }
+        ]
+      },
+      {
+        "project": "colorlog",
+        "version": "6.10.1",
+        "kind": "wheel",
+        "files": [
+          {
+            "platforms": ["windows-x64", "linux-x64"],
+            "filename": "colorlog-6.10.1-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/6d/c1/e419ef3723a074172b68aaa89c9f3de486ed4c2399e2dbd8113a4fdcaf9e/colorlog-6.10.1-py3-none-any.whl",
+            "sha256": "2d7e8348291948af66122cff006c9f8da6255d224e7cf8e37d8de2df3bad8c9c"
+          }
+        ]
+      },
+      {
+        "project": "colorama",
+        "version": "0.4.6",
+        "kind": "wheel",
+        "files": [
+          {
+            "platforms": ["windows-x64"],
+            "filename": "colorama-0.4.6-py2.py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/d1/d6/3965ed04c63042e047cb6a3e6ed1a63a35087b6a609aa3a15ed8ac56c221/colorama-0.4.6-py2.py3-none-any.whl",
+            "sha256": "4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6"
+          }
+        ]
+      },
+      {
+        "project": "jinja2",
+        "version": "3.1.6",
+        "kind": "wheel",
+        "files": [
+          {
+            "platforms": ["windows-x64", "linux-x64"],
+            "filename": "jinja2-3.1.6-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/62/a1/3d680cbfd5f4b8f15abc1d571870c5fc3e594bb582bc3b64ea099db13e56/jinja2-3.1.6-py3-none-any.whl",
+            "sha256": "85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67"
+          }
+        ]
+      },
+      {
+        "project": "markupsafe",
+        "version": "3.0.3",
+        "kind": "wheel",
+        "files": [
+          {
+            "platforms": ["windows-x64"],
+            "filename": "markupsafe-3.0.3-cp314-cp314-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/28/52/182836104b33b444e400b14f797212f720cbc9ed6ba34c800639d154e821/markupsafe-3.0.3-cp314-cp314-win_amd64.whl",
+            "sha256": "bdc919ead48f234740ad807933cdf545180bfbe9342c2bb451556db2ed958581"
+          },
+          {
+            "platforms": ["linux-x64"],
+            "filename": "markupsafe-3.0.3-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+            "url": "https://files.pythonhosted.org/packages/41/3c/a36c2450754618e62008bf7435ccb0f88053e07592e6028a34776213d877/markupsafe-3.0.3-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+            "sha256": "457a69a9577064c05a97c41f4e65148652db078a3a509039e64d3467b9e7ef97"
+          }
+        ]
+      },
+      {
+        "project": "lxml",
+        "version": "6.0.2",
+        "kind": "wheel",
+        "files": [
+          {
+            "platforms": ["windows-x64"],
+            "filename": "lxml-6.0.2-cp314-cp314-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/e3/e0/c96cf13eccd20c9421ba910304dae0f619724dcf1702864fd59dd386404d/lxml-6.0.2-cp314-cp314-win_amd64.whl",
+            "sha256": "fa25afbadead523f7001caf0c2382afd272c315a033a7b06336da2637d92d6ed"
+          },
+          {
+            "platforms": ["linux-x64"],
+            "filename": "lxml-6.0.2-cp314-cp314-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl",
+            "url": "https://files.pythonhosted.org/packages/29/9c/47293c58cc91769130fbf85531280e8cc7868f7fbb6d92f4670071b9cb3e/lxml-6.0.2-cp314-cp314-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl",
+            "sha256": "98a5e1660dc7de2200b00d53fa00bcd3c35a3608c305d45a7bbcaf29fa16e83d"
+          }
+        ]
+      },
+      {
+        "project": "pygments",
+        "version": "2.19.2",
+        "kind": "wheel",
+        "files": [
+          {
+            "platforms": ["windows-x64", "linux-x64"],
+            "filename": "pygments-2.19.2-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/c7/21/705964c7812476f378728bdf590ca4b771ec72385c533964653c68e86bdc/pygments-2.19.2-py3-none-any.whl",
+            "sha256": "86540386c03d588bb81d44bc3928634ff26449851e99741617ecb9037ee5ec0b"
+          }
+        ]
+      }
+    ]
+  },
+  "linux": {
+    "builder": {
+      "image": "quay.io/pypa/manylinux_2_28_x86_64@sha256:c7123a4aebb153c1e45b8152f07a64bd950d65e630cfb633a029cc45ee21897c",
+      "sourceUrl": "https://quay.io/repository/pypa/manylinux_2_28_x86_64"
+    },
+    "glibcBaseline": "2.28",
+    "muslPolicy": "unsupported"
+  }
+}

@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "python": {
+    "version": "3.14.6",
+    "license": "PSF-2.0",
+    "licenseFile": "Python-3.14.6.txt",
+    "licenseSource": "https://github.com/python/cpython/blob/v3.14.6/LICENSE"
+  },
+  "gcovr": {
+    "version": "8.6",
+    "license": "BSD-3-Clause",
+    "licenseFile": "gcovr-8.6.txt",
+    "licenseSource": "https://github.com/gcovr/gcovr/blob/8.6/LICENSE.txt"
+  },
+  "licenseTexts": {
+    "MIT": "MIT License\n\nPermission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the Software), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED AS IS, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.",
+    "BSD-2-Clause": "BSD 2-Clause License\n\nRedistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:\n\n1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.\n\n2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.\n\nTHIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS AS IS AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES.",
+    "BSD-3-Clause": "BSD 3-Clause License\n\nRedistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:\n\n1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.\n\n2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.\n\n3. Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.\n\nTHIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS AS IS AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES.",
+    "BSD-3-Clause+MIT": "BSD 3-Clause License\n\nRedistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met: retain the copyright notice, conditions, and disclaimer in source and binary redistributions; do not use copyright holder or contributor names to endorse derived products without prior written permission.\n\nTHIS SOFTWARE IS PROVIDED AS IS, WITHOUT WARRANTIES OF MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.\n\nMIT License\n\nPermission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files, to deal in the Software without restriction, including rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies, subject to inclusion of the copyright and permission notice. THE SOFTWARE IS PROVIDED AS IS, WITHOUT WARRANTY OF ANY KIND."
+  },
+  "packages": [
+    {
+      "project": "gcovr",
+      "version": "8.6",
+      "license": "BSD-3-Clause",
+      "licenseTextId": "BSD-3-Clause",
+      "licenseSource": "https://github.com/gcovr/gcovr/blob/8.6/LICENSE.txt",
+      "notice": "Copyright (c) 2013-2026 the gcovr authors; Copyright (c) 2013 Sandia Corporation. The complete project license is retained in gcovr-8.6.txt."
+    },
+    {
+      "project": "colorlog",
+      "version": "6.10.1",
+      "license": "MIT",
+      "licenseTextId": "MIT",
+      "licenseSource": "https://github.com/borntyping/python-colorlog/blob/6.10.1/LICENSE",
+      "notice": "Copyright (c) 2013-2025 Sam Clegg and contributors. No separate NOTICE file is declared by the published wheel metadata."
+    },
+    {
+      "project": "colorama",
+      "version": "0.4.6",
+      "license": "BSD-3-Clause",
+      "licenseTextId": "BSD-3-Clause",
+      "licenseSource": "https://github.com/tartley/colorama/blob/0.4.6/LICENSE.txt",
+      "notice": "Copyright (c) 2010 Jonathan Hartley. This dependency is included only for the fixed Windows x64 colorlog marker resolution."
+    },
+    {
+      "project": "jinja2",
+      "version": "3.1.6",
+      "license": "BSD-3-Clause",
+      "licenseTextId": "BSD-3-Clause",
+      "licenseSource": "https://github.com/pallets/jinja/blob/3.1.6/LICENSE.txt",
+      "notice": "Copyright (c) 2009 Pallets. The i18n extra is not selected; Babel is therefore not part of this closed runtime lock."
+    },
+    {
+      "project": "markupsafe",
+      "version": "3.0.3",
+      "license": "BSD-3-Clause",
+      "licenseTextId": "BSD-3-Clause",
+      "licenseSource": "https://github.com/pallets/markupsafe/blob/3.0.3/LICENSE.txt",
+      "notice": "Copyright (c) 2010 Pallets. This is the exact Jinja2 runtime dependency and has separate Windows and Linux CPython 3.14 wheels."
+    },
+    {
+      "project": "lxml",
+      "version": "6.0.2",
+      "license": "BSD-3-Clause AND MIT",
+      "licenseTextId": "BSD-3-Clause+MIT",
+      "licenseSource": "https://github.com/lxml/lxml/blob/lxml-6.0.2/LICENSE.txt",
+      "notice": "Copyright (c) lxml developers. The binary wheels carry lxml and libxml2/libxslt licensing material; retain their bundled notices when Task 2 assembles the application archive."
+    },
+    {
+      "project": "pygments",
+      "version": "2.19.2",
+      "license": "BSD-2-Clause",
+      "licenseTextId": "BSD-2-Clause",
+      "licenseSource": "https://github.com/pygments/pygments/blob/2.19.2/LICENSE",
+      "notice": "Copyright (c) 2006-2025 by the Pygments team. The optional windows-terminal extra is not selected, so it does not add a second colorama dependency."
+    }
+  ]
+}
