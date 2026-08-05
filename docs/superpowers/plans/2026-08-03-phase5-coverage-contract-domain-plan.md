@@ -58,7 +58,7 @@ CoverageLine
 CoverageMetric
 ```
 
-- [ ] **Step 1：写出 valid、closed schema 和 deterministic generation 失败测试**
+- [x] **Step 1：写出 valid、closed schema 和 deterministic generation 失败测试**
 
 覆盖：
 
@@ -75,7 +75,7 @@ CoverageMetric
 - files 按 URI 排序；
 - generated TypeScript/Go type 与 Schema enum 一致。
 
-- [ ] **Step 2：运行 Coverage Schema tests 并确认失败**
+- [x] **Step 2：运行 Coverage Schema tests 并确认失败**
 
 ```powershell
 pnpm --filter @unit-test-ide/coverage-schema test
@@ -84,7 +84,7 @@ pnpm --filter @unit-test-ide/coverage-models test
 
 预期：FAIL，新 package 和 generator 尚不存在。
 
-- [ ] **Step 3：实现独立 coverage generator**
+- [x] **Step 3：实现独立 coverage generator**
 
 新增 root scripts：
 
@@ -99,7 +99,7 @@ pnpm --filter @unit-test-ide/coverage-models test
 
 Generator 必须 deterministic；`--check` 在临时目录生成后 byte-compare，不修改 source tree。JSON Schema 负责 closed structural shape；`covered <= total`、strict ordering、canonical URI 和跨字段 summary invariant 由 TypeScript/Go semantic validator 实现，不能依赖非标准 JSON Schema extension。
 
-- [ ] **Step 4：生成并验证第二次无 diff**
+- [x] **Step 4：生成并验证第二次无 diff**
 
 ```powershell
 pnpm generate:coverage
@@ -112,7 +112,7 @@ git diff --check
 
 预期：PASS。
 
-- [ ] **Step 5：提交 Coverage JSON contract**
+- [x] **Step 5：提交 Coverage JSON contract**
 
 ```powershell
 git add package.json packages/coverage-schema packages/coverage-models tools/coverage-gen apps/test-service/internal/coveragemodel
@@ -149,7 +149,7 @@ type CoverageProfile struct {
 }
 ```
 
-- [ ] **Step 1：写出 v1/v2 compatibility、v3 valid 和 injection 失败测试**
+- [x] **Step 1：写出 v1/v2 compatibility、v3 valid 和 injection 失败测试**
 
 覆盖：
 
@@ -162,7 +162,7 @@ type CoverageProfile struct {
 - canonical config hash 包含 profile 与稳定排序的 glob；
 - profile 数和总 matcher state 有界。
 
-- [ ] **Step 2：运行 Workspace tests 并确认失败**
+- [x] **Step 2：运行 Workspace tests 并确认失败**
 
 ```powershell
 go test ./apps/test-service/internal/workspace ./apps/test-service/internal/cmake -run 'Coverage|ConfigV3|Generation' -count=1
@@ -171,11 +171,11 @@ pnpm test:workspace
 
 预期：FAIL。
 
-- [ ] **Step 3：实现 strict v3 loader 与 immutable clone**
+- [x] **Step 3：实现 strict v3 loader 与 immutable clone**
 
 Config loader 继续按顶层 version 选择 closed schema；glob 此阶段只校验和 canonicalize，不访问文件系统或执行匹配。
 
-- [ ] **Step 4：运行完整 Workspace tests**
+- [x] **Step 4：运行完整 Workspace tests**
 
 ```powershell
 go test ./apps/test-service/internal/workspace ./apps/test-service/internal/cmake -count=1
@@ -183,7 +183,7 @@ pnpm test:workspace
 git diff --check
 ```
 
-- [ ] **Step 5：提交 Workspace coverage profiles**
+- [x] **Step 5：提交 Workspace coverage profiles**
 
 ```powershell
 git add apps/test-service/internal/workspace apps/test-service/internal/cmake/generation.go apps/test-service/internal/cmake/generation_test.go tools/workspace-smoke
@@ -231,7 +231,7 @@ CoverageEventV14
 TaskSnapshotV14
 ```
 
-- [ ] **Step 1：写出 v1.4 valid、negative injection 与 compatibility 失败测试**
+- [x] **Step 1：写出 v1.4 valid、negative injection 与 compatibility 失败测试**
 
 至少逐字段拒绝：
 
@@ -243,13 +243,13 @@ python module plugin template threshold
 
 验证 selection、repeat、timeout、page/cursor、closed outcome/reason、safe integer、artifact kind 和 capabilities。
 
-- [ ] **Step 2：运行 Protocol tests 并确认失败**
+- [x] **Step 2：运行 Protocol tests 并确认失败**
 
 ```powershell
 pnpm --filter @unit-test-ide/protocol-schema test
 ```
 
-- [ ] **Step 3：实现 v1.4 closed schemas 与 generation**
+- [x] **Step 3：实现 v1.4 closed schemas 与 generation**
 
 Methods：
 
@@ -262,7 +262,7 @@ coverage/reports/get
 
 `tasks/get/list/cancel` v1.4 增加 coverage Task projection；v1.3 schema 文件不得修改。
 
-- [ ] **Step 4：生成并验证 compatibility/drift**
+- [x] **Step 4：生成并验证 compatibility/drift**
 
 ```powershell
 pnpm generate:protocol
@@ -272,7 +272,7 @@ pnpm check:protocol-generated
 git diff --check
 ```
 
-- [ ] **Step 5：提交 Protocol v1.4 contract**
+- [x] **Step 5：提交 Protocol v1.4 contract**
 
 ```powershell
 git add packages/protocol-schema packages/protocol-models apps/test-service/internal/protocolmodel tools/protocol-gen/generate.mjs
@@ -310,28 +310,28 @@ type Run struct {
 }
 ```
 
-- [ ] **Step 1：写出 outcome、request、clone、bounds 和 Task mapping 失败测试**
+- [x] **Step 1：写出 outcome、request、clone、bounds 和 Task mapping 失败测试**
 
 覆盖 immutable clone、stable ID、closed enum、selection reuse、available/partial/unavailable/cancelled invariant、summary arithmetic、covered<=total、artifact terminal-only 和 no-native-path serialization。
 
-- [ ] **Step 2：运行领域测试并确认失败**
+- [x] **Step 2：运行领域测试并确认失败**
 
 ```powershell
 go test ./apps/test-service/internal/coveragedomain ./apps/test-service/internal/task -run 'Coverage|Plan' -count=1
 ```
 
-- [ ] **Step 3：实现纯领域模型**
+- [x] **Step 3：实现纯领域模型**
 
 本 Task 不依赖 SQLite、Protocol generated model 或 process package。Task Engine 仅增加内部 `KindCoverageRun`/coverage step kind 与 clone/fingerprint 支持，不生成实际 plan。
 
-- [ ] **Step 4：运行全套领域与 race**
+- [x] **Step 4：运行全套领域与 race**
 
 ```powershell
 go test ./apps/test-service/internal/coveragedomain ./apps/test-service/internal/task -count=1
 go test -race ./apps/test-service/internal/coveragedomain ./apps/test-service/internal/task -count=1
 ```
 
-- [ ] **Step 5：提交 coverage domain**
+- [x] **Step 5：提交 coverage domain**
 
 ```powershell
 git add apps/test-service/internal/coveragedomain apps/test-service/internal/task
@@ -355,7 +355,7 @@ git commit -m "feat: model coverage runs and reports"
 - 修改：`apps/test-service/internal/taskstore/artifacts.go`
 - 修改：`apps/test-service/internal/taskstore/sqlite_test.go`
 
-- [ ] **Step 1：写出 migration/repository/atomicity 失败测试**
+- [x] **Step 1：写出 migration/repository/atomicity 失败测试**
 
 覆盖：
 
@@ -369,17 +369,17 @@ git commit -m "feat: model coverage runs and reports"
 - storage/artifact/event fault 不产生 orphan relation；
 - 旧数据库 replay 不变。
 
-- [ ] **Step 2：运行 taskstore tests 并确认失败**
+- [x] **Step 2：运行 taskstore tests 并确认失败**
 
 ```powershell
 go test ./apps/test-service/internal/taskstore -run 'Migration009|Coverage|Atomic' -count=1
 ```
 
-- [ ] **Step 3：实现 migration 与 transaction API**
+- [x] **Step 3：实现 migration 与 transaction API**
 
 Migration 保存 request canonical JSON、status/outcome/reason、tool provenance、summary metadata 和 artifact foreign key；逐行 coverage 禁止入表。
 
-- [ ] **Step 4：运行 taskstore 全套/race**
+- [x] **Step 4：运行 taskstore 全套/race**
 
 ```powershell
 go test ./apps/test-service/internal/taskstore -count=1
@@ -387,7 +387,7 @@ go test -race ./apps/test-service/internal/taskstore -count=1
 git diff --check
 ```
 
-- [ ] **Step 5：提交 persistence**
+- [x] **Step 5：提交 persistence**
 
 ```powershell
 git add apps/test-service/internal/taskstore
@@ -467,12 +467,16 @@ git commit -m "feat: expose coverage client contracts"
 - GitHub Actions run `30984884517` 的 Client 86/86 与 contract/drift/build checks 通过；Linux failures 与上一 run `30969925130` 完全相同，Windows failures 仍位于既有 CMake fixture、CppUTest parser 与 Unity runner baseline。额外 Unity compile case 在其固定 30 秒 timeout 后失败，但相关目录/blob 在 baseline..HEAD 间零改动且本地 `-count=1` 复跑通过，判定为 hosted runner 负载波动。
 - GitHub `github` 与 Gitee `origin` 已同步并由 remote-ref query 验证。由于上述历史 baseline，下面的“完整 Phase 5A 门禁与独立 diff/security review”保持未勾选。
 
+2026-08-05 Phase 5A whole-branch review（base `26f1aa6`..HEAD）逐行审阅 28,968 行 diff，结论为 `CLEAN`：0 Critical、0 Important、0 Minor、0 spec gap。Review 覆盖 Coverage JSON/Workspace/Protocol/generated models、Go domain/task mapping、migration 009/atomic persistence、TypeScript Client、compatibility 与 execution/network/security boundaries。唯一候选风险 `coverage_run` task vocabulary 到 process sink 的路径，被 Start validation 与 Resume allowlist 在 `processes.Prepare` 前 fail closed，并有零副作用 regression evidence。
+
+Final controller gates 使用 pinned Node 24.18.0、pnpm 11.4.0、Go 1.26.5 与 worktree-local cache：Coverage/Protocol generated checks 通过；全部 workspace package tests 通过（Coverage Schema 3/3、Protocol models 7/7、Protocol Schema 23/23、Coverage models 9/9、Client 86/86、Service probe 31/31）；相关 Go packages 通过；`coveragedomain`、`task`、`taskstore` race 通过；root build 与 `git diff --check` 通过。
+
 ## Phase 5A 完成检查
 
-- [ ] Coverage JSON v1 contract 与 generated models
-- [ ] Workspace config v3 coverage profiles
-- [ ] Protocol v1.4 closed contract 与 compatibility
-- [ ] CoverageRun/Report domain
-- [ ] Migration 009 与 atomic creation
+- [x] Coverage JSON v1 contract 与 generated models
+- [x] Workspace config v3 coverage profiles
+- [x] Protocol v1.4 closed contract 与 compatibility
+- [x] CoverageRun/Report domain
+- [x] Migration 009 与 atomic creation
 - [x] TypeScript Client v1.4
 - [ ] 完整 Phase 5A 门禁与独立 diff/security review
