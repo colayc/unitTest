@@ -3,12 +3,11 @@ import { createHash } from "node:crypto";
 import { Duplex, PassThrough } from "node:stream";
 import { createInterface } from "node:readline";
 import test from "node:test";
-import { TestSelectionModeV14 } from "@unit-test-ide/protocol-models";
-import { MAX_MESSAGE_BYTES, ProtocolClient } from "./client.js";
+import { MAX_MESSAGE_BYTES } from "./client.js";
 import { Connection } from "./connection.js";
 import { decodeCoverageReport, decodeCoverageRun, decodeCoverageRunPage, decodeTaskEvent, decodeTestCatalog, decodeTestRun } from "./decoders.js";
 import { ProtocolError } from "./envelopes.js";
-import { TestFailureSubtypeV13, TestSelectionModeV13 } from "./index.js";
+import { ProtocolClient, TestFailureSubtypeV13, TestSelectionModeV13, TestSelectionModeV14 } from "./index.js";
 import type { CoverageReport, CoverageRun, CoverageRunInput, CoverageRunListInput, CoverageRunPage } from "./index.js";
 import { EventSubscription } from "./subscription.js";
 
@@ -1153,6 +1152,140 @@ test("protocol 1.4 response schemas reject invalid enum, URI, digest, safe integ
   }
 });
 
+test("protocol 1.4 existing API semantic failures close the connection without a partial result", async () => {
+  const invalidCatalog = testCatalog();
+  const item = (invalidCatalog.items as JsonObject[])[0];
+  assert.ok(item);
+  item.containerId = `utid-v1-${"a".repeat(64)}`;
+  const fixture = scriptedClient((request) => {
+    if (request.method === "handshake") {
+      return response(request, { negotiatedProtocolVersion: "1.4", serviceVersion: "0.5.0" }, "1.4");
+    }
+    if (request.method === "tests/catalog/get") return response(request, invalidCatalog, "1.4");
+    if (request.method === "shutdown") return response(request, { accepted: true }, "1.4");
+    return undefined;
+  });
+  await fixture.client.handshake("0123456789abcdef", "test", "0.5.0");
+  let returned = false;
+  await assert.rejects(async () => {
+    await fixture.client.getTestCatalog({ projectId: "core", profileId: BUILD_PROFILE_ID });
+    returned = true;
+  }, /unknown container reference/i);
+  assert.equal(returned, false);
+  const before = fixture.requests.length;
+  await assert.rejects(() => fixture.client.shutdown(), /closed/i);
+  assert.equal(fixture.requests.length, before);
+  fixture.client.close();
+});
+
+test("protocol 1.4 server ProtocolError leaves the connection healthy", async () => {
+  const fixture = scriptedClient((request) => {
+    if (request.method === "handshake") {
+      return response(request, { negotiatedProtocolVersion: "1.4", serviceVersion: "0.5.0" }, "1.4");
+    }
+    if (request.method === "tests/catalog/get") return error(request, "STORAGE_UNAVAILABLE", true, "1.4");
+    if (request.method === "shutdown") return response(request, { accepted: true }, "1.4");
+    return undefined;
+  });
+  await fixture.client.handshake("0123456789abcdef", "test", "0.5.0");
+  await assert.rejects(
+    () => fixture.client.getTestCatalog({ projectId: "core", profileId: BUILD_PROFILE_ID }),
+    (failure: unknown) => failure instanceof ProtocolError
+      && failure.code === "STORAGE_UNAVAILABLE"
+      && failure.retryable
+  );
+  await fixture.client.shutdown();
+  assert.deepEqual(fixture.requests.map(({ method }) => method), ["handshake", "tests/catalog/get", "shutdown"]);
+  fixture.client.close();
+});
+
+test("protocol 1.4 task and artifact pages enforce canonical response bounds", async () => {
+  const artifact = {
+    artifactId: ARTIFACT_ID,
+    taskId: TASK_ID,
+    kind: "coverage-json",
+    mimeType: "application/json",
+    sizeBytes: 10,
+    sha256: "a".repeat(64),
+    createdAt: SENT_AT,
+    uri: `unit-test-ide://artifacts/${ARTIFACT_ID}`
+  };
+  const invalidCases: Array<{
+    label: string;
+    method: "tasks/list" | "artifacts/list";
+    payload: JsonObject;
+    invoke: (client: ProtocolClient) => Promise<unknown>;
+  }> = [
+    {
+      label: "task item count",
+      method: "tasks/list",
+      payload: { items: Array.from({ length: 201 }, () => taskSnapshot()) },
+      invoke: (client) => client.listTasks()
+    },
+    {
+      label: "task cursor length",
+      method: "tasks/list",
+      payload: { items: [], nextCursor: "x".repeat(4097) },
+      invoke: (client) => client.listTasks()
+    },
+    {
+      label: "artifact item count",
+      method: "artifacts/list",
+      payload: { items: Array.from({ length: 201 }, () => ({ ...artifact })) },
+      invoke: (client) => client.listArtifacts(TASK_ID)
+    },
+    {
+      label: "artifact cursor length",
+      method: "artifacts/list",
+      payload: { items: [], nextCursor: "x".repeat(4097) },
+      invoke: (client) => client.listArtifacts(TASK_ID)
+    }
+  ];
+
+  for (const item of invalidCases) {
+    const fixture = scriptedClient((request) => request.method === "handshake"
+      ? response(request, { negotiatedProtocolVersion: "1.4", serviceVersion: "0.5.0" }, "1.4")
+      : request.method === item.method ? response(request, item.payload, "1.4") : undefined);
+    await fixture.client.handshake("0123456789abcdef", "test", "0.5.0");
+    await assert.rejects(
+      () => item.invoke(fixture.client),
+      /invalid protocol message|invalid (tasks|artifacts)\/list response/i,
+      item.label
+    );
+    const before = fixture.requests.length;
+    await assert.rejects(() => fixture.client.shutdown(), /closed/i);
+    assert.equal(fixture.requests.length, before, `${item.label} left the connection writable`);
+    fixture.client.close();
+  }
+
+  const fixture = scriptedClient((request) => {
+    if (request.method === "handshake") {
+      return response(request, { negotiatedProtocolVersion: "1.4", serviceVersion: "0.5.0" }, "1.4");
+    }
+    if (request.method === "tasks/list") {
+      return response(request, {
+        items: Array.from({ length: 200 }, () => taskSnapshot()),
+        nextCursor: "x".repeat(4096)
+      }, "1.4");
+    }
+    if (request.method === "artifacts/list") {
+      return response(request, {
+        items: Array.from({ length: 200 }, () => ({ ...artifact })),
+        nextCursor: "x".repeat(4096)
+      }, "1.4");
+    }
+    return undefined;
+  });
+  await fixture.client.handshake("0123456789abcdef", "test", "0.5.0");
+  const tasks = await fixture.client.listTasks();
+  const artifacts = await fixture.client.listArtifacts(TASK_ID);
+  assert.equal(tasks.items.length, 200);
+  assert.equal(tasks.nextCursor?.length, 4096);
+  assert.equal(artifacts.items.length, 200);
+  assert.equal(artifacts.nextCursor?.length, 4096);
+  fixture.client.close();
+});
+
 test("protocol 1.3 response validation rejects unknown outcomes, unsafe integers, invalid URI, and invalid dates", async () => {
   const cases: Array<{
     payload: JsonObject;
@@ -1292,6 +1425,144 @@ test("EventSubscription accepts protocol 1.4 coverage events and clones nested p
   assert.deepEqual(((event?.payload as JsonObject).summary as JsonObject).lines, { covered: 8, total: 10 });
   assert.equal(subscription.lastSequence, 1);
   client.close();
+});
+
+test("ordinary events must exactly match the negotiated session version", async () => {
+  const mismatches: Array<{ label: string; negotiated: "1.3" | "1.4"; event: JsonObject }> = [
+    {
+      label: "protocol 1.3 session receiving protocol 1.4 coverage event",
+      negotiated: "1.3",
+      event: {
+        protocolVersion: "1.4",
+        kind: "event",
+        messageId: MESSAGE_ID,
+        sentAt: SENT_AT,
+        sequence: 1,
+        event: "coverage.report.available",
+        taskId: TASK_ID,
+        payloadVersion: 1,
+        payload: {
+          coverageRunId: COVERAGE_RUN_ID,
+          reportId: REPORT_ID,
+          artifactId: ARTIFACT_ID,
+          completeness: { outcome: "available", reasons: [] },
+          summary: coverageReport().summary
+        }
+      }
+    },
+    {
+      label: "protocol 1.4 session receiving protocol 1.3 test event",
+      negotiated: "1.4",
+      event: {
+        protocolVersion: "1.3",
+        kind: "event",
+        messageId: MESSAGE_ID,
+        sentAt: SENT_AT,
+        sequence: 1,
+        event: "test.item.finished",
+        taskId: TASK_ID,
+        payloadVersion: 1,
+        payload: {
+          runId: RUN_ID,
+          result: {
+            itemId: ITEM_ID,
+            containerId: CONTAINER_ID,
+            iteration: 1,
+            outcome: "passed",
+            failureDetails: [],
+            outputRefs: [],
+            partial: false
+          }
+        }
+      }
+    }
+  ];
+
+  for (const item of mismatches) {
+    const [clientStream, serverStream] = pair();
+    createInterface({ input: serverStream }).on("line", (line) => {
+      const request = JSON.parse(line) as JsonObject;
+      if (request.method === "handshake") {
+        serverStream.write(`${JSON.stringify(response(request, {
+          negotiatedProtocolVersion: item.negotiated,
+          serviceVersion: "0.5.0"
+        }, item.negotiated))}\n`);
+        return;
+      }
+      serverStream.write(
+        `${JSON.stringify(response(request, { afterSequence: 0 }, item.negotiated))}\n${JSON.stringify(item.event)}\n`
+      );
+    });
+    const client = ProtocolClient.attach(clientStream);
+    try {
+      await client.handshake("0123456789abcdef", "test", "0.5.0");
+      const subscription = await client.subscribeEvents(0);
+      assert.deepEqual(await subscription.next(), { value: undefined, done: true }, item.label);
+      assert.equal(subscription.lastSequence, 0, item.label);
+      await assert.rejects(() => client.getCapabilities(), /closed/i, item.label);
+    } finally {
+      client.close();
+      serverStream.destroy();
+    }
+  }
+});
+
+test("an event before successful handshake closes without delivery", async () => {
+  const [clientStream, serverStream] = pair();
+  const connection = new Connection(clientStream);
+  let delivered = 0;
+  connection.onEvent(() => delivered++);
+  try {
+    serverStream.write(`${JSON.stringify(taskEvent(1, "task.created"))}\n`);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(connection.closed, true);
+    assert.equal(delivered, 0);
+  } finally {
+    connection.close();
+    serverStream.destroy();
+  }
+});
+
+test("legacy unsupported handshake retries do not lock the event version", async () => {
+  const [clientStream, serverStream] = pair();
+  const handshakeVersions: unknown[] = [];
+  createInterface({ input: serverStream }).on("line", (line) => {
+    const request = JSON.parse(line) as JsonObject;
+    if (request.method === "handshake") {
+      handshakeVersions.push(request.protocolVersion);
+      const reply = request.protocolVersion === "1.2"
+        ? response(request, { negotiatedProtocolVersion: "1.2", serviceVersion: "0.3.0" }, "1.2")
+        : error(request, "UNSUPPORTED_PROTOCOL", false, "1.0");
+      serverStream.write(`${JSON.stringify(reply)}\n`);
+      return;
+    }
+    serverStream.write(
+      `${JSON.stringify(response(request, { afterSequence: 0 }, "1.2"))}\n${JSON.stringify({
+        protocolVersion: "1.2",
+        kind: "event",
+        messageId: MESSAGE_ID,
+        sentAt: SENT_AT,
+        sequence: 1,
+        event: "task.step_started",
+        taskId: TASK_ID,
+        payloadVersion: 1,
+        payload: { stepId: "configure", kind: "configure", status: "running" }
+      })}\n`
+    );
+  });
+  const client = ProtocolClient.attach(clientStream);
+  try {
+    const negotiated = await client.handshake("0123456789abcdef", "test", "0.5.0");
+    assert.equal(negotiated.negotiatedProtocolVersion, "1.2");
+    assert.deepEqual(handshakeVersions, ["1.4", "1.3", "1.2"]);
+    const subscription = await client.subscribeEvents(0);
+    const event = (await take(subscription, 1))[0];
+    assert.equal(event?.protocolVersion, "1.2");
+    assert.equal(subscription.lastSequence, 1);
+  } finally {
+    client.close();
+    serverStream.destroy();
+  }
 });
 
 test("protocol 1.4 event schema rejects invalid enums before semantic decoding", async () => {

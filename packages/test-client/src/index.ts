@@ -27,7 +27,8 @@ export { EventSubscription } from "./subscription.js";
 export {
   TestFailureCategoryV13,
   TestFailureSubtypeV13,
-  TestSelectionModeV13
+  TestSelectionModeV13,
+  TestSelectionModeV14
 } from "@unit-test-ide/protocol-models";
 export type {
   ArtifactMetadata,

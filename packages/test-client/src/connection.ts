@@ -67,6 +67,7 @@ export class Connection {
   #closed = false;
   #closeError: Error | undefined;
   #legacyHandshakeCeiling = Number.POSITIVE_INFINITY;
+  #negotiatedVersion: ProtocolVersion | undefined;
 
   get closed(): boolean { return this.#closed; }
 
@@ -191,6 +192,14 @@ export class Connection {
     }
     const message = value as IncomingEnvelope;
     if (message.kind === "event") {
+      if (this.#negotiatedVersion === undefined) {
+        this.#closeWithError(new Error("service returned an event before protocol negotiation"));
+        return false;
+      }
+      if (message.protocolVersion !== this.#negotiatedVersion) {
+        this.#closeWithError(new Error("event protocol version does not match the negotiated session"));
+        return false;
+      }
       let event: ProtocolTaskEvent;
       try {
         event = decodeTaskEvent(message);
@@ -238,6 +247,7 @@ export class Connection {
       pending.reject(new Error("response method does not match request"));
       return true;
     }
+    if (pending.method === "handshake") this.#negotiatedVersion = response.protocolVersion;
     try {
       pending.onResponse?.(response.payload);
     } catch (error) {

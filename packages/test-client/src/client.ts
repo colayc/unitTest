@@ -225,13 +225,7 @@ const validateTaskPageV13 = payloadAjv.compile({
   }
 });
 const validateTaskPageV14 = payloadAjv.compile({
-  type: "object",
-  additionalProperties: false,
-  required: ["items"],
-  properties: {
-    items: { type: "array", items: { $ref: "urn:unit-test-ide:protocol:v1.4:task" } },
-    nextCursor: { type: "string", minLength: 1 }
-  }
+  $ref: "urn:unit-test-ide:protocol:v1.4:message#/$defs/tasksListResponse/allOf/1/properties/payload"
 });
 const validateArtifactPage = payloadAjv.compile({
   type: "object",
@@ -261,13 +255,7 @@ const validateArtifactPageV13 = payloadAjv.compile({
   }
 });
 const validateArtifactPageV14 = payloadAjv.compile({
-  type: "object",
-  additionalProperties: false,
-  required: ["items"],
-  properties: {
-    items: { type: "array", items: { $ref: "urn:unit-test-ide:protocol:v1.4:artifact" } },
-    nextCursor: { type: "string", minLength: 1 }
-  }
+  $ref: "urn:unit-test-ide:protocol:v1.4:message#/$defs/artifactsListResponse/allOf/1/properties/payload"
 });
 const validateTestCatalogV13 = payloadAjv.compile({
   $ref: "urn:unit-test-ide:protocol:v1.3:test#/$defs/testCatalog"
@@ -474,11 +462,13 @@ export class ProtocolClient {
     const version = this.#requireAuthentication();
     const payload = await this.#connection.request(version, "capabilities/get", {});
     if (version === "1.4") {
-      validatePayload("capabilities/get", validateCapabilitiesV14, payload);
-      return {
-        ...payload,
-        frameworkAdapters: (payload.frameworkAdapters as Record<string, unknown>[]).map((adapter) => ({ ...adapter }))
-      } as unknown as CapabilitiesV14;
+      return this.#decodeV14InboundResponse(version, () => {
+        validatePayload("capabilities/get", validateCapabilitiesV14, payload);
+        return {
+          ...payload,
+          frameworkAdapters: (payload.frameworkAdapters as Record<string, unknown>[]).map((adapter) => ({ ...adapter }))
+        } as unknown as CapabilitiesV14;
+      });
     }
     if (version === "1.3") {
       validatePayload("capabilities/get", validateCapabilitiesV13, payload);
@@ -499,70 +489,89 @@ export class ProtocolClient {
   async shutdown(): Promise<void> {
     const version = this.#requireAuthentication();
     const payload = await this.#connection.request(version, "shutdown", {});
-    validatePayload("shutdown", validateShutdown, payload);
+    this.#decodeV14InboundResponse(version, () => validatePayload("shutdown", validateShutdown, payload));
   }
 
   async inspectWorkspace(): Promise<WorkspaceSnapshot> {
-    const payload = await this.#requestV12("workspace/inspect", {});
-    validatePayload("workspace/inspect", validateWorkspaceV12, payload);
-    return decodeWorkspaceSnapshot(payload);
+    const version = this.#requireV12();
+    const payload = await this.#connection.request(version, "workspace/inspect", {});
+    return this.#decodeV14InboundResponse(version, () => {
+      validatePayload("workspace/inspect", validateWorkspaceV12, payload);
+      return decodeWorkspaceSnapshot(payload);
+    });
   }
 
   async listCMakeTargets(input: CMakeTargetsInput): Promise<TargetList> {
-    this.#requireV12();
+    const version = this.#requireV12();
     validateCMakeContext(input);
-    const payload = await this.#requestV12("cmake/targets/list", { ...input });
-    validatePayload("cmake/targets/list", validateTargetListV12, payload);
-    return decodeTargetList(payload);
+    const payload = await this.#connection.request(version, "cmake/targets/list", { ...input });
+    return this.#decodeV14InboundResponse(version, () => {
+      validatePayload("cmake/targets/list", validateTargetListV12, payload);
+      return decodeTargetList(payload);
+    });
   }
 
   async startCMakeBuild(input: CMakeBuildInput): Promise<TaskSnapshotV12 | TaskSnapshotV13 | TaskSnapshotV14> {
     const version = this.#requireV12();
     validateCMakeBuildInput(input);
     const payload = await this.#connection.request(version, "tasks/start", { ...input, kind: "cmakeBuild" });
-    if (version === "1.4") {
-      validatePayload("tasks/start", validateTaskV14, payload);
-      return decodeTaskSnapshotV14(payload);
-    }
-    if (version === "1.3") {
-      validatePayload("tasks/start", validateTaskV13, payload);
-      return decodeTaskSnapshotV13(payload);
-    }
-    validatePayload("tasks/start", validateTaskV12, payload);
-    return decodeTaskSnapshotV12(payload);
+    return this.#decodeV14InboundResponse(version, () => {
+      if (version === "1.4") {
+        validatePayload("tasks/start", validateTaskV14, payload);
+        return decodeTaskSnapshotV14(payload);
+      }
+      if (version === "1.3") {
+        validatePayload("tasks/start", validateTaskV13, payload);
+        return decodeTaskSnapshotV13(payload);
+      }
+      validatePayload("tasks/start", validateTaskV12, payload);
+      return decodeTaskSnapshotV12(payload);
+    });
   }
 
   async discoverTests(input: TestDiscoveryInput): Promise<TaskSnapshotV13 | TaskSnapshotV14> {
     const version = this.#requireV13();
     const payload = await this.#connection.request(version, "tasks/start", { ...input, kind: "testDiscovery" });
-    return decodeTaskResponse("tasks/start", version, payload) as TaskSnapshotV13 | TaskSnapshotV14;
+    return this.#decodeV14InboundResponse(
+      version,
+      () => decodeTaskResponse("tasks/start", version, payload) as TaskSnapshotV13 | TaskSnapshotV14
+    );
   }
 
   async runTests(input: TestRunInput): Promise<TaskSnapshotV13 | TaskSnapshotV14> {
     const version = this.#requireV13();
     const payload = await this.#connection.request(version, "tasks/start", { ...input, kind: "testRun" });
-    return decodeTaskResponse("tasks/start", version, payload) as TaskSnapshotV13 | TaskSnapshotV14;
+    return this.#decodeV14InboundResponse(
+      version,
+      () => decodeTaskResponse("tasks/start", version, payload) as TaskSnapshotV13 | TaskSnapshotV14
+    );
   }
 
   async getTestCatalog(input: CatalogGetInput): Promise<ProtocolTestCatalog> {
     const version = this.#requireV13();
     const payload = await this.#connection.request(version, "tests/catalog/get", { ...input });
-    validatePayload("tests/catalog/get", version === "1.4" ? validateTestCatalogV14 : validateTestCatalogV13, payload);
-    return version === "1.4" ? decodeTestCatalogV14(payload) : decodeTestCatalog(payload);
+    return this.#decodeV14InboundResponse(version, () => {
+      validatePayload("tests/catalog/get", version === "1.4" ? validateTestCatalogV14 : validateTestCatalogV13, payload);
+      return version === "1.4" ? decodeTestCatalogV14(payload) : decodeTestCatalog(payload);
+    });
   }
 
   async getTestRun(runId: string): Promise<ProtocolTestRun> {
     const version = this.#requireV13();
     const payload = await this.#connection.request(version, "tests/runs/get", { runId });
-    validatePayload("tests/runs/get", version === "1.4" ? validateTestRunV14 : validateTestRunV13, payload);
-    return version === "1.4" ? decodeTestRunV14(payload) : decodeTestRun(payload);
+    return this.#decodeV14InboundResponse(version, () => {
+      validatePayload("tests/runs/get", version === "1.4" ? validateTestRunV14 : validateTestRunV13, payload);
+      return version === "1.4" ? decodeTestRunV14(payload) : decodeTestRun(payload);
+    });
   }
 
   async listTestRuns(input: TestRunListInput = {}): Promise<ProtocolTestRunPage> {
     const version = this.#requireV13();
     const payload = await this.#connection.request(version, "tests/runs/list", { ...input });
-    validatePayload("tests/runs/list", version === "1.4" ? validateTestRunPageV14 : validateTestRunPageV13, payload);
-    return version === "1.4" ? decodeTestRunPageV14(payload) : decodeTestRunPage(payload);
+    return this.#decodeV14InboundResponse(version, () => {
+      validatePayload("tests/runs/list", version === "1.4" ? validateTestRunPageV14 : validateTestRunPageV13, payload);
+      return version === "1.4" ? decodeTestRunPageV14(payload) : decodeTestRunPage(payload);
+    });
   }
 
   async startCoverage(input: CoverageRunInput): Promise<CoverageRun> {
@@ -574,14 +583,10 @@ export class ProtocolClient {
       "coverage/runs/start",
       request as Record<string, unknown>
     );
-    try {
+    return this.#decodeV14InboundResponse(version, () => {
       validatePayload("coverage/runs/start", validateCoverageRunV14, payload);
       return decodeCoverageRun(payload);
-    } catch (error) {
-      const failure = error instanceof Error ? error : new Error(String(error));
-      this.#connection.close(failure);
-      throw failure;
-    }
+    });
   }
 
   async getCoverageRun(coverageRunId: string): Promise<CoverageRun> {
@@ -589,14 +594,10 @@ export class ProtocolClient {
     const request = { coverageRunId };
     validateRequestPayload("coverage/runs/get", validateCoverageRunIdPayloadV14, request);
     const payload = await this.#connection.request(version, "coverage/runs/get", request);
-    try {
+    return this.#decodeV14InboundResponse(version, () => {
       validatePayload("coverage/runs/get", validateCoverageRunV14, payload);
       return decodeCoverageRun(payload);
-    } catch (error) {
-      const failure = error instanceof Error ? error : new Error(String(error));
-      this.#connection.close(failure);
-      throw failure;
-    }
+    });
   }
 
   async listCoverageRuns(input: CoverageRunListInput = {}): Promise<CoverageRunPage> {
@@ -608,14 +609,10 @@ export class ProtocolClient {
       "coverage/runs/list",
       request as Record<string, unknown>
     );
-    try {
+    return this.#decodeV14InboundResponse(version, () => {
       validatePayload("coverage/runs/list", validateCoverageRunPageV14, payload);
       return decodeCoverageRunPage(payload);
-    } catch (error) {
-      const failure = error instanceof Error ? error : new Error(String(error));
-      this.#connection.close(failure);
-      throw failure;
-    }
+    });
   }
 
   async getCoverageReport(reportId: string): Promise<CoverageReport> {
@@ -623,14 +620,10 @@ export class ProtocolClient {
     const request = { reportId };
     validateRequestPayload("coverage/reports/get", validateCoverageReportIdPayloadV14, request);
     const payload = await this.#connection.request(version, "coverage/reports/get", request);
-    try {
+    return this.#decodeV14InboundResponse(version, () => {
       validatePayload("coverage/reports/get", validateCoverageReportV14, payload);
       return decodeCoverageReport(payload);
-    } catch (error) {
-      const failure = error instanceof Error ? error : new Error(String(error));
-      this.#connection.close(failure);
-      throw failure;
-    }
+    });
   }
 
   async startTask(input: StartTaskInput): Promise<ProtocolTaskSnapshot> {
@@ -640,34 +633,36 @@ export class ProtocolClient {
       "tasks/start",
       version === "1.1" ? { ...input } : { ...input, kind: "simulation" }
     );
-    return decodeTaskResponse("tasks/start", version, payload);
+    return this.#decodeV14InboundResponse(version, () => decodeTaskResponse("tasks/start", version, payload));
   }
 
   async getTask(taskId: string): Promise<ProtocolTaskSnapshot> {
     const { version, payload } = await this.#requestTaskProtocol("tasks/get", { taskId });
-    return decodeTaskResponse("tasks/get", version, payload);
+    return this.#decodeV14InboundResponse(version, () => decodeTaskResponse("tasks/get", version, payload));
   }
 
   async listTasks(input: PageInput = {}): Promise<TaskPage> {
     const { version, payload } = await this.#requestTaskProtocol("tasks/list", { ...input });
-    const validator = version === "1.4"
-      ? validateTaskPageV14
-      : version === "1.3" ? validateTaskPageV13 : version === "1.2" ? validateTaskPageV12 : validateTaskPage;
-    validatePayload("tasks/list", validator, payload);
-    return {
-      items: (payload.items as Record<string, unknown>[]).map((item) =>
-        version === "1.4"
-          ? decodeTaskSnapshotV14(item)
-          : version === "1.3"
-          ? decodeTaskSnapshotV13(item)
-          : version === "1.2" ? decodeTaskSnapshotV12(item) : decodeTaskSnapshot(item)),
-      ...(typeof payload.nextCursor === "string" ? { nextCursor: payload.nextCursor } : {})
-    };
+    return this.#decodeV14InboundResponse(version, () => {
+      const validator = version === "1.4"
+        ? validateTaskPageV14
+        : version === "1.3" ? validateTaskPageV13 : version === "1.2" ? validateTaskPageV12 : validateTaskPage;
+      validatePayload("tasks/list", validator, payload);
+      return {
+        items: (payload.items as Record<string, unknown>[]).map((item) =>
+          version === "1.4"
+            ? decodeTaskSnapshotV14(item)
+            : version === "1.3"
+            ? decodeTaskSnapshotV13(item)
+            : version === "1.2" ? decodeTaskSnapshotV12(item) : decodeTaskSnapshot(item)),
+        ...(typeof payload.nextCursor === "string" ? { nextCursor: payload.nextCursor } : {})
+      };
+    });
   }
 
   async cancelTask(taskId: string): Promise<ProtocolTaskSnapshot> {
     const { version, payload } = await this.#requestTaskProtocol("tasks/cancel", { taskId });
-    return decodeTaskResponse("tasks/cancel", version, payload);
+    return this.#decodeV14InboundResponse(version, () => decodeTaskResponse("tasks/cancel", version, payload));
   }
 
   async subscribeEvents(afterSequence: number): Promise<EventSubscription> {
@@ -691,8 +686,12 @@ export class ProtocolClient {
       await connection.request(version, "events/subscribe", { afterSequence }, {
         onResponse: (payload) => {
           try {
-            validateSubscriptionAcknowledgement(payload, afterSequence);
-            if (this.#closed || connection !== this.#connection) throw new Error("event subscription connection is no longer active");
+            this.#decodeV14InboundResponse(version, () => {
+              validateSubscriptionAcknowledgement(payload, afterSequence);
+              if (this.#closed || connection !== this.#connection) {
+                throw new Error("event subscription connection is no longer active");
+              }
+            });
           } catch (error) {
             retireUnacknowledgedSubscriptions();
             throw error;
@@ -718,19 +717,21 @@ export class ProtocolClient {
 
   async listArtifacts(taskId: string, input: PageInput = {}): Promise<ArtifactPage> {
     const { version, payload } = await this.#requestTaskProtocol("artifacts/list", { taskId, ...input });
-    const validator = version === "1.4"
-      ? validateArtifactPageV14
-      : version === "1.3" ? validateArtifactPageV13 : version === "1.2" ? validateArtifactPageV12 : validateArtifactPage;
-    validatePayload("artifacts/list", validator, payload);
-    return {
-      items: (payload.items as Record<string, unknown>[]).map((item) =>
-        version === "1.4"
-          ? decodeArtifactMetadataV14(item)
-          : version === "1.3"
-          ? decodeArtifactMetadataV13(item)
-          : version === "1.2" ? decodeArtifactMetadataV12(item) : decodeArtifactMetadata(item)),
-      ...(typeof payload.nextCursor === "string" ? { nextCursor: payload.nextCursor } : {})
-    };
+    return this.#decodeV14InboundResponse(version, () => {
+      const validator = version === "1.4"
+        ? validateArtifactPageV14
+        : version === "1.3" ? validateArtifactPageV13 : version === "1.2" ? validateArtifactPageV12 : validateArtifactPage;
+      validatePayload("artifacts/list", validator, payload);
+      return {
+        items: (payload.items as Record<string, unknown>[]).map((item) =>
+          version === "1.4"
+            ? decodeArtifactMetadataV14(item)
+            : version === "1.3"
+            ? decodeArtifactMetadataV13(item)
+            : version === "1.2" ? decodeArtifactMetadataV12(item) : decodeArtifactMetadata(item)),
+        ...(typeof payload.nextCursor === "string" ? { nextCursor: payload.nextCursor } : {})
+      };
+    });
   }
 
   async readArtifact(artifactId: string): Promise<Uint8Array> {
@@ -742,47 +743,50 @@ export class ProtocolClient {
     let expectedDigest: string | undefined;
     for (;;) {
       const payload = await this.#connection.request(version, "artifacts/read", { artifactId, offset, length: 65_536 });
-      validatePayload("artifacts/read", validateArtifactChunk, payload);
-      const chunk: ArtifactChunk = {
-        data: payload.data as string,
-        nextOffset: payload.nextOffset as number,
-        eof: payload.eof as boolean,
-        sizeBytes: payload.sizeBytes as number,
-        sha256: payload.sha256 as string
-      };
-      const data = decodeBase64Url(chunk.data);
-      if (!Number.isSafeInteger(chunk.sizeBytes) || !Number.isSafeInteger(chunk.nextOffset) || !Number.isSafeInteger(data.byteLength)) {
-        throw new Error("artifact size and offsets must be safe integers");
-      }
-      const computedNextOffset = offset + data.byteLength;
-      if (!Number.isSafeInteger(computedNextOffset)) throw new Error("artifact offset overflowed the safe integer range");
-      if (data.byteLength > 65_536 || chunk.nextOffset !== computedNextOffset) {
-        throw new Error("invalid artifact chunk offset or length");
-      }
-      if (!chunk.eof && chunk.nextOffset <= offset) throw new Error("invalid artifact chunk: offset did not advance");
-      if (expectedSize === undefined) {
-        if (chunk.sizeBytes > MAX_ARTIFACT_BYTES) throw new Error("artifact exceeds the client download limit");
-        expectedSize = chunk.sizeBytes;
-        expectedDigest = chunk.sha256;
-        result = Buffer.allocUnsafe(expectedSize);
-      } else if (chunk.sizeBytes !== expectedSize || chunk.sha256 !== expectedDigest) {
-        throw new Error("artifact chunk metadata changed during read");
-      }
-      if (computedNextOffset > MAX_ARTIFACT_BYTES) throw new Error("artifact exceeds the client download limit");
-      if (chunk.nextOffset > expectedSize) throw new Error("invalid artifact chunk: offset exceeds declared size");
-      if (!chunk.eof && chunk.nextOffset === expectedSize) {
-        throw new Error("artifact chunk reached the declared size without EOF");
-      }
-      if (!result) throw new Error("artifact buffer was not initialized");
-      hash.update(data);
-      data.copy(result, offset);
-      offset = chunk.nextOffset;
-      if (!chunk.eof) continue;
-      if (offset !== expectedSize) throw new Error("artifact size does not match the completed read");
-      if (!result || result.byteLength !== expectedSize) throw new Error("artifact size does not match the completed read");
-      const actualDigest = hash.digest("hex");
-      if (actualDigest !== expectedDigest) throw new Error("artifact SHA-256 does not match metadata");
-      return result;
+      const completed = this.#decodeV14InboundResponse(version, () => {
+        validatePayload("artifacts/read", validateArtifactChunk, payload);
+        const chunk: ArtifactChunk = {
+          data: payload.data as string,
+          nextOffset: payload.nextOffset as number,
+          eof: payload.eof as boolean,
+          sizeBytes: payload.sizeBytes as number,
+          sha256: payload.sha256 as string
+        };
+        const data = decodeBase64Url(chunk.data);
+        if (!Number.isSafeInteger(chunk.sizeBytes) || !Number.isSafeInteger(chunk.nextOffset) || !Number.isSafeInteger(data.byteLength)) {
+          throw new Error("artifact size and offsets must be safe integers");
+        }
+        const computedNextOffset = offset + data.byteLength;
+        if (!Number.isSafeInteger(computedNextOffset)) throw new Error("artifact offset overflowed the safe integer range");
+        if (data.byteLength > 65_536 || chunk.nextOffset !== computedNextOffset) {
+          throw new Error("invalid artifact chunk offset or length");
+        }
+        if (!chunk.eof && chunk.nextOffset <= offset) throw new Error("invalid artifact chunk: offset did not advance");
+        if (expectedSize === undefined) {
+          if (chunk.sizeBytes > MAX_ARTIFACT_BYTES) throw new Error("artifact exceeds the client download limit");
+          expectedSize = chunk.sizeBytes;
+          expectedDigest = chunk.sha256;
+          result = Buffer.allocUnsafe(expectedSize);
+        } else if (chunk.sizeBytes !== expectedSize || chunk.sha256 !== expectedDigest) {
+          throw new Error("artifact chunk metadata changed during read");
+        }
+        if (computedNextOffset > MAX_ARTIFACT_BYTES) throw new Error("artifact exceeds the client download limit");
+        if (chunk.nextOffset > expectedSize) throw new Error("invalid artifact chunk: offset exceeds declared size");
+        if (!chunk.eof && chunk.nextOffset === expectedSize) {
+          throw new Error("artifact chunk reached the declared size without EOF");
+        }
+        if (!result) throw new Error("artifact buffer was not initialized");
+        hash.update(data);
+        data.copy(result, offset);
+        offset = chunk.nextOffset;
+        if (!chunk.eof) return undefined;
+        if (offset !== expectedSize) throw new Error("artifact size does not match the completed read");
+        if (result.byteLength !== expectedSize) throw new Error("artifact size does not match the completed read");
+        const actualDigest = hash.digest("hex");
+        if (actualDigest !== expectedDigest) throw new Error("artifact SHA-256 does not match metadata");
+        return result;
+      });
+      if (completed !== undefined) return completed;
     }
   }
 
@@ -936,17 +940,23 @@ export class ProtocolClient {
     return version;
   }
 
+  #decodeV14InboundResponse<T>(version: ProtocolVersion, decode: () => T): T {
+    if (version !== "1.4") return decode();
+    try {
+      return decode();
+    } catch (error) {
+      const failure = error instanceof Error ? error : new Error(String(error));
+      this.#connection.close(failure);
+      throw failure;
+    }
+  }
+
   async #requestTaskProtocol(
     method: Method,
     payload: Record<string, unknown>
   ): Promise<{ version: TaskProtocolVersion; payload: Record<string, unknown> }> {
     const version = this.#requireTaskProtocol();
     return { version, payload: await this.#connection.request(version, method, payload) };
-  }
-
-  async #requestV12(method: Method, payload: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const version = this.#requireV12();
-    return this.#connection.request(version, method, payload);
   }
 
   #installConnectionListeners(connection: Connection, eventUnsubscribe?: () => void): void {
