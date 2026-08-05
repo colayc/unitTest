@@ -2,6 +2,14 @@ import type {
   ArtifactMetadata,
   ArtifactMetadataV12,
   ArtifactMetadataV13,
+  CoverageCompletenessV14,
+  CoverageIncompleteReasonV14,
+  CoverageMetricV14,
+  CoverageReport,
+  CoverageRun,
+  CoverageRunPage,
+  CoverageSummaryV14,
+  CoverageToolProvenanceV14,
   TargetList,
   TaskEvent,
   TaskEventV12,
@@ -48,6 +56,50 @@ function iteration(value: unknown, name: string): number {
   const result = safeInteger(value, name);
   if (result < 1 || result > 100) throw new Error(`${name} must be between 1 and 100`);
   return result;
+}
+
+function decodeCoverageMetric(value: unknown, name: string): CoverageMetricV14 {
+  const wire = record(value, name);
+  const covered = safeInteger(wire.covered, `${name} covered`);
+  const total = safeInteger(wire.total, `${name} total`);
+  if (covered < 0 || total < 0 || covered > total) throw new Error(`${name} covered exceeds total`);
+  return { covered, total };
+}
+
+function decodeCoverageSummary(value: unknown): CoverageSummaryV14 {
+  const wire = record(value, "coverage summary");
+  return {
+    lines: decodeCoverageMetric(wire.lines, "coverage lines"),
+    branches: decodeCoverageMetric(wire.branches, "coverage branches"),
+    functions: decodeCoverageMetric(wire.functions, "coverage functions")
+  };
+}
+
+function decodeCoverageCompleteness(value: unknown): CoverageCompletenessV14 {
+  const wire = record(value, "coverage completeness");
+  if (!Array.isArray(wire.reasons)) throw new Error("coverage completeness reasons must be an array");
+  const reasons = [...wire.reasons] as CoverageIncompleteReasonV14[];
+  if (new Set(reasons).size !== reasons.length) throw new Error("coverage completeness reasons are not unique");
+  if (wire.outcome === "available" && reasons.length !== 0) {
+    throw new Error("available coverage completeness contains reasons");
+  }
+  if (wire.outcome === "partial" && reasons.length === 0) {
+    throw new Error("partial coverage completeness is missing reasons");
+  }
+  return { outcome: wire.outcome as CoverageCompletenessV14["outcome"], reasons };
+}
+
+function decodeCoverageToolProvenance(value: unknown): CoverageToolProvenanceV14 {
+  const wire = record(value, "coverage tool provenance");
+  return {
+    platform: wire.platform as CoverageToolProvenanceV14["platform"],
+    architecture: wire.architecture as CoverageToolProvenanceV14["architecture"],
+    compiler: { ...record(wire.compiler, "coverage compiler") } as unknown as CoverageToolProvenanceV14["compiler"],
+    driver: { ...record(wire.driver, "coverage driver") } as unknown as CoverageToolProvenanceV14["driver"],
+    collector: { ...record(wire.collector, "coverage collector") } as unknown as CoverageToolProvenanceV14["collector"],
+    normalizerVersion: wire.normalizerVersion as string,
+    instrumentationFingerprint: wire.instrumentationFingerprint as string
+  };
 }
 
 export function decodeTaskSnapshot(value: unknown): TaskSnapshot {
@@ -545,4 +597,79 @@ export function decodeTestRunPage(value: unknown): TestRunPage {
     items: (wire.items as unknown[]).map((item) => decodeTestRun(item)),
     ...(wire.nextCursor === undefined ? {} : { nextCursor: wire.nextCursor })
   } as TestRunPage;
+}
+
+export function decodeCoverageRun(value: unknown): CoverageRun {
+  const wire = record(value, "coverage run");
+  const selection = record(wire.selectionSnapshot, "coverage selection snapshot");
+  if (wire.status !== "finished" &&
+      (wire.outcome !== undefined || wire.reason !== undefined || wire.finishedAt !== undefined || wire.reportId !== undefined)) {
+    throw new Error("non-terminal coverage run contains terminal metadata");
+  }
+  if ((wire.outcome === "available" || wire.outcome === "partial") && wire.reportId === undefined) {
+    throw new Error("report-bearing coverage run is missing reportId");
+  }
+  if ((wire.outcome === "unavailable" || wire.outcome === "cancelled") && wire.reportId !== undefined) {
+    throw new Error("report-free coverage run contains reportId");
+  }
+  if (wire.status === "finished" && (wire.outcome === undefined || wire.finishedAt === undefined)) {
+    throw new Error("finished coverage run is missing terminal metadata");
+  }
+  if ((wire.outcome === "available" || wire.outcome === "partial") && wire.reason !== undefined) {
+    throw new Error("report-bearing coverage run contains failure reason");
+  }
+  const cancelledReason = wire.reason === "user_cancelled" || wire.reason === "task_timed_out";
+  if (wire.outcome === "cancelled" && !cancelledReason) {
+    throw new Error("cancelled coverage run has an invalid reason");
+  }
+  if (wire.outcome === "unavailable" && (wire.reason === undefined || cancelledReason)) {
+    throw new Error("unavailable coverage run has an invalid reason");
+  }
+  return {
+    coverageRunId: wire.coverageRunId,
+    taskId: wire.taskId,
+    testRunId: wire.testRunId,
+    workspaceGeneration: wire.workspaceGeneration,
+    projectId: wire.projectId,
+    coverageProfileId: wire.coverageProfileId,
+    catalogRevision: wire.catalogRevision,
+    selectionSnapshot: {
+      ...selection,
+      containerIds: [...(selection.containerIds as string[])],
+      itemIds: [...(selection.itemIds as string[])]
+    },
+    repeatCount: iteration(wire.repeatCount, "coverage repeatCount"),
+    timeoutMs: safeInteger(wire.timeoutMs, "coverage timeoutMs"),
+    status: wire.status,
+    createdAt: date(wire.createdAt, "coverage createdAt"),
+    lastSequence: safeInteger(wire.lastSequence, "coverage lastSequence"),
+    ...(wire.outcome === undefined ? {} : { outcome: wire.outcome }),
+    ...(wire.reason === undefined ? {} : { reason: wire.reason }),
+    ...(wire.startedAt === undefined ? {} : { startedAt: date(wire.startedAt, "coverage startedAt") }),
+    ...(wire.finishedAt === undefined ? {} : { finishedAt: date(wire.finishedAt, "coverage finishedAt") }),
+    ...(wire.reportId === undefined ? {} : { reportId: wire.reportId })
+  } as CoverageRun;
+}
+
+export function decodeCoverageRunPage(value: unknown): CoverageRunPage {
+  const wire = record(value, "coverage run page");
+  return {
+    items: (wire.items as unknown[]).map((item) => decodeCoverageRun(item)),
+    ...(wire.nextCursor === undefined ? {} : { nextCursor: wire.nextCursor })
+  } as CoverageRunPage;
+}
+
+export function decodeCoverageReport(value: unknown): CoverageReport {
+  const wire = record(value, "coverage report");
+  return {
+    reportId: wire.reportId as string,
+    coverageRunId: wire.coverageRunId as string,
+    testRunId: wire.testRunId as string,
+    schemaVersion: wire.schemaVersion as CoverageReport["schemaVersion"],
+    createdAt: date(wire.createdAt, "coverage report createdAt"),
+    completeness: decodeCoverageCompleteness(wire.completeness),
+    summary: decodeCoverageSummary(wire.summary),
+    toolProvenance: decodeCoverageToolProvenance(wire.toolProvenance),
+    artifactId: wire.artifactId as string
+  };
 }

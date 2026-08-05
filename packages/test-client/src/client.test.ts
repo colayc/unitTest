@@ -5,7 +5,7 @@ import { createInterface } from "node:readline";
 import test from "node:test";
 import { MAX_MESSAGE_BYTES, ProtocolClient } from "./client.js";
 import { Connection } from "./connection.js";
-import { decodeTaskEvent, decodeTestCatalog, decodeTestRun } from "./decoders.js";
+import { decodeCoverageReport, decodeCoverageRun, decodeCoverageRunPage, decodeTaskEvent, decodeTestCatalog, decodeTestRun } from "./decoders.js";
 import { ProtocolError } from "./envelopes.js";
 import { TestFailureSubtypeV13, TestSelectionModeV13 } from "./index.js";
 import { EventSubscription } from "./subscription.js";
@@ -20,6 +20,9 @@ const TARGET_ID = "4".repeat(64);
 const CATALOG_REVISION = "5".repeat(64);
 const RESULT_REVISION = "6".repeat(64);
 const RUN_ID = "77777777777777777777777777777777";
+const COVERAGE_RUN_ID = "a".repeat(32);
+const REPORT_ID = "b".repeat(32);
+const COVERAGE_PROFILE_ID = "coverage-debug";
 const CONTAINER_ID = `utid-v1-${"8".repeat(64)}`;
 const ITEM_ID = `utid-v1-${"9".repeat(64)}`;
 const SENT_AT = "2026-07-21T00:00:00Z";
@@ -188,6 +191,56 @@ function testRun(overrides: JsonObject = {}): JsonObject {
     },
     resultRevision: RESULT_REVISION,
     incomplete: false,
+    ...overrides
+  };
+}
+
+function coverageRun(overrides: JsonObject = {}): JsonObject {
+  return {
+    coverageRunId: COVERAGE_RUN_ID,
+    taskId: TASK_ID,
+    testRunId: RUN_ID,
+    workspaceGeneration: WORKSPACE_GENERATION,
+    projectId: "core",
+    coverageProfileId: COVERAGE_PROFILE_ID,
+    catalogRevision: CATALOG_REVISION,
+    selectionSnapshot: { mode: "items", containerIds: [], itemIds: [ITEM_ID] },
+    repeatCount: 1,
+    timeoutMs: 60_000,
+    status: "finished",
+    outcome: "available",
+    createdAt: SENT_AT,
+    startedAt: SENT_AT,
+    finishedAt: SENT_AT,
+    reportId: REPORT_ID,
+    lastSequence: 9,
+    ...overrides
+  };
+}
+
+function coverageReport(overrides: JsonObject = {}): JsonObject {
+  return {
+    reportId: REPORT_ID,
+    coverageRunId: COVERAGE_RUN_ID,
+    testRunId: RUN_ID,
+    schemaVersion: "1.0",
+    createdAt: SENT_AT,
+    completeness: { outcome: "available", reasons: [] },
+    summary: {
+      lines: { covered: 8, total: 10 },
+      branches: { covered: 3, total: 4 },
+      functions: { covered: 2, total: 2 }
+    },
+    toolProvenance: {
+      platform: "linux",
+      architecture: "x64",
+      compiler: { family: "clang", version: "18.1.8" },
+      driver: { name: "llvm-cov", version: "18.1.8" },
+      collector: { name: "llvm-cov", version: "18.1.8" },
+      normalizerVersion: "1.0.0",
+      instrumentationFingerprint: "c".repeat(64)
+    },
+    artifactId: ARTIFACT_ID,
     ...overrides
   };
 }
@@ -546,6 +599,28 @@ test("protocol 1.3 decoder preserves closed mock failure subtype", () => {
     decoded.payload.result.failureDetails[0]?.subtype,
     TestFailureSubtypeV13.MockParameterMismatch
   );
+});
+
+test("coverage decoders clone nested values and convert dates", () => {
+  const wireRun = coverageRun();
+  const wireReport = coverageReport();
+  const run = decodeCoverageRun(wireRun);
+  const report = decodeCoverageReport(wireReport);
+  assert.ok(run.createdAt instanceof Date);
+  assert.ok(report.createdAt instanceof Date);
+  (wireRun.selectionSnapshot as JsonObject).itemIds = [];
+  (wireReport.summary as JsonObject).lines = { covered: 0, total: 0 };
+  assert.deepEqual(run.selectionSnapshot.itemIds, [ITEM_ID]);
+  assert.equal(report.summary.lines.covered, 8);
+});
+
+test("coverage decoders reject unsafe and inconsistent domain values", () => {
+  assert.throws(() => decodeCoverageRun(coverageRun({ lastSequence: Number.MAX_SAFE_INTEGER + 1 })), /safe integer/i);
+  assert.throws(() => decodeCoverageRun(coverageRun({ status: "finished", outcome: "available", reportId: undefined })), /report/i);
+  assert.throws(() => decodeCoverageReport(coverageReport({
+    summary: { lines: { covered: 11, total: 10 }, branches: { covered: 0, total: 0 }, functions: { covered: 0, total: 0 } }
+  })), /covered|total/i);
+  assert.equal(decodeCoverageRunPage({ items: [coverageRun()], nextCursor: "next" }).nextCursor, "next");
 });
 
 test("protocol 1.3 response validation rejects unknown outcomes, unsafe integers, invalid URI, and invalid dates", async () => {
