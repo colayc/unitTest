@@ -618,6 +618,20 @@ test("Linux builder contract pins image ABI, configure flags, source epoch and d
   assert.ok(script.indexOf("trap restore_output_ownership EXIT") < script.indexOf("make -j1"));
 });
 
+test("Linux prune removes Tcl/Tk symlink fixtures before generic symlink materialization", async () => {
+  const script = await readFile(new URL("./build-linux.sh", import.meta.url), "utf8");
+  const symlinkPrune = script.match(/find \/out\/python -type l[^\n]+-delete/u)?.[0];
+  assert.ok(symlinkPrune, "missing symlink-specific prune rooted at /out/python");
+  for (const fixture of ["libtcl8.6.so", "libtk8.6.so"]) {
+    const prefix = fixture.startsWith("libtcl") ? "libtcl" : "libtk";
+    assert.match(symlinkPrune, new RegExp(`-iname '${prefix}\\*'`, "u"), fixture);
+  }
+  assert.ok(
+    script.indexOf(symlinkPrune) < script.indexOf("while IFS= read -r -d '' link"),
+    "Tcl/Tk symlinks must be deleted before symlink materialization",
+  );
+});
+
 test("final layout rejects native Tk and Tcl/Tk runtime paths", async (t) => {
   for (const extra of [
     "python/DLLs/_tkinter.pyd",

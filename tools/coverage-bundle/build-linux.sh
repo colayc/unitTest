@@ -60,6 +60,7 @@ rm -rf \
   /out/python/lib/python3.14/test \
   /out/python/lib/python3.14/tkinter \
   /out/python/lib/python3.14/config-*
+find /out/python -type l \( -iname 'libtcl*' -o -iname 'libtk*' \) -delete
 find /out/python -type f \( -name '*.a' -o -name '*.pyc' -o -name 'pip*' -o -iname '_tkinter*' -o -iname 'tcl*.so*' -o -iname 'tk*.so*' -o -iname 'libtcl*' -o -iname 'libtk*' \) -delete
 find /out/python -type d \( -name '__pycache__' -o -name ensurepip -o -name idlelib -o -name test -o -name tests -o -iname tkinter -o -iname 'tcl[0-9]*' -o -iname 'tk[0-9]*' -o -iname 'libtcl*' -o -iname 'libtk*' -o -iname 'lib-tk*' \) -prune -exec rm -rf '{}' +
 while IFS= read -r -d '' link; do
