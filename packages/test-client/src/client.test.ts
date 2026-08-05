@@ -247,43 +247,27 @@ test("EventSubscription rejects an unsafe initial sequence", () => {
   assert.throws(() => new EventSubscription(Number.MAX_SAFE_INTEGER + 1), /safe integer/i);
 });
 
-test("client prefers protocol 1.3 and accepts negotiated 1.2 and 1.1 downgrades", async () => {
-  for (const negotiated of ["1.3", "1.2", "1.1"] as const) {
+test("client prefers protocol 1.4 and accepts negotiated downgrades", async () => {
+  for (const negotiated of ["1.4", "1.3", "1.2", "1.1"] as const) {
     const fixture = scriptedClient((request) => response(request, {
       negotiatedProtocolVersion: negotiated,
-      serviceVersion: "0.3.0"
+      serviceVersion: "0.5.0"
     }, negotiated));
-    const result = await fixture.client.handshake("0123456789abcdef", "test", "0.3.0");
+    const result = await fixture.client.handshake("0123456789abcdef", "test", "0.5.0");
     assert.equal(result.negotiatedProtocolVersion, negotiated);
-    assert.equal(fixture.requests[0]?.protocolVersion, "1.3");
-    assert.deepEqual((fixture.requests[0]?.payload as JsonObject).supportedProtocolVersions, ["1.3", "1.2", "1.1", "1.0"]);
+    assert.equal(fixture.requests[0]?.protocolVersion, "1.4");
+    assert.deepEqual((fixture.requests[0]?.payload as JsonObject).supportedProtocolVersions, ["1.4", "1.3", "1.2", "1.1", "1.0"]);
     fixture.client.close();
   }
 });
 
-test("client retries a legacy service with the newest envelope version it understands", async () => {
-  for (const negotiated of ["1.2", "1.1"] as const) {
-    const fixture = scriptedClient((request) => {
-      if (request.protocolVersion === negotiated) {
-        return response(request, {
-          negotiatedProtocolVersion: negotiated,
-          serviceVersion: "0.2.0"
-        }, negotiated);
-      }
-      return error(request, "UNSUPPORTED_PROTOCOL", false, "1.0");
-    });
-    const result = await fixture.client.handshake("0123456789abcdef", "test", "0.3.0");
-    assert.equal(result.negotiatedProtocolVersion, negotiated);
-    const expectedVersions = negotiated === "1.2"
-      ? ["1.3", "1.2"]
-      : ["1.3", "1.2", "1.1"];
-    assert.deepEqual(fixture.requests.map(({ protocolVersion }) => protocolVersion), expectedVersions);
-    assert.deepEqual(
-      (fixture.requests.at(-1)?.payload as JsonObject).supportedProtocolVersions,
-      negotiated === "1.2" ? ["1.2", "1.1", "1.0"] : ["1.1", "1.0"]
-    );
-    fixture.client.close();
-  }
+test("client retries legacy services from the v1.4 ceiling", async () => {
+  const fixture = scriptedClient((request) => request.protocolVersion === "1.2"
+    ? response(request, { negotiatedProtocolVersion: "1.2", serviceVersion: "0.3.0" }, "1.2")
+    : error(request, "UNSUPPORTED_PROTOCOL", false, "1.0"));
+  await fixture.client.handshake("0123456789abcdef", "test", "0.5.0");
+  assert.deepEqual(fixture.requests.map(({ protocolVersion }) => protocolVersion), ["1.4", "1.3", "1.2"]);
+  fixture.client.close();
 });
 
 test("protocol 1.3 client routes typed discovery, run, catalog, and run query APIs", async () => {
@@ -909,7 +893,7 @@ test("client performs handshake, capabilities, and shutdown in order", async () 
 });
 
 test("client exposes stable server error codes", async () => {
-  const { client } = scriptedClient((request) => error(request, "AUTH_FAILED", false, "1.3"));
+  const { client } = scriptedClient((request) => error(request, "AUTH_FAILED", false, "1.4"));
   await assert.rejects(
     () => client.handshake("wrong-token-value", "test", "0.1.0"),
     (failure: unknown) => failure instanceof ProtocolError && failure.code === "AUTH_FAILED"
@@ -1008,15 +992,15 @@ test("client falls back to an exact 1.0 handshake", async () => {
   assert.equal(negotiated.negotiatedProtocolVersion, "1.0");
   assert.deepEqual(
     fixture.requests.map(({ protocolVersion }) => protocolVersion),
-    ["1.3", "1.2", "1.1", "1.0"]
+    ["1.4", "1.3", "1.2", "1.1", "1.0"]
   );
   assert.deepEqual(fixture.requests[0]?.payload, {
     token: "0123456789abcdef",
     clientName: "test",
     clientVersion: "0.2.0",
-    supportedProtocolVersions: ["1.3", "1.2", "1.1", "1.0"]
+    supportedProtocolVersions: ["1.4", "1.3", "1.2", "1.1", "1.0"]
   });
-  assert.equal("supportedProtocolVersions" in (fixture.requests[3]?.payload as JsonObject), false);
+  assert.equal("supportedProtocolVersions" in (fixture.requests[4]?.payload as JsonObject), false);
   fixture.client.close();
 });
 
@@ -1060,7 +1044,7 @@ test("a same-version handshake failure consumes the Connection legacy opportunit
   let handshakeCount = 0;
   const fixture = scriptedClient((request) => {
     handshakeCount++;
-    if (handshakeCount === 1) return error(request, "AUTH_FAILED", false, "1.3");
+    if (handshakeCount === 1) return error(request, "AUTH_FAILED", false, "1.4");
     if (handshakeCount === 2) return error(request, "UNSUPPORTED_PROTOCOL", false, "1.0");
     return response(request, { negotiatedProtocolVersion: "1.0", serviceVersion: "0.1.0" }, "1.0");
   });
@@ -1072,7 +1056,7 @@ test("a same-version handshake failure consumes the Connection legacy opportunit
     () => fixture.client.handshake("0123456789abcdef", "test", "0.2.0"),
     /protocol version/
   );
-  assert.deepEqual(fixture.requests.map(({ protocolVersion }) => protocolVersion), ["1.3", "1.3"]);
+  assert.deepEqual(fixture.requests.map(({ protocolVersion }) => protocolVersion), ["1.4", "1.4"]);
 });
 
 test("an authenticated connection rejects a legacy-version handshake error", async () => {
@@ -1458,6 +1442,12 @@ test("Connection validates all handshake request versions before writing", async
     serverStream.write(`${JSON.stringify(error(request, "INVALID_MESSAGE", false, request.protocolVersion))}\n`);
   });
   const connection = new Connection(clientStream);
+  await assert.rejects(() => connection.request("1.4", "handshake", {
+    token: "short",
+    clientName: "test",
+    clientVersion: "0.5.0",
+    supportedProtocolVersions: []
+  }));
   await assert.rejects(() => connection.request("1.2", "handshake", {
     token: "short",
     clientName: "test",
@@ -1477,6 +1467,24 @@ test("Connection validates all handshake request versions before writing", async
   }));
   assert.equal(requests.length, 0);
   connection.close();
+});
+
+test("Connection closes on malformed v1.4 response and event envelopes", async () => {
+  const fixture = scriptedClient((request) => ({
+    ...response(request, { negotiatedProtocolVersion: "1.4", serviceVersion: "0.5.0" }, "1.4"),
+    unexpected: true
+  }));
+  await assert.rejects(() => fixture.client.handshake("0123456789abcdef", "test", "0.5.0"), /invalid protocol message/);
+  await assert.rejects(() => fixture.client.handshake("0123456789abcdef", "test", "0.5.0"), /closed/);
+
+  const [clientStream, serverStream] = pair();
+  const connection = new Connection(clientStream);
+  const closeError = new Promise<Error>((resolve) => connection.onClose(resolve));
+  serverStream.write(`${JSON.stringify({
+    ...taskEvent(1, "task.created", { protocolVersion: "1.4", payload: { status: "queued" } }),
+    unexpected: true
+  })}\n`);
+  assert.match((await closeError).message, /invalid protocol message/);
 });
 
 test("a response protocol version mismatch closes the connection", async () => {
@@ -1546,7 +1554,7 @@ test("reconnect reuses credentials and the active subscription cursor", async ()
   assert.equal((await subscription.next()).value?.sequence, 4);
   await client.reconnect();
   assert.equal(calls, 2);
-  assert.deepEqual((requests[1]?.[0]?.payload as JsonObject).supportedProtocolVersions, ["1.3", "1.2", "1.1", "1.0"]);
+  assert.deepEqual((requests[1]?.[0]?.payload as JsonObject).supportedProtocolVersions, ["1.4", "1.3", "1.2", "1.1", "1.0"]);
   assert.deepEqual(requests[1]?.[1]?.payload, { afterSequence: 4 });
 
   first[1].write(`${JSON.stringify(taskEvent(5, "task.output", { payload: { old: true } }))}\n`);

@@ -1,6 +1,6 @@
-import type { TaskEvent, TaskEventV12, TaskEventV13 } from "@unit-test-ide/protocol-models";
+import type { TaskEvent, TaskEventV12, TaskEventV13, TaskEventV14 } from "@unit-test-ide/protocol-models";
 
-export type ProtocolVersion = "1.0" | "1.1" | "1.2" | "1.3";
+export type ProtocolVersion = "1.0" | "1.1" | "1.2" | "1.3" | "1.4";
 export type Method =
   | "handshake"
   | "capabilities/get"
@@ -16,9 +16,13 @@ export type Method =
   | "cmake/targets/list"
   | "tests/catalog/get"
   | "tests/runs/get"
-  | "tests/runs/list";
+  | "tests/runs/list"
+  | "coverage/runs/start"
+  | "coverage/runs/get"
+  | "coverage/runs/list"
+  | "coverage/reports/get";
 
-export type ProtocolTaskEvent = TaskEvent | TaskEventV12 | TaskEventV13;
+export type ProtocolTaskEvent = TaskEvent | TaskEventV12 | TaskEventV13 | TaskEventV14;
 
 export interface RequestEnvelope {
   protocolVersion: ProtocolVersion;

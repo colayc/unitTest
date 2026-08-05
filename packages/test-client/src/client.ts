@@ -139,12 +139,12 @@ const validateHandshakeV10 = payloadAjv.compile({
     serviceVersion: { type: "string", minLength: 1 }
   }
 });
-const validateHandshakeV12 = payloadAjv.compile({
+const validateHandshakeModern = payloadAjv.compile({
   type: "object",
   additionalProperties: false,
   required: ["negotiatedProtocolVersion", "serviceVersion"],
   properties: {
-    negotiatedProtocolVersion: { enum: ["1.0", "1.1", "1.2", "1.3"] },
+    negotiatedProtocolVersion: { enum: ["1.0", "1.1", "1.2", "1.3", "1.4"] },
     serviceVersion: { type: "string", minLength: 1 }
   }
 });
@@ -686,9 +686,10 @@ export class ProtocolClient {
 
   async #authenticate(connection: Connection, credentials: Credentials): Promise<HandshakeResult> {
     const attempts: ReadonlyArray<{
-      version: "1.3" | "1.2" | "1.1";
+      version: "1.4" | "1.3" | "1.2" | "1.1";
       offered: ProtocolVersion[];
     }> = [
+      { version: "1.4", offered: ["1.4", "1.3", "1.2", "1.1", "1.0"] },
       { version: "1.3", offered: ["1.3", "1.2", "1.1", "1.0"] },
       { version: "1.2", offered: ["1.2", "1.1", "1.0"] },
       { version: "1.1", offered: ["1.1", "1.0"] }
@@ -699,7 +700,7 @@ export class ProtocolClient {
           ...credentials,
           supportedProtocolVersions: attempt.offered
         });
-        validatePayload("handshake", validateHandshakeV12, payload);
+        validatePayload("handshake", validateHandshakeModern, payload);
         return {
           negotiatedProtocolVersion: payload.negotiatedProtocolVersion as ProtocolVersion,
           serviceVersion: payload.serviceVersion as string
