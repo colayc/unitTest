@@ -7,18 +7,83 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 )
 
-const maximumManifestBytes = 16 * 1024 * 1024
+const (
+	// Task 2's prepared Windows bundle has 42 outputs, 3 directories, 47
+	// persistent bundle handles, depth 2, a 28-byte maximum relative path,
+	// a 15.9 MiB maximum file, and 40.4 MiB of total hashed bytes. These
+	// budgets leave substantial upgrade room while keeping attacker-controlled
+	// work and persistent resources bounded.
+	maximumManifestBytes         int64 = 16 * 1024 * 1024
+	maximumReadyBytes            int64 = 64
+	maximumManifestOutputs             = 768
+	maximumBundleDirectories           = 96
+	bundleMetadataFileCount             = 2
+	maximumActualEntries               = maximumManifestOutputs + maximumBundleDirectories + bundleMetadataFileCount
+	maximumBundleDepth                 = 24
+	maximumPortablePathBytes           = 512
+	directoryReadBatchSize             = 64
+	maximumRegularFileBytes      int64 = 256 * 1024 * 1024
+	maximumTotalHashBytes        int64 = 2 * 1024 * 1024 * 1024
+	maximumProductRootComponents       = 64
+	maximumPersistentHandles           = 900
+)
+
+type resourceBudget struct {
+	handles     int
+	entries     int
+	directories int
+	hashBytes   int64
+}
+
+func (budget *resourceBudget) reserveHandle() error {
+	if budget.handles >= maximumPersistentHandles {
+		return errors.New("persistent handle budget exceeded")
+	}
+	budget.handles++
+	return nil
+}
+
+func (budget *resourceBudget) releaseHandle() {
+	if budget.handles > 0 {
+		budget.handles--
+	}
+}
+
+func (budget *resourceBudget) recordEntry(directory bool) error {
+	if budget.entries >= maximumActualEntries {
+		return errors.New("actual bundle entry budget exceeded")
+	}
+	budget.entries++
+	if directory {
+		if budget.directories >= maximumBundleDirectories {
+			return errors.New("bundle directory budget exceeded")
+		}
+		budget.directories++
+	}
+	return nil
+}
+
+func (budget *resourceBudget) addHashBytes(size int64) error {
+	if size < 0 || size > maximumTotalHashBytes-budget.hashBytes {
+		return errors.New("total hash byte budget exceeded")
+	}
+	budget.hashBytes += size
+	return nil
+}
 
 type pinnedObject struct {
-	path      string
-	file      *os.File
-	identity  os.FileInfo
-	directory bool
-	digest    string
+	path       string
+	file       *os.File
+	identity   os.FileInfo
+	directory  bool
+	digest     string
+	maxBytes   int64
+	executable bool
 }
 
 type bundlePin struct {
@@ -28,7 +93,10 @@ type bundlePin struct {
 	manifest            resolvedManifest
 	directories         []*pinnedObject
 	relativeDirectories []string
+	directoryByRelative map[string]*pinnedObject
 	files               map[string]*pinnedObject
+	bundleRootPin       *pinnedObject
+	resource            resourceBudget
 	closed              bool
 	verifyHook          func()
 }
@@ -71,25 +139,13 @@ func (pin *bundlePin) verifyPass() error {
 			return fmt.Errorf("directory identity: %w", err)
 		}
 	}
-	paths := make([]string, 0, len(pin.files))
-	for relative := range pin.files {
-		paths = append(paths, relative)
-	}
-	sort.Strings(paths)
-	for _, relative := range paths {
-		if err := pin.files[relative].verifyDigest(); err != nil {
-			return fmt.Errorf("file %q: %w", relative, err)
-		}
+	if err := verifyPinnedFileSet(pin.files); err != nil {
+		return err
 	}
 	if err := pin.verifyCurrentTree(); err != nil {
 		return err
 	}
-	contents, digest, err := readAndDigest(pin.files[manifestName].file, maximumManifestBytes)
-	if err != nil || digest != pin.installation.ManifestSHA256 {
-		return errors.New("resolved manifest identity changed")
-	}
-	manifest, err := parseResolvedManifest(contents, pin.manifest.Platform)
-	if err != nil || manifest.PythonVersion != pin.manifest.PythonVersion || manifest.GcovrVersion != pin.manifest.GcovrVersion {
+	if pin.files[manifestName].digest != pin.installation.ManifestSHA256 {
 		return errors.New("resolved manifest identity changed")
 	}
 	return nil
@@ -98,7 +154,8 @@ func (pin *bundlePin) verifyPass() error {
 func (pin *bundlePin) verifyCurrentTree() error {
 	files := map[string]struct{}{}
 	directories := map[string]struct{}{}
-	if err := scanDirectTree(pin.bundleRoot, "", files, directories); err != nil {
+	budget := resourceBudget{}
+	if err := scanPinnedTree(pin.bundleRootPin, "", pin, files, directories, &budget); err != nil {
 		return err
 	}
 	if len(files) != len(pin.files) || len(directories) != len(pin.relativeDirectories) {
@@ -117,12 +174,8 @@ func (pin *bundlePin) verifyCurrentTree() error {
 	return nil
 }
 
-func scanDirectTree(absolute, relative string, files, directories map[string]struct{}) error {
-	entries, err := os.ReadDir(absolute)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
+func scanPinnedTree(parent *pinnedObject, relative string, pin *bundlePin, files, directories map[string]struct{}, budget *resourceBudget) error {
+	return forEachPinnedDirectoryEntry(parent, func(entry os.DirEntry) error {
 		childRelative := entry.Name()
 		if relative != "" {
 			childRelative = relative + "/" + entry.Name()
@@ -130,23 +183,49 @@ func scanDirectTree(absolute, relative string, files, directories map[string]str
 		if !canonicalTreePath(childRelative) {
 			return fmt.Errorf("non-canonical bundle entry %q", childRelative)
 		}
-		childAbsolute := absolute + string(os.PathSeparator) + entry.Name()
-		info, err := directObjectInfo(childAbsolute)
+		directoryEntry, err := pinnedChildDirectory(parent, entry.Name())
 		if err != nil {
 			return err
 		}
-		if info.IsDir() {
+		if err := budget.recordEntry(directoryEntry); err != nil {
+			return err
+		}
+		if directoryEntry {
 			directories[childRelative] = struct{}{}
-			if err := scanDirectTree(childAbsolute, childRelative, files, directories); err != nil {
+			child, expected := pin.directoryByRelative[childRelative]
+			if !expected {
+				return nil
+			}
+			if err := scanPinnedTree(child, childRelative, pin, files, directories, budget); err != nil {
 				return err
 			}
-		} else if info.Mode().IsRegular() {
-			files[childRelative] = struct{}{}
 		} else {
-			return fmt.Errorf("bundle entry is not a direct regular object: %q", childRelative)
+			files[childRelative] = struct{}{}
+		}
+		return nil
+	})
+}
+
+func forEachPinnedDirectoryEntry(parent *pinnedObject, visit func(os.DirEntry) error) error {
+	file, err := openPinnedDirectoryReader(parent)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	for {
+		entries, readErr := file.ReadDir(directoryReadBatchSize)
+		for _, entry := range entries {
+			if err := visit(entry); err != nil {
+				return err
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			return nil
+		}
+		if readErr != nil {
+			return readErr
 		}
 	}
-	return nil
 }
 
 func (pin *bundlePin) Close() error {
@@ -191,6 +270,29 @@ func pinDirectObject(path string, directory bool) (*pinnedObject, error) {
 	if err != nil {
 		return nil, err
 	}
+	return pinOpenedObject(path, directory, before, file)
+}
+
+func pinChildObject(parent *pinnedObject, name string, directory bool) (*pinnedObject, error) {
+	if parent == nil || parent.file == nil || !parent.directory || name == "" || name == "." || name == ".." || filepath.Base(name) != name {
+		return nil, errors.New("invalid pinned parent or child name")
+	}
+	childPath := filepath.Join(parent.path, name)
+	before, err := directObjectInfo(childPath)
+	if err != nil {
+		return nil, err
+	}
+	if before.IsDir() != directory {
+		return nil, errors.New("bundle object type does not match")
+	}
+	file, err := openPinnedChild(parent, name, directory)
+	if err != nil {
+		return nil, err
+	}
+	return pinOpenedObject(childPath, directory, before, file)
+}
+
+func pinOpenedObject(path string, directory bool, before os.FileInfo, file *os.File) (*pinnedObject, error) {
 	pinned := &pinnedObject{path: path, file: file, identity: before, directory: directory}
 	fail := func(cause error) (*pinnedObject, error) {
 		_ = pinned.Close()
@@ -235,21 +337,60 @@ func (object *pinnedObject) verifyIdentity() error {
 	if err != nil || !os.SameFile(object.identity, after) {
 		return errors.New("bundle object path changed while validating")
 	}
+	if object.executable && (before.Mode().Perm()&0o111 == 0 || handle.Mode().Perm()&0o111 == 0 || after.Mode().Perm()&0o111 == 0) {
+		return errors.New("pinned executable mode changed")
+	}
 	return nil
 }
 
-func (object *pinnedObject) verifyDigest() error {
+func (object *pinnedObject) verifyDigest(hashLimit int64) (int64, error) {
 	if object.directory || !digestPattern.MatchString(object.digest) {
-		return errors.New("missing pinned file digest")
+		return 0, errors.New("missing pinned file digest")
 	}
 	if err := object.verifyIdentity(); err != nil {
-		return err
+		return 0, err
 	}
-	_, digest, err := readAndDigest(object.file, -1)
+	limit := object.maxBytes
+	if hashLimit < limit {
+		limit = hashLimit
+	}
+	digest, count, err := digestOpenedFile(object.file, limit)
 	if err != nil || digest != object.digest {
-		return errors.New("bundle file digest changed")
+		return count, errors.New("bundle file digest changed")
 	}
-	return object.verifyIdentity()
+	return count, object.verifyIdentity()
+}
+
+func verifyPinnedFileSet(files map[string]*pinnedObject) error {
+	paths := make([]string, 0, len(files))
+	for relative := range files {
+		paths = append(paths, relative)
+	}
+	sort.Strings(paths)
+	var total int64
+	for _, relative := range paths {
+		object := files[relative]
+		if err := object.verifyIdentity(); err != nil {
+			return fmt.Errorf("file %q: %w", relative, err)
+		}
+		info, err := object.file.Stat()
+		if err != nil || info.Size() < 0 || info.Size() > object.maxBytes {
+			return fmt.Errorf("file %q exceeds its size budget", relative)
+		}
+		if info.Size() > maximumTotalHashBytes-total {
+			return errors.New("total hash byte budget exceeded")
+		}
+		total += info.Size()
+	}
+	remaining := maximumTotalHashBytes
+	for _, relative := range paths {
+		count, err := files[relative].verifyDigest(remaining)
+		if err != nil {
+			return fmt.Errorf("file %q: %w", relative, err)
+		}
+		remaining -= count
+	}
+	return nil
 }
 
 func (object *pinnedObject) Close() error {
@@ -269,13 +410,6 @@ func readAndDigest(file *os.File, maximum int64) ([]byte, string, error) {
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return nil, "", err
 	}
-	if maximum < 0 {
-		hash := sha256.New()
-		if _, err := io.Copy(hash, file); err != nil {
-			return nil, "", err
-		}
-		return nil, hex.EncodeToString(hash.Sum(nil)), nil
-	}
 	reader := io.LimitReader(file, maximum+1)
 	contents, err := io.ReadAll(reader)
 	if err != nil {
@@ -286,4 +420,22 @@ func readAndDigest(file *os.File, maximum int64) ([]byte, string, error) {
 	}
 	digest := sha256.Sum256(contents)
 	return contents, hex.EncodeToString(digest[:]), nil
+}
+
+func digestOpenedFile(file *os.File, maximum int64) (string, int64, error) {
+	if file == nil || maximum < 0 {
+		return "", 0, errors.New("invalid file digest budget")
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return "", 0, err
+	}
+	hash := sha256.New()
+	count, err := io.Copy(hash, io.LimitReader(file, maximum+1))
+	if err != nil {
+		return "", count, err
+	}
+	if count > maximum {
+		return "", count, errors.New("file exceeds size budget")
+	}
+	return hex.EncodeToString(hash.Sum(nil)), count, nil
 }

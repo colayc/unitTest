@@ -1,10 +1,12 @@
 package coveragebundle
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -83,6 +85,121 @@ func TestBundleResolverRejectsClosedSetMismatch(t *testing.T) {
 	}
 }
 
+func TestBundleResolverRejectsActualEntryBudgetOverflowAndRollsBackPins(t *testing.T) {
+	productRoot, bundleRoot := createBundleFixture(t)
+	overflowRoot := filepath.Join(bundleRoot, "python")
+	for index := 0; index < maximumActualEntries; index++ {
+		name := filepath.Join(overflowRoot, fmt.Sprintf("overflow-%04d.dat", index))
+		if err := os.WriteFile(name, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if pin, err := Resolve(productRoot); err == nil {
+		_ = pin.Close()
+		t.Fatal("Resolve accepted an actual tree above the entry budget")
+	}
+	moved := productRoot + "-moved"
+	if err := os.Rename(productRoot, moved); err != nil {
+		t.Fatalf("failed Resolve leaked a persistent handle: %v", err)
+	}
+}
+
+func TestBundleResolverRejectsDirectoryBudgetOverflowAndRollsBackPins(t *testing.T) {
+	productRoot, bundleRoot := createBundleFixture(t)
+	overflowRoot := filepath.Join(bundleRoot, "python")
+	for index := 0; index < maximumBundleDirectories; index++ {
+		name := filepath.Join(overflowRoot, fmt.Sprintf("directory-overflow-%04d", index))
+		if err := os.Mkdir(name, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if pin, err := Resolve(productRoot); err == nil {
+		_ = pin.Close()
+		t.Fatal("Resolve accepted an actual tree above the directory budget")
+	} else if !strings.Contains(err.Error(), "bundle directory budget exceeded") {
+		t.Fatalf("Resolve error = %v, want directory budget", err)
+	}
+	moved := productRoot + "-moved"
+	if err := os.Rename(productRoot, moved); err != nil {
+		t.Fatalf("directory-overflow rollback leaked a persistent handle: %v", err)
+	}
+}
+
+func TestBundleResolverRejectsPersistentHandleBudgetOverflowAndRollsBack(t *testing.T) {
+	sourceProduct, _ := createBundleFixture(t)
+	deepRoot := testScratchDir(t)
+	for index := 0; index < 40; index++ {
+		deepRoot = filepath.Join(deepRoot, fmt.Sprintf("d%02d", index))
+	}
+	if err := os.MkdirAll(deepRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	productRoot := filepath.Join(deepRoot, "product")
+	if err := os.Rename(sourceProduct, productRoot); err != nil {
+		t.Fatal(err)
+	}
+	key, err := currentPlatformKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundleRoot := filepath.Join(productRoot, "coverage-bundle", key)
+	existingEntries := countFixtureEntries(t, bundleRoot)
+	productComponents := len(strings.FieldsFunc(strings.TrimPrefix(productRoot, filepath.VolumeName(productRoot)), func(value rune) bool {
+		return value == '/' || value == '\\'
+	}))
+	ancestorHandles := 1 + productComponents
+	extraFiles := maximumPersistentHandles - ancestorHandles - 2 - existingEntries + 1
+	if extraFiles <= 0 || existingEntries+extraFiles > maximumActualEntries {
+		t.Fatalf("invalid handle-overflow fixture: ancestors=%d entries=%d extras=%d", ancestorHandles, existingEntries, extraFiles)
+	}
+	overflowRoot := filepath.Join(bundleRoot, "python")
+	for index := 0; index < extraFiles; index++ {
+		name := filepath.Join(overflowRoot, fmt.Sprintf("handle-overflow-%04d.dat", index))
+		if err := os.WriteFile(name, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if pin, err := Resolve(productRoot); err == nil {
+		_ = pin.Close()
+		t.Fatal("Resolve accepted a tree above the persistent handle budget")
+	} else if !strings.Contains(err.Error(), "persistent handle budget exceeded") {
+		t.Fatalf("Resolve error = %v, want persistent handle budget", err)
+	}
+	moved := productRoot + "-moved"
+	if err := os.Rename(productRoot, moved); err != nil {
+		t.Fatalf("handle-overflow rollback leaked a persistent handle: %v", err)
+	}
+}
+
+func countFixtureEntries(t *testing.T, root string) int {
+	t.Helper()
+	count := 0
+	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if path != root {
+			count++
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return count
+}
+
+func TestBundleResolverRejectsOversizedSparseOutputBeforeHashing(t *testing.T) {
+	productRoot, bundleRoot := createBundleFixture(t)
+	runner := filepath.Join(bundleRoot, "app", "gcovr-runner.pyz")
+	if err := os.Truncate(runner, maximumRegularFileBytes+1); err != nil {
+		t.Fatal(err)
+	}
+	if pin, err := Resolve(productRoot); err == nil {
+		_ = pin.Close()
+		t.Fatal("Resolve accepted an output above the single-file budget")
+	}
+}
+
 func TestBundleResolverFailsClosedOnTOCTOU(t *testing.T) {
 	productRoot, bundleRoot := createBundleFixture(t)
 	_, err := resolveBundle(productRoot, resolveHooks{afterManifest: func() {
@@ -98,7 +215,7 @@ func TestBundleResolverRejectsSymlinkOrJunctionEscape(t *testing.T) {
 	if err != nil {
 		t.Skip(err)
 	}
-	base := t.TempDir()
+	base := testScratchDir(t)
 	targetProduct, _ := createBundleFixture(t)
 	productRoot := filepath.Join(base, "product")
 	if err := os.Mkdir(productRoot, 0o700); err != nil {
@@ -116,5 +233,24 @@ func TestBundleResolverRejectsSymlinkOrJunctionEscape(t *testing.T) {
 	if pin, err := Resolve(productRoot); err == nil {
 		_ = pin.Close()
 		t.Fatalf("Resolve accepted %s bundle escape through %s", key, link)
+	}
+}
+
+func TestBundleResolverRejectsIntermediateProductAncestorSymlinkOrJunction(t *testing.T) {
+	targetProduct, _ := createBundleFixture(t)
+	targetParent := filepath.Dir(targetProduct)
+	base := testScratchDir(t)
+	alias := filepath.Join(base, "intermediate-alias")
+	if runtime.GOOS == "windows" {
+		if err := createWindowsJunction(alias, targetParent); err != nil {
+			t.Skipf("directory junctions are unavailable: %v", err)
+		}
+	} else if err := os.Symlink(targetParent, alias); err != nil {
+		t.Fatal(err)
+	}
+	productRoot := filepath.Join(alias, filepath.Base(targetProduct))
+	if pin, err := Resolve(productRoot); err == nil {
+		_ = pin.Close()
+		t.Fatalf("Resolve accepted intermediate product ancestor alias %q", alias)
 	}
 }

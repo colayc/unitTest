@@ -43,22 +43,40 @@ func resolveBundle(productRoot string, hooks resolveHooks) (*bundlePin, error) {
 		return nil, integrityError("product root", errors.New("must be an absolute canonical path"))
 	}
 	bundleRoot := filepath.Join(productRoot, "coverage-bundle", key)
-	result := &bundlePin{bundleRoot: bundleRoot}
+	result := &bundlePin{bundleRoot: bundleRoot, files: map[string]*pinnedObject{}, directoryByRelative: map[string]*pinnedObject{}}
 	fail := func(label string, cause error) (*bundlePin, error) {
 		_ = result.Close()
 		return nil, integrityError(label, cause)
 	}
 
-	for _, directory := range []string{productRoot, filepath.Join(productRoot, "coverage-bundle"), bundleRoot} {
-		pinned, pinErr := pinDirectObject(directory, true)
-		if pinErr != nil {
-			return fail("pin bundle directory", pinErr)
-		}
-		result.directories = append(result.directories, pinned)
+	ancestors, err := pinProductRootAncestors(productRoot)
+	if err != nil {
+		return fail("pin product root ancestors", err)
 	}
+	for _, ancestor := range ancestors {
+		if err := result.resource.reserveHandle(); err != nil {
+			for index := len(ancestors) - 1; index >= 0; index-- {
+				_ = ancestors[index].Close()
+			}
+			return fail("pin product root ancestors", err)
+		}
+		result.directories = append(result.directories, ancestor)
+	}
+	productRootPin := ancestors[len(ancestors)-1]
+	coverageRootPin, err := result.pinChild(productRootPin, "coverage-bundle", true, 0)
+	if err != nil {
+		return fail("pin coverage bundle root", err)
+	}
+	result.directories = append(result.directories, coverageRootPin)
+	bundleRootPin, err := result.pinChild(coverageRootPin, key, true, 0)
+	if err != nil {
+		return fail("pin platform bundle root", err)
+	}
+	result.directories = append(result.directories, bundleRootPin)
+	result.bundleRootPin = bundleRootPin
+	result.directoryByRelative[""] = bundleRootPin
 
-	manifestPath := filepath.Join(bundleRoot, manifestName)
-	manifestPin, err := pinDirectObject(manifestPath, false)
+	manifestPin, err := result.pinChild(bundleRootPin, manifestName, false, maximumManifestBytes)
 	if err != nil {
 		return fail("pin resolved manifest", err)
 	}
@@ -74,16 +92,16 @@ func resolveBundle(productRoot string, hooks resolveHooks) (*bundlePin, error) {
 		return fail("validate resolved manifest", err)
 	}
 	result.manifest = manifest
-	result.files = map[string]*pinnedObject{manifestName: manifestPin}
+	result.files[manifestName] = manifestPin
 	if hooks.afterManifest != nil {
 		hooks.afterManifest()
 	}
 
-	readyPin, err := pinDirectObject(filepath.Join(bundleRoot, readyName), false)
+	readyPin, err := result.pinChild(bundleRootPin, readyName, false, maximumReadyBytes)
 	if err != nil {
 		return fail("pin READY", err)
 	}
-	readyContents, readyDigest, err := readAndDigest(readyPin.file, 64)
+	readyContents, readyDigest, err := readAndDigest(readyPin.file, maximumReadyBytes)
 	if err != nil || string(readyContents) != "ready\n" {
 		_ = readyPin.Close()
 		if err == nil {
@@ -97,14 +115,14 @@ func resolveBundle(productRoot string, hooks resolveHooks) (*bundlePin, error) {
 	if err := result.pinTree(); err != nil {
 		return fail("pin bundle tree", err)
 	}
-	if err := result.validateClosedLayout(); err != nil {
-		return fail("validate closed bundle layout", err)
-	}
 	pythonRelative := "python/bin/python3"
 	if key == "windows-x64" {
 		pythonRelative = "python/python.exe"
-	} else if result.files[pythonRelative].identity.Mode().Perm()&0o111 == 0 {
-		return fail("validate Python executable", errors.New("Linux Python is not executable"))
+	} else if pythonPin := result.files[pythonRelative]; pythonPin != nil {
+		pythonPin.executable = true
+	}
+	if err := result.validateClosedLayout(); err != nil {
+		return fail("validate closed bundle layout", err)
 	}
 	result.installation = Installation{
 		Root:           bundleRoot,
@@ -132,15 +150,11 @@ func currentPlatformKey() (string, error) {
 }
 
 func (pin *bundlePin) pinTree() error {
-	return pin.pinDirectoryContents(pin.bundleRoot, "")
+	return pin.pinDirectoryContents(pin.bundleRootPin, "")
 }
 
-func (pin *bundlePin) pinDirectoryContents(absolute, relative string) error {
-	entries, err := os.ReadDir(absolute)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
+func (pin *bundlePin) pinDirectoryContents(parent *pinnedObject, relative string) error {
+	return forEachPinnedDirectoryEntry(parent, func(entry os.DirEntry) error {
 		childRelative := entry.Name()
 		if relative != "" {
 			childRelative = relative + "/" + entry.Name()
@@ -148,39 +162,64 @@ func (pin *bundlePin) pinDirectoryContents(absolute, relative string) error {
 		if !canonicalTreePath(childRelative) {
 			return fmt.Errorf("non-canonical bundle entry %q", childRelative)
 		}
-		childAbsolute := filepath.Join(absolute, entry.Name())
-		info, err := directObjectInfo(childAbsolute)
+		directoryEntry, err := pinnedChildDirectory(parent, entry.Name())
 		if err != nil {
 			return err
 		}
-		if info.IsDir() {
-			directory, err := pinDirectObject(childAbsolute, true)
+		if err := pin.resource.recordEntry(directoryEntry); err != nil {
+			return err
+		}
+		if directoryEntry {
+			directory, err := pin.pinChild(parent, entry.Name(), true, 0)
 			if err != nil {
 				return err
 			}
 			pin.directories = append(pin.directories, directory)
 			pin.relativeDirectories = append(pin.relativeDirectories, childRelative)
-			if err := pin.pinDirectoryContents(childAbsolute, childRelative); err != nil {
+			pin.directoryByRelative[childRelative] = directory
+			if err := pin.pinDirectoryContents(directory, childRelative); err != nil {
 				return err
 			}
-			continue
-		}
-		if !info.Mode().IsRegular() {
-			return fmt.Errorf("bundle entry is not a regular file: %q", childRelative)
+			return nil
 		}
 		if _, exists := pin.files[childRelative]; exists {
 			if err := pin.files[childRelative].verifyIdentity(); err != nil {
 				return err
 			}
-			continue
+			return nil
 		}
-		file, err := pinDirectObject(childAbsolute, false)
+		file, err := pin.pinChild(parent, entry.Name(), false, maximumRegularFileBytes)
 		if err != nil {
 			return err
 		}
 		pin.files[childRelative] = file
+		return nil
+	})
+}
+
+func (pin *bundlePin) pinChild(parent *pinnedObject, name string, directory bool, maxBytes int64) (*pinnedObject, error) {
+	if err := pin.resource.reserveHandle(); err != nil {
+		return nil, err
 	}
-	return nil
+	object, err := pinChildObject(parent, name, directory)
+	if err != nil {
+		pin.resource.releaseHandle()
+		return nil, err
+	}
+	if !directory {
+		object.maxBytes = maxBytes
+		if object.identity.Size() < 0 || object.identity.Size() > maxBytes {
+			_ = object.Close()
+			pin.resource.releaseHandle()
+			return nil, errors.New("bundle file size budget exceeded")
+		}
+		if err := pin.resource.addHashBytes(object.identity.Size()); err != nil {
+			_ = object.Close()
+			pin.resource.releaseHandle()
+			return nil, err
+		}
+	}
+	return object, nil
 }
 
 func (pin *bundlePin) validateClosedLayout() error {
@@ -210,9 +249,6 @@ func (pin *bundlePin) validateClosedLayout() error {
 			return fmt.Errorf("unlisted bundle file %q", relative)
 		}
 		file.digest = digest
-		if err := file.verifyDigest(); err != nil {
-			return fmt.Errorf("verify %q: %w", relative, err)
-		}
 	}
 	if len(pin.relativeDirectories) != len(expectedDirectories) {
 		return fmt.Errorf("bundle directory set has %d entries, expected %d", len(pin.relativeDirectories), len(expectedDirectories))
@@ -228,7 +264,7 @@ func (pin *bundlePin) validateClosedLayout() error {
 			return fmt.Errorf("unlisted bundle directory %q", relative)
 		}
 	}
-	return nil
+	return verifyPinnedFileSet(pin.files)
 }
 
 func pathParent(value string) string {

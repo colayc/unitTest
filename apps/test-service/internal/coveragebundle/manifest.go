@@ -241,6 +241,9 @@ func (manifest resolvedManifest) validate(expectedPlatform string) error {
 	if len(manifest.Outputs) == 0 {
 		return errors.New("resolved manifest contains no outputs")
 	}
+	if len(manifest.Outputs) > maximumManifestOutputs {
+		return errors.New("resolved manifest output budget exceeded")
+	}
 	previous := ""
 	seen := map[string]struct{}{}
 	outputs := make(map[string]outputRecord, len(manifest.Outputs))
@@ -338,10 +341,14 @@ func validateRequiredOutputs(manifest resolvedManifest, outputs map[string]outpu
 }
 
 func canonicalOutputPath(value string) bool {
-	if value == "" || !pathPattern.MatchString(value) || strings.Contains(value, `\`) || path.IsAbs(value) || path.Clean(value) != value {
+	if value == "" || len(value) > maximumPortablePathBytes || !pathPattern.MatchString(value) || strings.Contains(value, `\`) || path.IsAbs(value) || path.Clean(value) != value {
 		return false
 	}
-	for _, segment := range strings.Split(value, "/") {
+	segments := strings.Split(value, "/")
+	if len(segments) > maximumBundleDepth {
+		return false
+	}
+	for _, segment := range segments {
 		if segment == "" || segment == "." || segment == ".." {
 			return false
 		}

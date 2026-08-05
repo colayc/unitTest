@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -103,6 +104,50 @@ func TestBundleManifestRequiresPlatformExecutionClosure(t *testing.T) {
 	}
 }
 
+func TestBundleManifestRejectsOutputResourceBudgetOverflow(t *testing.T) {
+	t.Run("output count before output handles", func(t *testing.T) {
+		productRoot, bundleRoot := createBundleFixture(t)
+		mutateBundleManifest(t, bundleRoot, func(manifest map[string]any) {
+			outputs := manifest["outputs"].([]any)
+			for index := len(outputs); index <= maximumManifestOutputs; index++ {
+				outputs = append(outputs, map[string]any{
+					"path":   fmt.Sprintf("licenses/overflow-%04d.txt", index),
+					"sha256": digestBytes([]byte(fmt.Sprintf("overflow-%d", index))),
+					"kind":   "regular-file",
+				})
+			}
+			sort.Slice(outputs, func(left, right int) bool {
+				return outputs[left].(map[string]any)["path"].(string) < outputs[right].(map[string]any)["path"].(string)
+			})
+			manifest["outputs"] = outputs
+		})
+		afterManifest := false
+		if pin, err := resolveBundle(productRoot, resolveHooks{afterManifest: func() { afterManifest = true }}); err == nil {
+			_ = pin.Close()
+			t.Fatal("Resolve accepted output count above the manifest budget")
+		}
+		if afterManifest {
+			t.Fatal("output-count overflow reached the output-handle phase")
+		}
+	})
+
+	for name, candidate := range map[string]string{
+		"depth":  strings.Repeat("a/", maximumBundleDepth) + "file.txt",
+		"length": "licenses/" + strings.Repeat("a", maximumPortablePathBytes) + ".txt",
+	} {
+		t.Run(name, func(t *testing.T) {
+			productRoot, bundleRoot := createBundleFixture(t)
+			mutateBundleManifest(t, bundleRoot, func(manifest map[string]any) {
+				manifest["outputs"].([]any)[0].(map[string]any)["path"] = candidate
+			})
+			if pin, err := Resolve(productRoot); err == nil {
+				_ = pin.Close()
+				t.Fatalf("Resolve accepted output path above the %s budget", name)
+			}
+		})
+	}
+}
+
 func TestBundleManifestRejectsUnknownFieldsAndTrailingJSON(t *testing.T) {
 	productRoot, bundleRoot := createBundleFixture(t)
 	mutateBundleManifest(t, bundleRoot, func(manifest map[string]any) {
@@ -152,7 +197,7 @@ func createBundleFixture(t *testing.T) (string, string) {
 	if err != nil {
 		t.Skipf("unsupported test platform: %v", err)
 	}
-	productRoot := filepath.Join(t.TempDir(), "product")
+	productRoot := filepath.Join(testScratchDir(t), "product")
 	bundleRoot := filepath.Join(productRoot, "coverage-bundle", key)
 	files := map[string][]byte{
 		"app/gcovr-runner.pyz": []byte("runner and locked dependencies"),
@@ -233,6 +278,25 @@ func createBundleFixture(t *testing.T) (string, string) {
 		t.Fatal(err)
 	}
 	return productRoot, bundleRoot
+}
+
+func testScratchDir(t *testing.T) string {
+	t.Helper()
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	repositoryRoot := filepath.Clean(filepath.Join(workingDirectory, "..", "..", "..", ".."))
+	base := filepath.Join(repositoryRoot, ".superpowers", "cache", "coveragebundle-tests")
+	if err := os.MkdirAll(base, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.MkdirTemp(base, "case-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	return root
 }
 
 func mutateBundleManifest(t *testing.T, bundleRoot string, mutate func(map[string]any)) {

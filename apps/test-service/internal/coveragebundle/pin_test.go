@@ -30,6 +30,25 @@ func TestPinInstallationReturnsImmutableCloneAndCloseIsIdempotent(t *testing.T) 
 	}
 }
 
+func TestPinResourceBudgetsRejectEntryDirectoryAndHandleOverflow(t *testing.T) {
+	handles := resourceBudget{handles: maximumPersistentHandles}
+	if err := handles.reserveHandle(); err == nil {
+		t.Fatal("persistent handle budget accepted an overflow")
+	}
+	entries := resourceBudget{entries: maximumActualEntries}
+	if err := entries.recordEntry(false); err == nil {
+		t.Fatal("actual entry budget accepted an overflow")
+	}
+	directories := resourceBudget{directories: maximumBundleDirectories}
+	if err := directories.recordEntry(true); err == nil {
+		t.Fatal("directory budget accepted an overflow")
+	}
+	hashBytes := resourceBudget{hashBytes: maximumTotalHashBytes}
+	if err := hashBytes.addHashBytes(1); err == nil {
+		t.Fatal("total hash byte budget accepted an overflow")
+	}
+}
+
 func TestPinDetectsOrPreventsFileReplacement(t *testing.T) {
 	productRoot, bundleRoot := createBundleFixture(t)
 	pin, err := Resolve(productRoot)
@@ -112,5 +131,69 @@ func TestPinVerifyRechecksDigestsBeforeAndAfter(t *testing.T) {
 	}
 	if !errors.Is(err, ErrBundleIntegrity) {
 		t.Fatalf("Verify() = %v, want ErrBundleIntegrity", err)
+	}
+}
+
+func TestPinPinsAndDetectsOrPreventsProductAncestorReplacement(t *testing.T) {
+	sourceProduct, _ := createBundleFixture(t)
+	base := testScratchDir(t)
+	ancestor := filepath.Join(base, "stable-ancestor")
+	if err := os.Mkdir(ancestor, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	productRoot := filepath.Join(ancestor, "product")
+	if err := os.Rename(sourceProduct, productRoot); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := resolveBundle(productRoot, resolveHooks{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resolved.Close()
+	ancestorPinned := false
+	for _, directory := range resolved.directories {
+		if filepath.Clean(directory.path) == filepath.Clean(ancestor) {
+			ancestorPinned = true
+			break
+		}
+	}
+	if !ancestorPinned {
+		t.Fatal("intermediate product ancestor did not retain an opened identity")
+	}
+	moved := filepath.Join(base, "moved-ancestor")
+	renameErr := os.Rename(ancestor, moved)
+	if runtime.GOOS == "windows" {
+		if renameErr == nil {
+			t.Fatal("Windows product ancestor replacement succeeded while pinned")
+		}
+		if err := resolved.Verify(); err != nil {
+			t.Fatalf("Verify after blocked ancestor replacement: %v", err)
+		}
+		return
+	}
+	if renameErr != nil {
+		t.Fatal(renameErr)
+	}
+	if err := resolved.Verify(); !errors.Is(err, ErrBundleIntegrity) {
+		t.Fatalf("Verify after product ancestor replacement = %v, want ErrBundleIntegrity", err)
+	}
+}
+
+func TestPinLinuxPythonChmodFailsClosed(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux executable-mode runtime evidence requires Linux")
+	}
+	productRoot, _ := createBundleFixture(t)
+	resolved, err := Resolve(productRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resolved.Close()
+	python := resolved.Installation().Python
+	if err := os.Chmod(python, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := resolved.Verify(); !errors.Is(err, ErrBundleIntegrity) {
+		t.Fatalf("Verify after chmod = %v, want ErrBundleIntegrity", err)
 	}
 }

@@ -4,7 +4,10 @@ package coveragebundle
 
 import (
 	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"golang.org/x/sys/windows"
 )
@@ -17,6 +20,56 @@ func openPinnedDirectory(path string) (*os.File, error) {
 	return openPinnedWindowsObject(path, true)
 }
 
+func openPinnedChild(parent *pinnedObject, name string, directory bool) (*os.File, error) {
+	return openPinnedWindowsObject(filepath.Join(parent.path, name), directory)
+}
+
+func openPinnedDirectoryReader(parent *pinnedObject) (*os.File, error) {
+	return os.Open(parent.path)
+}
+
+func pinnedChildDirectory(parent *pinnedObject, name string) (bool, error) {
+	info, err := directObjectInfo(filepath.Join(parent.path, name))
+	if err != nil {
+		return false, err
+	}
+	return info.IsDir(), nil
+}
+
+func pinProductRootAncestors(absolute string) ([]*pinnedObject, error) {
+	volume := filepath.VolumeName(absolute)
+	if volume == "" {
+		return nil, errors.New("product root has no volume")
+	}
+	root := volume + string(filepath.Separator)
+	remainder := strings.TrimLeft(strings.TrimPrefix(absolute, volume), `\/`)
+	segments := strings.FieldsFunc(remainder, func(value rune) bool { return value == '\\' || value == '/' })
+	if len(segments) > maximumProductRootComponents {
+		return nil, errors.New("product root component budget exceeded")
+	}
+	rootPin, err := pinDirectObject(root, true)
+	if err != nil {
+		return nil, fmt.Errorf("pin volume root %q: %w", root, err)
+	}
+	pins := []*pinnedObject{rootPin}
+	fail := func(cause error) ([]*pinnedObject, error) {
+		for index := len(pins) - 1; index >= 0; index-- {
+			_ = pins[index].Close()
+		}
+		return nil, cause
+	}
+	parent := rootPin
+	for _, segment := range segments {
+		child, err := pinChildObject(parent, segment, true)
+		if err != nil {
+			return fail(fmt.Errorf("pin product ancestor %q: %w", filepath.Join(parent.path, segment), err))
+		}
+		pins = append(pins, child)
+		parent = child
+	}
+	return pins, nil
+}
+
 func openPinnedWindowsObject(path string, directory bool) (*os.File, error) {
 	name, err := windows.UTF16PtrFromString(path)
 	if err != nil {
@@ -26,7 +79,7 @@ func openPinnedWindowsObject(path string, directory bool) (*os.File, error) {
 	flags := uint32(windows.FILE_ATTRIBUTE_NORMAL | windows.FILE_FLAG_OPEN_REPARSE_POINT)
 	share := uint32(windows.FILE_SHARE_READ)
 	if directory {
-		access = windows.FILE_READ_ATTRIBUTES
+		access = 0
 		flags = windows.FILE_FLAG_BACKUP_SEMANTICS | windows.FILE_FLAG_OPEN_REPARSE_POINT
 		share |= windows.FILE_SHARE_WRITE
 	}
