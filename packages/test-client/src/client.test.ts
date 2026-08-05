@@ -568,6 +568,60 @@ test("protocol 1.3 sessions reject every coverage API without writing", async ()
   fixture.client.close();
 });
 
+test("coverage start and list validate and send one deep caller snapshot", async () => {
+  const fixture = scriptedClient((request) => {
+    if (request.method === "handshake") {
+      return response(request, { negotiatedProtocolVersion: "1.4", serviceVersion: "0.5.0" }, "1.4");
+    }
+    if (request.method === "coverage/runs/list") return response(request, { items: [] }, "1.4");
+    return response(request, coverageRun(), "1.4");
+  });
+  await fixture.client.handshake("0123456789abcdef", "test", "0.5.0");
+
+  let startOwnKeysCalls = 0;
+  const startTarget = {
+    ...validCoverageInput(),
+    command: "calc.exe"
+  } as unknown as JsonObject;
+  const changingStart = new Proxy(startTarget, {
+    ownKeys(target) {
+      startOwnKeysCalls++;
+      const keys = Reflect.ownKeys(target);
+      return startOwnKeysCalls === 1 ? keys.filter((key) => key !== "command") : keys;
+    },
+    get(target, key, receiver) {
+      if (key === "selection" && startOwnKeysCalls > 1) {
+        return { mode: "items", itemIds: [ITEM_ID], command: "calc.exe" };
+      }
+      return Reflect.get(target, key, receiver);
+    }
+  }) as unknown as CoverageRunInput;
+
+  let listOwnKeysCalls = 0;
+  const listTarget = { projectId: "core", limit: 200, command: "calc.exe" };
+  const changingList = new Proxy(listTarget, {
+    ownKeys(target) {
+      listOwnKeysCalls++;
+      const keys = Reflect.ownKeys(target);
+      return listOwnKeysCalls === 1 ? keys.filter((key) => key !== "command") : keys;
+    },
+    get(target, key, receiver) {
+      if (key === "limit" && listOwnKeysCalls > 1) return 201;
+      return Reflect.get(target, key, receiver);
+    }
+  }) as unknown as CoverageRunListInput;
+
+  const started = await fixture.client.startCoverage(changingStart);
+  const page = await fixture.client.listCoverageRuns(changingList);
+  assert.equal(started.coverageRunId, COVERAGE_RUN_ID);
+  assert.deepEqual(page.items, []);
+  assert.equal(startOwnKeysCalls, 1);
+  assert.equal(listOwnKeysCalls, 1);
+  assert.deepEqual(fixture.requests[1]?.payload, validCoverageInput());
+  assert.deepEqual(fixture.requests[2]?.payload, { projectId: "core", limit: 200 });
+  fixture.client.close();
+});
+
 test("coverage request validation rejects execution-plan injection and invalid bounds without writing", async () => {
   const fixture = scriptedClient((request) => request.method === "handshake"
     ? response(request, { negotiatedProtocolVersion: "1.4", serviceVersion: "0.5.0" }, "1.4")
@@ -578,7 +632,14 @@ test("coverage request validation rejects execution-plan injection and invalid b
     ...(valid as unknown as JsonObject),
     ...overrides
   }) as unknown as CoverageRunInput;
-  const cases: Array<{ label: string; invoke: () => Promise<unknown> }> = [
+  const cyclic = validCoverageInput() as unknown as JsonObject;
+  cyclic.selection = cyclic;
+  const cases: Array<{ label: string; pattern?: RegExp; invoke: () => Promise<unknown> }> = [
+    {
+      label: "snapshot cycle",
+      pattern: /invalid protocol request.*snapshot/i,
+      invoke: () => fixture.client.startCoverage(cyclic as unknown as CoverageRunInput)
+    },
     { label: "command", invoke: () => fixture.client.startCoverage(invalidStart({ command: "calc.exe" })) },
     { label: "environment", invoke: () => fixture.client.startCoverage(invalidStart({ environment: { PATH: "outside" } })) },
     { label: "idempotencyKey", invoke: () => fixture.client.startCoverage(invalidStart({ idempotencyKey: "bad" })) },
@@ -606,7 +667,7 @@ test("coverage request validation rejects execution-plan injection and invalid b
 
   for (const item of cases) {
     const before = fixture.requests.length;
-    await assert.rejects(item.invoke, /invalid protocol request/i, item.label);
+    await assert.rejects(item.invoke, item.pattern ?? /invalid protocol request/i, item.label);
     assert.equal(fixture.requests.length, before, `${item.label} wrote to the wire`);
   }
 
@@ -624,6 +685,48 @@ test("coverage responses reject every invalid schema value without returning a p
     payload: JsonObject;
     invoke: (client: ProtocolClient) => Promise<unknown>;
   }> = [
+    {
+      label: "malformed run coverageRunId",
+      method: "coverage/runs/get",
+      payload: coverageRun({ coverageRunId: "bad" }),
+      invoke: (client) => client.getCoverageRun(COVERAGE_RUN_ID)
+    },
+    {
+      label: "malformed run taskId",
+      method: "coverage/runs/get",
+      payload: coverageRun({ taskId: "bad" }),
+      invoke: (client) => client.getCoverageRun(COVERAGE_RUN_ID)
+    },
+    {
+      label: "malformed run testRunId",
+      method: "coverage/runs/get",
+      payload: coverageRun({ testRunId: "bad" }),
+      invoke: (client) => client.getCoverageRun(COVERAGE_RUN_ID)
+    },
+    {
+      label: "malformed report reportId",
+      method: "coverage/reports/get",
+      payload: coverageReport({ reportId: "bad" }),
+      invoke: (client) => client.getCoverageReport(REPORT_ID)
+    },
+    {
+      label: "malformed report coverageRunId",
+      method: "coverage/reports/get",
+      payload: coverageReport({ coverageRunId: "bad" }),
+      invoke: (client) => client.getCoverageReport(REPORT_ID)
+    },
+    {
+      label: "malformed report testRunId",
+      method: "coverage/reports/get",
+      payload: coverageReport({ testRunId: "bad" }),
+      invoke: (client) => client.getCoverageReport(REPORT_ID)
+    },
+    {
+      label: "malformed report artifactId linkage",
+      method: "coverage/reports/get",
+      payload: coverageReport({ artifactId: "bad" }),
+      invoke: (client) => client.getCoverageReport(REPORT_ID)
+    },
     {
       label: "unknown status",
       method: "coverage/runs/get",
@@ -722,6 +825,7 @@ test("coverage public APIs defensively clone selection, completeness, summary, a
     if (request.method === "handshake") {
       return response(request, { negotiatedProtocolVersion: "1.4", serviceVersion: "0.5.0" }, "1.4");
     }
+    if (request.method === "coverage/runs/list") return response(request, { items: [coverageRun()] }, "1.4");
     if (request.method === "coverage/reports/get") return response(request, coverageReport(), "1.4");
     return response(request, coverageRun(), "1.4");
   });
@@ -730,6 +834,11 @@ test("coverage public APIs defensively clone selection, completeness, summary, a
   firstRun.selectionSnapshot.itemIds.length = 0;
   const secondRun = await fixture.client.getCoverageRun(COVERAGE_RUN_ID);
   assert.deepEqual(secondRun.selectionSnapshot.itemIds, [ITEM_ID]);
+
+  const firstPage = await fixture.client.listCoverageRuns();
+  firstPage.items[0]!.selectionSnapshot.itemIds.length = 0;
+  const secondPage = await fixture.client.listCoverageRuns();
+  assert.deepEqual(secondPage.items[0]?.selectionSnapshot.itemIds, [ITEM_ID]);
 
   const firstReport = await fixture.client.getCoverageReport(REPORT_ID);
   (firstReport.completeness.reasons as unknown as string[]).push("test_crashed");
@@ -902,16 +1011,20 @@ test("protocol 1.3 decoder preserves closed mock failure subtype", () => {
 
 test("coverage decoders clone nested values and convert dates", () => {
   const wireRun = coverageRun();
+  const wirePage = { items: [coverageRun()], nextCursor: "next" };
   const wireReport = coverageReport();
   const run = decodeCoverageRun(wireRun);
+  const page = decodeCoverageRunPage(wirePage);
   const report = decodeCoverageReport(wireReport);
   assert.ok(run.createdAt instanceof Date);
   assert.ok(report.createdAt instanceof Date);
   (wireRun.selectionSnapshot as JsonObject).itemIds = [];
+  (((wirePage.items[0] as JsonObject).selectionSnapshot as JsonObject).itemIds as string[]).length = 0;
   (wireReport.completeness as JsonObject).reasons = ["test_crashed"];
   (wireReport.summary as JsonObject).lines = { covered: 0, total: 0 };
   ((wireReport.toolProvenance as JsonObject).compiler as JsonObject).version = "mutated";
   assert.deepEqual(run.selectionSnapshot.itemIds, [ITEM_ID]);
+  assert.deepEqual(page.items[0]?.selectionSnapshot.itemIds, [ITEM_ID]);
   assert.deepEqual(report.completeness.reasons, []);
   assert.equal(report.summary.lines.covered, 8);
   assert.equal(report.toolProvenance.compiler.version, "18.1.8");

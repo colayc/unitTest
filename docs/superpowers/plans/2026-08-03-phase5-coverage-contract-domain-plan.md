@@ -457,8 +457,9 @@ git commit -m "feat: expose coverage client contracts"
 2026-08-05 Task 6 证据（pinned Node 24.18.0、pnpm 11.4.0、Go 1.26.5 与 worktree-local cache）：
 
 - RED：`pnpm --filter @unit-test-ide/test-client test` exit 1，TypeScript 精确报告缺少 `CoverageRunInput`、`CoverageRunListInput`、`CoverageRun`、`CoverageRunPage`、`CoverageReport` exports 与四个 Coverage methods。
-- GREEN：`pnpm --filter @unit-test-ide/test-client test` 79 passed、0 failed；独立 Client build 与 `git diff --check` 通过。
-- `pnpm check:coverage-generated`、`pnpm check:protocol-generated` 与 root `pnpm build` 通过；重复 Client test 仍为 79 passed、0 failed。
+- GREEN：`pnpm --filter @unit-test-ide/test-client test` 80 passed、0 failed；独立 Client build 与 `git diff --check` 通过。
+- `pnpm check:coverage-generated`、`pnpm check:protocol-generated` 与 root `pnpm build` 通过；review fix 后 Client test 为 80 passed、0 failed。
+- review fix（base `f81c63e`）证明 start/list 对 caller 只建立一次 deep JSON-wire snapshot、对该 snapshot 做 exact schema validation 并发送同一对象；stateful Proxy 无法在 validation/serialization 间注入 outer operational field 或 nested selection field，snapshot failure 本地拒绝且不关闭 connection。Coverage run/report/artifact linkage malformed IDs 均 fail closed，CoverageRunPage nested item clone 也有直接 regression evidence。
 - root `pnpm test` 与 `pnpm verify` 均在唯一的历史 Windows CMake fixture `UnitTestIDE CMake helper has strict deterministic framework registration` 失败，精确原因为 `spawnSync cmake ENOENT`；失败发生前 Coverage generator、CMake bundle、workspace schema/security tests 与 verify 的 drift/build 均通过，未出现 test-client、Coverage/Protocol generated 或本次变更 package 的新增 failure。
 - 由于上述历史 baseline，下面的“完整 Phase 5A 门禁与独立 diff/security review”保持未勾选；whole-branch review、后续完整 CI 与双 remote 推送由最终 controller 执行。
 

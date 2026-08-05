@@ -353,6 +353,17 @@ function validateRequestPayload(method: string, validator: ValidateFunction, pay
   }
 }
 
+function snapshotRequestPayload(method: string, payload: unknown): unknown {
+  try {
+    const encoded = JSON.stringify(payload);
+    if (encoded === undefined) throw new Error("payload is not JSON-serializable");
+    return JSON.parse(encoded) as unknown;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`invalid protocol request for ${method}: payload snapshot failed: ${detail}`);
+  }
+}
+
 function decodeBase64Url(value: string): Buffer {
   if (!/^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-]{2}|[A-Za-z0-9_-]{3})?$/.test(value)) {
     throw new Error("invalid artifact chunk Base64URL data");
@@ -556,8 +567,13 @@ export class ProtocolClient {
 
   async startCoverage(input: CoverageRunInput): Promise<CoverageRun> {
     const version = this.#requireV14();
-    validateRequestPayload("coverage/runs/start", validateCoverageRunStartV14, input);
-    const payload = await this.#connection.request(version, "coverage/runs/start", { ...input });
+    const request = snapshotRequestPayload("coverage/runs/start", input);
+    validateRequestPayload("coverage/runs/start", validateCoverageRunStartV14, request);
+    const payload = await this.#connection.request(
+      version,
+      "coverage/runs/start",
+      request as Record<string, unknown>
+    );
     try {
       validatePayload("coverage/runs/start", validateCoverageRunV14, payload);
       return decodeCoverageRun(payload);
@@ -585,8 +601,13 @@ export class ProtocolClient {
 
   async listCoverageRuns(input: CoverageRunListInput = {}): Promise<CoverageRunPage> {
     const version = this.#requireV14();
-    validateRequestPayload("coverage/runs/list", validateCoverageRunsListPayloadV14, input);
-    const payload = await this.#connection.request(version, "coverage/runs/list", { ...input });
+    const request = snapshotRequestPayload("coverage/runs/list", input);
+    validateRequestPayload("coverage/runs/list", validateCoverageRunsListPayloadV14, request);
+    const payload = await this.#connection.request(
+      version,
+      "coverage/runs/list",
+      request as Record<string, unknown>
+    );
     try {
       validatePayload("coverage/runs/list", validateCoverageRunPageV14, payload);
       return decodeCoverageRunPage(payload);
