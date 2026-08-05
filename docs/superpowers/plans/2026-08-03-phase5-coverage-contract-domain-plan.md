@@ -414,7 +414,7 @@ listCoverageRuns(input: CoverageRunListInput): Promise<CoverageRunPage>;
 getCoverageReport(reportId: string): Promise<CoverageReport>;
 ```
 
-- [ ] **Step 1：写出 negotiation/local validation/decoder 失败测试**
+- [x] **Step 1：写出 negotiation/local validation/decoder 失败测试**
 
 覆盖：
 
@@ -425,17 +425,17 @@ getCoverageReport(reportId: string): Promise<CoverageReport>;
 - decoder deep clone；
 - v1.3 test API 行为不变。
 
-- [ ] **Step 2：运行 Client tests 并确认失败**
+- [x] **Step 2：运行 Client tests 并确认失败**
 
 ```powershell
 pnpm --filter @unit-test-ide/test-client test
 ```
 
-- [ ] **Step 3：实现 version-aware API 与 strict decoder**
+- [x] **Step 3：实现 version-aware API 与 strict decoder**
 
 Client 不解析大型 Coverage JSON body；它只返回 report metadata/artifact ID，Coverage JSON 由 `@unit-test-ide/coverage-models` 的独立 decoder 验证。
 
-- [ ] **Step 4：运行 Phase 5A 完整门禁**
+- [x] **Step 4：运行 Phase 5A 完整门禁**
 
 ```powershell
 pnpm check:coverage-generated
@@ -447,12 +447,20 @@ go test -race ./apps/test-service/internal/coveragedomain ./apps/test-service/in
 git diff --check
 ```
 
-- [ ] **Step 5：提交 TypeScript Client v1.4**
+- [x] **Step 5：提交 TypeScript Client v1.4**
 
 ```powershell
 git add packages/test-client
 git commit -m "feat: expose coverage client contracts"
 ```
+
+2026-08-05 Task 6 证据（pinned Node 24.18.0、pnpm 11.4.0、Go 1.26.5 与 worktree-local cache）：
+
+- RED：`pnpm --filter @unit-test-ide/test-client test` exit 1，TypeScript 精确报告缺少 `CoverageRunInput`、`CoverageRunListInput`、`CoverageRun`、`CoverageRunPage`、`CoverageReport` exports 与四个 Coverage methods。
+- GREEN：`pnpm --filter @unit-test-ide/test-client test` 79 passed、0 failed；独立 Client build 与 `git diff --check` 通过。
+- `pnpm check:coverage-generated`、`pnpm check:protocol-generated` 与 root `pnpm build` 通过；重复 Client test 仍为 79 passed、0 failed。
+- root `pnpm test` 与 `pnpm verify` 均在唯一的历史 Windows CMake fixture `UnitTestIDE CMake helper has strict deterministic framework registration` 失败，精确原因为 `spawnSync cmake ENOENT`；失败发生前 Coverage generator、CMake bundle、workspace schema/security tests 与 verify 的 drift/build 均通过，未出现 test-client、Coverage/Protocol generated 或本次变更 package 的新增 failure。
+- 由于上述历史 baseline，下面的“完整 Phase 5A 门禁与独立 diff/security review”保持未勾选；whole-branch review、后续完整 CI 与双 remote 推送由最终 controller 执行。
 
 ## Phase 5A 完成检查
 
@@ -461,5 +469,5 @@ git commit -m "feat: expose coverage client contracts"
 - [ ] Protocol v1.4 closed contract 与 compatibility
 - [ ] CoverageRun/Report domain
 - [ ] Migration 009 与 atomic creation
-- [ ] TypeScript Client v1.4
+- [x] TypeScript Client v1.4
 - [ ] 完整 Phase 5A 门禁与独立 diff/security review

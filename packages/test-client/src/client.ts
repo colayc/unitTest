@@ -15,6 +15,10 @@ import type {
   CapabilitiesV12,
   CapabilitiesV13,
   CapabilitiesV14,
+  CoverageReport,
+  CoverageRun,
+  CoverageRunPage,
+  CoverageRunStartRequest,
   TargetList,
   TaskSnapshot,
   TaskSnapshotV12,
@@ -35,6 +39,9 @@ import {
   decodeArtifactMetadataV12,
   decodeArtifactMetadataV13,
   decodeArtifactMetadataV14,
+  decodeCoverageReport,
+  decodeCoverageRun,
+  decodeCoverageRunPage,
   decodeTargetList,
   decodeTaskSnapshot,
   decodeTaskSnapshotV12,
@@ -98,6 +105,13 @@ export interface CatalogGetInput {
 export interface TestRunListInput {
   projectId?: string;
   profileId?: string;
+  cursor?: string;
+  limit?: number;
+}
+export type CoverageRunInput = CoverageRunStartRequest;
+export interface CoverageRunListInput {
+  projectId?: string;
+  coverageProfileId?: string;
   cursor?: string;
   limit?: number;
 }
@@ -273,6 +287,27 @@ const validateTestRunV14 = payloadAjv.compile({
 const validateTestRunPageV14 = payloadAjv.compile({
   $ref: "urn:unit-test-ide:protocol:v1.4:test#/$defs/testRunPage"
 });
+const validateCoverageRunStartV14 = payloadAjv.compile({
+  $ref: "urn:unit-test-ide:protocol:v1.4:coverage#/$defs/coverageRunStartRequest"
+});
+const validateCoverageRunV14 = payloadAjv.compile({
+  $ref: "urn:unit-test-ide:protocol:v1.4:coverage#/$defs/coverageRun"
+});
+const validateCoverageRunPageV14 = payloadAjv.compile({
+  $ref: "urn:unit-test-ide:protocol:v1.4:coverage#/$defs/coverageRunPage"
+});
+const validateCoverageReportV14 = payloadAjv.compile({
+  $ref: "urn:unit-test-ide:protocol:v1.4:coverage#/$defs/coverageReport"
+});
+const validateCoverageRunIdPayloadV14 = payloadAjv.getSchema(
+  "urn:unit-test-ide:protocol:v1.4:message#/$defs/coverageRunIdPayload"
+) as ValidateFunction;
+const validateCoverageReportIdPayloadV14 = payloadAjv.getSchema(
+  "urn:unit-test-ide:protocol:v1.4:message#/$defs/coverageReportIdPayload"
+) as ValidateFunction;
+const validateCoverageRunsListPayloadV14 = payloadAjv.getSchema(
+  "urn:unit-test-ide:protocol:v1.4:message#/$defs/coverageRunsListPayload"
+) as ValidateFunction;
 const validateSubscription = payloadAjv.compile({
   type: "object",
   additionalProperties: false,
@@ -309,6 +344,12 @@ function endpointConnector(endpoint: string): ConnectionConnector {
 function validatePayload(method: string, validator: ValidateFunction, payload: Record<string, unknown>): void {
   if (!validator(payload)) {
     throw new Error(`invalid ${method} response: ${payloadAjv.errorsText(validator.errors)}`);
+  }
+}
+
+function validateRequestPayload(method: string, validator: ValidateFunction, payload: unknown): void {
+  if (!validator(payload)) {
+    throw new Error(`invalid protocol request for ${method}: ${payloadAjv.errorsText(validator.errors)}`);
   }
 }
 
@@ -511,6 +552,64 @@ export class ProtocolClient {
     const payload = await this.#connection.request(version, "tests/runs/list", { ...input });
     validatePayload("tests/runs/list", version === "1.4" ? validateTestRunPageV14 : validateTestRunPageV13, payload);
     return version === "1.4" ? decodeTestRunPageV14(payload) : decodeTestRunPage(payload);
+  }
+
+  async startCoverage(input: CoverageRunInput): Promise<CoverageRun> {
+    const version = this.#requireV14();
+    validateRequestPayload("coverage/runs/start", validateCoverageRunStartV14, input);
+    const payload = await this.#connection.request(version, "coverage/runs/start", { ...input });
+    try {
+      validatePayload("coverage/runs/start", validateCoverageRunV14, payload);
+      return decodeCoverageRun(payload);
+    } catch (error) {
+      const failure = error instanceof Error ? error : new Error(String(error));
+      this.#connection.close(failure);
+      throw failure;
+    }
+  }
+
+  async getCoverageRun(coverageRunId: string): Promise<CoverageRun> {
+    const version = this.#requireV14();
+    const request = { coverageRunId };
+    validateRequestPayload("coverage/runs/get", validateCoverageRunIdPayloadV14, request);
+    const payload = await this.#connection.request(version, "coverage/runs/get", request);
+    try {
+      validatePayload("coverage/runs/get", validateCoverageRunV14, payload);
+      return decodeCoverageRun(payload);
+    } catch (error) {
+      const failure = error instanceof Error ? error : new Error(String(error));
+      this.#connection.close(failure);
+      throw failure;
+    }
+  }
+
+  async listCoverageRuns(input: CoverageRunListInput = {}): Promise<CoverageRunPage> {
+    const version = this.#requireV14();
+    validateRequestPayload("coverage/runs/list", validateCoverageRunsListPayloadV14, input);
+    const payload = await this.#connection.request(version, "coverage/runs/list", { ...input });
+    try {
+      validatePayload("coverage/runs/list", validateCoverageRunPageV14, payload);
+      return decodeCoverageRunPage(payload);
+    } catch (error) {
+      const failure = error instanceof Error ? error : new Error(String(error));
+      this.#connection.close(failure);
+      throw failure;
+    }
+  }
+
+  async getCoverageReport(reportId: string): Promise<CoverageReport> {
+    const version = this.#requireV14();
+    const request = { reportId };
+    validateRequestPayload("coverage/reports/get", validateCoverageReportIdPayloadV14, request);
+    const payload = await this.#connection.request(version, "coverage/reports/get", request);
+    try {
+      validatePayload("coverage/reports/get", validateCoverageReportV14, payload);
+      return decodeCoverageReport(payload);
+    } catch (error) {
+      const failure = error instanceof Error ? error : new Error(String(error));
+      this.#connection.close(failure);
+      throw failure;
+    }
   }
 
   async startTask(input: StartTaskInput): Promise<ProtocolTaskSnapshot> {
@@ -804,6 +903,14 @@ export class ProtocolClient {
     const version = this.#requireAuthentication();
     if (version !== "1.3" && version !== "1.4") {
       throw new ProtocolError("PROTOCOL_FEATURE_UNAVAILABLE", "protocol 1.3 or newer was not negotiated", false);
+    }
+    return version;
+  }
+
+  #requireV14(): "1.4" {
+    const version = this.#requireAuthentication();
+    if (version !== "1.4") {
+      throw new ProtocolError("PROTOCOL_FEATURE_UNAVAILABLE", "protocol 1.4 was not negotiated", false);
     }
     return version;
   }

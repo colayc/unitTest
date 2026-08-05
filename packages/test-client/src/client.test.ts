@@ -3,11 +3,13 @@ import { createHash } from "node:crypto";
 import { Duplex, PassThrough } from "node:stream";
 import { createInterface } from "node:readline";
 import test from "node:test";
+import { TestSelectionModeV14 } from "@unit-test-ide/protocol-models";
 import { MAX_MESSAGE_BYTES, ProtocolClient } from "./client.js";
 import { Connection } from "./connection.js";
 import { decodeCoverageReport, decodeCoverageRun, decodeCoverageRunPage, decodeTaskEvent, decodeTestCatalog, decodeTestRun } from "./decoders.js";
 import { ProtocolError } from "./envelopes.js";
 import { TestFailureSubtypeV13, TestSelectionModeV13 } from "./index.js";
+import type { CoverageReport, CoverageRun, CoverageRunInput, CoverageRunListInput, CoverageRunPage } from "./index.js";
 import { EventSubscription } from "./subscription.js";
 
 type JsonObject = Record<string, unknown>;
@@ -242,6 +244,19 @@ function coverageReport(overrides: JsonObject = {}): JsonObject {
     },
     artifactId: ARTIFACT_ID,
     ...overrides
+  };
+}
+
+function validCoverageInput(): CoverageRunInput {
+  return {
+    idempotencyKey: "d".repeat(32),
+    workspaceGeneration: WORKSPACE_GENERATION,
+    projectId: "core",
+    coverageProfileId: COVERAGE_PROFILE_ID,
+    catalogRevision: CATALOG_REVISION,
+    selection: { mode: TestSelectionModeV14.Items, itemIds: [ITEM_ID] },
+    repeatCount: 1,
+    timeoutMs: 60_000
   };
 }
 
@@ -498,6 +513,235 @@ test("protocol 1.4 keeps existing task, test, artifact, and event APIs usable", 
   fixture.client.close();
 });
 
+test("protocol 1.4 client routes strict coverage APIs", async () => {
+  const fixture = scriptedClient((request) => {
+    if (request.method === "handshake") {
+      return response(request, { negotiatedProtocolVersion: "1.4", serviceVersion: "0.5.0" }, "1.4");
+    }
+    if (request.method === "coverage/runs/list") {
+      return response(request, { items: [coverageRun()], nextCursor: "coverage-next" }, "1.4");
+    }
+    if (request.method === "coverage/reports/get") return response(request, coverageReport(), "1.4");
+    return response(request, coverageRun(), "1.4");
+  });
+  await fixture.client.handshake("0123456789abcdef", "test", "0.5.0");
+  const start: Parameters<ProtocolClient["startCoverage"]>[0] = validCoverageInput();
+  const started: CoverageRun = await fixture.client.startCoverage(start);
+  const got = await fixture.client.getCoverageRun(started.coverageRunId);
+  const list: CoverageRunListInput = {
+    projectId: "core",
+    coverageProfileId: COVERAGE_PROFILE_ID,
+    limit: 200
+  };
+  const page: CoverageRunPage = await fixture.client.listCoverageRuns(list);
+  const report: CoverageReport = await fixture.client.getCoverageReport(REPORT_ID);
+  assert.equal(started.coverageRunId, COVERAGE_RUN_ID);
+  assert.ok(got.createdAt instanceof Date);
+  assert.equal(page.items[0]?.coverageRunId, COVERAGE_RUN_ID);
+  assert.equal(page.nextCursor, "coverage-next");
+  assert.equal(report.reportId, REPORT_ID);
+  assert.equal(report.artifactId, ARTIFACT_ID);
+  assert.deepEqual(fixture.requests.slice(1).map(({ method }) => method), [
+    "coverage/runs/start", "coverage/runs/get", "coverage/runs/list", "coverage/reports/get"
+  ]);
+  fixture.client.close();
+});
+
+test("protocol 1.3 sessions reject every coverage API without writing", async () => {
+  const fixture = scriptedClient((request) => request.method === "handshake"
+    ? response(request, { negotiatedProtocolVersion: "1.3", serviceVersion: "0.4.0" }, "1.3")
+    : response(request, { accepted: true }, "1.3"));
+  await fixture.client.handshake("0123456789abcdef", "test", "0.5.0");
+  const calls = [
+    () => fixture.client.startCoverage(validCoverageInput()),
+    () => fixture.client.getCoverageRun(COVERAGE_RUN_ID),
+    () => fixture.client.listCoverageRuns(),
+    () => fixture.client.getCoverageReport(REPORT_ID)
+  ];
+  for (const call of calls) {
+    await assert.rejects(call, (failure: unknown) =>
+      failure instanceof ProtocolError && failure.code === "PROTOCOL_FEATURE_UNAVAILABLE");
+  }
+  assert.equal(fixture.requests.length, 1);
+  await fixture.client.shutdown();
+  assert.equal(fixture.requests.length, 2);
+  fixture.client.close();
+});
+
+test("coverage request validation rejects execution-plan injection and invalid bounds without writing", async () => {
+  const fixture = scriptedClient((request) => request.method === "handshake"
+    ? response(request, { negotiatedProtocolVersion: "1.4", serviceVersion: "0.5.0" }, "1.4")
+    : response(request, coverageRun(), "1.4"));
+  await fixture.client.handshake("0123456789abcdef", "test", "0.5.0");
+  const valid = validCoverageInput();
+  const invalidStart = (overrides: JsonObject): CoverageRunInput => ({
+    ...(valid as unknown as JsonObject),
+    ...overrides
+  }) as unknown as CoverageRunInput;
+  const cases: Array<{ label: string; invoke: () => Promise<unknown> }> = [
+    { label: "command", invoke: () => fixture.client.startCoverage(invalidStart({ command: "calc.exe" })) },
+    { label: "environment", invoke: () => fixture.client.startCoverage(invalidStart({ environment: { PATH: "outside" } })) },
+    { label: "idempotencyKey", invoke: () => fixture.client.startCoverage(invalidStart({ idempotencyKey: "bad" })) },
+    { label: "workspaceGeneration", invoke: () => fixture.client.startCoverage(invalidStart({ workspaceGeneration: "bad" })) },
+    { label: "projectId", invoke: () => fixture.client.startCoverage(invalidStart({ projectId: "/outside" })) },
+    { label: "coverageProfileId", invoke: () => fixture.client.startCoverage(invalidStart({ coverageProfileId: "/outside" })) },
+    { label: "catalogRevision", invoke: () => fixture.client.startCoverage(invalidStart({ catalogRevision: "bad" })) },
+    {
+      label: "selection injection",
+      invoke: () => fixture.client.startCoverage(invalidStart({
+        selection: { mode: "items", itemIds: [ITEM_ID], command: "calc.exe" }
+      }))
+    },
+    { label: "repeatCount 0", invoke: () => fixture.client.startCoverage(invalidStart({ repeatCount: 0 })) },
+    { label: "repeatCount 101", invoke: () => fixture.client.startCoverage(invalidStart({ repeatCount: 101 })) },
+    { label: "timeoutMs 0", invoke: () => fixture.client.startCoverage(invalidStart({ timeoutMs: 0 })) },
+    { label: "timeoutMs 86400001", invoke: () => fixture.client.startCoverage(invalidStart({ timeoutMs: 86_400_001 })) },
+    { label: "coverageRunId", invoke: () => fixture.client.getCoverageRun("bad") },
+    { label: "reportId", invoke: () => fixture.client.getCoverageReport("bad") },
+    { label: "list limit 0", invoke: () => fixture.client.listCoverageRuns({ limit: 0 }) },
+    { label: "list limit 201", invoke: () => fixture.client.listCoverageRuns({ limit: 201 }) },
+    { label: "empty cursor", invoke: () => fixture.client.listCoverageRuns({ cursor: "" }) },
+    { label: "oversized cursor", invoke: () => fixture.client.listCoverageRuns({ cursor: "x".repeat(4097) }) }
+  ];
+
+  for (const item of cases) {
+    const before = fixture.requests.length;
+    await assert.rejects(item.invoke, /invalid protocol request/i, item.label);
+    assert.equal(fixture.requests.length, before, `${item.label} wrote to the wire`);
+  }
+
+  const started = await fixture.client.startCoverage(valid);
+  assert.equal(started.coverageRunId, COVERAGE_RUN_ID);
+  assert.equal(fixture.requests.length, 2);
+  fixture.client.close();
+});
+
+test("coverage responses reject every invalid schema value without returning a partial object", async () => {
+  const reportSummary = coverageReport().summary as JsonObject;
+  const cases: Array<{
+    label: string;
+    method: "coverage/runs/get" | "coverage/runs/list" | "coverage/reports/get";
+    payload: JsonObject;
+    invoke: (client: ProtocolClient) => Promise<unknown>;
+  }> = [
+    {
+      label: "unknown status",
+      method: "coverage/runs/get",
+      payload: coverageRun({ status: "unknown" }),
+      invoke: (client) => client.getCoverageRun(COVERAGE_RUN_ID)
+    },
+    {
+      label: "unknown outcome",
+      method: "coverage/runs/get",
+      payload: coverageRun({ outcome: "unknown" }),
+      invoke: (client) => client.getCoverageRun(COVERAGE_RUN_ID)
+    },
+    {
+      label: "unknown reason",
+      method: "coverage/runs/get",
+      payload: coverageRun({ outcome: "unavailable", reason: "unknown", reportId: undefined }),
+      invoke: (client) => client.getCoverageRun(COVERAGE_RUN_ID)
+    },
+    {
+      label: "unknown completeness",
+      method: "coverage/reports/get",
+      payload: coverageReport({ completeness: { outcome: "unknown", reasons: [] } }),
+      invoke: (client) => client.getCoverageReport(REPORT_ID)
+    },
+    {
+      label: "unknown completeness reason",
+      method: "coverage/reports/get",
+      payload: coverageReport({ completeness: { outcome: "partial", reasons: ["unknown"] } }),
+      invoke: (client) => client.getCoverageReport(REPORT_ID)
+    },
+    {
+      label: "unsafe sequence",
+      method: "coverage/runs/get",
+      payload: coverageRun({ lastSequence: Number.MAX_SAFE_INTEGER + 1 }),
+      invoke: (client) => client.getCoverageRun(COVERAGE_RUN_ID)
+    },
+    {
+      label: "unsafe summary",
+      method: "coverage/reports/get",
+      payload: coverageReport({
+        summary: { ...reportSummary, lines: { covered: Number.MAX_SAFE_INTEGER + 1, total: 10 } }
+      }),
+      invoke: (client) => client.getCoverageReport(REPORT_ID)
+    },
+    {
+      label: "invalid Date",
+      method: "coverage/runs/list",
+      payload: { items: [coverageRun({ createdAt: "not-a-date" })] },
+      invoke: (client) => client.listCoverageRuns()
+    },
+    {
+      label: "report lifecycle mismatch",
+      method: "coverage/runs/get",
+      payload: coverageRun({ reportId: undefined }),
+      invoke: (client) => client.getCoverageRun(COVERAGE_RUN_ID)
+    }
+  ];
+
+  for (const item of cases) {
+    const fixture = scriptedClient((request) => request.method === "handshake"
+      ? response(request, { negotiatedProtocolVersion: "1.4", serviceVersion: "0.5.0" }, "1.4")
+      : request.method === item.method ? response(request, item.payload, "1.4") : undefined);
+    await fixture.client.handshake("0123456789abcdef", "test", "0.5.0");
+    let returned = false;
+    await assert.rejects(async () => {
+      await item.invoke(fixture.client);
+      returned = true;
+    }, /invalid protocol message|invalid .* response/i, item.label);
+    assert.equal(returned, false, `${item.label} returned a partial object`);
+    const before = fixture.requests.length;
+    await assert.rejects(() => fixture.client.getCoverageRun(COVERAGE_RUN_ID), /closed/i);
+    assert.equal(fixture.requests.length, before, `${item.label} left the connection writable`);
+    fixture.client.close();
+  }
+});
+
+test("coverage semantic response failure closes the connection", async () => {
+  const summary = coverageReport().summary as JsonObject;
+  const fixture = scriptedClient((request) => request.method === "handshake"
+    ? response(request, { negotiatedProtocolVersion: "1.4", serviceVersion: "0.5.0" }, "1.4")
+    : request.method === "coverage/reports/get"
+      ? response(request, coverageReport({
+        summary: { ...summary, lines: { covered: 11, total: 10 } }
+      }), "1.4")
+      : response(request, coverageRun(), "1.4"));
+  await fixture.client.handshake("0123456789abcdef", "test", "0.5.0");
+  await assert.rejects(() => fixture.client.getCoverageReport(REPORT_ID), /covered|total/i);
+  const before = fixture.requests.length;
+  await assert.rejects(() => fixture.client.getCoverageRun(COVERAGE_RUN_ID), /closed/i);
+  assert.equal(fixture.requests.length, before);
+  fixture.client.close();
+});
+
+test("coverage public APIs defensively clone selection, completeness, summary, and provenance", async () => {
+  const fixture = scriptedClient((request) => {
+    if (request.method === "handshake") {
+      return response(request, { negotiatedProtocolVersion: "1.4", serviceVersion: "0.5.0" }, "1.4");
+    }
+    if (request.method === "coverage/reports/get") return response(request, coverageReport(), "1.4");
+    return response(request, coverageRun(), "1.4");
+  });
+  await fixture.client.handshake("0123456789abcdef", "test", "0.5.0");
+  const firstRun = await fixture.client.getCoverageRun(COVERAGE_RUN_ID);
+  firstRun.selectionSnapshot.itemIds.length = 0;
+  const secondRun = await fixture.client.getCoverageRun(COVERAGE_RUN_ID);
+  assert.deepEqual(secondRun.selectionSnapshot.itemIds, [ITEM_ID]);
+
+  const firstReport = await fixture.client.getCoverageReport(REPORT_ID);
+  (firstReport.completeness.reasons as unknown as string[]).push("test_crashed");
+  firstReport.summary.lines.covered = 0;
+  firstReport.toolProvenance.compiler.version = "mutated";
+  const secondReport = await fixture.client.getCoverageReport(REPORT_ID);
+  assert.deepEqual(secondReport.completeness.reasons, []);
+  assert.equal(secondReport.summary.lines.covered, 8);
+  assert.equal(secondReport.toolProvenance.compiler.version, "18.1.8");
+  fixture.client.close();
+});
+
 test("protocol 1.2 sessions reject every test API locally without writing", async () => {
   const fixture = scriptedClient((request) => response(request, {
     negotiatedProtocolVersion: "1.2",
@@ -664,9 +908,13 @@ test("coverage decoders clone nested values and convert dates", () => {
   assert.ok(run.createdAt instanceof Date);
   assert.ok(report.createdAt instanceof Date);
   (wireRun.selectionSnapshot as JsonObject).itemIds = [];
+  (wireReport.completeness as JsonObject).reasons = ["test_crashed"];
   (wireReport.summary as JsonObject).lines = { covered: 0, total: 0 };
+  ((wireReport.toolProvenance as JsonObject).compiler as JsonObject).version = "mutated";
   assert.deepEqual(run.selectionSnapshot.itemIds, [ITEM_ID]);
+  assert.deepEqual(report.completeness.reasons, []);
   assert.equal(report.summary.lines.covered, 8);
+  assert.equal(report.toolProvenance.compiler.version, "18.1.8");
 });
 
 test("coverage decoders reject unsafe and inconsistent domain values", () => {
