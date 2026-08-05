@@ -443,6 +443,61 @@ test("protocol 1.3 client routes typed discovery, run, catalog, and run query AP
   fixture.client.close();
 });
 
+test("protocol 1.4 keeps existing task, test, artifact, and event APIs usable", async () => {
+  const fixture = scriptedClient((request) => {
+    if (request.method === "handshake") {
+      return response(request, { negotiatedProtocolVersion: "1.4", serviceVersion: "0.5.0" }, "1.4");
+    }
+    if (request.method === "capabilities/get") {
+      return response(request, {
+        workspaceInspect: true,
+        targetList: true,
+        cmakeBuild: true,
+        testDiscovery: true,
+        testRun: true,
+        frameworkAdapters: [],
+        opaqueCTestFallback: true,
+        ctestJson: true,
+        maxRepeatCount: 100,
+        maxSelectionSize: 100000,
+        maxCatalogPageSize: 1000,
+        unityHelperContractVersion: "1",
+        unityRunnerContractVersion: "utide.runner.v1",
+        coverageRun: true,
+        coverageReport: true,
+        maxCoveragePageSize: 200,
+        maxCoverageTimeoutMs: 86400000
+      }, "1.4");
+    }
+    if (request.method === "tasks/get") return response(request, taskSnapshot(), "1.4");
+    if (request.method === "tests/runs/get") return response(request, testRun(), "1.4");
+    if (request.method === "artifacts/list") {
+      return response(request, { items: [{
+        artifactId: ARTIFACT_ID,
+        taskId: TASK_ID,
+        kind: "coverage-json",
+        mimeType: "application/json",
+        sizeBytes: 10,
+        sha256: "a".repeat(64),
+        createdAt: SENT_AT,
+        uri: "unit-test-ide://artifacts/" + ARTIFACT_ID
+      }] }, "1.4");
+    }
+    return undefined;
+  });
+  await fixture.client.handshake("0123456789abcdef", "test", "0.5.0");
+  const capabilities = await fixture.client.getCapabilities();
+  const task = await fixture.client.getTask(TASK_ID);
+  const run = await fixture.client.getTestRun(RUN_ID);
+  const artifacts = await fixture.client.listArtifacts(TASK_ID);
+  assert.equal("coverageRun" in capabilities && capabilities.coverageRun, true);
+  assert.ok(task.createdAt instanceof Date);
+  assert.ok(run.startedAt instanceof Date);
+  assert.ok(artifacts.items[0]?.createdAt instanceof Date);
+  assert.deepEqual(fixture.requests.slice(1).map(({ protocolVersion }) => protocolVersion), ["1.4", "1.4", "1.4", "1.4"]);
+  fixture.client.close();
+});
+
 test("protocol 1.2 sessions reject every test API locally without writing", async () => {
   const fixture = scriptedClient((request) => response(request, {
     negotiatedProtocolVersion: "1.2",
@@ -623,6 +678,120 @@ test("coverage decoders reject unsafe and inconsistent domain values", () => {
   assert.equal(decodeCoverageRunPage({ items: [coverageRun()], nextCursor: "next" }).nextCursor, "next");
 });
 
+test("protocol 1.4 decoder clones every coverage event payload and applies semantic checks", () => {
+  const coverageEventPayloads = [
+    ["coverage.run.started", {
+      coverageRunId: COVERAGE_RUN_ID,
+      testRunId: RUN_ID,
+      catalogRevision: CATALOG_REVISION,
+      repeatCount: 1
+    }],
+    ["coverage.build.finished", { coverageRunId: COVERAGE_RUN_ID }],
+    ["coverage.collection.started", { coverageRunId: COVERAGE_RUN_ID, testRunId: RUN_ID }],
+    ["coverage.report.available", {
+      coverageRunId: COVERAGE_RUN_ID,
+      reportId: REPORT_ID,
+      artifactId: ARTIFACT_ID,
+      completeness: { outcome: "available", reasons: [] },
+      summary: coverageReport().summary as JsonObject
+    }],
+    ["coverage.run.finished", {
+      coverageRunId: COVERAGE_RUN_ID,
+      outcome: "available",
+      reportId: REPORT_ID
+    }]
+  ] as const;
+
+  for (const [event, payload] of coverageEventPayloads) {
+    const decoded = decodeTaskEvent({
+      protocolVersion: "1.4",
+      kind: "event",
+      messageId: MESSAGE_ID,
+      sentAt: SENT_AT,
+      sequence: 1,
+      event,
+      taskId: TASK_ID,
+      payloadVersion: 1,
+      payload
+    });
+    assert.notEqual(decoded.payload, payload);
+    if (event === "coverage.report.available") {
+      const decodedPayload = decoded.payload as unknown as JsonObject;
+      const decodedCompleteness = decodedPayload.completeness as JsonObject;
+      const decodedSummary = decodedPayload.summary as JsonObject;
+      assert.notEqual(decodedCompleteness, payload.completeness);
+      assert.notEqual(decodedCompleteness.reasons, payload.completeness.reasons);
+      assert.notEqual(decodedSummary, payload.summary);
+      assert.notEqual(decodedSummary.lines, payload.summary.lines);
+    }
+  }
+
+  assert.throws(() => decodeTaskEvent({
+    protocolVersion: "1.4",
+    kind: "event",
+    messageId: MESSAGE_ID,
+    sentAt: SENT_AT,
+    sequence: 1,
+    event: "coverage.run.started",
+    taskId: TASK_ID,
+    payloadVersion: 1,
+    payload: { coverageRunId: COVERAGE_RUN_ID, testRunId: RUN_ID, catalogRevision: CATALOG_REVISION, repeatCount: 101 }
+  }), /repeatCount/i);
+});
+
+test("protocol 1.4 response schemas reject invalid enum, URI, digest, safe integer, and date values", async () => {
+  const artifact = {
+    artifactId: ARTIFACT_ID,
+    taskId: TASK_ID,
+    kind: "coverage-json",
+    mimeType: "application/json",
+    sizeBytes: 10,
+    sha256: "a".repeat(64),
+    createdAt: SENT_AT,
+    uri: "unit-test-ide://artifacts/" + ARTIFACT_ID
+  };
+  const cases: Array<{
+    method: "artifacts/list" | "tasks/get" | "tests/runs/get";
+    payload: JsonObject;
+    invoke: (client: ProtocolClient) => Promise<unknown>;
+  }> = [
+    {
+      method: "artifacts/list",
+      payload: { items: [{ ...artifact, uri: "not a uri" }] },
+      invoke: (client) => client.listArtifacts(TASK_ID)
+    },
+    {
+      method: "artifacts/list",
+      payload: { items: [{ ...artifact, sha256: "bad" }] },
+      invoke: (client) => client.listArtifacts(TASK_ID)
+    },
+    {
+      method: "artifacts/list",
+      payload: { items: [{ ...artifact, sizeBytes: Number.MAX_SAFE_INTEGER + 1 }] },
+      invoke: (client) => client.listArtifacts(TASK_ID)
+    },
+    {
+      method: "tasks/get",
+      payload: taskSnapshot({ createdAt: "not-a-date" }),
+      invoke: (client) => client.getTask(TASK_ID)
+    },
+    {
+      method: "tests/runs/get",
+      payload: testRun({ outcome: "unknown" }),
+      invoke: (client) => client.getTestRun(RUN_ID)
+    }
+  ];
+
+  for (const item of cases) {
+    const fixture = scriptedClient((request) => request.method === "handshake"
+      ? response(request, { negotiatedProtocolVersion: "1.4", serviceVersion: "0.5.0" }, "1.4")
+      : request.method === item.method ? response(request, item.payload, "1.4") : undefined);
+    await fixture.client.handshake("0123456789abcdef", "test", "0.5.0");
+    await assert.rejects(() => item.invoke(fixture.client), /invalid protocol message|invalid .* response/i);
+    fixture.client.close();
+  }
+});
+
 test("protocol 1.3 response validation rejects unknown outcomes, unsafe integers, invalid URI, and invalid dates", async () => {
   const cases: Array<{
     payload: JsonObject;
@@ -719,6 +888,67 @@ test("EventSubscription accepts protocol 1.3 test events and preserves sequence"
   assert.ok(event?.sentAt instanceof Date);
   assert.equal(subscription.lastSequence, 1);
   client.close();
+});
+
+test("EventSubscription accepts protocol 1.4 coverage events and clones nested payloads", async () => {
+  const [clientStream, serverStream] = pair();
+  createInterface({ input: serverStream }).on("line", (line) => {
+    const request = JSON.parse(line) as JsonObject;
+    if (request.method === "handshake") {
+      serverStream.write(`${JSON.stringify(response(request, {
+        negotiatedProtocolVersion: "1.4",
+        serviceVersion: "0.5.0"
+      }, "1.4"))}\n`);
+      return;
+    }
+    serverStream.write(`${JSON.stringify(response(request, { afterSequence: 0 }, "1.4"))}\n`);
+    serverStream.write(`${JSON.stringify({
+      protocolVersion: "1.4",
+      kind: "event",
+      messageId: MESSAGE_ID,
+      sentAt: SENT_AT,
+      sequence: 1,
+      event: "coverage.report.available",
+      taskId: TASK_ID,
+      payloadVersion: 1,
+      payload: {
+        coverageRunId: COVERAGE_RUN_ID,
+        reportId: REPORT_ID,
+        artifactId: ARTIFACT_ID,
+        completeness: { outcome: "available", reasons: [] },
+        summary: coverageReport().summary
+      }
+    })}\n`);
+  });
+  const client = ProtocolClient.attach(clientStream);
+  await client.handshake("0123456789abcdef", "test", "0.5.0");
+  const subscription = await client.subscribeEvents(0);
+  const event = (await take(subscription, 1))[0];
+  assert.equal(event?.protocolVersion, "1.4");
+  assert.equal(event?.sequence, 1);
+  assert.ok(event?.sentAt instanceof Date);
+  assert.deepEqual((event?.payload as JsonObject).completeness, { outcome: "available", reasons: [] });
+  assert.deepEqual(((event?.payload as JsonObject).summary as JsonObject).lines, { covered: 8, total: 10 });
+  assert.equal(subscription.lastSequence, 1);
+  client.close();
+});
+
+test("protocol 1.4 event schema rejects invalid enums before semantic decoding", async () => {
+  const [clientStream, serverStream] = pair();
+  const connection = new Connection(clientStream);
+  const closeError = new Promise<Error>((resolve) => connection.onClose(resolve));
+  serverStream.write(`${JSON.stringify({
+    protocolVersion: "1.4",
+    kind: "event",
+    messageId: MESSAGE_ID,
+    sentAt: SENT_AT,
+    sequence: 1,
+    event: "coverage.run.finished",
+    taskId: TASK_ID,
+    payloadVersion: 1,
+    payload: { coverageRunId: COVERAGE_RUN_ID, outcome: "unknown" }
+  })}\n`);
+  assert.match((await closeError).message, /invalid protocol message/i);
 });
 
 test("protocol 1.2 client routes workspace, target, and CMake build APIs", async () => {

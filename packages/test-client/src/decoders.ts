@@ -2,6 +2,7 @@ import type {
   ArtifactMetadata,
   ArtifactMetadataV12,
   ArtifactMetadataV13,
+  ArtifactMetadataV14,
   CoverageCompletenessV14,
   CoverageIncompleteReasonV14,
   CoverageMetricV14,
@@ -14,14 +15,19 @@ import type {
   TaskEvent,
   TaskEventV12,
   TaskEventV13,
+  TaskEventV14,
   TaskSnapshot,
   TaskSnapshotV12,
   TaskSnapshotV13,
+  TaskSnapshotV14,
   TestCatalog,
+  TestCatalogV14,
   TestItemResult,
   TestRun,
   TestRunPage,
+  TestRunPageV14,
   TestRunSummaryV13,
+  TestRunV14,
   TestSourceLocationV13,
   WorkspaceSnapshot
 } from "@unit-test-ide/protocol-models";
@@ -212,8 +218,77 @@ export function decodeTaskSnapshotV13(value: unknown): TaskSnapshotV13 {
   }
 }
 
+export function decodeTaskSnapshotV14(value: unknown): TaskSnapshotV14 {
+  const wire = record(value, "protocol 1.4 task snapshot");
+  const common = {
+    taskId: wire.taskId,
+    status: wire.status,
+    outcome: wire.outcome,
+    createdAt: date(wire.createdAt, "task createdAt"),
+    startedAt: optionalDate(wire.startedAt, "task startedAt"),
+    finishedAt: optionalDate(wire.finishedAt, "task finishedAt"),
+    lastSequence: safeInteger(wire.lastSequence, "task lastSequence"),
+    errorCode: wire.errorCode as string | undefined,
+    errorMessage: wire.errorMessage as string | undefined
+  };
+  switch (wire.kind) {
+    case "cmakeBuild":
+      return {
+        ...common,
+        kind: "cmakeBuild",
+        workspaceGeneration: wire.workspaceGeneration,
+        projectId: wire.projectId,
+        buildProfileId: wire.buildProfileId,
+        targetIds: [...(wire.targetIds as string[])],
+        jobs: safeInteger(wire.jobs, "task jobs"),
+        timeoutMs: safeInteger(wire.timeoutMs, "task timeoutMs")
+      } as unknown as TaskSnapshotV14;
+    case "simulation":
+      return {
+        ...common,
+        kind: "simulation",
+        scenario: wire.scenario,
+        timeoutMs: optionalSafeInteger(wire.timeoutMs, "task timeoutMs")
+      } as unknown as TaskSnapshotV14;
+    case "testDiscovery":
+      return {
+        ...common,
+        kind: "testDiscovery",
+        projectId: wire.projectId,
+        profileId: wire.profileId,
+        catalogRevision: wire.catalogRevision
+      } as unknown as TaskSnapshotV14;
+    case "testRun":
+      return {
+        ...common,
+        kind: "testRun",
+        projectId: wire.projectId,
+        profileId: wire.profileId,
+        catalogRevision: wire.catalogRevision,
+        runId: wire.runId,
+        repeatCount: iteration(wire.repeatCount, "task repeatCount")
+      } as unknown as TaskSnapshotV14;
+    case "coverageRun":
+      return {
+        ...common,
+        kind: "coverageRun",
+        workspaceGeneration: wire.workspaceGeneration,
+        projectId: wire.projectId,
+        coverageProfileId: wire.coverageProfileId,
+        catalogRevision: wire.catalogRevision,
+        coverageRunId: wire.coverageRunId,
+        testRunId: wire.testRunId,
+        repeatCount: iteration(wire.repeatCount, "task repeatCount"),
+        timeoutMs: safeInteger(wire.timeoutMs, "task timeoutMs")
+      } as unknown as TaskSnapshotV14;
+    default:
+      throw new Error("invalid protocol 1.4 task kind");
+  }
+}
+
 export function decodeTaskEvent(value: unknown): ProtocolTaskEvent {
   const wire = record(value, "task event");
+  if (wire.protocolVersion === "1.4") return decodeTaskEventV14(wire);
   if (wire.protocolVersion === "1.3") return decodeTaskEventV13(wire);
   if (wire.protocolVersion === "1.2") return decodeTaskEventV12(wire);
   return {
@@ -304,6 +379,63 @@ function decodeTaskEventV13(wire: Record<string, unknown>): TaskEventV13 {
     payloadVersion: safeInteger(wire.payloadVersion, "event payloadVersion"),
     payload
   } as unknown as TaskEventV13;
+}
+
+function decodeTaskEventV14(wire: Record<string, unknown>): TaskEventV14 {
+  let payload = { ...record(wire.payload, "event payload") };
+  if (wire.event === "task.step_finished") {
+    const exitCode = optionalSafeInteger(payload.exitCode, "event step exitCode");
+    if (exitCode === undefined) delete payload.exitCode;
+    else payload.exitCode = exitCode;
+  }
+  if (wire.event === "task.diagnostic") {
+    const diagnostic = { ...record(payload.diagnostic, "event diagnostic") };
+    const line = optionalSafeInteger(diagnostic.line, "event diagnostic line");
+    const column = optionalSafeInteger(diagnostic.column, "event diagnostic column");
+    if (line === undefined) delete diagnostic.line;
+    else diagnostic.line = line;
+    if (column === undefined) delete diagnostic.column;
+    else diagnostic.column = column;
+    payload = { diagnostic };
+  }
+  if (wire.event === "test.item.finished") {
+    payload = {
+      runId: payload.runId,
+      result: decodeTestItemResult(payload.result)
+    };
+  }
+  if (wire.event === "test.run.finished") {
+    const summary = decodeTestRunSummary(payload.summary);
+    validateTestRunSummary(summary);
+    payload = { ...payload, summary };
+  }
+  if (wire.event === "test.container.started" ||
+    wire.event === "test.item.started" ||
+    wire.event === "test.output" ||
+    wire.event === "test.container.finished") {
+    payload.iteration = iteration(payload.iteration, "event iteration");
+  }
+  if (wire.event === "coverage.run.started") {
+    payload.repeatCount = iteration(payload.repeatCount, "event repeatCount");
+  }
+  if (wire.event === "coverage.report.available") {
+    payload = {
+      ...payload,
+      completeness: decodeCoverageCompleteness(payload.completeness),
+      summary: decodeCoverageSummary(payload.summary)
+    };
+  }
+  return {
+    protocolVersion: "1.4",
+    kind: "event",
+    messageId: wire.messageId,
+    sentAt: date(wire.sentAt, "event sentAt"),
+    sequence: safeInteger(wire.sequence, "event sequence"),
+    event: wire.event,
+    taskId: wire.taskId,
+    payloadVersion: safeInteger(wire.payloadVersion, "event payloadVersion"),
+    payload
+  } as unknown as TaskEventV14;
 }
 
 function decodeSourceLocation(value: unknown, name: string): TestSourceLocationV13 {
@@ -421,6 +553,20 @@ export function decodeArtifactMetadataV13(value: unknown): ArtifactMetadataV13 {
   } as unknown as ArtifactMetadataV13;
 }
 
+export function decodeArtifactMetadataV14(value: unknown): ArtifactMetadataV14 {
+  const wire = record(value, "protocol 1.4 artifact metadata");
+  return {
+    artifactId: wire.artifactId,
+    taskId: wire.taskId,
+    kind: wire.kind,
+    mimeType: wire.mimeType,
+    sizeBytes: safeInteger(wire.sizeBytes, "artifact sizeBytes"),
+    sha256: wire.sha256,
+    createdAt: date(wire.createdAt, "artifact createdAt"),
+    uri: wire.uri
+  } as unknown as ArtifactMetadataV14;
+}
+
 export function decodeWorkspaceSnapshot(value: unknown): WorkspaceSnapshot {
   const wire = record(value, "workspace snapshot");
   return {
@@ -517,6 +663,10 @@ export function decodeTestCatalog(value: unknown): TestCatalog {
   } as unknown as TestCatalog;
 }
 
+export function decodeTestCatalogV14(value: unknown): TestCatalogV14 {
+  return decodeTestCatalog(value) as unknown as TestCatalogV14;
+}
+
 function validateCatalogReferences(
   projectId: unknown,
   containers: Record<string, unknown>[],
@@ -591,12 +741,24 @@ export function decodeTestRun(value: unknown): TestRun {
   } as unknown as TestRun;
 }
 
+export function decodeTestRunV14(value: unknown): TestRunV14 {
+  return decodeTestRun(value) as unknown as TestRunV14;
+}
+
 export function decodeTestRunPage(value: unknown): TestRunPage {
   const wire = record(value, "test run page");
   return {
     items: (wire.items as unknown[]).map((item) => decodeTestRun(item)),
     ...(wire.nextCursor === undefined ? {} : { nextCursor: wire.nextCursor })
   } as TestRunPage;
+}
+
+export function decodeTestRunPageV14(value: unknown): TestRunPageV14 {
+  const wire = record(value, "test run page");
+  return {
+    items: (wire.items as unknown[]).map((item) => decodeTestRunV14(item)),
+    ...(wire.nextCursor === undefined ? {} : { nextCursor: wire.nextCursor })
+  } as TestRunPageV14;
 }
 
 export function decodeCoverageRun(value: unknown): CoverageRun {
