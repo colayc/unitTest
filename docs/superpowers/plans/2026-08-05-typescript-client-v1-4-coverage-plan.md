@@ -1018,6 +1018,8 @@ git diff --check
 
 2026-08-05 controller evidence：Client 86/86、Client build、Coverage/Protocol drift、root build、Go full、Go full race、Phase 5A `coveragedomain + taskstore` race、service-probe E2E 20/20 与 `git diff --check` 均通过。首次并行跑 Go full/race 时，`internal/probe` 的 200 ms timeout control 因资源竞争返回 `context deadline exceeded`；随后顺序运行 `internal/probe` race 和全量 race 均通过。root `pnpm test` 与 `pnpm verify` 只复现已记录的 `spawnSync cmake ENOENT`，`verify` 因此短路的 race/E2E 已独立运行并通过。
 
+GitHub Actions `foundation` run `30984884517`（HEAD `1bcfafb`）确认 Client 86/86、workspace/schema/security tests 与 generated/build checks 通过。Linux 精确复现上一 run `30969925130` 的 `internal/build` boundary fixture 与 CppUTest process fixture failures；Windows 精确复现既有 CMake fixture、CppUTest parser 与 Unity golden failures，上一 run 的间歇性 VSWhere failure 本轮未出现。Windows 另有 `TestGeneratedRunnerCompilesAndExecutesOnCurrentPlatform` 在 30 秒 compile timeout 后失败；对应 `unityrunner` 目录和 test blob 在 baseline..HEAD 间完全相同，本地 `-count=1` focused rerun 通过，因此归类为 hosted runner 负载波动，不是本 Task 新代码路径。
+
 - [x] **Step 8: 更新父计划的 Task 6 状态并提交**
 
 只有 Steps 1–7 全部有证据后，勾选 `2026-08-03-phase5-coverage-contract-domain-plan.md` 的 Task 6 Steps 1–5 和 `TypeScript Client v1.4` completion item。若 root full gate 仍有已知 baseline failure，则保留“完整 Phase 5A 门禁”未勾选，并在 Task 6 下记录 run/测试证据与 baseline disposition。
@@ -1036,5 +1038,5 @@ git commit -m "feat: expose coverage client contracts"
 - [x] Security boundary scan 确认 test-client 没有新增 executable、raw args、environment、working directory、Shell、HTTP/TLS/OAuth/GitHub dependency。
 - [x] 使用 pinned Node/Go runtime 重跑 Client test/build、Coverage/Protocol drift、root applicable gates 与 `git diff --check`。
 - [x] 确认 tracked worktree clean，删除仅属于本计划的 worktree-local cache/review workspace。
-- [ ] 推送 `codex/workspace-cmake-toolchains` 到 GitHub `github` 与 Gitee `origin`，并验证两个 remote ref 等于 local HEAD。
-- [ ] 等待 GitHub Actions，比较 exact failed tests 与已记录 baseline；任何本 Task 新 failure 必须修复后重新双推。
+- [x] 推送 `codex/workspace-cmake-toolchains` 到 GitHub `github` 与 Gitee `origin`，并验证两个 remote ref 等于 local HEAD。
+- [x] 等待 GitHub Actions，比较 exact failed tests 与已记录 baseline；任何本 Task 新 failure 必须修复后重新双推。

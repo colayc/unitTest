@@ -464,7 +464,8 @@ git commit -m "feat: expose coverage client contracts"
 - final fix wave 使用 pinned Node 24.18.0、pnpm 11.4.0、Go 1.26.5 与 worktree-local cache 重跑 Client build、`check:protocol-generated`、`check:coverage-generated`、root `pnpm build` 和 `git diff --check`，全部通过；完整命令、RED PoC、legitimate controls 与一次环境 PATH 重试均经 scoped re-review 核对，临时 SDD report 在 review `CLEAN` 后按流程清理。
 - controller 独立补跑 Go full、Go full race、`coveragedomain + taskstore` race 与 service-probe E2E 20/20，全部通过。首次并行 Go full/race 仅在高负载下触发 `internal/probe` timeout control 抖动；该 package race 与全量 race 顺序复跑均通过。
 - root `pnpm test` 与 `pnpm verify` 均在唯一的历史 Windows CMake fixture `UnitTestIDE CMake helper has strict deterministic framework registration` 失败，精确原因为 `spawnSync cmake ENOENT`；失败发生前 Coverage generator、CMake bundle、workspace schema/security tests 与 verify 的 drift/build 均通过，未出现 test-client、Coverage/Protocol generated 或本次变更 package 的新增 failure。
-- 由于上述历史 baseline，下面的“完整 Phase 5A 门禁与独立 diff/security review”保持未勾选；whole-branch review、后续完整 CI 与双 remote 推送由最终 controller 执行。
+- GitHub Actions run `30984884517` 的 Client 86/86 与 contract/drift/build checks 通过；Linux failures 与上一 run `30969925130` 完全相同，Windows failures 仍位于既有 CMake fixture、CppUTest parser 与 Unity runner baseline。额外 Unity compile case 在其固定 30 秒 timeout 后失败，但相关目录/blob 在 baseline..HEAD 间零改动且本地 `-count=1` 复跑通过，判定为 hosted runner 负载波动。
+- GitHub `github` 与 Gitee `origin` 已同步并由 remote-ref query 验证。由于上述历史 baseline，下面的“完整 Phase 5A 门禁与独立 diff/security review”保持未勾选。
 
 ## Phase 5A 完成检查
 
