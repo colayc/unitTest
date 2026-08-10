@@ -254,6 +254,52 @@ func TestPreparedExecutionDetectsOutputInPlaceMutation(t *testing.T) {
 	}
 }
 
+func TestPreparedExecutionRejectsTaskRootReplacementBeforeOutputOpen(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("task-root replacement fixture requires rename/symlink support")
+	}
+	base := t.TempDir()
+	coverageRoot := filepath.Join(base, "coverage")
+	projectRoot := filepath.Join(base, "project")
+	objects := filepath.Join(base, "objects")
+	for _, directory := range []string{coverageRoot, projectRoot, objects} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	python, runner, gcov := filepath.Join(base, "python.exe"), filepath.Join(base, "runner.pyz"), filepath.Join(base, "gcov.exe")
+	for _, path := range []string{python, runner, gcov} {
+		if err := os.WriteFile(path, []byte(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	execution, err := PrepareRunner(&fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}}, coverageRoot, "task", DescriptorInput{
+		Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(coverageRoot, "task", "coverage.json"),
+	}, descriptorCapabilitiesForTest(t, coverageRoot, projectRoot, objects, gcov))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer execution.Close()
+	outputPath := execution.Descriptor().OutputPath
+	if err := os.WriteFile(outputPath, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := execution.VerifyAfter(); err != nil {
+		t.Fatal(err)
+	}
+	taskRoot := filepath.Dir(outputPath)
+	replacement := taskRoot + ".replacement"
+	if err := os.Rename(taskRoot, replacement); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(replacement, taskRoot); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if err := execution.VerifyAfter(); err == nil {
+		t.Fatal("VerifyAfter accepted replaced task root")
+	}
+}
+
 func TestIsolatedRunnerRejectsHostileEnvironment(t *testing.T) {
 	t.Setenv("PYTHONPATH", "canonical-hostile")
 	t.Setenv("pYtHoNpAtH", "hostile")

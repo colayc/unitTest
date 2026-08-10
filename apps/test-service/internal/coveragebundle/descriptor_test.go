@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -122,7 +123,7 @@ func TestParseDescriptorRejectsUnknownAndDuplicateMembers(t *testing.T) {
 }
 
 func TestDescriptorRejectsSymlinkEscape(t *testing.T) {
-	if runtimeGOOS() == "windows" {
+	if runtime.GOOS == "windows" {
 		t.Skip("symlink fixture requires elevated Windows privilege")
 	}
 	base := t.TempDir()
@@ -147,6 +148,33 @@ func TestDescriptorRejectsSymlinkEscape(t *testing.T) {
 	}
 	if _, err := descriptor.WriteAtomic(coverageRoot, "task", DescriptorCapabilities{}); err == nil {
 		t.Fatal("WriteAtomic accepted symlink root escape")
+	}
+}
+
+func TestVerifiedDirectoryRejectsAncestorReplacement(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("ancestor replacement fixture requires symlink support")
+	}
+	base := t.TempDir()
+	parent := filepath.Join(base, "parent")
+	child := filepath.Join(parent, "child")
+	if err := os.MkdirAll(child, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	capability, err := NewVerifiedDirectory(child)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer capability.Close()
+	replacement := filepath.Join(base, "replacement")
+	if err := os.Rename(parent, replacement); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(replacement, parent); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if err := capability.Verify(); err == nil {
+		t.Fatal("VerifiedDirectory accepted replaced ancestor")
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -316,9 +317,6 @@ func (directory *VerifiedDirectory) Verify() error {
 		}
 	}
 	for _, pin := range directory.pins {
-		if pin.path != directory.path {
-			continue
-		}
 		if err := pin.verifyIdentity(); err != nil {
 			return fmt.Errorf("%w: verified directory %s: %v", ErrDescriptorIntegrity, pin.path, err)
 		}
@@ -335,14 +333,11 @@ func (directory *VerifiedDirectory) Verify() error {
 			}
 			return fmt.Errorf("%w: verified directory %s: %v", ErrDescriptorIntegrity, identity.path, err)
 		}
-		if runtime.GOOS == "windows" && identity.path != directory.path {
-			continue
-		}
 		if _, pinned := pinnedPaths[identity.path]; pinned {
 			continue
 		}
 		resolved, statErr := os.Stat(identity.path)
-		if statErr != nil || !os.SameFile(identity.info, resolved) {
+		if statErr != nil || !sameDirectoryIdentity(identity.info, resolved) {
 			if statErr == nil {
 				statErr = errors.New("directory identity changed or resolves through reparse point")
 			}
@@ -350,6 +345,19 @@ func (directory *VerifiedDirectory) Verify() error {
 		}
 	}
 	return nil
+}
+
+func sameDirectoryIdentity(expected, actual os.FileInfo) bool {
+	if expected == nil || actual == nil {
+		return false
+	}
+	if os.SameFile(expected, actual) {
+		return true
+	}
+	// Windows can return non-comparable FileInfo wrappers for a stable
+	// directory across separate Stat calls. Compare the native identity token
+	// and immutable type bits as a conservative fallback.
+	return expected.Sys() != nil && actual.Sys() != nil && reflect.DeepEqual(expected.Sys(), actual.Sys()) && expected.Mode().Perm() == actual.Mode().Perm() && expected.IsDir() == actual.IsDir()
 }
 
 func (directory *VerifiedDirectory) Close() error {
@@ -463,8 +471,11 @@ func capturePathIdentities(path string) ([]pathIdentity, []*pinnedObject, error)
 		pinned, pinErr := pinDirectObject(current, true)
 		if pinErr != nil {
 			if current == path {
-				return fail(fmt.Errorf("path component resolves through reparse point: %w", pinErr))
+				return fail(fmt.Errorf("path component %s resolves through reparse point: %w", current, pinErr))
 			}
+			// Some Windows system ancestors deny opening a directory handle even
+			// for metadata access. Retain their resolved identity token and
+			// verify it component-wise below; fail closed if that token changes.
 		} else {
 			pins = append(pins, pinned)
 		}
@@ -530,22 +541,18 @@ func (descriptor Descriptor) WriteAtomic(coverageRoot, taskID string, capabiliti
 		return nil, integrityError("task root", err)
 	}
 	if err := syncPinnedDirectory(coveragePin); err != nil {
-		_ = os.RemoveAll(taskRoot)
 		return nil, integrityError("task root sync", err)
-	}
-	cleanup := func() { _ = os.RemoveAll(taskRoot) }
-	if err := capabilities.CoverageRoot.Verify(); err != nil {
-		cleanup()
-		return nil, integrityError("coverage root", err)
-	}
-	if !pathWithin(taskRoot, descriptor.OutputPath) || filepath.Dir(descriptor.OutputPath) != taskRoot {
-		cleanup()
-		return nil, integrityError("output path", errors.New("output must be a direct child of task root"))
 	}
 	taskRootCapability, err := NewVerifiedDirectoryFrom(capabilities.CoverageRoot, filepath.Base(taskRoot))
 	if err != nil {
-		cleanup()
 		return nil, integrityError("task root capability", err)
+	}
+	cleanup := func() {
+		// This function is only called after taskRootCapability is retained;
+		// callers must verify it before deleting anything below taskRoot.
+		if taskRootCapability.Verify() == nil {
+			_ = os.RemoveAll(taskRoot)
+		}
 	}
 	closeTaskRoot := func() {
 		// Never recursively clean a path after its retained capability has
@@ -554,6 +561,14 @@ func (descriptor Descriptor) WriteAtomic(coverageRoot, taskID string, capabiliti
 			cleanup()
 		}
 		_ = taskRootCapability.Close()
+	}
+	if err := capabilities.CoverageRoot.Verify(); err != nil {
+		_ = taskRootCapability.Close()
+		return nil, integrityError("coverage root", err)
+	}
+	if !pathWithin(taskRoot, descriptor.OutputPath) || filepath.Dir(descriptor.OutputPath) != taskRoot {
+		closeTaskRoot()
+		return nil, integrityError("output path", errors.New("output must be a direct child of task root"))
 	}
 	raw, err := json.Marshal(descriptor)
 	if err != nil {
@@ -711,6 +726,11 @@ func (owned *OwnedDescriptor) VerifyOutputAfter() error {
 			return digestErr
 		}
 		owned.outputDigest = digest
+		if err := owned.taskRootCapability.Verify(); err != nil {
+			_ = file.Close()
+			owned.outputFile, owned.outputInfo, owned.outputDigest = nil, nil, ""
+			return err
+		}
 		return nil
 	}
 	if owned.outputPin != nil {

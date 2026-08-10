@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"sync"
 )
@@ -22,7 +23,7 @@ const (
 	maximumReadyBytes            int64 = 64
 	maximumManifestOutputs             = 768
 	maximumBundleDirectories           = 96
-	bundleMetadataFileCount             = 2
+	bundleMetadataFileCount            = 2
 	maximumActualEntries               = maximumManifestOutputs + maximumBundleDirectories + bundleMetadataFileCount
 	maximumBundleDepth                 = 24
 	maximumPortablePathBytes           = 512
@@ -326,7 +327,14 @@ func (object *pinnedObject) verifyIdentity() error {
 		return errors.New("bundle object pin is closed")
 	}
 	before, err := directObjectInfo(object.path)
-	if err != nil || before.IsDir() != object.directory || !os.SameFile(object.identity, before) {
+	pathIdentity := before
+	if runtime.GOOS == "windows" && err == nil {
+		// Lstat and a handle's FileInfo can expose different reparse metadata
+		// for unchanged Windows ancestors. Stat still resolves the exact path;
+		// the directObjectInfo check above rejects symlinks/reparse objects.
+		pathIdentity, err = os.Stat(object.path)
+	}
+	if err != nil || pathIdentity.IsDir() != object.directory || !os.SameFile(object.identity, pathIdentity) {
 		return errors.New("bundle object path identity changed")
 	}
 	handle, err := object.file.Stat()
@@ -334,7 +342,11 @@ func (object *pinnedObject) verifyIdentity() error {
 		return errors.New("bundle object handle identity changed")
 	}
 	after, err := directObjectInfo(object.path)
-	if err != nil || !os.SameFile(object.identity, after) {
+	afterIdentity := after
+	if runtime.GOOS == "windows" && err == nil {
+		afterIdentity, err = os.Stat(object.path)
+	}
+	if err != nil || !os.SameFile(object.identity, afterIdentity) {
 		return errors.New("bundle object path changed while validating")
 	}
 	if object.executable && (before.Mode().Perm()&0o111 == 0 || handle.Mode().Perm()&0o111 == 0 || after.Mode().Perm()&0o111 == 0) {
