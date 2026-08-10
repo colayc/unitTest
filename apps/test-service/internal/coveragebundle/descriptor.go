@@ -548,11 +548,9 @@ func (descriptor Descriptor) WriteAtomic(coverageRoot, taskID string, capabiliti
 		return nil, integrityError("task root capability", err)
 	}
 	cleanup := func() {
-		// This function is only called after taskRootCapability is retained;
-		// callers must verify it before deleting anything below taskRoot.
-		if taskRootCapability.Verify() == nil {
-			_ = os.RemoveAll(taskRoot)
-		}
+		// Deliberately leak the task root on failure. Recursive pathname
+		// deletion cannot be made race-free on every supported host; safety is
+		// preferred over deleting a replaced attacker-controlled tree.
 	}
 	closeTaskRoot := func() {
 		// Never recursively clean a path after its retained capability has
@@ -586,12 +584,7 @@ func (descriptor Descriptor) WriteAtomic(coverageRoot, taskID string, capabiliti
 		closeTaskRoot()
 		return nil, integrityError("create descriptor temporary", err)
 	}
-	temporaryPath := filepath.Join(taskRoot, temporaryName)
-	removeTemporaryFile := func() {
-		if err := taskRootCapability.Verify(); err == nil {
-			_ = os.Remove(temporaryPath)
-		}
-	}
+	removeTemporaryFile := func() {}
 	removeTemporary := func() {
 		_ = temporary.Close()
 		removeTemporaryFile()
