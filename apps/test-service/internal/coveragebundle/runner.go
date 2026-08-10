@@ -23,15 +23,16 @@ type Execution interface {
 }
 
 type PreparedExecution struct {
-	mu         sync.Mutex
-	pin        Pin
-	install    Installation
-	descriptor *OwnedDescriptor
-	spec       task.ProcessSpec
-	closed     bool
+	mu             sync.Mutex
+	pin            Pin
+	install        Installation
+	descriptor     *OwnedDescriptor
+	descriptorPath string
+	spec           task.ProcessSpec
+	closed         bool
 }
 
-func PrepareRunner(pin Pin, coverageRoot, taskID string, input DescriptorInput) (*PreparedExecution, error) {
+func PrepareRunner(pin Pin, coverageRoot, taskID string, input DescriptorInput, capabilities DescriptorCapabilities) (*PreparedExecution, error) {
 	if isNilPin(pin) {
 		return nil, ErrBundleIntegrity
 	}
@@ -46,8 +47,9 @@ func PrepareRunner(pin Pin, coverageRoot, taskID string, input DescriptorInput) 
 	if err != nil {
 		return nil, err
 	}
-	owned, err := descriptor.WriteAtomic(coverageRoot, taskID)
+	owned, err := descriptor.WriteAtomic(coverageRoot, taskID, capabilities)
 	if err != nil {
+		closeDescriptorCapabilities(capabilities)
 		return nil, err
 	}
 	spec := task.ProcessSpec{
@@ -56,12 +58,27 @@ func PrepareRunner(pin Pin, coverageRoot, taskID string, input DescriptorInput) 
 		EnvUnset:   fixedRunnerEnvUnset(),
 		Dir:        owned.TaskRoot(),
 	}
-	execution := &PreparedExecution{pin: pin, install: install, descriptor: owned, spec: spec}
+	execution := &PreparedExecution{pin: pin, install: install, descriptor: owned, descriptorPath: owned.Path(), spec: spec}
 	if err := execution.Verify(); err != nil {
 		_ = execution.Close()
 		return nil, err
 	}
 	return execution, nil
+}
+
+func closeDescriptorCapabilities(capabilities DescriptorCapabilities) {
+	if capabilities.GcovExecutable != nil {
+		_ = capabilities.GcovExecutable.Close()
+	}
+	if capabilities.ObjectDirectory != nil {
+		_ = capabilities.ObjectDirectory.Close()
+	}
+	if capabilities.Root != nil {
+		_ = capabilities.Root.Close()
+	}
+	if capabilities.CoverageRoot != nil {
+		_ = capabilities.CoverageRoot.Close()
+	}
 }
 
 func (execution *PreparedExecution) ProcessSpec() task.ProcessSpec {
@@ -74,10 +91,36 @@ func (execution *PreparedExecution) ProcessSpec() task.ProcessSpec {
 }
 
 func (execution *PreparedExecution) DescriptorPath() string {
-	if execution == nil || execution.descriptor == nil {
+	if execution == nil {
 		return ""
 	}
-	return execution.descriptor.Path()
+	execution.mu.Lock()
+	defer execution.mu.Unlock()
+	return execution.descriptorPath
+}
+
+func (execution *PreparedExecution) TaskRoot() string {
+	if execution == nil {
+		return ""
+	}
+	execution.mu.Lock()
+	defer execution.mu.Unlock()
+	if execution.descriptor == nil {
+		return ""
+	}
+	return execution.descriptor.TaskRoot()
+}
+
+func (execution *PreparedExecution) Descriptor() Descriptor {
+	if execution == nil {
+		return Descriptor{}
+	}
+	execution.mu.Lock()
+	defer execution.mu.Unlock()
+	if execution.descriptor == nil {
+		return Descriptor{}
+	}
+	return execution.descriptor.Descriptor()
 }
 
 func (execution *PreparedExecution) Verify() error {
@@ -112,18 +155,14 @@ func (execution *PreparedExecution) VerifyAfter() error {
 	if err := execution.Verify(); err != nil {
 		return err
 	}
-	path := execution.descriptor.Descriptor().OutputPath
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-		if err == nil {
-			err = errors.New("runner output is not a direct regular file")
-		}
-		return err
+	execution.mu.Lock()
+	if execution.closed || execution.descriptor == nil {
+		execution.mu.Unlock()
+		return ErrBundleIntegrity
 	}
-	if !pathWithin(execution.descriptor.TaskRoot(), path) {
-		return ErrDescriptorIntegrity
-	}
-	return nil
+	descriptor := execution.descriptor
+	execution.mu.Unlock()
+	return descriptor.VerifyOutputAfter()
 }
 
 func (execution *PreparedExecution) ValidateProcessTarget(executable string, args, env, envUnset []string, dir string) error {
@@ -194,13 +233,13 @@ func isNilPin(pin Pin) bool {
 }
 
 func fixedRunnerEnvUnset() []string {
-	keys := map[string]string{
-		"PYTHONPATH": "PYTHONPATH", "PYTHONHOME": "PYTHONHOME", "PYTHONSTARTUP": "PYTHONSTARTUP", "PYTHONUSERBASE": "PYTHONUSERBASE",
-		"PYTHONWARNINGS": "PYTHONWARNINGS", "PYTHONBREAKPOINT": "PYTHONBREAKPOINT", "PYTHONINSPECT": "PYTHONINSPECT", "PYTHONHASHSEED": "PYTHONHASHSEED",
-		"PYTHONUTF8": "PYTHONUTF8", "PIP_CONFIG_FILE": "PIP_CONFIG_FILE", "PIP_INDEX_URL": "PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL": "PIP_EXTRA_INDEX_URL",
-		"PIP_TRUSTED_HOST": "PIP_TRUSTED_HOST", "VIRTUAL_ENV": "VIRTUAL_ENV", "CONDA_PREFIX": "CONDA_PREFIX", "CONDA_DEFAULT_ENV": "CONDA_DEFAULT_ENV",
-		"HTTP_PROXY": "HTTP_PROXY", "HTTPS_PROXY": "HTTPS_PROXY", "ALL_PROXY": "ALL_PROXY", "NO_PROXY": "NO_PROXY",
-		"LANG": "LANG", "LANGUAGE": "LANGUAGE",
+	keys := map[string]struct{}{
+		"PYTHONPATH": {}, "PYTHONHOME": {}, "PYTHONSTARTUP": {}, "PYTHONUSERBASE": {},
+		"PYTHONWARNINGS": {}, "PYTHONBREAKPOINT": {}, "PYTHONINSPECT": {}, "PYTHONHASHSEED": {},
+		"PYTHONUTF8": {}, "PIP_CONFIG_FILE": {}, "PIP_INDEX_URL": {}, "PIP_EXTRA_INDEX_URL": {},
+		"PIP_TRUSTED_HOST": {}, "VIRTUAL_ENV": {}, "CONDA_PREFIX": {}, "CONDA_DEFAULT_ENV": {},
+		"HTTP_PROXY": {}, "HTTPS_PROXY": {}, "ALL_PROXY": {}, "NO_PROXY": {},
+		"LANG": {}, "LANGUAGE": {},
 	}
 	for _, entry := range os.Environ() {
 		key, _, found := strings.Cut(entry, "=")
@@ -210,11 +249,14 @@ func fixedRunnerEnvUnset() []string {
 		upper := strings.ToUpper(key)
 		if strings.HasPrefix(upper, "PYTHON") || strings.HasPrefix(upper, "PIP_") || strings.HasPrefix(upper, "CONDA_") ||
 			strings.HasSuffix(upper, "_PROXY") || upper == "VIRTUAL_ENV" || upper == "LANG" || upper == "LANGUAGE" || strings.HasPrefix(upper, "LC_") {
-			keys[upper] = key
+			// Keep every original spelling.  Process environments on Unix can
+			// contain both PYTHONPATH and pYtHoNpAtH; folding them would leave
+			// one hostile entry available to Python.
+			keys[key] = struct{}{}
 		}
 	}
 	result := make([]string, 0, len(keys))
-	for _, key := range keys {
+	for key := range keys {
 		result = append(result, key)
 	}
 	sort.SliceStable(result, func(left, right int) bool {

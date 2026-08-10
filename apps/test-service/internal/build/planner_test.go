@@ -88,85 +88,99 @@ func TestExecutionBoundaryAttachesAndRevalidatesFixedCoverageExecution(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	python := filepath.Join(fixture.dataRoot, "coverage", "task", "python.exe")
-	runner := filepath.Join(fixture.dataRoot, "coverage", "task", "runner.pyz")
-	descriptor := filepath.Join(fixture.dataRoot, "coverage", "task", "descriptor.json")
-	for _, path := range []string{python, runner, descriptor} {
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			t.Fatal(err)
-		}
+	installRoot := filepath.Join(fixture.dataRoot, "coverage-install")
+	python := filepath.Join(installRoot, "python.exe")
+	runner := filepath.Join(installRoot, "runner.pyz")
+	if err := os.MkdirAll(installRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	projectRoot := filepath.Join(fixture.dataRoot, "coverage", "project")
+	objects := filepath.Join(fixture.dataRoot, "coverage", "objects")
+	if err := os.MkdirAll(projectRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(objects, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{python, runner} {
 		if err := os.WriteFile(path, []byte(path), 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
-	execution := &recordingCoverageExecution{spec: task.ProcessSpec{
-		Executable: python,
-		Args:       []string{"-I", "-S", runner, descriptor},
-		Dir:        filepath.Dir(descriptor),
-	}}
+	gcov := filepath.Join(fixture.dataRoot, "coverage", "gcov.exe")
+	if err := os.WriteFile(gcov, []byte(gcov), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pin := &testCoveragePin{installation: coveragebundle.Installation{Root: fixture.dataRoot, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}}
+	execution, err := coveragebundle.PrepareRunner(pin, filepath.Join(fixture.dataRoot, "coverage"), "task", coveragebundle.DescriptorInput{
+		Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(fixture.dataRoot, "coverage", "task", "coverage.json"),
+	}, testCoverageCapabilities(t, filepath.Join(fixture.dataRoot, "coverage"), projectRoot, objects, gcov))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := boundaryValue.AttachCoverageExecution(execution); err != nil {
 		t.Fatalf("AttachCoverageExecution() = %v", err)
 	}
+	spec := execution.ProcessSpec()
 	if err := boundaryValue.ValidateProcessTarget(
-		execution.spec.Executable, execution.spec.Args,
-		execution.spec.Env, execution.spec.EnvUnset, execution.spec.Dir,
+		spec.Executable, spec.Args, spec.Env, spec.EnvUnset, spec.Dir,
 	); err != nil {
 		t.Fatalf("ValidateProcessTarget() = %v", err)
 	}
 	if err := boundaryValue.ValidateProcessTarget(
-		execution.spec.Executable, []string{"-I", "-S", runner, "tampered.json"},
-		nil, nil, execution.spec.Dir,
+		spec.Executable, []string{"-I", "-S", runner, "tampered.json"},
+		nil, nil, spec.Dir,
 	); err == nil {
 		t.Fatal("ValidateProcessTarget accepted replaced descriptor")
 	}
 	if err := boundaryValue.Release(); err != nil {
 		t.Fatal(err)
 	}
-	if execution.closeCalls != 1 {
-		t.Fatalf("coverage execution Close calls = %d, want 1", execution.closeCalls)
-	}
 	if err := boundaryValue.Release(); err != nil {
 		t.Fatalf("second Release() = %v", err)
 	}
 	if err := boundaryValue.ValidateProcessTarget(
-		execution.spec.Executable, execution.spec.Args,
-		nil, nil, execution.spec.Dir,
+		spec.Executable, spec.Args,
+		nil, nil, spec.Dir,
 	); err == nil {
 		t.Fatal("ValidateProcessTarget accepted released coverage execution")
 	}
 }
 
-type recordingCoverageExecution struct {
-	spec       task.ProcessSpec
-	closeCalls int
-	closed     bool
+type testCoveragePin struct {
+	installation coveragebundle.Installation
+	closed       bool
 }
 
-func (execution *recordingCoverageExecution) ProcessSpec() task.ProcessSpec { return execution.spec }
-func (execution *recordingCoverageExecution) Verify() error {
-	if execution.closed {
-		return errors.New("coverage execution closed")
+func (pin *testCoveragePin) Installation() coveragebundle.Installation { return pin.installation }
+func (pin *testCoveragePin) Verify() error {
+	if pin.closed {
+		return errors.New("closed")
 	}
 	return nil
 }
-func (execution *recordingCoverageExecution) VerifyAfter() error { return execution.Verify() }
-func (execution *recordingCoverageExecution) ValidateProcessTarget(
-	executable string, arguments, environment, unset []string, directory string,
-) error {
-	want := execution.spec
-	if executable != want.Executable || !reflect.DeepEqual(arguments, want.Args) ||
-		!reflect.DeepEqual(environment, want.Env) || !reflect.DeepEqual(unset, want.EnvUnset) || directory != want.Dir {
-		return errors.New("coverage process target mismatch")
-	}
-	return execution.Verify()
-}
-func (execution *recordingCoverageExecution) Close() error {
-	execution.closeCalls++
-	execution.closed = true
-	return nil
-}
+func (pin *testCoveragePin) Close() error { pin.closed = true; return nil }
 
-var _ coveragebundle.Execution = (*recordingCoverageExecution)(nil)
+func testCoverageCapabilities(t *testing.T, coverageRoot, projectRoot, objects, gcov string) coveragebundle.DescriptorCapabilities {
+	t.Helper()
+	coverageCapability, err := coveragebundle.NewVerifiedDirectory(coverageRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootCapability, err := coveragebundle.NewVerifiedDirectory(projectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	objectCapability, err := coveragebundle.NewVerifiedDirectory(objects)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gcovCapability, err := coveragebundle.NewVerifiedExecutable(filepath.Dir(gcov), gcov)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return coveragebundle.DescriptorCapabilities{CoverageRoot: coverageCapability, Root: rootCapability, ObjectDirectory: objectCapability, GcovExecutable: gcovCapability}
+}
 
 func TestPlannerSkipsConfigureAndKeepsTargetNamesAsIndependentArguments(t *testing.T) {
 	fixture := newPlannerFixture(t)

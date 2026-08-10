@@ -15,6 +15,10 @@ func openPinnedRegular(path string) (*os.File, error) {
 	return openPinnedUnixObject(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW)
 }
 
+func openDescriptorOutput(path string) (*os.File, error) {
+	return openPinnedRegular(path)
+}
+
 func openPinnedDirectory(path string) (*os.File, error) {
 	return openPinnedUnixObject(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW)
 }

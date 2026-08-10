@@ -35,7 +35,7 @@ func TestDescriptorWriteAtomicIsClosedAndDeterministic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	owned, err := descriptor.WriteAtomic(coverageRoot, "task-1")
+	owned, err := descriptor.WriteAtomic(coverageRoot, "task-1", descriptorCapabilitiesForTest(t, coverageRoot, root, objects, gcov))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestDescriptorRejectsClosedContractAndNativeEscapes(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if _, err := test.make().WriteAtomic(coverageRoot, "task"); err == nil {
+			if _, err := test.make().WriteAtomic(coverageRoot, "task", DescriptorCapabilities{}); err == nil {
 				t.Fatal("WriteAtomic accepted unsafe descriptor")
 			}
 		})
@@ -135,7 +135,7 @@ func TestDescriptorRejectsSymlinkEscape(t *testing.T) {
 		GcovExecutable:  filepath.Join(outside, "gcov"),
 		OutputPath:      filepath.Join(coverageRoot, "task", "out.json"),
 	}
-	if _, err := descriptor.WriteAtomic(coverageRoot, "task"); err == nil {
+	if _, err := descriptor.WriteAtomic(coverageRoot, "task", DescriptorCapabilities{}); err == nil {
 		t.Fatal("WriteAtomic accepted symlink root escape")
 	}
 }
@@ -155,7 +155,7 @@ func TestDescriptorDetectsTamperBeforeCloseAndClosesOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	descriptor := Descriptor{SchemaVersion: 1, Root: root, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(coverageRoot, "task", "out.json")}
-	owned, err := descriptor.WriteAtomic(coverageRoot, "task")
+	owned, err := descriptor.WriteAtomic(coverageRoot, "task", descriptorCapabilitiesForTest(t, coverageRoot, root, objects, gcov))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,5 +170,29 @@ func TestDescriptorDetectsTamperBeforeCloseAndClosesOnce(t *testing.T) {
 	}
 	if err := owned.Close(); err != nil {
 		t.Fatalf("second Close after tamper = %v", err)
+	}
+}
+
+func descriptorCapabilitiesForTest(t *testing.T, coverageRoot, root, objects, gcov string) DescriptorCapabilities {
+	t.Helper()
+	coverageCapability, err := NewVerifiedDirectory(coverageRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootCapability, err := NewVerifiedDirectory(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	objectCapability, err := NewVerifiedDirectory(objects)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gcovCapability, err := NewVerifiedExecutable(filepath.Dir(gcov), gcov)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return DescriptorCapabilities{
+		CoverageRoot: coverageCapability, Root: rootCapability,
+		ObjectDirectory: objectCapability, GcovExecutable: gcovCapability,
 	}
 }

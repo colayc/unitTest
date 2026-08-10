@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -53,7 +54,7 @@ func TestPrepareRunnerBuildsExactIsolatedProcessSpec(t *testing.T) {
 	execution, err := PrepareRunner(pin, coverageRoot, "task", DescriptorInput{
 		Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov,
 		OutputPath: filepath.Join(coverageRoot, "task", "coverage.json"),
-	})
+	}, descriptorCapabilitiesForTest(t, coverageRoot, projectRoot, objects, gcov))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,13 +111,97 @@ func TestPrepareRunnerRejectsTamperedPinAndOutputEscape(t *testing.T) {
 	_, err := PrepareRunner(pin, coverageRoot, "task", DescriptorInput{
 		Root: filepath.Join(base, "root"), ObjectDirectory: filepath.Join(base, "objects"),
 		GcovExecutable: filepath.Join(base, "gcov"), OutputPath: filepath.Join(base, "outside.json"),
-	})
+	}, DescriptorCapabilities{})
 	if err == nil {
 		t.Fatal("PrepareRunner accepted output outside owned root")
 	}
 }
 
+func TestPreparedExecutionDetectsRootAndGcovTamper(t *testing.T) {
+	base := t.TempDir()
+	coverageRoot := filepath.Join(base, "coverage")
+	projectRoot := filepath.Join(base, "project")
+	objects := filepath.Join(base, "objects")
+	for _, directory := range []string{coverageRoot, projectRoot, objects} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	python := filepath.Join(base, "python.exe")
+	runner := filepath.Join(base, "gcovr-runner.pyz")
+	gcov := filepath.Join(base, "gcov.exe")
+	for _, path := range []string{python, runner, gcov} {
+		if err := os.WriteFile(path, []byte(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pin := &fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}}
+	execution, err := PrepareRunner(pin, coverageRoot, "task", DescriptorInput{
+		Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov,
+		OutputPath: filepath.Join(coverageRoot, "task", "coverage.json"),
+	}, descriptorCapabilitiesForTest(t, coverageRoot, projectRoot, objects, gcov))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer execution.Close()
+	if err := os.WriteFile(gcov, []byte("tampered gcov"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := execution.Verify(); err == nil {
+		t.Fatal("Verify accepted tampered gcov executable")
+	}
+}
+
+func TestPreparedExecutionDetectsOutputReplacementAfterVerifyAfter(t *testing.T) {
+	base := t.TempDir()
+	coverageRoot := filepath.Join(base, "coverage")
+	projectRoot := filepath.Join(base, "project")
+	objects := filepath.Join(base, "objects")
+	for _, directory := range []string{coverageRoot, projectRoot, objects} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	python := filepath.Join(base, "python.exe")
+	runner := filepath.Join(base, "gcovr-runner.pyz")
+	gcov := filepath.Join(base, "gcov.exe")
+	for _, path := range []string{python, runner, gcov} {
+		if err := os.WriteFile(path, []byte(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	execution, err := PrepareRunner(&fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}}, coverageRoot, "task", DescriptorInput{
+		Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov,
+		OutputPath: filepath.Join(coverageRoot, "task", "coverage.json"),
+	}, descriptorCapabilitiesForTest(t, coverageRoot, projectRoot, objects, gcov))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer execution.Close()
+	outputPath := execution.Descriptor().OutputPath
+	if err := os.WriteFile(outputPath, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := execution.VerifyAfter(); err != nil {
+		t.Fatalf("first VerifyAfter() = %v", err)
+	}
+	replacement := outputPath + ".replacement"
+	if err := os.WriteFile(replacement, []byte("replacement"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(outputPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, outputPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := execution.VerifyAfter(); err == nil {
+		t.Fatal("VerifyAfter accepted replaced output")
+	}
+}
+
 func TestIsolatedRunnerRejectsHostileEnvironment(t *testing.T) {
+	t.Setenv("PYTHONPATH", "canonical-hostile")
 	t.Setenv("pYtHoNpAtH", "hostile")
 	t.Setenv("pIp_Index_URL", "https://hostile.invalid")
 	t.Setenv("vIrTuAl_Env", "hostile")
@@ -132,14 +217,20 @@ func TestIsolatedRunnerRejectsHostileEnvironment(t *testing.T) {
 			t.Fatalf("fixed runner environment did not clear %s: %#v", key, unset)
 		}
 	}
-	foundCaseVariant := false
+	foundCanonical, foundCaseVariant := false, false
 	for _, key := range unset {
+		if key == "PYTHONPATH" {
+			foundCanonical = true
+		}
 		if key == "pYtHoNpAtH" {
 			foundCaseVariant = true
 		}
 	}
-	if !foundCaseVariant {
+	if runtime.GOOS != "windows" && !foundCaseVariant {
 		t.Fatalf("fixed runner environment normalized away case-variant key: %#v", unset)
+	}
+	if !foundCanonical {
+		t.Fatalf("fixed runner environment omitted canonical key: %#v", unset)
 	}
 }
 

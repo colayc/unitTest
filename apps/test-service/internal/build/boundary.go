@@ -36,7 +36,7 @@ type executionBoundary struct {
 	adoptedTaskID              string
 	releaseOnce                sync.Once
 	releaseErr                 error
-	coverageExecution          coveragebundle.Execution
+	coverageExecution          *coveragebundle.PreparedExecution
 }
 
 type pinnedTestExecutable struct {
@@ -385,7 +385,7 @@ func (b *executionBoundary) ValidateWorkingDirectory(path string) error {
 // AttachCoverageExecution transfers ownership to the boundary only after the
 // execution has passed its pin and descriptor verification. A failed attach
 // leaves ownership with the caller.
-func (b *executionBoundary) AttachCoverageExecution(execution coveragebundle.Execution) error {
+func (b *executionBoundary) AttachCoverageExecution(execution *coveragebundle.PreparedExecution) error {
 	if b == nil || execution == nil {
 		return task.ErrInvalidArgument
 	}
@@ -393,7 +393,12 @@ func (b *executionBoundary) AttachCoverageExecution(execution coveragebundle.Exe
 		return task.ErrInvalidArgument
 	}
 	spec := execution.ProcessSpec()
-	if spec.Executable == "" || len(spec.Args) == 0 || spec.Dir == "" || len(spec.Batch) != 0 {
+	if spec.Executable == "" || len(spec.Args) != 4 || spec.Args[0] != "-I" || spec.Args[1] != "-S" ||
+		spec.Args[2] == "" || spec.Args[3] == "" || spec.Dir == "" || len(spec.Env) != 0 || len(spec.EnvUnset) == 0 || len(spec.Batch) != 0 ||
+		spec.Dir != execution.TaskRoot() || execution.DescriptorPath() != spec.Args[3] {
+		return task.ErrInvalidArgument
+	}
+	if err := execution.ValidateProcessTarget(spec.Executable, spec.Args, spec.Env, spec.EnvUnset, spec.Dir); err != nil {
 		return task.ErrInvalidArgument
 	}
 	b.mu.Lock()
