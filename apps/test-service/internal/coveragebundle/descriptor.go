@@ -548,8 +548,12 @@ func (descriptor Descriptor) WriteAtomic(coverageRoot, taskID string, capabiliti
 		return nil, integrityError("task root capability", err)
 	}
 	closeTaskRoot := func() {
+		// Never recursively clean a path after its retained capability has
+		// changed; doing so could delete an attacker-controlled replacement.
+		if err := taskRootCapability.Verify(); err == nil {
+			cleanup()
+		}
 		_ = taskRootCapability.Close()
-		cleanup()
 	}
 	raw, err := json.Marshal(descriptor)
 	if err != nil {
@@ -568,9 +572,14 @@ func (descriptor Descriptor) WriteAtomic(coverageRoot, taskID string, capabiliti
 		return nil, integrityError("create descriptor temporary", err)
 	}
 	temporaryPath := filepath.Join(taskRoot, temporaryName)
+	removeTemporaryFile := func() {
+		if err := taskRootCapability.Verify(); err == nil {
+			_ = os.Remove(temporaryPath)
+		}
+	}
 	removeTemporary := func() {
 		_ = temporary.Close()
-		_ = os.Remove(temporaryPath)
+		removeTemporaryFile()
 		closeTaskRoot()
 	}
 	if _, err := temporary.Write(raw); err != nil {
@@ -582,13 +591,13 @@ func (descriptor Descriptor) WriteAtomic(coverageRoot, taskID string, capabiliti
 		return nil, integrityError("sync descriptor", err)
 	}
 	if err := temporary.Close(); err != nil {
-		_ = os.Remove(temporaryPath)
+		removeTemporaryFile()
 		closeTaskRoot()
 		return nil, integrityError("close descriptor temporary", err)
 	}
 	descriptorPath := filepath.Join(taskRoot, "descriptor.json")
 	if err := renamePinnedChild(taskPin, temporaryName, "descriptor.json"); err != nil {
-		_ = os.Remove(temporaryPath)
+		removeTemporaryFile()
 		closeTaskRoot()
 		return nil, integrityError("publish descriptor", err)
 	}
