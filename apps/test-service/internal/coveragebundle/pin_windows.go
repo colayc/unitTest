@@ -13,19 +13,38 @@ import (
 )
 
 func mkdirPinnedChild(parent *pinnedObject, name string, mode uint32) error {
-	return os.Mkdir(filepath.Join(parent.path, name), os.FileMode(mode))
+	if err := parent.verifyIdentity(); err != nil {
+		return err
+	}
+	if err := os.Mkdir(filepath.Join(parent.path, name), os.FileMode(mode)); err != nil {
+		return err
+	}
+	return parent.verifyIdentity()
 }
 
 func createPinnedTemp(parent *pinnedObject, prefix string) (*os.File, string, error) {
+	if err := parent.verifyIdentity(); err != nil {
+		return nil, "", err
+	}
 	file, err := os.CreateTemp(parent.path, prefix+"-*.tmp")
 	if err != nil {
+		return nil, "", err
+	}
+	if err := parent.verifyIdentity(); err != nil {
+		_ = file.Close()
 		return nil, "", err
 	}
 	return file, filepath.Base(file.Name()), nil
 }
 
 func renamePinnedChild(parent *pinnedObject, oldName, newName string) error {
-	return os.Rename(filepath.Join(parent.path, oldName), filepath.Join(parent.path, newName))
+	if err := parent.verifyIdentity(); err != nil {
+		return err
+	}
+	if err := os.Rename(filepath.Join(parent.path, oldName), filepath.Join(parent.path, newName)); err != nil {
+		return err
+	}
+	return parent.verifyIdentity()
 }
 
 func syncPinnedDirectory(parent *pinnedObject) error {
