@@ -4,12 +4,43 @@ package coveragebundle
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 
 	"golang.org/x/sys/unix"
 )
+
+var descriptorTempSequence uint64
+
+func mkdirPinnedChild(parent *pinnedObject, name string, mode uint32) error {
+	return unix.Mkdirat(int(parent.file.Fd()), name, mode)
+}
+
+func createPinnedTemp(parent *pinnedObject, prefix string) (*os.File, string, error) {
+	for attempt := 0; attempt < 32; attempt++ {
+		name := fmt.Sprintf("%s-%d.tmp", prefix, atomic.AddUint64(&descriptorTempSequence, 1))
+		fd, err := unix.Openat(int(parent.file.Fd()), name, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC, 0o600)
+		if err == unix.EEXIST {
+			continue
+		}
+		if err != nil {
+			return nil, "", err
+		}
+		return os.NewFile(uintptr(fd), filepath.Join(parent.path, name)), name, nil
+	}
+	return nil, "", errors.New("unable to allocate descriptor temporary")
+}
+
+func renamePinnedChild(parent *pinnedObject, oldName, newName string) error {
+	return unix.Renameat(int(parent.file.Fd()), oldName, int(parent.file.Fd()), newName)
+}
+
+func syncPinnedDirectory(parent *pinnedObject) error {
+	return unix.Fsync(int(parent.file.Fd()))
+}
 
 func openPinnedRegular(path string) (*os.File, error) {
 	return openPinnedUnixObject(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW)

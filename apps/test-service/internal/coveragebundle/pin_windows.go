@@ -12,6 +12,35 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func mkdirPinnedChild(parent *pinnedObject, name string, mode uint32) error {
+	return os.Mkdir(filepath.Join(parent.path, name), os.FileMode(mode))
+}
+
+func createPinnedTemp(parent *pinnedObject, prefix string) (*os.File, string, error) {
+	file, err := os.CreateTemp(parent.path, prefix+"-*.tmp")
+	if err != nil {
+		return nil, "", err
+	}
+	return file, filepath.Base(file.Name()), nil
+}
+
+func renamePinnedChild(parent *pinnedObject, oldName, newName string) error {
+	return os.Rename(filepath.Join(parent.path, oldName), filepath.Join(parent.path, newName))
+}
+
+func syncPinnedDirectory(parent *pinnedObject) error {
+	if err := parent.file.Sync(); err != nil {
+		// Windows does not expose directory metadata flush through an ordinary
+		// directory handle; the retained handle and post-operation identity
+		// verification remain the durability boundary there.
+		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
 func openPinnedRegular(path string) (*os.File, error) {
 	return openPinnedWindowsObject(path, false)
 }

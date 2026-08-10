@@ -79,6 +79,9 @@ func closeDescriptorCapabilities(capabilities DescriptorCapabilities) {
 	if capabilities.CoverageRoot != nil {
 		_ = capabilities.CoverageRoot.Close()
 	}
+	if capabilities.Provenance != nil {
+		_ = capabilities.Provenance.Close()
+	}
 }
 
 func (execution *PreparedExecution) ProcessSpec() task.ProcessSpec {
@@ -87,7 +90,12 @@ func (execution *PreparedExecution) ProcessSpec() task.ProcessSpec {
 	}
 	execution.mu.Lock()
 	defer execution.mu.Unlock()
-	return cloneProcessSpec(execution.spec)
+	spec := cloneProcessSpec(execution.spec)
+	// Recompute the hostile-variable deny-list at launch/validation time;
+	// environment policy is not a prepare-time snapshot.
+	spec.EnvUnset = fixedRunnerEnvUnset()
+	execution.spec.EnvUnset = append([]string(nil), spec.EnvUnset...)
+	return spec
 }
 
 func (execution *PreparedExecution) DescriptorPath() string {
@@ -145,7 +153,8 @@ func (execution *PreparedExecution) Verify() error {
 	if execution.spec.Executable != install.Python || len(execution.spec.Args) != 4 ||
 		execution.spec.Args[0] != "-I" || execution.spec.Args[1] != "-S" ||
 		execution.spec.Args[2] != install.Runner || execution.spec.Args[3] != execution.descriptor.Path() ||
-		execution.spec.Dir != execution.descriptor.TaskRoot() || len(execution.spec.Env) != 0 || len(execution.spec.Batch) != 0 {
+		execution.spec.Dir != execution.descriptor.TaskRoot() || len(execution.spec.Env) != 0 || len(execution.spec.Batch) != 0 ||
+		!reflect.DeepEqual(execution.spec.EnvUnset, fixedRunnerEnvUnset()) {
 		return ErrBundleIntegrity
 	}
 	return nil

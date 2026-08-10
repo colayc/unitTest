@@ -1,6 +1,7 @@
 package coveragebundle
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -32,6 +33,52 @@ type Descriptor struct {
 
 type DescriptorInput = Descriptor
 
+// ParseDescriptor is the closed parser used by runner-facing tests and
+// consumers. It rejects unknown and duplicate JSON members before decoding
+// the descriptor contract.
+func ParseDescriptor(data []byte) (Descriptor, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	start, err := decoder.Token()
+	if err != nil || start != json.Delim('{') {
+		return Descriptor{}, integrityError("descriptor JSON", errors.New("expected object"))
+	}
+	fields := make(map[string]json.RawMessage, 5)
+	for decoder.More() {
+		token, err := decoder.Token()
+		key, ok := token.(string)
+		if err != nil || !ok {
+			return Descriptor{}, integrityError("descriptor JSON", errors.New("expected member name"))
+		}
+		if _, exists := fields[key]; exists {
+			return Descriptor{}, integrityError("descriptor JSON", fmt.Errorf("duplicate field %q", key))
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return Descriptor{}, integrityError("descriptor JSON", err)
+		}
+		fields[key] = value
+	}
+	end, err := decoder.Token()
+	if err != nil || end != json.Delim('}') {
+		return Descriptor{}, integrityError("descriptor JSON", err)
+	}
+	if trailing, err := decoder.Token(); err != io.EOF || trailing != nil {
+		return Descriptor{}, integrityError("descriptor JSON", errors.New("trailing JSON"))
+	}
+	allowed := map[string]bool{"schemaVersion": true, "root": true, "objectDirectory": true, "gcovExecutable": true, "outputPath": true}
+	for key := range fields {
+		if !allowed[key] {
+			return Descriptor{}, integrityError("descriptor JSON", fmt.Errorf("unknown field %q", key))
+		}
+	}
+	var descriptor Descriptor
+	encoded, err := json.Marshal(fields)
+	if err != nil || json.Unmarshal(encoded, &descriptor) != nil {
+		return Descriptor{}, integrityError("descriptor JSON", errors.New("invalid descriptor fields"))
+	}
+	return NewDescriptor(descriptor.Root, descriptor.ObjectDirectory, descriptor.GcovExecutable, descriptor.OutputPath)
+}
+
 // OwnedDescriptor is an immutable, service-owned descriptor file. It retains
 // native path identities for the descriptor, task root, and gcov executable so
 // verification is not a lexical-prefix check.
@@ -51,9 +98,11 @@ type OwnedDescriptor struct {
 	rootCapability     *VerifiedDirectory
 	objectCapability   *VerifiedDirectory
 	gcovCapability     *VerifiedExecutable
+	provenance         *VerifiedDirectory
 	outputPin          *pinnedObject
 	outputFile         *os.File
 	outputInfo         os.FileInfo
+	outputDigest       string
 	closed             bool
 }
 
@@ -70,23 +119,30 @@ type VerifiedDirectory struct {
 	path       string
 	identities []pathIdentity
 	pins       []*pinnedObject
+	parent     *VerifiedDirectory
 	closed     bool
 }
 
 // VerifiedExecutable pins an executable handle and digest and requires its
 // path to be under the caller-authorized directory capability.
 type VerifiedExecutable struct {
-	mu     sync.Mutex
-	path   string
-	root   *VerifiedDirectory
-	pin    *pinnedObject
-	file   *os.File
-	info   os.FileInfo
-	digest string
-	closed bool
+	mu       sync.Mutex
+	path     string
+	root     *VerifiedDirectory
+	parent   *VerifiedDirectory
+	ownsRoot bool
+	pin      *pinnedObject
+	file     *os.File
+	info     os.FileInfo
+	digest   string
+	closed   bool
 }
 
 type DescriptorCapabilities struct {
+	// Provenance is the service-owned authority from which all three
+	// descriptor directories are resolved. Bare absolute paths are not an
+	// authorization boundary.
+	Provenance      *VerifiedDirectory
 	CoverageRoot    *VerifiedDirectory
 	Root            *VerifiedDirectory
 	ObjectDirectory *VerifiedDirectory
@@ -102,6 +158,54 @@ func NewVerifiedDirectory(path string) (*VerifiedDirectory, error) {
 		return nil, fmt.Errorf("capture verified directory: %w", err)
 	}
 	return &VerifiedDirectory{path: path, identities: identities, pins: pins}, nil
+}
+
+// NewVerifiedDirectoryFrom resolves a child relative to an already trusted
+// directory capability. The parent capability remains independently owned and
+// is re-verified on every child verification.
+func NewVerifiedDirectoryFrom(parent *VerifiedDirectory, relative string) (*VerifiedDirectory, error) {
+	if parent == nil || filepath.IsAbs(relative) || relative == "" || filepath.Clean(relative) != relative || relative == "." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || relative == ".." {
+		return nil, errors.New("invalid relative verified directory")
+	}
+	parent.mu.Lock()
+	if parent.closed || len(parent.pins) == 0 {
+		parent.mu.Unlock()
+		return nil, ErrDescriptorClosed
+	}
+	base := parent.path
+	var current *pinnedObject
+	for _, pin := range parent.pins {
+		if pin.path == parent.path {
+			current = pin
+			break
+		}
+	}
+	if current == nil {
+		parent.mu.Unlock()
+		return nil, ErrDescriptorIntegrity
+	}
+	parts := strings.FieldsFunc(relative, func(r rune) bool { return r == '\\' || r == '/' })
+	pins := make([]*pinnedObject, 0, len(parts))
+	for _, part := range parts {
+		child, err := pinChildObject(current, part, true)
+		if err != nil {
+			for i := len(pins) - 1; i >= 0; i-- {
+				_ = pins[i].Close()
+			}
+			parent.mu.Unlock()
+			return nil, err
+		}
+		pins = append(pins, child)
+		current = child
+	}
+	parent.mu.Unlock()
+	path := filepath.Join(base, relative)
+	identities := make([]pathIdentity, 0, len(parent.identities)+len(pins))
+	identities = append(identities, parent.identities...)
+	for _, pin := range pins {
+		identities = append(identities, pathIdentity{path: pin.path, info: pin.identity})
+	}
+	return &VerifiedDirectory{path: path, identities: identities, pins: pins, parent: parent}, nil
 }
 
 func NewVerifiedExecutable(authorizedRoot, path string) (*VerifiedExecutable, error) {
@@ -127,6 +231,67 @@ func NewVerifiedExecutable(authorizedRoot, path string) (*VerifiedExecutable, er
 	return &VerifiedExecutable{path: path, root: root, file: file, info: info, digest: digest}, nil
 }
 
+func NewVerifiedExecutableFrom(parent *VerifiedDirectory, relative string) (*VerifiedExecutable, error) {
+	if parent == nil || filepath.IsAbs(relative) || relative == "" || filepath.Clean(relative) != relative {
+		return nil, errors.New("invalid relative verified executable")
+	}
+	parent.mu.Lock()
+	if parent.closed || len(parent.pins) == 0 {
+		parent.mu.Unlock()
+		return nil, ErrDescriptorClosed
+	}
+	base := parent.path
+	parent.mu.Unlock()
+	dirCapability := parent
+	directory := filepath.Dir(relative)
+	if directory != "." {
+		var dirErr error
+		dirCapability, dirErr = NewVerifiedDirectoryFrom(parent, directory)
+		if dirErr != nil {
+			return nil, dirErr
+		}
+	}
+	dirCapability.mu.Lock()
+	var parentPin *pinnedObject
+	for _, pin := range dirCapability.pins {
+		if pin.path == dirCapability.path {
+			parentPin = pin
+			break
+		}
+	}
+	if parentPin == nil {
+		dirCapability.mu.Unlock()
+		return nil, ErrDescriptorIntegrity
+	}
+	filePin, err := pinChildObject(parentPin, filepath.Base(relative), false)
+	dirCapability.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	path := filepath.Join(base, relative)
+	file, err := openDescriptorOutput(path)
+	if err != nil {
+		_ = filePin.Close()
+		return nil, err
+	}
+	info, statErr := file.Stat()
+	if statErr != nil || !os.SameFile(filePin.identity, info) {
+		_ = file.Close()
+		_ = filePin.Close()
+		if statErr == nil {
+			statErr = errors.New("executable identity changed while opening")
+		}
+		return nil, statErr
+	}
+	_ = filePin.Close()
+	digest, err := digestFile(file)
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return &VerifiedExecutable{path: path, root: dirCapability, parent: parent, ownsRoot: dirCapability != parent, file: file, info: info, digest: digest}, nil
+}
+
 func (directory *VerifiedDirectory) Path() string {
 	if directory == nil {
 		return ""
@@ -144,6 +309,11 @@ func (directory *VerifiedDirectory) Verify() error {
 	defer directory.mu.Unlock()
 	if directory.closed {
 		return ErrDescriptorClosed
+	}
+	if directory.parent != nil {
+		if err := directory.parent.Verify(); err != nil {
+			return err
+		}
 	}
 	for _, pin := range directory.pins {
 		if pin.path != directory.path {
@@ -210,6 +380,11 @@ func (executable *VerifiedExecutable) Verify() error {
 	if err := executable.root.Verify(); err != nil {
 		return err
 	}
+	if executable.pin != nil {
+		if err := executable.pin.verifyIdentity(); err != nil {
+			return fmt.Errorf("%w: executable identity: %v", ErrDescriptorIntegrity, err)
+		}
+	}
 	if !pathWithin(executable.root.path, executable.path) || !pathWithin(executable.root.path, executable.path) {
 		return ErrDescriptorIntegrity
 	}
@@ -256,7 +431,9 @@ func (executable *VerifiedExecutable) Close() error {
 		result = errors.Join(result, file.Close())
 	}
 	if root != nil {
-		result = errors.Join(result, root.Close())
+		if executable.parent == nil || executable.ownsRoot {
+			result = errors.Join(result, root.Close())
+		}
 	}
 	return result
 }
@@ -315,6 +492,18 @@ func NewDescriptor(root, objectDirectory, gcovExecutable, outputPath string) (De
 	return descriptor, nil
 }
 
+func directoryFinalPin(directory *VerifiedDirectory) *pinnedObject {
+	if directory == nil {
+		return nil
+	}
+	for _, pin := range directory.pins {
+		if pin.path == directory.path {
+			return pin
+		}
+	}
+	return nil
+}
+
 func (descriptor Descriptor) WriteAtomic(coverageRoot, taskID string, capabilities DescriptorCapabilities) (*OwnedDescriptor, error) {
 	if err := validateDescriptorFields(descriptor); err != nil {
 		return nil, err
@@ -333,8 +522,16 @@ func (descriptor Descriptor) WriteAtomic(coverageRoot, taskID string, capabiliti
 	if filepath.Clean(taskRoot) != taskRoot || !pathWithin(coverageRoot, taskRoot) {
 		return nil, integrityError("task root", errors.New("task root escapes coverage root"))
 	}
-	if err := os.Mkdir(taskRoot, 0o700); err != nil {
+	coveragePin := directoryFinalPin(capabilities.CoverageRoot)
+	if coveragePin == nil {
+		return nil, integrityError("task root", errors.New("coverage root capability is not pinned"))
+	}
+	if err := mkdirPinnedChild(coveragePin, taskID, 0o700); err != nil {
 		return nil, integrityError("task root", err)
+	}
+	if err := syncPinnedDirectory(coveragePin); err != nil {
+		_ = os.RemoveAll(taskRoot)
+		return nil, integrityError("task root sync", err)
 	}
 	cleanup := func() { _ = os.RemoveAll(taskRoot) }
 	if err := capabilities.CoverageRoot.Verify(); err != nil {
@@ -345,7 +542,7 @@ func (descriptor Descriptor) WriteAtomic(coverageRoot, taskID string, capabiliti
 		cleanup()
 		return nil, integrityError("output path", errors.New("output must be a direct child of task root"))
 	}
-	taskRootCapability, err := NewVerifiedDirectory(taskRoot)
+	taskRootCapability, err := NewVerifiedDirectoryFrom(capabilities.CoverageRoot, filepath.Base(taskRoot))
 	if err != nil {
 		cleanup()
 		return nil, integrityError("task root capability", err)
@@ -360,12 +557,17 @@ func (descriptor Descriptor) WriteAtomic(coverageRoot, taskID string, capabiliti
 		return nil, integrityError("marshal descriptor", err)
 	}
 	raw = append(raw, '\n')
-	temporary, err := os.CreateTemp(taskRoot, ".descriptor-*.tmp")
+	taskPin := directoryFinalPin(taskRootCapability)
+	if taskPin == nil {
+		closeTaskRoot()
+		return nil, integrityError("task root capability", errors.New("task root is not pinned"))
+	}
+	temporary, temporaryName, err := createPinnedTemp(taskPin, ".descriptor")
 	if err != nil {
 		closeTaskRoot()
 		return nil, integrityError("create descriptor temporary", err)
 	}
-	temporaryPath := temporary.Name()
+	temporaryPath := filepath.Join(taskRoot, temporaryName)
 	removeTemporary := func() {
 		_ = temporary.Close()
 		_ = os.Remove(temporaryPath)
@@ -385,13 +587,17 @@ func (descriptor Descriptor) WriteAtomic(coverageRoot, taskID string, capabiliti
 		return nil, integrityError("close descriptor temporary", err)
 	}
 	descriptorPath := filepath.Join(taskRoot, "descriptor.json")
-	if err := os.Rename(temporaryPath, descriptorPath); err != nil {
+	if err := renamePinnedChild(taskPin, temporaryName, "descriptor.json"); err != nil {
 		_ = os.Remove(temporaryPath)
 		closeTaskRoot()
 		return nil, integrityError("publish descriptor", err)
 	}
+	if err := syncPinnedDirectory(taskPin); err != nil {
+		closeTaskRoot()
+		return nil, integrityError("publish descriptor sync", err)
+	}
 	path := descriptorPath
-	descriptorFile, err := os.Open(path)
+	descriptorFile, err := openDescriptorOutput(path)
 	if err != nil {
 		closeTaskRoot()
 		cleanup()
@@ -416,7 +622,7 @@ func (descriptor Descriptor) WriteAtomic(coverageRoot, taskID string, capabiliti
 		descriptorInfo: descriptorInfo, coverageRoot: capabilities.CoverageRoot,
 		taskRootCapability: taskRootCapability,
 		rootCapability:     capabilities.Root, objectCapability: capabilities.ObjectDirectory,
-		gcovCapability: capabilities.GcovExecutable,
+		gcovCapability: capabilities.GcovExecutable, provenance: capabilities.Provenance,
 	}
 	if err := owned.Verify(); err != nil {
 		_ = owned.Close()
@@ -489,6 +695,13 @@ func (owned *OwnedDescriptor) VerifyOutputAfter() error {
 			return fmt.Errorf("%w: output identity: %v", ErrDescriptorIntegrity, err)
 		}
 		owned.outputFile, owned.outputInfo = file, info
+		digest, digestErr := digestFile(file)
+		if digestErr != nil {
+			_ = file.Close()
+			owned.outputFile, owned.outputInfo = nil, nil
+			return digestErr
+		}
+		owned.outputDigest = digest
 		return nil
 	}
 	if owned.outputPin != nil {
@@ -496,7 +709,17 @@ func (owned *OwnedDescriptor) VerifyOutputAfter() error {
 			return fmt.Errorf("%w: output identity: %v", ErrDescriptorIntegrity, err)
 		}
 	}
-	return verifyFilePath(path, owned.outputInfo, owned.outputFile)
+	if err := verifyFilePath(path, owned.outputInfo, owned.outputFile); err != nil {
+		return err
+	}
+	digest, err := digestFile(owned.outputFile)
+	if err != nil || digest != owned.outputDigest {
+		if err == nil {
+			err = errors.New("runner output digest changed")
+		}
+		return fmt.Errorf("%w: output digest: %v", ErrDescriptorIntegrity, err)
+	}
+	return nil
 }
 
 func (owned *OwnedDescriptor) Verify() error {
@@ -585,12 +808,22 @@ func (owned *OwnedDescriptor) Close() error {
 		closeErr = errors.Join(closeErr, owned.taskRootCapability.Close())
 		owned.taskRootCapability = nil
 	}
+	if owned.provenance != nil {
+		closeErr = errors.Join(closeErr, owned.provenance.Close())
+		owned.provenance = nil
+	}
 	return errors.Join(verifyErr, closeErr)
 }
 
 func validateDescriptorCapabilities(coverageRoot string, descriptor Descriptor, capabilities DescriptorCapabilities) error {
-	if capabilities.CoverageRoot == nil || capabilities.Root == nil || capabilities.ObjectDirectory == nil || capabilities.GcovExecutable == nil {
+	if capabilities.Provenance == nil || capabilities.CoverageRoot == nil || capabilities.Root == nil || capabilities.ObjectDirectory == nil || capabilities.GcovExecutable == nil {
 		return integrityError("descriptor capabilities", errors.New("all verified capabilities are required"))
+	}
+	if capabilities.CoverageRoot.parent != capabilities.Provenance || capabilities.Root.parent != capabilities.Provenance || capabilities.ObjectDirectory.parent != capabilities.Provenance || capabilities.GcovExecutable.parent != capabilities.Provenance {
+		return integrityError("descriptor capabilities", errors.New("capabilities lack common authorized provenance"))
+	}
+	if err := capabilities.Provenance.Verify(); err != nil {
+		return integrityError("capability provenance", err)
 	}
 	if capabilities.CoverageRoot.Path() != coverageRoot || capabilities.Root.Path() != descriptor.Root ||
 		capabilities.ObjectDirectory.Path() != descriptor.ObjectDirectory || capabilities.GcovExecutable.Path() != descriptor.GcovExecutable {

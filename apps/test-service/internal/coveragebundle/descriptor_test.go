@@ -111,6 +111,16 @@ func TestDescriptorRejectsClosedContractAndNativeEscapes(t *testing.T) {
 	}
 }
 
+func TestParseDescriptorRejectsUnknownAndDuplicateMembers(t *testing.T) {
+	valid := `{"schemaVersion":1,"root":"C:/root","objectDirectory":"C:/objects","gcovExecutable":"C:/gcov.exe","outputPath":"C:/task/coverage.json"}`
+	if _, err := ParseDescriptor([]byte(strings.Replace(valid, `"outputPath"`, `"unknown":true,"outputPath"`, 1))); err == nil {
+		t.Fatal("ParseDescriptor accepted unknown member")
+	}
+	if _, err := ParseDescriptor([]byte(strings.Replace(valid, `"schemaVersion":1`, `"schemaVersion":1,"schemaVersion":1`, 1))); err == nil {
+		t.Fatal("ParseDescriptor accepted duplicate member")
+	}
+}
+
 func TestDescriptorRejectsSymlinkEscape(t *testing.T) {
 	if runtimeGOOS() == "windows" {
 		t.Skip("symlink fixture requires elevated Windows privilege")
@@ -175,23 +185,36 @@ func TestDescriptorDetectsTamperBeforeCloseAndClosesOnce(t *testing.T) {
 
 func descriptorCapabilitiesForTest(t *testing.T, coverageRoot, root, objects, gcov string) DescriptorCapabilities {
 	t.Helper()
-	coverageCapability, err := NewVerifiedDirectory(coverageRoot)
+	provenancePath := filepath.Dir(coverageRoot)
+	for !pathWithin(provenancePath, root) || !pathWithin(provenancePath, objects) || !pathWithin(provenancePath, gcov) {
+		provenancePath = filepath.Dir(provenancePath)
+	}
+	provenance, err := NewVerifiedDirectory(provenancePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	rootCapability, err := NewVerifiedDirectory(root)
+	relative := func(path string) string {
+		value, _ := filepath.Rel(provenancePath, path)
+		return value
+	}
+	coverageCapability, err := NewVerifiedDirectoryFrom(provenance, relative(coverageRoot))
 	if err != nil {
 		t.Fatal(err)
 	}
-	objectCapability, err := NewVerifiedDirectory(objects)
+	rootCapability, err := NewVerifiedDirectoryFrom(provenance, relative(root))
 	if err != nil {
 		t.Fatal(err)
 	}
-	gcovCapability, err := NewVerifiedExecutable(filepath.Dir(gcov), gcov)
+	objectCapability, err := NewVerifiedDirectoryFrom(provenance, relative(objects))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gcovCapability, err := NewVerifiedExecutableFrom(provenance, relative(gcov))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return DescriptorCapabilities{
+		Provenance:   provenance,
 		CoverageRoot: coverageCapability, Root: rootCapability,
 		ObjectDirectory: objectCapability, GcovExecutable: gcovCapability,
 	}

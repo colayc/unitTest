@@ -163,23 +163,29 @@ func (pin *testCoveragePin) Close() error { pin.closed = true; return nil }
 
 func testCoverageCapabilities(t *testing.T, coverageRoot, projectRoot, objects, gcov string) coveragebundle.DescriptorCapabilities {
 	t.Helper()
-	coverageCapability, err := coveragebundle.NewVerifiedDirectory(coverageRoot)
+	provenancePath := filepath.Dir(coverageRoot)
+	provenance, err := coveragebundle.NewVerifiedDirectory(provenancePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	rootCapability, err := coveragebundle.NewVerifiedDirectory(projectRoot)
+	relative := func(path string) string { value, _ := filepath.Rel(provenancePath, path); return value }
+	coverageCapability, err := coveragebundle.NewVerifiedDirectoryFrom(provenance, relative(coverageRoot))
 	if err != nil {
 		t.Fatal(err)
 	}
-	objectCapability, err := coveragebundle.NewVerifiedDirectory(objects)
+	rootCapability, err := coveragebundle.NewVerifiedDirectoryFrom(provenance, relative(projectRoot))
 	if err != nil {
 		t.Fatal(err)
 	}
-	gcovCapability, err := coveragebundle.NewVerifiedExecutable(filepath.Dir(gcov), gcov)
+	objectCapability, err := coveragebundle.NewVerifiedDirectoryFrom(provenance, relative(objects))
 	if err != nil {
 		t.Fatal(err)
 	}
-	return coveragebundle.DescriptorCapabilities{CoverageRoot: coverageCapability, Root: rootCapability, ObjectDirectory: objectCapability, GcovExecutable: gcovCapability}
+	gcovCapability, err := coveragebundle.NewVerifiedExecutableFrom(provenance, relative(gcov))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return coveragebundle.DescriptorCapabilities{Provenance: provenance, CoverageRoot: coverageCapability, Root: rootCapability, ObjectDirectory: objectCapability, GcovExecutable: gcovCapability}
 }
 
 func TestPlannerSkipsConfigureAndKeepsTargetNamesAsIndependentArguments(t *testing.T) {
