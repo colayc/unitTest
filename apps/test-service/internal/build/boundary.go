@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"unit-test-ide.local/test-service/internal/cmake"
+	"unit-test-ide.local/test-service/internal/coveragebundle"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/workspace"
 )
@@ -35,6 +36,7 @@ type executionBoundary struct {
 	adoptedTaskID              string
 	releaseOnce                sync.Once
 	releaseErr                 error
+	coverageExecution          coveragebundle.Execution
 }
 
 type pinnedTestExecutable struct {
@@ -150,6 +152,15 @@ func (b *executionBoundary) ValidateExecutable(path string) error {
 	defer b.mu.Unlock()
 	if b.executableFile == nil {
 		return task.ErrInvalidArgument
+	}
+	if b.coverageExecution != nil {
+		spec := b.coverageExecution.ProcessSpec()
+		if filepath.Clean(path) == spec.Executable {
+			if err := b.coverageExecution.Verify(); err != nil {
+				return task.ErrInvalidArgument
+			}
+			return nil
+		}
 	}
 	absolute, err := filepath.Abs(path)
 	if err != nil {
@@ -285,11 +296,13 @@ func (b *executionBoundary) Release() error {
 		ctestFile := b.ctestFile
 		unityRunnerGeneratorFile := b.unityRunnerGeneratorFile
 		testExecutables := b.testExecutables
+		coverageExecution := b.coverageExecution
 		b.lock = nil
 		b.executableFile = nil
 		b.ctestFile = nil
 		b.unityRunnerGeneratorFile = nil
 		b.testExecutables = nil
+		b.coverageExecution = nil
 		b.mu.Unlock()
 
 		var result error
@@ -307,6 +320,9 @@ func (b *executionBoundary) Release() error {
 		}
 		for _, executable := range testExecutables {
 			result = errors.Join(result, executable.file.Close())
+		}
+		if coverageExecution != nil {
+			result = errors.Join(result, coverageExecution.Close())
 		}
 		b.mu.Lock()
 		b.releaseErr = result
@@ -335,6 +351,15 @@ func (b *executionBoundary) ValidateWorkingDirectory(path string) error {
 	if b.executableFile == nil {
 		return task.ErrInvalidArgument
 	}
+	if b.coverageExecution != nil {
+		spec := b.coverageExecution.ProcessSpec()
+		if filepath.Clean(path) == spec.Dir {
+			if err := b.coverageExecution.Verify(); err != nil {
+				return task.ErrInvalidArgument
+			}
+			return nil
+		}
+	}
 	workspaceInfo, workspaceErr := os.Stat(b.workspaceRoot.NativePath)
 	dataInfo, dataErr := os.Stat(b.dataRoot.NativePath)
 	if workspaceErr != nil || dataErr != nil ||
@@ -352,6 +377,76 @@ func (b *executionBoundary) ValidateWorkingDirectory(path string) error {
 		return task.ErrInvalidArgument
 	}
 	if !b.workspaceRoot.Contains(absolute) && !b.dataRoot.Contains(absolute) {
+		return task.ErrInvalidArgument
+	}
+	return nil
+}
+
+// AttachCoverageExecution transfers ownership to the boundary only after the
+// execution has passed its pin and descriptor verification. A failed attach
+// leaves ownership with the caller.
+func (b *executionBoundary) AttachCoverageExecution(execution coveragebundle.Execution) error {
+	if b == nil || execution == nil {
+		return task.ErrInvalidArgument
+	}
+	if err := execution.Verify(); err != nil {
+		return task.ErrInvalidArgument
+	}
+	spec := execution.ProcessSpec()
+	if spec.Executable == "" || len(spec.Args) == 0 || spec.Dir == "" || len(spec.Batch) != 0 {
+		return task.ErrInvalidArgument
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.executableFile == nil || b.coverageExecution != nil {
+		return task.ErrInvalidArgument
+	}
+	b.coverageExecution = execution
+	return nil
+}
+
+func (b *executionBoundary) ValidateProcessTarget(
+	executable string,
+	arguments, environment, unset []string,
+	directory string,
+) error {
+	if b == nil {
+		return task.ErrInvalidArgument
+	}
+	b.mu.Lock()
+	coverageExecution := b.coverageExecution
+	b.mu.Unlock()
+	if coverageExecution != nil {
+		spec := coverageExecution.ProcessSpec()
+		if executable == spec.Executable {
+			if err := coverageExecution.ValidateProcessTarget(
+				executable, arguments, environment, unset, directory,
+			); err != nil {
+				return task.ErrInvalidArgument
+			}
+			return nil
+		}
+	}
+	if err := b.ValidateExecutable(executable); err != nil {
+		return task.ErrInvalidArgument
+	}
+	if err := b.ValidateWorkingDirectory(directory); err != nil {
+		return task.ErrInvalidArgument
+	}
+	return nil
+}
+
+func (b *executionBoundary) VerifyCoverageExecutionAfter() error {
+	if b == nil {
+		return task.ErrInvalidArgument
+	}
+	b.mu.Lock()
+	coverageExecution := b.coverageExecution
+	b.mu.Unlock()
+	if coverageExecution == nil {
+		return task.ErrInvalidArgument
+	}
+	if err := coverageExecution.VerifyAfter(); err != nil {
 		return task.ErrInvalidArgument
 	}
 	return nil

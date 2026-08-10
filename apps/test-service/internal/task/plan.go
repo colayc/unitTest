@@ -111,6 +111,14 @@ type ManagedExecutionBoundary interface {
 	Release() error
 }
 
+// ProcessTargetBoundary is an optional runtime-only extension. Consumers that
+// pin a fixed command (for example the bundled gcovr runner) can validate the
+// complete target, including args and environment, on every plan and
+// continuation validation without changing the protocol-facing boundary.
+type ProcessTargetBoundary interface {
+	ValidateProcessTarget(executable string, args, env, envUnset []string, dir string) error
+}
+
 type StartRequest struct {
 	IdempotencyKey      string
 	Kind                Kind
@@ -238,6 +246,13 @@ func validProcessTarget(
 	}
 	if err := boundary.ValidateExecutable(executable); err != nil {
 		return false
+	}
+	if targetBoundary, ok := boundary.(ProcessTargetBoundary); ok {
+		if err := targetBoundary.ValidateProcessTarget(
+			executable, arguments, environment, unset, directory,
+		); err != nil {
+			return false
+		}
 	}
 	return boundary.ValidateWorkingDirectory(directory) == nil
 }

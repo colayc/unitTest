@@ -81,6 +81,22 @@ func TestValidatePlanAcceptsValidTwoStepPlan(t *testing.T) {
 	}
 }
 
+func TestValidatePlanInvokesOptionalProcessTargetBoundary(t *testing.T) {
+	boundary := recordingTargetBoundary{fakeBoundary: fakeBoundary{
+		executables: []string{"cmake"}, roots: []string{"src"},
+	}}
+	plan := task.ExecutionPlan{Version: 1, Steps: []task.ExecutionStep{{
+		ID: "configure", Kind: task.StepConfigure,
+		Process: task.ProcessSpec{Executable: "cmake", Args: []string{"-S", "src"}, Dir: "src"},
+	}}}
+	if err := task.ValidatePlan(plan, &boundary); err != nil {
+		t.Fatalf("ValidatePlan() error = %v", err)
+	}
+	if boundary.calls != 1 {
+		t.Fatalf("ValidateProcessTarget calls = %d, want 1", boundary.calls)
+	}
+}
+
 func TestValidatePlanAcceptsServiceOwnedCTestStepKinds(t *testing.T) {
 	for _, kind := range []task.StepKind{
 		task.StepTestDiscovery,
@@ -457,3 +473,17 @@ type nilFakeBoundary struct{}
 
 func (*nilFakeBoundary) ValidateExecutable(string) error       { return nil }
 func (*nilFakeBoundary) ValidateWorkingDirectory(string) error { return nil }
+
+type recordingTargetBoundary struct {
+	fakeBoundary
+	calls int
+}
+
+func (boundary *recordingTargetBoundary) ValidateProcessTarget(
+	executable string,
+	arguments, environment, unset []string,
+	directory string,
+) error {
+	boundary.calls++
+	return boundary.fakeBoundary.ValidateExecutable(executable)
+}

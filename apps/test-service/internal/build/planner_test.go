@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"unit-test-ide.local/test-service/internal/cmake"
+	"unit-test-ide.local/test-service/internal/coveragebundle"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/toolchain"
 	"unit-test-ide.local/test-service/internal/workspace"
@@ -78,6 +79,94 @@ func TestPlannerBuildsValidatedConfigureAndBuildSteps(t *testing.T) {
 		t.Fatalf("ValidatePlan() error = %v", err)
 	}
 }
+
+func TestExecutionBoundaryAttachesAndRevalidatesFixedCoverageExecution(t *testing.T) {
+	fixture := newPlannerFixture(t)
+	boundaryValue, err := newExecutionBoundary(
+		fixture.installation, fixture.root, fixture.dataRoot, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	python := filepath.Join(fixture.dataRoot, "coverage", "task", "python.exe")
+	runner := filepath.Join(fixture.dataRoot, "coverage", "task", "runner.pyz")
+	descriptor := filepath.Join(fixture.dataRoot, "coverage", "task", "descriptor.json")
+	for _, path := range []string{python, runner, descriptor} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	execution := &recordingCoverageExecution{spec: task.ProcessSpec{
+		Executable: python,
+		Args:       []string{"-I", "-S", runner, descriptor},
+		Dir:        filepath.Dir(descriptor),
+	}}
+	if err := boundaryValue.AttachCoverageExecution(execution); err != nil {
+		t.Fatalf("AttachCoverageExecution() = %v", err)
+	}
+	if err := boundaryValue.ValidateProcessTarget(
+		execution.spec.Executable, execution.spec.Args,
+		execution.spec.Env, execution.spec.EnvUnset, execution.spec.Dir,
+	); err != nil {
+		t.Fatalf("ValidateProcessTarget() = %v", err)
+	}
+	if err := boundaryValue.ValidateProcessTarget(
+		execution.spec.Executable, []string{"-I", "-S", runner, "tampered.json"},
+		nil, nil, execution.spec.Dir,
+	); err == nil {
+		t.Fatal("ValidateProcessTarget accepted replaced descriptor")
+	}
+	if err := boundaryValue.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if execution.closeCalls != 1 {
+		t.Fatalf("coverage execution Close calls = %d, want 1", execution.closeCalls)
+	}
+	if err := boundaryValue.Release(); err != nil {
+		t.Fatalf("second Release() = %v", err)
+	}
+	if err := boundaryValue.ValidateProcessTarget(
+		execution.spec.Executable, execution.spec.Args,
+		nil, nil, execution.spec.Dir,
+	); err == nil {
+		t.Fatal("ValidateProcessTarget accepted released coverage execution")
+	}
+}
+
+type recordingCoverageExecution struct {
+	spec       task.ProcessSpec
+	closeCalls int
+	closed     bool
+}
+
+func (execution *recordingCoverageExecution) ProcessSpec() task.ProcessSpec { return execution.spec }
+func (execution *recordingCoverageExecution) Verify() error {
+	if execution.closed {
+		return errors.New("coverage execution closed")
+	}
+	return nil
+}
+func (execution *recordingCoverageExecution) VerifyAfter() error { return execution.Verify() }
+func (execution *recordingCoverageExecution) ValidateProcessTarget(
+	executable string, arguments, environment, unset []string, directory string,
+) error {
+	want := execution.spec
+	if executable != want.Executable || !reflect.DeepEqual(arguments, want.Args) ||
+		!reflect.DeepEqual(environment, want.Env) || !reflect.DeepEqual(unset, want.EnvUnset) || directory != want.Dir {
+		return errors.New("coverage process target mismatch")
+	}
+	return execution.Verify()
+}
+func (execution *recordingCoverageExecution) Close() error {
+	execution.closeCalls++
+	execution.closed = true
+	return nil
+}
+
+var _ coveragebundle.Execution = (*recordingCoverageExecution)(nil)
 
 func TestPlannerSkipsConfigureAndKeepsTargetNamesAsIndependentArguments(t *testing.T) {
 	fixture := newPlannerFixture(t)
