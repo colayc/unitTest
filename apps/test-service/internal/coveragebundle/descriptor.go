@@ -173,6 +173,7 @@ type VerifiedDirectory struct {
 	identities []pathIdentity
 	pins       []*pinnedObject
 	parent     *VerifiedDirectory
+	authority  *serviceauthority.Authority
 	closed     bool
 }
 
@@ -229,7 +230,12 @@ func NewVerifiedDirectoryFromAuthority(authority serviceauthority.Authority, rel
 		return nil, err
 	}
 	if relative == "" || relative == "." {
-		return newVerifiedDirectory(anchor)
+		root, err := newVerifiedDirectory(anchor)
+		if err != nil {
+			return nil, err
+		}
+		root.authority = &authority
+		return root, nil
 	}
 	if filepath.IsAbs(relative) || filepath.Clean(relative) != relative || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 		return nil, errors.New("invalid relative verified directory")
@@ -243,6 +249,7 @@ func NewVerifiedDirectoryFromAuthority(authority serviceauthority.Authority, rel
 		_ = parent.Close()
 		return nil, err
 	}
+	child.authority = &authority
 	return child, nil
 }
 
@@ -291,7 +298,7 @@ func NewVerifiedDirectoryFrom(parent *VerifiedDirectory, relative string) (*Veri
 	for _, pin := range pins {
 		identities = append(identities, pathIdentity{path: pin.path, info: pin.identity})
 	}
-	return &VerifiedDirectory{path: path, identities: identities, pins: pins, parent: parent}, nil
+	return &VerifiedDirectory{path: path, identities: identities, pins: pins, parent: parent, authority: parent.authority}, nil
 }
 
 func NewVerifiedExecutable(authorizedRoot, path string) (*VerifiedExecutable, error) {
@@ -780,36 +787,35 @@ func (owned *OwnedDescriptor) verifyOutputAfterLocked() error {
 		return ErrDescriptorIntegrity
 	}
 	if owned.outputFile == nil {
-		lstat, err := os.Lstat(path)
-		if err != nil || !lstat.Mode().IsRegular() || lstat.Mode()&os.ModeSymlink != 0 {
-			if err == nil {
-				err = errors.New("runner output is not a direct regular file")
+		var taskPin *pinnedObject
+		for _, pin := range owned.taskRootCapability.pins {
+			if pin.path == owned.taskRoot {
+				taskPin = pin
+				break
 			}
-			return fmt.Errorf("%w: output identity: %v", ErrDescriptorIntegrity, err)
 		}
-		file, err := openDescriptorOutput(path)
+		if taskPin == nil {
+			return ErrDescriptorIntegrity
+		}
+		outputPin, err := pinOutputChild(taskPin, filepath.Base(path))
 		if err != nil {
-			return err
-		}
-		info, err := file.Stat()
-		if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || !os.SameFile(lstat, info) {
-			_ = file.Close()
-			if err == nil {
-				err = errors.New("runner output identity changed while opening")
-			}
 			return fmt.Errorf("%w: output identity: %v", ErrDescriptorIntegrity, err)
 		}
-		owned.outputFile, owned.outputInfo = file, info
-		digest, digestErr := digestFile(file)
+		if outputPin.identity == nil || !outputPin.identity.Mode().IsRegular() || outputPin.identity.Mode()&os.ModeSymlink != 0 {
+			_ = outputPin.Close()
+			return fmt.Errorf("%w: output is not a direct regular file", ErrDescriptorIntegrity)
+		}
+		owned.outputPin, owned.outputFile, owned.outputInfo = outputPin, outputPin.file, outputPin.identity
+		digest, digestErr := digestFile(outputPin.file)
 		if digestErr != nil {
-			_ = file.Close()
-			owned.outputFile, owned.outputInfo = nil, nil
+			_ = outputPin.Close()
+			owned.outputPin, owned.outputFile, owned.outputInfo = nil, nil, nil
 			return digestErr
 		}
 		owned.outputDigest = digest
 		if err := owned.taskRootCapability.Verify(); err != nil {
-			_ = file.Close()
-			owned.outputFile, owned.outputInfo, owned.outputDigest = nil, nil, ""
+			_ = outputPin.Close()
+			owned.outputPin, owned.outputFile, owned.outputInfo, owned.outputDigest = nil, nil, nil, ""
 			return err
 		}
 		return nil
@@ -943,6 +949,20 @@ func validateDescriptorCapabilities(coverageRoot string, descriptor Descriptor, 
 	}
 	if capabilities.Provenance == nil || capabilities.CoverageRoot == nil || capabilities.Root == nil || capabilities.ObjectDirectory == nil || capabilities.GcovExecutable == nil {
 		return integrityError("descriptor capabilities", errors.New("all verified capabilities are required"))
+	}
+	if err := capabilities.Authority.Verify(capabilities.Provenance.Path()); err != nil {
+		return integrityError("capability authority", err)
+	}
+	if capabilities.Provenance.authority == nil || !capabilities.Authority.SameIssuer(*capabilities.Provenance.authority) || capabilities.CoverageRoot.authority != capabilities.Provenance.authority || capabilities.Root.authority != capabilities.Provenance.authority || capabilities.ObjectDirectory.authority != capabilities.Provenance.authority || capabilities.GcovExecutable.root == nil || capabilities.GcovExecutable.root.authority != capabilities.Provenance.authority {
+		return integrityError("capability authority", errors.New("capabilities do not share one authority issuer"))
+	}
+	for label, path := range map[string]string{
+		"coverage root": coverageRoot, "root": descriptor.Root,
+		"object directory": descriptor.ObjectDirectory, "gcov executable": descriptor.GcovExecutable,
+	} {
+		if err := capabilities.Authority.Verify(path); err != nil {
+			return integrityError("capability authority "+label, err)
+		}
 	}
 	if capabilities.CoverageRoot.parent != capabilities.Provenance || capabilities.Root.parent != capabilities.Provenance || capabilities.ObjectDirectory.parent != capabilities.Provenance || capabilities.GcovExecutable.parent != capabilities.Provenance {
 		return integrityError("descriptor capabilities", errors.New("capabilities lack common authorized provenance"))

@@ -255,10 +255,6 @@ func TestDescriptorDetectsTamperBeforeCloseAndClosesOnce(t *testing.T) {
 
 func descriptorCapabilitiesForTest(t *testing.T, coverageRoot, root, objects, gcov string) DescriptorCapabilities {
 	t.Helper()
-	authority, err := serviceauthority.Mint(coverageRoot)
-	if err != nil {
-		t.Fatal(err)
-	}
 	provenancePath := filepath.Dir(coverageRoot)
 	for !pathWithin(provenancePath, root) || !pathWithin(provenancePath, objects) || !pathWithin(provenancePath, gcov) {
 		provenancePath = filepath.Dir(provenancePath)
@@ -292,7 +288,7 @@ func descriptorCapabilitiesForTest(t *testing.T, coverageRoot, root, objects, gc
 		t.Fatal(err)
 	}
 	return DescriptorCapabilities{
-		Authority:    authority,
+		Authority:    anchor,
 		Provenance:   provenance,
 		CoverageRoot: coverageCapability, Root: rootCapability,
 		ObjectDirectory: objectCapability, GcovExecutable: gcovCapability,

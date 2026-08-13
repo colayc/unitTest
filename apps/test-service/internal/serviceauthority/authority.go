@@ -40,6 +40,12 @@ func pathWithin(root, child string) bool {
 
 func (authority Authority) Root() string { return authority.root }
 
+// SameIssuer checks that two capabilities were issued by the same opaque
+// token, independent of copied Authority value wrappers.
+func (authority Authority) SameIssuer(other Authority) bool {
+	return authority.token != nil && authority.token == other.token
+}
+
 func samePath(left, right string) bool {
 	left, right = filepath.Clean(left), filepath.Clean(right)
 	if filepath.VolumeName(left) != "" {

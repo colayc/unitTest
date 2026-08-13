@@ -294,6 +294,25 @@ func pinChildObject(parent *pinnedObject, name string, directory bool) (*pinnedO
 	return pinOpenedObject(childPath, directory, before, file)
 }
 
+func pinOutputChild(parent *pinnedObject, name string) (*pinnedObject, error) {
+	if parent == nil || parent.file == nil || !parent.directory || name == "" || name == "." || name == ".." || filepath.Base(name) != name {
+		return nil, errors.New("invalid pinned output parent or child name")
+	}
+	childPath := filepath.Join(parent.path, name)
+	before, err := directObjectInfo(childPath)
+	if err != nil || before.IsDir() {
+		if err == nil {
+			err = errors.New("output is not a regular file")
+		}
+		return nil, err
+	}
+	file, err := openPinnedOutputChild(parent, name)
+	if err != nil {
+		return nil, err
+	}
+	return pinOpenedObject(childPath, false, before, file)
+}
+
 func pinOpenedObject(path string, directory bool, before os.FileInfo, file *os.File) (*pinnedObject, error) {
 	pinned := &pinnedObject{path: path, file: file, identity: before, directory: directory}
 	fail := func(cause error) (*pinnedObject, error) {

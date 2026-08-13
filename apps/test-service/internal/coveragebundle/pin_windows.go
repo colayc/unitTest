@@ -95,6 +95,21 @@ func openPinnedChild(parent *pinnedObject, name string, directory bool) (*os.Fil
 	return openPinnedWindowsObject(filepath.Join(parent.path, name), directory)
 }
 
+func openPinnedOutputChild(parent *pinnedObject, name string) (*os.File, error) {
+	path := filepath.Join(parent.path, name)
+	utf16, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return nil, err
+	}
+	handle, err := windows.CreateFile(utf16, windows.GENERIC_READ,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(handle), path), nil
+}
+
 func openPinnedDirectoryReader(parent *pinnedObject) (*os.File, error) {
 	return os.Open(parent.path)
 }
@@ -148,7 +163,7 @@ func openPinnedWindowsObject(path string, directory bool) (*os.File, error) {
 	}
 	access := uint32(windows.GENERIC_READ)
 	flags := uint32(windows.FILE_ATTRIBUTE_NORMAL | windows.FILE_FLAG_OPEN_REPARSE_POINT)
-	share := uint32(windows.FILE_SHARE_READ)
+	share := uint32(windows.FILE_SHARE_READ | windows.FILE_SHARE_DELETE)
 	if directory {
 		access = 0
 		flags = windows.FILE_FLAG_BACKUP_SEMANTICS

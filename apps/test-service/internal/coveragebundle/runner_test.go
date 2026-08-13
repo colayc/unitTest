@@ -280,6 +280,9 @@ func TestPinnedOutputConsumesWithoutPathReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if execution.descriptor.outputPin == nil || execution.descriptor.outputFile == nil {
+		t.Fatal("PinnedOutput did not retain output capability")
+	}
 	if got, err := output.ReadAll(); err != nil || string(got) != `{"ok":true}` {
 		t.Fatalf("PinnedOutput.ReadAll() = %q, %v", got, err)
 	}
