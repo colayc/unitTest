@@ -78,13 +78,14 @@ func (budget *resourceBudget) addHashBytes(size int64) error {
 }
 
 type pinnedObject struct {
-	path       string
-	file       *os.File
-	identity   os.FileInfo
-	directory  bool
-	digest     string
-	maxBytes   int64
-	executable bool
+	path        string
+	file        *os.File
+	identity    os.FileInfo
+	directory   bool
+	digest      string
+	maxBytes    int64
+	executable  bool
+	nativeToken any
 }
 
 type bundlePin struct {
@@ -299,6 +300,11 @@ func pinOpenedObject(path string, directory bool, before os.FileInfo, file *os.F
 		_ = pinned.Close()
 		return nil, cause
 	}
+	if token, tokenErr := captureNativeIdentity(file); tokenErr != nil && runtime.GOOS == "windows" {
+		return fail(tokenErr)
+	} else {
+		pinned.nativeToken = token
+	}
 	handleInfo, err := file.Stat()
 	if err != nil || handleInfo.IsDir() != directory || !os.SameFile(before, handleInfo) {
 		return fail(errors.New("bundle object identity changed while pinning"))
@@ -336,6 +342,11 @@ func (object *pinnedObject) verifyIdentity() error {
 	}
 	if err != nil || pathIdentity.IsDir() != object.directory || !os.SameFile(object.identity, pathIdentity) {
 		return errors.New("bundle object path identity changed")
+	}
+	if runtime.GOOS == "windows" && object.directory {
+		if err := verifyNativeIdentity(object.path, object.nativeToken); err != nil {
+			return errors.New("bundle ancestor native identity unavailable")
+		}
 	}
 	handle, err := object.file.Stat()
 	if err != nil || handle.IsDir() != object.directory || !os.SameFile(object.identity, handle) {
