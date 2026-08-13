@@ -163,6 +163,10 @@ func (pin *testCoveragePin) Close() error { pin.closed = true; return nil }
 
 func testCoverageCapabilities(t *testing.T, coverageRoot, projectRoot, objects, gcov string) coveragebundle.DescriptorCapabilities {
 	t.Helper()
+	authority, err := NewCoverageAuthority(coverageRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
 	provenancePath := filepath.Dir(coverageRoot)
 	provenance, err := coveragebundle.NewVerifiedDirectory(provenancePath)
 	if err != nil {
@@ -185,7 +189,7 @@ func testCoverageCapabilities(t *testing.T, coverageRoot, projectRoot, objects, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	return coveragebundle.DescriptorCapabilities{Provenance: provenance, CoverageRoot: coverageCapability, Root: rootCapability, ObjectDirectory: objectCapability, GcovExecutable: gcovCapability}
+	return coveragebundle.DescriptorCapabilities{Authority: authority, Provenance: provenance, CoverageRoot: coverageCapability, Root: rootCapability, ObjectDirectory: objectCapability, GcovExecutable: gcovCapability}
 }
 
 func TestPlannerSkipsConfigureAndKeepsTargetNamesAsIndependentArguments(t *testing.T) {

@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"unit-test-ide.local/test-service/internal/serviceauthority"
 )
 
 func TestDescriptorWriteAtomicIsClosedAndDeterministic(t *testing.T) {
@@ -112,6 +114,18 @@ func TestDescriptorRejectsClosedContractAndNativeEscapes(t *testing.T) {
 	}
 }
 
+func TestDescriptorRejectsUnboundAuthority(t *testing.T) {
+	base := t.TempDir()
+	coverage := filepath.Join(base, "coverage")
+	if err := os.MkdirAll(coverage, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	descriptor := Descriptor{SchemaVersion: 1, Root: base, ObjectDirectory: base, GcovExecutable: filepath.Join(base, "gcov"), OutputPath: filepath.Join(coverage, "task", "out.json")}
+	if _, err := descriptor.WriteAtomic(coverage, "task", DescriptorCapabilities{}); err == nil {
+		t.Fatal("WriteAtomic accepted an unbound service authority")
+	}
+}
+
 func TestParseDescriptorRejectsUnknownAndDuplicateMembers(t *testing.T) {
 	valid := `{"schemaVersion":1,"root":"C:/root","objectDirectory":"C:/objects","gcovExecutable":"C:/gcov.exe","outputPath":"C:/task/coverage.json"}`
 	if _, err := ParseDescriptor([]byte(strings.Replace(valid, `"outputPath"`, `"unknown":true,"outputPath"`, 1))); err == nil {
@@ -119,6 +133,12 @@ func TestParseDescriptorRejectsUnknownAndDuplicateMembers(t *testing.T) {
 	}
 	if _, err := ParseDescriptor([]byte(strings.Replace(valid, `"schemaVersion":1`, `"schemaVersion":1,"schemaVersion":1`, 1))); err == nil {
 		t.Fatal("ParseDescriptor accepted duplicate member")
+	}
+	if _, err := ParseDescriptor([]byte(strings.Replace(valid, `"schemaVersion":1`, `"schemaVersion":2`, 1))); err == nil {
+		t.Fatal("ParseDescriptor accepted unsupported schema")
+	}
+	if _, err := ParseDescriptor([]byte(`{"root":"C:/root","objectDirectory":"C:/objects","gcovExecutable":"C:/gcov.exe","outputPath":"C:/task/coverage.json"}`)); err == nil {
+		t.Fatal("ParseDescriptor accepted missing schemaVersion")
 	}
 }
 
@@ -213,6 +233,10 @@ func TestDescriptorDetectsTamperBeforeCloseAndClosesOnce(t *testing.T) {
 
 func descriptorCapabilitiesForTest(t *testing.T, coverageRoot, root, objects, gcov string) DescriptorCapabilities {
 	t.Helper()
+	authority, err := serviceauthority.Mint(coverageRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
 	provenancePath := filepath.Dir(coverageRoot)
 	for !pathWithin(provenancePath, root) || !pathWithin(provenancePath, objects) || !pathWithin(provenancePath, gcov) {
 		provenancePath = filepath.Dir(provenancePath)
@@ -242,6 +266,7 @@ func descriptorCapabilitiesForTest(t *testing.T, coverageRoot, root, objects, gc
 		t.Fatal(err)
 	}
 	return DescriptorCapabilities{
+		Authority:    authority,
 		Provenance:   provenance,
 		CoverageRoot: coverageCapability, Root: rootCapability,
 		ObjectDirectory: objectCapability, GcovExecutable: gcovCapability,

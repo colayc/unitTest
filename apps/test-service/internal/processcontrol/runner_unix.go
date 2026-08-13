@@ -195,7 +195,7 @@ func (runner *unixRunner) Prepare(ctx context.Context, spec Spec, taskID, servic
 	host.Stdout = stdoutWriter
 	host.Stderr = stderrWriter
 	host.ExtraFiles = []*os.File{statusWriter}
-	host.Env = append(os.Environ(), "UNIT_TEST_IDE_STATUS_HANDLE="+strconv.Itoa(statusHandleNumber))
+	host.Env = append(SanitizeEnvironment(nil, nil), "UNIT_TEST_IDE_STATUS_HANDLE="+strconv.Itoa(statusHandleNumber))
 	host.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Pdeathsig: syscall.SIGTERM}
 	identityReady := make(chan struct{})
 	var hostIdentity string

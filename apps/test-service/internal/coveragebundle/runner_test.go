@@ -254,6 +254,37 @@ func TestPreparedExecutionDetectsOutputInPlaceMutation(t *testing.T) {
 	}
 }
 
+func TestPinnedOutputConsumesWithoutPathReopen(t *testing.T) {
+	base := t.TempDir()
+	coverageRoot, projectRoot, objects := filepath.Join(base, "coverage"), filepath.Join(base, "project"), filepath.Join(base, "objects")
+	for _, directory := range []string{coverageRoot, projectRoot, objects} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	python, runner, gcov := filepath.Join(base, "python.exe"), filepath.Join(base, "runner.pyz"), filepath.Join(base, "gcov.exe")
+	for _, path := range []string{python, runner, gcov} {
+		if err := os.WriteFile(path, []byte(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	execution, err := PrepareRunner(&fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}}, coverageRoot, "task", DescriptorInput{Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(coverageRoot, "task", "coverage.json")}, descriptorCapabilitiesForTest(t, coverageRoot, projectRoot, objects, gcov))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer execution.Close()
+	if err := os.WriteFile(execution.Descriptor().OutputPath, []byte(`{"ok":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	output, err := execution.PinnedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := output.ReadAll(); err != nil || string(got) != `{"ok":true}` {
+		t.Fatalf("PinnedOutput.ReadAll() = %q, %v", got, err)
+	}
+}
+
 func TestPreparedExecutionRejectsTaskRootReplacementBeforeOutputOpen(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("task-root replacement fixture requires rename/symlink support")

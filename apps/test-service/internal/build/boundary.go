@@ -11,9 +11,17 @@ import (
 
 	"unit-test-ide.local/test-service/internal/cmake"
 	"unit-test-ide.local/test-service/internal/coveragebundle"
+	"unit-test-ide.local/test-service/internal/serviceauthority"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/workspace"
 )
+
+// NewCoverageAuthority binds coverage capability derivation to the service
+// data root. The opaque token is minted by the trusted build boundary, not by
+// coveragebundle callers.
+func NewCoverageAuthority(coverageRoot string) (serviceauthority.Authority, error) {
+	return serviceauthority.Mint(coverageRoot)
+}
 
 type executionBoundary struct {
 	executable                 string
@@ -455,4 +463,23 @@ func (b *executionBoundary) VerifyCoverageExecutionAfter() error {
 		return task.ErrInvalidArgument
 	}
 	return nil
+}
+
+// PinnedCoverageOutput hands downstream consumers the retained output handle;
+// consumers must use ReadAll and cannot reopen a mutable pathname.
+func (b *executionBoundary) PinnedCoverageOutput() (*coveragebundle.PinnedOutput, error) {
+	if b == nil {
+		return nil, task.ErrInvalidArgument
+	}
+	b.mu.Lock()
+	execution := b.coverageExecution
+	b.mu.Unlock()
+	if execution == nil {
+		return nil, task.ErrInvalidArgument
+	}
+	output, err := execution.PinnedOutput()
+	if err != nil {
+		return nil, task.ErrInvalidArgument
+	}
+	return output, nil
 }

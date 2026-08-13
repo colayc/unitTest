@@ -100,41 +100,7 @@ func targetEnvironment(
 	if len(unsetValues) != 0 {
 		unset = unsetValues[0]
 	}
-	removed := make(map[string]struct{}, len(unset))
-	for _, key := range unset {
-		removed[key] = struct{}{}
-	}
-	overridden := make(map[string]struct{}, len(extra))
-	for _, entry := range extra {
-		key, _, found := strings.Cut(entry, "=")
-		if found && !serviceOwnedTargetEnvironmentKey(key) {
-			overridden[key] = struct{}{}
-		}
-	}
-	inherited := os.Environ()
-	result := make([]string, 0, len(inherited)+len(extra))
-	for _, entry := range inherited {
-		key, _, found := strings.Cut(entry, "=")
-		if !found ||
-			serviceOwnedTargetEnvironmentKey(key) {
-			continue
-		}
-		if _, exists := removed[key]; exists {
-			continue
-		}
-		if _, exists := overridden[key]; exists {
-			continue
-		}
-		result = append(result, entry)
-	}
-	for _, entry := range extra {
-		key, _, found := strings.Cut(entry, "=")
-		if !found || serviceOwnedTargetEnvironmentKey(key) {
-			continue
-		}
-		result = append(result, entry)
-	}
-	return result
+	return processcontrol.SanitizeEnvironment(extra, unset)
 }
 
 func (target *unixTarget) PID() int          { return target.cmd.Process.Pid }

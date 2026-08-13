@@ -954,14 +954,7 @@ func createRunnerSuspendedProcess(executable string, args, environment []string,
 }
 
 func hostWindowsEnvironment(base []string, status windows.Handle) []string {
-	result := make([]string, 0, len(base)+1)
-	for _, entry := range base {
-		if strings.HasPrefix(strings.ToUpper(entry), "UNIT_TEST_IDE_STATUS_HANDLE=") {
-			continue
-		}
-		result = append(result, entry)
-	}
-	return append(result, "UNIT_TEST_IDE_STATUS_HANDLE="+strconv.FormatUint(uint64(status), 10))
+	return append(SanitizeEnvironment(nil, nil), "UNIT_TEST_IDE_STATUS_HANDLE="+strconv.FormatUint(uint64(status), 10))
 }
 
 func runnerWindowsEnvironmentBlock(environment []string) ([]uint16, error) {

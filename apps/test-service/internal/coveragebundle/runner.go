@@ -52,6 +52,13 @@ func PrepareRunner(pin Pin, coverageRoot, taskID string, input DescriptorInput, 
 		closeDescriptorCapabilities(capabilities)
 		return nil, err
 	}
+	if parsed, err := owned.Parse(); err != nil || parsed != descriptor {
+		_ = owned.Close()
+		if err == nil {
+			err = ErrBundleIntegrity
+		}
+		return nil, err
+	}
 	spec := task.ProcessSpec{
 		Executable: install.Python,
 		Args:       []string{"-I", "-S", install.Runner, owned.Path()},
@@ -172,6 +179,18 @@ func (execution *PreparedExecution) VerifyAfter() error {
 	descriptor := execution.descriptor
 	execution.mu.Unlock()
 	return descriptor.VerifyOutputAfter()
+}
+
+func (execution *PreparedExecution) PinnedOutput() (*PinnedOutput, error) {
+	if execution == nil {
+		return nil, ErrBundleIntegrity
+	}
+	execution.mu.Lock()
+	defer execution.mu.Unlock()
+	if execution.closed || execution.descriptor == nil {
+		return nil, ErrBundleIntegrity
+	}
+	return execution.descriptor.PinnedOutput()
 }
 
 func (execution *PreparedExecution) ValidateProcessTarget(executable string, args, env, envUnset []string, dir string) error {

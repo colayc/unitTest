@@ -4,7 +4,16 @@ import (
 	"errors"
 	"io"
 	"path/filepath"
+
+	"unit-test-ide.local/test-service/internal/build"
+	"unit-test-ide.local/test-service/internal/serviceauthority"
 )
+
+// CoverageAuthority binds capability derivation to the service-owned runtime
+// coverage directory before handing it to build/coverage consumers.
+func CoverageAuthority(layout Layout) (serviceauthority.Authority, error) {
+	return build.NewCoverageAuthority(layout.Coverage)
+}
 
 var ErrUnsafeDataDir = errors.New("service data directory is not owner-only")
 

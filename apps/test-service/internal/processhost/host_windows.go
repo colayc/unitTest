@@ -350,71 +350,7 @@ func targetWindowsEnvironment(
 	if len(unsetValues) != 0 {
 		unset = unsetValues[0]
 	}
-	removed := make(map[string]struct{}, len(unset))
-	for _, key := range unset {
-		removed[strings.ToUpper(key)] = struct{}{}
-	}
-	overrides := make(map[string]string, len(extra))
-	for _, entry := range extra {
-		separator := strings.IndexByte(entry, '=')
-		if separator > 0 {
-			key := strings.ToUpper(entry[:separator])
-			if !serviceOwnedTargetEnvironmentKey(key) {
-				overrides[key] = entry
-			}
-		}
-	}
-	inherited := os.Environ()
-	result := make([]string, 0, len(inherited)+len(extra))
-	seen := make(map[string]struct{}, len(inherited)+len(extra))
-	for _, entry := range inherited {
-		separator := strings.IndexByte(entry, '=')
-		if separator == 0 {
-			if next := strings.IndexByte(entry[1:], '='); next >= 0 {
-				separator = next + 1
-			}
-		}
-		if separator < 0 {
-			if entry != "" {
-				result = append(result, entry)
-			}
-			continue
-		}
-		key := strings.ToUpper(entry[:separator])
-		if serviceOwnedTargetEnvironmentKey(key) {
-			continue
-		}
-		if _, exists := removed[key]; exists {
-			continue
-		}
-		if _, exists := overrides[key]; exists {
-			continue
-		}
-		if _, exists := seen[key]; exists {
-			continue
-		}
-		seen[key] = struct{}{}
-		result = append(result, entry)
-	}
-	for _, entry := range extra {
-		separator := strings.IndexByte(entry, '=')
-		if separator <= 0 {
-			continue
-		}
-		key := strings.ToUpper(entry[:separator])
-		if serviceOwnedTargetEnvironmentKey(key) {
-			continue
-		}
-		if _, exists := removed[key]; exists {
-			continue
-		}
-		if _, duplicate := seen[key]; duplicate {
-			continue
-		}
-		seen[key] = struct{}{}
-		result = append(result, entry)
-	}
-	return result
+	return processcontrol.SanitizeEnvironment(extra, unset)
 }
 
 func windowsEnvironmentBlock(environment []string) ([]uint16, error) {

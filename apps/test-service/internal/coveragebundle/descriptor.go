@@ -14,6 +14,8 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+
+	"unit-test-ide.local/test-service/internal/serviceauthority"
 )
 
 var (
@@ -72,10 +74,19 @@ func ParseDescriptor(data []byte) (Descriptor, error) {
 			return Descriptor{}, integrityError("descriptor JSON", fmt.Errorf("unknown field %q", key))
 		}
 	}
+	if len(fields) != 5 {
+		return Descriptor{}, integrityError("descriptor JSON", errors.New("descriptor must contain exactly five fields"))
+	}
+	if _, ok := fields["schemaVersion"]; !ok {
+		return Descriptor{}, integrityError("descriptor JSON", errors.New("schemaVersion is required"))
+	}
 	var descriptor Descriptor
 	encoded, err := json.Marshal(fields)
 	if err != nil || json.Unmarshal(encoded, &descriptor) != nil {
 		return Descriptor{}, integrityError("descriptor JSON", errors.New("invalid descriptor fields"))
+	}
+	if descriptor.SchemaVersion != 1 {
+		return Descriptor{}, integrityError("descriptor JSON", errors.New("unsupported schema version"))
 	}
 	return NewDescriptor(descriptor.Root, descriptor.ObjectDirectory, descriptor.GcovExecutable, descriptor.OutputPath)
 }
@@ -105,6 +116,48 @@ type OwnedDescriptor struct {
 	outputInfo         os.FileInfo
 	outputDigest       string
 	closed             bool
+}
+
+// PinnedOutput is a consumer handle backed by the already-open output file.
+// It never reopens the descriptor's pathname, preventing output ABA during
+// normalization/consumption.
+type PinnedOutput struct {
+	descriptor *OwnedDescriptor
+}
+
+func (owned *OwnedDescriptor) Parse() (Descriptor, error) {
+	if owned == nil {
+		return Descriptor{}, ErrDescriptorClosed
+	}
+	owned.mu.Lock()
+	defer owned.mu.Unlock()
+	if owned.closed || owned.descriptorFile == nil {
+		return Descriptor{}, ErrDescriptorClosed
+	}
+	if _, err := owned.descriptorFile.Seek(0, io.SeekStart); err != nil {
+		return Descriptor{}, err
+	}
+	contents, err := io.ReadAll(owned.descriptorFile)
+	if err != nil {
+		return Descriptor{}, err
+	}
+	return ParseDescriptor(contents)
+}
+
+func (output *PinnedOutput) ReadAll() ([]byte, error) {
+	if output == nil || output.descriptor == nil {
+		return nil, ErrDescriptorClosed
+	}
+	d := output.descriptor
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err := d.verifyOutputAfterLocked(); err != nil {
+		return nil, err
+	}
+	if _, err := d.outputFile.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	return io.ReadAll(d.outputFile)
 }
 
 type pathIdentity struct {
@@ -144,6 +197,7 @@ type DescriptorCapabilities struct {
 	// descriptor directories are resolved. Bare absolute paths are not an
 	// authorization boundary.
 	Provenance      *VerifiedDirectory
+	Authority       serviceauthority.Authority
 	CoverageRoot    *VerifiedDirectory
 	Root            *VerifiedDirectory
 	ObjectDirectory *VerifiedDirectory
@@ -252,6 +306,12 @@ func NewVerifiedExecutableFrom(parent *VerifiedDirectory, relative string) (*Ver
 			return nil, dirErr
 		}
 	}
+	ownsRoot := dirCapability != parent
+	cleanupNested := func() {
+		if ownsRoot {
+			_ = dirCapability.Close()
+		}
+	}
 	dirCapability.mu.Lock()
 	var parentPin *pinnedObject
 	for _, pin := range dirCapability.pins {
@@ -262,23 +322,27 @@ func NewVerifiedExecutableFrom(parent *VerifiedDirectory, relative string) (*Ver
 	}
 	if parentPin == nil {
 		dirCapability.mu.Unlock()
+		cleanupNested()
 		return nil, ErrDescriptorIntegrity
 	}
 	filePin, err := pinChildObject(parentPin, filepath.Base(relative), false)
 	dirCapability.mu.Unlock()
 	if err != nil {
+		cleanupNested()
 		return nil, err
 	}
 	path := filepath.Join(base, relative)
 	file, err := openDescriptorOutput(path)
 	if err != nil {
 		_ = filePin.Close()
+		cleanupNested()
 		return nil, err
 	}
 	info, statErr := file.Stat()
 	if statErr != nil || !os.SameFile(filePin.identity, info) {
 		_ = file.Close()
 		_ = filePin.Close()
+		cleanupNested()
 		if statErr == nil {
 			statErr = errors.New("executable identity changed while opening")
 		}
@@ -288,9 +352,10 @@ func NewVerifiedExecutableFrom(parent *VerifiedDirectory, relative string) (*Ver
 	digest, err := digestFile(file)
 	if err != nil {
 		_ = file.Close()
+		cleanupNested()
 		return nil, err
 	}
-	return &VerifiedExecutable{path: path, root: dirCapability, parent: parent, ownsRoot: dirCapability != parent, file: file, info: info, digest: digest}, nil
+	return &VerifiedExecutable{path: path, root: dirCapability, parent: parent, ownsRoot: ownsRoot, file: file, info: info, digest: digest}, nil
 }
 
 func (directory *VerifiedDirectory) Path() string {
@@ -681,6 +746,10 @@ func (owned *OwnedDescriptor) VerifyOutputAfter() error {
 	}
 	owned.mu.Lock()
 	defer owned.mu.Unlock()
+	return owned.verifyOutputAfterLocked()
+}
+
+func (owned *OwnedDescriptor) verifyOutputAfterLocked() error {
 	if owned.closed || owned.taskRootCapability == nil {
 		return ErrDescriptorClosed
 	}
@@ -742,6 +811,18 @@ func (owned *OwnedDescriptor) VerifyOutputAfter() error {
 		return fmt.Errorf("%w: output digest: %v", ErrDescriptorIntegrity, err)
 	}
 	return nil
+}
+
+func (owned *OwnedDescriptor) PinnedOutput() (*PinnedOutput, error) {
+	if owned == nil {
+		return nil, ErrDescriptorClosed
+	}
+	owned.mu.Lock()
+	defer owned.mu.Unlock()
+	if err := owned.verifyOutputAfterLocked(); err != nil {
+		return nil, err
+	}
+	return &PinnedOutput{descriptor: owned}, nil
 }
 
 func (owned *OwnedDescriptor) Verify() error {
@@ -838,6 +919,9 @@ func (owned *OwnedDescriptor) Close() error {
 }
 
 func validateDescriptorCapabilities(coverageRoot string, descriptor Descriptor, capabilities DescriptorCapabilities) error {
+	if err := capabilities.Authority.Verify(coverageRoot); err != nil {
+		return integrityError("service authority", err)
+	}
 	if capabilities.Provenance == nil || capabilities.CoverageRoot == nil || capabilities.Root == nil || capabilities.ObjectDirectory == nil || capabilities.GcovExecutable == nil {
 		return integrityError("descriptor capabilities", errors.New("all verified capabilities are required"))
 	}
