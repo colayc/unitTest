@@ -3,6 +3,7 @@ package serviceauthority
 import (
 	"errors"
 	"path/filepath"
+	"strings"
 )
 
 // Authority is an opaque service-owned provenance token. Its fields are
@@ -22,10 +23,19 @@ func Mint(root string) (Authority, error) {
 }
 
 func (authority Authority) Verify(root string) error {
-	if authority.token == nil || authority.root == "" || !samePath(authority.root, root) {
+	if authority.token == nil || authority.root == "" || !pathWithin(authority.root, root) {
 		return errors.New("invalid service-owned provenance")
 	}
 	return nil
+}
+
+func pathWithin(root, child string) bool {
+	root, child = filepath.Clean(root), filepath.Clean(child)
+	if filepath.VolumeName(root) != "" && !equalFold(filepath.VolumeName(root), filepath.VolumeName(child)) {
+		return false
+	}
+	rel, err := filepath.Rel(root, child)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
 }
 
 func (authority Authority) Root() string { return authority.root }

@@ -15,6 +15,7 @@ import (
 
 	"unit-test-ide.local/test-service/internal/cmake"
 	"unit-test-ide.local/test-service/internal/coveragebundle"
+	"unit-test-ide.local/test-service/internal/serviceauthority"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/toolchain"
 	"unit-test-ide.local/test-service/internal/workspace"
@@ -163,12 +164,15 @@ func (pin *testCoveragePin) Close() error { pin.closed = true; return nil }
 
 func testCoverageCapabilities(t *testing.T, coverageRoot, projectRoot, objects, gcov string) coveragebundle.DescriptorCapabilities {
 	t.Helper()
-	authority, err := NewCoverageAuthority(coverageRoot)
+	provenancePath := filepath.Dir(filepath.Dir(coverageRoot))
+	if !pathWithinLocal(provenancePath, projectRoot) || !pathWithinLocal(provenancePath, objects) || !pathWithinLocal(provenancePath, gcov) {
+		t.Fatalf("fixture paths escaped scratch anchor %q", provenancePath)
+	}
+	authority, err := serviceauthority.Mint(provenancePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	provenancePath := filepath.Dir(coverageRoot)
-	provenance, err := coveragebundle.NewVerifiedDirectory(provenancePath)
+	provenance, err := coveragebundle.NewVerifiedDirectoryFromAuthority(authority, ".")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,6 +194,11 @@ func testCoverageCapabilities(t *testing.T, coverageRoot, projectRoot, objects, 
 		t.Fatal(err)
 	}
 	return coveragebundle.DescriptorCapabilities{Authority: authority, Provenance: provenance, CoverageRoot: coverageCapability, Root: rootCapability, ObjectDirectory: objectCapability, GcovExecutable: gcovCapability}
+}
+
+func pathWithinLocal(root, child string) bool {
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(child))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
 }
 
 func TestPlannerSkipsConfigureAndKeepsTargetNamesAsIndependentArguments(t *testing.T) {
@@ -494,11 +503,30 @@ type plannerFixture struct {
 	targetID     string
 }
 
+func plannerScratchDir(t *testing.T) string {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(wd, "..", "..", "..", "..", ".task4-scratch")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.MkdirTemp(root, "planner-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 func newPlannerFixture(t *testing.T) plannerFixture {
 	t.Helper()
-	workspaceDir := filepath.Join(t.TempDir(), "workspace")
+	base := plannerScratchDir(t)
+	dataRoot := filepath.Join(base, "service-data")
+	workspaceDir := filepath.Join(base, "workspace")
 	sourceDir := filepath.Join(workspaceDir, "project")
-	dataRoot := filepath.Join(t.TempDir(), "service-data")
 	buildDir := filepath.Join(dataRoot, "build", "profile")
 	for _, directory := range []string{sourceDir, buildDir} {
 		if err := os.MkdirAll(directory, 0o700); err != nil {
@@ -508,10 +536,10 @@ func newPlannerFixture(t *testing.T) plannerFixture {
 	if err := os.WriteFile(filepath.Join(sourceDir, "CMakeLists.txt"), []byte("project(fixture)"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cmakePath := filepath.Join(t.TempDir(), "cmake.exe")
+	cmakePath := filepath.Join(dataRoot, "cmake.exe")
 	ctestPath := filepath.Join(filepath.Dir(cmakePath), "ctest.exe")
-	cCompiler := filepath.Join(t.TempDir(), "cc.exe")
-	cxxCompiler := filepath.Join(t.TempDir(), "cxx.exe")
+	cCompiler := filepath.Join(dataRoot, "cc.exe")
+	cxxCompiler := filepath.Join(dataRoot, "cxx.exe")
 	for _, path := range []string{cmakePath, ctestPath, cCompiler, cxxCompiler} {
 		if err := os.WriteFile(path, []byte(path), 0o700); err != nil {
 			t.Fatal(err)

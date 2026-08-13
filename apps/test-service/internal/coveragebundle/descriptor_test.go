@@ -12,14 +12,32 @@ import (
 	"unit-test-ide.local/test-service/internal/serviceauthority"
 )
 
+func strictTestTempDir(t *testing.T) string {
+	t.Helper()
+	root := filepath.Join("..", "..", "..", "..", ".task4-scratch")
+	root, err := filepath.Abs(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	directory, err := os.MkdirTemp(root, "case-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	return directory
+}
+
 func TestDescriptorWriteAtomicIsClosedAndDeterministic(t *testing.T) {
-	coverageRoot := filepath.Join(t.TempDir(), "coverage")
+	coverageRoot := filepath.Join(strictTestTempDir(t), "coverage")
 	if err := os.MkdirAll(coverageRoot, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	root := filepath.Join(t.TempDir(), "source")
-	objects := filepath.Join(t.TempDir(), "objects")
-	gcov := filepath.Join(t.TempDir(), "gcov.exe")
+	root := filepath.Join(strictTestTempDir(t), "source")
+	objects := filepath.Join(strictTestTempDir(t), "objects")
+	gcov := filepath.Join(strictTestTempDir(t), "gcov.exe")
 	for _, directory := range []string{root, objects} {
 		if err := os.MkdirAll(directory, 0o700); err != nil {
 			t.Fatal(err)
@@ -74,7 +92,7 @@ func TestDescriptorWriteAtomicIsClosedAndDeterministic(t *testing.T) {
 }
 
 func TestDescriptorRejectsClosedContractAndNativeEscapes(t *testing.T) {
-	base := t.TempDir()
+	base := strictTestTempDir(t)
 	coverageRoot := filepath.Join(base, "coverage")
 	root := filepath.Join(base, "root")
 	objects := filepath.Join(base, "objects")
@@ -115,7 +133,7 @@ func TestDescriptorRejectsClosedContractAndNativeEscapes(t *testing.T) {
 }
 
 func TestDescriptorRejectsUnboundAuthority(t *testing.T) {
-	base := t.TempDir()
+	base := strictTestTempDir(t)
 	coverage := filepath.Join(base, "coverage")
 	if err := os.MkdirAll(coverage, 0o700); err != nil {
 		t.Fatal(err)
@@ -146,7 +164,7 @@ func TestDescriptorRejectsSymlinkEscape(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink fixture requires elevated Windows privilege")
 	}
-	base := t.TempDir()
+	base := strictTestTempDir(t)
 	coverageRoot := filepath.Join(base, "coverage")
 	outside := filepath.Join(base, "outside")
 	if err := os.MkdirAll(coverageRoot, 0o700); err != nil {
@@ -175,13 +193,17 @@ func TestVerifiedDirectoryRejectsAncestorReplacement(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("ancestor replacement fixture requires symlink support")
 	}
-	base := t.TempDir()
+	base := strictTestTempDir(t)
 	parent := filepath.Join(base, "parent")
 	child := filepath.Join(parent, "child")
 	if err := os.MkdirAll(child, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	capability, err := NewVerifiedDirectory(child)
+	authority, err := serviceauthority.Mint(filepath.Dir(child))
+	if err != nil {
+		t.Fatal(err)
+	}
+	capability, err := NewVerifiedDirectoryFromAuthority(authority, filepath.Base(child))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +221,7 @@ func TestVerifiedDirectoryRejectsAncestorReplacement(t *testing.T) {
 }
 
 func TestDescriptorDetectsTamperBeforeCloseAndClosesOnce(t *testing.T) {
-	base := t.TempDir()
+	base := strictTestTempDir(t)
 	coverageRoot := filepath.Join(base, "coverage")
 	root := filepath.Join(base, "root")
 	objects := filepath.Join(base, "objects")
@@ -241,7 +263,11 @@ func descriptorCapabilitiesForTest(t *testing.T, coverageRoot, root, objects, gc
 	for !pathWithin(provenancePath, root) || !pathWithin(provenancePath, objects) || !pathWithin(provenancePath, gcov) {
 		provenancePath = filepath.Dir(provenancePath)
 	}
-	provenance, err := NewVerifiedDirectory(provenancePath)
+	anchor, err := serviceauthority.Mint(provenancePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provenance, err := NewVerifiedDirectoryFromAuthority(anchor, ".")
 	if err != nil {
 		t.Fatal(err)
 	}

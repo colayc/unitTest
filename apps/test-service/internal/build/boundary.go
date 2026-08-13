@@ -20,7 +20,7 @@ import (
 // data root. The opaque token is minted by the trusted build boundary, not by
 // coveragebundle callers.
 func NewCoverageAuthority(coverageRoot string) (serviceauthority.Authority, error) {
-	return serviceauthority.Mint(coverageRoot)
+	return serviceauthority.Mint(filepath.Dir(filepath.Clean(coverageRoot)))
 }
 
 type executionBoundary struct {

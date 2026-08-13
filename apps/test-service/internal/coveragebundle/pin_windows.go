@@ -151,7 +151,7 @@ func openPinnedWindowsObject(path string, directory bool) (*os.File, error) {
 	share := uint32(windows.FILE_SHARE_READ)
 	if directory {
 		access = 0
-		flags = windows.FILE_FLAG_BACKUP_SEMANTICS | windows.FILE_FLAG_OPEN_REPARSE_POINT
+		flags = windows.FILE_FLAG_BACKUP_SEMANTICS
 		share |= windows.FILE_SHARE_WRITE
 	}
 	handle, err := windows.CreateFile(name, access, share, nil, windows.OPEN_EXISTING, flags, 0)

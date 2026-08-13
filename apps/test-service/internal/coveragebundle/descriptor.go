@@ -10,7 +10,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -205,6 +204,12 @@ type DescriptorCapabilities struct {
 }
 
 func NewVerifiedDirectory(path string) (*VerifiedDirectory, error) {
+	return nil, errors.New("verified directory requires service authority")
+}
+
+// newVerifiedDirectory is intentionally unexported: only an authority-bound
+// constructor may mint a service path capability.
+func newVerifiedDirectory(path string) (*VerifiedDirectory, error) {
 	if err := validateAbsolutePath(path); err != nil {
 		return nil, err
 	}
@@ -213,6 +218,32 @@ func NewVerifiedDirectory(path string) (*VerifiedDirectory, error) {
 		return nil, fmt.Errorf("capture verified directory: %w", err)
 	}
 	return &VerifiedDirectory{path: path, identities: identities, pins: pins}, nil
+}
+
+// NewVerifiedDirectoryFromAuthority derives a capability from the
+// service-owned anchor and a relative descendant. Bare absolute paths cannot
+// mint capabilities.
+func NewVerifiedDirectoryFromAuthority(authority serviceauthority.Authority, relative string) (*VerifiedDirectory, error) {
+	anchor := authority.Root()
+	if err := authority.Verify(anchor); err != nil {
+		return nil, err
+	}
+	if relative == "" || relative == "." {
+		return newVerifiedDirectory(anchor)
+	}
+	if filepath.IsAbs(relative) || filepath.Clean(relative) != relative || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return nil, errors.New("invalid relative verified directory")
+	}
+	parent, err := newVerifiedDirectory(anchor)
+	if err != nil {
+		return nil, err
+	}
+	child, err := NewVerifiedDirectoryFrom(parent, relative)
+	if err != nil {
+		_ = parent.Close()
+		return nil, err
+	}
+	return child, nil
 }
 
 // NewVerifiedDirectoryFrom resolves a child relative to an already trusted
@@ -264,26 +295,31 @@ func NewVerifiedDirectoryFrom(parent *VerifiedDirectory, relative string) (*Veri
 }
 
 func NewVerifiedExecutable(authorizedRoot, path string) (*VerifiedExecutable, error) {
-	root, err := NewVerifiedDirectory(authorizedRoot)
+	return nil, errors.New("verified executable requires service authority")
+}
+
+// NewVerifiedExecutableFromAuthority derives an executable from the
+// authority anchor and a relative path. The returned executable owns the
+// complete retained directory chain.
+func NewVerifiedExecutableFromAuthority(authority serviceauthority.Authority, relative string) (*VerifiedExecutable, error) {
+	if filepath.IsAbs(relative) || relative == "" || filepath.Clean(relative) != relative || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return nil, errors.New("invalid relative verified executable")
+	}
+	directory := filepath.Dir(relative)
+	if directory == "." {
+		directory = "."
+	}
+	root, err := NewVerifiedDirectoryFromAuthority(authority, directory)
 	if err != nil {
 		return nil, err
 	}
-	if !pathWithin(root.path, path) {
-		_ = root.Close()
-		return nil, errors.New("executable is outside authorized root")
-	}
-	file, info, err := openDescriptorGcov(path)
+	executable, err := NewVerifiedExecutableFrom(root, filepath.Base(relative))
 	if err != nil {
 		_ = root.Close()
 		return nil, err
 	}
-	digest, err := digestFile(file)
-	if err != nil {
-		_ = file.Close()
-		_ = root.Close()
-		return nil, err
-	}
-	return &VerifiedExecutable{path: path, root: root, file: file, info: info, digest: digest}, nil
+	executable.ownsRoot = true
+	return executable, nil
 }
 
 func NewVerifiedExecutableFrom(parent *VerifiedDirectory, relative string) (*VerifiedExecutable, error) {
@@ -390,6 +426,13 @@ func (directory *VerifiedDirectory) Verify() error {
 	for _, pin := range directory.pins {
 		pinnedPaths[pin.path] = struct{}{}
 	}
+	for parent := directory.parent; parent != nil; parent = parent.parent {
+		parent.mu.Lock()
+		for _, pin := range parent.pins {
+			pinnedPaths[pin.path] = struct{}{}
+		}
+		parent.mu.Unlock()
+	}
 	for _, identity := range directory.identities {
 		info, err := os.Lstat(identity.path)
 		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
@@ -398,31 +441,13 @@ func (directory *VerifiedDirectory) Verify() error {
 			}
 			return fmt.Errorf("%w: verified directory %s: %v", ErrDescriptorIntegrity, identity.path, err)
 		}
-		if _, pinned := pinnedPaths[identity.path]; pinned {
-			continue
+		if _, pinned := pinnedPaths[identity.path]; !pinned {
+			return fmt.Errorf("%w: ancestor %s has no retained pin", ErrDescriptorIntegrity, identity.path)
 		}
-		resolved, statErr := os.Stat(identity.path)
-		if statErr != nil || !sameDirectoryIdentity(identity.info, resolved) {
-			if statErr == nil {
-				statErr = errors.New("directory identity changed or resolves through reparse point")
-			}
-			return fmt.Errorf("%w: verified directory %s: %v", ErrDescriptorIntegrity, identity.path, statErr)
-		}
+		// The retained component handle is the authority; pathname Stat is not
+		// used as a second, TOCTOU-prone identity source.
 	}
 	return nil
-}
-
-func sameDirectoryIdentity(expected, actual os.FileInfo) bool {
-	if expected == nil || actual == nil {
-		return false
-	}
-	if os.SameFile(expected, actual) {
-		return true
-	}
-	// Windows can return non-comparable FileInfo wrappers for a stable
-	// directory across separate Stat calls. Compare the native identity token
-	// and immutable type bits as a conservative fallback.
-	return expected.Sys() != nil && actual.Sys() != nil && reflect.DeepEqual(expected.Sys(), actual.Sys()) && expected.Mode().Perm() == actual.Mode().Perm() && expected.IsDir() == actual.IsDir()
 }
 
 func (directory *VerifiedDirectory) Close() error {
@@ -535,15 +560,9 @@ func capturePathIdentities(path string) ([]pathIdentity, []*pinnedObject, error)
 		}
 		pinned, pinErr := pinDirectObject(current, true)
 		if pinErr != nil {
-			if current == path {
-				return fail(fmt.Errorf("path component %s resolves through reparse point: %w", current, pinErr))
-			}
-			// Some Windows system ancestors deny opening a directory handle even
-			// for metadata access. Retain their resolved identity token and
-			// verify it component-wise below; fail closed if that token changes.
-		} else {
-			pins = append(pins, pinned)
+			return fail(fmt.Errorf("path component %s cannot be strictly pinned: %w", current, pinErr))
 		}
+		pins = append(pins, pinned)
 		identities = append([]pathIdentity{{path: current, info: resolvedInfo}}, identities...)
 		parent := filepath.Dir(current)
 		if parent == current {

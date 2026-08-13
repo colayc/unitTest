@@ -33,7 +33,7 @@ func (pin *fakeRunnerPin) Close() error {
 }
 
 func TestPrepareRunnerBuildsExactIsolatedProcessSpec(t *testing.T) {
-	base := t.TempDir()
+	base := strictTestTempDir(t)
 	coverageRoot := filepath.Join(base, "coverage")
 	projectRoot := filepath.Join(base, "project")
 	objects := filepath.Join(base, "objects")
@@ -105,7 +105,7 @@ func TestPrepareRunnerBuildsExactIsolatedProcessSpec(t *testing.T) {
 }
 
 func TestPrepareRunnerRejectsTamperedPinAndOutputEscape(t *testing.T) {
-	base := t.TempDir()
+	base := strictTestTempDir(t)
 	coverageRoot := filepath.Join(base, "coverage")
 	if err := os.MkdirAll(coverageRoot, 0o700); err != nil {
 		t.Fatal(err)
@@ -134,7 +134,7 @@ func TestPrepareRunnerRejectsTamperedPinAndOutputEscape(t *testing.T) {
 }
 
 func TestPreparedExecutionDetectsRootAndGcovTamper(t *testing.T) {
-	base := t.TempDir()
+	base := strictTestTempDir(t)
 	coverageRoot := filepath.Join(base, "coverage")
 	projectRoot := filepath.Join(base, "project")
 	objects := filepath.Join(base, "objects")
@@ -169,7 +169,7 @@ func TestPreparedExecutionDetectsRootAndGcovTamper(t *testing.T) {
 }
 
 func TestPreparedExecutionDetectsOutputReplacementAfterVerifyAfter(t *testing.T) {
-	base := t.TempDir()
+	base := strictTestTempDir(t)
 	coverageRoot := filepath.Join(base, "coverage")
 	projectRoot := filepath.Join(base, "project")
 	objects := filepath.Join(base, "objects")
@@ -217,7 +217,7 @@ func TestPreparedExecutionDetectsOutputReplacementAfterVerifyAfter(t *testing.T)
 }
 
 func TestPreparedExecutionDetectsOutputInPlaceMutation(t *testing.T) {
-	base := t.TempDir()
+	base := strictTestTempDir(t)
 	coverageRoot := filepath.Join(base, "coverage")
 	projectRoot := filepath.Join(base, "project")
 	objects := filepath.Join(base, "objects")
@@ -255,7 +255,7 @@ func TestPreparedExecutionDetectsOutputInPlaceMutation(t *testing.T) {
 }
 
 func TestPinnedOutputConsumesWithoutPathReopen(t *testing.T) {
-	base := t.TempDir()
+	base := strictTestTempDir(t)
 	coverageRoot, projectRoot, objects := filepath.Join(base, "coverage"), filepath.Join(base, "project"), filepath.Join(base, "objects")
 	for _, directory := range []string{coverageRoot, projectRoot, objects} {
 		if err := os.MkdirAll(directory, 0o700); err != nil {
