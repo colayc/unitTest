@@ -104,7 +104,7 @@ docs/
 
 验收标准：桌面 IDE 能打开示例工作区，未受信任时拒绝执行，受信任后发现测试，并通过外部 Go 服务运行测试。
 
-首个 Vertical Slice 状态：已实现。独立 Code-OSS Extension package 已完成 Workspace Trust gate、真实 Go Service lifecycle、Windows Named Pipe/Linux Unix Socket platform contract、现有 Protocol Client 接入、`workspace/inspect` 命令，以及 Extension Development Host activation smoke harness。Windows Named Pipe 已由本地 runtime smoke 实际验证；Linux Unix Socket evidence 继续由 Linux CI 提供。
+首个 Vertical Slice 状态：已实现。独立 Code-OSS Extension package 已完成 Workspace Trust gate、真实 Go Service lifecycle、Windows Named Pipe/Linux Unix Socket platform contract、现有 Protocol Client 接入、`workspace/inspect` 命令，以及由生产 `activate()` 成功完成 marker 驱动的 Extension Development Host smoke harness。Windows Named Pipe 已由本地 runtime smoke 实际验证；Code-OSS 信任丢失通过 Extension Host teardown/deactivation path 清理 Service；Linux Unix Socket evidence 继续由 Linux CI 提供。
 
 详细设计：`docs/superpowers/specs/2026-08-16-phase6-code-oss-extension-design.md`
 

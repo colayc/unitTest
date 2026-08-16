@@ -34,7 +34,7 @@
 - Modify: `pnpm-workspace.yaml`
 
 **Interfaces:**
-- Produces package name `@unit-test-ide/code-oss-extension`。
+- Produces legal Code-OSS manifest name `code-oss-extension`；与 publisher `unit-test-ide` 组成 Extension ID `unit-test-ide.code-oss-extension`。
 - Produces `ExtensionState`, `TrustState`, `ServiceState` 和 `ServiceStatus` 类型，后续 Task 只能依赖这些稳定类型。
 
 - [ ] **Step 1: Write the failing manifest and contract tests**
@@ -51,7 +51,7 @@ const root = resolve(dirname(import.meta.dirname), "..");
 
 test("extension manifest declares workspace extension and safe commands", async () => {
   const manifest = JSON.parse(await readFile(resolve(root, "package.json"), "utf8")) as Record<string, unknown>;
-  assert.equal(manifest.name, "@unit-test-ide/code-oss-extension");
+  assert.equal(manifest.name, "code-oss-extension");
   assert.equal(manifest.main, "./dist/src/extension.js");
   assert.deepEqual(manifest.extensionKind, ["workspace"]);
   const contributes = manifest.contributes as { commands: Array<{ command: string }> };
@@ -73,7 +73,7 @@ test("contracts expose explicit lifecycle states", async () => {
 Run:
 
 ```powershell
-pnpm --filter @unit-test-ide/code-oss-extension test
+pnpm --filter code-oss-extension test
 ```
 
 Expected: FAIL because the workspace package, manifest and contract module do not exist.
@@ -95,7 +95,7 @@ packages:
 
 ```json
 {
-  "name": "@unit-test-ide/code-oss-extension",
+  "name": "code-oss-extension",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -150,8 +150,8 @@ export interface ServiceStatus { state: ServiceState; detail?: string }
 Run:
 
 ```powershell
-pnpm --filter @unit-test-ide/code-oss-extension test
-pnpm --filter @unit-test-ide/code-oss-extension build
+pnpm --filter code-oss-extension test
+pnpm --filter code-oss-extension build
 ```
 
 Expected: manifest and contract tests PASS，TypeScript build PASS。
@@ -205,7 +205,7 @@ test("trust transition emits trusted only for one trusted folder", () => {
 
 - [ ] **Step 2: Run the focused tests and verify failure**
 
-Run `pnpm --filter @unit-test-ide/code-oss-extension test -- --test-name-pattern "workspace|trust"`。
+Run `pnpm --filter code-oss-extension test -- --test-name-pattern "workspace|trust"`。
 
 Expected: FAIL because `trust-gate.ts` is missing.
 
@@ -231,7 +231,7 @@ export function canStartService(state: TrustState): state is "trusted" { return 
 
 - [ ] **Step 5: Run tests**
 
-Run `pnpm --filter @unit-test-ide/code-oss-extension test -- --test-name-pattern "workspace|trust"`。
+Run `pnpm --filter code-oss-extension test -- --test-name-pattern "workspace|trust"`。
 
 Expected: all Trust gate tests PASS。
 
@@ -320,7 +320,7 @@ export class ServiceManager {
 Run:
 
 ```powershell
-pnpm --filter @unit-test-ide/code-oss-extension test -- --test-name-pattern "resource|lifecycle|service"
+pnpm --filter code-oss-extension test -- --test-name-pattern "resource|lifecycle|service"
 ```
 
 Expected: FAIL because `service-resources.ts` and `ServiceManager` are undefined。
@@ -360,7 +360,7 @@ await withTimeout("service capabilities", client.getCapabilities());
 
 - [ ] **Step 6: Run focused tests**
 
-Run `pnpm --filter @unit-test-ide/code-oss-extension test -- --test-name-pattern "resource|lifecycle|service"`。
+Run `pnpm --filter code-oss-extension test -- --test-name-pattern "resource|lifecycle|service"`。
 
 Expected: resource/lifecycle tests PASS。
 
@@ -368,7 +368,7 @@ Expected: resource/lifecycle tests PASS。
 
 在测试中连续执行 50 次 `start -> stop -> start -> stop`，断言无重复 cleanup、无旧 token 复用、无未处理 Promise rejection。
 
-Run `pnpm --filter @unit-test-ide/code-oss-extension test -- --test-name-pattern "repeated|restart"`。
+Run `pnpm --filter code-oss-extension test -- --test-name-pattern "repeated|restart"`。
 
 - [ ] **Step 8: Commit**
 
@@ -417,7 +417,7 @@ test("inspect command delegates only to workspace/inspect", async () => {
 
 - [ ] **Step 2: Run tests and verify failure**
 
-Run `pnpm --filter @unit-test-ide/code-oss-extension test -- --test-name-pattern "activation|command|inspect"`。
+Run `pnpm --filter code-oss-extension test -- --test-name-pattern "activation|command|inspect"`。
 
 Expected: FAIL because activation, commands and protocol adapter do not exist。
 
@@ -453,13 +453,13 @@ export function createProtocolClient(endpoint: string): Promise<ProtocolClient>;
 2. 创建 `TrustGate`、`ServiceManager`、Output Channel 和 Status Bar Item；
 3. 监听 `onDidChangeWorkspaceFolders` 与 `onDidGrantWorkspaceTrust`；
 4. trusted 单根且 `unitTestIde.autoStart === true` 时启动 manager；
-5. trust revoke、workspace close 或 `deactivate` 时调用幂等 stop；
+5. workspace close 时调用幂等 stop；Code-OSS trust revoke 通过 Extension Host reload/teardown 进入 `deactivate`，不依赖不存在的 revoke event；
 6. 将 `stopped/starting/running/stopping/failed` 投影到规定状态栏文本；
 7. 在 `deactivate` 中等待 manager.stop 的有限超时，不阻塞 Extension Host 无限等待。
 
 - [ ] **Step 6: Run focused tests**
 
-Run `pnpm --filter @unit-test-ide/code-oss-extension test -- --test-name-pattern "activation|command|inspect"`。
+Run `pnpm --filter code-oss-extension test -- --test-name-pattern "activation|command|inspect"`。
 
 Expected: activation/command tests PASS。
 
@@ -493,7 +493,7 @@ git commit -m "feat: connect Code-OSS commands to service protocol"
 - 从 `UNIT_TEST_IDE_SERVICE_BINARY` 读取 binary；未设置时用仓库 `build/unit-test-service(.exe)`；
 - trusted fixture 启动真实 Service，等待 handshake/capabilities，执行 `inspectWorkspace`；
 - untrusted fixture 在调用 `start` 前后断言 service spawn count 为 0、token/endpoint/data directory 不存在；
-- revoke trust 后断言 child 退出且旧 endpoint 不可再次连接；
+- 将 live trust state 置为 false 后显式调用 `controller.deactivate()`，模拟 Code-OSS trust-loss reload/teardown，并断言 child 退出且旧 endpoint 不可再次连接；不得伪造 revoke callback；
 - Windows 与 Linux 使用同一测试 contract，platform-specific endpoint assertion 分别执行。
 
 - [ ] **Step 2: Write failing Extension Host smoke harness**
@@ -506,15 +506,15 @@ git commit -m "feat: connect Code-OSS commands to service protocol"
 <fixture-workspace>
 ```
 
-脚本等待 Extension Host 产生明确的 activation marker；没有 `CODE_OSS_EXECUTABLE` 时退出码为 0 并输出 `SKIP: CODE_OSS_EXECUTABLE is not configured`，不得伪造 PASS。
+生产 `activate()` 只在 activation 成功完成后输出固定、无敏感信息的 `UNIT_TEST_IDE_EXTENSION_ACTIVATED` marker；脚本等待该 marker。activation reject 不得输出 marker；没有 `CODE_OSS_EXECUTABLE` 时退出码为 0 并输出 `SKIP: CODE_OSS_EXECUTABLE is not configured`，不得伪造 PASS。
 
 - [ ] **Step 3: Run RED smoke tests**
 
 Run:
 
 ```powershell
-pnpm --filter @unit-test-ide/code-oss-extension test:service-smoke
-pnpm --filter @unit-test-ide/code-oss-extension test:host
+pnpm --filter code-oss-extension test:service-smoke
+pnpm --filter code-oss-extension test:host
 ```
 
 Expected: service smoke 在未完成接线前 FAIL；host smoke 在无 executable 时只产生明确 SKIP。
@@ -543,9 +543,9 @@ Expected: service smoke 在未完成接线前 FAIL；host smoke 在无 executabl
 在 pinned 环境运行：
 
 ```powershell
-pnpm --filter @unit-test-ide/code-oss-extension test
-pnpm --filter @unit-test-ide/code-oss-extension test:service-smoke
-pnpm --filter @unit-test-ide/code-oss-extension test:host
+pnpm --filter code-oss-extension test
+pnpm --filter code-oss-extension test:service-smoke
+pnpm --filter code-oss-extension test:host
 pnpm build
 pnpm test:go
 git diff --check

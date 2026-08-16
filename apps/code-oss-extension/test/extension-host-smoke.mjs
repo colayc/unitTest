@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { EXTENSION_ACTIVATION_MARKER } from "../dist/src/extension.js";
 import { redactServiceError } from "../dist/src/service-resources.js";
 
 const executable = process.env.CODE_OSS_EXECUTABLE?.trim();
@@ -16,7 +17,6 @@ const smokeRoot = await mkdtemp(join(tmpdir(), "unit-test-ide-extension-host-"))
 const workspace = join(smokeRoot, "workspace");
 const userDataDirectory = join(smokeRoot, "user-data");
 const extensionsDirectory = join(smokeRoot, "extensions");
-const activationMarker = /ExtensionService#_doActivateExtension[^\r\n]*unit-test-ide\.code-oss-extension[^\r\n]*onStartupFinished/i;
 const sensitive = [executable, repositoryRoot, extensionPath, smokeRoot, workspace, userDataDirectory, extensionsDirectory];
 
 function redactedFailure(message, output = "") {
@@ -49,7 +49,7 @@ function waitForActivation(child) {
     };
     const onData = (chunk) => {
       output = boundedOutput(output, chunk);
-      if (activationMarker.test(output)) finish();
+      if (output.includes(EXTENSION_ACTIVATION_MARKER)) finish();
     };
     const onError = (error) => finish(error);
     const onExit = (code, signal) => finish(new Error(

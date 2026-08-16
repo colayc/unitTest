@@ -5,6 +5,8 @@ import {
   type WorkspaceSnapshot as ProtocolWorkspaceSnapshot
 } from "@unit-test-ide/test-client";
 import {
+  EXTENSION_ACTIVATION_MARKER,
+  activateControllerWithMarker,
   createExtensionController,
   type ExtensionHost,
   type LifecycleManager
@@ -198,6 +200,37 @@ function createExtensionHarness(options: HarnessOptions = {}) {
     }
   };
 }
+
+test("activation completion marker is emitted only after controller activation resolves", async () => {
+  const markers: string[] = [];
+  let releaseActivation: (() => void) | undefined;
+  const activation = activateControllerWithMarker(
+    {
+      activate: () => new Promise<void>((resolve) => { releaseActivation = resolve; })
+    },
+    (marker) => markers.push(marker)
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(markers, []);
+  assert.ok(releaseActivation);
+  releaseActivation();
+  await activation;
+  assert.deepEqual(markers, [EXTENSION_ACTIVATION_MARKER]);
+});
+
+test("activation completion marker is not emitted when controller activation rejects", async () => {
+  const markers: string[] = [];
+
+  await assert.rejects(
+    () => activateControllerWithMarker(
+      { activate: async () => { throw new Error("activation rejected"); } },
+      (marker) => markers.push(marker)
+    ),
+    /activation rejected/
+  );
+  assert.deepEqual(markers, []);
+});
 
 test("untrusted activation publishes blocked status and does not start service", async () => {
   const host = createExtensionHarness({ folderCount: 1, isTrusted: false });

@@ -59,23 +59,23 @@ pnpm test:e2e
 独立 Extension 位于 `apps/code-oss-extension`。使用固定 Node.js 与 pnpm runtime 构建：
 
 ```sh
-pnpm --filter @unit-test-ide/code-oss-extension build
-pnpm --filter @unit-test-ide/code-oss-extension test
+pnpm --filter code-oss-extension build
+pnpm --filter code-oss-extension test
 ```
 
 真实 Service smoke 不下载依赖，也不通过 shell 启动子进程。先使用固定 Go runtime 按现有 `service-probe` 约定构建 `unit-test-service`、`cmake-fixture` 等本地 fixture，再运行验收：
 
 ```sh
 node tools/service-probe/build-service.mjs
-pnpm --filter @unit-test-ide/code-oss-extension test:service-smoke
+pnpm --filter code-oss-extension test:service-smoke
 ```
 
-默认 Service binary 为仓库 `build/unit-test-service`（Windows 为 `build/unit-test-service.exe`）。开发者也可通过 `UNIT_TEST_IDE_SERVICE_BINARY` 指定另一份已构建 binary。该 smoke 在当前平台执行同一 contract：trusted workspace 必须完成 `READY`、handshake、capabilities 与 `workspace/inspect`；untrusted workspace 必须保持零 Service process、零 token、零 endpoint 和零 data directory；trust revoke 后旧 endpoint 必须不可重连。Windows 本地结果只作为 Named Pipe evidence，Linux Unix Socket 必须由 Linux CI 实际执行，不能用 cross-compile 代替。
+默认 Service binary 为仓库 `build/unit-test-service`（Windows 为 `build/unit-test-service.exe`）。开发者也可通过 `UNIT_TEST_IDE_SERVICE_BINARY` 指定另一份已构建 binary。该 smoke 在当前平台执行同一 contract：trusted workspace 必须完成 `READY`、handshake、capabilities 与 `workspace/inspect`；untrusted workspace 必须保持零 Service process、零 token、零 endpoint 和零 data directory；Code-OSS 信任丢失会 reload/teardown Extension Host，因此验收通过显式 `deactivate()` 验证 child 退出且旧 endpoint 不可重连，不模拟不存在的 trust-revoke callback。Windows 本地结果只作为 Named Pipe evidence，Linux Unix Socket 必须由 Linux CI 实际执行，不能用 cross-compile 代替。
 
 需要分别定位 trusted 与 untrusted 验收时，先完成 Extension build，再运行：
 
 ```sh
-node --test --test-name-pattern "trusted real service|revoking trust" apps/code-oss-extension/dist/test/service-smoke.test.js
+node --test --test-name-pattern "trusted real service|host deactivation" apps/code-oss-extension/dist/test/service-smoke.test.js
 node --test --test-name-pattern "untrusted real-service" apps/code-oss-extension/dist/test/service-smoke.test.js
 ```
 
@@ -83,10 +83,10 @@ Extension Host smoke 需要本机已有 Code-OSS 或 Code-OSS compatible executa
 
 ```powershell
 $env:CODE_OSS_EXECUTABLE = "C:\path\to\code-oss.exe"
-pnpm --filter @unit-test-ide/code-oss-extension test:host
+pnpm --filter code-oss-extension test:host
 ```
 
-脚本通过 `--extensionDevelopmentPath` 与 `--extensionDevelopmentKind=workspace` 启动隔离的 Extension Development Host，等待 `onStartupFinished` activation marker，然后终止并等待 host process 退出。未配置 `CODE_OSS_EXECUTABLE` 时只输出 `SKIP: CODE_OSS_EXECUTABLE is not configured` 并以 0 退出；该结果不是 PASS，也不能作为 Extension Host activation evidence。
+脚本通过 `--extensionDevelopmentPath` 与 `--extensionDevelopmentKind=workspace` 启动隔离的 Extension Development Host，等待生产 `activate()` 成功完成后输出的固定 `UNIT_TEST_IDE_EXTENSION_ACTIVATED` marker，然后终止并等待 host process 退出。marker 不会在 activation reject 时输出。未配置 `CODE_OSS_EXECUTABLE` 时只输出 `SKIP: CODE_OSS_EXECUTABLE is not configured` 并以 0 退出；该结果不是 PASS，也不能作为 Extension Host activation evidence。
 
 ## Native 开发
 

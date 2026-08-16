@@ -7,8 +7,9 @@ const root = resolve(dirname(import.meta.dirname), "..");
 
 test("extension manifest declares workspace extension and safe commands", async () => {
   const manifest = JSON.parse(await readFile(resolve(root, "package.json"), "utf8")) as Record<string, unknown>;
-  assert.equal(manifest.name, "@unit-test-ide/code-oss-extension");
+  assert.equal(manifest.name, "code-oss-extension");
   assert.equal(manifest.publisher, "unit-test-ide");
+  assert.equal(`${String(manifest.publisher)}.${String(manifest.name)}`, "unit-test-ide.code-oss-extension");
   assert.equal(manifest.main, "./dist/src/extension.js");
   assert.deepEqual(manifest.extensionKind, ["workspace"]);
   const contributes = manifest.contributes as { commands: Array<{ command: string }> };

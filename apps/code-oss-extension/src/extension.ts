@@ -15,6 +15,7 @@ import { ServiceManager, type ServiceManagerOptions } from "./service-manager.js
 import { TrustGate, type WorkspaceSnapshot } from "./trust-gate.js";
 
 const DEFAULT_STOP_TIMEOUT_MS = 2_000;
+export const EXTENSION_ACTIVATION_MARKER = "UNIT_TEST_IDE_EXTENSION_ACTIVATED";
 
 export interface ExtensionWorkspaceSnapshot extends WorkspaceSnapshot {
   workspaceRoot?: string;
@@ -317,6 +318,14 @@ export function createExtensionController(
   return new ExtensionController(host, options);
 }
 
+export async function activateControllerWithMarker(
+  controller: { activate(): Promise<void> },
+  emitMarker: (marker: string) => void = (marker) => console.log(marker)
+): Promise<void> {
+  await controller.activate();
+  emitMarker(EXTENSION_ACTIVATION_MARKER);
+}
+
 function createVSCodeHost(
   vscode: typeof vscodeTypes,
   context: vscodeTypes.ExtensionContext
@@ -355,7 +364,7 @@ export async function activate(context: vscodeTypes.ExtensionContext): Promise<v
   const vscode = await import("vscode");
   const controller = createExtensionController(createVSCodeHost(vscode, context));
   activeController = controller;
-  await controller.activate();
+  await activateControllerWithMarker(controller);
 }
 
 export async function deactivate(): Promise<void> {

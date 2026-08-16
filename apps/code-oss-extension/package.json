@@ -1,5 +1,5 @@
 {
-  "name": "@unit-test-ide/code-oss-extension",
+  "name": "code-oss-extension",
   "publisher": "unit-test-ide",
   "version": "0.1.0",
   "private": true,

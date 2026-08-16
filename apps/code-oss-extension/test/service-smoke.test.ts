@@ -273,12 +273,11 @@ test("untrusted real-service fixture creates no process, token, endpoint, or dat
   });
 });
 
-test("revoking trust stops the real child and makes its old endpoint unreachable", async (t) => {
+test("host deactivation after trust loss stops the real child and makes its old endpoint unreachable", async (t) => {
   const fixture = await createFixture();
   const observations = createObservations();
   const sensitive = [fixture.root, fixture.workspace, fixture.dataDirectory, serviceBinary, cmakeFixture];
   const state = { trusted: true };
-  const trustListeners = new Set<() => void | Promise<void>>();
   const subscriptions: Array<{ dispose(): void }> = [];
   let manager: ServiceManager | undefined;
 
@@ -302,10 +301,7 @@ test("revoking trust stops the real child and makes its old endpoint unreachable
     createStatusBarItem: () => ({ text: "", show() {}, dispose() {} }),
     registerCommand: () => disposable(),
     onDidChangeWorkspaceFolders: () => disposable(),
-    onDidGrantWorkspaceTrust: (listener) => {
-      trustListeners.add(listener);
-      return disposable(() => trustListeners.delete(listener));
-    },
+    onDidGrantWorkspaceTrust: () => disposable(),
     showErrorMessage: () => undefined
   };
 
@@ -336,8 +332,9 @@ test("revoking trust stops the real child and makes its old endpoint unreachable
     const oldEndpoint = session.endpoint;
     assert.equal(observations.children.length, 1);
 
+    // Code-OSS exposes a grant event only; trust loss tears down/reloads the Extension Host.
     state.trusted = false;
-    await Promise.all([...trustListeners].map(async (listener) => listener()));
+    await controller.deactivate();
 
     assert.equal(manager.status.state, "stopped");
     assert.equal(manager.session, undefined);
