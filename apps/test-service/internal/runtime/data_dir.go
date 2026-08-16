@@ -43,7 +43,16 @@ func PrepareDataDir(root string) (Layout, error) {
 }
 
 func prepareDataDirGuard(root string) (Layout, io.Closer, error) {
+	return prepareDataDirGuardWithPin(root, pinOwnerOnlyDirectory)
+}
+
+// prepareDataDirGuardWithPin keeps the directory-pinning dependency explicit
+// so tests can exercise failure cleanup without changing production behavior.
+func prepareDataDirGuardWithPin(root string, pin func(string) (io.Closer, error)) (Layout, io.Closer, error) {
 	if root == "" {
+		return Layout{}, nil, ErrUnsafeDataDir
+	}
+	if pin == nil {
 		return Layout{}, nil, ErrUnsafeDataDir
 	}
 	absolute, err := filepath.Abs(root)
@@ -51,7 +60,7 @@ func prepareDataDirGuard(root string) (Layout, io.Closer, error) {
 		return Layout{}, nil, ErrUnsafeDataDir
 	}
 	absolute = filepath.Clean(absolute)
-	guard, err := pinOwnerOnlyDirectory(absolute)
+	guard, err := pin(absolute)
 	if err != nil {
 		return Layout{}, nil, ErrUnsafeDataDir
 	}
@@ -69,11 +78,11 @@ func prepareDataDirGuard(root string) (Layout, io.Closer, error) {
 		return Layout{}, nil, errors.Join(ErrUnsafeDataDir, guard.Close())
 	}
 	layout.CoverageAnchor = anchor
-	buildGuard, err := pinOwnerOnlyDirectory(layout.Build)
+	buildGuard, err := pin(layout.Build)
 	if err != nil {
 		return Layout{}, nil, errors.Join(ErrUnsafeDataDir, guard.Close())
 	}
-	controlGuard, err := pinOwnerOnlyDirectory(layout.Controls)
+	controlGuard, err := pin(layout.Controls)
 	if err != nil {
 		return Layout{}, nil, errors.Join(
 			ErrUnsafeDataDir,
@@ -81,7 +90,7 @@ func prepareDataDirGuard(root string) (Layout, io.Closer, error) {
 			guard.Close(),
 		)
 	}
-	coverageGuard, err := pinOwnerOnlyDirectory(layout.Coverage)
+	coverageGuard, err := pin(layout.Coverage)
 	if err != nil {
 		return Layout{}, nil, errors.Join(
 			ErrUnsafeDataDir,

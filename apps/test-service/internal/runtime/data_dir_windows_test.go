@@ -17,6 +17,13 @@ import (
 	"unit-test-ide.local/test-service/internal/instance"
 )
 
+func assertOwnerOnlyDirectoryForTest(t *testing.T, path string) {
+	t.Helper()
+	if err := validateOwnerOnlyDirectory(path); err != nil {
+		t.Fatalf("owner-only directory %q validation failed: %v", path, err)
+	}
+}
+
 func TestPrepareDataDirCreatesProtectedOwnerOnlyWindowsDirectory(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "owner-only")
 	if _, err := PrepareDataDir(root); err != nil {
