@@ -1,5 +1,6 @@
 import type { ServiceStatus, TrustState } from "./contracts.js";
 import type { ExtensionProtocolClient } from "./protocol-client.js";
+import { redactServiceError } from "./service-resources.js";
 
 export interface DisposableLike {
   dispose(): unknown;
@@ -31,6 +32,7 @@ export interface CommandManager {
 
 export interface CommandStatus {
   readonly trustState: TrustState;
+  refreshTrust(): TrustState;
   projectService(status: ServiceStatus): void;
 }
 
@@ -47,14 +49,15 @@ const BLOCKED_MESSAGES: Record<Exclude<TrustState, "trusted">, string> = {
   "blocked-untrusted": "Unit Test: Trust this workspace to use the service."
 };
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function managerError(manager: CommandManager, error: unknown): string {
-  return manager.status.state === "failed" && manager.status.detail
+export async function presentManagerError(
+  host: Pick<CommandHost, "showErrorMessage">,
+  manager: Pick<CommandManager, "status">,
+  fallback: string
+): Promise<void> {
+  const message = manager.status.state === "failed" && manager.status.detail
     ? manager.status.detail
-    : errorMessage(error);
+    : fallback;
+  await host.showErrorMessage(redactServiceError(message, []).message);
 }
 
 export function registerCommands(
@@ -66,8 +69,9 @@ export function registerCommands(
   host: CommandHost
 ): void {
   const requireTrustedWorkspace = async (): Promise<boolean> => {
-    if (status.trustState === "trusted") return true;
-    await host.showErrorMessage(BLOCKED_MESSAGES[status.trustState]);
+    const trustState = status.refreshTrust();
+    if (trustState === "trusted") return true;
+    await host.showErrorMessage(BLOCKED_MESSAGES[trustState]);
     return false;
   };
 
@@ -76,8 +80,8 @@ export function registerCommands(
     status.projectService({ state: "starting" });
     try {
       await manager.start();
-    } catch (error) {
-      await host.showErrorMessage(managerError(manager, error));
+    } catch {
+      await presentManagerError(host, manager, "Unit Test: Service start failed.");
     } finally {
       status.projectService(manager.status);
     }
@@ -88,8 +92,8 @@ export function registerCommands(
     status.projectService({ state: "stopping" });
     try {
       await manager.stop();
-    } catch (error) {
-      await host.showErrorMessage(managerError(manager, error));
+    } catch {
+      await presentManagerError(host, manager, "Unit Test: Service stop failed.");
     } finally {
       status.projectService(manager.status);
     }
@@ -104,8 +108,8 @@ export function registerCommands(
     }
     try {
       output.appendLine(JSON.stringify(await client.inspectWorkspace(), null, 2));
-    } catch (error) {
-      await host.showErrorMessage(managerError(manager, error));
+    } catch {
+      await presentManagerError(host, manager, "Unit Test: Workspace inspection failed.");
       status.projectService(manager.status);
     }
   };

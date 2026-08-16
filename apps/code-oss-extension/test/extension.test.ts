@@ -1,12 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { WorkspaceSnapshot as ProtocolWorkspaceSnapshot } from "@unit-test-ide/test-client";
+import {
+  ProtocolClient,
+  type WorkspaceSnapshot as ProtocolWorkspaceSnapshot
+} from "@unit-test-ide/test-client";
 import {
   createExtensionController,
   type ExtensionHost,
   type LifecycleManager
 } from "../src/extension.js";
 import type { ExtensionProtocolClient } from "../src/protocol-client.js";
+import { createProtocolClient } from "../src/protocol-client.js";
+import type { ServiceManagerOptions } from "../src/service-manager.js";
 
 type Listener = () => void | Promise<void>;
 
@@ -14,11 +19,13 @@ class FakeProtocolClient implements ExtensionProtocolClient {
   inspectCalls = 0;
   buildCalls = 0;
   closeCalls = 0;
+  inspectFailure: Error | undefined;
 
   constructor(private readonly workspace: ProtocolWorkspaceSnapshot) {}
 
   async inspectWorkspace(): Promise<ProtocolWorkspaceSnapshot> {
     this.inspectCalls++;
+    if (this.inspectFailure) throw this.inspectFailure;
     return this.workspace;
   }
 
@@ -34,6 +41,7 @@ class FakeServiceManager implements LifecycleManager {
   session: LifecycleManager["session"];
   startFailure: Error | undefined;
   stopFailure: Error | undefined;
+  publishStopFailureStatus = true;
   startPromise: Promise<void> | undefined;
   stopPromise: Promise<void> | undefined;
 
@@ -60,7 +68,9 @@ class FakeServiceManager implements LifecycleManager {
     this.status = { state: "stopping" };
     if (this.stopPromise) await this.stopPromise;
     if (this.stopFailure) {
-      this.status = { state: "failed", detail: this.stopFailure.message };
+      if (this.publishStopFailureStatus) {
+        this.status = { state: "failed", detail: this.stopFailure.message };
+      }
       throw this.stopFailure;
     }
     this.session = undefined;
@@ -85,6 +95,8 @@ interface HarnessOptions {
   autoStart?: boolean;
   manager?: FakeServiceManager;
   stopTimeoutMs?: number;
+  serviceExecutable?: string;
+  managerFactory?: (options: ServiceManagerOptions) => LifecycleManager;
 }
 
 function createExtensionHarness(options: HarnessOptions = {}) {
@@ -105,14 +117,20 @@ function createExtensionHarness(options: HarnessOptions = {}) {
   const disposable = (dispose: () => void) => ({ dispose });
   const host: ExtensionHost = {
     context: { subscriptions },
+    extensionPath: "C:\\extension",
+    dataDirectory: "C:\\extension-data",
     workspaceSnapshot: () => ({
       folderCount: state.folderCount,
       isTrusted: state.isTrusted,
       workspaceRoot: state.folderCount === 1 ? state.workspaceRoot : undefined
     }),
-    configuration: (key, fallback) => key === "autoStart"
-      ? (options.autoStart ?? true) as typeof fallback
-      : fallback,
+    configuration: (key, fallback) => {
+      if (key === "autoStart") return (options.autoStart ?? true) as typeof fallback;
+      if (key === "serviceExecutable") {
+        return (options.serviceExecutable ?? fallback) as typeof fallback;
+      }
+      return fallback;
+    },
     createOutputChannel: () => ({
       appendLine(value) { output.push(value); },
       dispose() {}
@@ -138,7 +156,7 @@ function createExtensionHarness(options: HarnessOptions = {}) {
     async showErrorMessage(message) { errors.push(message); }
   };
   const controller = createExtensionController(host, {
-    manager,
+    ...(options.managerFactory ? { managerFactory: options.managerFactory } : { manager }),
     stopTimeoutMs: options.stopTimeoutMs
   });
 
@@ -163,6 +181,20 @@ function createExtensionHarness(options: HarnessOptions = {}) {
     async grantTrust() {
       state.isTrusted = true;
       for (const listener of [...trustListeners]) await listener();
+    },
+    queueTrustChange(isTrusted: boolean) {
+      state.isTrusted = isTrusted;
+      return Promise.all([...trustListeners].map((listener) => listener())).then(() => undefined);
+    },
+    queueWorkspaceChange(
+      folderCount: number,
+      isTrusted: boolean,
+      workspaceRoot = state.workspaceRoot
+    ) {
+      state.folderCount = folderCount;
+      state.isTrusted = isTrusted;
+      state.workspaceRoot = workspaceRoot;
+      return Promise.all([...workspaceListeners].map((listener) => listener())).then(() => undefined);
     }
   };
 }
@@ -321,4 +353,111 @@ test("deactivation reports a redacted manager stop failure", async () => {
 
   assert.deepEqual(host.errors, ["shutdown failed at [redacted]"]);
   assert.equal(host.statusText, "Unit Test: Service Failed");
+});
+
+test("queued trust reconciliation cannot start after deactivation begins", async () => {
+  const host = createExtensionHarness({ isTrusted: false });
+  await host.activate();
+
+  const transition = host.queueTrustChange(true);
+  const firstDeactivate = host.deactivate();
+  const secondDeactivate = host.deactivate();
+  assert.equal(firstDeactivate, secondDeactivate);
+  await Promise.all([transition, firstDeactivate]);
+
+  assert.equal(host.manager.startCalls, 0);
+  assert.equal(host.manager.stopCalls, 1);
+  assert.equal(host.manager.status.state, "stopped");
+  assert.equal(host.manager.session, undefined);
+
+  await host.queueTrustChange(true);
+  assert.equal(host.manager.startCalls, 0);
+  assert.equal(host.manager.stopCalls, 1);
+});
+
+test("inspect command rechecks live trust while workspace stop is pending", async () => {
+  const client = new FakeProtocolClient(workspaceSnapshot("live-trust"));
+  const manager = new FakeServiceManager(client);
+  manager.status = { state: "running" };
+  let releaseStop: (() => void) | undefined;
+  manager.stopPromise = new Promise<void>((resolve) => { releaseStop = resolve; });
+  const host = createExtensionHarness({ autoStart: false, manager });
+  await host.activate();
+
+  const rootTransition = host.queueWorkspaceChange(1, true, "C:\\replacement");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(manager.stopCalls, 1);
+  const trustTransition = host.queueWorkspaceChange(1, false, "C:\\replacement");
+  await host.execute("unitTestIde.inspectWorkspace");
+
+  assert.equal(client.inspectCalls, 0);
+  assert.match(host.errors.at(-1) ?? "", /Trust this workspace/);
+  assert.ok(releaseStop);
+  releaseStop();
+  await Promise.all([rootTransition, trustTransition]);
+});
+
+test("default activation resolves an empty executable setting to the bundled service", async () => {
+  const manager = new FakeServiceManager();
+  let captured: ServiceManagerOptions | undefined;
+  const host = createExtensionHarness({
+    serviceExecutable: "",
+    managerFactory(options) {
+      captured = options;
+      return manager;
+    }
+  });
+
+  await host.activate();
+
+  assert.ok(captured);
+  assert.notEqual(captured.serviceExecutable, "");
+  assert.match(captured.serviceExecutable, /bin[\\/]+unit-test-service(?:\.exe)?$/);
+  assert.equal(manager.startCalls, 1);
+});
+
+test("protocol adapter delegates its endpoint to ProtocolClient.connect", async () => {
+  const original = ProtocolClient.connect;
+  const client = new FakeProtocolClient(workspaceSnapshot("adapter"));
+  let received: Parameters<typeof ProtocolClient.connect>[0] | undefined;
+  ProtocolClient.connect = async (endpoint) => {
+    received = endpoint;
+    return client as unknown as ProtocolClient;
+  };
+  try {
+    const connected = await createProtocolClient("\\\\.\\pipe\\adapter-test");
+    assert.equal(connected, client);
+    assert.equal(received, "\\\\.\\pipe\\adapter-test");
+  } finally {
+    ProtocolClient.connect = original;
+  }
+});
+
+test("inspect errors never present raw paths or tokens", async () => {
+  const client = new FakeProtocolClient(workspaceSnapshot("inspect-error"));
+  const token = "vK4MPRV9Ih3oqoJr48fLQW1z4oYwz0LVEGs6x7sVQwA";
+  client.inspectFailure = new Error(`inspect failed ${token} at C:\\private\\workspace`);
+  const manager = new FakeServiceManager(client);
+  manager.status = { state: "running" };
+  const host = createExtensionHarness({ autoStart: false, manager });
+  await host.activate();
+
+  await host.execute("unitTestIde.inspectWorkspace");
+
+  assert.equal(host.errors.length, 1);
+  assert.doesNotMatch(host.errors[0] ?? "", /private|vK4MPR/);
+});
+
+test("cleanup errors without manager detail never present raw paths or tokens", async () => {
+  const manager = new FakeServiceManager();
+  const token = "uX9pJ6xNvz1qPyE6C9yCbY0KJ2mN5qR8WvT4aHs7FgA";
+  manager.stopFailure = new Error(`cleanup failed ${token} at C:\\private\\session`);
+  manager.publishStopFailureStatus = false;
+  const host = createExtensionHarness({ autoStart: false, manager });
+  await host.activate();
+
+  await host.execute("unitTestIde.stopService");
+
+  assert.equal(host.errors.length, 1);
+  assert.doesNotMatch(host.errors[0] ?? "", /private|session|uX9pJ6/);
 });

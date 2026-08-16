@@ -3,6 +3,7 @@ import type * as vscodeTypes from "vscode";
 import type { ServiceStatus, TrustState } from "./contracts.js";
 import {
   registerCommands,
+  presentManagerError,
   type CommandContext,
   type CommandHost,
   type CommandManager,
@@ -10,7 +11,7 @@ import {
   type OutputChannelLike,
   type StatusBarLike
 } from "./commands.js";
-import { ServiceManager } from "./service-manager.js";
+import { ServiceManager, type ServiceManagerOptions } from "./service-manager.js";
 import { TrustGate, type WorkspaceSnapshot } from "./trust-gate.js";
 
 const DEFAULT_STOP_TIMEOUT_MS = 2_000;
@@ -35,6 +36,7 @@ export type LifecycleManager = CommandManager;
 
 export interface ExtensionControllerOptions {
   manager?: LifecycleManager;
+  managerFactory?: (options: ServiceManagerOptions) => LifecycleManager;
   stopTimeoutMs?: number;
 }
 
@@ -56,7 +58,10 @@ class StatusProjection {
   #trustState: TrustState = "no-workspace";
   #serviceStatus: ServiceStatus = { state: "stopped" };
 
-  constructor(private readonly item: StatusBarLike) {}
+  constructor(
+    private readonly item: StatusBarLike,
+    private readonly readTrust: () => TrustState
+  ) {}
 
   get trustState(): TrustState {
     return this.#trustState;
@@ -65,6 +70,12 @@ class StatusProjection {
   projectTrust(state: TrustState): void {
     this.#trustState = state;
     this.#render();
+  }
+
+  refreshTrust(): TrustState {
+    const state = this.readTrust();
+    this.projectTrust(state);
+    return state;
   }
 
   projectService(status: ServiceStatus): void {
@@ -90,14 +101,13 @@ function bundledServiceExecutable(extensionPath: string): string {
 
 function createManager(
   host: ExtensionHost,
-  snapshot: ExtensionWorkspaceSnapshot
-): ServiceManager {
+  snapshot: ExtensionWorkspaceSnapshot,
+  factory: (options: ServiceManagerOptions) => LifecycleManager
+): LifecycleManager {
   const extensionPath = host.extensionPath ?? process.cwd();
-  return new ServiceManager({
-    serviceExecutable: host.configuration(
-      "serviceExecutable",
-      bundledServiceExecutable(extensionPath)
-    ),
+  const configuredExecutable = host.configuration("serviceExecutable", "").trim();
+  return factory({
+    serviceExecutable: configuredExecutable || bundledServiceExecutable(extensionPath),
     workspaceRoot: snapshot.workspaceRoot ?? extensionPath,
     dataDirectory: host.dataDirectory ?? join(extensionPath, ".unit-test-ide"),
     timeoutMs: host.configuration("serviceStartupTimeoutMs", 10_000),
@@ -109,10 +119,13 @@ function createManager(
 }
 
 class WorkspaceLifecycleManager implements LifecycleManager {
-  #delegate: ServiceManager | undefined;
+  #delegate: LifecycleManager | undefined;
   #workspaceRoot: string | undefined;
 
-  constructor(private readonly host: ExtensionHost) {}
+  constructor(
+    private readonly host: ExtensionHost,
+    private readonly factory: (options: ServiceManagerOptions) => LifecycleManager
+  ) {}
 
   get status(): ServiceStatus {
     return this.#delegate?.status ?? { state: "stopped" };
@@ -132,7 +145,7 @@ class WorkspaceLifecycleManager implements LifecycleManager {
       this.#delegate = undefined;
     }
     if (!this.#delegate) {
-      this.#delegate = createManager(this.host, snapshot);
+      this.#delegate = createManager(this.host, snapshot, this.factory);
       this.#workspaceRoot = snapshot.workspaceRoot;
     }
     return this.#delegate.start();
@@ -162,6 +175,7 @@ class ExtensionController {
   readonly #status: StatusProjection;
   readonly #stopTimeoutMs: number;
   #activated = false;
+  #deactivating = false;
   #deactivation: Promise<void> | undefined;
   #transitionTail: Promise<void> = Promise.resolve();
   #workspaceRoot: string | undefined;
@@ -170,11 +184,17 @@ class ExtensionController {
     private readonly host: ExtensionHost,
     options: ExtensionControllerOptions
   ) {
-    this.#manager = options.manager ?? new WorkspaceLifecycleManager(host);
+    this.#manager = options.manager ?? new WorkspaceLifecycleManager(
+      host,
+      options.managerFactory ?? ((managerOptions) => new ServiceManager(managerOptions))
+    );
     this.#stopTimeoutMs = options.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS;
     this.#output = host.createOutputChannel("Unit Test IDE");
     const statusItem = host.createStatusBarItem();
-    this.#status = new StatusProjection(statusItem);
+    this.#status = new StatusProjection(statusItem, () => {
+      if (this.#deactivating) return "no-workspace";
+      return this.#gate.update(this.host.workspaceSnapshot());
+    });
     host.context.subscriptions.push(this.#output, statusItem);
   }
 
@@ -206,14 +226,22 @@ class ExtensionController {
 
   deactivate(): Promise<void> {
     if (this.#deactivation) return this.#deactivation;
-    const stop = this.#manager.stop().catch((error) => this.#reportManagerError(error));
-    this.#deactivation = settleWithin(stop, this.#stopTimeoutMs).then(() => {
+    this.#deactivating = true;
+    const transitions = this.#transitionTail.catch(() => undefined);
+    const stop = this.#manager.stop().catch(() => presentManagerError(
+      this.host,
+      this.#manager,
+      "Unit Test: Service stop failed."
+    ));
+    const shutdown = Promise.allSettled([transitions, stop]);
+    this.#deactivation = settleWithin(shutdown, this.#stopTimeoutMs).then(() => {
       this.#status.projectService(this.#manager.status);
     });
     return this.#deactivation;
   }
 
   #enqueueReconcile(): Promise<void> {
+    if (this.#deactivating) return Promise.resolve();
     const next = this.#transitionTail.then(
       () => this.#reconcileWorkspace(),
       () => this.#reconcileWorkspace()
@@ -223,6 +251,7 @@ class ExtensionController {
   }
 
   async #reconcileWorkspace(): Promise<void> {
+    if (this.#deactivating) return;
     const previous = this.#status.trustState;
     const snapshot = this.host.workspaceSnapshot();
     const rootChanged = snapshot.workspaceRoot !== this.#workspaceRoot;
@@ -231,6 +260,7 @@ class ExtensionController {
     this.#status.projectTrust(current);
     if (current === "trusted") {
       if (previous === "trusted" && rootChanged) await this.#stopService();
+      if (this.#deactivating) return;
       if ((previous !== "trusted" || rootChanged) && this.host.configuration("autoStart", true)) {
         await this.#startService();
       }
@@ -242,11 +272,16 @@ class ExtensionController {
   }
 
   async #startService(): Promise<void> {
+    if (this.#deactivating) return;
     this.#status.projectService({ state: "starting" });
     try {
       await this.#manager.start();
-    } catch (error) {
-      await this.#reportManagerError(error);
+    } catch {
+      await presentManagerError(
+        this.host,
+        this.#manager,
+        "Unit Test: Service start failed."
+      );
     } finally {
       this.#status.projectService(this.#manager.status);
     }
@@ -256,20 +291,17 @@ class ExtensionController {
     this.#status.projectService({ state: "stopping" });
     try {
       await this.#manager.stop();
-    } catch (error) {
-      await this.#reportManagerError(error);
+    } catch {
+      await presentManagerError(
+        this.host,
+        this.#manager,
+        "Unit Test: Service stop failed."
+      );
     } finally {
       this.#status.projectService(this.#manager.status);
     }
   }
 
-  async #reportManagerError(error: unknown): Promise<void> {
-    await this.host.showErrorMessage(
-      this.#manager.status.state === "failed" && this.#manager.status.detail
-        ? this.#manager.status.detail
-        : error instanceof Error ? error.message : String(error)
-    );
-  }
 }
 
 export function createExtensionController(
