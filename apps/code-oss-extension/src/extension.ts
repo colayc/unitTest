@@ -60,7 +60,8 @@ class StatusProjection {
 
   constructor(
     private readonly item: StatusBarLike,
-    private readonly readTrust: () => TrustState
+    private readonly readTrust: () => TrustState,
+    private readonly readActive: () => boolean
   ) {}
 
   get trustState(): TrustState {
@@ -76,6 +77,10 @@ class StatusProjection {
     const state = this.readTrust();
     this.projectTrust(state);
     return state;
+  }
+
+  isActive(): boolean {
+    return this.readActive();
   }
 
   projectService(status: ServiceStatus): void {
@@ -191,10 +196,11 @@ class ExtensionController {
     this.#stopTimeoutMs = options.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS;
     this.#output = host.createOutputChannel("Unit Test IDE");
     const statusItem = host.createStatusBarItem();
-    this.#status = new StatusProjection(statusItem, () => {
-      if (this.#deactivating) return "no-workspace";
-      return this.#gate.update(this.host.workspaceSnapshot());
-    });
+    this.#status = new StatusProjection(
+      statusItem,
+      () => this.#gate.update(this.host.workspaceSnapshot()),
+      () => !this.#deactivating
+    );
     host.context.subscriptions.push(this.#output, statusItem);
   }
 

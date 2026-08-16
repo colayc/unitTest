@@ -32,6 +32,7 @@ export interface CommandManager {
 
 export interface CommandStatus {
   readonly trustState: TrustState;
+  isActive(): boolean;
   refreshTrust(): TrustState;
   projectService(status: ServiceStatus): void;
 }
@@ -68,15 +69,28 @@ export function registerCommands(
   status: CommandStatus,
   host: CommandHost
 ): void {
-  const requireTrustedWorkspace = async (): Promise<boolean> => {
+  const currentAuthorization = (): { allowed: boolean; message?: string } => {
+    if (!status.isActive()) return { allowed: false };
     const trustState = status.refreshTrust();
-    if (trustState === "trusted") return true;
-    await host.showErrorMessage(BLOCKED_MESSAGES[trustState]);
+    return trustState === "trusted"
+      ? { allowed: true }
+      : { allowed: false, message: BLOCKED_MESSAGES[trustState] };
+  };
+
+  const requireTrustedWorkspace = async (): Promise<boolean> => {
+    const authorization = currentAuthorization();
+    if (authorization.allowed) return true;
+    if (authorization.message) await host.showErrorMessage(authorization.message);
     return false;
   };
 
   const startService = async () => {
     if (!await requireTrustedWorkspace()) return;
+    const authorization = currentAuthorization();
+    if (!authorization.allowed) {
+      if (authorization.message) await host.showErrorMessage(authorization.message);
+      return;
+    }
     status.projectService({ state: "starting" });
     try {
       await manager.start();
@@ -89,6 +103,11 @@ export function registerCommands(
 
   const stopService = async () => {
     if (!await requireTrustedWorkspace()) return;
+    const authorization = currentAuthorization();
+    if (!authorization.allowed) {
+      if (authorization.message) await host.showErrorMessage(authorization.message);
+      return;
+    }
     status.projectService({ state: "stopping" });
     try {
       await manager.stop();
@@ -101,6 +120,11 @@ export function registerCommands(
 
   const inspectWorkspace = async () => {
     if (!await requireTrustedWorkspace()) return;
+    const authorization = currentAuthorization();
+    if (!authorization.allowed) {
+      if (authorization.message) await host.showErrorMessage(authorization.message);
+      return;
+    }
     const client = clientProvider();
     if (!client) {
       await host.showErrorMessage("Unit Test: Service is not running.");

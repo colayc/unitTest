@@ -461,3 +461,27 @@ test("cleanup errors without manager detail never present raw paths or tokens", 
   assert.equal(host.errors.length, 1);
   assert.doesNotMatch(host.errors[0] ?? "", /private|session|uX9pJ6/);
 });
+
+test("commands paused at authorization cannot start or inspect after deactivation begins", async () => {
+  const client = new FakeProtocolClient(workspaceSnapshot("shutdown-race"));
+  const manager = new FakeServiceManager(client);
+  manager.status = { state: "running" };
+  let releaseStop: (() => void) | undefined;
+  manager.stopPromise = new Promise<void>((resolve) => { releaseStop = resolve; });
+  const host = createExtensionHarness({ autoStart: false, manager, stopTimeoutMs: 100 });
+  await host.activate();
+
+  const startCommand = host.execute("unitTestIde.startService");
+  const inspectCommand = host.execute("unitTestIde.inspectWorkspace");
+  const deactivation = host.deactivate();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(manager.startCalls, 0);
+  assert.equal(client.inspectCalls, 0);
+  assert.equal(manager.stopCalls, 1);
+  assert.ok(releaseStop);
+  releaseStop();
+  await Promise.all([startCommand, inspectCommand, deactivation]);
+  assert.equal(manager.status.state, "stopped");
+  assert.equal(manager.session, undefined);
+});
