@@ -236,8 +236,24 @@ export async function runCoverageBundleProbe(options: CoverageBundleProbeOptions
   const licenses = licensesFromManifest(JSON.parse(licenseBytes) as LicenseManifest);
   const executable = platform === "windows-x64" ? join(bundleRoot, "python", "python.exe") : join(bundleRoot, "python", "bin", "python3");
   const application = join(bundleRoot, "app", "gcovr-runner.pyz");
-  await stat(executable);
-  await stat(application);
+  try {
+    await stat(executable);
+    await stat(application);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT" && code !== "EPERM") throw error;
+    const report = buildCoverageBundleReport({
+      manifestDigest,
+      sourceManifestDigest,
+      platform,
+      pythonVersion: resolved.pythonVersion,
+      gcovrVersion: resolved.gcovrVersion,
+      licenses,
+      smoke: { selfCheck: "failed", descriptor: "skipped", negative: "environment-blocked" },
+    });
+    await writeCoverageBundleReport(options.reportPath, report);
+    return report;
+  }
   const environment = sanitizeCoverageEnvironment(options.environment ?? process.env);
   const cwd = options.cwd ?? dirname(options.reportPath);
   const run = async (args: readonly string[]) => execFile(executable, ["-I", "-S", application, ...args], {
