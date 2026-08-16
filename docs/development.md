@@ -9,7 +9,7 @@
 - Named Pipe/Unix Socket：桌面进程与 Service 的 per-user 本地 IPC。
 - GitHub：源码托管、PR、Hosted CI 和发布准备；不在产品运行链路内。
 
-当前 Phase 3D 已实现 Service 与 native CMake 构建链路，Code-OSS UI 将在后续阶段接入。
+当前已完成 Phase 6 首个 Vertical Slice：独立 Code-OSS Extension 可接入真实 Go Service，Workspace Trust gate、Service lifecycle 与 `workspace/inspect` 已形成闭环；Testing API UI 仍属于后续子阶段。
 
 ## 固定开发环境
 
@@ -53,6 +53,40 @@ pnpm test:e2e
 ```
 
 `pnpm verify` 和产品运行不得联网。只有显式的 `pnpm prepare:cmake-bundle` 可以下载固定 CMake archive；下载后仍会进行完整摘要和布局验证。
+
+## Code-OSS Extension 开发与验收
+
+独立 Extension 位于 `apps/code-oss-extension`。使用固定 Node.js 与 pnpm runtime 构建：
+
+```sh
+pnpm --filter @unit-test-ide/code-oss-extension build
+pnpm --filter @unit-test-ide/code-oss-extension test
+```
+
+真实 Service smoke 不下载依赖，也不通过 shell 启动子进程。先使用固定 Go runtime 按现有 `service-probe` 约定构建 `unit-test-service`、`cmake-fixture` 等本地 fixture，再运行验收：
+
+```sh
+node tools/service-probe/build-service.mjs
+pnpm --filter @unit-test-ide/code-oss-extension test:service-smoke
+```
+
+默认 Service binary 为仓库 `build/unit-test-service`（Windows 为 `build/unit-test-service.exe`）。开发者也可通过 `UNIT_TEST_IDE_SERVICE_BINARY` 指定另一份已构建 binary。该 smoke 在当前平台执行同一 contract：trusted workspace 必须完成 `READY`、handshake、capabilities 与 `workspace/inspect`；untrusted workspace 必须保持零 Service process、零 token、零 endpoint 和零 data directory；trust revoke 后旧 endpoint 必须不可重连。Windows 本地结果只作为 Named Pipe evidence，Linux Unix Socket 必须由 Linux CI 实际执行，不能用 cross-compile 代替。
+
+需要分别定位 trusted 与 untrusted 验收时，先完成 Extension build，再运行：
+
+```sh
+node --test --test-name-pattern "trusted real service|revoking trust" apps/code-oss-extension/dist/test/service-smoke.test.js
+node --test --test-name-pattern "untrusted real-service" apps/code-oss-extension/dist/test/service-smoke.test.js
+```
+
+Extension Host smoke 需要本机已有 Code-OSS 或 Code-OSS compatible executable。PowerShell 示例：
+
+```powershell
+$env:CODE_OSS_EXECUTABLE = "C:\path\to\code-oss.exe"
+pnpm --filter @unit-test-ide/code-oss-extension test:host
+```
+
+脚本通过 `--extensionDevelopmentPath` 与 `--extensionDevelopmentKind=workspace` 启动隔离的 Extension Development Host，等待 `onStartupFinished` activation marker，然后终止并等待 host process 退出。未配置 `CODE_OSS_EXECUTABLE` 时只输出 `SKIP: CODE_OSS_EXECUTABLE is not configured` 并以 0 退出；该结果不是 PASS，也不能作为 Extension Host activation evidence。
 
 ## Native 开发
 

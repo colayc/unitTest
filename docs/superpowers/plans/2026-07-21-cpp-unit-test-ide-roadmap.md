@@ -104,6 +104,14 @@ docs/
 
 验收标准：桌面 IDE 能打开示例工作区，未受信任时拒绝执行，受信任后发现测试，并通过外部 Go 服务运行测试。
 
+首个 Vertical Slice 状态：已实现。独立 Code-OSS Extension package 已完成 Workspace Trust gate、真实 Go Service lifecycle、Windows Named Pipe/Linux Unix Socket platform contract、现有 Protocol Client 接入、`workspace/inspect` 命令，以及 Extension Development Host activation smoke harness。Windows Named Pipe 已由本地 runtime smoke 实际验证；Linux Unix Socket evidence 继续由 Linux CI 提供。
+
+详细设计：`docs/superpowers/specs/2026-08-16-phase6-code-oss-extension-design.md`
+
+实施计划：`docs/superpowers/plans/2026-08-16-phase6-code-oss-extension-plan.md`
+
+后续子阶段：Testing API test tree、run profile、source decoration、coverage UI、完整 Code-OSS fork/branding 与 built-in registration 尚未实现；首个 Vertical Slice 的完成不表示这些 UI 与 desktop packaging 工作已完成。
+
 ### Phase 7：产品测试 UX、Mock 配置、历史记录与报告
 
 加入运行配置、过滤器、失败详情、进度/日志流、Mock/Stub 配置、覆盖率树和源码装饰、本地历史记录、制品浏览，以及兼容 Web 的报告视图。
