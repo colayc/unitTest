@@ -24,6 +24,22 @@ importers:
         specifier: 6.0.3
         version: 6.0.3
 
+  apps/code-oss-extension:
+    dependencies:
+      '@unit-test-ide/test-client':
+        specifier: workspace:*
+        version: link:../../packages/test-client
+    devDependencies:
+      '@types/node':
+        specifier: 24.13.3
+        version: 24.13.3
+      '@types/vscode':
+        specifier: 1.105.0
+        version: 1.105.0
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
+
   packages/coverage-models:
     dependencies:
       '@unit-test-ide/coverage-schema':
@@ -154,6 +170,10 @@ packages:
 
   '@types/node@24.13.3':
     resolution: {integrity: sha512-Dh8vAsV36ig5wa9OX4pXvMc9D3Veibfw2wix0CUwYODLD8nkj9UsLjASr49nPg+2eKzxhBV+v7L8pXvT4e639Q==, tarball: https://registry.npmjs.org/@types/node/-/node-24.13.3.tgz}
+
+  '@types/vscode@1.105.0':
+    resolution: {integrity: sha512-Lotk3CTFlGZN8ray4VxJE7axIyLZZETQJVWi/lYoUVQuqfRxlQhVOfoejsD2V3dVXPSbS15ov5ZyowMAzgUqcw==, tarball: https://registry.npmjs.org/@types/vscode/-/vscode-1.105.0.tgz}
+
 
   abort-controller@3.0.0:
     resolution: {integrity: sha512-h8lQ8tacZYnR3vNQTgibj+tODHI5/+l06Au2Pcriv/Gmet0eaj4TwWH41sO9wnHDiQsEj19q0drzdWdeAHtweg==, tarball: https://registry.npmjs.org/abort-controller/-/abort-controller-3.0.0.tgz}
@@ -577,6 +597,9 @@ snapshots:
   '@types/node@24.13.3':
     dependencies:
       undici-types: 7.18.2
+
+  '@types/vscode@1.105.0': {}
+
 
   abort-controller@3.0.0:
     dependencies:
