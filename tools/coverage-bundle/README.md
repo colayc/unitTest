@@ -21,6 +21,18 @@ pnpm check:coverage-bundle
 
 `prepare:coverage-bundle` 和 `check:coverage-bundle` 是 Task 2 将提供的显式 prepare command，因此不会加入默认 `verify`。默认 `test` 只运行可离线的 manifest/license contract tests；真实 download/build 由平台 CI 显式调用。
 
+## Runtime service-probe
+
+Hosted Windows/Linux job 在进入 service runtime 前分别执行对应平台的 `prepare:coverage-bundle`（cache miss 时才允许下载）和 `check:coverage-bundle`（cache hit 也必须完整复验）。随后运行：
+
+```powershell
+pnpm --filter @unit-test-ide/service-probe test:coverage-bundle
+```
+
+该 probe 只通过 bundle 内的固定 Python 与 `gcovr-runner.pyz`，使用 `-I -S` 和清理后的环境；Node harness 同时阻断 DNS、socket、HTTP(S) 与 proxy/registry 变量。Probe 生成 `coverage-bundle-report.json`，只包含 platform、manifest digest、Python/gcovr version、SPDX license 与 smoke outcome，不包含安装路径、用户目录或系统路径。报告写入采用临时文件 + fsync + 原子 rename。
+
+malformed descriptor 必须返回明确的 runner rejection（exit code `2`）；若 Hosted sandbox 阻止启动，则仅将 `ENOENT`/`EPERM` 记录为 `environment-blocked`。缺失或 `null` status 不得被视为拒绝成功。
+
 ## 升级规则
 
 Python、gcovr、任何 wheel、builder image 或 license 变更必须在同一 review 中更新 manifest、license contract、Golden tests 和相关 source evidence。禁止 `latest`、branch、未锁定 transitive dependency、未审阅 mirror、用户 URL 或下载后解析依赖。

@@ -30,13 +30,31 @@ jobs:
           cache-dependency-path: apps/test-service/go.sum
       - run: pnpm install --frozen-lockfile
       - run: pnpm verify
+      - id: coverage-manifest
+        shell: pwsh
+        run: |
+          $digest = (Get-FileHash -Algorithm SHA256 -LiteralPath 'tools/coverage-bundle/manifest.json').Hash.ToLowerInvariant()
+          "digest=$digest" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - id: coverage-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            .superpowers/cache/coverage-bundle
+            .superpowers/runtime/coverage-bundle
+          key: coverage-bundle-windows-x64-${{ steps.coverage-manifest.outputs.digest }}
+      - if: steps.coverage-cache.outputs.cache-hit != 'true'
+        run: pnpm prepare:coverage-bundle
+      - run: pnpm check:coverage-bundle
+      - run: pnpm --filter @unit-test-ide/service-probe test:coverage-bundle
       - run: pnpm prepare:cmake-bundle
       - run: pnpm test:e2e:native
       - if: always()
         uses: actions/upload-artifact@v7
         with:
           name: native-toolchain-windows-${{ github.run_attempt }}
-          path: .native-e2e/artifacts/windows/toolchain-report.json
+          path: |
+            .native-e2e/artifacts/windows/toolchain-report.json
+            .native-e2e/artifacts/windows/coverage-bundle-report.json
           if-no-files-found: error
       - if: always()
         run: git diff --exit-code
@@ -62,13 +80,31 @@ jobs:
           cache-dependency-path: apps/test-service/go.sum
       - run: pnpm install --frozen-lockfile
       - run: pnpm verify
+      - id: coverage-manifest
+        shell: bash
+        run: |
+          digest="$(sha256sum tools/coverage-bundle/manifest.json | cut -d' ' -f1)"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - id: coverage-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            .superpowers/cache/coverage-bundle
+            .superpowers/runtime/coverage-bundle
+          key: coverage-bundle-linux-x64-${{ steps.coverage-manifest.outputs.digest }}
+      - if: steps.coverage-cache.outputs.cache-hit != 'true'
+        run: pnpm prepare:coverage-bundle
+      - run: pnpm check:coverage-bundle
+      - run: pnpm --filter @unit-test-ide/service-probe test:coverage-bundle
       - run: pnpm prepare:cmake-bundle
       - run: pnpm test:e2e:native
       - if: always()
         uses: actions/upload-artifact@v7
         with:
           name: native-toolchain-linux-${{ github.run_attempt }}
-          path: .native-e2e/artifacts/linux/toolchain-report.json
+          path: |
+            .native-e2e/artifacts/linux/toolchain-report.json
+            .native-e2e/artifacts/linux/coverage-bundle-report.json
           if-no-files-found: error
       - if: always()
         run: git diff --exit-code
