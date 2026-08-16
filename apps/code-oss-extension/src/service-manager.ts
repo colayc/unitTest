@@ -23,6 +23,13 @@ const execFile = promisify(execFileCallback);
 const CLIENT_NAME = "code-oss-extension";
 const CLIENT_VERSION = "0.1.0";
 
+class WorkspaceTrustRevokedError extends Error {
+  constructor() {
+    super("workspace is not trusted");
+    this.name = "WorkspaceTrustRevokedError";
+  }
+}
+
 export interface ServiceOperations {
   prepareTokenFile(binary: string, tokenFile: string, token: string): Promise<void>;
   spawnService(binary: string, args: string[]): ChildProcessWithoutNullStreams;
@@ -243,13 +250,15 @@ export class ServiceManager {
 
   start(): Promise<ServiceSession> {
     const trustState: TrustState = this.#options.trusted() ? "trusted" : "blocked-untrusted";
-    if (!canStartService(trustState)) return Promise.reject(new Error("workspace is not trusted"));
+    if (!canStartService(trustState)) return Promise.reject(new WorkspaceTrustRevokedError());
     return this.#enqueueLifecycle(() => this.#startOwned());
   }
 
   async #startOwned(): Promise<ServiceSession> {
+    this.#assertTrusted();
     if (this.#session && this.#status.state === "running") return this.#session;
     this.#status = { state: "starting" };
+    this.#assertTrusted();
     const token = createToken();
     const output: CapturedOutput = { stdout: "", stderr: "" };
     let sessionDirectory: string | undefined;
@@ -267,14 +276,18 @@ export class ServiceManager {
 
     try {
       sessionDirectory = await createSessionDirectory("unit-test-ide-session-");
+      this.#assertTrusted();
       endpointResource = await createEndpointResource(process.platform);
+      this.#assertTrusted();
       tokenFile = join(sessionDirectory, "token");
       const sensitive = this.#sensitive(token, tokenFile, sessionDirectory, endpointResource);
+      this.#assertTrusted();
       await withTimeout(
         "token file preparation",
         this.#operations.prepareTokenFile(this.#options.serviceExecutable, tokenFile, token),
         this.#options.timeoutMs
       );
+      this.#assertTrusted();
       child = this.#operations.spawnService(this.#options.serviceExecutable, [
         "--endpoint", endpointResource.path,
         "--token-file", tokenFile,
@@ -287,6 +300,7 @@ export class ServiceManager {
         exited = true;
         resolve([code, signal]);
       }));
+      this.#assertTrusted();
       const startupFailure = new Promise<never>((_resolve, reject) => {
         startupExitListener = (code, signal) => {
           startupFailureReason = new Error(
@@ -314,24 +328,28 @@ export class ServiceManager {
         whileChildAlive(waitForReady(child, endpointResource.path)),
         this.#options.timeoutMs
       );
+      this.#assertTrusted();
       requireChildAlive();
       client = await withTimeout(
         "service connection",
         whileChildAlive(this.#operations.connect(endpointResource.path)),
         this.#options.timeoutMs
       );
+      this.#assertTrusted();
       requireChildAlive();
       await withTimeout(
         "task protocol handshake",
         whileChildAlive(client.handshake(token, CLIENT_NAME, CLIENT_VERSION)),
         this.#options.timeoutMs
       );
+      this.#assertTrusted();
       requireChildAlive();
       await withTimeout(
         "service capabilities",
         whileChildAlive(client.getCapabilities()),
         this.#options.timeoutMs
       );
+      this.#assertTrusted();
       requireChildAlive();
       if (startupExitListener) child.off("exit", startupExitListener);
       if (startupErrorListener) child.off("error", startupErrorListener);
@@ -373,6 +391,10 @@ export class ServiceManager {
         endpointResource?.directory
       ).catch(() => undefined);
       const failure = diagnostic(error, output, sensitive);
+      if (error instanceof WorkspaceTrustRevokedError) {
+        this.#status = { state: "stopped" };
+        throw failure;
+      }
       this.#status = { state: "failed", detail: failure.message };
       throw failure;
     }
@@ -421,7 +443,7 @@ export class ServiceManager {
 
   restart(): Promise<ServiceSession> {
     const trustState: TrustState = this.#options.trusted() ? "trusted" : "blocked-untrusted";
-    if (!canStartService(trustState)) return Promise.reject(new Error("workspace is not trusted"));
+    if (!canStartService(trustState)) return Promise.reject(new WorkspaceTrustRevokedError());
     return this.#enqueueLifecycle(async () => {
       await this.#stopOwned();
       return this.#startOwned();
@@ -432,6 +454,10 @@ export class ServiceManager {
     const result = this.#lifecycleTail.then(operation);
     this.#lifecycleTail = result.then(() => undefined, () => undefined);
     return result;
+  }
+
+  #assertTrusted(): void {
+    if (!this.#options.trusted()) throw new WorkspaceTrustRevokedError();
   }
 
   #sensitive(

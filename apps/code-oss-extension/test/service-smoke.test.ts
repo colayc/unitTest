@@ -286,6 +286,7 @@ test("host deactivation after trust loss stops the real child and makes its old 
     context: { subscriptions },
     extensionPath: resolve(repositoryRoot, "apps/code-oss-extension"),
     dataDirectory: fixture.dataDirectory,
+    developmentMode: true,
     workspaceSnapshot: () => ({
       folderCount: 1,
       isTrusted: state.trusted,

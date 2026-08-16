@@ -98,6 +98,7 @@ interface HarnessOptions {
   manager?: FakeServiceManager;
   stopTimeoutMs?: number;
   serviceExecutable?: string;
+  developmentMode?: boolean;
   managerFactory?: (options: ServiceManagerOptions) => LifecycleManager;
 }
 
@@ -121,6 +122,7 @@ function createExtensionHarness(options: HarnessOptions = {}) {
     context: { subscriptions },
     extensionPath: "C:\\extension",
     dataDirectory: "C:\\extension-data",
+    developmentMode: options.developmentMode ?? false,
     workspaceSnapshot: () => ({
       folderCount: state.folderCount,
       isTrusted: state.isTrusted,
@@ -446,6 +448,55 @@ test("default activation resolves an empty executable setting to the bundled ser
   assert.ok(captured);
   assert.notEqual(captured.serviceExecutable, "");
   assert.match(captured.serviceExecutable, /bin[\\/]+unit-test-service(?:\.exe)?$/);
+  assert.equal(manager.startCalls, 1);
+});
+
+test("service executable overrides require development mode and an approved absolute path", async (t) => {
+  const cases = [
+    { name: "production override", serviceExecutable: "C:\\dev\\unit-test-service.exe", developmentMode: false },
+    { name: "development relative path", serviceExecutable: "unit-test-service.exe", developmentMode: true },
+    { name: "development unapproved basename", serviceExecutable: "C:\\dev\\other-service.exe", developmentMode: true }
+  ];
+
+  for (const item of cases) {
+    await t.test(item.name, async () => {
+      const manager = new FakeServiceManager();
+      let factoryCalls = 0;
+      const host = createExtensionHarness({
+        serviceExecutable: item.serviceExecutable,
+        developmentMode: item.developmentMode,
+        managerFactory: () => {
+          factoryCalls++;
+          return manager;
+        }
+      });
+
+      await host.activate();
+
+      assert.equal(factoryCalls, 0);
+      assert.equal(manager.startCalls, 0);
+      assert.deepEqual(host.errors, ["Unit Test: Service start failed."]);
+    });
+  }
+});
+
+test("development mode accepts an approved absolute service executable override", async () => {
+  const manager = new FakeServiceManager();
+  let captured: ServiceManagerOptions | undefined;
+  const override = "C:\\dev\\unit-test-service.exe";
+  const host = createExtensionHarness({
+    serviceExecutable: override,
+    developmentMode: true,
+    managerFactory(options) {
+      captured = options;
+      return manager;
+    }
+  });
+
+  await host.activate();
+
+  assert.ok(captured);
+  assert.equal(captured.serviceExecutable, override);
   assert.equal(manager.startCalls, 1);
 });
 

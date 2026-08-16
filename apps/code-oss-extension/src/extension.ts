@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { basename, isAbsolute, join } from "node:path";
 import type * as vscodeTypes from "vscode";
 import type { ServiceStatus, TrustState } from "./contracts.js";
 import {
@@ -25,6 +25,7 @@ export interface ExtensionHost extends CommandHost {
   readonly context: CommandContext;
   readonly extensionPath?: string;
   readonly dataDirectory?: string;
+  readonly developmentMode?: boolean;
   workspaceSnapshot(): ExtensionWorkspaceSnapshot;
   configuration<T>(key: string, fallback: T): T;
   createOutputChannel(name: string): OutputChannelLike;
@@ -105,15 +106,29 @@ function bundledServiceExecutable(extensionPath: string): string {
   );
 }
 
+function resolveServiceExecutable(host: ExtensionHost, extensionPath: string): string {
+  const configured = host.configuration("serviceExecutable", "").trim();
+  if (!configured) return bundledServiceExecutable(extensionPath);
+  if (!host.developmentMode) {
+    throw new Error("unitTestIde.serviceExecutable overrides are development-only");
+  }
+  const absolute = isAbsolute(configured) || /^[A-Za-z]:[\\/]/.test(configured) || configured.startsWith("\\\\");
+  const normalizedBase = basename(configured.replaceAll("\\", "/")).toLowerCase();
+  const expectedBase = process.platform === "win32" ? "unit-test-service.exe" : "unit-test-service";
+  if (!absolute || normalizedBase !== expectedBase) {
+    throw new Error("unitTestIde.serviceExecutable must be an absolute unit-test-service executable");
+  }
+  return configured;
+}
+
 function createManager(
   host: ExtensionHost,
   snapshot: ExtensionWorkspaceSnapshot,
   factory: (options: ServiceManagerOptions) => LifecycleManager
 ): LifecycleManager {
   const extensionPath = host.extensionPath ?? process.cwd();
-  const configuredExecutable = host.configuration("serviceExecutable", "").trim();
   return factory({
-    serviceExecutable: configuredExecutable || bundledServiceExecutable(extensionPath),
+    serviceExecutable: resolveServiceExecutable(host, extensionPath),
     workspaceRoot: snapshot.workspaceRoot ?? extensionPath,
     dataDirectory: host.dataDirectory ?? join(extensionPath, ".unit-test-ide"),
     timeoutMs: host.configuration("serviceStartupTimeoutMs", 10_000),
@@ -334,6 +349,8 @@ function createVSCodeHost(
     context,
     extensionPath: context.extensionUri.fsPath,
     dataDirectory: context.globalStorageUri.fsPath,
+    developmentMode: context.extensionMode === vscode.ExtensionMode.Development ||
+      context.extensionMode === vscode.ExtensionMode.Test,
     workspaceSnapshot: () => {
       const folders = vscode.workspace.workspaceFolders;
       return {

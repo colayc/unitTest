@@ -69,7 +69,9 @@ class FakeClient {
     private readonly order: string[],
     private readonly child: FakeChild,
     private readonly handshakeFailure?: Error,
-    private readonly capabilitiesFailure?: Error
+    private readonly capabilitiesFailure?: Error,
+    private readonly handshakeGate?: Promise<void>,
+    private readonly shutdownGate?: Promise<void>
   ) {
   }
 
@@ -81,6 +83,7 @@ class FakeClient {
   async handshake(_token: string, _clientName: string, _clientVersion: string): Promise<{ negotiatedProtocolVersion: "1.4" }> {
     this.handshakeCalls++;
     this.order.push("handshake");
+    if (this.handshakeGate) await this.handshakeGate;
     if (this.handshakeFailure) throw this.handshakeFailure;
     return { negotiatedProtocolVersion: "1.4" };
   }
@@ -94,6 +97,7 @@ class FakeClient {
 
   async shutdown(): Promise<void> {
     this.shutdownCalls++;
+    if (this.shutdownGate) await this.shutdownGate;
     queueMicrotask(() => this.child.exit(0, null));
   }
 
@@ -125,6 +129,10 @@ interface HarnessOptions {
   timeoutMs?: number;
   handshakeFailure?: Error;
   capabilitiesFailure?: Error;
+  prepareGate?: Promise<void>;
+  handshakeGate?: Promise<void>;
+  shutdownGate?: Promise<void>;
+  trustProvider?: () => boolean;
 }
 
 function createHarness(options: HarnessOptions = {}): {
@@ -153,6 +161,7 @@ function createHarness(options: HarnessOptions = {}): {
       tokens.push(token);
       tokenFiles.push(tokenFile);
       order.push("prepare");
+      if (options.prepareGate) await options.prepareGate;
     },
     spawnService(_binary, args) {
       calls.spawn++;
@@ -181,7 +190,9 @@ function createHarness(options: HarnessOptions = {}): {
         order,
         child,
         options.handshakeFailure,
-        options.capabilitiesFailure
+        options.capabilitiesFailure,
+        options.handshakeGate,
+        options.shutdownGate
       );
       clients.push(client);
       return client.asProtocolClient();
@@ -196,7 +207,7 @@ function createHarness(options: HarnessOptions = {}): {
     workspaceRoot: "C:\\private\\workspace",
     dataDirectory: "C:\\private\\data",
     timeoutMs: options.timeoutMs ?? 100,
-    trusted: () => options.trusted !== false,
+    trusted: () => options.trustProvider?.() ?? options.trusted !== false,
     operations
   };
 
@@ -244,6 +255,73 @@ test("service lifecycle trust gate performs no external operation when untrusted
   await assert.rejects(() => harness.manager.start(), /workspace is not trusted/);
   assert.deepEqual(harness.calls, { prepare: 0, spawn: 0, connect: 0 });
   assert.equal(harness.manager.status.state, "stopped");
+});
+
+test("queued start rechecks trust before allocating startup resources", async () => {
+  let trusted = true;
+  const harness = createHarness({ trustProvider: () => trusted });
+  const start = harness.manager.start();
+  trusted = false;
+
+  await assert.rejects(start, /workspace is not trusted/);
+  assert.deepEqual(harness.calls, { prepare: 0, spawn: 0, connect: 0 });
+  assert.equal(harness.manager.status.state, "stopped");
+});
+
+test("trust loss during token preparation cancels startup before spawn", async () => {
+  let trusted = true;
+  let releasePrepare: (() => void) | undefined;
+  const prepareGate = new Promise<void>((resolve) => { releasePrepare = resolve; });
+  const harness = createHarness({ prepareGate, trustProvider: () => trusted });
+  const start = harness.manager.start();
+  await waitFor(() => harness.calls.prepare === 1);
+
+  trusted = false;
+  assert.ok(releasePrepare);
+  releasePrepare();
+  await assert.rejects(start, /workspace is not trusted/);
+
+  assert.equal(harness.calls.spawn, 0);
+  assert.equal(harness.manager.session, undefined);
+  assert.equal(harness.manager.status.state, "stopped");
+});
+
+test("restart rechecks trust after a stop that overlaps trust loss", async () => {
+  let trusted = true;
+  let releaseShutdown: (() => void) | undefined;
+  const shutdownGate = new Promise<void>((resolve) => { releaseShutdown = resolve; });
+  const harness = createHarness({ shutdownGate, trustProvider: () => trusted });
+  await harness.manager.start();
+
+  const restart = harness.manager.restart();
+  await waitFor(() => harness.clients[0]?.shutdownCalls === 1);
+  trusted = false;
+  assert.ok(releaseShutdown);
+  releaseShutdown();
+  await assert.rejects(restart, /workspace is not trusted/);
+
+  assert.equal(harness.calls.spawn, 1);
+  assert.equal(harness.manager.session, undefined);
+  assert.equal(harness.manager.status.state, "stopped");
+});
+
+test("trust loss during handshake cleans the spawned service without entering running", async () => {
+  let trusted = true;
+  let releaseHandshake: (() => void) | undefined;
+  const handshakeGate = new Promise<void>((resolve) => { releaseHandshake = resolve; });
+  const harness = createHarness({ handshakeGate, trustProvider: () => trusted });
+  const start = harness.manager.start();
+  await waitFor(() => harness.clients[0]?.handshakeCalls === 1);
+
+  trusted = false;
+  assert.ok(releaseHandshake);
+  releaseHandshake();
+  await assert.rejects(start, /workspace is not trusted/);
+
+  assert.equal(harness.calls.spawn, 1);
+  assert.equal(harness.manager.session, undefined);
+  assert.equal(harness.manager.status.state, "stopped");
+  assert.equal(harness.children[0]?.killCalls, 1);
 });
 
 test("service lifecycle startup failures enter failed and clean owned resources", async (t) => {
