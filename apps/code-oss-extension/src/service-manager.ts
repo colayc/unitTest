@@ -49,6 +49,10 @@ interface ServiceConnectionCloseObservable {
   onConnectionClose(listener: (error: Error) => void): () => void;
 }
 
+interface ServiceCleanupOperations {
+  removeDirectory(directory: string): Promise<void>;
+}
+
 type Exit = [code: number | null, signal: NodeJS.Signals | null];
 
 interface CapturedOutput {
@@ -199,25 +203,34 @@ function connectionCloseObservable(client: ProtocolClient): ServiceConnectionClo
     : undefined;
 }
 
-async function removeOwnedDirectories(sessionDirectory?: string, endpointDirectory?: string): Promise<void> {
+async function removeDirectory(directory: string): Promise<void> {
+  await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+}
+
+async function removeOwnedDirectories(
+  remover: (directory: string) => Promise<void>,
+  sessionDirectory?: string,
+  endpointDirectory?: string
+): Promise<void> {
   const directories = new Set([sessionDirectory, endpointDirectory].filter((value): value is string => Boolean(value)));
   for (const directory of directories) {
-    await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    await remover(directory);
   }
 }
 
 export class ServiceManager {
   readonly #options: ServiceManagerOptions;
   readonly #operations: ServiceOperations;
+  readonly #removeDirectory: (directory: string) => Promise<void>;
   #status: ServiceStatus = { state: "stopped" };
   #session: ManagedSession | undefined;
-  #startPromise: Promise<ServiceSession> | undefined;
-  #stopPromise: Promise<void> | undefined;
   #lifecycleTail: Promise<void> = Promise.resolve();
 
   constructor(options: ServiceManagerOptions) {
     this.#options = options;
     this.#operations = { ...defaultOperations, ...options.operations };
+    const cleanupOperations = options.operations as (Partial<ServiceOperations> & Partial<ServiceCleanupOperations>) | undefined;
+    this.#removeDirectory = cleanupOperations?.removeDirectory?.bind(cleanupOperations) ?? removeDirectory;
   }
 
   get status(): ServiceStatus {
@@ -231,14 +244,7 @@ export class ServiceManager {
   start(): Promise<ServiceSession> {
     const trustState: TrustState = this.#options.trusted() ? "trusted" : "blocked-untrusted";
     if (!canStartService(trustState)) return Promise.reject(new Error("workspace is not trusted"));
-    if (this.#startPromise) return this.#startPromise;
-
-    const operation = this.#enqueueLifecycle(() => this.#startOwned());
-    const tracked = operation.finally(() => {
-      if (this.#startPromise === tracked) this.#startPromise = undefined;
-    });
-    this.#startPromise = tracked;
-    return tracked;
+    return this.#enqueueLifecycle(() => this.#startOwned());
   }
 
   async #startOwned(): Promise<ServiceSession> {
@@ -361,7 +367,11 @@ export class ServiceManager {
         if (!exited && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
         if (exit) await withTimeout("failed service process exit", exit, this.#options.timeoutMs).catch(() => undefined);
       }
-      await removeOwnedDirectories(sessionDirectory, endpointResource?.directory).catch(() => undefined);
+      await removeOwnedDirectories(
+        this.#removeDirectory,
+        sessionDirectory,
+        endpointResource?.directory
+      ).catch(() => undefined);
       const failure = diagnostic(error, output, sensitive);
       this.#status = { state: "failed", detail: failure.message };
       throw failure;
@@ -369,13 +379,7 @@ export class ServiceManager {
   }
 
   stop(): Promise<void> {
-    if (this.#stopPromise) return this.#stopPromise;
-    const operation = this.#enqueueLifecycle(() => this.#stopOwned());
-    const tracked = operation.finally(() => {
-      if (this.#stopPromise === tracked) this.#stopPromise = undefined;
-    });
-    this.#stopPromise = tracked;
-    return tracked;
+    return this.#enqueueLifecycle(() => this.#stopOwned());
   }
 
   async #stopOwned(): Promise<void> {
@@ -510,6 +514,6 @@ export class ServiceManager {
   async #releaseSession(session: ManagedSession): Promise<void> {
     session.child.stdout.off("data", session.stdoutListener);
     session.child.stderr.off("data", session.stderrListener);
-    await removeOwnedDirectories(session.sessionDirectory, session.endpointDirectory);
+    await removeOwnedDirectories(this.#removeDirectory, session.sessionDirectory, session.endpointDirectory);
   }
 }

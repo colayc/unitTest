@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { access } from "node:fs/promises";
+import { access, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
@@ -133,6 +133,7 @@ function createHarness(options: HarnessOptions = {}): {
   tokens: string[];
   tokenFiles: string[];
   endpoints: string[];
+  removedDirectories: string[];
   children: FakeChild[];
   clients: FakeClient[];
   calls: { prepare: number; spawn: number; connect: number };
@@ -141,11 +142,12 @@ function createHarness(options: HarnessOptions = {}): {
   const tokens: string[] = [];
   const tokenFiles: string[] = [];
   const endpoints: string[] = [];
+  const removedDirectories: string[] = [];
   const children: FakeChild[] = [];
   const clients: FakeClient[] = [];
   const calls = { prepare: 0, spawn: 0, connect: 0 };
 
-  const operations: ServiceOperations = {
+  const operations: ServiceOperations & { removeDirectory(directory: string): Promise<void> } = {
     async prepareTokenFile(_binary, tokenFile, token) {
       calls.prepare++;
       tokens.push(token);
@@ -183,6 +185,10 @@ function createHarness(options: HarnessOptions = {}): {
       );
       clients.push(client);
       return client.asProtocolClient();
+    },
+    async removeDirectory(directory) {
+      removedDirectories.push(directory);
+      await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   };
   const managerOptions: ServiceManagerOptions = {
@@ -200,6 +206,7 @@ function createHarness(options: HarnessOptions = {}): {
     tokens,
     tokenFiles,
     endpoints,
+    removedDirectories,
     children,
     clients,
     calls
@@ -259,6 +266,13 @@ test("service lifecycle startup failures enter failed and clean owned resources"
       await assertPathMissing(dirname(tokenFile));
       const endpoint = harness.endpoints[0];
       if (process.platform !== "win32" && endpoint) await assertPathMissing(dirname(endpoint));
+      const expectedDirectories = [
+        dirname(tokenFile),
+        ...(process.platform !== "win32" && endpoint ? [dirname(endpoint)] : [])
+      ];
+      for (const directory of expectedDirectories) {
+        assert.equal(harness.removedDirectories.filter((value) => value === directory).length, 1);
+      }
     });
   }
 });
@@ -274,6 +288,37 @@ test("service lifecycle stop is idempotent for the connection and child", async 
   assert.equal(harness.clients[0]?.closeCalls, 1);
   assert.equal(harness.children[0]?.killCalls, 0);
   assert.equal(harness.manager.status.state, "stopped");
+});
+
+test("service lifecycle preserves stop, start, stop call order", async () => {
+  const harness = createHarness();
+  const first = await harness.manager.start();
+
+  const firstStop = harness.manager.stop();
+  const middleStart = harness.manager.start();
+  const lastStop = harness.manager.stop();
+  const [, middle] = await Promise.all([firstStop, middleStart, lastStop]);
+
+  assert.notEqual(middle, first);
+  assert.equal(harness.calls.spawn, 2);
+  assert.equal(harness.manager.status.state, "stopped");
+  assert.equal(harness.manager.session, undefined);
+  assert.ok(harness.clients.every((client) => client.shutdownCalls === 1 && client.closeCalls === 1));
+});
+
+test("service lifecycle preserves start, stop, start call order", async () => {
+  const harness = createHarness();
+
+  const firstStart = harness.manager.start();
+  const middleStop = harness.manager.stop();
+  const lastStart = harness.manager.start();
+  const [first, , last] = await Promise.all([firstStart, middleStop, lastStart]);
+
+  assert.notEqual(last, first);
+  assert.equal(harness.calls.spawn, 2);
+  assert.equal(harness.manager.status.state, "running");
+  assert.equal(harness.manager.session, last);
+  await harness.manager.stop();
 });
 
 test("service restart replaces the token, endpoint, and client", async () => {
@@ -363,6 +408,7 @@ test("service lifecycle diagnostics retain only redacted stdout and stderr", asy
 test("repeated service lifecycle never reuses resources or cleans an owner twice", async (t) => {
   const harness = createHarness();
   const clients: ProtocolClient[] = [];
+  const ownedDirectories: string[] = [];
   const unhandled: unknown[] = [];
   const onUnhandled = (error: unknown) => unhandled.push(error);
   process.on("unhandledRejection", onUnhandled);
@@ -371,11 +417,15 @@ test("repeated service lifecycle never reuses resources or cleans an owner twice
   for (let iteration = 0; iteration < 50; iteration++) {
     const first = await harness.manager.start();
     clients.push(first.client);
+    ownedDirectories.push(first.sessionDirectory);
+    if (process.platform !== "win32") ownedDirectories.push(dirname(first.endpoint));
     await harness.manager.stop();
     await assertPathMissing(first.sessionDirectory);
     if (process.platform !== "win32") await assertPathMissing(dirname(first.endpoint));
     const second = await harness.manager.start();
     clients.push(second.client);
+    ownedDirectories.push(second.sessionDirectory);
+    if (process.platform !== "win32") ownedDirectories.push(dirname(second.endpoint));
     await harness.manager.stop();
     await assertPathMissing(second.sessionDirectory);
     if (process.platform !== "win32") await assertPathMissing(dirname(second.endpoint));
@@ -387,5 +437,9 @@ test("repeated service lifecycle never reuses resources or cleans an owner twice
   assert.equal(new Set(clients).size, 100);
   assert.ok(harness.clients.every((client) => client.shutdownCalls === 1 && client.closeCalls === 1));
   assert.ok(harness.children.every((child) => child.killCalls === 0));
+  assert.equal(harness.removedDirectories.length, ownedDirectories.length);
+  for (const directory of ownedDirectories) {
+    assert.equal(harness.removedDirectories.filter((value) => value === directory).length, 1);
+  }
   assert.deepEqual(unhandled, []);
 });
