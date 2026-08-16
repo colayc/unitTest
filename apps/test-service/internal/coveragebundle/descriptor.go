@@ -14,7 +14,7 @@ import (
 	"strings"
 	"sync"
 
-	"unit-test-ide.local/test-service/internal/serviceauthority"
+	"unit-test-ide.local/test-service/internal/serviceanchor"
 )
 
 var (
@@ -173,7 +173,8 @@ type VerifiedDirectory struct {
 	identities []pathIdentity
 	pins       []*pinnedObject
 	parent     *VerifiedDirectory
-	authority  *serviceauthority.Authority
+	ownsParent bool
+	authority  *serviceanchor.Anchor
 	closed     bool
 }
 
@@ -197,7 +198,7 @@ type DescriptorCapabilities struct {
 	// descriptor directories are resolved. Bare absolute paths are not an
 	// authorization boundary.
 	Provenance      *VerifiedDirectory
-	Authority       serviceauthority.Authority
+	Anchor          serviceanchor.Anchor
 	CoverageRoot    *VerifiedDirectory
 	Root            *VerifiedDirectory
 	ObjectDirectory *VerifiedDirectory
@@ -221,26 +222,26 @@ func newVerifiedDirectory(path string) (*VerifiedDirectory, error) {
 	return &VerifiedDirectory{path: path, identities: identities, pins: pins}, nil
 }
 
-// NewVerifiedDirectoryFromAuthority derives a capability from the
+// NewVerifiedDirectoryFromAnchor derives a capability from the
 // service-owned anchor and a relative descendant. Bare absolute paths cannot
 // mint capabilities.
-func NewVerifiedDirectoryFromAuthority(authority serviceauthority.Authority, relative string) (*VerifiedDirectory, error) {
-	anchor := authority.Root()
-	if err := authority.Verify(anchor); err != nil {
+func NewVerifiedDirectoryFromAnchor(anchor serviceanchor.Anchor, relative string) (*VerifiedDirectory, error) {
+	root := anchor.Root()
+	if err := anchor.Verify(root); err != nil {
 		return nil, err
 	}
 	if relative == "" || relative == "." {
-		root, err := newVerifiedDirectory(anchor)
+		rootCapability, err := newVerifiedDirectory(root)
 		if err != nil {
 			return nil, err
 		}
-		root.authority = &authority
-		return root, nil
+		rootCapability.authority = &anchor
+		return rootCapability, nil
 	}
 	if filepath.IsAbs(relative) || filepath.Clean(relative) != relative || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 		return nil, errors.New("invalid relative verified directory")
 	}
-	parent, err := newVerifiedDirectory(anchor)
+	parent, err := newVerifiedDirectory(root)
 	if err != nil {
 		return nil, err
 	}
@@ -249,7 +250,8 @@ func NewVerifiedDirectoryFromAuthority(authority serviceauthority.Authority, rel
 		_ = parent.Close()
 		return nil, err
 	}
-	child.authority = &authority
+	child.authority = &anchor
+	child.ownsParent = true
 	return child, nil
 }
 
@@ -305,10 +307,10 @@ func NewVerifiedExecutable(authorizedRoot, path string) (*VerifiedExecutable, er
 	return nil, errors.New("verified executable requires service authority")
 }
 
-// NewVerifiedExecutableFromAuthority derives an executable from the
+// NewVerifiedExecutableFromAnchor derives an executable from the
 // authority anchor and a relative path. The returned executable owns the
 // complete retained directory chain.
-func NewVerifiedExecutableFromAuthority(authority serviceauthority.Authority, relative string) (*VerifiedExecutable, error) {
+func NewVerifiedExecutableFromAnchor(anchor serviceanchor.Anchor, relative string) (*VerifiedExecutable, error) {
 	if filepath.IsAbs(relative) || relative == "" || filepath.Clean(relative) != relative || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 		return nil, errors.New("invalid relative verified executable")
 	}
@@ -316,7 +318,7 @@ func NewVerifiedExecutableFromAuthority(authority serviceauthority.Authority, re
 	if directory == "." {
 		directory = "."
 	}
-	root, err := NewVerifiedDirectoryFromAuthority(authority, directory)
+	root, err := NewVerifiedDirectoryFromAnchor(anchor, directory)
 	if err != nil {
 		return nil, err
 	}
@@ -464,11 +466,18 @@ func (directory *VerifiedDirectory) Close() error {
 	directory.mu.Lock()
 	directory.closed = true
 	pins := directory.pins
+	parent := directory.parent
+	ownsParent := directory.ownsParent
 	directory.pins = nil
+	directory.parent = nil
+	directory.ownsParent = false
 	directory.mu.Unlock()
 	var result error
 	for index := len(pins) - 1; index >= 0; index-- {
 		result = errors.Join(result, pins[index].Close())
+	}
+	if ownsParent && parent != nil {
+		result = errors.Join(result, parent.Close())
 	}
 	return result
 }
@@ -944,23 +953,23 @@ func (owned *OwnedDescriptor) Close() error {
 }
 
 func validateDescriptorCapabilities(coverageRoot string, descriptor Descriptor, capabilities DescriptorCapabilities) error {
-	if err := capabilities.Authority.Verify(coverageRoot); err != nil {
+	if err := capabilities.Anchor.Verify(coverageRoot); err != nil {
 		return integrityError("service authority", err)
 	}
 	if capabilities.Provenance == nil || capabilities.CoverageRoot == nil || capabilities.Root == nil || capabilities.ObjectDirectory == nil || capabilities.GcovExecutable == nil {
 		return integrityError("descriptor capabilities", errors.New("all verified capabilities are required"))
 	}
-	if err := capabilities.Authority.Verify(capabilities.Provenance.Path()); err != nil {
+	if err := capabilities.Anchor.Verify(capabilities.Provenance.Path()); err != nil {
 		return integrityError("capability authority", err)
 	}
-	if capabilities.Provenance.authority == nil || !capabilities.Authority.SameIssuer(*capabilities.Provenance.authority) || capabilities.CoverageRoot.authority != capabilities.Provenance.authority || capabilities.Root.authority != capabilities.Provenance.authority || capabilities.ObjectDirectory.authority != capabilities.Provenance.authority || capabilities.GcovExecutable.root == nil || capabilities.GcovExecutable.root.authority != capabilities.Provenance.authority {
+	if capabilities.Provenance.authority == nil || !capabilities.Anchor.SameIssuer(*capabilities.Provenance.authority) || capabilities.CoverageRoot.authority != capabilities.Provenance.authority || capabilities.Root.authority != capabilities.Provenance.authority || capabilities.ObjectDirectory.authority != capabilities.Provenance.authority || capabilities.GcovExecutable.root == nil || capabilities.GcovExecutable.root.authority != capabilities.Provenance.authority {
 		return integrityError("capability authority", errors.New("capabilities do not share one authority issuer"))
 	}
 	for label, path := range map[string]string{
 		"coverage root": coverageRoot, "root": descriptor.Root,
 		"object directory": descriptor.ObjectDirectory, "gcov executable": descriptor.GcovExecutable,
 	} {
-		if err := capabilities.Authority.Verify(path); err != nil {
+		if err := capabilities.Anchor.Verify(path); err != nil {
 			return integrityError("capability authority "+label, err)
 		}
 	}

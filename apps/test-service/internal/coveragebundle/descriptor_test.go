@@ -8,8 +8,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-
-	"unit-test-ide.local/test-service/internal/serviceauthority"
 )
 
 func strictTestTempDir(t *testing.T) string {
@@ -199,11 +197,11 @@ func TestVerifiedDirectoryRejectsAncestorReplacement(t *testing.T) {
 	if err := os.MkdirAll(child, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	authority, err := serviceauthority.Mint(filepath.Dir(child))
+	authority, err := testNewServiceAnchor(filepath.Dir(child))
 	if err != nil {
 		t.Fatal(err)
 	}
-	capability, err := NewVerifiedDirectoryFromAuthority(authority, filepath.Base(child))
+	capability, err := NewVerifiedDirectoryFromAnchor(authority, filepath.Base(child))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,6 +215,66 @@ func TestVerifiedDirectoryRejectsAncestorReplacement(t *testing.T) {
 	}
 	if err := capability.Verify(); err == nil {
 		t.Fatal("VerifiedDirectory accepted replaced ancestor")
+	}
+}
+
+func TestVerifiedChildCloseDoesNotCloseOwnedParent(t *testing.T) {
+	base := strictTestTempDir(t)
+	parentPath := filepath.Join(base, "parent")
+	childPath := filepath.Join(parentPath, "child")
+	if err := os.MkdirAll(childPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	anchor, err := testNewServiceAnchor(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, err := NewVerifiedDirectoryFromAnchor(anchor, "parent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := NewVerifiedDirectoryFrom(parent, "child")
+	if err != nil {
+		_ = parent.Close()
+		t.Fatal(err)
+	}
+	if err := child.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := parent.Verify(); err != nil {
+		t.Fatalf("parent Verify after child Close() = %v", err)
+	}
+	if err := child.Close(); err != nil {
+		t.Fatalf("second child Close() = %v", err)
+	}
+	if err := parent.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAnchorRelativeChildCloseReleasesImplicitParent(t *testing.T) {
+	base := strictTestTempDir(t)
+	childPath := filepath.Join(base, "child")
+	if err := os.MkdirAll(childPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	anchor, err := testNewServiceAnchor(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := NewVerifiedDirectoryFromAnchor(anchor, "child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := child.parent
+	if parent == nil || !child.ownsParent {
+		t.Fatal("anchor-relative child did not retain ownership of implicit parent")
+	}
+	if err := child.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := parent.Verify(); !errors.Is(err, ErrDescriptorClosed) {
+		t.Fatalf("implicit parent Verify after child Close() = %v, want ErrDescriptorClosed", err)
 	}
 }
 
@@ -259,11 +317,11 @@ func descriptorCapabilitiesForTest(t *testing.T, coverageRoot, root, objects, gc
 	for !pathWithin(provenancePath, root) || !pathWithin(provenancePath, objects) || !pathWithin(provenancePath, gcov) {
 		provenancePath = filepath.Dir(provenancePath)
 	}
-	anchor, err := serviceauthority.Mint(provenancePath)
+	anchor, err := testNewServiceAnchor(provenancePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	provenance, err := NewVerifiedDirectoryFromAuthority(anchor, ".")
+	provenance, err := NewVerifiedDirectoryFromAnchor(anchor, ".")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +346,7 @@ func descriptorCapabilitiesForTest(t *testing.T, coverageRoot, root, objects, gc
 		t.Fatal(err)
 	}
 	return DescriptorCapabilities{
-		Authority:    anchor,
+		Anchor:       anchor,
 		Provenance:   provenance,
 		CoverageRoot: coverageCapability, Root: rootCapability,
 		ObjectDirectory: objectCapability, GcovExecutable: gcovCapability,

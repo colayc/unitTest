@@ -5,26 +5,30 @@ import (
 	"io"
 	"path/filepath"
 
-	"unit-test-ide.local/test-service/internal/build"
-	"unit-test-ide.local/test-service/internal/serviceauthority"
+	"unit-test-ide.local/test-service/internal/serviceanchor"
 )
 
-// CoverageAuthority binds capability derivation to the service-owned runtime
-// coverage directory before handing it to build/coverage consumers.
-func CoverageAuthority(layout Layout) (serviceauthority.Authority, error) {
-	return build.NewCoverageAuthority(layout.Coverage)
+// CoverageAuthority returns the opaque issuer created with the prepared
+// service data directory. Consumers must receive this value from runtime;
+// build no longer mints authorities from arbitrary path strings.
+func CoverageAuthority(layout Layout) (serviceanchor.Anchor, error) {
+	if layout.CoverageAnchor.Root() == "" || layout.CoverageAnchor.Root() != layout.Root || layout.CoverageAnchor.Verify(layout.Coverage) != nil {
+		return serviceanchor.Anchor{}, ErrUnsafeDataDir
+	}
+	return layout.CoverageAnchor, nil
 }
 
 var ErrUnsafeDataDir = errors.New("service data directory is not owner-only")
 
 type Layout struct {
-	Root      string
-	Database  string
-	Artifacts string
-	Build     string
-	Coverage  string
-	Controls  string
-	Lock      string
+	Root           string
+	Database       string
+	Artifacts      string
+	Build          string
+	Coverage       string
+	Controls       string
+	Lock           string
+	CoverageAnchor serviceanchor.Anchor
 }
 
 func PrepareDataDir(root string) (Layout, error) {
@@ -60,6 +64,11 @@ func prepareDataDirGuard(root string) (Layout, io.Closer, error) {
 		Controls:  filepath.Join(absolute, "controls"),
 		Lock:      filepath.Join(absolute, "service.lock"),
 	}
+	anchor, err := newServiceAnchor(absolute)
+	if err != nil {
+		return Layout{}, nil, errors.Join(ErrUnsafeDataDir, guard.Close())
+	}
+	layout.CoverageAnchor = anchor
 	buildGuard, err := pinOwnerOnlyDirectory(layout.Build)
 	if err != nil {
 		return Layout{}, nil, errors.Join(ErrUnsafeDataDir, guard.Close())

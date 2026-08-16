@@ -11,17 +11,9 @@ import (
 
 	"unit-test-ide.local/test-service/internal/cmake"
 	"unit-test-ide.local/test-service/internal/coveragebundle"
-	"unit-test-ide.local/test-service/internal/serviceauthority"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/workspace"
 )
-
-// NewCoverageAuthority binds coverage capability derivation to the service
-// data root. The opaque token is minted by the trusted build boundary, not by
-// coveragebundle callers.
-func NewCoverageAuthority(coverageRoot string) (serviceauthority.Authority, error) {
-	return serviceauthority.Mint(filepath.Dir(filepath.Clean(coverageRoot)))
-}
 
 type executionBoundary struct {
 	executable                 string

@@ -15,7 +15,6 @@ import (
 
 	"unit-test-ide.local/test-service/internal/cmake"
 	"unit-test-ide.local/test-service/internal/coveragebundle"
-	"unit-test-ide.local/test-service/internal/serviceauthority"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/toolchain"
 	"unit-test-ide.local/test-service/internal/workspace"
@@ -168,11 +167,11 @@ func testCoverageCapabilities(t *testing.T, coverageRoot, projectRoot, objects, 
 	if !pathWithinLocal(provenancePath, projectRoot) || !pathWithinLocal(provenancePath, objects) || !pathWithinLocal(provenancePath, gcov) {
 		t.Fatalf("fixture paths escaped scratch anchor %q", provenancePath)
 	}
-	authority, err := serviceauthority.Mint(provenancePath)
+	authority, err := testNewServiceAnchor(provenancePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	provenance, err := coveragebundle.NewVerifiedDirectoryFromAuthority(authority, ".")
+	provenance, err := coveragebundle.NewVerifiedDirectoryFromAnchor(authority, ".")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +192,7 @@ func testCoverageCapabilities(t *testing.T, coverageRoot, projectRoot, objects, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	return coveragebundle.DescriptorCapabilities{Authority: authority, Provenance: provenance, CoverageRoot: coverageCapability, Root: rootCapability, ObjectDirectory: objectCapability, GcovExecutable: gcovCapability}
+	return coveragebundle.DescriptorCapabilities{Anchor: authority, Provenance: provenance, CoverageRoot: coverageCapability, Root: rootCapability, ObjectDirectory: objectCapability, GcovExecutable: gcovCapability}
 }
 
 func pathWithinLocal(root, child string) bool {

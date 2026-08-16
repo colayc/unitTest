@@ -50,6 +50,13 @@ func TestCoverageDataDirectoryIsServiceOwned(t *testing.T) {
 	if err != nil || !info.IsDir() {
 		t.Fatalf("coverage data directory = %#v, %v", info, err)
 	}
+	anchor, err := CoverageAuthority(layout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if anchor.Root() != layout.Root || anchor.Verify(layout.Coverage) != nil {
+		t.Fatalf("coverage anchor is not bound to layout: root=%q coverage=%q", anchor.Root(), layout.Coverage)
+	}
 }
 
 func TestPrepareDataDirRejectsARegularFile(t *testing.T) {

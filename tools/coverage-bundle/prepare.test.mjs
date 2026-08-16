@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 
 import { bundleDirectory, platformKey } from "./layout.mjs";
@@ -684,4 +686,43 @@ test("runner descriptor is closed and maps only fixed root/object/gcov/output fi
   assert.ok(contract.indexOf('descriptor["outputPath"]') < contract.indexOf('"--json-pretty"'));
   assert.match(main, /"-I"[\s\S]*"-S"/u);
   assert.match(main, /PYTHON/iu);
+});
+
+test("real Python runner contract rejects malformed descriptors", async (t) => {
+  const python = process.env.PYTHON ?? (process.platform === "win32" ? "python" : "python3");
+  const probe = spawnSync(python, ["-c", "import sys; print(sys.version_info[:2])"], { encoding: "utf8" });
+  if (probe.error) {
+    if (probe.error.code === "ENOENT" || probe.error.code === "EPERM") {
+      t.skip(`Python subprocess unavailable (${probe.error.code}): ${probe.error.message}`);
+      return;
+    }
+    throw probe.error;
+  }
+  if (typeof probe.status !== "number") throw new Error(`Python probe did not return an exit status: ${probe.error ?? probe.stderr}`);
+  if (probe.status !== 0) throw new Error(`Python probe failed: ${probe.stderr}`);
+  const root = await temporary(t, "coverage-runner-contract-");
+  const descriptorPath = join(root, "descriptor.json");
+  const runnerDirectory = dirname(fileURLToPath(new URL("./runner/contract.py", import.meta.url)));
+  const script = "import sys; from contract import load_descriptor; load_descriptor(sys.argv[1])";
+  const valid = {
+    schemaVersion: 1,
+    root: join(root, "source"),
+    objectDirectory: join(root, "objects"),
+    gcovExecutable: join(root, "gcov.exe"),
+    outputPath: join(root, "coverage.json"),
+  };
+  await writeFile(descriptorPath, JSON.stringify(valid));
+  const accepted = spawnSync(python, ["-c", script, descriptorPath], { cwd: runnerDirectory, encoding: "utf8" });
+  assert.equal(accepted.status, 0, accepted.stderr);
+  for (const malformed of [
+    JSON.stringify({ ...valid, extra: true }),
+    `{"schemaVersion":1,"root":"${valid.root}","root":"${valid.root}","objectDirectory":"${valid.objectDirectory}","gcovExecutable":"${valid.gcovExecutable}","outputPath":"${valid.outputPath}"}`,
+    JSON.stringify({ ...valid, schemaVersion: 2 }),
+  ]) {
+    await writeFile(descriptorPath, malformed);
+    const rejected = spawnSync(python, ["-c", script, descriptorPath], { cwd: runnerDirectory, encoding: "utf8" });
+    assert.equal(rejected.error, undefined, rejected.error?.message);
+    assert.equal(typeof rejected.status, "number", "runner did not return an exit status");
+    assert.notEqual(rejected.status, 0, `runner accepted malformed descriptor: ${malformed}`);
+  }
 });
