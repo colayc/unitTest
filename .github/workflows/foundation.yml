@@ -52,9 +52,13 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: native-toolchain-windows-${{ github.run_attempt }}
-          path: |
-            .native-e2e/artifacts/windows/toolchain-report.json
-            .native-e2e/artifacts/windows/coverage-bundle-report.json
+          path: .native-e2e/artifacts/windows/toolchain-report.json
+          if-no-files-found: error
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-bundle-windows-${{ github.run_attempt }}
+          path: .native-e2e/artifacts/windows/coverage-bundle-report.json
           if-no-files-found: error
       - if: always()
         run: git diff --exit-code
@@ -102,9 +106,13 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: native-toolchain-linux-${{ github.run_attempt }}
-          path: |
-            .native-e2e/artifacts/linux/toolchain-report.json
-            .native-e2e/artifacts/linux/coverage-bundle-report.json
+          path: .native-e2e/artifacts/linux/toolchain-report.json
+          if-no-files-found: error
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-bundle-linux-${{ github.run_attempt }}
+          path: .native-e2e/artifacts/linux/coverage-bundle-report.json
           if-no-files-found: error
       - if: always()
         run: git diff --exit-code
