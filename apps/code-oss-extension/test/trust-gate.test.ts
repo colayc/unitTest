@@ -13,6 +13,11 @@ test("untrusted single-root workspace never becomes executable", () => {
   assert.equal(canStartService("blocked-untrusted"), false);
 });
 
+test("trusted single-root workspace can start the service", () => {
+  assert.equal(evaluateWorkspace({ folderCount: 1, isTrusted: true }), "trusted");
+  assert.equal(canStartService("trusted"), true);
+});
+
 test("trust transition emits trusted only for one trusted folder", () => {
   const gate = new TrustGate();
   assert.equal(gate.update({ folderCount: 1, isTrusted: false }), "blocked-untrusted");

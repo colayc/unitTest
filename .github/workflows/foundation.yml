@@ -101,6 +101,10 @@ jobs:
       - run: pnpm check:coverage-bundle
       - run: pnpm --filter @unit-test-ide/service-probe test:coverage-bundle
       - run: pnpm prepare:cmake-bundle
+      # Exercise the real Unix Socket service contract; host smoke remains an honest SKIP without CODE_OSS_EXECUTABLE.
+      - run: node tools/service-probe/build-service.mjs
+      - run: pnpm --filter code-oss-extension test:service-smoke
+      - run: pnpm --filter code-oss-extension test:host
       - run: pnpm test:e2e:native
       - if: always()
         uses: actions/upload-artifact@v7
