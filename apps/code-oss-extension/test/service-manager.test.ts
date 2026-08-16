@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { access } from "node:fs/promises";
+import { dirname } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import type { ProtocolClient } from "@unit-test-ide/test-client";
@@ -20,6 +22,11 @@ class FakeChild extends EventEmitter {
   exitCode: ExitCode = null;
   signalCode: ExitSignal = null;
   killCalls = 0;
+  delayedKillSignal: NodeJS.Signals | undefined;
+
+  constructor(private readonly deferKillExit = false) {
+    super();
+  }
 
   ready(endpoint: string): void {
     this.stdout.write(`READY ${endpoint}\n`);
@@ -34,8 +41,16 @@ class FakeChild extends EventEmitter {
 
   kill(signal: NodeJS.Signals = "SIGTERM"): boolean {
     this.killCalls++;
-    queueMicrotask(() => this.exit(null, signal));
+    if (this.deferKillExit) this.delayedKillSignal = signal;
+    else queueMicrotask(() => this.exit(null, signal));
     return true;
+  }
+
+  finishDelayedKill(): void {
+    const signal = this.delayedKillSignal;
+    assert.ok(signal);
+    this.delayedKillSignal = undefined;
+    this.exit(null, signal);
   }
 
   asChildProcess(): ChildProcessWithoutNullStreams {
@@ -43,11 +58,12 @@ class FakeChild extends EventEmitter {
   }
 }
 
-class FakeClient extends EventEmitter {
+class FakeClient {
   handshakeCalls = 0;
   capabilitiesCalls = 0;
   shutdownCalls = 0;
   closeCalls = 0;
+  readonly #connectionCloseListeners = new Set<(error: Error) => void>();
 
   constructor(
     private readonly order: string[],
@@ -55,7 +71,11 @@ class FakeClient extends EventEmitter {
     private readonly handshakeFailure?: Error,
     private readonly capabilitiesFailure?: Error
   ) {
-    super();
+  }
+
+  onConnectionClose(listener: (error: Error) => void): () => void {
+    this.#connectionCloseListeners.add(listener);
+    return () => this.#connectionCloseListeners.delete(listener);
   }
 
   async handshake(_token: string, _clientName: string, _clientVersion: string): Promise<{ negotiatedProtocolVersion: "1.4" }> {
@@ -79,11 +99,17 @@ class FakeClient extends EventEmitter {
 
   close(): void {
     this.closeCalls++;
-    this.emit("close", new Error("connection closed"));
+    this.#notifyConnectionClose(new Error("connection closed"));
   }
 
   disconnect(error = new Error("connection lost")): void {
-    this.emit("close", error);
+    this.#notifyConnectionClose(error);
+  }
+
+  #notifyConnectionClose(error: Error): void {
+    const listeners = [...this.#connectionCloseListeners];
+    this.#connectionCloseListeners.clear();
+    for (const listener of listeners) listener(error);
   }
 
   asProtocolClient(): ProtocolClient {
@@ -95,6 +121,7 @@ interface HarnessOptions {
   trusted?: boolean;
   autoReady?: boolean;
   exitAfterReady?: boolean;
+  deferKillExit?: boolean;
   timeoutMs?: number;
   handshakeFailure?: Error;
   capabilitiesFailure?: Error;
@@ -104,6 +131,7 @@ function createHarness(options: HarnessOptions = {}): {
   manager: ServiceManager;
   order: string[];
   tokens: string[];
+  tokenFiles: string[];
   endpoints: string[];
   children: FakeChild[];
   clients: FakeClient[];
@@ -111,15 +139,17 @@ function createHarness(options: HarnessOptions = {}): {
 } {
   const order: string[] = [];
   const tokens: string[] = [];
+  const tokenFiles: string[] = [];
   const endpoints: string[] = [];
   const children: FakeChild[] = [];
   const clients: FakeClient[] = [];
   const calls = { prepare: 0, spawn: 0, connect: 0 };
 
   const operations: ServiceOperations = {
-    async prepareTokenFile(_binary, _tokenFile, token) {
+    async prepareTokenFile(_binary, tokenFile, token) {
       calls.prepare++;
       tokens.push(token);
+      tokenFiles.push(tokenFile);
       order.push("prepare");
     },
     spawnService(_binary, args) {
@@ -128,7 +158,7 @@ function createHarness(options: HarnessOptions = {}): {
       const endpoint = args[args.indexOf("--endpoint") + 1];
       assert.ok(endpoint);
       endpoints.push(endpoint);
-      const child = new FakeChild();
+      const child = new FakeChild(options.deferKillExit);
       children.push(child);
       if (options.autoReady !== false) {
         queueMicrotask(() => {
@@ -168,6 +198,7 @@ function createHarness(options: HarnessOptions = {}): {
     manager: new ServiceManager(managerOptions),
     order,
     tokens,
+    tokenFiles,
     endpoints,
     children,
     clients,
@@ -181,6 +212,13 @@ async function waitFor(predicate: () => boolean): Promise<void> {
     if (Date.now() >= deadline) throw new Error("condition was not reached");
     await new Promise<void>((resolve) => setImmediate(resolve));
   }
+}
+
+async function assertPathMissing(path: string): Promise<void> {
+  await assert.rejects(
+    () => access(path),
+    (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT"
+  );
 }
 
 test("service lifecycle starts in prepare, spawn, READY, connect, handshake, capabilities order", async () => {
@@ -216,6 +254,11 @@ test("service lifecycle startup failures enter failed and clean owned resources"
       assert.equal(harness.manager.session, undefined);
       assert.equal(harness.children[0]?.killCalls, 1);
       if (harness.clients[0]) assert.equal(harness.clients[0].closeCalls, 1);
+      const tokenFile = harness.tokenFiles[0];
+      assert.ok(tokenFile);
+      await assertPathMissing(dirname(tokenFile));
+      const endpoint = harness.endpoints[0];
+      if (process.platform !== "win32" && endpoint) await assertPathMissing(dirname(endpoint));
     });
   }
 });
@@ -249,7 +292,7 @@ test("service lifecycle enters failed when the child exits", async () => {
   await harness.manager.start();
 
   harness.children[0]?.exit(9, null);
-  await waitFor(() => harness.manager.status.state === "failed");
+  await waitFor(() => harness.manager.status.state === "failed" && harness.manager.session === undefined);
 
   assert.equal(harness.clients[0]?.closeCalls, 1);
   assert.equal(harness.manager.session, undefined);
@@ -268,12 +311,35 @@ test("service lifecycle rejects a child exit between READY and connection", asyn
 test("service lifecycle enters failed when the connection closes", async () => {
   const harness = createHarness();
   await harness.manager.start();
+  assert.equal(harness.clients[0] instanceof EventEmitter, false);
 
   harness.clients[0]?.disconnect();
-  await waitFor(() => harness.manager.status.state === "failed");
+  await waitFor(() => harness.manager.status.state === "failed" && harness.manager.session === undefined);
 
   assert.equal(harness.children[0]?.killCalls, 1);
   assert.equal(harness.manager.session, undefined);
+});
+
+test("service lifecycle serializes delayed failure cleanup before replacement start", async () => {
+  const harness = createHarness({ deferKillExit: true });
+  const first = await harness.manager.start();
+
+  harness.clients[0]?.disconnect(new Error("delayed disconnect"));
+  const replacementPromise = harness.manager.start();
+  await waitFor(() => harness.children[0]?.killCalls === 1);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(harness.calls.prepare, 1);
+  assert.equal(harness.manager.session, first);
+  harness.children[0]?.finishDelayedKill();
+
+  const replacement = await replacementPromise;
+  assert.notEqual(replacement, first);
+  assert.equal(harness.manager.session, replacement);
+  assert.equal(harness.manager.status.state, "running");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(harness.manager.status.state, "running");
+  await harness.manager.stop();
 });
 
 test("service lifecycle diagnostics retain only redacted stdout and stderr", async () => {
@@ -303,10 +369,16 @@ test("repeated service lifecycle never reuses resources or cleans an owner twice
   t.after(() => process.off("unhandledRejection", onUnhandled));
 
   for (let iteration = 0; iteration < 50; iteration++) {
-    clients.push((await harness.manager.start()).client);
+    const first = await harness.manager.start();
+    clients.push(first.client);
     await harness.manager.stop();
-    clients.push((await harness.manager.start()).client);
+    await assertPathMissing(first.sessionDirectory);
+    if (process.platform !== "win32") await assertPathMissing(dirname(first.endpoint));
+    const second = await harness.manager.start();
+    clients.push(second.client);
     await harness.manager.stop();
+    await assertPathMissing(second.sessionDirectory);
+    if (process.platform !== "win32") await assertPathMissing(dirname(second.endpoint));
   }
   await new Promise<void>((resolve) => setImmediate(resolve));
 

@@ -4,6 +4,8 @@ import {
   type ChildProcessWithoutNullStreams
 } from "node:child_process";
 import { rm, writeFile } from "node:fs/promises";
+import { once } from "node:events";
+import { createConnection, type Socket } from "node:net";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { ProtocolClient } from "@unit-test-ide/test-client";
@@ -43,6 +45,10 @@ export interface ServiceSession {
   readonly client: ProtocolClient;
 }
 
+interface ServiceConnectionCloseObservable {
+  onConnectionClose(listener: (error: Error) => void): () => void;
+}
+
 type Exit = [code: number | null, signal: NodeJS.Signals | null];
 
 interface CapturedOutput {
@@ -62,13 +68,10 @@ interface ManagedSession extends ServiceSession {
   exited: boolean;
   childExitListener?: (code: number | null, signal: NodeJS.Signals | null) => void;
   childErrorListener?: (error: Error) => void;
-  clientCloseListener?: (error?: Error) => void;
+  clientCloseUnsubscribe?: () => void;
 }
 
-interface ClientCloseEmitter {
-  once(event: "close", listener: (error?: Error) => void): unknown;
-  off(event: "close", listener: (error?: Error) => void): unknown;
-}
+const connectionCloseObservables = new WeakMap<ProtocolClient, ServiceConnectionCloseObservable>();
 
 async function prepareTokenFile(binary: string, tokenFile: string, token: string): Promise<void> {
   await execFile(binary, ["--prepare-token-file", tokenFile], { windowsHide: true });
@@ -78,8 +81,45 @@ async function prepareTokenFile(binary: string, tokenFile: string, token: string
 const defaultOperations: ServiceOperations = {
   prepareTokenFile,
   spawnService: (binary, args) => spawn(binary, args, { windowsHide: true }),
-  connect: (endpoint) => ProtocolClient.connect(endpoint)
+  connect: connectProtocolClient
 };
+
+function observeSocketClose(socket: Socket): ServiceConnectionCloseObservable {
+  const listeners = new Set<(error: Error) => void>();
+  let closeError: Error | undefined;
+  let closed = false;
+  socket.once("error", (error) => { closeError = error; });
+  socket.once("close", () => {
+    closed = true;
+    const error = closeError ?? new Error("service connection closed");
+    for (const listener of [...listeners]) listener(error);
+    listeners.clear();
+  });
+  return {
+    onConnectionClose(listener) {
+      if (closed) {
+        queueMicrotask(() => listener(closeError ?? new Error("service connection closed")));
+        return () => undefined;
+      }
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    }
+  };
+}
+
+async function connectProtocolClient(endpoint: string): Promise<ProtocolClient> {
+  const socket = createConnection(endpoint);
+  const observable = observeSocketClose(socket);
+  try {
+    await once(socket, "connect");
+  } catch (error) {
+    socket.destroy();
+    throw error;
+  }
+  const client = ProtocolClient.attach(socket);
+  connectionCloseObservables.set(client, observable);
+  return client;
+}
 
 function timeoutError(operation: string, timeoutMs: number): Error {
   const error = new Error(`${operation} timed out after ${timeoutMs}ms`);
@@ -150,10 +190,12 @@ function diagnostic(error: unknown, output: CapturedOutput, sensitive: readonly 
   );
 }
 
-function closeEmitter(client: ProtocolClient): ClientCloseEmitter | undefined {
-  const candidate = client as unknown as Partial<ClientCloseEmitter>;
-  return typeof candidate.once === "function" && typeof candidate.off === "function"
-    ? candidate as ClientCloseEmitter
+function connectionCloseObservable(client: ProtocolClient): ServiceConnectionCloseObservable | undefined {
+  const registered = connectionCloseObservables.get(client);
+  if (registered) return registered;
+  const candidate = client as unknown as Partial<ServiceConnectionCloseObservable>;
+  return typeof candidate.onConnectionClose === "function"
+    ? candidate as ServiceConnectionCloseObservable
     : undefined;
 }
 
@@ -171,6 +213,7 @@ export class ServiceManager {
   #session: ManagedSession | undefined;
   #startPromise: Promise<ServiceSession> | undefined;
   #stopPromise: Promise<void> | undefined;
+  #lifecycleTail: Promise<void> = Promise.resolve();
 
   constructor(options: ServiceManagerOptions) {
     this.#options = options;
@@ -188,10 +231,9 @@ export class ServiceManager {
   start(): Promise<ServiceSession> {
     const trustState: TrustState = this.#options.trusted() ? "trusted" : "blocked-untrusted";
     if (!canStartService(trustState)) return Promise.reject(new Error("workspace is not trusted"));
-    if (this.#session && this.#status.state === "running") return Promise.resolve(this.#session);
     if (this.#startPromise) return this.#startPromise;
 
-    const operation = this.#startOwned();
+    const operation = this.#enqueueLifecycle(() => this.#startOwned());
     const tracked = operation.finally(() => {
       if (this.#startPromise === tracked) this.#startPromise = undefined;
     });
@@ -200,7 +242,7 @@ export class ServiceManager {
   }
 
   async #startOwned(): Promise<ServiceSession> {
-    if (this.#stopPromise) await this.#stopPromise;
+    if (this.#session && this.#status.state === "running") return this.#session;
     this.#status = { state: "starting" };
     const token = createToken();
     const output: CapturedOutput = { stdout: "", stderr: "" };
@@ -328,7 +370,7 @@ export class ServiceManager {
 
   stop(): Promise<void> {
     if (this.#stopPromise) return this.#stopPromise;
-    const operation = this.#stopOwned();
+    const operation = this.#enqueueLifecycle(() => this.#stopOwned());
     const tracked = operation.finally(() => {
       if (this.#stopPromise === tracked) this.#stopPromise = undefined;
     });
@@ -337,9 +379,6 @@ export class ServiceManager {
   }
 
   async #stopOwned(): Promise<void> {
-    if (this.#startPromise) {
-      await this.#startPromise.catch(() => undefined);
-    }
     const session = this.#session;
     if (!session) {
       this.#status = { state: "stopped" };
@@ -376,9 +415,19 @@ export class ServiceManager {
     this.#status = { state: "stopped" };
   }
 
-  async restart(): Promise<ServiceSession> {
-    await this.stop();
-    return this.start();
+  restart(): Promise<ServiceSession> {
+    const trustState: TrustState = this.#options.trusted() ? "trusted" : "blocked-untrusted";
+    if (!canStartService(trustState)) return Promise.reject(new Error("workspace is not trusted"));
+    return this.#enqueueLifecycle(async () => {
+      await this.#stopOwned();
+      return this.#startOwned();
+    });
+  }
+
+  #enqueueLifecycle<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.#lifecycleTail.then(operation);
+    this.#lifecycleTail = result.then(() => undefined, () => undefined);
+    return result;
   }
 
   #sensitive(
@@ -402,43 +451,47 @@ export class ServiceManager {
   #installRuntimeListeners(session: ManagedSession): void {
     session.childExitListener = (code, signal) => {
       if (session.expectedStop) return;
-      void this.#failSession(
+      this.#scheduleFailure(
         session,
         new Error(`service exited unexpectedly with code ${String(code)} and signal ${String(signal)}`)
-      ).catch(() => undefined);
+      );
     };
     session.childErrorListener = (error) => {
       if (session.expectedStop) return;
-      void this.#failSession(session, error).catch(() => undefined);
+      this.#scheduleFailure(session, error);
     };
     session.child.once("exit", session.childExitListener);
     session.child.once("error", session.childErrorListener);
 
-    const emitter = closeEmitter(session.client);
-    if (emitter) {
-      session.clientCloseListener = (error) => {
+    const observable = connectionCloseObservable(session.client);
+    if (observable) {
+      session.clientCloseUnsubscribe = observable.onConnectionClose((error) => {
         if (session.expectedStop) return;
-        void this.#failSession(session, error ?? new Error("service connection closed")).catch(() => undefined);
-      };
-      emitter.once("close", session.clientCloseListener);
+        this.#scheduleFailure(session, error);
+      });
     }
   }
 
   #removeRuntimeListeners(session: ManagedSession): void {
     if (session.childExitListener) session.child.off("exit", session.childExitListener);
     if (session.childErrorListener) session.child.off("error", session.childErrorListener);
-    const emitter = closeEmitter(session.client);
-    if (emitter && session.clientCloseListener) emitter.off("close", session.clientCloseListener);
+    session.clientCloseUnsubscribe?.();
     session.childExitListener = undefined;
     session.childErrorListener = undefined;
-    session.clientCloseListener = undefined;
+    session.clientCloseUnsubscribe = undefined;
   }
 
-  async #failSession(session: ManagedSession, error: unknown): Promise<void> {
+  #scheduleFailure(session: ManagedSession, error: unknown): void {
     if (this.#session !== session || session.expectedStop) return;
     session.expectedStop = true;
     this.#removeRuntimeListeners(session);
-    this.#session = undefined;
+    const failure = diagnostic(error, session.output, session.sensitive);
+    this.#status = { state: "failed", detail: failure.message };
+    void this.#enqueueLifecycle(() => this.#failSession(session, error)).catch(() => undefined);
+  }
+
+  async #failSession(session: ManagedSession, error: unknown): Promise<void> {
+    if (this.#session !== session) return;
     session.client.close();
     if (!session.exited && session.child.exitCode === null && session.child.signalCode === null) {
       session.child.kill("SIGKILL");
@@ -448,7 +501,10 @@ export class ServiceManager {
     }
     await this.#releaseSession(session).catch(() => undefined);
     const failure = diagnostic(error, session.output, session.sensitive);
-    this.#status = { state: "failed", detail: failure.message };
+    if (this.#session === session) {
+      this.#session = undefined;
+      this.#status = { state: "failed", detail: failure.message };
+    }
   }
 
   async #releaseSession(session: ManagedSession): Promise<void> {
