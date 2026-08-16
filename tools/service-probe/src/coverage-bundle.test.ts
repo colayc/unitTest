@@ -26,6 +26,10 @@ test("coverage probe sanitizes Python, proxy, registry, and user-site environmen
     PYTHONUSERBASE: "poison",
     VIRTUAL_ENV: "poison",
     CONDA_PREFIX: "poison",
+    LANG: "C",
+    LANGUAGE: "en_US",
+    LC_ALL: "C.UTF-8",
+    lC_CTYPE: "C.UTF-8",
     UNIT_TEST_IDE_COVERAGE_PROBE: "1",
   });
   assert.deepEqual(sanitized, {
@@ -50,6 +54,7 @@ test("coverage network guard blocks DNS, socket, HTTP and restores state", async
 test("coverage report has provenance but never installation paths", () => {
   const report = buildCoverageBundleReport({
     manifestDigest: "a".repeat(64),
+    sourceManifestDigest: "b".repeat(64),
     platform: "windows-x64",
     pythonVersion: "3.14.6",
     gcovrVersion: "8.6",
@@ -60,6 +65,20 @@ test("coverage report has provenance but never installation paths", () => {
   assert.equal(JSON.stringify(report).includes("C:\\\\secret"), false);
   assert.equal(JSON.stringify(report).includes("/opt/coverage"), false);
   assert.throws(() => validateCoverageBundleReport({ ...report, installationPath: "/opt/coverage" } as never), /unexpected fields/u);
+});
+
+test("coverage report accepts an explicit environment-blocked runner outcome", () => {
+  const report = buildCoverageBundleReport({
+    manifestDigest: "c".repeat(64),
+    sourceManifestDigest: "d".repeat(64),
+    platform: "linux-x64",
+    pythonVersion: "3.14.6",
+    gcovrVersion: "8.6",
+    licenses: ["PSF-2.0", "BSD-3-Clause"],
+    smoke: { selfCheck: "failed", descriptor: "skipped", negative: "environment-blocked" },
+  });
+  validateCoverageBundleReport(report);
+  assert.equal(report.smoke.negative, "environment-blocked");
 });
 
 test("negative evidence distinguishes a real rejection from a null status", () => {
@@ -75,6 +94,7 @@ test("report writer is atomic and only emits the stable schema", async (t) => {
   t.after(() => rm(root, { recursive: true, force: true }));
   const report = buildCoverageBundleReport({
     manifestDigest: "b".repeat(64),
+    sourceManifestDigest: "e".repeat(64),
     platform: "linux-x64",
     pythonVersion: "3.14.6",
     gcovrVersion: "8.6",

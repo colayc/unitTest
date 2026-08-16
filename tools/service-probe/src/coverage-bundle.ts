@@ -33,6 +33,7 @@ export interface CoverageBundleReport {
   readonly schemaVersion: 1;
   readonly platform: BundlePlatform;
   readonly manifestDigest: string;
+  readonly sourceManifestDigest: string;
   readonly versions: { readonly python: string; readonly gcovr: string };
   readonly licenses: readonly string[];
   readonly smoke: CoverageSmokeOutcome;
@@ -40,6 +41,7 @@ export interface CoverageBundleReport {
 
 export interface CoverageBundleReportInput {
   readonly manifestDigest: string;
+  readonly sourceManifestDigest: string;
   readonly platform: BundlePlatform;
   readonly pythonVersion: string;
   readonly gcovrVersion: string;
@@ -53,6 +55,7 @@ export interface CoverageBundleProbeOptions {
   readonly platform?: BundlePlatform;
   readonly environment?: NodeJS.ProcessEnv;
   readonly cwd?: string;
+  readonly sourceManifestPath?: string;
 }
 
 interface ResolvedManifest {
@@ -79,6 +82,7 @@ export function sanitizeCoverageEnvironment(environment: NodeJS.ProcessEnv = pro
     if (
       upper.startsWith("PYTHON") || upper.startsWith("PIP_") || upper.startsWith("CONDA_") ||
       upper.startsWith("NPM_CONFIG_") || NETWORK_NAMES.has(upper) || HOME_NAMES.has(upper) ||
+      upper === "LANG" || upper === "LANGUAGE" || upper.startsWith("LC_") ||
       upper === "VIRTUAL_ENV" || upper === "PYTHONUSERBASE"
     ) continue;
     sanitized[name] = value;
@@ -136,6 +140,7 @@ function replace(target: object, property: PropertyKey, value: unknown, restorer
 
 export function buildCoverageBundleReport(input: CoverageBundleReportInput): CoverageBundleReport {
   if (!DIGEST.test(input.manifestDigest)) throw new Error("invalid coverage manifest digest");
+  if (!DIGEST.test(input.sourceManifestDigest)) throw new Error("invalid source manifest digest");
   if (input.platform !== "windows-x64" && input.platform !== "linux-x64") throw new Error("invalid coverage platform");
   if (!VERSION.test(input.pythonVersion) || !VERSION.test(input.gcovrVersion)) throw new Error("invalid coverage version");
   if (!Array.isArray(input.licenses) || input.licenses.length === 0 || input.licenses.some((value) => !/^[A-Za-z0-9.+-]+$/u.test(value))) {
@@ -150,6 +155,7 @@ export function buildCoverageBundleReport(input: CoverageBundleReportInput): Cov
     schemaVersion: 1,
     platform: input.platform,
     manifestDigest: input.manifestDigest,
+    sourceManifestDigest: input.sourceManifestDigest,
     versions: { python: input.pythonVersion, gcovr: input.gcovrVersion },
     licenses: [...new Set(input.licenses)].sort(),
     smoke: { ...smoke },
@@ -157,10 +163,10 @@ export function buildCoverageBundleReport(input: CoverageBundleReportInput): Cov
 }
 
 export function validateCoverageBundleReport(report: CoverageBundleReport): void {
-  exactKeys(report, ["schemaVersion", "platform", "manifestDigest", "versions", "licenses", "smoke"], "coverage report");
+  exactKeys(report, ["schemaVersion", "platform", "manifestDigest", "sourceManifestDigest", "versions", "licenses", "smoke"], "coverage report");
   if (report.schemaVersion !== 1 || (report.platform !== "windows-x64" && report.platform !== "linux-x64")) throw new Error("invalid coverage report");
   exactKeys(report.versions, ["python", "gcovr"], "coverage report versions");
-  if (!DIGEST.test(report.manifestDigest) || !report.versions || !VERSION.test(report.versions.python) || !VERSION.test(report.versions.gcovr)) throw new Error("invalid coverage report identity");
+  if (!DIGEST.test(report.manifestDigest) || !DIGEST.test(report.sourceManifestDigest) || !report.versions || !VERSION.test(report.versions.python) || !VERSION.test(report.versions.gcovr)) throw new Error("invalid coverage report identity");
   if (!Array.isArray(report.licenses) || report.licenses.length === 0 || report.licenses.some((license) => !/^[A-Za-z0-9.+-]+$/u.test(license))) throw new Error("invalid coverage report licenses");
   if (report.licenses.some((license, index) => index > 0 && report.licenses[index - 1]! >= license)) throw new Error("coverage report licenses must be unique and sorted");
   exactKeys(report.smoke, ["selfCheck", "descriptor", "negative"], "coverage report smoke");
@@ -177,6 +183,7 @@ function exactKeys(value: unknown, expected: readonly string[], label: string): 
 
 export function classifyNegativeEvidence(result: { readonly status: unknown; readonly code?: unknown }): NegativeEvidence {
   if (result.status === "rejected" && (result.code === undefined || result.code === 2)) return "rejected";
+  if (result.status === "environment-blocked" && result.code === undefined) return "environment-blocked";
   if (result.status === "error" && (result.code === "ENOENT" || result.code === "EPERM")) return "environment-blocked";
   throw new Error("missing negative evidence or negative case was accepted");
 }
@@ -222,6 +229,9 @@ export async function runCoverageBundleProbe(options: CoverageBundleProbeOptions
   const platform = options.platform ?? resolved.platform;
   if (platform !== resolved.platform) throw new Error("coverage bundle platform mismatch");
   const manifestDigest = createHash("sha256").update(manifestBytes).digest("hex");
+  const sourceManifestPath = options.sourceManifestPath ?? join(resolve(import.meta.dirname, "../../.."), "tools", "coverage-bundle", "manifest.json");
+  if (!isAbsolute(sourceManifestPath) || sourceManifestPath.includes("\0")) throw new Error("source manifest path must be absolute");
+  const sourceManifestDigest = createHash("sha256").update(await readFile(sourceManifestPath)).digest("hex");
   const licenseBytes = await readFile(join(bundleRoot, "licenses", "dependencies.json"), "utf8");
   const licenses = licensesFromManifest(JSON.parse(licenseBytes) as LicenseManifest);
   const executable = platform === "windows-x64" ? join(bundleRoot, "python", "python.exe") : join(bundleRoot, "python", "bin", "python3");
@@ -238,13 +248,32 @@ export async function runCoverageBundleProbe(options: CoverageBundleProbeOptions
     maxBuffer: 1024 * 1024,
   });
   let selfCheck: "passed" | "failed" = "failed";
+  let executionBlocked = false;
   try {
     const result = await run(["--self-check"]);
     const value = JSON.parse(result.stdout.trim()) as { python?: string; gcovr?: string };
     if (value.python !== resolved.pythonVersion || value.gcovr !== resolved.gcovrVersion) throw new Error("coverage runner version mismatch");
     selfCheck = "passed";
   } catch (error) {
-    throw new Error(`coverage bundle self-check failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+    const code = (error as ExecFileException & { code?: string | number }).code;
+    if (code === "ENOENT" || code === "EPERM") {
+      executionBlocked = true;
+    } else {
+      throw new Error(`coverage bundle self-check failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+    }
+  }
+  if (executionBlocked) {
+    const report = buildCoverageBundleReport({
+      manifestDigest,
+      sourceManifestDigest,
+      platform,
+      pythonVersion: resolved.pythonVersion,
+      gcovrVersion: resolved.gcovrVersion,
+      licenses,
+      smoke: { selfCheck, descriptor: "skipped", negative: "environment-blocked" },
+    });
+    await writeCoverageBundleReport(options.reportPath, report);
+    return report;
   }
   const smokeRoot = await mkdtemp(join(dirname(options.reportPath), `.coverage-probe-${process.pid}-`));
   const descriptorRoot = join(smokeRoot, "root");
@@ -288,6 +317,7 @@ export async function runCoverageBundleProbe(options: CoverageBundleProbeOptions
   }
   const report = buildCoverageBundleReport({
     manifestDigest,
+    sourceManifestDigest,
     platform,
     pythonVersion: resolved.pythonVersion,
     gcovrVersion: resolved.gcovrVersion,

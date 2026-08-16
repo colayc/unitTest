@@ -29,9 +29,9 @@ Hosted Windows/Linux job 在进入 service runtime 前分别执行对应平台�
 pnpm --filter @unit-test-ide/service-probe test:coverage-bundle
 ```
 
-该 probe 只通过 bundle 内的固定 Python 与 `gcovr-runner.pyz`，使用 `-I -S` 和清理后的环境；Node harness 同时阻断 DNS、socket、HTTP(S) 与 proxy/registry 变量。Probe 生成 `coverage-bundle-report.json`，只包含 platform、manifest digest、Python/gcovr version、SPDX license 与 smoke outcome，不包含安装路径、用户目录或系统路径。报告写入采用临时文件 + fsync + 原子 rename。
+该 probe 只通过 bundle 内的固定 Python 与 `gcovr-runner.pyz`，使用 `-I -S` 和清理后的环境；Node harness 同时阻断 DNS、socket、HTTP(S) 与 proxy/registry 变量。Probe 生成 `coverage-bundle-report.json`，包含 resolved `manifest.resolved.json` digest 与 source `manifest.json` digest、Python/gcovr version、SPDX license 与 smoke outcome，不包含安装路径、用户目录或系统路径。报告写入采用临时文件 + fsync + 原子 rename。
 
-malformed descriptor 必须返回明确的 runner rejection（exit code `2`）；若 Hosted sandbox 阻止启动，则仅将 `ENOENT`/`EPERM` 记录为 `environment-blocked`。缺失或 `null` status 不得被视为拒绝成功。
+malformed descriptor 必须返回明确的 runner rejection（exit code `2`）；若 Hosted sandbox 阻止启动，则仅将 `ENOENT`/`EPERM` 记录为 `environment-blocked` 并仍写出报告。缺失或 `null` status 不得被视为拒绝成功。
 
 ## 升级规则
 
