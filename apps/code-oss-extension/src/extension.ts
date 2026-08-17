@@ -112,7 +112,7 @@ function resolveServiceExecutable(host: ExtensionHost, extensionPath: string): s
   if (!host.developmentMode) {
     throw new Error("unitTestIde.serviceExecutable overrides are development-only");
   }
-  const absolute = isAbsolute(configured) || /^[A-Za-z]:[\\/]/.test(configured) || configured.startsWith("\\\\");
+  const absolute = isAbsolute(configured);
   const normalizedBase = basename(configured.replaceAll("\\", "/")).toLowerCase();
   const expectedBase = process.platform === "win32" ? "unit-test-service.exe" : "unit-test-service";
   if (!absolute || normalizedBase !== expectedBase) {

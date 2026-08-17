@@ -505,6 +505,37 @@ test("development mode accepts an approved absolute service executable override"
   assert.equal(manager.startCalls, 1);
 });
 
+test("executable absolute paths follow the host platform", async () => {
+  const expectedExecutable = process.platform === "win32" ? "unit-test-service.exe" : "unit-test-service";
+  const overrides = process.platform === "win32"
+    ? [`C:\\dev\\${expectedExecutable}`, `\\\\server\\share\\${expectedExecutable}`]
+    : ["C:/dev/unit-test-service"];
+
+  for (const override of overrides) {
+    const manager = new FakeServiceManager();
+    let factoryCalls = 0;
+    const host = createExtensionHarness({
+      serviceExecutable: override,
+      developmentMode: true,
+      managerFactory: () => {
+        factoryCalls++;
+        return manager;
+      }
+    });
+
+    await host.activate();
+
+    if (process.platform === "win32") {
+      assert.equal(factoryCalls, 1);
+      assert.equal(manager.startCalls, 1);
+    } else {
+      assert.equal(factoryCalls, 0);
+      assert.equal(manager.startCalls, 0);
+      assert.deepEqual(host.errors, ["Unit Test: Service start failed."]);
+    }
+  }
+});
+
 test("protocol adapter delegates its endpoint to ProtocolClient.connect", async () => {
   const original = ProtocolClient.connect;
   const client = new FakeProtocolClient(workspaceSnapshot("adapter"));
