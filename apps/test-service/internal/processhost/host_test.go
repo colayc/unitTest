@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -40,6 +43,55 @@ type fakePlatform struct {
 	started      []processcontrol.Spec
 	terminations int
 	mu           sync.Mutex
+}
+
+type batchFakePlatform struct {
+	targets      []*fakeTarget
+	started      []processcontrol.Spec
+	terminations map[int]int
+	mu           sync.Mutex
+}
+
+func (p *batchFakePlatform) Start(
+	spec processcontrol.Spec,
+	stdout, stderr io.Writer,
+) (processhost.Target, error) {
+	p.mu.Lock()
+	index := len(p.started)
+	p.started = append(p.started, spec)
+	p.mu.Unlock()
+	if index >= len(p.targets) {
+		return nil, errors.New("unexpected target")
+	}
+	if len(spec.Args) != 0 {
+		_, _ = io.WriteString(stdout, "stdout-"+spec.Args[0])
+		_, _ = io.WriteString(stderr, "stderr-"+spec.Args[0])
+	}
+	return p.targets[index], nil
+}
+
+func (p *batchFakePlatform) Terminate(
+	target processhost.Target,
+	_ time.Duration,
+) error {
+	p.mu.Lock()
+	if p.terminations == nil {
+		p.terminations = make(map[int]int)
+	}
+	p.terminations[target.PID()]++
+	p.mu.Unlock()
+	candidate := target.(*fakeTarget)
+	select {
+	case candidate.done <- targetResult{}:
+	default:
+	}
+	return nil
+}
+
+func (p *batchFakePlatform) terminationCount(pid int) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.terminations[pid]
 }
 
 func (p *fakePlatform) Start(spec processcontrol.Spec, stdout, stderr io.Writer) (processhost.Target, error) {
@@ -234,6 +286,140 @@ func TestRunStartsTargetAndReportsNaturalExit(t *testing.T) {
 	}
 }
 
+func TestRunBatchStartsTargetsRoutesOutputAndReportsChildren(t *testing.T) {
+	first := &fakeTarget{
+		pid: 51, group: 151,
+		done: make(chan targetResult, 1),
+	}
+	second := &fakeTarget{
+		pid: 52, group: 152,
+		done: make(chan targetResult, 1),
+	}
+	first.done <- targetResult{code: 3}
+	second.done <- targetResult{code: 7}
+	platform := &batchFakePlatform{
+		targets: []*fakeTarget{first, second},
+	}
+	spec := processcontrol.Spec{Batch: []processcontrol.BatchItem{
+		{
+			ID: "first", Executable: "fixture",
+			Args: []string{"first"}, Dir: ".",
+			TimeoutMS: 1_000,
+		},
+		{
+			ID: "second", Executable: "fixture",
+			Args: []string{"second"}, Dir: ".",
+			TimeoutMS: 1_000,
+		},
+	}}
+	control := newBlockingControl(commandBytes(
+		t,
+		processcontrol.StartCommand(spec),
+	))
+	var status bytes.Buffer
+
+	if code := processhost.Run(
+		context.Background(),
+		platform,
+		control,
+		&status,
+		io.Discard,
+		io.Discard,
+	); code != 0 {
+		t.Fatalf("code = %d, status = %q", code, status.String())
+	}
+	statuses := decodeStatuses(t, status.Bytes())
+	if len(statuses) != 6 {
+		t.Fatalf("statuses = %#v", statuses)
+	}
+	if got := statuses[0]; got.Kind != "started" ||
+		got.PID != 51 ||
+		!slices.Equal(got.TargetProcessGroups, []int{151, 152}) {
+		t.Fatalf("started status = %#v", got)
+	}
+	outputs := make(map[string]string)
+	for _, got := range statuses[1 : len(statuses)-1] {
+		if got.Kind != "output" {
+			t.Fatalf("output status = %#v", got)
+		}
+		outputs[got.Source+"/"+string(got.Stream)] = string(got.Data)
+	}
+	wantOutputs := map[string]string{
+		"first/stdout":  "stdout-first",
+		"first/stderr":  "stderr-first",
+		"second/stdout": "stdout-second",
+		"second/stderr": "stderr-second",
+	}
+	if !maps.Equal(outputs, wantOutputs) {
+		t.Fatalf("outputs = %#v, want %#v", outputs, wantOutputs)
+	}
+	exit := statuses[len(statuses)-1]
+	if exit.Kind != "exit" || exit.ErrorCode != "" ||
+		!reflect.DeepEqual(exit.Children, []processcontrol.HostChildResult{
+			{ID: "first", ExitCode: 3},
+			{ID: "second", ExitCode: 7},
+		}) {
+		t.Fatalf("exit status = %#v", exit)
+	}
+	if platform.terminationCount(51) != 1 ||
+		platform.terminationCount(52) != 1 {
+		t.Fatalf("terminations = %#v", platform.terminations)
+	}
+}
+
+func TestRunBatchTerminatesOnlyTimedOutTarget(t *testing.T) {
+	timedOut := &fakeTarget{
+		pid: 61, group: 161,
+		done: make(chan targetResult, 1),
+	}
+	finished := &fakeTarget{
+		pid: 62, group: 162,
+		done: make(chan targetResult, 1),
+	}
+	finished.done <- targetResult{code: 0}
+	platform := &batchFakePlatform{
+		targets: []*fakeTarget{timedOut, finished},
+	}
+	spec := processcontrol.Spec{Batch: []processcontrol.BatchItem{
+		{
+			ID: "slow", Executable: "fixture",
+			Dir: ".", TimeoutMS: 10,
+		},
+		{
+			ID: "fast", Executable: "fixture",
+			Dir: ".", TimeoutMS: 1_000,
+		},
+	}}
+	control := newBlockingControl(commandBytes(
+		t,
+		processcontrol.StartCommand(spec),
+	))
+	var status bytes.Buffer
+
+	if code := processhost.Run(
+		context.Background(),
+		platform,
+		control,
+		&status,
+		io.Discard,
+		io.Discard,
+	); code != 0 {
+		t.Fatalf("code = %d, status = %q", code, status.String())
+	}
+	statuses := decodeStatuses(t, status.Bytes())
+	exit := statuses[len(statuses)-1]
+	if !reflect.DeepEqual(exit.Children, []processcontrol.HostChildResult{
+		{ID: "fast"},
+		{ID: "slow", TimedOut: true},
+	}) {
+		t.Fatalf("children = %#v", exit.Children)
+	}
+	if platform.terminationCount(61) != 1 ||
+		platform.terminationCount(62) != 1 {
+		t.Fatalf("terminations = %#v", platform.terminations)
+	}
+}
+
 func TestRunTerminatesTargetOnStopEOFAndContextCancellation(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -290,7 +476,7 @@ func TestRunTerminatesTargetOnStopEOFAndContextCancellation(t *testing.T) {
 }
 
 func TestRunRejectsInvalidInitialFramesFailClosed(t *testing.T) {
-	oversizeSecret := strings.Repeat("SENSITIVE", 9_000)
+	oversizeSecret := strings.Repeat("SENSITIVE", 470_000)
 	tests := []struct {
 		name    string
 		control string

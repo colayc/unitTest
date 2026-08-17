@@ -7,6 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -14,7 +17,14 @@ import (
 	"unit-test-ide.local/test-service/internal/processcontrol"
 )
 
-const maxHostFrameBytes = 64 * 1024
+const maxHostFrameBytes = 4 * 1024 * 1024
+
+func serviceOwnedTargetEnvironmentKey(value string) bool {
+	upper := strings.ToUpper(value)
+	return strings.HasPrefix(upper, "UTIDE_") ||
+		strings.HasPrefix(upper, "UNIT_TEST_IDE_") ||
+		upper == "UNIT_TEST_SERVICE_TOKEN"
+}
 
 type Target interface {
 	PID() int
@@ -122,6 +132,24 @@ func writeStatus(writer io.Writer, value processcontrol.HostStatus) error {
 	return json.NewEncoder(writer).Encode(value)
 }
 
+type synchronizedStatusWriter struct {
+	mu     sync.Mutex
+	writer io.Writer
+	err    error
+}
+
+func (writer *synchronizedStatusWriter) Write(
+	value processcontrol.HostStatus,
+) error {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	if writer.err != nil {
+		return writer.err
+	}
+	writer.err = writeStatus(writer.writer, value)
+	return writer.err
+}
+
 func waitOrStop(ctx context.Context, platform Platform, target Target, stop <-chan struct{}) waitResult {
 	done := make(chan waitResult, 1)
 	go func() {
@@ -201,6 +229,16 @@ func Run(ctx context.Context, platform Platform, control io.Reader, status io.Wr
 		_ = writeStatus(status, processcontrol.HostStatus{Kind: "error", ErrorCode: "INVALID_HOST_COMMAND", Message: "invalid start command"})
 		return 2
 	}
+	if len(start.Spec.Batch) != 0 {
+		return runBatch(
+			ctx,
+			platform,
+			owner,
+			frames,
+			status,
+			*start.Spec,
+		)
+	}
 	target, err := platform.Start(*start.Spec, stdout, stderr)
 	if err != nil || target == nil {
 		_ = writeStatus(status, processcontrol.HostStatus{Kind: "error", ErrorCode: "PROCESS_START_FAILED", Message: "target process could not start"})
@@ -232,4 +270,286 @@ func Run(ctx context.Context, platform Platform, control io.Reader, status io.Wr
 		return 1
 	}
 	return 0
+}
+
+type batchTarget struct {
+	item         processcontrol.BatchItem
+	target       Target
+	startedAt    time.Time
+	stdoutReader *os.File
+	stderrReader *os.File
+}
+
+type batchWaitResult struct {
+	result processcontrol.HostChildResult
+}
+
+func runBatch(
+	ctx context.Context,
+	platform Platform,
+	owner *controlOwner,
+	frames *frameReader,
+	status io.Writer,
+	spec processcontrol.Spec,
+) int {
+	if !validBatchSpec(spec) {
+		_ = writeStatus(status, processcontrol.HostStatus{
+			Kind: "error", ErrorCode: "INVALID_HOST_COMMAND",
+			Message: "invalid batch start command",
+		})
+		return 2
+	}
+	writer := &synchronizedStatusWriter{writer: status}
+	targets := make([]batchTarget, 0, len(spec.Batch))
+	for _, item := range spec.Batch {
+		stdoutReader, stdoutWriter, err := os.Pipe()
+		if err != nil {
+			cleanupBatchTargets(platform, targets)
+			_ = writer.Write(processcontrol.HostStatus{
+				Kind: "error", ErrorCode: "PROCESS_START_FAILED",
+				Message: "target process could not start",
+			})
+			return 1
+		}
+		stderrReader, stderrWriter, err := os.Pipe()
+		if err != nil {
+			_ = stdoutReader.Close()
+			_ = stdoutWriter.Close()
+			cleanupBatchTargets(platform, targets)
+			_ = writer.Write(processcontrol.HostStatus{
+				Kind: "error", ErrorCode: "PROCESS_START_FAILED",
+				Message: "target process could not start",
+			})
+			return 1
+		}
+		target, startErr := platform.Start(
+			processcontrol.Spec{
+				Executable: item.Executable,
+				Args:       append([]string(nil), item.Args...),
+				Dir:        item.Dir,
+				Env:        append([]string(nil), item.Env...),
+				EnvUnset: append(
+					[]string(nil),
+					item.EnvUnset...,
+				),
+			},
+			stdoutWriter,
+			stderrWriter,
+		)
+		startedAt := time.Now()
+		_ = stdoutWriter.Close()
+		_ = stderrWriter.Close()
+		if startErr != nil || target == nil {
+			_ = stdoutReader.Close()
+			_ = stderrReader.Close()
+			cleanupBatchTargets(platform, targets)
+			_ = writer.Write(processcontrol.HostStatus{
+				Kind: "error", ErrorCode: "PROCESS_START_FAILED",
+				Message: "target process could not start",
+			})
+			return 1
+		}
+		targets = append(targets, batchTarget{
+			item: item, target: target,
+			startedAt:    startedAt,
+			stdoutReader: stdoutReader,
+			stderrReader: stderrReader,
+		})
+	}
+	targetProcessGroups := make([]int, len(targets))
+	for index, target := range targets {
+		targetProcessGroups[index] = target.target.ProcessGroup()
+		if targetProcessGroups[index] <= 1 {
+			cleanupBatchTargets(platform, targets)
+			_ = writer.Write(processcontrol.HostStatus{
+				Kind: "error", ErrorCode: "PROCESS_START_FAILED",
+				Message: "target process identity unavailable",
+			})
+			return 1
+		}
+	}
+	if err := writer.Write(processcontrol.HostStatus{
+		Kind:                "started",
+		PID:                 targets[0].target.PID(),
+		TargetProcessGroups: targetProcessGroups,
+	}); err != nil {
+		cleanupBatchTargets(platform, targets)
+		return 1
+	}
+
+	stop := make(chan struct{})
+	controlDone := readControl(owner, frames, stop)
+	var outputCopies sync.WaitGroup
+	outputCopies.Add(len(targets) * 2)
+	for _, target := range targets {
+		go copyBatchOutput(
+			&outputCopies,
+			writer,
+			target.item.ID,
+			processcontrol.StreamStdout,
+			target.stdoutReader,
+		)
+		go copyBatchOutput(
+			&outputCopies,
+			writer,
+			target.item.ID,
+			processcontrol.StreamStderr,
+			target.stderrReader,
+		)
+	}
+
+	results := make(chan batchWaitResult, len(targets))
+	for _, candidate := range targets {
+		go func(target batchTarget) {
+			timeout := time.Duration(target.item.TimeoutMS) *
+				time.Millisecond
+			remaining := timeout - time.Since(target.startedAt)
+			if remaining <= 0 {
+				remaining = time.Nanosecond
+			}
+			waitContext, cancel := context.WithTimeout(
+				ctx,
+				remaining,
+			)
+			result := waitOrStop(
+				waitContext,
+				platform,
+				target.target,
+				stop,
+			)
+			timedOut := errors.Is(
+				waitContext.Err(),
+				context.DeadlineExceeded,
+			) && ctx.Err() == nil
+			cancel()
+			child := processcontrol.HostChildResult{
+				ID:       target.item.ID,
+				ExitCode: result.exitCode,
+				TimedOut: timedOut,
+			}
+			if result.err != nil {
+				child.ErrorCode = "PROCESS_WAIT_FAILED"
+			}
+			results <- batchWaitResult{result: child}
+		}(candidate)
+	}
+	children := make(
+		[]processcontrol.HostChildResult,
+		0,
+		len(targets),
+	)
+	for range targets {
+		children = append(children, (<-results).result)
+	}
+	sort.Slice(children, func(left, right int) bool {
+		return children[left].ID < children[right].ID
+	})
+	outputCopies.Wait()
+	owner.Close()
+	commandResult := <-controlDone
+	if commandResult.invalid {
+		_ = writer.Write(processcontrol.HostStatus{
+			Kind: "error", ErrorCode: "INVALID_HOST_COMMAND",
+			Message: "invalid stop command",
+		})
+		return 2
+	}
+	errorCode := ""
+	for _, child := range children {
+		if child.ErrorCode != "" {
+			errorCode = "PROCESS_WAIT_FAILED"
+			break
+		}
+	}
+	if err := writer.Write(processcontrol.HostStatus{
+		Kind: "exit", ErrorCode: errorCode,
+		Children: children,
+	}); err != nil {
+		return 1
+	}
+	if errorCode != "" {
+		return 1
+	}
+	return 0
+}
+
+func validBatchSpec(spec processcontrol.Spec) bool {
+	if spec.Executable != "" || len(spec.Args) != 0 ||
+		spec.Dir != "" || len(spec.Env) != 0 ||
+		len(spec.EnvUnset) != 0 ||
+		len(spec.Batch) < 1 || len(spec.Batch) > 256 {
+		return false
+	}
+	seen := make(map[string]struct{}, len(spec.Batch))
+	for _, item := range spec.Batch {
+		if !validBatchID(item.ID) ||
+			item.Executable == "" || item.Dir == "" ||
+			item.TimeoutMS < 1 ||
+			item.TimeoutMS > (24*time.Hour).Milliseconds() {
+			return false
+		}
+		if _, duplicate := seen[item.ID]; duplicate {
+			return false
+		}
+		seen[item.ID] = struct{}{}
+	}
+	return true
+}
+
+func validBatchID(value string) bool {
+	if len(value) < 1 || len(value) > 64 {
+		return false
+	}
+	for index := range len(value) {
+		character := value[index]
+		if character >= 'a' && character <= 'z' ||
+			index > 0 && character >= '0' &&
+				character <= '9' ||
+			index > 0 && (character == '-' ||
+				character == '_') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func cleanupBatchTargets(
+	platform Platform,
+	targets []batchTarget,
+) {
+	for _, target := range targets {
+		_ = platform.Terminate(target.target, 0)
+		_, _ = target.target.Wait()
+		_ = target.stdoutReader.Close()
+		_ = target.stderrReader.Close()
+	}
+}
+
+func copyBatchOutput(
+	wait *sync.WaitGroup,
+	writer *synchronizedStatusWriter,
+	source string,
+	stream processcontrol.Stream,
+	reader *os.File,
+) {
+	defer wait.Done()
+	defer reader.Close()
+	buffer := make([]byte, 16*1024)
+	for {
+		count, err := reader.Read(buffer)
+		if count != 0 {
+			_ = writer.Write(processcontrol.HostStatus{
+				Kind: "output", Source: source,
+				Stream: stream,
+				Data: append(
+					[]byte(nil),
+					buffer[:count]...,
+				),
+			})
+		}
+		if err != nil {
+			return
+		}
+	}
 }

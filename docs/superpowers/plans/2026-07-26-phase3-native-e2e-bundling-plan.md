@@ -47,7 +47,7 @@ export function verifyInstalledFiles(root, files)
 export async function prepareBundle({ key, outputRoot, download })
 ```
 
-- [ ] **Step 1：写 manifest 解析、平台选择和摘要失败测试**
+- [x] **Step 1：写 manifest 解析、平台选择和摘要失败测试**
 
 `prepare.test.mjs` 使用 `node:test`、临时目录和本地 byte fixtures，不访问网络。至少覆盖：
 
@@ -77,7 +77,7 @@ test("digest mismatch never publishes staging", async () => {
 });
 ```
 
-- [ ] **Step 2：运行准备工具测试并确认失败**
+- [x] **Step 2：运行准备工具测试并确认失败**
 
 运行：
 
@@ -87,7 +87,7 @@ node --test tools/cmake-bundle/prepare.test.mjs
 
 预期： FAIL，原因是 manifest 与 `prepare.mjs` 尚不存在。
 
-- [ ] **Step 3：提交固定 manifest**
+- [x] **Step 3：提交固定 manifest**
 
 `manifest.json` 写入已由 CMake 官方 SHA-256 清单和官方归档复核的固定值：
 
@@ -123,7 +123,7 @@ node --test tools/cmake-bundle/prepare.test.mjs
 }
 ```
 
-- [ ] **Step 4：实现显式下载、校验、解压和原子发布**
+- [x] **Step 4：实现显式下载、校验、解压和原子发布**
 
 `prepare.mjs` 必须：
 
@@ -140,7 +140,7 @@ node --test tools/cmake-bundle/prepare.test.mjs
 
 下载函数只允许 manifest 中的 URL，并在 redirect 后再次要求最终 URL 为 HTTPS `cmake.org` 固定路径；禁止调用方传入 URL、header、proxy credential 或 executable。`--output` 必须位于 repository root 或 CI 显式提供的临时根内。
 
-- [ ] **Step 5：加入离线与显式联网脚本**
+- [x] **Step 5：加入离线与显式联网脚本**
 
 `.gitignore` 加入：
 
@@ -162,7 +162,7 @@ node --test tools/cmake-bundle/prepare.test.mjs
 
 `test:cmake-bundle` 进入普通 `test` 链；`prepare:cmake-bundle` 不进入 `test` 或 `verify` 链。
 
-- [ ] **Step 6：写中文供应链说明并运行测试**
+- [x] **Step 6：写中文供应链说明并运行测试**
 
 `README.md` 记录固定来源、摘要更新流程、BSD 3-Clause 分发义务、显式准备命令、输出 layout、离线边界和 Phase 8 签名责任。
 
@@ -176,7 +176,7 @@ git diff --check
 
 预期： PASS；测试过程中没有外网请求，`.bundled-tools` 不出现在 tracked files。
 
-- [ ] **Step 7：提交**
+- [x] **Step 7：提交**
 
 ```powershell
 git add .gitignore package.json tools/cmake-bundle
@@ -227,7 +227,11 @@ export async function copyNativeFixture(
 
 export function normalizeNativeDiagnostic(
   diagnostic: Diagnostic,
-  roots: { workspace: string; build: string },
+  roots: {
+    workspace: string;
+    build: string;
+    external?: readonly string[];
+  },
 ): Diagnostic;
 
 export interface GoldenDiagnosticExpectation {
@@ -240,7 +244,7 @@ export interface GoldenDiagnosticExpectation {
 }
 ```
 
-- [ ] **Step 1：写 fixture copy 与 diagnostic normalization 测试**
+- [x] **Step 1：写 fixture copy 与 diagnostic normalization 测试**
 
 测试覆盖：
 
@@ -252,7 +256,7 @@ export interface GoldenDiagnosticExpectation {
 - diagnostic `code`、`severity`、line/column 不被丢失；
 - normalizer 不替换 source message 中与路径无关的普通文本。
 
-- [ ] **Step 2：运行 fixture tests 并确认失败**
+- [x] **Step 2：运行 fixture tests 并确认失败**
 
 运行：
 
@@ -262,7 +266,7 @@ pnpm --filter @unit-test-ide/service-probe test -- native-fixture.test
 
 预期： FAIL，原因是 helper 和 fixture 尚不存在。
 
-- [ ] **Step 3：建立 preset 与 generated fallback 正常项目**
+- [x] **Step 3：建立 preset 与 generated fallback 正常项目**
 
 `preset-project/CMakePresets.json` 使用 CMake Presets version `10`，包含 `unit-test-ide-debug` configure preset 和同名 build preset；binary directory 固定为 `${sourceDir}/.native-e2e/build/preset`，generator 由该 preset 明确选择 `Ninja`。它验证“Preset 语义由 CMake 保留”的路径：
 
@@ -286,6 +290,8 @@ pnpm --filter @unit-test-ide/service-probe test -- native-fixture.test
   ]
 }
 ```
+
+Native runner 只修改复制后的受信任 fixture，不修改 tracked source：Linux Preset 以 CMake cache semantic 显式选择 `g++`/`clang++`；Windows MSVC Preset 使用已验证 Visual Studio generator，clang-cl Preset 使用已验证 Ninja 和 `clang-cl` compiler semantic。Protocol 仍只接收 Service 返回的 Preset profile ID。configure 成功后 runner 必须从事件输出核对 CMake 识别出的 compiler family 与完整 version；Service 的 File API 只把 `C`/`CXX` descriptor 纳入 identity，并只允许 Preset CMake input 读取同一次 discovery snapshot 中已验证 toolchain 的 compiler/sysroot roots。
 
 `preset-project/CMakeLists.txt`：
 
@@ -342,7 +348,7 @@ int main() {
 }
 ```
 
-- [ ] **Step 4：建立确定性失败项目与 golden**
+- [x] **Step 4：建立确定性失败项目与 golden**
 
 Compiler fixture 使用一个明确的未知 identifier，确保所有 compiler 在同一源文件行产生 error：
 
@@ -403,15 +409,15 @@ Golden 只记录跨版本稳定基准：
 }
 ```
 
-不同 compiler family 分文件记录允许的 `codePattern`；MSVC/clang-cl 文件使用 `^(C[0-9]+|)$`，GCC/Clang 文件允许空 code。Linker golden 的 `messageContains` 固定为 `native_missing_symbol`，configure golden 固定为 `UNIT_TEST_IDE_CONFIGURE_FAILURE`。完整原始 message 只检查 marker，不逐字固定 Hosted Runner 文案。
+不同 compiler family 分文件记录允许的 `codePattern`；MSVC/clang-cl 文件使用 `^(C[0-9]+|COMPILER_ERROR)$`，GCC/Clang 文件使用 `^COMPILER_ERROR$`。clang-cl 未输出 numeric code 时由 Service 规范化为 `COMPILER_ERROR`，不能产生违反 Protocol/ArtifactStore 非空 code 不变量的 Diagnostic。MSVC/clang-cl build parser 对未匹配 compiler/`LNKxxxx` shape 的行继续调用共享 Linker parser，因此 `lld-link: error:` 规范化为 `LLD_LINK_ERROR`；两份 linker golden 都必须拒绝空 code。每个隔离 diagnostic fixture 若在首次 Start 收到 Task 创建前的 `WORKSPACE_CHANGED`，只重新 inspect 并用新 idempotency key 重试一次，第二次 stale 或其他错误仍失败。长运行主矩阵的 cancellation/timeout 场景在 Start 前建立新 checkpoint：重新 inspect、按该 generation list `slow_target`，并在 target list 或 Start 首次返回 `WORKSPACE_CHANGED` 后将整个 checkpoint 流程重试一次；target ID 不得跨 generation 复用。Linker golden 的 `messageContains` 固定为 `native_missing_symbol`，configure golden 固定为 `UNIT_TEST_IDE_CONFIGURE_FAILURE`。完整原始 message 只检查 marker，不逐字固定 Hosted Runner 文案。
 
-- [ ] **Step 5：实现安全复制和规范化**
+- [x] **Step 5：实现安全复制和规范化**
 
 复制 helper 使用 `lstat` 后只允许 regular file/directory，按 code point 排序逐项复制；拒绝 symlink、junction/reparse point 和 device。destination 必须是 helper 新建的空目录。
 
 normalizer 在分隔符统一前先使用 Phase 3B path identity 比较；只将已证明位于 workspace/build root 内的路径替换为 `<workspace>`/`<build>`。
 
-- [ ] **Step 6：运行 tests 并提交**
+- [x] **Step 6：运行 tests 并提交**
 
 运行：
 
@@ -459,10 +465,11 @@ export async function runNativeMatrix(options: {
   platform: NodeJS.Platform;
   requiredFamilies: readonly RequiredToolchainFamily[];
   artifactDirectory: string;
+  workDirectory?: string;
 }): Promise<readonly NativeScenarioResult[]>;
 ```
 
-- [ ] **Step 1：写 bundle 缺失与 required family 测试**
+- [x] **Step 1：写 bundle 缺失与 required family 测试**
 
 使用 dependency injection 的 fake Service launcher/discovery snapshot，先覆盖：
 
@@ -473,7 +480,7 @@ export async function runNativeMatrix(options: {
 - native runner 不读取 `PATH` 中的 CMake；
 - native runner 给 Service 传入显式 trusted workspace 和 bundle CMake 路径。
 
-- [ ] **Step 2：运行 Linux native tests 并确认失败**
+- [x] **Step 2：运行 Linux native tests 并确认失败**
 
 在 Linux 上运行：
 
@@ -483,7 +490,7 @@ UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS=gcc,clang pnpm --filter @unit-test-ide/
 
 预期： FAIL，原因是 native runner 和 scripts 尚不存在。
 
-- [ ] **Step 3：实现每个 toolchain 独立的真实 Service 生命周期**
+- [x] **Step 3：实现每个 toolchain 独立的真实 Service 生命周期**
 
 对 GCC、Clang 分别：
 
@@ -497,7 +504,7 @@ UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS=gcc,clang pnpm --filter @unit-test-ide/
 
 禁止把 compiler executable、args 或 environment 从 test 直接传到 Protocol；test 只能按 discovery 返回的 `toolchainFamily` 选择 profile ID。
 
-- [ ] **Step 4：覆盖 configure lifecycle**
+- [x] **Step 4：覆盖 configure lifecycle**
 
 每个 family 的同一 profile 连续执行：
 
@@ -509,7 +516,7 @@ UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS=gcc,clang pnpm --filter @unit-test-ide/
 
 断言读取 task steps、event sequence 和 configure fingerprint artifact，不依赖 wall-clock 推断。
 
-- [ ] **Step 5：覆盖 diagnostics、Unicode、取消、超时和恢复**
+- [x] **Step 5：覆盖 diagnostics、Unicode、取消、超时和恢复**
 
 对 GCC 与 Clang 至少覆盖：
 
@@ -521,9 +528,9 @@ UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS=gcc,clang pnpm --filter @unit-test-ide/
 - 断线后以 sequence 重连，不重复或遗漏 Step/Diagnostic event；
 - `../`、workspace 外 Preset include 与 symlink escape 在进程创建前拒绝。
 
-取消/超时 fixture 由 CMake project 构建受控的长运行 custom target；native runner 等待 `task.step_started` 后再 cancel，禁止固定 sleep 作为同步机制。
+取消/超时 fixture 由 CMake project 构建受控的长运行 custom target；native runner 在每个后期场景前重新 inspect workspace，并按最新 generation 重新 list `slow_target`。target list 或 Start 首次因并发 workspace 变化返回 `WORKSPACE_CHANGED` 时，只允许重新建立一次完整 checkpoint，第二次 stale 直接失败。runner 等待 `task.step_started` 后再 cancel，禁止固定 sleep 作为同步机制。
 
-- [ ] **Step 6：写稳定工具链报告**
+- [x] **Step 6：写稳定工具链报告**
 
 将以下内容写入 `.native-e2e/artifacts/linux/toolchain-report.json`：
 
@@ -535,7 +542,7 @@ UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS=gcc,clang pnpm --filter @unit-test-ide/
 
 报告不得包含 environment、token、绝对 workspace/build path 或完整 compiler installation path。
 
-- [ ] **Step 7：加入 scripts，运行并提交**
+- [x] **Step 7：加入 scripts，运行并提交**
 
 `tools/service-probe/package.json` 加入 `test:e2e:native:linux`；根 `package.json` 加入：
 
@@ -563,6 +570,32 @@ git add package.json tools/service-probe
 git commit -m "test: cover linux gcc and clang builds"
 ```
 
+#### 2026-07-29 实施记录
+
+Native matrix runner、离线 bundle preflight、required-family policy、路径无关报告及全部 scenario 已实现。Windows 本机使用 bundled CMake 4.3.4 与 MSVC 19.44 / Visual Studio 17 2022 完成真实验证，所有 scenario PASS；本机未安装符合生产发现策略的 clang-cl，因此按 local policy 记录为 `skipped`。
+
+真实 MSVC 运行同时发现并修复了以下架构缺口：
+
+- bundle prepare 的发布 layout 与 Go Resolver 约定不一致；
+- Protocol v1.2 缺少选择 generated profile 所需的安全 Toolchain/Profile 关联与 workspace diagnostics；
+- automatic toolchain ID 长度超过 generated profile 的旧上限；
+- Windows compiler path 未转换为 CMake-safe `/` 形式；
+- File API 错误地拒绝 workspace 外的 compiler identity 和已校验 CMake/toolchain root；
+- invalid workspace config 在 Runtime pre-READY 阶段退出，客户端无法读取阻断诊断；
+- Native E2E 的 Service data path 过长，触发 MSBuild `MSB3491`/`.tlog` 路径失败。
+- Hosted Runner 升级到 Visual Studio 18 后，MSVC 已验证成功但 Visual Studio generator capability 未生成；generated profile policy 现保持 Visual Studio generator 优先，并在同一实例随附 Ninja 已通过固定路径、identity 与 version probe 时有界回退到 Ninja。
+- Preset profile 在 configure 前没有单一 `toolchainId`；File API 的 CMake input 边界现只扩展到同一次 discovery snapshot 中全部已验证 toolchain roots，generated profile 仍只使用自己选定的 toolchain root。Visual Studio 额外报告的相对 `RC` descriptor 不再被错误当成 C/C++ identity。
+
+本地验证证据：
+
+- `pnpm check:protocol-generated`、`pnpm build`、`pnpm test` PASS；
+- `go test -race ./apps/test-service/...` PASS；
+- 既有 Windows Service E2E 19/19 PASS；
+- Windows MSVC native report 位于 ignored `.native-e2e/artifacts/windows/toolchain-report.json`，不包含 token、environment 或绝对路径。
+- Windows MSVC 的额外 Preset profile 已使用 bundled CMake 4.3.4、Visual Studio 17 2022 和 MSVC 19.44 完成真实 configure/build，并核对 CMake compiler identity/version。
+
+固定 Hosted CI 运行 [`30464939729`](https://github.com/colayc/unitTest/actions/runs/30464939729) 已让 Linux GCC 13.3.0、Clang 18.1.3、Windows MSVC 19.51.36248 与 clang-cl 20.1.8 的 generated fallback 和额外 Preset 场景全部通过，并上传双平台报告。该证据关闭了 required-family、generator、diagnostic、取消/超时、恢复与真实 Preset 构建门禁。
+
 ---
 
 ### Task 4：Windows MSVC 与 clang-cl Native E2E
@@ -577,17 +610,18 @@ git commit -m "test: cover linux gcc and clang builds"
 - 输入： Task 3 native runner 与 Windows Phase 3B toolchain profiles。
 - 输出： Windows MSVC/clang-cl scenario results 与无敏感信息的工具链报告。
 
-- [ ] **Step 1：写 MSVC/clang-cl profile 选择与 capability 测试**
+- [x] **Step 1：写 MSVC/clang-cl profile 选择与 capability 测试**
 
 fake discovery snapshot 覆盖：
 
-- MSVC 必须选择 generated profile、Visual Studio generator 和明确 architecture；
+- MSVC 必须选择 generated profile、明确 architecture，以及优先 Visual Studio、仅在该 capability 不可用时回退到已验证 Ninja 的封闭 generator policy；
 - clang-cl 必须同时具备 LLVM、MSVC environment、Windows SDK 和可用 generator；
+- Windows Ninja discovery 优先使用固定的独立 CMake/Ninja；该文件不存在时，只回退到已验证 Visual Studio instance 内固定布局的随附 Ninja，并把 executable、父目录与安装根 identity 纳入 probe 复验；
 - 只安装 `clang.exe` 而没有 `clang-cl.exe` 不算 clang-cl；
 - required `msvc,clang-cl` 中任一 family 缺失即失败；
 - report 只保留 Visual Studio instance ID/toolset version，不保存安装绝对路径或捕获 environment。
 
-- [ ] **Step 2：运行 Windows native tests 并确认失败**
+- [x] **Step 2：运行 Windows native tests 并确认失败**
 
 在 Windows 上运行：
 
@@ -598,11 +632,11 @@ pnpm --filter @unit-test-ide/service-probe test:e2e:native:windows
 
 预期： FAIL，原因是 Windows matrix 尚未接入。
 
-- [ ] **Step 3：执行 MSVC 真实矩阵**
+- [x] **Step 3：执行 MSVC 真实矩阵**
 
 使用 discovery 返回的 MSVC generated profile 驱动 Task 3 的全部正常 lifecycle 场景，并额外断言：
 
-- generator 属于 Adapter 已验证的 Visual Studio generator；
+- generator 属于 Adapter 已验证的 Visual Studio generator；若该 capability 不可用，则只允许使用同一已验证 Visual Studio 实例随附并通过固定路径、identity 与 version probe 的 Ninja；
 - `configuration` 明确为 `Debug`；
 - environment 仅由 Service 内部 MSVC Adapter 构造；
 - build artifact 是当前 architecture 的 PE executable；
@@ -610,7 +644,7 @@ pnpm --filter @unit-test-ide/service-probe test:e2e:native:windows
 
 Preset 项目使用已安装 Ninja 和 preset 自己的 compiler 语义；configure 后通过 File API 验证实际 compiler，并把它作为额外 preset scenario，不替代 generated MSVC profile 门禁。
 
-- [ ] **Step 4：执行 clang-cl 真实矩阵**
+- [x] **Step 4：执行 clang-cl 真实矩阵**
 
 选择 `toolchainFamily === "clang-cl"` 的 generated profile，要求：
 
@@ -620,7 +654,7 @@ Preset 项目使用已安装 Ninja 和 preset 自己的 compiler 语义；config
 - compiler/linker diagnostics 通过 clang-cl/MSVC family golden；
 - 不运行 coverage instrumentation、`.profraw`、`llvm-profdata` 或 `llvm-cov`。
 
-- [ ] **Step 5：覆盖 Windows 路径与恢复边界**
+- [x] **Step 5：覆盖 Windows 路径与恢复边界**
 
 额外覆盖：
 
@@ -631,7 +665,7 @@ Preset 项目使用已安装 Ninja 和 preset 自己的 compiler 语义；config
 - Service restart 后不会复用已经变化的 MSVC instance/toolchain generation；
 - token/endpoint ACL 测试仍满足已有 Windows E2E 架构修复，不通过 `icacls /grant:r` 放宽 ACL。
 
-- [ ] **Step 6：生成报告，运行并提交**
+- [x] **Step 6：生成报告，运行并提交**
 
 报告写入 `.native-e2e/artifacts/windows/toolchain-report.json`，字段与 Linux 同构。
 
@@ -668,7 +702,7 @@ git commit -m "test: cover windows msvc and clang-cl builds"
 - 输入： Phase 3A–3D 全部交付。
 - 输出： 固定的 Windows/Linux CI、用户/开发者说明、PR readiness evidence。
 
-- [ ] **Step 1：先写 CI 结构检查**
+- [x] **Step 1：先写 CI 结构检查**
 
 扩展 `tools/workspace-smoke/workspace-smoke.test.mjs`，解析 workflow text 并断言：
 
@@ -680,7 +714,7 @@ git commit -m "test: cover windows msvc and clang-cl builds"
 - 两个 job 都上传 `toolchain-report.json`；
 - workflow 不使用 `windows-latest` 或 `ubuntu-latest`。
 
-- [ ] **Step 2：运行 workspace smoke 并确认失败**
+- [x] **Step 2：运行 workspace smoke 并确认失败**
 
 运行：
 
@@ -690,7 +724,7 @@ pnpm test:workspace
 
 预期： FAIL，原因是 workflow 仍使用浮动 matrix labels。
 
-- [ ] **Step 3：将 workflow 拆成固定平台 job**
+- [x] **Step 3：将 workflow 拆成固定平台 job**
 
 保留现有 Node/Go/pnpm 固定版本，把单一 matrix job 改为 `verify-windows` 与 `verify-linux`。两个 job 的核心顺序：
 
@@ -726,7 +760,7 @@ env:
 
 `prepare:cmake-bundle` 是 CI 唯一允许的 CMake 网络准备步骤；native E2E 开始前设置 test harness network guard，任何 HTTP(S) 请求都使测试失败。
 
-- [ ] **Step 4：更新中文文档**
+- [x] **Step 4：更新中文文档**
 
 文档必须清楚说明：
 
@@ -739,7 +773,17 @@ env:
 - 如何显式准备 bundle、运行 local native E2E、查看无敏感信息报告；
 - Phase 5 才实现 clang-cl/Clang/GCC coverage，Phase 8 才实现签名安装包和升级/回滚。
 
-- [ ] **Step 5：执行完整本地门禁**
+**2026-07-29 实施记录：**
+
+- workspace smoke 已先在旧 `windows-latest`/`ubuntu-latest` matrix 上按预期失败，再在固定双 job workflow 上通过；
+- Windows job 固定 `windows-2025-vs2026` 并强制 `msvc,clang-cl`，Linux job 固定 `ubuntu-24.04` 并强制 `gcc,clang`；
+- 每个 job 都按 `verify → prepare:cmake-bundle → test:e2e:native` 顺序执行，并只上传对应平台的 `toolchain-report.json`；
+- native runner 在动态加载矩阵实现前安装 Node.js HTTP(S) network guard，覆盖 `http`、`https`、`http2` 与全局 `fetch`，同时保留本地 IPC 所需的 `net`；
+- Windows native data/build 根不再使用用户 profile temp：普通 clone 使用 checkout 的 `.native-e2e/work`，managed worktree 使用主 checkout 的同名目录。这保留了 MSBuild 短路径预算，也避免因用户 profile 祖先无法以“不共享 delete”方式固定而错误放宽 Service owner-only/TOCTOU 架构；
+- 本地 Windows 已在 guard 启用时通过 MSVC 19.44/Visual Studio 17 2022 全场景；本机 clang-cl 不满足 production discovery 前提。固定 Hosted CI 运行 [`30464939729`](https://github.com/colayc/unitTest/actions/runs/30464939729) 已验证 Windows MSVC/clang-cl 与 Linux GCC/Clang 的 generated fallback 和 Preset required-family 全场景。
+- Hosted Windows Runner 已升级到 Visual Studio 18；production discovery 能验证 MSVC 19.51 与 VS-bundled Ninja。为避免把 CMake/Visual Studio generator 支持版本与 compiler family 可用性错误绑定，MSVC generated profile 继续优先 Visual Studio generator，并在其 capability 缺失时回退到已验证 Ninja。
+
+- [x] **Step 5：执行完整本地门禁**
 
 Windows：
 
@@ -766,7 +810,7 @@ git status --short
 
 预期： 全部 PASS；status 只包含本 Task 预期文档/workflow 改动，bundle 和 native artifacts 均被 ignore。
 
-- [ ] **Step 6：执行独立评审与安全边界检查**
+- [x] **Step 6：执行独立评审与安全边界检查**
 
 评审必须逐项确认：
 
@@ -779,7 +823,7 @@ git status --short
 - v1.0/v1.1 compatibility gates 仍通过；
 - Windows token ACL E2E 仍验证架构修复后的安全描述符。
 
-- [ ] **Step 7：提交并等待 Hosted CI**
+- [x] **Step 7：提交并等待 Hosted CI**
 
 ```powershell
 git add .github/workflows/foundation.yml README.md docs tools/workspace-smoke/workspace-smoke.test.mjs
@@ -791,18 +835,27 @@ git status --short
 
 推送后等待 `verify-windows` 与 `verify-linux` 均完成；保存两个 artifact 的 compiler、generator、CMake version 作为 Phase 3 验收证据。任何 job failure 都先使用 `superpowers:systematic-debugging` 定位 root cause，再修改实现。
 
+#### 2026-07-29 最终验收记录
+
+- 固定 Hosted CI 运行 [`30464939729`](https://github.com/colayc/unitTest/actions/runs/30464939729) 全绿：`verify-linux` 与 `verify-windows` 均依次通过 `pnpm verify`、CMake bundle 准备、required-family Native E2E、artifact 上传和 `git diff --exit-code`。
+- Linux artifact `native-toolchain-linux-1` 的 digest 为 `sha256:838ba4077532496c55736de661ece6f129b478268d243a35615c16e364e4d679`。报告记录 CMake 4.3.4、GCC 13.3.0/Ninja 与 Clang 18.1.3/Ninja，全部 scenario 为 `passed`。
+- Windows artifact `native-toolchain-windows-1` 的 digest 为 `sha256:32e0e13b2325652ac067c734f5d31a88dd50a86d6c6537bf4611c51a1eb5b157`。报告记录 CMake 4.3.4、MSVC 19.51.36248/Visual Studio 18 2026 与 clang-cl 20.1.8/Ninja，全部 scenario 为 `passed`。
+- 四个 compiler family 的报告都包含 `preset-build: passed`；generated fallback、configure reuse/invalidation、target、diagnostic、取消、超时、escape 与 recovery 场景也全部通过。隔离 workspace 名称包含空格和 Unicode。
+- 独立安全边界复审确认 Protocol 没有新增 executable、raw args、environment 或 cwd 输入；generated profile 的 File API root 仍只允许所选 toolchain，Preset 只扩展到同一次 Service discovery snapshot 内已经验证的 toolchain root；报告不包含 token、environment 或绝对 workspace/compiler 路径。
+- 本地完整 `pnpm verify`、Go race tests、Protocol v1.0/v1.1/v1.2 gates、Windows Service E2E、MSVC Native E2E 与 `git diff --check` 均通过；本机缺少符合 production discovery 的 clang-cl，由固定 Hosted required-family 矩阵完成真实验证。
+
 ---
 
 ## Phase 3D 完成检查
 
-- [ ] CMake 4.3.4 archive、executable 和 license digest 均由 manifest 固定并验证。
-- [ ] 普通 `pnpm verify` 与产品运行不联网。
-- [ ] Preset 与 generated fallback 都通过真实构建。
-- [ ] Windows/MSVC、Windows/clang-cl、Linux/GCC、Linux/Clang 全部通过。
-- [ ] configure 首次执行、无变化跳过、CMake input 变化后重新执行。
-- [ ] 默认 target、指定 target、compiler/linker/configure diagnostics 通过。
-- [ ] 空格/Unicode、escape、取消、超时、断线重连和 restart recovery 通过。
-- [ ] Protocol v1.0/v1.1 回归和 Protocol v1.2 contract 通过。
-- [ ] Windows/Ubuntu 固定 Hosted Runner CI 全绿并上传工具链报告。
-- [ ] `pnpm verify`、`git diff --check`、`git diff --exit-code` 全绿。
-- [ ] 工作树 clean，独立评审无未解决问题。
+- [x] CMake 4.3.4 archive、executable 和 license digest 均由 manifest 固定并验证。
+- [x] 普通 `pnpm verify` 与产品运行不联网。
+- [x] Preset 与 generated fallback 都通过真实构建。
+- [x] Windows/MSVC、Windows/clang-cl、Linux/GCC、Linux/Clang 全部通过。
+- [x] configure 首次执行、无变化跳过、CMake input 变化后重新执行。
+- [x] 默认 target、指定 target、compiler/linker/configure diagnostics 通过。
+- [x] 空格/Unicode、escape、取消、超时、断线重连和 restart recovery 通过。
+- [x] Protocol v1.0/v1.1 回归和 Protocol v1.2 contract 通过。
+- [x] Windows/Ubuntu 固定 Hosted Runner CI 全绿并上传工具链报告。
+- [x] `pnpm verify`、`git diff --check`、`git diff --exit-code` 全绿。
+- [x] 工作树 clean，独立评审无未解决问题。

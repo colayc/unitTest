@@ -274,7 +274,7 @@ Preset 模式：
 Generated 模式：
 
 - 必须选择已验证 toolchain；
-- Windows MSVC 使用对应 Visual Studio generator 和 architecture；
+- Windows MSVC 优先使用对应 Visual Studio generator 和 architecture；若该 Visual Studio generator capability 未通过验证，但同一已验证 Visual Studio 实例提供的 Ninja 已通过固定路径、identity 与 version probe，则允许使用 Ninja，并继续显式传递已捕获的 MSVC/Windows SDK environment 与 compiler path；
 - Linux GCC/Clang 显式选择经过检测的 generator；
 - Linux 优先使用可用的 Ninja，否则使用经过验证的 Unix Makefiles；
 - Windows clang-cl 仅在所需 LLVM、MSVC/Windows SDK 环境及 generator 均可用时生成 Profile；
@@ -294,6 +294,8 @@ Build Profile ID 由 project、origin、Preset 或生成配置、toolchain ident
 它不污染源码树，并处于 Service 已控制的 ACL 和清理边界内。Preset 显式定义的 binary directory 只有在位于 workspace 或 Service build root 内时才允许使用；其他位置在 Phase 3 中拒绝。
 
 每个 build directory 使用进程内互斥与文件锁双重保护，避免并发 Service 或并发任务同时 configure/build 同一目录。
+
+Windows generated profile 传给 CMake 的 compiler path 统一规范化为 `/` 分隔符，避免 CMake 生成的内部脚本把 `\P` 等片段解释为转义。Native E2E 的短生命周期 Service data root 使用 repository 管理的 `.native-e2e/work`：普通 clone 位于当前 checkout，`.worktrees/<name>` managed worktree 位于主 checkout。它不使用用户 profile temp，因此 Service 仍能以不共享 delete 的句柄固定全部祖先；同时为 Visual Studio generator 的 `CMakeScratch/TryCompile` 和 MSBuild `.tlog` 保留传统 260 字符路径预算。workspace 本身仍覆盖空格与 Unicode。正式客户端同样必须把 Service data root 放在短、固定、owner-only 且祖先可固定的产品目录，不能通过放宽 owner-only/TOCTOU 验证来兼容任意 temp 路径。
 
 ## 10. Workspace Generation 与 Configure Fingerprint
 
@@ -347,6 +349,12 @@ configure 成功后：
 4. 把原生 target name 映射为稳定的 `targetId`。
 5. 保存用于 configure invalidation 的 CMake input 信息。
 
+File API 路径按用途划分边界：
+
+- reply、target、artifact、cache 和需要 snapshot 的 CMake input 必须位于 workspace、Service data root、已校验的 bundled CMake install root，或当前 verified toolchain 的 compiler/sysroot root；Preset configure 前没有单一 toolchain identity 时，只允许使用同一次 Service discovery snapshot 中全部已验证 toolchain 的这些 root；
+- `C`/`CXX` compiler path 是 toolchain identity metadata，允许位于 workspace 外，但只接受有界的规范绝对路径；解析器不打开它，也不因此授予执行或任意文件读取权限；Visual Studio File API 额外返回的 `RC` 等辅助语言 descriptor 不参与 C/C++ identity；
+- CMake executable 的执行权限仍只来自 Resolver 固定的 `Installation`，File API 不能新增 executable authority。
+
 `cmake/targets/list` 只读取最近一次成功 configure 的有效 File API reply，不隐式执行项目代码。如果尚未 configure，返回 `CONFIGURE_REQUIRED`。
 
 客户端只能把 Service 返回的 `targetId` 交回 `tasks/start`。执行前若 configure 使 target 集合变化，Service 重新解析 target；目标已不存在时，在启动 build step 前以 `TARGET_NOT_FOUND` 结束，绝不把未经验证的 target 字符串传给 CMake。
@@ -381,6 +389,9 @@ Toolchain ID 根据 family、规范 executable identity、version、target tripl
 ### 12.2 Windows MSVC
 
 - 使用 Visual Studio 安装器附带的 `vswhere` 定位包含 C++ workload 的实例。
+- `vswhere` 会把可扩展的 Visual Studio Installer property store 投影到顶层 JSON。Adapter 先执行总大小、UTF-8、NUL、重复 key 和 installation 数量边界校验，再只把 `instanceId`、`installationPath`、`installationVersion`、`isComplete`、`isLaunchable` 投影到发现模型；其他有界 metadata 不参与 path、argument、environment 或 executable 决策，Visual Studio Installer 增加字段时也不会扩大执行面。
+- Visual Studio generator capability 需要安装实例内、已固定 identity 的 `MSBuild.exe` 以固定参数成功返回有界 version 输出；parser 同时支持单行 numeric 形式与 VS 2026 的 banner 加 numeric 形式，拒绝互相冲突的 major，并要求其 major 与 `vswhere installationVersion` 一致。generator 名称只由该已验证 installation major 决定。
+- MSVC generated profile 按 `Visual Studio 18 2026`、`Visual Studio 17 2022`、`Ninja` 的封闭顺序选择 generator。Ninja 只作为 Visual Studio generator capability 不可用时的回退；它必须来自已验证的固定位置，构建仍使用该 MSVC 实例捕获并验证的 compiler、linker、Windows SDK 与 environment，不把 `PATH` 提升为发现入口。
 - 使用固定模板调用安装实例自己的 `VsDevCmd.bat`，捕获特定 host/target architecture 的环境。
 - `.bat` 调用是受信任 MSVC Adapter 的发现步骤，不是 Build Task 的 Shell 执行入口。
 - `VsDevCmd.bat` 路径来自已验证 Visual Studio 实例；architecture、toolset 和 SDK 参数来自枚举，不能包含客户端文本。
@@ -390,6 +401,7 @@ Toolchain ID 根据 family、规范 executable identity、version、target tripl
 ### 12.3 Windows clang-cl
 
 - 检测 LLVM 安装中的 `clang-cl`、`lld-link` 和版本。
+- Ninja 先从固定的独立 CMake 安装位置发现；若该位置不存在，只允许回退到当前已验证 Visual Studio 实例随附的 `Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja/ninja.exe`。回退路径必须仍位于该实例固定 identity 的安装根内，probe 前后复验 executable、Ninja 父目录和 Visual Studio 安装根，不能从用户 `PATH` 补全。
 - 组合已验证的 MSVC/Windows SDK environment。
 - 验证 CMake generator 是否支持该组合。
 - Phase 3 完成真实构建与诊断；只记录 `llvm-profdata`/`llvm-cov` capability，不执行覆盖率。
@@ -513,6 +525,12 @@ Diagnostic 数量不替代进程退出码。存在 warning 的成功构建仍是
 - Toolchains
 
 该方法可以读取配置、运行固定的 CMake preset listing 和 compiler capability probe，但不执行项目 configure 或 build。
+
+Toolchain 只投影 family、version、target triple、host/target architecture、已验证 generator 和 `gcov`/`llvm-cov` capability 名称；不返回 compiler path、environment、sysroot 或 coverage executable path。Build Profile 返回 `origin`、安全的 `toolchainId` 关联、generator 和 configuration。
+
+workspace 配置无效或超过大小上限时，Runtime 忽略其中的 CMake override 与 manual toolchain，不在 pre-READY 阶段退出；Service 以安全空配置启动，并由 `workspace/inspect` 返回 `WORKSPACE_INVALID_CONFIG` 或 `WORKSPACE_CONFIG_TOO_LARGE` 阻断诊断。这样客户端可以解释和修复配置，同时无效配置不会获得执行能力。
+
+`sourceDir` 在配置解码阶段按 workspace root 解析真实路径。Linux symlink 或 Windows junction/reparse point 指向 workspace 外部时，配置在 project inspection 与进程创建之前被拒绝，并由 `workspace/inspect` 返回 `WORKSPACE_INVALID_CONFIG`；`PROJECT_INVALID` 仅用于已通过配置解码、但项目内容本身无效的情况。
 
 #### `cmake/targets/list`
 
@@ -680,9 +698,11 @@ Protocol 中的 line/column 使用零起始、结束位置不包含在范围内�
 - CMake configure 单行和多行 error/warning；
 - MSVC `Cxxxx` error/warning；
 - MSVC linker `LNKxxxx`；
-- clang-cl 的 MSVC 风格或 Clang 风格输出；
+- clang-cl 的 MSVC 风格或 Clang 风格输出；其中 MSVC-style location 允许 MSVC 的 `Cnnnn` code，也允许 clang-cl 只输出 `error:`/`warning:` 而没有 numeric code；无 numeric code 时规范化为非空的 `COMPILER_ERROR`/`COMPILER_WARNING`/`COMPILER_NOTE`，满足 Protocol 与 ArtifactStore 的非空 code 不变量；
 - GCC/Clang `file:line:column`；
 - GNU ld、LLD、lld-link、link.exe 常见 linker error；
+- MSVC/clang-cl build parser 在 compiler 与 `LNKxxxx` shape 均不匹配时委托给共享 Linker parser，使 `lld-link: error:` 规范化为非空的 `LLD_LINK_ERROR`；该委托只复用封闭的 linker regex，不接受普通输出或任意前缀；
+- GCC/Clang build Step 使用同一个 `FamilyGNU` 流式 parser：先匹配 compiler diagnostic；未匹配时只回落到受限的 GNU ld/LLD/`collect2` linker pattern，从而覆盖 Ubuntu GCC 把 `undefined reference` 绑定到 source-location 行的输出，同时不把普通 output 提升为 Diagnostic；
 - template instantiation、included-from 和 note chain。
 
 ### 16.2 流式处理
@@ -755,12 +775,19 @@ ArtifactStore 从仅验证 simulation summary 扩展为按 task kind 注册 arti
 - Workspace Config Schema、大小、深度和数量限制。
 - Windows/Linux path containment。
 - symlink、junction 和 reparse point 越界。
+- Native E2E 验证 `sourceDir` symlink 越界在配置层返回 `WORKSPACE_INVALID_CONFIG`，且不会进入 project inspection 或创建进程。
 - CMake Resolver、bundle manifest 和摘要验证。
 - Preset include 图、cycle、unsupported version 和外部 include。
 - Workspace Generation 与 Configure Fingerprint。
 - Build Profile 稳定 ID。
 - MSVC、clang-cl、GCC 和 Clang discovery/probe。
 - MSVC 固定环境捕获模板和敏感变量清理。
+- 跨平台 E2E 的首次 `workspace/inspect` 使用独立的 cold-discovery 外层预算：Linux 为 30 秒，Windows 为 120 秒。Windows 预算覆盖全量 Go race 后的 hosted runner 高负载，以及 MSVC/clang-cl 多 adapter 依次组合固定 probe 的最坏路径；它只约束测试客户端等待时间，每个 production probe 自身的固定参数、输出上限和 5 秒命令预算保持不变。
+- Windows production discovery smoke test 只在宿主机同时提供固定 Visual Studio metadata 与可验证 compiler/generator 时执行完整断言；generator 不可用，或底层 production runner 明确返回 `probe.ErrTimeout` 表示任一 5 秒固定 probe 预算在当前宿主负载下耗尽时，跳过该宿主机能力测试。其他 identity、格式、输出和环境错误仍失败。CI 随后的 Native E2E 仍通过 `UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS=msvc,clang-cl` 强制验收项目支持矩阵，不能由 smoke test 跳过替代。
+- 普通 CMake E2E 在首次 Start 因 optimistic-concurrency 返回 `WORKSPACE_CHANGED` 时，重新执行 `workspace/inspect`、重新选择 project/profile，并以新的 idempotency key 有界重试一次；拒绝发生在 Task 创建前，不会产生重复 Task。刷新后再次 stale 或基线建立后的 generation 漂移仍作为失败。
+- Native E2E 在 Service recovery 场景开始前重新执行 `workspace/inspect`，用最新 generation/profile 完成基线构建并解析 slow target；重启后同时验证持久 Task 收敛为 `interrupted`，以及未变更 workspace 的 generation 保持稳定。
+- Native E2E 的 compiler/linker/configure diagnostic fixture 各自使用独立 Workspace 与 Service，因此会重新执行完整 toolchain discovery。若当前 family 已在主矩阵中确认存在，但某个新隔离 Service 的首次 inspect 未生成该 family 的 profile，则只允许在同一未变更 Workspace 上有界重试一次；第二次仍缺失时必须带稳定 diagnostic code 失败，不能跳过 required family。若选定 profile 后首次 Start 因 optimistic concurrency 返回 `WORKSPACE_CHANGED`，则重新 inspect、重新选择同一 required family，并用新的 idempotency key 重试一次；该拒绝发生在 Task 创建前，第二次 stale 或其他错误仍立即失败。
+- Native E2E 等待 terminal event 时使用有界 liveness heartbeat：持续保留同一个 pending subscription read，查询 durable Task 状态；连接失活时由客户端执行 reconnect/replay，durable Task 已 terminal 但事件尚未到达时最多触发一次 terminal replay。验收仍要求收到连续 sequence 的 `task.finished`，不能用轮询快照替代事件契约。
 - ExecutionPlan 的 executable、cwd、NUL、environment key/secret 校验，以及每 Step `ProcessSpec.Args <= 256`、`ProcessSpec.Env <= 256`、`CommandSummary.Args <= 256` 的精确边界。
 - configure/build Step 状态、取消、超时和失败短路。
 - SQLite migration、旧 simulation `scenario + timeoutMs` 回填、旧 hash语义 replay、checksum/unknown-version防护与 queued 恢复。

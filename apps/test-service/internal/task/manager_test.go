@@ -6,12 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"unit-test-ide.local/test-service/internal/diagnostic"
 	"unit-test-ide.local/test-service/internal/task"
+	"unit-test-ide.local/test-service/internal/testdomain"
 )
 
 func TestNewManagerRejectsMissingDependencies(t *testing.T) {
@@ -47,7 +50,6 @@ func TestManagerStartsAndCancelsOneTask(t *testing.T) {
 	if got := f.publisher.types(); !reflect.DeepEqual(got, []task.EventType{
 		task.EventTaskCreated,
 		task.EventTaskStarted,
-		task.EventTaskStepStarted,
 	}) {
 		t.Fatalf("events = %v", got)
 	}
@@ -78,8 +80,8 @@ func TestManagerStartsAndCancelsOneTask(t *testing.T) {
 		t.Fatalf("terminal cancel terminated %d times", f.process.terminateCalls())
 	}
 	if got := f.publisher.types(); !reflect.DeepEqual(got, []task.EventType{
-		task.EventTaskCreated, task.EventTaskStarted, task.EventTaskStepStarted,
-		task.EventTaskCancellationRequested, task.EventTaskStepFinished,
+		task.EventTaskCreated, task.EventTaskStarted,
+		task.EventTaskCancellationRequested,
 		task.EventArtifactCreated, task.EventTaskFinished,
 	}) {
 		t.Fatalf("events = %v", got)
@@ -97,7 +99,7 @@ func TestManagerIdempotencyAndSerializedStarts(t *testing.T) {
 	if err != nil || replayed.ID != first.ID {
 		t.Fatalf("replay = %#v, %v", replayed, err)
 	}
-	if f.processes.prepareCount() != 1 || len(f.publisher.events()) != 3 {
+	if f.processes.prepareCount() != 1 || len(f.publisher.events()) != 2 {
 		t.Fatalf("replay performed side effects: prepare=%d events=%d", f.processes.prepareCount(), len(f.publisher.events()))
 	}
 	conflict := req
@@ -128,14 +130,12 @@ func TestManagerPersistsPreparedLeaseBeforeStartAndRefreshesItAfterStart(t *test
 	if got := eventTypes(f.store.eventsForTask(started.ID)); !reflect.DeepEqual(got, []task.EventType{
 		task.EventTaskCreated,
 		task.EventTaskStarted,
-		task.EventTaskStepStarted,
 	}) {
 		t.Fatalf("durable events = %v", got)
 	}
 	if got := f.publisher.types(); !reflect.DeepEqual(got, []task.EventType{
 		task.EventTaskCreated,
 		task.EventTaskStarted,
-		task.EventTaskStepStarted,
 	}) {
 		t.Fatalf("published events = %v", got)
 	}
@@ -1062,7 +1062,6 @@ func TestManagerPublisherFailureQuiescesOtherActiveTaskForRecovery(t *testing.T)
 	if got := eventTypes(f.store.eventsForTask(first.ID)); !reflect.DeepEqual(got, []task.EventType{
 		task.EventTaskCreated,
 		task.EventTaskStarted,
-		task.EventTaskStepStarted,
 	}) {
 		t.Fatalf("first durable event types = %v, want no false terminal event", got)
 	}
@@ -1074,11 +1073,10 @@ func TestManagerPublisherFailureQuiescesOtherActiveTaskForRecovery(t *testing.T)
 
 func TestManagerPublisherFailureCloseErrorHandsOffRecoveryWithoutTerminalization(t *testing.T) {
 	f := newManagerFixture(t)
-	first, err := f.manager.Start(context.Background(), task.StartRequest{
-		IdempotencyKey: testID(44),
-		Scenario:       task.ScenarioHang,
-		Timeout:        time.Hour,
-	})
+	boundary := &recordingManagedBoundary{}
+	firstRequest := simulationManagerRequest(testID(44), task.ScenarioHang, time.Hour)
+	firstRequest.Boundary = boundary
+	first, err := f.manager.Start(context.Background(), firstRequest)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1140,12 +1138,10 @@ func TestManagerPublisherFailureCloseErrorHandsOffRecoveryWithoutTerminalization
 		!reflect.DeepEqual(durableEvents, []task.EventType{
 			task.EventTaskCreated,
 			task.EventTaskStarted,
-			task.EventTaskStepStarted,
 		}) ||
 		!reflect.DeepEqual(publishedEvents, []task.EventType{
 			task.EventTaskCreated,
 			task.EventTaskStarted,
-			task.EventTaskStepStarted,
 		}) ||
 		len(artifactSummaries) != 0 ||
 		len(storedArtifacts) != 0 ||
@@ -1153,6 +1149,9 @@ func TestManagerPublisherFailureCloseErrorHandsOffRecoveryWithoutTerminalization
 		t.Fatalf("publisher circuit Close error did not hand off cleanly: Shutdown=%v Get=%v task=%#v durableEvents=%v publishedEvents=%v artifactSummaries=%d storedArtifacts=%d Close calls=%d",
 			shutdownErr, getErr, durableFirst, durableEvents, publishedEvents,
 			len(artifactSummaries), len(storedArtifacts), closeCalls)
+	}
+	if _, releases := boundary.state(); releases != 1 {
+		t.Fatalf("managed boundary releases after recovery handoff = %d, want 1", releases)
 	}
 }
 
@@ -1434,10 +1433,9 @@ func TestManagerMapsProcessResultsAndCommitsSummaryAtomically(t *testing.T) {
 				t.Fatalf("sensitive error = %q", finished.ErrorMessage)
 			}
 			mutation := f.store.lastMutation()
-			if !mutation.DeleteLease || len(mutation.Artifacts) != 1 || len(mutation.Events) != 3 ||
-				mutation.Events[0].Type != task.EventTaskStepFinished ||
-				mutation.Events[1].Type != task.EventArtifactCreated ||
-				mutation.Events[2].Type != task.EventTaskFinished {
+			if !mutation.DeleteLease || len(mutation.Artifacts) != 1 || len(mutation.Events) != 2 ||
+				mutation.Events[0].Type != task.EventArtifactCreated ||
+				mutation.Events[1].Type != task.EventTaskFinished {
 				t.Fatalf("terminal mutation = %#v", mutation)
 			}
 			summary := f.artifacts.lastSummary()
@@ -1454,7 +1452,10 @@ func TestManagerBuildsGenericCMakeTaskSummaryThroughKindRegistry(t *testing.T) {
 	f.processes.queue = []*fakeProcess{f.process, second}
 	t.Cleanup(func() { second.completeOnce(task.ProcessResult{Err: errors.New("test cleanup")}) })
 
-	started, err := f.manager.Start(context.Background(), twoStepCMakeStartRequest(testID(74), time.Minute, fixedBoundary{}))
+	request := twoStepCMakeStartRequest(testID(74), time.Minute, fixedBoundary{})
+	request.Plan.Steps[0].Process.Env = []string{"BUILD_SECRET=must-not-be-persisted"}
+	request.Plan.Fingerprint = task.FingerprintPlan(request.Plan)
+	started, err := f.manager.Start(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1474,6 +1475,23 @@ func TestManagerBuildsGenericCMakeTaskSummaryThroughKindRegistry(t *testing.T) {
 		summary.Steps[0].ID != "configure" || summary.Steps[0].Status != task.StepSucceeded ||
 		summary.Steps[1].ID != "build" || summary.Steps[1].Status != task.StepSucceeded {
 		t.Fatalf("generic TaskSummary = %#v; finished task = %#v", summary, finished)
+	}
+	storedArtifacts := f.store.artifactsCopy()
+	kinds := make([]string, len(storedArtifacts))
+	for index, artifact := range storedArtifacts {
+		kinds[index] = artifact.Kind
+	}
+	sort.Strings(kinds)
+	if want := []string{"build-summary", "diagnostics", "execution-plan", "stderr", "stdout"}; !reflect.DeepEqual(kinds, want) {
+		t.Fatalf("CMake artifact kinds = %v, want %v", kinds, want)
+	}
+	planJSON, err := json.Marshal(f.artifacts.lastPlan())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(planJSON), "BUILD_SECRET") ||
+		strings.Contains(strings.ToLower(string(planJSON)), "environment") {
+		t.Fatalf("execution-plan artifact exposed runtime environment: %s", planJSON)
 	}
 }
 
@@ -1779,18 +1797,31 @@ type managerFixture struct {
 }
 
 func newManagerFixture(t *testing.T) *managerFixture {
-	return newManagerFixtureWithOptions(t, 0, 0)
+	return newManagerFixtureWithOptionsAndObserver(t, 0, 0, nil)
 }
 
 func newManagerFixtureWithCloseTimeout(t *testing.T, closeTimeout time.Duration) *managerFixture {
-	return newManagerFixtureWithOptions(t, closeTimeout, 0)
+	return newManagerFixtureWithOptionsAndObserver(t, closeTimeout, 0, nil)
 }
 
 func newManagerFixtureWithCommandQueue(t *testing.T, commandQueue int) *managerFixture {
-	return newManagerFixtureWithOptions(t, 0, commandQueue)
+	return newManagerFixtureWithOptionsAndObserver(t, 0, commandQueue, nil)
 }
 
 func newManagerFixtureWithOptions(t *testing.T, closeTimeout time.Duration, commandQueue int) *managerFixture {
+	return newManagerFixtureWithOptionsAndObserver(t, closeTimeout, commandQueue, nil)
+}
+
+func newManagerFixtureWithObserver(t *testing.T, observer task.StepObserver) *managerFixture {
+	return newManagerFixtureWithOptionsAndObserver(t, 0, 0, observer)
+}
+
+func newManagerFixtureWithOptionsAndObserver(
+	t *testing.T,
+	closeTimeout time.Duration,
+	commandQueue int,
+	observer task.StepObserver,
+) *managerFixture {
 	t.Helper()
 	clock := newFakeClock()
 	store := newFakeStore()
@@ -1801,7 +1832,8 @@ func newManagerFixtureWithOptions(t *testing.T, closeTimeout time.Duration, comm
 	var next byte = 100
 	manager, err := task.NewManager(task.ManagerConfig{
 		Store: store, Publisher: publisher, Processes: processes, Artifacts: artifacts,
-		Clock: clock, NewID: func() string { next++; return testID(next) },
+		StepObserver: observer,
+		Clock:        clock, NewID: func() string { next++; return testID(next) },
 		ServiceExecutable: "trusted-service", ServiceInstanceID: testID(99),
 		TerminationGrace: time.Second, OutputFlushInterval: 25 * time.Millisecond,
 		ProcessCloseTimeout: closeTimeout, CommandQueue: commandQueue,
@@ -1999,25 +2031,31 @@ type fakeStore struct {
 	leases         map[string]task.ProcessLease
 	mutations      []task.Mutation
 	sequence       int64
+	testRuns       map[string]testdomain.TestRun
 	failAppend     error
 	failApply      error
 	failApplyAt    int
 	failApplyFor   int
 	failApplyErr   error
 	failApplyMatch func(task.Mutation) error
+	onAppendEvent  func(task.EventDraft)
 	applyCalls     int
+	createCalls    int
+	replaceCalls   int
 }
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
 		tasks: map[string]task.Task{}, keys: map[string]string{}, getCalls: map[string]int{},
-		leases: map[string]task.ProcessLease{},
+		leases:   map[string]task.ProcessLease{},
+		testRuns: map[string]testdomain.TestRun{},
 	}
 }
 
 func (s *fakeStore) Create(_ context.Context, value task.Task, steps []task.StepSnapshot, draft task.EventDraft) (task.Task, []task.Event, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.createCalls++
 	if existingID, ok := s.keys[value.IdempotencyKey]; ok {
 		existing := s.tasks[existingID]
 		if existing.RequestHash != value.RequestHash {
@@ -2031,6 +2069,31 @@ func (s *fakeStore) Create(_ context.Context, value task.Task, steps []task.Step
 	s.tasks[value.ID] = value
 	s.keys[value.IdempotencyKey] = value.ID
 	return value, []task.Event{event}, nil
+}
+
+func (s *fakeStore) CreateTestTask(
+	ctx context.Context,
+	value task.Task,
+	steps []task.StepSnapshot,
+	draft task.EventDraft,
+	run testdomain.TestRun,
+) (task.Task, []task.Event, error) {
+	created, events, err := s.Create(ctx, value, steps, draft)
+	if err != nil {
+		return task.Task{}, nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(events) != 0 {
+		s.testRuns[run.RunID] = run.Clone()
+	}
+	return created, events, nil
+}
+
+func (s *fakeStore) testRun(id string) testdomain.TestRun {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.testRuns[id].Clone()
 }
 
 func (s *fakeStore) FindByIdempotencyKey(_ context.Context, key string) (task.Task, error) {
@@ -2054,7 +2117,7 @@ func (s *fakeStore) Get(_ context.Context, id string) (task.Task, error) {
 	return value, nil
 }
 
-func (s *fakeStore) List(_ context.Context, _ string, limit int) (task.Page[task.Task], error) {
+func (s *fakeStore) List(_ context.Context, _ string, limit int, _ ...task.Kind) (task.Page[task.Task], error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	result := task.Page[task.Task]{}
@@ -2108,6 +2171,14 @@ func (s *fakeStore) Apply(_ context.Context, mutation task.Mutation) (task.Task,
 			return task.Task{}, nil, task.ErrConflict
 		}
 	}
+	for _, appended := range mutation.AppendSteps {
+		for _, existing := range steps {
+			if existing.ID == appended.ID {
+				return task.Task{}, nil, task.ErrConflict
+			}
+		}
+		steps = append(steps, appended)
+	}
 	events := make([]task.Event, 0, len(mutation.Events))
 	for _, draft := range mutation.Events {
 		events = append(events, s.appendLocked(draft))
@@ -2124,6 +2195,10 @@ func (s *fakeStore) Apply(_ context.Context, mutation task.Mutation) (task.Task,
 		delete(s.leases, mutation.Task.ID)
 	}
 	s.artifacts = append(s.artifacts, mutation.Artifacts...)
+	if mutation.FinishRun != nil {
+		s.testRuns[mutation.FinishRun.RunID] =
+			mutation.FinishRun.Clone()
+	}
 	s.mutations = append(s.mutations, mutation)
 	return mutation.Task, events, nil
 }
@@ -2133,6 +2208,9 @@ func (s *fakeStore) AppendEvent(_ context.Context, _ string, draft task.EventDra
 	defer s.mu.Unlock()
 	if s.failAppend != nil {
 		return task.Event{}, s.failAppend
+	}
+	if s.onAppendEvent != nil {
+		s.onAppendEvent(draft)
 	}
 	event := s.appendLocked(draft)
 	value := s.tasks[draft.TaskID]
@@ -2183,6 +2261,30 @@ func (s *fakeStore) ActiveLeases(context.Context) ([]task.ProcessLease, error) {
 func (s *fakeStore) RecoverInterrupted(context.Context, time.Time) ([]task.Event, error) {
 	return nil, nil
 }
+func (s *fakeStore) ReplaceQueuedPlan(
+	_ context.Context,
+	taskID string,
+	requestHash string,
+	planFingerprint string,
+	steps []task.StepSnapshot,
+) (task.Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.replaceCalls++
+	current, ok := s.tasks[taskID]
+	if !ok {
+		return task.Task{}, task.ErrNotFound
+	}
+	if current.Status != task.StatusQueued || current.Kind != task.KindCMakeBuild ||
+		current.RequestHash != requestHash {
+		return task.Task{}, task.ErrConflict
+	}
+	current.PlanFingerprint = planFingerprint
+	current.ActiveStep = ""
+	current.Steps = append([]task.StepSnapshot(nil), steps...)
+	s.tasks[taskID] = current
+	return current, nil
+}
 func (s *fakeStore) ReferencedArtifactPaths(context.Context) (map[string]struct{}, error) {
 	return nil, nil
 }
@@ -2201,6 +2303,12 @@ func (s *fakeStore) applyCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.applyCalls
+}
+
+func (s *fakeStore) writeSideEffectCounts() (creates, applies, replacements, events, artifacts, leases int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.createCalls, s.applyCalls, s.replaceCalls, len(s.eventsValue), len(s.artifacts), len(s.leases)
 }
 
 func (s *fakeStore) getCount(id string) int {
@@ -2517,24 +2625,154 @@ func (p *fakeProcess) closeCalls() int     { p.mu.Lock(); defer p.mu.Unlock(); r
 func (p *fakeProcess) startCalls() int     { p.mu.Lock(); defer p.mu.Unlock(); return p.starts }
 
 type fakeArtifactWriter struct {
-	mu        sync.Mutex
-	fail      error
-	summaries []map[string]string
-	values    []any
+	mu                 sync.Mutex
+	fail               error
+	summaries          []map[string]string
+	values             []any
+	plans              []any
+	nextID             uint64
+	onAppendOutput     func()
+	onAppendDiagnostic func()
 }
 
-func (w *fakeArtifactWriter) CommitJSON(_ context.Context, taskID, artifactID string, at time.Time, value any) (task.Artifact, error) {
+type fakePendingArtifact struct {
+	id    string
+	kind  string
+	value any
+}
+
+type fakeArtifactSink struct {
+	writer   *fakeArtifactWriter
+	taskID   string
+	taskKind task.Kind
+	pending  []fakePendingArtifact
+	aborted  bool
+}
+
+func (w *fakeArtifactWriter) OpenTask(
+	_ context.Context,
+	taskID string,
+	kind task.Kind,
+) (task.ArtifactSink, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.fail != nil {
-		return task.Artifact{}, w.fail
+		return nil, w.fail
 	}
-	w.values = append(w.values, value)
+	return &fakeArtifactSink{writer: w, taskID: taskID, taskKind: kind}, nil
+}
+
+func (s *fakeArtifactSink) AppendOutput(
+	_ context.Context,
+	_ string,
+	_ string,
+	_ []byte,
+) error {
+	s.writer.mu.Lock()
+	defer s.writer.mu.Unlock()
+	if s.writer.onAppendOutput != nil {
+		s.writer.onAppendOutput()
+	}
+	return s.writer.fail
+}
+
+func (s *fakeArtifactSink) AppendDiagnostic(
+	_ context.Context,
+	_ diagnostic.Diagnostic,
+) error {
+	s.writer.mu.Lock()
+	defer s.writer.mu.Unlock()
+	if s.writer.onAppendDiagnostic != nil {
+		s.writer.onAppendDiagnostic()
+	}
+	return s.writer.fail
+}
+
+func (s *fakeArtifactSink) CommitJSON(
+	_ context.Context,
+	artifactID string,
+	kind string,
+	value any,
+) error {
+	s.writer.mu.Lock()
+	defer s.writer.mu.Unlock()
+	if s.writer.fail != nil {
+		return s.writer.fail
+	}
+	s.pending = append(s.pending, fakePendingArtifact{
+		id: artifactID, kind: kind, value: value,
+	})
+	if kind == "execution-plan" {
+		s.writer.plans = append(s.writer.plans, value)
+	}
+	if kind != "task-summary" && kind != "build-summary" {
+		return nil
+	}
+	s.writer.values = append(s.writer.values, value)
 	raw, _ := json.Marshal(value)
 	var summary map[string]string
 	_ = json.Unmarshal(raw, &summary)
-	w.summaries = append(w.summaries, summary)
-	return task.Artifact{ID: artifactID, TaskID: taskID, Kind: "task-summary", RelativePath: fmt.Sprintf("tasks/%s/%s.json", taskID, artifactID), MIMEType: "application/json", Size: int64(len(raw)), SHA256: strings.Repeat("a", 64), CreatedAt: at}, nil
+	s.writer.summaries = append(s.writer.summaries, summary)
+	return nil
+}
+
+func (s *fakeArtifactSink) CommitJSONLines(
+	_ context.Context,
+	artifactID string,
+	kind string,
+	values []json.RawMessage,
+) error {
+	copied := make([]json.RawMessage, len(values))
+	for index, value := range values {
+		copied[index] = append(json.RawMessage(nil), value...)
+	}
+	return s.CommitJSON(
+		context.Background(),
+		artifactID,
+		kind,
+		copied,
+	)
+}
+
+func (s *fakeArtifactSink) Finalize(
+	_ context.Context,
+	at time.Time,
+) ([]task.Artifact, error) {
+	s.writer.mu.Lock()
+	defer s.writer.mu.Unlock()
+	if s.writer.fail != nil {
+		return nil, s.writer.fail
+	}
+	pending := append([]fakePendingArtifact(nil), s.pending...)
+	if s.taskKind == task.KindCMakeBuild {
+		for _, kind := range []string{"stdout", "stderr", "diagnostics"} {
+			s.writer.nextID++
+			pending = append(pending, fakePendingArtifact{
+				id: fmt.Sprintf("%032x", s.writer.nextID), kind: kind,
+			})
+		}
+	}
+	result := make([]task.Artifact, len(pending))
+	for index, value := range pending {
+		mimeType := "application/json"
+		if value.kind == "stdout" || value.kind == "stderr" {
+			mimeType = "application/octet-stream"
+		} else if value.kind == "diagnostics" ||
+			value.kind == "test-results" {
+			mimeType = "application/x-ndjson"
+		}
+		result[index] = task.Artifact{
+			ID: value.id, TaskID: s.taskID, Kind: value.kind,
+			RelativePath: fmt.Sprintf("tasks/%s/%s", s.taskID, value.id),
+			MIMEType:     mimeType, SHA256: strings.Repeat("a", 64), CreatedAt: at,
+		}
+	}
+	return result, nil
+}
+
+func (s *fakeArtifactSink) Abort(context.Context) error {
+	s.aborted = true
+	return nil
 }
 func (w *fakeArtifactWriter) lastSummary() map[string]string {
 	w.mu.Lock()
@@ -2553,6 +2791,15 @@ func (w *fakeArtifactWriter) lastValue() any {
 		return nil
 	}
 	return w.values[len(w.values)-1]
+}
+
+func (w *fakeArtifactWriter) lastPlan() any {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.plans) == 0 {
+		return nil
+	}
+	return w.plans[len(w.plans)-1]
 }
 
 type clockWaiter struct {

@@ -1,17 +1,27 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
-import { EventSubscription, type ProtocolClient, type TaskEvent, type TaskSnapshot } from "@unit-test-ide/test-client";
+import {
+  EventSubscription,
+  ProtocolError,
+  type ProtocolClient,
+  type ProtocolTaskEvent,
+  type ProtocolTaskSnapshot
+} from "@unit-test-ide/test-client";
+import { TestSelectionModeV13 } from "@unit-test-ide/protocol-models";
 import { endpointForDirectory } from "./endpoint.js";
 import { assertProcessGone, prepareTokenFile, runProbe, startService, startTaskService, withNamedTimeout } from "./probe.js";
+import { prepareTestFrameworkWorkspace } from "./test-framework-fixture.js";
 
 const root = resolve(import.meta.dirname, "../../..");
 const binary = join(root, "build", process.platform === "win32" ? "unit-test-service.exe" : "unit-test-service");
+const cmakeFixture = join(root, "build", process.platform === "win32" ? "cmake-fixture.exe" : "cmake-fixture");
 const EVENT_TIMEOUT_MS = 8_000;
+const WORKSPACE_INSPECTION_TIMEOUT_MS = process.platform === "win32" ? 120_000 : 30_000;
 const V11_EVENT_NAMES = new Set([
   "task.created",
   "task.started",
@@ -19,6 +29,12 @@ const V11_EVENT_NAMES = new Set([
   "task.cancellation_requested",
   "task.finished",
   "artifact.created"
+]);
+const V12_EVENT_NAMES = new Set([
+  ...V11_EVENT_NAMES,
+  "task.step_started",
+  "task.step_finished",
+  "task.diagnostic"
 ]);
 
 test("Unix endpoint stays within sockaddr_un when the workspace path is long", async () => {
@@ -185,7 +201,7 @@ test("service fixture bounds a pending handshake RPC and cleans up its process",
           handshakeClient: () => new Promise<never>(() => undefined)
         }
       }),
-      /protocol 1\.1 handshake timed out after 500ms/
+      /task protocol handshake timed out after 500ms/
     );
     assert.ok(servicePID);
     await assertProcessGone(servicePID);
@@ -273,6 +289,46 @@ test("spawn failures recursively redact nested diagnostics", async () => {
   }, captured, environmentSentinel);
 });
 
+test("service launch forwards workspace trust and CMake options as isolated arguments", async () => {
+  const directory = await mkdtemp(join(dirname(binary), "unit-test-ide-options-"));
+  const workspaceRoot = join(directory, "workspace");
+  const cmakeBundleRoot = join(directory, "cmake-bundle");
+  const devCMakeExecutable = join(directory, "cmake-dev");
+  let checked = false;
+  try {
+    await assert.rejects(
+      startService(binary, directory, {
+        workspaceRoot,
+        trustedWorkspace: true,
+        cmakeBundleRoot,
+        devCMakeExecutable,
+        operations: {
+          spawnService: (_serviceBinary, args) => {
+            assert.deepEqual(args.slice(-7), [
+              "--workspace-root", workspaceRoot,
+              "--trusted-workspace=true",
+              "--cmake-bundle-root", cmakeBundleRoot,
+              "--dev-cmake-executable", devCMakeExecutable
+            ]);
+            checked = true;
+            throw new Error(`expected launch stop ${workspaceRoot} ${cmakeBundleRoot} ${devCMakeExecutable}`);
+          }
+        }
+      }),
+      (error: unknown) => {
+        const serialized = serializeErrorTree(error);
+        for (const sensitive of [workspaceRoot, cmakeBundleRoot, devCMakeExecutable]) {
+          assert.equal(serialized.includes(sensitive), false);
+        }
+        return true;
+      }
+    );
+    assert.equal(checked, true);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("connect failures recursively redact nested diagnostics", async () => {
   const captured: string[] = [];
   const environmentSentinel = "CONNECT_SECRET_ENV=do-not-print";
@@ -299,17 +355,17 @@ test("handshake failures recursively redact nested diagnostics", async () => {
   }, captured, environmentSentinel);
 });
 
-function eventWithin(subscription: EventSubscription, label: string): Promise<IteratorResult<TaskEvent>> {
+function eventWithin(subscription: EventSubscription, label: string): Promise<IteratorResult<ProtocolTaskEvent>> {
   return withNamedTimeout(label, subscription.next(), EVENT_TIMEOUT_MS);
 }
 
 async function waitForEvent(
   subscription: EventSubscription,
   taskId: string,
-  predicate: (event: TaskEvent) => boolean,
+  predicate: (event: ProtocolTaskEvent) => boolean,
   label: string,
-  seen: TaskEvent[]
-): Promise<TaskEvent> {
+  seen: ProtocolTaskEvent[]
+): Promise<ProtocolTaskEvent> {
   for (;;) {
     const next = await eventWithin(subscription, label);
     if (next.done) throw new Error(`${label} ended before the expected event`);
@@ -318,11 +374,16 @@ async function waitForEvent(
   }
 }
 
-async function waitForChildPID(subscription: EventSubscription, taskId: string, seen: TaskEvent[]): Promise<number> {
+async function waitForChildPID(
+  subscription: EventSubscription,
+  taskId: string,
+  seen: ProtocolTaskEvent[]
+): Promise<number> {
   let output = "";
   for (;;) {
     const event = await waitForEvent(subscription, taskId, (value) => value.event === "task.output", "child PID event", seen);
-    output += typeof event.payload.text === "string" ? event.payload.text : "";
+    const payload = event.payload as { text?: unknown };
+    output += typeof payload.text === "string" ? payload.text : "";
     const match = /(?:^|\n)CHILD_PID=(\d+)(?:\n|$)/.exec(output);
     if (!match?.[1]) continue;
     const pid = Number(match[1]);
@@ -331,7 +392,11 @@ async function waitForChildPID(subscription: EventSubscription, taskId: string, 
   }
 }
 
-async function waitForFinished(subscription: EventSubscription, taskId: string, seen: TaskEvent[]): Promise<TaskEvent> {
+async function waitForFinished(
+  subscription: EventSubscription,
+  taskId: string,
+  seen: ProtocolTaskEvent[]
+): Promise<ProtocolTaskEvent> {
   return waitForEvent(subscription, taskId, (event) => event.event === "task.finished", "task finished event", seen);
 }
 
@@ -340,8 +405,8 @@ async function collectThroughSequence(
   sequence: number,
   afterSequence = 0,
   label = "event replay"
-): Promise<TaskEvent[]> {
-  const events: TaskEvent[] = [];
+): Promise<ProtocolTaskEvent[]> {
+  const events: ProtocolTaskEvent[] = [];
   let lastConsumedSequence = afterSequence;
   while (lastConsumedSequence < sequence) {
     const next = await eventWithin(subscription, label);
@@ -353,7 +418,7 @@ async function collectThroughSequence(
   return events;
 }
 
-function queuedTaskEvent(sequence: number): TaskEvent {
+function queuedTaskEvent(sequence: number): ProtocolTaskEvent {
   return {
     event: sequence === 4 ? "task.finished" : "task.output",
     kind: "event",
@@ -364,7 +429,7 @@ function queuedTaskEvent(sequence: number): TaskEvent {
     sentAt: new Date("2026-07-23T00:00:00.000Z"),
     sequence,
     taskId: "1".repeat(32)
-  } as TaskEvent;
+  } as ProtocolTaskEvent;
 }
 
 test("collector consumes queued replay through the stable target sequence", async () => {
@@ -375,7 +440,7 @@ test("collector consumes queued replay through the stable target sequence", asyn
   assert.deepEqual(events.map((event) => event.sequence), [1, 2, 3, 4]);
 });
 
-function assertContinuousUniqueSequences(events: TaskEvent[]): void {
+function assertContinuousUniqueSequences(events: ProtocolTaskEvent[]): void {
   assert.ok(events.length > 0);
   assert.equal(new Set(events.map((event) => event.sequence)).size, events.length, "event sequences must be unique");
   for (let index = 1; index < events.length; index++) {
@@ -383,33 +448,41 @@ function assertContinuousUniqueSequences(events: TaskEvent[]): void {
   }
 }
 
-function assertV11CompatibilityEvents(events: TaskEvent[], afterSequence = 0): void {
+function assertSimulationProtocolEvents(events: ProtocolTaskEvent[], afterSequence = 0): void {
   assertContinuousUniqueSequences(events);
   assert.equal(events[0]?.sequence, afterSequence + 1, "event replay must start immediately after its cursor");
+  const version = events[0]?.protocolVersion;
   for (const event of events) {
-    assert.equal(event.protocolVersion, "1.1");
-    assert.equal(V11_EVENT_NAMES.has(event.event), true, `v1.1 leaked event type ${event.event}`);
+    assert.equal(event.protocolVersion, version, "event replay mixed protocol versions");
+    const allowedNames = version === "1.2" || version === "1.3"
+      ? V12_EVENT_NAMES
+      : V11_EVENT_NAMES;
+    assert.equal(allowedNames.has(event.event), true, `${version} leaked event type ${event.event}`);
     if (event.event !== "task.output") continue;
+    const expectedKeys = version === "1.2" || version === "1.3"
+      ? ["stepId", "stream", "text", "truncated"]
+      : ["stream", "text", "truncated"];
     assert.deepEqual(
       Object.keys(event.payload).sort(),
-      ["stream", "text", "truncated"],
-      `v1.1 task.output sequence ${event.sequence} changed its exact payload`
+      expectedKeys,
+      `${version} task.output sequence ${event.sequence} changed its exact payload`
     );
-    assert.equal(typeof event.payload.stream, "string");
-    assert.equal(typeof event.payload.text, "string");
-    assert.equal(typeof event.payload.truncated, "boolean");
+    const payload = event.payload as { stream?: unknown; text?: unknown; truncated?: unknown };
+    assert.equal(typeof payload.stream, "string");
+    assert.equal(typeof payload.text, "string");
+    assert.equal(typeof payload.truncated, "boolean");
   }
 }
 
-function assertV11SimulationSnapshot(snapshot: TaskSnapshot): void {
+function assertSimulationSnapshot(snapshot: ProtocolTaskSnapshot): void {
   assert.equal(snapshot.kind, "simulation");
   for (const field of ["activeStep", "steps", "workspaceGeneration", "planFingerprint", "request"]) {
-    assert.equal(field in snapshot, false, `v1.1 Task Snapshot leaked ${field}`);
+    assert.equal(field in snapshot, false, `simulation Task Snapshot leaked ${field}`);
   }
 }
 
-function assertInterrupted(snapshot: TaskSnapshot): void {
-  assertV11SimulationSnapshot(snapshot);
+function assertInterrupted(snapshot: ProtocolTaskSnapshot): void {
+  assertSimulationSnapshot(snapshot);
   assert.equal(snapshot.status, "finished");
   assert.equal(snapshot.outcome, "interrupted");
 }
@@ -428,11 +501,27 @@ test("prepares the token file before writing the secret", async () => {
 
 test("probe authenticates, reads capabilities, and shuts the service down", async () => {
   const capabilities = await runProbe(binary);
-  assert.equal(capabilities.platform, process.platform === "win32" ? "windows" : "linux");
-  assert.deepEqual(capabilities.transports, [process.platform === "win32" ? "named-pipe" : "unix-socket"]);
+  assert.equal(
+    "workspaceInspect" in capabilities &&
+      capabilities.workspaceInspect,
+    true
+  );
+  assert.equal(
+    "targetList" in capabilities && capabilities.targetList,
+    true
+  );
+  assert.equal(
+    "cmakeBuild" in capabilities && capabilities.cmakeBuild,
+    true
+  );
+  assert.equal(
+    "testDiscovery" in capabilities && capabilities.testDiscovery,
+    true
+  );
+  assert.equal("testRun" in capabilities && capabilities.testRun, true);
 });
 
-test("successful simulation preserves the complete v1.1 compatibility event stream", async () => {
+test("successful simulation preserves the complete negotiated event stream", async () => {
   const fixture = await startTaskService(binary);
   try {
     const subscription = await withNamedTimeout(
@@ -449,19 +538,20 @@ test("successful simulation preserves the complete v1.1 compatibility event stre
       }),
       EVENT_TIMEOUT_MS
     );
-    assertV11SimulationSnapshot(started);
+    assertSimulationSnapshot(started);
 
-    const seen: TaskEvent[] = [];
+    const seen: ProtocolTaskEvent[] = [];
     const finished = await waitForFinished(subscription, started.taskId, seen);
-    assert.equal(finished.payload.outcome, "succeeded");
-    assertV11CompatibilityEvents(seen);
-    const compatibilityOutputs = seen.filter((event) => event.event === "task.output");
+    assert.equal((finished.payload as { outcome?: unknown }).outcome, "succeeded");
+    assertSimulationProtocolEvents(seen);
     assert.deepEqual(
-      compatibilityOutputs.map((event) => event.payload),
-      [
-        { stream: "service", text: "", truncated: false },
-        { stream: "service", text: "", truncated: false }
-      ]
+      seen.filter((event) =>
+        event.event === "task.step_started" ||
+        event.event === "task.step_finished" ||
+        event.event === "task.diagnostic"
+      ),
+      [],
+      "simulation tasks must not expose CMake step or diagnostic events"
     );
     const artifactIndex = seen.findIndex((event) => event.event === "artifact.created");
     const finishedIndex = seen.findIndex((event) => event.event === "task.finished");
@@ -472,7 +562,7 @@ test("successful simulation preserves the complete v1.1 compatibility event stre
       fixture.client.getTask(started.taskId),
       EVENT_TIMEOUT_MS
     );
-    assertV11SimulationSnapshot(durable);
+    assertSimulationSnapshot(durable);
     assert.equal(durable.status, "finished");
     assert.equal(durable.outcome, "succeeded");
     assert.equal(durable.lastSequence, seen.at(-1)?.sequence);
@@ -481,9 +571,511 @@ test("successful simulation preserves the complete v1.1 compatibility event stre
   }
 });
 
+test("trusted workspace completes deterministic CMake builds and skips the second configure", async () => {
+  const workspaceDirectory = await mkdtemp(join(dirname(binary), "unit-test-ide-cmake-workspace-"));
+  const serviceDirectory = await mkdtemp(join(dirname(binary), "unit-test-ide-cmake-service-"));
+  let fixture: Awaited<ReturnType<typeof startService>> | undefined;
+  let stage = "prepare workspace";
+  try {
+    await mkdir(join(workspaceDirectory, ".unit-test-ide"), { recursive: true });
+    await writeFile(
+      join(workspaceDirectory, ".unit-test-ide", "workspace.json"),
+      JSON.stringify({
+        version: 1,
+        projects: [{
+          id: "root",
+          sourceDir: ".",
+          fallback: { configurations: ["Debug"] }
+        }]
+      })
+    );
+    await writeFile(
+      join(workspaceDirectory, "CMakeLists.txt"),
+      "cmake_minimum_required(VERSION 3.25)\nproject(fixture LANGUAGES CXX)\nadd_executable(fixture-app main.cpp)\n"
+    );
+    await writeFile(join(workspaceDirectory, "main.cpp"), "int main() { return 0; }\n");
+    await writeFile(
+      join(workspaceDirectory, "CMakePresets.json"),
+      JSON.stringify({
+        version: 6,
+        configurePresets: [{
+          name: "fixture",
+          generator: "Ninja",
+          binaryDir: "${sourceDir}/build-fixture"
+        }]
+      })
+    );
+
+    stage = "start trusted service";
+    fixture = await startService(binary, serviceDirectory, {
+      timeoutMs: WORKSPACE_INSPECTION_TIMEOUT_MS,
+      workspaceRoot: workspaceDirectory,
+      trustedWorkspace: true,
+      devCMakeExecutable: cmakeFixture
+    });
+    stage = "inspect workspace";
+    let workspace = await withNamedTimeout(
+      "deterministic workspace inspection",
+      fixture.client.inspectWorkspace(),
+      WORKSPACE_INSPECTION_TIMEOUT_MS
+    );
+    const selectFixtureProfile = (snapshot: typeof workspace) => {
+      const selectedProject = snapshot.projects.find((candidate) => candidate.projectId === "root");
+      const selectedProfile = selectedProject?.buildProfiles[0];
+      assert.ok(selectedProject, "fixture project must be inspectable");
+      assert.ok(selectedProfile, "fixture project must have a verified platform toolchain profile");
+      return { project: selectedProject, profile: selectedProfile };
+    };
+    let selected = selectFixtureProfile(workspace);
+
+    stage = "subscribe first build";
+    const firstSubscription = await withNamedTimeout(
+      "first CMake event subscription",
+      fixture.client.subscribeEvents(0),
+      EVENT_TIMEOUT_MS
+    );
+    stage = "start first build";
+    const startFirstBuild = () =>
+      withNamedTimeout(
+        "first deterministic CMake build",
+        fixture!.client.startCMakeBuild({
+          idempotencyKey: randomBytes(16).toString("hex"),
+          workspaceGeneration: workspace.workspaceGeneration,
+          projectId: selected.project.projectId,
+          buildProfileId: selected.profile.buildProfileId,
+          targetIds: [],
+          jobs: 2,
+          timeoutMs: 30_000
+        }),
+        EVENT_TIMEOUT_MS
+      );
+    let first;
+    try {
+      first = await startFirstBuild();
+    } catch (error) {
+      if (!(error instanceof ProtocolError) || error.code !== "WORKSPACE_CHANGED") {
+        throw error;
+      }
+      stage = "refresh workspace after stale generation";
+      workspace = await withNamedTimeout(
+        "stale-generation workspace refresh",
+        fixture.client.inspectWorkspace(),
+        WORKSPACE_INSPECTION_TIMEOUT_MS
+      );
+      selected = selectFixtureProfile(workspace);
+      stage = "retry first build";
+      first = await startFirstBuild();
+    }
+    const firstEvents: ProtocolTaskEvent[] = [];
+    stage = "wait for first build";
+    const firstFinished = await waitForFinished(firstSubscription, first.taskId, firstEvents);
+    assert.equal((firstFinished.payload as { outcome?: unknown }).outcome, "succeeded");
+    assertContinuousUniqueSequences(firstEvents);
+    assert.deepEqual(
+      firstEvents
+        .filter((event) => event.event === "task.step_started")
+        .map((event) => (event.payload as { stepId?: unknown }).stepId),
+      ["configure", "build"]
+    );
+    assert.deepEqual(
+      firstEvents
+        .filter((event) => event.event === "task.step_finished")
+        .map((event) => (event.payload as { stepId?: unknown }).stepId),
+      ["configure", "build"]
+    );
+    const diagnostics = firstEvents.filter((event) => event.event === "task.diagnostic");
+    assert.ok(diagnostics.length >= 1, "build output must produce a diagnostic event");
+    assert.equal(
+      diagnostics.some((event) =>
+        (event.payload as { diagnostic?: { severity?: unknown } }).diagnostic?.severity === "warning"
+      ),
+      true
+    );
+
+    stage = "list first artifacts";
+    const artifacts = await withNamedTimeout(
+      "first CMake artifact list",
+      fixture.client.listArtifacts(first.taskId),
+      EVENT_TIMEOUT_MS
+    );
+    assert.deepEqual(
+      artifacts.items.map((artifact) => artifact.kind).sort(),
+      ["build-summary", "diagnostics", "execution-plan", "stderr", "stdout"]
+    );
+    assert.deepEqual(
+      firstEvents
+        .filter((event) => event.event === "artifact.created")
+        .map((event) => (event.payload as { kind?: unknown }).kind)
+        .sort(),
+      ["build-summary", "diagnostics", "execution-plan", "stderr", "stdout"]
+    );
+    stage = "read first artifacts";
+    const artifactText = (
+      await Promise.all(artifacts.items.map((artifact) => fixture!.client.readArtifact(artifact.artifactId)))
+    ).map((bytes) => new TextDecoder().decode(bytes)).join("\n");
+    for (const forbidden of ["UNIT_TEST_SERVICE_TOKEN", "UNIT_TEST_IDE_TOKEN", "\"env\"", "\"environment\""]) {
+      assert.equal(artifactText.includes(forbidden), false, `artifact leaked ${forbidden}`);
+    }
+
+    stage = "list CMake targets";
+    const targets = await withNamedTimeout(
+      "deterministic CMake target list",
+      fixture.client.listCMakeTargets({
+        workspaceGeneration: workspace.workspaceGeneration,
+        projectId: selected.project.projectId,
+        buildProfileId: selected.profile.buildProfileId
+      }),
+      EVENT_TIMEOUT_MS
+    );
+    assert.deepEqual(targets.targets.map((target) => target.name), ["fixture-app"]);
+
+    stage = "read first durable task";
+    const firstDurable = await withNamedTimeout(
+      "first deterministic durable task",
+      fixture.client.getTask(first.taskId),
+      EVENT_TIMEOUT_MS
+    );
+    stage = "subscribe second build";
+    const secondSubscription = await withNamedTimeout(
+      "second CMake event subscription",
+      fixture.client.subscribeEvents(firstDurable.lastSequence),
+      EVENT_TIMEOUT_MS
+    );
+    stage = "start second build";
+    const second = await withNamedTimeout(
+      "second deterministic CMake build",
+      fixture.client.startCMakeBuild({
+        idempotencyKey: randomBytes(16).toString("hex"),
+        workspaceGeneration: workspace.workspaceGeneration,
+        projectId: selected.project.projectId,
+        buildProfileId: selected.profile.buildProfileId,
+        targetIds: [],
+        jobs: 2,
+        timeoutMs: 30_000
+      }),
+      EVENT_TIMEOUT_MS
+    );
+    const secondEvents: ProtocolTaskEvent[] = [];
+    stage = "wait for second build";
+    const secondFinished = await waitForFinished(secondSubscription, second.taskId, secondEvents);
+    assert.equal((secondFinished.payload as { outcome?: unknown }).outcome, "succeeded");
+    assertContinuousUniqueSequences(secondEvents);
+    assert.equal(secondEvents[0]?.sequence, firstDurable.lastSequence + 1);
+    assert.deepEqual(
+      secondEvents
+        .filter((event) => event.event === "task.step_started")
+        .map((event) => (event.payload as { stepId?: unknown }).stepId),
+      ["build"],
+      "second build must skip configure"
+    );
+
+    stage = "read fixture state";
+    const state = JSON.parse(
+      await readFile(
+        join(workspaceDirectory, "build-fixture", ".unit-test-ide-cmake-fixture.json"),
+        "utf8"
+      )
+    ) as { configureCount?: unknown; buildCount?: unknown };
+    assert.deepEqual(
+      { configureCount: state.configureCount, buildCount: state.buildCount },
+      { configureCount: 1, buildCount: 2 }
+    );
+  } catch (error) {
+    throw new Error(`deterministic CMake E2E failed during ${stage}`, { cause: error });
+  } finally {
+    await fixture?.dispose();
+    await rm(workspaceDirectory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(serviceDirectory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
+test("protocol v1.3 discovers, runs, replays, and reruns deterministic CppUTest failures", async () => {
+  const workspaceDirectory = await mkdtemp(
+    join(dirname(binary), "unit-test-ide-test-workspace-")
+  );
+  const serviceDirectory = await mkdtemp(
+    join(dirname(binary), "unit-test-ide-test-service-")
+  );
+  let fixture: Awaited<ReturnType<typeof startService>> | undefined;
+  let secondary: ProtocolClient | undefined;
+  let stage = "prepare test workspace";
+  try {
+    await prepareTestFrameworkWorkspace(workspaceDirectory);
+    stage = "start trusted test service";
+    fixture = await startService(binary, serviceDirectory, {
+      timeoutMs: WORKSPACE_INSPECTION_TIMEOUT_MS,
+      workspaceRoot: workspaceDirectory,
+      trustedWorkspace: true,
+      devCMakeExecutable: cmakeFixture
+    });
+    stage = "inspect test workspace";
+    const workspace = await withNamedTimeout(
+      "test workspace inspection",
+      fixture.client.inspectWorkspace(),
+      WORKSPACE_INSPECTION_TIMEOUT_MS
+    );
+    const project = workspace.projects.find(
+      (candidate) => candidate.projectId === "root"
+    );
+    const profile = project?.buildProfiles[0];
+    assert.ok(project, "test fixture project must be inspectable");
+    assert.ok(profile, "test fixture must expose a build profile");
+
+    stage = "subscribe test events";
+    const subscription = await withNamedTimeout(
+      "test event subscription",
+      fixture.client.subscribeEvents(0),
+      EVENT_TIMEOUT_MS
+    );
+    stage = "start test discovery";
+    const discovery = await withNamedTimeout(
+      "deterministic test discovery",
+      fixture.client.discoverTests({
+        idempotencyKey: randomBytes(16).toString("hex"),
+        projectId: project.projectId,
+        profileId: profile.buildProfileId
+      }),
+      EVENT_TIMEOUT_MS
+    );
+    const discoveryEvents: ProtocolTaskEvent[] = [];
+    stage = "wait for test discovery";
+    const discoveryFinished = await waitForFinished(
+      subscription,
+      discovery.taskId,
+      discoveryEvents
+    );
+    assert.equal(
+      (discoveryFinished.payload as { outcome?: unknown }).outcome,
+      "succeeded"
+    );
+    assert.deepEqual(
+      discoveryEvents
+        .filter((event) =>
+          event.taskId === discovery.taskId &&
+          event.event.startsWith("test.")
+        )
+        .map((event) => event.event),
+      [
+        "test.discovery.started",
+        "test.container.discovered",
+        "test.catalog.published"
+      ]
+    );
+    const discoveryDurable = await withNamedTimeout(
+      "durable test discovery",
+      fixture.client.getTask(discovery.taskId),
+      EVENT_TIMEOUT_MS
+    );
+    stage = "read deterministic catalog";
+    const catalog = await withNamedTimeout(
+      "deterministic test catalog",
+      fixture.client.getTestCatalog({
+        projectId: project.projectId,
+        profileId: profile.buildProfileId,
+        limit: 1000
+      }),
+      EVENT_TIMEOUT_MS
+    );
+    assert.equal(catalog.partial, false);
+    assert.equal(catalog.containers.length, 1);
+    assert.deepEqual(
+      catalog.items
+        .filter((item) => item.kind === "case")
+        .map((item) => item.logicalName)
+        .sort(),
+      ["fails", "passes"]
+    );
+
+    stage = "run all deterministic tests";
+    const firstRunTask = await withNamedTimeout(
+      "deterministic test run",
+      fixture.client.runTests({
+        idempotencyKey: randomBytes(16).toString("hex"),
+        projectId: project.projectId,
+        profileId: profile.buildProfileId,
+        catalogRevision: catalog.revision,
+        selection: { mode: TestSelectionModeV13.All },
+        repeatCount: 1
+      }),
+      EVENT_TIMEOUT_MS
+    );
+    const firstRunEvents: ProtocolTaskEvent[] = [];
+    stage = "wait for deterministic test run";
+    const firstTaskFinished = await waitForFinished(
+      subscription,
+      firstRunTask.taskId,
+      firstRunEvents
+    );
+    assert.equal(
+      (firstTaskFinished.payload as { outcome?: unknown }).outcome,
+      "succeeded",
+      "a fully captured assertion failure must not fail orchestration"
+    );
+    const firstRunFinished = firstRunEvents.find(
+      (event) =>
+        event.taskId === firstRunTask.taskId &&
+        event.event === "test.run.finished"
+    );
+    assert.ok(firstRunFinished, "test.run.finished must be durable");
+    const firstRunIdValue = (
+      firstRunFinished.payload as { runId?: unknown }
+    ).runId;
+    if (typeof firstRunIdValue !== "string") {
+      throw new Error("test.run.finished omitted runId");
+    }
+    const firstRunId = firstRunIdValue;
+    const firstRun = await withNamedTimeout(
+      "first TestRun lookup",
+      fixture.client.getTestRun(firstRunId),
+      EVENT_TIMEOUT_MS
+    );
+    assert.equal(firstRun.status, "completed");
+    assert.equal(firstRun.outcome, "failed");
+    assert.deepEqual(
+      {
+        total: firstRun.summary.total,
+        completed: firstRun.summary.completed,
+        passed: firstRun.summary.passed,
+        failed: firstRun.summary.failed
+      },
+      { total: 2, completed: 2, passed: 1, failed: 1 }
+    );
+    stage = "list first TestRun artifacts";
+    const firstRunArtifacts = await withNamedTimeout(
+      "first TestRun artifact list",
+      fixture.client.listArtifacts(firstRunTask.taskId),
+      EVENT_TIMEOUT_MS
+    );
+    assert.deepEqual(
+      firstRunArtifacts.items.map((artifact) => artifact.kind).sort(),
+      [
+        "diagnostics",
+        "execution-plan",
+        "stderr",
+        "stdout",
+        "task-summary",
+        "test-catalog",
+        "test-results",
+        "test-run-summary",
+        "test-selection"
+      ]
+    );
+
+    stage = "replay first TestRun from durable cursor";
+    const firstRunDurable = await withNamedTimeout(
+      "durable first TestRun task",
+      fixture.client.getTask(firstRunTask.taskId),
+      EVENT_TIMEOUT_MS
+    );
+    secondary = await fixture.connectClient();
+    const replay = await withNamedTimeout(
+      "TestRun replay subscription",
+      secondary.subscribeEvents(discoveryDurable.lastSequence),
+      EVENT_TIMEOUT_MS
+    );
+    const replayed = await collectThroughSequence(
+      replay,
+      firstRunDurable.lastSequence,
+      discoveryDurable.lastSequence,
+      "TestRun event replay"
+    );
+    assertContinuousUniqueSequences(replayed);
+    assert.ok(
+      replayed.some((event) =>
+        event.taskId === firstRunTask.taskId &&
+        event.event === "test.run.finished"
+      ),
+      "cursor replay must retain test.run.finished"
+    );
+
+    stage = "rerun deterministic failures";
+    const rerunTask = await withNamedTimeout(
+      "failed TestRun rerun",
+      fixture.client.runTests({
+        idempotencyKey: randomBytes(16).toString("hex"),
+        projectId: project.projectId,
+        profileId: profile.buildProfileId,
+        catalogRevision: catalog.revision,
+        selection: {
+          mode: TestSelectionModeV13.FailedFromRun,
+          runId: firstRunId
+        },
+        repeatCount: 1
+      }),
+      EVENT_TIMEOUT_MS
+    );
+    const rerunEvents: ProtocolTaskEvent[] = [];
+    const rerunTaskFinished = await waitForFinished(
+      subscription,
+      rerunTask.taskId,
+      rerunEvents
+    );
+    assert.equal(
+      (rerunTaskFinished.payload as { outcome?: unknown }).outcome,
+      "succeeded"
+    );
+    const rerunFinished = rerunEvents.find(
+      (event) =>
+        event.taskId === rerunTask.taskId &&
+        event.event === "test.run.finished"
+    );
+    assert.ok(rerunFinished, "rerun must finish its TestRun");
+    const rerunIdValue = (
+      rerunFinished.payload as { runId?: unknown }
+    ).runId;
+    if (typeof rerunIdValue !== "string") {
+      throw new Error("rerun test.run.finished omitted runId");
+    }
+    const rerunId = rerunIdValue;
+    const rerun = await withNamedTimeout(
+      "rerun TestRun lookup",
+      fixture.client.getTestRun(rerunId),
+      EVENT_TIMEOUT_MS
+    );
+    assert.equal(rerun.selectionSnapshot.mode, "failedFromRun");
+    assert.deepEqual(
+      {
+        total: rerun.summary.total,
+        completed: rerun.summary.completed,
+        failed: rerun.summary.failed
+      },
+      { total: 1, completed: 1, failed: 1 }
+    );
+    const runs = await withNamedTimeout(
+      "TestRun history",
+      fixture.client.listTestRuns({
+        projectId: project.projectId,
+        profileId: profile.buildProfileId,
+        limit: 1000
+      }),
+      EVENT_TIMEOUT_MS
+    );
+    assert.deepEqual(
+      new Set(runs.items.map((run) => run.runId)),
+      new Set([firstRunId, rerunId])
+    );
+  } catch (error) {
+    throw new Error(
+      `deterministic Protocol v1.3 E2E failed during ${stage}`,
+      { cause: error }
+    );
+  } finally {
+    secondary?.close();
+    await fixture?.dispose();
+    await rm(
+      workspaceDirectory,
+      { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }
+    );
+    await rm(
+      serviceDirectory,
+      { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }
+    );
+  }
+});
+
 test("task survives reconnect, cancels its tree, persists history and artifact", async () => {
   const fixture = await startTaskService(binary);
-  const seen: TaskEvent[] = [];
+  const seen: ProtocolTaskEvent[] = [];
   let secondary: ProtocolClient | undefined;
   let reconnectGate: ReturnType<typeof fixture.pauseNextReconnect> | undefined;
   try {
@@ -501,8 +1093,8 @@ test("task survives reconnect, cancels its tree, persists history and artifact",
     const childPID = await waitForChildPID(subscription, running.taskId, seen);
     const beforeReconnect = seen.at(-1)?.sequence;
     assert.ok(beforeReconnect);
-    assertV11SimulationSnapshot(running);
-    assertV11CompatibilityEvents(seen);
+    assertSimulationSnapshot(running);
+    assertSimulationProtocolEvents(seen);
 
     reconnectGate = fixture.pauseNextReconnect();
     const reconnecting = withNamedTimeout("primary client reconnect", client.reconnect(), EVENT_TIMEOUT_MS);
@@ -515,12 +1107,12 @@ test("task survives reconnect, cancels its tree, persists history and artifact",
       EVENT_TIMEOUT_MS
     );
     await withNamedTimeout("secondary task cancellation", secondaryClient.cancelTask(running.taskId), EVENT_TIMEOUT_MS);
-    const secondarySeen: TaskEvent[] = [];
+    const secondarySeen: ProtocolTaskEvent[] = [];
     const secondaryFinished = await waitForFinished(secondarySubscription, running.taskId, secondarySeen);
-    assertV11CompatibilityEvents(secondarySeen, beforeReconnect);
-    assert.equal(secondaryFinished.payload.outcome, "cancelled");
+    assertSimulationProtocolEvents(secondarySeen, beforeReconnect);
+    assert.equal((secondaryFinished.payload as { outcome?: unknown }).outcome, "cancelled");
     const durable = await withNamedTimeout("secondary durable task lookup", secondaryClient.getTask(running.taskId), EVENT_TIMEOUT_MS);
-    assertV11SimulationSnapshot(durable);
+    assertSimulationSnapshot(durable);
     assert.equal(durable.status, "finished");
     assert.equal(durable.outcome, "cancelled");
     assert.ok(durable.lastSequence > beforeReconnect);
@@ -541,7 +1133,7 @@ test("task survives reconnect, cancels its tree, persists history and artifact",
       Array.from({ length: durable.lastSequence - beforeReconnect }, (_, index) => beforeReconnect + index + 1)
     );
     assert.equal(new Set(replayed.map((event) => event.sequence)).size, replayed.length);
-    assertV11CompatibilityEvents(replayed, beforeReconnect);
+    assertSimulationProtocolEvents(replayed, beforeReconnect);
     await assertProcessGone(childPID);
 
     const artifacts = await withNamedTimeout("artifact list", client.listArtifacts(running.taskId), EVENT_TIMEOUT_MS);
@@ -558,7 +1150,7 @@ test("task survives reconnect, cancels its tree, persists history and artifact",
     await fixture.stopGracefully();
     const restarted = await fixture.restart();
     const persisted = await withNamedTimeout("persisted task lookup", restarted.client.getTask(running.taskId), EVENT_TIMEOUT_MS);
-    assertV11SimulationSnapshot(persisted);
+    assertSimulationSnapshot(persisted);
     assert.equal(persisted.status, "finished");
     assert.equal(persisted.outcome, "cancelled");
   } finally {
@@ -586,10 +1178,10 @@ test("service crash recovers an active task exactly once as interrupted", async 
       EVENT_TIMEOUT_MS
     );
     assert.equal(running.status, "running");
-    const beforeCrash: TaskEvent[] = [];
+    const beforeCrash: ProtocolTaskEvent[] = [];
     const childPID = await waitForChildPID(subscription, running.taskId, beforeCrash);
-    assertV11SimulationSnapshot(running);
-    assertV11CompatibilityEvents(beforeCrash);
+    assertSimulationSnapshot(running);
+    assertSimulationProtocolEvents(beforeCrash);
     await fixture.kill();
     await assertProcessGone(childPID);
 
@@ -606,10 +1198,10 @@ test("service crash recovers an active task exactly once as interrupted", async 
       EVENT_TIMEOUT_MS
     );
     const events = await collectThroughSequence(recoverySubscription, recovered.lastSequence, 0, "recovery event replay");
-    assertV11CompatibilityEvents(events);
+    assertSimulationProtocolEvents(events);
     const recoveredFinished = events.filter((event) => event.taskId === running.taskId && event.event === "task.finished");
     assert.equal(recoveredFinished.length, 1);
-    assert.equal(recoveredFinished[0]?.payload.outcome, "interrupted");
+    assert.equal((recoveredFinished[0]?.payload as { outcome?: unknown }).outcome, "interrupted");
     assert.equal(JSON.stringify({ recovered, events }).includes("test_failed"), false);
   } finally {
     await fixture.dispose();

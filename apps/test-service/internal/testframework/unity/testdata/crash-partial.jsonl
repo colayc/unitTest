@@ -1,0 +1,2 @@
+{"magic":"unit-test-ide","protocol":"utide.runner.v1","record":"testFinished","suite":"testdata/basic.c","case":"test_adds_numbers","identity":"test_adds_numbers","arguments":[],"source":{"path":"testdata/basic.c","line":16},"status":"passed","durationNanoseconds":1000000,"generatorVersion":"1.0.0","manifestSha256":"8fc8771747f61531a21ec26fc7138506849ba4a7b4396557e39285ac832dfb81"}
+{"magic":"unit-test-ide","protocol":"utide.runner.v1","record":"testFinished"

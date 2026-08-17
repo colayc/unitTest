@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -50,6 +51,25 @@ func TestStoreCommitsSnapshotAndEventAtomically(t *testing.T) {
 	leases, err := store.ActiveLeases(ctx)
 	if err != nil || len(leases) != 1 || leases[0].HostPID != 42 {
 		t.Fatalf("ActiveLeases() = %#v, %v", leases, err)
+	}
+}
+
+func TestListFiltersTaskKindsWithoutBreakingPagination(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	base := time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC)
+	createTask(t, store, newTask(2, 12, base))
+	createTask(t, store, newCMakeTask(3, 13, base.Add(time.Second)))
+	createTask(t, store, newTask(4, 14, base.Add(2*time.Second)))
+
+	first, err := store.List(ctx, "", 1, task.KindSimulation)
+	if err != nil || len(first.Items) != 1 || first.Items[0].Kind != task.KindSimulation || first.NextCursor == "" {
+		t.Fatalf("first filtered page = %#v, %v", first, err)
+	}
+	second, err := store.List(ctx, first.NextCursor, 1, task.KindSimulation)
+	if err != nil || len(second.Items) != 1 || second.Items[0].Kind != task.KindSimulation ||
+		second.Items[0].ID == first.Items[0].ID || second.NextCursor != "" {
+		t.Fatalf("second filtered page = %#v, %v", second, err)
 	}
 }
 
@@ -466,11 +486,17 @@ func TestUpdateLeaseRequiresExistingLeaseOnActiveTask(t *testing.T) {
 	}
 	missing.HostPID = 11
 	missing.TargetProcessGroup = 12
+	missing.TargetProcessGroups = []int{13, 14}
 	if err := store.UpdateLease(ctx, missing); err != nil {
 		t.Fatal(err)
 	}
 	leases, _ := store.ActiveLeases(ctx)
-	if len(leases) != 1 || leases[0].HostPID != 11 || leases[0].TargetProcessGroup != 12 {
+	if len(leases) != 1 || leases[0].HostPID != 11 ||
+		leases[0].TargetProcessGroup != 12 ||
+		!reflect.DeepEqual(
+			leases[0].TargetProcessGroups,
+			[]int{13, 14},
+		) {
 		t.Fatalf("ActiveLeases() = %#v", leases)
 	}
 	finished := mustTransition(t, running, task.Transition{From: task.StatusRunning, To: task.StatusFinished, Outcome: task.OutcomeSucceeded, At: now.Add(2 * time.Second)})
@@ -999,6 +1025,121 @@ SELECT * FROM;`,
 	}
 }
 
+func TestMigration009UpgradesCoverageSchemaAndPreservesRelations(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "coverage-migration.sqlite")
+	db := openConfiguredDatabase(t, path)
+	defer db.Close()
+	store := &Store{db: db, newID: task.NewID}
+
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(migrations) != 9 || migrations[len(migrations)-1].version != 9 {
+		t.Fatalf("migration tail = %#v, want version 9", migrations)
+	}
+	wantLegacyChecksums := []string{
+		"2f3f3db3d9811852897799f6e5b210e615edb47002dde34a51bb21432b8a3158",
+		"6d4a171589c89435d710d1dccdd849ff101646f0e1c28eb05f4fa183bd5c95be",
+		"73992c95549eb16f4b8a3398e2b319059bdc468e69649c96a6cfe7422c556eae",
+		"2cf08a34c001b79bbfa495ddd9e892e47120bb195845d93a515ddda3d50f57c9",
+		"9c18580478d744c7bf4b36ba3e8fcd4f5a34ba5021cb98ed886946996c7b3719",
+		"fb9b6d985853a01c6b44164ef2f59ca89b839109c57f276c3e760dcb55029d86",
+		"7f173d27bdfd991a60fb4546e6319dd7be10e000da606c47106d58040de6ce08",
+		"4f5446d1413e2c9d23000ecd3336e9567ad7afe05bd1e2d49ae50dce75abf5b7",
+	}
+	for index, wantChecksum := range wantLegacyChecksums {
+		if migrations[index].version != index+1 || migrations[index].checksum != wantChecksum {
+			t.Fatalf("migration %d changed: %#v", index+1, migrations[index])
+		}
+	}
+	applyMigrationsThrough(t, ctx, store, migrations[:8])
+	legacy := seedCoverageMigrationLegacyData(t, db)
+	if err := store.applyMigration(ctx, migrations[8]); err != nil {
+		t.Fatal(err)
+	}
+
+	assertCoverageMigrationLegacyData(t, db, legacy)
+	if rows := foreignKeyViolations(t, db); rows != 0 {
+		t.Fatalf("foreign key violations after v9 = %d", rows)
+	}
+	var foreignKeys int
+	if err := db.QueryRow(`PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil || foreignKeys != 1 {
+		t.Fatalf("foreign_keys after v9 = %d, %v", foreignKeys, err)
+	}
+
+	coverageTaskID := strings.Repeat("e", 32)
+	if _, err := db.Exec(`INSERT INTO tasks(
+		task_id, idempotency_key, request_hash, kind, scenario, request_json,
+		workspace_generation, plan_fingerprint, active_step, timeout_ms, status,
+		outcome, created_at, started_at, finished_at, last_sequence, error_code, error_message
+	) VALUES(?,?,?,?,NULL,?,?,?,?,?,'queued',NULL,?,NULL,NULL,0,'','')`,
+		coverageTaskID, strings.Repeat("f", 32), strings.Repeat("a", 64), "coverage_run", `{"coverage":true}`,
+		strings.Repeat("b", 64), strings.Repeat("c", 64), "", 30000, "2026-08-04T10:00:00Z"); err != nil {
+		t.Fatalf("insert coverage task: %v", err)
+	}
+	coverageSteps := []string{
+		"coverage-configure", "coverage-build", "coverage-test", "coverage-merge",
+		"coverage-normalize", "coverage-report", "coverage-publish",
+	}
+	for ordinal, stepKind := range coverageSteps {
+		if _, err := db.Exec(`INSERT INTO task_steps(
+			task_id, step_ordinal, step_id, step_kind, status, started_at, finished_at, exit_code, error_code
+		) VALUES(?,?,?,?,'pending',NULL,NULL,NULL,'')`, coverageTaskID, ordinal, fmt.Sprintf("coverage-%d", ordinal), stepKind); err != nil {
+			t.Fatalf("insert %s step: %v", stepKind, err)
+		}
+	}
+	var acceptedSteps int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM task_steps WHERE task_id=?`, coverageTaskID).Scan(&acceptedSteps); err != nil || acceptedSteps != len(coverageSteps) {
+		t.Fatalf("coverage vocabulary rows = %d, %v", acceptedSteps, err)
+	}
+
+	assertCoverageMigrationSchema(t, db)
+}
+
+func TestMigration009FailureRollsBackAndRestoresForeignKeys(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "coverage-migration-failure.sqlite")
+	db := openConfiguredDatabase(t, path)
+	defer db.Close()
+	store := &Store{db: db, newID: task.NewID}
+
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(migrations) != 9 || migrations[len(migrations)-1].version != 9 {
+		t.Fatalf("migration tail = %#v, want version 9", migrations)
+	}
+	applyMigrationsThrough(t, ctx, store, migrations[:8])
+	legacy := seedCoverageMigrationLegacyData(t, db)
+	broken := migrations[8]
+	broken.checksum = strings.Repeat("f", 64)
+	broken.sql += "\nSELECT * FROM;\n"
+	if err := store.applyMigration(ctx, broken); !errors.Is(err, task.ErrStorageUnavailable) {
+		t.Fatalf("apply broken v9 migration = %v, want ErrStorageUnavailable", err)
+	}
+
+	var migrationCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&migrationCount); err != nil || migrationCount != 8 {
+		t.Fatalf("migration count after failed v9 = %d, %v", migrationCount, err)
+	}
+	assertCoverageMigrationLegacyData(t, db, legacy)
+	var survivingTables int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master
+		WHERE type='table' AND name IN ('coverage_runs','coverage_reports','tasks_v9','task_steps_v9')`).Scan(&survivingTables); err != nil || survivingTables != 0 {
+		t.Fatalf("v9 tables survived rollback = %d, %v", survivingTables, err)
+	}
+	var foreignKeys int
+	if err := db.QueryRow(`PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil || foreignKeys != 1 {
+		t.Fatalf("foreign_keys after failed v9 = %d, %v", foreignKeys, err)
+	}
+	if rows := foreignKeyViolations(t, db); rows != 0 {
+		t.Fatalf("foreign key violations after failed v9 = %d", rows)
+	}
+}
+
 func TestMigrationCancellationRestoresForeignKeys(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "history.sqlite")
 	createMigration001Database(t, path)
@@ -1171,7 +1312,7 @@ func TestReopenDoesNotReapplyMigrationAndDetectsChecksumTampering(t *testing.T) 
 	if err := store.db.QueryRow(`SELECT COUNT(*), MIN(sha256) FROM schema_migrations`).Scan(&count, &checksum); err != nil {
 		t.Fatal(err)
 	}
-	if count != 3 || len(checksum) != 64 {
+	if count != 9 || len(checksum) != 64 {
 		t.Fatalf("schema_migrations count=%d checksum=%q", count, checksum)
 	}
 	if err := store.Close(); err != nil {
@@ -1181,7 +1322,7 @@ func TestReopenDoesNotReapplyMigrationAndDetectsChecksumTampering(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&count); err != nil || count != 3 {
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&count); err != nil || count != 9 {
 		t.Fatalf("reopen count=%d err=%v", count, err)
 	}
 	if _, err := store.db.Exec(`UPDATE schema_migrations SET sha256=? WHERE version=1`, strings.Repeat("0", 64)); err != nil {
@@ -1192,6 +1333,35 @@ func TestReopenDoesNotReapplyMigrationAndDetectsChecksumTampering(t *testing.T) 
 	}
 	if _, err := Open(path); err == nil || !errors.Is(err, task.ErrStorageUnavailable) {
 		t.Fatalf("Open(tampered migration) error = %v", err)
+	}
+}
+
+func TestReopenAcceptsEquivalentCRLFMigrationChecksum(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.sqlite")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const crlfMigration001Checksum = "b70e6fce0b2f262c5bb5c7b6288344812c66377ddb3fd5268c97a94d437880d3"
+	if _, err := store.db.Exec(`UPDATE schema_migrations SET sha256=? WHERE version=1`, crlfMigration001Checksum); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open(CRLF migration history) error = %v", err)
+	}
+	defer reopened.Close()
+	var checksum string
+	if err := reopened.db.QueryRow(`SELECT sha256 FROM schema_migrations WHERE version=1`).Scan(&checksum); err != nil {
+		t.Fatal(err)
+	}
+	if checksum != crlfMigration001Checksum {
+		t.Fatalf("migration 1 checksum = %q, want preserved CRLF compatibility checksum", checksum)
 	}
 }
 
@@ -1472,14 +1642,12 @@ func (migrationReplayPublisher) Publish(task.Event) {}
 
 type migrationReplayArtifacts struct{}
 
-func (migrationReplayArtifacts) CommitJSON(
+func (migrationReplayArtifacts) OpenTask(
 	context.Context,
 	string,
-	string,
-	time.Time,
-	any,
-) (task.Artifact, error) {
-	return task.Artifact{}, errors.New("artifact commit must not run during idempotent replay")
+	task.Kind,
+) (task.ArtifactSink, error) {
+	return nil, errors.New("artifact sink must not open during idempotent replay")
 }
 
 func newMigrationReplayManager(t *testing.T, store *Store) (*task.Manager, *migrationReplayProcesses) {
@@ -1547,6 +1715,234 @@ func migrationReplayRequest(
 		Plan:           plan,
 		Boundary:       migrationReplayBoundary{},
 		Scenario:       scenario,
+	}
+}
+
+type coverageMigrationLegacyData struct {
+	taskID     string
+	testTaskID string
+	runID      string
+	artifactID string
+	leaseID    string
+}
+
+func applyMigrationsThrough(t *testing.T, ctx context.Context, store *Store, migrations []migration) {
+	t.Helper()
+	if _, err := store.db.Exec(`CREATE TABLE schema_migrations (
+		version INTEGER PRIMARY KEY,
+		sha256 TEXT NOT NULL,
+		applied_at TEXT NOT NULL
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, current := range migrations {
+		if err := store.applyMigration(ctx, current); err != nil {
+			t.Fatalf("apply migration %d: %v", current.version, err)
+		}
+	}
+}
+
+func seedCoverageMigrationLegacyData(t *testing.T, db *sql.DB) coverageMigrationLegacyData {
+	t.Helper()
+	legacy := coverageMigrationLegacyData{
+		taskID:     strings.Repeat("a", 32),
+		testTaskID: strings.Repeat("b", 32),
+		runID:      strings.Repeat("c", 32),
+		artifactID: strings.Repeat("d", 32),
+		leaseID:    strings.Repeat("e", 32),
+	}
+	workspace := strings.Repeat("f", 64)
+	catalog := strings.Repeat("a", 64)
+	result := strings.Repeat("b", 64)
+	if _, err := db.Exec(`INSERT INTO tasks(
+		task_id, idempotency_key, request_hash, kind, scenario, request_json,
+		workspace_generation, plan_fingerprint, active_step, timeout_ms, status,
+		outcome, created_at, started_at, finished_at, last_sequence, error_code, error_message
+	) VALUES(?,?,?,?,NULL,?,?,?,?,?,'queued',NULL,?,NULL,NULL,0,'','')`,
+		legacy.taskID, strings.Repeat("c", 32), strings.Repeat("d", 64), "cmake_build", `{}`,
+		workspace, strings.Repeat("e", 64), "", 30000, "2026-08-04T09:00:00Z"); err != nil {
+		t.Fatalf("insert legacy task: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO task_steps(
+		task_id, step_ordinal, step_id, step_kind, status, started_at, finished_at, exit_code, error_code
+	) VALUES(?,0,'configure','configure','pending',NULL,NULL,NULL,'')`, legacy.taskID); err != nil {
+		t.Fatalf("insert legacy step: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO task_events(
+		event_id, task_id, event_type, occurred_at, payload_version, payload_json
+	) VALUES(?,?,'task.created','2026-08-04T09:00:00Z',1,'{}')`, strings.Repeat("f", 32), legacy.taskID); err != nil {
+		t.Fatalf("insert legacy event: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO artifacts(
+		artifact_id, task_id, kind, relative_path, mime_type, size_bytes, sha256, created_at, complete
+	) VALUES(?,?,'stdout','legacy/stdout.txt','text/plain',1,?,'2026-08-04T09:00:00Z',1)`,
+		legacy.artifactID, legacy.taskID, strings.Repeat("a", 64)); err != nil {
+		t.Fatalf("insert legacy artifact: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO process_leases(
+		task_id, host_pid, host_start_identity, target_process_group, service_instance_id, target_process_groups_json
+	) VALUES(?,42,'legacy-start',0,?,'[]')`, legacy.taskID, legacy.leaseID); err != nil {
+		t.Fatalf("insert legacy lease: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO tasks(
+		task_id, idempotency_key, request_hash, kind, scenario, request_json,
+		workspace_generation, plan_fingerprint, active_step, timeout_ms, status,
+		outcome, created_at, started_at, finished_at, last_sequence, error_code, error_message
+	) VALUES(?,?,?,?,NULL,?,?,?,?,?,'queued',NULL,?,NULL,NULL,0,'','')`,
+		legacy.testTaskID, strings.Repeat("b", 32), strings.Repeat("c", 64), "test_run", `{}`,
+		workspace, strings.Repeat("d", 64), "", 30000, "2026-08-04T09:00:01Z"); err != nil {
+		t.Fatalf("insert legacy test task: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO test_runs(
+		run_id, task_id, idempotency_key, project_id, profile_id, toolchain_id,
+		catalog_revision, selection_json, status, outcome, created_at, started_at,
+		finished_at, summary_json, result_revision, incomplete
+	) VALUES(?,?,?,?,?,?,?,?,'queued',NULL,?,NULL,NULL,'{}',?,0)`,
+		legacy.runID, legacy.testTaskID, strings.Repeat("a", 32), "project", strings.Repeat("b", 64),
+		"toolchain", catalog, `{}`, "2026-08-04T09:00:01Z", result); err != nil {
+		t.Fatalf("insert legacy test run: %v", err)
+	}
+	return legacy
+}
+
+func assertCoverageMigrationLegacyData(t *testing.T, db *sql.DB, legacy coverageMigrationLegacyData) {
+	t.Helper()
+	checks := []struct {
+		name  string
+		query string
+		arg   string
+	}{
+		{"task", `SELECT task_id FROM tasks WHERE task_id=?`, legacy.taskID},
+		{"step", `SELECT task_id FROM task_steps WHERE task_id=?`, legacy.taskID},
+		{"event", `SELECT task_id FROM task_events WHERE task_id=?`, legacy.taskID},
+		{"artifact", `SELECT artifact_id FROM artifacts WHERE artifact_id=?`, legacy.artifactID},
+		{"test run", `SELECT run_id FROM test_runs WHERE run_id=?`, legacy.runID},
+		{"lease", `SELECT task_id FROM process_leases WHERE task_id=?`, legacy.taskID},
+	}
+	for _, check := range checks {
+		var value string
+		if err := db.QueryRow(check.query, check.arg).Scan(&value); err != nil || value == "" {
+			t.Fatalf("reload legacy %s = %q, %v", check.name, value, err)
+		}
+	}
+}
+
+func assertCoverageMigrationSchema(t *testing.T, db *sql.DB) {
+	t.Helper()
+	wantTables := map[string]bool{
+		"schema_migrations":     true,
+		"tasks":                 true,
+		"task_events":           true,
+		"artifacts":             true,
+		"process_leases":        true,
+		"task_steps":            true,
+		"build_configurations":  true,
+		"test_catalogs":         true,
+		"current_test_catalogs": true,
+		"test_catalog_entries":  true,
+		"test_runs":             true,
+		"test_run_results":      true,
+		"test_run_artifacts":    true,
+		"coverage_runs":         true,
+		"coverage_reports":      true,
+	}
+	rows, err := db.Query(`SELECT name FROM sqlite_master
+		WHERE type='table' AND name NOT LIKE 'sqlite_%'
+		ORDER BY name`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tables := make([]string, 0, len(wantTables))
+	for rows.Next() {
+		var tableName string
+		if err := rows.Scan(&tableName); err != nil {
+			t.Fatal(err)
+		}
+		if !wantTables[tableName] {
+			t.Fatalf("unexpected table %q could store coverage payload data", tableName)
+		}
+		tables = append(tables, tableName)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		t.Fatal(err)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(tables) != len(wantTables) {
+		t.Fatalf("schema tables = %v, want exactly %d approved tables", tables, len(wantTables))
+	}
+
+	coverageColumns := map[string][]string{
+		"coverage_runs": {
+			"coverage_run_id", "task_id", "test_run_id", "idempotency_key",
+			"request_json", "workspace_generation", "project_id", "coverage_profile_id",
+			"catalog_revision", "selection_snapshot_json", "repeat_count", "timeout_ms",
+			"status", "outcome", "reason", "toolchain_json", "summary_json", "report_id",
+			"coverage_json_artifact_id", "junit_xml_artifact_id", "coverage_html_artifact_id",
+			"created_at", "started_at", "finished_at", "last_sequence",
+		},
+		"coverage_reports": {
+			"report_id", "coverage_run_id", "task_id", "test_run_id", "schema_version",
+			"created_at", "completeness_json", "summary_json", "toolchain_json", "artifact_id",
+		},
+	}
+	for tableName, wantColumns := range coverageColumns {
+		rows, err := db.Query(`SELECT name FROM pragma_table_info(?) ORDER BY cid`, tableName)
+		if err != nil {
+			t.Fatal(err)
+		}
+		columns := make([]string, 0, len(wantColumns))
+		for rows.Next() {
+			var column string
+			if err := rows.Scan(&column); err != nil {
+				_ = rows.Close()
+				t.Fatal(err)
+			}
+			columns = append(columns, column)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			t.Fatal(err)
+		}
+		if err := rows.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(columns, wantColumns) {
+			t.Fatalf("%s columns = %v, want exactly %v", tableName, columns, wantColumns)
+		}
+	}
+
+	for _, tableName := range tables {
+		rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, tableName)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rows.Next() {
+			var column string
+			if err := rows.Scan(&column); err != nil {
+				_ = rows.Close()
+				t.Fatal(err)
+			}
+			name := strings.ToLower(column)
+			fileOrLine, payload := false, false
+			for _, token := range strings.Split(name, "_") {
+				switch token {
+				case "file", "files", "line", "lines":
+					fileOrLine = true
+				case "json", "payload", "body", "content", "blob":
+					payload = true
+				}
+			}
+			if fileOrLine && payload {
+				_ = rows.Close()
+				t.Fatalf("%s unexpectedly stores file/line coverage payload column %q", tableName, column)
+			}
+		}
+		if err := rows.Close(); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

@@ -284,7 +284,10 @@ func createWindowsProtectedJob(limitFlags uint32) (windows.Handle, error) {
 }
 
 func createSuspendedWindowsTarget(spec processcontrol.Spec, stdin, stdout, stderr windows.Handle) (windows.ProcessInformation, error) {
-	environment := targetWindowsEnvironment(spec.Env)
+	environment := targetWindowsEnvironment(
+		spec.Env,
+		spec.EnvUnset,
+	)
 	return createSuspendedWindowsProcess(spec.Executable, spec.Args, spec.Dir, environment, stdin, stdout, stderr, []windows.Handle{stdin, stdout, stderr})
 }
 
@@ -339,38 +342,15 @@ func createSuspendedWindowsProcess(executable string, args []string, dir string,
 	return info, err
 }
 
-func targetWindowsEnvironment(extra []string) []string {
-	combined := append(os.Environ(), extra...)
-	result := make([]string, 0, len(combined))
-	seen := make(map[string]struct{}, len(combined))
-	for index := len(combined) - 1; index >= 0; index-- {
-		entry := combined[index]
-		separator := strings.IndexByte(entry, '=')
-		if separator == 0 {
-			if next := strings.IndexByte(entry[1:], '='); next >= 0 {
-				separator = next + 1
-			}
-		}
-		if separator < 0 {
-			if entry != "" {
-				result = append(result, entry)
-			}
-			continue
-		}
-		key := strings.ToUpper(entry[:separator])
-		if key == "UNIT_TEST_IDE_STATUS_HANDLE" {
-			continue
-		}
-		if _, exists := seen[key]; exists {
-			continue
-		}
-		seen[key] = struct{}{}
-		result = append(result, entry)
+func targetWindowsEnvironment(
+	extra []string,
+	unsetValues ...[]string,
+) []string {
+	var unset []string
+	if len(unsetValues) != 0 {
+		unset = unsetValues[0]
 	}
-	for left, right := 0, len(result)-1; left < right; left, right = left+1, right-1 {
-		result[left], result[right] = result[right], result[left]
-	}
-	return result
+	return processcontrol.SanitizeEnvironment(extra, unset)
 }
 
 func windowsEnvironmentBlock(environment []string) ([]uint16, error) {

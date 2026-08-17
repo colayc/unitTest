@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:unit-test-ide:protocol:v1.2:diagnostic",
+  "title": "Diagnostic",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["severity", "code", "message"],
+  "properties": {
+    "severity": { "enum": ["error", "warning", "info"] },
+    "code": { "type": "string", "minLength": 1 },
+    "message": { "type": "string", "minLength": 1 },
+    "sourceUri": { "type": "string", "format": "uri" },
+    "line": { "type": "integer", "minimum": 1 },
+    "column": { "type": "integer", "minimum": 1 }
+  }
+}

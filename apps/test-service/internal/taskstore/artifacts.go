@@ -8,7 +8,17 @@ import (
 	"strings"
 	"time"
 
+	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/task"
+)
+
+const (
+	coverageJSONArtifactKind = "coverage-json"
+	junitXMLArtifactKind     = "junit-xml"
+	coverageHTMLArtifactKind = "coverage-html"
+	applicationJSONMIMEType  = "application/json"
+	applicationXMLMIMEType   = "application/xml"
+	textHTMLMIMEType         = "text/html"
 )
 
 func insertArtifact(ctx context.Context, tx *sql.Tx, artifact task.Artifact) error {
@@ -31,6 +41,56 @@ func validArtifact(value task.Artifact) bool {
 	}
 	_, err := hex.DecodeString(value.SHA256)
 	return err == nil
+}
+
+func validateCoverageArtifacts(run coveragedomain.Run, artifacts []task.Artifact) error {
+	if err := validateRunArtifacts(run.TaskID, artifacts); err != nil {
+		return err
+	}
+	byID := make(map[string]task.Artifact, len(artifacts))
+	for _, artifact := range artifacts {
+		byID[artifact.ID] = artifact
+	}
+	public := map[string]string{
+		coverageJSONArtifactKind: run.Artifacts.CoverageJSONID,
+		junitXMLArtifactKind:     run.Artifacts.JUnitXMLID,
+		coverageHTMLArtifactKind: run.Artifacts.CoverageHTMLID,
+	}
+	for _, artifact := range artifacts {
+		switch artifact.Kind {
+		case coverageJSONArtifactKind, junitXMLArtifactKind, coverageHTMLArtifactKind,
+			"diagnostics", "stdout", "stderr":
+		default:
+			return task.ErrInvalidArgument
+		}
+	}
+	if run.Outcome != coveragedomain.OutcomeAvailable && run.Outcome != coveragedomain.OutcomePartial {
+		for _, artifact := range artifacts {
+			if _, exists := public[artifact.Kind]; exists {
+				return task.ErrInvalidArgument
+			}
+		}
+		return nil
+	}
+	expected := []struct {
+		id, kind, mime string
+	}{
+		{run.Artifacts.CoverageJSONID, coverageJSONArtifactKind, applicationJSONMIMEType},
+		{run.Artifacts.JUnitXMLID, junitXMLArtifactKind, applicationXMLMIMEType},
+		{run.Artifacts.CoverageHTMLID, coverageHTMLArtifactKind, textHTMLMIMEType},
+	}
+	for _, reference := range expected {
+		artifact, exists := byID[reference.id]
+		if !exists || artifact.Kind != reference.kind || artifact.MIMEType != reference.mime {
+			return task.ErrInvalidArgument
+		}
+	}
+	for _, artifact := range artifacts {
+		if expectedID, exists := public[artifact.Kind]; exists && artifact.ID != expectedID {
+			return task.ErrInvalidArgument
+		}
+	}
+	return nil
 }
 
 func canonicalArtifactPath(value string) bool {

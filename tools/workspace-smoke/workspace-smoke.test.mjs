@@ -10,6 +10,7 @@ const serviceCommandPackage = "./apps/test-service/cmd/unit-test-service";
 const serviceProductionRoot = "apps/test-service";
 const currentServicePlatform = process.platform === "win32" ? "windows" : "linux";
 const winioImportPath = "github.com/Microsoft/go-winio";
+const pureParsingImports = new Set(["net/url"]);
 const allowedProductionNetworkImports = new Map([
   ["apps/test-service/internal/server/server.go", new Set(["net"])],
   ["apps/test-service/internal/server/service.go", new Set(["net"])],
@@ -33,14 +34,15 @@ function goImportAudit(paths) {
 }
 
 function isNetworkCapableImport(importPath) {
-  return importPath === "net"
-    || importPath.startsWith("net/")
-    || importPath === "crypto/tls"
-    || importPath.startsWith("github.com/google/go-github")
-    || importPath.startsWith("golang.org/x/oauth2")
-    || importPath === "golang.org/x/net"
-    || importPath.startsWith("golang.org/x/net/")
-    || importPath === winioImportPath;
+  return !pureParsingImports.has(importPath)
+    && (importPath === "net"
+      || importPath.startsWith("net/")
+      || importPath === "crypto/tls"
+      || importPath.startsWith("github.com/google/go-github")
+      || importPath.startsWith("golang.org/x/oauth2")
+      || importPath === "golang.org/x/net"
+      || importPath.startsWith("golang.org/x/net/")
+      || importPath === winioImportPath);
 }
 
 function productionNetworkImportEscapes(records) {
@@ -77,6 +79,61 @@ test("README contains the complete local verification gate", async () => {
   const readme = await readFile("README.md", "utf8");
   for (const command of ["pnpm check:protocol-generated", "pnpm test", "pnpm test:e2e"]) {
     assert.match(readme, new RegExp(command.replaceAll(" ", "\\s+")));
+  }
+});
+
+test("Phase 3 documentation records desktop, bundle, native, and security boundaries", async () => {
+  const readme = await readFile("README.md", "utf8");
+  const development = await readFile("docs/development.md", "utf8");
+  const security = await readFile("docs/security.md", "utf8");
+  const bundle = await readFile("docs/cmake-bundle.md", "utf8");
+  const native = await readFile("docs/native-e2e.md", "utf8");
+  assert.match(readme, /Code-OSS desktop/);
+  assert.match(readme, /最终用户运行产品不必连接 GitHub/);
+  assert.doesNotMatch(readme, /不会执行工作区代码、CMake/);
+  assert.match(development, /pnpm install --frozen-lockfile --offline/);
+  assert.match(security, /Protocol request[\s\S]*executable[\s\S]*raw args[\s\S]*environment[\s\S]*cwd/);
+  assert.match(bundle, /archive SHA-256[\s\S]*license[\s\S]*installed-file SHA-256/);
+  assert.match(native, /windows-2025-vs2026[\s\S]*ubuntu-24\.04/);
+  assert.match(native, /Phase 5[\s\S]*llvm-cov/);
+  assert.match(native, /Phase 8[\s\S]*签名安装包/);
+});
+
+test("Hosted CI pins native toolchain runners and enforces the complete matrix", async () => {
+  const workflow = await readFile(".github/workflows/foundation.yml", "utf8");
+  assert.doesNotMatch(workflow, /\b(?:windows|ubuntu)-latest\b/);
+  assert.match(workflow, /^\s{2}verify-windows:\s*$/m);
+  assert.match(workflow, /^\s{4}runs-on:\s*windows-2025-vs2026\s*$/m);
+  assert.match(
+    workflow,
+    /^\s{6}UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS:\s*msvc,clang-cl\s*$/m,
+  );
+  assert.match(workflow, /^\s{2}verify-linux:\s*$/m);
+  assert.match(workflow, /^\s{4}runs-on:\s*ubuntu-24\.04\s*$/m);
+  assert.match(
+    workflow,
+    /^\s{6}UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS:\s*gcc,clang\s*$/m,
+  );
+
+  for (const [job, platform] of [
+    ["verify-windows", "windows"],
+    ["verify-linux", "linux"],
+  ]) {
+    const start = workflow.indexOf(`  ${job}:`);
+    assert.notEqual(start, -1);
+    const nextJob = workflow.indexOf("\n  verify-", start + 3);
+    const source = workflow.slice(start, nextJob === -1 ? undefined : nextJob);
+    const verify = source.indexOf("pnpm verify");
+    const prepare = source.indexOf("pnpm prepare:cmake-bundle");
+    const native = source.indexOf("pnpm test:e2e:native");
+    assert.ok(verify !== -1 && prepare > verify && native > prepare);
+    assert.match(source, /uses:\s*actions\/upload-artifact@v7/);
+    assert.match(source, /if:\s*always\(\)/);
+    assert.match(
+      source,
+      new RegExp(`path:\\s*\\.native-e2e/artifacts/${platform}/toolchain-report\\.json`),
+    );
+    assert.match(source, /run:\s*git diff --exit-code/);
   }
 });
 
@@ -134,6 +191,13 @@ test("Go import audit parses commented raw and aliased import specs before polic
     );
   } finally {
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("network import policy permits pure URL parsing but still rejects transport stacks", () => {
+  assert.equal(isNetworkCapableImport("net/url"), false);
+  for (const importPath of ["net", "net/http", "net/http/httptest", "crypto/tls"]) {
+    assert.equal(isNetworkCapableImport(importPath), true, `${importPath} must remain network-capable`);
   }
 });
 

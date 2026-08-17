@@ -145,6 +145,8 @@ queued/running/cancelling ──服务重启恢复──► finished/interrupted
 - 因终止操作产生的非零退出码不能覆盖 `cancelled` 或 `timed_out`。
 - 进程已自然退出后到达的取消请求不改变结果。
 - 进程启动、I/O 或进程管理失败归类为 `infrastructure_failed`。
+- `Shutdown(ctx)` 在线性化 shutdown intent 后等待 Manager 停止；若等待期间 `ctx.Done()` 与 `stopped` 同时可读，返回 `ctx.Err()`，避免随机报告成功。调用入口已经停止的 Manager 仍幂等返回 `nil`。
+- 已被 Manager 接纳并生成响应的 `Start` 与 Manager 停止同时完成时，公开调用优先返回该响应；只有尚无已提交响应时才返回 `STORAGE_UNAVAILABLE`，避免丢失已经创建的 Task ID。
 - 主进程退出后，ProcessRunner 必须先终止或确认 Job/Process Group 中没有剩余后代，再允许任务进入 `finished`。
 
 ## 7. 模拟任务
@@ -219,6 +221,8 @@ Phase 2 引入协议 `1.1`：
 - 在恢复主线程前，将进程加入专属 Job Object。
 - Job Object 设置 `KILL_ON_JOB_CLOSE`。
 - 取消和超时使用 `TerminateJobObject` 终止整个进程树。
+- 外层 Host 强制清理只有在原始进程句柄的 signaled wait 成功后才算成功；该成功事务必须同步发布 `hostExited`，不能因 observer goroutine 调度滞后把随后到达的 `Close` 误判为清理失败并将 Task 留在 `cancelling`。
+- Windows/Linux Process wrapper 必须先关闭内部 `finished` gate，再向公开 `Done()` channel 发布结果；因此调用方一旦观察到 `Done()`，随后调用 `Terminate` 必须按已完成操作幂等成功，不能再次访问已经退出的 Process Host。
 - 不能安全加入 Job Object 时启动失败并记录为 `infrastructure_failed`，不得降级为无进程树保护的执行。
 
 ### 9.2 Linux

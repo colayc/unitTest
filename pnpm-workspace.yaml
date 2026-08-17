@@ -1,3 +1,4 @@
 packages:
   - "packages/*"
   - "tools/service-probe"
+  - "apps/code-oss-extension"

@@ -1,0 +1,78 @@
+{
+  "cmake": {
+    "version": {
+      "major": 4,
+      "minor": 3,
+      "patch": 4,
+      "suffix": "",
+      "string": "4.3.4",
+      "isDirty": false
+    },
+    "paths": {
+      "cmake": "$SOURCE$/tools/cmake",
+      "ctest": "$SOURCE$/tools/ctest",
+      "cpack": "$SOURCE$/tools/cpack",
+      "root": "$SOURCE$/tools/share/cmake-4.3"
+    },
+    "generator": {
+      "multiConfig": false,
+      "name": "Ninja"
+    }
+  },
+  "objects": [
+    {
+      "kind": "codemodel",
+      "version": {"major": 2, "minor": 9},
+      "jsonFile": "codemodel-v2.json"
+    },
+    {
+      "kind": "cache",
+      "version": {"major": 2, "minor": 0},
+      "jsonFile": "cache-v2.json"
+    },
+    {
+      "kind": "cmakeFiles",
+      "version": {"major": 1, "minor": 1},
+      "jsonFile": "cmakeFiles-v1.json"
+    },
+    {
+      "kind": "toolchains",
+      "version": {"major": 1, "minor": 1},
+      "jsonFile": "toolchains-v1.json"
+    }
+  ],
+  "reply": {
+    "client-unit-test-ide": {
+      "query.json": {
+        "requests": [
+          {"kind": "codemodel", "version": {"major": 2}},
+          {"kind": "cache", "version": {"major": 2}},
+          {"kind": "cmakeFiles", "version": {"major": 1}},
+          {"kind": "toolchains", "version": {"major": 1}}
+        ],
+        "responses": [
+          {
+            "kind": "codemodel",
+            "version": {"major": 2, "minor": 9},
+            "jsonFile": "codemodel-v2.json"
+          },
+          {
+            "kind": "cache",
+            "version": {"major": 2, "minor": 0},
+            "jsonFile": "cache-v2.json"
+          },
+          {
+            "kind": "cmakeFiles",
+            "version": {"major": 1, "minor": 1},
+            "jsonFile": "cmakeFiles-v1.json"
+          },
+          {
+            "kind": "toolchains",
+            "version": {"major": 1, "minor": 1},
+            "jsonFile": "toolchains-v1.json"
+          }
+        ]
+      }
+    }
+  }
+}

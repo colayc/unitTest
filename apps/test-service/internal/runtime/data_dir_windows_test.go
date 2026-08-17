@@ -17,6 +17,13 @@ import (
 	"unit-test-ide.local/test-service/internal/instance"
 )
 
+func assertOwnerOnlyDirectoryForTest(t *testing.T, path string) {
+	t.Helper()
+	if err := validateOwnerOnlyDirectory(path); err != nil {
+		t.Fatalf("owner-only directory %q validation failed: %v", path, err)
+	}
+}
+
 func TestPrepareDataDirCreatesProtectedOwnerOnlyWindowsDirectory(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "owner-only")
 	if _, err := PrepareDataDir(root); err != nil {
@@ -99,7 +106,7 @@ func TestRuntimePinsWindowsAncestorsUntilClose(t *testing.T) {
 	ancestor := filepath.Join(base, "shared-parent")
 	root := filepath.Join(ancestor, "data")
 	active, err := Open(Config{
-		DataDir: root, ServiceExecutable: os.Args[0], Platform: "windows",
+		DataDir: root, ServiceExecutable: os.Args[0], WorkspaceRoot: filepath.Dir(root), Platform: "windows",
 		dependencies: testDependencies(&recordingRunner{}, nil),
 	})
 	if err != nil {
@@ -144,7 +151,7 @@ func TestRuntimePinsWindowsAncestorsBeforeInstanceLock(t *testing.T) {
 		}
 		return lockInstance(path)
 	}
-	active, err := Open(Config{DataDir: root, ServiceExecutable: os.Args[0], Platform: "windows", dependencies: deps})
+	active, err := Open(Config{DataDir: root, ServiceExecutable: os.Args[0], WorkspaceRoot: filepath.Dir(root), Platform: "windows", dependencies: deps})
 	if err != nil {
 		t.Fatal(err)
 	}

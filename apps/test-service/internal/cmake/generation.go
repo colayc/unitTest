@@ -1,0 +1,351 @@
+package cmake
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"path"
+	"runtime"
+	"sort"
+	"strings"
+
+	"unit-test-ide.local/test-service/internal/workspace"
+)
+
+type generationPayload struct {
+	Config           generationConfig       `json:"config"`
+	Installation     generationInstallation `json:"installation"`
+	Profiles         []BuildProfile         `json:"profiles"`
+	ToolchainIDs     []string               `json:"toolchainIds"`
+	InputGenerations []string               `json:"inputGenerations,omitempty"`
+}
+
+type generationConfig struct {
+	Version          int                         `json:"version"`
+	CMake            generationCMakeConfig       `json:"cmake"`
+	Projects         []generationProject         `json:"projects"`
+	Toolchains       []generationToolchain       `json:"toolchains"`
+	CoverageProfiles []generationCoverageProfile `json:"coverageProfiles,omitempty"`
+}
+
+type generationCoverageProfile struct {
+	ID                 string   `json:"id"`
+	BaseBuildProfileID string   `json:"baseBuildProfileId"`
+	Include            []string `json:"include"`
+	Exclude            []string `json:"exclude"`
+}
+
+type generationCMakeConfig struct {
+	Executable string `json:"executable"`
+}
+
+type generationProject struct {
+	ID        string                 `json:"id"`
+	SourceDir string                 `json:"sourceDir"`
+	Fallback  generationFallback     `json:"fallback"`
+	Tests     generationProjectTests `json:"tests"`
+}
+
+type generationFallback struct {
+	Configurations     []string `json:"configurations"`
+	PreferredGenerator string   `json:"preferredGenerator"`
+}
+
+type generationProjectTests struct {
+	Containers []generationTestContainerMapping `json:"containers"`
+}
+
+type generationTestContainerMapping struct {
+	CTestName string              `json:"ctestName"`
+	Framework workspace.Framework `json:"framework"`
+}
+
+type generationToolchain struct {
+	ID                 string `json:"id"`
+	Family             string `json:"family"`
+	CCompiler          string `json:"cCompiler"`
+	CPPCompiler        string `json:"cppCompiler"`
+	InstallationID     string `json:"installationId"`
+	ToolsetVersion     string `json:"toolsetVersion"`
+	HostArchitecture   string `json:"hostArchitecture"`
+	TargetArchitecture string `json:"targetArchitecture"`
+}
+
+type generationInstallation struct {
+	Executable      string `json:"executable"`
+	CTestExecutable string `json:"ctestExecutable"`
+	Version         string `json:"version"`
+	Source          string `json:"source"`
+	Identity        string `json:"identity"`
+	LicensePath     string `json:"licensePath"`
+}
+
+var ErrInvalidCoverageProfile = errors.New("invalid coverage profile")
+
+// ValidateCoverageProfileReferences verifies that each coverage profile refers
+// to one, and only one, discovered build profile.
+func ValidateCoverageProfileReferences(
+	coverageProfiles []workspace.CoverageProfile,
+	buildProfiles []BuildProfile,
+) error {
+	buildByID, err := uniqueBuildProfiles(buildProfiles)
+	if err != nil {
+		return err
+	}
+	coverageByID := make(map[string]struct{}, len(coverageProfiles))
+	for _, coverage := range coverageProfiles {
+		if _, exists := coverageByID[coverage.ID]; exists {
+			return fmt.Errorf("%w: duplicate coverage profile ID", ErrInvalidCoverageProfile)
+		}
+		coverageByID[coverage.ID] = struct{}{}
+		if _, ok := buildByID[coverage.BaseBuildProfileID]; !ok {
+			return fmt.Errorf("%w: base build profile is not discovered", ErrInvalidCoverageProfile)
+		}
+	}
+	return nil
+}
+
+// ResolveCoverageProfile returns a detached coverage profile and its base build
+// profile when that base belongs to projectID.
+func ResolveCoverageProfile(
+	coverageProfiles []workspace.CoverageProfile,
+	buildProfiles []BuildProfile,
+	projectID string,
+	coverageProfileID string,
+) (workspace.CoverageProfile, BuildProfile, error) {
+	if err := ValidateCoverageProfileReferences(coverageProfiles, buildProfiles); err != nil {
+		return workspace.CoverageProfile{}, BuildProfile{}, err
+	}
+
+	var coverage workspace.CoverageProfile
+	found := false
+	for _, candidate := range coverageProfiles {
+		if candidate.ID != coverageProfileID {
+			continue
+		}
+		if found {
+			return workspace.CoverageProfile{}, BuildProfile{}, fmt.Errorf("%w: coverage profile is ambiguous", ErrInvalidCoverageProfile)
+		}
+		coverage = candidate
+		found = true
+	}
+	if !found {
+		return workspace.CoverageProfile{}, BuildProfile{}, fmt.Errorf("%w: coverage profile is not discovered", ErrInvalidCoverageProfile)
+	}
+
+	base, ok := uniqueBuildProfileByID(buildProfiles, coverage.BaseBuildProfileID)
+	if !ok || base.ProjectID != projectID {
+		return workspace.CoverageProfile{}, BuildProfile{}, fmt.Errorf("%w: base build profile does not belong to project", ErrInvalidCoverageProfile)
+	}
+	return cloneCoverageProfile(coverage), base, nil
+}
+
+func uniqueBuildProfiles(buildProfiles []BuildProfile) (map[string]BuildProfile, error) {
+	result := make(map[string]BuildProfile, len(buildProfiles))
+	for _, profile := range buildProfiles {
+		if _, exists := result[profile.ID]; exists {
+			return nil, fmt.Errorf("%w: duplicate build profile ID", ErrInvalidCoverageProfile)
+		}
+		result[profile.ID] = profile
+	}
+	return result, nil
+}
+
+func uniqueBuildProfileByID(buildProfiles []BuildProfile, id string) (BuildProfile, bool) {
+	for _, profile := range buildProfiles {
+		if profile.ID == id {
+			return profile, true
+		}
+	}
+	return BuildProfile{}, false
+}
+
+func cloneCoverageProfile(profile workspace.CoverageProfile) workspace.CoverageProfile {
+	profile.Include = cloneCoverageGlobList(profile.Include)
+	profile.Exclude = cloneCoverageGlobList(profile.Exclude)
+	return profile
+}
+
+func cloneCoverageGlobList(globs []string) []string {
+	if globs == nil {
+		return nil
+	}
+	return append([]string{}, globs...)
+}
+
+func WorkspaceGeneration(
+	config workspace.Config,
+	install Installation,
+	profiles []BuildProfile,
+	toolchainIDs []string,
+	inputGenerations ...string,
+) string {
+	payload := generationPayload{
+		Config:           canonicalGenerationConfig(config),
+		Installation:     canonicalGenerationInstallation(install),
+		Profiles:         canonicalProfiles(profiles),
+		ToolchainIDs:     append([]string{}, toolchainIDs...),
+		InputGenerations: append([]string{}, inputGenerations...),
+	}
+	sort.Strings(payload.ToolchainIDs)
+	sort.Strings(payload.InputGenerations)
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		panic("canonical workspace generation payload cannot fail to encode: " + err.Error())
+	}
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:])
+}
+
+func canonicalGenerationConfig(config workspace.Config) generationConfig {
+	result := generationConfig{
+		Version: config.Version,
+		CMake: generationCMakeConfig{
+			Executable: canonicalPortablePath(config.CMake.Executable),
+		},
+		Projects:   make([]generationProject, 0, len(config.Projects)),
+		Toolchains: make([]generationToolchain, 0, len(config.Toolchains)),
+	}
+	for _, project := range config.Projects {
+		configurations := append([]string{}, project.Fallback.Configurations...)
+		sort.Strings(configurations)
+		containers := make([]generationTestContainerMapping, 0, len(project.Tests.Containers))
+		for _, container := range project.Tests.Containers {
+			containers = append(containers, generationTestContainerMapping{
+				CTestName: container.CTestName,
+				Framework: container.Framework,
+			})
+		}
+		sort.Slice(containers, func(first, second int) bool {
+			if containers[first].CTestName != containers[second].CTestName {
+				return containers[first].CTestName < containers[second].CTestName
+			}
+			return containers[first].Framework < containers[second].Framework
+		})
+		result.Projects = append(result.Projects, generationProject{
+			ID:        project.ID,
+			SourceDir: canonicalRelativePath(project.SourceDir),
+			Fallback: generationFallback{
+				Configurations:     configurations,
+				PreferredGenerator: project.Fallback.PreferredGenerator,
+			},
+			Tests: generationProjectTests{Containers: containers},
+		})
+	}
+	sort.Slice(result.Projects, func(first, second int) bool {
+		if result.Projects[first].ID != result.Projects[second].ID {
+			return result.Projects[first].ID < result.Projects[second].ID
+		}
+		return result.Projects[first].SourceDir < result.Projects[second].SourceDir
+	})
+
+	for _, toolchain := range config.Toolchains {
+		result.Toolchains = append(result.Toolchains, generationToolchain{
+			ID:                 toolchain.ID,
+			Family:             toolchain.Family,
+			CCompiler:          canonicalPortablePath(toolchain.CCompiler),
+			CPPCompiler:        canonicalPortablePath(toolchain.CPPCompiler),
+			InstallationID:     toolchain.InstallationID,
+			ToolsetVersion:     toolchain.ToolsetVersion,
+			HostArchitecture:   toolchain.HostArchitecture,
+			TargetArchitecture: toolchain.TargetArchitecture,
+		})
+	}
+	sort.Slice(result.Toolchains, func(first, second int) bool {
+		return generationToolchainKey(result.Toolchains[first]) <
+			generationToolchainKey(result.Toolchains[second])
+	})
+	if config.Version == 3 {
+		result.CoverageProfiles = canonicalCoverageProfiles(config.CoverageProfiles)
+	}
+	return result
+}
+
+func canonicalCoverageProfiles(profiles []workspace.CoverageProfile) []generationCoverageProfile {
+	result := make([]generationCoverageProfile, len(profiles))
+	for index, profile := range profiles {
+		include := append([]string{}, profile.Include...)
+		exclude := append([]string{}, profile.Exclude...)
+		sort.Strings(include)
+		sort.Strings(exclude)
+		result[index] = generationCoverageProfile{
+			ID:                 profile.ID,
+			BaseBuildProfileID: profile.BaseBuildProfileID,
+			Include:            include,
+			Exclude:            exclude,
+		}
+	}
+	sort.Slice(result, func(first, second int) bool {
+		if result[first].ID != result[second].ID {
+			return result[first].ID < result[second].ID
+		}
+		return result[first].BaseBuildProfileID < result[second].BaseBuildProfileID
+	})
+	return result
+}
+
+func generationToolchainKey(toolchain generationToolchain) string {
+	encoded, err := json.Marshal(toolchain)
+	if err != nil {
+		panic("canonical toolchain cannot fail to encode: " + err.Error())
+	}
+	return string(encoded)
+}
+
+func canonicalGenerationInstallation(install Installation) generationInstallation {
+	return generationInstallation{
+		Executable:      canonicalPortablePath(install.Executable),
+		CTestExecutable: canonicalPortablePath(install.CTestExecutable),
+		Version:         install.Version,
+		Source:          install.Source,
+		Identity:        install.Identity,
+		LicensePath:     canonicalPortablePath(install.LicensePath),
+	}
+}
+
+func canonicalProfiles(profiles []BuildProfile) []BuildProfile {
+	result := make([]BuildProfile, len(profiles))
+	for index, profile := range profiles {
+		result[index] = canonicalProfile(profile)
+	}
+	sort.Slice(result, func(first, second int) bool {
+		firstEncoded, firstErr := json.Marshal(result[first])
+		secondEncoded, secondErr := json.Marshal(result[second])
+		if firstErr != nil || secondErr != nil {
+			panic("canonical profile cannot fail to encode")
+		}
+		return string(firstEncoded) < string(secondEncoded)
+	})
+	return result
+}
+
+func canonicalRelativePath(value string) string {
+	if value == "" {
+		return ""
+	}
+	canonical := canonicalPortablePath(value)
+	if canonical == "." {
+		return "."
+	}
+	return strings.TrimPrefix(canonical, "./")
+}
+
+func canonicalPortablePath(value string) string {
+	if value == "" {
+		return ""
+	}
+	portable := strings.ReplaceAll(value, `\`, "/")
+	unc := strings.HasPrefix(portable, "//") &&
+		len(portable) > 2 &&
+		portable[2] != '/'
+	canonical := path.Clean(portable)
+	if unc && strings.HasPrefix(canonical, "/") && !strings.HasPrefix(canonical, "//") {
+		canonical = "/" + canonical
+	}
+	if runtime.GOOS == "windows" {
+		canonical = strings.ToLower(canonical)
+	}
+	return canonical
+}

@@ -1,9 +1,14 @@
 .superpowers/
+# Coverage preparation downloads and runtime outputs are never source artifacts.
+.superpowers/cache/coverage-bundle/
+.superpowers/runtime/coverage-bundle/
 .worktrees/
-build/
+/build/
 dist/
 node_modules/
 *.tsbuildinfo
 *.profraw
 *.profdata
 *.sock
+.bundled-tools/
+.native-e2e/

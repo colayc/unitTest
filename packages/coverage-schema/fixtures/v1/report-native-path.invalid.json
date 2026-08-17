@@ -1,0 +1,32 @@
+{
+  "schemaVersion": "1.0",
+  "provenance": {
+    "platform": "linux",
+    "architecture": "x64",
+    "compiler": { "family": "clang", "version": "22.1.0" },
+    "driver": { "name": "llvm-cov", "version": "22.1.0" },
+    "collector": { "name": "llvm-cov", "version": "22.1.0" },
+    "normalizerVersion": "1.0.0",
+    "instrumentationFingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "completeness": { "outcome": "available", "reasons": [] },
+  "summary": {
+    "lines": { "covered": 1, "total": 2 },
+    "branches": { "covered": 1, "total": 2 },
+    "functions": { "covered": 1, "total": 1 }
+  },
+  "files": [{
+    "uri": "src/calculator.cpp",
+    "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "summary": {
+      "lines": { "covered": 1, "total": 2 },
+      "branches": { "covered": 1, "total": 2 },
+      "functions": { "covered": 1, "total": 1 }
+    },
+    "lines": [
+      { "line": 10, "count": 1, "branches": { "covered": 1, "total": 2 } },
+      { "line": 11, "count": 0, "branches": { "covered": 0, "total": 0 } }
+    ]
+  }],
+  "nativePath": "C:\\workspace\\src\\calculator.cpp"
+}

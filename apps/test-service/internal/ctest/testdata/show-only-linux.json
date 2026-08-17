@@ -1,0 +1,69 @@
+{
+  "kind": "ctestInfo",
+  "version": {
+    "major": 1,
+    "minor": 0
+  },
+  "backtraceGraph": {
+    "commands": [
+      "add_test",
+      "set_tests_properties"
+    ],
+    "files": [
+      "CMakeLists.txt",
+      "tests/数学 tests.cmake"
+    ],
+    "nodes": [
+      {
+        "file": 1,
+        "line": 12,
+        "command": 0,
+        "parent": 1
+      },
+      {
+        "file": 0,
+        "line": 21,
+        "command": 1
+      }
+    ]
+  },
+  "tests": [
+    {
+      "name": "core.math[fast]",
+      "command": [
+        "/workspace/build/bin/core tests",
+        "--mode",
+        "fast"
+      ],
+      "backtrace": 0,
+      "properties": [
+        {
+          "name": "LABELS",
+          "value": [
+            "fast",
+            "unicode-数学"
+          ],
+          "futurePropertyField": "ignored"
+        },
+        {
+          "name": "TIMEOUT",
+          "value": 30
+        },
+        {
+          "name": "DISABLED",
+          "value": false
+        },
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "/workspace/build"
+        }
+      ],
+      "futureTestField": {
+        "ignored": true
+      }
+    }
+  ],
+  "futureRootField": {
+    "ignored": true
+  }
+}

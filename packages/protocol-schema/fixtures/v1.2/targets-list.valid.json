@@ -1,0 +1,17 @@
+{
+  "protocolVersion": "1.2",
+  "kind": "response",
+  "messageId": "0123456789abcdef0123456789abcdef",
+  "requestId": "fedcba9876543210fedcba9876543210",
+  "method": "cmake/targets/list",
+  "sentAt": "2026-07-26T00:00:00Z",
+  "payload": {
+    "workspaceGeneration": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "projectId": "example-project",
+    "buildProfileId": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+    "targets": [{
+      "targetId": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+      "name": "example"
+    }]
+  }
+}

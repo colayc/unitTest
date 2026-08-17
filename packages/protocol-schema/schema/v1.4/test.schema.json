@@ -1,0 +1,844 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:unit-test-ide:protocol:v1.4:test",
+  "title": "TestContractV14",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "catalog",
+    "selection",
+    "run",
+    "result",
+    "runPage"
+  ],
+  "properties": {
+    "catalog": {
+      "$ref": "#/$defs/testCatalog"
+    },
+    "selection": {
+      "$ref": "#/$defs/testSelection"
+    },
+    "run": {
+      "$ref": "#/$defs/testRun"
+    },
+    "result": {
+      "$ref": "#/$defs/testItemResult"
+    },
+    "runPage": {
+      "$ref": "#/$defs/testRunPage"
+    }
+  },
+  "$defs": {
+    "safeCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "projectId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+    },
+    "profileId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "revision": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "taskId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "runId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "artifactId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "stableId": {
+      "type": "string",
+      "pattern": "^utid-v1-[0-9a-f]{64}$"
+    },
+    "boundedName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "testFramework": {
+      "title": "TestFrameworkV14",
+      "enum": [
+        "cpputest",
+        "unity",
+        "opaque-ctest"
+      ]
+    },
+    "testCapabilities": {
+      "title": "TestCapabilitiesV14",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canDiscoverCases",
+        "canRunCase",
+        "canReportSkipped",
+        "canReportSourceLocation",
+        "canReportMockDetails"
+      ],
+      "properties": {
+        "canDiscoverCases": {
+          "type": "boolean"
+        },
+        "canRunCase": {
+          "type": "boolean"
+        },
+        "canReportSkipped": {
+          "type": "boolean"
+        },
+        "canReportSourceLocation": {
+          "type": "boolean"
+        },
+        "canReportMockDetails": {
+          "type": "boolean"
+        }
+      }
+    },
+    "sourceLocation": {
+      "title": "TestSourceLocationV14",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "uri",
+        "navigable",
+        "provenance"
+      ],
+      "properties": {
+        "uri": {
+          "type": "string",
+          "format": "uri"
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "column": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "navigable": {
+          "type": "boolean"
+        },
+        "provenance": {
+          "title": "TestSourceProvenanceV14",
+          "enum": [
+            "ctest-backtrace",
+            "framework-manifest",
+            "framework-output",
+            "mock-expectation",
+            "mock-actual-call",
+            "test-declaration"
+          ]
+        }
+      }
+    },
+    "labelList": {
+      "type": "array",
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/boundedName"
+      }
+    },
+    "testContainer": {
+      "title": "TestContainer",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "projectId",
+        "ctestLogicalName",
+        "displayName",
+        "framework",
+        "capabilities",
+        "labels",
+        "disabled"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/stableId"
+        },
+        "projectId": {
+          "$ref": "#/$defs/projectId"
+        },
+        "ctestLogicalName": {
+          "$ref": "#/$defs/boundedName"
+        },
+        "displayName": {
+          "$ref": "#/$defs/boundedName"
+        },
+        "framework": {
+          "$ref": "#/$defs/testFramework"
+        },
+        "capabilities": {
+          "$ref": "#/$defs/testCapabilities"
+        },
+        "labels": {
+          "$ref": "#/$defs/labelList"
+        },
+        "sourceLocation": {
+          "$ref": "#/$defs/sourceLocation"
+        },
+        "disabled": {
+          "type": "boolean"
+        },
+        "degradedReason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        }
+      }
+    },
+    "testParameterValue": {
+      "oneOf": [
+        {
+          "type": "string",
+          "maxLength": 512
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "testParameter": {
+      "title": "TestParameterV14",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "value"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/boundedName"
+        },
+        "value": {
+          "$ref": "#/$defs/testParameterValue"
+        }
+      }
+    },
+    "testItem": {
+      "title": "TestItem",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "containerId",
+        "kind",
+        "framework",
+        "logicalName",
+        "displayName",
+        "labels",
+        "disabled"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/stableId"
+        },
+        "containerId": {
+          "$ref": "#/$defs/stableId"
+        },
+        "parentId": {
+          "$ref": "#/$defs/stableId"
+        },
+        "kind": {
+          "title": "TestItemKindV14",
+          "enum": [
+            "group",
+            "suite",
+            "case"
+          ]
+        },
+        "framework": {
+          "$ref": "#/$defs/testFramework"
+        },
+        "logicalName": {
+          "$ref": "#/$defs/boundedName"
+        },
+        "displayName": {
+          "$ref": "#/$defs/boundedName"
+        },
+        "labels": {
+          "$ref": "#/$defs/labelList"
+        },
+        "sourceLocation": {
+          "$ref": "#/$defs/sourceLocation"
+        },
+        "disabled": {
+          "type": "boolean"
+        },
+        "parameters": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/testParameter"
+          }
+        }
+      }
+    },
+    "testCatalog": {
+      "title": "TestCatalog",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "projectId",
+        "profileId",
+        "revision",
+        "generatedAt",
+        "containers",
+        "items",
+        "diagnostics",
+        "partial"
+      ],
+      "properties": {
+        "projectId": {
+          "$ref": "#/$defs/projectId"
+        },
+        "profileId": {
+          "$ref": "#/$defs/profileId"
+        },
+        "revision": {
+          "$ref": "#/$defs/revision"
+        },
+        "generatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "containers": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": {
+            "$ref": "#/$defs/testContainer"
+          }
+        },
+        "items": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": {
+            "$ref": "#/$defs/testItem"
+          }
+        },
+        "diagnostics": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": {
+            "$ref": "urn:unit-test-ide:protocol:v1.4:diagnostic"
+          }
+        },
+        "partial": {
+          "const": false
+        },
+        "nextCursor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      }
+    },
+    "testFilter": {
+      "title": "TestFilterV14",
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "group": {
+          "$ref": "#/$defs/boundedName"
+        },
+        "suite": {
+          "$ref": "#/$defs/boundedName"
+        },
+        "label": {
+          "$ref": "#/$defs/boundedName"
+        },
+        "nameContains": {
+          "$ref": "#/$defs/boundedName"
+        },
+        "includeItemIds": {
+          "$ref": "#/$defs/itemIdSelection"
+        },
+        "excludeItemIds": {
+          "$ref": "#/$defs/itemIdSelection"
+        }
+      }
+    },
+    "containerIdSelection": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 10000,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/stableId"
+      }
+    },
+    "itemIdSelection": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100000,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/stableId"
+      }
+    },
+    "testSelection": {
+      "title": "TestSelection",
+      "oneOf": [
+        {
+          "title": "AllTestSelectionV14",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mode"
+          ],
+          "properties": {
+            "mode": {
+              "const": "all"
+            }
+          }
+        },
+        {
+          "title": "ContainersTestSelectionV14",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "containerIds"
+          ],
+          "properties": {
+            "mode": {
+              "const": "containers"
+            },
+            "containerIds": {
+              "$ref": "#/$defs/containerIdSelection"
+            }
+          }
+        },
+        {
+          "title": "ItemsTestSelectionV14",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "itemIds"
+          ],
+          "properties": {
+            "mode": {
+              "const": "items"
+            },
+            "itemIds": {
+              "$ref": "#/$defs/itemIdSelection"
+            }
+          }
+        },
+        {
+          "title": "FilterTestSelectionV14",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "filter"
+          ],
+          "properties": {
+            "mode": {
+              "const": "filter"
+            },
+            "filter": {
+              "$ref": "#/$defs/testFilter"
+            }
+          }
+        },
+        {
+          "title": "FailedFromRunTestSelectionV14",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "runId"
+          ],
+          "properties": {
+            "mode": {
+              "const": "failedFromRun"
+            },
+            "runId": {
+              "$ref": "#/$defs/runId"
+            }
+          }
+        }
+      ]
+    },
+    "selectionSnapshot": {
+      "title": "TestSelectionSnapshotV14",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "containerIds",
+        "itemIds"
+      ],
+      "properties": {
+        "mode": {
+          "title": "TestSelectionModeV14",
+          "enum": [
+            "all",
+            "containers",
+            "items",
+            "filter",
+            "failedFromRun"
+          ]
+        },
+        "containerIds": {
+          "type": "array",
+          "maxItems": 10000,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/stableId"
+          }
+        },
+        "itemIds": {
+          "type": "array",
+          "maxItems": 100000,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/stableId"
+          }
+        }
+      }
+    },
+    "testRunSummary": {
+      "title": "TestRunSummaryV14",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "total",
+        "completed",
+        "passed",
+        "failed",
+        "skipped",
+        "errored",
+        "cancelled",
+        "timedOut",
+        "notRun",
+        "iterations"
+      ],
+      "properties": {
+        "total": {
+          "$ref": "#/$defs/safeCount"
+        },
+        "completed": {
+          "$ref": "#/$defs/safeCount"
+        },
+        "passed": {
+          "$ref": "#/$defs/safeCount"
+        },
+        "failed": {
+          "$ref": "#/$defs/safeCount"
+        },
+        "skipped": {
+          "$ref": "#/$defs/safeCount"
+        },
+        "errored": {
+          "$ref": "#/$defs/safeCount"
+        },
+        "cancelled": {
+          "$ref": "#/$defs/safeCount"
+        },
+        "timedOut": {
+          "$ref": "#/$defs/safeCount"
+        },
+        "notRun": {
+          "$ref": "#/$defs/safeCount"
+        },
+        "iterations": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        }
+      }
+    },
+    "testRun": {
+      "title": "TestRun",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runId",
+        "taskId",
+        "projectId",
+        "profileId",
+        "toolchainId",
+        "catalogRevision",
+        "selectionSnapshot",
+        "status",
+        "summary",
+        "resultRevision",
+        "incomplete"
+      ],
+      "properties": {
+        "runId": {
+          "$ref": "#/$defs/runId"
+        },
+        "taskId": {
+          "$ref": "#/$defs/taskId"
+        },
+        "projectId": {
+          "$ref": "#/$defs/projectId"
+        },
+        "profileId": {
+          "$ref": "#/$defs/profileId"
+        },
+        "toolchainId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+        },
+        "catalogRevision": {
+          "$ref": "#/$defs/revision"
+        },
+        "selectionSnapshot": {
+          "$ref": "#/$defs/selectionSnapshot"
+        },
+        "status": {
+          "title": "TestRunStatusV14",
+          "enum": [
+            "queued",
+            "running",
+            "completed"
+          ]
+        },
+        "outcome": {
+          "title": "TestRunOutcomeV14",
+          "enum": [
+            "passed",
+            "failed",
+            "blocked",
+            "errored",
+            "cancelled",
+            "timed_out",
+            "interrupted"
+          ]
+        },
+        "startedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "finishedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "summary": {
+          "$ref": "#/$defs/testRunSummary"
+        },
+        "resultRevision": {
+          "$ref": "#/$defs/revision"
+        },
+        "incomplete": {
+          "type": "boolean"
+        }
+      }
+    },
+    "failureCategory": {
+      "title": "TestFailureCategoryV14",
+      "enum": [
+        "configuration_error",
+        "build_error",
+        "assertion_failure",
+        "test_process_crash",
+        "test_timeout",
+        "cancelled",
+        "framework_output_invalid",
+        "infrastructure_error",
+        "unexpected_exit",
+        "inconsistent_exit_status"
+      ]
+    },
+    "failureSubtype": {
+      "title": "TestFailureSubtypeV14",
+      "enum": [
+        "mock_unexpected_call",
+        "mock_missing_call",
+        "mock_parameter_mismatch",
+        "mock_failure"
+      ]
+    },
+    "failureDetail": {
+      "title": "TestFailureDetailV14",
+      "type": "object",
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "subtype": {}
+            },
+            "required": [
+              "subtype"
+            ]
+          },
+          "then": {
+            "properties": {
+              "category": {
+                "const": "assertion_failure"
+              }
+            }
+          }
+        }
+      ],
+      "required": [
+        "category",
+        "message",
+        "locations",
+        "evidenceRefs"
+      ],
+      "properties": {
+        "category": {
+          "$ref": "#/$defs/failureCategory"
+        },
+        "subtype": {
+          "$ref": "#/$defs/failureSubtype"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "expected": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "actual": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "locations": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/sourceLocation"
+          }
+        },
+        "evidenceRefs": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/artifactId"
+          }
+        }
+      }
+    },
+    "testItemResult": {
+      "title": "TestItemResult",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "itemId",
+        "containerId",
+        "iteration",
+        "outcome",
+        "failureDetails",
+        "outputRefs",
+        "partial"
+      ],
+      "properties": {
+        "itemId": {
+          "$ref": "#/$defs/stableId"
+        },
+        "containerId": {
+          "$ref": "#/$defs/stableId"
+        },
+        "iteration": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "outcome": {
+          "title": "TestItemOutcomeV14",
+          "enum": [
+            "passed",
+            "failed",
+            "skipped",
+            "errored",
+            "cancelled",
+            "timed_out",
+            "not_run"
+          ]
+        },
+        "durationMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "sourceLocation": {
+          "$ref": "#/$defs/sourceLocation"
+        },
+        "failureDetails": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/failureDetail"
+          }
+        },
+        "outputRefs": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/artifactId"
+          }
+        },
+        "partial": {
+          "type": "boolean"
+        },
+        "reason": {
+          "title": "TestResultReasonV14",
+          "enum": [
+            "build_blocked",
+            "container_terminated",
+            "selection_aborted",
+            "service_restarted",
+            "stale_catalog",
+            "disabled"
+          ]
+        }
+      }
+    },
+    "testRunPage": {
+      "title": "TestRunPage",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "items"
+      ],
+      "properties": {
+        "items": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": {
+            "$ref": "#/$defs/testRun"
+          }
+        },
+        "nextCursor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      }
+    }
+  }
+}

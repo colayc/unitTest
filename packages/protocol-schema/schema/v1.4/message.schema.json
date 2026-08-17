@@ -1,0 +1,1377 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:unit-test-ide:protocol:v1.4:message",
+  "title": "ProtocolMessageV14",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/handshakeRequest"
+    },
+    {
+      "$ref": "#/$defs/emptyRequest"
+    },
+    {
+      "$ref": "#/$defs/workspaceInspectRequest"
+    },
+    {
+      "$ref": "#/$defs/targetsListRequest"
+    },
+    {
+      "$ref": "#/$defs/taskStartRequest"
+    },
+    {
+      "$ref": "#/$defs/taskIDRequest"
+    },
+    {
+      "$ref": "#/$defs/tasksListRequest"
+    },
+    {
+      "$ref": "#/$defs/eventsSubscribeRequest"
+    },
+    {
+      "$ref": "#/$defs/artifactsListRequest"
+    },
+    {
+      "$ref": "#/$defs/artifactReadRequest"
+    },
+    {
+      "$ref": "#/$defs/testCatalogGetRequest"
+    },
+    {
+      "$ref": "#/$defs/testRunGetRequest"
+    },
+    {
+      "$ref": "#/$defs/testRunsListRequest"
+    },
+    {
+      "$ref": "#/$defs/coverageRunStartRequest"
+    },
+    {
+      "$ref": "#/$defs/coverageRunGetRequest"
+    },
+    {
+      "$ref": "#/$defs/coverageRunsListRequest"
+    },
+    {
+      "$ref": "#/$defs/coverageReportGetRequest"
+    },
+    {
+      "$ref": "#/$defs/response"
+    },
+    {
+      "$ref": "#/$defs/error"
+    },
+    {
+      "$ref": "urn:unit-test-ide:protocol:v1.4:event"
+    }
+  ],
+  "$defs": {
+    "base": {
+      "type": "object",
+      "properties": {
+        "protocolVersion": {
+          "const": "1.4"
+        },
+        "messageId": {
+          "$ref": "#/$defs/id32"
+        },
+        "sentAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "protocolVersion",
+        "messageId",
+        "sentAt"
+      ]
+    },
+    "handshakeRequest": {
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/base"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "request"
+            },
+            "method": {
+              "const": "handshake"
+            },
+            "payload": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "token",
+                "clientName",
+                "clientVersion",
+                "supportedProtocolVersions"
+              ],
+              "properties": {
+                "token": {
+                  "type": "string",
+                  "minLength": 16
+                },
+                "clientName": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512
+                },
+                "clientVersion": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "supportedProtocolVersions": {
+                  "type": "array",
+                  "minItems": 1,
+                  "uniqueItems": true,
+                  "items": {
+                    "enum": [
+                      "1.4",
+                      "1.3",
+                      "1.2",
+                      "1.1",
+                      "1.0"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "method",
+            "payload"
+          ]
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "emptyRequest": {
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/base"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "request"
+            },
+            "method": {
+              "enum": [
+                "capabilities/get",
+                "shutdown"
+              ]
+            },
+            "payload": {
+              "$ref": "#/$defs/emptyPayload"
+            }
+          },
+          "required": [
+            "kind",
+            "method",
+            "payload"
+          ]
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "workspaceInspectRequest": {
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/base"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "request"
+            },
+            "method": {
+              "const": "workspace/inspect"
+            },
+            "payload": {
+              "$ref": "#/$defs/emptyPayload"
+            }
+          },
+          "required": [
+            "kind",
+            "method",
+            "payload"
+          ]
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "targetsListRequest": {
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/base"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "request"
+            },
+            "method": {
+              "const": "cmake/targets/list"
+            },
+            "payload": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "workspaceGeneration",
+                "projectId",
+                "buildProfileId"
+              ],
+              "properties": {
+                "workspaceGeneration": {
+                  "$ref": "#/$defs/id64"
+                },
+                "projectId": {
+                  "$ref": "#/$defs/projectId"
+                },
+                "buildProfileId": {
+                  "$ref": "#/$defs/id64"
+                }
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "method",
+            "payload"
+          ]
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "taskStartRequest": {
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/base"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "request"
+            },
+            "method": {
+              "const": "tasks/start"
+            },
+            "payload": {
+              "$ref": "#/$defs/taskStartPayload"
+            }
+          },
+          "required": [
+            "kind",
+            "method",
+            "payload"
+          ]
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "taskIDRequest": {
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/base"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "request"
+            },
+            "method": {
+              "enum": [
+                "tasks/get",
+                "tasks/cancel"
+              ]
+            },
+            "payload": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "taskId"
+              ],
+              "properties": {
+                "taskId": {
+                  "$ref": "#/$defs/id32"
+                }
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "method",
+            "payload"
+          ]
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "tasksListRequest": {
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/base"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "request"
+            },
+            "method": {
+              "const": "tasks/list"
+            },
+            "payload": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "cursor": {
+                  "$ref": "#/$defs/cursor"
+                },
+                "limit": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 200
+                }
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "method",
+            "payload"
+          ]
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "eventsSubscribeRequest": {
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/base"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "request"
+            },
+            "method": {
+              "const": "events/subscribe"
+            },
+            "payload": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "afterSequence"
+              ],
+              "properties": {
+                "afterSequence": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "method",
+            "payload"
+          ]
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "artifactsListRequest": {
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/base"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "request"
+            },
+            "method": {
+              "const": "artifacts/list"
+            },
+            "payload": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "taskId"
+              ],
+              "properties": {
+                "taskId": {
+                  "$ref": "#/$defs/id32"
+                },
+                "cursor": {
+                  "$ref": "#/$defs/cursor"
+                },
+                "limit": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 200
+                }
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "method",
+            "payload"
+          ]
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "artifactReadRequest": {
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/base"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "request"
+            },
+            "method": {
+              "const": "artifacts/read"
+            },
+            "payload": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "artifactId",
+                "offset",
+                "length"
+              ],
+              "properties": {
+                "artifactId": {
+                  "$ref": "#/$defs/id32"
+                },
+                "offset": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "length": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65536
+                }
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "method",
+            "payload"
+          ]
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "testCatalogGetRequest": {
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/base"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "request"
+            },
+            "method": {
+              "const": "tests/catalog/get"
+            },
+            "payload": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "projectId",
+                "profileId"
+              ],
+              "properties": {
+                "projectId": {
+                  "$ref": "#/$defs/projectId"
+                },
+                "profileId": {
+                  "$ref": "#/$defs/id64"
+                },
+                "cursor": {
+                  "$ref": "#/$defs/cursor"
+                },
+                "limit": {
+                  "$ref": "#/$defs/testPageLimit"
+                }
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "method",
+            "payload"
+          ]
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "testRunGetRequest": {
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/base"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "request"
+            },
+            "method": {
+              "const": "tests/runs/get"
+            },
+            "payload": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "runId"
+              ],
+              "properties": {
+                "runId": {
+                  "$ref": "#/$defs/id32"
+                }
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "method",
+            "payload"
+          ]
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "testRunsListRequest": {
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/base"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "request"
+            },
+            "method": {
+              "const": "tests/runs/list"
+            },
+            "payload": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "projectId": {
+                  "$ref": "#/$defs/projectId"
+                },
+                "profileId": {
+                  "$ref": "#/$defs/id64"
+                },
+                "cursor": {
+                  "$ref": "#/$defs/cursor"
+                },
+                "limit": {
+                  "$ref": "#/$defs/testPageLimit"
+                }
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "method",
+            "payload"
+          ]
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "coverageRunStartRequest": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "properties": { "kind": { "const": "request" }, "method": { "const": "coverage/runs/start" }, "payload": { "$ref": "urn:unit-test-ide:protocol:v1.4:coverage#/$defs/coverageRunStartRequest" } }, "required": ["kind", "method", "payload"] }],
+      "unevaluatedProperties": false
+    },
+    "coverageRunGetRequest": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "properties": { "kind": { "const": "request" }, "method": { "const": "coverage/runs/get" }, "payload": { "$ref": "#/$defs/coverageRunIdPayload" } }, "required": ["kind", "method", "payload"] }],
+      "unevaluatedProperties": false
+    },
+    "coverageRunsListRequest": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "properties": { "kind": { "const": "request" }, "method": { "const": "coverage/runs/list" }, "payload": { "$ref": "#/$defs/coverageRunsListPayload" } }, "required": ["kind", "method", "payload"] }],
+      "unevaluatedProperties": false
+    },
+    "coverageReportGetRequest": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "properties": { "kind": { "const": "request" }, "method": { "const": "coverage/reports/get" }, "payload": { "$ref": "#/$defs/coverageReportIdPayload" } }, "required": ["kind", "method", "payload"] }],
+      "unevaluatedProperties": false
+    },
+    "response": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/handshakeResponse"
+        },
+        {
+          "$ref": "#/$defs/capabilitiesResponse"
+        },
+        {
+          "$ref": "#/$defs/shutdownResponse"
+        },
+        {
+          "$ref": "#/$defs/workspaceResponse"
+        },
+        {
+          "$ref": "#/$defs/targetsResponse"
+        },
+        {
+          "$ref": "#/$defs/taskResponse"
+        },
+        {
+          "$ref": "#/$defs/tasksListResponse"
+        },
+        {
+          "$ref": "#/$defs/eventsSubscribeResponse"
+        },
+        {
+          "$ref": "#/$defs/artifactsListResponse"
+        },
+        {
+          "$ref": "#/$defs/artifactReadResponse"
+        },
+        {
+          "$ref": "#/$defs/testCatalogResponse"
+        },
+        {
+          "$ref": "#/$defs/testRunResponse"
+        },
+        {
+          "$ref": "#/$defs/testRunsListResponse"
+        },
+        {
+          "$ref": "#/$defs/coverageRunResponse"
+        },
+        {
+          "$ref": "#/$defs/coverageRunsListResponse"
+        },
+        {
+          "$ref": "#/$defs/coverageReportResponse"
+        }
+      ]
+    },
+    "responseBase": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/base"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "response"
+            },
+            "requestId": {
+              "$ref": "#/$defs/id32"
+            },
+            "method": {},
+            "payload": {}
+          },
+          "required": [
+            "kind",
+            "requestId",
+            "method",
+            "payload"
+          ]
+        }
+      ]
+    },
+    "handshakeResponse": {
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/responseBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "const": "handshake"
+            },
+            "payload": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "negotiatedProtocolVersion",
+                "serviceVersion"
+              ],
+              "properties": {
+                "negotiatedProtocolVersion": {
+                  "const": "1.4"
+                },
+                "serviceVersion": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                }
+              }
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "capabilitiesResponse": {
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/responseBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "const": "capabilities/get"
+            },
+            "payload": {
+              "$ref": "urn:unit-test-ide:protocol:v1.4:capabilities"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "shutdownResponse": {
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/responseBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "const": "shutdown"
+            },
+            "payload": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "accepted"
+              ],
+              "properties": {
+                "accepted": {
+                  "const": true
+                }
+              }
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "workspaceResponse": {
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/responseBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "const": "workspace/inspect"
+            },
+            "payload": {
+              "$ref": "urn:unit-test-ide:protocol:v1.2:workspace"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "targetsResponse": {
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/responseBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "const": "cmake/targets/list"
+            },
+            "payload": {
+              "$ref": "urn:unit-test-ide:protocol:v1.2:workspace#/$defs/targetList"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "taskResponse": {
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/responseBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "enum": [
+                "tasks/start",
+                "tasks/get",
+                "tasks/cancel"
+              ]
+            },
+            "payload": {
+              "$ref": "urn:unit-test-ide:protocol:v1.4:task"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "tasksListResponse": {
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/responseBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "const": "tasks/list"
+            },
+            "payload": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "items"
+              ],
+              "properties": {
+                "items": {
+                  "type": "array",
+                  "maxItems": 200,
+                  "items": {
+                    "$ref": "urn:unit-test-ide:protocol:v1.4:task"
+                  }
+                },
+                "nextCursor": {
+                  "$ref": "#/$defs/cursor"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "eventsSubscribeResponse": {
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/responseBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "const": "events/subscribe"
+            },
+            "payload": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "afterSequence"
+              ],
+              "properties": {
+                "afterSequence": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              }
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "artifactsListResponse": {
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/responseBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "const": "artifacts/list"
+            },
+            "payload": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "items"
+              ],
+              "properties": {
+                "items": {
+                  "type": "array",
+                  "maxItems": 200,
+                  "items": {
+                    "$ref": "urn:unit-test-ide:protocol:v1.4:artifact"
+                  }
+                },
+                "nextCursor": {
+                  "$ref": "#/$defs/cursor"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "artifactReadResponse": {
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/responseBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "const": "artifacts/read"
+            },
+            "payload": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "data",
+                "nextOffset",
+                "eof",
+                "sizeBytes",
+                "sha256"
+              ],
+              "properties": {
+                "data": {
+                  "type": "string"
+                },
+                "nextOffset": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "eof": {
+                  "type": "boolean"
+                },
+                "sizeBytes": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "sha256": {
+                  "$ref": "#/$defs/id64"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "testCatalogResponse": {
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/responseBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "const": "tests/catalog/get"
+            },
+            "payload": {
+              "$ref": "urn:unit-test-ide:protocol:v1.4:test#/$defs/testCatalog"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "testRunResponse": {
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/responseBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "const": "tests/runs/get"
+            },
+            "payload": {
+              "$ref": "urn:unit-test-ide:protocol:v1.4:test#/$defs/testRun"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "testRunsListResponse": {
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/responseBase"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "method": {
+              "const": "tests/runs/list"
+            },
+            "payload": {
+              "$ref": "urn:unit-test-ide:protocol:v1.4:test#/$defs/testRunPage"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "coverageRunResponse": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/responseBase" }, { "type": "object", "properties": { "method": { "enum": ["coverage/runs/start", "coverage/runs/get"] }, "payload": { "$ref": "urn:unit-test-ide:protocol:v1.4:coverage#/$defs/coverageRun" } } }],
+      "unevaluatedProperties": false
+    },
+    "coverageRunsListResponse": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/responseBase" }, { "type": "object", "properties": { "method": { "const": "coverage/runs/list" }, "payload": { "$ref": "urn:unit-test-ide:protocol:v1.4:coverage#/$defs/coverageRunPage" } } }],
+      "unevaluatedProperties": false
+    },
+    "coverageReportResponse": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/responseBase" }, { "type": "object", "properties": { "method": { "const": "coverage/reports/get" }, "payload": { "$ref": "urn:unit-test-ide:protocol:v1.4:coverage#/$defs/coverageReport" } } }],
+      "unevaluatedProperties": false
+    },
+    "coverageRunIdPayload": {
+      "type": "object", "additionalProperties": false, "required": ["coverageRunId"],
+      "properties": { "coverageRunId": { "$ref": "#/$defs/id32" } }
+    },
+    "coverageReportIdPayload": {
+      "type": "object", "additionalProperties": false, "required": ["reportId"],
+      "properties": { "reportId": { "$ref": "#/$defs/id32" } }
+    },
+    "coverageRunsListPayload": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "projectId": { "$ref": "#/$defs/projectId" },
+        "coverageProfileId": { "$ref": "#/$defs/projectId" },
+        "cursor": { "$ref": "#/$defs/cursor" },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 200 }
+      }
+    },
+    "taskStartPayload": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/cmakeBuildStartPayload"
+        },
+        {
+          "$ref": "#/$defs/simulationStartPayload"
+        },
+        {
+          "$ref": "#/$defs/testDiscoveryStartPayload"
+        },
+        {
+          "$ref": "#/$defs/testRunStartPayload"
+        }
+      ]
+    },
+    "cmakeBuildStartPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "idempotencyKey",
+        "kind",
+        "workspaceGeneration",
+        "projectId",
+        "buildProfileId",
+        "targetIds",
+        "jobs",
+        "timeoutMs"
+      ],
+      "properties": {
+        "idempotencyKey": {
+          "$ref": "#/$defs/id32"
+        },
+        "kind": {
+          "const": "cmakeBuild"
+        },
+        "workspaceGeneration": {
+          "$ref": "#/$defs/id64"
+        },
+        "projectId": {
+          "$ref": "#/$defs/projectId"
+        },
+        "buildProfileId": {
+          "$ref": "#/$defs/id64"
+        },
+        "targetIds": {
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/id64"
+          }
+        },
+        "jobs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 256
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400000
+        }
+      }
+    },
+    "simulationStartPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "idempotencyKey",
+        "kind",
+        "scenario",
+        "timeoutMs"
+      ],
+      "properties": {
+        "idempotencyKey": {
+          "$ref": "#/$defs/id32"
+        },
+        "kind": {
+          "const": "simulation"
+        },
+        "scenario": {
+          "enum": [
+            "success",
+            "exit-nonzero",
+            "hang",
+            "spawn-child",
+            "emit-output"
+          ]
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400000
+        }
+      }
+    },
+    "testDiscoveryStartPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "idempotencyKey",
+        "kind",
+        "projectId",
+        "profileId"
+      ],
+      "properties": {
+        "idempotencyKey": {
+          "$ref": "#/$defs/id32"
+        },
+        "kind": {
+          "const": "testDiscovery"
+        },
+        "projectId": {
+          "$ref": "#/$defs/projectId"
+        },
+        "profileId": {
+          "$ref": "#/$defs/id64"
+        }
+      }
+    },
+    "testRunStartPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "idempotencyKey",
+        "kind",
+        "projectId",
+        "profileId",
+        "catalogRevision",
+        "selection",
+        "repeatCount"
+      ],
+      "properties": {
+        "idempotencyKey": {
+          "$ref": "#/$defs/id32"
+        },
+        "kind": {
+          "const": "testRun"
+        },
+        "projectId": {
+          "$ref": "#/$defs/projectId"
+        },
+        "profileId": {
+          "$ref": "#/$defs/id64"
+        },
+        "catalogRevision": {
+          "$ref": "#/$defs/id64"
+        },
+        "selection": {
+          "$ref": "urn:unit-test-ide:protocol:v1.4:test#/$defs/testSelection"
+        },
+        "repeatCount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        }
+      }
+    },
+    "id32": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "id64": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "projectId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+    },
+    "cursor": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "testPageLimit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000
+    },
+    "emptyPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 0
+    },
+    "error": {
+      "type": "object",
+      "allOf": [
+        {
+          "$ref": "#/$defs/base"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "error"
+            },
+            "requestId": {
+              "$ref": "#/$defs/id32"
+            },
+            "error": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "code",
+                "message",
+                "retryable"
+              ],
+              "properties": {
+                "code": {
+                  "enum": [
+                    "INVALID_MESSAGE",
+                    "UNSUPPORTED_PROTOCOL",
+                    "AUTH_REQUIRED",
+                    "AUTH_FAILED",
+                    "METHOD_NOT_FOUND",
+                    "INVALID_TASK_SPEC",
+                    "TASK_NOT_FOUND",
+                    "IDEMPOTENCY_CONFLICT",
+                    "EVENT_CURSOR_INVALID",
+                    "ARTIFACT_NOT_FOUND",
+                    "ARTIFACT_NOT_READY",
+                    "STORAGE_UNAVAILABLE",
+                    "SERVICE_UNHEALTHY",
+                    "SUBSCRIBER_TOO_SLOW",
+                    "PROTOCOL_FEATURE_UNAVAILABLE",
+                    "WORKSPACE_CHANGED",
+                    "PROJECT_NOT_FOUND",
+                    "BUILD_PROFILE_NOT_FOUND",
+                    "TARGET_NOT_FOUND",
+                    "CONFIGURE_REQUIRED",
+                    "WORKSPACE_TRUST_REQUIRED",
+                    "TEST_CATALOG_NOT_FOUND",
+                    "TEST_CATALOG_STALE",
+                    "TEST_RUN_NOT_FOUND",
+                    "TEST_SELECTION_INVALID",
+                    "TEST_FRAMEWORK_UNAVAILABLE",
+                    "COVERAGE_PROFILE_NOT_FOUND",
+                    "COVERAGE_RUN_NOT_FOUND",
+                    "COVERAGE_REPORT_NOT_FOUND"
+                  ]
+                },
+                "message": {
+                  "type": "string",
+                  "maxLength": 8192
+                },
+                "retryable": {
+                  "type": "boolean"
+                }
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "requestId",
+            "error"
+          ]
+        }
+      ],
+      "unevaluatedProperties": false
+    }
+  }
+}

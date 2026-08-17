@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:unit-test-ide:protocol:v1.2:workspace",
+  "title": "WorkspaceSnapshot",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "workspaceUri",
+    "workspaceGeneration",
+    "capabilities",
+    "toolchains",
+    "diagnostics",
+    "projects"
+  ],
+  "properties": {
+    "workspaceUri": { "type": "string", "format": "uri" },
+    "workspaceGeneration": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "capabilities": { "$ref": "#/$defs/capabilities" },
+    "toolchains": {
+      "type": "array",
+      "maxItems": 256,
+      "items": { "$ref": "#/$defs/toolchain" }
+    },
+    "diagnostics": {
+      "type": "array",
+      "maxItems": 4096,
+      "items": { "$ref": "#/$defs/workspaceDiagnostic" }
+    },
+    "projects": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/project" }
+    }
+  },
+  "$defs": {
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspaceInspect", "targetList", "cmakeBuild"],
+      "properties": {
+        "workspaceInspect": { "const": true },
+        "targetList": { "const": true },
+        "cmakeBuild": { "const": true }
+      }
+    },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["projectId", "sourceUri", "buildProfiles"],
+      "properties": {
+        "projectId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" },
+        "sourceUri": { "type": "string", "format": "uri" },
+        "buildProfiles": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/buildProfile" }
+        }
+      }
+    },
+    "buildProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["buildProfileId", "name", "origin", "generator"],
+      "properties": {
+        "buildProfileId": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "origin": { "enum": ["preset", "generated"] },
+        "toolchainId": { "$ref": "#/$defs/toolchainId" },
+        "generator": {
+          "enum": [
+            "Ninja",
+            "Unix Makefiles",
+            "Visual Studio 17 2022",
+            "Visual Studio 18 2026",
+            "NMake Makefiles"
+          ]
+        },
+        "configuration": { "type": "string", "minLength": 1, "maxLength": 256 }
+      }
+    },
+    "toolchainId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{1,128}$"
+    },
+    "toolchain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "toolchainId",
+        "family",
+        "version",
+        "targetTriple",
+        "hostArchitecture",
+        "targetArchitecture",
+        "generators",
+        "capabilities"
+      ],
+      "properties": {
+        "toolchainId": { "$ref": "#/$defs/toolchainId" },
+        "family": { "enum": ["gcc", "clang", "msvc", "clang-cl"] },
+        "version": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "targetTriple": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "hostArchitecture": { "enum": ["x86", "x64", "arm64"] },
+        "targetArchitecture": { "enum": ["x86", "x64", "arm64"] },
+        "generators": {
+          "type": "array",
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "Ninja",
+              "Unix Makefiles",
+              "Visual Studio 17 2022",
+              "Visual Studio 18 2026",
+              "NMake Makefiles"
+            ]
+          }
+        },
+        "capabilities": { "$ref": "#/$defs/toolchainCapabilities" }
+      }
+    },
+    "toolchainCapabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["coverageDrivers"],
+      "properties": {
+        "coverageDrivers": {
+          "type": "array",
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": { "enum": ["gcov", "llvm-cov"] }
+        }
+      }
+    },
+    "workspaceDiagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["severity", "code", "message"],
+      "properties": {
+        "severity": { "enum": ["error", "warning", "info"] },
+        "code": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 1048576 },
+        "sourceUri": { "type": "string", "format": "uri" },
+        "line": { "type": "integer", "minimum": 1 },
+        "column": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "targetList": {
+      "title": "TargetList",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspaceGeneration", "projectId", "buildProfileId", "targets"],
+      "properties": {
+        "workspaceGeneration": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "projectId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" },
+        "buildProfileId": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "targets": { "type": "array", "items": { "$ref": "#/$defs/target" } }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["targetId", "name"],
+      "properties": {
+        "targetId": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "name": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

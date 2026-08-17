@@ -1,0 +1,3 @@
+src/空 格.cpp(12,5): error C2143: syntax error: missing ';' before '}' [sample.vcxproj]
+src/空 格.cpp(20): warning C4100: 'unused': unreferenced formal parameter [sample.vcxproj]
+LINK : fatal error LNK1120: 1 unresolved externals [sample.vcxproj]

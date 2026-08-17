@@ -1,0 +1,14 @@
+TEST(MockGroup, parameterMismatch)
+C:\workspace\tests\mock_tests.cpp(60): error: Failure in TEST(MockGroup, parameterMismatch)
+C:\workspace\src\controller.cpp(44): error:
+	Mock Failure: Unexpected parameter value to parameter "value" to function "dependency_write": <20 (0x14)>
+	EXPECTED calls that WERE NOT fulfilled related to function: dependency_write
+		dependency_write -> int value: <7 (0x7)> (expected 1 call, called 0 times)
+	EXPECTED calls that WERE fulfilled related to function: dependency_write
+		<none>
+	ACTUAL unexpected parameter passed to function: dependency_write
+		int value: <20 (0x14)>
+
+ - 7 ms
+
+Errors (1 failures, 1 tests, 1 ran, 0 checks, 0 ignored, 0 filtered out, 7 ms)

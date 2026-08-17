@@ -1,0 +1,32 @@
+{
+  "kind": "ctestInfo",
+  "version": {
+    "major": 1,
+    "minor": 0
+  },
+  "backtraceGraph": {
+    "commands": [
+      "add_test"
+    ],
+    "files": [
+      "CMakeLists.txt"
+    ],
+    "nodes": [
+      {
+        "file": 0,
+        "line": 1,
+        "command": 0
+      }
+    ]
+  },
+  "tests": [
+    {
+      "name": "broken.backtrace",
+      "command": [
+        "runner"
+      ],
+      "backtrace": 9,
+      "properties": []
+    }
+  ]
+}

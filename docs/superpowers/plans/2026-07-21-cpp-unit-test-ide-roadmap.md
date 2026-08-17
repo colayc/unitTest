@@ -68,7 +68,9 @@ docs/
 
 依赖：Phase 2 的任务/进程引擎。
 
-验收标准：Windows/MSVC、Linux/GCC 和 Linux/Clang 示例项目可通过服务完成配置和构建，并产生基准诊断结果。
+验收标准：Windows/MSVC、Windows/clang-cl、Linux/GCC 和 Linux/Clang 示例项目可通过服务完成配置和构建，并产生基准诊断结果。
+
+状态：已于 2026-07-29 完成。固定 Hosted CI 运行 [`30464939729`](https://github.com/colayc/unitTest/actions/runs/30464939729) 已验证四种 compiler family 的 generated fallback、Preset、诊断、取消/超时、路径边界与恢复场景，并通过 Protocol compatibility、完整 `pnpm verify` 和双平台报告门禁。
 
 ### Phase 4：测试框架发现与执行
 
@@ -78,6 +80,8 @@ docs/
 
 验收标准：两个框架都能在支持矩阵上发现并运行单个测试，包括失败、崩溃、跳过、超时和格式错误输出的测试夹具。
 
+状态：已于 2026-08-01 完成。提交 `69dd3d8` 已完成 CTest、CppUTest/CppUMock、Unity/CMock、Protocol v1.3、TestRun recovery 和 deterministic E2E，并同步到 GitHub 与 Gitee。
+
 ### Phase 5：覆盖率与报告管道
 
 实现 Windows clang-cl/llvm-cov、Linux GCC/gcovr 和 Linux Clang/llvm-cov 适配器；规范化路径；合并 profile；导出版本化 JSON、JUnit XML 和 HTML 制品；并强制执行 LLVM 工具版本兼容性。
@@ -86,6 +90,12 @@ docs/
 
 验收标准：在所有已声明的覆盖率配置中，源码、行、分支和汇总覆盖率均可复现，且每份报告都显示实际工具链。
 
+详细设计：`docs/superpowers/specs/2026-08-03-coverage-report-pipeline-design.md`
+
+状态：设计已于 2026-08-03 确认，详细实施计划已完成，待确认后执行 Phase 5A。
+
+实施计划索引：`docs/superpowers/plans/2026-08-03-phase5-coverage-implementation-index.md`
+
 ### Phase 6：Code-OSS 外壳与内置扩展
 
 创建精简的 Code-OSS fork、产品品牌、更新/遥测配置、扩展源策略、内置扩展注册、服务生命周期管理器、Testing API 集成、工作区信任门禁，以及诊断/源码导航。
@@ -93,6 +103,14 @@ docs/
 依赖：稳定的 Phase 1 协议，以及 Phase 3/4 的执行 API。
 
 验收标准：桌面 IDE 能打开示例工作区，未受信任时拒绝执行，受信任后发现测试，并通过外部 Go 服务运行测试。
+
+首个 Vertical Slice 状态：已实现。独立 Code-OSS Extension package 已完成 Workspace Trust gate、真实 Go Service lifecycle、Windows Named Pipe/Linux Unix Socket platform contract、现有 Protocol Client 接入、`workspace/inspect` 命令，以及由生产 `activate()` 成功完成 marker 驱动的 Extension Development Host smoke harness。Windows Named Pipe 已由本地 runtime smoke 实际验证；Code-OSS 信任丢失通过 Extension Host teardown/deactivation path 清理 Service；Linux Unix Socket evidence 继续由 Linux CI 提供。
+
+详细设计：`docs/superpowers/specs/2026-08-16-phase6-code-oss-extension-design.md`
+
+实施计划：`docs/superpowers/plans/2026-08-16-phase6-code-oss-extension-plan.md`
+
+后续子阶段：Testing API test tree、run profile、source decoration、coverage UI、完整 Code-OSS fork/branding 与 built-in registration 尚未实现；首个 Vertical Slice 的完成不表示这些 UI 与 desktop packaging 工作已完成。
 
 ### Phase 7：产品测试 UX、Mock 配置、历史记录与报告
 

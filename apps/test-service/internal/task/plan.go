@@ -5,23 +5,39 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"reflect"
+	"runtime"
 	"strings"
 	"time"
+
+	"unit-test-ide.local/test-service/internal/diagnostic"
+	"unit-test-ide.local/test-service/internal/testdomain"
 )
 
 type Kind string
 
 const (
-	KindSimulation Kind = "simulation"
-	KindCMakeBuild Kind = "cmake_build"
+	KindSimulation    Kind = "simulation"
+	KindCMakeBuild    Kind = "cmake_build"
+	KindTestDiscovery Kind = "test_discovery"
+	KindTestRun       Kind = "test_run"
+	KindCoverageRun   Kind = "coverage_run"
 )
 
 type StepKind string
 
 const (
-	StepSimulation StepKind = "simulation"
-	StepConfigure  StepKind = "configure"
-	StepBuild      StepKind = "build"
+	StepSimulation        StepKind = "simulation"
+	StepConfigure         StepKind = "configure"
+	StepBuild             StepKind = "build"
+	StepTestDiscovery     StepKind = "test-discovery"
+	StepTestRun           StepKind = "test-run"
+	StepCoverageConfigure StepKind = "coverage-configure"
+	StepCoverageBuild     StepKind = "coverage-build"
+	StepCoverageTest      StepKind = "coverage-test"
+	StepCoverageMerge     StepKind = "coverage-merge"
+	StepCoverageNormalize StepKind = "coverage-normalize"
+	StepCoverageReport    StepKind = "coverage-report"
+	StepCoveragePublish   StepKind = "coverage-publish"
 )
 
 type StepStatus string
@@ -37,7 +53,12 @@ const (
 const (
 	maxProcessSpecArgs    = 256
 	maxProcessSpecEnv     = 256
+	maxProcessBatchItems  = 256
 	maxCommandSummaryArgs = 256
+	maxExecutionStepState = 256 * 1024
+	maxInitialPlanSteps   = 8
+	maxContinuationSteps  = 256
+	maxRuntimePlanSteps   = 10_000
 )
 
 type CommandSummary struct {
@@ -46,10 +67,12 @@ type CommandSummary struct {
 }
 
 type ExecutionStep struct {
-	ID      string
-	Kind    StepKind
-	Process ProcessSpec
-	Public  CommandSummary
+	ID               string
+	Kind             StepKind
+	Process          ProcessSpec
+	Public           CommandSummary
+	State            json.RawMessage
+	DiagnosticParser diagnostic.Parser
 }
 
 type ExecutionPlan struct {
@@ -58,11 +81,42 @@ type ExecutionPlan struct {
 	Steps       []ExecutionStep
 }
 
+type StepVerdict string
+
+const (
+	StepVerdictDefault   StepVerdict = ""
+	StepVerdictSucceeded StepVerdict = "succeeded"
+	StepVerdictFailed    StepVerdict = "failed"
+)
+
+type StepResult struct {
+	Process ProcessResult
+	Verdict StepVerdict
+}
+
+type Continuation struct {
+	Steps []ExecutionStep
+}
+
 // ExecutionBoundary is runtime-only. It must never be persisted or exposed
 // through protocol types.
 type ExecutionBoundary interface {
 	ValidateExecutable(path string) error
 	ValidateWorkingDirectory(path string) error
+}
+
+type ManagedExecutionBoundary interface {
+	ExecutionBoundary
+	Adopt(string)
+	Release() error
+}
+
+// ProcessTargetBoundary is an optional runtime-only extension. Consumers that
+// pin a fixed command (for example the bundled gcovr runner) can validate the
+// complete target, including args and environment, on every plan and
+// continuation validation without changing the protocol-facing boundary.
+type ProcessTargetBoundary interface {
+	ValidateProcessTarget(executable string, args, env, envUnset []string, dir string) error
 }
 
 type StartRequest struct {
@@ -73,58 +127,181 @@ type StartRequest struct {
 	Timeout             time.Duration
 	Plan                ExecutionPlan
 	Boundary            ExecutionBoundary
+	Continuation        PlanContinuation
+	ResultInterpreter   ResultInterpreter
+	TestRun             *testdomain.TestRun
 
 	// Scenario remains an internal compatibility input while v1.1 simulation
 	// requests are projected into service-owned execution plans.
 	Scenario Scenario
 }
 
+type ResumeRequest struct {
+	Task              Task
+	Plan              ExecutionPlan
+	Boundary          ExecutionBoundary
+	Continuation      PlanContinuation
+	ResultInterpreter ResultInterpreter
+}
+
 func ValidatePlan(plan ExecutionPlan, boundary ExecutionBoundary) error {
-	if plan.Version != 1 || len(plan.Steps) < 1 || len(plan.Steps) > 8 || nilBoundary(boundary) {
+	if plan.Version != 1 ||
+		len(plan.Steps) < 1 ||
+		len(plan.Steps) > maxInitialPlanSteps ||
+		nilBoundary(boundary) {
 		return ErrInvalidArgument
 	}
+	return validateExecutionSteps(plan.Steps, boundary)
+}
 
-	ids := make(map[string]struct{}, len(plan.Steps))
-	for _, step := range plan.Steps {
-		if !validStepID(step.ID) || !validStepKind(step.Kind) || step.Process.Executable == "" || step.Process.Dir == "" ||
-			containsNUL(step.Process.Executable) || containsNUL(step.Process.Dir) ||
-			len(step.Process.Args) > maxProcessSpecArgs ||
-			len(step.Process.Env) > maxProcessSpecEnv ||
-			len(step.Public.Args) > maxCommandSummaryArgs {
+func validateExecutionSteps(
+	steps []ExecutionStep,
+	boundary ExecutionBoundary,
+) error {
+	if len(steps) < 1 || len(steps) > maxRuntimePlanSteps ||
+		nilBoundary(boundary) {
+		return ErrInvalidArgument
+	}
+	ids := make(map[string]struct{}, len(steps))
+	for _, step := range steps {
+		if !validStepID(step.ID) || !validStepKind(step.Kind) ||
+			!validProcessSpec(step.Process, boundary) ||
+			len(step.Public.Args) > maxCommandSummaryArgs ||
+			len(step.State) > maxExecutionStepState ||
+			len(step.State) != 0 && !json.Valid(step.State) {
 			return ErrInvalidArgument
 		}
 		if _, exists := ids[step.ID]; exists {
 			return ErrInvalidArgument
 		}
 		ids[step.ID] = struct{}{}
-		for _, argument := range step.Process.Args {
-			if containsNUL(argument) {
-				return ErrInvalidArgument
-			}
-		}
-		for _, value := range step.Process.Env {
-			if containsNUL(value) || !validEnvironment(value) {
-				return ErrInvalidArgument
-			}
-		}
-		if err := boundary.ValidateExecutable(step.Process.Executable); err != nil {
-			return ErrInvalidArgument
-		}
-		if err := boundary.ValidateWorkingDirectory(step.Process.Dir); err != nil {
-			return ErrInvalidArgument
-		}
 	}
 	return nil
 }
 
+func validProcessSpec(
+	spec ProcessSpec,
+	boundary ExecutionBoundary,
+) bool {
+	if len(spec.Batch) == 0 {
+		return validProcessTarget(
+			spec.Executable,
+			spec.Args,
+			spec.Env,
+			spec.EnvUnset,
+			spec.Dir,
+			boundary,
+		)
+	}
+	if spec.Executable != "" || len(spec.Args) != 0 ||
+		len(spec.Env) != 0 || len(spec.EnvUnset) != 0 ||
+		spec.Dir != "" ||
+		len(spec.Batch) > maxProcessBatchItems {
+		return false
+	}
+	ids := make(map[string]struct{}, len(spec.Batch))
+	for _, item := range spec.Batch {
+		if !validStepID(item.ID) ||
+			item.Timeout < time.Millisecond ||
+			item.Timeout > 24*time.Hour ||
+			item.Timeout%time.Millisecond != 0 ||
+			!validProcessTarget(
+				item.Executable,
+				item.Args,
+				item.Env,
+				item.EnvUnset,
+				item.Dir,
+				boundary,
+			) {
+			return false
+		}
+		if _, duplicate := ids[item.ID]; duplicate {
+			return false
+		}
+		ids[item.ID] = struct{}{}
+	}
+	return true
+}
+
+func validProcessTarget(
+	executable string,
+	arguments, environment, unset []string,
+	directory string,
+	boundary ExecutionBoundary,
+) bool {
+	if executable == "" || directory == "" ||
+		containsNUL(executable) || containsNUL(directory) ||
+		len(arguments) > maxProcessSpecArgs ||
+		len(environment) > maxProcessSpecEnv ||
+		len(unset) > maxProcessSpecEnv {
+		return false
+	}
+	for _, argument := range arguments {
+		if containsNUL(argument) {
+			return false
+		}
+	}
+	if !validProcessEnvironment(environment, unset) {
+		return false
+	}
+	if err := boundary.ValidateExecutable(executable); err != nil {
+		return false
+	}
+	if targetBoundary, ok := boundary.(ProcessTargetBoundary); ok {
+		if err := targetBoundary.ValidateProcessTarget(
+			executable, arguments, environment, unset, directory,
+		); err != nil {
+			return false
+		}
+	}
+	return boundary.ValidateWorkingDirectory(directory) == nil
+}
+
+func extendExecutionPlan(
+	plan ExecutionPlan,
+	continuation Continuation,
+	boundary ExecutionBoundary,
+) (ExecutionPlan, []StepSnapshot, error) {
+	if len(continuation.Steps) == 0 {
+		return plan, nil, nil
+	}
+	if len(continuation.Steps) > maxContinuationSteps ||
+		len(continuation.Steps) > maxRuntimePlanSteps-len(plan.Steps) {
+		return ExecutionPlan{}, nil, ErrInvalidArgument
+	}
+	combined := cloneExecutionPlan(plan)
+	appended := cloneExecutionPlan(ExecutionPlan{
+		Version: plan.Version,
+		Steps:   continuation.Steps,
+	})
+	combined.Steps = append(combined.Steps, appended.Steps...)
+	if err := validateExecutionSteps(combined.Steps, boundary); err != nil {
+		return ExecutionPlan{}, nil, err
+	}
+	combined.Fingerprint = FingerprintPlan(combined)
+	snapshots := initialStepSnapshots(appended)
+	return combined, snapshots, nil
+}
+
 func FingerprintPlan(plan ExecutionPlan) string {
-	type canonicalStep struct {
+	type canonicalBatchProcess struct {
 		ID         string   `json:"id"`
-		Kind       StepKind `json:"kind"`
 		Executable string   `json:"executable"`
 		Args       []string `json:"args"`
 		Env        []string `json:"env"`
+		EnvUnset   []string `json:"envUnset"`
 		Dir        string   `json:"dir"`
+		TimeoutMS  int64    `json:"timeoutMs"`
+	}
+	type canonicalStep struct {
+		ID         string                  `json:"id"`
+		Kind       StepKind                `json:"kind"`
+		Executable string                  `json:"executable"`
+		Args       []string                `json:"args"`
+		Env        []string                `json:"env"`
+		EnvUnset   []string                `json:"envUnset"`
+		Dir        string                  `json:"dir"`
+		Batch      []canonicalBatchProcess `json:"batch,omitempty"`
 	}
 	type canonicalPlan struct {
 		Version int             `json:"version"`
@@ -139,7 +316,28 @@ func FingerprintPlan(plan ExecutionPlan) string {
 			Executable: step.Process.Executable,
 			Args:       append([]string{}, step.Process.Args...),
 			Env:        append([]string{}, step.Process.Env...),
-			Dir:        step.Process.Dir,
+			EnvUnset: append(
+				[]string{},
+				step.Process.EnvUnset...,
+			),
+			Dir: step.Process.Dir,
+		}
+		for _, item := range step.Process.Batch {
+			canonical.Steps[index].Batch = append(
+				canonical.Steps[index].Batch,
+				canonicalBatchProcess{
+					ID:         item.ID,
+					Executable: item.Executable,
+					Args:       append([]string{}, item.Args...),
+					Env:        append([]string{}, item.Env...),
+					EnvUnset: append(
+						[]string{},
+						item.EnvUnset...,
+					),
+					Dir:       item.Dir,
+					TimeoutMS: item.Timeout.Milliseconds(),
+				},
+			)
 		}
 	}
 	raw, _ := json.Marshal(canonical)
@@ -149,7 +347,9 @@ func FingerprintPlan(plan ExecutionPlan) string {
 
 func validStepKind(value StepKind) bool {
 	switch value {
-	case StepSimulation, StepConfigure, StepBuild:
+	case StepSimulation, StepConfigure, StepBuild, StepTestDiscovery, StepTestRun,
+		StepCoverageConfigure, StepCoverageBuild, StepCoverageTest, StepCoverageMerge,
+		StepCoverageNormalize, StepCoverageReport, StepCoveragePublish:
 		return true
 	default:
 		return false
@@ -171,9 +371,40 @@ func validStepID(value string) bool {
 	return true
 }
 
-func validEnvironment(value string) bool {
-	key, _, found := strings.Cut(value, "=")
-	return found && validEnvironmentKey(key) && !serviceOwnedEnvironmentKey(key)
+func validProcessEnvironment(
+	environment []string,
+	unset []string,
+) bool {
+	if len(environment)+len(unset) > maxProcessSpecEnv {
+		return false
+	}
+	seen := make(map[string]struct{}, len(environment)+len(unset))
+	for _, value := range environment {
+		key, _, found := strings.Cut(value, "=")
+		if !found || containsNUL(value) ||
+			!validEnvironmentKey(key) ||
+			serviceOwnedEnvironmentKey(key) {
+			return false
+		}
+		canonical := environmentKey(key)
+		if _, duplicate := seen[canonical]; duplicate {
+			return false
+		}
+		seen[canonical] = struct{}{}
+	}
+	for _, key := range unset {
+		if containsNUL(key) ||
+			!validEnvironmentKey(key) ||
+			serviceOwnedEnvironmentKey(key) {
+			return false
+		}
+		canonical := environmentKey(key)
+		if _, duplicate := seen[canonical]; duplicate {
+			return false
+		}
+		seen[canonical] = struct{}{}
+	}
+	return true
 }
 
 func validEnvironmentKey(value string) bool {
@@ -182,7 +413,10 @@ func validEnvironmentKey(value string) bool {
 	}
 	for index := 0; index < len(value); index++ {
 		character := value[index]
-		if (character >= 'A' && character <= 'Z') || character == '_' || (character >= '0' && character <= '9' && index > 0) {
+		if (character >= 'A' && character <= 'Z') ||
+			(character >= 'a' && character <= 'z') ||
+			character == '_' ||
+			(character >= '0' && character <= '9' && index > 0) {
 			continue
 		}
 		return false
@@ -191,12 +425,17 @@ func validEnvironmentKey(value string) bool {
 }
 
 func serviceOwnedEnvironmentKey(value string) bool {
-	switch strings.ToUpper(value) {
-	case "UNIT_TEST_SERVICE_TOKEN", "UNIT_TEST_IDE_TOKEN", "UNIT_TEST_IDE_STATUS_HANDLE":
-		return true
-	default:
-		return false
+	upper := strings.ToUpper(value)
+	return strings.HasPrefix(upper, "UTIDE_") ||
+		strings.HasPrefix(upper, "UNIT_TEST_IDE_") ||
+		upper == "UNIT_TEST_SERVICE_TOKEN"
+}
+
+func environmentKey(value string) string {
+	if runtime.GOOS == "windows" {
+		return strings.ToUpper(value)
 	}
+	return value
 }
 
 func containsNUL(value string) bool { return strings.IndexByte(value, 0) >= 0 }

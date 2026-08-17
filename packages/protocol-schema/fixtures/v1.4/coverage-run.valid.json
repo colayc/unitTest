@@ -1,0 +1,33 @@
+{
+  "protocolVersion": "1.4",
+  "kind": "response",
+  "messageId": "33333333333333333333333333333333",
+  "requestId": "22222222222222222222222222222222",
+  "method": "coverage/runs/get",
+  "sentAt": "2026-08-04T00:00:04Z",
+  "payload": {
+    "coverageRunId": "55555555555555555555555555555555",
+    "taskId": "66666666666666666666666666666666",
+    "testRunId": "77777777777777777777777777777777",
+    "workspaceGeneration": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "projectId": "core",
+    "coverageProfileId": "coverage-debug",
+    "catalogRevision": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "selectionSnapshot": {
+      "mode": "items",
+      "containerIds": [],
+      "itemIds": [
+        "utid-v1-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      ]
+    },
+    "repeatCount": 2,
+    "timeoutMs": 60000,
+    "status": "finished",
+    "outcome": "available",
+    "createdAt": "2026-08-04T00:00:00Z",
+    "startedAt": "2026-08-04T00:00:01Z",
+    "finishedAt": "2026-08-04T00:00:03Z",
+    "reportId": "88888888888888888888888888888888",
+    "lastSequence": 42
+  }
+}

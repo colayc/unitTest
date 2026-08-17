@@ -2,11 +2,14 @@ package task
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"unit-test-ide.local/test-service/internal/diagnostic"
 )
 
 func TestManagerOrdinaryClosePathDoesNotRetryFailedClose(t *testing.T) {
@@ -750,8 +753,12 @@ func (s *causeBarrierStore) Apply(_ context.Context, mutation Mutation) (Task, [
 
 type causeBarrierArtifacts struct{}
 
-func (causeBarrierArtifacts) CommitJSON(_ context.Context, taskID, artifactID string, at time.Time, _ any) (Artifact, error) {
-	return Artifact{ID: artifactID, TaskID: taskID, Kind: "summary", CreatedAt: at}, nil
+func (causeBarrierArtifacts) OpenTask(
+	_ context.Context,
+	taskID string,
+	_ Kind,
+) (ArtifactSink, error) {
+	return &causeArtifactSink{taskID: taskID}, nil
 }
 
 type causeBarrierPublisher struct{}
@@ -1136,17 +1143,19 @@ type preparedLeaseCircuitArtifacts struct {
 	calls int
 }
 
-func (a *preparedLeaseCircuitArtifacts) CommitJSON(
+func (a *preparedLeaseCircuitArtifacts) OpenTask(
 	_ context.Context,
 	taskID string,
-	artifactID string,
-	at time.Time,
-	_ any,
-) (Artifact, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.calls++
-	return Artifact{ID: artifactID, TaskID: taskID, Kind: "summary", CreatedAt: at}, nil
+	_ Kind,
+) (ArtifactSink, error) {
+	return &causeArtifactSink{
+		taskID: taskID,
+		committed: func() {
+			a.mu.Lock()
+			a.calls++
+			a.mu.Unlock()
+		},
+	}, nil
 }
 
 func (a *preparedLeaseCircuitArtifacts) callCount() int {
@@ -1154,6 +1163,60 @@ func (a *preparedLeaseCircuitArtifacts) callCount() int {
 	defer a.mu.Unlock()
 	return a.calls
 }
+
+type causeArtifactSink struct {
+	taskID     string
+	artifactID string
+	kind       string
+	committed  func()
+}
+
+func (*causeArtifactSink) AppendOutput(context.Context, string, string, []byte) error {
+	return nil
+}
+
+func (*causeArtifactSink) AppendDiagnostic(context.Context, diagnostic.Diagnostic) error {
+	return nil
+}
+
+func (s *causeArtifactSink) CommitJSON(
+	_ context.Context,
+	artifactID string,
+	kind string,
+	_ any,
+) error {
+	s.artifactID = artifactID
+	s.kind = kind
+	if s.committed != nil {
+		s.committed()
+	}
+	return nil
+}
+
+func (s *causeArtifactSink) CommitJSONLines(
+	_ context.Context,
+	artifactID string,
+	kind string,
+	_ []json.RawMessage,
+) error {
+	return s.CommitJSON(
+		context.Background(),
+		artifactID,
+		kind,
+		nil,
+	)
+}
+
+func (s *causeArtifactSink) Finalize(
+	_ context.Context,
+	at time.Time,
+) ([]Artifact, error) {
+	return []Artifact{{
+		ID: s.artifactID, TaskID: s.taskID, Kind: s.kind, CreatedAt: at,
+	}}, nil
+}
+
+func (*causeArtifactSink) Abort(context.Context) error { return nil }
 
 type preparedLeaseCircuitProcesses struct {
 	mu       sync.Mutex

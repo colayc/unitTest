@@ -1,0 +1,357 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Unit Test IDE Workspace Configuration",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/workspaceV1"
+    },
+    {
+      "$ref": "#/$defs/workspaceV2"
+    },
+    {
+      "$ref": "#/$defs/workspaceV3"
+    }
+  ],
+  "$defs": {
+    "workspaceV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "cmake": {
+          "$ref": "#/$defs/cmake"
+        },
+        "projects": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/projectV1"
+          }
+        },
+        "toolchains": {
+          "$ref": "#/$defs/toolchains"
+        }
+      }
+    },
+    "workspaceV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version"
+      ],
+      "properties": {
+        "version": {
+          "const": 2
+        },
+        "cmake": {
+          "$ref": "#/$defs/cmake"
+        },
+        "projects": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/projectV2"
+          }
+        },
+        "toolchains": {
+          "$ref": "#/$defs/toolchains"
+        }
+      }
+    },
+    "workspaceV3": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version"
+      ],
+      "properties": {
+        "version": {
+          "const": 3
+        },
+        "cmake": {
+          "$ref": "#/$defs/cmake"
+        },
+        "projects": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/projectV2"
+          }
+        },
+        "toolchains": {
+          "$ref": "#/$defs/toolchains"
+        },
+        "coverageProfiles": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/coverageProfile"
+          }
+        }
+      }
+    },
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "absolutePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?:/|[A-Za-z]:[\\\\/]|\\\\\\\\)"
+    },
+    "relativeWorkspacePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?![A-Za-z]:)(?![\\\\/])(?!.*(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$)).+$"
+    },
+    "cmake": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "executable": {
+          "$ref": "#/$defs/absolutePath"
+        }
+      }
+    },
+    "fallback": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "configurations": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "preferredGenerator": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "projectV1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "sourceDir"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "sourceDir": {
+          "$ref": "#/$defs/relativeWorkspacePath"
+        },
+        "fallback": {
+          "$ref": "#/$defs/fallback"
+        }
+      }
+    },
+    "projectV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "sourceDir"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "sourceDir": {
+          "$ref": "#/$defs/relativeWorkspacePath"
+        },
+        "fallback": {
+          "$ref": "#/$defs/fallback"
+        },
+        "tests": {
+          "$ref": "#/$defs/projectTests"
+        }
+      }
+    },
+    "projectTests": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "containers": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/testContainerMapping"
+          }
+        }
+      }
+    },
+    "coverageProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "baseBuildProfileId"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "baseBuildProfileId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "include": {
+          "$ref": "#/$defs/coverageIncludeGlobList"
+        },
+        "exclude": {
+          "$ref": "#/$defs/coverageExcludeGlobList"
+        }
+      }
+    },
+    "coverageIncludeGlobList": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/coverageGlob"
+      }
+    },
+    "coverageExcludeGlobList": {
+      "type": "array",
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/coverageGlob"
+      }
+    },
+    "coverageGlob": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?![A-Za-z][A-Za-z0-9+.-]*:)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*//)(?!.*/$)(?!.*[\\[\\]{}])(?!.*[\\u0000-\\u001F\\u007F])(?!.*`)(?!.*\\$[({]).+$"
+    },
+    "testContainerMapping": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ctestName",
+        "framework"
+      ],
+      "properties": {
+        "ctestName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "framework": {
+          "enum": [
+            "cpputest",
+            "unity"
+          ]
+        }
+      }
+    },
+    "toolchains": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/toolchain"
+      }
+    },
+    "compilerToolchain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "family",
+        "cCompiler",
+        "cppCompiler"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "family": {
+          "enum": [
+            "gcc",
+            "clang",
+            "clang-cl"
+          ]
+        },
+        "cCompiler": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "cppCompiler": {
+          "$ref": "#/$defs/absolutePath"
+        }
+      }
+    },
+    "msvcToolchain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "family",
+        "installationId",
+        "toolsetVersion",
+        "hostArchitecture",
+        "targetArchitecture"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "family": {
+          "const": "msvc"
+        },
+        "installationId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "toolsetVersion": {
+          "type": "string",
+          "minLength": 1
+        },
+        "hostArchitecture": {
+          "enum": [
+            "x86",
+            "x64",
+            "arm64"
+          ]
+        },
+        "targetArchitecture": {
+          "enum": [
+            "x86",
+            "x64",
+            "arm64"
+          ]
+        }
+      }
+    },
+    "toolchain": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/compilerToolchain"
+        },
+        {
+          "$ref": "#/$defs/msvcToolchain"
+        }
+      ]
+    }
+  }
+}

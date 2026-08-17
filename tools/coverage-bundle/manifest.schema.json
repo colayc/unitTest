@@ -1,0 +1,174 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://unit-test-ide.invalid/tools/coverage-bundle/manifest.schema.json",
+  "title": "Offline Python/gcovr bundle source manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "python", "gcovr", "linux"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "python": { "$ref": "#/$defs/python" },
+    "gcovr": { "$ref": "#/$defs/gcovr" },
+    "linux": { "$ref": "#/$defs/linux" }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "allOf": [
+        { "not": { "pattern": "^([0-9a-f])\\1{63}$" } },
+        {
+          "not": {
+            "enum": [
+              "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+              "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            ]
+          }
+        }
+      ]
+    },
+    "platform": {
+      "type": "string",
+      "enum": ["windows-x64", "linux-x64"]
+    },
+    "platforms": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/platform" }
+    },
+    "httpsSource": {
+      "type": "string",
+      "pattern": "^https://(?:www\\.python\\.org|files\\.pythonhosted\\.org|quay\\.io)/[^?#]+$"
+    },
+    "filename": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*$"
+    },
+    "sourceArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "filename", "url", "sha256"],
+      "properties": {
+        "kind": { "enum": ["embedded-archive", "source-archive"] },
+        "filename": { "$ref": "#/$defs/filename" },
+        "url": { "$ref": "#/$defs/httpsSource" },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "wheelFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["platforms", "filename", "url", "sha256"],
+      "properties": {
+        "platforms": { "$ref": "#/$defs/platforms" },
+        "filename": {
+          "allOf": [
+            { "$ref": "#/$defs/filename" },
+            { "type": "string", "pattern": "\\.whl$" }
+          ]
+        },
+        "url": { "$ref": "#/$defs/httpsSource" },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "wheelLockEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project", "version", "kind", "files"],
+      "properties": {
+        "project": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^\\d+(?:\\.\\d+)*$"
+        },
+        "kind": { "const": "wheel" },
+        "files": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/wheelFile" }
+        }
+      }
+    },
+    "python": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "license", "artifacts"],
+      "properties": {
+        "version": { "const": "3.14.6" },
+        "license": { "const": "PSF-2.0" },
+        "artifacts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["windows-x64", "linux-x64"],
+          "properties": {
+            "windows-x64": {
+              "allOf": [
+                { "$ref": "#/$defs/sourceArtifact" },
+                { "type": "object", "properties": { "kind": { "const": "embedded-archive" } } }
+              ]
+            },
+            "linux-x64": {
+              "allOf": [
+                { "$ref": "#/$defs/sourceArtifact" },
+                { "type": "object", "properties": { "kind": { "const": "source-archive" } } }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "gcovr": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "license", "wheels"],
+      "properties": {
+        "version": { "const": "8.6" },
+        "license": { "const": "BSD-3-Clause" },
+        "wheels": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/wheelLockEntry" }
+        }
+      }
+    },
+    "linux": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["builder", "glibcBaseline", "muslPolicy"],
+      "properties": {
+        "builder": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["image", "sourceUrl"],
+          "properties": {
+            "image": {
+              "const": "quay.io/pypa/manylinux_2_28_x86_64@sha256:c7123a4aebb153c1e45b8152f07a64bd950d65e630cfb633a029cc45ee21897c"
+            },
+            "sourceUrl": { "$ref": "#/$defs/httpsSource" }
+          }
+        },
+        "glibcBaseline": { "const": "2.28" },
+        "muslPolicy": { "const": "unsupported" }
+      }
+    },
+    "resolvedOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "kind"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9][A-Za-z0-9._+/-]*$"
+        },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "kind": { "const": "regular-file" }
+      }
+    }
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:unit-test-ide:protocol:v1.2:artifact",
+  "title": "ArtifactMetadataV12",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["artifactId", "taskId", "kind", "mimeType", "sizeBytes", "sha256", "createdAt", "uri"],
+  "properties": {
+    "artifactId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "taskId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "kind": {
+      "enum": [
+        "task-summary",
+        "build-summary",
+        "execution-plan",
+        "diagnostics",
+        "stdout",
+        "stderr"
+      ]
+    },
+    "mimeType": {
+      "enum": [
+        "application/json",
+        "application/x-ndjson",
+        "application/octet-stream"
+      ]
+    },
+    "sizeBytes": { "type": "integer", "minimum": 0 },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "uri": { "type": "string", "format": "uri" }
+  }
+}

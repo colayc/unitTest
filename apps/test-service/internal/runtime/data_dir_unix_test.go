@@ -8,6 +8,17 @@ import (
 	"testing"
 )
 
+func assertOwnerOnlyDirectoryForTest(t *testing.T, path string) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat owner-only directory %q: %v", path, err)
+	}
+	if got := info.Mode().Perm(); got != 0o700 {
+		t.Fatalf("owner-only directory %q mode = %04o, want 0700", path, got)
+	}
+}
+
 func TestPrepareDataDirRejectsPermissiveUnixMode(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "permissive")
 	if err := os.Mkdir(root, 0o755); err != nil {

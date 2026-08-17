@@ -1,0 +1,36 @@
+{
+  "protocolVersion": "1.2",
+  "kind": "response",
+  "messageId": "0123456789abcdef0123456789abcdef",
+  "requestId": "fedcba9876543210fedcba9876543210",
+  "method": "workspace/inspect",
+  "sentAt": "2026-07-26T00:00:00Z",
+  "payload": {
+    "workspaceUri": "file:///workspace",
+    "workspaceGeneration": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "capabilities": { "workspaceInspect": true, "targetList": true, "cmakeBuild": true },
+    "toolchains": [{
+      "toolchainId": "gcc-0123456789abcdef",
+      "family": "gcc",
+      "version": "15.1.0",
+      "targetTriple": "x86_64-linux-gnu",
+      "hostArchitecture": "x64",
+      "targetArchitecture": "x64",
+      "generators": ["Ninja", "Unix Makefiles"],
+      "capabilities": { "coverageDrivers": ["gcov"] }
+    }],
+    "diagnostics": [],
+    "projects": [{
+      "projectId": "example-project",
+      "sourceUri": "file:///workspace",
+      "buildProfiles": [{
+        "buildProfileId": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+        "name": "Debug",
+        "origin": "generated",
+        "toolchainId": "gcc-0123456789abcdef",
+        "generator": "Ninja",
+        "configuration": "Debug"
+      }]
+    }]
+  }
+}

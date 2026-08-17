@@ -8,6 +8,9 @@ import (
 	"time"
 
 	"unit-test-ide.local/test-service/internal/artifactstore"
+	"unit-test-ide.local/test-service/internal/build"
+	"unit-test-ide.local/test-service/internal/cmake"
+	"unit-test-ide.local/test-service/internal/discovery"
 	"unit-test-ide.local/test-service/internal/eventbroker"
 	"unit-test-ide.local/test-service/internal/protocol"
 	"unit-test-ide.local/test-service/internal/protocolmodel"
@@ -36,6 +39,7 @@ type fakeBackend struct {
 	getID         string
 	listCursor    string
 	listLimit     int
+	listKinds     []task.Kind
 	cancelID      string
 	after         int64
 	artifactTask  string
@@ -56,8 +60,20 @@ type fakeBackend struct {
 	err          error
 }
 
-func (b *fakeBackend) StartSimulation(_ context.Context, idempotencyKey string, scenario task.Scenario, timeout time.Duration) (task.Task, error) {
-	b.startKey, b.startScenario, b.startTimeout = idempotencyKey, scenario, timeout
+func (b *fakeBackend) StartSimulation(_ context.Context, input task.SimulationStart) (task.Task, error) {
+	b.startKey, b.startScenario, b.startTimeout = input.IdempotencyKey, input.Scenario, input.Timeout
+	return b.startResult, b.err
+}
+
+func (b *fakeBackend) InspectWorkspace(context.Context) (discovery.Snapshot, error) {
+	return discovery.Snapshot{}, b.err
+}
+
+func (b *fakeBackend) ListTargets(context.Context, build.TargetsRequest) ([]cmake.Target, error) {
+	return nil, b.err
+}
+
+func (b *fakeBackend) StartBuild(context.Context, build.StartRequest) (task.Task, error) {
 	return b.startResult, b.err
 }
 
@@ -66,8 +82,8 @@ func (b *fakeBackend) Get(_ context.Context, taskID string) (task.Task, error) {
 	return b.getResult, b.err
 }
 
-func (b *fakeBackend) List(_ context.Context, cursor string, limit int) (task.Page[task.Task], error) {
-	b.listCursor, b.listLimit = cursor, limit
+func (b *fakeBackend) List(_ context.Context, cursor string, limit int, kinds []task.Kind) (task.Page[task.Task], error) {
+	b.listCursor, b.listLimit, b.listKinds = cursor, limit, append([]task.Kind(nil), kinds...)
 	return b.listResult, b.err
 }
 
@@ -126,7 +142,7 @@ func TestSessionRoutesControlledTaskStart(t *testing.T) {
 func TestSessionRoutesRemainingPhase2Methods(t *testing.T) {
 	finished := fixedTime.Add(time.Minute)
 	artifact := task.Artifact{ID: id('a'), TaskID: id('1'), Kind: "task-summary", MIMEType: "application/json", Size: 3, SHA256: string(bytesOf('b', 64)), CreatedAt: fixedTime}
-	taskValue := task.Task{ID: id('1'), Scenario: task.ScenarioSuccess, Timeout: time.Second, Status: task.StatusFinished, Outcome: task.OutcomeSucceeded, CreatedAt: fixedTime, FinishedAt: &finished, LastSequence: 4}
+	taskValue := task.Task{ID: id('1'), Kind: task.KindSimulation, Scenario: task.ScenarioSuccess, Timeout: time.Second, Status: task.StatusFinished, Outcome: task.OutcomeSucceeded, CreatedAt: fixedTime, FinishedAt: &finished, LastSequence: 4}
 	backend := &fakeBackend{
 		getResult: taskValue, cancelResult: taskValue,
 		listResult: task.Page[task.Task]{Items: []task.Task{taskValue}, NextCursor: "next-task"},
@@ -364,8 +380,8 @@ func TestSessionRequiresValidV11VersionOffer(t *testing.T) {
 			payload: map[string]string{"token": "0123456789abcdef", "clientName": "test", "clientVersion": "0.2.0"},
 			code:    "INVALID_MESSAGE",
 		},
-		"mismatched offer": {
-			payload: map[string]any{"token": "0123456789abcdef", "clientName": "test", "clientVersion": "0.2.0", "supportedProtocolVersions": []string{"1.0"}},
+		"no common offer": {
+			payload: map[string]any{"token": "0123456789abcdef", "clientName": "test", "clientVersion": "0.2.0", "supportedProtocolVersions": []string{"2.0"}},
 			code:    "UNSUPPORTED_PROTOCOL",
 		},
 	}

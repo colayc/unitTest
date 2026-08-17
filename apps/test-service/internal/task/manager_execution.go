@@ -8,7 +8,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+
+	"unit-test-ide.local/test-service/internal/testdomain"
 )
 
 // NewSimulationStartRequest projects the protocol-owned simulation inputs into
@@ -145,7 +148,18 @@ func validateStartRequest(request StartRequest) error {
 			return ErrInvalidArgument
 		}
 	case KindCMakeBuild:
-		if request.Scenario != "" || request.WorkspaceGeneration == "" {
+		if request.Scenario != "" || request.WorkspaceGeneration == "" ||
+			request.TestRun != nil {
+			return ErrInvalidArgument
+		}
+	case KindTestDiscovery:
+		if request.Scenario != "" || request.WorkspaceGeneration == "" ||
+			request.TestRun != nil {
+			return ErrInvalidArgument
+		}
+	case KindTestRun:
+		if request.Scenario != "" || request.WorkspaceGeneration == "" ||
+			!validAssociatedTestRun(request.TestRun) {
 			return ErrInvalidArgument
 		}
 	default:
@@ -158,7 +172,23 @@ func cloneStartRequest(request StartRequest) StartRequest {
 	result := request
 	result.Request = append(json.RawMessage(nil), request.Request...)
 	result.Plan = cloneExecutionPlan(request.Plan)
+	if request.TestRun != nil {
+		cloned := request.TestRun.Clone()
+		result.TestRun = &cloned
+	}
 	return result
+}
+
+func validAssociatedTestRun(value *testdomain.TestRun) bool {
+	if value == nil || value.TaskID != "" || !value.CreatedAt.IsZero() ||
+		value.Status != testdomain.RunQueued {
+		return false
+	}
+	candidate := value.Clone()
+	candidate.TaskID = strings.Repeat("0", 32)
+	candidate.CreatedAt = time.Unix(0, 0).UTC()
+	validated, err := testdomain.NewTestRun(candidate)
+	return err == nil && len(validated.Results) == 0
 }
 
 func cloneExecutionPlan(plan ExecutionPlan) ExecutionPlan {
@@ -168,7 +198,30 @@ func cloneExecutionPlan(plan ExecutionPlan) ExecutionPlan {
 		result.Steps[index] = step
 		result.Steps[index].Process.Args = append([]string(nil), step.Process.Args...)
 		result.Steps[index].Process.Env = append([]string(nil), step.Process.Env...)
+		result.Steps[index].Process.EnvUnset = append(
+			[]string(nil),
+			step.Process.EnvUnset...,
+		)
+		result.Steps[index].Process.Batch =
+			cloneProcessBatch(step.Process.Batch)
 		result.Steps[index].Public.Args = append([]string(nil), step.Public.Args...)
+		result.Steps[index].State = append(json.RawMessage(nil), step.State...)
+	}
+	return result
+}
+
+func cloneProcessBatch(
+	values []ProcessBatchItem,
+) []ProcessBatchItem {
+	result := make([]ProcessBatchItem, len(values))
+	for index, value := range values {
+		result[index] = value
+		result[index].Args = append([]string(nil), value.Args...)
+		result[index].Env = append([]string(nil), value.Env...)
+		result[index].EnvUnset = append(
+			[]string(nil),
+			value.EnvUnset...,
+		)
 	}
 	return result
 }
@@ -232,7 +285,32 @@ func (m *Manager) start(request StartRequest, active map[string]*activeTask) tas
 	}()
 	steps := initialStepSnapshots(request.Plan)
 	draft := eventDraft(created.ID, EventTaskCreated, now, map[string]any{"status": StatusQueued})
-	stored, events, err := m.store.Create(context.Background(), created, steps, draft)
+	var stored Task
+	var events []Event
+	var err error
+	if request.TestRun == nil {
+		stored, events, err = m.store.Create(
+			context.Background(),
+			created,
+			steps,
+			draft,
+		)
+	} else {
+		testStore, ok := m.store.(TestTaskStore)
+		if !ok {
+			return taskResponse{err: ErrStorageUnavailable}
+		}
+		run := request.TestRun.Clone()
+		run.TaskID = created.ID
+		run.CreatedAt = now
+		stored, events, err = testStore.CreateTestTask(
+			context.Background(),
+			created,
+			steps,
+			draft,
+			run,
+		)
+	}
 	if err != nil {
 		if errors.Is(err, ErrStorageUnavailable) {
 			m.tripStorage(active)
@@ -245,13 +323,20 @@ func (m *Manager) start(request StartRequest, active map[string]*activeTask) tas
 		}
 		return taskResponse{task: stored}
 	}
+	if boundary, ok := request.Boundary.(ManagedExecutionBoundary); ok {
+		boundary.Adopt(stored.ID)
+	}
 	current := &activeTask{
 		task: stored, plan: request.Plan, boundary: request.Boundary,
+		continuation: request.Continuation, resultInterpreter: request.ResultInterpreter,
 		timerStop: make(chan struct{}), timeoutStop: make(chan struct{}),
 		watcherStop: make(chan struct{}), execution: execution,
 	}
 	active[stored.ID] = current
 	executionRetained = true
+	if err := m.openTaskArtifacts(current, active); err != nil {
+		return taskResponse{task: current.task, err: err}
+	}
 	m.armTimeout(current)
 
 	if !m.publishAll(events) {
@@ -266,9 +351,85 @@ func (m *Manager) start(request StartRequest, active map[string]*activeTask) tas
 		return taskResponse{task: current.task, err: err}
 	}
 	if current.task.Status == StatusFinished && current.process == nil {
-		delete(active, stored.ID)
+		removeActiveTask(active, stored.ID)
 	}
 	return taskResponse{task: current.task}
+}
+
+func (m *Manager) resumeQueued(
+	request ResumeRequest,
+	active map[string]*activeTask,
+) taskResponse {
+	if !m.Healthy() {
+		return taskResponse{err: ErrStorageUnavailable}
+	}
+	if active[request.Task.ID] != nil {
+		return taskResponse{err: ErrConflict}
+	}
+	stored, err := m.store.Get(context.Background(), request.Task.ID)
+	if err != nil {
+		if errors.Is(err, ErrStorageUnavailable) {
+			m.tripStorage(active)
+		}
+		return taskResponse{err: err}
+	}
+	if !sameQueuedTaskIdentity(stored, request.Task) {
+		return taskResponse{task: stored, err: ErrConflict}
+	}
+	planStore, ok := m.store.(QueuedPlanStore)
+	if !ok {
+		m.tripStorage(active)
+		return taskResponse{task: stored, err: ErrStorageUnavailable}
+	}
+	stored, err = planStore.ReplaceQueuedPlan(
+		context.Background(), stored.ID, stored.RequestHash,
+		request.Plan.Fingerprint, initialStepSnapshots(request.Plan),
+	)
+	if err != nil {
+		if errors.Is(err, ErrStorageUnavailable) {
+			m.tripStorage(active)
+		}
+		return taskResponse{task: stored, err: err}
+	}
+	execution := newExecutionSignal()
+	m.executionSignals.Store(stored.ID, execution)
+	if m.closing.Load() {
+		execution.claim(OutcomeInterrupted)
+	}
+	if boundary, ok := request.Boundary.(ManagedExecutionBoundary); ok {
+		boundary.Adopt(stored.ID)
+	}
+	current := &activeTask{
+		task: stored, plan: request.Plan, boundary: request.Boundary,
+		continuation: request.Continuation, resultInterpreter: request.ResultInterpreter,
+		timerStop: make(chan struct{}), timeoutStop: make(chan struct{}),
+		watcherStop: make(chan struct{}), execution: execution,
+	}
+	active[stored.ID] = current
+	if err := m.openTaskArtifacts(current, active); err != nil {
+		return taskResponse{task: current.task, err: err}
+	}
+	m.armTimeout(current)
+	if err := m.startNextStep(current, active); err != nil {
+		return taskResponse{task: current.task, err: err}
+	}
+	if current.task.Status == StatusFinished && current.process == nil {
+		removeActiveTask(active, stored.ID)
+	}
+	return taskResponse{task: current.task}
+}
+
+func sameQueuedTaskIdentity(stored, supplied Task) bool {
+	return stored.ID == supplied.ID &&
+		stored.IdempotencyKey == supplied.IdempotencyKey &&
+		stored.RequestHash == supplied.RequestHash &&
+		resumableQueuedKind(stored.Kind) &&
+		stored.Status == StatusQueued &&
+		supplied.Kind == stored.Kind &&
+		supplied.Status == StatusQueued &&
+		stored.WorkspaceGeneration == supplied.WorkspaceGeneration &&
+		stored.Timeout == supplied.Timeout &&
+		string(stored.Request) == string(supplied.Request)
 }
 
 func (m *Manager) startNextStep(current *activeTask, active map[string]*activeTask) error {
@@ -334,12 +495,14 @@ func (m *Manager) startNextStep(current *activeTask, active map[string]*activeTa
 	runningStep := runningTask.Steps[current.nextStep]
 	runningStep.Status = StepRunning
 	runningStep.StartedAt = timePointer(startedAt)
-	events = append(events, eventDraft(
-		current.task.ID,
-		EventTaskStepStarted,
-		startedAt,
-		stepEventPayload(runningStep),
-	))
+	if current.task.Kind == KindCMakeBuild {
+		events = append(events, eventDraft(
+			current.task.ID,
+			EventTaskStepStarted,
+			startedAt,
+			stepEventPayload(runningStep),
+		))
+	}
 	stored, committed, err := m.store.Apply(context.Background(), Mutation{
 		Task: runningTask, Expected: expectedStatus,
 		Steps:  []StepMutation{{Step: runningStep, Expected: StepPending}},
@@ -427,10 +590,12 @@ func (m *Manager) persistPreparedLease(
 }
 
 func validateExecutionPlan(plan ExecutionPlan, boundary ExecutionBoundary) error {
-	if plan.Fingerprint == "" || plan.Fingerprint != FingerprintPlan(plan) {
+	if plan.Version != 1 ||
+		plan.Fingerprint == "" ||
+		plan.Fingerprint != FingerprintPlan(plan) {
 		return ErrInvalidArgument
 	}
-	return ValidatePlan(plan, boundary)
+	return validateExecutionSteps(plan.Steps, boundary)
 }
 
 func (m *Manager) setCurrentProcess(current *activeTask, process ManagedProcess) {
@@ -463,7 +628,7 @@ func (m *Manager) cleanupPreparedProcess(current *activeTask) {
 func (m *Manager) finishPendingStep(current *activeTask, active map[string]*activeTask) error {
 	_, err := m.finishExecution(current, ProcessResult{Err: errors.New("step preparation failed")}, OutcomeInfrastructureFailed, true, active)
 	if err == nil && m.canRemove(current) {
-		delete(active, current.task.ID)
+		removeActiveTask(active, current.task.ID)
 	}
 	return err
 }
@@ -473,10 +638,20 @@ func (m *Manager) finish(current *activeTask, result ProcessResult, active map[s
 	if active[current.task.ID] == nil {
 		return
 	}
+	m.closeDiagnosticParser(current, active)
+	if active[current.task.ID] == nil {
+		return
+	}
 	m.stageProcessCompletion(current, result, false)
 }
 
-func (m *Manager) persistSuccessfulStep(current *activeTask, result ProcessResult, active map[string]*activeTask) error {
+func (m *Manager) persistSuccessfulStep(
+	current *activeTask,
+	result ProcessResult,
+	nextPlan ExecutionPlan,
+	appended []StepSnapshot,
+	active map[string]*activeTask,
+) error {
 	if current.process != nil && !current.closeComplete {
 		return ErrConflict
 	}
@@ -487,10 +662,21 @@ func (m *Manager) persistSuccessfulStep(current *activeTask, result ProcessResul
 	step.ExitCode = intPointer(result.ExitCode)
 	updatedTask := current.task
 	updatedTask.ActiveStep = ""
-	stored, events, err := m.store.Apply(context.Background(), Mutation{
+	updatedTask.PlanFingerprint = nextPlan.Fingerprint
+	eventDrafts := []EventDraft(nil)
+	if current.task.Kind == KindCMakeBuild {
+		eventDrafts = append(eventDrafts, eventDraft(
+			current.task.ID,
+			EventTaskStepFinished,
+			finishedAt,
+			stepEventPayload(step),
+		))
+	}
+	stored, committed, err := m.store.Apply(context.Background(), Mutation{
 		Task: updatedTask, Expected: current.task.Status,
 		Steps:       []StepMutation{{Step: step, Expected: StepRunning}},
-		Events:      []EventDraft{eventDraft(current.task.ID, EventTaskStepFinished, finishedAt, stepEventPayload(step))},
+		AppendSteps: appended,
+		Events:      eventDrafts,
 		DeleteLease: true,
 	})
 	if err != nil {
@@ -502,8 +688,9 @@ func (m *Manager) persistSuccessfulStep(current *activeTask, result ProcessResul
 		return err
 	}
 	current.task = stored
+	current.plan = nextPlan
 	current.leasePersisted = false
-	return publishCommitted(m, events, active)
+	return publishCommitted(m, committed, active)
 }
 
 func (m *Manager) finishExecution(
@@ -548,16 +735,77 @@ func (m *Manager) persistCommittedCreateFailure(
 			return current.task, err
 		}
 		steps := terminalStepMutations(current, ProcessResult{}, outcome, false, finishedAt)
+		events := []EventDraft{
+			eventDraft(current.task.ID, EventTaskFinished, finishedAt, map[string]any{"outcome": outcome}),
+		}
+		artifacts := []Artifact(nil)
+		var finishedRun *testdomain.TestRun
+		if current.task.Kind == KindTestRun {
+			completion, completionErr := m.prepareDomainCompletion(
+				current,
+				finished,
+				finishedAt,
+				outcome,
+			)
+			if completionErr != nil {
+				return current.task, completionErr
+			}
+			artifacts, completionErr = m.finalizeTaskArtifacts(
+				context.Background(),
+				current,
+				current.task,
+				finishedAt,
+				outcome,
+				steps,
+			)
+			if completionErr != nil {
+				return current.task, completionErr
+			}
+			events = make(
+				[]EventDraft,
+				0,
+				len(artifacts)+len(completion.Events)+1,
+			)
+			for _, artifact := range artifacts {
+				events = append(events, eventDraft(
+					current.task.ID,
+					EventArtifactCreated,
+					finishedAt,
+					map[string]any{
+						"artifactId": artifact.ID,
+						"kind":       artifact.Kind,
+					},
+				))
+			}
+			for _, domainEvent := range completion.Events {
+				events = append(events, EventDraft{
+					TaskID: current.task.ID,
+					Type:   domainEvent.Type,
+					At:     finishedAt,
+					Payload: append(
+						json.RawMessage(nil),
+						domainEvent.Payload...,
+					),
+				})
+			}
+			events = append(events, eventDraft(
+				current.task.ID,
+				EventTaskFinished,
+				finishedAt,
+				map[string]any{"outcome": outcome},
+			))
+			finishedRun = completion.TestRun
+		}
 		stored, _, err := m.store.Apply(context.Background(), Mutation{
 			Task: finished, Expected: StatusQueued, Steps: steps,
-			Events: []EventDraft{
-				eventDraft(current.task.ID, EventTaskFinished, finishedAt, map[string]any{"outcome": outcome}),
-			},
+			Events: events, Artifacts: artifacts,
+			FinishRun: finishedRun,
 		})
 		if err == nil {
 			current.task = stored
+			releaseExecutionBoundary(current)
 			m.stopActive(current)
-			delete(active, current.task.ID)
+			removeActiveTask(active, current.task.ID)
 			return stored, nil
 		}
 		if errors.Is(err, ErrConflict) && attempt == 0 {
@@ -565,7 +813,7 @@ func (m *Manager) persistCommittedCreateFailure(
 		}
 		current.recoveryRequired = true
 		m.stopActive(current)
-		delete(active, current.task.ID)
+		removeActiveTask(active, current.task.ID)
 		if !errors.Is(err, ErrConflict) {
 			m.tripStorage(active)
 		}
@@ -608,13 +856,40 @@ func (m *Manager) persistTerminal(
 		current.recoveryRequired = true
 		m.stopActive(current)
 		if current.process == nil {
-			delete(active, current.task.ID)
+			removeActiveTask(active, current.task.ID)
 		} else {
 			m.maybeStartClose(current)
 		}
 		return current.task, ErrConflict
 	}
 	panic("unreachable")
+}
+
+func releaseExecutionBoundary(current *activeTask) {
+	if current == nil || current.boundaryReleased {
+		return
+	}
+	current.boundaryReleased = true
+	if boundary, ok := current.boundary.(ManagedExecutionBoundary); ok {
+		_ = boundary.Release()
+	}
+}
+
+func removeActiveTask(active map[string]*activeTask, taskID string) {
+	current := active[taskID]
+	if current != nil {
+		abortArtifactSink(current)
+		releaseExecutionBoundary(current)
+	}
+	delete(active, taskID)
+}
+
+func abortArtifactSink(current *activeTask) {
+	if current == nil || current.artifactSink == nil {
+		return
+	}
+	_ = current.artifactSink.Abort(context.Background())
+	current.artifactSink = nil
 }
 
 func terminalStepMutations(
@@ -680,11 +955,20 @@ func (m *Manager) persistFinished(
 	if err != nil {
 		return current, err
 	}
-	artifactID := m.newID()
-	artifact, artifactErr := m.commitTaskSummary(
+	completion, completionErr := m.prepareDomainCompletion(
+		owner,
+		finished,
+		finishedAt,
+		outcome,
+	)
+	if completionErr != nil {
+		m.tripStorage(active)
+		return current, ErrStorageUnavailable
+	}
+	artifacts, artifactErr := m.finalizeTaskArtifacts(
 		context.Background(),
+		owner,
 		current,
-		artifactID,
 		finishedAt,
 		outcome,
 		steps,
@@ -693,8 +977,9 @@ func (m *Manager) persistFinished(
 		m.tripStorage(active)
 		return current, ErrStorageUnavailable
 	}
-	events := make([]EventDraft, 0, 3)
-	if step, ok := finishedRunningStep(steps); ok {
+	events := make([]EventDraft, 0, len(artifacts)+2)
+	if step, ok := finishedRunningStep(steps); ok &&
+		current.Kind == KindCMakeBuild {
 		events = append(events, eventDraft(
 			current.ID,
 			EventTaskStepFinished,
@@ -702,15 +987,32 @@ func (m *Manager) persistFinished(
 			stepEventPayload(step),
 		))
 	}
+	for _, artifact := range artifacts {
+		events = append(events, eventDraft(
+			current.ID,
+			EventArtifactCreated,
+			finishedAt,
+			map[string]any{"artifactId": artifact.ID, "kind": artifact.Kind},
+		))
+	}
+	for _, domainEvent := range completion.Events {
+		events = append(events, EventDraft{
+			TaskID: current.ID,
+			Type:   domainEvent.Type,
+			At:     finishedAt,
+			Payload: append(
+				json.RawMessage(nil),
+				domainEvent.Payload...,
+			),
+		})
+	}
 	events = append(events,
-		eventDraft(current.ID, EventArtifactCreated, finishedAt, map[string]any{
-			"artifactId": artifact.ID, "kind": artifact.Kind,
-		}),
 		eventDraft(current.ID, EventTaskFinished, finishedAt, map[string]any{"outcome": outcome}),
 	)
 	stored, committed, err := m.store.Apply(context.Background(), Mutation{
 		Task: finished, Expected: current.Status, Steps: steps, Events: events,
-		DeleteLease: deleteLease, Artifacts: []Artifact{artifact},
+		DeleteLease: deleteLease, Artifacts: artifacts,
+		FinishRun: completion.TestRun,
 	})
 	if err != nil {
 		if !errors.Is(err, ErrConflict) {
@@ -719,6 +1021,7 @@ func (m *Manager) persistFinished(
 		return current, err
 	}
 	owner.task = stored
+	releaseExecutionBoundary(owner)
 	if deleteLease && owner.process != nil {
 		owner.leasePersisted = false
 	}
@@ -727,6 +1030,56 @@ func (m *Manager) persistFinished(
 		return stored, ErrStorageUnavailable
 	}
 	return stored, nil
+}
+
+func (m *Manager) prepareDomainCompletion(
+	owner *activeTask,
+	current Task,
+	finishedAt time.Time,
+	outcome Outcome,
+) (DomainCompletion, error) {
+	if owner == nil {
+		return DomainCompletion{}, ErrInvalidArgument
+	}
+	preparer, ok := owner.resultInterpreter.(CompletionPreparer)
+	if !ok {
+		return DomainCompletion{}, nil
+	}
+	if owner.artifactSink == nil {
+		return DomainCompletion{}, ErrStorageUnavailable
+	}
+	return callCompletionPreparer(
+		preparer,
+		current,
+		finishedAt,
+		outcome,
+		owner.artifactSink,
+		m.newID,
+	)
+}
+
+func callCompletionPreparer(
+	preparer CompletionPreparer,
+	current Task,
+	finishedAt time.Time,
+	outcome Outcome,
+	sink ArtifactSink,
+	newID IDGenerator,
+) (completion DomainCompletion, resultErr error) {
+	defer func() {
+		if recover() != nil {
+			completion = DomainCompletion{}
+			resultErr = errors.New("completion preparer panicked")
+		}
+	}()
+	return preparer.PrepareCompletion(
+		context.Background(),
+		cloneRuntimeTask(current),
+		finishedAt,
+		outcome,
+		sink,
+		newID,
+	)
 }
 
 func finishedRunningStep(mutations []StepMutation) (StepSnapshot, bool) {

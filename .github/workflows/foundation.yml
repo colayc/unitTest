@@ -5,14 +5,15 @@ on:
   push:
     branches: [master]
 
+permissions:
+  contents: read
+
 jobs:
-  verify:
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, ubuntu-latest]
-    runs-on: ${{ matrix.os }}
+  verify-windows:
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 60
+    env:
+      UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS: msvc,clang-cl
     steps:
       - uses: actions/checkout@v6
       - uses: pnpm/action-setup@v4
@@ -29,4 +30,93 @@ jobs:
           cache-dependency-path: apps/test-service/go.sum
       - run: pnpm install --frozen-lockfile
       - run: pnpm verify
-      - run: git diff --exit-code
+      - id: coverage-manifest
+        shell: pwsh
+        run: |
+          $digest = (Get-FileHash -Algorithm SHA256 -LiteralPath 'tools/coverage-bundle/manifest.json').Hash.ToLowerInvariant()
+          "digest=$digest" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - id: coverage-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            .superpowers/cache/coverage-bundle
+            .superpowers/runtime/coverage-bundle
+          key: coverage-bundle-windows-x64-${{ steps.coverage-manifest.outputs.digest }}
+      - if: steps.coverage-cache.outputs.cache-hit != 'true'
+        run: pnpm prepare:coverage-bundle
+      - run: pnpm check:coverage-bundle
+      - run: pnpm --filter @unit-test-ide/service-probe test:coverage-bundle
+      - run: pnpm prepare:cmake-bundle
+      - run: pnpm test:e2e:native
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-toolchain-windows-${{ github.run_attempt }}
+          path: .native-e2e/artifacts/windows/toolchain-report.json
+          if-no-files-found: error
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-bundle-windows-${{ github.run_attempt }}
+          path: .native-e2e/artifacts/windows/coverage-bundle-report.json
+          if-no-files-found: error
+      - if: always()
+        run: git diff --exit-code
+
+  verify-linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS: gcc,clang
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.4.0
+          run_install: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: apps/test-service/go.sum
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm verify
+      - id: coverage-manifest
+        shell: bash
+        run: |
+          digest="$(sha256sum tools/coverage-bundle/manifest.json | cut -d' ' -f1)"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - id: coverage-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            .superpowers/cache/coverage-bundle
+            .superpowers/runtime/coverage-bundle
+          key: coverage-bundle-linux-x64-${{ steps.coverage-manifest.outputs.digest }}
+      - if: steps.coverage-cache.outputs.cache-hit != 'true'
+        run: pnpm prepare:coverage-bundle
+      - run: pnpm check:coverage-bundle
+      - run: pnpm --filter @unit-test-ide/service-probe test:coverage-bundle
+      - run: pnpm prepare:cmake-bundle
+      # Exercise the real Unix Socket service contract; host smoke remains an honest SKIP without CODE_OSS_EXECUTABLE.
+      - run: node tools/service-probe/build-service.mjs
+      - run: pnpm --filter code-oss-extension test:service-smoke
+      - run: pnpm --filter code-oss-extension test:host
+      - run: pnpm test:e2e:native
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-toolchain-linux-${{ github.run_attempt }}
+          path: .native-e2e/artifacts/linux/toolchain-report.json
+          if-no-files-found: error
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-bundle-linux-${{ github.run_attempt }}
+          path: .native-e2e/artifacts/linux/coverage-bundle-report.json
+          if-no-files-found: error
+      - if: always()
+        run: git diff --exit-code

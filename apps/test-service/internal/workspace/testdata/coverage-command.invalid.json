@@ -1,0 +1,21 @@
+{
+  "version": 3,
+  "projects": [
+    {
+      "id": "app",
+      "sourceDir": ".",
+      "tests": {
+        "containers": []
+      }
+    }
+  ],
+  "coverageProfiles": [
+    {
+      "id": "coverage-debug",
+      "baseBuildProfileId": "debug-clang",
+      "include": ["src/**", "include/**"],
+      "exclude": ["third_party/**", "tests/**"],
+      "command": "llvm-cov export"
+    }
+  ]
+}

@@ -1,0 +1,2 @@
+src/main.cpp:8:4: warning: conversion changes value [-Wconversion]
+src/main.cpp:9:2: error: expected ';' before '}' token

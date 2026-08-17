@@ -61,7 +61,7 @@ func (platform *unixPlatform) Start(spec processcontrol.Spec, stdout, stderr io.
 	}
 	cmd := exec.Command(spec.Executable, spec.Args...)
 	cmd.Dir = spec.Dir
-	cmd.Env = targetEnvironment(spec.Env)
+	cmd.Env = targetEnvironment(spec.Env, spec.EnvUnset)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
@@ -92,16 +92,15 @@ func killAndReapFailedTarget(cmd *exec.Cmd) {
 	_ = cmd.Wait()
 }
 
-func targetEnvironment(extra []string) []string {
-	combined := append(os.Environ(), extra...)
-	result := make([]string, 0, len(combined))
-	for _, entry := range combined {
-		if strings.HasPrefix(entry, "UNIT_TEST_IDE_STATUS_HANDLE=") {
-			continue
-		}
-		result = append(result, entry)
+func targetEnvironment(
+	extra []string,
+	unsetValues ...[]string,
+) []string {
+	var unset []string
+	if len(unsetValues) != 0 {
+		unset = unsetValues[0]
 	}
-	return result
+	return processcontrol.SanitizeEnvironment(extra, unset)
 }
 
 func (target *unixTarget) PID() int          { return target.cmd.Process.Pid }

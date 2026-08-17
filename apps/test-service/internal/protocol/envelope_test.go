@@ -8,9 +8,12 @@ import (
 	"unit-test-ide.local/test-service/internal/protocol"
 )
 
-func TestSupportedVersionRecognizesV10AndV11(t *testing.T) {
-	if !protocol.SupportedVersion(protocol.Version10) || !protocol.SupportedVersion(protocol.Version11) {
-		t.Fatal("expected protocol 1.0 and 1.1 to be supported")
+func TestSupportedVersionRecognizesEveryShippedVersion(t *testing.T) {
+	if !protocol.SupportedVersion(protocol.Version10) ||
+		!protocol.SupportedVersion(protocol.Version11) ||
+		!protocol.SupportedVersion(protocol.Version12) ||
+		!protocol.SupportedVersion(protocol.Version13) {
+		t.Fatal("expected protocol 1.0 through 1.3 to be supported")
 	}
 	if protocol.SupportedVersion("2.0") {
 		t.Fatal("expected unknown protocol version to be rejected")
@@ -36,11 +39,11 @@ func TestFailureFallsBackToV10ForUnknownVersion(t *testing.T) {
 	}
 }
 
-func TestNewEventBuildsV11Envelope(t *testing.T) {
+func TestNewEventUsesRequestedVersion(t *testing.T) {
 	at := time.Date(2026, 7, 22, 1, 2, 3, 4, time.FixedZone("test", 8*60*60))
 	payload := json.RawMessage(`{"state":"running"}`)
-	event := protocol.NewEvent(42, "task.updated", "task-1", at, payload)
-	if event.ProtocolVersion != protocol.Version11 || event.Kind != "event" || event.Sequence != 42 || event.Event != "task.updated" || event.TaskID != "task-1" || event.PayloadVersion != 1 {
+	event := protocol.NewEvent(protocol.Version12, 42, "task.updated", "task-1", at, payload)
+	if event.ProtocolVersion != protocol.Version12 || event.Kind != "event" || event.Sequence != 42 || event.Event != "task.updated" || event.TaskID != "task-1" || event.PayloadVersion != 1 {
 		t.Fatalf("unexpected event: %#v", event)
 	}
 	if event.SentAt != "2026-07-21T17:02:03.000000004Z" || string(event.Payload) != string(payload) {

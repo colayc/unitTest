@@ -50,6 +50,59 @@ func applyStepMutations(ctx context.Context, tx *sql.Tx, taskID string, mutation
 	return nil
 }
 
+func appendSteps(
+	ctx context.Context,
+	tx *sql.Tx,
+	taskID string,
+	steps []task.StepSnapshot,
+) error {
+	if len(steps) == 0 {
+		return nil
+	}
+	var ordinal int
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT COALESCE(MAX(step_ordinal) + 1, 0)
+		FROM task_steps WHERE task_id=?`,
+		taskID,
+	).Scan(&ordinal); err != nil {
+		return storageError("read next task step ordinal", err)
+	}
+	for _, step := range steps {
+		var duplicate int
+		if err := tx.QueryRowContext(
+			ctx,
+			`SELECT COUNT(*) FROM task_steps
+			WHERE task_id=? AND step_id=?`,
+			taskID,
+			step.ID,
+		).Scan(&duplicate); err != nil {
+			return storageError("check appended task step", err)
+		}
+		if duplicate != 0 {
+			return task.ErrConflict
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO task_steps(
+			task_id, step_ordinal, step_id, step_kind, status, started_at,
+			finished_at, exit_code, error_code
+		) VALUES(?,?,?,?,?,?,?,?,?)`,
+			taskID,
+			ordinal,
+			step.ID,
+			string(step.Kind),
+			string(step.Status),
+			nullableTime(step.StartedAt),
+			nullableTime(step.FinishedAt),
+			nullableInt(step.ExitCode),
+			step.ErrorCode,
+		); err != nil {
+			return storageError("append task step", err)
+		}
+		ordinal++
+	}
+	return nil
+}
+
 func hydrateTaskSteps(ctx context.Context, queryer stepQueryer, value *task.Task) error {
 	rows, err := queryer.QueryContext(ctx, `SELECT
 		step_id, step_kind, status, started_at, finished_at, exit_code, error_code
@@ -129,6 +182,22 @@ func validateStepMutations(mutations []task.StepMutation) error {
 	return nil
 }
 
+func validateAppendedSteps(steps []task.StepSnapshot) error {
+	if err := validateSteps(steps); err != nil {
+		return err
+	}
+	for _, step := range steps {
+		if step.Status != task.StepPending ||
+			step.StartedAt != nil ||
+			step.FinishedAt != nil ||
+			step.ExitCode != nil ||
+			step.ErrorCode != "" {
+			return task.ErrInvalidArgument
+		}
+	}
+	return nil
+}
+
 func validStepSnapshot(step task.StepSnapshot) bool {
 	return validStoredStepID(step.ID) && validStepKind(step.Kind) && validStepStatus(step.Status)
 }
@@ -151,7 +220,12 @@ func validStoredStepID(value string) bool {
 
 func validStepKind(value task.StepKind) bool {
 	switch value {
-	case task.StepSimulation, task.StepConfigure, task.StepBuild:
+	case task.StepSimulation, task.StepConfigure, task.StepBuild,
+		task.StepTestDiscovery, task.StepTestRun,
+		task.StepCoverageConfigure, task.StepCoverageBuild,
+		task.StepCoverageTest, task.StepCoverageMerge,
+		task.StepCoverageNormalize, task.StepCoverageReport,
+		task.StepCoveragePublish:
 		return true
 	default:
 		return false

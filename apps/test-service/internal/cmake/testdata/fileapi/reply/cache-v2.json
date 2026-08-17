@@ -1,0 +1,12 @@
+{
+  "kind": "cache",
+  "version": {"major": 2, "minor": 0},
+  "entries": [
+    {
+      "name": "CMAKE_BUILD_TYPE",
+      "value": "Debug",
+      "type": "STRING",
+      "properties": []
+    }
+  ]
+}

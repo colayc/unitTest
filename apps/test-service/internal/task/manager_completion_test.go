@@ -45,7 +45,6 @@ func TestManagerStartErrorCloseFailureDefersTerminalVisibility(t *testing.T) {
 	if got := eventTypes(f.store.eventsForTask(started.ID)); !reflect.DeepEqual(got, []task.EventType{
 		task.EventTaskCreated,
 		task.EventTaskStarted,
-		task.EventTaskStepStarted,
 	}) {
 		t.Fatalf("events before Close retry = %v", got)
 	}

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"unit-test-ide.local/test-service/internal/task"
 )
@@ -33,6 +34,16 @@ func TestValidatePlanRejectsUnsafeSpecs(t *testing.T) {
 		{name: "NUL environment", plan: planWith(func(step *task.ExecutionStep) { step.Process.Env = []string{"CMAKE_GENERATOR=Ni\x00nja"} })},
 		{name: "invalid environment key", plan: planWith(func(step *task.ExecutionStep) { step.Process.Env = []string{"CMAKE-GENERATOR=Ninja"} })},
 		{name: "service token environment key", plan: planWith(func(step *task.ExecutionStep) { step.Process.Env = []string{"UNIT_TEST_SERVICE_TOKEN=secret"} })},
+		{name: "service-owned environment prefix", plan: planWith(func(step *task.ExecutionStep) {
+			step.Process.Env = []string{"UTIDE_PRIVATE=secret"}
+		})},
+		{name: "environment unset collision", plan: planWith(func(step *task.ExecutionStep) {
+			step.Process.Env = []string{"PATH=trusted"}
+			step.Process.EnvUnset = []string{"PATH"}
+		})},
+		{name: "invalid environment unset", plan: planWith(func(step *task.ExecutionStep) {
+			step.Process.EnvUnset = []string{"INVALID-NAME"}
+		})},
 		{name: "nil boundary", plan: planWith(func(*task.ExecutionStep) {}), useBoundary: true},
 		{name: "typed nil boundary", plan: planWith(func(*task.ExecutionStep) {}), boundary: (*nilFakeBoundary)(nil), useBoundary: true},
 	}
@@ -70,6 +81,236 @@ func TestValidatePlanAcceptsValidTwoStepPlan(t *testing.T) {
 	}
 }
 
+func TestValidatePlanInvokesOptionalProcessTargetBoundary(t *testing.T) {
+	boundary := recordingTargetBoundary{fakeBoundary: fakeBoundary{
+		executables: []string{"cmake"}, roots: []string{"src"},
+	}}
+	plan := task.ExecutionPlan{Version: 1, Steps: []task.ExecutionStep{{
+		ID: "configure", Kind: task.StepConfigure,
+		Process: task.ProcessSpec{Executable: "cmake", Args: []string{"-S", "src"}, Dir: "src"},
+	}}}
+	if err := task.ValidatePlan(plan, &boundary); err != nil {
+		t.Fatalf("ValidatePlan() error = %v", err)
+	}
+	if boundary.calls != 1 {
+		t.Fatalf("ValidateProcessTarget calls = %d, want 1", boundary.calls)
+	}
+}
+
+func TestValidatePlanAcceptsServiceOwnedCTestStepKinds(t *testing.T) {
+	for _, kind := range []task.StepKind{
+		task.StepTestDiscovery,
+		task.StepTestRun,
+	} {
+		step := task.ExecutionStep{
+			ID:   "ctest",
+			Kind: kind,
+			Process: task.ProcessSpec{
+				Executable: "ctest",
+				Args:       []string{"--test-dir", "build"},
+				Env:        []string{},
+				Dir:        "build",
+			},
+		}
+		if err := task.ValidatePlan(
+			task.ExecutionPlan{Version: 1, Steps: []task.ExecutionStep{step}},
+			fakeBoundary{executables: []string{"ctest"}, roots: []string{"build"}},
+		); err != nil {
+			t.Fatalf("ValidatePlan(%s) error = %v", kind, err)
+		}
+	}
+}
+
+func TestCoverageTaskWireVocabularyLiterals(t *testing.T) {
+	values := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{name: "KindCoverageRun", got: string(task.KindCoverageRun), want: "coverage_run"},
+		{name: "StepCoverageConfigure", got: string(task.StepCoverageConfigure), want: "coverage-configure"},
+		{name: "StepCoverageBuild", got: string(task.StepCoverageBuild), want: "coverage-build"},
+		{name: "StepCoverageTest", got: string(task.StepCoverageTest), want: "coverage-test"},
+		{name: "StepCoverageMerge", got: string(task.StepCoverageMerge), want: "coverage-merge"},
+		{name: "StepCoverageNormalize", got: string(task.StepCoverageNormalize), want: "coverage-normalize"},
+		{name: "StepCoverageReport", got: string(task.StepCoverageReport), want: "coverage-report"},
+		{name: "StepCoveragePublish", got: string(task.StepCoveragePublish), want: "coverage-publish"},
+	}
+	for _, value := range values {
+		t.Run(value.name, func(t *testing.T) {
+			if value.got != value.want {
+				t.Fatalf("%s = %q, want Protocol literal %q", value.name, value.got, value.want)
+			}
+		})
+	}
+}
+
+func TestValidatePlanAcceptsCoverageStepKindsAndFingerprintsThem(t *testing.T) {
+	kinds := []task.StepKind{
+		task.StepCoverageConfigure,
+		task.StepCoverageBuild,
+		task.StepCoverageTest,
+		task.StepCoverageMerge,
+		task.StepCoverageNormalize,
+		task.StepCoverageReport,
+		task.StepCoveragePublish,
+	}
+	boundary := fakeBoundary{executables: []string{"coverage-service"}, roots: []string{"build"}}
+	for _, kind := range kinds {
+		t.Run(string(kind), func(t *testing.T) {
+			plan := task.ExecutionPlan{Version: 1, Steps: []task.ExecutionStep{{
+				ID: "coverage", Kind: kind,
+				Process: task.ProcessSpec{Executable: "coverage-service", Dir: "build"},
+			}}}
+			if err := task.ValidatePlan(plan, boundary); err != nil {
+				t.Fatalf("ValidatePlan() error = %v", err)
+			}
+			changed := plan
+			changed.Steps = append([]task.ExecutionStep(nil), plan.Steps...)
+			changed.Steps[0].Kind = task.StepConfigure
+			if task.FingerprintPlan(plan) == task.FingerprintPlan(changed) {
+				t.Fatal("FingerprintPlan() did not change after step kind changed")
+			}
+		})
+	}
+
+	for _, kind := range []task.StepKind{"coverage-collect", "coverage-export", "coverage-file"} {
+		plan := task.ExecutionPlan{Version: 1, Steps: []task.ExecutionStep{{
+			ID: "coverage", Kind: kind,
+			Process: task.ProcessSpec{Executable: "coverage-service", Dir: "build"},
+		}}}
+		if err := task.ValidatePlan(plan, boundary); !errors.Is(err, task.ErrInvalidArgument) {
+			t.Fatalf("ValidatePlan(%q) error = %v, want ErrInvalidArgument", kind, err)
+		}
+	}
+}
+
+func TestValidatePlanAcceptsBoundedProcessBatchAndFingerprintsIt(
+	t *testing.T,
+) {
+	step := task.ExecutionStep{
+		ID: "run-wave-000001", Kind: task.StepTestRun,
+		Process: task.ProcessSpec{
+			Batch: []task.ProcessBatchItem{
+				{
+					ID: "test-000001", Executable: "ctest",
+					Args: []string{"-R", "first"},
+					Env:  []string{"MODE=one"},
+					Dir:  "build", Timeout: time.Second,
+				},
+				{
+					ID: "test-000002", Executable: "ctest",
+					Args:     []string{"-R", "second"},
+					EnvUnset: []string{"LEGACY_MODE"},
+					Dir:      "build", Timeout: 2 * time.Second,
+				},
+			},
+		},
+		Public: task.CommandSummary{
+			Executable: "test-wave",
+			Args: []string{
+				"test-000001",
+				"test-000002",
+			},
+		},
+	}
+	plan := task.ExecutionPlan{
+		Version: 1,
+		Steps:   []task.ExecutionStep{step},
+	}
+	boundary := fakeBoundary{
+		executables: []string{"ctest"},
+		roots:       []string{"build"},
+	}
+	if err := task.ValidatePlan(plan, boundary); err != nil {
+		t.Fatal(err)
+	}
+	changed := plan
+	changed.Steps = append(
+		[]task.ExecutionStep(nil),
+		plan.Steps...,
+	)
+	changed.Steps[0].Process.Batch = append(
+		[]task.ProcessBatchItem(nil),
+		step.Process.Batch...,
+	)
+	changed.Steps[0].Process.Batch[1].Timeout =
+		3 * time.Second
+	if task.FingerprintPlan(plan) ==
+		task.FingerprintPlan(changed) {
+		t.Fatal("batch timeout was absent from plan fingerprint")
+	}
+}
+
+func TestValidatePlanRejectsInvalidProcessBatch(t *testing.T) {
+	valid := task.ExecutionStep{
+		ID: "run-wave-000001", Kind: task.StepTestRun,
+		Process: task.ProcessSpec{
+			Batch: []task.ProcessBatchItem{{
+				ID: "test-000001", Executable: "ctest",
+				Dir: "build", Timeout: time.Second,
+			}},
+		},
+	}
+	tests := []struct {
+		name   string
+		change func(*task.ExecutionStep)
+	}{
+		{
+			name: "mixed single and batch",
+			change: func(step *task.ExecutionStep) {
+				step.Process.Executable = "ctest"
+			},
+		},
+		{
+			name: "duplicate item ID",
+			change: func(step *task.ExecutionStep) {
+				step.Process.Batch = append(
+					step.Process.Batch,
+					step.Process.Batch[0],
+				)
+			},
+		},
+		{
+			name: "sub-millisecond timeout",
+			change: func(step *task.ExecutionStep) {
+				step.Process.Batch[0].Timeout =
+					time.Microsecond
+			},
+		},
+		{
+			name: "blocked executable",
+			change: func(step *task.ExecutionStep) {
+				step.Process.Batch[0].Executable = "ninja"
+			},
+		},
+	}
+	boundary := fakeBoundary{
+		executables: []string{"ctest"},
+		roots:       []string{"build"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			step := valid
+			step.Process.Batch = append(
+				[]task.ProcessBatchItem(nil),
+				valid.Process.Batch...,
+			)
+			test.change(&step)
+			err := task.ValidatePlan(
+				task.ExecutionPlan{
+					Version: 1,
+					Steps:   []task.ExecutionStep{step},
+				},
+				boundary,
+			)
+			if !errors.Is(err, task.ErrInvalidArgument) {
+				t.Fatalf("ValidatePlan() error = %v", err)
+			}
+		})
+	}
+}
+
 func TestValidatePlanEnforcesArgumentAndEnvironmentItemLimits(t *testing.T) {
 	boundary := fakeBoundary{executables: []string{"cmake"}, roots: []string{"src"}}
 	fields := []struct {
@@ -87,7 +328,22 @@ func TestValidatePlanEnforcesArgumentAndEnvironmentItemLimits(t *testing.T) {
 			set: func(step *task.ExecutionStep, count int) {
 				step.Process.Env = make([]string, count)
 				for index := range step.Process.Env {
-					step.Process.Env[index] = "CMAKE_OPTION=value"
+					step.Process.Env[index] = fmt.Sprintf(
+						"CMAKE_OPTION_%03d=value",
+						index,
+					)
+				}
+			},
+		},
+		{
+			name: "ProcessSpec EnvUnset",
+			set: func(step *task.ExecutionStep, count int) {
+				step.Process.EnvUnset = make([]string, count)
+				for index := range step.Process.EnvUnset {
+					step.Process.EnvUnset[index] = fmt.Sprintf(
+						"VAR_%03d",
+						index,
+					)
 				}
 			},
 		},
@@ -123,7 +379,7 @@ func TestValidatePlanEnforcesArgumentAndEnvironmentItemLimits(t *testing.T) {
 
 func TestFingerprintPlanCoversExecutionFieldsAndExcludesNonExecutionFields(t *testing.T) {
 	plan := task.ExecutionPlan{Version: 1, Steps: []task.ExecutionStep{validConfigureStep()}}
-	if got, want := task.FingerprintPlan(plan), "24d3c4e47950028ec5c13edc3e78d3eaa8ebd63704c64df06ac07cab66905c49"; got != want {
+	if got, want := task.FingerprintPlan(plan), "68c6e32d3ec23957664ef8f61fc3c657f993a7952b4862023764c9b9f05fb7c8"; got != want {
 		t.Fatalf("FingerprintPlan() = %q, want fixed digest %q", got, want)
 	}
 
@@ -137,6 +393,9 @@ func TestFingerprintPlanCoversExecutionFieldsAndExcludesNonExecutionFields(t *te
 		{name: "executable", change: func(value *task.ExecutionPlan) { value.Steps[0].Process.Executable = "ninja" }},
 		{name: "arguments", change: func(value *task.ExecutionPlan) { value.Steps[0].Process.Args = []string{"--build", "build"} }},
 		{name: "environment", change: func(value *task.ExecutionPlan) { value.Steps[0].Process.Env = []string{"CMAKE_GENERATOR=Ninja"} }},
+		{name: "environment unset", change: func(value *task.ExecutionPlan) {
+			value.Steps[0].Process.EnvUnset = []string{"CMAKE_GENERATOR"}
+		}},
 		{name: "working directory", change: func(value *task.ExecutionPlan) { value.Steps[0].Process.Dir = "build" }},
 	}
 	for _, tt := range executionChanges {
@@ -214,3 +473,17 @@ type nilFakeBoundary struct{}
 
 func (*nilFakeBoundary) ValidateExecutable(string) error       { return nil }
 func (*nilFakeBoundary) ValidateWorkingDirectory(string) error { return nil }
+
+type recordingTargetBoundary struct {
+	fakeBoundary
+	calls int
+}
+
+func (boundary *recordingTargetBoundary) ValidateProcessTarget(
+	executable string,
+	arguments, environment, unset []string,
+	directory string,
+) error {
+	boundary.calls++
+	return boundary.fakeBoundary.ValidateExecutable(executable)
+}

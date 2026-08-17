@@ -6,10 +6,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
+	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/task"
+	"unit-test-ide.local/test-service/internal/testdomain"
 )
 
 const maxPageSize = 200
@@ -19,6 +22,82 @@ type rowScanner interface {
 }
 
 func (s *Store) Create(ctx context.Context, input task.Task, steps []task.StepSnapshot, event task.EventDraft) (task.Task, []task.Event, error) {
+	if input.Kind == task.KindCoverageRun {
+		return task.Task{}, nil, task.ErrInvalidArgument
+	}
+	return s.createTask(ctx, input, steps, event, nil)
+}
+
+func (s *Store) CreateTestTask(
+	ctx context.Context,
+	input task.Task,
+	steps []task.StepSnapshot,
+	event task.EventDraft,
+	run testdomain.TestRun,
+) (task.Task, []task.Event, error) {
+	if input.Kind != task.KindTestRun ||
+		run.TaskID != input.ID {
+		return task.Task{}, nil, task.ErrInvalidArgument
+	}
+	validated, err := testdomain.NewTestRun(run)
+	if err != nil || len(validated.Results) != 0 ||
+		validated.Status != testdomain.RunQueued {
+		return task.Task{}, nil, task.ErrInvalidArgument
+	}
+	return s.createTask(ctx, input, steps, event, &taskCreationRelations{
+		testRun: &validated,
+	})
+}
+
+func (s *Store) CreateCoverageTask(
+	ctx context.Context,
+	input task.Task,
+	steps []task.StepSnapshot,
+	event task.EventDraft,
+	run coveragedomain.Run,
+	testRun testdomain.TestRun,
+) (task.Task, []task.Event, error) {
+	if s == nil || ctx == nil {
+		return task.Task{}, nil, task.ErrInvalidArgument
+	}
+	validatedRun, err := coveragedomain.NewRun(run)
+	if err != nil {
+		return task.Task{}, nil, task.ErrInvalidArgument
+	}
+	validatedTestRun, err := testdomain.NewTestRun(testRun)
+	if err != nil {
+		return task.Task{}, nil, task.ErrInvalidArgument
+	}
+	if err := validateCoverageTaskCreation(
+		input,
+		steps,
+		event,
+		validatedRun,
+		validatedTestRun,
+	); err != nil {
+		return task.Task{}, nil, err
+	}
+	return s.createTask(ctx, input, steps, event, &taskCreationRelations{
+		coverageRun: &validatedRun,
+		testRun:     &validatedTestRun,
+	})
+}
+
+type taskCreationRelations struct {
+	coverageRun *coveragedomain.Run
+	testRun     *testdomain.TestRun
+}
+
+func (s *Store) createTask(
+	ctx context.Context,
+	input task.Task,
+	steps []task.StepSnapshot,
+	event task.EventDraft,
+	relations *taskCreationRelations,
+) (task.Task, []task.Event, error) {
+	if s == nil || ctx == nil {
+		return task.Task{}, nil, task.ErrInvalidArgument
+	}
 	if err := validateTask(input); err != nil {
 		return task.Task{}, nil, err
 	}
@@ -47,6 +126,12 @@ func (s *Store) Create(ctx context.Context, input task.Task, steps []task.StepSn
 	if err != nil {
 		existing, findErr := findTaskByIdempotencyKey(ctx, tx, input.IdempotencyKey)
 		if findErr == nil {
+			if relations != nil && relations.coverageRun != nil {
+				if relations.testRun != nil && equivalentCoverageTaskCreation(ctx, tx, existing, input, *relations.coverageRun, *relations.testRun) {
+					return existing, nil, nil
+				}
+				return task.Task{}, nil, task.ErrIdempotencyConflict
+			}
 			if existing.RequestHash == input.RequestHash ||
 				task.EquivalentIdempotencyRequest(existing, input) {
 				return existing, nil, nil
@@ -54,6 +139,16 @@ func (s *Store) Create(ctx context.Context, input task.Task, steps []task.StepSn
 			return task.Task{}, nil, task.ErrIdempotencyConflict
 		}
 		return task.Task{}, nil, storageError("create task", err)
+	}
+	if relations != nil && relations.coverageRun != nil {
+		if err := insertCoverageRun(ctx, tx, *relations.coverageRun); err != nil {
+			return task.Task{}, nil, err
+		}
+	}
+	if relations != nil && relations.testRun != nil {
+		if err := insertTestRun(ctx, tx, *relations.testRun); err != nil {
+			return task.Task{}, nil, err
+		}
 	}
 	if err := insertSteps(ctx, tx, input.ID, steps); err != nil {
 		return task.Task{}, nil, err
@@ -66,11 +161,132 @@ func (s *Store) Create(ctx context.Context, input task.Task, steps []task.StepSn
 	if _, err := tx.ExecContext(ctx, `UPDATE tasks SET last_sequence=? WHERE task_id=?`, input.LastSequence, input.ID); err != nil {
 		return task.Task{}, nil, storageError("update task sequence", err)
 	}
+	if relations != nil && relations.coverageRun != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE coverage_runs SET last_sequence=? WHERE coverage_run_id=? AND task_id=?`, input.LastSequence, relations.coverageRun.ID, input.ID); err != nil {
+			return task.Task{}, nil, storageError("update CoverageRun sequence", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return task.Task{}, nil, storageError("commit create", err)
 	}
 	input.Steps = cloneSteps(steps)
 	return input, events, nil
+}
+
+func validateCoverageTaskCreation(
+	input task.Task,
+	steps []task.StepSnapshot,
+	event task.EventDraft,
+	run coveragedomain.Run,
+	testRun testdomain.TestRun,
+) error {
+	if err := validateTask(input); err != nil ||
+		input.Kind != task.KindCoverageRun || input.Status != task.StatusQueued || input.LastSequence != 0 ||
+		validateSteps(steps) != nil || !validCoverageSteps(steps) ||
+		event.TaskID != input.ID || event.Type != task.EventTaskCreated || !validEventDraft(event) ||
+		run.Status != coveragedomain.StatusQueued || run.LastSequence != 0 ||
+		testRun.Status != testdomain.RunQueued || len(testRun.Results) != 0 ||
+		!zeroQueuedTestRunSummary(testRun.Summary) ||
+		run.TaskID != input.ID || testRun.TaskID != input.ID || run.TestRunID != testRun.RunID ||
+		run.Request.IdempotencyKey != input.IdempotencyKey || run.Request.IdempotencyKey != testRun.IdempotencyKey ||
+		run.Request.WorkspaceGeneration != input.WorkspaceGeneration ||
+		run.Request.ProjectID != testRun.ProjectID ||
+		run.Request.CatalogRevision != testRun.CatalogRevision ||
+		run.Request.Timeout != input.Timeout ||
+		run.Request.RepeatCount != testRun.Summary.Iterations ||
+		!reflect.DeepEqual(run.SelectionSnapshot, testRun.SelectionSnapshot) ||
+		!input.CreatedAt.Equal(run.CreatedAt) || !input.CreatedAt.Equal(testRun.CreatedAt) || !input.CreatedAt.Equal(event.At) {
+		return task.ErrInvalidArgument
+	}
+	canonical, err := run.Request.CanonicalJSON()
+	if err != nil || !bytesEqual(input.Request, canonical) {
+		return task.ErrInvalidArgument
+	}
+	return nil
+}
+
+func zeroQueuedTestRunSummary(value testdomain.RunSummary) bool {
+	return value.Total == 0 && value.Completed == 0 && value.Passed == 0 &&
+		value.Failed == 0 && value.Skipped == 0 && value.Errored == 0 &&
+		value.Cancelled == 0 && value.TimedOut == 0 && value.NotRun == 0
+}
+
+func validCoverageSteps(steps []task.StepSnapshot) bool {
+	for _, step := range steps {
+		switch step.Kind {
+		case task.StepCoverageConfigure, task.StepCoverageBuild,
+			task.StepCoverageTest, task.StepCoverageMerge,
+			task.StepCoverageNormalize, task.StepCoverageReport,
+			task.StepCoveragePublish:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func bytesEqual(first, second []byte) bool {
+	if len(first) != len(second) {
+		return false
+	}
+	for index := range first {
+		if first[index] != second[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func equivalentCoverageTaskCreation(
+	ctx context.Context,
+	tx *sql.Tx,
+	existing task.Task,
+	incoming task.Task,
+	incomingRun coveragedomain.Run,
+	incomingTestRun testdomain.TestRun,
+) bool {
+	if !task.EquivalentIdempotencyRequest(existing, incoming) {
+		return false
+	}
+	existingRun, err := scanCoverageRun(tx.QueryRowContext(
+		ctx,
+		coverageRunSelect+` WHERE task_id=?`,
+		existing.ID,
+	))
+	if err != nil || existingRun.Status != coveragedomain.StatusQueued ||
+		existingRun.TaskID != existing.ID || existingRun.LastSequence != existing.LastSequence {
+		return false
+	}
+	existingTestRun, err := scanTestRun(tx.QueryRowContext(
+		ctx,
+		testRunSelect+` WHERE run_id=? AND task_id=?`,
+		existingRun.TestRunID,
+		existing.ID,
+	))
+	if err != nil || existingTestRun.Status != testdomain.RunQueued ||
+		existingTestRun.TaskID != existing.ID ||
+		existingTestRun.IdempotencyKey != existing.IdempotencyKey {
+		return false
+	}
+	var resultCount int
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM test_run_results WHERE run_id=?`,
+		existingTestRun.RunID,
+	).Scan(&resultCount); err != nil || resultCount != 0 {
+		return false
+	}
+
+	incomingRun.TaskID = existing.ID
+	incomingRun.TestRunID = existingTestRun.RunID
+	incomingRun.CreatedAt = existingRun.CreatedAt
+	incomingRun.LastSequence = existingRun.LastSequence
+	incomingTestRun.RunID = existingTestRun.RunID
+	incomingTestRun.TaskID = existing.ID
+	incomingTestRun.CreatedAt = existingTestRun.CreatedAt
+	incomingTestRun.Results = nil
+	return reflect.DeepEqual(existingRun, incomingRun) &&
+		reflect.DeepEqual(existingTestRun, incomingTestRun)
 }
 
 func (s *Store) FindByIdempotencyKey(ctx context.Context, key string) (task.Task, error) {
@@ -114,19 +330,39 @@ func (s *Store) Get(ctx context.Context, taskID string) (task.Task, error) {
 	return result, nil
 }
 
-func (s *Store) List(ctx context.Context, cursor string, limit int) (task.Page[task.Task], error) {
-	if limit < 1 || limit > maxPageSize {
+func (s *Store) List(ctx context.Context, cursor string, limit int, kinds ...task.Kind) (task.Page[task.Task], error) {
+	if limit < 1 || limit > maxPageSize || len(kinds) > 5 {
 		return task.Page[task.Task]{}, task.ErrInvalidArgument
 	}
 	query := taskSelect
-	args := make([]any, 0, 3)
+	args := make([]any, 0, 5)
+	conditions := make([]string, 0, 2)
+	if len(kinds) > 0 {
+		seen := make(map[task.Kind]struct{}, len(kinds))
+		placeholders := make([]string, 0, len(kinds))
+		for _, kind := range kinds {
+			if !validTaskKind(kind) {
+				return task.Page[task.Task]{}, task.ErrInvalidArgument
+			}
+			if _, exists := seen[kind]; exists {
+				continue
+			}
+			seen[kind] = struct{}{}
+			placeholders = append(placeholders, "?")
+			args = append(args, string(kind))
+		}
+		conditions = append(conditions, "kind IN ("+strings.Join(placeholders, ",")+")")
+	}
 	if cursor != "" {
 		createdAt, taskID, err := decodeCursor(cursor)
 		if err != nil {
 			return task.Page[task.Task]{}, task.ErrInvalidArgument
 		}
-		query += ` WHERE (created_at < ? OR (created_at = ? AND task_id < ?))`
+		conditions = append(conditions, `(created_at < ? OR (created_at = ? AND task_id < ?))`)
 		args = append(args, formatTime(createdAt), formatTime(createdAt), taskID)
+	}
+	if len(conditions) > 0 {
+		query += ` WHERE ` + strings.Join(conditions, ` AND `)
 	}
 	query += ` ORDER BY created_at DESC, task_id DESC LIMIT ?`
 	args = append(args, limit+1)
@@ -173,6 +409,23 @@ func (s *Store) Apply(ctx context.Context, mutation task.Mutation) (task.Task, [
 	if err := validateStepMutations(mutation.Steps); err != nil {
 		return task.Task{}, nil, err
 	}
+	if err := validateAppendedSteps(mutation.AppendSteps); err != nil {
+		return task.Task{}, nil, err
+	}
+	if len(mutation.AppendSteps) != 0 &&
+		(mutation.Expected != task.StatusRunning ||
+			mutation.Task.Status != task.StatusRunning) {
+		return task.Task{}, nil, task.ErrInvalidArgument
+	}
+	mutatedStepIDs := make(map[string]struct{}, len(mutation.Steps))
+	for _, changed := range mutation.Steps {
+		mutatedStepIDs[changed.Step.ID] = struct{}{}
+	}
+	for _, appended := range mutation.AppendSteps {
+		if _, exists := mutatedStepIDs[appended.ID]; exists {
+			return task.Task{}, nil, task.ErrInvalidArgument
+		}
+	}
 	for _, event := range mutation.Events {
 		if event.TaskID != mutation.Task.ID || !validEventDraft(event) {
 			return task.Task{}, nil, task.ErrInvalidArgument
@@ -187,6 +440,10 @@ func (s *Store) Apply(ctx context.Context, mutation task.Mutation) (task.Task, [
 		if artifact.TaskID != mutation.Task.ID {
 			return task.Task{}, nil, task.ErrInvalidArgument
 		}
+	}
+	terminalTestRun, terminalCoverage, err := validateTerminalMutation(mutation)
+	if err != nil {
+		return task.Task{}, nil, err
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -211,14 +468,58 @@ func (s *Store) Apply(ctx context.Context, mutation task.Mutation) (task.Task, [
 		return task.Task{}, nil, storageError("read mutation result", err)
 	}
 	if affected != 1 {
+		if terminalCoverage != nil {
+			replayed, identical, replayErr := equivalentCoverageTerminalReplay(
+				ctx,
+				tx,
+				mutation,
+				*terminalTestRun,
+				*terminalCoverage,
+			)
+			if replayErr != nil {
+				return task.Task{}, nil, replayErr
+			}
+			if identical {
+				return replayed, nil, nil
+			}
+		}
 		return task.Task{}, nil, task.ErrConflict
+	}
+	if terminalCoverage != nil {
+		persisted, readErr := scanCoverageRun(tx.QueryRowContext(
+			ctx,
+			coverageRunSelect+` WHERE coverage_run_id=? AND task_id=? AND test_run_id=?`,
+			terminalCoverage.Run.ID,
+			mutation.Task.ID,
+			terminalTestRun.RunID,
+		))
+		if isNoRows(readErr) {
+			return task.Task{}, nil, task.ErrConflict
+		}
+		if readErr != nil {
+			return task.Task{}, nil, storageError("get CoverageRun for finish", readErr)
+		}
+		if !coverageRunCanComplete(persisted, terminalCoverage.Run, terminalCoverage.Expected) {
+			return task.Task{}, nil, task.ErrConflict
+		}
 	}
 	if err := applyStepMutations(ctx, tx, mutation.Task.ID, mutation.Steps); err != nil {
 		return task.Task{}, nil, err
 	}
+	if err := appendSteps(
+		ctx,
+		tx,
+		mutation.Task.ID,
+		mutation.AppendSteps,
+	); err != nil {
+		return task.Task{}, nil, err
+	}
 	events, err := insertEvents(ctx, tx, mutation.Events, s.newID)
 	if err != nil {
-		return task.Task{}, nil, err
+		return task.Task{}, nil, fmt.Errorf(
+			"insert Task mutation events: %w",
+			err,
+		)
 	}
 	if mutation.PutLease != nil {
 		if err := upsertLease(ctx, tx, *mutation.PutLease); err != nil {
@@ -232,6 +533,44 @@ func (s *Store) Apply(ctx context.Context, mutation task.Mutation) (task.Task, [
 	}
 	for _, artifact := range mutation.Artifacts {
 		if err := insertArtifact(ctx, tx, artifact); err != nil {
+			return task.Task{}, nil, fmt.Errorf(
+				"insert Task mutation artifact: %w",
+				err,
+			)
+		}
+	}
+	if terminalTestRun != nil {
+		if err := finishRunTx(
+			ctx,
+			tx,
+			terminalTestRun.Clone(),
+			mutation.Artifacts,
+			false,
+		); err != nil {
+			return task.Task{}, nil, fmt.Errorf(
+				"finish TestRun in Task mutation: %w",
+				err,
+			)
+		}
+	}
+	if terminalCoverage != nil {
+		if terminalCoverage.Report != nil {
+			if err := insertCoverageReport(
+				ctx,
+				tx,
+				terminalCoverage.Report.Clone(),
+				terminalCoverage.Run,
+				mutation.Task.ID,
+			); err != nil {
+				return task.Task{}, nil, fmt.Errorf("insert terminal CoverageReport: %w", err)
+			}
+		}
+		if err := finishCoverageRunTx(
+			ctx,
+			tx,
+			terminalCoverage.Run,
+			terminalCoverage.Expected,
+		); err != nil {
 			return task.Task{}, nil, err
 		}
 	}
@@ -241,8 +580,31 @@ func (s *Store) Apply(ctx context.Context, mutation task.Mutation) (task.Task, [
 	} else if err := tx.QueryRowContext(ctx, `SELECT last_sequence FROM tasks WHERE task_id=?`, mutation.Task.ID).Scan(&last); err != nil {
 		return task.Task{}, nil, storageError("read task sequence", err)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE tasks SET last_sequence=? WHERE task_id=?`, last, mutation.Task.ID); err != nil {
+	sequenceResult, err := tx.ExecContext(ctx, `UPDATE tasks SET last_sequence=? WHERE task_id=?`, last, mutation.Task.ID)
+	if err != nil {
 		return task.Task{}, nil, storageError("update task sequence", err)
+	}
+	if terminalCoverage != nil {
+		affected, err := sequenceResult.RowsAffected()
+		if err != nil {
+			return task.Task{}, nil, storageError("read task sequence update result", err)
+		}
+		if affected != 1 {
+			return task.Task{}, nil, task.ErrConflict
+		}
+		coverageSequenceResult, err := tx.ExecContext(ctx, `UPDATE coverage_runs SET last_sequence=?
+			WHERE coverage_run_id=? AND task_id=? AND test_run_id=? AND status='finished'`,
+			last, terminalCoverage.Run.ID, mutation.Task.ID, terminalTestRun.RunID)
+		if err != nil {
+			return task.Task{}, nil, storageError("update CoverageRun sequence", err)
+		}
+		affected, err = coverageSequenceResult.RowsAffected()
+		if err != nil {
+			return task.Task{}, nil, storageError("read CoverageRun sequence update result", err)
+		}
+		if affected != 1 {
+			return task.Task{}, nil, task.ErrConflict
+		}
 	}
 	mutation.Task.LastSequence = last
 	if err := hydrateTaskSteps(ctx, tx, &mutation.Task); err != nil {
@@ -252,6 +614,231 @@ func (s *Store) Apply(ctx context.Context, mutation task.Mutation) (task.Task, [
 		return task.Task{}, nil, storageError("commit mutation", err)
 	}
 	return mutation.Task, events, nil
+}
+
+func validateTerminalMutation(mutation task.Mutation) (*testdomain.TestRun, *task.CoverageCompletion, error) {
+	if mutation.FinishCoverage != nil {
+		if mutation.FinishRun == nil || mutation.Task.Kind != task.KindCoverageRun ||
+			mutation.Task.Status != task.StatusFinished || mutation.Expected == task.StatusFinished ||
+			(mutation.FinishCoverage.Expected != coveragedomain.StatusQueued &&
+				mutation.FinishCoverage.Expected != coveragedomain.StatusRunning) ||
+			!hasSingleFinalTaskFinishedEvent(mutation.Events) {
+			return nil, nil, task.ErrInvalidArgument
+		}
+		run, err := coveragedomain.NewRun(mutation.FinishCoverage.Run.Clone())
+		if err != nil {
+			return nil, nil, task.ErrInvalidArgument
+		}
+		canonicalRequest, err := run.Request.CanonicalJSON()
+		if err != nil || run.Status != coveragedomain.StatusFinished ||
+			run.TaskID != mutation.Task.ID ||
+			run.Request.IdempotencyKey != mutation.Task.IdempotencyKey ||
+			run.Request.WorkspaceGeneration != mutation.Task.WorkspaceGeneration ||
+			run.Request.Timeout != mutation.Task.Timeout ||
+			!bytesEqual(mutation.Task.Request, canonicalRequest) ||
+			!run.CreatedAt.Equal(mutation.Task.CreatedAt) ||
+			mutation.Task.Outcome != task.CoverageTaskOutcome(run.Outcome, run.Reason) {
+			return nil, nil, task.ErrInvalidArgument
+		}
+		testRun, err := testdomain.NewTestRun(mutation.FinishRun.Clone())
+		if err != nil || testRun.Status != testdomain.RunCompleted ||
+			testRun.TaskID != mutation.Task.ID || testRun.RunID != run.TestRunID ||
+			testRun.IdempotencyKey != run.Request.IdempotencyKey ||
+			testRun.ProjectID != run.Request.ProjectID ||
+			testRun.CatalogRevision != run.Request.CatalogRevision ||
+			testRun.Summary.Iterations != run.Request.RepeatCount ||
+			!reflect.DeepEqual(testRun.SelectionSnapshot, run.SelectionSnapshot) ||
+			!testRun.CreatedAt.Equal(run.CreatedAt) {
+			return nil, nil, task.ErrInvalidArgument
+		}
+		if err := validateCoverageArtifacts(run, mutation.Artifacts); err != nil {
+			return nil, nil, err
+		}
+		reportBearing := run.Outcome == coveragedomain.OutcomeAvailable || run.Outcome == coveragedomain.OutcomePartial
+		if reportBearing != (mutation.FinishCoverage.Report != nil) {
+			return nil, nil, task.ErrInvalidArgument
+		}
+		completion := &task.CoverageCompletion{Run: run, Expected: mutation.FinishCoverage.Expected}
+		if mutation.FinishCoverage.Report != nil {
+			report, err := validateCoverageReportForRun(
+				mutation.FinishCoverage.Report.Clone(),
+				run,
+				mutation.Task.ID,
+			)
+			if err != nil {
+				return nil, nil, err
+			}
+			completion.Report = &report
+		}
+		return &testRun, completion, nil
+	}
+	if mutation.FinishRun == nil {
+		if mutation.Task.Kind == task.KindCoverageRun && mutation.Task.Status == task.StatusFinished {
+			return nil, nil, task.ErrInvalidArgument
+		}
+		return nil, nil, nil
+	}
+	if mutation.Task.Kind == task.KindCoverageRun {
+		return nil, nil, task.ErrInvalidArgument
+	}
+	run, err := testdomain.NewTestRun(mutation.FinishRun.Clone())
+	if err != nil {
+		return nil, nil, fmt.Errorf("validate terminal TestRun: %w", task.ErrInvalidArgument)
+	}
+	if run.Status != testdomain.RunCompleted || mutation.Task.Kind != task.KindTestRun ||
+		mutation.Task.Status != task.StatusFinished || run.TaskID != mutation.Task.ID {
+		return nil, nil, fmt.Errorf("match terminal TestRun to Task: %w", task.ErrInvalidArgument)
+	}
+	if err := validateRunArtifacts(run.TaskID, mutation.Artifacts); err != nil {
+		return nil, nil, err
+	}
+	hasRunFinished := false
+	for _, event := range mutation.Events {
+		if event.Type == task.EventTestRunFinished {
+			hasRunFinished = true
+			break
+		}
+	}
+	if !hasRunFinished {
+		return nil, nil, fmt.Errorf("terminal TestRun event is missing: %w", task.ErrInvalidArgument)
+	}
+	return &run, nil, nil
+}
+
+func equivalentCoverageTerminalReplay(
+	ctx context.Context,
+	tx *sql.Tx,
+	mutation task.Mutation,
+	testRun testdomain.TestRun,
+	completion task.CoverageCompletion,
+) (task.Task, bool, error) {
+	persistedTask, err := scanTask(tx.QueryRowContext(ctx, taskSelect+` WHERE task_id=?`, mutation.Task.ID))
+	if isNoRows(err) {
+		return task.Task{}, false, nil
+	}
+	if err != nil {
+		return task.Task{}, false, storageError("read terminal Task replay", err)
+	}
+	if err := hydrateTaskSteps(ctx, tx, &persistedTask); err != nil {
+		return task.Task{}, false, storageError("read terminal Task replay steps", err)
+	}
+	incomingTask := mutation.Task
+	incomingTask.LastSequence = persistedTask.LastSequence
+	persistedSteps := persistedTask.Steps
+	incomingSteps := cloneSteps(incomingTask.Steps)
+	persistedTask.Steps, incomingTask.Steps = nil, nil
+	taskMatches := reflect.DeepEqual(persistedTask, incomingTask) &&
+		equivalentTerminalSteps(persistedSteps, incomingSteps, mutation.Steps, mutation.AppendSteps)
+	persistedTask.Steps = persistedSteps
+	if !taskMatches {
+		return task.Task{}, false, nil
+	}
+	persistedEvents, err := loadEventDraftsBetween(
+		ctx,
+		tx,
+		mutation.Task.ID,
+		mutation.Task.LastSequence,
+		persistedTask.LastSequence,
+	)
+	if err != nil {
+		return task.Task{}, false, storageError("read terminal Task replay events", err)
+	}
+	if !equivalentEventDrafts(persistedEvents, mutation.Events) {
+		return task.Task{}, false, nil
+	}
+	persistedTestRun, err := scanTestRun(tx.QueryRowContext(
+		ctx,
+		testRunSelect+` WHERE run_id=? AND task_id=?`,
+		testRun.RunID,
+		mutation.Task.ID,
+	))
+	if isNoRows(err) {
+		return task.Task{}, false, nil
+	}
+	if err != nil {
+		return task.Task{}, false, storageError("read terminal TestRun replay", err)
+	}
+	if !equivalentFinishedRun(persistedTestRun, testRun) {
+		return task.Task{}, false, nil
+	}
+	equivalentArtifacts, err := runArtifactsEqual(ctx, tx, testRun.RunID, mutation.Artifacts)
+	if err != nil {
+		return task.Task{}, false, err
+	}
+	if !equivalentArtifacts {
+		return task.Task{}, false, nil
+	}
+	persistedRun, err := scanCoverageRun(tx.QueryRowContext(
+		ctx,
+		coverageRunSelect+` WHERE coverage_run_id=? AND task_id=? AND test_run_id=?`,
+		completion.Run.ID,
+		mutation.Task.ID,
+		testRun.RunID,
+	))
+	if isNoRows(err) {
+		return task.Task{}, false, nil
+	}
+	if err != nil {
+		return task.Task{}, false, storageError("read terminal CoverageRun replay", err)
+	}
+	if persistedTask.LastSequence != persistedRun.LastSequence ||
+		!equivalentFinishedCoverageRun(persistedRun, completion.Run) {
+		return task.Task{}, false, nil
+	}
+	if completion.Report != nil {
+		persistedReport, err := scanCoverageReport(tx.QueryRowContext(
+			ctx,
+			coverageReportSelect+` WHERE report_id=? AND coverage_run_id=?`,
+			completion.Report.ID,
+			completion.Run.ID,
+		))
+		if isNoRows(err) {
+			return task.Task{}, false, nil
+		}
+		if err != nil {
+			return task.Task{}, false, storageError("read terminal CoverageReport replay", err)
+		}
+		if !reflect.DeepEqual(persistedReport, *completion.Report) {
+			return task.Task{}, false, nil
+		}
+	} else {
+		var reportCount int
+		if err := tx.QueryRowContext(
+			ctx,
+			`SELECT COUNT(*) FROM coverage_reports WHERE coverage_run_id=?`,
+			completion.Run.ID,
+		).Scan(&reportCount); err != nil {
+			return task.Task{}, false, storageError("count terminal CoverageReport replay", err)
+		}
+		if reportCount != 0 {
+			return task.Task{}, false, nil
+		}
+	}
+	return persistedTask, true, nil
+}
+
+func equivalentTerminalSteps(
+	persisted []task.StepSnapshot,
+	before []task.StepSnapshot,
+	mutations []task.StepMutation,
+	appended []task.StepSnapshot,
+) bool {
+	expected := cloneSteps(before)
+	for _, mutation := range mutations {
+		found := false
+		for index := range expected {
+			if expected[index].ID == mutation.Step.ID {
+				expected[index] = mutation.Step
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	expected = append(expected, cloneSteps(appended)...)
+	return reflect.DeepEqual(persisted, expected)
 }
 
 func validateTask(value task.Task) error {
@@ -265,7 +852,7 @@ func validateTask(value task.Task) error {
 		if !task.ValidScenario(value.Scenario) || value.WorkspaceGeneration != "" {
 			return task.ErrInvalidArgument
 		}
-	case task.KindCMakeBuild:
+	case task.KindCMakeBuild, task.KindTestDiscovery, task.KindTestRun, task.KindCoverageRun:
 		if value.Scenario != "" || !validWorkspaceGeneration(value.WorkspaceGeneration) {
 			return task.ErrInvalidArgument
 		}
@@ -280,6 +867,16 @@ func validateTask(value task.Task) error {
 		return task.ErrInvalidArgument
 	}
 	return nil
+}
+
+func validTaskKind(value task.Kind) bool {
+	switch value {
+	case task.KindSimulation, task.KindCMakeBuild,
+		task.KindTestDiscovery, task.KindTestRun, task.KindCoverageRun:
+		return true
+	default:
+		return false
+	}
 }
 
 func validWorkspaceGeneration(value string) bool {

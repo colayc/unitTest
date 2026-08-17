@@ -1,0 +1,38 @@
+{
+  "name": "code-oss-extension",
+  "publisher": "unit-test-ide",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/src/extension.js",
+  "engines": { "vscode": ">=1.90.0" },
+  "activationEvents": ["onStartupFinished"],
+  "extensionKind": ["workspace"],
+  "contributes": {
+    "commands": [
+      { "command": "unitTestIde.startService", "title": "Unit Test: Start Service" },
+      { "command": "unitTestIde.stopService", "title": "Unit Test: Stop Service" },
+      { "command": "unitTestIde.inspectWorkspace", "title": "Unit Test: Inspect Workspace" }
+    ],
+    "configuration": {
+      "title": "Unit Test IDE",
+      "properties": {
+        "unitTestIde.serviceExecutable": { "type": "string", "default": "" },
+        "unitTestIde.serviceStartupTimeoutMs": { "type": "number", "default": 10000, "minimum": 1000, "maximum": 60000 },
+        "unitTestIde.autoStart": { "type": "boolean", "default": true }
+      }
+    }
+  },
+  "dependencies": { "@unit-test-ide/test-client": "workspace:*" },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "@types/vscode": "1.105.0",
+    "typescript": "6.0.3"
+  },
+  "scripts": {
+    "build": "tsc -b tsconfig.json",
+    "test": "pnpm run build && node --test dist/test/manifest.test.js dist/test/service-manager.test.js dist/test/service-resources.test.js dist/test/trust-gate.test.js dist/test/extension.test.js",
+    "test:service-smoke": "pnpm run build && node --test dist/test/service-smoke.test.js",
+    "test:host": "pnpm run build && node test/extension-host-smoke.mjs"
+  }
+}

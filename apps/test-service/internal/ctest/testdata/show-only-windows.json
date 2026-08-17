@@ -1,0 +1,46 @@
+{
+  "kind": "ctestInfo",
+  "version": {
+    "major": 1,
+    "minor": 0
+  },
+  "backtraceGraph": {
+    "commands": [
+      "add_test"
+    ],
+    "files": [
+      "C:\\work space\\源码\\CMakeLists.txt"
+    ],
+    "nodes": [
+      {
+        "file": 0,
+        "line": 18,
+        "command": 0
+      }
+    ]
+  },
+  "tests": [
+    {
+      "name": "windows unicode 测试",
+      "command": [
+        "C:\\work space\\构建\\Debug\\runner.exe",
+        "--exact",
+        "名字 with spaces"
+      ],
+      "backtrace": 0,
+      "properties": [
+        {
+          "name": "WORKING_DIRECTORY",
+          "value": "C:\\work space\\构建"
+        },
+        {
+          "name": "LABELS",
+          "value": [
+            "windows",
+            "unicode"
+          ]
+        }
+      ]
+    }
+  ]
+}

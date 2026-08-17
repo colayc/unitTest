@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:unit-test-ide:protocol:v1.2:task",
+  "title": "TaskSnapshotV12",
+  "oneOf": [
+    { "$ref": "#/$defs/cmakeBuildTask" },
+    { "$ref": "#/$defs/simulationTask" }
+  ],
+  "$defs": {
+    "cmakeBuildTask": {
+      "title": "CmakeBuildTaskSnapshotV12",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["taskId", "kind", "workspaceGeneration", "projectId", "buildProfileId", "targetIds", "jobs", "timeoutMs", "status", "createdAt", "lastSequence"],
+      "properties": {
+        "taskId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+        "kind": { "title": "TaskKindV12", "const": "cmakeBuild" },
+        "workspaceGeneration": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "projectId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" },
+        "buildProfileId": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "targetIds": { "type": "array", "maxItems": 128, "uniqueItems": true, "items": { "type": "string", "pattern": "^[0-9a-f]{64}$" } },
+        "jobs": { "type": "integer", "minimum": 1, "maximum": 256 },
+        "timeoutMs": { "type": "integer", "minimum": 1, "maximum": 86400000 },
+        "status": { "title": "TaskStatusV12", "enum": ["queued", "running", "cancelling", "finished"] },
+        "outcome": { "title": "TaskOutcomeV12", "enum": ["succeeded", "command_failed", "cancelled", "timed_out", "interrupted", "infrastructure_failed"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "startedAt": { "type": "string", "format": "date-time" },
+        "finishedAt": { "type": "string", "format": "date-time" },
+        "lastSequence": { "type": "integer", "minimum": 1 },
+        "errorCode": { "type": "string" },
+        "errorMessage": { "type": "string" }
+      }
+    },
+    "simulationTask": {
+      "title": "SimulationTaskSnapshotV12",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["taskId", "kind", "scenario", "status", "createdAt", "lastSequence"],
+      "properties": {
+        "taskId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+        "kind": { "title": "TaskKindV12", "const": "simulation" },
+        "scenario": { "title": "SimulationScenarioV12", "enum": ["success", "exit-nonzero", "hang", "spawn-child", "emit-output"] },
+        "status": { "title": "TaskStatusV12", "enum": ["queued", "running", "cancelling", "finished"] },
+        "outcome": { "title": "TaskOutcomeV12", "enum": ["succeeded", "command_failed", "cancelled", "timed_out", "interrupted", "infrastructure_failed"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "startedAt": { "type": "string", "format": "date-time" },
+        "finishedAt": { "type": "string", "format": "date-time" },
+        "timeoutMs": { "type": "integer", "minimum": 1, "maximum": 86400000 },
+        "lastSequence": { "type": "integer", "minimum": 1 },
+        "errorCode": { "type": "string" },
+        "errorMessage": { "type": "string" }
+      }
+    }
+  }
+}

@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
+
+	"unit-test-ide.local/test-service/internal/diagnostic"
 )
 
 const (
@@ -25,6 +27,7 @@ type ManagerConfig struct {
 	Publisher           Publisher
 	Processes           ProcessFactory
 	Artifacts           ArtifactWriter
+	StepObserver        StepObserver
 	Clock               Clock
 	NewID               IDGenerator
 	ServiceExecutable   string
@@ -40,6 +43,7 @@ type Manager struct {
 	publisher           Publisher
 	processes           ProcessFactory
 	artifacts           ArtifactWriter
+	stepObserver        StepObserver
 	clock               Clock
 	newID               IDGenerator
 	serviceExecutable   string
@@ -63,6 +67,11 @@ type startCommand struct {
 	reply   chan taskResponse
 }
 
+type resumeCommand struct {
+	request ResumeRequest
+	reply   chan taskResponse
+}
+
 type taskIDCommand struct {
 	id     string
 	cancel bool
@@ -72,6 +81,7 @@ type taskIDCommand struct {
 type listCommand struct {
 	cursor string
 	limit  int
+	kinds  []Kind
 	reply  chan listResponse
 }
 
@@ -118,6 +128,10 @@ type activeTask struct {
 	task                  Task
 	plan                  ExecutionPlan
 	boundary              ExecutionBoundary
+	continuation          PlanContinuation
+	resultInterpreter     ResultInterpreter
+	artifactSink          ArtifactSink
+	boundaryReleased      bool
 	nextStep              int
 	process               ManagedProcess
 	pendingCompletion     *pendingProcessCompletion
@@ -297,7 +311,8 @@ func NewManager(config ManagerConfig) (*Manager, error) {
 	}
 	manager := &Manager{
 		store: config.Store, publisher: config.Publisher, processes: config.Processes, artifacts: config.Artifacts,
-		clock: config.Clock, newID: config.NewID, serviceExecutable: config.ServiceExecutable,
+		stepObserver: config.StepObserver,
+		clock:        config.Clock, newID: config.NewID, serviceExecutable: config.ServiceExecutable,
 		serviceInstanceID: config.ServiceInstanceID, terminationGrace: config.TerminationGrace, processCloseTimeout: config.ProcessCloseTimeout,
 		outputFlushInterval: config.OutputFlushInterval, commands: make(chan any, config.CommandQueue),
 		shutdownSignal: make(chan struct{}, 1), stopped: make(chan struct{}),
@@ -330,7 +345,50 @@ func (m *Manager) Start(ctx context.Context, request StartRequest) (Task, error)
 	case <-ctx.Done():
 		return Task{}, ctx.Err()
 	case <-m.stopped:
+		select {
+		case response := <-reply:
+			return response.task, publicError(response.err)
+		default:
+		}
 		return Task{}, ErrStorageUnavailable
+	}
+}
+
+func (m *Manager) ResumeQueued(ctx context.Context, request ResumeRequest) (Task, error) {
+	if m == nil || request.Task.ID == "" ||
+		!resumableQueuedKind(request.Task.Kind) ||
+		request.Task.Status != StatusQueued ||
+		request.Plan.Fingerprint == "" ||
+		request.Plan.Fingerprint != FingerprintPlan(request.Plan) ||
+		ValidatePlan(request.Plan, request.Boundary) != nil {
+		return Task{}, ErrInvalidArgument
+	}
+	request.Task.Request = append(json.RawMessage(nil), request.Task.Request...)
+	request.Task.Steps = append([]StepSnapshot(nil), request.Task.Steps...)
+	request.Plan = cloneExecutionPlan(request.Plan)
+	if !m.Healthy() {
+		return Task{}, ErrStorageUnavailable
+	}
+	reply := make(chan taskResponse, 1)
+	if err := m.send(ctx, resumeCommand{request: request, reply: reply}); err != nil {
+		return Task{}, err
+	}
+	select {
+	case response := <-reply:
+		return response.task, publicError(response.err)
+	case <-ctx.Done():
+		return Task{}, ctx.Err()
+	case <-m.stopped:
+		return Task{}, ErrStorageUnavailable
+	}
+}
+
+func resumableQueuedKind(kind Kind) bool {
+	switch kind {
+	case KindCMakeBuild, KindTestDiscovery, KindTestRun:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -352,12 +410,17 @@ func (m *Manager) Get(ctx context.Context, id string) (Task, error) {
 	}
 }
 
-func (m *Manager) List(ctx context.Context, cursor string, limit int) (Page[Task], error) {
-	if m == nil || limit < 1 {
+func (m *Manager) List(ctx context.Context, cursor string, limit int, kinds ...Kind) (Page[Task], error) {
+	if m == nil || limit < 1 || len(kinds) > 2 {
 		return Page[Task]{}, ErrInvalidArgument
 	}
 	reply := make(chan listResponse, 1)
-	if err := m.send(ctx, listCommand{cursor: cursor, limit: limit, reply: reply}); err != nil {
+	if err := m.send(ctx, listCommand{
+		cursor: cursor,
+		limit:  limit,
+		kinds:  append([]Kind(nil), kinds...),
+		reply:  reply,
+	}); err != nil {
 		return Page[Task]{}, err
 	}
 	select {
@@ -440,6 +503,9 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-m.stopped:
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		return nil
 	}
 }
@@ -482,6 +548,8 @@ func (m *Manager) loop() {
 		switch value := command.(type) {
 		case startCommand:
 			value.reply <- m.start(value.request, active)
+		case resumeCommand:
+			value.reply <- m.resumeQueued(value.request, active)
 		case taskIDCommand:
 			if value.cancel {
 				value.reply <- m.cancel(value.id, active)
@@ -490,7 +558,7 @@ func (m *Manager) loop() {
 				value.reply <- taskResponse{task: got, err: err}
 			}
 		case listCommand:
-			page, err := m.store.List(context.Background(), value.cursor, value.limit)
+			page, err := m.store.List(context.Background(), value.cursor, value.limit, value.kinds...)
 			value.reply <- listResponse{page: page, err: err}
 		case outputCommand:
 			if current := active[value.taskID]; !m.circuitFailed() && current != nil && !current.processCompleted {
@@ -513,7 +581,7 @@ func (m *Manager) loop() {
 						m.abandon(current)
 					}
 					if active[string(value)] == current && current.task.Status == StatusFinished {
-						delete(active, string(value))
+						removeActiveTask(active, string(value))
 					}
 					break
 				}
@@ -534,7 +602,7 @@ func (m *Manager) loop() {
 			if current := active[value.taskID]; current != nil && !current.processCompleted {
 				m.finish(current, value.result, active)
 				if active[value.taskID] == current && m.canRemove(current) {
-					delete(active, value.taskID)
+					removeActiveTask(active, value.taskID)
 				}
 			}
 		case terminationResultCommand:
@@ -560,7 +628,7 @@ func (m *Manager) loop() {
 					if (m.circuitFailed() || current.recoveryRequired) && recoveryHandoffSafe {
 						current.recoveryRequired = true
 						m.stopActive(current)
-						delete(active, value.taskID)
+						removeActiveTask(active, value.taskID)
 					} else {
 						current.closeStarted = false
 						current.closeComplete = false
@@ -576,7 +644,7 @@ func (m *Manager) loop() {
 					}
 				}
 				if value.err == nil && m.canRemove(current) {
-					delete(active, value.taskID)
+					removeActiveTask(active, value.taskID)
 				}
 			}
 		case shutdownCommand:
@@ -597,7 +665,7 @@ func (m *Manager) loop() {
 							m.abandon(current)
 						}
 						if active[current.task.ID] == current && current.task.Status == StatusFinished {
-							delete(active, current.task.ID)
+							removeActiveTask(active, current.task.ID)
 						}
 					} else if current.cleanupWithoutDone && !current.terminationComplete {
 						if !current.terminating {
@@ -657,7 +725,7 @@ func (m *Manager) cancel(id string, active map[string]*activeTask) taskResponse 
 				return taskResponse{task: current.task, err: finishErr}
 			}
 			if active[id] == current && current.task.Status == StatusFinished {
-				delete(active, id)
+				removeActiveTask(active, id)
 			}
 			return taskResponse{task: finished}
 		}
@@ -702,7 +770,7 @@ func (m *Manager) cancel(id string, active map[string]*activeTask) taskResponse 
 			return taskResponse{task: current.task, err: finishErr}
 		}
 		if active[id] == current && current.task.Status == StatusFinished {
-			delete(active, id)
+			removeActiveTask(active, id)
 		}
 		return taskResponse{task: finished}
 	}
@@ -733,7 +801,7 @@ func (m *Manager) finishCancellationConflict(current *activeTask, active map[str
 			m.abandon(current)
 		}
 		if active[current.task.ID] == current && current.task.Status == StatusFinished {
-			delete(active, current.task.ID)
+			removeActiveTask(active, current.task.ID)
 		}
 		return
 	}
@@ -797,9 +865,116 @@ func (m *Manager) armTimeout(current *activeTask) {
 type timeoutCommand string
 
 func (m *Manager) acceptOutput(current *activeTask, output ProcessOutput, active map[string]*activeTask) {
-	if len(output.Data) == 0 || current.truncated {
+	if current.artifactSink == nil ||
+		current.artifactSink.AppendOutput(
+			context.Background(), current.task.ActiveStep, output.Stream, output.Data,
+		) != nil {
+		m.tripStorage(active)
 		return
 	}
+	if current.execution.currentCause() == "" {
+		if observer, ok := current.resultInterpreter.(ResultOutputObserver); ok {
+			if err := callResultOutputObserver(
+				current.execution.ctx,
+				observer,
+				cloneRuntimeTask(current.task),
+				cloneRuntimeStep(current.plan.Steps[current.nextStep]),
+				ProcessOutput{
+					Source: output.Source,
+					Stream: output.Stream,
+					Data:   append([]byte(nil), output.Data...),
+				},
+			); err != nil {
+				m.failResultObservation(current, err)
+				return
+			}
+			if err := m.persistDomainEvents(current, active); err != nil {
+				m.failResultObservation(current, err)
+				return
+			}
+		}
+	}
+	if len(output.Data) != 0 && !current.truncated {
+		m.bufferOutput(current, output, active)
+		if m.circuitFailed() {
+			return
+		}
+	}
+	values, failed := feedDiagnosticParser(current, output)
+	if failed {
+		current.plan.Steps[current.nextStep].DiagnosticParser = nil
+		return
+	}
+	if len(values) == 0 {
+		return
+	}
+	m.flushOutput(current, active)
+	if m.circuitFailed() {
+		return
+	}
+	m.persistDiagnostics(current, values, active)
+}
+
+func (m *Manager) persistDomainEvents(
+	current *activeTask,
+	active map[string]*activeTask,
+) error {
+	source, ok := current.resultInterpreter.(DomainEventSource)
+	if !ok {
+		return nil
+	}
+	for _, pending := range source.DrainDomainEvents() {
+		if pending.Type == "" || !json.Valid(pending.Payload) {
+			m.tripStorage(active)
+			return ErrStorageUnavailable
+		}
+		event, err := m.store.AppendEvent(
+			context.Background(),
+			current.task.ID,
+			EventDraft{
+				TaskID: current.task.ID,
+				Type:   pending.Type,
+				At:     m.clock.Now(),
+				Payload: append(
+					json.RawMessage(nil),
+					pending.Payload...,
+				),
+			},
+		)
+		if err != nil {
+			m.tripStorage(active)
+			return ErrStorageUnavailable
+		}
+		current.task.LastSequence = event.Sequence
+		if !m.publish(event) {
+			m.tripPublisher(active)
+			return ErrStorageUnavailable
+		}
+	}
+	return nil
+}
+
+func (m *Manager) failResultObservation(
+	current *activeTask,
+	err error,
+) {
+	if current == nil || current.processCompleted {
+		return
+	}
+	current.execution.resolve(OutcomeInfrastructureFailed)
+	current.cleanupWithoutDone = true
+	current.failPendingStep = false
+	if !current.terminating {
+		m.terminate(current)
+	}
+	m.stageProcessCompletion(
+		current,
+		ProcessResult{Err: err},
+		false,
+	)
+}
+
+func (m *Manager) bufferOutput(current *activeTask, output ProcessOutput, active map[string]*activeTask) {
 	remaining := maxPersistedOutput - current.persistedBytes - current.bufferedBytes
 	accepted := output.Data
 	overflow := false
@@ -835,6 +1010,100 @@ func (m *Manager) acceptOutput(current *activeTask, output ProcessOutput, active
 	}
 	if current.bufferedBytes > 0 && !current.flushPending {
 		m.armFlush(current)
+	}
+}
+
+func feedDiagnosticParser(
+	current *activeTask,
+	output ProcessOutput,
+) (values []diagnostic.Diagnostic, failed bool) {
+	if current.nextStep >= len(current.plan.Steps) {
+		return nil, false
+	}
+	parser := current.plan.Steps[current.nextStep].DiagnosticParser
+	if parser == nil {
+		return nil, false
+	}
+	defer func() {
+		if recover() != nil {
+			values = nil
+			failed = true
+		}
+	}()
+	return parser.Feed(output.Stream, output.Data), false
+}
+
+func (m *Manager) closeDiagnosticParser(current *activeTask, active map[string]*activeTask) {
+	if current.nextStep >= len(current.plan.Steps) {
+		return
+	}
+	parser := current.plan.Steps[current.nextStep].DiagnosticParser
+	if parser == nil {
+		return
+	}
+	values, failed := closeParserSafely(parser)
+	if failed {
+		current.plan.Steps[current.nextStep].DiagnosticParser = nil
+		return
+	}
+	m.persistDiagnostics(current, values, active)
+}
+
+func closeParserSafely(
+	parser diagnostic.Parser,
+) (values []diagnostic.Diagnostic, failed bool) {
+	defer func() {
+		if recover() != nil {
+			values = nil
+			failed = true
+		}
+	}()
+	return parser.Close(), false
+}
+
+func (m *Manager) persistDiagnostics(
+	current *activeTask,
+	values []diagnostic.Diagnostic,
+	active map[string]*activeTask,
+) {
+	for _, value := range values {
+		value.TaskID = current.task.ID
+		if value.StepID == "" {
+			value.StepID = current.task.ActiveStep
+		}
+		if current.artifactSink == nil ||
+			current.artifactSink.AppendDiagnostic(context.Background(), value) != nil {
+			m.tripStorage(active)
+			return
+		}
+		payload := map[string]any{
+			"severity": value.Severity,
+			"code":     value.Code,
+			"message":  value.Message,
+		}
+		if value.FileURI != "" {
+			payload["sourceUri"] = value.FileURI
+		}
+		if value.Range != nil {
+			payload["line"] = value.Range.Start.Line + 1
+			payload["column"] = value.Range.Start.Character + 1
+		}
+		event, err := m.store.AppendEvent(
+			context.Background(),
+			current.task.ID,
+			eventDraft(current.task.ID, EventTaskDiagnostic, m.clock.Now(), map[string]any{
+				"diagnostic": payload,
+			}),
+		)
+		if err != nil {
+			m.tripStorage(active)
+			return
+		}
+		current.task.LastSequence = event.Sequence
+		if !m.publish(event) {
+			m.tripPublisher(active)
+			return
+		}
 	}
 }
 
@@ -1064,7 +1333,7 @@ func (m *Manager) quiesceActive(active map[string]*activeTask) {
 		current.recoveryRequired = true
 		m.stopActive(current)
 		if current.process == nil {
-			delete(active, taskID)
+			removeActiveTask(active, taskID)
 			continue
 		}
 		if current.cleanupWithoutDone && !current.terminationComplete {

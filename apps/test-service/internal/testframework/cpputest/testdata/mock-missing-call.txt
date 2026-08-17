@@ -1,0 +1,11 @@
+TEST(MockGroup, missingCall)
+/workspace/tests/mock_tests.cpp:40: error: Failure in TEST(MockGroup, missingCall)
+	Mock Failure: Expected call WAS NOT fulfilled.
+	EXPECTED calls that WERE NOT fulfilled:
+		dependency_write -> int value: <7 (0x7)> (expected 1 call, called 0 times)
+	EXPECTED calls that WERE fulfilled:
+		<none>
+
+ - 5 ms
+
+Errors (1 failures, 1 tests, 1 ran, 0 checks, 0 ignored, 0 filtered out, 5 ms)

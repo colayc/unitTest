@@ -602,7 +602,7 @@ type ArtifactWriter interface {
 }
 ```
 
-- [ ] **Step 1：写出流式 artifacts、diagnostic event 和 fixture E2E 失败测试**
+- [x] **Step 1：写出流式 artifacts、diagnostic event 和 fixture E2E 失败测试**
 
 Go tests 断言：
 
@@ -611,12 +611,12 @@ Go tests 断言：
 - parser failure 不改变 process outcome；
 - sink failure 终止活动进程并使 Service unhealthy；
 - finalize 生成 stdout/stderr/execution-plan/diagnostics/build-summary；
-- 所有文件通过 temp + fsync + rename 提交；
+- 所有文件通过 temp + fsync + 无覆盖原子发布 + 目录 fsync 提交；
 - environment 和 token 不出现在 artifacts。
 
 Service-probe E2E 启动 deterministic `cmake-fixture`，完成 inspect → build → targets → second build skip configure，并断言 Step/Diagnostic event replay。
 
-- [ ] **Step 2：运行聚焦测试并确认失败**
+- [x] **Step 2：运行聚焦测试并确认失败**
 
 运行：
 
@@ -627,7 +627,7 @@ pnpm --filter @unit-test-ide/service-probe test:e2e
 
 预期： FAIL。
 
-- [ ] **Step 3：实现 sink、parser feed、v1.2 events 与 fixture**
+- [x] **Step 3：实现 sink、parser feed、v1.2 events 与 fixture**
 
 Manager 对每个 ProcessOutput：
 
@@ -649,7 +649,7 @@ Manager 对每个 ProcessOutput：
 
 未知参数退出 2，fixture 不执行外部命令。
 
-- [ ] **Step 4：运行完整门禁**
+- [x] **Step 4：运行完整门禁**
 
 运行：
 
@@ -664,7 +664,7 @@ git diff --check
 
 预期： 全部 PASS。
 
-- [ ] **Step 5：提交 Phase 3C integration**
+- [x] **Step 5：提交 Phase 3C integration**
 
 ```powershell
 git add apps/test-service packages tools/service-probe
@@ -673,11 +673,11 @@ git commit -m "feat: stream cmake build diagnostics and artifacts"
 
 ## Phase 3C 完成检查
 
-- [ ] v1.2 Schema/生成模型 deterministic
-- [ ] v1.0/v1.1 contract tests 全部通过
-- [ ] v1.1 event sequence compatibility projection 测试通过
-- [ ] deterministic CMake fixture E2E 通过
-- [ ] `pnpm verify`
-- [ ] `git diff --check`
-- [ ] `git status --short` 为空
-- [ ] 独立评审确认 Session/Client 均不能传入 executable/args/env/path
+- [x] v1.2 Schema/生成模型 deterministic
+- [x] v1.0/v1.1 contract tests 全部通过
+- [x] v1.1 event sequence compatibility projection 测试通过
+- [x] deterministic CMake fixture E2E 通过
+- [x] `pnpm verify`
+- [x] `git diff --check`
+- [x] `git status --short` 为空
+- [x] 独立评审确认 Session/Client 均不能传入 executable/args/env/path

@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:unit-test-ide:protocol:v1.4:capabilities",
+  "title": "CapabilitiesV14",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "workspaceInspect",
+    "targetList",
+    "cmakeBuild",
+    "testDiscovery",
+    "testRun",
+    "frameworkAdapters",
+    "opaqueCTestFallback",
+    "ctestJson",
+    "maxRepeatCount",
+    "maxSelectionSize",
+    "maxCatalogPageSize",
+    "unityHelperContractVersion",
+    "unityRunnerContractVersion",
+    "coverageRun",
+    "coverageReport",
+    "maxCoveragePageSize",
+    "maxCoverageTimeoutMs"
+  ],
+  "properties": {
+    "workspaceInspect": {
+      "const": true
+    },
+    "targetList": {
+      "const": true
+    },
+    "cmakeBuild": {
+      "const": true
+    },
+    "testDiscovery": {
+      "const": true
+    },
+    "testRun": {
+      "const": true
+    },
+    "frameworkAdapters": {
+      "type": "array",
+      "maxItems": 2,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/frameworkAdapter"
+      }
+    },
+    "opaqueCTestFallback": {
+      "const": true
+    },
+    "ctestJson": {
+      "type": "boolean"
+    },
+    "maxRepeatCount": {
+      "const": 100
+    },
+    "maxSelectionSize": {
+      "const": 100000
+    },
+    "maxCatalogPageSize": {
+      "const": 1000
+    },
+    "unityHelperContractVersion": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "unityRunnerContractVersion": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "coverageRun": {
+      "const": true
+    },
+    "coverageReport": {
+      "const": true
+    },
+    "maxCoveragePageSize": {
+      "const": 200
+    },
+    "maxCoverageTimeoutMs": {
+      "const": 86400000
+    }
+  },
+  "$defs": {
+    "frameworkAdapter": {
+      "title": "FrameworkAdapterCapabilityV14",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "contractVersion",
+        "displayName",
+        "canDiscoverCases",
+        "canRunCase",
+        "canReportSkipped",
+        "canReportSourceLocation",
+        "canReportMockDetails"
+      ],
+      "properties": {
+        "id": {
+          "title": "FrameworkAdapterIDV14",
+          "enum": [
+            "cpputest",
+            "unity"
+          ]
+        },
+        "contractVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "canDiscoverCases": {
+          "type": "boolean"
+        },
+        "canRunCase": {
+          "type": "boolean"
+        },
+        "canReportSkipped": {
+          "type": "boolean"
+        },
+        "canReportSourceLocation": {
+          "type": "boolean"
+        },
+        "canReportMockDetails": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

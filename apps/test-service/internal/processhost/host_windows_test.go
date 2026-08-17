@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -16,6 +17,41 @@ import (
 	"unit-test-ide.local/test-service/internal/processcontrol"
 	"unit-test-ide.local/test-service/internal/winprocess"
 )
+
+func TestTargetWindowsEnvironmentAppliesOverlayAndUnset(t *testing.T) {
+	t.Setenv("UT_PROCESSHOST_KEEP", "inherited")
+	t.Setenv("UT_PROCESSHOST_REMOVE", "private")
+	t.Setenv("UT_PROCESSHOST_REPLACE", "old")
+	t.Setenv("UNIT_TEST_SERVICE_TOKEN", "service-secret")
+	t.Setenv("UTIDE_PRIVATE_VALUE", "service-private")
+	environment := targetWindowsEnvironment(
+		[]string{
+			"UT_PROCESSHOST_REPLACE=new",
+			"unit_test_service_token=override-attempt",
+		},
+		[]string{"ut_processhost_remove"},
+	)
+	values := make(map[string]string)
+	for _, entry := range environment {
+		name, value, found := strings.Cut(entry, "=")
+		if found {
+			values[strings.ToUpper(name)] = value
+		}
+	}
+	if values["UT_PROCESSHOST_KEEP"] != "inherited" ||
+		values["UT_PROCESSHOST_REPLACE"] != "new" {
+		t.Fatalf("target environment = %#v", values)
+	}
+	if _, exists := values["UT_PROCESSHOST_REMOVE"]; exists {
+		t.Fatalf("unset environment remained = %#v", values)
+	}
+	if _, exists := values["UNIT_TEST_SERVICE_TOKEN"]; exists {
+		t.Fatalf("service token reached target = %#v", values)
+	}
+	if _, exists := values["UTIDE_PRIVATE_VALUE"]; exists {
+		t.Fatalf("service-owned value reached target = %#v", values)
+	}
+}
 
 func TestWindowsTargetWaitConfirmsInnerJobEmptyBeforeClosingAndReturning(t *testing.T) {
 	queries := 0

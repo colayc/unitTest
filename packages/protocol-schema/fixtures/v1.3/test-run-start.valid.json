@@ -1,0 +1,21 @@
+{
+  "protocolVersion": "1.3",
+  "kind": "request",
+  "messageId": "22222222222222222222222222222222",
+  "method": "tasks/start",
+  "sentAt": "2026-07-31T00:00:01Z",
+  "payload": {
+    "idempotencyKey": "cccccccccccccccccccccccccccccccc",
+    "kind": "testRun",
+    "projectId": "core",
+    "profileId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "catalogRevision": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "selection": {
+      "mode": "items",
+      "itemIds": [
+        "utid-v1-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      ]
+    },
+    "repeatCount": 2
+  }
+}

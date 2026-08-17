@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"unit-test-ide.local/test-service/internal/diagnostic"
 	"unit-test-ide.local/test-service/internal/task"
 )
 
@@ -51,7 +52,7 @@ func TestManagerJournalsStepStartWithRunningMutationAfterPurePrelease(t *testing
 	if err := json.Unmarshal(running.Events[1].Payload, &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload.StepID != "first" || payload.Kind != task.StepSimulation || payload.Status != task.StepRunning {
+	if payload.StepID != "first" || payload.Kind != task.StepConfigure || payload.Status != task.StepRunning {
 		t.Fatalf("step started payload = %#v", payload)
 	}
 
@@ -141,6 +142,411 @@ func TestManagerJournalsStepFinishBeforeStartingNextStep(t *testing.T) {
 		t.Fatalf("events after second Step starts = %v", got)
 	}
 	second.complete(task.ProcessResult{ExitCode: 0})
+}
+
+func TestManagerRunsSuccessfulStepObserverBeforeStartingNextStep(t *testing.T) {
+	observer := &recordingStepObserver{}
+	f := newManagerFixtureWithObserver(t, observer)
+	first := f.process
+	second := newFakeProcess()
+	f.processes.queue = []*fakeProcess{first, second}
+	t.Cleanup(func() { second.completeOnce(task.ProcessResult{Err: errors.New("test cleanup")}) })
+
+	started, err := f.manager.Start(
+		context.Background(),
+		twoStepStartRequest(testID(68), time.Minute, fixedBoundary{}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.complete(task.ProcessResult{ExitCode: 0})
+	f.awaitEventType(t, task.EventTaskStepStarted, 2)
+	if observer.calls != 1 || observer.taskID != started.ID || observer.step.ID != "first" {
+		t.Fatalf("observer = %#v", observer)
+	}
+	if second.startCalls() != 1 {
+		t.Fatalf("second Process Start calls = %d, want 1", second.startCalls())
+	}
+	second.complete(task.ProcessResult{ExitCode: 0})
+}
+
+func TestManagerObserverFailureDoesNotStartNextStep(t *testing.T) {
+	observer := &recordingStepObserver{err: task.ErrStorageUnavailable}
+	f := newManagerFixtureWithObserver(t, observer)
+	first := f.process
+	second := newFakeProcess()
+	f.processes.queue = []*fakeProcess{first, second}
+
+	started, err := f.manager.Start(
+		context.Background(),
+		twoStepStartRequest(testID(67), time.Minute, fixedBoundary{}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.complete(task.ProcessResult{ExitCode: 0})
+	f.awaitEventType(t, task.EventTaskFinished, 1)
+	if observer.calls != 1 {
+		t.Fatalf("observer calls = %d, want 1", observer.calls)
+	}
+	if second.startCalls() != 0 {
+		t.Fatalf("second Process Start calls = %d, want 0", second.startCalls())
+	}
+	finished, err := f.manager.Get(context.Background(), started.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finished.Outcome != task.OutcomeInfrastructureFailed ||
+		finished.Steps[0].Status != task.StepFailed ||
+		finished.Steps[1].Status != task.StepSkipped {
+		t.Fatalf("finished task = %#v", finished)
+	}
+}
+
+func TestManagerOwnsManagedBoundaryUntilTerminalCommit(t *testing.T) {
+	boundary := &recordingManagedBoundary{}
+	f := newManagerFixture(t)
+	first := f.process
+	second := newFakeProcess()
+	f.processes.queue = []*fakeProcess{first, second}
+
+	started, err := f.manager.Start(
+		context.Background(),
+		twoStepStartRequest(testID(66), time.Minute, boundary),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adoptedTaskID, releases := boundary.state()
+	if adoptedTaskID != started.ID || releases != 0 {
+		t.Fatalf("boundary after Start = task %q releases %d", adoptedTaskID, releases)
+	}
+	first.complete(task.ProcessResult{ExitCode: 0})
+	f.awaitEventType(t, task.EventTaskStepStarted, 2)
+	_, releases = boundary.state()
+	if releases != 0 {
+		t.Fatalf("boundary releases before final Step = %d", releases)
+	}
+	second.complete(task.ProcessResult{ExitCode: 0})
+	f.awaitEventType(t, task.EventTaskFinished, 1)
+	_, releases = boundary.state()
+	if releases != 1 {
+		t.Fatalf("boundary releases after terminal commit = %d, want 1", releases)
+	}
+}
+
+func TestManagerResumesExistingQueuedBuildWithoutCreatingAnotherTask(t *testing.T) {
+	f := newManagerFixture(t)
+	boundary := &recordingManagedBoundary{}
+	request := twoStepCMakeStartRequest(testID(67), time.Minute, boundary)
+	request.Plan.Steps = request.Plan.Steps[1:]
+	request.Plan.Fingerprint = task.FingerprintPlan(request.Plan)
+	now := f.clock.Now()
+	persisted := task.Task{
+		ID: testID(68), IdempotencyKey: request.IdempotencyKey,
+		RequestHash: strings.Repeat("b", 64), Kind: task.KindCMakeBuild,
+		Request:             append(json.RawMessage(nil), request.Request...),
+		WorkspaceGeneration: request.WorkspaceGeneration,
+		PlanFingerprint:     strings.Repeat("c", 64), Timeout: request.Timeout,
+		Status: task.StatusQueued, CreatedAt: now,
+	}
+	persisted, _, err := f.store.Create(
+		context.Background(), persisted,
+		[]task.StepSnapshot{
+			{ID: "configure", Kind: task.StepConfigure, Status: task.StepPending},
+			{ID: "build", Kind: task.StepBuild, Status: task.StepPending},
+		},
+		task.EventDraft{
+			TaskID: persisted.ID, Type: task.EventTaskCreated, At: now,
+			Payload: json.RawMessage(`{"status":"queued"}`),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := f.manager.Manager.ResumeQueued(context.Background(), task.ResumeRequest{
+		Task: persisted, Plan: request.Plan, Boundary: boundary,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.ID != persisted.ID || resumed.Status != task.StatusRunning ||
+		resumed.PlanFingerprint != request.Plan.Fingerprint ||
+		len(resumed.Steps) != 1 || resumed.Steps[0].ID != "build" {
+		t.Fatalf("resumed task = %#v", resumed)
+	}
+	if got := eventTypes(f.store.eventsForTask(persisted.ID)); !reflect.DeepEqual(got, []task.EventType{
+		task.EventTaskCreated, task.EventTaskStarted, task.EventTaskStepStarted,
+	}) {
+		t.Fatalf("resume event types = %v", got)
+	}
+	if adopted, releases := boundary.state(); adopted != persisted.ID || releases != 0 {
+		t.Fatalf("resume boundary = adopted %q releases %d", adopted, releases)
+	}
+	f.process.complete(task.ProcessResult{ExitCode: 0})
+	f.awaitEventType(t, task.EventTaskFinished, 1)
+	if _, releases := boundary.state(); releases != 1 {
+		t.Fatalf("resume boundary releases = %d, want 1", releases)
+	}
+}
+
+func TestManagerRejectsCoverageRunStartWithoutSideEffects(t *testing.T) {
+	f := newManagerFixture(t)
+	request := oneStepBuildRequest(testID(201))
+	request.Kind = task.KindCoverageRun
+
+	got, err := f.manager.Manager.Start(context.Background(), request)
+	if !errors.Is(err, task.ErrInvalidArgument) || !reflect.DeepEqual(got, task.Task{}) {
+		t.Fatalf("Manager.Start(coverage_run) = %#v, %v; want zero Task, ErrInvalidArgument", got, err)
+	}
+	assertNoManagerCoverageSideEffects(t, f)
+}
+
+func TestManagerRejectsCoverageRunResumeQueuedWithoutSideEffects(t *testing.T) {
+	f := newManagerFixture(t)
+	request := oneStepBuildRequest(testID(202))
+	queued := task.Task{
+		ID:                  testID(203),
+		IdempotencyKey:      request.IdempotencyKey,
+		RequestHash:         strings.Repeat("b", 64),
+		Kind:                task.KindCoverageRun,
+		Request:             append(json.RawMessage(nil), request.Request...),
+		WorkspaceGeneration: request.WorkspaceGeneration,
+		PlanFingerprint:     request.Plan.Fingerprint,
+		Timeout:             request.Timeout,
+		Status:              task.StatusQueued,
+		CreatedAt:           f.clock.Now(),
+	}
+
+	got, err := f.manager.Manager.ResumeQueued(context.Background(), task.ResumeRequest{
+		Task: queued, Plan: request.Plan, Boundary: request.Boundary,
+	})
+	if !errors.Is(err, task.ErrInvalidArgument) || !reflect.DeepEqual(got, task.Task{}) {
+		t.Fatalf("Manager.ResumeQueued(coverage_run) = %#v, %v; want zero Task, ErrInvalidArgument", got, err)
+	}
+	if gets := f.store.getCount(queued.ID); gets != 0 {
+		t.Fatalf("Store.Get calls = %d, want 0", gets)
+	}
+	assertNoManagerCoverageSideEffects(t, f)
+}
+
+func assertNoManagerCoverageSideEffects(t *testing.T, f *managerFixture) {
+	t.Helper()
+	creates, applies, replacements, events, artifacts, leases := f.store.writeSideEffectCounts()
+	if creates != 0 || applies != 0 || replacements != 0 || events != 0 || artifacts != 0 || leases != 0 {
+		t.Fatalf(
+			"Store side effects = create:%d apply:%d replace:%d events:%d artifacts:%d leases:%d; want all zero",
+			creates, applies, replacements, events, artifacts, leases,
+		)
+	}
+	if prepares, starts, terminates, closes := f.processes.prepareCount(), f.process.startCalls(), f.process.terminateCalls(), f.process.closeCalls(); prepares != 0 || starts != 0 || terminates != 0 || closes != 0 {
+		t.Fatalf(
+			"process side effects = prepare:%d start:%d terminate:%d close:%d; want all zero",
+			prepares, starts, terminates, closes,
+		)
+	}
+	if published := len(f.publisher.events()); published != 0 {
+		t.Fatalf("published events = %d, want 0", published)
+	}
+}
+
+func TestManagerPublishesStructuredDiagnosticsFromRuntimeOnlyStepParser(t *testing.T) {
+	f := newManagerFixture(t)
+	request := twoStepStartRequest(testID(65), time.Minute, fixedBoundary{})
+	request.Plan.Steps[0].DiagnosticParser = &staticDiagnosticParser{
+		values: []diagnostic.Diagnostic{{
+			Severity: "error", Code: "C100", Message: "compile failed",
+			FileURI: "file:///workspace/main.cpp",
+			Range:   &diagnostic.Range{Start: diagnostic.Position{Line: 11, Character: 2}},
+		}},
+	}
+	started, err := f.manager.Start(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.process.output(task.ProcessOutput{Stream: "stderr", Data: []byte("diagnostic\n")})
+	f.awaitEventType(t, task.EventTaskDiagnostic, 1)
+	events := f.store.eventsForTask(started.ID)
+	var payload struct {
+		Diagnostic struct {
+			Severity  string `json:"severity"`
+			Code      string `json:"code"`
+			Message   string `json:"message"`
+			SourceURI string `json:"sourceUri"`
+			Line      int    `json:"line"`
+			Column    int    `json:"column"`
+		} `json:"diagnostic"`
+	}
+	found := false
+	for _, event := range events {
+		if event.Type != task.EventTaskDiagnostic {
+			continue
+		}
+		found = true
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !found || payload.Diagnostic.Severity != "error" ||
+		payload.Diagnostic.Code != "C100" ||
+		payload.Diagnostic.Message != "compile failed" ||
+		payload.Diagnostic.SourceURI != "file:///workspace/main.cpp" ||
+		payload.Diagnostic.Line != 12 || payload.Diagnostic.Column != 3 {
+		t.Fatalf("diagnostic payload = %#v", payload)
+	}
+	f.process.complete(task.ProcessResult{ExitCode: 1})
+}
+
+func TestManagerWritesOutputAndDiagnosticsToSinkBeforeJournal(t *testing.T) {
+	f := newManagerFixture(t)
+	request := twoStepCMakeStartRequest(testID(102), time.Minute, fixedBoundary{})
+	request.Plan.Steps = request.Plan.Steps[1:]
+	request.Plan.Steps[0].DiagnosticParser = &staticDiagnosticParser{
+		values: []diagnostic.Diagnostic{{
+			Severity: "warning", Code: "W200", Message: "ordered warning",
+			StepID: "build",
+		}},
+	}
+	request.Plan.Fingerprint = task.FingerprintPlan(request.Plan)
+	started, err := f.manager.Start(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var operationsMu sync.Mutex
+	operations := make([]string, 0, 4)
+	appendOperation := func(value string) {
+		operationsMu.Lock()
+		operations = append(operations, value)
+		operationsMu.Unlock()
+	}
+	f.artifacts.onAppendOutput = func() { appendOperation("sink.output") }
+	f.artifacts.onAppendDiagnostic = func() { appendOperation("sink.diagnostic") }
+	f.store.onAppendEvent = func(draft task.EventDraft) {
+		switch draft.Type {
+		case task.EventTaskOutput:
+			appendOperation("journal.output")
+		case task.EventTaskDiagnostic:
+			appendOperation("journal.diagnostic")
+		}
+	}
+
+	f.process.output(task.ProcessOutput{
+		Stream: "stderr", Data: []byte("warning: deterministic\n"),
+	})
+	f.awaitEventType(t, task.EventTaskDiagnostic, 1)
+	operationsMu.Lock()
+	got := append([]string(nil), operations...)
+	operationsMu.Unlock()
+	if want := []string{
+		"sink.output", "journal.output", "sink.diagnostic", "journal.diagnostic",
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("artifact/journal order = %v, want %v; task=%s", got, want, started.ID)
+	}
+	f.process.complete(task.ProcessResult{ExitCode: 0})
+}
+
+func TestManagerIgnoresDiagnosticParserPanicForProcessOutcome(t *testing.T) {
+	f := newManagerFixture(t)
+	request := twoStepCMakeStartRequest(testID(103), time.Minute, fixedBoundary{})
+	request.Plan.Steps = request.Plan.Steps[1:]
+	request.Plan.Steps[0].DiagnosticParser = panickingDiagnosticParser{}
+	request.Plan.Fingerprint = task.FingerprintPlan(request.Plan)
+	started, err := f.manager.Start(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.process.output(task.ProcessOutput{Stream: "stderr", Data: []byte("parser input\n")})
+	f.process.complete(task.ProcessResult{ExitCode: 0})
+	finished := f.awaitTask(t, started.ID, task.StatusFinished)
+	if finished.Outcome != task.OutcomeSucceeded || !f.manager.Healthy() {
+		t.Fatalf("parser panic changed process outcome: task=%#v healthy=%v", finished, f.manager.Healthy())
+	}
+}
+
+func TestManagerArtifactSinkFailureTerminatesProcessAndTripsCircuit(t *testing.T) {
+	f := newManagerFixture(t)
+	request := twoStepCMakeStartRequest(testID(104), time.Minute, fixedBoundary{})
+	request.Plan.Steps = request.Plan.Steps[1:]
+	request.Plan.Fingerprint = task.FingerprintPlan(request.Plan)
+	started, err := f.manager.Start(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.artifacts.fail = errors.New("artifact sink unavailable")
+	f.process.output(task.ProcessOutput{Stream: "stdout", Data: []byte("output")})
+	f.awaitUnhealthy(t)
+	f.awaitTerminate(t, 1)
+	stored, err := f.manager.Get(context.Background(), started.ID)
+	if err != nil || stored.Status == task.StatusFinished {
+		t.Fatalf("sink failure fabricated terminal state: %#v, %v", stored, err)
+	}
+}
+
+type recordingStepObserver struct {
+	calls  int
+	taskID string
+	step   task.ExecutionStep
+	err    error
+}
+
+type recordingManagedBoundary struct {
+	fixedBoundary
+	mu            sync.Mutex
+	adoptedTaskID string
+	releases      int
+}
+
+type staticDiagnosticParser struct {
+	values []diagnostic.Diagnostic
+}
+
+func (p *staticDiagnosticParser) Feed(string, []byte) []diagnostic.Diagnostic {
+	values := p.values
+	p.values = nil
+	return values
+}
+
+func (p *staticDiagnosticParser) Close() []diagnostic.Diagnostic { return nil }
+
+type panickingDiagnosticParser struct{}
+
+func (panickingDiagnosticParser) Feed(string, []byte) []diagnostic.Diagnostic {
+	panic("parser failure")
+}
+
+func (panickingDiagnosticParser) Close() []diagnostic.Diagnostic {
+	panic("parser failure")
+}
+
+func (b *recordingManagedBoundary) Adopt(taskID string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.adoptedTaskID = taskID
+}
+
+func (b *recordingManagedBoundary) Release() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.releases++
+	return nil
+}
+
+func (b *recordingManagedBoundary) state() (string, int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.adoptedTaskID, b.releases
+}
+
+func (o *recordingStepObserver) Succeeded(
+	_ context.Context,
+	value task.Task,
+	step task.ExecutionStep,
+) error {
+	o.calls++
+	o.taskID = value.ID
+	o.step = step
+	return o.err
 }
 
 func TestManagerStepEventPublisherFailureKeepsDurableProcessHandoff(t *testing.T) {
@@ -531,7 +937,11 @@ func TestManagerCancellationDuringNextStepPreparePreventsStart(t *testing.T) {
 
 	select {
 	case result := <-cancelResult:
-		if result.err != nil || result.task.Status != task.StatusRunning {
+		terminalResult := result.task.Status == task.StatusFinished &&
+			(result.task.Outcome == task.OutcomeCancelled ||
+				result.task.Outcome == task.OutcomeInfrastructureFailed)
+		if result.err != nil ||
+			result.task.Status != task.StatusRunning && !terminalResult {
 			t.Fatalf("Cancel = %#v, %v", result.task, result.err)
 		}
 	case <-time.After(time.Second):
@@ -1591,7 +2001,10 @@ func TestManagerCancelConflictCleansPreemptedPreparedProcessLocally(t *testing.T
 
 	select {
 	case result := <-cancelResult:
-		if result.err != nil || result.task.Status != task.StatusRunning {
+		terminalConflict := result.task.Status == task.StatusFinished &&
+			result.task.Outcome == task.OutcomeInfrastructureFailed
+		if result.err != nil ||
+			result.task.Status != task.StatusRunning && !terminalConflict {
 			t.Fatalf("Cancel = %#v, %v", result.task, result.err)
 		}
 	case <-time.After(time.Second):
@@ -1723,33 +2136,35 @@ func twoStepStartRequest(idempotencyKey string, timeout time.Duration, boundary 
 		Version: 1,
 		Steps: []task.ExecutionStep{
 			{
-				ID: "first", Kind: task.StepSimulation,
+				ID: "first", Kind: task.StepConfigure,
 				Process: task.ProcessSpec{
 					Executable: "trusted-service",
 					Args:       []string{"--task-fixture", "success"},
 					Dir:        "simulation-dir",
 				},
+				Public: task.CommandSummary{Executable: "cmake", Args: []string{"--configure"}},
 			},
 			{
-				ID: "second", Kind: task.StepSimulation,
+				ID: "second", Kind: task.StepBuild,
 				Process: task.ProcessSpec{
 					Executable: "trusted-service",
 					Args:       []string{"--task-fixture", "success"},
 					Dir:        "simulation-dir",
 				},
+				Public: task.CommandSummary{Executable: "cmake", Args: []string{"--build"}},
 			},
 		},
 	}
 	plan.Fingerprint = task.FingerprintPlan(plan)
-	request, _ := json.Marshal(map[string]any{"scenario": task.ScenarioSuccess, "timeoutMs": timeout.Milliseconds()})
+	request, _ := json.Marshal(map[string]any{"sourceRoot": "src", "buildRoot": "build"})
 	return task.StartRequest{
-		IdempotencyKey: idempotencyKey,
-		Kind:           task.KindSimulation,
-		Request:        request,
-		Scenario:       task.ScenarioSuccess,
-		Timeout:        timeout,
-		Plan:           plan,
-		Boundary:       boundary,
+		IdempotencyKey:      idempotencyKey,
+		Kind:                task.KindCMakeBuild,
+		Request:             request,
+		WorkspaceGeneration: strings.Repeat("a", 64),
+		Timeout:             timeout,
+		Plan:                plan,
+		Boundary:            boundary,
 	}
 }
 

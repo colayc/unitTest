@@ -170,6 +170,80 @@ func TestRunServiceModeRequiresDataDirBeforeConsumingToken(t *testing.T) {
 	}
 }
 
+func TestRunServiceModeRequiresWorkspaceRootBeforeConsumingToken(t *testing.T) {
+	directory := t.TempDir()
+	tokenPath := preparedServiceToken(t, directory)
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"--endpoint", "unused-endpoint", "--token-file", tokenPath,
+		"--data-dir", filepath.Join(directory, "data"),
+	}, strings.NewReader(""), &stdout, &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "--workspace-root") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if contents, err := os.ReadFile(tokenPath); err != nil || string(contents) != "0123456789abcdef" {
+		t.Fatalf("token was consumed before workspace validation: %q, %v", contents, err)
+	}
+}
+
+func TestRunTrustedWorkspaceRequiresExplicitBoolean(t *testing.T) {
+	for _, args := range [][]string{
+		{"--trusted-workspace"},
+		{"--trusted-workspace=maybe"},
+	} {
+		var stdout, stderr bytes.Buffer
+		if code := run(args, strings.NewReader(""), &stdout, &stderr); code != 2 ||
+			stdout.Len() != 0 || stderr.Len() == 0 {
+			t.Fatalf("args=%v code=%d stdout=%q stderr=%q", args, code, stdout.String(), stderr.String())
+		}
+	}
+}
+
+func TestRunRejectsWorkspaceAndCMakeFlagsInInternalModes(t *testing.T) {
+	for _, extra := range [][]string{
+		{"--workspace-root", t.TempDir()},
+		{"--trusted-workspace=true"},
+		{"--cmake-bundle-root", t.TempDir()},
+		{"--dev-cmake-executable", os.Args[0]},
+	} {
+		args := append([]string{"--task-fixture", "success"}, extra...)
+		var stdout, stderr bytes.Buffer
+		if code := run(args, strings.NewReader(""), &stdout, &stderr); code != 2 ||
+			!strings.Contains(stderr.String(), "internal modes cannot be combined") {
+			t.Fatalf("args=%v code=%d stdout=%q stderr=%q", args, code, stdout.String(), stderr.String())
+		}
+	}
+}
+
+func TestRunInvalidWorkspaceRootNeverCreatesListenerOrPrintsReady(t *testing.T) {
+	directory := t.TempDir()
+	tokenPath := preparedServiceToken(t, directory)
+	workspacePath := filepath.Join(directory, "not-a-directory")
+	if err := os.WriteFile(workspacePath, []byte("private"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := listenTransport
+	listenerCalled := false
+	listenTransport = func(string) (net.Listener, error) {
+		listenerCalled = true
+		return nil, errors.New("listener must not be called")
+	}
+	defer func() { listenTransport = previous }()
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"--endpoint", "unused-endpoint", "--token-file", tokenPath,
+		"--data-dir", filepath.Join(directory, "data"),
+		"--workspace-root", workspacePath,
+	}, strings.NewReader(""), &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("run code = %d, want 1; stderr = %q", code, stderr.String())
+	}
+	if listenerCalled || strings.Contains(stdout.String(), "READY") {
+		t.Fatalf("listenerCalled=%v stdout=%q", listenerCalled, stdout.String())
+	}
+}
+
 func TestRunUnsafeDataDirNeverCreatesListenerOrPrintsReady(t *testing.T) {
 	directory := t.TempDir()
 	tokenPath := filepath.Join(directory, "token")
@@ -192,7 +266,10 @@ func TestRunUnsafeDataDirNeverCreatesListenerOrPrintsReady(t *testing.T) {
 	defer func() { listenTransport = previous }()
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"--endpoint", "unused-endpoint", "--token-file", tokenPath, "--data-dir", unsafePath}, strings.NewReader(""), &stdout, &stderr)
+	code := run([]string{
+		"--endpoint", "unused-endpoint", "--token-file", tokenPath,
+		"--data-dir", unsafePath, "--workspace-root", directory,
+	}, strings.NewReader(""), &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("run code = %d, want 1; stderr = %q", code, stderr.String())
 	}
@@ -214,7 +291,10 @@ func TestRunSanitizesListenerSetupFailure(t *testing.T) {
 	defer func() { listenTransport = previous }()
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"--endpoint", "test-endpoint", "--token-file", tokenPath, "--data-dir", filepath.Join(directory, "data")}, strings.NewReader(""), &stdout, &stderr)
+	code := run([]string{
+		"--endpoint", "test-endpoint", "--token-file", tokenPath,
+		"--data-dir", filepath.Join(directory, "data"), "--workspace-root", directory,
+	}, strings.NewReader(""), &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("run code = %d, want 1", code)
 	}
@@ -233,7 +313,10 @@ func TestRunSanitizesServeFailureAfterReady(t *testing.T) {
 	defer func() { listenTransport = previous }()
 
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"--endpoint", "test-endpoint", "--token-file", tokenPath, "--data-dir", filepath.Join(directory, "data")}, strings.NewReader(""), &stdout, &stderr)
+	code := run([]string{
+		"--endpoint", "test-endpoint", "--token-file", tokenPath,
+		"--data-dir", filepath.Join(directory, "data"), "--workspace-root", directory,
+	}, strings.NewReader(""), &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("run code = %d, want 1", code)
 	}
@@ -266,6 +349,7 @@ func TestRunSanitizesConsumeTokenFailure(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run([]string{
 		"--endpoint", "test-endpoint", "--token-file", `C:\secret\token-file`, "--data-dir", filepath.Join(t.TempDir(), "data"),
+		"--workspace-root", t.TempDir(),
 	}, strings.NewReader(""), &stdout, &stderr)
 	if code != 1 || stdout.Len() != 0 || stderr.String() != "authentication token unavailable\n" {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())

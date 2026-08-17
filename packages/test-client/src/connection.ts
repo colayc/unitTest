@@ -3,9 +3,8 @@ import { createRequire } from "node:module";
 import type { Duplex } from "node:stream";
 import { Ajv2020, type ValidateFunction } from "ajv/dist/2020.js";
 import * as formatsModule from "ajv-formats";
-import type { TaskEvent } from "@unit-test-ide/protocol-models";
 import { decodeTaskEvent } from "./decoders.js";
-import type { ErrorEnvelope, IncomingEnvelope, Method, ProtocolVersion, RequestEnvelope, ResponseEnvelope } from "./envelopes.js";
+import type { ErrorEnvelope, IncomingEnvelope, Method, ProtocolTaskEvent, ProtocolVersion, RequestEnvelope, ResponseEnvelope } from "./envelopes.js";
 import { ProtocolError } from "./envelopes.js";
 
 export const MAX_MESSAGE_BYTES = 1024 * 1024;
@@ -17,15 +16,38 @@ addFormats(ajv);
 ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.1/task"));
 ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.1/event"));
 ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.1/artifact"));
+ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.2/capabilities"));
+ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.2/diagnostic"));
+ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.2/workspace"));
+ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.2/task"));
+ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.2/event"));
+ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.2/artifact"));
+ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.3/capabilities"));
+ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.3/diagnostic"));
+ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.3/test"));
+ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.3/task"));
+ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.3/event"));
+ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.3/artifact"));
+ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.4/capabilities"));
+ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.4/diagnostic"));
+ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.4/test"));
+ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.4/coverage"));
+ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.4/task"));
+ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.4/event"));
+ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.4/artifact"));
 const validators: Record<ProtocolVersion, ValidateFunction> = {
   "1.0": ajv.compile(require("@unit-test-ide/protocol-schema/v1/message")),
-  "1.1": ajv.compile(require("@unit-test-ide/protocol-schema/v1.1/message"))
+  "1.1": ajv.compile(require("@unit-test-ide/protocol-schema/v1.1/message")),
+  "1.2": ajv.compile(require("@unit-test-ide/protocol-schema/v1.2/message")),
+  "1.3": ajv.compile(require("@unit-test-ide/protocol-schema/v1.3/message")),
+  "1.4": ajv.compile(require("@unit-test-ide/protocol-schema/v1.4/message"))
 };
 
 type Pending = {
   version: ProtocolVersion;
   method: Method;
   acceptLegacyUnsupportedProtocol: boolean;
+  offeredProtocolVersions: ProtocolVersion[];
   onResponse?: (payload: Record<string, unknown>) => void;
   onError?: (error: ProtocolError) => void;
   resolve: (payload: Record<string, unknown>) => void;
@@ -39,12 +61,13 @@ export interface RequestOptions {
 
 export class Connection {
   readonly #pending = new Map<string, Pending>();
-  readonly #eventListeners = new Set<(event: TaskEvent) => void>();
+  readonly #eventListeners = new Set<(event: ProtocolTaskEvent) => void>();
   readonly #closeListeners = new Set<(error: Error) => void>();
   #buffer = Buffer.alloc(0);
   #closed = false;
   #closeError: Error | undefined;
-  #legacyHandshakeAvailable = true;
+  #legacyHandshakeCeiling = Number.POSITIVE_INFINITY;
+  #negotiatedVersion: ProtocolVersion | undefined;
 
   get closed(): boolean { return this.#closed; }
 
@@ -79,15 +102,20 @@ export class Connection {
     if (encoded.byteLength - 1 > MAX_MESSAGE_BYTES) {
       return Promise.reject(new Error("protocol line exceeds the 1 MiB limit"));
     }
-    const acceptLegacyUnsupportedProtocol = this.#legacyHandshakeAvailable
-      && version === "1.1"
-      && method === "handshake";
-    if (acceptLegacyUnsupportedProtocol) this.#legacyHandshakeAvailable = false;
+    const handshakeAttempt = method === "handshake";
+    const acceptLegacyUnsupportedProtocol = handshakeAttempt
+      && version !== "1.0"
+      && protocolRank(version) < this.#legacyHandshakeCeiling;
+    if (handshakeAttempt) this.#legacyHandshakeCeiling = Number.NEGATIVE_INFINITY;
+    const offeredProtocolVersions = method === "handshake" && Array.isArray(payload.supportedProtocolVersions)
+      ? payload.supportedProtocolVersions.filter(isProtocolVersion)
+      : [];
     return new Promise((resolve, reject) => {
       this.#pending.set(messageId, {
         version,
         method,
         acceptLegacyUnsupportedProtocol,
+        offeredProtocolVersions,
         onResponse: options.onResponse,
         onError: options.onError,
         resolve,
@@ -100,7 +128,7 @@ export class Connection {
     });
   }
 
-  onEvent(listener: (event: TaskEvent) => void): () => void {
+  onEvent(listener: (event: ProtocolTaskEvent) => void): () => void {
     if (this.#closed) return () => {};
     this.#eventListeners.add(listener);
     return () => this.#eventListeners.delete(listener);
@@ -153,7 +181,7 @@ export class Connection {
       return false;
     }
     const version = (value as { protocolVersion?: unknown }).protocolVersion;
-    if (version !== "1.0" && version !== "1.1") {
+    if (!isProtocolVersion(version)) {
       this.#closeWithError(new Error("service returned an unsupported protocol version"));
       return false;
     }
@@ -164,7 +192,15 @@ export class Connection {
     }
     const message = value as IncomingEnvelope;
     if (message.kind === "event") {
-      let event: TaskEvent;
+      if (this.#negotiatedVersion === undefined) {
+        this.#closeWithError(new Error("service returned an event before protocol negotiation"));
+        return false;
+      }
+      if (message.protocolVersion !== this.#negotiatedVersion) {
+        this.#closeWithError(new Error("event protocol version does not match the negotiated session"));
+        return false;
+      }
+      let event: ProtocolTaskEvent;
       try {
         event = decodeTaskEvent(message);
       } catch (error) {
@@ -177,14 +213,21 @@ export class Connection {
     const pending = this.#pending.get(message.requestId);
     if (!pending) return true;
     const isAllowedLegacyHandshakeError = pending.acceptLegacyUnsupportedProtocol
-      && pending.version === "1.1"
       && pending.method === "handshake"
       && message.kind === "error"
       && message.protocolVersion === "1.0"
       && message.error.code === "UNSUPPORTED_PROTOCOL";
-    if (message.protocolVersion !== pending.version && !isAllowedLegacyHandshakeError) {
+    const isAllowedNegotiatedHandshakeResponse = pending.method === "handshake"
+      && message.kind === "response"
+      && pending.offeredProtocolVersions.includes(message.protocolVersion)
+      && message.payload.negotiatedProtocolVersion === message.protocolVersion
+      && protocolRank(message.protocolVersion) <= protocolRank(pending.version);
+    if (message.protocolVersion !== pending.version && !isAllowedLegacyHandshakeError && !isAllowedNegotiatedHandshakeResponse) {
       this.#closeWithError(new Error("response protocol version does not match request"));
       return false;
+    }
+    if (isAllowedLegacyHandshakeError) {
+      this.#legacyHandshakeCeiling = protocolRank(pending.version);
     }
     this.#pending.delete(message.requestId);
     if (message.kind === "error") {
@@ -204,6 +247,7 @@ export class Connection {
       pending.reject(new Error("response method does not match request"));
       return true;
     }
+    if (pending.method === "handshake") this.#negotiatedVersion = response.protocolVersion;
     try {
       pending.onResponse?.(response.payload);
     } catch (error) {
@@ -225,4 +269,12 @@ export class Connection {
     this.#closeListeners.clear();
     this.stream.destroy();
   }
+}
+
+function isProtocolVersion(value: unknown): value is ProtocolVersion {
+  return value === "1.0" || value === "1.1" || value === "1.2" || value === "1.3" || value === "1.4";
+}
+
+function protocolRank(version: ProtocolVersion): number {
+  return { "1.0": 0, "1.1": 1, "1.2": 2, "1.3": 3, "1.4": 4 }[version];
 }

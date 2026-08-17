@@ -1,0 +1,3 @@
+IGNORE_TEST(Core, ignored) - 0 ms
+
+OK (1 tests, 0 ran, 0 checks, 1 ignored, 0 filtered out, 0 ms)

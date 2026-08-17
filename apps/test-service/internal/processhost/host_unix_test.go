@@ -21,6 +21,41 @@ import (
 
 const identityFailureHelperEnvironment = "UNIT_TEST_PROCESSHOST_IDENTITY_FAILURE_HELPER"
 
+func TestTargetEnvironmentAppliesOverlayAndUnset(t *testing.T) {
+	t.Setenv("UT_PROCESSHOST_KEEP", "inherited")
+	t.Setenv("UT_PROCESSHOST_REMOVE", "private")
+	t.Setenv("UT_PROCESSHOST_REPLACE", "old")
+	t.Setenv("UNIT_TEST_SERVICE_TOKEN", "service-secret")
+	t.Setenv("UTIDE_PRIVATE_VALUE", "service-private")
+	environment := targetEnvironment(
+		[]string{
+			"UT_PROCESSHOST_REPLACE=new",
+			"UNIT_TEST_SERVICE_TOKEN=override-attempt",
+		},
+		[]string{"UT_PROCESSHOST_REMOVE"},
+	)
+	values := make(map[string]string)
+	for _, entry := range environment {
+		name, value, found := strings.Cut(entry, "=")
+		if found {
+			values[name] = value
+		}
+	}
+	if values["UT_PROCESSHOST_KEEP"] != "inherited" ||
+		values["UT_PROCESSHOST_REPLACE"] != "new" {
+		t.Fatalf("target environment = %#v", values)
+	}
+	if _, exists := values["UT_PROCESSHOST_REMOVE"]; exists {
+		t.Fatalf("unset environment remained = %#v", values)
+	}
+	if _, exists := values["UNIT_TEST_SERVICE_TOKEN"]; exists {
+		t.Fatalf("service token reached target = %#v", values)
+	}
+	if _, exists := values["UTIDE_PRIVATE_VALUE"]; exists {
+		t.Fatalf("service-owned value reached target = %#v", values)
+	}
+}
+
 func TestLinuxIdentityFailureHelper(t *testing.T) {
 	if os.Getenv(identityFailureHelperEnvironment) == "" {
 		return
