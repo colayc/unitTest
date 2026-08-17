@@ -452,10 +452,13 @@ test("default activation resolves an empty executable setting to the bundled ser
 });
 
 test("service executable overrides require development mode and an approved absolute path", async (t) => {
+  const expectedExecutable = process.platform === "win32" ? "unit-test-service.exe" : "unit-test-service";
+  const approvedAbsolute = process.platform === "win32" ? `C:\\dev\\${expectedExecutable}` : `/tmp/${expectedExecutable}`;
+  const unapprovedAbsolute = process.platform === "win32" ? "C:\\dev\\other-service.exe" : "/tmp/other-service";
   const cases = [
-    { name: "production override", serviceExecutable: "C:\\dev\\unit-test-service.exe", developmentMode: false },
-    { name: "development relative path", serviceExecutable: "unit-test-service.exe", developmentMode: true },
-    { name: "development unapproved basename", serviceExecutable: "C:\\dev\\other-service.exe", developmentMode: true }
+    { name: "production override", serviceExecutable: approvedAbsolute, developmentMode: false },
+    { name: "development relative path", serviceExecutable: expectedExecutable, developmentMode: true },
+    { name: "development unapproved basename", serviceExecutable: unapprovedAbsolute, developmentMode: true }
   ];
 
   for (const item of cases) {
@@ -483,7 +486,8 @@ test("service executable overrides require development mode and an approved abso
 test("development mode accepts an approved absolute service executable override", async () => {
   const manager = new FakeServiceManager();
   let captured: ServiceManagerOptions | undefined;
-  const override = "C:\\dev\\unit-test-service.exe";
+  const expectedExecutable = process.platform === "win32" ? "unit-test-service.exe" : "unit-test-service";
+  const override = process.platform === "win32" ? `C:\\dev\\${expectedExecutable}` : `/tmp/${expectedExecutable}`;
   const host = createExtensionHarness({
     serviceExecutable: override,
     developmentMode: true,
@@ -497,6 +501,7 @@ test("development mode accepts an approved absolute service executable override"
 
   assert.ok(captured);
   assert.equal(captured.serviceExecutable, override);
+  assert.equal(captured.serviceExecutable.replaceAll("\\", "/").split("/").at(-1), expectedExecutable);
   assert.equal(manager.startCalls, 1);
 });
 
