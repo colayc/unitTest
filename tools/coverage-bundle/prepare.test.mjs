@@ -333,6 +333,20 @@ test("archive audit rejects traversal, symlink and duplicate entries before extr
   }
 });
 
+test("archive audit accepts safe internal spaces in regular filenames", () => {
+  assert.deepEqual(__testing.validateArchiveEntries([
+    { path: "Python-3.14.6/Mac/Icons/Disk Image.icns", type: "file" },
+  ]), [
+    { path: "Python-3.14.6/Mac/Icons/Disk Image.icns", type: "file" },
+  ]);
+  assert.throws(() => __testing.validateArchiveEntries([
+    { path: "Python-3.14.6/Mac/Icons/Disk Image.icns ", type: "file" },
+  ]), /unsafe archive entry/u);
+  assert.throws(() => __testing.validateArchiveEntries([
+    { path: "Python-3.14.6/Mac/Icons/ Disk Image.icns", type: "file" },
+  ]), /unsafe archive entry/u);
+});
+
 test("prepare builds in a temp directory, writes READY last, and atomically publishes", async (t) => {
   let sawTargetDuringBuild = false;
   let sawReadyBeforeHook = true;

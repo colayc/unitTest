@@ -176,10 +176,10 @@ export async function obtainArtifact(artifact, cacheRoot, download = defaultDown
 function portablePath(value) {
   if (typeof value !== "string" || !value || value.includes("\\") || value.includes(":")) return false;
   const path = value.endsWith("/") ? value.slice(0, -1) : value;
-  if (!path || posix.isAbsolute(path) || posix.normalize(path) !== path || !/^[A-Za-z0-9._+/-]+$/u.test(path)) return false;
+  if (!path || posix.isAbsolute(path) || posix.normalize(path) !== path || !/^[-A-Za-z0-9._+/ ]+$/u.test(path)) return false;
   return path.split("/").every((part) => {
     const base = part.split(".", 1)[0].toUpperCase();
-    return part && part !== "." && part !== ".." && !part.endsWith(".") && !part.endsWith(" ") &&
+    return part && part !== "." && part !== ".." && !part.startsWith(" ") && !part.endsWith(".") && !part.endsWith(" ") &&
       !["CON", "PRN", "AUX", "NUL"].includes(base) && !/^(?:COM|LPT)[1-9]$/u.test(base);
   });
 }
