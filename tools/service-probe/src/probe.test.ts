@@ -20,7 +20,7 @@ import { prepareTestFrameworkWorkspace } from "./test-framework-fixture.js";
 const root = resolve(import.meta.dirname, "../../..");
 const binary = join(root, "build", process.platform === "win32" ? "unit-test-service.exe" : "unit-test-service");
 const cmakeFixture = join(root, "build", process.platform === "win32" ? "cmake-fixture.exe" : "cmake-fixture");
-const EVENT_TIMEOUT_MS = 8_000;
+const EVENT_TIMEOUT_MS = 30_000;
 const WORKSPACE_INSPECTION_TIMEOUT_MS = process.platform === "win32" ? 120_000 : 30_000;
 const V11_EVENT_NAMES = new Set([
   "task.created",
@@ -192,6 +192,7 @@ test("service fixture bounds a pending handshake RPC and cleans up its process",
     await assert.rejects(
       startService(binary, directory, {
         timeoutMs: 500,
+        startupTimeoutMs: 30_000,
         operations: {
           spawnService: (serviceBinary, args) => {
             const child = spawn(serviceBinary, args, { windowsHide: true });

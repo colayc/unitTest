@@ -85,6 +85,12 @@ interface ProbeOperations {
 
 export interface StartServiceOptions {
   timeoutMs?: number;
+  /**
+   * Timeout for the one-time endpoint/token/readiness phase.  Keeping this
+   * separate from timeoutMs lets tests exercise a short RPC deadline without
+   * making a cold native service startup fail first on slower runners.
+   */
+  startupTimeoutMs?: number;
   workspaceRoot?: string;
   trustedWorkspace?: boolean;
   cmakeBundleRoot?: string;
@@ -313,6 +319,7 @@ async function launchService(serviceBinary: string, directory: string, options: 
   const dataDir = join(directory, "data");
   const workspaceRoot = options.workspaceRoot ?? directory;
   const timeoutMs = options.timeoutMs ?? OPERATION_TIMEOUT_MS;
+  const startupTimeoutMs = options.startupTimeoutMs ?? timeoutMs;
   let endpointResource: EndpointResource | undefined;
   let child: ChildProcessWithoutNullStreams | undefined;
   let exit: Promise<Exit> | undefined;
@@ -329,12 +336,12 @@ async function launchService(serviceBinary: string, directory: string, options: 
           await rm(resource.directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
         }
       },
-      timeoutMs
+      startupTimeoutMs
     );
     await withNamedTimeout(
       "token file preparation",
       (options.operations?.prepareTokenFile ?? prepareTokenFile)(serviceBinary, tokenFile, token),
-      timeoutMs
+      startupTimeoutMs
     );
     const serviceArguments = [
       "--endpoint", endpointResource.path,
@@ -361,8 +368,8 @@ async function launchService(serviceBinary: string, directory: string, options: 
     child.stderr.on("data", (chunk: Buffer | string) => { stderr += String(chunk); });
     child.on("error", (error) => { stderr += `${error.message}\n`; });
 
-    await withNamedTimeout("service startup readiness", ready(child, endpointResource.path), timeoutMs);
-    await withNamedTimeout("token file consumption confirmation", tokenWasConsumed(tokenFile), timeoutMs);
+    await withNamedTimeout("service startup readiness", ready(child, endpointResource.path), startupTimeoutMs);
+    await withNamedTimeout("token file consumption confirmation", tokenWasConsumed(tokenFile), startupTimeoutMs);
     const connector = new PausableConnector(endpointResource.path, timeoutMs);
     client = await withNamedTimeout(
       "service connection",
