@@ -9,7 +9,7 @@
 - Named Pipe/Unix Socket：桌面进程与 Service 的 per-user 本地 IPC。
 - GitHub：源码托管、PR、Hosted CI 和发布准备；不在产品运行链路内。
 
-当前已完成 Phase 6 首个 Vertical Slice：独立 Code-OSS Extension 可接入真实 Go Service，Workspace Trust gate、Service lifecycle 与 `workspace/inspect` 已形成闭环；Testing API UI 仍属于后续子阶段。
+当前已完成 Phase 6 首个 Vertical Slice，并已实现 Phase 6B Testing API 集成代码：独立 Code-OSS Extension 可接入真实 Go Service，Workspace Trust gate、Service lifecycle、`workspace/inspect`、Test Item tree 与 Run Profile 已形成闭环。Phase 6B 只有在 Windows/Linux CI 都实际执行真实 Service smoke 后才能标记完成；Coverage UI、source decoration 与 desktop packaging 仍不在本阶段范围内。
 
 ## 固定开发环境
 
@@ -61,6 +61,7 @@ pnpm test:e2e
 ```sh
 pnpm --filter code-oss-extension build
 pnpm --filter code-oss-extension test
+pnpm --filter code-oss-extension test:benchmark
 ```
 
 真实 Service smoke 不下载依赖，也不通过 shell 启动子进程。先使用固定 Go runtime 按现有 `service-probe` 约定构建 `unit-test-service`、`cmake-fixture` 等本地 fixture，再运行验收：
@@ -70,7 +71,17 @@ node tools/service-probe/build-service.mjs
 pnpm --filter code-oss-extension test:service-smoke
 ```
 
-默认 Service binary 为仓库 `build/unit-test-service`（Windows 为 `build/unit-test-service.exe`）。开发者也可通过 `UNIT_TEST_IDE_SERVICE_BINARY` 指定另一份已构建 binary。该 smoke 在当前平台执行同一 contract：trusted workspace 必须完成 `READY`、handshake、capabilities 与 `workspace/inspect`；untrusted workspace 必须保持零 Service process、零 token、零 endpoint 和零 data directory；Code-OSS 信任丢失会 reload/teardown Extension Host，因此验收通过显式 `deactivate()` 验证 child 退出且旧 endpoint 不可重连，不模拟不存在的 trust-revoke callback。Windows 本地结果只作为 Named Pipe evidence，Linux Unix Socket 必须由 Linux CI 实际执行，不能用 cross-compile 代替。
+默认 Service binary 为仓库 `build/unit-test-service`（Windows 为 `build/unit-test-service.exe`）。开发者也可通过 `UNIT_TEST_IDE_SERVICE_BINARY` 指定另一份已构建 binary。该 smoke 在当前平台执行同一 contract：trusted workspace 必须完成 `READY`、handshake、capabilities、`workspace/inspect → discoverTests → tests/catalog/get → runTests`，并把真实 passed/failed item result 投影到 TestRun；untrusted workspace 必须保持零 Service process、零 token、零 endpoint 和零 data directory；Code-OSS 信任丢失会 reload/teardown Extension Host，因此验收通过显式 `deactivate()` 验证 child 退出且旧 endpoint 不可重连，不模拟不存在的 trust-revoke callback。Windows 本地结果只作为 Named Pipe evidence，Linux Unix Socket 必须由 Linux CI 实际执行，不能用 cross-compile 代替。
+
+在 Code-OSS Testing view 中，Refresh 与默认 `Run Tests` profile 只在 trusted 单根 workspace 且当前 Service session 为 `running` 时调用协议；untrusted、multi-root、无 session 或 Service stopping 状态均 fail-closed，不会发起 discovery/run。Refresh 固定先执行 `workspace/inspect`，再选择排序后的首个 project/profile，启动 discovery 并读取 catalog。`projectId + profileId + catalogRevision` 相同的 refresh 不替换已有 Test Item object；revision 变化才原子替换树，旧 revision 的 selection 不得启动 run。
+
+10,000 item 基准可单独复现：
+
+```sh
+pnpm --filter code-oss-extension test:benchmark
+```
+
+基准输出仅记录 Node runtime、platform/architecture、item count、catalog revision、首次建树 elapsed time 与同 revision replacement count，不输出 token、endpoint 或本机路径。它验证 10,000 个 item 均进入树，且相同 revision 的 replacement count 为 0；elapsed time 是环境观测值，不是跨机器硬编码阈值。
 
 需要分别定位 trusted 与 untrusted 验收时，先完成 Extension build，再运行：
 
@@ -86,7 +97,7 @@ $env:CODE_OSS_EXECUTABLE = "C:\path\to\code-oss.exe"
 pnpm --filter code-oss-extension test:host
 ```
 
-脚本通过 `--extensionDevelopmentPath` 与 `--extensionDevelopmentKind=workspace` 启动隔离的 Extension Development Host，等待生产 `activate()` 成功完成后输出的固定 `UNIT_TEST_IDE_EXTENSION_ACTIVATED` marker，然后终止并等待 host process 退出。marker 不会在 activation reject 时输出。未配置 `CODE_OSS_EXECUTABLE` 时只输出 `SKIP: CODE_OSS_EXECUTABLE is not configured` 并以 0 退出；该结果不是 PASS，也不能作为 Extension Host activation evidence。
+脚本通过 `--extensionDevelopmentPath` 与 `--extensionDevelopmentKind=workspace` 启动隔离的 Extension Development Host，等待生产 `activate()` 成功完成后输出的固定 `UNIT_TEST_IDE_EXTENSION_ACTIVATED` marker，然后终止并等待 host process 退出。marker 不会在 activation reject 时输出。未配置 `CODE_OSS_EXECUTABLE` 时只输出 `SKIP: CODE_OSS_EXECUTABLE is not configured` 并以 0 退出；该结果不是 PASS，也不能作为 Extension Host activation evidence。Hosted CI 的 Windows 与 Linux job 都构建相同 Service/fixture 并运行 `test:service-smoke` 与 `test:benchmark`；只有两个平台 job 的真实 smoke 均通过，才能形成 Phase 6B 跨平台 runtime evidence。`test:host` 在没有 CI-provided `CODE_OSS_EXECUTABLE` 时仍必须诚实 SKIP。
 
 ## Native 开发
 

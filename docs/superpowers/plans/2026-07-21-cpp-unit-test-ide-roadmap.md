@@ -106,11 +106,13 @@ docs/
 
 首个 Vertical Slice 状态：已实现。独立 Code-OSS Extension package 已完成 Workspace Trust gate、真实 Go Service lifecycle、Windows Named Pipe/Linux Unix Socket platform contract、现有 Protocol Client 接入、`workspace/inspect` 命令，以及由生产 `activate()` 成功完成 marker 驱动的 Extension Development Host smoke harness。Windows Named Pipe 已由本地 runtime smoke 实际验证；Code-OSS 信任丢失通过 Extension Host teardown/deactivation path 清理 Service；Linux Unix Socket evidence 继续由 Linux CI 提供。
 
+Phase 6B 状态：实现与本地 Windows 验证已就绪，等待 Hosted CI 双平台实跑后确认完成。共享 TypeScript `TestingApiAdapter` 已提供 trusted 单根 workspace 的 Refresh、稳定 Test Item tree、默认 Run Profile、root/container/item selection、test event 投影与最终 TestRun 收敛；真实 smoke 覆盖 `workspace/inspect → discoverTests → catalog → runTests → item result`。相同 `catalogRevision` 保留 Test Item object identity，10,000 item 基准记录环境、elapsed time 和零 replacement。Windows job 验证 Named Pipe，Linux job 必须实际验证 Unix Socket；Linux evidence 不得由 Windows 或 cross-compile 代替。两个 job 都只有在真实 Service smoke 通过后才构成 Phase 6B runtime evidence，未提供 `CODE_OSS_EXECUTABLE` 的 host harness 仅记为明确 SKIP，不记 PASS。
+
 详细设计：`docs/superpowers/specs/2026-08-16-phase6-code-oss-extension-design.md`
 
 实施计划：`docs/superpowers/plans/2026-08-16-phase6-code-oss-extension-plan.md`
 
-后续子阶段：Testing API test tree、run profile、source decoration、coverage UI、完整 Code-OSS fork/branding 与 built-in registration 尚未实现；首个 Vertical Slice 的完成不表示这些 UI 与 desktop packaging 工作已完成。
+后续子阶段：Coverage UI、source decoration、完整 Code-OSS fork/branding、built-in registration 与 desktop packaging 尚未实现；Phase 6B Testing API 集成就绪不表示这些 UI 与产品打包工作已完成。
 
 ### Phase 7：产品测试 UX、Mock 配置、历史记录与报告
 

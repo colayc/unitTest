@@ -31,7 +31,8 @@
   },
   "scripts": {
     "build": "tsc -b tsconfig.json",
-    "test": "pnpm run build && node --test dist/test/manifest.test.js dist/test/service-manager.test.js dist/test/service-resources.test.js dist/test/trust-gate.test.js dist/test/extension.test.js",
+    "test": "pnpm run build && node --test dist/test/manifest.test.js dist/test/service-manager.test.js dist/test/service-resources.test.js dist/test/trust-gate.test.js dist/test/extension.test.js dist/test/testing-api.test.js dist/test/testing-api-benchmark.test.js",
+    "test:benchmark": "pnpm run build && node --test dist/test/testing-api-benchmark.test.js",
     "test:service-smoke": "pnpm run build && node --test dist/test/service-smoke.test.js",
     "test:host": "pnpm run build && node test/extension-host-smoke.mjs"
   }

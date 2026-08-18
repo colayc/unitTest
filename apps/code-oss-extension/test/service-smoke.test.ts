@@ -28,6 +28,14 @@ import {
   type ServiceSession
 } from "../src/service-manager.js";
 import { redactServiceError } from "../src/service-resources.js";
+import type {
+  TestingController,
+  TestingRun,
+  TestingRunProfile,
+  TestingRunProfileHandler,
+  TestingTestItem,
+  TestingTestItemCollection
+} from "../src/testing-api.js";
 
 const execFile = promisify(execFileCallback);
 const repositoryRoot = resolve(import.meta.dirname, "../../../..");
@@ -55,6 +63,7 @@ interface ObservedChild {
 
 interface Observations {
   readonly order: string[];
+  readonly testingCalls: string[];
   readonly tokens: string[];
   readonly preparedTokenFiles: string[];
   readonly spawnArguments: string[][];
@@ -65,6 +74,7 @@ interface Observations {
 function createObservations(): Observations {
   return {
     order: [],
+    testingCalls: [],
     tokens: [],
     preparedTokenFiles: [],
     spawnArguments: [],
@@ -81,10 +91,127 @@ async function createFixture(): Promise<Fixture> {
   await mkdir(join(workspace, ".unit-test-ide"), { recursive: true });
   await writeFile(
     join(workspace, ".unit-test-ide", "workspace.json"),
-    JSON.stringify({ version: 1, cmake: { executable: cmakeFixture } }),
+    JSON.stringify({
+      version: 2,
+      cmake: { executable: cmakeFixture },
+      projects: [{
+        id: "root",
+        sourceDir: ".",
+        fallback: { configurations: ["Debug"] },
+        tests: {
+          containers: [{ ctestName: "framework-tests", framework: "cpputest" }]
+        }
+      }]
+    }),
+    "utf8"
+  );
+  await writeFile(
+    join(workspace, "CMakeLists.txt"),
+    [
+      "cmake_minimum_required(VERSION 3.25)",
+      "project(test_framework_fixture LANGUAGES CXX)",
+      "add_executable(fixture-app main.cpp)",
+      "add_test(NAME framework-tests COMMAND fixture-app)",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+  await writeFile(join(workspace, "main.cpp"), "int main() { return 0; }\n", "utf8");
+  await writeFile(
+    join(workspace, "CMakePresets.json"),
+    JSON.stringify({
+      version: 6,
+      configurePresets: [{
+        name: "fixture",
+        generator: "Ninja",
+        binaryDir: "${sourceDir}/build-fixture"
+      }]
+    }),
     "utf8"
   );
   return { root, workspace, dataDirectory: join(root, "service-data") };
+}
+
+class SmokeCollection implements TestingTestItemCollection {
+  readonly entries = new Map<string, TestingTestItem>();
+
+  add(item: TestingTestItem): void { this.entries.set(item.id, item); }
+  delete(id: string): void { this.entries.delete(id); }
+  get(id: string): TestingTestItem | undefined { return this.entries.get(id); }
+  replace(items: readonly TestingTestItem[]): void {
+    this.entries.clear();
+    for (const item of items) this.entries.set(item.id, item);
+  }
+}
+
+interface SmokeRunCapture {
+  readonly started: string[];
+  readonly passed: string[];
+  readonly failed: string[];
+  readonly skipped: string[];
+  readonly errored: string[];
+  ends: number;
+}
+
+class SmokeTestingController implements TestingController {
+  readonly items = new SmokeCollection();
+  readonly profiles: Array<{ handler: TestingRunProfileHandler; profile: TestingRunProfile }> = [];
+  readonly runs: SmokeRunCapture[] = [];
+  refreshHandler: (() => void | Promise<void>) | undefined;
+
+  dispose(): void {}
+
+  createTestItem(id: string, label: string, uri?: unknown): TestingTestItem {
+    return { id, label, uri, children: new SmokeCollection() };
+  }
+
+  createRunProfile(
+    label: string,
+    handler: TestingRunProfileHandler
+  ): TestingRunProfile {
+    const profile = { label, dispose() {} };
+    this.profiles.push({ handler, profile });
+    return profile;
+  }
+
+  createTestRun(): TestingRun {
+    const capture: SmokeRunCapture = {
+      started: [], passed: [], failed: [], skipped: [], errored: [], ends: 0
+    };
+    this.runs.push(capture);
+    return {
+      started: (item) => { capture.started.push(item.id); },
+      passed: (item) => { capture.passed.push(item.id); },
+      failed: (item) => { capture.failed.push(item.id); },
+      skipped: (item) => { capture.skipped.push(item.id); },
+      errored: (item) => { capture.errored.push(item.id); },
+      end: () => { capture.ends++; },
+      dispose() {}
+    };
+  }
+}
+
+function nestedItems(collection: SmokeCollection): TestingTestItem[] {
+  const result: TestingTestItem[] = [];
+  for (const item of collection.entries.values()) {
+    result.push(item);
+    if (item.children instanceof SmokeCollection) result.push(...nestedItems(item.children));
+  }
+  return result;
+}
+
+async function eventually(assertion: () => void): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 160; attempt++) {
+    try {
+      assertion();
+      return;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+    }
+  }
+  throw lastError;
 }
 
 async function assertPathMissing(path: string): Promise<void> {
@@ -142,7 +269,24 @@ function createRealOperations(
     async connect(endpoint) {
       observations.order.push("connect");
       observations.connectedEndpoints.push(endpoint);
-      return ProtocolClient.connect(endpoint);
+      const client = await ProtocolClient.connect(endpoint);
+      const tracked = new Map<PropertyKey, string>([
+        ["inspectWorkspace", "workspace/inspect"],
+        ["discoverTests", "discoverTests"],
+        ["getTestCatalog", "catalog"],
+        ["runTests", "runTests"]
+      ]);
+      return new Proxy(client, {
+        get(target, property) {
+          const value = Reflect.get(target, property, target);
+          if (typeof value !== "function") return value;
+          return (...args: unknown[]) => {
+            const label = tracked.get(property);
+            if (label) observations.testingCalls.push(label);
+            return Reflect.apply(value, target, args);
+          };
+        }
+      });
     }
   };
 }
@@ -242,6 +386,94 @@ test("trusted real service completes handshake, capabilities, and workspace insp
     await manager.stop();
     assert.equal(manager.status.state, "stopped");
     assert.equal(observations.children[0]?.exited, true);
+  });
+});
+
+test("trusted extension adapter completes inspect, discovery, catalog, run, and item results against the real service", async (t) => {
+  const fixture = await createFixture();
+  const observations = createObservations();
+  const sensitive = [fixture.root, fixture.workspace, fixture.dataDirectory, serviceBinary, cmakeFixture];
+  const testing = new SmokeTestingController();
+  const subscriptions: Array<{ dispose(): void }> = [];
+  let manager: ServiceManager | undefined;
+  const disposable = () => ({ dispose() {} });
+  const host: ExtensionHost = {
+    context: { subscriptions },
+    extensionPath: resolve(repositoryRoot, "apps/code-oss-extension"),
+    dataDirectory: fixture.dataDirectory,
+    developmentMode: true,
+    workspaceSnapshot: () => ({
+      folderCount: 1,
+      isTrusted: true,
+      workspaceRoot: fixture.workspace
+    }),
+    configuration: (key, fallback) => {
+      if (key === "autoStart") return true as typeof fallback;
+      if (key === "serviceExecutable") return serviceBinary as typeof fallback;
+      if (key === "serviceStartupTimeoutMs") return 120_000 as typeof fallback;
+      return fallback;
+    },
+    createOutputChannel: () => ({ appendLine() {}, dispose() {} }),
+    createStatusBarItem: () => ({ text: "", show() {}, dispose() {} }),
+    createTestController: () => testing,
+    registerCommand: () => disposable(),
+    onDidChangeWorkspaceFolders: () => disposable(),
+    onDidGrantWorkspaceTrust: () => disposable(),
+    showErrorMessage: () => undefined
+  };
+  const controller = createExtensionController(host, {
+    managerFactory: (options): LifecycleManager => {
+      manager = new ServiceManager({
+        ...options,
+        operations: createRealOperations(observations, options)
+      });
+      return manager;
+    }
+  });
+  t.after(async () => {
+    await withRedactedFailure(sensitive, async () => {
+      await controller.deactivate();
+      await rm(fixture.root, { recursive: true, force: true });
+    });
+  });
+
+  await withRedactedFailure(sensitive, async () => {
+    await access(serviceBinary);
+    await access(cmakeFixture);
+    await controller.activate();
+    assert.ok(manager?.session);
+    collectSessionSecrets(manager.session, observations, sensitive);
+
+    const profile = testing.profiles[0];
+    assert.ok(profile, "the activated adapter must register a run profile");
+    const items = nestedItems(testing.items);
+    const passingItem = items.find((item) => item.label === "passes");
+    const failingItem = items.find((item) => item.label === "fails");
+    assert.ok(passingItem, "real discovery must publish the passing case");
+    assert.ok(failingItem, "real discovery must publish the failing case");
+
+    await profile.handler({});
+    await eventually(() => {
+      const run = testing.runs[0];
+      assert.ok(run);
+      assert.equal(run.ends, 1);
+      assert.equal(run.passed.includes(passingItem.id), true);
+      assert.equal(run.failed.includes(failingItem.id), true);
+      assert.equal(run.errored.includes(passingItem.id), false);
+      assert.equal(run.errored.includes(failingItem.id), false);
+      const inspectIndex = observations.testingCalls.indexOf("workspace/inspect");
+      const discoveryIndex = observations.testingCalls.indexOf("discoverTests");
+      const catalogIndex = observations.testingCalls.indexOf("catalog");
+      const runIndex = observations.testingCalls.indexOf("runTests");
+      assert.equal(
+        inspectIndex >= 0 &&
+        inspectIndex < discoveryIndex &&
+        discoveryIndex < catalogIndex &&
+        catalogIndex < runIndex,
+        true,
+        "real Testing API calls must preserve inspect → discovery → catalog → run order"
+      );
+    });
   });
 });
 
