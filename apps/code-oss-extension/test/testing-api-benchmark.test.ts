@@ -22,15 +22,29 @@ import {
 const ITEM_COUNT = 10_000;
 const REVISION = "benchmark-r1";
 
+interface BenchmarkMutationCounts {
+  create: number;
+  add: number;
+  delete: number;
+  replace: number;
+}
+
 class BenchmarkCollection implements TestingTestItemCollection {
   readonly entries = new Map<string, TestingTestItem>();
-  replaceCalls = 0;
 
-  add(item: TestingTestItem): void { this.entries.set(item.id, item); }
-  delete(id: string): void { this.entries.delete(id); }
+  constructor(private readonly mutationCounts: BenchmarkMutationCounts) {}
+
+  add(item: TestingTestItem): void {
+    this.mutationCounts.add++;
+    this.entries.set(item.id, item);
+  }
+  delete(id: string): void {
+    this.mutationCounts.delete++;
+    this.entries.delete(id);
+  }
   get(id: string): TestingTestItem | undefined { return this.entries.get(id); }
   replace(items: readonly TestingTestItem[]): void {
-    this.replaceCalls++;
+    this.mutationCounts.replace++;
     this.entries.clear();
     for (const item of items) this.entries.set(item.id, item);
   }
@@ -103,15 +117,24 @@ class BenchmarkClient implements ExtensionProtocolClient {
 
 test("10,000 item catalog keeps Test Item identity for the same revision", async (t) => {
   const client = new BenchmarkClient();
-  const root = new BenchmarkCollection();
+  const mutationCounts: BenchmarkMutationCounts = {
+    create: 0,
+    add: 0,
+    delete: 0,
+    replace: 0
+  };
+  const root = new BenchmarkCollection(mutationCounts);
   const controller: TestingController = {
     items: root,
-    createTestItem: (id, label, uri) => ({
-      id,
-      label,
-      uri,
-      children: new BenchmarkCollection()
-    }),
+    createTestItem: (id, label, uri) => {
+      mutationCounts.create++;
+      return {
+        id,
+        label,
+        uri,
+        children: new BenchmarkCollection(mutationCounts)
+      };
+    },
     dispose() {}
   };
   const host: TestingApiHost = {
@@ -129,18 +152,27 @@ test("10,000 item catalog keeps Test Item identity for the same revision", async
   assert.ok(container);
   const children = container.children as BenchmarkCollection;
   assert.equal(children.entries.size, ITEM_COUNT);
-  const firstItem = children.get("benchmark-item-00000");
-  assert.ok(firstItem);
-  const rootReplacements = root.replaceCalls;
-  const childReplacements = children.replaceCalls;
+  const itemReferences = new Map(children.entries);
+  assert.equal(itemReferences.size, ITEM_COUNT);
+  assert.deepEqual(mutationCounts, {
+    create: ITEM_COUNT + 1,
+    add: 0,
+    delete: 0,
+    replace: 2
+  });
+  const mutationsBeforeSameRevision = { ...mutationCounts };
 
   await adapter.refresh();
 
-  assert.equal(root.get("benchmark-container"), container);
-  assert.equal((root.get("benchmark-container")?.children as BenchmarkCollection).get("benchmark-item-00000"), firstItem);
-  assert.equal(root.replaceCalls, rootReplacements);
-  assert.equal(children.replaceCalls, childReplacements);
-  const replacementCount = (root.replaceCalls - rootReplacements) + (children.replaceCalls - childReplacements);
+  const currentContainer = root.get("benchmark-container");
+  assert.equal(currentContainer, container);
+  const currentChildren = currentContainer?.children as BenchmarkCollection;
+  assert.equal(currentChildren.entries.size, ITEM_COUNT);
+  for (const [id, reference] of itemReferences) {
+    assert.equal(currentChildren.get(id), reference, `${id} identity changed for the same revision`);
+  }
+  assert.deepEqual(mutationCounts, mutationsBeforeSameRevision);
+  const replacementCount = mutationCounts.replace - mutationsBeforeSameRevision.replace;
   t.diagnostic(JSON.stringify({
     runtime: `node-${process.versions.node}`,
     platform: `${process.platform}-${process.arch}`,
