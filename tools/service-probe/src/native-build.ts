@@ -47,7 +47,8 @@ const execFile = promisify(execFileCallback);
 const repositoryRoot = resolve(import.meta.dirname, "../../..");
 const nativeTimeoutMs = 120_000;
 const nativeEventHeartbeatMs = 5_000;
-const nativeLivenessReconnectAttempts = 4;
+const nativeLivenessReconnectTimeoutMs = 30_000;
+const nativeLivenessReconnectAttempts = 3;
 const nativeLivenessReconnectBackoffMs = 250;
 const requiredEnvironmentName = "UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS";
 const families = ["gcc", "clang", "msvc", "clang-cl"] as const;
@@ -1288,7 +1289,7 @@ async function recoverNativeLiveness(
       await withNamedTimeout(
         `native task ${taskId} liveness reconnect`,
         client.reconnect(),
-        Math.min(nativeEventHeartbeatMs, remaining),
+        Math.min(nativeLivenessReconnectTimeoutMs, remaining),
       );
       return;
     } catch (error) {
@@ -1304,7 +1305,8 @@ async function recoverNativeLiveness(
     }
   }
   throw new Error(
-    `native task ${taskId} liveness recovery failed after sequence ${lastSequence}`,
+    `native task ${taskId} liveness recovery failed after sequence ${lastSequence}: ` +
+    `${lastError instanceof Error ? lastError.message : String(lastError)}`,
     { cause: lastError },
   );
 }
