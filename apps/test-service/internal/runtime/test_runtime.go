@@ -187,6 +187,7 @@ func (executor ctestProbeExecutor) Execute(
 func newTaskDiscoveryInputFactory(
 	config testCoordinatorConfig,
 ) testrun.TaskDiscoveryInputFactory {
+	const maxGenerationRebinds = 3
 	return func(
 		ctx context.Context,
 		request testrun.RefreshRequest,
@@ -235,12 +236,12 @@ func newTaskDiscoveryInputFactory(
 			},
 		)
 		generation := request.WorkspaceGeneration
-		if errors.Is(err, build.ErrWorkspaceChanged) {
+		for rebinds := 0; errors.Is(err, build.ErrWorkspaceChanged) &&
+			rebinds < maxGenerationRebinds; rebinds++ {
 			// CMake configure/build may publish the File API between the
-			// prepared build checkpoint and this refresh. Rebind once to a
-			// fresh snapshot, but only when the semantic project/profile
-			// identity is unchanged; an actual workspace change remains
-			// fail-closed.
+			// prepared build checkpoint and this refresh. Rebind to a fresh
+			// snapshot, but only when the semantic project/profile identity
+			// is unchanged; an actual workspace change remains fail-closed.
 			current, inspectErr := config.Build.Inspect(ctx)
 			if inspectErr != nil {
 				return testdiscovery.DiscoveryInput{}, err
