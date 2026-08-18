@@ -31,6 +31,26 @@ class FakeProtocolClient implements ExtensionProtocolClient {
     return this.workspace;
   }
 
+  async discoverTests(): Promise<never> {
+    throw new Error("not used by extension lifecycle tests");
+  }
+
+  async getTestCatalog(): Promise<never> {
+    throw new Error("not used by extension lifecycle tests");
+  }
+
+  async runTests(): Promise<never> {
+    throw new Error("not used by extension lifecycle tests");
+  }
+
+  async getTestRun(): Promise<never> {
+    throw new Error("not used by extension lifecycle tests");
+  }
+
+  async subscribeEvents(): Promise<never> {
+    throw new Error("not used by extension lifecycle tests");
+  }
+
   close(): void {
     this.closeCalls++;
   }
