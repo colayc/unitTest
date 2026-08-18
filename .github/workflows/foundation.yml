@@ -41,7 +41,9 @@ jobs:
           path: |
             .superpowers/cache/coverage-bundle
             .superpowers/runtime/coverage-bundle
-          key: coverage-bundle-windows-x64-${{ steps.coverage-manifest.outputs.digest }}
+          # Bump the recipe epoch when bundle layout/normalization changes; the
+          # source manifest digest alone cannot invalidate a cached old layout.
+          key: coverage-bundle-windows-x64-recipe-v2-${{ steps.coverage-manifest.outputs.digest }}
       - if: steps.coverage-cache.outputs.cache-hit != 'true'
         run: pnpm prepare:coverage-bundle
       - run: pnpm check:coverage-bundle
@@ -100,7 +102,9 @@ jobs:
           path: |
             .superpowers/cache/coverage-bundle
             .superpowers/runtime/coverage-bundle
-          key: coverage-bundle-linux-x64-${{ steps.coverage-manifest.outputs.digest }}
+          # Keep the recipe epoch alongside the source lock digest so a cache
+          # produced by an older prepare/check implementation is not reused.
+          key: coverage-bundle-linux-x64-recipe-v2-${{ steps.coverage-manifest.outputs.digest }}
       - if: steps.coverage-cache.outputs.cache-hit != 'true'
         run: pnpm prepare:coverage-bundle
       - run: pnpm check:coverage-bundle
