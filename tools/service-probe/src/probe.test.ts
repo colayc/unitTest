@@ -20,7 +20,7 @@ import { prepareTestFrameworkWorkspace } from "./test-framework-fixture.js";
 const root = resolve(import.meta.dirname, "../../..");
 const binary = join(root, "build", process.platform === "win32" ? "unit-test-service.exe" : "unit-test-service");
 const cmakeFixture = join(root, "build", process.platform === "win32" ? "cmake-fixture.exe" : "cmake-fixture");
-const EVENT_TIMEOUT_MS = 30_000;
+const EVENT_TIMEOUT_MS = 8_000;
 const WORKSPACE_INSPECTION_TIMEOUT_MS = process.platform === "win32" ? 120_000 : 30_000;
 const V11_EVENT_NAMES = new Set([
   "task.created",
@@ -800,6 +800,10 @@ test("protocol v1.3 discovers, runs, replays, and reruns deterministic CppUTest 
   let fixture: Awaited<ReturnType<typeof startService>> | undefined;
   let secondary: ProtocolClient | undefined;
   let stage = "prepare test workspace";
+  // Native CppUTest discovery can spend longer than the general RPC/event
+  // deadline on a cold shared runner. Keep the larger bound local to this
+  // end-to-end scenario so unrelated negative-timeout tests stay fast.
+  const EVENT_TIMEOUT_MS = 30_000;
   try {
     await prepareTestFrameworkWorkspace(workspaceDirectory);
     stage = "start trusted test service";
