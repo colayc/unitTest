@@ -167,6 +167,7 @@ class SmokeTestingController implements TestingController {
 
   createRunProfile(
     label: string,
+    _kind: "run",
     handler: TestingRunProfileHandler
   ): TestingRunProfile {
     const profile = { label, dispose() {} };

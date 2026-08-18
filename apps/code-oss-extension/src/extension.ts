@@ -14,9 +14,9 @@ import {
 import { ServiceManager, type ServiceManagerOptions } from "./service-manager.js";
 import {
   TestingApiAdapter,
-  type TestingApiHost,
-  type TestingController
+  type TestingApiHost
 } from "./testing-api.js";
+import { createVSCodeTestingController } from "./vscode-testing-bridge.js";
 import { TrustGate, type WorkspaceSnapshot } from "./trust-gate.js";
 
 const DEFAULT_STOP_TIMEOUT_MS = 2_000;
@@ -443,10 +443,10 @@ function createVSCodeHost(
       vscode.StatusBarAlignment.Left,
       100
     ),
-    createTestController: (id, label) => vscode.tests.createTestController(
-      id,
-      label
-    ) as unknown as TestingController,
+    createTestController: (id, label) => createVSCodeTestingController(
+      vscode,
+      vscode.tests.createTestController(id, label)
+    ),
     registerCommand: (command, handler) => vscode.commands.registerCommand(command, handler),
     onDidChangeWorkspaceFolders: (listener) => vscode.workspace.onDidChangeWorkspaceFolders(listener),
     onDidGrantWorkspaceTrust: (listener) => vscode.workspace.onDidGrantWorkspaceTrust(listener),

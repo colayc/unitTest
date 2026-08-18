@@ -22,11 +22,10 @@ export interface TestingDisposable {
 export interface TestingTestItem {
   readonly id: string;
   label: string;
-  parent?: TestingTestItem;
   children?: TestingTestItemCollection;
   canResolveChildren?: boolean;
   error?: string | Error;
-  uri?: unknown;
+  readonly uri?: unknown;
   sourceLocation?: TestingSourceLocation;
   diagnostics?: readonly TestingDiagnostic[];
   description?: string;
@@ -140,8 +139,8 @@ export interface TestingController extends TestingDisposable {
   createTestItem?(id: string, label: string, uri?: unknown): TestingTestItem;
   createRunProfile?(
     label: string,
+    kind: "run",
     handler: TestingRunProfileHandler,
-    kind?: unknown,
     isDefault?: boolean
   ): TestingRunProfile;
   createTestRun?(request?: TestingRunRequest, name?: string, persist?: boolean): TestingRun;
@@ -159,6 +158,7 @@ export class TestingApiAdapter implements TestingDisposable {
   readonly #controller: TestingController;
   readonly #runProfile: TestingRunProfile | undefined;
   #closed = false;
+  #refreshGeneration = 0;
   #eventCursor = 0;
   #catalogState: TestingCatalogState | undefined;
   #containersById = new Map<string, TestingTestItem>();
@@ -183,8 +183,8 @@ export class TestingApiAdapter implements TestingDisposable {
     this.#controller.refreshHandler = () => this.refresh();
     this.#runProfile = this.#controller.createRunProfile?.(
       "Run Tests",
-      (request) => this.#run(request),
       "run",
+      (request) => this.#run(request),
       true
     );
   }
@@ -214,12 +214,13 @@ export class TestingApiAdapter implements TestingDisposable {
   }
 
   async refresh(): Promise<void> {
+    const generation = ++this.#refreshGeneration;
     const client = this.#assertTrustedClient();
     if (!client) return;
 
     try {
       const workspace = await client.inspectWorkspace();
-      if (!this.#assertTrustedClient(client)) return;
+      if (!this.#isCurrentRefresh(generation, client)) return;
       const project = [...workspace.projects]
         .sort((left, right) => left.projectId.localeCompare(right.projectId))[0];
       const profile = [...(project?.buildProfiles ?? [])]
@@ -231,11 +232,13 @@ export class TestingApiAdapter implements TestingDisposable {
         projectId: project.projectId,
         profileId: profile.buildProfileId
       });
-      if (!this.#assertTrustedClient(client)) return;
-      const catalog = await this.#awaitCatalogOrPoll(client, project.projectId, profile.buildProfileId);
-      if (!catalog || !this.#assertTrustedClient(client)) return;
+      if (!this.#isCurrentRefresh(generation, client)) return;
+      const catalog = await this.#awaitCatalogOrPoll(client, project.projectId, profile.buildProfileId, generation);
+      if (!catalog || !this.#isCurrentRefresh(generation, client)) return;
       this.#reconcileTree(catalog);
     } catch (error) {
+      if (generation !== this.#refreshGeneration) return;
+      this.#abortAllRuns("Test run cancelled because the test catalog refresh failed.");
       this.#clearTree();
       const redacted = redactServiceError(error, []);
       await this.host.showErrorMessage(redacted.message);
@@ -246,6 +249,7 @@ export class TestingApiAdapter implements TestingDisposable {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
+    this.#refreshGeneration++;
     this.#abortAllRuns("Test run cancelled because the testing adapter was closed.");
     this.#eventSubscription?.close();
     this.#runProfile?.dispose();
@@ -278,15 +282,16 @@ export class TestingApiAdapter implements TestingDisposable {
   async #awaitCatalogOrPoll(
     client: ExtensionProtocolClient,
     projectId: string,
-    profileId: string
+    profileId: string,
+    generation: number
   ): Promise<ProtocolTestCatalog | undefined> {
-    if (!this.#assertTrustedClient(client)) return undefined;
+    if (!this.#isCurrentRefresh(generation, client)) return undefined;
     const publication = this.#waitForCatalogPublication(client, projectId, profileId);
     try {
       await this.#ensureEventPump(client);
-      if (!this.#assertTrustedClient(client)) return undefined;
-      if (await publication.result) return this.#readCatalog(client, projectId, profileId);
-      return this.#pollCatalog(client, projectId, profileId);
+      if (!this.#isCurrentRefresh(generation, client)) return undefined;
+      if (await publication.result) return this.#readCatalog(client, projectId, profileId, generation);
+      return this.#pollCatalog(client, projectId, profileId, generation);
     } finally {
       publication.cancel();
     }
@@ -316,15 +321,16 @@ export class TestingApiAdapter implements TestingDisposable {
   async #pollCatalog(
     client: ExtensionProtocolClient,
     projectId: string,
-    profileId: string
+    profileId: string,
+    generation: number
   ): Promise<ProtocolTestCatalog | undefined> {
     const delays = [0, 50, 100, 200, 400, 800, 1600, 3200];
     let lastError: unknown;
     for (const delay of delays) {
       if (delay) await this.#delay(delay);
-      if (!this.#assertTrustedClient(client)) return undefined;
+      if (!this.#isCurrentRefresh(generation, client)) return undefined;
       try {
-        const catalog = await this.#readCatalog(client, projectId, profileId);
+        const catalog = await this.#readCatalog(client, projectId, profileId, generation);
         if (!catalog) return undefined;
         return catalog;
       } catch (error) {
@@ -339,15 +345,42 @@ export class TestingApiAdapter implements TestingDisposable {
   async #readCatalog(
     client: ExtensionProtocolClient,
     projectId: string,
-    profileId: string
+    profileId: string,
+    generation: number
   ): Promise<ProtocolTestCatalog | undefined> {
-    if (!this.#assertTrustedClient(client)) return undefined;
-    const catalog = await client.getTestCatalog({ projectId, profileId });
-    if (!this.#assertTrustedClient(client)) return undefined;
-    if (catalog.projectId !== projectId || catalog.profileId !== profileId) {
-      throw new CatalogScopeError();
+    const pages: ProtocolTestCatalog[] = [];
+    const seenCursors = new Set<string>();
+    let cursor: string | undefined;
+    for (let pageIndex = 0; pageIndex < 1_000; pageIndex++) {
+      if (!this.#isCurrentRefresh(generation, client)) return undefined;
+      const catalog = await client.getTestCatalog({
+        projectId,
+        profileId,
+        ...(cursor === undefined ? {} : { cursor })
+      });
+      if (!this.#isCurrentRefresh(generation, client)) return undefined;
+      if (catalog.projectId !== projectId || catalog.profileId !== profileId) throw new CatalogScopeError();
+      if (pages[0] && catalog.revision !== pages[0].revision) throw new CatalogPaginationError();
+      pages.push(catalog);
+      if (catalog.nextCursor === undefined) {
+        const first = pages[0];
+        if (!first) throw new CatalogPaginationError();
+        return {
+          ...first,
+          containers: pages.flatMap((page) => [...page.containers]),
+          items: pages.flatMap((page) => [...page.items]),
+          nextCursor: undefined
+        } as unknown as ProtocolTestCatalog;
+      }
+      if (seenCursors.has(catalog.nextCursor)) throw new CatalogPaginationError();
+      seenCursors.add(catalog.nextCursor);
+      cursor = catalog.nextCursor;
     }
-    return catalog;
+    throw new CatalogPaginationError();
+  }
+
+  #isCurrentRefresh(generation: number, client: ExtensionProtocolClient): boolean {
+    return generation === this.#refreshGeneration && this.#assertTrustedClient(client) !== undefined;
   }
 
   #reconcileTree(catalog: ProtocolTestCatalog): void {
@@ -407,7 +440,6 @@ export class TestingApiAdapter implements TestingDisposable {
         .sort((left, right) => left.id.localeCompare(right.id))
         .map((child) => {
           const childItem = makeItem(child.id);
-          childItem.parent = testItem;
           return childItem;
         });
       if (children.length) {
@@ -435,7 +467,6 @@ export class TestingApiAdapter implements TestingDisposable {
           .sort((left, right) => left.id.localeCompare(right.id))
           .map((child) => {
             const childItem = makeItem(child.id);
-            childItem.parent = item;
             return childItem;
           });
         if (children.length) {
@@ -474,10 +505,14 @@ export class TestingApiAdapter implements TestingDisposable {
 
   async #run(request: TestingRunRequest): Promise<void> {
     const testRun = this.#controller.createTestRun?.(request);
+    const requestedTargets = request.include === undefined
+      ? [...this.#containersById.values(), ...this.#itemsById.values()]
+      : [...request.include];
     const client = this.#assertTrustedClient();
     const state = this.#catalogState;
     const selection = this.#selectionFor(request);
     if (!testRun || !client || !state || !selection) {
+      if (testRun) this.#markTargets(testRun, requestedTargets, "Test run rejected because its selection or trusted session is not current.");
       testRun?.end();
       return;
     }
@@ -770,6 +805,11 @@ export class TestingApiAdapter implements TestingDisposable {
     snapshot.unfinished.clear();
   }
 
+  #markTargets(run: TestingRun, targets: readonly TestingTestItem[], message: string): void {
+    const redacted = redactServiceError(new Error(message), []).message;
+    for (const item of new Set(targets)) run.errored(item, redacted);
+  }
+
   #abortRun(active: ActiveTestingRun, message: string): void {
     if (active.ended) return;
     this.#markUnfinished(active, message);
@@ -777,7 +817,10 @@ export class TestingApiAdapter implements TestingDisposable {
   }
 
   #abortAllRuns(message: string): void {
-    this.#eventSubscription?.close();
+    const subscription = this.#eventSubscription;
+    this.#eventSubscription = undefined;
+    this.#eventClient = undefined;
+    subscription?.close();
     for (const active of [...this.#activeRuns.values()]) this.#abortRun(active, message);
   }
 
@@ -796,5 +839,11 @@ export class TestingApiAdapter implements TestingDisposable {
 class CatalogScopeError extends Error {
   constructor() {
     super("Test catalog response did not match the selected workspace.");
+  }
+}
+
+class CatalogPaginationError extends Error {
+  constructor() {
+    super("Test catalog pagination did not produce one stable bounded snapshot.");
   }
 }

@@ -89,6 +89,7 @@ function benchmarkCatalog(): ProtocolTestCatalog {
 
 class BenchmarkClient implements ExtensionProtocolClient {
   readonly catalog = benchmarkCatalog();
+  readonly catalogCalls: CatalogGetInput[] = [];
 
   async inspectWorkspace(): Promise<WorkspaceSnapshot> {
     return {
@@ -106,7 +107,19 @@ class BenchmarkClient implements ExtensionProtocolClient {
   }
 
   async discoverTests(_input: TestDiscoveryInput): Promise<never> { return {} as never; }
-  async getTestCatalog(_input: CatalogGetInput): Promise<ProtocolTestCatalog> { return this.catalog; }
+  async getTestCatalog(input: CatalogGetInput): Promise<ProtocolTestCatalog> {
+    this.catalogCalls.push(input);
+    const offset = input.cursor === undefined ? 0 : Number(input.cursor);
+    const entries = [...this.catalog.containers, ...this.catalog.items];
+    const page = entries.slice(offset, offset + 200);
+    const nextOffset = offset + page.length;
+    return {
+      ...this.catalog,
+      containers: page.filter((entry) => "capabilities" in entry) as typeof this.catalog.containers,
+      items: page.filter((entry) => !("capabilities" in entry)) as typeof this.catalog.items,
+      ...(nextOffset < entries.length ? { nextCursor: String(nextOffset) } : { nextCursor: undefined })
+    } as unknown as ProtocolTestCatalog;
+  }
   async runTests(_input: TestRunInput): Promise<never> { throw new Error("benchmark does not run tests"); }
   async getTestRun(_runId: string): Promise<ProtocolTestRun> { throw new Error("benchmark has no runs"); }
   async subscribeEvents(afterSequence: number): Promise<EventSubscription> {
@@ -152,6 +165,7 @@ test("10,000 item catalog keeps Test Item identity for the same revision", async
   assert.ok(container);
   const children = container.children as BenchmarkCollection;
   assert.equal(children.entries.size, ITEM_COUNT);
+  assert.equal(client.catalogCalls.length, 51);
   const itemReferences = new Map(children.entries);
   assert.equal(itemReferences.size, ITEM_COUNT);
   assert.deepEqual(mutationCounts, {

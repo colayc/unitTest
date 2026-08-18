@@ -133,6 +133,7 @@ class FakeProtocolClient implements ExtensionProtocolClient {
   afterInspect: (() => void) | undefined;
   afterDiscover: (() => void) | undefined;
   afterSubscribe: (() => void) | undefined;
+  catalogHandler: ((input: CatalogGetInput, callIndex: number) => Promise<ProtocolTestCatalog>) | undefined;
   runResult: unknown = {
     kind: "testRun",
     taskId: "task-a",
@@ -167,6 +168,7 @@ class FakeProtocolClient implements ExtensionProtocolClient {
   async getTestCatalog(input: CatalogGetInput): Promise<ProtocolTestCatalog> {
     this.catalogCalls.push(input);
     this.callOrder.push("catalog");
+    if (this.catalogHandler) return this.catalogHandler(input, this.catalogCalls.length - 1);
     const next = this.catalogResults.shift();
     if (next instanceof Error) throw next;
     if (next) return next;
@@ -263,7 +265,7 @@ function testingHarness(
     dispose() {},
     items,
     createTestItem: fakeItem,
-    createRunProfile(label: string, handler: TestingRunProfileHandler, kind?: unknown, isDefault?: boolean) {
+    createRunProfile(label: string, kind: "run", handler: TestingRunProfileHandler, isDefault?: boolean) {
       const captured = { label, handler, kind, isDefault, disposed: false };
       profiles.push(captured);
       return { label, dispose: () => { captured.disposed = true; } };
@@ -377,8 +379,6 @@ test("refresh inspects sorted workspace, discovers once, and maps a stable neste
   const disabled = suite?.children?.get("case-a");
   assert.equal(container?.label, "Alpha container");
   assert.equal(container?.uri, "file:///workspace/alpha.cpp");
-  assert.equal(suite?.parent, container);
-  assert.equal(disabled?.parent, suite);
   assert.equal(disabled?.id, "case-a");
   assert.match(String(disabled?.error), /disabled/i);
   assert.deepEqual(disabled?.sourceLocation, {
@@ -404,6 +404,65 @@ test("refresh does not rebuild the tree when the catalog revision is unchanged",
 
   assert.equal(items.get("container-a"), firstContainer);
   assert.equal(items.replaceCalls, replaceCalls);
+});
+
+test("refresh follows catalog cursors and projects more than one service page", async () => {
+  const client = new FakeProtocolClient();
+  client.workspace = workspaceWithProfiles();
+  const allItems = Array.from({ length: 251 }, (_, index) => ({
+    ...catalog().items[0]!,
+    id: `paged-${index}`,
+    displayName: `Paged ${index}`,
+    logicalName: `Paged.${index}`,
+    parentId: undefined
+  }));
+  client.catalogHandler = async (input) => {
+    const offset = input.cursor === undefined ? 0 : Number(input.cursor.slice("cursor-".length));
+    const pageItems = allItems.slice(offset, offset + 200);
+    const nextOffset = offset + pageItems.length;
+    return {
+      ...catalog(),
+      containers: offset === 0 ? catalog().containers : [],
+      items: pageItems,
+      ...(nextOffset < allItems.length ? { nextCursor: `cursor-${nextOffset}` } : {})
+    } as ProtocolTestCatalog;
+  };
+  const { adapter, items } = testingHarness(client);
+
+  await adapter.refresh();
+
+  assert.deepEqual(client.catalogCalls, [
+    { projectId: "a-project", profileId: "a-profile" },
+    { projectId: "a-project", profileId: "a-profile", cursor: "cursor-200" }
+  ]);
+  assert.equal(items.get("container-a")?.children?.get("paged-250")?.label, "Paged 250");
+  assert.equal(items.get("container-a")?.children instanceof FakeCollection, true);
+  assert.equal((items.get("container-a")?.children as FakeCollection).entries.size, 251);
+  adapter.close();
+});
+
+test("a slower older refresh cannot overwrite a newer catalog revision", async () => {
+  const client = new FakeProtocolClient();
+  client.workspace = workspaceWithProfiles();
+  const older = deferred<ProtocolTestCatalog>();
+  const newer = deferred<ProtocolTestCatalog>();
+  client.catalogHandler = async (_input, callIndex) => callIndex === 0 ? older.promise : newer.promise;
+  const { adapter, items } = testingHarness(client);
+
+  const first = adapter.refresh();
+  await new Promise((resolve) => setTimeout(resolve, 75));
+  assert.equal(client.catalogCalls.length, 1);
+  const second = adapter.refresh();
+  await new Promise((resolve) => setTimeout(resolve, 75));
+  assert.equal(client.catalogCalls.length, 2);
+  newer.resolve(catalog("catalog-r2"));
+  await second;
+  older.resolve(catalog("catalog-r1"));
+  await first;
+
+  assert.equal(adapter.catalogState?.revision, "catalog-r2");
+  assert.equal(items.get("container-a")?.label, "Alpha container");
+  adapter.close();
 });
 
 test("refresh atomically replaces stale catalog children when the revision changes", async () => {
@@ -700,7 +759,38 @@ test("a Test Item from a replaced catalog revision is rejected without a new run
   assert.equal(client.runCalls.length, runCount);
   assert.equal(client.subscriptionCalls.length, subscriptionCount);
   assert.equal(runs[0]?.ends, 1);
+  assert.deepEqual(runs[0]?.errored.map(({ id }) => id), ["suite-a"]);
   adapter.close();
+});
+
+test("pre-dispatch trust or session loss marks the selected targets before ending", async (t) => {
+  for (const scenario of ["trust", "session"] as const) {
+    await t.test(scenario, async () => {
+      const client = new FakeProtocolClient();
+      client.workspace = workspaceWithProfiles();
+      client.catalogResult = catalog();
+      let trusted = true;
+      let current: ExtensionProtocolClient | undefined = client;
+      const { adapter, items, profiles, runs } = testingHarness(client, {
+        workspaceSnapshot: () => ({ folderCount: 1, isTrusted: trusted }),
+        readTrust: () => trusted ? "trusted" : "blocked-untrusted",
+        clientProvider: () => current
+      });
+      await adapter.refresh();
+      const selected = items.get("container-a")?.children?.get("suite-a");
+      const profile = profiles[0];
+      assert.ok(selected && profile);
+      if (scenario === "trust") trusted = false;
+      else current = undefined;
+
+      await profile.handler({ include: [selected] });
+
+      assert.equal(client.runCalls.length, 0);
+      assert.equal(runs[0]?.ends, 1);
+      assert.deepEqual(runs[0]?.errored.map(({ id }) => id), ["suite-a"]);
+      adapter.close();
+    });
+  }
 });
 
 test("an event sequence gap closes the shared stream and converges every active run", async () => {
@@ -922,12 +1012,36 @@ test("run profile rejects unknown IDs and stale run revisions without subscribin
   await profile.handler({ include: [{ ...fakeItem("unknown-item", "Unknown") }] });
   assert.equal(client.runCalls.length, 0);
   assert.equal(runs[0]?.ends, 1);
+  assert.deepEqual(runs[0]?.errored.map(({ id }) => id), ["unknown-item"]);
 
   client.runResult = { ...client.runResult as object, catalogRevision: "catalog-r0" };
   await profile.handler({});
   assert.equal(client.runCalls.length, 1);
   assert.deepEqual(client.subscriptionCalls, [0]);
   assert.equal(runs[1]?.ends, 1);
+  assert.ok((runs[1]?.errored.length ?? 0) > 0);
+  adapter.close();
+});
+
+test("refresh failure aborts active runs and closes their event stream", async () => {
+  const client = new FakeProtocolClient();
+  client.workspace = workspaceWithProfiles();
+  client.catalogResult = catalog();
+  const { adapter, profiles, runs } = testingHarness(client);
+  await adapter.refresh();
+  const profile = profiles[0];
+  assert.ok(profile);
+  await profile.handler({ include: [adapter.controller.items?.get("container-a") as TestingTestItem] });
+  const subscription = client.activeSubscription;
+  assert.ok(subscription);
+  client.catalogHandler = async () => ({ ...catalog(), projectId: "other-project" } as ProtocolTestCatalog);
+
+  await assert.rejects(() => adapter.refresh(), /selected workspace/);
+
+  assert.equal(subscription.closed, true);
+  assert.equal(runs[0]?.ends, 1);
+  assert.ok((runs[0]?.errored.length ?? 0) > 0);
+  assert.doesNotMatch(runs[0]?.errored[0]?.message ?? "", /secret-session|token/);
   adapter.close();
 });
 

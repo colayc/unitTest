@@ -64,8 +64,8 @@ class FakeTestingController implements TestingController {
 
   createRunProfile(
     label: string,
+    _kind: "run",
     handler: TestingRunProfileHandler,
-    _kind?: unknown,
     _isDefault?: boolean
   ): TestingRunProfile {
     const captured = {
