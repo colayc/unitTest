@@ -173,6 +173,7 @@ export class TestingApiAdapter implements TestingDisposable {
 
     try {
       const workspace = await client.inspectWorkspace();
+      if (!this.#assertTrustedClient(client)) return;
       const project = [...workspace.projects]
         .sort((left, right) => left.projectId.localeCompare(right.projectId))[0];
       const profile = [...(project?.buildProfiles ?? [])]
@@ -184,7 +185,9 @@ export class TestingApiAdapter implements TestingDisposable {
         projectId: project.projectId,
         profileId: profile.buildProfileId
       });
+      if (!this.#assertTrustedClient(client)) return;
       const catalog = await this.#awaitCatalogOrPoll(client, project.projectId, profile.buildProfileId);
+      if (!catalog || !this.#assertTrustedClient(client)) return;
       this.#reconcileTree(catalog);
     } catch (error) {
       this.#clearTree();
@@ -204,7 +207,7 @@ export class TestingApiAdapter implements TestingDisposable {
     this.close();
   }
 
-  #assertTrustedClient(): ExtensionProtocolClient | undefined {
+  #assertTrustedClient(expectedClient?: ExtensionProtocolClient): ExtensionProtocolClient | undefined {
     const workspace = this.readWorkspace();
     const client = this.currentClient();
     if (
@@ -212,7 +215,8 @@ export class TestingApiAdapter implements TestingDisposable {
       this.currentTrust() !== "trusted" ||
       workspace.folderCount !== 1 ||
       !workspace.isTrusted ||
-      !client
+      !client ||
+      (expectedClient !== undefined && client !== expectedClient)
     ) {
       this.#clearTree();
       return undefined;
@@ -224,11 +228,14 @@ export class TestingApiAdapter implements TestingDisposable {
     client: ExtensionProtocolClient,
     projectId: string,
     profileId: string
-  ): Promise<ProtocolTestCatalog> {
+  ): Promise<ProtocolTestCatalog | undefined> {
+    if (!this.#assertTrustedClient(client)) return undefined;
     const subscription = await client.subscribeEvents(this.#eventCursor).catch(() => undefined);
     try {
+      if (!this.#assertTrustedClient(client)) return undefined;
       if (subscription) {
-        const published = await this.#awaitCatalogPublished(subscription, projectId, profileId);
+        const published = await this.#awaitCatalogPublished(subscription, client, projectId, profileId);
+        if (!this.#assertTrustedClient(client)) return undefined;
         if (published) return this.#readCatalog(client, projectId, profileId);
       }
       return this.#pollCatalog(client, projectId, profileId);
@@ -242,6 +249,7 @@ export class TestingApiAdapter implements TestingDisposable {
 
   async #awaitCatalogPublished(
     subscription: Awaited<ReturnType<ExtensionProtocolClient["subscribeEvents"]>>,
+    client: ExtensionProtocolClient,
     projectId: string,
     profileId: string
   ): Promise<boolean> {
@@ -249,6 +257,7 @@ export class TestingApiAdapter implements TestingDisposable {
     while (true) {
       const next = await Promise.race([subscription.next(), deadline]);
       if (!next || next.done) return false;
+      if (!this.#assertTrustedClient(client)) return false;
       this.#eventCursor = Math.max(this.#eventCursor, next.value.sequence);
       if (
         next.value.event === "test.catalog.published" &&
@@ -262,13 +271,16 @@ export class TestingApiAdapter implements TestingDisposable {
     client: ExtensionProtocolClient,
     projectId: string,
     profileId: string
-  ): Promise<ProtocolTestCatalog> {
+  ): Promise<ProtocolTestCatalog | undefined> {
     const delays = [0, 50, 100, 200, 400, 800, 1600, 3200];
     let lastError: unknown;
     for (const delay of delays) {
       if (delay) await this.#delay(delay);
+      if (!this.#assertTrustedClient(client)) return undefined;
       try {
-        return await this.#readCatalog(client, projectId, profileId);
+        const catalog = await this.#readCatalog(client, projectId, profileId);
+        if (!catalog) return undefined;
+        return catalog;
       } catch (error) {
         if (error instanceof CatalogScopeError) throw error;
         lastError = error;
@@ -282,8 +294,10 @@ export class TestingApiAdapter implements TestingDisposable {
     client: ExtensionProtocolClient,
     projectId: string,
     profileId: string
-  ): Promise<ProtocolTestCatalog> {
+  ): Promise<ProtocolTestCatalog | undefined> {
+    if (!this.#assertTrustedClient(client)) return undefined;
     const catalog = await client.getTestCatalog({ projectId, profileId });
+    if (!this.#assertTrustedClient(client)) return undefined;
     if (catalog.projectId !== projectId || catalog.profileId !== profileId) {
       throw new CatalogScopeError();
     }

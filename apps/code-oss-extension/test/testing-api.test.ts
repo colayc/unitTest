@@ -125,16 +125,21 @@ class FakeProtocolClient implements ExtensionProtocolClient {
   catalogResult: ProtocolTestCatalog | undefined;
   catalogResults: Array<ProtocolTestCatalog | Error> = [];
   subscription: EventSubscription | undefined;
+  afterInspect: (() => void) | undefined;
+  afterDiscover: (() => void) | undefined;
+  afterSubscribe: (() => void) | undefined;
 
   async inspectWorkspace(): Promise<WorkspaceSnapshot> {
     this.inspectCalls++;
     this.callOrder.push("inspect");
+    this.afterInspect?.();
     return this.workspace;
   }
 
   async discoverTests(input: TestDiscoveryInput): Promise<never> {
     this.discoveryCalls.push(input);
     this.callOrder.push("discover");
+    this.afterDiscover?.();
     return {} as never;
   }
 
@@ -161,6 +166,7 @@ class FakeProtocolClient implements ExtensionProtocolClient {
     const subscription = this.subscription ?? new EventSubscription(afterSequence);
     this.subscription = undefined;
     if (!subscription.closed && subscription.lastSequence === afterSequence) subscription.close();
+    this.afterSubscribe?.();
     return subscription;
   }
 
@@ -191,7 +197,14 @@ function workspaceWithProfiles(): WorkspaceSnapshot {
 
 function testingHarness(
   client: FakeProtocolClient,
-  options: { folderCount?: number; trusted?: boolean; trust?: "trusted" | "blocked-untrusted" } = {}
+  options: {
+    folderCount?: number;
+    trusted?: boolean;
+    trust?: "trusted" | "blocked-untrusted";
+    clientProvider?: () => ExtensionProtocolClient | undefined;
+    workspaceSnapshot?: () => { folderCount: number; isTrusted: boolean; workspaceRoot?: string };
+    readTrust?: () => "trusted" | "blocked-untrusted";
+  } = {}
 ) {
   const items = new FakeCollection();
   const errors: string[] = [];
@@ -201,15 +214,23 @@ function testingHarness(
     createTestItem: fakeItem
   };
   const host: TestingApiHost = {
-    workspaceSnapshot: () => ({
+    workspaceSnapshot: options.workspaceSnapshot ?? (() => ({
       folderCount: options.folderCount ?? 1,
       isTrusted: options.trusted ?? true,
       workspaceRoot: "C:\\workspace"
-    }),
+    })),
     createTestController: () => controller,
     showErrorMessage: (message) => { errors.push(message); }
   };
-  return { adapter: new TestingApiAdapter(host, () => client, () => options.trust ?? "trusted"), items, errors };
+  return {
+    adapter: new TestingApiAdapter(
+      host,
+      options.clientProvider ?? (() => client),
+      options.readTrust ?? (() => options.trust ?? "trusted")
+    ),
+    items,
+    errors
+  };
 }
 
 test("refresh inspects sorted workspace, discovers once, and maps a stable nested catalog tree", async () => {
@@ -322,14 +343,84 @@ test("refresh falls back to bounded catalog polling when no catalog event is ava
   assert.equal(adapter.catalogState?.revision, "catalog-r1");
 });
 
-test("refresh rejects a catalog response for another project or profile", async () => {
+test("refresh stops after the bounded catalog polling backoff is exhausted", async () => {
   const client = new FakeProtocolClient();
   client.workspace = workspaceWithProfiles();
-  client.catalogResult = { ...catalog(), projectId: "other-project" } as ProtocolTestCatalog;
-  const { adapter, errors } = testingHarness(client);
+  const { adapter } = testingHarness(client);
 
-  await assert.rejects(() => adapter.refresh(), /selected workspace/);
-  assert.match(errors[0] ?? "", /selected workspace/);
+  await assert.rejects(() => adapter.refresh(), /Test catalog refresh did not complete/);
+
+  assert.equal(client.catalogCalls.length, 8);
+});
+
+test("refresh rejects a catalog response for another project or profile", async (t) => {
+  for (const scope of ["project", "profile"] as const) {
+    await t.test(scope, async () => {
+      const client = new FakeProtocolClient();
+      client.workspace = workspaceWithProfiles();
+      client.catalogResult = {
+        ...catalog(),
+        ...(scope === "project" ? { projectId: "other-project" } : { profileId: "other-profile" })
+      } as ProtocolTestCatalog;
+      const { adapter, errors } = testingHarness(client);
+
+      await assert.rejects(() => adapter.refresh(), /selected workspace/);
+      assert.match(errors[0] ?? "", /selected workspace/);
+    });
+  }
+});
+
+test("refresh revalidates trust after inspect before it starts discovery", async () => {
+  const client = new FakeProtocolClient();
+  client.workspace = workspaceWithProfiles();
+  client.catalogResult = catalog();
+  let trusted = true;
+  client.afterInspect = () => { trusted = false; };
+  const { adapter } = testingHarness(client, {
+    workspaceSnapshot: () => ({ folderCount: 1, isTrusted: trusted }),
+    readTrust: () => trusted ? "trusted" : "blocked-untrusted"
+  });
+
+  await adapter.refresh();
+
+  assert.equal(client.inspectCalls, 1);
+  assert.deepEqual(client.discoveryCalls, []);
+  assert.deepEqual(client.subscriptionCalls, []);
+  assert.deepEqual(client.catalogCalls, []);
+});
+
+test("refresh revalidates the same session after discovery before subscription", async () => {
+  const client = new FakeProtocolClient();
+  const replacement = new FakeProtocolClient();
+  client.workspace = workspaceWithProfiles();
+  client.catalogResult = catalog();
+  let current: ExtensionProtocolClient | undefined = client;
+  client.afterDiscover = () => { current = replacement; };
+  const { adapter } = testingHarness(client, { clientProvider: () => current });
+
+  await adapter.refresh();
+
+  assert.equal(client.inspectCalls, 1);
+  assert.equal(client.discoveryCalls.length, 1);
+  assert.deepEqual(client.subscriptionCalls, []);
+  assert.deepEqual(client.catalogCalls, []);
+});
+
+test("refresh revalidates the same session after subscription before catalog access", async () => {
+  const client = new FakeProtocolClient();
+  const replacement = new FakeProtocolClient();
+  client.workspace = workspaceWithProfiles();
+  client.catalogResult = catalog();
+  let current: ExtensionProtocolClient | undefined = client;
+  client.afterSubscribe = () => { current = replacement; };
+  const { adapter } = testingHarness(client, { clientProvider: () => current });
+
+  await adapter.refresh();
+
+  assert.equal(client.inspectCalls, 1);
+  assert.equal(client.discoveryCalls.length, 1);
+  assert.deepEqual(client.subscriptionCalls, [0]);
+  assert.deepEqual(client.catalogCalls, []);
 });
 
 test("refresh does not issue protocol calls outside a trusted single-root session", async (t) => {
@@ -342,18 +433,15 @@ test("refresh does not issue protocol calls outside a trusted single-root sessio
   for (const item of cases) {
     await t.test(item.name, async () => {
       const client = new FakeProtocolClient();
-      const { adapter } = testingHarness(client, item);
-      const noSessionAdapter = item.noSession
-        ? new TestingApiAdapter({
-          workspaceSnapshot: () => ({ folderCount: 1, isTrusted: true }),
-          createTestController: () => ({ dispose() {} }),
-          showErrorMessage: () => undefined
-        }, () => undefined, () => "trusted")
-        : adapter;
+      const { adapter } = testingHarness(client, {
+        ...item,
+        ...(item.noSession ? { clientProvider: () => undefined } : {})
+      });
 
-      await noSessionAdapter.refresh();
+      await adapter.refresh();
       assert.equal(client.inspectCalls, 0);
       assert.deepEqual(client.discoveryCalls, []);
+      assert.deepEqual(client.subscriptionCalls, []);
       assert.deepEqual(client.catalogCalls, []);
     });
   }
