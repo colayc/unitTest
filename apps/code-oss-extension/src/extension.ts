@@ -202,6 +202,7 @@ class ExtensionController {
   readonly #status: StatusProjection;
   readonly #stopTimeoutMs: number;
   #testingAdapter: TestingApiAdapter | undefined;
+  #testingSessionRoot: string | undefined;
   #activated = false;
   #deactivating = false;
   #deactivation: Promise<void> | undefined;
@@ -247,6 +248,7 @@ class ExtensionController {
       );
       this.host.context.subscriptions.push(this.#testingAdapter);
     }
+    this.#bindTestingSession();
 
     registerCommands(
       this.host.context,
@@ -255,7 +257,11 @@ class ExtensionController {
       this.#output,
       this.#status,
       this.host,
-      () => this.#refreshTesting()
+      (state) => {
+        if (state === "started") this.#bindTestingSession();
+        else this.#invalidateTestingSession();
+        return this.#refreshTesting();
+      }
     );
     this.host.context.subscriptions.push(
       this.host.onDidChangeWorkspaceFolders(() => this.#enqueueReconcile()),
@@ -287,6 +293,7 @@ class ExtensionController {
 
   #enqueueReconcile(): Promise<void> {
     if (this.#deactivating) return Promise.resolve();
+    this.#revokeTestingSessionForWorkspaceChange();
     const next = this.#transitionTail.then(
       () => this.#reconcileWorkspace(),
       () => this.#reconcileWorkspace()
@@ -326,7 +333,9 @@ class ExtensionController {
     this.#status.projectService({ state: "starting" });
     try {
       await this.#manager.start();
+      this.#bindTestingSession();
     } catch {
+      this.#invalidateTestingSession();
       await presentManagerError(
         this.host,
         this.#manager,
@@ -357,12 +366,36 @@ class ExtensionController {
   }
 
   #testingClient() {
-    return this.#testingTrust() === "trusted" ? this.#manager.session?.client : undefined;
+    const snapshot = this.host.workspaceSnapshot();
+    return this.#gate.update(snapshot) === "trusted" &&
+      snapshot.workspaceRoot !== undefined &&
+      snapshot.workspaceRoot === this.#testingSessionRoot
+      ? this.#manager.session?.client
+      : undefined;
   }
 
   async #refreshTesting(): Promise<void> {
     if (this.#deactivating) return;
     await this.#testingAdapter?.refresh().catch(() => undefined);
+  }
+
+  #bindTestingSession(): void {
+    const snapshot = this.host.workspaceSnapshot();
+    this.#testingSessionRoot = this.#gate.update(snapshot) === "trusted" && this.#manager.session
+      ? snapshot.workspaceRoot
+      : undefined;
+  }
+
+  #invalidateTestingSession(): void {
+    this.#testingSessionRoot = undefined;
+    void this.#refreshTesting();
+  }
+
+  #revokeTestingSessionForWorkspaceChange(): void {
+    const snapshot = this.host.workspaceSnapshot();
+    if (this.#gate.update(snapshot) !== "trusted" || snapshot.workspaceRoot !== this.#testingSessionRoot) {
+      this.#invalidateTestingSession();
+    }
   }
 
 }
