@@ -42,7 +42,7 @@ source_root="/build/source/Python-$PYTHON_VERSION"
 [[ -x "$source_root/configure" ]] || { echo 'unexpected Python source layout' >&2; exit 2; }
 printf '%s\n' '*disabled*' '_tkinter' > "$source_root/Modules/Setup.local"
 cd /build/cpython
-LDFLAGS='-Wl,-rpath,$ORIGIN/../lib' CFLAGS='-O2 -g0 -ffile-prefix-map=/build=/usr/src/python' \
+LDFLAGS='-Wl,-rpath,\$ORIGIN/../lib' CFLAGS='-O2 -g0 -ffile-prefix-map=/build=/usr/src/python' \
   "$source_root/configure" \
     --prefix=/ \
     --enable-shared \
