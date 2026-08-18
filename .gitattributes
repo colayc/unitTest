@@ -4,6 +4,7 @@
 *.md text eol=lf
 *.sql text eol=lf
 *.ts text eol=lf
+tools/coverage-bundle/licenses/*.txt text eol=lf
 *.yaml text eol=lf
 apps/test-service/internal/testframework/cpputest/testdata/list-crlf.valid.txt text eol=crlf
 apps/test-service/internal/testframework/cpputest/testdata/pass.txt text eol=lf
