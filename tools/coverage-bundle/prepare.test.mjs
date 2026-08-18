@@ -345,6 +345,9 @@ test("archive audit accepts safe internal spaces in regular filenames", () => {
   assert.throws(() => __testing.validateArchiveEntries([
     { path: "Python-3.14.6/Mac/Icons/ Disk Image.icns", type: "file" },
   ]), /unsafe archive entry/u);
+  assert.throws(() => __testing.validateArchiveEntries([
+    { path: "Python-3.14.6/Mac/Icons/DiskImage.icns.", type: "file" },
+  ]), /unsafe archive entry/u);
 });
 
 test("prepare builds in a temp directory, writes READY last, and atomically publishes", async (t) => {
@@ -620,6 +623,15 @@ test("TAR audit accepts a safe GNU longname with identical extraction semantics"
   const path = join(root, "safe.tgz");
   await writeFile(path, gzipSync(archive));
   assert.deepEqual(await __testing.inspectArchive(path), [{ path: longPath, type: "file" }]);
+});
+
+test("TAR audit accepts a Linux source filename with a trailing dot", async (t) => {
+  const root = await temporary(t, "coverage-bundle-safe-trailing-dot-");
+  const sourcePath = "Python-3.14.6/Modules/_xxtestfuzz/fuzz_elementtree_parsewhole_corpus/out_inNsSuperfluous_c14nPrefix.";
+  const archive = rawTar([{ name: sourcePath, data: "safe" }]);
+  const path = join(root, "safe-trailing-dot.tgz");
+  await writeFile(path, gzipSync(archive));
+  assert.deepEqual(await __testing.inspectArchive(path), [{ path: sourcePath, type: "file" }]);
 });
 
 test("TAR audit accepts only path-safe local PAX and metadata-only global PAX semantics", async (t) => {

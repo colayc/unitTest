@@ -173,22 +173,22 @@ export async function obtainArtifact(artifact, cacheRoot, download = defaultDown
   }
 }
 
-function portablePath(value) {
+function portablePath(value, { allowTrailingDot = false } = {}) {
   if (typeof value !== "string" || !value || value.includes("\\") || value.includes(":")) return false;
   const path = value.endsWith("/") ? value.slice(0, -1) : value;
   if (!path || posix.isAbsolute(path) || posix.normalize(path) !== path || !/^[-A-Za-z0-9._+/ ]+$/u.test(path)) return false;
   return path.split("/").every((part) => {
     const base = part.split(".", 1)[0].toUpperCase();
-    return part && part !== "." && part !== ".." && !part.startsWith(" ") && !part.endsWith(".") && !part.endsWith(" ") &&
+    return part && part !== "." && part !== ".." && !part.startsWith(" ") && (allowTrailingDot || !part.endsWith(".")) && !part.endsWith(" ") &&
       !["CON", "PRN", "AUX", "NUL"].includes(base) && !/^(?:COM|LPT)[1-9]$/u.test(base);
   });
 }
 
-export function validateArchiveEntries(entries) {
+export function validateArchiveEntries(entries, options = {}) {
   if (!Array.isArray(entries) || entries.length === 0) throw new Error("unsafe archive entry: empty archive");
   const names = new Set();
   for (const entry of entries) {
-    if (!plainObject(entry) || !portablePath(entry.path) || !["file", "directory"].includes(entry.type)) throw new Error(`unsafe archive entry: ${entry?.path ?? "unknown"}`);
+    if (!plainObject(entry) || !portablePath(entry.path, options) || !["file", "directory"].includes(entry.type)) throw new Error(`unsafe archive entry: ${entry?.path ?? "unknown"}`);
     const key = entry.path.replace(/\/$/u, "").toLowerCase();
     if (names.has(key)) throw new Error(`unsafe archive entry: duplicate ${entry.path}`);
     names.add(key);
@@ -372,7 +372,7 @@ function parseTar(buffer) {
     const nextOffset = dataStart + Math.ceil(size / 512) * 512;
     if (dataEnd > buffer.length || nextOffset > buffer.length) throw new Error("unsafe archive entry: truncated TAR data");
     const headerPath = prefix ? `${prefix}/${name}` : name;
-    if (!(typeFlag === "L" && headerPath === "././@LongLink") && !portablePath(headerPath)) throw new Error(`unsafe archive entry: ${headerPath}`);
+    if (!(typeFlag === "L" && headerPath === "././@LongLink") && !portablePath(headerPath, { allowTrailingDot: true })) throw new Error(`unsafe archive entry: ${headerPath}`);
     if (typeFlag === "L") {
       const data = buffer.subarray(dataStart, dataEnd);
       if (longName !== undefined || data.length < 2 || data.at(-1) !== 0 || data.subarray(0, -1).includes(0)) throw new Error("unsafe archive entry: malformed GNU longname");
@@ -394,7 +394,7 @@ function parseTar(buffer) {
     offset = nextOffset;
   }
   if (!ended || longName !== undefined || Object.keys(localPax).length !== 0) throw new Error("unsafe archive entry: incomplete TAR metadata");
-  return validateArchiveEntries(entries);
+  return validateArchiveEntries(entries, { allowTrailingDot: true });
 }
 
 async function inspectArchive(path) {
