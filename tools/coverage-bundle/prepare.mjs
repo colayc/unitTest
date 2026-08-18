@@ -32,6 +32,7 @@ const digestPattern = /^[0-9a-f]{64}$/u;
 const maximumDownloadBytes = 512 * 1024 * 1024;
 const maximumExpandedArchiveBytes = 1024 * 1024 * 1024;
 const allowedHosts = new Set(["www.python.org", "files.pythonhosted.org", "github.com"]);
+const allowedRedirectHosts = new Set(["release-assets.githubusercontent.com"]);
 const fixedLinuxImage = "quay.io/pypa/manylinux_2_28_x86_64@sha256:0c87ccb5996dab6c3b7612ee4fda7b80c4ab3c44a86c2541e4a872afdf4f131b";
 const recipeName = "coverage-bundle-recipe-v2";
 const recipeFiles = [
@@ -138,8 +139,11 @@ async function exists(path) {
 }
 
 async function defaultDownload(url, destination) {
-  const response = await fetch(url, { redirect: "error", signal: AbortSignal.timeout(5 * 60 * 1000) });
-  if (!response.ok || response.url !== url || !response.body) throw new Error(`download failed for locked URL: ${url}`);
+  const response = await fetch(url, { redirect: "follow", signal: AbortSignal.timeout(5 * 60 * 1000) });
+  const sourceURL = new URL(url);
+  const finalURL = new URL(response.url);
+  const approvedRedirect = sourceURL.hostname === "github.com" && finalURL.hostname && allowedRedirectHosts.has(finalURL.hostname);
+  if (!response.ok || (!approvedRedirect && response.url !== url) || !response.body) throw new Error(`download failed for locked URL: ${url}`);
   const declared = Number(response.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > maximumDownloadBytes) throw new Error("download exceeds size limit");
   let received = 0;
