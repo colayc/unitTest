@@ -417,6 +417,77 @@ func TestRuntimeTestDiscoveryRefreshesTargetsAfterBuild(
 	}
 }
 
+func TestRuntimeTestDiscoveryRebindsOneStableGenerationAfterBuild(
+	t *testing.T,
+) {
+	base := t.TempDir()
+	workspaceRoot := filepath.Join(base, "workspace")
+	serviceRoot := filepath.Join(base, "service-builds")
+	buildDirectory := filepath.Join(workspaceRoot, "out", "debug")
+	for _, root := range []string{workspaceRoot, serviceRoot, buildDirectory} {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store, err := taskstore.Open(filepath.Join(base, "history.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	workspaceID := strings.Repeat("1", 64)
+	profileID := strings.Repeat("2", 64)
+	cmakeIdentity := strings.Repeat("3", 64)
+	fileAPIIdentity := strings.Repeat("4", 64)
+	if err := store.PutBuildConfiguration(context.Background(), taskstore.BuildConfiguration{
+		WorkspaceID: workspaceID, ProjectID: "core", ProfileID: profileID,
+		Fingerprint: strings.Repeat("5", 64), BuildDirectory: "workspace/out/debug",
+		CMakeIdentity: cmakeIdentity, FileAPIIdentity: fileAPIIdentity,
+		ConfiguredAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	project := workspace.ProjectConfig{ID: "core"}
+	profile := cmake.BuildProfile{ID: profileID, ProjectID: "core", BinaryDir: buildDirectory}
+	target := cmake.Target{
+		ID: strings.Repeat("6", 64), Name: "fresh-tests",
+		Artifacts: []string{filepath.Join(buildDirectory, "tests")},
+	}
+	currentGeneration := strings.Repeat("a", 64)
+	coordinator := &fakeRuntimeCoordinator{
+		targets: []cmake.Target{target},
+		targetErrs: []error{build.ErrWorkspaceChanged, nil},
+		snapshot: discovery.Snapshot{
+			Generation: currentGeneration,
+			Projects: []workspace.ProjectConfig{project},
+			Profiles: []cmake.BuildProfile{profile},
+			Toolchains: []toolchain.Instance{{ID: "preset-toolchain"}},
+		},
+	}
+	factory := newTaskDiscoveryInputFactory(testCoordinatorConfig{
+		Build: coordinator, Store: store,
+		Installation: cmake.Installation{Identity: cmakeIdentity},
+		WorkspaceRoot: workspace.Root{ID: workspaceID, NativePath: workspaceRoot},
+		BuildDataRoot: serviceRoot, NewID: task.NewID,
+	})
+	input, err := factory(context.Background(), testrun.RefreshRequest{
+		TaskID: strings.Repeat("7", 32), WorkspaceGeneration: strings.Repeat("8", 64),
+		Project: project, Profile: profile,
+		Toolchain: toolchain.Instance{ID: "preset-toolchain"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if input.Fingerprint.WorkspaceGeneration != currentGeneration {
+		t.Fatalf("generation = %q, want %q", input.Fingerprint.WorkspaceGeneration, currentGeneration)
+	}
+	if len(coordinator.targetCalls) != 2 || coordinator.targetCalls[1].WorkspaceGeneration != currentGeneration {
+		t.Fatalf("target calls = %#v", coordinator.targetCalls)
+	}
+	if !reflect.DeepEqual(input.Targets, []cmake.Target{target}) {
+		t.Fatalf("targets = %#v", input.Targets)
+	}
+}
+
 func TestTrustedRuntimeKeepsInvalidWorkspaceAvailableForInspectorDiagnostics(t *testing.T) {
 	base := t.TempDir()
 	workspaceRoot := filepath.Join(base, "workspace")
@@ -791,6 +862,8 @@ type fakeRuntimeCoordinator struct {
 	config      build.CoordinatorConfig
 	snapshot    discovery.Snapshot
 	targets     []cmake.Target
+	targetErrs  []error
+	targetCalls []build.TargetsRequest
 	started     task.Task
 	resumeErr   error
 	resumeCalls int
@@ -800,7 +873,15 @@ func (f *fakeRuntimeCoordinator) Inspect(context.Context) (discovery.Snapshot, e
 	return f.snapshot, nil
 }
 
-func (f *fakeRuntimeCoordinator) Targets(context.Context, build.TargetsRequest) ([]cmake.Target, error) {
+func (f *fakeRuntimeCoordinator) Targets(_ context.Context, request build.TargetsRequest) ([]cmake.Target, error) {
+	f.targetCalls = append(f.targetCalls, request)
+	if len(f.targetErrs) > 0 {
+		err := f.targetErrs[0]
+		f.targetErrs = f.targetErrs[1:]
+		if err != nil {
+			return nil, err
+		}
+	}
 	return append([]cmake.Target(nil), f.targets...), nil
 }
 

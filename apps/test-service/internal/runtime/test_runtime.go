@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"time"
@@ -233,6 +234,56 @@ func newTaskDiscoveryInputFactory(
 				BuildProfileID: request.Profile.ID,
 			},
 		)
+		generation := request.WorkspaceGeneration
+		if errors.Is(err, build.ErrWorkspaceChanged) {
+			// CMake configure/build may publish the File API between the
+			// prepared build checkpoint and this refresh. Rebind once to a
+			// fresh snapshot, but only when the semantic project/profile
+			// identity is unchanged; an actual workspace change remains
+			// fail-closed.
+			current, inspectErr := config.Build.Inspect(ctx)
+			if inspectErr != nil {
+				return testdiscovery.DiscoveryInput{}, err
+			}
+			profileMatches := false
+			for _, candidate := range current.Profiles {
+				if candidate.ID == request.Profile.ID {
+					profileMatches = candidate == request.Profile
+					break
+				}
+			}
+			projectMatches := false
+			for _, candidate := range current.Projects {
+				if candidate.ID == request.Project.ID {
+					projectMatches = reflect.DeepEqual(candidate, request.Project)
+					break
+				}
+			}
+			if !profileMatches || !projectMatches || current.Generation == "" {
+				return testdiscovery.DiscoveryInput{}, err
+			}
+			if request.Toolchain.ID != "" {
+				toolchainMatches := false
+				for _, candidate := range current.Toolchains {
+					if candidate.ID == request.Toolchain.ID {
+						toolchainMatches = reflect.DeepEqual(candidate, request.Toolchain)
+						break
+					}
+				}
+				if !toolchainMatches {
+					return testdiscovery.DiscoveryInput{}, err
+				}
+			}
+			targets, err = config.Build.Targets(
+				ctx,
+				build.TargetsRequest{
+					WorkspaceGeneration: current.Generation,
+					ProjectID:      request.Project.ID,
+					BuildProfileID: request.Profile.ID,
+				},
+			)
+			generation = current.Generation
+		}
 		if err != nil {
 			return testdiscovery.DiscoveryInput{}, err
 		}
@@ -270,7 +321,7 @@ func newTaskDiscoveryInputFactory(
 			Helpers:    map[string]testframework.Declaration{},
 			Mappings:   mappings,
 			Fingerprint: testdiscovery.Fingerprint{
-				WorkspaceGeneration: request.WorkspaceGeneration,
+				WorkspaceGeneration: generation,
 				TestConfigurationSHA256: hex.EncodeToString(
 					testConfigHash[:],
 				),
