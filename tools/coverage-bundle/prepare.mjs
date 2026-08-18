@@ -116,6 +116,7 @@ function collectArtifacts(manifest, key) {
   const result = [manifest.python.artifacts[key]];
   for (const wheel of manifest.gcovr.wheels) {
     const matches = wheel.files.filter(({ platforms }) => platforms.includes(key));
+    if (matches.length === 0) continue;
     if (matches.length !== 1) throw new Error(`wheel ${wheel.project} must resolve exactly once for ${key}`);
     result.push(matches[0]);
   }
@@ -555,8 +556,9 @@ async function resolvedInputs(manifest, key) {
       url: artifacts[0].url,
       sha256: artifacts[0].sha256,
     },
-    wheels: manifest.gcovr.wheels.map((wheel) => {
+    wheels: manifest.gcovr.wheels.flatMap((wheel) => {
       const file = wheel.files.find(({ platforms }) => platforms.includes(key));
+      if (!file) return [];
       return {
         project: wheel.project,
         version: wheel.version,
@@ -809,6 +811,7 @@ export const __testing = Object.freeze({
   parseCLI,
   pythonInvocationArguments,
   prepareBundleFromManifest,
+  resolvedInputs,
   sanitizePythonEnvironment,
   validateArchiveEntries,
   verifyResolvedBundle,

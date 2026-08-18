@@ -248,6 +248,25 @@ test("layout accepts only the separate Windows/Linux x64 bundle keys", () => {
   assert.match(bundleDirectory("C:/repo", "windows-x64"), /coverage-bundle[\\/]windows-x64$/u);
 });
 
+test("platform-specific wheels are omitted from another platform's resolved inputs", async () => {
+  const { manifest, wheelBytes } = fixture();
+  manifest.gcovr.wheels.push({
+    project: "colorama",
+    version: "0.4.6",
+    kind: "wheel",
+    files: [{
+      ...artifact(
+        "colorama-0.4.6-py2.py3-none-any.whl",
+        "https://files.pythonhosted.org/packages/fixture/colorama.whl",
+        wheelBytes,
+      ),
+      platforms: ["windows-x64"],
+    }],
+  });
+  const resolved = await __testing.resolvedInputs(manifest, "linux-x64");
+  assert.deepEqual(resolved.wheels.map(({ project }) => project), ["gcovr"]);
+});
+
 test("cold prepare downloads only the platform manifest allowlist and verifies before inspection", async (t) => {
   const order = [];
   const { manifest } = fixture();
