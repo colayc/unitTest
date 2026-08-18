@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import type { WorkspaceSnapshot } from "@unit-test-ide/protocol-models";
-import { ProtocolError, type ProtocolClient } from "@unit-test-ide/test-client";
+import { ProtocolError, type EventSubscription, type ProtocolClient } from "@unit-test-ide/test-client";
 import type { TaskServiceFixture } from "./probe.js";
 import {
   __testing,
@@ -465,6 +465,36 @@ test("late named-target stale-checkpoint retry is bounded to one", async () => {
   assert.equal(inspections, 2);
   assert.equal(listings, 2);
   assert.equal(starts, 2);
+});
+
+test("cancellation recovery establishes a fresh default-build checkpoint", async () => {
+  let inspections = 0;
+  let starts = 0;
+  const client = {
+    inspectWorkspace: async () => {
+      inspections++;
+      return workspaceSnapshot("gcc");
+    },
+    startCMakeBuild: async () => {
+      starts++;
+      return { taskId: "post-cancellation-recovery" };
+    },
+  } as unknown as ProtocolClient;
+  const events = [{
+    taskId: "post-cancellation-recovery",
+    event: "task.finished",
+    payload: { outcome: "succeeded" },
+  }];
+  const subscription = {
+    lastSequence: 0,
+    next: async () => ({ done: false, value: events.shift()! }),
+  } as unknown as EventSubscription;
+
+  await __testing.recoverAfterCancellation(client, "gcc", subscription);
+
+  assert.equal(inspections, 1);
+  assert.equal(starts, 1);
+  assert.equal(events.length, 0);
 });
 
 test("diagnostic fixture refreshes one stale generation before Task creation", async () => {

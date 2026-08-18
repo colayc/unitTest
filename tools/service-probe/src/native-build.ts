@@ -483,6 +483,14 @@ async function executeCoreScenarios(
   );
   assertContinuousSequences(cancelledEvents, `${context.family} cancellation reconnect`);
 
+  // A cancelled CMake build can leave its File API/configuration state in the
+  // middle of a transition while the process-control close completes.  Before
+  // starting the next target scenario, establish a fresh successful default
+  // build checkpoint so the following target lookup cannot reuse that stale
+  // generation (or an incompletely persisted configure fingerprint).
+  reportNativeScenario(context.family, "cancellation-recovery");
+  await recoverAfterCancellation(client, context.family, subscription);
+
   reportNativeScenario(context.family, "timeout");
   const timed = await startNamedTargetBuildAtCheckpoint(
     client,
@@ -603,6 +611,7 @@ async function executeCoreScenarios(
     "unknown-target-rejected": "passed",
     "stale-generation-rejected": "passed",
     cancellation: "passed",
+    "cancellation-recovery": "passed",
     timeout: "passed",
     "preset-build": "passed",
     "compiler-diagnostic": "passed",
@@ -615,6 +624,21 @@ async function executeCoreScenarios(
       : {}),
     "service-recovery": "passed",
   };
+}
+
+async function recoverAfterCancellation(
+  client: ProtocolClient,
+  family: RequiredToolchainFamily,
+  subscription: EventSubscription,
+): Promise<void> {
+  const recovery = await startFamilyBuildAtCheckpoint(
+    client,
+    family,
+    "cancellation-recovery",
+    [],
+    60_000,
+  );
+  await waitForTask(client, subscription, recovery.taskId);
 }
 
 function reportNativeScenario(
@@ -1588,5 +1612,6 @@ export const __testing = Object.freeze({
   selectGeneratedProfile,
   startFamilyBuildAtCheckpoint,
   startNamedTargetBuildAtCheckpoint,
+  recoverAfterCancellation,
   startFailureBuildWithStaleRetry,
 });
