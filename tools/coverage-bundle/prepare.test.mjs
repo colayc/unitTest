@@ -636,6 +636,18 @@ test("TAR audit accepts a safe GNU longname with identical extraction semantics"
   assert.deepEqual(await __testing.inspectArchive(path), [{ path: longPath, type: "file" }]);
 });
 
+test("TAR audit accepts the locked release archive's V7 headers", async (t) => {
+  const root = await temporary(t, "coverage-bundle-v7-tar-");
+  const archive = rawTar([{ name: "Python-3.14.6/Modules/_lzma.c", data: "safe" }]);
+  archive.fill(0, 257, 263);
+  archive.fill(0x20, 148, 156);
+  const checksum = [...archive.subarray(0, 512)].reduce((sum, byte) => sum + byte, 0);
+  archive.write(`${checksum.toString(8).padStart(6, "0")}\0 `, 148, 8, "ascii");
+  const path = join(root, "v7.tgz");
+  await writeFile(path, gzipSync(archive));
+  assert.deepEqual(await __testing.inspectArchive(path), [{ path: "Python-3.14.6/Modules/_lzma.c", type: "file" }]);
+});
+
 test("TAR audit accepts a Linux source filename with a trailing dot", async (t) => {
   const root = await temporary(t, "coverage-bundle-safe-trailing-dot-");
   const sourcePath = "Python-3.14.6/Modules/_xxtestfuzz/fuzz_elementtree_parsewhole_corpus/out_inNsSuperfluous_c14nPrefix.";

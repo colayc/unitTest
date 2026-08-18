@@ -182,7 +182,7 @@ export async function obtainArtifact(artifact, cacheRoot, download = defaultDown
 function portablePath(value, { allowTrailingDot = false } = {}) {
   if (typeof value !== "string" || !value || value.includes("\\") || value.includes(":")) return false;
   const path = value.endsWith("/") ? value.slice(0, -1) : value;
-  if (!path || posix.isAbsolute(path) || posix.normalize(path) !== path || !/^[-A-Za-z0-9._+/ ]+$/u.test(path)) return false;
+  if (!path || posix.isAbsolute(path) || posix.normalize(path) !== path || !/^[-A-Za-z0-9._+~@/ ]+$/u.test(path)) return false;
   return path.split("/").every((part) => {
     const base = part.split(".", 1)[0].toUpperCase();
     return part && part !== "." && part !== ".." && !part.startsWith(" ") && (allowTrailingDot || !part.endsWith(".")) && !part.endsWith(" ") &&
@@ -365,7 +365,10 @@ function parseTar(buffer) {
     const actualChecksum = [...checksumHeader].reduce((sum, byte) => sum + byte, 0);
     if (storedChecksum !== actualChecksum) throw new Error("unsafe archive entry: TAR checksum mismatch");
     const magic = header.subarray(257, 263).toString("binary");
-    if (magic !== "ustar\0" && magic !== "ustar ") throw new Error("unsafe archive entry: unsupported TAR format");
+    // The locked CPython/XZ release archives are produced by the historical
+    // V7 tar writer and leave the ustar magic field empty.  They still carry
+    // the same checksum, bounded size, and path/type checks below.
+    if (magic !== "" && magic !== "\0\0\0\0\0\0" && magic !== "ustar\0" && magic !== "ustar ") throw new Error("unsafe archive entry: unsupported TAR format");
     const name = parseTarString(header, 0, 100);
     const prefix = parseTarString(header, 345, 155);
     const linkName = parseTarString(header, 157, 100);
