@@ -12,6 +12,11 @@ import {
   type StatusBarLike
 } from "./commands.js";
 import { ServiceManager, type ServiceManagerOptions } from "./service-manager.js";
+import {
+  TestingApiAdapter,
+  type TestingApiHost,
+  type TestingController
+} from "./testing-api.js";
 import { TrustGate, type WorkspaceSnapshot } from "./trust-gate.js";
 
 const DEFAULT_STOP_TIMEOUT_MS = 2_000;
@@ -30,6 +35,7 @@ export interface ExtensionHost extends CommandHost {
   configuration<T>(key: string, fallback: T): T;
   createOutputChannel(name: string): OutputChannelLike;
   createStatusBarItem(): StatusBarLike;
+  createTestController?: TestingApiHost["createTestController"];
   onDidChangeWorkspaceFolders(listener: () => void | Promise<void>): DisposableLike;
   onDidGrantWorkspaceTrust(listener: () => void | Promise<void>): DisposableLike;
 }
@@ -195,6 +201,7 @@ class ExtensionController {
   readonly #output: OutputChannelLike;
   readonly #status: StatusProjection;
   readonly #stopTimeoutMs: number;
+  #testingAdapter: TestingApiAdapter | undefined;
   #activated = false;
   #deactivating = false;
   #deactivation: Promise<void> | undefined;
@@ -227,6 +234,19 @@ class ExtensionController {
     this.#workspaceRoot = snapshot.workspaceRoot;
     this.#status.projectTrust(this.#gate.update(snapshot));
     this.#status.projectService(this.#manager.status);
+    const createTestController = this.host.createTestController;
+    if (createTestController) {
+      this.#testingAdapter = new TestingApiAdapter(
+        {
+          workspaceSnapshot: () => this.host.workspaceSnapshot(),
+          createTestController: (id, label) => createTestController(id, label),
+          showErrorMessage: (message) => this.host.showErrorMessage(message)
+        },
+        () => this.#testingClient(),
+        () => this.#testingTrust()
+      );
+      this.host.context.subscriptions.push(this.#testingAdapter);
+    }
 
     registerCommands(
       this.host.context,
@@ -234,7 +254,8 @@ class ExtensionController {
       () => this.#manager.session?.client,
       this.#output,
       this.#status,
-      this.host
+      this.host,
+      () => this.#refreshTesting()
     );
     this.host.context.subscriptions.push(
       this.host.onDidChangeWorkspaceFolders(() => this.#enqueueReconcile()),
@@ -244,11 +265,13 @@ class ExtensionController {
     if (this.#status.trustState === "trusted" && this.host.configuration("autoStart", true)) {
       await this.#startService();
     }
+    await this.#refreshTesting();
   }
 
   deactivate(): Promise<void> {
     if (this.#deactivation) return this.#deactivation;
     this.#deactivating = true;
+    this.#testingAdapter?.close();
     const transitions = this.#transitionTail.catch(() => undefined);
     const stop = this.#manager.stop().catch(() => presentManagerError(
       this.host,
@@ -281,13 +304,18 @@ class ExtensionController {
     const current = this.#gate.update(snapshot);
     this.#status.projectTrust(current);
     if (current === "trusted") {
-      if (previous === "trusted" && rootChanged) await this.#stopService();
+      if (previous === "trusted" && rootChanged) {
+        await this.#stopService();
+        await this.#refreshTesting();
+      }
       if (this.#deactivating) return;
       if ((previous !== "trusted" || rootChanged) && this.host.configuration("autoStart", true)) {
         await this.#startService();
       }
+      await this.#refreshTesting();
       return;
     }
+    await this.#refreshTesting();
     if (previous === "trusted" || this.#manager.status.state !== "stopped") {
       await this.#stopService();
     }
@@ -322,6 +350,19 @@ class ExtensionController {
     } finally {
       this.#status.projectService(this.#manager.status);
     }
+  }
+
+  #testingTrust(): TrustState {
+    return this.#gate.update(this.host.workspaceSnapshot());
+  }
+
+  #testingClient() {
+    return this.#testingTrust() === "trusted" ? this.#manager.session?.client : undefined;
+  }
+
+  async #refreshTesting(): Promise<void> {
+    if (this.#deactivating) return;
+    await this.#testingAdapter?.refresh().catch(() => undefined);
   }
 
 }
@@ -368,6 +409,10 @@ function createVSCodeHost(
       vscode.StatusBarAlignment.Left,
       100
     ),
+    createTestController: (id, label) => vscode.tests.createTestController(
+      id,
+      label
+    ) as unknown as TestingController,
     registerCommand: (command, handler) => vscode.commands.registerCommand(command, handler),
     onDidChangeWorkspaceFolders: (listener) => vscode.workspace.onDidChangeWorkspaceFolders(listener),
     onDidGrantWorkspaceTrust: (listener) => vscode.workspace.onDidGrantWorkspaceTrust(listener),

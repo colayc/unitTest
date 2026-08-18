@@ -14,8 +14,64 @@ import {
 import type { ExtensionProtocolClient } from "../src/protocol-client.js";
 import { createProtocolClient } from "../src/protocol-client.js";
 import type { ServiceManagerOptions } from "../src/service-manager.js";
+import type {
+  TestingController,
+  TestingRunProfile,
+  TestingRunProfileHandler,
+  TestingTestItem,
+  TestingTestItemCollection
+} from "../src/testing-api.js";
 
 type Listener = () => void | Promise<void>;
+
+class FakeTestingCollection implements TestingTestItemCollection {
+  readonly entries = new Map<string, TestingTestItem>();
+  replaceCalls = 0;
+
+  add(item: TestingTestItem): void { this.entries.set(item.id, item); }
+  delete(id: string): void { this.entries.delete(id); }
+  get(id: string): TestingTestItem | undefined { return this.entries.get(id); }
+  replace(items: readonly TestingTestItem[]): void {
+    this.replaceCalls++;
+    this.entries.clear();
+    for (const item of items) this.entries.set(item.id, item);
+  }
+}
+
+class FakeTestingController implements TestingController {
+  readonly items = new FakeTestingCollection();
+  readonly profiles: Array<{
+    handler: TestingRunProfileHandler;
+    profile: TestingRunProfile;
+    disposeCalls: number;
+  }> = [];
+  refreshHandler: (() => void | Promise<void>) | undefined;
+  disposeCalls = 0;
+
+  dispose(): void { this.disposeCalls++; }
+
+  createTestItem(id: string, label: string, uri?: unknown): TestingTestItem {
+    return { id, label, uri, children: new FakeTestingCollection() };
+  }
+
+  createRunProfile(
+    label: string,
+    handler: TestingRunProfileHandler,
+    _kind?: unknown,
+    _isDefault?: boolean
+  ): TestingRunProfile {
+    const captured = {
+      handler,
+      disposeCalls: 0,
+      profile: {
+        label,
+        dispose: () => { captured.disposeCalls++; }
+      }
+    };
+    this.profiles.push(captured);
+    return captured.profile;
+  }
+}
 
 class FakeProtocolClient implements ExtensionProtocolClient {
   inspectCalls = 0;
@@ -119,6 +175,7 @@ interface HarnessOptions {
   stopTimeoutMs?: number;
   serviceExecutable?: string;
   developmentMode?: boolean;
+  testingApi?: boolean;
   managerFactory?: (options: ServiceManagerOptions) => LifecycleManager;
 }
 
@@ -129,6 +186,7 @@ function createExtensionHarness(options: HarnessOptions = {}) {
   const output: string[] = [];
   const errors: string[] = [];
   const subscriptions: Array<{ dispose(): void }> = [];
+  const testingControllers: FakeTestingController[] = [];
   const state = {
     folderCount: options.folderCount ?? 1,
     isTrusted: options.isTrusted ?? true,
@@ -165,6 +223,11 @@ function createExtensionHarness(options: HarnessOptions = {}) {
       show() {},
       dispose() {}
     }),
+    createTestController: options.testingApi ? () => {
+      const controller = new FakeTestingController();
+      testingControllers.push(controller);
+      return controller;
+    } : undefined,
     registerCommand(command, handler) {
       commands.set(command, handler);
       return disposable(() => commands.delete(command));
@@ -188,6 +251,7 @@ function createExtensionHarness(options: HarnessOptions = {}) {
     manager,
     output,
     errors,
+    get testingControllers() { return testingControllers; },
     get statusText() { return state.statusText; },
     activate: () => controller.activate(),
     deactivate: () => controller.deactivate(),
@@ -195,6 +259,17 @@ function createExtensionHarness(options: HarnessOptions = {}) {
       const handler = commands.get(command);
       assert.ok(handler, `command ${command} was not registered`);
       await handler();
+    },
+    async refreshTests() {
+      const controller = testingControllers[0];
+      assert.ok(controller, "Testing API controller was not registered");
+      await controller.refreshHandler?.();
+    },
+    async runTests() {
+      const controller = testingControllers[0];
+      const profile = controller?.profiles[0];
+      assert.ok(profile, "Testing API run profile was not registered");
+      await profile.handler({});
     },
     async updateWorkspace(folderCount: number, isTrusted: boolean, workspaceRoot = state.workspaceRoot) {
       state.folderCount = folderCount;
@@ -261,6 +336,81 @@ test("untrusted activation publishes blocked status and does not start service",
 
   assert.equal(host.manager.startCalls, 0);
   assert.equal(host.statusText, "Unit Test: Untrusted Workspace");
+});
+
+test("trusted activation registers one Testing API controller and refreshes through the active session", async () => {
+  const client = new FakeProtocolClient(workspaceSnapshot("testing-api"));
+  const manager = new FakeServiceManager(client);
+  const host = createExtensionHarness({ manager, testingApi: true });
+
+  await host.activate();
+
+  assert.equal(host.testingControllers.length, 1);
+  assert.equal(host.testingControllers[0]?.profiles.length, 1);
+  assert.ok(host.testingControllers[0]?.refreshHandler);
+  assert.equal(client.inspectCalls, 1);
+});
+
+test("untrusted activation and trust loss leave the Testing API without a usable protocol run path", async () => {
+  const untrustedClient = new FakeProtocolClient(workspaceSnapshot("untrusted-testing-api"));
+  const untrusted = createExtensionHarness({
+    isTrusted: false,
+    testingApi: true,
+    manager: new FakeServiceManager(untrustedClient)
+  });
+  await untrusted.activate();
+  await untrusted.runTests();
+  assert.equal(untrustedClient.inspectCalls, 0);
+
+  const multiRootClient = new FakeProtocolClient(workspaceSnapshot("multi-root-testing-api"));
+  const multiRoot = createExtensionHarness({
+    folderCount: 2,
+    testingApi: true,
+    manager: new FakeServiceManager(multiRootClient)
+  });
+  await multiRoot.activate();
+  await multiRoot.runTests();
+  assert.equal(multiRootClient.inspectCalls, 0);
+
+  const noSessionClient = new FakeProtocolClient(workspaceSnapshot("no-session-testing-api"));
+  const noSessionManager = new FakeServiceManager(noSessionClient);
+  noSessionManager.session = undefined;
+  const noSession = createExtensionHarness({
+    autoStart: false,
+    testingApi: true,
+    manager: noSessionManager
+  });
+  await noSession.activate();
+  await noSession.runTests();
+  assert.equal(noSessionClient.inspectCalls, 0);
+
+  const client = new FakeProtocolClient(workspaceSnapshot("trust-loss-testing-api"));
+  const host = createExtensionHarness({ manager: new FakeServiceManager(client), testingApi: true });
+  await host.activate();
+  const controller = host.testingControllers[0];
+  assert.ok(controller);
+  const clearedBeforeTrustLoss = controller.items.replaceCalls;
+  const protocolCallsBeforeTrustLoss = client.inspectCalls;
+
+  await host.updateWorkspace(1, false);
+  await host.runTests();
+
+  assert.ok(controller.items.replaceCalls > clearedBeforeTrustLoss);
+  assert.equal(client.inspectCalls, protocolCallsBeforeTrustLoss);
+});
+
+test("deactivate closes the Testing API profile and controller exactly once", async () => {
+  const host = createExtensionHarness({ autoStart: false, testingApi: true });
+  await host.activate();
+  const controller = host.testingControllers[0];
+  assert.ok(controller);
+  const profile = controller.profiles[0];
+  assert.ok(profile);
+
+  await Promise.all([host.deactivate(), host.deactivate()]);
+
+  assert.equal(profile.disposeCalls, 1);
+  assert.equal(controller.disposeCalls, 1);
 });
 
 test("inspect command delegates only to workspace/inspect", async () => {
