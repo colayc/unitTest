@@ -367,7 +367,8 @@ class ExtensionController {
 
   #testingClient() {
     const snapshot = this.host.workspaceSnapshot();
-    return this.#gate.update(snapshot) === "trusted" &&
+    return this.#manager.status.state === "running" &&
+      this.#gate.update(snapshot) === "trusted" &&
       snapshot.workspaceRoot !== undefined &&
       snapshot.workspaceRoot === this.#testingSessionRoot
       ? this.#manager.session?.client

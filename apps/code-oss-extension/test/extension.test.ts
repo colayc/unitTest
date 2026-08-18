@@ -572,6 +572,38 @@ test("root switch synchronously revokes the old Testing API session before stop 
   await transition;
 });
 
+test("manual stop rejects Testing API refresh and run while service shutdown is pending", async () => {
+  const client = testingClient("manual-stop-testing-api");
+  const manager = new FakeServiceManager(client);
+  let releaseStop: (() => void) | undefined;
+  manager.stopPromise = new Promise<void>((resolve) => { releaseStop = resolve; });
+  const host = createExtensionHarness({ manager, testingApi: true });
+  await host.activate();
+  const protocolCallsBeforeStop = [
+    client.inspectCalls,
+    client.discoveryCalls,
+    client.catalogCalls,
+    client.runCalls,
+    client.subscriptionCalls
+  ];
+
+  const stopping = host.execute("unitTestIde.stopService");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(manager.stopCalls, 1);
+  await Promise.all([host.refreshTests(), host.runTests()]);
+
+  assert.deepEqual([
+    client.inspectCalls,
+    client.discoveryCalls,
+    client.catalogCalls,
+    client.runCalls,
+    client.subscriptionCalls
+  ], protocolCallsBeforeStop);
+  assert.ok(releaseStop);
+  releaseStop();
+  await stopping;
+});
+
 test("inspect command delegates only to workspace/inspect", async () => {
   const client = new FakeProtocolClient(workspaceSnapshot("a"));
   const manager = new FakeServiceManager(client);
