@@ -146,6 +146,7 @@ class FakeProtocolClient implements ExtensionProtocolClient {
     repeatCount: 1
   };
   runResults: unknown[] = [];
+  pendingRun: Promise<unknown> | undefined;
   getRunResult: ProtocolTestRun | undefined;
   getRunErrors: Error[] = [];
 
@@ -175,6 +176,7 @@ class FakeProtocolClient implements ExtensionProtocolClient {
 
   async runTests(input: TestRunInput): Promise<never> {
     this.runCalls.push(input);
+    if (this.pendingRun) return await this.pendingRun as never;
     return (this.runResults.shift() ?? this.runResult) as never;
   }
 
@@ -326,6 +328,11 @@ async function eventually(assertion: () => void): Promise<void> {
     }
   }
   throw lastError;
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
+  let resolve!: (value: T) => void;
+  return { promise: new Promise<T>((complete) => { resolve = complete; }), resolve };
 }
 
 function completedRun(runId = "run-a", revision = "catalog-r1"): ProtocolTestRun {
@@ -742,6 +749,77 @@ test("closed event streams converge incomplete and failed snapshots as errored i
         assert.ok((runs[0]?.errored.length ?? 0) > 0);
       });
       assert.doesNotMatch(runs[0]?.errored[0]?.message ?? "", /secret-session|token/);
+      adapter.close();
+    });
+  }
+});
+
+test("non-passed terminal run outcomes mark selected items even after every item event arrived", async (t) => {
+  for (const outcome of ["failed", "cancelled", "timed_out", "errored"] as const) {
+    await t.test(outcome, async () => {
+      const client = new FakeProtocolClient();
+      client.workspace = workspaceWithProfiles();
+      client.catalogResult = catalog();
+      client.getRunResult = { ...completedRun(), outcome } as ProtocolTestRun;
+      const { adapter, profiles, runs } = testingHarness(client);
+      await adapter.refresh();
+      const profile = profiles[0];
+      assert.ok(profile);
+      await profile.handler({ include: [adapter.controller.items?.get("container-a") as TestingTestItem] });
+      client.emit({ sequence: 1, event: "test.container.finished", payload: {
+        runId: "run-a", containerId: "container-a", outcome: "passed"
+      } } as never);
+      client.emit({ sequence: 2, event: "test.item.finished", payload: {
+        runId: "run-a", result: { itemId: "suite-a", outcome: "passed", failureDetails: [] }
+      } } as never);
+      client.emit({ sequence: 3, event: "test.item.finished", payload: {
+        runId: "run-a", result: { itemId: "case-a", outcome: "passed", failureDetails: [] }
+      } } as never);
+      client.activeSubscription?.close();
+
+      await eventually(() => {
+        assert.equal(runs[0]?.ends, 1);
+        assert.ok((runs[0]?.errored.length ?? 0) > 0);
+      });
+      adapter.close();
+    });
+  }
+});
+
+test("delayed run dispatch marks its pre-dispatch selection on trust, session, or revision loss", async (t) => {
+  for (const scenario of ["trust", "session", "revision"] as const) {
+    await t.test(scenario, async () => {
+      const client = new FakeProtocolClient();
+      const replacement = new FakeProtocolClient();
+      client.workspace = workspaceWithProfiles();
+      client.catalogResult = catalog("catalog-r1");
+      const response = deferred<unknown>();
+      client.pendingRun = response.promise;
+      let trusted = true;
+      let current: ExtensionProtocolClient | undefined = client;
+      const { adapter, profiles, runs } = testingHarness(client, {
+        workspaceSnapshot: () => ({ folderCount: 1, isTrusted: trusted }),
+        readTrust: () => trusted ? "trusted" : "blocked-untrusted",
+        clientProvider: () => current
+      });
+      await adapter.refresh();
+      const profile = profiles[0];
+      assert.ok(profile);
+      const dispatch = profile.handler({ include: [adapter.controller.items?.get("container-a") as TestingTestItem] });
+      await eventually(() => assert.equal(client.runCalls.length, 1));
+      if (scenario === "trust") trusted = false;
+      if (scenario === "session") current = replacement;
+      if (scenario === "revision") {
+        client.catalogResult = catalog("catalog-r2");
+        await adapter.refresh();
+      }
+      response.resolve(client.runResult);
+      await dispatch;
+
+      assert.equal(runs[0]?.ends, 1);
+      assert.ok((runs[0]?.errored.length ?? 0) > 0);
+      assert.equal(client.getRunCalls.length, 0);
+      assert.equal(replacement.subscriptionCalls.length, 0);
       adapter.close();
     });
   }

@@ -117,9 +117,17 @@ interface ActiveTestingRun {
   readonly catalogRevision: string;
   readonly containersById: ReadonlyMap<string, TestingTestItem>;
   readonly itemsById: ReadonlyMap<string, TestingTestItem>;
+  readonly terminalTargets: ReadonlySet<TestingTestItem>;
   readonly unfinished: Set<TestingTestItem>;
   finalizing: boolean;
   ended: boolean;
+}
+
+interface TestingRunSnapshot {
+  readonly containersById: ReadonlyMap<string, TestingTestItem>;
+  readonly itemsById: ReadonlyMap<string, TestingTestItem>;
+  readonly terminalTargets: ReadonlySet<TestingTestItem>;
+  readonly unfinished: Set<TestingTestItem>;
 }
 
 export interface TestingEventSubscription {
@@ -473,6 +481,7 @@ export class TestingApiAdapter implements TestingDisposable {
       testRun?.end();
       return;
     }
+    const snapshot = this.#snapshotForSelection(selection);
 
     let active: ActiveTestingRun | undefined;
     try {
@@ -485,6 +494,7 @@ export class TestingApiAdapter implements TestingDisposable {
         repeatCount: 1
       });
       if (!this.#assertTrustedClient(client) || !this.#isCurrentCatalog(state)) {
+        this.#markSnapshot(testRun, snapshot, "Test run cancelled because the trusted testing session or catalog changed.");
         testRun.end();
         return;
       }
@@ -502,6 +512,7 @@ export class TestingApiAdapter implements TestingDisposable {
         started.profileId !== state.profileId ||
         started.catalogRevision !== state.revision
       ) {
+        this.#markSnapshot(testRun, snapshot, "Test run returned a stale or invalid run response.");
         testRun.end();
         return;
       }
@@ -512,9 +523,7 @@ export class TestingApiAdapter implements TestingDisposable {
         projectId: state.projectId,
         profileId: state.profileId,
         catalogRevision: state.revision,
-        containersById: new Map(this.#containersById),
-        itemsById: new Map(this.#itemsById),
-        unfinished: new Set([...this.#containersById.values(), ...this.#itemsById.values()]),
+        ...snapshot,
         finalizing: false,
         ended: false
       };
@@ -528,7 +537,10 @@ export class TestingApiAdapter implements TestingDisposable {
     } catch (error) {
       const redacted = redactServiceError(error, []);
       if (active) this.#abortRun(active, redacted.message);
-      else testRun.end();
+      else {
+        this.#markSnapshot(testRun, snapshot, redacted.message);
+        testRun.end();
+      }
       await this.host.showErrorMessage(redacted.message);
     }
   }
@@ -545,6 +557,22 @@ export class TestingApiAdapter implements TestingDisposable {
       return { mode: TestSelectionModeV13.Items, itemIds: unique.map((item) => item.id).sort() };
     }
     return undefined;
+  }
+
+  #snapshotForSelection(selection: TestRunInput["selection"]): TestingRunSnapshot {
+    const containersById = new Map(this.#containersById);
+    const itemsById = new Map(this.#itemsById);
+    const targets = selection.mode === TestSelectionModeV13.Containers
+      ? selection.containerIds.map((id) => containersById.get(id)).filter((item): item is TestingTestItem => item !== undefined)
+      : selection.mode === TestSelectionModeV13.Items
+      ? selection.itemIds.map((id) => itemsById.get(id)).filter((item): item is TestingTestItem => item !== undefined)
+      : [...containersById.values()];
+    return {
+      containersById,
+      itemsById,
+      terminalTargets: new Set(targets),
+      unfinished: new Set(targets)
+    };
   }
 
   async #ensureEventPump(client: ExtensionProtocolClient): Promise<void> {
@@ -695,6 +723,8 @@ export class TestingApiAdapter implements TestingDisposable {
         this.#markUnfinished(active, "Test run returned a result for a different testing catalog.");
       } else if (result.status !== "completed" || result.incomplete || result.outcome === undefined) {
         this.#markUnfinished(active, interruption ?? "Test run did not reach a final complete result.");
+      } else if (result.outcome !== "passed") {
+        this.#markTerminalOutcome(active, `Test run completed with ${result.outcome}.`);
       } else if (active.unfinished.size) {
         this.#markUnfinished(active, "Test run completed without an item result.");
       }
@@ -726,6 +756,18 @@ export class TestingApiAdapter implements TestingDisposable {
     const redacted = redactServiceError(new Error(message), []).message;
     for (const item of active.unfinished) active.run.errored(item, redacted);
     active.unfinished.clear();
+  }
+
+  #markTerminalOutcome(active: ActiveTestingRun, message: string): void {
+    const redacted = redactServiceError(new Error(message), []).message;
+    for (const item of active.terminalTargets) active.run.errored(item, redacted);
+    active.unfinished.clear();
+  }
+
+  #markSnapshot(run: TestingRun, snapshot: TestingRunSnapshot, message: string): void {
+    const redacted = redactServiceError(new Error(message), []).message;
+    for (const item of snapshot.unfinished) run.errored(item, redacted);
+    snapshot.unfinished.clear();
   }
 
   #abortRun(active: ActiveTestingRun, message: string): void {
