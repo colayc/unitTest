@@ -41,12 +41,11 @@ tar --extract --gzip --file "/input/Python-$PYTHON_VERSION.tgz" --directory /bui
 source_root="/build/source/Python-$PYTHON_VERSION"
 [[ -x "$source_root/configure" ]] || { echo 'unexpected Python source layout' >&2; exit 2; }
 printf '%s\n' '*disabled*' '_tkinter' > "$source_root/Modules/Setup.local"
-liblzma_header=/usr/include/lzma.h
-liblzma=$(ldconfig -p | awk '$1 == "liblzma.so.5" { print $NF; exit }')
-[[ -f "$liblzma_header" && -f "$liblzma" ]] || { echo 'manylinux liblzma development files are missing' >&2; exit 2; }
-liblzma_dir=$(dirname "$liblzma")
+prebuilt_lzma=$(find /opt/python -type f -path '*/lib/python3.14/lib-dynload/_lzma*.so' -print -quit)
+[[ -n "$prebuilt_lzma" ]] || { echo 'manylinux CPython 3.14 _lzma extension is missing' >&2; exit 2; }
+liblzma=$(ldd "$prebuilt_lzma" | awk '$1 == "liblzma.so.5" { print $3; exit }')
+[[ -f "$liblzma" ]] || { echo 'manylinux _lzma runtime library is missing' >&2; exit 2; }
 cd /build/cpython
-LIBLZMA_CFLAGS="-I$(dirname "$liblzma_header")" LIBLZMA_LIBS="-L$liblzma_dir -llzma" \
 LDFLAGS='-Wl,-rpath,\$ORIGIN/../lib' CFLAGS='-O2 -g0 -ffile-prefix-map=/build=/usr/src/python' \
   "$source_root/configure" \
     --prefix=/ \
@@ -56,6 +55,7 @@ LDFLAGS='-Wl,-rpath,\$ORIGIN/../lib' CFLAGS='-O2 -g0 -ffile-prefix-map=/build=/u
     --without-static-libpython
 make -j1
 make DESTDIR=/out/python install
+cp -L "$prebuilt_lzma" /out/python/lib/python3.14/lib-dynload/
 cp -L "$liblzma" /out/python/lib/liblzma.so.5
 rm -rf \
   /out/python/include \

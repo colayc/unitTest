@@ -657,8 +657,9 @@ test("Linux builder contract pins image ABI, configure flags, source epoch and d
   assert.match(script, /--without-static-libpython/u);
   assert.match(script, /--enable-shared/u);
   assert.ok(script.includes("LDFLAGS='-Wl,-rpath,\\$ORIGIN/../lib'"), "Python binary must retain a bundle-relative shared-library rpath");
-  assert.match(script, /LIBLZMA_CFLAGS/u);
-  assert.match(script, /LIBLZMA_LIBS/u);
+  assert.match(script, /prebuilt_lzma=/u);
+  assert.match(script, /lib\/python3\.14\/lib-dynload\/_lzma\*\.so/u);
+  assert.match(script, /ldd "\$prebuilt_lzma"/u);
   assert.match(script, /liblzma\.so\.5/u);
   assert.match(script, /python3\.bin/u);
   assert.match(script, /export LD_LIBRARY_PATH="\$self_dir\/\.\.\/lib"/u);
