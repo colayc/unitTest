@@ -129,6 +129,7 @@ class FakeProtocolClient implements ExtensionProtocolClient {
   catalogResult: ProtocolTestCatalog | undefined;
   catalogResults: Array<ProtocolTestCatalog | Error> = [];
   subscription: EventSubscription | undefined;
+  activeSubscription: EventSubscription | undefined;
   afterInspect: (() => void) | undefined;
   afterDiscover: (() => void) | undefined;
   afterSubscribe: (() => void) | undefined;
@@ -144,7 +145,9 @@ class FakeProtocolClient implements ExtensionProtocolClient {
     runId: "run-a",
     repeatCount: 1
   };
+  runResults: unknown[] = [];
   getRunResult: ProtocolTestRun | undefined;
+  getRunErrors: Error[] = [];
 
   async inspectWorkspace(): Promise<WorkspaceSnapshot> {
     this.inspectCalls++;
@@ -172,24 +175,33 @@ class FakeProtocolClient implements ExtensionProtocolClient {
 
   async runTests(input: TestRunInput): Promise<never> {
     this.runCalls.push(input);
-    return this.runResult as never;
+    return (this.runResults.shift() ?? this.runResult) as never;
   }
 
   async getTestRun(runId: string): Promise<ProtocolTestRun> {
     this.getRunCalls.push(runId);
+    const failure = this.getRunErrors.shift();
+    if (failure) throw failure;
     if (!this.getRunResult) throw new Error("test run is not available");
     return this.getRunResult;
   }
 
   async subscribeEvents(afterSequence: number): Promise<EventSubscription> {
     this.subscriptionCalls.push(afterSequence);
-    const subscription = this.subscription;
+    this.activeSubscription?.close();
+    const subscription = this.subscription ?? new EventSubscription(afterSequence);
     this.subscription = undefined;
+    this.activeSubscription = subscription;
     this.afterSubscribe?.();
-    if (subscription) return subscription;
-    const closed = new EventSubscription(afterSequence);
-    closed.close();
-    return closed;
+    return subscription;
+  }
+
+  emit(event: Parameters<EventSubscription["push"]>[0]): boolean {
+    const subscription = this.activeSubscription;
+    if (!subscription) return false;
+    const accepted = subscription.push(event);
+    if (!accepted) subscription.close();
+    return accepted;
   }
 
   close(): void {}
@@ -230,7 +242,13 @@ function testingHarness(
 ) {
   const items = new FakeCollection();
   const errors: string[] = [];
-  const profiles: Array<{ label: string; handler: TestingRunProfileHandler; disposed: boolean }> = [];
+  const profiles: Array<{
+    label: string;
+    handler: TestingRunProfileHandler;
+    kind: unknown;
+    isDefault: boolean | undefined;
+    disposed: boolean;
+  }> = [];
   const runs: Array<{
     started: string[];
     passed: Array<{ id: string; duration?: number }>;
@@ -243,8 +261,8 @@ function testingHarness(
     dispose() {},
     items,
     createTestItem: fakeItem,
-    createRunProfile(label: string, handler: TestingRunProfileHandler) {
-      const captured = { label, handler, disposed: false };
+    createRunProfile(label: string, handler: TestingRunProfileHandler, kind?: unknown, isDefault?: boolean) {
+      const captured = { label, handler, kind, isDefault, disposed: false };
       profiles.push(captured);
       return { label, dispose: () => { captured.disposed = true; } };
     },
@@ -424,7 +442,7 @@ test("refresh filters unrelated catalog publications and retains the matching ev
   client.catalogResult = catalog("catalog-r2");
   await adapter.refresh();
 
-  assert.deepEqual(client.subscriptionCalls, [0, 2]);
+  assert.deepEqual(client.subscriptionCalls, [0]);
   assert.equal(adapter.catalogState?.revision, "catalog-r2");
 });
 
@@ -552,6 +570,8 @@ test("run profile converts root, container, and item selections into stable prot
   await adapter.refresh();
   const profile = profiles[0];
   assert.ok(profile);
+  assert.equal(profile.kind, "run");
+  assert.equal(profile.isDefault, true);
 
   await profile.handler({});
   await profile.handler({ include: [items.get("container-a") as TestingTestItem] });
@@ -574,6 +594,211 @@ test("run profile converts root, container, and item selections into stable prot
     }
   ]);
   for (const request of client.runCalls) assert.match(request.idempotencyKey, /^[a-f0-9]{32}$/);
+  adapter.close();
+});
+
+test("concurrent runs share one subscription and dispatch matching run events without cancelling either run", async () => {
+  const client = new FakeProtocolClient();
+  client.workspace = workspaceWithProfiles();
+  client.catalogResult = catalog();
+  client.runResults = [
+    { ...client.runResult as object, runId: "run-a" },
+    { ...client.runResult as object, runId: "run-b" }
+  ];
+  const { adapter, profiles, runs } = testingHarness(client);
+  await adapter.refresh();
+  const profile = profiles[0];
+  assert.ok(profile);
+  await profile.handler({});
+  await profile.handler({});
+  assert.deepEqual(client.subscriptionCalls, [0]);
+  const subscription = client.activeSubscription;
+  assert.ok(subscription);
+  subscription.push({ sequence: 1, event: "test.item.started", payload: { runId: "run-a", itemId: "suite-a" } } as never);
+  subscription.push({ sequence: 2, event: "test.item.started", payload: { runId: "run-b", itemId: "case-a" } } as never);
+
+  await eventually(() => {
+    assert.deepEqual(runs[0]?.started, ["suite-a"]);
+    assert.deepEqual(runs[1]?.started, ["case-a"]);
+    assert.equal(runs[0]?.ends, 0);
+    assert.equal(runs[1]?.ends, 0);
+  });
+  adapter.close();
+});
+
+test("container events update their catalog container and failure details are redacted", async () => {
+  const client = new FakeProtocolClient();
+  client.workspace = workspaceWithProfiles();
+  client.catalogResult = catalog();
+  const { adapter, profiles, runs } = testingHarness(client);
+  await adapter.refresh();
+  const profile = profiles[0];
+  assert.ok(profile);
+  await profile.handler({});
+  const subscription = client.activeSubscription;
+  assert.ok(subscription);
+  subscription.push({ sequence: 1, event: "test.container.started", payload: { runId: "run-a", containerId: "container-a" } } as never);
+  subscription.push({ sequence: 2, event: "test.container.finished", payload: {
+    runId: "run-a", containerId: "container-a", outcome: "failed"
+  } } as never);
+  subscription.push({ sequence: 3, event: "test.item.finished", payload: {
+    runId: "run-a", result: {
+      itemId: "case-a", outcome: "failed", failureDetails: [{ message: "failed at C:\\secret-session\\token" }]
+    }
+  } } as never);
+
+  await eventually(() => {
+    assert.deepEqual(runs[0]?.started, ["container-a"]);
+    assert.deepEqual(runs[0]?.failed.slice(0, 1), [{ id: "container-a", message: "Test container failed" }]);
+    assert.doesNotMatch(runs[0]?.failed[1]?.message ?? "", /secret-session|token/);
+  });
+  adapter.close();
+});
+
+test("catalog revision replacement aborts an old run before queued old events can update the new tree", async () => {
+  const client = new FakeProtocolClient();
+  client.workspace = workspaceWithProfiles();
+  client.catalogResult = catalog("catalog-r1");
+  client.getRunResult = completedRun("run-a", "catalog-r1");
+  const { adapter, profiles, runs } = testingHarness(client);
+  await adapter.refresh();
+  const profile = profiles[0];
+  assert.ok(profile);
+  await profile.handler({});
+  client.catalogResult = catalog("catalog-r2");
+  await adapter.refresh();
+  client.activeSubscription?.push({ sequence: 1, event: "test.item.started", payload: { runId: "run-a", itemId: "suite-a" } } as never);
+
+  await eventually(() => assert.ok((runs[0]?.errored.length ?? 0) > 0));
+  assert.deepEqual(runs[0]?.started, []);
+  adapter.close();
+});
+
+test("a Test Item from a replaced catalog revision is rejected without a new run subscription", async () => {
+  const client = new FakeProtocolClient();
+  client.workspace = workspaceWithProfiles();
+  client.catalogResult = catalog("catalog-r1");
+  const { adapter, items, profiles, runs } = testingHarness(client);
+  await adapter.refresh();
+  const oldItem = items.get("container-a")?.children?.get("suite-a");
+  assert.ok(oldItem);
+  client.catalogResult = catalog("catalog-r2");
+  await adapter.refresh();
+  const profile = profiles[0];
+  assert.ok(profile);
+  const runCount = client.runCalls.length;
+  const subscriptionCount = client.subscriptionCalls.length;
+  await profile.handler({ include: [oldItem] });
+
+  assert.equal(client.runCalls.length, runCount);
+  assert.equal(client.subscriptionCalls.length, subscriptionCount);
+  assert.equal(runs[0]?.ends, 1);
+  adapter.close();
+});
+
+test("an event sequence gap closes the shared stream and converges every active run", async () => {
+  const client = new FakeProtocolClient();
+  client.workspace = workspaceWithProfiles();
+  client.catalogResult = catalog();
+  client.getRunResult = { ...completedRun(), incomplete: true } as ProtocolTestRun;
+  const { adapter, profiles, runs } = testingHarness(client);
+  await adapter.refresh();
+  client.runResults = [{ ...client.runResult as object, runId: "run-a" }, { ...client.runResult as object, runId: "run-b" }];
+  const profile = profiles[0];
+  assert.ok(profile);
+  await profile.handler({});
+  await profile.handler({});
+  assert.equal(client.emit({ sequence: 2, event: "test.item.started", payload: { runId: "run-a", itemId: "suite-a" } } as never), false);
+
+  await eventually(() => {
+    assert.deepEqual(client.getRunCalls.sort(), ["run-a", "run-b"]);
+    assert.ok((runs[0]?.errored.length ?? 0) > 0);
+    assert.ok((runs[1]?.errored.length ?? 0) > 0);
+  });
+  adapter.close();
+});
+
+test("closed event streams converge incomplete and failed snapshots as errored items", async (t) => {
+  for (const scenario of ["running", "incomplete", "get-error"] as const) {
+    await t.test(scenario, async () => {
+      const client = new FakeProtocolClient();
+      client.workspace = workspaceWithProfiles();
+      client.catalogResult = catalog();
+      client.getRunResult = {
+        ...completedRun(),
+        ...(scenario === "running" ? { status: "running", outcome: undefined } : {}),
+        ...(scenario === "incomplete" ? { incomplete: true } : {})
+      } as ProtocolTestRun;
+      if (scenario === "get-error") client.getRunErrors.push(new Error("transport C:\\secret-session\\token"));
+      const { adapter, profiles, runs } = testingHarness(client);
+      await adapter.refresh();
+      const profile = profiles[0];
+      assert.ok(profile);
+      await profile.handler({});
+      client.activeSubscription?.close();
+
+      await eventually(() => {
+        assert.equal(runs[0]?.ends, 1);
+        assert.ok((runs[0]?.errored.length ?? 0) > 0);
+      });
+      assert.doesNotMatch(runs[0]?.errored[0]?.message ?? "", /secret-session|token/);
+      adapter.close();
+    });
+  }
+});
+
+test("trust loss aborts every active run without further protocol calls", async () => {
+  const client = new FakeProtocolClient();
+  client.workspace = workspaceWithProfiles();
+  client.catalogResult = catalog();
+  let trusted = true;
+  const { adapter, profiles, runs } = testingHarness(client, {
+    workspaceSnapshot: () => ({ folderCount: 1, isTrusted: trusted }),
+    readTrust: () => trusted ? "trusted" : "blocked-untrusted"
+  });
+  await adapter.refresh();
+  client.runResults = [{ ...client.runResult as object, runId: "run-a" }, { ...client.runResult as object, runId: "run-b" }];
+  const profile = profiles[0];
+  assert.ok(profile);
+  await profile.handler({});
+  await profile.handler({});
+  trusted = false;
+  client.activeSubscription?.push({ sequence: 1, event: "test.item.started", payload: { runId: "run-a", itemId: "suite-a" } } as never);
+
+  await eventually(() => {
+    assert.equal(runs[0]?.ends, 1);
+    assert.equal(runs[1]?.ends, 1);
+    assert.ok((runs[0]?.errored.length ?? 0) > 0);
+    assert.ok((runs[1]?.errored.length ?? 0) > 0);
+  });
+  assert.deepEqual(client.getRunCalls, []);
+  adapter.close();
+});
+
+test("session replacement aborts every active run without calls through the replacement client", async () => {
+  const client = new FakeProtocolClient();
+  const replacement = new FakeProtocolClient();
+  client.workspace = workspaceWithProfiles();
+  client.catalogResult = catalog();
+  let current: ExtensionProtocolClient | undefined = client;
+  const { adapter, profiles, runs } = testingHarness(client, { clientProvider: () => current });
+  await adapter.refresh();
+  client.runResults = [{ ...client.runResult as object, runId: "run-a" }, { ...client.runResult as object, runId: "run-b" }];
+  const profile = profiles[0];
+  assert.ok(profile);
+  await profile.handler({});
+  await profile.handler({});
+  current = replacement;
+  client.emit({ sequence: 1, event: "test.item.started", payload: { runId: "run-a", itemId: "suite-a" } } as never);
+
+  await eventually(() => {
+    assert.equal(runs[0]?.ends, 1);
+    assert.equal(runs[1]?.ends, 1);
+    assert.ok((runs[0]?.errored.length ?? 0) > 0);
+    assert.ok((runs[1]?.errored.length ?? 0) > 0);
+  });
+  assert.deepEqual(replacement.subscriptionCalls, []);
+  assert.deepEqual(replacement.getRunCalls, []);
   adapter.close();
 });
 
@@ -602,10 +827,10 @@ test("run event mapping projects started and all result outcomes with failure de
   const client = new FakeProtocolClient();
   client.workspace = workspaceWithProfiles();
   client.catalogResult = catalog();
-  const subscription = new EventSubscription(0);
   const { adapter, profiles, runs } = testingHarness(client);
   await adapter.refresh();
-  client.subscription = subscription;
+  const subscription = client.activeSubscription;
+  assert.ok(subscription);
   const profile = profiles[0];
   assert.ok(profile);
   await profile.handler({});
@@ -644,10 +869,10 @@ test("run completion and a closed event subscription converge through getTestRun
   client.workspace = workspaceWithProfiles();
   client.catalogResult = catalog();
   client.getRunResult = completedRun();
-  const subscription = new EventSubscription(0);
   const { adapter, profiles, runs } = testingHarness(client);
   await adapter.refresh();
-  client.subscription = subscription;
+  const subscription = client.activeSubscription;
+  assert.ok(subscription);
   const profile = profiles[0];
   assert.ok(profile);
   await profile.handler({});
@@ -657,17 +882,17 @@ test("run completion and a closed event subscription converge through getTestRun
     assert.deepEqual(client.getRunCalls, ["run-a"]);
     assert.equal(runs[0]?.ends, 1);
   });
-  assert.equal(subscription.closed, true);
+  assert.equal(subscription.closed, false);
   adapter.close();
 
   const secondClient = new FakeProtocolClient();
   secondClient.workspace = workspaceWithProfiles();
   secondClient.catalogResult = catalog();
   secondClient.getRunResult = completedRun();
-  const secondSubscription = new EventSubscription(0);
   const second = testingHarness(secondClient);
   await second.adapter.refresh();
-  secondClient.subscription = secondSubscription;
+  const secondSubscription = secondClient.activeSubscription;
+  assert.ok(secondSubscription);
   const secondProfile = second.profiles[0];
   assert.ok(secondProfile);
   await secondProfile.handler({});
@@ -680,10 +905,10 @@ test("deactivate closes active run subscriptions before later events can update 
   const client = new FakeProtocolClient();
   client.workspace = workspaceWithProfiles();
   client.catalogResult = catalog();
-  const subscription = new EventSubscription(0);
   const { adapter, profiles, runs } = testingHarness(client);
   await adapter.refresh();
-  client.subscription = subscription;
+  const subscription = client.activeSubscription;
+  assert.ok(subscription);
   const profile = profiles[0];
   assert.ok(profile);
   await profile.handler({});

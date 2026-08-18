@@ -1,5 +1,10 @@
 import { randomBytes } from "node:crypto";
-import { TestSelectionModeV13, type ProtocolTestCatalog, type TestRunInput } from "@unit-test-ide/test-client";
+import {
+  TestSelectionModeV13,
+  type EventSubscription,
+  type ProtocolTestCatalog,
+  type TestRunInput
+} from "@unit-test-ide/test-client";
 import type { ExtensionProtocolClient } from "./protocol-client.js";
 import type { TrustState } from "./contracts.js";
 import { redactServiceError } from "./service-resources.js";
@@ -107,11 +112,12 @@ interface ActiveTestingRun {
   readonly client: ExtensionProtocolClient;
   readonly run: TestingRun;
   readonly runId: string;
+  readonly projectId: string;
+  readonly profileId: string;
   readonly catalogRevision: string;
-  subscription?: TestingEventSubscription & {
-    readonly lastSequence: number;
-    next(): Promise<IteratorResult<unknown>>;
-  };
+  readonly containersById: ReadonlyMap<string, TestingTestItem>;
+  readonly itemsById: ReadonlyMap<string, TestingTestItem>;
+  readonly unfinished: Set<TestingTestItem>;
   finalizing: boolean;
   ended: boolean;
 }
@@ -150,6 +156,15 @@ export class TestingApiAdapter implements TestingDisposable {
   #containersById = new Map<string, TestingTestItem>();
   #itemsById = new Map<string, TestingTestItem>();
   #activeRuns = new Map<string, ActiveTestingRun>();
+  #eventSubscription: EventSubscription | undefined;
+  #eventClient: ExtensionProtocolClient | undefined;
+  #eventStart: Promise<void> | undefined;
+  #catalogWaiters = new Set<{
+    client: ExtensionProtocolClient;
+    projectId: string;
+    profileId: string;
+    resolve: (published: boolean) => void;
+  }>();
 
   constructor(
     private readonly host: TestingApiHost,
@@ -161,7 +176,7 @@ export class TestingApiAdapter implements TestingDisposable {
     this.#runProfile = this.#controller.createRunProfile?.(
       "Run Tests",
       (request) => this.#run(request),
-      undefined,
+      "run",
       true
     );
   }
@@ -223,7 +238,8 @@ export class TestingApiAdapter implements TestingDisposable {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
-    for (const active of [...this.#activeRuns.values()]) this.#endRun(active);
+    this.#abortAllRuns("Test run cancelled because the testing adapter was closed.");
+    this.#eventSubscription?.close();
     this.#runProfile?.dispose();
     this.#controller.dispose();
   }
@@ -241,8 +257,10 @@ export class TestingApiAdapter implements TestingDisposable {
       workspace.folderCount !== 1 ||
       !workspace.isTrusted ||
       !client ||
+      (this.#eventClient !== undefined && this.#eventClient !== client) ||
       (expectedClient !== undefined && client !== expectedClient)
     ) {
+      this.#abortAllRuns("Test run cancelled because the trusted testing session changed.");
       this.#clearTree();
       return undefined;
     }
@@ -255,41 +273,36 @@ export class TestingApiAdapter implements TestingDisposable {
     profileId: string
   ): Promise<ProtocolTestCatalog | undefined> {
     if (!this.#assertTrustedClient(client)) return undefined;
-    const subscription = await client.subscribeEvents(this.#eventCursor).catch(() => undefined);
+    const publication = this.#waitForCatalogPublication(client, projectId, profileId);
     try {
+      await this.#ensureEventPump(client);
       if (!this.#assertTrustedClient(client)) return undefined;
-      if (subscription) {
-        const published = await this.#awaitCatalogPublished(subscription, client, projectId, profileId);
-        if (!this.#assertTrustedClient(client)) return undefined;
-        if (published) return this.#readCatalog(client, projectId, profileId);
-      }
+      if (await publication.result) return this.#readCatalog(client, projectId, profileId);
       return this.#pollCatalog(client, projectId, profileId);
     } finally {
-      if (subscription) {
-        this.#eventCursor = Math.max(this.#eventCursor, subscription.lastSequence);
-        subscription.close();
-      }
+      publication.cancel();
     }
   }
 
-  async #awaitCatalogPublished(
-    subscription: Awaited<ReturnType<ExtensionProtocolClient["subscribeEvents"]>>,
-    client: ExtensionProtocolClient,
-    projectId: string,
-    profileId: string
-  ): Promise<boolean> {
-    const deadline = this.#delay(50).then(() => undefined);
-    while (true) {
-      const next = await Promise.race([subscription.next(), deadline]);
-      if (!next || next.done) return false;
-      if (!this.#assertTrustedClient(client)) return false;
-      this.#eventCursor = Math.max(this.#eventCursor, next.value.sequence);
-      if (
-        next.value.event === "test.catalog.published" &&
-        next.value.payload.projectId === projectId &&
-        next.value.payload.profileId === profileId
-      ) return true;
-    }
+  #waitForCatalogPublication(client: ExtensionProtocolClient, projectId: string, profileId: string): {
+    result: Promise<boolean>;
+    cancel(): void;
+  } {
+    let resolve!: (published: boolean) => void;
+    const waiter = { client, projectId, profileId, resolve: (published: boolean) => resolve(published) };
+    const result = new Promise<boolean>((complete) => { resolve = complete; });
+    this.#catalogWaiters.add(waiter);
+    const deadline = setTimeout(() => {
+      if (!this.#catalogWaiters.delete(waiter)) return;
+      resolve(false);
+    }, 50);
+    return {
+      result,
+      cancel: () => {
+        clearTimeout(deadline);
+        if (this.#catalogWaiters.delete(waiter)) resolve(false);
+      }
+    };
   }
 
   async #pollCatalog(
@@ -335,6 +348,13 @@ export class TestingApiAdapter implements TestingDisposable {
       this.#catalogState?.profileId === catalog.profileId &&
       this.#catalogState?.revision === catalog.revision
     ) return;
+    for (const active of [...this.#activeRuns.values()]) {
+      if (
+        active.projectId !== catalog.projectId ||
+        active.profileId !== catalog.profileId ||
+        active.catalogRevision !== catalog.revision
+      ) this.#abortRun(active, "Test run cancelled because its catalog revision is no longer current.");
+    }
     const root = this.#controller.items;
     const create = this.#controller.createTestItem;
     if (!root || !create) throw new Error("Testing API host cannot create a test tree.");
@@ -454,6 +474,7 @@ export class TestingApiAdapter implements TestingDisposable {
       return;
     }
 
+    let active: ActiveTestingRun | undefined;
     try {
       const task = await client.runTests({
         idempotencyKey: randomBytes(16).toString("hex"),
@@ -484,19 +505,30 @@ export class TestingApiAdapter implements TestingDisposable {
         testRun.end();
         return;
       }
-      const active: ActiveTestingRun = {
+      active = {
         client,
         run: testRun,
         runId: started.runId,
+        projectId: state.projectId,
+        profileId: state.profileId,
         catalogRevision: state.revision,
+        containersById: new Map(this.#containersById),
+        itemsById: new Map(this.#itemsById),
+        unfinished: new Set([...this.#containersById.values(), ...this.#itemsById.values()]),
         finalizing: false,
         ended: false
       };
+      const previous = this.#activeRuns.get(active.runId);
+      if (previous) this.#abortRun(previous, "Test run was superseded by a duplicate run identifier.");
       this.#activeRuns.set(active.runId, active);
-      await this.#watchRun(active);
+      await this.#ensureEventPump(client);
+      if (!this.#assertTrustedClient(client) || !this.#isCurrentRunCatalog(active)) {
+        this.#abortRun(active, "Test run cancelled because its catalog revision is no longer current.");
+      }
     } catch (error) {
-      testRun.end();
       const redacted = redactServiceError(error, []);
+      if (active) this.#abortRun(active, redacted.message);
+      else testRun.end();
       await this.host.showErrorMessage(redacted.message);
     }
   }
@@ -515,55 +547,69 @@ export class TestingApiAdapter implements TestingDisposable {
     return undefined;
   }
 
-  async #watchRun(active: ActiveTestingRun): Promise<void> {
-    try {
-      const subscription = await active.client.subscribeEvents(this.#eventCursor);
-      if (!this.#assertTrustedClient(active.client) || active.ended || active.finalizing) {
+  async #ensureEventPump(client: ExtensionProtocolClient): Promise<void> {
+    if (this.#eventSubscription && this.#eventClient === client && !this.#eventSubscription.closed) return;
+    if (this.#eventStart) return this.#eventStart;
+    const start = (async () => {
+      const subscription = await client.subscribeEvents(this.#eventCursor);
+      if (!this.#assertTrustedClient(client)) {
         subscription.close();
-        this.#endRun(active);
         return;
       }
-      active.subscription = subscription;
-      void this.#consumeRunEvents(active);
-    } catch (error) {
-      if (!this.#closed && this.#assertTrustedClient(active.client)) {
-        const redacted = redactServiceError(error, []);
-        await this.host.showErrorMessage(redacted.message);
-      }
-      this.#endRun(active);
+      this.#eventSubscription?.close();
+      this.#eventSubscription = subscription;
+      this.#eventClient = client;
+      void this.#consumeEvents(client, subscription);
+    })();
+    this.#eventStart = start;
+    try {
+      await start;
+    } finally {
+      if (this.#eventStart === start) this.#eventStart = undefined;
     }
   }
 
-  async #consumeRunEvents(active: ActiveTestingRun): Promise<void> {
-    const subscription = active.subscription;
-    if (!subscription) return;
+  async #consumeEvents(client: ExtensionProtocolClient, subscription: EventSubscription): Promise<void> {
     try {
-      while (!active.ended && !active.finalizing) {
+      while (!this.#closed && this.#eventSubscription === subscription) {
         const next = await subscription.next();
         this.#eventCursor = Math.max(this.#eventCursor, subscription.lastSequence);
-        if (next.done) {
-          await this.#convergeRun(active);
-          return;
-        }
-        if (!this.#assertTrustedClient(active.client)) {
-          this.#endRun(active);
-          return;
-        }
-        await this.#applyRunEvent(active, next.value);
+        if (next.done) break;
+        if (!this.#assertTrustedClient(client)) return;
+        this.#dispatchCatalogEvent(client, next.value);
+        await this.#dispatchRunEvent(client, next.value);
       }
     } catch (error) {
-      if (!this.#closed && this.#assertTrustedClient(active.client)) {
-        const redacted = redactServiceError(error, []);
-        await this.host.showErrorMessage(redacted.message);
+      if (!this.#closed && this.#assertTrustedClient(client)) {
+        await this.host.showErrorMessage(redactServiceError(error, []).message);
       }
-      this.#endRun(active);
+    } finally {
+      if (this.#eventSubscription === subscription) {
+        this.#eventSubscription = undefined;
+        this.#eventClient = undefined;
+        if (!this.#closed && this.#assertTrustedClient(client)) {
+          await Promise.all([...this.#activeRuns.values()]
+            .filter((active) => active.client === client)
+            .map((active) => this.#convergeRun(active, "Test event stream closed before a final result was observed.")));
+        }
+      }
     }
   }
 
-  async #applyRunEvent(active: ActiveTestingRun, raw: unknown): Promise<void> {
+  #dispatchCatalogEvent(client: ExtensionProtocolClient, raw: unknown): void {
+    const event = raw as { event?: string; payload?: { projectId?: string; profileId?: string } };
+    if (event.event !== "test.catalog.published") return;
+    for (const waiter of [...this.#catalogWaiters]) {
+      if (waiter.client !== client || waiter.projectId !== event.payload?.projectId || waiter.profileId !== event.payload?.profileId) continue;
+      this.#catalogWaiters.delete(waiter);
+      waiter.resolve(true);
+    }
+  }
+
+  async #dispatchRunEvent(client: ExtensionProtocolClient, raw: unknown): Promise<void> {
     const event = raw as {
       event?: string;
-      payload?: { runId?: string; itemId?: string; result?: {
+      payload?: { runId?: string; itemId?: string; containerId?: string; outcome?: string; result?: {
         itemId?: string;
         outcome?: string;
         durationMs?: number;
@@ -571,14 +617,29 @@ export class TestingApiAdapter implements TestingDisposable {
       } };
     };
     const payload = event.payload;
-    const runId = payload?.runId;
-    if (runId !== active.runId) return;
+    const active = payload?.runId === undefined ? undefined : this.#activeRuns.get(payload.runId);
+    if (!active || active.client !== client || active.ended) return;
+    if (!this.#isCurrentRunCatalog(active)) {
+      this.#abortRun(active, "Test run cancelled because its catalog revision is no longer current.");
+      return;
+    }
     if (event.event === "test.run.finished") {
       await this.#convergeRun(active);
       return;
     }
+    if (event.event === "test.container.started" || event.event === "test.container.finished") {
+      const container = payload?.containerId === undefined ? undefined : active.containersById.get(payload.containerId);
+      if (!container) return;
+      if (event.event === "test.container.started") {
+        active.run.started(container);
+        return;
+      }
+      active.unfinished.delete(container);
+      this.#applyOutcome(active.run, container, payload?.outcome, undefined, "Test container");
+      return;
+    }
     const itemId = event.event === "test.item.finished" ? payload?.result?.itemId : payload?.itemId;
-    const item = itemId === undefined ? undefined : this.#itemsById.get(itemId);
+    const item = itemId === undefined ? undefined : active.itemsById.get(itemId);
     if (!item) return;
     if (event.event === "test.item.started") {
       active.run.started(item);
@@ -591,34 +652,55 @@ export class TestingApiAdapter implements TestingDisposable {
       ?.map((detail) => detail.message)
       .filter((message): message is string => typeof message === "string" && message.length > 0)
       .join("\n");
-    const message = redactServiceError(new Error(details || `Test ${result?.outcome ?? "result"}`), []).message;
-    switch (result?.outcome) {
-      case "passed": active.run.passed(item, duration); return;
-      case "failed": active.run.failed(item, message, duration); return;
-      case "skipped": active.run.skipped(item); return;
-      case "errored":
-      case "cancelled":
-      case "timed_out":
-      case "not_run": active.run.errored(item, message, duration); return;
-      default: active.run.errored(item, message, duration);
+    active.unfinished.delete(item);
+    this.#applyOutcome(active.run, item, result?.outcome, duration, "Test", details);
+  }
+
+  #applyOutcome(
+    run: TestingRun,
+    item: TestingTestItem,
+    outcome: string | undefined,
+    duration: number | undefined,
+    subject: string,
+    details?: string
+  ): void {
+    const message = redactServiceError(new Error(details || `${subject} ${outcome ?? "result"}`), []).message;
+    switch (outcome) {
+      case "passed": run.passed(item, duration); return;
+      case "failed": run.failed(item, message, duration); return;
+      case "skipped": run.skipped(item); return;
+      default: run.errored(item, message, duration);
     }
   }
 
-  async #convergeRun(active: ActiveTestingRun): Promise<void> {
+  async #convergeRun(active: ActiveTestingRun, interruption?: string): Promise<void> {
     if (active.finalizing || active.ended) return;
     active.finalizing = true;
-    active.subscription?.close();
-    this.#eventCursor = Math.max(this.#eventCursor, active.subscription?.lastSequence ?? this.#eventCursor);
     try {
-      if (!this.#assertTrustedClient(active.client) || !this.#isCurrentCatalogRevision(active.catalogRevision)) return;
+      if (!this.#assertTrustedClient(active.client) || !this.#isCurrentRunCatalog(active)) {
+        this.#markUnfinished(active, "Test run cancelled because its catalog revision is no longer current.");
+        return;
+      }
       const result = await active.client.getTestRun(active.runId);
-      if (!this.#assertTrustedClient(active.client) || !this.#isCurrentCatalogRevision(active.catalogRevision)) return;
+      if (!this.#assertTrustedClient(active.client) || !this.#isCurrentRunCatalog(active)) {
+        this.#markUnfinished(active, "Test run cancelled because its catalog revision is no longer current.");
+        return;
+      }
       if (
         result.runId !== active.runId ||
-        result.projectId !== this.#catalogState?.projectId ||
-        result.profileId !== this.#catalogState?.profileId ||
+        result.projectId !== active.projectId ||
+        result.profileId !== active.profileId ||
         result.catalogRevision !== active.catalogRevision
-      ) return;
+      ) {
+        this.#markUnfinished(active, "Test run returned a result for a different testing catalog.");
+      } else if (result.status !== "completed" || result.incomplete || result.outcome === undefined) {
+        this.#markUnfinished(active, interruption ?? "Test run did not reach a final complete result.");
+      } else if (active.unfinished.size) {
+        this.#markUnfinished(active, "Test run completed without an item result.");
+      }
+    } catch (error) {
+      this.#markUnfinished(active, redactServiceError(error, []).message);
+      if (!this.#closed) await this.host.showErrorMessage(redactServiceError(error, []).message);
     } finally {
       this.#endRun(active);
     }
@@ -634,10 +716,32 @@ export class TestingApiAdapter implements TestingDisposable {
     return this.#catalogState?.revision === revision;
   }
 
+  #isCurrentRunCatalog(active: ActiveTestingRun): boolean {
+    return this.#catalogState?.projectId === active.projectId &&
+      this.#catalogState?.profileId === active.profileId &&
+      this.#catalogState?.revision === active.catalogRevision;
+  }
+
+  #markUnfinished(active: ActiveTestingRun, message: string): void {
+    const redacted = redactServiceError(new Error(message), []).message;
+    for (const item of active.unfinished) active.run.errored(item, redacted);
+    active.unfinished.clear();
+  }
+
+  #abortRun(active: ActiveTestingRun, message: string): void {
+    if (active.ended) return;
+    this.#markUnfinished(active, message);
+    this.#endRun(active);
+  }
+
+  #abortAllRuns(message: string): void {
+    this.#eventSubscription?.close();
+    for (const active of [...this.#activeRuns.values()]) this.#abortRun(active, message);
+  }
+
   #endRun(active: ActiveTestingRun): void {
     if (active.ended) return;
     active.ended = true;
-    active.subscription?.close();
     this.#activeRuns.delete(active.runId);
     active.run.end();
   }
