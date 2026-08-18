@@ -602,10 +602,20 @@ async function resolvedInputs(manifest, key) {
 function forbiddenOutputPath(path) {
   const segments = path.toLowerCase().split("/");
   return segments.some((segment) =>
-    ["pip", "ensurepip", "test", "tests", "idle", "idlelib", "tk", "tkinter", "include", "includes", "headers", "build", "build-tools"].includes(segment) ||
+    ["pip", "ensurepip", "test", "tests", "idle", "idlelib", "tk", "tkinter", "__pycache__", "include", "includes", "headers", "build", "build-tools"].includes(segment) ||
     /^_tkinter(?:[._-]|$)/u.test(segment) || /^(?:lib)?tcl(?:\d|[._-]|$)/u.test(segment) ||
     /^(?:lib)?tk(?:\d|[._-]|$)/u.test(segment) || /^lib-tk(?:\d|[._-]|$)/u.test(segment)
   ) || /\.(?:a|lib|h|hpp)$/iu.test(path);
+}
+
+async function removePythonCaches(root) {
+  const cacheDirectories = (await walk(root))
+    .map(({ path }) => path.split("/"))
+    .filter((segments) => segments.includes("__pycache__"))
+    .map((segments) => segments.slice(0, segments.indexOf("__pycache__") + 1))
+    .sort((left, right) => left.length - right.length);
+  const unique = new Set(cacheDirectories.map((segments) => segments.join("/")));
+  for (const path of unique) await rm(join(root, ...path.split("/")), { recursive: true, force: true });
 }
 
 function validateWindowsIsolation(files) {
@@ -796,6 +806,7 @@ async function smokeBundle(root, key, manifest) {
     const coverage = JSON.parse(await readFile(outputPath, "utf8"));
     if (!plainObject(coverage) || !Array.isArray(coverage.files)) throw new Error("coverage runner descriptor smoke produced invalid JSON");
     for (const marker of markers) if (await exists(marker)) throw new Error(`hostile Python module was imported: ${marker}`);
+    await removePythonCaches(root);
   } finally {
     await rm(scratch, { recursive: true, force: true });
   }

@@ -719,6 +719,7 @@ test("final layout rejects native Tk and Tcl/Tk runtime paths", async (t) => {
     "python/lib/libtcl8.6.so",
     "python/lib/libtk8.6.so",
     "python/lib/python3.14/lib-tk/tkinter.py",
+    "python/lib/python3.14/__pycache__/json.cpython-314.pyc",
   ]) {
     const root = await temporary(t, "coverage-bundle-tk-");
     await writeOutput(root);
