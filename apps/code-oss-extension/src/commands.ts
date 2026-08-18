@@ -67,7 +67,8 @@ export function registerCommands(
   clientProvider: ClientProvider,
   output: OutputChannelLike,
   status: CommandStatus,
-  host: CommandHost
+  host: CommandHost,
+  onServiceChanged?: (state: "started" | "stopped") => void | Promise<void>
 ): void {
   const currentAuthorization = (): { allowed: boolean; message?: string } => {
     if (!status.isActive()) return { allowed: false };
@@ -94,6 +95,7 @@ export function registerCommands(
     status.projectService({ state: "starting" });
     try {
       await manager.start();
+      await onServiceChanged?.("started");
     } catch {
       await presentManagerError(host, manager, "Unit Test: Service start failed.");
     } finally {
@@ -111,6 +113,7 @@ export function registerCommands(
     status.projectService({ state: "stopping" });
     try {
       await manager.stop();
+      await onServiceChanged?.("stopped");
     } catch {
       await presentManagerError(host, manager, "Unit Test: Service stop failed.");
     } finally {
