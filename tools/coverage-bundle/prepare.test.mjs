@@ -657,6 +657,8 @@ test("Linux builder contract pins image ABI, configure flags, source epoch and d
   assert.match(script, /--without-static-libpython/u);
   assert.match(script, /--enable-shared/u);
   assert.ok(script.includes("LDFLAGS='-Wl,-rpath,\\$ORIGIN/../lib'"), "Python binary must retain a bundle-relative shared-library rpath");
+  assert.match(script, /python3\.bin/u);
+  assert.match(script, /export LD_LIBRARY_PATH="\$self_dir\/\.\.\/lib"/u);
   assert.match(script, /--network[= ]none/u);
   assert.match(script, /\*disabled\*[\s\S]*_tkinter/u);
   assert.match(script, /HOST_UID/u);

@@ -70,4 +70,13 @@ while IFS= read -r -d '' link; do
 done < <(find /out/python -type l -print0)
 if [[ -f /out/python/bin/python3.14 ]]; then cp /out/python/bin/python3.14 /out/python/bin/python3; fi
 find /out/python/bin -type f ! -name python3 -delete
+mv /out/python/bin/python3 /out/python/bin/python3.bin
+cat > /out/python/bin/python3 <<'PYTHON_LAUNCHER'
+#!/bin/sh
+set -eu
+self_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+export LD_LIBRARY_PATH="$self_dir/../lib"
+exec "$self_dir/python3.bin" "$@"
+PYTHON_LAUNCHER
+chmod 0755 /out/python/bin/python3
 find /out/python -type f -exec touch --date="@$SOURCE_DATE_EPOCH" '{}' +
