@@ -47,6 +47,8 @@ const execFile = promisify(execFileCallback);
 const repositoryRoot = resolve(import.meta.dirname, "../../..");
 const nativeTimeoutMs = 120_000;
 const nativeEventHeartbeatMs = 5_000;
+const nativeLivenessReconnectAttempts = 4;
+const nativeLivenessReconnectBackoffMs = 250;
 const requiredEnvironmentName = "UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS";
 const families = ["gcc", "clang", "msvc", "clang-cl"] as const;
 const platformFamilies: Readonly<Record<"linux" | "win32", readonly RequiredToolchainFamily[]>> = {
@@ -1206,17 +1208,7 @@ async function waitForTask(
         if (error instanceof ProtocolError) {
           throw error;
         }
-        await withNamedTimeout(
-          `native task ${taskId} liveness reconnect`,
-          client.reconnect(),
-          Math.min(nativeEventHeartbeatMs, Math.max(deadline - Date.now(), 1)),
-        ).catch((reconnectError: unknown) => {
-          throw new Error(
-            `native task ${taskId} liveness recovery failed after sequence ` +
-            `${subscription.lastSequence}`,
-            { cause: reconnectError },
-          );
-        });
+        await recoverNativeLiveness(client, taskId, subscription.lastSequence, deadline);
       }
       continue;
     }
@@ -1280,6 +1272,41 @@ async function waitForTask(
       return events;
     }
   }
+}
+
+async function recoverNativeLiveness(
+  client: ProtocolClient,
+  taskId: string,
+  lastSequence: number,
+  deadline = Date.now() + nativeTimeoutMs,
+): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= nativeLivenessReconnectAttempts; attempt++) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    try {
+      await withNamedTimeout(
+        `native task ${taskId} liveness reconnect`,
+        client.reconnect(),
+        Math.min(nativeEventHeartbeatMs, remaining),
+      );
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt === nativeLivenessReconnectAttempts) break;
+      const backoff = Math.min(
+        nativeLivenessReconnectBackoffMs * attempt,
+        Math.max(deadline - Date.now(), 0),
+      );
+      if (backoff > 0) {
+        await new Promise((resolve) => setTimeout(resolve, backoff));
+      }
+    }
+  }
+  throw new Error(
+    `native task ${taskId} liveness recovery failed after sequence ${lastSequence}`,
+    { cause: lastError },
+  );
 }
 
 function waitForNativeEvent(
@@ -1613,5 +1640,6 @@ export const __testing = Object.freeze({
   startFamilyBuildAtCheckpoint,
   startNamedTargetBuildAtCheckpoint,
   recoverAfterCancellation,
+  recoverNativeLiveness,
   startFailureBuildWithStaleRetry,
 });

@@ -497,6 +497,21 @@ test("cancellation recovery establishes a fresh default-build checkpoint", async
   assert.equal(events.length, 0);
 });
 
+test("native liveness recovery retries a transient reconnect failure", async () => {
+  let reconnects = 0;
+  const client = {
+    reconnect: async () => {
+      reconnects++;
+      if (reconnects === 1) {
+        throw new Error("transient reconnect failure");
+      }
+    },
+  } as unknown as ProtocolClient;
+
+  await __testing.recoverNativeLiveness(client, "native-task", 16);
+  assert.equal(reconnects, 2);
+});
+
 test("diagnostic fixture refreshes one stale generation before Task creation", async () => {
   const requests: Array<{ idempotencyKey: string; workspaceGeneration: string }> = [];
   let inspections = 0;
