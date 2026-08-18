@@ -720,7 +720,7 @@ export class TestingApiAdapter implements TestingDisposable {
         result.profileId !== active.profileId ||
         result.catalogRevision !== active.catalogRevision
       ) {
-        this.#markUnfinished(active, "Test run returned a result for a different testing catalog.");
+        this.#markTerminalOutcome(active, "Test run returned a result for a different testing catalog.");
       } else if (result.status !== "completed" || result.incomplete || result.outcome === undefined) {
         this.#markUnfinished(active, interruption ?? "Test run did not reach a final complete result.");
       } else if (result.outcome !== "passed") {

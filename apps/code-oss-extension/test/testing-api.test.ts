@@ -786,6 +786,36 @@ test("non-passed terminal run outcomes mark selected items even after every item
   }
 });
 
+test("final snapshot identity mismatches mark selected targets after all events completed", async (t) => {
+  for (const field of ["runId", "projectId", "profileId", "catalogRevision"] as const) {
+    await t.test(field, async () => {
+      const client = new FakeProtocolClient();
+      client.workspace = workspaceWithProfiles();
+      client.catalogResult = catalog();
+      client.getRunResult = {
+        ...completedRun(),
+        [field]: field === "runId" ? "other-run" : field === "projectId" ? "other-project" :
+          field === "profileId" ? "other-profile" : "catalog-r2"
+      } as ProtocolTestRun;
+      const { adapter, profiles, runs } = testingHarness(client);
+      await adapter.refresh();
+      const profile = profiles[0];
+      assert.ok(profile);
+      await profile.handler({ include: [adapter.controller.items?.get("container-a") as TestingTestItem] });
+      client.emit({ sequence: 1, event: "test.container.finished", payload: {
+        runId: "run-a", containerId: "container-a", outcome: "passed"
+      } } as never);
+      client.activeSubscription?.close();
+
+      await eventually(() => {
+        assert.equal(runs[0]?.ends, 1);
+        assert.ok((runs[0]?.errored.length ?? 0) > 0);
+      });
+      adapter.close();
+    });
+  }
+});
+
 test("delayed run dispatch marks its pre-dispatch selection on trust, session, or revision loss", async (t) => {
   for (const scenario of ["trust", "session", "revision"] as const) {
     await t.test(scenario, async () => {
