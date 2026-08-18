@@ -7,11 +7,13 @@ readonly SOURCE_DATE_EPOCH=1785715200
 # manylinux_2_28 fixes the minimum supported glibc ABI at 2.28.
 
 if [[ "${1:-}" != '--inside-builder' ]]; then
-  [[ $# -eq 4 ]] || { echo 'usage: build-linux.sh SOURCE OUTPUT SHA256 IMAGE' >&2; exit 2; }
+  [[ $# -eq 6 ]] || { echo 'usage: build-linux.sh SOURCE OUTPUT SHA256 IMAGE LZMA_SOURCE LZMA_SHA256' >&2; exit 2; }
   source_archive=$(realpath "$1")
   output=$(realpath -m "$2")
   expected_sha256=$3
   image=$4
+  lzma_archive=$(realpath "$5")
+  expected_lzma_sha256=$6
   [[ "$image" == "$BUILDER_IMAGE" ]] || { echo 'unexpected Linux builder image' >&2; exit 2; }
   mkdir -p "$output"
   host_uid=$(id -u)
@@ -21,13 +23,15 @@ if [[ "${1:-}" != '--inside-builder' ]]; then
     --env "HOST_UID=$host_uid" \
     --env "HOST_GID=$host_gid" \
     --mount "type=bind,src=$source_archive,dst=/input/Python-$PYTHON_VERSION.tgz,readonly" \
+    --mount "type=bind,src=$lzma_archive,dst=/input/xz-5.8.1.tar.gz,readonly" \
     --mount "type=bind,src=$output,dst=/out" \
     --mount "type=bind,src=$(realpath "$0"),dst=/work/build-linux.sh,readonly" \
-    "$BUILDER_IMAGE" /bin/bash /work/build-linux.sh --inside-builder "$expected_sha256"
+    "$BUILDER_IMAGE" /bin/bash /work/build-linux.sh --inside-builder "$expected_sha256" "$expected_lzma_sha256"
 fi
 
-[[ $# -eq 2 ]] || { echo 'invalid builder invocation' >&2; exit 2; }
+[[ $# -eq 3 ]] || { echo 'invalid builder invocation' >&2; exit 2; }
 expected_sha256=$2
+expected_lzma_sha256=$3
 [[ "${HOST_UID:-}" =~ ^[0-9]+$ && "${HOST_GID:-}" =~ ^[0-9]+$ ]] || { echo 'invalid host ownership identity' >&2; exit 2; }
 restore_output_ownership() {
   chown -R "$HOST_UID:$HOST_GID" /out
@@ -35,17 +39,28 @@ restore_output_ownership() {
 trap restore_output_ownership EXIT
 export SOURCE_DATE_EPOCH PYTHONHASHSEED=0 LC_ALL=C TZ=UTC
 printf '%s  %s\n' "$expected_sha256" "/input/Python-$PYTHON_VERSION.tgz" | sha256sum --check --strict
-rm -rf /build/cpython /build/source /out/python
-mkdir -p /build/source /build/cpython /out/python
+printf '%s  %s\n' "$expected_lzma_sha256" "/input/xz-5.8.1.tar.gz" | sha256sum --check --strict
+rm -rf /build/cpython /build/lzma /build/source /out/python
+mkdir -p /build/cpython /build/lzma /build/source /out/python
 tar --extract --gzip --file "/input/Python-$PYTHON_VERSION.tgz" --directory /build/source --no-same-owner --no-same-permissions
+tar --extract --gzip --file "/input/xz-5.8.1.tar.gz" --directory /build/source --no-same-owner --no-same-permissions
 source_root="/build/source/Python-$PYTHON_VERSION"
+lzma_root="/build/source/xz-5.8.1"
 [[ -x "$source_root/configure" ]] || { echo 'unexpected Python source layout' >&2; exit 2; }
+[[ -x "$lzma_root/configure" ]] || { echo 'unexpected XZ source layout' >&2; exit 2; }
 printf '%s\n' '*disabled*' '_tkinter' > "$source_root/Modules/Setup.local"
-prebuilt_lzma=$(find /opt/python -type f -path '*/lib/python3.14/lib-dynload/_lzma*.so' -print -quit)
-[[ -n "$prebuilt_lzma" ]] || { echo 'manylinux CPython 3.14 _lzma extension is missing' >&2; exit 2; }
-liblzma=$(ldd "$prebuilt_lzma" | awk '$1 == "liblzma.so.5" { print $3; exit }')
-[[ -f "$liblzma" ]] || { echo 'manylinux _lzma runtime library is missing' >&2; exit 2; }
+cd /build/lzma
+CFLAGS='-O2 -g0 -fPIC -ffile-prefix-map=/build=/usr/src/xz' \
+  "$lzma_root/configure" \
+    --prefix=/build/lzma/install \
+    --disable-doc \
+    --disable-nls \
+    --disable-static \
+    --enable-shared
+make -j1
+make install
 cd /build/cpython
+LIBLZMA_CFLAGS='-I/build/lzma/install/include' LIBLZMA_LIBS='-L/build/lzma/install/lib -llzma' \
 LDFLAGS='-Wl,-rpath,\$ORIGIN/../lib' CFLAGS='-O2 -g0 -ffile-prefix-map=/build=/usr/src/python' \
   "$source_root/configure" \
     --prefix=/ \
@@ -55,8 +70,9 @@ LDFLAGS='-Wl,-rpath,\$ORIGIN/../lib' CFLAGS='-O2 -g0 -ffile-prefix-map=/build=/u
     --without-static-libpython
 make -j1
 make DESTDIR=/out/python install
-cp -L "$prebuilt_lzma" /out/python/lib/python3.14/lib-dynload/
-cp -L "$liblzma" /out/python/lib/liblzma.so.5
+lzma_runtime=$(find /build/lzma/install/lib -maxdepth 1 -type f -name 'liblzma.so.*' -print -quit)
+[[ -f "$lzma_runtime" ]] || { echo 'built liblzma runtime library is missing' >&2; exit 2; }
+cp -L "$lzma_runtime" /out/python/lib/liblzma.so.5
 rm -rf \
   /out/python/include \
   /out/python/share \

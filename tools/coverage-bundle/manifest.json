@@ -133,6 +133,12 @@
       "sourceUrl": "https://quay.io/repository/pypa/manylinux_2_28_x86_64"
     },
     "glibcBaseline": "2.28",
-    "muslPolicy": "unsupported"
+    "muslPolicy": "unsupported",
+    "liblzma": {
+      "kind": "source-archive",
+      "filename": "xz-5.8.1.tar.gz",
+      "url": "https://github.com/tukaani-project/xz/releases/download/v5.8.1/xz-5.8.1.tar.gz",
+      "sha256": "507825b599356c10dca1cd720c9d0d0c9d5400b9de300af00e4d1ea150795543"
+    }
   }
 }

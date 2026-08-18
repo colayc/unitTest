@@ -127,9 +127,11 @@ function artifact(filename, url, bytes, kind = "wheel") {
 function fixture() {
   const pythonBytes = Buffer.from("python archive fixture");
   const wheelBytes = Buffer.from("wheel archive fixture");
+  const lzmaBytes = Buffer.from("xz source archive fixture");
   return {
     pythonBytes,
     wheelBytes,
+    lzmaBytes,
     manifest: {
       schemaVersion: 1,
       python: {
@@ -174,6 +176,12 @@ function fixture() {
         },
         glibcBaseline: "2.28",
         muslPolicy: "unsupported",
+        liblzma: artifact(
+          "xz-5.8.1.tar.gz",
+          "https://github.com/tukaani-project/xz/releases/download/v5.8.1/xz-5.8.1.tar.gz",
+          lzmaBytes,
+          "source-archive",
+        ),
       },
     },
   };
@@ -218,11 +226,12 @@ async function prepareFixture(t, overrides = {}) {
   const root = await temporary(t, "coverage-bundle-");
   const cacheRoot = join(root, "cache");
   const outputRoot = join(root, "runtime");
-  const { manifest, pythonBytes, wheelBytes } = fixture();
+  const { manifest, pythonBytes, wheelBytes, lzmaBytes } = fixture();
   const downloads = [];
   const byUrl = new Map([
     [manifest.python.artifacts["windows-x64"].url, pythonBytes],
     [manifest.gcovr.wheels[0].files[0].url, wheelBytes],
+    [manifest.linux.liblzma.url, lzmaBytes],
   ]);
   const download = async (url, destination) => {
     downloads.push(url);
@@ -455,7 +464,8 @@ test("cache hit performs full resolved-manifest verification and detects tamperi
 test("cache identity binds exact selected inputs and deterministic recipe provenance", async (t) => {
   const prepared = await prepareFixture(t);
   const resolved = JSON.parse(await readFile(join(prepared.result.root, "manifest.resolved.json"), "utf8"));
-  assert.deepEqual(Object.keys(resolved.inputs).sort(), ["provenance", "pythonArtifact", "wheels"]);
+  assert.deepEqual(Object.keys(resolved.inputs).sort(), ["buildSources", "provenance", "pythonArtifact", "wheels"]);
+  assert.deepEqual(resolved.inputs.buildSources, []);
   assert.deepEqual(Object.keys(resolved.inputs.provenance).sort(), ["builderImage", "glibcBaseline", "recipe"]);
   assert.match(resolved.inputs.provenance.recipe.name, /coverage-bundle/u);
   assert.match(resolved.inputs.provenance.recipe.sha256, /^[0-9a-f]{64}$/u);
@@ -467,6 +477,7 @@ test("cache identity binds exact selected inputs and deterministic recipe proven
   const linuxRoot = await temporary(t, "coverage-bundle-linux-provenance-");
   await writeOutput(linuxRoot);
   const linuxResolved = await __testing.createResolvedManifest(linuxRoot, "linux-x64", prepared.manifest);
+  assert.deepEqual(linuxResolved.inputs.buildSources.map(({ filename }) => filename), ["xz-5.8.1.tar.gz"]);
   assert.equal(linuxResolved.inputs.provenance.builderImage, prepared.manifest.linux.builder.image);
   assert.equal(linuxResolved.inputs.provenance.glibcBaseline, "2.28");
 
@@ -657,9 +668,11 @@ test("Linux builder contract pins image ABI, configure flags, source epoch and d
   assert.match(script, /--without-static-libpython/u);
   assert.match(script, /--enable-shared/u);
   assert.ok(script.includes("LDFLAGS='-Wl,-rpath,\\$ORIGIN/../lib'"), "Python binary must retain a bundle-relative shared-library rpath");
-  assert.match(script, /prebuilt_lzma=/u);
-  assert.match(script, /lib\/python3\.14\/lib-dynload\/_lzma\*\.so/u);
-  assert.match(script, /ldd "\$prebuilt_lzma"/u);
+  assert.match(script, /LZMA_SOURCE/u);
+  assert.match(script, /xz-5\.8\.1\.tar\.gz/u);
+  assert.match(script, /LIBLZMA_CFLAGS/u);
+  assert.match(script, /LIBLZMA_LIBS/u);
+  assert.match(script, /--disable-static/u);
   assert.match(script, /liblzma\.so\.5/u);
   assert.match(script, /python3\.bin/u);
   assert.match(script, /export LD_LIBRARY_PATH="\$self_dir\/\.\.\/lib"/u);

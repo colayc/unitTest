@@ -17,7 +17,7 @@ const expectedProjects = [
 ];
 const sha256 = /^[0-9a-f]{64}$/u;
 const exactVersion = /^\d+(?:\.\d+)*$/u;
-const sourceHosts = new Set(["www.python.org", "files.pythonhosted.org", "quay.io"]);
+const sourceHosts = new Set(["www.python.org", "files.pythonhosted.org", "quay.io", "github.com"]);
 
 async function readJson(name) {
   return JSON.parse(await readFile(new URL(name, root), "utf8"));
@@ -88,6 +88,9 @@ test("tracked manifest fixes the Python 3.14.6 and gcovr 8.6 source lock", async
   assert.equal(manifest.linux.builder.image, "quay.io/pypa/manylinux_2_28_x86_64@sha256:0c87ccb5996dab6c3b7612ee4fda7b80c4ab3c44a86c2541e4a872afdf4f131b");
   assert.equal(manifest.linux.glibcBaseline, "2.28");
   assert.equal(manifest.linux.muslPolicy, "unsupported");
+  assert.equal(manifest.linux.liblzma.filename, "xz-5.8.1.tar.gz");
+  assert.equal(manifest.linux.liblzma.url, "https://github.com/tukaani-project/xz/releases/download/v5.8.1/xz-5.8.1.tar.gz");
+  assert.equal(manifest.linux.liblzma.sha256, "507825b599356c10dca1cd720c9d0d0c9d5400b9de300af00e4d1ea150795543");
   assert.deepEqual(
     {
       windowsPython: manifest.python.artifacts["windows-x64"].sha256,
@@ -123,6 +126,7 @@ test("source artifacts and every locked wheel use reviewed HTTPS URLs and lowerc
   const manifest = await readJson("manifest.json");
   const artifacts = [
     ...Object.values(manifest.python.artifacts),
+    manifest.linux.liblzma,
     ...manifest.gcovr.wheels.flatMap(({ files }) => files),
   ];
   assert.ok(artifacts.length > 0);

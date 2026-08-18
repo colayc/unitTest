@@ -39,7 +39,7 @@
     },
     "httpsSource": {
       "type": "string",
-      "pattern": "^https://(?:www\\.python\\.org|files\\.pythonhosted\\.org|quay\\.io)/[^?#]+$"
+      "pattern": "^https://(?:www\\.python\\.org|files\\.pythonhosted\\.org|quay\\.io|github\\.com)/[^?#]+$"
     },
     "filename": {
       "type": "string",
@@ -139,7 +139,7 @@
     "linux": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["builder", "glibcBaseline", "muslPolicy"],
+      "required": ["builder", "glibcBaseline", "muslPolicy", "liblzma"],
       "properties": {
         "builder": {
           "type": "object",
@@ -153,7 +153,13 @@
           }
         },
         "glibcBaseline": { "const": "2.28" },
-        "muslPolicy": { "const": "unsupported" }
+        "muslPolicy": { "const": "unsupported" },
+        "liblzma": {
+          "allOf": [
+            { "$ref": "#/$defs/sourceArtifact" },
+            { "type": "object", "properties": { "kind": { "const": "source-archive" } } }
+          ]
+        }
       }
     },
     "resolvedOutput": {

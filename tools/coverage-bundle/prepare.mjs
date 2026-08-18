@@ -31,7 +31,7 @@ const readyName = "READY";
 const digestPattern = /^[0-9a-f]{64}$/u;
 const maximumDownloadBytes = 512 * 1024 * 1024;
 const maximumExpandedArchiveBytes = 1024 * 1024 * 1024;
-const allowedHosts = new Set(["www.python.org", "files.pythonhosted.org"]);
+const allowedHosts = new Set(["www.python.org", "files.pythonhosted.org", "github.com"]);
 const fixedLinuxImage = "quay.io/pypa/manylinux_2_28_x86_64@sha256:0c87ccb5996dab6c3b7612ee4fda7b80c4ab3c44a86c2541e4a872afdf4f131b";
 const recipeName = "coverage-bundle-recipe-v2";
 const recipeFiles = [
@@ -104,8 +104,10 @@ export function validateSourceManifest(manifest) {
     if (!Array.isArray(wheel.files) || wheel.files.length === 0) throw new Error("wheel lock entry has no files");
     for (const file of wheel.files) validateArtifact(file, `wheel ${wheel.project}`, true);
   }
-  exactKeys(manifest.linux, ["builder", "glibcBaseline", "muslPolicy"], "manifest.linux");
+  exactKeys(manifest.linux, ["builder", "glibcBaseline", "muslPolicy", "liblzma"], "manifest.linux");
   exactKeys(manifest.linux.builder, ["image", "sourceUrl"], "manifest.linux.builder");
+  validateArtifact(manifest.linux.liblzma, "manifest.linux.liblzma");
+  if (manifest.linux.liblzma.kind !== "source-archive") throw new Error("Linux liblzma source kind is invalid");
   if (manifest.linux.builder.image !== fixedLinuxImage || manifest.linux.glibcBaseline !== "2.28" || manifest.linux.muslPolicy !== "unsupported") {
     throw new Error("unsupported Linux builder contract");
   }
@@ -397,6 +399,11 @@ function parseTar(buffer) {
   return validateArchiveEntries(entries, { allowTrailingDot: true });
 }
 
+function collectBuildArtifacts(manifest, key) {
+  if (key !== "linux-x64") return [];
+  return [manifest.linux.liblzma];
+}
+
 async function inspectArchive(path) {
   const bytes = await readFile(path);
   if (/\.(?:tgz|tar\.gz)$/iu.test(path)) return parseTar(gunzipSync(bytes, { maxOutputLength: maximumExpandedArchiveBytes }));
@@ -494,13 +501,15 @@ async function buildWindows({ stagingRoot, artifacts, downloads }) {
   await copyLicenses(stagingRoot);
 }
 
-async function buildLinux({ stagingRoot, artifacts, downloads, manifest }) {
+async function buildLinux({ stagingRoot, artifacts, buildArtifacts, downloads, manifest }) {
   await execFile("bash", [
     join(toolDirectory, "build-linux.sh"),
     downloads.get(artifacts[0].url),
     stagingRoot,
     artifacts[0].sha256,
     manifest.linux.builder.image,
+    downloads.get(buildArtifacts[0].url),
+    buildArtifacts[0].sha256,
   ], { maxBuffer: 16 * 1024 * 1024 });
   await createApplicationArchive(artifacts.slice(1).map(({ url }) => downloads.get(url)), join(stagingRoot, "app", "gcovr-runner.pyz"));
   await copyLicenses(stagingRoot);
@@ -549,6 +558,7 @@ async function recipeIdentity() {
 
 async function resolvedInputs(manifest, key) {
   const artifacts = collectArtifacts(manifest, key);
+  const buildArtifacts = collectBuildArtifacts(manifest, key);
   return {
     pythonArtifact: {
       kind: artifacts[0].kind,
@@ -568,6 +578,12 @@ async function resolvedInputs(manifest, key) {
         sha256: file.sha256,
       };
     }).sort((left, right) => left.project < right.project ? -1 : left.project > right.project ? 1 : 0),
+    buildSources: buildArtifacts.map((artifact) => ({
+      kind: artifact.kind,
+      filename: artifact.filename,
+      url: artifact.url,
+      sha256: artifact.sha256,
+    })),
     provenance: {
       recipe: await recipeIdentity(),
       builderImage: key === "linux-x64" ? manifest.linux.builder.image : null,
@@ -615,10 +631,12 @@ export async function createResolvedManifest(root, key, manifest) {
 function validateResolvedShape(value, key, manifest, expectedInputs) {
   exactKeys(value, ["schemaVersion", "platform", "pythonVersion", "gcovrVersion", "inputs", "outputs"], "resolved manifest");
   if (value.schemaVersion !== 1 || value.platform !== key || value.pythonVersion !== manifest.python.version || value.gcovrVersion !== manifest.gcovr.version || !Array.isArray(value.outputs) || value.outputs.length === 0) throw new Error("resolved manifest identity mismatch");
-  exactKeys(value.inputs, ["pythonArtifact", "wheels", "provenance"], "resolved inputs");
+  exactKeys(value.inputs, ["pythonArtifact", "wheels", "buildSources", "provenance"], "resolved inputs");
   exactKeys(value.inputs.pythonArtifact, ["kind", "filename", "url", "sha256"], "resolved Python input");
   if (!Array.isArray(value.inputs.wheels)) throw new Error("resolved wheel inputs must be an array");
   for (const wheel of value.inputs.wheels) exactKeys(wheel, ["project", "version", "kind", "filename", "url", "sha256"], "resolved wheel input");
+  if (!Array.isArray(value.inputs.buildSources)) throw new Error("resolved build sources must be an array");
+  for (const source of value.inputs.buildSources) exactKeys(source, ["kind", "filename", "url", "sha256"], "resolved build source");
   exactKeys(value.inputs.provenance, ["recipe", "builderImage", "glibcBaseline"], "resolved provenance");
   exactKeys(value.inputs.provenance.recipe, ["name", "sha256"], "resolved recipe");
   if (JSON.stringify(value.inputs) !== JSON.stringify(expectedInputs)) throw new Error("resolved input/provenance mismatch");
@@ -667,8 +685,9 @@ export async function prepareBundleFromManifest({ manifest, key, outputRoot, cac
     return { root: target, reused: true };
   }
   const artifacts = collectArtifacts(manifest, key);
+  const buildArtifacts = collectBuildArtifacts(manifest, key);
   const downloads = new Map();
-  for (const artifact of artifacts) {
+  for (const artifact of [...artifacts, ...buildArtifacts]) {
     const path = await obtainArtifact(artifact, cacheRoot, download);
     const entries = await operations.inspectArchive(path, artifact);
     validateArchiveEntries(entries);
@@ -676,7 +695,7 @@ export async function prepareBundleFromManifest({ manifest, key, outputRoot, cac
   }
   const stagingRoot = await mkdtemp(join(outputRoot, `.coverage-bundle-${key}-`));
   try {
-    await operations.buildBundle({ stagingRoot, artifacts, downloads, manifest, key });
+    await operations.buildBundle({ stagingRoot, artifacts, buildArtifacts, downloads, manifest, key });
     await createResolvedManifest(stagingRoot, key, manifest);
     await operations.beforeReady?.({ stagingRoot, target });
     await writeFile(join(stagingRoot, readyName), "ready\n", { flag: "wx" });
