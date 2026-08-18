@@ -85,7 +85,7 @@ test("tracked manifest fixes the Python 3.14.6 and gcovr 8.6 source lock", async
   assert.deepEqual(Object.keys(manifest.python.artifacts).sort(), ["linux-x64", "windows-x64"]);
   assert.equal(manifest.python.artifacts["windows-x64"].kind, "embedded-archive");
   assert.equal(manifest.python.artifacts["linux-x64"].kind, "source-archive");
-  assert.equal(manifest.linux.builder.image, "quay.io/pypa/manylinux_2_28_x86_64@sha256:c7123a4aebb153c1e45b8152f07a64bd950d65e630cfb633a029cc45ee21897c");
+  assert.equal(manifest.linux.builder.image, "quay.io/pypa/manylinux_2_28_x86_64@sha256:0c87ccb5996dab6c3b7612ee4fda7b80c4ab3c44a86c2541e4a872afdf4f131b");
   assert.equal(manifest.linux.glibcBaseline, "2.28");
   assert.equal(manifest.linux.muslPolicy, "unsupported");
   assert.deepEqual(

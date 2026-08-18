@@ -169,7 +169,7 @@ function fixture() {
       },
       linux: {
         builder: {
-          image: "quay.io/pypa/manylinux_2_28_x86_64@sha256:c7123a4aebb153c1e45b8152f07a64bd950d65e630cfb633a029cc45ee21897c",
+          image: "quay.io/pypa/manylinux_2_28_x86_64@sha256:0c87ccb5996dab6c3b7612ee4fda7b80c4ab3c44a86c2541e4a872afdf4f131b",
           sourceUrl: "https://quay.io/repository/pypa/manylinux_2_28_x86_64",
         },
         glibcBaseline: "2.28",

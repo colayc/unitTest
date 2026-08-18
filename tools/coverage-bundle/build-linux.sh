@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly BUILDER_IMAGE='quay.io/pypa/manylinux_2_28_x86_64@sha256:c7123a4aebb153c1e45b8152f07a64bd950d65e630cfb633a029cc45ee21897c'
+readonly BUILDER_IMAGE='quay.io/pypa/manylinux_2_28_x86_64@sha256:0c87ccb5996dab6c3b7612ee4fda7b80c4ab3c44a86c2541e4a872afdf4f131b'
 readonly PYTHON_VERSION='3.14.6'
 readonly SOURCE_DATE_EPOCH=1785715200
 # manylinux_2_28 fixes the minimum supported glibc ABI at 2.28.

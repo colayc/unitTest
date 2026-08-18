@@ -32,7 +32,7 @@ const digestPattern = /^[0-9a-f]{64}$/u;
 const maximumDownloadBytes = 512 * 1024 * 1024;
 const maximumExpandedArchiveBytes = 1024 * 1024 * 1024;
 const allowedHosts = new Set(["www.python.org", "files.pythonhosted.org"]);
-const fixedLinuxImage = "quay.io/pypa/manylinux_2_28_x86_64@sha256:c7123a4aebb153c1e45b8152f07a64bd950d65e630cfb633a029cc45ee21897c";
+const fixedLinuxImage = "quay.io/pypa/manylinux_2_28_x86_64@sha256:0c87ccb5996dab6c3b7612ee4fda7b80c4ab3c44a86c2541e4a872afdf4f131b";
 const recipeName = "coverage-bundle-recipe-v2";
 const recipeFiles = [
   "build-linux.sh",
