@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import type { ProtocolTestCatalog } from "@unit-test-ide/test-client";
+import { TestSelectionModeV13, type ProtocolTestCatalog, type TestRunInput } from "@unit-test-ide/test-client";
 import type { ExtensionProtocolClient } from "./protocol-client.js";
 import type { TrustState } from "./contracts.js";
 import { redactServiceError } from "./service-resources.js";
@@ -103,6 +103,19 @@ export interface TestingRun extends TestingDisposable {
   end(): void;
 }
 
+interface ActiveTestingRun {
+  readonly client: ExtensionProtocolClient;
+  readonly run: TestingRun;
+  readonly runId: string;
+  readonly catalogRevision: string;
+  subscription?: TestingEventSubscription & {
+    readonly lastSequence: number;
+    next(): Promise<IteratorResult<unknown>>;
+  };
+  finalizing: boolean;
+  ended: boolean;
+}
+
 export interface TestingEventSubscription {
   close(): void;
 }
@@ -130,9 +143,13 @@ export type TestingClientProvider = () => ExtensionProtocolClient | undefined;
 
 export class TestingApiAdapter implements TestingDisposable {
   readonly #controller: TestingController;
+  readonly #runProfile: TestingRunProfile | undefined;
   #closed = false;
   #eventCursor = 0;
   #catalogState: TestingCatalogState | undefined;
+  #containersById = new Map<string, TestingTestItem>();
+  #itemsById = new Map<string, TestingTestItem>();
+  #activeRuns = new Map<string, ActiveTestingRun>();
 
   constructor(
     private readonly host: TestingApiHost,
@@ -141,6 +158,12 @@ export class TestingApiAdapter implements TestingDisposable {
   ) {
     this.#controller = host.createTestController("unitTestIde.tests", "Unit Test IDE");
     this.#controller.refreshHandler = () => this.refresh();
+    this.#runProfile = this.#controller.createRunProfile?.(
+      "Run Tests",
+      (request) => this.#run(request),
+      undefined,
+      true
+    );
   }
 
   get controller(): TestingController {
@@ -200,6 +223,8 @@ export class TestingApiAdapter implements TestingDisposable {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
+    for (const active of [...this.#activeRuns.values()]) this.#endRun(active);
+    this.#runProfile?.dispose();
     this.#controller.dispose();
   }
 
@@ -334,6 +359,8 @@ export class TestingApiAdapter implements TestingDisposable {
       ...(item.sourceLocation === undefined ? {} : { sourceLocation: item.sourceLocation })
     }));
     const itemById = new Map(catalogItems.map((item) => [item.id, item]));
+    const nextContainersById = new Map<string, TestingTestItem>();
+    const nextItemsById = new Map<string, TestingTestItem>();
     const childrenByParent = new Map<string, CatalogTreeItem[]>();
     for (const item of catalogItems) {
       const parentKey = item.parentId ?? `container:${item.containerId}`;
@@ -346,6 +373,7 @@ export class TestingApiAdapter implements TestingDisposable {
       const source = itemById.get(itemId);
       if (!source) throw new Error("Test catalog tree references an unknown item.");
       const testItem = create(source.id, source.displayName, source.sourceLocation?.uri);
+      nextItemsById.set(source.id, testItem);
       this.#applyCatalogMetadata(testItem, source, diagnostics);
       const children = (childrenByParent.get(source.id) ?? [])
         .sort((left, right) => left.id.localeCompare(right.id))
@@ -373,6 +401,7 @@ export class TestingApiAdapter implements TestingDisposable {
       .sort((left, right) => left.id.localeCompare(right.id))
       .map((container) => {
         const item = create(container.id, container.displayName, container.sourceLocation?.uri);
+        nextContainersById.set(container.id, item);
         this.#applyCatalogMetadata(item, container, diagnostics);
         const children = (childrenByParent.get(`container:${container.id}`) ?? [])
           .sort((left, right) => left.id.localeCompare(right.id))
@@ -388,6 +417,8 @@ export class TestingApiAdapter implements TestingDisposable {
         return item;
       });
     root.replace(containers);
+    this.#containersById = nextContainersById;
+    this.#itemsById = nextItemsById;
     this.#catalogState = {
       projectId: catalog.projectId,
       profileId: catalog.profileId,
@@ -409,6 +440,206 @@ export class TestingApiAdapter implements TestingDisposable {
   #clearTree(): void {
     this.#controller.items?.replace([]);
     this.#catalogState = undefined;
+    this.#containersById.clear();
+    this.#itemsById.clear();
+  }
+
+  async #run(request: TestingRunRequest): Promise<void> {
+    const testRun = this.#controller.createTestRun?.(request);
+    const client = this.#assertTrustedClient();
+    const state = this.#catalogState;
+    const selection = this.#selectionFor(request);
+    if (!testRun || !client || !state || !selection) {
+      testRun?.end();
+      return;
+    }
+
+    try {
+      const task = await client.runTests({
+        idempotencyKey: randomBytes(16).toString("hex"),
+        projectId: state.projectId,
+        profileId: state.profileId,
+        catalogRevision: state.revision,
+        selection,
+        repeatCount: 1
+      });
+      if (!this.#assertTrustedClient(client) || !this.#isCurrentCatalog(state)) {
+        testRun.end();
+        return;
+      }
+      const started = task as unknown as {
+        kind?: string;
+        runId?: string;
+        projectId?: string;
+        profileId?: string;
+        catalogRevision?: string;
+      };
+      if (
+        started.kind !== "testRun" ||
+        typeof started.runId !== "string" ||
+        started.projectId !== state.projectId ||
+        started.profileId !== state.profileId ||
+        started.catalogRevision !== state.revision
+      ) {
+        testRun.end();
+        return;
+      }
+      const active: ActiveTestingRun = {
+        client,
+        run: testRun,
+        runId: started.runId,
+        catalogRevision: state.revision,
+        finalizing: false,
+        ended: false
+      };
+      this.#activeRuns.set(active.runId, active);
+      await this.#watchRun(active);
+    } catch (error) {
+      testRun.end();
+      const redacted = redactServiceError(error, []);
+      await this.host.showErrorMessage(redacted.message);
+    }
+  }
+
+  #selectionFor(request: TestingRunRequest): TestRunInput["selection"] | undefined {
+    if (request.exclude?.length) return undefined;
+    const include = request.include;
+    if (!include?.length) return { mode: TestSelectionModeV13.All };
+    const unique = [...new Map(include.map((item) => [item.id, item])).values()];
+    if (unique.every((item) => this.#containersById.get(item.id) === item)) {
+      return { mode: TestSelectionModeV13.Containers, containerIds: unique.map((item) => item.id).sort() };
+    }
+    if (unique.every((item) => this.#itemsById.get(item.id) === item)) {
+      return { mode: TestSelectionModeV13.Items, itemIds: unique.map((item) => item.id).sort() };
+    }
+    return undefined;
+  }
+
+  async #watchRun(active: ActiveTestingRun): Promise<void> {
+    try {
+      const subscription = await active.client.subscribeEvents(this.#eventCursor);
+      if (!this.#assertTrustedClient(active.client) || active.ended || active.finalizing) {
+        subscription.close();
+        this.#endRun(active);
+        return;
+      }
+      active.subscription = subscription;
+      void this.#consumeRunEvents(active);
+    } catch (error) {
+      if (!this.#closed && this.#assertTrustedClient(active.client)) {
+        const redacted = redactServiceError(error, []);
+        await this.host.showErrorMessage(redacted.message);
+      }
+      this.#endRun(active);
+    }
+  }
+
+  async #consumeRunEvents(active: ActiveTestingRun): Promise<void> {
+    const subscription = active.subscription;
+    if (!subscription) return;
+    try {
+      while (!active.ended && !active.finalizing) {
+        const next = await subscription.next();
+        this.#eventCursor = Math.max(this.#eventCursor, subscription.lastSequence);
+        if (next.done) {
+          await this.#convergeRun(active);
+          return;
+        }
+        if (!this.#assertTrustedClient(active.client)) {
+          this.#endRun(active);
+          return;
+        }
+        await this.#applyRunEvent(active, next.value);
+      }
+    } catch (error) {
+      if (!this.#closed && this.#assertTrustedClient(active.client)) {
+        const redacted = redactServiceError(error, []);
+        await this.host.showErrorMessage(redacted.message);
+      }
+      this.#endRun(active);
+    }
+  }
+
+  async #applyRunEvent(active: ActiveTestingRun, raw: unknown): Promise<void> {
+    const event = raw as {
+      event?: string;
+      payload?: { runId?: string; itemId?: string; result?: {
+        itemId?: string;
+        outcome?: string;
+        durationMs?: number;
+        failureDetails?: Array<{ message?: string }>;
+      } };
+    };
+    const payload = event.payload;
+    const runId = payload?.runId;
+    if (runId !== active.runId) return;
+    if (event.event === "test.run.finished") {
+      await this.#convergeRun(active);
+      return;
+    }
+    const itemId = event.event === "test.item.finished" ? payload?.result?.itemId : payload?.itemId;
+    const item = itemId === undefined ? undefined : this.#itemsById.get(itemId);
+    if (!item) return;
+    if (event.event === "test.item.started") {
+      active.run.started(item);
+      return;
+    }
+    if (event.event !== "test.item.finished") return;
+    const result = payload?.result;
+    const duration = typeof result?.durationMs === "number" && result.durationMs >= 0 ? result.durationMs : undefined;
+    const details = result?.failureDetails
+      ?.map((detail) => detail.message)
+      .filter((message): message is string => typeof message === "string" && message.length > 0)
+      .join("\n");
+    const message = redactServiceError(new Error(details || `Test ${result?.outcome ?? "result"}`), []).message;
+    switch (result?.outcome) {
+      case "passed": active.run.passed(item, duration); return;
+      case "failed": active.run.failed(item, message, duration); return;
+      case "skipped": active.run.skipped(item); return;
+      case "errored":
+      case "cancelled":
+      case "timed_out":
+      case "not_run": active.run.errored(item, message, duration); return;
+      default: active.run.errored(item, message, duration);
+    }
+  }
+
+  async #convergeRun(active: ActiveTestingRun): Promise<void> {
+    if (active.finalizing || active.ended) return;
+    active.finalizing = true;
+    active.subscription?.close();
+    this.#eventCursor = Math.max(this.#eventCursor, active.subscription?.lastSequence ?? this.#eventCursor);
+    try {
+      if (!this.#assertTrustedClient(active.client) || !this.#isCurrentCatalogRevision(active.catalogRevision)) return;
+      const result = await active.client.getTestRun(active.runId);
+      if (!this.#assertTrustedClient(active.client) || !this.#isCurrentCatalogRevision(active.catalogRevision)) return;
+      if (
+        result.runId !== active.runId ||
+        result.projectId !== this.#catalogState?.projectId ||
+        result.profileId !== this.#catalogState?.profileId ||
+        result.catalogRevision !== active.catalogRevision
+      ) return;
+    } finally {
+      this.#endRun(active);
+    }
+  }
+
+  #isCurrentCatalog(state: TestingCatalogState): boolean {
+    return this.#isCurrentCatalogRevision(state.revision) &&
+      this.#catalogState?.projectId === state.projectId &&
+      this.#catalogState?.profileId === state.profileId;
+  }
+
+  #isCurrentCatalogRevision(revision: string): boolean {
+    return this.#catalogState?.revision === revision;
+  }
+
+  #endRun(active: ActiveTestingRun): void {
+    if (active.ended) return;
+    active.ended = true;
+    active.subscription?.close();
+    this.#activeRuns.delete(active.runId);
+    active.run.end();
   }
 
   #delay(milliseconds: number): Promise<void> {
