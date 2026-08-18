@@ -164,12 +164,25 @@ func equivalentPath(first, second string) bool {
 	if firstErr != nil || secondErr != nil {
 		return false
 	}
-	firstAbsolute = filepath.Clean(firstAbsolute)
-	secondAbsolute = filepath.Clean(secondAbsolute)
+	firstAbsolute = canonicalComparisonPath(firstAbsolute)
+	secondAbsolute = canonicalComparisonPath(secondAbsolute)
 	if runtime.GOOS == "windows" {
 		return strings.EqualFold(firstAbsolute, secondAbsolute)
 	}
 	return firstAbsolute == secondAbsolute
+}
+
+// canonicalComparisonPath resolves the existing parent of a path so a
+// missing executable leaf can still be compared across symlink and native
+// Windows path aliases.
+func canonicalComparisonPath(path string) string {
+	path = filepath.Clean(path)
+	parent := filepath.Dir(path)
+	resolvedParent, err := filepath.EvalSymlinks(parent)
+	if err != nil {
+		return path
+	}
+	return filepath.Clean(filepath.Join(resolvedParent, filepath.Base(path)))
 }
 
 func resolveAllowedPath(

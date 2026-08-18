@@ -168,6 +168,7 @@ func (b *executionBoundary) ValidateExecutable(path string) error {
 	}
 	var file *os.File
 	var info os.FileInfo
+	var expectedDigest string
 	switch filepath.Clean(absolute) {
 	case b.executable:
 		file, info = b.executableFile, b.executableInfo
@@ -181,6 +182,7 @@ func (b *executionBoundary) ValidateExecutable(path string) error {
 			return task.ErrInvalidArgument
 		}
 		file, info = testExecutable.file, testExecutable.info
+		expectedDigest = testExecutable.sha256
 	}
 	if file == nil {
 		return task.ErrInvalidArgument
@@ -191,6 +193,12 @@ func (b *executionBoundary) ValidateExecutable(path string) error {
 		absolute,
 	); err != nil {
 		return task.ErrInvalidArgument
+	}
+	if expectedDigest != "" {
+		digest, err := pinnedExecutableDigest(file)
+		if err != nil || digest != expectedDigest {
+			return task.ErrInvalidArgument
+		}
 	}
 	if b.unityRunnerGeneratorFile != nil {
 		if err := validatePinnedExecutable(
