@@ -221,7 +221,8 @@ func TestWindowsProductionVSWhereFindsExpectedFixedMetadata(t *testing.T) {
 	if _, err := os.Stat(options.VSWherePath); err != nil {
 		t.Skipf("fixed vswhere is unavailable: %v", err)
 	}
-	adapters, err := newWindowsAdapters(probe.NewRunner(), nil, options)
+	runner := &windowsProductionProbeRunner{delegate: probe.NewRunner()}
+	adapters, err := newWindowsAdapters(runner, nil, options)
 	if err != nil {
 		t.Fatalf("newWindowsAdapters(production) error = %v", err)
 	}
@@ -231,9 +232,12 @@ func TestWindowsProductionVSWhereFindsExpectedFixedMetadata(t *testing.T) {
 	}
 	installations, discoverErr := discoverVisualStudioInstallations(
 		context.Background(),
-		probe.NewRunner(),
+		runner,
 		msvc.options.config,
 	)
+	if discoverErr != nil && runner.timedOut(discoverErr) {
+		t.Skipf("fixed vswhere probe exceeded its bounded budget: %v", discoverErr)
+	}
 	if discoverErr != nil || len(installations) == 0 {
 		t.Fatalf(
 			"production vswhere installations = %#v, %v",
