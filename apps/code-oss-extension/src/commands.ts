@@ -187,7 +187,8 @@ export function registerCoverageCommands(
         reportId: state.reportId,
         completeness: state.completeness,
         summary: state.summary,
-        toolProvenance: state.toolProvenance
+        toolProvenance: state.toolProvenance,
+        sources: state.sources
       }));
       await host.showInformationMessage?.("Unit Test: Coverage report is available.");
     } catch (error) {

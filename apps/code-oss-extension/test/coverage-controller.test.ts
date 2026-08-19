@@ -53,6 +53,7 @@ function reportFixture(overrides: Partial<CoverageReport> = {}): CoverageReport 
       instrumentationFingerprint: "fingerprint"
     },
     artifactId: id,
+    sources: [{ uri: "src/main.cpp", sha256: "a".repeat(64) }],
     ...overrides
   } as CoverageReport;
 }
@@ -116,6 +117,10 @@ test("coverage report state is published only after matching run and report iden
   assert.equal(state.reportId, id);
   assert.equal(state.summary?.lines.total, 10);
   assert.equal(state.toolProvenance?.driver.name, "llvm-cov");
+  assert.equal(state.sources?.[0]?.uri, "src/main.cpp");
+  assert.equal(state.sources?.[0]?.sha256, "a".repeat(64));
+  (state.sources![0] as { uri: string }).uri = "mutated.cpp";
+  assert.equal(controller.getState().sources?.[0]?.uri, "src/main.cpp");
 });
 
 test("coverage operation fails closed when the session changes after an RPC", async () => {

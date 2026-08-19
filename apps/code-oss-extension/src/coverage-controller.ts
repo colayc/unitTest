@@ -29,6 +29,7 @@ export interface CoverageControllerState {
   readonly completeness?: CoverageReport["completeness"];
   readonly summary?: CoverageReport["summary"];
   readonly toolProvenance?: CoverageReport["toolProvenance"];
+  readonly sources?: CoverageReport["sources"];
   readonly detail?: string;
 }
 
@@ -87,7 +88,8 @@ function copyState(state: CoverageControllerState): CoverageControllerState {
       compiler: { ...state.toolProvenance.compiler },
       driver: { ...state.toolProvenance.driver },
       collector: { ...state.toolProvenance.collector }
-    }
+    },
+    sources: state.sources === undefined ? undefined : state.sources.map((source) => ({ ...source }))
   };
 }
 
@@ -139,7 +141,8 @@ export class CoverageController {
         reportId: report.reportId,
         completeness: report.completeness,
         summary: report.summary,
-        toolProvenance: report.toolProvenance
+        toolProvenance: report.toolProvenance,
+        sources: report.sources
       });
       return this.getState();
     } catch (error) {
@@ -176,7 +179,8 @@ export class CoverageController {
         reportId: report.reportId,
         completeness: report.completeness,
         summary: report.summary,
-        toolProvenance: report.toolProvenance
+        toolProvenance: report.toolProvenance,
+        sources: report.sources
       });
       return this.getState();
     } catch (error) {
