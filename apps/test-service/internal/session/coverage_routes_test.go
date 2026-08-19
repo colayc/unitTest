@@ -15,7 +15,7 @@ import (
 
 func TestV14CoverageNegotiationAndCapabilitiesRequireCoverageBackend(t *testing.T) {
 	backend := &coverageBackend{fakeBackend: &fakeBackend{}}
-	active := session.New("0123456789abcdef", "linux", "unix-socket", backend)
+	active := session.NewWithCoverage("0123456789abcdef", "linux", "unix-socket", backend, backend)
 	handshake := active.Handle(context.Background(), requestVersion(t, protocol.Version14, "handshake", map[string]any{
 		"token": "0123456789abcdef", "clientName": "test", "clientVersion": "0.5.0",
 		"supportedProtocolVersions": []string{protocol.Version13, protocol.Version14},
@@ -30,9 +30,25 @@ func TestV14CoverageNegotiationAndCapabilitiesRequireCoverageBackend(t *testing.
 	}
 }
 
-func TestV14CoverageRoutesRejectUnsafePayloadBeforeBackend(t *testing.T) {
+func TestV14CoverageNegotiationRequiresExplicitCoverageProvider(t *testing.T) {
 	backend := &coverageBackend{fakeBackend: &fakeBackend{}}
 	active := session.New("0123456789abcdef", "linux", "unix-socket", backend)
+	handshake := active.Handle(context.Background(), requestVersion(t, protocol.Version14, "handshake", map[string]any{
+		"token": "0123456789abcdef", "clientName": "test", "clientVersion": "0.5.0",
+		"supportedProtocolVersions": []string{protocol.Version13, protocol.Version14},
+	}))
+	if handshake.Response.Kind != "response" || active.NegotiatedVersion() != protocol.Version13 {
+		t.Fatalf("handshake = %#v, negotiated=%q; coverage must remain gated", handshake.Response, active.NegotiatedVersion())
+	}
+	capabilities := active.Handle(context.Background(), requestVersion(t, protocol.Version13, "capabilities/get", map[string]any{}))
+	if capabilities.Response.Kind != "response" || capabilities.Response.ProtocolVersion != protocol.Version13 {
+		t.Fatalf("capabilities = %#v", capabilities.Response)
+	}
+}
+
+func TestV14CoverageRoutesRejectUnsafePayloadBeforeBackend(t *testing.T) {
+	backend := &coverageBackend{fakeBackend: &fakeBackend{}}
+	active := session.NewWithCoverage("0123456789abcdef", "linux", "unix-socket", backend, backend)
 	if result := active.Handle(context.Background(), requestVersion(t, protocol.Version14, "handshake", map[string]any{
 		"token": "0123456789abcdef", "clientName": "test", "clientVersion": "0.5.0",
 		"supportedProtocolVersions": []string{protocol.Version14},

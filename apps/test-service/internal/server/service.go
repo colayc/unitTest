@@ -16,6 +16,7 @@ type Service struct {
 	listener                   net.Listener
 	token, platform, transport string
 	backend                    session.Backend
+	coverageBackend            session.CoverageBackend
 	config                     ServiceConfig
 	stop                       chan struct{}
 	stopOnce                   sync.Once
@@ -25,6 +26,13 @@ type Service struct {
 }
 
 func NewService(listener net.Listener, token, platform, transport string, backend session.Backend, config ServiceConfig) *Service {
+	return NewServiceWithCoverage(listener, token, platform, transport, backend, nil, config)
+}
+
+// NewServiceWithCoverage keeps Protocol v1.4 coverage opt-in at the service
+// boundary. Ordinary sessions remain on the negotiated legacy protocol until
+// a real coverage execution provider is supplied.
+func NewServiceWithCoverage(listener net.Listener, token, platform, transport string, backend session.Backend, coverage session.CoverageBackend, config ServiceConfig) *Service {
 	if config.MaxConnections <= 0 {
 		config.MaxConnections = 64
 	}
@@ -33,7 +41,7 @@ func NewService(listener net.Listener, token, platform, transport string, backen
 	}
 	return &Service{
 		listener: listener, token: token, platform: platform, transport: transport,
-		backend: backend, config: config, stop: make(chan struct{}), connections: make(map[net.Conn]struct{}),
+		backend: backend, coverageBackend: coverage, config: config, stop: make(chan struct{}), connections: make(map[net.Conn]struct{}),
 	}
 }
 
@@ -67,7 +75,7 @@ func (s *Service) Serve() error {
 		go func() {
 			defer s.handlers.Done()
 			defer func() { <-capacity }()
-			active := session.New(s.token, s.platform, s.transport, s.backend)
+			active := session.NewWithCoverage(s.token, s.platform, s.transport, s.backend, s.coverageBackend)
 			ServeConnectionWithConfig(connection, active, s.config.Connection)
 			s.mu.Lock()
 			delete(s.connections, connection)

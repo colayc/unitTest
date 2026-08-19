@@ -66,8 +66,14 @@ func coverageMethod(method string) bool {
 	}
 }
 
-func negotiateForBackend(envelopeVersion string, supported []string, backend any) (string, bool) {
-	if _, ok := backend.(CoverageBackend); !ok {
+func negotiateForBackend(envelopeVersion string, supported []string, backend CoverageBackend) (string, bool) {
+	if backend == nil {
+		// A service without a real coverage provider can still negotiate the
+		// latest legacy version when the client starts with a v1.4 envelope.
+		// v1.4 is deliberately not selected unless the provider is explicit.
+		if envelopeVersion == protocolVersion14 {
+			envelopeVersion = protocolVersion13
+		}
 		return negotiate(envelopeVersion, supported)
 	}
 	if envelopeVersion == protocolVersion10 && len(supported) == 0 {

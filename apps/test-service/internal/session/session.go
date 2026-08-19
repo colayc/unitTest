@@ -114,6 +114,7 @@ type Session struct {
 	authenticated              bool
 	negotiatedVersion          string
 	backend                    Backend
+	coverageBackend            CoverageBackend
 	shutdown                   chan struct{}
 	shutdownOnce               sync.Once
 }
@@ -248,7 +249,15 @@ type artifactChunkPayload struct {
 }
 
 func New(token, platform, transport string, backend Backend) *Session {
-	return &Session{token: token, platform: platform, transport: transport, backend: backend, shutdown: make(chan struct{})}
+	return NewWithCoverage(token, platform, transport, backend, nil)
+}
+
+// NewWithCoverage explicitly opts a session into Protocol v1.4 coverage
+// capabilities. Keeping this provider separate from Backend prevents a
+// Runtime that only supports ordinary build/test operations from advertising
+// coverage merely because it happens to expose read-only history methods.
+func NewWithCoverage(token, platform, transport string, backend Backend, coverage CoverageBackend) *Session {
+	return &Session{token: token, platform: platform, transport: transport, backend: backend, coverageBackend: coverage, shutdown: make(chan struct{})}
 }
 
 func (s *Session) ShutdownRequested() <-chan struct{} { return s.shutdown }
@@ -289,7 +298,7 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 		if err != nil {
 			return handled(protocol.Failure(responseVersion, request, "INVALID_MESSAGE", "invalid handshake payload", false))
 		}
-		negotiatedVersion, ok := negotiateForBackend(request.ProtocolVersion, payload.SupportedProtocolVersions, s.backend)
+		negotiatedVersion, ok := negotiateForBackend(request.ProtocolVersion, payload.SupportedProtocolVersions, s.coverageBackend)
 		if !ok {
 			return handled(protocol.Failure(responseVersion, request, "UNSUPPORTED_PROTOCOL", "protocol version is not supported", false))
 		}
@@ -346,11 +355,10 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 		if s.negotiatedVersion != protocol.Version14 {
 			return handled(protocol.Failure(responseVersion, request, "PROTOCOL_FEATURE_UNAVAILABLE", "method requires protocol 1.4", false))
 		}
-		backend, ok := s.backend.(CoverageBackend)
-		if !ok {
+		if s.coverageBackend == nil {
 			return handled(protocol.Failure(responseVersion, request, "SERVICE_UNHEALTHY", "coverage service is unavailable", true))
 		}
-		return s.handleCoverage(ctx, responseVersion, request, backend)
+		return s.handleCoverage(ctx, responseVersion, request, s.coverageBackend)
 	}
 
 	if phase3Method(request.Method) {
