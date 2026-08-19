@@ -4,7 +4,8 @@ export interface CoverageContractV14 { runStartRequest: CoverageRunStartRequest;
 export interface CoverageRunStartRequest { idempotencyKey: string; workspaceGeneration: string; projectId: string; coverageProfileId: string; catalogRevision: string; selection: TestSelectionV14; repeatCount: number; timeoutMs: number; }
 export interface CoverageRun { coverageRunId: string; taskId: string; testRunId: string; workspaceGeneration: string; projectId: string; coverageProfileId: string; catalogRevision: string; selectionSnapshot: TestSelectionSnapshotV14; repeatCount: number; timeoutMs: number; status: CoverageRunStatusV14; outcome?: CoverageRunOutcomeV14; reason?: CoverageRunReasonV14; createdAt: Date; startedAt?: Date; finishedAt?: Date; reportId?: string; lastSequence: number; }
 export interface CoverageRunPage { items: CoverageRun[]; nextCursor?: string; }
-export interface CoverageReport { reportId: string; coverageRunId: string; testRunId: string; schemaVersion: CoverageSchemaVersionV14; createdAt: Date; completeness: CoverageCompletenessV14; summary: CoverageSummaryV14; toolProvenance: CoverageToolProvenanceV14; artifactId: string; }
+export interface CoverageReport { reportId: string; coverageRunId: string; testRunId: string; schemaVersion: CoverageSchemaVersionV14; createdAt: Date; completeness: CoverageCompletenessV14; summary: CoverageSummaryV14; toolProvenance: CoverageToolProvenanceV14; artifactId: string; sources?: CoverageSourceSnapshotV14[]; }
+export interface CoverageSourceSnapshotV14 { uri: string; sha256: string; }
 export interface CoverageMetricV14 { covered: number; total: number; }
 export interface CoverageSummaryV14 { lines: CoverageMetricV14; branches: CoverageMetricV14; functions: CoverageMetricV14; }
 export interface CoverageCompilerV14 { family: CoverageCompilerFamilyV14; version: string; }

@@ -77,7 +77,16 @@ func toProtocolCoverageReport(value coveragedomain.Report) (coveragev14.Coverage
 		Summary:        toProtocolCoverageSummary(validated.Summary),
 		ToolProvenance: toProtocolCoverageToolchain(validated.Toolchain),
 		ArtifactID:     validated.ArtifactID,
+		Sources:        toProtocolCoverageSources(validated.Sources),
 	}, nil
+}
+
+func toProtocolCoverageSources(values []coveragedomain.SourceSnapshot) []coveragev14.CoverageSourceSnapshotV14 {
+	result := make([]coveragev14.CoverageSourceSnapshotV14, len(values))
+	for index, source := range values {
+		result[index] = coveragev14.CoverageSourceSnapshotV14{URI: source.URI, SHA256: source.SHA256}
+	}
+	return result
 }
 
 func toProtocolCoverageSelection(value testdomain.SelectionSnapshot) testv14.TestSelectionSnapshotV14 {

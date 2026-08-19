@@ -832,6 +832,9 @@ export function decodeCoverageReport(value: unknown): CoverageReport {
     completeness: decodeCoverageCompleteness(wire.completeness),
     summary: decodeCoverageSummary(wire.summary),
     toolProvenance: decodeCoverageToolProvenance(wire.toolProvenance),
-    artifactId: wire.artifactId as string
+    artifactId: wire.artifactId as string,
+    ...(wire.sources === undefined
+      ? {}
+      : { sources: (wire.sources as Record<string, unknown>[]).map((source) => ({ uri: source.uri as string, sha256: source.sha256 as string })) })
   };
 }

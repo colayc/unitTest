@@ -43,6 +43,7 @@ export type {
   CoverageReport,
   CoverageRun,
   CoverageRunPage,
+  CoverageSourceSnapshotV14,
   TargetList,
   TaskEvent,
   TaskEventV12,

@@ -47,15 +47,20 @@ type CoverageRunPage struct {
 	NextCursor *string       `json:"nextCursor,omitempty"`
 }
 type CoverageReport struct {
-	ReportID       string                    `json:"reportId"`
-	CoverageRunID  string                    `json:"coverageRunId"`
-	TestRunID      string                    `json:"testRunId"`
-	SchemaVersion  CoverageSchemaVersionV14  `json:"schemaVersion"`
-	CreatedAt      time.Time                 `json:"createdAt"`
-	Completeness   CoverageCompletenessV14   `json:"completeness"`
-	Summary        CoverageSummaryV14        `json:"summary"`
-	ToolProvenance CoverageToolProvenanceV14 `json:"toolProvenance"`
-	ArtifactID     string                    `json:"artifactId"`
+	ReportID       string                      `json:"reportId"`
+	CoverageRunID  string                      `json:"coverageRunId"`
+	TestRunID      string                      `json:"testRunId"`
+	SchemaVersion  CoverageSchemaVersionV14    `json:"schemaVersion"`
+	CreatedAt      time.Time                   `json:"createdAt"`
+	Completeness   CoverageCompletenessV14     `json:"completeness"`
+	Summary        CoverageSummaryV14          `json:"summary"`
+	ToolProvenance CoverageToolProvenanceV14   `json:"toolProvenance"`
+	ArtifactID     string                      `json:"artifactId"`
+	Sources        []CoverageSourceSnapshotV14 `json:"sources,omitempty"`
+}
+type CoverageSourceSnapshotV14 struct {
+	URI    string `json:"uri"`
+	SHA256 string `json:"sha256"`
 }
 type CoverageMetricV14 struct {
 	Covered int64 `json:"covered"`

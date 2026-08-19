@@ -242,6 +242,7 @@ function coverageReport(overrides: JsonObject = {}): JsonObject {
       instrumentationFingerprint: "c".repeat(64)
     },
     artifactId: ARTIFACT_ID,
+    sources: [{ uri: "src/a.cpp", sha256: "a".repeat(64) }],
     ...overrides
   };
 }
@@ -1022,11 +1023,13 @@ test("coverage decoders clone nested values and convert dates", () => {
   (wireReport.completeness as JsonObject).reasons = ["test_crashed"];
   (wireReport.summary as JsonObject).lines = { covered: 0, total: 0 };
   ((wireReport.toolProvenance as JsonObject).compiler as JsonObject).version = "mutated";
+  ((wireReport.sources as JsonObject[])[0] as JsonObject).uri = "mutated.cpp";
   assert.deepEqual(run.selectionSnapshot.itemIds, [ITEM_ID]);
   assert.deepEqual(page.items[0]?.selectionSnapshot.itemIds, [ITEM_ID]);
   assert.deepEqual(report.completeness.reasons, []);
   assert.equal(report.summary.lines.covered, 8);
   assert.equal(report.toolProvenance.compiler.version, "18.1.8");
+  assert.equal(report.sources?.[0]?.uri, "src/a.cpp");
 });
 
 test("coverage decoders reject unsafe and inconsistent domain values", () => {

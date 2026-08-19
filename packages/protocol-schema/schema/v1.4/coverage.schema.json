@@ -69,6 +69,16 @@
         "functions": { "$ref": "#/$defs/metric" }
       }
     },
+    "sourceSnapshot": {
+      "title": "CoverageSourceSnapshotV14",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["uri", "sha256"],
+      "properties": {
+        "uri": { "type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[^\\x00/\\\\]+(?:/[^\\x00/\\\\]+)*$" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
     "compiler": {
       "title": "CoverageCompilerV14",
       "type": "object",
@@ -227,7 +237,8 @@
         "completeness": { "$ref": "#/$defs/completeness" },
         "summary": { "$ref": "#/$defs/summary" },
         "toolProvenance": { "$ref": "#/$defs/toolProvenance" },
-        "artifactId": { "$ref": "#/$defs/id" }
+        "artifactId": { "$ref": "#/$defs/id" },
+        "sources": { "type": "array", "maxItems": 100000, "items": { "$ref": "#/$defs/sourceSnapshot" } }
       }
     }
   }

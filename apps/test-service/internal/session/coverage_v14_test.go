@@ -50,6 +50,10 @@ func TestCoverageProjectionMapsFinishedRunAndReportWithoutPaths(t *testing.T) {
 		Completeness: coveragedomain.Completeness{Outcome: coveragedomain.OutcomeAvailable},
 		Summary:      coveragedomain.Summary{Lines: coveragedomain.Metric{Covered: 2, Total: 3}},
 		Toolchain:    run.Toolchain, ArtifactID: strings.Repeat("2", 32),
+		Sources: []coveragedomain.SourceSnapshot{
+			{URI: "src/a.cpp", SHA256: strings.Repeat("a", 64)},
+			{URI: "src/z.cpp", SHA256: strings.Repeat("b", 64)},
+		},
 	}
 	projectedReport, err := toProtocolCoverageReport(report)
 	if err != nil {
@@ -57,6 +61,9 @@ func TestCoverageProjectionMapsFinishedRunAndReportWithoutPaths(t *testing.T) {
 	}
 	if projectedReport.ReportID != report.ID || projectedReport.ArtifactID != report.ArtifactID || projectedReport.ToolProvenance.Platform != coveragev14.CoverageLinuxV14 {
 		t.Fatalf("report projection = %#v", projectedReport)
+	}
+	if len(projectedReport.Sources) != 2 || projectedReport.Sources[0].URI != "src/a.cpp" || projectedReport.Sources[0].SHA256 != strings.Repeat("a", 64) {
+		t.Fatalf("source projection = %#v", projectedReport.Sources)
 	}
 }
 

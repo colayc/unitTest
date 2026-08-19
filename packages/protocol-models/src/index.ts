@@ -147,6 +147,7 @@ export type {
   CoverageRun,
   CoverageRunPage,
   CoverageRunStartRequest,
+  CoverageSourceSnapshotV14,
   CoverageSummaryV14,
   CoverageToolProvenanceV14
 } from "./generated/coverage-v1-4.js";
