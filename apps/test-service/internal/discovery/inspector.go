@@ -30,14 +30,14 @@ const maxProfiles = 4096
 var ErrInspectorInvariant = errors.New("workspace inspector invariant failed")
 
 type Snapshot struct {
-	WorkspaceID  string
-	WorkspaceURI string
-	Generation   string
-	Projects     []workspace.ProjectConfig
-	Profiles     []cmake.BuildProfile
+	WorkspaceID      string
+	WorkspaceURI     string
+	Generation       string
+	Projects         []workspace.ProjectConfig
+	Profiles         []cmake.BuildProfile
 	CoverageProfiles []workspace.CoverageProfile
-	Toolchains   []toolchain.Instance
-	Diagnostics  []diagnostic.Diagnostic
+	Toolchains       []toolchain.Instance
+	Diagnostics      []diagnostic.Diagnostic
 }
 
 type toolchainDiscovery interface {
@@ -275,7 +275,7 @@ func (i *Inspector) Inspect(ctx context.Context) (Snapshot, error) {
 		WorkspaceID: i.root.ID, WorkspaceURI: i.root.URI, Generation: generation,
 		Projects: projects, Profiles: cloneProfiles(profiles),
 		CoverageProfiles: loaded.Config.Clone().CoverageProfiles,
-		Toolchains: cloneToolchains(instances), Diagnostics: cloneDiagnostics(diagnostics),
+		Toolchains:       cloneToolchains(instances), Diagnostics: cloneDiagnostics(diagnostics),
 	}, nil
 }
 

@@ -48,8 +48,8 @@ func TestCoverageProjectionMapsFinishedRunAndReportWithoutPaths(t *testing.T) {
 		ID: strings.Repeat("1", 32), RunID: run.ID, TestRunID: run.TestRunID,
 		SchemaVersion: coveragedomain.SchemaVersion10, CreatedAt: finished,
 		Completeness: coveragedomain.Completeness{Outcome: coveragedomain.OutcomeAvailable},
-		Summary: coveragedomain.Summary{Lines: coveragedomain.Metric{Covered: 2, Total: 3}},
-		Toolchain: run.Toolchain, ArtifactID: strings.Repeat("2", 32),
+		Summary:      coveragedomain.Summary{Lines: coveragedomain.Metric{Covered: 2, Total: 3}},
+		Toolchain:    run.Toolchain, ArtifactID: strings.Repeat("2", 32),
 	}
 	projectedReport, err := toProtocolCoverageReport(report)
 	if err != nil {
@@ -79,7 +79,7 @@ func coverageProjectionRun() coveragedomain.Run {
 	request := coveragedomain.Request{
 		IdempotencyKey: strings.Repeat("1", 32), WorkspaceGeneration: strings.Repeat("2", 64),
 		ProjectID: "core", CoverageProfileID: "coverage-debug", CatalogRevision: strings.Repeat("3", 64),
-		Selection: testdomain.Selection{Mode: testdomain.SelectionItems, ItemIDs: []testdomain.ID{"utid-v1-" + strings.Repeat("4", 64)}},
+		Selection:   testdomain.Selection{Mode: testdomain.SelectionItems, ItemIDs: []testdomain.ID{testdomain.ID("utid-v1-" + strings.Repeat("4", 64))}},
 		RepeatCount: 1, Timeout: time.Second,
 	}
 	id, err := coveragedomain.CoverageRunID(request)
@@ -88,12 +88,12 @@ func coverageProjectionRun() coveragedomain.Run {
 	}
 	return coveragedomain.Run{
 		ID: id, TaskID: strings.Repeat("5", 32), TestRunID: strings.Repeat("6", 32), Status: coveragedomain.StatusQueued,
-		Request: request, SelectionSnapshot: testdomain.SelectionSnapshot{Mode: testdomain.SelectionItems, ItemIDs: []testdomain.ID{"utid-v1-" + strings.Repeat("4", 64)}},
+		Request: request, SelectionSnapshot: testdomain.SelectionSnapshot{Mode: testdomain.SelectionItems, ItemIDs: []testdomain.ID{testdomain.ID("utid-v1-" + strings.Repeat("4", 64))}},
 		Toolchain: coveragedomain.ToolchainSnapshot{
 			Platform: coveragedomain.PlatformLinux, Architecture: coveragedomain.ArchitectureX64,
-			Compiler: coveragedomain.CompilerSnapshot{Family: coveragedomain.CompilerFamilyGCC, Version: "15.1.0"},
-			Driver: coveragedomain.DriverSnapshot{Name: coveragedomain.DriverGCov, Version: "15.1.0"},
-			Collector: coveragedomain.CollectorSnapshot{Name: coveragedomain.CollectorGCovr, Version: "8.6"},
+			Compiler:          coveragedomain.CompilerSnapshot{Family: coveragedomain.CompilerFamilyGCC, Version: "15.1.0"},
+			Driver:            coveragedomain.DriverSnapshot{Name: coveragedomain.DriverGCov, Version: "15.1.0"},
+			Collector:         coveragedomain.CollectorSnapshot{Name: coveragedomain.CollectorGCovr, Version: "8.6"},
 			NormalizerVersion: "1.0.0", InstrumentationFingerprint: strings.Repeat("7", 64),
 		},
 		CreatedAt: time.Date(2026, 8, 19, 6, 7, 8, 0, time.UTC),

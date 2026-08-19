@@ -16,13 +16,13 @@ import (
 func TestNewQueuedAggregateBuildsClosedCoverageGraph(t *testing.T) {
 	now := time.Date(2026, 8, 19, 4, 5, 6, 0, time.UTC)
 	aggregate, err := NewQueuedAggregate(QueuedInput{
-		Request:         validRequest(),
-		Selection:       validSelectionSnapshot(),
-		BuildProfileID:  strings.Repeat("b", 64),
-		ToolchainID:     "gcc-linux",
-		Toolchain:       validToolchain(),
-		CreatedAt:       now,
-		NewID:           sequentialIDs("1", "2"),
+		Request:        validRequest(),
+		Selection:      validSelectionSnapshot(),
+		BuildProfileID: strings.Repeat("b", 64),
+		ToolchainID:    "gcc-linux",
+		Toolchain:      validToolchain(),
+		CreatedAt:      now,
+		NewID:          sequentialIDs("1", "2"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -49,13 +49,13 @@ func TestNewQueuedAggregateBuildsClosedCoverageGraph(t *testing.T) {
 
 func TestQueuedAggregatePersistDelegatesAtomically(t *testing.T) {
 	aggregate, err := NewQueuedAggregate(QueuedInput{
-		Request:         validRequest(),
-		Selection:       validSelectionSnapshot(),
-		BuildProfileID:  strings.Repeat("b", 64),
-		ToolchainID:     "gcc-linux",
-		Toolchain:       validToolchain(),
-		CreatedAt:       time.Date(2026, 8, 19, 4, 5, 6, 0, time.UTC),
-		NewID:           sequentialIDs("3", "4"),
+		Request:        validRequest(),
+		Selection:      validSelectionSnapshot(),
+		BuildProfileID: strings.Repeat("b", 64),
+		ToolchainID:    "gcc-linux",
+		Toolchain:      validToolchain(),
+		CreatedAt:      time.Date(2026, 8, 19, 4, 5, 6, 0, time.UTC),
+		NewID:          sequentialIDs("3", "4"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -100,22 +100,22 @@ func validRequest() coveragedomain.Request {
 		ProjectID:           "core",
 		CoverageProfileID:   "coverage-debug",
 		CatalogRevision:     strings.Repeat("d", 64),
-		Selection:           testdomain.Selection{Mode: testdomain.SelectionItems, ItemIDs: []testdomain.ID{"utid-v1-" + strings.Repeat("e", 64)}},
+		Selection:           testdomain.Selection{Mode: testdomain.SelectionItems, ItemIDs: []testdomain.ID{testdomain.ID("utid-v1-" + strings.Repeat("e", 64))}},
 		RepeatCount:         1,
 		Timeout:             time.Minute,
 	}
 }
 
 func validSelectionSnapshot() testdomain.SelectionSnapshot {
-	return testdomain.SelectionSnapshot{Mode: testdomain.SelectionItems, ItemIDs: []testdomain.ID{"utid-v1-" + strings.Repeat("e", 64)}}
+	return testdomain.SelectionSnapshot{Mode: testdomain.SelectionItems, ItemIDs: []testdomain.ID{testdomain.ID("utid-v1-" + strings.Repeat("e", 64))}}
 }
 
 func validToolchain() coveragedomain.ToolchainSnapshot {
 	return coveragedomain.ToolchainSnapshot{
 		Platform: coveragedomain.PlatformLinux, Architecture: coveragedomain.ArchitectureX64,
-		Compiler: coveragedomain.CompilerSnapshot{Family: coveragedomain.CompilerFamilyGCC, Version: "15.1.0"},
-		Driver: coveragedomain.DriverSnapshot{Name: coveragedomain.DriverGCov, Version: "15.1.0"},
-		Collector: coveragedomain.CollectorSnapshot{Name: coveragedomain.CollectorGCovr, Version: "8.6"},
+		Compiler:          coveragedomain.CompilerSnapshot{Family: coveragedomain.CompilerFamilyGCC, Version: "15.1.0"},
+		Driver:            coveragedomain.DriverSnapshot{Name: coveragedomain.DriverGCov, Version: "15.1.0"},
+		Collector:         coveragedomain.CollectorSnapshot{Name: coveragedomain.CollectorGCovr, Version: "8.6"},
 		NormalizerVersion: "1.0.0", InstrumentationFingerprint: strings.Repeat("f", 64),
 	}
 }

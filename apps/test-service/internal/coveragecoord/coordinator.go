@@ -3,7 +3,6 @@ package coveragecoord
 import (
 	"context"
 	"errors"
-	"time"
 
 	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/task"
@@ -15,9 +14,9 @@ var ErrInvalidCoordinator = errors.New("invalid coverage coordinator")
 // Coordinator owns only the trusted queue boundary. It does not construct
 // process specifications, start processes, or publish a report.
 type Coordinator struct {
-	store  task.CoverageTaskStore
-	clock  task.Clock
-	newID  task.IDGenerator
+	store task.CoverageTaskStore
+	clock task.Clock
+	newID task.IDGenerator
 }
 
 type EnqueueResult struct {

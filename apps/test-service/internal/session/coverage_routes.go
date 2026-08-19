@@ -8,7 +8,6 @@ import (
 
 	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/protocol"
-	coveragev14 "unit-test-ide.local/test-service/internal/protocolmodel/v1_4/coverage"
 	capabilitiesv14 "unit-test-ide.local/test-service/internal/protocolmodel/v1_4/capabilities"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/testdomain"
@@ -113,7 +112,7 @@ func capabilitiesV14() capabilitiesv14.CapabilitiesV14 {
 		TestDiscovery: true, TestRun: true, CoverageRun: true, CoverageReport: true,
 		CtestJSON: true, OpaqueCTestFallback: true, MaxRepeatCount: 100,
 		MaxSelectionSize: 100_000, MaxCatalogPageSize: 1_000, MaxCoveragePageSize: 200,
-		MaxCoverageTimeoutMS: int64((24 * time.Hour) / time.Millisecond),
+		MaxCoverageTimeoutMS:       int64((24 * time.Hour) / time.Millisecond),
 		UnityHelperContractVersion: "1", UnityRunnerContractVersion: "utide.runner.v1",
 		FrameworkAdapters: []capabilitiesv14.FrameworkAdapterCapabilityV14{
 			{ID: capabilitiesv14.Cpputest, ContractVersion: "cpputest.v1", DisplayName: "CppUTest / CppUMock", CanDiscoverCases: true, CanRunCase: true, CanReportSkipped: true, CanReportSourceLocation: true, CanReportMockDetails: true},
