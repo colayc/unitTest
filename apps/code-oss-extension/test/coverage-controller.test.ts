@@ -66,7 +66,7 @@ function context(
     client: client as CoverageContext["client"],
     serviceRunning: true,
     workspaceGeneration: "workspace-1",
-    catalog: { projectId: "project-1", profileId: "profile-1", revision: "catalog-1" },
+    catalog: { projectId: "project-1", profileId: "profile-1", revision: "catalog-1", workspaceGeneration: "workspace-1" },
     coverageProfileId: "coverage-debug",
     ...overrides
   };
@@ -98,7 +98,7 @@ test("coverage start rejects untrusted and stale catalogs before RPC", async () 
     readContext: () => context({
       ...client,
       startCoverage: async () => { calls++; return runFixture(); }
-    }, { catalog: { projectId: "project-1", profileId: "profile-1", revision: "catalog-2" } })
+    }, { catalog: { projectId: "project-1", profileId: "profile-1", revision: "catalog-2", workspaceGeneration: "workspace-1" } })
   });
   await assert.rejects(() => stale.start({ catalogRevision: "catalog-1" }), /current catalog revision/);
   assert.equal(calls, 0);

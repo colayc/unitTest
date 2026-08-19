@@ -118,6 +118,8 @@ Phase 6B 状态：实现与本地 Windows 验证已就绪，等待 Hosted CI 双
 
 加入运行配置、过滤器、失败详情、进度/日志流、Mock/Stub 配置、覆盖率树和源码装饰、本地历史记录、制品浏览，以及兼容 Web 的报告视图。
 
+当前进度：Coverage Report Extension 的首个客户端 slice 已完成 command/controller/viewer 接线；真正可运行的 `coverage/runs/start`、report persistence 和 Windows/Linux coverage smoke 仍依赖 Go Service 的 production coverage routes/coordinator，暂不宣称 Phase 7 或 Phase 6B 完成。
+
 依赖：Phase 5 的报告能力和 Phase 6 的扩展集成。
 
 验收标准：完整的主要用户旅程无需终端命令即可完成，并在 10,000 个测试项时保持响应。

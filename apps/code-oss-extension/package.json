@@ -12,12 +12,16 @@
     "commands": [
       { "command": "unitTestIde.startService", "title": "Unit Test: Start Service" },
       { "command": "unitTestIde.stopService", "title": "Unit Test: Stop Service" },
-      { "command": "unitTestIde.inspectWorkspace", "title": "Unit Test: Inspect Workspace" }
+      { "command": "unitTestIde.inspectWorkspace", "title": "Unit Test: Inspect Workspace" },
+      { "command": "unitTestIde.runCoverage", "title": "Unit Test: Run with Coverage" },
+      { "command": "unitTestIde.refreshCoverage", "title": "Unit Test: Refresh Coverage" },
+      { "command": "unitTestIde.openCoverageReport", "title": "Unit Test: Open Coverage Report" }
     ],
     "configuration": {
       "title": "Unit Test IDE",
       "properties": {
         "unitTestIde.serviceExecutable": { "type": "string", "default": "" },
+        "unitTestIde.coverageProfileId": { "type": "string", "default": "coverage-debug", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" },
         "unitTestIde.serviceStartupTimeoutMs": { "type": "number", "default": 10000, "minimum": 1000, "maximum": 60000 },
         "unitTestIde.autoStart": { "type": "boolean", "default": true }
       }

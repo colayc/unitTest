@@ -3,6 +3,7 @@ import type * as vscodeTypes from "vscode";
 import type { ServiceStatus, TrustState } from "./contracts.js";
 import {
   registerCommands,
+  registerCoverageCommands,
   presentManagerError,
   type CommandContext,
   type CommandHost,
@@ -11,6 +12,7 @@ import {
   type OutputChannelLike,
   type StatusBarLike
 } from "./commands.js";
+import { createCoverageController, type CoverageController } from "./coverage-controller.js";
 import { ServiceManager, type ServiceManagerOptions } from "./service-manager.js";
 import {
   TestingApiAdapter,
@@ -35,6 +37,7 @@ export interface ExtensionHost extends CommandHost {
   configuration<T>(key: string, fallback: T): T;
   createOutputChannel(name: string): OutputChannelLike;
   createStatusBarItem(): StatusBarLike;
+  openCoverageHtml?: (html: string) => void | PromiseLike<void>;
   createTestController?: TestingApiHost["createTestController"];
   onDidChangeWorkspaceFolders(listener: () => void | Promise<void>): DisposableLike;
   onDidGrantWorkspaceTrust(listener: () => void | Promise<void>): DisposableLike;
@@ -202,6 +205,7 @@ class ExtensionController {
   readonly #status: StatusProjection;
   readonly #stopTimeoutMs: number;
   #testingAdapter: TestingApiAdapter | undefined;
+  #coverageController: CoverageController | undefined;
   #testingSessionRoot: string | undefined;
   #activated = false;
   #deactivating = false;
@@ -250,6 +254,21 @@ class ExtensionController {
     }
     this.#bindTestingSession();
 
+    this.#coverageController = createCoverageController({
+      readContext: () => {
+        const catalog = this.#testingAdapter?.catalogState;
+        return {
+          trust: this.#testingTrust(),
+          client: this.#testingClient(),
+          serviceRunning: this.#manager.status.state === "running",
+          workspaceGeneration: catalog?.workspaceGeneration ?? "",
+          catalog,
+          coverageProfileId: this.host.configuration("coverageProfileId", "coverage-debug")
+        };
+      }
+    });
+    this.host.context.subscriptions.push(this.#coverageController);
+
     registerCommands(
       this.host.context,
       this.#manager,
@@ -262,6 +281,14 @@ class ExtensionController {
         else this.#invalidateTestingSession();
         return this.#refreshTesting();
       }
+    );
+    registerCoverageCommands(
+      this.host.context,
+      this.#coverageController,
+      () => this.#manager.session?.client,
+      this.#status,
+      this.host,
+      this.#output
     );
     this.host.context.subscriptions.push(
       this.host.onDidChangeWorkspaceFolders(() => this.#enqueueReconcile()),
@@ -278,6 +305,7 @@ class ExtensionController {
     if (this.#deactivation) return this.#deactivation;
     this.#deactivating = true;
     this.#testingAdapter?.close();
+    this.#coverageController?.dispose();
     const transitions = this.#transitionTail.catch(() => undefined);
     const stop = this.#manager.stop().catch(() => presentManagerError(
       this.host,
@@ -396,6 +424,7 @@ class ExtensionController {
     const snapshot = this.host.workspaceSnapshot();
     if (this.#gate.update(snapshot) !== "trusted" || snapshot.workspaceRoot !== this.#testingSessionRoot) {
       this.#invalidateTestingSession();
+      this.#coverageController?.setTrustState(this.#gate.update(snapshot));
     }
   }
 
@@ -438,6 +467,15 @@ function createVSCodeHost(
       .getConfiguration("unitTestIde")
       .get(key, fallback),
     createOutputChannel: (name) => vscode.window.createOutputChannel(name),
+    openCoverageHtml: (html) => {
+      const panel = vscode.window.createWebviewPanel(
+        "unitTestIde.coverage",
+        "Unit Test Coverage",
+        vscode.ViewColumn.One,
+        { enableScripts: true, retainContextWhenHidden: true }
+      );
+      panel.webview.html = html;
+    },
     createStatusBarItem: () => vscode.window.createStatusBarItem(
       "unitTestIde.status",
       vscode.StatusBarAlignment.Left,

@@ -11,6 +11,8 @@
 
 当前已完成 Phase 6 首个 Vertical Slice，并已实现 Phase 6B Testing API 集成代码：独立 Code-OSS Extension 可接入真实 Go Service，Workspace Trust gate、Service lifecycle、`workspace/inspect`、Test Item tree 与 Run Profile 已形成闭环。Phase 6B 只有在 Windows/Linux CI 都实际执行真实 Service smoke 后才能标记完成；Coverage UI、source decoration 与 desktop packaging 仍不在本阶段范围内。
 
+Phase 7 的第一个 Coverage Report Extension slice 已开始：Extension 已提供受信任工作区的 `Run with Coverage`、`Refresh Coverage` 和 `Open Coverage Report` command，CoverageRun 会在每个异步边界重新校验 trust、Service session、workspace generation 和 catalog revision；HTML artifact 只能通过 protocol chunk digest 校验后进入无网络 CSP viewer。Go Service 当前仍缺少生产 `coverage/runs/*`、`coverage/reports/get` 的 session route 与真实 coverage execution coordinator，因此跨平台 coverage smoke 尚未标记完成，也不会用 fake response 冒充 runtime evidence。
+
 ## 固定开发环境
 
 - Node.js 24.18.0

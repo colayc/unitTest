@@ -15,7 +15,14 @@ test("extension manifest declares workspace extension and safe commands", async 
   const contributes = manifest.contributes as { commands: Array<{ command: string }> };
   assert.deepEqual(
     contributes.commands.map((command) => command.command),
-    ["unitTestIde.startService", "unitTestIde.stopService", "unitTestIde.inspectWorkspace"]
+    [
+      "unitTestIde.startService",
+      "unitTestIde.stopService",
+      "unitTestIde.inspectWorkspace",
+      "unitTestIde.runCoverage",
+      "unitTestIde.refreshCoverage",
+      "unitTestIde.openCoverageReport"
+    ]
   );
 });
 

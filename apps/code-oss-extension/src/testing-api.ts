@@ -53,6 +53,7 @@ export interface TestingCatalogState {
   projectId: string;
   profileId: string;
   revision: string;
+  workspaceGeneration: string;
 }
 
 interface CatalogTreeItem {
@@ -235,7 +236,7 @@ export class TestingApiAdapter implements TestingDisposable {
       if (!this.#isCurrentRefresh(generation, client)) return;
       const catalog = await this.#awaitCatalogOrPoll(client, project.projectId, profile.buildProfileId, generation);
       if (!catalog || !this.#isCurrentRefresh(generation, client)) return;
-      this.#reconcileTree(catalog);
+      this.#reconcileTree(catalog, workspace.workspaceGeneration);
     } catch (error) {
       if (generation !== this.#refreshGeneration) return;
       this.#abortAllRuns("Test run cancelled because the test catalog refresh failed.");
@@ -383,7 +384,7 @@ export class TestingApiAdapter implements TestingDisposable {
     return generation === this.#refreshGeneration && this.#assertTrustedClient(client) !== undefined;
   }
 
-  #reconcileTree(catalog: ProtocolTestCatalog): void {
+  #reconcileTree(catalog: ProtocolTestCatalog, workspaceGeneration: string): void {
     if (
       this.#catalogState?.projectId === catalog.projectId &&
       this.#catalogState?.profileId === catalog.profileId &&
@@ -481,7 +482,8 @@ export class TestingApiAdapter implements TestingDisposable {
     this.#catalogState = {
       projectId: catalog.projectId,
       profileId: catalog.profileId,
-      revision: catalog.revision
+      revision: catalog.revision,
+      workspaceGeneration
     };
   }
 
