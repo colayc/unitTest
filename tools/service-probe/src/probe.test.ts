@@ -588,6 +588,7 @@ test("successful simulation preserves the complete negotiated event stream", asy
 test("trusted workspace completes deterministic CMake builds and skips the second configure", async () => {
   const workspaceDirectory = await mkdtemp(join(dirname(binary), "unit-test-ide-cmake-workspace-"));
   const serviceDirectory = await mkdtemp(join(dirname(binary), "unit-test-ide-cmake-service-"));
+  const cmakeEventTimeoutMs = process.platform === "win32" ? 30_000 : 15_000;
   let fixture: Awaited<ReturnType<typeof startService>> | undefined;
   let stage = "prepare workspace";
   try {
@@ -646,7 +647,7 @@ test("trusted workspace completes deterministic CMake builds and skips the secon
     const firstSubscription = await withNamedTimeout(
       "first CMake event subscription",
       fixture.client.subscribeEvents(0),
-      EVENT_TIMEOUT_MS
+      cmakeEventTimeoutMs
     );
     stage = "start first build";
     const startFirstBuild = () =>
@@ -661,7 +662,7 @@ test("trusted workspace completes deterministic CMake builds and skips the secon
           jobs: 2,
           timeoutMs: 30_000
         }),
-        EVENT_TIMEOUT_MS
+        cmakeEventTimeoutMs
       );
     let first;
     try {
@@ -682,7 +683,12 @@ test("trusted workspace completes deterministic CMake builds and skips the secon
     }
     const firstEvents: ProtocolTaskEvent[] = [];
     stage = "wait for first build";
-    const firstFinished = await waitForFinished(firstSubscription, first.taskId, firstEvents);
+    const firstFinished = await waitForFinished(
+      firstSubscription,
+      first.taskId,
+      firstEvents,
+      cmakeEventTimeoutMs,
+    );
     assert.equal((firstFinished.payload as { outcome?: unknown }).outcome, "succeeded");
     assertContinuousUniqueSequences(firstEvents);
     assert.deepEqual(
@@ -710,7 +716,7 @@ test("trusted workspace completes deterministic CMake builds and skips the secon
     const artifacts = await withNamedTimeout(
       "first CMake artifact list",
       fixture.client.listArtifacts(first.taskId),
-      EVENT_TIMEOUT_MS
+      cmakeEventTimeoutMs
     );
     assert.deepEqual(
       artifacts.items.map((artifact) => artifact.kind).sort(),
@@ -739,7 +745,7 @@ test("trusted workspace completes deterministic CMake builds and skips the secon
         projectId: selected.project.projectId,
         buildProfileId: selected.profile.buildProfileId
       }),
-      EVENT_TIMEOUT_MS
+      cmakeEventTimeoutMs
     );
     assert.deepEqual(targets.targets.map((target) => target.name), ["fixture-app"]);
 
@@ -747,13 +753,13 @@ test("trusted workspace completes deterministic CMake builds and skips the secon
     const firstDurable = await withNamedTimeout(
       "first deterministic durable task",
       fixture.client.getTask(first.taskId),
-      EVENT_TIMEOUT_MS
+      cmakeEventTimeoutMs
     );
     stage = "subscribe second build";
     const secondSubscription = await withNamedTimeout(
       "second CMake event subscription",
       fixture.client.subscribeEvents(firstDurable.lastSequence),
-      EVENT_TIMEOUT_MS
+      cmakeEventTimeoutMs
     );
     stage = "start second build";
     const second = await withNamedTimeout(
@@ -767,11 +773,16 @@ test("trusted workspace completes deterministic CMake builds and skips the secon
         jobs: 2,
         timeoutMs: 30_000
       }),
-      EVENT_TIMEOUT_MS
+      cmakeEventTimeoutMs
     );
     const secondEvents: ProtocolTaskEvent[] = [];
     stage = "wait for second build";
-    const secondFinished = await waitForFinished(secondSubscription, second.taskId, secondEvents);
+    const secondFinished = await waitForFinished(
+      secondSubscription,
+      second.taskId,
+      secondEvents,
+      cmakeEventTimeoutMs,
+    );
     assert.equal((secondFinished.payload as { outcome?: unknown }).outcome, "succeeded");
     assertContinuousUniqueSequences(secondEvents);
     assert.equal(secondEvents[0]?.sequence, firstDurable.lastSequence + 1);
