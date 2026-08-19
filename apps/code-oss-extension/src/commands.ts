@@ -1,5 +1,7 @@
 import type { ServiceStatus, TrustState } from "./contracts.js";
 import type { ExtensionProtocolClient } from "./protocol-client.js";
+import type { CoverageControllerState } from "./coverage-controller.js";
+import { openCoverageHtml } from "./coverage-viewer.js";
 import { redactServiceError } from "./service-resources.js";
 
 export interface DisposableLike {
@@ -40,6 +42,17 @@ export interface CommandStatus {
 export interface CommandHost {
   registerCommand(command: string, handler: () => void | Promise<void>): DisposableLike;
   showErrorMessage(message: string): void | PromiseLike<unknown>;
+}
+
+export interface CoverageCommandHost extends CommandHost {
+  openCoverageHtml?: (html: string) => void | PromiseLike<void>;
+  showInformationMessage?: (message: string) => void | PromiseLike<unknown>;
+}
+
+export interface CoverageCommandController {
+  getState(): CoverageControllerState;
+  startCurrent(): Promise<CoverageControllerState>;
+  refreshCurrent(): Promise<CoverageControllerState>;
 }
 
 export type ClientProvider = () => ExtensionProtocolClient | undefined;
@@ -145,5 +158,83 @@ export function registerCommands(
     host.registerCommand("unitTestIde.startService", startService),
     host.registerCommand("unitTestIde.stopService", stopService),
     host.registerCommand("unitTestIde.inspectWorkspace", inspectWorkspace)
+  );
+}
+
+export function registerCoverageCommands(
+  context: CommandContext,
+  controller: CoverageCommandController,
+  clientProvider: ClientProvider,
+  status: CommandStatus,
+  host: CoverageCommandHost,
+  output: OutputChannelLike
+): void {
+  const requireTrusted = async (): Promise<boolean> => {
+    if (!status.isActive()) return false;
+    const trust = status.refreshTrust();
+    if (trust === "trusted") return true;
+    await host.showErrorMessage(BLOCKED_MESSAGES[trust]);
+    return false;
+  };
+
+  const runCoverage = async (): Promise<void> => {
+    if (!await requireTrusted()) return;
+    try {
+      const state = await controller.startCurrent();
+      output.appendLine(JSON.stringify({
+        state: state.state,
+        coverageRunId: state.coverageRunId,
+        reportId: state.reportId,
+        completeness: state.completeness,
+        summary: state.summary,
+        toolProvenance: state.toolProvenance
+      }));
+      await host.showInformationMessage?.("Unit Test: Coverage report is available.");
+    } catch (error) {
+      await host.showErrorMessage(redactServiceError(error, []).message);
+    }
+  };
+
+  const refreshCoverage = async (): Promise<void> => {
+    if (!await requireTrusted()) return;
+    try {
+      await controller.refreshCurrent();
+    } catch (error) {
+      await host.showErrorMessage(redactServiceError(error, []).message);
+    }
+  };
+
+  const openReport = async (): Promise<void> => {
+    if (!await requireTrusted()) return;
+    const state = controller.getState();
+    if (state.state !== "available" || !state.taskId) {
+      await host.showErrorMessage("Unit Test: No completed coverage report is available.");
+      return;
+    }
+    if (!host.openCoverageHtml) {
+      await host.showErrorMessage("Unit Test: Coverage report viewer is unavailable.");
+      return;
+    }
+    const client = clientProvider();
+    if (!client?.listArtifacts || !client.readArtifact) {
+      await host.showErrorMessage("Unit Test: Protocol artifact access is unavailable.");
+      return;
+    }
+    try {
+      const artifacts = await client.listArtifacts(state.taskId);
+      const htmlArtifacts = artifacts.items.filter((artifact) => artifact.kind === "coverage-html");
+      if (htmlArtifacts.length !== 1) throw new Error("Expected exactly one coverage HTML artifact.");
+      const artifact = htmlArtifacts[0]!;
+      const bytes = await client.readArtifact(artifact.artifactId);
+      await openCoverageHtml({ openCoverageHtml: host.openCoverageHtml }, { kind: artifact.kind, bytes });
+    } catch (error) {
+      await host.showErrorMessage(redactServiceError(error, []).message);
+    }
+  };
+
+  context.subscriptions.push(
+    host.registerCommand("unitTestIde.runCoverage", runCoverage),
+    host.registerCommand("unitTestIde.refreshCoverage", refreshCoverage),
+    host.registerCommand("unitTestIde.openCoverageReport", openReport)
   );
 }

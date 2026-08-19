@@ -24,6 +24,7 @@ export type CoverageControllerStateName =
 export interface CoverageControllerState {
   readonly state: CoverageControllerStateName;
   readonly coverageRunId?: string;
+  readonly taskId?: string;
   readonly reportId?: string;
   readonly completeness?: CoverageReport["completeness"];
   readonly summary?: CoverageReport["summary"];
@@ -120,7 +121,7 @@ export class CoverageController {
       };
       const started = await client.startCoverage(request);
       this.#assertCurrent(operation, context, input.catalogRevision);
-      this.#publish({ state: started.status === "finished" ? "running" : "running", coverageRunId: started.coverageRunId });
+      this.#publish({ state: "running", coverageRunId: started.coverageRunId, taskId: started.taskId });
       const finished = await this.#waitForFinished(client, started, operation, context, input.catalogRevision);
       this.#assertCurrent(operation, context, input.catalogRevision);
       if (!finished.reportId) {
@@ -134,6 +135,7 @@ export class CoverageController {
       this.#publish({
         state: "available",
         coverageRunId: finished.coverageRunId,
+        taskId: finished.taskId,
         reportId: report.reportId,
         completeness: report.completeness,
         summary: report.summary,
@@ -146,6 +148,11 @@ export class CoverageController {
       this.#publish({ state: "unavailable", detail });
       throw new Error(detail);
     }
+  }
+
+  async startCurrent(): Promise<CoverageControllerState> {
+    const context = this.#assertContext();
+    return this.start({ catalogRevision: context.catalog!.revision });
   }
 
   async refresh(runId: string): Promise<CoverageControllerState> {
@@ -165,6 +172,7 @@ export class CoverageController {
       this.#publish({
         state: "available",
         coverageRunId: run.coverageRunId,
+        taskId: run.taskId,
         reportId: report.reportId,
         completeness: report.completeness,
         summary: report.summary,
@@ -176,6 +184,12 @@ export class CoverageController {
       this.#publish({ state: "unavailable", detail });
       throw new Error(detail);
     }
+  }
+
+  async refreshCurrent(): Promise<CoverageControllerState> {
+    const runId = this.#state.coverageRunId;
+    if (!runId) throw new Error("No coverage run is available to refresh.");
+    return this.refresh(runId);
   }
 
   setTrustState(trust: TrustState): void {
@@ -234,7 +248,7 @@ export class CoverageController {
     for (let attempt = 0; attempt < MAX_POLL_ATTEMPTS; attempt++) {
       this.#assertCurrent(operation, captured, catalogRevision);
       if (run.status === "finished") return run;
-      this.#publish({ state: "running", coverageRunId: run.coverageRunId });
+      this.#publish({ state: "running", coverageRunId: run.coverageRunId, taskId: run.taskId });
       await (this.options.sleep ?? ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds))))(POLL_DELAY_MS);
       this.#assertCurrent(operation, captured, catalogRevision);
       run = await client.getCoverageRun(initial.coverageRunId);
