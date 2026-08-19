@@ -128,6 +128,11 @@ type ArtifactRefs struct {
 	CoverageHTMLID string
 }
 
+type SourceSnapshot struct {
+	URI    string
+	SHA256 string
+}
+
 type Completeness struct {
 	Outcome Outcome
 	Reasons []CompletenessReason
@@ -162,6 +167,7 @@ type Report struct {
 	Summary       Summary
 	Toolchain     ToolchainSnapshot
 	ArtifactID    string
+	Sources       []SourceSnapshot
 }
 
 type RunPageRequest struct {
@@ -257,17 +263,51 @@ func NewReport(value Report) (Report, error) {
 	if !validHex(value.ArtifactID, 32) {
 		return Report{}, fmt.Errorf("%w: coverage-json artifact ID", ErrInvalidReport)
 	}
+	if err := validateSourceSnapshots(value.Sources); err != nil {
+		return Report{}, fmt.Errorf("%w: sources: %w", ErrInvalidReport, err)
+	}
 	result := value.Clone()
 	result.CreatedAt = value.CreatedAt.UTC()
 	result.Completeness = completeness
 	result.Summary = summary
+	sort.Slice(result.Sources, func(i, j int) bool { return result.Sources[i].URI < result.Sources[j].URI })
 	return result, nil
 }
 
 func (value Report) Clone() Report {
 	result := value
 	result.Completeness.Reasons = append([]CompletenessReason(nil), value.Completeness.Reasons...)
+	result.Sources = append([]SourceSnapshot(nil), value.Sources...)
 	return result
+}
+
+func validateSourceSnapshots(values []SourceSnapshot) error {
+	if len(values) > 100_000 {
+		return errors.New("too many sources")
+	}
+	seen := make(map[string]struct{}, len(values))
+	for _, source := range values {
+		if !validSourceURI(source.URI) || !validHex(source.SHA256, 64) {
+			return errors.New("invalid source snapshot")
+		}
+		if _, duplicate := seen[source.URI]; duplicate {
+			return errors.New("duplicate source URI")
+		}
+		seen[source.URI] = struct{}{}
+	}
+	return nil
+}
+
+func validSourceURI(value string) bool {
+	if value == "" || len(value) > 4096 || !utf8.ValidString(value) || strings.ContainsRune(value, '\x00') || strings.HasPrefix(value, "/") || strings.Contains(value, "\\") {
+		return false
+	}
+	for _, segment := range strings.Split(value, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 func validateRunLifecycle(value *Run) error {
