@@ -65,11 +65,16 @@ func (state State) Apply(result StepResult) (State, error) {
 		return next, nil
 	}
 	switch result.Phase {
-	case PhaseConfigure, PhaseBuild:
+	case PhaseConfigure:
+		if !result.Succeeded || result.InfrastructureFailure {
+			return unavailable(next, coveragedomain.ReasonInstrumentationFailed), nil
+		}
+		next.Phase = PhaseBuild
+	case PhaseBuild:
 		if !result.Succeeded || result.InfrastructureFailure {
 			return unavailable(next, coveragedomain.ReasonBuildFailed), nil
 		}
-		next.Phase = nextPhase(result.Phase)
+		next.Phase = PhaseTest
 	case PhaseTest:
 		if result.InfrastructureFailure {
 			return unavailable(next, coveragedomain.ReasonProfileCollectionFailed), nil
@@ -124,13 +129,6 @@ func unavailable(state State, reason coveragedomain.Reason) State {
 	state.Outcome = coveragedomain.OutcomeUnavailable
 	state.Reason = reason
 	return state
-}
-
-func nextPhase(value Phase) Phase {
-	if value == PhaseConfigure {
-		return PhaseBuild
-	}
-	return PhaseTest
 }
 
 func addPartialReason(state *State, reason coveragedomain.CompletenessReason) {

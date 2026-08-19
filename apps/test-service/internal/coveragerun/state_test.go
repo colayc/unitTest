@@ -63,7 +63,20 @@ func TestStateFailsClosedForInfrastructureFailureCancellationAndBadOrder(t *test
 	if _, err := state.Apply(StepResult{Phase: PhaseBuild, Succeeded: true}); !errors.Is(err, ErrInvalidTransition) {
 		t.Fatalf("out-of-order error = %v", err)
 	}
-	state, err := state.Apply(StepResult{Phase: PhaseConfigure, Succeeded: false, InfrastructureFailure: true})
+	configureFailure, err := state.Apply(StepResult{Phase: PhaseConfigure, Succeeded: false, InfrastructureFailure: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configureFailure.Reason != coveragedomain.ReasonInstrumentationFailed {
+		t.Fatalf("configure failure reason = %q", configureFailure.Reason)
+	}
+
+	state = NewState()
+	state, err = state.Apply(StepResult{Phase: PhaseConfigure, Succeeded: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err = state.Apply(StepResult{Phase: PhaseBuild, Succeeded: false, InfrastructureFailure: true})
 	if err != nil {
 		t.Fatal(err)
 	}
