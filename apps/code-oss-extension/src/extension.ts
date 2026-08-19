@@ -38,6 +38,7 @@ export interface ExtensionHost extends CommandHost {
   createOutputChannel(name: string): OutputChannelLike;
   createStatusBarItem(): StatusBarLike;
   openCoverageHtml?: (html: string) => void | PromiseLike<void>;
+  openCoverageSource?: (path: string) => void | PromiseLike<void>;
   createTestController?: TestingApiHost["createTestController"];
   onDidChangeWorkspaceFolders(listener: () => void | Promise<void>): DisposableLike;
   onDidGrantWorkspaceTrust(listener: () => void | Promise<void>): DisposableLike;
@@ -475,6 +476,10 @@ function createVSCodeHost(
         { enableScripts: true, retainContextWhenHidden: true }
       );
       panel.webview.html = html;
+    },
+    openCoverageSource: async (path) => {
+      const document = await vscode.workspace.openTextDocument(vscode.Uri.file(path));
+      await vscode.window.showTextDocument(document, vscode.ViewColumn.One);
     },
     createStatusBarItem: () => vscode.window.createStatusBarItem(
       "unitTestIde.status",

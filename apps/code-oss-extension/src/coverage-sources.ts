@@ -11,6 +11,10 @@ export interface VerifiedCoverageSource {
   readonly sha256: string;
 }
 
+export interface CoverageSourceHost {
+  openCoverageSource(path: string): void | PromiseLike<void>;
+}
+
 export const MAX_COVERAGE_SOURCE_BYTES = 64 * 1024 * 1024;
 
 export function resolveCoverageSourcePath(workspaceRoot: string, uri: string): string {
@@ -62,6 +66,15 @@ export async function verifyCoverageSource(workspaceRoot: string, source: Covera
   } finally {
     await handle.close();
   }
+}
+
+export async function openCoverageSource(
+  host: CoverageSourceHost,
+  workspaceRoot: string,
+  source: CoverageSourceSnapshot
+): Promise<void> {
+  const verified = await verifyCoverageSource(workspaceRoot, source);
+  await host.openCoverageSource(verified.path);
 }
 
 function sameIdentity(left: { dev: number; ino: number; size: number }, right: { dev: number; ino: number; size: number }): boolean {

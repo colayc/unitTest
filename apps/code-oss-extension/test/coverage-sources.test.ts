@@ -6,6 +6,7 @@ import test from "node:test";
 import { createHash } from "node:crypto";
 import {
   resolveCoverageSourcePath,
+  openCoverageSource,
   verifyCoverageSource,
   type CoverageSourceSnapshot
 } from "../src/coverage-sources.js";
@@ -35,4 +36,18 @@ test("verifyCoverageSource returns a path only for a matching bounded digest", a
 
   await writeFile(path, "changed\n");
   await assert.rejects(() => verifyCoverageSource(root, source), /digest/i);
+});
+
+test("openCoverageSource verifies before handing a native path to the host", async () => {
+  const root = await mkdtemp(join(tmpdir(), "unit-test-ide-coverage-source-"));
+  await mkdir(join(root, "src"), { recursive: true });
+  const content = Buffer.from("source\n", "utf8");
+  await writeFile(join(root, "src", "main.cpp"), content);
+  const source: CoverageSourceSnapshot = {
+    uri: "src/main.cpp",
+    sha256: createHash("sha256").update(content).digest("hex")
+  };
+  let opened = "";
+  await openCoverageSource({ openCoverageSource: (path) => { opened = path; } }, root, source);
+  assert.equal(opened, join(root, "src", "main.cpp"));
 });
