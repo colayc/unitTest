@@ -356,8 +356,12 @@ test("handshake failures recursively redact nested diagnostics", async () => {
   }, captured, environmentSentinel);
 });
 
-function eventWithin(subscription: EventSubscription, label: string): Promise<IteratorResult<ProtocolTaskEvent>> {
-  return withNamedTimeout(label, subscription.next(), EVENT_TIMEOUT_MS);
+function eventWithin(
+  subscription: EventSubscription,
+  label: string,
+  timeoutMs = EVENT_TIMEOUT_MS
+): Promise<IteratorResult<ProtocolTaskEvent>> {
+  return withNamedTimeout(label, subscription.next(), timeoutMs);
 }
 
 async function waitForEvent(
@@ -365,10 +369,11 @@ async function waitForEvent(
   taskId: string,
   predicate: (event: ProtocolTaskEvent) => boolean,
   label: string,
-  seen: ProtocolTaskEvent[]
+  seen: ProtocolTaskEvent[],
+  timeoutMs = EVENT_TIMEOUT_MS
 ): Promise<ProtocolTaskEvent> {
   for (;;) {
-    const next = await eventWithin(subscription, label);
+    const next = await eventWithin(subscription, label, timeoutMs);
     if (next.done) throw new Error(`${label} ended before the expected event`);
     seen.push(next.value);
     if (next.value.taskId === taskId && predicate(next.value)) return next.value;
@@ -396,9 +401,17 @@ async function waitForChildPID(
 async function waitForFinished(
   subscription: EventSubscription,
   taskId: string,
-  seen: ProtocolTaskEvent[]
+  seen: ProtocolTaskEvent[],
+  timeoutMs = EVENT_TIMEOUT_MS
 ): Promise<ProtocolTaskEvent> {
-  return waitForEvent(subscription, taskId, (event) => event.event === "task.finished", "task finished event", seen);
+  return waitForEvent(
+    subscription,
+    taskId,
+    (event) => event.event === "task.finished",
+    "task finished event",
+    seen,
+    timeoutMs
+  );
 }
 
 async function collectThroughSequence(
@@ -847,7 +860,8 @@ test("protocol v1.3 discovers, runs, replays, and reruns deterministic CppUTest 
     const discoveryFinished = await waitForFinished(
       subscription,
       discovery.taskId,
-      discoveryEvents
+      discoveryEvents,
+      EVENT_TIMEOUT_MS
     );
     assert.equal(
       (discoveryFinished.payload as { outcome?: unknown }).outcome,
@@ -909,7 +923,8 @@ test("protocol v1.3 discovers, runs, replays, and reruns deterministic CppUTest 
     const firstTaskFinished = await waitForFinished(
       subscription,
       firstRunTask.taskId,
-      firstRunEvents
+      firstRunEvents,
+      EVENT_TIMEOUT_MS
     );
     assert.equal(
       (firstTaskFinished.payload as { outcome?: unknown }).outcome,
@@ -1013,7 +1028,8 @@ test("protocol v1.3 discovers, runs, replays, and reruns deterministic CppUTest 
     const rerunTaskFinished = await waitForFinished(
       subscription,
       rerunTask.taskId,
-      rerunEvents
+      rerunEvents,
+      EVENT_TIMEOUT_MS
     );
     assert.equal(
       (rerunTaskFinished.payload as { outcome?: unknown }).outcome,
