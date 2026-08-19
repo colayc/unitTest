@@ -126,3 +126,5 @@ pnpm check:protocol-generated
 ```
 
 不要手工修改生成的 TypeScript 或 Go model。新增能力必须保持 Protocol v1.0/v1.1 compatibility gate，并避免把 executable、raw args、environment 或 cwd 暴露为 request 字段。
+
+当前 Go Service 已识别 Protocol v1.4 envelope，但仍暂不把协商最高版本切换到 v1.4；在 coverage routes、capabilities projection 和既有 v1.4 task/test projection 全部完成前，客户端会安全回退到 v1.3。这样可以先发布兼容入口，不会让部分实现的 v1.4 破坏现有 session。

@@ -18,6 +18,7 @@ import (
 	"unit-test-ide.local/test-service/internal/artifactstore"
 	"unit-test-ide.local/test-service/internal/build"
 	"unit-test-ide.local/test-service/internal/cmake"
+	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/diagnostic"
 	"unit-test-ide.local/test-service/internal/discovery"
 	"unit-test-ide.local/test-service/internal/eventbroker"
@@ -64,6 +65,15 @@ func TestUntrustedRuntimeAllowsNoWorkspaceMethods(t *testing.T) {
 			"StartTestRun() error = %v, want trust error",
 			err,
 		)
+	}
+	if _, err := active.GetCoverageRun(context.Background(), strings.Repeat("a", 32)); !errors.Is(err, build.ErrWorkspaceTrustRequired) {
+		t.Fatalf("GetCoverageRun() error = %v, want trust error", err)
+	}
+	if _, err := active.ListCoverageRuns(context.Background(), coveragedomain.RunPageRequest{WorkspaceGeneration: strings.Repeat("b", 64)}); !errors.Is(err, build.ErrWorkspaceTrustRequired) {
+		t.Fatalf("ListCoverageRuns() error = %v, want trust error", err)
+	}
+	if _, err := active.GetCoverageReport(context.Background(), strings.Repeat("c", 32)); !errors.Is(err, build.ErrWorkspaceTrustRequired) {
+		t.Fatalf("GetCoverageReport() error = %v, want trust error", err)
 	}
 }
 

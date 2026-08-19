@@ -11,6 +11,7 @@ import (
 	"unit-test-ide.local/test-service/internal/artifactstore"
 	"unit-test-ide.local/test-service/internal/build"
 	"unit-test-ide.local/test-service/internal/cmake"
+	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/discovery"
 	"unit-test-ide.local/test-service/internal/eventbroker"
 	"unit-test-ide.local/test-service/internal/instance"
@@ -78,6 +79,7 @@ type runtimeStore interface {
 	build.ConfigurationStore
 	task.TestCatalogRepository
 	task.TestRunRepository
+	task.CoverageRepository
 	task.QueuedPlanStore
 	FailQueuedBuild(context.Context, string, string, time.Time) (task.Task, []task.Event, error)
 	FailQueuedTask(context.Context, string, string, time.Time) (task.Task, []task.Event, error)
@@ -731,6 +733,46 @@ func (r *Runtime) ListTestRuns(
 		return testdomain.RunPage{}, err
 	}
 	return r.store.ListRuns(ctx, request)
+}
+
+func (r *Runtime) GetCoverageRun(
+	ctx context.Context,
+	runID string,
+) (coveragedomain.Run, error) {
+	if err := r.requireCoverageRuntime(); err != nil {
+		return coveragedomain.Run{}, err
+	}
+	return r.store.GetCoverageRun(ctx, runID)
+}
+
+func (r *Runtime) ListCoverageRuns(
+	ctx context.Context,
+	request coveragedomain.RunPageRequest,
+) (coveragedomain.RunPage, error) {
+	if err := r.requireCoverageRuntime(); err != nil {
+		return coveragedomain.RunPage{}, err
+	}
+	return r.store.ListCoverageRuns(ctx, request)
+}
+
+func (r *Runtime) GetCoverageReport(
+	ctx context.Context,
+	reportID string,
+) (coveragedomain.Report, error) {
+	if err := r.requireCoverageRuntime(); err != nil {
+		return coveragedomain.Report{}, err
+	}
+	return r.store.GetCoverageReport(ctx, reportID)
+}
+
+func (r *Runtime) requireCoverageRuntime() error {
+	if r == nil || !r.trustedWorkspace || r.store == nil {
+		if r != nil && r.trustedWorkspace {
+			return task.ErrStorageUnavailable
+		}
+		return build.ErrWorkspaceTrustRequired
+	}
+	return nil
 }
 
 func (r *Runtime) requireTestRuntime() error {
