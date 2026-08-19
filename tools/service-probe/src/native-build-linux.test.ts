@@ -579,6 +579,42 @@ test("diagnostic fixture stale-generation retry is bounded to one", async () => 
   assert.equal(inspections, 1);
 });
 
+test("diagnostic fixture retries one transient stale inspection before Task creation", async () => {
+  let starts = 0;
+  let inspections = 0;
+  const refreshed = workspaceSnapshot("gcc");
+  refreshed.workspaceGeneration = "b".repeat(64);
+  const client = {
+    inspectWorkspace: async () => {
+      inspections++;
+      if (inspections === 1) {
+        throw new ProtocolError("WORKSPACE_CHANGED", "workspace generation is stale", true);
+      }
+      return refreshed;
+    },
+    startCMakeBuild: async () => {
+      starts++;
+      if (starts === 1) {
+        throw new ProtocolError("WORKSPACE_CHANGED", "workspace generation is stale", true);
+      }
+      return { taskId: "task-after-inspection-refresh" };
+    },
+  } as unknown as ProtocolClient;
+  const selected = __testing.selectGeneratedProfile(workspaceSnapshot("gcc"), "gcc");
+  assert.ok(selected);
+
+  const task = await __testing.startFailureBuildWithStaleRetry(
+    client,
+    selected,
+    "gcc",
+    "linker-failure",
+  );
+
+  assert.equal(task.taskId, "task-after-inspection-refresh");
+  assert.equal(starts, 2);
+  assert.equal(inspections, 2);
+});
+
 test("native report contains stable summaries and rejects absolute tool paths", () => {
   const bundle = fakePreparedBundle("/bundle");
   const result = {

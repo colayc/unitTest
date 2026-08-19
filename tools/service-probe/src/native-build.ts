@@ -984,12 +984,24 @@ async function inspectEstablishedFamily(
   scenario: string,
 ): Promise<SelectedProfile> {
   let lastSnapshot: WorkspaceSnapshot | undefined;
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    const snapshot = await withNamedTimeout(
-      `${family} ${scenario} inspection attempt ${attempt}`,
-      client.inspectWorkspace(),
-      nativeTimeoutMs,
-    );
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    let snapshot: WorkspaceSnapshot;
+    try {
+      snapshot = await withNamedTimeout(
+        `${family} ${scenario} inspection attempt ${attempt}`,
+        client.inspectWorkspace(),
+        nativeTimeoutMs,
+      );
+    } catch (error) {
+      if (
+        error instanceof ProtocolError &&
+        error.code === "WORKSPACE_CHANGED" &&
+        attempt < 3
+      ) {
+        continue;
+      }
+      throw error;
+    }
     const selected = selectGeneratedProfile(snapshot, family);
     if (selected !== undefined) {
       return selected;
