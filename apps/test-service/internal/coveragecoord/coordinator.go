@@ -26,6 +26,15 @@ type EnqueueResult struct {
 	Events  []task.Event
 }
 
+// persistedCoverageRelations is implemented by the durable store. A replay
+// may return an existing task with no new events, so the coordinator must
+// reload the canonical run relations instead of returning newly-generated
+// in-memory IDs.
+type persistedCoverageRelations interface {
+	GetCoverageRun(context.Context, string) (coveragedomain.Run, error)
+	GetRunForTask(context.Context, string) (testdomain.TestRun, error)
+}
+
 func NewCoordinator(store task.CoverageTaskStore, clock task.Clock, newID task.IDGenerator) (*Coordinator, error) {
 	if store == nil {
 		return nil, ErrInvalidCoordinator
@@ -54,6 +63,21 @@ func (coordinator *Coordinator) Enqueue(ctx context.Context, input QueuedInput) 
 	taskValue, events, err := aggregate.Persist(ctx, coordinator.store)
 	if err != nil {
 		return EnqueueResult{}, err
+	}
+	if len(events) == 0 {
+		relations, ok := coordinator.store.(persistedCoverageRelations)
+		if !ok {
+			return EnqueueResult{}, task.ErrStorageUnavailable
+		}
+		persistedRun, err := relations.GetCoverageRun(ctx, aggregate.Run.ID)
+		if err != nil {
+			return EnqueueResult{}, err
+		}
+		persistedTestRun, err := relations.GetRunForTask(ctx, taskValue.ID)
+		if err != nil {
+			return EnqueueResult{}, err
+		}
+		return EnqueueResult{Task: taskValue, Run: persistedRun, TestRun: persistedTestRun, Events: events}, nil
 	}
 	return EnqueueResult{Task: taskValue, Run: aggregate.Run, TestRun: aggregate.TestRun, Events: events}, nil
 }

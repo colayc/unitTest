@@ -3,10 +3,14 @@ package coveragecoord
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"unit-test-ide.local/test-service/internal/coveragedomain"
+	"unit-test-ide.local/test-service/internal/task"
+	"unit-test-ide.local/test-service/internal/testdomain"
 )
 
 func TestCoordinatorEnqueueUsesTrustedDefaultsAndPersistsClosedAggregate(t *testing.T) {
@@ -45,12 +49,12 @@ func TestCoordinatorEnqueuePreservesExplicitCreationTime(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, err := coordinator.Enqueue(context.Background(), QueuedInput{
-		Request:         validRequest(),
-		Selection:       validSelectionSnapshot(),
-		BuildProfileID:  strings.Repeat("b", 64),
-		ToolchainID:     "gcc-linux",
-		Toolchain:       validToolchain(),
-		CreatedAt:       created,
+		Request:        validRequest(),
+		Selection:      validSelectionSnapshot(),
+		BuildProfileID: strings.Repeat("b", 64),
+		ToolchainID:    "gcc-linux",
+		Toolchain:      validToolchain(),
+		CreatedAt:      created,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -70,11 +74,11 @@ func TestCoordinatorRejectsInvalidConstructionAndStorageFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := coordinator.Enqueue(context.Background(), QueuedInput{
-		Request:         validRequest(),
-		Selection:       validSelectionSnapshot(),
-		BuildProfileID:  strings.Repeat("b", 64),
-		ToolchainID:     "gcc-linux",
-		Toolchain:       validToolchain(),
+		Request:        validRequest(),
+		Selection:      validSelectionSnapshot(),
+		BuildProfileID: strings.Repeat("b", 64),
+		ToolchainID:    "gcc-linux",
+		Toolchain:      validToolchain(),
 	}); !errors.Is(err, store.err) {
 		t.Fatalf("storage error = %v, want %v", err, store.err)
 	}
@@ -86,15 +90,72 @@ func TestCoordinatorRejectsDuplicateAggregateIDs(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = coordinator.Enqueue(context.Background(), QueuedInput{
-		Request:         validRequest(),
-		Selection:       validSelectionSnapshot(),
-		BuildProfileID:  strings.Repeat("b", 64),
-		ToolchainID:     "gcc-linux",
-		Toolchain:       validToolchain(),
+		Request:        validRequest(),
+		Selection:      validSelectionSnapshot(),
+		BuildProfileID: strings.Repeat("b", 64),
+		ToolchainID:    "gcc-linux",
+		Toolchain:      validToolchain(),
 	})
 	if !errors.Is(err, ErrInvalidQueuedInput) {
 		t.Fatalf("duplicate IDs error = %v", err)
 	}
+}
+
+func TestCoordinatorReloadsCanonicalRelationsOnIdempotentReplay(t *testing.T) {
+	created := time.Date(2026, 8, 19, 5, 6, 7, 0, time.UTC)
+	store := &replayingCoverageStore{}
+	coordinator, err := NewCoordinator(store, fixedCoverageClock{at: created}, sequentialIDs("a", "b", "c", "d"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := QueuedInput{
+		Request:        validRequest(),
+		Selection:      validSelectionSnapshot(),
+		BuildProfileID: strings.Repeat("b", 64),
+		ToolchainID:    "gcc-linux",
+		Toolchain:      validToolchain(),
+	}
+	first, err := coordinator.Enqueue(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := coordinator.Enqueue(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Events) != 0 || second.Task.ID != first.Task.ID || !reflect.DeepEqual(second.Run, first.Run) || !reflect.DeepEqual(second.TestRun, first.TestRun) {
+		t.Fatalf("replay did not return persisted relations: first=%#v second=%#v", first, second)
+	}
+}
+
+type replayingCoverageStore struct {
+	recordingCoverageStore
+	run     coveragedomain.Run
+	testRun testdomain.TestRun
+	task    task.Task
+}
+
+func (store *replayingCoverageStore) CreateCoverageTask(_ context.Context, input task.Task, _ []task.StepSnapshot, _ task.EventDraft, run coveragedomain.Run, testRun testdomain.TestRun) (task.Task, []task.Event, error) {
+	store.calls++
+	if store.calls == 1 {
+		store.task, store.run, store.testRun = input, run, testRun
+		return input, []task.Event{{ID: "event-1"}}, nil
+	}
+	return store.task, nil, nil
+}
+
+func (store *replayingCoverageStore) GetCoverageRun(_ context.Context, id string) (coveragedomain.Run, error) {
+	if id != store.run.ID {
+		return coveragedomain.Run{}, task.ErrNotFound
+	}
+	return store.run, nil
+}
+
+func (store *replayingCoverageStore) GetRunForTask(_ context.Context, id string) (testdomain.TestRun, error) {
+	if id != store.task.ID {
+		return testdomain.TestRun{}, task.ErrNotFound
+	}
+	return store.testRun, nil
 }
 
 type fixedCoverageClock struct{ at time.Time }
