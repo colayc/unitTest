@@ -289,7 +289,7 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 		if err != nil {
 			return handled(protocol.Failure(responseVersion, request, "INVALID_MESSAGE", "invalid handshake payload", false))
 		}
-		negotiatedVersion, ok := negotiate(request.ProtocolVersion, payload.SupportedProtocolVersions)
+		negotiatedVersion, ok := negotiateForBackend(request.ProtocolVersion, payload.SupportedProtocolVersions, s.backend)
 		if !ok {
 			return handled(protocol.Failure(responseVersion, request, "UNSUPPORTED_PROTOCOL", "protocol version is not supported", false))
 		}
@@ -302,6 +302,9 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 	case "capabilities/get":
 		if err := decodeEmpty(request.Payload); err != nil {
 			return handled(protocol.Failure(responseVersion, request, "INVALID_MESSAGE", "payload must be an empty object", false))
+		}
+		if s.negotiatedVersion == protocol.Version14 {
+			return handled(protocol.Success(responseVersion, request, capabilitiesV14()))
 		}
 		if s.negotiatedVersion == protocol.Version13 {
 			return handled(protocol.Success(
@@ -338,6 +341,16 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 		}
 		s.shutdownOnce.Do(func() { close(s.shutdown) })
 		return handled(protocol.Success(responseVersion, request, map[string]bool{"accepted": true}))
+	}
+	if coverageMethod(request.Method) {
+		if s.negotiatedVersion != protocol.Version14 {
+			return handled(protocol.Failure(responseVersion, request, "PROTOCOL_FEATURE_UNAVAILABLE", "method requires protocol 1.4", false))
+		}
+		backend, ok := s.backend.(CoverageBackend)
+		if !ok {
+			return handled(protocol.Failure(responseVersion, request, "SERVICE_UNHEALTHY", "coverage service is unavailable", true))
+		}
+		return s.handleCoverage(ctx, responseVersion, request, backend)
 	}
 
 	if phase3Method(request.Method) {
