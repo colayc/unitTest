@@ -32,7 +32,7 @@
 - Consumes: `discovery.Snapshot`, `session.CoverageRunStart`, `coveragecoord.QueuedBackend`, `task.CoverageRepository`。
 - Produces: `runtimeCoverageBackend` implementing `session.CoverageBackend`; `Runtime` constructs it only for trusted workspaces when no explicit test provider was injected。
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 覆盖以下行为：
 
@@ -52,7 +52,7 @@ func TestRuntimeCoverageBackendNeverConstructsAProviderForUntrustedRuntime(t *te
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run:
 
@@ -62,7 +62,7 @@ $env:GOENV='off'; $env:GOTOOLCHAIN='local'; go test ./apps/test-service/internal
 
 Expected: FAIL because production resolver/provider construction is not defined and Runtime only preserves an injected backend.
 
-- [ ] **Step 3: Write the minimal implementation**
+- [x] **Step 3: Write the minimal implementation**
 
 Implement a runtime-owned provider with these exact checks:
 
@@ -73,7 +73,7 @@ Implement a runtime-owned provider with these exact checks:
 5. Delegate `GetCoverageRun`, `ListCoverageRuns`, and `GetCoverageReport` to the canonical repository.
 6. In `runtime.Open`, preserve an explicitly injected `Config.CoverageBackend` for tests; otherwise construct the provider only when `TrustedWorkspace` is true and all required runtime dependencies exist.
 
-- [ ] **Step 4: Run focused and package tests**
+- [x] **Step 4: Run focused and package tests**
 
 Run:
 
@@ -84,7 +84,7 @@ $env:GOENV='off'; $env:GOTOOLCHAIN='local'; go test -race ./apps/test-service/in
 
 Expected: PASS; untrusted runtime still has no coverage capability and existing injected test backends remain unchanged.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add apps/test-service/internal/runtime/coverage_backend.go apps/test-service/internal/runtime/coverage_backend_test.go apps/test-service/internal/runtime/runtime.go
@@ -105,11 +105,11 @@ git push origin master
 - Consumes: Task 1 production provider and existing Protocol v1.4 facade。
 - Produces: real route evidence for queued start/get/list and a documented non-terminal response until execution coordinator is implemented。
 
-- [ ] **Step 1: Write the failing smoke assertions**
+- [x] **Step 1: Write the failing smoke assertions**
 
 Add a trusted service case that starts coverage with the current catalog identity, asserts `status === "queued"`, then reads the same run via `getCoverageRun` and `listCoverageRuns`; assert no `reportId`, summary, artifact ID, native path, token or environment is present. Add an untrusted case asserting coverage start is rejected without process/token/endpoint/data side effects.
 
-- [ ] **Step 2: Run the focused smoke to verify it fails**
+- [x] **Step 2: Run the focused smoke to verify it fails**
 
 Run:
 
@@ -120,11 +120,11 @@ pnpm --filter code-oss-extension test:service-smoke
 
 Expected: the new route case fails because production Runtime currently does not expose a provider or the fixture has no current coverage profile.
 
-- [ ] **Step 3: Implement route fixture and pending assertions**
+- [x] **Step 3: Implement route fixture and pending assertions**
 
 Use only the existing deterministic workspace fixture and Protocol Client. Do not add fake report responses or mark the test as completed coverage. If the fixture cannot resolve a coverage profile, assert the stable unavailable error and keep the runtime smoke honest.
 
-- [ ] **Step 4: Run all applicable gates**
+- [x] **Step 4: Run all applicable gates**
 
 Run:
 
@@ -134,7 +134,7 @@ $env:GOENV='off'; $env:GOTOOLCHAIN='local'; go test ./apps/test-service/... -cou
 git diff --check
 ```
 
-- [ ] **Step 5: Commit and push**
+- [x] **Step 5: Commit and push**
 
 ```powershell
 git add apps/test-service/internal/server/server_test.go apps/test-service/internal/session/coverage_routes_test.go apps/code-oss-extension/test/service-smoke.test.ts docs/development.md

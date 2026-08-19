@@ -363,7 +363,8 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 
 	if phase3Method(request.Method) {
 		if s.negotiatedVersion != protocol.Version12 &&
-			s.negotiatedVersion != protocol.Version13 {
+			s.negotiatedVersion != protocol.Version13 &&
+			s.negotiatedVersion != protocol.Version14 {
 			return handled(protocol.Failure(responseVersion, request, "PROTOCOL_FEATURE_UNAVAILABLE", "method requires protocol 1.2", false))
 		}
 		if s.backend == nil {
@@ -372,7 +373,8 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 		return s.handlePhase3(ctx, responseVersion, request)
 	}
 	if phase4Method(request.Method) {
-		if s.negotiatedVersion != protocol.Version13 {
+		if s.negotiatedVersion != protocol.Version13 &&
+			s.negotiatedVersion != protocol.Version14 {
 			return handled(protocol.Failure(
 				responseVersion,
 				request,
@@ -422,7 +424,7 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 func (s *Session) handlePhase2(ctx context.Context, version string, request protocol.Request) HandleResult {
 	switch request.Method {
 	case "tasks/start":
-		if version == protocol.Version13 {
+		if version == protocol.Version13 || version == protocol.Version14 {
 			backend, ok := s.backend.(TestBackend)
 			if !ok {
 				return handled(protocol.Failure(
@@ -477,7 +479,7 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 		if err != nil {
 			return backendFailure(version, request, err)
 		}
-		if version == protocol.Version13 {
+		if version == protocol.Version13 || version == protocol.Version14 {
 			var run *testdomain.TestRun
 			if value.Kind == task.KindTestRun {
 				testBackend, ok := s.backend.(TestBackend)
@@ -544,7 +546,7 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 		if err != nil {
 			return backendFailure(version, request, err)
 		}
-		if version == protocol.Version13 {
+		if version == protocol.Version13 || version == protocol.Version14 {
 			testBackend, ok := s.backend.(TestBackend)
 			if !ok {
 				return backendFailure(
@@ -651,7 +653,8 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 			return backendFailure(version, request, err)
 		}
 		if version == protocol.Version12 ||
-			version == protocol.Version13 {
+			version == protocol.Version13 ||
+			version == protocol.Version14 {
 			items := make([]artifactv12.ArtifactMetadataV12, len(page.Items))
 			for index := range page.Items {
 				items[index] = toProtocolArtifactV12(page.Items[index])

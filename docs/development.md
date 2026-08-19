@@ -11,7 +11,7 @@
 
 当前已完成 Phase 6 首个 Vertical Slice，并已实现 Phase 6B Testing API 集成代码：独立 Code-OSS Extension 可接入真实 Go Service，Workspace Trust gate、Service lifecycle、`workspace/inspect`、Test Item tree 与 Run Profile 已形成闭环。Phase 6B 只有在 Windows/Linux CI 都实际执行真实 Service smoke 后才能标记完成；Coverage UI、source decoration 与 desktop packaging 仍不在本阶段范围内。
 
-Phase 7 的第一个 Coverage Report Extension slice 已开始：Extension 已提供受信任工作区的 `Run with Coverage`、`Refresh Coverage` 和 `Open Coverage Report` command，CoverageRun 会在每个异步边界重新校验 trust、Service session、workspace generation 和 catalog revision；HTML artifact 只能通过 protocol chunk digest 校验后进入无网络 CSP viewer。Go Service 当前仍缺少生产 `coverage/runs/*`、`coverage/reports/get` 的 session route 与真实 coverage execution coordinator，因此跨平台 coverage smoke 尚未标记完成，也不会用 fake response 冒充 runtime evidence。
+Phase 7 的第一个 Coverage Report Extension slice 已开始：Extension 已提供受信任工作区的 `Run with Coverage`、`Refresh Coverage` 和 `Open Coverage Report` command，CoverageRun 会在每个异步边界重新校验 trust、Service session、workspace generation 和 catalog revision；HTML artifact 只能通过 protocol chunk digest 校验后进入无网络 CSP viewer。Go Service 现在已把 trusted Runtime 接到真实 Protocol v1.4 coverage provider：`coverage/runs/*` 与 `coverage/reports/get` 使用 durable queued aggregate 和 canonical repository，未完成执行前不会伪造 report。Coverage execution coordinator、跨平台采集和完成态 smoke 仍未实现，也不会用 fake response 冒充 runtime evidence。
 
 ## 固定开发环境
 
@@ -127,4 +127,4 @@ pnpm check:protocol-generated
 
 不要手工修改生成的 TypeScript 或 Go model。新增能力必须保持 Protocol v1.0/v1.1 compatibility gate，并避免把 executable、raw args、environment 或 cwd 暴露为 request 字段。
 
-当前 Go Service 已识别 Protocol v1.4 envelope，但仍暂不把协商最高版本切换到 v1.4；在 coverage routes、capabilities projection 和既有 v1.4 task/test projection 全部完成前，客户端会安全回退到 v1.3。这样可以先发布兼容入口，不会让部分实现的 v1.4 破坏现有 session。
+当前 Go Service 在 trusted Runtime 构建成功后会协商 Protocol v1.4，并同时保留 workspace、test、task、event 的既有 projection；coverage provider 只在 trusted workspace 暴露。untrusted 或 provider 不可用时仍安全回退到 legacy protocol。v1.4 queued coverage 只代表已持久化、待执行，不代表已经生成 report。

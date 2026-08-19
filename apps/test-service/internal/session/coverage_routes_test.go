@@ -3,9 +3,11 @@ package session_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"unit-test-ide.local/test-service/internal/coveragedomain"
+	"unit-test-ide.local/test-service/internal/discovery"
 	"unit-test-ide.local/test-service/internal/protocol"
 	capabilitiesv14 "unit-test-ide.local/test-service/internal/protocolmodel/v1_4/capabilities"
 	"unit-test-ide.local/test-service/internal/session"
@@ -27,6 +29,21 @@ func TestV14CoverageNegotiationAndCapabilitiesRequireCoverageBackend(t *testing.
 	value, ok := capabilities.Response.Payload.(capabilitiesv14.CapabilitiesV14)
 	if capabilities.Response.Kind != "response" || !ok || !value.CoverageRun || !value.CoverageReport {
 		t.Fatalf("capabilities = %#v", capabilities.Response)
+	}
+}
+
+func TestV14CoverageSessionKeepsWorkspaceMethodsAvailable(t *testing.T) {
+	backend := &coverageBackend{fakeBackend: &fakeBackend{}}
+	active := session.NewWithCoverage("0123456789abcdef", "linux", "unix-socket", backend, backend)
+	if result := active.Handle(context.Background(), requestVersion(t, protocol.Version14, "handshake", map[string]any{
+		"token": "0123456789abcdef", "clientName": "test", "clientVersion": "0.5.0",
+		"supportedProtocolVersions": []string{protocol.Version14},
+	})); result.Response.Kind != "response" {
+		t.Fatalf("handshake = %#v", result.Response)
+	}
+	result := active.Handle(context.Background(), requestVersion(t, protocol.Version14, "workspace/inspect", map[string]any{}))
+	if result.Response.Kind != "response" || result.Response.Error != nil {
+		t.Fatalf("workspace/inspect = %#v", result.Response)
 	}
 }
 
@@ -80,6 +97,10 @@ func TestV14CoverageRoutesRejectUnsafePayloadBeforeBackend(t *testing.T) {
 type coverageBackend struct {
 	*fakeBackend
 	calls int
+}
+
+func (*coverageBackend) InspectWorkspace(context.Context) (discovery.Snapshot, error) {
+	return discovery.Snapshot{WorkspaceURI: "file:///workspace", Generation: strings.Repeat("a", 64)}, nil
 }
 
 func (*coverageBackend) StartTestDiscovery(context.Context, session.TestDiscoveryStart) (task.Task, error) {

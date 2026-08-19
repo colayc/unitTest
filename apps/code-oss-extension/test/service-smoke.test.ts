@@ -378,6 +378,10 @@ test("trusted real service completes handshake, capabilities, and workspace insp
     assert.equal(observations.connectedEndpoints.length, 1);
     assertPlatformEndpoint(session.endpoint);
 
+    const capabilities = await session.client.getCapabilities();
+    assert.equal("coverageRun" in capabilities && capabilities.coverageRun, true, "trusted production service must expose coverageRun");
+    assert.equal("coverageReport" in capabilities && capabilities.coverageReport, true, "trusted production service must expose coverageReport");
+
     const snapshot = await session.client.inspectWorkspace();
     assert.equal(snapshot.capabilities.workspaceInspect, true);
     assert.equal(Array.isArray(snapshot.projects), true);

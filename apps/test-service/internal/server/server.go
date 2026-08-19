@@ -339,10 +339,10 @@ func forwardSubscription(ctx context.Context, subscription *eventbroker.Subscrip
 func toProtocolEvent(event task.Event, version string) (protocol.Event, error) {
 	eventType := event.Type
 	payload := event.Payload
-	if version != protocol.Version13 && testDomainEvent(event.Type) {
+	if version != protocol.Version13 && version != protocol.Version14 && testDomainEvent(event.Type) {
 		eventType = task.EventTaskOutput
 		payload = compatibilityOutput(version)
-	} else if version == protocol.Version13 &&
+	} else if (version == protocol.Version13 || version == protocol.Version14) &&
 		event.Type == task.EventTaskDiagnostic {
 		var err error
 		payload, err = projectV13Diagnostic(event.Payload)
