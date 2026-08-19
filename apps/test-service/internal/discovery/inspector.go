@@ -35,6 +35,7 @@ type Snapshot struct {
 	Generation   string
 	Projects     []workspace.ProjectConfig
 	Profiles     []cmake.BuildProfile
+	CoverageProfiles []workspace.CoverageProfile
 	Toolchains   []toolchain.Instance
 	Diagnostics  []diagnostic.Diagnostic
 }
@@ -273,6 +274,7 @@ func (i *Inspector) Inspect(ctx context.Context) (Snapshot, error) {
 	return Snapshot{
 		WorkspaceID: i.root.ID, WorkspaceURI: i.root.URI, Generation: generation,
 		Projects: projects, Profiles: cloneProfiles(profiles),
+		CoverageProfiles: loaded.Config.Clone().CoverageProfiles,
 		Toolchains: cloneToolchains(instances), Diagnostics: cloneDiagnostics(diagnostics),
 	}, nil
 }

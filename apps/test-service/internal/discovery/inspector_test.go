@@ -186,6 +186,9 @@ func TestInspectorReportsUnavailableCoverageBaseProfile(t *testing.T) {
 	if !strings.Contains(diagnosticsText(snapshot), "COVERAGE_PROFILE_INVALID") {
 		t.Fatalf("diagnostics = %#v", snapshot.Diagnostics)
 	}
+	if !reflect.DeepEqual(snapshot.CoverageProfiles, config.CoverageProfiles) {
+		t.Fatalf("coverage profiles = %#v, want %#v", snapshot.CoverageProfiles, config.CoverageProfiles)
+	}
 
 	t.Run("valid reference", func(t *testing.T) {
 		config.CoverageProfiles[0].BaseBuildProfileID = "available-build"
