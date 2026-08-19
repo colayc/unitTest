@@ -260,3 +260,14 @@ test("tracked golden diagnostics keep the cross-compiler minimum contract", asyn
     }
   }
 });
+
+test("MSVC linker fixture uses a supported unresolved entrypoint option", async () => {
+  const cmake = await readFile(
+    join(fixtureRoot, "failures", "linker", "CMakeLists.txt"),
+    "utf8",
+  );
+  assert.match(
+    cmake,
+    /target_link_options\s*\(\s*linker_failure\s+PRIVATE\s+"\/entry:native_missing_symbol"\s*\)/,
+  );
+});
