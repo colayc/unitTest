@@ -15,6 +15,7 @@ const (
 	Version11 = "1.1"
 	Version12 = "1.2"
 	Version13 = "1.3"
+	Version14 = "1.4"
 	Version   = Version10
 )
 
@@ -67,7 +68,7 @@ type Event struct {
 
 func SupportedVersion(version string) bool {
 	return version == Version10 || version == Version11 ||
-		version == Version12 || version == Version13
+		version == Version12 || version == Version13 || version == Version14
 }
 
 func DecodeRequest(line []byte) (Request, error) {
