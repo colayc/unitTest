@@ -48,6 +48,13 @@ func ResolveCollector(toolchain coveragedomain.ToolchainSnapshot) (CollectorSpec
 		!nonEmpty(toolchain.Collector.Version) {
 		return CollectorSpec{}, ErrUnsupportedToolchain
 	}
+	if toolchain.Driver.Name == coveragedomain.DriverLLVMCov &&
+		(toolchain.Compiler.Version != toolchain.Driver.Version || toolchain.Driver.Version != toolchain.Collector.Version) {
+		return CollectorSpec{}, ErrUnsupportedToolchain
+	}
+	if toolchain.Driver.Name == coveragedomain.DriverGCov && toolchain.Compiler.Version != toolchain.Driver.Version {
+		return CollectorSpec{}, ErrUnsupportedToolchain
+	}
 
 	spec := CollectorSpec{Toolchain: toolchain}
 	switch {

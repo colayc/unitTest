@@ -85,6 +85,21 @@ func TestResolveCollectorRejectsUnsupportedOrIncompleteToolchains(t *testing.T) 
 			return value
 		}(),
 		"missing compiler version": func() coveragedomain.ToolchainSnapshot { value := base; value.Compiler.Version = ""; return value }(),
+		"llvm version mismatch": func() coveragedomain.ToolchainSnapshot {
+			value := base
+			value.Platform = coveragedomain.PlatformLinux
+			value.Compiler.Family = coveragedomain.CompilerFamilyClang
+			value.Driver.Name = coveragedomain.DriverLLVMCov
+			value.Driver.Version = "18.1.8"
+			value.Collector.Name = coveragedomain.CollectorLLVMCov
+			value.Collector.Version = "17.0.6"
+			return value
+		}(),
+		"gcov version mismatch": func() coveragedomain.ToolchainSnapshot {
+			value := base
+			value.Driver.Version = "14.2.0"
+			return value
+		}(),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := ResolveCollector(input); !errors.Is(err, ErrUnsupportedToolchain) {
