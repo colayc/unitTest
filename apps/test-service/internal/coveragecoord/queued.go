@@ -51,7 +51,7 @@ func NewQueuedAggregate(input QueuedInput) (QueuedAggregate, error) {
 		return QueuedAggregate{}, ErrInvalidQueuedInput
 	}
 	taskID, testRunID := input.NewID(), input.NewID()
-	if len(taskID) != 32 || len(testRunID) != 32 {
+	if len(taskID) != 32 || len(testRunID) != 32 || taskID == testRunID {
 		return QueuedAggregate{}, ErrInvalidQueuedInput
 	}
 	steps := queuedSteps()

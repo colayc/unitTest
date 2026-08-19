@@ -1,0 +1,104 @@
+package coveragecoord
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+)
+
+func TestCoordinatorEnqueueUsesTrustedDefaultsAndPersistsClosedAggregate(t *testing.T) {
+	created := time.Date(2026, 8, 19, 5, 6, 7, 123_000_000, time.FixedZone("local", 8*60*60))
+	store := &recordingCoverageStore{}
+	coordinator, err := NewCoordinator(store, fixedCoverageClock{at: created}, sequentialIDs("a", "b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := coordinator.Enqueue(context.Background(), QueuedInput{
+		Request:        validRequest(),
+		Selection:      validSelectionSnapshot(),
+		BuildProfileID: strings.Repeat("b", 64),
+		ToolchainID:    "gcc-linux",
+		Toolchain:      validToolchain(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Task.ID != strings.Repeat("a", 32) || result.Run.TaskID != result.Task.ID || result.TestRun.TaskID != result.Task.ID {
+		t.Fatalf("identity graph = %#v", result)
+	}
+	if !result.Task.CreatedAt.Equal(created.UTC()) || !result.Run.CreatedAt.Equal(created.UTC()) {
+		t.Fatalf("createdAt not normalized: task=%v run=%v", result.Task.CreatedAt, result.Run.CreatedAt)
+	}
+	if store.calls != 1 || len(result.Events) != 1 {
+		t.Fatalf("persist calls/events = %d/%d", store.calls, len(result.Events))
+	}
+}
+
+func TestCoordinatorEnqueuePreservesExplicitCreationTime(t *testing.T) {
+	created := time.Date(2026, 8, 19, 5, 6, 7, 0, time.UTC)
+	store := &recordingCoverageStore{}
+	coordinator, err := NewCoordinator(store, fixedCoverageClock{at: created.Add(time.Hour)}, sequentialIDs("c", "d"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := coordinator.Enqueue(context.Background(), QueuedInput{
+		Request:         validRequest(),
+		Selection:       validSelectionSnapshot(),
+		BuildProfileID:  strings.Repeat("b", 64),
+		ToolchainID:     "gcc-linux",
+		Toolchain:       validToolchain(),
+		CreatedAt:       created,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Task.CreatedAt.Equal(created) {
+		t.Fatalf("explicit createdAt = %v, want %v", result.Task.CreatedAt, created)
+	}
+}
+
+func TestCoordinatorRejectsInvalidConstructionAndStorageFailure(t *testing.T) {
+	if _, err := NewCoordinator(nil, fixedCoverageClock{}, sequentialIDs("e", "f")); !errors.Is(err, ErrInvalidCoordinator) {
+		t.Fatalf("nil store error = %v", err)
+	}
+	store := &recordingCoverageStore{err: errors.New("storage down")}
+	coordinator, err := NewCoordinator(store, fixedCoverageClock{at: time.Now().UTC()}, sequentialIDs("1", "2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coordinator.Enqueue(context.Background(), QueuedInput{
+		Request:         validRequest(),
+		Selection:       validSelectionSnapshot(),
+		BuildProfileID:  strings.Repeat("b", 64),
+		ToolchainID:     "gcc-linux",
+		Toolchain:       validToolchain(),
+	}); !errors.Is(err, store.err) {
+		t.Fatalf("storage error = %v, want %v", err, store.err)
+	}
+}
+
+func TestCoordinatorRejectsDuplicateAggregateIDs(t *testing.T) {
+	coordinator, err := NewCoordinator(&recordingCoverageStore{}, fixedCoverageClock{at: time.Now().UTC()}, sequentialIDs("a", "a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = coordinator.Enqueue(context.Background(), QueuedInput{
+		Request:         validRequest(),
+		Selection:       validSelectionSnapshot(),
+		BuildProfileID:  strings.Repeat("b", 64),
+		ToolchainID:     "gcc-linux",
+		Toolchain:       validToolchain(),
+	})
+	if !errors.Is(err, ErrInvalidQueuedInput) {
+		t.Fatalf("duplicate IDs error = %v", err)
+	}
+}
+
+type fixedCoverageClock struct{ at time.Time }
+
+func (clock fixedCoverageClock) Now() time.Time { return clock.at }
+
+func (clock fixedCoverageClock) After(time.Duration) <-chan time.Time { return make(chan time.Time) }

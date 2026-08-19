@@ -129,9 +129,15 @@ func sequentialIDs(values ...string) task.IDGenerator {
 	}
 }
 
-type recordingCoverageStore struct{ calls int }
+type recordingCoverageStore struct {
+	calls int
+	err   error
+}
 
 func (store *recordingCoverageStore) CreateCoverageTask(_ context.Context, input task.Task, steps []task.StepSnapshot, event task.EventDraft, _ coveragedomain.Run, _ testdomain.TestRun) (task.Task, []task.Event, error) {
 	store.calls++
+	if store.err != nil {
+		return task.Task{}, nil, store.err
+	}
 	return input, []task.Event{{Sequence: 1, EventDraft: event, ID: strings.Repeat("e", 32)}}, nil
 }
