@@ -15,7 +15,8 @@
       { "command": "unitTestIde.inspectWorkspace", "title": "Unit Test: Inspect Workspace" },
       { "command": "unitTestIde.runCoverage", "title": "Unit Test: Run with Coverage" },
       { "command": "unitTestIde.refreshCoverage", "title": "Unit Test: Refresh Coverage" },
-      { "command": "unitTestIde.openCoverageReport", "title": "Unit Test: Open Coverage Report" }
+      { "command": "unitTestIde.openCoverageReport", "title": "Unit Test: Open Coverage Report" },
+      { "command": "unitTestIde.openCoverageSource", "title": "Unit Test: Open Coverage Source" }
     ],
     "configuration": {
       "title": "Unit Test IDE",

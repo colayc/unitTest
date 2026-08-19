@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import {
   registerCoverageCommands,
@@ -9,6 +13,7 @@ import {
   type DisposableLike,
   type OutputChannelLike
 } from "../src/commands.js";
+import type { CoverageSourceSnapshotV14 } from "@unit-test-ide/test-client";
 import type { CoverageControllerState } from "../src/coverage-controller.js";
 import type { ExtensionProtocolClient } from "../src/protocol-client.js";
 
@@ -28,12 +33,15 @@ function setup(options: {
   trust?: "trusted" | "blocked-untrusted";
   state?: CoverageControllerState;
   client?: ExtensionProtocolClient;
+  workspaceRoot?: string;
+  pickSource?: CoverageSourceSnapshotV14;
 } = {}) {
-  const handlers = new Map<string, () => void | Promise<void>>();
+  const handlers = new Map<string, (...args: unknown[]) => void | Promise<void>>();
   const errors: string[] = [];
   const info: string[] = [];
   const output: string[] = [];
   let opened = "";
+  let openedSource = "";
   const host: CoverageCommandHost = {
     registerCommand(command, handler) {
       handlers.set(command, handler);
@@ -41,7 +49,9 @@ function setup(options: {
     },
     showErrorMessage(message) { errors.push(message); },
     showInformationMessage(message) { info.push(message); },
-    openCoverageHtml(html) { opened = html; }
+    openCoverageHtml(html) { opened = html; },
+    openCoverageSource(path) { openedSource = path; },
+    pickCoverageSource: options.pickSource ? async () => options.pickSource : undefined
   };
   const status: CommandStatus = {
     trustState: options.trust ?? "trusted",
@@ -56,8 +66,8 @@ function setup(options: {
   };
   const context: CommandContext = { subscriptions: [] };
   const channel: OutputChannelLike = { appendLine: (value) => output.push(value), dispose() {} };
-  registerCoverageCommands(context, controller, () => options.client, status, host, channel);
-  return { handlers, errors, info, output, get opened() { return opened; } };
+  registerCoverageCommands(context, controller, () => options.client, status, host, channel, () => options.workspaceRoot);
+  return { handlers, errors, info, output, get opened() { return opened; }, get openedSource() { return openedSource; } };
 }
 
 test("coverage commands fail closed when trust is lost", async () => {
@@ -108,4 +118,50 @@ test("openCoverageReport rejects duplicate HTML artifacts before reading bytes",
   await fixture.handlers.get("unitTestIde.openCoverageReport")!();
   assert.equal(reads, 0);
   assert.match(fixture.errors[0]!, /exactly one/);
+});
+
+test("openCoverageSource verifies the selected snapshot before handing it to the host", async () => {
+  const root = await mkdtemp(join(tmpdir(), "unit-test-coverage-command-"));
+  try {
+    const relative = "src/main.cpp";
+    const file = join(root, "src", "main.cpp");
+    await mkdir(join(root, "src"));
+    await writeFile(file, "int main() {}\n", "utf8");
+    const sha256 = createHash("sha256").update("int main() {}\n").digest("hex");
+    const fixture = setup({ workspaceRoot: root });
+    await fixture.handlers.get("unitTestIde.openCoverageSource")!({ uri: relative, sha256 });
+    assert.equal(fixture.errors.length, 0);
+    assert.equal(fixture.openedSource, file);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("openCoverageSource rejects malformed or unavailable snapshots before opening", async () => {
+  const root = await mkdtemp(join(tmpdir(), "unit-test-coverage-command-"));
+  try {
+    const fixture = setup({ workspaceRoot: root });
+    await fixture.handlers.get("unitTestIde.openCoverageSource")!({ uri: "../secret.cpp", sha256: "a".repeat(64) });
+    assert.equal(fixture.openedSource, "");
+    assert.match(fixture.errors[0]!, /coverage source/i);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("openCoverageSource lets the host pick from the current report when no argument is supplied", async () => {
+  const root = await mkdtemp(join(tmpdir(), "unit-test-coverage-command-"));
+  try {
+    const relative = "src/main.cpp";
+    const file = join(root, "src", "main.cpp");
+    await mkdir(join(root, "src"));
+    await writeFile(file, "int main() {}\n", "utf8");
+    const source = { uri: relative, sha256: createHash("sha256").update("int main() {}\n").digest("hex") };
+    const fixture = setup({ workspaceRoot: root, state: state({ sources: [source] }), pickSource: source });
+    await fixture.handlers.get("unitTestIde.openCoverageSource")!();
+    assert.equal(fixture.errors.length, 0);
+    assert.equal(fixture.openedSource, file);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

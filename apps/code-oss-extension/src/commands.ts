@@ -1,7 +1,9 @@
+import type { CoverageSourceSnapshotV14 } from "@unit-test-ide/test-client";
 import type { ServiceStatus, TrustState } from "./contracts.js";
 import type { ExtensionProtocolClient } from "./protocol-client.js";
 import type { CoverageControllerState } from "./coverage-controller.js";
 import { openCoverageHtml } from "./coverage-viewer.js";
+import { openCoverageSource as verifyAndOpenCoverageSource } from "./coverage-sources.js";
 import { redactServiceError } from "./service-resources.js";
 
 export interface DisposableLike {
@@ -46,6 +48,8 @@ export interface CommandHost {
 
 export interface CoverageCommandHost extends CommandHost {
   openCoverageHtml?: (html: string) => void | PromiseLike<void>;
+  openCoverageSource?: (path: string) => void | PromiseLike<void>;
+  pickCoverageSource?: (sources: readonly CoverageSourceSnapshotV14[]) => CoverageSourceSnapshotV14 | undefined | PromiseLike<CoverageSourceSnapshotV14 | undefined>;
   showInformationMessage?: (message: string) => void | PromiseLike<unknown>;
 }
 
@@ -56,6 +60,14 @@ export interface CoverageCommandController {
 }
 
 export type ClientProvider = () => ExtensionProtocolClient | undefined;
+
+function decodeCoverageSource(value: unknown): CoverageSourceSnapshotV14 | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const candidate = value as { uri?: unknown; sha256?: unknown };
+  return typeof candidate.uri === "string" && typeof candidate.sha256 === "string"
+    ? { uri: candidate.uri, sha256: candidate.sha256 }
+    : undefined;
+}
 
 const BLOCKED_MESSAGES: Record<Exclude<TrustState, "trusted">, string> = {
   "no-workspace": "Unit Test: Open a workspace to use the service.",
@@ -167,7 +179,8 @@ export function registerCoverageCommands(
   clientProvider: ClientProvider,
   status: CommandStatus,
   host: CoverageCommandHost,
-  output: OutputChannelLike
+  output: OutputChannelLike,
+  workspaceRoot?: () => string | undefined
 ): void {
   const requireTrusted = async (): Promise<boolean> => {
     if (!status.isActive()) return false;
@@ -233,9 +246,38 @@ export function registerCoverageCommands(
     }
   };
 
+  const openSource = async (value?: unknown): Promise<void> => {
+    if (!await requireTrusted()) return;
+    if (!host.openCoverageSource) {
+      await host.showErrorMessage("Unit Test: Coverage source viewer is unavailable.");
+      return;
+    }
+    const root = workspaceRoot?.();
+    let source = decodeCoverageSource(value);
+    if (value === undefined) {
+      const candidates = controller.getState().sources ?? [];
+      if (candidates.length === 0 || !host.pickCoverageSource) {
+        await host.showErrorMessage("Unit Test: No coverage sources are available to open.");
+        return;
+      }
+      source = await host.pickCoverageSource(candidates);
+      if (!source) return;
+    }
+    if (!root || !source) {
+      await host.showErrorMessage("Unit Test: A valid coverage source selection is required.");
+      return;
+    }
+    try {
+      await verifyAndOpenCoverageSource({ openCoverageSource: host.openCoverageSource }, root, source);
+    } catch (error) {
+      await host.showErrorMessage(redactServiceError(error, []).message);
+    }
+  };
+
   context.subscriptions.push(
     host.registerCommand("unitTestIde.runCoverage", runCoverage),
     host.registerCommand("unitTestIde.refreshCoverage", refreshCoverage),
-    host.registerCommand("unitTestIde.openCoverageReport", openReport)
+    host.registerCommand("unitTestIde.openCoverageReport", openReport),
+    host.registerCommand("unitTestIde.openCoverageSource", openSource)
   );
 }

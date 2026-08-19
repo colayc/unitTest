@@ -21,7 +21,8 @@ test("extension manifest declares workspace extension and safe commands", async 
       "unitTestIde.inspectWorkspace",
       "unitTestIde.runCoverage",
       "unitTestIde.refreshCoverage",
-      "unitTestIde.openCoverageReport"
+      "unitTestIde.openCoverageReport",
+      "unitTestIde.openCoverageSource"
     ]
   );
 });

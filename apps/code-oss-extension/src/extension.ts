@@ -1,4 +1,5 @@
 import { basename, isAbsolute, join } from "node:path";
+import type { CoverageSourceSnapshotV14 } from "@unit-test-ide/test-client";
 import type * as vscodeTypes from "vscode";
 import type { ServiceStatus, TrustState } from "./contracts.js";
 import {
@@ -39,6 +40,7 @@ export interface ExtensionHost extends CommandHost {
   createStatusBarItem(): StatusBarLike;
   openCoverageHtml?: (html: string) => void | PromiseLike<void>;
   openCoverageSource?: (path: string) => void | PromiseLike<void>;
+  pickCoverageSource?: (sources: readonly CoverageSourceSnapshotV14[]) => CoverageSourceSnapshotV14 | undefined | PromiseLike<CoverageSourceSnapshotV14 | undefined>;
   createTestController?: TestingApiHost["createTestController"];
   onDidChangeWorkspaceFolders(listener: () => void | Promise<void>): DisposableLike;
   onDidGrantWorkspaceTrust(listener: () => void | Promise<void>): DisposableLike;
@@ -289,7 +291,8 @@ class ExtensionController {
       () => this.#manager.session?.client,
       this.#status,
       this.host,
-      this.#output
+      this.#output,
+      () => this.host.workspaceSnapshot().workspaceRoot
     );
     this.host.context.subscriptions.push(
       this.host.onDidChangeWorkspaceFolders(() => this.#enqueueReconcile()),
@@ -480,6 +483,13 @@ function createVSCodeHost(
     openCoverageSource: async (path) => {
       const document = await vscode.workspace.openTextDocument(vscode.Uri.file(path));
       await vscode.window.showTextDocument(document, vscode.ViewColumn.One);
+    },
+    pickCoverageSource: async (sources) => {
+      const picked = await vscode.window.showQuickPick(
+        sources.map((source) => ({ label: source.uri, description: source.sha256, source })),
+        { placeHolder: "Select a coverage source" }
+      );
+      return picked?.source;
     },
     createStatusBarItem: () => vscode.window.createStatusBarItem(
       "unitTestIde.status",
