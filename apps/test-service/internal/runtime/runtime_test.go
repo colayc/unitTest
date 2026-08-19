@@ -36,10 +36,12 @@ import (
 
 func TestUntrustedRuntimeAllowsNoWorkspaceMethods(t *testing.T) {
 	root := t.TempDir()
+	coverage := &runtimeCoverageBackend{}
 	active, err := Open(Config{
 		DataDir: filepath.Join(root, "data"), ServiceExecutable: os.Args[0],
 		WorkspaceRoot: root, TrustedWorkspace: false, Platform: platformForTest(),
-		dependencies: testDependencies(&recordingRunner{}, nil),
+		CoverageBackend: coverage,
+		dependencies:    testDependencies(&recordingRunner{}, nil),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -75,6 +77,9 @@ func TestUntrustedRuntimeAllowsNoWorkspaceMethods(t *testing.T) {
 	if _, err := active.GetCoverageReport(context.Background(), strings.Repeat("c", 32)); !errors.Is(err, build.ErrWorkspaceTrustRequired) {
 		t.Fatalf("GetCoverageReport() error = %v, want trust error", err)
 	}
+	if active.CoverageBackend() != nil {
+		t.Fatal("untrusted runtime exposed a coverage provider")
+	}
 }
 
 func TestTrustedRuntimeDelegatesWorkspaceMethodsToCoordinator(t *testing.T) {
@@ -98,6 +103,7 @@ func TestTrustedRuntimeDelegatesWorkspaceMethodsToCoordinator(t *testing.T) {
 		targets: []cmake.Target{{ID: strings.Repeat("d", 64), Name: "tests"}},
 		started: task.Task{ID: strings.Repeat("e", 32), Kind: task.KindCMakeBuild},
 	}
+	coverage := &runtimeCoverageBackend{}
 	deps.newCoordinator = func(config build.CoordinatorConfig) (runtimeCoordinator, error) {
 		fake.config = config
 		return fake, nil
@@ -105,6 +111,7 @@ func TestTrustedRuntimeDelegatesWorkspaceMethodsToCoordinator(t *testing.T) {
 	active, err := Open(Config{
 		DataDir: filepath.Join(base, "data"), ServiceExecutable: os.Args[0],
 		WorkspaceRoot: workspaceRoot, TrustedWorkspace: true,
+		CoverageBackend:    coverage,
 		DevCMakeExecutable: os.Args[0], Platform: platformForTest(),
 		dependencies: deps,
 	})
@@ -128,6 +135,9 @@ func TestTrustedRuntimeDelegatesWorkspaceMethodsToCoordinator(t *testing.T) {
 		fake.config.Configurations == nil || fake.config.Locks == nil ||
 		fake.config.ServiceDataRoot == "" {
 		t.Fatalf("Coordinator config = %#v", fake.config)
+	}
+	if active.CoverageBackend() != coverage {
+		t.Fatal("trusted runtime did not retain the explicitly injected coverage provider")
 	}
 }
 
@@ -464,18 +474,18 @@ func TestRuntimeTestDiscoveryRebindsOneStableGenerationAfterBuild(
 	}
 	currentGeneration := strings.Repeat("a", 64)
 	coordinator := &fakeRuntimeCoordinator{
-		targets: []cmake.Target{target},
+		targets:    []cmake.Target{target},
 		targetErrs: []error{build.ErrWorkspaceChanged, nil},
 		snapshot: discovery.Snapshot{
 			Generation: currentGeneration,
-			Projects: []workspace.ProjectConfig{project},
-			Profiles: []cmake.BuildProfile{profile},
+			Projects:   []workspace.ProjectConfig{project},
+			Profiles:   []cmake.BuildProfile{profile},
 			Toolchains: []toolchain.Instance{{ID: "preset-toolchain"}},
 		},
 	}
 	factory := newTaskDiscoveryInputFactory(testCoordinatorConfig{
 		Build: coordinator, Store: store,
-		Installation: cmake.Installation{Identity: cmakeIdentity},
+		Installation:  cmake.Installation{Identity: cmakeIdentity},
 		WorkspaceRoot: workspace.Root{ID: workspaceID, NativePath: workspaceRoot},
 		BuildDataRoot: serviceRoot, NewID: task.NewID,
 	})
@@ -543,14 +553,14 @@ func TestRuntimeTestDiscoveryRebindsAcrossTransientGenerationChurn(
 		},
 		snapshot: discovery.Snapshot{
 			Generation: currentGeneration,
-			Projects: []workspace.ProjectConfig{project},
-			Profiles: []cmake.BuildProfile{profile},
+			Projects:   []workspace.ProjectConfig{project},
+			Profiles:   []cmake.BuildProfile{profile},
 			Toolchains: []toolchain.Instance{{ID: "preset-toolchain"}},
 		},
 	}
 	factory := newTaskDiscoveryInputFactory(testCoordinatorConfig{
 		Build: coordinator, Store: store,
-		Installation: cmake.Installation{Identity: cmakeIdentity},
+		Installation:  cmake.Installation{Identity: cmakeIdentity},
 		WorkspaceRoot: workspace.Root{ID: workspaceID, NativePath: workspaceRoot},
 		BuildDataRoot: serviceRoot, NewID: task.NewID,
 	})
@@ -1816,6 +1826,24 @@ type recordingCloser struct {
 func (closer *recordingCloser) Close() error {
 	closer.closeCalls.Add(1)
 	return nil
+}
+
+type runtimeCoverageBackend struct{}
+
+func (*runtimeCoverageBackend) StartCoverageRun(context.Context, session.CoverageRunStart) (task.Task, coveragedomain.Run, testdomain.TestRun, error) {
+	return task.Task{}, coveragedomain.Run{}, testdomain.TestRun{}, task.ErrStorageUnavailable
+}
+
+func (*runtimeCoverageBackend) GetCoverageRun(context.Context, string) (coveragedomain.Run, error) {
+	return coveragedomain.Run{}, task.ErrStorageUnavailable
+}
+
+func (*runtimeCoverageBackend) ListCoverageRuns(context.Context, coveragedomain.RunPageRequest) (coveragedomain.RunPage, error) {
+	return coveragedomain.RunPage{}, task.ErrStorageUnavailable
+}
+
+func (*runtimeCoverageBackend) GetCoverageReport(context.Context, string) (coveragedomain.Report, error) {
+	return coveragedomain.Report{}, task.ErrStorageUnavailable
 }
 
 type trackedRuntimeStore struct {

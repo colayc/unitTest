@@ -41,6 +41,7 @@ type Config struct {
 	ServiceExecutable  string
 	WorkspaceRoot      string
 	TrustedWorkspace   bool
+	CoverageBackend    session.CoverageBackend
 	CMakeBundleRoot    string
 	DevCMakeExecutable string
 	Platform           string
@@ -66,6 +67,7 @@ type Runtime struct {
 	simulationDirectory string
 	workspaceRoot       workspace.Root
 	trustedWorkspace    bool
+	coverageBackend     session.CoverageBackend
 
 	shutdownMu          sync.Mutex
 	shutdownRunning     bool
@@ -440,11 +442,28 @@ func Open(config Config) (*Runtime, error) {
 	return &Runtime{
 		store: store, artifacts: artifacts, broker: broker, manager: manager, runner: runner,
 		coordinator: coordinator, tests: tests,
+		coverageBackend: func() session.CoverageBackend {
+			if config.TrustedWorkspace {
+				return config.CoverageBackend
+			}
+			return nil
+		}(),
 		testResources: testResources,
 		lock:          locked, guard: guard, grace: grace,
 		serviceExecutable: config.ServiceExecutable, simulationDirectory: layout.Root,
 		workspaceRoot: workspaceRoot, trustedWorkspace: config.TrustedWorkspace,
 	}, nil
+}
+
+// CoverageBackend returns the explicitly injected provider only for a trusted
+// workspace. Runtime does not infer or construct a provider from ordinary
+// build/test capabilities; callers must supply a real execution implementation
+// before the server can negotiate Protocol v1.4 coverage.
+func (r *Runtime) CoverageBackend() session.CoverageBackend {
+	if r == nil || !r.trustedWorkspace {
+		return nil
+	}
+	return r.coverageBackend
 }
 
 func clockNow(clock task.Clock) time.Time {
