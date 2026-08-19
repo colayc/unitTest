@@ -11,6 +11,7 @@ import (
 	"unit-test-ide.local/test-service/internal/artifactstore"
 	"unit-test-ide.local/test-service/internal/build"
 	"unit-test-ide.local/test-service/internal/cmake"
+	"unit-test-ide.local/test-service/internal/coveragecoord"
 	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/discovery"
 	"unit-test-ide.local/test-service/internal/eventbroker"
@@ -65,6 +66,7 @@ type Runtime struct {
 	grace               time.Duration
 	serviceExecutable   string
 	simulationDirectory string
+	platform            string
 	workspaceRoot       workspace.Root
 	trustedWorkspace    bool
 	coverageBackend     session.CoverageBackend
@@ -82,6 +84,7 @@ type runtimeStore interface {
 	task.TestCatalogRepository
 	task.TestRunRepository
 	task.CoverageRepository
+	task.CoverageTaskStore
 	task.QueuedPlanStore
 	FailQueuedBuild(context.Context, string, string, time.Time) (task.Task, []task.Event, error)
 	FailQueuedTask(context.Context, string, string, time.Time) (task.Task, []task.Event, error)
@@ -439,7 +442,7 @@ func Open(config Config) (*Runtime, error) {
 			return failTrustedRuntime(err)
 		}
 	}
-	return &Runtime{
+	runtimeValue := &Runtime{
 		store: store, artifacts: artifacts, broker: broker, manager: manager, runner: runner,
 		coordinator: coordinator, tests: tests,
 		coverageBackend: func() session.CoverageBackend {
@@ -450,15 +453,30 @@ func Open(config Config) (*Runtime, error) {
 		}(),
 		testResources: testResources,
 		lock:          locked, guard: guard, grace: grace,
-		serviceExecutable: config.ServiceExecutable, simulationDirectory: layout.Root,
+		serviceExecutable: config.ServiceExecutable, simulationDirectory: layout.Root, platform: config.Platform,
 		workspaceRoot: workspaceRoot, trustedWorkspace: config.TrustedWorkspace,
-	}, nil
+	}
+	if runtimeValue.trustedWorkspace && runtimeValue.coverageBackend == nil {
+		coverageCoordinator, err := coveragecoord.NewCoordinator(store, config.Clock, newID)
+		if err != nil {
+			return failArtifacts(err)
+		}
+		queuedBackend, err := coveragecoord.NewQueuedBackend(coverageCoordinator, store)
+		if err != nil {
+			return failArtifacts(err)
+		}
+		coverageBackend, err := newRuntimeCoverageBackend(queuedBackend, store, runtimeValue.resolveCoverageStart)
+		if err != nil {
+			return failArtifacts(err)
+		}
+		runtimeValue.coverageBackend = coverageBackend
+	}
+	return runtimeValue, nil
 }
 
-// CoverageBackend returns the explicitly injected provider only for a trusted
-// workspace. Runtime does not infer or construct a provider from ordinary
-// build/test capabilities; callers must supply a real execution implementation
-// before the server can negotiate Protocol v1.4 coverage.
+// CoverageBackend returns a provider only for a trusted workspace. Tests may
+// inject an explicit provider; production Runtime constructs the queue-backed
+// provider from its trusted store and workspace/build snapshot.
 func (r *Runtime) CoverageBackend() session.CoverageBackend {
 	if r == nil || !r.trustedWorkspace {
 		return nil
