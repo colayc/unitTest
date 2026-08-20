@@ -8,6 +8,7 @@ import (
 	"io"
 	"reflect"
 	"sync"
+	"time"
 
 	"unit-test-ide.local/test-service/internal/build"
 	"unit-test-ide.local/test-service/internal/coveragellvm"
@@ -23,6 +24,11 @@ type TaskResumer interface {
 	ResumeQueued(context.Context, task.ResumeRequest) (task.Task, error)
 }
 
+type TaskController interface {
+	TaskResumer
+	Cancel(context.Context, string) (task.Task, error)
+}
+
 type Store interface {
 	task.CoverageRepository
 	task.TestRunRepository
@@ -31,7 +37,13 @@ type Store interface {
 }
 
 type BuildPreparer interface {
-	PreparePlan(context.Context, build.StartRequest) (*build.PreparedPlan, error)
+	PreparePlan(context.Context, build.StartRequest) (PreparedBuild, error)
+}
+
+type PreparedBuild interface {
+	testrun.PreparedBuild
+	CoverageBinaryDir() string
+	AttachCoverageToolset(*coveragellvm.Toolset) error
 }
 
 type EmbeddedTestPreparer interface {
@@ -58,7 +70,7 @@ type Adapter interface {
 }
 
 type Config struct {
-	Tasks         TaskResumer
+	Tasks         TaskController
 	Store         Store
 	Build         BuildPreparer
 	Tests         EmbeddedTestPreparer
@@ -67,6 +79,7 @@ type Config struct {
 	ExecutionRoot string
 	Clock         task.Clock
 	NewID         task.IDGenerator
+	CloseTimeout  time.Duration
 }
 
 type liveExecution interface {
@@ -85,6 +98,8 @@ type Coordinator struct {
 	executions map[string]liveExecution
 	closed     bool
 	preparing  map[string]chan struct{}
+	closeDone  chan struct{}
+	closeErr   error
 }
 
 func nilPort(value any) bool {

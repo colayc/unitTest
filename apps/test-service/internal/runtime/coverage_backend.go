@@ -12,6 +12,7 @@ import (
 	"unit-test-ide.local/test-service/internal/cmake"
 	"unit-test-ide.local/test-service/internal/coveragecoord"
 	"unit-test-ide.local/test-service/internal/coveragedomain"
+	"unit-test-ide.local/test-service/internal/coveragellvm"
 	"unit-test-ide.local/test-service/internal/session"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/testdomain"
@@ -217,6 +218,7 @@ func coverageToolchainSnapshot(instance toolchain.Instance, platform string) (co
 		result.Compiler.Family = coveragedomain.CompilerFamilyClangCL
 		result.Driver = coveragedomain.DriverSnapshot{Name: coveragedomain.DriverLLVMCov, Version: instance.Version}
 		result.Collector = coveragedomain.CollectorSnapshot{Name: coveragedomain.CollectorLLVMCov, Version: instance.Version}
+		result.InstrumentationFingerprint = coveragellvm.InstrumentationFingerprint()
 	case result.Platform == coveragedomain.PlatformLinux && instance.Family == toolchain.FamilyGCC:
 		result.Compiler.Family = coveragedomain.CompilerFamilyGCC
 		result.Driver = coveragedomain.DriverSnapshot{Name: coveragedomain.DriverGCov, Version: instance.Version}
@@ -231,14 +233,14 @@ func coverageToolchainSnapshot(instance toolchain.Instance, platform string) (co
 	if result.Architecture == "" {
 		return coveragedomain.ToolchainSnapshot{}, coveragedomain.ErrInvalidToolchain
 	}
-	identity, _ := json.Marshal(struct {
-		ID      string
-		Family  toolchain.Family
-		Version string
-		Profile string
-	}{instance.ID, instance.Family, instance.Version, result.NormalizerVersion})
-	sum := sha256.Sum256(identity)
-	result.InstrumentationFingerprint = hex.EncodeToString(sum[:])
+	if result.InstrumentationFingerprint == "" {
+		identity, _ := json.Marshal(struct {
+			Family   toolchain.Family
+			Contract string
+		}{instance.Family, result.NormalizerVersion})
+		sum := sha256.Sum256(identity)
+		result.InstrumentationFingerprint = hex.EncodeToString(sum[:])
+	}
 	return result, nil
 }
 

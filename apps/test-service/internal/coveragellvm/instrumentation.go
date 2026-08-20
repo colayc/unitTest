@@ -35,6 +35,16 @@ type instrumentationRootPin struct {
 	native nativeFileIdentity
 }
 
+// InstrumentationFingerprint is the stable identity of the exact retained
+// clang-cl coverage instrumentation contract. Toolchain identity and version
+// are deliberately validated separately by the execution owner.
+func InstrumentationFingerprint() string {
+	digest := sha256.Sum256([]byte(instrumentationContents))
+	digestHex := hex.EncodeToString(digest[:])
+	fingerprint := sha256.Sum256([]byte(instrumentationVersion + "\x00" + digestHex))
+	return hex.EncodeToString(fingerprint[:])
+}
+
 func WriteInstrumentation(taskRoot string) (Instrumentation, error) {
 	if taskRoot == "" || strings.ContainsRune(taskRoot, 0) || !filepath.IsAbs(taskRoot) || filepath.Clean(taskRoot) != taskRoot {
 		return Instrumentation{}, ErrInvalidToolset
@@ -90,11 +100,10 @@ func WriteInstrumentation(taskRoot string) (Instrumentation, error) {
 	if err != nil || !published.Mode().IsRegular() || published.Mode()&os.ModeSymlink != 0 {
 		return Instrumentation{}, errors.Join(ErrInvalidToolset, errors.New("instrumentation publication is not regular"))
 	}
-	fingerprintHash := sha256.Sum256([]byte(instrumentationVersion + "\x00" + digest))
 	return Instrumentation{
 		IncludePath: finalPath,
 		SHA256:      digest,
-		Fingerprint: hex.EncodeToString(fingerprintHash[:]),
+		Fingerprint: InstrumentationFingerprint(),
 	}, nil
 }
 

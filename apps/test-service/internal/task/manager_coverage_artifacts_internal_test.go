@@ -1,6 +1,7 @@
 package task
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"testing"
@@ -8,6 +9,50 @@ import (
 
 	"unit-test-ide.local/test-service/internal/diagnostic"
 )
+
+func TestCoverageProcessOutputIsPrivateToResultObserver(t *testing.T) {
+	sentinel := []byte(`C:\private\build\raw.profraw --token=coverage-secret`)
+	sink := &coverageOnlyRecordingSink{}
+	observer := &coveragePrivateObserver{}
+	manager := &Manager{
+		clock: RealClock{}, outputFlushInterval: time.Hour,
+	}
+	current := &activeTask{
+		task: Task{
+			ID: "22222222222222222222222222222222", Kind: KindCoverageRun,
+			Status: StatusRunning, ActiveStep: "coverage-normalize",
+		},
+		plan: ExecutionPlan{Version: 1, Steps: []ExecutionStep{{
+			ID: "coverage-normalize", Kind: StepCoverageNormalize,
+		}}},
+		resultInterpreter: observer,
+		artifactSink:      sink,
+		execution:         newExecutionSignal(),
+		timerStop:         make(chan struct{}),
+	}
+	manager.acceptOutput(current, ProcessOutput{
+		Source: "llvm-cov", Stream: "stdout", Data: sentinel,
+	}, map[string]*activeTask{current.task.ID: current})
+	close(current.timerStop)
+	if !bytes.Equal(observer.output, sentinel) {
+		t.Fatalf("private observer output = %q, want sentinel", observer.output)
+	}
+	if len(sink.outputs) != 0 || current.bufferedBytes != 0 || len(current.segments) != 0 {
+		t.Fatalf("raw coverage output reached generic persistence: sink=%q buffered=%d segments=%d",
+			sink.outputs, current.bufferedBytes, len(current.segments))
+	}
+}
+
+type coveragePrivateObserver struct{ output []byte }
+
+func (*coveragePrivateObserver) Interpret(context.Context, Task, ExecutionStep, ProcessResult) (StepVerdict, error) {
+	return StepVerdictSucceeded, nil
+}
+
+func (observer *coveragePrivateObserver) ObserveOutput(_ context.Context, _ Task, _ ExecutionStep, output ProcessOutput) error {
+	observer.output = append(observer.output, output.Data...)
+	return nil
+}
 
 func TestCoverageTaskArtifactsAreOwnedOnlyByCompletionPreparer(t *testing.T) {
 	sink := &coverageOnlyRecordingSink{}
@@ -48,9 +93,11 @@ func (writer coverageOnlyArtifactWriter) OpenTask(context.Context, string, Kind)
 type coverageOnlyRecordingSink struct {
 	jsonKinds     []string
 	finalizeCalls int
+	outputs       [][]byte
 }
 
-func (*coverageOnlyRecordingSink) AppendOutput(context.Context, string, string, []byte) error {
+func (sink *coverageOnlyRecordingSink) AppendOutput(_ context.Context, _, _ string, data []byte) error {
+	sink.outputs = append(sink.outputs, append([]byte(nil), data...))
 	return nil
 }
 

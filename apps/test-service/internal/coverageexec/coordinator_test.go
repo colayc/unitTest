@@ -11,11 +11,15 @@ import (
 	"time"
 
 	"unit-test-ide.local/test-service/internal/artifactstore"
+	"unit-test-ide.local/test-service/internal/build"
+	"unit-test-ide.local/test-service/internal/cmake"
 	"unit-test-ide.local/test-service/internal/coveragecoord"
 	"unit-test-ide.local/test-service/internal/coveragedomain"
+	"unit-test-ide.local/test-service/internal/coveragellvm"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/taskstore"
 	"unit-test-ide.local/test-service/internal/testdomain"
+	"unit-test-ide.local/test-service/internal/toolchain"
 	"unit-test-ide.local/test-service/internal/workspace"
 )
 
@@ -33,6 +37,22 @@ func TestCoordinatorResumeRejectsNonCoverageTask(t *testing.T) {
 		Status: task.StatusQueued,
 	}); !errors.Is(err, task.ErrInvalidArgument) {
 		t.Fatalf("Resume() error = %v", err)
+	}
+}
+
+func TestCoordinatorAcceptsOnlyTheRetainedInstrumentationContract(t *testing.T) {
+	fingerprint := coveragellvm.InstrumentationFingerprint()
+	snapshot := coveragedomain.ToolchainSnapshot{InstrumentationFingerprint: fingerprint}
+	instrumentation := coveragellvm.Instrumentation{Fingerprint: fingerprint}
+	if err := validateInstrumentationContract(snapshot, instrumentation); err != nil {
+		t.Fatalf("matching producer/adapter contract = %v", err)
+	}
+	instrumentation.Fingerprint = strings.Repeat("f", 64)
+	if instrumentation.Fingerprint == fingerprint {
+		instrumentation.Fingerprint = strings.Repeat("e", 64)
+	}
+	if err := validateInstrumentationContract(snapshot, instrumentation); !errors.Is(err, task.ErrInvalidArgument) {
+		t.Fatalf("mismatched adapter contract error = %v", err)
 	}
 }
 
@@ -60,6 +80,114 @@ func TestCoordinatorDuplicateResumeReturnsTheSingleLiveTask(t *testing.T) {
 	if store.getCalls != 2 || len(coordinator.executions) != 1 {
 		t.Fatalf("duplicate ownership = gets %d, executions %d", store.getCalls, len(coordinator.executions))
 	}
+}
+
+func TestCoordinatorCloseCancelsWaitsThenReleasesActiveExecutionOnce(t *testing.T) {
+	taskID := strings.Repeat("1", 32)
+	controller := &blockingCloseController{
+		cancelled: make(chan struct{}), allowFinish: make(chan struct{}),
+	}
+	live := &closeTrackedExecution{}
+	coordinator := &Coordinator{
+		config:     Config{Tasks: controller},
+		executions: map[string]liveExecution{taskID: live},
+		preparing:  make(map[string]chan struct{}),
+	}
+	results := make(chan error, 2)
+	go func() { results <- coordinator.Close() }()
+	go func() { results <- coordinator.Close() }()
+	select {
+	case <-controller.cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not cancel the active Task")
+	}
+	if got := live.closeCount(); got != 0 {
+		t.Fatalf("execution released before cancellation completed: %d", got)
+	}
+	close(controller.allowFinish)
+	for range 2 {
+		select {
+		case err := <-results:
+			if err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("Close did not wait boundedly for Task completion")
+		}
+	}
+	if controller.cancelCount() != 1 || live.closeCount() != 1 {
+		t.Fatalf("close ownership: cancels=%d releases=%d", controller.cancelCount(), live.closeCount())
+	}
+	if _, err := coordinator.Resume(context.Background(), task.Task{
+		ID: taskID, Kind: task.KindCoverageRun, Status: task.StatusQueued,
+	}); !errors.Is(err, task.ErrStorageUnavailable) {
+		t.Fatalf("Resume after Close error = %v", err)
+	}
+}
+
+type blockingCloseController struct {
+	mu          sync.Mutex
+	cancels     int
+	cancelled   chan struct{}
+	allowFinish chan struct{}
+}
+
+func (*blockingCloseController) ResumeQueued(context.Context, task.ResumeRequest) (task.Task, error) {
+	return task.Task{}, task.ErrStorageUnavailable
+}
+
+func (controller *blockingCloseController) Cancel(ctx context.Context, id string) (task.Task, error) {
+	controller.mu.Lock()
+	controller.cancels++
+	if controller.cancels == 1 {
+		close(controller.cancelled)
+	}
+	controller.mu.Unlock()
+	select {
+	case <-controller.allowFinish:
+		return task.Task{ID: id, Kind: task.KindCoverageRun, Status: task.StatusFinished}, nil
+	case <-ctx.Done():
+		return task.Task{}, ctx.Err()
+	}
+}
+
+func (controller *blockingCloseController) cancelCount() int {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	return controller.cancels
+}
+
+type closeTrackedExecution struct {
+	mu     sync.Mutex
+	closes int
+}
+
+func (*closeTrackedExecution) AfterStep(context.Context, task.Task, task.ExecutionStep, task.StepResult) (task.Continuation, error) {
+	return task.Continuation{}, nil
+}
+func (*closeTrackedExecution) Interpret(context.Context, task.Task, task.ExecutionStep, task.ProcessResult) (task.StepVerdict, error) {
+	return task.StepVerdictSucceeded, nil
+}
+func (*closeTrackedExecution) ObserveOutput(context.Context, task.Task, task.ExecutionStep, task.ProcessOutput) error {
+	return nil
+}
+func (*closeTrackedExecution) DrainDomainEvents() []task.DomainEvent { return nil }
+func (*closeTrackedExecution) ExecuteServiceAction(context.Context, task.Task, task.ExecutionStep) (task.StepResult, error) {
+	return task.StepResult{}, nil
+}
+func (*closeTrackedExecution) PrepareCompletion(context.Context, task.Task, time.Time, task.Outcome, task.ArtifactSink, task.IDGenerator) (task.DomainCompletion, error) {
+	return task.DomainCompletion{}, nil
+}
+func (execution *closeTrackedExecution) Close() error {
+	execution.mu.Lock()
+	execution.closes++
+	execution.mu.Unlock()
+	return nil
+}
+func (execution *closeTrackedExecution) closeCount() int {
+	execution.mu.Lock()
+	defer execution.mu.Unlock()
+	return execution.closes
 }
 
 type getOnlyCoordinatorStore struct {
@@ -235,13 +363,8 @@ func TestCoordinatorUnsupportedCompletesOneRealSQLiteAggregate(t *testing.T) {
 		t.Fatalf("finished TestRun = %#v, %v", testRun, err)
 	}
 	page, err := store.ListArtifacts(ctx, persisted.ID, "", 100)
-	if err != nil || len(page.Items) != 3 {
+	if err != nil || len(page.Items) != 0 {
 		t.Fatalf("coverage artifacts = %#v, %v", page.Items, err)
-	}
-	for _, artifact := range page.Items {
-		if artifact.Kind != "stdout" && artifact.Kind != "stderr" && artifact.Kind != "diagnostics" {
-			t.Fatalf("unsupported completion published %q", artifact.Kind)
-		}
 	}
 	if publisher.count(task.EventTestRunFinished) != 1 ||
 		publisher.count(task.EventCoverageRunFinished) != 1 ||
@@ -251,9 +374,252 @@ func TestCoordinatorUnsupportedCompletesOneRealSQLiteAggregate(t *testing.T) {
 	}
 }
 
+func TestCoordinatorPreparationFailureCompletesRealAggregate(t *testing.T) {
+	fixture := newSQLiteCoverageFixture(t, unusedProcessFactory{})
+	preparer := &scriptedBuildPreparer{failureAt: 1}
+	coordinator, err := NewCoordinator(Config{
+		Tasks: fixture.manager, Store: fixture.store,
+		Build: preparer, Tests: unusedEmbeddedPreparer{},
+		Adapter: unusedCoverageAdapter{}, WorkspaceRoot: fixture.workspaceRoot,
+		ExecutionRoot: fixture.executionRoot, Clock: task.RealClock{}, NewID: task.NewID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = coordinator.Close() })
+	if _, err := coordinator.Resume(context.Background(), fixture.persisted); err != nil {
+		t.Fatalf("Resume preparation failure = %v, want terminalization", err)
+	}
+	finished := fixture.awaitFinished(t)
+	if finished.Outcome != task.OutcomeCommandFailed {
+		t.Fatalf("preparation Task = %#v", finished)
+	}
+	run, err := fixture.store.GetCoverageRun(context.Background(), fixture.aggregate.Run.ID)
+	if err != nil || run.Outcome != coveragedomain.OutcomeUnavailable ||
+		run.Reason != coveragedomain.ReasonBuildFailed || run.ReportID != "" {
+		t.Fatalf("preparation CoverageRun = %#v, %v", run, err)
+	}
+	page, err := fixture.store.ListArtifacts(context.Background(), fixture.persisted.ID, "", 100)
+	if err != nil || len(page.Items) != 0 {
+		t.Fatalf("preparation artifacts = %#v, %v", page.Items, err)
+	}
+	if fixture.publisher.count(task.EventTestRunFinished) != 1 ||
+		fixture.publisher.count(task.EventCoverageRunFinished) != 1 ||
+		fixture.publisher.count(task.EventTaskFinished) != 1 {
+		t.Fatalf("preparation terminal events = %#v", fixture.publisher.snapshot())
+	}
+}
+
+func TestCoordinatorAdapterPreparationFailureCompletesRealAggregate(t *testing.T) {
+	fixture := newSQLiteCoverageFixture(t, unusedProcessFactory{})
+	preparer := &scriptedBuildPreparer{plan: preparedBuildForFixture(fixture)}
+	coordinator, err := NewCoordinator(Config{
+		Tasks: fixture.manager, Store: fixture.store,
+		Build: preparer, Tests: unusedEmbeddedPreparer{},
+		Adapter: failingCoverageAdapter{}, WorkspaceRoot: fixture.workspaceRoot,
+		ExecutionRoot: fixture.executionRoot, Clock: task.RealClock{}, NewID: task.NewID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = coordinator.Close() })
+	if _, err := coordinator.Resume(context.Background(), fixture.persisted); err != nil {
+		t.Fatalf("Resume adapter failure = %v, want terminalization", err)
+	}
+	finished := fixture.awaitFinished(t)
+	if finished.Outcome != task.OutcomeInfrastructureFailed {
+		t.Fatalf("adapter preparation Task = %#v", finished)
+	}
+	run, err := fixture.store.GetCoverageRun(context.Background(), fixture.aggregate.Run.ID)
+	if err != nil || run.Outcome != coveragedomain.OutcomeUnavailable ||
+		run.Reason != coveragedomain.ReasonInstrumentationFailed || run.ReportID != "" {
+		t.Fatalf("adapter preparation CoverageRun = %#v, %v", run, err)
+	}
+}
+
+type sqliteCoverageFixture struct {
+	workspaceRoot workspace.Root
+	executionRoot string
+	store         *coordinatorSQLiteStore
+	publisher     *coordinatorPublisher
+	manager       *task.Manager
+	aggregate     coveragecoord.QueuedAggregate
+	persisted     task.Task
+}
+
+func newSQLiteCoverageFixture(t *testing.T, processes task.ProcessFactory) *sqliteCoverageFixture {
+	return newSQLiteCoverageFixtureWithArtifacts(t, processes, func(store *artifactstore.Store) task.ArtifactWriter { return store })
+}
+
+func newSQLiteCoverageFixtureWithSelection(
+	t *testing.T,
+	processes task.ProcessFactory,
+	selection testdomain.Selection,
+	snapshot testdomain.SelectionSnapshot,
+) *sqliteCoverageFixture {
+	return newSQLiteCoverageFixtureInternal(
+		t, processes,
+		func(store *artifactstore.Store) task.ArtifactWriter { return store },
+		selection, snapshot,
+	)
+}
+
+func newSQLiteCoverageFixtureWithArtifacts(
+	t *testing.T,
+	processes task.ProcessFactory,
+	wrap func(*artifactstore.Store) task.ArtifactWriter,
+) *sqliteCoverageFixture {
+	return newSQLiteCoverageFixtureInternal(
+		t, processes, wrap,
+		testdomain.Selection{Mode: testdomain.SelectionAll},
+		testdomain.SelectionSnapshot{
+			Mode: testdomain.SelectionAll, ContainerIDs: []testdomain.ID{}, ItemIDs: []testdomain.ID{},
+		},
+	)
+}
+
+func newSQLiteCoverageFixtureInternal(
+	t *testing.T,
+	processes task.ProcessFactory,
+	wrap func(*artifactstore.Store) task.ArtifactWriter,
+	selection testdomain.Selection,
+	snapshot testdomain.SelectionSnapshot,
+) *sqliteCoverageFixture {
+	t.Helper()
+	ctx := context.Background()
+	root := t.TempDir()
+	workspacePath := filepath.Join(root, "workspace")
+	if err := os.MkdirAll(filepath.Join(workspacePath, ".unit-test-ide"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	buildProfileID := strings.Repeat("7", 64)
+	config := `{"version":3,"coverageProfiles":[{"id":"coverage-default","baseBuildProfileId":"` + buildProfileID + `","include":["**"],"exclude":[]}]}`
+	if err := os.WriteFile(filepath.Join(workspacePath, ".unit-test-ide", "workspace.json"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workspaceRoot, err := workspace.OpenRoot(workspacePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executionRoot := filepath.Join(root, "coverage-executions")
+	if err := os.Mkdir(executionRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sqlite, err := taskstore.Open(filepath.Join(root, "tasks.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sqlite.Close() })
+	artifacts, err := artifactstore.New(filepath.Join(root, "artifacts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = artifacts.Close() })
+	createdAt := time.Date(2026, 8, 20, 1, 2, 3, 0, time.UTC)
+	catalog, err := testdomain.NewCatalog(testdomain.Catalog{
+		ProjectID: "core", ProfileID: buildProfileID,
+		Revision: strings.Repeat("6", 64), GeneratedAt: createdAt,
+		Containers: []testdomain.Container{}, Items: []testdomain.Item{},
+		Diagnostics: []testdomain.Diagnostic{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &coordinatorSQLiteStore{Store: sqlite, catalog: catalog}
+	publisher := &coordinatorPublisher{}
+	manager, err := task.NewManager(task.ManagerConfig{
+		Store: store, Publisher: publisher, Processes: processes, Artifacts: wrap(artifacts),
+		Clock: task.RealClock{}, NewID: task.NewID,
+		ServiceExecutable: "trusted-service", ServiceInstanceID: strings.Repeat("9", 32),
+		TerminationGrace: 100 * time.Millisecond, ProcessCloseTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = manager.Shutdown(ctx)
+	})
+	ids := []string{strings.Repeat("1", 32), strings.Repeat("2", 32)}
+	aggregate, err := coveragecoord.NewQueuedAggregate(coveragecoord.QueuedInput{
+		Request: coveragedomain.Request{
+			IdempotencyKey: strings.Repeat("3", 32), WorkspaceGeneration: strings.Repeat("5", 64),
+			ProjectID: "core", CoverageProfileID: "coverage-default", CatalogRevision: catalog.Revision,
+			Selection: selection, RepeatCount: 1, Timeout: time.Minute,
+		},
+		Selection:      snapshot,
+		BuildProfileID: buildProfileID, ToolchainID: "clang-cl",
+		Toolchain: coveragedomain.ToolchainSnapshot{
+			Platform: coveragedomain.PlatformWindows, Architecture: coveragedomain.ArchitectureX64,
+			Compiler:          coveragedomain.CompilerSnapshot{Family: coveragedomain.CompilerFamilyClangCL, Version: "18.1.8"},
+			Driver:            coveragedomain.DriverSnapshot{Name: coveragedomain.DriverLLVMCov, Version: "18.1.8"},
+			Collector:         coveragedomain.CollectorSnapshot{Name: coveragedomain.CollectorLLVMCov, Version: "18.1.8"},
+			NormalizerVersion: "1.0.0", InstrumentationFingerprint: coveragellvm.InstrumentationFingerprint(),
+		},
+		CreatedAt: createdAt,
+		NewID:     func() string { id := ids[0]; ids = ids[1:]; return id },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted, _, err := aggregate.Persist(ctx, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &sqliteCoverageFixture{
+		workspaceRoot: workspaceRoot, executionRoot: executionRoot,
+		store: store, publisher: publisher, manager: manager,
+		aggregate: aggregate, persisted: persisted,
+	}
+}
+
+func (fixture *sqliteCoverageFixture) awaitFinished(t *testing.T) task.Task {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		value, err := fixture.store.Get(context.Background(), fixture.persisted.ID)
+		if err == nil && value.Status == task.StatusFinished {
+			return value
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	value, err := fixture.store.Get(context.Background(), fixture.persisted.ID)
+	events, eventsErr := fixture.store.EventsAfter(context.Background(), 0, 0, 100)
+	mutation, applyErr := fixture.store.applySnapshot()
+	coverageRun, coverageErr := fixture.store.GetCoverageRun(context.Background(), fixture.aggregate.Run.ID)
+	var completionExpected coveragedomain.Status
+	var completionRun coveragedomain.Run
+	if mutation.FinishCoverage != nil {
+		completionExpected = mutation.FinishCoverage.Expected
+		completionRun = mutation.FinishCoverage.Run
+	}
+	t.Fatalf("Task did not finish: %#v, %v; healthy=%v events=%#v eventsErr=%v published=%#v applyErr=%v coverage=%#v coverageErr=%v completionExpected=%q completionRun=%#v",
+		value, err, fixture.manager.Healthy(), events, eventsErr, fixture.publisher.snapshot(), applyErr, coverageRun, coverageErr, completionExpected, completionRun)
+	return task.Task{}
+}
+
 type coordinatorSQLiteStore struct {
 	*taskstore.Store
-	catalog testdomain.Catalog
+	catalog      testdomain.Catalog
+	mu           sync.Mutex
+	lastApplyErr error
+	lastMutation task.Mutation
+}
+
+func (store *coordinatorSQLiteStore) Apply(ctx context.Context, mutation task.Mutation) (task.Task, []task.Event, error) {
+	value, events, err := store.Store.Apply(ctx, mutation)
+	store.mu.Lock()
+	store.lastApplyErr = err
+	store.lastMutation = mutation
+	store.mu.Unlock()
+	return value, events, err
+}
+
+func (store *coordinatorSQLiteStore) applySnapshot() (task.Mutation, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	return store.lastMutation, store.lastApplyErr
 }
 
 func (store *coordinatorSQLiteStore) GetCatalog(context.Context, string, string) (testdomain.Catalog, error) {
@@ -298,3 +664,63 @@ func (unusedProcessFactory) Prepare(context.Context, task.ProcessSpec, string, s
 type unusedBuildPreparer struct{ BuildPreparer }
 type unusedEmbeddedPreparer struct{ EmbeddedTestPreparer }
 type unusedCoverageAdapter struct{ Adapter }
+
+type scriptedBuildPreparer struct {
+	plan      PreparedBuild
+	calls     int
+	failureAt int
+}
+
+func (preparer *scriptedBuildPreparer) PreparePlan(context.Context, build.StartRequest) (PreparedBuild, error) {
+	preparer.calls++
+	if preparer.calls == preparer.failureAt {
+		return nil, errors.New("scripted preparation failure")
+	}
+	return preparer.plan, nil
+}
+
+type fakePreparedBuild struct {
+	workspaceGeneration string
+	project             workspace.ProjectConfig
+	profile             cmake.BuildProfile
+	toolchain           toolchain.Instance
+	plan                task.ExecutionPlan
+	coverageBinaryDir   string
+	attachErr           error
+}
+
+func (prepared *fakePreparedBuild) Plan() task.ExecutionPlan               { return prepared.plan }
+func (*fakePreparedBuild) Boundary() task.ExecutionBoundary                { return permissiveCoverageBoundary{} }
+func (prepared *fakePreparedBuild) WorkspaceGeneration() string            { return prepared.workspaceGeneration }
+func (prepared *fakePreparedBuild) Project() workspace.ProjectConfig       { return prepared.project }
+func (prepared *fakePreparedBuild) Profile() cmake.BuildProfile            { return prepared.profile }
+func (prepared *fakePreparedBuild) Toolchain() toolchain.Instance          { return prepared.toolchain }
+func (*fakePreparedBuild) Targets() []cmake.Target                         { return []cmake.Target{} }
+func (*fakePreparedBuild) AllowTestExecutable(cmake.FingerprintFile) error { return nil }
+func (*fakePreparedBuild) ReleaseIfUnadopted()                             {}
+func (prepared *fakePreparedBuild) CoverageBinaryDir() string              { return prepared.coverageBinaryDir }
+func (prepared *fakePreparedBuild) AttachCoverageToolset(*coveragellvm.Toolset) error {
+	return prepared.attachErr
+}
+
+func preparedBuildForFixture(fixture *sqliteCoverageFixture) *fakePreparedBuild {
+	return &fakePreparedBuild{
+		workspaceGeneration: fixture.persisted.WorkspaceGeneration,
+		project:             workspace.ProjectConfig{ID: "core"},
+		profile:             cmake.BuildProfile{ID: fixture.aggregate.TestRun.ProfileID, ProjectID: "core"},
+		toolchain:           toolchain.Instance{ID: "clang-cl", Family: toolchain.FamilyClangCL, Version: "18.1.8"},
+	}
+}
+
+type permissiveCoverageBoundary struct{}
+
+func (permissiveCoverageBoundary) ValidateExecutable(string) error       { return nil }
+func (permissiveCoverageBoundary) ValidateWorkingDirectory(string) error { return nil }
+
+type failingCoverageAdapter struct{}
+
+func (failingCoverageAdapter) Prepare(context.Context, AdapterInput) (PreparedAdapter, error) {
+	return nil, errors.New("scripted adapter preparation failure")
+}
+
+var _ BuildPreparer = (*scriptedBuildPreparer)(nil)

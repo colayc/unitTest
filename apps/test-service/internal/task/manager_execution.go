@@ -1125,6 +1125,38 @@ func (m *Manager) persistFinished(
 		finishedAt,
 		outcome,
 	)
+	if completionErr != nil && current.Kind == KindCoverageRun {
+		if owner.artifactSink == nil ||
+			owner.artifactSink.Abort(context.Background()) != nil {
+			m.tripStorage(active)
+			return current, ErrStorageUnavailable
+		}
+		owner.artifactSink = nil
+		if err := m.createTaskArtifacts(owner); err != nil {
+			m.tripStorage(active)
+			return current, ErrStorageUnavailable
+		}
+		outcome = OutcomeInfrastructureFailed
+		finished, completionErr = ApplyTransition(current, Transition{
+			From: current.Status, To: StatusFinished, Outcome: outcome, At: finishedAt,
+			ErrorCode: outcomeErrorCode(outcome), ErrorMessage: outcomeErrorMessage(outcome),
+		})
+		if completionErr == nil {
+			steps = terminalStepMutations(
+				owner,
+				ProcessResult{Err: ErrStorageUnavailable},
+				outcome,
+				false,
+				finishedAt,
+			)
+			completion, completionErr = m.prepareDomainCompletion(
+				owner,
+				finished,
+				finishedAt,
+				outcome,
+			)
+		}
+	}
 	if completionErr != nil {
 		m.tripStorage(active)
 		return current, ErrStorageUnavailable

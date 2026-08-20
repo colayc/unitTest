@@ -85,6 +85,9 @@ func (s *taskSink) AppendOutput(
 	if s.unavailable() {
 		return ErrStoreUnavailable
 	}
+	if s.taskKind == task.KindCoverageRun {
+		return nil
+	}
 	if s.taskKind == task.KindSimulation || len(data) == 0 {
 		return nil
 	}
@@ -117,6 +120,9 @@ func (s *taskSink) AppendDiagnostic(
 	defer s.mu.Unlock()
 	if s.unavailable() {
 		return ErrStoreUnavailable
+	}
+	if s.taskKind == task.KindCoverageRun {
+		return nil
 	}
 	if s.taskKind == task.KindSimulation {
 		return nil
@@ -442,23 +448,6 @@ func (s *taskSink) pendingArtifacts() ([]pendingArtifact, error) {
 		if hasReport {
 			result = append(result, coverageJSON, junitXML, coverageHTML)
 		}
-		stdoutID, err := newGeneratedID()
-		if err != nil {
-			return nil, err
-		}
-		stderrID, err := newGeneratedID()
-		if err != nil {
-			return nil, err
-		}
-		diagnosticsID, err := newGeneratedID()
-		if err != nil {
-			return nil, err
-		}
-		result = append(result,
-			pendingArtifact{id: stdoutID, kind: "stdout", data: append([]byte(nil), s.stdout.Bytes()...)},
-			pendingArtifact{id: stderrID, kind: "stderr", data: append([]byte(nil), s.stderr.Bytes()...)},
-			pendingArtifact{id: diagnosticsID, kind: "diagnostics", data: append([]byte(nil), s.diagnostics.Bytes()...)},
-		)
 	default:
 		return nil, ErrInvalidArtifact
 	}

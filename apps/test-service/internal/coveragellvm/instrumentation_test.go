@@ -39,6 +39,9 @@ func TestWriteInstrumentationPublishesGoldenReadOnlyInclude(t *testing.T) {
 	if len(got.Fingerprint) != 64 || got.Fingerprint != strings.ToLower(got.Fingerprint) {
 		t.Fatalf("Fingerprint = %q, want lowercase SHA-256", got.Fingerprint)
 	}
+	if got.Fingerprint != InstrumentationFingerprint() {
+		t.Fatalf("written fingerprint = %q, contract = %q", got.Fingerprint, InstrumentationFingerprint())
+	}
 	info, err := os.Lstat(got.IncludePath)
 	if err != nil {
 		t.Fatal(err)

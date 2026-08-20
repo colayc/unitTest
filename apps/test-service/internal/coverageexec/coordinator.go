@@ -35,25 +35,29 @@ type catalogReader interface {
 	GetCatalog(context.Context, string, string) (testdomain.Catalog, error)
 }
 
+const defaultCoordinatorCloseTimeout = 5 * time.Second
+
 type execution struct {
-	config      Config
-	coordinator *Coordinator
-	taskID      string
-	initialTask task.Task
-	run         coveragedomain.Run
-	testRun     testdomain.TestRun
-	profile     workspace.CoverageProfile
-	buildInput  build.StartRequest
-	prepared    *build.PreparedPlan
-	adapter     PreparedAdapter
-	root        *executionRootOwner
-	boundary    *executionBoundary
-	taskRoot    string
-	profileRoot string
-	buildRoot   string
-	toolchain   toolchain.Instance
-	instrument  coveragellvm.Instrumentation
-	unsupported bool
+	config          Config
+	coordinator     *Coordinator
+	taskID          string
+	initialTask     task.Task
+	run             coveragedomain.Run
+	testRun         testdomain.TestRun
+	profile         workspace.CoverageProfile
+	buildInput      build.StartRequest
+	prepared        PreparedBuild
+	adapter         PreparedAdapter
+	root            *executionRootOwner
+	boundary        *executionBoundary
+	taskRoot        string
+	profileRoot     string
+	buildRoot       string
+	toolchain       toolchain.Instance
+	instrument      coveragellvm.Instrumentation
+	unsupported     bool
+	terminalErr     error
+	terminalOutcome task.Outcome
 
 	mu                sync.Mutex
 	embedded          testrun.EmbeddedRun
@@ -80,6 +84,9 @@ type execution struct {
 
 	closeOnce sync.Once
 	closeErr  error
+
+	completionMu sync.Mutex
+	completion   *completionReplay
 }
 
 func NewCoordinator(config Config) (*Coordinator, error) {
@@ -103,6 +110,12 @@ func NewCoordinator(config Config) (*Coordinator, error) {
 	}
 	if config.NewID == nil {
 		config.NewID = task.NewID
+	}
+	if config.CloseTimeout < 0 {
+		return nil, task.ErrInvalidArgument
+	}
+	if config.CloseTimeout == 0 {
+		config.CloseTimeout = defaultCoordinatorCloseTimeout
 	}
 	return &Coordinator{
 		config:     config,
@@ -177,7 +190,11 @@ func (coordinator *Coordinator) resume(
 	}
 	execution, plan, err := coordinator.prepare(ctx, persisted, unsupported)
 	if err != nil {
-		return task.Task{}, err
+		failure := preparationFailure{phase: coveragerun.PhaseConfigure, cause: err}
+		if !errors.As(err, &failure) {
+			failure.cause = err
+		}
+		return coordinator.resumePreparationFailure(ctx, persisted, failure)
 	}
 	if unsupported {
 		plan = task.ExecutionPlan{Version: 1, Steps: []task.ExecutionStep{reportActionStep()}}
@@ -200,26 +217,164 @@ func (coordinator *Coordinator) resume(
 	return resumed, nil
 }
 
+type preparationFailure struct {
+	phase coveragerun.Phase
+	cause error
+}
+
+func (failure preparationFailure) Error() string { return failure.cause.Error() }
+func (failure preparationFailure) Unwrap() error { return failure.cause }
+
+func failPreparation(phase coveragerun.Phase, err error) error {
+	if err == nil {
+		err = task.ErrInvalidArgument
+	}
+	return preparationFailure{phase: phase, cause: err}
+}
+
+func (coordinator *Coordinator) resumePreparationFailure(
+	ctx context.Context,
+	persisted task.Task,
+	failure preparationFailure,
+) (task.Task, error) {
+	stored, err := coordinator.config.Store.Get(ctx, persisted.ID)
+	if err != nil || !sameQueuedTask(stored, persisted) {
+		return task.Task{}, errOrInvalid(err)
+	}
+	runID := coverageRunID(stored.Request)
+	run, err := coordinator.config.Store.GetCoverageRun(ctx, runID)
+	if err != nil {
+		return task.Task{}, err
+	}
+	testRun, err := coordinator.config.Store.GetRunForTask(ctx, stored.ID)
+	if err != nil {
+		return task.Task{}, err
+	}
+	execution := &execution{
+		config: coordinator.config, coordinator: coordinator,
+		taskID: stored.ID, initialTask: stored, run: run, testRun: testRun,
+		state: coveragerun.NewState(), failedPhase: failure.phase,
+		outcomes: make(map[string]testrun.InvocationOutcome), terminalErr: failure.cause,
+		terminalOutcome: preparationTaskOutcome(failure.phase),
+	}
+	execution.boundary = &executionBoundary{execution: execution}
+	if err := coordinator.install(execution); err != nil {
+		_ = execution.Close()
+		return task.Task{}, err
+	}
+	plan := task.ExecutionPlan{Version: 1, Steps: []task.ExecutionStep{reportActionStep()}}
+	plan.Fingerprint = task.FingerprintPlan(plan)
+	resumed, err := coordinator.config.Tasks.ResumeQueued(ctx, task.ResumeRequest{
+		Task: persisted, Plan: plan, Boundary: execution.boundary,
+		Continuation: execution, ResultInterpreter: execution, ActionExecutor: execution,
+	})
+	if err != nil {
+		coordinator.forget(persisted.ID, execution)
+		_ = execution.Close()
+	}
+	return resumed, err
+}
+
+func preparationTaskOutcome(phase coveragerun.Phase) task.Outcome {
+	if phase == coveragerun.PhaseBuild {
+		return task.OutcomeCommandFailed
+	}
+	return task.OutcomeInfrastructureFailed
+}
+
 func (coordinator *Coordinator) Close() error {
 	if coordinator == nil {
 		return nil
 	}
 	coordinator.mu.Lock()
-	if coordinator.closed {
+	if coordinator.closeDone != nil {
+		done := coordinator.closeDone
 		coordinator.mu.Unlock()
-		return nil
+		<-done
+		coordinator.mu.Lock()
+		err := coordinator.closeErr
+		coordinator.mu.Unlock()
+		return err
 	}
 	coordinator.closed = true
-	executions := make([]liveExecution, 0, len(coordinator.executions))
-	for _, execution := range coordinator.executions {
-		executions = append(executions, execution)
+	coordinator.closeDone = make(chan struct{})
+	done := coordinator.closeDone
+	coordinator.mu.Unlock()
+	result := coordinator.closeActiveExecutions()
+	coordinator.mu.Lock()
+	coordinator.closeErr = result
+	close(done)
+	coordinator.mu.Unlock()
+	return result
+}
+
+func (coordinator *Coordinator) closeActiveExecutions() error {
+	timeout := coordinator.config.CloseTimeout
+	if timeout <= 0 {
+		timeout = defaultCoordinatorCloseTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	for {
+		coordinator.mu.Lock()
+		waits := make([]chan struct{}, 0, len(coordinator.preparing))
+		for _, wait := range coordinator.preparing {
+			waits = append(waits, wait)
+		}
+		coordinator.mu.Unlock()
+		if len(waits) == 0 {
+			break
+		}
+		for _, wait := range waits {
+			select {
+			case <-wait:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
+
+	coordinator.mu.Lock()
+	executions := make(map[string]liveExecution, len(coordinator.executions))
+	for id, execution := range coordinator.executions {
+		executions[id] = execution
 	}
 	coordinator.mu.Unlock()
 	var result error
-	for _, execution := range executions {
+	for id, execution := range executions {
+		finished, err := coordinator.config.Tasks.Cancel(ctx, id)
+		if err != nil {
+			result = errors.Join(result, err)
+		}
+		if finished.Status != task.StatusFinished {
+			finished, err = coordinator.waitTaskFinished(ctx, id)
+			if err != nil {
+				result = errors.Join(result, err)
+				continue
+			}
+		}
 		result = errors.Join(result, execution.Close())
 	}
 	return result
+}
+
+func (coordinator *Coordinator) waitTaskFinished(ctx context.Context, id string) (task.Task, error) {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		stored, err := coordinator.config.Store.Get(ctx, id)
+		if err != nil {
+			return task.Task{}, err
+		}
+		if stored.Status == task.StatusFinished {
+			return stored, nil
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return task.Task{}, ctx.Err()
+		}
+	}
 }
 
 func (coordinator *Coordinator) install(execution *execution) error {
@@ -256,7 +411,7 @@ func (coordinator *Coordinator) prepare(
 ) (*execution, task.ExecutionPlan, error) {
 	stored, run, testRun, profile, err := coordinator.loadGraph(ctx, persisted)
 	if err != nil {
-		return nil, task.ExecutionPlan{}, err
+		return nil, task.ExecutionPlan{}, failPreparation(coveragerun.PhaseConfigure, err)
 	}
 	execution := &execution{
 		config: coordinator.config, coordinator: coordinator,
@@ -279,23 +434,23 @@ func (coordinator *Coordinator) prepare(
 	}
 	probe, err := coordinator.config.Build.PreparePlan(ctx, execution.buildInput)
 	if err != nil {
-		return nil, task.ExecutionPlan{}, err
+		return nil, task.ExecutionPlan{}, failPreparation(coveragerun.PhaseBuild, err)
 	}
 	if probe == nil {
-		return nil, task.ExecutionPlan{}, task.ErrStorageUnavailable
+		return nil, task.ExecutionPlan{}, failPreparation(coveragerun.PhaseBuild, task.ErrStorageUnavailable)
 	}
 	currentToolchain := probe.Toolchain()
 	identityErr := validatePreparedIdentity(probe, run, testRun, profile, currentToolchain)
 	probe.ReleaseIfUnadopted()
 	if identityErr != nil {
-		return nil, task.ExecutionPlan{}, identityErr
+		return nil, task.ExecutionPlan{}, failPreparation(coveragerun.PhaseConfigure, identityErr)
 	}
 	root, taskRoot, profileRoot, buildRoot, err := allocateExecutionRoots(
 		coordinator.config.ExecutionRoot,
 		stored.ID,
 	)
 	if err != nil {
-		return nil, task.ExecutionPlan{}, err
+		return nil, task.ExecutionPlan{}, failPreparation(coveragerun.PhaseConfigure, err)
 	}
 	execution.root, execution.taskRoot = root, taskRoot
 	execution.profileRoot, execution.buildRoot = profileRoot, buildRoot
@@ -311,13 +466,13 @@ func (coordinator *Coordinator) prepare(
 		ProfileRoot: profileRoot,
 	})
 	if err != nil || nilPort(preparedAdapter) {
-		return nil, task.ExecutionPlan{}, task.ErrInvalidArgument
+		return nil, task.ExecutionPlan{}, failPreparation(coveragerun.PhaseConfigure, errOrInvalid(err))
 	}
 	execution.adapter = preparedAdapter
 	execution.toolchain = cloneToolchain(currentToolchain)
 	execution.instrument = preparedAdapter.Instrumentation()
 	if err := execution.validateAdapterIdentity(); err != nil {
-		return nil, task.ExecutionPlan{}, err
+		return nil, task.ExecutionPlan{}, failPreparation(coveragerun.PhaseConfigure, err)
 	}
 	coverageInput := execution.buildInput
 	coverageInput.Coverage = &build.CoverageOptions{
@@ -332,19 +487,19 @@ func (coordinator *Coordinator) prepare(
 	}
 	prepared, err := coordinator.config.Build.PreparePlan(ctx, coverageInput)
 	if err != nil || prepared == nil {
-		return nil, task.ExecutionPlan{}, errOrInvalid(err)
+		return nil, task.ExecutionPlan{}, failPreparation(coveragerun.PhaseBuild, errOrInvalid(err))
 	}
 	execution.prepared = prepared
 	if err := validatePreparedIdentity(prepared, run, testRun, profile, currentToolchain); err != nil {
-		return nil, task.ExecutionPlan{}, err
+		return nil, task.ExecutionPlan{}, failPreparation(coveragerun.PhaseBuild, err)
 	}
 	if !samePath(prepared.CoverageBinaryDir(), buildRoot) ||
 		prepared.AttachCoverageToolset(preparedAdapter.Toolset()) != nil {
-		return nil, task.ExecutionPlan{}, task.ErrInvalidArgument
+		return nil, task.ExecutionPlan{}, failPreparation(coveragerun.PhaseBuild, task.ErrInvalidArgument)
 	}
 	plan, err := rewriteBuildPlan(prepared.Plan())
 	if err != nil {
-		return nil, task.ExecutionPlan{}, err
+		return nil, task.ExecutionPlan{}, failPreparation(coveragerun.PhaseBuild, err)
 	}
 	execution.boundary = &executionBoundary{
 		delegate: prepared.Boundary(), execution: execution, root: root,
@@ -489,8 +644,20 @@ func (execution *execution) validateAdapterIdentityLocked() error {
 		execution.adapter.Toolset().Identity() != execution.toolchain.Coverage.ToolsetIdentity ||
 		execution.adapter.Toolset().Version() != execution.toolchain.Version ||
 		execution.instrument != execution.adapter.Instrumentation() ||
-		execution.instrument.Fingerprint != execution.run.Toolchain.InstrumentationFingerprint ||
+		validateInstrumentationContract(execution.run.Toolchain, execution.instrument) != nil ||
 		!pathWithin(execution.taskRoot, execution.instrument.IncludePath) {
+		return task.ErrInvalidArgument
+	}
+	return nil
+}
+
+func validateInstrumentationContract(
+	snapshot coveragedomain.ToolchainSnapshot,
+	instrumentation coveragellvm.Instrumentation,
+) error {
+	if snapshot.InstrumentationFingerprint == "" ||
+		instrumentation.Fingerprint == "" ||
+		snapshot.InstrumentationFingerprint != instrumentation.Fingerprint {
 		return task.ErrInvalidArgument
 	}
 	return nil
@@ -691,6 +858,12 @@ func (execution *execution) ExecuteServiceAction(
 	if execution.unsupported {
 		execution.setFailedPhase(coveragerun.PhaseConfigure)
 		return task.StepResult{}, errors.New("coverage adapter is unavailable")
+	}
+	if execution.terminalErr != nil {
+		if execution.terminalOutcome == task.OutcomeCommandFailed {
+			return task.StepResult{Verdict: task.StepVerdictFailed}, nil
+		}
+		return task.StepResult{}, execution.terminalErr
 	}
 	if err := execution.revalidate(ctx); err != nil {
 		execution.setFailedPhase(phaseForStep(step.Kind))
@@ -987,14 +1160,20 @@ func (execution *execution) recordOutcomes(result task.ProcessResult) {
 			if expectation.InvocationID != child.ID {
 				continue
 			}
-			execution.outcomes[outcomeKey(expectation.InvocationID, expectation.Iteration)] = testrun.InvocationOutcome{
-				InvocationID: expectation.InvocationID,
-				Iteration:    expectation.Iteration,
-				ExitCode:     child.ExitCode,
-				Crashed:      child.ExitCode < 0 && !child.TimedOut,
-				TimedOut:     child.TimedOut,
-			}
+			outcome := invocationOutcomeFromChild(child)
+			outcome.InvocationID = expectation.InvocationID
+			outcome.Iteration = expectation.Iteration
+			execution.outcomes[outcomeKey(expectation.InvocationID, expectation.Iteration)] = outcome
 		}
+	}
+}
+
+func invocationOutcomeFromChild(child task.ProcessChildResult) testrun.InvocationOutcome {
+	return testrun.InvocationOutcome{
+		InvocationID: child.ID,
+		ExitCode:     child.ExitCode,
+		Crashed:      !child.TimedOut && processExitWasCrash(child.ExitCode),
+		TimedOut:     child.TimedOut,
 	}
 }
 
@@ -1083,7 +1262,7 @@ func allocateExecutionRoots(root, taskID string) (*executionRootOwner, string, s
 		return nil, "", "", "", task.ErrInvalidArgument
 	}
 	executionRoot := filepath.Join(root, taskID)
-	if err := os.Mkdir(executionRoot, 0o700); err != nil {
+	if err := createOwnerOnlyExecutionDirectory(executionRoot); err != nil {
 		return nil, "", "", "", task.ErrConflict
 	}
 	owner, err := retainExecutionRoot(executionRoot)
@@ -1101,7 +1280,7 @@ func allocateExecutionRoots(root, taskID string) (*executionRootOwner, string, s
 		filepath.Join(executionRoot, "build"),
 	}
 	for _, path := range paths {
-		if err := os.Mkdir(path, 0o700); err != nil || owner.VerifyDirectory(path) != nil {
+		if err := createOwnerOnlyExecutionDirectory(path); err != nil || owner.VerifyDirectory(path) != nil {
 			return fail()
 		}
 	}
@@ -1143,7 +1322,7 @@ func retainTestBinaries(originals map[string]task.ExecutionStep) ([]*retainedFil
 }
 
 func validatePreparedIdentity(
-	prepared *build.PreparedPlan,
+	prepared PreparedBuild,
 	run coveragedomain.Run,
 	testRun testdomain.TestRun,
 	profile workspace.CoverageProfile,

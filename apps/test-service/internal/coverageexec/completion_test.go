@@ -3,6 +3,8 @@ package coverageexec
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -179,6 +181,35 @@ func TestCompletionCommitsClosedReportSetBeforeReportBearingGraph(t *testing.T) 
 		completion.Events[2].Type != task.EventCoverageRunFinished ||
 		!strings.Contains(string(completion.Events[1].Payload), `"completeness":{"outcome":"available","reasons":[]}`) {
 		t.Fatalf("report terminal events = %#v", completion.Events)
+	}
+
+	replaySink := &completionRecordingSink{}
+	replayIDCalls := 0
+	replayed, err := execution.PrepareCompletion(
+		context.Background(), current, finishedAt, task.OutcomeSucceeded, replaySink,
+		func() string {
+			replayIDCalls++
+			return strings.Repeat("f", 32)
+		},
+	)
+	if err != nil {
+		t.Fatalf("idempotent coordinator replay = %v", err)
+	}
+	if !reflect.DeepEqual(replayed, completion) || replayIDCalls != 0 || len(replaySink.blobs) != 0 {
+		t.Fatalf("coordinator replay changed terminal graph: equal=%v idCalls=%d blobs=%v",
+			reflect.DeepEqual(replayed, completion), replayIDCalls, replaySink.blobs)
+	}
+
+	conflictSink := &completionRecordingSink{}
+	if _, err := execution.PrepareCompletion(
+		context.Background(), current, finishedAt.Add(time.Nanosecond),
+		task.OutcomeSucceeded, conflictSink,
+		func() string { return strings.Repeat("f", 32) },
+	); !errors.Is(err, task.ErrConflict) {
+		t.Fatalf("conflicting coordinator replay error = %v", err)
+	}
+	if len(conflictSink.blobs) != 0 {
+		t.Fatalf("conflicting coordinator replay staged blobs = %v", conflictSink.blobs)
 	}
 }
 

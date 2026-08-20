@@ -880,6 +880,10 @@ func (m *Manager) armTimeout(current *activeTask) {
 type timeoutCommand string
 
 func (m *Manager) acceptOutput(current *activeTask, output ProcessOutput, active map[string]*activeTask) {
+	if current.task.Kind == KindCoverageRun {
+		m.observePrivateCoverageOutput(current, output, active)
+		return
+	}
 	if current.artifactSink == nil ||
 		current.artifactSink.AppendOutput(
 			context.Background(), current.task.ActiveStep, output.Stream, output.Data,
@@ -928,6 +932,37 @@ func (m *Manager) acceptOutput(current *activeTask, output ProcessOutput, active
 		return
 	}
 	m.persistDiagnostics(current, values, active)
+}
+
+func (m *Manager) observePrivateCoverageOutput(
+	current *activeTask,
+	output ProcessOutput,
+	active map[string]*activeTask,
+) {
+	if current.execution.currentCause() != "" {
+		return
+	}
+	observer, ok := current.resultInterpreter.(ResultOutputObserver)
+	if !ok {
+		return
+	}
+	if err := callResultOutputObserver(
+		current.execution.ctx,
+		observer,
+		cloneRuntimeTask(current.task),
+		cloneRuntimeStep(current.plan.Steps[current.nextStep]),
+		ProcessOutput{
+			Source: output.Source,
+			Stream: output.Stream,
+			Data:   append([]byte(nil), output.Data...),
+		},
+	); err != nil {
+		m.failResultObservation(current, err)
+		return
+	}
+	if err := m.persistDomainEvents(current, active); err != nil {
+		m.failResultObservation(current, err)
+	}
 }
 
 func (m *Manager) persistDomainEvents(

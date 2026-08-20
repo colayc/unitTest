@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"slices"
 	"time"
 
@@ -84,6 +85,36 @@ func (execution *execution) PrepareCompletion(
 		finishedAt.IsZero() || sink == nil || newID == nil {
 		return task.DomainCompletion{}, task.ErrInvalidArgument
 	}
+	execution.completionMu.Lock()
+	defer execution.completionMu.Unlock()
+	replay := execution.completionReplayRequest(current, finishedAt, outcome)
+	if execution.completion != nil {
+		if !reflect.DeepEqual(execution.completion.request, replay) {
+			return task.DomainCompletion{}, task.ErrConflict
+		}
+		return cloneDomainCompletion(execution.completion.value), nil
+	}
+	completion, err := execution.prepareCompletion(
+		ctx, current, finishedAt, outcome, sink, newID,
+	)
+	if err != nil {
+		return task.DomainCompletion{}, err
+	}
+	execution.completion = &completionReplay{
+		request: replay,
+		value:   cloneDomainCompletion(completion),
+	}
+	return cloneDomainCompletion(completion), nil
+}
+
+func (execution *execution) prepareCompletion(
+	ctx context.Context,
+	current task.Task,
+	finishedAt time.Time,
+	outcome task.Outcome,
+	sink task.ArtifactSink,
+	newID task.IDGenerator,
+) (task.DomainCompletion, error) {
 	coverageSink, ok := sink.(task.CoverageArtifactSink)
 	if !ok || nilPort(coverageSink) {
 		return task.DomainCompletion{}, task.ErrInvalidArgument
@@ -98,6 +129,8 @@ func (execution *execution) PrepareCompletion(
 	reportSet := execution.reportSet
 	bindings := append([]coveragenormalize.SourceBinding(nil), execution.bindings...)
 	priorStatus := execution.run.Status
+	embedded := execution.embedded
+	outcomeCount := len(execution.outcomes)
 	execution.mu.Unlock()
 
 	coverageOutcome, reason, err := projectCoverageOutcome(outcome, failedPhase, state)
@@ -105,7 +138,8 @@ func (execution *execution) PrepareCompletion(
 		return task.DomainCompletion{}, task.ErrInvalidArgument
 	}
 	testOutcome := outcome
-	if stateReachedTests(state, failedPhase) &&
+	completedInvocations := embedded != nil && outcomeCount > 0 && outcomeCount == len(embedded.Expectations())
+	if (stateReachedTests(state, failedPhase) || completedInvocations) &&
 		outcome != task.OutcomeCancelled && outcome != task.OutcomeTimedOut &&
 		outcome != task.OutcomeInterrupted {
 		testOutcome = task.OutcomeSucceeded
@@ -195,6 +229,94 @@ func (execution *execution) PrepareCompletion(
 		},
 		Events: events,
 	}, nil
+}
+
+type completionReplay struct {
+	request completionReplayRequest
+	value   task.DomainCompletion
+}
+
+type completionReplayRequest struct {
+	task        task.Task
+	finishedAt  time.Time
+	outcome     task.Outcome
+	state       coveragerun.State
+	failedPhase coveragerun.Phase
+	run         coveragedomain.Run
+	testRun     testdomain.TestRun
+	reportSet   *coveragereport.Set
+	bindings    []coveragenormalize.SourceBinding
+}
+
+func (execution *execution) completionReplayRequest(
+	current task.Task,
+	finishedAt time.Time,
+	outcome task.Outcome,
+) completionReplayRequest {
+	execution.mu.Lock()
+	defer execution.mu.Unlock()
+	return completionReplayRequest{
+		task: cloneCompletionTask(current), finishedAt: finishedAt.UTC(), outcome: outcome,
+		state: execution.state, failedPhase: execution.failedPhase,
+		run: execution.run.Clone(), testRun: execution.testRun.Clone(),
+		reportSet: cloneReportSet(execution.reportSet),
+		bindings:  append([]coveragenormalize.SourceBinding(nil), execution.bindings...),
+	}
+}
+
+func cloneCompletionTask(value task.Task) task.Task {
+	value.Request = append([]byte(nil), value.Request...)
+	value.StartedAt = cloneTimePointer(value.StartedAt)
+	value.FinishedAt = cloneTimePointer(value.FinishedAt)
+	value.Steps = make([]task.StepSnapshot, len(value.Steps))
+	for index, step := range value.Steps {
+		value.Steps[index] = step
+		value.Steps[index].StartedAt = cloneTimePointer(step.StartedAt)
+		value.Steps[index].FinishedAt = cloneTimePointer(step.FinishedAt)
+		if step.ExitCode != nil {
+			exitCode := *step.ExitCode
+			value.Steps[index].ExitCode = &exitCode
+		}
+	}
+	return value
+}
+
+func cloneReportSet(value *coveragereport.Set) *coveragereport.Set {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	copy.CoverageJSON = append([]byte(nil), value.CoverageJSON...)
+	copy.JUnitXML = append([]byte(nil), value.JUnitXML...)
+	copy.CoverageHTML = append([]byte(nil), value.CoverageHTML...)
+	if value.Sources != nil {
+		copy.Sources = append([]coveragedomain.SourceSnapshot{}, value.Sources...)
+	}
+	return &copy
+}
+
+func cloneDomainCompletion(value task.DomainCompletion) task.DomainCompletion {
+	result := value
+	if value.TestRun != nil {
+		copy := value.TestRun.Clone()
+		result.TestRun = &copy
+	}
+	if value.Coverage != nil {
+		copy := *value.Coverage
+		copy.Run = value.Coverage.Run.Clone()
+		if value.Coverage.Report != nil {
+			report := value.Coverage.Report.Clone()
+			copy.Report = &report
+		}
+		result.Coverage = &copy
+	}
+	result.Events = make([]task.DomainEvent, len(value.Events))
+	for index, event := range value.Events {
+		result.Events[index] = task.DomainEvent{
+			Type: event.Type, Payload: append(json.RawMessage(nil), event.Payload...),
+		}
+	}
+	return result
 }
 
 type completionIDs struct {

@@ -7,6 +7,7 @@ import (
 
 	"unit-test-ide.local/test-service/internal/coveragecoord"
 	"unit-test-ide.local/test-service/internal/coveragedomain"
+	"unit-test-ide.local/test-service/internal/coveragellvm"
 	"unit-test-ide.local/test-service/internal/session"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/testdomain"
@@ -130,5 +131,30 @@ func TestCoverageToolchainSnapshotAcceptsOnlySupportedPlatformFamilies(t *testin
 	}
 	if _, err := coverageToolchainSnapshot(toolchain.Instance{ID: "toolchain", Family: toolchain.FamilyMSVC, Version: "19.0", TargetArchitecture: "amd64"}, "windows"); !errors.Is(err, coveragedomain.ErrInvalidToolchain) {
 		t.Fatalf("unsupported family error = %v", err)
+	}
+}
+
+func TestWindowsCoverageProducerUsesRetainedInstrumentationContract(t *testing.T) {
+	first, err := coverageToolchainSnapshot(toolchain.Instance{
+		ID: "first-toolchain", Family: toolchain.FamilyClangCL,
+		Version: "18.1.8", TargetArchitecture: "amd64",
+	}, "windows")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := coverageToolchainSnapshot(toolchain.Instance{
+		ID: "replacement-toolchain", Family: toolchain.FamilyClangCL,
+		Version: "19.0.1", TargetArchitecture: "amd64",
+	}, "windows")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := coveragellvm.InstrumentationFingerprint()
+	if first.InstrumentationFingerprint != want || second.InstrumentationFingerprint != want {
+		t.Fatalf("producer fingerprints = %q, %q; retained contract = %q",
+			first.InstrumentationFingerprint, second.InstrumentationFingerprint, want)
+	}
+	if first.Compiler.Version == second.Compiler.Version {
+		t.Fatal("toolchain version identity was not preserved separately")
 	}
 }

@@ -58,8 +58,8 @@ func TestCoverageArtifactSinkPublishesClosedReportSet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(artifacts) != 6 {
-		t.Fatalf("Finalize() artifacts = %#v, want three public and three bounded artifacts", artifacts)
+	if len(artifacts) != 3 {
+		t.Fatalf("Finalize() artifacts = %#v, want the three public report artifacts", artifacts)
 	}
 	byKind := make(map[string]task.Artifact, len(artifacts))
 	for _, artifact := range artifacts {
@@ -80,8 +80,9 @@ func TestCoverageArtifactSinkPublishesClosedReportSet(t *testing.T) {
 	}
 }
 
-func TestCoverageArtifactSinkAllowsOnlyBoundedArtifactsWithoutReport(t *testing.T) {
-	store, err := New(t.TempDir())
+func TestCoverageArtifactSinkNeverPersistsRawProcessOutputOrDiagnostics(t *testing.T) {
+	root := t.TempDir()
+	store, err := New(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,11 +92,17 @@ func TestCoverageArtifactSinkAllowsOnlyBoundedArtifactsWithoutReport(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := sink.AppendOutput(context.Background(), "coverage-build", "stdout", []byte("build output\n")); err != nil {
-		t.Fatal(err)
+	sentinel := `C:\private\build\secret.profraw --token=coverage-secret`
+	for _, phase := range []string{
+		"coverage-configure", "coverage-build", "coverage-test", "coverage-normalize",
+	} {
+		if err := sink.AppendOutput(context.Background(), phase, "stdout", []byte(sentinel)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := sink.AppendDiagnostic(context.Background(), diagnostic.Diagnostic{
-		TaskID: taskID, StepID: "coverage-build", Severity: "error", Code: "COVERAGE_BUILD_FAILED",
+		TaskID: taskID, StepID: "coverage-build", Severity: "error",
+		Code: "COVERAGE_BUILD_FAILED", Message: sentinel,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -103,12 +110,11 @@ func TestCoverageArtifactSinkAllowsOnlyBoundedArtifactsWithoutReport(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	kinds := make([]string, len(artifacts))
-	for index, artifact := range artifacts {
-		kinds[index] = artifact.Kind
+	if len(artifacts) != 0 {
+		t.Fatalf("raw coverage artifacts = %#v, want none", artifacts)
 	}
-	if want := []string{"diagnostics", "stderr", "stdout"}; !reflect.DeepEqual(kinds, want) {
-		t.Fatalf("non-report artifact kinds = %#v, want %#v", kinds, want)
+	if matches, err := filepath.Glob(filepath.Join(root, "**", "*")); err != nil || len(matches) != 0 {
+		t.Fatalf("coverage raw persistence left files = %v, %v", matches, err)
 	}
 }
 
