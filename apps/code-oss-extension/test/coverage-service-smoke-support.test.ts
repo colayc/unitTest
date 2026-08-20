@@ -6,12 +6,84 @@ import test from "node:test";
 import {
   parseStrictJUnit,
   publishEvidenceAtomically,
+  runAfterVerifiedCoverageToolsetPreflight,
   teardownThenPublish
 } from "./coverage-service-smoke-support.js";
 
 const itemA = `utid-v1-${"a".repeat(64)}`;
 const itemB = `utid-v1-${"b".repeat(64)}`;
 const container = `utid-v1-${"c".repeat(64)}`;
+const unavailableMessage = "SKIP: verified clang-cl coverage toolset is unavailable";
+
+test("local unavailable coverage toolset skips before every boundary and execution side effect", async () => {
+  const trace: string[] = [];
+  const result = await runAfterVerifiedCoverageToolsetPreflight({
+    required: false,
+    async preflight() {
+      trace.push("preflight");
+      return { status: "unavailable" };
+    },
+    skip(message) { trace.push(`skip:${message}`); },
+    async installBoundary() { trace.push("boundary"); return "boundary"; },
+    async execute() { trace.push("service-start/native-execution"); return 1; }
+  });
+  assert.deepEqual(result, { status: "skipped" });
+  assert.deepEqual(trace, ["preflight", `skip:${unavailableMessage}`]);
+});
+
+test("required unavailable coverage toolset fails before every boundary and execution side effect", async () => {
+  const trace: string[] = [];
+  await assert.rejects(
+    runAfterVerifiedCoverageToolsetPreflight({
+      required: true,
+      async preflight() {
+        trace.push("preflight");
+        return { status: "unavailable" };
+      },
+      skip(message) { trace.push(`skip:${message}`); },
+      async installBoundary() { trace.push("boundary"); return "boundary"; },
+      async execute() { trace.push("service-start/native-execution"); return 1; }
+    }),
+    /required verified clang-cl coverage toolset is unavailable/u
+  );
+  assert.deepEqual(trace, ["preflight"]);
+});
+
+test("verified coverage toolset establishes the boundary before Service and native execution", async () => {
+  const trace: string[] = [];
+  const result = await runAfterVerifiedCoverageToolsetPreflight({
+    required: true,
+    async preflight() {
+      trace.push("preflight");
+      return { status: "verified", version: "18.1.8" };
+    },
+    skip(message) { trace.push(`skip:${message}`); },
+    async installBoundary() { trace.push("boundary"); return "boundary"; },
+    async execute(boundary, toolset) {
+      trace.push(`service-start/native-execution:${boundary}:${toolset.version}`);
+      return 7;
+    }
+  });
+  assert.deepEqual(result, { status: "executed", value: 7 });
+  assert.deepEqual(trace, [
+    "preflight",
+    "boundary",
+    "service-start/native-execution:boundary:18.1.8"
+  ]);
+
+  let executed = false;
+  await assert.rejects(
+    runAfterVerifiedCoverageToolsetPreflight({
+      required: true,
+      async preflight() { return { status: "verified", version: "18.1.8" }; },
+      skip() {},
+      async installBoundary() { throw new Error("guardian failed closed"); },
+      async execute() { executed = true; }
+    }),
+    /guardian failed closed/u
+  );
+  assert.equal(executed, false, "a verified toolset cannot bypass a failed OS boundary");
+});
 
 test("strict JUnit tokenizer accepts quoted attributes and legal builtin/numeric entities", () => {
   const xml = junit([

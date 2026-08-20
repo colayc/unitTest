@@ -374,3 +374,137 @@ Generated GOCACHE, Python cache, Service build output and `.native-e2e`
 runtime/artifact state were removed. No production Service or coverage
 execution behavior was weakened, no out-of-scope production fix was required,
 and no push was performed.
+
+## Fix Round 3
+
+### Review findings and credible RED
+
+Both reviewed Important findings were reproduced with real PowerShell fixture
+processes before implementation.
+
+- The initial per-store audit suite ran 41 tests with 27 passing and 14
+  failing. Every PersistentStore policy/filter tamper incorrectly reached
+  `ready`, and the valid control had no PersistentStore filter trace. This
+  proved that the ActiveStore rule object was still being used to endorse both
+  stores.
+- After adding closed guardian-state and delayed-creator cases, the focused
+  suite ran 50 tests with 41 passing and 9 failing. Corrupt canonical-marker
+  inputs, an extra leaf, a reparse marker, and a forged `removed` leaf beside a
+  live delayed guardian were incorrectly accepted by the old CleanupAll state
+  check.
+
+Final-gate preparation then exposed a separate test-helper ordering concern:
+on this non-elevated workstation the smoke tried to establish the firewall
+guardian before determining that no verified LLVM coverage toolset existed.
+The first focused preflight test produced the expected TypeScript RED
+(`runAfterVerifiedCoverageToolsetPreflight` was not exported). The parent
+approved the minimal test-helper scope: reuse the production discovery and
+identity verifier, without changing production coverage behavior.
+
+### Independent ActiveStore and PersistentStore proof
+
+`Assert-RuleInstalled` now obtains the ActiveStore and PersistentStore rule
+objects independently. Each object must be unique and must independently match
+the exact Name, DisplayName, Enabled, Direction, Action, Profile and Group.
+Application, address, port, service, interface and interface-type filters are
+also fetched from and checked against each corresponding store object. The
+effective firewall-profile query remains explicitly
+`Get-NetFirewallProfile -PolicyStore ActiveStore` and accepts only enabled
+Domain, Private and Public profiles.
+
+The real PowerShell fixture can tamper every policy/filter field in either
+store while leaving the other store valid. All 26 Active/Persistent tamper
+combinations now fail before `ready`, converge rule removal, publish only the
+canonical removal proof and exit nonzero. The valid fixture records all twelve
+store/filter queries and reaches the normal release/removed lifecycle.
+
+### Closed guardian state and convergent CleanupAll
+
+The Node launcher creates and flushes the durable `rule-name` and `owner.pid`
+markers before spawning the sole guardian. Guardian state has a closed six-leaf
+schema: `rule-name`, `owner.pid`, `guardian.pid`, `release`, `ready` and
+`removed`. Every present leaf must be a regular non-reparse file no larger than
+256 bytes, decode as strict UTF-8 and match its exact canonical content;
+owner/guardian PIDs are strict positive decimal integers. Unknown leaves,
+directories, case variants, damaged/oversized markers and reparse points fail
+closed.
+
+CleanupAll performs the dedicated group removal and empty ActiveStore plus
+PersistentStore audit on every retry before it considers state convergence.
+For a canonical guardian directory it writes or validates the canonical
+release marker. A live PID is a blocker even when `removed` already exists,
+and is trusted only when both its executable is Windows PowerShell and its CIM
+command line binds the same Guard action, rule, owner PID and state directory.
+A not-yet-scheduled guardian with no PID remains a possible late creator and
+therefore remains a blocker. A dead guardian is accepted only with canonical
+removed proof. Thus a delayed pre-ready guardian observes release, follows its
+no-create/cleanup path and exits before CleanupAll can obtain three stable
+audits; a forged removed leaf cannot make CleanupAll return early.
+
+The guardian itself validates the closed state before PID creation, before and
+after firewall creation/audit, and before readiness. Ready, release and removed
+use distinct canonical values. Removal/query exceptions continue to be caught
+and retried to the bounded deadline. The former free-form `failed` leaf was
+removed so failure cannot expand the state schema.
+
+### Verified-toolset preflight scope closure
+
+The Windows coverage smoke now builds and runs a small Go preflight helper
+before firewall installation, Service start or coverage-native execution. The
+helper directly uses production `NewWindowsAdapters` discovery evidence and
+`coveragellvm.PinToolset/Verify`, including the retained executable handles,
+Windows file identity and SHA-256 validation. It does not inspect only PATH or
+file existence and emits one closed no-path JSON availability object.
+
+Three focused branches prove ordering and zero forbidden side effects:
+non-required unavailable produces only the exact skip; required unavailable
+throws before boundary/Service/native callbacks; verified establishes the
+guardian before executing, and a guardian failure cannot invoke execution.
+The real smoke additionally requires the Service-discovered toolchain version
+to equal the preflight version. Local unavailable remains exactly one SKIP;
+required unavailable is an expected test failure, not a SKIP or evidence.
+
+### Fresh GREEN verification
+
+All applicable commands used Node 24.18.0, pnpm 11.4.0 and Go 1.26.6. Go
+commands used `GOENV=off`, `GOTOOLCHAIN=local` and a private worktree cache.
+
+- Independent store/state/guardian focused suite: PASS, 50/50.
+- Coverage support preflight/JUnit/evidence suite: PASS, 12/12.
+- `pnpm --filter @unit-test-ide/service-probe test`: PASS, 90/90.
+- `pnpm --filter code-oss-extension test`: PASS, 136/136.
+- Existing real Named Pipe Service smoke: PASS, 20/20.
+- Coverage Service smoke: honest local SKIP, exactly 1 test / 0 pass / 0 fail /
+  1 skip with `SKIP: verified clang-cl coverage toolset is unavailable`;
+  firewall state and the final execution report are absent.
+- Required `clang-cl` negative control: expected FAIL, exactly 1 test / 0 pass /
+  1 fail / 0 skip with
+  `required verified clang-cl coverage toolset is unavailable`; no report was
+  published.
+- Generic Windows native E2E control: PASS for the available MSVC matrix;
+  unavailable `clang-cl` remained an honest skip and was not relabelled PASS.
+- `go test ./apps/test-service/... -count=1`: PASS, all packages including the
+  new preflight command.
+- `go test -race ./apps/test-service/... -count=1`: PASS, all packages and no
+  race report.
+- `pnpm check:protocol-generated` and `pnpm check:coverage-generated`: PASS.
+- Root `pnpm build`: PASS.
+- `pnpm test:workspace`: PASS, 21/21.
+- Root `pnpm test`: PASS, including generators, bundle/workspace checks, all
+  package suites, Extension 136/136 and the full Go Service suite.
+- `git diff --check`: PASS.
+
+The first sandboxed Go full run could not perform the coverage-bundle
+ancestor-identity rename; its approved rerun passed unchanged. Likewise, the
+workspace control required read access to installed Windows SDK metadata. The
+fixed CMake bundle used the official 4.3.4 archive, matched the repository
+manifest SHA-256 exactly, and was prepared through the production bundle
+verifier. These were environment/setup boundaries, not relaxed assertions.
+
+Generated Node/Go/CMake caches, fixture binaries, Python cache, `.native-e2e`
+artifacts and the stale preflight-era guardian directory were removed. The
+coverage execution report remains absent because this host cannot produce a
+verified LLVM native PASS. The approved preflight change is isolated to test
+orchestration and a test-only Go command; no production Service, resolver,
+collector, protocol or Extension runtime behavior was weakened. No push was
+performed.

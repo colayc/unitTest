@@ -22,6 +22,8 @@ $ruleGroup = 'UnitTestIDE Native Offline Boundary'
 $rulePattern = '^UnitTestIDE-NativeOffline-[0-9a-f]{16,64}$'
 $cleanupPollMilliseconds = 100
 $requiredStableAudits = 3
+$markerMaximumBytes = 256
+$stateMarkerNames = @('rule-name', 'owner.pid', 'guardian.pid', 'release', 'ready', 'removed')
 
 function Assert-RuleName([string]$Name) {
   if ($Name -cnotmatch $rulePattern) {
@@ -67,24 +69,52 @@ function Assert-GroupRemoved {
   }
 }
 
+function Assert-ClosedRule([object]$Rule, [string]$Name, [string]$Store) {
+  if (
+    $Rule.Name -cne $Name -or
+    $Rule.DisplayName -cne $Name -or
+    $Rule.Enabled.ToString() -ne 'True' -or
+    $Rule.Direction.ToString() -ne 'Outbound' -or
+    $Rule.Action.ToString() -ne 'Block' -or
+    $Rule.Profile.ToString() -ne 'Any' -or
+    $Rule.Group -ne $ruleGroup
+  ) {
+    throw "Windows native offline firewall rule has unexpected $Store policy"
+  }
+}
+
+function Assert-ClosedFilters([object]$Rule, [string]$Store) {
+  $application = @($Rule | Get-NetFirewallApplicationFilter)
+  $address = @($Rule | Get-NetFirewallAddressFilter)
+  $port = @($Rule | Get-NetFirewallPortFilter)
+  $service = @($Rule | Get-NetFirewallServiceFilter)
+  $interface = @($Rule | Get-NetFirewallInterfaceFilter)
+  $interfaceType = @($Rule | Get-NetFirewallInterfaceTypeFilter)
+  if (
+    $application.Count -ne 1 -or ($application[0].Program -join ',') -ne 'Any' -or
+    -not ([string]::IsNullOrEmpty($application[0].Package) -or $application[0].Package -eq 'Any') -or
+    $address.Count -ne 1 -or
+    ($address[0].LocalAddress -join ',') -ne 'Any' -or
+    ($address[0].RemoteAddress -join ',') -ne 'Any' -or
+    $port.Count -ne 1 -or $port[0].Protocol.ToString() -ne 'Any' -or
+    ($port[0].LocalPort -join ',') -ne 'Any' -or
+    ($port[0].RemotePort -join ',') -ne 'Any' -or
+    $service.Count -ne 1 -or $service[0].Service.ToString() -ne 'Any' -or
+    $interface.Count -ne 1 -or ($interface[0].InterfaceAlias -join ',') -ne 'Any' -or
+    $interfaceType.Count -ne 1 -or $interfaceType[0].InterfaceType.ToString() -ne 'Any'
+  ) {
+    throw "Windows native offline firewall $Store filters are not closed"
+  }
+}
+
 function Assert-RuleInstalled([string]$Name) {
-  $rules = @(Get-RuleByName 'ActiveStore' $Name)
-  $persistent = @(Get-RuleByName 'PersistentStore' $Name)
-  if ($rules.Count -ne 1 -or $persistent.Count -ne 1) {
+  $activeRules = @(Get-RuleByName 'ActiveStore' $Name)
+  $persistentRules = @(Get-RuleByName 'PersistentStore' $Name)
+  if ($activeRules.Count -ne 1 -or $persistentRules.Count -ne 1) {
     throw 'Windows native offline firewall rule is not unique in both policy stores'
   }
-  $rule = $rules[0]
-  if (
-    $rule.Name -cne $Name -or
-    $rule.DisplayName -cne $Name -or
-    $rule.Enabled.ToString() -ne 'True' -or
-    $rule.Direction.ToString() -ne 'Outbound' -or
-    $rule.Action.ToString() -ne 'Block' -or
-    $rule.Profile.ToString() -ne 'Any' -or
-    $rule.Group -ne $ruleGroup
-  ) {
-    throw 'Windows native offline firewall rule has unexpected policy'
-  }
+  Assert-ClosedRule $activeRules[0] $Name 'ActiveStore'
+  Assert-ClosedRule $persistentRules[0] $Name 'PersistentStore'
 
   # Get-NetFirewallProfile without PolicyStore reads PersistentStore. The
   # effective protection decision must be audited from ActiveStore explicitly.
@@ -107,27 +137,8 @@ function Assert-RuleInstalled([string]$Name) {
     throw 'Windows Firewall must be enabled for every ActiveStore profile'
   }
 
-  $application = @($rule | Get-NetFirewallApplicationFilter)
-  $address = @($rule | Get-NetFirewallAddressFilter)
-  $port = @($rule | Get-NetFirewallPortFilter)
-  $service = @($rule | Get-NetFirewallServiceFilter)
-  $interface = @($rule | Get-NetFirewallInterfaceFilter)
-  $interfaceType = @($rule | Get-NetFirewallInterfaceTypeFilter)
-  if (
-    $application.Count -ne 1 -or ($application[0].Program -join ',') -ne 'Any' -or
-    -not ([string]::IsNullOrEmpty($application[0].Package) -or $application[0].Package -eq 'Any') -or
-    $address.Count -ne 1 -or
-    ($address[0].LocalAddress -join ',') -ne 'Any' -or
-    ($address[0].RemoteAddress -join ',') -ne 'Any' -or
-    $port.Count -ne 1 -or $port[0].Protocol.ToString() -ne 'Any' -or
-    ($port[0].LocalPort -join ',') -ne 'Any' -or
-    ($port[0].RemotePort -join ',') -ne 'Any' -or
-    $service.Count -ne 1 -or $service[0].Service.ToString() -ne 'Any' -or
-    $interface.Count -ne 1 -or ($interface[0].InterfaceAlias -join ',') -ne 'Any' -or
-    $interfaceType.Count -ne 1 -or $interfaceType[0].InterfaceType.ToString() -ne 'Any'
-  ) {
-    throw 'Windows native offline firewall filters are not closed'
-  }
+  Assert-ClosedFilters $activeRules[0] 'ActiveStore'
+  Assert-ClosedFilters $persistentRules[0] 'PersistentStore'
 }
 
 function Remove-RuleByName([string]$Name) {
@@ -226,11 +237,135 @@ function Write-MarkerUnlessPresent([string]$Path, [string]$Content) {
   try {
     Write-ExclusiveMarker $Path $Content
   } catch [IO.IOException] {
-    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
-    if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-      throw 'Windows native offline marker is unsafe'
+    $actual = Get-PlainMarkerContent $Path ([IO.Path]::GetFileName($Path))
+    if ($actual -cne $Content) {
+      throw 'Windows native offline marker content is invalid'
     }
   }
+}
+
+function Get-PlainMarkerContent([string]$Path, [string]$Label) {
+  $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+  if (
+    $item.PSIsContainer -or
+    ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+    $item.Length -gt $markerMaximumBytes
+  ) {
+    throw "Windows native offline $Label marker is unsafe"
+  }
+  $bytes = [IO.File]::ReadAllBytes($item.FullName)
+  if ($bytes.Length -gt $markerMaximumBytes) {
+    throw "Windows native offline $Label marker is too large"
+  }
+  try {
+    [Text.UTF8Encoding]::new($false, $true).GetString($bytes)
+  } catch {
+    throw "Windows native offline $Label marker is not canonical UTF-8"
+  }
+}
+
+function Get-ClosedStateLeaves([string]$Path, [string[]]$AllowedNames) {
+  $leaves = [Collections.Generic.Dictionary[string, IO.FileInfo]]::new(
+    [StringComparer]::Ordinal
+  )
+  foreach ($item in @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction Stop)) {
+    if (
+      $item.PSIsContainer -or
+      ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+      -not ($AllowedNames -ccontains $item.Name) -or
+      $leaves.ContainsKey($item.Name)
+    ) {
+      throw 'Windows native offline guardian state contains an unsafe or unexpected leaf'
+    }
+    $leaves.Add($item.Name, $item)
+  }
+  return ,$leaves
+}
+
+function Assert-RequiredMarker(
+  [Collections.Generic.Dictionary[string, IO.FileInfo]]$Leaves,
+  [string]$Name,
+  [string]$Expected
+) {
+  if (-not $Leaves.ContainsKey($Name)) {
+    throw "Windows native offline guardian state is missing $Name"
+  }
+  $actual = Get-PlainMarkerContent $Leaves[$Name].FullName $Name
+  if ($actual -cne $Expected) {
+    throw "Windows native offline $Name marker content is invalid"
+  }
+}
+
+function Assert-OptionalMarker(
+  [Collections.Generic.Dictionary[string, IO.FileInfo]]$Leaves,
+  [string]$Name,
+  [string]$Expected
+) {
+  if (-not $Leaves.ContainsKey($Name)) {
+    return
+  }
+  $actual = Get-PlainMarkerContent $Leaves[$Name].FullName $Name
+  if ($actual -cne $Expected) {
+    throw "Windows native offline $Name marker content is invalid"
+  }
+}
+
+function ConvertFrom-CanonicalPid([string]$Content, [string]$Prefix, [string]$Label) {
+  $match = [regex]::Match($Content, "\A$([regex]::Escape($Prefix))([1-9][0-9]{0,9})`n\z")
+  $value = 0
+  if (
+    -not $match.Success -or
+    -not [int]::TryParse($match.Groups[1].Value, [ref]$value) -or
+    $value -le 0
+  ) {
+    throw "Windows native offline $Label PID marker is invalid"
+  }
+  $value
+}
+
+function Assert-CanonicalGuardianState(
+  [string]$Path,
+  [string]$Name,
+  [string[]]$AllowedNames,
+  [int]$ExpectedOwnerPid = 0
+) {
+  $leaves = Get-ClosedStateLeaves $Path $AllowedNames
+  Assert-RequiredMarker $leaves 'rule-name' "rule=$Name`n"
+  if (-not $leaves.ContainsKey('owner.pid')) {
+    throw 'Windows native offline guardian state is missing owner.pid'
+  }
+  $ownerPid = ConvertFrom-CanonicalPid (
+    Get-PlainMarkerContent $leaves['owner.pid'].FullName 'owner.pid'
+  ) 'owner=' 'owner'
+  if ($ExpectedOwnerPid -gt 0 -and $ownerPid -ne $ExpectedOwnerPid) {
+    throw 'Windows native offline owner PID marker does not match the guardian owner'
+  }
+
+  $guardianPid = 0
+  if ($leaves.ContainsKey('guardian.pid')) {
+    $guardianPid = ConvertFrom-CanonicalPid (
+      Get-PlainMarkerContent $leaves['guardian.pid'].FullName 'guardian.pid'
+    ) '' 'guardian'
+  }
+  Assert-OptionalMarker $leaves 'release' "release=$Name`n"
+  Assert-OptionalMarker $leaves 'ready' "ready=$Name`n"
+  Assert-OptionalMarker $leaves 'removed' "removed=$Name`n"
+  [pscustomobject]@{
+    Leaves = $leaves
+    OwnerPid = $ownerPid
+    GuardianPid = $guardianPid
+  }
+}
+
+function Test-CanonicalMarker([string]$Path, [string]$Expected, [string]$Label) {
+  if (-not (Test-Path -LiteralPath $Path)) {
+    return $false
+  }
+  $actual = Get-PlainMarkerContent $Path $Label
+  if ($actual -cne $Expected) {
+    throw "Windows native offline $Label marker content is invalid"
+  }
+  $true
 }
 
 function Test-OwnerAlive([Diagnostics.Process]$Owner) {
@@ -245,7 +380,52 @@ function Test-OwnerAlive([Diagnostics.Process]$Owner) {
 function Request-GuardianRelease([IO.DirectoryInfo]$Directory) {
   Write-MarkerUnlessPresent (
     Join-Path $Directory.FullName 'release'
-  ) "$($Directory.Name)`n"
+  ) "release=$($Directory.Name)`n"
+}
+
+function Test-CorrespondingGuardianAlive(
+  [int]$GuardianPid,
+  [int]$OwnerPid,
+  [string]$StatePath,
+  [string]$Name
+) {
+  try {
+    $process = Get-Process -Id $GuardianPid -ErrorAction Stop
+  } catch {
+    if ($_.FullyQualifiedErrorId -like 'NoProcessFoundForGivenId*') {
+      return $false
+    }
+    throw
+  }
+
+  $expectedPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+  if (
+    [string]::IsNullOrWhiteSpace($process.Path) -or
+    -not $process.Path.Equals($expectedPowerShell, [StringComparison]::OrdinalIgnoreCase)
+  ) {
+    throw 'Windows native offline guardian PID does not identify Windows PowerShell'
+  }
+  $records = @(Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $GuardianPid" -ErrorAction Stop)
+  if ($records.Count -eq 0) {
+    return $false
+  }
+  if ($records.Count -ne 1 -or [string]::IsNullOrWhiteSpace($records[0].CommandLine)) {
+    throw 'Windows native offline guardian process identity is not auditable'
+  }
+  $commandLine = $records[0].CommandLine
+  $actionPattern = '(?i)(?:^|\s)-Action\s+"?Guard"?(?:\s|$)'
+  $rulePatternExact = "(?i)(?:^|\s)-RuleName\s+`"?$([regex]::Escape($Name))`"?(?:\s|$)"
+  $ownerPattern = "(?i)(?:^|\s)-OwnerPid\s+`"?$OwnerPid`"?(?:\s|$)"
+  $statePattern = "(?i)(?:^|\s)-StateDirectory\s+`"?$([regex]::Escape($StatePath))`"?(?:\s|$)"
+  if (
+    $commandLine -notmatch $actionPattern -or
+    $commandLine -notmatch $rulePatternExact -or
+    $commandLine -notmatch $ownerPattern -or
+    $commandLine -notmatch $statePattern
+  ) {
+    throw 'Windows native offline guardian PID identifies an unrelated process'
+  }
+  $true
 }
 
 function Test-GuardianBlockers([string]$Root) {
@@ -258,29 +438,27 @@ function Test-GuardianBlockers([string]$Root) {
     if (($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
       throw 'Windows native offline state root contains a reparse point'
     }
+    $state = Assert-CanonicalGuardianState $directory.FullName $directory.Name $stateMarkerNames
     Request-GuardianRelease $directory
-    if (Test-Path -LiteralPath (Join-Path $directory.FullName 'removed') -PathType Leaf) {
-      continue
-    }
-    $pidPath = Join-Path $directory.FullName 'guardian.pid'
-    if (-not (Test-Path -LiteralPath $pidPath -PathType Leaf)) {
+    $state = Assert-CanonicalGuardianState $directory.FullName $directory.Name $stateMarkerNames
+    if ($state.GuardianPid -le 0) {
       # The guardian may have been spawned but not scheduled yet. Until it
       # writes its PID it remains a possible late creator.
       $hasBlocker = $true
       continue
     }
-    $guardianPidText = (Get-Content -LiteralPath $pidPath -Raw -ErrorAction Stop).Trim()
-    $guardianPid = 0
-    if (-not [int]::TryParse($guardianPidText, [ref]$guardianPid) -or $guardianPid -le 0) {
-      throw 'Windows native offline guardian PID marker is invalid'
-    }
-    try {
-      Get-Process -Id $guardianPid -ErrorAction Stop | Out-Null
+    if (
+      Test-CorrespondingGuardianAlive `
+        $state.GuardianPid `
+        $state.OwnerPid `
+        $directory.FullName `
+        $directory.Name
+    ) {
       $hasBlocker = $true
-    } catch {
-      if ($_.FullyQualifiedErrorId -notlike 'NoProcessFoundForGivenId*') {
-        throw
-      }
+      continue
+    }
+    if (-not $state.Leaves.ContainsKey('removed')) {
+      throw 'Windows native offline guardian exited without canonical removal proof'
     }
   }
   $hasBlocker
@@ -297,15 +475,26 @@ switch ($Action) {
     $readyPath = Join-Path $statePath 'ready'
     $releasePath = Join-Path $statePath 'release'
     $removedPath = Join-Path $statePath 'removed'
-    $failedPath = Join-Path $statePath 'failed'
+    Assert-CanonicalGuardianState `
+      $statePath `
+      $RuleName `
+      @('rule-name', 'owner.pid', 'release') `
+      $OwnerPid | Out-Null
     Write-ExclusiveMarker $pidPath "$PID`n"
+    Assert-CanonicalGuardianState `
+      $statePath `
+      $RuleName `
+      @('rule-name', 'owner.pid', 'guardian.pid', 'release') `
+      $OwnerPid | Out-Null
 
     $primaryError = $null
     $cleanupError = $null
     try {
       $owner = Get-Process -Id $OwnerPid -ErrorAction Stop
       Assert-RuleRemoved $RuleName
-      $continueGuard = -not (Test-Path -LiteralPath $releasePath -PathType Leaf) -and (Test-OwnerAlive $owner)
+      $continueGuard = -not (
+        Test-CanonicalMarker $releasePath "release=$RuleName`n" 'release'
+      ) -and (Test-OwnerAlive $owner)
       if ($continueGuard) {
         # This guardian process is the only rule creator. Once this call returns,
         # the rest of its lifetime contains no create path.
@@ -319,15 +508,39 @@ switch ($Action) {
           -Enabled True `
           -Profile Any `
           -Protocol Any | Out-Null
-        $continueGuard = -not (Test-Path -LiteralPath $releasePath -PathType Leaf) -and (Test-OwnerAlive $owner)
+        $state = Assert-CanonicalGuardianState `
+          $statePath `
+          $RuleName `
+          @('rule-name', 'owner.pid', 'guardian.pid', 'release', 'removed') `
+          $OwnerPid
+        $continueGuard = `
+          -not $state.Leaves.ContainsKey('release') -and `
+          -not $state.Leaves.ContainsKey('removed') -and `
+          (Test-OwnerAlive $owner)
       }
       if ($continueGuard) {
         Assert-RuleInstalled $RuleName
-        $continueGuard = -not (Test-Path -LiteralPath $releasePath -PathType Leaf) -and (Test-OwnerAlive $owner)
+        $state = Assert-CanonicalGuardianState `
+          $statePath `
+          $RuleName `
+          @('rule-name', 'owner.pid', 'guardian.pid', 'release', 'removed') `
+          $OwnerPid
+        $continueGuard = `
+          -not $state.Leaves.ContainsKey('release') -and `
+          -not $state.Leaves.ContainsKey('removed') -and `
+          (Test-OwnerAlive $owner)
       }
       if ($continueGuard) {
-        Write-ExclusiveMarker $readyPath "$RuleName`n"
-        while ((Test-OwnerAlive $owner) -and -not (Test-Path -LiteralPath $releasePath -PathType Leaf)) {
+        Write-ExclusiveMarker $readyPath "ready=$RuleName`n"
+        Assert-CanonicalGuardianState `
+          $statePath `
+          $RuleName `
+          @('rule-name', 'owner.pid', 'guardian.pid', 'release', 'ready') `
+          $OwnerPid | Out-Null
+        while (
+          (Test-OwnerAlive $owner) -and
+          -not (Test-CanonicalMarker $releasePath "release=$RuleName`n" 'release')
+        ) {
           Start-Sleep -Milliseconds $cleanupPollMilliseconds
         }
       }
@@ -339,13 +552,12 @@ switch ($Action) {
           { Remove-RuleByName $RuleName } `
           { Assert-RuleRemoved $RuleName } `
           { $false }
-        Write-MarkerUnlessPresent $removedPath "$RuleName`n"
+        Write-MarkerUnlessPresent $removedPath "removed=$RuleName`n"
       } catch {
         $cleanupError = $_
       }
     }
     if ($null -ne $primaryError -or $null -ne $cleanupError) {
-      Write-MarkerUnlessPresent $failedPath "guardian failed`n"
       if ($null -ne $cleanupError) {
         throw $cleanupError
       }
@@ -355,11 +567,14 @@ switch ($Action) {
   'CleanupExact' {
     Assert-RuleName $RuleName
     $statePath = Assert-StateDirectory $StateRoot $StateDirectory $RuleName
+    Assert-CanonicalGuardianState $statePath $RuleName $stateMarkerNames | Out-Null
     Invoke-StableCleanup `
       { Remove-RuleByName $RuleName } `
       { Assert-RuleRemoved $RuleName } `
       { $false }
-    Write-MarkerUnlessPresent (Join-Path $statePath 'removed') "$RuleName`n"
+    Write-MarkerUnlessPresent (
+      Join-Path $statePath 'removed'
+    ) "removed=$RuleName`n"
   }
   'CleanupAll' {
     $rootPath = Get-SafeFullPath $StateRoot 'state root'

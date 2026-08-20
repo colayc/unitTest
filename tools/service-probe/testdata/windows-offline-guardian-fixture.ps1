@@ -19,6 +19,27 @@ param(
   [ValidateSet('Valid', 'MissingProfile', 'ExtraProfile', 'DisabledProfile')]
   [string]$ProfileScenario = 'Valid',
 
+  [ValidateSet('None', 'ActiveStore', 'PersistentStore')]
+  [string]$TamperStore = 'None',
+
+  [ValidateSet(
+    'None',
+    'Name',
+    'DisplayName',
+    'Enabled',
+    'Direction',
+    'Action',
+    'Profile',
+    'Group',
+    'Application',
+    'Address',
+    'Port',
+    'Service',
+    'Interface',
+    'InterfaceType'
+  )]
+  [string]$TamperField = 'None',
+
   [ValidateRange(0, 30000)]
   [int]$InstallDelayMilliseconds = 0,
 
@@ -43,12 +64,36 @@ $script:removeAttempts = 0
 $script:queryAttempts = 0
 $tracePath = Join-Path $StateRoot $TraceName
 
+# The real Node launcher owns these two durable provenance markers. Keep the
+# PowerShell fixture faithful so guardian state validation exercises the same
+# handshake without replacing production behavior.
+if ($Action -ceq 'Guard') {
+  if ([string]::IsNullOrEmpty($StateDirectory) -or $OwnerPid -le 0) {
+    throw 'fixture guardian state initialization is invalid'
+  }
+  $utf8NoBom = [Text.UTF8Encoding]::new($false)
+  [IO.File]::WriteAllText(
+    (Join-Path $StateDirectory 'rule-name'),
+    "rule=$RuleName`n",
+    $utf8NoBom
+  )
+  [IO.File]::WriteAllText(
+    (Join-Path $StateDirectory 'owner.pid'),
+    "owner=$OwnerPid`n",
+    $utf8NoBom
+  )
+}
+
 function Add-FixtureTrace([string]$Message) {
   Add-Content -LiteralPath $tracePath -Value $Message -Encoding utf8
 }
 
-function New-FixtureRule {
-  [pscustomobject]@{
+function Test-FixtureTamper([string]$Store, [string]$Field) {
+  $TamperStore -ceq $Store -and $TamperField -ceq $Field
+}
+
+function New-FixtureRule([string]$Store) {
+  $rule = [ordered]@{
     Name = $RuleName
     DisplayName = $RuleName
     Enabled = 'True'
@@ -56,7 +101,20 @@ function New-FixtureRule {
     Action = 'Block'
     Profile = 'Any'
     Group = 'UnitTestIDE Native Offline Boundary'
+    FixtureStore = $Store
   }
+  if ($TamperStore -ceq $Store) {
+    switch ($TamperField) {
+      'Name' { $rule.Name = "$RuleName-tampered" }
+      'DisplayName' { $rule.DisplayName = "$RuleName-tampered" }
+      'Enabled' { $rule.Enabled = 'False' }
+      'Direction' { $rule.Direction = 'Inbound' }
+      'Action' { $rule.Action = 'Allow' }
+      'Profile' { $rule.Profile = 'Public' }
+      'Group' { $rule.Group = 'Tampered Group' }
+    }
+  }
+  [pscustomobject]$rule
 }
 
 function Get-NetFirewallRule {
@@ -84,7 +142,7 @@ function Get-NetFirewallRule {
   ) {
     return
   }
-  New-FixtureRule
+  New-FixtureRule $PolicyStore
 }
 
 function New-NetFirewallRule {
@@ -106,7 +164,7 @@ function New-NetFirewallRule {
   }
   $script:installed = $true
   Add-FixtureTrace 'install-finished'
-  New-FixtureRule
+  New-FixtureRule 'PersistentStore'
 }
 
 function Remove-NetFirewallRule {
@@ -154,8 +212,12 @@ function Get-NetFirewallApplicationFilter {
   [CmdletBinding()]
   param([Parameter(ValueFromPipeline = $true)][object]$InputObject)
   process {
-    Add-FixtureTrace 'filter:application'
-    [pscustomobject]@{ Program = 'Any'; Package = 'Any' }
+    Add-FixtureTrace "filter:$($InputObject.FixtureStore):application"
+    if (Test-FixtureTamper $InputObject.FixtureStore 'Application') {
+      [pscustomobject]@{ Program = 'C:\tampered.exe'; Package = 'Any' }
+    } else {
+      [pscustomobject]@{ Program = 'Any'; Package = 'Any' }
+    }
   }
 }
 
@@ -163,8 +225,12 @@ function Get-NetFirewallAddressFilter {
   [CmdletBinding()]
   param([Parameter(ValueFromPipeline = $true)][object]$InputObject)
   process {
-    Add-FixtureTrace 'filter:address'
-    [pscustomobject]@{ LocalAddress = 'Any'; RemoteAddress = 'Any' }
+    Add-FixtureTrace "filter:$($InputObject.FixtureStore):address"
+    if (Test-FixtureTamper $InputObject.FixtureStore 'Address') {
+      [pscustomobject]@{ LocalAddress = 'Any'; RemoteAddress = '8.8.8.8' }
+    } else {
+      [pscustomobject]@{ LocalAddress = 'Any'; RemoteAddress = 'Any' }
+    }
   }
 }
 
@@ -172,8 +238,12 @@ function Get-NetFirewallPortFilter {
   [CmdletBinding()]
   param([Parameter(ValueFromPipeline = $true)][object]$InputObject)
   process {
-    Add-FixtureTrace 'filter:port'
-    [pscustomobject]@{ Protocol = 'Any'; LocalPort = 'Any'; RemotePort = 'Any' }
+    Add-FixtureTrace "filter:$($InputObject.FixtureStore):port"
+    if (Test-FixtureTamper $InputObject.FixtureStore 'Port') {
+      [pscustomobject]@{ Protocol = 'TCP'; LocalPort = 'Any'; RemotePort = '443' }
+    } else {
+      [pscustomobject]@{ Protocol = 'Any'; LocalPort = 'Any'; RemotePort = 'Any' }
+    }
   }
 }
 
@@ -181,8 +251,12 @@ function Get-NetFirewallServiceFilter {
   [CmdletBinding()]
   param([Parameter(ValueFromPipeline = $true)][object]$InputObject)
   process {
-    Add-FixtureTrace 'filter:service'
-    [pscustomobject]@{ Service = 'Any' }
+    Add-FixtureTrace "filter:$($InputObject.FixtureStore):service"
+    if (Test-FixtureTamper $InputObject.FixtureStore 'Service') {
+      [pscustomobject]@{ Service = 'TamperedService' }
+    } else {
+      [pscustomobject]@{ Service = 'Any' }
+    }
   }
 }
 
@@ -190,8 +264,12 @@ function Get-NetFirewallInterfaceFilter {
   [CmdletBinding()]
   param([Parameter(ValueFromPipeline = $true)][object]$InputObject)
   process {
-    Add-FixtureTrace 'filter:interface'
-    [pscustomobject]@{ InterfaceAlias = 'Any' }
+    Add-FixtureTrace "filter:$($InputObject.FixtureStore):interface"
+    if (Test-FixtureTamper $InputObject.FixtureStore 'Interface') {
+      [pscustomobject]@{ InterfaceAlias = 'Ethernet' }
+    } else {
+      [pscustomobject]@{ InterfaceAlias = 'Any' }
+    }
   }
 }
 
@@ -199,8 +277,12 @@ function Get-NetFirewallInterfaceTypeFilter {
   [CmdletBinding()]
   param([Parameter(ValueFromPipeline = $true)][object]$InputObject)
   process {
-    Add-FixtureTrace 'filter:interface-type'
-    [pscustomobject]@{ InterfaceType = 'Any' }
+    Add-FixtureTrace "filter:$($InputObject.FixtureStore):interface-type"
+    if (Test-FixtureTamper $InputObject.FixtureStore 'InterfaceType') {
+      [pscustomobject]@{ InterfaceType = 'Wireless' }
+    } else {
+      [pscustomobject]@{ InterfaceType = 'Any' }
+    }
   }
 }
 

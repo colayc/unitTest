@@ -177,7 +177,7 @@ function defaultWindowsFirewallGuardianOperations(): WindowsFirewallGuardianOper
   );
   return {
     async start(ruleName, ownerPid, stateRoot) {
-      const stateDirectory = await createGuardianStateDirectory(stateRoot, ruleName);
+      const stateDirectory = await createGuardianStateDirectory(stateRoot, ruleName, ownerPid);
       const child = spawn(
         powershell,
         [
@@ -201,12 +201,11 @@ function defaultWindowsFirewallGuardianOperations(): WindowsFirewallGuardianOper
 }
 
 function defaultGuardian(context: DefaultGuardianContext): WindowsFirewallGuardian {
-  const expectedMarker = `${context.ruleName}\n`;
   return {
     async waitUntilReady() {
       await waitForMarker(
         join(context.stateDirectory, "ready"),
-        expectedMarker,
+        `ready=${context.ruleName}\n`,
         context.outcome,
         guardianReadyTimeoutMilliseconds,
         "readiness"
@@ -215,11 +214,11 @@ function defaultGuardian(context: DefaultGuardianContext): WindowsFirewallGuardi
     async release() {
       await writeExclusiveOrValidateMarker(
         join(context.stateDirectory, "release"),
-        expectedMarker
+        `release=${context.ruleName}\n`
       );
       await waitForMarker(
         join(context.stateDirectory, "removed"),
-        expectedMarker,
+        `removed=${context.ruleName}\n`,
         context.outcome,
         guardianReleaseTimeoutMilliseconds,
         "removal"
@@ -237,7 +236,7 @@ function defaultGuardian(context: DefaultGuardianContext): WindowsFirewallGuardi
       try {
         await writeExclusiveOrValidateMarker(
           join(context.stateDirectory, "release"),
-          expectedMarker
+          `release=${context.ruleName}\n`
         );
       } catch (error) {
         errors.push(error);
@@ -290,7 +289,10 @@ function defaultGuardian(context: DefaultGuardianContext): WindowsFirewallGuardi
             maxBuffer: 1024 * 1024
           }
         );
-        await requireMarker(join(context.stateDirectory, "removed"), expectedMarker);
+        await requireMarker(
+          join(context.stateDirectory, "removed"),
+          `removed=${context.ruleName}\n`
+        );
         await rm(context.stateDirectory, { recursive: true, force: true });
       } catch (error) {
         errors.push(error);
@@ -300,7 +302,11 @@ function defaultGuardian(context: DefaultGuardianContext): WindowsFirewallGuardi
   };
 }
 
-async function createGuardianStateDirectory(stateRoot: string, ruleName: string): Promise<string> {
+async function createGuardianStateDirectory(
+  stateRoot: string,
+  ruleName: string,
+  ownerPid: number
+): Promise<string> {
   await mkdir(stateRoot, { recursive: true });
   const rootInfo = await lstat(stateRoot);
   if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) {
@@ -311,6 +317,19 @@ async function createGuardianStateDirectory(stateRoot: string, ruleName: string)
   const stateInfo = await lstat(stateDirectory);
   if (!stateInfo.isDirectory() || stateInfo.isSymbolicLink()) {
     throw new Error("Windows offline guardian state directory is unsafe");
+  }
+  try {
+    await writeExclusiveOrValidateMarker(
+      join(stateDirectory, "rule-name"),
+      `rule=${ruleName}\n`
+    );
+    await writeExclusiveOrValidateMarker(
+      join(stateDirectory, "owner.pid"),
+      `owner=${ownerPid}\n`
+    );
+  } catch (error) {
+    await rm(stateDirectory, { recursive: true, force: true }).catch(() => undefined);
+    throw error;
   }
   return stateDirectory;
 }

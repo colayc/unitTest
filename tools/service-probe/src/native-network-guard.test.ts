@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile as execFileCallback, spawn } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import http, { get as httpGet, request as httpRequest } from "node:http";
 import http2, { connect as http2Connect } from "node:http2";
 import https, { get as httpsGet, request as httpsRequest } from "node:https";
@@ -184,10 +184,12 @@ test("Windows guardian publishes ready only after a closed ActiveStore profile a
     const trace = await readFile(join(root, "fixture-trace.log"), "utf8");
     assert.match(trace, /profile-query:ActiveStore/u);
     assert.doesNotMatch(trace, /^profile-query:\s*$/mu, "default profile-store lookup is forbidden");
-    for (const filter of ["application", "address", "port", "service", "interface", "interface-type"]) {
-      assert.match(trace, new RegExp(`^filter:${filter}$`, "mu"));
+    for (const store of ["ActiveStore", "PersistentStore"]) {
+      for (const filter of ["application", "address", "port", "service", "interface", "interface-type"]) {
+        assert.match(trace, new RegExp(`^filter:${store}:${filter}$`, "mu"));
+      }
     }
-    await writeFile(join(stateDirectory, "release"), "release\n", { flag: "wx" });
+    await writeFile(join(stateDirectory, "release"), `release=${ruleName}\n`, { flag: "wx" });
     const result = await child.result;
     assert.equal(result.code, 0, result.stderr);
     await access(join(stateDirectory, "removed"));
@@ -197,6 +199,53 @@ test("Windows guardian publishes ready only after a closed ActiveStore profile a
     await rm(root, { recursive: true, force: true });
   }
 });
+
+const storeTamperFields = [
+  "Name",
+  "DisplayName",
+  "Enabled",
+  "Direction",
+  "Action",
+  "Profile",
+  "Group",
+  "Application",
+  "Address",
+  "Port",
+  "Service",
+  "Interface",
+  "InterfaceType"
+] as const;
+
+for (const tamperStore of ["ActiveStore", "PersistentStore"] as const) {
+  for (const tamperField of storeTamperFields) {
+    test(`Windows guardian rejects ${tamperStore} ${tamperField} tampering independently`, {
+      skip: process.platform === "win32" ? false : "Windows PowerShell is unavailable"
+    }, async () => {
+      const root = await mkdtemp(join(tmpdir(), `offline-guardian-${tamperStore}-${tamperField}-`));
+      const ruleName = "UnitTestIDE-NativeOffline-2468aaaabbbb1357";
+      const stateDirectory = join(root, ruleName);
+      await mkdir(stateDirectory);
+      const child = spawnGuardianFixture({
+        root,
+        ruleName,
+        stateDirectory,
+        ownerPid: process.pid,
+        tamperStore,
+        tamperField
+      });
+      try {
+        const result = await finishExpectedGuardianRejection(child, stateDirectory, ruleName);
+        assert.notEqual(result.code, 0, `${tamperStore} ${tamperField} tampering reached ready`);
+        await assert.rejects(access(join(stateDirectory, "ready")));
+        await access(join(stateDirectory, "removed"));
+      } finally {
+        child.process.kill();
+        await child.result.catch(() => undefined);
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+}
 
 for (const profileScenario of ["MissingProfile", "ExtraProfile", "DisabledProfile"] as const) {
   test(`Windows guardian rejects the ${profileScenario} ActiveStore profile set and cleans up`, {
@@ -355,6 +404,139 @@ test("Windows CI CleanupAll waits out a guardian concurrently finishing installa
   }
 });
 
+test("Windows CI CleanupAll never trusts a forged removed marker while a delayed guardian is live", {
+  skip: process.platform === "win32" ? false : "Windows PowerShell is unavailable"
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "offline-guardian-forged-removed-"));
+  const ruleName = "UnitTestIDE-NativeOffline-aaaabbbbcccc7777";
+  const stateDirectory = join(root, ruleName);
+  await mkdir(stateDirectory);
+  const guardian = spawnGuardianFixture({
+    root,
+    ruleName,
+    stateDirectory,
+    ownerPid: process.pid,
+    installDelayMilliseconds: 2_000,
+    traceName: "guardian.log"
+  });
+  let cleanup: SpawnedGuardianFixture | undefined;
+  try {
+    await waitForTrace(root, "install-start", guardian, "guardian.log");
+    await writeFile(join(stateDirectory, "removed"), `removed=${ruleName}\n`, { flag: "wx" });
+    cleanup = spawnGuardianFixture({
+      root,
+      ruleName,
+      action: "CleanupAll",
+      deadlineSeconds: 5,
+      traceName: "cleanup.log"
+    });
+    const earlyResult = await Promise.race([
+      cleanup.result.then((result) => result),
+      new Promise<undefined>((resolveResult) => setTimeout(resolveResult, 750))
+    ]);
+    assert.equal(earlyResult, undefined, "a removed leaf must not bypass a live guardian process");
+    const cleanupResult = await cleanup.result;
+    const guardianResult = await guardian.result;
+    assert.equal(cleanupResult.code, 0, cleanupResult.stderr);
+    assert.equal(guardianResult.code, 0, guardianResult.stderr);
+  } finally {
+    guardian.process.kill();
+    cleanup?.process.kill();
+    await guardian.result.catch(() => undefined);
+    await cleanup?.result.catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+const corruptGuardianStates = [
+  ["rule-name", "rule=UnitTestIDE-NativeOffline-deadbeefdeadbeef\n"],
+  ["owner.pid", "owner=0\n"],
+  ["guardian.pid", "guardian=not-a-pid\n"],
+  ["release", "release=wrong\n"],
+  ["ready", "ready=wrong\n"],
+  ["removed", "removed=wrong\n"]
+] as const;
+
+for (const [markerName, corruptContent] of corruptGuardianStates) {
+  test(`Windows CI CleanupAll rejects non-canonical ${markerName} state`, {
+    skip: process.platform === "win32" ? false : "Windows PowerShell is unavailable"
+  }, async () => {
+    const root = await mkdtemp(join(tmpdir(), `offline-guardian-corrupt-${markerName}-`));
+    const ruleName = "UnitTestIDE-NativeOffline-88889999aaaabbbb";
+    const stateDirectory = join(root, ruleName);
+    await mkdir(stateDirectory);
+    await writeCanonicalConvergedState(stateDirectory, ruleName);
+    await writeFile(join(stateDirectory, markerName), corruptContent);
+    const cleanup = spawnGuardianFixture({
+      root,
+      ruleName,
+      action: "CleanupAll",
+      deadlineSeconds: 1
+    });
+    try {
+      const result = await cleanup.result;
+      assert.notEqual(result.code, 0, `${markerName} corruption must fail closed`);
+      assert.match(result.stderr, /state|marker|cleanup did not converge/ui);
+    } finally {
+      cleanup.process.kill();
+      await cleanup.result.catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("Windows CI CleanupAll rejects an extra state leaf and inconsistent marker lifecycle", {
+  skip: process.platform === "win32" ? false : "Windows PowerShell is unavailable"
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "offline-guardian-extra-state-"));
+  const ruleName = "UnitTestIDE-NativeOffline-777788889999aaaa";
+  const stateDirectory = join(root, ruleName);
+  await mkdir(stateDirectory);
+  await writeCanonicalConvergedState(stateDirectory, ruleName);
+  await writeFile(join(stateDirectory, "unexpected"), "unexpected\n");
+  const cleanup = spawnGuardianFixture({
+    root,
+    ruleName,
+    action: "CleanupAll",
+    deadlineSeconds: 1
+  });
+  try {
+    const result = await cleanup.result;
+    assert.notEqual(result.code, 0, "an extra state leaf must fail closed");
+  } finally {
+    cleanup.process.kill();
+    await cleanup.result.catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Windows CI CleanupAll rejects a reparse marker", {
+  skip: process.platform === "win32" ? false : "Windows PowerShell is unavailable"
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "offline-guardian-reparse-marker-"));
+  const target = await mkdtemp(join(tmpdir(), "offline-guardian-reparse-target-"));
+  const ruleName = "UnitTestIDE-NativeOffline-6666777788889999";
+  const stateDirectory = join(root, ruleName);
+  await mkdir(stateDirectory);
+  await writeCanonicalConvergedState(stateDirectory, ruleName, false);
+  await symlink(target, join(stateDirectory, "removed"), "junction");
+  const cleanup = spawnGuardianFixture({
+    root,
+    ruleName,
+    action: "CleanupAll",
+    deadlineSeconds: 1
+  });
+  try {
+    const result = await cleanup.result;
+    assert.notEqual(result.code, 0, "a marker reparse point must fail closed");
+  } finally {
+    cleanup.process.kill();
+    await cleanup.result.catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+    await rm(target, { recursive: true, force: true });
+  }
+});
+
 test("Windows native offline boundary keeps HTTP blocked when recovery cannot prove cleanup", async () => {
   const originalRequest = http.request;
   const trace: string[] = [];
@@ -381,6 +563,8 @@ interface GuardianFixtureOptions {
   readonly ownerPid?: number;
   readonly action?: "Guard" | "CleanupAll";
   readonly profileScenario?: "Valid" | "MissingProfile" | "ExtraProfile" | "DisabledProfile";
+  readonly tamperStore?: "None" | "ActiveStore" | "PersistentStore";
+  readonly tamperField?: "None" | typeof storeTamperFields[number];
   readonly installDelayMilliseconds?: number;
   readonly removeFailures?: number;
   readonly queryFailures?: number;
@@ -408,6 +592,8 @@ function spawnGuardianFixture(options: GuardianFixtureOptions): SpawnedGuardianF
     "-StateRoot", options.root,
     "-DeadlineSeconds", String(options.deadlineSeconds ?? 5),
     "-ProfileScenario", options.profileScenario ?? "Valid",
+    "-TamperStore", options.tamperStore ?? "None",
+    "-TamperField", options.tamperField ?? "None",
     "-InstallDelayMilliseconds", String(options.installDelayMilliseconds ?? 0),
     "-RemoveFailures", String(options.removeFailures ?? 0),
     "-QueryFailures", String(options.queryFailures ?? 0)
@@ -426,6 +612,30 @@ function spawnGuardianFixture(options: GuardianFixtureOptions): SpawnedGuardianF
       child.once("exit", (code) => resolveResult({ code, stderr }));
     })
   };
+}
+
+async function finishExpectedGuardianRejection(
+  child: SpawnedGuardianFixture,
+  stateDirectory: string,
+  ruleName: string
+): Promise<{ code: number | null; stderr: string }> {
+  const readyPath = join(stateDirectory, "ready");
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    try {
+      await access(readyPath);
+      await writeFile(join(stateDirectory, "release"), `release=${ruleName}\n`, { flag: "wx" });
+      return child.result;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    const exited = await Promise.race([
+      child.result.then((result) => result),
+      new Promise<undefined>((resolveResult) => setTimeout(resolveResult, 25))
+    ]);
+    if (exited !== undefined) return exited;
+  }
+  throw new Error("guardian neither rejected tampering nor published ready");
 }
 
 async function waitForFile(path: string, child: SpawnedGuardianFixture): Promise<void> {
@@ -468,6 +678,19 @@ async function waitForTrace(
     if (exited !== undefined) throw new Error(`guardian exited before ${expected}: ${exited.stderr}`);
   }
   throw new Error(`guardian trace did not contain ${expected}`);
+}
+
+async function writeCanonicalConvergedState(
+  stateDirectory: string,
+  ruleName: string,
+  includeRemoved = true
+): Promise<void> {
+  await writeFile(join(stateDirectory, "rule-name"), `rule=${ruleName}\n`);
+  await writeFile(join(stateDirectory, "owner.pid"), `owner=${process.pid}\n`);
+  await writeFile(join(stateDirectory, "guardian.pid"), "2147483647\n");
+  if (includeRemoved) {
+    await writeFile(join(stateDirectory, "removed"), `removed=${ruleName}\n`);
+  }
 }
 
 function fakeGuardianOperations(

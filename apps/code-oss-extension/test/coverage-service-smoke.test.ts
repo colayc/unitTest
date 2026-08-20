@@ -47,6 +47,7 @@ import { redactServiceError } from "../src/service-resources.js";
 import {
   parseStrictJUnit,
   publishEvidenceAtomically,
+  runAfterVerifiedCoverageToolsetPreflight,
   teardownThenPublish
 } from "./coverage-service-smoke-support.js";
 
@@ -74,7 +75,6 @@ const firewallGuardianStateRoot = join(
   "runtime",
   "windows-firewall-guardians"
 );
-const SKIP_MESSAGE = "SKIP: verified clang-cl coverage toolset is unavailable";
 const COVERAGE_PROFILE_ID = "coverage-clang-cl";
 const PROJECT_ID = "coverage-fixture";
 const TEST_CONTAINER = "coverage-tests";
@@ -85,6 +85,7 @@ interface Fixture {
   readonly workspace: string;
   readonly dataDirectory: string;
   readonly serviceBinary: string;
+  readonly toolsetPreflightBinary: string;
   readonly goCache: string;
 }
 
@@ -173,6 +174,7 @@ async function createFixture(): Promise<Fixture> {
       workspace,
       dataDirectory: join(root, "service-data"),
       serviceBinary: join(root, "unit-test-service.exe"),
+      toolsetPreflightBinary: join(root, "coverage-toolset-preflight.exe"),
       goCache: join(root, "go-cache")
     };
   } catch (error) {
@@ -247,7 +249,56 @@ async function buildService(fixture: Fixture): Promise<string> {
       maxBuffer: 16 * 1024 * 1024
     }
   );
+  await execFile(
+    executable,
+    [
+      "build",
+      "-trimpath",
+      "-o",
+      fixture.toolsetPreflightBinary,
+      "./apps/test-service/cmd/coverage-toolset-preflight"
+    ],
+    {
+      cwd: repositoryRoot,
+      env: environment,
+      timeout: NATIVE_TIMEOUT_MS,
+      windowsHide: true,
+      maxBuffer: 16 * 1024 * 1024
+    }
+  );
   return version.stdout.trim().replace(/^go version /u, "");
+}
+
+async function preflightCoverageToolset(fixture: Fixture): Promise<
+  { readonly status: "unavailable" } |
+  { readonly status: "verified"; readonly version: string }
+> {
+  const result = await execFile(fixture.toolsetPreflightBinary, [], {
+    cwd: repositoryRoot,
+    encoding: "utf8",
+    timeout: 90_000,
+    windowsHide: true,
+    maxBuffer: 64 * 1024
+  });
+  assert.equal(result.stderr, "", "coverage toolset preflight must not emit diagnostics");
+  assert.match(result.stdout, /^\{[^\r\n]+\}\n$/u, "coverage toolset preflight must emit one JSON object");
+  const parsed = JSON.parse(result.stdout) as Record<string, unknown>;
+  assert.equal(parsed.schemaVersion, 1);
+  assert.equal(parsed.platform, "windows");
+  assert.equal(parsed.architecture, "x64");
+  if (parsed.status === "unavailable") {
+    assert.deepEqual(Object.keys(parsed).sort(), [
+      "architecture", "platform", "schemaVersion", "status"
+    ]);
+    return { status: "unavailable" };
+  }
+  assert.equal(parsed.status, "verified");
+  assert.deepEqual(Object.keys(parsed).sort(), [
+    "architecture", "platform", "schemaVersion", "status", "version"
+  ]);
+  assert.equal(typeof parsed.version, "string");
+  assert.match(parsed.version as string, /^[0-9]+\.[0-9]+(?:\.[0-9]+)?$/u);
+  return { status: "verified", version: parsed.version as string };
 }
 
 function coverageOperations(
@@ -655,21 +706,29 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
       fixture.workspace,
       fixture.dataDirectory,
       fixture.serviceBinary,
+      fixture.toolsetPreflightBinary,
       fixture.goCache,
       cmakeBundleRoot
     );
-    const useCMakeBundle = await pathExists(cmakeBundleRoot);
-    if (!useCMakeBundle) {
-      if (requiredClangCL()) {
-        throw new Error("required verified clang-cl coverage toolset is unavailable");
-      }
-      t.skip(SKIP_MESSAGE);
-      return;
-    }
     await buildService(fixture);
-    offlineBoundary = await installWindowsNativeOfflineBoundary({
-      stateRoot: firewallGuardianStateRoot
+    const gate = await runAfterVerifiedCoverageToolsetPreflight({
+      required: requiredClangCL(),
+      preflight: () => preflightCoverageToolset(fixture!),
+      skip: (message) => t.skip(message),
+      async installBoundary() {
+        offlineBoundary = await installWindowsNativeOfflineBoundary({
+          stateRoot: firewallGuardianStateRoot
+        });
+        return offlineBoundary;
+      },
+      async execute(_boundary, toolset) {
+        return toolset;
+      }
     });
+    if (gate.status === "skipped") return;
+    const verifiedToolset = gate.value;
+    const useCMakeBundle = await pathExists(cmakeBundleRoot);
+    assert.equal(useCMakeBundle, true, "prepared CMake bundle root is unavailable");
     manager = new ServiceManager({
       serviceExecutable: fixture.serviceBinary,
       workspaceRoot: fixture.workspace,
@@ -693,12 +752,9 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
     assert.equal("coverageReport" in capabilities && capabilities.coverageReport, true);
     const initial = await inspectSelected(session.client);
     if (initial === undefined) {
-      if (requiredClangCL()) {
-        throw new Error("required verified clang-cl coverage toolset is unavailable");
-      }
-      t.skip(SKIP_MESSAGE);
-      return;
+      throw new Error("preflight-verified clang-cl coverage toolset disappeared before inspection");
     }
+    assert.equal(initial.toolchain.version, verifiedToolset.version);
 
     await writeWorkspaceConfig(fixture.workspace, initial.profile.buildProfileId);
     const configured = await inspectSelected(session.client, initial.toolchain.toolchainId);

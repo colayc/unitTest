@@ -25,6 +25,41 @@ export interface EvidencePublishOptions {
   readonly readBack?: (path: string) => Promise<Uint8Array>;
 }
 
+export type CoverageToolsetPreflight =
+  | { readonly status: "unavailable" }
+  | { readonly status: "verified"; readonly version: string };
+
+export interface CoverageToolsetPreflightGate<Boundary, Result> {
+  readonly required: boolean;
+  readonly preflight: () => Promise<CoverageToolsetPreflight>;
+  readonly skip: (message: string) => void;
+  readonly installBoundary: () => Promise<Boundary>;
+  readonly execute: (
+    boundary: Boundary,
+    toolset: Extract<CoverageToolsetPreflight, { readonly status: "verified" }>
+  ) => Promise<Result>;
+}
+
+const COVERAGE_TOOLSET_SKIP = "SKIP: verified clang-cl coverage toolset is unavailable";
+
+export async function runAfterVerifiedCoverageToolsetPreflight<Boundary, Result>(
+  gate: CoverageToolsetPreflightGate<Boundary, Result>
+): Promise<{ readonly status: "skipped" } | { readonly status: "executed"; readonly value: Result }> {
+  const preflight = await gate.preflight();
+  if (preflight.status === "unavailable") {
+    if (gate.required) {
+      throw new Error("required verified clang-cl coverage toolset is unavailable");
+    }
+    gate.skip(COVERAGE_TOOLSET_SKIP);
+    return { status: "skipped" };
+  }
+  if (!/^[0-9]+\.[0-9]+(?:\.[0-9]+)?$/u.test(preflight.version)) {
+    throw new Error("verified clang-cl coverage toolset version is invalid");
+  }
+  const boundary = await gate.installBoundary();
+  return { status: "executed", value: await gate.execute(boundary, preflight) };
+}
+
 interface XMLStartToken {
   readonly kind: "start";
   readonly name: string;
