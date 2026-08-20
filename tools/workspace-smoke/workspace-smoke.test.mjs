@@ -147,6 +147,12 @@ test("Hosted CI pins native toolchain runners and enforces the complete matrix",
       assert.notEqual(coverageReport, -1);
       const uploadStep = source.slice(source.lastIndexOf("      - ", coverageReport), coverageReport);
       assert.match(uploadStep, /if:\s*success\(\)/u, "failed smoke must not upload PASS evidence");
+      const cleanupStep = source.slice(source.lastIndexOf("      - ", firewallCleanup), serviceSmoke);
+      assert.match(cleanupStep, /windows-offline-boundary\.ps1/u);
+      assert.match(cleanupStep, /-Action\s+CleanupAll/u);
+      assert.match(cleanupStep, /Join-Path\s+\$PWD\s+'\.native-e2e\/runtime\/windows-firewall-guardians'/u);
+      assert.match(cleanupStep, /-StateRoot\s+\$stateRoot/u);
+      assert.doesNotMatch(cleanupStep, /Get-NetFirewallRule/u, "CI must reuse the convergent cleanup implementation");
     }
   }
 });

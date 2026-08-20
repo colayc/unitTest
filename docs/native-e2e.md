@@ -78,7 +78,7 @@ UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS=gcc,clang pnpm test:e2e:native
 
 `prepare:cmake-bundle` 是 native 验证前唯一允许的 CMake 网络准备步骤。`native-run` 会先安装 HTTP(S) network guard，再动态加载矩阵实现；guard 覆盖 Node.js `http`、`https`、`http2` 和全局 `fetch`，同时保留 Named Pipe/Unix Socket 所需的 `net`。
 
-Windows LLVM coverage required gate 另有更强的 OS 级边界：在真实 Service 启动前创建随机唯一、仅在测试时窗作用于隔离 runner 的 all-program outbound Block/Any Windows Firewall rule，并从 ActiveStore 验证 closed filters；因此 Service 以及 CMake、Ninja、clang-cl/linker、测试进程、llvm-profdata/llvm-cov 子进程树均无法出网。PID watchdog 通过 readiness marker 证明已开始监视，随后与测试 teardown、CI `always()` cleanup 一起幂等删除专属 rule；查询权限、创建、审计或撤销失败均使 required gate 失败。普通本机运行只有在 verified toolset 缺失时才可在 native execution 前诚实 SKIP。
+Windows LLVM coverage required gate 另有更强的 OS 级边界：在真实 Service 启动前创建随机唯一、仅在测试时窗作用于隔离 runner 的 all-program outbound Block/Any Windows Firewall rule，因此 Service 以及 CMake、Ninja、clang-cl/linker、测试进程、llvm-profdata/llvm-cov 子进程树均无法出网。唯一的 detached guardian 在 pre-audit 后亲自创建 rule，复核 Active/Persistent identity、全部 closed filters，并显式从 ActiveStore 验证严格为 Domain/Private/Public 且全部启用；完整审计后才发布 ready，ready 后再无 create 路径。owner 退出或 explicit release 后，guardian 对 removal/query fault 持续有界重试到两个 store 连续为空，写 removed 并退出；Node 必须等待两项确认。CI `always()` cleanup 从固定 state root release 所有 guardian，并复用同一有界 group 清理/双 store 审计，权限、未知 guardian、创建、审计或撤销失败均使 required gate 失败。普通本机运行只有在 verified toolset 缺失时才可在 native execution 前诚实 SKIP。
 
 Go production import audit 禁止 HTTP/TLS/GitHub/OAuth client stack，并只允许本地 IPC 代码使用受限的 `net` 能力。
 

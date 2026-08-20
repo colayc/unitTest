@@ -68,6 +68,12 @@ const evidencePath = join(
   "windows",
   "coverage-execution-report.json"
 );
+const firewallGuardianStateRoot = join(
+  repositoryRoot,
+  ".native-e2e",
+  "runtime",
+  "windows-firewall-guardians"
+);
 const SKIP_MESSAGE = "SKIP: verified clang-cl coverage toolset is unavailable";
 const COVERAGE_PROFILE_ID = "coverage-clang-cl";
 const PROJECT_ID = "coverage-fixture";
@@ -661,7 +667,9 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
       return;
     }
     await buildService(fixture);
-    offlineBoundary = await installWindowsNativeOfflineBoundary();
+    offlineBoundary = await installWindowsNativeOfflineBoundary({
+      stateRoot: firewallGuardianStateRoot
+    });
     manager = new ServiceManager({
       serviceExecutable: fixture.serviceBinary,
       workspaceRoot: fixture.workspace,

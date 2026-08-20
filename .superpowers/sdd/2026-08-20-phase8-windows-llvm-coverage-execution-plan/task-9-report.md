@@ -259,3 +259,118 @@ All commands used Node 24.18.0, pnpm 11.4.0, Go 1.26.6, `GOENV=off`,
 Generated Go cache, temporary fixture binaries, Service build outputs and test
 cache artifacts were removed. No production coverage behavior was weakened,
 no out-of-scope production fix was required, and no push was performed.
+
+## Fix Round 2
+
+### Review findings and credible RED
+
+Both remaining Important findings were reproduced before implementation.
+
+- Six new real PowerShell fixture cases failed because the old script exposed
+  only separate `Watch`/`Install` actions. It rejected both `Guard` and
+  `CleanupAll`, produced neither ready nor removed state, and could not satisfy
+  the owner-death or cleanup-retry contracts. The existing real unprivileged
+  Windows control continued to reject an unavailable firewall audit.
+- The TypeScript lifecycle tests then failed to compile because there was no
+  guardian handle or state-root API. The Hosted-CI focused test also failed
+  because the workflow still contained one inline removal/audit pass instead
+  of the shared convergent cleanup action.
+
+This RED specifically captured the reviewed race: a detached watcher could be
+ready before a separate installer started, so the installer could outlive Node
+and create a rule after cleanup had already observed no rule. It also captured
+that `Get-NetFirewallProfile` without `-PolicyStore` does not audit the
+effective ActiveStore profiles.
+
+### Single-creator guardian and ActiveStore audit
+
+The separate installer and watchdog were replaced by one detached,
+long-lived PowerShell guardian. The guardian writes its PID state first,
+captures the owner process, proves the exact rule absent in ActiveStore and
+PersistentStore, and is itself the sole caller of `New-NetFirewallRule`. It
+then audits the effective rule, every application/address/port/service/
+interface filter, and the persistent identity. Firewall profiles are queried
+only with `Get-NetFirewallProfile -PolicyStore ActiveStore`; the closed set
+must be exactly Domain, Private and Public, with every profile enabled. An
+exclusive ready marker is written only after the complete audit.
+
+After the one create call returns, the guardian has no create path. It only
+waits for owner exit or an exclusive release marker. Its finally path catches
+each removal and query failure, resets the stability count and retries within
+a bounded deadline. Only three consecutive empty Active/Persistent audits
+produce the removed marker and successful process exit. Owner death during a
+delayed install therefore lets that same installer finish and immediately
+converge cleanup without ever publishing ready.
+
+Node now waits for guardian ready before returning the boundary. Normal close
+writes release and waits for both removed and a zero guardian exit before it
+restores the HTTP guard. If readiness or release is abnormal, recovery first
+requests release and waits; on timeout it terminates the sole creator and must
+observe its exit before launching an independent exact cleanup. When removal
+cannot be proven, the Node guard remains installed and the gate fails closed.
+
+### CI convergence and regression coverage
+
+The coverage smoke places guardian state under the fixed ignored root
+`.native-e2e/runtime/windows-firewall-guardians`. The Windows `always()` step
+now calls the same script's `CleanupAll` action. It repeatedly signals every
+known guardian, removes the dedicated firewall group, audits ActiveStore and
+PersistentStore, and refuses success while an unarmed/live guardian remains.
+Query/removal faults reset convergence and a permission failure or timeout is
+fatal. Since ready guardians cannot create again and pre-ready guardians have
+a state directory before spawn, successful CI convergence has no late creator.
+
+The real PowerShell fixture and TypeScript tests cover:
+
+- ready only after exact ActiveStore profiles and all closed filters;
+- missing, extra and disabled profile sets fail after confirmed cleanup;
+- owner death while the sole installer is delayed, followed by cleanup whose
+  first two removals throw and whose third succeeds;
+- removal and query exceptions being retried, permanent audit failure timing
+  out, and `CleanupAll` waiting for a concurrently finishing guardian;
+- normal explicit close waiting for removal, readiness failure waiting for
+  recovery, abnormal close recovery, and HTTP remaining blocked whenever
+  cleanup is not proven;
+- a static ban on default profile queries, the real unprivileged fail-closed
+  firewall control, and the workflow's shared CleanupAll/state-root contract.
+
+Chinese development, native-E2E, security, roadmap and design documentation
+now describes this exact single-creator lifecycle and the ActiveStore profile
+semantics. The Protocol vertical slice, strict JUnit parser, PASS-only atomic
+evidence, Go 1.26.6 pin, local single-SKIP and required-family failure behavior
+from Fix Round 1 remain unchanged.
+
+### Fresh GREEN verification
+
+All commands used Node 24.18.0, pnpm 11.4.0 and Go 1.26.6. Go commands used
+`GOENV=off`, `GOTOOLCHAIN=local` and a worktree-local GOCACHE.
+
+- `pnpm install --offline --frozen-lockfile`: PASS with pnpm 11.4.0.
+- Guardian/profile/cleanup focused suite: PASS, 15/15, including the real
+  unprivileged Windows control.
+- `pnpm --filter @unit-test-ide/service-probe test`: PASS, 55/55.
+- `pnpm --filter code-oss-extension test`: PASS, 133/133.
+- Existing real Named Pipe Service smoke: PASS, 4/4.
+- Coverage Service smoke: honest local SKIP, exactly 1 test / 0 pass / 0 fail /
+  1 skip with `SKIP: verified clang-cl coverage toolset is unavailable`; the
+  final coverage execution report remained absent.
+- Required `clang-cl` control with the same missing verified toolset: expected
+  FAIL, exactly 1 test / 0 pass / 1 fail / 0 skip with
+  `required verified clang-cl coverage toolset is unavailable`.
+- `go test ./apps/test-service/... -count=1`: PASS, all Service packages.
+- `go test -race ./apps/test-service/... -count=1`: PASS, all Service packages,
+  no race report.
+- `pnpm check:protocol-generated` and `pnpm check:coverage-generated`: PASS.
+- Root `pnpm build`: PASS.
+- Root `pnpm test`: PASS after supplying the installed Visual Studio CMake to
+  PATH and allowing MSBuild read-only access to its LocalAppData Windows SDK
+  metadata; no network access was used. The two earlier attempts precisely
+  reported missing CMake on PATH and sandbox-denied SDK metadata respectively.
+- Standalone `pnpm test:workspace`: PASS, 21/21 under the same local CMake/SDK
+  read boundary.
+- `git diff --check`: PASS.
+
+Generated GOCACHE, Python cache, Service build output and `.native-e2e`
+runtime/artifact state were removed. No production Service or coverage
+execution behavior was weakened, no out-of-scope production fix was required,
+and no push was performed.

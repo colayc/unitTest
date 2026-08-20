@@ -59,26 +59,12 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          $group = 'UnitTestIDE Native Offline Boundary'
-          function Get-OfflineRules([string]$store) {
-            try {
-              @(Get-NetFirewallRule -PolicyStore $store -Group $group -ErrorAction Stop)
-            } catch {
-              if ($_.FullyQualifiedErrorId -like 'CmdletizationQuery_NotFound*') {
-                return
-              }
-              throw
-            }
-          }
-          $rules = @(Get-OfflineRules 'PersistentStore')
-          if ($rules.Count -gt 0) {
-            $rules | Remove-NetFirewallRule -ErrorAction Stop
-          }
-          $active = @(Get-OfflineRules 'ActiveStore')
-          $persistent = @(Get-OfflineRules 'PersistentStore')
-          if ($active.Count -ne 0 -or $persistent.Count -ne 0) {
-            throw 'Windows native offline firewall state was not removed'
-          }
+          $stateRoot = Join-Path $PWD '.native-e2e/runtime/windows-firewall-guardians'
+          [IO.Directory]::CreateDirectory($stateRoot) | Out-Null
+          & 'tools/service-probe/scripts/windows-offline-boundary.ps1' `
+            -Action CleanupAll `
+            -StateRoot $stateRoot `
+            -DeadlineSeconds 60
       - run: pnpm --filter code-oss-extension test:service-smoke
       - run: pnpm --filter code-oss-extension test:benchmark
       - run: pnpm --filter code-oss-extension test:host
