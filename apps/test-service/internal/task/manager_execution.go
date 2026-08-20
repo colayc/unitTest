@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/testdomain"
 )
 
@@ -165,6 +166,7 @@ func validateStartRequest(request StartRequest) error {
 	case KindCoverageRun:
 		if request.Scenario != "" || request.WorkspaceGeneration == "" ||
 			!validAssociatedTestRun(request.TestRun) ||
+			!validAssociatedCoverageRun(request.CoverageRun, request.TestRun, request) ||
 			!hasCompletionPreparer(request.ResultInterpreter) {
 			return ErrInvalidArgument
 		}
@@ -187,7 +189,38 @@ func cloneStartRequest(request StartRequest) StartRequest {
 		cloned := request.TestRun.Clone()
 		result.TestRun = &cloned
 	}
+	if request.CoverageRun != nil {
+		cloned := request.CoverageRun.Clone()
+		result.CoverageRun = &cloned
+	}
 	return result
+}
+
+func validAssociatedCoverageRun(
+	value *coveragedomain.Run,
+	testRun *testdomain.TestRun,
+	request StartRequest,
+) bool {
+	if value == nil || testRun == nil || value.TaskID != "" ||
+		!value.CreatedAt.IsZero() || value.Status != coveragedomain.StatusQueued ||
+		value.TestRunID != testRun.RunID ||
+		value.Request.IdempotencyKey != request.IdempotencyKey ||
+		value.Request.WorkspaceGeneration != request.WorkspaceGeneration ||
+		value.Request.Timeout != request.Timeout ||
+		value.Request.ProjectID != testRun.ProjectID ||
+		value.Request.CatalogRevision != testRun.CatalogRevision ||
+		value.Request.RepeatCount != testRun.Summary.Iterations {
+		return false
+	}
+	canonical, err := value.Request.CanonicalJSON()
+	if err != nil || string(canonical) != string(request.Request) {
+		return false
+	}
+	candidate := value.Clone()
+	candidate.TaskID = strings.Repeat("0", 32)
+	candidate.CreatedAt = time.Unix(0, 0).UTC()
+	_, err = coveragedomain.NewRun(candidate)
+	return err == nil
 }
 
 func cloneResumeRequest(request ResumeRequest) ResumeRequest {
@@ -307,7 +340,26 @@ func (m *Manager) start(request StartRequest, active map[string]*activeTask) tas
 	var stored Task
 	var events []Event
 	var err error
-	if request.TestRun == nil {
+	if request.Kind == KindCoverageRun {
+		coverageStore, ok := m.store.(CoverageTaskStore)
+		if !ok {
+			return taskResponse{err: ErrStorageUnavailable}
+		}
+		run := request.CoverageRun.Clone()
+		run.TaskID = created.ID
+		run.CreatedAt = now
+		testRun := request.TestRun.Clone()
+		testRun.TaskID = created.ID
+		testRun.CreatedAt = now
+		stored, events, err = coverageStore.CreateCoverageTask(
+			context.Background(),
+			created,
+			steps,
+			draft,
+			run,
+			testRun,
+		)
+	} else if request.TestRun == nil {
 		stored, events, err = m.store.Create(
 			context.Background(),
 			created,
@@ -850,7 +902,8 @@ func (m *Manager) persistCommittedCreateFailure(
 		}
 		artifacts := []Artifact(nil)
 		var finishedRun *testdomain.TestRun
-		if current.task.Kind == KindTestRun {
+		var finishedCoverage *CoverageCompletion
+		if current.task.Kind == KindTestRun || current.task.Kind == KindCoverageRun {
 			completion, completionErr := m.prepareDomainCompletion(
 				current,
 				finished,
@@ -905,11 +958,12 @@ func (m *Manager) persistCommittedCreateFailure(
 				map[string]any{"outcome": outcome},
 			))
 			finishedRun = completion.TestRun
+			finishedCoverage = completion.Coverage
 		}
 		stored, _, err := m.store.Apply(context.Background(), Mutation{
 			Task: finished, Expected: StatusQueued, Steps: steps,
 			Events: events, Artifacts: artifacts,
-			FinishRun: finishedRun,
+			FinishRun: finishedRun, FinishCoverage: finishedCoverage,
 		})
 		if err == nil {
 			current.task = stored

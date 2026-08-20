@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/diagnostic"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/testdomain"
@@ -411,6 +412,86 @@ func TestManagerCancelsCoverageServiceActionOnceWithoutProcessLease(t *testing.T
 	mutation := f.store.lastMutation()
 	if mutation.FinishRun == nil || mutation.FinishCoverage == nil {
 		t.Fatalf("coverage terminal mutation = %#v; want TestRun and Coverage", mutation)
+	}
+}
+
+func TestManagerStartsCoverageRunWithCoverageTaskStore(t *testing.T) {
+	f := newManagerFixture(t)
+	request := coverageStartRequest(t, testID(206))
+	request.ActionExecutor = immediateServiceAction{}
+	request.ResultInterpreter = &coverageCompletionInterpreter{}
+	started, err := f.manager.Manager.Start(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished := f.awaitTask(t, started.ID, task.StatusFinished)
+	if finished.Kind != task.KindCoverageRun || f.store.coverageCreateCount() != 1 ||
+		f.store.testTaskCreateCount() != 0 {
+		t.Fatalf("coverage Start created the wrong aggregate: task=%#v coverage=%d test=%d", finished, f.store.coverageCreateCount(), f.store.testTaskCreateCount())
+	}
+}
+
+type immediateServiceAction struct{}
+
+func (immediateServiceAction) ExecuteServiceAction(
+	context.Context,
+	task.Task,
+	task.ExecutionStep,
+) (task.StepResult, error) {
+	return task.StepResult{Verdict: task.StepVerdictSucceeded}, nil
+}
+
+func coverageStartRequest(t *testing.T, idempotencyKey string) task.StartRequest {
+	t.Helper()
+	selection := testdomain.SelectionSnapshot{Mode: testdomain.SelectionItems, ItemIDs: []testdomain.ID{
+		testdomain.ID("utid-v1-" + strings.Repeat("a", 64)),
+	}}
+	request := coveragedomain.Request{
+		IdempotencyKey: idempotencyKey, WorkspaceGeneration: strings.Repeat("b", 64),
+		ProjectID: "core", CoverageProfileID: "coverage-default", CatalogRevision: strings.Repeat("c", 64),
+		Selection:   testdomain.Selection{Mode: selection.Mode, ItemIDs: append([]testdomain.ID(nil), selection.ItemIDs...)},
+		RepeatCount: 1, Timeout: time.Minute,
+	}
+	validatedRequest, err := coveragedomain.NewRequest(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID, err := coveragedomain.CoverageRunID(validatedRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := validatedRequest.CanonicalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := task.ExecutionPlan{Version: 1, Steps: []task.ExecutionStep{{
+		ID: "coverage-report", Kind: task.StepCoverageReport,
+		Action: task.ServiceActionCoverageReport,
+		Public: task.CommandSummary{Executable: "coverage-report"},
+	}}}
+	plan.Fingerprint = task.FingerprintPlan(plan)
+	return task.StartRequest{
+		IdempotencyKey: idempotencyKey, Kind: task.KindCoverageRun,
+		Request: canonical, WorkspaceGeneration: validatedRequest.WorkspaceGeneration,
+		Timeout: time.Minute, Plan: plan, Boundary: fixedBoundary{},
+		TestRun: &testdomain.TestRun{
+			RunID: testID(207), IdempotencyKey: idempotencyKey, ProjectID: "core",
+			ProfileID: strings.Repeat("d", 64), ToolchainID: "workspace-toolchain",
+			CatalogRevision: validatedRequest.CatalogRevision, SelectionSnapshot: selection,
+			Status: testdomain.RunQueued, Summary: testdomain.RunSummary{Iterations: 1},
+			ResultRevision: testdomain.EmptyResultRevision(), Incomplete: true,
+		},
+		CoverageRun: &coveragedomain.Run{
+			ID: runID, TestRunID: testID(207), Status: coveragedomain.StatusQueued,
+			Request: validatedRequest, SelectionSnapshot: selection,
+			Toolchain: coveragedomain.ToolchainSnapshot{
+				Platform: coveragedomain.PlatformWindows, Architecture: coveragedomain.ArchitectureX64,
+				Compiler:          coveragedomain.CompilerSnapshot{Family: coveragedomain.CompilerFamilyClangCL, Version: "17.0"},
+				Driver:            coveragedomain.DriverSnapshot{Name: coveragedomain.DriverLLVMCov, Version: "17.0"},
+				Collector:         coveragedomain.CollectorSnapshot{Name: coveragedomain.CollectorLLVMCov, Version: "7.0"},
+				NormalizerVersion: "v1", InstrumentationFingerprint: strings.Repeat("e", 64),
+			},
+		},
 	}
 }
 

@@ -33,7 +33,7 @@ func (s *Store) ReplaceQueuedPlan(
 	result, err := tx.ExecContext(ctx, `UPDATE tasks
 		SET plan_fingerprint=?, active_step=''
 		WHERE task_id=? AND request_hash=?
-		AND kind IN ('cmake_build','test_discovery','test_run')
+		AND kind IN ('cmake_build','test_discovery','test_run','coverage_run')
 		AND status='queued'`,
 		planFingerprint, taskID, requestHash,
 	)

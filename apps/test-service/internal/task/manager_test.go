@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/diagnostic"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/testdomain"
@@ -2022,26 +2023,28 @@ func (f *managerFixture) awaitOutputTruncation(t *testing.T) {
 }
 
 type fakeStore struct {
-	mu             sync.Mutex
-	tasks          map[string]task.Task
-	keys           map[string]string
-	getCalls       map[string]int
-	eventsValue    []task.Event
-	artifacts      []task.Artifact
-	leases         map[string]task.ProcessLease
-	mutations      []task.Mutation
-	sequence       int64
-	testRuns       map[string]testdomain.TestRun
-	failAppend     error
-	failApply      error
-	failApplyAt    int
-	failApplyFor   int
-	failApplyErr   error
-	failApplyMatch func(task.Mutation) error
-	onAppendEvent  func(task.EventDraft)
-	applyCalls     int
-	createCalls    int
-	replaceCalls   int
+	mu              sync.Mutex
+	tasks           map[string]task.Task
+	keys            map[string]string
+	getCalls        map[string]int
+	eventsValue     []task.Event
+	artifacts       []task.Artifact
+	leases          map[string]task.ProcessLease
+	mutations       []task.Mutation
+	sequence        int64
+	testRuns        map[string]testdomain.TestRun
+	failAppend      error
+	failApply       error
+	failApplyAt     int
+	failApplyFor    int
+	failApplyErr    error
+	failApplyMatch  func(task.Mutation) error
+	onAppendEvent   func(task.EventDraft)
+	applyCalls      int
+	createCalls     int
+	testTaskCreates int
+	coverageCreates int
+	replaceCalls    int
 }
 
 func newFakeStore() *fakeStore {
@@ -2078,6 +2081,9 @@ func (s *fakeStore) CreateTestTask(
 	draft task.EventDraft,
 	run testdomain.TestRun,
 ) (task.Task, []task.Event, error) {
+	if value.Kind != task.KindTestRun {
+		return task.Task{}, nil, task.ErrInvalidArgument
+	}
 	created, events, err := s.Create(ctx, value, steps, draft)
 	if err != nil {
 		return task.Task{}, nil, err
@@ -2087,6 +2093,36 @@ func (s *fakeStore) CreateTestTask(
 	if len(events) != 0 {
 		s.testRuns[run.RunID] = run.Clone()
 	}
+	s.testTaskCreates++
+	return created, events, nil
+}
+
+func (s *fakeStore) CreateCoverageTask(
+	ctx context.Context,
+	value task.Task,
+	steps []task.StepSnapshot,
+	draft task.EventDraft,
+	coverage coveragedomain.Run,
+	run testdomain.TestRun,
+) (task.Task, []task.Event, error) {
+	if value.Kind != task.KindCoverageRun {
+		return task.Task{}, nil, task.ErrInvalidArgument
+	}
+	if coverage.TaskID != value.ID || coverage.TestRunID != run.RunID ||
+		!coverage.CreatedAt.Equal(value.CreatedAt) || run.TaskID != value.ID ||
+		!run.CreatedAt.Equal(value.CreatedAt) {
+		return task.Task{}, nil, task.ErrInvalidArgument
+	}
+	created, events, err := s.Create(ctx, value, steps, draft)
+	if err != nil {
+		return task.Task{}, nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(events) != 0 {
+		s.testRuns[run.RunID] = run.Clone()
+	}
+	s.coverageCreates++
 	return created, events, nil
 }
 
@@ -2304,6 +2340,18 @@ func (s *fakeStore) applyCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.applyCalls
+}
+
+func (s *fakeStore) testTaskCreateCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.testTaskCreates
+}
+
+func (s *fakeStore) coverageCreateCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.coverageCreates
 }
 
 func (s *fakeStore) writeSideEffectCounts() (creates, applies, replacements, events, artifacts, leases int) {

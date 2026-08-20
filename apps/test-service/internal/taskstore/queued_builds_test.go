@@ -54,6 +54,27 @@ func TestReplaceQueuedPlanChangesPendingStepsWithoutCreatingEvents(t *testing.T)
 	}
 }
 
+func TestReplaceQueuedPlanAllowsQueuedCoverageRun(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	input, steps, event, run, testRun := coverageCreationFixture(t, 41)
+	created, _, err := store.CreateCoverageTask(ctx, input, steps, event, run, testRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fingerprint := strings.Repeat("f", 64)
+	replaced, err := store.ReplaceQueuedPlan(ctx, created.ID, created.RequestHash, fingerprint, []task.StepSnapshot{{
+		ID: "coverage-report", Kind: task.StepCoverageReport, Status: task.StepPending,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replaced.Kind != task.KindCoverageRun || replaced.PlanFingerprint != fingerprint ||
+		len(replaced.Steps) != 1 || replaced.Steps[0].Kind != task.StepCoverageReport {
+		t.Fatalf("replaced coverage task = %#v", replaced)
+	}
+}
+
 func TestFailQueuedBuildPersistsInterruptedErrorAndSkipsSteps(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()

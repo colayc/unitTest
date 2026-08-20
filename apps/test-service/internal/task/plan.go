@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/diagnostic"
 	"unit-test-ide.local/test-service/internal/testdomain"
 )
@@ -143,6 +144,7 @@ type StartRequest struct {
 	ResultInterpreter   ResultInterpreter
 	ActionExecutor      ServiceActionExecutor
 	TestRun             *testdomain.TestRun
+	CoverageRun         *coveragedomain.Run
 
 	// Scenario remains an internal compatibility input while v1.1 simulation
 	// requests are projected into service-owned execution plans.
