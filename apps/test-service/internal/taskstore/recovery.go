@@ -7,6 +7,7 @@ import (
 	"sort"
 	"time"
 
+	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/testdomain"
 )
@@ -210,8 +211,8 @@ func (s *Store) RecoverInterrupted(ctx context.Context, at time.Time) ([]task.Ev
 		if affected != 1 {
 			return nil, task.ErrConflict
 		}
-		drafts := make([]task.EventDraft, 0, 2)
-		if candidate.kind == task.KindTestRun {
+		drafts := make([]task.EventDraft, 0, 3)
+		if candidate.kind == task.KindTestRun || candidate.kind == task.KindCoverageRun {
 			finished, err := recoverInterruptedTestRun(
 				ctx,
 				tx,
@@ -221,6 +222,15 @@ func (s *Store) RecoverInterrupted(ctx context.Context, at time.Time) ([]task.Ev
 			if err != nil {
 				return nil, err
 			}
+			drafts = append(drafts, finished)
+		}
+		var recoveredCoverage *coveragedomain.Run
+		if candidate.kind == task.KindCoverageRun {
+			run, finished, err := recoverInterruptedCoverageRun(ctx, tx, candidate.taskID, at)
+			if err != nil {
+				return nil, err
+			}
+			recoveredCoverage = &run
 			drafts = append(drafts, finished)
 		}
 		drafts = append(drafts, task.EventDraft{
@@ -237,6 +247,23 @@ func (s *Store) RecoverInterrupted(ctx context.Context, at time.Time) ([]task.Ev
 		if _, err := tx.ExecContext(ctx, `UPDATE tasks SET last_sequence=? WHERE task_id=?`, lastSequence, candidate.taskID); err != nil {
 			return nil, storageError("update recovered task sequence", err)
 		}
+		if recoveredCoverage != nil {
+			recoveredCoverage.LastSequence = lastSequence
+			canonical, err := coveragedomain.NewRun(recoveredCoverage.Clone())
+			if err != nil {
+				return nil, storageError("validate recovered CoverageRun sequence", err)
+			}
+			result, err := tx.ExecContext(ctx, `UPDATE coverage_runs SET last_sequence=?
+				WHERE coverage_run_id=? AND task_id=? AND status='finished'`,
+				canonical.LastSequence, canonical.ID, canonical.TaskID)
+			if err != nil {
+				return nil, storageError("update recovered CoverageRun sequence", err)
+			}
+			affected, err := result.RowsAffected()
+			if err != nil || affected != 1 {
+				return nil, storageError("read recovered CoverageRun sequence update", err)
+			}
+		}
 		events = append(events, inserted...)
 	}
 	for _, candidate := range candidates {
@@ -249,6 +276,54 @@ func (s *Store) RecoverInterrupted(ctx context.Context, at time.Time) ([]task.Ev
 	}
 	sort.Slice(events, func(i, j int) bool { return events[i].Sequence < events[j].Sequence })
 	return events, nil
+}
+
+func recoverInterruptedCoverageRun(
+	ctx context.Context,
+	tx *sql.Tx,
+	taskID string,
+	at time.Time,
+) (coveragedomain.Run, task.EventDraft, error) {
+	run, err := scanCoverageRun(tx.QueryRowContext(
+		ctx,
+		coverageRunSelect+` WHERE task_id=?`,
+		taskID,
+	))
+	if err != nil {
+		return coveragedomain.Run{}, task.EventDraft{},
+			storageError("get interrupted CoverageRun", err)
+	}
+	if run.Status != coveragedomain.StatusRunning {
+		return coveragedomain.Run{}, task.EventDraft{},
+			storageError("validate interrupted CoverageRun", task.ErrConflict)
+	}
+	run.Status = coveragedomain.StatusFinished
+	run.Outcome = coveragedomain.OutcomeUnavailable
+	run.Reason = coveragedomain.ReasonServiceRestarted
+	run.Summary = nil
+	run.ReportID = ""
+	run.Artifacts = coveragedomain.ArtifactRefs{}
+	run.FinishedAt = &at
+	validated, err := coveragedomain.NewRun(run)
+	if err != nil {
+		return coveragedomain.Run{}, task.EventDraft{},
+			storageError("validate recovered CoverageRun", err)
+	}
+	if err := finishCoverageRunTx(ctx, tx, validated, coveragedomain.StatusRunning); err != nil {
+		return coveragedomain.Run{}, task.EventDraft{}, err
+	}
+	payload, err := json.Marshal(map[string]any{
+		"coverageRunId": validated.ID,
+		"outcome":       validated.Outcome,
+		"reason":        validated.Reason,
+	})
+	if err != nil {
+		return coveragedomain.Run{}, task.EventDraft{},
+			storageError("encode interrupted CoverageRun event", err)
+	}
+	return validated, task.EventDraft{
+		TaskID: taskID, Type: task.EventCoverageRunFinished, At: at, Payload: payload,
+	}, nil
 }
 
 type recoveryResultIdentity struct {

@@ -339,7 +339,10 @@ func forwardSubscription(ctx context.Context, subscription *eventbroker.Subscrip
 func toProtocolEvent(event task.Event, version string) (protocol.Event, error) {
 	eventType := event.Type
 	payload := event.Payload
-	if version != protocol.Version13 && version != protocol.Version14 && testDomainEvent(event.Type) {
+	if version != protocol.Version14 && coverageDomainEvent(event.Type) {
+		eventType = task.EventTaskOutput
+		payload = compatibilityOutput(version)
+	} else if version != protocol.Version13 && version != protocol.Version14 && testDomainEvent(event.Type) {
 		eventType = task.EventTaskOutput
 		payload = compatibilityOutput(version)
 	} else if (version == protocol.Version13 || version == protocol.Version14) &&
@@ -434,6 +437,19 @@ func testDomainEvent(value task.EventType) bool {
 		task.EventTestItemFinished,
 		task.EventTestContainerFinished,
 		task.EventTestRunFinished:
+		return true
+	default:
+		return false
+	}
+}
+
+func coverageDomainEvent(value task.EventType) bool {
+	switch value {
+	case task.EventCoverageRunStarted,
+		task.EventCoverageBuildFinished,
+		task.EventCoverageCollectionStarted,
+		task.EventCoverageReportAvailable,
+		task.EventCoverageRunFinished:
 		return true
 	default:
 		return false

@@ -950,6 +950,12 @@ func artifactDescriptor(kind string) (mimeType, extension string, ok bool) {
 		return "application/x-ndjson", ".jsonl", true
 	case "stdout", "stderr":
 		return "application/octet-stream", ".log", true
+	case "coverage-json":
+		return "application/json", ".coverage.json", true
+	case "junit-xml":
+		return "application/xml", ".junit.xml", true
+	case "coverage-html":
+		return "text/html", ".coverage.html", true
 	default:
 		return "", "", false
 	}

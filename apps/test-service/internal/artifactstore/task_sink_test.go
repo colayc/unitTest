@@ -2,7 +2,9 @@ package artifactstore
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -15,6 +17,163 @@ import (
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/testdomain"
 )
+
+var (
+	coverageJSON = []byte("{\"schemaVersion\":\"1.0\"}\n")
+	junitXML     = []byte("<?xml version=\"1.0\" encoding=\"UTF-8\"?><testsuites></testsuites>\n")
+	coverageHTML = []byte("<!doctype html><meta charset=\"utf-8\"><title>Coverage</title>\n")
+)
+
+func TestCoverageArtifactSinkPublishesClosedReportSet(t *testing.T) {
+	root := t.TempDir()
+	store, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	taskID := id(40)
+	raw, err := store.OpenTask(context.Background(), taskID, task.KindCoverageRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink, ok := raw.(task.CoverageArtifactSink)
+	if !ok {
+		t.Fatal("coverage task sink does not implement CoverageArtifactSink")
+	}
+	inputs := []struct {
+		id, kind, mime, extension string
+		body                      []byte
+	}{
+		{id(41), "coverage-json", "application/json", ".coverage.json", coverageJSON},
+		{id(42), "junit-xml", "application/xml", ".junit.xml", junitXML},
+		{id(43), "coverage-html", "text/html", ".coverage.html", coverageHTML},
+	}
+	for _, input := range inputs {
+		if err := sink.CommitBlob(context.Background(), input.id, input.kind, input.body); err != nil {
+			t.Fatalf("CommitBlob(%q) error = %v", input.kind, err)
+		}
+	}
+	finishedAt := time.Date(2026, 8, 20, 4, 0, 0, 0, time.UTC)
+	artifacts, err := sink.Finalize(context.Background(), finishedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(artifacts) != 6 {
+		t.Fatalf("Finalize() artifacts = %#v, want three public and three bounded artifacts", artifacts)
+	}
+	byKind := make(map[string]task.Artifact, len(artifacts))
+	for _, artifact := range artifacts {
+		if _, duplicate := byKind[artifact.Kind]; duplicate {
+			t.Fatalf("duplicate artifact kind %q", artifact.Kind)
+		}
+		byKind[artifact.Kind] = artifact
+	}
+	for _, input := range inputs {
+		artifact, exists := byKind[input.kind]
+		wantSHA := sha256.Sum256(input.body)
+		if !exists || artifact.ID != input.id || artifact.TaskID != taskID ||
+			artifact.MIMEType != input.mime || !strings.HasSuffix(artifact.RelativePath, input.extension) ||
+			artifact.SHA256 != fmt.Sprintf("%x", wantSHA) || strings.ToLower(artifact.SHA256) != artifact.SHA256 {
+			t.Fatalf("%s artifact = %#v", input.kind, artifact)
+		}
+		assertArtifactContent(t, root, artifact, string(input.body))
+	}
+}
+
+func TestCoverageArtifactSinkAllowsOnlyBoundedArtifactsWithoutReport(t *testing.T) {
+	store, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	taskID := id(44)
+	sink, err := store.OpenTask(context.Background(), taskID, task.KindCoverageRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.AppendOutput(context.Background(), "coverage-build", "stdout", []byte("build output\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.AppendDiagnostic(context.Background(), diagnostic.Diagnostic{
+		TaskID: taskID, StepID: "coverage-build", Severity: "error", Code: "COVERAGE_BUILD_FAILED",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	artifacts, err := sink.Finalize(context.Background(), time.Date(2026, 8, 20, 4, 1, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	kinds := make([]string, len(artifacts))
+	for index, artifact := range artifacts {
+		kinds[index] = artifact.Kind
+	}
+	if want := []string{"diagnostics", "stderr", "stdout"}; !reflect.DeepEqual(kinds, want) {
+		t.Fatalf("non-report artifact kinds = %#v, want %#v", kinds, want)
+	}
+}
+
+func TestCoverageArtifactSinkRejectsInvalidBlobs(t *testing.T) {
+	store, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	seed := 50
+	open := func(t *testing.T, kind task.Kind) task.CoverageArtifactSink {
+		t.Helper()
+		seed++
+		raw, err := store.OpenTask(context.Background(), id(byte(seed)), kind)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sink, ok := raw.(task.CoverageArtifactSink)
+		if !ok {
+			t.Fatal("task sink does not implement CoverageArtifactSink")
+		}
+		return sink
+	}
+	t.Run("empty", func(t *testing.T) {
+		if err := open(t, task.KindCoverageRun).CommitBlob(context.Background(), id(61), "coverage-json", nil); err != ErrInvalidArtifact {
+			t.Fatalf("CommitBlob() error = %v", err)
+		}
+	})
+	t.Run("over limit", func(t *testing.T) {
+		if err := open(t, task.KindCoverageRun).CommitBlob(context.Background(), id(62), "coverage-json", make([]byte, maxCoverageArtifactBytes+1)); err != ErrInvalidArtifact {
+			t.Fatalf("CommitBlob() error = %v", err)
+		}
+	})
+	t.Run("duplicate kind and ID", func(t *testing.T) {
+		sink := open(t, task.KindCoverageRun)
+		if err := sink.CommitBlob(context.Background(), id(63), "coverage-json", coverageJSON); err != nil {
+			t.Fatal(err)
+		}
+		if err := sink.CommitBlob(context.Background(), id(64), "coverage-json", coverageJSON); err != ErrInvalidArtifact {
+			t.Fatalf("duplicate kind error = %v", err)
+		}
+		if err := sink.CommitBlob(context.Background(), id(63), "junit-xml", junitXML); err != ErrInvalidArtifact {
+			t.Fatalf("duplicate ID error = %v", err)
+		}
+	})
+	t.Run("non coverage task", func(t *testing.T) {
+		if err := open(t, task.KindTestRun).CommitBlob(context.Background(), id(65), "coverage-json", coverageJSON); err != ErrInvalidArtifact {
+			t.Fatalf("CommitBlob() error = %v", err)
+		}
+	})
+	for _, kind := range []string{"raw.profraw", "indexed.profdata"} {
+		t.Run(kind, func(t *testing.T) {
+			if err := open(t, task.KindCoverageRun).CommitBlob(context.Background(), id(66), kind, []byte("raw profile")); err != ErrInvalidArtifact {
+				t.Fatalf("CommitBlob(%q) error = %v", kind, err)
+			}
+		})
+	}
+	for _, kind := range []string{"junit-xml", "coverage-html"} {
+		t.Run("CommitJSON "+kind, func(t *testing.T) {
+			if err := open(t, task.KindCoverageRun).CommitJSON(context.Background(), id(67), kind, map[string]any{"data": "report"}); err != ErrInvalidArtifact {
+				t.Fatalf("CommitJSON(%q) error = %v", kind, err)
+			}
+		})
+	}
+}
 
 func TestArtifactSinkFinalizesDeterministicCMakeArtifactSet(t *testing.T) {
 	root := t.TempDir()

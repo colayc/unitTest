@@ -285,6 +285,19 @@ func TestCoverageArtifactContractRejectsInvalidPublicationSets(t *testing.T) {
 	}
 }
 
+func TestCoverageArtifactContractRejectsPublicArtifactsForUnavailableRun(t *testing.T) {
+	store := openTestStore(t)
+	mutation := coverageCompletionFixture(t, store, 379, coveragedomain.OutcomeUnavailable, coveragedomain.ReasonBuildFailed)
+	mutation.Artifacts = []task.Artifact{{
+		ID: coverageHex(9995), TaskID: mutation.Task.ID, Kind: "coverage-json",
+		RelativePath: "coverage/coverage.json", MIMEType: "application/json", Size: 2,
+		SHA256: strings.Repeat("a", 64), CreatedAt: *mutation.Task.FinishedAt,
+	}}
+	if _, _, err := store.Apply(context.Background(), mutation); !errors.Is(err, task.ErrInvalidArgument) {
+		t.Fatalf("Apply() error = %v, want invalid argument", err)
+	}
+}
+
 func TestCoverageArtifactContractAllowsDiagnosticOutput(t *testing.T) {
 	ctx := context.Background()
 	for index, outcome := range []coveragedomain.Outcome{

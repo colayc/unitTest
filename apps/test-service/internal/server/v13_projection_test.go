@@ -117,14 +117,24 @@ func subscribeSingleProjectedEvent(
 		},
 	}
 	client, serviceConnection := net.Pipe()
-	go server.ServeConnection(
-		serviceConnection,
-		session.New(
+	active := session.New(
+		"0123456789abcdef",
+		"linux",
+		"unix-socket",
+		backend,
+	)
+	if version == protocol.Version14 {
+		active = session.NewWithCoverage(
 			"0123456789abcdef",
 			"linux",
 			"unix-socket",
 			backend,
-		),
+			projectionCoverageBackend{},
+		)
+	}
+	go server.ServeConnection(
+		serviceConnection,
+		active,
 	)
 	t.Cleanup(func() { _ = client.Close() })
 	if err := client.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {

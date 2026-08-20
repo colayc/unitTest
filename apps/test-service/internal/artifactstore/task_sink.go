@@ -22,6 +22,7 @@ const (
 	maxDiagnosticArtifactBytes = 32 * 1024 * 1024
 	maxJSONArtifactBytes       = 4 * 1024 * 1024
 	maxTestResultArtifactBytes = 128 * 1024 * 1024
+	maxCoverageArtifactBytes   = 128 * 1024 * 1024
 )
 
 type taskSink struct {
@@ -253,6 +254,44 @@ func (s *taskSink) CommitJSONLines(
 	return nil
 }
 
+func (s *taskSink) CommitBlob(
+	ctx context.Context,
+	artifactID string,
+	kind string,
+	data []byte,
+) error {
+	if ctx == nil || s.taskKind != task.KindCoverageRun ||
+		!validGeneratedID(artifactID) || len(data) == 0 ||
+		len(data) > maxCoverageArtifactBytes {
+		return ErrInvalidArtifact
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	switch kind {
+	case "coverage-json", "junit-xml", "coverage-html":
+	default:
+		return ErrInvalidArtifact
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.unavailable() {
+		return ErrStoreUnavailable
+	}
+	if _, exists := s.json[kind]; exists {
+		return ErrInvalidArtifact
+	}
+	for _, pending := range s.json {
+		if pending.id == artifactID {
+			return ErrInvalidArtifact
+		}
+	}
+	s.json[kind] = pendingArtifact{
+		id: artifactID, kind: kind, data: append([]byte(nil), data...),
+	}
+	return nil
+}
+
 func (s *taskSink) Finalize(
 	ctx context.Context,
 	at time.Time,
@@ -389,6 +428,37 @@ func (s *taskSink) pendingArtifacts() ([]pendingArtifact, error) {
 				data: append([]byte(nil), s.diagnostics.Bytes()...),
 			},
 		)
+	case task.KindCoverageRun:
+		coverageJSON, hasCoverageJSON := s.json["coverage-json"]
+		junitXML, hasJUnitXML := s.json["junit-xml"]
+		coverageHTML, hasCoverageHTML := s.json["coverage-html"]
+		hasReport := hasCoverageJSON || hasJUnitXML || hasCoverageHTML
+		if hasReport && (!hasCoverageJSON || !hasJUnitXML || !hasCoverageHTML || len(s.json) != 3) {
+			return nil, ErrInvalidArtifact
+		}
+		if !hasReport && len(s.json) != 0 {
+			return nil, ErrInvalidArtifact
+		}
+		if hasReport {
+			result = append(result, coverageJSON, junitXML, coverageHTML)
+		}
+		stdoutID, err := newGeneratedID()
+		if err != nil {
+			return nil, err
+		}
+		stderrID, err := newGeneratedID()
+		if err != nil {
+			return nil, err
+		}
+		diagnosticsID, err := newGeneratedID()
+		if err != nil {
+			return nil, err
+		}
+		result = append(result,
+			pendingArtifact{id: stdoutID, kind: "stdout", data: append([]byte(nil), s.stdout.Bytes()...)},
+			pendingArtifact{id: stderrID, kind: "stderr", data: append([]byte(nil), s.stderr.Bytes()...)},
+			pendingArtifact{id: diagnosticsID, kind: "diagnostics", data: append([]byte(nil), s.diagnostics.Bytes()...)},
+		)
 	default:
 		return nil, ErrInvalidArtifact
 	}
@@ -401,7 +471,7 @@ func (s *taskSink) pendingArtifacts() ([]pendingArtifact, error) {
 func supportedTaskKind(value task.Kind) bool {
 	switch value {
 	case task.KindSimulation, task.KindCMakeBuild,
-		task.KindTestDiscovery, task.KindTestRun:
+		task.KindTestDiscovery, task.KindTestRun, task.KindCoverageRun:
 		return true
 	default:
 		return false
@@ -515,3 +585,4 @@ func projectArtifactDiagnostic(value diagnostic.Diagnostic) artifactDiagnostic {
 
 var _ task.ArtifactWriter = (*Store)(nil)
 var _ task.ArtifactSink = (*taskSink)(nil)
+var _ task.CoverageArtifactSink = (*taskSink)(nil)

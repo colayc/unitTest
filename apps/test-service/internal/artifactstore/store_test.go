@@ -68,6 +68,33 @@ func TestCommitJSONAndReadChunk(t *testing.T) {
 	}
 }
 
+func TestCoverageArtifactDescriptorsProducePortablePublicPaths(t *testing.T) {
+	store, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	at := time.Date(2026, 8, 20, 5, 0, 0, 0, time.UTC)
+	taskID := id(70)
+	cases := []struct {
+		kind, mime, extension string
+		body                  []byte
+	}{
+		{"coverage-json", "application/json", ".coverage.json", coverageJSON},
+		{"junit-xml", "application/xml", ".junit.xml", junitXML},
+		{"coverage-html", "text/html", ".coverage.html", coverageHTML},
+	}
+	for index, tc := range cases {
+		artifact, err := store.commitArtifactData(context.Background(), taskID, id(byte(71+index)), tc.kind, at, tc.body)
+		if err != nil {
+			t.Fatalf("commitArtifactData(%q) error = %v", tc.kind, err)
+		}
+		if artifact.MIMEType != tc.mime || !strings.HasSuffix(artifact.RelativePath, tc.extension) || strings.Contains(artifact.RelativePath, "\\") {
+			t.Fatalf("commitArtifactData(%q) = %#v", tc.kind, artifact)
+		}
+	}
+}
+
 func TestPinnedDirectoryHandleSupportsDurableSync(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows-specific directory FlushFileBuffers probe")

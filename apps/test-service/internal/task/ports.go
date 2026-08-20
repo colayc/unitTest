@@ -250,6 +250,11 @@ type ArtifactSink interface {
 	Abort(context.Context) error
 }
 
+type CoverageArtifactSink interface {
+	ArtifactSink
+	CommitBlob(context.Context, string, string, []byte) error
+}
+
 type ArtifactWriter interface {
 	OpenTask(context.Context, string, Kind) (ArtifactSink, error)
 }

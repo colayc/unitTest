@@ -52,6 +52,11 @@ const (
 	EventTestItemFinished          EventType = "test.item.finished"
 	EventTestContainerFinished     EventType = "test.container.finished"
 	EventTestRunFinished           EventType = "test.run.finished"
+	EventCoverageRunStarted        EventType = "coverage.run.started"
+	EventCoverageBuildFinished     EventType = "coverage.build.finished"
+	EventCoverageCollectionStarted EventType = "coverage.collection.started"
+	EventCoverageReportAvailable   EventType = "coverage.report.available"
+	EventCoverageRunFinished       EventType = "coverage.run.finished"
 )
 
 type Task struct {
@@ -157,7 +162,12 @@ func ValidEventType(value EventType) bool {
 		EventTestOutput,
 		EventTestItemFinished,
 		EventTestContainerFinished,
-		EventTestRunFinished:
+		EventTestRunFinished,
+		EventCoverageRunStarted,
+		EventCoverageBuildFinished,
+		EventCoverageCollectionStarted,
+		EventCoverageReportAvailable,
+		EventCoverageRunFinished:
 		return true
 	default:
 		return false
