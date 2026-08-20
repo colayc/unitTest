@@ -121,6 +121,13 @@ type ProcessFactory interface {
 	Prepare(context.Context, ProcessSpec, string, string) (ManagedProcess, error)
 }
 
+// ServiceActionExecutor runs closed service-owned actions. It is runtime-only:
+// no callback implementation is part of the execution plan, persistence, or
+// protocol surface.
+type ServiceActionExecutor interface {
+	ExecuteServiceAction(context.Context, Task, ExecutionStep) (StepResult, error)
+}
+
 type StepObserver interface {
 	Succeeded(context.Context, Task, ExecutionStep) error
 }
@@ -179,8 +186,9 @@ type CompletionPreparer interface {
 }
 
 type DomainCompletion struct {
-	TestRun *testdomain.TestRun
-	Events  []DomainEvent
+	TestRun  *testdomain.TestRun
+	Coverage *CoverageCompletion
+	Events   []DomainEvent
 }
 
 type ProcessSpec struct {

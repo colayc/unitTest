@@ -10,6 +10,102 @@ type pendingProcessCompletion struct {
 	FailPending bool
 }
 
+func (m *Manager) completeServiceAction(
+	current *activeTask,
+	result StepResult,
+	actionErr error,
+	active map[string]*activeTask,
+) error {
+	current.actionCompleted = true
+	if actionErr != nil {
+		result.Process.Err = actionErr
+	}
+	pending := pendingProcessCompletion{Result: result.Process}
+	outcome, verdict := processCompletionOutcome(current, pending)
+	if actionErr == nil && current.execution.currentCause() == "" {
+		switch result.Verdict {
+		case StepVerdictDefault:
+		case StepVerdictSucceeded:
+			outcome, verdict = OutcomeSucceeded, StepVerdictSucceeded
+		case StepVerdictFailed:
+			outcome, verdict = OutcomeCommandFailed, StepVerdictFailed
+		default:
+			outcome, verdict = OutcomeInfrastructureFailed, StepVerdictDefault
+		}
+	}
+	nextPlan := current.plan
+	appendedSnapshots := []StepSnapshot(nil)
+	if outcome == OutcomeSucceeded {
+		var callbackErr error
+		if m.stepObserver != nil && current.nextStep+1 < len(current.plan.Steps) {
+			callbackErr = m.stepObserver.Succeeded(
+				current.execution.ctx,
+				cloneRuntimeTask(current.task),
+				cloneRuntimeStep(current.plan.Steps[current.nextStep]),
+			)
+		}
+		if callbackErr == nil && current.continuation != nil {
+			var continuation Continuation
+			continuation, callbackErr = callContinuation(
+				current.execution.ctx,
+				current.continuation,
+				cloneRuntimeTask(current.task),
+				cloneRuntimeStep(current.plan.Steps[current.nextStep]),
+				StepResult{Process: result.Process, Verdict: verdict},
+			)
+			if eventErr := m.persistDomainEvents(current, active); eventErr != nil {
+				return eventErr
+			}
+			if callbackErr == nil {
+				nextPlan, appendedSnapshots, callbackErr = extendExecutionPlan(
+					current.plan,
+					continuation,
+					current.boundary,
+				)
+			}
+		}
+		if cause := current.execution.currentCause(); cause != "" {
+			outcome = cause
+			callbackErr = nil
+		}
+		if callbackErr != nil {
+			result.Process.Err = callbackErr
+			outcome = OutcomeInfrastructureFailed
+		} else if current.nextStep+1 < len(nextPlan.Steps) {
+			if err := m.persistSuccessfulStep(
+				current,
+				result.Process,
+				nextPlan,
+				appendedSnapshots,
+				active,
+			); err != nil {
+				if !errors.Is(err, ErrConflict) {
+					return err
+				}
+				result.Process.Err = ErrConflict
+				outcome = OutcomeInfrastructureFailed
+			} else {
+				current.nextStep++
+				return m.startNextStep(current, active)
+			}
+		}
+	}
+	finished, err := m.persistTerminal(
+		current,
+		result.Process,
+		outcome,
+		false,
+		false,
+		active,
+	)
+	if err != nil {
+		return err
+	}
+	current.task = finished
+	m.stopActive(current)
+	return nil
+}
+
 func (m *Manager) stageProcessCompletion(
 	current *activeTask,
 	result ProcessResult,

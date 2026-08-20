@@ -15,6 +15,7 @@ import (
 
 	"unit-test-ide.local/test-service/internal/diagnostic"
 	"unit-test-ide.local/test-service/internal/task"
+	"unit-test-ide.local/test-service/internal/testdomain"
 )
 
 func TestManagerJournalsStepStartWithRunningMutationAfterPurePrelease(t *testing.T) {
@@ -328,6 +329,147 @@ func TestManagerRejectsCoverageRunResumeQueuedWithoutSideEffects(t *testing.T) {
 		t.Fatalf("Store.Get calls = %d, want 0", gets)
 	}
 	assertNoManagerCoverageSideEffects(t, f)
+}
+
+func TestManagerCancelsCoverageServiceActionOnceWithoutProcessLease(t *testing.T) {
+	f := newManagerFixture(t)
+	action := &blockingServiceAction{entered: make(chan task.Task, 1), release: make(chan struct{}), cancelled: make(chan struct{})}
+	completion := &coverageCompletionInterpreter{}
+	plan := task.ExecutionPlan{Version: 1, Steps: []task.ExecutionStep{{
+		ID: "coverage-report", Kind: task.StepCoverageReport,
+		Action: task.ServiceActionCoverageReport,
+		Public: task.CommandSummary{Executable: "coverage-report"},
+	}}}
+	plan.Fingerprint = task.FingerprintPlan(plan)
+	queued := task.Task{
+		ID: testID(204), IdempotencyKey: testID(205), RequestHash: strings.Repeat("c", 64),
+		Kind: task.KindCoverageRun, Request: json.RawMessage(`{"coverage":true}`),
+		WorkspaceGeneration: "workspace", PlanFingerprint: plan.Fingerprint,
+		Timeout: time.Minute, Status: task.StatusQueued, CreatedAt: f.clock.Now(),
+		Steps: []task.StepSnapshot{{ID: "coverage-report", Kind: task.StepCoverageReport, Status: task.StepPending}},
+	}
+	f.store.mu.Lock()
+	f.store.tasks[queued.ID] = queued
+	f.store.keys[queued.IdempotencyKey] = queued.ID
+	f.store.mu.Unlock()
+
+	resumed := make(chan struct {
+		task task.Task
+		err  error
+	}, 1)
+	go func() {
+		value, err := f.manager.Manager.ResumeQueued(context.Background(), task.ResumeRequest{
+			Task: queued, Plan: plan, Boundary: fixedBoundary{},
+			ResultInterpreter: completion, ActionExecutor: action,
+		})
+		resumed <- struct {
+			task task.Task
+			err  error
+		}{value, err}
+	}()
+
+	var running task.Task
+	select {
+	case running = <-action.entered:
+		if running.Status != task.StatusRunning || running.ActiveStep != "coverage-report" {
+			t.Fatalf("action entered before durable running state: %#v", running)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("service action did not enter")
+	}
+	select {
+	case response := <-resumed:
+		if response.err != nil || response.task.Status != task.StatusRunning {
+			t.Fatalf("ResumeQueued() = %#v, %v", response.task, response.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("service action blocked the Manager command loop")
+	}
+
+	if _, err := f.manager.Manager.Cancel(context.Background(), queued.ID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-action.cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("cancellation did not reach service action")
+	}
+	close(action.release)
+	finished := f.awaitTask(t, queued.ID, task.StatusFinished)
+	if finished.Outcome != task.OutcomeCancelled {
+		t.Fatalf("finished Task = %#v", finished)
+	}
+	if got := f.processes.prepareCount(); got != 0 {
+		t.Fatalf("ProcessFactory.Prepare calls = %d, want 0", got)
+	}
+	if lease := f.store.lease(queued.ID); lease.TaskID != "" {
+		t.Fatalf("service action persisted a lease: %#v", lease)
+	}
+	if calls := completion.callCount(); calls != 1 {
+		t.Fatalf("completion calls = %d, want 1", calls)
+	}
+	mutation := f.store.lastMutation()
+	if mutation.FinishRun == nil || mutation.FinishCoverage == nil {
+		t.Fatalf("coverage terminal mutation = %#v; want TestRun and Coverage", mutation)
+	}
+}
+
+type blockingServiceAction struct {
+	entered   chan task.Task
+	release   chan struct{}
+	cancelled chan struct{}
+}
+
+func (action *blockingServiceAction) ExecuteServiceAction(
+	ctx context.Context,
+	current task.Task,
+	_ task.ExecutionStep,
+) (task.StepResult, error) {
+	action.entered <- current
+	select {
+	case <-ctx.Done():
+		close(action.cancelled)
+	case <-action.release:
+	}
+	<-action.release
+	return task.StepResult{Process: task.ProcessResult{ExitCode: 0}, Verdict: task.StepVerdictSucceeded}, nil
+}
+
+type coverageCompletionInterpreter struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (*coverageCompletionInterpreter) Interpret(
+	context.Context,
+	task.Task,
+	task.ExecutionStep,
+	task.ProcessResult,
+) (task.StepVerdict, error) {
+	return task.StepVerdictSucceeded, nil
+}
+
+func (interpreter *coverageCompletionInterpreter) PrepareCompletion(
+	context.Context,
+	task.Task,
+	time.Time,
+	task.Outcome,
+	task.ArtifactSink,
+	task.IDGenerator,
+) (task.DomainCompletion, error) {
+	interpreter.mu.Lock()
+	defer interpreter.mu.Unlock()
+	interpreter.calls++
+	return task.DomainCompletion{
+		TestRun:  &testdomain.TestRun{},
+		Coverage: &task.CoverageCompletion{},
+	}, nil
+}
+
+func (interpreter *coverageCompletionInterpreter) callCount() int {
+	interpreter.mu.Lock()
+	defer interpreter.mu.Unlock()
+	return interpreter.calls
 }
 
 func assertNoManagerCoverageSideEffects(t *testing.T, f *managerFixture) {

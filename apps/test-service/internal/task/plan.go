@@ -66,10 +66,22 @@ type CommandSummary struct {
 	Args       []string `json:"args"`
 }
 
+// ServiceAction is a closed, runtime-only operation implemented by the
+// service. It is deliberately distinct from ProcessSpec so executable paths,
+// environment, and callbacks cannot cross the persistence or protocol
+// boundary.
+type ServiceAction string
+
+const (
+	ServiceActionCoverageReport  ServiceAction = "coverage-report"
+	ServiceActionCoveragePublish ServiceAction = "coverage-publish"
+)
+
 type ExecutionStep struct {
 	ID               string
 	Kind             StepKind
 	Process          ProcessSpec
+	Action           ServiceAction
 	Public           CommandSummary
 	State            json.RawMessage
 	DiagnosticParser diagnostic.Parser
@@ -129,6 +141,7 @@ type StartRequest struct {
 	Boundary            ExecutionBoundary
 	Continuation        PlanContinuation
 	ResultInterpreter   ResultInterpreter
+	ActionExecutor      ServiceActionExecutor
 	TestRun             *testdomain.TestRun
 
 	// Scenario remains an internal compatibility input while v1.1 simulation
@@ -142,6 +155,7 @@ type ResumeRequest struct {
 	Boundary          ExecutionBoundary
 	Continuation      PlanContinuation
 	ResultInterpreter ResultInterpreter
+	ActionExecutor    ServiceActionExecutor
 }
 
 func ValidatePlan(plan ExecutionPlan, boundary ExecutionBoundary) error {
@@ -165,7 +179,7 @@ func validateExecutionSteps(
 	ids := make(map[string]struct{}, len(steps))
 	for _, step := range steps {
 		if !validStepID(step.ID) || !validStepKind(step.Kind) ||
-			!validProcessSpec(step.Process, boundary) ||
+			!validExecutionStep(step, boundary) ||
 			len(step.Public.Args) > maxCommandSummaryArgs ||
 			len(step.State) > maxExecutionStepState ||
 			len(step.State) != 0 && !json.Valid(step.State) {
@@ -177,6 +191,31 @@ func validateExecutionSteps(
 		ids[step.ID] = struct{}{}
 	}
 	return nil
+}
+
+// validExecutionStep accepts exactly one execution mechanism. Service actions
+// are intentionally closed and may not carry a diagnostic parser.
+func validExecutionStep(step ExecutionStep, boundary ExecutionBoundary) bool {
+	hasProcess := step.Process.Executable != "" || len(step.Process.Batch) != 0
+	hasAction := step.Action != ""
+	if hasProcess == hasAction {
+		return false
+	}
+	if hasAction {
+		return validServiceAction(step.Kind, step.Action) && step.DiagnosticParser == nil
+	}
+	return validProcessSpec(step.Process, boundary)
+}
+
+func validServiceAction(kind StepKind, action ServiceAction) bool {
+	switch action {
+	case ServiceActionCoverageReport:
+		return kind == StepCoverageReport
+	case ServiceActionCoveragePublish:
+		return kind == StepCoveragePublish
+	default:
+		return false
+	}
 }
 
 func validProcessSpec(
@@ -296,6 +335,7 @@ func FingerprintPlan(plan ExecutionPlan) string {
 	type canonicalStep struct {
 		ID         string                  `json:"id"`
 		Kind       StepKind                `json:"kind"`
+		Action     ServiceAction           `json:"action,omitempty"`
 		Executable string                  `json:"executable"`
 		Args       []string                `json:"args"`
 		Env        []string                `json:"env"`
@@ -313,6 +353,7 @@ func FingerprintPlan(plan ExecutionPlan) string {
 		canonical.Steps[index] = canonicalStep{
 			ID:         step.ID,
 			Kind:       step.Kind,
+			Action:     step.Action,
 			Executable: step.Process.Executable,
 			Args:       append([]string{}, step.Process.Args...),
 			Env:        append([]string{}, step.Process.Env...),

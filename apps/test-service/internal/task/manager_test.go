@@ -2275,7 +2275,8 @@ func (s *fakeStore) ReplaceQueuedPlan(
 	if !ok {
 		return task.Task{}, task.ErrNotFound
 	}
-	if current.Status != task.StatusQueued || current.Kind != task.KindCMakeBuild ||
+	if current.Status != task.StatusQueued ||
+		(current.Kind != task.KindCMakeBuild && current.Kind != task.KindCoverageRun) ||
 		current.RequestHash != requestHash {
 		return task.Task{}, task.ErrConflict
 	}

@@ -162,10 +162,21 @@ func validateStartRequest(request StartRequest) error {
 			!validAssociatedTestRun(request.TestRun) {
 			return ErrInvalidArgument
 		}
+	case KindCoverageRun:
+		if request.Scenario != "" || request.WorkspaceGeneration == "" ||
+			!validAssociatedTestRun(request.TestRun) ||
+			!hasCompletionPreparer(request.ResultInterpreter) {
+			return ErrInvalidArgument
+		}
 	default:
 		return ErrInvalidArgument
 	}
 	return ValidatePlan(request.Plan, request.Boundary)
+}
+
+func hasCompletionPreparer(interpreter ResultInterpreter) bool {
+	_, ok := interpreter.(CompletionPreparer)
+	return ok
 }
 
 func cloneStartRequest(request StartRequest) StartRequest {
@@ -176,6 +187,14 @@ func cloneStartRequest(request StartRequest) StartRequest {
 		cloned := request.TestRun.Clone()
 		result.TestRun = &cloned
 	}
+	return result
+}
+
+func cloneResumeRequest(request ResumeRequest) ResumeRequest {
+	result := request
+	result.Task.Request = append(json.RawMessage(nil), request.Task.Request...)
+	result.Task.Steps = cloneStepSnapshots(request.Task.Steps)
+	result.Plan = cloneExecutionPlan(request.Plan)
 	return result
 }
 
@@ -329,7 +348,8 @@ func (m *Manager) start(request StartRequest, active map[string]*activeTask) tas
 	current := &activeTask{
 		task: stored, plan: request.Plan, boundary: request.Boundary,
 		continuation: request.Continuation, resultInterpreter: request.ResultInterpreter,
-		timerStop: make(chan struct{}), timeoutStop: make(chan struct{}),
+		actionExecutor: request.ActionExecutor,
+		timerStop:      make(chan struct{}), timeoutStop: make(chan struct{}),
 		watcherStop: make(chan struct{}), execution: execution,
 	}
 	active[stored.ID] = current
@@ -402,7 +422,8 @@ func (m *Manager) resumeQueued(
 	current := &activeTask{
 		task: stored, plan: request.Plan, boundary: request.Boundary,
 		continuation: request.Continuation, resultInterpreter: request.ResultInterpreter,
-		timerStop: make(chan struct{}), timeoutStop: make(chan struct{}),
+		actionExecutor: request.ActionExecutor,
+		timerStop:      make(chan struct{}), timeoutStop: make(chan struct{}),
 		watcherStop: make(chan struct{}), execution: execution,
 	}
 	active[stored.ID] = current
@@ -441,6 +462,32 @@ func (m *Manager) startNextStep(current *activeTask, active map[string]*activeTa
 	}
 	step := current.plan.Steps[current.nextStep]
 	if current.execution.currentCause() != "" {
+		return nil
+	}
+	if step.Action != "" {
+		if err := m.persistRunningServiceAction(current, step, active); err != nil {
+			return err
+		}
+		if current.execution.currentCause() != "" {
+			return nil
+		}
+		if current.actionExecutor == nil {
+			return m.finishPendingStep(current, active)
+		}
+		current.actionCompleted = false
+		taskID := current.task.ID
+		executor := current.actionExecutor
+		runtimeTask := cloneRuntimeTask(current.task)
+		runtimeStep := cloneRuntimeStep(step)
+		go func() {
+			result, err := callServiceAction(
+				current.execution.ctx,
+				executor,
+				runtimeTask,
+				runtimeStep,
+			)
+			m.sendInternal(actionDoneCommand{taskID: taskID, result: result, err: err})
+		}()
 		return nil
 	}
 	process, prepareErr := m.processes.Prepare(
@@ -566,6 +613,69 @@ func (m *Manager) startNextStep(current *activeTask, active map[string]*activeTa
 	return nil
 }
 
+func (m *Manager) persistRunningServiceAction(
+	current *activeTask,
+	step ExecutionStep,
+	active map[string]*activeTask,
+) error {
+	startedAt := m.clock.Now()
+	runningTask := current.task
+	expectedStatus := current.task.Status
+	events := []EventDraft(nil)
+	if current.task.Status == StatusQueued {
+		var err error
+		runningTask, err = ApplyTransition(current.task, Transition{
+			From: StatusQueued, To: StatusRunning, At: startedAt,
+		})
+		if err != nil {
+			return err
+		}
+		events = []EventDraft{eventDraft(
+			current.task.ID,
+			EventTaskStarted,
+			startedAt,
+			map[string]any{"status": StatusRunning},
+		)}
+	}
+	runningTask.ActiveStep = step.ID
+	runningStep := runningTask.Steps[current.nextStep]
+	runningStep.Status = StepRunning
+	runningStep.StartedAt = timePointer(startedAt)
+	stored, committed, err := m.store.Apply(context.Background(), Mutation{
+		Task: runningTask, Expected: expectedStatus,
+		Steps:  []StepMutation{{Step: runningStep, Expected: StepPending}},
+		Events: events,
+	})
+	if err != nil {
+		current.execution.resolve(OutcomeInfrastructureFailed)
+		if errors.Is(err, ErrStorageUnavailable) {
+			m.tripStorage(active)
+		}
+		return err
+	}
+	current.task = stored
+	if !m.publishAll(committed) {
+		m.tripPublisher(active)
+		return ErrStorageUnavailable
+	}
+	return nil
+}
+
+func callServiceAction(
+	ctx context.Context,
+	executor ServiceActionExecutor,
+	current Task,
+	step ExecutionStep,
+) (result StepResult, resultErr error) {
+	defer func() {
+		if recover() != nil {
+			result = StepResult{}
+			resultErr = errors.New("service action executor panicked")
+		}
+	}()
+	return executor.ExecuteServiceAction(ctx, current, step)
+}
+
 func (m *Manager) persistPreparedLease(
 	current *activeTask,
 	active map[string]*activeTask,
@@ -677,7 +787,7 @@ func (m *Manager) persistSuccessfulStep(
 		Steps:       []StepMutation{{Step: step, Expected: StepRunning}},
 		AppendSteps: appended,
 		Events:      eventDrafts,
-		DeleteLease: true,
+		DeleteLease: current.process != nil,
 	})
 	if err != nil {
 		current.execution.resolve(OutcomeInfrastructureFailed)
@@ -1012,7 +1122,7 @@ func (m *Manager) persistFinished(
 	stored, committed, err := m.store.Apply(context.Background(), Mutation{
 		Task: finished, Expected: current.Status, Steps: steps, Events: events,
 		DeleteLease: deleteLease, Artifacts: artifacts,
-		FinishRun: completion.TestRun,
+		FinishRun: completion.TestRun, FinishCoverage: completion.Coverage,
 	})
 	if err != nil {
 		if !errors.Is(err, ErrConflict) {
@@ -1043,12 +1153,15 @@ func (m *Manager) prepareDomainCompletion(
 	}
 	preparer, ok := owner.resultInterpreter.(CompletionPreparer)
 	if !ok {
+		if current.Kind == KindCoverageRun {
+			return DomainCompletion{}, ErrInvalidArgument
+		}
 		return DomainCompletion{}, nil
 	}
 	if owner.artifactSink == nil {
 		return DomainCompletion{}, ErrStorageUnavailable
 	}
-	return callCompletionPreparer(
+	completion, err := callCompletionPreparer(
 		preparer,
 		current,
 		finishedAt,
@@ -1056,6 +1169,14 @@ func (m *Manager) prepareDomainCompletion(
 		owner.artifactSink,
 		m.newID,
 	)
+	if err != nil {
+		return DomainCompletion{}, err
+	}
+	if current.Kind == KindCoverageRun &&
+		(completion.TestRun == nil || completion.Coverage == nil) {
+		return DomainCompletion{}, ErrInvalidArgument
+	}
+	return completion, nil
 }
 
 func callCompletionPreparer(

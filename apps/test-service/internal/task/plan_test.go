@@ -185,6 +185,59 @@ func TestValidatePlanAcceptsCoverageStepKindsAndFingerprintsThem(t *testing.T) {
 	}
 }
 
+func TestValidatePlanAcceptsOnlyClosedServiceActions(t *testing.T) {
+	action := task.ExecutionStep{
+		ID:     "coverage-report",
+		Kind:   task.StepCoverageReport,
+		Action: task.ServiceActionCoverageReport,
+		Public: task.CommandSummary{Executable: "coverage-report"},
+	}
+	plan := task.ExecutionPlan{Version: 1, Steps: []task.ExecutionStep{action}}
+	plan.Fingerprint = task.FingerprintPlan(plan)
+	if err := task.ValidatePlan(plan, fixedBoundary{}); err != nil {
+		t.Fatal(err)
+	}
+	changedAction := plan
+	changedAction.Steps = append([]task.ExecutionStep(nil), plan.Steps...)
+	changedAction.Steps[0].Action = task.ServiceActionCoveragePublish
+	if task.FingerprintPlan(changedAction) == plan.Fingerprint {
+		t.Fatal("FingerprintPlan() did not include the service action")
+	}
+
+	for _, value := range []struct {
+		name string
+		step task.ExecutionStep
+	}{
+		{
+			name: "process and action",
+			step: func() task.ExecutionStep {
+				result := action
+				result.Process = task.ProcessSpec{
+					Executable: "trusted-service",
+					Dir:        "simulation-dir",
+				}
+				return result
+			}(),
+		},
+		{
+			name: "unknown action",
+			step: func() task.ExecutionStep {
+				result := action
+				result.Action = "workspace-script"
+				return result
+			}(),
+		},
+	} {
+		t.Run(value.name, func(t *testing.T) {
+			invalid := task.ExecutionPlan{Version: 1, Steps: []task.ExecutionStep{value.step}}
+			invalid.Fingerprint = task.FingerprintPlan(invalid)
+			if err := task.ValidatePlan(invalid, fixedBoundary{}); !errors.Is(err, task.ErrInvalidArgument) {
+				t.Fatalf("ValidatePlan() error = %v, want ErrInvalidArgument", err)
+			}
+		})
+	}
+}
+
 func TestValidatePlanAcceptsBoundedProcessBatchAndFingerprintsIt(
 	t *testing.T,
 ) {

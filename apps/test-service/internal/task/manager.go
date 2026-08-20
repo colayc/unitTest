@@ -94,6 +94,11 @@ type processDoneCommand struct {
 	taskID string
 	result ProcessResult
 }
+type actionDoneCommand struct {
+	taskID string
+	result StepResult
+	err    error
+}
 type flushCommand struct {
 	taskID string
 	token  uint64
@@ -130,6 +135,7 @@ type activeTask struct {
 	boundary              ExecutionBoundary
 	continuation          PlanContinuation
 	resultInterpreter     ResultInterpreter
+	actionExecutor        ServiceActionExecutor
 	artifactSink          ArtifactSink
 	boundaryReleased      bool
 	nextStep              int
@@ -147,6 +153,7 @@ type activeTask struct {
 	timeoutStop           chan struct{}
 	watcherStop           chan struct{}
 	processCompleted      bool
+	actionCompleted       bool
 	terminationGeneration uint64
 	terminationComplete   bool
 	terminationFailed     bool
@@ -360,12 +367,11 @@ func (m *Manager) ResumeQueued(ctx context.Context, request ResumeRequest) (Task
 		request.Task.Status != StatusQueued ||
 		request.Plan.Fingerprint == "" ||
 		request.Plan.Fingerprint != FingerprintPlan(request.Plan) ||
-		ValidatePlan(request.Plan, request.Boundary) != nil {
+		ValidatePlan(request.Plan, request.Boundary) != nil ||
+		(request.Task.Kind == KindCoverageRun && !hasCompletionPreparer(request.ResultInterpreter)) {
 		return Task{}, ErrInvalidArgument
 	}
-	request.Task.Request = append(json.RawMessage(nil), request.Task.Request...)
-	request.Task.Steps = append([]StepSnapshot(nil), request.Task.Steps...)
-	request.Plan = cloneExecutionPlan(request.Plan)
+	request = cloneResumeRequest(request)
 	if !m.Healthy() {
 		return Task{}, ErrStorageUnavailable
 	}
@@ -385,7 +391,7 @@ func (m *Manager) ResumeQueued(ctx context.Context, request ResumeRequest) (Task
 
 func resumableQueuedKind(kind Kind) bool {
 	switch kind {
-	case KindCMakeBuild, KindTestDiscovery, KindTestRun:
+	case KindCMakeBuild, KindTestDiscovery, KindTestRun, KindCoverageRun:
 		return true
 	default:
 		return false
@@ -602,6 +608,15 @@ func (m *Manager) loop() {
 			if current := active[value.taskID]; current != nil && !current.processCompleted {
 				m.finish(current, value.result, active)
 				if active[value.taskID] == current && m.canRemove(current) {
+					removeActiveTask(active, value.taskID)
+				}
+			}
+		case actionDoneCommand:
+			if current := active[value.taskID]; current != nil && !current.actionCompleted {
+				if err := m.completeServiceAction(current, value.result, value.err, active); err != nil {
+					m.abandon(current)
+				}
+				if active[value.taskID] == current && current.task.Status == StatusFinished {
 					removeActiveTask(active, value.taskID)
 				}
 			}
