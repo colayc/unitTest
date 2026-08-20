@@ -59,7 +59,7 @@ func TestCoverageEventV14ProjectionAndCompatibility(t *testing.T) {
 				persisted := eventForProjection(int64(200+index), taskID, tc.typeValue, at.Add(time.Duration(index)*time.Second), tc.payload)
 				projected := subscribeSingleProjectedEvent(t, version, persisted)
 				wantPayload := `{"stream":"service","text":"","truncated":false}`
-				if version == protocol.Version12 {
+				if version == protocol.Version12 || version == protocol.Version13 {
 					wantPayload = `{"stepId":"test-compatibility","stream":"combined","text":"","truncated":false}`
 				}
 				if projected.MessageID != persisted.ID || projected.Sequence != persisted.Sequence ||

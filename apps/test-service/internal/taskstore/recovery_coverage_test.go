@@ -101,10 +101,51 @@ func TestRecoverInterruptedCoverageTerminalizesAggregateAndLeavesQueuedCoverage(
 	}
 }
 
-func TestRecoverInterruptedCoverageRollsBackEveryDomainWrite(t *testing.T) {
+func TestRecoverInterruptedCoverageAcceptsQueuedRunFromNormalManagerStart(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
-	runningTask, runningRun, runningTestRun := startCoverageForRecovery(t, store, 1200)
+	runningTask, queuedRun, queuedTestRun := startNormalCoverageForRecovery(t, store, 1150)
+	recoveredAt := runningTask.StartedAt.Add(time.Minute)
+
+	events, err := store.RecoverInterrupted(ctx, recoveredAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 3 ||
+		events[0].Type != task.EventTestRunFinished ||
+		events[1].Type != task.EventCoverageRunFinished ||
+		events[2].Type != task.EventTaskFinished {
+		t.Fatalf("recovery events = %#v", events)
+	}
+	gotTask, err := store.Get(ctx, runningTask.ID)
+	if err != nil || gotTask.Status != task.StatusFinished || gotTask.Outcome != task.OutcomeInterrupted ||
+		len(gotTask.Steps) != len(runningTask.Steps) || gotTask.Steps[0].Status != task.StepFailed ||
+		gotTask.Steps[0].ErrorCode != "SERVICE_RESTARTED" {
+		t.Fatalf("recovered Task = %#v, %v", gotTask, err)
+	}
+	for _, step := range gotTask.Steps[1:] {
+		if step.Status != task.StepSkipped {
+			t.Fatalf("recovered pending step = %#v, want skipped", step)
+		}
+	}
+	gotRun, err := store.GetCoverageRun(ctx, queuedRun.ID)
+	if err != nil || gotRun.Status != coveragedomain.StatusFinished ||
+		gotRun.Outcome != coveragedomain.OutcomeUnavailable || gotRun.Reason != coveragedomain.ReasonServiceRestarted ||
+		gotRun.StartedAt != nil || gotRun.ReportID != "" || gotRun.Summary != nil ||
+		gotRun.Artifacts != (coveragedomain.ArtifactRefs{}) || gotRun.LastSequence != events[2].Sequence {
+		t.Fatalf("recovered CoverageRun = %#v, %v", gotRun, err)
+	}
+	gotTestRun, err := store.GetRun(ctx, queuedTestRun.RunID)
+	if err != nil || gotTestRun.Status != testdomain.RunCompleted ||
+		gotTestRun.Outcome != testdomain.RunInterrupted || !gotTestRun.Incomplete || gotTestRun.StartedAt != nil {
+		t.Fatalf("recovered TestRun = %#v, %v", gotTestRun, err)
+	}
+}
+
+func TestRecoverInterruptedCoverageWithQueuedRunRollsBackEveryDomainWrite(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	runningTask, runningRun, runningTestRun := startNormalCoverageForRecovery(t, store, 1200)
 	beforeTask, _ := store.Get(ctx, runningTask.ID)
 	beforeRun, _ := store.GetCoverageRun(ctx, runningRun.ID)
 	beforeTestRun, _ := store.GetRun(ctx, runningTestRun.RunID)
@@ -129,6 +170,40 @@ func TestRecoverInterruptedCoverageRollsBackEveryDomainWrite(t *testing.T) {
 		t.Fatalf("coverage recovery leaked writes: Task=%#v (%v), Run=%#v (%v), TestRun=%#v (%v), watermark=%d (%v)",
 			afterTask, taskErr, afterRun, runErr, afterTestRun, testRunErr, afterWatermark, watermarkErr)
 	}
+}
+
+func startNormalCoverageForRecovery(t *testing.T, store *Store, seed int) (task.Task, coveragedomain.Run, testdomain.TestRun) {
+	t.Helper()
+	ctx := context.Background()
+	input, steps, event, run, testRun := coverageCreationFixture(t, seed)
+	ensureCoverageRecoveryCatalog(t, store, run, testRun)
+	created, _, err := store.CreateCoverageTask(ctx, input, steps, event, run, testRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startedAt := created.CreatedAt.Add(time.Second)
+	running := mustTransition(t, created, task.Transition{From: task.StatusQueued, To: task.StatusRunning, At: startedAt})
+	running.ActiveStep = created.Steps[0].ID
+	runningStep := created.Steps[0]
+	runningStep.Status = task.StepRunning
+	runningStep.StartedAt = &startedAt
+	running, _, err = store.Apply(ctx, task.Mutation{
+		Task: running, Expected: task.StatusQueued,
+		Steps:  []task.StepMutation{{Step: runningStep, Expected: task.StepPending}},
+		Events: []task.EventDraft{draft(running.ID, task.EventTaskStarted, startedAt)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	persistedRun, err := store.GetCoverageRun(ctx, run.ID)
+	if err != nil || persistedRun.Status != coveragedomain.StatusQueued {
+		t.Fatalf("normal-start CoverageRun = %#v, %v", persistedRun, err)
+	}
+	persistedTestRun, err := store.GetRun(ctx, testRun.RunID)
+	if err != nil || persistedTestRun.Status != testdomain.RunQueued {
+		t.Fatalf("normal-start TestRun = %#v, %v", persistedTestRun, err)
+	}
+	return running, persistedRun, persistedTestRun
 }
 
 func startCoverageForRecovery(t *testing.T, store *Store, seed int) (task.Task, coveragedomain.Run, testdomain.TestRun) {

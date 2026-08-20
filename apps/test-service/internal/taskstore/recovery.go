@@ -293,7 +293,8 @@ func recoverInterruptedCoverageRun(
 		return coveragedomain.Run{}, task.EventDraft{},
 			storageError("get interrupted CoverageRun", err)
 	}
-	if run.Status != coveragedomain.StatusRunning {
+	expected := run.Status
+	if expected != coveragedomain.StatusQueued && expected != coveragedomain.StatusRunning {
 		return coveragedomain.Run{}, task.EventDraft{},
 			storageError("validate interrupted CoverageRun", task.ErrConflict)
 	}
@@ -309,7 +310,7 @@ func recoverInterruptedCoverageRun(
 		return coveragedomain.Run{}, task.EventDraft{},
 			storageError("validate recovered CoverageRun", err)
 	}
-	if err := finishCoverageRunTx(ctx, tx, validated, coveragedomain.StatusRunning); err != nil {
+	if err := finishCoverageRunTx(ctx, tx, validated, expected); err != nil {
 		return coveragedomain.Run{}, task.EventDraft{}, err
 	}
 	payload, err := json.Marshal(map[string]any{
