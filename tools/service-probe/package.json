@@ -3,6 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "exports": {
+    "./native-network-guard": {
+      "types": "./dist/native-network-guard.d.ts",
+      "default": "./dist/native-network-guard.js"
+    }
+  },
   "dependencies": {
     "@unit-test-ide/protocol-models": "workspace:*",
     "@unit-test-ide/test-client": "workspace:*"

@@ -11,14 +11,11 @@ import {
   lstat,
   mkdir,
   mkdtemp,
-  open,
-  readFile,
-  rename,
   rm,
   writeFile
 } from "node:fs/promises";
 import { createConnection } from "node:net";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import {
@@ -36,6 +33,10 @@ import {
   decodeCoverageDocumentV1,
   type CoverageDocumentV1
 } from "@unit-test-ide/coverage-models";
+import {
+  installWindowsNativeOfflineBoundary,
+  type WindowsNativeOfflineBoundary
+} from "@unit-test-ide/service-probe/native-network-guard";
 import { createCoverageController } from "../src/coverage-controller.js";
 import { openCoverageHtml } from "../src/coverage-viewer.js";
 import {
@@ -43,6 +44,11 @@ import {
   type ServiceOperations
 } from "../src/service-manager.js";
 import { redactServiceError } from "../src/service-resources.js";
+import {
+  parseStrictJUnit,
+  publishEvidenceAtomically,
+  teardownThenPublish
+} from "./coverage-service-smoke-support.js";
 
 const execFile = promisify(execFileCallback);
 const repositoryRoot = resolve(import.meta.dirname, "../../../..");
@@ -482,66 +488,6 @@ function decodeCoverageJSON(artifact: PublicArtifact): CoverageDocumentV1 {
   return decodeCoverageDocumentV1(JSON.parse(text));
 }
 
-interface ParsedJUnit {
-  readonly tests: number;
-  readonly failures: number;
-  readonly errors: number;
-  readonly skipped: number;
-}
-
-function parseJUnit(artifact: PublicArtifact): ParsedJUnit {
-  assert.equal(artifact.kind, "junit-xml");
-  const xml = new TextDecoder("utf-8", { fatal: true }).decode(artifact.bytes);
-  assert.ok(xml.length <= 64 * 1024 * 1024);
-  const declaration = /^<\?xml version="1\.0" encoding="UTF-8"\?>\s*/u.exec(xml);
-  assert.ok(declaration, "JUnit must contain a UTF-8 XML declaration");
-  const body = xml.slice(declaration[0].length);
-  const root = /^<testsuite\b([^>]*)>/u.exec(body);
-  assert.ok(root, "JUnit root must be testsuite");
-  assert.match(body, /<\/testsuite>\s*$/u);
-
-  const attributes = new Map<string, string>();
-  const attributePattern = /\s+([A-Za-z][A-Za-z0-9_.:-]*)="([^"<>]*)"/gu;
-  let consumed = 0;
-  for (const match of root[1]!.matchAll(attributePattern)) {
-    assert.equal(match.index, consumed);
-    attributes.set(match[1]!, match[2]!);
-    consumed += match[0].length;
-  }
-  assert.equal(consumed, root[1]!.length, "JUnit testsuite attributes must be well formed");
-
-  const stack: string[] = [];
-  const tags = /<\/?([A-Za-z][A-Za-z0-9_.:-]*)(?:\s[^<>]*?)?>/gu;
-  for (const match of body.matchAll(tags)) {
-    const tag = match[1]!;
-    if (match[0].startsWith("</")) {
-      assert.equal(stack.pop(), tag, `JUnit closing tag ${tag} must match`);
-    } else {
-      stack.push(tag);
-    }
-  }
-  assert.deepEqual(stack, [], "JUnit element stack must close");
-
-  const parseCount = (name: string): number => {
-    const raw = attributes.get(name);
-    assert.match(raw ?? "", /^(?:0|[1-9][0-9]*)$/u, `JUnit ${name} must be an integer`);
-    const value = Number(raw);
-    assert.equal(Number.isSafeInteger(value), true);
-    return value;
-  };
-  const parsed = {
-    tests: parseCount("tests"),
-    failures: parseCount("failures"),
-    errors: parseCount("errors"),
-    skipped: parseCount("skipped")
-  };
-  assert.equal((body.match(/<testcase\b/gu) ?? []).length, parsed.tests);
-  assert.equal((body.match(/<failure\b/gu) ?? []).length, parsed.failures);
-  assert.equal((body.match(/<error\b/gu) ?? []).length, parsed.errors);
-  assert.equal((body.match(/<skipped\b/gu) ?? []).length, parsed.skipped);
-  return parsed;
-}
-
 function assertProvenance(report: CoverageReport, document: CoverageDocumentV1): string {
   assert.equal(report.toolProvenance.platform, "windows");
   assert.equal(report.toolProvenance.architecture, "x64");
@@ -658,47 +604,39 @@ function buildEvidence(
   return evidence;
 }
 
-async function writeEvidenceAtomically(evidence: CoverageExecutionEvidence): Promise<Buffer> {
-  const directory = dirname(evidencePath);
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  const targetInfo = await lstat(directory);
-  if (!targetInfo.isDirectory() || targetInfo.isSymbolicLink()) {
-    throw new Error("coverage evidence directory is unsafe");
-  }
-  const bytes = Buffer.from(`${JSON.stringify(evidence)}\n`, "utf8");
-  const parsed = JSON.parse(bytes.toString("utf8")) as Record<string, unknown>;
-  assert.deepEqual(Object.keys(parsed).sort(), Object.keys(evidence).sort());
-  const temporary = join(directory, `.coverage-execution-report-${process.pid}-${randomBytes(8).toString("hex")}.tmp`);
-  let handle: Awaited<ReturnType<typeof open>> | undefined;
-  try {
-    handle = await open(temporary, "wx", 0o600);
-    await handle.writeFile(bytes);
-    await handle.sync();
-    await handle.close();
-    handle = undefined;
-    await rename(temporary, evidencePath);
-  } catch (error) {
-    await handle?.close().catch(() => undefined);
-    await rm(temporary, { force: true }).catch(() => undefined);
-    throw error;
-  }
-  return bytes;
-}
-
 test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed TestRun report", async (t) => {
   assert.equal(process.platform, "win32", "coverage service smoke is Windows-only");
   await rm(evidencePath, { force: true });
   let fixture: Fixture | undefined;
   let manager: ServiceManager | undefined;
+  let offlineBoundary: WindowsNativeOfflineBoundary | undefined;
   const wire = new ProtocolWireCapture();
   const tokens: string[] = [];
   const hostileEnvironmentValue = `coverage-smoke-secret-${randomBytes(12).toString("hex")}`;
   const sensitive: string[] = [hostileEnvironmentValue];
 
+  const stopService = async (): Promise<void> => {
+    if (manager === undefined) return;
+    await manager.stop();
+    manager = undefined;
+  };
+  const cleanupFixture = async (): Promise<void> => {
+    if (fixture === undefined) return;
+    await rm(fixture.root, { recursive: true, force: true });
+    fixture = undefined;
+  };
+  const closeOfflineBoundary = async (): Promise<void> => {
+    if (offlineBoundary === undefined) return;
+    await offlineBoundary.close();
+    offlineBoundary = undefined;
+  };
+
   t.after(async () => {
     try {
-      await manager?.stop();
-      if (fixture !== undefined) await rm(fixture.root, { recursive: true, force: true });
+      await teardownThenPublish(
+        [stopService, cleanupFixture, closeOfflineBoundary],
+        async () => undefined
+      );
     } catch (error) {
       throw redactServiceError(error, sensitive);
     }
@@ -723,6 +661,7 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
       return;
     }
     await buildService(fixture);
+    offlineBoundary = await installWindowsNativeOfflineBoundary();
     manager = new ServiceManager({
       serviceExecutable: fixture.serviceBinary,
       workspaceRoot: fixture.workspace,
@@ -814,7 +753,9 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
     assert.deepEqual(document.summary, report.summary);
     assert.equal(document.files.some((file) => file.uri === "src/math.cpp"), true);
     assert.equal(document.files.some((file) => file.uri.startsWith("test/")), false);
-    const junit = parseJUnit(artifactByKind(artifacts, "junit-xml"));
+    const junitArtifact = artifactByKind(artifacts, "junit-xml");
+    assert.equal(junitArtifact.kind, "junit-xml");
+    const junit = parseStrictJUnit(junitArtifact.bytes);
     assert.deepEqual(junit, { tests: 2, failures: 1, errors: 0, skipped: 0 });
 
     let openedHTML = "";
@@ -846,11 +787,14 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
         coverageProfileId: COVERAGE_PROFILE_ID
       })
     });
-    const extensionState = await coverageController.refresh(run.coverageRunId);
-    assert.equal(extensionState.state, "available");
-    assert.equal(extensionState.reportId, report.reportId);
-    assert.deepEqual(extensionState.summary, report.summary);
-    coverageController.dispose();
+    try {
+      const extensionState = await coverageController.refresh(run.coverageRunId);
+      assert.equal(extensionState.state, "available");
+      assert.equal(extensionState.reportId, report.reportId);
+      assert.deepEqual(extensionState.summary, report.summary);
+    } finally {
+      coverageController.dispose();
+    }
 
     const protocolBytes = wire.bytes();
     assertNoSensitiveBytes("Protocol v1.4 coverage exchange", protocolBytes, sensitive);
@@ -861,11 +805,9 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
     const evidence = buildEvidence(report, artifacts, durationMs);
     const expectedEvidenceBytes = Buffer.from(`${JSON.stringify(evidence)}\n`, "utf8");
     assertNoSensitiveBytes("coverage execution evidence", expectedEvidenceBytes, sensitive);
-    const evidenceBytes = await writeEvidenceAtomically(evidence);
-    assert.deepEqual(evidenceBytes, expectedEvidenceBytes);
-    assert.deepEqual(
-      JSON.parse(await readFile(evidencePath, "utf8")),
-      evidence
+    await teardownThenPublish(
+      [stopService, cleanupFixture, closeOfflineBoundary],
+      () => publishEvidenceAtomically(evidencePath, expectedEvidenceBytes)
     );
   } catch (error) {
     throw redactServiceError(error, sensitive);

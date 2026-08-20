@@ -57,12 +57,13 @@ bool run_covered_case() {
   return actual == 1;
 }
 
-bool expect_equal(int expected, int actual) {
+bool expect_equal(int expected, int actual, int assertion_line) {
   if (expected == actual) {
     std::cout << " - 2 ms\n";
     return true;
   }
-  std::cout << "test/math_test.cpp:63: error: Failure in TEST(" << kGroup
+  std::cout << "test/math_test.cpp:" << assertion_line
+            << ": error: Failure in TEST(" << kGroup
             << ", " << kFailedCase << ")\n";
   std::cout << "\tExpected <" << expected << ">\n";
   std::cout << "\tbut was  <" << actual << ">\n\n";
@@ -73,7 +74,7 @@ bool expect_equal(int expected, int actual) {
 bool run_failed_case() {
   const int instrumented = coverage_branch(0);
   std::cout << "TEST(" << kGroup << ", " << kFailedCase << ")\n";
-  return expect_equal(1, instrumented);
+  return expect_equal(1, instrumented, __LINE__);
 }
 
 }  // namespace

@@ -6,6 +6,8 @@
 
 普通 `pnpm verify`、native E2E 执行阶段和 Go Service 不应建立 HTTP(S) 客户端连接。CMake archive 下载只发生在显式的 `pnpm prepare:cmake-bundle` 阶段。native E2E 进程在加载测试实现前安装 HTTP(S) network guard；workspace smoke 还会审计 Go production import，将网络能力限制在 Named Pipe/Unix Socket 本地 IPC 边界。
 
+Windows LLVM coverage smoke 不把 Node API monkeypatch 当作完整禁网证据。它还在隔离 runner 上安装临时、可审计的 Windows Firewall all-program outbound Block/Any rule，使 Service 与全部 native child process 都受 OS filter 约束；独立 watchdog 的 readiness handshake、正常 teardown 和 CI cleanup 必须证明 rule 已从 PersistentStore/ActiveStore 移除。查询权限不得被当成空结果；建立、审计或清理失败时 required gate fail-closed，不生成或上传 coverage PASS evidence。
+
 ## Protocol 权限边界
 
 Protocol request 只表达封闭的语义操作。客户端不能提交：

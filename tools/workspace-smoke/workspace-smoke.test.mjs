@@ -69,7 +69,7 @@ async function productionGoSources(directory) {
 
 test("workspace pins supported toolchains", async () => {
   assert.equal((await readFile(".node-version", "utf8")).trim(), "24.18.0");
-  assert.equal((await readFile(".go-version", "utf8")).trim(), "1.26.5");
+  assert.equal((await readFile(".go-version", "utf8")).trim(), "1.26.6");
   const manifest = JSON.parse(await readFile("package.json", "utf8"));
   assert.equal(manifest.packageManager, "pnpm@11.4.0");
   assert.equal(manifest.engines.node, ">=24.18.0 <25");
@@ -134,6 +134,20 @@ test("Hosted CI pins native toolchain runners and enforces the complete matrix",
       new RegExp(`path:\\s*\\.native-e2e/artifacts/${platform}/toolchain-report\\.json`),
     );
     assert.match(source, /run:\s*git diff --exit-code/);
+
+    if (platform === "windows") {
+      const coverageSmoke = source.indexOf("test:coverage-service-smoke");
+      const firewallCleanup = source.indexOf("Cleanup Windows native offline firewall boundary");
+      const serviceSmoke = source.indexOf("test:service-smoke");
+      assert.ok(
+        coverageSmoke !== -1 && firewallCleanup > coverageSmoke && serviceSmoke > firewallCleanup,
+        "Windows CI must always revoke the OS-level offline boundary before later steps"
+      );
+      const coverageReport = source.indexOf("coverage-execution-report.json");
+      assert.notEqual(coverageReport, -1);
+      const uploadStep = source.slice(source.lastIndexOf("      - ", coverageReport), coverageReport);
+      assert.match(uploadStep, /if:\s*success\(\)/u, "failed smoke must not upload PASS evidence");
+    }
   }
 });
 

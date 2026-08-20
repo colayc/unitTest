@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- 最低运行环境保持 Node.js `24.18.0`、pnpm `11.4.0`、Go `1.26.5`。
+- 最低运行环境保持 Node.js `24.18.0`、pnpm `11.4.0`、Go `1.26.6`。
 - 只支持 trusted 单根 workspace；无 workspace 或 multi-root workspace 不启动 Service。
 - untrusted workspace 不创建 token、endpoint、data directory，不 spawn Go Service。
 - Windows 使用 per-user Named Pipe；Linux 使用 owner-only Unix Socket。

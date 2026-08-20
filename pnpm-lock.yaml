@@ -33,6 +33,9 @@ importers:
       '@unit-test-ide/coverage-models':
         specifier: workspace:*
         version: link:../../packages/coverage-models
+      '@unit-test-ide/service-probe':
+        specifier: workspace:*
+        version: link:../../tools/service-probe
       '@types/node':
         specifier: 24.13.3
         version: 24.13.3

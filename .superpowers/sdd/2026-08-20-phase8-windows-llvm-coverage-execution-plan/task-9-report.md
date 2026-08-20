@@ -145,3 +145,117 @@ cache, the unchanged root `pnpm build` command passed.
 
 The implementation commit identifier is supplied in the Task 9 handoff because
 this report cannot contain the hash of its own commit.
+
+## Fix Round 1
+
+### Review findings and RED evidence
+
+The four reviewed Important findings were reproduced before their fixes:
+
+- The offline-boundary test first failed to compile because the audited Windows
+  OS-boundary API did not exist. A later real Windows PowerShell control exposed
+  a second fail-open defect: an unavailable firewall query was silently treated
+  as an absent rule (4 tests passed, 1 failed with `Missing expected rejection`).
+- The strict JUnit and PASS-only evidence tests first failed with `TS2307`
+  because their support module did not exist. After the tokenizer was present,
+  an entity-encoded non-whitespace document tail still produced a focused RED
+  until text outside the one root was checked in its raw XML form.
+- Workspace focused tests failed because `.go-version` still contained
+  `1.26.5` and the workflow had neither the required offline cleanup ordering
+  nor a success-only coverage-evidence upload.
+- The fixture control reported line 63, which mapped to `return true;` inside
+  the helper instead of the failed assertion call.
+
+### Offline execution boundary
+
+Before the real Service starts, the smoke now installs both the existing Node
+HTTP(S) guard and a random unique Windows Firewall all-program outbound
+`Block/Any` rule for the isolated-runner test window. The Service, CMake,
+Ninja, compiler/linker, fixture test, `llvm-profdata` and `llvm-cov` therefore
+share one OS-enforced boundary instead of relying on a Node monkeypatch.
+
+Installation is fail-closed and auditable. A detached PowerShell watchdog must
+write an exclusive PID-specific readiness marker before rule installation.
+The installed rule is then checked in ActiveStore for identity, enabled state,
+outbound/block/Any-profile policy, all enabled firewall profiles, and
+unrestricted application, package, service, address, port and interface
+filters. Firewall-query permission failures propagate; they are never treated
+as an empty policy store. Normal teardown removes and re-audits both stores,
+the PID watchdog repeatedly removes the exact random rule after an abnormal
+Node exit, and the workflow has an `always()` cleanup/audit by the dedicated
+rule group. Failure to start the watchdog or create, audit or revoke the rule
+fails the required gate.
+
+The local host has a medium-integrity token and cannot enumerate Firewall
+policy. The real control now verifies that `AuditRemoved` rejects this state
+instead of claiming a clean audit. Because this worktree also lacks the
+verified CMake/LLVM bundle, the coverage smoke returns the exact single SKIP
+before any native execution or OS-rule installation. Required CI does not have
+that escape: missing toolchain or firewall authority is a failure.
+
+### Strict JUnit and PASS-only evidence
+
+The regex/tag-stack JUnit check was replaced by a bounded, fatal-UTF-8,
+character-by-character XML tokenizer and closed JUnit parser. It validates the
+exact declaration, quoted and non-duplicate attributes, legal builtin and
+numeric entities, XML characters, matching nesting, exactly one root, exact
+testsuite/testcase/outcome schemas and structural counts. Unknown/bare/
+unterminated entities, bad numeric entities, unquoted/duplicate/extra/missing
+attributes, mismatched nesting, extra roots, DOCTYPE/ENTITY, comments, CDATA
+and extra processing instructions are rejected.
+
+At test entry, any stale final report is removed. Assertions, artifact decode,
+the real Extension viewer adapter and CoverageController disposal all finish
+before teardown. Service shutdown, fixture removal and offline-boundary
+revocation are attempted in order; every teardown must succeed before
+publication. Evidence is written exclusively to a random temporary file,
+flushed, read back and checked for exact canonical strict-JSON bytes, with
+atomic rename as the final fallible operation. Injected post-write readback
+corruption and injected Service teardown failure both leave no final report or
+temporary evidence. The workflow uploads coverage execution evidence only on
+`success()` and retains `if-no-files-found: error`.
+
+### Pin and fixture correction
+
+The live repository pin, README, current development plan, workspace assertion
+and both CI jobs now agree on Go 1.26.6. Repository-wide search leaves only
+dated historical plans and recorded Go 1.26.5 command evidence; those are
+historical facts rather than current pin claims and were not rewritten.
+
+The fixture passes `__LINE__` from the failed `expect_equal` call. A fresh
+compiled control now emits `test/math_test.cpp:77`, and source line 77 is the
+actual `return expect_equal(1, instrumented, __LINE__);` call, so unrelated
+helper-line drift cannot make the diagnostic point at successful helper code.
+
+### Fresh GREEN verification
+
+All commands used Node 24.18.0, pnpm 11.4.0, Go 1.26.6, `GOENV=off`,
+`GOTOOLCHAIN=local` and a worktree-local GOCACHE where Go was involved.
+
+- `pnpm install --offline --frozen-lockfile`: PASS.
+- Offline-boundary focused suite: PASS, 5/5, including the real unprivileged
+  fail-closed Windows control.
+- Strict JUnit/evidence focused suite: PASS, 9/9.
+- `pnpm --filter @unit-test-ide/service-probe test`: PASS, 45/45.
+- `pnpm --filter code-oss-extension test`: PASS, 133/133.
+- Existing real Named Pipe Service smoke: PASS, 4/4.
+- Coverage Service smoke: honest local SKIP, exactly 1 test / 0 pass / 0 fail /
+  1 skip with `SKIP: verified clang-cl coverage toolset is unavailable`; the
+  final coverage execution report is absent.
+- `go test ./apps/test-service/... -count=1`: PASS, all Service packages.
+- `go test -race ./apps/test-service/... -count=1`: PASS, all Service packages,
+  no race report.
+- `pnpm check:protocol-generated` and `pnpm check:coverage-generated`: PASS.
+- `pnpm build`: PASS.
+- Root `pnpm test`: PASS through coverage/CMake bundle generators, workspace
+  smoke, every package suite and the full Go Service suite.
+- `pnpm test:workspace`: PASS, 21/21. The first sandboxed attempt correctly
+  exposed blocked Visual Studio SDK metadata; the unchanged gate passed after
+  granting the test read access and using the installed CMake 3.31.6-msvc6.
+- Fixture diagnostic location control: PASS; process exit 1 and the emitted
+  line maps to the assertion call.
+- `git diff --check`: PASS.
+
+Generated Go cache, temporary fixture binaries, Service build outputs and test
+cache artifacts were removed. No production coverage behavior was weakened,
+no out-of-scope production fix was required, and no push was performed.

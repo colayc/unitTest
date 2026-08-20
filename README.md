@@ -8,7 +8,7 @@
 
 - Node.js 24.18.0
 - 通过 Corepack 使用 pnpm 11.4.0
-- Go 1.26.5
+- Go 1.26.6
 - Windows native 验证：MSVC 与 Windows SDK；clang-cl 场景还需要 LLVM
 - Linux native 验证：GCC 或 Clang；推荐 Ninja，缺少 Ninja 时可使用经过验证的 Unix Makefiles
 

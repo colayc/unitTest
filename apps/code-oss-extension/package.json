@@ -31,13 +31,14 @@
   "dependencies": { "@unit-test-ide/test-client": "workspace:*" },
   "devDependencies": {
     "@unit-test-ide/coverage-models": "workspace:*",
+    "@unit-test-ide/service-probe": "workspace:*",
     "@types/node": "24.13.3",
     "@types/vscode": "1.105.0",
     "typescript": "6.0.3"
   },
   "scripts": {
     "build": "tsc -b tsconfig.json",
-    "test": "pnpm run build && node --test dist/test/manifest.test.js dist/test/service-manager.test.js dist/test/service-resources.test.js dist/test/trust-gate.test.js dist/test/extension.test.js dist/test/testing-api.test.js dist/test/testing-api-benchmark.test.js dist/test/vscode-testing-bridge.test.js",
+    "test": "pnpm run build && node --test dist/test/coverage-service-smoke-support.test.js dist/test/manifest.test.js dist/test/service-manager.test.js dist/test/service-resources.test.js dist/test/trust-gate.test.js dist/test/extension.test.js dist/test/testing-api.test.js dist/test/testing-api-benchmark.test.js dist/test/vscode-testing-bridge.test.js",
     "test:benchmark": "pnpm run build && node --test dist/test/testing-api-benchmark.test.js",
     "test:coverage-service-smoke": "pnpm run build && node --test dist/test/coverage-service-smoke.test.js",
     "test:service-smoke": "pnpm run build && node --test dist/test/service-smoke.test.js",

@@ -55,6 +55,30 @@ jobs:
         env:
           UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS: clang-cl
         run: pnpm --filter code-oss-extension test:coverage-service-smoke
+      - name: Cleanup Windows native offline firewall boundary
+        if: always()
+        shell: pwsh
+        run: |
+          $group = 'UnitTestIDE Native Offline Boundary'
+          function Get-OfflineRules([string]$store) {
+            try {
+              @(Get-NetFirewallRule -PolicyStore $store -Group $group -ErrorAction Stop)
+            } catch {
+              if ($_.FullyQualifiedErrorId -like 'CmdletizationQuery_NotFound*') {
+                return
+              }
+              throw
+            }
+          }
+          $rules = @(Get-OfflineRules 'PersistentStore')
+          if ($rules.Count -gt 0) {
+            $rules | Remove-NetFirewallRule -ErrorAction Stop
+          }
+          $active = @(Get-OfflineRules 'ActiveStore')
+          $persistent = @(Get-OfflineRules 'PersistentStore')
+          if ($active.Count -ne 0 -or $persistent.Count -ne 0) {
+            throw 'Windows native offline firewall state was not removed'
+          }
       - run: pnpm --filter code-oss-extension test:service-smoke
       - run: pnpm --filter code-oss-extension test:benchmark
       - run: pnpm --filter code-oss-extension test:host
@@ -65,7 +89,7 @@ jobs:
           name: native-toolchain-windows-${{ github.run_attempt }}
           path: .native-e2e/artifacts/windows/toolchain-report.json
           if-no-files-found: error
-      - if: always()
+      - if: success()
         uses: actions/upload-artifact@v7
         with:
           name: coverage-execution-windows-${{ github.run_attempt }}
