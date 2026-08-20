@@ -96,3 +96,23 @@ func TestStateFailsClosedForInfrastructureFailureCancellationAndBadOrder(t *test
 		t.Fatalf("cancelled state = %#v", state)
 	}
 }
+
+func TestOutcomeMergeFailureUsesClosedMergeReason(t *testing.T) {
+	state := NewState()
+	var err error
+	for _, result := range []StepResult{
+		{Phase: PhaseConfigure, Succeeded: true},
+		{Phase: PhaseBuild, Succeeded: true},
+		{Phase: PhaseTest, Succeeded: true},
+		{Phase: PhaseMerge, Succeeded: false},
+	} {
+		state, err = state.Apply(result)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if state.Outcome != coveragedomain.OutcomeUnavailable ||
+		state.Reason != coveragedomain.ReasonMergeFailed {
+		t.Fatalf("merge outcome = %q/%q", state.Outcome, state.Reason)
+	}
+}

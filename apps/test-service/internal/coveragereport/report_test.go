@@ -68,6 +68,32 @@ func TestRenderRejectsMismatchedCoverageDocumentAndIncompleteRun(t *testing.T) {
 	}
 }
 
+func TestRenderPreservesCanonicalEmptySourceSet(t *testing.T) {
+	input := reportFixture(t)
+	input.Document.Files = []coveragemodelv1.CoverageFileV1{}
+	input.Document.Summary = coveragemodelv1.CoverageSummaryV1{
+		Lines:     coveragemodelv1.CoverageMetricV1{},
+		Branches:  coveragemodelv1.CoverageMetricV1{},
+		Functions: coveragemodelv1.CoverageMetricV1{},
+	}
+	input.Sources = []coveragenormalize.SourceBinding{}
+	coverage, err := coveragenormalize.EncodeCanonical(input.Document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.CoverageJSON = coverage
+	set, err := Render(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if set.Sources == nil {
+		t.Fatal("Render collapsed a canonical empty source set to nil")
+	}
+	if err := Validate(set); err != nil {
+		t.Fatalf("Validate(Render(empty sources)) = %v", err)
+	}
+}
+
 func TestValidateRejectsMalformedOrNonImmutableSet(t *testing.T) {
 	set, err := Render(reportFixture(t))
 	if err != nil {

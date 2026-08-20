@@ -93,7 +93,7 @@ func (state State) Apply(result StepResult) (State, error) {
 		next.Phase = PhaseMerge
 	case PhaseMerge:
 		if !result.Succeeded {
-			return unavailable(next, coveragedomain.ReasonProfileCollectionFailed), nil
+			return unavailable(next, coveragedomain.ReasonMergeFailed), nil
 		}
 		next.Phase = PhaseNormalize
 	case PhaseNormalize:

@@ -12,7 +12,6 @@ var taskSummaryProjectors = map[Kind]taskSummaryProjector{
 	KindCMakeBuild:    projectCMakeSummary,
 	KindTestDiscovery: projectTestTaskSummary,
 	KindTestRun:       projectTestTaskSummary,
-	KindCoverageRun:   projectTestTaskSummary,
 }
 
 type executionPlanArtifact struct {
@@ -57,8 +56,7 @@ func projectTestTaskSummary(
 	summary TaskSummary,
 ) (any, error) {
 	if current.Kind != KindTestDiscovery &&
-		current.Kind != KindTestRun &&
-		current.Kind != KindCoverageRun {
+		current.Kind != KindTestRun {
 		return nil, ErrInvalidArgument
 	}
 	return summary, nil
@@ -91,8 +89,7 @@ func (m *Manager) createTaskArtifacts(current *activeTask) error {
 	current.artifactSink = sink
 	if current.task.Kind != KindCMakeBuild &&
 		current.task.Kind != KindTestDiscovery &&
-		current.task.Kind != KindTestRun &&
-		current.task.Kind != KindCoverageRun {
+		current.task.Kind != KindTestRun {
 		return nil
 	}
 	plan := executionPlanArtifact{
@@ -129,6 +126,14 @@ func (m *Manager) finalizeTaskArtifacts(
 	}
 	if err := m.createTaskArtifacts(owner); err != nil {
 		return nil, err
+	}
+	if current.Kind == KindCoverageRun {
+		artifacts, err := owner.artifactSink.Finalize(ctx, finishedAt)
+		if err != nil {
+			return nil, err
+		}
+		owner.artifactSink = nil
+		return artifacts, nil
 	}
 	projector, ok := taskSummaryProjectors[current.Kind]
 	if !ok {

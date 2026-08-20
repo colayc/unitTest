@@ -93,7 +93,9 @@ func cloneSet(value Set) Set {
 	value.CoverageJSON = append([]byte(nil), value.CoverageJSON...)
 	value.JUnitXML = append([]byte(nil), value.JUnitXML...)
 	value.CoverageHTML = append([]byte(nil), value.CoverageHTML...)
-	value.Sources = append([]coveragedomain.SourceSnapshot(nil), value.Sources...)
+	if value.Sources != nil {
+		value.Sources = append([]coveragedomain.SourceSnapshot{}, value.Sources...)
+	}
 	return value
 }
 
