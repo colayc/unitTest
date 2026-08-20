@@ -508,3 +508,123 @@ verified LLVM native PASS. The approved preflight change is isolated to test
 orchestration and a test-only Go command; no production Service, resolver,
 collector, protocol or Extension runtime behavior was weakened. No push was
 performed.
+
+## Fix Round 4
+
+### Review findings and credible RED
+
+The reviewed `e5fced6` baseline was clean and its 50-test real PowerShell
+guardian suite passed before new regression coverage was added. Both remaining
+Important findings were then reproduced against that implementation.
+
+- A live guardian was paused for three seconds inside rule creation. Replacing
+  its canonical `guardian.pid` with `2147483647` and adding a canonical forged
+  `removed` marker made the old CleanupAll process win the exit race while the
+  creator was still live. The strengthened test reported `cleanup` instead of
+  the required `guardian` first exit, proving that marker-selected PID lookup
+  could hide a late creator.
+- An ordinary file at the state root was silently accepted with exit code 0
+  because `Get-ChildItem -Directory` did not enumerate it. Replacing a delayed
+  live guardian directory with an ordinary file likewise let the old cleanup
+  return before the creator. The companion unknown-directory, root reparse and
+  extra-leaf cases preserve the complete fail-closed root/state matrix.
+- Pre-install self-PID tampering initially allowed rule creation and successful
+  guardian exit. Adding the command-bound nonce contract first produced the
+  expected TypeScript interface RED; the real PowerShell nonce/PID tamper cases
+  then demonstrated that writable state was not yet bound continuously to the
+  creator.
+
+The workstation denied even same-user `Win32_Process` CIM command-line reads,
+so a CIM-based global enumerator could not provide the required local or CI
+evidence. This was treated as an identity-audit blocker, not bypassed.
+
+### Command-bound guardian identity and continuous self-audit
+
+Every Windows boundary now generates an independent 256-bit nonce. The Node
+launcher writes the exact lowercase nonce to the exclusive
+`guardian.nonce` marker before spawn and passes the same value on both Guard
+and CleanupExact command lines. Guardian state is a closed seven-leaf schema:
+`rule-name`, `owner.pid`, `guardian.nonce`, `guardian.pid`, `release`, `ready`
+and `removed`.
+
+The guardian binds the strict nonce marker to its command argument and binds
+`guardian.pid` to its actual `$PID`. It repeats the complete plain-directory,
+regular-leaf, canonical-content audit immediately after publishing PID, before
+the only create call, after creation, before ready, on every ready-state wait
+poll, before and after stable firewall cleanup, and after publishing removed.
+Tampering still enters the bounded Active/Persistent cleanup path, but cannot
+publish readiness or a canonical removal proof from invalid state. Real tests
+cover PID/nonce tampering before creation and PID/nonce/extra-leaf tampering
+after readiness; every case exits nonzero and the creator performs cleanup.
+
+### Marker-independent creator discovery and closed state root
+
+CleanupAll no longer uses `guardian.pid` or `removed` to discover live
+creators. On every convergence audit it independently enumerates OS
+`powershell.exe` processes. A small in-process C# inspector uses read-only
+`OpenProcess`, `QueryFullProcessImageName` and
+`NtQueryInformationProcess(ProcessCommandLineInformation)` so executable and
+command line remain auditable where CIM is denied. A matching creator must
+bind the exact System32 Windows PowerShell executable, exact boundary script,
+case-exact `Guard` action, canonical state root, a direct-child state directory,
+canonical rule name, positive owner PID and one valid 256-bit nonce. Duplicate
+arguments/creators or unauditable identity fail closed. The live command owner,
+nonce and process PID are cross-checked against the corresponding strict state
+before convergence.
+
+All matching processes receive canonical release when their directory is still
+plain and remain blockers until a fresh OS enumeration proves they exited.
+Therefore a dead-PID substitution, forged removed proof, missing/replaced
+directory or not-yet-scheduled marker writer cannot hide create capability.
+Three stable iterations must still prove the firewall group absent from both
+ActiveStore and PersistentStore after all matching creators are gone.
+
+The state root now uses `Get-ChildItem -Force` as a closed enumeration and
+revalidates the root itself as a plain non-reparse directory. Its only accepted
+entries are canonical-name, ordinary non-reparse guardian directories. Any
+ordinary file, symlink, junction, other reparse point or unknown entry fails
+closed. Each state directory is also revalidated as plain on every marker
+audit, so replacing it while a creator is delayed cannot produce early cleanup
+success.
+
+### Fresh GREEN verification
+
+Commands used Node 24.19.0 (within the repository's pinned Node 24 range), pnpm
+11.4.0 and Go 1.26.6. Go commands used `GOENV=off`, `GOTOOLCHAIN=local` and a
+private worktree GOCACHE.
+
+- Final new guardian/root/process focused suite: PASS, 12/12.
+- Full real PowerShell guardian suite: PASS, 62/62; the prior 50 tests remain
+  intact, including all 26 independent ActiveStore/PersistentStore tamper cases.
+- `pnpm --filter @unit-test-ide/service-probe test`: PASS, 102/102.
+- `pnpm --filter code-oss-extension test`: PASS, 136/136; its
+  preflight/JUnit/evidence subset remains 12/12.
+- Real Named Pipe Service vertical slice: PASS, 4/4.
+- Coverage Service smoke: honest local SKIP, exactly 1 test / 0 pass / 0 fail /
+  1 skip with `SKIP: verified clang-cl coverage toolset is unavailable`; no
+  firewall state or final report existed.
+- Required `clang-cl` control: expected FAIL, exactly 1 test / 0 pass / 1 fail /
+  0 skip with `required verified clang-cl coverage toolset is unavailable`;
+  again no firewall state or report existed.
+- `go test ./apps/test-service/cmd/coverage-toolset-preflight -count=1`: PASS
+  (compile-only package). The current root suite also passed every Go Service
+  package. No Go source changed, so the fresh reviewed `e5fced6` full race PASS
+  remains applicable.
+- `pnpm check:protocol-generated`, `pnpm check:coverage-generated` and root
+  `pnpm build`: PASS.
+- `pnpm test:workspace`: PASS, 21/21.
+- Root `pnpm test`: PASS, including generator/bundle/workspace gates, all
+  packages, service-probe 102/102, Extension 136/136 and the complete Go suite.
+- `git diff --check`: PASS.
+
+The first Service smoke attempt precisely reported missing local fixture
+binaries; rebuilding them with the pinned Go runtime made the real slice pass.
+The first root build attempt correctly rejected an ambient pnpm 11.19.0; the
+11.4.0 shim plus Node 24 PATH was used for the successful gates. The sandboxed
+workspace run was 20/21 only because MSBuild could not read installed Windows
+SDK metadata under LocalAppData; the approved read-only rerun was 21/21. These
+were environment boundaries, not relaxed assertions.
+
+Generated Go cache, fixture binaries, Python cache, temporary pnpm shim and
+`.native-e2e` state were removed. No Go, production coverage execution,
+protocol or Extension behavior was changed, and no push was performed.

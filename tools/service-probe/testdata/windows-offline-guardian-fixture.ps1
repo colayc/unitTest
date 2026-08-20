@@ -16,6 +16,8 @@ param(
 
   [int]$OwnerPid = 0,
 
+  [string]$GuardianNonce = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+
   [ValidateSet('Valid', 'MissingProfile', 'ExtraProfile', 'DisabledProfile')]
   [string]$ProfileScenario = 'Valid',
 
@@ -43,6 +45,9 @@ param(
   [ValidateRange(0, 30000)]
   [int]$InstallDelayMilliseconds = 0,
 
+  [ValidateRange(0, 30000)]
+  [int]$PreInstallDelayMilliseconds = 0,
+
   [ValidateRange(0, 20)]
   [int]$RemoveFailures = 0,
 
@@ -62,9 +67,10 @@ $ErrorActionPreference = 'Stop'
 $script:installed = $Action -eq 'CleanupAll'
 $script:removeAttempts = 0
 $script:queryAttempts = 0
-$tracePath = Join-Path $StateRoot $TraceName
+$script:preInstallPaused = $false
+$tracePath = Join-Path ([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($StateRoot))) $TraceName
 
-# The real Node launcher owns these two durable provenance markers. Keep the
+# The real Node launcher owns these three durable provenance markers. Keep the
 # PowerShell fixture faithful so guardian state validation exercises the same
 # handshake without replacing production behavior.
 if ($Action -ceq 'Guard') {
@@ -82,10 +88,30 @@ if ($Action -ceq 'Guard') {
     "owner=$OwnerPid`n",
     $utf8NoBom
   )
+  if (-not [string]::IsNullOrEmpty($GuardianNonce)) {
+    [IO.File]::WriteAllText(
+      (Join-Path $StateDirectory 'guardian.nonce'),
+      "nonce=$GuardianNonce`n",
+      $utf8NoBom
+    )
+  }
 }
 
 function Add-FixtureTrace([string]$Message) {
-  Add-Content -LiteralPath $tracePath -Value $Message -Encoding utf8
+  $bytes = [Text.UTF8Encoding]::new($false).GetBytes("$Message`n")
+  $stream = [IO.File]::Open(
+    $tracePath,
+    [IO.FileMode]::OpenOrCreate,
+    [IO.FileAccess]::Write,
+    [IO.FileShare]::ReadWrite
+  )
+  try {
+    $stream.Seek(0, [IO.SeekOrigin]::End) | Out-Null
+    $stream.Write($bytes, 0, $bytes.Length)
+    $stream.Flush()
+  } finally {
+    $stream.Dispose()
+  }
 }
 
 function Test-FixtureTamper([string]$Store, [string]$Field) {
@@ -129,6 +155,17 @@ function Get-NetFirewallRule {
   if ($script:queryAttempts -le $QueryFailures) {
     Add-FixtureTrace "query-error:$script:queryAttempts"
     throw "fixture firewall query failure $script:queryAttempts"
+  }
+  if (
+    $Action -ceq 'Guard' -and
+    -not $script:installed -and
+    $PolicyStore -ceq 'PersistentStore' -and
+    -not $script:preInstallPaused -and
+    $PreInstallDelayMilliseconds -gt 0
+  ) {
+    $script:preInstallPaused = $true
+    Add-FixtureTrace 'preinstall-audit-finished'
+    Start-Sleep -Milliseconds $PreInstallDelayMilliseconds
   }
   if (-not $script:installed) {
     return
@@ -297,6 +334,9 @@ if (-not [string]::IsNullOrEmpty($StateDirectory)) {
 }
 if ($OwnerPid -gt 0) {
   $parameters.OwnerPid = $OwnerPid
+}
+if (-not [string]::IsNullOrEmpty($GuardianNonce)) {
+  $parameters.GuardianNonce = $GuardianNonce
 }
 
 . $BoundaryScript @parameters

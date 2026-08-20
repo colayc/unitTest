@@ -39,7 +39,12 @@ export interface WindowsFirewallGuardianOperations {
    * Starts the sole rule creator. Implementations must not throw after a child
    * can still create; post-spawn failures are reported by the returned handle.
    */
-  start(ruleName: string, ownerPid: number, stateRoot: string): Promise<WindowsFirewallGuardian>;
+  start(
+    ruleName: string,
+    ownerPid: number,
+    stateRoot: string,
+    guardianNonce: string
+  ): Promise<WindowsFirewallGuardian>;
 }
 
 export interface WindowsNativeOfflineBoundary {
@@ -67,6 +72,7 @@ interface DefaultGuardianContext {
   readonly ruleName: string;
   readonly stateRoot: string;
   readonly stateDirectory: string;
+  readonly guardianNonce: string;
 }
 
 export function installNativeHttpNetworkGuard(): () => void {
@@ -110,11 +116,12 @@ export async function installWindowsNativeOfflineBoundary(
     throw new Error("Windows offline boundary owner PID is invalid");
   }
   const stateRoot = resolve(options.stateRoot ?? defaultGuardianStateRoot);
+  const guardianNonce = randomBytes(32).toString("hex");
   const operations = options.operations ?? defaultWindowsFirewallGuardianOperations();
   const restoreHTTP = installNativeHttpNetworkGuard();
   let guardian: WindowsFirewallGuardian;
   try {
-    guardian = await operations.start(ruleName, ownerPid, stateRoot);
+    guardian = await operations.start(ruleName, ownerPid, stateRoot, guardianNonce);
   } catch (error) {
     // start() is contractually allowed to throw only before a creator exists.
     restoreHTTP();
@@ -176,8 +183,13 @@ function defaultWindowsFirewallGuardianOperations(): WindowsFirewallGuardianOper
     "powershell.exe"
   );
   return {
-    async start(ruleName, ownerPid, stateRoot) {
-      const stateDirectory = await createGuardianStateDirectory(stateRoot, ruleName, ownerPid);
+    async start(ruleName, ownerPid, stateRoot, guardianNonce) {
+      const stateDirectory = await createGuardianStateDirectory(
+        stateRoot,
+        ruleName,
+        ownerPid,
+        guardianNonce
+      );
       const child = spawn(
         powershell,
         [
@@ -188,6 +200,8 @@ function defaultWindowsFirewallGuardianOperations(): WindowsFirewallGuardianOper
           stateRoot,
           "-StateDirectory",
           stateDirectory,
+          "-GuardianNonce",
+          guardianNonce,
           "-DeadlineSeconds",
           "30"
         ],
@@ -195,7 +209,15 @@ function defaultWindowsFirewallGuardianOperations(): WindowsFirewallGuardianOper
       );
       const outcome = observeChildOutcome(child);
       child.unref();
-      return defaultGuardian({ child, outcome, powershell, ruleName, stateRoot, stateDirectory });
+      return defaultGuardian({
+        child,
+        outcome,
+        powershell,
+        ruleName,
+        stateRoot,
+        stateDirectory,
+        guardianNonce
+      });
     }
   };
 }
@@ -279,6 +301,8 @@ function defaultGuardian(context: DefaultGuardianContext): WindowsFirewallGuardi
             context.stateRoot,
             "-StateDirectory",
             context.stateDirectory,
+            "-GuardianNonce",
+            context.guardianNonce,
             "-DeadlineSeconds",
             "30"
           ],
@@ -305,7 +329,8 @@ function defaultGuardian(context: DefaultGuardianContext): WindowsFirewallGuardi
 async function createGuardianStateDirectory(
   stateRoot: string,
   ruleName: string,
-  ownerPid: number
+  ownerPid: number,
+  guardianNonce: string
 ): Promise<string> {
   await mkdir(stateRoot, { recursive: true });
   const rootInfo = await lstat(stateRoot);
@@ -326,6 +351,10 @@ async function createGuardianStateDirectory(
     await writeExclusiveOrValidateMarker(
       join(stateDirectory, "owner.pid"),
       `owner=${ownerPid}\n`
+    );
+    await writeExclusiveOrValidateMarker(
+      join(stateDirectory, "guardian.nonce"),
+      `nonce=${guardianNonce}\n`
     );
   } catch (error) {
     await rm(stateDirectory, { recursive: true, force: true }).catch(() => undefined);
