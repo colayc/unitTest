@@ -237,6 +237,7 @@ func (plan *PreparedPlan) CoverageBinaryDir() string {
 func (plan *PreparedPlan) AttachCoverageToolset(toolset *coveragellvm.Toolset) error {
 	if plan == nil || plan.prepared == nil || plan.prepared.coverage == nil ||
 		plan.prepared.boundary == nil || toolset == nil || toolset.Version() != plan.prepared.toolchain.Version ||
+		toolset.Identity() != plan.prepared.coverage.ToolsetIdentity ||
 		!sameNativePath(toolset.Compiler().Path(), plan.prepared.toolchain.CXXCompiler) ||
 		!sameNativePath(toolset.Compiler().Path(), plan.prepared.toolchain.CCompiler) {
 		return task.ErrInvalidArgument
@@ -347,17 +348,43 @@ func (c *Coordinator) prepare(
 	}
 	if coverage != nil {
 		if instance.Family != toolchain.FamilyClangCL || instance.Version == "" ||
-			instance.Coverage.LLVMProfdata == "" || instance.Coverage.LLVMCov == "" {
+			instance.Coverage.LLVMProfdata == "" || instance.Coverage.LLVMCov == "" ||
+			!validLowerSHA256(instance.Coverage.ToolsetIdentity) {
 			return nil, task.ErrInvalidArgument
 		}
+		coverage.ToolsetIdentity = instance.Coverage.ToolsetIdentity
 		profile.BinaryDir = coverage.BinaryDir
 	}
 	if err := c.ensureBuildDirectory(profile.BinaryDir); err != nil {
 		return nil, err
 	}
+	var coverageDirectory *verifiedDirectory
+	if coverage != nil {
+		coverageDirectory, err = pinVerifiedDirectory(profile.BinaryDir)
+		if err != nil {
+			return nil, task.ErrInvalidArgument
+		}
+		defer func() {
+			if coverageDirectory != nil {
+				_ = coverageDirectory.Close()
+			}
+		}()
+		baseInfo, baseErr := os.Stat(baseProfile.BinaryDir)
+		if baseErr == nil && os.SameFile(baseInfo, coverageDirectory.info) {
+			return nil, task.ErrInvalidArgument
+		}
+		coverage.BinaryDir = coverageDirectory.path
+		profile.BinaryDir = coverageDirectory.path
+		coverage.BinaryDirIdentity = coverageDirectory.identity
+	}
 	lock, err := c.config.Locks.Acquire(profile.BinaryDir)
 	if err != nil {
 		return nil, err
+	}
+	if coverageDirectory != nil {
+		if err := coverageDirectory.Verify(); err != nil {
+			return nil, task.ErrInvalidArgument
+		}
 	}
 	lockOwned := true
 	defer func() {
@@ -380,7 +407,7 @@ func (c *Coordinator) prepare(
 
 	needsConfigure := true
 	previous, configurationErr := c.config.Configurations.GetBuildConfiguration(
-		ctx, c.config.WorkspaceRoot.ID, project.ID, profile.ID,
+		ctx, c.config.WorkspaceRoot.ID, project.ID, configurationStorageID(baseProfile.ID, coverage),
 	)
 	if configurationErr != nil && !errors.Is(configurationErr, task.ErrNotFound) {
 		return nil, configurationErr
@@ -424,6 +451,11 @@ func (c *Coordinator) prepare(
 		return nil, err
 	}
 	if coverage != nil {
+		if err := boundary.attachCoverageDirectory(coverageDirectory); err != nil {
+			_ = boundary.Release()
+			return nil, err
+		}
+		coverageDirectory = nil
 		if err := boundary.attachCoveragePlan(coverage); err != nil {
 			_ = boundary.Release()
 			return nil, err
@@ -550,7 +582,7 @@ func (c *Coordinator) Succeeded(
 		ctx,
 		taskstore.BuildConfiguration{
 			WorkspaceID: state.WorkspaceID, ProjectID: state.ProjectID,
-			ProfileID: state.Profile.ID, Fingerprint: fingerprint,
+			ProfileID: state.ConfigurationID, Fingerprint: fingerprint,
 			BuildDirectory:  state.BuildDirectory,
 			CMakeIdentity:   state.CMakeIdentity,
 			FileAPIIdentity: fileAPIIdentity(reply),
@@ -563,6 +595,7 @@ type configureStepState struct {
 	WorkspaceID                  string             `json:"workspaceId"`
 	WorkspaceGeneration          string             `json:"workspaceGeneration"`
 	ProjectID                    string             `json:"projectId"`
+	ConfigurationID              string             `json:"configurationId"`
 	Profile                      cmake.BuildProfile `json:"profile"`
 	ToolchainID                  string             `json:"toolchainId"`
 	CMakeIdentity                string             `json:"cmakeIdentity"`
@@ -602,6 +635,7 @@ func (c *Coordinator) configureState(
 		WorkspaceID:         c.config.WorkspaceRoot.ID,
 		WorkspaceGeneration: snapshot.Generation,
 		ProjectID:           project.ID, Profile: profile, ToolchainID: instance.ID,
+		ConfigurationID:              configurationStorageID(profile.ID, coverage),
 		CMakeIdentity:                c.config.Installation.Identity,
 		UnityRunnerGeneratorIdentity: c.config.Installation.UnityRunnerGenerator.Identity,
 		BuildDirectory:               buildDirectory,
@@ -778,6 +812,21 @@ func (c *Coordinator) prepareCoverageOptions(
 			return nil, task.ErrInvalidArgument
 		}
 	}
+	if err := rejectDirectoryReparseAncestors(filepath.Dir(options.TopLevelInclude.Path)); err != nil {
+		return nil, task.ErrInvalidArgument
+	}
+	for current := options.BinaryDir; ; current = filepath.Dir(current) {
+		if _, err := os.Lstat(current); err == nil {
+			if err := rejectDirectoryReparseAncestors(current); err != nil {
+				return nil, task.ErrInvalidArgument
+			}
+			break
+		}
+		next := filepath.Dir(current)
+		if next == current {
+			return nil, task.ErrInvalidArgument
+		}
+	}
 	info, err := os.Lstat(options.TopLevelInclude.Path)
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 		return nil, task.ErrInvalidArgument
@@ -793,7 +842,9 @@ func validCoverageOptions(options *CoverageOptions, baseBinaryDir string) bool {
 		baseBinaryDir != "" && sameNativePath(options.BinaryDir, baseBinaryDir) ||
 		options.TopLevelInclude.Identity != options.InstrumentationFingerprint ||
 		!validLowerSHA256(options.TopLevelInclude.SHA256) ||
-		!validLowerSHA256(options.InstrumentationFingerprint) {
+		!validLowerSHA256(options.InstrumentationFingerprint) ||
+		options.ToolsetIdentity != "" && !validLowerSHA256(options.ToolsetIdentity) ||
+		options.BinaryDirIdentity != "" && !validLowerSHA256(options.BinaryDirIdentity) {
 		return false
 	}
 	return true
@@ -872,11 +923,26 @@ func fingerprintInput(
 		)
 		sum := sha256.Sum256([]byte(
 			"coverage-configure-v1\x00" + result.ToolchainIdentity + "\x00" +
-				coverage.InstrumentationFingerprint,
+				coverage.InstrumentationFingerprint + "\x00" + coverage.ToolsetIdentity +
+				"\x00" + coverage.BinaryDirIdentity,
 		))
 		result.ToolchainIdentity = hex.EncodeToString(sum[:])
 	}
 	return result
+}
+
+func configurationStorageID(baseProfileID string, coverage *CoverageOptions) string {
+	if coverage == nil {
+		return baseProfileID
+	}
+	if !validLowerSHA256(baseProfileID) || !validLowerSHA256(coverage.ToolsetIdentity) ||
+		!validLowerSHA256(coverage.BinaryDirIdentity) || !validLowerSHA256(coverage.InstrumentationFingerprint) {
+		return ""
+	}
+	sum := sha256.Sum256([]byte("coverage-configuration-v1\x00" + baseProfileID + "\x00" +
+		coverage.BinaryDirIdentity + "\x00" + coverage.ToolsetIdentity + "\x00" +
+		coverage.InstrumentationFingerprint + "\x00" + coverage.TopLevelInclude.SHA256))
+	return hex.EncodeToString(sum[:])
 }
 
 func configureFingerprint(

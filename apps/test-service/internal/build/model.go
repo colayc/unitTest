@@ -31,6 +31,8 @@ type CoverageOptions struct {
 	BinaryDir                  string
 	TopLevelInclude            cmake.FingerprintFile
 	InstrumentationFingerprint string
+	ToolsetIdentity            string
+	BinaryDirIdentity          string
 }
 
 type TargetsRequest struct {

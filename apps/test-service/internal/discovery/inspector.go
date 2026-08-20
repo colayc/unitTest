@@ -622,9 +622,13 @@ func toolchainGenerationDescriptors(instances []toolchain.Instance) []string {
 			Sysroot:            canonicalPath(instance.Sysroot),
 			Environment:        environment, Generators: generators,
 			Coverage: toolchain.CoverageCapability{
-				LLVMProfdata: canonicalPath(instance.Coverage.LLVMProfdata),
-				LLVMCov:      canonicalPath(instance.Coverage.LLVMCov),
-				GCov:         canonicalPath(instance.Coverage.GCov),
+				LLVMProfdata:     canonicalPath(instance.Coverage.LLVMProfdata),
+				LLVMCov:          canonicalPath(instance.Coverage.LLVMCov),
+				GCov:             canonicalPath(instance.Coverage.GCov),
+				CompilerEvidence: instance.Coverage.CompilerEvidence,
+				ProfdataEvidence: instance.Coverage.ProfdataEvidence,
+				CovEvidence:      instance.Coverage.CovEvidence,
+				ToolsetIdentity:  instance.Coverage.ToolsetIdentity,
 			},
 		}
 		encoded, _ := json.Marshal(payload)

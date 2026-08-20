@@ -40,6 +40,8 @@ type executionBoundary struct {
 	coverageExecution          *coveragebundle.PreparedExecution
 	coverageToolset            *coveragellvm.Toolset
 	coverageBinaryDir          string
+	coverageDirectory          *verifiedDirectory
+	coverageIncludeParent      *verifiedDirectory
 	coverageInclude            pinnedTestExecutable
 }
 
@@ -313,6 +315,8 @@ func (b *executionBoundary) Release() error {
 		testExecutables := b.testExecutables
 		coverageExecution := b.coverageExecution
 		coverageToolset := b.coverageToolset
+		coverageDirectory := b.coverageDirectory
+		coverageIncludeParent := b.coverageIncludeParent
 		coverageInclude := b.coverageInclude
 		b.lock = nil
 		b.executableFile = nil
@@ -321,6 +325,8 @@ func (b *executionBoundary) Release() error {
 		b.testExecutables = nil
 		b.coverageExecution = nil
 		b.coverageToolset = nil
+		b.coverageDirectory = nil
+		b.coverageIncludeParent = nil
 		b.coverageInclude = pinnedTestExecutable{}
 		b.coverageBinaryDir = ""
 		b.mu.Unlock()
@@ -346,6 +352,12 @@ func (b *executionBoundary) Release() error {
 		}
 		if coverageToolset != nil {
 			result = errors.Join(result, coverageToolset.Close())
+		}
+		if coverageDirectory != nil {
+			result = errors.Join(result, coverageDirectory.Close())
+		}
+		if coverageIncludeParent != nil {
+			result = errors.Join(result, coverageIncludeParent.Close())
 		}
 		if coverageInclude.file != nil {
 			result = errors.Join(result, coverageInclude.file.Close())
@@ -401,6 +413,12 @@ func (b *executionBoundary) ValidateWorkingDirectory(path string) error {
 		return task.ErrInvalidArgument
 	}
 	absolute = filepath.Clean(absolute)
+	if b.coverageDirectory != nil && sameNativePath(absolute, b.coverageDirectory.path) {
+		if err := b.coverageDirectory.Verify(); err != nil {
+			return task.ErrInvalidArgument
+		}
+		return nil
+	}
 	info, err := os.Stat(absolute)
 	if err != nil || !info.IsDir() {
 		return task.ErrInvalidArgument
@@ -424,14 +442,34 @@ func (b *executionBoundary) attachCoveragePlan(options *CoverageOptions) error {
 		_ = file.Close()
 		return task.ErrInvalidArgument
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.executableFile == nil || b.coverageInclude.file != nil || b.coverageBinaryDir != "" {
+	parent, err := pinVerifiedDirectory(filepath.Dir(options.TopLevelInclude.Path))
+	if err != nil {
 		_ = file.Close()
 		return task.ErrInvalidArgument
 	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.executableFile == nil || b.coverageDirectory == nil || b.coverageInclude.file != nil || b.coverageBinaryDir != "" {
+		_ = file.Close()
+		_ = parent.Close()
+		return task.ErrInvalidArgument
+	}
 	b.coverageBinaryDir = options.BinaryDir
+	b.coverageIncludeParent = parent
 	b.coverageInclude = pinnedTestExecutable{file: file, info: info, sha256: digest}
+	return nil
+}
+
+func (b *executionBoundary) attachCoverageDirectory(directory *verifiedDirectory) error {
+	if b == nil || directory == nil || directory.Verify() != nil {
+		return task.ErrInvalidArgument
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.executableFile == nil || b.coverageDirectory != nil {
+		return task.ErrInvalidArgument
+	}
+	b.coverageDirectory = directory
 	return nil
 }
 
@@ -439,20 +477,32 @@ func (b *executionBoundary) attachCoverageToolset(toolset *coveragellvm.Toolset)
 	if b == nil || toolset == nil || toolset.Verify() != nil {
 		return task.ErrInvalidArgument
 	}
+	claim, err := toolset.ClaimOwnership()
+	if err != nil {
+		return task.ErrInvalidArgument
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.executableFile == nil || b.coverageInclude.file == nil || b.coverageBinaryDir == "" || b.coverageToolset != nil {
+	if b.executableFile == nil || b.coverageDirectory == nil || b.coverageInclude.file == nil || b.coverageBinaryDir == "" || b.coverageToolset != nil {
+		claim.Rollback()
 		return task.ErrInvalidArgument
 	}
 	b.coverageToolset = toolset
+	claim.Commit()
 	return nil
 }
 
 func (b *executionBoundary) verifyCoveragePlanLocked() error {
-	if b.coverageBinaryDir == "" && b.coverageInclude.file == nil && b.coverageToolset == nil {
+	if b.coverageBinaryDir == "" && b.coverageDirectory == nil && b.coverageInclude.file == nil && b.coverageToolset == nil {
 		return nil
 	}
-	if b.coverageBinaryDir == "" || b.coverageInclude.file == nil || b.coverageToolset == nil {
+	if b.coverageBinaryDir == "" || b.coverageDirectory == nil || b.coverageIncludeParent == nil || b.coverageInclude.file == nil || b.coverageToolset == nil {
+		return task.ErrInvalidArgument
+	}
+	if err := b.coverageDirectory.Verify(); err != nil {
+		return task.ErrInvalidArgument
+	}
+	if err := b.coverageIncludeParent.Verify(); err != nil {
 		return task.ErrInvalidArgument
 	}
 	if err := validatePinnedExecutable(

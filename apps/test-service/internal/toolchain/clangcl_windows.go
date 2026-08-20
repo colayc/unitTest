@@ -279,7 +279,7 @@ func (adapter *clangCLAdapter) probeCandidate(
 	if err != nil {
 		return Instance{}, err
 	}
-	coverage, err := adapter.probeCoverage(ctx, candidate, cVersion, verify)
+	coverage, err := adapter.probeCoverage(ctx, candidate, cCompiler, cVersion, verify)
 	if err != nil {
 		return Instance{}, err
 	}
@@ -465,6 +465,7 @@ func verifyClangGenerator(
 func (adapter *clangCLAdapter) probeCoverage(
 	ctx context.Context,
 	candidate clangCLCandidate,
+	compiler *executableSnapshot,
 	compilerVersion string,
 	verify func() error,
 ) (CoverageCapability, error) {
@@ -543,9 +544,30 @@ func (adapter *clangCLAdapter) probeCoverage(
 		profdataVersion != coverageVersion {
 		return CoverageCapability{}, nil
 	}
+	compilerPath, compilerFileID, compilerIdentityErr := canonicalWindowsFileSystemIdentity(compiler.path)
+	profdataPath, profdataFileID, profdataIdentityErr := canonicalWindowsFileSystemIdentity(profdata.path)
+	coveragePath, coverageFileID, coverageIdentityErr := canonicalWindowsFileSystemIdentity(coverage.path)
+	if compilerIdentityErr != nil || profdataIdentityErr != nil || coverageIdentityErr != nil ||
+		identityPath(compilerPath) != identityPath(compiler.path) ||
+		identityPath(profdataPath) != identityPath(profdata.path) ||
+		identityPath(coveragePath) != identityPath(coverage.path) {
+		return CoverageCapability{}, nil
+	}
+	evidence := []ExecutableEvidence{
+		{FileIdentity: compilerFileID, SHA256: compiler.digest},
+		{FileIdentity: profdataFileID, SHA256: profdata.digest},
+		{FileIdentity: coverageFileID, SHA256: coverage.digest},
+	}
+	paths := []string{compiler.path, profdata.path, coverage.path}
+	identity := LLVMToolsetIdentity(compilerVersion, paths, evidence)
+	if identity == "" {
+		return CoverageCapability{}, nil
+	}
 	return CoverageCapability{
-		LLVMProfdata: profdata.path,
-		LLVMCov:      coverage.path,
+		LLVMProfdata:     profdata.path,
+		LLVMCov:          coverage.path,
+		CompilerEvidence: evidence[0], ProfdataEvidence: evidence[1], CovEvidence: evidence[2],
+		ToolsetIdentity: identity,
 	}, nil
 }
 

@@ -64,6 +64,12 @@ func TestClangCLAdapterCombinesValidatedMSVCEnvironmentAndLLVMTools(t *testing.T
 		got.Coverage.LLVMCov != fixture.llvmCov || got.Coverage.GCov != "" {
 		t.Fatalf("clang-cl coverage = %#v", got.Coverage)
 	}
+	if got.Coverage.ToolsetIdentity == "" ||
+		!validExecutableEvidence(got.Coverage.CompilerEvidence) ||
+		!validExecutableEvidence(got.Coverage.ProfdataEvidence) ||
+		!validExecutableEvidence(got.Coverage.CovEvidence) {
+		t.Fatalf("clang-cl coverage discovery evidence = %#v", got.Coverage)
+	}
 	if strings.Contains(strings.ToUpper(strings.Join(got.Environment, "\n")), "TOKEN") {
 		t.Fatalf("clang-cl environment leaked token metadata: %#v", got.Environment)
 	}

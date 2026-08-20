@@ -280,6 +280,7 @@ func TestCoordinatorPreparePlanOwnsCoverageIsolationAndRuntimeOnlyFields(t *test
 			t.Fatal(err)
 		}
 	}
+	instance = testCoverageToolchainEvidence(t, instance)
 	fixture.toolchain = instance
 	fixture.snapshot.Toolchains = []toolchain.Instance{instance}
 	fixture.profile.ToolchainID = instance.ID
@@ -289,6 +290,9 @@ func TestCoordinatorPreparePlanOwnsCoverageIsolationAndRuntimeOnlyFields(t *test
 		t.Fatal(err)
 	}
 	defer prepared.ReleaseIfUnadopted()
+	if fixture.configurations.lastGetProfileID == fixture.profile.ID || fixture.configurations.lastGetProfileID == "" {
+		t.Fatalf("coverage configuration used base storage key %q", fixture.configurations.lastGetProfileID)
+	}
 	if prepared.CoverageBinaryDir() != options.BinaryDir || prepared.Profile().BinaryDir != options.BinaryDir {
 		t.Fatalf("coverage binary dir = %q, profile = %#v", prepared.CoverageBinaryDir(), prepared.Profile())
 	}
@@ -320,7 +324,9 @@ func TestCoverageConfigureFingerprintTracksInstrumentationAndToolIdentityOnly(t 
 	fixture := newCoordinatorFixture(t)
 	reply := fixture.validReply()
 	options := &CoverageOptions{
-		BinaryDir: filepath.Join(fixture.dataRoot(), "coverage-build"),
+		BinaryDir:         filepath.Join(fixture.dataRoot(), "coverage-build"),
+		BinaryDirIdentity: strings.Repeat("8", 64),
+		ToolsetIdentity:   strings.Repeat("9", 64),
 		TopLevelInclude: cmake.FingerprintFile{
 			Path:     filepath.Join(fixture.dataRoot(), "task", "coverage.cmake"),
 			Identity: strings.Repeat("4", 64), SHA256: strings.Repeat("5", 64),
@@ -344,6 +350,8 @@ func TestCoverageConfigureFingerprintTracksInstrumentationAndToolIdentityOnly(t 
 			value.TopLevelInclude.Identity = value.InstrumentationFingerprint
 		}},
 		{"tool identity", func(identity *string, _ *CoverageOptions) { *identity = "other-toolchain" }},
+		{"retained compiler/profdata/cov identity", func(_ *string, value *CoverageOptions) { value.ToolsetIdentity = strings.Repeat("a", 64) }},
+		{"verified coverage directory identity", func(_ *string, value *CoverageOptions) { value.BinaryDirIdentity = strings.Repeat("b", 64) }},
 	}
 	for _, mutation := range mutations {
 		t.Run(mutation.name, func(t *testing.T) {
@@ -372,6 +380,53 @@ func TestCoverageConfigureFingerprintTracksInstrumentationAndToolIdentityOnly(t 
 	)
 	if stable != base {
 		t.Fatal("ordinary source content changed coverage configure fingerprint")
+	}
+}
+
+func TestCoverageConfigurationIdentitySeparatesBaseAndCoverageStorage(t *testing.T) {
+	base := strings.Repeat("1", 64)
+	first := &CoverageOptions{
+		BinaryDir:                  filepath.Join(t.TempDir(), "coverage-one"),
+		BinaryDirIdentity:          strings.Repeat("2", 64),
+		ToolsetIdentity:            strings.Repeat("3", 64),
+		TopLevelInclude:            cmake.FingerprintFile{Path: filepath.Join(t.TempDir(), "coverage.cmake"), Identity: strings.Repeat("4", 64), SHA256: strings.Repeat("5", 64)},
+		InstrumentationFingerprint: strings.Repeat("4", 64),
+	}
+	second := *first
+	second.BinaryDir = filepath.Join(t.TempDir(), "coverage-two")
+	second.BinaryDirIdentity = strings.Repeat("6", 64)
+	firstID := configurationStorageID(base, first)
+	secondID := configurationStorageID(base, &second)
+	if firstID == "" || firstID == base || secondID == "" || secondID == base || firstID == secondID {
+		t.Fatalf("storage identities base=%q first=%q second=%q", base, firstID, secondID)
+	}
+	if configurationStorageID(base, nil) != base {
+		t.Fatal("ordinary build storage identity changed")
+	}
+}
+
+func TestCoverageConfigurationRecordsCoexistInRealStore(t *testing.T) {
+	store, err := taskstore.Open(filepath.Join(t.TempDir(), "coverage-configurations.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	baseID := strings.Repeat("1", 64)
+	firstOptions := &CoverageOptions{BinaryDir: filepath.Join(t.TempDir(), "one"), BinaryDirIdentity: strings.Repeat("2", 64), ToolsetIdentity: strings.Repeat("3", 64), TopLevelInclude: cmake.FingerprintFile{Path: filepath.Join(t.TempDir(), "one.cmake"), Identity: strings.Repeat("4", 64), SHA256: strings.Repeat("5", 64)}, InstrumentationFingerprint: strings.Repeat("4", 64)}
+	secondOptions := *firstOptions
+	secondOptions.BinaryDir = filepath.Join(t.TempDir(), "two")
+	secondOptions.BinaryDirIdentity = strings.Repeat("6", 64)
+	ids := []string{baseID, configurationStorageID(baseID, firstOptions), configurationStorageID(baseID, &secondOptions)}
+	for index, id := range ids {
+		value := taskstore.BuildConfiguration{WorkspaceID: strings.Repeat("7", 64), ProjectID: "core", ProfileID: id, Fingerprint: strings.Repeat(string(rune('a'+index)), 64), BuildDirectory: "service/build", CMakeIdentity: strings.Repeat("d", 64), FileAPIIdentity: strings.Repeat("e", 64), ConfiguredAt: time.Date(2026, 8, 20, index, 0, 0, 0, time.UTC)}
+		if err := store.PutBuildConfiguration(context.Background(), value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, id := range ids {
+		if _, err := store.GetBuildConfiguration(context.Background(), strings.Repeat("7", 64), "core", id); err != nil {
+			t.Fatalf("configuration %q did not coexist: %v", id, err)
+		}
 	}
 }
 
@@ -640,15 +695,17 @@ func (f *fakeTaskStarter) ResumeQueued(
 }
 
 type fakeConfigurationStore struct {
-	value    taskstore.BuildConfiguration
-	getErr   error
-	putErr   error
-	putCalls int
+	value            taskstore.BuildConfiguration
+	getErr           error
+	putErr           error
+	putCalls         int
+	lastGetProfileID string
 }
 
 func (f *fakeConfigurationStore) GetBuildConfiguration(
-	context.Context, string, string, string,
+	_ context.Context, _, _, profileID string,
 ) (taskstore.BuildConfiguration, error) {
+	f.lastGetProfileID = profileID
 	if f.getErr != nil {
 		return taskstore.BuildConfiguration{}, f.getErr
 	}

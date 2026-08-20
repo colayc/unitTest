@@ -26,6 +26,7 @@ type Toolset struct {
 	profdata pinnedTool
 	cov      pinnedTool
 	version  string
+	identity string
 
 	installationPath   string
 	installationFile   *os.File
@@ -33,8 +34,15 @@ type Toolset struct {
 	installationNative nativeFileIdentity
 
 	mu        sync.Mutex
+	claimed   bool
 	closeOnce sync.Once
 	closeErr  error
+}
+
+type OwnershipClaim struct {
+	toolset *Toolset
+	mu      sync.Mutex
+	done    bool
 }
 
 type toolRole uint8
@@ -87,6 +95,54 @@ func (t *Toolset) Version() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.version
+}
+
+func (t *Toolset) Identity() string {
+	if t == nil {
+		return ""
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.identity
+}
+
+func (t *Toolset) ClaimOwnership() (*OwnershipClaim, error) {
+	if t == nil {
+		return nil, ErrInvalidToolset
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.claimed || t.installationFile == nil || t.compiler.file == nil || t.profdata.file == nil || t.cov.file == nil {
+		return nil, ErrInvalidToolset
+	}
+	t.claimed = true
+	return &OwnershipClaim{toolset: t}, nil
+}
+
+func (claim *OwnershipClaim) Rollback() {
+	if claim == nil {
+		return
+	}
+	claim.mu.Lock()
+	defer claim.mu.Unlock()
+	if claim.done {
+		return
+	}
+	claim.done = true
+	if claim.toolset != nil {
+		claim.toolset.mu.Lock()
+		claim.toolset.claimed = false
+		claim.toolset.mu.Unlock()
+	}
+}
+
+func (claim *OwnershipClaim) Commit() {
+	if claim == nil {
+		return
+	}
+	claim.mu.Lock()
+	claim.done = true
+	claim.mu.Unlock()
 }
 
 func (t *Toolset) Verify() error {

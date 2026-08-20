@@ -3,6 +3,9 @@
 package coveragellvm
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,8 +13,76 @@ import (
 	"sync"
 	"testing"
 
+	"golang.org/x/sys/windows"
+
 	"unit-test-ide.local/test-service/internal/toolchain"
 )
+
+func TestLLVMToolsetRejectsReplacementBetweenDiscoveryAndPin(t *testing.T) {
+	instance := llvmToolchainFixture(t)
+	instance.Coverage = coverageEvidenceForTest(t, instance)
+	if err := os.Remove(instance.Coverage.LLVMProfdata); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(instance.Coverage.LLVMProfdata, []byte(strings.Repeat("z", 128)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if toolset, err := PinToolset(instance); err == nil {
+		_ = toolset.Close()
+		t.Fatal("PinToolset accepted a replacement created after discovery evidence")
+	}
+}
+
+func TestLLVMToolsetIdentityChangesWithEachRetainedExecutable(t *testing.T) {
+	first := llvmToolchainFixture(t)
+	first.Coverage = coverageEvidenceForTest(t, first)
+	toolset, err := PinToolset(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer toolset.Close()
+	if toolset.Identity() != first.Coverage.ToolsetIdentity {
+		t.Fatalf("Identity() = %q, want discovery identity %q", toolset.Identity(), first.Coverage.ToolsetIdentity)
+	}
+	second := llvmToolchainFixture(t)
+	if err := os.WriteFile(second.Coverage.LLVMCov, []byte(strings.Repeat("q", 128)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	second.Coverage = coverageEvidenceForTest(t, second)
+	if second.Coverage.ToolsetIdentity == first.Coverage.ToolsetIdentity {
+		t.Fatal("toolset identity ignored llvm-cov identity")
+	}
+}
+
+func TestLLVMToolsetSingleOwnerClaimRollsBackAndClosesExactlyOnce(t *testing.T) {
+	instance := llvmToolchainFixture(t)
+	toolset, err := PinToolset(instance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := toolset.ClaimOwnership()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := toolset.ClaimOwnership(); err == nil {
+		t.Fatal("second owner claimed one retained toolset")
+	}
+	first.Rollback()
+	retry, err := toolset.ClaimOwnership()
+	if err != nil {
+		t.Fatalf("claim after failed attachment rollback = %v", err)
+	}
+	retry.Commit()
+	if _, err := toolset.ClaimOwnership(); err == nil {
+		t.Fatal("committed ownership was attachable again")
+	}
+	if err := toolset.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := toolset.Close(); err != nil {
+		t.Fatalf("second Close() = %v", err)
+	}
+}
 
 func TestLLVMToolsetRetainsSameInstallationAndClosesExactlyOnce(t *testing.T) {
 	instance := llvmToolchainFixture(t)
@@ -169,11 +240,54 @@ func llvmToolchainFixture(t *testing.T) toolchain.Instance {
 			t.Fatal(err)
 		}
 	}
-	return toolchain.Instance{
+	instance := toolchain.Instance{
 		ID: "verified-clang-cl", Family: toolchain.FamilyClangCL,
 		CCompiler: paths[0], CXXCompiler: paths[0], Version: "20.1.8",
 		Coverage: toolchain.CoverageCapability{LLVMProfdata: paths[1], LLVMCov: paths[2]},
 	}
+	instance.Coverage = coverageEvidenceForTest(t, instance)
+	return instance
+}
+
+func coverageEvidenceForTest(t *testing.T, instance toolchain.Instance) toolchain.CoverageCapability {
+	t.Helper()
+	result := instance.Coverage
+	paths := []string{instance.CXXCompiler, result.LLVMProfdata, result.LLVMCov}
+	evidence := make([]toolchain.ExecutableEvidence, len(paths))
+	for index, path := range paths {
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sum := sha256.Sum256(contents)
+		pointer, err := windows.UTF16PtrFromString(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		handle, err := windows.CreateFile(pointer, windows.FILE_READ_ATTRIBUTES, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var info windows.ByHandleFileInformation
+		err = windows.GetFileInformationByHandle(handle, &info)
+		_ = windows.CloseHandle(handle)
+		if err != nil {
+			t.Fatal(err)
+		}
+		evidence[index] = toolchain.ExecutableEvidence{
+			FileIdentity: windowsFileIdentity(info.VolumeSerialNumber, info.FileIndexHigh, info.FileIndexLow),
+			SHA256:       hex.EncodeToString(sum[:]),
+		}
+	}
+	result.CompilerEvidence = evidence[0]
+	result.ProfdataEvidence = evidence[1]
+	result.CovEvidence = evidence[2]
+	result.ToolsetIdentity = toolchain.LLVMToolsetIdentity(instance.Version, paths, evidence)
+	return result
+}
+
+func windowsFileIdentity(volume, high, low uint32) string {
+	return fmt.Sprintf("windows:%08x:%08x%08x", volume, high, low)
 }
 
 func renamedTool(t *testing.T, source, name string) string {

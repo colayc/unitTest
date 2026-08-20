@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -30,11 +31,16 @@ type nativeFileIdentity struct {
 	attrs     uint32
 }
 
+func (identity nativeFileIdentity) String() string {
+	return fmt.Sprintf("windows:%08x:%08x%08x", identity.volume, identity.indexHigh, identity.indexLow)
+}
+
 func PinToolset(instance toolchain.Instance) (*Toolset, error) {
 	if instance.Family != toolchain.FamilyClangCL ||
 		!validSnapshotVersion(instance.Version) ||
 		instance.CCompiler == "" || !strings.EqualFold(instance.CCompiler, instance.CXXCompiler) ||
-		instance.Coverage.LLVMProfdata == "" || instance.Coverage.LLVMCov == "" {
+		instance.Coverage.LLVMProfdata == "" || instance.Coverage.LLVMCov == "" ||
+		instance.Coverage.ToolsetIdentity == "" {
 		return nil, ErrInvalidToolset
 	}
 	paths := []string{instance.CXXCompiler, instance.Coverage.LLVMProfdata, instance.Coverage.LLVMCov}
@@ -45,6 +51,14 @@ func PinToolset(instance toolchain.Instance) (*Toolset, error) {
 			return nil, ErrInvalidToolset
 		}
 		paths[index] = absolute
+	}
+	evidence := []toolchain.ExecutableEvidence{
+		instance.Coverage.CompilerEvidence,
+		instance.Coverage.ProfdataEvidence,
+		instance.Coverage.CovEvidence,
+	}
+	if toolchain.LLVMToolsetIdentity(instance.Version, paths, evidence) != instance.Coverage.ToolsetIdentity {
+		return nil, ErrInvalidToolset
 	}
 	parent := filepath.Dir(paths[0])
 	if !strings.EqualFold(filepath.Dir(paths[1]), parent) || !strings.EqualFold(filepath.Dir(paths[2]), parent) {
@@ -59,6 +73,7 @@ func PinToolset(instance toolchain.Instance) (*Toolset, error) {
 	}
 	result := &Toolset{
 		version:          instance.Version,
+		identity:         instance.Coverage.ToolsetIdentity,
 		installationPath: parent, installationFile: directoryFile,
 		installationInfo: directoryInfo, installationNative: directoryNative,
 	}
@@ -73,6 +88,9 @@ func PinToolset(instance toolchain.Instance) (*Toolset, error) {
 			return fail(err)
 		}
 		*tools[index] = pinned
+		if pinned.sha256 != evidence[index].SHA256 || pinned.native.String() != evidence[index].FileIdentity {
+			return fail(errors.New("LLVM tool no longer matches discovery evidence"))
+		}
 	}
 	if err := rejectReparseAncestors(parent); err != nil {
 		return fail(err)
