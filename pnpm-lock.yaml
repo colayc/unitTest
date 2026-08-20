@@ -30,6 +30,9 @@ importers:
         specifier: workspace:*
         version: link:../../packages/test-client
     devDependencies:
+      '@unit-test-ide/coverage-models':
+        specifier: workspace:*
+        version: link:../../packages/coverage-models
       '@types/node':
         specifier: 24.13.3
         version: 24.13.3

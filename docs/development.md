@@ -11,13 +11,13 @@
 
 当前已完成 Phase 6 首个 Vertical Slice，并已实现 Phase 6B Testing API 集成代码：独立 Code-OSS Extension 可接入真实 Go Service，Workspace Trust gate、Service lifecycle、`workspace/inspect`、Test Item tree 与 Run Profile 已形成闭环。Phase 6B 只有在 Windows/Linux CI 都实际执行真实 Service smoke 后才能标记完成；Coverage UI、source decoration 与 desktop packaging 仍不在本阶段范围内。
 
-Coverage Report Extension 已提供受信任工作区的 `Run with Coverage`、`Refresh Coverage` 和 `Open Coverage Report` command，CoverageRun 会在每个异步边界重新校验 trust、Service session、workspace generation 和 catalog revision；HTML artifact 只能通过 protocol chunk digest 校验后进入无网络 CSP viewer。Go Service 的 trusted Runtime 现在会先持久化 CoverageRun aggregate，再交给共享 `coverageexec.Coordinator`：Windows `clang-cl` 可执行 `clang-cl → llvm-profdata → llvm-cov` 链路并完成 Coverage JSON、JUnit XML 与单文件 HTML 的原子发布。Linux 本批明确返回 unsupported terminal aggregate；GCC/Clang native coverage execution 是下一批工作，cross-compile 不能作为 Linux native PASS。完成态 Protocol smoke 与 CI evidence 由后续验收任务提供，不能用 fake response 冒充 runtime evidence。
+Coverage Report Extension 已提供受信任工作区的 `Run with Coverage`、`Refresh Coverage` 和 `Open Coverage Report` command，CoverageRun 会在每个异步边界重新校验 trust、Service session、workspace generation 和 catalog revision；HTML artifact 只能通过 protocol chunk digest 校验后进入无网络 CSP viewer。Go Service 的 trusted Runtime 现在会先持久化 CoverageRun aggregate，再交给共享 `coverageexec.Coordinator`：Windows `clang-cl` 可执行 `clang-cl → llvm-profdata → llvm-cov` 链路并完成 Coverage JSON、JUnit XML 与单文件 HTML 的原子发布。真实 Windows Named Pipe + Protocol v1.4 smoke 已接入 required-PASS CI 门禁；它验证 assertion failure 对应的 failed TestRun 仍可关联 available CoverageRun，并下载、校验、解码和打开三种报告。Linux 本批明确返回 unsupported terminal aggregate；GCC/Clang native coverage execution 是下一批工作，cross-compile 或 fake response 都不能作为 Linux native PASS。
 
 ## 固定开发环境
 
 - Node.js 24.18.0
 - pnpm 11.4.0
-- Go 1.26.5
+- Go 1.26.6
 - CMake 4.3.4 bundle
 
 依赖安装：
@@ -74,6 +74,18 @@ pnpm --filter code-oss-extension test:service-smoke
 ```
 
 默认 Service binary 为仓库 `build/unit-test-service`（Windows 为 `build/unit-test-service.exe`）。开发者也可通过 `UNIT_TEST_IDE_SERVICE_BINARY` 指定另一份已构建 binary。该 smoke 在当前平台执行同一 contract：trusted workspace 必须完成 `READY`、handshake、capabilities、`workspace/inspect → discoverTests → tests/catalog/get → runTests`，并把真实 passed/failed item result 投影到 TestRun；untrusted workspace 必须保持零 Service process、零 token、零 endpoint 和零 data directory；Code-OSS 信任丢失会 reload/teardown Extension Host，因此验收通过显式 `deactivate()` 验证 child 退出且旧 endpoint 不可重连，不模拟不存在的 trust-revoke callback。Windows 本地结果只作为 Named Pipe evidence，Linux Unix Socket 必须由 Linux CI 实际执行，不能用 cross-compile 代替。
+
+Windows LLVM coverage vertical slice 先准备固定 CMake bundle，再运行独立 smoke：
+
+```powershell
+pnpm prepare:cmake-bundle
+$env:UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS = "clang-cl"
+pnpm --filter code-oss-extension test:coverage-service-smoke
+```
+
+smoke 自行用 Go 1.26.6 构建当前仓库 Service，启动 trusted Windows Named Pipe session，完成 base build、test discovery、catalog、coverage start 与有界轮询，并通过真实 TypeScript Client 的 artifact chunk/size/SHA-256 校验读取 Coverage JSON v1、JUnit XML 和单文件 HTML。Coverage JSON 使用共享 decoder；HTML 必须经过 Extension 的无网络 viewer adapter。成功时原子写入 `.native-e2e/artifacts/windows/coverage-execution-report.json`，该 strict JSON 只含 platform、architecture、工具版本、run/TestRun outcome、整数 summary、三种 artifact 的 size/digest 和 duration，不含 ID 或原生路径。
+
+证据边界是固定的：本机缺少 verified CMake/`clang-cl`/`llvm-profdata`/`llvm-cov` 能力时，未设置 required-family 的运行只能产生一个 `SKIP: verified clang-cl coverage toolset is unavailable`，`pass` 计数必须为 0，且不得留下 execution report；该 SKIP 不是 Windows native PASS。Windows CI 显式要求 `clang-cl`，因此缺工具链必须失败，且 successful job 必须上传 report（`if-no-files-found: error`）。Linux job 不运行或上传 native coverage execution report，只保留现有 Unix Socket Service smoke；Linux GCC/Clang coverage 尚未实现。
 
 在 Code-OSS Testing view 中，Refresh 与默认 `Run Tests` profile 只在 trusted 单根 workspace 且当前 Service session 为 `running` 时调用协议；untrusted、multi-root、无 session 或 Service stopping 状态均 fail-closed，不会发起 discovery/run。Refresh 固定先执行 `workspace/inspect`，再选择排序后的首个 project/profile，启动 discovery 并读取 catalog。`projectId + profileId + catalogRevision` 相同的 refresh 不替换已有 Test Item object；revision 变化才原子替换树，旧 revision 的 selection 不得启动 run。
 

@@ -118,7 +118,9 @@ Phase 6B 状态：实现与本地 Windows 验证已就绪，等待 Hosted CI 双
 
 加入运行配置、过滤器、失败详情、进度/日志流、Mock/Stub 配置、覆盖率树和源码装饰、本地历史记录、制品浏览，以及兼容 Web 的报告视图。
 
-当前进度：Coverage Report Extension 的首个客户端 slice 已完成 command/controller/viewer 接线；真正可运行的 `coverage/runs/start`、report persistence 和 Windows/Linux coverage smoke 仍依赖 Go Service 的 production coverage routes/coordinator，暂不宣称 Phase 7 或 Phase 6B 完成。
+当前进度：Coverage Report Extension 的 command/controller/viewer 与 Go Service production `coverage/runs/start`、report persistence、共享 execution coordinator 已接通。Windows required-PASS CI 现在运行真实 `clang-cl/llvm-profdata/llvm-cov` Named Pipe + Protocol v1.4 smoke：关联 TestRun 必须为 `failed`、CoverageRun 必须为 `available`，Coverage JSON/JUnit/HTML 三种 artifact 必须完成 chunk、size、SHA-256、decoder/XML 与无网络 viewer 校验，并生成不含原生路径的 strict JSON evidence。未准备 verified toolset 的本机运行只能明确 SKIP，不能记为 PASS；Windows Hosted job 缺 toolset 或 report 会失败。Linux job 继续运行真实 Unix Socket Service smoke，但不运行或上传 native coverage report；Linux GCC/Clang coverage execution 尚未实现，cross-compile 不构成 native PASS。
+
+GitHub Actions 的 PASS/report 是开发验收证据，GitHub 与 Gitee 只承担源码托管、协作和开发分发；production Service 的 coverage execution 不访问这两个平台或其他网络服务。Windows required-PASS gate 完成不表示 Linux coverage 或完整 Phase 7 UX 已完成。
 
 依赖：Phase 5 的报告能力和 Phase 6 的扩展集成。
 

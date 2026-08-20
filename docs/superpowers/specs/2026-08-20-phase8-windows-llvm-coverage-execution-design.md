@@ -232,9 +232,15 @@ CI 与本机 fixture 使用已验证的 `clang-cl`/`llvm-profdata`/`llvm-cov`：
 - 通过 Protocol v1.4 查询 finished CoverageRun/Report，并由 Code-OSS 打开 HTML artifact；
 - 测试运行期间禁用网络并注入 hostile environment，证明执行只依赖 pinned capabilities。
 
+实现后的 smoke 使用仓库 Go 1.26.6 构建 Service，并通过真实 trusted Windows Named Pipe 与 TypeScript Protocol Client v1.4 完成 generation/profile/catalog discovery、coverage start 和有界 finished 轮询。fixture 的一个 case 覆盖 `math.cpp` 的部分 branch，另一个 case 在执行 instrumented code 后正常退出为 assertion failure，因此验收必须同时看到 CoverageRun `available`、TestRun `failed`、非零且含 uncovered branch 的 summary。三种 public artifact ID 必须互异；Client 必须读取全部 chunks 并复核 metadata size/SHA-256/kind，随后使用共享 Coverage JSON v1 decoder、JUnit parser 和 Extension 无网络 HTML viewer adapter。
+
+本机未形成 verified CMake/clang-cl coverage capability 时，只允许一个精确的 `SKIP: verified clang-cl coverage toolset is unavailable`，`pass` 为 0，且不生成 evidence file；该结果不是 native PASS。Windows CI 设置 `UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS=clang-cl`，把相同情况提升为失败。成功时仅原子发布 `.native-e2e/artifacts/windows/coverage-execution-report.json`；其 strict JSON closed shape 只含 platform/architecture、compiler/driver/collector 版本、run/TestRun outcome、summary、三种 artifact digest/size 与 duration，不含 token、environment、ID、workspace/data/tool path 或 raw profile 名称，并由 `if-no-files-found: error` 上传门禁约束。
+
 ### 9.4 Linux evidence boundary
 
-第一批 Linux CI 只验证共享 Coordinator、Adapter 接口、Go test/race/vet 与 Linux cross/runtime static contract。不得把交叉编译或 fake runner 计为 Linux coverage runtime PASS。Linux GCC/Clang Adapter 实现后，分别增加真实 Unix Socket + compiler + collector smoke。
+第一批 Linux CI 只验证共享 Coordinator、Adapter 接口、Go test/race/vet、Linux cross/runtime static contract 与既有 Unix Socket Service smoke；它不运行 Windows native coverage script，也不上传 `coverage-execution-report.json`。不得把交叉编译、Unix Socket 基础 smoke 或 fake runner 计为 Linux coverage runtime PASS。Linux GCC/Clang Adapter 实现后，分别增加真实 Unix Socket + compiler + collector smoke。
+
+GitHub Actions 及其 artifact 只是开发验收 evidence，GitHub/Gitee 只是源码托管、协作和开发分发渠道。production Runtime 不读取 CI report，也不依赖这些平台或网络完成 coverage execution。
 
 ## 10. 完成标准
 

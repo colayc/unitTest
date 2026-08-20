@@ -5,6 +5,9 @@
     "outDir": "dist",
     "types": ["node", "vscode"]
   },
-  "references": [{ "path": "../../packages/test-client/tsconfig.json" }],
+  "references": [
+    { "path": "../../packages/test-client/tsconfig.json" },
+    { "path": "../../packages/coverage-models/tsconfig.json" }
+  ],
   "include": ["src/**/*.ts", "test/**/*.ts"]
 }

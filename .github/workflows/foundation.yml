@@ -26,7 +26,7 @@ jobs:
           cache: pnpm
       - uses: actions/setup-go@v6
         with:
-          go-version: 1.26.5
+          go-version: 1.26.6
           cache-dependency-path: apps/test-service/go.sum
       - run: pnpm install --frozen-lockfile
       - run: pnpm verify
@@ -51,6 +51,10 @@ jobs:
       - run: pnpm prepare:cmake-bundle
       # Exercise the real Named Pipe service contract. The host harness reports SKIP without CODE_OSS_EXECUTABLE.
       - run: node tools/service-probe/build-service.mjs
+      - name: Verify Windows LLVM coverage execution
+        env:
+          UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS: clang-cl
+        run: pnpm --filter code-oss-extension test:coverage-service-smoke
       - run: pnpm --filter code-oss-extension test:service-smoke
       - run: pnpm --filter code-oss-extension test:benchmark
       - run: pnpm --filter code-oss-extension test:host
@@ -60,6 +64,12 @@ jobs:
         with:
           name: native-toolchain-windows-${{ github.run_attempt }}
           path: .native-e2e/artifacts/windows/toolchain-report.json
+          if-no-files-found: error
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-execution-windows-${{ github.run_attempt }}
+          path: .native-e2e/artifacts/windows/coverage-execution-report.json
           if-no-files-found: error
       - if: always()
         uses: actions/upload-artifact@v7
@@ -87,7 +97,7 @@ jobs:
           cache: pnpm
       - uses: actions/setup-go@v6
         with:
-          go-version: 1.26.5
+          go-version: 1.26.6
           cache-dependency-path: apps/test-service/go.sum
       - run: pnpm install --frozen-lockfile
       - run: pnpm verify
