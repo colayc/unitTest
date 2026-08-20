@@ -227,15 +227,7 @@ func containsWindowsPath(value string) bool {
 }
 
 func containsPOSIXPath(value string) bool {
-	for index := 0; index+1 < len(value); index++ {
-		if value[index] != '/' || value[index+1] == '/' {
-			continue
-		}
-		if index == 0 || strings.ContainsRune(" \t([{<\"'=,:;", rune(value[index-1])) {
-			return true
-		}
-	}
-	return false
+	return strings.Contains(value, "/")
 }
 
 func xmlText(value string) string {
