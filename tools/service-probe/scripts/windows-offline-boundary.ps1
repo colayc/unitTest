@@ -398,6 +398,7 @@ function Assert-CanonicalGuardianState(
 }
 
 function Assert-GuardianOwnedState(
+  [string]$Root,
   [string]$Path,
   [string]$Name,
   [string[]]$AllowedNames,
@@ -405,6 +406,10 @@ function Assert-GuardianOwnedState(
   [string]$ExpectedGuardianNonce,
   [int]$ExpectedGuardianPid
 ) {
+  Assert-PlainDirectory $Root 'state root'
+  if ([IO.Path]::GetDirectoryName($Path) -cne $Root) {
+    throw 'Windows native offline guardian state escaped its canonical root'
+  }
   $state = Assert-CanonicalGuardianState `
     $Path `
     $Name `
@@ -430,33 +435,6 @@ function Request-GuardianRelease([IO.DirectoryInfo]$Directory) {
   Write-MarkerUnlessPresent (
     Join-Path $Directory.FullName 'release'
   ) "release=$($Directory.Name)`n"
-}
-
-function Split-GuardianCommandLine([string]$CommandLine) {
-  if ([string]::IsNullOrWhiteSpace($CommandLine)) {
-    throw 'Windows native offline guardian process command line is unavailable'
-  }
-  $arguments = [Collections.Generic.List[string]]::new()
-  $matches = [regex]::Matches($CommandLine, '(?:"([^"]*)"|([^\s"]+))')
-  $cursor = 0
-  foreach ($match in $matches) {
-    if ($CommandLine.Substring($cursor, $match.Index - $cursor) -notmatch '^\s*$') {
-      throw 'Windows native offline guardian process command line is not canonical'
-    }
-    if ($match.Groups[1].Success) {
-      $arguments.Add($match.Groups[1].Value)
-    } else {
-      $arguments.Add($match.Groups[2].Value)
-    }
-    $cursor = $match.Index + $match.Length
-  }
-  if (
-    $arguments.Count -eq 0 -or
-    $CommandLine.Substring($cursor) -notmatch '^\s*$'
-  ) {
-    throw 'Windows native offline guardian process command line is not canonical'
-  }
-  return $arguments.ToArray()
 }
 
 function Get-GuardianArgumentValues([string[]]$Arguments, [string]$Name) {
@@ -510,7 +488,9 @@ function Initialize-GuardianProcessInspector {
   }
   Add-Type -TypeDefinition @'
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -518,12 +498,12 @@ namespace UnitTestIDE {
   public sealed class GuardianProcessSnapshot {
     public int ProcessId { get; private set; }
     public string ExecutablePath { get; private set; }
-    public string CommandLine { get; private set; }
+    public string[] Arguments { get; private set; }
 
-    public GuardianProcessSnapshot(int processId, string executablePath, string commandLine) {
+    public GuardianProcessSnapshot(int processId, string executablePath, string[] arguments) {
       ProcessId = processId;
       ExecutablePath = executablePath;
-      CommandLine = commandLine;
+      Arguments = arguments;
     }
   }
 
@@ -531,12 +511,21 @@ namespace UnitTestIDE {
     private const uint ProcessQueryInformation = 0x0400;
     private const uint ProcessQueryLimitedInformation = 0x1000;
     private const int ProcessCommandLineInformation = 60;
+    private const int MaximumCommandLineCharacters = 32767;
+    private const int MaximumCommandLineBufferBytes = 128 * 1024;
+    private const int MaximumArgumentCount = 256;
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern IntPtr OpenProcess(uint access, bool inheritHandle, int processId);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool CloseHandle(IntPtr handle);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr LocalFree(IntPtr memory);
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CommandLineToArgvW(string commandLine, out int argumentCount);
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern bool QueryFullProcessImageName(
@@ -554,6 +543,75 @@ namespace UnitTestIDE {
       int informationLength,
       out int returnLength
     );
+
+    public static int[] EnumeratePowerShellProcessIds() {
+      Process[] processes;
+      try {
+        processes = Process.GetProcessesByName("powershell");
+      } catch (Exception error) {
+        throw new InvalidOperationException("cannot enumerate PowerShell guardian processes", error);
+      }
+
+      var processIds = new List<int>(processes.Length);
+      try {
+        foreach (Process process in processes) {
+          processIds.Add(process.Id);
+        }
+      } catch (Exception error) {
+        throw new InvalidOperationException("cannot enumerate PowerShell guardian process IDs", error);
+      } finally {
+        foreach (Process process in processes) {
+          process.Dispose();
+        }
+      }
+      return processIds.ToArray();
+    }
+
+    private static string[] ParseCommandLine(string commandLine) {
+      if (
+        String.IsNullOrWhiteSpace(commandLine) ||
+        commandLine.Length > MaximumCommandLineCharacters
+      ) {
+        throw new InvalidOperationException("PowerShell guardian command line length is invalid");
+      }
+
+      int argumentCount;
+      IntPtr argumentVector = CommandLineToArgvW(commandLine, out argumentCount);
+      if (argumentVector == IntPtr.Zero) {
+        throw new Win32Exception(
+          Marshal.GetLastWin32Error(),
+          "cannot parse PowerShell guardian command line"
+        );
+      }
+
+      try {
+        if (argumentCount <= 0 || argumentCount > MaximumArgumentCount) {
+          throw new InvalidOperationException("PowerShell guardian argument count is invalid");
+        }
+        var arguments = new string[argumentCount];
+        int totalCharacters = 0;
+        for (int index = 0; index < argumentCount; index++) {
+          IntPtr argumentPointer = Marshal.ReadIntPtr(argumentVector, index * IntPtr.Size);
+          if (argumentPointer == IntPtr.Zero) {
+            throw new InvalidOperationException("PowerShell guardian argument pointer is invalid");
+          }
+          string argument = Marshal.PtrToStringUni(argumentPointer);
+          if (argument == null || argument.Length > MaximumCommandLineCharacters) {
+            throw new InvalidOperationException("PowerShell guardian argument length is invalid");
+          }
+          totalCharacters = checked(totalCharacters + argument.Length);
+          if (totalCharacters > MaximumCommandLineCharacters) {
+            throw new InvalidOperationException("PowerShell guardian arguments are too large");
+          }
+          arguments[index] = argument;
+        }
+        return arguments;
+      } finally {
+        if (LocalFree(argumentVector) != IntPtr.Zero) {
+          throw new InvalidOperationException("cannot free parsed PowerShell guardian arguments");
+        }
+      }
+    }
 
     public static GuardianProcessSnapshot Inspect(int processId) {
       IntPtr process = OpenProcess(
@@ -586,7 +644,7 @@ namespace UnitTestIDE {
           0,
           out commandLineLength
         );
-        if (commandLineLength <= 0 || commandLineLength > 1024 * 1024) {
+        if (commandLineLength <= 0 || commandLineLength > MaximumCommandLineBufferBytes) {
           throw new InvalidOperationException("PowerShell guardian command line length is invalid");
         }
         IntPtr buffer = Marshal.AllocHGlobal(commandLineLength);
@@ -606,24 +664,37 @@ namespace UnitTestIDE {
           }
           int textLength = (ushort)Marshal.ReadInt16(buffer, 0);
           int maximumLength = (ushort)Marshal.ReadInt16(buffer, 2);
-          if (textLength <= 0 || textLength > maximumLength || textLength > commandLineLength) {
+          if (
+            textLength <= 0 ||
+            (textLength & 1) != 0 ||
+            textLength > maximumLength ||
+            textLength > commandLineLength
+          ) {
             throw new InvalidOperationException("PowerShell guardian command line is invalid");
           }
           IntPtr text = Marshal.ReadIntPtr(buffer, IntPtr.Size == 8 ? 8 : 4);
-          string commandLine = Marshal.PtrToStringUni(text, textLength / 2);
-          if (String.IsNullOrWhiteSpace(commandLine)) {
-            throw new InvalidOperationException("PowerShell guardian command line is empty");
+          long bufferStart = buffer.ToInt64();
+          long bufferEnd = checked(bufferStart + commandLineLength);
+          long textStart = text.ToInt64();
+          if (textStart < bufferStart || textStart > bufferEnd - textLength) {
+            throw new InvalidOperationException("PowerShell guardian command line pointer is invalid");
           }
+          string commandLine = Marshal.PtrToStringUni(text, textLength / 2);
           return new GuardianProcessSnapshot(
             processId,
             executablePath.ToString(),
-            commandLine
+            ParseCommandLine(commandLine)
           );
         } finally {
           Marshal.FreeHGlobal(buffer);
         }
       } finally {
-        CloseHandle(process);
+        if (!CloseHandle(process)) {
+          throw new Win32Exception(
+            Marshal.GetLastWin32Error(),
+            "cannot close PowerShell guardian process handle"
+          );
+        }
       }
     }
   }
@@ -635,8 +706,10 @@ function Get-MatchingGuardianProcesses([string]$Root) {
   $expectedPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
   $guardians = [Collections.Generic.List[object]]::new()
   Initialize-GuardianProcessInspector
-  foreach ($process in @(Get-Process -Name powershell -ErrorAction SilentlyContinue)) {
-    $record = [UnitTestIDE.GuardianProcessInspector]::Inspect($process.Id)
+  foreach ($processId in @(
+    [UnitTestIDE.GuardianProcessInspector]::EnumeratePowerShellProcessIds()
+  )) {
+    $record = [UnitTestIDE.GuardianProcessInspector]::Inspect($processId)
     if ($null -eq $record) {
       continue
     }
@@ -649,7 +722,7 @@ function Get-MatchingGuardianProcesses([string]$Root) {
     ) {
       continue
     }
-    $arguments = Split-GuardianCommandLine $record.CommandLine
+    $arguments = [string[]]$record.Arguments
     if (-not (Test-GuardianScriptArgument $arguments)) {
       continue
     }
@@ -704,17 +777,24 @@ function Request-MatchingGuardianRelease([object]$Guardian) {
   try {
     $directory = Get-Item -LiteralPath $Guardian.StateDirectory -Force -ErrorAction Stop
   } catch [Management.Automation.ItemNotFoundException] {
-    return
+    throw 'Windows native offline matching guardian state directory is missing'
   }
   if (
     -not $directory.PSIsContainer -or
     ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
   ) {
-    return
+    throw 'Windows native offline guardian state cannot safely receive release'
   }
   Write-MarkerUnlessPresent (
     Join-Path $directory.FullName 'release'
   ) "release=$($Guardian.RuleName)`n"
+}
+
+function Ensure-CleanupStateRoot([string]$Root) {
+  if (-not [IO.Directory]::Exists($Root)) {
+    [IO.Directory]::CreateDirectory($Root) | Out-Null
+  }
+  Assert-PlainDirectory $Root 'state root'
 }
 
 function Get-ClosedGuardianDirectories([string]$Root) {
@@ -733,20 +813,19 @@ function Get-ClosedGuardianDirectories([string]$Root) {
   return $directories.ToArray()
 }
 
-function Test-GuardianBlockers([string]$Root) {
-  $guardians = @(Get-MatchingGuardianProcesses $Root)
+function Test-GuardianStateBlockers([string]$Root, [object[]]$Guardians) {
+  Ensure-CleanupStateRoot $Root
   $guardiansByState = [Collections.Generic.Dictionary[string, object]]::new(
     [StringComparer]::OrdinalIgnoreCase
   )
-  foreach ($guardian in $guardians) {
-    Request-MatchingGuardianRelease $guardian
+  foreach ($guardian in $Guardians) {
     if ($guardiansByState.ContainsKey($guardian.StateDirectory)) {
       throw 'Windows native offline state has more than one matching guardian process'
     }
     $guardiansByState.Add($guardian.StateDirectory, $guardian)
   }
 
-  $hasBlocker = $guardians.Count -gt 0
+  $hasBlocker = $Guardians.Count -gt 0
   foreach ($directory in @(Get-ClosedGuardianDirectories $Root)) {
     $expectedOwnerPid = 0
     $expectedGuardianNonce = ''
@@ -775,6 +854,12 @@ function Test-GuardianBlockers([string]$Root) {
     if ($null -ne $liveGuardian -and $state.GuardianPid -ne $liveGuardian.ProcessId) {
       throw 'Windows native offline guardian PID marker does not match its command-bound process'
     }
+    if ($null -ne $liveGuardian) {
+      # A live command-bound guardian is itself the blocker. It cannot be
+      # required to have published the terminal removed marker yet.
+      $hasBlocker = $true
+      continue
+    }
     if ($state.GuardianPid -le 0) {
       # The guardian may have been spawned but not scheduled yet. Until it
       # writes its PID it remains a possible late creator.
@@ -788,6 +873,117 @@ function Test-GuardianBlockers([string]$Root) {
   $hasBlocker
 }
 
+function Add-CleanupStateError(
+  [Collections.Generic.List[string]]$Errors,
+  [object]$ErrorRecord
+) {
+  $message = $ErrorRecord.Exception.Message
+  if (-not $Errors.Contains($message)) {
+    $Errors.Add($message)
+  }
+}
+
+function Invoke-CleanupAll([string]$Root) {
+  $deadline = [DateTime]::UtcNow.AddSeconds($DeadlineSeconds)
+  $stableAudits = 0
+  $lastOperationalError = $null
+  $stateErrors = [Collections.Generic.List[string]]::new()
+
+  while ([DateTime]::UtcNow -lt $deadline) {
+    $iterationError = $null
+    $enumerationSucceeded = $false
+    $guardians = @()
+
+    # Creator discovery is deliberately independent of StateRoot. Writable
+    # marker state, a missing root, or a replacement reparse point must not
+    # hide a command-bound process that can still create a firewall rule.
+    try {
+      $guardians = @(Get-MatchingGuardianProcesses $Root)
+      $enumerationSucceeded = $true
+    } catch {
+      $iterationError = $_
+    }
+
+    if ($enumerationSucceeded) {
+      foreach ($guardian in $guardians) {
+        try {
+          Request-MatchingGuardianRelease $guardian
+        } catch {
+          Add-CleanupStateError $stateErrors $_
+        }
+      }
+    }
+
+    # Global removal and both policy-store audits always run, including when
+    # process identity or StateRoot integrity is currently unauditable.
+    $firewallConverged = $true
+    try {
+      Remove-RuleGroup
+    } catch {
+      if ($null -eq $iterationError) {
+        $iterationError = $_
+      }
+      $firewallConverged = $false
+    }
+    try {
+      Assert-GroupRemoved
+    } catch {
+      if ($null -eq $iterationError) {
+        $iterationError = $_
+      }
+      $firewallConverged = $false
+    }
+
+    $stateHasBlocker = $false
+    try {
+      $stateHasBlocker = Test-GuardianStateBlockers $Root $guardians
+    } catch {
+      Add-CleanupStateError $stateErrors $_
+    }
+
+    if (
+      $enumerationSucceeded -and
+      $guardians.Count -eq 0 -and
+      $firewallConverged -and
+      -not $stateHasBlocker
+    ) {
+      $stableAudits++
+      $lastOperationalError = $null
+      if ($stableAudits -ge $requiredStableAudits) {
+        if ($stateErrors.Count -gt 0) {
+          throw (
+            'Windows native offline firewall cleanup converged but guardian state is invalid: ' +
+            ($stateErrors -join '; ')
+          )
+        }
+        return
+      }
+    } else {
+      $stableAudits = 0
+      if ($null -ne $iterationError) {
+        $lastOperationalError = $iterationError
+      }
+    }
+
+    Start-Sleep -Milliseconds $cleanupPollMilliseconds
+  }
+
+  $details = [Collections.Generic.List[string]]::new()
+  if ($null -ne $lastOperationalError) {
+    $details.Add($lastOperationalError.Exception.Message)
+  }
+  if ($stateErrors.Count -gt 0) {
+    $details.Add('guardian state is invalid: ' + ($stateErrors -join '; '))
+  }
+  if ($details.Count -gt 0) {
+    throw (
+      'Windows native offline firewall cleanup did not converge: ' +
+      ($details -join '; ')
+    )
+  }
+  throw 'Windows native offline firewall cleanup did not converge before its deadline'
+}
+
 switch ($Action) {
   'Guard' {
     Assert-RuleName $RuleName
@@ -795,7 +991,8 @@ switch ($Action) {
     if ($OwnerPid -le 0) {
       throw 'Windows native offline guardian owner PID is invalid'
     }
-    $statePath = Assert-StateDirectory $StateRoot $StateDirectory $RuleName
+    $rootPath = Get-SafeFullPath $StateRoot 'state root'
+    $statePath = Assert-StateDirectory $rootPath $StateDirectory $RuleName
     $pidPath = Join-Path $statePath 'guardian.pid'
     $readyPath = Join-Path $statePath 'ready'
     $removedPath = Join-Path $statePath 'removed'
@@ -807,6 +1004,7 @@ switch ($Action) {
       $GuardianNonce | Out-Null
     Write-ExclusiveMarker $pidPath "$PID`n"
     Assert-GuardianOwnedState `
+      $rootPath `
       $statePath `
       $RuleName `
       @('rule-name', 'owner.pid', 'guardian.nonce', 'guardian.pid', 'release') `
@@ -820,6 +1018,7 @@ switch ($Action) {
       $owner = Get-Process -Id $OwnerPid -ErrorAction Stop
       Assert-RuleRemoved $RuleName
       $state = Assert-GuardianOwnedState `
+        $rootPath `
         $statePath `
         $RuleName `
         @('rule-name', 'owner.pid', 'guardian.nonce', 'guardian.pid', 'release') `
@@ -843,6 +1042,7 @@ switch ($Action) {
           -Profile Any `
           -Protocol Any | Out-Null
         $state = Assert-GuardianOwnedState `
+          $rootPath `
           $statePath `
           $RuleName `
           @('rule-name', 'owner.pid', 'guardian.nonce', 'guardian.pid', 'release') `
@@ -856,6 +1056,7 @@ switch ($Action) {
       if ($continueGuard) {
         Assert-RuleInstalled $RuleName
         $state = Assert-GuardianOwnedState `
+          $rootPath `
           $statePath `
           $RuleName `
           @('rule-name', 'owner.pid', 'guardian.nonce', 'guardian.pid', 'release') `
@@ -869,6 +1070,7 @@ switch ($Action) {
       if ($continueGuard) {
         Write-ExclusiveMarker $readyPath "ready=$RuleName`n"
         Assert-GuardianOwnedState `
+          $rootPath `
           $statePath `
           $RuleName `
           @('rule-name', 'owner.pid', 'guardian.nonce', 'guardian.pid', 'release', 'ready') `
@@ -877,6 +1079,7 @@ switch ($Action) {
           $PID | Out-Null
         while (Test-OwnerAlive $owner) {
           $state = Assert-GuardianOwnedState `
+            $rootPath `
             $statePath `
             $RuleName `
             @('rule-name', 'owner.pid', 'guardian.nonce', 'guardian.pid', 'release', 'ready') `
@@ -896,6 +1099,7 @@ switch ($Action) {
         $transitionError = $null
         try {
           Assert-GuardianOwnedState `
+            $rootPath `
             $statePath `
             $RuleName `
             @('rule-name', 'owner.pid', 'guardian.nonce', 'guardian.pid', 'release', 'ready') `
@@ -913,6 +1117,7 @@ switch ($Action) {
           throw $transitionError
         }
         Assert-GuardianOwnedState `
+          $rootPath `
           $statePath `
           $RuleName `
           @('rule-name', 'owner.pid', 'guardian.nonce', 'guardian.pid', 'release', 'ready') `
@@ -921,6 +1126,7 @@ switch ($Action) {
           $PID | Out-Null
         Write-MarkerUnlessPresent $removedPath "removed=$RuleName`n"
         Assert-GuardianOwnedState `
+          $rootPath `
           $statePath `
           $RuleName `
           @('rule-name', 'owner.pid', 'guardian.nonce', 'guardian.pid', 'release', 'ready', 'removed') `
@@ -964,11 +1170,7 @@ switch ($Action) {
   }
   'CleanupAll' {
     $rootPath = Get-SafeFullPath $StateRoot 'state root'
-    Assert-PlainDirectory $rootPath 'state root'
-    Invoke-StableCleanup `
-      { Remove-RuleGroup } `
-      { Assert-GroupRemoved } `
-      { Test-GuardianBlockers $rootPath }
+    Invoke-CleanupAll $rootPath
   }
   'AuditRemoved' {
     Assert-RuleName $RuleName

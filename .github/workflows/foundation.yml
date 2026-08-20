@@ -60,7 +60,6 @@ jobs:
         shell: pwsh
         run: |
           $stateRoot = Join-Path $PWD '.native-e2e/runtime/windows-firewall-guardians'
-          [IO.Directory]::CreateDirectory($stateRoot) | Out-Null
           & 'tools/service-probe/scripts/windows-offline-boundary.ps1' `
             -Action CleanupAll `
             -StateRoot $stateRoot `

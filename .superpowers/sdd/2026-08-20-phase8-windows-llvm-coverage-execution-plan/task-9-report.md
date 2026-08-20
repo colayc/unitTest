@@ -628,3 +628,138 @@ were environment boundaries, not relaxed assertions.
 Generated Go cache, fixture binaries, Python cache, temporary pnpm shim and
 `.native-e2e` state were removed. No Go, production coverage execution,
 protocol or Extension behavior was changed, and no push was performed.
+
+## Fix Round 5
+
+### Review findings and credible RED
+
+The final review started from clean commit `e509d95`. New real Windows
+PowerShell tests first reproduced the remaining cleanup-ordering and command
+line findings without changing production behavior.
+
+- CleanupAll failed immediately at `Get-Item` when its state root was missing,
+  so it never reached global firewall removal or either policy-store audit.
+  Replacing a live installed guardian's StateRoot with an ordinary file likewise
+  produced no cleanup trace at all.
+- A delayed command-bound guardian kept running when its StateRoot was renamed
+  and replaced by a junction. The old CleanupAll rejected the junction and
+  returned inside the 750 ms early-return window while the creator was still
+  live; because the guardian validated only its child directory, it retained a
+  late create path through the junction.
+- A legal ordinary `powershell.exe` launched with an unmatched Windows quote
+  remained live, but the handwritten regular-expression parser classified its
+  command line as non-canonical. CleanupAll then timed out after roughly five
+  seconds even though the process was unrelated to the boundary.
+- A fixture-preloaded native enumeration failure already demonstrated the
+  intended fail-closed direction: cleanup returned nonzero while the global
+  remove plus ActiveStore and PersistentStore audits continued. The regression
+  is retained to prevent a future swallowed enumeration/query error.
+
+The focused baseline result was four expected failures and one passing
+fail-closed enumeration regression. After the implementation, all five cases
+passed unchanged.
+
+### Safety-first convergent CleanupAll
+
+CleanupAll now canonicalizes only the StateRoot string before entering a
+specialized bounded convergence loop. Every iteration performs the safety work
+in this order:
+
+1. enumerate and identify command-bound guardian processes without consulting
+   the filesystem, then request release where strict state still permits it;
+2. globally remove the fixed firewall rule group and audit both ActiveStore and
+   PersistentStore even if enumeration, release or state validation failed;
+3. validate or create the state root and audit its complete closed state.
+
+A matching guardian remains a blocker until a fresh native enumeration proves
+it has exited. Failure to write release because the root or state directory was
+removed, replaced or made a reparse point is recorded as state corruption; it
+does not remove the live-process blocker. Enumeration errors likewise prevent
+stable success but do not suppress global removal. Only three consecutive
+iterations with successful enumeration, no matching creator and both stores
+empty can terminate. Durable state corruption is then returned as an aggregated
+nonzero error, so CI fails only after the OS firewall state has converged.
+
+A genuinely missing clean StateRoot is created by the script after the first
+global removal/audit rather than by the workflow. An ordinary file, junction,
+symlink, other reparse point or corrupt closed state is never replaced and
+never reported as successful. The Windows CI cleanup step therefore invokes
+CleanupAll directly; its former unconditional `CreateDirectory` pre-step was
+removed so an invalid root cannot stop the boundary script from running.
+
+The guardian's owned-state check now revalidates the canonical StateRoot itself
+as a plain non-reparse directory on every existing PID/nonce/state transition:
+after PID publication, before the only create call, after creation, before and
+after ready, during every wait poll, and around removal proof. A junction
+introduced during the pre-install pause therefore produces no rule creation;
+an ordinary-file replacement after readiness makes the guardian perform stable
+rule cleanup and exit nonzero.
+
+### Native Windows argv and process enumeration
+
+The regular-expression command-line parser and PowerShell `Get-Process
+-ErrorAction SilentlyContinue` enumerator were deleted. The embedded C# helper
+now uses `Process.GetProcessesByName("powershell")`, disposes every returned
+`Process` object and propagates enumeration or process-query errors. The only
+ignored query race is `OpenProcess` returning explicit Windows error 87 for an
+already-exited PID; access denial and every other identity failure remain
+fatal.
+
+Each inspected process is opened read-only, its exact executable and native
+command line are queried, and shell32 `CommandLineToArgvW` supplies Windows argv
+semantics. Argument count, raw command length, each argument length, total
+characters, NT buffer bounds and the x86/x64 `UNICODE_STRING` pointer are
+bounded before exact guardian comparisons. `Process.Dispose`, `FreeHGlobal`,
+`LocalFree` and `CloseHandle` all run from `finally` paths; allocation or close
+failures are fail-closed. Only the resulting native argv is compared against
+the exact System32 Windows PowerShell executable, boundary script, `Guard`
+action, canonical StateRoot/direct-child StateDirectory, rule name, owner PID
+and 256-bit nonce. The live odd-quote PowerShell regression proves unrelated
+legal Windows command lines no longer block cleanup, while the existing install
+race and forged-marker tests repeatedly exercise exact guardian recognition on
+the x64 host.
+
+### Fresh GREEN verification
+
+Commands used Node 24.19.0, pnpm 11.4.0, Go 1.26.6 and the repository-verified
+CMake 4.3.4 Windows x64 bundle. Go commands used `GOENV=off`,
+`GOTOOLCHAIN=local` and a private worktree cache.
+
+- New Round 5 real-PowerShell focused suite: PASS, 5/5.
+- Full real-PowerShell guardian/root/process suite: PASS, 67/67. All prior 62
+  tests remain intact, including the 26 independent ActiveStore/PersistentStore
+  tamper cases, PID/nonce tampering, install races and forged removal case.
+- `pnpm --filter @unit-test-ide/service-probe test`: PASS, 107/107.
+- `pnpm --filter code-oss-extension test`: PASS, 136/136; the focused
+  preflight/JUnit/evidence slice remains 12/12.
+- Real Named Pipe Service vertical slice: PASS, 4/4.
+- Coverage Service smoke: honest local SKIP, exactly 1 test / 0 pass / 0 fail /
+  1 skip with `SKIP: verified clang-cl coverage toolset is unavailable`.
+- Required `clang-cl` control: expected FAIL, exactly 1 test / 0 pass / 1 fail /
+  0 skip with `required verified clang-cl coverage toolset is unavailable`.
+- `go test ./apps/test-service/cmd/coverage-toolset-preflight -count=1`: PASS
+  (compile-only package). The final root suite also passed every Go Service
+  package. No Go source changed, so the fresh reviewed Round 4 full race PASS
+  remains applicable.
+- `pnpm check:protocol-generated`, `pnpm check:coverage-generated` and root
+  `pnpm build`: PASS.
+- `pnpm test:workspace`: PASS, 21/21.
+- Root `pnpm test`: PASS in 217.6 seconds, including generators, bundle and
+  workspace checks, all packages, service-probe 107/107, Extension 136/136 and
+  the complete Go Service suite.
+- `git diff --check`: PASS.
+
+The first root build correctly rejected ambient pnpm 11.19.0; the pinned 11.4.0
+shim made the unchanged gate pass. The first workspace attempt lacked CMake and
+used the ambient Go cache; after preparing the fixed bundle and private cache,
+the sandboxed result was 20/21 solely because MSBuild could not read installed
+Windows SDK metadata. Its approved read-only rerun passed 21/21. The repository
+Node downloader hit its five-minute network bound for the official CMake
+archive; a resumable `curl` download of the same locked URL was fed through the
+unchanged repository SHA-256, archive-entry, installed-file, CMake and CTest
+verifier before use.
+
+The private Go cache, fixture binaries, verified CMake runtime, downloaded
+archive, temporary pnpm shim, Python cache and smoke state were removed. No Go,
+coverage execution, protocol or Extension runtime source changed, and no push
+was performed.

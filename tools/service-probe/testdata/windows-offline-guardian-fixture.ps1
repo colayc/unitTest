@@ -57,6 +57,9 @@ param(
   [ValidateRange(1, 30)]
   [int]$DeadlineSeconds = 5,
 
+  [ValidateSet('Normal', 'Failure')]
+  [string]$ProcessEnumerationScenario = 'Normal',
+
   [ValidatePattern('^[a-z0-9-]+\.log$')]
   [string]$TraceName = 'fixture-trace.log'
 )
@@ -321,6 +324,28 @@ function Get-NetFirewallInterfaceTypeFilter {
       [pscustomobject]@{ InterfaceType = 'Any' }
     }
   }
+}
+
+if ($ProcessEnumerationScenario -ceq 'Failure') {
+  # The boundary deliberately accepts no test-only switch. A fresh fixture
+  # process can preload the inspector type, however, which lets this vertical
+  # slice prove that a native enumeration failure is fail-closed without
+  # weakening the production command surface.
+  Add-Type -TypeDefinition @'
+using System;
+
+namespace UnitTestIDE {
+  public static class GuardianProcessInspector {
+    public static int[] EnumeratePowerShellProcessIds() {
+      throw new InvalidOperationException("fixture process enumeration failure");
+    }
+
+    public static object Inspect(int processId) {
+      throw new InvalidOperationException("fixture process enumeration failure");
+    }
+  }
+}
+'@ | Out-Null
 }
 
 $parameters = @{

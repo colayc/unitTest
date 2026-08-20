@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
-import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import http, { get as httpGet, request as httpRequest } from "node:http";
 import http2, { connect as http2Connect } from "node:http2";
 import https, { get as httpsGet, request as httpsRequest } from "node:https";
@@ -496,6 +496,189 @@ test("Windows CI CleanupAll fails closed when firewall queries never become audi
   }
 });
 
+test("Windows CI CleanupAll creates a missing clean state root and still proves both stores empty", {
+  skip: process.platform === "win32" ? false : "Windows PowerShell is unavailable"
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "offline-guardian-missing-root-"));
+  const cleanup = spawnGuardianFixture({
+    root,
+    ruleName: "UnitTestIDE-NativeOffline-10101010aaaabbbb",
+    action: "CleanupAll",
+    createStateRoot: false,
+    traceName: "cleanup.log"
+  });
+  try {
+    const result = await cleanup.result;
+    assert.equal(result.code, 0, result.stderr);
+    await access(fixtureStateRoot(root));
+    await assertGlobalCleanupTrace(root, "cleanup.log");
+  } finally {
+    cleanup.process.kill();
+    await cleanup.result.catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Windows CI CleanupAll fails closed on native process enumeration errors after global cleanup", {
+  skip: process.platform === "win32" ? false : "Windows PowerShell is unavailable"
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "offline-guardian-enumeration-error-"));
+  const cleanup = spawnGuardianFixture({
+    root,
+    ruleName: "UnitTestIDE-NativeOffline-20202020aaaabbbb",
+    action: "CleanupAll",
+    deadlineSeconds: 1,
+    processEnumerationScenario: "Failure",
+    traceName: "cleanup.log"
+  });
+  try {
+    const result = await cleanup.result;
+    assert.notEqual(result.code, 0, "an unprovable guardian enumeration must fail closed");
+    assert.match(result.stderr, /process enumeration failure|cleanup did not converge/ui);
+    await assertGlobalCleanupTrace(root, "cleanup.log");
+  } finally {
+    cleanup.process.kill();
+    await cleanup.result.catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Windows CI CleanupAll ignores a legal ordinary PowerShell command with an unmatched quote", {
+  skip: process.platform === "win32" ? false : "Windows PowerShell is unavailable"
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "offline-guardian-native-argv-"));
+  const systemRoot = process.env.SystemRoot;
+  assert.ok(systemRoot);
+  const powershell = join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  let ordinaryStderr = "";
+  const ordinary = spawn(powershell, [
+    '-NoLogo -NoProfile -NonInteractive -Command "Start-Sleep -Seconds 10'
+  ], {
+    stdio: ["ignore", "ignore", "pipe"],
+    windowsHide: true,
+    windowsVerbatimArguments: true
+  });
+  ordinary.stderr.setEncoding("utf8");
+  ordinary.stderr.on("data", (chunk: string) => { ordinaryStderr += chunk; });
+  const cleanup = spawnGuardianFixture({
+    root,
+    ruleName: "UnitTestIDE-NativeOffline-30303030aaaabbbb",
+    action: "CleanupAll",
+    traceName: "cleanup.log"
+  });
+  try {
+    await new Promise((resolveResult) => setTimeout(resolveResult, 250));
+    assert.equal(ordinary.exitCode, null, `ordinary PowerShell did not remain live: ${ordinaryStderr}`);
+    const result = await cleanup.result;
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(ordinary.exitCode, null, "cleanup must not terminate an unrelated PowerShell process");
+    await assertGlobalCleanupTrace(root, "cleanup.log");
+  } finally {
+    ordinary.kill();
+    cleanup.process.kill();
+    await cleanup.result.catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Windows CI CleanupAll disarms a delayed guardian after StateRoot becomes a junction", {
+  skip: process.platform === "win32" ? false : "Windows PowerShell is unavailable"
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "offline-guardian-root-junction-live-"));
+  const stateRoot = fixtureStateRoot(root);
+  const replacementTarget = join(root, "state-target");
+  const ruleName = "UnitTestIDE-NativeOffline-40404040aaaabbbb";
+  const stateDirectory = join(stateRoot, ruleName);
+  await mkdir(stateDirectory, { recursive: true });
+  const guardian = spawnGuardianFixture({
+    root,
+    ruleName,
+    stateDirectory,
+    ownerPid: process.pid,
+    preInstallDelayMilliseconds: 2_000,
+    traceName: "guardian.log"
+  });
+  let cleanup: SpawnedGuardianFixture | undefined;
+  try {
+    await waitForTrace(root, "preinstall-audit-finished", guardian, "guardian.log");
+    await rename(stateRoot, replacementTarget);
+    await symlink(replacementTarget, stateRoot, "junction");
+    cleanup = spawnGuardianFixture({
+      root,
+      ruleName,
+      action: "CleanupAll",
+      deadlineSeconds: 5,
+      traceName: "cleanup.log"
+    });
+    const earlyResult = await Promise.race([
+      cleanup.result.then((result) => result),
+      new Promise<undefined>((resolveResult) => setTimeout(resolveResult, 750))
+    ]);
+    assert.equal(earlyResult, undefined, "cleanup must not return while the command-bound creator is live");
+    const guardianResult = await guardian.result;
+    const cleanupResult = await cleanup.result;
+    assert.notEqual(guardianResult.code, 0, "a guardian must reject a reparse StateRoot");
+    assert.notEqual(cleanupResult.code, 0, "StateRoot corruption must fail after cleanup converges");
+    const guardianTrace = await readFile(join(root, "guardian.log"), "utf8");
+    assert.doesNotMatch(guardianTrace, /^install-start$/mu, "root corruption must remove every late-create path");
+    assert.match(guardianTrace, /^rule-query:ActiveStore$/mu);
+    assert.match(guardianTrace, /^rule-query:PersistentStore$/mu);
+    await assertGlobalCleanupTrace(root, "cleanup.log");
+  } finally {
+    guardian.process.kill();
+    cleanup?.process.kill();
+    await guardian.result.catch(() => undefined);
+    await cleanup?.result.catch(() => undefined);
+    await rm(stateRoot, { recursive: true, force: true });
+    await rm(replacementTarget, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Windows CI CleanupAll globally removes an installed rule after StateRoot becomes a file", {
+  skip: process.platform === "win32" ? false : "Windows PowerShell is unavailable"
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "offline-guardian-root-file-live-"));
+  const stateRoot = fixtureStateRoot(root);
+  const ruleName = "UnitTestIDE-NativeOffline-50505050aaaabbbb";
+  const stateDirectory = join(stateRoot, ruleName);
+  await mkdir(stateDirectory, { recursive: true });
+  const guardian = spawnGuardianFixture({
+    root,
+    ruleName,
+    stateDirectory,
+    ownerPid: process.pid,
+    traceName: "guardian.log"
+  });
+  let cleanup: SpawnedGuardianFixture | undefined;
+  try {
+    await waitForFile(join(stateDirectory, "ready"), guardian);
+    await rm(stateRoot, { recursive: true, force: true });
+    await writeFile(stateRoot, "replacement\n");
+    cleanup = spawnGuardianFixture({
+      root,
+      ruleName,
+      action: "CleanupAll",
+      createStateRoot: false,
+      deadlineSeconds: 4,
+      traceName: "cleanup.log"
+    });
+    const guardianResult = await guardian.result;
+    const cleanupResult = await cleanup.result;
+    assert.notEqual(guardianResult.code, 0, "a guardian must reject an ordinary-file StateRoot");
+    assert.notEqual(cleanupResult.code, 0, "StateRoot corruption must fail after cleanup converges");
+    const guardianTrace = await readFile(join(root, "guardian.log"), "utf8");
+    assert.match(guardianTrace, /^remove:\d+$/mu, "the guardian must remove its installed rule");
+    await assertGlobalCleanupTrace(root, "cleanup.log");
+  } finally {
+    guardian.process.kill();
+    cleanup?.process.kill();
+    await guardian.result.catch(() => undefined);
+    await cleanup?.result.catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("Windows CI CleanupAll waits out a guardian concurrently finishing installation", {
   skip: process.platform === "win32" ? false : "Windows PowerShell is unavailable"
 }, async () => {
@@ -572,7 +755,8 @@ test("Windows CI CleanupAll ignores dead-PID substitution and forged removal whi
     assert.equal(firstExit.process, "guardian", "writable markers must not hide a live creator");
     const guardianResult = await guardian.result;
     const cleanupResult = await cleanup.result;
-    assert.equal(cleanupResult.code, 0, cleanupResult.stderr);
+    assert.notEqual(cleanupResult.code, 0, "cleanup must report the durable forged state after convergence");
+    assert.match(cleanupResult.stderr, /guardian state is invalid|PID marker/ui);
     assert.notEqual(guardianResult.code, 0, "self-PID substitution must fail the guardian");
     const trace = await readFile(join(root, "guardian.log"), "utf8");
     assert.match(trace, /^remove:\d+$/mu, "the late creator must remove its rule before exit");
@@ -825,6 +1009,8 @@ interface GuardianFixtureOptions {
   readonly removeFailures?: number;
   readonly queryFailures?: number;
   readonly deadlineSeconds?: number;
+  readonly createStateRoot?: boolean;
+  readonly processEnumerationScenario?: "Normal" | "Failure";
   readonly traceName?: string;
 }
 
@@ -840,7 +1026,7 @@ function spawnGuardianFixture(options: GuardianFixtureOptions): SpawnedGuardianF
   const fixture = resolve(import.meta.dirname, "..", "testdata", "windows-offline-guardian-fixture.ps1");
   const script = resolve(import.meta.dirname, "..", "scripts", "windows-offline-boundary.ps1");
   const stateRoot = fixtureStateRoot(options.root);
-  mkdirSync(stateRoot, { recursive: true });
+  if (options.createStateRoot ?? true) mkdirSync(stateRoot, { recursive: true });
   const arguments_ = [
     "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
     "-File", fixture,
@@ -858,6 +1044,7 @@ function spawnGuardianFixture(options: GuardianFixtureOptions): SpawnedGuardianF
     "-RemoveFailures", String(options.removeFailures ?? 0),
     "-QueryFailures", String(options.queryFailures ?? 0)
   ];
+  arguments_.push("-ProcessEnumerationScenario", options.processEnumerationScenario ?? "Normal");
   arguments_.push("-TraceName", options.traceName ?? "fixture-trace.log");
   if (options.stateDirectory !== undefined) arguments_.push("-StateDirectory", options.stateDirectory);
   if (options.ownerPid !== undefined) arguments_.push("-OwnerPid", String(options.ownerPid));
@@ -959,6 +1146,13 @@ async function writeCanonicalConvergedState(
   if (includeRemoved) {
     await writeFile(join(stateDirectory, "removed"), `removed=${ruleName}\n`);
   }
+}
+
+async function assertGlobalCleanupTrace(root: string, traceName: string): Promise<void> {
+  const trace = await readFile(join(root, traceName), "utf8");
+  assert.match(trace, /^remove:\d+$/mu, "CleanupAll must attempt the global convergent removal");
+  assert.match(trace, /^rule-query:ActiveStore$/mu, "CleanupAll must audit ActiveStore");
+  assert.match(trace, /^rule-query:PersistentStore$/mu, "CleanupAll must audit PersistentStore");
 }
 
 function fakeGuardianOperations(
