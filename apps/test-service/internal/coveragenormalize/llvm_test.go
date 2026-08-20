@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -93,6 +94,50 @@ func TestNormalizeLLVMRejectsDuplicatePhysicalSourceWithoutPartialOutput(t *test
 	}
 }
 
+func TestNormalizeLLVMFiltersWindowsCaseVariantMandatoryExclusion(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows mandatory exclusions are case insensitive")
+	}
+	input := llvmNormalizationFixture(t)
+	path := filepath.Join(input.WorkspaceRoot, "src", ".GIT", "hidden.cpp")
+	writeSourceFile(t, path, "excluded\n")
+	input.Export.Files = append(input.Export.Files, coverageparserllvm.File{
+		NativePath: path, Lines: []coverageparserllvm.Line{{Number: 1, Count: 99}},
+	})
+	got, _, err := NormalizeLLVM(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, expectedLLVMDocument(coveragemodelv1.Available, []coveragemodelv1.Reason{})) {
+		t.Fatalf("case-variant mandatory exclusion changed document: %#v", got)
+	}
+}
+
+func TestNormalizeLLVMPreservesDistinctCaseSensitiveSourceAssociations(t *testing.T) {
+	input := llvmNormalizationFixture(t)
+	upper := filepath.Join(input.WorkspaceRoot, "src", "Case.cpp")
+	lower := filepath.Join(input.WorkspaceRoot, "src", "case.cpp")
+	writeSourceFile(t, upper, "upper\n")
+	writeSourceFile(t, lower, "lower\n")
+	upperInfo, upperErr := os.Stat(upper)
+	lowerInfo, lowerErr := os.Stat(lower)
+	if upperErr != nil || lowerErr != nil || os.SameFile(upperInfo, lowerInfo) {
+		t.Skip("filesystem cannot create and prove two case-distinct physical files")
+	}
+	input.Export.Files = []coverageparserllvm.File{
+		{NativePath: upper, Functions: coverageparserllvm.Metric{Covered: 1, Total: 1}, Lines: []coverageparserllvm.Line{{Number: 1, Count: 7}}},
+		{NativePath: lower, Functions: coverageparserllvm.Metric{Covered: 0, Total: 1}, Lines: []coverageparserllvm.Line{{Number: 2, Count: 0}}},
+	}
+	got, _, err := NormalizeLLVM(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Files) != 2 || got.Files[0].URI != "src/Case.cpp" || got.Files[0].Lines[0].Count != 7 ||
+		got.Files[1].URI != "src/case.cpp" || got.Files[1].Lines[0].Count != 0 {
+		t.Fatalf("case-distinct evidence was associated incorrectly: %#v", got.Files)
+	}
+}
+
 func TestNormalizeLLVMLimitsAndInvalidMetricsFailClosed(t *testing.T) {
 	input := llvmNormalizationFixture(t)
 	input.Limits.MaxFiles = 1
@@ -111,16 +156,19 @@ func llvmNormalizationFixture(t *testing.T) LLVMInput {
 	t.Helper()
 	root := t.TempDir()
 	paths := map[string]string{
-		"z":         filepath.Join(root, "src", "z.cpp"),
-		"generated": filepath.Join(root, "generated", "skip.cpp"),
-		"git":       filepath.Join(root, ".git", "hidden.cpp"),
-		"data":      filepath.Join(root, "data", "fixture.cpp"),
-		"build":     filepath.Join(root, "build", "generated.cpp"),
-		"a":         filepath.Join(root, "src", "a.cpp"),
+		"z":           filepath.Join(root, "src", "z.cpp"),
+		"generated":   filepath.Join(root, "generated", "skip.cpp"),
+		"git":         filepath.Join(root, ".git", "hidden.cpp"),
+		"data":        filepath.Join(root, "data", "fixture.cpp"),
+		"build":       filepath.Join(root, "build", "generated.cpp"),
+		"a":           filepath.Join(root, "src", "a.cpp"),
+		"nestedGit":   filepath.Join(root, "src", ".git", "hidden.cpp"),
+		"nestedData":  filepath.Join(root, "src", "data", "fixture.cpp"),
+		"nestedBuild": filepath.Join(root, "src", "build", "generated.cpp"),
 	}
 	writeSourceFile(t, paths["z"], "zeta\n")
 	writeSourceFile(t, paths["a"], "alpha\n")
-	for _, name := range []string{"generated", "git", "data", "build"} {
+	for _, name := range []string{"generated", "git", "data", "build", "nestedGit", "nestedData", "nestedBuild"} {
 		writeSourceFile(t, paths[name], name+"\n")
 	}
 	matcher, err := NewGlobMatcher([]string{"**/*.cpp"}, []string{"generated/**"})
@@ -134,6 +182,9 @@ func llvmNormalizationFixture(t *testing.T) LLVMInput {
 			{NativePath: paths["git"], Lines: []coverageparserllvm.Line{{Number: 1, Count: 99}}},
 			{NativePath: paths["data"], Lines: []coverageparserllvm.Line{{Number: 1, Count: 99}}},
 			{NativePath: paths["build"], Lines: []coverageparserllvm.Line{{Number: 1, Count: 99}}},
+			{NativePath: paths["nestedGit"], Lines: []coverageparserllvm.Line{{Number: 1, Count: 99}}},
+			{NativePath: paths["nestedData"], Lines: []coverageparserllvm.Line{{Number: 1, Count: 99}}},
+			{NativePath: paths["nestedBuild"], Lines: []coverageparserllvm.Line{{Number: 1, Count: 99}}},
 			{NativePath: paths["a"], Functions: coverageparserllvm.Metric{Covered: 1, Total: 1}, Lines: []coverageparserllvm.Line{
 				{Number: 11, Count: 0},
 				{Number: 10, Count: 1, Branches: coverageparserllvm.Metric{Covered: 1, Total: 2}},

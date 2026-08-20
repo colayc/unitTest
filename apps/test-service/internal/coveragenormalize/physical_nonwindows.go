@@ -3,17 +3,11 @@
 package coveragenormalize
 
 import (
-	"fmt"
 	"os"
 	"reflect"
 )
 
-func physicalSourceIdentity(path string) (physicalSourceID, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return physicalSourceID{}, fmt.Errorf("%w: open identity: %v", ErrSourceIdentity, err)
-	}
-	defer file.Close()
+func physicalSourceIdentity(file *os.File) (physicalSourceID, error) {
 	info, err := file.Stat()
 	if err != nil || !info.Mode().IsRegular() {
 		return physicalSourceID{}, ErrSourceIdentity

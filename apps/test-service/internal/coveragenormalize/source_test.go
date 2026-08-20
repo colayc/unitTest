@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -62,5 +63,34 @@ func TestDigestSourceRejectsInvalidLimitsAndEscapedPath(t *testing.T) {
 	}
 	if _, err := DigestSource(root, filepath.Join(filepath.Dir(root), "outside.cpp"), DefaultLimits()); !errors.Is(err, ErrInvalidSourcePath) {
 		t.Fatalf("outside error = %v", err)
+	}
+}
+
+func TestSourceSnapshotRejectsReplacementBetweenIdentityAndDigest(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "src.cpp")
+	if err := os.WriteFile(path, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := openSourceSnapshot(root, path, DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer snapshot.close()
+
+	original := filepath.Join(root, "original.cpp")
+	if err := os.Rename(path, original); err != nil {
+		if runtime.GOOS == "windows" {
+			// The retained Windows handle denies rename/delete sharing, so the
+			// replacement is prevented before a digest can observe another file.
+			return
+		}
+		t.Fatalf("cannot exercise retained-handle replacement: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("replacement"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := snapshot.digest(); !errors.Is(err, ErrSourceIdentity) {
+		t.Fatalf("digest after path replacement error = %v, want ErrSourceIdentity", err)
 	}
 }

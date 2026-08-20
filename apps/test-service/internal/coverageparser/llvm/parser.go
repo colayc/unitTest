@@ -322,8 +322,11 @@ func (p *parser) region() (region, error) {
 		}
 		*destination = value
 	}
-	if result.lineStart < 1 || result.columnStart < 1 || result.lineEnd < 1 || result.columnEnd < 1 {
-		return region{}, errors.New("invalid region location")
+	if !validSourceRange(result.lineStart, result.columnStart, result.lineEnd, result.columnEnd) {
+		return region{}, errors.New("invalid region range")
+	}
+	if result.kind > 6 {
+		return region{}, errors.New("unsupported region kind")
 	}
 	if err := p.close(']'); err != nil {
 		return region{}, err
@@ -345,8 +348,11 @@ func (p *parser) branch() (branch, error) {
 		}
 		*destination = value
 	}
-	if result.lineStart < 1 || result.columnStart < 1 || result.lineEnd < 1 || result.columnEnd < 1 {
-		return branch{}, errors.New("invalid branch location")
+	if !validSourceRange(result.lineStart, result.columnStart, result.lineEnd, result.columnEnd) {
+		return branch{}, errors.New("invalid branch range")
+	}
+	if result.kind != 4 && result.kind != 6 {
+		return branch{}, errors.New("unsupported branch kind")
 	}
 	if err := p.close(']'); err != nil {
 		return branch{}, err
@@ -383,10 +389,19 @@ func (p *parser) mcdcRecords() error {
 		if err := p.open('['); err != nil {
 			return err
 		}
-		for index := 0; index < 6; index++ {
-			if _, err := p.integer(); err != nil {
+		values := make([]int64, 6)
+		for index := range values {
+			value, err := p.integer()
+			if err != nil {
 				return err
 			}
+			values[index] = value
+		}
+		if !validSourceRange(values[0], values[1], values[2], values[3]) {
+			return errors.New("invalid MC/DC range")
+		}
+		if values[5] != 5 {
+			return errors.New("unsupported MC/DC kind")
 		}
 		conditions := int64(0)
 		if err := p.array(func() error {
@@ -441,17 +456,43 @@ func (p *parser) summary() error {
 }
 
 func (p *parser) summaryMetric(notCovered bool) error {
+	var count, covered, uncovered int64
 	handlers := map[string]func() error{
-		"count":   func() error { _, err := p.integer(); return err },
-		"covered": func() error { _, err := p.integer(); return err },
+		"count": func() error {
+			value, err := p.integer()
+			count = value
+			return err
+		},
+		"covered": func() error {
+			value, err := p.integer()
+			covered = value
+			return err
+		},
 		"percent": p.percentage,
 	}
 	required := []string{"count", "covered", "percent"}
 	if notCovered {
-		handlers["notcovered"] = func() error { _, err := p.integer(); return err }
+		handlers["notcovered"] = func() error {
+			value, err := p.integer()
+			uncovered = value
+			return err
+		}
 		required = append(required, "notcovered")
 	}
-	return p.object(handlers, required...)
+	if err := p.object(handlers, required...); err != nil {
+		return err
+	}
+	if covered > count || (notCovered && uncovered != count-covered) {
+		return errors.New("inconsistent coverage summary")
+	}
+	return nil
+}
+
+func validSourceRange(startLine, startColumn, endLine, endColumn int64) bool {
+	if startLine < 1 || startColumn < 1 || endLine < 1 || endColumn < 1 {
+		return false
+	}
+	return endLine > startLine || (endLine == startLine && endColumn > startColumn)
 }
 
 func (p *parser) percentage() error {
@@ -621,11 +662,13 @@ func (p *parser) increment(value *int64, maximum int64) error {
 func (p *parser) reduce(raw rawExport) (Export, error) {
 	result := Export{Version: raw.version, Files: make([]File, len(raw.files))}
 	pathIndex := make(map[string]int, len(raw.files))
+	var outputLines int64
 	for index, rawFile := range raw.files {
-		lines, err := p.reduceLines(rawFile)
+		lines, err := p.reduceLines(rawFile, p.limits.MaxLines-outputLines)
 		if err != nil {
 			return Export{}, err
 		}
+		outputLines += int64(len(lines))
 		result.Files[index] = File{NativePath: rawFile.path, Lines: lines}
 		if _, exists := pathIndex[rawFile.path]; !exists {
 			pathIndex[rawFile.path] = index
@@ -638,12 +681,17 @@ func (p *parser) reduce(raw rawExport) (Export, error) {
 	}
 	functions := make(map[string]functionState, len(raw.functions))
 	for _, function := range raw.functions {
-		identityRegion := function.regions[0]
+		var identityRegion region
+		hasCodeRegion := false
 		for _, candidate := range function.regions {
 			if candidate.kind == 0 {
 				identityRegion = candidate
+				hasCodeRegion = true
 				break
 			}
+		}
+		if !hasCodeRegion {
+			return Export{}, errors.New("function has no code region")
 		}
 		if identityRegion.fileID < 0 || identityRegion.fileID >= int64(len(function.filenames)) {
 			return Export{}, errors.New("function file ID")
@@ -671,7 +719,7 @@ func (p *parser) reduce(raw rawExport) (Export, error) {
 	return result, nil
 }
 
-func (p *parser) reduceLines(file rawFile) ([]Line, error) {
+func (p *parser) reduceLines(file rawFile, lineBudget int64) ([]Line, error) {
 	segments := append([]segment(nil), file.segments...)
 	sort.SliceStable(segments, func(i, j int) bool {
 		if segments[i].line != segments[j].line {
@@ -692,7 +740,7 @@ func (p *parser) reduceLines(file rawFile) ([]Line, error) {
 			}
 		}
 		for line := current.line; line <= end; line++ {
-			if int64(len(counts)) >= p.limits.MaxLines {
+			if int64(len(counts)) >= lineBudget {
 				if _, exists := counts[line]; !exists {
 					return nil, ErrLimitExceeded
 				}
@@ -728,6 +776,9 @@ func (p *parser) reduceLines(file rawFile) ([]Line, error) {
 	}
 	branchMetrics := make(map[int64]Metric)
 	for _, value := range deduplicated {
+		if _, exists := counts[value.lineStart]; !exists {
+			return nil, errors.New("branch has no executable line")
+		}
 		metric := branchMetrics[value.lineStart]
 		metric.Total += 2
 		if value.trueCount > 0 {
@@ -737,12 +788,6 @@ func (p *parser) reduceLines(file rawFile) ([]Line, error) {
 			metric.Covered++
 		}
 		branchMetrics[value.lineStart] = metric
-		if _, exists := counts[value.lineStart]; !exists {
-			if int64(len(counts)) >= p.limits.MaxLines {
-				return nil, ErrLimitExceeded
-			}
-			counts[value.lineStart] = 0
-		}
 	}
 
 	lineNumbers := make([]int64, 0, len(counts))

@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -27,8 +26,6 @@ type LLVMInput struct {
 
 type selectedLLVMFile struct {
 	file coverageparserllvm.File
-	path string
-	key  string
 }
 
 type physicalSourceID struct {
@@ -58,7 +55,6 @@ func NormalizeLLVM(input LLVMInput) (coveragemodelv1.CoverageDocumentV1, []Sourc
 
 	selected := make([]selectedLLVMFile, 0, len(input.Export.Files))
 	paths := make([]string, 0, len(input.Export.Files))
-	seenPhysical := make(map[physicalSourceID]struct{}, len(input.Export.Files))
 	for _, file := range input.Export.Files {
 		path, relative, err := workspaceRelativeSource(root, file.NativePath)
 		if err != nil {
@@ -67,26 +63,26 @@ func NormalizeLLVM(input LLVMInput) (coveragemodelv1.CoverageDocumentV1, []Sourc
 		if !input.Matcher.Include(relative) {
 			continue
 		}
-		identity, err := physicalSourceIdentity(path)
-		if err != nil {
-			return fail(err)
-		}
-		if _, duplicate := seenPhysical[identity]; duplicate {
-			return fail(ErrDuplicateSource)
-		}
-		seenPhysical[identity] = struct{}{}
-		key := physicalPathKey(path)
-		selected = append(selected, selectedLLVMFile{file: file, path: path, key: key})
+		selected = append(selected, selectedLLVMFile{file: file})
 		paths = append(paths, path)
 	}
 
-	bindings, err := CollectSources(root, paths, input.Matcher, input.Limits)
+	evidence, err := collectSources(root, paths, input.Matcher, input.Limits)
 	if err != nil {
 		return fail(err)
 	}
-	filesByPath := make(map[string]coverageparserllvm.File, len(selected))
-	for _, candidate := range selected {
-		filesByPath[candidate.key] = candidate.file
+	bindings := make([]SourceBinding, len(evidence))
+	filesByIdentity := make(map[physicalSourceID]coverageparserllvm.File, len(evidence))
+	for index := range evidence {
+		bindings[index] = evidence[index].binding
+		inputIndex := evidence[index].inputIndex
+		if inputIndex < 0 || inputIndex >= len(selected) {
+			return fail(fmt.Errorf("%w: source binding mismatch", ErrInvalidLLVM))
+		}
+		if _, duplicate := filesByIdentity[evidence[index].identity]; duplicate {
+			return fail(ErrDuplicateSource)
+		}
+		filesByIdentity[evidence[index].identity] = selected[inputIndex].file
 	}
 
 	document := coveragemodelv1.CoverageDocumentV1{
@@ -95,8 +91,8 @@ func NormalizeLLVM(input LLVMInput) (coveragemodelv1.CoverageDocumentV1, []Sourc
 		Provenance:    provenanceV1(input.Toolchain),
 		SchemaVersion: coveragemodelv1.The10,
 	}
-	for _, binding := range bindings {
-		file, exists := filesByPath[physicalPathKey(binding.NativePath)]
+	for index, binding := range bindings {
+		file, exists := filesByIdentity[evidence[index].identity]
 		if !exists {
 			return fail(fmt.Errorf("%w: source binding mismatch", ErrInvalidLLVM))
 		}
@@ -207,14 +203,6 @@ func workspaceRelativeSource(root, value string) (string, string, error) {
 		return "", "", ErrInvalidSourcePath
 	}
 	return path, relative, nil
-}
-
-func physicalPathKey(value string) string {
-	value = filepath.Clean(value)
-	if runtime.GOOS == "windows" {
-		return strings.ToLower(value)
-	}
-	return value
 }
 
 func normalizeLLVMFile(file coverageparserllvm.File, binding SourceBinding) (coveragemodelv1.CoverageFileV1, error) {

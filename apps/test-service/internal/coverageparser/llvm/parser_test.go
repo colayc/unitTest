@@ -139,6 +139,79 @@ func TestParseLLVMLimitsFailClosed(t *testing.T) {
 	}
 }
 
+func TestParseLLVMGlobalOutputLineLimitStopsCrossFileExpansion(t *testing.T) {
+	encoded := []byte(`{"version":"2.0.1","type":"llvm.coverage.json.export","data":[{"files":[{"filename":"C:\\workspace\\src\\one.cpp","segments":[[1,1,1,true,true,false],[5,1,0,false,false,false]],"branches":[],"mcdc_records":[],"expansions":[],"summary":{"lines":{"count":4,"covered":4,"percent":100},"functions":{"count":0,"covered":0,"percent":100},"instantiations":{"count":0,"covered":0,"percent":100},"regions":{"count":0,"covered":0,"notcovered":0,"percent":100},"branches":{"count":0,"covered":0,"notcovered":0,"percent":100},"mcdc":{"count":0,"covered":0,"notcovered":0,"percent":100}}},{"filename":"C:\\workspace\\src\\two.cpp","segments":[[1,1,1,true,true,false],[5,1,0,false,false,false]],"branches":[],"mcdc_records":[],"expansions":[],"summary":{"lines":{"count":4,"covered":4,"percent":100},"functions":{"count":0,"covered":0,"percent":100},"instantiations":{"count":0,"covered":0,"percent":100},"regions":{"count":0,"covered":0,"notcovered":0,"percent":100},"branches":{"count":0,"covered":0,"notcovered":0,"percent":100},"mcdc":{"count":0,"covered":0,"notcovered":0,"percent":100}}}],"functions":[],"totals":{"lines":{"count":8,"covered":8,"percent":100},"functions":{"count":0,"covered":0,"percent":100},"instantiations":{"count":0,"covered":0,"percent":100},"regions":{"count":0,"covered":0,"notcovered":0,"percent":100},"branches":{"count":0,"covered":0,"notcovered":0,"percent":100},"mcdc":{"count":0,"covered":0,"notcovered":0,"percent":100}}}]}`)
+	limits := DefaultLimits()
+	limits.MaxLines = 4
+	got, err := Parse(bytes.NewReader(encoded), limits)
+	if !errors.Is(err, ErrLimitExceeded) {
+		t.Fatalf("Parse() error = %v, want ErrLimitExceeded", err)
+	}
+	if !reflect.DeepEqual(got, Export{}) {
+		t.Fatalf("Parse() returned partial export %#v", got)
+	}
+}
+
+func TestParseLLVMRejectsBranchWithoutExecutableLineAndReturnsNoPartialEvidence(t *testing.T) {
+	encoded := bytes.Replace(
+		readFixture(t, "branches.json"),
+		[]byte(`"segments":[[4,1,7,true,true,false],[5,1,0,false,false,false]]`),
+		[]byte(`"segments":[[5,1,7,true,true,false],[6,1,0,false,false,false]]`),
+		1,
+	)
+	got, err := Parse(bytes.NewReader(encoded), DefaultLimits())
+	if err == nil {
+		t.Fatalf("Parse() = %#v, want inconsistent branch error", got)
+	}
+	if !reflect.DeepEqual(got, Export{}) {
+		t.Fatalf("Parse() returned partial uncovered evidence %#v", got)
+	}
+}
+
+func TestParseLLVMRejectsSemanticallyInvalidTuplesAndSummaries(t *testing.T) {
+	simple := readFixture(t, "simple.json")
+	branches := readFixture(t, "branches.json")
+	replace := func(input []byte, old, replacement string) []byte {
+		t.Helper()
+		result := bytes.Replace(input, []byte(old), []byte(replacement), 1)
+		if bytes.Equal(result, input) {
+			t.Fatalf("fixture does not contain %q", old)
+		}
+		return result
+	}
+	tests := map[string][]byte{
+		"reversed region": replace(simple,
+			`[2,1,3,2,5,0,0,0]`, `[3,2,2,1,5,0,0,0]`),
+		"unsupported region kind": replace(simple,
+			`[2,1,3,2,5,0,0,0]`, `[2,1,3,2,5,0,0,7]`),
+		"function without code region": replace(simple,
+			`[2,1,3,2,5,0,0,0]`, `[2,1,3,2,5,0,0,1]`),
+		"reversed branch": replace(branches,
+			`[4,3,4,8,1,0,0,0,4]`, `[4,8,4,3,1,0,0,0,4]`),
+		"unsupported branch kind": replace(branches,
+			`[4,3,4,8,1,0,0,0,4]`, `[4,3,4,8,1,0,0,0,0]`),
+		"reversed mcdc location": replace(branches,
+			`[4,3,4,15,0,5,[true,false]]`, `[4,15,4,3,0,5,[true,false]]`),
+		"unsupported mcdc kind": replace(branches,
+			`[4,3,4,15,0,5,[true,false]]`, `[4,3,4,15,0,6,[true,false]]`),
+		"covered exceeds count": replace(simple,
+			`"lines":{"count":2,"covered":2`, `"lines":{"count":2,"covered":3`),
+		"notcovered inconsistent": replace(simple,
+			`"regions":{"count":2,"covered":2,"notcovered":0`, `"regions":{"count":2,"covered":2,"notcovered":1`),
+	}
+	for name, encoded := range tests {
+		t.Run(name, func(t *testing.T) {
+			got, err := Parse(bytes.NewReader(encoded), DefaultLimits())
+			if err == nil {
+				t.Fatalf("Parse() = %#v, want semantic validation error", got)
+			}
+			if !reflect.DeepEqual(got, Export{}) {
+				t.Fatalf("Parse() returned partial export %#v", got)
+			}
+		})
+	}
+}
+
 func readFixture(t *testing.T, name string) []byte {
 	t.Helper()
 	encoded, err := os.ReadFile("testdata/" + name)

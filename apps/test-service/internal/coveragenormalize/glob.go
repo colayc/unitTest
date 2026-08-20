@@ -68,6 +68,11 @@ func (m *GlobMatcher) Include(relativeURI string) bool {
 	if !validRelativeURI(relativeURI) {
 		return false
 	}
+	for _, component := range strings.Split(relativeURI, "/") {
+		if excludedComponent(component) {
+			return false
+		}
+	}
 	if len(m.includes) > 0 {
 		matched := false
 		for _, pattern := range m.includes {

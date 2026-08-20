@@ -2,6 +2,7 @@ package coveragenormalize
 
 import (
 	"errors"
+	"runtime"
 	"testing"
 )
 
@@ -39,6 +40,22 @@ func TestGlobMatcherSupportsSingleCharacterAndMandatoryExclusions(t *testing.T) 
 	} {
 		if got := matcher.Include(path); got != want {
 			t.Fatalf("Include(%q) = %t, want %t", path, got, want)
+		}
+	}
+}
+
+func TestGlobMatcherMandatoryExclusionsApplyToEveryPathComponent(t *testing.T) {
+	matcher, err := NewGlobMatcher([]string{"**/*.cpp"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := []string{"src/build/generated.cpp", "src/data/fixture.cpp", "src/.git/hidden.cpp"}
+	if runtime.GOOS == "windows" {
+		paths = append(paths, "src/.GIT/case.cpp", "src/BUILD/case.cpp", "src/DATA/case.cpp")
+	}
+	for _, path := range paths {
+		if matcher.Include(path) {
+			t.Fatalf("mandatory excluded component accepted: %q", path)
 		}
 	}
 }
