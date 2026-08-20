@@ -1473,7 +1473,7 @@ func TestRuntimeArtifactBackendHidesPathsAndVerifiesContent(t *testing.T) {
 	}
 }
 
-func TestShutdownRetainsOwnershipUntilManagerQuiescesAndCanBeRetried(t *testing.T) {
+func TestShutdownReleasesOwnershipWhenManagerCannotQuiesce(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "data")
 	process := newBlockingProcess()
 	cleanupStarted := make(chan struct{})
@@ -1492,7 +1492,7 @@ func TestShutdownRetainsOwnershipUntilManagerQuiescesAndCanBeRetried(t *testing.
 			return nil
 		}
 	}}
-	active, err := Open(Config{DataDir: root, ServiceExecutable: os.Args[0], WorkspaceRoot: filepath.Dir(root), Platform: platformForTest(), TerminationGrace: time.Millisecond, dependencies: testDependencies(runner, nil)})
+	active, err := Open(Config{DataDir: root, ServiceExecutable: os.Args[0], WorkspaceRoot: filepath.Dir(root), Platform: platformForTest(), TerminationGrace: 250 * time.Millisecond, dependencies: testDependencies(runner, nil)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1509,27 +1509,30 @@ func TestShutdownRetainsOwnershipUntilManagerQuiescesAndCanBeRetried(t *testing.
 	}
 	subscription.Activate()
 	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
 	shutdownReturned := make(chan error, 1)
 	go func() { shutdownReturned <- active.Shutdown(ctx) }()
 	select {
 	case <-cleanupStarted:
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		close(allowCleanup)
 		t.Fatal("Shutdown did not begin forced lease cleanup")
 	}
-	cancel()
 	select {
 	case <-cleanupReturned:
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		close(allowCleanup)
 		t.Fatal("Shutdown left forced cleanup running after caller cancellation")
 	}
 	select {
 	case err := <-shutdownReturned:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("Shutdown() error = %v, want cancellation", err)
+		if !errors.Is(err, context.Canceled) || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Shutdown() error = %v, want caller cancellation and bounded cleanup deadline", err)
 		}
-	case <-time.After(time.Second):
+		if repeated := active.Close(); repeated != err {
+			t.Fatalf("repeated Close() error = %v, want canonical %v", repeated, err)
+		}
+	case <-time.After(5 * time.Second):
 		close(allowCleanup)
 		t.Fatal("Shutdown did not return after caller cancellation")
 	}
@@ -1538,25 +1541,15 @@ func TestShutdownRetainsOwnershipUntilManagerQuiescesAndCanBeRetried(t *testing.
 		t.Fatal(err)
 	}
 	locked, err := instance.Lock(layout.Lock)
-	if !errors.Is(err, instance.ErrAlreadyRunning) || locked != nil {
-		if locked != nil {
-			_ = locked.Close()
-		}
-		t.Fatalf("Shutdown released ownership before manager quiesced: lock=%#v error=%v", locked, err)
-	}
-	close(allowCleanup)
-	if err := active.Close(); err != nil {
-		t.Fatalf("retrying Close() after quiescence: %v", err)
-	}
-	assertClosed(t, subscription.Events)
-	assertClosed(t, subscription.Errors)
-	locked, err = instance.Lock(layout.Lock)
 	if err != nil {
-		t.Fatalf("Close retained instance lock after quiescence: %v", err)
+		t.Fatalf("Shutdown retained ownership after manager failure: %v", err)
 	}
 	_ = locked.Close()
+	close(allowCleanup)
+	assertClosed(t, subscription.Events)
+	assertClosed(t, subscription.Errors)
 	cleaned := runner.cleanupLeases()
-	if len(cleaned) != 2 {
+	if len(cleaned) != 1 {
 		t.Fatalf("forced cleanup leases = %#v", cleaned)
 	}
 	for _, lease := range cleaned {
@@ -1566,7 +1559,7 @@ func TestShutdownRetainsOwnershipUntilManagerQuiescesAndCanBeRetried(t *testing.
 	}
 }
 
-func TestShutdownRetryAfterProcessCloseFailureReleasesInstanceLock(t *testing.T) {
+func TestShutdownProcessCloseFailureReleasesInstanceLockAndFreezesError(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "data")
 	process := newRetryCloseProcess()
 	runner := &recordingRunner{prepared: process}
@@ -1614,44 +1607,29 @@ func TestShutdownRetryAfterProcessCloseFailureReleasesInstanceLock(t *testing.T)
 
 	short, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
-	if err := active.Shutdown(short); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Shutdown after transient Close failure = %v, want deadline", err)
+	shutdownErr := active.Shutdown(short)
+	if !errors.Is(shutdownErr, context.DeadlineExceeded) {
+		t.Fatalf("Shutdown after transient Close failure = %v, want deadline", shutdownErr)
 	}
 	locked, err := instance.Lock(layout.Lock)
-	if !errors.Is(err, instance.ErrAlreadyRunning) || locked != nil {
-		if locked != nil {
-			_ = locked.Close()
-		}
-		t.Fatalf("failed Close released instance lock: lock=%#v error=%v", locked, err)
+	if err != nil {
+		t.Fatalf("failed Shutdown retained instance lock: %v", err)
 	}
+	_ = locked.Close()
 
+	callsAfterShutdown := process.closeCalls.Load()
 	release()
 	long, cancelLong := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancelLong()
-	if err := active.Shutdown(long); err != nil {
-		t.Fatalf("retry Shutdown = %v", err)
+	if err := active.Shutdown(long); err != shutdownErr {
+		t.Fatalf("repeated Shutdown error = %v, want canonical %v", err, shutdownErr)
 	}
-	if calls := process.closeCalls.Load(); calls < 2 {
-		t.Fatalf("process Close calls = %d, want retry", calls)
-	}
-	store, err := taskstore.Open(layout.Database)
-	if err != nil {
-		t.Fatal(err)
-	}
-	finished, getErr := store.Get(context.Background(), started.ID)
-	closeErr := store.Close()
-	if getErr != nil ||
-		closeErr != nil ||
-		finished.Status != task.StatusFinished ||
-		finished.Outcome != task.OutcomeInfrastructureFailed {
-		t.Fatalf("Task after Close retry = %#v, get=%v close=%v", finished, getErr, closeErr)
-	}
-	if leases := activeLeases(t, layout.Database); len(leases) != 0 {
-		t.Fatalf("leases after Close retry = %#v", leases)
+	if calls := process.closeCalls.Load(); calls != callsAfterShutdown {
+		t.Fatalf("repeated Shutdown retried process Close: before=%d after=%d", callsAfterShutdown, calls)
 	}
 	locked, err = instance.Lock(layout.Lock)
 	if err != nil {
-		t.Fatalf("retry Shutdown retained instance lock: %v", err)
+		t.Fatalf("repeated Shutdown retained instance lock: %v", err)
 	}
 	_ = locked.Close()
 }

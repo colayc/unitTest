@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"sync"
 	"testing"
 
 	"unit-test-ide.local/test-service/internal/coveragecoord"
@@ -71,7 +72,10 @@ type fakeCoverageExecutor struct {
 	unsupported  []string
 	resumeResult task.Task
 	resumeErr    error
+	closeOnce    sync.Once
 	closeCalls   int
+	closeErr     error
+	closeResult  error
 	steps        *[]string
 	onClose      func()
 }
@@ -90,11 +94,14 @@ func (executor *fakeCoverageExecutor) FinishUnsupported(_ context.Context, persi
 }
 
 func (executor *fakeCoverageExecutor) Close() error {
-	executor.closeCalls++
-	if executor.onClose != nil {
-		executor.onClose()
-	}
-	return nil
+	executor.closeOnce.Do(func() {
+		executor.closeCalls++
+		if executor.onClose != nil {
+			executor.onClose()
+		}
+		executor.closeResult = executor.closeErr
+	})
+	return executor.closeResult
 }
 
 func (repository *fakeCoverageRepository) GetCoverageReport(context.Context, string) (coveragedomain.Report, error) {

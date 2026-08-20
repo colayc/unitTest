@@ -175,3 +175,126 @@ product runtime dependencies.
 
 The implementation commit identifier is supplied in the Task 8 handoff because
 the report cannot contain the hash of its own commit.
+
+## Fix Round 1
+
+### Reviewed findings and TDD RED
+
+Important finding 1 was reproduced with a fault-injection Runtime containing a
+coverage executor whose `Close` returns an error, a failing Manager shutdown and
+force-cleanup path, and failing test/artifact/SQLite/instance/data guards. Before
+the fix, the focused test failed with only `executor` in the trace: Manager
+shutdown, force cleanup, and every downstream owner were skipped.
+
+Important finding 2 received production-shaped evidence rather than another
+constructor seam. The real `Open` + SQLite recovery test first failed because a
+running TestRun could not be recovered without a real Catalog/selection, then
+failed again because a directly seeded running CoverageRun did not use SQLite's
+canonical nine-digit fractional timestamp. Adding the durable Catalog fixture
+and exact stored timestamp made the intended real recovery path GREEN.
+
+### Shutdown correction
+
+`Runtime.Shutdown` now freezes one canonical result for all concurrent and
+repeated callers. One attempt always performs the complete ownership sequence:
+
+1. stop coverage admission;
+2. attempt `coverageexec.Coordinator.Close`;
+3. attempt Manager shutdown;
+4. on Manager failure, attempt lease cleanup and a bounded Manager retry with
+   independent cleanup contexts;
+5. close test resources, broker, artifacts, SQLite, instance lock, and data-dir
+   guard exactly once.
+
+Errors from every stage are joined. An executor, Manager, cleanup, caller
+context, or downstream guard error no longer prevents later owners from being
+released. The regression test checks exact order, exact call counts, every
+`errors.Is` identity, concurrent caller identity, repeated-call identity, and
+admission closure. Earlier retry-oriented tests were updated to the reviewed
+one-shot ownership contract: even a non-quiescent Manager or process-close
+failure releases the lock and returns the frozen aggregate on later calls.
+
+### Production/runtime/server evidence
+
+- A Windows-only hermetic LLVM fixture calls the default
+  `newRuntimeCoverageExecutor`, asserts the concrete coordinator is the real
+  `*coverageexec.Coordinator`, and runs the real `llvmCoverageAdapter`. Both
+  current build revalidations return one Inspector-shaped retained
+  `toolchain.Instance`; `PinToolset`, instrumentation creation, toolset attach,
+  exact compiler/profdata/cov paths and toolset identity are verified. Closing
+  the executor also proves active Coordinator cancellation.
+- A real `Open` uses real SQLite `RecoverInterrupted` and the default coverage
+  constructor. A Task/CoverageRun/TestRun persisted as running becomes Task
+  `interrupted`, CoverageRun `unavailable/service_restarted`, and TestRun
+  `interrupted`, with no report/artifact and no resume. Three queued aggregates
+  resume through the real Coordinator in ascending created-time/Task-ID order.
+- The explicit Linux default wrapper uses a real Coordinator, Manager, SQLite
+  aggregate, and terminal completion. It produces Task `infrastructure_failed`
+  plus CoverageRun `unavailable/instrumentation_failed`, with no report or
+  artifact, while build preparation, native process preparation, and execution
+  root allocation all remain at zero.
+- A real `net.Pipe` server and Protocol v1.4 `coverage/runs/start` request pass
+  through the production `queuedCoverageBackend`, recording
+  persist -> resume -> canonical Task/CoverageRun/TestRun reload. The untrusted
+  session exposes no coverage provider and the same request causes no queue or
+  executor side effect.
+
+### Fix Round 1 verification
+
+Focused Runtime/server:
+
+```powershell
+go test ./apps/test-service/internal/runtime ./apps/test-service/internal/server -run 'Coverage|Queued|Trusted|Unsupported|Shutdown' -count=1
+```
+
+Result: both packages `ok`.
+
+Runtime/server/session full:
+
+```powershell
+go test ./apps/test-service/internal/runtime ./apps/test-service/internal/server ./apps/test-service/internal/session -count=1
+```
+
+Result: all three packages `ok`.
+
+Race:
+
+```powershell
+go test -race ./apps/test-service/internal/runtime ./apps/test-service/internal/coverageexec -run 'Coverage|Queued|Shutdown|Cancel' -count=1
+```
+
+Result: Runtime `ok` in 7.126s and coverageexec `ok` in 5.412s. The first race
+run showed that the SQLite cleanup fixture's 1ms grace could expire before the
+fault callback under instrumentation; the fixture grace was widened without
+changing production timeout behavior, and the complete race command then
+passed.
+
+Static and Linux compile-only:
+
+```powershell
+go vet ./apps/test-service/internal/runtime ./apps/test-service/internal/coverageexec ./apps/test-service/internal/coveragellvm
+$env:GOOS='linux'; $env:GOARCH='amd64'; $env:CGO_ENABLED='0'; go test -c -o "$env:TEMP\unitTest-phase8-task8-fix1-runtime-linux.test" ./apps/test-service/internal/runtime
+```
+
+Result: both exited 0; Linux remains compile/static evidence only.
+
+Full Service:
+
+```powershell
+go test ./apps/test-service/... -count=1
+```
+
+Result: the final complete run passed every package. An earlier run had one
+transient Windows `Access is denied` in the unrelated coveragebundle ancestor
+rename test; that exact test passed immediately in isolation, and the full
+Service rerun passed including coveragebundle.
+
+### Fix Round 1 concerns
+
+- This round does not claim native Linux execution; it strengthens the explicit
+  unsupported terminal path only.
+- The Windows fixture verifies real pinning and ownership with hermetic tool
+  files; Task 9 still owns the installed LLVM end-to-end smoke.
+- Shutdown intentionally releases data ownership after bounded Manager failure.
+  The canonical aggregate preserves those errors for diagnosis; later calls do
+  not retry already released owners.

@@ -902,12 +902,8 @@ func (r *Runtime) Shutdown(ctx context.Context) error {
 		if r.shutdownRunning {
 			done := r.shutdownAttemptDone
 			r.shutdownMu.Unlock()
-			select {
-			case <-done:
-				continue
-			case <-ctx.Done():
-				return ctx.Err()
-			}
+			<-done
+			continue
 		}
 		r.shutdownRunning = true
 		r.shutdownAttemptDone = make(chan struct{})
@@ -915,12 +911,10 @@ func (r *Runtime) Shutdown(ctx context.Context) error {
 		r.shutdownMu.Unlock()
 
 		err := r.shutdownAttempt(ctx)
+		err = errors.Join(err, r.closeResources())
 		r.shutdownMu.Lock()
-		if err == nil {
-			r.shutdownErr = r.closeResources()
-			r.shutdownComplete = true
-			err = r.shutdownErr
-		}
+		r.shutdownErr = err
+		r.shutdownComplete = true
 		r.shutdownRunning = false
 		close(done)
 		r.shutdownMu.Unlock()
@@ -929,33 +923,31 @@ func (r *Runtime) Shutdown(ctx context.Context) error {
 }
 
 func (r *Runtime) shutdownAttempt(ctx context.Context) error {
+	var result error
 	if backend, ok := r.coverageBackend.(*queuedCoverageBackend); ok {
 		backend.stopAdmission()
 	}
 	if r.coverageExecutor != nil {
-		if err := r.coverageExecutor.Close(); err != nil {
-			return err
-		}
+		result = errors.Join(result, r.coverageExecutor.Close())
 	}
 	if r.manager == nil {
-		return nil
+		return result
 	}
 	attempt, cancel := context.WithTimeout(ctx, r.grace)
 	err := r.manager.Shutdown(attempt)
 	cancel()
 	if err == nil {
-		return nil
+		return result
 	}
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-	if err := r.forceCleanup(ctx); err != nil {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		return err
-	}
-	return r.manager.Shutdown(ctx)
+	result = errors.Join(result, err, ctx.Err())
+	cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), r.grace)
+	cleanupErr := r.forceCleanup(cleanupContext)
+	cleanupCancel()
+	result = errors.Join(result, cleanupErr)
+	retryContext, retryCancel := context.WithTimeout(context.Background(), r.grace)
+	retryErr := r.manager.Shutdown(retryContext)
+	retryCancel()
+	return errors.Join(result, retryErr)
 }
 
 func (r *Runtime) closeResources() error {
