@@ -3,21 +3,12 @@ package coveragereport
 import (
 	"bytes"
 	"encoding/xml"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 
 	"unit-test-ide.local/test-service/internal/testdomain"
-)
-
-var (
-	diagnosticURL     = regexp.MustCompile(`(?i)\b(?:https?|file)://[^\s<>"']+`)
-	diagnosticSecret  = regexp.MustCompile(`(?i)\b(?:token|api[_-]?key|authorization|password|secret)\s*[:=]\s*\S+`)
-	diagnosticRuntime = regexp.MustCompile(`(?i)\b(?:argv|command|executable|environment|env|llvm_profile_file)\s*[:=]\s*\S+`)
-	diagnosticWindows = regexp.MustCompile(`(?i)(?:[a-z]:\\|\\\\)[^\s<>"']+`)
-	diagnosticPOSIX   = regexp.MustCompile(`(?:^|\s)/(?:[^\s<>"']+/?)+`)
 )
 
 func renderJUnit(run testdomain.TestRun) ([]byte, error) {
@@ -181,17 +172,70 @@ func safeLocation(value testdomain.SourceLocation) string {
 }
 
 func safeDiagnostic(value string) string {
-	value = diagnosticURL.ReplaceAllString(value, "[redacted-url]")
-	value = diagnosticSecret.ReplaceAllString(value, "[redacted-secret]")
-	value = diagnosticRuntime.ReplaceAllString(value, "[redacted-runtime]")
-	value = diagnosticWindows.ReplaceAllString(value, "[redacted-path]")
-	value = diagnosticPOSIX.ReplaceAllStringFunc(value, func(path string) string {
-		if strings.HasPrefix(path, " ") {
-			return " [redacted-path]"
+	if !utf8.ValidString(value) {
+		value = strings.ToValidUTF8(value, "�")
+	}
+	lines := strings.FieldsFunc(value, func(r rune) bool { return r == '\n' || r == '\r' })
+	if len(lines) == 0 {
+		return ""
+	}
+	for index, line := range lines {
+		if unsafeDiagnosticLine(line) {
+			lines[index] = "[redacted-sensitive-diagnostic]"
 		}
-		return "[redacted-path]"
-	})
-	return xmlText(value)
+	}
+	return xmlText(strings.Join(lines, "\n"))
+}
+
+func unsafeDiagnosticLine(value string) bool {
+	lower := strings.ToLower(value)
+	for _, marker := range []string{"http://", "https://", "file://"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	if containsWindowsPath(value) || containsPOSIXPath(value) {
+		return true
+	}
+	for _, marker := range []string{
+		"authorization", "bearer", "token", "api_key", "apikey", "password", "secret", "credential",
+		"argv", "command", "executable", "environment", "llvm_profile_file", "profile=", " env=",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	trimmed := strings.TrimLeft(lower, " \t$>")
+	for _, command := range []string{"run ", "exec ", "cmd ", "powershell ", "bash ", "sh ", "python ", "go "} {
+		if strings.HasPrefix(trimmed, command) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsWindowsPath(value string) bool {
+	for index := 0; index+2 < len(value); index++ {
+		if (value[index] >= 'a' && value[index] <= 'z' || value[index] >= 'A' && value[index] <= 'Z') && value[index+1] == ':' && (value[index+2] == '\\' || value[index+2] == '/') {
+			return true
+		}
+		if value[index] == '\\' && value[index+1] == '\\' {
+			return true
+		}
+	}
+	return false
+}
+
+func containsPOSIXPath(value string) bool {
+	for index := 0; index+1 < len(value); index++ {
+		if value[index] != '/' || value[index+1] == '/' {
+			continue
+		}
+		if index == 0 || strings.ContainsRune(" \t([{<\"'=,:;", rune(value[index-1])) {
+			return true
+		}
+	}
+	return false
 }
 
 func xmlText(value string) string {

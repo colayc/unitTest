@@ -15,7 +15,7 @@ func TestJUnitRedactsSensitiveDiagnosticsAndKeepsSafeStructure(t *testing.T) {
 	results[1].SourceLocation = &testdomain.SourceLocation{URI: "file:///C:/Users/Alice/private/test.cpp", Line: 41, Column: 7, Navigable: true, Provenance: "test-declaration"}
 	results[1].FailureDetails = []testdomain.FailureDetail{{
 		Category: "assertion_failure", Subtype: testdomain.FailureSubtypeMockParameterMismatch,
-		Message:  "safe assertion; token=very-secret-token argv=--secret C:\\Users\\Alice\\private\\test.cpp /home/alice/private.cpp https://example.invalid/leak",
+		Message:  "safe assertion\ntoken=very-secret-token argv=--secret C:\\Users\\Alice\\private\\test.cpp /home/alice/private.cpp https://example.invalid/leak",
 		Expected: "expected token=very-secret-token", Actual: "actual file:///C:/Users/Alice/private/test.cpp",
 		Locations: []testdomain.SourceLocation{{URI: "https://example.invalid/leak", Line: 11, Column: 3, Navigable: true, Provenance: "framework-output"}}, EvidenceRefs: []string{},
 	}}
@@ -29,7 +29,7 @@ func TestJUnitRedactsSensitiveDiagnosticsAndKeepsSafeStructure(t *testing.T) {
 			t.Fatalf("JUnit leaked %q:\n%s", forbidden, set.JUnitXML)
 		}
 	}
-	for _, expected := range []string{"safe assertion", "mock_parameter_mismatch", "expected: expected [redacted-secret]", "actual: actual [redacted-url]", "primary-location: line 41, column 7", "location: line 11, column 3"} {
+	for _, expected := range []string{"safe assertion", "mock_parameter_mismatch", "expected: [redacted-sensitive-diagnostic]", "actual: [redacted-sensitive-diagnostic]", "primary-location: line 41, column 7", "location: line 11, column 3"} {
 		if !bytes.Contains(set.JUnitXML, []byte(expected)) {
 			t.Fatalf("JUnit missing %q:\n%s", expected, set.JUnitXML)
 		}

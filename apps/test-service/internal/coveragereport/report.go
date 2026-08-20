@@ -174,6 +174,9 @@ func validateJUnit(value []byte) error {
 		case xml.Comment:
 			return fmt.Errorf("XML comment")
 		case xml.StartElement:
+			if current.Name.Space != "" {
+				return fmt.Errorf("qualified XML element")
+			}
 			if !rootOpen {
 				if current.Name.Local != "testsuite" || rootClosed {
 					return fmt.Errorf("unexpected root")
@@ -214,6 +217,9 @@ func validateJUnit(value []byte) error {
 				return fmt.Errorf("unexpected XML text")
 			}
 		case xml.EndElement:
+			if current.Name.Space != "" {
+				return fmt.Errorf("qualified XML element")
+			}
 			if detail != "" {
 				if current.Name.Local != detail {
 					return fmt.Errorf("mismatched detail")
