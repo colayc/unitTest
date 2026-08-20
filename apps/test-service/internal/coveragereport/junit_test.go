@@ -14,7 +14,7 @@ func TestJUnitSafelyRepresentsCompletedTestOutcomes(t *testing.T) {
 	for _, expected := range []string{
 		`tests="5"`, `failures="1"`, `errors="1"`, `skipped="2"`,
 		`name="utid-v1-` + strings.Repeat("b", 64) + `#2"`,
-		`<failure`, `&lt;safe&gt;`, `&amp; wrong`, `file:///workspace/src/example.cpp:5:2`, `<error`, `<skipped`,
+		`<failure`, `&lt;safe&gt;`, `&amp; wrong`, `primary-location: line 5, column 2`, `mock_parameter_mismatch`, `expected: expected call(1)`, `actual: actual call(2)`, `<error`, `<skipped`,
 	} {
 		if !bytes.Contains(set.JUnitXML, []byte(expected)) {
 			t.Fatalf("JUnit missing %q:\n%s", expected, set.JUnitXML)
