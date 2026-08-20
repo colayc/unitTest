@@ -253,17 +253,10 @@ func TestCoordinatorReportAndPublishRevalidationFailureNeverPublishesRealAggrega
 			if _, err := coordinator.Resume(context.Background(), fixture.persisted); err != nil {
 				t.Fatal(err)
 			}
-			finished := fixture.awaitFinished(t)
-			run, runErr := fixture.store.GetCoverageRun(context.Background(), fixture.aggregate.Run.ID)
-			page, artifactErr := fixture.store.ListArtifacts(context.Background(), fixture.persisted.ID, "", 100)
-			if finished.Outcome != task.OutcomeInfrastructureFailed || runErr != nil ||
-				run.Outcome != coveragedomain.OutcomeUnavailable || run.Reason != test.wantReason ||
-				run.ReportID != "" || artifactErr != nil || len(page.Items) != 0 ||
-				fixture.publisher.count(task.EventCoverageReportAvailable) != 0 {
-				t.Fatalf("%s revalidation terminal: task=%#v run=%#v/%v artifacts=%#v/%v events=%#v",
-					test.name, finished, run, runErr, page.Items, artifactErr, fixture.publisher.snapshot())
-			}
-			assertNoRawCoverageSentinel(t, fixture, processes.raw)
+			assertRealUnavailableFault(
+				t, fixture, processes, task.OutcomeInfrastructureFailed,
+				test.wantReason, []string{"configure", "build", "test", "merge", "normalize"},
+			)
 		})
 	}
 }
@@ -651,6 +644,14 @@ func (adapter *orchestrationPreparedAdapter) Close() error {
 		result = errors.Join(result, adapter.toolset.Close())
 	})
 	return result
+}
+
+func (adapter *orchestrationPreparedAdapter) releaseProfileRootRenameBlockerForTest() error {
+	allocator, ok := adapter.allocator.(*countingProfileAllocator)
+	if !ok || allocator.closer == nil {
+		return errors.New("real profile-root handle is unavailable")
+	}
+	return allocator.closer.Close()
 }
 
 func (adapter *orchestrationPreparedAdapter) sealedManifestState() (int, bool) {

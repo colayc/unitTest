@@ -850,3 +850,213 @@ Output: both exit 0; coverageexec `18.395s`, artifactstore `0.590s`.
 - Fix-round-3 implementation and tests: `3ea19c2` —
   `fix: bind coverage rollback to retained identities`.
 - The report-only follow-up commit identifier is supplied in the handoff.
+
+## Fix Round 4 — post-Link identity binding and exact durable terminal evidence
+
+### Reviewed baseline and scope
+
+- Confirmed the linked Windows worktree was clean at reviewed HEAD
+  `5fd87b0c9cf080a26e3526be9370c5736b5df3b4` before making changes.
+- Re-read the Task 7 plan, brief, full prior report and
+  `review-c453954..5fd87b0.diff`, then reproduced each of the three Important
+  reviewer findings independently.
+- Kept the genuine late SQLite transaction trigger from fix round 3 unchanged.
+  The Task 5 post-profile-seal cancellation closure remains covered, and the
+  Task 1 standalone aggregate validator remains the only deferred minor item.
+
+### Changes
+
+- `commitArtifactDataRetained` now captures the open temporary file's regular
+  file identity and verifies that the visible temporary pathname still names
+  that object before `Link`. Immediately after a successful `Link`, rollback is
+  bound to that already-retained original identity, before any target reopen or
+  verified-open work can fail.
+- Added a deterministic post-Link/pre-verified-open hook regression. It replaces
+  the just-published target with a distinct file containing identical bytes.
+  Commit fails closed with `ErrUnsafePath`; rollback refuses to unlink the
+  replacement, all temporary/capability handles close, and the replacement
+  remains readable and removable by test cleanup.
+- Added a shared terminal graph/event assertion for timeout, post-seal cancel,
+  all six retained-boundary revalidation cases, and the older report/publish
+  revalidation cases. It bypasses fixture mutation wrappers and reloads Task,
+  TestRun and CoverageRun from the underlying real SQLite Store.
+- Terminal assertions now cover exact status/outcome/reason, Task/Coverage
+  start and finish equality, exact unstarted or one-millisecond embedded-run
+  timing, incomplete flag, empty summary/result revision, nil Coverage summary,
+  blank report ID, empty artifact refs, zero artifact metadata/files, and zero
+  `coverage_reports` rows.
+- The event assertion reads the durable event stream through the real SQLite
+  watermark and compares it with the broker snapshot. It requires, in strict
+  order, exactly one `TestRunFinished`, one `CoverageRunFinished`, and one
+  `TaskFinished`, with unique IDs, increasing sequences, the exact common
+  terminal timestamp and exact JSON payloads. Both durable and published
+  streams must contain no duplicate terminal event and no
+  `CoverageReportAvailable` event.
+- Reworked direct root replacement isolation. The test no longer calls the
+  prepared adapter's production `Close`, closes the retained root handle, or
+  sets `rootOwner.file` to nil. Its Windows-only seam closes only the underlying
+  profile-root fixture handle that denies directory rename, without consuming
+  the counting allocator or adapter ownership.
+- The retained root capability is verified before replacement, remains live
+  through the rename, and its handle continues to identify the detached
+  original. The replacement pathname identifies a different directory, so
+  `executionRootOwner.Verify` itself returns the expected identity mismatch.
+  Production cleanup subsequently closes the live root handle and advances
+  adapter/allocator close observations from zero to exactly one. Duplicate
+  coordinator closes do not change them, while both replacement and detached
+  sentinels survive.
+
+### RED evidence
+
+Post-Link replacement exposed the publication rollback race on the reviewed
+implementation:
+
+```powershell
+$env:GOCACHE=(Join-Path $env:TEMP 'codex-task7-round4-artifact-red'); go test ./internal/artifactstore -run '^TestCommitArtifactDataRollbackNeverDeletesReplacementBeforeVerifiedOpen$' -count=1
+```
+
+Output: exit 1. Commit returned the expected unsafe error, but the decisive
+assertion failed with `rollback deleted the same-content replacement: ... The
+system cannot find the file specified.` The old `publishedIdentity == nil`
+rollback path had unlinked the replacement.
+
+Adding the exact terminal-event calls before their implementation produced the
+expected test-coverage RED:
+
+```powershell
+$env:GOCACHE=(Join-Path $env:TEMP 'codex-task7-round4-terminal-red'); go test ./internal/coverageexec -run 'TestCoordinator(TaskTimeoutStopsCurrentTreeBeforeLaterPhase|CancellationAfterProfileSealingReleasesRealManifestTreeOnce|RevalidatesEveryRetainedBoundaryBeforeContinuation|ReportAndPublishRevalidationFailureNeverPublishesRealAggregate)$' -count=1
+```
+
+Output: build failure at all three call sites, `undefined:
+assertExactTerminalEventSet`. The first helper draft then correctly exposed its
+own empty durable window (`through=0`) while the broker already contained the
+three expected events; the final helper uses the SQLite watermark and retains
+the unfiltered durable set for duplicate/report-event checks.
+
+Keeping the replacement test's new retained-capability assertions around the
+old test fault produced the root-isolation RED:
+
+```powershell
+$env:GOCACHE=(Join-Path $env:TEMP 'codex-task7-round4-root-red'); go test ./internal/coverageexec -run '^TestCoordinatorDirectExecutionRootReplacementFailsClosedWithoutFollowingReplacement$' -count=1
+```
+
+Output: exit 1, `direct execution root replacement failed: root identity
+capability was released before replacement`. This proves the prior failure was
+caused by the test's explicit close/nil operation, not pathname identity
+replacement.
+
+### GREEN evidence
+
+Final focused artifact identity matrix:
+
+```powershell
+$env:GOCACHE=(Join-Path $env:TEMP 'codex-task7-round4-artifact-focused-corrected'); go test ./internal/artifactstore -run '^(TestCommitArtifactDataRollbackNeverDeletesReplacementBeforeVerifiedOpen|TestCommitJSONRejectsSubstitutedTemporaryFile|TestCommitJSONRollsBackPublicationWhenFinalizationFails|TestCoverageArtifactRollbackNeverDeletesSameContentReplacement)$' -count=1
+```
+
+Output: exit 0; package PASS in `0.115s`.
+
+Final exact terminal and root-replacement matrix:
+
+```powershell
+$env:GOCACHE=(Join-Path $env:TEMP 'codex-task7-round4-focused-graph'); go test ./internal/coverageexec -run 'TestCoordinator(TaskTimeoutStopsCurrentTreeBeforeLaterPhase|CancellationAfterProfileSealingReleasesRealManifestTreeOnce|RevalidatesEveryRetainedBoundaryBeforeContinuation|ReportAndPublishRevalidationFailureNeverPublishesRealAggregate|DirectExecutionRootReplacementFailsClosedWithoutFollowingReplacement)$' -count=1
+```
+
+Output: exit 0; package PASS in `4.238s`.
+
+Fresh affected package gates:
+
+```powershell
+go test ./internal/artifactstore -count=1
+go test ./internal/coverageexec -count=1
+```
+
+Output: both exit 0; artifactstore `0.782s`, coverageexec `11.509s`.
+
+Fresh full service gate:
+
+```powershell
+$env:GOCACHE=(Join-Path $env:TEMP 'codex-task7-round4-service-full'); go test ./... -count=1
+```
+
+Working directory: `apps/test-service`. Output: exit 0 in `62.6s`; every
+test-bearing package passed, including artifactstore `1.429s`, coverageexec
+`19.034s`, task `0.897s`, taskstore `16.873s`, diagnostic `22.422s`, and
+processcontrol `31.995s`.
+
+Fresh affected race gate:
+
+```powershell
+$env:GOCACHE=(Join-Path $env:TEMP 'codex-task7-round4-race'); go test -race ./internal/coverageexec ./internal/artifactstore ./internal/task ./internal/taskstore -count=1
+```
+
+Output: exit 0 in `117.7s`; coverageexec `34.012s`, artifactstore `1.894s`,
+task `2.133s`, taskstore `81.060s`.
+
+Fresh static and patch gates:
+
+```powershell
+$env:GOCACHE=(Join-Path $env:TEMP 'codex-task7-round4-vet'); go vet ./...
+git diff --check
+```
+
+Output: both exit 0 with no diagnostics.
+
+Repeated deterministic regressions:
+
+```powershell
+$env:GOCACHE=(Join-Path $env:TEMP 'codex-task7-round4-artifact-replay'); go test ./internal/artifactstore -run '^TestCommitArtifactDataRollbackNeverDeletesReplacementBeforeVerifiedOpen$' -count=10
+$env:GOCACHE=(Join-Path $env:TEMP 'codex-task7-round4-terminal-replay'); go test ./internal/coverageexec -run 'TestCoordinator(TaskTimeoutStopsCurrentTreeBeforeLaterPhase|CancellationAfterProfileSealingReleasesRealManifestTreeOnce|RevalidatesEveryRetainedBoundaryBeforeContinuation|ReportAndPublishRevalidationFailureNeverPublishesRealAggregate|DirectExecutionRootReplacementFailsClosedWithoutFollowingReplacement)$' -count=3
+```
+
+Output: both exit 0; artifact regression `0.337s`, terminal/root matrix
+`12.611s`.
+
+### Ownership and safety review
+
+- The publication rollback identity is available for every error after `Link`.
+  A missing original target is finalized as an already-absent rollback; a
+  pathname naming the original object is removable; any different, linked or
+  non-regular object returns unsafe without removal. The temporary and target
+  handles, parent capability and successful finalized capability retain their
+  existing single close/release paths.
+- Pre-Link visible temporary identity verification preserves the existing
+  substituted-temporary fail-closed contract and prevents publication of a
+  pathname that no longer names the open temporary object.
+- Durable event checks operate over the complete isolated SQLite fixture stream,
+  not a terminal-event-filtered slice. Coverage report absence is independently
+  checked in SQLite, Store artifact metadata and the artifact filesystem.
+- The root seam is intentionally test-only. Windows' real profile allocator
+  opens the profile directory without delete sharing and otherwise prevents the
+  hostile rename. Calling only its underlying idempotent closer makes the state
+  constructible without closing or nulling the root identity capability and
+  without invoking the counting allocator/adapter `Close`; their zero-before,
+  one-after observations therefore reflect production cleanup rather than a
+  pre-consumed `sync.Once`.
+
+### Files changed in fix round 4
+
+- `apps/test-service/internal/artifactstore/store.go`
+- `apps/test-service/internal/artifactstore/store_test.go`
+- `apps/test-service/internal/coverageexec/orchestration_faults_windows_test.go`
+- `apps/test-service/internal/coverageexec/orchestration_windows_test.go`
+- `.superpowers/sdd/2026-08-20-phase8-windows-llvm-coverage-execution-plan/task-7-report.md`
+
+### Deferred ledger and concerns
+
+- **Task 1 standalone aggregate validator remains deferred minor.** This round
+  adds exact real-stack SQLite graph/event assertions but does not introduce the
+  separate general task-layer validator.
+- **Task 5 post-seal cancellation closure remains closed.** The exact graph and
+  durable event checks now strengthen it; manifest, allocator, adapter and root
+  ownership still release once.
+- The root replacement regression demonstrates fail-closed behavior once a
+  hostile pathname replacement exists. It does not claim an unprivileged peer
+  can rename the tree while every normal Windows profile capability remains
+  open; that handle protection is why the narrowly scoped test seam is needed.
+- The fake process remains hermetic and does not invoke host-installed LLVM.
+  There is no blocking concern for Task 8.
+
+### Commit
+
+- Fix-round-4 implementation, tests and report commit identifier is supplied in
+  the handoff.

@@ -39,6 +39,7 @@ type storeHooks struct {
 	afterSnapshotRead     func(position int64)
 	afterTempSync         func()
 	beforePublish         func(temporaryName string)
+	afterPublishLink      func(targetName string)
 	finalizeDirectory     func(stage directoryFinalizeStage) error
 	beforeTempRemove      func(temporaryName string)
 	beforeCleanupExecute  func()
@@ -238,6 +239,16 @@ func (s *Store) commitArtifactDataRetained(
 	if err := ctx.Err(); err != nil {
 		return task.Artifact{}, nil, err
 	}
+	temporaryInfo, temporaryErr := temporary.Stat()
+	if temporaryErr != nil || !temporaryInfo.Mode().IsRegular() {
+		return task.Artifact{}, nil, ErrUnsafePath
+	}
+	temporaryPathInfo, err := parent.Lstat(temporaryName)
+	if err != nil || isLinkInfo(temporaryPathInfo) ||
+		!temporaryPathInfo.Mode().IsRegular() ||
+		!os.SameFile(temporaryInfo, temporaryPathInfo) {
+		return task.Artifact{}, nil, ErrUnsafePath
+	}
 	targetName := path.Base(relative)
 	if err := parent.Link(temporaryName, targetName); err != nil {
 		if errors.Is(err, os.ErrExist) {
@@ -246,7 +257,10 @@ func (s *Store) commitArtifactDataRetained(
 		return task.Artifact{}, nil, rootOperationError(err)
 	}
 	published := true
-	var publishedIdentity os.FileInfo
+	publishedIdentity := temporaryInfo
+	if s.hooks.afterPublishLink != nil {
+		s.hooks.afterPublishLink(targetName)
+	}
 	finalize := func(stage directoryFinalizeStage) error {
 		if s.hooks.finalizeDirectory != nil {
 			if err := s.hooks.finalizeDirectory(stage); err != nil {
@@ -302,11 +316,9 @@ func (s *Store) commitArtifactDataRetained(
 			}
 		}
 	}()
-	temporaryInfo, temporaryErr := temporary.Stat()
-	if temporaryErr != nil || !temporaryInfo.Mode().IsRegular() || !finalInfo.Mode().IsRegular() || !os.SameFile(temporaryInfo, finalInfo) {
+	if !finalInfo.Mode().IsRegular() || !os.SameFile(temporaryInfo, finalInfo) {
 		return failPublished(ErrUnsafePath)
 	}
-	publishedIdentity = finalInfo
 	if err := finalize(directoryFinalizePublished); err != nil {
 		return failPublished(err)
 	}

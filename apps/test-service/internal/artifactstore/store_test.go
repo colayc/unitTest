@@ -458,6 +458,72 @@ func TestCommitJSONRollsBackPublicationWhenFinalizationFails(t *testing.T) {
 	assertNoTemporaryArtifacts(t, root)
 }
 
+func TestCommitArtifactDataRollbackNeverDeletesReplacementBeforeVerifiedOpen(t *testing.T) {
+	root := t.TempDir()
+	store, err := newStore(t, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, artifactID := id(1), id(2)
+	body := []byte("same-content replacement")
+	parent := filepath.Join(root, "tasks", taskID)
+	target := filepath.Join(parent, artifactID+".coverage.html")
+	replacementSource := filepath.Join(parent, "same-content-replacement")
+	var originalIdentity, replacementIdentity os.FileInfo
+	hookCalls := 0
+	store.hooks.afterPublishLink = func(targetName string) {
+		hookCalls++
+		if targetName != filepath.Base(target) {
+			t.Fatalf("linked target = %q, want %q", targetName, filepath.Base(target))
+		}
+		originalIdentity, err = os.Lstat(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(replacementSource, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		replacementIdentity, err = os.Lstat(replacementSource)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if os.SameFile(originalIdentity, replacementIdentity) {
+			t.Fatal("replacement unexpectedly reused the published object identity")
+		}
+		if err := os.Remove(target); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(replacementSource, target); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	_, err = store.commitArtifactData(
+		context.Background(), taskID, artifactID, "coverage-html",
+		time.Unix(0, 0).UTC(), body,
+	)
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("commitArtifactData() error = %v, want ErrUnsafePath", err)
+	}
+	if hookCalls != 1 {
+		t.Fatalf("post-link hook calls = %d, want 1", hookCalls)
+	}
+	current, err := os.Lstat(target)
+	if err != nil {
+		t.Fatalf("rollback deleted the same-content replacement: %v", err)
+	}
+	if !os.SameFile(current, replacementIdentity) || os.SameFile(current, originalIdentity) {
+		t.Fatalf("final path identity = %#v, want the replacement and not the published object", current)
+	}
+	if got, err := os.ReadFile(target); err != nil || !bytes.Equal(got, body) {
+		t.Fatalf("replacement content = %q, %v", got, err)
+	}
+	assertNoTemporaryArtifacts(t, root)
+	if err := os.RemoveAll(filepath.Join(root, "tasks", taskID)); err != nil {
+		t.Fatalf("failed publication retained an open file capability: %v", err)
+	}
+}
+
 func TestCommitJSONFlushesPublicationAndTemporaryRemoval(t *testing.T) {
 	root := t.TempDir()
 	store, err := newStore(t, root)

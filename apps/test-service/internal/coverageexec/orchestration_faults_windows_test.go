@@ -315,10 +315,9 @@ func TestCoordinatorTaskTimeoutStopsCurrentTreeBeforeLaterPhase(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("configure did not start before Task timeout")
 	}
-	finished := fixture.awaitFinished(t)
-	run, err := fixture.store.GetCoverageRun(context.Background(), fixture.aggregate.Run.ID)
-	testRun, testErr := fixture.store.GetRun(context.Background(), fixture.aggregate.TestRun.RunID)
-	if err != nil || finished.Status != task.StatusFinished || finished.Outcome != task.OutcomeTimedOut ||
+	_ = fixture.awaitFinished(t)
+	finished, testRun, run := loadDurableTerminalGraph(t, fixture)
+	if finished.Status != task.StatusFinished || finished.Outcome != task.OutcomeTimedOut ||
 		finished.StartedAt == nil || finished.FinishedAt == nil || finished.ActiveStep != "" ||
 		finished.ErrorCode != "" || finished.ErrorMessage != "" ||
 		run.Status != coveragedomain.StatusFinished ||
@@ -326,14 +325,16 @@ func TestCoordinatorTaskTimeoutStopsCurrentTreeBeforeLaterPhase(t *testing.T) {
 		run.StartedAt == nil || !run.StartedAt.Equal(*finished.StartedAt) ||
 		run.FinishedAt == nil || !run.FinishedAt.Equal(*finished.FinishedAt) ||
 		run.Summary != nil || run.ReportID != "" || run.Artifacts != (coveragedomain.ArtifactRefs{}) ||
-		testErr != nil || testRun.Status != testdomain.RunCompleted || testRun.Outcome != testdomain.RunTimedOut ||
+		testRun.Status != testdomain.RunCompleted || testRun.Outcome != testdomain.RunTimedOut ||
 		testRun.StartedAt != nil || testRun.FinishedAt == nil || !testRun.FinishedAt.Equal(*finished.FinishedAt) ||
 		!testRun.Incomplete || !reflect.DeepEqual(testRun.Summary, testdomain.RunSummary{Iterations: 1}) ||
-		len(testRun.Results) != 0 || !reflect.DeepEqual(factory.phases(), []string{"configure"}) ||
+		testRun.ResultRevision != testdomain.EmptyResultRevision() || len(testRun.Results) != 0 ||
+		!reflect.DeepEqual(factory.phases(), []string{"configure"}) ||
 		factory.terminateCount() != 1 {
-		t.Fatalf("Task timeout terminal: task=%#v run=%#v/%v test=%#v/%v phases=%v terminates=%d",
-			finished, run, err, testRun, testErr, factory.phases(), factory.terminateCount())
+		t.Fatalf("Task timeout terminal: task=%#v run=%#v test=%#v phases=%v terminates=%d",
+			finished, run, testRun, factory.phases(), factory.terminateCount())
 	}
+	assertExactTerminalEventSet(t, fixture, finished, testRun, run)
 	assertNoPublicFaultArtifacts(t, fixture, factory.raw)
 }
 
@@ -369,12 +370,11 @@ func TestCoordinatorCancellationAfterProfileSealingReleasesRealManifestTreeOnce(
 	if _, err := fixture.manager.Cancel(context.Background(), fixture.persisted.ID); err != nil {
 		t.Fatal(err)
 	}
-	finished := fixture.awaitFinished(t)
-	run, err := fixture.store.GetCoverageRun(context.Background(), fixture.aggregate.Run.ID)
-	testRun, testErr := fixture.store.GetRun(context.Background(), fixture.aggregate.TestRun.RunID)
+	_ = fixture.awaitFinished(t)
+	finished, testRun, run := loadDurableTerminalGraph(t, fixture)
 	testStartedExact := testRun.StartedAt != nil && testRun.FinishedAt != nil &&
 		testRun.StartedAt.Equal(testRun.FinishedAt.Add(-time.Millisecond))
-	if err != nil || finished.Status != task.StatusFinished || finished.Outcome != task.OutcomeCancelled ||
+	if finished.Status != task.StatusFinished || finished.Outcome != task.OutcomeCancelled ||
 		finished.StartedAt == nil || finished.FinishedAt == nil || finished.ActiveStep != "" ||
 		finished.ErrorCode != "" || finished.ErrorMessage != "" ||
 		run.Status != coveragedomain.StatusFinished ||
@@ -382,14 +382,16 @@ func TestCoordinatorCancellationAfterProfileSealingReleasesRealManifestTreeOnce(
 		run.StartedAt == nil || !run.StartedAt.Equal(*finished.StartedAt) ||
 		run.FinishedAt == nil || !run.FinishedAt.Equal(*finished.FinishedAt) ||
 		run.Summary != nil || run.ReportID != "" || run.Artifacts != (coveragedomain.ArtifactRefs{}) ||
-		testErr != nil || testRun.Status != testdomain.RunCompleted || testRun.Outcome != testdomain.RunCancelled ||
+		testRun.Status != testdomain.RunCompleted || testRun.Outcome != testdomain.RunCancelled ||
 		!testStartedExact || testRun.FinishedAt.After(*finished.FinishedAt) || testRun.Incomplete ||
-		!reflect.DeepEqual(testRun.Summary, testdomain.RunSummary{Iterations: 1}) || len(testRun.Results) != 0 ||
+		!reflect.DeepEqual(testRun.Summary, testdomain.RunSummary{Iterations: 1}) ||
+		testRun.ResultRevision != testdomain.EmptyResultRevision() || len(testRun.Results) != 0 ||
 		!reflect.DeepEqual(factory.phases(), []string{"configure", "build", "test", "merge"}) ||
 		factory.terminateCount() != 1 {
-		t.Fatalf("late cancellation terminal: task=%#v run=%#v/%v test=%#v/%v phases=%v terminates=%d",
-			finished, run, err, testRun, testErr, factory.phases(), factory.terminateCount())
+		t.Fatalf("late cancellation terminal: task=%#v run=%#v test=%#v phases=%v terminates=%d",
+			finished, run, testRun, factory.phases(), factory.terminateCount())
 	}
+	assertExactTerminalEventSet(t, fixture, finished, testRun, run)
 	executionRoot := filepath.Join(fixture.executionRoot, fixture.persisted.ID)
 	closeDeadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(closeDeadline) {
@@ -556,6 +558,8 @@ func TestCoordinatorDirectExecutionRootReplacementFailsClosedWithoutFollowingRep
 	replacementSentinel := filepath.Join(original, "replacement-must-survive")
 	detachedSentinel := filepath.Join(detached, "original-must-not-be-followed")
 	mutationDone := make(chan error, 1)
+	var retainedRootOwner *executionRootOwner
+	var retainedRootFile *os.File
 	var once sync.Once
 	factory.beforeComplete = func(phase string) {
 		if phase != "configure" {
@@ -563,10 +567,10 @@ func TestCoordinatorDirectExecutionRootReplacementFailsClosedWithoutFollowingRep
 		}
 		once.Do(func() {
 			mutationDone <- func() error {
-				// Windows correctly denies replacement while retained handles are
-				// open. This test-only fault closes the OS handles without invoking
-				// executionRootOwner.Close (and therefore without deleting the
-				// tree), leaving its original identity snapshot to police cleanup.
+				// The profile allocator's Windows directory handle deliberately
+				// denies rename. Release only that downstream test fixture handle;
+				// the execution root capability under test remains live, and normal
+				// production cleanup still owns and invokes both Close methods.
 				coordinator.mu.Lock()
 				live, ok := coordinator.executions[fixture.persisted.ID].(*execution)
 				coordinator.mu.Unlock()
@@ -574,19 +578,26 @@ func TestCoordinatorDirectExecutionRootReplacementFailsClosedWithoutFollowingRep
 					return errors.New("live execution missing during root replacement")
 				}
 				live.mu.Lock()
-				preparedAdapter := live.adapter
+				preparedAdapter, prepared := live.adapter.(*orchestrationPreparedAdapter)
 				rootOwner := live.root
 				live.mu.Unlock()
-				if preparedAdapter == nil || rootOwner == nil || rootOwner.file == nil {
+				if !prepared || preparedAdapter == nil || rootOwner == nil || rootOwner.file == nil {
 					return errors.New("retained execution capabilities missing")
 				}
-				if err := preparedAdapter.Close(); err != nil {
+				retainedRootOwner = rootOwner
+				retainedRootFile = rootOwner.file
+				if err := rootOwner.Verify(); err != nil {
+					return fmt.Errorf("root capability was invalid before replacement: %w", err)
+				}
+				if err := preparedAdapter.releaseProfileRootRenameBlockerForTest(); err != nil {
 					return err
 				}
-				if err := rootOwner.file.Close(); err != nil {
-					return err
+				if rootOwner.file == nil || rootOwner.Verify() != nil {
+					return errors.New("root identity capability was disturbed before replacement")
 				}
-				rootOwner.file = nil
+				if adapter.closeCount() != 0 || adapter.allocatorCloseCount() != 0 {
+					return errors.New("production ownership was consumed by the replacement seam")
+				}
 				if err := os.Rename(original, detached); err != nil {
 					return err
 				}
@@ -596,7 +607,24 @@ func TestCoordinatorDirectExecutionRootReplacementFailsClosedWithoutFollowingRep
 				if err := os.WriteFile(replacementSentinel, []byte("replacement"), 0o600); err != nil {
 					return err
 				}
-				return os.WriteFile(detachedSentinel, []byte("detached-original"), 0o600)
+				if err := os.WriteFile(detachedSentinel, []byte("detached-original"), 0o600); err != nil {
+					return err
+				}
+				if err := rootOwner.Verify(); !errors.Is(err, task.ErrInvalidArgument) {
+					return fmt.Errorf("Verify after pathname replacement = %v, want identity mismatch", err)
+				}
+				replacementInfo, err := os.Lstat(original)
+				if err != nil {
+					return err
+				}
+				handleInfo, err := rootOwner.file.Stat()
+				if err != nil {
+					return fmt.Errorf("retained root handle was not live after replacement: %w", err)
+				}
+				if !os.SameFile(rootOwner.info, handleInfo) || os.SameFile(rootOwner.info, replacementInfo) {
+					return errors.New("root handle/path identities did not diverge after replacement")
+				}
+				return nil
 			}()
 		})
 	}
@@ -615,12 +643,26 @@ func TestCoordinatorDirectExecutionRootReplacementFailsClosedWithoutFollowingRep
 			t.Fatalf("cleanup followed or deleted replacement boundary %q: %q, %v", sentinel, body, err)
 		}
 	}
+	if retainedRootOwner == nil || retainedRootFile == nil || retainedRootOwner.file != nil {
+		t.Fatalf("production cleanup did not consume the retained root capability: owner=%#v file=%#v",
+			retainedRootOwner, retainedRootFile)
+	}
+	if _, err := retainedRootFile.Stat(); err == nil {
+		t.Fatal("production cleanup left the retained root OS handle open")
+	}
 	if adapter.closeCount() != 1 || adapter.allocatorCloseCount() != 1 {
 		t.Fatalf("replacement cleanup ownership: adapter=%d allocator=%d",
 			adapter.closeCount(), adapter.allocatorCloseCount())
 	}
 	if err := coordinator.Close(); err != nil {
 		t.Fatal(err)
+	}
+	if err := coordinator.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if adapter.closeCount() != 1 || adapter.allocatorCloseCount() != 1 {
+		t.Fatalf("duplicate coordinator Close changed replacement ownership: adapter=%d allocator=%d",
+			adapter.closeCount(), adapter.allocatorCloseCount())
 	}
 	// Removal by the test also proves all retained root/file handles closed.
 	for _, path := range []string{original, detached} {
@@ -639,15 +681,14 @@ func assertRealUnavailableFault(
 	wantPhases []string,
 ) {
 	t.Helper()
-	finished := fixture.awaitFinished(t)
+	_ = fixture.awaitFinished(t)
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) && (fixture.publisher.count(task.EventTestRunFinished) != 1 ||
 		fixture.publisher.count(task.EventCoverageRunFinished) != 1 ||
 		fixture.publisher.count(task.EventTaskFinished) != 1) {
 		time.Sleep(time.Millisecond)
 	}
-	run, runErr := fixture.store.GetCoverageRun(context.Background(), fixture.aggregate.Run.ID)
-	testRun, testRunErr := fixture.store.GetRun(context.Background(), fixture.aggregate.TestRun.RunID)
+	finished, testRun, run := loadDurableTerminalGraph(t, fixture)
 	wantTestOutcome := testdomain.RunPassed
 	wantIncomplete := false
 	wantTestStarted := true
@@ -675,32 +716,184 @@ func assertRealUnavailableFault(
 	}
 	emptySummary := testdomain.RunSummary{Iterations: 1}
 	finishedAt := finished.FinishedAt
-	testFinishedValid := testRun.FinishedAt != nil && finishedAt != nil && finished.StartedAt != nil &&
-		!testRun.FinishedAt.After(*finishedAt) && !testRun.FinishedAt.Before(*finished.StartedAt)
-	testStartedExact := !wantTestStarted || (testRun.StartedAt != nil && testRun.FinishedAt != nil &&
-		testRun.StartedAt.Equal(testRun.FinishedAt.Add(-time.Millisecond)))
+	testTimingExact := testRun.FinishedAt != nil && finishedAt != nil && finished.StartedAt != nil
+	if testTimingExact && wantTestStarted {
+		testTimingExact = testRun.StartedAt != nil &&
+			testRun.StartedAt.Equal(testRun.FinishedAt.Add(-time.Millisecond)) &&
+			!testRun.FinishedAt.After(*finishedAt) &&
+			!testRun.FinishedAt.Before(*finished.StartedAt)
+	} else if testTimingExact {
+		testTimingExact = testRun.StartedAt == nil && testRun.FinishedAt.Equal(*finishedAt)
+	}
 	if finished.Status != task.StatusFinished || finished.Outcome != wantTask ||
 		finished.StartedAt == nil || finishedAt == nil || finished.ActiveStep != "" ||
 		finished.ErrorCode != wantErrorCode || finished.ErrorMessage != wantErrorMessage ||
-		runErr != nil || run.Status != coveragedomain.StatusFinished ||
+		run.Status != coveragedomain.StatusFinished ||
 		run.Outcome != coveragedomain.OutcomeUnavailable || run.Reason != wantReason ||
 		run.StartedAt == nil || run.FinishedAt == nil ||
 		!run.StartedAt.Equal(*finished.StartedAt) || !run.FinishedAt.Equal(*finishedAt) ||
 		run.Summary != nil || run.ReportID != "" || run.Artifacts != (coveragedomain.ArtifactRefs{}) ||
 		run.LastSequence != finished.LastSequence ||
-		testRunErr != nil || testRun.Status != testdomain.RunCompleted || testRun.Outcome != wantTestOutcome ||
-		(testRun.StartedAt != nil) != wantTestStarted || !testFinishedValid ||
-		!testStartedExact || testRun.Incomplete != wantIncomplete ||
-		!reflect.DeepEqual(testRun.Summary, emptySummary) || len(testRun.Results) != 0 ||
+		testRun.Status != testdomain.RunCompleted || testRun.Outcome != wantTestOutcome ||
+		!testTimingExact || testRun.Incomplete != wantIncomplete ||
+		!reflect.DeepEqual(testRun.Summary, emptySummary) ||
+		testRun.ResultRevision != testdomain.EmptyResultRevision() || len(testRun.Results) != 0 ||
 		!reflect.DeepEqual(factory.phases(), wantPhases) ||
 		fixture.publisher.count(task.EventTestRunFinished) != 1 ||
 		fixture.publisher.count(task.EventCoverageRunFinished) != 1 ||
 		fixture.publisher.count(task.EventTaskFinished) != 1 ||
 		fixture.publisher.count(task.EventCoverageReportAvailable) != 0 {
-		t.Fatalf("real fault terminal: task=%#v run=%#v/%v test=%#v/%v phases=%v events=%#v",
-			finished, run, runErr, testRun, testRunErr, factory.phases(), fixture.publisher.snapshot())
+		t.Fatalf("real fault terminal: task=%#v run=%#v test=%#v phases=%v events=%#v",
+			finished, run, testRun, factory.phases(), fixture.publisher.snapshot())
 	}
+	assertExactTerminalEventSet(t, fixture, finished, testRun, run)
 	assertNoPublicFaultArtifacts(t, fixture, factory.raw)
+}
+
+func loadDurableTerminalGraph(
+	t *testing.T,
+	fixture *sqliteCoverageFixture,
+) (task.Task, testdomain.TestRun, coveragedomain.Run) {
+	t.Helper()
+	ctx := context.Background()
+	finished, err := fixture.store.Store.Get(ctx, fixture.persisted.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testRun, err := fixture.store.Store.GetRun(ctx, fixture.aggregate.TestRun.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coverageRun, err := fixture.store.Store.GetCoverageRun(ctx, fixture.aggregate.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return finished, testRun, coverageRun
+}
+
+func assertExactTerminalEventSet(
+	t *testing.T,
+	fixture *sqliteCoverageFixture,
+	finished task.Task,
+	testRun testdomain.TestRun,
+	coverageRun coveragedomain.Run,
+) {
+	t.Helper()
+	wantTypes := []task.EventType{
+		task.EventTestRunFinished,
+		task.EventCoverageRunFinished,
+		task.EventTaskFinished,
+	}
+	deadline := time.Now().Add(time.Second)
+	var publishedAll, published []task.Event
+	for time.Now().Before(deadline) {
+		publishedAll = fixture.publisher.snapshot()
+		published = terminalEventsForTask(publishedAll, finished.ID)
+		if len(published) >= len(wantTypes) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	ctx := context.Background()
+	through, err := fixture.store.Store.Watermark(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	durableAll, err := fixture.store.Store.EventsAfter(ctx, 0, through, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	durable := terminalEventsForTask(durableAll, finished.ID)
+	if len(published) != len(wantTypes) || len(durable) != len(wantTypes) ||
+		!reflect.DeepEqual(published, durable) {
+		t.Fatalf("terminal event set mismatch: published=%#v durable=%#v", published, durable)
+	}
+	if finished.FinishedAt == nil {
+		t.Fatalf("terminal Task has no finish time: %#v", finished)
+	}
+	wantPayloads := []any{
+		map[string]any{
+			"runId": testRun.RunID, "outcome": testRun.Outcome,
+			"summary": testRun.Summary, "resultRevision": testRun.ResultRevision,
+			"incomplete": testRun.Incomplete,
+		},
+		map[string]any{
+			"coverageRunId": coverageRun.ID,
+			"outcome":       coverageRun.Outcome,
+			"reason":        coverageRun.Reason,
+		},
+		map[string]any{"outcome": finished.Outcome},
+	}
+	seenIDs := make(map[string]struct{}, len(published))
+	for index, event := range published {
+		if event.Type != wantTypes[index] || event.TaskID != finished.ID ||
+			event.ID == "" || event.Sequence <= 0 ||
+			!event.At.Equal(*finished.FinishedAt) ||
+			(index > 0 && event.Sequence <= published[index-1].Sequence) {
+			t.Fatalf("terminal event %d = %#v, want type %q at %s in strict sequence",
+				index, event, wantTypes[index], finished.FinishedAt.Format(time.RFC3339Nano))
+		}
+		if _, duplicate := seenIDs[event.ID]; duplicate {
+			t.Fatalf("duplicate terminal event ID %q in %#v", event.ID, published)
+		}
+		seenIDs[event.ID] = struct{}{}
+		assertExactJSONValue(t, event.Payload, wantPayloads[index])
+	}
+	if finished.LastSequence != published[len(published)-1].Sequence ||
+		coverageRun.LastSequence != finished.LastSequence {
+		t.Fatalf("terminal sequences: task=%d coverage=%d events=%#v",
+			finished.LastSequence, coverageRun.LastSequence, published)
+	}
+	for _, events := range [][]task.Event{publishedAll, durableAll} {
+		if countEventTypeForTask(events, finished.ID, task.EventTestRunFinished) != 1 ||
+			countEventTypeForTask(events, finished.ID, task.EventCoverageRunFinished) != 1 ||
+			countEventTypeForTask(events, finished.ID, task.EventTaskFinished) != 1 ||
+			countEventTypeForTask(events, finished.ID, task.EventCoverageReportAvailable) != 0 {
+			t.Fatalf("duplicate or unexpected terminal/report events: %#v", events)
+		}
+	}
+}
+
+func terminalEventsForTask(events []task.Event, taskID string) []task.Event {
+	result := make([]task.Event, 0, 3)
+	for _, event := range events {
+		if event.TaskID != taskID {
+			continue
+		}
+		switch event.Type {
+		case task.EventTestRunFinished, task.EventCoverageRunFinished, task.EventTaskFinished:
+			result = append(result, event)
+		}
+	}
+	return result
+}
+
+func countEventTypeForTask(events []task.Event, taskID string, kind task.EventType) int {
+	count := 0
+	for _, event := range events {
+		if event.TaskID == taskID && event.Type == kind {
+			count++
+		}
+	}
+	return count
+}
+
+func assertExactJSONValue(t *testing.T, encoded json.RawMessage, want any) {
+	t.Helper()
+	var gotValue, wantValue any
+	wantEncoded, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(encoded, &gotValue); err != nil {
+		t.Fatalf("decode event payload %q: %v", encoded, err)
+	}
+	if err := json.Unmarshal(wantEncoded, &wantValue); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(gotValue, wantValue) {
+		t.Fatalf("event payload = %#v, want %#v", gotValue, wantValue)
+	}
 }
 
 func assertNoPublicFaultArtifacts(t *testing.T, fixture *sqliteCoverageFixture, sentinel string) {
@@ -708,6 +901,22 @@ func assertNoPublicFaultArtifacts(t *testing.T, fixture *sqliteCoverageFixture, 
 	page, err := fixture.store.ListArtifacts(context.Background(), fixture.persisted.ID, "", 100)
 	if err != nil || len(page.Items) != 0 {
 		t.Fatalf("fault artifacts = %#v, %v", page.Items, err)
+	}
+	db, err := sql.Open("sqlite", fixture.sqlitePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var reportCount int
+	if err := db.QueryRowContext(
+		context.Background(),
+		`SELECT COUNT(*) FROM coverage_reports WHERE coverage_run_id=?`,
+		fixture.aggregate.Run.ID,
+	).Scan(&reportCount); err != nil {
+		t.Fatal(err)
+	}
+	if reportCount != 0 {
+		t.Fatalf("fault CoverageReport rows = %d, want 0", reportCount)
 	}
 	assertNoRawCoverageSentinel(t, fixture, sentinel)
 }
