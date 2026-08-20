@@ -26,6 +26,7 @@ type PlanInput struct {
 	Jobs           int
 	Configure      bool
 	ConfigureState json.RawMessage
+	Coverage       *CoverageOptions
 }
 
 func Plan(input PlanInput) (task.ExecutionPlan, error) {
@@ -34,7 +35,8 @@ func Plan(input PlanInput) (task.ExecutionPlan, error) {
 		input.Profile.ProjectID != input.Project.ID || input.Profile.BinaryDir == "" ||
 		input.Jobs < 1 || input.Jobs > 256 ||
 		(input.Installation.UnityRunnerGenerator != (cmake.ProductExecutable{}) &&
-			!input.Installation.UnityRunnerGenerator.Valid()) {
+			!input.Installation.UnityRunnerGenerator.Valid()) ||
+		!validPlanCoverage(input.Coverage) {
 		return task.ExecutionPlan{}, task.ErrInvalidArgument
 	}
 	sourceDir, err := input.WorkspaceRoot.ResolveRelative(input.Project.SourceDir)
@@ -75,6 +77,9 @@ func configureStep(input PlanInput, sourceDir string) (task.ExecutionStep, error
 			return task.ExecutionStep{}, task.ErrInvalidArgument
 		}
 		args = []string{"--preset", input.Profile.ConfigurePreset}
+		if input.Coverage != nil {
+			args = append(args, "-B", input.Coverage.BinaryDir)
+		}
 	case "generated":
 		if input.Profile.Generator == "" || input.Toolchain.CCompiler == "" ||
 			input.Toolchain.CXXCompiler == "" {
@@ -82,7 +87,7 @@ func configureStep(input PlanInput, sourceDir string) (task.ExecutionStep, error
 		}
 		args = []string{
 			"-S", sourceDir,
-			"-B", input.Profile.BinaryDir,
+			"-B", planBinaryDir(input),
 			"-G", input.Profile.Generator,
 		}
 		if input.Profile.Configuration != "" && !multiConfigGenerator(input.Profile.Generator) {
@@ -94,6 +99,12 @@ func configureStep(input PlanInput, sourceDir string) (task.ExecutionStep, error
 		)
 	default:
 		return task.ExecutionStep{}, task.ErrInvalidArgument
+	}
+	if input.Coverage != nil {
+		args = append(args,
+			"-DCMAKE_PROJECT_TOP_LEVEL_INCLUDES:FILEPATH="+
+				filepath.ToSlash(input.Coverage.TopLevelInclude.Path),
+		)
 	}
 	if input.Installation.UnityRunnerGenerator.Valid() {
 		args = append(args,
@@ -130,7 +141,8 @@ func buildStep(input PlanInput, sourceDir string, targetNames []string) (task.Ex
 	if err != nil {
 		return task.ExecutionStep{}, err
 	}
-	args := []string{"--build", input.Profile.BinaryDir}
+	binaryDir := planBinaryDir(input)
+	args := []string{"--build", binaryDir}
 	if input.Profile.Configuration != "" {
 		args = append(args, "--config", input.Profile.Configuration)
 	}
@@ -158,7 +170,7 @@ func buildStep(input PlanInput, sourceDir string, targetNames []string) (task.Ex
 			Executable: input.Installation.Executable,
 			Args:       append([]string(nil), args...),
 			Env:        environment,
-			Dir:        input.Profile.BinaryDir,
+			Dir:        binaryDir,
 		},
 		Public: task.CommandSummary{
 			Executable: filepath.Base(input.Installation.Executable),
@@ -166,6 +178,17 @@ func buildStep(input PlanInput, sourceDir string, targetNames []string) (task.Ex
 		},
 		DiagnosticParser: parser,
 	}, nil
+}
+
+func planBinaryDir(input PlanInput) string {
+	if input.Coverage != nil {
+		return input.Coverage.BinaryDir
+	}
+	return input.Profile.BinaryDir
+}
+
+func validPlanCoverage(options *CoverageOptions) bool {
+	return options == nil || validCoverageOptions(options, "")
 }
 
 func resolveTargetNames(targets []cmake.Target, ids []string) ([]string, error) {

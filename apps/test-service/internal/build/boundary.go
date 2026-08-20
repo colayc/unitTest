@@ -11,6 +11,7 @@ import (
 
 	"unit-test-ide.local/test-service/internal/cmake"
 	"unit-test-ide.local/test-service/internal/coveragebundle"
+	"unit-test-ide.local/test-service/internal/coveragellvm"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/workspace"
 )
@@ -37,6 +38,9 @@ type executionBoundary struct {
 	releaseOnce                sync.Once
 	releaseErr                 error
 	coverageExecution          *coveragebundle.PreparedExecution
+	coverageToolset            *coveragellvm.Toolset
+	coverageBinaryDir          string
+	coverageInclude            pinnedTestExecutable
 }
 
 type pinnedTestExecutable struct {
@@ -151,6 +155,9 @@ func (b *executionBoundary) ValidateExecutable(path string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.executableFile == nil {
+		return task.ErrInvalidArgument
+	}
+	if err := b.verifyCoveragePlanLocked(); err != nil {
 		return task.ErrInvalidArgument
 	}
 	if b.coverageExecution != nil {
@@ -305,12 +312,17 @@ func (b *executionBoundary) Release() error {
 		unityRunnerGeneratorFile := b.unityRunnerGeneratorFile
 		testExecutables := b.testExecutables
 		coverageExecution := b.coverageExecution
+		coverageToolset := b.coverageToolset
+		coverageInclude := b.coverageInclude
 		b.lock = nil
 		b.executableFile = nil
 		b.ctestFile = nil
 		b.unityRunnerGeneratorFile = nil
 		b.testExecutables = nil
 		b.coverageExecution = nil
+		b.coverageToolset = nil
+		b.coverageInclude = pinnedTestExecutable{}
+		b.coverageBinaryDir = ""
 		b.mu.Unlock()
 
 		var result error
@@ -331,6 +343,12 @@ func (b *executionBoundary) Release() error {
 		}
 		if coverageExecution != nil {
 			result = errors.Join(result, coverageExecution.Close())
+		}
+		if coverageToolset != nil {
+			result = errors.Join(result, coverageToolset.Close())
+		}
+		if coverageInclude.file != nil {
+			result = errors.Join(result, coverageInclude.file.Close())
 		}
 		b.mu.Lock()
 		b.releaseErr = result
@@ -359,6 +377,9 @@ func (b *executionBoundary) ValidateWorkingDirectory(path string) error {
 	if b.executableFile == nil {
 		return task.ErrInvalidArgument
 	}
+	if err := b.verifyCoveragePlanLocked(); err != nil {
+		return task.ErrInvalidArgument
+	}
 	if b.coverageExecution != nil {
 		spec := b.coverageExecution.ProcessSpec()
 		if filepath.Clean(path) == spec.Dir {
@@ -385,6 +406,66 @@ func (b *executionBoundary) ValidateWorkingDirectory(path string) error {
 		return task.ErrInvalidArgument
 	}
 	if !b.workspaceRoot.Contains(absolute) && !b.dataRoot.Contains(absolute) {
+		return task.ErrInvalidArgument
+	}
+	return nil
+}
+
+func (b *executionBoundary) attachCoveragePlan(options *CoverageOptions) error {
+	if b == nil || !validCoverageOptions(options, "") {
+		return task.ErrInvalidArgument
+	}
+	file, info, err := pinExecutable(options.TopLevelInclude.Path)
+	if err != nil {
+		return task.ErrInvalidArgument
+	}
+	digest, err := pinnedExecutableDigest(file)
+	if err != nil || digest != options.TopLevelInclude.SHA256 {
+		_ = file.Close()
+		return task.ErrInvalidArgument
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.executableFile == nil || b.coverageInclude.file != nil || b.coverageBinaryDir != "" {
+		_ = file.Close()
+		return task.ErrInvalidArgument
+	}
+	b.coverageBinaryDir = options.BinaryDir
+	b.coverageInclude = pinnedTestExecutable{file: file, info: info, sha256: digest}
+	return nil
+}
+
+func (b *executionBoundary) attachCoverageToolset(toolset *coveragellvm.Toolset) error {
+	if b == nil || toolset == nil || toolset.Verify() != nil {
+		return task.ErrInvalidArgument
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.executableFile == nil || b.coverageInclude.file == nil || b.coverageBinaryDir == "" || b.coverageToolset != nil {
+		return task.ErrInvalidArgument
+	}
+	b.coverageToolset = toolset
+	return nil
+}
+
+func (b *executionBoundary) verifyCoveragePlanLocked() error {
+	if b.coverageBinaryDir == "" && b.coverageInclude.file == nil && b.coverageToolset == nil {
+		return nil
+	}
+	if b.coverageBinaryDir == "" || b.coverageInclude.file == nil || b.coverageToolset == nil {
+		return task.ErrInvalidArgument
+	}
+	if err := validatePinnedExecutable(
+		b.coverageInclude.file, b.coverageInclude.info,
+		b.coverageInclude.file.Name(),
+	); err != nil {
+		return task.ErrInvalidArgument
+	}
+	digest, err := pinnedExecutableDigest(b.coverageInclude.file)
+	if err != nil || digest != b.coverageInclude.sha256 {
+		return task.ErrInvalidArgument
+	}
+	if b.coverageToolset.Verify() != nil {
 		return task.ErrInvalidArgument
 	}
 	return nil

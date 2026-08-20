@@ -80,6 +80,73 @@ func TestPlannerBuildsValidatedConfigureAndBuildSteps(t *testing.T) {
 	}
 }
 
+func TestPlannerInjectsOnlyTypedCoveragePathsForPresetAndGeneratedProfiles(t *testing.T) {
+	for _, origin := range []string{"generated", "preset"} {
+		t.Run(origin, func(t *testing.T) {
+			fixture := newPlannerFixture(t)
+			baseBinaryDir := fixture.profile.BinaryDir
+			fixture.profile.Origin = origin
+			if origin == "preset" {
+				fixture.profile.ConfigurePreset = "debug"
+			}
+			coverageBinaryDir := filepath.Join(fixture.dataRoot, "coverage-build", origin)
+			include := filepath.Join(fixture.dataRoot, "task", "coverage-instrumentation.cmake")
+			options := &CoverageOptions{
+				BinaryDir: coverageBinaryDir,
+				TopLevelInclude: cmake.FingerprintFile{
+					Path: include, Identity: strings.Repeat("4", 64), SHA256: strings.Repeat("5", 64),
+				},
+				InstrumentationFingerprint: strings.Repeat("4", 64),
+			}
+			plan, err := Plan(PlanInput{
+				Installation: fixture.installation, WorkspaceRoot: fixture.root,
+				Project: fixture.project, Profile: fixture.profile,
+				Toolchain: fixture.toolchain, Jobs: 1, Configure: true,
+				Coverage: options,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			configure := plan.Steps[0].Process.Args
+			wantBinaryPair := []string{"-B", coverageBinaryDir}
+			if countArgumentPair(configure, wantBinaryPair) != 1 {
+				t.Fatalf("coverage configure args = %#v, want exactly one %#v", configure, wantBinaryPair)
+			}
+			wantInclude := "-DCMAKE_PROJECT_TOP_LEVEL_INCLUDES:FILEPATH=" + filepath.ToSlash(include)
+			if countArgument(configure, wantInclude) != 1 {
+				t.Fatalf("coverage configure args = %#v, want exactly one %q", configure, wantInclude)
+			}
+			if countArgument(configure, baseBinaryDir) != 0 || strings.Contains(strings.Join(configure, "\n"), "extra-args") {
+				t.Fatalf("coverage configure reused base binary dir or exposed generic args: %#v", configure)
+			}
+			build := plan.Steps[1]
+			if build.Process.Args[1] != coverageBinaryDir || build.Process.Dir != coverageBinaryDir {
+				t.Fatalf("coverage build step = %#v, want isolated binary dir %q", build, coverageBinaryDir)
+			}
+		})
+	}
+}
+
+func countArgument(arguments []string, want string) int {
+	count := 0
+	for _, argument := range arguments {
+		if argument == want {
+			count++
+		}
+	}
+	return count
+}
+
+func countArgumentPair(arguments, want []string) int {
+	count := 0
+	for index := 0; index+1 < len(arguments); index++ {
+		if arguments[index] == want[0] && arguments[index+1] == want[1] {
+			count++
+		}
+	}
+	return count
+}
+
 func TestExecutionBoundaryAttachesAndRevalidatesFixedCoverageExecution(t *testing.T) {
 	fixture := newPlannerFixture(t)
 	boundaryValue, err := newExecutionBoundary(

@@ -10,11 +10,13 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
 
 	"unit-test-ide.local/test-service/internal/cmake"
+	"unit-test-ide.local/test-service/internal/coveragellvm"
 	"unit-test-ide.local/test-service/internal/discovery"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/taskstore"
@@ -118,7 +120,7 @@ func (c *Coordinator) Targets(
 	toolchainIdentity := effectiveToolchainIdentity(profile, toolchain.Instance{}, reply)
 	current := fingerprintInput(
 		snapshot.Generation, profile, c.config.Installation.Identity,
-		toolchainIdentity, reply, c.config.Installation.UnityRunnerGenerator.Identity,
+		toolchainIdentity, reply, c.config.Installation.UnityRunnerGenerator.Identity, nil,
 	)
 	if cmake.NeedsConfigure(cmake.BuildConfiguration{
 		Fingerprint: previous.Fingerprint, Succeeded: true,
@@ -132,7 +134,10 @@ func (c *Coordinator) Start(
 	ctx context.Context,
 	request StartRequest,
 ) (task.Task, error) {
-	prepared, err := c.prepare(ctx, request)
+	if request.Coverage != nil {
+		return task.Task{}, task.ErrInvalidArgument
+	}
+	prepared, err := c.prepare(ctx, request, false)
 	if err != nil {
 		return task.Task{}, err
 	}
@@ -148,7 +153,7 @@ func (c *Coordinator) PreparePlan(
 	ctx context.Context,
 	request StartRequest,
 ) (*PreparedPlan, error) {
-	prepared, err := c.prepare(ctx, request)
+	prepared, err := c.prepare(ctx, request, true)
 	if err != nil {
 		return nil, err
 	}
@@ -222,6 +227,23 @@ func (plan *PreparedPlan) Targets() []cmake.Target {
 	return cloneTargets(plan.prepared.targets)
 }
 
+func (plan *PreparedPlan) CoverageBinaryDir() string {
+	if plan == nil || plan.prepared == nil || plan.prepared.coverage == nil {
+		return ""
+	}
+	return plan.prepared.coverage.BinaryDir
+}
+
+func (plan *PreparedPlan) AttachCoverageToolset(toolset *coveragellvm.Toolset) error {
+	if plan == nil || plan.prepared == nil || plan.prepared.coverage == nil ||
+		plan.prepared.boundary == nil || toolset == nil || toolset.Version() != plan.prepared.toolchain.Version ||
+		!sameNativePath(toolset.Compiler().Path(), plan.prepared.toolchain.CXXCompiler) ||
+		!sameNativePath(toolset.Compiler().Path(), plan.prepared.toolchain.CCompiler) {
+		return task.ErrInvalidArgument
+	}
+	return plan.prepared.boundary.attachCoverageToolset(toolset)
+}
+
 func (plan *PreparedPlan) AllowTestExecutable(
 	state cmake.FingerprintFile,
 ) error {
@@ -269,7 +291,7 @@ func (c *Coordinator) Resume(
 		ProjectID:           payload.ProjectID, BuildProfileID: payload.BuildProfileID,
 		TargetIDs: append([]string(nil), payload.TargetIDs...),
 		Jobs:      payload.Jobs, Timeout: persisted.Timeout,
-	})
+	}, false)
 	if err != nil {
 		return task.Task{}, err
 	}
@@ -292,6 +314,7 @@ type preparedBuild struct {
 	profile   cmake.BuildProfile
 	toolchain toolchain.Instance
 	targets   []cmake.Target
+	coverage  *CoverageOptions
 }
 
 func (p *preparedBuild) releaseUnlessAdopted() {
@@ -303,10 +326,12 @@ func (p *preparedBuild) releaseUnlessAdopted() {
 func (c *Coordinator) prepare(
 	ctx context.Context,
 	request StartRequest,
+	allowCoverage bool,
 ) (*preparedBuild, error) {
 	if c == nil || ctx == nil || request.IdempotencyKey == "" ||
 		request.Jobs < 1 || request.Jobs > 256 ||
-		request.Timeout < time.Millisecond || request.Timeout > 24*time.Hour {
+		request.Timeout < time.Millisecond || request.Timeout > 24*time.Hour ||
+		request.Coverage != nil && !allowCoverage {
 		return nil, task.ErrInvalidArgument
 	}
 	snapshot, project, profile, instance, err := c.resolve(
@@ -314,6 +339,18 @@ func (c *Coordinator) prepare(
 	)
 	if err != nil {
 		return nil, err
+	}
+	baseProfile := profile
+	coverage, err := c.prepareCoverageOptions(request.Coverage, baseProfile)
+	if err != nil {
+		return nil, err
+	}
+	if coverage != nil {
+		if instance.Family != toolchain.FamilyClangCL || instance.Version == "" ||
+			instance.Coverage.LLVMProfdata == "" || instance.Coverage.LLVMCov == "" {
+			return nil, task.ErrInvalidArgument
+		}
+		profile.BinaryDir = coverage.BinaryDir
 	}
 	if err := c.ensureBuildDirectory(profile.BinaryDir); err != nil {
 		return nil, err
@@ -355,11 +392,12 @@ func (c *Coordinator) prepare(
 			fingerprintInput(
 				snapshot.Generation, profile, c.config.Installation.Identity,
 				toolchainIdentity, reply, c.config.Installation.UnityRunnerGenerator.Identity,
+				coverage,
 			),
 		)
 	}
 	state, err := c.configureState(
-		snapshot, project, profile, instance, reply, request.TargetIDs,
+		snapshot, project, profile, instance, reply, request.TargetIDs, coverage,
 	)
 	if err != nil {
 		return nil, err
@@ -374,6 +412,7 @@ func (c *Coordinator) prepare(
 		Project: project, Profile: profile, Toolchain: instance,
 		Targets: targets, TargetIDs: request.TargetIDs, Jobs: request.Jobs,
 		Configure: needsConfigure, ConfigureState: state,
+		Coverage: coverage,
 	})
 	if err != nil {
 		return nil, err
@@ -383,6 +422,12 @@ func (c *Coordinator) prepare(
 	)
 	if err != nil {
 		return nil, err
+	}
+	if coverage != nil {
+		if err := boundary.attachCoveragePlan(coverage); err != nil {
+			_ = boundary.Release()
+			return nil, err
+		}
 	}
 	lockOwned = false
 	boundaryOwned := true
@@ -424,6 +469,7 @@ func (c *Coordinator) prepare(
 		snapshot: snapshot, project: project, profile: profile,
 		toolchain: preparedToolchain,
 		targets:   cloneTargets(targets),
+		coverage:  cloneCoverageOptions(coverage),
 	}, nil
 }
 
@@ -495,6 +541,7 @@ func (c *Coordinator) Succeeded(
 	fingerprint := configureFingerprint(
 		state.WorkspaceGeneration, state.Profile, state.CMakeIdentity,
 		toolchainIdentity, reply, state.UnityRunnerGeneratorIdentity,
+		state.Coverage,
 	)
 	if fingerprint == "" {
 		return ErrConfigureRequired
@@ -524,6 +571,7 @@ type configureStepState struct {
 	AllowedRoots                 []string           `json:"allowedRoots"`
 	TargetIDs                    []string           `json:"targetIds"`
 	TargetNames                  map[string]string  `json:"targetNames"`
+	Coverage                     *CoverageOptions   `json:"coverage,omitempty"`
 }
 
 func (c *Coordinator) configureState(
@@ -533,6 +581,7 @@ func (c *Coordinator) configureState(
 	instance toolchain.Instance,
 	reply cmake.FileAPIReply,
 	targetIDs []string,
+	coverage *CoverageOptions,
 ) (json.RawMessage, error) {
 	targetNames := make(map[string]string, len(targetIDs))
 	byID := make(map[string]string, len(reply.Targets))
@@ -558,6 +607,7 @@ func (c *Coordinator) configureState(
 		BuildDirectory:               buildDirectory,
 		AllowedRoots:                 c.fileAPIAllowedRoots(profile, instance, snapshot.Toolchains),
 		TargetIDs:                    append([]string{}, targetIDs...), TargetNames: targetNames,
+		Coverage: cloneCoverageOptions(coverage),
 	})
 	if err != nil {
 		return nil, task.ErrInvalidArgument
@@ -712,6 +762,75 @@ func (c *Coordinator) ensureBuildDirectory(path string) error {
 	return errors.Join(validationErr, releaseErr)
 }
 
+func (c *Coordinator) prepareCoverageOptions(
+	options *CoverageOptions,
+	baseProfile cmake.BuildProfile,
+) (*CoverageOptions, error) {
+	if options == nil {
+		return nil, nil
+	}
+	if !validCoverageOptions(options, baseProfile.BinaryDir) {
+		return nil, task.ErrInvalidArgument
+	}
+	for _, path := range []string{options.BinaryDir, options.TopLevelInclude.Path} {
+		if !pathWithinRoot(c.config.ServiceDataRoot, path) ||
+			pathWithinRoot(c.config.WorkspaceRoot.NativePath, path) {
+			return nil, task.ErrInvalidArgument
+		}
+	}
+	info, err := os.Lstat(options.TopLevelInclude.Path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, task.ErrInvalidArgument
+	}
+	return cloneCoverageOptions(options), nil
+}
+
+func validCoverageOptions(options *CoverageOptions, baseBinaryDir string) bool {
+	if options == nil || options.BinaryDir == "" || options.TopLevelInclude.Path == "" ||
+		!filepath.IsAbs(options.BinaryDir) || !filepath.IsAbs(options.TopLevelInclude.Path) ||
+		filepath.Clean(options.BinaryDir) != options.BinaryDir ||
+		filepath.Clean(options.TopLevelInclude.Path) != options.TopLevelInclude.Path ||
+		baseBinaryDir != "" && sameNativePath(options.BinaryDir, baseBinaryDir) ||
+		options.TopLevelInclude.Identity != options.InstrumentationFingerprint ||
+		!validLowerSHA256(options.TopLevelInclude.SHA256) ||
+		!validLowerSHA256(options.InstrumentationFingerprint) {
+		return false
+	}
+	return true
+}
+
+func validLowerSHA256(value string) bool {
+	if len(value) != 64 || value != strings.ToLower(value) {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
+}
+
+func pathWithinRoot(root, path string) bool {
+	relative, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
+	return err == nil && relative != ".." &&
+		!strings.HasPrefix(relative, ".."+string(filepath.Separator)) &&
+		!filepath.IsAbs(relative)
+}
+
+func sameNativePath(left, right string) bool {
+	left = filepath.Clean(left)
+	right = filepath.Clean(right)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(left, right)
+	}
+	return left == right
+}
+
+func cloneCoverageOptions(value *CoverageOptions) *CoverageOptions {
+	if value == nil {
+		return nil
+	}
+	result := *value
+	return &result
+}
+
 func (c *Coordinator) buildDirectoryIdentity(path string) (string, error) {
 	roots := []struct {
 		prefix string
@@ -736,8 +855,9 @@ func fingerprintInput(
 	toolchainIdentity string,
 	reply cmake.FileAPIReply,
 	unityRunnerGeneratorIdentity string,
+	coverage *CoverageOptions,
 ) cmake.ProfileFingerprintInput {
-	return cmake.ProfileFingerprintInput{
+	result := cmake.ProfileFingerprintInput{
 		WorkspaceGeneration: generation, Profile: profile,
 		CMakeIdentity:                cmakeIdentity,
 		UnityRunnerGeneratorIdentity: unityRunnerGeneratorIdentity,
@@ -745,6 +865,18 @@ func fingerprintInput(
 		CMakeInputStates:             reply.CMakeInputStates, Cache: reply.Cache,
 		FileAPIState: reply.StateFiles,
 	}
+	if coverage != nil {
+		result.CMakeInputStates = append(
+			append([]cmake.FingerprintFile(nil), result.CMakeInputStates...),
+			coverage.TopLevelInclude,
+		)
+		sum := sha256.Sum256([]byte(
+			"coverage-configure-v1\x00" + result.ToolchainIdentity + "\x00" +
+				coverage.InstrumentationFingerprint,
+		))
+		result.ToolchainIdentity = hex.EncodeToString(sum[:])
+	}
+	return result
 }
 
 func configureFingerprint(
@@ -754,10 +886,12 @@ func configureFingerprint(
 	toolchainIdentity string,
 	reply cmake.FileAPIReply,
 	unityRunnerGeneratorIdentity string,
+	coverage *CoverageOptions,
 ) string {
 	return cmake.ConfigureFingerprint(fingerprintInput(
 		generation, profile, cmakeIdentity, toolchainIdentity, reply,
 		unityRunnerGeneratorIdentity,
+		coverage,
 	))
 }
 

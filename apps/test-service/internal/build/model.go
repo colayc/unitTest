@@ -3,6 +3,8 @@ package build
 import (
 	"errors"
 	"time"
+
+	"unit-test-ide.local/test-service/internal/cmake"
 )
 
 var (
@@ -22,6 +24,13 @@ type StartRequest struct {
 	TargetIDs           []string
 	Jobs                int
 	Timeout             time.Duration
+	Coverage            *CoverageOptions `json:"-"`
+}
+
+type CoverageOptions struct {
+	BinaryDir                  string
+	TopLevelInclude            cmake.FingerprintFile
+	InstrumentationFingerprint string
 }
 
 type TargetsRequest struct {

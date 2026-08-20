@@ -2,15 +2,19 @@ package build
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"unit-test-ide.local/test-service/internal/cmake"
+	"unit-test-ide.local/test-service/internal/coveragellvm"
 	"unit-test-ide.local/test-service/internal/discovery"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/taskstore"
@@ -98,7 +102,7 @@ func TestCoordinatorPlansConfigureThenSkipsItForUnchangedSuccessfulState(t *test
 		fixture.installation.Identity,
 		fixture.toolchain.ID,
 		reply,
-		"",
+		"", nil,
 	)
 	fixture.configurations.value = taskstore.BuildConfiguration{
 		WorkspaceID: fixture.root.ID, ProjectID: fixture.project.ID,
@@ -220,6 +224,161 @@ func TestCoordinatorPreparePlanSharesBoundaryWithoutCreatingNestedTask(
 	}
 }
 
+func TestCoordinatorPreparePlanOwnsCoverageIsolationAndRuntimeOnlyFields(t *testing.T) {
+	fixture := newCoordinatorFixture(t)
+	fixture.request.TargetIDs = nil
+	include := filepath.Join(fixture.dataRoot(), "coverage-task", "coverage-instrumentation.cmake")
+	if err := os.MkdirAll(filepath.Dir(include), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	contents := []byte("trusted instrumentation\n")
+	if err := os.WriteFile(include, contents, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(contents)
+	digest := hex.EncodeToString(sum[:])
+	options := &CoverageOptions{
+		BinaryDir: filepath.Join(fixture.dataRoot(), "coverage-build", "identity"),
+		TopLevelInclude: cmake.FingerprintFile{
+			Path: include, Identity: strings.Repeat("4", 64), SHA256: digest,
+		},
+		InstrumentationFingerprint: strings.Repeat("4", 64),
+	}
+	fixture.request.Coverage = options
+	encoded, err := json.Marshal(fixture.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "coverage") || strings.Contains(string(encoded), options.BinaryDir) {
+		t.Fatalf("StartRequest JSON exposed runtime-only coverage fields: %s", encoded)
+	}
+	if _, err := fixture.coordinator.Start(context.Background(), fixture.request); !errors.Is(err, task.ErrInvalidArgument) {
+		t.Fatalf("Start() coverage error = %v, want task.ErrInvalidArgument", err)
+	}
+	if fixture.starter.calls != 0 {
+		t.Fatalf("normal Start created %d tasks for runtime-only coverage request", fixture.starter.calls)
+	}
+	if runtime.GOOS != "windows" {
+		if _, err := fixture.coordinator.PreparePlan(context.Background(), fixture.request); !errors.Is(err, task.ErrInvalidArgument) {
+			t.Fatalf("non-Windows PreparePlan() = %v, want unsupported invalid argument", err)
+		}
+		return
+	}
+	instance := fixture.toolchain
+	instance.Family = toolchain.FamilyClangCL
+	instance.Version = "20.1.8"
+	toolRoot := filepath.Join(fixture.dataRoot(), "llvm", "bin")
+	if err := os.MkdirAll(toolRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	instance.CCompiler = filepath.Join(toolRoot, "clang-cl.exe")
+	instance.CXXCompiler = instance.CCompiler
+	instance.Coverage.LLVMProfdata = filepath.Join(toolRoot, "llvm-profdata.exe")
+	instance.Coverage.LLVMCov = filepath.Join(toolRoot, "llvm-cov.exe")
+	for _, path := range []string{instance.CXXCompiler, instance.Coverage.LLVMProfdata, instance.Coverage.LLVMCov} {
+		if err := os.WriteFile(path, []byte(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fixture.toolchain = instance
+	fixture.snapshot.Toolchains = []toolchain.Instance{instance}
+	fixture.profile.ToolchainID = instance.ID
+	fixture.snapshot.Profiles = []cmake.BuildProfile{fixture.profile}
+	prepared, err := fixture.coordinator.PreparePlan(context.Background(), fixture.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.ReleaseIfUnadopted()
+	if prepared.CoverageBinaryDir() != options.BinaryDir || prepared.Profile().BinaryDir != options.BinaryDir {
+		t.Fatalf("coverage binary dir = %q, profile = %#v", prepared.CoverageBinaryDir(), prepared.Profile())
+	}
+	if prepared.CoverageBinaryDir() == fixture.profile.BinaryDir {
+		t.Fatal("coverage plan reused the base profile binary directory")
+	}
+	if err := prepared.Boundary().ValidateExecutable(fixture.installation.Executable); err == nil {
+		t.Fatal("coverage boundary became executable before retained LLVM toolset transfer")
+	}
+
+	toolset, err := coveragellvm.PinToolset(instance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := prepared.AttachCoverageToolset(toolset); err != nil {
+		_ = toolset.Close()
+		t.Fatalf("AttachCoverageToolset() = %v", err)
+	}
+	if err := prepared.Boundary().ValidateExecutable(fixture.installation.Executable); err != nil {
+		t.Fatalf("coverage boundary rejected CMake after retained toolset transfer: %v", err)
+	}
+	prepared.ReleaseIfUnadopted()
+	if err := toolset.Verify(); err == nil {
+		t.Fatal("boundary release did not close transferred toolset")
+	}
+}
+
+func TestCoverageConfigureFingerprintTracksInstrumentationAndToolIdentityOnly(t *testing.T) {
+	fixture := newCoordinatorFixture(t)
+	reply := fixture.validReply()
+	options := &CoverageOptions{
+		BinaryDir: filepath.Join(fixture.dataRoot(), "coverage-build"),
+		TopLevelInclude: cmake.FingerprintFile{
+			Path:     filepath.Join(fixture.dataRoot(), "task", "coverage.cmake"),
+			Identity: strings.Repeat("4", 64), SHA256: strings.Repeat("5", 64),
+		},
+		InstrumentationFingerprint: strings.Repeat("4", 64),
+	}
+	base := configureFingerprint(
+		fixture.snapshot.Generation, fixture.profile, fixture.installation.Identity,
+		fixture.toolchain.ID, reply, "", options,
+	)
+	if base == "" {
+		t.Fatal("coverage configure fingerprint is empty")
+	}
+	mutations := []struct {
+		name string
+		edit func(*string, *CoverageOptions)
+	}{
+		{"instrumentation digest", func(_ *string, value *CoverageOptions) { value.TopLevelInclude.SHA256 = strings.Repeat("6", 64) }},
+		{"template fingerprint", func(_ *string, value *CoverageOptions) {
+			value.InstrumentationFingerprint = strings.Repeat("7", 64)
+			value.TopLevelInclude.Identity = value.InstrumentationFingerprint
+		}},
+		{"tool identity", func(identity *string, _ *CoverageOptions) { *identity = "other-toolchain" }},
+	}
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			identity := fixture.toolchain.ID
+			changed := *options
+			mutation.edit(&identity, &changed)
+			got := configureFingerprint(
+				fixture.snapshot.Generation, fixture.profile, fixture.installation.Identity,
+				identity, reply, "", &changed,
+			)
+			if got == base {
+				t.Fatalf("configure fingerprint did not track %s", mutation.name)
+			}
+		})
+	}
+	source := filepath.Join(fixture.root.NativePath, "project", "ordinary.cpp")
+	if err := os.WriteFile(source, []byte("int first;"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("int second;"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stable := configureFingerprint(
+		fixture.snapshot.Generation, fixture.profile, fixture.installation.Identity,
+		fixture.toolchain.ID, reply, "", options,
+	)
+	if stable != base {
+		t.Fatal("ordinary source content changed coverage configure fingerprint")
+	}
+}
+
+func (f *coordinatorFixture) dataRoot() string {
+	return filepath.Dir(filepath.Dir(f.profile.BinaryDir))
+}
+
 func TestPresetFileAPIRootsIncludeOnlyServiceDiscoveredToolchains(t *testing.T) {
 	fixture := newCoordinatorFixture(t)
 	preset := fixture.profile
@@ -286,7 +445,7 @@ func TestConfigureObserverWritesStateAndRejectsDisappearedOrRemappedTarget(t *te
 	fixture := newCoordinatorFixture(t)
 	state, err := fixture.coordinator.configureState(
 		fixture.snapshot, fixture.project, fixture.profile, fixture.toolchain,
-		fixture.validReply(), []string{fixture.target.ID},
+		fixture.validReply(), []string{fixture.target.ID}, nil,
 	)
 	if err != nil {
 		t.Fatal(err)
