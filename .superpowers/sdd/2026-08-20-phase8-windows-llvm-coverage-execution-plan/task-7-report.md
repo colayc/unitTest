@@ -585,3 +585,11 @@ Output: both exited 0 with no diagnostics.
 - No blocking concern remains for Task 8's coordinator contract. The open Task 1
   standalone validator ledger item is unchanged and is not claimed by these
   integration tests.
+
+### Commit
+
+- Fix-round-2 implementation and verification evidence: `c1f912c` —
+  `fix: complete coverage execution fault matrix`.
+- This commit identifier was recorded in a report-only follow-up commit; that
+  follow-up identifier is supplied in the agent handoff because a commit cannot
+  contain its own final hash.
