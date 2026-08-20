@@ -129,34 +129,74 @@ func (s *Store) commitArtifactData(
 	at time.Time,
 	data []byte,
 ) (artifact task.Artifact, resultErr error) {
+	artifact, capability, err := s.commitArtifactDataRetained(
+		ctx, taskID, artifactID, kind, at, data,
+	)
+	if capability != nil {
+		err = errors.Join(err, capability.close())
+	}
+	if err != nil {
+		return task.Artifact{}, err
+	}
+	return artifact, nil
+}
+
+type finalizedArtifactCapability struct {
+	store          *Store
+	artifact       task.Artifact
+	parentRelative string
+	targetName     string
+	parent         *os.Root
+	parentIdentity os.FileInfo
+	file           *os.File
+	fileIdentity   os.FileInfo
+}
+
+func (s *Store) commitArtifactDataRetained(
+	ctx context.Context,
+	taskID string,
+	artifactID string,
+	kind string,
+	at time.Time,
+	data []byte,
+) (artifact task.Artifact, capability *finalizedArtifactCapability, resultErr error) {
 	if s == nil || s.root == nil || ctx == nil {
-		return task.Artifact{}, ErrStoreUnavailable
+		return task.Artifact{}, nil, ErrStoreUnavailable
 	}
 	if err := ctx.Err(); err != nil {
-		return task.Artifact{}, err
+		return task.Artifact{}, nil, err
 	}
 	mimeType, extension, ok := artifactDescriptor(kind)
 	if !validGeneratedID(taskID) || !validGeneratedID(artifactID) || at.IsZero() ||
 		!ok {
-		return task.Artifact{}, ErrInvalidArtifact
+		return task.Artifact{}, nil, ErrInvalidArtifact
 	}
 	relative := artifactRelativePathFor(taskID, artifactID, extension)
 	parentRelative := path.Dir(relative)
 	if err := validateRootPath(s.root, parentRelative, true); err != nil {
-		return task.Artifact{}, err
+		return task.Artifact{}, nil, err
 	}
 	if err := s.root.MkdirAll(nativePath(parentRelative), 0o700); err != nil {
-		return task.Artifact{}, rootOperationError(err)
+		return task.Artifact{}, nil, rootOperationError(err)
 	}
 	parent, parentIdentity, err := openVerifiedRoot(s.root, parentRelative)
 	if err != nil {
-		return task.Artifact{}, err
+		return task.Artifact{}, nil, err
 	}
-	defer parent.Close()
+	parentTransferred := false
+	defer func() {
+		if !parentTransferred {
+			if err := parent.Close(); err != nil && resultErr == nil {
+				artifact = task.Artifact{}
+				capability = nil
+				resultErr = ErrStoreUnavailable
+			}
+		}
+	}()
 
 	temporaryName, temporary, err := createTemporary(parent)
 	if err != nil {
-		return task.Artifact{}, err
+		return task.Artifact{}, nil, err
 	}
 	temporaryPresent := true
 	temporaryOpen := true
@@ -164,6 +204,7 @@ func (s *Store) commitArtifactData(
 		if temporaryOpen {
 			if err := temporary.Close(); err != nil && resultErr == nil {
 				artifact = task.Artifact{}
+				capability = nil
 				resultErr = ErrStoreUnavailable
 			}
 		}
@@ -172,16 +213,17 @@ func (s *Store) commitArtifactData(
 			if removeErr != nil {
 				if _, statErr := parent.Lstat(temporaryName); statErr == nil || !errors.Is(statErr, os.ErrNotExist) {
 					artifact = task.Artifact{}
+					capability = nil
 					resultErr = ErrStoreUnavailable
 				}
 			}
 		}
 	}()
 	if _, err := temporary.Write(data); err != nil {
-		return task.Artifact{}, ErrStoreUnavailable
+		return task.Artifact{}, nil, ErrStoreUnavailable
 	}
 	if err := temporary.Sync(); err != nil {
-		return task.Artifact{}, ErrStoreUnavailable
+		return task.Artifact{}, nil, ErrStoreUnavailable
 	}
 	if s.hooks.afterTempSync != nil {
 		s.hooks.afterTempSync()
@@ -191,17 +233,17 @@ func (s *Store) commitArtifactData(
 		s.hooks.beforePublish(temporaryName)
 	}
 	if !rootIdentityMatches(s.root, parentRelative, parentIdentity) {
-		return task.Artifact{}, ErrUnsafePath
+		return task.Artifact{}, nil, ErrUnsafePath
 	}
 	if err := ctx.Err(); err != nil {
-		return task.Artifact{}, err
+		return task.Artifact{}, nil, err
 	}
 	targetName := path.Base(relative)
 	if err := parent.Link(temporaryName, targetName); err != nil {
 		if errors.Is(err, os.ErrExist) {
-			return task.Artifact{}, ErrInvalidArtifact
+			return task.Artifact{}, nil, ErrInvalidArtifact
 		}
-		return task.Artifact{}, rootOperationError(err)
+		return task.Artifact{}, nil, rootOperationError(err)
 	}
 	published := true
 	var publishedIdentity os.FileInfo
@@ -236,11 +278,11 @@ func (s *Store) commitArtifactData(
 		published = false
 		return finalize(directoryFinalizeRollback)
 	}
-	failPublished := func(cause error) (task.Artifact, error) {
+	failPublished := func(cause error) (task.Artifact, *finalizedArtifactCapability, error) {
 		if rollbackErr := rollback(); rollbackErr != nil {
-			return task.Artifact{}, rollbackErr
+			return task.Artifact{}, nil, rollbackErr
 		}
-		return task.Artifact{}, cause
+		return task.Artifact{}, nil, cause
 	}
 
 	if !rootIdentityMatches(s.root, parentRelative, parentIdentity) {
@@ -250,10 +292,17 @@ func (s *Store) commitArtifactData(
 	if err != nil {
 		return failPublished(err)
 	}
+	finalTransferred := false
+	defer func() {
+		if !finalTransferred {
+			if err := final.Close(); err != nil && resultErr == nil {
+				artifact = task.Artifact{}
+				capability = nil
+				resultErr = ErrStoreUnavailable
+			}
+		}
+	}()
 	temporaryInfo, temporaryErr := temporary.Stat()
-	if closeErr := final.Close(); closeErr != nil {
-		return failPublished(ErrStoreUnavailable)
-	}
 	if temporaryErr != nil || !temporaryInfo.Mode().IsRegular() || !finalInfo.Mode().IsRegular() || !os.SameFile(temporaryInfo, finalInfo) {
 		return failPublished(ErrUnsafePath)
 	}
@@ -281,7 +330,7 @@ func (s *Store) commitArtifactData(
 	temporaryOpen = false
 
 	sum := sha256.Sum256(data)
-	return task.Artifact{
+	artifact = task.Artifact{
 		ID:           artifactID,
 		TaskID:       taskID,
 		Kind:         kind,
@@ -290,56 +339,134 @@ func (s *Store) commitArtifactData(
 		Size:         int64(len(data)),
 		SHA256:       hex.EncodeToString(sum[:]),
 		CreatedAt:    at,
-	}, nil
+	}
+	capability = &finalizedArtifactCapability{
+		store: s, artifact: artifact,
+		parentRelative: parentRelative, targetName: targetName,
+		parent: parent, parentIdentity: parentIdentity,
+		file: final, fileIdentity: finalInfo,
+	}
+	parentTransferred = true
+	finalTransferred = true
+	return artifact, capability, nil
 }
 
-func (s *Store) rollbackCommittedArtifacts(artifacts []task.Artifact) error {
-	if s == nil || s.root == nil {
-		return ErrStoreUnavailable
+func validateFinalizedCapabilities(
+	artifacts []task.Artifact,
+	capabilities []*finalizedArtifactCapability,
+) error {
+	if len(artifacts) != len(capabilities) {
+		return ErrInvalidArtifact
 	}
-	var result error
-	for index := len(artifacts) - 1; index >= 0; index-- {
-		artifact := artifacts[index]
-		if !validArtifact(artifact) {
-			return errors.Join(result, ErrInvalidArtifact)
+	for index := range capabilities {
+		capability := capabilities[index]
+		if capability == nil || artifacts[index] != capability.artifact ||
+			!validArtifact(artifacts[index]) {
+			return ErrInvalidArtifact
 		}
-		parentRelative := path.Dir(artifact.RelativePath)
-		parent, parentIdentity, err := openVerifiedRoot(s.root, parentRelative)
-		if err != nil {
-			return errors.Join(result, err)
+		if err := capability.validate(); err != nil {
+			return err
 		}
-		targetName := path.Base(artifact.RelativePath)
-		file, info, err := openVerifiedFile(parent, targetName)
-		if err != nil {
-			_ = parent.Close()
-			return errors.Join(result, err)
+	}
+	return nil
+}
+
+func rollbackFinalizedCapabilities(
+	artifacts []task.Artifact,
+	capabilities []*finalizedArtifactCapability,
+) (result error) {
+	defer func() {
+		result = errors.Join(result, closeFinalizedCapabilities(capabilities))
+	}()
+	// Preflight the whole graph before removing any sibling. A replacement of
+	// even one object makes the entire rollback fail closed.
+	if err := validateFinalizedCapabilities(artifacts, capabilities); err != nil {
+		return err
+	}
+	for index := len(capabilities) - 1; index >= 0; index-- {
+		capability := capabilities[index]
+		if err := capability.validatePathIdentity(); err != nil {
+			return err
 		}
-		hash := sha256.New()
-		_, digestErr := io.Copy(hash, file)
-		closeErr := file.Close()
-		expectedHash, decodeErr := hex.DecodeString(artifact.SHA256)
-		if digestErr != nil || closeErr != nil || decodeErr != nil ||
-			info.Size() != artifact.Size ||
-			subtle.ConstantTimeCompare(hash.Sum(nil), expectedHash) != 1 ||
-			!rootIdentityMatches(s.root, parentRelative, parentIdentity) {
-			_ = parent.Close()
-			return errors.Join(result, ErrUnsafePath)
+		if err := capability.parent.Remove(capability.targetName); err != nil {
+			return rootOperationError(err)
 		}
-		current, err := parent.Lstat(targetName)
-		if err != nil || isLinkInfo(current) || !current.Mode().IsRegular() || !os.SameFile(info, current) {
-			_ = parent.Close()
-			return errors.Join(result, ErrUnsafePath)
-		}
-		if err := parent.Remove(targetName); err != nil {
-			_ = parent.Close()
-			return errors.Join(result, rootOperationError(err))
-		}
-		if err := syncRootDirectory(parent); err != nil {
+		if err := syncRootDirectory(capability.parent); err != nil {
 			result = errors.Join(result, err)
 		}
-		if err := parent.Close(); err != nil {
+	}
+	return result
+}
+
+func closeFinalizedCapabilities(capabilities []*finalizedArtifactCapability) (result error) {
+	for _, capability := range capabilities {
+		if capability != nil {
+			result = errors.Join(result, capability.close())
+		}
+	}
+	return result
+}
+
+func (capability *finalizedArtifactCapability) validate() error {
+	if capability == nil || capability.store == nil || capability.store.root == nil ||
+		capability.parent == nil || capability.file == nil ||
+		capability.parentIdentity == nil || capability.fileIdentity == nil {
+		return ErrStoreUnavailable
+	}
+	if !rootIdentityMatches(
+		capability.store.root,
+		capability.parentRelative,
+		capability.parentIdentity,
+	) {
+		return ErrUnsafePath
+	}
+	info, err := capability.file.Stat()
+	if err != nil || !info.Mode().IsRegular() ||
+		!os.SameFile(info, capability.fileIdentity) ||
+		info.Size() != capability.artifact.Size {
+		return ErrUnsafePath
+	}
+	if _, err := capability.file.Seek(0, io.SeekStart); err != nil {
+		return ErrStoreUnavailable
+	}
+	hash := sha256.New()
+	if _, err := io.Copy(hash, capability.file); err != nil {
+		return ErrStoreUnavailable
+	}
+	expectedHash, err := hex.DecodeString(capability.artifact.SHA256)
+	if err != nil || subtle.ConstantTimeCompare(hash.Sum(nil), expectedHash) != 1 {
+		return ErrUnsafePath
+	}
+	return capability.validatePathIdentity()
+}
+
+func (capability *finalizedArtifactCapability) validatePathIdentity() error {
+	if capability == nil || capability.parent == nil || capability.fileIdentity == nil {
+		return ErrStoreUnavailable
+	}
+	current, err := capability.parent.Lstat(capability.targetName)
+	if err != nil || isLinkInfo(current) || !current.Mode().IsRegular() ||
+		!os.SameFile(current, capability.fileIdentity) {
+		return ErrUnsafePath
+	}
+	return nil
+}
+
+func (capability *finalizedArtifactCapability) close() (result error) {
+	if capability == nil {
+		return nil
+	}
+	if capability.file != nil {
+		if err := capability.file.Close(); err != nil {
 			result = errors.Join(result, ErrStoreUnavailable)
 		}
+		capability.file = nil
+	}
+	if capability.parent != nil {
+		if err := capability.parent.Close(); err != nil {
+			result = errors.Join(result, ErrStoreUnavailable)
+		}
+		capability.parent = nil
 	}
 	return result
 }

@@ -269,6 +269,12 @@ type FinalizedArtifactRollback interface {
 	RollbackFinalized(context.Context, []Artifact) error
 }
 
+// FinalizedArtifactReleaser releases identity capabilities after the SQLite
+// transaction has made finalized artifact metadata durable.
+type FinalizedArtifactReleaser interface {
+	ReleaseFinalized(context.Context, []Artifact) error
+}
+
 type ArtifactWriter interface {
 	OpenTask(context.Context, string, Kind) (ArtifactSink, error)
 }

@@ -1275,7 +1275,11 @@ func (m *Manager) persistFinished(
 		}
 		return current, err
 	}
+	var artifactReleaseErr error
 	if current.Kind == KindCoverageRun {
+		if releaser, ok := owner.artifactSink.(FinalizedArtifactReleaser); ok {
+			artifactReleaseErr = releaser.ReleaseFinalized(context.Background(), artifacts)
+		}
 		owner.artifactSink = nil
 	}
 	owner.task = stored
@@ -1285,6 +1289,10 @@ func (m *Manager) persistFinished(
 	}
 	if !m.publishAll(committed) {
 		m.tripPublisher(active)
+		return stored, ErrStorageUnavailable
+	}
+	if artifactReleaseErr != nil {
+		m.tripStorage(active)
 		return stored, ErrStorageUnavailable
 	}
 	return stored, nil

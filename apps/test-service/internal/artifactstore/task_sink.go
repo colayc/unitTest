@@ -27,18 +27,22 @@ const (
 )
 
 type taskSink struct {
-	mu          sync.Mutex
-	store       *Store
-	taskID      string
-	taskKind    task.Kind
-	stdout      bytes.Buffer
-	stderr      bytes.Buffer
-	diagnostics bytes.Buffer
-	json        map[string]pendingArtifact
-	finished    bool
-	aborted     bool
-	finalized   []task.Artifact
-	rolledBack  bool
+	mu           sync.Mutex
+	store        *Store
+	taskID       string
+	taskKind     task.Kind
+	stdout       bytes.Buffer
+	stderr       bytes.Buffer
+	diagnostics  bytes.Buffer
+	json         map[string]pendingArtifact
+	finished     bool
+	aborted      bool
+	finalized    []task.Artifact
+	capabilities []*finalizedArtifactCapability
+	rolledBack   bool
+	rollbackErr  error
+	released     bool
+	releaseErr   error
 }
 
 type pendingArtifact struct {
@@ -326,18 +330,21 @@ func (s *taskSink) Finalize(
 	s.mu.Unlock()
 
 	artifacts := make([]task.Artifact, 0, len(pending))
+	capabilities := make([]*finalizedArtifactCapability, 0, len(pending))
 	for _, value := range pending {
-		artifact, err := s.store.commitArtifactData(
+		artifact, capability, err := s.store.commitArtifactDataRetained(
 			ctx, s.taskID, value.id, value.kind, at, value.data,
 		)
 		if err != nil {
-			rollbackErr := s.store.rollbackCommittedArtifacts(artifacts)
+			rollbackErr := rollbackFinalizedCapabilities(artifacts, capabilities)
 			return nil, errors.Join(err, rollbackErr)
 		}
 		artifacts = append(artifacts, artifact)
+		capabilities = append(capabilities, capability)
 	}
 	s.mu.Lock()
 	s.finalized = append([]task.Artifact{}, artifacts...)
+	s.capabilities = capabilities
 	s.mu.Unlock()
 	return artifacts, nil
 }
@@ -361,13 +368,45 @@ func (s *taskSink) RollbackFinalized(ctx context.Context, artifacts []task.Artif
 		}
 	}
 	if s.rolledBack {
-		return nil
+		return s.rollbackErr
 	}
-	if err := s.store.rollbackCommittedArtifacts(s.finalized); err != nil {
+	if s.released {
+		return ErrStoreUnavailable
+	}
+	s.rollbackErr = rollbackFinalizedCapabilities(s.finalized, s.capabilities)
+	s.capabilities = nil
+	s.rolledBack = true
+	return s.rollbackErr
+}
+
+func (s *taskSink) ReleaseFinalized(ctx context.Context, artifacts []task.Artifact) error {
+	if s == nil || ctx == nil {
+		return ErrInvalidArtifact
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	s.rolledBack = true
-	return nil
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.store == nil || !s.finished || s.aborted || s.finalized == nil ||
+		len(s.finalized) != len(artifacts) {
+		return ErrStoreUnavailable
+	}
+	for index := range artifacts {
+		if artifacts[index] != s.finalized[index] {
+			return ErrInvalidArtifact
+		}
+	}
+	if s.released {
+		return s.releaseErr
+	}
+	if s.rolledBack {
+		return ErrStoreUnavailable
+	}
+	s.releaseErr = closeFinalizedCapabilities(s.capabilities)
+	s.capabilities = nil
+	s.released = true
+	return s.releaseErr
 }
 
 func (s *taskSink) Abort(ctx context.Context) error {
@@ -611,3 +650,4 @@ var _ task.ArtifactWriter = (*Store)(nil)
 var _ task.ArtifactSink = (*taskSink)(nil)
 var _ task.CoverageArtifactSink = (*taskSink)(nil)
 var _ task.FinalizedArtifactRollback = (*taskSink)(nil)
+var _ task.FinalizedArtifactReleaser = (*taskSink)(nil)

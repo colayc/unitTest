@@ -441,6 +441,7 @@ type sqliteCoverageFixture struct {
 	workspaceRoot workspace.Root
 	executionRoot string
 	artifactRoot  string
+	sqlitePath    string
 	artifacts     *artifactstore.Store
 	store         *coordinatorSQLiteStore
 	publisher     *coordinatorPublisher
@@ -524,7 +525,8 @@ func newSQLiteCoverageFixtureInternal(
 	if err := os.Mkdir(executionRoot, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	sqlite, err := taskstore.Open(filepath.Join(root, "tasks.sqlite"))
+	sqlitePath := filepath.Join(root, "tasks.sqlite")
+	sqlite, err := taskstore.Open(sqlitePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -595,7 +597,7 @@ func newSQLiteCoverageFixtureInternal(
 	}
 	return &sqliteCoverageFixture{
 		workspaceRoot: workspaceRoot, executionRoot: executionRoot,
-		artifactRoot: artifactRoot, artifacts: artifacts,
+		artifactRoot: artifactRoot, sqlitePath: sqlitePath, artifacts: artifacts,
 		store: store, publisher: publisher, manager: manager,
 		aggregate: aggregate, persisted: persisted,
 	}
@@ -628,26 +630,16 @@ func (fixture *sqliteCoverageFixture) awaitFinished(t *testing.T) task.Task {
 
 type coordinatorSQLiteStore struct {
 	*taskstore.Store
-	catalog      testdomain.Catalog
-	mu           sync.Mutex
-	lastApplyErr error
-	lastMutation task.Mutation
-	taskMutation func(*task.Task)
-	runMutation  func(*coveragedomain.Run)
+	catalog         testdomain.Catalog
+	mu              sync.Mutex
+	lastApplyErr    error
+	lastMutation    task.Mutation
+	taskMutation    func(*task.Task)
+	runMutation     func(*coveragedomain.Run)
 	catalogMutation func(*testdomain.Catalog)
-	terminalApplyFailures int
 }
 
 func (store *coordinatorSQLiteStore) Apply(ctx context.Context, mutation task.Mutation) (task.Task, []task.Event, error) {
-	store.mu.Lock()
-	if mutation.FinishCoverage != nil && store.terminalApplyFailures > 0 {
-		store.terminalApplyFailures--
-		store.lastApplyErr = task.ErrStorageUnavailable
-		store.lastMutation = mutation
-		store.mu.Unlock()
-		return task.Task{}, nil, task.ErrStorageUnavailable
-	}
-	store.mu.Unlock()
 	value, events, err := store.Store.Apply(ctx, mutation)
 	store.mu.Lock()
 	store.lastApplyErr = err

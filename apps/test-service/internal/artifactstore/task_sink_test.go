@@ -135,6 +135,67 @@ func TestCoverageArtifactSinkRollsBackPublishedReportFilesWhenFinalizationFailsP
 	}
 }
 
+func TestCoverageArtifactRollbackNeverDeletesSameContentReplacement(t *testing.T) {
+	root := t.TempDir()
+	store, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	taskID := id(81)
+	raw, err := store.OpenTask(context.Background(), taskID, task.KindCoverageRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := raw.(task.CoverageArtifactSink)
+	for _, input := range []struct {
+		id, kind string
+		body     []byte
+	}{
+		{id(82), "coverage-json", coverageJSON},
+		{id(83), "junit-xml", junitXML},
+		{id(84), "coverage-html", coverageHTML},
+	} {
+		if err := sink.CommitBlob(context.Background(), input.id, input.kind, input.body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	artifacts, err := sink.Finalize(context.Background(), time.Date(2026, 8, 20, 6, 0, 0, 0, time.UTC))
+	if err != nil || len(artifacts) != 3 {
+		t.Fatalf("Finalize() = %#v, %v", artifacts, err)
+	}
+	// Finalization order is kind-sorted and rollback is reverse order. Replace
+	// the last object so a correct rollback refuses before deleting any sibling.
+	replaced := artifacts[len(artifacts)-1]
+	replacedPath := filepath.Join(root, filepath.FromSlash(replaced.RelativePath))
+	body, err := os.ReadFile(replacedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(replacedPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(replacedPath, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rollback := raw.(task.FinalizedArtifactRollback)
+	if err := rollback.RollbackFinalized(context.Background(), artifacts); !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("RollbackFinalized() error = %v, want ErrUnsafePath", err)
+	}
+	if err := rollback.RollbackFinalized(context.Background(), artifacts); !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("duplicate RollbackFinalized() error = %v, want cached ErrUnsafePath", err)
+	}
+	for _, artifact := range artifacts {
+		path := filepath.Join(root, filepath.FromSlash(artifact.RelativePath))
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("rollback deleted finalized/replacement object %q: %v", artifact.Kind, err)
+		}
+	}
+	if err := os.RemoveAll(filepath.Join(root, "tasks", taskID)); err != nil {
+		t.Fatalf("retained rollback handles were not closed: %v", err)
+	}
+}
+
 func TestCoverageArtifactSinkNeverPersistsRawProcessOutputOrDiagnostics(t *testing.T) {
 	root := t.TempDir()
 	store, err := New(root)

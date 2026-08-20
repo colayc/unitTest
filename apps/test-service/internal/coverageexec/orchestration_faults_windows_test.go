@@ -4,6 +4,7 @@ package coverageexec
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +22,48 @@ import (
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/testdomain"
 )
+
+func installLateTerminalSQLiteFault(t *testing.T, sqlitePath string) func() {
+	t.Helper()
+	db, err := sql.Open("sqlite", sqlitePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA busy_timeout=5000`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TRIGGER coverageexec_fail_terminal_coverage
+		BEFORE UPDATE OF status ON coverage_runs
+		WHEN NEW.status='finished'
+		BEGIN
+			SELECT RAISE(ABORT, 'coverageexec injected late terminal failure');
+		END`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			dropDB, err := sql.Open("sqlite", sqlitePath)
+			if err != nil {
+				t.Errorf("open SQLite to drop terminal fault: %v", err)
+				return
+			}
+			defer dropDB.Close()
+			if _, err := dropDB.Exec(`PRAGMA busy_timeout=5000`); err != nil {
+				t.Errorf("configure SQLite fault cleanup: %v", err)
+				return
+			}
+			if _, err := dropDB.Exec(`DROP TRIGGER IF EXISTS coverageexec_fail_terminal_coverage`); err != nil {
+				t.Errorf("drop SQLite terminal fault: %v", err)
+			}
+		})
+	}
+}
 
 func TestCoordinatorRealArtifactFinalizationFailureRollsBackAndTerminalizesUnavailable(t *testing.T) {
 	factory := &orchestrationProcessFactory{
@@ -80,9 +123,8 @@ func TestCoordinatorTerminalSQLiteFailureKeepsBrokerInvisibleAndRecoversExactly(
 	)
 	persistRecoveryCatalog(t, fixture, containerID, itemID)
 	adapter := &orchestrationAdapter{}
-	fixture.store.mu.Lock()
-	fixture.store.terminalApplyFailures = 1
-	fixture.store.mu.Unlock()
+	dropTerminalFault := installLateTerminalSQLiteFault(t, fixture.sqlitePath)
+	defer dropTerminalFault()
 	coordinator, err := NewCoordinator(Config{
 		Tasks: fixture.manager, Store: fixture.store,
 		Build: &orchestrationBuildPreparer{instance: orchestrationToolchain(t)},
@@ -103,17 +145,39 @@ func TestCoordinatorTerminalSQLiteFailureKeepsBrokerInvisibleAndRecoversExactly(
 	}
 	current, currentErr := fixture.store.Store.Get(context.Background(), fixture.persisted.ID)
 	run, runErr := fixture.store.Store.GetCoverageRun(context.Background(), fixture.aggregate.Run.ID)
+	storedTestRun, storedTestErr := fixture.store.Store.GetRun(context.Background(), fixture.aggregate.TestRun.RunID)
 	page, artifactErr := fixture.store.Store.ListArtifacts(context.Background(), fixture.persisted.ID, "", 100)
-	if fixture.manager.Healthy() || adapter.closeCount() != 1 || currentErr != nil || current.Status == task.StatusFinished ||
-		runErr != nil || run.Status == coveragedomain.StatusFinished || artifactErr != nil || len(page.Items) != 0 ||
+	lastMutation, lastApplyErr := fixture.store.applySnapshot()
+	var reportErr error
+	if lastMutation.FinishCoverage != nil && lastMutation.FinishCoverage.Report != nil {
+		_, reportErr = fixture.store.Store.GetCoverageReport(
+			context.Background(), lastMutation.FinishCoverage.Report.ID,
+		)
+	}
+	emptySummary := testdomain.RunSummary{Iterations: 1}
+	if fixture.manager.Healthy() || adapter.closeCount() != 1 ||
+		!errors.Is(lastApplyErr, task.ErrStorageUnavailable) ||
+		lastMutation.FinishCoverage == nil || lastMutation.FinishCoverage.Report == nil ||
+		!errors.Is(reportErr, task.ErrNotFound) ||
+		currentErr != nil || current.Status != task.StatusRunning || current.Outcome != "" ||
+		current.StartedAt == nil || current.FinishedAt != nil || current.ActiveStep != "coverage-publish" ||
+		runErr != nil || run.Status != coveragedomain.StatusQueued || run.Outcome != "" || run.Reason != "" ||
+		run.StartedAt != nil || run.FinishedAt != nil || run.Summary != nil || run.ReportID != "" ||
+		storedTestErr != nil || storedTestRun.Status != testdomain.RunQueued || storedTestRun.Outcome != "" ||
+		storedTestRun.StartedAt != nil || storedTestRun.FinishedAt != nil || !storedTestRun.Incomplete ||
+		!reflect.DeepEqual(storedTestRun.Summary, emptySummary) ||
+		artifactErr != nil || len(page.Items) != 0 ||
 		fixture.publisher.count(task.EventTestRunFinished) != 0 ||
 		fixture.publisher.count(task.EventCoverageRunFinished) != 0 ||
 		fixture.publisher.count(task.EventCoverageReportAvailable) != 0 ||
 		fixture.publisher.count(task.EventTaskFinished) != 0 {
-		t.Fatalf("precommit SQLite failure leaked terminal state: healthy=%v adapter=%d task=%#v/%v run=%#v/%v artifacts=%#v/%v events=%#v",
-			fixture.manager.Healthy(), adapter.closeCount(), current, currentErr, run, runErr, page.Items, artifactErr, fixture.publisher.snapshot())
+		t.Fatalf("late in-transaction SQLite failure leaked terminal state: healthy=%v adapter=%d apply=%#v/%v reportErr=%v task=%#v/%v run=%#v/%v test=%#v/%v artifacts=%#v/%v events=%#v",
+			fixture.manager.Healthy(), adapter.closeCount(), lastMutation, lastApplyErr, reportErr,
+			current, currentErr, run, runErr, storedTestRun, storedTestErr,
+			page.Items, artifactErr, fixture.publisher.snapshot())
 	}
 	assertNoRegularArtifactFiles(t, fixture.artifactRoot, fixture.persisted.ID)
+	dropTerminalFault()
 	recoveredAt := time.Now().UTC().Add(time.Second)
 	events, err := fixture.store.Store.RecoverInterrupted(context.Background(), recoveredAt)
 	if err != nil {
@@ -122,12 +186,19 @@ func TestCoordinatorTerminalSQLiteFailureKeepsBrokerInvisibleAndRecoversExactly(
 	finished, taskErr := fixture.store.Store.Get(context.Background(), fixture.persisted.ID)
 	recovered, coverageErr := fixture.store.Store.GetCoverageRun(context.Background(), fixture.aggregate.Run.ID)
 	testRun, testErr := fixture.store.Store.GetRun(context.Background(), fixture.aggregate.TestRun.RunID)
+	recoveredSummary := testdomain.RunSummary{Total: 1, NotRun: 1, Iterations: 1}
 	if len(events) != 3 || events[0].Type != task.EventTestRunFinished ||
 		events[1].Type != task.EventCoverageRunFinished || events[2].Type != task.EventTaskFinished ||
 		taskErr != nil || finished.Status != task.StatusFinished || finished.Outcome != task.OutcomeInterrupted ||
+		finished.StartedAt == nil || finished.FinishedAt == nil || !finished.FinishedAt.Equal(recoveredAt) ||
 		coverageErr != nil || recovered.Outcome != coveragedomain.OutcomeUnavailable ||
-		recovered.Reason != coveragedomain.ReasonServiceRestarted || recovered.ReportID != "" ||
-		testErr != nil || testRun.Outcome != testdomain.RunInterrupted || !testRun.Incomplete {
+		recovered.Reason != coveragedomain.ReasonServiceRestarted || recovered.ReportID != "" || recovered.Summary != nil ||
+		recovered.StartedAt != nil || recovered.FinishedAt == nil || !recovered.FinishedAt.Equal(recoveredAt) ||
+		testErr != nil || testRun.Status != testdomain.RunCompleted || testRun.Outcome != testdomain.RunInterrupted ||
+		testRun.StartedAt != nil || testRun.FinishedAt == nil || !testRun.FinishedAt.Equal(recoveredAt) ||
+		!testRun.Incomplete || !reflect.DeepEqual(testRun.Summary, recoveredSummary) ||
+		len(testRun.Results) != 1 || testRun.Results[0].Outcome != testdomain.ItemNotRun ||
+		testRun.Results[0].Reason != "service_restarted" {
 		t.Fatalf("SQLite recovery terminal graph: events=%#v task=%#v/%v run=%#v/%v test=%#v/%v",
 			events, finished, taskErr, recovered, coverageErr, testRun, testErr)
 	}
@@ -246,12 +317,22 @@ func TestCoordinatorTaskTimeoutStopsCurrentTreeBeforeLaterPhase(t *testing.T) {
 	}
 	finished := fixture.awaitFinished(t)
 	run, err := fixture.store.GetCoverageRun(context.Background(), fixture.aggregate.Run.ID)
-	if err != nil || finished.Outcome != task.OutcomeTimedOut ||
+	testRun, testErr := fixture.store.GetRun(context.Background(), fixture.aggregate.TestRun.RunID)
+	if err != nil || finished.Status != task.StatusFinished || finished.Outcome != task.OutcomeTimedOut ||
+		finished.StartedAt == nil || finished.FinishedAt == nil || finished.ActiveStep != "" ||
+		finished.ErrorCode != "" || finished.ErrorMessage != "" ||
+		run.Status != coveragedomain.StatusFinished ||
 		run.Outcome != coveragedomain.OutcomeCancelled || run.Reason != coveragedomain.ReasonTaskTimedOut ||
-		run.ReportID != "" || !reflect.DeepEqual(factory.phases(), []string{"configure"}) ||
+		run.StartedAt == nil || !run.StartedAt.Equal(*finished.StartedAt) ||
+		run.FinishedAt == nil || !run.FinishedAt.Equal(*finished.FinishedAt) ||
+		run.Summary != nil || run.ReportID != "" || run.Artifacts != (coveragedomain.ArtifactRefs{}) ||
+		testErr != nil || testRun.Status != testdomain.RunCompleted || testRun.Outcome != testdomain.RunTimedOut ||
+		testRun.StartedAt != nil || testRun.FinishedAt == nil || !testRun.FinishedAt.Equal(*finished.FinishedAt) ||
+		!testRun.Incomplete || !reflect.DeepEqual(testRun.Summary, testdomain.RunSummary{Iterations: 1}) ||
+		len(testRun.Results) != 0 || !reflect.DeepEqual(factory.phases(), []string{"configure"}) ||
 		factory.terminateCount() != 1 {
-		t.Fatalf("Task timeout terminal: task=%#v run=%#v/%v phases=%v terminates=%d",
-			finished, run, err, factory.phases(), factory.terminateCount())
+		t.Fatalf("Task timeout terminal: task=%#v run=%#v/%v test=%#v/%v phases=%v terminates=%d",
+			finished, run, err, testRun, testErr, factory.phases(), factory.terminateCount())
 	}
 	assertNoPublicFaultArtifacts(t, fixture, factory.raw)
 }
@@ -290,12 +371,24 @@ func TestCoordinatorCancellationAfterProfileSealingReleasesRealManifestTreeOnce(
 	}
 	finished := fixture.awaitFinished(t)
 	run, err := fixture.store.GetCoverageRun(context.Background(), fixture.aggregate.Run.ID)
-	if err != nil || finished.Outcome != task.OutcomeCancelled ||
+	testRun, testErr := fixture.store.GetRun(context.Background(), fixture.aggregate.TestRun.RunID)
+	testStartedExact := testRun.StartedAt != nil && testRun.FinishedAt != nil &&
+		testRun.StartedAt.Equal(testRun.FinishedAt.Add(-time.Millisecond))
+	if err != nil || finished.Status != task.StatusFinished || finished.Outcome != task.OutcomeCancelled ||
+		finished.StartedAt == nil || finished.FinishedAt == nil || finished.ActiveStep != "" ||
+		finished.ErrorCode != "" || finished.ErrorMessage != "" ||
+		run.Status != coveragedomain.StatusFinished ||
 		run.Outcome != coveragedomain.OutcomeCancelled || run.Reason != coveragedomain.ReasonUserCancelled ||
-		run.ReportID != "" || !reflect.DeepEqual(factory.phases(), []string{"configure", "build", "test", "merge"}) ||
+		run.StartedAt == nil || !run.StartedAt.Equal(*finished.StartedAt) ||
+		run.FinishedAt == nil || !run.FinishedAt.Equal(*finished.FinishedAt) ||
+		run.Summary != nil || run.ReportID != "" || run.Artifacts != (coveragedomain.ArtifactRefs{}) ||
+		testErr != nil || testRun.Status != testdomain.RunCompleted || testRun.Outcome != testdomain.RunCancelled ||
+		!testStartedExact || testRun.FinishedAt.After(*finished.FinishedAt) || testRun.Incomplete ||
+		!reflect.DeepEqual(testRun.Summary, testdomain.RunSummary{Iterations: 1}) || len(testRun.Results) != 0 ||
+		!reflect.DeepEqual(factory.phases(), []string{"configure", "build", "test", "merge"}) ||
 		factory.terminateCount() != 1 {
-		t.Fatalf("late cancellation terminal: task=%#v run=%#v/%v phases=%v terminates=%d",
-			finished, run, err, factory.phases(), factory.terminateCount())
+		t.Fatalf("late cancellation terminal: task=%#v run=%#v/%v test=%#v/%v phases=%v terminates=%d",
+			finished, run, err, testRun, testErr, factory.phases(), factory.terminateCount())
 	}
 	executionRoot := filepath.Join(fixture.executionRoot, fixture.persisted.ID)
 	closeDeadline := time.Now().Add(3 * time.Second)
@@ -440,6 +533,103 @@ func TestCoordinatorRevalidatesEveryRetainedBoundaryBeforeContinuation(t *testin
 	}
 }
 
+func TestCoordinatorDirectExecutionRootReplacementFailsClosedWithoutFollowingReplacement(t *testing.T) {
+	factory := &orchestrationProcessFactory{
+		export: orchestrationLLVMExport(t), raw: `RAW_ROOT_REPLACEMENT C:\private\root\secret.profraw`,
+		results: make(map[string]task.ProcessResult), outputs: make(map[string][]task.ProcessOutput),
+	}
+	fixture := newSQLiteCoverageFixture(t, factory)
+	adapter := &orchestrationAdapter{}
+	coordinator, err := NewCoordinator(Config{
+		Tasks: fixture.manager, Store: fixture.store,
+		Build: &orchestrationBuildPreparer{instance: orchestrationToolchain(t)},
+		Tests: orchestrationEmbeddedPreparer{store: fixture.store}, Adapter: adapter,
+		WorkspaceRoot: fixture.workspaceRoot, ExecutionRoot: fixture.executionRoot,
+		Clock: task.RealClock{}, NewID: task.NewID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = coordinator.Close() })
+	original := filepath.Join(fixture.executionRoot, fixture.persisted.ID)
+	detached := original + ".detached"
+	replacementSentinel := filepath.Join(original, "replacement-must-survive")
+	detachedSentinel := filepath.Join(detached, "original-must-not-be-followed")
+	mutationDone := make(chan error, 1)
+	var once sync.Once
+	factory.beforeComplete = func(phase string) {
+		if phase != "configure" {
+			return
+		}
+		once.Do(func() {
+			mutationDone <- func() error {
+				// Windows correctly denies replacement while retained handles are
+				// open. This test-only fault closes the OS handles without invoking
+				// executionRootOwner.Close (and therefore without deleting the
+				// tree), leaving its original identity snapshot to police cleanup.
+				coordinator.mu.Lock()
+				live, ok := coordinator.executions[fixture.persisted.ID].(*execution)
+				coordinator.mu.Unlock()
+				if !ok {
+					return errors.New("live execution missing during root replacement")
+				}
+				live.mu.Lock()
+				preparedAdapter := live.adapter
+				rootOwner := live.root
+				live.mu.Unlock()
+				if preparedAdapter == nil || rootOwner == nil || rootOwner.file == nil {
+					return errors.New("retained execution capabilities missing")
+				}
+				if err := preparedAdapter.Close(); err != nil {
+					return err
+				}
+				if err := rootOwner.file.Close(); err != nil {
+					return err
+				}
+				rootOwner.file = nil
+				if err := os.Rename(original, detached); err != nil {
+					return err
+				}
+				if err := os.Mkdir(original, 0o700); err != nil {
+					return err
+				}
+				if err := os.WriteFile(replacementSentinel, []byte("replacement"), 0o600); err != nil {
+					return err
+				}
+				return os.WriteFile(detachedSentinel, []byte("detached-original"), 0o600)
+			}()
+		})
+	}
+	if _, err := coordinator.Resume(context.Background(), fixture.persisted); err != nil {
+		t.Fatal(err)
+	}
+	if mutationErr := <-mutationDone; mutationErr != nil {
+		t.Fatalf("direct execution root replacement failed: %v", mutationErr)
+	}
+	assertRealUnavailableFault(
+		t, fixture, factory, task.OutcomeInfrastructureFailed,
+		coveragedomain.ReasonInstrumentationFailed, []string{"configure"},
+	)
+	for _, sentinel := range []string{replacementSentinel, detachedSentinel} {
+		if body, err := os.ReadFile(sentinel); err != nil || len(body) == 0 {
+			t.Fatalf("cleanup followed or deleted replacement boundary %q: %q, %v", sentinel, body, err)
+		}
+	}
+	if adapter.closeCount() != 1 || adapter.allocatorCloseCount() != 1 {
+		t.Fatalf("replacement cleanup ownership: adapter=%d allocator=%d",
+			adapter.closeCount(), adapter.allocatorCloseCount())
+	}
+	if err := coordinator.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Removal by the test also proves all retained root/file handles closed.
+	for _, path := range []string{original, detached} {
+		if err := os.RemoveAll(path); err != nil {
+			t.Fatalf("retained handle remained open for %q: %v", path, err)
+		}
+	}
+}
+
 func assertRealUnavailableFault(
 	t *testing.T,
 	fixture *sqliteCoverageFixture,
@@ -457,15 +647,58 @@ func assertRealUnavailableFault(
 		time.Sleep(time.Millisecond)
 	}
 	run, runErr := fixture.store.GetCoverageRun(context.Background(), fixture.aggregate.Run.ID)
-	if finished.Outcome != wantTask || runErr != nil ||
-		run.Outcome != coveragedomain.OutcomeUnavailable || run.Reason != wantReason || run.ReportID != "" ||
+	testRun, testRunErr := fixture.store.GetRun(context.Background(), fixture.aggregate.TestRun.RunID)
+	wantTestOutcome := testdomain.RunPassed
+	wantIncomplete := false
+	wantTestStarted := true
+	wantErrorCode := string(wantTask)
+	wantErrorMessage := "task infrastructure failed"
+	if wantTask == task.OutcomeCommandFailed {
+		wantErrorMessage = "task command exited unsuccessfully"
+	}
+	switch wantReason {
+	case coveragedomain.ReasonInstrumentationFailed:
+		wantTestOutcome = testdomain.RunErrored
+		wantIncomplete = true
+		wantTestStarted = false
+	case coveragedomain.ReasonBuildFailed:
+		wantTestOutcome = testdomain.RunBlocked
+		wantIncomplete = true
+		wantTestStarted = false
+	case coveragedomain.ReasonProfileCollectionFailed,
+		coveragedomain.ReasonMergeFailed,
+		coveragedomain.ReasonNormalizationFailed,
+		coveragedomain.ReasonReportGenerationFailed,
+		coveragedomain.ReasonPersistenceFailed:
+	default:
+		t.Fatalf("missing exact TestRun expectation for Coverage reason %q", wantReason)
+	}
+	emptySummary := testdomain.RunSummary{Iterations: 1}
+	finishedAt := finished.FinishedAt
+	testFinishedValid := testRun.FinishedAt != nil && finishedAt != nil && finished.StartedAt != nil &&
+		!testRun.FinishedAt.After(*finishedAt) && !testRun.FinishedAt.Before(*finished.StartedAt)
+	testStartedExact := !wantTestStarted || (testRun.StartedAt != nil && testRun.FinishedAt != nil &&
+		testRun.StartedAt.Equal(testRun.FinishedAt.Add(-time.Millisecond)))
+	if finished.Status != task.StatusFinished || finished.Outcome != wantTask ||
+		finished.StartedAt == nil || finishedAt == nil || finished.ActiveStep != "" ||
+		finished.ErrorCode != wantErrorCode || finished.ErrorMessage != wantErrorMessage ||
+		runErr != nil || run.Status != coveragedomain.StatusFinished ||
+		run.Outcome != coveragedomain.OutcomeUnavailable || run.Reason != wantReason ||
+		run.StartedAt == nil || run.FinishedAt == nil ||
+		!run.StartedAt.Equal(*finished.StartedAt) || !run.FinishedAt.Equal(*finishedAt) ||
+		run.Summary != nil || run.ReportID != "" || run.Artifacts != (coveragedomain.ArtifactRefs{}) ||
+		run.LastSequence != finished.LastSequence ||
+		testRunErr != nil || testRun.Status != testdomain.RunCompleted || testRun.Outcome != wantTestOutcome ||
+		(testRun.StartedAt != nil) != wantTestStarted || !testFinishedValid ||
+		!testStartedExact || testRun.Incomplete != wantIncomplete ||
+		!reflect.DeepEqual(testRun.Summary, emptySummary) || len(testRun.Results) != 0 ||
 		!reflect.DeepEqual(factory.phases(), wantPhases) ||
 		fixture.publisher.count(task.EventTestRunFinished) != 1 ||
 		fixture.publisher.count(task.EventCoverageRunFinished) != 1 ||
 		fixture.publisher.count(task.EventTaskFinished) != 1 ||
 		fixture.publisher.count(task.EventCoverageReportAvailable) != 0 {
-		t.Fatalf("real fault terminal: task=%#v run=%#v/%v phases=%v events=%#v",
-			finished, run, runErr, factory.phases(), fixture.publisher.snapshot())
+		t.Fatalf("real fault terminal: task=%#v run=%#v/%v test=%#v/%v phases=%v events=%#v",
+			finished, run, runErr, testRun, testRunErr, factory.phases(), fixture.publisher.snapshot())
 	}
 	assertNoPublicFaultArtifacts(t, fixture, factory.raw)
 }
