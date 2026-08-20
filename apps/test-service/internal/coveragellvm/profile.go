@@ -20,15 +20,17 @@ import (
 
 const (
 	maxProfileBytes = int64(512 * 1024 * 1024)
-	maxProfileCount = 250
+	maxProfileCount = testrun.MaxProfileCount
 )
 
 var ErrInvalidProfiles = errors.New("invalid LLVM profile evidence")
 
 type profileAllocator struct {
-	mu     sync.Mutex
-	root   *instrumentationRootPin
-	closed bool
+	mu        sync.Mutex
+	root      *instrumentationRootPin
+	allocated map[string]testrun.ProfileExpectation
+	fileNames map[string]string
+	closed    bool
 }
 
 func NewProfileAllocator(
@@ -63,6 +65,20 @@ func (allocator *profileAllocator) Decorate(
 		verifyInstrumentationRoot(allocator.root) != nil {
 		return task.ProcessSpec{}, ErrInvalidProfiles
 	}
+	key := profileExpectationKey(
+		expectation.InvocationID,
+		expectation.Iteration,
+	)
+	if existing, exists := allocator.allocated[key]; exists {
+		if existing != expectation {
+			return task.ProcessSpec{}, ErrInvalidProfiles
+		}
+	} else {
+		if _, duplicate := allocator.fileNames[expectation.FileName]; duplicate ||
+			len(allocator.allocated) >= maxProfileCount {
+			return task.ProcessSpec{}, ErrInvalidProfiles
+		}
+	}
 	result := cloneProfileProcessSpec(spec)
 	environment := make([]string, 0, len(result.Env)+1)
 	unsafeNames := make([]string, 0)
@@ -94,6 +110,17 @@ func (allocator *profileAllocator) Decorate(
 		),
 	)
 	result.EnvUnset = unset
+	if allocator.allocated == nil {
+		allocator.allocated = make(
+			map[string]testrun.ProfileExpectation,
+			maxProfileCount,
+		)
+		allocator.fileNames = make(map[string]string, maxProfileCount)
+	}
+	if _, exists := allocator.allocated[key]; !exists {
+		allocator.allocated[key] = expectation
+		allocator.fileNames[expectation.FileName] = key
+	}
 	return result, nil
 }
 

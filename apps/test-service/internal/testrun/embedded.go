@@ -14,6 +14,8 @@ import (
 
 const embeddedTaskTimeout = 24 * time.Hour
 
+const MaxProfileCount = 250
+
 type ProfileExpectation struct {
 	InvocationID string
 	Iteration    int64
@@ -173,6 +175,9 @@ func (coordinator *Coordinator) PrepareEmbedded(
 	)
 	if err != nil {
 		return nil, err
+	}
+	if len(planned.Invocations) > MaxProfileCount {
+		return nil, task.ErrInvalidArgument
 	}
 	expectations := make(
 		[]ProfileExpectation,
@@ -443,10 +448,25 @@ func (execution *embeddedExecution) Finish(
 	if err != nil {
 		return testdomain.TestRun{}, err
 	}
+	run, err = testdomain.NewTestRun(run)
+	if err != nil {
+		return testdomain.TestRun{}, err
+	}
 	if run.TaskID != execution.taskID ||
-		run.CatalogRevision != execution.catalogRevision ||
-		run.Status != testdomain.RunRunning || run.StartedAt == nil ||
-		finishedAt.Before(*run.StartedAt) {
+		run.CatalogRevision != execution.catalogRevision {
+		return testdomain.TestRun{}, task.ErrConflict
+	}
+	switch run.Status {
+	case testdomain.RunQueued:
+		if execution.runStarted || run.StartedAt != nil ||
+			len(run.Results) != 0 || finishedAt.Before(run.CreatedAt) {
+			return testdomain.TestRun{}, task.ErrConflict
+		}
+	case testdomain.RunRunning:
+		if run.StartedAt == nil || finishedAt.Before(*run.StartedAt) {
+			return testdomain.TestRun{}, task.ErrConflict
+		}
+	default:
 		return testdomain.TestRun{}, task.ErrConflict
 	}
 	summary, incomplete, err := Summarize(

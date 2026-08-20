@@ -2,6 +2,8 @@ package testrun
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -145,6 +147,100 @@ func TestEmbeddedRunPersistsFrameworkResultsEventsAndFinishesRun(t *testing.T) {
 	}
 }
 
+func TestEmbeddedFinishTerminalizesQueuedRunBeforeAnyCallback(t *testing.T) {
+	tests := []struct {
+		name    string
+		outcome task.Outcome
+		want    testdomain.RunOutcome
+	}{
+		{
+			name:    "cancelled",
+			outcome: task.OutcomeCancelled,
+			want:    testdomain.RunCancelled,
+		},
+		{
+			name:    "infrastructure failure",
+			outcome: task.OutcomeInfrastructureFailed,
+			want:    testdomain.RunErrored,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture, request, _ := newEmbeddedFixture(t, 1)
+			embedded, err := fixture.coordinator.PrepareEmbedded(
+				context.Background(),
+				request,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			finishedAt := request.Run.CreatedAt.Add(2 * time.Second)
+			finished, err := embedded.Finish(
+				context.Background(),
+				finishedAt,
+				test.outcome,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			validated, err := testdomain.NewTestRun(finished)
+			if err != nil {
+				t.Fatalf("terminal TestRun cannot enter coverage completion: %v", err)
+			}
+			if validated.Status != testdomain.RunCompleted ||
+				validated.Outcome != test.want ||
+				validated.StartedAt != nil ||
+				validated.FinishedAt == nil ||
+				!validated.FinishedAt.Equal(finishedAt) ||
+				validated.Summary != (testdomain.RunSummary{Iterations: 1}) ||
+				validated.ResultRevision != testdomain.EmptyResultRevision() ||
+				!validated.Incomplete {
+				t.Fatalf("zero-callback terminal TestRun = %#v", validated)
+			}
+			events := embedded.DrainDomainEvents()
+			if len(events) != 1 || events[0].Type != task.EventTestRunFinished {
+				t.Fatalf("zero-callback events = %#v", events)
+			}
+		})
+	}
+}
+
+func TestPrepareEmbeddedEnforcesProfileCapacityBeforeAllocation(t *testing.T) {
+	for _, test := range []struct {
+		count   int
+		wantErr bool
+	}{
+		{count: 250},
+		{count: 251, wantErr: true},
+	} {
+		t.Run(fmt.Sprintf("%d", test.count), func(t *testing.T) {
+			fixture, request, allocator := newEmbeddedFixtureWithItems(
+				t,
+				test.count,
+			)
+			embedded, err := fixture.coordinator.PrepareEmbedded(
+				context.Background(),
+				request,
+			)
+			if test.wantErr {
+				if !errors.Is(err, task.ErrInvalidArgument) {
+					t.Fatalf("PrepareEmbedded(%d) error = %v", test.count, err)
+				}
+				if len(allocator.values) != 0 {
+					t.Fatalf("over-capacity plan allocated %d profiles", len(allocator.values))
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(embedded.Expectations()) != 250 || len(allocator.values) != 250 {
+				t.Fatalf("capacity plan = expectations %d allocations %d", len(embedded.Expectations()), len(allocator.values))
+			}
+		})
+	}
+}
+
 type recordingProfileAllocator struct {
 	values []ProfileExpectation
 }
@@ -165,6 +261,28 @@ func newEmbeddedFixture(
 ) (*coordinatorRunFixture, EmbeddedRequest, *recordingProfileAllocator) {
 	t.Helper()
 	fixture := newCoordinatorRunFixture(t)
+	return newEmbeddedFixtureForCoordinator(t, fixture, repeat)
+}
+
+func newEmbeddedFixtureWithItems(
+	t *testing.T,
+	count int,
+) (*coordinatorRunFixture, EmbeddedRequest, *recordingProfileAllocator) {
+	t.Helper()
+	names := make([]string, count)
+	for index := range names {
+		names[index] = fmt.Sprintf("Case%06d", index+1)
+	}
+	fixture := newCoordinatorRunFixtureWithCases(t, names...)
+	return newEmbeddedFixtureForCoordinator(t, fixture, 1)
+}
+
+func newEmbeddedFixtureForCoordinator(
+	t *testing.T,
+	fixture *coordinatorRunFixture,
+	repeat int64,
+) (*coordinatorRunFixture, EmbeddedRequest, *recordingProfileAllocator) {
+	t.Helper()
 	selection, err := Resolve(
 		context.Background(), fixture.catalog, fixture.request.Selection,
 		fixture.runs, testdomain.Limits{MaxSelectionSize: 100_000},

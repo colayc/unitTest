@@ -505,14 +505,20 @@ type coordinatorRunFixture struct {
 }
 
 func newCoordinatorRunFixture(t *testing.T) *coordinatorRunFixture {
+	return newCoordinatorRunFixtureWithCases(t, "CaseA", "CaseB")
+}
+
+func newCoordinatorRunFixtureWithCases(
+	t *testing.T,
+	caseNames ...string,
+) *coordinatorRunFixture {
 	t.Helper()
 	catalog, container, cases := plannerCatalog(
 		t,
 		testdomain.FrameworkCppUTest,
 		"framework-tests",
 		"Group",
-		"CaseA",
-		"CaseB",
+		caseNames...,
 	)
 	profile := cmake.BuildProfile{
 		ID: catalog.ProfileID, ProjectID: catalog.ProjectID,
@@ -580,6 +586,10 @@ func newCoordinatorRunFixture(t *testing.T) *coordinatorRunFixture {
 	runs := &coordinatorRunStore{}
 	tasks.runs = runs
 	runner, _ := plannerCTestRunner(t)
+	selected := make([]testdomain.ID, len(cases))
+	for index, item := range cases {
+		selected[index] = item.ID
+	}
 	fixture := &coordinatorRunFixture{
 		catalog: catalog, tasks: tasks, runs: runs,
 		prepared: prepared, refresher: refresher,
@@ -595,7 +605,7 @@ func newCoordinatorRunFixture(t *testing.T) *coordinatorRunFixture {
 			MaxConcurrency:      2,
 			Selection: testdomain.Selection{
 				Mode:    testdomain.SelectionItems,
-				ItemIDs: []testdomain.ID{cases[0].ID, cases[1].ID},
+				ItemIDs: selected,
 			},
 		},
 	}

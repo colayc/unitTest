@@ -315,6 +315,59 @@ func TestCoverageCompletionPersistsAggregateAtomically(t *testing.T) {
 	}
 }
 
+func TestCoverageCompletionAcceptsZeroCallbackEmbeddedTestRun(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name            string
+		coverageOutcome coveragedomain.Outcome
+		reason          coveragedomain.Reason
+		testOutcome     testdomain.RunOutcome
+	}{
+		{
+			name:            "cancelled",
+			coverageOutcome: coveragedomain.OutcomeCancelled,
+			reason:          coveragedomain.ReasonUserCancelled,
+			testOutcome:     testdomain.RunCancelled,
+		},
+		{
+			name:            "infrastructure failure",
+			coverageOutcome: coveragedomain.OutcomeUnavailable,
+			reason:          coveragedomain.ReasonProfileCollectionFailed,
+			testOutcome:     testdomain.RunErrored,
+		},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := openTestStore(t)
+			mutation := coverageCompletionFixture(
+				t,
+				store,
+				210+index,
+				test.coverageOutcome,
+				test.reason,
+			)
+			// This is the canonical lifecycle returned by EmbeddedRun.Finish
+			// when no result or output callback ever started the queued run.
+			mutation.FinishRun.Outcome = test.testOutcome
+			mutation.FinishRun.StartedAt = nil
+			mutation.FinishRun.Incomplete = true
+			if mutation.FinishRun.Summary != (testdomain.RunSummary{Iterations: 2}) {
+				t.Fatalf("queued fixture summary = %#v", mutation.FinishRun.Summary)
+			}
+			if _, _, err := store.Apply(ctx, mutation); err != nil {
+				t.Fatalf("atomic zero-callback completion = %v", err)
+			}
+			persisted, err := store.GetRun(ctx, mutation.FinishRun.RunID)
+			if err != nil || persisted.Status != testdomain.RunCompleted ||
+				persisted.Outcome != test.testOutcome ||
+				persisted.StartedAt != nil || persisted.FinishedAt == nil ||
+				!persisted.Incomplete {
+				t.Fatalf("persisted zero-callback TestRun = %#v, %v", persisted, err)
+			}
+		})
+	}
+}
+
 func TestCoverageOwnedTestRunRejectsPublicFinishRunWithoutChangingAggregate(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)

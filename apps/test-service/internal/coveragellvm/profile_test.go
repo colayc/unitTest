@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"unit-test-ide.local/test-service/internal/coveragedomain"
@@ -70,6 +71,102 @@ func TestProfileAllocatorSanitizesEnvironmentAndAppendsOneOwnedPattern(
 		!reflect.DeepEqual(spec.Args, []string{"--run"}) {
 		t.Fatalf("allocator changed process target = %#v", spec)
 	}
+}
+
+func TestProfileAllocatorEnforcesUniqueConcurrentCapacity(t *testing.T) {
+	t.Run("duplicates consume one slot", func(t *testing.T) {
+		root := newProfileRoot(t)
+		allocator, err := NewProfileAllocator(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer closeProfileAllocator(t, allocator)
+		spec := task.ProcessSpec{Executable: "test.exe", Dir: root}
+		if _, err := allocator.Decorate(
+			profileExpectation(999, 1),
+			task.ProcessSpec{
+				Batch: []task.ProcessBatchItem{{ID: "invalid"}},
+			},
+		); !errors.Is(err, ErrInvalidProfiles) {
+			t.Fatalf("invalid allocation error = %v", err)
+		}
+
+		first := profileExpectation(1, 1)
+		const duplicateCalls = 32
+		errorsByCall := make(chan error, duplicateCalls)
+		var duplicates sync.WaitGroup
+		for range duplicateCalls {
+			duplicates.Add(1)
+			go func() {
+				defer duplicates.Done()
+				_, err := allocator.Decorate(first, spec)
+				errorsByCall <- err
+			}()
+		}
+		duplicates.Wait()
+		close(errorsByCall)
+		for err := range errorsByCall {
+			if err != nil {
+				t.Fatalf("duplicate concurrent allocation = %v", err)
+			}
+		}
+		for invocation := int64(2); invocation <= maxProfileCount; invocation++ {
+			if _, err := allocator.Decorate(profileExpectation(invocation, 1), spec); err != nil {
+				t.Fatalf("allocation %d/%d = %v", invocation, maxProfileCount, err)
+			}
+		}
+		if _, err := allocator.Decorate(profileExpectation(maxProfileCount+1, 1), spec); !errors.Is(err, ErrInvalidProfiles) {
+			t.Fatalf("allocation %d error = %v", maxProfileCount+1, err)
+		}
+		if _, err := allocator.Decorate(first, spec); err != nil {
+			t.Fatalf("duplicate at capacity consumed another slot: %v", err)
+		}
+	})
+
+	t.Run("concurrent unique allocations cannot bypass limit", func(t *testing.T) {
+		root := newProfileRoot(t)
+		allocator, err := NewProfileAllocator(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer closeProfileAllocator(t, allocator)
+		spec := task.ProcessSpec{Executable: "test.exe", Dir: root}
+		type allocationResult struct {
+			expectation testrun.ProfileExpectation
+			err         error
+		}
+		results := make(chan allocationResult, maxProfileCount+1)
+		var allocations sync.WaitGroup
+		for invocation := int64(1); invocation <= maxProfileCount+1; invocation++ {
+			expectation := profileExpectation(invocation, 1)
+			allocations.Add(1)
+			go func() {
+				defer allocations.Done()
+				_, err := allocator.Decorate(expectation, spec)
+				results <- allocationResult{expectation: expectation, err: err}
+			}()
+		}
+		allocations.Wait()
+		close(results)
+		accepted := 0
+		var acceptedExpectation testrun.ProfileExpectation
+		for result := range results {
+			switch {
+			case result.err == nil:
+				accepted++
+				acceptedExpectation = result.expectation
+			case errors.Is(result.err, ErrInvalidProfiles):
+			default:
+				t.Fatalf("concurrent allocation error = %v", result.err)
+			}
+		}
+		if accepted != maxProfileCount {
+			t.Fatalf("concurrent accepted = %d, want %d", accepted, maxProfileCount)
+		}
+		if _, err := allocator.Decorate(acceptedExpectation, spec); err != nil {
+			t.Fatalf("accepted duplicate after concurrent capacity = %v", err)
+		}
+	})
 }
 
 func TestSealProfilesReturnsClosedSameSnapshotManifest(t *testing.T) {
