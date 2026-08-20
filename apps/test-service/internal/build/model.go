@@ -4,14 +4,15 @@ import (
 	"errors"
 	"time"
 
+	"unit-test-ide.local/test-service/internal/buildcontract"
 	"unit-test-ide.local/test-service/internal/cmake"
 )
 
 var (
-	ErrWorkspaceChanged       = errors.New("workspace changed")
+	ErrWorkspaceChanged       = buildcontract.ErrWorkspaceChanged
 	ErrWorkspaceTrustRequired = errors.New("workspace trust required")
-	ErrProjectNotFound        = errors.New("project not found")
-	ErrBuildProfileNotFound   = errors.New("build profile not found")
+	ErrProjectNotFound        = buildcontract.ErrProjectNotFound
+	ErrBuildProfileNotFound   = buildcontract.ErrBuildProfileNotFound
 	ErrTargetNotFound         = errors.New("target not found")
 	ErrConfigureRequired      = errors.New("configure required")
 )

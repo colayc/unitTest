@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"unit-test-ide.local/test-service/internal/build"
+	"unit-test-ide.local/test-service/internal/buildcontract"
 	"unit-test-ide.local/test-service/internal/cmake"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/testdomain"
@@ -87,7 +87,7 @@ func (coordinator *Coordinator) prepareDiscovery(
 	request.TargetIDs = targetIDs
 	prepared, err := coordinator.config.PrepareBuild(
 		ctx,
-		build.StartRequest{
+		BuildRequest{
 			IdempotencyKey:      request.IdempotencyKey,
 			WorkspaceGeneration: request.WorkspaceGeneration,
 			ProjectID:           request.ProjectID,
@@ -130,20 +130,20 @@ func (coordinator *Coordinator) prepareDiscovery(
 		request.WorkspaceGeneration {
 		return fail(fmt.Errorf(
 			"test discovery workspace generation changed: %w",
-			build.ErrWorkspaceChanged,
+			buildcontract.ErrWorkspaceChanged,
 		))
 	}
 	if project.ID != request.ProjectID {
 		return fail(fmt.Errorf(
 			"test discovery project changed: %w",
-			build.ErrProjectNotFound,
+			buildcontract.ErrProjectNotFound,
 		))
 	}
 	if profile.ID != request.BuildProfileID ||
 		profile.ProjectID != project.ID {
 		return fail(fmt.Errorf(
 			"test discovery build profile changed: %w",
-			build.ErrBuildProfileNotFound,
+			buildcontract.ErrBuildProfileNotFound,
 		))
 	}
 	if instance.ID == "" {

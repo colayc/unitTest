@@ -11,7 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"unit-test-ide.local/test-service/internal/build"
 	"unit-test-ide.local/test-service/internal/cmake"
 	"unit-test-ide.local/test-service/internal/ctest"
 	"unit-test-ide.local/test-service/internal/task"
@@ -39,8 +38,21 @@ type PreparedBuild interface {
 
 type PrepareBuild func(
 	context.Context,
-	build.StartRequest,
+	BuildRequest,
 ) (PreparedBuild, error)
+
+// BuildRequest is the build preparation subset used by test orchestration.
+// It is deliberately local so the LLVM coverage adapter can consume the
+// embedded-run contracts without creating a package cycle through build.
+type BuildRequest struct {
+	IdempotencyKey      string
+	WorkspaceGeneration string
+	ProjectID           string
+	BuildProfileID      string
+	TargetIDs           []string
+	Jobs                int
+	Timeout             time.Duration
+}
 
 type CatalogReader interface {
 	GetCatalog(
@@ -196,7 +208,7 @@ func (coordinator *Coordinator) StartRun(
 	request.TargetIDs = targetIDs
 	prepared, err := coordinator.config.PrepareBuild(
 		ctx,
-		build.StartRequest{
+		BuildRequest{
 			IdempotencyKey:      request.IdempotencyKey,
 			WorkspaceGeneration: request.WorkspaceGeneration,
 			ProjectID:           request.ProjectID,

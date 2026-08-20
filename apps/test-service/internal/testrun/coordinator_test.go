@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"unit-test-ide.local/test-service/internal/build"
+	"unit-test-ide.local/test-service/internal/buildcontract"
 	"unit-test-ide.local/test-service/internal/cmake"
 	"unit-test-ide.local/test-service/internal/ctest"
 	"unit-test-ide.local/test-service/internal/task"
@@ -16,6 +16,57 @@ import (
 	"unit-test-ide.local/test-service/internal/toolchain"
 	"unit-test-ide.local/test-service/internal/workspace"
 )
+
+func TestDiscoveryCoordinatorPreservesBuildValidationErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		edit func(*coordinatorPreparedBuild)
+		want error
+	}{
+		{
+			name: "workspace generation",
+			edit: func(prepared *coordinatorPreparedBuild) {
+				prepared.generation = strings.Repeat("9", 64)
+			},
+			want: buildcontract.ErrWorkspaceChanged,
+		},
+		{
+			name: "project",
+			edit: func(prepared *coordinatorPreparedBuild) {
+				prepared.project.ID = "other"
+			},
+			want: buildcontract.ErrProjectNotFound,
+		},
+		{
+			name: "profile",
+			edit: func(prepared *coordinatorPreparedBuild) {
+				prepared.profile.ID = strings.Repeat("9", 64)
+			},
+			want: buildcontract.ErrBuildProfileNotFound,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newCoordinatorRunFixture(t)
+			test.edit(fixture.prepared)
+			_, err := fixture.coordinator.StartDiscovery(
+				context.Background(),
+				DiscoveryRequest{
+					IdempotencyKey:      fixture.request.IdempotencyKey,
+					WorkspaceGeneration: fixture.request.WorkspaceGeneration,
+					ProjectID:           fixture.request.ProjectID,
+					BuildProfileID:      fixture.request.BuildProfileID,
+					TargetIDs:           fixture.request.TargetIDs,
+					Jobs:                fixture.request.Jobs,
+					Timeout:             fixture.request.Timeout,
+				},
+			)
+			if !errors.Is(err, test.want) {
+				t.Fatalf("StartDiscovery error = %v, want %v", err, test.want)
+			}
+		})
+	}
+}
 
 func TestCoordinatorContinuesBuildIntoPinnedFrameworkRunSteps(
 	t *testing.T,
@@ -500,6 +551,7 @@ func newCoordinatorRunFixture(t *testing.T) *coordinatorRunFixture {
 	prepared.plan.Fingerprint = task.FingerprintPlan(prepared.plan)
 	adapter := &coordinatorAdapter{}
 	refresher := &coordinatorCatalogRefresher{
+		embeddedGeneration: prepared.generation,
 		result: RefreshedCatalog{
 			Catalog: catalog,
 			Bindings: []ContainerBinding{{
@@ -550,7 +602,7 @@ func newCoordinatorRunFixture(t *testing.T) *coordinatorRunFixture {
 	coordinator, err := NewCoordinator(CoordinatorConfig{
 		PrepareBuild: func(
 			context.Context,
-			build.StartRequest,
+			BuildRequest,
 		) (PreparedBuild, error) {
 			fixture.prepareCalls++
 			return prepared, nil
@@ -639,8 +691,9 @@ func (reader *coordinatorCatalogReader) GetCatalog(
 }
 
 type coordinatorCatalogRefresher struct {
-	result RefreshedCatalog
-	calls  int
+	result             RefreshedCatalog
+	embeddedGeneration string
+	calls              int
 }
 
 func (refresher *coordinatorCatalogRefresher) PrepareAfterBuild(
@@ -755,7 +808,8 @@ func (starter *coordinatorTaskStarter) ResumeQueued(
 }
 
 type coordinatorRunStore struct {
-	run testdomain.TestRun
+	run         testdomain.TestRun
+	appendCalls int
 }
 
 func (store *coordinatorRunStore) create(
@@ -798,11 +852,35 @@ func (store *coordinatorRunStore) StartRun(
 	return nil
 }
 
-func (*coordinatorRunStore) AppendResult(
-	context.Context,
-	string,
-	testdomain.TestItemResult,
+func (store *coordinatorRunStore) AppendResult(
+	_ context.Context,
+	runID string,
+	result testdomain.TestItemResult,
 ) error {
+	if store.run.RunID != runID {
+		return task.ErrNotFound
+	}
+	validated, err := testdomain.NewTestItemResult(result)
+	if err != nil {
+		return err
+	}
+	store.appendCalls++
+	replaced := false
+	for index := range store.run.Results {
+		if store.run.Results[index].ItemID == validated.ItemID &&
+			store.run.Results[index].Iteration == validated.Iteration {
+			store.run.Results[index] = validated
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		store.run.Results = append(store.run.Results, validated)
+	}
+	store.run.ResultRevision, err = testdomain.ResultRevision(store.run.Results)
+	if err != nil {
+		return err
+	}
 	return nil
 }
 

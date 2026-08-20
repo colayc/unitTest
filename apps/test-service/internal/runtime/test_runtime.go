@@ -120,9 +120,20 @@ func newRuntimeTestCoordinator(
 	}
 	prepare := func(
 		ctx context.Context,
-		request build.StartRequest,
+		request testrun.BuildRequest,
 	) (testrun.PreparedBuild, error) {
-		return preparer.PreparePlan(ctx, request)
+		return preparer.PreparePlan(ctx, build.StartRequest{
+			IdempotencyKey:      request.IdempotencyKey,
+			WorkspaceGeneration: request.WorkspaceGeneration,
+			ProjectID:           request.ProjectID,
+			BuildProfileID:      request.BuildProfileID,
+			TargetIDs: append(
+				[]string(nil),
+				request.TargetIDs...,
+			),
+			Jobs:    request.Jobs,
+			Timeout: request.Timeout,
+		})
 	}
 	coordinator, err := testrun.NewCoordinator(
 		testrun.CoordinatorConfig{
@@ -279,8 +290,8 @@ func newTaskDiscoveryInputFactory(
 				ctx,
 				build.TargetsRequest{
 					WorkspaceGeneration: current.Generation,
-					ProjectID:      request.Project.ID,
-					BuildProfileID: request.Profile.ID,
+					ProjectID:           request.Project.ID,
+					BuildProfileID:      request.Profile.ID,
 				},
 			)
 			generation = current.Generation

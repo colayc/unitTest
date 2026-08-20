@@ -8,7 +8,6 @@ import (
 	"reflect"
 	"time"
 
-	"unit-test-ide.local/test-service/internal/build"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/testdomain"
 )
@@ -82,7 +81,7 @@ func (coordinator *Coordinator) ResumeRun(
 		persisted.WorkspaceGeneration
 	prepared, err := coordinator.config.PrepareBuild(
 		ctx,
-		build.StartRequest{
+		BuildRequest{
 			IdempotencyKey:      request.IdempotencyKey,
 			WorkspaceGeneration: request.WorkspaceGeneration,
 			ProjectID:           request.ProjectID,

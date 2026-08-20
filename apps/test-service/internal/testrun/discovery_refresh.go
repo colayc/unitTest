@@ -58,6 +58,36 @@ func (refresher *TaskCatalogRefresher) PrepareAfterBuild(
 	return session, converted, nil
 }
 
+// PrepareEmbedded reuses the existing synchronous discovery path to obtain
+// fresh runtime-only descriptors and framework adapters for an already-owned
+// Coverage Task. It does not create or start a Task or TestRun.
+func (refresher *TaskCatalogRefresher) PrepareEmbedded(
+	ctx context.Context,
+	request RefreshRequest,
+) (RefreshedCatalog, error) {
+	if refresher == nil || ctx == nil {
+		return RefreshedCatalog{}, task.ErrInvalidArgument
+	}
+	input, err := refresher.input(ctx, request)
+	if err != nil {
+		return RefreshedCatalog{}, err
+	}
+	if input.TaskID != request.TaskID || input.Profile != request.Profile {
+		return RefreshedCatalog{}, task.ErrInvalidArgument
+	}
+	snapshot, err := refresher.service.DiscoverSnapshotAfterBuild(ctx, input)
+	if err != nil {
+		return RefreshedCatalog{}, err
+	}
+	converted, err := convertTaskDiscoveryProgress(
+		testdiscovery.TaskProgress{Snapshot: &snapshot},
+	)
+	if err != nil || converted.Snapshot == nil {
+		return RefreshedCatalog{}, task.ErrInvalidArgument
+	}
+	return converted.Snapshot.Clone(), nil
+}
+
 type taskCatalogRefresh struct {
 	execution *testdiscovery.TaskExecution
 }
