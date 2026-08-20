@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -77,6 +78,60 @@ func TestCoverageArtifactSinkPublishesClosedReportSet(t *testing.T) {
 			t.Fatalf("%s artifact = %#v", input.kind, artifact)
 		}
 		assertArtifactContent(t, root, artifact, string(input.body))
+	}
+}
+
+func TestCoverageArtifactSinkRollsBackPublishedReportFilesWhenFinalizationFailsPartway(t *testing.T) {
+	root := t.TempDir()
+	store, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	published := 0
+	store.hooks.finalizeDirectory = func(stage directoryFinalizeStage) error {
+		if stage == directoryFinalizePublished {
+			published++
+			if published == 2 {
+				return errors.New("injected second report publication failure")
+			}
+		}
+		return nil
+	}
+	raw, err := store.OpenTask(context.Background(), id(45), task.KindCoverageRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := raw.(task.CoverageArtifactSink)
+	for _, input := range []struct {
+		id, kind string
+		body     []byte
+	}{
+		{id(46), "coverage-json", coverageJSON},
+		{id(47), "junit-xml", junitXML},
+		{id(48), "coverage-html", coverageHTML},
+	} {
+		if err := sink.CommitBlob(context.Background(), input.id, input.kind, input.body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := sink.Finalize(context.Background(), time.Date(2026, 8, 20, 5, 0, 0, 0, time.UTC)); err == nil {
+		t.Fatal("Finalize() succeeded across injected second-file failure")
+	}
+	var files []string
+	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.Type().IsRegular() {
+			files = append(files, path)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 0 {
+		t.Fatalf("partly finalized report left files = %v", files)
 	}
 }
 

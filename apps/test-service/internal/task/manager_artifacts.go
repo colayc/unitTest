@@ -132,7 +132,6 @@ func (m *Manager) finalizeTaskArtifacts(
 		if err != nil {
 			return nil, err
 		}
-		owner.artifactSink = nil
 		return artifacts, nil
 	}
 	projector, ok := taskSummaryProjectors[current.Kind]

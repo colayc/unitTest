@@ -12,6 +12,7 @@ import (
 
 	"unit-test-ide.local/test-service/internal/build"
 	"unit-test-ide.local/test-service/internal/coveragellvm"
+	"unit-test-ide.local/test-service/internal/coveragereport"
 	"unit-test-ide.local/test-service/internal/coveragerun"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/testdomain"
@@ -69,6 +70,8 @@ type Adapter interface {
 	Prepare(context.Context, AdapterInput) (PreparedAdapter, error)
 }
 
+type ReportRenderer func(coveragereport.Input) (coveragereport.Set, error)
+
 type Config struct {
 	Tasks         TaskController
 	Store         Store
@@ -79,6 +82,7 @@ type Config struct {
 	ExecutionRoot string
 	Clock         task.Clock
 	NewID         task.IDGenerator
+	RenderReport  ReportRenderer
 	CloseTimeout  time.Duration
 }
 

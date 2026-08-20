@@ -111,6 +111,9 @@ func NewCoordinator(config Config) (*Coordinator, error) {
 	if config.NewID == nil {
 		config.NewID = task.NewID
 	}
+	if config.RenderReport == nil {
+		config.RenderReport = coveragereport.Render
+	}
 	if config.CloseTimeout < 0 {
 		return nil, task.ErrInvalidArgument
 	}
@@ -885,7 +888,7 @@ func (execution *execution) ExecuteServiceAction(
 		if !normalized {
 			return task.StepResult{}, task.ErrInvalidArgument
 		}
-		set, err := coveragereport.Render(coveragereport.Input{
+		set, err := execution.config.RenderReport(coveragereport.Input{
 			CoverageJSON: coverageJSON,
 			Document:     document,
 			TestRun:      run,

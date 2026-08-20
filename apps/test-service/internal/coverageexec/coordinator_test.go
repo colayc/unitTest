@@ -440,6 +440,8 @@ func TestCoordinatorAdapterPreparationFailureCompletesRealAggregate(t *testing.T
 type sqliteCoverageFixture struct {
 	workspaceRoot workspace.Root
 	executionRoot string
+	artifactRoot  string
+	artifacts     *artifactstore.Store
 	store         *coordinatorSQLiteStore
 	publisher     *coordinatorPublisher
 	manager       *task.Manager
@@ -478,12 +480,29 @@ func newSQLiteCoverageFixtureWithArtifacts(
 	)
 }
 
+func newSQLiteCoverageFixtureWithTimeout(
+	t *testing.T,
+	processes task.ProcessFactory,
+	timeout time.Duration,
+) *sqliteCoverageFixture {
+	return newSQLiteCoverageFixtureInternal(
+		t, processes,
+		func(store *artifactstore.Store) task.ArtifactWriter { return store },
+		testdomain.Selection{Mode: testdomain.SelectionAll},
+		testdomain.SelectionSnapshot{
+			Mode: testdomain.SelectionAll, ContainerIDs: []testdomain.ID{}, ItemIDs: []testdomain.ID{},
+		},
+		timeout,
+	)
+}
+
 func newSQLiteCoverageFixtureInternal(
 	t *testing.T,
 	processes task.ProcessFactory,
 	wrap func(*artifactstore.Store) task.ArtifactWriter,
 	selection testdomain.Selection,
 	snapshot testdomain.SelectionSnapshot,
+	timeouts ...time.Duration,
 ) *sqliteCoverageFixture {
 	t.Helper()
 	ctx := context.Background()
@@ -510,7 +529,8 @@ func newSQLiteCoverageFixtureInternal(
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = sqlite.Close() })
-	artifacts, err := artifactstore.New(filepath.Join(root, "artifacts"))
+	artifactRoot := filepath.Join(root, "artifacts")
+	artifacts, err := artifactstore.New(artifactRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -541,12 +561,18 @@ func newSQLiteCoverageFixtureInternal(
 		defer cancel()
 		_ = manager.Shutdown(ctx)
 	})
+	requestTimeout := time.Minute
+	if len(timeouts) == 1 {
+		requestTimeout = timeouts[0]
+	} else if len(timeouts) != 0 {
+		t.Fatal("invalid timeout fixture arguments")
+	}
 	ids := []string{strings.Repeat("1", 32), strings.Repeat("2", 32)}
 	aggregate, err := coveragecoord.NewQueuedAggregate(coveragecoord.QueuedInput{
 		Request: coveragedomain.Request{
 			IdempotencyKey: strings.Repeat("3", 32), WorkspaceGeneration: strings.Repeat("5", 64),
 			ProjectID: "core", CoverageProfileID: "coverage-default", CatalogRevision: catalog.Revision,
-			Selection: selection, RepeatCount: 1, Timeout: time.Minute,
+			Selection: selection, RepeatCount: 1, Timeout: requestTimeout,
 		},
 		Selection:      snapshot,
 		BuildProfileID: buildProfileID, ToolchainID: "clang-cl",
@@ -569,6 +595,7 @@ func newSQLiteCoverageFixtureInternal(
 	}
 	return &sqliteCoverageFixture{
 		workspaceRoot: workspaceRoot, executionRoot: executionRoot,
+		artifactRoot: artifactRoot, artifacts: artifacts,
 		store: store, publisher: publisher, manager: manager,
 		aggregate: aggregate, persisted: persisted,
 	}
@@ -605,15 +632,56 @@ type coordinatorSQLiteStore struct {
 	mu           sync.Mutex
 	lastApplyErr error
 	lastMutation task.Mutation
+	taskMutation func(*task.Task)
+	runMutation  func(*coveragedomain.Run)
+	catalogMutation func(*testdomain.Catalog)
+	terminalApplyFailures int
 }
 
 func (store *coordinatorSQLiteStore) Apply(ctx context.Context, mutation task.Mutation) (task.Task, []task.Event, error) {
+	store.mu.Lock()
+	if mutation.FinishCoverage != nil && store.terminalApplyFailures > 0 {
+		store.terminalApplyFailures--
+		store.lastApplyErr = task.ErrStorageUnavailable
+		store.lastMutation = mutation
+		store.mu.Unlock()
+		return task.Task{}, nil, task.ErrStorageUnavailable
+	}
+	store.mu.Unlock()
 	value, events, err := store.Store.Apply(ctx, mutation)
 	store.mu.Lock()
 	store.lastApplyErr = err
 	store.lastMutation = mutation
 	store.mu.Unlock()
 	return value, events, err
+}
+
+func (store *coordinatorSQLiteStore) Get(ctx context.Context, id string) (task.Task, error) {
+	value, err := store.Store.Get(ctx, id)
+	if err != nil {
+		return task.Task{}, err
+	}
+	store.mu.Lock()
+	mutate := store.taskMutation
+	store.mu.Unlock()
+	if mutate != nil && value.Status != task.StatusFinished {
+		mutate(&value)
+	}
+	return value, nil
+}
+
+func (store *coordinatorSQLiteStore) GetCoverageRun(ctx context.Context, id string) (coveragedomain.Run, error) {
+	value, err := store.Store.GetCoverageRun(ctx, id)
+	if err != nil {
+		return coveragedomain.Run{}, err
+	}
+	store.mu.Lock()
+	mutate := store.runMutation
+	store.mu.Unlock()
+	if mutate != nil && value.Status != coveragedomain.StatusFinished {
+		mutate(&value)
+	}
+	return value, nil
 }
 
 func (store *coordinatorSQLiteStore) applySnapshot() (task.Mutation, error) {
@@ -623,7 +691,14 @@ func (store *coordinatorSQLiteStore) applySnapshot() (task.Mutation, error) {
 }
 
 func (store *coordinatorSQLiteStore) GetCatalog(context.Context, string, string) (testdomain.Catalog, error) {
-	return store.catalog.Clone(), nil
+	value := store.catalog.Clone()
+	store.mu.Lock()
+	mutate := store.catalogMutation
+	store.mu.Unlock()
+	if mutate != nil {
+		mutate(&value)
+	}
+	return value, nil
 }
 
 type coordinatorPublisher struct {

@@ -293,6 +293,57 @@ func (s *Store) commitArtifactData(
 	}, nil
 }
 
+func (s *Store) rollbackCommittedArtifacts(artifacts []task.Artifact) error {
+	if s == nil || s.root == nil {
+		return ErrStoreUnavailable
+	}
+	var result error
+	for index := len(artifacts) - 1; index >= 0; index-- {
+		artifact := artifacts[index]
+		if !validArtifact(artifact) {
+			return errors.Join(result, ErrInvalidArtifact)
+		}
+		parentRelative := path.Dir(artifact.RelativePath)
+		parent, parentIdentity, err := openVerifiedRoot(s.root, parentRelative)
+		if err != nil {
+			return errors.Join(result, err)
+		}
+		targetName := path.Base(artifact.RelativePath)
+		file, info, err := openVerifiedFile(parent, targetName)
+		if err != nil {
+			_ = parent.Close()
+			return errors.Join(result, err)
+		}
+		hash := sha256.New()
+		_, digestErr := io.Copy(hash, file)
+		closeErr := file.Close()
+		expectedHash, decodeErr := hex.DecodeString(artifact.SHA256)
+		if digestErr != nil || closeErr != nil || decodeErr != nil ||
+			info.Size() != artifact.Size ||
+			subtle.ConstantTimeCompare(hash.Sum(nil), expectedHash) != 1 ||
+			!rootIdentityMatches(s.root, parentRelative, parentIdentity) {
+			_ = parent.Close()
+			return errors.Join(result, ErrUnsafePath)
+		}
+		current, err := parent.Lstat(targetName)
+		if err != nil || isLinkInfo(current) || !current.Mode().IsRegular() || !os.SameFile(info, current) {
+			_ = parent.Close()
+			return errors.Join(result, ErrUnsafePath)
+		}
+		if err := parent.Remove(targetName); err != nil {
+			_ = parent.Close()
+			return errors.Join(result, rootOperationError(err))
+		}
+		if err := syncRootDirectory(parent); err != nil {
+			result = errors.Join(result, err)
+		}
+		if err := parent.Close(); err != nil {
+			result = errors.Join(result, ErrStoreUnavailable)
+		}
+	}
+	return result
+}
+
 func (s *Store) ReadChunk(ctx context.Context, artifact task.Artifact, offset int64, length int) ([]byte, int64, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, 0, false, err

@@ -185,6 +185,13 @@ type CompletionPreparer interface {
 	) (DomainCompletion, error)
 }
 
+// PreparedCompletionDiscarder lets a domain execution discard a completion
+// graph after its artifact publication failed. The next preparation must
+// produce an unavailable graph without reusing report/blob identities.
+type PreparedCompletionDiscarder interface {
+	DiscardPreparedCompletion()
+}
+
 type DomainCompletion struct {
 	TestRun  *testdomain.TestRun
 	Coverage *CoverageCompletion
@@ -253,6 +260,13 @@ type ArtifactSink interface {
 type CoverageArtifactSink interface {
 	ArtifactSink
 	CommitBlob(context.Context, string, string, []byte) error
+}
+
+// FinalizedArtifactRollback removes files that were finalized before the
+// SQLite mutation which makes their metadata visible. Implementations must
+// verify that the supplied metadata identifies the exact finalized files.
+type FinalizedArtifactRollback interface {
+	RollbackFinalized(context.Context, []Artifact) error
 }
 
 type ArtifactWriter interface {

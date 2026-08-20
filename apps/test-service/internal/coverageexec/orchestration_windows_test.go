@@ -450,6 +450,7 @@ type orchestrationBuildPreparer struct {
 	invalidPlanAt   int
 	wrongBinaryAt   int
 	attachFailureAt int
+	trustLost       bool
 }
 
 func (preparer *orchestrationBuildPreparer) PreparePlan(_ context.Context, request build.StartRequest) (PreparedBuild, error) {
@@ -462,7 +463,11 @@ func (preparer *orchestrationBuildPreparer) PreparePlan(_ context.Context, reque
 	invalidPlanAt := preparer.invalidPlanAt
 	wrongBinaryAt := preparer.wrongBinaryAt
 	attachFailureAt := preparer.attachFailureAt
+	trustLost := preparer.trustLost
 	preparer.mu.Unlock()
+	if trustLost {
+		return nil, build.ErrWorkspaceTrustRequired
+	}
 	if call == failAt {
 		return nil, errors.New("injected build preparation failure")
 	}
@@ -564,6 +569,16 @@ func (adapter *orchestrationAdapter) allocatorCloseCount() int {
 	return allocator.closes
 }
 
+func (adapter *orchestrationAdapter) sealedManifestState() (int, bool) {
+	adapter.mu.Lock()
+	prepared := adapter.prepared
+	adapter.mu.Unlock()
+	if prepared == nil {
+		return 0, false
+	}
+	return prepared.sealedManifestState()
+}
+
 type countingProfileAllocator struct {
 	delegate  testrun.ProfileAllocator
 	closer    io.Closer
@@ -597,6 +612,8 @@ type orchestrationPreparedAdapter struct {
 	closeOnce       sync.Once
 	mu              sync.Mutex
 	closes          int
+	seals           int
+	manifest        *coveragellvm.Manifest
 }
 
 func (adapter *orchestrationPreparedAdapter) Toolset() *coveragellvm.Toolset { return adapter.toolset }
@@ -607,7 +624,15 @@ func (adapter *orchestrationPreparedAdapter) Allocator() testrun.ProfileAllocato
 	return adapter.allocator
 }
 func (adapter *orchestrationPreparedAdapter) SealProfiles(expectations []testrun.ProfileExpectation, outcomes []testrun.InvocationOutcome) (coveragellvm.Manifest, error) {
-	return coveragellvm.SealProfiles(adapter.profileRoot, expectations, outcomes)
+	manifest, err := coveragellvm.SealProfiles(adapter.profileRoot, expectations, outcomes)
+	if err == nil {
+		copy := manifest
+		adapter.mu.Lock()
+		adapter.seals++
+		adapter.manifest = &copy
+		adapter.mu.Unlock()
+	}
+	return manifest, err
 }
 func (adapter *orchestrationPreparedAdapter) Collector(_ coveragellvm.Manifest, _ []coveragerun.TrustedPath) (task.ProcessSpec, task.ProcessSpec, error) {
 	dir := filepath.Dir(adapter.profileRoot)
@@ -626,6 +651,15 @@ func (adapter *orchestrationPreparedAdapter) Close() error {
 		result = errors.Join(result, adapter.toolset.Close())
 	})
 	return result
+}
+
+func (adapter *orchestrationPreparedAdapter) sealedManifestState() (int, bool) {
+	adapter.mu.Lock()
+	defer adapter.mu.Unlock()
+	if adapter.manifest == nil {
+		return adapter.seals, false
+	}
+	return adapter.seals, adapter.manifest.Verify() != nil
 }
 
 type orchestrationRunStore interface {
@@ -691,7 +725,7 @@ func (*orchestrationEmbeddedRun) DrainDomainEvents() []task.DomainEvent { return
 func (run *orchestrationEmbeddedRun) Finish(_ context.Context, at time.Time, outcome task.Outcome) (testdomain.TestRun, error) {
 	run.mu.Lock()
 	defer run.mu.Unlock()
-	if run.finished || outcome != task.OutcomeSucceeded {
+	if run.finished {
 		return testdomain.TestRun{}, task.ErrConflict
 	}
 	result, err := run.store.GetRun(context.Background(), run.run.RunID)
@@ -706,11 +740,7 @@ func (run *orchestrationEmbeddedRun) Finish(_ context.Context, at time.Time, out
 	if err != nil {
 		return testdomain.TestRun{}, err
 	}
-	if result.Summary.Failed != 0 {
-		result.Outcome = testdomain.RunFailed
-	} else {
-		result.Outcome = testdomain.RunPassed
-	}
+	result.Outcome = coverageTestRunOutcome(outcome, result.Summary, result.Incomplete)
 	result.ResultRevision, err = testdomain.ResultRevision(result.Results)
 	if err != nil {
 		return testdomain.TestRun{}, err
@@ -723,16 +753,19 @@ func (run *orchestrationEmbeddedRun) Finish(_ context.Context, at time.Time, out
 }
 
 type orchestrationProcessFactory struct {
-	mu            sync.Mutex
-	export        []byte
-	raw           string
-	blockPhase    string
-	started       chan struct{}
-	phaseOrder    []string
-	terminates    int
-	skipProfile   bool
-	childExitCode int
-	childTimedOut bool
+	mu             sync.Mutex
+	export         []byte
+	raw            string
+	results        map[string]task.ProcessResult
+	outputs        map[string][]task.ProcessOutput
+	beforeComplete func(string)
+	blockPhase     string
+	started        chan struct{}
+	phaseOrder     []string
+	terminates     int
+	skipProfile    bool
+	childExitCode  int
+	childTimedOut  bool
 }
 
 func (factory *orchestrationProcessFactory) Prepare(_ context.Context, spec task.ProcessSpec, taskID, serviceID string) (task.ManagedProcess, error) {
@@ -745,7 +778,7 @@ func (factory *orchestrationProcessFactory) Prepare(_ context.Context, spec task
 	factory.mu.Unlock()
 	process := &orchestrationManagedProcess{
 		factory: factory, spec: spec, phase: phase,
-		output: make(chan task.ProcessOutput, 4), done: make(chan task.ProcessResult, 1),
+		output: make(chan task.ProcessOutput, 16), done: make(chan task.ProcessResult, 1),
 		lease: task.ProcessLease{TaskID: taskID, ServiceInstanceID: serviceID, HostPID: 41, HostStartIdentity: "host-start"},
 	}
 	return process, nil
@@ -789,15 +822,30 @@ type orchestrationManagedProcess struct {
 func (process *orchestrationManagedProcess) Lease() task.ProcessLease { return process.lease }
 func (process *orchestrationManagedProcess) Start(context.Context) error {
 	process.lease.TargetProcessGroup = 42
-	if process.phase == process.factory.blockPhase {
-		if process.factory.started != nil {
-			close(process.factory.started)
+	process.factory.mu.Lock()
+	blockPhase := process.factory.blockPhase
+	started := process.factory.started
+	raw := process.factory.raw
+	export := append([]byte(nil), process.factory.export...)
+	outputs := append([]task.ProcessOutput(nil), process.factory.outputs[process.phase]...)
+	result, hasResult := process.factory.results[process.phase]
+	beforeComplete := process.factory.beforeComplete
+	skipProfile := process.factory.skipProfile
+	process.factory.mu.Unlock()
+	if process.phase == blockPhase {
+		if started != nil {
+			close(started)
 		}
-		process.output <- task.ProcessOutput{Stream: "stderr", Data: []byte(process.factory.raw)}
+		process.output <- task.ProcessOutput{Stream: "stderr", Data: []byte(raw)}
 		return nil
 	}
-	process.output <- task.ProcessOutput{Stream: "stderr", Data: []byte(process.factory.raw)}
-	if process.phase == "test" && !process.factory.skipProfile {
+	process.output <- task.ProcessOutput{Stream: "stderr", Data: []byte(raw)}
+	for _, output := range outputs {
+		process.output <- task.ProcessOutput{
+			Source: output.Source, Stream: output.Stream, Data: append([]byte(nil), output.Data...),
+		}
+	}
+	if process.phase == "test" && !skipProfile {
 		for _, item := range process.spec.Batch {
 			for _, entry := range item.Env {
 				if name, value, ok := strings.Cut(entry, "="); ok && strings.EqualFold(name, "LLVM_PROFILE_FILE") {
@@ -809,11 +857,29 @@ func (process *orchestrationManagedProcess) Start(context.Context) error {
 			}
 		}
 	}
-	if process.phase == "normalize" {
-		process.output <- task.ProcessOutput{Stream: "stdout", Data: append([]byte(nil), process.factory.export...)}
+	if process.phase == "normalize" && !hasOutputStream(outputs, "stdout") {
+		process.output <- task.ProcessOutput{Stream: "stdout", Data: export}
 	}
-	process.finish(task.ProcessResult{ExitCode: 0, Children: orchestrationChildren(process.spec, process.factory)})
+	if beforeComplete != nil {
+		beforeComplete(process.phase)
+	}
+	if !hasResult {
+		result = task.ProcessResult{ExitCode: 0}
+	}
+	if process.phase == "test" && result.Children == nil {
+		result.Children = orchestrationChildren(process.spec, process.factory)
+	}
+	process.finish(result)
 	return nil
+}
+
+func hasOutputStream(outputs []task.ProcessOutput, stream string) bool {
+	for _, output := range outputs {
+		if output.Stream == stream {
+			return true
+		}
+	}
+	return false
 }
 func (process *orchestrationManagedProcess) Output() <-chan task.ProcessOutput { return process.output }
 func (process *orchestrationManagedProcess) Done() <-chan task.ProcessResult   { return process.done }

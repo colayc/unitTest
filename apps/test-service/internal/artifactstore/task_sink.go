@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"sort"
 	"strings"
@@ -36,6 +37,8 @@ type taskSink struct {
 	json        map[string]pendingArtifact
 	finished    bool
 	aborted     bool
+	finalized   []task.Artifact
+	rolledBack  bool
 }
 
 type pendingArtifact struct {
@@ -328,11 +331,43 @@ func (s *taskSink) Finalize(
 			ctx, s.taskID, value.id, value.kind, at, value.data,
 		)
 		if err != nil {
-			return nil, err
+			rollbackErr := s.store.rollbackCommittedArtifacts(artifacts)
+			return nil, errors.Join(err, rollbackErr)
 		}
 		artifacts = append(artifacts, artifact)
 	}
+	s.mu.Lock()
+	s.finalized = append([]task.Artifact{}, artifacts...)
+	s.mu.Unlock()
 	return artifacts, nil
+}
+
+func (s *taskSink) RollbackFinalized(ctx context.Context, artifacts []task.Artifact) error {
+	if s == nil || ctx == nil {
+		return ErrInvalidArtifact
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.store == nil || !s.finished || s.aborted || s.finalized == nil ||
+		len(s.finalized) != len(artifacts) {
+		return ErrStoreUnavailable
+	}
+	for index := range artifacts {
+		if artifacts[index] != s.finalized[index] {
+			return ErrInvalidArtifact
+		}
+	}
+	if s.rolledBack {
+		return nil
+	}
+	if err := s.store.rollbackCommittedArtifacts(s.finalized); err != nil {
+		return err
+	}
+	s.rolledBack = true
+	return nil
 }
 
 func (s *taskSink) Abort(ctx context.Context) error {
@@ -575,3 +610,4 @@ func projectArtifactDiagnostic(value diagnostic.Diagnostic) artifactDiagnostic {
 var _ task.ArtifactWriter = (*Store)(nil)
 var _ task.ArtifactSink = (*taskSink)(nil)
 var _ task.CoverageArtifactSink = (*taskSink)(nil)
+var _ task.FinalizedArtifactRollback = (*taskSink)(nil)

@@ -107,6 +107,18 @@ func (execution *execution) PrepareCompletion(
 	return cloneDomainCompletion(completion), nil
 }
 
+func (execution *execution) DiscardPreparedCompletion() {
+	if execution == nil {
+		return
+	}
+	execution.completionMu.Lock()
+	execution.completion = nil
+	execution.mu.Lock()
+	execution.failedPhase = coveragerun.PhasePublish
+	execution.mu.Unlock()
+	execution.completionMu.Unlock()
+}
+
 func (execution *execution) prepareCompletion(
 	ctx context.Context,
 	current task.Task,
@@ -522,6 +534,8 @@ func stateReachedTests(state coveragerun.State, failedPhase coveragerun.Phase) b
 		return false
 	}
 }
+
+var _ task.PreparedCompletionDiscarder = (*execution)(nil)
 
 func cloneTimePointer(value *time.Time) *time.Time {
 	if value == nil {

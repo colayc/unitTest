@@ -345,3 +345,243 @@ Output: both commands produced no diagnostics and exited 0.
 - The harness retains real temporary fake LLVM executable files and real LLVM toolset/profile/instrumentation ownership, but does not execute host-installed LLVM tools; process behavior is supplied by the bounded fake factory.
 - CommitBlob fault injection and SQLite rollback are covered. A host filesystem failure partway through final artifact renames remains governed by ArtifactStore recovery/cleanup, not a new Task 7 fault hook.
 - Final implementation commit subject is `fix: harden coverage execution ownership`; the final ID is in the agent handoff because a commit cannot contain its own hash.
+
+---
+
+## Fix Round 2 (2026-08-20)
+
+This section supersedes the round-1 evidence boundary for filesystem publication,
+terminal SQLite failure/recovery, the real process fault matrix, continuation
+revalidation, and cancellation after profile sealing.
+
+### Summary
+
+- The real temporary SQLite + ArtifactStore + Task Manager harness now injects
+  per-phase process results and output. It covers configure/build failure, merge
+  failure, malformed LLVM export, normalization failure, renderer failure, a
+  Task timeout distinct from child timeout, and all requested retained-state
+  mutations.
+- The coordinator has an injectable report renderer whose production default is
+  `coveragereport.Render`; this makes the report action itself fault-testable
+  without bypassing Manager orchestration.
+- ArtifactStore rolls back report files already published when a later report
+  file cannot finalize. Rollback reopens the pinned parent, validates canonical
+  metadata, file identity, size and SHA-256, refuses links/replacements, removes
+  in reverse order, and syncs the directory.
+- A finalized CoverageRun sink remains privately owned until the SQLite terminal
+  mutation commits. On transaction failure, Manager calls the exact sink's
+  verified rollback before quiescing; no artifact metadata or broker terminal
+  event becomes visible. Real `RecoverInterrupted` then commits exactly one
+  interrupted TestRun/CoverageRun/Task graph.
+- If report-file finalization itself fails, Manager discards the frozen
+  report-bearing completion, opens a clean sink, and prepares one exact
+  `infrastructure_failed` / `unavailable,persistence_failed` completion. No
+  report row, public artifact metadata, regular report file, or report-available
+  event survives.
+- Cancellation after the real allocator has allocated and `SealProfiles` has
+  retained a manifest proves the manifest, allocator, adapter, retained root,
+  and process tree are released exactly once, even across duplicate coordinator
+  `Close` calls.
+
+### RED evidence
+
+ArtifactStore initially left the first published report file behind when the
+second publication failed:
+
+```powershell
+$env:GOCACHE=(Join-Path (Get-Location) '.gocache-task7-fix2'); go test ./apps/test-service/internal/artifactstore -run TestCoverageArtifactSinkRollsBackPublishedReportFilesWhenFinalizationFailsPartway -count=1 -v
+```
+
+Output: `FAIL`; the assertion reported one remaining `.coverage.html` file.
+
+The real phase matrix initially could not inject the report action:
+
+```powershell
+$env:GOCACHE=(Join-Path (Get-Location) '.gocache-task7-fix2'); go test ./apps/test-service/internal/coverageexec -run TestCoordinatorRealManagerTerminalizesExactPhaseFaultMatrix -count=1 -v
+```
+
+Output: compile failure, `Config.RenderReport undefined`.
+
+The first post-seal cancellation run exposed an incomplete embedded-run test
+double rather than a production coordinator failure:
+
+```powershell
+$env:GOCACHE=(Join-Path (Get-Location) '.gocache-task7-fix2'); go test ./apps/test-service/internal/coverageexec -run TestCoordinatorCancellationAfterProfileSealingReleasesRealManifestTreeOnce -count=1 -v
+```
+
+Output: `FAIL`; the fake accepted only `task.OutcomeSucceeded`, so cancellation
+was misprojected as Task `infrastructure_failed` and CoverageRun `merge_failed`.
+The fake was aligned with the production embedded contract's cancelled,
+timed-out, interrupted, command-failed and infrastructure-failed mappings.
+
+The full persistence RED reproduced both blocking defects:
+
+```powershell
+$env:GOCACHE=(Join-Path (Get-Location) '.gocache-task7-fix2'); go test ./apps/test-service/internal/coverageexec -run 'TestCoordinator(RealArtifactFinalizationFailureRollsBackAndTerminalizesUnavailable|TerminalSQLiteFailureKeepsBrokerInvisibleAndRecoversExactly)' -count=1 -v
+```
+
+Output: `FAIL`. The filesystem-finalization case left the Task running at
+`coverage-publish` with an unhealthy Manager; the terminal SQLite failure left
+all three report files on disk even though the transaction and broker terminal
+publication had not committed.
+
+The first fresh full-service verification also caught two load-sensitive test
+timing defects: the 50 ms Task timeout could fire before configure started, and
+the test could observe the terminal row just before asynchronous process-close
+removed the execution root. The regression now uses a 2 second Task timeout and
+condition-based close/root waiting. Three consecutive focused runs passed before
+the full gate was repeated.
+
+### Final GREEN verification
+
+Fresh real fault/cancel/revalidation/recovery matrix:
+
+```powershell
+$env:GOCACHE=(Join-Path $env:TEMP 'unitTest-phase8-task7-fix2-final'); go test ./apps/test-service/internal/coverageexec -run 'TestCoordinator(RealManagerTerminalizesExactPhaseFaultMatrix|TaskTimeoutStopsCurrentTreeBeforeLaterPhase|RevalidatesEveryRetainedBoundaryBeforeContinuation|CancellationAfterProfileSealingReleasesRealManifestTreeOnce|RealArtifactFinalizationFailureRollsBackAndTerminalizesUnavailable|TerminalSQLiteFailureKeepsBrokerInvisibleAndRecoversExactly|AssertionFailureContinuesToAvailableRealAggregate|MissingProfileOutcomesUseExactRealInvocationEvidence)' -count=1 -v
+```
+
+Output: exit 0; all listed tests and subtests passed; package
+`coverageexec` completed in `6.173s`. This includes six injected phase faults,
+six retained-boundary mutations, four missing-profile classifications, Task
+timeout, assertion continuation, post-seal cancellation, filesystem rollback,
+and SQLite recovery.
+
+Fresh full service gate after timing stabilization:
+
+```powershell
+$env:GOCACHE=(Join-Path $env:TEMP 'unitTest-phase8-task7-fix2-final'); go test ./apps/test-service/... -count=1
+```
+
+Output: exit 0 in `35.9s`; every test-bearing package was `ok`, including
+`coverageexec 19.246s`, `artifactstore 1.372s`, `task 1.009s`,
+`taskstore 16.866s`, `runtime 4.017s`, and `processcontrol 31.695s`.
+
+Fresh race gate:
+
+```powershell
+$env:GOCACHE=(Join-Path $env:TEMP 'unitTest-phase8-task7-fix2-final-race'); go test -race ./apps/test-service/internal/coverageexec ./apps/test-service/internal/task ./apps/test-service/internal/artifactstore ./apps/test-service/internal/taskstore -count=1
+```
+
+```text
+ok  unit-test-ide.local/test-service/internal/coverageexec  32.647s
+ok  unit-test-ide.local/test-service/internal/task           2.141s
+ok  unit-test-ide.local/test-service/internal/artifactstore  1.872s
+ok  unit-test-ide.local/test-service/internal/taskstore     80.958s
+```
+
+Fresh static and patch gates:
+
+```powershell
+$env:GOCACHE=(Join-Path $env:TEMP 'unitTest-phase8-task7-fix2-final'); go vet ./apps/test-service/...
+git diff --check
+```
+
+Output: both exited 0 with no diagnostics.
+
+### Phase, outcome, fault, cancel, replay and ownership evidence
+
+- Configure exit 1 stops at configure and yields
+  `infrastructure_failed/instrumentation_failed`; build exit 1 stops at build and
+  yields `command_failed/build_failed`; merge exit 1 stops before export and
+  yields `infrastructure_failed/merge_failed`.
+- Malformed LLVM JSON and a valid export with duplicate physical source identity
+  independently exercise parser and normalizer failures. Both stop before the
+  report action and yield `normalization_failed`.
+- Renderer failure executes the real report action and leaves publish unstarted,
+  yielding `report_generation_failed` with no report/public artifact.
+- Task timeout terminates blocked configure once and never starts build/test/
+  merge/export/report/publish. Child timeout remains separately covered as exact
+  partial coverage evidence.
+- Before continuation, mutations of workspace generation, catalog revision,
+  coverage profile, instrumentation fingerprint, retained binary identity, and
+  workspace trust all stop the tree with the phase-appropriate exact unavailable
+  reason. Toolchain identity/version mutation remains covered by the round-1
+  real harness.
+- Every fault asserts one terminal Task/TestRun/CoverageRun aggregate, no report
+  ID, no public artifact metadata, no report-available event, no later process,
+  and absence of raw native-path/token/profile sentinels from durable events and
+  artifacts.
+- The filesystem-finalization test creates a real second-file collision after
+  the first report file publishes. ArtifactStore removes the first file; Manager
+  retries only an unavailable completion on a clean sink; the final artifact
+  tree contains no regular file for the CoverageRun.
+- The SQLite test injects failure at `Mutation.FinishCoverage`. Before recovery,
+  Task and CoverageRun remain nonterminal, the broker has zero TestRun/CoverageRun/
+  report/Task terminal events, SQLite has zero CoverageRun artifacts, and the
+  CoverageRun artifact directory has zero regular files. `RecoverInterrupted`
+  then returns exactly TestRun-finished, CoverageRun-finished, Task-finished and
+  stores `interrupted`, `unavailable/service_restarted`, and `interrupted`.
+- Post-seal cancellation observes one sealed live manifest before cancel, one
+  process termination, exact `cancelled/user_cancelled`, a closed manifest,
+  adapter/allocator close count one, removed retained execution root, no later
+  phase/public artifact, and unchanged counts after duplicate `Close`.
+- Round-1 coordinator and SQLite completion replay tests remain in the full and
+  race gates. The new rollback path discards a report-bearing cached completion
+  before preparing the unavailable graph, so no stale report IDs/blobs can be
+  replayed after persistence failure.
+
+### Files changed in fix round 2
+
+- `apps/test-service/internal/coverageexec/orchestration_faults_windows_test.go`
+- `apps/test-service/internal/coverageexec/orchestration_windows_test.go`
+- `apps/test-service/internal/coverageexec/coordinator_test.go`
+- `apps/test-service/internal/coverageexec/model.go`
+- `apps/test-service/internal/coverageexec/coordinator.go`
+- `apps/test-service/internal/coverageexec/completion.go`
+- `apps/test-service/internal/task/ports.go`
+- `apps/test-service/internal/task/manager_artifacts.go`
+- `apps/test-service/internal/task/manager_execution.go`
+- `apps/test-service/internal/artifactstore/store.go`
+- `apps/test-service/internal/artifactstore/task_sink.go`
+- `apps/test-service/internal/artifactstore/task_sink_test.go`
+
+### Self-review
+
+- Re-read the round-2 findings against the production diff and the final test
+  matrix. All requested failure boundaries are driven through real Manager,
+  SQLite and ArtifactStore owners; no test calls `failureReason` directly as its
+  orchestration evidence.
+- Verified rollback is CoverageRun-only. A review run caught an early version
+  incorrectly applying rollback to non-coverage terminal conflicts; the helper
+  was scoped back to CoverageRun and the three affected Manager conflict tests
+  plus the full task suite passed.
+- Verified Manager retains the finalized sink only until `Store.Apply` returns,
+  clears it on commit, and rolls it back before tripping storage on failure.
+  Broker publication remains after the successful SQLite mutation.
+- Verified the finalization-failure retry cannot reuse the frozen available
+  completion. `DiscardPreparedCompletion` clears the cached graph under the same
+  lock order and pins the failure projection to publish/persistence.
+- Verified rollback never follows a replaced path: it revalidates the pinned
+  parent and exact regular-file identity and content before removal. A hostile
+  replacement is refused rather than followed.
+- Verified the real manifest cancellation assertion waits for asynchronous
+  process-close/boundary release by state, not by assuming the terminal row and
+  cleanup occur simultaneously.
+- Confirmed no Go cache, temporary SQLite database, report file, profile,
+  profdata, LLVM fixture, or execution-root byproduct is in the worktree diff.
+
+### Deferred ledger status
+
+- **Task 1 — stronger task-layer finished aggregate validation: remains open.**
+  This round adds real aggregate and recovery evidence but no new standalone
+  stronger Task-layer aggregate validator.
+- **Task 1 — direct successful/action-error continuations: remains closed for
+  Task 7.** Normal success runs all continuations to publish; renderer failure
+  exercises the real action-error path and proves publish is not started.
+- **Task 5 — cancellation-specific allocator/root/profile release-once: closed
+  by new direct evidence.** Unlike round 1's configure-time cancellation, this
+  round cancels only after real profile allocation and manifest sealing, then
+  verifies manifest/allocator/adapter/root/process ownership exactly once.
+
+### Concerns and evidence boundary
+
+- The process factory is injectable and drives real Manager orchestration but
+  does not launch host-installed LLVM binaries. Concrete host process wiring
+  remains outside this hermetic fault matrix.
+- `FinalizedArtifactRollback` is an optional sink capability because generic
+  Task sinks retain their existing lifecycle. A report-bearing CoverageRun sink
+  that omits it fails closed; the production ArtifactStore implements it and has
+  compile-time and real-stack coverage.
+- No blocking concern remains for Task 8's coordinator contract. The open Task 1
+  standalone validator ledger item is unchanged and is not claimed by these
+  integration tests.

@@ -1112,6 +1112,12 @@ func (m *Manager) persistFinished(
 	active map[string]*activeTask,
 ) (Task, error) {
 	finishedAt := m.clock.Now()
+	if current.Kind == KindCoverageRun && owner.artifactSink == nil {
+		if err := m.createTaskArtifacts(owner); err != nil {
+			m.tripStorage(active)
+			return current, ErrStorageUnavailable
+		}
+	}
 	finished, err := ApplyTransition(current, Transition{
 		From: current.Status, To: StatusFinished, Outcome: outcome, At: finishedAt,
 		ErrorCode: outcomeErrorCode(outcome), ErrorMessage: outcomeErrorMessage(outcome),
@@ -1169,6 +1175,49 @@ func (m *Manager) persistFinished(
 		outcome,
 		steps,
 	)
+	if artifactErr != nil && current.Kind == KindCoverageRun {
+		owner.artifactSink = nil
+		discarder, ok := owner.resultInterpreter.(PreparedCompletionDiscarder)
+		if !ok {
+			m.tripStorage(active)
+			return current, ErrStorageUnavailable
+		}
+		discarder.DiscardPreparedCompletion()
+		if err := m.createTaskArtifacts(owner); err != nil {
+			m.tripStorage(active)
+			return current, ErrStorageUnavailable
+		}
+		outcome = OutcomeInfrastructureFailed
+		finished, artifactErr = ApplyTransition(current, Transition{
+			From: current.Status, To: StatusFinished, Outcome: outcome, At: finishedAt,
+			ErrorCode: outcomeErrorCode(outcome), ErrorMessage: outcomeErrorMessage(outcome),
+		})
+		if artifactErr == nil {
+			steps = terminalStepMutations(
+				owner,
+				ProcessResult{Err: ErrStorageUnavailable},
+				outcome,
+				false,
+				finishedAt,
+			)
+			completion, artifactErr = m.prepareDomainCompletion(
+				owner,
+				finished,
+				finishedAt,
+				outcome,
+			)
+		}
+		if artifactErr == nil {
+			artifacts, artifactErr = m.finalizeTaskArtifacts(
+				context.Background(),
+				owner,
+				current,
+				finishedAt,
+				outcome,
+				steps,
+			)
+		}
+	}
 	if artifactErr != nil {
 		m.tripStorage(active)
 		return current, ErrStorageUnavailable
@@ -1211,10 +1260,23 @@ func (m *Manager) persistFinished(
 		FinishRun: completion.TestRun, FinishCoverage: completion.Coverage,
 	})
 	if err != nil {
+		if current.Kind == KindCoverageRun {
+			rollbackErr := rollbackFinalizedArtifacts(owner, artifacts)
+			if discarder, ok := owner.resultInterpreter.(PreparedCompletionDiscarder); ok {
+				discarder.DiscardPreparedCompletion()
+			}
+			if rollbackErr != nil {
+				m.tripStorage(active)
+				return current, ErrStorageUnavailable
+			}
+		}
 		if !errors.Is(err, ErrConflict) {
 			m.tripStorage(active)
 		}
 		return current, err
+	}
+	if current.Kind == KindCoverageRun {
+		owner.artifactSink = nil
 	}
 	owner.task = stored
 	releaseExecutionBoundary(owner)
@@ -1226,6 +1288,23 @@ func (m *Manager) persistFinished(
 		return stored, ErrStorageUnavailable
 	}
 	return stored, nil
+}
+
+func rollbackFinalizedArtifacts(owner *activeTask, artifacts []Artifact) error {
+	if owner == nil || owner.artifactSink == nil {
+		return ErrStorageUnavailable
+	}
+	rollback, ok := owner.artifactSink.(FinalizedArtifactRollback)
+	if !ok {
+		if len(artifacts) == 0 {
+			owner.artifactSink = nil
+			return nil
+		}
+		return ErrStorageUnavailable
+	}
+	err := rollback.RollbackFinalized(context.Background(), artifacts)
+	owner.artifactSink = nil
+	return err
 }
 
 func (m *Manager) prepareDomainCompletion(
