@@ -13,6 +13,7 @@ import (
 	"unit-test-ide.local/test-service/internal/cmake"
 	"unit-test-ide.local/test-service/internal/coveragecoord"
 	"unit-test-ide.local/test-service/internal/coveragedomain"
+	"unit-test-ide.local/test-service/internal/coverageexec"
 	"unit-test-ide.local/test-service/internal/discovery"
 	"unit-test-ide.local/test-service/internal/eventbroker"
 	"unit-test-ide.local/test-service/internal/instance"
@@ -70,6 +71,7 @@ type Runtime struct {
 	workspaceRoot       workspace.Root
 	trustedWorkspace    bool
 	coverageBackend     session.CoverageBackend
+	coverageExecutor    coverageExecutor
 
 	shutdownMu          sync.Mutex
 	shutdownRunning     bool
@@ -144,9 +146,10 @@ type dependencies struct {
 	newTestCoordinator func(
 		testCoordinatorConfig,
 	) (runtimeTestCoordinator, io.Closer, error)
-	newRunner  func(string) processcontrol.Runner
-	newBroker  func(eventbroker.Source, int, int) (*eventbroker.Broker, error)
-	newManager func(task.ManagerConfig) (runtimeManager, error)
+	newCoverageExecutor func(coverageExecutionConfig) (coverageExecutor, error)
+	newRunner           func(string) processcontrol.Runner
+	newBroker           func(eventbroker.Source, int, int) (*eventbroker.Broker, error)
+	newManager          func(task.ManagerConfig) (runtimeManager, error)
 }
 
 func defaultDependencies() dependencies {
@@ -176,9 +179,10 @@ func defaultDependencies() dependencies {
 		newCoordinator: func(config build.CoordinatorConfig) (runtimeCoordinator, error) {
 			return build.NewCoordinator(config)
 		},
-		newTestCoordinator: newRuntimeTestCoordinator,
-		newRunner:          processcontrol.NewRunner,
-		newBroker:          eventbroker.New,
+		newTestCoordinator:  newRuntimeTestCoordinator,
+		newCoverageExecutor: newRuntimeCoverageExecutor,
+		newRunner:           processcontrol.NewRunner,
+		newBroker:           eventbroker.New,
 		newManager: func(config task.ManagerConfig) (runtimeManager, error) {
 			return task.NewManager(config)
 		},
@@ -222,6 +226,9 @@ func (d dependencies) complete() dependencies {
 	}
 	if d.newTestCoordinator == nil {
 		d.newTestCoordinator = defaults.newTestCoordinator
+	}
+	if d.newCoverageExecutor == nil {
+		d.newCoverageExecutor = defaults.newCoverageExecutor
 	}
 	if d.newRunner == nil {
 		d.newRunner = defaults.newRunner
@@ -411,36 +418,6 @@ func Open(config Config) (*Runtime, error) {
 				broker.Close(),
 			))
 		}
-		failTrustedRuntime := func(cause error) (*Runtime, error) {
-			shutdownContext, cancel := context.WithTimeout(
-				context.Background(),
-				closeTimeout,
-			)
-			shutdownErr := manager.Shutdown(shutdownContext)
-			cancel()
-			var resourceErr error
-			if testResources != nil {
-				resourceErr = testResources.Close()
-			}
-			return failArtifacts(errors.Join(
-				cause,
-				shutdownErr,
-				resourceErr,
-				broker.Close(),
-			))
-		}
-		if err := resumeQueuedBuilds(ctx, store, coordinator, broker, clockNow(config.Clock)); err != nil {
-			return failTrustedRuntime(err)
-		}
-		if err := resumeQueuedTests(
-			ctx,
-			store,
-			tests,
-			broker,
-			clockNow(config.Clock),
-		); err != nil {
-			return failTrustedRuntime(err)
-		}
 	}
 	runtimeValue := &Runtime{
 		store: store, artifacts: artifacts, broker: broker, manager: manager, runner: runner,
@@ -459,19 +436,67 @@ func Open(config Config) (*Runtime, error) {
 	if runtimeValue.trustedWorkspace && runtimeValue.coverageBackend == nil {
 		coverageCoordinator, err := coveragecoord.NewCoordinator(store, config.Clock, newID)
 		if err != nil {
-			return failArtifacts(err)
+			return runtimeValue.failOpen(err)
 		}
 		queuedBackend, err := coveragecoord.NewQueuedBackend(coverageCoordinator, store)
 		if err != nil {
-			return failArtifacts(err)
+			return runtimeValue.failOpen(err)
 		}
-		coverageBackend, err := newRuntimeCoverageBackend(queuedBackend, store, runtimeValue.resolveCoverageStart)
+		buildPreparer, ok := coordinator.(coveragePlanPreparer)
+		if !ok {
+			return runtimeValue.failOpen(task.ErrStorageUnavailable)
+		}
+		embeddedTests, ok := tests.(coverageexec.EmbeddedTestPreparer)
+		if !ok {
+			return runtimeValue.failOpen(task.ErrStorageUnavailable)
+		}
+		coverageExecutor, err := deps.newCoverageExecutor(coverageExecutionConfig{
+			Platform: config.Platform, Tasks: manager, Store: store,
+			Build: coverageBuildPreparer{delegate: buildPreparer}, Tests: embeddedTests,
+			WorkspaceRoot: workspaceRoot, ExecutionRoot: layout.Coverage,
+			Clock: config.Clock, NewID: newID,
+		})
 		if err != nil {
-			return failArtifacts(err)
+			return runtimeValue.failOpen(err)
+		}
+		runtimeValue.coverageExecutor = coverageExecutor
+		coverageBackend, err := newRuntimeCoverageBackend(queuedBackend, store, runtimeValue.resolveCoverageStart, coverageExecutor)
+		if err != nil {
+			return runtimeValue.failOpen(err)
 		}
 		runtimeValue.coverageBackend = coverageBackend
 	}
+	if runtimeValue.trustedWorkspace {
+		if err := resumeQueuedBuilds(ctx, store, coordinator, broker, clockNow(config.Clock)); err != nil {
+			return runtimeValue.failOpen(err)
+		}
+		if err := resumeQueuedTests(ctx, store, tests, broker, clockNow(config.Clock)); err != nil {
+			return runtimeValue.failOpen(err)
+		}
+		if runtimeValue.coverageExecutor != nil {
+			if err := resumeQueuedCoverage(ctx, store, runtimeValue.coverageExecutor); err != nil {
+				return runtimeValue.failOpen(err)
+			}
+		}
+	}
 	return runtimeValue, nil
+}
+
+func (r *Runtime) failOpen(cause error) (*Runtime, error) {
+	if r == nil {
+		return nil, cause
+	}
+	if backend, ok := r.coverageBackend.(*queuedCoverageBackend); ok {
+		backend.stopAdmission()
+	}
+	var coverageErr error
+	if r.coverageExecutor != nil {
+		coverageErr = r.coverageExecutor.Close()
+	}
+	shutdownContext, cancel := context.WithTimeout(context.Background(), closeTimeout)
+	shutdownErr := r.manager.Shutdown(shutdownContext)
+	cancel()
+	return nil, errors.Join(cause, coverageErr, shutdownErr, r.closeResources())
 }
 
 // CoverageBackend returns a provider only for a trusted workspace. Tests may
@@ -904,6 +929,14 @@ func (r *Runtime) Shutdown(ctx context.Context) error {
 }
 
 func (r *Runtime) shutdownAttempt(ctx context.Context) error {
+	if backend, ok := r.coverageBackend.(*queuedCoverageBackend); ok {
+		backend.stopAdmission()
+	}
+	if r.coverageExecutor != nil {
+		if err := r.coverageExecutor.Close(); err != nil {
+			return err
+		}
+	}
 	if r.manager == nil {
 		return nil
 	}

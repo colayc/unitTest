@@ -7,11 +7,11 @@
 - TypeScript：Code-OSS UI、IDE 状态、Protocol Client 与用户交互。
 - Go Service：本机 workspace 检查、Toolchain 发现、任务持久化、CMake 构建、测试与后续覆盖率执行。
 - Named Pipe/Unix Socket：桌面进程与 Service 的 per-user 本地 IPC。
-- GitHub：源码托管、PR、Hosted CI 和发布准备；不在产品运行链路内。
+- GitHub / Gitee：仅用于源码托管、协作、Hosted CI 与开发分发；二者都不是产品运行依赖，Service 执行 coverage 时不会访问网络或代码托管平台。
 
 当前已完成 Phase 6 首个 Vertical Slice，并已实现 Phase 6B Testing API 集成代码：独立 Code-OSS Extension 可接入真实 Go Service，Workspace Trust gate、Service lifecycle、`workspace/inspect`、Test Item tree 与 Run Profile 已形成闭环。Phase 6B 只有在 Windows/Linux CI 都实际执行真实 Service smoke 后才能标记完成；Coverage UI、source decoration 与 desktop packaging 仍不在本阶段范围内。
 
-Phase 7 的第一个 Coverage Report Extension slice 已开始：Extension 已提供受信任工作区的 `Run with Coverage`、`Refresh Coverage` 和 `Open Coverage Report` command，CoverageRun 会在每个异步边界重新校验 trust、Service session、workspace generation 和 catalog revision；HTML artifact 只能通过 protocol chunk digest 校验后进入无网络 CSP viewer。Go Service 现在已把 trusted Runtime 接到真实 Protocol v1.4 coverage provider：`coverage/runs/*` 与 `coverage/reports/get` 使用 durable queued aggregate 和 canonical repository，未完成执行前不会伪造 report。Coverage execution coordinator、跨平台采集和完成态 smoke 仍未实现，也不会用 fake response 冒充 runtime evidence。
+Coverage Report Extension 已提供受信任工作区的 `Run with Coverage`、`Refresh Coverage` 和 `Open Coverage Report` command，CoverageRun 会在每个异步边界重新校验 trust、Service session、workspace generation 和 catalog revision；HTML artifact 只能通过 protocol chunk digest 校验后进入无网络 CSP viewer。Go Service 的 trusted Runtime 现在会先持久化 CoverageRun aggregate，再交给共享 `coverageexec.Coordinator`：Windows `clang-cl` 可执行 `clang-cl → llvm-profdata → llvm-cov` 链路并完成 Coverage JSON、JUnit XML 与单文件 HTML 的原子发布。Linux 本批明确返回 unsupported terminal aggregate；GCC/Clang native coverage execution 是下一批工作，cross-compile 不能作为 Linux native PASS。完成态 Protocol smoke 与 CI evidence 由后续验收任务提供，不能用 fake response 冒充 runtime evidence。
 
 ## 固定开发环境
 
@@ -127,4 +127,4 @@ pnpm check:protocol-generated
 
 不要手工修改生成的 TypeScript 或 Go model。新增能力必须保持 Protocol v1.0/v1.1 compatibility gate，并避免把 executable、raw args、environment 或 cwd 暴露为 request 字段。
 
-当前 Go Service 在 trusted Runtime 构建成功后会协商 Protocol v1.4，并同时保留 workspace、test、task、event 的既有 projection；coverage provider 只在 trusted workspace 暴露。untrusted 或 provider 不可用时仍安全回退到 legacy protocol。v1.4 queued coverage 只代表已持久化、待执行，不代表已经生成 report。
+当前 Go Service 在 trusted Runtime 构建成功后会协商 Protocol v1.4，并同时保留 workspace、test、task、event 的既有 projection；coverage provider 只在 trusted workspace 暴露。untrusted 或 provider 不可用时仍安全回退到 legacy protocol。`coverage/runs/start` 严格 persist-first，然后 resume canonical persisted Task；Windows `clang-cl` run 可以进入完成态并生成 report，Linux GCC/Clang run 当前会明确终态化为 unavailable，而不会启动 compiler、collector 或伪造 report。

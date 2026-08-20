@@ -8,6 +8,7 @@ import (
 	"errors"
 	goruntime "runtime"
 	"strings"
+	"sync"
 
 	"unit-test-ide.local/test-service/internal/cmake"
 	"unit-test-ide.local/test-service/internal/coveragecoord"
@@ -27,47 +28,108 @@ type coverageQueue interface {
 }
 
 type coverageRepository interface {
+	Get(context.Context, string) (task.Task, error)
+	GetRunForTask(context.Context, string) (testdomain.TestRun, error)
 	GetCoverageRun(context.Context, string) (coveragedomain.Run, error)
 	ListCoverageRuns(context.Context, coveragedomain.RunPageRequest) (coveragedomain.RunPage, error)
 	GetCoverageReport(context.Context, string) (coveragedomain.Report, error)
 }
 
+type coverageExecutor interface {
+	Resume(context.Context, task.Task) (task.Task, error)
+	FinishUnsupported(context.Context, task.Task) (task.Task, error)
+	Close() error
+}
+
 type coverageStartResolver func(context.Context, session.CoverageRunStart) (coveragecoord.QueuedStartInput, error)
 
 type queuedCoverageBackend struct {
+	mu         sync.RWMutex
+	stopped    bool
 	queue      coverageQueue
 	repository coverageRepository
 	resolve    coverageStartResolver
+	executor   coverageExecutor
 }
 
-func newRuntimeCoverageBackend(queue coverageQueue, repository coverageRepository, resolve coverageStartResolver) (*queuedCoverageBackend, error) {
-	if queue == nil || repository == nil || resolve == nil {
+func newRuntimeCoverageBackend(queue coverageQueue, repository coverageRepository, resolve coverageStartResolver, executor coverageExecutor) (*queuedCoverageBackend, error) {
+	if queue == nil || repository == nil || resolve == nil || executor == nil {
 		return nil, errInvalidCoverageBackend
 	}
-	return &queuedCoverageBackend{queue: queue, repository: repository, resolve: resolve}, nil
+	return &queuedCoverageBackend{queue: queue, repository: repository, resolve: resolve, executor: executor}, nil
 }
 
 func (backend *queuedCoverageBackend) StartCoverageRun(
 	ctx context.Context,
 	input session.CoverageRunStart,
 ) (task.Task, coveragedomain.Run, testdomain.TestRun, error) {
-	if backend == nil || backend.queue == nil || backend.resolve == nil || ctx == nil {
+	if backend == nil || ctx == nil {
+		return task.Task{}, coveragedomain.Run{}, testdomain.TestRun{}, errInvalidCoverageBackend
+	}
+	backend.mu.RLock()
+	if backend.stopped {
+		backend.mu.RUnlock()
+		return task.Task{}, coveragedomain.Run{}, testdomain.TestRun{}, task.ErrStorageUnavailable
+	}
+	if backend.queue == nil || backend.repository == nil || backend.resolve == nil || backend.executor == nil {
+		backend.mu.RUnlock()
 		return task.Task{}, coveragedomain.Run{}, testdomain.TestRun{}, errInvalidCoverageBackend
 	}
 	queued, err := backend.resolve(ctx, input)
 	if err != nil {
+		backend.mu.RUnlock()
 		return task.Task{}, coveragedomain.Run{}, testdomain.TestRun{}, err
 	}
 	result, err := backend.queue.Start(ctx, queued)
 	if err != nil {
+		backend.mu.RUnlock()
 		return task.Task{}, coveragedomain.Run{}, testdomain.TestRun{}, err
 	}
 	if result.Task.ID == "" || result.Run.ID == "" || result.TestRun.RunID == "" ||
+		result.Run.TaskID != result.Task.ID || result.Run.TestRunID != result.TestRun.RunID ||
+		result.TestRun.TaskID != result.Task.ID ||
 		result.Task.Status != task.StatusQueued || result.Run.Status != coveragedomain.StatusQueued ||
 		result.TestRun.Status != testdomain.RunQueued {
+		backend.mu.RUnlock()
 		return task.Task{}, coveragedomain.Run{}, testdomain.TestRun{}, errInvalidCoverageBackend
 	}
-	return result.Task, result.Run, result.TestRun, nil
+	backend.mu.RUnlock()
+	_, resumeErr := backend.executor.Resume(ctx, result.Task)
+	canonicalTask, canonicalRun, canonicalTestRun, reloadErr := backend.reloadGraph(ctx, result)
+	if reloadErr != nil {
+		return result.Task, result.Run, result.TestRun, errors.Join(resumeErr, reloadErr)
+	}
+	return canonicalTask, canonicalRun, canonicalTestRun, resumeErr
+}
+
+func (backend *queuedCoverageBackend) reloadGraph(ctx context.Context, queued coveragecoord.QueuedStartResult) (task.Task, coveragedomain.Run, testdomain.TestRun, error) {
+	canonicalTask, err := backend.repository.Get(ctx, queued.Task.ID)
+	if err != nil {
+		return task.Task{}, coveragedomain.Run{}, testdomain.TestRun{}, err
+	}
+	canonicalRun, err := backend.repository.GetCoverageRun(ctx, queued.Run.ID)
+	if err != nil {
+		return task.Task{}, coveragedomain.Run{}, testdomain.TestRun{}, err
+	}
+	canonicalTestRun, err := backend.repository.GetRunForTask(ctx, queued.Task.ID)
+	if err != nil {
+		return task.Task{}, coveragedomain.Run{}, testdomain.TestRun{}, err
+	}
+	if canonicalTask.ID != queued.Task.ID || canonicalRun.ID != queued.Run.ID ||
+		canonicalRun.TaskID != canonicalTask.ID || canonicalRun.TestRunID != canonicalTestRun.RunID ||
+		canonicalTestRun.TaskID != canonicalTask.ID {
+		return task.Task{}, coveragedomain.Run{}, testdomain.TestRun{}, errInvalidCoverageBackend
+	}
+	return canonicalTask, canonicalRun, canonicalTestRun, nil
+}
+
+func (backend *queuedCoverageBackend) stopAdmission() {
+	if backend == nil {
+		return
+	}
+	backend.mu.Lock()
+	backend.stopped = true
+	backend.mu.Unlock()
 }
 
 func (backend *queuedCoverageBackend) GetCoverageRun(ctx context.Context, id string) (coveragedomain.Run, error) {

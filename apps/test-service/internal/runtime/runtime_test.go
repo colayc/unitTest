@@ -82,6 +82,108 @@ func TestUntrustedRuntimeAllowsNoWorkspaceMethods(t *testing.T) {
 	}
 }
 
+func TestUntrustedRuntimeConstructsNoCoverageExecutorOrNativeSideEffect(t *testing.T) {
+	base := t.TempDir()
+	runner := &recordingRunner{}
+	deps := testDependencies(runner, nil)
+	var buildCalls, testCalls, executorCalls int
+	deps.newCoordinator = func(build.CoordinatorConfig) (runtimeCoordinator, error) {
+		buildCalls++
+		return &fakeRuntimeCoordinator{}, nil
+	}
+	deps.newTestCoordinator = func(testCoordinatorConfig) (runtimeTestCoordinator, io.Closer, error) {
+		testCalls++
+		return &fakeRuntimeTestCoordinator{}, nil, nil
+	}
+	deps.newCoverageExecutor = func(coverageExecutionConfig) (coverageExecutor, error) {
+		executorCalls++
+		return &fakeCoverageExecutor{}, nil
+	}
+	active, err := Open(Config{
+		DataDir: filepath.Join(base, "data"), ServiceExecutable: os.Args[0],
+		WorkspaceRoot: base, TrustedWorkspace: false, Platform: platformForTest(),
+		dependencies: deps,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = active.Close() })
+	if buildCalls != 0 || testCalls != 0 || executorCalls != 0 || active.coverageExecutor != nil || active.CoverageBackend() != nil {
+		t.Fatalf("untrusted construction calls build/test/coverage=%d/%d/%d executor=%#v backend=%#v", buildCalls, testCalls, executorCalls, active.coverageExecutor, active.CoverageBackend())
+	}
+	if runner.prepares.Load() != 0 {
+		t.Fatalf("untrusted process prepares = %d, want 0", runner.prepares.Load())
+	}
+	layout, err := PrepareDataDir(filepath.Join(base, "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(layout.Coverage)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("untrusted coverage execution directory = %#v, %v", entries, err)
+	}
+}
+
+func TestTrustedRuntimeConstructsCoverageExecutionAndResumesAfterBuildAndTests(t *testing.T) {
+	base := t.TempDir()
+	workspaceRoot := filepath.Join(base, "workspace")
+	if err := os.MkdirAll(workspaceRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var stages []string
+	deps := testDependencies(&recordingRunner{}, func(stage string) { stages = append(stages, stage) })
+	deps.resolveCMake = func(context.Context, probe.Runner, cmake.ResolverConfig) (cmake.Installation, error) {
+		return cmake.Installation{Executable: os.Args[0], Identity: strings.Repeat("a", 64), Version: "test", Source: cmake.SourceDev}, nil
+	}
+	buildCoordinator := &fakeRuntimeCoordinator{}
+	deps.newCoordinator = func(build.CoordinatorConfig) (runtimeCoordinator, error) {
+		return buildCoordinator, nil
+	}
+	testCoordinator := &fakeRuntimeTestCoordinator{}
+	deps.newTestCoordinator = func(testCoordinatorConfig) (runtimeTestCoordinator, io.Closer, error) {
+		return testCoordinator, nil, nil
+	}
+	executor := &fakeCoverageExecutor{}
+	var captured coverageExecutionConfig
+	deps.newCoverageExecutor = func(config coverageExecutionConfig) (coverageExecutor, error) {
+		captured = config
+		return executor, nil
+	}
+	dataDir := filepath.Join(base, "data")
+	active, err := Open(Config{
+		DataDir: dataDir, ServiceExecutable: os.Args[0], WorkspaceRoot: workspaceRoot,
+		TrustedWorkspace: true, DevCMakeExecutable: os.Args[0], Platform: platformForTest(),
+		dependencies: deps,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = active.Close() })
+	layout, err := PrepareDataDir(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active.coverageExecutor != executor {
+		t.Fatal("trusted runtime did not retain its coverage executor")
+	}
+	if _, ok := active.CoverageBackend().(*queuedCoverageBackend); !ok {
+		t.Fatalf("trusted coverage backend = %T", active.CoverageBackend())
+	}
+	if captured.Platform != platformForTest() || captured.Tasks == nil || captured.Store == nil ||
+		captured.Build == nil || captured.Tests != testCoordinator ||
+		captured.WorkspaceRoot.NativePath != workspaceRoot || captured.ExecutionRoot != layout.Coverage {
+		t.Fatalf("coverage execution config = %#v", captured)
+	}
+	wantStages := []string{
+		"validate-data-dir", "lock-instance", "open-sqlite", "cleanup-process",
+		"recover-interrupted", "cleanup-artifacts", "start-manager",
+		"resume-queued-builds", "resume-queued-tests", "resume-queued-coverage",
+	}
+	if !reflect.DeepEqual(stages, wantStages) {
+		t.Fatalf("trusted startup stages = %v, want %v", stages, wantStages)
+	}
+}
+
 func TestTrustedRuntimeDelegatesWorkspaceMethodsToCoordinator(t *testing.T) {
 	base := t.TempDir()
 	workspaceRoot := filepath.Join(base, "workspace")
@@ -985,6 +1087,10 @@ func (f *fakeRuntimeCoordinator) Start(context.Context, build.StartRequest) (tas
 	return f.started, nil
 }
 
+func (f *fakeRuntimeCoordinator) PreparePlan(context.Context, build.StartRequest) (*build.PreparedPlan, error) {
+	return nil, task.ErrStorageUnavailable
+}
+
 func (f *fakeRuntimeCoordinator) Resume(context.Context, task.Task) (task.Task, error) {
 	f.resumeCalls++
 	return task.Task{}, f.resumeErr
@@ -1037,6 +1143,13 @@ func (fake *fakeRuntimeTestCoordinator) ResumeRun(
 ) (task.Task, error) {
 	fake.resumeRunCalls++
 	return task.Task{}, fake.resumeErr
+}
+
+func (fake *fakeRuntimeTestCoordinator) PrepareEmbedded(
+	context.Context,
+	testrun.EmbeddedRequest,
+) (testrun.EmbeddedRun, error) {
+	return nil, task.ErrStorageUnavailable
 }
 
 type fixedRuntimeClock struct{ at time.Time }
@@ -1710,9 +1823,11 @@ type recordingRunner struct {
 	cleanupErr error
 	cleanup    func(context.Context, task.ProcessLease) error
 	prepared   processcontrol.Process
+	prepares   atomic.Int32
 }
 
 func (r *recordingRunner) Prepare(context.Context, processcontrol.Spec, string, string) (processcontrol.Process, error) {
+	r.prepares.Add(1)
 	if r.prepared != nil {
 		return r.prepared, nil
 	}
@@ -1786,6 +1901,18 @@ func testDependencies(runner processcontrol.Runner, stage func(string)) *depende
 type stageStore struct {
 	runtimeStore
 	stage func(string)
+}
+
+func (s *stageStore) List(ctx context.Context, cursor string, limit int, kinds ...task.Kind) (task.Page[task.Task], error) {
+	switch {
+	case reflect.DeepEqual(kinds, []task.Kind{task.KindCMakeBuild}):
+		s.stage("resume-queued-builds")
+	case reflect.DeepEqual(kinds, []task.Kind{task.KindTestDiscovery, task.KindTestRun}):
+		s.stage("resume-queued-tests")
+	case reflect.DeepEqual(kinds, []task.Kind{task.KindCoverageRun}):
+		s.stage("resume-queued-coverage")
+	}
+	return s.runtimeStore.List(ctx, cursor, limit, kinds...)
 }
 
 func (s *stageStore) ActiveLeases(ctx context.Context) ([]task.ProcessLease, error) {
