@@ -593,3 +593,260 @@ Output: both exited 0 with no diagnostics.
 - This commit identifier was recorded in a report-only follow-up commit; that
   follow-up identifier is supplied in the agent handoff because a commit cannot
   contain its own final hash.
+
+## Fix Round 3 — retained rollback identity, real SQLite fault, exact terminal graph, root replacement
+
+### Summary
+
+- Coverage report finalization now retains the original parent-directory and
+  file handles plus their identities until the SQLite terminal mutation settles.
+  Rollback validates the complete three-file graph before deleting any sibling,
+  removes only the original objects, closes every retained capability, and
+  caches the first rollback/release result for idempotent duplicate calls.
+- The Task Manager explicitly releases retained artifact capabilities only after
+  the terminal SQLite commit. A capability-close error no longer prevents
+  execution-boundary release or publication of already committed events.
+- The former `coordinatorSQLiteStore.terminalApplyFailures` pre-return was
+  removed. The real-stack transaction regression installs a SQLite trigger that
+  aborts the terminal `coverage_runs` update after Task/step/event/artifact,
+  TestRun and CoverageReport writes have already occurred in the same
+  `taskstore.Store.Apply` transaction.
+- Every phase-failure, Task-timeout, post-seal cancellation and revalidation
+  case now reads all three stored aggregates and asserts exact terminal status,
+  outcome/reason, timestamp relationships, TestRun incomplete/summary/result
+  state, empty unavailable report/artifacts, exact phase cutoff and unique
+  terminal broker events.
+- A Windows real-stack regression directly replaces the retained task-root
+  pathname between configure preparation and its continuation, verifies exact
+  `infrastructure_failed` / `unavailable,instrumentation_failed`, and proves
+  cleanup neither follows nor deletes the replacement or detached original.
+
+### RED evidence
+
+Same-content replacement exposed the hash-only rollback defect:
+
+```powershell
+$env:GOCACHE=(Join-Path $env:TEMP 'unitTest-phase8-task7-fix3-red'); go test ./apps/test-service/internal/artifactstore -run TestCoverageArtifactRollbackNeverDeletesSameContentReplacement -count=1 -v
+```
+
+Output: exit 1. `RollbackFinalized() error = <nil>, want ErrUnsafePath`; the old
+implementation accepted a fresh same-content object as the finalized object.
+
+Replacing the wrapper fault with a genuine SQLite fault initially had no fault
+installer, proving the old pre-return mechanism had been removed from the test:
+
+```powershell
+$env:GOCACHE=(Join-Path $env:TEMP 'unitTest-phase8-task7-fix3-sql-red'); go test ./apps/test-service/internal/coverageexec -run TestCoordinatorTerminalSQLiteFailureKeepsBrokerInvisibleAndRecoversExactly -count=1 -v
+```
+
+Output: build failure, `undefined: installLateTerminalSQLiteFault`. The helper
+subsequently installed a real database trigger rather than restoring the Store
+wrapper fault.
+
+Strengthening the aggregate matrix produced RED against over-strong provisional
+timestamp/error assumptions. The stored evidence showed exact domain behavior:
+Task infrastructure/command failures retain their closed error code/message,
+and an action failure may finish the embedded TestRun immediately before the
+Task terminal timestamp. Assertions were corrected to require the exact closed
+values and bounded ordering rather than weakening production behavior.
+
+The first direct task-root rename attempt produced a Windows-specific RED:
+
+```text
+rename ...\coverage-executions\111... ...\111....detached: Access is denied.
+```
+
+Windows correctly pinned the non-empty tree while retained handles were open.
+The test-only fault now closes those OS handles without calling owner cleanup,
+preserves the original identity snapshot, performs the replacement, and then
+lets the production continuation/cleanup paths validate it.
+
+Duplicate unsafe rollback initially hid the first failure:
+
+```powershell
+$env:GOCACHE=(Join-Path $env:TEMP 'unitTest-phase8-task7-fix3-replay-red'); go test ./apps/test-service/internal/artifactstore -run TestCoverageArtifactRollbackNeverDeletesSameContentReplacement -count=1 -v
+```
+
+Output: exit 1, `duplicate RollbackFinalized() error = <nil>, want cached
+ErrUnsafePath`.
+
+### GREEN evidence
+
+Identity-bound rollback regression:
+
+```powershell
+$env:GOCACHE=(Join-Path $env:TEMP 'unitTest-phase8-task7-fix3-replay-green'); go test ./apps/test-service/internal/artifactstore -run TestCoverageArtifactRollbackNeverDeletesSameContentReplacement -count=1 -v
+```
+
+Output: exit 0; PASS in `0.03s`, package `0.095s`. The same-content replacement
+and every sibling remained, the duplicate call returned the cached unsafe error,
+and test cleanup removed the directory, proving handles were closed.
+
+Genuine late SQLite transaction fault:
+
+```powershell
+$env:GOCACHE=(Join-Path $env:TEMP 'unitTest-phase8-task7-fix3-sql-exact-green'); go test ./apps/test-service/internal/coverageexec -run TestCoordinatorTerminalSQLiteFailureKeepsBrokerInvisibleAndRecoversExactly -count=1 -v
+```
+
+Output: exit 0; PASS in `0.60s`, package `0.686s`.
+
+Exact fault/cancel/revalidation matrix:
+
+```powershell
+$env:GOCACHE=(Join-Path $env:TEMP 'unitTest-phase8-task7-fix3-cancel-exact'); go test ./apps/test-service/internal/coverageexec -run 'TestCoordinatorTaskTimeoutStopsCurrentTreeBeforeLaterPhase|TestCoordinatorCancellationAfterProfileSealingReleasesRealManifestTreeOnce|TestCoordinatorRealManagerTerminalizesExactPhaseFaultMatrix|TestCoordinatorRevalidatesEveryRetainedBoundaryBeforeContinuation' -count=1
+```
+
+Output: exit 0; package PASS in `4.790s`.
+
+Direct retained-root replacement:
+
+```powershell
+$env:GOCACHE=(Join-Path $env:TEMP 'unitTest-phase8-task7-fix3-root-replace4'); go test ./apps/test-service/internal/coverageexec -run TestCoordinatorDirectExecutionRootReplacementFailsClosedWithoutFollowingReplacement -count=1 -v
+```
+
+Output: exit 0; PASS in `0.12s`, package `0.224s`.
+
+Fresh affected package gates, run concurrently with independent caches:
+
+```powershell
+go test ./internal/artifactstore -count=1
+go test ./internal/task -count=1
+go test ./internal/taskstore -count=1
+go test ./internal/coverageexec -count=1
+```
+
+Output: all exit 0: artifactstore `0.957s`, task `0.787s`, taskstore
+`11.687s`, coverageexec `11.836s`.
+
+Fresh full service gate:
+
+```powershell
+$env:GOCACHE=(Join-Path $env:TEMP 'unitTest-phase8-task7-fix3-service-full'); go test ./... -count=1
+```
+
+Working directory: `apps/test-service`. Output: exit 0 in `95.5s`; every
+test-bearing package passed, including coverageexec `21.385s`, artifactstore
+`2.629s`, task `0.874s`, taskstore `18.614s`, runtime `4.196s`, and
+processcontrol `35.465s`.
+
+Fresh affected race gate:
+
+```powershell
+$env:GOCACHE=(Join-Path $env:TEMP 'unitTest-phase8-task7-fix3-race'); go test -race ./internal/coverageexec ./internal/artifactstore ./internal/task ./internal/taskstore -count=1
+```
+
+Output: exit 0 in `173.1s`; coverageexec `36.248s`, artifactstore `2.110s`,
+task `2.429s`, taskstore `87.093s`.
+
+Fresh static and patch gates:
+
+```powershell
+$env:GOCACHE=(Join-Path $env:TEMP 'unitTest-phase8-task7-fix3-vet'); go vet ./...
+git diff --check
+```
+
+Output: both exit 0 with no diagnostics.
+
+Repeated fault/leak/replay/ownership selection:
+
+```powershell
+$env:GOCACHE=(Join-Path $env:TEMP 'unitTest-phase8-task7-fix3-fault-replay'); go test ./internal/coverageexec -run 'TestCoordinator(RealArtifactFinalizationFailureRollsBackAndTerminalizesUnavailable|TerminalSQLiteFailureKeepsBrokerInvisibleAndRecoversExactly|RealManagerTerminalizesExactPhaseFaultMatrix|TaskTimeoutStopsCurrentTreeBeforeLaterPhase|CancellationAfterProfileSealingReleasesRealManifestTreeOnce|RevalidatesEveryRetainedBoundaryBeforeContinuation|DirectExecutionRootReplacementFailsClosedWithoutFollowingReplacement|CloseCancelsRealActiveManagerProcessBeforeReleasing|DuplicateResumeReturnsTheSingleLiveTask)|TestCompletionCommitsClosedReportSetBeforeReportBearingGraph' -count=3
+$env:GOCACHE=(Join-Path $env:TEMP 'unitTest-phase8-task7-fix3-artifact-replay'); go test ./internal/artifactstore -run 'TestCoverageArtifactSinkRollsBackPublishedReportFilesWhenFinalizationFailsPartway|TestCoverageArtifactRollbackNeverDeletesSameContentReplacement' -count=10
+```
+
+Output: both exit 0; coverageexec `18.395s`, artifactstore `0.590s`.
+
+### Phase, outcome, transaction, replay and ownership evidence
+
+- Configure/build/merge/parser/normalizer/report failures stop at the expected
+  last phase. Stored Task, TestRun and CoverageRun are each terminal once with
+  the precise closed outcome; unavailable CoverageRuns have nil summary, blank
+  report ID, empty artifact refs, and matching Task/Coverage finish timestamps.
+- Configure/revalidation failures store an unstarted errored incomplete TestRun;
+  build failure stores blocked incomplete; post-test failures store a started
+  passed complete TestRun. Each has the exact `{Iterations:1}` empty summary and
+  no results in this empty-catalog harness.
+- Task timeout stores `timed_out`, `cancelled/task_timed_out`, and an unstarted
+  `timed_out` incomplete TestRun, terminates configure once, and starts no later
+  phase. Post-seal cancel stores `cancelled`, `cancelled/user_cancelled`, and a
+  started cancelled complete TestRun; manifest/allocator/adapter/root ownership
+  remains once-only across duplicate coordinator Close.
+- Workspace generation, catalog revision, coverage profile, instrumentation
+  fingerprint, retained binary identity and trust loss are revalidated before
+  continuation with the precise phase cutoff. The direct root replacement is a
+  seventh concrete retained-boundary mutation and leaves both replacement and
+  detached-original sentinels intact with no public output.
+- The SQLite trigger fires in `finishCoverageRunTx`, after earlier writes in the
+  same transaction. Before recovery, Task remains running at publish, CoverageRun
+  and TestRun remain queued, the attempted report is not found, artifact metadata
+  and files are empty, and the broker has no terminal event. After dropping the
+  trigger, `RecoverInterrupted` stores exact interrupted/service-restarted
+  timestamps, summary and not-run result with exactly three recovery events.
+- Rollback preflights all report objects through retained handles before any
+  removal. A same-content replacement therefore cannot cause deletion of either
+  that replacement or an already-validated sibling. Partial finalization and
+  SQLite failure still remove only original files; duplicate rollback is
+  idempotent and returns the frozen first result without reopening paths.
+
+### Files changed in fix round 3
+
+- `apps/test-service/internal/artifactstore/store.go`
+- `apps/test-service/internal/artifactstore/task_sink.go`
+- `apps/test-service/internal/artifactstore/task_sink_test.go`
+- `apps/test-service/internal/coverageexec/coordinator_test.go`
+- `apps/test-service/internal/coverageexec/orchestration_faults_windows_test.go`
+- `apps/test-service/internal/task/manager_execution.go`
+- `apps/test-service/internal/task/ports.go`
+
+### Self-review
+
+- Removed the obsolete path-reopen/hash rollback implementation; production
+  CoverageRun rollback now has a single retained-capability path.
+- Verified the whole three-file graph is validated before the first deletion and
+  each removal rechecks current path identity. Capability close is centralized,
+  idempotent, and executed after success, rollback failure, partial finalization,
+  and duplicate calls.
+- Verified Store.Apply is called by the wrapper before its error is recorded;
+  the trigger is persistent SQLite schema state and explicitly dropped only
+  after the precommit assertions, before recovery.
+- Verified terminal assertions do not equate action completion and Task finish
+  when the Manager legitimately records them a fraction apart; they require
+  exact non-zero/ordering relationships and exact domain values.
+- Verified root replacement happens after preparation/configure execution and
+  before the continuation consumes the process result. The test-only handle
+  closure is necessary because Windows otherwise prevents the hostile state;
+  production cleanup still owns the identity check and refuses both trees.
+- Verified no cache, database, report, profile, profdata or execution-root
+  byproduct appears in the worktree diff.
+
+### Deferred ledger status
+
+- **Task 1 stronger standalone task-layer finished aggregate validator remains
+  open.** Round 3 adds direct exact real-stack assertions but does not introduce
+  the separately requested general validator.
+- **Task 1 successful/action-error continuation evidence remains closed for Task
+  7.** The full real flow reaches publish and renderer failure stops before it.
+- **Task 5 cancellation allocator/root/profile release-once remains closed.**
+  The post-seal real cancellation still asserts manifest, allocator, adapter,
+  root and process ownership once; round 3 strengthens its three-aggregate
+  terminal assertions and repeats it in race/replay gates.
+
+### Concerns and evidence boundary
+
+- Windows prevents an external rename while the retained directory/profile
+  capabilities are open. The replacement regression therefore uses a test-only
+  fault to close OS handles without owner cleanup, then replaces the path while
+  retaining the original identity snapshot. This is stronger than a metadata
+  mutation for cleanup behavior, but it is not evidence that an unprivileged
+  peer can bypass Windows handle pinning.
+- The fake process remains hermetic; it exercises the real Manager, SQLite,
+  ArtifactStore, retained LLVM adapter/profile handles and process contract, not
+  host-installed LLVM executables.
+- No blocking concern remains for Task 8. The only deferred item in this scope
+  is the pre-existing Task 1 standalone aggregate validator.
+
+### Commit
+
+- Fix-round-3 implementation and tests: `3ea19c2` —
+  `fix: bind coverage rollback to retained identities`.
+- The report-only follow-up commit identifier is supplied in the handoff.
