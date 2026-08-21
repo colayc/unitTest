@@ -3,9 +3,11 @@ package task_test
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
+	"unit-test-ide.local/test-service/internal/cmake"
 	"unit-test-ide.local/test-service/internal/task"
 )
 
@@ -445,6 +447,9 @@ func TestFingerprintPlanCoversExecutionFieldsAndExcludesNonExecutionFields(t *te
 		{name: "step kind", change: func(value *task.ExecutionPlan) { value.Steps[0].Kind = task.StepBuild }},
 		{name: "executable", change: func(value *task.ExecutionPlan) { value.Steps[0].Process.Executable = "ninja" }},
 		{name: "launch plan", change: func(value *task.ExecutionPlan) { value.Steps[0].Process.LaunchPlan = []string{"clang-cl", "lld-link"} }},
+		{name: "launch inputs", change: func(value *task.ExecutionPlan) {
+			value.Steps[0].Process.LaunchInputs = []cmake.FingerprintFile{{Path: "C:/src/CMakeLists.txt", Identity: "windows:00000001:0000000000000001", SHA256: strings.Repeat("1", 64)}}
+		}},
 		{name: "arguments", change: func(value *task.ExecutionPlan) { value.Steps[0].Process.Args = []string{"--build", "build"} }},
 		{name: "environment", change: func(value *task.ExecutionPlan) { value.Steps[0].Process.Env = []string{"CMAKE_GENERATOR=Ninja"} }},
 		{name: "environment unset", change: func(value *task.ExecutionPlan) {

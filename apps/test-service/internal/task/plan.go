@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"unit-test-ide.local/test-service/internal/cmake"
 	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/diagnostic"
 	"unit-test-ide.local/test-service/internal/testdomain"
@@ -52,15 +53,17 @@ const (
 )
 
 const (
-	maxProcessSpecArgs    = 256
-	maxProcessSpecEnv     = 256
-	maxProcessLaunchPlan  = 64
-	maxProcessBatchItems  = 256
-	maxCommandSummaryArgs = 256
-	maxExecutionStepState = 256 * 1024
-	maxInitialPlanSteps   = 8
-	maxContinuationSteps  = 256
-	maxRuntimePlanSteps   = 10_000
+	maxProcessSpecArgs         = 256
+	maxProcessSpecEnv          = 256
+	maxProcessLaunchPlan       = 64
+	maxProcessLaunchInputs     = 128
+	maxProcessLaunchInputBytes = 512 * 1024
+	maxProcessBatchItems       = 256
+	maxCommandSummaryArgs      = 256
+	maxExecutionStepState      = 256 * 1024
+	maxInitialPlanSteps        = 8
+	maxContinuationSteps       = 256
+	maxRuntimePlanSteps        = 10_000
 )
 
 type CommandSummary struct {
@@ -229,6 +232,7 @@ func validProcessSpec(
 		return validProcessTarget(
 			spec.Executable,
 			spec.LaunchPlan,
+			spec.LaunchInputs,
 			spec.Args,
 			spec.Env,
 			spec.EnvUnset,
@@ -251,6 +255,7 @@ func validProcessSpec(
 			!validProcessTarget(
 				item.Executable,
 				item.LaunchPlan,
+				item.LaunchInputs,
 				item.Args,
 				item.Env,
 				item.EnvUnset,
@@ -270,6 +275,7 @@ func validProcessSpec(
 func validProcessTarget(
 	executable string,
 	launchPlan []string,
+	launchInputs []cmake.FingerprintFile,
 	arguments, environment, unset []string,
 	directory string,
 	boundary ExecutionBoundary,
@@ -278,6 +284,7 @@ func validProcessTarget(
 		containsNUL(executable) || containsNUL(directory) ||
 		len(arguments) > maxProcessSpecArgs ||
 		len(launchPlan) > maxProcessLaunchPlan ||
+		len(launchInputs) > maxProcessLaunchInputs ||
 		len(environment) > maxProcessSpecEnv ||
 		len(unset) > maxProcessSpecEnv {
 		return false
@@ -286,6 +293,18 @@ func validProcessTarget(
 		if plannedExecutable == "" || containsNUL(plannedExecutable) {
 			return false
 		}
+	}
+	seenLaunchInputs := make(map[string]struct{}, len(launchInputs))
+	for _, state := range launchInputs {
+		if state.Path == "" || state.Identity == "" || len(state.Identity) > 128 ||
+			cmake.VerifyLaunchInput(state, maxProcessLaunchInputBytes) != nil {
+			return false
+		}
+		key := strings.ToLower(state.Path)
+		if _, duplicate := seenLaunchInputs[key]; duplicate {
+			return false
+		}
+		seenLaunchInputs[key] = struct{}{}
 	}
 	for _, argument := range arguments {
 		if containsNUL(argument) {
@@ -336,26 +355,28 @@ func extendExecutionPlan(
 
 func FingerprintPlan(plan ExecutionPlan) string {
 	type canonicalBatchProcess struct {
-		ID         string   `json:"id"`
-		Executable string   `json:"executable"`
-		LaunchPlan []string `json:"launchPlan"`
-		Args       []string `json:"args"`
-		Env        []string `json:"env"`
-		EnvUnset   []string `json:"envUnset"`
-		Dir        string   `json:"dir"`
-		TimeoutMS  int64    `json:"timeoutMs"`
+		ID           string                  `json:"id"`
+		Executable   string                  `json:"executable"`
+		LaunchPlan   []string                `json:"launchPlan"`
+		LaunchInputs []cmake.FingerprintFile `json:"launchInputs,omitempty"`
+		Args         []string                `json:"args"`
+		Env          []string                `json:"env"`
+		EnvUnset     []string                `json:"envUnset"`
+		Dir          string                  `json:"dir"`
+		TimeoutMS    int64                   `json:"timeoutMs"`
 	}
 	type canonicalStep struct {
-		ID         string                  `json:"id"`
-		Kind       StepKind                `json:"kind"`
-		Action     ServiceAction           `json:"action,omitempty"`
-		Executable string                  `json:"executable"`
-		LaunchPlan []string                `json:"launchPlan"`
-		Args       []string                `json:"args"`
-		Env        []string                `json:"env"`
-		EnvUnset   []string                `json:"envUnset"`
-		Dir        string                  `json:"dir"`
-		Batch      []canonicalBatchProcess `json:"batch,omitempty"`
+		ID           string                  `json:"id"`
+		Kind         StepKind                `json:"kind"`
+		Action       ServiceAction           `json:"action,omitempty"`
+		Executable   string                  `json:"executable"`
+		LaunchPlan   []string                `json:"launchPlan"`
+		LaunchInputs []cmake.FingerprintFile `json:"launchInputs,omitempty"`
+		Args         []string                `json:"args"`
+		Env          []string                `json:"env"`
+		EnvUnset     []string                `json:"envUnset"`
+		Dir          string                  `json:"dir"`
+		Batch        []canonicalBatchProcess `json:"batch,omitempty"`
 	}
 	type canonicalPlan struct {
 		Version int             `json:"version"`
@@ -365,13 +386,14 @@ func FingerprintPlan(plan ExecutionPlan) string {
 	canonical := canonicalPlan{Version: plan.Version, Steps: make([]canonicalStep, len(plan.Steps))}
 	for index, step := range plan.Steps {
 		canonical.Steps[index] = canonicalStep{
-			ID:         step.ID,
-			Kind:       step.Kind,
-			Action:     step.Action,
-			Executable: step.Process.Executable,
-			LaunchPlan: append([]string{}, step.Process.LaunchPlan...),
-			Args:       append([]string{}, step.Process.Args...),
-			Env:        append([]string{}, step.Process.Env...),
+			ID:           step.ID,
+			Kind:         step.Kind,
+			Action:       step.Action,
+			Executable:   step.Process.Executable,
+			LaunchPlan:   append([]string{}, step.Process.LaunchPlan...),
+			LaunchInputs: append([]cmake.FingerprintFile{}, step.Process.LaunchInputs...),
+			Args:         append([]string{}, step.Process.Args...),
+			Env:          append([]string{}, step.Process.Env...),
 			EnvUnset: append(
 				[]string{},
 				step.Process.EnvUnset...,
@@ -382,11 +404,12 @@ func FingerprintPlan(plan ExecutionPlan) string {
 			canonical.Steps[index].Batch = append(
 				canonical.Steps[index].Batch,
 				canonicalBatchProcess{
-					ID:         item.ID,
-					Executable: item.Executable,
-					LaunchPlan: append([]string{}, item.LaunchPlan...),
-					Args:       append([]string{}, item.Args...),
-					Env:        append([]string{}, item.Env...),
+					ID:           item.ID,
+					Executable:   item.Executable,
+					LaunchPlan:   append([]string{}, item.LaunchPlan...),
+					LaunchInputs: append([]cmake.FingerprintFile{}, item.LaunchInputs...),
+					Args:         append([]string{}, item.Args...),
+					Env:          append([]string{}, item.Env...),
 					EnvUnset: append(
 						[]string{},
 						item.EnvUnset...,

@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"unit-test-ide.local/test-service/internal/cmake"
 	"unit-test-ide.local/test-service/internal/processcontrol"
 )
 
@@ -322,13 +323,14 @@ func runBatch(
 			})
 			return 1
 		}
-			target, startErr := platform.Start(
-				processcontrol.Spec{
-					Executable: item.Executable,
-					LaunchPlan: append([]string(nil), item.LaunchPlan...),
-				Args:       append([]string(nil), item.Args...),
-				Dir:        item.Dir,
-				Env:        append([]string(nil), item.Env...),
+		target, startErr := platform.Start(
+			processcontrol.Spec{
+				Executable:   item.Executable,
+				LaunchPlan:   append([]string(nil), item.LaunchPlan...),
+				LaunchInputs: append([]cmake.FingerprintFile(nil), item.LaunchInputs...),
+				Args:         append([]string(nil), item.Args...),
+				Dir:          item.Dir,
+				Env:          append([]string(nil), item.Env...),
 				EnvUnset: append(
 					[]string(nil),
 					item.EnvUnset...,

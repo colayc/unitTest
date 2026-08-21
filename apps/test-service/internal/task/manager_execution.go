@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"unit-test-ide.local/test-service/internal/cmake"
 	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/testdomain"
 )
@@ -250,6 +251,7 @@ func cloneExecutionPlan(plan ExecutionPlan) ExecutionPlan {
 		result.Steps[index] = step
 		result.Steps[index].Process.Args = append([]string(nil), step.Process.Args...)
 		result.Steps[index].Process.LaunchPlan = append([]string(nil), step.Process.LaunchPlan...)
+		result.Steps[index].Process.LaunchInputs = append([]cmake.FingerprintFile(nil), step.Process.LaunchInputs...)
 		result.Steps[index].Process.Env = append([]string(nil), step.Process.Env...)
 		result.Steps[index].Process.EnvUnset = append(
 			[]string(nil),
@@ -271,6 +273,7 @@ func cloneProcessBatch(
 		result[index] = value
 		result[index].Args = append([]string(nil), value.Args...)
 		result[index].LaunchPlan = append([]string(nil), value.LaunchPlan...)
+		result[index].LaunchInputs = append([]cmake.FingerprintFile(nil), value.LaunchInputs...)
 		result[index].Env = append([]string(nil), value.Env...)
 		result[index].EnvUnset = append(
 			[]string(nil),

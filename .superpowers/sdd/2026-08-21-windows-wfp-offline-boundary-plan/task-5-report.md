@@ -126,6 +126,19 @@ controls:
   partial capability), so ordinary Windows builds outside this boundary are
   unchanged. The retained positive fixture proves nested `${CMAKE_COMMAND} -E
   touch` and a literal pre-generated include.
+- Final configure-entry/TOCTOU regression: real fixtures proved that
+  `execute_process(COMMAND unknown.exe)`, `try_run`,
+  `CMAKE_CXX_COMPILER_LAUNCHER`, and `RULE_LAUNCH_CUSTOM` were accepted by the
+  earlier custom-command-only parser. The closed parser now validates every
+  `execute_process` `COMMAND`, compiler launcher, and `RULE_LAUNCH_*` value
+  against the exact LaunchPlan; rejects `try_run`, dynamic properties, and
+  `cmake_language(EVAL|CALL)`; and retains a positive
+  `${CMAKE_COMMAND} -E touch` configure control. Each parsed file is captured
+  from a stable handle with its OS identity and SHA-256, carried through the
+  runtime-only task/processhost protocol, and reverified after APP_ID
+  registration immediately before native process creation. A mutation control
+  replaces `CMakeLists.txt` after planning and proves that neither Job creation
+  nor `CreateProcess` is reached.
 
 ## Verification
 
@@ -162,6 +175,12 @@ Go caches.
   hit one unrelated existing SQLite fault-injection timing failure in
   `internal/coverageexec`; that test passed immediately in isolation, and a
   second complete race run passed every package.
+- Final configure-entry/TOCTOU wave: focused build/cmake/task/processcontrol/
+  processhost packages PASS; complete Service unit and race trees PASS with
+  only the privileged WFP integration explicitly excluded; `go vet` and Linux
+  full-package compile-only PASS; Service Probe reports 76 PASS / one exact
+  toolchain SKIP; Extension reports 138/138 PASS. The unexcluded Go run still
+  fails only the honest privileged WFP control with `WFPAccessDenied`.
 - `pnpm check:protocol-generated`, `pnpm check:coverage-generated`, and
   `pnpm build` with private `GOCACHE`: PASS.
 - Exact `pnpm test`: coverage generator 4/4, CMake bundle 28/28, and coverage
@@ -189,7 +208,9 @@ Go caches.
   before the direct CMake launch. The planner now rejects undeclared custom/test
   executables and unprovable dynamic CMake graph edges before process creation;
   projects outside this explicitly supported grammar must extend the closed
-  declaration rather than be treated as covered. Privileged CI must still
+  declaration rather than be treated as covered. `execute_process`, launcher
+  properties, and parsed-source mutation are closed as described above;
+  `try_run` remains unsupported. Privileged CI must still
   supply the positive native evidence for that declared shape.
 - Temporary Go caches, the pnpm shim and generated runtime artifacts are removed
   before commit. The change is committed locally and is not pushed.

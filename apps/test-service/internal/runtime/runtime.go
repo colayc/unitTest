@@ -1048,11 +1048,12 @@ func (f processFactory) Prepare(ctx context.Context, spec task.ProcessSpec, task
 	batch := make([]processcontrol.BatchItem, len(spec.Batch))
 	for index, item := range spec.Batch {
 		batch[index] = processcontrol.BatchItem{
-			ID:         item.ID,
-			Executable: item.Executable,
-			LaunchPlan: append([]string(nil), item.LaunchPlan...),
-			Args:       append([]string(nil), item.Args...),
-			Env:        append([]string(nil), item.Env...),
+			ID:           item.ID,
+			Executable:   item.Executable,
+			LaunchPlan:   append([]string(nil), item.LaunchPlan...),
+			LaunchInputs: append([]cmake.FingerprintFile(nil), item.LaunchInputs...),
+			Args:         append([]string(nil), item.Args...),
+			Env:          append([]string(nil), item.Env...),
 			EnvUnset: append(
 				[]string(nil),
 				item.EnvUnset...,
@@ -1062,10 +1063,11 @@ func (f processFactory) Prepare(ctx context.Context, spec task.ProcessSpec, task
 		}
 	}
 	process, err := f.runner.Prepare(ctx, processcontrol.Spec{
-		Executable: spec.Executable,
-		LaunchPlan: append([]string(nil), spec.LaunchPlan...),
-		Args:       append([]string(nil), spec.Args...),
-		Env:        append([]string(nil), spec.Env...),
+		Executable:   spec.Executable,
+		LaunchPlan:   append([]string(nil), spec.LaunchPlan...),
+		LaunchInputs: append([]cmake.FingerprintFile(nil), spec.LaunchInputs...),
+		Args:         append([]string(nil), spec.Args...),
+		Env:          append([]string(nil), spec.Env...),
 		EnvUnset: append(
 			[]string(nil),
 			spec.EnvUnset...,

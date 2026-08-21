@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"unit-test-ide.local/test-service/internal/cmake"
 	"unit-test-ide.local/test-service/internal/task"
 )
 
@@ -16,24 +17,26 @@ const (
 )
 
 type Spec struct {
-	Executable string
-	LaunchPlan []string
-	Args       []string
-	Dir        string
-	Env        []string
-	EnvUnset   []string
-	Batch      []BatchItem
+	Executable   string
+	LaunchPlan   []string
+	LaunchInputs []cmake.FingerprintFile
+	Args         []string
+	Dir          string
+	Env          []string
+	EnvUnset     []string
+	Batch        []BatchItem
 }
 
 type BatchItem struct {
-	ID         string
-	Executable string
-	LaunchPlan []string
-	Args       []string
-	Dir        string
-	Env        []string
-	EnvUnset   []string
-	TimeoutMS  int64
+	ID           string
+	Executable   string
+	LaunchPlan   []string
+	LaunchInputs []cmake.FingerprintFile
+	Args         []string
+	Dir          string
+	Env          []string
+	EnvUnset     []string
+	TimeoutMS    int64
 }
 
 type Output struct {

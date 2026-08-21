@@ -53,20 +53,22 @@ func Plan(input PlanInput) (task.ExecutionPlan, error) {
 	if err != nil {
 		return task.ExecutionPlan{}, task.ErrInvalidArgument
 	}
+	var launchInputs []cmake.FingerprintFile
 	if runtime.GOOS == "windows" && (input.Coverage != nil || offlineboundary.ExecutableRegistrationActive()) {
-		if err := validateCMakeCustomCommandPlan(input, sourceDir, launchPlan); err != nil {
+		launchInputs, err = validateCMakeLaunchPlan(input, sourceDir, launchPlan)
+		if err != nil {
 			return task.ExecutionPlan{}, task.ErrInvalidArgument
 		}
 	}
 	steps := make([]task.ExecutionStep, 0, 2)
 	if input.Configure {
-		configure, err := configureStep(input, sourceDir, launchPlan)
+		configure, err := configureStep(input, sourceDir, launchPlan, launchInputs)
 		if err != nil {
 			return task.ExecutionPlan{}, err
 		}
 		steps = append(steps, configure)
 	}
-	build, err := buildStep(input, sourceDir, targetNames, launchPlan)
+	build, err := buildStep(input, sourceDir, targetNames, launchPlan, launchInputs)
 	if err != nil {
 		return task.ExecutionPlan{}, err
 	}
@@ -76,7 +78,7 @@ func Plan(input PlanInput) (task.ExecutionPlan, error) {
 	return plan, nil
 }
 
-func configureStep(input PlanInput, sourceDir string, launchPlan []string) (task.ExecutionStep, error) {
+func configureStep(input PlanInput, sourceDir string, launchPlan []string, launchInputs []cmake.FingerprintFile) (task.ExecutionStep, error) {
 	environment, err := normalizedToolchainEnvironment(input.Toolchain.Environment)
 	if err != nil {
 		return task.ExecutionStep{}, err
@@ -133,11 +135,12 @@ func configureStep(input PlanInput, sourceDir string, launchPlan []string) (task
 	return task.ExecutionStep{
 		ID: "configure", Kind: task.StepConfigure,
 		Process: task.ProcessSpec{
-			Executable: input.Installation.Executable,
-			LaunchPlan: launchPlan,
-			Args:       append([]string(nil), args...),
-			Env:        environment,
-			Dir:        sourceDir,
+			Executable:   input.Installation.Executable,
+			LaunchPlan:   launchPlan,
+			LaunchInputs: append([]cmake.FingerprintFile(nil), launchInputs...),
+			Args:         append([]string(nil), args...),
+			Env:          environment,
+			Dir:          sourceDir,
 		},
 		Public: task.CommandSummary{
 			Executable: filepath.Base(input.Installation.Executable),
@@ -148,7 +151,7 @@ func configureStep(input PlanInput, sourceDir string, launchPlan []string) (task
 	}, nil
 }
 
-func buildStep(input PlanInput, sourceDir string, targetNames, launchPlan []string) (task.ExecutionStep, error) {
+func buildStep(input PlanInput, sourceDir string, targetNames, launchPlan []string, launchInputs []cmake.FingerprintFile) (task.ExecutionStep, error) {
 	environment, err := normalizedToolchainEnvironment(input.Toolchain.Environment)
 	if err != nil {
 		return task.ExecutionStep{}, err
@@ -179,11 +182,12 @@ func buildStep(input PlanInput, sourceDir string, targetNames, launchPlan []stri
 	return task.ExecutionStep{
 		ID: "build", Kind: task.StepBuild,
 		Process: task.ProcessSpec{
-			Executable: input.Installation.Executable,
-			LaunchPlan: launchPlan,
-			Args:       append([]string(nil), args...),
-			Env:        environment,
-			Dir:        binaryDir,
+			Executable:   input.Installation.Executable,
+			LaunchPlan:   launchPlan,
+			LaunchInputs: append([]cmake.FingerprintFile(nil), launchInputs...),
+			Args:         append([]string(nil), args...),
+			Env:          environment,
+			Dir:          binaryDir,
 		},
 		Public: task.CommandSummary{
 			Executable: filepath.Base(input.Installation.Executable),

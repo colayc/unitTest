@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 )
 
 // fileSnapshot pins one filesystem object while the resolver trusts its bytes.
@@ -24,6 +26,39 @@ type fileSnapshot struct {
 	info       os.FileInfo
 	digest     string
 	osIdentity string
+}
+
+// SnapshotLaunchInput returns the exact bytes parsed for a closed native
+// launch declaration together with their filesystem identity and digest.
+func SnapshotLaunchInput(path string, maximum int64) (FingerprintFile, []byte, error) {
+	snapshot, err := captureFileSnapshot(path, maximum)
+	if err != nil {
+		return FingerprintFile{}, nil, err
+	}
+	defer snapshot.Close()
+	content, err := snapshot.ReadAll(maximum)
+	if err != nil || snapshot.Verify() != nil {
+		return FingerprintFile{}, nil, fmt.Errorf("launch input changed while reading")
+	}
+	return fingerprintFileFromSnapshot(snapshot), content, nil
+}
+
+// VerifyLaunchInput fails when a previously parsed launch input no longer
+// names the same direct file with the same bytes.
+func VerifyLaunchInput(state FingerprintFile, maximum int64) error {
+	if !validFingerprintFile(state) {
+		return fmt.Errorf("invalid launch input")
+	}
+	snapshot, err := captureFileSnapshot(filepath.FromSlash(state.Path), maximum)
+	if err != nil {
+		return fmt.Errorf("launch input changed")
+	}
+	defer snapshot.Close()
+	if err := snapshot.Verify(); err != nil || snapshot.osIdentity != state.Identity ||
+		snapshot.digest != strings.ToLower(state.SHA256) {
+		return fmt.Errorf("launch input changed")
+	}
+	return nil
 }
 
 func captureFileSnapshot(path string, maximum int64) (*fileSnapshot, error) {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"time"
 
+	"unit-test-ide.local/test-service/internal/cmake"
 	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/diagnostic"
 	"unit-test-ide.local/test-service/internal/testdomain"
@@ -201,24 +202,26 @@ type DomainCompletion struct {
 type ProcessSpec struct {
 	// ProcessSpec is runtime-only service state. Its Env field must not be
 	// persisted or exposed through the protocol.
-	Executable string
-	LaunchPlan []string
-	Args       []string
-	Env        []string
-	EnvUnset   []string
-	Dir        string
-	Batch      []ProcessBatchItem
+	Executable   string
+	LaunchPlan   []string
+	LaunchInputs []cmake.FingerprintFile
+	Args         []string
+	Env          []string
+	EnvUnset     []string
+	Dir          string
+	Batch        []ProcessBatchItem
 }
 
 type ProcessBatchItem struct {
-	ID         string
-	Executable string
-	LaunchPlan []string
-	Args       []string
-	Env        []string
-	EnvUnset   []string
-	Dir        string
-	Timeout    time.Duration
+	ID           string
+	Executable   string
+	LaunchPlan   []string
+	LaunchInputs []cmake.FingerprintFile
+	Args         []string
+	Env          []string
+	EnvUnset     []string
+	Dir          string
+	Timeout      time.Duration
 }
 
 type ProcessOutput struct {

@@ -15,6 +15,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
+	"unit-test-ide.local/test-service/internal/cmake"
 	"unit-test-ide.local/test-service/internal/offlineboundary"
 	"unit-test-ide.local/test-service/internal/processcontrol"
 	"unit-test-ide.local/test-service/internal/winprocess"
@@ -46,6 +47,7 @@ var _ Target = (*windowsTarget)(nil)
 
 type windowsTargetOperations struct {
 	registerExecutable     func(string) error
+	verifyLaunchInputs     func([]cmake.FingerprintFile) error
 	createProtectedJob     func(uint32) (windows.Handle, error)
 	createSuspended        func(processcontrol.Spec, windows.Handle, windows.Handle, windows.Handle) (windows.ProcessInformation, error)
 	assignProcess          func(windows.Handle, windows.Handle) error
@@ -68,6 +70,17 @@ func newWindowsPlatform(operations windowsTargetOperations) *windowsPlatform {
 func defaultWindowsTargetOperations() windowsTargetOperations {
 	return windowsTargetOperations{
 		registerExecutable: offlineboundary.RegisterExecutableForActiveBoundary,
+		verifyLaunchInputs: func(states []cmake.FingerprintFile) error {
+			if len(states) > 128 {
+				return errors.New("too many launch inputs")
+			}
+			for _, state := range states {
+				if err := cmake.VerifyLaunchInput(state, 512*1024); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
 		createProtectedJob: createWindowsProtectedJob,
 		createSuspended:    createSuspendedWindowsTarget,
 		assignProcess:      windows.AssignProcessToJobObject,
@@ -111,6 +124,10 @@ func (platform *windowsPlatform) Start(spec processcontrol.Spec, stdout, stderr 
 			return nil, errors.New("target launch registration failed")
 		}
 		registered[key] = struct{}{}
+	}
+	if platform.operations.verifyLaunchInputs == nil ||
+		platform.operations.verifyLaunchInputs(spec.LaunchInputs) != nil {
+		return nil, errors.New("target launch inputs changed")
 	}
 	nul, err := os.OpenFile("NUL", os.O_RDONLY, 0)
 	if err != nil {

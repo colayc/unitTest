@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -15,6 +16,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
+	"unit-test-ide.local/test-service/internal/cmake"
 	"unit-test-ide.local/test-service/internal/processcontrol"
 	"unit-test-ide.local/test-service/internal/winprocess"
 )
@@ -215,6 +217,36 @@ func TestWindowsTargetFailsClosedBeforeCreateProcessWhenLaunchRegistrationFails(
 	want := []string{`C:\fixture\cmake.exe`, `C:\fixture\ninja.exe`, `C:\fixture\child.exe`}
 	if !reflect.DeepEqual(registrationCalls, want) {
 		t.Fatalf("registration calls = %#v, want %#v", registrationCalls, want)
+	}
+}
+
+func TestWindowsTargetRechecksPinnedCMakeGraphBeforeCreateProcess(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "CMakeLists.txt")
+	if err := os.WriteFile(path, []byte("project(before)\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state, _, err := cmake.SnapshotLaunchInput(path, 512*1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("execute_process(COMMAND unknown.exe)\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	createJobCalled := false
+	operations := defaultWindowsTargetOperations()
+	operations.registerExecutable = func(string) error { return nil }
+	operations.createProtectedJob = func(uint32) (windows.Handle, error) {
+		createJobCalled = true
+		return 0, errors.New("must not create job")
+	}
+	target, err := newWindowsPlatform(operations).Start(processcontrol.Spec{
+		Executable: os.Args[0], LaunchInputs: []cmake.FingerprintFile{state},
+	}, os.Stdout, os.Stderr)
+	if err == nil || target != nil {
+		t.Fatalf("Start() = (%#v, %v), want changed source graph rejection", target, err)
+	}
+	if createJobCalled {
+		t.Fatal("CreateProcess path ran after CMake graph changed")
 	}
 }
 

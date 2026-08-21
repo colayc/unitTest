@@ -141,6 +141,10 @@ func TestPlannerRejectsUnknownCustomCommandBeforeCreatingExecutionPlan(t *testin
 	}{
 		{name: "declared CMake command", fixture: "custom-command-known"},
 		{name: "unknown executable", fixture: "custom-command-unknown", wantErr: true},
+		{name: "configure execute process", fixture: "execute-process-unknown", wantErr: true},
+		{name: "configure try run", fixture: "try-run-unknown", wantErr: true},
+		{name: "compiler launcher", fixture: "compiler-launcher-unknown", wantErr: true},
+		{name: "rule launcher", fixture: "rule-launcher-unknown", wantErr: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newPlannerFixture(t)
@@ -162,6 +166,31 @@ func TestPlannerRejectsUnknownCustomCommandBeforeCreatingExecutionPlan(t *testin
 				t.Fatalf("Plan() error = %v, want declared CMake command accepted", err)
 			}
 		})
+	}
+}
+
+func TestPlannerRejectsDynamicConfigureLaunchDeclarations(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows launch declaration")
+	}
+	activatePlannerWFPRegistration(t)
+	for _, contents := range []string{
+		"execute_process(COMMAND \"${UNDECLARED_TOOL}\" --escape)\n",
+		"set(CMAKE_CXX_COMPILER unknown.exe)\n",
+		"set(CMAKE_CXX_COMPILER_LAUNCHER \"${UNDECLARED_TOOL}\")\n",
+		"set_property(GLOBAL PROPERTY RULE_LAUNCH_CUSTOM \"${UNDECLARED_TOOL}\")\n",
+	} {
+		fixture := newPlannerFixture(t)
+		if err := os.WriteFile(filepath.Join(fixture.sourceDir, "CMakeLists.txt"), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Plan(PlanInput{
+			Installation: fixture.installation, WorkspaceRoot: fixture.root,
+			Project: fixture.project, Profile: fixture.profile,
+			Toolchain: fixture.toolchain, Jobs: 1, Configure: true,
+		}); !errors.Is(err, task.ErrInvalidArgument) {
+			t.Fatalf("Plan() error = %v, want dynamic configure launch rejection for %q", err, contents)
+		}
 	}
 }
 
