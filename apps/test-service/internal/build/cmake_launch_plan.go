@@ -23,8 +23,7 @@ const (
 var errInvalidCMakeLaunchDeclaration = errors.New("invalid CMake launch declaration")
 
 type cmakeArgument struct {
-	value    string
-	unquoted bool
+	value string
 }
 
 type cmakeInvocation struct {
@@ -312,8 +311,8 @@ func (validator *cmakeLaunchValidator) validatePreset(sourceRoot, name string) e
 		if err != nil {
 			return errInvalidCMakeLaunchDeclaration
 		}
-		if strings.EqualFold(variable, "CMAKE_TOOLCHAIN_FILE") {
-			if err := validator.validateToolchainFile(sourceRoot, value); err != nil {
+		if isCMakeScriptLoaderVariable(variable) {
+			if err := validator.validateScriptLoaderValue(sourceRoot, variable, value); err != nil {
 				return err
 			}
 			continue
@@ -325,12 +324,21 @@ func (validator *cmakeLaunchValidator) validatePreset(sourceRoot, name string) e
 		}
 	}
 	for variable, raw := range resolved.environment {
-		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) ||
-			(!isCompilerLauncherProperty(variable) && !isRuleLauncherProperty(variable) && !isPinnedCMakeToolVariable(variable)) {
+		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 			continue
 		}
 		value, err := launchPresetValue(raw)
-		if err != nil || !validator.allowedBareExecutable(value, "") {
+		if err != nil {
+			return errInvalidCMakeLaunchDeclaration
+		}
+		if isCMakeScriptLoaderVariable(variable) {
+			if err := validator.validateScriptLoaderValue(sourceRoot, variable, value); err != nil {
+				return err
+			}
+			continue
+		}
+		if (isCompilerLauncherProperty(variable) || isRuleLauncherProperty(variable) || isPinnedCMakeToolVariable(variable)) &&
+			!validator.allowedBareExecutable(value, "") {
 			return errInvalidCMakeLaunchDeclaration
 		}
 	}
@@ -409,10 +417,14 @@ func resolveLaunchPreset(name string, values map[string]launchPreset, visiting m
 			return launchPreset{}, err
 		}
 		for key, raw := range parent.cache {
-			result.cache[key] = append(json.RawMessage(nil), raw...)
+			if _, inherited := result.cache[key]; !inherited {
+				result.cache[key] = append(json.RawMessage(nil), raw...)
+			}
 		}
 		for key, raw := range parent.environment {
-			result.environment[key] = append(json.RawMessage(nil), raw...)
+			if _, inherited := result.environment[key]; !inherited {
+				result.environment[key] = append(json.RawMessage(nil), raw...)
+			}
 		}
 		if len(result.toolchainFile) == 0 {
 			result.toolchainFile = append(json.RawMessage(nil), parent.toolchainFile...)
@@ -467,26 +479,45 @@ func launchPresetValue(raw json.RawMessage) (string, error) {
 }
 
 func (validator *cmakeLaunchValidator) validateToolchainFile(sourceRoot, value string) error {
-	if value == "" || strings.ContainsAny(value, "$;<>") {
+	return validator.validateScriptLoaderValue(sourceRoot, "CMAKE_TOOLCHAIN_FILE", value)
+}
+
+func (validator *cmakeLaunchValidator) validateScriptLoaderValue(sourceRoot, variable, value string) error {
+	if value == "" {
+		return nil
+	}
+	if strings.ContainsAny(value, "$<>") {
 		return errInvalidCMakeLaunchDeclaration
 	}
-	path := filepath.FromSlash(value)
-	if !filepath.IsAbs(path) {
-		path = filepath.Join(sourceRoot, path)
+	paths := strings.Split(value, ";")
+	if strings.EqualFold(variable, "CMAKE_TOOLCHAIN_FILE") && len(paths) != 1 {
+		return errInvalidCMakeLaunchDeclaration
 	}
-	return validator.validateFile(path, validator.binaryRoot)
+	for _, value := range paths {
+		if value == "" || strings.TrimSpace(value) != value {
+			return errInvalidCMakeLaunchDeclaration
+		}
+		path := filepath.FromSlash(value)
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(sourceRoot, path)
+		}
+		if err := validator.validateFile(path, validator.binaryRoot); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (validator *cmakeLaunchValidator) validateCommandGroups(invocation cmakeInvocation, sourceKey, mode string) error {
 	commands := 0
 	for index, argument := range invocation.arguments {
-		if !argument.unquoted || !strings.EqualFold(argument.value, "COMMAND") {
+		if !strings.EqualFold(argument.value, "COMMAND") {
 			continue
 		}
 		commands++
 		end := len(invocation.arguments)
 		for next := index + 2; next < len(invocation.arguments); next++ {
-			if invocation.arguments[next].unquoted && strings.EqualFold(invocation.arguments[next].value, "COMMAND") {
+			if strings.EqualFold(invocation.arguments[next].value, "COMMAND") {
 				end = next
 				break
 			}
@@ -621,6 +652,15 @@ func (validator *cmakeLaunchValidator) validateSetLaunchProperty(invocation cmak
 		}
 		return nil
 	}
+	if isCMakeScriptLoaderVariable(invocation.arguments[0].value) {
+		if len(invocation.arguments) == 1 {
+			return nil
+		}
+		if len(invocation.arguments) != 2 {
+			return errInvalidCMakeLaunchDeclaration
+		}
+		return validator.validateScriptLoaderValue(filepath.Dir(sourceKey), invocation.arguments[0].value, invocation.arguments[1].value)
+	}
 	if !isCompilerLauncherProperty(invocation.arguments[0].value) {
 		return nil
 	}
@@ -629,7 +669,7 @@ func (validator *cmakeLaunchValidator) validateSetLaunchProperty(invocation cmak
 
 func (validator *cmakeLaunchValidator) validateSetProperty(invocation cmakeInvocation, sourceKey string) error {
 	for index, argument := range invocation.arguments {
-		if argument.unquoted && strings.EqualFold(argument.value, "PROPERTY") {
+		if strings.EqualFold(argument.value, "PROPERTY") {
 			if index+1 >= len(invocation.arguments) {
 				return errInvalidCMakeLaunchDeclaration
 			}
@@ -645,7 +685,7 @@ func (validator *cmakeLaunchValidator) validateSetProperty(invocation cmakeInvoc
 func (validator *cmakeLaunchValidator) validateTargetProperties(invocation cmakeInvocation, sourceKey string) error {
 	properties := -1
 	for index, argument := range invocation.arguments {
-		if argument.unquoted && strings.EqualFold(argument.value, "PROPERTIES") {
+		if strings.EqualFold(argument.value, "PROPERTIES") {
 			properties = index + 1
 			break
 		}
@@ -668,8 +708,7 @@ func (validator *cmakeLaunchValidator) validateTargetProperties(invocation cmake
 }
 
 func (validator *cmakeLaunchValidator) validateDirectoryProperties(invocation cmakeInvocation, sourceKey string) error {
-	if len(invocation.arguments) == 0 || !invocation.arguments[0].unquoted ||
-		!strings.EqualFold(invocation.arguments[0].value, "PROPERTIES") ||
+	if len(invocation.arguments) == 0 || !strings.EqualFold(invocation.arguments[0].value, "PROPERTIES") ||
 		(len(invocation.arguments)-1)%2 != 0 {
 		return errInvalidCMakeLaunchDeclaration
 	}
@@ -737,6 +776,31 @@ func isPinnedCMakeToolVariable(value string) bool {
 	languageTool := strings.TrimPrefix(upper, "CMAKE_")
 	for _, suffix := range []string{"_COMPILER", "_LINKER"} {
 		if strings.HasSuffix(languageTool, suffix) && len(strings.TrimSuffix(languageTool, suffix)) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func isCMakeScriptLoaderVariable(value string) bool {
+	upper := strings.ToUpper(value)
+	switch upper {
+	case "CMAKE_TOOLCHAIN_FILE",
+		"CMAKE_PROJECT_TOP_LEVEL_INCLUDES",
+		"CMAKE_PROJECT_INCLUDE",
+		"CMAKE_PROJECT_INCLUDE_BEFORE",
+		"CMAKE_USER_MAKE_RULES_OVERRIDE":
+		return true
+	}
+	if strings.HasPrefix(upper, "CMAKE_USER_MAKE_RULES_OVERRIDE_") {
+		return len(strings.TrimPrefix(upper, "CMAKE_USER_MAKE_RULES_OVERRIDE_")) > 0
+	}
+	if !strings.HasPrefix(upper, "CMAKE_PROJECT_") {
+		return false
+	}
+	projectVariable := strings.TrimPrefix(upper, "CMAKE_PROJECT_")
+	for _, suffix := range []string{"_INCLUDE", "_INCLUDE_BEFORE"} {
+		if strings.HasSuffix(projectVariable, suffix) && len(strings.TrimSuffix(projectVariable, suffix)) > 0 {
 			return true
 		}
 	}
@@ -855,7 +919,7 @@ func (parser *cmakeParser) readArguments() ([]cmakeArgument, error) {
 				if err != nil {
 					return nil, err
 				}
-				result = append(result, cmakeArgument{value: value, unquoted: true})
+				result = append(result, cmakeArgument{value: value})
 			}
 		}
 		parser.argumentCount++

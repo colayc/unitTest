@@ -151,6 +151,22 @@ controls:
   every graph input through the entire CMake process; a deterministic hook
   between verification and process creation proves both write and replacement
   are denied, no Job is created, and original/replacement bytes remain intact.
+- Final preset-script wave began with four focused RED controls. Multiple
+  inheritance selected the later parent even though CMake gives conflicts to
+  the earlier entry in `inherits`; preset
+  `CMAKE_PROJECT_TOP_LEVEL_INCLUDES`, preset-environment
+  `CMAKE_TOOLCHAIN_FILE`, source
+  `set(CMAKE_PROJECT_TOP_LEVEL_INCLUDES ...)`, and quoted `"PROPERTY"` all
+  bypassed validation. The resolver now preserves the first inherited cache
+  and environment value before applying child overrides. Literal,
+  source-root-constrained loader values for `CMAKE_TOOLCHAIN_FILE`,
+  `CMAKE_PROJECT_TOP_LEVEL_INCLUDES`, `CMAKE_PROJECT_INCLUDE` and named-project
+  variants, and `CMAKE_USER_MAKE_RULES_OVERRIDE` language variants are parsed
+  through the same bounded graph and carried in `LaunchInputs`. Dynamic,
+  escaping, missing, or rejected script graphs fail before a plan exists.
+  CMake signature keywords are matched case-insensitively regardless of
+  quoting. A Plan-level conflicting-parent control proves that only the safe
+  earlier-parent script is selected and identity/digest pinned.
 
 ## Verification
 
@@ -198,6 +214,13 @@ Go caches.
   privileged WFP integration explicitly excluded; vet and Linux compile-only
   PASS; Service Probe reports 76 PASS / one exact toolchain SKIP; Extension
   reports 138/138 PASS.
+- Final preset-script wave: focused inheritance, preset/source script-loader,
+  snapshot, and quoted-keyword controls PASS. Complete Service unit and race
+  trees PASS with only the privileged WFP integration explicitly excluded;
+  `go vet` and Linux full-package compile-only PASS; Service Probe reports 76
+  PASS / one exact `ToolchainUnavailable` SKIP; Extension reports 138/138 PASS.
+  The privileged lifecycle was rerun separately and fails exactly
+  `WFPAccessDenied (local and required modes fail closed)` on this host.
 - `pnpm check:protocol-generated`, `pnpm check:coverage-generated`, and
   `pnpm build` with private `GOCACHE`: PASS.
 - Exact `pnpm test`: coverage generator 4/4, CMake bundle 28/28, and coverage

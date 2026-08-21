@@ -199,6 +199,187 @@ func TestPlannerRejectsPresetLauncherAndConfigureTimeGraphMutation(t *testing.T)
 	}
 }
 
+func TestResolveLaunchPresetUsesCMakeMultipleInheritancePrecedence(t *testing.T) {
+	presets := map[string]launchPreset{
+		"first": {
+			name: "first",
+			cache: map[string]json.RawMessage{
+				"CONFLICT": json.RawMessage(`"first"`),
+			},
+			environment: map[string]json.RawMessage{
+				"ENV_CONFLICT": json.RawMessage(`"first"`),
+			},
+		},
+		"second": {
+			name: "second",
+			cache: map[string]json.RawMessage{
+				"CONFLICT": json.RawMessage(`"second"`),
+			},
+			environment: map[string]json.RawMessage{
+				"ENV_CONFLICT": json.RawMessage(`"second"`),
+			},
+		},
+		"inherited": {
+			name:        "inherited",
+			inherits:    []string{"first", "second"},
+			cache:       map[string]json.RawMessage{},
+			environment: map[string]json.RawMessage{},
+		},
+		"child": {
+			name:     "child",
+			inherits: []string{"first", "second"},
+			cache: map[string]json.RawMessage{
+				"CONFLICT": json.RawMessage(`"child"`),
+			},
+			environment: map[string]json.RawMessage{
+				"ENV_CONFLICT": json.RawMessage(`"child"`),
+			},
+		},
+	}
+	for _, test := range []struct {
+		name string
+		want string
+	}{
+		{name: "inherited", want: "first"},
+		{name: "child", want: "child"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			resolved, err := resolveLaunchPreset(test.name, presets, make(map[string]bool), 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cacheValue, err := launchPresetValue(resolved.cache["CONFLICT"])
+			if err != nil || cacheValue != test.want {
+				t.Fatalf("cache conflict = %q, %v, want %q", cacheValue, err, test.want)
+			}
+			environmentValue, err := launchPresetValue(resolved.environment["ENV_CONFLICT"])
+			if err != nil || environmentValue != test.want {
+				t.Fatalf("environment conflict = %q, %v, want %q", environmentValue, err, test.want)
+			}
+		})
+	}
+}
+
+func TestPlannerPinsEarlierInheritedPresetScriptLikeCMake(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows launch declaration")
+	}
+	activatePlannerWFPRegistration(t)
+	fixture := newPlannerFixture(t)
+	safe := filepath.Join(fixture.sourceDir, "safe.cmake")
+	evil := filepath.Join(fixture.sourceDir, "evil.cmake")
+	if err := os.WriteFile(safe, []byte("# pinned inherited script\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(evil, []byte("execute_process(COMMAND unknown.exe)\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	document := map[string]any{
+		"version": 4,
+		"configurePresets": []any{
+			map[string]any{"name": "first", "cacheVariables": map[string]string{"CMAKE_PROJECT_TOP_LEVEL_INCLUDES": "safe.cmake"}},
+			map[string]any{"name": "second", "cacheVariables": map[string]string{"CMAKE_PROJECT_TOP_LEVEL_INCLUDES": "evil.cmake"}},
+			map[string]any{"name": "child", "inherits": []string{"first", "second"}},
+		},
+	}
+	content, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fixture.sourceDir, "CMakePresets.json"), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixture.profile.Origin = "preset"
+	fixture.profile.ConfigurePreset = "child"
+	plan, err := Plan(PlanInput{
+		Installation: fixture.installation, WorkspaceRoot: fixture.root,
+		Project: fixture.project, Profile: fixture.profile,
+		Toolchain: fixture.toolchain, Jobs: 1, Configure: true,
+	})
+	if err != nil {
+		t.Fatalf("Plan() error = %v, want first inherited preset preferred", err)
+	}
+	inputs := plan.Steps[0].Process.LaunchInputs
+	if !slices.ContainsFunc(inputs, func(value cmake.FingerprintFile) bool { return strings.EqualFold(value.Path, safe) }) {
+		t.Fatalf("LaunchInputs = %#v, want selected inherited script %q pinned", inputs, safe)
+	}
+	if slices.ContainsFunc(inputs, func(value cmake.FingerprintFile) bool { return strings.EqualFold(value.Path, evil) }) {
+		t.Fatalf("LaunchInputs = %#v, later conflicting parent script must not win", inputs)
+	}
+}
+
+func TestPlannerPinsCMakeScriptLoadersFromPresetsAndSource(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows launch declaration")
+	}
+	activatePlannerWFPRegistration(t)
+	for _, test := range []struct {
+		name        string
+		cmakeLists  string
+		presetField string
+		presetValue string
+		environment bool
+	}{
+		{
+			name:        "preset top-level include",
+			cmakeLists:  "project(fixture)\n",
+			presetField: "CMAKE_PROJECT_TOP_LEVEL_INCLUDES",
+			presetValue: "evil.cmake",
+		},
+		{
+			name:        "preset environment toolchain",
+			cmakeLists:  "project(fixture)\n",
+			presetField: "CMAKE_TOOLCHAIN_FILE",
+			presetValue: "evil.cmake",
+			environment: true,
+		},
+		{
+			name:       "source top-level include",
+			cmakeLists: "set(CMAKE_PROJECT_TOP_LEVEL_INCLUDES evil.cmake)\nproject(fixture)\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newPlannerFixture(t)
+			if err := os.WriteFile(filepath.Join(fixture.sourceDir, "CMakeLists.txt"), []byte(test.cmakeLists), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(fixture.sourceDir, "evil.cmake"), []byte("execute_process(COMMAND unknown.exe)\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if test.presetField != "" {
+				preset := map[string]any{
+					"name": "child",
+				}
+				if test.environment {
+					preset["environment"] = map[string]string{test.presetField: test.presetValue}
+				} else {
+					preset["cacheVariables"] = map[string]string{test.presetField: test.presetValue}
+				}
+				document := map[string]any{
+					"version":          4,
+					"configurePresets": []any{preset},
+				}
+				content, err := json.Marshal(document)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(fixture.sourceDir, "CMakePresets.json"), content, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				fixture.profile.Origin = "preset"
+				fixture.profile.ConfigurePreset = "child"
+			}
+			if _, err := Plan(PlanInput{
+				Installation: fixture.installation, WorkspaceRoot: fixture.root,
+				Project: fixture.project, Profile: fixture.profile,
+				Toolchain: fixture.toolchain, Jobs: 1, Configure: true,
+			}); !errors.Is(err, task.ErrInvalidArgument) {
+				t.Fatalf("Plan() error = %v, want script loader rejected before execution plan", err)
+			}
+		})
+	}
+}
+
 func TestPlannerDerivesFreshDeclaredTestExecutableBeforeFileAPIExists(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows launch declaration")
@@ -230,9 +411,12 @@ func TestPlannerRejectsDynamicConfigureLaunchDeclarations(t *testing.T) {
 	activatePlannerWFPRegistration(t)
 	for _, contents := range []string{
 		"execute_process(COMMAND \"${UNDECLARED_TOOL}\" --escape)\n",
+		"execute_process(\"COMMAND\" unknown.exe)\n",
 		"set(CMAKE_CXX_COMPILER unknown.exe)\n",
 		"set(CMAKE_CXX_COMPILER_LAUNCHER \"${UNDECLARED_TOOL}\")\n",
 		"set_property(GLOBAL PROPERTY RULE_LAUNCH_CUSTOM \"${UNDECLARED_TOOL}\")\n",
+		"set_property(GLOBAL \"PROPERTY\" RULE_LAUNCH_CUSTOM unknown.exe)\n",
+		"add_executable(quoted-target main.cpp)\nset_target_properties(quoted-target \"PROPERTIES\" RULE_LAUNCH_CUSTOM unknown.exe)\n",
 		"set_directory_properties(PROPERTIES RULE_LAUNCH_CUSTOM unknown.exe)\n",
 		"add_custom_target(wrapper COMMAND \"${CMAKE_CTEST_COMMAND}\" --test-dir build)\n",
 	} {
