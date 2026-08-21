@@ -15,6 +15,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
+	"unit-test-ide.local/test-service/internal/offlineboundary"
 	"unit-test-ide.local/test-service/internal/processcontrol"
 	"unit-test-ide.local/test-service/internal/winprocess"
 )
@@ -44,6 +45,7 @@ type windowsTarget struct {
 var _ Target = (*windowsTarget)(nil)
 
 type windowsTargetOperations struct {
+	registerExecutable     func(string) error
 	createProtectedJob     func(uint32) (windows.Handle, error)
 	createSuspended        func(processcontrol.Spec, windows.Handle, windows.Handle, windows.Handle) (windows.ProcessInformation, error)
 	assignProcess          func(windows.Handle, windows.Handle) error
@@ -65,6 +67,7 @@ func newWindowsPlatform(operations windowsTargetOperations) *windowsPlatform {
 
 func defaultWindowsTargetOperations() windowsTargetOperations {
 	return windowsTargetOperations{
+		registerExecutable: offlineboundary.RegisterExecutableForActiveBoundary,
 		createProtectedJob: createWindowsProtectedJob,
 		createSuspended:    createSuspendedWindowsTarget,
 		assignProcess:      windows.AssignProcessToJobObject,
@@ -91,6 +94,23 @@ func (platform *windowsPlatform) Start(spec processcontrol.Spec, stdout, stderr 
 	stderrFile, stderrOK := stderr.(*os.File)
 	if !stdoutOK || !stderrOK || stdoutFile == nil || stderrFile == nil {
 		return nil, errors.New("invalid target output handles")
+	}
+	if platform.operations.registerExecutable == nil {
+		return nil, errors.New("target launch registration unavailable")
+	}
+	registered := make(map[string]struct{}, len(spec.LaunchPlan)+1)
+	for _, executable := range append([]string{spec.Executable}, spec.LaunchPlan...) {
+		if executable == "" {
+			return nil, errors.New("target launch registration failed")
+		}
+		key := strings.ToLower(executable)
+		if _, exists := registered[key]; exists {
+			continue
+		}
+		if err := platform.operations.registerExecutable(executable); err != nil {
+			return nil, errors.New("target launch registration failed")
+		}
+		registered[key] = struct{}{}
 	}
 	nul, err := os.OpenFile("NUL", os.O_RDONLY, 0)
 	if err != nil {

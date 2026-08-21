@@ -3,7 +3,11 @@
 package offlineboundary
 
 import (
+	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -12,6 +16,7 @@ import (
 	"strconv"
 	"sync"
 	"time"
+	"unsafe"
 
 	"github.com/Microsoft/go-winio"
 	"golang.org/x/sys/windows"
@@ -21,6 +26,8 @@ const (
 	defaultGuardianReadyTimeout   = 5 * time.Second
 	defaultGuardianReleaseTimeout = 5 * time.Second
 )
+
+var procGetNamedPipeClientProcessID = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetNamedPipeClientProcessId")
 
 type guardianOwnerVerifierFunc func(uint32) (uint64, error)
 
@@ -72,20 +79,54 @@ type guardianOwnerWatcher interface {
 }
 
 type guardianRuntime struct {
-	session       guardianTransport
-	engineFactory func() (wfpEngine, error)
-	leaseIDSource func() []byte
-	owner         guardianOwnerWatcher
+	session            guardianTransport
+	engineFactory      func() (wfpEngine, error)
+	leaseIDSource      func() ([]byte, error)
+	applications       []string
+	registrations      <-chan executableRegistrationRequest
+	closeRegistrations func() error
+	owner              guardianOwnerWatcher
 }
 
 type guardianPipeSession struct {
 	cmd       *exec.Cmd
 	listener  net.Listener
 	connReady chan guardianConnResult
+	authNonce []byte
+	owner     OwnerIdentity
+	guardian  OwnerIdentity
 
 	closeOnce sync.Once
 	mu        sync.Mutex
 	conn      net.Conn
+}
+
+func guardianAuthenticationFrame(nonce []byte, guardian, owner OwnerIdentity) guardianFrame {
+	frame := guardianFrame{
+		Kind:        guardianFrameAuthenticate,
+		GuardianPID: guardian.PID, GuardianCreationTime: guardian.CreationTime,
+		OwnerPID: owner.PID, OwnerCreationTime: owner.CreationTime,
+	}
+	mac := hmac.New(sha256.New, nonce)
+	_, _ = mac.Write([]byte("unit-test-ide/wfp-guardian-auth/v1"))
+	var identity [24]byte
+	binary.LittleEndian.PutUint32(identity[0:4], guardian.PID)
+	binary.LittleEndian.PutUint64(identity[4:12], guardian.CreationTime)
+	binary.LittleEndian.PutUint32(identity[12:16], owner.PID)
+	binary.LittleEndian.PutUint64(identity[16:24], owner.CreationTime)
+	_, _ = mac.Write(identity[:])
+	copy(frame.Proof[:], mac.Sum(nil))
+	return frame
+}
+
+func validGuardianAuthentication(frame guardianFrame, nonce []byte, guardian, owner OwnerIdentity) bool {
+	if frame.Kind != guardianFrameAuthenticate || frame.GuardianPID != guardian.PID ||
+		frame.GuardianCreationTime != guardian.CreationTime || frame.OwnerPID != owner.PID ||
+		frame.OwnerCreationTime != owner.CreationTime || len(nonce) != 32 {
+		return false
+	}
+	want := guardianAuthenticationFrame(nonce, guardian, owner)
+	return hmac.Equal(frame.Proof[:], want.Proof[:])
 }
 
 type guardianOwnerMonitor struct {
@@ -174,6 +215,27 @@ func (lease *guardianLease) run() {
 	byeSeen := false
 	waitErr := error(nil)
 	waitDone := false
+	abort := func(primary error) {
+		if killErr := lease.session.Kill(); killErr != nil {
+			primary = errors.Join(primary, SessionCloseFailed)
+		}
+		if !waitDone {
+			timer := time.NewTimer(lease.releaseTimeout)
+			select {
+			case waitErr = <-waitCh:
+				waitDone = true
+			case <-timer.C:
+				primary = errors.Join(primary, SessionCloseFailed)
+			}
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+		}
+		lease.finish(primary)
+	}
 
 	sendRelease := func() error {
 		if releaseSent {
@@ -198,20 +260,17 @@ func (lease *guardianLease) run() {
 
 		select {
 		case <-readyTimer.C:
-			_ = lease.session.Kill()
-			lease.finish(GuardianTimeout)
+			abort(GuardianTimeout)
 			return
 		case <-lease.releaseRequest:
 			if readySeen {
 				if err := sendRelease(); err != nil {
-					_ = lease.session.Kill()
-					lease.finish(err)
+					abort(err)
 					return
 				}
 			}
 		case <-releaseTimeout:
-			_ = lease.session.Kill()
-			lease.finish(GuardianTimeout)
+			abort(GuardianTimeout)
 			return
 		case result := <-recv:
 			if result.err != nil {
@@ -219,30 +278,26 @@ func (lease *guardianLease) run() {
 					continue
 				}
 				if !readySeen {
-					_ = lease.session.Kill()
-					lease.finish(GuardianStartFailed)
+					abort(GuardianStartFailed)
 					return
 				}
 				if releaseSent {
-					_ = lease.session.Kill()
-					lease.finish(SessionCloseFailed)
+					abort(SessionCloseFailed)
 					return
 				}
-				lease.finish(SessionCloseFailed)
+				abort(SessionCloseFailed)
 				return
 			}
 			switch result.frame.Kind {
 			case guardianFrameHello:
 				if helloSeen || readySeen {
-					_ = lease.session.Kill()
-					lease.finish(GuardianStartFailed)
+					abort(GuardianStartFailed)
 					return
 				}
 				helloSeen = true
 			case guardianFrameReady:
 				if !helloSeen || readySeen {
-					_ = lease.session.Kill()
-					lease.finish(GuardianStartFailed)
+					abort(GuardianStartFailed)
 					return
 				}
 				readySeen = true
@@ -256,38 +311,34 @@ func (lease *guardianLease) run() {
 				select {
 				case <-lease.releaseRequest:
 					if err := sendRelease(); err != nil {
-						_ = lease.session.Kill()
-						lease.finish(err)
+						abort(err)
 						return
 					}
 				default:
 				}
 			case guardianFrameError:
-				_ = lease.session.Kill()
 				if !readySeen {
 					if result.frame.Code == guardianErrorSessionCloseFailed {
-						lease.finish(SessionCloseFailed)
+						abort(SessionCloseFailed)
 						return
 					}
 					if result.frame.Code == guardianErrorWFPAccessDenied {
-						lease.finish(WFPAccessDenied)
+						abort(WFPAccessDenied)
 						return
 					}
-					lease.finish(GuardianStartFailed)
+					abort(GuardianStartFailed)
 					return
 				}
-				lease.finish(SessionCloseFailed)
+				abort(SessionCloseFailed)
 				return
 			case guardianFrameBye:
 				if !readySeen {
-					_ = lease.session.Kill()
-					lease.finish(GuardianStartFailed)
+					abort(GuardianStartFailed)
 					return
 				}
 				byeSeen = true
 			default:
-				_ = lease.session.Kill()
-				lease.finish(GuardianStartFailed)
+				abort(GuardianStartFailed)
 				return
 			}
 		case err := <-waitCh:
@@ -330,10 +381,12 @@ func (lease *guardianLease) receiveFrames(out chan<- guardianReceiveResult) {
 
 func (lease *guardianLease) finish(err error) {
 	lease.doneOnce.Do(func() {
+		if closeErr := lease.session.Close(); closeErr != nil {
+			err = errors.Join(err, SessionCloseFailed)
+		}
 		lease.mu.Lock()
 		lease.finalErr = err
 		lease.mu.Unlock()
-		_ = lease.session.Close()
 		close(lease.done)
 	})
 }
@@ -343,7 +396,20 @@ func (boundary *boundary) startGuardianProcess(ctx context.Context, owner OwnerI
 	if err != nil {
 		return nil, GuardianStartFailed
 	}
-	pipeName := guardianPipeName(newLeaseID())
+	pipeID, err := newLeaseID()
+	if err != nil {
+		return nil, GuardianStartFailed
+	}
+	pipeName := guardianPipeName(pipeID)
+	authNonce, err := newLeaseID()
+	if err != nil {
+		return nil, GuardianStartFailed
+	}
+	registrationPipeID := pipeID[:16]
+	registrationNonce, err := newLeaseID()
+	if err != nil {
+		return nil, GuardianStartFailed
+	}
 	listener, err := winio.ListenPipe(pipeName, &winio.PipeConfig{
 		MessageMode:      true,
 		InputBufferSize:  4096,
@@ -360,7 +426,19 @@ func (boundary *boundary) startGuardianProcess(ctx context.Context, owner OwnerI
 	}
 	cmd := exec.CommandContext(ctx, executable, args...)
 	cmd.SysProcAttr = &windows.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
+	bootstrap := make([]byte, 0, 80)
+	bootstrap = append(bootstrap, authNonce...)
+	bootstrap = append(bootstrap, registrationPipeID...)
+	bootstrap = append(bootstrap, registrationNonce...)
+	cmd.Stdin = bytes.NewReader(bootstrap)
 	if err := cmd.Start(); err != nil {
+		_ = listener.Close()
+		return nil, GuardianStartFailed
+	}
+	guardianCreationTime, err := currentOwnerCreationTime(uint32(cmd.Process.Pid))
+	if err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
 		_ = listener.Close()
 		return nil, GuardianStartFailed
 	}
@@ -368,6 +446,9 @@ func (boundary *boundary) startGuardianProcess(ctx context.Context, owner OwnerI
 		cmd:       cmd,
 		listener:  listener,
 		connReady: make(chan guardianConnResult, 1),
+		authNonce: append([]byte(nil), authNonce...),
+		owner:     owner,
+		guardian:  OwnerIdentity{PID: uint32(cmd.Process.Pid), CreationTime: guardianCreationTime},
 	}
 	go session.accept()
 	return session, nil
@@ -434,8 +515,42 @@ func (session *guardianPipeSession) Kill() error {
 }
 
 func (session *guardianPipeSession) accept() {
-	conn, err := session.listener.Accept()
-	session.connReady <- guardianConnResult{conn: conn, err: err}
+	for {
+		conn, err := session.listener.Accept()
+		if err != nil {
+			session.connReady <- guardianConnResult{err: err}
+			return
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+		frame, frameErr := readGuardianFrame(conn)
+		peerPID, peerErr := namedPipeClientProcessID(conn)
+		_ = conn.SetReadDeadline(time.Time{})
+		if frameErr == nil && peerErr == nil && peerPID == session.guardian.PID &&
+			validGuardianAuthentication(frame, session.authNonce, session.guardian, session.owner) {
+			session.connReady <- guardianConnResult{conn: conn}
+			return
+		}
+		_ = conn.Close()
+	}
+}
+
+func namedPipeClientProcessID(conn net.Conn) (uint32, error) {
+	file, ok := conn.(interface{ Fd() uintptr })
+	if !ok || file.Fd() == 0 {
+		return 0, GuardianStartFailed
+	}
+	var pid uint32
+	result, _, callErr := procGetNamedPipeClientProcessID.Call(file.Fd(), uintptr(unsafe.Pointer(&pid)))
+	if result == 0 {
+		if callErr != nil && callErr != windows.ERROR_SUCCESS {
+			return 0, callErr
+		}
+		return 0, GuardianStartFailed
+	}
+	if pid == 0 {
+		return 0, GuardianStartFailed
+	}
+	return pid, nil
 }
 
 func (session *guardianPipeSession) awaitConn() (net.Conn, error) {
@@ -460,12 +575,12 @@ func (session *guardianPipeSession) awaitConn() (net.Conn, error) {
 	return session.conn, nil
 }
 
-func RunNativeGuardian(owner OwnerIdentity, ipcAddress string) error {
-	return sanitizeGuardianChildError(runNativeGuardian(owner, ipcAddress))
+func RunNativeGuardian(owner OwnerIdentity, ipcAddress string, authNonce, registrationPipeID, registrationNonce []byte) error {
+	return sanitizeGuardianChildError(runNativeGuardian(owner, ipcAddress, authNonce, registrationPipeID, registrationNonce))
 }
 
-func runNativeGuardian(owner OwnerIdentity, ipcAddress string) error {
-	if ipcAddress == "" {
+func runNativeGuardian(owner OwnerIdentity, ipcAddress string, authNonce, registrationPipeID, registrationNonce []byte) error {
+	if ipcAddress == "" || len(authNonce) != 32 || len(registrationPipeID) != 16 || len(registrationNonce) != 32 {
 		return GuardianStartFailed
 	}
 	conn, err := winio.DialPipeContext(context.Background(), ipcAddress)
@@ -473,6 +588,18 @@ func runNativeGuardian(owner OwnerIdentity, ipcAddress string) error {
 		return err
 	}
 	defer conn.Close() //nolint:errcheck
+	guardianPID := uint32(os.Getpid())
+	guardianCreationTime, err := currentOwnerCreationTime(guardianPID)
+	if err != nil {
+		return err
+	}
+	if err := writeGuardianFrame(conn, guardianAuthenticationFrame(
+		authNonce,
+		OwnerIdentity{PID: guardianPID, CreationTime: guardianCreationTime},
+		owner,
+	)); err != nil {
+		return err
+	}
 
 	ownerMonitor, err := newGuardianOwnerMonitor(owner)
 	if err != nil {
@@ -480,12 +607,26 @@ func runNativeGuardian(owner OwnerIdentity, ipcAddress string) error {
 		return err
 	}
 	defer ownerMonitor.Close() //nolint:errcheck
+	ownerApplication, err := ownerExecutablePath(owner.PID)
+	if err != nil {
+		_ = writeGuardianFrame(conn, guardianFrame{Kind: guardianFrameError, Code: guardianErrorStartup})
+		return err
+	}
+	registrationServer, err := newExecutableRegistrationServer(registrationPipeID, registrationNonce)
+	if err != nil {
+		_ = writeGuardianFrame(conn, guardianFrame{Kind: guardianFrameError, Code: guardianErrorStartup})
+		return err
+	}
+	defer registrationServer.Close() //nolint:errcheck
 
 	runtime := guardianRuntime{
-		session:       guardianConnTransport{conn: conn},
-		engineFactory: defaultWFPEngineFactory,
-		leaseIDSource: newLeaseID,
-		owner:         ownerMonitor,
+		session:            guardianConnTransport{conn: conn},
+		engineFactory:      defaultWFPEngineFactory,
+		leaseIDSource:      newLeaseID,
+		applications:       []string{ownerApplication},
+		registrations:      registrationServer.requests,
+		closeRegistrations: registrationServer.Close,
+		owner:              ownerMonitor,
 	}
 	return runGuardianLoop(context.Background(), runtime, owner)
 }
@@ -533,8 +674,11 @@ func runGuardianLoop(ctx context.Context, runtime guardianRuntime, owner OwnerId
 	if leaseIDSource == nil {
 		leaseIDSource = newLeaseID
 	}
-	leaseID := leaseIDSource()
-	if err := engine.AddOutboundBlockFilters(ctx, leaseID); err != nil {
+	leaseID, err := leaseIDSource()
+	if err != nil {
+		return GuardianStartFailed
+	}
+	if err := engine.AddOutboundBlockFilters(ctx, leaseID, runtime.applications); err != nil {
 		err = joinGuardianEngineClose(err, engine.Close())
 		_ = runtime.session.Send(ctx, guardianFrame{Kind: guardianFrameError, Code: guardianErrorCodeFor(err)})
 		return err
@@ -556,20 +700,37 @@ func runGuardianLoop(ctx context.Context, runtime guardianRuntime, owner OwnerId
 		release <- guardianReceiveResult{frame: frame, err: recvErr}
 	}()
 
-	select {
-	case <-ctx.Done():
-	case <-runtime.owner.Done():
-	case result := <-release:
-		if result.err != nil {
-			_ = engine.Close()
-			return result.err
-		}
-		if result.frame.Kind != guardianFrameRelease {
-			_ = engine.Close()
-			return errGuardianFrameInvalid
+	for active := true; active; {
+		select {
+		case <-ctx.Done():
+			active = false
+		case <-runtime.owner.Done():
+			active = false
+		case request := <-runtime.registrations:
+			registerErr := engine.RegisterExecutable(ctx, leaseID, request.path)
+			request.result <- registerErr
+			if registerErr != nil {
+				registrationCloseErr := error(nil)
+				if runtime.closeRegistrations != nil {
+					registrationCloseErr = runtime.closeRegistrations()
+				}
+				return joinGuardianEngineClose(registerErr, errors.Join(registrationCloseErr, engine.Close()))
+			}
+		case result := <-release:
+			if result.err != nil {
+				return joinGuardianEngineClose(result.err, engine.Close())
+			}
+			if result.frame.Kind != guardianFrameRelease {
+				return joinGuardianEngineClose(errGuardianFrameInvalid, engine.Close())
+			}
+			active = false
 		}
 	}
-	closeErr := engine.Close()
+	registrationCloseErr := error(nil)
+	if runtime.closeRegistrations != nil {
+		registrationCloseErr = runtime.closeRegistrations()
+	}
+	closeErr := errors.Join(registrationCloseErr, engine.Close())
 	if err := runtime.session.Send(ctx, guardianFrame{Kind: guardianFrameBye}); err != nil {
 		if closeErr != nil {
 			return errors.Join(closeErr, err)
@@ -631,6 +792,23 @@ func currentOwnerCreationTime(pid uint32) (uint64, error) {
 	}
 	defer windows.CloseHandle(handle) //nolint:errcheck
 	return ownerCreationTimeFromHandle(handle)
+}
+
+func ownerExecutablePath(pid uint32) (string, error) {
+	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	if err != nil {
+		return "", err
+	}
+	defer windows.CloseHandle(handle) //nolint:errcheck
+	buffer := make([]uint16, windows.MAX_LONG_PATH)
+	size := uint32(len(buffer))
+	if err := windows.QueryFullProcessImageName(handle, 0, &buffer[0], &size); err != nil {
+		return "", err
+	}
+	if size == 0 {
+		return "", GuardianStartFailed
+	}
+	return windows.UTF16ToString(buffer[:size]), nil
 }
 
 // OwnerCreationTime returns the current Windows creation-time identity for a

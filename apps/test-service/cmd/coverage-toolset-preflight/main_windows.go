@@ -17,11 +17,12 @@ import (
 const preflightTimeout = 60 * time.Second
 
 type preflightReport struct {
-	SchemaVersion int    `json:"schemaVersion"`
-	Platform      string `json:"platform"`
-	Architecture  string `json:"architecture"`
-	Status        string `json:"status"`
-	Version       string `json:"version,omitempty"`
+	SchemaVersion   int    `json:"schemaVersion"`
+	Platform        string `json:"platform"`
+	Architecture    string `json:"architecture"`
+	Status          string `json:"status"`
+	Version         string `json:"version,omitempty"`
+	ToolchainDigest string `json:"toolchainDigest,omitempty"`
 }
 
 func main() {
@@ -56,11 +57,13 @@ func run(stdout io.Writer) error {
 			if verifyErr = verified.Verify(); verifyErr == nil {
 				report.Status = "verified"
 				report.Version = verified.Version()
+				report.ToolchainDigest = verified.Identity()
 			}
 			closeErr := verified.Close()
 			if verifyErr == nil && closeErr != nil {
 				report.Status = "unavailable"
 				report.Version = ""
+				report.ToolchainDigest = ""
 			}
 			if report.Status == "verified" {
 				break

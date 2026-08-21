@@ -202,6 +202,7 @@ type ProcessSpec struct {
 	// ProcessSpec is runtime-only service state. Its Env field must not be
 	// persisted or exposed through the protocol.
 	Executable string
+	LaunchPlan []string
 	Args       []string
 	Env        []string
 	EnvUnset   []string
@@ -212,6 +213,7 @@ type ProcessSpec struct {
 type ProcessBatchItem struct {
 	ID         string
 	Executable string
+	LaunchPlan []string
 	Args       []string
 	Env        []string
 	EnvUnset   []string

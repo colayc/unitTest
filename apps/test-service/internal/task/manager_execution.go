@@ -249,6 +249,7 @@ func cloneExecutionPlan(plan ExecutionPlan) ExecutionPlan {
 	for index, step := range plan.Steps {
 		result.Steps[index] = step
 		result.Steps[index].Process.Args = append([]string(nil), step.Process.Args...)
+		result.Steps[index].Process.LaunchPlan = append([]string(nil), step.Process.LaunchPlan...)
 		result.Steps[index].Process.Env = append([]string(nil), step.Process.Env...)
 		result.Steps[index].Process.EnvUnset = append(
 			[]string(nil),
@@ -269,6 +270,7 @@ func cloneProcessBatch(
 	for index, value := range values {
 		result[index] = value
 		result[index].Args = append([]string(nil), value.Args...)
+		result[index].LaunchPlan = append([]string(nil), value.LaunchPlan...)
 		result[index].Env = append([]string(nil), value.Env...)
 		result[index].EnvUnset = append(
 			[]string(nil),

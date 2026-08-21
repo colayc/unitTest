@@ -432,7 +432,7 @@ func TestValidatePlanEnforcesArgumentAndEnvironmentItemLimits(t *testing.T) {
 
 func TestFingerprintPlanCoversExecutionFieldsAndExcludesNonExecutionFields(t *testing.T) {
 	plan := task.ExecutionPlan{Version: 1, Steps: []task.ExecutionStep{validConfigureStep()}}
-	if got, want := task.FingerprintPlan(plan), "68c6e32d3ec23957664ef8f61fc3c657f993a7952b4862023764c9b9f05fb7c8"; got != want {
+	if got, want := task.FingerprintPlan(plan), "8910743edaf02686ed3acbea71634b9655e556bcb45f3c08bf473abd21bc3659"; got != want {
 		t.Fatalf("FingerprintPlan() = %q, want fixed digest %q", got, want)
 	}
 
@@ -444,6 +444,7 @@ func TestFingerprintPlanCoversExecutionFieldsAndExcludesNonExecutionFields(t *te
 		{name: "step ID", change: func(value *task.ExecutionPlan) { value.Steps[0].ID = "other" }},
 		{name: "step kind", change: func(value *task.ExecutionPlan) { value.Steps[0].Kind = task.StepBuild }},
 		{name: "executable", change: func(value *task.ExecutionPlan) { value.Steps[0].Process.Executable = "ninja" }},
+		{name: "launch plan", change: func(value *task.ExecutionPlan) { value.Steps[0].Process.LaunchPlan = []string{"clang-cl", "lld-link"} }},
 		{name: "arguments", change: func(value *task.ExecutionPlan) { value.Steps[0].Process.Args = []string{"--build", "build"} }},
 		{name: "environment", change: func(value *task.ExecutionPlan) { value.Steps[0].Process.Env = []string{"CMAKE_GENERATOR=Ninja"} }},
 		{name: "environment unset", change: func(value *task.ExecutionPlan) {

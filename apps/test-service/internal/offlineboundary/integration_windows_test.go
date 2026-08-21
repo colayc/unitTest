@@ -81,7 +81,7 @@ func TestPrivilegedWindowsWFPDynamicLifecycle(t *testing.T) {
 	required := requireWFPIntegrationMode(t)
 	probeRealWFPManagement(t, required)
 
-	t.Run("dynamic V4 and V6 filters block connect then normal release removes all objects", func(t *testing.T) {
+	t.Run("dynamic V4 and V6 filters leave loopback local resources reachable and normal release removes all objects", func(t *testing.T) {
 		v4 := listenIntegrationLoopback(t, "tcp4", "127.0.0.1:0", required)
 		defer v4.Close() //nolint:errcheck
 		v6 := listenIntegrationLoopback(t, "tcp6", "[::1]:0", required)
@@ -100,18 +100,26 @@ func TestPrivilegedWindowsWFPDynamicLifecycle(t *testing.T) {
 				_ = engine.Close()
 			}
 		})
-		if err := engine.AddOutboundBlockFilters(context.Background(), leaseID); err != nil {
+		application, pathErr := os.Executable()
+		if pathErr != nil {
+			t.Fatalf("os.Executable() error = %v", pathErr)
+		}
+		if err := engine.AddOutboundBlockFilters(context.Background(), leaseID, []string{application}); err != nil {
 			t.Fatalf("AddOutboundBlockFilters() error after privilege probe = %v", err)
 		}
 		if err := engine.AuditOutboundBlockFilters(context.Background(), leaseID); err != nil {
 			t.Fatalf("AuditOutboundBlockFilters() error = %v", err)
 		}
-		assertIntegrationConnectBlocked(t, "tcp4", v4.Addr().String())
-		assertIntegrationConnectBlocked(t, "tcp6", v6.Addr().String())
+		assertIntegrationConnectAllowed(t, "tcp4", v4.Addr().String())
+		assertIntegrationConnectAllowed(t, "tcp6", v6.Addr().String())
 
 		providerKey := providerKeyForLease(leaseID)
 		subLayerKey := subLayerKeyForLease(leaseID)
-		v4Key, v6Key := filterKeysForLease(leaseID)
+		applicationID, appErr := (procWfpAPI{}).ApplicationID(application)
+		if appErr != nil {
+			t.Fatalf("ApplicationID() error = %v", appErr)
+		}
+		v4Key, v6Key := filterKeysForApplication(leaseID, applicationID)
 		assertIntegrationObjectsLiveAndDynamic(t, providerKey, subLayerKey, []windows.GUID{v4Key, v6Key})
 		if err := engine.Close(); err != nil {
 			t.Fatalf("Close() error = %v", err)
@@ -202,17 +210,19 @@ func probeRealWFPManagement(t *testing.T, required bool) {
 	t.Helper()
 	engine, err := openWFPEngineWithAPI(integrationTracingWfpAPI{}, windows.GenerateGUID)
 	if err == nil {
-		err = engine.AddOutboundBlockFilters(context.Background(), []byte("task5-wfp-probe"))
+		application, pathErr := os.Executable()
+		if pathErr != nil {
+			err = pathErr
+		} else {
+			err = engine.AddOutboundBlockFilters(context.Background(), []byte("task5-wfp-probe"), []string{application})
+		}
 		closeErr := engine.Close()
 		if err == nil {
 			err = closeErr
 		}
 	}
 	if errors.Is(err, WFPAccessDenied) {
-		if required {
-			t.Fatalf("required WFP integration FAIL: WFPAccessDenied")
-		}
-		t.Skip("SKIP: WFP management permission unavailable (WFPAccessDenied); required mode would FAIL")
+		t.Fatalf("WFP integration FAIL after test start: WFPAccessDenied (local and required modes fail closed)")
 	}
 	if err != nil {
 		t.Fatalf("real WFP management probe error = %v", err)

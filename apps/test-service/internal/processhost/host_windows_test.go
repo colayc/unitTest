@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -182,6 +183,38 @@ func TestWindowsTargetAssignmentFailureUsesSharedFallbackBeforeProcessClose(t *t
 		if events[index] != want[index] {
 			t.Fatalf("events = %#v, want %#v", events, want)
 		}
+	}
+}
+
+func TestWindowsTargetFailsClosedBeforeCreateProcessWhenLaunchRegistrationFails(t *testing.T) {
+	registrationCalls := []string{}
+	createJobCalled := false
+	operations := defaultWindowsTargetOperations()
+	operations.registerExecutable = func(path string) error {
+		registrationCalls = append(registrationCalls, path)
+		if path == `C:\fixture\child.exe` {
+			return errors.New("injected registration failure")
+		}
+		return nil
+	}
+	operations.createProtectedJob = func(uint32) (windows.Handle, error) {
+		createJobCalled = true
+		return 0, errors.New("must not create job")
+	}
+	platform := newWindowsPlatform(operations)
+	target, err := platform.Start(processcontrol.Spec{
+		Executable: `C:\fixture\cmake.exe`,
+		LaunchPlan: []string{`C:\fixture\ninja.exe`, `C:\fixture\child.exe`},
+	}, os.Stdout, os.Stderr)
+	if err == nil || target != nil {
+		t.Fatalf("Start() = (%#v, %v), want fail-closed registration error", target, err)
+	}
+	if createJobCalled {
+		t.Fatal("native job/CreateProcess path ran after registration failure")
+	}
+	want := []string{`C:\fixture\cmake.exe`, `C:\fixture\ninja.exe`, `C:\fixture\child.exe`}
+	if !reflect.DeepEqual(registrationCalls, want) {
+		t.Fatalf("registration calls = %#v, want %#v", registrationCalls, want)
 	}
 }
 

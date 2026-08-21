@@ -5,6 +5,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 
 	"unit-test-ide.local/test-service/internal/offlineboundary"
@@ -35,9 +36,17 @@ func main() {
 		return
 	}
 
+	bootstrap := make([]byte, 80)
+	if _, err := io.ReadFull(os.Stdin, bootstrap); err != nil {
+		fmt.Fprintln(os.Stderr, offlineboundary.GuardianStartFailed)
+		os.Exit(1)
+	}
 	err := offlineboundary.RunNativeGuardian(
 		offlineboundary.OwnerIdentity{PID: uint32(ownerPID), CreationTime: ownerCreationTime},
 		ipcAddress,
+		bootstrap[:32],
+		bootstrap[32:48],
+		bootstrap[48:80],
 	)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)

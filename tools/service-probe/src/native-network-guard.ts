@@ -12,6 +12,7 @@ let installed = false;
 
 export interface WindowsNativeOfflineBoundary {
   readonly ruleName: string;
+  readonly registrationEnvironment: Readonly<Record<string, string>>;
   runGuarded<Result>(
     execute: (signal: AbortSignal) => Promise<Result>,
     onBoundaryLoss?: () => Promise<void>,
@@ -74,6 +75,7 @@ export async function installWindowsNativeOfflineBoundary(
   let closed = false;
   return {
     ruleName: result.boundary.ruleName,
+    registrationEnvironment: result.boundary.registrationEnvironment,
     async runGuarded<Result>(
       execute: (signal: AbortSignal) => Promise<Result>,
       onBoundaryLoss?: () => Promise<void>,

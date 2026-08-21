@@ -54,6 +54,7 @@ const (
 const (
 	maxProcessSpecArgs    = 256
 	maxProcessSpecEnv     = 256
+	maxProcessLaunchPlan  = 64
 	maxProcessBatchItems  = 256
 	maxCommandSummaryArgs = 256
 	maxExecutionStepState = 256 * 1024
@@ -227,6 +228,7 @@ func validProcessSpec(
 	if len(spec.Batch) == 0 {
 		return validProcessTarget(
 			spec.Executable,
+			spec.LaunchPlan,
 			spec.Args,
 			spec.Env,
 			spec.EnvUnset,
@@ -248,6 +250,7 @@ func validProcessSpec(
 			item.Timeout%time.Millisecond != 0 ||
 			!validProcessTarget(
 				item.Executable,
+				item.LaunchPlan,
 				item.Args,
 				item.Env,
 				item.EnvUnset,
@@ -266,6 +269,7 @@ func validProcessSpec(
 
 func validProcessTarget(
 	executable string,
+	launchPlan []string,
 	arguments, environment, unset []string,
 	directory string,
 	boundary ExecutionBoundary,
@@ -273,9 +277,15 @@ func validProcessTarget(
 	if executable == "" || directory == "" ||
 		containsNUL(executable) || containsNUL(directory) ||
 		len(arguments) > maxProcessSpecArgs ||
+		len(launchPlan) > maxProcessLaunchPlan ||
 		len(environment) > maxProcessSpecEnv ||
 		len(unset) > maxProcessSpecEnv {
 		return false
+	}
+	for _, plannedExecutable := range launchPlan {
+		if plannedExecutable == "" || containsNUL(plannedExecutable) {
+			return false
+		}
 	}
 	for _, argument := range arguments {
 		if containsNUL(argument) {
@@ -328,6 +338,7 @@ func FingerprintPlan(plan ExecutionPlan) string {
 	type canonicalBatchProcess struct {
 		ID         string   `json:"id"`
 		Executable string   `json:"executable"`
+		LaunchPlan []string `json:"launchPlan"`
 		Args       []string `json:"args"`
 		Env        []string `json:"env"`
 		EnvUnset   []string `json:"envUnset"`
@@ -339,6 +350,7 @@ func FingerprintPlan(plan ExecutionPlan) string {
 		Kind       StepKind                `json:"kind"`
 		Action     ServiceAction           `json:"action,omitempty"`
 		Executable string                  `json:"executable"`
+		LaunchPlan []string                `json:"launchPlan"`
 		Args       []string                `json:"args"`
 		Env        []string                `json:"env"`
 		EnvUnset   []string                `json:"envUnset"`
@@ -357,6 +369,7 @@ func FingerprintPlan(plan ExecutionPlan) string {
 			Kind:       step.Kind,
 			Action:     step.Action,
 			Executable: step.Process.Executable,
+			LaunchPlan: append([]string{}, step.Process.LaunchPlan...),
 			Args:       append([]string{}, step.Process.Args...),
 			Env:        append([]string{}, step.Process.Env...),
 			EnvUnset: append(
@@ -371,6 +384,7 @@ func FingerprintPlan(plan ExecutionPlan) string {
 				canonicalBatchProcess{
 					ID:         item.ID,
 					Executable: item.Executable,
+					LaunchPlan: append([]string{}, item.LaunchPlan...),
 					Args:       append([]string{}, item.Args...),
 					Env:        append([]string{}, item.Env...),
 					EnvUnset: append(

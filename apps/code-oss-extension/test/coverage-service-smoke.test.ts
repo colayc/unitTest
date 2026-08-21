@@ -312,18 +312,17 @@ async function preflightCoverageToolset(fixture: Fixture): Promise<
   }
   assert.equal(parsed.status, "verified");
   assert.deepEqual(Object.keys(parsed).sort(), [
-    "architecture", "platform", "schemaVersion", "status", "version"
+    "architecture", "platform", "schemaVersion", "status", "toolchainDigest", "version"
   ]);
   assert.equal(typeof parsed.version, "string");
   assert.match(parsed.version as string, /^[0-9]+\.[0-9]+(?:\.[0-9]+)?$/u);
-  const digest = createHash("sha256").update(JSON.stringify({
-    schemaVersion: 1,
-    platform: "windows",
-    architecture: "x64",
+  assert.equal(typeof parsed.toolchainDigest, "string");
+  assert.match(parsed.toolchainDigest as string, /^[0-9a-f]{64}$/u);
+  return {
     status: "verified",
-    version: parsed.version
-  }), "utf8").digest("hex");
-  return { status: "verified", version: parsed.version as string, digest };
+    version: parsed.version as string,
+    digest: parsed.toolchainDigest as string
+  };
 }
 
 function coverageOperations(
@@ -331,7 +330,8 @@ function coverageOperations(
   wire: ProtocolWireCapture,
   tokens: string[],
   hostileEnvironmentValue: string,
-  useCMakeBundle: boolean
+  useCMakeBundle: boolean,
+  boundaryEnvironment: Readonly<Record<string, string>>
 ): Partial<ServiceOperations> {
   return {
     async prepareTokenFile(binary, tokenFile, token) {
@@ -351,6 +351,7 @@ function coverageOperations(
         stdio: "pipe",
         env: {
           ...process.env,
+          ...boundaryEnvironment,
           UNIT_TEST_IDE_COVERAGE_SMOKE_SECRET: hostileEnvironmentValue,
           LLVM_PROFILE_FILE: join(fixture.root, `${hostileEnvironmentValue}-%p.profraw`)
         }
@@ -742,7 +743,8 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
             wire,
             tokens,
             hostileEnvironmentValue,
-            useCMakeBundle
+            useCMakeBundle,
+            installedBoundary.registrationEnvironment
           )
         });
         const session = await manager.start();

@@ -123,6 +123,7 @@ func configureStep(input PlanInput, sourceDir string) (task.ExecutionStep, error
 		ID: "configure", Kind: task.StepConfigure,
 		Process: task.ProcessSpec{
 			Executable: input.Installation.Executable,
+			LaunchPlan: nativeBuildLaunchPlan(input),
 			Args:       append([]string(nil), args...),
 			Env:        environment,
 			Dir:        sourceDir,
@@ -168,6 +169,7 @@ func buildStep(input PlanInput, sourceDir string, targetNames []string) (task.Ex
 		ID: "build", Kind: task.StepBuild,
 		Process: task.ProcessSpec{
 			Executable: input.Installation.Executable,
+			LaunchPlan: nativeBuildLaunchPlan(input),
 			Args:       append([]string(nil), args...),
 			Env:        environment,
 			Dir:        binaryDir,
@@ -178,6 +180,37 @@ func buildStep(input PlanInput, sourceDir string, targetNames []string) (task.Ex
 		},
 		DiagnosticParser: parser,
 	}, nil
+}
+
+// Windows WFP has no PID-tree condition. The Service therefore declares every
+// executable CMake may launch so processhost can register each APP_ID before
+// CreateProcess. The coverage path uses Ninja + clang-cl/lld-link.
+func nativeBuildLaunchPlan(input PlanInput) []string {
+	values := []string{input.Toolchain.CCompiler, input.Toolchain.CXXCompiler}
+	if strings.HasPrefix(input.Profile.Generator, "Ninja") && input.Installation.Root != "" {
+		name := "ninja"
+		if runtime.GOOS == "windows" {
+			name += ".exe"
+		}
+		values = append(values, filepath.Join(input.Installation.Root, "bin", name))
+	}
+	if input.Toolchain.Family == toolchain.FamilyClangCL && input.Toolchain.CXXCompiler != "" {
+		values = append(values, filepath.Join(filepath.Dir(input.Toolchain.CXXCompiler), "lld-link.exe"))
+	}
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		key := strings.ToLower(filepath.Clean(value))
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }
 
 func planBinaryDir(input PlanInput) string {

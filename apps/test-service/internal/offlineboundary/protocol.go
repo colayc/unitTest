@@ -7,7 +7,7 @@ import (
 	"io"
 )
 
-const maxGuardianFramePayloadSize = 32
+const maxGuardianFramePayloadSize = 64
 
 var (
 	errGuardianFrameTooLarge = errors.New("guardian frame too large")
@@ -22,6 +22,7 @@ const (
 	guardianFrameRelease
 	guardianFrameError
 	guardianFrameBye
+	guardianFrameAuthenticate
 )
 
 type guardianErrorCode byte
@@ -33,8 +34,13 @@ const (
 )
 
 type guardianFrame struct {
-	Kind guardianFrameKind
-	Code guardianErrorCode
+	Kind                 guardianFrameKind
+	Code                 guardianErrorCode
+	GuardianPID          uint32
+	GuardianCreationTime uint64
+	OwnerPID             uint32
+	OwnerCreationTime    uint64
+	Proof                [32]byte
 }
 
 func readGuardianFrame(reader io.Reader) (guardianFrame, error) {
@@ -59,6 +65,18 @@ func readGuardianFrame(reader io.Reader) (guardianFrame, error) {
 		if !validGuardianErrorCode(frame.Code) {
 			return guardianFrame{}, errGuardianFrameInvalid
 		}
+	case guardianFrameAuthenticate:
+		if len(payload) != 57 {
+			return guardianFrame{}, errGuardianFrameInvalid
+		}
+		frame.GuardianPID = binary.LittleEndian.Uint32(payload[1:5])
+		frame.GuardianCreationTime = binary.LittleEndian.Uint64(payload[5:13])
+		frame.OwnerPID = binary.LittleEndian.Uint32(payload[13:17])
+		frame.OwnerCreationTime = binary.LittleEndian.Uint64(payload[17:25])
+		copy(frame.Proof[:], payload[25:57])
+		if frame.GuardianPID == 0 || frame.GuardianCreationTime == 0 || frame.OwnerPID == 0 || frame.OwnerCreationTime == 0 {
+			return guardianFrame{}, errGuardianFrameInvalid
+		}
 	default:
 		return guardianFrame{}, errGuardianFrameInvalid
 	}
@@ -74,6 +92,17 @@ func writeGuardianFrame(writer io.Writer, frame guardianFrame) error {
 			return errGuardianFrameInvalid
 		}
 		payload = append(payload, byte(frame.Code))
+	case guardianFrameAuthenticate:
+		if frame.GuardianPID == 0 || frame.GuardianCreationTime == 0 || frame.OwnerPID == 0 || frame.OwnerCreationTime == 0 {
+			return errGuardianFrameInvalid
+		}
+		payload = make([]byte, 57)
+		payload[0] = byte(frame.Kind)
+		binary.LittleEndian.PutUint32(payload[1:5], frame.GuardianPID)
+		binary.LittleEndian.PutUint64(payload[5:13], frame.GuardianCreationTime)
+		binary.LittleEndian.PutUint32(payload[13:17], frame.OwnerPID)
+		binary.LittleEndian.PutUint64(payload[17:25], frame.OwnerCreationTime)
+		copy(payload[25:57], frame.Proof[:])
 	default:
 		return fmt.Errorf("%w: kind %d", errGuardianFrameInvalid, frame.Kind)
 	}

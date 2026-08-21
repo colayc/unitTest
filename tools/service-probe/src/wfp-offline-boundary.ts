@@ -1,5 +1,5 @@
 import { execFile as execFileCallback, spawn, type ChildProcess } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import net from "node:net";
 import { dirname, isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
@@ -8,7 +8,7 @@ const execFile = promisify(execFileCallback);
 const preflightTimeoutMilliseconds = 90_000;
 const guardianConnectTimeoutMilliseconds = 10_000;
 const defaultGuardianLifecycleTimeoutMilliseconds = 10_000;
-const maxGuardianFramePayloadBytes = 32;
+const maxGuardianFramePayloadBytes = 64;
 const ruleNamePrefix = "UnitTestIDE-NativeOffline-";
 
 export type GuardianFrame =
@@ -23,6 +23,8 @@ export interface GuardianProcess {
   writeFrame(frame: Extract<GuardianFrame, { readonly kind: "Release" }>): Promise<void>;
   waitForExit(): Promise<void>;
   terminate(): void | Promise<void>;
+  readonly registrationEnvironment?: Readonly<Record<string, string>>;
+  registerExecutable?(path: string): Promise<void>;
 }
 
 export interface WfpOfflineBoundaryDependencies {
@@ -51,6 +53,7 @@ export interface InstalledWfpOfflineBoundary {
   readonly outcome: "installed";
   readonly boundary: {
     readonly ruleName: string;
+    readonly registrationEnvironment: Readonly<Record<string, string>>;
     runGuarded<Result>(
       execute: (signal: AbortSignal) => Promise<Result>,
       onBoundaryLoss?: () => Promise<void>,
@@ -61,7 +64,7 @@ export interface InstalledWfpOfflineBoundary {
 
 export type WfpOfflineBoundaryResult = InstalledWfpOfflineBoundary | {
   readonly outcome: "skipped";
-  readonly reason: "ToolchainUnavailable" | "WFPAccessDenied";
+  readonly reason: "ToolchainUnavailable";
 };
 
 /** WFP is mandatory here; callers may add HTTP(S) only as a complement. */
@@ -108,6 +111,12 @@ export async function installWfpOfflineBoundary(
     guardian = await dependencies.startGuardian({ ownerPid, ownerCreationTime, ruleName });
     await withTimeout(expectFrame(guardian, "Hello"), guardianTimeoutMilliseconds);
     await withTimeout(expectFrame(guardian, "Ready"), guardianTimeoutMilliseconds);
+    if (options.nativeExecutablePath !== undefined) {
+      if (guardian.registerExecutable === undefined) {
+        throw new Error("guardian launch registration is unavailable");
+      }
+      await withTimeout(guardian.registerExecutable(options.nativeExecutablePath), guardianTimeoutMilliseconds);
+    }
   } catch (error) {
     if (guardian !== undefined) {
       try {
@@ -117,8 +126,7 @@ export async function installWfpOfflineBoundary(
       }
     }
     if (error instanceof GuardianProtocolError && error.code === "WFPAccessDenied") {
-      if (options.required === true) throw new Error("Windows Filtering Platform access is unavailable");
-      return { outcome: "skipped", reason: "WFPAccessDenied" };
+      throw new Error("Windows Filtering Platform access is unavailable");
     }
     throw new Error("guardian protocol did not establish an audited WFP boundary");
   }
@@ -152,6 +160,7 @@ export async function installWfpOfflineBoundary(
     outcome: "installed",
     boundary: {
       ruleName,
+      registrationEnvironment: guardian.registrationEnvironment ?? {},
       async runGuarded<Result>(
         execute: (signal: AbortSignal) => Promise<Result>,
         onBoundaryLoss: () => Promise<void> = async () => undefined,
@@ -259,7 +268,11 @@ function parsePreflight(result: { readonly stdout: string; readonly stderr: stri
   const baseKeys = ["architecture", "platform", "schemaVersion", "status"];
   if (report.schemaVersion !== 1 || report.platform !== "windows" || report.architecture !== "x64") throw new Error("coverage toolset preflight output is invalid");
   if (report.status === "unavailable" && sameKeys(report, baseKeys)) return { status: "unavailable" };
-  if (report.status === "verified" && sameKeys(report, [...baseKeys, "version"]) && typeof report.version === "string" && /^\d+\.\d+(?:\.\d+)?$/u.test(report.version)) return { status: "verified" };
+  if (report.status === "verified" && sameKeys(report, [...baseKeys, "toolchainDigest", "version"]) &&
+      typeof report.version === "string" && /^\d+\.\d+(?:\.\d+)?$/u.test(report.version) &&
+      typeof report.toolchainDigest === "string" && /^[0-9a-f]{64}$/u.test(report.toolchainDigest)) {
+    return { status: "verified" };
+  }
   throw new Error("coverage toolset preflight output is invalid");
 }
 
@@ -324,11 +337,11 @@ export async function startNativeGuardianForTesting(options: NativeGuardianStart
 
 async function startNativeGuardian(options: NativeGuardianStartOptions): Promise<GuardianProcess> {
   const pipeName = `\\\\.\\pipe\\offlineboundary-${randomBytes(16).toString("hex")}`;
+  const authenticationNonce = randomBytes(32);
+  const registrationPipeID = randomBytes(16);
+  const registrationNonce = randomBytes(32);
+  const registrationPipeName = `\\\\.\\pipe\\offlineboundary-register-${registrationPipeID.toString("hex")}`;
   const server = net.createServer();
-  const connection = awaitConnection(server);
-  // Spawn may fail before the connection is awaited; retain a rejection
-  // handler so that resource cleanup cannot become an unhandled rejection.
-  void connection.catch(() => undefined);
   try {
     await listenPipe(server, pipeName);
   } catch {
@@ -348,12 +361,34 @@ async function startNativeGuardian(options: NativeGuardianStartOptions): Promise
   }
   const exit = observeGuardianExit(child, server);
   void exit.catch(() => undefined);
-  const socket = await connection.catch(async () => {
+  if (child.pid === undefined || child.stdin === null) {
+    child.kill();
+    await waitForExitSettlement(exit, defaultGuardianLifecycleTimeoutMilliseconds);
+    throw new Error("guardian process could not start");
+  }
+  let guardianCreationTime: string;
+  try {
+    guardianCreationTime = await resolveProcessCreationTime(options.executable, child.pid);
+    child.stdin.end(Buffer.concat([authenticationNonce, registrationPipeID, registrationNonce]));
+  } catch {
+    child.kill();
+    await waitForExitSettlement(exit, defaultGuardianLifecycleTimeoutMilliseconds);
+    throw new Error("guardian process could not start");
+  }
+  const connection = awaitAuthenticatedConnection(server, authenticationNonce, {
+    guardianPid: child.pid,
+    guardianCreationTime,
+    ownerPid: options.ownerPid,
+    ownerCreationTime: options.ownerCreationTime,
+  });
+  void connection.catch(() => undefined);
+  const authenticated = await connection.catch(async () => {
     child.kill();
     await waitForExitSettlement(exit, defaultGuardianLifecycleTimeoutMilliseconds);
     throw new Error("guardian process could not start");
   });
-  const frames = new GuardianFrameReader(socket);
+  const socket = authenticated.socket;
+  const frames = new GuardianFrameReader(socket, authenticated.remainder);
   return {
     readFrame: async () => await frames.read(),
     writeFrame: async (frame) => await writeGuardianFrame(socket, frame),
@@ -365,7 +400,55 @@ async function startNativeGuardian(options: NativeGuardianStartOptions): Promise
       child.kill();
       await waitForExitSettlement(exit, defaultGuardianLifecycleTimeoutMilliseconds);
     },
+    registrationEnvironment: {
+      UNIT_TEST_IDE_WFP_REGISTRATION_PIPE: registrationPipeName,
+      UNIT_TEST_IDE_WFP_REGISTRATION_NONCE: registrationNonce.toString("hex"),
+    },
+    registerExecutable: async (path) => await registerExecutableWithGuardian(
+      registrationPipeName,
+      registrationNonce,
+      path,
+    ),
   };
+}
+
+async function registerExecutableWithGuardian(pipeName: string, nonce: Buffer, path: string): Promise<void> {
+  const pathBytes = Buffer.from(path, "utf8");
+  if (pathBytes.length === 0 || pathBytes.length > 32 * 1024 || path.includes("\0")) {
+    throw new Error("guardian launch registration failed");
+  }
+  const proof = createHmac("sha256", nonce)
+    .update("unit-test-ide/wfp-register-app-id/v1", "utf8")
+    .update(pathBytes)
+    .digest();
+  const payload = Buffer.concat([Buffer.from([1]), proof, pathBytes]);
+  const header = Buffer.alloc(4);
+  header.writeUInt32LE(payload.length);
+  const socket = net.createConnection(pipeName);
+  try {
+    await withTimeout(new Promise<void>((resolve, reject) => {
+      socket.once("connect", resolve);
+      socket.once("error", reject);
+    }), guardianConnectTimeoutMilliseconds);
+    await writeSocket(socket, header);
+    await writeSocket(socket, payload);
+    const ack = await withTimeout(new Promise<Buffer>((resolve, reject) => {
+      socket.once("data", resolve);
+      socket.once("error", reject);
+      socket.once("close", () => reject(new Error("guardian launch registration failed")));
+    }), guardianConnectTimeoutMilliseconds);
+    if (ack.length !== 1 || ack[0] !== 1) throw new Error("guardian launch registration failed");
+  } catch {
+    throw new Error("guardian launch registration failed");
+  } finally {
+    socket.destroy();
+  }
+}
+
+async function writeSocket(socket: net.Socket, value: Buffer): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    socket.write(value, (error) => error === undefined ? resolve() : reject(error));
+  });
 }
 
 async function waitForExitSettlement(exit: Promise<void>, timeoutMilliseconds: number): Promise<void> {
@@ -382,31 +465,159 @@ async function listenPipe(server: net.Server, pipeName: string): Promise<void> {
   });
 }
 
-function awaitConnection(server: net.Server): Promise<net.Socket> {
-  return new Promise<net.Socket>((resolveConnection, rejectConnection) => {
+interface GuardianAuthenticationIdentity {
+  readonly guardianPid: number;
+  readonly guardianCreationTime: string;
+  readonly ownerPid: number;
+  readonly ownerCreationTime: string;
+}
+
+function awaitAuthenticatedConnection(
+  server: net.Server,
+  nonce: Buffer,
+  identity: GuardianAuthenticationIdentity,
+): Promise<{ readonly socket: net.Socket; readonly remainder: Buffer }> {
+  return new Promise((resolveConnection, rejectConnection) => {
+    let settled = false;
     const timeout = setTimeout(() => finish(new Error("guardian connection timed out")), guardianConnectTimeoutMilliseconds);
-    const finish = (error?: Error, socket?: net.Socket) => {
+    const finish = (error?: Error, authenticated?: { readonly socket: net.Socket; readonly remainder: Buffer }) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timeout);
       server.off("error", onError);
       server.off("connection", onConnection);
       server.off("close", onClose);
       if (error !== undefined) rejectConnection(error);
-      else if (socket !== undefined) resolveConnection(socket);
+      else if (authenticated !== undefined) resolveConnection(authenticated);
     };
     const onError = () => finish(new Error("guardian pipe failed"));
     const onClose = () => finish(new Error("guardian pipe closed"));
     const onConnection = (socket: net.Socket) => {
-      server.close();
-      finish(undefined, socket);
+      void authenticateGuardianSocket(socket, nonce, identity).then((authenticated) => {
+        if (!authenticated.valid || settled) {
+          socket.destroy();
+          return;
+        }
+        server.close();
+        finish(undefined, { socket, remainder: authenticated.remainder });
+      }, () => socket.destroy());
     };
     server.once("error", onError);
-    server.once("connection", onConnection);
+    server.on("connection", onConnection);
     server.once("close", onClose);
   });
 }
 
+async function resolveProcessCreationTime(executable: string, pid: number): Promise<string> {
+  const result = await execFile(executable, [`--print-owner-creation-time=${pid}`], {
+    encoding: "utf8", timeout: guardianConnectTimeoutMilliseconds, windowsHide: true,
+    maxBuffer: 4 * 1024, env: sanitizedEnvironment(),
+  });
+  if (result.stderr !== "" || !/^[1-9][0-9]*\n$/u.test(result.stdout)) {
+    throw new Error("guardian process identity is unavailable");
+  }
+  return result.stdout.trim();
+}
+
+async function authenticateGuardianSocket(
+  socket: net.Socket,
+  nonce: Buffer,
+  identity: GuardianAuthenticationIdentity,
+): Promise<{ readonly valid: boolean; readonly remainder: Buffer }> {
+  const { payload, remainder } = await readFirstGuardianWireFrame(socket);
+  return { valid: verifyGuardianAuthenticationPayload(payload, nonce, identity), remainder };
+}
+
+function verifyGuardianAuthenticationPayload(
+  payload: Buffer,
+  nonce: Buffer,
+  identity: GuardianAuthenticationIdentity,
+): boolean {
+  if (payload.length !== 57 || payload[0] !== 6) return false;
+  const guardianPid = payload.readUInt32LE(1);
+  const guardianCreationTime = payload.readBigUInt64LE(5).toString();
+  const ownerPid = payload.readUInt32LE(13);
+  const ownerCreationTime = payload.readBigUInt64LE(17).toString();
+  if (guardianPid !== identity.guardianPid || guardianCreationTime !== identity.guardianCreationTime ||
+      ownerPid !== identity.ownerPid || ownerCreationTime !== identity.ownerCreationTime) {
+    return false;
+  }
+  const expected = guardianAuthenticationProof(nonce, identity);
+  return payload.subarray(25).equals(expected);
+}
+
+/** Exported only for the same-user rogue authentication regression. */
+export function guardianAuthenticationPayloadForTesting(
+  nonce: Buffer,
+  identity: GuardianAuthenticationIdentity,
+): Buffer {
+  const payload = Buffer.alloc(57);
+  payload[0] = 6;
+  payload.writeUInt32LE(identity.guardianPid, 1);
+  payload.writeBigUInt64LE(BigInt(identity.guardianCreationTime), 5);
+  payload.writeUInt32LE(identity.ownerPid, 13);
+  payload.writeBigUInt64LE(BigInt(identity.ownerCreationTime), 17);
+  guardianAuthenticationProof(nonce, identity).copy(payload, 25);
+  return payload;
+}
+
+/** Exported only for the same-user rogue authentication regression. */
+export function verifyGuardianAuthenticationForTesting(
+  payload: Buffer,
+  nonce: Buffer,
+  identity: GuardianAuthenticationIdentity,
+): boolean {
+  return verifyGuardianAuthenticationPayload(payload, nonce, identity);
+}
+
+function guardianAuthenticationProof(nonce: Buffer, identity: GuardianAuthenticationIdentity): Buffer {
+  const encoded = Buffer.alloc(24);
+  encoded.writeUInt32LE(identity.guardianPid, 0);
+  encoded.writeBigUInt64LE(BigInt(identity.guardianCreationTime), 4);
+  encoded.writeUInt32LE(identity.ownerPid, 12);
+  encoded.writeBigUInt64LE(BigInt(identity.ownerCreationTime), 16);
+  return createHmac("sha256", nonce)
+    .update("unit-test-ide/wfp-guardian-auth/v1", "utf8")
+    .update(encoded)
+    .digest();
+}
+
+function readFirstGuardianWireFrame(socket: net.Socket): Promise<{ readonly payload: Buffer; readonly remainder: Buffer }> {
+  return new Promise((resolve, reject) => {
+    let buffer = Buffer.alloc(0);
+    const timeout = setTimeout(() => fail(), guardianConnectTimeoutMilliseconds);
+    const cleanup = () => {
+      clearTimeout(timeout);
+      socket.off("data", onData);
+      socket.off("error", fail);
+      socket.off("end", fail);
+      socket.off("close", fail);
+    };
+    const fail = () => {
+      cleanup();
+      reject(new Error("guardian authentication failed"));
+    };
+    const onData = (chunk: Buffer) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      if (buffer.length < 4) return;
+      const length = buffer.readUInt32LE(0);
+      if (length === 0 || length > maxGuardianFramePayloadBytes) {
+        fail();
+        return;
+      }
+      if (buffer.length < 4 + length) return;
+      cleanup();
+      resolve({ payload: buffer.subarray(4, 4 + length), remainder: buffer.subarray(4 + length) });
+    };
+    socket.on("data", onData);
+    socket.once("error", fail);
+    socket.once("end", fail);
+    socket.once("close", fail);
+  });
+}
+
 async function spawnGuardian(executable: string, args: readonly string[]): Promise<ChildProcess> {
-  const child = spawn(executable, args, { stdio: "ignore", windowsHide: true, env: sanitizedEnvironment() });
+  const child = spawn(executable, args, { stdio: ["pipe", "ignore", "ignore"], windowsHide: true, env: sanitizedEnvironment() });
   await new Promise<void>((resolveSpawn, rejectSpawn) => {
     child.once("spawn", resolveSpawn);
     child.once("error", rejectSpawn);
@@ -434,11 +645,12 @@ export class GuardianFrameReader {
   } | undefined;
   #failure: Error | undefined;
 
-  constructor(private readonly socket: net.Socket) {
+  constructor(private readonly socket: net.Socket, initial: Buffer = Buffer.alloc(0)) {
     socket.on("data", (chunk: Buffer) => this.push(chunk));
     socket.once("error", () => this.fail());
     socket.once("end", () => this.fail());
     socket.once("close", () => this.fail());
+    if (initial.length > 0) this.push(initial);
   }
 
   async read(): Promise<GuardianFrame> {

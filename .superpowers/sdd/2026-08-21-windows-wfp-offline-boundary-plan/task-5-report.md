@@ -4,221 +4,135 @@
 
 `DONE_WITH_CONCERNS`
 
-The privileged integration and its required-mode controls are implemented, the
-non-privileged and cross-platform gates pass, and CI now runs the privileged Go
-and TypeScript commands before the coverage Service/native smoke. This host
-cannot claim a native WFP or verified LLVM PASS: WFP management returns
-`WFPAccessDenied`, the verified coverage toolset is unavailable, and the final
-root workspace command cannot spawn `cmake`.
+The native Windows boundary, fail-closed lifecycle controls, process launch
+registration, integration/control tests, and required CI path are implemented.
+All executable local gates that do not require unavailable host capabilities are
+green. This machine cannot honestly claim the positive privileged WFP or
+verified clang-cl/LLVM execution: WFP management returns `WFPAccessDenied`, the
+verified coverage toolset is unavailable, and `cmake` is absent from `PATH`.
 
-## RED evidence
+## Final design and behavior
 
-- The first Go integration compile failed because the new access-denied frame
-  used the not-yet-defined `guardianErrorWFPAccessDenied` protocol code.
-- The first TypeScript integration compile failed because `WFPAccessDenied`
-  was not an accepted guardian error code and the default bridge had no
-  executable anchor for fixture siblings.
-- The first workflow control failed because no required privileged Go or
-  TypeScript WFP command ran before the coverage Service/native smoke.
-- The first Linux cross-compile failed because `guardianSession` and
-  `guardianOwnerVerifier` were declared only in the Windows implementation.
-- The first real engine probe failed at `FwpmEngineOpen0` with
-  `ERROR_NOT_SUPPORTED`. A test-only call trace isolated the failure to engine
-  open; the Windows API requires `RPC_C_AUTHN_WINNT` or
-  `RPC_C_AUTHN_DEFAULT`, while the implementation passed zero. After using
-  `RPC_C_AUTHN_WINNT`, the same probe reached the host's real permission
-  boundary and returned the canonical `WFPAccessDenied` result.
+- Each WFP dynamic-session block filter is scoped to a registered executable's
+  exact `ALE_APP_ID`. V4 and V6 filters also require
+  `FLAGS_NONE_SET(IS_LOOPBACK)`, so unrelated executables and loopback/local-host
+  resources remain usable while registered applications' non-loopback outbound
+  connections are blocked. There is no machine-wide zero-condition filter.
+- The guardian audits the exact closed provider, sublayer, filter keys, action,
+  non-persistent flags, APP_ID blobs, and loopback condition before reporting
+  `Ready`. Executable registration adds the matching V4/V6 pair to the same
+  dynamic session and repeats the audit.
+- WFP has no process-tree condition. The boundary therefore uses an explicit
+  pre-launch application plan: the Service executable is registered after
+  guardian `Ready`; the Service plan carries CMake, Ninja, compiler, linker,
+  test and LLVM executable identities; and the Windows processhost registers
+  the direct executable plus the plan before job allocation or `CreateProcess`.
+  Missing capability, malformed registration, rejection, or an unregistered
+  planned launch fails closed before the native process starts.
+- Registration uses a private per-run named-pipe capability and HMAC nonce.
+  The capability reaches the Service/processhost only; service-owned variables
+  are removed from the final target environment and no path or nonce is emitted
+  in reports or diagnostics.
+- Guardian control-pipe authentication precedes `Hello`/`Ready`. Go checks the
+  OS named-pipe peer PID plus guardian and owner PID/creation identities and a
+  32-byte per-run HMAC nonce. TypeScript binds the same nonce proof to the
+  spawned guardian PID/creation identity and owner identity. A rejected first
+  same-user client is closed while bounded accept continues for the real
+  guardian.
+- Every Go Lease timeout, protocol, send, and close-abort path kills the
+  guardian, waits within a bound for `Wait()`/process exit, and only then closes
+  transport. Unknown exit or cleanup failure maps to session-close failure.
+  Registration shutdown is also bounded so a release-racing request cannot
+  block the guardian.
+- TypeScript continuously monitors the guardian and socket after `Ready`.
+  Active guardian loss prevents or aborts the native callback and suppresses
+  evidence. Pending frame reads reject on socket/child loss, termination is
+  bounded, and normal close exclusively proves `Release` -> `Bye` -> clean
+  guardian exit even if child-exit observation races ahead of buffered `Bye`.
+- Coverage teardown is Service stop -> guardian close -> fixture removal ->
+  atomic publication, keeping the fixture-owned guardian executable available
+  until exit is proved.
+- Post-preflight `WFPAccessDenied` is a failure in both local and required
+  modes. Only preflight `ToolchainUnavailable` may be a local skip. Verified
+  preflight output has a closed schema and includes a path-free SHA-256 digest
+  over the exact clang-cl, llvm-profdata, and llvm-cov binary identities rather
+  than only their version. Failure to obtain cryptographic randomness fails
+  closed; there are no fallback lease bytes.
 
-## Delivered GREEN behavior
+## TDD evidence
 
-- The Go privileged test uses a real dynamic WFP session and unique provider,
-  sublayer, V4 and V6 filter keys. It proves outbound loopback connectivity
-  before installation, blocked V4/V6 connects while the filters are live,
-  non-persistent dynamic object flags, normal-release removal, and restored
-  connectivity.
-- Guardian-crash and real-owner-termination cases prove that a fresh WFP
-  observer cannot find the run's provider, sublayer or filters after the
-  dynamic session owner disappears. The PID-reuse control supplies a matching
-  PID with a mismatched creation time and proves fail-closed rejection before a
-  provider is created.
-- Local access denial skips with the exact `WFPAccessDenied` reason. Setting
-  `UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED=1` converts the same boundary into a
-  test failure; it never skips in required mode.
-- The TypeScript end-to-end control uses the default sibling resolution:
-  coverage preflight completes first, guardian `Ready` is required next, and
-  only then may the Service/native side effect run. Local unavailable-toolchain
-  and access-denied controls prove zero Service side effects; required mode
-  fails instead of skipping.
-- Guardian startup error code 2 is the fixed `WFPAccessDenied` code in Go and
-  TypeScript. It is preserved through sanitization and mapped to the stable
-  sentinel rather than an uncontrolled Windows error string.
-- Pure guardian session and owner-verifier interfaces now live in the common Go
-  file, so non-Windows packages compile while runtime behavior remains explicit
-  `ErrUnsupported`.
-- Required Windows CI steps run the privileged Go lifecycle and TypeScript WFP
-  integration before the existing coverage Service/native smoke.
+The final review wave began with focused regressions against the prior code:
 
-## Current-host integration boundary
+- WFP unit tests observed zero filter conditions and a machine-wide scope.
+  They now prove exact APP_ID/loopback conditions, V4/V6 pairs, unchanged
+  unrelated applications, child registration, and closed-set re-audit.
+- A same-user rogue pipe client was accepted before the guardian. Go now rejects
+  the rogue and accepts the later authenticated peer; the TypeScript proof test
+  rejects a forged nonce/identity payload.
+- Lease `Close` returned while a killed guardian was still alive. It now waits
+  for exit and does not close transport early; timeout and residue-unknown
+  controls fail closed.
+- A processhost registration rejection still reached the job/CreateProcess
+  path. It now stops before either side effect, while the exact executable and
+  child launch plan are acknowledged in the green control.
+- Local post-preflight WFP denial incorrectly skipped, a version-only verified
+  preflight was accepted, and random-source failure produced fallback bytes.
+  The new focused tests are green with FAIL, schema rejection, and fail-closed
+  entropy behavior respectively.
+- Full Service Probe initially found two older verified-preflight fixtures
+  without `toolchainDigest`; both were RED and then updated to the closed schema.
+- The root network audit initially rejected the new registration file and the
+  additional guardian pipe connection type. Its final tests explicitly allow
+  only `net.Listener`/`net.Conn` and named-pipe listen/dial selectors; no generic
+  transport exception was added.
 
-- Privileged Go, local mode: **SKIP**, exactly
-  `WFP management permission unavailable (WFPAccessDenied); required mode would FAIL`.
-- Privileged Go, required control: **expected FAIL**, exactly
-  `required WFP integration FAIL: WFPAccessDenied`.
-- TypeScript WFP end-to-end, local mode: two injected controls PASS and the
-  real default-sibling test **SKIP** with
-  `ToolchainUnavailable; required mode would FAIL`.
-- TypeScript WFP end-to-end, required control: two injected controls PASS and
-  the real default-sibling test **expected FAIL** because the verified coverage
-  toolset is unavailable.
-- Therefore this report makes no native privileged WFP PASS and no verified
-  LLVM coverage PASS claim. The required CI job is the authoritative executor
-  for those host capabilities.
+Earlier review regressions remain green for post-Ready crash abort, pending
+read rejection, bounded termination, access-denied cleanup, Release/Bye event
+ordering, engine-close error joining, and fixture teardown/publication order.
 
-## Final verification
+## Verification
 
-Pinned commands used Node 24.19.0, pnpm 11.4.0, Go 1.26.6,
-`GOENV=off`, `GOTOOLCHAIN=local`, and private worktree Go caches.
+Final commands used Node 24.18.0, pnpm 11.4.0, Go 1.26.6 and worktree-private
+Go caches.
 
-- `go test ./apps/test-service/... -count=1`: PASS.
-- `go test -race ./apps/test-service/... -count=1`: PASS.
-- `go vet ./apps/test-service/...`: PASS.
-- Linux `GOOS=linux GOARCH=amd64 CGO_ENABLED=0` offlineboundary test compile:
-  PASS.
-- Linux `GOOS=linux GOARCH=amd64 CGO_ENABLED=0` native guardian build: PASS.
-- `pnpm --filter @unit-test-ide/service-probe build`: PASS.
-- `pnpm --filter @unit-test-ide/service-probe test`: PASS, 66 pass / 1 honest
-  toolchain skip.
-- `pnpm build`: PASS.
-- `pnpm check:protocol-generated`: PASS.
-- `pnpm check:coverage-generated`: PASS.
-- `pnpm -r --if-present test`: PASS; Service Probe is 66 pass / 1 skip and the
-  Extension is 136/136.
-- `pnpm test:workspace`: 21 pass / 1 environment failure,
-  `spawnSync cmake ENOENT`.
-- `pnpm test`: generator and bundle stages PASS, including 34 pass / 1 existing
-  Python `EPERM` skip in the coverage bundle; it then stops at the same sole
-  workspace `cmake ENOENT` failure. Package tests were run separately and PASS.
-- `git diff --check`: PASS.
+- Unexcluded Windows Go full run: all packages pass except
+  `TestPrivilegedWindowsWFPDynamicLifecycle`, which fails exactly
+  `WFP integration FAIL after test start: WFPAccessDenied (local and required modes fail closed)`.
+- `go test ./... -count=1 -skip '^TestPrivilegedWindowsWFPDynamicLifecycle$'`:
+  PASS for the complete Service tree.
+- `go test -race ./... -count=1 -skip '^TestPrivilegedWindowsWFPDynamicLifecycle$'`:
+  PASS for the complete Service tree. After the final bounded registration
+  shutdown edit, focused race on `internal/offlineboundary` and
+  `internal/processhost` also PASS.
+- `go vet ./...`: PASS.
+- Linux `GOOS=linux GOARCH=amd64 CGO_ENABLED=0` full-package compile through a
+  no-exec wrapper: PASS, including unsupported offlineboundary and guardian
+  command compilation.
+- `pnpm --filter @unit-test-ide/service-probe test`: 76 PASS / 1 exact
+  `ToolchainUnavailable; required mode would FAIL` SKIP.
+- `pnpm --filter code-oss-extension test`: 138/138 PASS.
+- `pnpm --filter code-oss-extension test:coverage-service-smoke`: 1 honest SKIP,
+  `verified clang-cl coverage toolset is unavailable`; it does not publish a
+  report.
+- `pnpm check:protocol-generated`, `pnpm check:coverage-generated`, and
+  `pnpm build` with private `GOCACHE`: PASS.
+- Exact `pnpm test`: coverage generator 4/4, CMake bundle 28/28, and coverage
+  bundle 34 PASS / 1 existing Python `EPERM` SKIP. The workspace gate's two new
+  local-IPC audit failures were fixed and rerun green; its final result is
+  22 PASS / 1 environment failure, solely `spawnSync cmake ENOENT`.
+- `git diff --check`: PASS before report/cleanup and rerun before commit.
 
-## Security and lifecycle review
+## Host boundary and handoff
 
-- Production source contains no call to
-  `windows-offline-boundary.ps1 -Action Guard`; the remaining script references
-  are legacy-cleanup tests and the cleanup workflow.
-- Both TypeScript startup and the coverage smoke place the Service/native start
-  after preflight and guardian `Ready`.
-- Live object enumeration checks provider, sublayer and both filters are marked
-  non-persistent. Normal close and abnormal owner loss are then checked through
-  both the existing observer and a newly opened dynamic observer, which is the
-  native WFP equivalent of proving no persistent-policy residue.
-- Session close is idempotent, owns each WFP handle exactly once, and propagates
-  close/guardian failures. Go and TypeScript fail-closed controls remain green.
-- Closed-report-schema validators remain green; no new open-ended report fields
-  or raw native error values were introduced.
-
-## Concerns and handoff
-
-- A Windows runner with WFP management permission is still required to execute
-  the real block/release/crash lifecycle as PASS.
-- A runner with the repository-verified clang-cl/LLVM toolset is still required
-  to execute the positive default-sibling TypeScript path as PASS.
-- This host has no `cmake` on `PATH`, so the exact root `pnpm test` command is
-  not green here even though the affected package suites and all generated-file
-  checks pass independently.
-- Temporary caches, Linux binaries and the pnpm shim are removed before commit.
-  No push is performed.
-
-## Review fix round 1 — lifecycle closure
-
-The first Task 5 review rejected four lifecycle gaps. Each correction was
-developed from an observed RED regression before production changes:
-
-- Coverage smoke teardown previously ran Service stop, fixture deletion and
-  guardian close in that order. The new ownership-order regression failed
-  until the flow became Service stop, guardian close, fixture deletion and
-  only then atomic evidence publication. The guardian executable therefore
-  remains present until the guardian has exited.
-- TypeScript previously stopped reading after `Ready`, so a guardian crash was
-  discovered only during teardown. The new post-Ready tests failed until the
-  boundary continuously raced the already-pending next frame and child exit.
-  `runGuarded` now checks liveness before starting native work, aborts an
-  in-flight callback through `AbortSignal`, invokes bounded Service cleanup,
-  and prevents evidence publication on boundary loss.
-- `GuardianFrameReader.fail` previously recorded failure without rejecting its
-  pending read. A real connected-socket regression hung until the reader began
-  rejecting its waiter on error, end and close. Startup, Release/Bye, child
-  exit and termination waits are now bounded; termination waits for child exit
-  rather than returning immediately.
-- Go Add, Audit and Ready startup failures previously ignored `engine.Close`
-  errors. Fault injection failed until each path joined the primary error,
-  `SessionCloseFailed` and the close error, closed exactly once, and used fixed
-  session-close protocol code 3. A joined access-denied primary can therefore
-  never become a local `WFPAccessDenied` skip when cleanup was not proved.
-
-Fresh review-round verification used the same pinned Node 24.19.0, pnpm
-11.4.0 and Go 1.26.6 setup:
-
-- Focused WFP lifecycle/public-wrapper tests: PASS, 16/16.
-- Focused Extension sequencing, teardown and publication tests: PASS, 14/14.
-- Full Service Probe: PASS, 72 pass / 1 honest `ToolchainUnavailable` skip.
-- Full Extension: PASS, 138/138.
-- Full workspace package tests: PASS, including the same 72/1 Service Probe
-  result and Extension 138/138.
-- Full Go Service, race and vet: PASS.
-- Linux offlineboundary test compile and native guardian build: PASS.
-- Protocol/coverage generated checks and root build: PASS.
-- Exact root test: generator 4/4, CMake bundle 28/28 and coverage bundle
-  34 pass / 1 existing Python `EPERM` skip, then the same environment-only
-  workspace failure `spawnSync cmake ENOENT` (21/22). Package and Go suites
-  were run separately and passed.
-- `git diff --check`: PASS.
-
-The current host still has no WFP management permission, verified LLVM or
-`cmake` on `PATH`; no native privileged PASS was inferred from the review
-controls. The required Windows CI commands remain the authoritative positive
-executor. No push was performed.
-
-## Review fix round 2 — termination proof and release ordering
-
-The second review found two remaining TypeScript lifecycle gaps. Both were
-reproduced against the prior implementation before production changes:
-
-- A fake guardian that reported `WFPAccessDenied`, accepted termination but
-  never exited was incorrectly returned as a local skip. The regression failed
-  with `Missing expected rejection` until termination required both the
-  terminate operation and bounded child-exit settlement. Startup cleanup
-  timeout or termination failure now remains a generic fail-closed startup
-  error, so `WFPAccessDenied` is mapped to local SKIP only after exit is proved.
-- During normal Release, a clean child exit observed before the pending `Bye`
-  continuation incorrectly rejected the liveness promise and made close fail.
-  The event-order regression failed with `guardian protocol did not prove WFP
-  boundary removal` until the active monitor stopped owning the releasing
-  phase. `close()` now exclusively performs the bounded Release, Bye and clean
-  guardian-exit checks; active-phase child or socket loss remains fail-closed.
-- The default native guardian termination and connection-failure cleanup no
-  longer swallow bounded exit timeout. Close preserves both the primary
-  protocol error and any termination error through a stable aggregate cleanup
-  failure, and report publication remains suppressed on rejection.
-
-Fresh round-2 verification used pinned Node 24.19.0, pnpm 11.4.0 and Go
-1.26.6 with `GOENV=off`, `GOTOOLCHAIN=local` and private worktree caches:
-
-- Focused round-2 regressions plus the active-crash controls: PASS, 4/4.
-- Complete WFP unit file: PASS, 15/15.
-- Full Service Probe: PASS, 74 pass / 1 honest
-  `ToolchainUnavailable; required mode would FAIL` skip.
-- Full Extension: PASS, 138/138.
-- Full recursive workspace package tests: PASS, including the same Service
-  Probe 74/1 result and Extension 138/138.
-- Full Go Service tests, race detector and vet: PASS.
-- Linux offlineboundary test compile and native guardian build: PASS.
-- Protocol and coverage generated checks and root build: PASS.
-- Exact root test: coverage generator 4/4, CMake bundle 28/28, and coverage
-  bundle 34 pass / 1 existing Python `EPERM` skip; it then stopped at the same
-  environment-only workspace failure `spawnSync cmake ENOENT` (21/22).
-- `git diff --check`: PASS.
-
-The host capability boundary is unchanged: no WFP management permission,
-verified LLVM or `cmake` is available locally, so no privileged WFP or verified
-LLVM PASS is claimed. Required Windows CI remains the positive executor. No push
-was performed.
+- This report makes no privileged native WFP PASS claim. A Windows runner with
+  WFP management permission must execute the real APP_ID-scoped block,
+  unrelated/loopback allow, normal release, guardian crash, owner termination,
+  PID-reuse and dynamic-object disappearance evidence. The required CI job is
+  the authoritative positive executor.
+- This report makes no verified LLVM or coverage-publication PASS claim. A
+  runner with the repository-verified clang-cl/LLVM siblings must execute the
+  positive default-sibling path.
+- `cmake` is not installed on this host's `PATH`; the exact root suite therefore
+  stops at that one environment boundary after its earlier stages pass.
+- Temporary Go caches, the pnpm shim and generated runtime artifacts are removed
+  before commit. The change is committed locally and is not pushed.

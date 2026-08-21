@@ -13,6 +13,7 @@ const winioImportPath = "github.com/Microsoft/go-winio";
 const pureParsingImports = new Set(["net/url"]);
 const allowedProductionNetworkImports = new Map([
   ["apps/test-service/internal/offlineboundary/guardian_windows.go", new Set(["net", winioImportPath])],
+  ["apps/test-service/internal/offlineboundary/registration_windows.go", new Set(["net", winioImportPath])],
   ["apps/test-service/internal/server/server.go", new Set(["net"])],
   ["apps/test-service/internal/server/service.go", new Set(["net"])],
   ["apps/test-service/internal/transport/listener.go", new Set(["net"])],
@@ -301,12 +302,31 @@ test("guardian Windows boundary constrains network-capable selectors to local IP
   const source = await readFile("apps/test-service/internal/offlineboundary/guardian_windows.go", "utf8");
   assert.deepEqual(
     [...source.matchAll(/\bnet\.([A-Za-z_]\w*)/g)].map((match) => match[1]),
-    ["Listener", "Conn", "Conn", "Conn", "Conn"],
+    ["Listener", "Conn", "Conn", "Conn", "Conn", "Conn"],
     "guardian_windows.go must use net only for local pipe listener/connection types"
   );
   assert.deepEqual(
     [...source.matchAll(/\bwinio\.([A-Za-z_]\w*)/g)].map((match) => match[1]),
     ["ListenPipe", "PipeConfig", "DialPipeContext"],
     "guardian_windows.go must use go-winio only for local Named Pipe setup/dial"
+  );
+});
+
+test("guardian executable registration constrains network-capable selectors to local IPC only", async () => {
+  const source = await readFile("apps/test-service/internal/offlineboundary/registration_windows.go", "utf8");
+  assert.deepEqual(
+    [...source.matchAll(/\bnet\.([A-Za-z_]\w*)/g)].map((match) => match[1]),
+    ["Listener", "Conn"],
+    "registration_windows.go must use net only for local pipe listener/connection types"
+  );
+  assert.deepEqual(
+    [...source.matchAll(/\bwinio\.([A-Za-z_]\w*)/g)].map((match) => match[1]),
+    ["ListenPipe", "PipeConfig", "DialPipeContext"],
+    "registration_windows.go must use go-winio only for local Named Pipe setup/dial"
+  );
+  assert.deepEqual(
+    calledSelectors(source, "winio"),
+    ["ListenPipe", "DialPipeContext"],
+    "executable registration must only listen and dial on local Named Pipes"
   );
 });

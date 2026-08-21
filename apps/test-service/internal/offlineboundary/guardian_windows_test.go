@@ -6,11 +6,15 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/Microsoft/go-winio"
 )
 
 func TestProtocolRejectsOversizedAndUnknownFrames(t *testing.T) {
@@ -50,6 +54,111 @@ func TestProtocolRejectsOversizedAndUnknownFrames(t *testing.T) {
 			t.Fatalf("readGuardianFrame() error = %v, want errGuardianFrameInvalid", err)
 		}
 	})
+}
+
+func TestGuardianPipeRejectsSameUserRogueBeforeAcceptingAuthenticatedGuardian(t *testing.T) {
+	pipeName := guardianPipeName([]byte(fmt.Sprintf("auth-race-%d", time.Now().UnixNano())))
+	listener, err := winio.ListenPipe(pipeName, &winio.PipeConfig{MessageMode: true})
+	if err != nil {
+		t.Fatalf("ListenPipe() error = %v", err)
+	}
+	nonce := bytes.Repeat([]byte{0x5a}, 32)
+	identity, err := currentOwnerCreationTime(uint32(os.Getpid()))
+	if err != nil {
+		_ = listener.Close()
+		t.Fatalf("currentOwnerCreationTime() error = %v", err)
+	}
+	guardian := OwnerIdentity{PID: uint32(os.Getpid()), CreationTime: identity}
+	owner := OwnerIdentity{PID: 41, CreationTime: 99}
+	session := &guardianPipeSession{
+		listener: listener, connReady: make(chan guardianConnResult, 1),
+		authNonce: nonce, guardian: guardian, owner: owner,
+	}
+	defer session.Close() //nolint:errcheck
+	go session.accept()
+
+	rogue, err := winio.DialPipeContext(context.Background(), pipeName)
+	if err != nil {
+		t.Fatalf("rogue DialPipeContext() error = %v", err)
+	}
+	forged := guardianAuthenticationFrame(nonce, guardian, owner)
+	forged.Proof[0] ^= 0xff
+	rogueWrite := make(chan error, 1)
+	go func() { rogueWrite <- writeGuardianFrame(rogue, forged) }()
+	accepted := make(chan guardianConnResult, 1)
+	go func() {
+		conn, awaitErr := session.awaitConn()
+		accepted <- guardianConnResult{conn: conn, err: awaitErr}
+	}()
+	select {
+	case result := <-accepted:
+		_ = rogue.Close()
+		t.Fatalf("rogue connection was accepted before authentication: %v", result.err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	if err := <-rogueWrite; err != nil {
+		t.Fatalf("write forged authentication frame: %v", err)
+	}
+	_ = rogue.Close()
+
+	real, err := winio.DialPipeContext(context.Background(), pipeName)
+	if err != nil {
+		t.Fatalf("real DialPipeContext() error = %v", err)
+	}
+	defer real.Close() //nolint:errcheck
+	realWrite := make(chan error, 1)
+	go func() {
+		if writeErr := writeGuardianFrame(real, guardianAuthenticationFrame(nonce, guardian, owner)); writeErr != nil {
+			realWrite <- writeErr
+			return
+		}
+		realWrite <- writeGuardianFrame(real, guardianFrame{Kind: guardianFrameHello})
+	}()
+	select {
+	case result := <-accepted:
+		if result.err != nil {
+			t.Fatalf("awaitConn() error = %v", result.err)
+		}
+		frame, readErr := readGuardianFrame(result.conn)
+		if readErr != nil || frame.Kind != guardianFrameHello {
+			t.Fatalf("first post-auth frame = %#v, error = %v; want Hello", frame, readErr)
+		}
+		if writeErr := <-realWrite; writeErr != nil {
+			t.Fatalf("write authenticated frames: %v", writeErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("authenticated guardian was not accepted")
+	}
+}
+
+func TestProcesshostRegistrationCapabilityAcknowledgesExactExecutable(t *testing.T) {
+	pipeID := bytes.Repeat([]byte{0x31}, 16)
+	nonce := bytes.Repeat([]byte{0x42}, 32)
+	server, err := newExecutableRegistrationServer(pipeID, nonce)
+	if err != nil {
+		t.Fatalf("newExecutableRegistrationServer() error = %v", err)
+	}
+	defer server.Close() //nolint:errcheck
+	t.Setenv(registrationPipeEnvironment, registrationPipeName(pipeID))
+	t.Setenv(registrationNonceEnvironment, fmt.Sprintf("%x", nonce))
+	want := `C:\fixture\clang-cl.exe`
+	received := make(chan string, 1)
+	go func() {
+		request := <-server.requests
+		received <- request.path
+		request.result <- nil
+	}()
+	if err := RegisterExecutableForActiveBoundary(want); err != nil {
+		t.Fatalf("RegisterExecutableForActiveBoundary() error = %v", err)
+	}
+	select {
+	case got := <-received:
+		if got != want {
+			t.Fatalf("registered executable = %q, want exact planned identity", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("registration request was not delivered")
+	}
 }
 
 func TestOwnerIdentityVerifierRejectsPIDReuse(t *testing.T) {
@@ -294,6 +403,54 @@ func TestGuardianLifecycleRejectsWrongOrderTimeoutAndCrash(t *testing.T) {
 	})
 }
 
+func TestGuardianLeaseKillWaitsForProcessExitBeforeClosingSessionOrReturning(t *testing.T) {
+	session := newScriptedGuardianSession()
+	session.sendErrKind = guardianFrameRelease
+	session.sendErr = errors.New("injected release send failure")
+	boundary := New(Config{
+		ownerVerifier:          funcVerifierForOwner(7, 8),
+		guardianFactory:        func(context.Context, OwnerIdentity) (guardianSession, error) { return session, nil },
+		guardianReadyTimeout:   time.Second,
+		guardianReleaseTimeout: 200 * time.Millisecond,
+	})
+
+	lease, err := boundary.Start(context.Background(), OwnerIdentity{PID: 7, CreationTime: 8})
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	session.pushInbound(guardianFrame{Kind: guardianFrameHello})
+	session.pushInbound(guardianFrame{Kind: guardianFrameReady})
+	<-lease.Ready()
+
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- lease.Close() }()
+	select {
+	case <-session.killed:
+	case <-time.After(time.Second):
+		t.Fatal("guardian was not killed after release send failure")
+	}
+	select {
+	case err := <-closeResult:
+		t.Fatalf("Close() returned before the killed guardian exited: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	select {
+	case <-session.closed:
+		t.Fatal("transport was closed before the killed guardian exited")
+	default:
+	}
+
+	session.finish(errors.New("guardian exited after kill"))
+	if err := <-closeResult; !errors.Is(err, SessionCloseFailed) {
+		t.Fatalf("Close() error = %v, want SessionCloseFailed", err)
+	}
+	select {
+	case <-session.closed:
+	case <-time.After(time.Second):
+		t.Fatal("transport was not closed after guardian exit")
+	}
+}
+
 func TestGuardianStartupCleanupErrorFrameMapsToSessionCloseFailure(t *testing.T) {
 	session := newScriptedGuardianSession()
 	boundary := New(Config{
@@ -323,7 +480,7 @@ func TestGuardianRunClosesSessionAndSendsByeWhenOwnerTerminates(t *testing.T) {
 	err := runGuardianLoop(context.Background(), guardianRuntime{
 		session:       session,
 		engineFactory: func() (wfpEngine, error) { return engine, nil },
-		leaseIDSource: func() []byte { return []byte("lease-id") },
+		leaseIDSource: func() ([]byte, error) { return []byte("lease-id"), nil },
 		owner:         fakeGuardianOwnerWatcher{done: ownerDone},
 	}, OwnerIdentity{PID: 9, CreationTime: 10})
 	if err != nil {
@@ -382,7 +539,7 @@ func TestGuardianRunJoinsStartupEngineCloseFailuresAndNeverReportsAccessDeniedSk
 			err := runGuardianLoop(context.Background(), guardianRuntime{
 				session:       session,
 				engineFactory: func() (wfpEngine, error) { return test.engine, nil },
-				leaseIDSource: func() []byte { return []byte("lease-id") },
+				leaseIDSource: func() ([]byte, error) { return []byte("lease-id"), nil },
 				owner:         fakeGuardianOwnerWatcher{done: ownerDone},
 			}, OwnerIdentity{PID: 9, CreationTime: 10})
 
@@ -470,7 +627,12 @@ type scriptedGuardianSession struct {
 	waitErr     chan error
 	sendErr     error
 	sendErrKind guardianFrameKind
+	inboundOnce sync.Once
+	finishOnce  sync.Once
 	closeOnce   sync.Once
+	killOnce    sync.Once
+	killed      chan struct{}
+	closed      chan struct{}
 }
 
 type fakeGuardianOwnerWatcher struct {
@@ -483,6 +645,8 @@ func newScriptedGuardianSession() *scriptedGuardianSession {
 		inbound:  make(chan guardianFrame, 8),
 		outbound: make(chan guardianFrame, 8),
 		waitErr:  make(chan error, 1),
+		killed:   make(chan struct{}),
+		closed:   make(chan struct{}),
 	}
 }
 
@@ -509,8 +673,12 @@ type faultingGuardianEngine struct {
 	closeCalls int
 }
 
-func (engine *faultingGuardianEngine) AddOutboundBlockFilters(context.Context, []byte) error {
+func (engine *faultingGuardianEngine) AddOutboundBlockFilters(context.Context, []byte, []string) error {
 	return engine.addErr
+}
+
+func (engine *faultingGuardianEngine) RegisterExecutable(context.Context, []byte, string) error {
+	return nil
 }
 
 func (engine *faultingGuardianEngine) AuditOutboundBlockFilters(context.Context, []byte) error {
@@ -527,19 +695,27 @@ func (session *scriptedGuardianSession) Wait() error {
 }
 
 func (session *scriptedGuardianSession) Close() error {
-	session.closeOnce.Do(func() { close(session.inbound) })
+	session.closeOnce.Do(func() {
+		session.inboundOnce.Do(func() { close(session.inbound) })
+		close(session.closed)
+	})
 	return nil
 }
 
-func (session *scriptedGuardianSession) Kill() error { return nil }
+func (session *scriptedGuardianSession) Kill() error {
+	session.killOnce.Do(func() { close(session.killed) })
+	return nil
+}
 
 func (session *scriptedGuardianSession) pushInbound(frame guardianFrame) {
 	session.inbound <- frame
 }
 
 func (session *scriptedGuardianSession) finish(err error) {
-	session.closeOnce.Do(func() { close(session.inbound) })
-	session.waitErr <- err
+	session.finishOnce.Do(func() {
+		session.inboundOnce.Do(func() { close(session.inbound) })
+		session.waitErr <- err
+	})
 }
 
 func (session *scriptedGuardianSession) nextOutbound(t *testing.T) guardianFrame {

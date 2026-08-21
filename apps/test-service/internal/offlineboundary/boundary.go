@@ -3,13 +3,15 @@ package offlineboundary
 import (
 	"context"
 	"crypto/rand"
-	"encoding/binary"
+	"errors"
+	"io"
 	"path/filepath"
 	"time"
 )
 
 type wfpEngine interface {
-	AddOutboundBlockFilters(context.Context, []byte) error
+	AddOutboundBlockFilters(context.Context, []byte, []string) error
+	RegisterExecutable(context.Context, []byte, string) error
 	AuditOutboundBlockFilters(context.Context, []byte) error
 	Close() error
 }
@@ -37,7 +39,7 @@ type guardianOwnerVerifier interface {
 // expose the attempted path.
 type Config struct {
 	engineFactory func() (wfpEngine, error)
-	leaseIDSource func() []byte
+	leaseIDSource func() ([]byte, error)
 	ownerVerifier guardianOwnerVerifier
 	// GuardianExecutablePath selects the native guardian binary on Windows.
 	//
@@ -56,7 +58,7 @@ type Config struct {
 
 type boundary struct {
 	engineFactory          func() (wfpEngine, error)
-	leaseIDSource          func() []byte
+	leaseIDSource          func() ([]byte, error)
 	ownerVerifier          guardianOwnerVerifier
 	guardianExecutablePath string
 	guardianFactory        func(context.Context, OwnerIdentity) (guardianSession, error)
@@ -106,12 +108,18 @@ func validateOwnerIdentity(owner OwnerIdentity) error {
 	return nil
 }
 
-func newLeaseID() []byte {
-	buffer := make([]byte, 16)
-	if _, err := rand.Read(buffer); err == nil {
-		return buffer
+func newLeaseID() ([]byte, error) {
+	return newLeaseIDFrom(rand.Read)
+}
+
+func newLeaseIDFrom(read func([]byte) (int, error)) ([]byte, error) {
+	if read == nil {
+		return nil, GuardianStartFailed
 	}
-	binary.LittleEndian.PutUint64(buffer[:8], uint64(1))
-	binary.LittleEndian.PutUint64(buffer[8:], uint64(2))
-	return buffer
+	buffer := make([]byte, 32)
+	n, err := read(buffer)
+	if err != nil || n != len(buffer) {
+		return nil, errors.Join(GuardianStartFailed, err, io.ErrUnexpectedEOF)
+	}
+	return buffer, nil
 }

@@ -17,6 +17,7 @@ const (
 
 type Spec struct {
 	Executable string
+	LaunchPlan []string
 	Args       []string
 	Dir        string
 	Env        []string
@@ -27,6 +28,7 @@ type Spec struct {
 type BatchItem struct {
 	ID         string
 	Executable string
+	LaunchPlan []string
 	Args       []string
 	Dir        string
 	Env        []string

@@ -1050,6 +1050,7 @@ func (f processFactory) Prepare(ctx context.Context, spec task.ProcessSpec, task
 		batch[index] = processcontrol.BatchItem{
 			ID:         item.ID,
 			Executable: item.Executable,
+			LaunchPlan: append([]string(nil), item.LaunchPlan...),
 			Args:       append([]string(nil), item.Args...),
 			Env:        append([]string(nil), item.Env...),
 			EnvUnset: append(
@@ -1062,6 +1063,7 @@ func (f processFactory) Prepare(ctx context.Context, spec task.ProcessSpec, task
 	}
 	process, err := f.runner.Prepare(ctx, processcontrol.Spec{
 		Executable: spec.Executable,
+		LaunchPlan: append([]string(nil), spec.LaunchPlan...),
 		Args:       append([]string(nil), spec.Args...),
 		Env:        append([]string(nil), spec.Env...),
 		EnvUnset: append(

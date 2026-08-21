@@ -954,7 +954,15 @@ func createRunnerSuspendedProcess(executable string, args, environment []string,
 }
 
 func hostWindowsEnvironment(base []string, status windows.Handle) []string {
-	return append(SanitizeEnvironment(nil, nil), "UNIT_TEST_IDE_STATUS_HANDLE="+strconv.FormatUint(uint64(status), 10))
+	environment := append(SanitizeEnvironment(nil, nil), "UNIT_TEST_IDE_STATUS_HANDLE="+strconv.FormatUint(uint64(status), 10))
+	for _, entry := range base {
+		name, _, ok := strings.Cut(entry, "=")
+		if ok && (strings.EqualFold(name, "UNIT_TEST_IDE_WFP_REGISTRATION_PIPE") ||
+			strings.EqualFold(name, "UNIT_TEST_IDE_WFP_REGISTRATION_NONCE")) {
+			environment = append(environment, entry)
+		}
+	}
+	return environment
 }
 
 func runnerWindowsEnvironmentBlock(environment []string) ([]uint16, error) {

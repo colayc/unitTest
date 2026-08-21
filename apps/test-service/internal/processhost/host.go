@@ -322,9 +322,10 @@ func runBatch(
 			})
 			return 1
 		}
-		target, startErr := platform.Start(
-			processcontrol.Spec{
-				Executable: item.Executable,
+			target, startErr := platform.Start(
+				processcontrol.Spec{
+					Executable: item.Executable,
+					LaunchPlan: append([]string(nil), item.LaunchPlan...),
 				Args:       append([]string(nil), item.Args...),
 				Dir:        item.Dir,
 				Env:        append([]string(nil), item.Env...),

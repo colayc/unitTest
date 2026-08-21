@@ -17,7 +17,7 @@ const repositoryRoot = resolve(import.meta.dirname, "../../..");
 
 function verifiedPreflight(): { readonly stdout: string; readonly stderr: string } {
   return {
-    stdout: "{\"schemaVersion\":1,\"platform\":\"windows\",\"architecture\":\"x64\",\"status\":\"verified\",\"version\":\"19.42.0\"}\n",
+    stdout: "{\"schemaVersion\":1,\"platform\":\"windows\",\"architecture\":\"x64\",\"status\":\"verified\",\"version\":\"19.42.0\",\"toolchainDigest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n",
     stderr: "",
   };
 }
@@ -41,19 +41,23 @@ function accessDeniedGuardian(): WfpOfflineBoundaryDependencies["startGuardian"]
   };
 }
 
-test("local WFP access denial skips before Service/native side effects", async () => {
+test("local WFP access denial fails after verified preflight before Service/native side effects", async () => {
   let serviceStarts = 0;
-  const result = await installWfpOfflineBoundary({
-    required: false,
-    __dependencies: {
-      platform: "win32",
-      resolveOwnerCreationTime: async () => "1337",
-      runPreflight: async () => verifiedPreflight(),
-      startGuardian: accessDeniedGuardian(),
-    },
-  });
-  if (result.outcome === "installed") serviceStarts++;
-  assert.deepEqual(result, { outcome: "skipped", reason: "WFPAccessDenied" });
+  await assert.rejects(
+    installWfpOfflineBoundary({
+      required: false,
+      __dependencies: {
+        platform: "win32",
+        resolveOwnerCreationTime: async () => "1337",
+        runPreflight: async () => verifiedPreflight(),
+        startGuardian: accessDeniedGuardian(),
+      },
+    }).then((result) => {
+      if (result.outcome === "installed") serviceStarts++;
+      return result;
+    }),
+    /Windows Filtering Platform access is unavailable/u,
+  );
   assert.equal(serviceStarts, 0);
 });
 

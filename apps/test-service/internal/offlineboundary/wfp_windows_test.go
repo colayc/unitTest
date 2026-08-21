@@ -4,6 +4,7 @@ package offlineboundary
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"testing"
 
@@ -20,7 +21,8 @@ func TestOpenWFPEngineUsesDynamicSessionAndExpectedBlockFilters(t *testing.T) {
 	}
 
 	leaseID := []byte("0123456789abcdef")
-	if err := engine.AddOutboundBlockFilters(context.Background(), leaseID); err != nil {
+	applicationPath := `C:\fixture\guarded.exe`
+	if err := engine.AddOutboundBlockFilters(context.Background(), leaseID, []string{applicationPath}); err != nil {
 		t.Fatalf("AddOutboundBlockFilters() error = %v", err)
 	}
 
@@ -42,7 +44,8 @@ func TestOpenWFPEngineUsesDynamicSessionAndExpectedBlockFilters(t *testing.T) {
 	if len(abi.addedFilters) != 2 {
 		t.Fatalf("added filters = %d, want 2", len(abi.addedFilters))
 	}
-	wantV4, wantV6 := filterKeysForLease(leaseID)
+	applicationID, _ := abi.ApplicationID(applicationPath)
+	wantV4, wantV6 := filterKeysForApplication(leaseID, applicationID)
 	gotV4, gotV6 := abi.addedFilters[0], abi.addedFilters[1]
 	if gotV4.FilterKey != wantV4 {
 		t.Fatalf("v4 filter key = %#v, want %#v", gotV4.FilterKey, wantV4)
@@ -68,11 +71,53 @@ func TestOpenWFPEngineUsesDynamicSessionAndExpectedBlockFilters(t *testing.T) {
 	if gotV4.Flags&fwpmFilterFlagPersistent != 0 || gotV6.Flags&fwpmFilterFlagPersistent != 0 {
 		t.Fatalf("persistent flags = %#x / %#x", gotV4.Flags, gotV6.Flags)
 	}
+	for _, filter := range abi.addedFilters {
+		if filter.NumFilterConditions != 2 || filter.FilterCondition == nil {
+			t.Fatalf("filter %#v has %d conditions at %p; want APP_ID plus loopback exclusion", filter.FilterKey, filter.NumFilterConditions, filter.FilterCondition)
+		}
+	}
+	for _, filter := range abi.enumFilters {
+		if !auditConditionsMatch(filter.Conditions, applicationID) {
+			t.Fatalf("filter %#v conditions = %#v, want exact APP_ID and loopback exclusion", filter.FilterKey, filter.Conditions)
+		}
+	}
+	if err := engine.AuditOutboundBlockFilters(context.Background(), leaseID); err != nil {
+		t.Fatalf("AuditOutboundBlockFilters() error = %v", err)
+	}
+}
+
+func TestRegisterExecutableAddsAuditedV4V6ChildFiltersWithoutChangingExistingApp(t *testing.T) {
+	abi := &recordingWfpAPI{}
+	engine, err := openWFPEngineWithAPI(abi, func() (windows.GUID, error) { return windows.GUID{Data1: 1}, nil })
+	if err != nil {
+		t.Fatalf("openWFPEngineWithAPI() error = %v", err)
+	}
+	leaseID := []byte("registered-child")
+	parent := `C:\fixture\cmake.exe`
+	child := `C:\fixture\clang-cl.exe`
+	if err := engine.AddOutboundBlockFilters(context.Background(), leaseID, []string{parent}); err != nil {
+		t.Fatalf("AddOutboundBlockFilters() error = %v", err)
+	}
+	if err := engine.RegisterExecutable(context.Background(), leaseID, child); err != nil {
+		t.Fatalf("RegisterExecutable() error = %v", err)
+	}
+	if len(abi.addedFilters) != 4 {
+		t.Fatalf("filters after child registration = %d, want parent+child V4/V6", len(abi.addedFilters))
+	}
+	childID, _ := abi.ApplicationID(child)
+	wantV4, wantV6 := filterKeysForApplication(leaseID, childID)
+	if abi.addedFilters[2].FilterKey != wantV4 || abi.addedFilters[3].FilterKey != wantV6 {
+		t.Fatalf("child filter keys = %#v / %#v, want V4/V6 child identities", abi.addedFilters[2].FilterKey, abi.addedFilters[3].FilterKey)
+	}
+	if err := engine.AuditOutboundBlockFilters(context.Background(), leaseID); err != nil {
+		t.Fatalf("AuditOutboundBlockFilters() after child = %v", err)
+	}
 }
 
 func TestOpenWFPEngineAuditRejectsMissingExtraAndMismatchedFilters(t *testing.T) {
 	leaseID := []byte("fedcba9876543210")
-	wantV4, wantV6 := filterKeysForLease(leaseID)
+	applicationID := []byte("audit-app-id")
+	wantV4, wantV6 := filterKeysForApplication(leaseID, applicationID)
 	providerKey := providerKeyForLease(leaseID)
 	subLayerKey := subLayerKeyForLease(leaseID)
 
@@ -112,6 +157,7 @@ func TestOpenWFPEngineAuditRejectsMissingExtraAndMismatchedFilters(t *testing.T)
 			}
 			engine.providerKey = providerKey
 			engine.subLayerKey = subLayerKey
+			engine.applications = [][]byte{applicationID}
 			if err := engine.AuditOutboundBlockFilters(context.Background(), leaseID); !errors.Is(err, FilterAuditFailed) {
 				t.Fatalf("AuditOutboundBlockFilters() error = %v, want FilterAuditFailed", err)
 			}
@@ -155,10 +201,12 @@ func TestOpenWFPEngineMapsAccessDeniedAndDeletesFiltersOnClose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openWFPEngineWithAPI() error = %v", err)
 	}
-	if err := engine.AddOutboundBlockFilters(context.Background(), leaseID); err != nil {
+	applicationPath := `C:\fixture\guarded.exe`
+	if err := engine.AddOutboundBlockFilters(context.Background(), leaseID, []string{applicationPath}); err != nil {
 		t.Fatalf("AddOutboundBlockFilters() error = %v", err)
 	}
-	wantV4, wantV6 := filterKeysForLease(leaseID)
+	applicationID, _ := abi.ApplicationID(applicationPath)
+	wantV4, wantV6 := filterKeysForApplication(leaseID, applicationID)
 	if err := engine.Close(); err != nil {
 		t.Fatalf("first Close() error = %v", err)
 	}
@@ -188,10 +236,12 @@ type fakeWfpEngine struct {
 	closeCalls    int
 }
 
-func (engine *fakeWfpEngine) AddOutboundBlockFilters(_ context.Context, leaseID []byte) error {
+func (engine *fakeWfpEngine) AddOutboundBlockFilters(_ context.Context, leaseID []byte, _ []string) error {
 	engine.addLeaseIDs = append(engine.addLeaseIDs, append([]byte(nil), leaseID...))
 	return nil
 }
+
+func (engine *fakeWfpEngine) RegisterExecutable(context.Context, []byte, string) error { return nil }
 
 func (engine *fakeWfpEngine) AuditOutboundBlockFilters(_ context.Context, leaseID []byte) error {
 	engine.auditLeaseIDs = append(engine.auditLeaseIDs, append([]byte(nil), leaseID...))
@@ -214,6 +264,11 @@ type recordingWfpAPI struct {
 	deletedSubLayerKeys []windows.GUID
 	deletedProviderKeys []windows.GUID
 	closeCalls          int
+}
+
+func (api *recordingWfpAPI) ApplicationID(path string) ([]byte, error) {
+	digest := sha256.Sum256([]byte(path))
+	return append([]byte(nil), digest[:]...), nil
 }
 
 func (api *recordingWfpAPI) OpenSession(session *fwpmSession0) (windows.Handle, error) {

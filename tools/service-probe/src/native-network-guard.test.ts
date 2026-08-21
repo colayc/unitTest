@@ -31,7 +31,7 @@ test("public Windows native offline boundary export keeps the boundary contract"
       platform: "win32",
       resolveOwnerCreationTime: async () => "1337",
       runPreflight: async () => ({
-        stdout: "{\"schemaVersion\":1,\"platform\":\"windows\",\"architecture\":\"x64\",\"status\":\"verified\",\"version\":\"19.42.0\"}\n",
+        stdout: "{\"schemaVersion\":1,\"platform\":\"windows\",\"architecture\":\"x64\",\"status\":\"verified\",\"version\":\"19.42.0\",\"toolchainDigest\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}\n",
         stderr: "",
       }),
       startGuardian: async () => {
@@ -65,7 +65,7 @@ test("HTTP guard remains installed when WFP removal cannot be proven", async () 
       platform: "win32",
       resolveOwnerCreationTime: async () => "1337",
       runPreflight: async () => ({
-        stdout: "{\"schemaVersion\":1,\"platform\":\"windows\",\"architecture\":\"x64\",\"status\":\"verified\",\"version\":\"19.42.0\"}\n",
+        stdout: "{\"schemaVersion\":1,\"platform\":\"windows\",\"architecture\":\"x64\",\"status\":\"verified\",\"version\":\"19.42.0\",\"toolchainDigest\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}\n",
         stderr: "",
       }),
       startGuardian: async () => {

@@ -6,11 +6,29 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   GuardianFrameReader,
+  guardianAuthenticationPayloadForTesting,
+  verifyGuardianAuthenticationForTesting,
   startNativeGuardianForTesting,
   installWfpOfflineBoundary,
   type GuardianFrame,
   type WfpOfflineBoundaryDependencies,
 } from "./wfp-offline-boundary.js";
+
+test("same-user rogue cannot forge guardian authentication before Hello", () => {
+  const nonce = Buffer.alloc(32, 0x5a);
+  const identity = {
+    guardianPid: 4123,
+    guardianCreationTime: "13370000",
+    ownerPid: 4321,
+    ownerCreationTime: "73310000",
+  };
+  const authentic = guardianAuthenticationPayloadForTesting(nonce, identity);
+  assert.equal(verifyGuardianAuthenticationForTesting(authentic, nonce, identity), true);
+  const forged = Buffer.from(authentic);
+  forged[25] = forged[25]! ^ 0xff;
+  assert.equal(verifyGuardianAuthenticationForTesting(forged, nonce, identity), false);
+  assert.equal(verifyGuardianAuthenticationForTesting(authentic, Buffer.alloc(32, 0x6b), identity), false);
+});
 
 function deferred<T>(): { readonly promise: Promise<T>; resolve(value: T): void; reject(error: Error): void } {
   let resolvePromise!: (value: T) => void;
@@ -24,7 +42,7 @@ function deferred<T>(): { readonly promise: Promise<T>; resolve(value: T): void;
 
 function verifiedPreflight(): { readonly stdout: string; readonly stderr: string } {
   return {
-    stdout: "{\"schemaVersion\":1,\"platform\":\"windows\",\"architecture\":\"x64\",\"status\":\"verified\",\"version\":\"19.42.0\"}\n",
+    stdout: "{\"schemaVersion\":1,\"platform\":\"windows\",\"architecture\":\"x64\",\"status\":\"verified\",\"version\":\"19.42.0\",\"toolchainDigest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n",
     stderr: "",
   };
 }
@@ -79,6 +97,28 @@ test("required unavailable preflight fails before guardian side effects", async 
       },
     }),
     /coverage toolset is unavailable/u,
+  );
+  assert.equal(guardianStarts, 0);
+});
+
+test("verified preflight rejects a version-only result without exact tool identity digest", async () => {
+  let guardianStarts = 0;
+  await assert.rejects(
+    installWfpOfflineBoundary({
+      __dependencies: {
+        platform: "win32",
+        resolveOwnerCreationTime: async () => "1337",
+        runPreflight: async () => ({
+          stdout: "{\"schemaVersion\":1,\"platform\":\"windows\",\"architecture\":\"x64\",\"status\":\"verified\",\"version\":\"19.42.0\"}\n",
+          stderr: "",
+        }),
+        startGuardian: async () => {
+          guardianStarts++;
+          return await frames({ kind: "Hello" }, { kind: "Ready" }, { kind: "Bye" })({} as never);
+        },
+      },
+    }),
+    /coverage toolset preflight output is invalid/u,
   );
   assert.equal(guardianStarts, 0);
 });
