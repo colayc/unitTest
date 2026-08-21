@@ -110,6 +110,16 @@ type fwpmFilterEnumTemplate0 struct {
 	CalloutKey              *windows.GUID
 }
 
+type auditFilterRecord struct {
+	FilterKey      windows.GUID
+	HasProviderKey bool
+	ProviderKey    windows.GUID
+	SubLayerKey    windows.GUID
+	LayerKey       windows.GUID
+	ActionType     uint32
+	Flags          uint32
+}
+
 type wfpAPI interface {
 	OpenSession(*fwpmSession0) (windows.Handle, error)
 	AddProvider(windows.Handle, *fwpmProvider0) error
@@ -118,7 +128,7 @@ type wfpAPI interface {
 	DeleteSubLayerByKey(windows.Handle, *windows.GUID) error
 	AddFilter(windows.Handle, *fwpmFilter0) error
 	GetFilterByKey(windows.Handle, *windows.GUID) (*fwpmFilter0, error)
-	EnumFilters(windows.Handle, *fwpmFilterEnumTemplate0) ([]fwpmFilter0, error)
+	EnumFilters(windows.Handle, *fwpmFilterEnumTemplate0) ([]auditFilterRecord, error)
 	DeleteFilterByKey(windows.Handle, *windows.GUID) error
 	CloseEngine(windows.Handle) error
 }
@@ -300,14 +310,14 @@ func (engine *windowsWfpEngine) AuditOutboundBlockFilters(ctx context.Context, l
 		v6Key: fwpmLayerALEAuthConnectV6,
 	}
 	for _, filter := range filters {
-		if filter.ProviderKey == nil || *filter.ProviderKey != providerKey {
+		if !filter.HasProviderKey || filter.ProviderKey != providerKey {
 			return FilterAuditFailed
 		}
 		if filter.SubLayerKey != subLayerKey {
 			return FilterAuditFailed
 		}
 		wantLayer, ok := remaining[filter.FilterKey]
-		if !ok || filter.LayerKey != wantLayer || filter.Action.Type != fwpActionBlock || filter.Flags&fwpmFilterFlagPersistent != 0 {
+		if !ok || filter.LayerKey != wantLayer || filter.ActionType != fwpActionBlock || filter.Flags&fwpmFilterFlagPersistent != 0 {
 			return FilterAuditFailed
 		}
 		delete(remaining, filter.FilterKey)
@@ -403,6 +413,21 @@ func mapEmpty(value map[windows.GUID]windows.GUID) error {
 		return FilterAuditFailed
 	}
 	return nil
+}
+
+func newAuditFilterRecord(filter *fwpmFilter0) auditFilterRecord {
+	record := auditFilterRecord{
+		FilterKey:   filter.FilterKey,
+		SubLayerKey: filter.SubLayerKey,
+		LayerKey:    filter.LayerKey,
+		ActionType:  filter.Action.Type,
+		Flags:       filter.Flags,
+	}
+	if filter.ProviderKey != nil {
+		record.HasProviderKey = true
+		record.ProviderKey = *filter.ProviderKey
+	}
+	return record
 }
 
 func classifyStartError(err error) error {
@@ -507,7 +532,7 @@ func (procWfpAPI) GetFilterByKey(handle windows.Handle, key *windows.GUID) (*fwp
 	return &copy, nil
 }
 
-func (procWfpAPI) EnumFilters(handle windows.Handle, template *fwpmFilterEnumTemplate0) ([]fwpmFilter0, error) {
+func (procWfpAPI) EnumFilters(handle windows.Handle, template *fwpmFilterEnumTemplate0) ([]auditFilterRecord, error) {
 	var enumHandle windows.Handle
 	status, _, _ := procFwpmFilterCreateEnumHandle0.Call(
 		uintptr(handle),
@@ -536,10 +561,10 @@ func (procWfpAPI) EnumFilters(handle windows.Handle, template *fwpmFilterEnumTem
 	}
 	defer procFwpmFreeMemory0.Call(uintptr(unsafe.Pointer(&entries)))
 	views := unsafe.Slice(entries, count)
-	result := make([]fwpmFilter0, 0, count)
+	result := make([]auditFilterRecord, 0, count)
 	for _, item := range views {
 		if item != nil {
-			result = append(result, *item)
+			result = append(result, newAuditFilterRecord(item))
 		}
 	}
 	return result, nil

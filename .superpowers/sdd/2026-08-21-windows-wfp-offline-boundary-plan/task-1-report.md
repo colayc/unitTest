@@ -93,3 +93,47 @@ Implementation commit: `558ad40` — `feat: add Windows WFP offline boundary cor
 ### Remaining concerns
 
 - None for Task 1 scope.
+
+## Fix round 2 (enum audit lifetime)
+
+### RED
+
+- Command: `go test ./apps/test-service/internal/offlineboundary -count=1`
+- Result: FAIL after adding the lifetime regression tests. The package failed for the expected missing audit-copy capabilities: `auditFilterRecord` and `newAuditFilterRecord` did not yet exist.
+
+### GREEN
+
+- Command: `gofmt -w apps/test-service/internal/offlineboundary`
+- Result: PASS
+
+- Command: `go test ./apps/test-service/internal/offlineboundary -count=1`
+- Result: `ok  	unit-test-ide.local/test-service/internal/offlineboundary	0.064s`
+
+### Linux cross-compile
+
+- Command: `$env:GOOS='linux'; $env:GOARCH='amd64'; $env:CGO_ENABLED='0'; go test -c ./apps/test-service/internal/offlineboundary`
+- Result: PASS
+
+### Verification
+
+- Command: `go vet ./apps/test-service/internal/offlineboundary`
+- Result: PASS
+
+- Command: `git diff --check -- apps/test-service/internal/offlineboundary apps/test-service/go.mod apps/test-service/go.sum`
+- Result: PASS
+
+### Fix summary
+
+- Replaced native-enum audit consumption with a Go-owned `auditFilterRecord` that copies scalar and GUID values before `FwpmFreeMemory0`.
+- Kept extra-filter rejection on provider-scoped enumeration while removing the dangling `ProviderKey` pointer dependency from `AuditOutboundBlockFilters`.
+- Added a regression test that mutates the source provider GUID after copy and verifies the copied audit record remains intact.
+
+### Report boundary
+
+- This `task-1-report.md` file is an SDD development report used to preserve RED/GREEN evidence for implementation review.
+- It is not a production-facing runtime artifact and is not the closed-schema report described by the design.
+- The production closed report model remains out of scope for Task 1 and is planned for Task 4; Task 1 does not publish runtime path, command, token, or environment data.
+
+### Remaining concerns
+
+- None for Task 1 scope.
