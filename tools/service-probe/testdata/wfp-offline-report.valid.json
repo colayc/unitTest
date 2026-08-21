@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "outcome": "passed",
+  "reason": "None",
+  "toolchainDigest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "guardianOutcome": "released",
+  "filterAuditOutcome": "passed",
+  "startedAt": "2026-08-21T00:00:00.000Z",
+  "finishedAt": "2026-08-21T00:00:05.000Z"
+}

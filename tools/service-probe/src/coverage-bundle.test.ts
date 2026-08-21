@@ -1,14 +1,16 @@
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import {
   buildCoverageBundleReport,
+  buildWfpOfflineReport,
   classifyNegativeEvidence,
   installCoverageBundleNetworkGuard,
   sanitizeCoverageEnvironment,
   validateCoverageBundleReport,
+  validateWfpOfflineReport,
 } from "./coverage-bundle.js";
 
 test("coverage probe sanitizes Python, proxy, registry, and user-site environment", () => {
@@ -79,6 +81,35 @@ test("coverage report accepts an explicit environment-blocked runner outcome", (
   });
   validateCoverageBundleReport(report);
   assert.equal(report.smoke.negative, "environment-blocked");
+});
+
+test("WFP offline report fixture stays closed and path-free", async () => {
+  const fixture = JSON.parse(await readFile(resolve(import.meta.dirname, "../testdata/wfp-offline-report.valid.json"), "utf8"));
+  validateWfpOfflineReport(fixture);
+  assert.equal(JSON.stringify(fixture).includes("C:\\\\"), false);
+  assert.equal(JSON.stringify(fixture).includes("/opt/"), false);
+});
+
+test("WFP offline report rejects extra fields, paths, and invalid timestamps", async () => {
+  const fixture = JSON.parse(await readFile(resolve(import.meta.dirname, "../testdata/wfp-offline-report.invalid.json"), "utf8"));
+  assert.throws(() => validateWfpOfflineReport(fixture), /WFP offline report|toolchain digest|timestamps|unexpected fields/u);
+});
+
+test("WFP offline report builder enforces the success contract", () => {
+  const report = buildWfpOfflineReport({
+    outcome: "passed",
+    reason: "None",
+    toolchainDigest: "f".repeat(64),
+    guardianOutcome: "released",
+    filterAuditOutcome: "passed",
+    startedAt: "2026-08-21T00:00:00.000Z",
+    finishedAt: "2026-08-21T00:00:01.000Z",
+  });
+  validateWfpOfflineReport(report);
+  assert.throws(() => buildWfpOfflineReport({
+    ...report,
+    guardianOutcome: "ready",
+  }), /successful WFP offline report/u);
 });
 
 test("negative evidence distinguishes a real rejection from a null status", () => {

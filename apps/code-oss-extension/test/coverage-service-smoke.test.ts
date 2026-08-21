@@ -33,6 +33,7 @@ import {
   decodeCoverageDocumentV1,
   type CoverageDocumentV1
 } from "@unit-test-ide/coverage-models";
+import { buildWfpOfflineReport } from "@unit-test-ide/service-probe/coverage-bundle";
 import {
   installWindowsNativeOfflineBoundary,
   type WindowsNativeOfflineBoundary
@@ -104,22 +105,13 @@ interface PublicArtifact {
 
 interface CoverageExecutionEvidence {
   readonly schemaVersion: 1;
-  readonly platform: "windows";
-  readonly architecture: "x64";
-  readonly tools: {
-    readonly compiler: { readonly family: "clang-cl"; readonly version: string };
-    readonly driver: { readonly name: "llvm-cov"; readonly version: string };
-    readonly collector: { readonly name: "llvm-cov"; readonly version: string };
-  };
-  readonly runOutcome: "available";
-  readonly testRunOutcome: "failed";
-  readonly summary: CoverageReport["summary"];
-  readonly artifacts: ReadonlyArray<{
-    readonly kind: PublicArtifact["kind"];
-    readonly sizeBytes: number;
-    readonly sha256: string;
-  }>;
-  readonly durationMs: number;
+  readonly outcome: "passed";
+  readonly reason: "None";
+  readonly toolchainDigest: string;
+  readonly guardianOutcome: "released";
+  readonly filterAuditOutcome: "passed";
+  readonly startedAt: string;
+  readonly finishedAt: string;
 }
 
 class ProtocolWireCapture {
@@ -270,8 +262,8 @@ async function buildService(fixture: Fixture): Promise<string> {
 }
 
 async function preflightCoverageToolset(fixture: Fixture): Promise<
-  { readonly status: "unavailable" } |
-  { readonly status: "verified"; readonly version: string }
+  { readonly status: "unavailable"; readonly digest: string } |
+  { readonly status: "verified"; readonly version: string; readonly digest: string }
 > {
   const result = await execFile(fixture.toolsetPreflightBinary, [], {
     cwd: repositoryRoot,
@@ -290,7 +282,13 @@ async function preflightCoverageToolset(fixture: Fixture): Promise<
     assert.deepEqual(Object.keys(parsed).sort(), [
       "architecture", "platform", "schemaVersion", "status"
     ]);
-    return { status: "unavailable" };
+    const digest = createHash("sha256").update(JSON.stringify({
+      schemaVersion: 1,
+      platform: "windows",
+      architecture: "x64",
+      status: "unavailable"
+    }), "utf8").digest("hex");
+    return { status: "unavailable", digest };
   }
   assert.equal(parsed.status, "verified");
   assert.deepEqual(Object.keys(parsed).sort(), [
@@ -298,7 +296,14 @@ async function preflightCoverageToolset(fixture: Fixture): Promise<
   ]);
   assert.equal(typeof parsed.version, "string");
   assert.match(parsed.version as string, /^[0-9]+\.[0-9]+(?:\.[0-9]+)?$/u);
-  return { status: "verified", version: parsed.version as string };
+  const digest = createHash("sha256").update(JSON.stringify({
+    schemaVersion: 1,
+    platform: "windows",
+    architecture: "x64",
+    status: "verified",
+    version: parsed.version
+  }), "utf8").digest("hex");
+  return { status: "verified", version: parsed.version as string, digest };
 }
 
 function coverageOperations(
@@ -596,68 +601,31 @@ function assertNoSensitiveBytes(
 }
 
 function buildEvidence(
-  report: CoverageReport,
-  artifacts: readonly PublicArtifact[],
-  durationMs: number
+  toolchainDigest: string,
+  startedAt: Date,
+  finishedAt: Date
 ): CoverageExecutionEvidence {
-  assert.equal(Number.isSafeInteger(durationMs) && durationMs >= 0, true);
-  const evidence: CoverageExecutionEvidence = {
+  const evidence = {
     schemaVersion: 1,
-    platform: "windows",
-    architecture: "x64",
-    tools: {
-      compiler: {
-        family: "clang-cl",
-        version: report.toolProvenance.compiler.version
-      },
-      driver: {
-        name: "llvm-cov",
-        version: report.toolProvenance.driver.version
-      },
-      collector: {
-        name: "llvm-cov",
-        version: report.toolProvenance.collector.version
-      }
-    },
-    runOutcome: "available",
-    testRunOutcome: "failed",
-    summary: {
-      lines: { ...report.summary.lines },
-      branches: { ...report.summary.branches },
-      functions: { ...report.summary.functions }
-    },
-    artifacts: artifacts.map((artifact) => ({
-      kind: artifact.kind,
-      sizeBytes: artifact.metadata.sizeBytes,
-      sha256: artifact.metadata.sha256
-    })),
-    durationMs
-  };
+    outcome: "passed",
+    reason: "None",
+    toolchainDigest,
+    guardianOutcome: "released",
+    filterAuditOutcome: "passed",
+    startedAt: startedAt.toISOString(),
+    finishedAt: finishedAt.toISOString(),
+  } satisfies CoverageExecutionEvidence;
+  buildWfpOfflineReport(evidence);
   assert.deepEqual(Object.keys(evidence).sort(), [
-    "architecture",
-    "artifacts",
-    "durationMs",
-    "platform",
-    "runOutcome",
+    "filterAuditOutcome",
+    "finishedAt",
+    "guardianOutcome",
+    "outcome",
+    "reason",
     "schemaVersion",
-    "summary",
-    "testRunOutcome",
-    "tools"
+    "startedAt",
+    "toolchainDigest"
   ]);
-  assert.deepEqual(
-    evidence.artifacts.map((artifact) => artifact.kind),
-    ["coverage-json", "junit-xml", "coverage-html"]
-  );
-  assert.deepEqual(Object.keys(evidence.tools).sort(), ["collector", "compiler", "driver"]);
-  assert.deepEqual(Object.keys(evidence.tools.compiler).sort(), ["family", "version"]);
-  assert.deepEqual(Object.keys(evidence.tools.driver).sort(), ["name", "version"]);
-  assert.deepEqual(Object.keys(evidence.tools.collector).sort(), ["name", "version"]);
-  for (const metric of [evidence.summary.lines, evidence.summary.branches, evidence.summary.functions]) {
-    assert.deepEqual(Object.keys(metric).sort(), ["covered", "total"]);
-  }
-  for (const artifact of evidence.artifacts) {
-    assert.deepEqual(Object.keys(artifact).sort(), ["kind", "sha256", "sizeBytes"]);
-  }
   return evidence;
 }
 
@@ -768,7 +736,7 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
     // below is scoped to the coverage request/run/report/artifact exchange,
     // whose public contract must never carry native execution paths.
     wire.reset();
-    const coverageStartedAt = Date.now();
+    const coverageStartedAt = new Date();
     const request: CoverageRunInput = {
       idempotencyKey: randomBytes(16).toString("hex"),
       workspaceGeneration: selected.snapshot.workspaceGeneration,
@@ -781,7 +749,7 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
     };
     const started = await session.client.startCoverage(request);
     const run = await waitForCoverageFinished(session.client, started);
-    const durationMs = Date.now() - coverageStartedAt;
+    const coverageFinishedAt = new Date();
     assert.equal(run.status, "finished");
     assert.equal(run.outcome, "available");
     assert.equal(run.reason, undefined);
@@ -866,7 +834,7 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
       assertNoSensitiveBytes(`${artifact.kind} report`, artifact.bytes, sensitive);
     }
 
-    const evidence = buildEvidence(report, artifacts, durationMs);
+    const evidence = buildEvidence(verifiedToolset.digest, coverageStartedAt, coverageFinishedAt);
     const expectedEvidenceBytes = Buffer.from(`${JSON.stringify(evidence)}\n`, "utf8");
     assertNoSensitiveBytes("coverage execution evidence", expectedEvidenceBytes, sensitive);
     await teardownThenPublish(

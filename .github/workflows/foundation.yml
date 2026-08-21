@@ -55,13 +55,13 @@ jobs:
         env:
           UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS: clang-cl
         run: pnpm --filter code-oss-extension test:coverage-service-smoke
-      - name: Cleanup Windows native offline firewall boundary
+      - name: Legacy cleanup Windows offline boundary residue
         if: always()
         shell: pwsh
         run: |
           $stateRoot = Join-Path $PWD '.native-e2e/runtime/windows-firewall-guardians'
           & 'tools/service-probe/scripts/windows-offline-boundary.ps1' `
-            -Action CleanupAll `
+            -Action LegacyCleanup `
             -StateRoot $stateRoot `
             -DeadlineSeconds 60
       - run: pnpm --filter code-oss-extension test:service-smoke
@@ -74,7 +74,7 @@ jobs:
           name: native-toolchain-windows-${{ github.run_attempt }}
           path: .native-e2e/artifacts/windows/toolchain-report.json
           if-no-files-found: error
-      - if: success()
+      - if: always()
         uses: actions/upload-artifact@v7
         with:
           name: coverage-execution-windows-${{ github.run_attempt }}

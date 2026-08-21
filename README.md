@@ -57,6 +57,8 @@ UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS=gcc,clang pnpm test:e2e:native
 
 报告写入 `.native-e2e/artifacts/<platform>/toolchain-report.json`，只包含 compiler family/version、generator、CMake version 和场景状态，不记录 token、环境变量或主机绝对路径。native E2E 启动时会安装 HTTP(S) network guard；bundle 下载只允许发生在显式的 `prepare:cmake-bundle` 阶段。
 
+Windows `clang-cl` coverage smoke 另有一个 required gate：它先运行独立 Go `coverage-toolset-preflight`，只有拿到 verified toolchain 后才建立 Windows Filtering Platform (WFP) guardian，再启动真实 Service/native coverage。non-required 本机若缺 verified LLVM 只能在 boundary 前精确 `SKIP`，required CI 则直接失败；成功 evidence 仅写入 `.native-e2e/artifacts/windows/coverage-execution-report.json`，且 JSON 只保留 `schemaVersion/outcome/reason/toolchainDigest/guardianOutcome/filterAuditOutcome/startedAt/finishedAt` 这些闭集字段。旧 PowerShell 脚本现在只负责一次性 legacy residue cleanup，不再承担生产 boundary。
+
 更多说明见 [开发指南](docs/development.md)、[安全边界](docs/security.md)、[CMake bundle](docs/cmake-bundle.md) 和 [native E2E](docs/native-e2e.md)。
 
 ## 协议与安全边界

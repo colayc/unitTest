@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./coverage-bundle": {
+      "types": "./dist/coverage-bundle.d.ts",
+      "default": "./dist/coverage-bundle.js"
+    },
     "./native-network-guard": {
       "types": "./dist/native-network-guard.d.ts",
       "default": "./dist/native-network-guard.js"

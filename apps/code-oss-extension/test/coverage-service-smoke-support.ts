@@ -26,8 +26,8 @@ export interface EvidencePublishOptions {
 }
 
 export type CoverageToolsetPreflight =
-  | { readonly status: "unavailable" }
-  | { readonly status: "verified"; readonly version: string };
+  | { readonly status: "unavailable"; readonly digest: string }
+  | { readonly status: "verified"; readonly version: string; readonly digest: string };
 
 export interface CoverageToolsetPreflightGate<Boundary, Result> {
   readonly required: boolean;

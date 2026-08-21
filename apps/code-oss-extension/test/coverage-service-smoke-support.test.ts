@@ -21,7 +21,7 @@ test("local unavailable coverage toolset skips before every boundary and executi
     required: false,
     async preflight() {
       trace.push("preflight");
-      return { status: "unavailable" };
+      return { status: "unavailable", digest: "a".repeat(64) };
     },
     skip(message) { trace.push(`skip:${message}`); },
     async installBoundary() { trace.push("boundary"); return "boundary"; },
@@ -38,7 +38,7 @@ test("required unavailable coverage toolset fails before every boundary and exec
       required: true,
       async preflight() {
         trace.push("preflight");
-        return { status: "unavailable" };
+        return { status: "unavailable", digest: "b".repeat(64) };
       },
       skip(message) { trace.push(`skip:${message}`); },
       async installBoundary() { trace.push("boundary"); return "boundary"; },
@@ -55,7 +55,7 @@ test("verified coverage toolset establishes the boundary before Service and nati
     required: true,
     async preflight() {
       trace.push("preflight");
-      return { status: "verified", version: "18.1.8" };
+      return { status: "verified", version: "18.1.8", digest: "c".repeat(64) };
     },
     skip(message) { trace.push(`skip:${message}`); },
     async installBoundary() { trace.push("boundary"); return "boundary"; },
@@ -75,7 +75,7 @@ test("verified coverage toolset establishes the boundary before Service and nati
   await assert.rejects(
     runAfterVerifiedCoverageToolsetPreflight({
       required: true,
-      async preflight() { return { status: "verified", version: "18.1.8" }; },
+      async preflight() { return { status: "verified", version: "18.1.8", digest: "d".repeat(64) }; },
       skip() {},
       async installBoundary() { throw new Error("guardian failed closed"); },
       async execute() { executed = true; }

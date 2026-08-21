@@ -12,6 +12,7 @@ const currentServicePlatform = process.platform === "win32" ? "windows" : "linux
 const winioImportPath = "github.com/Microsoft/go-winio";
 const pureParsingImports = new Set(["net/url"]);
 const allowedProductionNetworkImports = new Map([
+  ["apps/test-service/internal/offlineboundary/guardian_windows.go", new Set(["net", winioImportPath])],
   ["apps/test-service/internal/server/server.go", new Set(["net"])],
   ["apps/test-service/internal/server/service.go", new Set(["net"])],
   ["apps/test-service/internal/transport/listener.go", new Set(["net"])],
@@ -137,22 +138,24 @@ test("Hosted CI pins native toolchain runners and enforces the complete matrix",
 
     if (platform === "windows") {
       const coverageSmoke = source.indexOf("test:coverage-service-smoke");
-      const firewallCleanup = source.indexOf("Cleanup Windows native offline firewall boundary");
+      const legacyCleanup = source.indexOf("Legacy cleanup Windows offline boundary residue");
       const serviceSmoke = source.indexOf("test:service-smoke");
       assert.ok(
-        coverageSmoke !== -1 && firewallCleanup > coverageSmoke && serviceSmoke > firewallCleanup,
-        "Windows CI must always revoke the OS-level offline boundary before later steps"
+        coverageSmoke !== -1 && legacyCleanup > coverageSmoke && serviceSmoke > legacyCleanup,
+        "Windows CI must keep coverage smoke ahead of legacy residue cleanup and later Service checks"
       );
       const coverageReport = source.indexOf("coverage-execution-report.json");
       assert.notEqual(coverageReport, -1);
       const uploadStep = source.slice(source.lastIndexOf("      - ", coverageReport), coverageReport);
-      assert.match(uploadStep, /if:\s*success\(\)/u, "failed smoke must not upload PASS evidence");
-      const cleanupStep = source.slice(source.lastIndexOf("      - ", firewallCleanup), serviceSmoke);
+      assert.match(uploadStep, /if:\s*always\(\)/u, "WFP evidence upload must run even after an earlier failure");
+      assert.match(source, /coverage-execution-windows-[\s\S]*if-no-files-found:\s*error/u, "required verified Windows runs must fail closed without evidence");
+      const cleanupStep = source.slice(source.lastIndexOf("      - ", legacyCleanup), serviceSmoke);
       assert.match(cleanupStep, /windows-offline-boundary\.ps1/u);
-      assert.match(cleanupStep, /-Action\s+CleanupAll/u);
+      assert.match(cleanupStep, /-Action\s+LegacyCleanup/u);
       assert.match(cleanupStep, /Join-Path\s+\$PWD\s+'\.native-e2e\/runtime\/windows-firewall-guardians'/u);
       assert.match(cleanupStep, /-StateRoot\s+\$stateRoot/u);
-      assert.doesNotMatch(cleanupStep, /Get-NetFirewallRule/u, "CI must reuse the convergent cleanup implementation");
+      assert.doesNotMatch(source, /-Action\s+Guard/u, "production CI must not revive the legacy PowerShell boundary");
+      assert.doesNotMatch(cleanupStep, /CleanupAll/u, "legacy cleanup must be bounded to known historical residue only");
     }
   }
 });

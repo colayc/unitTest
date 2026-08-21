@@ -58,6 +58,40 @@ export interface CoverageBundleProbeOptions {
   readonly sourceManifestPath?: string;
 }
 
+export type WfpOfflineReportOutcome = "passed" | "failed" | "skipped";
+export type WfpOfflineReportReason =
+  | "None"
+  | "ToolchainUnavailable"
+  | "WFPAccessDenied"
+  | "GuardianStartFailed"
+  | "FilterAuditFailed"
+  | "OwnerIdentityMismatch"
+  | "GuardianTimeout"
+  | "SessionCloseFailed";
+export type WfpGuardianOutcome = "not-run" | "ready" | "released" | "failed";
+export type WfpFilterAuditOutcome = "not-run" | "passed" | "failed";
+
+export interface WfpOfflineReport {
+  readonly schemaVersion: 1;
+  readonly outcome: WfpOfflineReportOutcome;
+  readonly reason: WfpOfflineReportReason;
+  readonly toolchainDigest: string;
+  readonly guardianOutcome: WfpGuardianOutcome;
+  readonly filterAuditOutcome: WfpFilterAuditOutcome;
+  readonly startedAt: string;
+  readonly finishedAt: string;
+}
+
+export interface WfpOfflineReportInput {
+  readonly outcome: WfpOfflineReportOutcome;
+  readonly reason: WfpOfflineReportReason;
+  readonly toolchainDigest: string;
+  readonly guardianOutcome: WfpGuardianOutcome;
+  readonly filterAuditOutcome: WfpFilterAuditOutcome;
+  readonly startedAt: string;
+  readonly finishedAt: string;
+}
+
 interface ResolvedManifest {
   readonly schemaVersion: number;
   readonly platform: BundlePlatform;
@@ -72,6 +106,7 @@ interface LicenseManifest {
 }
 
 const blockedMessage = "coverage bundle network guard blocked network access";
+const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
 let guardInstalled = false;
 
 /** Remove all host-provided Python, package-manager, proxy, registry and home hints. */
@@ -174,11 +209,82 @@ export function validateCoverageBundleReport(report: CoverageBundleReport): void
   classifyNegativeEvidence({ status: report.smoke.negative });
 }
 
+export function buildWfpOfflineReport(input: WfpOfflineReportInput): WfpOfflineReport {
+  const report: WfpOfflineReport = {
+    schemaVersion: 1,
+    outcome: input.outcome,
+    reason: input.reason,
+    toolchainDigest: input.toolchainDigest,
+    guardianOutcome: input.guardianOutcome,
+    filterAuditOutcome: input.filterAuditOutcome,
+    startedAt: input.startedAt,
+    finishedAt: input.finishedAt,
+  };
+  validateWfpOfflineReport(report);
+  return report;
+}
+
+export function validateWfpOfflineReport(report: WfpOfflineReport): void {
+  exactKeys(report, [
+    "schemaVersion",
+    "outcome",
+    "reason",
+    "toolchainDigest",
+    "guardianOutcome",
+    "filterAuditOutcome",
+    "startedAt",
+    "finishedAt",
+  ], "WFP offline report");
+  if (report.schemaVersion !== 1) throw new Error("invalid WFP offline report schema");
+  if (!["passed", "failed", "skipped"].includes(report.outcome)) throw new Error("invalid WFP offline report outcome");
+  if (![
+    "None",
+    "ToolchainUnavailable",
+    "WFPAccessDenied",
+    "GuardianStartFailed",
+    "FilterAuditFailed",
+    "OwnerIdentityMismatch",
+    "GuardianTimeout",
+    "SessionCloseFailed",
+  ].includes(report.reason)) {
+    throw new Error("invalid WFP offline report reason");
+  }
+  if (!DIGEST.test(report.toolchainDigest)) throw new Error("invalid WFP offline toolchain digest");
+  if (!["not-run", "ready", "released", "failed"].includes(report.guardianOutcome)) {
+    throw new Error("invalid WFP guardian outcome");
+  }
+  if (!["not-run", "passed", "failed"].includes(report.filterAuditOutcome)) {
+    throw new Error("invalid WFP filter audit outcome");
+  }
+  assertISOTimestamp(report.startedAt, "startedAt");
+  assertISOTimestamp(report.finishedAt, "finishedAt");
+  if (Date.parse(report.finishedAt) < Date.parse(report.startedAt)) {
+    throw new Error("WFP offline report timestamps are invalid");
+  }
+  if (report.outcome === "passed") {
+    if (report.reason !== "None" || report.guardianOutcome !== "released" || report.filterAuditOutcome !== "passed") {
+      throw new Error("invalid successful WFP offline report");
+    }
+  } else if (report.outcome === "skipped") {
+    if (report.reason !== "ToolchainUnavailable" || report.guardianOutcome !== "not-run" || report.filterAuditOutcome !== "not-run") {
+      throw new Error("invalid skipped WFP offline report");
+    }
+  } else if (report.reason === "None") {
+    throw new Error("invalid failed WFP offline report");
+  }
+}
+
 function exactKeys(value: unknown, expected: readonly string[], label: string): void {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object`);
   const actual = Object.keys(value).sort();
   const wanted = [...expected].sort();
   if (actual.length !== wanted.length || actual.some((key, index) => key !== wanted[index])) throw new Error(`${label} has unexpected fields`);
+}
+
+function assertISOTimestamp(value: string, label: string): void {
+  if (!ISO_TIMESTAMP.test(value) || Number.isNaN(Date.parse(value)) || new Date(value).toISOString() !== value) {
+    throw new Error(`invalid WFP offline report ${label}`);
+  }
 }
 
 export function classifyNegativeEvidence(result: { readonly status: unknown; readonly code?: unknown }): NegativeEvidence {
