@@ -25,6 +25,8 @@ const (
 	fwpMatchFlagsNoneSet     = 8
 	fwpConditionFlagLoopback = 0x00000001
 	rpcCAuthnWinnt           = 10
+	auditFilterPageEntries   = 16
+	maxAuditFilterEntries    = 256
 )
 
 var (
@@ -138,6 +140,17 @@ type auditConditionRecord struct {
 	Blob      []byte
 }
 
+type auditFilterPage struct {
+	Filters    []auditFilterRecord
+	NextCursor uint64
+	Done       bool
+}
+
+type wfpFilterEnumerator interface {
+	Next(uint64, uint32) (auditFilterPage, error)
+	Close() error
+}
+
 type wfpAPI interface {
 	ApplicationID(string) ([]byte, error)
 	OpenSession(*fwpmSession0) (windows.Handle, error)
@@ -147,7 +160,7 @@ type wfpAPI interface {
 	DeleteSubLayerByKey(windows.Handle, *windows.GUID) error
 	AddFilter(windows.Handle, *fwpmFilter0) error
 	GetFilterByKey(windows.Handle, *windows.GUID) (*fwpmFilter0, error)
-	EnumFilters(windows.Handle, *fwpmFilterEnumTemplate0) ([]auditFilterRecord, error)
+	EnumFilters(windows.Handle, *fwpmFilterEnumTemplate0) (wfpFilterEnumerator, error)
 	DeleteFilterByKey(windows.Handle, *windows.GUID) error
 	CloseEngine(windows.Handle) error
 }
@@ -318,7 +331,7 @@ func (engine *windowsWfpEngine) AuditOutboundBlockFilters(ctx context.Context, l
 			appID []byte
 		}{v6Key, fwpmLayerALEAuthConnectV6, applicationID}
 	}
-	filters, err := engine.api.EnumFilters(engine.handle, &fwpmFilterEnumTemplate0{
+	enumerator, err := engine.api.EnumFilters(engine.handle, &fwpmFilterEnumTemplate0{
 		ProviderKey: &providerKey,
 	})
 	if err != nil {
@@ -327,25 +340,62 @@ func (engine *windowsWfpEngine) AuditOutboundBlockFilters(ctx context.Context, l
 		}
 		return errors.Join(FilterAuditFailed, err)
 	}
-	if len(filters) != len(expected) {
+	auditErr := auditFilterPages(enumerator, expected, providerKey, subLayerKey)
+	if closeErr := enumerator.Close(); closeErr != nil {
+		return errors.Join(FilterAuditFailed, auditErr, closeErr)
+	}
+	if errors.Is(auditErr, windows.ERROR_ACCESS_DENIED) {
+		return WFPAccessDenied
+	}
+	if auditErr != nil {
+		return errors.Join(FilterAuditFailed, auditErr)
+	}
+	return nil
+}
+
+func auditFilterPages(
+	enumerator wfpFilterEnumerator,
+	expected map[windows.GUID]struct {
+		key   windows.GUID
+		layer windows.GUID
+		appID []byte
+	},
+	providerKey, subLayerKey windows.GUID,
+) error {
+	if len(expected) > maxAuditFilterEntries {
 		return FilterAuditFailed
 	}
 	remaining := expected
-	for _, filter := range filters {
-		if !filter.HasProviderKey || filter.ProviderKey != providerKey {
+	var cursor uint64
+	for {
+		page, err := enumerator.Next(cursor, auditFilterPageEntries)
+		if err != nil {
+			return err
+		}
+		if page.Done {
+			if len(page.Filters) != 0 || page.NextCursor != cursor {
+				return FilterAuditFailed
+			}
+			return mapEmpty(remaining)
+		}
+		if len(page.Filters) == 0 || len(page.Filters) > auditFilterPageEntries ||
+			page.NextCursor <= cursor || page.NextCursor-cursor != uint64(len(page.Filters)) ||
+			page.NextCursor > maxAuditFilterEntries {
 			return FilterAuditFailed
 		}
-		if filter.SubLayerKey != subLayerKey {
-			return FilterAuditFailed
+		for _, filter := range page.Filters {
+			if !filter.HasProviderKey || filter.ProviderKey != providerKey || filter.SubLayerKey != subLayerKey {
+				return FilterAuditFailed
+			}
+			want, ok := remaining[filter.FilterKey]
+			if !ok || filter.LayerKey != want.layer || filter.ActionType != fwpActionBlock || filter.Flags&fwpmFilterFlagPersistent != 0 ||
+				!auditConditionsMatch(filter.Conditions, want.appID) {
+				return FilterAuditFailed
+			}
+			delete(remaining, filter.FilterKey)
 		}
-		want, ok := remaining[filter.FilterKey]
-		if !ok || filter.LayerKey != want.layer || filter.ActionType != fwpActionBlock || filter.Flags&fwpmFilterFlagPersistent != 0 ||
-			!auditConditionsMatch(filter.Conditions, want.appID) {
-			return FilterAuditFailed
-		}
-		delete(remaining, filter.FilterKey)
+		cursor = page.NextCursor
 	}
-	return mapEmpty(remaining)
 }
 
 func (engine *windowsWfpEngine) Close() error {
@@ -653,7 +703,15 @@ func (procWfpAPI) GetFilterByKey(handle windows.Handle, key *windows.GUID) (*fwp
 	return &copy, nil
 }
 
-func (procWfpAPI) EnumFilters(handle windows.Handle, template *fwpmFilterEnumTemplate0) ([]auditFilterRecord, error) {
+type procWfpFilterEnumerator struct {
+	engineHandle windows.Handle
+	enumHandle   windows.Handle
+	cursor       uint64
+	closeOnce    sync.Once
+	closeErr     error
+}
+
+func (procWfpAPI) EnumFilters(handle windows.Handle, template *fwpmFilterEnumTemplate0) (wfpFilterEnumerator, error) {
 	var enumHandle windows.Handle
 	status, _, _ := procFwpmFilterCreateEnumHandle0.Call(
 		uintptr(handle),
@@ -663,32 +721,68 @@ func (procWfpAPI) EnumFilters(handle windows.Handle, template *fwpmFilterEnumTem
 	if status != 0 {
 		return nil, windows.Errno(status)
 	}
-	defer procFwpmFilterDestroyEnumHandle0.Call(uintptr(handle), uintptr(enumHandle))
+	return &procWfpFilterEnumerator{engineHandle: handle, enumHandle: enumHandle}, nil
+}
 
+func (enumerator *procWfpFilterEnumerator) Next(cursor uint64, maxEntries uint32) (auditFilterPage, error) {
+	if enumerator.enumHandle == 0 || cursor != enumerator.cursor || maxEntries == 0 || maxEntries > auditFilterPageEntries {
+		return auditFilterPage{}, FilterAuditFailed
+	}
 	var entries **fwpmFilter0
 	var count uint32
-	status, _, _ = procFwpmFilterEnum0.Call(
-		uintptr(handle),
-		uintptr(enumHandle),
-		uintptr(16),
+	status, _, _ := procFwpmFilterEnum0.Call(
+		uintptr(enumerator.engineHandle),
+		uintptr(enumerator.enumHandle),
+		uintptr(maxEntries),
 		uintptr(unsafe.Pointer(&entries)),
 		uintptr(unsafe.Pointer(&count)),
 	)
 	if status != 0 {
-		return nil, windows.Errno(status)
+		return auditFilterPage{}, windows.Errno(status)
 	}
-	if entries == nil || count == 0 {
-		return nil, nil
+	if count > maxEntries || count > auditFilterPageEntries || (count > 0 && entries == nil) {
+		if entries != nil {
+			procFwpmFreeMemory0.Call(uintptr(unsafe.Pointer(&entries)))
+		}
+		return auditFilterPage{}, FilterAuditFailed
+	}
+	if count == 0 {
+		if entries != nil {
+			procFwpmFreeMemory0.Call(uintptr(unsafe.Pointer(&entries)))
+		}
+		return auditFilterPage{NextCursor: cursor, Done: true}, nil
 	}
 	defer procFwpmFreeMemory0.Call(uintptr(unsafe.Pointer(&entries)))
 	views := unsafe.Slice(entries, count)
 	result := make([]auditFilterRecord, 0, count)
 	for _, item := range views {
-		if item != nil {
-			result = append(result, newAuditFilterRecord(item))
+		if item == nil {
+			return auditFilterPage{}, FilterAuditFailed
 		}
+		result = append(result, newAuditFilterRecord(item))
 	}
-	return result, nil
+	if cursor > ^uint64(0)-uint64(count) {
+		return auditFilterPage{}, FilterAuditFailed
+	}
+	next := cursor + uint64(count)
+	enumerator.cursor = next
+	return auditFilterPage{Filters: result, NextCursor: next}, nil
+}
+
+func (enumerator *procWfpFilterEnumerator) Close() error {
+	enumerator.closeOnce.Do(func() {
+		if enumerator.enumHandle == 0 {
+			return
+		}
+		status, _, _ := procFwpmFilterDestroyEnumHandle0.Call(
+			uintptr(enumerator.engineHandle), uintptr(enumerator.enumHandle),
+		)
+		enumerator.enumHandle = 0
+		if status != 0 {
+			enumerator.closeErr = windows.Errno(status)
+		}
+	})
+	return enumerator.closeErr
 }
 
 func (procWfpAPI) DeleteFilterByKey(handle windows.Handle, key *windows.GUID) error {

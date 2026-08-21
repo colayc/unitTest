@@ -260,12 +260,22 @@ func (integrationTracingWfpAPI) AddFilter(handle windows.Handle, filter *fwpmFil
 	return nil
 }
 
-func (integrationTracingWfpAPI) EnumFilters(handle windows.Handle, template *fwpmFilterEnumTemplate0) ([]auditFilterRecord, error) {
-	filters, err := (procWfpAPI{}).EnumFilters(handle, template)
+func (integrationTracingWfpAPI) EnumFilters(handle windows.Handle, template *fwpmFilterEnumTemplate0) (wfpFilterEnumerator, error) {
+	enumerator, err := (procWfpAPI{}).EnumFilters(handle, template)
 	if err != nil {
 		return nil, fmt.Errorf("FwpmFilterEnum0: %w", err)
 	}
-	return filters, nil
+	return integrationTracingFilterEnumerator{wfpFilterEnumerator: enumerator}, nil
+}
+
+type integrationTracingFilterEnumerator struct{ wfpFilterEnumerator }
+
+func (enumerator integrationTracingFilterEnumerator) Next(cursor uint64, limit uint32) (auditFilterPage, error) {
+	page, err := enumerator.wfpFilterEnumerator.Next(cursor, limit)
+	if err != nil {
+		return auditFilterPage{}, fmt.Errorf("FwpmFilterEnum0: %w", err)
+	}
+	return page, nil
 }
 
 func listenIntegrationLoopback(t *testing.T, network, address string, required bool) net.Listener {
@@ -419,7 +429,7 @@ func waitForIntegrationProvider(t *testing.T) (windows.GUID, windows.GUID, []win
 				t.Fatalf("provider flags = %#x, unexpectedly persistent", provider.flags)
 			}
 			handle := openIntegrationObserver(t, 0)
-			filters, err := (procWfpAPI{}).EnumFilters(handle, &fwpmFilterEnumTemplate0{ProviderKey: &provider.key})
+			filters, err := enumerateIntegrationFilters(handle, &fwpmFilterEnumTemplate0{ProviderKey: &provider.key})
 			_ = (procWfpAPI{}).CloseEngine(handle)
 			if err != nil {
 				t.Fatalf("EnumFilters() error = %v", err)
@@ -435,6 +445,27 @@ func waitForIntegrationProvider(t *testing.T) (windows.GUID, windows.GUID, []win
 			t.Fatalf("offlineboundary provider/filter set did not become visible; providers=%d", len(providers))
 		}
 		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func enumerateIntegrationFilters(handle windows.Handle, template *fwpmFilterEnumTemplate0) ([]auditFilterRecord, error) {
+	enumerator, err := (procWfpAPI{}).EnumFilters(handle, template)
+	if err != nil {
+		return nil, err
+	}
+	defer enumerator.Close() //nolint:errcheck
+	var result []auditFilterRecord
+	var cursor uint64
+	for {
+		page, err := enumerator.Next(cursor, auditFilterPageEntries)
+		if err != nil {
+			return nil, err
+		}
+		if page.Done {
+			return result, nil
+		}
+		result = append(result, page.Filters...)
+		cursor = page.NextCursor
 	}
 }
 

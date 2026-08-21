@@ -90,6 +90,27 @@ Earlier review regressions remain green for post-Ready crash abort, pending
 read rejection, bounded termination, access-denied cleanup, Release/Bye event
 ordering, engine-close error joining, and fixture teardown/publication order.
 
+The final pagination/launch-declaration review began with two additional RED
+controls:
+
+- Nine registered applications create 18 V4/V6 filters. The prior production
+  enumeration returned only its first 16-entry page and the exact audit failed.
+  The Windows API wrapper now retains one enumeration handle, advances a
+  monotonic cursor through bounded 16-entry pages, audits the complete closed
+  set, and always destroys the handle. Repeated/backward cursors, count/cursor
+  disagreement, oversized pages, more than 256 entries, duplicate/extra
+  filters, and enumeration-handle cleanup errors all fail closed. The nine-app
+  test observes cursors `0, 16, 18` and exactly one enumerator close.
+- The supported Windows coverage build declaration previously contained only
+  compiler, Ninja, and linker identities. Its green closed plan now also
+  contains CMake, CTest, the Unity generator, the test executable, exact LLVM
+  tools, the family-specific archiver (`llvm-lib.exe` for clang-cl), and the
+  validated `cmd.exe` shell. The fixture builds a static library and runs a
+  CMake-owned post-build custom command, proving that its archiver and custom
+  command executor are declared before processhost can create CMake. Unknown
+  Windows toolchain families, a non-absolute/non-`cmd.exe` shell, malformed
+  registration, or any rejected declared identity stop before `CreateProcess`.
+
 ## Verification
 
 Final commands used Node 24.18.0, pnpm 11.4.0, Go 1.26.6 and worktree-private
@@ -114,6 +135,11 @@ Go caches.
 - `pnpm --filter code-oss-extension test:coverage-service-smoke`: 1 honest SKIP,
   `verified clang-cl coverage toolset is unavailable`; it does not publish a
   report.
+- Final pagination/launch-declaration wave: focused nine-application pagination,
+  malformed cursor, closed launch-plan, offlineboundary, build, and processhost
+  controls PASS; the complete Service, race, vet, Linux compile-only, Service
+  Probe, and Extension commands above were rerun PASS. Protocol and coverage
+  generated-source checks were rerun PASS.
 - `pnpm check:protocol-generated`, `pnpm check:coverage-generated`, and
   `pnpm build` with private `GOCACHE`: PASS.
 - Exact `pnpm test`: coverage generator 4/4, CMake bundle 28/28, and coverage
@@ -134,5 +160,13 @@ Go caches.
   positive default-sibling path.
 - `cmake` is not installed on this host's `PATH`; the exact root suite therefore
   stops at that one environment boundary after its earlier stages pass.
+- Windows WFP has no PID-tree primitive, and this user-mode implementation does
+  not claim interception of arbitrary dynamically discovered grandchildren.
+  The supported CMake/Ninja/clang-cl fixture is a closed launch declaration:
+  its known executors, archiver, shell, test, and LLVM tools are registered
+  before the direct CMake launch. Projects that require an undeclared custom
+  executable are outside this boundary shape and must be rejected/extended by
+  an explicit declaration rather than treated as covered. Privileged CI must
+  still supply the positive native evidence for that declared shape.
 - Temporary Go caches, the pnpm shim and generated runtime artifacts are removed
   before commit. The change is committed locally and is not pushed.

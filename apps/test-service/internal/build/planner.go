@@ -2,6 +2,7 @@ package build
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -119,11 +120,15 @@ func configureStep(input PlanInput, sourceDir string) (task.ExecutionStep, error
 	if err != nil {
 		return task.ExecutionStep{}, task.ErrInvalidArgument
 	}
+	launchPlan, err := nativeBuildLaunchPlan(input)
+	if err != nil {
+		return task.ExecutionStep{}, task.ErrInvalidArgument
+	}
 	return task.ExecutionStep{
 		ID: "configure", Kind: task.StepConfigure,
 		Process: task.ProcessSpec{
 			Executable: input.Installation.Executable,
-			LaunchPlan: nativeBuildLaunchPlan(input),
+			LaunchPlan: launchPlan,
 			Args:       append([]string(nil), args...),
 			Env:        environment,
 			Dir:        sourceDir,
@@ -165,11 +170,15 @@ func buildStep(input PlanInput, sourceDir string, targetNames []string) (task.Ex
 	if err != nil {
 		return task.ExecutionStep{}, task.ErrInvalidArgument
 	}
+	launchPlan, err := nativeBuildLaunchPlan(input)
+	if err != nil {
+		return task.ExecutionStep{}, task.ErrInvalidArgument
+	}
 	return task.ExecutionStep{
 		ID: "build", Kind: task.StepBuild,
 		Process: task.ProcessSpec{
 			Executable: input.Installation.Executable,
-			LaunchPlan: nativeBuildLaunchPlan(input),
+			LaunchPlan: launchPlan,
 			Args:       append([]string(nil), args...),
 			Env:        environment,
 			Dir:        binaryDir,
@@ -182,11 +191,18 @@ func buildStep(input PlanInput, sourceDir string, targetNames []string) (task.Ex
 	}, nil
 }
 
-// Windows WFP has no PID-tree condition. The Service therefore declares every
-// executable CMake may launch so processhost can register each APP_ID before
-// CreateProcess. The coverage path uses Ninja + clang-cl/lld-link.
-func nativeBuildLaunchPlan(input PlanInput) []string {
-	values := []string{input.Toolchain.CCompiler, input.Toolchain.CXXCompiler}
+// Windows WFP has no PID-tree condition. This is the closed declaration of
+// executable identities the supported CMake build is allowed to launch. It is
+// registered before CMake starts; arbitrary undeclared custom tools are not a
+// supported boundary shape.
+func nativeBuildLaunchPlan(input PlanInput) ([]string, error) {
+	values := []string{
+		input.Installation.Executable,
+		input.Installation.CTestExecutable,
+		input.Installation.UnityRunnerGenerator.Path,
+		input.Toolchain.CCompiler,
+		input.Toolchain.CXXCompiler,
+	}
 	if strings.HasPrefix(input.Profile.Generator, "Ninja") && input.Installation.Root != "" {
 		name := "ninja"
 		if runtime.GOOS == "windows" {
@@ -194,8 +210,38 @@ func nativeBuildLaunchPlan(input PlanInput) []string {
 		}
 		values = append(values, filepath.Join(input.Installation.Root, "bin", name))
 	}
-	if input.Toolchain.Family == toolchain.FamilyClangCL && input.Toolchain.CXXCompiler != "" {
-		values = append(values, filepath.Join(filepath.Dir(input.Toolchain.CXXCompiler), "lld-link.exe"))
+	if runtime.GOOS == "windows" && input.Toolchain.CXXCompiler != "" {
+		toolRoot := filepath.Dir(input.Toolchain.CXXCompiler)
+		switch input.Toolchain.Family {
+		case toolchain.FamilyClangCL:
+			values = append(values, filepath.Join(toolRoot, "lld-link.exe"), filepath.Join(toolRoot, "llvm-lib.exe"))
+		case toolchain.FamilyMSVC:
+			values = append(values, filepath.Join(toolRoot, "link.exe"), filepath.Join(toolRoot, "lib.exe"))
+		case toolchain.FamilyGCC:
+			values = append(values, filepath.Join(toolRoot, "ld.exe"), filepath.Join(toolRoot, "ar.exe"))
+		case toolchain.FamilyClang:
+			values = append(values, filepath.Join(toolRoot, "ld.lld.exe"), filepath.Join(toolRoot, "llvm-ar.exe"))
+		default:
+			return nil, task.ErrInvalidArgument
+		}
+	}
+	values = append(values, input.Toolchain.Coverage.LLVMProfdata, input.Toolchain.Coverage.LLVMCov)
+	if runtime.GOOS == "windows" {
+		shell := filepath.Clean(os.Getenv("ComSpec"))
+		if !filepath.IsAbs(shell) || !strings.EqualFold(filepath.Base(shell), "cmd.exe") {
+			return nil, task.ErrInvalidArgument
+		}
+		values = append(values, shell)
+		for _, target := range input.Targets {
+			if target.Type != "EXECUTABLE" {
+				continue
+			}
+			for _, artifact := range target.Artifacts {
+				if filepath.IsAbs(artifact) && strings.EqualFold(filepath.Ext(artifact), ".exe") {
+					values = append(values, filepath.Clean(artifact))
+				}
+			}
+		}
 	}
 	seen := make(map[string]struct{}, len(values))
 	result := make([]string, 0, len(values))
@@ -210,7 +256,7 @@ func nativeBuildLaunchPlan(input PlanInput) []string {
 		seen[key] = struct{}{}
 		result = append(result, value)
 	}
-	return result
+	return result, nil
 }
 
 func planBinaryDir(input PlanInput) string {

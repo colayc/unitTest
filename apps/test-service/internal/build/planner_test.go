@@ -80,6 +80,54 @@ func TestPlannerBuildsValidatedConfigureAndBuildSteps(t *testing.T) {
 	}
 }
 
+func TestNativeBuildLaunchPlanDeclaresClosedWindowsCoverageTree(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows launch declaration")
+	}
+	root := `C:\fixture\cmake`
+	toolRoot := `C:\fixture\llvm\bin`
+	shell := `C:\Windows\System32\cmd.exe`
+	t.Setenv("ComSpec", shell)
+	input := PlanInput{
+		Installation: cmake.Installation{
+			Root: root, Executable: filepath.Join(root, "bin", "cmake.exe"),
+			CTestExecutable:      filepath.Join(root, "bin", "ctest.exe"),
+			UnityRunnerGenerator: cmake.ProductExecutable{Path: `C:\fixture\tools\unity-runner-generator.exe`},
+		},
+		Profile: cmake.BuildProfile{Generator: "Ninja"},
+		Toolchain: toolchain.Instance{
+			Family:      toolchain.FamilyClangCL,
+			CCompiler:   filepath.Join(toolRoot, "clang-cl.exe"),
+			CXXCompiler: filepath.Join(toolRoot, "clang-cl.exe"),
+			Coverage: toolchain.CoverageCapability{
+				LLVMProfdata: filepath.Join(toolRoot, "llvm-profdata.exe"),
+				LLVMCov:      filepath.Join(toolRoot, "llvm-cov.exe"),
+			},
+		},
+		Targets: []cmake.Target{{Type: "EXECUTABLE", Artifacts: []string{`C:\fixture\build\coverage-tests.exe`}}},
+	}
+	want := []string{
+		filepath.Join(root, "bin", "cmake.exe"),
+		filepath.Join(root, "bin", "ctest.exe"),
+		`C:\fixture\tools\unity-runner-generator.exe`,
+		filepath.Join(toolRoot, "clang-cl.exe"),
+		filepath.Join(root, "bin", "ninja.exe"),
+		filepath.Join(toolRoot, "lld-link.exe"),
+		filepath.Join(toolRoot, "llvm-lib.exe"),
+		filepath.Join(toolRoot, "llvm-profdata.exe"),
+		filepath.Join(toolRoot, "llvm-cov.exe"),
+		shell,
+		`C:\fixture\build\coverage-tests.exe`,
+	}
+	got, err := nativeBuildLaunchPlan(input)
+	if err != nil {
+		t.Fatalf("nativeBuildLaunchPlan() error = %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("nativeBuildLaunchPlan() = %#v, want closed declaration %#v", got, want)
+	}
+}
+
 func TestPlannerInjectsOnlyTypedCoveragePathsForPresetAndGeneratedProfiles(t *testing.T) {
 	for _, origin := range []string{"generated", "preset"} {
 		t.Run(origin, func(t *testing.T) {

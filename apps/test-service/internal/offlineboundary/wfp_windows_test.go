@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"reflect"
 	"testing"
 
 	"golang.org/x/sys/windows"
@@ -111,6 +112,71 @@ func TestRegisterExecutableAddsAuditedV4V6ChildFiltersWithoutChangingExistingApp
 	}
 	if err := engine.AuditOutboundBlockFilters(context.Background(), leaseID); err != nil {
 		t.Fatalf("AuditOutboundBlockFilters() after child = %v", err)
+	}
+}
+
+func TestAuditEnumeratesEveryFilterForNineRegisteredApplications(t *testing.T) {
+	abi := &recordingWfpAPI{enumPageSize: 16}
+	engine, err := openWFPEngineWithAPI(abi, func() (windows.GUID, error) { return windows.GUID{Data1: 9}, nil })
+	if err != nil {
+		t.Fatalf("openWFPEngineWithAPI() error = %v", err)
+	}
+	leaseID := []byte("pagination-nine-apps")
+	applications := []string{
+		`C:\fixture\app-1.exe`, `C:\fixture\app-2.exe`, `C:\fixture\app-3.exe`,
+		`C:\fixture\app-4.exe`, `C:\fixture\app-5.exe`, `C:\fixture\app-6.exe`,
+		`C:\fixture\app-7.exe`, `C:\fixture\app-8.exe`, `C:\fixture\app-9.exe`,
+	}
+	if err := engine.AddOutboundBlockFilters(context.Background(), leaseID, applications); err != nil {
+		t.Fatalf("AddOutboundBlockFilters() error = %v", err)
+	}
+	if len(abi.enumFilters) != 18 {
+		t.Fatalf("registered filters = %d, want 18", len(abi.enumFilters))
+	}
+	if err := engine.AuditOutboundBlockFilters(context.Background(), leaseID); err != nil {
+		t.Fatalf("AuditOutboundBlockFilters() error = %v, want all pages audited", err)
+	}
+	if want := []uint64{0, 16, 18}; !reflect.DeepEqual(abi.enumCursors, want) {
+		t.Fatalf("enumeration cursors = %#v, want %#v", abi.enumCursors, want)
+	}
+	if abi.enumCloseCalls != 1 {
+		t.Fatalf("enumerator close calls = %d, want 1", abi.enumCloseCalls)
+	}
+}
+
+func TestAuditPaginationRejectsRepeatedCursorAndOverflow(t *testing.T) {
+	tests := []struct {
+		name       string
+		nextCursor uint64
+	}{
+		{name: "repeated cursor", nextCursor: 0},
+		{name: "cursor overflow", nextCursor: maxAuditFilterEntries + 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			abi := &recordingWfpAPI{}
+			engine, err := openWFPEngineWithAPI(abi, func() (windows.GUID, error) { return windows.GUID{Data1: 10}, nil })
+			if err != nil {
+				t.Fatalf("openWFPEngineWithAPI() error = %v", err)
+			}
+			leaseID := []byte("pagination-invalid")
+			if err := engine.AddOutboundBlockFilters(context.Background(), leaseID, []string{`C:\fixture\guarded.exe`}); err != nil {
+				t.Fatalf("AddOutboundBlockFilters() error = %v", err)
+			}
+			abi.enumPages = []auditFilterPage{{
+				Filters:    append([]auditFilterRecord(nil), abi.enumFilters[:1]...),
+				NextCursor: test.nextCursor,
+			}}
+			if err := engine.AuditOutboundBlockFilters(context.Background(), leaseID); !errors.Is(err, FilterAuditFailed) {
+				t.Fatalf("AuditOutboundBlockFilters() error = %v, want FilterAuditFailed", err)
+			}
+			if abi.enumCloseCalls != 1 {
+				t.Fatalf("enumerator close calls = %d, want 1", abi.enumCloseCalls)
+			}
+			if len(abi.enumCursors) != 1 {
+				t.Fatalf("enumeration calls = %d, want immediate cursor rejection", len(abi.enumCursors))
+			}
+		})
 	}
 }
 
@@ -260,6 +326,10 @@ type recordingWfpAPI struct {
 	addedSubLayer       *fwpmSubLayer0
 	addedFilters        []fwpmFilter0
 	enumFilters         []auditFilterRecord
+	enumPageSize        int
+	enumCursors         []uint64
+	enumPages           []auditFilterPage
+	enumCloseCalls      int
 	deletedKeys         []windows.GUID
 	deletedSubLayerKeys []windows.GUID
 	deletedProviderKeys []windows.GUID
@@ -318,7 +388,7 @@ func (api *recordingWfpAPI) DeleteSubLayerByKey(_ windows.Handle, key *windows.G
 	return nil
 }
 
-func (api *recordingWfpAPI) EnumFilters(_ windows.Handle, template *fwpmFilterEnumTemplate0) ([]auditFilterRecord, error) {
+func (api *recordingWfpAPI) EnumFilters(_ windows.Handle, template *fwpmFilterEnumTemplate0) (wfpFilterEnumerator, error) {
 	var filtered []auditFilterRecord
 	for _, filter := range api.enumFilters {
 		if template.ProviderKey != nil {
@@ -331,7 +401,46 @@ func (api *recordingWfpAPI) EnumFilters(_ windows.Handle, template *fwpmFilterEn
 		}
 		filtered = append(filtered, filter)
 	}
-	return filtered, nil
+	return &recordingFilterEnumerator{api: api, filters: filtered}, nil
+}
+
+type recordingFilterEnumerator struct {
+	api     *recordingWfpAPI
+	filters []auditFilterRecord
+	cursor  uint64
+}
+
+func (enumerator *recordingFilterEnumerator) Next(cursor uint64, maxEntries uint32) (auditFilterPage, error) {
+	enumerator.api.enumCursors = append(enumerator.api.enumCursors, cursor)
+	if len(enumerator.api.enumPages) > 0 {
+		index := len(enumerator.api.enumCursors) - 1
+		if index >= len(enumerator.api.enumPages) {
+			return auditFilterPage{}, FilterAuditFailed
+		}
+		return enumerator.api.enumPages[index], nil
+	}
+	if cursor != enumerator.cursor || maxEntries == 0 {
+		return auditFilterPage{}, FilterAuditFailed
+	}
+	if cursor >= uint64(len(enumerator.filters)) {
+		return auditFilterPage{NextCursor: cursor, Done: true}, nil
+	}
+	pageSize := int(maxEntries)
+	if enumerator.api.enumPageSize > 0 && pageSize > enumerator.api.enumPageSize {
+		pageSize = enumerator.api.enumPageSize
+	}
+	end := int(cursor) + pageSize
+	if end > len(enumerator.filters) {
+		end = len(enumerator.filters)
+	}
+	filters := append([]auditFilterRecord(nil), enumerator.filters[int(cursor):end]...)
+	enumerator.cursor = uint64(end)
+	return auditFilterPage{Filters: filters, NextCursor: enumerator.cursor}, nil
+}
+
+func (enumerator *recordingFilterEnumerator) Close() error {
+	enumerator.api.enumCloseCalls++
+	return nil
 }
 
 func (api *recordingWfpAPI) DeleteFilterByKey(_ windows.Handle, key *windows.GUID) error {
