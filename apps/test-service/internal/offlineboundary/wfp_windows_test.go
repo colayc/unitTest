@@ -71,6 +71,15 @@ func TestOpenWFPEngineUsesDynamicSessionAndExpectedBlockFilters(t *testing.T) {
 	if abi.openSession.Flags != fwpmSessionFlagDynamic {
 		t.Fatalf("session flags = %#x, want %#x", abi.openSession.Flags, fwpmSessionFlagDynamic)
 	}
+	if abi.addedProvider == nil {
+		t.Fatal("provider was not added")
+	}
+	if abi.addedSubLayer == nil {
+		t.Fatal("sublayer was not added")
+	}
+	if abi.addedSubLayer.ProviderKey == nil || *abi.addedSubLayer.ProviderKey != abi.addedProvider.ProviderKey {
+		t.Fatalf("sublayer provider key = %#v, want %#v", abi.addedSubLayer.ProviderKey, abi.addedProvider.ProviderKey)
+	}
 	if len(abi.addedFilters) != 2 {
 		t.Fatalf("added filters = %d, want 2", len(abi.addedFilters))
 	}
@@ -85,6 +94,15 @@ func TestOpenWFPEngineUsesDynamicSessionAndExpectedBlockFilters(t *testing.T) {
 	if gotV4.LayerKey != fwpmLayerALEAuthConnectV4 || gotV6.LayerKey != fwpmLayerALEAuthConnectV6 {
 		t.Fatalf("layers = %#v / %#v", gotV4.LayerKey, gotV6.LayerKey)
 	}
+	if gotV4.ProviderKey == nil || *gotV4.ProviderKey != abi.addedProvider.ProviderKey {
+		t.Fatalf("v4 provider key = %#v, want %#v", gotV4.ProviderKey, abi.addedProvider.ProviderKey)
+	}
+	if gotV6.ProviderKey == nil || *gotV6.ProviderKey != abi.addedProvider.ProviderKey {
+		t.Fatalf("v6 provider key = %#v, want %#v", gotV6.ProviderKey, abi.addedProvider.ProviderKey)
+	}
+	if gotV4.SubLayerKey != abi.addedSubLayer.SubLayerKey || gotV6.SubLayerKey != abi.addedSubLayer.SubLayerKey {
+		t.Fatalf("sublayers = %#v / %#v, want %#v", gotV4.SubLayerKey, gotV6.SubLayerKey, abi.addedSubLayer.SubLayerKey)
+	}
 	if gotV4.Action.Type != fwpActionBlock || gotV6.Action.Type != fwpActionBlock {
 		t.Fatalf("actions = %#x / %#x", gotV4.Action.Type, gotV6.Action.Type)
 	}
@@ -96,29 +114,30 @@ func TestOpenWFPEngineUsesDynamicSessionAndExpectedBlockFilters(t *testing.T) {
 func TestOpenWFPEngineAuditRejectsMissingExtraAndMismatchedFilters(t *testing.T) {
 	leaseID := []byte("fedcba9876543210")
 	wantV4, wantV6 := filterKeysForLease(leaseID)
+	providerKey := providerKeyForLease(leaseID)
+	subLayerKey := subLayerKeyForLease(leaseID)
 
 	tests := []struct {
 		name    string
-		filters map[windows.GUID]fwpmFilter0
+		filters []fwpmFilter0
 	}{
 		{
-			name: "missing v6",
-			filters: map[windows.GUID]fwpmFilter0{
-				wantV4: {FilterKey: wantV4, LayerKey: fwpmLayerALEAuthConnectV4, Action: fwpmAction0{Type: fwpActionBlock}},
-			},
+			name:    "missing v6",
+			filters: []fwpmFilter0{{FilterKey: wantV4, ProviderKey: &providerKey, SubLayerKey: subLayerKey, LayerKey: fwpmLayerALEAuthConnectV4, Action: fwpmAction0{Type: fwpActionBlock}}},
 		},
 		{
-			name: "duplicate actual key acts like extra",
-			filters: map[windows.GUID]fwpmFilter0{
-				wantV4: {FilterKey: wantV4, LayerKey: fwpmLayerALEAuthConnectV4, Action: fwpmAction0{Type: fwpActionBlock}},
-				wantV6: {FilterKey: wantV4, LayerKey: fwpmLayerALEAuthConnectV6, Action: fwpmAction0{Type: fwpActionBlock}},
+			name: "extra third filter",
+			filters: []fwpmFilter0{
+				{FilterKey: wantV4, ProviderKey: &providerKey, SubLayerKey: subLayerKey, LayerKey: fwpmLayerALEAuthConnectV4, Action: fwpmAction0{Type: fwpActionBlock}},
+				{FilterKey: wantV6, ProviderKey: &providerKey, SubLayerKey: subLayerKey, LayerKey: fwpmLayerALEAuthConnectV6, Action: fwpmAction0{Type: fwpActionBlock}},
+				{FilterKey: windows.GUID{Data1: 0xdeadbeef, Data2: 0xcafe, Data3: 0xbeef, Data4: [8]byte{1, 2, 3, 4, 5, 6, 7, 8}}, ProviderKey: &providerKey, SubLayerKey: subLayerKey, LayerKey: fwpmLayerALEAuthConnectV4, Action: fwpmAction0{Type: fwpActionBlock}},
 			},
 		},
 		{
 			name: "wrong action",
-			filters: map[windows.GUID]fwpmFilter0{
-				wantV4: {FilterKey: wantV4, LayerKey: fwpmLayerALEAuthConnectV4, Action: fwpmAction0{Type: 0}},
-				wantV6: {FilterKey: wantV6, LayerKey: fwpmLayerALEAuthConnectV6, Action: fwpmAction0{Type: fwpActionBlock}},
+			filters: []fwpmFilter0{
+				{FilterKey: wantV4, ProviderKey: &providerKey, SubLayerKey: subLayerKey, LayerKey: fwpmLayerALEAuthConnectV4, Action: fwpmAction0{Type: 0}},
+				{FilterKey: wantV6, ProviderKey: &providerKey, SubLayerKey: subLayerKey, LayerKey: fwpmLayerALEAuthConnectV6, Action: fwpmAction0{Type: fwpActionBlock}},
 			},
 		},
 	}
@@ -126,13 +145,14 @@ func TestOpenWFPEngineAuditRejectsMissingExtraAndMismatchedFilters(t *testing.T)
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			abi := &recordingWfpAPI{
-				filters: test.filters,
+				enumFilters: test.filters,
 			}
 			engine, err := openWFPEngineWithAPI(abi, func() (windows.GUID, error) { return windows.GUID{}, nil })
 			if err != nil {
 				t.Fatalf("openWFPEngineWithAPI() error = %v", err)
 			}
-			engine.filterKeys = []windows.GUID{wantV4, wantV6}
+			engine.providerKey = providerKey
+			engine.subLayerKey = subLayerKey
 			if err := engine.AuditOutboundBlockFilters(context.Background(), leaseID); !errors.Is(err, FilterAuditFailed) {
 				t.Fatalf("AuditOutboundBlockFilters() error = %v, want FilterAuditFailed", err)
 			}
@@ -171,6 +191,12 @@ func TestOpenWFPEngineMapsAccessDeniedAndDeletesFiltersOnClose(t *testing.T) {
 	if abi.closeCalls != 1 {
 		t.Fatalf("engine close calls = %d, want 1", abi.closeCalls)
 	}
+	if len(abi.deletedSubLayerKeys) != 1 || abi.deletedSubLayerKeys[0] != abi.addedSubLayer.SubLayerKey {
+		t.Fatalf("deleted sublayer keys = %#v, want %#v", abi.deletedSubLayerKeys, abi.addedSubLayer.SubLayerKey)
+	}
+	if len(abi.deletedProviderKeys) != 1 || abi.deletedProviderKeys[0] != abi.addedProvider.ProviderKey {
+		t.Fatalf("deleted provider keys = %#v, want %#v", abi.deletedProviderKeys, abi.addedProvider.ProviderKey)
+	}
 }
 
 type fakeWfpEngine struct {
@@ -195,12 +221,16 @@ func (engine *fakeWfpEngine) Close() error {
 }
 
 type recordingWfpAPI struct {
-	openSession  *fwpmSession0
-	openErr      error
-	addedFilters []fwpmFilter0
-	filters      map[windows.GUID]fwpmFilter0
-	deletedKeys  []windows.GUID
-	closeCalls   int
+	openSession         *fwpmSession0
+	openErr             error
+	addedProvider       *fwpmProvider0
+	addedSubLayer       *fwpmSubLayer0
+	addedFilters        []fwpmFilter0
+	enumFilters         []fwpmFilter0
+	deletedKeys         []windows.GUID
+	deletedSubLayerKeys []windows.GUID
+	deletedProviderKeys []windows.GUID
+	closeCalls          int
 }
 
 func (api *recordingWfpAPI) OpenSession(session *fwpmSession0) (windows.Handle, error) {
@@ -214,20 +244,56 @@ func (api *recordingWfpAPI) OpenSession(session *fwpmSession0) (windows.Handle, 
 
 func (api *recordingWfpAPI) AddFilter(_ windows.Handle, filter *fwpmFilter0) error {
 	api.addedFilters = append(api.addedFilters, *filter)
-	if api.filters == nil {
-		api.filters = map[windows.GUID]fwpmFilter0{}
-	}
-	api.filters[filter.FilterKey] = *filter
+	api.enumFilters = append(api.enumFilters, *filter)
 	return nil
 }
 
 func (api *recordingWfpAPI) GetFilterByKey(_ windows.Handle, key *windows.GUID) (*fwpmFilter0, error) {
-	filter, ok := api.filters[*key]
-	if !ok {
-		return nil, windows.ERROR_NOT_FOUND
+	for _, filter := range api.enumFilters {
+		if filter.FilterKey == *key {
+			copy := filter
+			return &copy, nil
+		}
 	}
-	copy := filter
-	return &copy, nil
+	return nil, windows.ERROR_NOT_FOUND
+}
+
+func (api *recordingWfpAPI) AddProvider(_ windows.Handle, provider *fwpmProvider0) error {
+	copy := *provider
+	api.addedProvider = &copy
+	return nil
+}
+
+func (api *recordingWfpAPI) DeleteProviderByKey(_ windows.Handle, key *windows.GUID) error {
+	api.deletedProviderKeys = append(api.deletedProviderKeys, *key)
+	return nil
+}
+
+func (api *recordingWfpAPI) AddSubLayer(_ windows.Handle, subLayer *fwpmSubLayer0) error {
+	copy := *subLayer
+	api.addedSubLayer = &copy
+	return nil
+}
+
+func (api *recordingWfpAPI) DeleteSubLayerByKey(_ windows.Handle, key *windows.GUID) error {
+	api.deletedSubLayerKeys = append(api.deletedSubLayerKeys, *key)
+	return nil
+}
+
+func (api *recordingWfpAPI) EnumFilters(_ windows.Handle, template *fwpmFilterEnumTemplate0) ([]fwpmFilter0, error) {
+	var filtered []fwpmFilter0
+	for _, filter := range api.enumFilters {
+		if template.ProviderKey != nil {
+			if filter.ProviderKey == nil || *filter.ProviderKey != *template.ProviderKey {
+				continue
+			}
+		}
+		if filter.LayerKey != template.LayerKey && template.LayerKey != (windows.GUID{}) {
+			continue
+		}
+		filtered = append(filtered, filter)
+	}
+	return filtered, nil
 }
 
 func (api *recordingWfpAPI) DeleteFilterByKey(_ windows.Handle, key *windows.GUID) error {

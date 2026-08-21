@@ -1,6 +1,6 @@
 # Task 1 Report
 
-Status: DONE_WITH_CONCERNS
+Status: DONE
 
 ## RED
 
@@ -55,3 +55,41 @@ No `go.mod` or `go.sum` changes were required.
 ## Commit
 
 Implementation commit: `558ad40` — `feat: add Windows WFP offline boundary core`
+
+## Fix round 1 (review findings)
+
+### RED
+
+- Command: `go test ./apps/test-service/internal/offlineboundary -count=1`
+- Result: FAIL after adding new seam tests. The package failed for the expected missing capabilities: `windowsWfpEngine` lacked `providerKey` / `subLayerKey`, and the Windows ABI layer lacked `fwpmProvider0`, `fwpmSubLayer0`, and `fwpmFilterEnumTemplate0`.
+
+### GREEN
+
+- Command: `gofmt -w apps/test-service/internal/offlineboundary`
+- Result: PASS
+
+- Command: `go test ./apps/test-service/internal/offlineboundary -count=1`
+- Result: `ok  	unit-test-ide.local/test-service/internal/offlineboundary	0.055s`
+
+### Linux cross-compile
+
+- Command: `$env:GOOS='linux'; $env:GOARCH='amd64'; $env:CGO_ENABLED='0'; go test -c ./apps/test-service/internal/offlineboundary`
+- Result: PASS
+
+### Verification
+
+- Command: `go vet ./apps/test-service/internal/offlineboundary`
+- Result: PASS
+
+- Command: `git diff --check -- apps/test-service/internal/offlineboundary apps/test-service/go.mod apps/test-service/go.sum`
+- Result: PASS
+
+### Fix summary
+
+- Replaced `FWPM_SUBLAYER_UNIVERSAL` usage with per-lease provider and sublayer identities derived inside the dynamic session.
+- Added provider and sublayer lifecycle management to the engine wrapper and asserted add/delete behavior in the recording seam.
+- Changed filter audit from keyed lookups to provider-scoped enumeration and strict “exactly two filters” validation, including a real third-filter negative fixture.
+
+### Remaining concerns
+
+- None for Task 1 scope.
