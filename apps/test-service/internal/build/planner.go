@@ -55,7 +55,7 @@ func Plan(input PlanInput) (task.ExecutionPlan, error) {
 	}
 	var launchInputs []cmake.FingerprintFile
 	if runtime.GOOS == "windows" && (input.Coverage != nil || offlineboundary.ExecutableRegistrationActive()) {
-		launchInputs, err = validateCMakeLaunchPlan(input, sourceDir, launchPlan)
+		launchPlan, launchInputs, err = validateCMakeLaunchPlan(input, sourceDir, launchPlan)
 		if err != nil {
 			return task.ExecutionPlan{}, task.ErrInvalidArgument
 		}

@@ -139,6 +139,18 @@ controls:
   registration immediately before native process creation. A mutation control
   replaces `CMakeLists.txt` after planning and proves that neither Job creation
   nor `CreateProcess` is reached.
+- Final retained/preset wave closed the remaining configure surfaces. A real
+  inherited `CMakePresets.json` launcher injection, a preset toolchain file,
+  `set_directory_properties(RULE_LAUNCH_*)`, CTest/Ninja wrapper commands, and
+  `file(WRITE)` replacement of a previously benign include are rejected before
+  an execution plan. Preset include/inheritance/cache variables and toolchain
+  files share the same bounded graph and identity/digest pins. A fresh
+  `add_executable(coverage-tests)` plus `add_test(COMMAND coverage-tests)` now
+  derives and registers the deterministic artifact without requiring stale
+  File API targets. Processhost retains verified no-write/no-delete handles for
+  every graph input through the entire CMake process; a deterministic hook
+  between verification and process creation proves both write and replacement
+  are denied, no Job is created, and original/replacement bytes remain intact.
 
 ## Verification
 
@@ -181,6 +193,11 @@ Go caches.
   full-package compile-only PASS; Service Probe reports 76 PASS / one exact
   toolchain SKIP; Extension reports 138/138 PASS. The unexcluded Go run still
   fails only the honest privileged WFP control with `WFPAccessDenied`.
+- Final retained/preset wave: focused controls and full build/cmake/processhost
+  packages PASS; complete Service unit and race trees PASS with only the
+  privileged WFP integration explicitly excluded; vet and Linux compile-only
+  PASS; Service Probe reports 76 PASS / one exact toolchain SKIP; Extension
+  reports 138/138 PASS.
 - `pnpm check:protocol-generated`, `pnpm check:coverage-generated`, and
   `pnpm build` with private `GOCACHE`: PASS.
 - Exact `pnpm test`: coverage generator 4/4, CMake bundle 28/28, and coverage

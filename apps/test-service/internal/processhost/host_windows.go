@@ -33,6 +33,7 @@ var _ Platform = (*windowsPlatform)(nil)
 type windowsTarget struct {
 	processOwner *winprocess.HandleOwner
 	jobOwner     *winprocess.HandleOwner
+	launchInputs io.Closer
 	pid          int
 	ops          windowsTargetOperations
 
@@ -47,7 +48,8 @@ var _ Target = (*windowsTarget)(nil)
 
 type windowsTargetOperations struct {
 	registerExecutable     func(string) error
-	verifyLaunchInputs     func([]cmake.FingerprintFile) error
+	retainLaunchInputs     func([]cmake.FingerprintFile) (io.Closer, error)
+	afterLaunchInputs      func() error
 	createProtectedJob     func(uint32) (windows.Handle, error)
 	createSuspended        func(processcontrol.Spec, windows.Handle, windows.Handle, windows.Handle) (windows.ProcessInformation, error)
 	assignProcess          func(windows.Handle, windows.Handle) error
@@ -70,16 +72,11 @@ func newWindowsPlatform(operations windowsTargetOperations) *windowsPlatform {
 func defaultWindowsTargetOperations() windowsTargetOperations {
 	return windowsTargetOperations{
 		registerExecutable: offlineboundary.RegisterExecutableForActiveBoundary,
-		verifyLaunchInputs: func(states []cmake.FingerprintFile) error {
+		retainLaunchInputs: func(states []cmake.FingerprintFile) (io.Closer, error) {
 			if len(states) > 128 {
-				return errors.New("too many launch inputs")
+				return nil, errors.New("too many launch inputs")
 			}
-			for _, state := range states {
-				if err := cmake.VerifyLaunchInput(state, 512*1024); err != nil {
-					return err
-				}
-			}
-			return nil
+			return cmake.RetainLaunchInputs(states, 512*1024)
 		},
 		createProtectedJob: createWindowsProtectedJob,
 		createSuspended:    createSuspendedWindowsTarget,
@@ -125,8 +122,20 @@ func (platform *windowsPlatform) Start(spec processcontrol.Spec, stdout, stderr 
 		}
 		registered[key] = struct{}{}
 	}
-	if platform.operations.verifyLaunchInputs == nil ||
-		platform.operations.verifyLaunchInputs(spec.LaunchInputs) != nil {
+	if platform.operations.retainLaunchInputs == nil {
+		return nil, errors.New("target launch inputs changed")
+	}
+	launchInputs, err := platform.operations.retainLaunchInputs(spec.LaunchInputs)
+	if err != nil || launchInputs == nil {
+		return nil, errors.New("target launch inputs changed")
+	}
+	retainLaunchInputs := true
+	defer func() {
+		if retainLaunchInputs {
+			_ = launchInputs.Close()
+		}
+	}()
+	if platform.operations.afterLaunchInputs != nil && platform.operations.afterLaunchInputs() != nil {
 		return nil, errors.New("target launch inputs changed")
 	}
 	nul, err := os.OpenFile("NUL", os.O_RDONLY, 0)
@@ -170,14 +179,17 @@ func (platform *windowsPlatform) Start(spec processcontrol.Spec, stdout, stderr 
 	if cleanupWait <= 0 {
 		cleanupWait = windowsPostKillWait
 	}
-	return &windowsTarget{
+	target := &windowsTarget{
 		processOwner: winprocess.NewHandleOwner(info.Process, platform.operations.closeHandle),
 		jobOwner:     jobOwner,
+		launchInputs: launchInputs,
 		pid:          int(info.ProcessId),
 		ops:          platform.operations,
 		waitDone:     make(chan struct{}),
 		cleanupWait:  cleanupWait,
-	}, nil
+	}
+	retainLaunchInputs = false
+	return target, nil
 }
 
 func (platform *windowsPlatform) createdProcessOperations() winprocess.Operations {
@@ -219,6 +231,11 @@ func (target *windowsTarget) Wait() (int, error) {
 			target.waitErr = errors.Join(target.waitErr, errors.New("target job cleanup failed"))
 		}
 		_ = target.processOwner.CloseEventually()
+		if target.launchInputs != nil {
+			if err := target.launchInputs.Close(); err != nil {
+				target.waitErr = errors.Join(target.waitErr, errors.New("launch input release failed"))
+			}
+		}
 	})
 	<-target.waitDone
 	return target.waitCode, target.waitErr

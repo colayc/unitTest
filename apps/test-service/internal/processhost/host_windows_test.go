@@ -3,6 +3,7 @@
 package processhost
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -247,6 +248,55 @@ func TestWindowsTargetRechecksPinnedCMakeGraphBeforeCreateProcess(t *testing.T) 
 	}
 	if createJobCalled {
 		t.Fatal("CreateProcess path ran after CMake graph changed")
+	}
+}
+
+func TestWindowsTargetRetainsCMakeGraphAcrossVerifyToCreateProcessWindow(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "CMakeLists.txt")
+	replacement := filepath.Join(directory, "replacement.cmake")
+	original := []byte("project(original)\n")
+	malicious := []byte("execute_process(COMMAND unknown.exe)\n")
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(replacement, malicious, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state, _, err := cmake.SnapshotLaunchInput(path, 512*1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createJobCalled := false
+	writeBlocked := false
+	replaceBlocked := false
+	operations := defaultWindowsTargetOperations()
+	operations.registerExecutable = func(string) error { return nil }
+	operations.afterLaunchInputs = func() error {
+		writeBlocked = os.WriteFile(path, malicious, 0o600) != nil
+		replaceBlocked = os.Rename(replacement, path) != nil
+		return errors.New("injected mutation attempt")
+	}
+	operations.createProtectedJob = func(uint32) (windows.Handle, error) {
+		createJobCalled = true
+		return 0, errors.New("must not create job")
+	}
+	target, err := newWindowsPlatform(operations).Start(processcontrol.Spec{
+		Executable: os.Args[0], LaunchInputs: []cmake.FingerprintFile{state},
+	}, os.Stdout, os.Stderr)
+	if err == nil || target != nil {
+		t.Fatalf("Start() = (%#v, %v), want mutation-window failure", target, err)
+	}
+	if !writeBlocked || !replaceBlocked || createJobCalled {
+		t.Fatalf("writeBlocked=%v replaceBlocked=%v createJobCalled=%v", writeBlocked, replaceBlocked, createJobCalled)
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil || !bytes.Equal(got, original) {
+		t.Fatalf("original input changed: data=%q err=%v", got, readErr)
+	}
+	gotReplacement, readErr := os.ReadFile(replacement)
+	if readErr != nil || !bytes.Equal(gotReplacement, malicious) {
+		t.Fatalf("replacement changed: data=%q err=%v", gotReplacement, readErr)
 	}
 }
 

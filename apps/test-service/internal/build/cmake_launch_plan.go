@@ -1,7 +1,10 @@
 package build
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -30,27 +33,34 @@ type cmakeInvocation struct {
 }
 
 type cmakeLaunchValidator struct {
-	allowed      map[string]struct{}
-	variables    map[string]string
-	targets      map[string]string
-	cmakePath    string
-	allowedRoots []string
-	visited      map[string]struct{}
-	states       []cmake.FingerprintFile
-	trustedFiles map[string]map[string]string
-	files        int
-	totalBytes   int64
+	allowed       map[string]struct{}
+	variables     map[string]string
+	targets       map[string]string
+	targetPaths   map[string]struct{}
+	cmakePath     string
+	ctestPath     string
+	binaryRoot    string
+	configuration string
+	multiConfig   bool
+	allowedRoots  []string
+	visited       map[string]struct{}
+	states        []cmake.FingerprintFile
+	planned       []string
+	trustedFiles  map[string]map[string]string
+	files         int
+	totalBytes    int64
 }
 
 // validateCMakeLaunchPlan proves every configure/build process entry in the
 // supported, statically reachable CMake graph is already in the APP_ID launch
 // declaration. Anything that cannot be resolved without running CMake is
 // rejected before process creation.
-func validateCMakeLaunchPlan(input PlanInput, sourceDir string, launchPlan []string) ([]cmake.FingerprintFile, error) {
+func validateCMakeLaunchPlan(input PlanInput, sourceDir string, launchPlan []string) ([]string, []cmake.FingerprintFile, error) {
 	sourceRoot, err := canonicalCMakeLaunchPath(sourceDir)
 	if err != nil {
-		return nil, errInvalidCMakeLaunchDeclaration
+		return nil, nil, errInvalidCMakeLaunchDeclaration
 	}
+	binaryRoot := planBinaryDir(input)
 	validator := &cmakeLaunchValidator{
 		allowed: make(map[string]struct{}, len(launchPlan)),
 		variables: map[string]string{
@@ -59,17 +69,22 @@ func validateCMakeLaunchPlan(input PlanInput, sourceDir string, launchPlan []str
 			"${CMAKE_C_COMPILER}":    input.Toolchain.CCompiler,
 			"${CMAKE_CXX_COMPILER}":  input.Toolchain.CXXCompiler,
 		},
-		cmakePath:    cmakeLaunchPathKey(input.Installation.Executable),
-		targets:      make(map[string]string, len(input.Targets)),
-		allowedRoots: []string{sourceRoot},
-		visited:      make(map[string]struct{}),
-		trustedFiles: make(map[string]map[string]string),
+		cmakePath:     cmakeLaunchPathKey(input.Installation.Executable),
+		ctestPath:     cmakeLaunchPathKey(input.Installation.CTestExecutable),
+		binaryRoot:    binaryRoot,
+		configuration: input.Profile.Configuration,
+		multiConfig:   multiConfigGenerator(input.Profile.Generator),
+		targets:       make(map[string]string, len(input.Targets)),
+		targetPaths:   make(map[string]struct{}, len(input.Targets)),
+		allowedRoots:  []string{sourceRoot},
+		visited:       make(map[string]struct{}),
+		trustedFiles:  make(map[string]map[string]string),
 	}
 	for _, executable := range launchPlan {
 		if !filepath.IsAbs(executable) {
-			return nil, errInvalidCMakeLaunchDeclaration
+			return nil, nil, errInvalidCMakeLaunchDeclaration
 		}
-		validator.allowed[cmakeLaunchPathKey(executable)] = struct{}{}
+		validator.addAllowedExecutable(executable, false)
 	}
 	for _, target := range input.Targets {
 		if target.Name == "" || target.Type != "EXECUTABLE" {
@@ -81,22 +96,28 @@ func validateCMakeLaunchPlan(input PlanInput, sourceDir string, launchPlan []str
 				continue
 			}
 			if executable != "" && !strings.EqualFold(filepath.Clean(executable), filepath.Clean(artifact)) {
-				return nil, errInvalidCMakeLaunchDeclaration
+				return nil, nil, errInvalidCMakeLaunchDeclaration
 			}
 			executable = filepath.Clean(artifact)
 		}
 		if executable != "" {
 			key := strings.ToLower(target.Name)
 			if previous, duplicate := validator.targets[key]; duplicate && !strings.EqualFold(previous, executable) {
-				return nil, errInvalidCMakeLaunchDeclaration
+				return nil, nil, errInvalidCMakeLaunchDeclaration
 			}
 			validator.targets[key] = executable
+			validator.targetPaths[cmakeLaunchPathKey(executable)] = struct{}{}
+		}
+	}
+	if input.Profile.Origin == "preset" {
+		if err := validator.validatePreset(sourceRoot, input.Profile.ConfigurePreset); err != nil {
+			return nil, nil, err
 		}
 	}
 	if input.Coverage != nil {
 		include, includeErr := canonicalCMakeLaunchPath(input.Coverage.TopLevelInclude.Path)
 		if includeErr != nil {
-			return nil, errInvalidCMakeLaunchDeclaration
+			return nil, nil, errInvalidCMakeLaunchDeclaration
 		}
 		validator.allowedRoots = append(validator.allowedRoots, filepath.Dir(include))
 		if input.Installation.UnityRunnerGenerator.Valid() {
@@ -104,18 +125,22 @@ func validateCMakeLaunchPlan(input PlanInput, sourceDir string, launchPlan []str
 				"${generator}": input.Installation.UnityRunnerGenerator.Path,
 			}
 		}
-		if err := validator.validateFile(include); err != nil {
-			return nil, err
+		if err := validator.validateFile(include, binaryRoot); err != nil {
+			return nil, nil, err
 		}
 	}
-	if err := validator.validateFile(filepath.Join(sourceRoot, "CMakeLists.txt")); err != nil {
-		return nil, err
+	if err := validator.validateFile(filepath.Join(sourceRoot, "CMakeLists.txt"), binaryRoot); err != nil {
+		return nil, nil, err
 	}
 	sort.Slice(validator.states, func(i, j int) bool { return validator.states[i].Path < validator.states[j].Path })
-	return append([]cmake.FingerprintFile(nil), validator.states...), nil
+	resultPlan := append(append([]string(nil), launchPlan...), validator.planned...)
+	if len(resultPlan) > 64 {
+		return nil, nil, errInvalidCMakeLaunchDeclaration
+	}
+	return resultPlan, append([]cmake.FingerprintFile(nil), validator.states...), nil
 }
 
-func (validator *cmakeLaunchValidator) validateFile(path string) error {
+func (validator *cmakeLaunchValidator) validateFile(path, binaryDir string) error {
 	canonical, err := canonicalCMakeLaunchPath(path)
 	if err != nil || !cmakeLaunchPathWithinRoots(canonical, validator.allowedRoots) {
 		return errInvalidCMakeLaunchDeclaration
@@ -124,29 +149,26 @@ func (validator *cmakeLaunchValidator) validateFile(path string) error {
 	if _, seen := validator.visited[key]; seen {
 		return nil
 	}
-	if validator.files >= maxCMakeLaunchFiles {
-		return errInvalidCMakeLaunchDeclaration
+	content, snapshotErr := validator.snapshotInput(canonical)
+	if snapshotErr != nil {
+		return snapshotErr
 	}
-	state, content, snapshotErr := cmake.SnapshotLaunchInput(canonical, maxCMakeLaunchFileBytes)
-	if snapshotErr != nil || validator.totalBytes > maxCMakeLaunchTotalBytes-int64(len(content)) {
-		return errInvalidCMakeLaunchDeclaration
-	}
-	validator.files++
-	validator.totalBytes += int64(len(content))
-	validator.visited[key] = struct{}{}
-	validator.states = append(validator.states, state)
 	invocations, err := parseCMakeInvocations(content)
 	if err != nil {
 		return errInvalidCMakeLaunchDeclaration
 	}
 	for _, invocation := range invocations {
 		switch strings.ToLower(invocation.name) {
-		case "add_custom_command", "add_custom_target", "add_test":
-			if err := validator.validateCommandGroups(invocation, key); err != nil {
+		case "add_custom_command", "add_custom_target":
+			if err := validator.validateCommandGroups(invocation, key, "custom"); err != nil {
+				return err
+			}
+		case "add_test":
+			if err := validator.validateCommandGroups(invocation, key, "test"); err != nil {
 				return err
 			}
 		case "execute_process":
-			if err := validator.validateCommandGroups(invocation, key); err != nil {
+			if err := validator.validateCommandGroups(invocation, key, "execute"); err != nil {
 				return err
 			}
 		case "try_run", "try_compile":
@@ -169,12 +191,33 @@ func (validator *cmakeLaunchValidator) validateFile(path string) error {
 			if err := validator.validateTargetProperties(invocation, key); err != nil {
 				return err
 			}
+		case "set_directory_properties":
+			if err := validator.validateDirectoryProperties(invocation, key); err != nil {
+				return err
+			}
+		case "add_executable":
+			if err := validator.declareExecutable(invocation, binaryDir); err != nil {
+				return err
+			}
+		case "file":
+			if len(invocation.arguments) != 0 {
+				switch strings.ToUpper(invocation.arguments[0].value) {
+				case "WRITE", "APPEND", "GENERATE", "CONFIGURE":
+					return errInvalidCMakeLaunchDeclaration
+				}
+			}
+		case "configure_file":
+			return errInvalidCMakeLaunchDeclaration
 		case "add_subdirectory":
 			if len(invocation.arguments) == 0 {
 				return errInvalidCMakeLaunchDeclaration
 			}
 			directory, err := resolveLiteralCMakeLaunchPath(filepath.Dir(canonical), invocation.arguments[0].value)
-			if err != nil || validator.validateFile(filepath.Join(directory, "CMakeLists.txt")) != nil {
+			childBinary := filepath.Join(binaryDir, filepath.FromSlash(invocation.arguments[0].value))
+			if len(invocation.arguments) > 1 && !strings.EqualFold(invocation.arguments[1].value, "EXCLUDE_FROM_ALL") {
+				childBinary, err = resolveLiteralCMakeLaunchPath(binaryDir, invocation.arguments[1].value)
+			}
+			if err != nil || validator.validateFile(filepath.Join(directory, "CMakeLists.txt"), childBinary) != nil {
 				return errInvalidCMakeLaunchDeclaration
 			}
 		case "include":
@@ -188,7 +231,7 @@ func (validator *cmakeLaunchValidator) validateFile(path string) error {
 			if filepath.Ext(include) == "" {
 				include += ".cmake"
 			}
-			if err := validator.validateFile(include); err != nil {
+			if err := validator.validateFile(include, binaryDir); err != nil {
 				return errInvalidCMakeLaunchDeclaration
 			}
 		}
@@ -196,7 +239,245 @@ func (validator *cmakeLaunchValidator) validateFile(path string) error {
 	return nil
 }
 
-func (validator *cmakeLaunchValidator) validateCommandGroups(invocation cmakeInvocation, sourceKey string) error {
+func (validator *cmakeLaunchValidator) snapshotInput(canonical string) ([]byte, error) {
+	key := cmakeLaunchPathKey(canonical)
+	if _, seen := validator.visited[key]; seen {
+		return nil, nil
+	}
+	if validator.files >= maxCMakeLaunchFiles {
+		return nil, errInvalidCMakeLaunchDeclaration
+	}
+	state, content, err := cmake.SnapshotLaunchInput(canonical, maxCMakeLaunchFileBytes)
+	if err != nil || validator.totalBytes > maxCMakeLaunchTotalBytes-int64(len(content)) {
+		return nil, errInvalidCMakeLaunchDeclaration
+	}
+	validator.files++
+	validator.totalBytes += int64(len(content))
+	validator.visited[key] = struct{}{}
+	validator.states = append(validator.states, state)
+	return content, nil
+}
+
+type launchPreset struct {
+	name          string
+	inherits      []string
+	cache         map[string]json.RawMessage
+	environment   map[string]json.RawMessage
+	toolchainFile json.RawMessage
+}
+
+type launchPresetDocument struct {
+	Version          int             `json:"version"`
+	Include          json.RawMessage `json:"include"`
+	ConfigurePresets []struct {
+		Name           string                     `json:"name"`
+		Inherits       json.RawMessage            `json:"inherits"`
+		CacheVariables map[string]json.RawMessage `json:"cacheVariables"`
+		Environment    map[string]json.RawMessage `json:"environment"`
+		ToolchainFile  json.RawMessage            `json:"toolchainFile"`
+	} `json:"configurePresets"`
+}
+
+func (validator *cmakeLaunchValidator) validatePreset(sourceRoot, name string) error {
+	if name == "" {
+		return errInvalidCMakeLaunchDeclaration
+	}
+	presets := make(map[string]launchPreset)
+	seenFiles := make(map[string]uint8)
+	foundRoot := false
+	for _, base := range []string{"CMakePresets.json", "CMakeUserPresets.json"} {
+		path := filepath.Join(sourceRoot, base)
+		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return errInvalidCMakeLaunchDeclaration
+		}
+		foundRoot = true
+		if err := validator.readPresetFile(path, sourceRoot, presets, seenFiles, 0); err != nil {
+			return err
+		}
+	}
+	if !foundRoot {
+		return errInvalidCMakeLaunchDeclaration
+	}
+	resolved, err := resolveLaunchPreset(name, presets, make(map[string]bool), 0)
+	if err != nil {
+		return err
+	}
+	for variable, raw := range resolved.cache {
+		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			continue
+		}
+		value, err := launchPresetValue(raw)
+		if err != nil {
+			return errInvalidCMakeLaunchDeclaration
+		}
+		if strings.EqualFold(variable, "CMAKE_TOOLCHAIN_FILE") {
+			if err := validator.validateToolchainFile(sourceRoot, value); err != nil {
+				return err
+			}
+			continue
+		}
+		if isCompilerLauncherProperty(variable) || isRuleLauncherProperty(variable) || isPinnedCMakeToolVariable(variable) {
+			if !validator.allowedBareExecutable(value, "") {
+				return errInvalidCMakeLaunchDeclaration
+			}
+		}
+	}
+	for variable, raw := range resolved.environment {
+		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) ||
+			(!isCompilerLauncherProperty(variable) && !isRuleLauncherProperty(variable) && !isPinnedCMakeToolVariable(variable)) {
+			continue
+		}
+		value, err := launchPresetValue(raw)
+		if err != nil || !validator.allowedBareExecutable(value, "") {
+			return errInvalidCMakeLaunchDeclaration
+		}
+	}
+	if len(resolved.toolchainFile) != 0 && !bytes.Equal(bytes.TrimSpace(resolved.toolchainFile), []byte("null")) {
+		value, err := launchPresetValue(resolved.toolchainFile)
+		if err != nil || validator.validateToolchainFile(sourceRoot, value) != nil {
+			return errInvalidCMakeLaunchDeclaration
+		}
+	}
+	return nil
+}
+
+func (validator *cmakeLaunchValidator) readPresetFile(path, sourceRoot string, presets map[string]launchPreset, seen map[string]uint8, depth int) error {
+	if depth > 16 {
+		return errInvalidCMakeLaunchDeclaration
+	}
+	canonical, err := canonicalCMakeLaunchPath(path)
+	if err != nil || !cmakeLaunchPathWithinRoots(canonical, []string{sourceRoot}) {
+		return errInvalidCMakeLaunchDeclaration
+	}
+	key := cmakeLaunchPathKey(canonical)
+	switch seen[key] {
+	case 1:
+		return errInvalidCMakeLaunchDeclaration
+	case 2:
+		return nil
+	}
+	seen[key] = 1
+	content, err := validator.snapshotInput(canonical)
+	if err != nil {
+		return err
+	}
+	var document launchPresetDocument
+	if json.Unmarshal(content, &document) != nil || document.Version < 1 || document.Version > 10 {
+		return errInvalidCMakeLaunchDeclaration
+	}
+	includes, err := launchPresetStringList(document.Include)
+	if err != nil {
+		return errInvalidCMakeLaunchDeclaration
+	}
+	for _, include := range includes {
+		if include == "" || strings.ContainsAny(include, "$;<>") {
+			return errInvalidCMakeLaunchDeclaration
+		}
+		if err := validator.readPresetFile(filepath.Join(filepath.Dir(canonical), filepath.FromSlash(include)), sourceRoot, presets, seen, depth+1); err != nil {
+			return err
+		}
+	}
+	for _, value := range document.ConfigurePresets {
+		if value.Name == "" || strings.ContainsAny(value.Name, "$;<>") {
+			return errInvalidCMakeLaunchDeclaration
+		}
+		if _, duplicate := presets[value.Name]; duplicate {
+			return errInvalidCMakeLaunchDeclaration
+		}
+		inherits, err := launchPresetStringList(value.Inherits)
+		if err != nil {
+			return errInvalidCMakeLaunchDeclaration
+		}
+		presets[value.Name] = launchPreset{name: value.Name, inherits: inherits, cache: value.CacheVariables, environment: value.Environment, toolchainFile: value.ToolchainFile}
+	}
+	seen[key] = 2
+	return nil
+}
+
+func resolveLaunchPreset(name string, values map[string]launchPreset, visiting map[string]bool, depth int) (launchPreset, error) {
+	value, ok := values[name]
+	if !ok || visiting[name] || depth > 64 {
+		return launchPreset{}, errInvalidCMakeLaunchDeclaration
+	}
+	visiting[name] = true
+	result := launchPreset{name: value.name, cache: make(map[string]json.RawMessage), environment: make(map[string]json.RawMessage)}
+	for _, parentName := range value.inherits {
+		parent, err := resolveLaunchPreset(parentName, values, visiting, depth+1)
+		if err != nil {
+			return launchPreset{}, err
+		}
+		for key, raw := range parent.cache {
+			result.cache[key] = append(json.RawMessage(nil), raw...)
+		}
+		for key, raw := range parent.environment {
+			result.environment[key] = append(json.RawMessage(nil), raw...)
+		}
+		if len(result.toolchainFile) == 0 {
+			result.toolchainFile = append(json.RawMessage(nil), parent.toolchainFile...)
+		}
+	}
+	delete(visiting, name)
+	for key, raw := range value.cache {
+		result.cache[key] = append(json.RawMessage(nil), raw...)
+	}
+	for key, raw := range value.environment {
+		result.environment[key] = append(json.RawMessage(nil), raw...)
+	}
+	if len(value.toolchainFile) != 0 {
+		result.toolchainFile = append(json.RawMessage(nil), value.toolchainFile...)
+	}
+	return result, nil
+}
+
+func launchPresetStringList(raw json.RawMessage) ([]string, error) {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, nil
+	}
+	var single string
+	if json.Unmarshal(raw, &single) == nil {
+		return []string{single}, nil
+	}
+	var values []string
+	if json.Unmarshal(raw, &values) != nil {
+		return nil, errInvalidCMakeLaunchDeclaration
+	}
+	return values, nil
+}
+
+func launchPresetValue(raw json.RawMessage) (string, error) {
+	var value string
+	if json.Unmarshal(raw, &value) == nil {
+		return value, nil
+	}
+	var object map[string]json.RawMessage
+	if json.Unmarshal(raw, &object) != nil || len(object) == 0 || len(object) > 2 {
+		return "", errInvalidCMakeLaunchDeclaration
+	}
+	for key := range object {
+		if key != "type" && key != "value" {
+			return "", errInvalidCMakeLaunchDeclaration
+		}
+	}
+	if json.Unmarshal(object["value"], &value) != nil {
+		return "", errInvalidCMakeLaunchDeclaration
+	}
+	return value, nil
+}
+
+func (validator *cmakeLaunchValidator) validateToolchainFile(sourceRoot, value string) error {
+	if value == "" || strings.ContainsAny(value, "$;<>") {
+		return errInvalidCMakeLaunchDeclaration
+	}
+	path := filepath.FromSlash(value)
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(sourceRoot, path)
+	}
+	return validator.validateFile(path, validator.binaryRoot)
+}
+
+func (validator *cmakeLaunchValidator) validateCommandGroups(invocation cmakeInvocation, sourceKey, mode string) error {
 	commands := 0
 	for index, argument := range invocation.arguments {
 		if !argument.unquoted || !strings.EqualFold(argument.value, "COMMAND") {
@@ -215,6 +496,7 @@ func (validator *cmakeLaunchValidator) validateCommandGroups(invocation cmakeInv
 				invocation.arguments[index+1].value,
 				invocation.arguments[index+2:end],
 				sourceKey,
+				mode,
 			) {
 			return errInvalidCMakeLaunchDeclaration
 		}
@@ -225,8 +507,9 @@ func (validator *cmakeLaunchValidator) validateCommandGroups(invocation cmakeInv
 	return nil
 }
 
-func (validator *cmakeLaunchValidator) allowedCommandExecutable(value string, arguments []cmakeArgument, sourceKey string) bool {
+func (validator *cmakeLaunchValidator) allowedCommandExecutable(value string, arguments []cmakeArgument, sourceKey, mode string) bool {
 	executable := value
+	targetCommand := false
 	if resolved, ok := validator.variables[executable]; ok {
 		executable = resolved
 	} else if resolved, ok := validator.trustedFiles[sourceKey][executable]; ok {
@@ -237,6 +520,7 @@ func (validator *cmakeLaunchValidator) allowedCommandExecutable(value string, ar
 	}
 	if target, ok := validator.targets[strings.ToLower(executable)]; ok {
 		executable = target
+		targetCommand = true
 	}
 	if strings.ContainsAny(executable, "$;<>") || !filepath.IsAbs(executable) {
 		return false
@@ -249,10 +533,75 @@ func (validator *cmakeLaunchValidator) allowedCommandExecutable(value string, ar
 		return len(arguments) >= 2 && arguments[0].value == "-E" &&
 			(arguments[1].value == "touch" || arguments[1].value == "touch_nocreate")
 	}
+	if key == validator.ctestPath || strings.EqualFold(filepath.Base(executable), "ninja.exe") || strings.EqualFold(filepath.Base(executable), "ninja") {
+		return false
+	}
+	if mode == "custom" {
+		return false
+	}
+	if mode == "execute" {
+		_, trusted := validator.trustedFiles[sourceKey][value]
+		return trusted
+	}
+	if mode == "test" {
+		if !targetCommand {
+			_, targetCommand = validator.targetPaths[key]
+		}
+		return targetCommand
+	}
 	// cmd.exe is registered because Ninja may use it as its shell. It is never
 	// an allowed custom-command executable because /c could start an undeclared
 	// process outside this parser's exact command identity.
 	return !strings.EqualFold(filepath.Base(executable), "cmd.exe")
+}
+
+func (validator *cmakeLaunchValidator) addAllowedExecutable(executable string, planned bool) {
+	key := cmakeLaunchPathKey(executable)
+	if _, exists := validator.allowed[key]; exists {
+		return
+	}
+	validator.allowed[key] = struct{}{}
+	if planned {
+		validator.planned = append(validator.planned, filepath.Clean(executable))
+	}
+}
+
+func (validator *cmakeLaunchValidator) declareExecutable(invocation cmakeInvocation, binaryDir string) error {
+	if len(invocation.arguments) < 2 || !literalCMakeTargetName(invocation.arguments[0].value) {
+		return errInvalidCMakeLaunchDeclaration
+	}
+	for _, argument := range invocation.arguments[1:] {
+		if strings.EqualFold(argument.value, "IMPORTED") || strings.EqualFold(argument.value, "ALIAS") {
+			return errInvalidCMakeLaunchDeclaration
+		}
+	}
+	outputDir := binaryDir
+	if validator.multiConfig && validator.configuration != "" {
+		outputDir = filepath.Join(outputDir, validator.configuration)
+	}
+	executable := filepath.Join(outputDir, invocation.arguments[0].value+".exe")
+	name := strings.ToLower(invocation.arguments[0].value)
+	if existing, duplicate := validator.targets[name]; duplicate && !strings.EqualFold(existing, executable) {
+		return errInvalidCMakeLaunchDeclaration
+	}
+	validator.targets[name] = executable
+	validator.targetPaths[cmakeLaunchPathKey(executable)] = struct{}{}
+	validator.addAllowedExecutable(executable, true)
+	return nil
+}
+
+func literalCMakeTargetName(value string) bool {
+	if value == "" || strings.ContainsAny(value, "$;<>/\\") {
+		return false
+	}
+	for _, character := range value {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' || strings.ContainsRune("_+.-", character) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func (validator *cmakeLaunchValidator) validateSetLaunchProperty(invocation cmakeInvocation, sourceKey string) error {
@@ -308,6 +657,23 @@ func (validator *cmakeLaunchValidator) validateTargetProperties(invocation cmake
 		return errInvalidCMakeLaunchDeclaration
 	}
 	for index := properties; index < len(invocation.arguments); index += 2 {
+		if strings.ContainsAny(invocation.arguments[index].value, "$;<>") {
+			return errInvalidCMakeLaunchDeclaration
+		}
+		if err := validator.validateLaunchProperty(invocation.arguments[index].value, invocation.arguments[index+1:index+2], sourceKey); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (validator *cmakeLaunchValidator) validateDirectoryProperties(invocation cmakeInvocation, sourceKey string) error {
+	if len(invocation.arguments) == 0 || !invocation.arguments[0].unquoted ||
+		!strings.EqualFold(invocation.arguments[0].value, "PROPERTIES") ||
+		(len(invocation.arguments)-1)%2 != 0 {
+		return errInvalidCMakeLaunchDeclaration
+	}
+	for index := 1; index < len(invocation.arguments); index += 2 {
 		if strings.ContainsAny(invocation.arguments[index].value, "$;<>") {
 			return errInvalidCMakeLaunchDeclaration
 		}

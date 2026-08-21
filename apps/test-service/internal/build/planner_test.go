@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -169,6 +170,59 @@ func TestPlannerRejectsUnknownCustomCommandBeforeCreatingExecutionPlan(t *testin
 	}
 }
 
+func TestPlannerRejectsPresetLauncherAndConfigureTimeGraphMutation(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows launch declaration")
+	}
+	activatePlannerWFPRegistration(t)
+	for _, fixtureName := range []string{"preset-launcher-unknown", "preset-toolchain-unknown", "configure-write-unknown"} {
+		t.Run(fixtureName, func(t *testing.T) {
+			fixture := newPlannerFixture(t)
+			if err := os.RemoveAll(fixture.sourceDir); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.CopyFS(fixture.sourceDir, os.DirFS(filepath.Join("testdata", fixtureName))); err != nil {
+				t.Fatal(err)
+			}
+			if strings.HasPrefix(fixtureName, "preset-") {
+				fixture.profile.Origin = "preset"
+				fixture.profile.ConfigurePreset = "child"
+			}
+			if _, err := Plan(PlanInput{
+				Installation: fixture.installation, WorkspaceRoot: fixture.root,
+				Project: fixture.project, Profile: fixture.profile,
+				Toolchain: fixture.toolchain, Jobs: 1, Configure: true,
+			}); !errors.Is(err, task.ErrInvalidArgument) {
+				t.Fatalf("Plan() error = %v, want fail-closed rejection", err)
+			}
+		})
+	}
+}
+
+func TestPlannerDerivesFreshDeclaredTestExecutableBeforeFileAPIExists(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows launch declaration")
+	}
+	activatePlannerWFPRegistration(t)
+	fixture := newPlannerFixture(t)
+	contents := "add_executable(coverage-tests main.cpp)\nadd_test(NAME coverage-tests COMMAND coverage-tests)\n"
+	if err := os.WriteFile(filepath.Join(fixture.sourceDir, "CMakeLists.txt"), []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := Plan(PlanInput{
+		Installation: fixture.installation, WorkspaceRoot: fixture.root,
+		Project: fixture.project, Profile: fixture.profile,
+		Toolchain: fixture.toolchain, Jobs: 1, Configure: true,
+	})
+	if err != nil {
+		t.Fatalf("Plan() error = %v, want fresh declared target accepted", err)
+	}
+	want := filepath.Join(fixture.profile.BinaryDir, "coverage-tests.exe")
+	if !slices.Contains(plan.Steps[0].Process.LaunchPlan, want) {
+		t.Fatalf("LaunchPlan = %#v, want derived target %q", plan.Steps[0].Process.LaunchPlan, want)
+	}
+}
+
 func TestPlannerRejectsDynamicConfigureLaunchDeclarations(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows launch declaration")
@@ -179,6 +233,8 @@ func TestPlannerRejectsDynamicConfigureLaunchDeclarations(t *testing.T) {
 		"set(CMAKE_CXX_COMPILER unknown.exe)\n",
 		"set(CMAKE_CXX_COMPILER_LAUNCHER \"${UNDECLARED_TOOL}\")\n",
 		"set_property(GLOBAL PROPERTY RULE_LAUNCH_CUSTOM \"${UNDECLARED_TOOL}\")\n",
+		"set_directory_properties(PROPERTIES RULE_LAUNCH_CUSTOM unknown.exe)\n",
+		"add_custom_target(wrapper COMMAND \"${CMAKE_CTEST_COMMAND}\" --test-dir build)\n",
 	} {
 		fixture := newPlannerFixture(t)
 		if err := os.WriteFile(filepath.Join(fixture.sourceDir, "CMakeLists.txt"), []byte(contents), 0o600); err != nil {
@@ -192,6 +248,21 @@ func TestPlannerRejectsDynamicConfigureLaunchDeclarations(t *testing.T) {
 			t.Fatalf("Plan() error = %v, want dynamic configure launch rejection for %q", err, contents)
 		}
 	}
+	t.Run("Ninja wrapper", func(t *testing.T) {
+		fixture := newPlannerFixture(t)
+		ninja := filepath.Join(fixture.installation.Root, "bin", "ninja.exe")
+		contents := fmt.Sprintf("add_custom_target(wrapper COMMAND %q -f generated.ninja)\n", filepath.ToSlash(ninja))
+		if err := os.WriteFile(filepath.Join(fixture.sourceDir, "CMakeLists.txt"), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Plan(PlanInput{
+			Installation: fixture.installation, WorkspaceRoot: fixture.root,
+			Project: fixture.project, Profile: fixture.profile,
+			Toolchain: fixture.toolchain, Jobs: 1, Configure: true,
+		}); !errors.Is(err, task.ErrInvalidArgument) {
+			t.Fatalf("Plan() error = %v, want Ninja wrapper rejection", err)
+		}
+	})
 }
 
 func TestPlannerRejectsDynamicCustomCommandsAndUnboundedCMakeGraphs(t *testing.T) {
@@ -293,6 +364,7 @@ func TestPlannerInjectsOnlyTypedCoveragePathsForPresetAndGeneratedProfiles(t *te
 			fixture.profile.Origin = origin
 			if origin == "preset" {
 				fixture.profile.ConfigurePreset = "debug"
+				writePlannerPreset(t, fixture.sourceDir, "debug")
 			}
 			coverageBinaryDir := filepath.Join(fixture.dataRoot, "coverage-build", origin)
 			include := filepath.Join(fixture.dataRoot, "task", "coverage-instrumentation.cmake")
@@ -593,6 +665,7 @@ func TestPlannerInjectsOnlyManifestBoundUnityRunnerForPresetAndGeneratedConfigur
 			fixture.profile.Origin = origin
 			if origin == "preset" {
 				fixture.profile.ConfigurePreset = "debug"
+				writePlannerPreset(t, fixture.sourceDir, "debug")
 			}
 			plan, err := Plan(PlanInput{
 				Installation: fixture.installation, WorkspaceRoot: fixture.root,
@@ -617,6 +690,14 @@ func TestPlannerInjectsOnlyManifestBoundUnityRunnerForPresetAndGeneratedConfigur
 				t.Fatalf("reserved cache args = %#v, want exactly %q", args, want)
 			}
 		})
+	}
+}
+
+func writePlannerPreset(t *testing.T, sourceDir, name string) {
+	t.Helper()
+	document := fmt.Sprintf(`{"version":6,"configurePresets":[{"name":%q,"generator":"Ninja","binaryDir":"${sourceDir}/build"}]}`, name)
+	if err := os.WriteFile(filepath.Join(sourceDir, "CMakePresets.json"), []byte(document), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 

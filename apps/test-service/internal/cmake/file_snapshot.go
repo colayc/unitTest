@@ -3,11 +3,13 @@ package cmake
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // fileSnapshot pins one filesystem object while the resolver trusts its bytes.
@@ -26,6 +28,56 @@ type fileSnapshot struct {
 	info       os.FileInfo
 	digest     string
 	osIdentity string
+}
+
+// LaunchInputLease retains stable no-write/no-delete handles for every parsed
+// CMake input until the launched configure/build process has exited.
+type LaunchInputLease struct {
+	once      sync.Once
+	snapshots []*fileSnapshot
+	err       error
+}
+
+func RetainLaunchInputs(states []FingerprintFile, maximum int64) (*LaunchInputLease, error) {
+	lease := &LaunchInputLease{snapshots: make([]*fileSnapshot, 0, len(states))}
+	seen := make(map[string]struct{}, len(states))
+	fail := func() (*LaunchInputLease, error) {
+		_ = lease.Close()
+		return nil, fmt.Errorf("launch input changed")
+	}
+	for _, state := range states {
+		if !validFingerprintFile(state) {
+			return fail()
+		}
+		key := strings.ToLower(filepath.Clean(filepath.FromSlash(state.Path)))
+		if _, duplicate := seen[key]; duplicate {
+			return fail()
+		}
+		seen[key] = struct{}{}
+		snapshot, err := captureFileSnapshot(filepath.FromSlash(state.Path), maximum)
+		if err != nil || snapshot.Verify() != nil || snapshot.osIdentity != state.Identity ||
+			snapshot.digest != strings.ToLower(state.SHA256) {
+			if snapshot != nil {
+				_ = snapshot.Close()
+			}
+			return fail()
+		}
+		lease.snapshots = append(lease.snapshots, snapshot)
+	}
+	return lease, nil
+}
+
+func (lease *LaunchInputLease) Close() error {
+	if lease == nil {
+		return nil
+	}
+	lease.once.Do(func() {
+		for index := len(lease.snapshots) - 1; index >= 0; index-- {
+			lease.err = errors.Join(lease.err, lease.snapshots[index].Close())
+		}
+		lease.snapshots = nil
+	})
+	return lease.err
 }
 
 // SnapshotLaunchInput returns the exact bytes parsed for a closed native
