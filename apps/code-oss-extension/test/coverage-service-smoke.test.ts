@@ -46,6 +46,7 @@ import {
 } from "../src/service-manager.js";
 import { redactServiceError } from "../src/service-resources.js";
 import {
+  executeCoverageServiceSmoke,
   parseStrictJUnit,
   publishEvidenceAtomically,
   runAfterVerifiedCoverageToolsetPreflight,
@@ -678,7 +679,7 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
   t.after(async () => {
     try {
       await teardownThenPublish(
-        [stopService, cleanupFixture, closeOfflineBoundary],
+        [stopService, closeOfflineBoundary, cleanupFixture],
         async () => undefined
       );
     } catch (error) {
@@ -716,152 +717,169 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
     });
     if (gate.status === "skipped") return;
     const verifiedToolset = gate.value;
-    const useCMakeBundle = await pathExists(cmakeBundleRoot);
-    assert.equal(useCMakeBundle, true, "prepared CMake bundle root is unavailable");
-    manager = new ServiceManager({
-      serviceExecutable: fixture.serviceBinary,
-      workspaceRoot: fixture.workspace,
-      dataDirectory: fixture.dataDirectory,
-      timeoutMs: 120_000,
-      trusted: () => true,
-      operations: coverageOperations(
-        fixture,
-        wire,
-        tokens,
-        hostileEnvironmentValue,
-        useCMakeBundle
-      )
-    });
-    const session = await manager.start();
-    sensitive.push(session.endpoint, session.tokenFile, session.sessionDirectory, ...tokens);
-    wire.reset();
-
-    const capabilities = await session.client.getCapabilities();
-    assert.equal("coverageRun" in capabilities && capabilities.coverageRun, true);
-    assert.equal("coverageReport" in capabilities && capabilities.coverageReport, true);
-    const initial = await inspectSelected(session.client);
-    if (initial === undefined) {
-      throw new Error("preflight-verified clang-cl coverage toolset disappeared before inspection");
+    const installedBoundary = offlineBoundary;
+    if (installedBoundary === undefined) {
+      throw new Error("verified coverage execution has no WFP boundary");
     }
-    assert.equal(initial.toolchain.version, verifiedToolset.version);
+    const installedFixture = fixture;
+    if (installedFixture === undefined) {
+      throw new Error("verified coverage execution has no fixture");
+    }
+    await executeCoverageServiceSmoke({
+      boundary: installedBoundary,
+      async execute(boundarySignal) {
+        boundarySignal.throwIfAborted();
+        const useCMakeBundle = await pathExists(cmakeBundleRoot);
+        assert.equal(useCMakeBundle, true, "prepared CMake bundle root is unavailable");
+        manager = new ServiceManager({
+          serviceExecutable: installedFixture.serviceBinary,
+          workspaceRoot: installedFixture.workspace,
+          dataDirectory: installedFixture.dataDirectory,
+          timeoutMs: 120_000,
+          trusted: () => true,
+          operations: coverageOperations(
+            installedFixture,
+            wire,
+            tokens,
+            hostileEnvironmentValue,
+            useCMakeBundle
+          )
+        });
+        const session = await manager.start();
+        boundarySignal.throwIfAborted();
+        sensitive.push(session.endpoint, session.tokenFile, session.sessionDirectory, ...tokens);
+        wire.reset();
 
-    await writeWorkspaceConfig(fixture.workspace, initial.profile.buildProfileId);
-    const configured = await inspectSelected(session.client, initial.toolchain.toolchainId);
-    if (configured === undefined) throw new Error("configured clang-cl coverage profile is unavailable");
-    assert.equal(configured.profile.buildProfileId, initial.profile.buildProfileId);
-    let selected = await buildBaseProfile(session.client, configured);
-    const catalog = await discoverCatalog(session.client, selected);
-    selected = (await inspectSelected(session.client, selected.toolchain.toolchainId)) ?? selected;
+        const capabilities = await session.client.getCapabilities();
+        assert.equal("coverageRun" in capabilities && capabilities.coverageRun, true);
+        assert.equal("coverageReport" in capabilities && capabilities.coverageReport, true);
+        const initial = await inspectSelected(session.client);
+        if (initial === undefined) {
+          throw new Error("preflight-verified clang-cl coverage toolset disappeared before inspection");
+        }
+        assert.equal(initial.toolchain.version, verifiedToolset.version);
 
-    // Workspace inspection intentionally carries workspace URIs. The leak gate
-    // below is scoped to the coverage request/run/report/artifact exchange,
-    // whose public contract must never carry native execution paths.
-    wire.reset();
-    const coverageStartedAt = new Date();
-    const request: CoverageRunInput = {
-      idempotencyKey: randomBytes(16).toString("hex"),
-      workspaceGeneration: selected.snapshot.workspaceGeneration,
-      projectId: selected.projectId,
-      coverageProfileId: COVERAGE_PROFILE_ID,
-      catalogRevision: catalog.revision,
-      selection: { mode: TestSelectionModeV14.All },
-      repeatCount: 1,
-      timeoutMs: NATIVE_TIMEOUT_MS
-    };
-    const started = await session.client.startCoverage(request);
-    const run = await waitForCoverageFinished(session.client, started);
-    const coverageFinishedAt = new Date();
-    assert.equal(run.status, "finished");
-    assert.equal(run.outcome, "available");
-    assert.equal(run.reason, undefined);
-    assert.ok(run.reportId);
+        await writeWorkspaceConfig(installedFixture.workspace, initial.profile.buildProfileId);
+        const configured = await inspectSelected(session.client, initial.toolchain.toolchainId);
+        if (configured === undefined) throw new Error("configured clang-cl coverage profile is unavailable");
+        assert.equal(configured.profile.buildProfileId, initial.profile.buildProfileId);
+        let selected = await buildBaseProfile(session.client, configured);
+        const catalog = await discoverCatalog(session.client, selected);
+        selected = (await inspectSelected(session.client, selected.toolchain.toolchainId)) ?? selected;
 
-    const testRun = await session.client.getTestRun(run.testRunId);
-    assert.equal(testRun.status, "completed");
-    assert.equal(testRun.outcome, "failed");
-    assert.equal(testRun.incomplete, false);
-    assert.deepEqual(
-      {
-        total: testRun.summary.total,
-        completed: testRun.summary.completed,
-        passed: testRun.summary.passed,
-        failed: testRun.summary.failed
-      },
-      { total: 2, completed: 2, passed: 1, failed: 1 }
-    );
-
-    const report = await session.client.getCoverageReport(run.reportId);
-    assert.equal(report.coverageRunId, run.coverageRunId);
-    assert.equal(report.testRunId, run.testRunId);
-    assert.equal(report.completeness.outcome, "available");
-    assert.deepEqual(report.completeness.reasons, []);
-    assert.ok(report.summary.lines.covered > 0 && report.summary.lines.total > 0);
-    assert.ok(report.summary.branches.covered > 0);
-    assert.ok(report.summary.branches.covered < report.summary.branches.total);
-    assert.ok(report.summary.functions.covered > 0 && report.summary.functions.total > 0);
-
-    const artifacts = await fetchPublicArtifacts(session.client, run.taskId);
-    assert.equal(artifactByKind(artifacts, "coverage-json").metadata.artifactId, report.artifactId);
-    const document = decodeCoverageJSON(artifactByKind(artifacts, "coverage-json"));
-    assert.deepEqual(document.summary, report.summary);
-    assert.equal(document.files.some((file) => file.uri === "src/math.cpp"), true);
-    assert.equal(document.files.some((file) => file.uri.startsWith("test/")), false);
-    const junitArtifact = artifactByKind(artifacts, "junit-xml");
-    assert.equal(junitArtifact.kind, "junit-xml");
-    const junit = parseStrictJUnit(junitArtifact.bytes);
-    assert.deepEqual(junit, { tests: 2, failures: 1, errors: 0, skipped: 0 });
-
-    let openedHTML = "";
-    await openCoverageHtml(
-      { openCoverageHtml: (html) => { openedHTML = html; } },
-      {
-        kind: "coverage-html",
-        bytes: artifactByKind(artifacts, "coverage-html").bytes
-      }
-    );
-    assert.match(openedHTML, /Content-Security-Policy/u);
-    assert.match(openedHTML, /default-src 'none'/u);
-    assert.doesNotMatch(openedHTML, /https?:\/\//iu);
-
-    const toolVersion = assertProvenance(report, document);
-    assert.equal(toolVersion, selected.toolchain.version);
-    const coverageController = createCoverageController({
-      readContext: () => ({
-        trust: "trusted",
-        client: session.client,
-        serviceRunning: true,
-        workspaceGeneration: selected.snapshot.workspaceGeneration,
-        catalog: {
+        // Workspace inspection intentionally carries workspace URIs. The leak gate
+        // below is scoped to the coverage request/run/report/artifact exchange,
+        // whose public contract must never carry native execution paths.
+        wire.reset();
+        const coverageStartedAt = new Date();
+        const request: CoverageRunInput = {
+          idempotencyKey: randomBytes(16).toString("hex"),
+          workspaceGeneration: selected.snapshot.workspaceGeneration,
           projectId: selected.projectId,
-          profileId: selected.profile.buildProfileId,
-          revision: catalog.revision,
-          workspaceGeneration: selected.snapshot.workspaceGeneration
-        },
-        coverageProfileId: COVERAGE_PROFILE_ID
-      })
+          coverageProfileId: COVERAGE_PROFILE_ID,
+          catalogRevision: catalog.revision,
+          selection: { mode: TestSelectionModeV14.All },
+          repeatCount: 1,
+          timeoutMs: NATIVE_TIMEOUT_MS
+        };
+        const started = await session.client.startCoverage(request);
+        const run = await waitForCoverageFinished(session.client, started);
+        const coverageFinishedAt = new Date();
+        assert.equal(run.status, "finished");
+        assert.equal(run.outcome, "available");
+        assert.equal(run.reason, undefined);
+        assert.ok(run.reportId);
+
+        const testRun = await session.client.getTestRun(run.testRunId);
+        assert.equal(testRun.status, "completed");
+        assert.equal(testRun.outcome, "failed");
+        assert.equal(testRun.incomplete, false);
+        assert.deepEqual(
+          {
+            total: testRun.summary.total,
+            completed: testRun.summary.completed,
+            passed: testRun.summary.passed,
+            failed: testRun.summary.failed
+          },
+          { total: 2, completed: 2, passed: 1, failed: 1 }
+        );
+
+        const report = await session.client.getCoverageReport(run.reportId);
+        assert.equal(report.coverageRunId, run.coverageRunId);
+        assert.equal(report.testRunId, run.testRunId);
+        assert.equal(report.completeness.outcome, "available");
+        assert.deepEqual(report.completeness.reasons, []);
+        assert.ok(report.summary.lines.covered > 0 && report.summary.lines.total > 0);
+        assert.ok(report.summary.branches.covered > 0);
+        assert.ok(report.summary.branches.covered < report.summary.branches.total);
+        assert.ok(report.summary.functions.covered > 0 && report.summary.functions.total > 0);
+
+        const artifacts = await fetchPublicArtifacts(session.client, run.taskId);
+        assert.equal(artifactByKind(artifacts, "coverage-json").metadata.artifactId, report.artifactId);
+        const document = decodeCoverageJSON(artifactByKind(artifacts, "coverage-json"));
+        assert.deepEqual(document.summary, report.summary);
+        assert.equal(document.files.some((file) => file.uri === "src/math.cpp"), true);
+        assert.equal(document.files.some((file) => file.uri.startsWith("test/")), false);
+        const junitArtifact = artifactByKind(artifacts, "junit-xml");
+        assert.equal(junitArtifact.kind, "junit-xml");
+        const junit = parseStrictJUnit(junitArtifact.bytes);
+        assert.deepEqual(junit, { tests: 2, failures: 1, errors: 0, skipped: 0 });
+
+        let openedHTML = "";
+        await openCoverageHtml(
+          { openCoverageHtml: (html) => { openedHTML = html; } },
+          {
+            kind: "coverage-html",
+            bytes: artifactByKind(artifacts, "coverage-html").bytes
+          }
+        );
+        assert.match(openedHTML, /Content-Security-Policy/u);
+        assert.match(openedHTML, /default-src 'none'/u);
+        assert.doesNotMatch(openedHTML, /https?:\/\//iu);
+
+        const toolVersion = assertProvenance(report, document);
+        assert.equal(toolVersion, selected.toolchain.version);
+        const coverageController = createCoverageController({
+          readContext: () => ({
+            trust: "trusted",
+            client: session.client,
+            serviceRunning: true,
+            workspaceGeneration: selected.snapshot.workspaceGeneration,
+            catalog: {
+              projectId: selected.projectId,
+              profileId: selected.profile.buildProfileId,
+              revision: catalog.revision,
+              workspaceGeneration: selected.snapshot.workspaceGeneration
+            },
+            coverageProfileId: COVERAGE_PROFILE_ID
+          })
+        });
+        try {
+          const extensionState = await coverageController.refresh(run.coverageRunId);
+          assert.equal(extensionState.state, "available");
+          assert.equal(extensionState.reportId, report.reportId);
+          assert.deepEqual(extensionState.summary, report.summary);
+        } finally {
+          coverageController.dispose();
+        }
+
+        const protocolBytes = wire.bytes();
+        assertNoSensitiveBytes("Protocol v1.4 coverage exchange", protocolBytes, sensitive);
+        for (const artifact of artifacts) {
+          assertNoSensitiveBytes(`${artifact.kind} report`, artifact.bytes, sensitive);
+        }
+
+        const evidence = buildEvidence(verifiedToolset.digest, coverageStartedAt, coverageFinishedAt);
+        const expectedEvidenceBytes = Buffer.from(`${JSON.stringify(evidence)}\n`, "utf8");
+        assertNoSensitiveBytes("coverage execution evidence", expectedEvidenceBytes, sensitive);
+        boundarySignal.throwIfAborted();
+        return expectedEvidenceBytes;
+      },
+      stopService,
+      closeOfflineBoundary,
+      cleanupFixture,
+      publish: (bytes) => publishEvidenceAtomically(evidencePath, bytes)
     });
-    try {
-      const extensionState = await coverageController.refresh(run.coverageRunId);
-      assert.equal(extensionState.state, "available");
-      assert.equal(extensionState.reportId, report.reportId);
-      assert.deepEqual(extensionState.summary, report.summary);
-    } finally {
-      coverageController.dispose();
-    }
-
-    const protocolBytes = wire.bytes();
-    assertNoSensitiveBytes("Protocol v1.4 coverage exchange", protocolBytes, sensitive);
-    for (const artifact of artifacts) {
-      assertNoSensitiveBytes(`${artifact.kind} report`, artifact.bytes, sensitive);
-    }
-
-    const evidence = buildEvidence(verifiedToolset.digest, coverageStartedAt, coverageFinishedAt);
-    const expectedEvidenceBytes = Buffer.from(`${JSON.stringify(evidence)}\n`, "utf8");
-    assertNoSensitiveBytes("coverage execution evidence", expectedEvidenceBytes, sensitive);
-    await teardownThenPublish(
-      [stopService, cleanupFixture, closeOfflineBoundary],
-      () => publishEvidenceAtomically(evidencePath, expectedEvidenceBytes)
-    );
   } catch (error) {
     throw redactServiceError(error, sensitive);
   }

@@ -27,8 +27,9 @@ const (
 type guardianErrorCode byte
 
 const (
-	guardianErrorStartup         guardianErrorCode = 1
-	guardianErrorWFPAccessDenied guardianErrorCode = 2
+	guardianErrorStartup            guardianErrorCode = 1
+	guardianErrorWFPAccessDenied    guardianErrorCode = 2
+	guardianErrorSessionCloseFailed guardianErrorCode = 3
 )
 
 type guardianFrame struct {
@@ -113,7 +114,7 @@ func writeGuardianWireFrame(writer io.Writer, payload []byte) error {
 
 func validGuardianErrorCode(code guardianErrorCode) bool {
 	switch code {
-	case guardianErrorStartup, guardianErrorWFPAccessDenied:
+	case guardianErrorStartup, guardianErrorWFPAccessDenied, guardianErrorSessionCloseFailed:
 		return true
 	default:
 		return false

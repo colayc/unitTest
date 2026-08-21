@@ -127,3 +127,53 @@ Pinned commands used Node 24.19.0, pnpm 11.4.0, Go 1.26.6,
   checks pass independently.
 - Temporary caches, Linux binaries and the pnpm shim are removed before commit.
   No push is performed.
+
+## Review fix round 1 — lifecycle closure
+
+The first Task 5 review rejected four lifecycle gaps. Each correction was
+developed from an observed RED regression before production changes:
+
+- Coverage smoke teardown previously ran Service stop, fixture deletion and
+  guardian close in that order. The new ownership-order regression failed
+  until the flow became Service stop, guardian close, fixture deletion and
+  only then atomic evidence publication. The guardian executable therefore
+  remains present until the guardian has exited.
+- TypeScript previously stopped reading after `Ready`, so a guardian crash was
+  discovered only during teardown. The new post-Ready tests failed until the
+  boundary continuously raced the already-pending next frame and child exit.
+  `runGuarded` now checks liveness before starting native work, aborts an
+  in-flight callback through `AbortSignal`, invokes bounded Service cleanup,
+  and prevents evidence publication on boundary loss.
+- `GuardianFrameReader.fail` previously recorded failure without rejecting its
+  pending read. A real connected-socket regression hung until the reader began
+  rejecting its waiter on error, end and close. Startup, Release/Bye, child
+  exit and termination waits are now bounded; termination waits for child exit
+  rather than returning immediately.
+- Go Add, Audit and Ready startup failures previously ignored `engine.Close`
+  errors. Fault injection failed until each path joined the primary error,
+  `SessionCloseFailed` and the close error, closed exactly once, and used fixed
+  session-close protocol code 3. A joined access-denied primary can therefore
+  never become a local `WFPAccessDenied` skip when cleanup was not proved.
+
+Fresh review-round verification used the same pinned Node 24.19.0, pnpm
+11.4.0 and Go 1.26.6 setup:
+
+- Focused WFP lifecycle/public-wrapper tests: PASS, 16/16.
+- Focused Extension sequencing, teardown and publication tests: PASS, 14/14.
+- Full Service Probe: PASS, 72 pass / 1 honest `ToolchainUnavailable` skip.
+- Full Extension: PASS, 138/138.
+- Full workspace package tests: PASS, including the same 72/1 Service Probe
+  result and Extension 138/138.
+- Full Go Service, race and vet: PASS.
+- Linux offlineboundary test compile and native guardian build: PASS.
+- Protocol/coverage generated checks and root build: PASS.
+- Exact root test: generator 4/4, CMake bundle 28/28 and coverage bundle
+  34 pass / 1 existing Python `EPERM` skip, then the same environment-only
+  workspace failure `spawnSync cmake ENOENT` (21/22). Package and Go suites
+  were run separately and passed.
+- `git diff --check`: PASS.
+
+The current host still has no WFP management permission, verified LLVM or
+`cmake` on `PATH`; no native privileged PASS was inferred from the review
+controls. The required Windows CI commands remain the authoritative positive
+executor. No push was performed.

@@ -6,6 +6,11 @@ import {
   installWindowsNativeOfflineBoundary,
 } from "./native-network-guard.js";
 
+function deferred<T>(): { readonly promise: Promise<T>; resolve(value: T): void } {
+  let resolvePromise!: (value: T) => void;
+  return { promise: new Promise<T>((resolve) => { resolvePromise = resolve; }), resolve: resolvePromise };
+}
+
 test("native E2E network guard rejects HTTP(S) entry points and restores state", () => {
   const originalRequest = http.request;
   const restore = installNativeHttpNetworkGuard();
@@ -19,6 +24,8 @@ test("native E2E network guard rejects HTTP(S) entry points and restores state",
 
 test("public Windows native offline boundary export keeps the boundary contract", async () => {
   const originalRequest = http.request;
+  const bye = deferred<{ readonly kind: "Bye" }>();
+  const exited = deferred<void>();
   const boundary = await installWindowsNativeOfflineBoundary({
     __dependencies: {
       platform: "win32",
@@ -28,18 +35,26 @@ test("public Windows native offline boundary export keeps the boundary contract"
         stderr: "",
       }),
       startGuardian: async () => {
-        const inbound = [{ kind: "Hello" as const }, { kind: "Ready" as const }, { kind: "Bye" as const }];
+        const inbound = [{ kind: "Hello" as const }, { kind: "Ready" as const }, bye.promise];
         return {
-          async readFrame() { return inbound.shift()!; },
-          async writeFrame() {},
-          async waitForExit() {},
-          terminate() {},
+          async readFrame() { return await inbound.shift()!; },
+          async writeFrame() {
+            bye.resolve({ kind: "Bye" });
+            setImmediate(() => exited.resolve());
+          },
+          async waitForExit() { await exited.promise; },
+          terminate() { exited.resolve(); },
         };
       },
     },
   });
   assert.equal(typeof boundary.ruleName, "string");
   assert.throws(() => http.request("http://127.0.0.1/"), /network guard/u);
+  const guarded = await boundary.runGuarded(async (signal) => {
+    assert.equal(signal.aborted, false);
+    return "native-result";
+  });
+  assert.equal(guarded, "native-result");
   await boundary.close();
   assert.equal(http.request, originalRequest);
 });

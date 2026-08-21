@@ -231,6 +231,35 @@ export async function teardownThenPublish(
   await publish();
 }
 
+export interface CoverageServiceSmokeBoundary {
+  runGuarded<Result>(
+    execute: (signal: AbortSignal) => Promise<Result>,
+    onBoundaryLoss?: () => Promise<void>
+  ): Promise<Result>;
+}
+
+export interface CoverageServiceSmokeExecution<Result> {
+  readonly boundary: CoverageServiceSmokeBoundary;
+  readonly execute: (signal: AbortSignal) => Promise<Result>;
+  readonly stopService: () => Promise<void>;
+  readonly closeOfflineBoundary: () => Promise<void>;
+  readonly cleanupFixture: () => Promise<void>;
+  readonly publish: (result: Result) => Promise<void>;
+}
+
+/** Runs native work under guardian liveness, then tears down in ownership order before publishing. */
+export async function executeCoverageServiceSmoke<Result>(
+  execution: CoverageServiceSmokeExecution<Result>
+): Promise<Result> {
+  const result = await execution.boundary.runGuarded(execution.execute, execution.stopService);
+  await teardownThenPublish([
+    execution.stopService,
+    execution.closeOfflineBoundary,
+    execution.cleanupFixture
+  ], () => execution.publish(result));
+  return result;
+}
+
 class StrictXMLTokenizer {
   readonly #pending: XMLToken[] = [];
   #index: number;

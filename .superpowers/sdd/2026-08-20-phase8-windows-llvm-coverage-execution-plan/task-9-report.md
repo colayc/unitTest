@@ -784,3 +784,18 @@ environment-limited solely by `spawnSync cmake ENOENT`; package suites were run
 and passed separately. Detailed RED/GREEN commands, security review, exact
 skip/fail boundaries and handoff concerns are recorded in
 `.superpowers/sdd/2026-08-21-windows-wfp-offline-boundary-plan/task-5-report.md`.
+
+### Task 5 review fix round 1
+
+Review follow-up closed the remaining native-boundary lifecycle gaps. Coverage
+smoke now stops Service, closes the guardian, removes its fixture and only then
+publishes evidence. The TypeScript boundary monitors socket frames and child
+exit continuously after `Ready`, rejects pending reads on every terminal socket
+event, bounds close/termination, and aborts guarded native work plus Service
+cleanup on liveness loss. Go Add/Audit/Ready failures now join every engine
+close failure with `SessionCloseFailed` and report fixed cleanup code 3 before
+any access-denied classification. Focused regressions, full Service Probe and
+Extension suites, full Go/race/vet, Linux cross-compiles, generated checks and
+root build passed; the exact root test retained only the previously documented
+host `cmake ENOENT` boundary. Detailed RED/GREEN evidence is in the Task 5
+report.

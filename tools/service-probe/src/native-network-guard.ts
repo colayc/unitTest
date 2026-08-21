@@ -12,6 +12,10 @@ let installed = false;
 
 export interface WindowsNativeOfflineBoundary {
   readonly ruleName: string;
+  runGuarded<Result>(
+    execute: (signal: AbortSignal) => Promise<Result>,
+    onBoundaryLoss?: () => Promise<void>,
+  ): Promise<Result>;
   close(): Promise<void>;
 }
 
@@ -70,6 +74,12 @@ export async function installWindowsNativeOfflineBoundary(
   let closed = false;
   return {
     ruleName: result.boundary.ruleName,
+    async runGuarded<Result>(
+      execute: (signal: AbortSignal) => Promise<Result>,
+      onBoundaryLoss?: () => Promise<void>,
+    ): Promise<Result> {
+      return await result.boundary.runGuarded(execute, onBoundaryLoss);
+    },
     async close(): Promise<void> {
       if (closed) return;
       await result.boundary.close();

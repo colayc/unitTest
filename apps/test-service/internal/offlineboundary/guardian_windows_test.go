@@ -127,8 +127,8 @@ func TestGuardianLifecycleRejectsWrongOrderTimeoutAndCrash(t *testing.T) {
 	t.Run("wrong order", func(t *testing.T) {
 		session := newScriptedGuardianSession()
 		boundary := New(Config{
-			ownerVerifier: funcVerifierForOwner(7, 8),
-			guardianFactory: func(context.Context, OwnerIdentity) (guardianSession, error) { return session, nil },
+			ownerVerifier:          funcVerifierForOwner(7, 8),
+			guardianFactory:        func(context.Context, OwnerIdentity) (guardianSession, error) { return session, nil },
 			guardianReadyTimeout:   time.Second,
 			guardianReleaseTimeout: time.Second,
 		})
@@ -149,8 +149,8 @@ func TestGuardianLifecycleRejectsWrongOrderTimeoutAndCrash(t *testing.T) {
 	t.Run("ready timeout", func(t *testing.T) {
 		session := newScriptedGuardianSession()
 		boundary := New(Config{
-			ownerVerifier: funcVerifierForOwner(7, 8),
-			guardianFactory: func(context.Context, OwnerIdentity) (guardianSession, error) { return session, nil },
+			ownerVerifier:          funcVerifierForOwner(7, 8),
+			guardianFactory:        func(context.Context, OwnerIdentity) (guardianSession, error) { return session, nil },
 			guardianReadyTimeout:   25 * time.Millisecond,
 			guardianReleaseTimeout: time.Second,
 		})
@@ -168,8 +168,8 @@ func TestGuardianLifecycleRejectsWrongOrderTimeoutAndCrash(t *testing.T) {
 	t.Run("crash before ready", func(t *testing.T) {
 		session := newScriptedGuardianSession()
 		boundary := New(Config{
-			ownerVerifier: funcVerifierForOwner(7, 8),
-			guardianFactory: func(context.Context, OwnerIdentity) (guardianSession, error) { return session, nil },
+			ownerVerifier:          funcVerifierForOwner(7, 8),
+			guardianFactory:        func(context.Context, OwnerIdentity) (guardianSession, error) { return session, nil },
 			guardianReadyTimeout:   time.Second,
 			guardianReleaseTimeout: time.Second,
 		})
@@ -189,8 +189,8 @@ func TestGuardianLifecycleRejectsWrongOrderTimeoutAndCrash(t *testing.T) {
 	t.Run("release timeout returns same canonical timeout result", func(t *testing.T) {
 		session := newScriptedGuardianSession()
 		boundary := New(Config{
-			ownerVerifier: funcVerifierForOwner(7, 8),
-			guardianFactory: func(context.Context, OwnerIdentity) (guardianSession, error) { return session, nil },
+			ownerVerifier:          funcVerifierForOwner(7, 8),
+			guardianFactory:        func(context.Context, OwnerIdentity) (guardianSession, error) { return session, nil },
 			guardianReadyTimeout:   time.Second,
 			guardianReleaseTimeout: 25 * time.Millisecond,
 		})
@@ -220,8 +220,8 @@ func TestGuardianLifecycleRejectsWrongOrderTimeoutAndCrash(t *testing.T) {
 		session := newScriptedGuardianSession()
 		session.sendErr = errors.New(`write \\.\pipe\offlineboundary-secret: access denied`)
 		boundary := New(Config{
-			ownerVerifier: funcVerifierForOwner(7, 8),
-			guardianFactory: func(context.Context, OwnerIdentity) (guardianSession, error) { return session, nil },
+			ownerVerifier:          funcVerifierForOwner(7, 8),
+			guardianFactory:        func(context.Context, OwnerIdentity) (guardianSession, error) { return session, nil },
 			guardianReadyTimeout:   time.Second,
 			guardianReleaseTimeout: time.Second,
 		})
@@ -253,8 +253,8 @@ func TestGuardianLifecycleRejectsWrongOrderTimeoutAndCrash(t *testing.T) {
 	t.Run("bye then process wait failure is canonical and sanitized", func(t *testing.T) {
 		session := newScriptedGuardianSession()
 		boundary := New(Config{
-			ownerVerifier: funcVerifierForOwner(7, 8),
-			guardianFactory: func(context.Context, OwnerIdentity) (guardianSession, error) { return session, nil },
+			ownerVerifier:          funcVerifierForOwner(7, 8),
+			guardianFactory:        func(context.Context, OwnerIdentity) (guardianSession, error) { return session, nil },
 			guardianReadyTimeout:   time.Second,
 			guardianReleaseTimeout: time.Second,
 		})
@@ -294,6 +294,26 @@ func TestGuardianLifecycleRejectsWrongOrderTimeoutAndCrash(t *testing.T) {
 	})
 }
 
+func TestGuardianStartupCleanupErrorFrameMapsToSessionCloseFailure(t *testing.T) {
+	session := newScriptedGuardianSession()
+	boundary := New(Config{
+		ownerVerifier:          funcVerifierForOwner(42, 99),
+		guardianFactory:        func(context.Context, OwnerIdentity) (guardianSession, error) { return session, nil },
+		guardianReadyTimeout:   time.Second,
+		guardianReleaseTimeout: time.Second,
+	})
+	lease, err := boundary.Start(context.Background(), OwnerIdentity{PID: 42, CreationTime: 99})
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	session.pushInbound(guardianFrame{Kind: guardianFrameHello})
+	session.pushInbound(guardianFrame{Kind: guardianFrameError, Code: guardianErrorSessionCloseFailed})
+	if err := lease.Wait(); !errors.Is(err, SessionCloseFailed) {
+		t.Fatalf("Wait() error = %v, want SessionCloseFailed", err)
+	}
+	session.finish(errors.New("guardian exited after cleanup failure"))
+}
+
 func TestGuardianRunClosesSessionAndSendsByeWhenOwnerTerminates(t *testing.T) {
 	session := newScriptedGuardianSession()
 	engine := &fakeWfpEngine{}
@@ -321,6 +341,76 @@ func TestGuardianRunClosesSessionAndSendsByeWhenOwnerTerminates(t *testing.T) {
 	}
 	if engine.closeCalls != 1 {
 		t.Fatalf("engine close calls = %d, want 1", engine.closeCalls)
+	}
+}
+
+func TestGuardianRunJoinsStartupEngineCloseFailuresAndNeverReportsAccessDeniedSkip(t *testing.T) {
+	closeFailure := errors.New("injected engine close failure")
+	tests := []struct {
+		name          string
+		engine        *faultingGuardianEngine
+		readySendErr  error
+		wantPrimary   error
+		wantErrorCode guardianErrorCode
+	}{
+		{
+			name:          "add failure",
+			engine:        &faultingGuardianEngine{addErr: WFPAccessDenied, closeErr: closeFailure},
+			wantPrimary:   WFPAccessDenied,
+			wantErrorCode: guardianErrorSessionCloseFailed,
+		},
+		{
+			name:          "audit failure",
+			engine:        &faultingGuardianEngine{auditErr: FilterAuditFailed, closeErr: closeFailure},
+			wantPrimary:   FilterAuditFailed,
+			wantErrorCode: guardianErrorSessionCloseFailed,
+		},
+		{
+			name:          "ready send failure",
+			engine:        &faultingGuardianEngine{closeErr: closeFailure},
+			readySendErr:  errors.New("injected ready send failure"),
+			wantErrorCode: guardianErrorSessionCloseFailed,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			session := newScriptedGuardianSession()
+			session.sendErrKind = guardianFrameReady
+			session.sendErr = test.readySendErr
+			ownerDone := make(chan struct{})
+			err := runGuardianLoop(context.Background(), guardianRuntime{
+				session:       session,
+				engineFactory: func() (wfpEngine, error) { return test.engine, nil },
+				leaseIDSource: func() []byte { return []byte("lease-id") },
+				owner:         fakeGuardianOwnerWatcher{done: ownerDone},
+			}, OwnerIdentity{PID: 9, CreationTime: 10})
+
+			if !errors.Is(err, SessionCloseFailed) {
+				t.Fatalf("runGuardianLoop() error = %v, want SessionCloseFailed", err)
+			}
+			if !errors.Is(err, closeFailure) {
+				t.Fatalf("runGuardianLoop() error = %v, want injected close failure", err)
+			}
+			if test.wantPrimary != nil && !errors.Is(err, test.wantPrimary) {
+				t.Fatalf("runGuardianLoop() error = %v, want primary %v", err, test.wantPrimary)
+			}
+			if test.readySendErr != nil && !errors.Is(err, test.readySendErr) {
+				t.Fatalf("runGuardianLoop() error = %v, want ready send failure", err)
+			}
+			if test.engine.closeCalls != 1 {
+				t.Fatalf("engine close calls = %d, want 1", test.engine.closeCalls)
+			}
+			if got := session.nextOutbound(t).Kind; got != guardianFrameHello {
+				t.Fatalf("first outbound kind = %v, want hello", got)
+			}
+			if test.wantErrorCode != 0 {
+				frame := session.nextOutbound(t)
+				if frame.Kind != guardianFrameError || frame.Code != test.wantErrorCode {
+					t.Fatalf("startup error frame = %#v, want code %v", frame, test.wantErrorCode)
+				}
+			}
+		})
 	}
 }
 
@@ -375,11 +465,12 @@ func TestGuardianExecutablePathUsesExplicitCallerConfig(t *testing.T) {
 }
 
 type scriptedGuardianSession struct {
-	inbound  chan guardianFrame
-	outbound chan guardianFrame
-	waitErr  chan error
-	sendErr  error
-	closeOnce sync.Once
+	inbound     chan guardianFrame
+	outbound    chan guardianFrame
+	waitErr     chan error
+	sendErr     error
+	sendErrKind guardianFrameKind
+	closeOnce   sync.Once
 }
 
 type fakeGuardianOwnerWatcher struct {
@@ -404,11 +495,31 @@ func (session *scriptedGuardianSession) Receive(context.Context) (guardianFrame,
 }
 
 func (session *scriptedGuardianSession) Send(_ context.Context, frame guardianFrame) error {
-	if session.sendErr != nil {
+	if session.sendErr != nil && (session.sendErrKind == 0 || session.sendErrKind == frame.Kind) {
 		return session.sendErr
 	}
 	session.outbound <- frame
 	return nil
+}
+
+type faultingGuardianEngine struct {
+	addErr     error
+	auditErr   error
+	closeErr   error
+	closeCalls int
+}
+
+func (engine *faultingGuardianEngine) AddOutboundBlockFilters(context.Context, []byte) error {
+	return engine.addErr
+}
+
+func (engine *faultingGuardianEngine) AuditOutboundBlockFilters(context.Context, []byte) error {
+	return engine.auditErr
+}
+
+func (engine *faultingGuardianEngine) Close() error {
+	engine.closeCalls++
+	return engine.closeErr
 }
 
 func (session *scriptedGuardianSession) Wait() error {

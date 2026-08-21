@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  executeCoverageServiceSmoke,
   parseStrictJUnit,
   publishEvidenceAtomically,
   runAfterVerifiedCoverageToolsetPreflight,
@@ -228,10 +229,10 @@ test("teardown failure runs every cleanup and suppresses evidence publication", 
           throw new Error("injected service teardown fault");
         },
         async () => {
-          trace.push("fixture-cleanup");
+          trace.push("offline-cleanup");
         },
         async () => {
-          trace.push("offline-cleanup");
+          trace.push("fixture-cleanup");
         }
       ], async () => {
         trace.push("publish");
@@ -239,7 +240,7 @@ test("teardown failure runs every cleanup and suppresses evidence publication", 
       }),
       /coverage smoke teardown failed/u
     );
-    assert.deepEqual(trace, ["service-stop", "fixture-cleanup", "offline-cleanup"]);
+    assert.deepEqual(trace, ["service-stop", "offline-cleanup", "fixture-cleanup"]);
     await assert.rejects(readFile(target), /ENOENT/u);
     assert.deepEqual(await readdir(root), []);
   } finally {
@@ -251,12 +252,59 @@ test("evidence publication occurs only after every teardown succeeds", async () 
   const trace: string[] = [];
   await teardownThenPublish([
     async () => { trace.push("service-stop"); },
-    async () => { trace.push("fixture-cleanup"); },
-    async () => { trace.push("offline-cleanup"); }
+    async () => { trace.push("offline-cleanup"); },
+    async () => { trace.push("fixture-cleanup"); }
   ], async () => {
     trace.push("publish");
   });
-  assert.deepEqual(trace, ["service-stop", "fixture-cleanup", "offline-cleanup", "publish"]);
+  assert.deepEqual(trace, ["service-stop", "offline-cleanup", "fixture-cleanup", "publish"]);
+});
+
+test("coverage smoke stops Service, closes the guardian, removes its fixture, then publishes", async () => {
+  const trace: string[] = [];
+  const value = await executeCoverageServiceSmoke({
+    boundary: {
+      async runGuarded(execute) {
+        trace.push("guarded");
+        return await execute(new AbortController().signal);
+      }
+    },
+    async execute() { trace.push("native"); return 7; },
+    async stopService() { trace.push("service-stop"); },
+    async closeOfflineBoundary() { trace.push("guardian-close"); },
+    async cleanupFixture() { trace.push("fixture-cleanup"); },
+    async publish() { trace.push("publish"); }
+  });
+  assert.equal(value, 7);
+  assert.deepEqual(trace, [
+    "guarded",
+    "native",
+    "service-stop",
+    "guardian-close",
+    "fixture-cleanup",
+    "publish"
+  ]);
+});
+
+test("guardian loss before native execution suppresses the callback and evidence publication", async () => {
+  const trace: string[] = [];
+  await assert.rejects(
+    executeCoverageServiceSmoke({
+      boundary: {
+        async runGuarded() {
+          trace.push("guardian-lost");
+          throw new Error("guardian liveness was lost; WFP boundary failed closed");
+        }
+      },
+      async execute() { trace.push("native"); },
+      async stopService() { trace.push("service-stop"); },
+      async closeOfflineBoundary() { trace.push("guardian-close"); },
+      async cleanupFixture() { trace.push("fixture-cleanup"); },
+      async publish() { trace.push("publish"); }
+    }),
+    /guardian liveness was lost/u
+  );
+  assert.deepEqual(trace, ["guardian-lost"]);
 });
 
 function junit(
