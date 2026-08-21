@@ -65,3 +65,56 @@ Covered behaviors in `guardian_windows_test.go`:
 ## Commit
 
 - Local commit created for this task: `feat: add WFP guardian process lifecycle` (final HEAD at handoff)
+
+## Fix round1 (review findings)
+
+### Root cause summary
+
+- The first Task 2 implementation used a raw hand-rolled Windows named pipe instead of one of the accepted IPC mechanisms from the brief/review.
+- Protocol parsing validated frame kinds but did not close the `error` frame code space.
+- Public errors still allowed raw launcher / verifier / process / IPC causes to escape through `Start`, `Close`, or guardian stderr.
+- The initial report did not lock the release-timeout / no-`bye` / no-exit close path in tests.
+- Guardian executable discovery was still an implicit sibling-binary assumption with no caller-supplied contract.
+
+### Fixes applied
+
+- Replaced the raw pipe setup with `go-winio` pipe listener/dial transport.
+- Tightened protocol validation so `guardianFrameError` accepts only explicit enum members (`guardianErrorStartup` today); unknown codes are rejected as malformed.
+- Collapsed public/API/main-visible failures to canonical sentinels:
+  - owner validation → `ErrOwnerIdentityMismatch`
+  - guardian start / child bootstrap failures → `GuardianStartFailed`
+  - release/close failures → `SessionCloseFailed` and timeout classification via `GuardianTimeout`
+- Added release-timeout regression coverage to ensure `Close()` does not report success early and repeated `Close()` returns the same canonical result.
+- Added an explicit caller-provided guardian executable path contract through config-based resolution; runtime still defaults to sibling-binary lookup when the caller does not override it.
+
+### Additional RED/GREEN evidence
+
+Focused RED for review-fix tests:
+
+- `go test ./apps/test-service/internal/offlineboundary -run 'Guardian|Protocol|Owner|Release' -count=1`
+  - RED evidence: compile failed first because the new explicit executable-path contract test referenced missing config/resolve symbols.
+
+Focused GREEN after fixes:
+
+- `go test ./apps/test-service/internal/offlineboundary -run 'Guardian|Protocol|Owner|Release' -count=1`
+  - Result: `ok  	unit-test-ide.local/test-service/internal/offlineboundary	0.108s`
+
+Re-run required gates after fix round1:
+
+- `$env:GOOS='linux'; $env:GOARCH='amd64'; $env:CGO_ENABLED='0'; go test -c ./apps/test-service/cmd/native-offline-guardian`
+  - Result: `?   	unit-test-ide.local/test-service/cmd/native-offline-guardian	[no test files]`
+
+- `go vet ./apps/test-service/internal/offlineboundary ./apps/test-service/cmd/native-offline-guardian`
+  - Result: exit 0, no output
+
+### Additional behaviors now covered
+
+- malformed `error` frame code is rejected
+- release timeout with no `bye` / no guardian exit returns a canonical close failure and repeated `Close()` returns the same result
+- owner-verifier and guardian-launcher failures do not leak absolute paths
+- guardian executable path can be supplied explicitly by the caller config
+
+### Updated concerns
+
+- The executable-path contract is now explicit and test-covered, but the default production wiring still falls back to sibling-binary discovery when callers do not override it. Task 3 or higher-level integration still needs to decide the final deployment handoff.
+- Lifecycle coverage is still package-level. There is not yet an end-to-end Windows test that spawns the compiled guardian binary over the real `go-winio` transport in CI.

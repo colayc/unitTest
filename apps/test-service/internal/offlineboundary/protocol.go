@@ -54,6 +54,9 @@ func readGuardianFrame(reader io.Reader) (guardianFrame, error) {
 			return guardianFrame{}, errGuardianFrameInvalid
 		}
 		frame.Code = guardianErrorCode(payload[1])
+		if !validGuardianErrorCode(frame.Code) {
+			return guardianFrame{}, errGuardianFrameInvalid
+		}
 	default:
 		return guardianFrame{}, errGuardianFrameInvalid
 	}
@@ -65,6 +68,9 @@ func writeGuardianFrame(writer io.Writer, frame guardianFrame) error {
 	switch frame.Kind {
 	case guardianFrameHello, guardianFrameReady, guardianFrameRelease, guardianFrameBye:
 	case guardianFrameError:
+		if !validGuardianErrorCode(frame.Code) {
+			return errGuardianFrameInvalid
+		}
 		payload = append(payload, byte(frame.Code))
 	default:
 		return fmt.Errorf("%w: kind %d", errGuardianFrameInvalid, frame.Kind)
@@ -102,4 +108,13 @@ func writeGuardianWireFrame(writer io.Writer, payload []byte) error {
 	}
 	_, err := writer.Write(payload)
 	return err
+}
+
+func validGuardianErrorCode(code guardianErrorCode) bool {
+	switch code {
+	case guardianErrorStartup:
+		return true
+	default:
+		return false
+	}
 }

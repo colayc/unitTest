@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -31,6 +32,17 @@ func TestProtocolRejectsOversizedAndUnknownFrames(t *testing.T) {
 	t.Run("unknown kind", func(t *testing.T) {
 		var wire bytes.Buffer
 		if err := writeGuardianWireFrame(&wire, []byte{0xff}); err != nil {
+			t.Fatalf("writeGuardianWireFrame() error = %v", err)
+		}
+
+		if _, err := readGuardianFrame(&wire); !errors.Is(err, errGuardianFrameInvalid) {
+			t.Fatalf("readGuardianFrame() error = %v, want errGuardianFrameInvalid", err)
+		}
+	})
+
+	t.Run("unknown error code", func(t *testing.T) {
+		var wire bytes.Buffer
+		if err := writeGuardianWireFrame(&wire, []byte{byte(guardianFrameError), 0xff}); err != nil {
 			t.Fatalf("writeGuardianWireFrame() error = %v", err)
 		}
 
@@ -173,6 +185,36 @@ func TestGuardianLifecycleRejectsWrongOrderTimeoutAndCrash(t *testing.T) {
 			t.Fatalf("Wait() error = %v, want GuardianStartFailed", err)
 		}
 	})
+
+	t.Run("release timeout returns same canonical close result", func(t *testing.T) {
+		session := newScriptedGuardianSession()
+		boundary := New(Config{
+			ownerVerifier: funcVerifierForOwner(7, 8),
+			guardianFactory: func(context.Context, OwnerIdentity) (guardianSession, error) { return session, nil },
+			guardianReadyTimeout:   time.Second,
+			guardianReleaseTimeout: 25 * time.Millisecond,
+		})
+
+		lease, err := boundary.Start(context.Background(), OwnerIdentity{PID: 7, CreationTime: 8})
+		if err != nil {
+			t.Fatalf("Start() error = %v", err)
+		}
+		session.pushInbound(guardianFrame{Kind: guardianFrameHello})
+		session.pushInbound(guardianFrame{Kind: guardianFrameReady})
+		<-lease.Ready()
+
+		err = lease.Close()
+		if !errors.Is(err, SessionCloseFailed) {
+			t.Fatalf("first Close() error = %v, want SessionCloseFailed", err)
+		}
+		err2 := lease.Close()
+		if !errors.Is(err2, SessionCloseFailed) {
+			t.Fatalf("second Close() error = %v, want SessionCloseFailed", err2)
+		}
+		if err2.Error() != err.Error() {
+			t.Fatalf("second Close() = %q, want same canonical result as %q", err2.Error(), err.Error())
+		}
+	})
 }
 
 func TestGuardianRunClosesSessionAndSendsByeWhenOwnerTerminates(t *testing.T) {
@@ -202,6 +244,56 @@ func TestGuardianRunClosesSessionAndSendsByeWhenOwnerTerminates(t *testing.T) {
 	}
 	if engine.closeCalls != 1 {
 		t.Fatalf("engine close calls = %d, want 1", engine.closeCalls)
+	}
+}
+
+func TestGuardianStartSanitizesVerifierAndLauncherFailures(t *testing.T) {
+	t.Run("owner verifier failure", func(t *testing.T) {
+		_, err := New(Config{
+			ownerVerifier: guardianOwnerVerifierFunc(func(uint32) (uint64, error) {
+				return 0, errors.New(`C:\secret\owner-verifier\failure.txt`)
+			}),
+		}).Start(context.Background(), OwnerIdentity{PID: 12, CreationTime: 34})
+		if err == nil {
+			t.Fatal("Start() error = nil")
+		}
+		if strings.Contains(err.Error(), `C:\`) {
+			t.Fatalf("Start() leaked path in error %q", err)
+		}
+		if !errors.Is(err, ErrOwnerIdentityMismatch) && !errors.Is(err, GuardianStartFailed) {
+			t.Fatalf("Start() error = %v, want canonical sentinel", err)
+		}
+	})
+
+	t.Run("guardian launcher failure", func(t *testing.T) {
+		_, err := New(Config{
+			ownerVerifier: funcVerifierForOwner(12, 34),
+			guardianFactory: func(context.Context, OwnerIdentity) (guardianSession, error) {
+				return nil, errors.New(`CreateProcess C:\very\secret\native-offline-guardian.exe failed`)
+			},
+		}).Start(context.Background(), OwnerIdentity{PID: 12, CreationTime: 34})
+		if err == nil {
+			t.Fatal("Start() error = nil")
+		}
+		if strings.Contains(err.Error(), `C:\`) {
+			t.Fatalf("Start() leaked path in error %q", err)
+		}
+		if !errors.Is(err, GuardianStartFailed) {
+			t.Fatalf("Start() error = %v, want GuardianStartFailed", err)
+		}
+	})
+}
+
+func TestGuardianExecutablePathUsesExplicitCallerConfig(t *testing.T) {
+	path := `C:\callers\provided\native-offline-guardian.exe`
+	boundary := New(Config{guardianExecutablePath: path}).(*boundary)
+
+	got, err := boundary.resolveGuardianExecutablePath()
+	if err != nil {
+		t.Fatalf("resolveGuardianExecutablePath() error = %v", err)
+	}
+	if got != path {
+		t.Fatalf("resolveGuardianExecutablePath() = %q, want %q", got, path)
 	}
 }
 

@@ -6,15 +6,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"sync"
-	"syscall"
 	"time"
-	"unsafe"
 
+	"github.com/Microsoft/go-winio"
 	"golang.org/x/sys/windows"
 )
 
@@ -92,15 +92,24 @@ type guardianRuntime struct {
 }
 
 type guardianPipeSession struct {
-	file *os.File
-	mu   sync.Mutex
-	cmd  *exec.Cmd
+	cmd       *exec.Cmd
+	listener  net.Listener
+	connReady chan guardianConnResult
+
+	closeOnce sync.Once
+	mu        sync.Mutex
+	conn      net.Conn
 }
 
 type guardianOwnerMonitor struct {
 	handle windows.Handle
 	done   chan struct{}
 	once   sync.Once
+}
+
+type guardianConnResult struct {
+	conn net.Conn
+	err  error
 }
 
 func (boundary *boundary) Start(ctx context.Context, owner OwnerIdentity) (Lease, error) {
@@ -115,7 +124,7 @@ func (boundary *boundary) Start(ctx context.Context, owner OwnerIdentity) (Lease
 		ownerVerifier = guardianOwnerVerifierFunc(currentOwnerCreationTime)
 	}
 	if err := ownerVerifier.Verify(owner); err != nil {
-		return nil, err
+		return nil, ErrOwnerIdentityMismatch
 	}
 
 	factory := boundary.guardianFactory
@@ -124,7 +133,7 @@ func (boundary *boundary) Start(ctx context.Context, owner OwnerIdentity) (Lease
 	}
 	session, err := factory(ctx, owner)
 	if err != nil {
-		return nil, err
+		return nil, GuardianStartFailed
 	}
 
 	lease := &guardianLease{
@@ -215,7 +224,7 @@ func (lease *guardianLease) run() {
 			}
 		case <-releaseTimeout:
 			_ = lease.session.Kill()
-			lease.finish(SessionCloseFailed)
+			lease.finish(errors.Join(SessionCloseFailed, GuardianTimeout))
 			return
 		case result := <-recv:
 			if result.err != nil {
@@ -229,7 +238,7 @@ func (lease *guardianLease) run() {
 					lease.finish(SessionCloseFailed)
 					return
 				}
-				lease.finish(errors.Join(SessionCloseFailed, result.err))
+				lease.finish(SessionCloseFailed)
 				return
 			}
 			switch result.frame.Kind {
@@ -299,12 +308,12 @@ func (lease *guardianLease) run() {
 					releaseTimer.Stop()
 				}
 				if err != nil {
-					lease.finish(errors.Join(SessionCloseFailed, err))
+					lease.finish(SessionCloseFailed)
 				}
 				return
 			}
 			if err != nil {
-				lease.finish(errors.Join(SessionCloseFailed, err))
+				lease.finish(SessionCloseFailed)
 				return
 			}
 		}
@@ -332,51 +341,44 @@ func (lease *guardianLease) finish(err error) {
 }
 
 func (boundary *boundary) startGuardianProcess(ctx context.Context, owner OwnerIdentity) (guardianSession, error) {
-	executable, err := guardianExecutablePath()
+	executable, err := boundary.resolveGuardianExecutablePath()
 	if err != nil {
-		return nil, errors.Join(GuardianStartFailed, err)
+		return nil, GuardianStartFailed
 	}
-	pipeName := fmt.Sprintf(`\\.\pipe\offlineboundary-%x`, newLeaseID())
-	server, err := createInheritableGuardianPipe(pipeName)
+	pipeName := guardianPipeName(newLeaseID())
+	listener, err := winio.ListenPipe(pipeName, &winio.PipeConfig{
+		MessageMode:      true,
+		InputBufferSize:  4096,
+		OutputBufferSize: 4096,
+	})
 	if err != nil {
-		return nil, errors.Join(GuardianStartFailed, err)
+		return nil, GuardianStartFailed
 	}
-	serverFile := os.NewFile(uintptr(server), "guardian-pipe-server")
-	defer serverFile.Close() //nolint:errcheck
 
 	args := []string{
 		"--owner-pid=" + strconv.FormatUint(uint64(owner.PID), 10),
 		"--owner-creation-time=" + strconv.FormatUint(owner.CreationTime, 10),
-		"--ipc-handle=" + strconv.FormatUint(uint64(server), 10),
+		"--ipc-address=" + pipeName,
 	}
 	cmd := exec.CommandContext(ctx, executable, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		HideWindow:                 true,
-		CreationFlags:              windows.CREATE_NO_WINDOW,
-		AdditionalInheritedHandles: []syscall.Handle{syscall.Handle(server)},
-	}
+	cmd.SysProcAttr = &windows.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
 	if err := cmd.Start(); err != nil {
-		return nil, errors.Join(GuardianStartFailed, err)
+		_ = listener.Close()
+		return nil, GuardianStartFailed
 	}
-	client, err := windows.CreateFile(
-		windows.StringToUTF16Ptr(pipeName),
-		windows.GENERIC_READ|windows.GENERIC_WRITE,
-		0,
-		nil,
-		windows.OPEN_EXISTING,
-		windows.FILE_ATTRIBUTE_NORMAL,
-		0,
-	)
-	if err != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		return nil, errors.Join(GuardianStartFailed, err)
+	session := &guardianPipeSession{
+		cmd:       cmd,
+		listener:  listener,
+		connReady: make(chan guardianConnResult, 1),
 	}
-	clientFile := os.NewFile(uintptr(client), "guardian-pipe-client")
-	return &guardianPipeSession{file: clientFile, cmd: cmd}, nil
+	go session.accept()
+	return session, nil
 }
 
-func guardianExecutablePath() (string, error) {
+func (boundary *boundary) resolveGuardianExecutablePath() (string, error) {
+	if boundary.guardianExecutablePath != "" {
+		return boundary.guardianExecutablePath, nil
+	}
 	executable, err := os.Executable()
 	if err != nil {
 		return "", err
@@ -384,35 +386,26 @@ func guardianExecutablePath() (string, error) {
 	return filepath.Join(filepath.Dir(executable), "native-offline-guardian.exe"), nil
 }
 
-func createInheritableGuardianPipe(name string) (windows.Handle, error) {
-	utf16, err := windows.UTF16PtrFromString(name)
-	if err != nil {
-		return 0, err
-	}
-	sa := &windows.SecurityAttributes{
-		Length:        uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
-		InheritHandle: 1,
-	}
-	return windows.CreateNamedPipe(
-		utf16,
-		windows.PIPE_ACCESS_DUPLEX,
-		windows.PIPE_TYPE_MESSAGE|windows.PIPE_READMODE_MESSAGE|windows.PIPE_WAIT,
-		1,
-		4096,
-		4096,
-		0,
-		sa,
-	)
+func guardianPipeName(leaseID []byte) string {
+	return fmt.Sprintf(`\\.\pipe\offlineboundary-%x`, leaseID)
 }
 
 func (session *guardianPipeSession) Receive(context.Context) (guardianFrame, error) {
-	return readGuardianFrame(session.file)
+	conn, err := session.awaitConn()
+	if err != nil {
+		return guardianFrame{}, err
+	}
+	return readGuardianFrame(conn)
 }
 
 func (session *guardianPipeSession) Send(_ context.Context, frame guardianFrame) error {
+	conn, err := session.awaitConn()
+	if err != nil {
+		return err
+	}
 	session.mu.Lock()
 	defer session.mu.Unlock()
-	return writeGuardianFrame(session.file, frame)
+	return writeGuardianFrame(conn, frame)
 }
 
 func (session *guardianPipeSession) Wait() error {
@@ -423,10 +416,20 @@ func (session *guardianPipeSession) Wait() error {
 }
 
 func (session *guardianPipeSession) Close() error {
-	if session.file != nil {
-		return session.file.Close()
-	}
-	return nil
+	var closeErr error
+	session.closeOnce.Do(func() {
+		session.mu.Lock()
+		defer session.mu.Unlock()
+		if session.conn != nil {
+			closeErr = session.conn.Close()
+		}
+		if session.listener != nil {
+			if err := session.listener.Close(); closeErr == nil {
+				closeErr = err
+			}
+		}
+	})
+	return closeErr
 }
 
 func (session *guardianPipeSession) Kill() error {
@@ -436,31 +439,80 @@ func (session *guardianPipeSession) Kill() error {
 	return session.cmd.Process.Kill()
 }
 
-func RunNativeGuardian(owner OwnerIdentity, ipcHandle uintptr) error {
-	if ipcHandle == 0 {
-		return ErrOwnerIdentityMismatch
+func (session *guardianPipeSession) accept() {
+	conn, err := session.listener.Accept()
+	session.connReady <- guardianConnResult{conn: conn, err: err}
+}
+
+func (session *guardianPipeSession) awaitConn() (net.Conn, error) {
+	session.mu.Lock()
+	if session.conn != nil {
+		conn := session.conn
+		session.mu.Unlock()
+		return conn, nil
 	}
-	handle := windows.Handle(ipcHandle)
-	if err := windows.ConnectNamedPipe(handle, nil); err != nil && !errors.Is(err, windows.ERROR_PIPE_CONNECTED) {
+	session.mu.Unlock()
+
+	result := <-session.connReady
+	if result.err != nil {
+		return nil, result.err
+	}
+
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if session.conn == nil {
+		session.conn = result.conn
+	}
+	return session.conn, nil
+}
+
+func RunNativeGuardian(owner OwnerIdentity, ipcAddress string) error {
+	return sanitizeGuardianChildError(runNativeGuardian(owner, ipcAddress))
+}
+
+func runNativeGuardian(owner OwnerIdentity, ipcAddress string) error {
+	if ipcAddress == "" {
+		return GuardianStartFailed
+	}
+	conn, err := winio.DialPipeContext(context.Background(), ipcAddress)
+	if err != nil {
 		return err
 	}
-	session := &guardianPipeSession{file: os.NewFile(ipcHandle, "guardian-ipc")}
-	defer session.Close() //nolint:errcheck
+	defer conn.Close() //nolint:errcheck
 
 	ownerMonitor, err := newGuardianOwnerMonitor(owner)
 	if err != nil {
-		_ = session.Send(context.Background(), guardianFrame{Kind: guardianFrameError, Code: guardianErrorStartup})
+		_ = writeGuardianFrame(conn, guardianFrame{Kind: guardianFrameError, Code: guardianErrorStartup})
 		return err
 	}
 	defer ownerMonitor.Close() //nolint:errcheck
 
 	runtime := guardianRuntime{
-		session:       session,
+		session:       guardianConnTransport{conn: conn},
 		engineFactory: defaultWFPEngineFactory,
 		leaseIDSource: newLeaseID,
 		owner:         ownerMonitor,
 	}
 	return runGuardianLoop(context.Background(), runtime, owner)
+}
+
+type guardianConnTransport struct {
+	conn net.Conn
+}
+
+func (transport guardianConnTransport) Receive(context.Context) (guardianFrame, error) {
+	return readGuardianFrame(transport.conn)
+}
+
+func (transport guardianConnTransport) Send(_ context.Context, frame guardianFrame) error {
+	return writeGuardianFrame(transport.conn, frame)
+}
+
+func (transport guardianConnTransport) Close() error {
+	if transport.conn != nil {
+		return transport.conn.Close()
+	}
+	return nil
 }
 
 func runGuardianLoop(ctx context.Context, runtime guardianRuntime, owner OwnerIdentity) error {
@@ -599,4 +651,14 @@ func ownerCreationTimeFromHandle(handle windows.Handle) (uint64, error) {
 		return 0, ErrOwnerIdentityMismatch
 	}
 	return value, nil
+}
+
+func sanitizeGuardianChildError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, ErrOwnerIdentityMismatch) {
+		return ErrOwnerIdentityMismatch
+	}
+	return GuardianStartFailed
 }
