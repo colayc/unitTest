@@ -163,6 +163,30 @@ test("startup termination wait is bounded when the guardian never exits", async 
   );
 });
 
+test("local WFP access denial is not skipped when guardian termination cannot be proven", async () => {
+  const inbound: GuardianFrame[] = [
+    { kind: "Hello" },
+    { kind: "Error", code: "WFPAccessDenied" },
+  ];
+  await assert.rejects(
+    installWfpOfflineBoundary({
+      __dependencies: {
+        platform: "win32",
+        guardianTimeoutMilliseconds: 20,
+        resolveOwnerCreationTime: async () => "1337",
+        runPreflight: async () => verifiedPreflight(),
+        startGuardian: async () => ({
+          readFrame: async () => inbound.shift()!,
+          writeFrame: async () => undefined,
+          waitForExit: async () => await new Promise<void>(() => undefined),
+          terminate: () => undefined,
+        }),
+      },
+    }),
+    /guardian protocol did not establish an audited WFP boundary/u,
+  );
+});
+
 test("close sends Release then waits for Bye and process exit", async () => {
   const bye = deferred<GuardianFrame>();
   const exited = deferred<void>();
@@ -195,6 +219,39 @@ test("close sends Release then waits for Bye and process exit", async () => {
   await Promise.resolve();
   assert.equal(settled, false, "close must wait for process exit after Bye");
   exited.resolve();
+  await closing;
+});
+
+test("close accepts guardian exit observed before an already-written Bye arrives", async () => {
+  const bye = deferred<GuardianFrame>();
+  const exited = deferred<void>();
+  const writes: GuardianFrame[] = [];
+  const boundary = await installWfpOfflineBoundary({
+    __dependencies: {
+      platform: "win32",
+      resolveOwnerCreationTime: async () => "1337",
+      runPreflight: async () => verifiedPreflight(),
+      startGuardian: async () => {
+        const inbound: Array<GuardianFrame | Promise<GuardianFrame>> = [
+          { kind: "Hello" }, { kind: "Ready" }, bye.promise,
+        ];
+        return {
+          readFrame: async () => await inbound.shift()!,
+          writeFrame: async (frame) => { writes.push(frame); },
+          waitForExit: async () => await exited.promise,
+          terminate: () => undefined,
+        };
+      },
+    },
+  });
+  assert.equal(boundary.outcome, "installed");
+  if (boundary.outcome !== "installed") return;
+
+  const closing = boundary.boundary.close();
+  assert.deepEqual(writes, [{ kind: "Release" }]);
+  exited.resolve();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  bye.resolve({ kind: "Bye" });
   await closing;
 });
 
@@ -282,6 +339,7 @@ test("guardian crash while close waits for Bye rejects instead of hanging", asyn
   const boundary = await installWfpOfflineBoundary({
     __dependencies: {
       platform: "win32",
+      guardianTimeoutMilliseconds: 20,
       resolveOwnerCreationTime: async () => "1337",
       runPreflight: async () => verifiedPreflight(),
       startGuardian: async () => {

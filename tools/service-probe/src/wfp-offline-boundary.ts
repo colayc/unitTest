@@ -109,7 +109,13 @@ export async function installWfpOfflineBoundary(
     await withTimeout(expectFrame(guardian, "Hello"), guardianTimeoutMilliseconds);
     await withTimeout(expectFrame(guardian, "Ready"), guardianTimeoutMilliseconds);
   } catch (error) {
-    if (guardian !== undefined) await terminateGuardian(guardian, guardianTimeoutMilliseconds);
+    if (guardian !== undefined) {
+      try {
+        await terminateGuardian(guardian, guardianTimeoutMilliseconds);
+      } catch (cleanupError) {
+        throw new Error("guardian protocol did not establish an audited WFP boundary", { cause: cleanupError });
+      }
+    }
     if (error instanceof GuardianProtocolError && error.code === "WFPAccessDenied") {
       if (options.required === true) throw new Error("Windows Filtering Platform access is unavailable");
       return { outcome: "skipped", reason: "WFPAccessDenied" };
@@ -119,7 +125,6 @@ export async function installWfpOfflineBoundary(
 
   type BoundaryPhase = "active" | "releasing" | "closed";
   let phase: BoundaryPhase = "active";
-  let byeSeen = false;
   const nextFrame = guardian.readFrame();
   const guardianExit = guardian.waitForExit();
   let rejectLiveness!: (error: Error) => void;
@@ -128,11 +133,11 @@ export async function installWfpOfflineBoundary(
   const loseBoundary = () => rejectLiveness(new BoundaryLivenessError());
   void nextFrame.then(
     () => { if (phase === "active") loseBoundary(); },
-    loseBoundary,
+    () => { if (phase === "active") loseBoundary(); },
   );
   void guardianExit.then(
-    () => { if (phase !== "closed" && !(phase === "releasing" && byeSeen)) loseBoundary(); },
-    loseBoundary,
+    () => { if (phase === "active") loseBoundary(); },
+    () => { if (phase === "active") loseBoundary(); },
   );
 
   const assertLive = async (): Promise<void> => {
@@ -172,18 +177,23 @@ export async function installWfpOfflineBoundary(
         try {
           await withTimeout((async () => {
             await guardian.writeFrame({ kind: "Release" });
-            const frame = await Promise.race([nextFrame, livenessFailure]);
+            const frame = await nextFrame;
             if (!isGuardianFrame(frame) || frame.kind !== "Bye") {
               throw new Error("unexpected guardian protocol frame");
             }
-            byeSeen = true;
-            await Promise.race([guardianExit, livenessFailure]);
+            await guardianExit;
           })(), guardianTimeoutMilliseconds);
           phase = "closed";
         } catch (error) {
-          await terminateGuardian(guardian, guardianTimeoutMilliseconds);
-          void error;
-          throw new Error("guardian protocol did not prove WFP boundary removal");
+          try {
+            await terminateGuardian(guardian, guardianTimeoutMilliseconds);
+          } catch (cleanupError) {
+            throw new AggregateError(
+              [error, cleanupError],
+              "guardian protocol did not prove WFP boundary removal",
+            );
+          }
+          throw new Error("guardian protocol did not prove WFP boundary removal", { cause: error });
         }
       },
     },
@@ -201,7 +211,13 @@ class BoundaryLivenessError extends Error {
 }
 
 async function terminateGuardian(guardian: GuardianProcess, timeoutMilliseconds: number): Promise<void> {
-  await withTimeout(Promise.resolve(guardian.terminate()), timeoutMilliseconds).catch(() => undefined);
+  const exitSettled = Promise.resolve()
+    .then(async () => await guardian.waitForExit())
+    .then(() => undefined, () => undefined);
+  await withTimeout((async () => {
+    await guardian.terminate();
+    await exitSettled;
+  })(), timeoutMilliseconds);
 }
 
 async function withTimeout<Result>(promise: Promise<Result>, timeoutMilliseconds: number): Promise<Result> {
@@ -334,7 +350,7 @@ async function startNativeGuardian(options: NativeGuardianStartOptions): Promise
   void exit.catch(() => undefined);
   const socket = await connection.catch(async () => {
     child.kill();
-    await withTimeout(exit.catch(() => undefined), defaultGuardianLifecycleTimeoutMilliseconds).catch(() => undefined);
+    await waitForExitSettlement(exit, defaultGuardianLifecycleTimeoutMilliseconds);
     throw new Error("guardian process could not start");
   });
   const frames = new GuardianFrameReader(socket);
@@ -347,12 +363,13 @@ async function startNativeGuardian(options: NativeGuardianStartOptions): Promise
       socket.destroy();
       server.close();
       child.kill();
-      await withTimeout(
-        exit.catch(() => undefined),
-        defaultGuardianLifecycleTimeoutMilliseconds,
-      ).catch(() => undefined);
+      await waitForExitSettlement(exit, defaultGuardianLifecycleTimeoutMilliseconds);
     },
   };
+}
+
+async function waitForExitSettlement(exit: Promise<void>, timeoutMilliseconds: number): Promise<void> {
+  await withTimeout(exit.then(() => undefined, () => undefined), timeoutMilliseconds);
 }
 
 async function listenPipe(server: net.Server, pipeName: string): Promise<void> {

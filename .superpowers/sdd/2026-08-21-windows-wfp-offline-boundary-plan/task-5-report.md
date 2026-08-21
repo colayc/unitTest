@@ -177,3 +177,48 @@ The current host still has no WFP management permission, verified LLVM or
 `cmake` on `PATH`; no native privileged PASS was inferred from the review
 controls. The required Windows CI commands remain the authoritative positive
 executor. No push was performed.
+
+## Review fix round 2 — termination proof and release ordering
+
+The second review found two remaining TypeScript lifecycle gaps. Both were
+reproduced against the prior implementation before production changes:
+
+- A fake guardian that reported `WFPAccessDenied`, accepted termination but
+  never exited was incorrectly returned as a local skip. The regression failed
+  with `Missing expected rejection` until termination required both the
+  terminate operation and bounded child-exit settlement. Startup cleanup
+  timeout or termination failure now remains a generic fail-closed startup
+  error, so `WFPAccessDenied` is mapped to local SKIP only after exit is proved.
+- During normal Release, a clean child exit observed before the pending `Bye`
+  continuation incorrectly rejected the liveness promise and made close fail.
+  The event-order regression failed with `guardian protocol did not prove WFP
+  boundary removal` until the active monitor stopped owning the releasing
+  phase. `close()` now exclusively performs the bounded Release, Bye and clean
+  guardian-exit checks; active-phase child or socket loss remains fail-closed.
+- The default native guardian termination and connection-failure cleanup no
+  longer swallow bounded exit timeout. Close preserves both the primary
+  protocol error and any termination error through a stable aggregate cleanup
+  failure, and report publication remains suppressed on rejection.
+
+Fresh round-2 verification used pinned Node 24.19.0, pnpm 11.4.0 and Go
+1.26.6 with `GOENV=off`, `GOTOOLCHAIN=local` and private worktree caches:
+
+- Focused round-2 regressions plus the active-crash controls: PASS, 4/4.
+- Complete WFP unit file: PASS, 15/15.
+- Full Service Probe: PASS, 74 pass / 1 honest
+  `ToolchainUnavailable; required mode would FAIL` skip.
+- Full Extension: PASS, 138/138.
+- Full recursive workspace package tests: PASS, including the same Service
+  Probe 74/1 result and Extension 138/138.
+- Full Go Service tests, race detector and vet: PASS.
+- Linux offlineboundary test compile and native guardian build: PASS.
+- Protocol and coverage generated checks and root build: PASS.
+- Exact root test: coverage generator 4/4, CMake bundle 28/28, and coverage
+  bundle 34 pass / 1 existing Python `EPERM` skip; it then stopped at the same
+  environment-only workspace failure `spawnSync cmake ENOENT` (21/22).
+- `git diff --check`: PASS.
+
+The host capability boundary is unchanged: no WFP management permission,
+verified LLVM or `cmake` is available locally, so no privileged WFP or verified
+LLVM PASS is claimed. Required Windows CI remains the positive executor. No push
+was performed.
