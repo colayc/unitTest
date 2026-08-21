@@ -49,6 +49,35 @@ function Assert-PlainFile([string]$Path, [string]$Label) {
   }
 }
 
+function New-ItemSnapshot([string]$Path, [string]$Label, [switch]$Directory) {
+  $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+  if ($Directory) {
+    if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+      throw "Windows native offline $Label directory is unsafe"
+    }
+  } else {
+    if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+      throw "Windows native offline $Label file is unsafe"
+    }
+  }
+  [pscustomobject]@{
+    Path             = $item.FullName
+    Attributes       = [int]$item.Attributes
+    CreationTimeUtc  = $item.CreationTimeUtc.Ticks
+    LastWriteTimeUtc = $item.LastWriteTimeUtc.Ticks
+    Length           = if ($Directory) { -1 } else { [int64]$item.Length }
+  }
+}
+
+function Assert-ItemSnapshot([object]$Snapshot, [string]$Label, [switch]$Directory) {
+  $current = New-ItemSnapshot $Snapshot.Path $Label -Directory:$Directory
+  foreach ($property in @('Path', 'Attributes', 'CreationTimeUtc', 'LastWriteTimeUtc', 'Length')) {
+    if ($current.$property -ne $Snapshot.$property) {
+      throw "Windows native offline $Label identity changed"
+    }
+  }
+}
+
 function Assert-StringField([string]$Actual, [string]$Expected, [string]$Label) {
   if ($Actual -cne $Expected) {
     throw "Windows native offline $Label must equal $Expected"
@@ -91,6 +120,23 @@ function Parse-PositiveUInt32([string]$Value, [string]$Pattern, [string]$Label) 
     throw "Windows native offline $Label marker is invalid"
   }
   return [uint32]$parsed
+}
+
+function New-AuditedMarker([string]$Path, [string]$Label, [string]$ExpectedContent) {
+  $snapshot = New-ItemSnapshot $Path $Label
+  $content = Read-CanonicalMarker $Path $Label
+  Assert-StringField $content $ExpectedContent "$Label content"
+  [pscustomobject]@{
+    Name            = Split-Path -Leaf $Path
+    Path            = $snapshot.Path
+    ExpectedContent = $ExpectedContent
+    Snapshot        = $snapshot
+  }
+}
+
+function Assert-AuditedMarkerUnchanged([object]$Marker) {
+  Assert-ItemSnapshot $Marker.Snapshot $Marker.Name
+  Assert-StringField (Read-CanonicalMarker $Marker.Path $Marker.Name) $Marker.ExpectedContent "$($Marker.Name) content"
 }
 
 function Get-RuleByGroup([string]$Store) {
@@ -146,24 +192,35 @@ function Audit-LegacyStateDirectory([IO.DirectoryInfo]$Directory) {
   }
 
   $ruleName = $Directory.Name
-  Assert-StringField (Read-CanonicalMarker $markers['rule-name'] 'rule-name') "rule=$ruleName`n" 'rule-name marker'
-  $ownerPid = Parse-PositiveUInt32 (Read-CanonicalMarker $markers['owner.pid'] 'owner.pid') '^owner=([1-9][0-9]{0,9})\n$' 'owner.pid'
+  $directorySnapshot = New-ItemSnapshot $Directory.FullName "legacy state directory $ruleName" -Directory
+  $ruleNameContent = "rule=$ruleName`n"
+  $ownerPidContent = Read-CanonicalMarker $markers['owner.pid'] 'owner.pid'
   $guardianNonceLine = Read-CanonicalMarker $markers['guardian.nonce'] 'guardian.nonce'
   if ($guardianNonceLine -cnotmatch '^nonce=([0-9a-f]{64})\n$') {
     throw 'Windows native offline guardian.nonce marker is invalid'
   }
   $guardianNonce = $Matches[1]
-  $guardianPid = Parse-PositiveUInt32 (Read-CanonicalMarker $markers['guardian.pid'] 'guardian.pid') '^([1-9][0-9]{0,9})\n$' 'guardian.pid'
-  foreach ($marker in @('release', 'ready', 'removed')) {
-    Assert-StringField (Read-CanonicalMarker $markers[$marker] $marker) "$marker=$ruleName`n" "$marker marker"
-  }
+  $guardianPidContent = Read-CanonicalMarker $markers['guardian.pid'] 'guardian.pid'
+  $ownerPid = Parse-PositiveUInt32 $ownerPidContent '^owner=([1-9][0-9]{0,9})\n$' 'owner.pid'
+  $guardianPid = Parse-PositiveUInt32 $guardianPidContent '^([1-9][0-9]{0,9})\n$' 'guardian.pid'
+  $auditedMarkers = @(
+    New-AuditedMarker $markers['rule-name'] 'rule-name' $ruleNameContent
+    New-AuditedMarker $markers['owner.pid'] 'owner.pid' $ownerPidContent
+    New-AuditedMarker $markers['guardian.nonce'] 'guardian.nonce' $guardianNonceLine
+    New-AuditedMarker $markers['guardian.pid'] 'guardian.pid' $guardianPidContent
+    New-AuditedMarker $markers['release'] 'release' "release=$ruleName`n"
+    New-AuditedMarker $markers['ready'] 'ready' "ready=$ruleName`n"
+    New-AuditedMarker $markers['removed'] 'removed' "removed=$ruleName`n"
+  )
 
   [pscustomobject]@{
     RuleName    = $ruleName
     Path        = $Directory.FullName
+    Snapshot    = $directorySnapshot
     OwnerPID    = $ownerPid
     GuardianPID = $guardianPid
     Nonce       = $guardianNonce
+    Markers     = $auditedMarkers
   }
 }
 
@@ -273,7 +330,16 @@ function Remove-AuditedState([object[]]$StateDirectories, [string]$Root) {
     if (-not $resolved.StartsWith($Root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
       throw 'Windows native offline legacy state escaped its root'
     }
-    Remove-Item -LiteralPath $resolved -Recurse -Force -ErrorAction Stop
+    Assert-ItemSnapshot $state.Snapshot "legacy state directory $($state.RuleName)" -Directory
+    foreach ($marker in $state.Markers) {
+      Assert-AuditedMarkerUnchanged $marker
+      Remove-Item -LiteralPath $marker.Path -Force -ErrorAction Stop
+    }
+    Assert-PlainDirectory $resolved "legacy state directory $($state.RuleName)"
+    if (@(Get-ChildItem -LiteralPath $resolved -Force -ErrorAction Stop).Count -ne 0) {
+      throw 'Windows native offline legacy state directory is not empty after exact marker cleanup'
+    }
+    Remove-Item -LiteralPath $resolved -Force -ErrorAction Stop
   }
 }
 
@@ -316,7 +382,21 @@ function Invoke-LegacyCleanup([string]$Root) {
   }
   Assert-NoLegacyRules
 
-  Remove-AuditedState $stateDirectories $rootPath
+  $confirmedStateDirectories = @(Audit-LegacyStateRoot $rootPath)
+  if ($confirmedStateDirectories.Count -ne $stateDirectories.Count) {
+    throw 'Windows native offline legacy state changed before exact cleanup'
+  }
+  for ($index = 0; $index -lt $stateDirectories.Count; $index++) {
+    $expected = $stateDirectories[$index]
+    $actual = $confirmedStateDirectories[$index]
+    foreach ($property in @('RuleName', 'OwnerPID', 'GuardianPID', 'Nonce')) {
+      if ($expected.$property -cne $actual.$property) {
+        throw 'Windows native offline legacy state changed before exact cleanup'
+      }
+    }
+  }
+
+  Remove-AuditedState $confirmedStateDirectories $rootPath
   Assert-ResidualStateAbsent $rootPath
   Assert-NoLegacyRules
 }

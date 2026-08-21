@@ -80,3 +80,35 @@ Fresh verification:
 Round1 concerns:
 
 1. The targeted Go package test above is not green in this host/worktree state; I am carrying it forward as an existing concern instead of masking it.
+
+## Fix round2 — 2026-08-21
+
+Status: DONE
+
+Delta delivered:
+
+- Closed the legacy-cleanup TOCTOU gap in `tools/service-probe/scripts/windows-offline-boundary.ps1`.
+- `LegacyCleanup` no longer calls blind `Remove-Item -Recurse -Force` on an already-audited state directory.
+- Before any state deletion, the script now immediately re-runs closed root/directory audit after exact known historical rules are removed.
+- Exact deletion now uses the audit-returned canonical marker list only:
+  - each marker is revalidated for path/snapshot/content before deletion
+  - the state directory itself must still be a plain non-reparse directory
+  - any late extra leaf keeps the directory non-empty and fail-closes cleanup
+  - directory removal is non-recursive and happens only after exact marker deletion leaves it empty
+- Unknown or extra rules still remain undeleted because rule removal is still limited to the audited historical rule set.
+- Added real late-mutation fixture coverage:
+  - late unknown marker injection
+  - late extra root leaf injection
+  - late reparse replacement of the audited state directory
+  - valid canonical residue still converges
+
+Fresh verification:
+
+- PASS: `node --test tools/service-probe/dist/windows-offline-boundary-legacy.test.js`
+- PASS: `pnpm --filter @unit-test-ide/service-probe test`
+- PASS: `node --test tools/workspace-smoke/workspace-smoke.test.mjs`
+- PASS: `git diff --check`
+
+Round2 concerns:
+
+- None beyond the previously recorded host-level `cmake` / unrelated Go-package concerns from earlier rounds.

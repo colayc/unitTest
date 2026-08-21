@@ -13,7 +13,10 @@ param(
   [string]$StateScenario = 'Valid',
 
   [ValidateSet('Valid', 'ExtraRule', 'WrongAction')]
-  [string]$RuleScenario = 'Valid'
+  [string]$RuleScenario = 'Valid',
+
+  [ValidateSet('None', 'LateUnknownMarker', 'LateExtraLeaf', 'LateReparseReplacement')]
+  [string]$MutationScenario = 'None'
 )
 
 Set-StrictMode -Version Latest
@@ -25,6 +28,7 @@ $script:rules = @{
   ActiveStore = @()
   PersistentStore = @()
 }
+$script:mutationInjected = $false
 $utf8NoBom = [Text.UTF8Encoding]::new($false)
 
 function Write-Marker([string]$Path, [string]$Content) {
@@ -86,6 +90,34 @@ function Initialize-FixtureRules {
   }
 }
 
+function Inject-LateMutation {
+  if ($script:mutationInjected -or $MutationScenario -ceq 'None') {
+    return
+  }
+  if (@($script:rules.ActiveStore).Count -ne 0 -or @($script:rules.PersistentStore).Count -ne 0) {
+    return
+  }
+
+  switch ($MutationScenario) {
+    'LateUnknownMarker' {
+      Write-Marker (Join-Path $script:stateDirectory 'late.marker') "boom`n"
+    }
+    'LateExtraLeaf' {
+      Write-Marker (Join-Path $StateRoot 'late-extra.txt') "boom`n"
+    }
+    'LateReparseReplacement' {
+      $lateTarget = Join-Path (Split-Path -Parent $StateRoot) 'late-reparse-target'
+      if (Test-Path -LiteralPath $lateTarget) {
+        Remove-Item -LiteralPath $lateTarget -Recurse -Force
+      }
+      Move-Item -LiteralPath $script:stateDirectory -Destination $lateTarget -Force
+      New-Item -ItemType Junction -Path $script:stateDirectory -Target $lateTarget | Out-Null
+    }
+  }
+
+  $script:mutationInjected = $true
+}
+
 function Get-NetFirewallRule {
   [CmdletBinding()]
   param(
@@ -98,6 +130,7 @@ function Get-NetFirewallRule {
     return @($rules | Where-Object { $_.Name -ceq $Name })
   }
   if (-not [string]::IsNullOrEmpty($Group)) {
+    Inject-LateMutation
     return @($rules | Where-Object { $_.Group -ceq $Group })
   }
   return $rules

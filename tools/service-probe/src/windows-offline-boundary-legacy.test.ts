@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile as execFileCallback } from "node:child_process";
-import { mkdtemp, readdir, stat } from "node:fs/promises";
+import { lstat, mkdtemp, readdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -16,6 +16,7 @@ async function runFixture(
   root: string,
   stateScenario: "Valid" | "WrongNonce" | "WrongOwnerPid" | "WrongRuleMarker" | "ExtraMarker" | "UnknownState",
   ruleScenario: "Valid" | "ExtraRule" | "WrongAction" = "Valid",
+  mutationScenario: "None" | "LateUnknownMarker" | "LateExtraLeaf" | "LateReparseReplacement" = "None",
 ): Promise<{ readonly code: number; readonly stderr: string }> {
   const stateRoot = join(root, "state-root");
   try {
@@ -34,6 +35,8 @@ async function runFixture(
       stateScenario,
       "-RuleScenario",
       ruleScenario,
+      "-MutationScenario",
+      mutationScenario,
     ], {
       encoding: "utf8",
       windowsHide: true,
@@ -61,6 +64,45 @@ test("legacy cleanup removes only canonically audited historical residue", {
   assert.equal(result.code, 0, result.stderr);
   assert.deepEqual(await readdir(join(root, "state-root")), []);
 });
+
+for (const scenario of [
+  {
+    mutation: "LateUnknownMarker",
+    pattern: /unknown|marker/u,
+    assertPreserved: async (root: string) => {
+      assert.equal((await stat(join(root, "state-root", ruleName, "late.marker"))).isFile(), true);
+    },
+  },
+  {
+    mutation: "LateExtraLeaf",
+    pattern: /unknown|file/u,
+    assertPreserved: async (root: string) => {
+      assert.equal((await stat(join(root, "state-root", "late-extra.txt"))).isFile(), true);
+    },
+  },
+  {
+    mutation: "LateReparseReplacement",
+    pattern: /reparse|unsafe/u,
+    assertPreserved: async (root: string) => {
+      assert.equal((await stat(join(root, "late-reparse-target"))).isDirectory(), true);
+      assert.equal((await lstat(join(root, "state-root", ruleName))).isSymbolicLink(), true);
+    },
+  },
+] as const) {
+  test(`legacy cleanup rejects late ${scenario.mutation} TOCTOU residue without deleting it`, {
+    skip: process.platform === "win32" ? false : "legacy cleanup fixture runs only on Windows",
+  }, async (t) => {
+    const root = await mkdtemp(join(tmpdir(), `utide-legacy-cleanup-${scenario.mutation.toLowerCase()}-`));
+    t.after(async () => {
+      const { rm } = await import("node:fs/promises");
+      await rm(root, { recursive: true, force: true });
+    });
+    const result = await runFixture(root, "Valid", "Valid", scenario.mutation);
+    assert.notEqual(result.code, 0, "fixture unexpectedly succeeded");
+    assert.match(result.stderr, scenario.pattern);
+    await scenario.assertPreserved(root);
+  });
+}
 
 for (const scenario of [
   { state: "WrongNonce", rule: "Valid", pattern: /nonce|invalid/u },
