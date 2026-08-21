@@ -51,7 +51,8 @@ jobs:
       - run: pnpm prepare:cmake-bundle
       # Exercise the real Named Pipe service contract. The host harness reports SKIP without CODE_OSS_EXECUTABLE.
       - run: node tools/service-probe/build-service.mjs
-      - name: Verify Windows LLVM coverage execution
+      - id: windows-coverage-smoke
+        name: Verify Windows LLVM coverage execution
         env:
           UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS: clang-cl
         run: pnpm --filter code-oss-extension test:coverage-service-smoke
@@ -74,7 +75,7 @@ jobs:
           name: native-toolchain-windows-${{ github.run_attempt }}
           path: .native-e2e/artifacts/windows/toolchain-report.json
           if-no-files-found: error
-      - if: always()
+      - if: ${{ steps.windows-coverage-smoke.outcome == 'success' }}
         uses: actions/upload-artifact@v7
         with:
           name: coverage-execution-windows-${{ github.run_attempt }}

@@ -15,7 +15,8 @@ $ErrorActionPreference = 'Stop'
 
 $ruleGroup = 'UnitTestIDE Native Offline Boundary'
 $rulePattern = '^UnitTestIDE-NativeOffline-[0-9a-f]{16,64}$'
-$legacyMarkers = @(
+$stores = @('ActiveStore', 'PersistentStore')
+$requiredMarkers = @(
   'rule-name',
   'owner.pid',
   'guardian.nonce',
@@ -24,6 +25,8 @@ $legacyMarkers = @(
   'ready',
   'removed'
 )
+$markerMaximumBytes = 256
+$utf8Strict = [Text.UTF8Encoding]::new($false, $true)
 
 function Get-SafeFullPath([string]$Path, [string]$Label) {
   if ([string]::IsNullOrWhiteSpace($Path) -or -not [IO.Path]::IsPathRooted($Path)) {
@@ -39,6 +42,57 @@ function Assert-PlainDirectory([string]$Path, [string]$Label) {
   }
 }
 
+function Assert-PlainFile([string]$Path, [string]$Label) {
+  $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+  if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "Windows native offline $Label file is unsafe"
+  }
+}
+
+function Assert-StringField([string]$Actual, [string]$Expected, [string]$Label) {
+  if ($Actual -cne $Expected) {
+    throw "Windows native offline $Label must equal $Expected"
+  }
+}
+
+function Read-CanonicalMarker([string]$Path, [string]$Label) {
+  Assert-PlainFile $Path $Label
+  $bytes = [IO.File]::ReadAllBytes($Path)
+  if ($bytes.Length -le 0 -or $bytes.Length -gt $markerMaximumBytes) {
+    throw "Windows native offline $Label marker size is invalid"
+  }
+  if (
+    $bytes.Length -ge 3 -and
+    $bytes[0] -eq 0xEF -and
+    $bytes[1] -eq 0xBB -and
+    $bytes[2] -eq 0xBF
+  ) {
+    throw "Windows native offline $Label marker must not contain a BOM"
+  }
+  $text = $utf8Strict.GetString($bytes)
+  if ($text.Contains("`0") -or $text.Contains("`r")) {
+    throw "Windows native offline $Label marker is invalid"
+  }
+  if (-not $text.EndsWith("`n")) {
+    throw "Windows native offline $Label marker must end with LF"
+  }
+  if ($text.IndexOf("`n") -ne ($text.Length - 1)) {
+    throw "Windows native offline $Label marker must contain a single canonical line"
+  }
+  return $text
+}
+
+function Parse-PositiveUInt32([string]$Value, [string]$Pattern, [string]$Label) {
+  if ($Value -cnotmatch $Pattern) {
+    throw "Windows native offline $Label marker is invalid"
+  }
+  [uint64]$parsed = $Matches[1]
+  if ($parsed -le 0 -or $parsed -gt [uint32]::MaxValue) {
+    throw "Windows native offline $Label marker is invalid"
+  }
+  return [uint32]$parsed
+}
+
 function Get-RuleByGroup([string]$Store) {
   try {
     @(Get-NetFirewallRule -PolicyStore $Store -Group $ruleGroup -ErrorAction Stop)
@@ -47,23 +101,6 @@ function Get-RuleByGroup([string]$Store) {
       return @()
     }
     throw
-  }
-}
-
-function Assert-NoLegacyRules {
-  foreach ($store in @('ActiveStore', 'PersistentStore')) {
-    if (@(Get-RuleByGroup $store).Count -ne 0) {
-      throw "Windows native offline legacy rule group still exists in $store"
-    }
-  }
-}
-
-function Remove-LegacyRules {
-  foreach ($store in @('ActiveStore', 'PersistentStore')) {
-    $rules = @(Get-RuleByGroup $store)
-    if ($rules.Count -gt 0) {
-      $rules | Remove-NetFirewallRule -ErrorAction Stop
-    }
   }
 }
 
@@ -79,7 +116,58 @@ function Get-LegacyGuardProcesses([string]$ScriptPath) {
   })
 }
 
-function Assert-KnownLegacyStateRoot([string]$Root) {
+function Audit-LegacyStateDirectory([IO.DirectoryInfo]$Directory) {
+  Assert-PlainDirectory $Directory.FullName "legacy state directory $($Directory.Name)"
+  if ($Directory.Name -cnotmatch $rulePattern) {
+    throw 'Windows native offline legacy state root contains an unknown directory'
+  }
+
+  $markers = @{}
+  foreach ($entry in @(Get-ChildItem -LiteralPath $Directory.FullName -Force -ErrorAction Stop)) {
+    if ($entry.PSIsContainer -or ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+      throw 'Windows native offline legacy state contains an unsafe child'
+    }
+    if ($requiredMarkers -notcontains $entry.Name) {
+      throw 'Windows native offline legacy state contains an unknown marker'
+    }
+    if ($markers.ContainsKey($entry.Name)) {
+      throw 'Windows native offline legacy state contains a duplicate marker'
+    }
+    $markers[$entry.Name] = $entry.FullName
+  }
+
+  foreach ($marker in $requiredMarkers) {
+    if (-not $markers.ContainsKey($marker)) {
+      throw "Windows native offline legacy state marker $marker is missing"
+    }
+  }
+  if ($markers.Count -ne $requiredMarkers.Count) {
+    throw 'Windows native offline legacy state marker set is invalid'
+  }
+
+  $ruleName = $Directory.Name
+  Assert-StringField (Read-CanonicalMarker $markers['rule-name'] 'rule-name') "rule=$ruleName`n" 'rule-name marker'
+  $ownerPid = Parse-PositiveUInt32 (Read-CanonicalMarker $markers['owner.pid'] 'owner.pid') '^owner=([1-9][0-9]{0,9})\n$' 'owner.pid'
+  $guardianNonceLine = Read-CanonicalMarker $markers['guardian.nonce'] 'guardian.nonce'
+  if ($guardianNonceLine -cnotmatch '^nonce=([0-9a-f]{64})\n$') {
+    throw 'Windows native offline guardian.nonce marker is invalid'
+  }
+  $guardianNonce = $Matches[1]
+  $guardianPid = Parse-PositiveUInt32 (Read-CanonicalMarker $markers['guardian.pid'] 'guardian.pid') '^([1-9][0-9]{0,9})\n$' 'guardian.pid'
+  foreach ($marker in @('release', 'ready', 'removed')) {
+    Assert-StringField (Read-CanonicalMarker $markers[$marker] $marker) "$marker=$ruleName`n" "$marker marker"
+  }
+
+  [pscustomobject]@{
+    RuleName    = $ruleName
+    Path        = $Directory.FullName
+    OwnerPID    = $ownerPid
+    GuardianPID = $guardianPid
+    Nonce       = $guardianNonce
+  }
+}
+
+function Audit-LegacyStateRoot([string]$Root) {
   if (-not (Test-Path -LiteralPath $Root)) {
     return @()
   }
@@ -92,25 +180,96 @@ function Assert-KnownLegacyStateRoot([string]$Root) {
     if (-not $entry.PSIsContainer) {
       throw 'Windows native offline legacy state root contains an unknown file'
     }
-    if ($entry.Name -cnotmatch $rulePattern) {
-      throw 'Windows native offline legacy state root contains an unknown directory'
-    }
-    foreach ($leaf in @(Get-ChildItem -LiteralPath $entry.FullName -Force -ErrorAction Stop)) {
-      if ($leaf.PSIsContainer -or ($leaf.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw 'Windows native offline legacy state contains an unsafe child'
-      }
-      if ($legacyMarkers -notcontains $leaf.Name) {
-        throw 'Windows native offline legacy state contains an unknown marker'
-      }
-    }
-    $directories += $entry
+    $directories += Audit-LegacyStateDirectory $entry
   }
-  return $directories
+  return @($directories | Sort-Object RuleName)
 }
 
-function Remove-KnownLegacyState([IO.DirectoryInfo[]]$Directories, [string]$Root) {
-  foreach ($directory in $Directories) {
-    $resolved = [IO.Path]::GetFullPath($directory.FullName)
+function Assert-ClosedFilters([object]$Rule, [string]$Store) {
+  $application = @($Rule | Get-NetFirewallApplicationFilter -ErrorAction Stop)
+  if ($application.Count -ne 1) {
+    throw "Windows native offline legacy application filter audit failed in $Store"
+  }
+  Assert-StringField ([string]$application[0].Program) 'Any' "$Store application program"
+  Assert-StringField ([string]$application[0].Package) 'Any' "$Store application package"
+
+  $address = @($Rule | Get-NetFirewallAddressFilter -ErrorAction Stop)
+  if ($address.Count -ne 1) {
+    throw "Windows native offline legacy address filter audit failed in $Store"
+  }
+  Assert-StringField ([string]$address[0].LocalAddress) 'Any' "$Store local address"
+  Assert-StringField ([string]$address[0].RemoteAddress) 'Any' "$Store remote address"
+
+  $port = @($Rule | Get-NetFirewallPortFilter -ErrorAction Stop)
+  if ($port.Count -ne 1) {
+    throw "Windows native offline legacy port filter audit failed in $Store"
+  }
+  Assert-StringField ([string]$port[0].Protocol) 'Any' "$Store protocol"
+  Assert-StringField ([string]$port[0].LocalPort) 'Any' "$Store local port"
+  Assert-StringField ([string]$port[0].RemotePort) 'Any' "$Store remote port"
+
+  $service = @($Rule | Get-NetFirewallServiceFilter -ErrorAction Stop)
+  if ($service.Count -ne 1) {
+    throw "Windows native offline legacy service filter audit failed in $Store"
+  }
+  Assert-StringField ([string]$service[0].Service) 'Any' "$Store service"
+
+  $interface = @($Rule | Get-NetFirewallInterfaceFilter -ErrorAction Stop)
+  if ($interface.Count -ne 1) {
+    throw "Windows native offline legacy interface filter audit failed in $Store"
+  }
+  Assert-StringField ([string]$interface[0].InterfaceAlias) 'Any' "$Store interface alias"
+
+  $interfaceType = @($Rule | Get-NetFirewallInterfaceTypeFilter -ErrorAction Stop)
+  if ($interfaceType.Count -ne 1) {
+    throw "Windows native offline legacy interface-type filter audit failed in $Store"
+  }
+  Assert-StringField ([string]$interfaceType[0].InterfaceType) 'Any' "$Store interface type"
+}
+
+function Assert-ClosedRule([object]$Rule, [string]$RuleName, [string]$Store) {
+  Assert-StringField ([string]$Rule.Name) $RuleName "$Store rule name"
+  Assert-StringField ([string]$Rule.DisplayName) $RuleName "$Store display name"
+  Assert-StringField ([string]$Rule.Enabled) 'True' "$Store enabled"
+  Assert-StringField ([string]$Rule.Direction) 'Outbound' "$Store direction"
+  Assert-StringField ([string]$Rule.Action) 'Block' "$Store action"
+  Assert-StringField ([string]$Rule.Profile) 'Any' "$Store profile"
+  Assert-StringField ([string]$Rule.Group) $ruleGroup "$Store group"
+  Assert-ClosedFilters $Rule $Store
+}
+
+function Audit-StoreRules([string]$Store, [object[]]$StateDirectories) {
+  $rules = @(Get-RuleByGroup $Store)
+  if ($rules.Count -ne $StateDirectories.Count) {
+    throw "Windows native offline legacy rule audit failed in $Store"
+  }
+  $ruleMap = @{}
+  foreach ($rule in $rules) {
+    $name = [string]$rule.Name
+    if ($name -cnotmatch $rulePattern) {
+      throw "Windows native offline legacy rule name is invalid in $Store"
+    }
+    if ($ruleMap.ContainsKey($name)) {
+      throw "Windows native offline legacy duplicate rule exists in $Store"
+    }
+    $ruleMap[$name] = $rule
+  }
+
+  $audited = @()
+  foreach ($state in $StateDirectories) {
+    $rule = $ruleMap[$state.RuleName]
+    if ($null -eq $rule) {
+      throw "Windows native offline legacy rule is missing in $Store"
+    }
+    Assert-ClosedRule $rule $state.RuleName $Store
+    $audited += $rule
+  }
+  return $audited
+}
+
+function Remove-AuditedState([object[]]$StateDirectories, [string]$Root) {
+  foreach ($state in $StateDirectories) {
+    $resolved = [IO.Path]::GetFullPath($state.Path)
     if (-not $resolved.StartsWith($Root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
       throw 'Windows native offline legacy state escaped its root'
     }
@@ -118,25 +277,48 @@ function Remove-KnownLegacyState([IO.DirectoryInfo[]]$Directories, [string]$Root
   }
 }
 
+function Assert-ResidualStateAbsent([string]$Root) {
+  if (-not (Test-Path -LiteralPath $Root)) {
+    return
+  }
+  Assert-PlainDirectory $Root 'legacy state root'
+  if (@(Get-ChildItem -LiteralPath $Root -Force -ErrorAction Stop).Count -ne 0) {
+    throw 'Windows native offline legacy state root is not empty after cleanup'
+  }
+}
+
+function Assert-NoLegacyRules {
+  foreach ($store in $stores) {
+    if (@(Get-RuleByGroup $store).Count -ne 0) {
+      throw "Windows native offline legacy rule group still exists in $store"
+    }
+  }
+}
+
 function Invoke-LegacyCleanup([string]$Root) {
   $rootPath = Get-SafeFullPath $Root 'legacy state root'
-  $scriptPath = [IO.Path]::GetFullPath($MyInvocation.MyCommand.Path)
-  $deadline = [DateTime]::UtcNow.AddSeconds($DeadlineSeconds)
-  do {
-    $directories = @(Assert-KnownLegacyStateRoot $rootPath)
-    $liveCreators = @(Get-LegacyGuardProcesses $scriptPath)
-    if ($liveCreators.Count -ne 0) {
-      throw 'Windows native offline legacy guardian process is still running'
+  $scriptPath = [IO.Path]::GetFullPath($PSCommandPath)
+
+  $stateDirectories = @(Audit-LegacyStateRoot $rootPath)
+  if (@(Get-LegacyGuardProcesses $scriptPath).Count -ne 0) {
+    throw 'Windows native offline legacy guardian process is still running'
+  }
+
+  $auditedRulesByStore = @{}
+  foreach ($store in $stores) {
+    $auditedRulesByStore[$store] = @(Audit-StoreRules $store $stateDirectories)
+  }
+
+  foreach ($store in $stores) {
+    foreach ($rule in $auditedRulesByStore[$store]) {
+      $rule | Remove-NetFirewallRule -ErrorAction Stop
     }
-    Remove-LegacyRules
-    Assert-NoLegacyRules
-    Remove-KnownLegacyState $directories $rootPath
-    if (-not (Test-Path -LiteralPath $rootPath) -or @(Get-ChildItem -LiteralPath $rootPath -Force -ErrorAction Stop).Count -eq 0) {
-      return
-    }
-    Start-Sleep -Milliseconds 200
-  } while ([DateTime]::UtcNow -lt $deadline)
-  throw 'Windows native offline legacy cleanup did not converge before its deadline'
+  }
+  Assert-NoLegacyRules
+
+  Remove-AuditedState $stateDirectories $rootPath
+  Assert-ResidualStateAbsent $rootPath
+  Assert-NoLegacyRules
 }
 
 switch ($Action) {

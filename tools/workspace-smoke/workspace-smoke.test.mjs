@@ -147,7 +147,7 @@ test("Hosted CI pins native toolchain runners and enforces the complete matrix",
       const coverageReport = source.indexOf("coverage-execution-report.json");
       assert.notEqual(coverageReport, -1);
       const uploadStep = source.slice(source.lastIndexOf("      - ", coverageReport), coverageReport);
-      assert.match(uploadStep, /if:\s*always\(\)/u, "WFP evidence upload must run even after an earlier failure");
+      assert.match(uploadStep, /steps\.windows-coverage-smoke\.outcome\s*==\s*'success'/u, "WFP evidence upload must depend on the required verified smoke step");
       assert.match(source, /coverage-execution-windows-[\s\S]*if-no-files-found:\s*error/u, "required verified Windows runs must fail closed without evidence");
       const cleanupStep = source.slice(source.lastIndexOf("      - ", legacyCleanup), serviceSmoke);
       assert.match(cleanupStep, /windows-offline-boundary\.ps1/u);
@@ -286,5 +286,19 @@ test("cross-platform transports constrain network-capable calls to local IPC", a
     calledSelectors(windowsSource, "winio"),
     ["ListenPipe"],
     "Windows transport must only listen on a local Named Pipe"
+  );
+});
+
+test("guardian Windows boundary constrains network-capable selectors to local IPC only", async () => {
+  const source = await readFile("apps/test-service/internal/offlineboundary/guardian_windows.go", "utf8");
+  assert.deepEqual(
+    [...source.matchAll(/\bnet\.([A-Za-z_]\w*)/g)].map((match) => match[1]),
+    ["Listener", "Conn", "Conn", "Conn", "Conn"],
+    "guardian_windows.go must use net only for local pipe listener/connection types"
+  );
+  assert.deepEqual(
+    [...source.matchAll(/\bwinio\.([A-Za-z_]\w*)/g)].map((match) => match[1]),
+    ["ListenPipe", "PipeConfig", "DialPipeContext"],
+    "guardian_windows.go must use go-winio only for local Named Pipe setup/dial"
   );
 });

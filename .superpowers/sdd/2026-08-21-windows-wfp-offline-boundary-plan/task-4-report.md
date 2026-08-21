@@ -40,3 +40,43 @@ Concerns:
 
 1. `pnpm test:workspace` is not fully green on this host because `cmake` is unavailable locally.
 2. Historical spec/testdata files still mention old `Guard` / `CleanupAll` names as archival context; production code/workflow no longer invoke them.
+
+## Fix round1 — 2026-08-21
+
+Status: DONE_WITH_CONCERNS
+
+Delta delivered:
+
+- Hardened `tools/service-probe/scripts/windows-offline-boundary.ps1` so `LegacyCleanup` now audits a closed historical residue contract before deleting anything:
+  - exact historical rule names only, in both `ActiveStore` and `PersistentStore`
+  - exact `Name/DisplayName/Enabled/Direction/Action/Profile/Group`
+  - exact closed `application/address/port/service/interface/interfaceType` filters
+  - exact marker set only: `rule-name`, `owner.pid`, `guardian.nonce`, `guardian.pid`, `release`, `ready`, `removed`
+  - strict UTF-8/no-BOM/single-line/size-bounded marker decoding
+  - canonical rule/owner/pid/nonce content checks
+  - live legacy creator detection still fail-closes cleanup
+  - deletion happens only after full audit, followed by a second absent audit
+- Added real Windows fixture coverage for legacy cleanup:
+  - valid canonical cleanup succeeds
+  - wrong nonce / wrong owner PID / wrong rule marker reject without deletion
+  - extra marker / unknown state root entry reject without deletion
+  - extra rule / wrong firewall action reject without deletion
+- Tightened `.github/workflows/foundation.yml` so `coverage-execution-windows-*` uploads only when the required verified `windows-coverage-smoke` step succeeded; it no longer uses unconditional `always()` evidence upload.
+- Updated `docs/development.md` to remove the old production PowerShell/marker wording and record the closed WFP execution report schema.
+- Extended workspace import-policy verification for `guardian_windows.go` with selector-level checks, not just file-level allowlisting.
+
+Fresh verification:
+
+- PASS: `pnpm --filter @unit-test-ide/service-probe build`
+- PASS: `node --test tools/service-probe/dist/windows-offline-boundary-legacy.test.js`
+- PASS: `node --test tools/workspace-smoke/workspace-smoke.test.mjs`
+- PASS: `pnpm --filter @unit-test-ide/service-probe test`
+- PASS: `pnpm check:protocol-generated`
+- PASS: `git diff --check`
+- FAIL (pre-existing / unrelated to this patch): `go test ./apps/test-service/internal/offlineboundary/...`
+  - exact failure on 2026-08-21: `TestWindowsBoundaryStartUsesInjectedEngineLeaseAndIdempotentClose` returned `offline boundary owner identity mismatch`
+  - this round did not modify Go boundary logic; only workflow/docs/PowerShell/test coverage changed
+
+Round1 concerns:
+
+1. The targeted Go package test above is not green in this host/worktree state; I am carrying it forward as an existing concern instead of masking it.
