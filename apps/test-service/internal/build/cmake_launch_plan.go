@@ -174,11 +174,10 @@ func (validator *cmakeLaunchValidator) validateFile(path, binaryDir string) erro
 		case "try_run", "try_compile":
 			return errInvalidCMakeLaunchDeclaration
 		case "cmake_language":
-			if len(invocation.arguments) != 0 &&
-				(strings.EqualFold(invocation.arguments[0].value, "EVAL") ||
-					strings.EqualFold(invocation.arguments[0].value, "CALL")) {
-				return errInvalidCMakeLaunchDeclaration
-			}
+			// CALL, EVAL, and DEFER can all introduce a command after this
+			// closed declaration has been validated. There is no safe default
+			// for an unrecognised cmake_language mode.
+			return errInvalidCMakeLaunchDeclaration
 		case "set":
 			if err := validator.validateSetLaunchProperty(invocation, key); err != nil {
 				return err
@@ -245,6 +244,15 @@ func (validator *cmakeLaunchValidator) validateFile(path, binaryDir string) erro
 			if err := validator.validateFile(include, binaryDir); err != nil {
 				return errInvalidCMakeLaunchDeclaration
 			}
+		case "cmake_minimum_required", "project", "enable_testing", "add_library",
+			"target_compile_features", "target_link_libraries":
+			// These commands are part of the canonical coverage fixture and do
+			// not assign a command, tool, or script-loader output variable.
+		default:
+			// An unknown command may assign an output variable (for example,
+			// find_program or get_filename_component) or schedule a launch.
+			// Only the explicitly classified commands above are accepted.
+			return errInvalidCMakeLaunchDeclaration
 		}
 	}
 	return nil
@@ -898,7 +906,8 @@ func isCMakeScriptLoaderVariable(value string) bool {
 }
 
 func isControlledCMakeListVariable(value string) bool {
-	return isCMakeScriptLoaderVariable(value) || isCompilerLauncherProperty(value) || isRuleLauncherProperty(value)
+	return isCMakeScriptLoaderVariable(value) || isCompilerLauncherProperty(value) ||
+		isRuleLauncherProperty(value) || isPinnedCMakeToolVariable(value)
 }
 
 func mentionsControlledCMakeListVariable(value string) bool {
@@ -909,6 +918,12 @@ func mentionsControlledCMakeListVariable(value string) bool {
 	return strings.Contains(upper, "CMAKE_PROJECT_") ||
 		strings.Contains(upper, "CMAKE_TOOLCHAIN_FILE") ||
 		strings.Contains(upper, "CMAKE_USER_MAKE_RULES_OVERRIDE") ||
+		strings.Contains(upper, "CMAKE_MAKE_PROGRAM") ||
+		strings.Contains(upper, "CMAKE_LINKER") ||
+		strings.Contains(upper, "CMAKE_AR") ||
+		strings.Contains(upper, "CMAKE_RANLIB") ||
+		strings.Contains(upper, "CMAKE_") &&
+			(strings.Contains(upper, "_COMPILER") || strings.Contains(upper, "_LINKER")) ||
 		strings.Contains(upper, "_COMPILER_LAUNCHER") ||
 		strings.Contains(upper, "_LINKER_LAUNCHER") ||
 		strings.Contains(upper, "RULE_LAUNCH_")

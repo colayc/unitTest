@@ -437,6 +437,22 @@ func TestPlannerRejectsUnsafeControlledCMakeListMutation(t *testing.T) {
 			contents: "list(APPEND CMAKE_CXX_COMPILER_LAUNCHER unknown.exe)\nadd_executable(fixture main.cpp)\n",
 		},
 		{
+			name:     "pinned compiler append",
+			contents: "list(APPEND CMAKE_CXX_COMPILER unknown.exe)\nproject(fixture)\n",
+		},
+		{
+			name:     "pinned make program pop",
+			contents: "list(POP_BACK CMAKE_MAKE_PROGRAM)\nproject(fixture)\n",
+		},
+		{
+			name:     "pinned linker set",
+			contents: "list(SET CMAKE_LINKER 0 unknown.exe)\nproject(fixture)\n",
+		},
+		{
+			name:     "pinned archiver remove",
+			contents: "list(REMOVE_ITEM CMAKE_AR unknown.exe)\nproject(fixture)\n",
+		},
+		{
 			name:     "unknown set operation",
 			contents: "list(SET CMAKE_PROJECT_TOP_LEVEL_INCLUDES 0 evil.cmake)\nproject(fixture)\n",
 			evilFile: true,
@@ -515,6 +531,22 @@ func TestPlannerRejectsProtectedVariableWritesFromCMakeTransformCommands(t *test
 			contents: "cmake_path(SET CMAKE_CXX_COMPILER_LAUNCHER unknown.exe)\nadd_executable(fixture main.cpp)\n",
 		},
 		{
+			name:     "string concat pinned compiler",
+			contents: "string(CONCAT CMAKE_C_COMPILER unknown.exe)\nproject(fixture)\n",
+		},
+		{
+			name:     "file path conversion pinned make program",
+			contents: "file(TO_CMAKE_PATH unknown.exe CMAKE_MAKE_PROGRAM)\nproject(fixture)\n",
+		},
+		{
+			name:     "cmake path set pinned fortran compiler",
+			contents: "cmake_path(SET CMAKE_Fortran_COMPILER unknown.exe)\nproject(fixture)\n",
+		},
+		{
+			name:     "string prepend pinned ranlib",
+			contents: "string(PREPEND CMAKE_RANLIB unknown.exe)\nproject(fixture)\n",
+		},
+		{
 			name:     "indirect string output",
 			contents: "set(OUTPUT_NAME CMAKE_PROJECT_TOP_LEVEL_INCLUDES)\nstring(APPEND \"${OUTPUT_NAME}\" evil.cmake)\nproject(fixture)\n",
 			evilFile: true,
@@ -538,6 +570,75 @@ func TestPlannerRejectsProtectedVariableWritesFromCMakeTransformCommands(t *test
 				t.Fatalf("Plan() error = %v, want protected variable writer rejected", err)
 			}
 		})
+	}
+}
+
+func TestPlannerRejectsUnknownCMakeCommandWriters(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows launch declaration")
+	}
+	activatePlannerWFPRegistration(t)
+	for _, test := range []struct {
+		name     string
+		contents string
+	}{
+		{
+			name:     "find program compiler launcher",
+			contents: "find_program(CMAKE_CXX_COMPILER_LAUNCHER NAMES unknown.exe)\nproject(fixture)\n",
+		},
+		{
+			name:     "get filename component script loader",
+			contents: "get_filename_component(CMAKE_PROJECT_TOP_LEVEL_INCLUDES evil.cmake ABSOLUTE)\nproject(fixture)\n",
+		},
+		{
+			name:     "deferred cmake language call",
+			contents: "cmake_language(DEFER CALL execute_process COMMAND unknown.exe)\nproject(fixture)\n",
+		},
+		{
+			name:     "unclassified command",
+			contents: "unclassified_command(CMAKE_CXX_COMPILER unknown.exe)\nproject(fixture)\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newPlannerFixture(t)
+			if err := os.WriteFile(filepath.Join(fixture.sourceDir, "CMakeLists.txt"), []byte(test.contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Plan(PlanInput{
+				Installation: fixture.installation, WorkspaceRoot: fixture.root,
+				Project: fixture.project, Profile: fixture.profile,
+				Toolchain: fixture.toolchain, Jobs: 1, Configure: true,
+			}); !errors.Is(err, task.ErrInvalidArgument) {
+				t.Fatalf("Plan() error = %v, want unknown CMake writer rejected", err)
+			}
+		})
+	}
+}
+
+func TestPlannerAcceptsExplicitSafeCMakeCommandAllowlist(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows launch declaration")
+	}
+	activatePlannerWFPRegistration(t)
+	fixture := newPlannerFixture(t)
+	contents := `cmake_minimum_required(VERSION 3.25)
+project(fixture LANGUAGES CXX)
+add_library(helper STATIC helper.cpp)
+add_executable(fixture main.cpp)
+target_compile_features(fixture PRIVATE cxx_std_20)
+target_link_libraries(fixture PRIVATE helper)
+enable_testing()
+add_test(NAME fixture COMMAND fixture)
+`
+	if err := os.WriteFile(filepath.Join(fixture.sourceDir, "CMakeLists.txt"), []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Plan(PlanInput{
+		Installation: fixture.installation, WorkspaceRoot: fixture.root,
+		Project: fixture.project, Profile: fixture.profile,
+		Toolchain: fixture.toolchain, Jobs: 1, Configure: true,
+	}); err != nil {
+		t.Fatalf("Plan() error = %v, want explicit safe CMake command allowlist accepted", err)
 	}
 }
 

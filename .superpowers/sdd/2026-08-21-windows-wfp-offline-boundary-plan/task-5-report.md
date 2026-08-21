@@ -187,6 +187,19 @@ controls:
   targets whose identity cannot be proven statically. The indirect
   `${OUTPUT_NAME}` control proves the gate is semantic rather than a four-form
   spelling blocklist.
+- Final unified tool-writer wave started with focused RED controls proving that
+  list mutations and string/file/cmake_path output forms could still overwrite
+  pinned compiler, linker, make-program, archiver, and ranlib variables. The
+  same RED run also proved that `find_program`, `get_filename_component`,
+  deferred `cmake_language`, and an unclassified command were accepted without
+  a closed output/launch interpretation. Every `isPinnedCMakeToolVariable`
+  identity is now part of the common controlled-variable predicate, including
+  C, CXX, Fortran and other literal language compiler/linker variables.
+  APPEND/PREPEND/POP/REMOVE/SET list forms and transform-command output writers
+  therefore fail closed. The CMake validator now defaults to rejection for an
+  unclassified command or command mode and retains only an explicit no-output,
+  no-launch allowlist for the canonical coverage fixture; a full canonical
+  static-library/test fixture is the positive control.
 
 ## Verification
 
@@ -251,6 +264,12 @@ Go caches.
   integration explicitly excluded; `go vet` and Linux full-package
   compile-only PASS; Service Probe reports 76 PASS / one exact
   `ToolchainUnavailable` SKIP; Extension reports 138/138 PASS.
+- Final unified tool-writer wave: focused list/string/cmake_path/file pinned-tool
+  controls and unknown-writer/default-rejection controls PASS, along with the
+  canonical safe-command positive fixture. Complete Service unit and race trees
+  PASS with only the privileged WFP lifecycle explicitly excluded; `go vet`
+  and Linux full-package compile-only PASS; Service Probe reports 76 PASS / one
+  exact `ToolchainUnavailable` SKIP; Extension reports 138/138 PASS.
 - `pnpm check:protocol-generated`, `pnpm check:coverage-generated`, and
   `pnpm build` with private `GOCACHE`: PASS.
 - Exact `pnpm test`: coverage generator 4/4, CMake bundle 28/28, and coverage
