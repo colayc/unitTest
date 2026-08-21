@@ -118,6 +118,65 @@ func TestPlannerRejectsModifiedCoverageInstrumentationOptions(t *testing.T) {
 	}
 }
 
+func TestPlannerRejectsCompilerAndLinkerOptionMutationSurfaces(t *testing.T) {
+	activatePlannerWFPRegistration(t)
+	for _, test := range []struct {
+		name     string
+		contents string
+	}{
+		{
+			name:     "compiler flags variable",
+			contents: "project(fixture LANGUAGES CXX)\nset(CMAKE_CXX_FLAGS \"-fpass-plugin=unknown.dll\")\n",
+		},
+		{
+			name:     "executable linker flags variable",
+			contents: "project(fixture LANGUAGES CXX)\nset(CMAKE_EXE_LINKER_FLAGS \"-Wl,-plugin,unknown.dll\")\n",
+		},
+		{
+			name:     "list mutated shared linker flags",
+			contents: "project(fixture LANGUAGES CXX)\nlist(APPEND CMAKE_SHARED_LINKER_FLAGS \"/LINK unknown.dll\")\n",
+		},
+		{
+			name: "quoted compile options property",
+			contents: "project(fixture LANGUAGES CXX)\nadd_executable(fixture main.cpp)\n" +
+				"set_property(TARGET fixture \"PROPERTY\" \"COMPILE_OPTIONS\" \"-fpass-plugin=unknown.dll\")\n",
+		},
+		{
+			name: "target link options property",
+			contents: "project(fixture LANGUAGES CXX)\nadd_executable(fixture main.cpp)\n" +
+				"set_target_properties(fixture PROPERTIES link_options \"-Wl,-plugin,unknown.dll\")\n",
+		},
+		{
+			name:     "directory compile flags property",
+			contents: "project(fixture LANGUAGES CXX)\nset_directory_properties(PROPERTIES \"COMPILE_FLAGS\" \"/clang:-fplugin=unknown.dll\")\n",
+		},
+		{
+			name: "raw target link flag",
+			contents: "project(fixture LANGUAGES CXX)\nadd_executable(fixture main.cpp)\n" +
+				"target_link_libraries(fixture PRIVATE \"-Wl,-plugin,unknown.dll\")\n",
+		},
+		{
+			name: "unknown target link item",
+			contents: "project(fixture LANGUAGES CXX)\nadd_executable(fixture main.cpp)\n" +
+				"target_link_libraries(fixture PRIVATE unknown_library)\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newPlannerFixture(t)
+			if err := os.WriteFile(filepath.Join(fixture.sourceDir, "CMakeLists.txt"), []byte(test.contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Plan(PlanInput{
+				Installation: fixture.installation, WorkspaceRoot: fixture.root,
+				Project: fixture.project, Profile: fixture.profile,
+				Toolchain: fixture.toolchain, Jobs: 1, Configure: true,
+			}); !errors.Is(err, task.ErrInvalidArgument) {
+				t.Fatalf("Plan() error = %v, want option mutation rejected", err)
+			}
+		})
+	}
+}
+
 func makeOwnerOnlyPlannerInstrumentationRoot(t *testing.T, path string) {
 	t.Helper()
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()

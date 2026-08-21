@@ -224,6 +224,19 @@ controls:
   closed retained instrumentation vectors. The same flags in project source,
   copied content without provenance, extra/changed options, and compiler/linker
   plugins fail before CMake process creation.
+- Final option-surface wave began with RED controls proving that compiler and
+  linker flags assigned through `set`, quoted/case-insensitive
+  `set_property`/`set_target_properties`/`set_directory_properties`, and raw or
+  unknown `target_link_libraries` items still bypassed the option provenance
+  gate. Compiler/language and executable/shared/module/static linker `*_FLAGS`
+  variables are now controlled across set/list/string/file/cmake_path writers
+  and always fail closed outside the exact retained instrumentation form.
+  Compile/link option, flags, and link-library properties are likewise closed.
+  `target_link_libraries` now accepts only prior literal declarations or exact
+  File API artifacts; the canonical static-library fixture remains the positive
+  control, while `-Wl`, `/LINK`, plugin, and unknown/raw entries fail before
+  configure. `add_library` is limited to the supported literal STATIC fixture
+  declaration.
 
 ## Verification
 
@@ -305,6 +318,12 @@ Go caches.
   Service unit and race trees PASS with only the privileged WFP lifecycle
   explicitly excluded; `go vet` and Linux full-package compile-only PASS;
   Service Probe reports 76 PASS / one exact `ToolchainUnavailable` SKIP;
+  Extension reports 138/138 PASS.
+- Final option-surface wave: focused flags-variable/property/target-link
+  negatives and canonical declared-static-library positive controls PASS.
+  Complete Service unit and race trees PASS with only the privileged WFP
+  lifecycle explicitly excluded; `go vet` and Linux full-package compile-only
+  PASS; Service Probe reports 76 PASS / one exact `ToolchainUnavailable` SKIP;
   Extension reports 138/138 PASS.
 - `pnpm check:protocol-generated`, `pnpm check:coverage-generated`, and
   `pnpm build` with private `GOCACHE`: PASS.

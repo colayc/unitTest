@@ -38,6 +38,8 @@ type cmakeLaunchValidator struct {
 	variables              map[string]string
 	targets                map[string]string
 	targetPaths            map[string]struct{}
+	declaredTargets        map[string]struct{}
+	declaredLinkArtifacts  map[string]struct{}
 	cmakePath              string
 	ctestPath              string
 	binaryRoot             string
@@ -74,17 +76,19 @@ func validateCMakeLaunchPlan(input PlanInput, sourceDir string, launchPlan []str
 			"${CMAKE_C_COMPILER}":    input.Toolchain.CCompiler,
 			"${CMAKE_CXX_COMPILER}":  input.Toolchain.CXXCompiler,
 		},
-		cmakePath:     cmakeLaunchPathKey(input.Installation.Executable),
-		ctestPath:     cmakeLaunchPathKey(input.Installation.CTestExecutable),
-		binaryRoot:    binaryRoot,
-		configuration: input.Profile.Configuration,
-		multiConfig:   multiConfigGenerator(input.Profile.Generator),
-		targets:       make(map[string]string, len(input.Targets)),
-		targetPaths:   make(map[string]struct{}, len(input.Targets)),
-		allowedRoots:  []string{sourceRoot},
-		visited:       make(map[string]struct{}),
-		trustedFiles:  make(map[string]map[string]string),
-		snapshots:     make(map[string]cmake.FingerprintFile),
+		cmakePath:             cmakeLaunchPathKey(input.Installation.Executable),
+		ctestPath:             cmakeLaunchPathKey(input.Installation.CTestExecutable),
+		binaryRoot:            binaryRoot,
+		configuration:         input.Profile.Configuration,
+		multiConfig:           multiConfigGenerator(input.Profile.Generator),
+		targets:               make(map[string]string, len(input.Targets)),
+		targetPaths:           make(map[string]struct{}, len(input.Targets)),
+		declaredTargets:       make(map[string]struct{}, len(input.Targets)),
+		declaredLinkArtifacts: make(map[string]struct{}, len(input.Targets)),
+		allowedRoots:          []string{sourceRoot},
+		visited:               make(map[string]struct{}),
+		trustedFiles:          make(map[string]map[string]string),
+		snapshots:             make(map[string]cmake.FingerprintFile),
 	}
 	for _, executable := range launchPlan {
 		if !filepath.IsAbs(executable) {
@@ -93,6 +97,14 @@ func validateCMakeLaunchPlan(input PlanInput, sourceDir string, launchPlan []str
 		validator.addAllowedExecutable(executable, false)
 	}
 	for _, target := range input.Targets {
+		if literalCMakeTargetName(target.Name) {
+			validator.declaredTargets[strings.ToLower(target.Name)] = struct{}{}
+		}
+		for _, artifact := range target.Artifacts {
+			if filepath.IsAbs(artifact) {
+				validator.declaredLinkArtifacts[cmakeLaunchPathKey(artifact)] = struct{}{}
+			}
+		}
 		if target.Name == "" || target.Type != "EXECUTABLE" {
 			continue
 		}
@@ -222,6 +234,14 @@ func (validator *cmakeLaunchValidator) validateFile(path, binaryDir string) erro
 			if err := validator.declareExecutable(invocation, binaryDir); err != nil {
 				return err
 			}
+		case "add_library":
+			if err := validator.declareLibrary(invocation); err != nil {
+				return err
+			}
+		case "target_link_libraries":
+			if err := validator.validateTargetLinkLibraries(invocation); err != nil {
+				return err
+			}
 		case "file":
 			if len(invocation.arguments) != 0 {
 				switch strings.ToUpper(invocation.arguments[0].value) {
@@ -264,8 +284,8 @@ func (validator *cmakeLaunchValidator) validateFile(path, binaryDir string) erro
 			if err := validator.validateInstrumentationOptions(invocation, key); err != nil {
 				return err
 			}
-		case "cmake_minimum_required", "enable_testing", "add_library",
-			"target_compile_features", "target_link_libraries",
+		case "cmake_minimum_required", "enable_testing",
+			"target_compile_features",
 			"if", "elseif", "else", "endif", "message":
 			// These commands are part of the canonical coverage fixture and do
 			// not assign a command, tool, or script-loader output variable.
@@ -658,8 +678,61 @@ func (validator *cmakeLaunchValidator) declareExecutable(invocation cmakeInvocat
 		return errInvalidCMakeLaunchDeclaration
 	}
 	validator.targets[name] = executable
+	validator.declaredTargets[name] = struct{}{}
 	validator.targetPaths[cmakeLaunchPathKey(executable)] = struct{}{}
 	validator.addAllowedExecutable(executable, true)
+	return nil
+}
+
+func (validator *cmakeLaunchValidator) declareLibrary(invocation cmakeInvocation) error {
+	if len(invocation.arguments) < 3 || !literalCMakeTargetName(invocation.arguments[0].value) ||
+		!strings.EqualFold(invocation.arguments[1].value, "STATIC") {
+		return errInvalidCMakeLaunchDeclaration
+	}
+	name := strings.ToLower(invocation.arguments[0].value)
+	if _, duplicate := validator.declaredTargets[name]; duplicate {
+		return errInvalidCMakeLaunchDeclaration
+	}
+	for _, source := range invocation.arguments[2:] {
+		if source.value == "" || strings.ContainsAny(source.value, "$;<>") {
+			return errInvalidCMakeLaunchDeclaration
+		}
+	}
+	validator.declaredTargets[name] = struct{}{}
+	return nil
+}
+
+func (validator *cmakeLaunchValidator) validateTargetLinkLibraries(invocation cmakeInvocation) error {
+	if len(invocation.arguments) < 2 || !literalCMakeTargetName(invocation.arguments[0].value) {
+		return errInvalidCMakeLaunchDeclaration
+	}
+	if _, declared := validator.declaredTargets[strings.ToLower(invocation.arguments[0].value)]; !declared {
+		return errInvalidCMakeLaunchDeclaration
+	}
+	items := 0
+	lastWasScope := false
+	for _, argument := range invocation.arguments[1:] {
+		switch strings.ToUpper(argument.value) {
+		case "PRIVATE", "PUBLIC", "INTERFACE":
+			lastWasScope = true
+			continue
+		}
+		lastWasScope = false
+		if _, declared := validator.declaredTargets[strings.ToLower(argument.value)]; declared {
+			items++
+			continue
+		}
+		if filepath.IsAbs(argument.value) {
+			if _, declared := validator.declaredLinkArtifacts[cmakeLaunchPathKey(argument.value)]; declared {
+				items++
+				continue
+			}
+		}
+		return errInvalidCMakeLaunchDeclaration
+	}
+	if items == 0 || lastWasScope {
+		return errInvalidCMakeLaunchDeclaration
+	}
 	return nil
 }
 
@@ -776,6 +849,9 @@ func (validator *cmakeLaunchValidator) validateSetLaunchProperty(invocation cmak
 		if _, trusted := validator.trustedFiles[sourceKey]; trusted {
 			return nil
 		}
+		return errInvalidCMakeLaunchDeclaration
+	}
+	if isCMakeCompilerOrLinkerFlagsVariable(invocation.arguments[0].value) {
 		return errInvalidCMakeLaunchDeclaration
 	}
 	if isPinnedCMakeToolVariable(invocation.arguments[0].value) {
@@ -935,6 +1011,9 @@ func (validator *cmakeLaunchValidator) validateDirectoryProperties(invocation cm
 }
 
 func (validator *cmakeLaunchValidator) validateLaunchProperty(name string, values []cmakeArgument, sourceKey string) error {
+	if isCompilerOrLinkerOptionProperty(name) {
+		return errInvalidCMakeLaunchDeclaration
+	}
 	if !isCompilerLauncherProperty(name) && !isRuleLauncherProperty(name) {
 		return nil
 	}
@@ -993,6 +1072,33 @@ func isPinnedCMakeToolVariable(value string) bool {
 	return false
 }
 
+func isCMakeCompilerOrLinkerFlagsVariable(value string) bool {
+	upper := strings.ToUpper(value)
+	if !strings.HasPrefix(upper, "CMAKE_") {
+		return false
+	}
+	toolFlags := strings.TrimPrefix(upper, "CMAKE_")
+	flags := strings.Index(toolFlags, "_FLAGS")
+	if flags <= 0 {
+		return false
+	}
+	suffix := toolFlags[flags+len("_FLAGS"):]
+	return suffix == "" || strings.HasPrefix(suffix, "_")
+}
+
+func isCompilerOrLinkerOptionProperty(value string) bool {
+	switch strings.ToUpper(value) {
+	case "COMPILE_OPTIONS", "INTERFACE_COMPILE_OPTIONS",
+		"LINK_OPTIONS", "INTERFACE_LINK_OPTIONS",
+		"COMPILE_FLAGS", "LINK_FLAGS",
+		"LINK_LIBRARIES", "INTERFACE_LINK_LIBRARIES",
+		"STATIC_LIBRARY_OPTIONS":
+		return true
+	default:
+		return false
+	}
+}
+
 func isCMakeScriptLoaderVariable(value string) bool {
 	upper := strings.ToUpper(value)
 	switch upper {
@@ -1020,7 +1126,8 @@ func isCMakeScriptLoaderVariable(value string) bool {
 
 func isControlledCMakeListVariable(value string) bool {
 	return isCMakeScriptLoaderVariable(value) || isCompilerLauncherProperty(value) ||
-		isRuleLauncherProperty(value) || isPinnedCMakeToolVariable(value)
+		isRuleLauncherProperty(value) || isPinnedCMakeToolVariable(value) ||
+		isCMakeCompilerOrLinkerFlagsVariable(value)
 }
 
 func mentionsControlledCMakeListVariable(value string) bool {
@@ -1035,6 +1142,7 @@ func mentionsControlledCMakeListVariable(value string) bool {
 		strings.Contains(upper, "CMAKE_LINKER") ||
 		strings.Contains(upper, "CMAKE_AR") ||
 		strings.Contains(upper, "CMAKE_RANLIB") ||
+		strings.Contains(upper, "CMAKE_") && strings.Contains(upper, "_FLAGS") ||
 		strings.Contains(upper, "CMAKE_") &&
 			(strings.Contains(upper, "_COMPILER") || strings.Contains(upper, "_LINKER")) ||
 		strings.Contains(upper, "_COMPILER_LAUNCHER") ||
