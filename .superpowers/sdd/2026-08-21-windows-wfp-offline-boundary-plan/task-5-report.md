@@ -237,6 +237,14 @@ controls:
   control, while `-Wl`, `/LINK`, plugin, and unknown/raw entries fail before
   configure. `add_library` is limited to the supported literal STATIC fixture
   declaration.
+- Final preset/environment option wave began with five RED controls proving
+  that direct and inherited `CMakePresets.json` cache/environment entries could
+  still inject compiler or linker options. Resolved preset cache variables in
+  the `CMAKE_*_FLAGS` families and common compiler/linker option environment
+  variables (`CFLAGS`, `CXXFLAGS`, `CPPFLAGS`, `LDFLAGS`, language-specific
+  flags, and the MSVC `CL`/`LINK` forms) now fail closed before CMake process
+  creation. Validation runs after CMake-compatible inheritance merging, so a
+  child cannot conceal a hostile parent entry.
 
 ## Verification
 
@@ -325,6 +333,11 @@ Go caches.
   lifecycle explicitly excluded; `go vet` and Linux full-package compile-only
   PASS; Service Probe reports 76 PASS / one exact `ToolchainUnavailable` SKIP;
   Extension reports 138/138 PASS.
+- Final preset/environment option wave: focused direct/inherited cache and
+  environment injection controls PASS. Complete Service unit and race trees
+  PASS with only the privileged WFP lifecycle explicitly excluded; `go vet`
+  and Linux full-package compile-only PASS; Service Probe reports 76 PASS / one
+  exact `ToolchainUnavailable` SKIP; Extension reports 138/138 PASS.
 - `pnpm check:protocol-generated`, `pnpm check:coverage-generated`, and
   `pnpm build` with private `GOCACHE`: PASS.
 - Exact `pnpm test`: coverage generator 4/4, CMake bundle 28/28, and coverage

@@ -373,6 +373,9 @@ func (validator *cmakeLaunchValidator) validatePreset(sourceRoot, name string) e
 		if err != nil {
 			return errInvalidCMakeLaunchDeclaration
 		}
+		if isCMakeCompilerOrLinkerFlagsVariable(variable) {
+			return errInvalidCMakeLaunchDeclaration
+		}
 		if isCMakeScriptLoaderVariable(variable) {
 			if err := validator.validateScriptLoaderValue(sourceRoot, variable, value); err != nil {
 				return err
@@ -391,6 +394,10 @@ func (validator *cmakeLaunchValidator) validatePreset(sourceRoot, name string) e
 		}
 		value, err := launchPresetValue(raw)
 		if err != nil {
+			return errInvalidCMakeLaunchDeclaration
+		}
+		if isCMakeCompilerOrLinkerFlagsVariable(variable) ||
+			isCompilerOrLinkerOptionEnvironmentVariable(variable) {
 			return errInvalidCMakeLaunchDeclaration
 		}
 		if isCMakeScriptLoaderVariable(variable) {
@@ -1084,6 +1091,18 @@ func isCMakeCompilerOrLinkerFlagsVariable(value string) bool {
 	}
 	suffix := toolFlags[flags+len("_FLAGS"):]
 	return suffix == "" || strings.HasPrefix(suffix, "_")
+}
+
+func isCompilerOrLinkerOptionEnvironmentVariable(value string) bool {
+	switch strings.ToUpper(value) {
+	case "CFLAGS", "CXXFLAGS", "CPPFLAGS", "LDFLAGS",
+		"OBJCFLAGS", "OBJCXXFLAGS", "FFLAGS", "FCFLAGS",
+		"ASMFLAGS", "ASFLAGS", "RCFLAGS", "CUDAFLAGS", "HIPFLAGS",
+		"CL", "_CL_", "LINK", "_LINK_":
+		return true
+	default:
+		return false
+	}
 }
 
 func isCompilerOrLinkerOptionProperty(value string) bool {

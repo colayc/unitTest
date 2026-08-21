@@ -260,6 +260,76 @@ func TestResolveLaunchPresetUsesCMakeMultipleInheritancePrecedence(t *testing.T)
 	}
 }
 
+func TestPlannerRejectsPresetCompilerAndLinkerOptionOverrides(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows launch declaration")
+	}
+	activatePlannerWFPRegistration(t)
+	for _, test := range []struct {
+		name       string
+		presets    []map[string]any
+		presetName string
+	}{
+		{
+			name: "cache compiler plugin",
+			presets: []map[string]any{{
+				"name": "debug", "cacheVariables": map[string]string{"CMAKE_CXX_FLAGS": "-fpass-plugin=unknown.dll"},
+			}},
+			presetName: "debug",
+		},
+		{
+			name: "environment compiler plugin",
+			presets: []map[string]any{{
+				"name": "debug", "environment": map[string]string{"CXXFLAGS": "/clang:-fplugin=unknown.dll"},
+			}},
+			presetName: "debug",
+		},
+		{
+			name: "environment linker plugin",
+			presets: []map[string]any{{
+				"name": "debug", "environment": map[string]string{"LDFLAGS": "-Wl,-plugin,unknown.dll"},
+			}},
+			presetName: "debug",
+		},
+		{
+			name: "inherited cache flags",
+			presets: []map[string]any{
+				{"name": "parent", "cacheVariables": map[string]string{"CMAKE_EXE_LINKER_FLAGS": "-Wl,-plugin,unknown.dll"}},
+				{"name": "child", "inherits": "parent"},
+			},
+			presetName: "child",
+		},
+		{
+			name: "inherited environment flags",
+			presets: []map[string]any{
+				{"name": "parent", "environment": map[string]string{"CPPFLAGS": "-fpass-plugin=unknown.dll"}},
+				{"name": "child", "inherits": "parent"},
+			},
+			presetName: "child",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newPlannerFixture(t)
+			fixture.profile.Origin = "preset"
+			fixture.profile.ConfigurePreset = test.presetName
+			document, err := json.Marshal(map[string]any{"version": 6, "configurePresets": test.presets})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(fixture.sourceDir, "CMakePresets.json"), document, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Plan(PlanInput{
+				Installation: fixture.installation, WorkspaceRoot: fixture.root,
+				Project: fixture.project, Profile: fixture.profile,
+				Toolchain: fixture.toolchain, Jobs: 1, Configure: true,
+			}); !errors.Is(err, task.ErrInvalidArgument) {
+				t.Fatalf("Plan() error = %v, want preset option override rejected", err)
+			}
+		})
+	}
+}
+
 func TestPlannerPinsEarlierInheritedPresetScriptLikeCMake(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows launch declaration")
