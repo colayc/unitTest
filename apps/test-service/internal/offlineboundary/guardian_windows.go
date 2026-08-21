@@ -193,7 +193,7 @@ func (lease *guardianLease) run() {
 			return nil
 		}
 		if err := lease.session.Send(context.Background(), guardianFrame{Kind: guardianFrameRelease}); err != nil {
-			return errors.Join(SessionCloseFailed, err)
+			return SessionCloseFailed
 		}
 		releaseSent = true
 		releaseTimer = time.NewTimer(lease.releaseTimeout)
@@ -204,7 +204,7 @@ func (lease *guardianLease) run() {
 	for {
 		if byeSeen && waitDone {
 			if waitErr != nil {
-				lease.finish(errors.Join(SessionCloseFailed, waitErr))
+				lease.finish(SessionCloseFailed)
 			}
 			return
 		}
@@ -224,7 +224,7 @@ func (lease *guardianLease) run() {
 			}
 		case <-releaseTimeout:
 			_ = lease.session.Kill()
-			lease.finish(errors.Join(SessionCloseFailed, GuardianTimeout))
+			lease.finish(GuardianTimeout)
 			return
 		case result := <-recv:
 			if result.err != nil {

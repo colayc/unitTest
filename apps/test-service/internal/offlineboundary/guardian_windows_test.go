@@ -186,7 +186,7 @@ func TestGuardianLifecycleRejectsWrongOrderTimeoutAndCrash(t *testing.T) {
 		}
 	})
 
-	t.Run("release timeout returns same canonical close result", func(t *testing.T) {
+	t.Run("release timeout returns same canonical timeout result", func(t *testing.T) {
 		session := newScriptedGuardianSession()
 		boundary := New(Config{
 			ownerVerifier: funcVerifierForOwner(7, 8),
@@ -204,8 +204,85 @@ func TestGuardianLifecycleRejectsWrongOrderTimeoutAndCrash(t *testing.T) {
 		<-lease.Ready()
 
 		err = lease.Close()
+		if !errors.Is(err, GuardianTimeout) {
+			t.Fatalf("first Close() error = %v, want GuardianTimeout", err)
+		}
+		err2 := lease.Close()
+		if !errors.Is(err2, GuardianTimeout) {
+			t.Fatalf("second Close() error = %v, want GuardianTimeout", err2)
+		}
+		if err2.Error() != err.Error() {
+			t.Fatalf("second Close() = %q, want same canonical result as %q", err2.Error(), err.Error())
+		}
+	})
+
+	t.Run("release send failure is canonical and sanitized", func(t *testing.T) {
+		session := newScriptedGuardianSession()
+		session.sendErr = errors.New(`write \\.\pipe\offlineboundary-secret: access denied`)
+		boundary := New(Config{
+			ownerVerifier: funcVerifierForOwner(7, 8),
+			guardianFactory: func(context.Context, OwnerIdentity) (guardianSession, error) { return session, nil },
+			guardianReadyTimeout:   time.Second,
+			guardianReleaseTimeout: time.Second,
+		})
+
+		lease, err := boundary.Start(context.Background(), OwnerIdentity{PID: 7, CreationTime: 8})
+		if err != nil {
+			t.Fatalf("Start() error = %v", err)
+		}
+		session.pushInbound(guardianFrame{Kind: guardianFrameHello})
+		session.pushInbound(guardianFrame{Kind: guardianFrameReady})
+		<-lease.Ready()
+
+		err = lease.Close()
 		if !errors.Is(err, SessionCloseFailed) {
 			t.Fatalf("first Close() error = %v, want SessionCloseFailed", err)
+		}
+		if strings.Contains(err.Error(), `\\.\pipe\`) || strings.Contains(err.Error(), `access denied`) {
+			t.Fatalf("first Close() leaked transport details: %q", err.Error())
+		}
+		err2 := lease.Close()
+		if !errors.Is(err2, SessionCloseFailed) {
+			t.Fatalf("second Close() error = %v, want SessionCloseFailed", err2)
+		}
+		if err2.Error() != err.Error() {
+			t.Fatalf("second Close() = %q, want same canonical result as %q", err2.Error(), err.Error())
+		}
+	})
+
+	t.Run("bye then process wait failure is canonical and sanitized", func(t *testing.T) {
+		session := newScriptedGuardianSession()
+		boundary := New(Config{
+			ownerVerifier: funcVerifierForOwner(7, 8),
+			guardianFactory: func(context.Context, OwnerIdentity) (guardianSession, error) { return session, nil },
+			guardianReadyTimeout:   time.Second,
+			guardianReleaseTimeout: time.Second,
+		})
+
+		lease, err := boundary.Start(context.Background(), OwnerIdentity{PID: 7, CreationTime: 8})
+		if err != nil {
+			t.Fatalf("Start() error = %v", err)
+		}
+		session.pushInbound(guardianFrame{Kind: guardianFrameHello})
+		session.pushInbound(guardianFrame{Kind: guardianFrameReady})
+		<-lease.Ready()
+
+		closeErr := make(chan error, 1)
+		go func() { closeErr <- lease.Close() }()
+
+		frame := session.nextOutbound(t)
+		if frame.Kind != guardianFrameRelease {
+			t.Fatalf("outbound frame = %#v, want release", frame)
+		}
+		session.pushInbound(guardianFrame{Kind: guardianFrameBye})
+		session.finish(errors.New(`process wait for C:\guardian\native-offline-guardian.exe exited with details`))
+
+		err = <-closeErr
+		if !errors.Is(err, SessionCloseFailed) {
+			t.Fatalf("first Close() error = %v, want SessionCloseFailed", err)
+		}
+		if strings.Contains(err.Error(), `C:\guardian\`) || strings.Contains(err.Error(), `exited with details`) {
+			t.Fatalf("first Close() leaked process details: %q", err.Error())
 		}
 		err2 := lease.Close()
 		if !errors.Is(err2, SessionCloseFailed) {
@@ -286,7 +363,7 @@ func TestGuardianStartSanitizesVerifierAndLauncherFailures(t *testing.T) {
 
 func TestGuardianExecutablePathUsesExplicitCallerConfig(t *testing.T) {
 	path := `C:\callers\provided\native-offline-guardian.exe`
-	boundary := New(Config{guardianExecutablePath: path}).(*boundary)
+	boundary := New(Config{GuardianExecutablePath: path}).(*boundary)
 
 	got, err := boundary.resolveGuardianExecutablePath()
 	if err != nil {
@@ -301,6 +378,7 @@ type scriptedGuardianSession struct {
 	inbound  chan guardianFrame
 	outbound chan guardianFrame
 	waitErr  chan error
+	sendErr  error
 	closeOnce sync.Once
 }
 
@@ -326,6 +404,9 @@ func (session *scriptedGuardianSession) Receive(context.Context) (guardianFrame,
 }
 
 func (session *scriptedGuardianSession) Send(_ context.Context, frame guardianFrame) error {
+	if session.sendErr != nil {
+		return session.sendErr
+	}
 	session.outbound <- frame
 	return nil
 }

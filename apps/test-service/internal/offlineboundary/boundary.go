@@ -17,7 +17,7 @@ type Config struct {
 	engineFactory          func() (wfpEngine, error)
 	leaseIDSource          func() []byte
 	ownerVerifier          guardianOwnerVerifier
-	guardianExecutablePath string
+	GuardianExecutablePath string
 	guardianFactory        func(context.Context, OwnerIdentity) (guardianSession, error)
 	guardianReadyTimeout   time.Duration
 	guardianReleaseTimeout time.Duration
@@ -38,7 +38,7 @@ func New(config Config) OfflineBoundary {
 		engineFactory:          config.engineFactory,
 		leaseIDSource:          config.leaseIDSource,
 		ownerVerifier:          config.ownerVerifier,
-		guardianExecutablePath: config.guardianExecutablePath,
+		guardianExecutablePath: config.GuardianExecutablePath,
 		guardianFactory:        config.guardianFactory,
 		guardianReadyTimeout:   config.guardianReadyTimeout,
 		guardianReleaseTimeout: config.guardianReleaseTimeout,

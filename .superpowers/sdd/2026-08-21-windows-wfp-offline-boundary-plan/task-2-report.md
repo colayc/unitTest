@@ -118,3 +118,54 @@ Re-run required gates after fix round1:
 
 - The executable-path contract is now explicit and test-covered, but the default production wiring still falls back to sibling-binary discovery when callers do not override it. Task 3 or higher-level integration still needs to decide the final deployment handoff.
 - Lifecycle coverage is still package-level. There is not yet an end-to-end Windows test that spawns the compiled guardian binary over the real `go-winio` transport in CI.
+
+## Fix round2 (scoped re-review)
+
+### Root cause summary
+
+- Two post-ready close paths still violated the public error-boundary contract:
+  - release send failure returned `errors.Join(SessionCloseFailed, rawErr)`
+  - `bye` followed by process wait failure retained the raw wait error in a joined public result
+- The executable-path contract existed only as a private config field, so package-external callers could not formally provide the path even though the implementation supported it internally.
+
+### Fixes applied
+
+- Canonicalized the remaining post-ready public close results:
+  - release send failure → `SessionCloseFailed`
+  - `bye` + process wait failure → `SessionCloseFailed`
+  - release timeout → `GuardianTimeout`
+- Removed the last public `errors.Join(...)` usage from the post-ready close/wait surface so pipe names, command details, and raw wait text do not escape through `Close()` / `Wait()`.
+- Promoted the caller path contract to exported API: `offlineboundary.Config.GuardianExecutablePath`.
+- Added a package-external test (`package offlineboundary_test`) proving callers can pass `GuardianExecutablePath` through the public config surface.
+
+### Additional RED/GREEN evidence
+
+Focused RED for scoped round2:
+
+- `go test ./apps/test-service/internal/offlineboundary -run 'Guardian|Protocol|Owner|Release|Config' -count=1`
+  - RED evidence: compile failed first because `Config.GuardianExecutablePath` did not yet exist publicly.
+
+Focused GREEN after scoped round2:
+
+- `go test ./apps/test-service/internal/offlineboundary -run 'Guardian|Protocol|Owner|Release|Config' -count=1`
+  - Result: `ok  	unit-test-ide.local/test-service/internal/offlineboundary	0.111s`
+
+Re-run required gates after fix round2:
+
+- `$env:GOOS='linux'; $env:GOARCH='amd64'; $env:CGO_ENABLED='0'; go test -c ./apps/test-service/cmd/native-offline-guardian`
+  - Result: `?   	unit-test-ide.local/test-service/cmd/native-offline-guardian	[no test files]`
+
+- `go vet ./apps/test-service/internal/offlineboundary ./apps/test-service/cmd/native-offline-guardian`
+  - Result: exit 0, no output
+
+### Additional behaviors now covered
+
+- release send failure returns a canonical/sanitized `SessionCloseFailed`
+- `bye` followed by guardian process wait failure returns a canonical/sanitized `SessionCloseFailed`
+- repeated `Close()` after those failures returns the same canonical result
+- package-external callers can pass `Config.GuardianExecutablePath`
+
+### Updated concerns after round2
+
+- The caller-facing executable-path contract is now formally exported, but default runtime behavior still falls back to sibling-binary discovery when callers leave it empty. That default is explicit now, but final production wiring still belongs to higher-level integration.
+- CI still lacks an end-to-end Windows test that spawns the compiled guardian binary over the real `go-winio` transport and asserts the exported path contract in a full process launch.
