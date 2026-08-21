@@ -24,14 +24,6 @@ var (
 	fwpmLayerALEAuthConnectV6 = windows.GUID{Data1: 0x4a72393b, Data2: 0x319f, Data3: 0x44bc, Data4: [8]byte{0x84, 0xc3, 0xba, 0x54, 0xdc, 0xb3, 0xb6, 0xb4}}
 )
 
-type boundaryLease struct {
-	ready     chan struct{}
-	done      chan struct{}
-	engine    wfpEngine
-	closeOnce sync.Once
-	closeErr  error
-}
-
 type fwpmDisplayData0 struct {
 	Name        *uint16
 	Description *uint16
@@ -161,67 +153,6 @@ var (
 	procFwpmEngineClose0             = fwpuclnt.NewProc("FwpmEngineClose0")
 	procFwpmFreeMemory0              = fwpuclnt.NewProc("FwpmFreeMemory0")
 )
-
-func (boundary *boundary) Start(ctx context.Context, owner OwnerIdentity) (Lease, error) {
-	if err := validateOwnerIdentity(owner); err != nil {
-		return nil, err
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-
-	engineFactory := boundary.engineFactory
-	if engineFactory == nil {
-		engineFactory = defaultWFPEngineFactory
-	}
-	engine, err := engineFactory()
-	if err != nil {
-		return nil, err
-	}
-
-	leaseIDSource := boundary.leaseIDSource
-	if leaseIDSource == nil {
-		leaseIDSource = newLeaseID
-	}
-	leaseID := append([]byte(nil), leaseIDSource()...)
-	if len(leaseID) == 0 {
-		leaseID = newLeaseID()
-	}
-
-	if err := engine.AddOutboundBlockFilters(ctx, leaseID); err != nil {
-		_ = engine.Close()
-		return nil, err
-	}
-	if err := engine.AuditOutboundBlockFilters(ctx, leaseID); err != nil {
-		_ = engine.Close()
-		return nil, err
-	}
-
-	ready := make(chan struct{})
-	close(ready)
-	return &boundaryLease{
-		ready:  ready,
-		done:   make(chan struct{}),
-		engine: engine,
-	}, nil
-}
-
-func (lease *boundaryLease) Ready() <-chan struct{} { return lease.ready }
-
-func (lease *boundaryLease) Close() error {
-	lease.closeOnce.Do(func() {
-		defer close(lease.done)
-		if lease.engine != nil {
-			lease.closeErr = lease.engine.Close()
-		}
-	})
-	return lease.closeErr
-}
-
-func (lease *boundaryLease) Wait() error {
-	<-lease.done
-	return lease.closeErr
-}
 
 func defaultWFPEngineFactory() (wfpEngine, error) {
 	return openWFPEngineWithAPI(procWfpAPI{}, windows.GenerateGUID)

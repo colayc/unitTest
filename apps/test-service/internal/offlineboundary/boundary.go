@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"time"
 )
 
 type wfpEngine interface {
@@ -13,19 +14,31 @@ type wfpEngine interface {
 }
 
 type Config struct {
-	engineFactory func() (wfpEngine, error)
-	leaseIDSource func() []byte
+	engineFactory          func() (wfpEngine, error)
+	leaseIDSource          func() []byte
+	ownerVerifier          guardianOwnerVerifier
+	guardianFactory        func(context.Context, OwnerIdentity) (guardianSession, error)
+	guardianReadyTimeout   time.Duration
+	guardianReleaseTimeout time.Duration
 }
 
 type boundary struct {
-	engineFactory func() (wfpEngine, error)
-	leaseIDSource func() []byte
+	engineFactory          func() (wfpEngine, error)
+	leaseIDSource          func() []byte
+	ownerVerifier          guardianOwnerVerifier
+	guardianFactory        func(context.Context, OwnerIdentity) (guardianSession, error)
+	guardianReadyTimeout   time.Duration
+	guardianReleaseTimeout time.Duration
 }
 
 func New(config Config) OfflineBoundary {
 	return &boundary{
-		engineFactory: config.engineFactory,
-		leaseIDSource: config.leaseIDSource,
+		engineFactory:          config.engineFactory,
+		leaseIDSource:          config.leaseIDSource,
+		ownerVerifier:          config.ownerVerifier,
+		guardianFactory:        config.guardianFactory,
+		guardianReadyTimeout:   config.guardianReadyTimeout,
+		guardianReleaseTimeout: config.guardianReleaseTimeout,
 	}
 }
 
