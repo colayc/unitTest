@@ -466,6 +466,71 @@ func TestPlannerValidatesPresetExecutableDiscoveryEnvironmentAgainstToolchainCap
 	})
 }
 
+func TestPlannerValidatesPresetDiscoveryAndPerLanguageToolCacheVariables(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows launch declaration")
+	}
+	activatePlannerWFPRegistration(t)
+	planWithCache := func(t *testing.T, variable string, value func(*plannerFixture) string) error {
+		t.Helper()
+		fixture := newPlannerFixture(t)
+		fixture.profile.Origin = "preset"
+		fixture.profile.ConfigurePreset = "debug"
+		cacheValue := value(&fixture)
+		document, err := json.Marshal(map[string]any{
+			"version": 6,
+			"configurePresets": []map[string]any{{
+				"name": "debug", "cacheVariables": map[string]string{variable: cacheValue},
+			}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(fixture.sourceDir, "CMakePresets.json"), document, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err = Plan(PlanInput{
+			Installation: fixture.installation, WorkspaceRoot: fixture.root,
+			Project: fixture.project, Profile: fixture.profile,
+			Toolchain: fixture.toolchain, Jobs: 1, Configure: true,
+		})
+		return err
+	}
+
+	for _, test := range []struct {
+		variable string
+		value    string
+	}{
+		{variable: "CMAKE_PROGRAM_PATH", value: "evilbin"},
+		{variable: "CMAKE_CXX_COMPILER_AR", value: "unknown-wrapper.exe"},
+		{variable: "CMAKE_CXX_COMPILER_RANLIB", value: "unknown-wrapper.exe"},
+		{variable: "CMAKE_CXX_COMPILER_TARGET", value: "unknown-target"},
+	} {
+		t.Run("rejects "+test.variable, func(t *testing.T) {
+			if err := planWithCache(t, test.variable, func(*plannerFixture) string { return test.value }); !errors.Is(err, task.ErrInvalidArgument) {
+				t.Fatalf("Plan() error = %v, want %s rejected", err, test.variable)
+			}
+		})
+	}
+
+	t.Run("accepts exact registered compiler archiver", func(t *testing.T) {
+		if err := planWithCache(t, "CMAKE_CXX_COMPILER_AR", func(fixture *plannerFixture) string {
+			return filepath.Join(filepath.Dir(fixture.toolchain.CXXCompiler), "ar.exe")
+		}); err != nil {
+			t.Fatalf("Plan() error = %v, want exact registered compiler archiver accepted", err)
+		}
+	})
+
+	t.Run("accepts exact toolchain target", func(t *testing.T) {
+		if err := planWithCache(t, "CMAKE_CXX_COMPILER_TARGET", func(fixture *plannerFixture) string {
+			fixture.toolchain.TargetTriple = "x86_64-pc-windows-gnu"
+			return fixture.toolchain.TargetTriple
+		}); err != nil {
+			t.Fatalf("Plan() error = %v, want exact toolchain target accepted", err)
+		}
+	})
+}
+
 func TestPlannerPinsEarlierInheritedPresetScriptLikeCMake(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows launch declaration")

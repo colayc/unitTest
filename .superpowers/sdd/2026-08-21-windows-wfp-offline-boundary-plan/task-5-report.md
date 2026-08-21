@@ -271,6 +271,16 @@ controls:
   its value byte-for-byte. Unknown, compiler/driver, CMake, unsetting, and
   uncaptured keys fail before process creation; exact captured `PATH` is the
   known-safe positive.
+- Final preset-cache discovery/tool wave began with RED controls proving that
+  `CMAKE_PROGRAM_PATH`, unknown `CMAKE_CXX_COMPILER_AR`/`RANLIB`, and an
+  unknown `CMAKE_CXX_COMPILER_TARGET` were accepted. CMake program/prefix/root,
+  module/framework/library/include, ignore, and find-mode discovery cache
+  variables now fail before process creation. Per-language `*_COMPILER*`
+  cache variables use a closed suffix grammar: compiler/AR/RANLIB/launcher
+  values must be exact registered LaunchPlan executables, TARGET must exactly
+  match the retained toolchain triple, and every other suffix is rejected.
+  Exact registered GCC archiver and exact target-triple fixtures are positive
+  controls.
 
 ## Verification
 
@@ -381,6 +391,12 @@ Go caches.
   Service unit and race trees PASS with only the privileged WFP lifecycle
   explicitly excluded; `go vet` and Linux full-package compile-only PASS;
   Service Probe reports 76 PASS / one exact `ToolchainUnavailable` SKIP;
+  Extension reports 138/138 PASS.
+- Final preset-cache discovery/tool wave: focused discovery-path,
+  AR/RANLIB/TARGET rejection and exact registered-tool/toolchain controls PASS.
+  Complete Service unit and race trees PASS with only the privileged WFP
+  lifecycle explicitly excluded; `go vet` and Linux full-package compile-only
+  PASS; Service Probe reports 76 PASS / one exact `ToolchainUnavailable` SKIP;
   Extension reports 138/138 PASS.
 - `pnpm check:protocol-generated`, `pnpm check:coverage-generated`, and
   `pnpm build` with private `GOCACHE`: PASS.

@@ -55,6 +55,7 @@ type cmakeLaunchValidator struct {
 	instrumentationPath    string
 	instrumentationDigest  string
 	instrumentationTrusted bool
+	toolchainTarget        string
 	files                  int
 	totalBytes             int64
 }
@@ -103,6 +104,7 @@ func validateCMakeLaunchPlan(input PlanInput, sourceDir string, launchPlan []str
 		visited:               make(map[string]struct{}),
 		trustedFiles:          make(map[string]map[string]string),
 		snapshots:             make(map[string]cmake.FingerprintFile),
+		toolchainTarget:       input.Toolchain.TargetTriple,
 	}
 	for _, executable := range launchPlan {
 		if !filepath.IsAbs(executable) {
@@ -386,6 +388,24 @@ func (validator *cmakeLaunchValidator) validatePreset(sourceRoot, name string) e
 		value, err := launchPresetValue(raw)
 		if err != nil {
 			return errInvalidCMakeLaunchDeclaration
+		}
+		if isCMakeExecutableDiscoveryCacheVariable(variable) {
+			return errInvalidCMakeLaunchDeclaration
+		}
+		if suffix, perLanguageCompiler := cmakePerLanguageCompilerToolSuffix(variable); perLanguageCompiler {
+			switch suffix {
+			case "_TARGET":
+				if validator.toolchainTarget == "" || value != validator.toolchainTarget {
+					return errInvalidCMakeLaunchDeclaration
+				}
+			case "", "_AR", "_RANLIB", "_LAUNCHER":
+				if !validator.allowedBareExecutable(value, "") {
+					return errInvalidCMakeLaunchDeclaration
+				}
+			default:
+				return errInvalidCMakeLaunchDeclaration
+			}
+			continue
 		}
 		if isCMakeCompilerOrLinkerFlagsVariable(variable) {
 			return errInvalidCMakeLaunchDeclaration
@@ -1098,6 +1118,43 @@ func isPinnedCMakeToolVariable(value string) bool {
 		}
 	}
 	return false
+}
+
+func cmakePerLanguageCompilerToolSuffix(value string) (string, bool) {
+	upper := strings.ToUpper(value)
+	if !strings.HasPrefix(upper, "CMAKE_") {
+		return "", false
+	}
+	languageTool := strings.TrimPrefix(upper, "CMAKE_")
+	marker := strings.Index(languageTool, "_COMPILER")
+	if marker <= 0 {
+		return "", false
+	}
+	for _, character := range languageTool[:marker] {
+		if character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' || character == '_' {
+			continue
+		}
+		return "", false
+	}
+	return languageTool[marker+len("_COMPILER"):], true
+}
+
+func isCMakeExecutableDiscoveryCacheVariable(value string) bool {
+	upper := strings.ToUpper(value)
+	switch upper {
+	case "CMAKE_PROGRAM_PATH", "CMAKE_SYSTEM_PROGRAM_PATH",
+		"CMAKE_PREFIX_PATH", "CMAKE_SYSTEM_PREFIX_PATH",
+		"CMAKE_FIND_ROOT_PATH", "CMAKE_MODULE_PATH",
+		"CMAKE_APPBUNDLE_PATH", "CMAKE_SYSTEM_APPBUNDLE_PATH",
+		"CMAKE_FRAMEWORK_PATH", "CMAKE_SYSTEM_FRAMEWORK_PATH",
+		"CMAKE_LIBRARY_PATH", "CMAKE_INCLUDE_PATH",
+		"CMAKE_IGNORE_PATH", "CMAKE_SYSTEM_IGNORE_PATH":
+		return true
+	default:
+		return strings.HasPrefix(upper, "CMAKE_FIND_USE_") ||
+			strings.HasPrefix(upper, "CMAKE_FIND_ROOT_PATH_MODE_")
+	}
 }
 
 func isCMakeCompilerOrLinkerFlagsVariable(value string) bool {
