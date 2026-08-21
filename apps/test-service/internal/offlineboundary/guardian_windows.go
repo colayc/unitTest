@@ -22,18 +22,6 @@ const (
 	defaultGuardianReleaseTimeout = 5 * time.Second
 )
 
-type guardianSession interface {
-	Receive(context.Context) (guardianFrame, error)
-	Send(context.Context, guardianFrame) error
-	Wait() error
-	Close() error
-	Kill() error
-}
-
-type guardianOwnerVerifier interface {
-	Verify(OwnerIdentity) error
-}
-
 type guardianOwnerVerifierFunc func(uint32) (uint64, error)
 
 func (fn guardianOwnerVerifierFunc) Verify(owner OwnerIdentity) error {
@@ -277,6 +265,10 @@ func (lease *guardianLease) run() {
 			case guardianFrameError:
 				_ = lease.session.Kill()
 				if !readySeen {
+					if result.frame.Code == guardianErrorWFPAccessDenied {
+						lease.finish(WFPAccessDenied)
+						return
+					}
 					lease.finish(GuardianStartFailed)
 					return
 				}
@@ -530,7 +522,7 @@ func runGuardianLoop(ctx context.Context, runtime guardianRuntime, owner OwnerId
 	}
 	engine, err := engineFactory()
 	if err != nil {
-		_ = runtime.session.Send(ctx, guardianFrame{Kind: guardianFrameError, Code: guardianErrorStartup})
+		_ = runtime.session.Send(ctx, guardianFrame{Kind: guardianFrameError, Code: guardianErrorCodeFor(err)})
 		return err
 	}
 	leaseIDSource := runtime.leaseIDSource
@@ -540,12 +532,12 @@ func runGuardianLoop(ctx context.Context, runtime guardianRuntime, owner OwnerId
 	leaseID := leaseIDSource()
 	if err := engine.AddOutboundBlockFilters(ctx, leaseID); err != nil {
 		_ = engine.Close()
-		_ = runtime.session.Send(ctx, guardianFrame{Kind: guardianFrameError, Code: guardianErrorStartup})
+		_ = runtime.session.Send(ctx, guardianFrame{Kind: guardianFrameError, Code: guardianErrorCodeFor(err)})
 		return err
 	}
 	if err := engine.AuditOutboundBlockFilters(ctx, leaseID); err != nil {
 		_ = engine.Close()
-		_ = runtime.session.Send(ctx, guardianFrame{Kind: guardianFrameError, Code: guardianErrorStartup})
+		_ = runtime.session.Send(ctx, guardianFrame{Kind: guardianFrameError, Code: guardianErrorCodeFor(err)})
 		return err
 	}
 	if err := runtime.session.Send(ctx, guardianFrame{Kind: guardianFrameReady}); err != nil {
@@ -665,5 +657,15 @@ func sanitizeGuardianChildError(err error) error {
 	if errors.Is(err, ErrOwnerIdentityMismatch) {
 		return ErrOwnerIdentityMismatch
 	}
+	if errors.Is(err, WFPAccessDenied) {
+		return WFPAccessDenied
+	}
 	return GuardianStartFailed
+}
+
+func guardianErrorCodeFor(err error) guardianErrorCode {
+	if errors.Is(err, WFPAccessDenied) {
+		return guardianErrorWFPAccessDenied
+	}
+	return guardianErrorStartup
 }

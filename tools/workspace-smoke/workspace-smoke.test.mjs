@@ -137,6 +137,8 @@ test("Hosted CI pins native toolchain runners and enforces the complete matrix",
     assert.match(source, /run:\s*git diff --exit-code/);
 
     if (platform === "windows") {
+      const privilegedWfp = source.indexOf("TestPrivilegedWindowsWFPDynamicLifecycle");
+      const typescriptWfp = source.indexOf("test:wfp-integration");
       const coverageSmoke = source.indexOf("test:coverage-service-smoke");
       const legacyCleanup = source.indexOf("Legacy cleanup Windows offline boundary residue");
       const serviceSmoke = source.indexOf("test:service-smoke");
@@ -144,6 +146,12 @@ test("Hosted CI pins native toolchain runners and enforces the complete matrix",
         coverageSmoke !== -1 && legacyCleanup > coverageSmoke && serviceSmoke > legacyCleanup,
         "Windows CI must keep coverage smoke ahead of legacy residue cleanup and later Service checks"
       );
+      assert.ok(
+        privilegedWfp !== -1 && typescriptWfp > privilegedWfp && coverageSmoke > typescriptWfp,
+        "required privileged Go and TypeScript WFP integration must run before coverage Service/native smoke"
+      );
+      const privilegedStep = source.slice(source.lastIndexOf("      - ", privilegedWfp), coverageSmoke);
+      assert.match(privilegedStep, /UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED:\s*["']?1["']?/u);
       const coverageReport = source.indexOf("coverage-execution-report.json");
       assert.notEqual(coverageReport, -1);
       const uploadStep = source.slice(source.lastIndexOf("      - ", coverageReport), coverageReport);

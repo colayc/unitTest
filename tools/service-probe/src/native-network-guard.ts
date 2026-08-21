@@ -18,6 +18,7 @@ export interface WindowsNativeOfflineBoundary {
 export interface WindowsNativeOfflineBoundaryOptions {
   readonly ownerPid?: number;
   readonly ruleName?: string;
+  readonly nativeExecutablePath?: string;
   /** Retained for caller compatibility; WFP uses no marker state directory. */
   readonly stateRoot?: string;
   readonly required?: boolean;
@@ -61,6 +62,7 @@ export async function installWindowsNativeOfflineBoundary(
     ownerPid: options.ownerPid,
     ruleName: options.ruleName,
     required: options.required ?? true,
+    nativeExecutablePath: options.nativeExecutablePath,
     __dependencies: options.__dependencies,
   });
   if (result.outcome === "skipped") throw new Error("coverage toolset is unavailable");

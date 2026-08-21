@@ -10,47 +10,6 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func TestWindowsBoundaryStartUsesInjectedEngineLeaseAndIdempotentClose(t *testing.T) {
-	ctx := context.Background()
-	ready := make(chan struct{})
-	close(ready)
-	engine := &fakeWfpEngine{}
-	boundary := New(Config{
-		engineFactory: func() (wfpEngine, error) { return engine, nil },
-		leaseIDSource: func() []byte { return []byte("0123456789abcdef") },
-	})
-
-	lease, err := boundary.Start(ctx, OwnerIdentity{PID: 42, CreationTime: 99})
-	if err != nil {
-		t.Fatalf("Start() error = %v", err)
-	}
-	select {
-	case <-lease.Ready():
-	default:
-		t.Fatal("Ready channel is not closed")
-	}
-	if got, want := engine.addLeaseIDs, [][]byte{[]byte("0123456789abcdef")}; !equalByteSlices(got, want) {
-		t.Fatalf("add lease IDs = %q, want %q", got, want)
-	}
-	if got, want := engine.auditLeaseIDs, [][]byte{[]byte("0123456789abcdef")}; !equalByteSlices(got, want) {
-		t.Fatalf("audit lease IDs = %q, want %q", got, want)
-	}
-	if err := lease.Close(); err != nil {
-		t.Fatalf("first Close() error = %v", err)
-	}
-	if err := lease.Close(); err != nil {
-		t.Fatalf("second Close() error = %v", err)
-	}
-	if err := lease.Wait(); err != nil {
-		t.Fatalf("Wait() error = %v", err)
-	}
-	if engine.closeCalls != 1 {
-		t.Fatalf("close calls = %d, want 1", engine.closeCalls)
-	}
-
-	_ = ready
-}
-
 func TestOpenWFPEngineUsesDynamicSessionAndExpectedBlockFilters(t *testing.T) {
 	abi := &recordingWfpAPI{}
 	engine, err := openWFPEngineWithAPI(abi, func() (windows.GUID, error) {
@@ -328,16 +287,4 @@ func (api *recordingWfpAPI) DeleteFilterByKey(_ windows.Handle, key *windows.GUI
 func (api *recordingWfpAPI) CloseEngine(windows.Handle) error {
 	api.closeCalls++
 	return nil
-}
-
-func equalByteSlices(left, right [][]byte) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for index := range left {
-		if string(left[index]) != string(right[index]) {
-			return false
-		}
-	}
-	return true
 }

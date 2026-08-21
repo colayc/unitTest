@@ -1,7 +1,7 @@
 import { execFile as execFileCallback, spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import net from "node:net";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 
 const execFile = promisify(execFileCallback);
@@ -15,7 +15,7 @@ export type GuardianFrame =
   | { readonly kind: "Ready" }
   | { readonly kind: "Release" }
   | { readonly kind: "Bye" }
-  | { readonly kind: "Error"; readonly code: "Startup" };
+  | { readonly kind: "Error"; readonly code: "Startup" | "WFPAccessDenied" };
 
 export interface GuardianProcess {
   readFrame(): Promise<GuardianFrame>;
@@ -39,6 +39,8 @@ export interface WfpOfflineBoundaryOptions {
   readonly ownerPid?: number;
   readonly ruleName?: string;
   readonly required?: boolean;
+  /** Resolve the default preflight and guardian beside this native executable. */
+  readonly nativeExecutablePath?: string;
   readonly __dependencies?: WfpOfflineBoundaryDependencies;
 }
 
@@ -49,14 +51,18 @@ export interface InstalledWfpOfflineBoundary {
 
 export type WfpOfflineBoundaryResult = InstalledWfpOfflineBoundary | {
   readonly outcome: "skipped";
-  readonly reason: "ToolchainUnavailable";
+  readonly reason: "ToolchainUnavailable" | "WFPAccessDenied";
 };
 
 /** WFP is mandatory here; callers may add HTTP(S) only as a complement. */
 export async function installWfpOfflineBoundary(
   options: WfpOfflineBoundaryOptions = {},
 ): Promise<WfpOfflineBoundaryResult> {
-  const dependencies = options.__dependencies ?? defaultDependencies();
+  if (options.nativeExecutablePath !== undefined &&
+      (!isAbsolute(options.nativeExecutablePath) || options.nativeExecutablePath.length === 0)) {
+    throw new Error("native executable path is invalid");
+  }
+  const dependencies = options.__dependencies ?? defaultDependencies(options.nativeExecutablePath ?? process.execPath);
   if (dependencies.platform !== "win32") throw new Error("Windows WFP offline boundary is Windows-only");
   const ownerPid = options.ownerPid ?? process.pid;
   if (!Number.isSafeInteger(ownerPid) || ownerPid <= 0) throw new Error("Windows offline boundary owner PID is invalid");
@@ -90,7 +96,10 @@ export async function installWfpOfflineBoundary(
     await expectFrame(guardian, "Ready");
   } catch (error) {
     guardian?.terminate();
-    void error;
+    if (error instanceof GuardianProtocolError && error.code === "WFPAccessDenied") {
+      if (options.required === true) throw new Error("Windows Filtering Platform access is unavailable");
+      return { outcome: "skipped", reason: "WFPAccessDenied" };
+    }
     throw new Error("guardian protocol did not establish an audited WFP boundary");
   }
 
@@ -116,8 +125,15 @@ export async function installWfpOfflineBoundary(
   };
 }
 
+class GuardianProtocolError extends Error {
+  constructor(readonly code: Extract<GuardianFrame, { readonly kind: "Error" }>["code"]) {
+    super("guardian reported a fixed protocol error");
+  }
+}
+
 function expectFrame(guardian: GuardianProcess, expected: GuardianFrame["kind"]): Promise<void> {
   return guardian.readFrame().then((frame) => {
+    if (isGuardianFrame(frame) && frame.kind === "Error") throw new GuardianProtocolError(frame.code);
     if (!isGuardianFrame(frame) || frame.kind !== expected) throw new Error("unexpected guardian protocol frame");
   });
 }
@@ -126,7 +142,9 @@ function isGuardianFrame(frame: GuardianFrame): boolean {
   if (frame.kind === "Hello" || frame.kind === "Ready" || frame.kind === "Release" || frame.kind === "Bye") {
     return Object.keys(frame).length === 1;
   }
-  return frame.kind === "Error" && frame.code === "Startup" && Object.keys(frame).length === 2;
+  return frame.kind === "Error" &&
+    (frame.code === "Startup" || frame.code === "WFPAccessDenied") &&
+    Object.keys(frame).length === 2;
 }
 
 function parsePreflight(result: { readonly stdout: string; readonly stderr: string }): { readonly status: "verified" | "unavailable" } {
@@ -156,12 +174,12 @@ function cryptoRandomRuleSuffix(): string {
   return randomBytes(16).toString("hex");
 }
 
-function defaultDependencies(): WfpOfflineBoundaryDependencies {
-  const guardianExecutable = siblingExecutable("native-offline-guardian.exe");
+function defaultDependencies(nativeExecutablePath: string): WfpOfflineBoundaryDependencies {
+  const guardianExecutable = siblingExecutable(nativeExecutablePath, "native-offline-guardian.exe");
   return {
     platform: process.platform,
     async runPreflight() {
-      const executable = join(dirname(process.execPath), "coverage-toolset-preflight.exe");
+      const executable = siblingExecutable(nativeExecutablePath, "coverage-toolset-preflight.exe");
       return await execFile(executable, [], { encoding: "utf8", timeout: preflightTimeoutMilliseconds, windowsHide: true, maxBuffer: 64 * 1024, env: sanitizedEnvironment() });
     },
     async resolveOwnerCreationTime(ownerPid) {
@@ -185,8 +203,8 @@ function defaultDependencies(): WfpOfflineBoundaryDependencies {
   };
 }
 
-function siblingExecutable(name: string): string {
-  return join(dirname(process.execPath), name);
+function siblingExecutable(nativeExecutablePath: string, name: string): string {
+  return join(dirname(nativeExecutablePath), name);
 }
 
 export interface NativeGuardianStartOptions {
@@ -355,6 +373,7 @@ function decodeGuardianPayload(payload: Buffer): GuardianFrame {
   if (payload.length === 1 && kind === 3) return { kind: "Release" };
   if (payload.length === 1 && kind === 5) return { kind: "Bye" };
   if (payload.length === 2 && kind === 4 && payload[1] === 1) return { kind: "Error", code: "Startup" };
+  if (payload.length === 2 && kind === 4 && payload[1] === 2) return { kind: "Error", code: "WFPAccessDenied" };
   throw new Error("guardian frame is invalid");
 }
 

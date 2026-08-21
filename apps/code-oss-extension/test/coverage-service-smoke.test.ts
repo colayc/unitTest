@@ -87,6 +87,7 @@ interface Fixture {
   readonly dataDirectory: string;
   readonly serviceBinary: string;
   readonly toolsetPreflightBinary: string;
+  readonly guardianBinary: string;
   readonly goCache: string;
 }
 
@@ -167,6 +168,7 @@ async function createFixture(): Promise<Fixture> {
       dataDirectory: join(root, "service-data"),
       serviceBinary: join(root, "unit-test-service.exe"),
       toolsetPreflightBinary: join(root, "coverage-toolset-preflight.exe"),
+      guardianBinary: join(root, "native-offline-guardian.exe"),
       goCache: join(root, "go-cache")
     };
   } catch (error) {
@@ -249,6 +251,23 @@ async function buildService(fixture: Fixture): Promise<string> {
       "-o",
       fixture.toolsetPreflightBinary,
       "./apps/test-service/cmd/coverage-toolset-preflight"
+    ],
+    {
+      cwd: repositoryRoot,
+      env: environment,
+      timeout: NATIVE_TIMEOUT_MS,
+      windowsHide: true,
+      maxBuffer: 16 * 1024 * 1024
+    }
+  );
+  await execFile(
+    executable,
+    [
+      "build",
+      "-trimpath",
+      "-o",
+      fixture.guardianBinary,
+      "./apps/test-service/cmd/native-offline-guardian"
     ],
     {
       cwd: repositoryRoot,
@@ -675,6 +694,7 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
       fixture.dataDirectory,
       fixture.serviceBinary,
       fixture.toolsetPreflightBinary,
+      fixture.guardianBinary,
       fixture.goCache,
       cmakeBundleRoot
     );
@@ -685,7 +705,8 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
       skip: (message) => t.skip(message),
       async installBoundary() {
         offlineBoundary = await installWindowsNativeOfflineBoundary({
-          stateRoot: firewallGuardianStateRoot
+          stateRoot: firewallGuardianStateRoot,
+          nativeExecutablePath: fixture!.serviceBinary
         });
         return offlineBoundary;
       },

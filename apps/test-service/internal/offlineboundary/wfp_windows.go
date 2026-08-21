@@ -17,6 +17,7 @@ const (
 	fwpmSessionFlagDynamic   = 0x00000001
 	fwpmFilterFlagPersistent = 0x00000001
 	fwpActionBlock           = 0x00000001 | 0x00001000
+	rpcCAuthnWinnt           = 10
 )
 
 var (
@@ -375,7 +376,7 @@ func (procWfpAPI) OpenSession(session *fwpmSession0) (windows.Handle, error) {
 	var handle windows.Handle
 	status, _, _ := procFwpmEngineOpen0.Call(
 		0,
-		0,
+		rpcCAuthnWinnt,
 		0,
 		uintptr(unsafe.Pointer(session)),
 		uintptr(unsafe.Pointer(&handle)),

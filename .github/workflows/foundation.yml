@@ -51,6 +51,14 @@ jobs:
       - run: pnpm prepare:cmake-bundle
       # Exercise the real Named Pipe service contract. The host harness reports SKIP without CODE_OSS_EXECUTABLE.
       - run: node tools/service-probe/build-service.mjs
+      - name: Verify privileged Windows WFP lifecycle
+        env:
+          UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED: "1"
+        run: go test ./apps/test-service/internal/offlineboundary -run '^TestPrivilegedWindowsWFPDynamicLifecycle$' -count=1 -v
+      - name: Verify TypeScript WFP sibling sequencing
+        env:
+          UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED: "1"
+        run: pnpm --filter @unit-test-ide/service-probe test:wfp-integration
       - id: windows-coverage-smoke
         name: Verify Windows LLVM coverage execution
         env:

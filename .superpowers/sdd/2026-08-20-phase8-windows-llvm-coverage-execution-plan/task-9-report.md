@@ -763,3 +763,24 @@ The private Go cache, fixture binaries, verified CMake runtime, downloaded
 archive, temporary pnpm shim, Python cache and smoke state were removed. No Go,
 coverage execution, protocol or Extension runtime source changed, and no push
 was performed.
+
+## Native WFP migration evidence — 2026-08-21 Task 5
+
+The former PowerShell guard path has now been replaced for new runs by the
+native dynamic-session WFP guardian. Required Windows CI runs a privileged Go
+lifecycle test and the TypeScript default-sibling sequencing test before the
+coverage Service/native smoke. The integration covers unique V4/V6 filters,
+blocked outbound connects, normal release, guardian crash, owner termination,
+dynamic-object disappearance through a fresh observer, and creation-time PID
+reuse rejection. Local WFP access denial is the closed `WFPAccessDenied`
+result; required mode fails and never skips.
+
+The current host was not privileged and had no verified LLVM toolset, so its
+real Go path skipped with `WFPAccessDenied` and its real TypeScript path skipped
+with `ToolchainUnavailable`; their required-mode controls failed as designed.
+No native PASS is claimed. Full Go, race, vet, Linux cross-compile, Node build,
+generated-file and package gates passed. The exact root/workspace gate remained
+environment-limited solely by `spawnSync cmake ENOENT`; package suites were run
+and passed separately. Detailed RED/GREEN commands, security review, exact
+skip/fail boundaries and handoff concerns are recorded in
+`.superpowers/sdd/2026-08-21-windows-wfp-offline-boundary-plan/task-5-report.md`.

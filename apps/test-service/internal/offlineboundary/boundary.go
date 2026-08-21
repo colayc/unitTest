@@ -14,6 +14,18 @@ type wfpEngine interface {
 	Close() error
 }
 
+type guardianSession interface {
+	Receive(context.Context) (guardianFrame, error)
+	Send(context.Context, guardianFrame) error
+	Wait() error
+	Close() error
+	Kill() error
+}
+
+type guardianOwnerVerifier interface {
+	Verify(OwnerIdentity) error
+}
+
 // Config configures OfflineBoundary construction.
 //
 // On Windows, GuardianExecutablePath controls how the native guardian binary is
@@ -24,9 +36,9 @@ type wfpEngine interface {
 // Start returns only the canonical GuardianStartFailed sentinel and does not
 // expose the attempted path.
 type Config struct {
-	engineFactory          func() (wfpEngine, error)
-	leaseIDSource          func() []byte
-	ownerVerifier          guardianOwnerVerifier
+	engineFactory func() (wfpEngine, error)
+	leaseIDSource func() []byte
+	ownerVerifier guardianOwnerVerifier
 	// GuardianExecutablePath selects the native guardian binary on Windows.
 	//
 	// Empty means: use only sibling discovery for `native-offline-guardian.exe`
