@@ -253,6 +253,14 @@ controls:
   unregistered paths, and registered non-compiler executables fail before
   CMake process creation. A fresh preset using the exact registered CXX path
   remains the positive control.
+- Final preset executable-discovery environment wave began with RED controls
+  proving that a preset could prepend an evil `PATH`, replace `COMSPEC`, or
+  extend `PATHEXT`. Resolved preset values for Windows executable resolution,
+  Visual Studio/SDK discovery, and CMake generator/search/launcher variables
+  now require an exact key-insensitive, value-exact match with the retained
+  toolchain environment capture. Missing capture entries, prepend/replace
+  values, and alternate launch resolution fail before CMake process creation;
+  an exact captured `PATH` remains the positive control.
 
 ## Verification
 
@@ -352,6 +360,12 @@ Go caches.
   lifecycle explicitly excluded; `go vet` and Linux full-package compile-only
   PASS; Service Probe reports 76 PASS / one exact `ToolchainUnavailable` SKIP;
   Extension reports 138/138 PASS.
+- Final preset executable-discovery environment wave: focused `PATH`,
+  `COMSPEC`, `PATHEXT`, and exact-capture controls PASS. Complete Service unit
+  and race trees PASS with only the privileged WFP lifecycle explicitly
+  excluded; `go vet` and Linux full-package compile-only PASS; Service Probe
+  reports 76 PASS / one exact `ToolchainUnavailable` SKIP; Extension reports
+  138/138 PASS.
 - `pnpm check:protocol-generated`, `pnpm check:coverage-generated`, and
   `pnpm build` with private `GOCACHE`: PASS.
 - Exact `pnpm test`: coverage generator 4/4, CMake bundle 28/28, and coverage

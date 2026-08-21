@@ -389,6 +389,69 @@ func TestPlannerValidatesPresetCompilerSelectorsAgainstRegisteredCompilers(t *te
 	})
 }
 
+func TestPlannerValidatesPresetExecutableDiscoveryEnvironmentAgainstToolchainCapture(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows launch declaration")
+	}
+	activatePlannerWFPRegistration(t)
+	planWithEnvironment := func(t *testing.T, captured []string, preset map[string]string) error {
+		t.Helper()
+		fixture := newPlannerFixture(t)
+		fixture.profile.Origin = "preset"
+		fixture.profile.ConfigurePreset = "debug"
+		fixture.toolchain.Environment = append([]string(nil), captured...)
+		document, err := json.Marshal(map[string]any{
+			"version": 6,
+			"configurePresets": []map[string]any{{
+				"name": "debug", "environment": preset,
+			}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(fixture.sourceDir, "CMakePresets.json"), document, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err = Plan(PlanInput{
+			Installation: fixture.installation, WorkspaceRoot: fixture.root,
+			Project: fixture.project, Profile: fixture.profile,
+			Toolchain: fixture.toolchain, Jobs: 1, Configure: true,
+		})
+		return err
+	}
+
+	for _, test := range []struct {
+		name     string
+		captured []string
+		preset   map[string]string
+	}{
+		{
+			name: "PATH prepend", captured: []string{"PATH=trusted"},
+			preset: map[string]string{"PATH": "evilbin;trusted"},
+		},
+		{
+			name: "COMSPEC replacement", captured: []string{"PATH=trusted"},
+			preset: map[string]string{"COMSPEC": "evil.exe"},
+		},
+		{
+			name: "PATHEXT replacement", captured: []string{"PATH=trusted", "PATHEXT=.COM;.EXE"},
+			preset: map[string]string{"PATHEXT": ".COM;.EXE;.EVIL"},
+		},
+	} {
+		t.Run("rejects "+test.name, func(t *testing.T) {
+			if err := planWithEnvironment(t, test.captured, test.preset); !errors.Is(err, task.ErrInvalidArgument) {
+				t.Fatalf("Plan() error = %v, want preset %s rejected", err, test.name)
+			}
+		})
+	}
+
+	t.Run("accepts exact captured PATH", func(t *testing.T) {
+		if err := planWithEnvironment(t, []string{"PATH=trusted"}, map[string]string{"Path": "trusted"}); err != nil {
+			t.Fatalf("Plan() error = %v, want exact captured PATH accepted", err)
+		}
+	})
+}
+
 func TestPlannerPinsEarlierInheritedPresetScriptLikeCMake(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows launch declaration")
