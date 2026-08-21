@@ -420,6 +420,10 @@ func (validator *cmakeLaunchValidator) validatePreset(sourceRoot, name string) e
 			if !validator.allowedBareExecutable(value, "") {
 				return errInvalidCMakeLaunchDeclaration
 			}
+			continue
+		}
+		if isUnregisteredCMakeExecutableCacheVariable(variable) {
+			return errInvalidCMakeLaunchDeclaration
 		}
 	}
 	for variable, raw := range resolved.environment {
@@ -1114,6 +1118,28 @@ func isPinnedCMakeToolVariable(value string) bool {
 	languageTool := strings.TrimPrefix(upper, "CMAKE_")
 	for _, suffix := range []string{"_COMPILER", "_LINKER"} {
 		if strings.HasSuffix(languageTool, suffix) && len(strings.TrimSuffix(languageTool, suffix)) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func isUnregisteredCMakeExecutableCacheVariable(value string) bool {
+	upper := strings.ToUpper(value)
+	if !strings.HasPrefix(upper, "CMAKE_") {
+		return false
+	}
+	switch upper {
+	case "CMAKE_MT", "CMAKE_NM", "CMAKE_OBJCOPY", "CMAKE_OBJDUMP",
+		"CMAKE_READELF", "CMAKE_STRIP", "CMAKE_DLLTOOL", "CMAKE_ADDR2LINE",
+		"CMAKE_TAPI", "CMAKE_INSTALL_NAME_TOOL", "CMAKE_LIBTOOL":
+		return true
+	}
+	for _, suffix := range []string{
+		"_COMPILER", "_LINKER", "_LAUNCHER", "_EMULATOR",
+		"_AR", "_RANLIB", "_TOOL", "_PROGRAM", "_COMMAND",
+	} {
+		if strings.HasSuffix(upper, suffix) {
 			return true
 		}
 	}

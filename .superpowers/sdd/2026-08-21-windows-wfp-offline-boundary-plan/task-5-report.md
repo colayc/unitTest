@@ -281,6 +281,14 @@ controls:
   match the retained toolchain triple, and every other suffix is rejected.
   Exact registered GCC archiver and exact target-triple fixtures are positive
   controls.
+- Final preset executable-cache closure began with a real CXX executable/test
+  graph whose preset could still inject `CMAKE_CROSSCOMPILING_EMULATOR`,
+  `CMAKE_TEST_LAUNCHER`, `CMAKE_MT`, or `CMAKE_OBJCOPY`; all four controls
+  returned a valid plan before the fix. Explicit compiler/linker/make/AR/RANLIB
+  cache variables retain their exact registered LaunchPlan identity checks.
+  Every remaining executable-shaped `CMAKE_*` cache entry, including launcher,
+  emulator, command/program/tool suffixes and direct binutils, now fails closed
+  before CMake or the test executable can start.
 
 ## Verification
 
@@ -398,6 +406,11 @@ Go caches.
   lifecycle explicitly excluded; `go vet` and Linux full-package compile-only
   PASS; Service Probe reports 76 PASS / one exact `ToolchainUnavailable` SKIP;
   Extension reports 138/138 PASS.
+- Final preset executable-cache closure wave: the four focused emulator/test
+  launcher/binutil controls PASS; complete Service unit and race trees PASS
+  with only the privileged WFP lifecycle explicitly excluded; `go vet` and
+  Linux full-package compile-only PASS; Service Probe reports 76 PASS / one
+  exact `ToolchainUnavailable` SKIP; Extension reports 138/138 PASS.
 - `pnpm check:protocol-generated`, `pnpm check:coverage-generated`, and
   `pnpm build` with private `GOCACHE`: PASS.
 - Exact `pnpm test`: coverage generator 4/4, CMake bundle 28/28, and coverage

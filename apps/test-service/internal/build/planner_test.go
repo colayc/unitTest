@@ -474,6 +474,10 @@ func TestPlannerValidatesPresetDiscoveryAndPerLanguageToolCacheVariables(t *test
 	planWithCache := func(t *testing.T, variable string, value func(*plannerFixture) string) error {
 		t.Helper()
 		fixture := newPlannerFixture(t)
+		contents := "project(fixture LANGUAGES CXX)\nadd_executable(fixture-test main.cpp)\nenable_testing()\nadd_test(NAME fixture-test COMMAND fixture-test)\n"
+		if err := os.WriteFile(filepath.Join(fixture.sourceDir, "CMakeLists.txt"), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
 		fixture.profile.Origin = "preset"
 		fixture.profile.ConfigurePreset = "debug"
 		cacheValue := value(&fixture)
@@ -505,6 +509,10 @@ func TestPlannerValidatesPresetDiscoveryAndPerLanguageToolCacheVariables(t *test
 		{variable: "CMAKE_CXX_COMPILER_AR", value: "unknown-wrapper.exe"},
 		{variable: "CMAKE_CXX_COMPILER_RANLIB", value: "unknown-wrapper.exe"},
 		{variable: "CMAKE_CXX_COMPILER_TARGET", value: "unknown-target"},
+		{variable: "CMAKE_CROSSCOMPILING_EMULATOR", value: "unknown-emulator.exe"},
+		{variable: "CMAKE_TEST_LAUNCHER", value: "unknown-test-launcher.exe"},
+		{variable: "CMAKE_MT", value: "unknown-mt.exe"},
+		{variable: "CMAKE_OBJCOPY", value: "unknown-objcopy.exe"},
 	} {
 		t.Run("rejects "+test.variable, func(t *testing.T) {
 			if err := planWithCache(t, test.variable, func(*plannerFixture) string { return test.value }); !errors.Is(err, task.ErrInvalidArgument) {
