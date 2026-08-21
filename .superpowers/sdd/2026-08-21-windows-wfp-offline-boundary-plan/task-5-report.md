@@ -212,6 +212,18 @@ controls:
   compile/link option declarations (`if`/`elseif`/`else`/`endif`, `message`,
   `add_compile_options`, and `add_link_options`); execute/custom launch grammar
   remains unchanged and default-denied.
+- Final instrumentation-provenance wave began with five RED controls proving
+  that a normal project could copy the retained coverage flags or inject
+  `/clang:-fplugin`, `-fpass-plugin`, and linker-plugin flags solely because
+  `add_compile_options`/`add_link_options` were allowed by command name. A
+  modified coverage include with plugin flags was accepted as well. These two
+  declarations are now accepted only from the canonical Coverage-designated
+  include when its contract fingerprint and exact content digest match
+  `coveragellvm.WriteInstrumentation`, its actual snapshot has a retained OS
+  identity and matching digest, and each argument vector exactly equals the
+  closed retained instrumentation vectors. The same flags in project source,
+  copied content without provenance, extra/changed options, and compiler/linker
+  plugins fail before CMake process creation.
 
 ## Verification
 
@@ -288,6 +300,12 @@ Go caches.
   excluded; `go vet` and Linux full-package compile-only PASS; Service Probe
   reports 76 PASS / one exact `ToolchainUnavailable` SKIP; Extension reports
   138/138 PASS.
+- Final instrumentation-provenance wave: focused real `WriteInstrumentation`
+  positive and copied/plugin/modified-include negative controls PASS. Complete
+  Service unit and race trees PASS with only the privileged WFP lifecycle
+  explicitly excluded; `go vet` and Linux full-package compile-only PASS;
+  Service Probe reports 76 PASS / one exact `ToolchainUnavailable` SKIP;
+  Extension reports 138/138 PASS.
 - `pnpm check:protocol-generated`, `pnpm check:coverage-generated`, and
   `pnpm build` with private `GOCACHE`: PASS.
 - Exact `pnpm test`: coverage generator 4/4, CMake bundle 28/28, and coverage

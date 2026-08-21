@@ -39,10 +39,16 @@ type instrumentationRootPin struct {
 // clang-cl coverage instrumentation contract. Toolchain identity and version
 // are deliberately validated separately by the execution owner.
 func InstrumentationFingerprint() string {
-	digest := sha256.Sum256([]byte(instrumentationContents))
-	digestHex := hex.EncodeToString(digest[:])
-	fingerprint := sha256.Sum256([]byte(instrumentationVersion + "\x00" + digestHex))
+	fingerprint := sha256.Sum256([]byte(instrumentationVersion + "\x00" + InstrumentationSHA256()))
 	return hex.EncodeToString(fingerprint[:])
+}
+
+// InstrumentationSHA256 identifies the exact bytes WriteInstrumentation
+// publishes. Consumers use it only to bind a retained file snapshot to this
+// contract; it is not a substitute for the snapshot's OS file identity.
+func InstrumentationSHA256() string {
+	digest := sha256.Sum256([]byte(instrumentationContents))
+	return hex.EncodeToString(digest[:])
 }
 
 func WriteInstrumentation(taskRoot string) (Instrumentation, error) {

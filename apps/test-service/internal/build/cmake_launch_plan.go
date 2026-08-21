@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"unit-test-ide.local/test-service/internal/cmake"
+	"unit-test-ide.local/test-service/internal/coveragellvm"
 )
 
 const (
@@ -33,22 +34,26 @@ type cmakeInvocation struct {
 }
 
 type cmakeLaunchValidator struct {
-	allowed       map[string]struct{}
-	variables     map[string]string
-	targets       map[string]string
-	targetPaths   map[string]struct{}
-	cmakePath     string
-	ctestPath     string
-	binaryRoot    string
-	configuration string
-	multiConfig   bool
-	allowedRoots  []string
-	visited       map[string]struct{}
-	states        []cmake.FingerprintFile
-	planned       []string
-	trustedFiles  map[string]map[string]string
-	files         int
-	totalBytes    int64
+	allowed                map[string]struct{}
+	variables              map[string]string
+	targets                map[string]string
+	targetPaths            map[string]struct{}
+	cmakePath              string
+	ctestPath              string
+	binaryRoot             string
+	configuration          string
+	multiConfig            bool
+	allowedRoots           []string
+	visited                map[string]struct{}
+	states                 []cmake.FingerprintFile
+	planned                []string
+	trustedFiles           map[string]map[string]string
+	snapshots              map[string]cmake.FingerprintFile
+	instrumentationPath    string
+	instrumentationDigest  string
+	instrumentationTrusted bool
+	files                  int
+	totalBytes             int64
 }
 
 // validateCMakeLaunchPlan proves every configure/build process entry in the
@@ -79,6 +84,7 @@ func validateCMakeLaunchPlan(input PlanInput, sourceDir string, launchPlan []str
 		allowedRoots:  []string{sourceRoot},
 		visited:       make(map[string]struct{}),
 		trustedFiles:  make(map[string]map[string]string),
+		snapshots:     make(map[string]cmake.FingerprintFile),
 	}
 	for _, executable := range launchPlan {
 		if !filepath.IsAbs(executable) {
@@ -120,6 +126,12 @@ func validateCMakeLaunchPlan(input PlanInput, sourceDir string, launchPlan []str
 			return nil, nil, errInvalidCMakeLaunchDeclaration
 		}
 		validator.allowedRoots = append(validator.allowedRoots, filepath.Dir(include))
+		validator.instrumentationPath = cmakeLaunchPathKey(include)
+		validator.instrumentationDigest = input.Coverage.TopLevelInclude.SHA256
+		validator.instrumentationTrusted =
+			input.Coverage.InstrumentationFingerprint == coveragellvm.InstrumentationFingerprint() &&
+				input.Coverage.TopLevelInclude.Identity == coveragellvm.InstrumentationFingerprint() &&
+				input.Coverage.TopLevelInclude.SHA256 == coveragellvm.InstrumentationSHA256()
 		if input.Installation.UnityRunnerGenerator.Valid() {
 			validator.trustedFiles[cmakeLaunchPathKey(include)] = map[string]string{
 				"${generator}": input.Installation.UnityRunnerGenerator.Path,
@@ -248,10 +260,13 @@ func (validator *cmakeLaunchValidator) validateFile(path, binaryDir string) erro
 			if err := validator.validateFile(include, binaryDir); err != nil {
 				return errInvalidCMakeLaunchDeclaration
 			}
+		case "add_compile_options", "add_link_options":
+			if err := validator.validateInstrumentationOptions(invocation, key); err != nil {
+				return err
+			}
 		case "cmake_minimum_required", "enable_testing", "add_library",
 			"target_compile_features", "target_link_libraries",
-			"if", "elseif", "else", "endif", "message",
-			"add_compile_options", "add_link_options":
+			"if", "elseif", "else", "endif", "message":
 			// These commands are part of the canonical coverage fixture and do
 			// not assign a command, tool, or script-loader output variable.
 		default:
@@ -280,6 +295,7 @@ func (validator *cmakeLaunchValidator) snapshotInput(canonical string) ([]byte, 
 	validator.totalBytes += int64(len(content))
 	validator.visited[key] = struct{}{}
 	validator.states = append(validator.states, state)
+	validator.snapshots[key] = state
 	return content, nil
 }
 
@@ -659,6 +675,37 @@ func literalCMakeTargetName(value string) bool {
 		return false
 	}
 	return true
+}
+
+func (validator *cmakeLaunchValidator) validateInstrumentationOptions(invocation cmakeInvocation, sourceKey string) error {
+	state, snapshotted := validator.snapshots[sourceKey]
+	if !validator.instrumentationTrusted || sourceKey != validator.instrumentationPath || !snapshotted ||
+		state.Identity == "" || cmakeLaunchPathKey(state.Path) != sourceKey ||
+		state.SHA256 != validator.instrumentationDigest ||
+		state.SHA256 != coveragellvm.InstrumentationSHA256() {
+		return errInvalidCMakeLaunchDeclaration
+	}
+	var expected []string
+	switch strings.ToLower(invocation.name) {
+	case "add_compile_options":
+		expected = []string{
+			"$<$<COMPILE_LANGUAGE:C,CXX>:-fprofile-instr-generate>",
+			"$<$<COMPILE_LANGUAGE:C,CXX>:-fcoverage-mapping>",
+		}
+	case "add_link_options":
+		expected = []string{"-fprofile-instr-generate"}
+	default:
+		return errInvalidCMakeLaunchDeclaration
+	}
+	if len(invocation.arguments) != len(expected) {
+		return errInvalidCMakeLaunchDeclaration
+	}
+	for index, argument := range invocation.arguments {
+		if argument.value != expected[index] {
+			return errInvalidCMakeLaunchDeclaration
+		}
+	}
+	return nil
 }
 
 func (validator *cmakeLaunchValidator) validateProject(invocation cmakeInvocation, sourceKey string) error {
