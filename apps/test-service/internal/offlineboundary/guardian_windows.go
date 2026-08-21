@@ -636,6 +636,13 @@ func currentOwnerCreationTime(pid uint32) (uint64, error) {
 	return ownerCreationTimeFromHandle(handle)
 }
 
+// OwnerCreationTime returns the current Windows creation-time identity for a
+// live PID. It is intentionally a numeric capability only: callers receive no
+// executable path, command line, or process environment details.
+func OwnerCreationTime(pid uint32) (uint64, error) {
+	return currentOwnerCreationTime(pid)
+}
+
 func ownerCreationTimeFromHandle(handle windows.Handle) (uint64, error) {
 	if handle == 0 || handle == windows.InvalidHandle {
 		return 0, ErrOwnerIdentityMismatch

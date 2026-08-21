@@ -1,9 +1,13 @@
-import { execFile as execFileCallback } from "node:child_process";
+import { execFile as execFileCallback, spawn, type ChildProcess } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import net from "node:net";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 
 const execFile = promisify(execFileCallback);
 const preflightTimeoutMilliseconds = 90_000;
+const guardianConnectTimeoutMilliseconds = 10_000;
+const maxGuardianFramePayloadBytes = 32;
 const ruleNamePrefix = "UnitTestIDE-NativeOffline-";
 
 export type GuardianFrame =
@@ -149,25 +153,216 @@ function requireRuleName(ruleName: string): void {
 }
 
 function cryptoRandomRuleSuffix(): string {
-  return Buffer.from(globalThis.crypto.getRandomValues(new Uint8Array(16))).toString("hex");
+  return randomBytes(16).toString("hex");
 }
 
 function defaultDependencies(): WfpOfflineBoundaryDependencies {
+  const guardianExecutable = siblingExecutable("native-offline-guardian.exe");
   return {
     platform: process.platform,
     async runPreflight() {
       const executable = join(dirname(process.execPath), "coverage-toolset-preflight.exe");
       return await execFile(executable, [], { encoding: "utf8", timeout: preflightTimeoutMilliseconds, windowsHide: true, maxBuffer: 64 * 1024, env: sanitizedEnvironment() });
     },
-    async resolveOwnerCreationTime() {
-      // Node does not expose GetProcessTimes. Guessing would weaken PID reuse protection.
-      throw new Error("Windows WFP guardian requires an owner identity provider");
+    async resolveOwnerCreationTime(ownerPid) {
+      let result: { readonly stdout: string; readonly stderr: string };
+      try {
+        result = await execFile(guardianExecutable, [`--print-owner-creation-time=${ownerPid}`], {
+          encoding: "utf8", timeout: preflightTimeoutMilliseconds, windowsHide: true,
+          maxBuffer: 4 * 1024, env: sanitizedEnvironment(),
+        });
+      } catch {
+        throw new Error("owner creation time unavailable");
+      }
+      if (result.stderr !== "" || !/^[1-9][0-9]*\n$/u.test(result.stdout)) {
+        throw new Error("owner creation time unavailable");
+      }
+      return result.stdout.trim();
     },
-    async startGuardian() {
-      // No PowerShell or marker-file fallback is permitted for this transport.
-      throw new Error("Windows WFP guardian transport is unavailable");
+    async startGuardian(options) {
+      return await startNativeGuardian({ executable: guardianExecutable, ...options });
     },
   };
+}
+
+function siblingExecutable(name: string): string {
+  return join(dirname(process.execPath), name);
+}
+
+export interface NativeGuardianStartOptions {
+  readonly executable: string;
+  readonly ownerPid: number;
+  readonly ownerCreationTime: string;
+  readonly ruleName: string;
+}
+
+/** Exported solely for the default-wiring regression test. */
+export async function startNativeGuardianForTesting(options: NativeGuardianStartOptions): Promise<GuardianProcess> {
+  return await startNativeGuardian(options);
+}
+
+async function startNativeGuardian(options: NativeGuardianStartOptions): Promise<GuardianProcess> {
+  const pipeName = `\\\\.\\pipe\\offlineboundary-${randomBytes(16).toString("hex")}`;
+  const server = net.createServer();
+  const connection = awaitConnection(server);
+  // Spawn may fail before the connection is awaited; retain a rejection
+  // handler so that resource cleanup cannot become an unhandled rejection.
+  void connection.catch(() => undefined);
+  try {
+    await listenPipe(server, pipeName);
+  } catch {
+    server.close();
+    throw new Error("guardian process could not start");
+  }
+  let child: ChildProcess;
+  try {
+    child = await spawnGuardian(options.executable, [
+      `--owner-pid=${options.ownerPid}`,
+      `--owner-creation-time=${options.ownerCreationTime}`,
+      `--ipc-address=${pipeName}`,
+    ]);
+  } catch {
+    server.close();
+    throw new Error("guardian process could not start");
+  }
+  const exit = observeGuardianExit(child, server);
+  void exit.catch(() => undefined);
+  const socket = await connection.catch(() => {
+    child.kill();
+    throw new Error("guardian process could not start");
+  });
+  const frames = new GuardianFrameReader(socket);
+  return {
+    readFrame: async () => await frames.read(),
+    writeFrame: async (frame) => await writeGuardianFrame(socket, frame),
+    waitForExit: async () => await exit,
+    terminate: () => {
+      frames.close();
+      socket.destroy();
+      server.close();
+      child.kill();
+    },
+  };
+}
+
+async function listenPipe(server: net.Server, pipeName: string): Promise<void> {
+  await new Promise<void>((resolveListen, rejectListen) => {
+    server.once("error", rejectListen);
+    server.listen(pipeName, () => {
+      server.off("error", rejectListen);
+      resolveListen();
+    });
+  });
+}
+
+function awaitConnection(server: net.Server): Promise<net.Socket> {
+  return new Promise<net.Socket>((resolveConnection, rejectConnection) => {
+    const timeout = setTimeout(() => finish(new Error("guardian connection timed out")), guardianConnectTimeoutMilliseconds);
+    const finish = (error?: Error, socket?: net.Socket) => {
+      clearTimeout(timeout);
+      server.off("error", onError);
+      server.off("connection", onConnection);
+      server.off("close", onClose);
+      if (error !== undefined) rejectConnection(error);
+      else if (socket !== undefined) resolveConnection(socket);
+    };
+    const onError = () => finish(new Error("guardian pipe failed"));
+    const onClose = () => finish(new Error("guardian pipe closed"));
+    const onConnection = (socket: net.Socket) => {
+      server.close();
+      finish(undefined, socket);
+    };
+    server.once("error", onError);
+    server.once("connection", onConnection);
+    server.once("close", onClose);
+  });
+}
+
+async function spawnGuardian(executable: string, args: readonly string[]): Promise<ChildProcess> {
+  const child = spawn(executable, args, { stdio: "ignore", windowsHide: true, env: sanitizedEnvironment() });
+  await new Promise<void>((resolveSpawn, rejectSpawn) => {
+    child.once("spawn", resolveSpawn);
+    child.once("error", rejectSpawn);
+  });
+  return child;
+}
+
+function observeGuardianExit(child: ChildProcess, server: net.Server): Promise<void> {
+  return new Promise<void>((resolveExit, rejectExit) => {
+    child.once("error", () => { server.close(); rejectExit(new Error("guardian process failed")); });
+    child.once("exit", (code, signal) => {
+      server.close();
+      if (code === 0 && signal === null) resolveExit();
+      else rejectExit(new Error("guardian process failed"));
+    });
+  });
+}
+
+class GuardianFrameReader {
+  #buffer = Buffer.alloc(0);
+  #frames: GuardianFrame[] = [];
+  #waiting: ((frame: GuardianFrame) => void) | undefined;
+  #failure: Error | undefined;
+
+  constructor(private readonly socket: net.Socket) {
+    socket.on("data", (chunk: Buffer) => this.push(chunk));
+    socket.once("error", () => this.fail());
+    socket.once("end", () => this.fail());
+    socket.once("close", () => this.fail());
+  }
+
+  async read(): Promise<GuardianFrame> {
+    const frame = this.#frames.shift();
+    if (frame !== undefined) return frame;
+    if (this.#failure !== undefined) throw this.#failure;
+    return await new Promise<GuardianFrame>((resolveFrame) => { this.#waiting = resolveFrame; });
+  }
+
+  close(): void { this.fail(); }
+
+  private push(chunk: Buffer): void {
+    if (this.#failure !== undefined) return;
+    this.#buffer = Buffer.concat([this.#buffer, chunk]);
+    try {
+      while (this.#buffer.length >= 4) {
+        const length = this.#buffer.readUInt32LE(0);
+        if (length === 0 || length > maxGuardianFramePayloadBytes) throw new Error("guardian frame is invalid");
+        if (this.#buffer.length < 4 + length) return;
+        const payload = this.#buffer.subarray(4, 4 + length);
+        this.#buffer = this.#buffer.subarray(4 + length);
+        this.deliver(decodeGuardianPayload(payload));
+      }
+    } catch { this.fail(); }
+  }
+
+  private deliver(frame: GuardianFrame): void {
+    const waiter = this.#waiting;
+    this.#waiting = undefined;
+    if (waiter !== undefined) waiter(frame);
+    else this.#frames.push(frame);
+  }
+
+  private fail(): void {
+    if (this.#failure !== undefined) return;
+    this.#failure = new Error("guardian frame is invalid");
+  }
+}
+
+function decodeGuardianPayload(payload: Buffer): GuardianFrame {
+  const kind = payload[0];
+  if (payload.length === 1 && kind === 1) return { kind: "Hello" };
+  if (payload.length === 1 && kind === 2) return { kind: "Ready" };
+  if (payload.length === 1 && kind === 3) return { kind: "Release" };
+  if (payload.length === 1 && kind === 5) return { kind: "Bye" };
+  if (payload.length === 2 && kind === 4 && payload[1] === 1) return { kind: "Error", code: "Startup" };
+  throw new Error("guardian frame is invalid");
+}
+
+async function writeGuardianFrame(socket: net.Socket, frame: Extract<GuardianFrame, { readonly kind: "Release" }>): Promise<void> {
+  const payload = Buffer.from([3]);
+  const header = Buffer.alloc(4);
+  header.writeUInt32LE(payload.length);
+  await new Promise<void>((resolveWrite, rejectWrite) => socket.write(Buffer.concat([header, payload]), (error) => error === undefined ? resolveWrite() : rejectWrite(error)));
 }
 
 function sanitizedEnvironment(): NodeJS.ProcessEnv {

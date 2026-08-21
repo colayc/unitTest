@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import {
+  startNativeGuardianForTesting,
   installWfpOfflineBoundary,
   type GuardianFrame,
   type WfpOfflineBoundaryDependencies,
@@ -160,4 +164,23 @@ test("malformed guardian frames terminate and fail closed", async () => {
     /guardian protocol/u,
   );
   assert.equal(terminated, true);
+});
+
+test("default native guardian wiring canonicalizes a sibling spawn failure", {
+  skip: process.platform === "win32" ? false : "Windows named pipes are unavailable",
+}, async () => {
+  const nonexistentGuardian = join(tmpdir(), `missing-guardian-${randomBytes(8).toString("hex")}.exe`);
+  await assert.rejects(
+    startNativeGuardianForTesting({
+      executable: nonexistentGuardian,
+      ownerPid: process.pid,
+      ownerCreationTime: "1337",
+      ruleName: "UnitTestIDE-NativeOffline-0123456789abcdef",
+    }),
+    (error: unknown) => {
+      assert.match(String(error), /guardian process could not start/u);
+      assert.doesNotMatch(String(error), /missing-guardian|[A-Za-z]:[\\/]/u);
+      return true;
+    },
+  );
 });
