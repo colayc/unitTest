@@ -54,4 +54,4 @@ No `go.mod` or `go.sum` changes were required.
 
 ## Commit
 
-`69722c6` — `feat: add Windows WFP offline boundary core`
+Implementation commit: `558ad40` — `feat: add Windows WFP offline boundary core`
