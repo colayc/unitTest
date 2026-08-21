@@ -289,6 +289,14 @@ controls:
   Every remaining executable-shaped `CMAKE_*` cache entry, including launcher,
   emulator, command/program/tool suffixes and direct binutils, now fails closed
   before CMake or the test executable can start.
+- Final preset rule-template closure began with the same real executable/test
+  graph proving that `CMAKE_CXX_LINK_EXECUTABLE`,
+  `CMAKE_CXX_COMPILE_OBJECT`, `CMAKE_CXX_CREATE_SHARED_LIBRARY`, and
+  `CMAKE_CXX_ARCHIVE_CREATE` each accepted an unknown executable template.
+  All `CMAKE_*` preset cache variables containing a closed compile, link,
+  archive, or create rule token are now rejected before configure; executable
+  compiler/linker identities continue through their separate exact registered
+  LaunchPlan checks.
 
 ## Verification
 
@@ -411,6 +419,11 @@ Go caches.
   with only the privileged WFP lifecycle explicitly excluded; `go vet` and
   Linux full-package compile-only PASS; Service Probe reports 76 PASS / one
   exact `ToolchainUnavailable` SKIP; Extension reports 138/138 PASS.
+- Final preset rule-template closure wave: the four focused compile/link/create/
+  archive controls PASS; complete Service unit and race trees PASS with only
+  the privileged WFP lifecycle explicitly excluded; `go vet` and Linux
+  full-package compile-only PASS; Service Probe reports 76 PASS / one exact
+  `ToolchainUnavailable` SKIP; Extension reports 138/138 PASS.
 - `pnpm check:protocol-generated`, `pnpm check:coverage-generated`, and
   `pnpm build` with private `GOCACHE`: PASS.
 - Exact `pnpm test`: coverage generator 4/4, CMake bundle 28/28, and coverage

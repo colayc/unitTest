@@ -392,6 +392,9 @@ func (validator *cmakeLaunchValidator) validatePreset(sourceRoot, name string) e
 		if isCMakeExecutableDiscoveryCacheVariable(variable) {
 			return errInvalidCMakeLaunchDeclaration
 		}
+		if isCMakeRuleTemplateCacheVariable(variable) {
+			return errInvalidCMakeLaunchDeclaration
+		}
 		if suffix, perLanguageCompiler := cmakePerLanguageCompilerToolSuffix(variable); perLanguageCompiler {
 			switch suffix {
 			case "_TARGET":
@@ -1140,6 +1143,19 @@ func isUnregisteredCMakeExecutableCacheVariable(value string) bool {
 		"_AR", "_RANLIB", "_TOOL", "_PROGRAM", "_COMMAND",
 	} {
 		if strings.HasSuffix(upper, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func isCMakeRuleTemplateCacheVariable(value string) bool {
+	upper := strings.ToUpper(value)
+	if !strings.HasPrefix(upper, "CMAKE_") {
+		return false
+	}
+	for _, marker := range []string{"_COMPILE_", "_LINK_", "_ARCHIVE_", "_CREATE_"} {
+		if strings.Contains(upper, marker) {
 			return true
 		}
 	}

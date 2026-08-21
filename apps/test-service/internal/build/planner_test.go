@@ -513,6 +513,10 @@ func TestPlannerValidatesPresetDiscoveryAndPerLanguageToolCacheVariables(t *test
 		{variable: "CMAKE_TEST_LAUNCHER", value: "unknown-test-launcher.exe"},
 		{variable: "CMAKE_MT", value: "unknown-mt.exe"},
 		{variable: "CMAKE_OBJCOPY", value: "unknown-objcopy.exe"},
+		{variable: "CMAKE_CXX_LINK_EXECUTABLE", value: "unknown-link.exe <OBJECTS>"},
+		{variable: "CMAKE_CXX_COMPILE_OBJECT", value: "unknown-compile.exe <SOURCE>"},
+		{variable: "CMAKE_CXX_CREATE_SHARED_LIBRARY", value: "unknown-link.exe <OBJECTS>"},
+		{variable: "CMAKE_CXX_ARCHIVE_CREATE", value: "unknown-ar.exe <OBJECTS>"},
 	} {
 		t.Run("rejects "+test.variable, func(t *testing.T) {
 			if err := planWithCache(t, test.variable, func(*plannerFixture) string { return test.value }); !errors.Is(err, task.ErrInvalidArgument) {
