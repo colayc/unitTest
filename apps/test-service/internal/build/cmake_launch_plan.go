@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"unit-test-ide.local/test-service/internal/cmake"
@@ -180,6 +181,10 @@ func (validator *cmakeLaunchValidator) validateFile(path, binaryDir string) erro
 			}
 		case "set":
 			if err := validator.validateSetLaunchProperty(invocation, key); err != nil {
+				return err
+			}
+		case "list":
+			if err := validator.validateListLaunchMutation(invocation, key); err != nil {
 				return err
 			}
 		case "set_property":
@@ -667,6 +672,75 @@ func (validator *cmakeLaunchValidator) validateSetLaunchProperty(invocation cmak
 	return validator.validateLaunchProperty(invocation.arguments[0].value, invocation.arguments[1:], sourceKey)
 }
 
+func (validator *cmakeLaunchValidator) validateListLaunchMutation(invocation cmakeInvocation, sourceKey string) error {
+	involvesControlled := false
+	for _, argument := range invocation.arguments {
+		if strings.ContainsAny(argument.value, "$<>") {
+			return errInvalidCMakeLaunchDeclaration
+		}
+		if mentionsControlledCMakeListVariable(argument.value) {
+			involvesControlled = true
+			break
+		}
+	}
+	if !involvesControlled {
+		return nil
+	}
+	if len(invocation.arguments) < 2 || !isControlledCMakeListVariable(invocation.arguments[1].value) {
+		return errInvalidCMakeLaunchDeclaration
+	}
+	variable := invocation.arguments[1].value
+	if !isCMakeScriptLoaderVariable(variable) {
+		return errInvalidCMakeLaunchDeclaration
+	}
+	operation := strings.ToUpper(invocation.arguments[0].value)
+	switch operation {
+	case "APPEND", "PREPEND":
+		return validator.validateListScriptValues(filepath.Dir(sourceKey), variable, invocation.arguments[2:])
+	case "INSERT":
+		if len(invocation.arguments) < 4 || !literalCMakeListIndex(invocation.arguments[2].value) {
+			return errInvalidCMakeLaunchDeclaration
+		}
+		return validator.validateListScriptValues(filepath.Dir(sourceKey), variable, invocation.arguments[3:])
+	case "REMOVE_ITEM":
+		return validator.validateListScriptValues(filepath.Dir(sourceKey), variable, invocation.arguments[2:])
+	case "REMOVE_AT":
+		if len(invocation.arguments) < 3 {
+			return errInvalidCMakeLaunchDeclaration
+		}
+		for _, argument := range invocation.arguments[2:] {
+			if !literalCMakeListIndex(argument.value) {
+				return errInvalidCMakeLaunchDeclaration
+			}
+		}
+		return nil
+	case "POP_BACK", "POP_FRONT", "REMOVE_DUPLICATES", "REVERSE", "SORT":
+		if len(invocation.arguments) != 2 {
+			return errInvalidCMakeLaunchDeclaration
+		}
+		return nil
+	default:
+		return errInvalidCMakeLaunchDeclaration
+	}
+}
+
+func (validator *cmakeLaunchValidator) validateListScriptValues(sourceRoot, variable string, values []cmakeArgument) error {
+	for _, value := range values {
+		if err := validator.validateScriptLoaderValue(sourceRoot, variable, value.value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func literalCMakeListIndex(value string) bool {
+	if value == "" || strings.TrimSpace(value) != value {
+		return false
+	}
+	_, err := strconv.Atoi(value)
+	return err == nil
+}
+
 func (validator *cmakeLaunchValidator) validateSetProperty(invocation cmakeInvocation, sourceKey string) error {
 	for index, argument := range invocation.arguments {
 		if strings.EqualFold(argument.value, "PROPERTY") {
@@ -805,6 +879,23 @@ func isCMakeScriptLoaderVariable(value string) bool {
 		}
 	}
 	return false
+}
+
+func isControlledCMakeListVariable(value string) bool {
+	return isCMakeScriptLoaderVariable(value) || isCompilerLauncherProperty(value) || isRuleLauncherProperty(value)
+}
+
+func mentionsControlledCMakeListVariable(value string) bool {
+	if isControlledCMakeListVariable(value) {
+		return true
+	}
+	upper := strings.ToUpper(value)
+	return strings.Contains(upper, "CMAKE_PROJECT_") ||
+		strings.Contains(upper, "CMAKE_TOOLCHAIN_FILE") ||
+		strings.Contains(upper, "CMAKE_USER_MAKE_RULES_OVERRIDE") ||
+		strings.Contains(upper, "_COMPILER_LAUNCHER") ||
+		strings.Contains(upper, "_LINKER_LAUNCHER") ||
+		strings.Contains(upper, "RULE_LAUNCH_")
 }
 
 func isRuleLauncherProperty(value string) bool {

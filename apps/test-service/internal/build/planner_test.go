@@ -380,6 +380,107 @@ func TestPlannerPinsCMakeScriptLoadersFromPresetsAndSource(t *testing.T) {
 	}
 }
 
+func TestPlannerPinsLiteralListAppendedCMakeScriptLoader(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows launch declaration")
+	}
+	activatePlannerWFPRegistration(t)
+	for _, operation := range []string{
+		"APPEND CMAKE_PROJECT_TOP_LEVEL_INCLUDES safe.cmake",
+		"PREPEND CMAKE_PROJECT_TOP_LEVEL_INCLUDES safe.cmake",
+		"INSERT CMAKE_PROJECT_TOP_LEVEL_INCLUDES 0 safe.cmake",
+	} {
+		t.Run(strings.Fields(operation)[0], func(t *testing.T) {
+			fixture := newPlannerFixture(t)
+			safe := filepath.Join(fixture.sourceDir, "safe.cmake")
+			if err := os.WriteFile(safe, []byte("# list-mutated safe script\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			contents := "list(" + operation + ")\nproject(fixture)\n"
+			if err := os.WriteFile(filepath.Join(fixture.sourceDir, "CMakeLists.txt"), []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			plan, err := Plan(PlanInput{
+				Installation: fixture.installation, WorkspaceRoot: fixture.root,
+				Project: fixture.project, Profile: fixture.profile,
+				Toolchain: fixture.toolchain, Jobs: 1, Configure: true,
+			})
+			if err != nil {
+				t.Fatalf("Plan() error = %v, want literal loader accepted", err)
+			}
+			if !slices.ContainsFunc(plan.Steps[0].Process.LaunchInputs, func(value cmake.FingerprintFile) bool {
+				return strings.EqualFold(value.Path, safe)
+			}) {
+				t.Fatalf("LaunchInputs = %#v, want list-mutated script %q pinned", plan.Steps[0].Process.LaunchInputs, safe)
+			}
+		})
+	}
+}
+
+func TestPlannerRejectsUnsafeControlledCMakeListMutation(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows launch declaration")
+	}
+	activatePlannerWFPRegistration(t)
+	for _, test := range []struct {
+		name     string
+		contents string
+		evilFile bool
+	}{
+		{
+			name:     "script loader append",
+			contents: "list(APPEND CMAKE_PROJECT_TOP_LEVEL_INCLUDES evil.cmake)\nproject(fixture)\n",
+			evilFile: true,
+		},
+		{
+			name:     "compiler launcher append",
+			contents: "list(APPEND CMAKE_CXX_COMPILER_LAUNCHER unknown.exe)\nadd_executable(fixture main.cpp)\n",
+		},
+		{
+			name:     "unknown set operation",
+			contents: "list(SET CMAKE_PROJECT_TOP_LEVEL_INCLUDES 0 evil.cmake)\nproject(fixture)\n",
+			evilFile: true,
+		},
+		{
+			name:     "dynamic removal",
+			contents: "set(CMAKE_PROJECT_TOP_LEVEL_INCLUDES safe.cmake)\nlist(REMOVE_ITEM CMAKE_PROJECT_TOP_LEVEL_INCLUDES \"${DYNAMIC}\")\nproject(fixture)\n",
+		},
+		{
+			name:     "pop into controlled launcher",
+			contents: "set(CMAKE_PROJECT_TOP_LEVEL_INCLUDES safe.cmake)\nlist(POP_BACK CMAKE_PROJECT_TOP_LEVEL_INCLUDES CMAKE_CXX_COMPILER_LAUNCHER)\nproject(fixture)\n",
+		},
+		{
+			name:     "indirect controlled variable name",
+			contents: "set(LAUNCH_VAR CMAKE_PROJECT_TOP_LEVEL_INCLUDES)\nlist(APPEND \"${LAUNCH_VAR}\" evil.cmake)\nproject(fixture)\n",
+			evilFile: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newPlannerFixture(t)
+			if err := os.WriteFile(filepath.Join(fixture.sourceDir, "CMakeLists.txt"), []byte(test.contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if test.evilFile {
+				if err := os.WriteFile(filepath.Join(fixture.sourceDir, "evil.cmake"), []byte("execute_process(COMMAND unknown.exe)\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if strings.Contains(test.contents, "safe.cmake") {
+				if err := os.WriteFile(filepath.Join(fixture.sourceDir, "safe.cmake"), []byte("# safe script\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := Plan(PlanInput{
+				Installation: fixture.installation, WorkspaceRoot: fixture.root,
+				Project: fixture.project, Profile: fixture.profile,
+				Toolchain: fixture.toolchain, Jobs: 1, Configure: true,
+			}); !errors.Is(err, task.ErrInvalidArgument) {
+				t.Fatalf("Plan() error = %v, want controlled list mutation rejected", err)
+			}
+		})
+	}
+}
+
 func TestPlannerDerivesFreshDeclaredTestExecutableBeforeFileAPIExists(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows launch declaration")

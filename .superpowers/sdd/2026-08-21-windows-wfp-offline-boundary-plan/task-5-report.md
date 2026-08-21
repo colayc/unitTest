@@ -167,6 +167,16 @@ controls:
   CMake signature keywords are matched case-insensitively regardless of
   quoting. A Plan-level conflicting-parent control proves that only the safe
   earlier-parent script is selected and identity/digest pinned.
+- Final controlled-list wave started with real CMake inputs proving that
+  `list(APPEND CMAKE_PROJECT_TOP_LEVEL_INCLUDES evil.cmake)` and
+  `list(APPEND CMAKE_CXX_COMPILER_LAUNCHER unknown.exe)` were silently ignored
+  by the validator. Literal `APPEND`, `PREPEND`, and `INSERT` of loader scripts
+  now traverse the same root-constrained graph and add identity/digest pins.
+  Launcher/rule mutations, unknown operations such as `SET`, dynamic removal,
+  output into another controlled variable, indirect `${LAUNCH_VAR}` targets,
+  and unproved `FILTER`/`TRANSFORM`-style semantics fail closed. Closed
+  removal/reordering signatures cannot add an executable and accept only
+  literal indices or already-validated script identities.
 
 ## Verification
 
@@ -221,6 +231,11 @@ Go caches.
   PASS / one exact `ToolchainUnavailable` SKIP; Extension reports 138/138 PASS.
   The privileged lifecycle was rerun separately and fails exactly
   `WFPAccessDenied (local and required modes fail closed)` on this host.
+- Final controlled-list wave: focused list-loader snapshot and rejection
+  controls PASS; complete Service unit and race trees PASS with only the
+  privileged WFP integration explicitly excluded; `go vet` and Linux
+  full-package compile-only PASS; Service Probe reports 76 PASS / one exact
+  `ToolchainUnavailable` SKIP; Extension reports 138/138 PASS.
 - `pnpm check:protocol-generated`, `pnpm check:coverage-generated`, and
   `pnpm build` with private `GOCACHE`: PASS.
 - Exact `pnpm test`: coverage generator 4/4, CMake bundle 28/28, and coverage
