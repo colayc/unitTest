@@ -169,3 +169,52 @@ Re-run required gates after fix round2:
 
 - The caller-facing executable-path contract is now formally exported, but default runtime behavior still falls back to sibling-binary discovery when callers leave it empty. That default is explicit now, but final production wiring still belongs to higher-level integration.
 - CI still lacks an end-to-end Windows test that spawns the compiled guardian binary over the real `go-winio` transport and asserts the exported path contract in a full process launch.
+
+## Fix round3 (remaining API-contract finding)
+
+### Root cause summary
+
+- `Config.GuardianExecutablePath` had been exported in round2, but the empty-value fallback contract was still implicit in code rather than explicit in exported API documentation.
+- Package-external callers could compile with the field, but there was no public seam to behavior-test the empty-value sibling-discovery rule without attempting a real process launch.
+- While rerunning focused verification, a legitimate post-`bye` EOF race also surfaced: EOF could arrive before `Wait()`, causing a false `SessionCloseFailed` after a successful `bye`.
+
+### Fixes applied
+
+- Added exported doc comments to `offlineboundary.Config` and `Config.GuardianExecutablePath` that explicitly define the Windows contract:
+  - empty value → only sibling discovery for `native-offline-guardian.exe`
+  - non-empty value → strictly use the caller-supplied path
+  - any later startup failure still returns only canonical `GuardianStartFailed` without leaking the resolved path
+- Added exported seam `ResolveGuardianExecutablePath(Config, func() (string, error))` so package-external callers/tests can verify both the empty fallback and non-empty override contracts without launching a process.
+- Routed the internal Windows guardian path resolution through the same exported seam to keep the contract single-sourced.
+- Fixed the post-`bye` EOF race so EOF after a valid `bye` no longer turns a successful close into `SessionCloseFailed`.
+
+### Additional RED/GREEN evidence
+
+Focused RED for round3:
+
+- `go test ./apps/test-service/internal/offlineboundary -run 'Guardian|Protocol|Owner|Release|Config' -count=1`
+  - RED evidence: compile failed first because `offlineboundary.ResolveGuardianExecutablePath` did not exist yet for the new package-external fallback-contract test.
+
+Focused GREEN after round3:
+
+- `go test ./apps/test-service/internal/offlineboundary -run 'Guardian|Protocol|Owner|Release|Config' -count=1`
+  - Result: `ok  	unit-test-ide.local/test-service/internal/offlineboundary	0.109s`
+
+Re-run required gates after round3:
+
+- `$env:GOOS='linux'; $env:GOARCH='amd64'; $env:CGO_ENABLED='0'; go test -c ./apps/test-service/cmd/native-offline-guardian`
+  - Result: `?   	unit-test-ide.local/test-service/cmd/native-offline-guardian	[no test files]`
+
+- `go vet ./apps/test-service/internal/offlineboundary ./apps/test-service/cmd/native-offline-guardian`
+  - Result: exit 0, no output
+
+### Additional behaviors now covered
+
+- package-external caller can behavior-test non-empty override without invoking the fallback resolver
+- package-external caller can behavior-test empty-value sibling fallback through the exported seam
+- internal Windows close path no longer misclassifies EOF-after-`bye` as `SessionCloseFailed`
+
+### Updated concerns after round3
+
+- The API contract is now explicit and behavior-tested for both empty fallback and non-empty override, but the actual production deployment decision for when higher layers should set `GuardianExecutablePath` versus relying on sibling discovery remains outside Task 2.
+- CI still lacks an end-to-end Windows launch test for the compiled guardian binary over real `go-winio` transport.

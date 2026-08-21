@@ -9,7 +9,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
@@ -228,6 +227,9 @@ func (lease *guardianLease) run() {
 			return
 		case result := <-recv:
 			if result.err != nil {
+				if byeSeen {
+					continue
+				}
 				if !readySeen {
 					_ = lease.session.Kill()
 					lease.finish(GuardianStartFailed)
@@ -376,14 +378,10 @@ func (boundary *boundary) startGuardianProcess(ctx context.Context, owner OwnerI
 }
 
 func (boundary *boundary) resolveGuardianExecutablePath() (string, error) {
-	if boundary.guardianExecutablePath != "" {
-		return boundary.guardianExecutablePath, nil
-	}
-	executable, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(filepath.Dir(executable), "native-offline-guardian.exe"), nil
+	return ResolveGuardianExecutablePath(
+		Config{GuardianExecutablePath: boundary.guardianExecutablePath},
+		os.Executable,
+	)
 }
 
 func guardianPipeName(leaseID []byte) string {

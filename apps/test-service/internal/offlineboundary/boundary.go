@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"path/filepath"
 	"time"
 )
 
@@ -13,10 +14,28 @@ type wfpEngine interface {
 	Close() error
 }
 
+// Config configures OfflineBoundary construction.
+//
+// On Windows, GuardianExecutablePath controls how the native guardian binary is
+// located. An empty GuardianExecutablePath uses only sibling discovery for
+// `native-offline-guardian.exe` beside the current executable. A non-empty
+// GuardianExecutablePath is used exactly as provided by the caller with no
+// fallback search. If guardian startup still fails after path resolution,
+// Start returns only the canonical GuardianStartFailed sentinel and does not
+// expose the attempted path.
 type Config struct {
 	engineFactory          func() (wfpEngine, error)
 	leaseIDSource          func() []byte
 	ownerVerifier          guardianOwnerVerifier
+	// GuardianExecutablePath selects the native guardian binary on Windows.
+	//
+	// Empty means: use only sibling discovery for `native-offline-guardian.exe`
+	// beside the current executable.
+	//
+	// Non-empty means: use exactly this caller-supplied path with no fallback.
+	//
+	// If guardian startup fails after resolution, Start returns only the
+	// canonical GuardianStartFailed sentinel and does not leak the resolved path.
 	GuardianExecutablePath string
 	guardianFactory        func(context.Context, OwnerIdentity) (guardianSession, error)
 	guardianReadyTimeout   time.Duration
@@ -43,6 +62,29 @@ func New(config Config) OfflineBoundary {
 		guardianReadyTimeout:   config.guardianReadyTimeout,
 		guardianReleaseTimeout: config.guardianReleaseTimeout,
 	}
+}
+
+// ResolveGuardianExecutablePath resolves the Windows guardian executable path
+// from Config using the provided current-executable resolver seam.
+//
+// Empty Config.GuardianExecutablePath uses only sibling discovery for
+// `native-offline-guardian.exe` beside the current executable returned by
+// currentExecutable.
+//
+// Non-empty Config.GuardianExecutablePath is returned exactly as provided and
+// currentExecutable is not called.
+func ResolveGuardianExecutablePath(config Config, currentExecutable func() (string, error)) (string, error) {
+	if config.GuardianExecutablePath != "" {
+		return config.GuardianExecutablePath, nil
+	}
+	if currentExecutable == nil {
+		return "", ErrUnsupported
+	}
+	executable, err := currentExecutable()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(filepath.Dir(executable), "native-offline-guardian.exe"), nil
 }
 
 func validateOwnerIdentity(owner OwnerIdentity) error {
