@@ -187,6 +187,10 @@ func (validator *cmakeLaunchValidator) validateFile(path, binaryDir string) erro
 			if err := validator.validateListLaunchMutation(invocation, key); err != nil {
 				return err
 			}
+		case "string", "cmake_path":
+			if err := validateClosedVariableWriter(invocation); err != nil {
+				return err
+			}
 		case "set_property":
 			if err := validator.validateSetProperty(invocation, key); err != nil {
 				return err
@@ -209,6 +213,9 @@ func (validator *cmakeLaunchValidator) validateFile(path, binaryDir string) erro
 				case "WRITE", "APPEND", "GENERATE", "CONFIGURE":
 					return errInvalidCMakeLaunchDeclaration
 				}
+			}
+			if err := validateClosedVariableWriter(invocation); err != nil {
+				return err
 			}
 		case "configure_file":
 			return errInvalidCMakeLaunchDeclaration
@@ -722,6 +729,15 @@ func (validator *cmakeLaunchValidator) validateListLaunchMutation(invocation cma
 	default:
 		return errInvalidCMakeLaunchDeclaration
 	}
+}
+
+func validateClosedVariableWriter(invocation cmakeInvocation) error {
+	for _, argument := range invocation.arguments {
+		if strings.ContainsAny(argument.value, "$<>") || mentionsControlledCMakeListVariable(argument.value) {
+			return errInvalidCMakeLaunchDeclaration
+		}
+	}
+	return nil
 }
 
 func (validator *cmakeLaunchValidator) validateListScriptValues(sourceRoot, variable string, values []cmakeArgument) error {

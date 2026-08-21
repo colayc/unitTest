@@ -177,6 +177,16 @@ controls:
   and unproved `FILTER`/`TRANSFORM`-style semantics fail closed. Closed
   removal/reordering signatures cannot add an executable and accept only
   literal indices or already-validated script identities.
+- Final variable-writer wave added real CMake controls for
+  `string(APPEND)`/`string(CONCAT)`, `cmake_path(SET)`, and
+  `file(TO_CMAKE_PATH)`/`file(READ)`. Each previously wrote a protected loader
+  or launcher variable without parser review. `string`, `cmake_path`, and the
+  non-writing `file` modes now share one closed writer gate: protected
+  `CMAKE_PROJECT_*`, toolchain/rule-override, compiler/linker-launcher, and
+  `RULE_LAUNCH_*` names fail closed, as do indirect `$` or generator-expression
+  targets whose identity cannot be proven statically. The indirect
+  `${OUTPUT_NAME}` control proves the gate is semantic rather than a four-form
+  spelling blocklist.
 
 ## Verification
 
@@ -235,6 +245,11 @@ Go caches.
   controls PASS; complete Service unit and race trees PASS with only the
   privileged WFP integration explicitly excluded; `go vet` and Linux
   full-package compile-only PASS; Service Probe reports 76 PASS / one exact
+  `ToolchainUnavailable` SKIP; Extension reports 138/138 PASS.
+- Final variable-writer wave: focused string/cmake_path/file writer controls
+  PASS; complete Service unit and race trees PASS with only the privileged WFP
+  integration explicitly excluded; `go vet` and Linux full-package
+  compile-only PASS; Service Probe reports 76 PASS / one exact
   `ToolchainUnavailable` SKIP; Extension reports 138/138 PASS.
 - `pnpm check:protocol-generated`, `pnpm check:coverage-generated`, and
   `pnpm build` with private `GOCACHE`: PASS.

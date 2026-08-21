@@ -481,6 +481,66 @@ func TestPlannerRejectsUnsafeControlledCMakeListMutation(t *testing.T) {
 	}
 }
 
+func TestPlannerRejectsProtectedVariableWritesFromCMakeTransformCommands(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows launch declaration")
+	}
+	activatePlannerWFPRegistration(t)
+	for _, test := range []struct {
+		name     string
+		contents string
+		evilFile bool
+	}{
+		{
+			name:     "string append script loader",
+			contents: "string(APPEND CMAKE_PROJECT_TOP_LEVEL_INCLUDES evil.cmake)\nproject(fixture)\n",
+			evilFile: true,
+		},
+		{
+			name:     "string concat compiler launcher",
+			contents: "string(CONCAT CMAKE_CXX_COMPILER_LAUNCHER unknown.exe)\nadd_executable(fixture main.cpp)\n",
+		},
+		{
+			name:     "file path conversion script loader",
+			contents: "file(TO_CMAKE_PATH evil.cmake CMAKE_PROJECT_TOP_LEVEL_INCLUDES)\nproject(fixture)\n",
+			evilFile: true,
+		},
+		{
+			name:     "file read script loader",
+			contents: "file(READ evil.cmake CMAKE_PROJECT_TOP_LEVEL_INCLUDES)\nproject(fixture)\n",
+			evilFile: true,
+		},
+		{
+			name:     "cmake path set compiler launcher",
+			contents: "cmake_path(SET CMAKE_CXX_COMPILER_LAUNCHER unknown.exe)\nadd_executable(fixture main.cpp)\n",
+		},
+		{
+			name:     "indirect string output",
+			contents: "set(OUTPUT_NAME CMAKE_PROJECT_TOP_LEVEL_INCLUDES)\nstring(APPEND \"${OUTPUT_NAME}\" evil.cmake)\nproject(fixture)\n",
+			evilFile: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newPlannerFixture(t)
+			if err := os.WriteFile(filepath.Join(fixture.sourceDir, "CMakeLists.txt"), []byte(test.contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if test.evilFile {
+				if err := os.WriteFile(filepath.Join(fixture.sourceDir, "evil.cmake"), []byte("execute_process(COMMAND unknown.exe)\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := Plan(PlanInput{
+				Installation: fixture.installation, WorkspaceRoot: fixture.root,
+				Project: fixture.project, Profile: fixture.profile,
+				Toolchain: fixture.toolchain, Jobs: 1, Configure: true,
+			}); !errors.Is(err, task.ErrInvalidArgument) {
+				t.Fatalf("Plan() error = %v, want protected variable writer rejected", err)
+			}
+		})
+	}
+}
+
 func TestPlannerDerivesFreshDeclaredTestExecutableBeforeFileAPIExists(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows launch declaration")
