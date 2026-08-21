@@ -202,6 +202,10 @@ func (validator *cmakeLaunchValidator) validateFile(path, binaryDir string) erro
 			if err := validator.validateDirectoryProperties(invocation, key); err != nil {
 				return err
 			}
+		case "project":
+			if err := validator.validateProject(invocation, key); err != nil {
+				return err
+			}
 		case "add_executable":
 			if err := validator.declareExecutable(invocation, binaryDir); err != nil {
 				return err
@@ -244,8 +248,10 @@ func (validator *cmakeLaunchValidator) validateFile(path, binaryDir string) erro
 			if err := validator.validateFile(include, binaryDir); err != nil {
 				return errInvalidCMakeLaunchDeclaration
 			}
-		case "cmake_minimum_required", "project", "enable_testing", "add_library",
-			"target_compile_features", "target_link_libraries":
+		case "cmake_minimum_required", "enable_testing", "add_library",
+			"target_compile_features", "target_link_libraries",
+			"if", "elseif", "else", "endif", "message",
+			"add_compile_options", "add_link_options":
 			// These commands are part of the canonical coverage fixture and do
 			// not assign a command, tool, or script-loader output variable.
 		default:
@@ -650,6 +656,66 @@ func literalCMakeTargetName(value string) bool {
 			character >= '0' && character <= '9' || strings.ContainsRune("_+.-", character) {
 			continue
 		}
+		return false
+	}
+	return true
+}
+
+func (validator *cmakeLaunchValidator) validateProject(invocation cmakeInvocation, sourceKey string) error {
+	if len(invocation.arguments) == 0 || !literalCMakeTargetName(invocation.arguments[0].value) {
+		return errInvalidCMakeLaunchDeclaration
+	}
+	languagesDeclared := false
+	for index := 1; index < len(invocation.arguments); {
+		keyword := strings.ToUpper(invocation.arguments[index].value)
+		switch keyword {
+		case "VERSION":
+			if index+1 >= len(invocation.arguments) || !literalCMakeProjectVersion(invocation.arguments[index+1].value) {
+				return errInvalidCMakeLaunchDeclaration
+			}
+			index += 2
+		case "DESCRIPTION", "HOMEPAGE_URL":
+			if index+1 >= len(invocation.arguments) ||
+				strings.ContainsAny(invocation.arguments[index+1].value, "$;<>") {
+				return errInvalidCMakeLaunchDeclaration
+			}
+			index += 2
+		case "LANGUAGES":
+			if languagesDeclared || index+1 >= len(invocation.arguments) {
+				return errInvalidCMakeLaunchDeclaration
+			}
+			languagesDeclared = true
+			for _, language := range invocation.arguments[index+1:] {
+				if !validator.registeredProjectLanguage(language.value, sourceKey) {
+					return errInvalidCMakeLaunchDeclaration
+				}
+			}
+			return nil
+		default:
+			return errInvalidCMakeLaunchDeclaration
+		}
+	}
+	if !validator.registeredProjectLanguage("C", sourceKey) ||
+		!validator.registeredProjectLanguage("CXX", sourceKey) {
+		return errInvalidCMakeLaunchDeclaration
+	}
+	return nil
+}
+
+func (validator *cmakeLaunchValidator) registeredProjectLanguage(language, sourceKey string) bool {
+	switch strings.ToUpper(language) {
+	case "C":
+		return validator.allowedBareExecutable("${CMAKE_C_COMPILER}", sourceKey)
+	case "CXX":
+		return validator.allowedBareExecutable("${CMAKE_CXX_COMPILER}", sourceKey)
+	default:
+		return false
+	}
+}
+
+func literalCMakeProjectVersion(value string) bool {
+	if value == "" || strings.Trim(value, "0123456789.") != "" ||
+		strings.HasPrefix(value, ".") || strings.HasSuffix(value, ".") || strings.Contains(value, "..") {
 		return false
 	}
 	return true

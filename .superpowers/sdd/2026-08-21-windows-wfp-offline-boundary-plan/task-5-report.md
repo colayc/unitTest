@@ -200,6 +200,18 @@ controls:
   unclassified command or command mode and retains only an explicit no-output,
   no-launch allowlist for the canonical coverage fixture; a full canonical
   static-library/test fixture is the positive control.
+- Final project/instrumentation wave began with RED controls proving that
+  `project(LANGUAGES Fortran)`, CUDA, and an unknown language were accepted
+  despite having no compiler in the registered APP_ID plan, while the exact
+  read-only output of `coveragellvm.WriteInstrumentation` was rejected by the
+  new default-deny command grammar. `project()` now accepts only its closed
+  literal metadata form and validates default or explicit languages against
+  the already-registered C/CXX compiler identities. Unknown or unregistered
+  languages fail before CMake process creation. The no-process allowlist now
+  includes only the retained instrumentation's conditional/message and
+  compile/link option declarations (`if`/`elseif`/`else`/`endif`, `message`,
+  `add_compile_options`, and `add_link_options`); execute/custom launch grammar
+  remains unchanged and default-denied.
 
 ## Verification
 
@@ -270,6 +282,12 @@ Go caches.
   PASS with only the privileged WFP lifecycle explicitly excluded; `go vet`
   and Linux full-package compile-only PASS; Service Probe reports 76 PASS / one
   exact `ToolchainUnavailable` SKIP; Extension reports 138/138 PASS.
+- Final project/instrumentation wave: focused registered-language rejection and
+  exact `WriteInstrumentation` coverage-plan controls PASS. Complete Service
+  unit and race trees PASS with only the privileged WFP lifecycle explicitly
+  excluded; `go vet` and Linux full-package compile-only PASS; Service Probe
+  reports 76 PASS / one exact `ToolchainUnavailable` SKIP; Extension reports
+  138/138 PASS.
 - `pnpm check:protocol-generated`, `pnpm check:coverage-generated`, and
   `pnpm build` with private `GOCACHE`: PASS.
 - Exact `pnpm test`: coverage generator 4/4, CMake bundle 28/28, and coverage

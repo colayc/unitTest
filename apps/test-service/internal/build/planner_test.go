@@ -642,6 +642,29 @@ add_test(NAME fixture COMMAND fixture)
 	}
 }
 
+func TestPlannerRejectsUnregisteredProjectLanguages(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows launch declaration")
+	}
+	activatePlannerWFPRegistration(t)
+	for _, language := range []string{"Fortran", "CUDA", "UnknownLanguage"} {
+		t.Run(language, func(t *testing.T) {
+			fixture := newPlannerFixture(t)
+			contents := "project(fixture LANGUAGES " + language + ")\n"
+			if err := os.WriteFile(filepath.Join(fixture.sourceDir, "CMakeLists.txt"), []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Plan(PlanInput{
+				Installation: fixture.installation, WorkspaceRoot: fixture.root,
+				Project: fixture.project, Profile: fixture.profile,
+				Toolchain: fixture.toolchain, Jobs: 1, Configure: true,
+			}); !errors.Is(err, task.ErrInvalidArgument) {
+				t.Fatalf("Plan() error = %v, want unregistered project language rejected", err)
+			}
+		})
+	}
+}
+
 func TestPlannerDerivesFreshDeclaredTestExecutableBeforeFileAPIExists(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows launch declaration")
