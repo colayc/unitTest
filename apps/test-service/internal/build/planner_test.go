@@ -856,6 +856,38 @@ func TestPlannerRejectsProtectedVariableWritesFromCMakeTransformCommands(t *test
 	}
 }
 
+func TestPlannerRejectsCMakeRuleTemplateSourceWriters(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows launch declaration")
+	}
+	activatePlannerWFPRegistration(t)
+	for _, test := range []struct {
+		name     string
+		contents string
+	}{
+		{name: "set link executable", contents: "set(CMAKE_CXX_LINK_EXECUTABLE unknown-link.exe)"},
+		{name: "list compile object", contents: "list(APPEND CMAKE_CXX_COMPILE_OBJECT unknown-compile.exe)"},
+		{name: "string archive create", contents: "string(CONCAT CMAKE_CXX_ARCHIVE_CREATE unknown-ar.exe)"},
+		{name: "file create shared library", contents: "file(TO_CMAKE_PATH unknown-link.exe CMAKE_CXX_CREATE_SHARED_LIBRARY)"},
+		{name: "cmake path archive finish", contents: "cmake_path(SET CMAKE_CXX_ARCHIVE_FINISH unknown-ar.exe)"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newPlannerFixture(t)
+			contents := test.contents + "\nproject(fixture LANGUAGES CXX)\nadd_executable(fixture main.cpp)\n"
+			if err := os.WriteFile(filepath.Join(fixture.sourceDir, "CMakeLists.txt"), []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Plan(PlanInput{
+				Installation: fixture.installation, WorkspaceRoot: fixture.root,
+				Project: fixture.project, Profile: fixture.profile,
+				Toolchain: fixture.toolchain, Jobs: 1, Configure: true,
+			}); !errors.Is(err, task.ErrInvalidArgument) {
+				t.Fatalf("Plan() error = %v, want CMake rule-template source writer rejected", err)
+			}
+		})
+	}
+}
+
 func TestPlannerRejectsUnknownCMakeCommandWriters(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows launch declaration")

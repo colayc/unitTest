@@ -297,6 +297,12 @@ controls:
   archive, or create rule token are now rejected before configure; executable
   compiler/linker identities continue through their separate exact registered
   LaunchPlan checks.
+- Final source rule-template closure added real `set`, `list`, `string`,
+  `file`, and `cmake_path` controls for link-executable, compile-object,
+  archive-create/finish, and create-shared-library variables. All five forms
+  previously returned a valid executable plan. Preset and source validation now
+  share one rule-template predicate: direct `set` rejects it and every transform
+  writer reaches the same controlled-variable default deny.
 
 ## Verification
 
@@ -422,6 +428,11 @@ Go caches.
 - Final preset rule-template closure wave: the four focused compile/link/create/
   archive controls PASS; complete Service unit and race trees PASS with only
   the privileged WFP lifecycle explicitly excluded; `go vet` and Linux
+  full-package compile-only PASS; Service Probe reports 76 PASS / one exact
+  `ToolchainUnavailable` SKIP; Extension reports 138/138 PASS.
+- Final source rule-template closure wave: the five focused source-writer and
+  retained preset controls PASS; complete Service unit and race trees PASS with
+  only the privileged WFP lifecycle explicitly excluded; `go vet` and Linux
   full-package compile-only PASS; Service Probe reports 76 PASS / one exact
   `ToolchainUnavailable` SKIP; Extension reports 138/138 PASS.
 - `pnpm check:protocol-generated`, `pnpm check:coverage-generated`, and

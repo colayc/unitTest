@@ -392,7 +392,7 @@ func (validator *cmakeLaunchValidator) validatePreset(sourceRoot, name string) e
 		if isCMakeExecutableDiscoveryCacheVariable(variable) {
 			return errInvalidCMakeLaunchDeclaration
 		}
-		if isCMakeRuleTemplateCacheVariable(variable) {
+		if isCMakeRuleTemplateVariable(variable) {
 			return errInvalidCMakeLaunchDeclaration
 		}
 		if suffix, perLanguageCompiler := cmakePerLanguageCompilerToolSuffix(variable); perLanguageCompiler {
@@ -909,6 +909,9 @@ func (validator *cmakeLaunchValidator) validateSetLaunchProperty(invocation cmak
 	if isCMakeCompilerOrLinkerFlagsVariable(invocation.arguments[0].value) {
 		return errInvalidCMakeLaunchDeclaration
 	}
+	if isCMakeRuleTemplateVariable(invocation.arguments[0].value) {
+		return errInvalidCMakeLaunchDeclaration
+	}
 	if isPinnedCMakeToolVariable(invocation.arguments[0].value) {
 		if len(invocation.arguments) != 2 ||
 			!validator.allowedBareExecutable(invocation.arguments[1].value, sourceKey) {
@@ -1149,7 +1152,7 @@ func isUnregisteredCMakeExecutableCacheVariable(value string) bool {
 	return false
 }
 
-func isCMakeRuleTemplateCacheVariable(value string) bool {
+func isCMakeRuleTemplateVariable(value string) bool {
 	upper := strings.ToUpper(value)
 	if !strings.HasPrefix(upper, "CMAKE_") {
 		return false
@@ -1285,7 +1288,7 @@ func isCMakeScriptLoaderVariable(value string) bool {
 func isControlledCMakeListVariable(value string) bool {
 	return isCMakeScriptLoaderVariable(value) || isCompilerLauncherProperty(value) ||
 		isRuleLauncherProperty(value) || isPinnedCMakeToolVariable(value) ||
-		isCMakeCompilerOrLinkerFlagsVariable(value)
+		isCMakeCompilerOrLinkerFlagsVariable(value) || isCMakeRuleTemplateVariable(value)
 }
 
 func mentionsControlledCMakeListVariable(value string) bool {
