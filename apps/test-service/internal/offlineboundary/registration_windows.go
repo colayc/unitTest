@@ -154,6 +154,14 @@ func RegisterExecutableForActiveBoundary(path string) error {
 	return nil
 }
 
+// ExecutableRegistrationActive reports whether this Service is inside the
+// private WFP registration boundary. A partial capability still counts as
+// active so callers validate and fail closed before attempting a launch.
+func ExecutableRegistrationActive() bool {
+	return os.Getenv(registrationPipeEnvironment) != "" ||
+		os.Getenv(registrationNonceEnvironment) != ""
+}
+
 func writeRegistrationRequest(writer io.Writer, nonce []byte, path string) error {
 	pathBytes := []byte(path)
 	if len(nonce) != 32 || len(pathBytes) == 0 || len(pathBytes) > maxRegisteredPathBytes || strings.ContainsRune(path, '\x00') {

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -128,6 +129,133 @@ func TestNativeBuildLaunchPlanDeclaresClosedWindowsCoverageTree(t *testing.T) {
 	}
 }
 
+func TestPlannerRejectsUnknownCustomCommandBeforeCreatingExecutionPlan(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows launch declaration")
+	}
+	activatePlannerWFPRegistration(t)
+	for _, test := range []struct {
+		name    string
+		fixture string
+		wantErr bool
+	}{
+		{name: "declared CMake command", fixture: "custom-command-known"},
+		{name: "unknown executable", fixture: "custom-command-unknown", wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newPlannerFixture(t)
+			if err := os.RemoveAll(fixture.sourceDir); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.CopyFS(fixture.sourceDir, os.DirFS(filepath.Join("testdata", test.fixture))); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Plan(PlanInput{
+				Installation: fixture.installation, WorkspaceRoot: fixture.root,
+				Project: fixture.project, Profile: fixture.profile,
+				Toolchain: fixture.toolchain, Jobs: 1, Configure: true,
+			})
+			if test.wantErr && !errors.Is(err, task.ErrInvalidArgument) {
+				t.Fatalf("Plan() error = %v, want task.ErrInvalidArgument before execution plan", err)
+			}
+			if !test.wantErr && err != nil {
+				t.Fatalf("Plan() error = %v, want declared CMake command accepted", err)
+			}
+		})
+	}
+}
+
+func TestPlannerRejectsDynamicCustomCommandsAndUnboundedCMakeGraphs(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows launch declaration")
+	}
+	activatePlannerWFPRegistration(t)
+	t.Run("dynamic command executable", func(t *testing.T) {
+		fixture := newPlannerFixture(t)
+		contents := "add_custom_target(dynamic COMMAND \"${UNDECLARED_TOOL}\" --escape)\n"
+		if err := os.WriteFile(filepath.Join(fixture.sourceDir, "CMakeLists.txt"), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Plan(PlanInput{
+			Installation: fixture.installation, WorkspaceRoot: fixture.root,
+			Project: fixture.project, Profile: fixture.profile,
+			Toolchain: fixture.toolchain, Jobs: 1, Configure: true,
+		}); !errors.Is(err, task.ErrInvalidArgument) {
+			t.Fatalf("Plan() error = %v, want dynamic COMMAND rejection", err)
+		}
+	})
+	t.Run("CMake executable wrapper", func(t *testing.T) {
+		fixture := newPlannerFixture(t)
+		contents := "add_custom_target(wrapper COMMAND \"${CMAKE_COMMAND}\" -E env -- unknown.exe)\n"
+		if err := os.WriteFile(filepath.Join(fixture.sourceDir, "CMakeLists.txt"), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Plan(PlanInput{
+			Installation: fixture.installation, WorkspaceRoot: fixture.root,
+			Project: fixture.project, Profile: fixture.profile,
+			Toolchain: fixture.toolchain, Jobs: 1, Configure: true,
+		}); !errors.Is(err, task.ErrInvalidArgument) {
+			t.Fatalf("Plan() error = %v, want spawning CMake wrapper rejection", err)
+		}
+	})
+	t.Run("declared executable test target", func(t *testing.T) {
+		fixture := newPlannerFixture(t)
+		contents := "add_test(NAME known COMMAND \"$<TARGET_FILE:known-test>\")\n"
+		if err := os.WriteFile(filepath.Join(fixture.sourceDir, "CMakeLists.txt"), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		target := cmake.Target{
+			ID: strings.Repeat("e", 64), Name: "known-test", Type: "EXECUTABLE",
+			Artifacts: []string{filepath.Join(fixture.profile.BinaryDir, "known-test.exe")},
+		}
+		if _, err := Plan(PlanInput{
+			Installation: fixture.installation, WorkspaceRoot: fixture.root,
+			Project: fixture.project, Profile: fixture.profile,
+			Toolchain: fixture.toolchain, Targets: []cmake.Target{target}, Jobs: 1, Configure: true,
+		}); err != nil {
+			t.Fatalf("Plan() error = %v, want exact target artifact accepted", err)
+		}
+	})
+	t.Run("file graph limit", func(t *testing.T) {
+		fixture := newPlannerFixture(t)
+		var root strings.Builder
+		for index := 0; index < maxCMakeLaunchFiles; index++ {
+			name := fmt.Sprintf("f%03d.cmake", index)
+			root.WriteString("include(" + name + ")\n")
+			if err := os.WriteFile(filepath.Join(fixture.sourceDir, name), []byte("# bounded include\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(fixture.sourceDir, "CMakeLists.txt"), []byte(root.String()), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Plan(PlanInput{
+			Installation: fixture.installation, WorkspaceRoot: fixture.root,
+			Project: fixture.project, Profile: fixture.profile,
+			Toolchain: fixture.toolchain, Jobs: 1, Configure: true,
+		}); !errors.Is(err, task.ErrInvalidArgument) {
+			t.Fatalf("Plan() error = %v, want bounded CMake graph rejection", err)
+		}
+	})
+}
+
+func activatePlannerWFPRegistration(t *testing.T) {
+	t.Helper()
+	t.Setenv("UNIT_TEST_IDE_WFP_REGISTRATION_PIPE", `\\.\pipe\offlineboundary-register-planner-test`)
+	t.Setenv("UNIT_TEST_IDE_WFP_REGISTRATION_NONCE", strings.Repeat("1", 64))
+}
+
+func TestCMakeLaunchParserBoundsCommandsAndArguments(t *testing.T) {
+	tooManyCommands := []byte(strings.Repeat("message(x)\n", maxCMakeLaunchCommands+1))
+	if _, err := parseCMakeInvocations(tooManyCommands); !errors.Is(err, errInvalidCMakeLaunchDeclaration) {
+		t.Fatalf("parse command bound error = %v", err)
+	}
+	tooManyArguments := []byte("message(" + strings.Repeat("x ", maxCMakeLaunchArguments+1) + ")")
+	if _, err := parseCMakeInvocations(tooManyArguments); !errors.Is(err, errInvalidCMakeLaunchDeclaration) {
+		t.Fatalf("parse argument bound error = %v", err)
+	}
+}
+
 func TestPlannerInjectsOnlyTypedCoveragePathsForPresetAndGeneratedProfiles(t *testing.T) {
 	for _, origin := range []string{"generated", "preset"} {
 		t.Run(origin, func(t *testing.T) {
@@ -139,6 +267,12 @@ func TestPlannerInjectsOnlyTypedCoveragePathsForPresetAndGeneratedProfiles(t *te
 			}
 			coverageBinaryDir := filepath.Join(fixture.dataRoot, "coverage-build", origin)
 			include := filepath.Join(fixture.dataRoot, "task", "coverage-instrumentation.cmake")
+			if err := os.MkdirAll(filepath.Dir(include), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(include, []byte("# trusted instrumentation\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
 			options := &CoverageOptions{
 				BinaryDir: coverageBinaryDir,
 				TopLevelInclude: cmake.FingerprintFile{

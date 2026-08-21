@@ -110,6 +110,22 @@ controls:
   command executor are declared before processhost can create CMake. Unknown
   Windows toolchain families, a non-absolute/non-`cmd.exe` shell, malformed
   registration, or any rejected declared identity stop before `CreateProcess`.
+- Final critical regression: a real nested CMake fixture with
+  `add_custom_command(... COMMAND unknown.exe ...)` previously returned a valid
+  plan even though that executable had no APP_ID filter. The planner now uses a
+  bounded CMake tokenizer and follows only literal `add_subdirectory` and
+  literal, already-materialized `include` edges under approved roots. Every
+  `COMMAND` in `add_custom_command`, `add_custom_target`, and `add_test` must
+  resolve exactly to a LaunchPlan path, a unique executable target artifact, or
+  a closed CMake variable. Unresolved dynamic variables/generator expressions,
+  missing or escaping graph edges, ambiguous targets, 129+ files, 8193+
+  commands, 65537+
+  arguments, direct `cmd.exe`, and process-spawning `cmake -E` wrappers fail
+  before an execution plan exists. Validation is scoped to coverage plans or a
+  Service carrying the WFP registration capability (including a malformed
+  partial capability), so ordinary Windows builds outside this boundary are
+  unchanged. The retained positive fixture proves nested `${CMAKE_COMMAND} -E
+  touch` and a literal pre-generated include.
 
 ## Verification
 
@@ -140,6 +156,12 @@ Go caches.
   controls PASS; the complete Service, race, vet, Linux compile-only, Service
   Probe, and Extension commands above were rerun PASS. Protocol and coverage
   generated-source checks were rerun PASS.
+- Final unknown-command wave: focused `internal/build` and `internal/processhost`
+  PASS; Service full, vet, Linux compile-only, Service Probe (76 PASS / one
+  exact toolchain SKIP), and Extension (138/138) PASS. The first full race run
+  hit one unrelated existing SQLite fault-injection timing failure in
+  `internal/coverageexec`; that test passed immediately in isolation, and a
+  second complete race run passed every package.
 - `pnpm check:protocol-generated`, `pnpm check:coverage-generated`, and
   `pnpm build` with private `GOCACHE`: PASS.
 - Exact `pnpm test`: coverage generator 4/4, CMake bundle 28/28, and coverage
@@ -164,9 +186,10 @@ Go caches.
   not claim interception of arbitrary dynamically discovered grandchildren.
   The supported CMake/Ninja/clang-cl fixture is a closed launch declaration:
   its known executors, archiver, shell, test, and LLVM tools are registered
-  before the direct CMake launch. Projects that require an undeclared custom
-  executable are outside this boundary shape and must be rejected/extended by
-  an explicit declaration rather than treated as covered. Privileged CI must
-  still supply the positive native evidence for that declared shape.
+  before the direct CMake launch. The planner now rejects undeclared custom/test
+  executables and unprovable dynamic CMake graph edges before process creation;
+  projects outside this explicitly supported grammar must extend the closed
+  declaration rather than be treated as covered. Privileged CI must still
+  supply the positive native evidence for that declared shape.
 - Temporary Go caches, the pnpm shim and generated runtime artifacts are removed
   before commit. The change is committed locally and is not pushed.

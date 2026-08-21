@@ -60,7 +60,7 @@ TS coverage smoke
             ├─ ALE_AUTH_CONNECT_V4 filter
             ├─ ALE_AUTH_CONNECT_V6 filter
             └─ local IPC: owner/ready/release/exit
-                 └─ Service + clang-cl/llvm-profdata/llvm-cov process tree
+                 └─ closed APP_ID launch declaration for Service/native tools
 ```
 
 ### 4.1 Go API
@@ -91,7 +91,9 @@ guardian 使用 `FwpmEngineOpen0` 打开 dynamic session，并在以下层添加
 - `FWPM_LAYER_ALE_AUTH_CONNECT_V4`；
 - `FWPM_LAYER_ALE_AUTH_CONNECT_V6`。
 
-filters 的 action 为 block，provider/sublayer/filter key 为每次 session 新生成的 GUID。只允许声明的本地 IPC 通道和测试所需本地资源；所有非本地 TCP/UDP outbound connect 默认阻断。filter 创建、查询和删除均在同一 dynamic session 内完成，不写 PersistentStore，也不调用 PowerShell 防火墙 cmdlet。
+filters 的 action 为 block，provider/sublayer/filter key 为每次 session 新生成的 GUID。每个 filter 同时绑定精确 APP_ID 并排除 loopback；未注册的无关进程和本地资源不被机器级阻断。filter 创建、查询和删除均在同一 dynamic session 内完成，不写 PersistentStore，也不调用 PowerShell 防火墙 cmdlet。
+
+WFP 没有 PID-tree condition。支持的 coverage build 因此使用 closed LaunchPlan：planner 在启动 CMake/Ninja 前有界解析主 `CMakeLists.txt`、literal `add_subdirectory` 和 literal/pre-generated `include`，收集 `add_custom_command`、`add_custom_target` 与 `add_test` 的每个 `COMMAND` executable，并要求它精确映射到已注册 APP_ID。除精确 `$<TARGET_FILE:...>` 映射外，未解析的动态变量/生成表达式、无法静态证明的 include/subdirectory、未知 executable、shell/代启动 wrapper 或解析上限溢出都在 CreateProcess 前失败；不能将任意动态 grandchildren 宣称为已覆盖。
 
 ### 4.3 Guardian IPC
 

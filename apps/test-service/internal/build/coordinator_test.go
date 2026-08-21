@@ -231,7 +231,7 @@ func TestCoordinatorPreparePlanOwnsCoverageIsolationAndRuntimeOnlyFields(t *test
 	if err := os.MkdirAll(filepath.Dir(include), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	contents := []byte("trusted instrumentation\n")
+	contents := []byte("# trusted instrumentation\n")
 	if err := os.WriteFile(include, contents, 0o400); err != nil {
 		t.Fatal(err)
 	}

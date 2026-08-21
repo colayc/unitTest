@@ -161,6 +161,18 @@ func TestProcesshostRegistrationCapabilityAcknowledgesExactExecutable(t *testing
 	}
 }
 
+func TestExecutableRegistrationActiveIncludesPartialFailClosedCapability(t *testing.T) {
+	t.Setenv(registrationPipeEnvironment, "")
+	t.Setenv(registrationNonceEnvironment, "")
+	if ExecutableRegistrationActive() {
+		t.Fatal("empty registration capability reported active")
+	}
+	t.Setenv(registrationPipeEnvironment, `\\.\pipe\offlineboundary-register-test`)
+	if !ExecutableRegistrationActive() {
+		t.Fatal("partial registration capability did not require fail-closed validation")
+	}
+}
+
 func TestOwnerIdentityVerifierRejectsPIDReuse(t *testing.T) {
 	verifier := guardianOwnerVerifierFunc(func(pid uint32) (uint64, error) {
 		if pid != 41 {

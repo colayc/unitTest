@@ -11,6 +11,7 @@ import (
 
 	"unit-test-ide.local/test-service/internal/cmake"
 	"unit-test-ide.local/test-service/internal/diagnostic"
+	"unit-test-ide.local/test-service/internal/offlineboundary"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/toolchain"
 	"unit-test-ide.local/test-service/internal/workspace"
@@ -48,15 +49,24 @@ func Plan(input PlanInput) (task.ExecutionPlan, error) {
 	if err != nil {
 		return task.ExecutionPlan{}, err
 	}
+	launchPlan, err := nativeBuildLaunchPlan(input)
+	if err != nil {
+		return task.ExecutionPlan{}, task.ErrInvalidArgument
+	}
+	if runtime.GOOS == "windows" && (input.Coverage != nil || offlineboundary.ExecutableRegistrationActive()) {
+		if err := validateCMakeCustomCommandPlan(input, sourceDir, launchPlan); err != nil {
+			return task.ExecutionPlan{}, task.ErrInvalidArgument
+		}
+	}
 	steps := make([]task.ExecutionStep, 0, 2)
 	if input.Configure {
-		configure, err := configureStep(input, sourceDir)
+		configure, err := configureStep(input, sourceDir, launchPlan)
 		if err != nil {
 			return task.ExecutionPlan{}, err
 		}
 		steps = append(steps, configure)
 	}
-	build, err := buildStep(input, sourceDir, targetNames)
+	build, err := buildStep(input, sourceDir, targetNames, launchPlan)
 	if err != nil {
 		return task.ExecutionPlan{}, err
 	}
@@ -66,7 +76,7 @@ func Plan(input PlanInput) (task.ExecutionPlan, error) {
 	return plan, nil
 }
 
-func configureStep(input PlanInput, sourceDir string) (task.ExecutionStep, error) {
+func configureStep(input PlanInput, sourceDir string, launchPlan []string) (task.ExecutionStep, error) {
 	environment, err := normalizedToolchainEnvironment(input.Toolchain.Environment)
 	if err != nil {
 		return task.ExecutionStep{}, err
@@ -120,10 +130,6 @@ func configureStep(input PlanInput, sourceDir string) (task.ExecutionStep, error
 	if err != nil {
 		return task.ExecutionStep{}, task.ErrInvalidArgument
 	}
-	launchPlan, err := nativeBuildLaunchPlan(input)
-	if err != nil {
-		return task.ExecutionStep{}, task.ErrInvalidArgument
-	}
 	return task.ExecutionStep{
 		ID: "configure", Kind: task.StepConfigure,
 		Process: task.ProcessSpec{
@@ -142,7 +148,7 @@ func configureStep(input PlanInput, sourceDir string) (task.ExecutionStep, error
 	}, nil
 }
 
-func buildStep(input PlanInput, sourceDir string, targetNames []string) (task.ExecutionStep, error) {
+func buildStep(input PlanInput, sourceDir string, targetNames, launchPlan []string) (task.ExecutionStep, error) {
 	environment, err := normalizedToolchainEnvironment(input.Toolchain.Environment)
 	if err != nil {
 		return task.ExecutionStep{}, err
@@ -167,10 +173,6 @@ func buildStep(input PlanInput, sourceDir string, targetNames []string) (task.Ex
 		Root: input.WorkspaceRoot, WorkingDirectory: sourceDir, StepID: "build",
 		ToolchainID: input.Toolchain.ID,
 	})
-	if err != nil {
-		return task.ExecutionStep{}, task.ErrInvalidArgument
-	}
-	launchPlan, err := nativeBuildLaunchPlan(input)
 	if err != nil {
 		return task.ExecutionStep{}, task.ErrInvalidArgument
 	}
