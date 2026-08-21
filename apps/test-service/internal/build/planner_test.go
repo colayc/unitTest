@@ -330,6 +330,65 @@ func TestPlannerRejectsPresetCompilerAndLinkerOptionOverrides(t *testing.T) {
 	}
 }
 
+func TestPlannerValidatesPresetCompilerSelectorsAgainstRegisteredCompilers(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows launch declaration")
+	}
+	activatePlannerWFPRegistration(t)
+	planWithSelector := func(t *testing.T, variable string, value func(plannerFixture) string) error {
+		t.Helper()
+		fixture := newPlannerFixture(t)
+		fixture.profile.Origin = "preset"
+		fixture.profile.ConfigurePreset = "debug"
+		document, err := json.Marshal(map[string]any{
+			"version": 6,
+			"configurePresets": []map[string]any{{
+				"name": "debug", "environment": map[string]string{variable: value(fixture)},
+			}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(fixture.sourceDir, "CMakePresets.json"), document, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err = Plan(PlanInput{
+			Installation: fixture.installation, WorkspaceRoot: fixture.root,
+			Project: fixture.project, Profile: fixture.profile,
+			Toolchain: fixture.toolchain, Jobs: 1, Configure: true,
+		})
+		return err
+	}
+
+	for _, variable := range []string{"CC", "CXX", "FC", "OBJC", "OBJCXX", "ASM", "CUDA", "HIP", "ISPC", "SWIFT"} {
+		t.Run("rejects unknown "+variable, func(t *testing.T) {
+			if err := planWithSelector(t, variable, func(plannerFixture) string { return "unknown.exe" }); !errors.Is(err, task.ErrInvalidArgument) {
+				t.Fatalf("Plan() error = %v, want unregistered %s compiler rejected", err, variable)
+			}
+		})
+	}
+
+	for _, test := range []struct {
+		name  string
+		value func(plannerFixture) string
+	}{
+		{name: "dynamic", value: func(plannerFixture) string { return "$env{TRUSTED_CXX}" }},
+		{name: "registered non-compiler", value: func(fixture plannerFixture) string { return fixture.installation.Executable }},
+	} {
+		t.Run("rejects "+test.name+" CXX", func(t *testing.T) {
+			if err := planWithSelector(t, "CXX", test.value); !errors.Is(err, task.ErrInvalidArgument) {
+				t.Fatalf("Plan() error = %v, want %s CXX rejected", err, test.name)
+			}
+		})
+	}
+
+	t.Run("accepts exact registered CXX compiler", func(t *testing.T) {
+		if err := planWithSelector(t, "CXX", func(fixture plannerFixture) string { return fixture.toolchain.CXXCompiler }); err != nil {
+			t.Fatalf("Plan() error = %v, want exact registered CXX compiler accepted", err)
+		}
+	})
+}
+
 func TestPlannerPinsEarlierInheritedPresetScriptLikeCMake(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows launch declaration")

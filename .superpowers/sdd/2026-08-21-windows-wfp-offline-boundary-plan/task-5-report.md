@@ -245,6 +245,14 @@ controls:
   flags, and the MSVC `CL`/`LINK` forms) now fail closed before CMake process
   creation. Validation runs after CMake-compatible inheritance merging, so a
   child cannot conceal a hostile parent entry.
+- Final preset compiler-selector wave began with RED controls proving that
+  relative unknown values for `CC`, `CXX`, `FC`, `OBJC`, `OBJCXX`, `ASM`,
+  `CUDA`, `HIP`, `ISPC`, and `SWIFT` were accepted. Preset selector values are
+  now literal absolute paths whose normalized identity must be in the exact
+  registered C/CXX compiler subset of the LaunchPlan; dynamic values,
+  unregistered paths, and registered non-compiler executables fail before
+  CMake process creation. A fresh preset using the exact registered CXX path
+  remains the positive control.
 
 ## Verification
 
@@ -338,6 +346,12 @@ Go caches.
   PASS with only the privileged WFP lifecycle explicitly excluded; `go vet`
   and Linux full-package compile-only PASS; Service Probe reports 76 PASS / one
   exact `ToolchainUnavailable` SKIP; Extension reports 138/138 PASS.
+- Final preset compiler-selector wave: focused selector, dynamic-value,
+  registered-non-compiler, and exact registered-compiler controls PASS.
+  Complete Service unit and race trees PASS with only the privileged WFP
+  lifecycle explicitly excluded; `go vet` and Linux full-package compile-only
+  PASS; Service Probe reports 76 PASS / one exact `ToolchainUnavailable` SKIP;
+  Extension reports 138/138 PASS.
 - `pnpm check:protocol-generated`, `pnpm check:coverage-generated`, and
   `pnpm build` with private `GOCACHE`: PASS.
 - Exact `pnpm test`: coverage generator 4/4, CMake bundle 28/28, and coverage

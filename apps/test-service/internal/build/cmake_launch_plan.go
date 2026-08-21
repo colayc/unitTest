@@ -35,6 +35,7 @@ type cmakeInvocation struct {
 
 type cmakeLaunchValidator struct {
 	allowed                map[string]struct{}
+	registeredCompilers    map[string]struct{}
 	variables              map[string]string
 	targets                map[string]string
 	targetPaths            map[string]struct{}
@@ -69,7 +70,8 @@ func validateCMakeLaunchPlan(input PlanInput, sourceDir string, launchPlan []str
 	}
 	binaryRoot := planBinaryDir(input)
 	validator := &cmakeLaunchValidator{
-		allowed: make(map[string]struct{}, len(launchPlan)),
+		allowed:             make(map[string]struct{}, len(launchPlan)),
+		registeredCompilers: make(map[string]struct{}, 2),
 		variables: map[string]string{
 			"${CMAKE_COMMAND}":       input.Installation.Executable,
 			"${CMAKE_CTEST_COMMAND}": input.Installation.CTestExecutable,
@@ -95,6 +97,11 @@ func validateCMakeLaunchPlan(input PlanInput, sourceDir string, launchPlan []str
 			return nil, nil, errInvalidCMakeLaunchDeclaration
 		}
 		validator.addAllowedExecutable(executable, false)
+	}
+	for _, compiler := range []string{input.Toolchain.CCompiler, input.Toolchain.CXXCompiler} {
+		if compiler != "" {
+			validator.registeredCompilers[cmakeLaunchPathKey(compiler)] = struct{}{}
+		}
 	}
 	for _, target := range input.Targets {
 		if literalCMakeTargetName(target.Name) {
@@ -398,6 +405,9 @@ func (validator *cmakeLaunchValidator) validatePreset(sourceRoot, name string) e
 		}
 		if isCMakeCompilerOrLinkerFlagsVariable(variable) ||
 			isCompilerOrLinkerOptionEnvironmentVariable(variable) {
+			return errInvalidCMakeLaunchDeclaration
+		}
+		if isCompilerSelectorEnvironmentVariable(variable) && !validator.allowedRegisteredCompiler(value) {
 			return errInvalidCMakeLaunchDeclaration
 		}
 		if isCMakeScriptLoaderVariable(variable) {
@@ -1048,6 +1058,18 @@ func (validator *cmakeLaunchValidator) allowedBareExecutable(value, sourceKey st
 	return allowed
 }
 
+func (validator *cmakeLaunchValidator) allowedRegisteredCompiler(value string) bool {
+	if strings.ContainsAny(value, "$;<>	\r\n") || !filepath.IsAbs(value) {
+		return false
+	}
+	key := cmakeLaunchPathKey(value)
+	if _, allowed := validator.allowed[key]; !allowed {
+		return false
+	}
+	_, registered := validator.registeredCompilers[key]
+	return registered
+}
+
 func isCompilerLauncherProperty(value string) bool {
 	upper := strings.ToUpper(value)
 	if strings.HasPrefix(upper, "CMAKE_") {
@@ -1102,6 +1124,17 @@ func isCompilerOrLinkerOptionEnvironmentVariable(value string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func isCompilerSelectorEnvironmentVariable(value string) bool {
+	upper := strings.ToUpper(value)
+	switch upper {
+	case "CC", "CXX", "FC", "OBJC", "OBJCXX", "ASM", "CUDA", "HIP", "ISPC", "SWIFT",
+		"RC", "CUDACXX", "CUDAHOSTCXX", "HIPCXX", "SWIFTC":
+		return true
+	default:
+		return strings.HasPrefix(upper, "ASM_") && len(strings.TrimPrefix(upper, "ASM_")) > 0
 	}
 }
 
