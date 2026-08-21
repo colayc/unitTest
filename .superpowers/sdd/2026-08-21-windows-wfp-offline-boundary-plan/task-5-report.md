@@ -251,8 +251,8 @@ controls:
   now literal absolute paths whose normalized identity must be in the exact
   registered C/CXX compiler subset of the LaunchPlan; dynamic values,
   unregistered paths, and registered non-compiler executables fail before
-  CMake process creation. A fresh preset using the exact registered CXX path
-  remains the positive control.
+  CMake process creation. Its interim exact registered-CXX positive was then
+  superseded by the final preset-environment closure described below.
 - Final preset executable-discovery environment wave began with RED controls
   proving that a preset could prepend an evil `PATH`, replace `COMSPEC`, or
   extend `PATHEXT`. Resolved preset values for Windows executable resolution,
@@ -261,6 +261,16 @@ controls:
   toolchain environment capture. Missing capture entries, prepend/replace
   values, and alternate launch resolution fail before CMake process creation;
   an exact captured `PATH` remains the positive control.
+- Final preset-environment closure wave replaced the discovery-variable deny
+  enumeration after RED controls proved that exact-captured `COMPILER_PATH`,
+  `GCC_EXEC_PREFIX`, and `CCC_OVERRIDE_OPTIONS` still bypassed it. A second RED
+  control proved that even an exact-captured registered `CXX` selector remained
+  outside the newly approved environment shape. Every resolved preset
+  environment entry must now use a fixed PATH/PATHEXT/COMSPEC/SystemRoot or
+  retained MSVC/SDK key, exist in the normalized toolchain capture, and match
+  its value byte-for-byte. Unknown, compiler/driver, CMake, unsetting, and
+  uncaptured keys fail before process creation; exact captured `PATH` is the
+  known-safe positive.
 
 ## Verification
 
@@ -355,7 +365,7 @@ Go caches.
   and Linux full-package compile-only PASS; Service Probe reports 76 PASS / one
   exact `ToolchainUnavailable` SKIP; Extension reports 138/138 PASS.
 - Final preset compiler-selector wave: focused selector, dynamic-value,
-  registered-non-compiler, and exact registered-compiler controls PASS.
+  registered-non-compiler, and registered-compiler rejection controls PASS.
   Complete Service unit and race trees PASS with only the privileged WFP
   lifecycle explicitly excluded; `go vet` and Linux full-package compile-only
   PASS; Service Probe reports 76 PASS / one exact `ToolchainUnavailable` SKIP;
@@ -366,6 +376,12 @@ Go caches.
   excluded; `go vet` and Linux full-package compile-only PASS; Service Probe
   reports 76 PASS / one exact `ToolchainUnavailable` SKIP; Extension reports
   138/138 PASS.
+- Final preset-environment closure wave: focused exact-captured unknown-driver,
+  compiler-selector, replacement, and known-safe controls PASS. Complete
+  Service unit and race trees PASS with only the privileged WFP lifecycle
+  explicitly excluded; `go vet` and Linux full-package compile-only PASS;
+  Service Probe reports 76 PASS / one exact `ToolchainUnavailable` SKIP;
+  Extension reports 138/138 PASS.
 - `pnpm check:protocol-generated`, `pnpm check:coverage-generated`, and
   `pnpm build` with private `GOCACHE`: PASS.
 - Exact `pnpm test`: coverage generator 4/4, CMake bundle 28/28, and coverage

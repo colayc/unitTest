@@ -35,7 +35,6 @@ type cmakeInvocation struct {
 
 type cmakeLaunchValidator struct {
 	allowed                map[string]struct{}
-	registeredCompilers    map[string]struct{}
 	capturedEnvironment    map[string]string
 	variables              map[string]string
 	targets                map[string]string
@@ -84,7 +83,6 @@ func validateCMakeLaunchPlan(input PlanInput, sourceDir string, launchPlan []str
 	binaryRoot := planBinaryDir(input)
 	validator := &cmakeLaunchValidator{
 		allowed:             make(map[string]struct{}, len(launchPlan)),
-		registeredCompilers: make(map[string]struct{}, 2),
 		capturedEnvironment: capturedEnvironment,
 		variables: map[string]string{
 			"${CMAKE_COMMAND}":       input.Installation.Executable,
@@ -111,11 +109,6 @@ func validateCMakeLaunchPlan(input PlanInput, sourceDir string, launchPlan []str
 			return nil, nil, errInvalidCMakeLaunchDeclaration
 		}
 		validator.addAllowedExecutable(executable, false)
-	}
-	for _, compiler := range []string{input.Toolchain.CCompiler, input.Toolchain.CXXCompiler} {
-		if compiler != "" {
-			validator.registeredCompilers[cmakeLaunchPathKey(compiler)] = struct{}{}
-		}
 	}
 	for _, target := range input.Targets {
 		if literalCMakeTargetName(target.Name) {
@@ -411,23 +404,21 @@ func (validator *cmakeLaunchValidator) validatePreset(sourceRoot, name string) e
 	}
 	for variable, raw := range resolved.environment {
 		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-			continue
+			return errInvalidCMakeLaunchDeclaration
 		}
 		value, err := launchPresetValue(raw)
 		if err != nil {
 			return errInvalidCMakeLaunchDeclaration
 		}
-		if isCMakeCompilerOrLinkerFlagsVariable(variable) ||
-			isCompilerOrLinkerOptionEnvironmentVariable(variable) {
+		if !isAllowedPresetEnvironmentVariable(variable) {
 			return errInvalidCMakeLaunchDeclaration
 		}
-		if isExecutableDiscoveryEnvironmentVariable(variable) {
-			captured, ok := validator.capturedEnvironment[strings.ToUpper(variable)]
-			if !ok || value != captured {
-				return errInvalidCMakeLaunchDeclaration
-			}
+		captured, ok := validator.capturedEnvironment[strings.ToUpper(variable)]
+		if !ok || value != captured {
+			return errInvalidCMakeLaunchDeclaration
 		}
-		if isCompilerSelectorEnvironmentVariable(variable) && !validator.allowedRegisteredCompiler(value) {
+		if isCMakeCompilerOrLinkerFlagsVariable(variable) ||
+			isCompilerOrLinkerOptionEnvironmentVariable(variable) {
 			return errInvalidCMakeLaunchDeclaration
 		}
 		if isCMakeScriptLoaderVariable(variable) {
@@ -1078,18 +1069,6 @@ func (validator *cmakeLaunchValidator) allowedBareExecutable(value, sourceKey st
 	return allowed
 }
 
-func (validator *cmakeLaunchValidator) allowedRegisteredCompiler(value string) bool {
-	if strings.ContainsAny(value, "$;<>	\r\n") || !filepath.IsAbs(value) {
-		return false
-	}
-	key := cmakeLaunchPathKey(value)
-	if _, allowed := validator.allowed[key]; !allowed {
-		return false
-	}
-	_, registered := validator.registeredCompilers[key]
-	return registered
-}
-
 func isCompilerLauncherProperty(value string) bool {
 	upper := strings.ToUpper(value)
 	if strings.HasPrefix(upper, "CMAKE_") {
@@ -1147,37 +1126,23 @@ func isCompilerOrLinkerOptionEnvironmentVariable(value string) bool {
 	}
 }
 
-func isCompilerSelectorEnvironmentVariable(value string) bool {
+func isAllowedPresetEnvironmentVariable(value string) bool {
 	upper := strings.ToUpper(value)
 	switch upper {
-	case "CC", "CXX", "FC", "OBJC", "OBJCXX", "ASM", "CUDA", "HIP", "ISPC", "SWIFT",
-		"RC", "CUDACXX", "CUDAHOSTCXX", "HIPCXX", "SWIFTC":
+	case "PATH", "PATHEXT", "COMSPEC", "SYSTEMROOT", "WINDIR",
+		"INCLUDE", "LIB", "LIBPATH",
+		"VSINSTALLDIR", "VCINSTALLDIR", "VCIDEINSTALLDIR",
+		"VCTOOLSINSTALLDIR", "VCTOOLSREDISTDIR", "VCTOOLSVERSION",
+		"WINDOWSLIBPATH", "WINDOWSSDKBINPATH", "WINDOWSSDKDIR",
+		"WINDOWSSDKLIBVERSION", "WINDOWSSDKVERBINPATH", "WINDOWSSDKVERSION",
+		"WINDOWSSDK_EXECUTABLEPATH_X64", "WINDOWSSDK_EXECUTABLEPATH_X86",
+		"UNIVERSALCRTSDKDIR", "UCRTVERSION", "NETFXSDKDIR", "EXTENSIONSDKDIR",
+		"VSCMD_ARG_HOST_ARCH", "VSCMD_ARG_TGT_ARCH", "VSCMD_ARG_APP_PLAT",
+		"VSCMD_ARG_VCVARS_VER", "VSCMD_ARG_WINSDK", "VSCMD_VER":
 		return true
 	default:
-		return strings.HasPrefix(upper, "ASM_") && len(strings.TrimPrefix(upper, "ASM_")) > 0
+		return false
 	}
-}
-
-func isExecutableDiscoveryEnvironmentVariable(value string) bool {
-	upper := strings.ToUpper(value)
-	switch upper {
-	case "PATH", "PATHEXT", "COMSPEC", "SYSTEMROOT", "WINDIR", "SHELL",
-		"VSINSTALLDIR", "VCINSTALLDIR", "VCTOOLSINSTALLDIR", "VCTOOLSVERSION",
-		"WINDOWSSDKDIR", "WINDOWSSDKVERSION", "WINDOWSSDKLIBVERSION",
-		"UNIVERSALCRTSDKDIR", "UCRTVERSION", "NETFXSDKDIR",
-		"INCLUDE", "LIB", "LIBPATH", "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432",
-		"CMAKE_GENERATOR", "CMAKE_GENERATOR_INSTANCE", "CMAKE_GENERATOR_PLATFORM",
-		"CMAKE_GENERATOR_TOOLSET", "CMAKE_PROGRAM_PATH", "CMAKE_PREFIX_PATH",
-		"CMAKE_SYSTEM_PREFIX_PATH", "CMAKE_SYSTEM_PROGRAM_PATH", "CMAKE_FIND_ROOT_PATH",
-		"CMAKE_FIND_ROOT_PATH_MODE_PROGRAM", "CMAKE_APPBUNDLE_PATH", "CMAKE_FRAMEWORK_PATH",
-		"CMAKE_IGNORE_PATH", "CMAKE_SYSTEM_IGNORE_PATH":
-		return true
-	}
-	return isCompilerLauncherProperty(upper) || isRuleLauncherProperty(upper) ||
-		isPinnedCMakeToolVariable(upper) || strings.HasPrefix(upper, "VSCMD_") ||
-		strings.HasPrefix(upper, "VCTOOLS") || strings.HasPrefix(upper, "WINDOWSSDK") ||
-		strings.HasPrefix(upper, "UCRT") ||
-		strings.HasPrefix(upper, "VS") && strings.HasSuffix(upper, "COMNTOOLS")
 }
 
 func isCompilerOrLinkerOptionProperty(value string) bool {

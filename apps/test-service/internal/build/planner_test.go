@@ -330,7 +330,7 @@ func TestPlannerRejectsPresetCompilerAndLinkerOptionOverrides(t *testing.T) {
 	}
 }
 
-func TestPlannerValidatesPresetCompilerSelectorsAgainstRegisteredCompilers(t *testing.T) {
+func TestPlannerRejectsPresetCompilerSelectorsOutsideClosedEnvironment(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows launch declaration")
 	}
@@ -340,10 +340,12 @@ func TestPlannerValidatesPresetCompilerSelectorsAgainstRegisteredCompilers(t *te
 		fixture := newPlannerFixture(t)
 		fixture.profile.Origin = "preset"
 		fixture.profile.ConfigurePreset = "debug"
+		selectorValue := value(fixture)
+		fixture.toolchain.Environment = append(fixture.toolchain.Environment, variable+"="+selectorValue)
 		document, err := json.Marshal(map[string]any{
 			"version": 6,
 			"configurePresets": []map[string]any{{
-				"name": "debug", "environment": map[string]string{variable: value(fixture)},
+				"name": "debug", "environment": map[string]string{variable: selectorValue},
 			}},
 		})
 		if err != nil {
@@ -382,9 +384,9 @@ func TestPlannerValidatesPresetCompilerSelectorsAgainstRegisteredCompilers(t *te
 		})
 	}
 
-	t.Run("accepts exact registered CXX compiler", func(t *testing.T) {
-		if err := planWithSelector(t, "CXX", func(fixture plannerFixture) string { return fixture.toolchain.CXXCompiler }); err != nil {
-			t.Fatalf("Plan() error = %v, want exact registered CXX compiler accepted", err)
+	t.Run("rejects exact captured registered CXX compiler", func(t *testing.T) {
+		if err := planWithSelector(t, "CXX", func(fixture plannerFixture) string { return fixture.toolchain.CXXCompiler }); !errors.Is(err, task.ErrInvalidArgument) {
+			t.Fatalf("Plan() error = %v, want compiler selector rejected by closed environment", err)
 		}
 	})
 }
@@ -436,6 +438,18 @@ func TestPlannerValidatesPresetExecutableDiscoveryEnvironmentAgainstToolchainCap
 		{
 			name: "PATHEXT replacement", captured: []string{"PATH=trusted", "PATHEXT=.COM;.EXE"},
 			preset: map[string]string{"PATHEXT": ".COM;.EXE;.EVIL"},
+		},
+		{
+			name: "COMPILER_PATH even when captured", captured: []string{"PATH=trusted", "COMPILER_PATH=evilbin"},
+			preset: map[string]string{"COMPILER_PATH": "evilbin"},
+		},
+		{
+			name: "GCC_EXEC_PREFIX even when captured", captured: []string{"PATH=trusted", "GCC_EXEC_PREFIX=evilprefix"},
+			preset: map[string]string{"GCC_EXEC_PREFIX": "evilprefix"},
+		},
+		{
+			name: "CCC_OVERRIDE_OPTIONS even when captured", captured: []string{"PATH=trusted", "CCC_OVERRIDE_OPTIONS=+-load +evil"},
+			preset: map[string]string{"CCC_OVERRIDE_OPTIONS": "+-load +evil"},
 		},
 	} {
 		t.Run("rejects "+test.name, func(t *testing.T) {
