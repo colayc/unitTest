@@ -19,7 +19,7 @@
   },
   "scripts": {
     "build": "tsc -b tsconfig.json",
-    "test": "pnpm run build && node --test dist/coverage-bundle.test.js dist/native-fixture.test.js dist/native-build-linux.test.js dist/native-network-guard.test.js dist/native-work-root.test.js dist/test-framework-fixture.test.js",
+    "test": "pnpm run build && node --test dist/coverage-bundle.test.js dist/native-fixture.test.js dist/native-build-linux.test.js dist/native-network-guard.test.js dist/wfp-offline-boundary.test.js dist/native-work-root.test.js dist/test-framework-fixture.test.js",
     "test:coverage-bundle": "pnpm run build && node dist/coverage-bundle.js",
     "test:e2e": "node build-service.mjs && pnpm run build && node --test dist/probe.test.js",
     "test:e2e:native": "node build-service.mjs && pnpm run build && node dist/native-run.js",
