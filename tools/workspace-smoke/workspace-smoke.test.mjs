@@ -152,7 +152,11 @@ test("Hosted CI pins native toolchain runners and enforces the complete matrix",
         "required privileged Go and TypeScript WFP integration must run before coverage Service/native smoke"
       );
       const privilegedStep = source.slice(source.lastIndexOf("      - ", privilegedWfp), coverageSmoke);
-      assert.match(privilegedStep, /UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED:\s*["']?1["']?/u);
+      assert.match(
+        privilegedStep,
+        /UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED:\s*\$\{\{\s*vars\.UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED\s*\|\|\s*['"]0['"]\s*\}\}/u,
+        "WFP integration must be strict only when the privileged repository variable is enabled"
+      );
       const coverageReport = source.indexOf("coverage-execution-report.json");
       assert.notEqual(coverageReport, -1);
       const uploadStep = source.slice(source.lastIndexOf("      - ", coverageReport), coverageReport);
