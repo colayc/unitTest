@@ -15,6 +15,10 @@ const execFile = promisify(execFileCallback);
 const requiredEnvironment = "UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED";
 const repositoryRoot = resolve(import.meta.dirname, "../../..");
 
+function requiredWfpIntegrationEnabled(): boolean {
+  return process.platform === "win32" && process.env[requiredEnvironment] === "1";
+}
+
 function verifiedPreflight(): { readonly stdout: string; readonly stderr: string } {
   return {
     stdout: "{\"schemaVersion\":1,\"platform\":\"windows\",\"architecture\":\"x64\",\"status\":\"verified\",\"version\":\"19.42.0\",\"toolchainDigest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n",
@@ -82,7 +86,9 @@ test("required WFP access denial fails before Service/native side effects", asyn
 });
 
 test("default sibling preflight and guardian become Ready before Service/native starts", {
-  skip: process.platform === "win32" ? false : "Windows WFP integration is unsupported on this platform",
+  skip: requiredWfpIntegrationEnabled()
+    ? false
+    : "Windows WFP integration requires UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED=1",
   timeout: 180_000,
 }, async (t) => {
   const root = await mkdtemp(join(tmpdir(), "unit-test-ide-wfp-e2e-"));
