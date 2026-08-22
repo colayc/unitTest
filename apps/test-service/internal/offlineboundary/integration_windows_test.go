@@ -79,6 +79,9 @@ func TestGuardianRunReportsWFPAccessDeniedWithoutReady(t *testing.T) {
 
 func TestPrivilegedWindowsWFPDynamicLifecycle(t *testing.T) {
 	required := requireWFPIntegrationMode(t)
+	if !required {
+		t.Skip("Windows WFP integration requires UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED=1")
+	}
 	probeRealWFPManagement(t, required)
 
 	t.Run("dynamic V4 and V6 filters leave loopback local resources reachable and normal release removes all objects", func(t *testing.T) {
