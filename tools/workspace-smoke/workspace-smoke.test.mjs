@@ -157,6 +157,12 @@ test("Hosted CI pins native toolchain runners and enforces the complete matrix",
         /UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED:\s*\$\{\{\s*vars\.UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED\s*\|\|\s*['"]0['"]\s*\}\}/u,
         "WFP integration must be strict only when the privileged repository variable is enabled"
       );
+      const coverageStep = source.slice(source.lastIndexOf("      - ", coverageSmoke), legacyCleanup);
+      assert.match(
+        coverageStep,
+        /if:\s*\$\{\{\s*vars\.UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED\s*==\s*['"]1['"]\s*\}\}/u,
+        "Windows LLVM coverage must be gated by the privileged WFP repository variable"
+      );
       const coverageReport = source.indexOf("coverage-execution-report.json");
       assert.notEqual(coverageReport, -1);
       const uploadStep = source.slice(source.lastIndexOf("      - ", coverageReport), coverageReport);

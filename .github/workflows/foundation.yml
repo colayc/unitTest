@@ -63,6 +63,7 @@ jobs:
         run: pnpm --filter @unit-test-ide/service-probe test:wfp-integration
       - id: windows-coverage-smoke
         name: Verify Windows LLVM coverage execution
+        if: ${{ vars.UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED == '1' }}
         env:
           UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS: clang-cl
         run: pnpm --filter code-oss-extension test:coverage-service-smoke
