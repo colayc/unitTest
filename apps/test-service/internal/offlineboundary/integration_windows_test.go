@@ -206,6 +206,19 @@ func requireWFPIntegrationMode(t *testing.T) bool {
 	}
 }
 
+func TestWFPAccessDeniedIsFatalOnlyInRequiredMode(t *testing.T) {
+	if wfpAccessDeniedIsFatal(false) {
+		t.Fatal("optional WFP integration mode must not fail on access denied")
+	}
+	if !wfpAccessDeniedIsFatal(true) {
+		t.Fatal("required WFP integration mode must fail on access denied")
+	}
+}
+
+func wfpAccessDeniedIsFatal(required bool) bool {
+	return required
+}
+
 func probeRealWFPManagement(t *testing.T, required bool) {
 	t.Helper()
 	engine, err := openWFPEngineWithAPI(integrationTracingWfpAPI{}, windows.GenerateGUID)
@@ -222,7 +235,10 @@ func probeRealWFPManagement(t *testing.T, required bool) {
 		}
 	}
 	if errors.Is(err, WFPAccessDenied) {
-		t.Fatalf("WFP integration FAIL after test start: WFPAccessDenied (local and required modes fail closed)")
+		if !wfpAccessDeniedIsFatal(required) {
+			t.Skip("WFP integration unavailable without management permission")
+		}
+		t.Fatalf("WFP integration FAIL after test start: WFPAccessDenied")
 	}
 	if err != nil {
 		t.Fatalf("real WFP management probe error = %v", err)
