@@ -825,9 +825,11 @@ test("protocol v1.3 discovers, runs, replays, and reruns deterministic CppUTest 
   let secondary: ProtocolClient | undefined;
   let stage = "prepare test workspace";
   // Native CppUTest discovery can spend longer than the general RPC/event
-  // deadline on a cold shared runner. Keep the larger bound local to this
-  // end-to-end scenario so unrelated negative-timeout tests stay fast.
+  // deadline on a cold shared runner. TestRun start also prepares the CMake
+  // build synchronously, so keep a separate larger bound for run lifecycle
+  // operations while unrelated RPC/event checks stay fast.
   const EVENT_TIMEOUT_MS = 30_000;
+  const TEST_RUN_TIMEOUT_MS = process.platform === "win32" ? 120_000 : EVENT_TIMEOUT_MS;
   try {
     await prepareTestFrameworkWorkspace(workspaceDirectory);
     stage = "start trusted test service";
@@ -927,7 +929,7 @@ test("protocol v1.3 discovers, runs, replays, and reruns deterministic CppUTest 
         selection: { mode: TestSelectionModeV13.All },
         repeatCount: 1
       }),
-      EVENT_TIMEOUT_MS
+      TEST_RUN_TIMEOUT_MS
     );
     const firstRunEvents: ProtocolTaskEvent[] = [];
     stage = "wait for deterministic test run";
@@ -935,7 +937,7 @@ test("protocol v1.3 discovers, runs, replays, and reruns deterministic CppUTest 
       subscription,
       firstRunTask.taskId,
       firstRunEvents,
-      EVENT_TIMEOUT_MS
+      TEST_RUN_TIMEOUT_MS
     );
     assert.equal(
       (firstTaskFinished.payload as { outcome?: unknown }).outcome,
@@ -1033,14 +1035,14 @@ test("protocol v1.3 discovers, runs, replays, and reruns deterministic CppUTest 
         },
         repeatCount: 1
       }),
-      EVENT_TIMEOUT_MS
+      TEST_RUN_TIMEOUT_MS
     );
     const rerunEvents: ProtocolTaskEvent[] = [];
     const rerunTaskFinished = await waitForFinished(
       subscription,
       rerunTask.taskId,
       rerunEvents,
-      EVENT_TIMEOUT_MS
+      TEST_RUN_TIMEOUT_MS
     );
     assert.equal(
       (rerunTaskFinished.payload as { outcome?: unknown }).outcome,
