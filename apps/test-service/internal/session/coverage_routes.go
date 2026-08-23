@@ -131,7 +131,7 @@ func (s *Session) handleCoverage(ctx context.Context, version string, request pr
 	switch request.Method {
 	case "coverage/runs/start":
 		payload, err := decodeStrict[coverageRunStartPayloadV14](request.Payload)
-		if err != nil || !validID(payload.IdempotencyKey) || !validHash(payload.WorkspaceGeneration) || !validProjectID(payload.ProjectID) || !validProjectID(payload.CoverageProfileID) || !validHash(payload.CatalogRevision) || payload.RepeatCount < 1 || payload.RepeatCount > 100 || payload.TimeoutMS < 1 || payload.TimeoutMS > maxTimeoutMS || payload.TimeoutMS%int64(time.Millisecond) != 0 {
+		if err != nil || !validID(payload.IdempotencyKey) || !validHash(payload.WorkspaceGeneration) || !validProjectID(payload.ProjectID) || !validProjectID(payload.CoverageProfileID) || !validHash(payload.CatalogRevision) || payload.RepeatCount < 1 || payload.RepeatCount > 100 || payload.TimeoutMS < 1 || payload.TimeoutMS > maxTimeoutMS {
 			return invalidPayload(version, request)
 		}
 		selection, err := decodeTestSelection(payload.Selection)

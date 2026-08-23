@@ -44,6 +44,7 @@ type CoordinatorConfig struct {
 	Installation    cmake.Installation
 	WorkspaceRoot   workspace.Root
 	ServiceDataRoot string
+	CoverageRoot    string
 	Locks           *DirectoryLocks
 }
 
@@ -723,6 +724,9 @@ func (c *Coordinator) fileAPIAllowedRoots(
 		c.config.ServiceDataRoot,
 		c.config.Installation.Root,
 	}
+	if c.config.CoverageRoot != "" {
+		candidates = append(candidates, c.config.CoverageRoot)
+	}
 	if c.config.Installation.Root == "" {
 		candidates[2] = filepath.Dir(c.config.Installation.Executable)
 	}
@@ -779,11 +783,22 @@ func (c *Coordinator) ensureBuildDirectory(path string) error {
 	resolved, ok := resolveAllowedBuildPath(
 		path, c.config.WorkspaceRoot.NativePath, c.config.ServiceDataRoot,
 	)
+	coverageRoot := c.config.CoverageRoot
+	if !ok && coverageRoot != "" {
+		resolved, ok = resolveAllowedBuildPath(path, c.config.WorkspaceRoot.NativePath, coverageRoot)
+	}
 	if !ok {
 		return task.ErrInvalidArgument
 	}
 	if err := os.MkdirAll(resolved, 0o700); err != nil {
 		return task.ErrInvalidArgument
+	}
+	if coverageRoot != "" && pathWithinRoot(coverageRoot, resolved) {
+		root, err := workspace.OpenRoot(coverageRoot)
+		if err != nil || root.Contains(c.config.WorkspaceRoot.NativePath) || c.config.WorkspaceRoot.Contains(root.NativePath) {
+			return task.ErrInvalidArgument
+		}
+		return nil
 	}
 	boundary, err := newExecutionBoundary(
 		c.config.Installation, c.config.WorkspaceRoot, c.config.ServiceDataRoot, nil,
@@ -806,8 +821,12 @@ func (c *Coordinator) prepareCoverageOptions(
 	if !validCoverageOptions(options, baseProfile.BinaryDir) {
 		return nil, task.ErrInvalidArgument
 	}
+	coverageRoot := c.config.CoverageRoot
+	if coverageRoot == "" {
+		coverageRoot = c.config.ServiceDataRoot
+	}
 	for _, path := range []string{options.BinaryDir, options.TopLevelInclude.Path} {
-		if !pathWithinRoot(c.config.ServiceDataRoot, path) ||
+		if !pathWithinRoot(coverageRoot, path) ||
 			pathWithinRoot(c.config.WorkspaceRoot.NativePath, path) {
 			return nil, task.ErrInvalidArgument
 		}
@@ -889,6 +908,12 @@ func (c *Coordinator) buildDirectoryIdentity(path string) (string, error) {
 	}{
 		{prefix: "service", path: c.config.ServiceDataRoot},
 		{prefix: "workspace", path: c.config.WorkspaceRoot.NativePath},
+	}
+	if c.config.CoverageRoot != "" {
+		roots = append(roots, struct {
+			prefix string
+			path   string
+		}{prefix: "coverage", path: c.config.CoverageRoot})
 	}
 	for _, root := range roots {
 		relative, err := filepath.Rel(root.path, path)

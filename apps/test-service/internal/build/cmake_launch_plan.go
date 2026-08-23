@@ -40,6 +40,7 @@ type cmakeLaunchValidator struct {
 	targets                map[string]string
 	targetPaths            map[string]struct{}
 	declaredTargets        map[string]struct{}
+	definedTargets         map[string]struct{}
 	declaredLinkArtifacts  map[string]struct{}
 	cmakePath              string
 	ctestPath              string
@@ -99,6 +100,7 @@ func validateCMakeLaunchPlan(input PlanInput, sourceDir string, launchPlan []str
 		targets:               make(map[string]string, len(input.Targets)),
 		targetPaths:           make(map[string]struct{}, len(input.Targets)),
 		declaredTargets:       make(map[string]struct{}, len(input.Targets)),
+		definedTargets:        make(map[string]struct{}, len(input.Targets)),
 		declaredLinkArtifacts: make(map[string]struct{}, len(input.Targets)),
 		allowedRoots:          []string{sourceRoot},
 		visited:               make(map[string]struct{}),
@@ -734,6 +736,7 @@ func (validator *cmakeLaunchValidator) declareExecutable(invocation cmakeInvocat
 	}
 	validator.targets[name] = executable
 	validator.declaredTargets[name] = struct{}{}
+	validator.definedTargets[name] = struct{}{}
 	validator.targetPaths[cmakeLaunchPathKey(executable)] = struct{}{}
 	validator.addAllowedExecutable(executable, true)
 	return nil
@@ -745,7 +748,7 @@ func (validator *cmakeLaunchValidator) declareLibrary(invocation cmakeInvocation
 		return errInvalidCMakeLaunchDeclaration
 	}
 	name := strings.ToLower(invocation.arguments[0].value)
-	if _, duplicate := validator.declaredTargets[name]; duplicate {
+	if _, duplicate := validator.definedTargets[name]; duplicate {
 		return errInvalidCMakeLaunchDeclaration
 	}
 	for _, source := range invocation.arguments[2:] {
@@ -754,6 +757,7 @@ func (validator *cmakeLaunchValidator) declareLibrary(invocation cmakeInvocation
 		}
 	}
 	validator.declaredTargets[name] = struct{}{}
+	validator.definedTargets[name] = struct{}{}
 	return nil
 }
 

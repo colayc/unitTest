@@ -825,7 +825,12 @@ func automaticToolchainID(
 		return "", err
 	}
 	sum := sha256.Sum256(encoded)
-	return string(instance.Family) + "-" + hex.EncodeToString(sum[:]), nil
+	prefix := string(instance.Family) + "-"
+	if len(prefix) >= 64 {
+		return "", fmt.Errorf("toolchain family is too long")
+	}
+	digest := hex.EncodeToString(sum[:])
+	return prefix + digest[:64-len(prefix)], nil
 }
 
 func candidateIssueMessage(family Family, code string) string {

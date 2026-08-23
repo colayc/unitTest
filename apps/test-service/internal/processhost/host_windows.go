@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -109,9 +110,16 @@ func (platform *windowsPlatform) Start(spec processcontrol.Spec, stdout, stderr 
 		return nil, errors.New("target launch registration unavailable")
 	}
 	registered := make(map[string]struct{}, len(spec.LaunchPlan)+1)
-	for _, executable := range append([]string{spec.Executable}, spec.LaunchPlan...) {
+	for index, executable := range append([]string{spec.Executable}, spec.LaunchPlan...) {
 		if executable == "" {
 			return nil, errors.New("target launch registration failed")
+		}
+		// CMake launch plans may contain freshly declared target artifacts that
+		// do not exist until this configure/build step creates them. They are
+		// registered by the later test invocation once the artifact exists;
+		// static tool identities remain mandatory before CMake starts.
+		if index > 0 && isCMakeStep(spec) && missingDerivedWindowsArtifact(executable) {
+			continue
 		}
 		key := strings.ToLower(executable)
 		if _, exists := registered[key]; exists {
@@ -190,6 +198,26 @@ func (platform *windowsPlatform) Start(spec processcontrol.Spec, stdout, stderr 
 	}
 	retainLaunchInputs = false
 	return target, nil
+}
+
+func isCMakeStep(spec processcontrol.Spec) bool {
+	if !strings.EqualFold(filepath.Base(spec.Executable), "cmake.exe") {
+		return false
+	}
+	for _, argument := range spec.Args {
+		if argument == "--build" || argument == "-S" {
+			return true
+		}
+	}
+	return false
+}
+
+func missingDerivedWindowsArtifact(executable string) bool {
+	if !filepath.IsAbs(executable) || !strings.EqualFold(filepath.Ext(executable), ".exe") {
+		return false
+	}
+	_, err := os.Stat(executable)
+	return errors.Is(err, os.ErrNotExist)
 }
 
 func (platform *windowsPlatform) createdProcessOperations() winprocess.Operations {

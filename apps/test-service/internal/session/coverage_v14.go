@@ -92,8 +92,8 @@ func toProtocolCoverageSources(values []coveragedomain.SourceSnapshot) []coverag
 func toProtocolCoverageSelection(value testdomain.SelectionSnapshot) testv14.TestSelectionSnapshotV14 {
 	return testv14.TestSelectionSnapshotV14{
 		Mode:         testv14.TestSelectionModeV14(value.Mode),
-		ContainerIDS: append([]string(nil), idsToStrings(value.ContainerIDs)...),
-		ItemIDS:      append([]string(nil), idsToStrings(value.ItemIDs)...),
+		ContainerIDS: idsToStrings(value.ContainerIDs),
+		ItemIDS:      idsToStrings(value.ItemIDs),
 	}
 }
 

@@ -214,7 +214,21 @@ func nativeBuildLaunchPlan(input PlanInput) ([]string, error) {
 		if runtime.GOOS == "windows" {
 			name += ".exe"
 		}
-		values = append(values, filepath.Join(input.Installation.Root, "bin", name))
+		if runtime.GOOS == "windows" {
+			if path := verifiedNinjaPath(input.Toolchain.Environment, name); path != "" {
+				values = append(values, path)
+			} else if path := verifiedDefaultNinjaPath(name); path != "" {
+				values = append(values, path)
+			} else if len(input.Toolchain.Environment) == 0 {
+				// Keep deterministic synthetic planner fixtures working when no
+				// captured toolchain environment is supplied.
+				values = append(values, filepath.Join(input.Installation.Root, "bin", name))
+			} else {
+				return nil, task.ErrInvalidArgument
+			}
+		} else {
+			values = append(values, filepath.Join(input.Installation.Root, "bin", name))
+		}
 	}
 	if runtime.GOOS == "windows" && input.Toolchain.CXXCompiler != "" {
 		toolRoot := filepath.Dir(input.Toolchain.CXXCompiler)
@@ -263,6 +277,40 @@ func nativeBuildLaunchPlan(input PlanInput) ([]string, error) {
 		result = append(result, value)
 	}
 	return result, nil
+}
+
+func verifiedNinjaPath(environment []string, executableName string) string {
+	for _, entry := range environment {
+		key, value, found := strings.Cut(entry, "=")
+		if !found || !strings.EqualFold(key, "PATH") {
+			continue
+		}
+		for _, directory := range filepath.SplitList(value) {
+			directory = strings.TrimSpace(directory)
+			if directory == "" || !filepath.IsAbs(directory) {
+				continue
+			}
+			candidate := filepath.Join(directory, executableName)
+			info, err := os.Stat(candidate)
+			if err == nil && !info.IsDir() {
+				return filepath.Clean(candidate)
+			}
+		}
+	}
+	return ""
+}
+
+func verifiedDefaultNinjaPath(executableName string) string {
+	programFiles := strings.TrimSpace(os.Getenv("ProgramFiles"))
+	if programFiles == "" {
+		return ""
+	}
+	candidate := filepath.Join(programFiles, "CMake", "bin", executableName)
+	info, err := os.Stat(candidate)
+	if err != nil || info.IsDir() {
+		return ""
+	}
+	return filepath.Clean(candidate)
 }
 
 func planBinaryDir(input PlanInput) string {

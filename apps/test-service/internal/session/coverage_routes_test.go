@@ -94,6 +94,31 @@ func TestV14CoverageRoutesRejectUnsafePayloadBeforeBackend(t *testing.T) {
 	}
 }
 
+func TestV14CoverageStartAcceptsMillisecondTimeout(t *testing.T) {
+	backend := &coverageBackend{fakeBackend: &fakeBackend{}}
+	active := session.NewWithCoverage("0123456789abcdef", "linux", "unix-socket", backend, backend)
+	if result := active.Handle(context.Background(), requestVersion(t, protocol.Version14, "handshake", map[string]any{
+		"token": "0123456789abcdef", "clientName": "test", "clientVersion": "0.5.0",
+		"supportedProtocolVersions": []string{protocol.Version14},
+	})); result.Response.Kind != "response" {
+		t.Fatalf("handshake = %#v", result.Response)
+	}
+	result := active.Handle(context.Background(), requestVersion(t, protocol.Version14, "coverage/runs/start", map[string]any{
+		"idempotencyKey":      "0123456789abcdef0123456789abcdef",
+		"workspaceGeneration": strings.Repeat("a", 64),
+		"projectId":           "core", "coverageProfileId": "coverage-debug",
+		"catalogRevision": strings.Repeat("b", 64),
+		"selection":       map[string]any{"mode": "all"}, "repeatCount": 1,
+		"timeoutMs": 180_000,
+	}))
+	if result.Response.Error == nil || result.Response.Error.Code == "INVALID_MESSAGE" {
+		t.Fatalf("coverage/runs/start = %#v, want backend error after payload validation", result.Response)
+	}
+	if backend.calls != 1 {
+		t.Fatalf("backend calls = %d, want 1", backend.calls)
+	}
+}
+
 type coverageBackend struct {
 	*fakeBackend
 	calls int

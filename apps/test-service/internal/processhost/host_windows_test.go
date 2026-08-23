@@ -221,6 +221,31 @@ func TestWindowsTargetFailsClosedBeforeCreateProcessWhenLaunchRegistrationFails(
 	}
 }
 
+func TestWindowsTargetDefersMissingDerivedArtifactRegistration(t *testing.T) {
+	registrationCalls := []string{}
+	operations := defaultWindowsTargetOperations()
+	operations.registerExecutable = func(path string) error {
+		registrationCalls = append(registrationCalls, path)
+		return nil
+	}
+	operations.createProtectedJob = func(uint32) (windows.Handle, error) {
+		return 0, errors.New("stop after registration")
+	}
+	_, err := newWindowsPlatform(operations).Start(processcontrol.Spec{
+		Executable: `C:\fixture\cmake.exe`,
+		LaunchPlan: []string{`C:\fixture\build\coverage-tests.exe`},
+		Args:       []string{"--build", `C:\fixture\build`},
+		Dir:        `C:\fixture`,
+	}, os.Stdout, os.Stderr)
+	if err == nil {
+		t.Fatal("Start() succeeded, want injected job failure")
+	}
+	want := []string{`C:\fixture\cmake.exe`}
+	if !reflect.DeepEqual(registrationCalls, want) {
+		t.Fatalf("registrationCalls = %#v, want %#v", registrationCalls, want)
+	}
+}
+
 func TestWindowsTargetRechecksPinnedCMakeGraphBeforeCreateProcess(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "CMakeLists.txt")
 	if err := os.WriteFile(path, []byte("project(before)\n"), 0o600); err != nil {

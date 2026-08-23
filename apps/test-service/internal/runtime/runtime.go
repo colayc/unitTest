@@ -381,7 +381,8 @@ func Open(config Config) (*Runtime, error) {
 		coordinator, err = deps.newCoordinator(build.CoordinatorConfig{
 			Inspector: inspector, Tasks: manager, Configurations: store,
 			Installation: installation, WorkspaceRoot: workspaceRoot,
-			ServiceDataRoot: layout.Build, Locks: build.NewDirectoryLocks(),
+			ServiceDataRoot: layout.Build, CoverageRoot: layout.Coverage,
+			Locks: build.NewDirectoryLocks(),
 		})
 		if err != nil {
 			shutdownContext, cancel := context.WithTimeout(context.Background(), grace)

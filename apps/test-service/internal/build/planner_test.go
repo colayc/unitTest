@@ -90,6 +90,11 @@ func TestNativeBuildLaunchPlanDeclaresClosedWindowsCoverageTree(t *testing.T) {
 	toolRoot := `C:\fixture\llvm\bin`
 	shell := `C:\Windows\System32\cmd.exe`
 	t.Setenv("ComSpec", shell)
+	ninjaDirectory := t.TempDir()
+	ninjaPath := filepath.Join(ninjaDirectory, "ninja.exe")
+	if err := os.WriteFile(ninjaPath, []byte("ninja"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	input := PlanInput{
 		Installation: cmake.Installation{
 			Root: root, Executable: filepath.Join(root, "bin", "cmake.exe"),
@@ -101,6 +106,7 @@ func TestNativeBuildLaunchPlanDeclaresClosedWindowsCoverageTree(t *testing.T) {
 			Family:      toolchain.FamilyClangCL,
 			CCompiler:   filepath.Join(toolRoot, "clang-cl.exe"),
 			CXXCompiler: filepath.Join(toolRoot, "clang-cl.exe"),
+			Environment: []string{"Path=" + ninjaDirectory},
 			Coverage: toolchain.CoverageCapability{
 				LLVMProfdata: filepath.Join(toolRoot, "llvm-profdata.exe"),
 				LLVMCov:      filepath.Join(toolRoot, "llvm-cov.exe"),
@@ -113,7 +119,7 @@ func TestNativeBuildLaunchPlanDeclaresClosedWindowsCoverageTree(t *testing.T) {
 		filepath.Join(root, "bin", "ctest.exe"),
 		`C:\fixture\tools\unity-runner-generator.exe`,
 		filepath.Join(toolRoot, "clang-cl.exe"),
-		filepath.Join(root, "bin", "ninja.exe"),
+		ninjaPath,
 		filepath.Join(toolRoot, "lld-link.exe"),
 		filepath.Join(toolRoot, "llvm-lib.exe"),
 		filepath.Join(toolRoot, "llvm-profdata.exe"),

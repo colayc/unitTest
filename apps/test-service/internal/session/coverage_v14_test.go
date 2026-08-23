@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -79,6 +80,25 @@ func TestCoverageProjectionRejectsInvalidRowsAndPreservesCursor(t *testing.T) {
 	}
 	if page.NextCursor == nil || *page.NextCursor != "next" || len(page.Items) != 1 {
 		t.Fatalf("page projection = %#v", page)
+	}
+}
+
+func TestCoverageProjectionEmitsEmptySelectionArrays(t *testing.T) {
+	run := coverageProjectionRun()
+	run.SelectionSnapshot = testdomain.SelectionSnapshot{Mode: testdomain.SelectionAll}
+	projected, err := toProtocolCoverageRun(run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projected.SelectionSnapshot.ContainerIDS == nil || projected.SelectionSnapshot.ItemIDS == nil {
+		t.Fatalf("selection arrays = %#v, want non-nil empty arrays", projected.SelectionSnapshot)
+	}
+	raw, err := json.Marshal(projected.SelectionSnapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != `{"containerIds":[],"itemIds":[],"mode":"all"}` {
+		t.Fatalf("selection JSON = %s", raw)
 	}
 }
 

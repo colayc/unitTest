@@ -170,6 +170,16 @@ func TestGCCAutomaticIDDistinguishesDefaultAndExplicitSysroot(t *testing.T) {
 	}
 }
 
+func TestAutomaticToolchainIDFitsProtocolToolchainIDBound(t *testing.T) {
+	got, err := automaticToolchainID(Instance{Family: FamilyClangCL, Version: "22.1.8", TargetTriple: "x86_64-pc-windows-msvc", HostArchitecture: "x64", TargetArchitecture: "x64"}, "c", "cxx", "sdk")
+	if err != nil {
+		t.Fatalf("automaticToolchainID() error = %v", err)
+	}
+	if len(got) != 64 || !strings.HasPrefix(got, "clang-cl-") {
+		t.Fatalf("automaticToolchainID() = %q, want a 64-character clang-cl identity", got)
+	}
+}
+
 func TestClangProbeUsesFixedArgumentsAndResourceIdentity(t *testing.T) {
 	t.Parallel()
 
