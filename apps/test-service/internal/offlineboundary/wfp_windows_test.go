@@ -144,6 +144,21 @@ func TestAuditEnumeratesEveryFilterForNineRegisteredApplications(t *testing.T) {
 	}
 }
 
+func TestAuditFallsBackToFilterKeyLookupWhenProviderEnumerationNeverMatches(t *testing.T) {
+	abi := &recordingWfpAPI{enumErr: windows.Errno(windows.FWP_E_NEVER_MATCH)}
+	engine, err := openWFPEngineWithAPI(abi, func() (windows.GUID, error) { return windows.GUID{Data1: 11}, nil })
+	if err != nil {
+		t.Fatalf("openWFPEngineWithAPI() error = %v", err)
+	}
+	leaseID := []byte("never-match-provider-enumeration")
+	if err := engine.AddOutboundBlockFilters(context.Background(), leaseID, []string{`C:\fixture\guarded.exe`}); err != nil {
+		t.Fatalf("AddOutboundBlockFilters() error = %v", err)
+	}
+	if err := engine.AuditOutboundBlockFilters(context.Background(), leaseID); err != nil {
+		t.Fatalf("AuditOutboundBlockFilters() error = %v, want filter-key fallback", err)
+	}
+}
+
 func TestAuditPaginationRejectsRepeatedCursorAndOverflow(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -329,6 +344,7 @@ type recordingWfpAPI struct {
 	enumPageSize        int
 	enumCursors         []uint64
 	enumPages           []auditFilterPage
+	enumErr             error
 	enumCloseCalls      int
 	deletedKeys         []windows.GUID
 	deletedSubLayerKeys []windows.GUID
@@ -389,6 +405,9 @@ func (api *recordingWfpAPI) DeleteSubLayerByKey(_ windows.Handle, key *windows.G
 }
 
 func (api *recordingWfpAPI) EnumFilters(_ windows.Handle, template *fwpmFilterEnumTemplate0) (wfpFilterEnumerator, error) {
+	if api.enumErr != nil {
+		return nil, api.enumErr
+	}
 	var filtered []auditFilterRecord
 	for _, filter := range api.enumFilters {
 		if template.ProviderKey != nil {

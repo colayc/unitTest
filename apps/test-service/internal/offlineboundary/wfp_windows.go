@@ -338,6 +338,13 @@ func (engine *windowsWfpEngine) AuditOutboundBlockFilters(ctx context.Context, l
 		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
 			return WFPAccessDenied
 		}
+		// Windows can reject provider-scoped enumeration for filters in a
+		// dynamic session with FWP_E_NEVER_MATCH even though direct lookup is
+		// permitted. The filter keys are already known, so validate each one
+		// directly rather than weakening the audit to an unscoped enumeration.
+		if errors.Is(err, windows.Errno(windows.FWP_E_NEVER_MATCH)) {
+			return auditFilterKeys(engine.api, engine.handle, expected, providerKey, subLayerKey)
+		}
 		return errors.Join(FilterAuditFailed, err)
 	}
 	auditErr := auditFilterPages(enumerator, expected, providerKey, subLayerKey)
@@ -384,18 +391,54 @@ func auditFilterPages(
 			return FilterAuditFailed
 		}
 		for _, filter := range page.Filters {
-			if !filter.HasProviderKey || filter.ProviderKey != providerKey || filter.SubLayerKey != subLayerKey {
-				return FilterAuditFailed
-			}
 			want, ok := remaining[filter.FilterKey]
-			if !ok || filter.LayerKey != want.layer || filter.ActionType != fwpActionBlock || filter.Flags&fwpmFilterFlagPersistent != 0 ||
-				!auditConditionsMatch(filter.Conditions, want.appID) {
+			if !ok || !auditFilterRecordMatches(filter, want, providerKey, subLayerKey) {
 				return FilterAuditFailed
 			}
 			delete(remaining, filter.FilterKey)
 		}
 		cursor = page.NextCursor
 	}
+}
+
+func auditFilterKeys(
+	api wfpAPI,
+	handle windows.Handle,
+	expected map[windows.GUID]struct {
+		key   windows.GUID
+		layer windows.GUID
+		appID []byte
+	},
+	providerKey, subLayerKey windows.GUID,
+) error {
+	for key, want := range expected {
+		filter, err := api.GetFilterByKey(handle, &key)
+		if err != nil {
+			if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+				return WFPAccessDenied
+			}
+			return errors.Join(FilterAuditFailed, err)
+		}
+		if filter == nil || !auditFilterRecordMatches(newAuditFilterRecord(filter), want, providerKey, subLayerKey) {
+			return FilterAuditFailed
+		}
+	}
+	return nil
+}
+
+func auditFilterRecordMatches(
+	filter auditFilterRecord,
+	want struct {
+		key   windows.GUID
+		layer windows.GUID
+		appID []byte
+	},
+	providerKey, subLayerKey windows.GUID,
+) bool {
+	return filter.HasProviderKey && filter.ProviderKey == providerKey &&
+		filter.SubLayerKey == subLayerKey && filter.FilterKey == want.key &&
+		filter.LayerKey == want.layer && filter.ActionType == fwpActionBlock &&
+		filter.Flags&fwpmFilterFlagPersistent == 0 && auditConditionsMatch(filter.Conditions, want.appID)
 }
 
 func (engine *windowsWfpEngine) Close() error {

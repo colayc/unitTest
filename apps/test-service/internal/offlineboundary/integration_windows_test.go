@@ -193,7 +193,9 @@ func TestWFPIntegrationOwnerHelper(t *testing.T) {
 		t.Skip("integration owner helper")
 	}
 	fmt.Fprintln(os.Stdout, "READY")
-	select {}
+	for {
+		time.Sleep(time.Hour)
+	}
 }
 
 func requireWFPIntegrationMode(t *testing.T) bool {
@@ -449,6 +451,17 @@ func waitForIntegrationProvider(t *testing.T) (windows.GUID, windows.GUID, []win
 			}
 			handle := openIntegrationObserver(t, 0)
 			filters, err := enumerateIntegrationFilters(handle, &fwpmFilterEnumTemplate0{ProviderKey: &provider.key})
+			if errors.Is(err, windows.Errno(windows.FWP_E_NEVER_MATCH)) {
+				var allFilters []auditFilterRecord
+				allFilters, err = enumerateIntegrationFilters(handle, nil)
+				if err == nil {
+					for _, filter := range allFilters {
+						if filter.HasProviderKey && filter.ProviderKey == provider.key {
+							filters = append(filters, filter)
+						}
+					}
+				}
+			}
 			_ = (procWfpAPI{}).CloseEngine(handle)
 			if err != nil {
 				t.Fatalf("EnumFilters() error = %v", err)
@@ -585,10 +598,12 @@ func waitForIntegrationObjectsAbsent(t *testing.T, providerKey, subLayerKey wind
 
 func assertIntegrationObjectsAbsent(t *testing.T, providerKey, subLayerKey windows.GUID, filterKeys []windows.GUID) {
 	t.Helper()
-	if !integrationObjectsAbsent(providerKey, subLayerKey, filterKeys, 0) {
+	activeAbsent := integrationObjectsAbsent(providerKey, subLayerKey, filterKeys, 0)
+	dynamicAbsent := integrationObjectsAbsent(providerKey, subLayerKey, filterKeys, fwpmSessionFlagDynamic)
+	if !activeAbsent {
 		t.Fatal("dynamic WFP objects remained in the active engine view")
 	}
-	if !integrationObjectsAbsent(providerKey, subLayerKey, filterKeys, fwpmSessionFlagDynamic) {
+	if !dynamicAbsent {
 		t.Fatal("dynamic WFP objects remained in a fresh dynamic engine view")
 	}
 }
@@ -614,7 +629,11 @@ func integrationObjectsAbsent(providerKey, subLayerKey windows.GUID, filterKeys 
 }
 
 func integrationNotFound(err error, wfpStatus uintptr) bool {
-	return errors.Is(err, windows.ERROR_NOT_FOUND) || errors.Is(err, windows.Errno(wfpStatus))
+	if errors.Is(err, windows.ERROR_NOT_FOUND) || errors.Is(err, windows.Errno(windows.FWP_E_NOT_FOUND)) {
+		return true
+	}
+	var status windows.Errno
+	return errors.As(err, &status) && uint32(status) == uint32(wfpStatus)
 }
 
 func openIntegrationObserver(t *testing.T, flags uint32) windows.Handle {
