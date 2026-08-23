@@ -471,6 +471,8 @@ git commit -m "feat: expose coverage client contracts"
 
 Final controller gates 使用 pinned Node 24.18.0、pnpm 11.4.0、Go 1.26.5 与 worktree-local cache：Coverage/Protocol generated checks 通过；全部 workspace package tests 通过（Coverage Schema 3/3、Protocol models 7/7、Protocol Schema 23/23、Coverage models 9/9、Client 86/86、Service probe 31/31）；相关 Go packages 通过；`coveragedomain`、`task`、`taskstore` race 通过；root build 与 `git diff --check` 通过。
 
+2026-08-23 收尾复核：在独立 `codex/phase5a-finalize` worktree 使用 pinned Node 24.19.0、pnpm 11.4.0 与 Go 1.26.6 重跑 Coverage/Protocol generated checks、Coverage Schema 3/3、Coverage models 9/9、Protocol Schema 23/23、Protocol models 7/7、Client 86/86、`coveragedomain`/`taskstore` 测试与 race、root build、`git diff --check`，全部通过。Hosted CI run [`32607308317`](https://github.com/colayc/unitTest/actions/runs/32607308317) 的 Linux/Windows `pnpm verify` 及 Phase 5 相关 bundle/service gates 也全部通过；因此历史 Windows CMake baseline 已不再阻塞当前 Phase 5A 交付。
+
 ## Phase 5A 完成检查
 
 - [x] Coverage JSON v1 contract 与 generated models
@@ -479,4 +481,4 @@ Final controller gates 使用 pinned Node 24.18.0、pnpm 11.4.0、Go 1.26.5 与 
 - [x] CoverageRun/Report domain
 - [x] Migration 009 与 atomic creation
 - [x] TypeScript Client v1.4
-- [ ] 完整 Phase 5A 门禁与独立 diff/security review
+- [x] 完整 Phase 5A 门禁与独立 diff/security review

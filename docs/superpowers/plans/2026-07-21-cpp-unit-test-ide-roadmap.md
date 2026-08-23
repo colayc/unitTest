@@ -92,7 +92,7 @@ docs/
 
 详细设计：`docs/superpowers/specs/2026-08-03-coverage-report-pipeline-design.md`
 
-状态：设计已于 2026-08-03 确认，详细实施计划已完成，待确认后执行 Phase 5A。
+状态：Phase 5A（Coverage JSON v1、Workspace config v3、Protocol v1.4、CoverageRun/Report persistence 与 TypeScript Client）已完成。Coverage/Protocol generated drift、相关 TypeScript/Go 测试、race、root build、`git diff --check` 及 Hosted CI 门禁均已通过；Phase 5 整体仍需 Linux GCC/Clang native coverage 矩阵与最终跨平台报告验收，不能仅因 Phase 5A 完成而标记结束。
 
 实施计划索引：`docs/superpowers/plans/2026-08-03-phase5-coverage-implementation-index.md`
 
@@ -106,7 +106,7 @@ docs/
 
 首个 Vertical Slice 状态：已实现。独立 Code-OSS Extension package 已完成 Workspace Trust gate、真实 Go Service lifecycle、Windows Named Pipe/Linux Unix Socket platform contract、现有 Protocol Client 接入、`workspace/inspect` 命令，以及由生产 `activate()` 成功完成 marker 驱动的 Extension Development Host smoke harness。Windows Named Pipe 已由本地 runtime smoke 实际验证；Code-OSS 信任丢失通过 Extension Host teardown/deactivation path 清理 Service；Linux Unix Socket evidence 继续由 Linux CI 提供。
 
-Phase 6B 状态：实现与本地 Windows 验证已就绪，等待 Hosted CI 双平台实跑后确认完成。共享 TypeScript `TestingApiAdapter` 已提供 trusted 单根 workspace 的 Refresh、稳定 Test Item tree、默认 Run Profile、root/container/item selection、test event 投影与最终 TestRun 收敛；真实 smoke 覆盖 `workspace/inspect → discoverTests → catalog → runTests → item result`。相同 `catalogRevision` 保留 Test Item object identity，10,000 item 基准记录环境、elapsed time 和零 replacement。Windows job 验证 Named Pipe，Linux job 必须实际验证 Unix Socket；Linux evidence 不得由 Windows 或 cross-compile 代替。两个 job 都只有在真实 Service smoke 通过后才构成 Phase 6B runtime evidence，未提供 `CODE_OSS_EXECUTABLE` 的 host harness 仅记为明确 SKIP，不记 PASS。
+Phase 6B 状态：已完成 Hosted CI 双平台实跑。GitHub Actions run [`32607308317`](https://github.com/colayc/unitTest/actions/runs/32607308317) 的 Linux 与 Windows job 均通过真实 Service smoke、Testing API benchmark、host harness 语义与完整 verify；Linux 使用 Unix Socket，Windows 使用 Named Pipe。未提供 `CODE_OSS_EXECUTABLE` 的 host harness 按契约明确 SKIP，不伪造 PASS。共享 TypeScript `TestingApiAdapter` 已提供 trusted 单根 workspace 的 Refresh、稳定 Test Item tree、默认 Run Profile、root/container/item selection、test event 投影与最终 TestRun 收敛；相同 `catalogRevision` 保留 Test Item object identity，10,000 item 基准记录环境、elapsed time 和零 replacement。
 
 详细设计：`docs/superpowers/specs/2026-08-16-phase6-code-oss-extension-design.md`
 
