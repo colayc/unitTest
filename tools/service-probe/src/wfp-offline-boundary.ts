@@ -430,8 +430,7 @@ async function registerExecutableWithGuardian(pipeName: string, nonce: Buffer, p
       socket.once("connect", resolve);
       socket.once("error", reject);
     }), guardianConnectTimeoutMilliseconds);
-    await writeSocket(socket, header);
-    await writeSocket(socket, payload);
+    await writeSocket(socket, Buffer.concat([header, payload]));
     const ack = await withTimeout(new Promise<Buffer>((resolve, reject) => {
       socket.once("data", resolve);
       socket.once("error", reject);
@@ -447,7 +446,7 @@ async function registerExecutableWithGuardian(pipeName: string, nonce: Buffer, p
 
 async function writeSocket(socket: net.Socket, value: Buffer): Promise<void> {
   await new Promise<void>((resolve, reject) => {
-    socket.write(value, (error) => error === undefined ? resolve() : reject(error));
+    socket.write(value, (error) => error == null ? resolve() : reject(error));
   });
 }
 
@@ -710,7 +709,7 @@ async function writeGuardianFrame(socket: net.Socket, frame: Extract<GuardianFra
   const payload = Buffer.from([3]);
   const header = Buffer.alloc(4);
   header.writeUInt32LE(payload.length);
-  await new Promise<void>((resolveWrite, rejectWrite) => socket.write(Buffer.concat([header, payload]), (error) => error === undefined ? resolveWrite() : rejectWrite(error)));
+  await new Promise<void>((resolveWrite, rejectWrite) => socket.write(Buffer.concat([header, payload]), (error) => error == null ? resolveWrite() : rejectWrite(error)));
 }
 
 function sanitizedEnvironment(): NodeJS.ProcessEnv {
