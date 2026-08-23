@@ -105,7 +105,7 @@ test("Hosted CI pins native toolchain runners and gates unstable Windows native 
   const workflow = await readFile(".github/workflows/foundation.yml", "utf8");
   assert.doesNotMatch(workflow, /\b(?:windows|ubuntu)-latest\b/);
   assert.match(workflow, /^\s{2}verify-windows:\s*$/m);
-  assert.match(workflow, /^\s{4}runs-on:\s*windows-2025-vs2026\s*$/m);
+  assert.match(workflow, /^\s{4}runs-on:\s*\$\{\{\s*github\.event_name\s*==\s*['"]push['"]\s*&&\s*github\.ref\s*==\s*['"]refs\/heads\/master['"]\s*&&\s*['"]unit-test-wfp['"]\s*\|\|\s*['"]windows-2025-vs2026['"]\s*\}\}\s*$/m);
   assert.match(
     workflow,
     /^\s{6}UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS:\s*msvc,clang-cl\s*$/m,
@@ -167,13 +167,13 @@ test("Hosted CI pins native toolchain runners and gates unstable Windows native 
       const privilegedStep = source.slice(source.lastIndexOf("      - ", privilegedWfp), coverageSmoke);
       assert.match(
         privilegedStep,
-        /UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED:\s*\$\{\{\s*vars\.UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED\s*\|\|\s*['"]0['"]\s*\}\}/u,
+        /UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED:\s*\$\{\{\s*github\.event_name\s*==\s*['"]push['"]\s*&&\s*github\.ref\s*==\s*['"]refs\/heads\/master['"]\s*&&\s*vars\.UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED\s*\|\|\s*['"]0['"]\s*\}\}/u,
         "WFP integration must be strict only when the privileged repository variable is enabled"
       );
       const coverageStep = source.slice(source.lastIndexOf("      - ", coverageSmoke), legacyCleanup);
       assert.match(
         coverageStep,
-        /if:\s*\$\{\{\s*vars\.UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED\s*==\s*['"]1['"]\s*\}\}/u,
+        /if:\s*\$\{\{\s*github\.event_name\s*==\s*['"]push['"]\s*&&\s*github\.ref\s*==\s*['"]refs\/heads\/master['"]\s*&&\s*vars\.UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED\s*==\s*['"]1['"]\s*\}\}/u,
         "Windows LLVM coverage must be gated by the privileged WFP repository variable"
       );
       const coverageReport = source.indexOf("coverage-execution-report.json");
