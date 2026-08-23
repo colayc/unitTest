@@ -126,9 +126,11 @@ test("Hosted CI pins native toolchain runners and gates unstable Windows native 
     const nextJob = workflow.indexOf("\n  verify-", start + 3);
     const source = workflow.slice(start, nextJob === -1 ? undefined : nextJob);
     const verify = source.indexOf("pnpm verify");
-    const prepare = source.indexOf("pnpm prepare:cmake-bundle");
+    const prepare = source.indexOf("tools/cmake-bundle/prepare.mjs");
     const native = source.indexOf("pnpm test:e2e:native");
-    assert.ok(verify !== -1 && prepare > verify && native > prepare);
+    assert.ok(verify > prepare && prepare !== -1 && native > verify);
+    assert.match(source, /path:\s*\.bundled-tools\/cmake/);
+    assert.match(source, /GITHUB_PATH/);
     assert.match(source, /uses:\s*actions\/upload-artifact@v7/);
     assert.match(source, /if:\s*always\(\)/);
     assert.match(
