@@ -101,7 +101,7 @@ test("Phase 3 documentation records desktop, bundle, native, and security bounda
   assert.match(native, /Phase 8[\s\S]*签名安装包/);
 });
 
-test("Hosted CI pins native toolchain runners and enforces the complete matrix", async () => {
+test("Hosted CI pins native toolchain runners and gates unstable Windows native E2E", async () => {
   const workflow = await readFile(".github/workflows/foundation.yml", "utf8");
   assert.doesNotMatch(workflow, /\b(?:windows|ubuntu)-latest\b/);
   assert.match(workflow, /^\s{2}verify-windows:\s*$/m);
@@ -138,6 +138,19 @@ test("Hosted CI pins native toolchain runners and enforces the complete matrix",
     assert.match(source, /run:\s*git diff --exit-code/);
 
     if (platform === "windows") {
+      const nativeStep = source.slice(source.lastIndexOf("      - ", native), source.indexOf("      - if:", native));
+      assert.match(
+        nativeStep,
+        /if:\s*\$\{\{\s*vars\.UNIT_TEST_IDE_WINDOWS_NATIVE_E2E_REQUIRED\s*==\s*['"]1['"]\s*\}\}/u,
+        "Windows native E2E must be opt-in on public hosted runners",
+      );
+      const nativeArtifact = source.indexOf("name: native-toolchain-windows-");
+      assert.notEqual(nativeArtifact, -1);
+      assert.match(
+        source.slice(Math.max(0, nativeArtifact - 320), nativeArtifact),
+        /if:\s*\$\{\{\s*always\(\)\s*&&\s*vars\.UNIT_TEST_IDE_WINDOWS_NATIVE_E2E_REQUIRED\s*==\s*['"]1['"]\s*\}\}/u,
+        "Windows native evidence upload must follow the opt-in gate",
+      );
       const privilegedWfp = source.indexOf("TestPrivilegedWindowsWFPDynamicLifecycle");
       const typescriptWfp = source.indexOf("test:wfp-integration");
       const coverageSmoke = source.indexOf("test:coverage-service-smoke");

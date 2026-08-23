@@ -63,13 +63,15 @@ UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS=gcc,clang pnpm test:e2e:native
 - `verify-windows`：`windows-2025-vs2026`，要求 `msvc,clang-cl`。
 - `verify-linux`：`ubuntu-24.04`，要求 `gcc,clang`。
 
-每个 job 固定执行：
+Linux job 固定执行完整 native 矩阵；Windows 公共 hosted runner 默认跳过原生矩阵，因为 `clang-cl` linker diagnostic 场景可能耗尽 named-pipe liveness reconnect。为在稳定的自托管/专用 runner 上启用 Windows 矩阵，设置仓库变量 `UNIT_TEST_IDE_WINDOWS_NATIVE_E2E_REQUIRED=1`；启用后缺少 toolchain report 会使 job 失败。
+
+每个 job 的共同步骤为：
 
 1. `pnpm install --frozen-lockfile`
 2. `pnpm verify`
 3. `pnpm prepare:cmake-bundle`
-4. `pnpm test:e2e:native`
-5. 使用 `actions/upload-artifact@v7` 只上传对应平台的 `toolchain-report.json`
+4. （Linux 默认执行；Windows 由上述仓库变量启用）`pnpm test:e2e:native`
+5. 使用 `actions/upload-artifact@v7` 只上传已执行平台的 `toolchain-report.json`
 6. `git diff --exit-code`
 
 工作流不使用 `windows-latest` 或 `ubuntu-latest`，避免 Runner 工具链更新在未评审时改变验收矩阵。
