@@ -939,6 +939,8 @@ async function main() {
     key: result.key,
     cmakeVersion: result.cmakeVersion,
     root: result.root,
+    executable: result.executable,
+    ctestExecutable: result.ctestExecutable,
     reused: result.reused,
   })}\n`);
 }
