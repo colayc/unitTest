@@ -11,6 +11,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  readFile,
   rm,
   writeFile
 } from "node:fs/promises";
@@ -330,6 +331,7 @@ function coverageOperations(
   wire: ProtocolWireCapture,
   tokens: string[],
   diagnostics: string[],
+  processHostDebugFile: string,
   hostileEnvironmentValue: string,
   useCMakeBundle: boolean,
   boundaryEnvironment: Readonly<Record<string, string>>
@@ -355,6 +357,7 @@ function coverageOperations(
           ...boundaryEnvironment,
           UNIT_TEST_IDE_COVERAGE_SMOKE_SECRET: hostileEnvironmentValue,
           UNIT_TEST_IDE_DEBUG_PROCESSHOST: "1",
+          UNIT_TEST_IDE_PROCESSHOST_DEBUG_FILE: processHostDebugFile,
           LLVM_PROFILE_FILE: join(fixture.root, `${hostileEnvironmentValue}-%p.profraw`)
         }
       });
@@ -656,7 +659,14 @@ function buildEvidence(
 
 test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed TestRun report", async (t) => {
   assert.equal(process.platform, "win32", "coverage service smoke is Windows-only");
+  const processHostDebugFile = join(
+    resolve(import.meta.dirname, "../../../.."),
+    ".native-e2e",
+    "runtime",
+    "windows-processhost-debug.log"
+  );
   await rm(evidencePath, { force: true });
+  await rm(processHostDebugFile, { force: true });
   let fixture: Fixture | undefined;
   let manager: ServiceManager | undefined;
   let offlineBoundary: WindowsNativeOfflineBoundary | undefined;
@@ -748,6 +758,7 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
             wire,
             tokens,
             diagnostics,
+            processHostDebugFile,
             hostileEnvironmentValue,
             useCMakeBundle,
             installedBoundary.registrationEnvironment
@@ -795,6 +806,7 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
         const coverageFinishedAt = new Date();
         assert.equal(run.status, "finished");
         const testRun = await session.client.getTestRun(run.testRunId);
+        const processHostDiagnostics = await readFile(processHostDebugFile, "utf8").catch(() => "");
         let taskSnapshot: ProtocolTaskSnapshot | undefined;
         let taskSnapshotError: string | undefined;
         try {
@@ -819,7 +831,8 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
               errorCode: taskSnapshot.errorCode,
               errorMessage: taskSnapshot.errorMessage
             },
-            serviceDiagnostics: diagnostics.join("")
+            serviceDiagnostics: diagnostics.join(""),
+            processHostDiagnostics
           }));
         }
         assert.equal(run.outcome, "available");

@@ -23,7 +23,14 @@ func processHostDebugf(format string, args ...any) {
 	if os.Getenv("UNIT_TEST_IDE_DEBUG_PROCESSHOST") != "1" {
 		return
 	}
-	_, _ = fmt.Fprintf(os.Stderr, "processhost-debug "+format+"\n", args...)
+	line := fmt.Sprintf("processhost-debug "+format+"\n", args...)
+	_, _ = fmt.Fprint(os.Stderr, line)
+	if path := os.Getenv("UNIT_TEST_IDE_PROCESSHOST_DEBUG_FILE"); path != "" {
+		if file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
+			_, _ = file.WriteString(line)
+			_ = file.Close()
+		}
+	}
 }
 
 const maxHostFrameBytes = 4 * 1024 * 1024

@@ -958,7 +958,9 @@ func hostWindowsEnvironment(base []string, status windows.Handle) []string {
 	for _, entry := range base {
 		name, _, ok := strings.Cut(entry, "=")
 		if ok && (strings.EqualFold(name, "UNIT_TEST_IDE_WFP_REGISTRATION_PIPE") ||
-			strings.EqualFold(name, "UNIT_TEST_IDE_WFP_REGISTRATION_NONCE")) {
+			strings.EqualFold(name, "UNIT_TEST_IDE_WFP_REGISTRATION_NONCE") ||
+			strings.EqualFold(name, "UNIT_TEST_IDE_DEBUG_PROCESSHOST") ||
+			strings.EqualFold(name, "UNIT_TEST_IDE_PROCESSHOST_DEBUG_FILE")) {
 			environment = append(environment, entry)
 		}
 	}
