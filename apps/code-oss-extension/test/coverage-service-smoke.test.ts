@@ -80,7 +80,10 @@ const firewallGuardianStateRoot = join(
 const COVERAGE_PROFILE_ID = "coverage-clang-cl";
 const PROJECT_ID = "coverage-fixture";
 const TEST_CONTAINER = "coverage-tests";
-const NATIVE_TIMEOUT_MS = 180_000;
+// The Windows self-hosted runner may spend several minutes on the first
+// instrumented build/profile collection before the coverage task reaches its
+// terminal state.
+const NATIVE_TIMEOUT_MS = 300_000;
 
 interface Fixture {
   readonly root: string;
