@@ -16,7 +16,7 @@ import {
   writeFile
 } from "node:fs/promises";
 import { createConnection } from "node:net";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import {
@@ -666,6 +666,7 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
     "windows-processhost-debug.log"
   );
   await rm(evidencePath, { force: true });
+  await mkdir(dirname(processHostDebugFile), { recursive: true });
   await rm(processHostDebugFile, { force: true });
   let fixture: Fixture | undefined;
   let manager: ServiceManager | undefined;

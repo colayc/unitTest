@@ -233,6 +233,7 @@ func readControl(owner *controlOwner, frames *frameReader, stop chan<- struct{})
 // implement io.ReadCloser so target completion or context cancellation can
 // interrupt and join a blocked command read. Run closes it exactly once.
 func Run(ctx context.Context, platform Platform, control io.Reader, status io.Writer, stdout, stderr io.Writer) int {
+	processHostDebugf("run-start")
 	owner, ok := newControlOwner(control)
 	if !ok {
 		_ = writeStatus(status, processcontrol.HostStatus{Kind: "error", ErrorCode: "INVALID_HOST_CONTROL", Message: "invalid host control"})
@@ -246,6 +247,7 @@ func Run(ctx context.Context, platform Platform, control io.Reader, status io.Wr
 		return 2
 	}
 	if len(start.Spec.Batch) != 0 {
+		processHostDebugf("run-mode=batch count=%d", len(start.Spec.Batch))
 		return runBatch(
 			ctx,
 			platform,
@@ -255,6 +257,7 @@ func Run(ctx context.Context, platform Platform, control io.Reader, status io.Wr
 			*start.Spec,
 		)
 	}
+	processHostDebugf("run-mode=single")
 	target, err := platform.Start(*start.Spec, stdout, stderr)
 	if err != nil || target == nil {
 		_ = writeStatus(status, processcontrol.HostStatus{Kind: "error", ErrorCode: "PROCESS_START_FAILED", Message: "target process could not start"})
