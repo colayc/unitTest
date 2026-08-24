@@ -788,6 +788,13 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
         const run = await waitForCoverageFinished(session.client, started);
         const coverageFinishedAt = new Date();
         assert.equal(run.status, "finished");
+        if (run.outcome !== "available") {
+          console.error("coverage-debug-status", JSON.stringify({
+            outcome: run.outcome,
+            reason: run.reason,
+            manager: manager?.status
+          }));
+        }
         assert.equal(run.outcome, "available");
         assert.equal(run.reason, undefined);
         assert.ok(run.reportId);
