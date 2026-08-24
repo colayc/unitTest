@@ -15,7 +15,7 @@ const (
 	instrumentationFileName = "coverage-instrumentation.cmake"
 	instrumentationVersion  = "clang-cl-instrumentation-v1"
 	instrumentationContents = "cmake_minimum_required(VERSION 3.25)\n" +
-		"if(NOT CMAKE_CXX_COMPILER_ID MATCHES \"Clang\")\n" +
+		"if(NOT CMAKE_CXX_COMPILER MATCHES \"(^|[/\\\\])clang-cl(\\\\.exe)?$\")\n" +
 		"  message(FATAL_ERROR \"unit-test-ide coverage requires clang-cl\")\n" +
 		"endif()\n" +
 		"add_compile_options(\"$<$<COMPILE_LANGUAGE:C,CXX>:-fprofile-instr-generate>\" \"$<$<COMPILE_LANGUAGE:C,CXX>:-fcoverage-mapping>\")\n" +

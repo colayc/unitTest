@@ -54,6 +54,7 @@ type execution struct {
 	profileRoot     string
 	buildRoot       string
 	toolchain       toolchain.Instance
+	preparedTargets []cmake.Target
 	instrument      coveragellvm.Instrumentation
 	unsupported     bool
 	terminalErr     error
@@ -607,7 +608,13 @@ func (execution *execution) revalidate(ctx context.Context) error {
 	); err != nil {
 		return err
 	}
-	return execution.verifyRetained()
+	execution.mu.Lock()
+	execution.preparedTargets = cloneCoverageTargets(probe.Targets())
+	execution.mu.Unlock()
+	if err := execution.verifyRetained(); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (execution *execution) verifyRetained() error {
@@ -754,7 +761,11 @@ func (execution *execution) Interpret(
 			execution.setFailedPhase(coveragerun.PhaseBuild)
 			return task.StepVerdictDefault, errors.New("coverage build timed out")
 		}
-		return task.StepVerdictDefault, nil
+		if result.ExitCode != 0 {
+			execution.setFailedPhase(coveragerun.PhaseBuild)
+			return task.StepVerdictDefault, nil
+		}
+		return task.StepVerdictSucceeded, nil
 	case task.StepCoverageTest:
 		execution.mu.Lock()
 		embedded := execution.embedded
@@ -928,10 +939,21 @@ func (execution *execution) prepareTests(ctx context.Context, current task.Task)
 	if err != nil {
 		return nil, err
 	}
+	execution.mu.Lock()
+	prepared := execution.prepared
+	targets := cloneCoverageTargets(execution.preparedTargets)
+	execution.mu.Unlock()
+	if prepared == nil {
+		execution.setFailedPhase(coveragerun.PhaseTest)
+		return nil, task.ErrInvalidArgument
+	}
+	if len(targets) != 0 {
+		prepared = &preparedBuildWithTargets{PreparedBuild: prepared, targets: targets}
+	}
 	embedded, err := execution.config.Tests.PrepareEmbedded(ctx, testrun.EmbeddedRequest{
 		TaskID:         execution.taskID,
 		Run:            run,
-		PreparedBuild:  execution.prepared,
+		PreparedBuild:  prepared,
 		Catalog:        catalog,
 		Allocator:      execution.adapter.Allocator(),
 		MaxConcurrency: 1,
@@ -966,6 +988,30 @@ func (execution *execution) prepareTests(ctx context.Context, current task.Task)
 	execution.mu.Unlock()
 	_ = current
 	return steps, nil
+}
+
+type preparedBuildWithTargets struct {
+	PreparedBuild
+	targets []cmake.Target
+}
+
+func (prepared *preparedBuildWithTargets) Targets() []cmake.Target {
+	if prepared == nil {
+		return nil
+	}
+	return cloneCoverageTargets(prepared.targets)
+}
+
+func cloneCoverageTargets(values []cmake.Target) []cmake.Target {
+	if values == nil {
+		return nil
+	}
+	result := make([]cmake.Target, len(values))
+	for index, value := range values {
+		result[index] = value
+		result[index].Artifacts = append([]string(nil), value.Artifacts...)
+	}
+	return result
 }
 
 func (execution *execution) prepareCollector(ctx context.Context) ([]task.ExecutionStep, error) {

@@ -16,6 +16,7 @@ import (
 	"unit-test-ide.local/test-service/internal/coveragecoord"
 	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/coveragellvm"
+	"unit-test-ide.local/test-service/internal/coveragerun"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/taskstore"
 	"unit-test-ide.local/test-service/internal/testdomain"
@@ -53,6 +54,23 @@ func TestCoordinatorAcceptsOnlyTheRetainedInstrumentationContract(t *testing.T) 
 	}
 	if err := validateInstrumentationContract(snapshot, instrumentation); !errors.Is(err, task.ErrInvalidArgument) {
 		t.Fatalf("mismatched adapter contract error = %v", err)
+	}
+}
+
+func TestCoverageBuildInterpretationContinuesOnlyAfterSuccess(t *testing.T) {
+	step := task.ExecutionStep{Kind: task.StepCoverageBuild}
+	current := task.Task{ID: "11111111111111111111111111111111"}
+
+	succeeded := &execution{taskID: current.ID}
+	verdict, err := succeeded.Interpret(context.Background(), current, step, task.ProcessResult{})
+	if err != nil || verdict != task.StepVerdictSucceeded {
+		t.Fatalf("successful build interpretation = %v, %v", verdict, err)
+	}
+
+	failed := &execution{taskID: current.ID}
+	verdict, err = failed.Interpret(context.Background(), current, step, task.ProcessResult{ExitCode: 1})
+	if err != nil || verdict != task.StepVerdictDefault || failed.failedPhase != coveragerun.PhaseBuild {
+		t.Fatalf("failed build interpretation = %v, %v, phase=%s", verdict, err, failed.failedPhase)
 	}
 }
 
