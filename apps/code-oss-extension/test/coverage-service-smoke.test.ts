@@ -332,7 +332,6 @@ function coverageOperations(
   fixture: Fixture,
   wire: ProtocolWireCapture,
   tokens: string[],
-  diagnostics: string[],
   hostileEnvironmentValue: string,
   useCMakeBundle: boolean,
   boundaryEnvironment: Readonly<Record<string, string>>
@@ -350,7 +349,7 @@ function coverageOperations(
       const launchArguments = useCMakeBundle
         ? [...args, "--cmake-bundle-root", cmakeBundleRoot]
         : [...args];
-      const child = spawn(binary, launchArguments, {
+      return spawn(binary, launchArguments, {
         windowsHide: true,
         stdio: "pipe",
         env: {
@@ -360,8 +359,6 @@ function coverageOperations(
           LLVM_PROFILE_FILE: join(fixture.root, `${hostileEnvironmentValue}-%p.profraw`)
         }
       });
-      child.stderr.on("data", (chunk: Buffer | string) => diagnostics.push(String(chunk)));
-      return child;
     },
     async connect(endpoint) {
       const socket = createConnection(endpoint);
@@ -664,7 +661,6 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
   let offlineBoundary: WindowsNativeOfflineBoundary | undefined;
   const wire = new ProtocolWireCapture();
   const tokens: string[] = [];
-  const diagnostics: string[] = [];
   const hostileEnvironmentValue = `coverage-smoke-secret-${randomBytes(12).toString("hex")}`;
   const sensitive: string[] = [hostileEnvironmentValue];
 
@@ -749,7 +745,6 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
             installedFixture,
             wire,
             tokens,
-            diagnostics,
             hostileEnvironmentValue,
             useCMakeBundle,
             installedBoundary.registrationEnvironment
@@ -796,38 +791,11 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
         const run = await waitForCoverageFinished(session.client, started);
         const coverageFinishedAt = new Date();
         assert.equal(run.status, "finished");
-        const testRun = await session.client.getTestRun(run.testRunId);
-        let taskSnapshot: ProtocolTaskSnapshot | undefined;
-        let taskSnapshotError: string | undefined;
-        try {
-          taskSnapshot = await session.client.getTask(run.taskId);
-        } catch (error) {
-          taskSnapshotError = String(error);
-        }
-        if (run.outcome !== "available") {
-          console.error("coverage-debug-status", JSON.stringify({
-            outcome: run.outcome,
-            reason: run.reason,
-            manager: manager?.status,
-            testRun: {
-              status: testRun.status,
-              outcome: testRun.outcome,
-              incomplete: testRun.incomplete,
-              summary: testRun.summary
-            },
-            task: taskSnapshot === undefined ? { error: taskSnapshotError } : {
-              status: taskSnapshot.status,
-              outcome: taskSnapshot.outcome,
-              errorCode: taskSnapshot.errorCode,
-              errorMessage: taskSnapshot.errorMessage
-            },
-            serviceDiagnostics: diagnostics.join("")
-          }));
-        }
         assert.equal(run.outcome, "available");
         assert.equal(run.reason, undefined);
         assert.ok(run.reportId);
 
+        const testRun = await session.client.getTestRun(run.testRunId);
         assert.equal(testRun.status, "completed");
         assert.equal(testRun.outcome, "failed");
         assert.equal(testRun.incomplete, false);
@@ -918,14 +886,6 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
       publish: (bytes) => publishEvidenceAtomically(evidencePath, bytes)
     });
   } catch (error) {
-    const redactText = (value: string): string => sensitive.reduce(
-      (result, secret) => result.split(secret).join("[REDACTED]"),
-      value
-    );
-    console.error("coverage-debug-failure", JSON.stringify({
-      error: redactServiceError(error, sensitive).message,
-      serviceDiagnostics: redactText(diagnostics.join(""))
-    }));
     throw redactServiceError(error, sensitive);
   }
 });
