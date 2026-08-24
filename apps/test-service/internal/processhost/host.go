@@ -24,7 +24,6 @@ func processHostDebugf(format string, args ...any) {
 		return
 	}
 	line := fmt.Sprintf("processhost-debug "+format+"\n", args...)
-	_, _ = fmt.Fprint(os.Stderr, line)
 	if path := os.Getenv("UNIT_TEST_IDE_PROCESSHOST_DEBUG_FILE"); path != "" {
 		if file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
 			_, _ = file.WriteString(line)
