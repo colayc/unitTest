@@ -37,6 +37,7 @@ type testCoordinatorConfig struct {
 	Installation  cmake.Installation
 	WorkspaceRoot workspace.Root
 	BuildDataRoot string
+	CoverageRoot  string
 	ControlRoot   string
 	Clock         task.Clock
 	NewID         task.IDGenerator
@@ -212,19 +213,24 @@ func newTaskDiscoveryInputFactory(
 			return testdiscovery.DiscoveryInput{},
 				task.ErrInvalidArgument
 		}
+		configurationID := request.Profile.ID
+		if request.ConfigurationID != "" {
+			configurationID = request.ConfigurationID
+		}
 		buildConfiguration, err :=
 			config.Store.GetBuildConfiguration(
 				ctx,
 				config.WorkspaceRoot.ID,
 				request.Project.ID,
-				request.Profile.ID,
+				configurationID,
 			)
 		if err != nil {
 			return testdiscovery.DiscoveryInput{}, err
 		}
-		buildDirectory, err := runtimeBuildDirectoryIdentity(
+		buildDirectory, err := runtimeBuildDirectoryIdentityWithCoverage(
 			config.WorkspaceRoot.NativePath,
 			config.BuildDataRoot,
+			config.CoverageRoot,
 			request.Profile.BinaryDir,
 		)
 		if err != nil {
@@ -237,15 +243,22 @@ func newTaskDiscoveryInputFactory(
 			return testdiscovery.DiscoveryInput{},
 				task.ErrConflict
 		}
-		targets, err := config.Build.Targets(
-			ctx,
-			build.TargetsRequest{
-				WorkspaceGeneration: request.
-					WorkspaceGeneration,
-				ProjectID:      request.Project.ID,
-				BuildProfileID: request.Profile.ID,
-			},
-		)
+		targets := cloneRuntimeTestTargets(request.Targets)
+		var targetErr error
+		if request.ConfigurationID == "" {
+			targets, targetErr = config.Build.Targets(
+				ctx,
+				build.TargetsRequest{
+					WorkspaceGeneration: request.
+						WorkspaceGeneration,
+					ProjectID:      request.Project.ID,
+					BuildProfileID: request.Profile.ID,
+				},
+			)
+		} else if len(targets) == 0 {
+			return testdiscovery.DiscoveryInput{}, task.ErrConflict
+		}
+		err = targetErr
 		generation := request.WorkspaceGeneration
 		for rebinds := 0; errors.Is(err, build.ErrWorkspaceChanged) &&
 			rebinds < maxGenerationRebinds; rebinds++ {
@@ -371,6 +384,15 @@ func runtimeBuildDirectoryIdentity(
 	serviceDataRoot string,
 	path string,
 ) (string, error) {
+	return runtimeBuildDirectoryIdentityWithCoverage(workspaceRoot, serviceDataRoot, "", path)
+}
+
+func runtimeBuildDirectoryIdentityWithCoverage(
+	workspaceRoot string,
+	serviceDataRoot string,
+	coverageRoot string,
+	path string,
+) (string, error) {
 	if !absoluteCleanRuntimePath(workspaceRoot) ||
 		!absoluteCleanRuntimePath(serviceDataRoot) ||
 		!absoluteCleanRuntimePath(path) {
@@ -391,6 +413,12 @@ func runtimeBuildDirectoryIdentity(
 			) {
 			return root.prefix + "/" +
 				filepath.ToSlash(relative), nil
+		}
+	}
+	if absoluteCleanRuntimePath(coverageRoot) {
+		relative, err := filepath.Rel(coverageRoot, path)
+		if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return "coverage/" + filepath.ToSlash(relative), nil
 		}
 	}
 	return "", task.ErrInvalidArgument

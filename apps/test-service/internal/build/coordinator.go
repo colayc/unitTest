@@ -147,7 +147,8 @@ func (c *Coordinator) Start(
 }
 
 type PreparedPlan struct {
-	prepared *preparedBuild
+	prepared    *preparedBuild
+	coordinator *Coordinator
 }
 
 func (c *Coordinator) PreparePlan(
@@ -158,7 +159,7 @@ func (c *Coordinator) PreparePlan(
 	if err != nil {
 		return nil, err
 	}
-	return &PreparedPlan{prepared: prepared}, nil
+	return &PreparedPlan{prepared: prepared, coordinator: c}, nil
 }
 
 func (plan *PreparedPlan) Plan() task.ExecutionPlan {
@@ -233,6 +234,53 @@ func (plan *PreparedPlan) CoverageBinaryDir() string {
 		return ""
 	}
 	return plan.prepared.coverage.BinaryDir
+}
+
+// ConfigurationID returns the persisted configuration identity for an
+// isolated coverage build. Ordinary builds deliberately return an empty value
+// so test discovery keeps its normal target-refresh behavior.
+func (plan *PreparedPlan) ConfigurationID() string {
+	if plan == nil || plan.prepared == nil || plan.prepared.coverage == nil {
+		return ""
+	}
+	return configurationStorageID(
+		plan.prepared.profile.ID,
+		plan.prepared.coverage,
+	)
+}
+
+// RefreshTargets rereads the File API for an already prepared coverage plan.
+// It deliberately does not reacquire the build-directory lock owned by the
+// plan, so coverage revalidation cannot deadlock with the active execution.
+func (plan *PreparedPlan) RefreshTargets(ctx context.Context) ([]cmake.Target, error) {
+	if plan == nil || plan.prepared == nil || plan.coordinator == nil || ctx == nil ||
+		plan.prepared.coverage == nil {
+		return nil, task.ErrInvalidArgument
+	}
+	reply, err := plan.coordinator.readReply(
+		plan.prepared.profile,
+		plan.prepared.toolchain,
+		plan.prepared.snapshot.Toolchains,
+	)
+	if err != nil {
+		return nil, ErrConfigureRequired
+	}
+	return cloneTargets(reply.Targets), nil
+}
+
+// PersistConfiguration records the successful coverage configure checkpoint
+// without reacquiring the plan's directory lock.
+func (plan *PreparedPlan) PersistConfiguration(ctx context.Context) error {
+	if plan == nil || plan.prepared == nil || plan.coordinator == nil || ctx == nil ||
+		plan.prepared.coverage == nil {
+		return task.ErrInvalidArgument
+	}
+	for _, step := range plan.prepared.request.Plan.Steps {
+		if step.Kind == task.StepConfigure {
+			return plan.coordinator.Succeeded(ctx, task.Task{}, step)
+		}
+	}
+	return task.ErrInvalidArgument
 }
 
 func (plan *PreparedPlan) AttachCoverageToolset(toolset *coveragellvm.Toolset) error {

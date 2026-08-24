@@ -73,6 +73,18 @@ type embeddedCatalogRefresher interface {
 	) (RefreshedCatalog, error)
 }
 
+type preparedConfigurationIdentity interface {
+	ConfigurationID() string
+}
+
+func preparedConfigurationID(prepared PreparedBuild) string {
+	identity, ok := prepared.(preparedConfigurationIdentity)
+	if !ok {
+		return ""
+	}
+	return identity.ConfigurationID()
+}
+
 func (coordinator *Coordinator) PrepareEmbedded(
 	ctx context.Context,
 	request EmbeddedRequest,
@@ -143,6 +155,7 @@ func (coordinator *Coordinator) PrepareEmbedded(
 	if !ok || nilCoordinatorPort(refresher) {
 		return nil, task.ErrStorageUnavailable
 	}
+	configurationID := preparedConfigurationID(prepared)
 	refreshed, err := refresher.PrepareEmbedded(
 		ctx,
 		RefreshRequest{
@@ -151,6 +164,7 @@ func (coordinator *Coordinator) PrepareEmbedded(
 			Project:             project,
 			Profile:             profile,
 			Toolchain:           instance,
+			ConfigurationID:     preparedConfigurationID(prepared),
 			Targets:             prepared.Targets(),
 		},
 	)
@@ -158,7 +172,11 @@ func (coordinator *Coordinator) PrepareEmbedded(
 		return nil, err
 	}
 	refreshedCatalog, err := testdomain.NewCatalog(refreshed.Catalog)
-	if err != nil || !sameEmbeddedCatalog(catalog, refreshedCatalog) {
+	if err != nil || !sameEmbeddedCatalogForRefresh(
+		catalog,
+		refreshedCatalog,
+		configurationID != "",
+	) {
 		return nil, testdomain.ErrCatalogStale
 	}
 	planned, err := PlanRun(
@@ -278,6 +296,18 @@ func sameEmbeddedCatalog(
 ) bool {
 	left.GeneratedAt = right.GeneratedAt
 	return reflect.DeepEqual(left, right)
+}
+
+func sameEmbeddedCatalogForRefresh(
+	left,
+	right testdomain.Catalog,
+	alternateConfiguration bool,
+) bool {
+	if alternateConfiguration {
+		left.Revision = ""
+		right.Revision = ""
+	}
+	return sameEmbeddedCatalog(left, right)
 }
 
 func sameEmbeddedProcessTarget(left, right task.ProcessSpec) bool {

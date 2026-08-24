@@ -539,6 +539,72 @@ func TestRuntimeTestDiscoveryRefreshesTargetsAfterBuild(
 	}
 }
 
+func TestRuntimeTestDiscoveryUsesCoverageConfigurationAndPreparedTargets(
+	t *testing.T,
+) {
+	base := t.TempDir()
+	workspaceRoot := filepath.Join(base, "workspace")
+	serviceRoot := filepath.Join(base, "service-builds")
+	coverageRoot := filepath.Join(base, "coverage-builds")
+	buildDirectory := filepath.Join(coverageRoot, "run", "build")
+	for _, root := range []string{workspaceRoot, serviceRoot, coverageRoot, buildDirectory} {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store, err := taskstore.Open(filepath.Join(base, "history.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	workspaceID := strings.Repeat("1", 64)
+	profileID := strings.Repeat("2", 64)
+	coverageConfigurationID := strings.Repeat("a", 64)
+	cmakeIdentity := strings.Repeat("3", 64)
+	fileAPIIdentity := strings.Repeat("4", 64)
+	if err := store.PutBuildConfiguration(context.Background(), taskstore.BuildConfiguration{
+		WorkspaceID: workspaceID, ProjectID: "core", ProfileID: coverageConfigurationID,
+		Fingerprint: strings.Repeat("5", 64), BuildDirectory: "coverage/run/build",
+		CMakeIdentity: cmakeIdentity, FileAPIIdentity: fileAPIIdentity,
+		ConfiguredAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	preparedTarget := cmake.Target{
+		ID: strings.Repeat("6", 64), Name: "coverage-tests",
+		Artifacts: []string{filepath.Join(buildDirectory, "tests")},
+	}
+	buildCoordinator := &fakeRuntimeCoordinator{targets: []cmake.Target{{
+		ID: strings.Repeat("7", 64), Name: "stale-base-target",
+	}}}
+	factory := newTaskDiscoveryInputFactory(testCoordinatorConfig{
+		Build: buildCoordinator, Store: store,
+		Installation:  cmake.Installation{Identity: cmakeIdentity},
+		WorkspaceRoot: workspace.Root{ID: workspaceID, NativePath: workspaceRoot},
+		BuildDataRoot: serviceRoot, CoverageRoot: coverageRoot, NewID: task.NewID,
+	})
+	input, err := factory(context.Background(), testrun.RefreshRequest{
+		TaskID: strings.Repeat("8", 32), WorkspaceGeneration: strings.Repeat("9", 64),
+		Project:         workspace.ProjectConfig{ID: "core"},
+		Profile:         cmake.BuildProfile{ID: profileID, ProjectID: "core", BinaryDir: buildDirectory},
+		Toolchain:       toolchain.Instance{ID: "preset-toolchain"},
+		ConfigurationID: coverageConfigurationID,
+		Targets:         []cmake.Target{preparedTarget},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(input.Targets, []cmake.Target{preparedTarget}) {
+		t.Fatalf("coverage discovery targets = %#v", input.Targets)
+	}
+	if len(buildCoordinator.targetCalls) != 0 {
+		t.Fatalf("coverage refresh queried base targets: %#v", buildCoordinator.targetCalls)
+	}
+	if input.Fingerprint.FileAPIReplyIdentity != fileAPIIdentity {
+		t.Fatalf("coverage file API identity = %q", input.Fingerprint.FileAPIReplyIdentity)
+	}
+}
+
 func TestRuntimeTestDiscoveryRebindsOneStableGenerationAfterBuild(
 	t *testing.T,
 ) {

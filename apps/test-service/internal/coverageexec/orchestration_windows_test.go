@@ -233,7 +233,7 @@ func TestCoordinatorReportAndPublishRevalidationFailureNeverPublishesRealAggrega
 		wantReason coveragedomain.Reason
 	}{
 		{name: "report", mismatchAt: 8, wantReason: coveragedomain.ReasonReportGenerationFailed},
-		{name: "publish", mismatchAt: 10, wantReason: coveragedomain.ReasonPersistenceFailed},
+		{name: "publish", mismatchAt: 9, wantReason: coveragedomain.ReasonPersistenceFailed},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			instance := orchestrationToolchain(t)
@@ -487,13 +487,25 @@ func (preparer *orchestrationBuildPreparer) PreparePlan(_ context.Context, reque
 	if call == attachFailureAt {
 		attachErr = errors.New("injected toolset attachment failure")
 	}
-	return &fakePreparedBuild{
+	prepared := &fakePreparedBuild{
 		workspaceGeneration: request.WorkspaceGeneration,
 		project:             workspace.ProjectConfig{ID: request.ProjectID},
 		profile:             cmake.BuildProfile{ID: request.BuildProfileID, ProjectID: request.ProjectID},
 		toolchain:           instance, plan: plan, coverageBinaryDir: binaryDir,
 		attachErr: attachErr,
-	}, nil
+	}
+	prepared.refresh = func() error {
+		preparer.mu.Lock()
+		preparer.calls++
+		refreshCall := preparer.calls
+		mismatchAt := preparer.mismatchAt
+		preparer.mu.Unlock()
+		if refreshCall == mismatchAt {
+			prepared.toolchain.ID = "changed-toolchain"
+		}
+		return nil
+	}
+	return prepared, nil
 }
 
 type orchestrationAdapter struct {

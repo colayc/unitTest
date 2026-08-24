@@ -74,6 +74,27 @@ func TestCoverageBuildInterpretationContinuesOnlyAfterSuccess(t *testing.T) {
 	}
 }
 
+func TestSameCoverageRunIdentityAllowsLifecycleAdvanceButRejectsMutation(t *testing.T) {
+	created := time.Unix(123, 0).UTC()
+	queued := coveragedomain.Run{
+		ID: "11111111111111111111111111111111", TaskID: "22222222222222222222222222222222",
+		TestRunID: "33333333333333333333333333333333", Status: coveragedomain.StatusQueued,
+		CreatedAt: created,
+	}
+	running := queued
+	running.Status = coveragedomain.StatusRunning
+	started := created.Add(time.Second)
+	running.StartedAt = &started
+	running.LastSequence = 1
+	if !sameCoverageRunIdentity(running, queued) {
+		t.Fatal("queued-to-running lifecycle advance must preserve coverage identity")
+	}
+	running.Request.ProjectID = "changed"
+	if sameCoverageRunIdentity(running, queued) {
+		t.Fatal("coverage request mutation must invalidate coverage identity")
+	}
+}
+
 func TestCoordinatorDuplicateResumeReturnsTheSingleLiveTask(t *testing.T) {
 	persisted := task.Task{
 		ID:   "11111111111111111111111111111111",
@@ -772,6 +793,7 @@ type fakePreparedBuild struct {
 	plan                task.ExecutionPlan
 	coverageBinaryDir   string
 	attachErr           error
+	refresh             func() error
 }
 
 func (prepared *fakePreparedBuild) Plan() task.ExecutionPlan               { return prepared.plan }
@@ -784,6 +806,14 @@ func (*fakePreparedBuild) Targets() []cmake.Target                         { ret
 func (*fakePreparedBuild) AllowTestExecutable(cmake.FingerprintFile) error { return nil }
 func (*fakePreparedBuild) ReleaseIfUnadopted()                             {}
 func (prepared *fakePreparedBuild) CoverageBinaryDir() string              { return prepared.coverageBinaryDir }
+func (prepared *fakePreparedBuild) RefreshTargets(context.Context) ([]cmake.Target, error) {
+	if prepared.refresh != nil {
+		if err := prepared.refresh(); err != nil {
+			return nil, err
+		}
+	}
+	return nil, nil
+}
 func (prepared *fakePreparedBuild) AttachCoverageToolset(*coveragellvm.Toolset) error {
 	return prepared.attachErr
 }

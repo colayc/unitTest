@@ -401,6 +401,7 @@ func Open(config Config) (*Runtime, error) {
 				Installation:  installation,
 				WorkspaceRoot: workspaceRoot,
 				BuildDataRoot: layout.Build,
+				CoverageRoot:  layout.Coverage,
 				ControlRoot:   layout.Controls,
 				Clock:         config.Clock,
 				NewID:         newID,

@@ -478,16 +478,9 @@ func (coordinator *Coordinator) prepare(
 	if err := execution.validateAdapterIdentity(); err != nil {
 		return nil, task.ExecutionPlan{}, failPreparation(coveragerun.PhaseConfigure, err)
 	}
-	coverageInput := execution.buildInput
-	coverageInput.Coverage = &build.CoverageOptions{
-		BinaryDir: buildRoot,
-		TopLevelInclude: cmake.FingerprintFile{
-			Path:     execution.instrument.IncludePath,
-			Identity: execution.instrument.Fingerprint,
-			SHA256:   execution.instrument.SHA256,
-		},
-		InstrumentationFingerprint: execution.instrument.Fingerprint,
-		ToolsetIdentity:            preparedAdapter.Toolset().Identity(),
+	coverageInput, err := execution.coverageBuildInput()
+	if err != nil {
+		return nil, task.ExecutionPlan{}, failPreparation(coveragerun.PhaseBuild, err)
 	}
 	prepared, err := coordinator.config.Build.PreparePlan(ctx, coverageInput)
 	if err != nil || prepared == nil {
@@ -562,7 +555,7 @@ func (coordinator *Coordinator) catalog(ctx context.Context, run testdomain.Test
 	return validated, nil
 }
 
-func (execution *execution) revalidate(ctx context.Context) error {
+func (execution *execution) revalidate(ctx context.Context, coverage bool) error {
 	if execution == nil || ctx == nil {
 		return task.ErrInvalidArgument
 	}
@@ -579,7 +572,8 @@ func (execution *execution) revalidate(ctx context.Context) error {
 		return task.ErrConflict
 	}
 	run, err := execution.config.Store.GetCoverageRun(ctx, execution.run.ID)
-	if err != nil || !reflect.DeepEqual(run, execution.run) {
+	if err != nil || !sameCoverageRunIdentity(run, execution.run) ||
+		(run.Status != coveragedomain.StatusQueued && run.Status != coveragedomain.StatusRunning) {
 		return task.ErrConflict
 	}
 	testRun, err := execution.config.Store.GetRunForTask(ctx, execution.taskID)
@@ -594,27 +588,81 @@ func (execution *execution) revalidate(ctx context.Context) error {
 	if _, err := execution.coordinator.catalog(ctx, execution.testRun); err != nil {
 		return err
 	}
-	probe, err := execution.config.Build.PreparePlan(ctx, execution.buildInput)
-	if err != nil || probe == nil {
-		return errOrInvalid(err)
+	if coverage {
+		execution.mu.Lock()
+		prepared := execution.prepared
+		execution.mu.Unlock()
+		if err := validatePreparedIdentity(
+			prepared,
+			execution.run,
+			execution.testRun,
+			execution.profile,
+			execution.toolchain,
+		); err != nil {
+			return err
+		}
+		if prepared == nil || !samePath(prepared.CoverageBinaryDir(), execution.buildRoot) {
+			return task.ErrConflict
+		}
+		targets := prepared.Targets()
+		if refresher, ok := prepared.(interface {
+			RefreshTargets(context.Context) ([]cmake.Target, error)
+		}); ok {
+			targets, err = refresher.RefreshTargets(ctx)
+			if err != nil {
+				return err
+			}
+		}
+		execution.mu.Lock()
+		execution.preparedTargets = cloneCoverageTargets(targets)
+		execution.mu.Unlock()
+	} else {
+		probe, err := execution.config.Build.PreparePlan(ctx, execution.buildInput)
+		if err != nil || probe == nil {
+			return errOrInvalid(err)
+		}
+		defer probe.ReleaseIfUnadopted()
+		if err := validatePreparedIdentity(
+			probe,
+			execution.run,
+			execution.testRun,
+			execution.profile,
+			execution.toolchain,
+		); err != nil {
+			return err
+		}
+		execution.mu.Lock()
+		execution.preparedTargets = cloneCoverageTargets(probe.Targets())
+		execution.mu.Unlock()
 	}
-	defer probe.ReleaseIfUnadopted()
-	if err := validatePreparedIdentity(
-		probe,
-		execution.run,
-		execution.testRun,
-		execution.profile,
-		execution.toolchain,
-	); err != nil {
-		return err
-	}
-	execution.mu.Lock()
-	execution.preparedTargets = cloneCoverageTargets(probe.Targets())
-	execution.mu.Unlock()
 	if err := execution.verifyRetained(); err != nil {
 		return err
 	}
 	return nil
+}
+
+func (execution *execution) coverageBuildInput() (build.StartRequest, error) {
+	if execution == nil || execution.adapter == nil || execution.instrument.IncludePath == "" ||
+		execution.instrument.Fingerprint == "" || execution.instrument.SHA256 == "" ||
+		execution.buildRoot == "" {
+		return build.StartRequest{}, task.ErrInvalidArgument
+	}
+	toolset := execution.adapter.Toolset()
+	if toolset == nil || toolset.Identity() == "" {
+		return build.StartRequest{}, task.ErrInvalidArgument
+	}
+	request := execution.buildInput
+	request.Coverage = &build.CoverageOptions{
+		BinaryDir: execution.buildRoot,
+		TopLevelInclude: cmake.FingerprintFile{
+			Path:     execution.instrument.IncludePath,
+			Identity: execution.instrument.Fingerprint,
+			SHA256:   execution.instrument.SHA256,
+		},
+		InstrumentationFingerprint: execution.instrument.Fingerprint,
+		ToolsetIdentity:            toolset.Identity(),
+	}
+	return request, nil
 }
 
 func (execution *execution) verifyRetained() error {
@@ -683,13 +731,23 @@ func (execution *execution) AfterStep(
 		result.Verdict != task.StepVerdictSucceeded {
 		return task.Continuation{}, task.ErrInvalidArgument
 	}
-	if err := execution.revalidate(ctx); err != nil {
+	if err := execution.revalidate(ctx, step.Kind != task.StepCoverageConfigure); err != nil {
 		return task.Continuation{}, err
 	}
 	switch step.Kind {
 	case task.StepCoverageConfigure:
 		if err := execution.applyPhase(coveragerun.StepResult{Phase: coveragerun.PhaseConfigure, Succeeded: true}); err != nil {
 			return task.Continuation{}, err
+		}
+		execution.mu.Lock()
+		prepared := execution.prepared
+		execution.mu.Unlock()
+		if recorder, ok := prepared.(interface {
+			PersistConfiguration(context.Context) error
+		}); ok {
+			if err := recorder.PersistConfiguration(ctx); err != nil {
+				return task.Continuation{}, err
+			}
 		}
 		return task.Continuation{}, nil
 	case task.StepCoverageBuild:
@@ -879,7 +937,7 @@ func (execution *execution) ExecuteServiceAction(
 		}
 		return task.StepResult{}, execution.terminalErr
 	}
-	if err := execution.revalidate(ctx); err != nil {
+	if err := execution.revalidate(ctx, true); err != nil {
 		execution.setFailedPhase(phaseForStep(step.Kind))
 		return task.StepResult{}, err
 	}
@@ -1000,6 +1058,19 @@ func (prepared *preparedBuildWithTargets) Targets() []cmake.Target {
 		return nil
 	}
 	return cloneCoverageTargets(prepared.targets)
+}
+
+func (prepared *preparedBuildWithTargets) ConfigurationID() string {
+	if prepared == nil || prepared.PreparedBuild == nil {
+		return ""
+	}
+	identity, ok := prepared.PreparedBuild.(interface {
+		ConfigurationID() string
+	})
+	if !ok {
+		return ""
+	}
+	return identity.ConfigurationID()
 }
 
 func cloneCoverageTargets(values []cmake.Target) []cmake.Target {
@@ -1458,6 +1529,19 @@ func sameTestRunIdentity(left, right testdomain.TestRun) bool {
 		left.IdempotencyKey == right.IdempotencyKey &&
 		left.CreatedAt.Equal(right.CreatedAt) &&
 		reflect.DeepEqual(left.SelectionSnapshot, right.SelectionSnapshot)
+}
+
+// sameCoverageRunIdentity excludes lifecycle fields that are expected to
+// advance while a task is executing. The request, selection, toolchain, and
+// graph identities remain immutable and are compared strictly.
+func sameCoverageRunIdentity(left, right coveragedomain.Run) bool {
+	return left.ID == right.ID &&
+		left.TaskID == right.TaskID &&
+		left.TestRunID == right.TestRunID &&
+		reflect.DeepEqual(left.Request, right.Request) &&
+		reflect.DeepEqual(left.SelectionSnapshot, right.SelectionSnapshot) &&
+		reflect.DeepEqual(left.Toolchain, right.Toolchain) &&
+		left.CreatedAt.Equal(right.CreatedAt)
 }
 
 func coverageRunID(request []byte) string {

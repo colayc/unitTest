@@ -112,7 +112,11 @@ type RefreshRequest struct {
 	Project             workspace.ProjectConfig
 	Profile             cmake.BuildProfile
 	Toolchain           toolchain.Instance
-	Targets             []cmake.Target
+	// ConfigurationID identifies an alternate persisted build configuration,
+	// such as the isolated configuration used by LLVM coverage. It is empty
+	// for ordinary test runs, which continue to refresh targets from Build.
+	ConfigurationID string
+	Targets         []cmake.Target
 }
 
 type RefreshedCatalog struct {
