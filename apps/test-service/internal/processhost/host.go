@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"sort"
@@ -17,6 +18,13 @@ import (
 	"unit-test-ide.local/test-service/internal/cmake"
 	"unit-test-ide.local/test-service/internal/processcontrol"
 )
+
+func processHostDebugf(format string, args ...any) {
+	if os.Getenv("UNIT_TEST_IDE_DEBUG_PROCESSHOST") != "1" {
+		return
+	}
+	_, _ = fmt.Fprintf(os.Stderr, "processhost-debug "+format+"\n", args...)
+}
 
 const maxHostFrameBytes = 4 * 1024 * 1024
 
@@ -303,6 +311,7 @@ func runBatch(
 	writer := &synchronizedStatusWriter{writer: status}
 	targets := make([]batchTarget, 0, len(spec.Batch))
 	for _, item := range spec.Batch {
+		processHostDebugf("batch-start id=%s args=%d timeout-ms=%d", item.ID, len(item.Args), item.TimeoutMS)
 		stdoutReader, stdoutWriter, err := os.Pipe()
 		if err != nil {
 			cleanupBatchTargets(platform, targets)
@@ -343,6 +352,7 @@ func runBatch(
 		_ = stdoutWriter.Close()
 		_ = stderrWriter.Close()
 		if startErr != nil || target == nil {
+			processHostDebugf("batch-start-failed id=%s", item.ID)
 			_ = stdoutReader.Close()
 			_ = stderrReader.Close()
 			cleanupBatchTargets(platform, targets)
@@ -352,6 +362,7 @@ func runBatch(
 			})
 			return 1
 		}
+		processHostDebugf("batch-started id=%s pid=%d group=%d", item.ID, target.PID(), target.ProcessGroup())
 		targets = append(targets, batchTarget{
 			item: item, target: target,
 			startedAt:    startedAt,
@@ -425,6 +436,7 @@ func runBatch(
 				context.DeadlineExceeded,
 			) && ctx.Err() == nil
 			cancel()
+			processHostDebugf("batch-waited id=%s exit=%d timed-out=%t err=%t", target.item.ID, result.exitCode, timedOut, result.err != nil)
 			child := processcontrol.HostChildResult{
 				ID:       target.item.ID,
 				ExitCode: result.exitCode,

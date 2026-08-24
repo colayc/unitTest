@@ -329,6 +329,7 @@ function coverageOperations(
   fixture: Fixture,
   wire: ProtocolWireCapture,
   tokens: string[],
+  diagnostics: string[],
   hostileEnvironmentValue: string,
   useCMakeBundle: boolean,
   boundaryEnvironment: Readonly<Record<string, string>>
@@ -346,16 +347,19 @@ function coverageOperations(
       const launchArguments = useCMakeBundle
         ? [...args, "--cmake-bundle-root", cmakeBundleRoot]
         : [...args];
-      return spawn(binary, launchArguments, {
+      const child = spawn(binary, launchArguments, {
         windowsHide: true,
         stdio: "pipe",
         env: {
           ...process.env,
           ...boundaryEnvironment,
           UNIT_TEST_IDE_COVERAGE_SMOKE_SECRET: hostileEnvironmentValue,
+          UNIT_TEST_IDE_DEBUG_PROCESSHOST: "1",
           LLVM_PROFILE_FILE: join(fixture.root, `${hostileEnvironmentValue}-%p.profraw`)
         }
       });
+      child.stderr.on("data", (chunk: Buffer | string) => diagnostics.push(String(chunk)));
+      return child;
     },
     async connect(endpoint) {
       const socket = createConnection(endpoint);
@@ -658,6 +662,7 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
   let offlineBoundary: WindowsNativeOfflineBoundary | undefined;
   const wire = new ProtocolWireCapture();
   const tokens: string[] = [];
+  const diagnostics: string[] = [];
   const hostileEnvironmentValue = `coverage-smoke-secret-${randomBytes(12).toString("hex")}`;
   const sensitive: string[] = [hostileEnvironmentValue];
 
@@ -742,6 +747,7 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
             installedFixture,
             wire,
             tokens,
+            diagnostics,
             hostileEnvironmentValue,
             useCMakeBundle,
             installedBoundary.registrationEnvironment
@@ -813,6 +819,7 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
               errorCode: taskSnapshot.errorCode,
               errorMessage: taskSnapshot.errorMessage
             },
+            serviceDiagnostics: diagnostics.join("")
           }));
         }
         assert.equal(run.outcome, "available");
