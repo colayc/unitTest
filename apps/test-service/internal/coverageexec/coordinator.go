@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -776,6 +777,7 @@ func (execution *execution) Interpret(
 		}
 		verdict, err := embedded.Interpret(ctx, current, original, result)
 		if err != nil || verdict != task.StepVerdictSucceeded {
+			_, _ = fmt.Fprintf(os.Stderr, "coverage-debug-test-interpret step=%s verdict=%s error=%v exit=%d timedOut=%t\n", step.ID, verdict, err, result.ExitCode, result.TimedOut)
 			execution.setFailedPhase(coveragerun.PhaseTest)
 			return verdict, err
 		}
@@ -1038,6 +1040,7 @@ func (execution *execution) prepareCollector(ctx context.Context) ([]task.Execut
 	}
 	manifest, err := execution.adapter.SealProfiles(expectations, outcomes)
 	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "coverage-debug-seal-profiles error=%v expectations=%d outcomes=%d root=%s\n", err, len(expectations), len(outcomes), execution.profileRoot)
 		execution.setFailedPhase(coveragerun.PhaseTest)
 		return nil, err
 	}
@@ -1050,6 +1053,7 @@ func (execution *execution) prepareCollector(ctx context.Context) ([]task.Execut
 	execution.mu.Unlock()
 	merge, export, err := execution.adapter.Collector(manifest, binaries)
 	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "coverage-debug-collector error=%v\n", err)
 		execution.setFailedPhase(coveragerun.PhaseMerge)
 		return nil, err
 	}
