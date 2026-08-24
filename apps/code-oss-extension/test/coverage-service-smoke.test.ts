@@ -80,13 +80,6 @@ const firewallGuardianStateRoot = join(
 const COVERAGE_PROFILE_ID = "coverage-clang-cl";
 const PROJECT_ID = "coverage-fixture";
 const TEST_CONTAINER = "coverage-tests";
-const coverageDebugPath = join(
-  repositoryRoot,
-  ".native-e2e",
-  "artifacts",
-  "windows",
-  "coverage-debug.json"
-);
 // The Windows self-hosted runner may spend several minutes on the first
 // instrumented build/profile collection before the coverage task reaches its
 // terminal state.
@@ -339,7 +332,6 @@ function coverageOperations(
   fixture: Fixture,
   wire: ProtocolWireCapture,
   tokens: string[],
-  diagnostics: string[],
   hostileEnvironmentValue: string,
   useCMakeBundle: boolean,
   boundaryEnvironment: Readonly<Record<string, string>>
@@ -357,7 +349,7 @@ function coverageOperations(
       const launchArguments = useCMakeBundle
         ? [...args, "--cmake-bundle-root", cmakeBundleRoot]
         : [...args];
-      const child = spawn(binary, launchArguments, {
+      return spawn(binary, launchArguments, {
         windowsHide: true,
         stdio: "pipe",
         env: {
@@ -367,8 +359,6 @@ function coverageOperations(
           LLVM_PROFILE_FILE: join(fixture.root, `${hostileEnvironmentValue}-%p.profraw`)
         }
       });
-      child.stderr.on("data", (chunk: Buffer | string) => diagnostics.push(String(chunk)));
-      return child;
     },
     async connect(endpoint) {
       const socket = createConnection(endpoint);
@@ -671,7 +661,6 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
   let offlineBoundary: WindowsNativeOfflineBoundary | undefined;
   const wire = new ProtocolWireCapture();
   const tokens: string[] = [];
-  const diagnostics: string[] = [];
   const hostileEnvironmentValue = `coverage-smoke-secret-${randomBytes(12).toString("hex")}`;
   const sensitive: string[] = [hostileEnvironmentValue];
 
@@ -756,7 +745,6 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
             installedFixture,
             wire,
             tokens,
-            diagnostics,
             hostileEnvironmentValue,
             useCMakeBundle,
             installedBoundary.registrationEnvironment
@@ -803,27 +791,6 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
         const run = await waitForCoverageFinished(session.client, started);
         const coverageFinishedAt = new Date();
         assert.equal(run.status, "finished");
-        if (run.outcome !== "available") {
-          let taskError = "";
-          try {
-            await session.client.getTask(run.taskId);
-          } catch (error) {
-            taskError = String(error);
-          }
-          console.error("coverage-debug-status", JSON.stringify({
-            outcome: run.outcome,
-            reason: run.reason,
-            taskError,
-            serviceDiagnostics: diagnostics.join("")
-          }));
-          await mkdir(join(repositoryRoot, ".native-e2e", "artifacts", "windows"), { recursive: true });
-          await writeFile(coverageDebugPath, JSON.stringify({
-            outcome: run.outcome,
-            reason: run.reason,
-            taskError,
-            serviceDiagnostics: diagnostics.join("")
-          }) + "\n", "utf8");
-        }
         assert.equal(run.outcome, "available");
         assert.equal(run.reason, undefined);
         assert.ok(run.reportId);
