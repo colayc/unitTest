@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1369,6 +1371,7 @@ func (m *Manager) tripStorage(active map[string]*activeTask) {
 	if m.storageFailed {
 		return
 	}
+	_, _ = fmt.Fprintf(os.Stderr, "task-storage-trip\n%s", debug.Stack())
 	m.storageFailed = true
 	m.healthy.Store(false)
 	m.quiesceActive(active)
