@@ -258,11 +258,14 @@ func Run(ctx context.Context, platform Platform, control io.Reader, status io.Wr
 		)
 	}
 	processHostDebugf("run-mode=single")
+	processHostDebugf("single-start args=%d", len(start.Spec.Args))
 	target, err := platform.Start(*start.Spec, stdout, stderr)
 	if err != nil || target == nil {
+		processHostDebugf("single-start-failed err=%t nil-target=%t", err != nil, target == nil)
 		_ = writeStatus(status, processcontrol.HostStatus{Kind: "error", ErrorCode: "PROCESS_START_FAILED", Message: "target process could not start"})
 		return 1
 	}
+	processHostDebugf("single-started pid=%d group=%d", target.PID(), target.ProcessGroup())
 	if err := writeStatus(status, processcontrol.HostStatus{Kind: "started", PID: target.PID(), ProcessGroup: target.ProcessGroup()}); err != nil {
 		_ = platform.Terminate(target, 2*time.Second)
 		_, _ = target.Wait()
@@ -272,6 +275,7 @@ func Run(ctx context.Context, platform Platform, control io.Reader, status io.Wr
 	stop := make(chan struct{})
 	controlDone := readControl(owner, frames, stop)
 	result := waitOrStop(ctx, platform, target, stop)
+	processHostDebugf("single-waited exit=%d err=%t", result.exitCode, result.err != nil)
 	owner.Close()
 	commandResult := <-controlDone
 	if commandResult.invalid {
