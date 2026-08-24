@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"sort"
@@ -18,19 +17,6 @@ import (
 	"unit-test-ide.local/test-service/internal/cmake"
 	"unit-test-ide.local/test-service/internal/processcontrol"
 )
-
-func processHostDebugf(format string, args ...any) {
-	if os.Getenv("UNIT_TEST_IDE_DEBUG_PROCESSHOST") != "1" {
-		return
-	}
-	line := fmt.Sprintf("processhost-debug "+format+"\n", args...)
-	if path := os.Getenv("UNIT_TEST_IDE_PROCESSHOST_DEBUG_FILE"); path != "" {
-		if file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
-			_, _ = file.WriteString(line)
-			_ = file.Close()
-		}
-	}
-}
 
 const maxHostFrameBytes = 4 * 1024 * 1024
 
@@ -232,7 +218,6 @@ func readControl(owner *controlOwner, frames *frameReader, stop chan<- struct{})
 // implement io.ReadCloser so target completion or context cancellation can
 // interrupt and join a blocked command read. Run closes it exactly once.
 func Run(ctx context.Context, platform Platform, control io.Reader, status io.Writer, stdout, stderr io.Writer) int {
-	processHostDebugf("run-start")
 	owner, ok := newControlOwner(control)
 	if !ok {
 		_ = writeStatus(status, processcontrol.HostStatus{Kind: "error", ErrorCode: "INVALID_HOST_CONTROL", Message: "invalid host control"})
@@ -246,7 +231,6 @@ func Run(ctx context.Context, platform Platform, control io.Reader, status io.Wr
 		return 2
 	}
 	if len(start.Spec.Batch) != 0 {
-		processHostDebugf("run-mode=batch count=%d", len(start.Spec.Batch))
 		return runBatch(
 			ctx,
 			platform,
@@ -256,15 +240,11 @@ func Run(ctx context.Context, platform Platform, control io.Reader, status io.Wr
 			*start.Spec,
 		)
 	}
-	processHostDebugf("run-mode=single")
-	processHostDebugf("single-start args=%d", len(start.Spec.Args))
 	target, err := platform.Start(*start.Spec, stdout, stderr)
 	if err != nil || target == nil {
-		processHostDebugf("single-start-failed err=%t nil-target=%t", err != nil, target == nil)
 		_ = writeStatus(status, processcontrol.HostStatus{Kind: "error", ErrorCode: "PROCESS_START_FAILED", Message: "target process could not start"})
 		return 1
 	}
-	processHostDebugf("single-started pid=%d group=%d", target.PID(), target.ProcessGroup())
 	if err := writeStatus(status, processcontrol.HostStatus{Kind: "started", PID: target.PID(), ProcessGroup: target.ProcessGroup()}); err != nil {
 		_ = platform.Terminate(target, 2*time.Second)
 		_, _ = target.Wait()
@@ -274,7 +254,6 @@ func Run(ctx context.Context, platform Platform, control io.Reader, status io.Wr
 	stop := make(chan struct{})
 	controlDone := readControl(owner, frames, stop)
 	result := waitOrStop(ctx, platform, target, stop)
-	processHostDebugf("single-waited exit=%d err=%t", result.exitCode, result.err != nil)
 	owner.Close()
 	commandResult := <-controlDone
 	if commandResult.invalid {
@@ -324,7 +303,6 @@ func runBatch(
 	writer := &synchronizedStatusWriter{writer: status}
 	targets := make([]batchTarget, 0, len(spec.Batch))
 	for _, item := range spec.Batch {
-		processHostDebugf("batch-start id=%s args=%d timeout-ms=%d", item.ID, len(item.Args), item.TimeoutMS)
 		stdoutReader, stdoutWriter, err := os.Pipe()
 		if err != nil {
 			cleanupBatchTargets(platform, targets)
@@ -365,7 +343,6 @@ func runBatch(
 		_ = stdoutWriter.Close()
 		_ = stderrWriter.Close()
 		if startErr != nil || target == nil {
-			processHostDebugf("batch-start-failed id=%s", item.ID)
 			_ = stdoutReader.Close()
 			_ = stderrReader.Close()
 			cleanupBatchTargets(platform, targets)
@@ -375,7 +352,6 @@ func runBatch(
 			})
 			return 1
 		}
-		processHostDebugf("batch-started id=%s pid=%d group=%d", item.ID, target.PID(), target.ProcessGroup())
 		targets = append(targets, batchTarget{
 			item: item, target: target,
 			startedAt:    startedAt,
@@ -449,7 +425,6 @@ func runBatch(
 				context.DeadlineExceeded,
 			) && ctx.Err() == nil
 			cancel()
-			processHostDebugf("batch-waited id=%s exit=%d timed-out=%t err=%t", target.item.ID, result.exitCode, timedOut, result.err != nil)
 			child := processcontrol.HostChildResult{
 				ID:       target.item.ID,
 				ExitCode: result.exitCode,

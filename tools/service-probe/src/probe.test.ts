@@ -829,6 +829,7 @@ test("protocol v1.3 discovers, runs, replays, and reruns deterministic CppUTest 
   // build synchronously, so keep a separate larger bound for run lifecycle
   // operations while unrelated RPC/event checks stay fast.
   const EVENT_TIMEOUT_MS = 30_000;
+  const DISCOVERY_TIMEOUT_MS = process.platform === "win32" ? 120_000 : EVENT_TIMEOUT_MS;
   const TEST_RUN_TIMEOUT_MS = process.platform === "win32" ? 120_000 : EVENT_TIMEOUT_MS;
   try {
     await prepareTestFrameworkWorkspace(workspaceDirectory);
@@ -866,7 +867,7 @@ test("protocol v1.3 discovers, runs, replays, and reruns deterministic CppUTest 
         projectId: project.projectId,
         profileId: profile.buildProfileId
       }),
-      EVENT_TIMEOUT_MS
+      DISCOVERY_TIMEOUT_MS
     );
     const discoveryEvents: ProtocolTaskEvent[] = [];
     stage = "wait for test discovery";
@@ -874,7 +875,7 @@ test("protocol v1.3 discovers, runs, replays, and reruns deterministic CppUTest 
       subscription,
       discovery.taskId,
       discoveryEvents,
-      EVENT_TIMEOUT_MS
+      DISCOVERY_TIMEOUT_MS
     );
     assert.equal(
       (discoveryFinished.payload as { outcome?: unknown }).outcome,

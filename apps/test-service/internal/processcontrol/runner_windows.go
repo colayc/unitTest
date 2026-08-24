@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"sort"
@@ -32,20 +31,6 @@ var (
 	errProcessStartFailed     = errors.New("target process could not start")
 	errProcessHostFailed      = errors.New("process host failed")
 )
-
-func processControlDebugf(format string, args ...any) {
-	if os.Getenv("UNIT_TEST_IDE_DEBUG_PROCESSHOST") != "1" {
-		return
-	}
-	line := fmt.Sprintf("processcontrol-debug "+format+"\n", args...)
-	_, _ = fmt.Fprint(os.Stderr, line)
-	if path := os.Getenv("UNIT_TEST_IDE_PROCESSHOST_DEBUG_FILE"); path != "" {
-		if file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
-			_, _ = file.WriteString(line)
-			_ = file.Close()
-		}
-	}
-}
 
 const windowsHostShutdownWait = time.Second
 
@@ -583,20 +568,13 @@ func (process *windowsProcess) copyStream(readers *sync.WaitGroup, reader *os.Fi
 	defer readers.Done()
 	defer reader.Close()
 	buffer := make([]byte, 32*1024)
-	total := 0
-	preview := make([]byte, 0, 200)
 	for {
 		count, err := reader.Read(buffer)
 		if count > 0 {
 			data := append([]byte(nil), buffer[:count]...)
-			total += count
-			if len(preview) < 200 {
-				preview = append(preview, data[:min(200-len(preview), len(data))]...)
-			}
 			process.sendOutput(Output{Stream: stream, Data: data})
 		}
 		if err != nil {
-			processControlDebugf("stream-closed stream=%s bytes=%d preview=%q", stream, total, preview)
 			return
 		}
 	}
@@ -980,9 +958,7 @@ func hostWindowsEnvironment(base []string, status windows.Handle) []string {
 	for _, entry := range base {
 		name, _, ok := strings.Cut(entry, "=")
 		if ok && (strings.EqualFold(name, "UNIT_TEST_IDE_WFP_REGISTRATION_PIPE") ||
-			strings.EqualFold(name, "UNIT_TEST_IDE_WFP_REGISTRATION_NONCE") ||
-			strings.EqualFold(name, "UNIT_TEST_IDE_DEBUG_PROCESSHOST") ||
-			strings.EqualFold(name, "UNIT_TEST_IDE_PROCESSHOST_DEBUG_FILE")) {
+			strings.EqualFold(name, "UNIT_TEST_IDE_WFP_REGISTRATION_NONCE")) {
 			environment = append(environment, entry)
 		}
 	}

@@ -11,12 +11,11 @@ import {
   lstat,
   mkdir,
   mkdtemp,
-  readFile,
   rm,
   writeFile
 } from "node:fs/promises";
 import { createConnection } from "node:net";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import {
@@ -330,8 +329,6 @@ function coverageOperations(
   fixture: Fixture,
   wire: ProtocolWireCapture,
   tokens: string[],
-  diagnostics: string[],
-  processHostDebugFile: string,
   hostileEnvironmentValue: string,
   useCMakeBundle: boolean,
   boundaryEnvironment: Readonly<Record<string, string>>
@@ -349,20 +346,16 @@ function coverageOperations(
       const launchArguments = useCMakeBundle
         ? [...args, "--cmake-bundle-root", cmakeBundleRoot]
         : [...args];
-      const child = spawn(binary, launchArguments, {
+      return spawn(binary, launchArguments, {
         windowsHide: true,
         stdio: "pipe",
         env: {
           ...process.env,
           ...boundaryEnvironment,
           UNIT_TEST_IDE_COVERAGE_SMOKE_SECRET: hostileEnvironmentValue,
-          UNIT_TEST_IDE_DEBUG_PROCESSHOST: "1",
-          UNIT_TEST_IDE_PROCESSHOST_DEBUG_FILE: processHostDebugFile,
           LLVM_PROFILE_FILE: join(fixture.root, `${hostileEnvironmentValue}-%p.profraw`)
         }
       });
-      child.stderr.on("data", (chunk: Buffer | string) => diagnostics.push(String(chunk)));
-      return child;
     },
     async connect(endpoint) {
       const socket = createConnection(endpoint);
@@ -659,21 +652,12 @@ function buildEvidence(
 
 test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed TestRun report", async (t) => {
   assert.equal(process.platform, "win32", "coverage service smoke is Windows-only");
-  const processHostDebugFile = join(
-    resolve(import.meta.dirname, "../../../.."),
-    ".native-e2e",
-    "runtime",
-    "windows-processhost-debug.log"
-  );
   await rm(evidencePath, { force: true });
-  await mkdir(dirname(processHostDebugFile), { recursive: true });
-  await rm(processHostDebugFile, { force: true });
   let fixture: Fixture | undefined;
   let manager: ServiceManager | undefined;
   let offlineBoundary: WindowsNativeOfflineBoundary | undefined;
   const wire = new ProtocolWireCapture();
   const tokens: string[] = [];
-  const diagnostics: string[] = [];
   const hostileEnvironmentValue = `coverage-smoke-secret-${randomBytes(12).toString("hex")}`;
   const sensitive: string[] = [hostileEnvironmentValue];
 
@@ -758,8 +742,6 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
             installedFixture,
             wire,
             tokens,
-            diagnostics,
-            processHostDebugFile,
             hostileEnvironmentValue,
             useCMakeBundle,
             installedBoundary.registrationEnvironment
@@ -806,40 +788,11 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
         const run = await waitForCoverageFinished(session.client, started);
         const coverageFinishedAt = new Date();
         assert.equal(run.status, "finished");
-        const testRun = await session.client.getTestRun(run.testRunId);
-        const processHostDiagnostics = await readFile(processHostDebugFile, "utf8").catch(() => "");
-        let taskSnapshot: ProtocolTaskSnapshot | undefined;
-        let taskSnapshotError: string | undefined;
-        try {
-          taskSnapshot = await session.client.getTask(run.taskId);
-        } catch (error) {
-          taskSnapshotError = String(error);
-        }
-        if (run.outcome !== "available") {
-          console.error("coverage-debug-status", JSON.stringify({
-            outcome: run.outcome,
-            reason: run.reason,
-            manager: manager?.status,
-            testRun: {
-              status: testRun.status,
-              outcome: testRun.outcome,
-              incomplete: testRun.incomplete,
-              summary: testRun.summary
-            },
-            task: taskSnapshot === undefined ? { error: taskSnapshotError } : {
-              status: taskSnapshot.status,
-              outcome: taskSnapshot.outcome,
-              errorCode: taskSnapshot.errorCode,
-              errorMessage: taskSnapshot.errorMessage
-            },
-            serviceDiagnostics: diagnostics.join(""),
-            processHostDiagnostics
-          }));
-        }
         assert.equal(run.outcome, "available");
         assert.equal(run.reason, undefined);
         assert.ok(run.reportId);
 
+        const testRun = await session.client.getTestRun(run.testRunId);
         assert.equal(testRun.status, "completed");
         assert.equal(testRun.outcome, "failed");
         assert.equal(testRun.incomplete, false);
@@ -930,16 +883,6 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
       publish: (bytes) => publishEvidenceAtomically(evidencePath, bytes)
     });
   } catch (error) {
-    const redactDiagnostics = (value: string): string => sensitive.reduce(
-      (result, secret) => result.split(secret).join("[REDACTED]"),
-      value
-    );
-    const processHostDiagnostics = await readFile(processHostDebugFile, "utf8").catch(() => "");
-    console.error("coverage-debug-failure", JSON.stringify({
-      error: redactDiagnostics(String(error)),
-      serviceDiagnostics: redactDiagnostics(diagnostics.join("")),
-      processHostDiagnostics: redactDiagnostics(processHostDiagnostics)
-    }));
     throw redactServiceError(error, sensitive);
   }
 });
