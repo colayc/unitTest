@@ -784,16 +784,17 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
           repeatCount: 1,
           timeoutMs: NATIVE_TIMEOUT_MS
         };
+        const eventSubscription = await session.client.subscribeEvents(0);
         const started = await session.client.startCoverage(request);
         const run = await waitForCoverageFinished(session.client, started);
         const coverageFinishedAt = new Date();
         assert.equal(run.status, "finished");
         const testRun = await session.client.getTestRun(run.testRunId);
+        const taskSnapshot = await session.client.getTask(run.taskId);
         const taskEvents: Array<{ event: string; payload: unknown }> = [];
-        const subscription = await session.client.subscribeEvents(0);
         for (;;) {
           const next = await Promise.race([
-            subscription.next(),
+            eventSubscription.next(),
             delay(100).then(() => undefined)
           ]);
           if (next === undefined || next.done) break;
@@ -801,7 +802,7 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
             taskEvents.push({ event: next.value.event, payload: next.value.payload });
           }
         }
-        subscription.close();
+        eventSubscription.close();
         if (run.outcome !== "available") {
           console.error("coverage-debug-status", JSON.stringify({
             outcome: run.outcome,
@@ -812,6 +813,14 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
               outcome: testRun.outcome,
               incomplete: testRun.incomplete,
               summary: testRun.summary
+            },
+            task: {
+              status: taskSnapshot.status,
+              outcome: taskSnapshot.outcome,
+              errorCode: taskSnapshot.errorCode,
+              errorMessage: taskSnapshot.errorMessage,
+              activeStep: "activeStep" in taskSnapshot ? taskSnapshot.activeStep : undefined,
+              steps: "steps" in taskSnapshot ? taskSnapshot.steps : undefined
             },
             taskEvents
           }));
