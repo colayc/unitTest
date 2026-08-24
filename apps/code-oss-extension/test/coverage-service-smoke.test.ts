@@ -794,6 +794,13 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
         const coverageFinishedAt = new Date();
         assert.equal(run.status, "finished");
         const testRun = await session.client.getTestRun(run.testRunId);
+        let taskSnapshot: ProtocolTaskSnapshot | undefined;
+        let taskSnapshotError: string | undefined;
+        try {
+          taskSnapshot = await session.client.getTask(run.taskId);
+        } catch (error) {
+          taskSnapshotError = String(error);
+        }
         if (run.outcome !== "available") {
           console.error("coverage-debug-status", JSON.stringify({
             outcome: run.outcome,
@@ -804,6 +811,12 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
               outcome: testRun.outcome,
               incomplete: testRun.incomplete,
               summary: testRun.summary
+            },
+            task: taskSnapshot === undefined ? { error: taskSnapshotError } : {
+              status: taskSnapshot.status,
+              outcome: taskSnapshot.outcome,
+              errorCode: taskSnapshot.errorCode,
+              errorMessage: taskSnapshot.errorMessage
             },
             serviceDiagnostics: diagnostics.join("")
           }));
