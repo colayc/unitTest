@@ -1407,6 +1407,7 @@ func (m *Manager) tripPublisher(active map[string]*activeTask) {
 	if m.publisherFailed {
 		return
 	}
+	_, _ = fmt.Fprintf(os.Stderr, "task-publisher-trip\n%s", debug.Stack())
 	m.publisherFailed = true
 	m.healthy.Store(false)
 	if !m.storageFailed {
