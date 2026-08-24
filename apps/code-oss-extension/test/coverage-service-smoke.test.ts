@@ -930,6 +930,16 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
       publish: (bytes) => publishEvidenceAtomically(evidencePath, bytes)
     });
   } catch (error) {
+    const redactDiagnostics = (value: string): string => sensitive.reduce(
+      (result, secret) => result.split(secret).join("[REDACTED]"),
+      value
+    );
+    const processHostDiagnostics = await readFile(processHostDebugFile, "utf8").catch(() => "");
+    console.error("coverage-debug-failure", JSON.stringify({
+      error: redactDiagnostics(String(error)),
+      serviceDiagnostics: redactDiagnostics(diagnostics.join("")),
+      processHostDiagnostics: redactDiagnostics(processHostDiagnostics)
+    }));
     throw redactServiceError(error, sensitive);
   }
 });
