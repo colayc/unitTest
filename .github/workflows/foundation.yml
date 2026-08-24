@@ -133,6 +133,12 @@ jobs:
           path: .native-e2e/artifacts/windows/coverage-bundle-report.json
           if-no-files-found: error
       - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-debug-windows-${{ github.run_attempt }}
+          path: .native-e2e/artifacts/windows/coverage-debug.json
+          if-no-files-found: ignore
+      - if: always()
         run: git diff --exit-code
 
   verify-linux:

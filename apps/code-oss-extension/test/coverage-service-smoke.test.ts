@@ -80,6 +80,13 @@ const firewallGuardianStateRoot = join(
 const COVERAGE_PROFILE_ID = "coverage-clang-cl";
 const PROJECT_ID = "coverage-fixture";
 const TEST_CONTAINER = "coverage-tests";
+const coverageDebugPath = join(
+  repositoryRoot,
+  ".native-e2e",
+  "artifacts",
+  "windows",
+  "coverage-debug.json"
+);
 // The Windows self-hosted runner may spend several minutes on the first
 // instrumented build/profile collection before the coverage task reaches its
 // terminal state.
@@ -809,6 +816,13 @@ test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed 
             taskError,
             serviceDiagnostics: diagnostics.join("")
           }));
+          await mkdir(join(repositoryRoot, ".native-e2e", "artifacts", "windows"), { recursive: true });
+          await writeFile(coverageDebugPath, JSON.stringify({
+            outcome: run.outcome,
+            reason: run.reason,
+            taskError,
+            serviceDiagnostics: diagnostics.join("")
+          }) + "\n", "utf8");
         }
         assert.equal(run.outcome, "available");
         assert.equal(run.reason, undefined);
