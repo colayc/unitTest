@@ -122,7 +122,9 @@ try {
     $evidence.packageSha256 -cne $PackageSha256 -or
     $evidence.manifestSha256 -cne $ManifestSha256 -or
     $evidence.version -cne $Version -or
+    $evidence.rollbackVersion -cne $BaselineVersion -or
     $evidence.outcomes.upgradeLaunch -cne 'failed-as-expected' -or
+    $evidence.outcomes.rollbackLaunch -cne 'pass' -or
     $evidence.outcomes.packageResidueAbsent -ne 'pass'
   ) { throw 'Install smoke evidence failed closed validation' }
 } finally {
