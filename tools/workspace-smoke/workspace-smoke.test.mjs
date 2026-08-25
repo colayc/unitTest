@@ -75,6 +75,24 @@ test("workspace pins supported toolchains", async () => {
   const manifest = JSON.parse(await readFile("package.json", "utf8"));
   assert.equal(manifest.packageManager, "pnpm@11.4.0");
   assert.equal(manifest.engines.node, ">=24.18.0 <25");
+  assert.equal(
+    manifest.scripts["prepare:release-manifest"],
+    "node tools/release/manifest.mjs --config tools/release/release-config.json",
+  );
+});
+
+test("release manifest contract stays pinned to the repository product identity", async () => {
+  const [config, schema] = await Promise.all([
+    JSON.parse(await readFile("tools/release/release-config.json", "utf8")),
+    JSON.parse(await readFile("tools/release/manifest.schema.json", "utf8")),
+  ]);
+  assert.deepEqual(config, {
+    schemaVersion: 1,
+    product: "unit-test-ide",
+  });
+  assert.equal(schema.properties.product.const, "unit-test-ide");
+  assert.equal(schema.properties.schemaVersion.const, 1);
+  assert.equal(schema.additionalProperties, false);
 });
 
 test("README contains the complete local verification gate", async () => {

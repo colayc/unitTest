@@ -15,6 +15,7 @@
     "check:coverage-generated": "node tools/coverage-gen/generate.mjs --check",
     "prepare:cmake-bundle": "node tools/cmake-bundle/prepare.mjs",
     "prepare:coverage-bundle": "node tools/coverage-bundle/prepare.mjs",
+    "prepare:release-manifest": "node tools/release/manifest.mjs --config tools/release/release-config.json",
     "check:coverage-bundle": "node tools/coverage-bundle/prepare.mjs --check",
     "test:coverage-gen": "node --test tools/coverage-gen/generate.test.mjs",
     "test:cmake-bundle": "node --test tools/cmake-bundle/prepare.test.mjs",
