@@ -90,11 +90,14 @@ node "$update_script" smoke \
   --manifest-sha256 "$manifest_sha256" \
   --version "$version" \
   --artifact "$target_payload" \
-  --baseline-artifact "$baseline_payload" >/dev/null
+  --baseline-artifact "$baseline_payload" \
+  --baseline-package "$baseline_package" \
+  --baseline-package-sha256 "$baseline_package_sha256" \
+  --baseline-manifest-sha256 "$baseline_manifest_sha256" >/dev/null
 
 node -e '
   const fs = require("node:fs");
-  const [path, packageSha, manifestSha, version, baselineVersion] = process.argv.slice(1);
+  const [path, packageSha, manifestSha, version, baselineVersion, baselinePackageSha, baselineManifestSha] = process.argv.slice(1);
   const value = JSON.parse(fs.readFileSync(path, "utf8"));
-  if (value.platform !== "linux" || value.packageSha256 !== packageSha || value.manifestSha256 !== manifestSha || value.version !== version || value.rollbackVersion !== baselineVersion || value.outcomes?.upgradeLaunch !== "failed-as-expected" || value.outcomes?.rollbackLaunch !== "pass" || value.outcomes?.packageResidueAbsent !== "pass") process.exit(1);
-' "$evidence" "$package_sha256" "$manifest_sha256" "$version" "$baseline_version"
+  if (value.platform !== "linux" || value.packageSha256 !== packageSha || value.manifestSha256 !== manifestSha || value.version !== version || value.rollbackVersion !== baselineVersion || value.rollbackPackageSha256 !== baselinePackageSha || value.rollbackManifestSha256 !== baselineManifestSha || value.outcomes?.upgradeLaunch !== "failed-as-expected" || value.outcomes?.rollbackLaunch !== "pass" || value.outcomes?.packageResidueAbsent !== "pass") process.exit(1);
+' "$evidence" "$package_sha256" "$manifest_sha256" "$version" "$baseline_version" "$baseline_package_sha256" "$baseline_manifest_sha256"

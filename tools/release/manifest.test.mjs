@@ -15,6 +15,12 @@ import {
 } from "./manifest.mjs";
 
 const root = new URL("./", import.meta.url);
+const sourceDateEpoch = "1787616000";
+const generatedAt = "2026-08-25T00:00:00.000Z";
+
+function buildManifest(input, options = {}) {
+  return buildReleaseManifest(input, { sourceDateEpoch, ...options });
+}
 
 function sha256Text(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -91,7 +97,7 @@ test("buildReleaseManifest sorts artifacts deterministically and emits only the 
       validInput(stagingRoot),
     ]);
     const { expectedLicenses, ...input } = fixture;
-    const manifest = await buildReleaseManifest(input);
+    const manifest = await buildManifest(input);
     validate(schema, manifest);
     assert.deepEqual(Object.keys(manifest).sort(), [
       "architecture",
@@ -106,7 +112,7 @@ test("buildReleaseManifest sorts artifacts deterministically and emits only the 
     ]);
     assert.equal(manifest.product, "unit-test-ide");
     assert.equal(manifest.schemaVersion, 1);
-    assert.match(manifest.generatedAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/u);
+    assert.equal(manifest.generatedAt, generatedAt);
     assert.deepEqual(
       manifest.artifacts.map(({ id, relativePath }) => ({ id, relativePath })),
       [
@@ -129,7 +135,7 @@ test("buildReleaseManifest rejects absolute artifact paths and parent traversal"
       void expectedLicenses;
       input.artifacts[0].relativePath = relativePath;
       await assert.rejects(
-        () => buildReleaseManifest(input),
+        () => buildManifest(input),
         /unsafe artifact path/u,
         name,
       );
@@ -143,7 +149,7 @@ test("buildReleaseManifest rejects duplicate artifact ids", async (t) => {
     void expectedLicenses;
     input.artifacts[1].id = input.artifacts[0].id;
     await assert.rejects(
-      () => buildReleaseManifest(input),
+      () => buildManifest(input),
       /duplicate artifact id/u,
     );
   });
@@ -174,7 +180,7 @@ test("buildReleaseManifest rejects intermediate junction or symlink parents", as
       }],
     };
     await assert.rejects(
-      () => buildReleaseManifest(input),
+      () => buildManifest(input),
       /unsafe artifact path/u,
     );
   });
@@ -190,7 +196,7 @@ test("buildReleaseManifest rejects size and digest mismatches", async (t) => {
       void expectedLicenses;
       mutate(input.artifacts[0]);
       await assert.rejects(
-        () => buildReleaseManifest(input),
+        () => buildManifest(input),
         /artifact (?:size|sha256) mismatch/u,
         name,
       );
@@ -207,7 +213,7 @@ test("buildReleaseManifest rejects license size and digest mismatches", async (t
     };
     await writeFile(join(stagingRoot, "licenses", "Python-3.14.6.txt"), "tampered license bytes\n");
     await assert.rejects(
-      () => buildReleaseManifest(input),
+      () => buildManifest(input),
       /license (?:size|sha256) mismatch/u,
     );
   });
@@ -225,6 +231,7 @@ test("release manifest CLI with --config writes the configured output artifact",
   ], {
     cwd: resolve("."),
     encoding: "utf8",
+    env: { ...process.env, SOURCE_DATE_EPOCH: sourceDateEpoch },
     windowsHide: true,
   });
 
@@ -241,7 +248,7 @@ test("schema rejects unknown top-level keys", async (t) => {
     ]);
     const { expectedLicenses, ...buildInput } = input;
     void expectedLicenses;
-    const manifest = await buildReleaseManifest(buildInput);
+    const manifest = await buildManifest(buildInput);
     manifest.unexpected = true;
     const ajv = new Ajv2020({ allErrors: true, strict: true });
     addFormats(ajv);
@@ -254,7 +261,7 @@ test("deterministic manifest bytes omit generatedAt", async (t) => {
   await withStaging(t, async (stagingRoot) => {
     const { expectedLicenses, ...input } = await validInput(stagingRoot);
     void expectedLicenses;
-    const manifest = await buildReleaseManifest(input);
+    const manifest = await buildManifest(input);
     const later = { ...manifest, generatedAt: "2026-08-26T00:00:00.000Z" };
     assert.equal(
       toDeterministicManifestBytes(manifest).toString("utf8"),
@@ -263,5 +270,29 @@ test("deterministic manifest bytes omit generatedAt", async (t) => {
     const parsed = JSON.parse(toDeterministicManifestBytes(manifest).toString("utf8"));
     assert.equal(parsed.generatedAt, undefined);
     assert.equal(parsed.product, "unit-test-ide");
+  });
+});
+
+test("release manifest generation fails closed without a reproducible source epoch", async (t) => {
+  await withStaging(t, async (stagingRoot) => {
+    const { expectedLicenses, ...input } = await validInput(stagingRoot);
+    void expectedLicenses;
+    await assert.rejects(
+      () => buildReleaseManifest(input, { sourceDateEpoch: undefined }),
+      /SOURCE_DATE_EPOCH/u,
+    );
+  });
+});
+
+test("identical inputs and SOURCE_DATE_EPOCH yield identical full manifest bytes", async (t) => {
+  await withStaging(t, async (stagingRoot) => {
+    const { expectedLicenses, ...input } = await validInput(stagingRoot);
+    void expectedLicenses;
+    const first = await buildManifest(input);
+    const second = await buildManifest(input);
+    const serialize = (value) => Buffer.from(`${JSON.stringify(value, null, 2)}\n`);
+
+    assert.equal(first.generatedAt, generatedAt);
+    assert.deepEqual(serialize(first), serialize(second));
   });
 });

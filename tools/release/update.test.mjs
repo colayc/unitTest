@@ -14,6 +14,11 @@ import {
 } from "./update.mjs";
 
 const sourceCommit = "a".repeat(40);
+const baselineSourceCommit = "d".repeat(40);
+const platform = process.platform === "win32" ? "windows" : "linux";
+const launcherRelativePath = platform === "windows" ? "app/code-oss.exe" : "app/code-oss";
+const generatedAt = "2026-08-25T00:00:00.000Z";
+const baselineGeneratedAt = "2026-08-24T00:00:00.000Z";
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -26,10 +31,15 @@ async function writeFixtureFile(root, relativePath, value) {
   return filePath;
 }
 
-async function createArtifact(root, version, { launcher = `launch ${version}\n`, launcherSource } = {}) {
+async function createArtifact(root, version, {
+  launcher = `launch ${version}\n`,
+  launcherSource,
+  manifestGeneratedAt = generatedAt,
+  manifestSourceCommit = sourceCommit,
+} = {}) {
   const artifactRoot = join(root, `artifact-${version}`);
   const notice = `license ${version}\n`;
-  const launcherPath = join(artifactRoot, "app", "code-oss");
+  const launcherPath = join(artifactRoot, ...launcherRelativePath.split("/"));
   await mkdir(dirname(launcherPath), { recursive: true });
   if (launcherSource === undefined) await writeFile(launcherPath, launcher);
   else await copyFile(launcherSource, launcherPath);
@@ -40,13 +50,13 @@ async function createArtifact(root, version, { launcher = `launch ${version}\n`,
     schemaVersion: 1,
     product: "unit-test-ide",
     version,
-    platform: process.platform === "win32" ? "windows" : "linux",
+    platform,
     architecture: "x64",
-    sourceCommit,
+    sourceCommit: manifestSourceCommit,
     artifacts: [{
       id: "app-code-oss",
       kind: "runtime",
-      relativePath: "app/code-oss",
+      relativePath: launcherRelativePath,
       size: launcherBytes.length,
       sha256: sha256(launcherBytes),
       executable: true,
@@ -56,7 +66,7 @@ async function createArtifact(root, version, { launcher = `launch ${version}\n`,
       size: Buffer.byteLength(notice),
       sha256: sha256(notice),
     }],
-    generatedAt: "2026-08-25T00:00:00.000Z",
+    generatedAt: manifestGeneratedAt,
   };
   await writeFile(join(artifactRoot, "release-manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
   return artifactRoot;
@@ -82,7 +92,7 @@ test("installVersion publishes a verified first install before switching current
     assert.deepEqual(result, { previousVersion: null, version: "1.0.0" });
     assert.equal(await currentVersion(packageRoot), "1.0.0");
     assert.equal(
-      await readFile(join(packageRoot, "versions", "1.0.0", "app", "code-oss"), "utf8"),
+      await readFile(join(packageRoot, "versions", "1.0.0", ...launcherRelativePath.split("/")), "utf8"),
       "launch 1.0.0\n",
     );
   });
@@ -93,21 +103,29 @@ test("package-backed production smoke corrupts the target then really launches t
     const launcherSource = process.platform === "win32"
       ? join(process.env.SystemRoot, "System32", "mountvol.exe")
       : "/usr/bin/true";
-    const baselineArtifact = await createArtifact(root, "1.0.0", { launcherSource });
+    const baselineArtifact = await createArtifact(root, "1.0.0", {
+      launcherSource,
+      manifestGeneratedAt: baselineGeneratedAt,
+      manifestSourceCommit: baselineSourceCommit,
+    });
     const artifact = await createArtifact(root, "2.0.0", { launcherSource });
-    const sourceLauncher = join(artifact, "app", "code-oss");
+    const sourceLauncher = join(artifact, ...launcherRelativePath.split("/"));
     const sourceBytes = await readFile(sourceLauncher);
     const packagePath = await writeFixtureFile(root, "downloads/unit-test-ide-2.0.0.package", "real package bytes\n");
+    const baselinePackagePath = await writeFixtureFile(root, "downloads/unit-test-ide-1.0.0.package", "real baseline package bytes\n");
     const evidencePath = join(root, "install-smoke.json");
 
     await runSmokeLifecycle({
       artifact,
       baselineArtifact,
+      baselineManifestSha256: sha256(await readFile(join(baselineArtifact, "release-manifest.json"))),
+      baselinePackagePath,
+      baselinePackageSha256: sha256(await readFile(baselinePackagePath)),
       evidence: evidencePath,
       manifestSha256: sha256(await readFile(join(artifact, "release-manifest.json"))),
       packagePath,
       packageSha256: sha256(await readFile(packagePath)),
-      platform: process.platform === "win32" ? "windows" : "linux",
+      platform,
       root: join(root, "disposable-smoke-root"),
       version: "2.0.0",
     });
@@ -126,7 +144,7 @@ test("installVersion leaves current unchanged and publishes no version when veri
     const packageRoot = join(root, "package-owned");
     await installVersion(packageRoot, await createArtifact(root, "1.0.0"));
     const invalidUpgrade = await createArtifact(root, "2.0.0");
-    await writeFile(join(invalidUpgrade, "app", "code-oss"), "tampered\n");
+    await writeFile(join(invalidUpgrade, ...launcherRelativePath.split("/")), "tampered\n");
 
     await assert.rejects(
       () => installVersion(packageRoot, invalidUpgrade),
@@ -193,7 +211,7 @@ test("rollbackVersion recovers after a simulated launch failure and is repeatabl
     await installVersion(packageRoot, await createArtifact(root, "2.0.0", { launcher: "launch failure\n" }));
 
     const launchFailed = (await readFile(
-      join(packageRoot, "versions", "2.0.0", "app", "code-oss"),
+      join(packageRoot, "versions", "2.0.0", ...launcherRelativePath.split("/")),
       "utf8",
     )).includes("failure");
     assert.equal(launchFailed, true);
@@ -221,7 +239,7 @@ test("rollbackVersion refuses a tampered installed version without changing curr
     const packageRoot = join(root, "package-owned");
     await installVersion(packageRoot, await createArtifact(root, "1.0.0"));
     await installVersion(packageRoot, await createArtifact(root, "2.0.0"));
-    await writeFile(join(packageRoot, "versions", "1.0.0", "app", "code-oss"), "tampered\n");
+    await writeFile(join(packageRoot, "versions", "1.0.0", ...launcherRelativePath.split("/")), "tampered\n");
 
     await assert.rejects(
       () => rollbackVersion(packageRoot, "1.0.0"),
@@ -303,21 +321,30 @@ test("installVersion rejects a redirected package-owned versions directory", asy
 
 test("package-backed smoke lifecycle emits digest-bound non-secret evidence", async (t) => {
   await withTemporaryRoot(t, async (root) => {
-    const baselineArtifact = await createArtifact(root, "1.0.0");
+    const baselineArtifact = await createArtifact(root, "1.0.0", {
+      manifestGeneratedAt: baselineGeneratedAt,
+      manifestSourceCommit: baselineSourceCommit,
+    });
     const artifact = await createArtifact(root, "2.0.0");
     const packagePath = await writeFixtureFile(root, "downloads/unit-test-ide-2.0.0.package", "real package bytes\n");
+    const baselinePackagePath = await writeFixtureFile(root, "downloads/unit-test-ide-1.0.0.package", "real baseline package bytes\n");
     const packageSha256 = sha256(await readFile(packagePath));
     const manifestSha256 = sha256(await readFile(join(artifact, "release-manifest.json")));
+    const baselinePackageSha256 = sha256(await readFile(baselinePackagePath));
+    const baselineManifestSha256 = sha256(await readFile(join(baselineArtifact, "release-manifest.json")));
     const disposableRoot = join(root, "disposable-smoke-root");
     const evidencePath = join(root, "install-smoke.json");
     await runSmokeLifecycle({
       artifact,
       baselineArtifact,
+      baselineManifestSha256,
+      baselinePackagePath,
+      baselinePackageSha256,
       evidence: evidencePath,
       manifestSha256,
       packagePath,
       packageSha256,
-      platform: process.platform === "win32" ? "windows" : "linux",
+      platform,
       root: disposableRoot,
       version: "2.0.0",
     }, {
@@ -329,12 +356,17 @@ test("package-backed smoke lifecycle emits digest-bound non-secret evidence", as
       "schemaVersion",
       "product",
       "platform",
+      "architecture",
       "sourceCommit",
+      "generatedAt",
       "packageFilename",
       "version",
       "packageSha256",
       "manifestSha256",
       "rollbackVersion",
+      "rollbackPackageFilename",
+      "rollbackPackageSha256",
+      "rollbackManifestSha256",
       "outcomes",
     ]);
     assert.equal(evidence.packageFilename, "unit-test-ide-2.0.0.package");
@@ -342,6 +374,11 @@ test("package-backed smoke lifecycle emits digest-bound non-secret evidence", as
     assert.equal(evidence.packageSha256, packageSha256);
     assert.equal(evidence.manifestSha256, manifestSha256);
     assert.equal(evidence.rollbackVersion, "1.0.0");
+    assert.equal(evidence.architecture, "x64");
+    assert.equal(evidence.generatedAt, generatedAt);
+    assert.equal(evidence.rollbackPackageFilename, "unit-test-ide-1.0.0.package");
+    assert.equal(evidence.rollbackPackageSha256, baselinePackageSha256);
+    assert.equal(evidence.rollbackManifestSha256, baselineManifestSha256);
     assert.deepEqual(evidence.outcomes, {
       install: "pass",
       launchHandshake: "pass",
@@ -362,17 +399,23 @@ test("package-backed smoke lifecycle emits digest-bound non-secret evidence", as
 for (const [label, omittedFlag] of [
   ["package input", "--package"],
   ["package digest", "--package-sha256"],
+  ["baseline package", "--baseline-package"],
+  ["baseline package digest", "--baseline-package-sha256"],
+  ["baseline manifest digest", "--baseline-manifest-sha256"],
   ["evidence output", "--evidence"],
 ]) {
   test(`smoke CLI fails closed when ${label} is absent`, () => {
     const values = new Map([
       ["--artifact", "target"],
       ["--baseline-artifact", "baseline"],
+      ["--baseline-manifest-sha256", "c".repeat(64)],
+      ["--baseline-package", "baseline.msix"],
+      ["--baseline-package-sha256", "d".repeat(64)],
       ["--evidence", "evidence.json"],
       ["--manifest-sha256", "a".repeat(64)],
       ["--package", "package.msix"],
       ["--package-sha256", "b".repeat(64)],
-      ["--platform", process.platform === "win32" ? "windows" : "linux"],
+      ["--platform", platform],
       ["--root", "smoke-root"],
       ["--version", "2.0.0"],
     ]);

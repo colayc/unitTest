@@ -21,7 +21,10 @@ $packageFootprintEntries = @(
   'AppxSignature.p7x'
 )
 $storeLogoPath = 'Assets/StoreLogo.png'
+$square150LogoPath = 'Assets/Square150x150Logo.png'
+$square44LogoPath = 'Assets/Square44x44Logo.png'
 $storeLogoBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7+4xQAAAAASUVORK5CYII='
+$manifestValidator = Join-Path (Split-Path -Parent $PSScriptRoot) 'validate-release-manifest.mjs'
 
 function Fail-Release {
   param(
@@ -266,7 +269,21 @@ $packagePath = Resolve-RealFile -Path $Package -Label 'package'
 $manifestPath = Resolve-RealFile -Path $Manifest -Label 'manifest'
 $stagingRoot = Split-Path -Parent $manifestPath
 $externalManifestBytes = [IO.File]::ReadAllBytes($manifestPath)
+$nodePath = (Get-Command -Name 'node.exe' -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+if ([string]::IsNullOrWhiteSpace($nodePath)) {
+  Fail-Release -Code 'RELEASE_TOOL_MISSING' -Message 'node.exe is unavailable for release manifest validation'
+}
+$manifestValidation = Invoke-ExternalTool -FilePath $nodePath -Arguments @($manifestValidator, '--manifest', $manifestPath, '--platform', 'windows')
+if ($manifestValidation.ExitCode -ne 0) {
+  Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message "release manifest schema/semantics are invalid: $($manifestValidation.Combined.Trim())"
+}
 $releaseManifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+$launcherArtifacts = @($releaseManifest.artifacts | Where-Object {
+    [string]$_.relativePath -ceq 'app/code-oss.exe' -and $_.executable -eq $true
+  })
+if ($launcherArtifacts.Count -ne 1) {
+  Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message 'release manifest must bind exactly one executable app/code-oss.exe launcher'
+}
 
 $expectedPayloads = [ordered]@{}
 foreach ($artifact in $releaseManifest.artifacts) {
@@ -307,6 +324,12 @@ $expectedPayloads['release-manifest.json'] = [pscustomobject]@{
 $expectedPayloads[$storeLogoPath] = [pscustomobject]@{
   Bytes = Get-PlaceholderLogoBytes
   Label = 'packaged logo'
+}
+foreach ($logoPath in @($square150LogoPath, $square44LogoPath)) {
+  $expectedPayloads[$logoPath] = [pscustomobject]@{
+    Bytes = Get-PlaceholderLogoBytes
+    Label = 'packaged logo'
+  }
 }
 
 $archive = [System.IO.Compression.ZipFile]::OpenRead($packagePath)
@@ -392,6 +415,14 @@ try {
   $dependencies = $embeddedAppxManifest.Package.Dependencies
   if ($null -eq $dependencies -or $null -eq $dependencies.TargetDeviceFamily) {
     Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message 'AppxManifest.xml is missing the required dependency declaration'
+  }
+  $applications = $embeddedAppxManifest.Package.SelectSingleNode("*[local-name()='Applications']")
+  $application = if ($null -ne $applications) { $applications.SelectSingleNode("*[local-name()='Application']") } else { $null }
+  if ($null -eq $application) {
+    Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message 'AppxManifest.xml is missing a runnable application entry point'
+  }
+  if ([string]$application.Executable -cne 'app\code-oss.exe' -or [string]$application.EntryPoint -cne 'Windows.FullTrustApplication') {
+    Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message 'AppxManifest.xml application entry point does not target the staged Code-OSS executable'
   }
 } finally {
   $archive.Dispose()

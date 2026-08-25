@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join, posix, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { buildReleaseManifest } from "./manifest.mjs";
+import { normalizeTreeTimestamps, resolveSourceDateEpoch } from "./release-reproducibility.mjs";
 
 const toolDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(toolDirectory, "..", "..");
@@ -191,8 +192,8 @@ function artifactKind(relativePath) {
   if (relativePath.startsWith("app/extensions/unit-test-ide/")) return "extension";
   if (relativePath.startsWith("bundles/cmake/")) return "bundle-cmake";
   if (relativePath.startsWith("bundles/coverage/")) return "bundle-coverage";
-  if (relativePath === "app/code-oss") return "runtime";
-  if (relativePath === "service/unit-test-service") return "service";
+  if (relativePath === "app/code-oss" || relativePath === "app/code-oss.exe") return "runtime";
+  if (relativePath === "service/unit-test-service" || relativePath === "service/unit-test-service.exe") return "service";
   return "payload";
 }
 
@@ -206,7 +207,9 @@ function artifactId(relativePath, index) {
 
 function executableArtifact(relativePath, mode) {
   return relativePath === "app/code-oss"
+    || relativePath === "app/code-oss.exe"
     || relativePath === "service/unit-test-service"
+    || relativePath === "service/unit-test-service.exe"
     || (mode & 0o111) !== 0;
 }
 
@@ -298,12 +301,14 @@ function normalizeInput(input) {
     outRoot: input.outRoot,
     extensionRoot: input.extensionRoot ?? join(repositoryRoot, "apps", "code-oss-extension"),
     sourceCommit: input.sourceCommit ?? currentSourceCommit(input.repositoryRoot ?? repositoryRoot),
+    sourceDateEpoch: input.sourceDateEpoch,
     repositoryRoot: input.repositoryRoot ?? repositoryRoot,
   };
 }
 
 export async function stageRelease(input) {
   const normalized = normalizeInput(input);
+  const sourceEpoch = resolveSourceDateEpoch(normalized.sourceDateEpoch);
   const [codeOss, service, cmakeRoot, coverageRoot, extensionRoot] = await Promise.all([
     validateRealFile(normalized.codeOss, "code-oss runtime"),
     validateRealFile(normalized.service, "service binary"),
@@ -330,8 +335,10 @@ export async function stageRelease(input) {
 
   const temporaryRoot = await mkdtemp(join(parentRoot, `.stage-${normalized.platform}-${normalized.architecture}-`));
   try {
-    await copyRegularFile(codeOss.path, join(temporaryRoot, "app", "code-oss"));
-    await copyRegularFile(service.path, join(temporaryRoot, "service", "unit-test-service"));
+    const runtimeName = normalized.platform === "windows" ? "code-oss.exe" : "code-oss";
+    const serviceName = normalized.platform === "windows" ? "unit-test-service.exe" : "unit-test-service";
+    await copyRegularFile(codeOss.path, join(temporaryRoot, "app", runtimeName));
+    await copyRegularFile(service.path, join(temporaryRoot, "service", serviceName));
     await copyRegularFile(extensionManifest.path, join(temporaryRoot, "app", "extensions", "unit-test-ide", "package.json"));
     await copyTree(extensionDist, join(temporaryRoot, "app", "extensions", "unit-test-ide", "dist"));
     await copyTree(cmakeRoot, join(temporaryRoot, "bundles", "cmake"));
@@ -350,9 +357,10 @@ export async function stageRelease(input) {
       sourceCommit: normalized.sourceCommit,
       artifacts,
       licenses,
-    });
+    }, { sourceDateEpoch: sourceEpoch.seconds });
     const manifestPath = join(temporaryRoot, "release-manifest.json");
     await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    await normalizeTreeTimestamps(temporaryRoot, sourceEpoch);
     await rename(temporaryRoot, finalRoot);
     return {
       manifest,
