@@ -740,6 +740,18 @@ jobs:
               process.exit(1);
             }
           '
+      - id: canonical-release-version
+        name: Export canonical qualified release version
+        shell: bash
+        env:
+          LINUX_RELEASE_VERSION: ${{ needs.package-linux.outputs.version }}
+          WINDOWS_RELEASE_VERSION: ${{ needs.package-windows.outputs.version }}
+        run: |
+          if [[ "$LINUX_RELEASE_VERSION" != "$WINDOWS_RELEASE_VERSION" ]]; then
+            echo "qualified platform versions diverged" >&2
+            exit 1
+          fi
+          echo "version=$WINDOWS_RELEASE_VERSION" >> "$GITHUB_OUTPUT"
       - name: Stage qualified release files
         shell: bash
         run: |
@@ -761,6 +773,6 @@ jobs:
       - name: Publish qualified release artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: qualified-release-${{ needs.package-windows.outputs.version }}-${{ github.run_attempt }}
+          name: qualified-release-${{ steps.canonical-release-version.outputs.version }}-${{ github.run_attempt }}
           path: .release/qualified
           if-no-files-found: error
