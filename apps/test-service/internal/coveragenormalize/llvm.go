@@ -116,7 +116,7 @@ func NormalizeLLVM(input LLVMInput) (coveragemodelv1.CoverageDocumentV1, []Sourc
 }
 
 func validateLLVMExport(value coverageparserllvm.Export, limits Limits) error {
-	if !llvmMajorTwo(value.Version) || int64(len(value.Files)) > limits.MaxFiles {
+	if !supportedLLVMVersion(value.Version) || int64(len(value.Files)) > limits.MaxFiles {
 		if int64(len(value.Files)) > limits.MaxFiles {
 			return ErrLimitExceeded
 		}
@@ -158,9 +158,9 @@ func validMetric(value coverageparserllvm.Metric) bool {
 	return value.Covered >= 0 && value.Covered <= value.Total && value.Total <= coveragedomain.MaxSafeInteger
 }
 
-func llvmMajorTwo(value string) bool {
+func supportedLLVMVersion(value string) bool {
 	parts := strings.Split(value, ".")
-	if len(parts) != 3 || parts[0] != "2" {
+	if len(parts) != 3 || (parts[0] != "2" && parts[0] != "3") {
 		return false
 	}
 	for _, part := range parts {

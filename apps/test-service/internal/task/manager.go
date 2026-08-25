@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,6 +22,8 @@ const (
 	maxOutputBlock          = 16 * 1024
 	maxPersistedOutput      = 4 * 1024 * 1024
 )
+
+var nativePathInTaskOutput = regexp.MustCompile(`(?i)(^|[\s"'(=:\[{])(?:file:///{0,2})?[a-z]:[\\/][^\s"'<>]+`)
 
 type ManagerConfig struct {
 	Store               Store
@@ -1117,6 +1120,10 @@ func (m *Manager) persistDiagnostics(
 	active map[string]*activeTask,
 ) {
 	for _, value := range values {
+		value.FileURI = publicDiagnosticURI(value.FileURI)
+		for index := range value.Related {
+			value.Related[index].FileURI = publicDiagnosticURI(value.Related[index].FileURI)
+		}
 		value.TaskID = current.task.ID
 		if value.StepID == "" {
 			value.StepID = current.task.ActiveStep
@@ -1157,6 +1164,17 @@ func (m *Manager) persistDiagnostics(
 	}
 }
 
+func publicDiagnosticURI(value string) string {
+	lower := strings.ToLower(value)
+	if strings.HasPrefix(lower, "file:///") && len(value) > len("file:///")+2 {
+		drive := value[len("file:///")]
+		if ((drive >= 'a' && drive <= 'z') || (drive >= 'A' && drive <= 'Z')) && value[len("file:///")+1] == ':' {
+			return "workspace:///"
+		}
+	}
+	return value
+}
+
 func (m *Manager) armFlush(current *activeTask) {
 	current.flushPending = true
 	current.flushToken++
@@ -1183,6 +1201,7 @@ func (m *Manager) flushOutput(current *activeTask, active map[string]*activeTask
 	current.bufferedBytes = 0
 	for _, segment := range segments {
 		for _, text := range validTextBlocks(segment.data) {
+			text = redactNativeTaskOutput(text)
 			payload := eventDraft(current.task.ID, EventTaskOutput, m.clock.Now(), map[string]any{
 				"stepId":    current.task.ActiveStep,
 				"stream":    segment.stream,
@@ -1202,6 +1221,13 @@ func (m *Manager) flushOutput(current *activeTask, active map[string]*activeTask
 		}
 		current.persistedBytes += len(segment.data)
 	}
+}
+
+func redactNativeTaskOutput(value string) string {
+	if !strings.Contains(value, ":") {
+		return value
+	}
+	return nativePathInTaskOutput.ReplaceAllString(value, "$1[redacted-path]")
 }
 
 func validTextBlocks(data []byte) []string {

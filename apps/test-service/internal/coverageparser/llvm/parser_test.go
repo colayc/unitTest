@@ -69,7 +69,7 @@ func TestParseLLVMRejectsMalformedDuplicateUnknownAndUnsafeValues(t *testing.T) 
 		"unknown root":       []byte(strings.Replace(valid, `"type":`, `"unknown":0,"type":`, 1)),
 		"unknown file":       []byte(strings.Replace(valid, `"filename":`, `"unknown":0,"filename":`, 1)),
 		"unknown summary":    []byte(strings.Replace(valid, `"lines":{`, `"unknown":0,"lines":{`, 1)),
-		"unsupported major":  []byte(strings.Replace(valid, `"2.0.1"`, `"3.0.0"`, 1)),
+		"unsupported major":  []byte(strings.Replace(valid, `"2.0.1"`, `"4.0.0"`, 1)),
 		"wrong type":         []byte(strings.Replace(valid, `"llvm.coverage.json.export"`, `"other"`, 1)),
 		"negative integer":   []byte(strings.Replace(valid, `[2,1,3,true`, `[2,1,-1,true`, 1)),
 		"floating integer":   []byte(strings.Replace(valid, `[2,1,3,true`, `[2,1,3.5,true`, 1)),
@@ -209,6 +209,30 @@ func TestParseLLVMRejectsSemanticallyInvalidTuplesAndSummaries(t *testing.T) {
 				t.Fatalf("Parse() returned partial export %#v", got)
 			}
 		})
+	}
+}
+
+func TestParseLLVMAllowsZeroLengthFunctionRegions(t *testing.T) {
+	simple := readFixture(t, "simple.json")
+	encoded := bytes.Replace(
+		simple,
+		[]byte(`[2,1,3,2,5,0,0,0]`),
+		[]byte(`[2,1,2,1,5,0,0,0]`),
+		1,
+	)
+	got, err := Parse(bytes.NewReader(encoded), DefaultLimits())
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if len(got.Files) == 0 {
+		t.Fatal("Parse() returned no files")
+	}
+}
+
+func TestParseLLVMAllowsVersionThree(t *testing.T) {
+	encoded := bytes.Replace(readFixture(t, "simple.json"), []byte(`"2.0.1"`), []byte(`"3.1.0"`), 1)
+	if _, err := Parse(bytes.NewReader(encoded), DefaultLimits()); err != nil {
+		t.Fatalf("Parse() error = %v", err)
 	}
 }
 

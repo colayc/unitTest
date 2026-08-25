@@ -95,6 +95,25 @@ func TestSameCoverageRunIdentityAllowsLifecycleAdvanceButRejectsMutation(t *test
 	}
 }
 
+func TestSameCoverageCatalogAllowsOnlyRevisionChange(t *testing.T) {
+	created := time.Unix(123, 0).UTC()
+	base := testdomain.Catalog{
+		ProjectID: "project", ProfileID: "profile", Revision: "base",
+		GeneratedAt: created,
+	}
+	alternate := base.Clone()
+	alternate.Revision = "coverage"
+	alternate.GeneratedAt = created.Add(time.Second)
+	if !sameCoverageCatalog(base, alternate) {
+		t.Fatal("coverage catalog revision/timestamp change must preserve semantic identity")
+	}
+	mutated := alternate.Clone()
+	mutated.ProjectID = "other"
+	if sameCoverageCatalog(base, mutated) {
+		t.Fatal("coverage catalog project mutation must be rejected")
+	}
+}
+
 func TestCoordinatorDuplicateResumeReturnsTheSingleLiveTask(t *testing.T) {
 	persisted := task.Task{
 		ID:   "11111111111111111111111111111111",

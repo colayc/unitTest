@@ -3,6 +3,7 @@ package testrun
 import (
 	"context"
 	"encoding/json"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 
@@ -15,6 +16,8 @@ const (
 	maxTestOutputEventBytes = 256 * 1024
 	maxTestOutputTotalBytes = 16 * 1024 * 1024
 )
+
+var nativePathInOutput = regexp.MustCompile(`(?i)(^|[\s"'(=:\[{])(?:file:///{0,2})?[a-z]:[\\/][^\s"'<>]+`)
 
 func newDomainEvent(
 	eventType task.EventType,
@@ -120,10 +123,10 @@ func (interpreter *Interpreter) recordOutputEvent(
 		accepted = accepted[:max(remaining, 0)]
 		truncated = true
 	}
-	text := strings.ToValidUTF8(
-		string(accepted),
-		"\uFFFD",
-	)
+	text := strings.ToValidUTF8(string(accepted), "\uFFFD")
+	if strings.Contains(text, ":") {
+		text = nativePathInOutput.ReplaceAllString(text, "$1[redacted-path]")
+	}
 	blocks := boundedEventText(text)
 	if len(blocks) == 0 && truncated {
 		blocks = []string{""}

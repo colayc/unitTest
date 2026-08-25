@@ -94,7 +94,6 @@ jobs:
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && vars.UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED == '1' }}
         env:
           UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS: clang-cl
-          UNIT_TEST_IDE_COVERAGE_DEBUG: ${{ vars.UNIT_TEST_IDE_COVERAGE_DEBUG || '0' }}
         run: pnpm --filter code-oss-extension test:coverage-service-smoke
       - name: Legacy cleanup Windows offline boundary residue
         if: always()
