@@ -1,7 +1,6 @@
-import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { lstat, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, posix, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -24,8 +23,9 @@ const supportedInputKeys = [
   "version",
 ];
 const artifactKeys = ["executable", "id", "kind", "relativePath", "sha256", "size"];
+const releaseConfigKeys = ["inputPath", "outputPath", "product", "schemaVersion"];
 
-let cachedConfig;
+const cachedConfigs = new Map();
 let cachedValidateManifest;
 
 function requirePlainObject(value, name) {
@@ -90,15 +90,31 @@ async function loadJson(path) {
   return JSON.parse(await readFile(path, "utf8"));
 }
 
-async function readReleaseConfig(configPath = defaultConfigPath) {
-  if (configPath === defaultConfigPath && cachedConfig) return cachedConfig;
-  const config = await loadJson(configPath);
+function validateReleaseConfig(config, configPath) {
   requirePlainObject(config, "release config");
-  requireExactKeys(config, ["product", "schemaVersion"], "release config");
+  requireExactKeys(config, releaseConfigKeys, "release config");
   if (config.schemaVersion !== 1 || config.product !== "unit-test-ide") {
     throw new Error("unsupported release config");
   }
-  if (configPath === defaultConfigPath) cachedConfig = config;
+  if (!isPortableRelativePath(config.inputPath)) {
+    throw new Error(`unsafe release config inputPath: ${config.inputPath}`);
+  }
+  if (!isPortableRelativePath(config.outputPath)) {
+    throw new Error(`unsafe release config outputPath: ${config.outputPath}`);
+  }
+  return {
+    schemaVersion: config.schemaVersion,
+    product: config.product,
+    inputPath: resolve(dirname(configPath), ...config.inputPath.split("/")),
+    outputPath: resolve(dirname(configPath), ...config.outputPath.split("/")),
+  };
+}
+
+async function readReleaseConfig(configPath = defaultConfigPath) {
+  const resolvedConfigPath = resolve(configPath);
+  if (cachedConfigs.has(resolvedConfigPath)) return cachedConfigs.get(resolvedConfigPath);
+  const config = validateReleaseConfig(await loadJson(resolvedConfigPath), resolvedConfigPath);
+  cachedConfigs.set(resolvedConfigPath, config);
   return config;
 }
 
@@ -109,6 +125,39 @@ async function manifestValidator() {
   const schema = await loadJson(schemaPath);
   cachedValidateManifest = ajv.compile(schema);
   return cachedValidateManifest;
+}
+
+async function resolvedCheckedPath(rootPath, canonicalRoot, relativePath, label) {
+  let current = rootPath;
+  for (const segment of relativePath.split("/")) {
+    current = join(current, segment);
+    const entryInfo = await lstat(current);
+    if (entryInfo.isSymbolicLink()) {
+      throw new Error(`unsafe ${label} path`);
+    }
+  }
+  const canonicalPath = await realpath(current);
+  if (!withinRoot(canonicalRoot, canonicalPath)) {
+    throw new Error(`unsafe ${label} path`);
+  }
+  return current;
+}
+
+async function validatedLicense(stagingRoot, canonicalRoot, license) {
+  if (!isPortableRelativePath(license)) {
+    throw new Error(`unsafe license path: ${license}`);
+  }
+  const resolvedPath = resolve(stagingRoot, ...license.split("/"));
+  const lexicalRelative = relative(stagingRoot, resolvedPath);
+  if (!withinRoot(stagingRoot, resolvedPath) || lexicalRelative.includes("..")) {
+    throw new Error(`unsafe license path: ${license}`);
+  }
+  const checkedPath = await resolvedCheckedPath(stagingRoot, canonicalRoot, license, "license");
+  const entryInfo = await lstat(checkedPath);
+  if (!entryInfo.isFile()) {
+    throw new Error(`license must be a regular file: ${license}`);
+  }
+  return license;
 }
 
 async function validatedArtifact(stagingRoot, canonicalRoot, artifact) {
@@ -138,19 +187,16 @@ async function validatedArtifact(stagingRoot, canonicalRoot, artifact) {
   if (!withinRoot(stagingRoot, resolvedPath) || lexicalRelative.includes("..")) {
     throw new Error("unsafe artifact path");
   }
-  const entryInfo = await lstat(resolvedPath);
-  if (entryInfo.isSymbolicLink() || !entryInfo.isFile()) {
+  const checkedPath = await resolvedCheckedPath(stagingRoot, canonicalRoot, artifact.relativePath, "artifact");
+  const entryInfo = await lstat(checkedPath);
+  if (!entryInfo.isFile()) {
     throw new Error(`artifact must be a regular file: ${artifact.relativePath}`);
   }
-  const canonicalPath = await realpath(resolvedPath);
-  if (!withinRoot(canonicalRoot, canonicalPath)) {
-    throw new Error("unsafe artifact path");
-  }
-  const actualSize = (await stat(resolvedPath)).size;
+  const actualSize = (await stat(checkedPath)).size;
   if (actualSize !== artifact.size) {
     throw new Error(`artifact size mismatch: ${artifact.id}`);
   }
-  const actualDigest = await sha256File(resolvedPath);
+  const actualDigest = await sha256File(checkedPath);
   if (actualDigest !== artifact.sha256) {
     throw new Error(`artifact sha256 mismatch: ${artifact.id}`);
   }
@@ -165,7 +211,7 @@ async function validatedArtifact(stagingRoot, canonicalRoot, artifact) {
   };
 }
 
-export async function buildReleaseManifest(input) {
+export async function buildReleaseManifest(input, options = {}) {
   requirePlainObject(input, "release manifest input");
   requireExactKeys(input, supportedInputKeys, "release manifest input");
   if (!semverLike.test(input.version)) {
@@ -186,18 +232,16 @@ export async function buildReleaseManifest(input) {
   if (!Array.isArray(input.licenses)) {
     throw new Error("licenses must be an array");
   }
-  for (const license of input.licenses) {
-    if (!isPortableRelativePath(license)) {
-      throw new Error(`unsafe license path: ${license}`);
-    }
-  }
-
   const stagingRoot = resolve(input.stagingRoot);
   const stagingInfo = await lstat(stagingRoot);
   if (stagingInfo.isSymbolicLink() || !stagingInfo.isDirectory()) {
     throw new Error("stagingRoot must be a real directory");
   }
   const canonicalRoot = await realpath(stagingRoot);
+  const licenses = [];
+  for (const license of input.licenses) {
+    licenses.push(await validatedLicense(stagingRoot, canonicalRoot, license));
+  }
   const ids = new Set();
   const artifacts = [];
   for (const artifact of input.artifacts) {
@@ -209,7 +253,7 @@ export async function buildReleaseManifest(input) {
   }
   artifacts.sort((left, right) => left.id.localeCompare(right.id, "en"));
 
-  const config = await readReleaseConfig();
+  const config = options.releaseConfig ?? await readReleaseConfig(options.configPath);
   const manifest = {
     schemaVersion: 1,
     product: config.product,
@@ -218,7 +262,7 @@ export async function buildReleaseManifest(input) {
     architecture: input.architecture,
     sourceCommit: input.sourceCommit,
     artifacts,
-    licenses: [...input.licenses],
+    licenses,
     generatedAt: new Date().toISOString(),
   };
   const validate = await manifestValidator();
@@ -247,6 +291,17 @@ function usage() {
   return "Usage: node tools/release/manifest.mjs [--config <path>] [--input <path>] [--output <path>]";
 }
 
+function normalizedBuildInput(input, inputPath) {
+  requirePlainObject(input, "release manifest input");
+  if (typeof input.stagingRoot === "string" && !isAbsolute(input.stagingRoot)) {
+    return {
+      ...input,
+      stagingRoot: resolve(dirname(inputPath), ...input.stagingRoot.split("/")),
+    };
+  }
+  return input;
+}
+
 async function main(argv) {
   let configPath = defaultConfigPath;
   let inputPath;
@@ -266,15 +321,17 @@ async function main(argv) {
       throw new Error(`unknown argument: ${argument}`);
     }
   }
-  await readReleaseConfig(configPath);
-  if (!inputPath) {
-    process.stdout.write("release manifest tool ready\n");
-    return;
-  }
-  const manifest = await buildReleaseManifest(await loadJson(resolve(inputPath)));
+  const releaseConfig = await readReleaseConfig(configPath);
+  const effectiveInputPath = inputPath ? resolve(inputPath) : releaseConfig.inputPath;
+  const effectiveOutputPath = outputPath ? resolve(outputPath) : releaseConfig.outputPath;
+  const manifest = await buildReleaseManifest(
+    normalizedBuildInput(await loadJson(effectiveInputPath), effectiveInputPath),
+    { releaseConfig },
+  );
   const bytes = `${JSON.stringify(manifest, null, 2)}\n`;
-  if (outputPath) {
-    await writeFile(resolve(outputPath), bytes);
+  if (effectiveOutputPath) {
+    await mkdir(dirname(effectiveOutputPath), { recursive: true });
+    await writeFile(effectiveOutputPath, bytes);
     return;
   }
   process.stdout.write(bytes);

@@ -1,4 +1,6 @@
 {
   "schemaVersion": 1,
-  "product": "unit-test-ide"
+  "product": "unit-test-ide",
+  "inputPath": "release-input.json",
+  "outputPath": "manifest.generated.json"
 }

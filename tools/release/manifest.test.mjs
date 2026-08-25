@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 
 import Ajv2020 from "ajv/dist/2020.js";
@@ -53,6 +54,8 @@ async function writeArtifact(rootDirectory, relativePath, bytes) {
 async function validInput(stagingRoot) {
   const alpha = await writeArtifact(stagingRoot, "bin/unit-test-ide.exe", "alpha executable\n");
   const beta = await writeArtifact(stagingRoot, "share/doc/readme.txt", "beta readme\n");
+  await writeArtifact(stagingRoot, "licenses/Python-3.14.6.txt", "fixture python license\n");
+  await writeArtifact(stagingRoot, "licenses/gcovr-8.6.txt", "fixture gcovr license\n");
   return {
     version: "1.2.3",
     platform: "windows",
@@ -138,6 +141,37 @@ test("buildReleaseManifest rejects duplicate artifact ids", async (t) => {
   });
 });
 
+test("buildReleaseManifest rejects intermediate junction or symlink parents", async (t) => {
+  await withStaging(t, async (stagingRoot) => {
+    const linkedDirectory = join(stagingRoot, "linked-bin");
+    await mkdir(linkedDirectory, { recursive: true });
+    const bytes = "linked executable\n";
+    const linkedArtifact = await writeArtifact(linkedDirectory, "unit-test-ide.exe", bytes);
+    await writeArtifact(stagingRoot, "licenses/Python-3.14.6.txt", "fixture python license\n");
+    await symlink(linkedDirectory, join(stagingRoot, "bin"), "junction");
+    const input = {
+      version: "1.2.3",
+      platform: "windows",
+      architecture: "x64",
+      stagingRoot,
+      sourceCommit: "a".repeat(40),
+      licenses: ["licenses/Python-3.14.6.txt"],
+      artifacts: [{
+      id: "cli",
+      kind: "executable",
+      relativePath: "bin/unit-test-ide.exe",
+      size: linkedArtifact.size,
+      sha256: linkedArtifact.sha256,
+      executable: true,
+      }],
+    };
+    await assert.rejects(
+      () => buildReleaseManifest(input),
+      /unsafe artifact path/u,
+    );
+  });
+});
+
 test("buildReleaseManifest rejects size and digest mismatches", async (t) => {
   await withStaging(t, async (stagingRoot) => {
     for (const [name, mutate] of [
@@ -153,6 +187,26 @@ test("buildReleaseManifest rejects size and digest mismatches", async (t) => {
       );
     }
   });
+});
+
+test("release manifest CLI with --config writes the configured output artifact", async (t) => {
+  const outputPath = resolve("tools/release/manifest.generated.json");
+  t.after(async () => {
+    await rm(outputPath, { force: true });
+  });
+  execFileSync(process.execPath, [
+    resolve("tools/release/manifest.mjs"),
+    "--config",
+    resolve("tools/release/release-config.json"),
+  ], {
+    cwd: resolve("."),
+    encoding: "utf8",
+    windowsHide: true,
+  });
+
+  const manifest = JSON.parse(await readFile(outputPath, "utf8"));
+    assert.equal(manifest.product, "unit-test-ide");
+    assert.equal(manifest.version, "1.2.3");
 });
 
 test("schema rejects unknown top-level keys", async (t) => {

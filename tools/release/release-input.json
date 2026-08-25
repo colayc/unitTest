@@ -1,0 +1,29 @@
+{
+  "version": "1.2.3",
+  "platform": "windows",
+  "architecture": "x64",
+  "stagingRoot": "./staging",
+  "sourceCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "licenses": [
+    "licenses/Python-3.14.6.txt",
+    "licenses/gcovr-8.6.txt"
+  ],
+  "artifacts": [
+    {
+      "id": "readme",
+      "kind": "documentation",
+      "relativePath": "share/doc/readme.txt",
+      "size": 15,
+      "sha256": "2401991f812e1120dba531307019b3831c41d3727816b71e2feeeeedb3bbad86",
+      "executable": false
+    },
+    {
+      "id": "cli",
+      "kind": "executable",
+      "relativePath": "bin/unit-test-ide.exe",
+      "size": 19,
+      "sha256": "b84e82a9ed496e7469c9a2492823d6d0984bd9047cef970b160d13464ca1277e",
+      "executable": true
+    }
+  ]
+}
