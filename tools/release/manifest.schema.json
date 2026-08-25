@@ -30,8 +30,7 @@
     },
     "licenses": {
       "type": "array",
-      "uniqueItems": true,
-      "items": { "$ref": "#/$defs/portableRelativePath" }
+      "items": { "$ref": "#/$defs/license" }
     },
     "generatedAt": {
       "type": "string",
@@ -72,6 +71,19 @@
         "executable": {
           "type": "boolean"
         }
+      }
+    },
+    "license": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "size", "sha256"],
+      "properties": {
+        "path": { "$ref": "#/$defs/portableRelativePath" },
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sha256": { "$ref": "#/$defs/sha256" }
       }
     }
   }

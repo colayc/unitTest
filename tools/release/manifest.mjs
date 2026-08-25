@@ -23,6 +23,7 @@ const supportedInputKeys = [
   "version",
 ];
 const artifactKeys = ["executable", "id", "kind", "relativePath", "sha256", "size"];
+const licenseKeys = ["path", "sha256", "size"];
 const releaseConfigKeys = ["inputPath", "outputPath", "product", "schemaVersion"];
 
 const cachedConfigs = new Map();
@@ -157,7 +158,51 @@ async function validatedLicense(stagingRoot, canonicalRoot, license) {
   if (!entryInfo.isFile()) {
     throw new Error(`license must be a regular file: ${license}`);
   }
-  return license;
+  const actualSize = (await stat(checkedPath)).size;
+  const actualDigest = await sha256File(checkedPath);
+  return {
+    path: license,
+    size: actualSize,
+    sha256: actualDigest,
+  };
+}
+
+async function validatedExistingLicense(stagingRoot, canonicalRoot, license) {
+  requirePlainObject(license, "license");
+  requireExactKeys(license, licenseKeys, "license");
+  if (!isPortableRelativePath(license.path)) {
+    throw new Error(`unsafe license path: ${license.path}`);
+  }
+  if (!Number.isSafeInteger(license.size) || license.size < 0) {
+    throw new Error(`license size must be a non-negative safe integer: ${license.path}`);
+  }
+  if (!digestPattern.test(license.sha256)) {
+    throw new Error(`license digest must be lowercase SHA-256: ${license.path}`);
+  }
+
+  const resolvedPath = resolve(stagingRoot, ...license.path.split("/"));
+  const lexicalRelative = relative(stagingRoot, resolvedPath);
+  if (!withinRoot(stagingRoot, resolvedPath) || lexicalRelative.includes("..")) {
+    throw new Error(`unsafe license path: ${license.path}`);
+  }
+  const checkedPath = await resolvedCheckedPath(stagingRoot, canonicalRoot, license.path, "license");
+  const entryInfo = await lstat(checkedPath);
+  if (!entryInfo.isFile()) {
+    throw new Error(`license must be a regular file: ${license.path}`);
+  }
+  const actualSize = (await stat(checkedPath)).size;
+  if (actualSize !== license.size) {
+    throw new Error(`license size mismatch: ${license.path}`);
+  }
+  const actualDigest = await sha256File(checkedPath);
+  if (actualDigest !== license.sha256) {
+    throw new Error(`license sha256 mismatch: ${license.path}`);
+  }
+  return {
+    path: license.path,
+    size: license.size,
+    sha256: license.sha256,
+  };
 }
 
 async function validatedArtifact(stagingRoot, canonicalRoot, artifact) {
@@ -239,9 +284,18 @@ export async function buildReleaseManifest(input, options = {}) {
   }
   const canonicalRoot = await realpath(stagingRoot);
   const licenses = [];
+  const licensePaths = new Set();
   for (const license of input.licenses) {
-    licenses.push(await validatedLicense(stagingRoot, canonicalRoot, license));
+    const normalizedLicense = typeof license === "string"
+      ? await validatedLicense(stagingRoot, canonicalRoot, license)
+      : await validatedExistingLicense(stagingRoot, canonicalRoot, license);
+    if (licensePaths.has(normalizedLicense.path)) {
+      throw new Error(`duplicate license path: ${normalizedLicense.path}`);
+    }
+    licensePaths.add(normalizedLicense.path);
+    licenses.push(normalizedLicense);
   }
+  licenses.sort((left, right) => left.path.localeCompare(right.path, "en"));
   const ids = new Set();
   const artifacts = [];
   for (const artifact of input.artifacts) {

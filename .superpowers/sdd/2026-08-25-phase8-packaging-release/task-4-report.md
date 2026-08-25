@@ -219,3 +219,136 @@ The file will have its original line endings in your working directory
 
 - License files are now part of the exact closed payload set and must exist at the embedded fixed paths, but the frozen Task 1 release-manifest contract still lists licenses as paths rather than digest-bearing artifact entries, so license-byte verification cannot be as strong as artifact-byte verification without widening that earlier contract.
 - I still did not exercise a real Linux `appimagetool` binary or native extraction path in this Windows workspace; the focused suite validates the hard-fail and payload-contract logic through the injected extractor path and the public fake-envelope rejection.
+
+---
+
+## Fix round 2 — cross-task license integrity hardening
+
+### Review ruling implemented
+
+The earlier license-integrity concern is now closed by widening the shared release-manifest contract itself:
+
+- `tools/release/manifest.schema.json` now requires every manifest `licenses[]` entry to be a closed object with:
+  - `path`
+  - `size`
+  - `sha256`
+- `tools/release/manifest.mjs` now measures and hashes license bytes under the same guarded path validation used for artifacts.
+- `buildReleaseManifest(...)` accepts either legacy input paths or explicit license records, but always emits the widened closed license-record form and rejects duplicate license paths.
+- Task 2 staging expectations were updated so staged manifests assert license `path/size/sha256`, not only path presence.
+
+### Packaging verifiers hardened
+
+- `tools/release/windows/verify-msix.ps1`
+  - validates each embedded license record against the staged manifest path, size, and SHA-256
+  - compares packaged license bytes against the staged bytes and reports license-specific size/hash failures
+
+- `tools/release/linux/verify-appimage.mjs`
+  - validates each embedded license record for closed shape and safe path
+  - compares extracted packaged license bytes against the embedded `size` and `sha256`
+  - keeps the fixed-path closed payload contract from fix round 1
+
+### Additional files changed in this round
+
+- `tools/release/manifest.schema.json`
+- `tools/release/manifest.mjs`
+- `tools/release/manifest.test.mjs`
+- `tools/release/stage.test.mjs`
+- `tools/release/windows/verify-msix.ps1`
+- `tools/release/windows/package-msix.test.mjs`
+- `tools/release/linux/verify-appimage.mjs`
+- `tools/release/linux/package-appimage.test.mjs`
+
+### Red run for the cross-task hardening
+
+Command:
+
+```powershell
+node --test tools/release/manifest.test.mjs tools/release/stage.test.mjs tools/release/windows/package-msix.test.mjs tools/release/linux/package-appimage.test.mjs
+```
+
+Observed failures before the contract/verifier updates included:
+
+```text
+RELEASE_VERIFICATION_FAILED: license [object Object] is missing from the AppImage: usr/lib/unit-test-ide/[object Object]
+...
+release manifest input has unexpected keys: architecture,artifacts,expectedLicenses,licenses,platform,sourceCommit,stagingRoot,version
+...
+RELEASE_VERIFICATION_FAILED: license is missing from the staged root: @{path=licenses/NOTICE.txt; size=7; sha256=...}
+```
+
+These failures confirmed all three old assumptions still existed:
+
+- Linux verifier still treated license entries as path strings
+- Windows verifier still treated license entries as path strings
+- manifest tests/fixtures still assumed the old path-only output shape
+
+### Green run after the hardening
+
+Command:
+
+```powershell
+node --test tools/release/manifest.test.mjs tools/release/stage.test.mjs tools/release/windows/package-msix.test.mjs tools/release/linux/package-appimage.test.mjs
+```
+
+Result:
+
+```text
+TAP version 13
+...
+1..39
+# tests 39
+# pass 39
+# fail 0
+```
+
+Covered suites:
+
+- `tools/release/manifest.test.mjs`
+- `tools/release/stage.test.mjs`
+- `tools/release/windows/package-msix.test.mjs`
+- `tools/release/linux/package-appimage.test.mjs`
+
+New or widened license-specific coverage now includes:
+
+- manifest license size/hash mismatch rejection
+- staged manifest license record assertions
+- MSIX packaged license tamper rejection
+- AppImage packaged license tamper rejection even after sidecar digest regeneration
+
+### Formatting check after the hardening
+
+Command:
+
+```powershell
+git diff --check
+```
+
+Result:
+
+```text
+warning: LF will be replaced by CRLF in tools/release/linux/package-appimage.test.mjs.
+The file will have its original line endings in your working directory
+warning: LF will be replaced by CRLF in tools/release/linux/verify-appimage.mjs.
+The file will have its original line endings in your working directory
+warning: LF will be replaced by CRLF in tools/release/manifest.mjs.
+The file will have its original line endings in your working directory
+warning: LF will be replaced by CRLF in tools/release/manifest.test.mjs.
+The file will have its original line endings in your working directory
+warning: LF will be replaced by CRLF in tools/release/stage.test.mjs.
+The file will have its original line endings in your working directory
+warning: LF will be replaced by CRLF in tools/release/windows/package-msix.test.mjs.
+The file will have its original line endings in your working directory
+warning: LF will be replaced by CRLF in tools/release/windows/verify-msix.ps1.
+The file will have its original line endings in your working directory
+```
+
+### Self-review for the hardening round
+
+- The license contract is now symmetric with artifact integrity in every packaging flow: manifest measurement, staging expectations, Windows verification, and Linux verification all work from the same closed record shape.
+- I kept the widened contract backward-compatible at the manifest-builder input boundary so the existing stage pipeline did not need a separate intermediate migration layer.
+- The new tests mutate only the packaged license payload or manifest-license contract, so failures are attributable to the license-integrity path rather than unrelated package layout checks.
+
+### Remaining concerns after the hardening round
+
+- The focused suites fully cover the widened manifest/license contract, but I still did not run the packaging flows on a native Linux host with a real `appimagetool` extraction path from this Windows workspace.
+- `git diff --check` remains clean apart from line-ending warnings from the Windows checkout.

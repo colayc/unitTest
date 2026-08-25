@@ -84,7 +84,13 @@ async function createStagingFixture(root, version = "1.2.3") {
         executable: false,
       },
     ],
-    licenses: ["licenses/NOTICE.txt"],
+    licenses: [
+      {
+        path: "licenses/NOTICE.txt",
+        size: Buffer.byteLength(notice),
+        sha256: sha256(notice),
+      },
+    ],
     generatedAt: "2026-08-25T00:00:00.000Z",
   };
   const manifestPath = await writeFixtureFile(
@@ -439,6 +445,26 @@ test("verifyAppImage rejects unexpected payload files outside the closed AppDir 
         extractor: result.extractor,
       }),
       /unexpected payload path/u,
+    );
+  });
+});
+
+test("verifyAppImage rejects a tampered license even when the sidecar digest is regenerated", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const result = await packageWithFakeTool(root);
+    await updateFakeEnvelope(result.outputPath, async (envelope) => {
+      envelope.files["usr/lib/unit-test-ide/licenses/NOTICE.txt"].contentBase64 = Buffer.from("tampered license\n").toString("base64");
+    });
+    await refreshSidecarManifest(result.manifestPath, result.outputPath);
+
+    await assert.rejects(
+      () => verifyAppImage({
+        image: result.outputPath,
+        manifest: result.manifestPath,
+        requireDigest: true,
+        extractor: result.extractor,
+      }),
+      /license .*sha256|license .*size/u,
     );
   });
 });
