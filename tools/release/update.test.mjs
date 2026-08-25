@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 
-import { installVersion, rollbackVersion, uninstall } from "./update.mjs";
+import { installVersion, rollbackVersion, runSmokeLifecycle, uninstall } from "./update.mjs";
 
 const sourceCommit = "a".repeat(40);
 
@@ -130,6 +130,19 @@ test("installVersion compares arbitrarily large semver-like numeric identifiers 
   });
 });
 
+test("installVersion compares prerelease identifiers with case-sensitive SemVer ASCII ordering", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const packageRoot = join(root, "package-owned");
+    await installVersion(packageRoot, await createArtifact(root, "1.0.0-a"));
+
+    await assert.rejects(
+      () => createArtifact(root, "1.0.0-A").then((artifact) => installVersion(packageRoot, artifact)),
+      (error) => error?.code === "RELEASE_DOWNGRADE_REJECTED",
+    );
+    assert.equal(await currentVersion(packageRoot), "1.0.0-a");
+  });
+});
+
 test("rollbackVersion recovers after a simulated launch failure and is repeatable", async (t) => {
   await withTemporaryRoot(t, async (root) => {
     const packageRoot = join(root, "package-owned");
@@ -222,47 +235,68 @@ test("installVersion rejects an intermediate reparse parent before creating pack
   });
 });
 
-test("platform install smoke script emits closed non-secret lifecycle evidence", async (t) => {
+test("installVersion rejects a redirected package-owned versions directory", async (t) => {
   await withTemporaryRoot(t, async (root) => {
-    await mkdir(resolve(".superpowers"), { recursive: true });
-    const writableContainer = await mkdtemp(resolve(".superpowers", "install-smoke-test-"));
-    t.after(async () => rm(writableContainer, { recursive: true, force: true }));
-    const disposableRoot = join(writableContainer, "disposable-smoke-root");
+    const packageRoot = join(root, "package-owned");
+    await installVersion(packageRoot, await createArtifact(root, "1.0.0"));
+    const externalVersions = join(root, "external-versions");
+    await rename(join(packageRoot, "versions"), externalVersions);
+    await symlink(
+      externalVersions,
+      join(packageRoot, "versions"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+
+    await assert.rejects(
+      () => createArtifact(root, "2.0.0").then((artifact) => installVersion(packageRoot, artifact)),
+      (error) => error?.code === "RELEASE_ROOT_NOT_OWNED",
+    );
+    await assert.rejects(
+      () => access(join(externalVersions, "2.0.0")),
+      (error) => error?.code === "ENOENT",
+    );
+  });
+});
+
+test("package-backed smoke lifecycle emits digest-bound non-secret evidence", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const baselineArtifact = await createArtifact(root, "1.0.0");
+    const artifact = await createArtifact(root, "2.0.0");
+    const packagePath = await writeFixtureFile(root, "downloads/unit-test-ide-2.0.0.package", "real package bytes\n");
+    const packageSha256 = sha256(await readFile(packagePath));
+    const manifestSha256 = sha256(await readFile(join(artifact, "release-manifest.json")));
+    const disposableRoot = join(root, "disposable-smoke-root");
     const evidencePath = join(root, "install-smoke.json");
-    const command = process.platform === "win32" ? "pwsh" : "bash";
-    const args = process.platform === "win32"
-      ? [
-          "-NoLogo",
-          "-NoProfile",
-          "-File",
-          resolve("tools/release/install-smoke.ps1"),
-          "-Root",
-          disposableRoot,
-          "-EvidencePath",
-          evidencePath,
-        ]
-      : [
-          resolve("tools/release/install-smoke.sh"),
-          "--root",
-          disposableRoot,
-          "--evidence",
-          evidencePath,
-        ];
-    const result = spawnSync(command, args, {
-      cwd: resolve("."),
-      encoding: "utf8",
-      windowsHide: true,
+    await runSmokeLifecycle({
+      artifact,
+      baselineArtifact,
+      evidence: evidencePath,
+      manifestSha256,
+      packagePath,
+      packageSha256,
+      platform: process.platform === "win32" ? "windows" : "linux",
+      root: disposableRoot,
+      version: "2.0.0",
+    }, {
+      launch: () => ({ status: 0, stdout: "2.0.0\n", stderr: "" }),
     });
 
-    assert.equal(result.status, 0, result.stderr || result.error?.message);
     const evidence = JSON.parse(await readFile(evidencePath, "utf8"));
     assert.deepEqual(Object.keys(evidence), [
       "schemaVersion",
       "product",
       "platform",
       "sourceCommit",
+      "packageFilename",
+      "version",
+      "packageSha256",
+      "manifestSha256",
       "outcomes",
     ]);
+    assert.equal(evidence.packageFilename, "unit-test-ide-2.0.0.package");
+    assert.equal(evidence.version, "2.0.0");
+    assert.equal(evidence.packageSha256, packageSha256);
+    assert.equal(evidence.manifestSha256, manifestSha256);
     assert.deepEqual(evidence.outcomes, {
       install: "pass",
       launchHandshake: "pass",
@@ -274,6 +308,50 @@ test("platform install smoke script emits closed non-secret lifecycle evidence",
       packageResidueAbsent: "pass",
     });
     assert.doesNotMatch(JSON.stringify(evidence), /release-update-|disposable-smoke-root|[A-Z]:\\/iu);
-    await assert.rejects(() => access(disposableRoot), (error) => error?.code === "ENOENT");
+    await assert.rejects(() => access(join(disposableRoot, "package-owned")), (error) => error?.code === "ENOENT");
   });
+});
+
+for (const [label, omittedFlag] of [
+  ["package input", "--package"],
+  ["package digest", "--package-sha256"],
+  ["evidence output", "--evidence"],
+]) {
+  test(`smoke CLI fails closed when ${label} is absent`, () => {
+    const values = new Map([
+      ["--artifact", "target"],
+      ["--baseline-artifact", "baseline"],
+      ["--evidence", "evidence.json"],
+      ["--manifest-sha256", "a".repeat(64)],
+      ["--package", "package.msix"],
+      ["--package-sha256", "b".repeat(64)],
+      ["--platform", process.platform === "win32" ? "windows" : "linux"],
+      ["--root", "smoke-root"],
+      ["--version", "2.0.0"],
+    ]);
+    values.delete(omittedFlag);
+    const args = [resolve("tools/release/update.mjs"), "smoke"];
+    for (const [flag, value] of values) args.push(flag, value);
+
+    const result = spawnSync(process.execPath, args, { encoding: "utf8", windowsHide: true });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, new RegExp(`${omittedFlag} is required`, "u"));
+  });
+}
+
+test("install smoke workflow downloads digest-bearing produced packages before exercising wrappers", async () => {
+  const workflow = await readFile(resolve(".github/workflows/foundation.yml"), "utf8");
+  for (const platform of ["windows", "linux"]) {
+    const jobStart = workflow.indexOf(`  install-smoke-${platform}:`);
+    const download = workflow.indexOf("uses: actions/download-artifact@", jobStart);
+    const wrapper = workflow.indexOf(`tools/release/install-smoke.${platform === "windows" ? "ps1" : "sh"}`, jobStart);
+    assert.ok(jobStart >= 0 && download > jobStart && wrapper > download, `${platform} package download must precede smoke`);
+    const job = workflow.slice(jobStart, workflow.indexOf("\n  install-smoke-", jobStart + 1) === -1
+      ? workflow.length
+      : workflow.indexOf("\n  install-smoke-", jobStart + 1));
+    assert.match(job, /package_sha256/u);
+    assert.match(job, /manifest_sha256/u);
+    assert.match(job, /baseline_package/u);
+  }
 });

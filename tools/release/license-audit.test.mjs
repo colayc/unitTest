@@ -143,6 +143,28 @@ test("auditLicenses fails when the coverage bundle contains an unlisted dependen
   });
 });
 
+test("auditLicenses fails when the dependency notice catalog contains an unknown package", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const { stagingRoot } = await createStagingFixture(root);
+    const dependenciesPath = join(stagingRoot, "bundles", "coverage", "licenses", "dependencies.json");
+    const dependencies = JSON.parse(await readFile(dependenciesPath, "utf8"));
+    dependencies.packages.push({
+      project: "unexpected",
+      version: "1.0.0",
+      license: "BSD-3-Clause",
+      licenseTextId: "BSD-3-Clause",
+      licenseSource: "https://example.invalid/unexpected-license",
+      notice: "This package is not part of any platform bundle.",
+    });
+    await writeFile(dependenciesPath, `${JSON.stringify(dependencies, null, 2)}\n`);
+
+    await assert.rejects(
+      () => auditLicenses(stagingRoot),
+      (error) => error?.code === "RELEASE_LICENSE_AUDIT_FAILED" && /unexpected dependency notice: unexpected@1\.0\.0/u.test(error.message),
+    );
+  });
+});
+
 test("auditLicenses fails when the CMake bundle notice is absent from the closed release license list", async (t) => {
   await withTemporaryRoot(t, async (root) => {
     const { stagingRoot } = await createStagingFixture(root);
@@ -186,6 +208,56 @@ test("auditLicenses consumes the packaged coverage resolved lock when the source
       },
       outputs: [],
     }, null, 2)}\n`);
+
+    const result = await auditLicenses(stagingRoot);
+
+    assert.ok(result.some(({ path }) => path.endsWith("dependencies.json")));
+  });
+});
+
+test("auditLicenses accepts the real Linux-resolved wheel lock when Windows-only colorama is omitted", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const { stagingRoot } = await createStagingFixture(root);
+    const sourceManifest = JSON.parse(await readFile(resolve("tools/coverage-bundle/manifest.json"), "utf8"));
+    const dependencies = JSON.parse(await readFile(resolve("tools/coverage-bundle/licenses/dependencies.json"), "utf8"));
+    const linuxWheels = sourceManifest.gcovr.wheels.flatMap((wheel) => {
+      const selected = wheel.files.find(({ platforms }) => platforms.includes("linux-x64"));
+      return selected === undefined ? [] : [{
+        project: wheel.project,
+        version: wheel.version,
+        kind: wheel.kind,
+        filename: selected.filename,
+        url: selected.url,
+        sha256: selected.sha256,
+      }];
+    });
+    assert.equal(linuxWheels.some(({ project }) => project === "colorama"), false);
+    assert.equal(dependencies.packages.some(({ project }) => project === "colorama"), true);
+
+    await rm(join(stagingRoot, "bundles", "cmake", "manifest.json"));
+    await rm(join(stagingRoot, "bundles", "coverage", "manifest.json"));
+    await writeFixtureFile(stagingRoot, "bundles/coverage/manifest.resolved.json", `${JSON.stringify({
+      schemaVersion: 1,
+      platform: "linux-x64",
+      pythonVersion: sourceManifest.python.version,
+      gcovrVersion: sourceManifest.gcovr.version,
+      inputs: {
+        pythonArtifact: {},
+        wheels: linuxWheels,
+        buildSources: [],
+        provenance: {},
+      },
+      outputs: [],
+    }, null, 2)}\n`);
+    await writeFixtureFile(
+      stagingRoot,
+      "bundles/coverage/licenses/dependencies.json",
+      `${JSON.stringify(dependencies, null, 2)}\n`,
+    );
+    const releaseManifestPath = join(stagingRoot, "release-manifest.json");
+    const releaseManifest = JSON.parse(await readFile(releaseManifestPath, "utf8"));
+    releaseManifest.platform = "linux";
+    await writeFile(releaseManifestPath, `${JSON.stringify(releaseManifest, null, 2)}\n`);
 
     const result = await auditLicenses(stagingRoot);
 

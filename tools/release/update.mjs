@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { createReadStream } from "node:fs";
 import {
   access,
@@ -16,7 +16,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { dirname, isAbsolute, join, parse, posix, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, parse, posix, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import Ajv2020 from "ajv/dist/2020.js";
@@ -402,8 +402,9 @@ function comparePrerelease(left, right) {
     } else if (leftNumeric !== rightNumeric) {
       return leftNumeric ? -1 : 1;
     } else {
-      const difference = leftParts[index].localeCompare(rightParts[index], "en");
-      if (difference !== 0) return Math.sign(difference);
+      if (leftParts[index] !== rightParts[index]) {
+        return leftParts[index] < rightParts[index] ? -1 : 1;
+      }
     }
   }
   return 0;
@@ -434,13 +435,42 @@ async function writeCurrent(root, version) {
   }
 }
 
+async function requireOwnedDirectory(packageRoot, relativePath, { create = false } = {}) {
+  if (!safeRelativePath(relativePath)) {
+    throw releaseError("RELEASE_ROOT_NOT_OWNED", `package-owned path is unsafe: ${relativePath}`);
+  }
+  const canonicalRoot = await realpath(packageRoot);
+  let current = packageRoot;
+  for (const segment of relativePath.split("/")) {
+    current = join(current, segment);
+    let info;
+    try {
+      info = await lstat(current);
+    } catch (error) {
+      if (error?.code !== "ENOENT" || !create) throw error;
+      await mkdir(current, { recursive: false });
+      info = await lstat(current);
+    }
+    if (info.isSymbolicLink() || !info.isDirectory()) {
+      throw releaseError("RELEASE_ROOT_NOT_OWNED", `package-owned path is redirected: ${relativePath}`);
+    }
+    const canonical = await realpath(current);
+    if (!withinRoot(canonicalRoot, canonical) || !samePath(current, canonical)) {
+      throw releaseError("RELEASE_ROOT_NOT_OWNED", `package-owned path escapes its root: ${relativePath}`);
+    }
+  }
+  return current;
+}
+
 export async function installVersion(root, artifact) {
   const source = await readVerifiedManifest(artifact);
   const packageRoot = await ensureOwnedRoot(root);
   return withUpdateLock(packageRoot, async () => {
+    const versionsRoot = await requireOwnedDirectory(packageRoot, "versions", { create: true });
     const previousVersion = await readCurrent(packageRoot);
     if (previousVersion !== null) {
-      await readVerifiedManifest(join(packageRoot, "versions", previousVersion));
+      const previousRoot = await requireOwnedDirectory(packageRoot, `versions/${previousVersion}`);
+      await readVerifiedManifest(previousRoot);
       if (compareVersions(source.manifest.version, previousVersion) < 0) {
         throw releaseError(
           "RELEASE_DOWNGRADE_REJECTED",
@@ -448,8 +478,6 @@ export async function installVersion(root, artifact) {
         );
       }
     }
-    const versionsRoot = join(packageRoot, "versions");
-    await mkdir(versionsRoot, { recursive: true });
     const destination = join(versionsRoot, source.manifest.version);
     if (await pathExists(destination)) {
       throw releaseError("RELEASE_VERSION_EXISTS", `version is already installed: ${source.manifest.version}`);
@@ -457,8 +485,10 @@ export async function installVersion(root, artifact) {
     const temporary = join(versionsRoot, `.install-${source.manifest.version}-${randomUUID()}`);
     try {
       await copyVerifiedArtifact(source.root.path, temporary, source.manifest);
+      await requireOwnedDirectory(packageRoot, `versions/${temporary.slice(versionsRoot.length + 1)}`);
       await readVerifiedManifest(temporary);
       await rename(temporary, destination);
+      await requireOwnedDirectory(packageRoot, `versions/${source.manifest.version}`);
       await fsyncDirectory(versionsRoot);
       await writeCurrent(packageRoot, source.manifest.version);
     } catch (error) {
@@ -476,8 +506,10 @@ export async function rollbackVersion(root, version) {
   const packageRoot = await requireOwnedRoot(root);
   if (packageRoot === null) throw releaseError("RELEASE_ROOT_NOT_OWNED", "package-owned root is missing");
   return withUpdateLock(packageRoot, async () => {
+    await requireOwnedDirectory(packageRoot, "versions");
     const previousVersion = await readCurrent(packageRoot);
-    const target = await readVerifiedManifest(join(packageRoot, "versions", version));
+    const targetRoot = await requireOwnedDirectory(packageRoot, `versions/${version}`);
+    const target = await readVerifiedManifest(targetRoot);
     if (target.manifest.version !== version) throw verificationFailure("rollback target version does not match its directory");
     await writeCurrent(packageRoot, version);
     return { previousVersion, version };
@@ -488,71 +520,86 @@ export async function uninstall(root) {
   const packageRoot = await requireOwnedRoot(root);
   if (packageRoot === null) return { removed: false };
   return withUpdateLock(packageRoot, async () => {
+    if (await pathExists(join(packageRoot, "versions"))) {
+      await requireOwnedDirectory(packageRoot, "versions");
+    }
     await rm(packageRoot, { recursive: true, force: false });
     return { removed: true };
   });
 }
 
-async function writeSmokeFile(root, relativePath, value) {
-  const path = join(root, ...relativePath.split("/"));
-  await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, value);
-}
-
-async function createSmokeArtifact(containerRoot, version, sourceCommit, launchStatus) {
-  const artifactRoot = join(containerRoot, "artifacts", version);
-  const launcher = [
-    'const version = process.argv[2];',
-    'if (process.argv[3] !== "--handshake") process.exit(64);',
-    `if (${launchStatus} !== 0) process.exit(${launchStatus});`,
-    'process.stdout.write(JSON.stringify({ product: "unit-test-ide", protocol: 1, version }));',
-    "",
-  ].join("\n");
-  const notice = "Unit Test IDE disposable install smoke notice\n";
-  await writeSmokeFile(artifactRoot, "app/code-oss", launcher);
-  await writeSmokeFile(artifactRoot, "licenses/NOTICE.txt", notice);
-  const manifest = {
-    schemaVersion: 1,
-    product: "unit-test-ide",
-    version,
-    platform: process.platform === "win32" ? "windows" : "linux",
-    architecture: "x64",
-    sourceCommit,
-    artifacts: [{
-      id: "app-code-oss",
-      kind: "runtime",
-      relativePath: "app/code-oss",
-      size: Buffer.byteLength(launcher),
-      sha256: createHash("sha256").update(launcher).digest("hex"),
-      executable: true,
-    }],
-    licenses: [{
-      path: "licenses/NOTICE.txt",
-      size: Buffer.byteLength(notice),
-      sha256: createHash("sha256").update(notice).digest("hex"),
-    }],
-    generatedAt: new Date().toISOString(),
-  };
-  await writeFile(join(artifactRoot, "release-manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
-  return artifactRoot;
-}
-
-function launchHandshake(packageRoot, version) {
+function launchHandshake(packageRoot, version, userDataRoot) {
   const launcher = join(packageRoot, "versions", version, "app", "code-oss");
-  return spawnSync(process.execPath, [launcher, version, "--handshake"], {
+  return spawnSync(launcher, ["--version"], {
     encoding: "utf8",
+    env: {
+      ...process.env,
+      HOME: userDataRoot,
+      USERPROFILE: userDataRoot,
+      XDG_CACHE_HOME: join(userDataRoot, "cache"),
+      XDG_CONFIG_HOME: join(userDataRoot, "config"),
+    },
+    timeout: 30_000,
     windowsHide: true,
   });
 }
 
-async function runSmokeLifecycle({ evidence, platform, root, sourceCommit }) {
+function requireLaunchHandshake(result, label) {
+  if (result.status !== 0 || typeof result.stdout !== "string" || result.stdout.trim().length === 0) {
+    const detail = result.error?.message ?? result.stderr?.trim() ?? `exit ${result.status}`;
+    throw releaseError("RELEASE_SMOKE_FAILED", `${label} launch handshake failed: ${detail}`);
+  }
+}
+
+export async function runSmokeLifecycle({
+  artifact,
+  baselineArtifact,
+  evidence,
+  manifestSha256,
+  packagePath,
+  packageSha256,
+  platform,
+  root,
+  version,
+}, { launch = launchHandshake } = {}) {
   if (!["windows", "linux"].includes(platform)) throw releaseError("RELEASE_SMOKE_INVALID", "unsupported platform");
   if ((platform === "windows") !== (process.platform === "win32")) {
     throw releaseError("RELEASE_SMOKE_INVALID", `platform ${platform} does not match this host`);
   }
-  if (!/^[0-9a-f]{40}$/u.test(sourceCommit)) {
-    throw releaseError("RELEASE_SMOKE_INVALID", "source commit must be a lowercase 40-hex digest");
+  if (typeof packagePath !== "string" || packagePath.trim().length === 0) {
+    throw releaseError("RELEASE_SMOKE_INVALID", "package input is required");
   }
+  if (!digestPattern.test(packageSha256 ?? "") || !digestPattern.test(manifestSha256 ?? "")) {
+    throw releaseError("RELEASE_SMOKE_INVALID", "package and manifest SHA-256 digests are required");
+  }
+  if (typeof evidence !== "string" || evidence.trim().length === 0) {
+    throw releaseError("RELEASE_SMOKE_INVALID", "evidence output is required");
+  }
+  if (typeof version !== "string" || !semverLike.test(version)) {
+    throw releaseError("RELEASE_SMOKE_INVALID", "package version must be semver-like");
+  }
+  const packageParent = await validateDirectory(dirname(resolve(packagePath)), "package parent");
+  const packageFile = await validateFileUnderRoot(
+    packageParent.path,
+    packageParent.canonical,
+    basename(resolve(packagePath)),
+    "package",
+  );
+  if (await sha256File(packageFile.path) !== packageSha256) {
+    throw releaseError("RELEASE_SMOKE_INVALID", "package SHA-256 does not match the downloaded artifact");
+  }
+  const baseline = await readVerifiedManifest(baselineArtifact);
+  const target = await readVerifiedManifest(artifact);
+  if (target.manifest.version !== version || target.manifest.platform !== platform) {
+    throw releaseError("RELEASE_SMOKE_INVALID", "extracted payload identity does not match package inputs");
+  }
+  if (baseline.manifest.platform !== platform || compareVersions(baseline.manifest.version, version) >= 0) {
+    throw releaseError("RELEASE_SMOKE_INVALID", "baseline payload must be an older package for the same platform");
+  }
+  if (await sha256File(join(target.root.path, "release-manifest.json")) !== manifestSha256) {
+    throw releaseError("RELEASE_SMOKE_INVALID", "manifest SHA-256 does not match the extracted package payload");
+  }
+  const sourceCommit = target.manifest.sourceCommit;
   const containerRoot = normalizeRoot(root);
   await mkdir(containerRoot, { recursive: true });
   const packageRoot = join(containerRoot, "package-owned");
@@ -560,37 +607,21 @@ async function runSmokeLifecycle({ evidence, platform, root, sourceCommit }) {
   const userData = join(workspaceRoot, "project", "tests.cpp");
   await mkdir(dirname(userData), { recursive: true });
   await writeFile(userData, "preserve user workspace data\n");
-  const firstArtifact = await createSmokeArtifact(containerRoot, "1.0.0", sourceCommit, 0);
-  const failingUpgrade = await createSmokeArtifact(containerRoot, "2.0.0", sourceCommit, 17);
 
-  await installVersion(packageRoot, firstArtifact);
-  const firstLaunch = launchHandshake(packageRoot, "1.0.0");
-  if (firstLaunch.status !== 0) {
-    const detail = firstLaunch.error?.message ?? firstLaunch.stderr?.trim() ?? `exit ${firstLaunch.status}`;
-    throw releaseError("RELEASE_SMOKE_FAILED", `first launch handshake failed: ${detail}`);
-  }
-  const handshake = JSON.parse(firstLaunch.stdout);
-  if (
-    handshake?.product !== "unit-test-ide"
-    || handshake?.protocol !== 1
-    || handshake?.version !== "1.0.0"
-    || Object.keys(handshake).sort().join(",") !== "product,protocol,version"
-  ) {
-    throw releaseError("RELEASE_SMOKE_FAILED", "launch handshake is not closed");
-  }
+  await installVersion(packageRoot, baseline.root.path);
+  const firstLaunch = launch(packageRoot, baseline.manifest.version, workspaceRoot);
+  requireLaunchHandshake(firstLaunch, "first");
 
-  await installVersion(packageRoot, failingUpgrade);
-  if ((await readCurrent(packageRoot)) !== "2.0.0") {
+  await installVersion(packageRoot, target.root.path);
+  if ((await readCurrent(packageRoot)) !== version) {
     throw releaseError("RELEASE_SMOKE_FAILED", "upgrade did not switch current");
   }
-  const failedLaunch = launchHandshake(packageRoot, "2.0.0");
-  if (failedLaunch.status === 0) throw releaseError("RELEASE_SMOKE_FAILED", "simulated upgrade launch unexpectedly passed");
-  await rollbackVersion(packageRoot, "1.0.0");
-  if (launchHandshake(packageRoot, "1.0.0").status !== 0) {
-    throw releaseError("RELEASE_SMOKE_FAILED", "rollback launch handshake failed");
-  }
-  await rollbackVersion(packageRoot, "1.0.0");
-  if ((await readCurrent(packageRoot)) !== "1.0.0") {
+  const upgradedLaunch = launch(packageRoot, version, workspaceRoot);
+  requireLaunchHandshake(upgradedLaunch, "upgrade");
+  await rollbackVersion(packageRoot, baseline.manifest.version);
+  requireLaunchHandshake(launch(packageRoot, baseline.manifest.version, workspaceRoot), "rollback");
+  await rollbackVersion(packageRoot, baseline.manifest.version);
+  if ((await readCurrent(packageRoot)) !== baseline.manifest.version) {
     throw releaseError("RELEASE_SMOKE_FAILED", "repeated rollback changed the target");
   }
   await uninstall(packageRoot);
@@ -604,6 +635,10 @@ async function runSmokeLifecycle({ evidence, platform, root, sourceCommit }) {
     product: "unit-test-ide",
     platform,
     sourceCommit,
+    packageFilename: basename(packageFile.path),
+    version,
+    packageSha256,
+    manifestSha256,
     outcomes: {
       install: "pass",
       launchHandshake: "pass",
@@ -617,7 +652,6 @@ async function runSmokeLifecycle({ evidence, platform, root, sourceCommit }) {
   };
   await mkdir(dirname(resolve(evidence)), { recursive: true });
   await writeFile(resolve(evidence), `${JSON.stringify(result, null, 2)}\n`);
-  await rm(join(containerRoot, "artifacts"), { recursive: true, force: true });
   await rm(workspaceRoot, { recursive: true, force: true });
   return result;
 }
@@ -625,7 +659,17 @@ async function runSmokeLifecycle({ evidence, platform, root, sourceCommit }) {
 function parseSmokeCli(argv) {
   if (argv[0] !== "smoke") throw releaseError("RELEASE_SMOKE_INVALID", "expected smoke command");
   const values = {};
-  const allowed = new Set(["--evidence", "--platform", "--root", "--source-commit"]);
+  const allowed = new Set([
+    "--artifact",
+    "--baseline-artifact",
+    "--evidence",
+    "--manifest-sha256",
+    "--package",
+    "--package-sha256",
+    "--platform",
+    "--root",
+    "--version",
+  ]);
   for (let index = 1; index < argv.length; index += 2) {
     const flag = argv[index];
     const value = argv[index + 1];
@@ -634,20 +678,29 @@ function parseSmokeCli(argv) {
     if (Object.hasOwn(values, flag)) throw releaseError("RELEASE_SMOKE_INVALID", `duplicate flag: ${flag}`);
     values[flag] = value;
   }
-  for (const required of ["--evidence", "--platform", "--root"]) {
+  for (const required of [
+    "--artifact",
+    "--baseline-artifact",
+    "--evidence",
+    "--manifest-sha256",
+    "--package",
+    "--package-sha256",
+    "--platform",
+    "--root",
+    "--version",
+  ]) {
     if (!values[required]) throw releaseError("RELEASE_SMOKE_INVALID", `${required} is required`);
   }
-  const repositoryRoot = resolve(toolDirectory, "..", "..");
-  const sourceCommit = values["--source-commit"] ?? execFileSync("git", ["rev-parse", "HEAD"], {
-    cwd: repositoryRoot,
-    encoding: "utf8",
-    windowsHide: true,
-  }).trim();
   return {
+    artifact: values["--artifact"],
+    baselineArtifact: values["--baseline-artifact"],
     evidence: values["--evidence"],
+    manifestSha256: values["--manifest-sha256"],
+    packagePath: values["--package"],
+    packageSha256: values["--package-sha256"],
     platform: values["--platform"],
     root: values["--root"],
-    sourceCommit,
+    version: values["--version"],
   };
 }
 

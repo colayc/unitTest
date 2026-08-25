@@ -39,9 +39,9 @@ Preset 在 configure 前可能没有单一 `toolchainId`。此时 File API 对 C
 
 每个版本先复制到 `versions/` 下的临时 sibling directory，重新验证封闭 `release-manifest.json`、全部 artifact/license 的 size 与 SHA-256、路径边界以及精确文件集合，fsync manifest 后才通过 rename 发布为 `versions/<version>`。`current` 是单独的 semver pointer file：新 pointer 先写入并在平台支持时 fsync，再用 rename 原子替换；验证或复制失败不会改变已有 pointer。普通安装拒绝 downgrade；显式 rollback 只允许切换到仍在 `versions/` 中且再次通过完整 manifest 验证的版本，重复 rollback 保持幂等，而且更新流程不会删除最后一个已知可用版本。
 
-许可审计以 release manifest 中 digest-bearing `{path,size,sha256}` 记录为唯一顶层闭集，拒绝缺失、额外、篡改或 reparse 的 notice/license 文件。coverage bundle 的固定 wheel lock 必须与 `licenses/dependencies.json` 中的 project/version 闭集一一对应，并保留 Python、gcovr 和每个 transitive dependency 的许可材料；CMake 必须至少保留 release manifest 已固定摘要的 license notice，在完整 CMake manifest 随包存在时还会校验平台对应的 `licensePath`。
+许可审计以 release manifest 中 digest-bearing `{path,size,sha256}` 记录为唯一顶层闭集，拒绝缺失、额外、篡改或 reparse 的 notice/license 文件。coverage bundle 按 release platform 从 source manifest 选择 wheel，或直接消费随包的 resolved lock；每个实际入包的 project/version 都必须在 `licenses/dependencies.json` 中有完整许可材料，而仅供其他平台使用的记录（例如 Windows-only `colorama`）不会被 Linux 错当作必需 wheel。Python、gcovr 和平台 resolved transitive dependencies 都必须有许可材料；CMake 必须至少保留 release manifest 已固定摘要的 license notice，在完整 CMake manifest 随包存在时还会校验平台对应的 `licensePath`。
 
-Windows PowerShell 与 Linux Bash clean-machine smoke 都使用一次性 root，验证首次安装、launch handshake、升级、模拟启动失败后的强制回滚、重复回滚、卸载、user-data 保留和 package residue 清零。CI 只上传封闭 JSON outcome、source commit 和 digest-bearing license audit；evidence 不包含 token、environment、用户名、runner path 或 workspace 内容。
+Windows PowerShell 与 Linux Bash clean-machine smoke 都先下载 package job 产生的真实 package artifact，按 workflow 传递的 SHA-256 验证 MSIX/AppImage 及其 embedded release manifest，再从两个真实产生的 baseline/release package 提取精确 payload，并仅在一次性 root 中验证首次安装、`--version` launch handshake、升级、显式回滚、重复回滚、卸载、user-data 保留和 package residue 清零。CI evidence 固定 package filename、version、package SHA-256、manifest SHA-256、source commit 和封闭 outcome；不包含 token、environment、用户名、runner path 或 workspace 内容。
 
 开发者自定义 CMake 仅允许：
 
