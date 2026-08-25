@@ -9,6 +9,9 @@ import type { ExtensionProtocolClient } from "./protocol-client.js";
 import type { TrustState } from "./contracts.js";
 import { redactServiceError } from "./service-resources.js";
 
+const RUNNING_DISCOVERY_PUBLICATION_TIMEOUT_MS = 120_000;
+const IMMEDIATE_DISCOVERY_PUBLICATION_TIMEOUT_MS = 50;
+
 export interface TestingWorkspaceSnapshot {
   folderCount: number;
   isTrusted: boolean;
@@ -228,13 +231,19 @@ export class TestingApiAdapter implements TestingDisposable {
         .sort((left, right) => left.buildProfileId.localeCompare(right.buildProfileId))[0];
       if (!project || !profile) throw new Error("No project build profile is available for test discovery.");
 
-      await client.discoverTests({
+      const discovery = await client.discoverTests({
         idempotencyKey: randomBytes(16).toString("hex"),
         projectId: project.projectId,
         profileId: profile.buildProfileId
       });
       if (!this.#isCurrentRefresh(generation, client)) return;
-      const catalog = await this.#awaitCatalogOrPoll(client, project.projectId, profile.buildProfileId, generation);
+      const catalog = await this.#awaitCatalogOrPoll(
+        client,
+        project.projectId,
+        profile.buildProfileId,
+        generation,
+        discovery.status === "queued" || discovery.status === "running"
+      );
       if (!catalog || !this.#isCurrentRefresh(generation, client)) return;
       this.#reconcileTree(catalog, workspace.workspaceGeneration);
     } catch (error) {
@@ -284,10 +293,18 @@ export class TestingApiAdapter implements TestingDisposable {
     client: ExtensionProtocolClient,
     projectId: string,
     profileId: string,
-    generation: number
+    generation: number,
+    discoveryRunning: boolean
   ): Promise<ProtocolTestCatalog | undefined> {
     if (!this.#isCurrentRefresh(generation, client)) return undefined;
-    const publication = this.#waitForCatalogPublication(client, projectId, profileId);
+    const publication = this.#waitForCatalogPublication(
+      client,
+      projectId,
+      profileId,
+      discoveryRunning
+        ? RUNNING_DISCOVERY_PUBLICATION_TIMEOUT_MS
+        : IMMEDIATE_DISCOVERY_PUBLICATION_TIMEOUT_MS
+    );
     try {
       await this.#ensureEventPump(client);
       if (!this.#isCurrentRefresh(generation, client)) return undefined;
@@ -298,7 +315,12 @@ export class TestingApiAdapter implements TestingDisposable {
     }
   }
 
-  #waitForCatalogPublication(client: ExtensionProtocolClient, projectId: string, profileId: string): {
+  #waitForCatalogPublication(
+    client: ExtensionProtocolClient,
+    projectId: string,
+    profileId: string,
+    timeoutMs: number
+  ): {
     result: Promise<boolean>;
     cancel(): void;
   } {
@@ -309,7 +331,7 @@ export class TestingApiAdapter implements TestingDisposable {
     const deadline = setTimeout(() => {
       if (!this.#catalogWaiters.delete(waiter)) return;
       resolve(false);
-    }, 50);
+    }, timeoutMs);
     return {
       result,
       cancel: () => {

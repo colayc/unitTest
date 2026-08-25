@@ -128,6 +128,7 @@ class FakeProtocolClient implements ExtensionProtocolClient {
   };
   catalogResult: ProtocolTestCatalog | undefined;
   catalogResults: Array<ProtocolTestCatalog | Error> = [];
+  discoveryResult: unknown = {};
   subscription: EventSubscription | undefined;
   activeSubscription: EventSubscription | undefined;
   afterInspect: (() => void) | undefined;
@@ -162,7 +163,7 @@ class FakeProtocolClient implements ExtensionProtocolClient {
     this.discoveryCalls.push(input);
     this.callOrder.push("discover");
     this.afterDiscover?.();
-    return {} as never;
+    return this.discoveryResult as never;
   }
 
   async getTestCatalog(input: CatalogGetInput): Promise<ProtocolTestCatalog> {
@@ -522,6 +523,28 @@ test("refresh falls back to bounded catalog polling when no catalog event is ava
 
   assert.equal(client.catalogCalls.length, 2);
   assert.equal(adapter.catalogState?.revision, "catalog-r1");
+});
+
+test("refresh waits for a catalog event when discovery is still running", async () => {
+  const client = new FakeProtocolClient();
+  client.workspace = workspaceWithProfiles();
+  client.discoveryResult = { status: "running" };
+  client.catalogResult = catalog("catalog-r1");
+  client.afterDiscover = () => {
+    setTimeout(() => {
+      client.emit({
+        sequence: 1,
+        event: "test.catalog.published",
+        payload: { projectId: "a-project", profileId: "a-profile" }
+      } as never);
+    }, 100);
+  };
+  const { adapter, items } = testingHarness(client);
+
+  await adapter.refresh();
+
+  assert.equal(items.get("container-a")?.label, "Alpha container");
+  assert.deepEqual(client.catalogCalls, [{ projectId: "a-project", profileId: "a-profile" }]);
 });
 
 test("refresh stops after the bounded catalog polling backoff is exhausted", async () => {

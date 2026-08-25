@@ -203,7 +203,7 @@ function nestedItems(collection: SmokeCollection): TestingTestItem[] {
 
 async function eventually(assertion: () => void): Promise<void> {
   let lastError: unknown;
-  for (let attempt = 0; attempt < 160; attempt++) {
+  for (let attempt = 0; attempt < 600; attempt++) {
     try {
       assertion();
       return;
