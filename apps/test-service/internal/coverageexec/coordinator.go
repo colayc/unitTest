@@ -861,6 +861,9 @@ func (execution *execution) Interpret(
 		if err != nil {
 			coverageDebugFailure("interpret-test", err)
 		}
+		if err == nil && verdict != task.StepVerdictSucceeded {
+			coverageDebugFailure("interpret-test-verdict", nil)
+		}
 		if err != nil || verdict != task.StepVerdictSucceeded {
 			execution.setFailedPhase(coveragerun.PhaseTest)
 			return verdict, err
