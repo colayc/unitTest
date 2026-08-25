@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10">
+  <Identity
+    Name="__PACKAGE_NAME__"
+    Publisher="__PUBLISHER__"
+    Version="__PACKAGE_VERSION__"
+    ProcessorArchitecture="__ARCHITECTURE__" />
+  <Properties>
+    <DisplayName>Unit Test IDE</DisplayName>
+    <PublisherDisplayName>Unit Test IDE</PublisherDisplayName>
+    <Description>Unit Test IDE release package</Description>
+  </Properties>
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+</Package>
