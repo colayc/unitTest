@@ -551,6 +551,20 @@ function requireLaunchHandshake(result, label) {
   }
 }
 
+function controlledUpgradeLaunchFailure(packageRoot, version, userDataRoot) {
+  const handshake = launchHandshake(packageRoot, version, userDataRoot);
+  if (handshake.status !== 0) return handshake;
+  const failure = spawnSync(process.execPath, ["-e", "process.exit(86)"], {
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  return {
+    ...failure,
+    stdout: handshake.stdout,
+    stderr: failure.stderr || "controlled smoke-only upgrade launch failure\n",
+  };
+}
+
 export async function runSmokeLifecycle({
   artifact,
   baselineArtifact,
@@ -561,7 +575,10 @@ export async function runSmokeLifecycle({
   platform,
   root,
   version,
-}, { launch = launchHandshake } = {}) {
+}, {
+  launch = launchHandshake,
+  upgradeLaunch = controlledUpgradeLaunchFailure,
+} = {}) {
   if (!["windows", "linux"].includes(platform)) throw releaseError("RELEASE_SMOKE_INVALID", "unsupported platform");
   if ((platform === "windows") !== (process.platform === "win32")) {
     throw releaseError("RELEASE_SMOKE_INVALID", `platform ${platform} does not match this host`);
@@ -616,8 +633,10 @@ export async function runSmokeLifecycle({
   if ((await readCurrent(packageRoot)) !== version) {
     throw releaseError("RELEASE_SMOKE_FAILED", "upgrade did not switch current");
   }
-  const upgradedLaunch = launch(packageRoot, version, workspaceRoot);
-  requireLaunchHandshake(upgradedLaunch, "upgrade");
+  const failedUpgradeLaunch = upgradeLaunch(packageRoot, version, workspaceRoot);
+  if (failedUpgradeLaunch.status === 0) {
+    throw releaseError("RELEASE_SMOKE_FAILED", "expected upgrade launch failure was not observed");
+  }
   await rollbackVersion(packageRoot, baseline.manifest.version);
   requireLaunchHandshake(launch(packageRoot, baseline.manifest.version, workspaceRoot), "rollback");
   await rollbackVersion(packageRoot, baseline.manifest.version);
@@ -643,6 +662,7 @@ export async function runSmokeLifecycle({
       install: "pass",
       launchHandshake: "pass",
       upgrade: "pass",
+      upgradeLaunch: "failed-as-expected",
       rollback: "pass",
       repeatedRollback: "pass",
       uninstall: "pass",

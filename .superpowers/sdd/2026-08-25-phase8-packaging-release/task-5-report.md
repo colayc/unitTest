@@ -126,3 +126,30 @@ DONE_WITH_CONCERNS
 
 - Native AppImage wrapper execution and the GitHub Actions packaging/smoke jobs remain CI-owned because this workspace is Windows. The complete cross-platform release contract suite is green, including native Windows SDK MSIX packaging/verifier tests.
 - The earlier unrelated workspace `fs.cp` sandbox `EPERM` concern is unchanged; no workspace-wide rerun was required for these review-specific changes.
+
+## Review remediation round 2 — rollback trigger evidence
+
+### Status
+
+DONE_WITH_CONCERNS
+
+### Fix
+
+- The package-backed smoke harness now calls the installed target launcher and then runs a deterministic smoke-only failing probe. Rollback is unreachable unless that upgrade-launch result is nonzero; a successful result raises `RELEASE_SMOKE_FAILED` while `current` remains on the target version.
+- Evidence now distinguishes `upgradeLaunch: failed-as-expected` from `rollback: pass`. Both platform wrappers validate the new outcome before accepting evidence.
+- The focused regression injects a successful upgrade-launch result and proves the lifecycle rejects it without rolling back, by asserting the installed `current` pointer remains the target version.
+
+### TDD evidence
+
+- Red: the new regression reported a missing rejection because the lifecycle ignored the injected upgrade-launch result and unconditionally rolled back/uninstalled; the existing evidence test also lacked `upgradeLaunch`.
+- Green: the focused update suite passed after gating rollback on the observed failure and adding the distinct evidence outcome.
+
+### Concerns
+
+- Native AppImage wrapper execution and hosted workflow execution remain CI-owned from this Windows workspace.
+
+### Verification
+
+- Focused Task 5 suite: `26` passed, `0` failed, `0` skipped.
+- Complete `tools/release/**/*.test.mjs` suite: `65` passed, `0` failed, `0` skipped.
+- `node --check tools/release/update.mjs`, PowerShell AST parsing, YAML parsing, and `git diff --check` passed.
