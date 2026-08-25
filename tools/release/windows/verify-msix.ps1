@@ -13,13 +13,15 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $packageName = 'OpenAI.UnitTestIDE'
-$allowedMetadata = @(
+$packageFootprintEntries = @(
   '[Content_Types].xml',
   'AppxBlockMap.xml',
   'AppxManifest.xml',
   'AppxMetadata/CodeIntegrity.cat',
   'AppxSignature.p7x'
 )
+$storeLogoPath = 'Assets/StoreLogo.png'
+$storeLogoBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7+4xQAAAAASUVORK5CYII='
 
 function Fail-Release {
   param(
@@ -43,14 +45,86 @@ function Resolve-RealFile {
   }
 
   $item = Get-Item -LiteralPath $resolved.ProviderPath -Force
-  if (-not $item.Exists -or -not $item.PSIsContainer -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-    Fail-Release -Code 'RELEASE_INPUT_MISSING' -Message "${Label} must be a regular file"
-  }
-  if (-not $item.Exists -or $item.PSIsContainer) {
+  if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
     Fail-Release -Code 'RELEASE_INPUT_MISSING' -Message "${Label} must be a regular file"
   }
 
   return $item.FullName
+}
+
+function Resolve-ToolPath {
+  param(
+    [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Override,
+    [Parameter(Mandatory = $true)][string]$CommandName,
+    [Parameter(Mandatory = $true)][string]$StableName
+  )
+
+  if (-not [string]::IsNullOrWhiteSpace($Override)) {
+    try {
+      return (Resolve-Path -LiteralPath $Override).ProviderPath
+    } catch {
+      Fail-Release -Code 'RELEASE_TOOL_MISSING' -Message "${StableName} is unavailable"
+    }
+  }
+
+  $command = Get-Command -Name $CommandName -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($null -ne $command) {
+    return $command.Source
+  }
+
+  $kitsRoot = ${env:ProgramFiles(x86)}
+  if (-not [string]::IsNullOrWhiteSpace($kitsRoot)) {
+    $candidateRoot = Join-Path $kitsRoot 'Windows Kits\10\bin'
+    if (Test-Path -LiteralPath $candidateRoot) {
+      $candidate = Get-ChildItem -LiteralPath $candidateRoot -Filter $CommandName -Recurse -File -ErrorAction SilentlyContinue |
+        Sort-Object -Property FullName -Descending |
+        Select-Object -First 1
+      if ($null -ne $candidate) {
+        return $candidate.FullName
+      }
+    }
+  }
+
+  Fail-Release -Code 'RELEASE_TOOL_MISSING' -Message "${StableName} is unavailable"
+}
+
+function Invoke-ExternalTool {
+  param(
+    [Parameter(Mandatory = $true)][string]$FilePath,
+    [Parameter(Mandatory = $true)][string[]]$Arguments
+  )
+
+  $extension = [IO.Path]::GetExtension($FilePath)
+  $stdoutPath = Join-Path ([IO.Path]::GetTempPath()) ("msix-stdout-" + [Guid]::NewGuid().ToString('N') + ".log")
+  $stderrPath = Join-Path ([IO.Path]::GetTempPath()) ("msix-stderr-" + [Guid]::NewGuid().ToString('N') + ".log")
+  if ($extension -ieq '.ps1') {
+    $commandPath = 'powershell.exe'
+    $argumentList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $FilePath) + $Arguments
+  } else {
+    $commandPath = $FilePath
+    $argumentList = $Arguments
+  }
+
+  try {
+    $process = Start-Process `
+      -FilePath $commandPath `
+      -ArgumentList $argumentList `
+      -Wait `
+      -PassThru `
+      -NoNewWindow `
+      -RedirectStandardOutput $stdoutPath `
+      -RedirectStandardError $stderrPath
+    $stdout = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw } else { '' }
+    $stderr = if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw } else { '' }
+    return [pscustomobject]@{
+      ExitCode = $process.ExitCode
+      StdErr = $stderr
+      StdOut = $stdout
+    }
+  } finally {
+    Remove-Item -LiteralPath $stdoutPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue
+  }
 }
 
 function Normalize-ReleaseVersion {
@@ -101,45 +175,147 @@ function Get-NormalizedEntries {
   return $results
 }
 
+function Get-EntryMap {
+  param([Parameter(Mandatory = $true)]$Archive)
+
+  $map = @{}
+  foreach ($entry in $Archive.Entries) {
+    if ([string]::IsNullOrWhiteSpace($entry.Name) -and $entry.FullName.EndsWith('/')) {
+      continue
+    }
+    $map[($entry.FullName -replace '\\', '/')] = $entry
+  }
+  return $map
+}
+
+function Resolve-StagedFile {
+  param(
+    [Parameter(Mandatory = $true)][string]$Root,
+    [Parameter(Mandatory = $true)][string]$RelativePath,
+    [Parameter(Mandatory = $true)][string]$Label
+  )
+
+  $invalidSegments = @($RelativePath.Split('/') | Where-Object { $_ -eq '.' -or $_ -eq '..' -or [string]::IsNullOrWhiteSpace($_) })
+  if (
+    [string]::IsNullOrWhiteSpace($RelativePath) -or
+    $RelativePath.Contains('\') -or
+    $RelativePath.Contains(':') -or
+    $RelativePath.StartsWith('/') -or
+    $invalidSegments.Count -gt 0
+  ) {
+    Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message "unsafe ${Label} path: $RelativePath"
+  }
+
+  $absolute = Join-Path $Root ($RelativePath -replace '/', [IO.Path]::DirectorySeparatorChar)
+  try {
+    $resolved = (Resolve-Path -LiteralPath $absolute).ProviderPath
+  } catch {
+    Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message "${Label} is missing from the staged root: $RelativePath"
+  }
+  $item = Get-Item -LiteralPath $resolved -Force
+  if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message "${Label} must be a regular file: $RelativePath"
+  }
+  $rootPrefix = ([IO.Path]::GetFullPath($Root)).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+  $resolvedFull = [IO.Path]::GetFullPath($resolved)
+  if (-not $resolvedFull.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+    Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message "unsafe ${Label} path escapes the staged root: $RelativePath"
+  }
+  return $resolvedFull
+}
+
+function Get-PlaceholderLogoBytes {
+  return [Convert]::FromBase64String($storeLogoBase64)
+}
+
+function Verify-Signature {
+  param([Parameter(Mandatory = $true)][string]$PackagePath)
+
+  $signatureTool = Resolve-ToolPath -Override ([string]$env:RELEASE_SIGNTOOL_PATH) -CommandName 'signtool.exe' -StableName 'signtool.exe'
+  $result = Invoke-ExternalTool -FilePath $signatureTool -Arguments @('verify', '/pa', '/v', $PackagePath)
+  if ($result.ExitCode -ne 0) {
+    $detail = ($result.StdErr + $result.StdOut).Trim()
+    if ([string]::IsNullOrWhiteSpace($detail)) {
+      $detail = 'signtool.exe rejected the MSIX package signature'
+    }
+    Fail-Release -Code 'RELEASE_SIGNATURE_INVALID' -Message $detail
+  }
+}
+
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 $packagePath = Resolve-RealFile -Path $Package -Label 'package'
 $manifestPath = Resolve-RealFile -Path $Manifest -Label 'manifest'
+$stagingRoot = Split-Path -Parent $manifestPath
 $externalManifestBytes = [IO.File]::ReadAllBytes($manifestPath)
 $releaseManifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+
+$expectedPayloads = [ordered]@{}
+foreach ($artifact in $releaseManifest.artifacts) {
+  $stagedPath = Resolve-StagedFile -Root $stagingRoot -RelativePath ([string]$artifact.relativePath) -Label 'artifact'
+  $stagedBytes = [IO.File]::ReadAllBytes($stagedPath)
+  if ($stagedBytes.Length -ne [int64]$artifact.size) {
+    Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message "artifact size does not match the release manifest: $($artifact.relativePath)"
+  }
+  if ((Get-Sha256Hex -Bytes $stagedBytes) -ne [string]$artifact.sha256) {
+    Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message "artifact hash does not match the release manifest: $($artifact.relativePath)"
+  }
+  $expectedPayloads[[string]$artifact.relativePath] = $stagedBytes
+}
+foreach ($license in $releaseManifest.licenses) {
+  $stagedPath = Resolve-StagedFile -Root $stagingRoot -RelativePath ([string]$license) -Label 'license'
+  $expectedPayloads[[string]$license] = [IO.File]::ReadAllBytes($stagedPath)
+}
+$expectedPayloads['release-manifest.json'] = $externalManifestBytes
+$expectedPayloads[$storeLogoPath] = Get-PlaceholderLogoBytes
 
 $archive = [System.IO.Compression.ZipFile]::OpenRead($packagePath)
 try {
   $entries = Get-NormalizedEntries -Archive $archive | Sort-Object -Unique
-  $embeddedManifestEntry = $archive.GetEntry('AppxManifest.xml')
+  $entryMap = Get-EntryMap -Archive $archive
+  $embeddedManifestEntry = $entryMap['AppxManifest.xml']
   if ($null -eq $embeddedManifestEntry) {
     Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message 'package does not contain AppxManifest.xml'
   }
 
-  $embeddedReleaseManifestEntry = $archive.GetEntry('release-manifest.json')
+  $embeddedReleaseManifestEntry = $entryMap['release-manifest.json']
   if ($null -eq $embeddedReleaseManifestEntry) {
     Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message 'package does not contain release-manifest.json'
   }
 
   $signaturePresent = $entries -contains 'AppxSignature.p7x'
-  if ($RequireSignature -and -not $signaturePresent) {
-    Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message 'required MSIX signature is absent'
+  if ($RequireSignature) {
+    if (-not $signaturePresent) {
+      Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message 'required MSIX signature is absent'
+    }
+    Verify-Signature -PackagePath $packagePath
   }
 
   $payloadEntries = @(
     $entries |
       Where-Object {
-        ($_ -notin $allowedMetadata) -and
+        ($_ -notin $packageFootprintEntries) -and
         (-not $_.StartsWith('AppxMetadata/'))
       }
   ) | Sort-Object
-  $expectedEntries = @(
-    @($releaseManifest.artifacts | ForEach-Object { $_.relativePath }) +
-    @($releaseManifest.licenses) +
-    @('release-manifest.json')
-  ) | Sort-Object
+  $expectedEntries = @($expectedPayloads.Keys) | Sort-Object
   if (($payloadEntries.Count -ne $expectedEntries.Count) -or (Compare-Object -ReferenceObject $expectedEntries -DifferenceObject $payloadEntries)) {
-    Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message 'package payload does not match release-manifest.json'
+    Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message 'package payload does not match the expected staged payload set'
+  }
+
+  foreach ($path in $expectedEntries) {
+    $entry = $entryMap[$path]
+    if ($null -eq $entry) {
+      Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message "package payload is missing: $path"
+    }
+    $entryBytes = Read-EntryBytes -Entry $entry
+    $expectedBytes = $expectedPayloads[$path]
+    if ($entryBytes.Length -ne $expectedBytes.Length) {
+      Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message "package payload size does not match the staged file: $path"
+    }
+    if ((Get-Sha256Hex -Bytes $entryBytes) -ne (Get-Sha256Hex -Bytes $expectedBytes)) {
+      Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message "package payload hash does not match the staged file: $path"
+    }
   }
 
   $embeddedReleaseManifestHash = Get-Sha256Hex -Bytes (Read-EntryBytes -Entry $embeddedReleaseManifestEntry)
@@ -164,6 +340,15 @@ try {
   }
   if ($identity.ProcessorArchitecture -ne $releaseManifest.architecture) {
     Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message 'AppxManifest.xml architecture does not match release-manifest.json'
+  }
+
+  $properties = $embeddedAppxManifest.Package.Properties
+  if ($null -eq $properties -or $properties.Logo -ne $storeLogoPath) {
+    Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message 'AppxManifest.xml is missing the required deterministic logo entry'
+  }
+  $dependencies = $embeddedAppxManifest.Package.Dependencies
+  if ($null -eq $dependencies -or $null -eq $dependencies.TargetDeviceFamily) {
+    Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message 'AppxManifest.xml is missing the required dependency declaration'
   }
 } finally {
   $archive.Dispose()
