@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -38,27 +37,6 @@ type catalogReader interface {
 
 const defaultCoordinatorCloseTimeout = 5 * time.Second
 
-func coverageDebugFailure(stage string, err error) {
-	if os.Getenv("UNIT_TEST_IDE_COVERAGE_DEBUG") != "1" {
-		return
-	}
-	errType := "<nil>"
-	if err != nil {
-		errType = fmt.Sprintf("%T", err)
-	}
-	fmt.Fprintf(
-		os.Stderr,
-		"COVERAGE_DEBUG stage=%s error_type=%s invalid=%t conflict=%t not_found=%t configure_required=%t catalog_stale=%t storage_unavailable=%t\n",
-		stage, errType,
-		errors.Is(err, task.ErrInvalidArgument),
-		errors.Is(err, task.ErrConflict),
-		errors.Is(err, task.ErrNotFound),
-		errors.Is(err, build.ErrConfigureRequired),
-		errors.Is(err, testdomain.ErrCatalogStale),
-		errors.Is(err, task.ErrStorageUnavailable),
-	)
-}
-
 type execution struct {
 	config          Config
 	coordinator     *Coordinator
@@ -67,6 +45,7 @@ type execution struct {
 	run             coveragedomain.Run
 	testRun         testdomain.TestRun
 	profile         workspace.CoverageProfile
+	catalog         testdomain.Catalog
 	buildInput      build.StartRequest
 	prepared        PreparedBuild
 	adapter         PreparedAdapter
@@ -439,10 +418,14 @@ func (coordinator *Coordinator) prepare(
 	if err != nil {
 		return nil, task.ExecutionPlan{}, failPreparation(coveragerun.PhaseConfigure, err)
 	}
+	catalog, err := coordinator.catalog(ctx, testRun)
+	if err != nil {
+		return nil, task.ExecutionPlan{}, failPreparation(coveragerun.PhaseConfigure, err)
+	}
 	execution := &execution{
 		config: coordinator.config, coordinator: coordinator,
 		taskID: stored.ID, initialTask: stored, run: run,
-		testRun: testRun, profile: profile,
+		testRun: testRun, profile: profile, catalog: catalog,
 		state: coveragerun.NewState(), failedPhase: coveragerun.PhaseConfigure,
 		outcomes:    make(map[string]testrun.InvocationOutcome),
 		unsupported: unsupported,
@@ -562,6 +545,15 @@ func (coordinator *Coordinator) loadGraph(
 }
 
 func (coordinator *Coordinator) catalog(ctx context.Context, run testdomain.TestRun) (testdomain.Catalog, error) {
+	return coordinator.catalogForCoverage(ctx, run, testdomain.Catalog{}, false)
+}
+
+func (coordinator *Coordinator) catalogForCoverage(
+	ctx context.Context,
+	run testdomain.TestRun,
+	expected testdomain.Catalog,
+	allowAlternateRevision bool,
+) (testdomain.Catalog, error) {
 	reader, ok := coordinator.config.Store.(catalogReader)
 	if !ok || nilPort(reader) {
 		return testdomain.Catalog{}, task.ErrStorageUnavailable
@@ -571,10 +563,28 @@ func (coordinator *Coordinator) catalog(ctx context.Context, run testdomain.Test
 		return testdomain.Catalog{}, err
 	}
 	validated, err := testdomain.NewCatalog(catalog)
-	if err != nil || validated.Revision != run.CatalogRevision {
+	if err != nil {
 		return testdomain.Catalog{}, testdomain.ErrCatalogStale
 	}
-	return validated, nil
+	if validated.Revision == run.CatalogRevision {
+		return validated, nil
+	}
+	if !allowAlternateRevision || !sameCoverageCatalog(expected, validated) {
+		return testdomain.Catalog{}, testdomain.ErrCatalogStale
+	}
+	// Keep the run-bound catalog identity for downstream test-run and protocol
+	// data. A semantically identical refresh is only accepted for revalidation;
+	// its new revision must not replace the snapshot captured by the run.
+	return expected.Clone(), nil
+}
+
+func sameCoverageCatalog(left, right testdomain.Catalog) bool {
+	left = left.Clone()
+	right = right.Clone()
+	left.Revision = ""
+	right.Revision = ""
+	left.GeneratedAt = right.GeneratedAt
+	return reflect.DeepEqual(left, right)
 }
 
 func (execution *execution) revalidate(ctx context.Context, coverage bool) error {
@@ -607,13 +617,16 @@ func (execution *execution) revalidate(ctx context.Context, coverage bool) error
 	if err != nil || !reflect.DeepEqual(profile, execution.profile) {
 		return task.ErrConflict
 	}
-	if _, err := execution.coordinator.catalog(ctx, execution.testRun); err != nil {
+	execution.mu.Lock()
+	prepared := execution.prepared
+	execution.mu.Unlock()
+	allowAlternateCatalog := coverageConfigurationID(prepared) != ""
+	if _, err := execution.coordinator.catalogForCoverage(
+		ctx, execution.testRun, execution.catalog, allowAlternateCatalog,
+	); err != nil {
 		return err
 	}
 	if coverage {
-		execution.mu.Lock()
-		prepared := execution.prepared
-		execution.mu.Unlock()
 		if err := validatePreparedIdentity(
 			prepared,
 			execution.run,
@@ -754,7 +767,6 @@ func (execution *execution) AfterStep(
 		return task.Continuation{}, task.ErrInvalidArgument
 	}
 	if err := execution.revalidate(ctx, step.Kind != task.StepCoverageConfigure); err != nil {
-		coverageDebugFailure("after-step-revalidate", err)
 		return task.Continuation{}, err
 	}
 	switch step.Kind {
@@ -769,7 +781,6 @@ func (execution *execution) AfterStep(
 			PersistConfiguration(context.Context) error
 		}); ok {
 			if err := recorder.PersistConfiguration(ctx); err != nil {
-				coverageDebugFailure("persist-configuration", err)
 				return task.Continuation{}, err
 			}
 		}
@@ -854,16 +865,9 @@ func (execution *execution) Interpret(
 		original := execution.testOriginals[step.ID]
 		execution.mu.Unlock()
 		if embedded == nil || original.ID == "" {
-			coverageDebugFailure("interpret-test-input", task.ErrInvalidArgument)
 			return task.StepVerdictDefault, task.ErrInvalidArgument
 		}
 		verdict, err := embedded.Interpret(ctx, current, original, result)
-		if err != nil {
-			coverageDebugFailure("interpret-test", err)
-		}
-		if err == nil && verdict != task.StepVerdictSucceeded {
-			coverageDebugFailure("interpret-test-verdict", nil)
-		}
 		if err != nil || verdict != task.StepVerdictSucceeded {
 			execution.setFailedPhase(coveragerun.PhaseTest)
 			return verdict, err
@@ -910,12 +914,10 @@ func (execution *execution) ObserveOutput(
 		original := execution.testOriginals[step.ID]
 		execution.mu.Unlock()
 		if embedded == nil || original.ID == "" {
-			coverageDebugFailure("observe-test-input", task.ErrInvalidArgument)
 			return task.ErrInvalidArgument
 		}
 		err := embedded.ObserveOutput(ctx, current, original, output)
 		if err != nil {
-			coverageDebugFailure("observe-test", err)
 		}
 		return err
 	}
@@ -974,7 +976,6 @@ func (execution *execution) ExecuteServiceAction(
 		return task.StepResult{}, execution.terminalErr
 	}
 	if err := execution.revalidate(ctx, true); err != nil {
-		coverageDebugFailure("service-action-revalidate", err)
 		execution.setFailedPhase(phaseForStep(step.Kind))
 		return task.StepResult{}, err
 	}
@@ -1030,9 +1031,13 @@ func (execution *execution) prepareTests(ctx context.Context, current task.Task)
 	if err != nil {
 		return nil, err
 	}
-	catalog, err := execution.coordinator.catalog(ctx, run)
+	execution.mu.Lock()
+	expectedCatalog := execution.catalog
+	execution.mu.Unlock()
+	catalog, err := execution.coordinator.catalogForCoverage(
+		ctx, run, expectedCatalog, true,
+	)
 	if err != nil {
-		coverageDebugFailure("prepare-tests-catalog", err)
 		return nil, err
 	}
 	execution.mu.Lock()
@@ -1040,7 +1045,6 @@ func (execution *execution) prepareTests(ctx context.Context, current task.Task)
 	targets := cloneCoverageTargets(execution.preparedTargets)
 	execution.mu.Unlock()
 	if prepared == nil {
-		coverageDebugFailure("prepare-tests-prepared", task.ErrInvalidArgument)
 		execution.setFailedPhase(coveragerun.PhaseTest)
 		return nil, task.ErrInvalidArgument
 	}
@@ -1056,18 +1060,15 @@ func (execution *execution) prepareTests(ctx context.Context, current task.Task)
 		MaxConcurrency: 1,
 	})
 	if err != nil || nilPort(embedded) {
-		coverageDebugFailure("prepare-tests-embedded", errOrInvalid(err))
 		execution.setFailedPhase(coveragerun.PhaseTest)
 		return nil, errOrInvalid(err)
 	}
 	steps, originals, err := rewriteTestSteps(embedded.Steps())
 	if err != nil {
-		coverageDebugFailure("prepare-tests-rewrite", err)
 		return nil, err
 	}
 	binaries, err := retainTestBinaries(originals)
 	if err != nil {
-		coverageDebugFailure("prepare-tests-binaries", err)
 		return nil, err
 	}
 	execution.mu.Lock()
@@ -1093,6 +1094,16 @@ func (execution *execution) prepareTests(ctx context.Context, current task.Task)
 type preparedBuildWithTargets struct {
 	PreparedBuild
 	targets []cmake.Target
+}
+
+func coverageConfigurationID(prepared PreparedBuild) string {
+	identity, ok := prepared.(interface {
+		ConfigurationID() string
+	})
+	if !ok {
+		return ""
+	}
+	return identity.ConfigurationID()
 }
 
 func (prepared *preparedBuildWithTargets) Targets() []cmake.Target {
@@ -1146,13 +1157,11 @@ func (execution *execution) prepareCollector(ctx context.Context) ([]task.Execut
 		return outcomes[left].Iteration < outcomes[right].Iteration
 	})
 	if len(outcomes) != len(expectations) {
-		coverageDebugFailure("prepare-collector-outcomes", task.ErrInvalidArgument)
 		execution.setFailedPhase(coveragerun.PhaseTest)
 		return nil, task.ErrInvalidArgument
 	}
 	manifest, err := execution.adapter.SealProfiles(expectations, outcomes)
 	if err != nil {
-		coverageDebugFailure("prepare-collector-seal", err)
 		execution.setFailedPhase(coveragerun.PhaseTest)
 		return nil, err
 	}
@@ -1165,7 +1174,6 @@ func (execution *execution) prepareCollector(ctx context.Context) ([]task.Execut
 	execution.mu.Unlock()
 	merge, export, err := execution.adapter.Collector(manifest, binaries)
 	if err != nil {
-		coverageDebugFailure("prepare-collector-adapter", err)
 		execution.setFailedPhase(coveragerun.PhaseMerge)
 		return nil, err
 	}
@@ -1189,7 +1197,6 @@ func (execution *execution) prepareCollector(ctx context.Context) ([]task.Execut
 		TimedOut:         hasReason(reasons, coveragedomain.CompletenessReasonTestTimedOut),
 		ProfileMissing:   hasReason(reasons, coveragedomain.CompletenessReasonProfileMissingForFailedInvocation),
 	}); err != nil {
-		coverageDebugFailure("prepare-collector-phase", err)
 		return nil, err
 	}
 	execution.mu.Lock()
@@ -1203,7 +1210,6 @@ func (execution *execution) prepareCollector(ctx context.Context) ([]task.Execut
 	execution.mu.Unlock()
 	steps, err := collectorSteps(merge, export)
 	if err != nil {
-		coverageDebugFailure("prepare-collector-steps", err)
 		return nil, err
 	}
 	execution.addApprovedSteps(steps)

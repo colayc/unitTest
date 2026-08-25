@@ -620,7 +620,7 @@ function assertNoSensitiveBytes(
       );
     }
   }
-  assert.doesNotMatch(text, /(?:[A-Za-z]:[\\/]|file:\/{2,3}[A-Za-z]:|\\\\[?.]\\)/u);
+  assert.doesNotMatch(text, /(?:^|[^A-Za-z0-9+.-])(?:[A-Za-z]:[\\/]|file:\/{2,3}[A-Za-z]:|\\\\[?.]\\)/u);
   assert.doesNotMatch(lower, /(?:llvm_profile_file|\.profraw|\.profdata)/u);
 }
 

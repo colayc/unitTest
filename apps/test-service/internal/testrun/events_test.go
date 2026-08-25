@@ -16,6 +16,20 @@ import (
 	"unit-test-ide.local/test-service/internal/testframework"
 )
 
+func TestNativePathsAreRedactedFromTestOutputEvents(t *testing.T) {
+	if got := nativePathInOutput.ReplaceAllString("unit-test-ide://artifact/abc", "$1[redacted-path]"); got != "unit-test-ide://artifact/abc" {
+		t.Fatalf("protocol URI was mistaken for a native path: %q", got)
+	}
+	input := `CTest command: E:\private\workspace\test.exe; file:///E:/private/workspace/test.cpp`
+	got := nativePathInOutput.ReplaceAllString(input, "$1[redacted-path]")
+	if strings.Contains(got, "E:/") || strings.Contains(got, `E:\`) {
+		t.Fatalf("native path was retained: %q", got)
+	}
+	if !strings.Contains(got, "[redacted-path]") {
+		t.Fatalf("redaction marker missing: %q", got)
+	}
+}
+
 func TestInterpreterEmitsBoundedOrderedLifecycleEventsAfterResults(
 	t *testing.T,
 ) {

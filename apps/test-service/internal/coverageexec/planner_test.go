@@ -53,6 +53,9 @@ func TestPlannerRewritesBuildStepsToClosedCoveragePhases(t *testing.T) {
 			len(got.Steps[index].Public.Args) != 0 {
 			t.Fatalf("step %d public command leaked native input: %#v", index, got.Steps[index].Public)
 		}
+		if got.Steps[index].DiagnosticParser != nil {
+			t.Fatalf("step %d retained a path-bearing diagnostic parser", index)
+		}
 	}
 	if !reflect.DeepEqual(got.Steps[0].Process, input.Steps[0].Process) ||
 		!reflect.DeepEqual(got.Steps[1].Process, input.Steps[1].Process) {

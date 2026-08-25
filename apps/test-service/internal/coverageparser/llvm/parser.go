@@ -177,7 +177,7 @@ func supportedVersion(value string) bool {
 			return false
 		}
 	}
-	return parts[0] == "2"
+	return parts[0] == "2" || parts[0] == "3"
 }
 
 func (p *parser) parseData() ([]rawFile, []rawFunction, error) {
@@ -322,7 +322,7 @@ func (p *parser) region() (region, error) {
 		}
 		*destination = value
 	}
-	if !validSourceRange(result.lineStart, result.columnStart, result.lineEnd, result.columnEnd) {
+	if !validRegionRange(result.lineStart, result.columnStart, result.lineEnd, result.columnEnd) {
 		return region{}, errors.New("invalid region range")
 	}
 	if result.kind > 6 {
@@ -493,6 +493,13 @@ func validSourceRange(startLine, startColumn, endLine, endColumn int64) bool {
 		return false
 	}
 	return endLine > startLine || (endLine == startLine && endColumn > startColumn)
+}
+
+func validRegionRange(startLine, startColumn, endLine, endColumn int64) bool {
+	if startLine < 1 || startColumn < 1 || endLine < 1 || endColumn < 1 {
+		return false
+	}
+	return endLine > startLine || (endLine == startLine && endColumn >= startColumn)
 }
 
 func (p *parser) percentage() error {

@@ -21,6 +21,10 @@ func rewriteBuildPlan(input task.ExecutionPlan) (task.ExecutionPlan, error) {
 		result.Steps[index].Public = task.CommandSummary{
 			Executable: string(result.Steps[index].Kind),
 		}
+		// Coverage tasks never publish compiler diagnostics: their public
+		// protocol is intentionally path-free, while raw build diagnostics may
+		// contain absolute toolchain or workspace paths.
+		result.Steps[index].DiagnosticParser = nil
 	}
 	result.Fingerprint = task.FingerprintPlan(result)
 	return result, nil
