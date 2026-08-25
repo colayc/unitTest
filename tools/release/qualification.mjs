@@ -7,6 +7,9 @@ import { fileURLToPath } from "node:url";
 const platforms = Object.freeze(["linux", "windows"]);
 const digestPattern = /^[0-9a-f]{64}$/u;
 const commitPattern = /^[0-9a-f]{40}$/u;
+const semverPattern = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u;
+const artifactIdPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
+const artifactKindPattern = /^[a-z][a-z0-9-]*$/u;
 const expectedOutcomes = Object.freeze({
   install: "pass",
   launchHandshake: "pass",
@@ -61,13 +64,18 @@ function hasExactKeys(value, expected) {
     && Object.keys(value).sort().join("\0") === [...expected].sort().join("\0");
 }
 
+function portableRelativePath(value) {
+  return typeof value === "string"
+    && /^[A-Za-z0-9][A-Za-z0-9._+/-]*$/u.test(value)
+    && !value.includes("\\")
+    && !value.startsWith("/")
+    && !/^[A-Za-z]:/u.test(value)
+    && value.split("/").every((segment) => segment.length > 0 && segment !== "." && segment !== "..");
+}
+
 function validLicense(value) {
   return hasExactKeys(value, ["path", "size", "sha256"])
-    && typeof value.path === "string"
-    && value.path.length > 0
-    && !value.path.includes("\\")
-    && !value.path.startsWith("/")
-    && !/(?:^|\/)\.\.?(?:\/|$)/u.test(value.path)
+    && portableRelativePath(value.path)
     && Number.isSafeInteger(value.size)
     && value.size >= 0
     && digestPattern.test(value.sha256);
@@ -75,8 +83,28 @@ function validLicense(value) {
 
 function closedLicenseList(value) {
   return Array.isArray(value)
+    && value.length > 0
     && value.every(validLicense)
     && new Set(value.map(({ path }) => path)).size === value.length;
+}
+
+function validArtifact(value) {
+  return hasExactKeys(value, ["id", "kind", "relativePath", "size", "sha256", "executable"])
+    && artifactIdPattern.test(value.id ?? "")
+    && artifactKindPattern.test(value.kind ?? "")
+    && portableRelativePath(value.relativePath)
+    && Number.isSafeInteger(value.size)
+    && value.size >= 0
+    && digestPattern.test(value.sha256 ?? "")
+    && typeof value.executable === "boolean";
+}
+
+function closedArtifactList(value) {
+  return Array.isArray(value)
+    && value.length > 0
+    && value.every(validArtifact)
+    && new Set(value.map(({ id }) => id)).size === value.length
+    && new Set(value.map(({ relativePath }) => relativePath)).size === value.length;
 }
 
 function sameLicenses(left, right) {
@@ -145,11 +173,16 @@ function validatePlatform(platform, input, reasons) {
       || manifest.product !== "unit-test-ide"
       || manifest.platform !== platform
       || !commitPattern.test(manifest.sourceCommit ?? "")
-      || typeof manifest.version !== "string"
-      || !Array.isArray(manifest.artifacts)
+      || !semverPattern.test(manifest.version ?? "")
       || !closedLicenseList(manifest.licenses)
     ) {
       addReason(reasons, `${platform} release manifest identity is invalid`);
+    }
+    if (!closedArtifactList(manifest.artifacts)) {
+      addReason(reasons, `${platform} release manifest artifacts are invalid`);
+    }
+    if (!Array.isArray(manifest.licenses) || manifest.licenses.length === 0) {
+      addReason(reasons, `${platform} release manifest must contain at least one license notice`);
     }
   }
   if (!digestPattern.test(manifestRecord?.packageSha256 ?? "")) {
@@ -183,6 +216,31 @@ function validatePlatform(platform, input, reasons) {
       addReason(reasons, `${platform} license audit does not match the release manifest`);
     }
   }
+}
+
+function validateReleaseVersion(input, reasons) {
+  const canonical = input.manifests?.linux?.releaseManifest?.version
+    ?? input.manifests?.windows?.releaseManifest?.version
+    ?? input.linuxEvidence?.version
+    ?? input.windowsEvidence?.version
+    ?? null;
+  if (!semverPattern.test(canonical ?? "")) {
+    addReason(reasons, "canonical release version is missing or invalid");
+    return null;
+  }
+  for (const platform of platforms) {
+    const records = [
+      ["release version", input.manifests?.[platform]?.releaseManifest?.version],
+      ["evidence version", input[`${platform}Evidence`]?.version],
+      ["license audit version", input.licenseAudit?.[platform]?.version],
+    ];
+    for (const [label, version] of records) {
+      if (version !== undefined && version !== null && version !== canonical) {
+        addReason(reasons, `${platform} ${label} does not match canonical version ${canonical}`);
+      }
+    }
+  }
+  return canonical;
 }
 
 function validateSourceCommit(input, reasons) {
@@ -248,6 +306,7 @@ export function qualifyRelease(input) {
   if (!hasExactKeys(normalized.manifests, platforms)) addReason(reasons, "platform manifest evidence is missing or not closed");
   if (!hasExactKeys(normalized.licenseAudit, platforms)) addReason(reasons, "platform license audit evidence is missing or not closed");
   for (const platform of platforms) validatePlatform(platform, normalized, reasons);
+  validateReleaseVersion(normalized, reasons);
   const sourceCommit = validateSourceCommit(normalized, reasons);
   const windowsSignature = validateSignatures(normalized.signatures, reasons);
   const qualified = reasons.length === 0;

@@ -227,6 +227,49 @@ test("qualifyRelease rejects evidence from different source commits", () => {
   assert.ok(reasonMessages(result).includes("windows evidence source commit does not match the release"));
 });
 
+test("qualifyRelease rejects cross-platform release version drift", () => {
+  const input = completeInput();
+  input.manifests.windows.releaseManifest.version = "1.2.4";
+  input.windowsEvidence.version = "1.2.4";
+  input.licenseAudit.windows.version = "1.2.4";
+
+  const result = qualifyRelease(input);
+
+  assert.equal(result.qualified, false);
+  assert.ok(reasonMessages(result).includes("windows release version does not match canonical version 1.2.3"));
+});
+
+test("qualifyRelease rejects empty manifest and audit license evidence on either platform", () => {
+  for (const platform of ["linux", "windows"]) {
+    const input = completeInput();
+    input.manifests[platform].releaseManifest.licenses = [];
+    input.licenseAudit[platform].licenses = [];
+
+    const result = qualifyRelease(input);
+
+    assert.equal(result.qualified, false);
+    assert.ok(reasonMessages(result).includes(`${platform} release manifest must contain at least one license notice`));
+    assert.equal(result.report.licenseOutcome[platform], "fail");
+  }
+});
+
+test("qualifyRelease rejects empty, malformed, and open artifact records", () => {
+  const cases = [
+    [],
+    [{ ...releaseManifest("linux").artifacts[0], unexpected: true }],
+    [{ ...releaseManifest("linux").artifacts[0], relativePath: "../outside", sha256: "invalid" }],
+  ];
+  for (const artifacts of cases) {
+    const input = completeInput();
+    input.manifests.linux.releaseManifest.artifacts = artifacts;
+
+    const result = qualifyRelease(input);
+
+    assert.equal(result.qualified, false);
+    assert.ok(reasonMessages(result).includes("linux release manifest artifacts are invalid"));
+  }
+});
+
 test("qualification CLI hashes package inputs and emits only closed path-free release evidence", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "release-qualification-cli-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -284,4 +327,5 @@ test("foundation release publication is downstream of a successful qualification
   assert.match(workflow, /node tools\/release\/qualification\.mjs[\s\S]*?release-qualification\.json/u);
   assert.match(workflow, /signature_required=\$env:RELEASE_SIGNING_REQUIRED/u);
   assert.match(workflow, /qualificationOutcome\.qualified[\s\S]*?actions\/upload-artifact@v7/u);
+  assert.match(workflow, /id: canonical-release-version[\s\S]*?name: qualified-release-\$\{\{ steps\.canonical-release-version\.outputs\.version \}\}/u);
 });
