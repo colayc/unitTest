@@ -14,6 +14,13 @@ function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
+function powerShellLiteral(value) {
+  if (value === null || value === undefined) {
+    return "$null";
+  }
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
 async function withTemporaryRoot(t, run) {
   const root = await mkdtemp(join(tmpdir(), "release-msix-"));
   t.after(async () => {
@@ -111,8 +118,10 @@ if (Test-Path -LiteralPath $package) {
   return toolPath;
 }
 
-async function createFakeSignTool(root) {
+async function createFakeSignTool(root, options = {}) {
   const toolPath = join(root, "fake-signtool.ps1");
+  const expectedCertificatePath = options.expectedCertificatePath ?? null;
+  const expectedPassword = options.expectedPassword ?? null;
   await writeFile(toolPath, `
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
 Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -122,6 +131,22 @@ if ($Arguments.Length -eq 0) {
 }
 switch ($Arguments[0].ToLowerInvariant()) {
   'sign' {
+    $expectedCertificatePath = ${powerShellLiteral(expectedCertificatePath)}
+    $expectedPassword = ${powerShellLiteral(expectedPassword)}
+    for ($index = 0; $index -lt $Arguments.Length; $index += 1) {
+      if ($Arguments[$index] -eq '/f' -and $expectedCertificatePath -ne $null) {
+        if ($Arguments[$index + 1] -ne $expectedCertificatePath) {
+          [Console]::Error.WriteLine("certificate-path-mismatch: " + $Arguments[$index + 1])
+          exit 3
+        }
+      }
+      if ($Arguments[$index] -eq '/p' -and $expectedPassword -ne $null) {
+        if ($Arguments[$index + 1] -ne $expectedPassword) {
+          [Console]::Error.WriteLine("password-mismatch: " + $Arguments[$index + 1])
+          exit 4
+        }
+      }
+    }
     $package = $Arguments[-1]
     $archive = [System.IO.Compression.ZipFile]::Open($package, [System.IO.Compression.ZipArchiveMode]::Update)
     try {
@@ -232,11 +257,11 @@ async function readZipEntry(packagePath, entryName) {
   const script = `
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-$archive = [System.IO.Compression.ZipFile]::OpenRead(${JSON.stringify(packagePath)})
+$archive = [System.IO.Compression.ZipFile]::OpenRead(${powerShellLiteral(packagePath)})
 try {
   $entry = $null
   foreach ($candidate in $archive.Entries) {
-    if (($candidate.FullName -replace '\\\\', '/') -eq ${JSON.stringify(entryName)}) {
+    if (($candidate.FullName -replace '\\\\', '/') -eq ${powerShellLiteral(entryName)}) {
       $entry = $candidate
       break
     }
@@ -264,11 +289,11 @@ async function setZipEntry(packagePath, entryName, content) {
   const script = `
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-$archive = [System.IO.Compression.ZipFile]::Open(${JSON.stringify(packagePath)}, [System.IO.Compression.ZipArchiveMode]::Update)
+$archive = [System.IO.Compression.ZipFile]::Open(${powerShellLiteral(packagePath)}, [System.IO.Compression.ZipArchiveMode]::Update)
 try {
   $entry = $null
   foreach ($candidate in $archive.Entries) {
-    if (($candidate.FullName -replace '\\\\', '/') -eq ${JSON.stringify(entryName)}) {
+    if (($candidate.FullName -replace '\\\\', '/') -eq ${powerShellLiteral(entryName)}) {
       $entry = $candidate
       break
     }
@@ -276,10 +301,41 @@ try {
   if ($null -ne $entry) {
     $entry.Delete()
   }
-  $replacement = $archive.CreateEntry(${JSON.stringify(entryName)})
+  $replacement = $archive.CreateEntry(${powerShellLiteral(entryName)})
   $writer = [IO.StreamWriter]::new($replacement.Open())
   try {
-    $writer.Write(${JSON.stringify(content)})
+    $writer.Write(${powerShellLiteral(content)})
+  } finally {
+    $writer.Dispose()
+  }
+} finally {
+  $archive.Dispose()
+}
+`;
+  const result = spawnSync("powershell.exe", [
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-Command",
+    script,
+  ], {
+    cwd: resolve("."),
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  assert.equal(result.status, 0, result.stderr);
+}
+
+async function addZipEntry(packagePath, entryName, content) {
+  const script = `
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$archive = [System.IO.Compression.ZipFile]::Open(${powerShellLiteral(packagePath)}, [System.IO.Compression.ZipArchiveMode]::Update)
+try {
+  $entry = $archive.CreateEntry(${powerShellLiteral(entryName)})
+  $writer = [IO.StreamWriter]::new($entry.Open())
+  try {
+    $writer.Write(${powerShellLiteral(content)})
   } finally {
     $writer.Dispose()
   }
@@ -423,6 +479,38 @@ windowsOnly("package-msix accepts an unsigned development package only when RELE
   });
 });
 
+windowsOnly("package-msix preserves spaced tool, certificate, output, and password arguments when signing is required", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const spacedRoot = join(root, "tool path with spaces");
+    await mkdir(spacedRoot, { recursive: true });
+    const fixture = await createStagingFixture(root);
+    fixture.outputPath = join(root, "dist with spaces", "unit test ide.msix");
+    const fakeMakeAppx = await createFakeMakeAppx(spacedRoot);
+    const certificatePath = await writeFixtureFile(root, "certs with spaces/release signing cert.pfx", "fake certificate");
+    const password = "space rich password value";
+    const fakeSignTool = await createFakeSignTool(spacedRoot, {
+      expectedCertificatePath: certificatePath,
+      expectedPassword: password,
+    });
+    const result = runPackage([
+      "-StagingRoot", fixture.stagingRoot,
+      "-Output", fixture.outputPath,
+      "-Version", fixture.version,
+      "-Publisher", "CN=Unit Test IDE",
+    ], {
+      RELEASE_MAKEAPPX_PATH: fakeMakeAppx,
+      RELEASE_SIGNTOOL_PATH: fakeSignTool,
+      RELEASE_SIGNING_REQUIRED: "1",
+      RELEASE_SIGNING_PFX_PATH: certificatePath,
+      RELEASE_SIGNING_PFX_PASSWORD: password,
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const bytes = await readFile(fixture.outputPath);
+    assert.ok(bytes.length > 0);
+  });
+});
+
 windowsOnly("package-msix returns RELEASE_SIGNING_REQUIRED when release signing is enabled without a certificate", async (t) => {
   await withTemporaryRoot(t, async (root) => {
     const fixture = await createStagingFixture(root);
@@ -459,6 +547,51 @@ windowsOnly("verify-msix rejects a forged signature entry when RequireSignature 
 
     assert.equal(result.status, 1);
     assert.match(result.stderr, /RELEASE_SIGNATURE_INVALID/u);
+  });
+});
+
+windowsOnly("verify-msix rejects a duplicate slash-aliased payload entry before payload-set comparison", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await packageWithFakeTools(root);
+    await addZipEntry(fixture.outputPath, "app\\code-oss", "aliased-runtime");
+    const result = runVerify([
+      "-Package", fixture.outputPath,
+      "-Manifest", fixture.manifestPath,
+    ], {});
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /RELEASE_VERIFICATION_FAILED/u);
+    assert.match(result.stderr, /duplicate|alias|backslash/u);
+  });
+});
+
+windowsOnly("verify-msix rejects a case-aliased payload entry before payload-set comparison", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await packageWithFakeTools(root);
+    await addZipEntry(fixture.outputPath, "APP/code-oss", "aliased-runtime");
+    const result = runVerify([
+      "-Package", fixture.outputPath,
+      "-Manifest", fixture.manifestPath,
+    ], {});
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /RELEASE_VERIFICATION_FAILED/u);
+    assert.match(result.stderr, /duplicate|alias|case/u);
+  });
+});
+
+windowsOnly("verify-msix rejects a dot-segment payload entry before payload-set comparison", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await packageWithFakeTools(root);
+    await addZipEntry(fixture.outputPath, "app/../app/code-oss", "aliased-runtime");
+    const result = runVerify([
+      "-Package", fixture.outputPath,
+      "-Manifest", fixture.manifestPath,
+    ], {});
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /RELEASE_VERIFICATION_FAILED/u);
+    assert.match(result.stderr, /\.\.|dot|unsafe/u);
   });
 });
 

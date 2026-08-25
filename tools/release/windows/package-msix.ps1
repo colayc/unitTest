@@ -156,36 +156,34 @@ function Invoke-ExternalTool {
     [Parameter(Mandatory = $true)][string[]]$Arguments
   )
 
-  $extension = [IO.Path]::GetExtension($FilePath)
-  $stdoutPath = Join-Path ([IO.Path]::GetTempPath()) ("msix-stdout-" + [Guid]::NewGuid().ToString('N') + ".log")
-  $stderrPath = Join-Path ([IO.Path]::GetTempPath()) ("msix-stderr-" + [Guid]::NewGuid().ToString('N') + ".log")
-  if ($extension -ieq '.ps1') {
-    $commandPath = 'powershell.exe'
-    $argumentList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $FilePath) + $Arguments
+  $previousExitCodeVariable = Get-Variable -Name LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue
+  $previousExitCode = if ($null -ne $previousExitCodeVariable) { $previousExitCodeVariable.Value } else { $null }
+  $global:LASTEXITCODE = $null
+  $output = & $FilePath @Arguments 2>&1
+  $succeeded = $?
+  $currentExitCodeVariable = Get-Variable -Name LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue
+  $exitCode = if ($null -ne $currentExitCodeVariable -and $null -ne $currentExitCodeVariable.Value) {
+    [int]$currentExitCodeVariable.Value
+  } elseif ($succeeded) {
+    0
   } else {
-    $commandPath = $FilePath
-    $argumentList = $Arguments
+    1
   }
-
-  try {
-    $process = Start-Process `
-      -FilePath $commandPath `
-      -ArgumentList $argumentList `
-      -Wait `
-      -PassThru `
-      -NoNewWindow `
-      -RedirectStandardOutput $stdoutPath `
-      -RedirectStandardError $stderrPath
-    $stdout = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw } else { '' }
-    $stderr = if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw } else { '' }
-    return [pscustomobject]@{
-      ExitCode = $process.ExitCode
-      StdErr = $stderr
-      StdOut = $stdout
-    }
-  } finally {
-    Remove-Item -LiteralPath $stdoutPath -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue
+  if ($null -ne $previousExitCodeVariable) {
+    $global:LASTEXITCODE = $previousExitCode
+  } else {
+    Clear-Variable -Name LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue
+  }
+  $merged = (@($output | ForEach-Object {
+        if ($_ -is [System.Management.Automation.ErrorRecord]) {
+          $_.ToString()
+        } else {
+          [string]$_
+        }
+      }) | Where-Object { -not [string]::IsNullOrEmpty($_) }) -join [Environment]::NewLine
+  return [pscustomobject]@{
+    ExitCode = $exitCode
+    Combined = $merged
   }
 }
 
@@ -256,7 +254,7 @@ try {
 
   $makeAppxResult = Invoke-ExternalTool -FilePath $makeAppxPath -Arguments @('pack', '/d', $temporaryRoot, '/p', $outputPath, '/o')
   if ($makeAppxResult.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $outputPath -PathType Leaf)) {
-    $detail = ($makeAppxResult.StdErr + $makeAppxResult.StdOut).Trim()
+    $detail = $makeAppxResult.Combined.Trim()
     if ([string]::IsNullOrWhiteSpace($detail)) {
       $detail = 'makeappx.exe failed to create the MSIX package'
     }
@@ -267,7 +265,7 @@ try {
     $signToolPath = Resolve-ToolPath -Override ([string]$env:RELEASE_SIGNTOOL_PATH) -CommandName 'signtool.exe' -StableName 'signtool.exe'
     $signResult = Invoke-ExternalTool -FilePath $signToolPath -Arguments @('sign', '/fd', 'SHA256', '/f', $signing.Path, '/p', $signing.Password, $outputPath)
     if ($signResult.ExitCode -ne 0) {
-      $detail = ($signResult.StdErr + $signResult.StdOut).Trim()
+      $detail = $signResult.Combined.Trim()
       if ([string]::IsNullOrWhiteSpace($detail)) {
         $detail = 'signtool.exe failed to sign the MSIX package'
       }
