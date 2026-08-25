@@ -19,6 +19,7 @@ const supportedKeys = [
   "expectedDigest",
   "output",
   "stagingRoot",
+  "verificationExtractor",
   "version",
 ];
 
@@ -164,7 +165,7 @@ function normalizedOutputPath(output) {
 async function loadReleaseManifest(stagingRoot, version, architecture) {
   const manifestFile = await validateRealFile(join(stagingRoot.path, "release-manifest.json"), "release manifest");
   const manifest = JSON.parse(await readFile(manifestFile.path, "utf8"));
-  if (manifest?.product !== "unit-test-ide" || manifest?.platform !== "linux") {
+  if (manifest?.schemaVersion !== 1 || manifest?.product !== "unit-test-ide" || manifest?.platform !== "linux") {
     throw releaseFailure("RELEASE_PACKAGING_FAILED", "release manifest identity is invalid for Linux packaging");
   }
   if (manifest.version !== version) {
@@ -219,6 +220,9 @@ export async function packageAppImage(input) {
   }
   if (typeof input.appimagetool !== "string" || input.appimagetool.trim().length === 0) {
     throw releaseFailure("RELEASE_TOOL_MISSING", "appimagetool is required");
+  }
+  if (input.verificationExtractor !== undefined && typeof input.verificationExtractor !== "function") {
+    throw releaseFailure("RELEASE_PACKAGING_FAILED", "verificationExtractor must be a function when provided");
   }
 
   const expectedDigest = expectedDigestFromInput(input);
@@ -294,6 +298,7 @@ export async function packageAppImage(input) {
       image: outputPath,
       manifest: manifestPath,
       requireDigest: true,
+      extractor: input.verificationExtractor,
     });
 
     return {
