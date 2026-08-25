@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
@@ -10,6 +11,8 @@ import { verifyAppImage } from "./verify-appimage.mjs";
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
+
+const verifyCli = resolve("tools/release/linux/verify-appimage.mjs");
 
 async function withTemporaryRoot(t, run) {
   const baseRoot = join(resolve("."), ".tmp", "release-appimage");
@@ -64,6 +67,22 @@ async function createStagingFixture(root, version = "1.2.3") {
         sha256: sha256(service),
         executable: true,
       },
+      {
+        id: "cmake",
+        kind: "bundle-cmake",
+        relativePath: "bundles/cmake/bin/cmake",
+        size: Buffer.byteLength(cmake),
+        sha256: sha256(cmake),
+        executable: false,
+      },
+      {
+        id: "coverage",
+        kind: "bundle-coverage",
+        relativePath: "bundles/coverage/app/gcovr-runner.pyz",
+        size: Buffer.byteLength(coverage),
+        sha256: sha256(coverage),
+        executable: false,
+      },
     ],
     licenses: ["licenses/NOTICE.txt"],
     generatedAt: "2026-08-25T00:00:00.000Z",
@@ -112,7 +131,10 @@ async function collect(rootPath, current = "") {
     files[relativePath] = {
       sha256: sha256(bytes),
       size: info.size,
-      executable: (info.mode & 0o111) !== 0 || relativePath === "AppRun" || relativePath.endsWith("/app/code-oss"),
+      executable: (info.mode & 0o111) !== 0
+        || relativePath === "AppRun"
+        || relativePath.endsWith("/app/code-oss")
+        || relativePath.endsWith("/service/unit-test-service"),
       contentBase64: bytes.toString("base64"),
     };
   }
@@ -133,6 +155,67 @@ await writeFile(output, JSON.stringify(payload, null, 2));
   return {
     path: toolScript,
     sha256: sha256(await readFile(toolScript)),
+  };
+}
+
+async function parseFakeEnvelope(imagePath) {
+  return JSON.parse(await readFile(imagePath, "utf8"));
+}
+
+function createFakeEnvelopeExtractor() {
+  return async (imagePath) => {
+    const envelope = await parseFakeEnvelope(imagePath);
+    assert.equal(envelope.marker, "UNIT_TEST_IDE_FAKE_APPIMAGE");
+    const files = new Map();
+    for (const [relativePath, entry] of Object.entries(envelope.files)) {
+      const content = Buffer.from(entry.contentBase64, "base64");
+      files.set(relativePath, {
+        size: content.length,
+        sha256: sha256(content),
+        executable: Boolean(entry.executable),
+        content,
+      });
+    }
+    return {
+      files,
+      cleanup: async () => {},
+    };
+  };
+}
+
+async function updateFakeEnvelope(imagePath, mutate) {
+  const envelope = await parseFakeEnvelope(imagePath);
+  await mutate(envelope);
+  await writeFile(imagePath, `${JSON.stringify(envelope, null, 2)}\n`);
+}
+
+async function refreshSidecarManifest(manifestPath, imagePath, mutate) {
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  if (mutate) {
+    await mutate(manifest);
+  }
+  manifest.packageSha256 = sha256(await readFile(imagePath));
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  return manifest;
+}
+
+async function packageWithFakeTool(root, version = "1.2.3") {
+  const fixture = await createStagingFixture(root, version);
+  const fakeTool = await createFakeAppImageTool(root);
+  const extractor = createFakeEnvelopeExtractor();
+  const result = await packageAppImage({
+    stagingRoot: fixture.stagingRoot,
+    output: fixture.outputPath,
+    appimagetool: fakeTool.path,
+    expectedDigest: fakeTool.sha256,
+    version: fixture.version,
+    architecture: "x64",
+    verificationExtractor: extractor,
+  });
+  return {
+    ...fixture,
+    ...result,
+    extractor,
   };
 }
 
@@ -183,34 +266,179 @@ test("packageAppImage fails closed when AppRun is missing", async (t) => {
 
 test("packageAppImage emits a closed digest manifest and a desktop entry that points at the staged launcher", async (t) => {
   await withTemporaryRoot(t, async (root) => {
-    const fixture = await createStagingFixture(root);
-    const fakeTool = await createFakeAppImageTool(root);
-    const result = await packageAppImage({
-      stagingRoot: fixture.stagingRoot,
-      output: fixture.outputPath,
-      appimagetool: fakeTool.path,
-      expectedDigest: fakeTool.sha256,
-      version: fixture.version,
-      architecture: "x64",
-    });
+    const result = await packageWithFakeTool(root);
 
     const desktop = await readFile(join(result.appDir, "unit-test-ide.desktop"), "utf8");
     assert.match(desktop, /^Exec=usr\/lib\/unit-test-ide\/app\/code-oss$/mu);
+    assert.match(desktop, /^TryExec=usr\/lib\/unit-test-ide\/app\/code-oss$/mu);
 
     const digestManifest = JSON.parse(await readFile(result.manifestPath, "utf8"));
-    assert.equal(digestManifest.packageFile, basename(fixture.outputPath));
+    assert.equal(digestManifest.packageFile, basename(result.outputPath));
     assert.equal(digestManifest.launcher, "usr/lib/unit-test-ide/app/code-oss");
     assert.doesNotMatch(JSON.stringify(digestManifest), /https?:\/\//u);
     assert.ok(!JSON.stringify(digestManifest).includes(root.replaceAll("\\", "/")));
     assert.ok(!JSON.stringify(digestManifest).includes(resolve(root)));
 
     const verification = await verifyAppImage({
-      image: fixture.outputPath,
+      image: result.outputPath,
       manifest: result.manifestPath,
       requireDigest: true,
+      extractor: result.extractor,
     });
     assert.equal(verification.packageSha256, digestManifest.packageSha256);
     assert.equal(verification.launcher, "usr/lib/unit-test-ide/app/code-oss");
     assert.equal(verification.releaseManifestSha256, digestManifest.releaseManifestSha256);
+  });
+});
+
+test("verifyAppImage rejects a tampered launcher even when the sidecar digest is regenerated", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const result = await packageWithFakeTool(root);
+    await updateFakeEnvelope(result.outputPath, async (envelope) => {
+      envelope.files["usr/lib/unit-test-ide/app/code-oss"].contentBase64 = Buffer.from("#!/bin/sh\necho tampered\n").toString("base64");
+    });
+    await refreshSidecarManifest(result.manifestPath, result.outputPath);
+
+    await assert.rejects(
+      () => verifyAppImage({
+        image: result.outputPath,
+        manifest: result.manifestPath,
+        requireDigest: true,
+        extractor: result.extractor,
+      }),
+      /artifact runtime .*sha256|artifact runtime .*size|artifact runtime .*executable/u,
+    );
+  });
+});
+
+test("public verify CLI rejects a fake AppImage envelope marker", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const result = await packageWithFakeTool(root);
+    const cli = spawnSync(process.execPath, [
+      verifyCli,
+      "--image", result.outputPath,
+      "--manifest", result.manifestPath,
+      "--require-digest",
+    ], {
+      cwd: resolve("."),
+      encoding: "utf8",
+      windowsHide: true,
+    });
+
+    assert.equal(cli.status, 1);
+    assert.match(cli.stderr, /fake AppImage envelope is not accepted by the public verifier/u);
+  });
+});
+
+test("verifyAppImage rejects sidecar path substitution instead of trusting redirected layout paths", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const result = await packageWithFakeTool(root);
+    await refreshSidecarManifest(result.manifestPath, result.outputPath, async (manifest) => {
+      manifest.launcher = "usr/lib/unit-test-ide/bin/alternate-launcher";
+    });
+
+    await assert.rejects(
+      () => verifyAppImage({
+        image: result.outputPath,
+        manifest: result.manifestPath,
+        requireDigest: true,
+        extractor: result.extractor,
+      }),
+      /launcher path must be fixed/u,
+    );
+  });
+});
+
+test("verifyAppImage rejects embedded release-manifest identity drift", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    for (const [field, value] of [
+      ["product", "other-product"],
+      ["version", "9.9.9"],
+      ["schemaVersion", 9],
+    ]) {
+      const result = await packageWithFakeTool(join(root, `${field}`));
+      await updateFakeEnvelope(result.outputPath, async (envelope) => {
+        const relativePath = "usr/lib/unit-test-ide/release-manifest.json";
+        const manifest = JSON.parse(Buffer.from(envelope.files[relativePath].contentBase64, "base64").toString("utf8"));
+        manifest[field] = value;
+        envelope.files[relativePath].contentBase64 = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`).toString("base64");
+      });
+      const envelope = await parseFakeEnvelope(result.outputPath);
+      const embeddedManifestBytes = Buffer.from(envelope.files["usr/lib/unit-test-ide/release-manifest.json"].contentBase64, "base64");
+      await refreshSidecarManifest(result.manifestPath, result.outputPath, async (manifest) => {
+        manifest.releaseManifestSha256 = sha256(embeddedManifestBytes);
+      });
+
+      await assert.rejects(
+        () => verifyAppImage({
+          image: result.outputPath,
+          manifest: result.manifestPath,
+          requireDigest: true,
+          extractor: result.extractor,
+        }),
+        /embedded release manifest identity is invalid/u,
+        `${field} drift should fail`,
+      );
+    }
+  });
+});
+
+test("verifyAppImage rejects desktop or launcher contract mismatches", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const result = await packageWithFakeTool(root);
+    await updateFakeEnvelope(result.outputPath, async (envelope) => {
+      envelope.files["unit-test-ide.desktop"].contentBase64 = Buffer.from([
+        "[Desktop Entry]",
+        "Type=Application",
+        "Name=Unit Test IDE",
+        "Exec=usr/lib/unit-test-ide/app/not-code-oss",
+        "TryExec=usr/lib/unit-test-ide/app/not-code-oss",
+        "Icon=unit-test-ide",
+        "Categories=Development;IDE;",
+        "Terminal=false",
+        "X-AppImage-Version=1.2.3",
+        "",
+      ].join("\n")).toString("base64");
+    });
+    const envelope = await parseFakeEnvelope(result.outputPath);
+    const desktopBytes = Buffer.from(envelope.files["unit-test-ide.desktop"].contentBase64, "base64");
+    await refreshSidecarManifest(result.manifestPath, result.outputPath, async (manifest) => {
+      manifest.packageSha256 = sha256(await readFile(result.outputPath));
+      manifest.releaseManifestSha256 = manifest.releaseManifestSha256;
+      void desktopBytes;
+    });
+
+    await assert.rejects(
+      () => verifyAppImage({
+        image: result.outputPath,
+        manifest: result.manifestPath,
+        requireDigest: true,
+        extractor: result.extractor,
+      }),
+      /desktop entry .*Exec|desktop entry .*TryExec/u,
+    );
+  });
+});
+
+test("verifyAppImage rejects unexpected payload files outside the closed AppDir contract", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const result = await packageWithFakeTool(root);
+    await updateFakeEnvelope(result.outputPath, async (envelope) => {
+      envelope.files["usr/lib/unit-test-ide/extra.txt"] = {
+        executable: false,
+        contentBase64: Buffer.from("unexpected\n").toString("base64"),
+      };
+    });
+    await refreshSidecarManifest(result.manifestPath, result.outputPath);
+
+    await assert.rejects(
+      () => verifyAppImage({
+        image: result.outputPath,
+        manifest: result.manifestPath,
+        requireDigest: true,
+        extractor: result.extractor,
+      }),
+      /unexpected payload path/u,
+    );
   });
 });

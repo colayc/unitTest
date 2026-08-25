@@ -2,11 +2,21 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstat, mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, extname, isAbsolute, join, posix, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+const toolDirectory = dirname(fileURLToPath(import.meta.url));
+const defaultAppRunPath = join(toolDirectory, "AppRun");
+const defaultDesktopTemplatePath = join(toolDirectory, "unit-test-ide.desktop");
 const semverLike = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u;
 const digestPattern = /^[0-9a-f]{64}$/u;
+const fixedPaths = {
+  appRun: "AppRun",
+  desktopEntry: "unit-test-ide.desktop",
+  launcher: "usr/lib/unit-test-ide/app/code-oss",
+  releaseManifestPath: "usr/lib/unit-test-ide/release-manifest.json",
+  payloadRoot: "usr/lib/unit-test-ide",
+};
 const sidecarKeys = [
   "appRun",
   "appimagetoolSha256",
@@ -79,6 +89,9 @@ async function collectDirectoryFiles(rootPath) {
     for (const entry of entries) {
       const relativePath = currentRelative ? `${currentRelative}/${entry.name}` : entry.name;
       const absolutePath = join(rootPath, ...relativePath.split("/"));
+      if (!isPortableRelativePath(relativePath)) {
+        throw releaseFailure("RELEASE_VERIFICATION_FAILED", `unsafe AppImage entry: ${relativePath}`);
+      }
       if (entry.isDirectory()) {
         await walk(absolutePath, relativePath);
         continue;
@@ -101,40 +114,13 @@ async function collectDirectoryFiles(rootPath) {
   return files;
 }
 
-function decodeFakeAppImageEnvelope(buffer) {
-  let envelope;
+function looksLikeFakeEnvelope(buffer) {
   try {
-    envelope = JSON.parse(buffer.toString("utf8"));
+    const parsed = JSON.parse(buffer.toString("utf8"));
+    return parsed?.marker === "UNIT_TEST_IDE_FAKE_APPIMAGE";
   } catch {
-    return null;
+    return false;
   }
-  if (envelope?.marker !== "UNIT_TEST_IDE_FAKE_APPIMAGE") return null;
-  requirePlainObject(envelope, "fake AppImage envelope");
-  requirePlainObject(envelope.files, "fake AppImage envelope files");
-  const files = new Map();
-  for (const [relativePath, entry] of Object.entries(envelope.files)) {
-    requirePlainObject(entry, `fake AppImage entry ${relativePath}`);
-    if (!isPortableRelativePath(relativePath)) {
-      throw releaseFailure("RELEASE_VERIFICATION_FAILED", `unsafe AppImage entry: ${relativePath}`);
-    }
-    if (!digestPattern.test(entry.sha256)) {
-      throw releaseFailure("RELEASE_VERIFICATION_FAILED", `invalid AppImage entry digest: ${relativePath}`);
-    }
-    if (!Number.isSafeInteger(entry.size) || entry.size < 0) {
-      throw releaseFailure("RELEASE_VERIFICATION_FAILED", `invalid AppImage entry size: ${relativePath}`);
-    }
-    if (typeof entry.executable !== "boolean" || typeof entry.contentBase64 !== "string") {
-      throw releaseFailure("RELEASE_VERIFICATION_FAILED", `invalid AppImage entry shape: ${relativePath}`);
-    }
-    const content = Buffer.from(entry.contentBase64, "base64");
-    files.set(relativePath, {
-      size: entry.size,
-      sha256: entry.sha256,
-      executable: entry.executable,
-      content,
-    });
-  }
-  return files;
 }
 
 async function extractAppImage(imagePath) {
@@ -170,22 +156,33 @@ async function extractAppImage(imagePath) {
   }
 }
 
-async function readImageFiles(imagePath) {
+async function readImageFiles(imagePath, extractor) {
   const resolvedImagePath = resolve(imagePath);
   const info = await lstat(resolvedImagePath);
-  if (info.isDirectory()) {
-    return {
-      files: await collectDirectoryFiles(resolvedImagePath),
-      cleanup: async () => {},
-    };
+  if (!info.isFile()) {
+    throw releaseFailure("RELEASE_VERIFICATION_FAILED", "image must be an AppImage file");
   }
+  if (extractor) {
+    const extracted = await extractor(resolvedImagePath);
+    if (!extracted || !(extracted.files instanceof Map) || typeof extracted.cleanup !== "function") {
+      throw releaseFailure("RELEASE_VERIFICATION_FAILED", "test extractor returned an invalid extraction result");
+    }
+    for (const [relativePath, file] of extracted.files.entries()) {
+      if (!isPortableRelativePath(relativePath)) {
+        throw releaseFailure("RELEASE_VERIFICATION_FAILED", `unsafe extracted AppImage path: ${relativePath}`);
+      }
+      if (!file || !Buffer.isBuffer(file.content) || typeof file.executable !== "boolean") {
+        throw releaseFailure("RELEASE_VERIFICATION_FAILED", `invalid extracted AppImage entry: ${relativePath}`);
+      }
+      file.size = file.content.length;
+      file.sha256 = createHash("sha256").update(file.content).digest("hex");
+    }
+    return extracted;
+  }
+
   const bytes = await readFile(resolvedImagePath);
-  const fakeEnvelope = decodeFakeAppImageEnvelope(bytes);
-  if (fakeEnvelope) {
-    return {
-      files: fakeEnvelope,
-      cleanup: async () => {},
-    };
+  if (looksLikeFakeEnvelope(bytes)) {
+    throw releaseFailure("RELEASE_VERIFICATION_FAILED", "fake AppImage envelope is not accepted by the public verifier");
   }
   if (process.platform === "win32") {
     throw releaseFailure("RELEASE_VERIFICATION_FAILED", "native AppImage extraction is unavailable on Windows");
@@ -205,10 +202,20 @@ function validateSidecarManifest(manifest) {
   if (manifest.architecture !== "x64") {
     throw releaseFailure("RELEASE_VERIFICATION_FAILED", "AppImage manifest architecture must be x64");
   }
-  for (const key of ["packageFile", "releaseManifestPath", "launcher", "desktopEntry", "appRun"]) {
-    if (!isPortableRelativePath(manifest[key])) {
-      throw releaseFailure("RELEASE_VERIFICATION_FAILED", `unsafe AppImage manifest path: ${key}`);
-    }
+  if (manifest.appRun !== fixedPaths.appRun) {
+    throw releaseFailure("RELEASE_VERIFICATION_FAILED", "AppRun path must be fixed");
+  }
+  if (manifest.desktopEntry !== fixedPaths.desktopEntry) {
+    throw releaseFailure("RELEASE_VERIFICATION_FAILED", "desktop entry path must be fixed");
+  }
+  if (manifest.launcher !== fixedPaths.launcher) {
+    throw releaseFailure("RELEASE_VERIFICATION_FAILED", "launcher path must be fixed");
+  }
+  if (manifest.releaseManifestPath !== fixedPaths.releaseManifestPath) {
+    throw releaseFailure("RELEASE_VERIFICATION_FAILED", "embedded release-manifest path must be fixed");
+  }
+  if (!isPortableRelativePath(manifest.packageFile)) {
+    throw releaseFailure("RELEASE_VERIFICATION_FAILED", "unsafe AppImage manifest packageFile");
   }
   for (const key of ["packageSha256", "releaseManifestSha256", "appimagetoolSha256"]) {
     if (!digestPattern.test(manifest[key])) {
@@ -229,89 +236,197 @@ function requireFile(files, relativePath, label) {
   return file;
 }
 
-function parseDesktopEntry(bytes) {
-  return bytes.toString("utf8");
+async function renderExpectedDesktop(version) {
+  const template = await readFile(defaultDesktopTemplatePath, "utf8");
+  return Buffer.from(
+    template
+      .replaceAll("{{EXEC}}", fixedPaths.launcher)
+      .replaceAll("{{VERSION}}", version),
+    "utf8",
+  );
 }
 
-export async function verifyAppImage({ image, manifest, requireDigest = false }) {
+function assertDesktopEntryContract(actualBuffer) {
+  const actualText = actualBuffer.toString("utf8");
+  const lines = actualText.split(/\r?\n/u);
+  const execLine = lines.find((line) => line.startsWith("Exec="));
+  const tryExecLine = lines.find((line) => line.startsWith("TryExec="));
+  if (execLine !== `Exec=${fixedPaths.launcher}`) {
+    throw releaseFailure("RELEASE_VERIFICATION_FAILED", "desktop entry Exec does not match the fixed launcher path");
+  }
+  if (tryExecLine !== `TryExec=${fixedPaths.launcher}`) {
+    throw releaseFailure("RELEASE_VERIFICATION_FAILED", "desktop entry TryExec does not match the fixed launcher path");
+  }
+}
+
+function assertBufferEquals(actual, expected, label) {
+  if (!actual.equals(expected)) {
+    throw releaseFailure("RELEASE_VERIFICATION_FAILED", `${label} content does not match the fixed packaging contract`);
+  }
+}
+
+function assertExecutable(actual, expected, label) {
+  if (actual !== expected) {
+    throw releaseFailure("RELEASE_VERIFICATION_FAILED", `${label} executable bit does not match the embedded manifest`);
+  }
+}
+
+function assertArtifactFile(actual, artifact) {
+  if (actual.size !== artifact.size) {
+    throw releaseFailure("RELEASE_VERIFICATION_FAILED", `artifact ${artifact.id} size does not match the embedded release manifest`);
+  }
+  if (actual.sha256 !== artifact.sha256) {
+    throw releaseFailure("RELEASE_VERIFICATION_FAILED", `artifact ${artifact.id} sha256 does not match the embedded release manifest`);
+  }
+  if (actual.executable !== artifact.executable) {
+    throw releaseFailure("RELEASE_VERIFICATION_FAILED", `artifact ${artifact.id} executable bit does not match the embedded release manifest`);
+  }
+}
+
+function validateEmbeddedReleaseManifest(releaseManifest, sidecarManifest) {
+  requirePlainObject(releaseManifest, "embedded release manifest");
+  if (
+    releaseManifest.schemaVersion !== 1 ||
+    releaseManifest.product !== "unit-test-ide" ||
+    releaseManifest.version !== sidecarManifest.version ||
+    releaseManifest.platform !== "linux" ||
+    releaseManifest.architecture !== sidecarManifest.architecture
+  ) {
+    throw releaseFailure("RELEASE_VERIFICATION_FAILED", "embedded release manifest identity is invalid");
+  }
+  if (!Array.isArray(releaseManifest.artifacts) || !Array.isArray(releaseManifest.licenses)) {
+    throw releaseFailure("RELEASE_VERIFICATION_FAILED", "embedded release manifest is missing artifacts or licenses");
+  }
+  return releaseManifest;
+}
+
+function expectedPayloadPaths(releaseManifest) {
+  const paths = new Set([
+    fixedPaths.appRun,
+    fixedPaths.desktopEntry,
+    fixedPaths.releaseManifestPath,
+  ]);
+  for (const artifact of releaseManifest.artifacts) {
+    if (!artifact?.relativePath || !isPortableRelativePath(artifact.relativePath)) {
+      throw releaseFailure("RELEASE_VERIFICATION_FAILED", "embedded release manifest contains an unsafe artifact path");
+    }
+    paths.add(`${fixedPaths.payloadRoot}/${artifact.relativePath}`);
+  }
+  for (const licensePath of releaseManifest.licenses) {
+    if (!isPortableRelativePath(licensePath)) {
+      throw releaseFailure("RELEASE_VERIFICATION_FAILED", "embedded release manifest contains an unsafe license path");
+    }
+    paths.add(`${fixedPaths.payloadRoot}/${licensePath}`);
+  }
+  return paths;
+}
+
+export async function verifyAppImage({ image, manifest, requireDigest = false, extractor } = {}) {
   if (typeof image !== "string" || image.trim().length === 0) {
     throw releaseFailure("RELEASE_VERIFICATION_FAILED", "image is required");
   }
   if (typeof manifest !== "string" || manifest.trim().length === 0) {
     throw releaseFailure("RELEASE_VERIFICATION_FAILED", "manifest is required");
   }
+  if (extractor !== undefined && typeof extractor !== "function") {
+    throw releaseFailure("RELEASE_VERIFICATION_FAILED", "extractor must be a function when provided");
+  }
 
   const manifestPath = resolve(manifest);
   const sidecarManifest = validateSidecarManifest(JSON.parse(await readFile(manifestPath, "utf8")));
   const resolvedImagePath = resolve(image);
   const imageInfo = await lstat(resolvedImagePath);
-  if (!imageInfo.isFile() && !imageInfo.isDirectory()) {
-    throw releaseFailure("RELEASE_VERIFICATION_FAILED", "image must be a file or extracted AppDir");
+  if (!imageInfo.isFile()) {
+    throw releaseFailure("RELEASE_VERIFICATION_FAILED", "image must be an AppImage file");
+  }
+  if (basename(resolvedImagePath) !== sidecarManifest.packageFile) {
+    throw releaseFailure("RELEASE_VERIFICATION_FAILED", "AppImage filename does not match the digest manifest");
+  }
+  const imageDigest = await sha256File(resolvedImagePath);
+  if (requireDigest && imageDigest !== sidecarManifest.packageSha256) {
+    throw releaseFailure("RELEASE_VERIFICATION_FAILED", "AppImage digest does not match the digest manifest");
   }
 
-  if (imageInfo.isFile()) {
-    if (basename(resolvedImagePath) !== sidecarManifest.packageFile) {
-      throw releaseFailure("RELEASE_VERIFICATION_FAILED", "AppImage filename does not match the digest manifest");
-    }
-    const imageDigest = await sha256File(resolvedImagePath);
-    if (requireDigest && imageDigest !== sidecarManifest.packageSha256) {
-      throw releaseFailure("RELEASE_VERIFICATION_FAILED", "AppImage digest does not match the digest manifest");
-    }
-  } else if (requireDigest) {
-    throw releaseFailure("RELEASE_VERIFICATION_FAILED", "digest verification requires an AppImage file");
-  }
-
-  const extraction = await readImageFiles(resolvedImagePath);
+  const extraction = await readImageFiles(resolvedImagePath, extractor);
   try {
-    const appRun = requireFile(extraction.files, sidecarManifest.appRun, "AppRun");
-    const desktopEntry = requireFile(extraction.files, sidecarManifest.desktopEntry, "desktop entry");
-    const launcher = requireFile(extraction.files, sidecarManifest.launcher, "launcher");
-    const embeddedManifest = requireFile(
-      extraction.files,
-      sidecarManifest.releaseManifestPath,
-      "embedded release manifest",
-    );
+    const appRun = requireFile(extraction.files, fixedPaths.appRun, "AppRun");
+    const desktopEntry = requireFile(extraction.files, fixedPaths.desktopEntry, "desktop entry");
+    const launcher = requireFile(extraction.files, fixedPaths.launcher, "launcher");
+    const embeddedManifest = requireFile(extraction.files, fixedPaths.releaseManifestPath, "embedded release manifest");
 
-    if (!appRun.executable) {
-      throw releaseFailure("RELEASE_VERIFICATION_FAILED", "AppRun must be executable");
-    }
-    if (!launcher.executable) {
-      throw releaseFailure("RELEASE_VERIFICATION_FAILED", "launcher must be executable");
-    }
+    const expectedAppRun = await readFile(defaultAppRunPath);
+    assertBufferEquals(appRun.content, expectedAppRun, "AppRun");
+    assertExecutable(appRun.executable, true, "AppRun");
 
-    const desktopText = parseDesktopEntry(desktopEntry.content);
-    const execLine = desktopText.split(/\r?\n/u).find((line) => line.startsWith("Exec="));
-    if (execLine !== `Exec=${sidecarManifest.launcher}`) {
-      throw releaseFailure("RELEASE_VERIFICATION_FAILED", "desktop entry does not point at the staged launcher");
-    }
+    const expectedDesktop = await renderExpectedDesktop(sidecarManifest.version);
+    assertDesktopEntryContract(desktopEntry.content);
+    assertBufferEquals(desktopEntry.content, expectedDesktop, "desktop entry");
+    assertExecutable(desktopEntry.executable, false, "desktop entry");
 
     const embeddedDigest = createHash("sha256").update(embeddedManifest.content).digest("hex");
     if (embeddedDigest !== sidecarManifest.releaseManifestSha256) {
       throw releaseFailure("RELEASE_VERIFICATION_FAILED", "embedded release manifest digest does not match");
     }
 
-    const releaseManifest = JSON.parse(embeddedManifest.content.toString("utf8"));
-    requirePlainObject(releaseManifest, "embedded release manifest");
-    if (releaseManifest.platform !== "linux" || releaseManifest.architecture !== sidecarManifest.architecture) {
-      throw releaseFailure("RELEASE_VERIFICATION_FAILED", "embedded release manifest platform metadata is invalid");
-    }
-    for (const artifact of releaseManifest.artifacts ?? []) {
-      if (!artifact?.relativePath || !isPortableRelativePath(artifact.relativePath)) {
+    const releaseManifest = validateEmbeddedReleaseManifest(
+      JSON.parse(embeddedManifest.content.toString("utf8")),
+      sidecarManifest,
+    );
+
+    let launcherArtifact;
+    for (const artifact of releaseManifest.artifacts) {
+      if (typeof artifact.id !== "string" || !isPortableRelativePath(artifact.relativePath)) {
         throw releaseFailure("RELEASE_VERIFICATION_FAILED", "embedded release manifest contains an unsafe artifact path");
       }
-      requireFile(extraction.files, `usr/lib/unit-test-ide/${artifact.relativePath}`, `artifact ${artifact.id}`);
-    }
-    for (const licensePath of releaseManifest.licenses ?? []) {
-      if (!isPortableRelativePath(licensePath)) {
-        throw releaseFailure("RELEASE_VERIFICATION_FAILED", "embedded release manifest contains an unsafe license path");
+      if (!digestPattern.test(artifact.sha256)) {
+        throw releaseFailure("RELEASE_VERIFICATION_FAILED", `artifact ${artifact.id} digest is invalid`);
       }
-      requireFile(extraction.files, `usr/lib/unit-test-ide/${licensePath}`, `license ${licensePath}`);
+      if (!Number.isSafeInteger(artifact.size) || artifact.size < 0) {
+        throw releaseFailure("RELEASE_VERIFICATION_FAILED", `artifact ${artifact.id} size is invalid`);
+      }
+      if (typeof artifact.executable !== "boolean") {
+        throw releaseFailure("RELEASE_VERIFICATION_FAILED", `artifact ${artifact.id} executable flag is invalid`);
+      }
+      const extractedFile = requireFile(
+        extraction.files,
+        `${fixedPaths.payloadRoot}/${artifact.relativePath}`,
+        `artifact ${artifact.id}`,
+      );
+      assertArtifactFile(extractedFile, artifact);
+      if (artifact.relativePath === "app/code-oss") {
+        launcherArtifact = artifact;
+      }
+    }
+    if (!launcherArtifact) {
+      throw releaseFailure("RELEASE_VERIFICATION_FAILED", "embedded release manifest is missing the fixed launcher artifact");
+    }
+    assertArtifactFile(launcher, launcherArtifact);
+    if (!launcherArtifact.executable) {
+      throw releaseFailure("RELEASE_VERIFICATION_FAILED", "embedded release manifest launcher must be executable");
+    }
+
+    for (const licensePath of releaseManifest.licenses) {
+      const extractedLicense = requireFile(
+        extraction.files,
+        `${fixedPaths.payloadRoot}/${licensePath}`,
+        `license ${licensePath}`,
+      );
+      if (extractedLicense.content.length === 0) {
+        throw releaseFailure("RELEASE_VERIFICATION_FAILED", `license ${licensePath} must not be empty`);
+      }
+    }
+
+    const expectedPaths = expectedPayloadPaths(releaseManifest);
+    for (const extractedPath of extraction.files.keys()) {
+      if (!expectedPaths.has(extractedPath)) {
+        throw releaseFailure("RELEASE_VERIFICATION_FAILED", `unexpected payload path: ${extractedPath}`);
+      }
     }
 
     return {
       packageSha256: sidecarManifest.packageSha256,
       releaseManifestSha256: sidecarManifest.releaseManifestSha256,
-      launcher: sidecarManifest.launcher,
+      launcher: fixedPaths.launcher,
     };
   } finally {
     await extraction.cleanup();

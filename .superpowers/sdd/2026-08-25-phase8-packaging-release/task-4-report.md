@@ -110,3 +110,112 @@ The file will have its original line endings in your working directory
 
 - I did not exercise a real Linux `appimagetool` binary or native `--appimage-extract` flow in this Windows workspace; the focused suite covers the fail-closed and digest/layout contract through a deterministic fake tool.
 - The new `package-linux` GitHub Actions job was updated statically but not executed end-to-end here; it depends on repository-side `CODE_OSS_EXECUTABLE`, `RELEASE_APPIMAGETOOL_PATH`, and `RELEASE_APPIMAGETOOL_SHA256` being provisioned correctly.
+
+---
+
+## Fix round 1 — review findings addressed
+
+### Review findings closed
+
+1. Tightened `verifyAppImage(...)` so every extracted artifact file is validated against the embedded `release-manifest.json` entry by exact fixed payload path, size, SHA-256, and executable bit; tampering now fails even if the sidecar digest file is regenerated.
+2. Removed the fake JSON envelope from the public verifier path. The production CLI now rejects `marker: UNIT_TEST_IDE_FAKE_APPIMAGE`; tests use an explicit injected extractor hook that is only reachable through the module API.
+3. Enforced the fixed AppDir contract instead of trusting sidecar layout redirects:
+   - fixed `AppRun`, desktop file, launcher, and embedded manifest paths
+   - exact `AppRun` script bytes from the repository template
+   - exact desktop file bytes plus explicit `Exec` / `TryExec` launcher checks
+   - embedded release-manifest identity checks for `schemaVersion`, `product`, `version`, `platform`, and `architecture`
+   - rejection of unexpected payload files outside the closed AppDir file set
+
+### Additional regression tests added
+
+- tampered launcher payload still fails after sidecar digest regeneration
+- public CLI fake-envelope rejection
+- sidecar launcher-path substitution rejection
+- embedded release-manifest identity drift for wrong `product`, `version`, and `schemaVersion`
+- desktop `Exec` / `TryExec` mismatch rejection
+- unexpected extra payload file rejection
+
+### Red run for the review fixes
+
+Command:
+
+```powershell
+node --test tools/release/linux/package-appimage.test.mjs
+```
+
+Observed failing output before the verifier fixes:
+
+```text
+not ok 3 - packageAppImage emits a closed digest manifest and a desktop entry that points at the staged launcher
+  error: 'RELEASE_PACKAGING_FAILED: AppImage package input has unexpected key: verificationExtractor'
+...
+not ok 9 - verifyAppImage rejects unexpected payload files outside the closed AppDir contract
+# pass 2
+# fail 7
+```
+
+### Green run after the fixes
+
+Command:
+
+```powershell
+node --test tools/release/linux/package-appimage.test.mjs
+```
+
+Result:
+
+```text
+TAP version 13
+# Subtest: packageAppImage fails closed when appimagetool is missing
+ok 1 - packageAppImage fails closed when appimagetool is missing
+# Subtest: packageAppImage fails closed when AppRun is missing
+ok 2 - packageAppImage fails closed when AppRun is missing
+# Subtest: packageAppImage emits a closed digest manifest and a desktop entry that points at the staged launcher
+ok 3 - packageAppImage emits a closed digest manifest and a desktop entry that points at the staged launcher
+# Subtest: verifyAppImage rejects a tampered launcher even when the sidecar digest is regenerated
+ok 4 - verifyAppImage rejects a tampered launcher even when the sidecar digest is regenerated
+# Subtest: public verify CLI rejects a fake AppImage envelope marker
+ok 5 - public verify CLI rejects a fake AppImage envelope marker
+# Subtest: verifyAppImage rejects sidecar path substitution instead of trusting redirected layout paths
+ok 6 - verifyAppImage rejects sidecar path substitution instead of trusting redirected layout paths
+# Subtest: verifyAppImage rejects embedded release-manifest identity drift
+ok 7 - verifyAppImage rejects embedded release-manifest identity drift
+# Subtest: verifyAppImage rejects desktop or launcher contract mismatches
+ok 8 - verifyAppImage rejects desktop or launcher contract mismatches
+# Subtest: verifyAppImage rejects unexpected payload files outside the closed AppDir contract
+ok 9 - verifyAppImage rejects unexpected payload files outside the closed AppDir contract
+1..9
+# tests 9
+# pass 9
+# fail 0
+```
+
+### Formatting check after the fixes
+
+Command:
+
+```powershell
+git diff --check
+```
+
+Result:
+
+```text
+warning: LF will be replaced by CRLF in tools/release/linux/package-appimage.mjs.
+The file will have its original line endings in your working directory
+warning: LF will be replaced by CRLF in tools/release/linux/package-appimage.test.mjs.
+The file will have its original line endings in your working directory
+warning: LF will be replaced by CRLF in tools/release/linux/verify-appimage.mjs.
+The file will have its original line endings in your working directory
+```
+
+### Self-review for the fix round
+
+- The verifier now trusts the embedded release manifest and fixed repository templates, not mutable sidecar path redirects.
+- The fake-envelope path is still available for deterministic tests, but only through an injected extractor supplied by direct module callers; the public CLI rejects it.
+- The new negative tests mutate only one contract surface at a time, so each review finding is covered by a distinct failure mode.
+
+### Remaining concerns after the fix round
+
+- License files are now part of the exact closed payload set and must exist at the embedded fixed paths, but the frozen Task 1 release-manifest contract still lists licenses as paths rather than digest-bearing artifact entries, so license-byte verification cannot be as strong as artifact-byte verification without widening that earlier contract.
+- I still did not exercise a real Linux `appimagetool` binary or native extraction path in this Windows workspace; the focused suite validates the hard-fail and payload-contract logic through the injected extractor path and the public fake-envelope rejection.
