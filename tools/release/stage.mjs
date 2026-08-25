@@ -254,7 +254,7 @@ function usage() {
 }
 
 function parseCliArguments(argv) {
-  const values = Object.create(null);
+  const values = {};
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--help") {

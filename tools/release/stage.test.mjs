@@ -168,3 +168,38 @@ test("stage CLI rejects duplicate flags instead of overwriting", () => {
   assert.equal(result.status, 1);
   assert.match(result.stderr, /duplicate stage flag: --platform/u);
 });
+
+test("stage CLI accepts a valid invocation and stages the release tree", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await createReleaseFixture(root);
+    const extensionDistRoot = resolve("apps/code-oss-extension/dist");
+    await rm(extensionDistRoot, { recursive: true, force: true });
+    await writeFixtureFile(extensionDistRoot, "src/extension.js", "export const cli = true;\n");
+    t.after(async () => {
+      await rm(extensionDistRoot, { recursive: true, force: true });
+    });
+    const result = spawnSync(process.execPath, [
+      resolve("tools/release/stage.mjs"),
+      "--platform", "windows",
+      "--architecture", "x64",
+      "--version", "1.2.3",
+      "--code-oss", fixture.codeOss,
+      "--service", fixture.service,
+      "--cmake-root", fixture.cmakeRoot,
+      "--coverage-root", fixture.coverageRoot,
+      "--out", fixture.outRoot,
+    ], {
+      cwd: resolve("."),
+      encoding: "utf8",
+      windowsHide: true,
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const stagingRoot = join(fixture.outRoot, "staging", "1.2.3", "windows-x64");
+    assert.equal(result.stdout.trim(), stagingRoot);
+    const manifest = JSON.parse(await readFile(join(stagingRoot, "release-manifest.json"), "utf8"));
+    assert.equal(manifest.version, "1.2.3");
+    assert.equal(manifest.platform, "windows");
+    assert.equal(manifest.architecture, "x64");
+  });
+});
