@@ -1,11 +1,18 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 
 const packageScript = resolve("tools/release/windows/package-msix.ps1");
+const verifyScript = resolve("tools/release/windows/verify-msix.ps1");
+const workflowPath = resolve(".github/workflows/foundation.yml");
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
 
 async function withTemporaryRoot(t, run) {
   const root = await mkdtemp(join(tmpdir(), "release-msix-"));
@@ -22,15 +29,18 @@ async function writeFixtureFile(root, relativePath, value) {
   return path;
 }
 
-async function createStagingFixture(root) {
+async function createStagingFixture(root, version = "1.2.3") {
   const stagingRoot = join(root, "staging");
-  await writeFixtureFile(stagingRoot, "app/code-oss", "runtime\n");
-  await writeFixtureFile(stagingRoot, "service/unit-test-service", "service\n");
-  await writeFixtureFile(stagingRoot, "licenses/NOTICE.txt", "notice\n");
+  const runtime = "runtime\n";
+  const service = "service\n";
+  const notice = "notice\n";
+  await writeFixtureFile(stagingRoot, "app/code-oss", runtime);
+  await writeFixtureFile(stagingRoot, "service/unit-test-service", service);
+  await writeFixtureFile(stagingRoot, "licenses/NOTICE.txt", notice);
   const manifest = {
     schemaVersion: 1,
     product: "unit-test-ide",
-    version: "1.2.3",
+    version,
     platform: "windows",
     architecture: "x64",
     sourceCommit: "a".repeat(40),
@@ -39,16 +49,16 @@ async function createStagingFixture(root) {
         id: "runtime",
         kind: "runtime",
         relativePath: "app/code-oss",
-        size: Buffer.byteLength("runtime\n"),
-        sha256: "0".repeat(64),
+        size: Buffer.byteLength(runtime),
+        sha256: sha256(runtime),
         executable: true,
       },
       {
         id: "service",
         kind: "service",
         relativePath: "service/unit-test-service",
-        size: Buffer.byteLength("service\n"),
-        sha256: "1".repeat(64),
+        size: Buffer.byteLength(service),
+        sha256: sha256(service),
         executable: true,
       },
     ],
@@ -64,10 +74,11 @@ async function createStagingFixture(root) {
     manifestPath,
     outputPath: join(root, "dist", "unit-test-ide.msix"),
     stagingRoot,
+    version,
   };
 }
 
-async function createFakeMakeAppx(root) {
+async function createFakeMakeAppx(root, mode = "success") {
   const toolPath = join(root, "fake-makeappx.ps1");
   await writeFile(toolPath, `
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
@@ -80,7 +91,12 @@ for ($index = 0; $index -lt $Arguments.Length; $index += 1) {
   }
 }
 if (-not $directory -or -not $package) {
-  throw 'fake makeappx missing required arguments'
+  [Console]::Error.WriteLine('fake makeappx missing required arguments')
+  exit 2
+}
+if (${JSON.stringify(mode)} -eq 'invalid-manifest') {
+  [Console]::Error.WriteLine('error C00CE169: App manifest validation error: The appx manifest is invalid.')
+  exit 11
 }
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $parent = Split-Path -Parent $package
@@ -95,13 +111,85 @@ if (Test-Path -LiteralPath $package) {
   return toolPath;
 }
 
-function runPackage(args, env) {
+async function createFakeSignTool(root) {
+  const toolPath = join(root, "fake-signtool.ps1");
+  await writeFile(toolPath, `
+param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+if ($Arguments.Length -eq 0) {
+  [Console]::Error.WriteLine('fake signtool missing mode')
+  exit 2
+}
+switch ($Arguments[0].ToLowerInvariant()) {
+  'sign' {
+    $package = $Arguments[-1]
+    $archive = [System.IO.Compression.ZipFile]::Open($package, [System.IO.Compression.ZipArchiveMode]::Update)
+    try {
+      foreach ($name in @('AppxSignature.p7x', 'AppxMetadata/CodeIntegrity.cat')) {
+        $existing = $archive.GetEntry($name)
+        if ($null -ne $existing) {
+          $existing.Delete()
+        }
+      }
+      $signature = $archive.CreateEntry('AppxSignature.p7x')
+      $writer = [IO.StreamWriter]::new($signature.Open())
+      try {
+        $writer.Write('signed-by-fake-signtool')
+      } finally {
+        $writer.Dispose()
+      }
+      $catalog = $archive.CreateEntry('AppxMetadata/CodeIntegrity.cat')
+      $catalogWriter = [IO.StreamWriter]::new($catalog.Open())
+      try {
+        $catalogWriter.Write('fake-catalog')
+      } finally {
+        $catalogWriter.Dispose()
+      }
+    } finally {
+      $archive.Dispose()
+    }
+    exit 0
+  }
+  'verify' {
+    $package = $Arguments[-1]
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($package)
+    try {
+      $entry = $archive.GetEntry('AppxSignature.p7x')
+      if ($null -eq $entry) {
+        [Console]::Error.WriteLine('SignTool Error: missing signature')
+        exit 1
+      }
+      $reader = [IO.StreamReader]::new($entry.Open())
+      try {
+        $content = $reader.ReadToEnd()
+      } finally {
+        $reader.Dispose()
+      }
+      if ($content -ne 'signed-by-fake-signtool') {
+        [Console]::Error.WriteLine('SignTool Error: signature digest mismatch')
+        exit 1
+      }
+    } finally {
+      $archive.Dispose()
+    }
+    exit 0
+  }
+  default {
+    [Console]::Error.WriteLine('fake signtool mode not supported')
+    exit 2
+  }
+}
+`.trimStart(), "utf8");
+  return toolPath;
+}
+
+function runPowerShellFile(filePath, args, env) {
   return spawnSync("powershell.exe", [
     "-NoProfile",
     "-ExecutionPolicy",
     "Bypass",
     "-File",
-    packageScript,
+    filePath,
     ...args,
   ], {
     cwd: resolve("."),
@@ -114,7 +202,156 @@ function runPackage(args, env) {
   });
 }
 
+function runPackage(args, env) {
+  return runPowerShellFile(packageScript, args, env);
+}
+
+function runVerify(args, env) {
+  return runPowerShellFile(verifyScript, args, env);
+}
+
+function runPowerShellCommand(command, env = {}) {
+  return spawnSync("powershell.exe", [
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-Command",
+    command,
+  ], {
+    cwd: resolve("."),
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      ...env,
+    },
+    windowsHide: true,
+  });
+}
+
+async function readZipEntry(packagePath, entryName) {
+  const script = `
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$archive = [System.IO.Compression.ZipFile]::OpenRead(${JSON.stringify(packagePath)})
+try {
+  $entry = $null
+  foreach ($candidate in $archive.Entries) {
+    if (($candidate.FullName -replace '\\\\', '/') -eq ${JSON.stringify(entryName)}) {
+      $entry = $candidate
+      break
+    }
+  }
+  if ($null -eq $entry) {
+    throw "missing entry: ${entryName}"
+  }
+  $reader = [IO.StreamReader]::new($entry.Open())
+  try {
+    [Console]::OutputEncoding = [Text.Encoding]::UTF8
+    [Console]::Write($reader.ReadToEnd())
+  } finally {
+    $reader.Dispose()
+  }
+} finally {
+  $archive.Dispose()
+}
+`;
+  const result = runPowerShellCommand(script);
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout;
+}
+
+async function setZipEntry(packagePath, entryName, content) {
+  const script = `
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$archive = [System.IO.Compression.ZipFile]::Open(${JSON.stringify(packagePath)}, [System.IO.Compression.ZipArchiveMode]::Update)
+try {
+  $entry = $null
+  foreach ($candidate in $archive.Entries) {
+    if (($candidate.FullName -replace '\\\\', '/') -eq ${JSON.stringify(entryName)}) {
+      $entry = $candidate
+      break
+    }
+  }
+  if ($null -ne $entry) {
+    $entry.Delete()
+  }
+  $replacement = $archive.CreateEntry(${JSON.stringify(entryName)})
+  $writer = [IO.StreamWriter]::new($replacement.Open())
+  try {
+    $writer.Write(${JSON.stringify(content)})
+  } finally {
+    $writer.Dispose()
+  }
+} finally {
+  $archive.Dispose()
+}
+`;
+  const result = spawnSync("powershell.exe", [
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-Command",
+    script,
+  ], {
+    cwd: resolve("."),
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  assert.equal(result.status, 0, result.stderr);
+}
+
+function resolveRealMakeAppx() {
+  const result = runPowerShellCommand(`
+$command = Get-Command -Name 'makeappx.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($null -ne $command) {
+  [Console]::Write($command.Source)
+  exit 0
+}
+$kitsRoot = \${env:ProgramFiles(x86)}
+if (-not [string]::IsNullOrWhiteSpace($kitsRoot)) {
+  $candidateRoot = Join-Path $kitsRoot 'Windows Kits\\10\\bin'
+  if (Test-Path -LiteralPath $candidateRoot) {
+    $candidate = Get-ChildItem -LiteralPath $candidateRoot -Filter 'makeappx.exe' -Recurse -File -ErrorAction SilentlyContinue |
+      Sort-Object -Property FullName -Descending |
+      Select-Object -First 1
+    if ($null -ne $candidate) {
+      [Console]::Write($candidate.FullName)
+      exit 0
+    }
+  }
+}
+exit 1
+`);
+  return result.status === 0 ? result.stdout.trim() : null;
+}
+
+async function packageWithFakeTools(root, version = "1.2.3", publisher = "CN=Unit Test IDE") {
+  const fixture = await createStagingFixture(root, version);
+  const fakeMakeAppx = await createFakeMakeAppx(root);
+  const result = runPackage([
+    "-StagingRoot", fixture.stagingRoot,
+    "-Output", fixture.outputPath,
+    "-Version", version,
+    "-Publisher", publisher,
+  ], {
+    RELEASE_MAKEAPPX_PATH: fakeMakeAppx,
+    RELEASE_SIGNING_REQUIRED: "0",
+    RELEASE_SIGNING_PFX_PATH: "",
+    RELEASE_SIGNING_PFX_PASSWORD: "",
+  });
+  assert.equal(result.status, 0, result.stderr);
+  return fixture;
+}
+
 const windowsOnly = process.platform === "win32" ? test : test.skip;
+
+test("package-windows workflow passes RELEASE_VERSION through env instead of interpolating the manual input inside the script body", async () => {
+  const workflow = await readFile(workflowPath, "utf8");
+  assert.match(workflow, /RELEASE_VERSION:/u);
+  assert.match(workflow, /\$env:RELEASE_VERSION/u);
+  assert.doesNotMatch(workflow, /\$version = '\$\{\{ inputs\.release_version \}\}'/u);
+});
 
 windowsOnly("package-msix returns RELEASE_TOOL_MISSING when makeappx.exe is unavailable", async (t) => {
   await withTemporaryRoot(t, async (root) => {
@@ -122,7 +359,7 @@ windowsOnly("package-msix returns RELEASE_TOOL_MISSING when makeappx.exe is unav
     const result = runPackage([
       "-StagingRoot", fixture.stagingRoot,
       "-Output", fixture.outputPath,
-      "-Version", "1.2.3",
+      "-Version", fixture.version,
       "-Publisher", "CN=Unit Test IDE",
     ], {
       RELEASE_MAKEAPPX_PATH: join(root, "missing-makeappx.exe"),
@@ -134,23 +371,53 @@ windowsOnly("package-msix returns RELEASE_TOOL_MISSING when makeappx.exe is unav
   });
 });
 
-windowsOnly("package-msix accepts an unsigned development package only when RELEASE_SIGNING_REQUIRED=0", async (t) => {
+windowsOnly("package-msix surfaces an existing makeappx invalid-manifest failure without misclassifying it as tool-missing", async (t) => {
   await withTemporaryRoot(t, async (root) => {
     const fixture = await createStagingFixture(root);
-    const fakeMakeAppx = await createFakeMakeAppx(root);
+    const fakeMakeAppx = await createFakeMakeAppx(root, "invalid-manifest");
     const result = runPackage([
       "-StagingRoot", fixture.stagingRoot,
       "-Output", fixture.outputPath,
-      "-Version", "1.2.3",
+      "-Version", fixture.version,
       "-Publisher", "CN=Unit Test IDE",
     ], {
       RELEASE_MAKEAPPX_PATH: fakeMakeAppx,
       RELEASE_SIGNING_REQUIRED: "0",
-      RELEASE_SIGNING_PFX_PATH: "",
-      RELEASE_SIGNING_PFX_PASSWORD: "",
     });
 
-    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /RELEASE_PACKAGING_FAILED/u);
+    assert.match(result.stderr, /App manifest validation error/u);
+    assert.doesNotMatch(result.stderr, /RELEASE_TOOL_MISSING/u);
+  });
+});
+
+windowsOnly("package-msix emits the required logo and dependency manifest elements and packages the placeholder logo", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await packageWithFakeTools(root);
+    const manifestXml = await readZipEntry(fixture.outputPath, "AppxManifest.xml");
+    const logoBytes = await readZipEntry(fixture.outputPath, "Assets/StoreLogo.png");
+
+    assert.match(manifestXml, /<Logo>Assets\/StoreLogo\.png<\/Logo>/u);
+    assert.match(manifestXml, /<Dependencies>/u);
+    assert.match(manifestXml, /TargetDeviceFamily/u);
+    assert.ok(logoBytes.length > 0);
+  });
+});
+
+windowsOnly("package-msix XML-escapes the Publisher and normalizes semver-like prerelease versions for AppxManifest", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await packageWithFakeTools(root, "1.2.3-beta+build.5", "CN=AT&T <Test>");
+    const manifestXml = await readZipEntry(fixture.outputPath, "AppxManifest.xml");
+
+    assert.match(manifestXml, /Publisher="CN=AT&amp;T &lt;Test&gt;"/u);
+    assert.match(manifestXml, /Version="1\.2\.3\.0"/u);
+  });
+});
+
+windowsOnly("package-msix accepts an unsigned development package only when RELEASE_SIGNING_REQUIRED=0", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await packageWithFakeTools(root);
     const bytes = await readFile(fixture.outputPath);
     assert.ok(bytes.length > 0);
   });
@@ -163,7 +430,7 @@ windowsOnly("package-msix returns RELEASE_SIGNING_REQUIRED when release signing 
     const result = runPackage([
       "-StagingRoot", fixture.stagingRoot,
       "-Output", fixture.outputPath,
-      "-Version", "1.2.3",
+      "-Version", fixture.version,
       "-Publisher", "CN=Unit Test IDE",
     ], {
       RELEASE_MAKEAPPX_PATH: fakeMakeAppx,
@@ -174,5 +441,63 @@ windowsOnly("package-msix returns RELEASE_SIGNING_REQUIRED when release signing 
 
     assert.equal(result.status, 1);
     assert.match(result.stderr, /RELEASE_SIGNING_REQUIRED/u);
+  });
+});
+
+windowsOnly("verify-msix rejects a forged signature entry when RequireSignature is set", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await packageWithFakeTools(root);
+    const fakeSignTool = await createFakeSignTool(root);
+    await setZipEntry(fixture.outputPath, "AppxSignature.p7x", "forged-signature");
+    const result = runVerify([
+      "-Package", fixture.outputPath,
+      "-Manifest", fixture.manifestPath,
+      "-RequireSignature",
+    ], {
+      RELEASE_SIGNTOOL_PATH: fakeSignTool,
+    });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /RELEASE_SIGNATURE_INVALID/u);
+  });
+});
+
+windowsOnly("verify-msix rejects a tampered packaged payload whose hash no longer matches the staged manifest", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await packageWithFakeTools(root);
+    await setZipEntry(fixture.outputPath, "app/code-oss", "tampered-runtime");
+    const result = runVerify([
+      "-Package", fixture.outputPath,
+      "-Manifest", fixture.manifestPath,
+    ], {});
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /RELEASE_VERIFICATION_FAILED/u);
+    assert.match(result.stderr, /(?:size|hash) does not match/u);
+  });
+});
+
+windowsOnly("package-msix succeeds with the real Windows SDK makeappx when it is available", async (t) => {
+  const realMakeAppx = resolveRealMakeAppx();
+  if (!realMakeAppx) {
+    t.skip("makeappx.exe is unavailable in this environment");
+    return;
+  }
+
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await createStagingFixture(root);
+    const result = runPackage([
+      "-StagingRoot", fixture.stagingRoot,
+      "-Output", fixture.outputPath,
+      "-Version", fixture.version,
+      "-Publisher", "CN=Unit Test IDE",
+    ], {
+      RELEASE_MAKEAPPX_PATH: realMakeAppx,
+      RELEASE_SIGNING_REQUIRED: "0",
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const bytes = await readFile(fixture.outputPath);
+    assert.ok(bytes.length > 0);
   });
 });

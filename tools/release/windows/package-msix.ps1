@@ -20,6 +20,7 @@ $packageName = 'OpenAI.UnitTestIDE'
 $toolRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $templatePath = Join-Path $toolRoot 'AppxManifest.xml.template'
 $verifyScript = Join-Path $toolRoot 'verify-msix.ps1'
+$storeLogoBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7+4xQAAAAASUVORK5CYII='
 
 function Fail-Release {
   param(
@@ -52,7 +53,7 @@ function Resolve-RealDirectory {
 
 function Resolve-ToolPath {
   param(
-    [Parameter(Mandatory = $true)][string]$Override,
+    [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Override,
     [Parameter(Mandatory = $true)][string]$CommandName,
     [Parameter(Mandatory = $true)][string]$StableName
   )
@@ -118,6 +119,12 @@ function Copy-StagingTree {
   }
 }
 
+function Escape-XmlAttribute {
+  param([Parameter(Mandatory = $true)][string]$Value)
+
+  return [Security.SecurityElement]::Escape($Value)
+}
+
 function New-AppxManifest {
   param(
     [Parameter(Mandatory = $true)][string]$TemplatePath,
@@ -129,10 +136,57 @@ function New-AppxManifest {
 
   $content = Get-Content -LiteralPath $TemplatePath -Raw
   $content = $content.Replace('__PACKAGE_NAME__', $packageName)
-  $content = $content.Replace('__PUBLISHER__', $PublisherSubject)
+  $content = $content.Replace('__PUBLISHER__', (Escape-XmlAttribute -Value $PublisherSubject))
   $content = $content.Replace('__PACKAGE_VERSION__', $PackageVersion)
   $content = $content.Replace('__ARCHITECTURE__', $Architecture)
   [IO.File]::WriteAllText($DestinationPath, $content, [Text.UTF8Encoding]::new($false))
+}
+
+function Write-PlaceholderResources {
+  param([Parameter(Mandatory = $true)][string]$Root)
+
+  $assetDirectory = Join-Path $Root 'Assets'
+  New-Item -ItemType Directory -Force -Path $assetDirectory | Out-Null
+  [IO.File]::WriteAllBytes((Join-Path $assetDirectory 'StoreLogo.png'), [Convert]::FromBase64String($storeLogoBase64))
+}
+
+function Invoke-ExternalTool {
+  param(
+    [Parameter(Mandatory = $true)][string]$FilePath,
+    [Parameter(Mandatory = $true)][string[]]$Arguments
+  )
+
+  $extension = [IO.Path]::GetExtension($FilePath)
+  $stdoutPath = Join-Path ([IO.Path]::GetTempPath()) ("msix-stdout-" + [Guid]::NewGuid().ToString('N') + ".log")
+  $stderrPath = Join-Path ([IO.Path]::GetTempPath()) ("msix-stderr-" + [Guid]::NewGuid().ToString('N') + ".log")
+  if ($extension -ieq '.ps1') {
+    $commandPath = 'powershell.exe'
+    $argumentList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $FilePath) + $Arguments
+  } else {
+    $commandPath = $FilePath
+    $argumentList = $Arguments
+  }
+
+  try {
+    $process = Start-Process `
+      -FilePath $commandPath `
+      -ArgumentList $argumentList `
+      -Wait `
+      -PassThru `
+      -NoNewWindow `
+      -RedirectStandardOutput $stdoutPath `
+      -RedirectStandardError $stderrPath
+    $stdout = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw } else { '' }
+    $stderr = if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw } else { '' }
+    return [pscustomobject]@{
+      ExitCode = $process.ExitCode
+      StdErr = $stderr
+      StdOut = $stdout
+    }
+  } finally {
+    Remove-Item -LiteralPath $stdoutPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue
+  }
 }
 
 function Require-SigningInputs {
@@ -157,6 +211,7 @@ Require-NoReparsePoints -Root $stagingRootPath
 $templateFile = Resolve-Path -LiteralPath $templatePath
 $verifyFile = Resolve-Path -LiteralPath $verifyScript
 $makeAppxPath = Resolve-ToolPath -Override ([string]$env:RELEASE_MAKEAPPX_PATH) -CommandName 'makeappx.exe' -StableName 'makeappx.exe'
+$packageVersion = Normalize-ReleaseVersion -InputVersion $Version
 $signingRequired = [string]$env:RELEASE_SIGNING_REQUIRED
 if ([string]::IsNullOrWhiteSpace($signingRequired)) {
   $signingRequired = '1'
@@ -192,25 +247,31 @@ $temporaryRoot = Join-Path $outputDirectory ('.msix-staging-' + [Guid]::NewGuid(
 try {
   New-Item -ItemType Directory -Force -Path $temporaryRoot | Out-Null
   Copy-StagingTree -Source $stagingRootPath -Destination $temporaryRoot
-  $packageVersion = Normalize-ReleaseVersion -InputVersion $Version
+  Write-PlaceholderResources -Root $temporaryRoot
   New-AppxManifest -TemplatePath $templateFile.ProviderPath -DestinationPath (Join-Path $temporaryRoot 'AppxManifest.xml') -PublisherSubject $Publisher -PackageVersion $packageVersion -Architecture ([string]$releaseManifest.architecture)
 
   if (Test-Path -LiteralPath $outputPath) {
     Remove-Item -LiteralPath $outputPath -Force
   }
 
-  $global:LASTEXITCODE = 0
-  & $makeAppxPath pack /d $temporaryRoot /p $outputPath /o | Out-Null
-  if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $outputPath -PathType Leaf)) {
-    Fail-Release -Code 'RELEASE_TOOL_MISSING' -Message 'makeappx.exe failed to create the MSIX package'
+  $makeAppxResult = Invoke-ExternalTool -FilePath $makeAppxPath -Arguments @('pack', '/d', $temporaryRoot, '/p', $outputPath, '/o')
+  if ($makeAppxResult.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $outputPath -PathType Leaf)) {
+    $detail = ($makeAppxResult.StdErr + $makeAppxResult.StdOut).Trim()
+    if ([string]::IsNullOrWhiteSpace($detail)) {
+      $detail = 'makeappx.exe failed to create the MSIX package'
+    }
+    Fail-Release -Code 'RELEASE_PACKAGING_FAILED' -Message $detail
   }
 
   if ($signingRequired -eq '1') {
     $signToolPath = Resolve-ToolPath -Override ([string]$env:RELEASE_SIGNTOOL_PATH) -CommandName 'signtool.exe' -StableName 'signtool.exe'
-    $global:LASTEXITCODE = 0
-    & $signToolPath sign /fd SHA256 /f $signing.Path /p $signing.Password $outputPath | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-      Fail-Release -Code 'RELEASE_SIGNING_REQUIRED' -Message 'signtool.exe failed to sign the MSIX package'
+    $signResult = Invoke-ExternalTool -FilePath $signToolPath -Arguments @('sign', '/fd', 'SHA256', '/f', $signing.Path, '/p', $signing.Password, $outputPath)
+    if ($signResult.ExitCode -ne 0) {
+      $detail = ($signResult.StdErr + $signResult.StdOut).Trim()
+      if ([string]::IsNullOrWhiteSpace($detail)) {
+        $detail = 'signtool.exe failed to sign the MSIX package'
+      }
+      Fail-Release -Code 'RELEASE_SIGNING_REQUIRED' -Message $detail
     }
     & $verifyFile.ProviderPath -Package $outputPath -Manifest $manifestPath -RequireSignature | Out-Null
   } else {

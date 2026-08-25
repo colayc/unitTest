@@ -296,13 +296,20 @@ jobs:
         name: Stage and package Windows MSIX
         shell: pwsh
         env:
+          RELEASE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.release_version || github.ref_name }}
           RELEASE_SIGNING_REQUIRED: ${{ startsWith(github.ref, 'refs/tags/v') && '1' || inputs.release_signing_required }}
           RELEASE_SIGNING_PFX_PASSWORD: ${{ secrets.RELEASE_SIGNING_PFX_PASSWORD }}
         run: |
           if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
-            $version = '${{ inputs.release_version }}'
+            $version = $env:RELEASE_VERSION
           } else {
-            $version = $env:GITHUB_REF_NAME.Substring(1)
+            if (-not $env:RELEASE_VERSION.StartsWith('v')) {
+              throw "tag release version must start with 'v': $env:RELEASE_VERSION"
+            }
+            $version = $env:RELEASE_VERSION.Substring(1)
+          }
+          if ($version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') {
+            throw "release version must be semver-like: $version"
           }
           $stagingRoot = node tools/release/stage.mjs `
             --platform windows `
