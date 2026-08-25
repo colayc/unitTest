@@ -89,6 +89,8 @@ test("release manifest contract stays pinned to the repository product identity"
   assert.deepEqual(config, {
     schemaVersion: 1,
     product: "unit-test-ide",
+    inputPath: "release-input.json",
+    outputPath: "manifest.generated.json",
   });
   assert.equal(schema.properties.product.const, "unit-test-ide");
   assert.equal(schema.properties.schemaVersion.const, 1);
