@@ -103,7 +103,17 @@ function coverageIdentity(releaseManifest, sourceManifest, resolvedManifest) {
     if (sourceManifest?.schemaVersion !== 1 || !Array.isArray(sourceManifest?.gcovr?.wheels)) {
       throw auditFailure("coverage bundle manifest has an unsupported schema");
     }
-    return sourceManifest;
+    const platform = `${releaseManifest.platform}-${releaseManifest.architecture}`;
+    return {
+      python: sourceManifest.python,
+      gcovr: {
+        ...sourceManifest.gcovr,
+        wheels: sourceManifest.gcovr.wheels.filter((wheel) =>
+          wheel.files.length === 0
+          || wheel.files.some(({ platforms }) => Array.isArray(platforms) && platforms.includes(platform)),
+        ),
+      },
+    };
   }
   const expectedPlatform = `${releaseManifest.platform}-${releaseManifest.architecture}`;
   if (
@@ -119,13 +129,16 @@ function coverageIdentity(releaseManifest, sourceManifest, resolvedManifest) {
   };
 }
 
-function auditCoverageDependencies(releaseManifest, sourceManifest, resolvedManifest, dependencies) {
+function auditCoverageDependencies(releaseManifest, sourceManifest, resolvedManifest, noticeCatalog, dependencies) {
   const coverageManifest = coverageIdentity(releaseManifest, sourceManifest, resolvedManifest);
   if (dependencies?.schemaVersion !== 1) {
     throw auditFailure("coverage license manifests have an unsupported schema");
   }
   if (!Array.isArray(coverageManifest?.gcovr?.wheels) || !Array.isArray(dependencies?.packages)) {
     throw auditFailure("coverage dependency lists are missing");
+  }
+  if (noticeCatalog?.schemaVersion !== 1 || !Array.isArray(noticeCatalog?.gcovr?.wheels)) {
+    throw auditFailure("coverage dependency notice catalog is unsupported");
   }
   if (
     dependencies?.python?.version !== coverageManifest?.python?.version
@@ -134,6 +147,7 @@ function auditCoverageDependencies(releaseManifest, sourceManifest, resolvedMani
     throw auditFailure("coverage dependency versions do not match the bundle manifest");
   }
   const listed = new Map();
+  const known = new Set(noticeCatalog.gcovr.wheels.map(({ project, version }) => `${project}@${version}`));
   for (const dependency of dependencies.packages) {
     requireText(dependency?.project, "coverage dependency project");
     requireText(dependency?.version, `coverage dependency ${dependency?.project} version`);
@@ -144,6 +158,7 @@ function auditCoverageDependencies(releaseManifest, sourceManifest, resolvedMani
     requireText(dependencies?.licenseTexts?.[dependency.licenseTextId], `${id} license text`);
     requireText(dependency.notice, `${id} notice`);
     requireText(dependency.licenseSource, `${id} license source`);
+    if (!known.has(id)) throw auditFailure(`unexpected dependency notice: ${id}`);
     listed.set(id, dependency);
   }
   const bundled = new Set();
@@ -154,9 +169,6 @@ function auditCoverageDependencies(releaseManifest, sourceManifest, resolvedMani
     if (bundled.has(id)) throw auditFailure(`duplicate bundled dependency: ${id}`);
     bundled.add(id);
     if (!listed.has(id)) throw auditFailure(`unlisted dependency: ${id}`);
-  }
-  for (const id of listed.keys()) {
-    if (!bundled.has(id)) throw auditFailure(`dependency notice has no bundled dependency: ${id}`);
   }
   const licensePaths = releaseManifest.licenses.map(({ path }) => path);
   for (const [name, dependency] of [["Python", dependencies.python], ["gcovr", dependencies.gcovr]]) {
@@ -242,8 +254,11 @@ export async function auditLicenses(stagingRoot) {
     readOptionalJson(root, "bundles/coverage/manifest.resolved.json", "coverage resolved lock"),
     readJson(root, "bundles/coverage/licenses/dependencies.json", "coverage dependency notice"),
   ]);
+  const coverageNoticeCatalog = coverageManifest ?? JSON.parse(
+    await readFile(resolve(toolDirectory, "..", "coverage-bundle", "manifest.json"), "utf8"),
+  );
   auditCmakeLicense(releaseManifest, cmakeManifest);
-  auditCoverageDependencies(releaseManifest, coverageManifest, coverageResolved, dependencies);
+  auditCoverageDependencies(releaseManifest, coverageManifest, coverageResolved, coverageNoticeCatalog, dependencies);
 
   const actualFiles = await collectLicenseFiles(root);
   const expectedFiles = licenses.map(({ path }) => path);

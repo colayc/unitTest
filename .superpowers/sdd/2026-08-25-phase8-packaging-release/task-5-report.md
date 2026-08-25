@@ -91,3 +91,38 @@ Result: `23/24` passed. The unrelated CMake-helper fixture failed in Node `fs.cp
 
 - Linux Bash execution and the GitHub Actions jobs cannot be run natively from this Windows workspace; Bash syntax is simple and the Linux job executes it explicitly with `bash`, but native runner evidence remains CI-owned.
 - Full workspace smoke is blocked at one pre-existing sandbox-sensitive `fs.cp` test by `EPERM` on `C:\Users\DELL`; the directly relevant complete release suite is green.
+
+## Review remediation — 2026-08-25
+
+### Status
+
+DONE_WITH_CONCERNS
+
+### Findings resolved
+
+- Coverage license expectations are now selected from the release platform. Source manifests filter wheels by `platforms`; packaged layouts consume `manifest.resolved.json`. Every selected wheel must have a complete dependency notice, catalog entries unknown to the tracked cross-platform source lock are rejected, and valid notices for another platform do not make that wheel mandatory. The regression builds the Linux resolved wheel list from the real coverage lock and proves that omitting Windows-only `colorama` passes.
+- Prerelease identifiers now follow SemVer precedence using numeric/non-numeric rules and case-sensitive ASCII/code-unit lexical comparison. The uppercase/lowercase downgrade regression is green.
+- Every package-owned `versions` path component is checked for symlink/junction/reparse redirection and canonical containment before use, after creation, and after version publication. Install refuses a `versions` junction redirected outside the package root without writing the new version there; rollback and uninstall share the guard.
+- Smoke no longer creates synthetic package versions. Windows and Linux package jobs now produce a lower baseline package plus the requested package, export filename/version/package SHA-256/manifest SHA-256 outputs, and upload both. Smoke jobs download that exact artifact first. The wrappers verify and extract the MSIX/AppImage, materialize the exact closed payload, run the real `app/code-oss --version` handshake, upgrade, rollback twice, uninstall, and preserve sibling user data under disposable roots.
+- Smoke evidence is closed and path-free while binding `packageFilename`, `version`, `packageSha256`, and `manifestSha256`. CLI regressions reject missing package input, package digest, or evidence output, and a workflow contract test requires artifact download before either platform wrapper.
+
+### TDD evidence
+
+- The Linux real-lock regression initially failed because `colorama@0.4.6` was treated as a mandatory bundled Linux dependency.
+- The case-sensitive prerelease regression initially reached a Windows case-colliding version directory instead of rejecting the downgrade.
+- The internal `versions` junction regression initially wrote `2.0.0` through the redirected path.
+- The unknown dependency notice regression initially passed and then failed closed after the tracked source catalog check was added.
+
+### Verification
+
+- Focused Task 5 suite: `25` passed, `0` failed, `0` skipped.
+- Complete `tools/release/**/*.test.mjs` suite with pinned Node 24.18.0: `64` passed, `0` failed, `0` skipped.
+- `node --check` passed for both Task 5 modules.
+- PowerShell AST parsing passed for `install-smoke.ps1`.
+- The workflow parsed successfully with the installed YAML 2.9.0 parser.
+- `git diff --check` passed.
+
+### Remaining concerns
+
+- Native AppImage wrapper execution and the GitHub Actions packaging/smoke jobs remain CI-owned because this workspace is Windows. The complete cross-platform release contract suite is green, including native Windows SDK MSIX packaging/verifier tests.
+- The earlier unrelated workspace `fs.cp` sandbox `EPERM` concern is unchanged; no workspace-wide rerun was required for these review-specific changes.

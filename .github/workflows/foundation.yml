@@ -244,6 +244,18 @@ jobs:
       - verify-linux
     runs-on: windows-2025-vs2026
     timeout-minutes: 60
+    outputs:
+      artifact_name: windows-msix-${{ steps.package-msix.outputs.version }}-${{ github.run_attempt }}
+      version: ${{ steps.package-msix.outputs.version }}
+      package_filename: ${{ steps.package-msix.outputs.package_filename }}
+      package_sha256: ${{ steps.package-msix.outputs.package_sha256 }}
+      manifest_filename: ${{ steps.package-msix.outputs.manifest_filename }}
+      manifest_sha256: ${{ steps.package-msix.outputs.manifest_sha256 }}
+      baseline_version: ${{ steps.package-msix.outputs.baseline_version }}
+      baseline_package_filename: ${{ steps.package-msix.outputs.baseline_package_filename }}
+      baseline_package_sha256: ${{ steps.package-msix.outputs.baseline_package_sha256 }}
+      baseline_manifest_filename: ${{ steps.package-msix.outputs.baseline_manifest_filename }}
+      baseline_manifest_sha256: ${{ steps.package-msix.outputs.baseline_manifest_sha256 }}
     env:
       CODE_OSS_EXECUTABLE: ${{ vars.CODE_OSS_EXECUTABLE }}
       RELEASE_MSIX_PUBLISHER: ${{ vars.RELEASE_MSIX_PUBLISHER || 'CN=Unit Test IDE' }}
@@ -311,6 +323,12 @@ jobs:
           if ($version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') {
             throw "release version must be semver-like: $version"
           }
+          $core = $version.Split('-', 2)[0].Split('+', 2)[0].Split('.') | ForEach-Object { [int]$_ }
+          if ($core[2] -gt 0) { $baselineVersion = "$($core[0]).$($core[1]).$($core[2] - 1)" }
+          elseif ($core[1] -gt 0) { $baselineVersion = "$($core[0]).$($core[1] - 1).0" }
+          elseif ($core[0] -gt 0) { $baselineVersion = "$($core[0] - 1).0.0" }
+          else { $baselineVersion = '0.0.0-0' }
+          if ($baselineVersion -eq $version) { throw "release version has no lower smoke baseline: $version" }
           $stagingRoot = node tools/release/stage.mjs `
             --platform windows `
             --architecture x64 `
@@ -327,14 +345,44 @@ jobs:
             -Output $packagePath `
             -Version $version `
             -Publisher $env:RELEASE_MSIX_PUBLISHER | Out-Null
-          $manifestPath = Join-Path $stagingRoot 'release-manifest.json'
+          $manifestPath = Join-Path $PWD ".release/windows/dist/unit-test-ide-$version.release-manifest.json"
+          Copy-Item -LiteralPath (Join-Path $stagingRoot 'release-manifest.json') -Destination $manifestPath
+          $baselineStagingRoot = node tools/release/stage.mjs `
+            --platform windows `
+            --architecture x64 `
+            --version $baselineVersion `
+            --code-oss $env:CODE_OSS_EXECUTABLE `
+            --service '.release/windows/unit-test-service.exe' `
+            --cmake-root '${{ steps.cmake-bundle.outputs.cmake_root }}' `
+            --coverage-root '.superpowers/runtime/coverage-bundle/windows-x64' `
+            --out '.release/windows/dist'
+          $baselineStagingRoot = $baselineStagingRoot.Trim()
+          $baselinePackagePath = Join-Path $PWD ".release/windows/dist/unit-test-ide-$baselineVersion.msix"
+          & 'tools/release/windows/package-msix.ps1' `
+            -StagingRoot $baselineStagingRoot `
+            -Output $baselinePackagePath `
+            -Version $baselineVersion `
+            -Publisher $env:RELEASE_MSIX_PUBLISHER | Out-Null
+          $baselineManifestPath = Join-Path $PWD ".release/windows/dist/unit-test-ide-$baselineVersion.release-manifest.json"
+          Copy-Item -LiteralPath (Join-Path $baselineStagingRoot 'release-manifest.json') -Destination $baselineManifestPath
           $licenseAuditPath = Join-Path $PWD '.release/windows/dist/license-audit-windows.json'
           node tools/release/license-audit.mjs `
             --staging-root $stagingRoot `
             --out $licenseAuditPath | Out-Null
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "package_path=$packagePath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "package_filename=$(Split-Path -Leaf $packagePath)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "package_sha256=$((Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash.ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "manifest_path=$manifestPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "manifest_filename=$(Split-Path -Leaf $manifestPath)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "manifest_sha256=$((Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "baseline_version=$baselineVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "baseline_package_path=$baselinePackagePath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "baseline_package_filename=$(Split-Path -Leaf $baselinePackagePath)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "baseline_package_sha256=$((Get-FileHash -LiteralPath $baselinePackagePath -Algorithm SHA256).Hash.ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "baseline_manifest_path=$baselineManifestPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "baseline_manifest_filename=$(Split-Path -Leaf $baselineManifestPath)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "baseline_manifest_sha256=$((Get-FileHash -LiteralPath $baselineManifestPath -Algorithm SHA256).Hash.ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "license_audit_path=$licenseAuditPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
       - uses: actions/upload-artifact@v7
         with:
@@ -342,6 +390,8 @@ jobs:
           path: |
             ${{ steps.package-msix.outputs.package_path }}
             ${{ steps.package-msix.outputs.manifest_path }}
+            ${{ steps.package-msix.outputs.baseline_package_path }}
+            ${{ steps.package-msix.outputs.baseline_manifest_path }}
             ${{ steps.package-msix.outputs.license_audit_path }}
           if-no-files-found: error
 
@@ -352,6 +402,18 @@ jobs:
       - verify-linux
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    outputs:
+      artifact_name: linux-appimage-${{ steps.package-appimage.outputs.version }}-${{ github.run_attempt }}
+      version: ${{ steps.package-appimage.outputs.version }}
+      package_filename: ${{ steps.package-appimage.outputs.package_filename }}
+      package_sha256: ${{ steps.package-appimage.outputs.package_sha256 }}
+      manifest_filename: ${{ steps.package-appimage.outputs.manifest_filename }}
+      manifest_sha256: ${{ steps.package-appimage.outputs.manifest_sha256 }}
+      baseline_version: ${{ steps.package-appimage.outputs.baseline_version }}
+      baseline_package_filename: ${{ steps.package-appimage.outputs.baseline_package_filename }}
+      baseline_package_sha256: ${{ steps.package-appimage.outputs.baseline_package_sha256 }}
+      baseline_manifest_filename: ${{ steps.package-appimage.outputs.baseline_manifest_filename }}
+      baseline_manifest_sha256: ${{ steps.package-appimage.outputs.baseline_manifest_sha256 }}
     env:
       CODE_OSS_EXECUTABLE: ${{ vars.CODE_OSS_EXECUTABLE }}
       RELEASE_APPIMAGETOOL_PATH: ${{ vars.RELEASE_APPIMAGETOOL_PATH }}
@@ -407,6 +469,13 @@ jobs:
             echo "release version must be semver-like: $version" >&2
             exit 1
           fi
+          IFS=. read -r major minor patch <<<"${version%%[-+]*}"
+          if ((10#$patch > 0)); then baseline_version="$major.$minor.$((10#$patch - 1))"
+          elif ((10#$minor > 0)); then baseline_version="$major.$((10#$minor - 1)).0"
+          elif ((10#$major > 0)); then baseline_version="$((10#$major - 1)).0.0"
+          else baseline_version='0.0.0-0'
+          fi
+          [[ "$baseline_version" != "$version" ]] || { echo "release version has no lower smoke baseline: $version" >&2; exit 1; }
           if [[ -z "${RELEASE_APPIMAGETOOL_PATH:-}" ]]; then
             echo "RELEASE_APPIMAGETOOL_PATH is required" >&2
             exit 1
@@ -432,13 +501,41 @@ jobs:
             --architecture x64)"
           image_path="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).image)' "$package_json")"
           manifest_path="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).manifestPath)' "$package_json")"
+          baseline_staging_root="$(node tools/release/stage.mjs \
+            --platform linux \
+            --architecture x64 \
+            --version "$baseline_version" \
+            --code-oss "$CODE_OSS_EXECUTABLE" \
+            --service .release/linux/unit-test-service \
+            --cmake-root "${{ steps.cmake-bundle.outputs.cmake_root }}" \
+            --coverage-root .superpowers/runtime/coverage-bundle/linux-x64 \
+            --out .release/linux/dist)"
+          baseline_package_json="$(node tools/release/linux/package-appimage.mjs \
+            --staging-root "$baseline_staging_root" \
+            --output ".release/linux/dist/unit-test-ide-$baseline_version.AppImage" \
+            --appimagetool "$RELEASE_APPIMAGETOOL_PATH" \
+            --version "$baseline_version" \
+            --architecture x64)"
+          baseline_image_path="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).image)' "$baseline_package_json")"
+          baseline_manifest_path="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).manifestPath)' "$baseline_package_json")"
           license_audit_path="$PWD/.release/linux/dist/license-audit-linux.json"
           node tools/release/license-audit.mjs \
             --staging-root "$staging_root" \
             --out "$license_audit_path" >/dev/null
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "package_path=$image_path" >> "$GITHUB_OUTPUT"
+          echo "package_filename=$(basename "$image_path")" >> "$GITHUB_OUTPUT"
+          echo "package_sha256=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).packageSha256)' "$manifest_path")" >> "$GITHUB_OUTPUT"
           echo "manifest_path=$manifest_path" >> "$GITHUB_OUTPUT"
+          echo "manifest_filename=$(basename "$manifest_path")" >> "$GITHUB_OUTPUT"
+          echo "manifest_sha256=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).releaseManifestSha256)' "$manifest_path")" >> "$GITHUB_OUTPUT"
+          echo "baseline_version=$baseline_version" >> "$GITHUB_OUTPUT"
+          echo "baseline_package_path=$baseline_image_path" >> "$GITHUB_OUTPUT"
+          echo "baseline_package_filename=$(basename "$baseline_image_path")" >> "$GITHUB_OUTPUT"
+          echo "baseline_package_sha256=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).packageSha256)' "$baseline_manifest_path")" >> "$GITHUB_OUTPUT"
+          echo "baseline_manifest_path=$baseline_manifest_path" >> "$GITHUB_OUTPUT"
+          echo "baseline_manifest_filename=$(basename "$baseline_manifest_path")" >> "$GITHUB_OUTPUT"
+          echo "baseline_manifest_sha256=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).releaseManifestSha256)' "$baseline_manifest_path")" >> "$GITHUB_OUTPUT"
           echo "license_audit_path=$license_audit_path" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v7
         with:
@@ -446,6 +543,8 @@ jobs:
           path: |
             ${{ steps.package-appimage.outputs.package_path }}
             ${{ steps.package-appimage.outputs.manifest_path }}
+            ${{ steps.package-appimage.outputs.baseline_package_path }}
+            ${{ steps.package-appimage.outputs.baseline_manifest_path }}
             ${{ steps.package-appimage.outputs.license_audit_path }}
           if-no-files-found: error
 
@@ -466,13 +565,33 @@ jobs:
           node-version: 24.18.0
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Download produced Windows package artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ needs.package-windows.outputs.artifact_name }}
+          path: .release/smoke-input
       - name: Exercise disposable Windows install lifecycle
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path '.release/evidence' | Out-Null
+          function Find-SmokeInput([string]$Name) {
+            $matches = @(Get-ChildItem -LiteralPath '.release/smoke-input' -Recurse -File | Where-Object Name -CEQ $Name)
+            if ($matches.Count -ne 1) { throw "expected exactly one downloaded package input named $Name" }
+            return $matches[0].FullName
+          }
           & 'tools/release/install-smoke.ps1' `
             -Root (Join-Path $env:RUNNER_TEMP 'unit-test-ide-install-smoke') `
-            -EvidencePath '.release/evidence/install-smoke-windows.json'
+            -EvidencePath '.release/evidence/install-smoke-windows.json' `
+            -PackagePath (Find-SmokeInput '${{ needs.package-windows.outputs.package_filename }}') `
+            -PackageSha256 '${{ needs.package-windows.outputs.package_sha256 }}' `
+            -ManifestPath (Find-SmokeInput '${{ needs.package-windows.outputs.manifest_filename }}') `
+            -ManifestSha256 '${{ needs.package-windows.outputs.manifest_sha256 }}' `
+            -Version '${{ needs.package-windows.outputs.version }}' `
+            -BaselinePackagePath (Find-SmokeInput '${{ needs.package-windows.outputs.baseline_package_filename }}') `
+            -BaselinePackageSha256 '${{ needs.package-windows.outputs.baseline_package_sha256 }}' `
+            -BaselineManifestPath (Find-SmokeInput '${{ needs.package-windows.outputs.baseline_manifest_filename }}') `
+            -BaselineManifestSha256 '${{ needs.package-windows.outputs.baseline_manifest_sha256 }}' `
+            -BaselineVersion '${{ needs.package-windows.outputs.baseline_version }}'
       - uses: actions/upload-artifact@v7
         with:
           name: install-smoke-windows-${{ github.run_attempt }}
@@ -496,13 +615,34 @@ jobs:
           node-version: 24.18.0
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Download produced Linux package artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ needs.package-linux.outputs.artifact_name }}
+          path: .release/smoke-input
       - name: Exercise disposable Linux install lifecycle
         shell: bash
         run: |
           mkdir -p .release/evidence
+          find_input() {
+            local name="$1" matches
+            mapfile -t matches < <(find .release/smoke-input -type f -name "$name" -print)
+            ((${#matches[@]} == 1)) || { echo "expected exactly one downloaded package input named $name" >&2; exit 1; }
+            printf '%s\n' "${matches[0]}"
+          }
           bash tools/release/install-smoke.sh \
             --root "$RUNNER_TEMP/unit-test-ide-install-smoke" \
-            --evidence .release/evidence/install-smoke-linux.json
+            --evidence .release/evidence/install-smoke-linux.json \
+            --package "$(find_input '${{ needs.package-linux.outputs.package_filename }}')" \
+            --package-sha256 '${{ needs.package-linux.outputs.package_sha256 }}' \
+            --manifest "$(find_input '${{ needs.package-linux.outputs.manifest_filename }}')" \
+            --manifest-sha256 '${{ needs.package-linux.outputs.manifest_sha256 }}' \
+            --version '${{ needs.package-linux.outputs.version }}' \
+            --baseline-package "$(find_input '${{ needs.package-linux.outputs.baseline_package_filename }}')" \
+            --baseline-package-sha256 '${{ needs.package-linux.outputs.baseline_package_sha256 }}' \
+            --baseline-manifest "$(find_input '${{ needs.package-linux.outputs.baseline_manifest_filename }}')" \
+            --baseline-manifest-sha256 '${{ needs.package-linux.outputs.baseline_manifest_sha256 }}' \
+            --baseline-version '${{ needs.package-linux.outputs.baseline_version }}'
       - uses: actions/upload-artifact@v7
         with:
           name: install-smoke-linux-${{ github.run_attempt }}
