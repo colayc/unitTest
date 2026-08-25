@@ -19,6 +19,16 @@ const requiredKeys = [
   "service",
   "version",
 ];
+const cliFlagMap = new Map([
+  ["--platform", "platform"],
+  ["--architecture", "architecture"],
+  ["--version", "version"],
+  ["--code-oss", "codeOss"],
+  ["--service", "service"],
+  ["--cmake-root", "cmakeRoot"],
+  ["--coverage-root", "coverageRoot"],
+  ["--out", "outRoot"],
+]);
 
 function requirePlainObject(value, name) {
   if (
@@ -243,6 +253,30 @@ function usage() {
   return "Usage: node tools/release/stage.mjs --platform <windows|linux> --architecture <x64> --version <semver> --code-oss <file> --service <file> --cmake-root <dir> --coverage-root <dir> --out <dir>";
 }
 
+function parseCliArguments(argv) {
+  const values = Object.create(null);
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index];
+    if (argument === "--help") {
+      return { help: true };
+    }
+    const key = cliFlagMap.get(argument);
+    if (!key) {
+      throw new Error(`unknown stage flag: ${argument}`);
+    }
+    if (Object.hasOwn(values, key)) {
+      throw new Error(`duplicate stage flag: ${argument}`);
+    }
+    const value = argv[index + 1];
+    if (!value || value.startsWith("--")) {
+      throw new Error(`missing value for ${argument}`);
+    }
+    values[key] = value;
+    index += 1;
+  }
+  return values;
+}
+
 function normalizeInput(input) {
   requirePlainObject(input, "release stage input");
   for (const key of requiredKeys) {
@@ -332,30 +366,12 @@ export async function stageRelease(input) {
 }
 
 async function main(argv) {
-  const values = new Map();
-  for (let index = 0; index < argv.length; index += 1) {
-    const argument = argv[index];
-    if (argument === "--help") {
-      process.stdout.write(`${usage()}\n`);
-      return;
-    }
-    if (!argument.startsWith("--")) throw new Error(`unknown argument: ${argument}`);
-    const value = argv[index + 1];
-    if (!value || value.startsWith("--")) throw new Error(`missing value for ${argument}`);
-    values.set(argument.slice(2), value);
-    index += 1;
+  const parsed = parseCliArguments(argv);
+  if (parsed.help) {
+    process.stdout.write(`${usage()}\n`);
+    return;
   }
-
-  const result = await stageRelease({
-    platform: values.get("platform"),
-    architecture: values.get("architecture"),
-    version: values.get("version"),
-    codeOss: values.get("code-oss"),
-    service: values.get("service"),
-    cmakeRoot: values.get("cmake-root"),
-    coverageRoot: values.get("coverage-root"),
-    outRoot: values.get("out"),
-  });
+  const result = await stageRelease(parsed);
   process.stdout.write(`${result.stagingRoot}\n`);
 }
 

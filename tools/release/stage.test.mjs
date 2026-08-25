@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 
 import { stageRelease } from "./stage.mjs";
@@ -129,4 +130,41 @@ test("stageRelease fails closed on a missing required input before it writes a p
       /ENOENT/u,
     );
   });
+});
+
+test("stage CLI rejects unknown flags with a stable error", () => {
+  const result = spawnSync(process.execPath, [
+    resolve("tools/release/stage.mjs"),
+    "--platform", "windows",
+    "--architecture", "x64",
+    "--version", "1.2.3",
+    "--code-oss", "runtime.exe",
+    "--service", "service.exe",
+    "--cmake-root", "cmake",
+    "--coverage-root", "coverage",
+    "--out", "out",
+    "--unexpected", "value",
+  ], {
+    cwd: resolve("."),
+    encoding: "utf8",
+    windowsHide: true,
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /unknown stage flag: --unexpected/u);
+});
+
+test("stage CLI rejects duplicate flags instead of overwriting", () => {
+  const result = spawnSync(process.execPath, [
+    resolve("tools/release/stage.mjs"),
+    "--platform", "windows",
+    "--platform", "linux",
+  ], {
+    cwd: resolve("."),
+    encoding: "utf8",
+    windowsHide: true,
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /duplicate stage flag: --platform/u);
 });
