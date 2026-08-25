@@ -54,8 +54,8 @@ async function writeArtifact(rootDirectory, relativePath, bytes) {
 async function validInput(stagingRoot) {
   const alpha = await writeArtifact(stagingRoot, "bin/unit-test-ide.exe", "alpha executable\n");
   const beta = await writeArtifact(stagingRoot, "share/doc/readme.txt", "beta readme\n");
-  await writeArtifact(stagingRoot, "licenses/Python-3.14.6.txt", "fixture python license\n");
-  await writeArtifact(stagingRoot, "licenses/gcovr-8.6.txt", "fixture gcovr license\n");
+  const pythonLicense = await writeArtifact(stagingRoot, "licenses/Python-3.14.6.txt", "fixture python license\n");
+  const gcovrLicense = await writeArtifact(stagingRoot, "licenses/gcovr-8.6.txt", "fixture gcovr license\n");
   return {
     version: "1.2.3",
     platform: "windows",
@@ -63,6 +63,10 @@ async function validInput(stagingRoot) {
     stagingRoot,
     sourceCommit: "a".repeat(40),
     licenses: ["licenses/Python-3.14.6.txt", "licenses/gcovr-8.6.txt"],
+    expectedLicenses: [
+      { path: pythonLicense.relativePath, size: pythonLicense.size, sha256: pythonLicense.sha256 },
+      { path: gcovrLicense.relativePath, size: gcovrLicense.size, sha256: gcovrLicense.sha256 },
+    ].sort((left, right) => left.path.localeCompare(right.path, "en")),
     artifacts: [
       {
         id: "readme",
@@ -82,10 +86,11 @@ async function validInput(stagingRoot) {
 
 test("buildReleaseManifest sorts artifacts deterministically and emits only the closed contract", async (t) => {
   await withStaging(t, async (stagingRoot) => {
-    const [schema, input] = await Promise.all([
+    const [schema, fixture] = await Promise.all([
       readJson("manifest.schema.json"),
       validInput(stagingRoot),
     ]);
+    const { expectedLicenses, ...input } = fixture;
     const manifest = await buildReleaseManifest(input);
     validate(schema, manifest);
     assert.deepEqual(Object.keys(manifest).sort(), [
@@ -109,6 +114,7 @@ test("buildReleaseManifest sorts artifacts deterministically and emits only the 
         { id: "readme", relativePath: "share/doc/readme.txt" },
       ],
     );
+    assert.deepEqual(manifest.licenses, expectedLicenses);
   });
 });
 
@@ -119,7 +125,8 @@ test("buildReleaseManifest rejects absolute artifact paths and parent traversal"
       ["absolute Windows path", "C:/escape.txt"],
       ["parent traversal", "../escape.txt"],
     ]) {
-      const input = await validInput(stagingRoot);
+      const { expectedLicenses, ...input } = await validInput(stagingRoot);
+      void expectedLicenses;
       input.artifacts[0].relativePath = relativePath;
       await assert.rejects(
         () => buildReleaseManifest(input),
@@ -132,7 +139,8 @@ test("buildReleaseManifest rejects absolute artifact paths and parent traversal"
 
 test("buildReleaseManifest rejects duplicate artifact ids", async (t) => {
   await withStaging(t, async (stagingRoot) => {
-    const input = await validInput(stagingRoot);
+    const { expectedLicenses, ...input } = await validInput(stagingRoot);
+    void expectedLicenses;
     input.artifacts[1].id = input.artifacts[0].id;
     await assert.rejects(
       () => buildReleaseManifest(input),
@@ -178,7 +186,8 @@ test("buildReleaseManifest rejects size and digest mismatches", async (t) => {
       ["size mismatch", (artifact) => { artifact.size += 1; }],
       ["digest mismatch", (artifact) => { artifact.sha256 = "b".repeat(64); }],
     ]) {
-      const input = await validInput(stagingRoot);
+      const { expectedLicenses, ...input } = await validInput(stagingRoot);
+      void expectedLicenses;
       mutate(input.artifacts[0]);
       await assert.rejects(
         () => buildReleaseManifest(input),
@@ -186,6 +195,21 @@ test("buildReleaseManifest rejects size and digest mismatches", async (t) => {
         name,
       );
     }
+  });
+});
+
+test("buildReleaseManifest rejects license size and digest mismatches", async (t) => {
+  await withStaging(t, async (stagingRoot) => {
+    const { expectedLicenses, ...baseInput } = await validInput(stagingRoot);
+    const input = {
+      ...baseInput,
+      licenses: expectedLicenses,
+    };
+    await writeFile(join(stagingRoot, "licenses", "Python-3.14.6.txt"), "tampered license bytes\n");
+    await assert.rejects(
+      () => buildReleaseManifest(input),
+      /license (?:size|sha256) mismatch/u,
+    );
   });
 });
 
@@ -215,7 +239,9 @@ test("schema rejects unknown top-level keys", async (t) => {
       readJson("manifest.schema.json"),
       validInput(stagingRoot),
     ]);
-    const manifest = await buildReleaseManifest(input);
+    const { expectedLicenses, ...buildInput } = input;
+    void expectedLicenses;
+    const manifest = await buildReleaseManifest(buildInput);
     manifest.unexpected = true;
     const ajv = new Ajv2020({ allErrors: true, strict: true });
     addFormats(ajv);
@@ -226,7 +252,8 @@ test("schema rejects unknown top-level keys", async (t) => {
 
 test("deterministic manifest bytes omit generatedAt", async (t) => {
   await withStaging(t, async (stagingRoot) => {
-    const input = await validInput(stagingRoot);
+    const { expectedLicenses, ...input } = await validInput(stagingRoot);
+    void expectedLicenses;
     const manifest = await buildReleaseManifest(input);
     const later = { ...manifest, generatedAt: "2026-08-26T00:00:00.000Z" };
     assert.equal(

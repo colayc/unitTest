@@ -278,14 +278,36 @@ foreach ($artifact in $releaseManifest.artifacts) {
   if ((Get-Sha256Hex -Bytes $stagedBytes) -ne [string]$artifact.sha256) {
     Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message "artifact hash does not match the release manifest: $($artifact.relativePath)"
   }
-  $expectedPayloads[[string]$artifact.relativePath] = $stagedBytes
+  $expectedPayloads[[string]$artifact.relativePath] = [pscustomobject]@{
+    Bytes = $stagedBytes
+    Label = 'artifact'
+  }
 }
 foreach ($license in $releaseManifest.licenses) {
-  $stagedPath = Resolve-StagedFile -Root $stagingRoot -RelativePath ([string]$license) -Label 'license'
-  $expectedPayloads[[string]$license] = [IO.File]::ReadAllBytes($stagedPath)
+  if ($null -eq $license.path -or [string]::IsNullOrWhiteSpace([string]$license.path)) {
+    Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message 'license path is invalid in the embedded release manifest'
+  }
+  $stagedPath = Resolve-StagedFile -Root $stagingRoot -RelativePath ([string]$license.path) -Label 'license'
+  $stagedBytes = [IO.File]::ReadAllBytes($stagedPath)
+  if ($stagedBytes.Length -ne [int64]$license.size) {
+    Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message "license size does not match the release manifest: $($license.path)"
+  }
+  if ((Get-Sha256Hex -Bytes $stagedBytes) -ne [string]$license.sha256) {
+    Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message "license hash does not match the release manifest: $($license.path)"
+  }
+  $expectedPayloads[[string]$license.path] = [pscustomobject]@{
+    Bytes = $stagedBytes
+    Label = 'license'
+  }
 }
-$expectedPayloads['release-manifest.json'] = $externalManifestBytes
-$expectedPayloads[$storeLogoPath] = Get-PlaceholderLogoBytes
+$expectedPayloads['release-manifest.json'] = [pscustomobject]@{
+  Bytes = $externalManifestBytes
+  Label = 'release manifest'
+}
+$expectedPayloads[$storeLogoPath] = [pscustomobject]@{
+  Bytes = Get-PlaceholderLogoBytes
+  Label = 'packaged logo'
+}
 
 $archive = [System.IO.Compression.ZipFile]::OpenRead($packagePath)
 try {
@@ -328,12 +350,14 @@ try {
     }
     $entry = $entryRecord.Entry
     $entryBytes = Read-EntryBytes -Entry $entry
-    $expectedBytes = $expectedPayloads[$path]
+    $expectedRecord = $expectedPayloads[$path]
+    $expectedBytes = $expectedRecord.Bytes
+    $expectedLabel = [string]$expectedRecord.Label
     if ($entryBytes.Length -ne $expectedBytes.Length) {
-      Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message "package payload size does not match the staged file: $path"
+      Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message "${expectedLabel} size does not match the staged file: $path"
     }
     if ((Get-Sha256Hex -Bytes $entryBytes) -ne (Get-Sha256Hex -Bytes $expectedBytes)) {
-      Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message "package payload hash does not match the staged file: $path"
+      Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message "${expectedLabel} hash does not match the staged file: $path"
     }
   }
 

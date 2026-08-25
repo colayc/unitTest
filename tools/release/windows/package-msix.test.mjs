@@ -69,7 +69,13 @@ async function createStagingFixture(root, version = "1.2.3") {
         executable: true,
       },
     ],
-    licenses: ["licenses/NOTICE.txt"],
+    licenses: [
+      {
+        path: "licenses/NOTICE.txt",
+        size: Buffer.byteLength(notice),
+        sha256: sha256(notice),
+      },
+    ],
     generatedAt: "2026-08-25T00:00:00.000Z",
   };
   const manifestPath = await writeFixtureFile(
@@ -607,6 +613,21 @@ windowsOnly("verify-msix rejects a tampered packaged payload whose hash no longe
     assert.equal(result.status, 1);
     assert.match(result.stderr, /RELEASE_VERIFICATION_FAILED/u);
     assert.match(result.stderr, /(?:size|hash) does not match/u);
+  });
+});
+
+windowsOnly("verify-msix rejects a tampered packaged license whose hash no longer matches the staged manifest", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await packageWithFakeTools(root);
+    await setZipEntry(fixture.outputPath, "licenses/NOTICE.txt", "tampered-license");
+    const result = runVerify([
+      "-Package", fixture.outputPath,
+      "-Manifest", fixture.manifestPath,
+    ], {});
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /RELEASE_VERIFICATION_FAILED/u);
+    assert.match(result.stderr, /license .*hash does not match|license .*size does not match/u);
   });
 });
 

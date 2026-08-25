@@ -312,11 +312,14 @@ function expectedPayloadPaths(releaseManifest) {
     }
     paths.add(`${fixedPaths.payloadRoot}/${artifact.relativePath}`);
   }
-  for (const licensePath of releaseManifest.licenses) {
-    if (!isPortableRelativePath(licensePath)) {
+  for (const license of releaseManifest.licenses) {
+    if (!license || typeof license !== "object") {
+      throw releaseFailure("RELEASE_VERIFICATION_FAILED", "embedded release manifest contains an invalid license entry");
+    }
+    if (!isPortableRelativePath(license.path)) {
       throw releaseFailure("RELEASE_VERIFICATION_FAILED", "embedded release manifest contains an unsafe license path");
     }
-    paths.add(`${fixedPaths.payloadRoot}/${licensePath}`);
+    paths.add(`${fixedPaths.payloadRoot}/${license.path}`);
   }
   return paths;
 }
@@ -405,14 +408,29 @@ export async function verifyAppImage({ image, manifest, requireDigest = false, e
       throw releaseFailure("RELEASE_VERIFICATION_FAILED", "embedded release manifest launcher must be executable");
     }
 
-    for (const licensePath of releaseManifest.licenses) {
+    for (const license of releaseManifest.licenses) {
+      if (!license || typeof license !== "object") {
+        throw releaseFailure("RELEASE_VERIFICATION_FAILED", "embedded release manifest contains an invalid license entry");
+      }
+      if (!isPortableRelativePath(license.path)) {
+        throw releaseFailure("RELEASE_VERIFICATION_FAILED", "embedded release manifest contains an unsafe license path");
+      }
+      if (!Number.isSafeInteger(license.size) || license.size < 0) {
+        throw releaseFailure("RELEASE_VERIFICATION_FAILED", `license ${license.path} size is invalid`);
+      }
+      if (!digestPattern.test(license.sha256)) {
+        throw releaseFailure("RELEASE_VERIFICATION_FAILED", `license ${license.path} digest is invalid`);
+      }
       const extractedLicense = requireFile(
         extraction.files,
-        `${fixedPaths.payloadRoot}/${licensePath}`,
-        `license ${licensePath}`,
+        `${fixedPaths.payloadRoot}/${license.path}`,
+        `license ${license.path}`,
       );
-      if (extractedLicense.content.length === 0) {
-        throw releaseFailure("RELEASE_VERIFICATION_FAILED", `license ${licensePath} must not be empty`);
+      if (extractedLicense.size !== license.size) {
+        throw releaseFailure("RELEASE_VERIFICATION_FAILED", `license ${license.path} size does not match the embedded release manifest`);
+      }
+      if (extractedLicense.sha256 !== license.sha256) {
+        throw releaseFailure("RELEASE_VERIFICATION_FAILED", `license ${license.path} sha256 does not match the embedded release manifest`);
       }
     }
 

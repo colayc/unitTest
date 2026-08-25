@@ -99,10 +99,18 @@ test("stageRelease copies the deterministic staging layout and writes a release 
     assert.equal(manifest.platform, "windows");
     assert.equal(manifest.architecture, "x64");
     assert.equal(manifest.sourceCommit, "a".repeat(40));
-    assert.ok(
-      manifest.licenses.includes("licenses/cmake/licenses/LICENSE.txt")
-      && manifest.licenses.includes("licenses/coverage/licenses/NOTICE.txt"),
+    assert.deepEqual(
+      manifest.licenses.map(({ path }) => path),
+      [
+        "licenses/cmake/licenses/LICENSE.txt",
+        "licenses/coverage/licenses/NOTICE.txt",
+      ],
     );
+    for (const license of manifest.licenses) {
+      const bytes = await readFile(join(result.stagingRoot, ...license.path.split("/")));
+      assert.equal(license.size, bytes.length);
+      assert.equal(license.sha256, sha256(bytes));
+    }
   });
 });
 
