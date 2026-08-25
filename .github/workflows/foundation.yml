@@ -338,3 +338,101 @@ jobs:
             ${{ steps.package-msix.outputs.package_path }}
             ${{ steps.package-msix.outputs.manifest_path }}
           if-no-files-found: error
+
+  package-linux:
+    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') }}
+    needs:
+      - verify-windows
+      - verify-linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CODE_OSS_EXECUTABLE: ${{ vars.CODE_OSS_EXECUTABLE }}
+      RELEASE_APPIMAGETOOL_PATH: ${{ vars.RELEASE_APPIMAGETOOL_PATH }}
+      RELEASE_APPIMAGETOOL_SHA256: ${{ vars.RELEASE_APPIMAGETOOL_SHA256 }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.4.0
+          run_install: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 1.26.6
+          cache-dependency-path: apps/test-service/go.sum
+      - run: pnpm install --frozen-lockfile
+      - id: cmake-bundle
+        name: Prepare CMake bundle
+        shell: bash
+        run: |
+          result="$(node tools/cmake-bundle/prepare.mjs)"
+          cmake="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).executable)' "$result")"
+          cmake_root="$(dirname "$(dirname "$cmake")")"
+          echo "$(dirname "$cmake")" >> "$GITHUB_PATH"
+          echo "CMAKE=$cmake" >> "$GITHUB_ENV"
+          echo "cmake_root=$cmake_root" >> "$GITHUB_OUTPUT"
+      - run: pnpm prepare:coverage-bundle
+      - run: pnpm build
+      - name: Build Linux service binary
+        shell: bash
+        run: |
+          mkdir -p .release/linux
+          go build -o .release/linux/unit-test-service ./apps/test-service/cmd/unit-test-service
+      - id: package-appimage
+        name: Stage and package Linux AppImage
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.release_version || github.ref_name }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            version="$RELEASE_VERSION"
+          else
+            if [[ "$RELEASE_VERSION" != v* ]]; then
+              echo "tag release version must start with 'v': $RELEASE_VERSION" >&2
+              exit 1
+            fi
+            version="${RELEASE_VERSION#v}"
+          fi
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "release version must be semver-like: $version" >&2
+            exit 1
+          fi
+          if [[ -z "${RELEASE_APPIMAGETOOL_PATH:-}" ]]; then
+            echo "RELEASE_APPIMAGETOOL_PATH is required" >&2
+            exit 1
+          fi
+          if [[ -z "${RELEASE_APPIMAGETOOL_SHA256:-}" ]]; then
+            echo "RELEASE_APPIMAGETOOL_SHA256 is required" >&2
+            exit 1
+          fi
+          staging_root="$(node tools/release/stage.mjs \
+            --platform linux \
+            --architecture x64 \
+            --version "$version" \
+            --code-oss "$CODE_OSS_EXECUTABLE" \
+            --service .release/linux/unit-test-service \
+            --cmake-root "${{ steps.cmake-bundle.outputs.cmake_root }}" \
+            --coverage-root .superpowers/runtime/coverage-bundle/linux-x64 \
+            --out .release/linux/dist)"
+          package_json="$(node tools/release/linux/package-appimage.mjs \
+            --staging-root "$staging_root" \
+            --output ".release/linux/dist/unit-test-ide-$version.AppImage" \
+            --appimagetool "$RELEASE_APPIMAGETOOL_PATH" \
+            --version "$version" \
+            --architecture x64)"
+          image_path="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).image)' "$package_json")"
+          manifest_path="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).manifestPath)' "$package_json")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "package_path=$image_path" >> "$GITHUB_OUTPUT"
+          echo "manifest_path=$manifest_path" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-appimage-${{ steps.package-appimage.outputs.version }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.package-appimage.outputs.package_path }}
+            ${{ steps.package-appimage.outputs.manifest_path }}
+          if-no-files-found: error

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Unit Test IDE
+Exec={{EXEC}}
+TryExec={{EXEC}}
+Icon=unit-test-ide
+Categories=Development;IDE;
+Terminal=false
+X-AppImage-Version={{VERSION}}
