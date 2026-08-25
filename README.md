@@ -61,6 +61,30 @@ Windows `clang-cl` coverage smoke 另有一个 required gate：它先运行独�
 
 更多说明见 [开发指南](docs/development.md)、[安全边界](docs/security.md)、[CMake bundle](docs/cmake-bundle.md) 和 [native E2E](docs/native-e2e.md)。
 
+## Release staging
+
+发布 staging tree 不会在默认测试或运行脚本里下载任何依赖；它只消费已经准备好的输入。`CODE_OSS_EXECUTABLE` 是必需的 build input，必须显式指向本地 Code-OSS 可执行文件。运行前还需要：
+
+- `apps/code-oss-extension/dist/` 已经构建完成；
+- Go service 二进制已经构建完成；
+- CMake bundle root 和 coverage bundle root 已经通过各自的 prepare/check gate。
+
+Windows PowerShell 示例：
+
+```powershell
+$env:CODE_OSS_EXECUTABLE='C:\path\to\CodeOSS.exe'
+pnpm release:stage -- --platform windows --architecture x64 --version 1.2.3 --code-oss $env:CODE_OSS_EXECUTABLE --service .\bin\unit-test-service.exe --cmake-root .\.bundled-tools\cmake\windows-x64 --coverage-root .\.superpowers\runtime\coverage-bundle\windows-x64 --out .\dist
+```
+
+Linux shell 示例：
+
+```sh
+CODE_OSS_EXECUTABLE=/path/to/code-oss \
+pnpm release:stage -- --platform linux --architecture x64 --version 1.2.3 --code-oss "$CODE_OSS_EXECUTABLE" --service ./bin/unit-test-service --cmake-root ./.bundled-tools/cmake/linux-x64 --coverage-root ./.superpowers/runtime/coverage-bundle/linux-x64 --out ./dist
+```
+
+命令会生成 `dist/staging/<version>/<platform>-<architecture>/`，其中包含 Code-OSS runtime、扩展 `dist`、service、bundle、聚合后的 license notices，以及闭集 `release-manifest.json`。
+
 ## 协议与安全边界
 
 协议模型由 `packages/protocol-schema/schema` 生成。生成的 TypeScript 和 Go 文件已提交；请编辑 Schema 并运行 `pnpm generate:protocol`，不要直接编辑生成文件。消息继续使用 UTF-8 NDJSON，每行编码后上限为 1 MiB。
