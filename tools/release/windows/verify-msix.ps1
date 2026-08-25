@@ -94,36 +94,34 @@ function Invoke-ExternalTool {
     [Parameter(Mandatory = $true)][string[]]$Arguments
   )
 
-  $extension = [IO.Path]::GetExtension($FilePath)
-  $stdoutPath = Join-Path ([IO.Path]::GetTempPath()) ("msix-stdout-" + [Guid]::NewGuid().ToString('N') + ".log")
-  $stderrPath = Join-Path ([IO.Path]::GetTempPath()) ("msix-stderr-" + [Guid]::NewGuid().ToString('N') + ".log")
-  if ($extension -ieq '.ps1') {
-    $commandPath = 'powershell.exe'
-    $argumentList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $FilePath) + $Arguments
+  $previousExitCodeVariable = Get-Variable -Name LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue
+  $previousExitCode = if ($null -ne $previousExitCodeVariable) { $previousExitCodeVariable.Value } else { $null }
+  $global:LASTEXITCODE = $null
+  $output = & $FilePath @Arguments 2>&1
+  $succeeded = $?
+  $currentExitCodeVariable = Get-Variable -Name LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue
+  $exitCode = if ($null -ne $currentExitCodeVariable -and $null -ne $currentExitCodeVariable.Value) {
+    [int]$currentExitCodeVariable.Value
+  } elseif ($succeeded) {
+    0
   } else {
-    $commandPath = $FilePath
-    $argumentList = $Arguments
+    1
   }
-
-  try {
-    $process = Start-Process `
-      -FilePath $commandPath `
-      -ArgumentList $argumentList `
-      -Wait `
-      -PassThru `
-      -NoNewWindow `
-      -RedirectStandardOutput $stdoutPath `
-      -RedirectStandardError $stderrPath
-    $stdout = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -LiteralPath $stdoutPath -Raw } else { '' }
-    $stderr = if (Test-Path -LiteralPath $stderrPath) { Get-Content -LiteralPath $stderrPath -Raw } else { '' }
-    return [pscustomobject]@{
-      ExitCode = $process.ExitCode
-      StdErr = $stderr
-      StdOut = $stdout
-    }
-  } finally {
-    Remove-Item -LiteralPath $stdoutPath -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue
+  if ($null -ne $previousExitCodeVariable) {
+    $global:LASTEXITCODE = $previousExitCode
+  } else {
+    Clear-Variable -Name LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue
+  }
+  $merged = (@($output | ForEach-Object {
+        if ($_ -is [System.Management.Automation.ErrorRecord]) {
+          $_.ToString()
+        } else {
+          [string]$_
+        }
+      }) | Where-Object { -not [string]::IsNullOrEmpty($_) }) -join [Environment]::NewLine
+  return [pscustomobject]@{
+    ExitCode = $exitCode
+    Combined = $merged
   }
 }
 
@@ -175,7 +173,7 @@ function Get-NormalizedEntries {
   return $results
 }
 
-function Get-EntryMap {
+function Get-ValidatedEntryMap {
   param([Parameter(Mandatory = $true)]$Archive)
 
   $map = @{}
@@ -183,7 +181,27 @@ function Get-EntryMap {
     if ([string]::IsNullOrWhiteSpace($entry.Name) -and $entry.FullName.EndsWith('/')) {
       continue
     }
-    $map[($entry.FullName -replace '\\', '/')] = $entry
+    $rawPath = [string]$entry.FullName
+    $normalizedPath = $rawPath -replace '\\', '/'
+    $segments = @($normalizedPath.Split('/'))
+    if (
+      [string]::IsNullOrWhiteSpace($rawPath) -or
+      $normalizedPath.StartsWith('/') -or
+      $normalizedPath.Contains(':') -or
+      (@($segments | Where-Object { [string]::IsNullOrWhiteSpace($_) -or $_ -eq '.' -or $_ -eq '..' })).Count -gt 0
+    ) {
+      Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message "unsafe archive entry path: $rawPath"
+    }
+
+    $canonicalPath = [string]::Join('/', $segments)
+    $canonicalKey = $canonicalPath.ToLowerInvariant()
+    if ($map.Contains($canonicalKey)) {
+      Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message "duplicate archive entry alias: $rawPath"
+    }
+    $map[$canonicalKey] = [pscustomobject]@{
+      CanonicalPath = $canonicalPath
+      Entry = $entry
+    }
   }
   return $map
 }
@@ -234,7 +252,7 @@ function Verify-Signature {
   $signatureTool = Resolve-ToolPath -Override ([string]$env:RELEASE_SIGNTOOL_PATH) -CommandName 'signtool.exe' -StableName 'signtool.exe'
   $result = Invoke-ExternalTool -FilePath $signatureTool -Arguments @('verify', '/pa', '/v', $PackagePath)
   if ($result.ExitCode -ne 0) {
-    $detail = ($result.StdErr + $result.StdOut).Trim()
+    $detail = $result.Combined.Trim()
     if ([string]::IsNullOrWhiteSpace($detail)) {
       $detail = 'signtool.exe rejected the MSIX package signature'
     }
@@ -271,14 +289,14 @@ $expectedPayloads[$storeLogoPath] = Get-PlaceholderLogoBytes
 
 $archive = [System.IO.Compression.ZipFile]::OpenRead($packagePath)
 try {
-  $entries = Get-NormalizedEntries -Archive $archive | Sort-Object -Unique
-  $entryMap = Get-EntryMap -Archive $archive
-  $embeddedManifestEntry = $entryMap['AppxManifest.xml']
+  $entryMap = Get-ValidatedEntryMap -Archive $archive
+  $entries = @($entryMap.Values | ForEach-Object { $_.CanonicalPath }) | Sort-Object
+  $embeddedManifestEntry = $entryMap['appxmanifest.xml'].Entry
   if ($null -eq $embeddedManifestEntry) {
     Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message 'package does not contain AppxManifest.xml'
   }
 
-  $embeddedReleaseManifestEntry = $entryMap['release-manifest.json']
+  $embeddedReleaseManifestEntry = $entryMap['release-manifest.json'].Entry
   if ($null -eq $embeddedReleaseManifestEntry) {
     Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message 'package does not contain release-manifest.json'
   }
@@ -304,10 +322,11 @@ try {
   }
 
   foreach ($path in $expectedEntries) {
-    $entry = $entryMap[$path]
-    if ($null -eq $entry) {
+    $entryRecord = $entryMap[$path.ToLowerInvariant()]
+    if ($null -eq $entryRecord) {
       Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message "package payload is missing: $path"
     }
+    $entry = $entryRecord.Entry
     $entryBytes = Read-EntryBytes -Entry $entry
     $expectedBytes = $expectedPayloads[$path]
     if ($entryBytes.Length -ne $expectedBytes.Length) {
