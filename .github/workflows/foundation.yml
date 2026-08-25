@@ -245,7 +245,7 @@ jobs:
     runs-on: windows-2025-vs2026
     timeout-minutes: 60
     outputs:
-      artifact_name: windows-msix-${{ steps.package-msix.outputs.version }}-${{ github.run_attempt }}
+      artifact_name: release-input-windows-${{ steps.package-msix.outputs.version }}-${{ github.run_attempt }}
       version: ${{ steps.package-msix.outputs.version }}
       package_filename: ${{ steps.package-msix.outputs.package_filename }}
       package_sha256: ${{ steps.package-msix.outputs.package_sha256 }}
@@ -256,6 +256,8 @@ jobs:
       baseline_package_sha256: ${{ steps.package-msix.outputs.baseline_package_sha256 }}
       baseline_manifest_filename: ${{ steps.package-msix.outputs.baseline_manifest_filename }}
       baseline_manifest_sha256: ${{ steps.package-msix.outputs.baseline_manifest_sha256 }}
+      signature_required: ${{ steps.package-msix.outputs.signature_required }}
+      signature_outcome: ${{ steps.package-msix.outputs.signature_outcome }}
     env:
       CODE_OSS_EXECUTABLE: ${{ vars.CODE_OSS_EXECUTABLE }}
       RELEASE_MSIX_PUBLISHER: ${{ vars.RELEASE_MSIX_PUBLISHER || 'CN=Unit Test IDE' }}
@@ -384,9 +386,11 @@ jobs:
           "baseline_manifest_filename=$(Split-Path -Leaf $baselineManifestPath)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "baseline_manifest_sha256=$((Get-FileHash -LiteralPath $baselineManifestPath -Algorithm SHA256).Hash.ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "license_audit_path=$licenseAuditPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "signature_required=$env:RELEASE_SIGNING_REQUIRED" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "signature_outcome=$(if ($env:RELEASE_SIGNING_REQUIRED -eq '1') { 'verified' } else { 'not-required' })" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
       - uses: actions/upload-artifact@v7
         with:
-          name: windows-msix-${{ steps.package-msix.outputs.version }}-${{ github.run_attempt }}
+          name: release-input-windows-${{ steps.package-msix.outputs.version }}-${{ github.run_attempt }}
           path: |
             ${{ steps.package-msix.outputs.package_path }}
             ${{ steps.package-msix.outputs.manifest_path }}
@@ -394,6 +398,7 @@ jobs:
             ${{ steps.package-msix.outputs.baseline_manifest_path }}
             ${{ steps.package-msix.outputs.license_audit_path }}
           if-no-files-found: error
+          retention-days: 1
 
   package-linux:
     if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') }}
@@ -403,12 +408,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     outputs:
-      artifact_name: linux-appimage-${{ steps.package-appimage.outputs.version }}-${{ github.run_attempt }}
+      artifact_name: release-input-linux-${{ steps.package-appimage.outputs.version }}-${{ github.run_attempt }}
       version: ${{ steps.package-appimage.outputs.version }}
       package_filename: ${{ steps.package-appimage.outputs.package_filename }}
       package_sha256: ${{ steps.package-appimage.outputs.package_sha256 }}
       manifest_filename: ${{ steps.package-appimage.outputs.manifest_filename }}
       manifest_sha256: ${{ steps.package-appimage.outputs.manifest_sha256 }}
+      release_manifest_filename: ${{ steps.package-appimage.outputs.release_manifest_filename }}
+      release_manifest_sha256: ${{ steps.package-appimage.outputs.release_manifest_sha256 }}
       baseline_version: ${{ steps.package-appimage.outputs.baseline_version }}
       baseline_package_filename: ${{ steps.package-appimage.outputs.baseline_package_filename }}
       baseline_package_sha256: ${{ steps.package-appimage.outputs.baseline_package_sha256 }}
@@ -501,6 +508,8 @@ jobs:
             --architecture x64)"
           image_path="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).image)' "$package_json")"
           manifest_path="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).manifestPath)' "$package_json")"
+          release_manifest_path="$PWD/.release/linux/dist/unit-test-ide-$version.release-manifest.json"
+          cp -- "$staging_root/release-manifest.json" "$release_manifest_path"
           baseline_staging_root="$(node tools/release/stage.mjs \
             --platform linux \
             --architecture x64 \
@@ -529,6 +538,9 @@ jobs:
           echo "manifest_path=$manifest_path" >> "$GITHUB_OUTPUT"
           echo "manifest_filename=$(basename "$manifest_path")" >> "$GITHUB_OUTPUT"
           echo "manifest_sha256=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).releaseManifestSha256)' "$manifest_path")" >> "$GITHUB_OUTPUT"
+          echo "release_manifest_path=$release_manifest_path" >> "$GITHUB_OUTPUT"
+          echo "release_manifest_filename=$(basename "$release_manifest_path")" >> "$GITHUB_OUTPUT"
+          echo "release_manifest_sha256=$(sha256sum "$release_manifest_path" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
           echo "baseline_version=$baseline_version" >> "$GITHUB_OUTPUT"
           echo "baseline_package_path=$baseline_image_path" >> "$GITHUB_OUTPUT"
           echo "baseline_package_filename=$(basename "$baseline_image_path")" >> "$GITHUB_OUTPUT"
@@ -539,14 +551,16 @@ jobs:
           echo "license_audit_path=$license_audit_path" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v7
         with:
-          name: linux-appimage-${{ steps.package-appimage.outputs.version }}-${{ github.run_attempt }}
+          name: release-input-linux-${{ steps.package-appimage.outputs.version }}-${{ github.run_attempt }}
           path: |
             ${{ steps.package-appimage.outputs.package_path }}
             ${{ steps.package-appimage.outputs.manifest_path }}
+            ${{ steps.package-appimage.outputs.release_manifest_path }}
             ${{ steps.package-appimage.outputs.baseline_package_path }}
             ${{ steps.package-appimage.outputs.baseline_manifest_path }}
             ${{ steps.package-appimage.outputs.license_audit_path }}
           if-no-files-found: error
+          retention-days: 1
 
   install-smoke-windows:
     if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') }}
@@ -647,4 +661,106 @@ jobs:
         with:
           name: install-smoke-linux-${{ github.run_attempt }}
           path: .release/evidence/install-smoke-linux.json
+          if-no-files-found: error
+
+  release-qualification:
+    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') }}
+    needs:
+      - install-smoke-windows
+      - install-smoke-linux
+      - package-windows
+      - package-linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.18.0
+      - name: Download Windows release inputs
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ needs.package-windows.outputs.artifact_name }}
+          path: .release/qualification/windows
+      - name: Download Linux release inputs
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ needs.package-linux.outputs.artifact_name }}
+          path: .release/qualification/linux
+      - name: Download Windows install evidence
+        uses: actions/download-artifact@v7
+        with:
+          name: install-smoke-windows-${{ github.run_attempt }}
+          path: .release/qualification/windows-evidence
+      - name: Download Linux install evidence
+        uses: actions/download-artifact@v7
+        with:
+          name: install-smoke-linux-${{ github.run_attempt }}
+          path: .release/qualification/linux-evidence
+      - id: qualify-release
+        name: Build closed release qualification evidence
+        continue-on-error: true
+        shell: bash
+        run: |
+          find_input() {
+            local root="$1" name="$2" matches
+            mapfile -t matches < <(find "$root" -type f -name "$name" -print)
+            ((${#matches[@]} == 1)) || { echo "expected exactly one qualification input named $name" >&2; exit 1; }
+            printf '%s\n' "${matches[0]}"
+          }
+          mkdir -p .release/evidence
+          node tools/release/qualification.mjs \
+            --linux-evidence "$(find_input .release/qualification/linux-evidence install-smoke-linux.json)" \
+            --windows-evidence "$(find_input .release/qualification/windows-evidence install-smoke-windows.json)" \
+            --linux-manifest "$(find_input .release/qualification/linux '${{ needs.package-linux.outputs.release_manifest_filename }}')" \
+            --windows-manifest "$(find_input .release/qualification/windows '${{ needs.package-windows.outputs.manifest_filename }}')" \
+            --linux-package "$(find_input .release/qualification/linux '${{ needs.package-linux.outputs.package_filename }}')" \
+            --windows-package "$(find_input .release/qualification/windows '${{ needs.package-windows.outputs.package_filename }}')" \
+            --linux-license-audit "$(find_input .release/qualification/linux license-audit-linux.json)" \
+            --windows-license-audit "$(find_input .release/qualification/windows license-audit-windows.json)" \
+            --windows-signature-required '${{ needs.package-windows.outputs.signature_required }}' \
+            --windows-signature-outcome '${{ needs.package-windows.outputs.signature_outcome }}' \
+            --out .release/evidence/release-qualification.json
+      - name: Publish qualification evidence
+        if: ${{ always() && hashFiles('.release/evidence/release-qualification.json') != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-qualification-${{ github.run_attempt }}
+          path: .release/evidence/release-qualification.json
+          if-no-files-found: error
+      - name: Require a qualified release before publication
+        if: always()
+        shell: bash
+        run: |
+          node -e '
+            const { readFileSync } = require("node:fs");
+            const report = JSON.parse(readFileSync(".release/evidence/release-qualification.json", "utf8"));
+            if (report.qualificationOutcome.qualified !== true) {
+              console.error(JSON.stringify(report.qualificationOutcome.reasons));
+              process.exit(1);
+            }
+          '
+      - name: Stage qualified release files
+        shell: bash
+        run: |
+          find_input() {
+            local root="$1" name="$2" matches
+            mapfile -t matches < <(find "$root" -type f -name "$name" -print)
+            ((${#matches[@]} == 1)) || { echo "expected exactly one qualified release input named $name" >&2; exit 1; }
+            printf '%s\n' "${matches[0]}"
+          }
+          mkdir -p .release/qualified
+          cp -- "$(find_input .release/qualification/windows '${{ needs.package-windows.outputs.package_filename }}')" .release/qualified/
+          cp -- "$(find_input .release/qualification/windows '${{ needs.package-windows.outputs.manifest_filename }}')" .release/qualified/
+          cp -- "$(find_input .release/qualification/windows license-audit-windows.json)" .release/qualified/
+          cp -- "$(find_input .release/qualification/linux '${{ needs.package-linux.outputs.package_filename }}')" .release/qualified/
+          cp -- "$(find_input .release/qualification/linux '${{ needs.package-linux.outputs.manifest_filename }}')" .release/qualified/
+          cp -- "$(find_input .release/qualification/linux '${{ needs.package-linux.outputs.release_manifest_filename }}')" .release/qualified/
+          cp -- "$(find_input .release/qualification/linux license-audit-linux.json)" .release/qualified/
+          cp -- .release/evidence/release-qualification.json .release/qualified/
+      - name: Publish qualified release artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: qualified-release-${{ needs.package-windows.outputs.version }}-${{ github.run_attempt }}
+          path: .release/qualified
           if-no-files-found: error
