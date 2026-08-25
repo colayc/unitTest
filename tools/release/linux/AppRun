@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+
+if [ "${UNIT_TEST_IDE_REQUIRE_NETWORK:-0}" != "0" ]; then
+  echo "RELEASE_NETWORK_DEPENDENCY: network-dependent setup is not allowed in the packaged AppImage" >&2
+  exit 114
+fi
+
+unset http_proxy HTTP_PROXY https_proxy HTTPS_PROXY ftp_proxy FTP_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
+export UNIT_TEST_IDE_RELEASE_OFFLINE=1
+export UNIT_TEST_IDE_ALLOW_DOWNLOADS=0
+
+SELF_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+LAUNCHER="$SELF_DIR/usr/lib/unit-test-ide/app/code-oss"
+
+if [ ! -x "$LAUNCHER" ]; then
+  echo "RELEASE_LAUNCHER_MISSING: packaged launcher is missing or not executable" >&2
+  exit 113
+fi
+
+exec "$LAUNCHER" "$@"
