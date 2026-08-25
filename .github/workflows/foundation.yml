@@ -328,15 +328,21 @@ jobs:
             -Version $version `
             -Publisher $env:RELEASE_MSIX_PUBLISHER | Out-Null
           $manifestPath = Join-Path $stagingRoot 'release-manifest.json'
+          $licenseAuditPath = Join-Path $PWD '.release/windows/dist/license-audit-windows.json'
+          node tools/release/license-audit.mjs `
+            --staging-root $stagingRoot `
+            --out $licenseAuditPath | Out-Null
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "package_path=$packagePath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "manifest_path=$manifestPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "license_audit_path=$licenseAuditPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
       - uses: actions/upload-artifact@v7
         with:
           name: windows-msix-${{ steps.package-msix.outputs.version }}-${{ github.run_attempt }}
           path: |
             ${{ steps.package-msix.outputs.package_path }}
             ${{ steps.package-msix.outputs.manifest_path }}
+            ${{ steps.package-msix.outputs.license_audit_path }}
           if-no-files-found: error
 
   package-linux:
@@ -426,13 +432,79 @@ jobs:
             --architecture x64)"
           image_path="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).image)' "$package_json")"
           manifest_path="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).manifestPath)' "$package_json")"
+          license_audit_path="$PWD/.release/linux/dist/license-audit-linux.json"
+          node tools/release/license-audit.mjs \
+            --staging-root "$staging_root" \
+            --out "$license_audit_path" >/dev/null
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "package_path=$image_path" >> "$GITHUB_OUTPUT"
           echo "manifest_path=$manifest_path" >> "$GITHUB_OUTPUT"
+          echo "license_audit_path=$license_audit_path" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v7
         with:
           name: linux-appimage-${{ steps.package-appimage.outputs.version }}-${{ github.run_attempt }}
           path: |
             ${{ steps.package-appimage.outputs.package_path }}
             ${{ steps.package-appimage.outputs.manifest_path }}
+            ${{ steps.package-appimage.outputs.license_audit_path }}
+          if-no-files-found: error
+
+  install-smoke-windows:
+    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') }}
+    needs:
+      - package-windows
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.4.0
+          run_install: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Exercise disposable Windows install lifecycle
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path '.release/evidence' | Out-Null
+          & 'tools/release/install-smoke.ps1' `
+            -Root (Join-Path $env:RUNNER_TEMP 'unit-test-ide-install-smoke') `
+            -EvidencePath '.release/evidence/install-smoke-windows.json'
+      - uses: actions/upload-artifact@v7
+        with:
+          name: install-smoke-windows-${{ github.run_attempt }}
+          path: .release/evidence/install-smoke-windows.json
+          if-no-files-found: error
+
+  install-smoke-linux:
+    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') }}
+    needs:
+      - package-linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.4.0
+          run_install: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Exercise disposable Linux install lifecycle
+        shell: bash
+        run: |
+          mkdir -p .release/evidence
+          bash tools/release/install-smoke.sh \
+            --root "$RUNNER_TEMP/unit-test-ide-install-smoke" \
+            --evidence .release/evidence/install-smoke-linux.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: install-smoke-linux-${{ github.run_attempt }}
+          path: .release/evidence/install-smoke-linux.json
           if-no-files-found: error

@@ -33,6 +33,16 @@ Preset 在 configure 前可能没有单一 `toolchainId`。此时 File API 对 C
 
 固定 CMake bundle 通过 tracked manifest 绑定版本、archive SHA-256、安装布局、executable、license 和 installed-file SHA-256。运行时不自动下载。
 
+## 安装、更新、回滚与许可边界
+
+发布安装验证只操作调用方显式提供的 package-owned root，不写注册表、不修改系统目录，也不改变用户 profile。首次安装会在该 root 写入封闭的 ownership marker；卸载前必须重新验证 marker，因而不会把任意非空目录认领为产品目录。workspace、任务数据库和用户制品必须位于 package-owned root 之外，卸载只递归删除已验证的产品 root。
+
+每个版本先复制到 `versions/` 下的临时 sibling directory，重新验证封闭 `release-manifest.json`、全部 artifact/license 的 size 与 SHA-256、路径边界以及精确文件集合，fsync manifest 后才通过 rename 发布为 `versions/<version>`。`current` 是单独的 semver pointer file：新 pointer 先写入并在平台支持时 fsync，再用 rename 原子替换；验证或复制失败不会改变已有 pointer。普通安装拒绝 downgrade；显式 rollback 只允许切换到仍在 `versions/` 中且再次通过完整 manifest 验证的版本，重复 rollback 保持幂等，而且更新流程不会删除最后一个已知可用版本。
+
+许可审计以 release manifest 中 digest-bearing `{path,size,sha256}` 记录为唯一顶层闭集，拒绝缺失、额外、篡改或 reparse 的 notice/license 文件。coverage bundle 的固定 wheel lock 必须与 `licenses/dependencies.json` 中的 project/version 闭集一一对应，并保留 Python、gcovr 和每个 transitive dependency 的许可材料；CMake 必须至少保留 release manifest 已固定摘要的 license notice，在完整 CMake manifest 随包存在时还会校验平台对应的 `licensePath`。
+
+Windows PowerShell 与 Linux Bash clean-machine smoke 都使用一次性 root，验证首次安装、launch handshake、升级、模拟启动失败后的强制回滚、重复回滚、卸载、user-data 保留和 package residue 清零。CI 只上传封闭 JSON outcome、source commit 和 digest-bearing license audit；evidence 不包含 token、environment、用户名、runner path 或 workspace 内容。
+
 开发者自定义 CMake 仅允许：
 
 - workspace 已显式标记为 trusted；
