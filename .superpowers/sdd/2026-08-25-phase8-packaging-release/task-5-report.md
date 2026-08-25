@@ -153,3 +153,32 @@ DONE_WITH_CONCERNS
 - Focused Task 5 suite: `26` passed, `0` failed, `0` skipped.
 - Complete `tools/release/**/*.test.mjs` suite: `65` passed, `0` failed, `0` skipped.
 - `node --check tools/release/update.mjs`, PowerShell AST parsing, YAML parsing, and `git diff --check` passed.
+
+## Review remediation round 3 — installed-product launch corruption
+
+### Status
+
+DONE_WITH_CONCERNS
+
+### Fix
+
+- Removed the synthetic `node -e process.exit(86)` probe. After the target package is atomically installed and reverified, `triggerInstalledUpgradeLaunchFailure` acquires the update lock, confirms the target is current, reverifies its closed manifest, and overwrites only the installed target `app/code-oss` with deterministic invalid bytes.
+- The harness invokes that exact installed file and requires a nonzero launch result before rollback. The downloaded package and verified extracted source payload are never modified.
+- Rollback switches to the untouched, manifest-verified baseline and performs a real baseline `--version` launch. Evidence now includes target package/version/digests, `rollbackVersion`, `upgradeLaunch: failed-as-expected`, `rollback: pass`, and `rollbackLaunch: pass`; both wrappers validate these fields.
+- Windows requires an executable suffix for the extensionless staged PE, so the smoke harness creates and removes a short-lived hardlink alias to the same installed file identity. Corruption and launch therefore still address the installed launcher bytes.
+
+### TDD evidence
+
+- Red: importing the requested installed-launch failure helper failed because no production path existed.
+- Red: the full production smoke regression then failed its first baseline launch on Windows because the staged PE is extensionless.
+- Green: the regression now uses a real executable package fixture, observes installed-target corruption/failure, performs real baseline and rollback launches, verifies the source target launcher is byte-identical, and accepts closed evidence.
+
+### Concerns
+
+- Native AppImage and hosted workflow execution remain CI-owned; the production smoke regression runs natively on the current Windows host and is cross-platform by construction.
+
+### Verification
+
+- Focused Task 5 suite: `26` passed, `0` failed, `0` skipped.
+- Complete `tools/release/**/*.test.mjs` suite: `65` passed, `0` failed, `0` skipped.
+- Module syntax, PowerShell AST parsing, YAML parsing, and `git diff --check` passed.

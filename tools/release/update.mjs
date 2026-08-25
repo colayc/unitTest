@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { createReadStream } from "node:fs";
+import { createReadStream, linkSync, unlinkSync } from "node:fs";
 import {
   access,
   chmod,
@@ -530,18 +530,24 @@ export async function uninstall(root) {
 
 function launchHandshake(packageRoot, version, userDataRoot) {
   const launcher = join(packageRoot, "versions", version, "app", "code-oss");
-  return spawnSync(launcher, ["--version"], {
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      HOME: userDataRoot,
-      USERPROFILE: userDataRoot,
-      XDG_CACHE_HOME: join(userDataRoot, "cache"),
-      XDG_CONFIG_HOME: join(userDataRoot, "config"),
-    },
-    timeout: 30_000,
-    windowsHide: true,
-  });
+  const executable = process.platform === "win32" ? `${launcher}.smoke.exe` : launcher;
+  if (process.platform === "win32") linkSync(launcher, executable);
+  try {
+    return spawnSync(executable, ["--version"], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        HOME: userDataRoot,
+        USERPROFILE: userDataRoot,
+        XDG_CACHE_HOME: join(userDataRoot, "cache"),
+        XDG_CONFIG_HOME: join(userDataRoot, "config"),
+      },
+      timeout: 30_000,
+      windowsHide: true,
+    });
+  } finally {
+    if (process.platform === "win32") unlinkSync(executable);
+  }
 }
 
 function requireLaunchHandshake(result, label) {
@@ -551,18 +557,27 @@ function requireLaunchHandshake(result, label) {
   }
 }
 
-function controlledUpgradeLaunchFailure(packageRoot, version, userDataRoot) {
-  const handshake = launchHandshake(packageRoot, version, userDataRoot);
-  if (handshake.status !== 0) return handshake;
-  const failure = spawnSync(process.execPath, ["-e", "process.exit(86)"], {
-    encoding: "utf8",
-    windowsHide: true,
+async function triggerInstalledUpgradeLaunchFailure(root, version, userDataRoot) {
+  if (typeof version !== "string" || !semverLike.test(version)) {
+    throw verificationFailure("smoke target version must be semver-like");
+  }
+  const packageRoot = await requireOwnedRoot(root);
+  if (packageRoot === null) throw releaseError("RELEASE_ROOT_NOT_OWNED", "package-owned root is missing");
+  return withUpdateLock(packageRoot, async () => {
+    if (await readCurrent(packageRoot) !== version) {
+      throw releaseError("RELEASE_SMOKE_FAILED", "installed smoke target is not current");
+    }
+    const targetRoot = await requireOwnedDirectory(packageRoot, `versions/${version}`);
+    await readVerifiedManifest(targetRoot);
+    const launcher = join(targetRoot, "app", "code-oss");
+    await writeFile(launcher, Buffer.from([0x00, 0xff, 0x00, 0x7f, 0x55, 0xaa]));
+    await fsyncFile(launcher);
+    const result = launchHandshake(packageRoot, version, userDataRoot);
+    if (result.status === 0) {
+      throw releaseError("RELEASE_SMOKE_FAILED", "expected corrupted upgrade launcher failure was not observed");
+    }
+    return result;
   });
-  return {
-    ...failure,
-    stdout: handshake.stdout,
-    stderr: failure.stderr || "controlled smoke-only upgrade launch failure\n",
-  };
 }
 
 export async function runSmokeLifecycle({
@@ -575,10 +590,7 @@ export async function runSmokeLifecycle({
   platform,
   root,
   version,
-}, {
-  launch = launchHandshake,
-  upgradeLaunch = controlledUpgradeLaunchFailure,
-} = {}) {
+}, { launch = launchHandshake } = {}) {
   if (!["windows", "linux"].includes(platform)) throw releaseError("RELEASE_SMOKE_INVALID", "unsupported platform");
   if ((platform === "windows") !== (process.platform === "win32")) {
     throw releaseError("RELEASE_SMOKE_INVALID", `platform ${platform} does not match this host`);
@@ -633,9 +645,9 @@ export async function runSmokeLifecycle({
   if ((await readCurrent(packageRoot)) !== version) {
     throw releaseError("RELEASE_SMOKE_FAILED", "upgrade did not switch current");
   }
-  const failedUpgradeLaunch = upgradeLaunch(packageRoot, version, workspaceRoot);
+  const failedUpgradeLaunch = await triggerInstalledUpgradeLaunchFailure(packageRoot, version, workspaceRoot);
   if (failedUpgradeLaunch.status === 0) {
-    throw releaseError("RELEASE_SMOKE_FAILED", "expected upgrade launch failure was not observed");
+    throw releaseError("RELEASE_SMOKE_FAILED", "expected corrupted upgrade launcher failure was not observed");
   }
   await rollbackVersion(packageRoot, baseline.manifest.version);
   requireLaunchHandshake(launch(packageRoot, baseline.manifest.version, workspaceRoot), "rollback");
@@ -658,12 +670,14 @@ export async function runSmokeLifecycle({
     version,
     packageSha256,
     manifestSha256,
+    rollbackVersion: baseline.manifest.version,
     outcomes: {
       install: "pass",
       launchHandshake: "pass",
       upgrade: "pass",
       upgradeLaunch: "failed-as-expected",
       rollback: "pass",
+      rollbackLaunch: "pass",
       repeatedRollback: "pass",
       uninstall: "pass",
       userDataPreserved: "pass",

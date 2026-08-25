@@ -94,7 +94,7 @@ node "$update_script" smoke \
 
 node -e '
   const fs = require("node:fs");
-  const [path, packageSha, manifestSha, version] = process.argv.slice(1);
+  const [path, packageSha, manifestSha, version, baselineVersion] = process.argv.slice(1);
   const value = JSON.parse(fs.readFileSync(path, "utf8"));
-  if (value.platform !== "linux" || value.packageSha256 !== packageSha || value.manifestSha256 !== manifestSha || value.version !== version || value.outcomes?.upgradeLaunch !== "failed-as-expected" || value.outcomes?.packageResidueAbsent !== "pass") process.exit(1);
-' "$evidence" "$package_sha256" "$manifest_sha256" "$version"
+  if (value.platform !== "linux" || value.packageSha256 !== packageSha || value.manifestSha256 !== manifestSha || value.version !== version || value.rollbackVersion !== baselineVersion || value.outcomes?.upgradeLaunch !== "failed-as-expected" || value.outcomes?.rollbackLaunch !== "pass" || value.outcomes?.packageResidueAbsent !== "pass") process.exit(1);
+' "$evidence" "$package_sha256" "$manifest_sha256" "$version" "$baseline_version"
