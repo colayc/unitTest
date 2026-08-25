@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { createReadStream, linkSync, unlinkSync } from "node:fs";
+import { createReadStream } from "node:fs";
 import {
   access,
   chmod,
@@ -529,25 +529,25 @@ export async function uninstall(root) {
 }
 
 function launchHandshake(packageRoot, version, userDataRoot) {
-  const launcher = join(packageRoot, "versions", version, "app", "code-oss");
-  const executable = process.platform === "win32" ? `${launcher}.smoke.exe` : launcher;
-  if (process.platform === "win32") linkSync(launcher, executable);
-  try {
-    return spawnSync(executable, ["--version"], {
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        HOME: userDataRoot,
-        USERPROFILE: userDataRoot,
-        XDG_CACHE_HOME: join(userDataRoot, "cache"),
-        XDG_CONFIG_HOME: join(userDataRoot, "config"),
-      },
-      timeout: 30_000,
-      windowsHide: true,
-    });
-  } finally {
-    if (process.platform === "win32") unlinkSync(executable);
-  }
+  const executable = join(
+    packageRoot,
+    "versions",
+    version,
+    "app",
+    process.platform === "win32" ? "code-oss.exe" : "code-oss",
+  );
+  return spawnSync(executable, ["--version"], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      HOME: userDataRoot,
+      USERPROFILE: userDataRoot,
+      XDG_CACHE_HOME: join(userDataRoot, "cache"),
+      XDG_CONFIG_HOME: join(userDataRoot, "config"),
+    },
+    timeout: 30_000,
+    windowsHide: true,
+  });
 }
 
 function requireLaunchHandshake(result, label) {
@@ -569,7 +569,7 @@ async function triggerInstalledUpgradeLaunchFailure(root, version, userDataRoot)
     }
     const targetRoot = await requireOwnedDirectory(packageRoot, `versions/${version}`);
     await readVerifiedManifest(targetRoot);
-    const launcher = join(targetRoot, "app", "code-oss");
+    const launcher = join(targetRoot, "app", process.platform === "win32" ? "code-oss.exe" : "code-oss");
     await writeFile(launcher, Buffer.from([0x00, 0xff, 0x00, 0x7f, 0x55, 0xaa]));
     await fsyncFile(launcher);
     const result = launchHandshake(packageRoot, version, userDataRoot);
@@ -583,6 +583,9 @@ async function triggerInstalledUpgradeLaunchFailure(root, version, userDataRoot)
 export async function runSmokeLifecycle({
   artifact,
   baselineArtifact,
+  baselineManifestSha256,
+  baselinePackagePath,
+  baselinePackageSha256,
   evidence,
   manifestSha256,
   packagePath,
@@ -595,11 +598,19 @@ export async function runSmokeLifecycle({
   if ((platform === "windows") !== (process.platform === "win32")) {
     throw releaseError("RELEASE_SMOKE_INVALID", `platform ${platform} does not match this host`);
   }
-  if (typeof packagePath !== "string" || packagePath.trim().length === 0) {
-    throw releaseError("RELEASE_SMOKE_INVALID", "package input is required");
+  if (
+    typeof packagePath !== "string" || packagePath.trim().length === 0
+    || typeof baselinePackagePath !== "string" || baselinePackagePath.trim().length === 0
+  ) {
+    throw releaseError("RELEASE_SMOKE_INVALID", "package and baseline package inputs are required");
   }
-  if (!digestPattern.test(packageSha256 ?? "") || !digestPattern.test(manifestSha256 ?? "")) {
-    throw releaseError("RELEASE_SMOKE_INVALID", "package and manifest SHA-256 digests are required");
+  if (
+    !digestPattern.test(packageSha256 ?? "")
+    || !digestPattern.test(manifestSha256 ?? "")
+    || !digestPattern.test(baselinePackageSha256 ?? "")
+    || !digestPattern.test(baselineManifestSha256 ?? "")
+  ) {
+    throw releaseError("RELEASE_SMOKE_INVALID", "package, manifest, and baseline SHA-256 digests are required");
   }
   if (typeof evidence !== "string" || evidence.trim().length === 0) {
     throw releaseError("RELEASE_SMOKE_INVALID", "evidence output is required");
@@ -617,6 +628,16 @@ export async function runSmokeLifecycle({
   if (await sha256File(packageFile.path) !== packageSha256) {
     throw releaseError("RELEASE_SMOKE_INVALID", "package SHA-256 does not match the downloaded artifact");
   }
+  const baselinePackageParent = await validateDirectory(dirname(resolve(baselinePackagePath)), "baseline package parent");
+  const baselinePackageFile = await validateFileUnderRoot(
+    baselinePackageParent.path,
+    baselinePackageParent.canonical,
+    basename(resolve(baselinePackagePath)),
+    "baseline package",
+  );
+  if (await sha256File(baselinePackageFile.path) !== baselinePackageSha256) {
+    throw releaseError("RELEASE_SMOKE_INVALID", "baseline package SHA-256 does not match the downloaded artifact");
+  }
   const baseline = await readVerifiedManifest(baselineArtifact);
   const target = await readVerifiedManifest(artifact);
   if (target.manifest.version !== version || target.manifest.platform !== platform) {
@@ -625,8 +646,14 @@ export async function runSmokeLifecycle({
   if (baseline.manifest.platform !== platform || compareVersions(baseline.manifest.version, version) >= 0) {
     throw releaseError("RELEASE_SMOKE_INVALID", "baseline payload must be an older package for the same platform");
   }
+  if (baseline.manifest.architecture !== target.manifest.architecture) {
+    throw releaseError("RELEASE_SMOKE_INVALID", "baseline payload architecture does not match the target release");
+  }
   if (await sha256File(join(target.root.path, "release-manifest.json")) !== manifestSha256) {
     throw releaseError("RELEASE_SMOKE_INVALID", "manifest SHA-256 does not match the extracted package payload");
+  }
+  if (await sha256File(join(baseline.root.path, "release-manifest.json")) !== baselineManifestSha256) {
+    throw releaseError("RELEASE_SMOKE_INVALID", "baseline manifest SHA-256 does not match the extracted package payload");
   }
   const sourceCommit = target.manifest.sourceCommit;
   const containerRoot = normalizeRoot(root);
@@ -665,12 +692,17 @@ export async function runSmokeLifecycle({
     schemaVersion: 1,
     product: "unit-test-ide",
     platform,
+    architecture: target.manifest.architecture,
     sourceCommit,
+    generatedAt: target.manifest.generatedAt,
     packageFilename: basename(packageFile.path),
     version,
     packageSha256,
     manifestSha256,
     rollbackVersion: baseline.manifest.version,
+    rollbackPackageFilename: basename(baselinePackageFile.path),
+    rollbackPackageSha256: baselinePackageSha256,
+    rollbackManifestSha256: baselineManifestSha256,
     outcomes: {
       install: "pass",
       launchHandshake: "pass",
@@ -696,6 +728,9 @@ function parseSmokeCli(argv) {
   const allowed = new Set([
     "--artifact",
     "--baseline-artifact",
+    "--baseline-manifest-sha256",
+    "--baseline-package",
+    "--baseline-package-sha256",
     "--evidence",
     "--manifest-sha256",
     "--package",
@@ -715,6 +750,9 @@ function parseSmokeCli(argv) {
   for (const required of [
     "--artifact",
     "--baseline-artifact",
+    "--baseline-manifest-sha256",
+    "--baseline-package",
+    "--baseline-package-sha256",
     "--evidence",
     "--manifest-sha256",
     "--package",
@@ -728,6 +766,9 @@ function parseSmokeCli(argv) {
   return {
     artifact: values["--artifact"],
     baselineArtifact: values["--baseline-artifact"],
+    baselineManifestSha256: values["--baseline-manifest-sha256"],
+    baselinePackagePath: values["--baseline-package"],
+    baselinePackageSha256: values["--baseline-package-sha256"],
     evidence: values["--evidence"],
     manifestSha256: values["--manifest-sha256"],
     packagePath: values["--package"],

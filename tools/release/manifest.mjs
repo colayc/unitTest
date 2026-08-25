@@ -4,13 +4,11 @@ import { lstat, mkdir, readFile, realpath, stat, writeFile } from "node:fs/promi
 import { dirname, isAbsolute, join, posix, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import Ajv2020 from "ajv/dist/2020.js";
-import addFormats from "ajv-formats";
+import { isCanonicalSemver, validateReleaseManifestRecord } from "./release-manifest-validation.mjs";
+import { resolveSourceDateEpoch } from "./release-reproducibility.mjs";
 
 const toolDirectory = dirname(fileURLToPath(import.meta.url));
 const defaultConfigPath = join(toolDirectory, "release-config.json");
-const schemaPath = join(toolDirectory, "manifest.schema.json");
-const semverLike = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u;
 const commitSha = /^[0-9a-f]{40}$/u;
 const digestPattern = /^[0-9a-f]{64}$/u;
 const supportedInputKeys = [
@@ -27,7 +25,6 @@ const licenseKeys = ["path", "sha256", "size"];
 const releaseConfigKeys = ["inputPath", "outputPath", "product", "schemaVersion"];
 
 const cachedConfigs = new Map();
-let cachedValidateManifest;
 
 function requirePlainObject(value, name) {
   if (
@@ -117,15 +114,6 @@ async function readReleaseConfig(configPath = defaultConfigPath) {
   const config = validateReleaseConfig(await loadJson(resolvedConfigPath), resolvedConfigPath);
   cachedConfigs.set(resolvedConfigPath, config);
   return config;
-}
-
-async function manifestValidator() {
-  if (cachedValidateManifest) return cachedValidateManifest;
-  const ajv = new Ajv2020({ allErrors: true, strict: true });
-  addFormats(ajv);
-  const schema = await loadJson(schemaPath);
-  cachedValidateManifest = ajv.compile(schema);
-  return cachedValidateManifest;
 }
 
 async function resolvedCheckedPath(rootPath, canonicalRoot, relativePath, label) {
@@ -259,8 +247,9 @@ async function validatedArtifact(stagingRoot, canonicalRoot, artifact) {
 export async function buildReleaseManifest(input, options = {}) {
   requirePlainObject(input, "release manifest input");
   requireExactKeys(input, supportedInputKeys, "release manifest input");
-  if (!semverLike.test(input.version)) {
-    throw new Error("release version must be semver-like");
+  const sourceEpoch = resolveSourceDateEpoch(options.sourceDateEpoch);
+  if (!isCanonicalSemver(input.version)) {
+    throw new Error("release version must be canonical semver");
   }
   if (typeof input.platform !== "string" || input.platform.length === 0) {
     throw new Error("platform is required");
@@ -317,12 +306,9 @@ export async function buildReleaseManifest(input, options = {}) {
     sourceCommit: input.sourceCommit,
     artifacts,
     licenses,
-    generatedAt: new Date().toISOString(),
+    generatedAt: sourceEpoch.iso,
   };
-  const validate = await manifestValidator();
-  if (!validate(manifest)) {
-    throw new Error(`invalid release manifest: ${validate.errors?.map(({ instancePath, message }) => `${instancePath || "/"} ${message}`).join("; ")}`);
-  }
+  validateReleaseManifestRecord(manifest);
   return manifest;
 }
 

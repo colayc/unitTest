@@ -5,6 +5,8 @@ import { basename, dirname, extname, isAbsolute, join, posix, relative, resolve 
 import { fileURLToPath } from "node:url";
 
 import { verifyAppImage } from "./verify-appimage.mjs";
+import { validateReleaseManifestRecord } from "../release-manifest-validation.mjs";
+import { normalizePathTimestamp, normalizeTreeTimestamps, resolveSourceDateEpoch } from "../release-reproducibility.mjs";
 
 const toolDirectory = dirname(fileURLToPath(import.meta.url));
 const defaultAppRunTemplatePath = join(toolDirectory, "AppRun");
@@ -18,6 +20,7 @@ const supportedKeys = [
   "desktopTemplatePath",
   "expectedDigest",
   "output",
+  "sourceDateEpoch",
   "stagingRoot",
   "verificationExtractor",
   "version",
@@ -162,17 +165,16 @@ function normalizedOutputPath(output) {
   return resolve(output);
 }
 
-async function loadReleaseManifest(stagingRoot, version, architecture) {
+async function loadReleaseManifest(stagingRoot, version, architecture, sourceEpoch) {
   const manifestFile = await validateRealFile(join(stagingRoot.path, "release-manifest.json"), "release manifest");
   const manifest = JSON.parse(await readFile(manifestFile.path, "utf8"));
-  if (manifest?.schemaVersion !== 1 || manifest?.product !== "unit-test-ide" || manifest?.platform !== "linux") {
-    throw releaseFailure("RELEASE_PACKAGING_FAILED", "release manifest identity is invalid for Linux packaging");
+  try {
+    validateReleaseManifestRecord(manifest, { platform: "linux", architecture, version });
+  } catch (error) {
+    throw releaseFailure("RELEASE_PACKAGING_FAILED", error.message);
   }
-  if (manifest.version !== version) {
-    throw releaseFailure("RELEASE_PACKAGING_FAILED", "release manifest version does not match the requested package version");
-  }
-  if (manifest.architecture !== architecture) {
-    throw releaseFailure("RELEASE_PACKAGING_FAILED", "release manifest architecture does not match the requested package architecture");
+  if (manifest.generatedAt !== sourceEpoch.iso) {
+    throw releaseFailure("RELEASE_PACKAGING_FAILED", "release manifest generatedAt does not match SOURCE_DATE_EPOCH");
   }
   return {
     file: manifestFile,
@@ -225,6 +227,7 @@ export async function packageAppImage(input) {
     throw releaseFailure("RELEASE_PACKAGING_FAILED", "verificationExtractor must be a function when provided");
   }
 
+  const sourceEpoch = resolveSourceDateEpoch(input.sourceDateEpoch);
   const expectedDigest = expectedDigestFromInput(input);
   const outputPath = normalizedOutputPath(input.output);
   const stagingRoot = await validateRealDirectory(input.stagingRoot, "staging root");
@@ -245,7 +248,7 @@ export async function packageAppImage(input) {
     throw releaseFailure("RELEASE_TOOL_DIGEST_MISMATCH", "appimagetool digest does not match the pinned release configuration");
   }
 
-  const { file: releaseManifestFile } = await loadReleaseManifest(stagingRoot, input.version, input.architecture);
+  const { file: releaseManifestFile } = await loadReleaseManifest(stagingRoot, input.version, input.architecture, sourceEpoch);
 
   const outputParent = dirname(outputPath);
   await mkdir(outputParent, { recursive: true });
@@ -256,6 +259,7 @@ export async function packageAppImage(input) {
     await copyRegularFile(appRunTemplate.path, join(appDir, "AppRun"));
     await chmod(join(appDir, "AppRun"), 0o755);
     await materializeDesktopEntry(desktopTemplate.path, join(appDir, "unit-test-ide.desktop"), input.version);
+    await normalizeTreeTimestamps(appDir, sourceEpoch);
 
     const result = runExternalTool(appimagetool.path, [appDir, outputPath], {
       cwd: outputParent,
@@ -263,6 +267,7 @@ export async function packageAppImage(input) {
       env: {
         ...process.env,
         ARCH: "x86_64",
+        SOURCE_DATE_EPOCH: String(sourceEpoch.seconds),
         VERSION: input.version,
       },
       windowsHide: true,
@@ -274,6 +279,7 @@ export async function packageAppImage(input) {
       );
     }
 
+    await normalizePathTimestamp(outputPath, sourceEpoch);
     const packageDigest = await sha256File(outputPath);
     const releaseManifestDigest = await sha256File(releaseManifestFile.path);
     const manifestPath = `${outputPath}.sha256.json`;
@@ -293,6 +299,7 @@ export async function packageAppImage(input) {
       appimagetoolSha256: expectedDigest,
     };
     await writeFile(manifestPath, `${JSON.stringify(sidecarManifest, null, 2)}\n`);
+    await normalizePathTimestamp(manifestPath, sourceEpoch);
 
     await verifyAppImage({
       image: outputPath,

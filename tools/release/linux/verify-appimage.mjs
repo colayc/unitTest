@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { validateReleaseManifestRecord } from "../release-manifest-validation.mjs";
+
 const toolDirectory = dirname(fileURLToPath(import.meta.url));
 const defaultAppRunPath = join(toolDirectory, "AppRun");
 const defaultDesktopTemplatePath = join(toolDirectory, "unit-test-ide.desktop");
@@ -284,20 +286,15 @@ function assertArtifactFile(actual, artifact) {
 }
 
 function validateEmbeddedReleaseManifest(releaseManifest, sidecarManifest) {
-  requirePlainObject(releaseManifest, "embedded release manifest");
-  if (
-    releaseManifest.schemaVersion !== 1 ||
-    releaseManifest.product !== "unit-test-ide" ||
-    releaseManifest.version !== sidecarManifest.version ||
-    releaseManifest.platform !== "linux" ||
-    releaseManifest.architecture !== sidecarManifest.architecture
-  ) {
-    throw releaseFailure("RELEASE_VERIFICATION_FAILED", "embedded release manifest identity is invalid");
+  try {
+    return validateReleaseManifestRecord(releaseManifest, {
+      platform: "linux",
+      architecture: sidecarManifest.architecture,
+      version: sidecarManifest.version,
+    });
+  } catch (error) {
+    throw releaseFailure("RELEASE_VERIFICATION_FAILED", `embedded release manifest schema/semantics are invalid: ${error.message}`);
   }
-  if (!Array.isArray(releaseManifest.artifacts) || !Array.isArray(releaseManifest.licenses)) {
-    throw releaseFailure("RELEASE_VERIFICATION_FAILED", "embedded release manifest is missing artifacts or licenses");
-  }
-  return releaseManifest;
 }
 
 function expectedPayloadPaths(releaseManifest) {

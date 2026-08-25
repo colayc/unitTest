@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 
 import { stageRelease } from "./stage.mjs";
+
+const sourceDateEpoch = "1787616000";
+const generatedAt = "2026-08-25T00:00:00.000Z";
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -56,6 +59,21 @@ async function createReleaseFixture(root) {
   };
 }
 
+async function packageInputSnapshot(root, current = "") {
+  const entries = await readdir(current ? join(root, ...current.split("/")) : root, { withFileTypes: true });
+  entries.sort((left, right) => left.name.localeCompare(right.name, "en"));
+  const snapshot = [];
+  for (const entry of entries) {
+    const relativePath = current ? `${current}/${entry.name}` : entry.name;
+    const absolutePath = join(root, ...relativePath.split("/"));
+    const info = await stat(absolutePath);
+    assert.equal(info.mtime.toISOString(), generatedAt, `timestamp for ${relativePath}`);
+    if (entry.isDirectory()) snapshot.push(...await packageInputSnapshot(root, relativePath));
+    else snapshot.push([relativePath, (await readFile(absolutePath)).toString("base64")]);
+  }
+  return snapshot;
+}
+
 test("stageRelease copies the deterministic staging layout and writes a release manifest", async (t) => {
   await withTemporaryRoot(t, async (root) => {
     const fixture = await createReleaseFixture(root);
@@ -64,15 +82,16 @@ test("stageRelease copies the deterministic staging layout and writes a release 
       architecture: "x64",
       version: "1.2.3",
       sourceCommit: "a".repeat(40),
+      sourceDateEpoch,
       ...fixture,
     });
 
     assert.equal(result.stagingRoot, join(fixture.outRoot, "staging", "1.2.3", "windows-x64"));
     for (const relativePath of [
-      "app/code-oss",
+      "app/code-oss.exe",
       "app/extensions/unit-test-ide/package.json",
       "app/extensions/unit-test-ide/dist/src/extension.js",
-      "service/unit-test-service",
+      "service/unit-test-service.exe",
       "bundles/cmake/bin/cmake.exe",
       "bundles/cmake/manifest.json",
       "bundles/coverage/app/gcovr-runner.pyz",
@@ -86,11 +105,11 @@ test("stageRelease copies the deterministic staging layout and writes a release 
     }
 
     assert.equal(
-      sha256(await readFile(join(result.stagingRoot, "app/code-oss"))),
+      sha256(await readFile(join(result.stagingRoot, "app/code-oss.exe"))),
       sha256("code oss runtime\n"),
     );
     assert.equal(
-      sha256(await readFile(join(result.stagingRoot, "service/unit-test-service"))),
+      sha256(await readFile(join(result.stagingRoot, "service/unit-test-service.exe"))),
       sha256("service binary\n"),
     );
 
@@ -99,6 +118,7 @@ test("stageRelease copies the deterministic staging layout and writes a release 
     assert.equal(manifest.platform, "windows");
     assert.equal(manifest.architecture, "x64");
     assert.equal(manifest.sourceCommit, "a".repeat(40));
+    assert.equal(manifest.generatedAt, generatedAt);
     assert.deepEqual(
       manifest.licenses.map(({ path }) => path),
       [
@@ -125,6 +145,7 @@ test("stageRelease fails closed on a missing required input before it writes a p
         architecture: "x64",
         version: "1.2.3",
         sourceCommit: "a".repeat(40),
+        sourceDateEpoch,
         ...fixture,
       }),
       (error) => {
@@ -199,6 +220,7 @@ test("stage CLI accepts a valid invocation and stages the release tree", async (
     ], {
       cwd: resolve("."),
       encoding: "utf8",
+      env: { ...process.env, SOURCE_DATE_EPOCH: sourceDateEpoch },
       windowsHide: true,
     });
 
@@ -209,5 +231,43 @@ test("stage CLI accepts a valid invocation and stages the release tree", async (
     assert.equal(manifest.version, "1.2.3");
     assert.equal(manifest.platform, "windows");
     assert.equal(manifest.architecture, "x64");
+  });
+});
+
+test("stageRelease fails closed when SOURCE_DATE_EPOCH is absent", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await createReleaseFixture(root);
+    await assert.rejects(
+      () => stageRelease({
+        platform: "windows",
+        architecture: "x64",
+        version: "1.2.3",
+        sourceCommit: "a".repeat(40),
+        ...fixture,
+      }),
+      /SOURCE_DATE_EPOCH/u,
+    );
+  });
+});
+
+test("identical staging inputs yield byte-identical normalized package inputs", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await createReleaseFixture(root);
+    const common = {
+      platform: "windows",
+      architecture: "x64",
+      version: "1.2.3",
+      sourceCommit: "a".repeat(40),
+      sourceDateEpoch,
+      ...fixture,
+    };
+    const first = await stageRelease({ ...common, outRoot: join(root, "first") });
+    const second = await stageRelease({ ...common, outRoot: join(root, "second") });
+
+    assert.deepEqual(await readFile(first.manifestPath), await readFile(second.manifestPath));
+    assert.deepEqual(
+      await packageInputSnapshot(first.stagingRoot),
+      await packageInputSnapshot(second.stagingRoot),
+    );
   });
 });

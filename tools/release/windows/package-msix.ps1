@@ -20,6 +20,7 @@ $packageName = 'OpenAI.UnitTestIDE'
 $toolRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $templatePath = Join-Path $toolRoot 'AppxManifest.xml.template'
 $verifyScript = Join-Path $toolRoot 'verify-msix.ps1'
+$manifestValidator = Join-Path (Split-Path -Parent $toolRoot) 'validate-release-manifest.mjs'
 $storeLogoBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7+4xQAAAAASUVORK5CYII='
 
 function Fail-Release {
@@ -147,7 +148,34 @@ function Write-PlaceholderResources {
 
   $assetDirectory = Join-Path $Root 'Assets'
   New-Item -ItemType Directory -Force -Path $assetDirectory | Out-Null
-  [IO.File]::WriteAllBytes((Join-Path $assetDirectory 'StoreLogo.png'), [Convert]::FromBase64String($storeLogoBase64))
+  $bytes = [Convert]::FromBase64String($storeLogoBase64)
+  foreach ($name in @('StoreLogo.png', 'Square150x150Logo.png', 'Square44x44Logo.png')) {
+    [IO.File]::WriteAllBytes((Join-Path $assetDirectory $name), $bytes)
+  }
+}
+
+function Get-SourceDateEpoch {
+  $raw = [string]$env:SOURCE_DATE_EPOCH
+  [int64]$seconds = 0
+  if ([string]::IsNullOrWhiteSpace($raw) -or $raw -cnotmatch '^(?:0|[1-9]\d*)$' -or -not [int64]::TryParse($raw, [ref]$seconds)) {
+    Fail-Release -Code 'RELEASE_CONFIG_MISSING' -Message 'SOURCE_DATE_EPOCH must be an explicit non-negative integer number of UTC seconds'
+  }
+  try {
+    $date = [DateTimeOffset]::FromUnixTimeSeconds($seconds)
+  } catch {
+    Fail-Release -Code 'RELEASE_CONFIG_MISSING' -Message 'SOURCE_DATE_EPOCH is outside the supported range'
+  }
+  return [pscustomobject]@{
+    Iso = $date.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", [Globalization.CultureInfo]::InvariantCulture)
+    UtcDateTime = $date.UtcDateTime
+  }
+}
+
+function Set-NormalizedTimestamps {
+  param([string]$Root, [DateTime]$UtcDateTime)
+  $entries = @(Get-ChildItem -LiteralPath $Root -Recurse -Force | Sort-Object { $_.FullName.Length } -Descending)
+  foreach ($entry in $entries) { $entry.LastWriteTimeUtc = $UtcDateTime }
+  (Get-Item -LiteralPath $Root -Force).LastWriteTimeUtc = $UtcDateTime
 }
 
 function Invoke-ExternalTool {
@@ -205,6 +233,7 @@ function Require-SigningInputs {
 }
 
 $stagingRootPath = Resolve-RealDirectory -Path $StagingRoot -Label 'staging root'
+$sourceEpoch = Get-SourceDateEpoch
 Require-NoReparsePoints -Root $stagingRootPath
 $templateFile = Resolve-Path -LiteralPath $templatePath
 $verifyFile = Resolve-Path -LiteralPath $verifyScript
@@ -226,12 +255,23 @@ $manifestPath = Join-Path $stagingRootPath 'release-manifest.json'
 if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
   Fail-Release -Code 'RELEASE_INPUT_MISSING' -Message 'staging release-manifest.json is required'
 }
+$nodePath = (Get-Command -Name 'node.exe' -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+if ([string]::IsNullOrWhiteSpace($nodePath)) {
+  Fail-Release -Code 'RELEASE_TOOL_MISSING' -Message 'node.exe is unavailable for release manifest validation'
+}
+$manifestValidation = Invoke-ExternalTool -FilePath $nodePath -Arguments @($manifestValidator, '--manifest', $manifestPath, '--platform', 'windows', '--version', $Version)
+if ($manifestValidation.ExitCode -ne 0) {
+  Fail-Release -Code 'RELEASE_INPUT_MISSING' -Message "release manifest schema/semantics are invalid: $($manifestValidation.Combined.Trim())"
+}
 $releaseManifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 if ($releaseManifest.version -ne $Version) {
   Fail-Release -Code 'RELEASE_INPUT_MISSING' -Message 'staging release-manifest.json version does not match the requested version'
 }
 if ($releaseManifest.platform -ne 'windows') {
   Fail-Release -Code 'RELEASE_INPUT_MISSING' -Message 'staging release-manifest.json must target the windows platform'
+}
+if ([string]$releaseManifest.generatedAt -cne $sourceEpoch.Iso) {
+  Fail-Release -Code 'RELEASE_INPUT_MISSING' -Message 'release manifest generatedAt does not match SOURCE_DATE_EPOCH'
 }
 
 $outputPath = [IO.Path]::GetFullPath($Output)
@@ -247,6 +287,7 @@ try {
   Copy-StagingTree -Source $stagingRootPath -Destination $temporaryRoot
   Write-PlaceholderResources -Root $temporaryRoot
   New-AppxManifest -TemplatePath $templateFile.ProviderPath -DestinationPath (Join-Path $temporaryRoot 'AppxManifest.xml') -PublisherSubject $Publisher -PackageVersion $packageVersion -Architecture ([string]$releaseManifest.architecture)
+  Set-NormalizedTimestamps -Root $temporaryRoot -UtcDateTime $sourceEpoch.UtcDateTime
 
   if (Test-Path -LiteralPath $outputPath) {
     Remove-Item -LiteralPath $outputPath -Force
@@ -275,6 +316,7 @@ try {
   } else {
     & $verifyFile.ProviderPath -Package $outputPath -Manifest $manifestPath | Out-Null
   }
+  (Get-Item -LiteralPath $outputPath -Force).LastWriteTimeUtc = $sourceEpoch.UtcDateTime
 } finally {
   if (Test-Path -LiteralPath $temporaryRoot) {
     Remove-Item -LiteralPath $temporaryRoot -Recurse -Force

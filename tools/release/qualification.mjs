@@ -4,10 +4,15 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import {
+  compareCanonicalVersions,
+  isCanonicalSemver,
+  validateReleaseManifestRecord,
+} from "./release-manifest-validation.mjs";
+
 const platforms = Object.freeze(["linux", "windows"]);
 const digestPattern = /^[0-9a-f]{64}$/u;
 const commitPattern = /^[0-9a-f]{40}$/u;
-const semverPattern = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u;
 const artifactIdPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
 const artifactKindPattern = /^[a-z][a-z0-9-]*$/u;
 const expectedOutcomes = Object.freeze({
@@ -26,24 +31,28 @@ const evidenceKeys = Object.freeze([
   "schemaVersion",
   "product",
   "platform",
+  "architecture",
   "sourceCommit",
+  "generatedAt",
   "packageFilename",
   "version",
   "packageSha256",
   "manifestSha256",
   "rollbackVersion",
+  "rollbackPackageFilename",
+  "rollbackPackageSha256",
+  "rollbackManifestSha256",
   "outcomes",
 ]);
-const manifestKeys = Object.freeze([
-  "schemaVersion",
-  "product",
-  "version",
-  "platform",
-  "architecture",
-  "sourceCommit",
-  "artifacts",
-  "licenses",
-  "generatedAt",
+const manifestRecordKeys = Object.freeze([
+  "releaseManifest",
+  "packageFilename",
+  "packageSha256",
+  "manifestSha256",
+  "baselineReleaseManifest",
+  "baselinePackageFilename",
+  "baselinePackageSha256",
+  "baselineManifestSha256",
 ]);
 const auditKeys = Object.freeze([
   "schemaVersion",
@@ -126,6 +135,8 @@ function outputDigests(record) {
   return {
     packageSha256: digestPattern.test(record?.packageSha256 ?? "") ? record.packageSha256 : null,
     manifestSha256: digestPattern.test(record?.manifestSha256 ?? "") ? record.manifestSha256 : null,
+    rollbackPackageSha256: digestPattern.test(record?.baselinePackageSha256 ?? "") ? record.baselinePackageSha256 : null,
+    rollbackManifestSha256: digestPattern.test(record?.baselineManifestSha256 ?? "") ? record.baselineManifestSha256 : null,
   };
 }
 
@@ -133,10 +144,21 @@ function addReason(reasons, message) {
   if (!reasons.includes(message)) reasons.push(message);
 }
 
+function canonicalUtcIso(value) {
+  return typeof value === "string"
+    && Number.isFinite(Date.parse(value))
+    && new Date(value).toISOString() === value;
+}
+
+function packageFilename(value) {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._+-]*$/u.test(value);
+}
+
 function validatePlatform(platform, input, reasons) {
   const evidence = input[`${platform}Evidence`];
   const manifestRecord = input.manifests?.[platform];
   const manifest = manifestRecord?.releaseManifest;
+  const baselineManifest = manifestRecord?.baselineReleaseManifest;
   const audit = input.licenseAudit?.[platform];
 
   if (evidence === undefined || evidence === null) {
@@ -146,12 +168,25 @@ function validatePlatform(platform, input, reasons) {
   }
 
   if (evidence !== undefined && evidence !== null) {
-    if (evidence.schemaVersion !== 1 || evidence.product !== "unit-test-ide" || evidence.platform !== platform) {
-      addReason(reasons, `${platform} evidence identity is invalid`);
+    const fields = {
+      schemaVersion: evidence.schemaVersion === 1,
+      product: evidence.product === "unit-test-ide",
+      platform: evidence.platform === platform,
+      architecture: typeof evidence.architecture === "string" && /^[A-Za-z0-9_]+(?:[-_][A-Za-z0-9_]+)*$/u.test(evidence.architecture),
+      sourceCommit: commitPattern.test(evidence.sourceCommit ?? ""),
+      generatedAt: canonicalUtcIso(evidence.generatedAt),
+      packageFilename: packageFilename(evidence.packageFilename),
+      version: isCanonicalSemver(evidence.version),
+      packageSha256: digestPattern.test(evidence.packageSha256 ?? ""),
+      manifestSha256: digestPattern.test(evidence.manifestSha256 ?? ""),
+      rollbackVersion: isCanonicalSemver(evidence.rollbackVersion),
+      rollbackPackageFilename: packageFilename(evidence.rollbackPackageFilename),
+      rollbackPackageSha256: digestPattern.test(evidence.rollbackPackageSha256 ?? ""),
+      rollbackManifestSha256: digestPattern.test(evidence.rollbackManifestSha256 ?? ""),
+    };
+    for (const [field, valid] of Object.entries(fields)) {
+      if (!valid) addReason(reasons, `${platform} evidence ${field} is invalid or missing`);
     }
-    if (!commitPattern.test(evidence.sourceCommit ?? "")) addReason(reasons, `${platform} evidence source commit is invalid`);
-    if (!digestPattern.test(evidence.packageSha256 ?? "")) addReason(reasons, `${platform} evidence package digest is invalid`);
-    if (!digestPattern.test(evidence.manifestSha256 ?? "")) addReason(reasons, `${platform} evidence manifest digest is invalid`);
     for (const [name, expected] of Object.entries(expectedOutcomes)) {
       if (evidence.outcomes?.[name] !== expected) {
         addReason(reasons, `${platform} ${name} outcome must be ${expected}`);
@@ -161,42 +196,54 @@ function validatePlatform(platform, input, reasons) {
 
   if (manifestRecord === undefined || manifestRecord === null) {
     addReason(reasons, `${platform} manifest evidence is missing`);
-  } else if (!hasExactKeys(manifestRecord, ["releaseManifest", "packageSha256", "manifestSha256"])) {
+  } else if (!hasExactKeys(manifestRecord, manifestRecordKeys)) {
     addReason(reasons, `${platform} manifest evidence record is not closed`);
   }
-  if (manifest === undefined || manifest === null) {
-    addReason(reasons, `${platform} release manifest is missing`);
-  } else {
-    if (!hasExactKeys(manifest, manifestKeys)) addReason(reasons, `${platform} release manifest is not closed`);
-    if (
-      manifest.schemaVersion !== 1
-      || manifest.product !== "unit-test-ide"
-      || manifest.platform !== platform
-      || !commitPattern.test(manifest.sourceCommit ?? "")
-      || !semverPattern.test(manifest.version ?? "")
-      || !closedLicenseList(manifest.licenses)
-    ) {
-      addReason(reasons, `${platform} release manifest identity is invalid`);
-    }
-    if (!closedArtifactList(manifest.artifacts)) {
-      addReason(reasons, `${platform} release manifest artifacts are invalid`);
-    }
-    if (!Array.isArray(manifest.licenses) || manifest.licenses.length === 0) {
-      addReason(reasons, `${platform} release manifest must contain at least one license notice`);
-    }
+  try {
+    validateReleaseManifestRecord(manifest, { platform });
+  } catch {
+    addReason(reasons, `${platform} release manifest schema/semantics are invalid`);
   }
-  if (!digestPattern.test(manifestRecord?.packageSha256 ?? "")) {
-    addReason(reasons, `${platform} package digest evidence is invalid`);
-  } else if (evidence && manifestRecord.packageSha256 !== evidence.packageSha256) {
+  if (!closedArtifactList(manifest?.artifacts)) addReason(reasons, `${platform} release manifest artifacts are invalid`);
+  if (!Array.isArray(manifest?.licenses) || manifest.licenses.length === 0) {
+    addReason(reasons, `${platform} release manifest must contain at least one license notice`);
+  }
+  try {
+    validateReleaseManifestRecord(baselineManifest, { platform });
+  } catch {
+    addReason(reasons, `${platform} baseline release manifest schema/semantics are invalid`);
+  }
+
+  if (!packageFilename(manifestRecord?.packageFilename) || evidence?.packageFilename !== manifestRecord?.packageFilename) {
+    addReason(reasons, `${platform} package filename does not match install evidence`);
+  }
+  if (!digestPattern.test(manifestRecord?.packageSha256 ?? "") || evidence?.packageSha256 !== manifestRecord?.packageSha256) {
     addReason(reasons, `${platform} packageSha256 does not match install evidence`);
   }
-  if (!digestPattern.test(manifestRecord?.manifestSha256 ?? "")) {
-    addReason(reasons, `${platform} manifest digest evidence is invalid`);
-  } else if (evidence && manifestRecord.manifestSha256 !== evidence.manifestSha256) {
+  if (!digestPattern.test(manifestRecord?.manifestSha256 ?? "") || evidence?.manifestSha256 !== manifestRecord?.manifestSha256) {
     addReason(reasons, `${platform} manifestSha256 does not match install evidence`);
   }
-  if (manifest && evidence && manifest.version !== evidence.version) {
-    addReason(reasons, `${platform} evidence version does not match the release manifest`);
+
+  const baselineProblem = (() => {
+    if (!baselineManifest) return "missing baseline";
+    if (!manifest || !isCanonicalSemver(baselineManifest.version) || !isCanonicalSemver(manifest.version)) return "missing baseline";
+    if (compareCanonicalVersions(baselineManifest.version, manifest.version) >= 0) return "not older";
+    if (!packageFilename(manifestRecord?.baselinePackageFilename)) return "filename drift";
+    if (!digestPattern.test(manifestRecord?.baselinePackageSha256 ?? "")) return "package digest drift";
+    if (!digestPattern.test(manifestRecord?.baselineManifestSha256 ?? "")) return "manifest digest drift";
+    if (evidence?.rollbackPackageFilename !== manifestRecord?.baselinePackageFilename) return "filename drift";
+    if (evidence?.rollbackPackageSha256 !== manifestRecord?.baselinePackageSha256) return "package digest drift";
+    if (evidence?.rollbackManifestSha256 !== manifestRecord?.baselineManifestSha256) return "manifest digest drift";
+    if (evidence?.rollbackVersion !== baselineManifest.version) return "version drift";
+    if (baselineManifest.architecture !== manifest.architecture) return "identity drift";
+    return null;
+  })();
+  if (baselineProblem) addReason(reasons, `${platform} baseline binding is invalid: ${baselineProblem}`);
+
+  if (manifest && evidence) {
+    if (manifest.version !== evidence.version) addReason(reasons, `${platform} evidence version does not match the release manifest`);
+    if (manifest.architecture !== evidence.architecture) addReason(reasons, `${platform} evidence architecture does not match the release manifest`);
+    if (manifest.generatedAt !== evidence.generatedAt) addReason(reasons, `${platform} evidence generatedAt does not match the release manifest`);
   }
 
   if (audit === undefined || audit === null) {
@@ -224,7 +271,7 @@ function validateReleaseVersion(input, reasons) {
     ?? input.linuxEvidence?.version
     ?? input.windowsEvidence?.version
     ?? null;
-  if (!semverPattern.test(canonical ?? "")) {
+  if (!isCanonicalSemver(canonical)) {
     addReason(reasons, "canonical release version is missing or invalid");
     return null;
   }
@@ -355,6 +402,10 @@ function parseCli(argv) {
     "--windows-manifest",
     "--linux-package",
     "--windows-package",
+    "--linux-baseline-manifest",
+    "--windows-baseline-manifest",
+    "--linux-baseline-package",
+    "--windows-baseline-package",
     "--linux-license-audit",
     "--windows-license-audit",
     "--windows-signature-required",
@@ -389,10 +440,17 @@ async function main(argv) {
   for (const platform of platforms) {
     const manifestPath = resolve(values[`--${platform}-manifest`]);
     const packagePath = resolve(values[`--${platform}-package`]);
+    const baselineManifestPath = resolve(values[`--${platform}-baseline-manifest`]);
+    const baselinePackagePath = resolve(values[`--${platform}-baseline-package`]);
     manifests[platform] = {
       releaseManifest: await readJson(manifestPath, `${platform} release manifest`),
+      packageFilename: packagePath.split(/[\\/]/u).at(-1),
       packageSha256: await sha256File(packagePath),
       manifestSha256: await sha256File(manifestPath),
+      baselineReleaseManifest: await readJson(baselineManifestPath, `${platform} baseline release manifest`),
+      baselinePackageFilename: baselinePackagePath.split(/[\\/]/u).at(-1),
+      baselinePackageSha256: await sha256File(baselinePackagePath),
+      baselineManifestSha256: await sha256File(baselineManifestPath),
     };
     licenseAudit[platform] = await readJson(
       resolve(values[`--${platform}-license-audit`]),

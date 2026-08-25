@@ -9,6 +9,7 @@ import test from "node:test";
 const packageScript = resolve("tools/release/windows/package-msix.ps1");
 const verifyScript = resolve("tools/release/windows/verify-msix.ps1");
 const workflowPath = resolve(".github/workflows/foundation.yml");
+const sourceDateEpoch = "1787616000";
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -41,8 +42,8 @@ async function createStagingFixture(root, version = "1.2.3") {
   const runtime = "runtime\n";
   const service = "service\n";
   const notice = "notice\n";
-  await writeFixtureFile(stagingRoot, "app/code-oss", runtime);
-  await writeFixtureFile(stagingRoot, "service/unit-test-service", service);
+  await writeFixtureFile(stagingRoot, "app/code-oss.exe", runtime);
+  await writeFixtureFile(stagingRoot, "service/unit-test-service.exe", service);
   await writeFixtureFile(stagingRoot, "licenses/NOTICE.txt", notice);
   const manifest = {
     schemaVersion: 1,
@@ -55,7 +56,7 @@ async function createStagingFixture(root, version = "1.2.3") {
       {
         id: "runtime",
         kind: "runtime",
-        relativePath: "app/code-oss",
+        relativePath: "app/code-oss.exe",
         size: Buffer.byteLength(runtime),
         sha256: sha256(runtime),
         executable: true,
@@ -63,7 +64,7 @@ async function createStagingFixture(root, version = "1.2.3") {
       {
         id: "service",
         kind: "service",
-        relativePath: "service/unit-test-service",
+        relativePath: "service/unit-test-service.exe",
         size: Buffer.byteLength(service),
         sha256: sha256(service),
         executable: true,
@@ -227,10 +228,19 @@ function runPowerShellFile(filePath, args, env) {
     encoding: "utf8",
     env: {
       ...process.env,
+      SOURCE_DATE_EPOCH: sourceDateEpoch,
       ...env,
     },
     windowsHide: true,
   });
+}
+
+async function rewriteReleaseManifest(fixture, mutate) {
+  const manifest = JSON.parse(await readFile(fixture.manifestPath, "utf8"));
+  mutate(manifest);
+  const bytes = `${JSON.stringify(manifest, null, 2)}\n`;
+  await writeFile(fixture.manifestPath, bytes);
+  await setZipEntry(fixture.outputPath, "release-manifest.json", bytes);
 }
 
 function runPackage(args, env) {
@@ -467,6 +477,57 @@ windowsOnly("package-msix emits the required logo and dependency manifest elemen
   });
 });
 
+windowsOnly("package-msix declares the staged Code-OSS executable as a runnable application entry point", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await packageWithFakeTools(root);
+    const manifestXml = await readZipEntry(fixture.outputPath, "AppxManifest.xml");
+
+    assert.match(manifestXml, /<Applications>[\s\S]*<Application\b/u);
+    assert.match(manifestXml, /Executable="app\\code-oss\.exe"/u);
+    assert.match(manifestXml, /EntryPoint="Windows\.FullTrustApplication"/u);
+  });
+});
+
+windowsOnly("verify-msix rejects a package whose AppxManifest has no application entry point", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await packageWithFakeTools(root);
+    const manifestXml = await readZipEntry(fixture.outputPath, "AppxManifest.xml");
+    await setZipEntry(
+      fixture.outputPath,
+      "AppxManifest.xml",
+      manifestXml.replace(/\s*<Applications>[\s\S]*?<\/Applications>/u, ""),
+    );
+    const result = runVerify([
+      "-Package", fixture.outputPath,
+      "-Manifest", fixture.manifestPath,
+    ], {});
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /RELEASE_VERIFICATION_FAILED/u);
+    assert.match(result.stderr, /application entry point|Applications/u);
+  });
+});
+
+windowsOnly("package-msix fails closed when SOURCE_DATE_EPOCH is absent", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await createStagingFixture(root);
+    const fakeMakeAppx = await createFakeMakeAppx(root);
+    const result = runPackage([
+      "-StagingRoot", fixture.stagingRoot,
+      "-Output", fixture.outputPath,
+      "-Version", fixture.version,
+      "-Publisher", "CN=Unit Test IDE",
+    ], {
+      SOURCE_DATE_EPOCH: "",
+      RELEASE_MAKEAPPX_PATH: fakeMakeAppx,
+      RELEASE_SIGNING_REQUIRED: "0",
+    });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /SOURCE_DATE_EPOCH/u);
+  });
+});
+
 windowsOnly("package-msix XML-escapes the Publisher and normalizes semver-like prerelease versions for AppxManifest", async (t) => {
   await withTemporaryRoot(t, async (root) => {
     const fixture = await packageWithFakeTools(root, "1.2.3-beta+build.5", "CN=AT&T <Test>");
@@ -559,7 +620,7 @@ windowsOnly("verify-msix rejects a forged signature entry when RequireSignature 
 windowsOnly("verify-msix rejects a duplicate slash-aliased payload entry before payload-set comparison", async (t) => {
   await withTemporaryRoot(t, async (root) => {
     const fixture = await packageWithFakeTools(root);
-    await addZipEntry(fixture.outputPath, "app\\code-oss", "aliased-runtime");
+    await addZipEntry(fixture.outputPath, "app\\code-oss.exe", "aliased-runtime");
     const result = runVerify([
       "-Package", fixture.outputPath,
       "-Manifest", fixture.manifestPath,
@@ -574,7 +635,7 @@ windowsOnly("verify-msix rejects a duplicate slash-aliased payload entry before 
 windowsOnly("verify-msix rejects a case-aliased payload entry before payload-set comparison", async (t) => {
   await withTemporaryRoot(t, async (root) => {
     const fixture = await packageWithFakeTools(root);
-    await addZipEntry(fixture.outputPath, "APP/code-oss", "aliased-runtime");
+    await addZipEntry(fixture.outputPath, "APP/code-oss.exe", "aliased-runtime");
     const result = runVerify([
       "-Package", fixture.outputPath,
       "-Manifest", fixture.manifestPath,
@@ -589,7 +650,7 @@ windowsOnly("verify-msix rejects a case-aliased payload entry before payload-set
 windowsOnly("verify-msix rejects a dot-segment payload entry before payload-set comparison", async (t) => {
   await withTemporaryRoot(t, async (root) => {
     const fixture = await packageWithFakeTools(root);
-    await addZipEntry(fixture.outputPath, "app/../app/code-oss", "aliased-runtime");
+    await addZipEntry(fixture.outputPath, "app/../app/code-oss.exe", "aliased-runtime");
     const result = runVerify([
       "-Package", fixture.outputPath,
       "-Manifest", fixture.manifestPath,
@@ -604,7 +665,7 @@ windowsOnly("verify-msix rejects a dot-segment payload entry before payload-set 
 windowsOnly("verify-msix rejects a tampered packaged payload whose hash no longer matches the staged manifest", async (t) => {
   await withTemporaryRoot(t, async (root) => {
     const fixture = await packageWithFakeTools(root);
-    await setZipEntry(fixture.outputPath, "app/code-oss", "tampered-runtime");
+    await setZipEntry(fixture.outputPath, "app/code-oss.exe", "tampered-runtime");
     const result = runVerify([
       "-Package", fixture.outputPath,
       "-Manifest", fixture.manifestPath,
@@ -628,6 +689,30 @@ windowsOnly("verify-msix rejects a tampered packaged license whose hash no longe
     assert.equal(result.status, 1);
     assert.match(result.stderr, /RELEASE_VERIFICATION_FAILED/u);
     assert.match(result.stderr, /license .*hash does not match|license .*size does not match/u);
+  });
+});
+
+windowsOnly("verify-msix rejects open and duplicate-path release manifests before payload verification", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    for (const [name, mutate] of [
+      ["open manifest", (manifest) => { manifest.unreviewed = true; }],
+      ["empty artifact list", (manifest) => { manifest.artifacts = []; }],
+      ["unsafe artifact size", (manifest) => { manifest.artifacts[0].size = Number.MAX_SAFE_INTEGER + 1; }],
+      ["duplicate artifact path", (manifest) => {
+        manifest.artifacts.push({ ...manifest.artifacts[0], id: "alternate-runtime" });
+      }],
+    ]) {
+      const fixture = await packageWithFakeTools(join(root, name.replaceAll(" ", "-")));
+      await rewriteReleaseManifest(fixture, mutate);
+      const result = runVerify([
+        "-Package", fixture.outputPath,
+        "-Manifest", fixture.manifestPath,
+      ], {});
+
+      assert.equal(result.status, 1, name);
+      assert.match(result.stderr, /RELEASE_VERIFICATION_FAILED/u, name);
+      assert.match(result.stderr, /release manifest.*(?:closed|schema|duplicate|invalid)/iu, name);
+    }
   });
 });
 

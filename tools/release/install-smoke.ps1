@@ -113,7 +113,10 @@ try {
     --manifest-sha256 $ManifestSha256 `
     --version $Version `
     --artifact $targetPayload `
-    --baseline-artifact $baselinePayload | Out-Null
+    --baseline-artifact $baselinePayload `
+    --baseline-package $resolvedBaselinePackage `
+    --baseline-package-sha256 $BaselinePackageSha256 `
+    --baseline-manifest-sha256 $BaselineManifestSha256 | Out-Null
   if ($LASTEXITCODE -ne 0) { throw "Install smoke failed with exit code $LASTEXITCODE" }
 
   $evidence = Get-Content -LiteralPath $resolvedEvidence -Raw | ConvertFrom-Json
@@ -123,6 +126,8 @@ try {
     $evidence.manifestSha256 -cne $ManifestSha256 -or
     $evidence.version -cne $Version -or
     $evidence.rollbackVersion -cne $BaselineVersion -or
+    $evidence.rollbackPackageSha256 -cne $BaselinePackageSha256 -or
+    $evidence.rollbackManifestSha256 -cne $BaselineManifestSha256 -or
     $evidence.outcomes.upgradeLaunch -cne 'failed-as-expected' -or
     $evidence.outcomes.rollbackLaunch -cne 'pass' -or
     $evidence.outcomes.packageResidueAbsent -ne 'pass'

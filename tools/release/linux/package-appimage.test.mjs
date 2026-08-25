@@ -8,6 +8,8 @@ import test from "node:test";
 import { packageAppImage } from "./package-appimage.mjs";
 import { verifyAppImage } from "./verify-appimage.mjs";
 
+const sourceDateEpoch = "1787616000";
+
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -52,22 +54,6 @@ async function createStagingFixture(root, version = "1.2.3") {
     sourceCommit: "a".repeat(40),
     artifacts: [
       {
-        id: "runtime",
-        kind: "runtime",
-        relativePath: "app/code-oss",
-        size: Buffer.byteLength(runtime),
-        sha256: sha256(runtime),
-        executable: true,
-      },
-      {
-        id: "service",
-        kind: "service",
-        relativePath: "service/unit-test-service",
-        size: Buffer.byteLength(service),
-        sha256: sha256(service),
-        executable: true,
-      },
-      {
         id: "cmake",
         kind: "bundle-cmake",
         relativePath: "bundles/cmake/bin/cmake",
@@ -82,6 +68,22 @@ async function createStagingFixture(root, version = "1.2.3") {
         size: Buffer.byteLength(coverage),
         sha256: sha256(coverage),
         executable: false,
+      },
+      {
+        id: "runtime",
+        kind: "runtime",
+        relativePath: "app/code-oss",
+        size: Buffer.byteLength(runtime),
+        sha256: sha256(runtime),
+        executable: true,
+      },
+      {
+        id: "service",
+        kind: "service",
+        relativePath: "service/unit-test-service",
+        size: Buffer.byteLength(service),
+        sha256: sha256(service),
+        executable: true,
       },
     ],
     licenses: [
@@ -205,6 +207,20 @@ async function refreshSidecarManifest(manifestPath, imagePath, mutate) {
   return manifest;
 }
 
+async function mutateEmbeddedReleaseManifest(result, mutate) {
+  let embeddedManifestBytes;
+  await updateFakeEnvelope(result.outputPath, async (envelope) => {
+    const path = "usr/lib/unit-test-ide/release-manifest.json";
+    const manifest = JSON.parse(Buffer.from(envelope.files[path].contentBase64, "base64").toString("utf8"));
+    mutate(manifest);
+    embeddedManifestBytes = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`);
+    envelope.files[path].contentBase64 = embeddedManifestBytes.toString("base64");
+  });
+  await refreshSidecarManifest(result.manifestPath, result.outputPath, async (manifest) => {
+    manifest.releaseManifestSha256 = sha256(embeddedManifestBytes);
+  });
+}
+
 async function packageWithFakeTool(root, version = "1.2.3") {
   const fixture = await createStagingFixture(root, version);
   const fakeTool = await createFakeAppImageTool(root);
@@ -214,6 +230,7 @@ async function packageWithFakeTool(root, version = "1.2.3") {
     output: fixture.outputPath,
     appimagetool: fakeTool.path,
     expectedDigest: fakeTool.sha256,
+    sourceDateEpoch,
     version: fixture.version,
     architecture: "x64",
     verificationExtractor: extractor,
@@ -235,6 +252,7 @@ test("packageAppImage fails closed when appimagetool is missing", async (t) => {
         output: fixture.outputPath,
         appimagetool: join(root, "missing-appimagetool"),
         expectedDigest: fakeTool.sha256,
+        sourceDateEpoch,
         version: fixture.version,
         architecture: "x64",
       }),
@@ -257,6 +275,7 @@ test("packageAppImage fails closed when AppRun is missing", async (t) => {
         output: fixture.outputPath,
         appimagetool: fakeTool.path,
         expectedDigest: fakeTool.sha256,
+        sourceDateEpoch,
         version: fixture.version,
         architecture: "x64",
         appRunTemplatePath: join(root, "missing-AppRun"),
@@ -266,6 +285,24 @@ test("packageAppImage fails closed when AppRun is missing", async (t) => {
         assert.match(error?.message ?? "", /AppRun/u);
         return true;
       },
+    );
+  });
+});
+
+test("packageAppImage fails closed when SOURCE_DATE_EPOCH is absent", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await createStagingFixture(root);
+    const fakeTool = await createFakeAppImageTool(root);
+    await assert.rejects(
+      () => packageAppImage({
+        stagingRoot: fixture.stagingRoot,
+        output: fixture.outputPath,
+        appimagetool: fakeTool.path,
+        expectedDigest: fakeTool.sha256,
+        version: fixture.version,
+        architecture: "x64",
+      }),
+      /SOURCE_DATE_EPOCH/u,
     );
   });
 });
@@ -382,8 +419,35 @@ test("verifyAppImage rejects embedded release-manifest identity drift", async (t
           requireDigest: true,
           extractor: result.extractor,
         }),
-        /embedded release manifest identity is invalid/u,
+        /embedded release manifest schema\/semantics are invalid/u,
         `${field} drift should fail`,
+      );
+    }
+  });
+});
+
+test("verifyAppImage rejects open and duplicate-path embedded release manifests", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    for (const [name, mutate] of [
+      ["open manifest", (manifest) => { manifest.unreviewed = true; }],
+      ["empty artifact list", (manifest) => { manifest.artifacts = []; }],
+      ["unsafe artifact size", (manifest) => { manifest.artifacts[0].size = Number.MAX_SAFE_INTEGER + 1; }],
+      ["duplicate artifact path", (manifest) => {
+        manifest.artifacts.push({ ...manifest.artifacts[0], id: "alternate-runtime" });
+      }],
+    ]) {
+      const result = await packageWithFakeTool(join(root, name.replaceAll(" ", "-")));
+      await mutateEmbeddedReleaseManifest(result, mutate);
+
+      await assert.rejects(
+        () => verifyAppImage({
+          image: result.outputPath,
+          manifest: result.manifestPath,
+          requireDigest: true,
+          extractor: result.extractor,
+        }),
+        /release manifest.*(?:closed|schema|duplicate|invalid)/iu,
+        name,
       );
     }
   });
