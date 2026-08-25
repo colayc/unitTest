@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://unit-test-ide.invalid/tools/release/manifest.schema.json",
+  "title": "Unit Test IDE release manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "product", "version", "platform", "architecture", "sourceCommit", "artifacts", "licenses", "generatedAt"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "product": { "const": "unit-test-ide" },
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"
+    },
+    "platform": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:[-_][a-z0-9]+)*$"
+    },
+    "architecture": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_]+(?:[-_][A-Za-z0-9_]+)*$"
+    },
+    "sourceCommit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "artifacts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/artifact" }
+    },
+    "licenses": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/portableRelativePath" }
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "$defs": {
+    "portableRelativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*(?:^|/)\\.(?:/|$))[A-Za-z0-9][A-Za-z0-9._+/-]*$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "relativePath", "size", "sha256", "executable"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+        },
+        "kind": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9-]*$"
+        },
+        "relativePath": { "$ref": "#/$defs/portableRelativePath" },
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "executable": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}
