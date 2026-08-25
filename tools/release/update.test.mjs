@@ -279,6 +279,7 @@ test("package-backed smoke lifecycle emits digest-bound non-secret evidence", as
       version: "2.0.0",
     }, {
       launch: () => ({ status: 0, stdout: "2.0.0\n", stderr: "" }),
+      upgradeLaunch: () => ({ status: 86, stdout: "", stderr: "controlled smoke failure\n" }),
     });
 
     const evidence = JSON.parse(await readFile(evidencePath, "utf8"));
@@ -301,6 +302,7 @@ test("package-backed smoke lifecycle emits digest-bound non-secret evidence", as
       install: "pass",
       launchHandshake: "pass",
       upgrade: "pass",
+      upgradeLaunch: "failed-as-expected",
       rollback: "pass",
       repeatedRollback: "pass",
       uninstall: "pass",
@@ -309,6 +311,37 @@ test("package-backed smoke lifecycle emits digest-bound non-secret evidence", as
     });
     assert.doesNotMatch(JSON.stringify(evidence), /release-update-|disposable-smoke-root|[A-Z]:\\/iu);
     await assert.rejects(() => access(join(disposableRoot, "package-owned")), (error) => error?.code === "ENOENT");
+  });
+});
+
+test("package-backed smoke refuses rollback until the upgrade launch failure is observed", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const baselineArtifact = await createArtifact(root, "1.0.0");
+    const artifact = await createArtifact(root, "2.0.0");
+    const packagePath = await writeFixtureFile(root, "downloads/unit-test-ide-2.0.0.package", "real package bytes\n");
+    const disposableRoot = join(root, "disposable-smoke-root");
+    const manifestSha256 = sha256(await readFile(join(artifact, "release-manifest.json")));
+    const packageSha256 = sha256(await readFile(packagePath));
+
+    await assert.rejects(
+      () => runSmokeLifecycle({
+        artifact,
+        baselineArtifact,
+        evidence: join(root, "install-smoke.json"),
+        manifestSha256,
+        packagePath,
+        packageSha256,
+        platform: process.platform === "win32" ? "windows" : "linux",
+        root: disposableRoot,
+        version: "2.0.0",
+      }, {
+        launch: () => ({ status: 0, stdout: "2.0.0\n", stderr: "" }),
+        upgradeLaunch: () => ({ status: 0, stdout: "2.0.0\n", stderr: "" }),
+      }),
+      (error) => error?.code === "RELEASE_SMOKE_FAILED" && /expected upgrade launch failure was not observed/u.test(error.message),
+    );
+
+    assert.equal(await currentVersion(join(disposableRoot, "package-owned")), "2.0.0");
   });
 });
 

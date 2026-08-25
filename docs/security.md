@@ -41,7 +41,7 @@ Preset 在 configure 前可能没有单一 `toolchainId`。此时 File API 对 C
 
 许可审计以 release manifest 中 digest-bearing `{path,size,sha256}` 记录为唯一顶层闭集，拒绝缺失、额外、篡改或 reparse 的 notice/license 文件。coverage bundle 按 release platform 从 source manifest 选择 wheel，或直接消费随包的 resolved lock；每个实际入包的 project/version 都必须在 `licenses/dependencies.json` 中有完整许可材料，而仅供其他平台使用的记录（例如 Windows-only `colorama`）不会被 Linux 错当作必需 wheel。Python、gcovr 和平台 resolved transitive dependencies 都必须有许可材料；CMake 必须至少保留 release manifest 已固定摘要的 license notice，在完整 CMake manifest 随包存在时还会校验平台对应的 `licensePath`。
 
-Windows PowerShell 与 Linux Bash clean-machine smoke 都先下载 package job 产生的真实 package artifact，按 workflow 传递的 SHA-256 验证 MSIX/AppImage 及其 embedded release manifest，再从两个真实产生的 baseline/release package 提取精确 payload，并仅在一次性 root 中验证首次安装、`--version` launch handshake、升级、显式回滚、重复回滚、卸载、user-data 保留和 package residue 清零。CI evidence 固定 package filename、version、package SHA-256、manifest SHA-256、source commit 和封闭 outcome；不包含 token、environment、用户名、runner path 或 workspace 内容。
+Windows PowerShell 与 Linux Bash clean-machine smoke 都先下载 package job 产生的真实 package artifact，按 workflow 传递的 SHA-256 验证 MSIX/AppImage 及其 embedded release manifest，再从两个真实产生的 baseline/release package 提取精确 payload，并仅在一次性 root 中验证首次安装、`--version` launch handshake 和升级。升级 package 的真实 launcher 被调用后，smoke harness 执行不会进入产品代码的确定性失败 probe；只有观察到非零结果才允许回滚。随后验证恢复版本可启动、重复回滚、卸载、user-data 保留和 package residue 清零。CI evidence 固定 package filename、version、package SHA-256、manifest SHA-256、source commit，并分别记录 `upgradeLaunch: failed-as-expected` 和 `rollback: pass`；不包含 token、environment、用户名、runner path 或 workspace 内容。
 
 开发者自定义 CMake 仅允许：
 
