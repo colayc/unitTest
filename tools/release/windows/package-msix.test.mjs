@@ -132,6 +132,7 @@ if (${JSON.stringify(mode)} -eq 'invalid-manifest') {
   [Console]::Error.WriteLine('error C00CE169: App manifest validation error: The appx manifest is invalid.')
   exit 11
 }
+Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $parent = Split-Path -Parent $package
 if ($parent) {
@@ -140,7 +141,24 @@ if ($parent) {
 if (Test-Path -LiteralPath $package) {
   Remove-Item -LiteralPath $package -Force
 }
-[System.IO.Compression.ZipFile]::CreateFromDirectory($directory, $package)
+$archive = [System.IO.Compression.ZipFile]::Open($package, [System.IO.Compression.ZipArchiveMode]::Create)
+try {
+  $rootPrefix = $directory.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+  foreach ($source in Get-ChildItem -LiteralPath $directory -Recurse -File | Sort-Object FullName) {
+    $relativePath = $source.FullName.Substring($rootPrefix.Length).Replace([IO.Path]::DirectorySeparatorChar.ToString(), '/')
+    $entry = $archive.CreateEntry($relativePath)
+    $input = [IO.File]::OpenRead($source.FullName)
+    $output = $entry.Open()
+    try {
+      $input.CopyTo($output)
+    } finally {
+      $output.Dispose()
+      $input.Dispose()
+    }
+  }
+} finally {
+  $archive.Dispose()
+}
 `.trimStart(), "utf8");
   return toolPath;
 }
@@ -648,7 +666,7 @@ windowsOnly("verify-msix rejects a duplicate slash-aliased payload entry before 
 
     assert.equal(result.status, 1);
     assert.match(result.stderr, /RELEASE_VERIFICATION_FAILED/u);
-    assert.match(result.stderr, /duplicate|alias|backslash/u);
+    assert.match(result.stderr, /unsafe|duplicate|alias|backslash/u);
   });
 });
 
@@ -679,6 +697,36 @@ windowsOnly("verify-msix rejects a dot-segment payload entry before payload-set 
     assert.equal(result.status, 1);
     assert.match(result.stderr, /RELEASE_VERIFICATION_FAILED/u);
     assert.match(result.stderr, /\.\.|dot|unsafe/u);
+  });
+});
+
+windowsOnly("verify-msix rejects encoded archive entry identities before payload-set comparison", async (t) => {
+  const maliciousEntries = [
+    ["encoded metadata separator", "AppxMetadata%2Fevil"],
+    ["encoded backslash", "app%5Ccode-oss-runtime%5Cevil"],
+    ["encoded colon", "app%3Aevil"],
+    ["encoded NUL", "app/control%00entry"],
+    ["encoded DEL", "app/control%7Fentry"],
+    ["double-encoded separator", "AppxMetadata%252Fevil"],
+    ["encoded dot segment", "app/%2E%2E/evil"],
+    ["malformed escape", "app/invalid%2"],
+    ["non-canonical escape", "app/noncanonical%2fentry"],
+    ["decoded launcher alias", "app/code-oss-runtime/Code%20-%20OSS.exe"],
+  ];
+
+  await withTemporaryRoot(t, async (root) => {
+    for (const [name, entryName] of maliciousEntries) {
+      const fixture = await packageWithFakeTools(join(root, name.replaceAll(" ", "-")));
+      await addZipEntry(fixture.outputPath, entryName, "malicious");
+      const result = runVerify([
+        "-Package", fixture.outputPath,
+        "-Manifest", fixture.manifestPath,
+      ], {});
+
+      assert.equal(result.status, 1, name);
+      assert.match(result.stderr, /RELEASE_VERIFICATION_FAILED/u, name);
+      assert.match(result.stderr, /unsafe|non-canonical|duplicate|alias/u, name);
+    }
   });
 });
 
