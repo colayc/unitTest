@@ -59,6 +59,8 @@ async function createReleaseFixture(root, platform = "windows") {
   await writeFixtureFile(codeOssRoot, "resources/app/extensions/ms-vscode.js-debug/ThirdPartyNotices.txt", "Debug extension notices\n");
   await writeFixtureFile(codeOssRoot, "resources/app/extensions/example/unlicensed.txt", "Not a license notice\n");
   await writeFixtureFile(codeOssRoot, "resources/app/extensions/example/ThirdPartyNoticeship.txt", "Not a third-party notice\n");
+  await writeFixtureFile(codeOssRoot, "resources/app/extensions/example/foo-license-manager.js", "Not a license notice\n");
+  await writeFixtureFile(codeOssRoot, "resources/app/extensions/example/foo.notice-board.txt", "Not a notice\n");
   await writeFixtureFile(codeOssRoot, "locales/en-US.pak", "locale data\n");
   await writeFixtureFile(codeOssRoot, "runtime.dll", "runtime library\n");
   const service = await writeFixtureFile(root, `inputs/service/unit-test-service${platform === "windows" ? ".exe" : ""}`, "service binary\n");
@@ -193,6 +195,8 @@ test("stageRelease copies the deterministic staging layout and writes a release 
     for (const relativePath of [
       "resources/app/extensions/example/unlicensed.txt",
       "resources/app/extensions/example/ThirdPartyNoticeship.txt",
+      "resources/app/extensions/example/foo-license-manager.js",
+      "resources/app/extensions/example/foo.notice-board.txt",
     ]) {
       await assert.rejects(
         () => lstat(join(result.stagingRoot, "licenses", "code-oss", ...relativePath.split("/"))),

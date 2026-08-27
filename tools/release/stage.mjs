@@ -161,7 +161,7 @@ function isLicenseRelativePath(relativePath) {
   return relativePath.split("/").includes("licenses")
     || /^(?:licen[cs]e(?:s)?|notice(?:s)?|copying)(?:$|[._-].+)$/iu.test(basename)
     || /^thirdpartynotices(?:$|[._-].+)$/iu.test(basename)
-    || /(?:^|[._-])(?:licen[cs]e|notice)(?:$|[._-].+)$/iu.test(basename);
+    || /(?:^|[._-])(?:licen[cs]e|notice)(?:$|(?:\.[^.]+)+$)/iu.test(basename);
 }
 
 async function copyLicenseSet(sourceRoot, destinationRoot, namespace) {
