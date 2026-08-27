@@ -145,13 +145,13 @@ The staging operation continues to build in a temporary sibling directory. Any v
 
 ## License Handling
 
-The runtime tree remains byte-for-byte under `app/code-oss-runtime/`. In addition, every file whose basename matches the existing license rule (`LICENSE*`, `NOTICE*`, or `COPYING*`) is copied into the same relative location beneath:
+The runtime tree remains byte-for-byte under `app/code-oss-runtime/`. In addition, every file whose basename matches the release license rule (`LICENSE*`, `NOTICE*`, or `COPYING*`) is copied into the same relative location beneath:
 
 ```text
 licenses/code-oss/
 ```
 
-Those copies join the existing CMake and coverage notices in the release manifest's closed `licenses` list and in `license-audit.mjs`. This includes the Code-OSS MIT notice, Chromium notices, and bundled extension notices present in the upstream build.
+Those copies join the existing CMake and coverage notices in the release manifest's closed `licenses` list and in `license-audit.mjs`. The implementation widens the current singular-name matcher so plural upstream names such as `LICENSES.chromium.html` are included. This covers the Code-OSS MIT notice, Chromium notices, and bundled extension notices present in the upstream build.
 
 ## Windows Data Flow
 
