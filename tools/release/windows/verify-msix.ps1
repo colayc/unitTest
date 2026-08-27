@@ -168,6 +168,22 @@ function Get-PlaceholderLogoBytes {
   return [Convert]::FromBase64String($storeLogoBase64)
 }
 
+function Assert-UniquePackagePayloadPath {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)]$Seen,
+    [Parameter(Mandatory = $true)]$Reserved
+  )
+
+  if (
+    -not $Seen.Add($Path) -or
+    $Reserved.Contains($Path) -or
+    $Path.StartsWith('AppxMetadata/', [StringComparison]::OrdinalIgnoreCase)
+  ) {
+    Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message 'duplicate or reserved release payload path'
+  }
+}
+
 function Verify-Signature {
   param([Parameter(Mandatory = $true)][string]$PackagePath)
 
@@ -206,8 +222,20 @@ if ($launcherArtifacts.Count -ne 1) {
 }
 
 $expectedPayloads = [ordered]@{}
+$expectedPayloadIdentities = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+$reservedPackagePayloads = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+foreach ($reservedPath in @(
+    'release-manifest.json',
+    $storeLogoPath,
+    $square150LogoPath,
+    $square44LogoPath
+  ) + $packageFootprintEntries) {
+  [void]$reservedPackagePayloads.Add([string]$reservedPath)
+}
 foreach ($artifact in $releaseManifest.artifacts) {
-  $expectedPayloads[[string]$artifact.relativePath] = [pscustomobject]@{
+  $artifactPath = [string]$artifact.relativePath
+  Assert-UniquePackagePayloadPath -Path $artifactPath -Seen $expectedPayloadIdentities -Reserved $reservedPackagePayloads
+  $expectedPayloads[$artifactPath] = [pscustomobject]@{
     Sha256 = [string]$artifact.sha256
     Size = [int64]$artifact.size
     Label = 'artifact'
@@ -217,7 +245,9 @@ foreach ($license in $releaseManifest.licenses) {
   if ($null -eq $license.path -or [string]::IsNullOrWhiteSpace([string]$license.path)) {
     Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message 'license path is invalid in the embedded release manifest'
   }
-  $expectedPayloads[[string]$license.path] = [pscustomobject]@{
+  $licensePath = [string]$license.path
+  Assert-UniquePackagePayloadPath -Path $licensePath -Seen $expectedPayloadIdentities -Reserved $reservedPackagePayloads
+  $expectedPayloads[$licensePath] = [pscustomobject]@{
     Sha256 = [string]$license.sha256
     Size = [int64]$license.size
     Label = 'license'

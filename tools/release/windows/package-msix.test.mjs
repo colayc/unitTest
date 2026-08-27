@@ -736,6 +736,11 @@ windowsOnly("verify-msix rejects unsafe Windows metadata entry components before
     ["trailing space", "AppxMetadata/trailing.txt "],
     ["trailing dot", "AppxMetadata/trailing."],
     ["device basename extension", "AppxMetadata/CON.txt"],
+    ["superscript COM1", "AppxMetadata/COM¹.txt"],
+    ["superscript COM2", "AppxMetadata/COM².log"],
+    ["superscript LPT3", "AppxMetadata/LPT³.bin"],
+    ["console input device", "AppxMetadata/CONIN$.txt"],
+    ["console output device", "AppxMetadata/CONOUT$.log"],
   ];
 
   await withTemporaryRoot(t, async (root) => {
@@ -750,6 +755,52 @@ windowsOnly("verify-msix rejects unsafe Windows metadata entry components before
       assert.equal(result.status, 1, name);
       assert.match(result.stderr, /RELEASE_VERIFICATION_FAILED/u, name);
       assert.match(result.stderr, /unsafe|device|space|dot/u, name);
+    }
+  });
+});
+
+windowsOnly("verify-msix rejects manifest payload aliases before case-insensitive expected-map insertion", async (t) => {
+  const cases = [
+    ["artifact/artifact alias with different digest", (manifest) => {
+      manifest.artifacts.push({
+        ...manifest.artifacts[0],
+        id: "runtime-case-alias",
+        relativePath: manifest.artifacts[0].relativePath.toUpperCase(),
+        sha256: "b".repeat(64),
+      });
+      manifest.artifacts.sort((left, right) => left.id.localeCompare(right.id, "en"));
+    }],
+    ["artifact/license alias", (manifest) => {
+      manifest.licenses.push({
+        path: manifest.artifacts[0].relativePath.toUpperCase(),
+        size: manifest.artifacts[0].size,
+        sha256: "c".repeat(64),
+      });
+      manifest.licenses.sort((left, right) => left.path.localeCompare(right.path, "en"));
+    }],
+    ["reserved release manifest alias", (manifest) => {
+      manifest.artifacts.push({
+        ...manifest.artifacts[0],
+        id: "reserved-manifest",
+        relativePath: "Release-Manifest.json",
+        sha256: "d".repeat(64),
+      });
+      manifest.artifacts.sort((left, right) => left.id.localeCompare(right.id, "en"));
+    }],
+  ];
+
+  await withTemporaryRoot(t, async (root) => {
+    for (const [name, mutate] of cases) {
+      const fixture = await packageWithFakeTools(join(root, name.replaceAll("/", "-").replaceAll(" ", "-")));
+      await rewriteReleaseManifest(fixture, mutate);
+      const result = runVerify([
+        "-Package", fixture.outputPath,
+        "-Manifest", fixture.manifestPath,
+      ], {});
+
+      assert.equal(result.status, 1, name);
+      assert.match(result.stderr, /RELEASE_VERIFICATION_FAILED/u, name);
+      assert.match(result.stderr, /duplicate or reserved release payload path/u, name);
     }
   });
 });

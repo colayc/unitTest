@@ -286,6 +286,52 @@ test("manifest schema and record validation reject unsafe artifact and license p
   });
 });
 
+test("record validation rejects ASCII case aliases and the reserved release manifest path", async (t) => {
+  await withStaging(t, async (stagingRoot) => {
+    const { expectedLicenses, ...input } = await validInput(stagingRoot);
+    void expectedLicenses;
+    const manifest = await buildManifest(input);
+    const cases = [
+      ["artifact/artifact alias", (value) => {
+        value.artifacts.push({
+          ...value.artifacts[0],
+          id: "case-alias",
+          relativePath: value.artifacts[0].relativePath.toUpperCase(),
+          sha256: "b".repeat(64),
+        });
+        value.artifacts.sort((left, right) => left.id.localeCompare(right.id, "en"));
+      }],
+      ["artifact/license alias", (value) => {
+        value.licenses.push({
+          path: value.artifacts[0].relativePath.toUpperCase(),
+          size: value.artifacts[0].size,
+          sha256: "c".repeat(64),
+        });
+        value.licenses.sort((left, right) => left.path.localeCompare(right.path, "en"));
+      }],
+      ["reserved release manifest alias", (value) => {
+        value.artifacts.push({
+          ...value.artifacts[0],
+          id: "reserved-manifest",
+          relativePath: "Release-Manifest.json",
+          sha256: "d".repeat(64),
+        });
+        value.artifacts.sort((left, right) => left.id.localeCompare(right.id, "en"));
+      }],
+    ];
+
+    for (const [name, mutate] of cases) {
+      const unsafeManifest = structuredClone(manifest);
+      mutate(unsafeManifest);
+      assert.throws(
+        () => validateReleaseManifestRecord(unsafeManifest),
+        /duplicate or reserved release payload path/u,
+        name,
+      );
+    }
+  });
+});
+
 test("buildReleaseManifest accepts literal real Code-OSS artifact and license paths", async (t) => {
   await withStaging(t, async (stagingRoot) => {
     const { expectedLicenses, ...input } = await validInput(stagingRoot);
