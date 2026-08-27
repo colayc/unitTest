@@ -55,7 +55,9 @@ function releaseManifest(platform) {
     artifacts: [{
       id: "desktop",
       kind: "executable",
-      relativePath: platform === "windows" ? "app/code-oss.exe" : "app/code-oss",
+      relativePath: platform === "windows"
+        ? "app/code-oss-runtime/Code - OSS.exe"
+        : "app/code-oss-runtime/code-oss",
       size: 23,
       sha256: "7".repeat(64),
       executable: true,
@@ -189,6 +191,41 @@ test("qualifyRelease accepts only a complete two-platform evidence set tied to o
     licenseOutcome: { linux: "pass", windows: "pass" },
     qualificationOutcome: { qualified: true, reasons: [] },
   });
+});
+
+test("qualifyRelease accepts safe internal ASCII spaces in the Windows runtime launcher", () => {
+  const input = completeInput();
+  input.manifests.windows.releaseManifest.artifacts[0].relativePath = "app/code-oss-runtime/Code - OSS.exe";
+  input.manifests.windows.baselineReleaseManifest.artifacts[0].relativePath = "app/code-oss-runtime/Code - OSS.exe";
+
+  assert.equal(qualifyRelease(input).qualified, true);
+});
+
+test("qualifyRelease rejects unsafe portable release paths", () => {
+  for (const relativePath of [
+    "/app/code-oss",
+    "C:/app/code-oss",
+    "app\\code-oss",
+    "app/../code-oss",
+    "app/code<oss",
+    "app/control\u0001.txt",
+    "app/CON.txt",
+    "app/com1.exe",
+    "app/ leading.txt",
+    "app/trailing ",
+    "app/trailing.",
+  ]) {
+    const input = completeInput();
+    input.manifests.windows.releaseManifest.artifacts[0].relativePath = relativePath;
+
+    const result = qualifyRelease(input);
+
+    assert.equal(result.qualified, false, relativePath);
+    assert.ok(
+      reasonMessages(result).includes("windows release manifest artifacts are invalid"),
+      `${relativePath}: ${reasonMessages(result).join("; ")}`,
+    );
+  }
 });
 
 test("qualifyRelease rejects each missing platform evidence record with an explicit reason", () => {
@@ -466,8 +503,20 @@ test("release package jobs materialize digest-pinned runtime inputs before packa
     const packageIndex = job.indexOf(packageStep);
     assert.ok(0 <= requireInputs && requireInputs < download && download < verifyDigest && verifyDigest < packageIndex, jobName);
     assert.match(job, /RELEASE_INPUT_MISSING/u, jobName);
+    assert.match(job, /CODE_OSS_RUNTIME_ROOT/u, `${jobName} runtime root`);
+    assert.equal(job.match(/--code-oss-root/gu)?.length, 2, `${jobName} target and baseline runtime roots`);
+    assert.equal(job.match(/--code-oss-sha256/gu)?.length, 2, `${jobName} target and baseline launcher digests`);
+    assert.doesNotMatch(job, /--code-oss(?:\s|$)/u, `${jobName} removed single-file staging flag`);
     for (const digest of requiredDigests) {
       assert.match(job, new RegExp(`${digest}[\\s\\S]*(?:Get-FileHash|sha256sum)`, "u"), `${jobName} ${digest}`);
+    }
+    if (jobName === "package-windows") {
+      assert.match(job, /\.release\/inputs\/windows-code-oss/u);
+      assert.match(job, /Join-Path\s+\$runtimeRoot\s+'Code - OSS\.exe'/u);
+    } else {
+      assert.match(job, /\.release\/inputs\/linux-code-oss/u);
+      assert.match(job, /launcher="\$runtime_root\/code-oss"/u);
+      assert.match(job, /\[\[\s+-x\s+"\$launcher"\s+\]\]/u);
     }
   }
 });

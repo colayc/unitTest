@@ -528,13 +528,18 @@ export async function uninstall(root) {
   });
 }
 
+function launcherRelativePath() {
+  return process.platform === "win32"
+    ? "app/code-oss-runtime/Code - OSS.exe"
+    : "app/code-oss-runtime/code-oss";
+}
+
 function launchHandshake(packageRoot, version, userDataRoot) {
   const executable = join(
     packageRoot,
     "versions",
     version,
-    "app",
-    process.platform === "win32" ? "code-oss.exe" : "code-oss",
+    ...launcherRelativePath().split("/"),
   );
   return spawnSync(executable, ["--version"], {
     encoding: "utf8",
@@ -569,7 +574,7 @@ async function triggerInstalledUpgradeLaunchFailure(root, version, userDataRoot)
     }
     const targetRoot = await requireOwnedDirectory(packageRoot, `versions/${version}`);
     await readVerifiedManifest(targetRoot);
-    const launcher = join(targetRoot, "app", process.platform === "win32" ? "code-oss.exe" : "code-oss");
+    const launcher = join(targetRoot, ...launcherRelativePath().split("/"));
     await writeFile(launcher, Buffer.from([0x00, 0xff, 0x00, 0x7f, 0x55, 0xaa]));
     await fsyncFile(launcher);
     const result = launchHandshake(packageRoot, version, userDataRoot);

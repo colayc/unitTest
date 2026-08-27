@@ -15,6 +15,7 @@ const digestPattern = /^[0-9a-f]{64}$/u;
 const commitPattern = /^[0-9a-f]{40}$/u;
 const artifactIdPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
 const artifactKindPattern = /^[a-z][a-z0-9-]*$/u;
+const portableRelativePathPattern = /^(?!\/)(?![A-Za-z]:)(?!.*\\)(?!.*(?:^|\/)\.\.(?:\/|$))(?!.*(?:^|\/)\.(?:\/|$))(?!.*(?:^|\/) )(?!.*(?:^|\/)[^/]*[. ](?:\/|$))(?!.*(?:^|\/)(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|\/|$))[A-Za-z0-9][A-Za-z0-9._+ /-]*$/iu;
 const expectedOutcomes = Object.freeze({
   install: "pass",
   launchHandshake: "pass",
@@ -74,12 +75,7 @@ function hasExactKeys(value, expected) {
 }
 
 function portableRelativePath(value) {
-  return typeof value === "string"
-    && /^[A-Za-z0-9][A-Za-z0-9._+/-]*$/u.test(value)
-    && !value.includes("\\")
-    && !value.startsWith("/")
-    && !/^[A-Za-z]:/u.test(value)
-    && value.split("/").every((segment) => segment.length > 0 && segment !== "." && segment !== "..");
+  return typeof value === "string" && portableRelativePathPattern.test(value);
 }
 
 function validLicense(value) {

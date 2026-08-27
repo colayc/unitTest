@@ -5,6 +5,7 @@ import { access, chmod, copyFile, mkdir, mkdtemp, readFile, rename, rm, symlink,
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 
 import {
   installVersion,
@@ -16,7 +17,11 @@ import {
 const sourceCommit = "a".repeat(40);
 const baselineSourceCommit = "d".repeat(40);
 const platform = process.platform === "win32" ? "windows" : "linux";
-const launcherRelativePath = platform === "windows" ? "app/code-oss.exe" : "app/code-oss";
+const launcherRelativePath = process.platform === "win32"
+  ? "app/code-oss-runtime/Code - OSS.exe"
+  : "app/code-oss-runtime/code-oss";
+const productRelativePath = "app/code-oss-runtime/resources/app/product.json";
+const corruptedLauncherBytes = Buffer.from([0x00, 0xff, 0x00, 0x7f, 0x55, 0xaa]);
 const generatedAt = "2026-08-25T00:00:00.000Z";
 const baselineGeneratedAt = "2026-08-24T00:00:00.000Z";
 
@@ -45,6 +50,8 @@ async function createArtifact(root, version, {
   else await copyFile(launcherSource, launcherPath);
   if (process.platform !== "win32") await chmod(launcherPath, 0o755);
   const launcherBytes = await readFile(launcherPath);
+  const productBytes = Buffer.from(`${JSON.stringify({ nameShort: "Code - OSS", version })}\n`);
+  await writeFixtureFile(artifactRoot, productRelativePath, productBytes);
   await writeFixtureFile(artifactRoot, "licenses/NOTICE.txt", notice);
   const manifest = {
     schemaVersion: 1,
@@ -53,14 +60,24 @@ async function createArtifact(root, version, {
     platform,
     architecture: "x64",
     sourceCommit: manifestSourceCommit,
-    artifacts: [{
-      id: "app-code-oss",
-      kind: "runtime",
-      relativePath: launcherRelativePath,
-      size: launcherBytes.length,
-      sha256: sha256(launcherBytes),
-      executable: true,
-    }],
+    artifacts: [
+      {
+        id: "app-code-oss",
+        kind: "runtime",
+        relativePath: launcherRelativePath,
+        size: launcherBytes.length,
+        sha256: sha256(launcherBytes),
+        executable: true,
+      },
+      {
+        id: "app-code-oss-product",
+        kind: "runtime",
+        relativePath: productRelativePath,
+        size: productBytes.length,
+        sha256: sha256(productBytes),
+        executable: false,
+      },
+    ],
     licenses: [{
       path: "licenses/NOTICE.txt",
       size: Buffer.byteLength(notice),
@@ -70,6 +87,20 @@ async function createArtifact(root, version, {
   };
   await writeFile(join(artifactRoot, "release-manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
   return artifactRoot;
+}
+
+async function observeInstalledProductAfterLauncherCorruption(packageRoot, version, smokeFinished) {
+  const launcher = join(packageRoot, "versions", version, ...launcherRelativePath.split("/"));
+  const product = join(packageRoot, "versions", version, ...productRelativePath.split("/"));
+  while (!smokeFinished()) {
+    try {
+      if ((await readFile(launcher)).equals(corruptedLauncherBytes)) return readFile(product);
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    await delay(1);
+  }
+  return null;
 }
 
 async function withTemporaryRoot(t, run) {
@@ -110,25 +141,38 @@ test("package-backed production smoke corrupts the target then really launches t
     });
     const artifact = await createArtifact(root, "2.0.0", { launcherSource });
     const sourceLauncher = join(artifact, ...launcherRelativePath.split("/"));
+    const sourceProduct = join(artifact, ...productRelativePath.split("/"));
     const sourceBytes = await readFile(sourceLauncher);
+    const sourceProductBytes = await readFile(sourceProduct);
     const packagePath = await writeFixtureFile(root, "downloads/unit-test-ide-2.0.0.package", "real package bytes\n");
     const baselinePackagePath = await writeFixtureFile(root, "downloads/unit-test-ide-1.0.0.package", "real baseline package bytes\n");
     const evidencePath = join(root, "install-smoke.json");
+    const packageRoot = join(root, "disposable-smoke-root", "package-owned");
+    let smokeFinished = false;
+    const installedProductAfterCorruption = observeInstalledProductAfterLauncherCorruption(
+      packageRoot,
+      "2.0.0",
+      () => smokeFinished,
+    );
 
-    await runSmokeLifecycle({
-      artifact,
-      baselineArtifact,
-      baselineManifestSha256: sha256(await readFile(join(baselineArtifact, "release-manifest.json"))),
-      baselinePackagePath,
-      baselinePackageSha256: sha256(await readFile(baselinePackagePath)),
-      evidence: evidencePath,
-      manifestSha256: sha256(await readFile(join(artifact, "release-manifest.json"))),
-      packagePath,
-      packageSha256: sha256(await readFile(packagePath)),
-      platform,
-      root: join(root, "disposable-smoke-root"),
-      version: "2.0.0",
-    });
+    try {
+      await runSmokeLifecycle({
+        artifact,
+        baselineArtifact,
+        baselineManifestSha256: sha256(await readFile(join(baselineArtifact, "release-manifest.json"))),
+        baselinePackagePath,
+        baselinePackageSha256: sha256(await readFile(baselinePackagePath)),
+        evidence: evidencePath,
+        manifestSha256: sha256(await readFile(join(artifact, "release-manifest.json"))),
+        packagePath,
+        packageSha256: sha256(await readFile(packagePath)),
+        platform,
+        root: join(root, "disposable-smoke-root"),
+        version: "2.0.0",
+      });
+    } finally {
+      smokeFinished = true;
+    }
 
     const evidence = JSON.parse(await readFile(evidencePath, "utf8"));
     assert.equal(evidence.outcomes.upgradeLaunch, "failed-as-expected");
@@ -136,6 +180,8 @@ test("package-backed production smoke corrupts the target then really launches t
     assert.equal(evidence.outcomes.rollbackLaunch, "pass");
     assert.equal(evidence.rollbackVersion, "1.0.0");
     assert.deepEqual(await readFile(sourceLauncher), sourceBytes);
+    assert.deepEqual(await installedProductAfterCorruption, sourceProductBytes);
+    assert.deepEqual(await readFile(sourceProduct), sourceProductBytes);
   });
 });
 
