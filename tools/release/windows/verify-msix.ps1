@@ -12,6 +12,15 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+trap {
+  $message = [string]$_.Exception.Message
+  if (-not $message.StartsWith('RELEASE_', [StringComparison]::Ordinal)) {
+    $message = 'RELEASE_VERIFICATION_FAILED: package verification failed'
+  }
+  [Console]::Error.WriteLine($message)
+  exit 1
+}
+
 $packageName = 'OpenAI.UnitTestIDE'
 $packageFootprintEntries = @(
   '[Content_Types].xml',
@@ -318,15 +327,17 @@ $archive = [System.IO.Compression.ZipFile]::OpenRead($packagePath)
 try {
   $entryMap = Get-CanonicalMsixEntryMap -Archive $archive
   $entries = @($entryMap.Values | ForEach-Object { $_.CanonicalPath }) | Sort-Object
-  $embeddedManifestEntry = $entryMap['appxmanifest.xml'].Entry
-  if ($null -eq $embeddedManifestEntry) {
+  $embeddedManifestRecord = $entryMap['appxmanifest.xml']
+  if ($null -eq $embeddedManifestRecord) {
     Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message 'package does not contain AppxManifest.xml'
   }
+  $embeddedManifestEntry = $embeddedManifestRecord.Entry
 
-  $embeddedReleaseManifestEntry = $entryMap['release-manifest.json'].Entry
-  if ($null -eq $embeddedReleaseManifestEntry) {
+  $embeddedReleaseManifestRecord = $entryMap['release-manifest.json']
+  if ($null -eq $embeddedReleaseManifestRecord) {
     Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message 'package does not contain release-manifest.json'
   }
+  $embeddedReleaseManifestEntry = $embeddedReleaseManifestRecord.Entry
 
   $signaturePresent = $entries -contains 'AppxSignature.p7x'
   if ($RequireSignature) {

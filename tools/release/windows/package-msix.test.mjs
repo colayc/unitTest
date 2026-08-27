@@ -381,6 +381,37 @@ try {
   assert.equal(result.status, 0, result.stderr);
 }
 
+async function deleteZipEntry(packagePath, entryName) {
+  const script = `
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$archive = [System.IO.Compression.ZipFile]::Open(${powerShellLiteral(packagePath)}, [System.IO.Compression.ZipArchiveMode]::Update)
+try {
+  $entry = $null
+  foreach ($candidate in $archive.Entries) {
+    if (($candidate.FullName -replace '\\\\', '/') -eq ${powerShellLiteral(entryName)}) {
+      $entry = $candidate
+      break
+    }
+  }
+  if ($null -eq $entry) {
+    throw 'fixture archive entry is missing'
+  }
+  $entry.Delete()
+} finally {
+  $archive.Dispose()
+}
+`;
+  const result = runPowerShellCommand(script);
+  assert.equal(result.status, 0, result.stderr);
+}
+
+function assertDoesNotContainHostPath(value, hostPath, label) {
+  const normalizedValue = value.replaceAll("\\", "/").toLowerCase();
+  const normalizedPath = hostPath.replaceAll("\\", "/").toLowerCase();
+  assert.equal(normalizedValue.includes(normalizedPath), false, `${label} must remain path-free`);
+}
+
 async function setZipEntryFromFile(packagePath, entryName, sourcePath) {
   const script = `
 Add-Type -AssemblyName System.IO.Compression
@@ -577,6 +608,31 @@ windowsOnly("verify-msix rejects a package whose AppxManifest has no application
     assert.equal(result.status, 1);
     assert.match(result.stderr, /RELEASE_VERIFICATION_FAILED/u);
     assert.match(result.stderr, /application entry point|Applications/u);
+  });
+});
+
+windowsOnly("verify-msix reports missing required manifest entries with stable path-free errors", async (t) => {
+  const cases = [
+    ["AppxManifest.xml", "RELEASE_VERIFICATION_FAILED: package does not contain AppxManifest.xml"],
+    ["release-manifest.json", "RELEASE_VERIFICATION_FAILED: package does not contain release-manifest.json"],
+  ];
+
+  await withTemporaryRoot(t, async (root) => {
+    for (const [entryName, expectedError] of cases) {
+      const fixture = await packageWithFakeTools(join(root, entryName.replaceAll(".", "-")));
+      await deleteZipEntry(fixture.outputPath, entryName);
+      const result = runVerify([
+        "-Package", fixture.outputPath,
+        "-Manifest", fixture.manifestPath,
+      ], {});
+
+      assert.equal(result.status, 1, entryName);
+      assert.equal(result.stdout.trim(), "", entryName);
+      assert.equal(result.stderr.trim(), expectedError, entryName);
+      assertDoesNotContainHostPath(result.stderr, fixture.outputPath, "MSIX error");
+      assertDoesNotContainHostPath(result.stderr, root, "MSIX error");
+      assertDoesNotContainHostPath(result.stderr, resolve("."), "MSIX error");
+    }
   });
 });
 
