@@ -24,10 +24,10 @@ function ConvertFrom-CanonicalMsixEntryPath {
 
     $decoded = $segment
     if ($segment.Contains('%')) {
-      if ($segment -cnotmatch '^(?:[^%]|%20)+$') {
+      if ($segment -cnotmatch '^(?:[^%]|%20|%2B|%28|%29|%40)+$') {
         Throw-UnsafeMsixEntryPath -RawPath $Path -Reason 'non-canonical archive entry path'
       }
-      $decoded = $segment.Replace('%20', ' ')
+      $decoded = $segment.Replace('%20', ' ').Replace('%2B', '+').Replace('%28', '(').Replace('%29', ')').Replace('%40', '@')
     }
 
     $trimmed = $decoded.Trim([char]' ')

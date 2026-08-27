@@ -24,6 +24,8 @@ $storeLogoPath = 'Assets/StoreLogo.png'
 $square150LogoPath = 'Assets/Square150x150Logo.png'
 $square44LogoPath = 'Assets/Square44x44Logo.png'
 $storeLogoBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7+4xQAAAAASUVORK5CYII='
+$maximumReleaseManifestBytes = 16 * 1024 * 1024
+$maximumAppxManifestBytes = 1 * 1024 * 1024
 $manifestValidator = Join-Path (Split-Path -Parent $PSScriptRoot) 'validate-release-manifest.mjs'
 . (Join-Path $PSScriptRoot 'msix-entry-path.ps1')
 
@@ -150,17 +152,54 @@ function Get-Sha256Hex {
   }
 }
 
-function Read-EntryBytes {
+function Get-EntrySha256Hex {
   param([Parameter(Mandatory = $true)]$Entry)
 
-  $stream = $Entry.Open()
-  $memory = New-Object IO.MemoryStream
+  $stream = $null
+  $sha = $null
   try {
-    $stream.CopyTo($memory)
-    return $memory.ToArray()
+    $stream = $Entry.Open()
+    $sha = [Security.Cryptography.SHA256]::Create()
+    return ([BitConverter]::ToString($sha.ComputeHash([IO.Stream]$stream))).Replace('-', '').ToLowerInvariant()
+  } catch {
+    Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message 'package payload cannot be hashed'
   } finally {
-    $memory.Dispose()
-    $stream.Dispose()
+    if ($null -ne $sha) {
+      $sha.Dispose()
+    }
+    if ($null -ne $stream) {
+      $stream.Dispose()
+    }
+  }
+}
+
+function Read-BoundedEntryBytes {
+  param(
+    [Parameter(Mandatory = $true)]$Entry,
+    [Parameter(Mandatory = $true)][int64]$MaximumBytes,
+    [Parameter(Mandatory = $true)][string]$Label
+  )
+
+  if ([int64]$Entry.Length -gt $MaximumBytes) {
+    Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message "${Label} exceeds the package metadata size limit"
+  }
+
+  $stream = $null
+  $memory = $null
+  try {
+    $stream = $Entry.Open()
+    $memory = [IO.MemoryStream]::new([int]$Entry.Length)
+    $stream.CopyTo($memory)
+    return [pscustomobject]@{ Bytes = $memory.ToArray() }
+  } catch {
+    Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message "${Label} cannot be read"
+  } finally {
+    if ($null -ne $memory) {
+      $memory.Dispose()
+    }
+    if ($null -ne $stream) {
+      $stream.Dispose()
+    }
   }
 }
 
@@ -202,6 +241,10 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 $packagePath = Resolve-RealFile -Path $Package -Label 'package'
 $manifestPath = Resolve-RealFile -Path $Manifest -Label 'manifest'
+$manifestInfo = Get-Item -LiteralPath $manifestPath -Force
+if ([int64]$manifestInfo.Length -gt $maximumReleaseManifestBytes) {
+  Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message 'release manifest exceeds the package metadata size limit'
+}
 $externalManifestBytes = [IO.File]::ReadAllBytes($manifestPath)
 $nodePath = (Get-Command -Name 'node.exe' -ErrorAction SilentlyContinue | Select-Object -First 1).Source
 if ([string]::IsNullOrWhiteSpace($nodePath)) {
@@ -311,24 +354,25 @@ try {
       Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message "package payload is missing: $path"
     }
     $entry = $entryRecord.Entry
-    $entryBytes = Read-EntryBytes -Entry $entry
     $expectedRecord = $expectedPayloads[$path]
     $expectedLabel = [string]$expectedRecord.Label
-    if ($entryBytes.Length -ne [int64]$expectedRecord.Size) {
+    if ([int64]$entry.Length -ne [int64]$expectedRecord.Size) {
       Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message "${expectedLabel} size does not match the release manifest: $path"
     }
-    if ((Get-Sha256Hex -Bytes $entryBytes) -ne [string]$expectedRecord.Sha256) {
+    if ((Get-EntrySha256Hex -Entry $entry) -ne [string]$expectedRecord.Sha256) {
       Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message "${expectedLabel} hash does not match the release manifest: $path"
     }
   }
 
-  $embeddedReleaseManifestHash = Get-Sha256Hex -Bytes (Read-EntryBytes -Entry $embeddedReleaseManifestEntry)
+  $embeddedReleaseManifestBytes = (Read-BoundedEntryBytes -Entry $embeddedReleaseManifestEntry -MaximumBytes $maximumReleaseManifestBytes -Label 'embedded release manifest').Bytes
+  $embeddedReleaseManifestHash = Get-Sha256Hex -Bytes $embeddedReleaseManifestBytes
   $externalReleaseManifestHash = Get-Sha256Hex -Bytes $externalManifestBytes
   if ($embeddedReleaseManifestHash -ne $externalReleaseManifestHash) {
     Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message 'embedded release-manifest.json hash does not match the staged manifest'
   }
 
-  $embeddedAppxManifest = [xml][Text.Encoding]::UTF8.GetString((Read-EntryBytes -Entry $embeddedManifestEntry))
+  $embeddedAppxManifestBytes = (Read-BoundedEntryBytes -Entry $embeddedManifestEntry -MaximumBytes $maximumAppxManifestBytes -Label 'embedded AppxManifest.xml').Bytes
+  $embeddedAppxManifest = [xml][Text.Encoding]::UTF8.GetString($embeddedAppxManifestBytes)
   $identity = $embeddedAppxManifest.Package.Identity
   if ($null -eq $identity) {
     Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message 'AppxManifest.xml does not declare Package/Identity'

@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, open, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 
 const packageScript = resolve("tools/release/windows/package-msix.ps1");
 const verifyScript = resolve("tools/release/windows/verify-msix.ps1");
+const entryPathScript = resolve("tools/release/windows/msix-entry-path.ps1");
 const workflowPath = resolve(".github/workflows/foundation.yml");
 const sourceDateEpoch = "1787616000";
 
@@ -380,6 +381,39 @@ try {
   assert.equal(result.status, 0, result.stderr);
 }
 
+async function setZipEntryFromFile(packagePath, entryName, sourcePath) {
+  const script = `
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$archive = [System.IO.Compression.ZipFile]::Open(${powerShellLiteral(packagePath)}, [System.IO.Compression.ZipArchiveMode]::Update)
+try {
+  $entry = $null
+  foreach ($candidate in $archive.Entries) {
+    if (($candidate.FullName -replace '\\\\', '/') -eq ${powerShellLiteral(entryName)}) {
+      $entry = $candidate
+      break
+    }
+  }
+  if ($null -ne $entry) {
+    $entry.Delete()
+  }
+  $replacement = $archive.CreateEntry(${powerShellLiteral(entryName)})
+  $input = [IO.File]::OpenRead(${powerShellLiteral(sourcePath)})
+  $output = $replacement.Open()
+  try {
+    $input.CopyTo($output)
+  } finally {
+    $output.Dispose()
+    $input.Dispose()
+  }
+} finally {
+  $archive.Dispose()
+}
+`;
+  const result = runPowerShellCommand(script);
+  assert.equal(result.status, 0, result.stderr);
+}
+
 async function addZipEntry(packagePath, entryName, content) {
   const script = `
 Add-Type -AssemblyName System.IO.Compression
@@ -700,6 +734,34 @@ windowsOnly("verify-msix rejects a dot-segment payload entry before payload-set 
   });
 });
 
+windowsOnly("MSIX entry canonicalization decodes only makeappx forms of portable punctuation", () => {
+  const encoded = "app/%40scope/C%2B%2B%20Regular%20Expressions%20%28JavaScript%29.tmLanguage";
+  const result = runPowerShellCommand(`
+. ${powerShellLiteral(entryPathScript)}
+$decoded = ConvertFrom-CanonicalMsixEntryPath -Path ${powerShellLiteral(encoded)}
+[Console]::Write($decoded)
+`);
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "app/@scope/C++ Regular Expressions (JavaScript).tmLanguage");
+});
+
+windowsOnly("verify-msix rejects raw and makeappx-encoded aliases for portable punctuation", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await packageWithFakeTools(root);
+    await addZipEntry(fixture.outputPath, "AppxMetadata/@scope/Name+(One).txt", "raw");
+    await addZipEntry(fixture.outputPath, "AppxMetadata/%40scope/Name%2B%28One%29.txt", "encoded");
+    const result = runVerify([
+      "-Package", fixture.outputPath,
+      "-Manifest", fixture.manifestPath,
+    ], {});
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /RELEASE_VERIFICATION_FAILED/u);
+    assert.match(result.stderr, /duplicate archive entry alias/u);
+  });
+});
+
 windowsOnly("verify-msix rejects encoded archive entry identities before payload-set comparison", async (t) => {
   const maliciousEntries = [
     ["encoded metadata separator", "AppxMetadata%2Fevil"],
@@ -711,6 +773,7 @@ windowsOnly("verify-msix rejects encoded archive entry identities before payload
     ["encoded dot segment", "app/%2E%2E/evil"],
     ["malformed escape", "app/invalid%2"],
     ["non-canonical escape", "app/noncanonical%2fentry"],
+    ["double-encoded portable punctuation", "AppxMetadata/%2540scope/name%252B%2528one%2529.txt"],
     ["decoded launcher alias", "app/code-oss-runtime/Code%20-%20OSS.exe"],
   ];
 
@@ -817,6 +880,74 @@ windowsOnly("verify-msix rejects a tampered packaged Code-OSS launcher whose has
     assert.equal(result.status, 1);
     assert.match(result.stderr, /RELEASE_VERIFICATION_FAILED/u);
     assert.match(result.stderr, /(?:size|hash) does not match/u);
+  });
+});
+
+windowsOnly("verify-msix streams large runtime payload hashes and still rejects a digest mismatch", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await createStagingFixture(root);
+    const relativePath = "app/code-oss-runtime/large-streaming-fixture.bin";
+    const payloadPath = await writeFixtureFile(fixture.stagingRoot, relativePath, "");
+    const payloadSize = 192 * 1024 * 1024;
+    const handle = await open(payloadPath, "r+");
+    try {
+      await handle.truncate(payloadSize);
+    } finally {
+      await handle.close();
+    }
+    const digest = createHash("sha256");
+    const zeroChunk = Buffer.alloc(1024 * 1024);
+    for (let offset = 0; offset < payloadSize; offset += zeroChunk.length) digest.update(zeroChunk);
+
+    const manifest = JSON.parse(await readFile(fixture.manifestPath, "utf8"));
+    manifest.artifacts.push({
+      executable: false,
+      id: "large-streaming-fixture",
+      kind: "runtime",
+      relativePath,
+      sha256: digest.digest("hex"),
+      size: payloadSize,
+    });
+    manifest.artifacts.sort((left, right) => left.id.localeCompare(right.id, "en"));
+    await writeFile(fixture.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+
+    const fakeMakeAppx = await createFakeMakeAppx(root);
+    const packageResult = runPackage([
+      "-StagingRoot", fixture.stagingRoot,
+      "-Output", fixture.outputPath,
+      "-Version", fixture.version,
+      "-Publisher", "CN=Unit Test IDE",
+    ], {
+      RELEASE_MAKEAPPX_PATH: fakeMakeAppx,
+      RELEASE_SIGNING_REQUIRED: "0",
+    });
+    assert.equal(packageResult.status, 0, packageResult.stderr);
+
+    await rewriteReleaseManifest(fixture, (embeddedManifest) => {
+      embeddedManifest.artifacts.find((artifact) => artifact.id === "large-streaming-fixture").sha256 = "f".repeat(64);
+    });
+    const mismatchResult = runVerify([
+      "-Package", fixture.outputPath,
+      "-Manifest", fixture.manifestPath,
+    ], {});
+    assert.equal(mismatchResult.status, 1);
+    assert.match(mismatchResult.stderr, /artifact hash does not match the release manifest/u);
+  });
+});
+
+windowsOnly("verify-msix rejects oversized embedded XML metadata before reading it", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await packageWithFakeTools(root);
+    const oversizedManifest = join(root, "oversized-AppxManifest.xml");
+    await writeFile(oversizedManifest, Buffer.alloc((1024 * 1024) + 1, 0x20));
+    await setZipEntryFromFile(fixture.outputPath, "AppxManifest.xml", oversizedManifest);
+
+    const result = runVerify([
+      "-Package", fixture.outputPath,
+      "-Manifest", fixture.manifestPath,
+    ], {});
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /embedded AppxManifest\.xml exceeds the package metadata size limit/u);
   });
 });
 
