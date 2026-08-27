@@ -70,6 +70,28 @@ test("validateCodeOssRuntime accepts a complete digest-pinned Windows runtime", 
   });
 });
 
+test("validator accepts literal real Code-OSS runtime path names", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await createRuntimeFixture(root, "windows");
+    await writeFixtureFile(
+      fixture.runtimeRoot,
+      "resources/app/node_modules.asar.unpacked/@vscode/ripgrep/bin/rg.exe",
+      "ripgrep\n",
+    );
+    await writeFixtureFile(
+      fixture.runtimeRoot,
+      "resources/app/extensions/javascript/syntaxes/Regular Expressions (JavaScript).tmLanguage",
+      "grammar\n",
+    );
+
+    await validateCodeOssRuntime({
+      root: fixture.runtimeRoot,
+      platform: "windows",
+      expectedLauncherSha256: fixture.launcherSha256,
+    });
+  });
+});
+
 const linuxOnly = process.platform === "linux" ? test : test.skip;
 
 linuxOnly("validateCodeOssRuntime accepts an executable Linux runtime", async (t) => {
@@ -253,6 +275,8 @@ const portableNameCases = [
   ["reserved device basename with numeric suffix", "LPT9"],
   ["trailing dot component", "runtime."],
   ["trailing space component", "runtime "],
+  ["character outside the closed ASCII set", "hash#name.txt"],
+  ["non-ASCII component", "caf\u00e9.txt"],
 ];
 
 test("validator rejects Windows-reserved and trailing portable path components", async (t) => {

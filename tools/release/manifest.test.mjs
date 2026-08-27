@@ -13,6 +13,7 @@ import {
   buildReleaseManifest,
   toDeterministicManifestBytes,
 } from "./manifest.mjs";
+import { validateReleaseManifestRecord } from "./release-manifest-validation.mjs";
 
 const root = new URL("./", import.meta.url);
 const sourceDateEpoch = "1787616000";
@@ -35,6 +36,12 @@ function validate(schema, value) {
   addFormats(ajv);
   const check = ajv.compile(schema);
   assert.equal(check(value), true, ajv.errorsText(check.errors));
+}
+
+function compileSchema(schema) {
+  const ajv = new Ajv2020({ allErrors: true, strict: true });
+  addFormats(ajv);
+  return ajv.compile(schema);
 }
 
 async function withStaging(t, run) {
@@ -202,6 +209,147 @@ test("manifest schema permits internal spaces but rejects unsafe Windows path co
       const unsafeManifest = JSON.parse(JSON.stringify(manifest));
       unsafeManifest.artifacts[0].relativePath = relativePath;
       assert.equal(check(unsafeManifest), false, relativePath);
+    }
+  });
+});
+
+test("manifest schema and record validation accept literal real Code-OSS paths", async (t) => {
+  await withStaging(t, async (stagingRoot) => {
+    const [schema, fixture] = await Promise.all([
+      readJson("manifest.schema.json"),
+      validInput(stagingRoot),
+    ]);
+    const { expectedLicenses, ...input } = fixture;
+    void expectedLicenses;
+    const manifest = await buildManifest(input);
+    manifest.artifacts[0].relativePath = "app/code-oss-runtime/resources/app/node_modules.asar.unpacked/@vscode/ripgrep/bin/rg.exe";
+    manifest.licenses[0].path = "app/code-oss-runtime/resources/app/extensions/javascript/syntaxes/Regular Expressions (JavaScript).tmLanguage";
+    manifest.licenses.sort((left, right) => left.path.localeCompare(right.path, "en"));
+
+    const check = compileSchema(schema);
+    assert.equal(check(manifest), true, check.errors?.map(({ message }) => message).join("; "));
+    assert.equal(validateReleaseManifestRecord(manifest), manifest);
+  });
+});
+
+test("manifest schema and record validation reject unsafe artifact and license paths", async (t) => {
+  await withStaging(t, async (stagingRoot) => {
+    const [schema, fixture] = await Promise.all([
+      readJson("manifest.schema.json"),
+      validInput(stagingRoot),
+    ]);
+    const { expectedLicenses, ...input } = fixture;
+    void expectedLicenses;
+    const manifest = await buildManifest(input);
+    const check = compileSchema(schema);
+    const unsafePaths = [
+      "app//x",
+      "app/x/",
+      "/app/x",
+      "C:/app/x",
+      "app/./x",
+      "app/../x",
+      "app\\x",
+      "app/x:y",
+      "app/less<than.txt",
+      "app/greater>than.txt",
+      "app/quote\"name.txt",
+      "app/pipe|name.txt",
+      "app/question?.txt",
+      "app/star*.txt",
+      "app/control\u0001.txt",
+      "app/hash#name.txt",
+      "app/caf\u00e9.txt",
+      "app/ leading.txt",
+      "app/trailing ",
+      "app/trailing.",
+      "app/CON.txt",
+      "app/com1.exe",
+    ];
+
+    for (const field of ["artifact", "license"]) {
+      for (const relativePath of unsafePaths) {
+        const unsafeManifest = structuredClone(manifest);
+        if (field === "artifact") unsafeManifest.artifacts[0].relativePath = relativePath;
+        else {
+          unsafeManifest.licenses[0].path = relativePath;
+          unsafeManifest.licenses.sort((left, right) => left.path.localeCompare(right.path, "en"));
+        }
+        assert.equal(check(unsafeManifest), false, `${field}: ${relativePath}`);
+        assert.throws(
+          () => validateReleaseManifestRecord(unsafeManifest),
+          /release manifest schema is invalid|portable/u,
+          `${field}: ${relativePath}`,
+        );
+      }
+    }
+  });
+});
+
+test("buildReleaseManifest accepts literal real Code-OSS artifact and license paths", async (t) => {
+  await withStaging(t, async (stagingRoot) => {
+    const { expectedLicenses, ...input } = await validInput(stagingRoot);
+    void expectedLicenses;
+    const artifact = await writeArtifact(
+      stagingRoot,
+      "app/code-oss-runtime/resources/app/node_modules.asar.unpacked/@vscode/ripgrep/bin/rg.exe",
+      "ripgrep\n",
+    );
+    const license = await writeArtifact(
+      stagingRoot,
+      "app/code-oss-runtime/resources/app/extensions/javascript/syntaxes/Regular Expressions (JavaScript).tmLanguage",
+      "grammar\n",
+    );
+    input.artifacts[0] = {
+      id: "ripgrep",
+      kind: "runtime",
+      executable: true,
+      ...artifact,
+    };
+    input.licenses = [license.relativePath];
+
+    const manifest = await buildManifest(input);
+    assert.equal(manifest.artifacts.find(({ id }) => id === "ripgrep")?.relativePath, artifact.relativePath);
+    assert.equal(manifest.licenses[0].path, license.relativePath);
+  });
+});
+
+test("buildReleaseManifest rejects unsafe artifact and license paths before filesystem access", async (t) => {
+  await withStaging(t, async (stagingRoot) => {
+    const unsafePaths = [
+      "app//x",
+      "app/x/",
+      "/app/x",
+      "C:/app/x",
+      "app/./x",
+      "app/../x",
+      "app\\x",
+      "app/x:y",
+      "app/less<than.txt",
+      "app/greater>than.txt",
+      "app/quote\"name.txt",
+      "app/pipe|name.txt",
+      "app/question?.txt",
+      "app/star*.txt",
+      "app/control\u0001.txt",
+      "app/hash#name.txt",
+      "app/caf\u00e9.txt",
+      "app/ leading.txt",
+      "app/trailing ",
+      "app/trailing.",
+      "app/CON.txt",
+      "app/com1.exe",
+    ];
+    for (const relativePath of unsafePaths) {
+      const { expectedLicenses, ...artifactInput } = await validInput(stagingRoot);
+      void expectedLicenses;
+      artifactInput.artifacts[0].relativePath = relativePath;
+      await assert.rejects(() => buildManifest(artifactInput), /unsafe artifact path/u, `artifact: ${relativePath}`);
+
+      const { expectedLicenses: ignoredLicenses, ...licenseInput } = await validInput(stagingRoot);
+      void ignoredLicenses;
+      licenseInput.licenses = [relativePath];
+      await assert.rejects(() => buildManifest(licenseInput), /unsafe license path/u, `license: ${relativePath}`);
     }
   });
 });

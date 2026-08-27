@@ -9,13 +9,13 @@ import {
   isCanonicalSemver,
   validateReleaseManifestRecord,
 } from "./release-manifest-validation.mjs";
+import { isPortableReleasePath } from "./portable-path.mjs";
 
 const platforms = Object.freeze(["linux", "windows"]);
 const digestPattern = /^[0-9a-f]{64}$/u;
 const commitPattern = /^[0-9a-f]{40}$/u;
 const artifactIdPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
 const artifactKindPattern = /^[a-z][a-z0-9-]*$/u;
-const portableRelativePathPattern = /^(?!\/)(?![A-Za-z]:)(?!.*\\)(?!.*(?:^|\/)\.\.(?:\/|$))(?!.*(?:^|\/)\.(?:\/|$))(?!.*(?:^|\/) )(?!.*(?:^|\/)[^/]*[. ](?:\/|$))(?!.*(?:^|\/)(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|\/|$))[A-Za-z0-9][A-Za-z0-9._+ /-]*$/iu;
 const expectedOutcomes = Object.freeze({
   install: "pass",
   launchHandshake: "pass",
@@ -74,15 +74,9 @@ function hasExactKeys(value, expected) {
     && Object.keys(value).sort().join("\0") === [...expected].sort().join("\0");
 }
 
-function portableRelativePath(value) {
-  return typeof value === "string"
-    && portableRelativePathPattern.test(value)
-    && value.split("/").every((segment) => segment.length > 0);
-}
-
 function validLicense(value) {
   return hasExactKeys(value, ["path", "size", "sha256"])
-    && portableRelativePath(value.path)
+    && isPortableReleasePath(value.path)
     && Number.isSafeInteger(value.size)
     && value.size >= 0
     && digestPattern.test(value.sha256);
@@ -99,7 +93,7 @@ function validArtifact(value) {
   return hasExactKeys(value, ["id", "kind", "relativePath", "size", "sha256", "executable"])
     && artifactIdPattern.test(value.id ?? "")
     && artifactKindPattern.test(value.kind ?? "")
-    && portableRelativePath(value.relativePath)
+    && isPortableReleasePath(value.relativePath)
     && Number.isSafeInteger(value.size)
     && value.size >= 0
     && digestPattern.test(value.sha256 ?? "")

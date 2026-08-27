@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
 
+import { isPortableReleasePath } from "./portable-path.mjs";
+
 const toolDirectory = dirname(fileURLToPath(import.meta.url));
 const schema = JSON.parse(await readFile(join(toolDirectory, "manifest.schema.json"), "utf8"));
 const ajv = new Ajv2020({ allErrors: true, strict: true });
@@ -78,6 +80,12 @@ export function validateReleaseManifestRecord(value, {
   version,
 } = {}) {
   if (!validateSchema(value)) throw new Error(`release manifest schema is invalid: ${schemaError()}`);
+  if (value.artifacts.some(({ relativePath }) => !isPortableReleasePath(relativePath))) {
+    throw new Error("release manifest artifact path is not portable");
+  }
+  if (value.licenses.some(({ path }) => !isPortableReleasePath(path))) {
+    throw new Error("release manifest license path is not portable");
+  }
   if (!isCanonicalSemver(value.version)) throw new Error("release manifest version is not canonical");
   if (!Number.isFinite(Date.parse(value.generatedAt)) || new Date(value.generatedAt).toISOString() !== value.generatedAt) {
     throw new Error("release manifest generatedAt is not canonical UTC ISO");

@@ -2,9 +2,11 @@ import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { createReadStream } from "node:fs";
 import { lstat, readFile, readdir, realpath } from "node:fs/promises";
-import { isAbsolute, join, posix, relative, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+
+import { isPortableReleasePath } from "./portable-path.mjs";
 
 const layouts = {
   windows: { launcherRelativePath: "Code - OSS.exe", requireExecutable: false },
@@ -30,36 +32,6 @@ function releaseInputError(code, message) {
 function withinRoot(rootPath, candidatePath) {
   const relativePath = relative(rootPath, candidatePath);
   return relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
-}
-
-function portableRelativePath(value) {
-  if (
-    typeof value !== "string" ||
-    value.length === 0 ||
-    value.includes("\\") ||
-    value.includes(":") ||
-    /[\u0000-\u001f\u007f]/u.test(value) ||
-    posix.isAbsolute(value) ||
-    isAbsolute(value) ||
-    posix.normalize(value) !== value
-  ) {
-    return false;
-  }
-  return value.split("/").every((segment) => {
-    if (
-      segment.length === 0 ||
-      segment === "." ||
-      segment === ".." ||
-      segment.startsWith(" ") ||
-      segment.endsWith(".") ||
-      segment.endsWith(" ") ||
-      /[<>:"|?*\\]/u.test(segment)
-    ) {
-      return false;
-    }
-    const base = segment.split(".", 1)[0].toUpperCase();
-    return !(["CON", "PRN", "AUX", "NUL"].includes(base) || /^(COM|LPT)[1-9]$/u.test(base));
-  });
 }
 
 async function assertNoWindowsReparsePoints(rootPath) {
@@ -105,7 +77,7 @@ async function scanRuntimeTree(rootPath, canonicalRoot) {
 
     for (const entry of entries) {
       const relativePath = currentRelativePath ? `${currentRelativePath}/${entry.name}` : entry.name;
-      if (!portableRelativePath(relativePath)) {
+      if (!isPortableReleasePath(relativePath)) {
         throw releaseInputError("RELEASE_INPUT_INVALID", "runtime tree contains a non-portable path");
       }
       const lowerCasePath = relativePath.toLowerCase();

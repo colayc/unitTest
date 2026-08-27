@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { lstat, mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, posix, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { isPortableReleasePath } from "./portable-path.mjs";
 import { isCanonicalSemver, validateReleaseManifestRecord } from "./release-manifest-validation.mjs";
 import { resolveSourceDateEpoch } from "./release-reproducibility.mjs";
 
@@ -48,37 +49,6 @@ function requireExactKeys(value, expected, name) {
   }
 }
 
-function isPortableRelativePath(value) {
-  if (
-    typeof value !== "string" ||
-    value.length === 0 ||
-    value.includes("\\") ||
-    value.includes(":") ||
-    /[\u0000-\u001f\u007f]/u.test(value) ||
-    posix.isAbsolute(value) ||
-    isAbsolute(value) ||
-    posix.normalize(value) !== value
-  ) {
-    return false;
-  }
-  const segments = value.split("/");
-  return segments.every((segment) => {
-    if (
-      segment.length === 0 ||
-      segment === "." ||
-      segment === ".." ||
-      segment.startsWith(" ") ||
-      segment.endsWith(".") ||
-      segment.endsWith(" ") ||
-      /[<>:"|?*]/u.test(segment)
-    ) {
-      return false;
-    }
-    const base = segment.split(".", 1)[0].toUpperCase();
-    return !(["CON", "PRN", "AUX", "NUL"].includes(base) || /^(COM|LPT)[1-9]$/u.test(base));
-  });
-}
-
 function withinRoot(rootPath, candidatePath) {
   const relativePath = relative(rootPath, candidatePath);
   return relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
@@ -102,10 +72,10 @@ function validateReleaseConfig(config, configPath) {
   if (config.schemaVersion !== 1 || config.product !== "unit-test-ide") {
     throw new Error("unsupported release config");
   }
-  if (!isPortableRelativePath(config.inputPath)) {
+  if (!isPortableReleasePath(config.inputPath)) {
     throw new Error(`unsafe release config inputPath: ${config.inputPath}`);
   }
-  if (!isPortableRelativePath(config.outputPath)) {
+  if (!isPortableReleasePath(config.outputPath)) {
     throw new Error(`unsafe release config outputPath: ${config.outputPath}`);
   }
   return {
@@ -141,7 +111,7 @@ async function resolvedCheckedPath(rootPath, canonicalRoot, relativePath, label)
 }
 
 async function validatedLicense(stagingRoot, canonicalRoot, license) {
-  if (!isPortableRelativePath(license)) {
+  if (!isPortableReleasePath(license)) {
     throw new Error(`unsafe license path: ${license}`);
   }
   const resolvedPath = resolve(stagingRoot, ...license.split("/"));
@@ -166,7 +136,7 @@ async function validatedLicense(stagingRoot, canonicalRoot, license) {
 async function validatedExistingLicense(stagingRoot, canonicalRoot, license) {
   requirePlainObject(license, "license");
   requireExactKeys(license, licenseKeys, "license");
-  if (!isPortableRelativePath(license.path)) {
+  if (!isPortableReleasePath(license.path)) {
     throw new Error(`unsafe license path: ${license.path}`);
   }
   if (!Number.isSafeInteger(license.size) || license.size < 0) {
@@ -204,7 +174,7 @@ async function validatedExistingLicense(stagingRoot, canonicalRoot, license) {
 async function validatedArtifact(stagingRoot, canonicalRoot, artifact) {
   requirePlainObject(artifact, "artifact");
   requireExactKeys(artifact, artifactKeys, "artifact");
-  if (!isPortableRelativePath(artifact.relativePath)) {
+  if (!isPortableReleasePath(artifact.relativePath)) {
     throw new Error("unsafe artifact path");
   }
   if (!digestPattern.test(artifact.sha256)) {

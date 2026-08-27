@@ -1,11 +1,12 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { copyFile, chmod, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, posix, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { buildReleaseManifest } from "./manifest.mjs";
 import { validateCodeOssRuntime } from "./code-oss-runtime.mjs";
+import { isPortableReleasePath } from "./portable-path.mjs";
 import { normalizeTreeTimestamps, resolveSourceDateEpoch } from "./release-reproducibility.mjs";
 
 const toolDirectory = dirname(fileURLToPath(import.meta.url));
@@ -54,36 +55,6 @@ function releaseInputMissing(message) {
 function withinRoot(rootPath, candidatePath) {
   const relativePath = relative(rootPath, candidatePath);
   return relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
-}
-
-function isPortableRelativePath(value) {
-  if (
-    typeof value !== "string" ||
-    value.length === 0 ||
-    value.includes("\\") ||
-    value.includes(":") ||
-    /[\u0000-\u001f\u007f]/u.test(value) ||
-    posix.isAbsolute(value) ||
-    isAbsolute(value) ||
-    posix.normalize(value) !== value
-  ) {
-    return false;
-  }
-  return value.split("/").every((segment) => {
-    if (
-      segment.length === 0 ||
-      segment === "." ||
-      segment === ".." ||
-      segment.startsWith(" ") ||
-      segment.endsWith(".") ||
-      segment.endsWith(" ") ||
-      /[<>:"|?*\\]/u.test(segment)
-    ) {
-      return false;
-    }
-    const base = segment.split(".", 1)[0].toUpperCase();
-    return !(["CON", "PRN", "AUX", "NUL"].includes(base) || /^(COM|LPT)[1-9]$/u.test(base));
-  });
 }
 
 async function validateRealDirectory(path, label, { missingCode = "RELEASE_INPUT_MISSING" } = {}) {
@@ -137,7 +108,7 @@ async function copyTree(sourceRoot, destinationRoot) {
       const relativePath = current.relativePath
         ? `${current.relativePath}/${entry.name}`
         : entry.name;
-      if (!isPortableRelativePath(relativePath)) {
+      if (!isPortableReleasePath(relativePath)) {
         throw new Error(`unsafe staged path: ${relativePath}`);
       }
       const sourcePath = join(sourceRoot.path, ...relativePath.split("/"));

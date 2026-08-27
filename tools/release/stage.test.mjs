@@ -94,6 +94,16 @@ async function packageInputSnapshot(root, current = "") {
 test("stageRelease copies the deterministic staging layout and writes a release manifest", async (t) => {
   await withTemporaryRoot(t, async (root) => {
     const fixture = await createReleaseFixture(root);
+    await writeFixtureFile(
+      fixture.codeOssRoot,
+      "resources/app/node_modules.asar.unpacked/@vscode/ripgrep/bin/rg.exe",
+      "ripgrep\n",
+    );
+    await writeFixtureFile(
+      fixture.codeOssRoot,
+      "resources/app/extensions/javascript/syntaxes/Regular Expressions (JavaScript).tmLanguage",
+      "grammar\n",
+    );
     const result = await stageRelease({
       platform: "windows",
       architecture: "x64",
@@ -109,6 +119,8 @@ test("stageRelease copies the deterministic staging layout and writes a release 
       "app/code-oss-runtime/resources/app/product.json",
       "app/code-oss-runtime/locales/en-US.pak",
       "app/code-oss-runtime/runtime.dll",
+      "app/code-oss-runtime/resources/app/node_modules.asar.unpacked/@vscode/ripgrep/bin/rg.exe",
+      "app/code-oss-runtime/resources/app/extensions/javascript/syntaxes/Regular Expressions (JavaScript).tmLanguage",
       "app/extensions/unit-test-ide/package.json",
       "app/extensions/unit-test-ide/dist/src/extension.js",
       "service/unit-test-service.exe",
@@ -278,6 +290,32 @@ test("stageRelease rejects leading-space source components", async (t) => {
       }),
       /unsafe staged path:  leading\.txt/u,
     );
+  });
+});
+
+test("stageRelease rejects source components outside the portable ASCII set", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    for (const [label, relativePath] of [
+      ["invalid character", "hash#name.txt"],
+      ["non-ASCII", "caf\u00e9.txt"],
+    ]) {
+      await t.test(label, async () => {
+        const fixture = await createReleaseFixture(join(root, label));
+        await writeFixtureFile(fixture.cmakeRoot, relativePath, "unsafe bundle path\n");
+
+        await assert.rejects(
+          () => stageRelease({
+            platform: "windows",
+            architecture: "x64",
+            version: "1.2.3",
+            sourceCommit: "a".repeat(40),
+            sourceDateEpoch,
+            ...fixture,
+          }),
+          /unsafe staged path/u,
+        );
+      });
+    }
   });
 });
 
