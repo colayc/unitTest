@@ -45,6 +45,7 @@ baseline_package="$(realpath -- "$baseline_package")"
 baseline_manifest="$(realpath -- "$baseline_manifest")"
 [[ "$(sha256sum -- "$package" | cut -d' ' -f1)" == "$package_sha256" ]] || { echo "package SHA-256 mismatch" >&2; exit 1; }
 [[ "$(sha256sum -- "$baseline_package" | cut -d' ' -f1)" == "$baseline_package_sha256" ]] || { echo "baseline package SHA-256 mismatch" >&2; exit 1; }
+chmod u+x -- "$package" "$baseline_package"
 
 if [[ -z "$root" ]]; then root="$(mktemp -u "${TMPDIR:-/tmp}/unit-test-ide-install-smoke.XXXXXXXX")"; fi
 root="$(realpath -m -- "$root")"
@@ -74,7 +75,6 @@ node -e '
 extract_payload() {
   local image="$1" destination="$2"
   mkdir -p -- "$destination"
-  chmod u+x -- "$image"
   (cd -- "$destination" && "$image" --appimage-extract >/dev/null)
   printf '%s\n' "$destination/squashfs-root/usr/lib/unit-test-ide"
 }

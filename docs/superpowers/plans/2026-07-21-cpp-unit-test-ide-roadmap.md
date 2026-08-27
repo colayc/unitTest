@@ -134,7 +134,7 @@ GitHub Actions 的 PASS/report 是开发验收证据，GitHub 与 Gitee 只承�
 
 验收标准：干净机器安装、升级、回滚、卸载清理、许可证审查和高风险安全门禁均通过。
 
-当前状态：Phase 8 的确定性 staging 已消费摘要固定的完整 Code-OSS runtime 目录制品，并将完整 upstream runtime 分别绑定到 Windows MSIX 与 Linux AppImage；安装包摘要校验、许可审计、安装/升级/回滚/卸载 smoke 与 fail-closed 发布资格门禁也已实现。Phase 8 仍未完成：本地 Windows 工作区不能替代原生 Linux AppImage 与干净机器 CI 证据，测试签名路径也不能替代正式 Windows 签名证据；第三方声明仍须附加最终许可证/法务审查记录。资格报告会明确保留这些缺失原因，只有同一源码提交的双平台原生证据、摘要、签名要求、生命周期和许可记录全部闭合时才允许发布制品。
+当前状态：Phase 8 的确定性 staging 已消费摘要固定的完整 Code-OSS runtime 目录制品，并将完整 upstream runtime 分别绑定到 Windows MSIX 与 Linux AppImage；Linux 消费者合同已要求受信任 run 的 `runtime/` 与闭集 mode inventory，在 staging 前验证完整文件集合/摘要并恢复全部 `0755`/`0644`，避免 artifact transport 丢失执行位。安装包摘要校验、许可审计、安装/升级/回滚/卸载 smoke 与 fail-closed 发布资格门禁也已实现。Phase 8 仍未完成：受信任 Linux runtime artifact 的生产流程与原生 Linux AppImage/干净机器 CI 证据尚未落地，本地 Windows 工作区不能替代这些证据；测试签名路径也不能替代正式 Windows 签名证据，第三方声明仍须附加最终许可证/法务审查记录。资格报告会明确保留这些缺失原因，只有同一源码提交的双平台原生证据、摘要、签名要求、生命周期和许可记录全部闭合时才允许发布制品。
 
 ### Phase 9：完整矩阵、性能与发布资格确认
 

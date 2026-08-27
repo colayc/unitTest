@@ -27,6 +27,8 @@ const baselineGeneratedAt = "2026-08-24T00:00:00.000Z";
 const sourceDateEpoch = "1787616000";
 const packageMsixScript = resolve("tools/release/windows/package-msix.ps1");
 const installSmokeScript = resolve("tools/release/install-smoke.ps1");
+const linuxInstallSmokeScript = resolve("tools/release/install-smoke.sh");
+const linuxOnly = process.platform === "linux" ? test : test.skip;
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -629,4 +631,77 @@ test("install smoke workflow downloads digest-bearing produced packages before e
     assert.match(job, /manifest_sha256/u);
     assert.match(job, /baseline_package/u);
   }
+});
+
+linuxOnly("Linux install smoke restores both AppImage execute bits before either verifier runs", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const scriptRoot = join(root, "tools", "release");
+    const linuxRoot = join(scriptRoot, "linux");
+    await mkdir(linuxRoot, { recursive: true });
+    await copyFile(linuxInstallSmokeScript, join(scriptRoot, "install-smoke.sh"));
+
+    const targetPackage = join(root, "target.AppImage");
+    const baselinePackage = join(root, "baseline.AppImage");
+    const fakeImage = "#!/usr/bin/env bash\nmkdir -p squashfs-root/usr/lib/unit-test-ide\n";
+    await writeFile(targetPackage, fakeImage, { mode: 0o644 });
+    await writeFile(baselinePackage, fakeImage, { mode: 0o644 });
+    await chmod(targetPackage, 0o644);
+    await chmod(baselinePackage, 0o644);
+
+    await writeFile(join(linuxRoot, "verify-appimage.mjs"), `
+import { access } from "node:fs/promises";
+import { constants } from "node:fs";
+const image = process.argv[process.argv.indexOf("--image") + 1];
+await access(image, constants.X_OK);
+`);
+    await writeFile(join(scriptRoot, "update.mjs"), `
+import { writeFile } from "node:fs/promises";
+const value = (flag) => process.argv[process.argv.indexOf(flag) + 1];
+await writeFile(value("--evidence"), JSON.stringify({
+  platform: "linux",
+  packageSha256: value("--package-sha256"),
+  manifestSha256: value("--manifest-sha256"),
+  version: value("--version"),
+  rollbackVersion: "1.0.0",
+  rollbackPackageSha256: value("--baseline-package-sha256"),
+  rollbackManifestSha256: value("--baseline-manifest-sha256"),
+  outcomes: { upgradeLaunch: "failed-as-expected", rollbackLaunch: "pass", packageResidueAbsent: "pass" },
+}));
+`);
+
+    const packageSha256 = sha256(await readFile(targetPackage));
+    const baselinePackageSha256 = sha256(await readFile(baselinePackage));
+    const targetManifest = join(root, "target.json");
+    const baselineManifest = join(root, "baseline.json");
+    const targetManifestValue = {
+      version: "2.0.0",
+      packageSha256,
+      releaseManifestSha256: "a".repeat(64),
+    };
+    const baselineManifestValue = {
+      version: "1.0.0",
+      packageSha256: baselinePackageSha256,
+      releaseManifestSha256: "b".repeat(64),
+    };
+    await writeFile(targetManifest, JSON.stringify(targetManifestValue));
+    await writeFile(baselineManifest, JSON.stringify(baselineManifestValue));
+    const smokeRoot = join(root, "smoke");
+    const evidence = join(root, "evidence.json");
+    const result = spawnSync("bash", [join(scriptRoot, "install-smoke.sh"),
+      "--root", smokeRoot,
+      "--evidence", evidence,
+      "--package", targetPackage,
+      "--package-sha256", packageSha256,
+      "--manifest", targetManifest,
+      "--manifest-sha256", targetManifestValue.releaseManifestSha256,
+      "--version", targetManifestValue.version,
+      "--baseline-package", baselinePackage,
+      "--baseline-package-sha256", baselinePackageSha256,
+      "--baseline-manifest", baselineManifest,
+      "--baseline-manifest-sha256", baselineManifestValue.releaseManifestSha256,
+      "--baseline-version", baselineManifestValue.version,
+    ], { encoding: "utf8", windowsHide: true });
+
+    assert.equal(result.status, 0, result.stderr);
+  });
 });

@@ -29,7 +29,7 @@ on:
         required: true
         type: string
       linux_code_oss_sha256:
-        description: SHA-256 of root-level code-oss in the complete code-oss-linux-x64 runtime artifact
+        description: SHA-256 of runtime/code-oss in the complete code-oss-linux-x64 runtime artifact
         required: true
         type: string
       linux_appimagetool_sha256:
@@ -499,24 +499,6 @@ jobs:
           path: .release/inputs/linux-appimagetool
           github-token: ${{ github.token }}
           run-id: ${{ env.RELEASE_INPUT_RUN_ID }}
-      - name: Verify and export release inputs
-        shell: bash
-        run: |
-          runtime_root="$PWD/.release/inputs/linux-code-oss"
-          launcher="$runtime_root/code-oss"
-          [[ -f "$launcher" ]] || { echo 'RELEASE_INPUT_MISSING: code-oss-linux-x64 must contain root-level code-oss' >&2; exit 1; }
-          mapfile -t appimagetool_matches < <(find .release/inputs/linux-appimagetool -type f -name appimagetool-x86_64.AppImage -print)
-          ((${#appimagetool_matches[@]} == 1)) || { echo 'RELEASE_INPUT_MISSING: appimagetool-linux-x64 must contain exactly one appimagetool-x86_64.AppImage' >&2; exit 1; }
-          [[ "$(sha256sum "$launcher" | cut -d' ' -f1)" == "$CODE_OSS_SHA256" ]] || { echo 'RELEASE_INPUT_MISSING: code-oss digest does not match CODE_OSS_SHA256' >&2; exit 1; }
-          [[ "$(sha256sum "${appimagetool_matches[0]}" | cut -d' ' -f1)" == "$APPIMAGETOOL_SHA256" ]] || { echo 'RELEASE_INPUT_MISSING: appimagetool digest does not match APPIMAGETOOL_SHA256' >&2; exit 1; }
-          source_date_epoch="$(git show -s --format=%ct HEAD)"
-          [[ "$source_date_epoch" =~ ^(0|[1-9][0-9]*)$ ]] || { echo 'RELEASE_INPUT_MISSING: source commit has no canonical SOURCE_DATE_EPOCH' >&2; exit 1; }
-          chmod u+x "$launcher" "${appimagetool_matches[0]}"
-          [[ -x "$launcher" ]] || { echo 'RELEASE_INPUT_MISSING: root-level code-oss must be executable' >&2; exit 1; }
-          echo "CODE_OSS_RUNTIME_ROOT=$runtime_root" >> "$GITHUB_ENV"
-          echo "RELEASE_APPIMAGETOOL_PATH=$PWD/${appimagetool_matches[0]}" >> "$GITHUB_ENV"
-          echo "RELEASE_APPIMAGETOOL_SHA256=$APPIMAGETOOL_SHA256" >> "$GITHUB_ENV"
-          echo "SOURCE_DATE_EPOCH=$source_date_epoch" >> "$GITHUB_ENV"
       - uses: pnpm/action-setup@v4
         with:
           version: 11.4.0
@@ -525,6 +507,33 @@ jobs:
         with:
           node-version: 24.18.0
           cache: pnpm
+      - name: Verify and export release inputs
+        shell: bash
+        run: |
+          input_root="$PWD/.release/inputs/linux-code-oss"
+          runtime_root="$input_root/runtime"
+          inventory="$input_root/code-oss-runtime-mode.json"
+          launcher="$runtime_root/code-oss"
+          mapfile -t runtime_artifact_entries < <(find "$input_root" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort)
+          ((${#runtime_artifact_entries[@]} == 2)) && [[ "${runtime_artifact_entries[0]}" == 'code-oss-runtime-mode.json' && "${runtime_artifact_entries[1]}" == 'runtime' ]] || { echo 'RELEASE_INPUT_INVALID: code-oss-linux-x64 must contain only runtime/ and code-oss-runtime-mode.json' >&2; exit 1; }
+          [[ -d "$runtime_root" && ! -L "$runtime_root" && -f "$inventory" && ! -L "$inventory" ]] || { echo 'RELEASE_INPUT_INVALID: Linux runtime artifact layout is invalid' >&2; exit 1; }
+          [[ -f "$launcher" && ! -L "$launcher" ]] || { echo 'RELEASE_INPUT_MISSING: code-oss-linux-x64 must contain runtime/code-oss' >&2; exit 1; }
+          mapfile -t appimagetool_matches < <(find .release/inputs/linux-appimagetool -type f -name appimagetool-x86_64.AppImage -print)
+          ((${#appimagetool_matches[@]} == 1)) || { echo 'RELEASE_INPUT_MISSING: appimagetool-linux-x64 must contain exactly one appimagetool-x86_64.AppImage' >&2; exit 1; }
+          [[ "$(sha256sum "$launcher" | cut -d' ' -f1)" == "$CODE_OSS_SHA256" ]] || { echo 'RELEASE_INPUT_MISSING: code-oss digest does not match CODE_OSS_SHA256' >&2; exit 1; }
+          [[ "$(sha256sum "${appimagetool_matches[0]}" | cut -d' ' -f1)" == "$APPIMAGETOOL_SHA256" ]] || { echo 'RELEASE_INPUT_MISSING: appimagetool digest does not match APPIMAGETOOL_SHA256' >&2; exit 1; }
+          source_date_epoch="$(git show -s --format=%ct HEAD)"
+          [[ "$source_date_epoch" =~ ^(0|[1-9][0-9]*)$ ]] || { echo 'RELEASE_INPUT_MISSING: source commit has no canonical SOURCE_DATE_EPOCH' >&2; exit 1; }
+          chmod u+x "${appimagetool_matches[0]}"
+          node tools/release/linux/runtime-mode-inventory.mjs restore \
+            --root "$runtime_root" \
+            --inventory "$inventory" \
+            --launcher-sha256 "$CODE_OSS_SHA256" >/dev/null
+          [[ -x "$launcher" ]] || { echo 'RELEASE_INPUT_INVALID: runtime/code-oss must be executable after mode restoration' >&2; exit 1; }
+          echo "CODE_OSS_RUNTIME_ROOT=$runtime_root" >> "$GITHUB_ENV"
+          echo "RELEASE_APPIMAGETOOL_PATH=$PWD/${appimagetool_matches[0]}" >> "$GITHUB_ENV"
+          echo "RELEASE_APPIMAGETOOL_SHA256=$APPIMAGETOOL_SHA256" >> "$GITHUB_ENV"
+          echo "SOURCE_DATE_EPOCH=$source_date_epoch" >> "$GITHUB_ENV"
       - uses: actions/setup-go@v6
         with:
           go-version: 1.26.6
