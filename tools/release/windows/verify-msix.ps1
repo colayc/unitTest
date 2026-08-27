@@ -168,6 +168,7 @@ function Decode-ArchiveEntryPath {
 
   $decodedSegments = @()
   foreach ($segment in $Path.Split('/')) {
+    $decoded = $segment
     if ($segment.Contains('%')) {
       if ($segment -cnotmatch '^(?:[^%]|%[0-9A-Fa-f]{2})+$') {
         Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message "unsafe archive entry path: $Path"
@@ -176,10 +177,20 @@ function Decode-ArchiveEntryPath {
       if ([Uri]::EscapeDataString($decoded) -cne $segment) {
         Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message "non-canonical archive entry path: $Path"
       }
-      $decodedSegments += $decoded
-    } else {
-      $decodedSegments += $segment
     }
+    if (
+      [string]::IsNullOrWhiteSpace($decoded) -or
+      $decoded -ceq '.' -or
+      $decoded -ceq '..' -or
+      $decoded.Contains('/') -or
+      $decoded.Contains('\') -or
+      $decoded.Contains('%') -or
+      $decoded.Contains(':') -or
+      $decoded -match '[\x00-\x1F\x7F]'
+    ) {
+      Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message "unsafe archive entry path: $Path"
+    }
+    $decodedSegments += $decoded
   }
   return [string]::Join('/', $decodedSegments)
 }
@@ -206,7 +217,7 @@ function Get-ValidatedEntryMap {
       continue
     }
     $rawPath = [string]$entry.FullName
-    $normalizedPath = Decode-ArchiveEntryPath -Path ($rawPath -replace '\\', '/')
+    $normalizedPath = Decode-ArchiveEntryPath -Path $rawPath
     $segments = @($normalizedPath.Split('/'))
     if (
       [string]::IsNullOrWhiteSpace($rawPath) -or
