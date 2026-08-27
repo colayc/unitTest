@@ -12,6 +12,14 @@ import { stageRelease } from "./stage.mjs";
 const sourceDateEpoch = "1787616000";
 const generatedAt = "2026-08-25T00:00:00.000Z";
 const linuxOnly = process.platform === "linux" ? test : test.skip;
+const codeOssNoticePaths = [
+  "LICENSES.chromium.html",
+  "resources/app/LICENSE.txt",
+  "resources/app/ThirdPartyNotices.txt",
+  "resources/app/extensions/git/dist/main.js.LICENSE.txt",
+  "resources/app/extensions/latex/cpp-bailout-license.txt",
+  "resources/app/extensions/ms-vscode.js-debug/ThirdPartyNotices.txt",
+];
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -45,6 +53,12 @@ async function createReleaseFixture(root, platform = "windows") {
   await writeFixtureFile(codeOssRoot, "resources/app/package.json", JSON.stringify({ name: "code-oss" }, null, 2));
   await writeFixtureFile(codeOssRoot, "resources/app/LICENSE.txt", "Code - OSS license\n");
   await writeFixtureFile(codeOssRoot, "LICENSES.chromium.html", "Chromium notices\n");
+  await writeFixtureFile(codeOssRoot, "resources/app/ThirdPartyNotices.txt", "App third-party notices\n");
+  await writeFixtureFile(codeOssRoot, "resources/app/extensions/git/dist/main.js.LICENSE.txt", "Git extension license\n");
+  await writeFixtureFile(codeOssRoot, "resources/app/extensions/latex/cpp-bailout-license.txt", "LaTeX extension license\n");
+  await writeFixtureFile(codeOssRoot, "resources/app/extensions/ms-vscode.js-debug/ThirdPartyNotices.txt", "Debug extension notices\n");
+  await writeFixtureFile(codeOssRoot, "resources/app/extensions/example/unlicensed.txt", "Not a license notice\n");
+  await writeFixtureFile(codeOssRoot, "resources/app/extensions/example/ThirdPartyNoticeship.txt", "Not a third-party notice\n");
   await writeFixtureFile(codeOssRoot, "locales/en-US.pak", "locale data\n");
   await writeFixtureFile(codeOssRoot, "runtime.dll", "runtime library\n");
   const service = await writeFixtureFile(root, `inputs/service/unit-test-service${platform === "windows" ? ".exe" : ""}`, "service binary\n");
@@ -130,8 +144,7 @@ test("stageRelease copies the deterministic staging layout and writes a release 
       "bundles/coverage/manifest.json",
       "licenses/cmake/licenses/LICENSE.txt",
       "licenses/coverage/licenses/NOTICE.txt",
-      "licenses/code-oss/resources/app/LICENSE.txt",
-      "licenses/code-oss/LICENSES.chromium.html",
+      ...codeOssNoticePaths.map((relativePath) => `licenses/code-oss/${relativePath}`),
       "release-manifest.json",
     ]) {
       const bytes = await readFile(join(result.stagingRoot, ...relativePath.split("/")));
@@ -165,10 +178,27 @@ test("stageRelease copies the deterministic staging layout and writes a release 
       [
         "licenses/cmake/licenses/LICENSE.txt",
         "licenses/code-oss/LICENSES.chromium.html",
+        "licenses/code-oss/resources/app/extensions/git/dist/main.js.LICENSE.txt",
+        "licenses/code-oss/resources/app/extensions/latex/cpp-bailout-license.txt",
+        "licenses/code-oss/resources/app/extensions/ms-vscode.js-debug/ThirdPartyNotices.txt",
         "licenses/code-oss/resources/app/LICENSE.txt",
+        "licenses/code-oss/resources/app/ThirdPartyNotices.txt",
         "licenses/coverage/licenses/NOTICE.txt",
       ],
     );
+    for (const relativePath of codeOssNoticePaths) {
+      const stagedPath = `licenses/code-oss/${relativePath}`;
+      assert.equal(manifest.licenses.filter(({ path }) => path === stagedPath).length, 1, stagedPath);
+    }
+    for (const relativePath of [
+      "resources/app/extensions/example/unlicensed.txt",
+      "resources/app/extensions/example/ThirdPartyNoticeship.txt",
+    ]) {
+      await assert.rejects(
+        () => lstat(join(result.stagingRoot, "licenses", "code-oss", ...relativePath.split("/"))),
+        /ENOENT/u,
+      );
+    }
     for (const license of manifest.licenses) {
       const bytes = await readFile(join(result.stagingRoot, ...license.path.split("/")));
       assert.equal(license.size, bytes.length);
