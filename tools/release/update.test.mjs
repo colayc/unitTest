@@ -24,9 +24,79 @@ const productRelativePath = "app/code-oss-runtime/resources/app/product.json";
 const corruptedLauncherBytes = Buffer.from([0x00, 0xff, 0x00, 0x7f, 0x55, 0xaa]);
 const generatedAt = "2026-08-25T00:00:00.000Z";
 const baselineGeneratedAt = "2026-08-24T00:00:00.000Z";
+const sourceDateEpoch = "1787616000";
+const packageMsixScript = resolve("tools/release/windows/package-msix.ps1");
+const installSmokeScript = resolve("tools/release/install-smoke.ps1");
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function runPowerShellFile(filePath, args, env = {}) {
+  return spawnSync("pwsh.exe", [
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    filePath,
+    ...args,
+  ], {
+    cwd: resolve("."),
+    encoding: "utf8",
+    env: { ...process.env, ...env },
+    windowsHide: true,
+  });
+}
+
+function runWindowsPowerShellFile(filePath, args, env = {}) {
+  return spawnSync("powershell.exe", [
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    filePath,
+    ...args,
+  ], {
+    cwd: resolve("."),
+    encoding: "utf8",
+    env: { ...process.env, ...env },
+    windowsHide: true,
+  });
+}
+
+function resolveRealMakeAppx() {
+  const result = spawnSync("powershell.exe", [
+    "-NoProfile",
+    "-Command",
+    String.raw`
+$command = Get-Command -Name 'makeappx.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($null -ne $command) { [Console]::Write($command.Source); exit 0 }
+$kitsRoot = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86)
+if (-not [string]::IsNullOrWhiteSpace($kitsRoot)) {
+  $candidateRoot = Join-Path $kitsRoot 'Windows Kits\10\bin'
+  if (Test-Path -LiteralPath $candidateRoot) {
+    $candidate = Get-ChildItem -LiteralPath $candidateRoot -Filter 'makeappx.exe' -Recurse -File -ErrorAction SilentlyContinue |
+      Sort-Object -Property FullName -Descending | Select-Object -First 1
+    if ($null -ne $candidate) { [Console]::Write($candidate.FullName); exit 0 }
+  }
+}
+exit 1
+`,
+  ], { encoding: "utf8", windowsHide: true });
+  return result.status === 0 ? result.stdout.trim() : null;
+}
+
+function packageWithRealMakeAppx(artifact, outputPath, version, makeAppx) {
+  return runWindowsPowerShellFile(packageMsixScript, [
+    "-StagingRoot", artifact,
+    "-Output", outputPath,
+    "-Version", version,
+    "-Publisher", "CN=Unit Test IDE",
+  ], {
+    RELEASE_MAKEAPPX_PATH: makeAppx,
+    RELEASE_SIGNING_REQUIRED: "0",
+    SOURCE_DATE_EPOCH: sourceDateEpoch,
+  });
 }
 
 async function writeFixtureFile(root, relativePath, value) {
@@ -182,6 +252,75 @@ test("package-backed production smoke corrupts the target then really launches t
     assert.deepEqual(await readFile(sourceLauncher), sourceBytes);
     assert.deepEqual(await installedProductAfterCorruption, sourceProductBytes);
     assert.deepEqual(await readFile(sourceProduct), sourceProductBytes);
+  });
+});
+
+const windowsOnly = process.platform === "win32" ? test : test.skip;
+
+windowsOnly("install-smoke completes the full lifecycle for real makeappx packages with a spaced launcher", async (t) => {
+  const realMakeAppx = resolveRealMakeAppx();
+  if (!realMakeAppx) {
+    t.skip("makeappx.exe is unavailable in this environment");
+    return;
+  }
+
+  await withTemporaryRoot(t, async (root) => {
+    const baselineArtifact = await createArtifact(root, "1.0.0", {
+      launcherSource: process.execPath,
+      manifestGeneratedAt: generatedAt,
+      manifestSourceCommit: baselineSourceCommit,
+    });
+    const artifact = await createArtifact(root, "2.0.0", { launcherSource: process.execPath });
+    const baselinePackagePath = join(root, "downloads", "unit-test-ide-1.0.0.msix");
+    const packagePath = join(root, "downloads", "unit-test-ide-2.0.0.msix");
+    const baselinePackageResult = packageWithRealMakeAppx(
+      baselineArtifact,
+      baselinePackagePath,
+      "1.0.0",
+      realMakeAppx,
+    );
+    assert.equal(baselinePackageResult.status, 0, baselinePackageResult.stderr);
+    const packageResult = packageWithRealMakeAppx(
+      artifact,
+      packagePath,
+      "2.0.0",
+      realMakeAppx,
+    );
+    assert.equal(packageResult.status, 0, packageResult.stderr);
+
+    const baselineManifestPath = join(baselineArtifact, "release-manifest.json");
+    const manifestPath = join(artifact, "release-manifest.json");
+    const evidencePath = join(root, "install-smoke.json");
+    const smokeRoot = join(root, "disposable-smoke-root");
+    const result = runPowerShellFile(installSmokeScript, [
+      "-EvidencePath", evidencePath,
+      "-PackagePath", packagePath,
+      "-PackageSha256", sha256(await readFile(packagePath)),
+      "-ManifestPath", manifestPath,
+      "-ManifestSha256", sha256(await readFile(manifestPath)),
+      "-Version", "2.0.0",
+      "-BaselinePackagePath", baselinePackagePath,
+      "-BaselinePackageSha256", sha256(await readFile(baselinePackagePath)),
+      "-BaselineManifestPath", baselineManifestPath,
+      "-BaselineManifestSha256", sha256(await readFile(baselineManifestPath)),
+      "-BaselineVersion", "1.0.0",
+      "-Root", smokeRoot,
+    ]);
+
+    assert.equal(result.status, 0, result.stderr);
+    const evidence = JSON.parse(await readFile(evidencePath, "utf8"));
+    assert.deepEqual(evidence.outcomes, {
+      install: "pass",
+      launchHandshake: "pass",
+      upgrade: "pass",
+      upgradeLaunch: "failed-as-expected",
+      rollback: "pass",
+      rollbackLaunch: "pass",
+      repeatedRollback: "pass",
+      uninstall: "pass",
+      userDataPreserved: "pass",
+      packageResidueAbsent: "pass",
+    });
   });
 });
 

@@ -19,7 +19,11 @@ $ErrorActionPreference = 'Stop'
 $scriptRoot = Split-Path -Parent $PSCommandPath
 $updateScript = Join-Path $scriptRoot 'update.mjs'
 $verifyScript = Join-Path $scriptRoot 'windows\verify-msix.ps1'
+$entryPathHelper = Join-Path $scriptRoot 'windows\msix-entry-path.ps1'
 $createdRoot = $false
+$targetArchive = $null
+$baselineArchive = $null
+. $entryPathHelper
 
 function Resolve-RealFile {
   param([string]$Path, [string]$Label)
@@ -39,20 +43,33 @@ function Require-FileDigest {
   if ($actual -cne $Expected) { throw "$Label SHA-256 mismatch" }
 }
 
+function Copy-MsixEntryToFile {
+  param($EntryRecord, [string]$Destination)
+  if ($null -eq $EntryRecord) { throw 'required package entry is missing' }
+  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Destination) | Out-Null
+  $input = $EntryRecord.Entry.Open()
+  $output = [IO.File]::Open($Destination, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+  try {
+    $input.CopyTo($output)
+  } finally {
+    $output.Dispose()
+    $input.Dispose()
+  }
+}
+
 function Expand-VerifiedPayload {
-  param([string]$Manifest, [string]$ExtractRoot, [string]$PayloadRoot)
+  param([string]$Manifest, $EntryMap, [string]$PayloadRoot)
   $releaseManifest = Get-Content -LiteralPath $Manifest -Raw | ConvertFrom-Json
   New-Item -ItemType Directory -Path $PayloadRoot | Out-Null
   $paths = @($releaseManifest.artifacts | ForEach-Object { [string]$_.relativePath })
   $paths += @($releaseManifest.licenses | ForEach-Object { [string]$_.path })
   $paths += 'release-manifest.json'
   foreach ($relativePath in $paths) {
-    if ($relativePath -match '\\|:|(^|/)\.\.(/|$)|^/') { throw "unsafe package payload path: $relativePath" }
-    $nativePath = $relativePath.Replace('/', [IO.Path]::DirectorySeparatorChar)
-    $source = Join-Path $ExtractRoot $nativePath
+    $canonicalPath = ConvertFrom-CanonicalMsixEntryPath -Path $relativePath
+    if ($canonicalPath -cne $relativePath) { throw "non-canonical package payload path: $relativePath" }
+    $nativePath = $canonicalPath.Replace('/', [IO.Path]::DirectorySeparatorChar)
     $destination = Join-Path $PayloadRoot $nativePath
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
-    Copy-Item -LiteralPath $source -Destination $destination
+    Copy-MsixEntryToFile -EntryRecord $EntryMap[$canonicalPath.ToLowerInvariant()] -Destination $destination
   }
 }
 
@@ -85,14 +102,14 @@ try {
   $createdRoot = $true
   New-Item -ItemType Directory -Force -Path (Split-Path -Parent $resolvedEvidence) | Out-Null
   Add-Type -AssemblyName System.IO.Compression.FileSystem
-  $targetExtract = Join-Path $resolvedRoot 'target-msix'
-  $baselineExtract = Join-Path $resolvedRoot 'baseline-msix'
-  New-Item -ItemType Directory -Path $targetExtract | Out-Null
-  New-Item -ItemType Directory -Path $baselineExtract | Out-Null
-  [IO.Compression.ZipFile]::ExtractToDirectory($resolvedPackage, $targetExtract)
-  [IO.Compression.ZipFile]::ExtractToDirectory($resolvedBaselinePackage, $baselineExtract)
-  $embeddedManifest = Join-Path $targetExtract 'release-manifest.json'
-  $embeddedBaselineManifest = Join-Path $baselineExtract 'release-manifest.json'
+  $targetArchive = [IO.Compression.ZipFile]::OpenRead($resolvedPackage)
+  $baselineArchive = [IO.Compression.ZipFile]::OpenRead($resolvedBaselinePackage)
+  $targetEntryMap = Get-CanonicalMsixEntryMap -Archive $targetArchive
+  $baselineEntryMap = Get-CanonicalMsixEntryMap -Archive $baselineArchive
+  $embeddedManifest = Join-Path $resolvedRoot 'target-manifest\release-manifest.json'
+  $embeddedBaselineManifest = Join-Path $resolvedRoot 'baseline-manifest\release-manifest.json'
+  Copy-MsixEntryToFile -EntryRecord $targetEntryMap['release-manifest.json'] -Destination $embeddedManifest
+  Copy-MsixEntryToFile -EntryRecord $baselineEntryMap['release-manifest.json'] -Destination $embeddedBaselineManifest
   Require-FileDigest -Path $embeddedManifest -Expected $ManifestSha256 -Label 'embedded manifest'
   Require-FileDigest -Path $embeddedBaselineManifest -Expected $BaselineManifestSha256 -Label 'embedded baseline manifest'
   if ((Get-Content -LiteralPath $embeddedManifest -Raw | ConvertFrom-Json).version -cne $Version) { throw 'embedded manifest version mismatch' }
@@ -101,8 +118,8 @@ try {
   & $verifyScript -Package $resolvedBaselinePackage -Manifest $embeddedBaselineManifest | Out-Null
   $targetPayload = Join-Path $resolvedRoot 'target-payload'
   $baselinePayload = Join-Path $resolvedRoot 'baseline-payload'
-  Expand-VerifiedPayload -Manifest $embeddedManifest -ExtractRoot $targetExtract -PayloadRoot $targetPayload
-  Expand-VerifiedPayload -Manifest $embeddedBaselineManifest -ExtractRoot $baselineExtract -PayloadRoot $baselinePayload
+  Expand-VerifiedPayload -Manifest $embeddedManifest -EntryMap $targetEntryMap -PayloadRoot $targetPayload
+  Expand-VerifiedPayload -Manifest $embeddedBaselineManifest -EntryMap $baselineEntryMap -PayloadRoot $baselinePayload
 
   & node $updateScript smoke `
     --platform windows `
@@ -133,5 +150,7 @@ try {
     $evidence.outcomes.packageResidueAbsent -ne 'pass'
   ) { throw 'Install smoke evidence failed closed validation' }
 } finally {
+  if ($null -ne $baselineArchive) { $baselineArchive.Dispose() }
+  if ($null -ne $targetArchive) { $targetArchive.Dispose() }
   if ($createdRoot -and (Test-Path -LiteralPath $resolvedRoot)) { Remove-Item -LiteralPath $resolvedRoot -Recurse -Force }
 }

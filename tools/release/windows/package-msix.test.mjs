@@ -730,6 +730,30 @@ windowsOnly("verify-msix rejects encoded archive entry identities before payload
   });
 });
 
+windowsOnly("verify-msix rejects unsafe Windows metadata entry components before filtering", async (t) => {
+  const maliciousEntries = [
+    ["leading space", "AppxMetadata/ leading.txt"],
+    ["trailing space", "AppxMetadata/trailing.txt "],
+    ["trailing dot", "AppxMetadata/trailing."],
+    ["device basename extension", "AppxMetadata/CON.txt"],
+  ];
+
+  await withTemporaryRoot(t, async (root) => {
+    for (const [name, entryName] of maliciousEntries) {
+      const fixture = await packageWithFakeTools(join(root, name.replaceAll(" ", "-")));
+      await addZipEntry(fixture.outputPath, entryName, "malicious");
+      const result = runVerify([
+        "-Package", fixture.outputPath,
+        "-Manifest", fixture.manifestPath,
+      ], {});
+
+      assert.equal(result.status, 1, name);
+      assert.match(result.stderr, /RELEASE_VERIFICATION_FAILED/u, name);
+      assert.match(result.stderr, /unsafe|device|space|dot/u, name);
+    }
+  });
+});
+
 windowsOnly("verify-msix rejects a tampered packaged Code-OSS launcher whose hash no longer matches the staged manifest", async (t) => {
   await withTemporaryRoot(t, async (root) => {
     const fixture = await packageWithFakeTools(root);
