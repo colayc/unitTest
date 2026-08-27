@@ -15,7 +15,7 @@ const digestPattern = /^[0-9a-f]{64}$/u;
 const fixedPaths = {
   appRun: "AppRun",
   desktopEntry: "unit-test-ide.desktop",
-  launcher: "usr/lib/unit-test-ide/app/code-oss",
+  launcher: "usr/lib/unit-test-ide/app/code-oss-runtime/code-oss",
   releaseManifestPath: "usr/lib/unit-test-ide/release-manifest.json",
   payloadRoot: "usr/lib/unit-test-ide",
 };
@@ -393,7 +393,7 @@ export async function verifyAppImage({ image, manifest, requireDigest = false, e
         `artifact ${artifact.id}`,
       );
       assertArtifactFile(extractedFile, artifact);
-      if (artifact.relativePath === "app/code-oss") {
+      if (artifact.relativePath === "app/code-oss-runtime/code-oss") {
         launcherArtifact = artifact;
       }
     }

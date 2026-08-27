@@ -185,7 +185,7 @@ async function loadReleaseManifest(stagingRoot, version, architecture, sourceEpo
 async function materializeDesktopEntry(templatePath, destinationPath, version) {
   const template = await readFile(templatePath, "utf8");
   const output = template
-    .replaceAll("{{EXEC}}", "usr/lib/unit-test-ide/app/code-oss")
+    .replaceAll("{{EXEC}}", "usr/lib/unit-test-ide/app/code-oss-runtime/code-oss")
     .replaceAll("{{VERSION}}", version);
   await writeFile(destinationPath, output);
 }
@@ -293,7 +293,7 @@ export async function packageAppImage(input) {
       packageSha256: packageDigest,
       releaseManifestPath: "usr/lib/unit-test-ide/release-manifest.json",
       releaseManifestSha256: releaseManifestDigest,
-      launcher: "usr/lib/unit-test-ide/app/code-oss",
+      launcher: "usr/lib/unit-test-ide/app/code-oss-runtime/code-oss",
       desktopEntry: "unit-test-ide.desktop",
       appRun: "AppRun",
       appimagetoolSha256: expectedDigest,

@@ -11,7 +11,7 @@ export UNIT_TEST_IDE_RELEASE_OFFLINE=1
 export UNIT_TEST_IDE_ALLOW_DOWNLOADS=0
 
 SELF_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-LAUNCHER="$SELF_DIR/usr/lib/unit-test-ide/app/code-oss"
+LAUNCHER="$SELF_DIR/usr/lib/unit-test-ide/app/code-oss-runtime/code-oss"
 
 if [ ! -x "$LAUNCHER" ]; then
   echo "RELEASE_LAUNCHER_MISSING: packaged launcher is missing or not executable" >&2

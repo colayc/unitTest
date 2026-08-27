@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import test from "node:test";
 
@@ -36,11 +36,16 @@ async function writeFixtureFile(root, relativePath, value) {
 async function createStagingFixture(root, version = "1.2.3") {
   const stagingRoot = join(root, "staging");
   const runtime = "#!/bin/sh\nexit 0\n";
+  const product = "{\"name\":\"Code - OSS\"}\n";
+  const locale = "locale data\n";
   const service = "service binary\n";
   const notice = "license notice\n";
   const cmake = "cmake bundle\n";
   const coverage = "coverage bundle\n";
-  await writeFixtureFile(stagingRoot, "app/code-oss", runtime);
+  const launcherPath = await writeFixtureFile(stagingRoot, "app/code-oss-runtime/code-oss", runtime);
+  await chmod(launcherPath, 0o755);
+  await writeFixtureFile(stagingRoot, "app/code-oss-runtime/resources/app/product.json", product);
+  await writeFixtureFile(stagingRoot, "app/code-oss-runtime/locales/en-US.pak", locale);
   await writeFixtureFile(stagingRoot, "service/unit-test-service", service);
   await writeFixtureFile(stagingRoot, "bundles/cmake/bin/cmake", cmake);
   await writeFixtureFile(stagingRoot, "bundles/coverage/app/gcovr-runner.pyz", coverage);
@@ -72,10 +77,26 @@ async function createStagingFixture(root, version = "1.2.3") {
       {
         id: "runtime",
         kind: "runtime",
-        relativePath: "app/code-oss",
+        relativePath: "app/code-oss-runtime/code-oss",
         size: Buffer.byteLength(runtime),
         sha256: sha256(runtime),
         executable: true,
+      },
+      {
+        id: "runtime-locale",
+        kind: "runtime",
+        relativePath: "app/code-oss-runtime/locales/en-US.pak",
+        size: Buffer.byteLength(locale),
+        sha256: sha256(locale),
+        executable: false,
+      },
+      {
+        id: "runtime-product",
+        kind: "runtime",
+        relativePath: "app/code-oss-runtime/resources/app/product.json",
+        size: Buffer.byteLength(product),
+        sha256: sha256(product),
+        executable: false,
       },
       {
         id: "service",
@@ -141,7 +162,7 @@ async function collect(rootPath, current = "") {
       size: info.size,
       executable: (info.mode & 0o111) !== 0
         || relativePath === "AppRun"
-        || relativePath.endsWith("/app/code-oss")
+        || relativePath.endsWith("/app/code-oss-runtime/code-oss")
         || relativePath.endsWith("/service/unit-test-service"),
       contentBase64: bytes.toString("base64"),
     };
@@ -312,12 +333,12 @@ test("packageAppImage emits a closed digest manifest and a desktop entry that po
     const result = await packageWithFakeTool(root);
 
     const desktop = await readFile(join(result.appDir, "unit-test-ide.desktop"), "utf8");
-    assert.match(desktop, /^Exec=usr\/lib\/unit-test-ide\/app\/code-oss$/mu);
-    assert.match(desktop, /^TryExec=usr\/lib\/unit-test-ide\/app\/code-oss$/mu);
+    assert.match(desktop, /^Exec=usr\/lib\/unit-test-ide\/app\/code-oss-runtime\/code-oss$/mu);
+    assert.match(desktop, /^TryExec=usr\/lib\/unit-test-ide\/app\/code-oss-runtime\/code-oss$/mu);
 
     const digestManifest = JSON.parse(await readFile(result.manifestPath, "utf8"));
     assert.equal(digestManifest.packageFile, basename(result.outputPath));
-    assert.equal(digestManifest.launcher, "usr/lib/unit-test-ide/app/code-oss");
+    assert.equal(digestManifest.launcher, "usr/lib/unit-test-ide/app/code-oss-runtime/code-oss");
     assert.doesNotMatch(JSON.stringify(digestManifest), /https?:\/\//u);
     assert.ok(!JSON.stringify(digestManifest).includes(root.replaceAll("\\", "/")));
     assert.ok(!JSON.stringify(digestManifest).includes(resolve(root)));
@@ -329,7 +350,7 @@ test("packageAppImage emits a closed digest manifest and a desktop entry that po
       extractor: result.extractor,
     });
     assert.equal(verification.packageSha256, digestManifest.packageSha256);
-    assert.equal(verification.launcher, "usr/lib/unit-test-ide/app/code-oss");
+    assert.equal(verification.launcher, "usr/lib/unit-test-ide/app/code-oss-runtime/code-oss");
     assert.equal(verification.releaseManifestSha256, digestManifest.releaseManifestSha256);
   });
 });
@@ -338,7 +359,7 @@ test("verifyAppImage rejects a tampered launcher even when the sidecar digest is
   await withTemporaryRoot(t, async (root) => {
     const result = await packageWithFakeTool(root);
     await updateFakeEnvelope(result.outputPath, async (envelope) => {
-      envelope.files["usr/lib/unit-test-ide/app/code-oss"].contentBase64 = Buffer.from("#!/bin/sh\necho tampered\n").toString("base64");
+      envelope.files["usr/lib/unit-test-ide/app/code-oss-runtime/code-oss"].contentBase64 = Buffer.from("#!/bin/sh\necho tampered\n").toString("base64");
     });
     await refreshSidecarManifest(result.manifestPath, result.outputPath);
 
@@ -350,6 +371,26 @@ test("verifyAppImage rejects a tampered launcher even when the sidecar digest is
         extractor: result.extractor,
       }),
       /artifact runtime .*sha256|artifact runtime .*size|artifact runtime .*executable/u,
+    );
+  });
+});
+
+test("verifyAppImage rejects a tampered runtime resource even when the sidecar digest is regenerated", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const result = await packageWithFakeTool(root);
+    await updateFakeEnvelope(result.outputPath, async (envelope) => {
+      envelope.files["usr/lib/unit-test-ide/app/code-oss-runtime/resources/app/product.json"].contentBase64 = Buffer.from("{\"name\":\"tampered\"}\n").toString("base64");
+    });
+    await refreshSidecarManifest(result.manifestPath, result.outputPath);
+
+    await assert.rejects(
+      () => verifyAppImage({
+        image: result.outputPath,
+        manifest: result.manifestPath,
+        requireDigest: true,
+        extractor: result.extractor,
+      }),
+      /artifact runtime-product .*sha256|artifact runtime-product .*size/u,
     );
   });
 });
