@@ -308,7 +308,7 @@ function runPowerShellCommand(command, env = {}) {
   });
 }
 
-async function readZipEntry(packagePath, entryName) {
+async function readZipEntryBytes(packagePath, entryName) {
   const script = `
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -324,20 +324,26 @@ try {
   if ($null -eq $entry) {
     throw "missing entry: ${entryName}"
   }
-  $reader = [IO.StreamReader]::new($entry.Open())
+  $buffer = [IO.MemoryStream]::new()
+  $input = $entry.Open()
   try {
-    [Console]::OutputEncoding = [Text.Encoding]::UTF8
-    [Console]::Write($reader.ReadToEnd())
+    $input.CopyTo($buffer)
   } finally {
-    $reader.Dispose()
+    $input.Dispose()
   }
+  [Console]::Write([Convert]::ToBase64String($buffer.ToArray()))
+  $buffer.Dispose()
 } finally {
   $archive.Dispose()
 }
 `;
   const result = runPowerShellCommand(script);
   assert.equal(result.status, 0, result.stderr);
-  return result.stdout;
+  return Buffer.from(result.stdout, "base64");
+}
+
+async function readZipEntry(packagePath, entryName) {
+  return (await readZipEntryBytes(packagePath, entryName)).toString("utf8");
 }
 
 async function setZipEntry(packagePath, entryName, content) {
@@ -404,6 +410,69 @@ try {
 `;
   const result = runPowerShellCommand(script);
   assert.equal(result.status, 0, result.stderr);
+}
+
+async function replaceZipEntryPath(packagePath, sourceName, replacementName) {
+  const script = `
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$archive = [System.IO.Compression.ZipFile]::Open(${powerShellLiteral(packagePath)}, [System.IO.Compression.ZipArchiveMode]::Update)
+try {
+  $source = $null
+  foreach ($candidate in $archive.Entries) {
+    $normalizedName = $candidate.FullName -replace '\\\\', '/'
+    if ($normalizedName -ceq ${powerShellLiteral(sourceName)}) {
+      $source = $candidate
+    }
+    if ($normalizedName -ceq ${powerShellLiteral(replacementName)}) {
+      throw 'fixture replacement entry already exists'
+    }
+  }
+  if ($null -eq $source) {
+    throw 'fixture source entry is missing'
+  }
+
+  $buffer = [IO.MemoryStream]::new()
+  $input = $source.Open()
+  try {
+    $input.CopyTo($buffer)
+  } finally {
+    $input.Dispose()
+  }
+  $bytes = $buffer.ToArray()
+  $buffer.Dispose()
+  $source.Delete()
+
+  $replacement = $archive.CreateEntry(${powerShellLiteral(replacementName)})
+  $output = $replacement.Open()
+  try {
+    $output.Write($bytes, 0, $bytes.Length)
+  } finally {
+    $output.Dispose()
+  }
+} finally {
+  $archive.Dispose()
+}
+`;
+  const result = runPowerShellCommand(script);
+  assert.equal(result.status, 0, result.stderr);
+}
+
+async function listZipEntryNames(packagePath) {
+  const script = `
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$archive = [System.IO.Compression.ZipFile]::OpenRead(${powerShellLiteral(packagePath)})
+try {
+  $names = @($archive.Entries | ForEach-Object { $_.FullName -replace '\\\\', '/' })
+  [Console]::Write((ConvertTo-Json -Compress -InputObject $names))
+} finally {
+  $archive.Dispose()
+}
+`;
+  const result = runPowerShellCommand(script);
+  assert.equal(result.status, 0, result.stderr);
+  return JSON.parse(result.stdout);
 }
 
 function assertDoesNotContainHostPath(value, hostPath, label) {
@@ -772,6 +841,43 @@ windowsOnly("verify-msix rejects a case-aliased payload entry before payload-set
     assert.equal(result.status, 1);
     assert.match(result.stderr, /RELEASE_VERIFICATION_FAILED/u);
     assert.match(result.stderr, /duplicate|alias|case/u);
+  });
+});
+
+windowsOnly("verify-msix rejects a sole case-mismatched payload entry with unchanged bytes", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await packageWithFakeTools(root);
+    const canonicalPath = "app/code-oss-runtime/Code - OSS.exe";
+    const wrongCasePath = "APP/code-oss-runtime/Code - OSS.exe";
+    const before = await readZipEntryBytes(fixture.outputPath, canonicalPath);
+    await replaceZipEntryPath(fixture.outputPath, canonicalPath, wrongCasePath);
+    const after = await readZipEntryBytes(fixture.outputPath, wrongCasePath);
+    const entryNames = await listZipEntryNames(fixture.outputPath);
+
+    assert.deepEqual(after, before);
+    assert.equal(after.byteLength, before.byteLength);
+    assert.equal(sha256(after), sha256(before));
+    assert.equal(entryNames.includes(canonicalPath), false);
+    assert.equal(entryNames.includes(wrongCasePath), true);
+    assert.equal(
+      entryNames.filter((entryName) => entryName.toLowerCase() === canonicalPath.toLowerCase()).length,
+      1,
+    );
+
+    const result = runVerify([
+      "-Package", fixture.outputPath,
+      "-Manifest", fixture.manifestPath,
+    ], {});
+
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout.trim(), "");
+    assert.equal(
+      result.stderr.trim(),
+      "RELEASE_VERIFICATION_FAILED: package payload does not match the expected staged payload set",
+    );
+    assertDoesNotContainHostPath(result.stderr, fixture.outputPath, "MSIX error");
+    assertDoesNotContainHostPath(result.stderr, root, "MSIX error");
+    assertDoesNotContainHostPath(result.stderr, resolve("."), "MSIX error");
   });
 });
 

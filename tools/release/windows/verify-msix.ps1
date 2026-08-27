@@ -355,14 +355,14 @@ try {
       }
   ) | Sort-Object
   $expectedEntries = @($expectedPayloads.Keys) | Sort-Object
-  if (($payloadEntries.Count -ne $expectedEntries.Count) -or (Compare-Object -ReferenceObject $expectedEntries -DifferenceObject $payloadEntries)) {
+  if (($payloadEntries.Count -ne $expectedEntries.Count) -or (Compare-Object -CaseSensitive -ReferenceObject $expectedEntries -DifferenceObject $payloadEntries)) {
     Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message 'package payload does not match the expected staged payload set'
   }
 
   foreach ($path in $expectedEntries) {
     $entryRecord = $entryMap[$path.ToLowerInvariant()]
-    if ($null -eq $entryRecord) {
-      Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message "package payload is missing: $path"
+    if (($null -eq $entryRecord) -or ($entryRecord.CanonicalPath -cne $path)) {
+      Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message 'package payload does not match the expected staged payload set'
     }
     $entry = $entryRecord.Entry
     $expectedRecord = $expectedPayloads[$path]
