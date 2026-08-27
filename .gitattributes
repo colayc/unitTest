@@ -5,6 +5,8 @@
 *.sql text eol=lf
 *.ts text eol=lf
 tools/coverage-bundle/licenses/*.txt text eol=lf
+tools/release/staging/share/doc/readme.txt text eol=lf
+tools/release/staging/bin/unit-test-ide.exe text eol=lf
 *.yaml text eol=lf
 apps/test-service/internal/testframework/cpputest/testdata/list-crlf.valid.txt text eol=crlf
 apps/test-service/internal/testframework/cpputest/testdata/pass.txt text eol=lf
