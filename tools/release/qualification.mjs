@@ -75,7 +75,9 @@ function hasExactKeys(value, expected) {
 }
 
 function portableRelativePath(value) {
-  return typeof value === "string" && portableRelativePathPattern.test(value);
+  return typeof value === "string"
+    && portableRelativePathPattern.test(value)
+    && value.split("/").every((segment) => segment.length > 0);
 }
 
 function validLicense(value) {
@@ -203,11 +205,19 @@ function validatePlatform(platform, input, reasons) {
   if (!closedArtifactList(manifest?.artifacts)) addReason(reasons, `${platform} release manifest artifacts are invalid`);
   if (!Array.isArray(manifest?.licenses) || manifest.licenses.length === 0) {
     addReason(reasons, `${platform} release manifest must contain at least one license notice`);
+  } else if (!closedLicenseList(manifest.licenses)) {
+    addReason(reasons, `${platform} release manifest licenses are invalid`);
   }
   try {
     validateReleaseManifestRecord(baselineManifest, { platform });
   } catch {
     addReason(reasons, `${platform} baseline release manifest schema/semantics are invalid`);
+  }
+  if (baselineManifest && !closedArtifactList(baselineManifest.artifacts)) {
+    addReason(reasons, `${platform} baseline release manifest artifacts are invalid`);
+  }
+  if (baselineManifest && !closedLicenseList(baselineManifest.licenses)) {
+    addReason(reasons, `${platform} baseline release manifest licenses are invalid`);
   }
 
   if (!packageFilename(manifestRecord?.packageFilename) || evidence?.packageFilename !== manifestRecord?.packageFilename) {
