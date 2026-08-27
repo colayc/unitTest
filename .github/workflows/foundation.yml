@@ -21,15 +21,15 @@ on:
           - '0'
           - '1'
       release_input_run_id:
-        description: Trusted workflow run containing the fixed-name release runtime artifacts
+        description: Trusted workflow run containing the complete fixed-name Code-OSS runtime artifacts
         required: true
         type: string
       windows_code_oss_sha256:
-        description: SHA-256 of code-oss.exe in the code-oss-windows-x64 artifact
+        description: SHA-256 of root-level Code - OSS.exe in the complete code-oss-windows-x64 runtime artifact
         required: true
         type: string
       linux_code_oss_sha256:
-        description: SHA-256 of code-oss in the code-oss-linux-x64 artifact
+        description: SHA-256 of root-level code-oss in the complete code-oss-linux-x64 runtime artifact
         required: true
         type: string
       linux_appimagetool_sha256:
@@ -288,7 +288,7 @@ jobs:
             throw 'RELEASE_INPUT_MISSING: RELEASE_INPUT_RUN_ID must identify a trusted artifact-producing run'
           }
           if ($env:CODE_OSS_SHA256 -cnotmatch '^[0-9a-f]{64}$') {
-            throw 'RELEASE_INPUT_MISSING: CODE_OSS_SHA256 must pin code-oss-windows-x64/code-oss.exe'
+            throw 'RELEASE_INPUT_MISSING: CODE_OSS_SHA256 must pin root-level code-oss-windows-x64/Code - OSS.exe'
           }
       - name: Download fixed-name Windows Code-OSS runtime
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -300,13 +300,17 @@ jobs:
       - name: Verify and export release inputs
         shell: pwsh
         run: |
-          $matches = @(Get-ChildItem -LiteralPath '.release/inputs/windows-code-oss' -Recurse -File | Where-Object Name -CEQ 'code-oss.exe')
-          if ($matches.Count -ne 1) { throw 'RELEASE_INPUT_MISSING: code-oss-windows-x64 must contain exactly one code-oss.exe' }
-          $actual = (Get-FileHash -LiteralPath $matches[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($actual -cne $env:CODE_OSS_SHA256) { throw 'RELEASE_INPUT_MISSING: code-oss.exe digest does not match CODE_OSS_SHA256' }
+          $runtimeRoot = Join-Path $PWD '.release/inputs/windows-code-oss'
+          $launcher = Join-Path $runtimeRoot 'Code - OSS.exe'
+          $matches = @(Get-ChildItem -LiteralPath $runtimeRoot -File | Where-Object Name -CEQ 'Code - OSS.exe')
+          if ($matches.Count -ne 1 -or -not (Test-Path -LiteralPath $launcher -PathType Leaf)) {
+            throw 'RELEASE_INPUT_MISSING: code-oss-windows-x64 must contain root-level Code - OSS.exe'
+          }
+          $actual = (Get-FileHash -LiteralPath $launcher -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -cne $env:CODE_OSS_SHA256) { throw 'RELEASE_INPUT_MISSING: Code - OSS.exe digest does not match CODE_OSS_SHA256' }
           $sourceDateEpoch = (git show -s --format=%ct HEAD).Trim()
           if ($sourceDateEpoch -cnotmatch '^(?:0|[1-9]\d*)$') { throw 'RELEASE_INPUT_MISSING: source commit has no canonical SOURCE_DATE_EPOCH' }
-          "CODE_OSS_EXECUTABLE=$($matches[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CODE_OSS_RUNTIME_ROOT=$runtimeRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "SOURCE_DATE_EPOCH=$sourceDateEpoch" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - uses: pnpm/action-setup@v4
         with:
@@ -380,7 +384,8 @@ jobs:
             --platform windows `
             --architecture x64 `
             --version $version `
-            --code-oss $env:CODE_OSS_EXECUTABLE `
+            --code-oss-root $env:CODE_OSS_RUNTIME_ROOT `
+            --code-oss-sha256 $env:CODE_OSS_SHA256 `
             --service '.release/windows/unit-test-service.exe' `
             --cmake-root '${{ steps.cmake-bundle.outputs.cmake_root }}' `
             --coverage-root '.superpowers/runtime/coverage-bundle/windows-x64' `
@@ -398,7 +403,8 @@ jobs:
             --platform windows `
             --architecture x64 `
             --version $baselineVersion `
-            --code-oss $env:CODE_OSS_EXECUTABLE `
+            --code-oss-root $env:CODE_OSS_RUNTIME_ROOT `
+            --code-oss-sha256 $env:CODE_OSS_SHA256 `
             --service '.release/windows/unit-test-service.exe' `
             --cmake-root '${{ steps.cmake-bundle.outputs.cmake_root }}' `
             --coverage-root '.superpowers/runtime/coverage-bundle/windows-x64' `
@@ -496,16 +502,18 @@ jobs:
       - name: Verify and export release inputs
         shell: bash
         run: |
-          mapfile -t code_oss_matches < <(find .release/inputs/linux-code-oss -type f -name code-oss -print)
-          ((${#code_oss_matches[@]} == 1)) || { echo 'RELEASE_INPUT_MISSING: code-oss-linux-x64 must contain exactly one code-oss' >&2; exit 1; }
+          runtime_root="$PWD/.release/inputs/linux-code-oss"
+          launcher="$runtime_root/code-oss"
+          [[ -f "$launcher" ]] || { echo 'RELEASE_INPUT_MISSING: code-oss-linux-x64 must contain root-level code-oss' >&2; exit 1; }
           mapfile -t appimagetool_matches < <(find .release/inputs/linux-appimagetool -type f -name appimagetool-x86_64.AppImage -print)
           ((${#appimagetool_matches[@]} == 1)) || { echo 'RELEASE_INPUT_MISSING: appimagetool-linux-x64 must contain exactly one appimagetool-x86_64.AppImage' >&2; exit 1; }
-          [[ "$(sha256sum "${code_oss_matches[0]}" | cut -d' ' -f1)" == "$CODE_OSS_SHA256" ]] || { echo 'RELEASE_INPUT_MISSING: code-oss digest does not match CODE_OSS_SHA256' >&2; exit 1; }
+          [[ "$(sha256sum "$launcher" | cut -d' ' -f1)" == "$CODE_OSS_SHA256" ]] || { echo 'RELEASE_INPUT_MISSING: code-oss digest does not match CODE_OSS_SHA256' >&2; exit 1; }
           [[ "$(sha256sum "${appimagetool_matches[0]}" | cut -d' ' -f1)" == "$APPIMAGETOOL_SHA256" ]] || { echo 'RELEASE_INPUT_MISSING: appimagetool digest does not match APPIMAGETOOL_SHA256' >&2; exit 1; }
           source_date_epoch="$(git show -s --format=%ct HEAD)"
           [[ "$source_date_epoch" =~ ^(0|[1-9][0-9]*)$ ]] || { echo 'RELEASE_INPUT_MISSING: source commit has no canonical SOURCE_DATE_EPOCH' >&2; exit 1; }
-          chmod u+x "${code_oss_matches[0]}" "${appimagetool_matches[0]}"
-          echo "CODE_OSS_EXECUTABLE=$PWD/${code_oss_matches[0]}" >> "$GITHUB_ENV"
+          chmod u+x "$launcher" "${appimagetool_matches[0]}"
+          [[ -x "$launcher" ]] || { echo 'RELEASE_INPUT_MISSING: root-level code-oss must be executable' >&2; exit 1; }
+          echo "CODE_OSS_RUNTIME_ROOT=$runtime_root" >> "$GITHUB_ENV"
           echo "RELEASE_APPIMAGETOOL_PATH=$PWD/${appimagetool_matches[0]}" >> "$GITHUB_ENV"
           echo "RELEASE_APPIMAGETOOL_SHA256=$APPIMAGETOOL_SHA256" >> "$GITHUB_ENV"
           echo "SOURCE_DATE_EPOCH=$source_date_epoch" >> "$GITHUB_ENV"
@@ -569,7 +577,8 @@ jobs:
             --platform linux \
             --architecture x64 \
             --version "$version" \
-            --code-oss "$CODE_OSS_EXECUTABLE" \
+            --code-oss-root "$CODE_OSS_RUNTIME_ROOT" \
+            --code-oss-sha256 "$CODE_OSS_SHA256" \
             --service .release/linux/unit-test-service \
             --cmake-root "${{ steps.cmake-bundle.outputs.cmake_root }}" \
             --coverage-root .superpowers/runtime/coverage-bundle/linux-x64 \
@@ -588,7 +597,8 @@ jobs:
             --platform linux \
             --architecture x64 \
             --version "$baseline_version" \
-            --code-oss "$CODE_OSS_EXECUTABLE" \
+            --code-oss-root "$CODE_OSS_RUNTIME_ROOT" \
+            --code-oss-sha256 "$CODE_OSS_SHA256" \
             --service .release/linux/unit-test-service \
             --cmake-root "${{ steps.cmake-bundle.outputs.cmake_root }}" \
             --coverage-root .superpowers/runtime/coverage-bundle/linux-x64 \

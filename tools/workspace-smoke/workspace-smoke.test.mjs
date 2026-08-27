@@ -227,6 +227,17 @@ test("documentation records pre-write token file preparation", async () => {
   assert.doesNotMatch(readme, /removes inherited Windows permissions after writing/i);
 });
 
+test("release documentation describes complete digest-pinned Code-OSS runtime artifacts", async () => {
+  const security = await readFile("docs/security.md", "utf8");
+  const roadmap = await readFile("docs/superpowers/plans/2026-07-21-cpp-unit-test-ide-roadmap.md", "utf8");
+
+  assert.match(security, /完整 Code-OSS runtime 目录制品/u);
+  assert.match(security, /app\/code-oss-runtime\/Code - OSS\.exe/u);
+  assert.match(security, /app\/code-oss-runtime\/code-oss/u);
+  assert.match(roadmap, /完整 Code-OSS runtime 目录制品/u);
+  assert.match(roadmap, /Phase 8 仍未完成/u);
+});
+
 test("compiled Service runtime excludes HTTP, TLS, GitHub, and OAuth client stacks", () => {
   const dependencies = goList(["list", "-deps", serviceCommandPackage]);
   const forbidden = dependencies.filter((dependency) =>
