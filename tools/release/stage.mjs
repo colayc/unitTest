@@ -62,13 +62,28 @@ function isPortableRelativePath(value) {
     value.length === 0 ||
     value.includes("\\") ||
     value.includes(":") ||
+    /[\u0000-\u001f\u007f]/u.test(value) ||
     posix.isAbsolute(value) ||
     isAbsolute(value) ||
     posix.normalize(value) !== value
   ) {
     return false;
   }
-  return value.split("/").every((segment) => segment.length > 0 && segment !== "." && segment !== "..");
+  return value.split("/").every((segment) => {
+    if (
+      segment.length === 0 ||
+      segment === "." ||
+      segment === ".." ||
+      segment.startsWith(" ") ||
+      segment.endsWith(".") ||
+      segment.endsWith(" ") ||
+      /[<>:"|?*\\]/u.test(segment)
+    ) {
+      return false;
+    }
+    const base = segment.split(".", 1)[0].toUpperCase();
+    return !(["CON", "PRN", "AUX", "NUL"].includes(base) || /^(COM|LPT)[1-9]$/u.test(base));
+  });
 }
 
 async function validateRealDirectory(path, label, { missingCode = "RELEASE_INPUT_MISSING" } = {}) {

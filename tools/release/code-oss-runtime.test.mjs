@@ -248,6 +248,7 @@ posixOnly("validator rejects special entries and non-portable entry names", asyn
 });
 
 const portableNameCases = [
+  ["leading space component", " leading.txt"],
   ["reserved device basename", "con.txt"],
   ["reserved device basename with numeric suffix", "LPT9"],
   ["trailing dot component", "runtime."],
