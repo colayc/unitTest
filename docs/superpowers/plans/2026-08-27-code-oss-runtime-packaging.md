@@ -154,6 +154,8 @@ git commit -m "feat: validate complete Code-OSS runtimes"
 - Modify: `tools/release/stage.mjs`
 - Modify: `tools/release/stage.test.mjs`
 - Modify: `tools/release/license-audit.test.mjs`
+- Modify: `tools/release/manifest.schema.json`
+- Modify: `tools/release/manifest.test.mjs`
 - Modify: `README.md`
 
 **Interfaces:**
@@ -163,6 +165,8 @@ git commit -m "feat: validate complete Code-OSS runtimes"
 - Produces the fixed staging prefix `app/code-oss-runtime/` and runtime licenses under `licenses/code-oss/`.
 
 - [ ] **Step 1: Rewrite the staging fixture and add a failing full-tree test**
+
+First add a manifest regression test whose literal artifact path is `app/code-oss-runtime/Code - OSS.exe`. Run `node --test tools/release/manifest.test.mjs` and observe RED because the current schema rejects internal spaces. Then widen only the schema's portable-relative-path character class to allow internal spaces while retaining the existing absolute path, drive path, backslash, `.`/`..`, invalid-character, and trailing dot/space rejections. The same test must keep unsafe spaced traversal and trailing-space components rejected.
 
 Change `createReleaseFixture(root, platform = "windows")` to select the exact platform launcher and create this Windows default:
 
@@ -439,6 +443,7 @@ git commit -m "fix: package the complete Linux Code-OSS runtime"
 - Modify: `tools/release/update.mjs`
 - Modify: `tools/release/update.test.mjs`
 - Modify: `.github/workflows/foundation.yml`
+- Modify: `tools/release/qualification.mjs`
 - Modify: `tools/release/qualification.test.mjs`
 - Modify: `tools/workspace-smoke/workspace-smoke.test.mjs`
 - Modify: `docs/security.md`
@@ -493,6 +498,8 @@ assert.match(job, /--code-oss-root/u);
 assert.match(job, /--code-oss-sha256/u);
 assert.doesNotMatch(job, /--code-oss(?:\s|$)/u);
 ```
+
+Update `qualification.mjs`'s local portable-relative-path predicate to accept the same safe internal-space contract as `manifest.schema.json`, so qualification accepts the Windows fixed launcher without weakening traversal, separator, invalid-character, device-name, or trailing dot/space rejection.
 
 Require the Windows job to check the root-level literal `Code - OSS.exe` and the Linux job to check root-level `code-oss` plus executable permission. Verify the launcher digest before staging. Then update `.github/workflows/foundation.yml`:
 

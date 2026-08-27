@@ -1,15 +1,17 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 
+import { validateCodeOssRuntime } from "./code-oss-runtime.mjs";
 import { stageRelease } from "./stage.mjs";
 
 const sourceDateEpoch = "1787616000";
 const generatedAt = "2026-08-25T00:00:00.000Z";
+const linuxOnly = process.platform === "linux" ? test : test.skip;
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -30,9 +32,22 @@ async function writeFixtureFile(root, relativePath, value) {
   return filePath;
 }
 
-async function createReleaseFixture(root) {
-  const codeOss = await writeFixtureFile(root, "inputs/code-oss/code-oss.exe", "code oss runtime\n");
-  const service = await writeFixtureFile(root, "inputs/service/unit-test-service.exe", "service binary\n");
+async function createReleaseFixture(root, platform = "windows") {
+  const codeOssRoot = join(root, "inputs/code-oss");
+  const launcherRelativePath = platform === "windows" ? "Code - OSS.exe" : "code-oss";
+  const launcherPath = await writeFixtureFile(codeOssRoot, launcherRelativePath, "code oss runtime\n");
+  if (platform === "linux") await chmod(launcherPath, 0o755);
+  await writeFixtureFile(codeOssRoot, "resources/app/product.json", JSON.stringify({
+    applicationName: "code-oss",
+    licenseName: "MIT",
+    nameShort: "Code - OSS",
+  }, null, 2));
+  await writeFixtureFile(codeOssRoot, "resources/app/package.json", JSON.stringify({ name: "code-oss" }, null, 2));
+  await writeFixtureFile(codeOssRoot, "resources/app/LICENSE.txt", "Code - OSS license\n");
+  await writeFixtureFile(codeOssRoot, "LICENSES.chromium.html", "Chromium notices\n");
+  await writeFixtureFile(codeOssRoot, "locales/en-US.pak", "locale data\n");
+  await writeFixtureFile(codeOssRoot, "runtime.dll", "runtime library\n");
+  const service = await writeFixtureFile(root, `inputs/service/unit-test-service${platform === "windows" ? ".exe" : ""}`, "service binary\n");
   const extensionRoot = join(root, "inputs/extension");
   await writeFixtureFile(extensionRoot, "dist/src/extension.js", "export const value = 1;\n");
   await writeFixtureFile(extensionRoot, "package.json", JSON.stringify({
@@ -50,7 +65,9 @@ async function createReleaseFixture(root) {
   await writeFixtureFile(coverageRoot, "manifest.json", JSON.stringify({ tool: "coverage" }, null, 2));
   await writeFixtureFile(coverageRoot, "licenses/NOTICE.txt", "coverage notice\n");
   return {
-    codeOss,
+    codeOssRoot,
+    codeOssSha256: sha256(await readFile(launcherPath)),
+    launcherPath,
     service,
     extensionRoot,
     cmakeRoot,
@@ -88,7 +105,10 @@ test("stageRelease copies the deterministic staging layout and writes a release 
 
     assert.equal(result.stagingRoot, join(fixture.outRoot, "staging", "1.2.3", "windows-x64"));
     for (const relativePath of [
-      "app/code-oss.exe",
+      "app/code-oss-runtime/Code - OSS.exe",
+      "app/code-oss-runtime/resources/app/product.json",
+      "app/code-oss-runtime/locales/en-US.pak",
+      "app/code-oss-runtime/runtime.dll",
       "app/extensions/unit-test-ide/package.json",
       "app/extensions/unit-test-ide/dist/src/extension.js",
       "service/unit-test-service.exe",
@@ -98,22 +118,31 @@ test("stageRelease copies the deterministic staging layout and writes a release 
       "bundles/coverage/manifest.json",
       "licenses/cmake/licenses/LICENSE.txt",
       "licenses/coverage/licenses/NOTICE.txt",
+      "licenses/code-oss/resources/app/LICENSE.txt",
+      "licenses/code-oss/LICENSES.chromium.html",
       "release-manifest.json",
     ]) {
       const bytes = await readFile(join(result.stagingRoot, ...relativePath.split("/")));
       assert.ok(bytes.length > 0, relativePath);
     }
 
-    assert.equal(
-      sha256(await readFile(join(result.stagingRoot, "app/code-oss.exe"))),
-      sha256("code oss runtime\n"),
+    const manifest = JSON.parse(await readFile(result.manifestPath, "utf8"));
+    const runtimeArtifacts = manifest.artifacts.filter(({ relativePath }) => relativePath.startsWith("app/code-oss-runtime/"));
+    const runtimeFiles = await packageInputSnapshot(join(result.stagingRoot, "app", "code-oss-runtime"));
+    assert.deepEqual(
+      runtimeArtifacts.map(({ relativePath }) => relativePath).sort((left, right) => left.localeCompare(right, "en")),
+      runtimeFiles.map(([relativePath]) => `app/code-oss-runtime/${relativePath}`).sort((left, right) => left.localeCompare(right, "en")),
     );
+    for (const artifact of runtimeArtifacts) {
+      const bytes = await readFile(join(result.stagingRoot, ...artifact.relativePath.split("/")));
+      assert.equal(artifact.kind, "runtime");
+      assert.equal(artifact.sha256, sha256(bytes));
+    }
     assert.equal(
       sha256(await readFile(join(result.stagingRoot, "service/unit-test-service.exe"))),
       sha256("service binary\n"),
     );
 
-    const manifest = JSON.parse(await readFile(result.manifestPath, "utf8"));
     assert.equal(manifest.version, "1.2.3");
     assert.equal(manifest.platform, "windows");
     assert.equal(manifest.architecture, "x64");
@@ -123,6 +152,8 @@ test("stageRelease copies the deterministic staging layout and writes a release 
       manifest.licenses.map(({ path }) => path),
       [
         "licenses/cmake/licenses/LICENSE.txt",
+        "licenses/code-oss/LICENSES.chromium.html",
+        "licenses/code-oss/resources/app/LICENSE.txt",
         "licenses/coverage/licenses/NOTICE.txt",
       ],
     );
@@ -134,10 +165,32 @@ test("stageRelease copies the deterministic staging layout and writes a release 
   });
 });
 
-test("stageRelease fails closed on a missing required input before it writes a partial manifest", async (t) => {
+linuxOnly("stageRelease preserves the complete executable Linux runtime", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await createReleaseFixture(root, "linux");
+    const result = await stageRelease({
+      platform: "linux",
+      architecture: "x64",
+      version: "1.2.3",
+      sourceCommit: "a".repeat(40),
+      sourceDateEpoch,
+      ...fixture,
+    });
+
+    await stat(join(result.stagingRoot, "app", "code-oss-runtime", "code-oss"));
+    await stat(join(result.stagingRoot, "app", "code-oss-runtime", "resources", "app", "product.json"));
+    await assert.rejects(() => stat(join(result.stagingRoot, "app", "code-oss")), /ENOENT/u);
+    const manifest = JSON.parse(await readFile(result.manifestPath, "utf8"));
+    const launcher = manifest.artifacts.find(({ relativePath }) => relativePath === "app/code-oss-runtime/code-oss");
+    assert.equal(launcher?.kind, "runtime");
+    assert.equal(launcher?.executable, true);
+  });
+});
+
+test("stageRelease rejects the removed single-file codeOss input", async (t) => {
   await withTemporaryRoot(t, async (root) => {
     const fixture = await createReleaseFixture(root);
-    await rm(fixture.codeOss, { force: true });
+    const { codeOssRoot, codeOssSha256, ...validFixture } = fixture;
 
     await assert.rejects(
       () => stageRelease({
@@ -146,10 +199,12 @@ test("stageRelease fails closed on a missing required input before it writes a p
         version: "1.2.3",
         sourceCommit: "a".repeat(40),
         sourceDateEpoch,
-        ...fixture,
+        ...validFixture,
+        codeOss: fixture.launcherPath,
       }),
       (error) => {
         assert.equal(error?.code, "RELEASE_INPUT_MISSING");
+        assert.match(error.message, /codeOssRoot is required/u);
         return true;
       },
     );
@@ -161,26 +216,50 @@ test("stageRelease fails closed on a missing required input before it writes a p
   });
 });
 
-test("stage CLI rejects unknown flags with a stable error", () => {
-  const result = spawnSync(process.execPath, [
-    resolve("tools/release/stage.mjs"),
-    "--platform", "windows",
-    "--architecture", "x64",
-    "--version", "1.2.3",
-    "--code-oss", "runtime.exe",
-    "--service", "service.exe",
-    "--cmake-root", "cmake",
-    "--coverage-root", "coverage",
-    "--out", "out",
-    "--unexpected", "value",
-  ], {
-    cwd: resolve("."),
-    encoding: "utf8",
-    windowsHide: true,
-  });
+test("stage CLI rejects --code-oss and requires both runtime-root flags", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await createReleaseFixture(root);
+    const oldFlag = spawnSync(process.execPath, [
+      resolve("tools/release/stage.mjs"),
+      "--platform", "windows",
+      "--architecture", "x64",
+      "--version", "1.2.3",
+      "--code-oss", "runtime.exe",
+    ], {
+      cwd: resolve("."),
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    assert.equal(oldFlag.status, 1);
+    assert.match(oldFlag.stderr, /unknown stage flag: --code-oss/u);
 
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /unknown stage flag: --unexpected/u);
+    for (const [omittedFlag, requiredKey] of [
+      ["--code-oss-root", "codeOssRoot"],
+      ["--code-oss-sha256", "codeOssSha256"],
+    ]) {
+      const argumentsList = [
+        resolve("tools/release/stage.mjs"),
+        "--platform", "windows",
+        "--architecture", "x64",
+        "--version", "1.2.3",
+        "--code-oss-root", fixture.codeOssRoot,
+        "--code-oss-sha256", fixture.codeOssSha256,
+        "--service", fixture.service,
+        "--cmake-root", fixture.cmakeRoot,
+        "--coverage-root", fixture.coverageRoot,
+        "--out", fixture.outRoot,
+      ];
+      const flagIndex = argumentsList.indexOf(omittedFlag);
+      argumentsList.splice(flagIndex, 2);
+      const result = spawnSync(process.execPath, argumentsList, {
+        cwd: resolve("."),
+        encoding: "utf8",
+        windowsHide: true,
+      });
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, new RegExp(`${requiredKey} is required`, "u"));
+    }
+  });
 });
 
 test("stage CLI rejects duplicate flags instead of overwriting", () => {
@@ -198,6 +277,36 @@ test("stage CLI rejects duplicate flags instead of overwriting", () => {
   assert.match(result.stderr, /duplicate stage flag: --platform/u);
 });
 
+test("stageRelease publishes no root after a post-copy launcher digest mismatch", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await createReleaseFixture(root);
+    let validationCalls = 0;
+    const validateRuntime = async (options) => {
+      validationCalls += 1;
+      if (validationCalls === 2) {
+        await writeFile(join(options.root, "Code - OSS.exe"), "mutated staged launcher\n");
+      }
+      return validateCodeOssRuntime(options);
+    };
+
+    await assert.rejects(
+      () => stageRelease({
+        platform: "windows",
+        architecture: "x64",
+        version: "1.2.3",
+        sourceCommit: "a".repeat(40),
+        sourceDateEpoch,
+        ...fixture,
+      }, { validateRuntime }),
+      (error) => error?.code === "RELEASE_INPUT_DIGEST_MISMATCH",
+    );
+    assert.equal(validationCalls, 2);
+    const parentRoot = join(fixture.outRoot, "staging", "1.2.3");
+    await assert.rejects(() => lstat(join(parentRoot, "windows-x64")), /ENOENT/u);
+    assert.equal((await readdir(parentRoot)).some((name) => name.startsWith(".stage-")), false);
+  });
+});
+
 test("stage CLI accepts a valid invocation and stages the release tree", async (t) => {
   await withTemporaryRoot(t, async (root) => {
     const fixture = await createReleaseFixture(root);
@@ -212,7 +321,8 @@ test("stage CLI accepts a valid invocation and stages the release tree", async (
       "--platform", "windows",
       "--architecture", "x64",
       "--version", "1.2.3",
-      "--code-oss", fixture.codeOss,
+      "--code-oss-root", fixture.codeOssRoot,
+      "--code-oss-sha256", fixture.codeOssSha256,
       "--service", fixture.service,
       "--cmake-root", fixture.cmakeRoot,
       "--coverage-root", fixture.coverageRoot,
@@ -250,7 +360,7 @@ test("stageRelease fails closed when SOURCE_DATE_EPOCH is absent", async (t) => 
   });
 });
 
-test("identical staging inputs yield byte-identical normalized package inputs", async (t) => {
+test("identical complete runtimes produce byte-identical normalized staging trees", async (t) => {
   await withTemporaryRoot(t, async (root) => {
     const fixture = await createReleaseFixture(root);
     const common = {

@@ -63,7 +63,7 @@ Windows `clang-cl` coverage smoke 另有一个 required gate：它先运行独�
 
 ## Release staging
 
-发布 staging tree 不会在默认测试或运行脚本里下载任何依赖；它只消费已经准备好的输入。`CODE_OSS_EXECUTABLE` 是必需的 build input，必须显式指向本地 Code-OSS 可执行文件。运行前还需要：
+发布 staging tree 不会在默认测试或运行脚本里下载任何依赖；它只消费已经准备好的输入。`CODE_OSS_ROOT` 是必需的 build input，必须显式指向本地完整 Code-OSS runtime 目录；`CODE_OSS_LAUNCHER_SHA256` 必须是平台 launcher 的小写 SHA-256。运行前还需要：
 
 - `apps/code-oss-extension/dist/` 已经构建完成；
 - Go service 二进制已经构建完成；
@@ -72,15 +72,17 @@ Windows `clang-cl` coverage smoke 另有一个 required gate：它先运行独�
 Windows PowerShell 示例：
 
 ```powershell
-$env:CODE_OSS_EXECUTABLE='C:\path\to\CodeOSS.exe'
-pnpm release:stage -- --platform windows --architecture x64 --version 1.2.3 --code-oss $env:CODE_OSS_EXECUTABLE --service .\bin\unit-test-service.exe --cmake-root .\.bundled-tools\cmake\windows-x64 --coverage-root .\.superpowers\runtime\coverage-bundle\windows-x64 --out .\dist
+$env:CODE_OSS_ROOT='C:\path\to\CodeOSS'
+$env:CODE_OSS_LAUNCHER_SHA256='0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+pnpm release:stage -- --platform windows --architecture x64 --version 1.2.3 --code-oss-root $env:CODE_OSS_ROOT --code-oss-sha256 $env:CODE_OSS_LAUNCHER_SHA256 --service .\bin\unit-test-service.exe --cmake-root .\.bundled-tools\cmake\windows-x64 --coverage-root .\.superpowers\runtime\coverage-bundle\windows-x64 --out .\dist
 ```
 
 Linux shell 示例：
 
 ```sh
-CODE_OSS_EXECUTABLE=/path/to/code-oss \
-pnpm release:stage -- --platform linux --architecture x64 --version 1.2.3 --code-oss "$CODE_OSS_EXECUTABLE" --service ./bin/unit-test-service --cmake-root ./.bundled-tools/cmake/linux-x64 --coverage-root ./.superpowers/runtime/coverage-bundle/linux-x64 --out ./dist
+CODE_OSS_ROOT=/path/to/code-oss-runtime \
+CODE_OSS_LAUNCHER_SHA256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+pnpm release:stage -- --platform linux --architecture x64 --version 1.2.3 --code-oss-root "$CODE_OSS_ROOT" --code-oss-sha256 "$CODE_OSS_LAUNCHER_SHA256" --service ./bin/unit-test-service --cmake-root ./.bundled-tools/cmake/linux-x64 --coverage-root ./.superpowers/runtime/coverage-bundle/linux-x64 --out ./dist
 ```
 
 命令会生成 `dist/staging/<version>/<platform>-<architecture>/`，其中包含 Code-OSS runtime、扩展 `dist`、service、bundle、聚合后的 license notices，以及闭集 `release-manifest.json`。
