@@ -196,6 +196,28 @@ test("validator rejects a descendant directory junction", async (t) => {
   });
 });
 
+const windowsOnly = process.platform === "win32" ? test : test.skip;
+
+windowsOnly("validator rejects a non-symlink reparse point inside the runtime", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await createRuntimeFixture(root, "windows");
+    const targetDirectory = join(fixture.runtimeRoot, "real-directory");
+    await mkdir(targetDirectory);
+    const reparseDirectory = join(fixture.runtimeRoot, "reparse-directory");
+    try {
+      await symlink(targetDirectory, reparseDirectory, "junction");
+    } catch (error) {
+      t.skip(`non-symlink reparse points unavailable: ${error.code}`);
+      return;
+    }
+    if ((await lstat(reparseDirectory)).isSymbolicLink()) {
+      t.skip("host exposes junctions as symbolic links");
+      return;
+    }
+    await expectFailure(() => validateCodeOssRuntime({ root: fixture.runtimeRoot, platform: "windows", expectedLauncherSha256: fixture.launcherSha256 }), "RELEASE_INPUT_INVALID");
+  });
+});
+
 const posixOnly = process.platform === "win32" ? test.skip : test;
 
 posixOnly("validator rejects special entries and non-portable entry names", async (t) => {
@@ -215,6 +237,31 @@ posixOnly("validator rejects special entries and non-portable entry names", asyn
         const fixture = await createRuntimeFixture(join(root, label), "windows");
         try {
           await writeFixtureFile(fixture.runtimeRoot, relativePath, "unsafe\n");
+        } catch (error) {
+          subtest.skip(`filesystem cannot represent ${label}: ${error.code}`);
+          return;
+        }
+        await expectFailure(() => validateCodeOssRuntime({ root: fixture.runtimeRoot, platform: "windows", expectedLauncherSha256: fixture.launcherSha256 }), "RELEASE_INPUT_INVALID");
+      });
+    }
+  });
+});
+
+const portableNameCases = [
+  ["reserved device basename", "con.txt"],
+  ["reserved device basename with numeric suffix", "LPT9"],
+  ["trailing dot component", "runtime."],
+  ["trailing space component", "runtime "],
+];
+
+test("validator rejects Windows-reserved and trailing portable path components", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    for (const [label, relativePath] of portableNameCases) {
+      await t.test(label, async (subtest) => {
+        const fixture = await createRuntimeFixture(join(root, label), "windows");
+        try {
+          await writeFixtureFile(fixture.runtimeRoot, relativePath, "unsafe\n");
+          await lstat(join(fixture.runtimeRoot, relativePath));
         } catch (error) {
           subtest.skip(`filesystem cannot represent ${label}: ${error.code}`);
           return;
