@@ -228,6 +228,40 @@ test("qualifyRelease rejects unsafe portable release paths", () => {
   }
 });
 
+for (const [separator, relativePath] of [
+  ["doubled separators", "app//code-oss"],
+  ["a trailing separator", "app/code-oss/"],
+]) {
+  for (const [record, mutate, expectedReason] of [
+    ["release artifact", (input, path) => {
+      input.manifests.windows.releaseManifest.artifacts[0].relativePath = path;
+    }, "windows release manifest artifacts are invalid"],
+    ["release license", (input, path) => {
+      input.manifests.windows.releaseManifest.licenses[0].path = path;
+      input.licenseAudit.windows.licenses[0].path = path;
+    }, "windows release manifest licenses are invalid"],
+    ["baseline artifact", (input, path) => {
+      input.manifests.windows.baselineReleaseManifest.artifacts[0].relativePath = path;
+    }, "windows baseline release manifest artifacts are invalid"],
+    ["baseline license", (input, path) => {
+      input.manifests.windows.baselineReleaseManifest.licenses[0].path = path;
+    }, "windows baseline release manifest licenses are invalid"],
+  ]) {
+    test(`qualifyRelease rejects ${separator} in a ${record} path`, () => {
+      const input = completeInput();
+      mutate(input, relativePath);
+
+      const result = qualifyRelease(input);
+
+      assert.equal(result.qualified, false, `${record}: ${relativePath}`);
+      assert.ok(
+        reasonMessages(result).includes(expectedReason),
+        `${record}: ${relativePath}: ${reasonMessages(result).join("; ")}`,
+      );
+    });
+  }
+}
+
 test("qualifyRelease rejects each missing platform evidence record with an explicit reason", () => {
   for (const platform of ["linux", "windows"]) {
     const input = completeInput();
