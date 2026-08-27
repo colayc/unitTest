@@ -262,6 +262,25 @@ test("stage CLI rejects --code-oss and requires both runtime-root flags", async 
   });
 });
 
+test("stageRelease rejects leading-space source components", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await createReleaseFixture(root);
+    await writeFixtureFile(fixture.cmakeRoot, " leading.txt", "unsafe bundle path\n");
+
+    await assert.rejects(
+      () => stageRelease({
+        platform: "windows",
+        architecture: "x64",
+        version: "1.2.3",
+        sourceCommit: "a".repeat(40),
+        sourceDateEpoch,
+        ...fixture,
+      }),
+      /unsafe staged path:  leading\.txt/u,
+    );
+  });
+});
+
 test("stage CLI rejects duplicate flags instead of overwriting", () => {
   const result = spawnSync(process.execPath, [
     resolve("tools/release/stage.mjs"),

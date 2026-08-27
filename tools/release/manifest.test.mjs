@@ -170,6 +170,62 @@ test("buildReleaseManifest accepts internal spaces but rejects unsafe spaced pat
   });
 });
 
+test("manifest schema permits internal spaces but rejects unsafe Windows path components", async (t) => {
+  await withStaging(t, async (stagingRoot) => {
+    const [schema, fixture] = await Promise.all([
+      readJson("manifest.schema.json"),
+      validInput(stagingRoot),
+    ]);
+    const { expectedLicenses, ...input } = fixture;
+    void expectedLicenses;
+    const launcher = await writeArtifact(stagingRoot, "app/code-oss-runtime/Code - OSS.exe", "Code - OSS launcher\n");
+    input.artifacts[0] = {
+      id: "code-oss-launcher",
+      kind: "runtime",
+      executable: true,
+      ...launcher,
+    };
+    const manifest = await buildManifest(input);
+    const ajv = new Ajv2020({ allErrors: true, strict: true });
+    addFormats(ajv);
+    const check = ajv.compile(schema);
+    assert.equal(check(manifest), true, ajv.errorsText(check.errors));
+
+    for (const relativePath of [
+      "app/code-oss-runtime/ Code - OSS.exe",
+      "app/code-oss-runtime/Code - OSS.exe ",
+      "app/code-oss-runtime/runtime.",
+      "app/code-oss-runtime/CON.txt",
+      "app/code-oss-runtime/lpt9.log",
+      "app/code-oss-runtime/control\u0001.txt",
+    ]) {
+      const unsafeManifest = JSON.parse(JSON.stringify(manifest));
+      unsafeManifest.artifacts[0].relativePath = relativePath;
+      assert.equal(check(unsafeManifest), false, relativePath);
+    }
+  });
+});
+
+test("buildReleaseManifest rejects leading-space and Windows-device artifact paths", async (t) => {
+  await withStaging(t, async (stagingRoot) => {
+    for (const relativePath of ["app/ leading.txt", "CON.txt", "control\u0001.txt"]) {
+      const { expectedLicenses, ...input } = await validInput(stagingRoot);
+      void expectedLicenses;
+      const artifact = relativePath.startsWith("app/")
+        ? await writeArtifact(stagingRoot, relativePath, "unsafe artifact\n")
+        : input.artifacts[0];
+      await assert.rejects(
+        () => buildManifest({
+          ...input,
+          artifacts: [{ ...input.artifacts[0], ...artifact, relativePath }, input.artifacts[1]],
+        }),
+        /unsafe artifact path/u,
+        relativePath,
+      );
+    }
+  });
+});
+
 test("buildReleaseManifest rejects duplicate artifact ids", async (t) => {
   await withStaging(t, async (stagingRoot) => {
     const { expectedLicenses, ...input } = await validInput(stagingRoot);

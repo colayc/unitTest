@@ -50,6 +50,7 @@ function portableRelativePath(value) {
       segment.length === 0 ||
       segment === "." ||
       segment === ".." ||
+      segment.startsWith(" ") ||
       segment.endsWith(".") ||
       segment.endsWith(" ") ||
       /[<>:"|?*\\]/u.test(segment)
