@@ -201,53 +201,64 @@ test("qualifyRelease accepts safe internal ASCII spaces in the Windows runtime l
   assert.equal(qualifyRelease(input).qualified, true);
 });
 
-test("qualifyRelease rejects unsafe portable release paths", () => {
-  for (const relativePath of [
-    "/app/code-oss",
-    "C:/app/code-oss",
-    "app\\code-oss",
-    "app/../code-oss",
-    "app/code<oss",
-    "app/control\u0001.txt",
-    "app/CON.txt",
-    "app/com1.exe",
-    "app/ leading.txt",
-    "app/trailing ",
-    "app/trailing.",
+test("qualifyRelease accepts literal real Code-OSS paths in current and baseline records", () => {
+  const input = completeInput();
+  const artifactPath = "app/code-oss-runtime/resources/app/node_modules.asar.unpacked/@vscode/ripgrep/bin/rg.exe";
+  const licensePath = "app/code-oss-runtime/resources/app/extensions/javascript/syntaxes/Regular Expressions (JavaScript).tmLanguage";
+  for (const manifest of [
+    input.manifests.windows.releaseManifest,
+    input.manifests.windows.baselineReleaseManifest,
   ]) {
-    const input = completeInput();
-    input.manifests.windows.releaseManifest.artifacts[0].relativePath = relativePath;
-
-    const result = qualifyRelease(input);
-
-    assert.equal(result.qualified, false, relativePath);
-    assert.ok(
-      reasonMessages(result).includes("windows release manifest artifacts are invalid"),
-      `${relativePath}: ${reasonMessages(result).join("; ")}`,
-    );
+    manifest.artifacts[0].relativePath = artifactPath;
+    manifest.licenses[0].path = licensePath;
   }
+  input.licenseAudit.windows.licenses[0].path = licensePath;
+
+  assert.equal(qualifyRelease(input).qualified, true);
 });
 
-for (const [separator, relativePath] of [
-  ["doubled separators", "app//code-oss"],
-  ["a trailing separator", "app/code-oss/"],
+const unsafeQualificationPaths = [
+  "app//x",
+  "app/x/",
+  "/app/x",
+  "C:/app/x",
+  "app/./x",
+  "app/../x",
+  "app\\x",
+  "app/x:y",
+  "app/less<than.txt",
+  "app/greater>than.txt",
+  "app/quote\"name.txt",
+  "app/pipe|name.txt",
+  "app/question?.txt",
+  "app/star*.txt",
+  "app/control\u0001.txt",
+  "app/hash#name.txt",
+  "app/caf\u00e9.txt",
+  "app/ leading.txt",
+  "app/trailing ",
+  "app/trailing.",
+  "app/CON.txt",
+  "app/com1.exe",
+];
+
+for (const [record, mutate, expectedReason] of [
+  ["current artifact", (input, path) => {
+    input.manifests.windows.releaseManifest.artifacts[0].relativePath = path;
+  }, "windows release manifest artifacts are invalid"],
+  ["current license", (input, path) => {
+    input.manifests.windows.releaseManifest.licenses[0].path = path;
+    input.licenseAudit.windows.licenses[0].path = path;
+  }, "windows release manifest licenses are invalid"],
+  ["baseline artifact", (input, path) => {
+    input.manifests.windows.baselineReleaseManifest.artifacts[0].relativePath = path;
+  }, "windows baseline release manifest artifacts are invalid"],
+  ["baseline license", (input, path) => {
+    input.manifests.windows.baselineReleaseManifest.licenses[0].path = path;
+  }, "windows baseline release manifest licenses are invalid"],
 ]) {
-  for (const [record, mutate, expectedReason] of [
-    ["release artifact", (input, path) => {
-      input.manifests.windows.releaseManifest.artifacts[0].relativePath = path;
-    }, "windows release manifest artifacts are invalid"],
-    ["release license", (input, path) => {
-      input.manifests.windows.releaseManifest.licenses[0].path = path;
-      input.licenseAudit.windows.licenses[0].path = path;
-    }, "windows release manifest licenses are invalid"],
-    ["baseline artifact", (input, path) => {
-      input.manifests.windows.baselineReleaseManifest.artifacts[0].relativePath = path;
-    }, "windows baseline release manifest artifacts are invalid"],
-    ["baseline license", (input, path) => {
-      input.manifests.windows.baselineReleaseManifest.licenses[0].path = path;
-    }, "windows baseline release manifest licenses are invalid"],
-  ]) {
-    test(`qualifyRelease rejects ${separator} in a ${record} path`, () => {
+  test(`qualifyRelease rejects unsafe ${record} paths`, () => {
+    for (const relativePath of unsafeQualificationPaths) {
       const input = completeInput();
       mutate(input, relativePath);
 
@@ -258,8 +269,8 @@ for (const [separator, relativePath] of [
         reasonMessages(result).includes(expectedReason),
         `${record}: ${relativePath}: ${reasonMessages(result).join("; ")}`,
       );
-    });
-  }
+    }
+  });
 }
 
 test("qualifyRelease rejects each missing platform evidence record with an explicit reason", () => {
