@@ -159,7 +159,9 @@ async function collectFiles(rootPath, prefix = "") {
 function isLicenseRelativePath(relativePath) {
   const basename = relativePath.split("/").at(-1) ?? "";
   return relativePath.split("/").includes("licenses")
-    || /^(?:licen[cs]e(?:s)?|notice(?:s)?|copying)(?:[._-].+)?$/iu.test(basename);
+    || /^(?:licen[cs]e(?:s)?|notice(?:s)?|copying)(?:$|[._-].+)$/iu.test(basename)
+    || /^thirdpartynotices(?:$|[._-].+)$/iu.test(basename)
+    || /(?:^|[._-])(?:licen[cs]e|notice)(?:$|[._-].+)$/iu.test(basename);
 }
 
 async function copyLicenseSet(sourceRoot, destinationRoot, namespace) {

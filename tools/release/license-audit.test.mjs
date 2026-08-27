@@ -68,6 +68,10 @@ async function createStagingFixture(root) {
   const files = new Map([
     ["licenses/code-oss/LICENSES.chromium.html", "Chromium notices\n"],
     ["licenses/code-oss/resources/app/LICENSE.txt", "Code - OSS license\n"],
+    ["licenses/code-oss/resources/app/ThirdPartyNotices.txt", "App third-party notices\n"],
+    ["licenses/code-oss/resources/app/extensions/git/dist/main.js.LICENSE.txt", "Git extension license\n"],
+    ["licenses/code-oss/resources/app/extensions/latex/cpp-bailout-license.txt", "LaTeX extension license\n"],
+    ["licenses/code-oss/resources/app/extensions/ms-vscode.js-debug/ThirdPartyNotices.txt", "Debug extension notices\n"],
     ["licenses/cmake/doc/cmake/LICENSE.rst", "cmake license\n"],
     ["licenses/coverage/licenses/Python-3.14.6.txt", "python license\n"],
     ["licenses/coverage/licenses/dependencies.json", `${JSON.stringify(dependencies, null, 2)}\n`],
@@ -117,19 +121,47 @@ test("auditLicenses verifies digest-bearing notices and returns a sorted closed 
     assert.deepEqual(Object.keys(result[0]).sort(), ["path", "sha256", "size"]);
     assert.ok(result.some(({ path }) => path === "licenses/code-oss/resources/app/LICENSE.txt"));
     assert.ok(result.some(({ path }) => path === "licenses/code-oss/LICENSES.chromium.html"));
+    assert.ok(result.some(({ path }) => path === "licenses/code-oss/resources/app/ThirdPartyNotices.txt"));
+    assert.ok(result.some(({ path }) => path === "licenses/code-oss/resources/app/extensions/git/dist/main.js.LICENSE.txt"));
+    assert.ok(result.some(({ path }) => path === "licenses/code-oss/resources/app/extensions/latex/cpp-bailout-license.txt"));
+    assert.ok(result.some(({ path }) => path === "licenses/code-oss/resources/app/extensions/ms-vscode.js-debug/ThirdPartyNotices.txt"));
   });
 });
 
-test("auditLicenses fails when Code-OSS license files are not listed", async (t) => {
+test("auditLicenses fails when an unlisted Code-OSS notice copy is present", async (t) => {
   await withTemporaryRoot(t, async (root) => {
     const { stagingRoot } = await createStagingFixture(root);
-    await writeFixtureFile(stagingRoot, "licenses/code-oss/NOTICE.extra", "unlisted Code - OSS notice\n");
+    await writeFixtureFile(stagingRoot, "licenses/code-oss/resources/app/ThirdPartyNotices.extra.txt", "unlisted Code - OSS notice\n");
 
     await assert.rejects(
       () => auditLicenses(stagingRoot),
       (error) => error?.code === "RELEASE_LICENSE_AUDIT_FAILED" && /unlisted/u.test(error.message),
     );
   });
+});
+
+test("auditLicenses fails when any manifest-listed Code-OSS notice is missing", async (t) => {
+  const codeOssNoticePaths = [
+    "LICENSES.chromium.html",
+    "resources/app/LICENSE.txt",
+    "resources/app/ThirdPartyNotices.txt",
+    "resources/app/extensions/git/dist/main.js.LICENSE.txt",
+    "resources/app/extensions/latex/cpp-bailout-license.txt",
+    "resources/app/extensions/ms-vscode.js-debug/ThirdPartyNotices.txt",
+  ];
+  for (const relativePath of codeOssNoticePaths) {
+    await t.test(relativePath, async (t) => {
+      await withTemporaryRoot(t, async (root) => {
+        const { stagingRoot } = await createStagingFixture(root);
+        await rm(join(stagingRoot, "licenses", "code-oss", ...relativePath.split("/")));
+
+        await assert.rejects(
+          () => auditLicenses(stagingRoot),
+          (error) => error?.code === "RELEASE_LICENSE_AUDIT_FAILED" && /missing/u.test(error.message),
+        );
+      });
+    });
+  }
 });
 
 test("auditLicenses fails when a manifest-listed notice is missing", async (t) => {
