@@ -560,8 +560,12 @@ test("release package jobs materialize digest-pinned runtime inputs before packa
       assert.match(job, /Join-Path\s+\$runtimeRoot\s+'Code - OSS\.exe'/u);
     } else {
       assert.match(job, /\.release\/inputs\/linux-code-oss/u);
-      assert.match(job, /launcher="\$runtime_root\/code-oss"/u);
-      assert.match(job, /\[\[\s+-x\s+"\$launcher"\s+\]\]/u);
+      assert.match(job, /runtime_root="\$input_root\/runtime"/u);
+      assert.match(job, /inventory="\$input_root\/code-oss-runtime-mode\.json"/u);
+      const restoreModes = job.indexOf("node tools/release/linux/runtime-mode-inventory.mjs restore");
+      const exportRuntimeRoot = job.indexOf('echo "CODE_OSS_RUNTIME_ROOT=$runtime_root"');
+      assert.ok(verifyDigest < restoreModes && restoreModes < exportRuntimeRoot && exportRuntimeRoot < packageIndex);
+      assert.doesNotMatch(job, /chmod\s+u\+x\s+"\$launcher"/u, "launcher-only chmod must not replace inventory restoration");
     }
   }
 });
