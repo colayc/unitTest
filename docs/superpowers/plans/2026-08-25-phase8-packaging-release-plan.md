@@ -286,4 +286,3 @@
 - The plan covers the roadmap requirements for signed or digest-verified Windows/Linux packages, bundled tools, license notices, install, upgrade, rollback, uninstall, and high-risk security gates.
 - The plan keeps signing credentials out of pull requests and treats missing runtime inputs as hard failures.
 - The plan deliberately does not mark Phase 8 complete until clean-machine evidence and final license/legal review exist.
-
