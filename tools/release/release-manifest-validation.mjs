@@ -68,6 +68,10 @@ function requireUnique(records, key, label) {
   if (new Set(values).size !== values.length) throw new Error(`duplicate ${label}`);
 }
 
+function asciiCaseFold(value) {
+  return value.replace(/[A-Z]/gu, (character) => character.toLowerCase());
+}
+
 function schemaError() {
   return validateSchema.errors
     ?.map(({ instancePath, message }) => `${instancePath || "/"} ${message}`)
@@ -104,7 +108,11 @@ export function validateReleaseManifestRecord(value, {
     ...value.artifacts.map(({ relativePath }) => relativePath),
     ...value.licenses.map(({ path }) => path),
   ];
-  if (new Set(payloadPaths).size !== payloadPaths.length || payloadPaths.includes("release-manifest.json")) {
+  const foldedPayloadPaths = payloadPaths.map(asciiCaseFold);
+  if (
+    new Set(foldedPayloadPaths).size !== foldedPayloadPaths.length
+    || foldedPayloadPaths.includes("release-manifest.json")
+  ) {
     throw new Error("duplicate or reserved release payload path");
   }
   if (platform !== undefined && value.platform !== platform) throw new Error(`release manifest platform must be ${platform}`);

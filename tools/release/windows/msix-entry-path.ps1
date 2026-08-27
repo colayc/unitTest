@@ -40,7 +40,7 @@ function ConvertFrom-CanonicalMsixEntryPath {
       $decoded -match '[\x00-\x1F\x7F]' -or
       $decoded -match '[<>:"/\\|?*]' -or
       $decoded.Contains('%') -or
-      $decoded -match '^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?$'
+      $decoded -match '^(?i:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM(?:[1-9]|\u00B9|\u00B2|\u00B3)|LPT(?:[1-9]|\u00B9|\u00B2|\u00B3))(?:\..*)?$'
     ) {
       Throw-UnsafeMsixEntryPath -RawPath $Path
     }
