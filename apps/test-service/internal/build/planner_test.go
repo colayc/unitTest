@@ -82,6 +82,26 @@ func TestPlannerBuildsValidatedConfigureAndBuildSteps(t *testing.T) {
 	}
 }
 
+func TestPlannerFixtureProvidesVerifiedWindowsNinja(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows Ninja discovery")
+	}
+	t.Setenv("ProgramFiles", filepath.Join(t.TempDir(), "missing-program-files"))
+	fixture := newPlannerFixture(t)
+	plan, err := Plan(PlanInput{
+		Installation: fixture.installation, WorkspaceRoot: fixture.root,
+		Project: fixture.project, Profile: fixture.profile,
+		Toolchain: fixture.toolchain, Jobs: 1, Configure: true,
+	})
+	if err != nil {
+		t.Fatalf("Plan() error = %v, want fixture-owned Ninja accepted", err)
+	}
+	want := filepath.Join(fixture.dataRoot, "program-files", "CMake", "bin", "ninja.exe")
+	if !slices.Contains(plan.Steps[0].Process.LaunchPlan, want) {
+		t.Fatalf("LaunchPlan = %#v, want fixture-owned Ninja %q", plan.Steps[0].Process.LaunchPlan, want)
+	}
+}
+
 func TestNativeBuildLaunchPlanDeclaresClosedWindowsCoverageTree(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows launch declaration")
@@ -1692,6 +1712,17 @@ func newPlannerFixture(t *testing.T) plannerFixture {
 		if err := os.WriteFile(path, []byte(path), 0o700); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if runtime.GOOS == "windows" {
+		programFiles := filepath.Join(dataRoot, "program-files")
+		ninjaPath := filepath.Join(programFiles, "CMake", "bin", "ninja.exe")
+		if err := os.MkdirAll(filepath.Dir(ninjaPath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(ninjaPath, []byte("ninja"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("ProgramFiles", programFiles)
 	}
 	root, err := workspace.OpenRoot(workspaceDir)
 	if err != nil {
