@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
 import { createReadStream } from "node:fs";
 import { lstat, readFile, readdir, realpath } from "node:fs/promises";
 import { isAbsolute, join, posix, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 
 const layouts = {
   windows: { launcherRelativePath: "Code - OSS.exe", requireExecutable: false },
@@ -16,6 +18,8 @@ const identity = {
 };
 
 const digestPattern = /^[0-9a-f]{64}$/u;
+const execFileAsync = promisify(execFile);
+const windowsReparsePointCommand = "$root=New-Object IO.DirectoryInfo($env:CODE_OSS_RUNTIME_ROOT); function Test-ReparsePoint([IO.FileSystemInfo]$node) { if (($node.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $true }; if ($node -is [IO.DirectoryInfo]) { foreach ($child in $node.EnumerateFileSystemInfos()) { if (Test-ReparsePoint $child) { return $true } } }; return $false }; [Console]::Out.Write([int](Test-ReparsePoint $root))";
 
 function releaseInputError(code, message) {
   const error = new Error(`${code}: ${message}`);
@@ -34,13 +38,49 @@ function portableRelativePath(value) {
     value.length === 0 ||
     value.includes("\\") ||
     value.includes(":") ||
+    /[\u0000-\u001f\u007f]/u.test(value) ||
     posix.isAbsolute(value) ||
     isAbsolute(value) ||
     posix.normalize(value) !== value
   ) {
     return false;
   }
-  return value.split("/").every((segment) => segment.length > 0 && segment !== "." && segment !== "..");
+  return value.split("/").every((segment) => {
+    if (
+      segment.length === 0 ||
+      segment === "." ||
+      segment === ".." ||
+      segment.endsWith(".") ||
+      segment.endsWith(" ") ||
+      /[<>:"|?*\\]/u.test(segment)
+    ) {
+      return false;
+    }
+    const base = segment.split(".", 1)[0].toUpperCase();
+    return !(["CON", "PRN", "AUX", "NUL"].includes(base) || /^(COM|LPT)[1-9]$/u.test(base));
+  });
+}
+
+async function assertNoWindowsReparsePoints(rootPath) {
+  if (process.platform !== "win32") return false;
+  try {
+    const { stdout } = await execFileAsync("powershell.exe", [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      windowsReparsePointCommand,
+    ], {
+      encoding: "utf8",
+      env: { ...process.env, CODE_OSS_RUNTIME_ROOT: rootPath },
+      windowsHide: true,
+    });
+    if (stdout.trim() === "1") {
+      throw releaseInputError("RELEASE_INPUT_INVALID", "runtime tree contains a reparse point");
+    }
+  } catch (error) {
+    if (error?.code === "RELEASE_INPUT_INVALID") throw error;
+    throw releaseInputError("RELEASE_INPUT_INVALID", "runtime tree reparse-point state cannot be inspected");
+  }
 }
 
 async function scanRuntimeTree(rootPath, canonicalRoot) {
@@ -81,7 +121,8 @@ async function scanRuntimeTree(rootPath, canonicalRoot) {
       try {
         info = await lstat(entryPath);
         canonicalEntryPath = await realpath(entryPath);
-      } catch {
+      } catch (error) {
+        if (error?.code === "RELEASE_INPUT_INVALID") throw error;
         throw releaseInputError("RELEASE_INPUT_INVALID", "runtime tree entry cannot be resolved");
       }
       if (entry.isSymbolicLink() || info.isSymbolicLink()) {
@@ -135,6 +176,7 @@ export async function validateCodeOssRuntime({ root, platform, expectedLauncherS
   if (rootInfo.isSymbolicLink() || !rootInfo.isDirectory()) {
     throw releaseInputError("RELEASE_INPUT_INVALID", "runtime root must be a real directory");
   }
+  await assertNoWindowsReparsePoints(rootPath);
   let canonicalRoot;
   try {
     canonicalRoot = await realpath(rootPath);
