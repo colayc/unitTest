@@ -59,6 +59,10 @@ function resolveOptIn(environment) {
   return { launcherSha256, root };
 }
 
+function assertExpectedRealRuntimeFileCount(snapshot, label) {
+  assert.equal(snapshot.length, 1006, `${label} must contain exactly 1006 regular files`);
+}
+
 async function writeFixtureFile(root, relativePath, value) {
   const filePath = join(root, ...relativePath.split("/"));
   await mkdir(dirname(filePath), { recursive: true });
@@ -202,6 +206,7 @@ async function runRealRuntimeE2E(t, inputs) {
   });
 
   const sourceSnapshot = await snapshotRegularFileTree(inputs.root);
+  assertExpectedRealRuntimeFileCount(sourceSnapshot, "source Code-OSS runtime");
   const sourcePaths = new Set(sourceSnapshot.map(({ relativePath }) => relativePath));
   for (const requiredPath of requiredRealRuntimePaths) {
     assert.ok(sourcePaths.has(requiredPath), `real runtime is missing required portable path: ${requiredPath}`);
@@ -238,6 +243,7 @@ async function runRealRuntimeE2E(t, inputs) {
   assert.deepEqual(stagedValidation.productIdentity, sourceValidation.productIdentity);
 
   const stagedSnapshot = await snapshotRegularFileTree(stagedRuntimeRoot);
+  assertExpectedRealRuntimeFileCount(stagedSnapshot, "staged Code-OSS runtime");
   assert.deepEqual(stagedSnapshot, sourceSnapshot, "staged runtime must preserve the exact source file set and bytes");
 
   const runtimeManifestSnapshot = result.manifest.artifacts
@@ -248,6 +254,7 @@ async function runRealRuntimeE2E(t, inputs) {
       size,
     }))
     .sort((left, right) => left.relativePath.localeCompare(right.relativePath, "en"));
+  assertExpectedRealRuntimeFileCount(runtimeManifestSnapshot, "runtime manifest artifact set");
   assert.deepEqual(
     runtimeManifestSnapshot,
     sourceSnapshot,
@@ -288,6 +295,16 @@ async function runRealRuntimeE2E(t, inputs) {
   ]);
   if (verifyResult.status !== 0) throw new Error(processFailure("real MSIX verification", verifyResult));
 }
+
+test("real Code-OSS file-count gate rejects incomplete and extra fixture trees", () => {
+  for (const count of [1005, 1007]) {
+    assert.throws(
+      () => assertExpectedRealRuntimeFileCount(new Array(count), "fixture runtime"),
+      /fixture runtime must contain exactly 1006 regular files/u,
+    );
+  }
+  assert.doesNotThrow(() => assertExpectedRealRuntimeFileCount(new Array(1006), "fixture runtime"));
+});
 
 test("real Code-OSS E2E opt-in accepts only a complete explicit input pair", () => {
   assert.equal(resolveOptIn({}), null);
