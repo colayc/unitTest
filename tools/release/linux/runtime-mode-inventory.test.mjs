@@ -108,6 +108,58 @@ test("inventory validation accepts only the closed sorted Linux x64 contract", (
   );
 });
 
+test("inventory validation rejects non-string digest values without coercion", () => {
+  const digest = "a".repeat(64);
+  const inventory = {
+    schemaVersion: 1,
+    platform: "linux",
+    architecture: "x64",
+    launcherRelativePath: "code-oss",
+    launcherSha256: digest,
+    files: [
+      { path: "code-oss", size: 4, sha256: digest, executable: true },
+      { path: "resources/app/package.json", size: 3, sha256: "b".repeat(64), executable: false },
+    ],
+  };
+  const assertInvalid = (run) => assert.throws(run, (error) => error?.code === "RELEASE_INPUT_INVALID");
+
+  for (const invalidDigest of [[digest], {}, 123]) {
+    assertInvalid(() => validateRuntimeModeInventory(inventory, invalidDigest));
+
+    const invalidLauncher = clone(inventory);
+    invalidLauncher.launcherSha256 = invalidDigest;
+    assertInvalid(() => validateRuntimeModeInventory(invalidLauncher, digest));
+
+    const invalidFile = clone(inventory);
+    invalidFile.files[1].sha256 = invalidDigest;
+    assertInvalid(() => validateRuntimeModeInventory(invalidFile, digest));
+  }
+});
+
+for (const [label, operations, expectedMessage] of [
+  ["chmod", { chmodFile: async () => { throw new Error("EACCES secret runtime path"); } }, "runtime file mode cannot be changed"],
+  ["final lstat", {
+    chmodFile: async () => {},
+    lstatFile: async () => { throw new Error("ENOENT secret runtime path"); },
+  }, "runtime file mode state cannot be inspected"],
+]) {
+  test(`restore maps ${label} failures to stable path-free errors`, async (t) => {
+    const fixture = await createRuntimeFixture(t);
+    const secretRoot = fixture.root;
+
+    await assert.rejects(() => restoreRuntimeModes({
+      root: fixture.root,
+      inventoryPath: fixture.inventoryPath,
+      expectedLauncherSha256: fixture.launcherSha256,
+    }, { platform: "linux", ...operations }), (error) => {
+      assert.equal(error?.code, "RELEASE_INPUT_INVALID");
+      assert.equal(error?.message, `RELEASE_INPUT_INVALID: ${expectedMessage}`);
+      assert.doesNotMatch(error?.message ?? "", new RegExp(secretRoot.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
+      return true;
+    });
+  });
+}
+
 linuxOnly("restore validates all bytes before restoring complete executable modes", async (t) => {
   const fixture = await createRuntimeFixture(t);
   for (const record of fixture.inventory.files) {

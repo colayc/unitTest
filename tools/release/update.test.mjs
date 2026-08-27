@@ -648,11 +648,26 @@ linuxOnly("Linux install smoke restores both AppImage execute bits before either
     await chmod(targetPackage, 0o644);
     await chmod(baselinePackage, 0o644);
 
+    const orderLog = join(root, "order.log");
+    const commandRoot = join(root, "bin");
+    await mkdir(commandRoot);
+    await writeFile(join(commandRoot, "sha256sum"), `#!/usr/bin/env bash
+printf 'sha256:%s\\n' "$*" >> "$ORDER_LOG"
+exec /usr/bin/sha256sum "$@"
+`, { mode: 0o755 });
+    await writeFile(join(commandRoot, "chmod"), `#!/usr/bin/env bash
+printf 'chmod:%s\\n' "$*" >> "$ORDER_LOG"
+exec /usr/bin/chmod "$@"
+`, { mode: 0o755 });
+    await chmod(join(commandRoot, "sha256sum"), 0o755);
+    await chmod(join(commandRoot, "chmod"), 0o755);
+
     await writeFile(join(linuxRoot, "verify-appimage.mjs"), `
-import { access } from "node:fs/promises";
+import { access, appendFile } from "node:fs/promises";
 import { constants } from "node:fs";
 const image = process.argv[process.argv.indexOf("--image") + 1];
 await access(image, constants.X_OK);
+await appendFile(process.env.ORDER_LOG, \`verify:\${image}\\n\`);
 `);
     await writeFile(join(scriptRoot, "update.mjs"), `
 import { writeFile } from "node:fs/promises";
@@ -700,8 +715,21 @@ await writeFile(value("--evidence"), JSON.stringify({
       "--baseline-manifest", baselineManifest,
       "--baseline-manifest-sha256", baselineManifestValue.releaseManifestSha256,
       "--baseline-version", baselineManifestValue.version,
-    ], { encoding: "utf8", windowsHide: true });
+    ], {
+      encoding: "utf8",
+      env: { ...process.env, ORDER_LOG: orderLog, PATH: `${commandRoot}:${process.env.PATH}` },
+      windowsHide: true,
+    });
 
     assert.equal(result.status, 0, result.stderr);
+    const events = (await readFile(orderLog, "utf8")).trim().split("\n");
+    const targetDigest = events.findIndex((event) => event === `sha256:-- ${targetPackage}`);
+    const baselineDigest = events.findIndex((event) => event === `sha256:-- ${baselinePackage}`);
+    const imageChmod = events.findIndex((event) => event === `chmod:u+x -- ${targetPackage} ${baselinePackage}`);
+    const targetVerify = events.findIndex((event) => event === `verify:${targetPackage}`);
+    const baselineVerify = events.findIndex((event) => event === `verify:${baselinePackage}`);
+    assert.ok(targetDigest >= 0 && baselineDigest >= 0 && imageChmod >= 0 && targetVerify >= 0 && baselineVerify >= 0, events);
+    assert.ok(targetDigest < imageChmod && baselineDigest < imageChmod, events);
+    assert.ok(imageChmod < targetVerify && imageChmod < baselineVerify, events);
   });
 });
