@@ -40,9 +40,13 @@ async function writeFixtureFile(root, relativePath, value) {
 async function createStagingFixture(root, version = "1.2.3") {
   const stagingRoot = join(root, "staging");
   const runtime = "runtime\n";
+  const product = "{\"applicationName\":\"code-oss\"}\n";
+  const locale = "locale\n";
   const service = "service\n";
   const notice = "notice\n";
-  await writeFixtureFile(stagingRoot, "app/code-oss.exe", runtime);
+  await writeFixtureFile(stagingRoot, "app/code-oss-runtime/Code - OSS.exe", runtime);
+  await writeFixtureFile(stagingRoot, "app/code-oss-runtime/resources/app/product.json", product);
+  await writeFixtureFile(stagingRoot, "app/code-oss-runtime/locales/en-US.pak", locale);
   await writeFixtureFile(stagingRoot, "service/unit-test-service.exe", service);
   await writeFixtureFile(stagingRoot, "licenses/NOTICE.txt", notice);
   const manifest = {
@@ -56,10 +60,26 @@ async function createStagingFixture(root, version = "1.2.3") {
       {
         id: "runtime",
         kind: "runtime",
-        relativePath: "app/code-oss.exe",
+        relativePath: "app/code-oss-runtime/Code - OSS.exe",
         size: Buffer.byteLength(runtime),
         sha256: sha256(runtime),
         executable: true,
+      },
+      {
+        id: "runtime-locale",
+        kind: "runtime",
+        relativePath: "app/code-oss-runtime/locales/en-US.pak",
+        size: Buffer.byteLength(locale),
+        sha256: sha256(locale),
+        executable: false,
+      },
+      {
+        id: "runtime-product",
+        kind: "runtime",
+        relativePath: "app/code-oss-runtime/resources/app/product.json",
+        size: Buffer.byteLength(product),
+        sha256: sha256(product),
+        executable: false,
       },
       {
         id: "service",
@@ -483,7 +503,7 @@ windowsOnly("package-msix declares the staged Code-OSS executable as a runnable 
     const manifestXml = await readZipEntry(fixture.outputPath, "AppxManifest.xml");
 
     assert.match(manifestXml, /<Applications>[\s\S]*<Application\b/u);
-    assert.match(manifestXml, /Executable="app\\code-oss\.exe"/u);
+    assert.match(manifestXml, /Executable="app\\code-oss-runtime\\Code - OSS\.exe"/u);
     assert.match(manifestXml, /EntryPoint="Windows\.FullTrustApplication"/u);
   });
 });
@@ -620,7 +640,7 @@ windowsOnly("verify-msix rejects a forged signature entry when RequireSignature 
 windowsOnly("verify-msix rejects a duplicate slash-aliased payload entry before payload-set comparison", async (t) => {
   await withTemporaryRoot(t, async (root) => {
     const fixture = await packageWithFakeTools(root);
-    await addZipEntry(fixture.outputPath, "app\\code-oss.exe", "aliased-runtime");
+    await addZipEntry(fixture.outputPath, "app\\code-oss-runtime\\Code - OSS.exe", "aliased-runtime");
     const result = runVerify([
       "-Package", fixture.outputPath,
       "-Manifest", fixture.manifestPath,
@@ -635,7 +655,7 @@ windowsOnly("verify-msix rejects a duplicate slash-aliased payload entry before 
 windowsOnly("verify-msix rejects a case-aliased payload entry before payload-set comparison", async (t) => {
   await withTemporaryRoot(t, async (root) => {
     const fixture = await packageWithFakeTools(root);
-    await addZipEntry(fixture.outputPath, "APP/code-oss.exe", "aliased-runtime");
+    await addZipEntry(fixture.outputPath, "APP/code-oss-runtime/Code - OSS.exe", "aliased-runtime");
     const result = runVerify([
       "-Package", fixture.outputPath,
       "-Manifest", fixture.manifestPath,
@@ -650,7 +670,7 @@ windowsOnly("verify-msix rejects a case-aliased payload entry before payload-set
 windowsOnly("verify-msix rejects a dot-segment payload entry before payload-set comparison", async (t) => {
   await withTemporaryRoot(t, async (root) => {
     const fixture = await packageWithFakeTools(root);
-    await addZipEntry(fixture.outputPath, "app/../app/code-oss.exe", "aliased-runtime");
+    await addZipEntry(fixture.outputPath, "app/../app/code-oss-runtime/Code - OSS.exe", "aliased-runtime");
     const result = runVerify([
       "-Package", fixture.outputPath,
       "-Manifest", fixture.manifestPath,
@@ -662,10 +682,10 @@ windowsOnly("verify-msix rejects a dot-segment payload entry before payload-set 
   });
 });
 
-windowsOnly("verify-msix rejects a tampered packaged payload whose hash no longer matches the staged manifest", async (t) => {
+windowsOnly("verify-msix rejects a tampered packaged Code-OSS launcher whose hash no longer matches the staged manifest", async (t) => {
   await withTemporaryRoot(t, async (root) => {
     const fixture = await packageWithFakeTools(root);
-    await setZipEntry(fixture.outputPath, "app/code-oss.exe", "tampered-runtime");
+    await setZipEntry(fixture.outputPath, "app/code-oss-runtime/Code - OSS.exe", "tampered-runtime");
     const result = runVerify([
       "-Package", fixture.outputPath,
       "-Manifest", fixture.manifestPath,
@@ -674,6 +694,42 @@ windowsOnly("verify-msix rejects a tampered packaged payload whose hash no longe
     assert.equal(result.status, 1);
     assert.match(result.stderr, /RELEASE_VERIFICATION_FAILED/u);
     assert.match(result.stderr, /(?:size|hash) does not match/u);
+  });
+});
+
+windowsOnly("verify-msix requires the fixed Code-OSS launcher to remain a runtime executable while allowing the service executable", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await packageWithFakeTools(root);
+    await rewriteReleaseManifest(fixture, (manifest) => {
+      manifest.artifacts[0].kind = "service";
+    });
+    const result = runVerify([
+      "-Package", fixture.outputPath,
+      "-Manifest", fixture.manifestPath,
+    ], {});
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /RELEASE_VERIFICATION_FAILED/u);
+    assert.match(result.stderr, /runtime.*launcher|launcher.*runtime/u);
+  });
+});
+
+windowsOnly("verify-msix rejects a tampered packaged Code-OSS product metadata file", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await packageWithFakeTools(root);
+    await setZipEntry(
+      fixture.outputPath,
+      "app/code-oss-runtime/resources/app/product.json",
+      "{\"applicationName\":\"tampered\"}\n",
+    );
+    const result = runVerify([
+      "-Package", fixture.outputPath,
+      "-Manifest", fixture.manifestPath,
+    ], {});
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /RELEASE_VERIFICATION_FAILED/u);
+    assert.match(result.stderr, /artifact .*hash does not match|artifact .*size does not match/u);
   });
 });
 
