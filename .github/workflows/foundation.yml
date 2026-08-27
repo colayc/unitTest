@@ -215,6 +215,8 @@ jobs:
           echo "$(dirname "$cmake")" >> "$GITHUB_PATH"
           echo "CMAKE=$cmake" >> "$GITHUB_ENV"
       - run: pnpm verify
+      - name: Verify native Linux release contracts
+        run: node --test tools/release/linux/runtime-mode-inventory.test.mjs tools/release/qualification.test.mjs tools/release/update.test.mjs tools/workspace-smoke/workspace-smoke.test.mjs
       - id: coverage-manifest
         shell: bash
         run: |

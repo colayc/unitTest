@@ -569,3 +569,13 @@ test("release package jobs materialize digest-pinned runtime inputs before packa
     }
   }
 });
+
+test("Ubuntu verification explicitly runs the native Linux release contract suite", async () => {
+  const workflow = await readFile(resolve(".github/workflows/foundation.yml"), "utf8");
+  const start = workflow.indexOf("  verify-linux:");
+  const end = workflow.indexOf("\n  package-windows:", start);
+  const job = workflow.slice(start, end);
+
+  assert.match(job, /- name: Verify native Linux release contracts\r?\n/u);
+  assert.match(job, /node --test tools\/release\/linux\/runtime-mode-inventory\.test\.mjs tools\/release\/qualification\.test\.mjs tools\/release\/update\.test\.mjs tools\/workspace-smoke\/workspace-smoke\.test\.mjs/u);
+});

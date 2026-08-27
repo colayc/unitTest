@@ -58,7 +58,7 @@ async function hashFile(path) {
 }
 
 export function validateRuntimeModeInventory(inventory, expectedLauncherSha256) {
-  if (!digestPattern.test(expectedLauncherSha256 ?? "")) {
+  if (typeof expectedLauncherSha256 !== "string" || !digestPattern.test(expectedLauncherSha256)) {
     throw releaseInputError("RELEASE_INPUT_INVALID", "launcher digest must be a lowercase SHA-256");
   }
   if (!hasExactKeys(inventory, inventoryKeys)) {
@@ -69,6 +69,7 @@ export function validateRuntimeModeInventory(inventory, expectedLauncherSha256) 
     || inventory.platform !== "linux"
     || inventory.architecture !== "x64"
     || inventory.launcherRelativePath !== "code-oss"
+    || typeof inventory.launcherSha256 !== "string"
     || !digestPattern.test(inventory.launcherSha256)
     || !Array.isArray(inventory.files)
     || inventory.files.length === 0
@@ -88,6 +89,7 @@ export function validateRuntimeModeInventory(inventory, expectedLauncherSha256) 
       || !isPortableReleasePath(record.path)
       || !Number.isSafeInteger(record.size)
       || record.size < 0
+      || typeof record.sha256 !== "string"
       || !digestPattern.test(record.sha256)
       || typeof record.executable !== "boolean"
     ) {
@@ -226,8 +228,11 @@ async function verifyRuntimeFiles(rootPath, inventory) {
   return actualFiles;
 }
 
-export async function restoreRuntimeModes({ root, inventoryPath, expectedLauncherSha256 } = {}) {
-  if (process.platform !== "linux") {
+export async function restoreRuntimeModes(
+  { root, inventoryPath, expectedLauncherSha256 } = {},
+  { platform = process.platform, chmodFile = chmod, lstatFile = lstat } = {},
+) {
+  if (platform !== "linux") {
     throw releaseInputError("RELEASE_INPUT_INVALID", "runtime mode restoration is supported only on Linux");
   }
   if (typeof root !== "string" || root.length === 0 || typeof inventoryPath !== "string" || inventoryPath.length === 0) {
@@ -237,13 +242,22 @@ export async function restoreRuntimeModes({ root, inventoryPath, expectedLaunche
   const inventory = await loadInventory(resolve(inventoryPath), expectedLauncherSha256);
   const actualFiles = await verifyRuntimeFiles(rootPath, inventory);
 
-  for (const record of inventory.files) {
-    await chmod(actualFiles.get(record.path).path, record.executable ? 0o755 : 0o644);
+  try {
+    for (const record of inventory.files) {
+      await chmodFile(actualFiles.get(record.path).path, record.executable ? 0o755 : 0o644);
+    }
+  } catch {
+    throw releaseInputError("RELEASE_INPUT_INVALID", "runtime file mode cannot be changed");
   }
 
   const restoredFiles = await verifyRuntimeFiles(rootPath, inventory);
   for (const record of inventory.files) {
-    const info = await lstat(restoredFiles.get(record.path).path);
+    let info;
+    try {
+      info = await lstatFile(restoredFiles.get(record.path).path);
+    } catch {
+      throw releaseInputError("RELEASE_INPUT_INVALID", "runtime file mode state cannot be inspected");
+    }
     const expectedMode = record.executable ? 0o755 : 0o644;
     if ((info.mode & 0o777) !== expectedMode) {
       throw releaseInputError("RELEASE_INPUT_INVALID", "runtime file mode could not be restored exactly");
