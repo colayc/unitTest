@@ -163,6 +163,27 @@ function Read-EntryBytes {
   }
 }
 
+function Decode-ArchiveEntryPath {
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  $decodedSegments = @()
+  foreach ($segment in $Path.Split('/')) {
+    if ($segment.Contains('%')) {
+      if ($segment -cnotmatch '^(?:[^%]|%[0-9A-Fa-f]{2})+$') {
+        Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message "unsafe archive entry path: $Path"
+      }
+      $decoded = [Uri]::UnescapeDataString($segment)
+      if ([Uri]::EscapeDataString($decoded) -cne $segment) {
+        Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message "non-canonical archive entry path: $Path"
+      }
+      $decodedSegments += $decoded
+    } else {
+      $decodedSegments += $segment
+    }
+  }
+  return [string]::Join('/', $decodedSegments)
+}
+
 function Get-NormalizedEntries {
   param([Parameter(Mandatory = $true)]$Archive)
 
@@ -185,7 +206,7 @@ function Get-ValidatedEntryMap {
       continue
     }
     $rawPath = [string]$entry.FullName
-    $normalizedPath = $rawPath -replace '\\', '/'
+    $normalizedPath = Decode-ArchiveEntryPath -Path ($rawPath -replace '\\', '/')
     $segments = @($normalizedPath.Split('/'))
     if (
       [string]::IsNullOrWhiteSpace($rawPath) -or
@@ -279,10 +300,12 @@ if ($manifestValidation.ExitCode -ne 0) {
 }
 $releaseManifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 $launcherArtifacts = @($releaseManifest.artifacts | Where-Object {
-    [string]$_.relativePath -ceq 'app/code-oss.exe' -and $_.executable -eq $true
+    [string]$_.relativePath -ceq 'app/code-oss-runtime/Code - OSS.exe' -and
+    [string]$_.kind -ceq 'runtime' -and
+    $_.executable -eq $true
   })
 if ($launcherArtifacts.Count -ne 1) {
-  Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message 'release manifest must bind exactly one executable app/code-oss.exe launcher'
+  Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message 'release manifest must bind exactly one runtime executable app/code-oss-runtime/Code - OSS.exe launcher'
 }
 
 $expectedPayloads = [ordered]@{}
@@ -421,7 +444,7 @@ try {
   if ($null -eq $application) {
     Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message 'AppxManifest.xml is missing a runnable application entry point'
   }
-  if ([string]$application.Executable -cne 'app\code-oss.exe' -or [string]$application.EntryPoint -cne 'Windows.FullTrustApplication') {
+  if ([string]$application.Executable -cne 'app\code-oss-runtime\Code - OSS.exe' -or [string]$application.EntryPoint -cne 'Windows.FullTrustApplication') {
     Fail-Release -Code 'RELEASE_VERIFICATION_FAILED' -Message 'AppxManifest.xml application entry point does not target the staged Code-OSS executable'
   }
 } finally {

@@ -22,7 +22,7 @@
     <Resource Language="en-us" />
   </Resources>
   <Applications>
-    <Application Id="UnitTestIDE" Executable="app\code-oss.exe" EntryPoint="Windows.FullTrustApplication">
+    <Application Id="UnitTestIDE" Executable="app\code-oss-runtime\Code - OSS.exe" EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
         DisplayName="Unit Test IDE"
         Description="Unit Test IDE release package"
