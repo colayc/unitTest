@@ -66,6 +66,8 @@ async function createStagingFixture(root) {
     },
   };
   const files = new Map([
+    ["licenses/code-oss/LICENSES.chromium.html", "Chromium notices\n"],
+    ["licenses/code-oss/resources/app/LICENSE.txt", "Code - OSS license\n"],
     ["licenses/cmake/doc/cmake/LICENSE.rst", "cmake license\n"],
     ["licenses/coverage/licenses/Python-3.14.6.txt", "python license\n"],
     ["licenses/coverage/licenses/dependencies.json", `${JSON.stringify(dependencies, null, 2)}\n`],
@@ -113,6 +115,20 @@ test("auditLicenses verifies digest-bearing notices and returns a sorted closed 
 
     assert.deepEqual(result, licenses.sort((left, right) => left.path.localeCompare(right.path, "en")));
     assert.deepEqual(Object.keys(result[0]).sort(), ["path", "sha256", "size"]);
+    assert.ok(result.some(({ path }) => path === "licenses/code-oss/resources/app/LICENSE.txt"));
+    assert.ok(result.some(({ path }) => path === "licenses/code-oss/LICENSES.chromium.html"));
+  });
+});
+
+test("auditLicenses fails when Code-OSS license files are not listed", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const { stagingRoot } = await createStagingFixture(root);
+    await writeFixtureFile(stagingRoot, "licenses/code-oss/NOTICE.extra", "unlisted Code - OSS notice\n");
+
+    await assert.rejects(
+      () => auditLicenses(stagingRoot),
+      (error) => error?.code === "RELEASE_LICENSE_AUDIT_FAILED" && /unlisted/u.test(error.message),
+    );
   });
 });
 

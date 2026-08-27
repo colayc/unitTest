@@ -143,6 +143,33 @@ test("buildReleaseManifest rejects absolute artifact paths and parent traversal"
   });
 });
 
+test("buildReleaseManifest accepts internal spaces but rejects unsafe spaced paths", async (t) => {
+  await withStaging(t, async (stagingRoot) => {
+    const { expectedLicenses, ...input } = await validInput(stagingRoot);
+    void expectedLicenses;
+    const launcher = await writeArtifact(stagingRoot, "app/code-oss-runtime/Code - OSS.exe", "Code - OSS launcher\n");
+    input.artifacts[0] = {
+      id: "code-oss-launcher",
+      kind: "runtime",
+      executable: true,
+      ...launcher,
+    };
+
+    const manifest = await buildManifest(input);
+    assert.ok(manifest.artifacts.some(({ relativePath }) => relativePath === "app/code-oss-runtime/Code - OSS.exe"));
+
+    for (const relativePath of [
+      "app/code-oss-runtime/../Code - OSS.exe",
+      "app/code-oss-runtime/Code - OSS.exe ",
+    ]) {
+      const { expectedLicenses: ignoredLicenses, ...unsafeInput } = await validInput(stagingRoot);
+      void ignoredLicenses;
+      unsafeInput.artifacts[0].relativePath = relativePath;
+      await assert.rejects(() => buildManifest(unsafeInput), /unsafe artifact path/u);
+    }
+  });
+});
+
 test("buildReleaseManifest rejects duplicate artifact ids", async (t) => {
   await withStaging(t, async (stagingRoot) => {
     const { expectedLicenses, ...input } = await validInput(stagingRoot);

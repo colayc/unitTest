@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join, posix, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { buildReleaseManifest } from "./manifest.mjs";
+import { validateCodeOssRuntime } from "./code-oss-runtime.mjs";
 import { normalizeTreeTimestamps, resolveSourceDateEpoch } from "./release-reproducibility.mjs";
 
 const toolDirectory = dirname(fileURLToPath(import.meta.url));
@@ -13,7 +14,8 @@ const semverLike = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u;
 const requiredKeys = [
   "architecture",
   "cmakeRoot",
-  "codeOss",
+  "codeOssRoot",
+  "codeOssSha256",
   "coverageRoot",
   "outRoot",
   "platform",
@@ -24,7 +26,8 @@ const cliFlagMap = new Map([
   ["--platform", "platform"],
   ["--architecture", "architecture"],
   ["--version", "version"],
-  ["--code-oss", "codeOss"],
+  ["--code-oss-root", "codeOssRoot"],
+  ["--code-oss-sha256", "codeOssSha256"],
   ["--service", "service"],
   ["--cmake-root", "cmakeRoot"],
   ["--coverage-root", "coverageRoot"],
@@ -170,7 +173,7 @@ async function collectFiles(rootPath, prefix = "") {
 function isLicenseRelativePath(relativePath) {
   const basename = relativePath.split("/").at(-1) ?? "";
   return relativePath.split("/").includes("licenses")
-    || /^(?:licen[cs]e|notice|copying)(?:[.-].+)?$/iu.test(basename);
+    || /^(?:licen[cs]e(?:s)?|notice(?:s)?|copying)(?:[._-].+)?$/iu.test(basename);
 }
 
 async function copyLicenseSet(sourceRoot, destinationRoot, namespace) {
@@ -192,7 +195,7 @@ function artifactKind(relativePath) {
   if (relativePath.startsWith("app/extensions/unit-test-ide/")) return "extension";
   if (relativePath.startsWith("bundles/cmake/")) return "bundle-cmake";
   if (relativePath.startsWith("bundles/coverage/")) return "bundle-coverage";
-  if (relativePath === "app/code-oss" || relativePath === "app/code-oss.exe") return "runtime";
+  if (relativePath.startsWith("app/code-oss-runtime/")) return "runtime";
   if (relativePath === "service/unit-test-service" || relativePath === "service/unit-test-service.exe") return "service";
   return "payload";
 }
@@ -206,8 +209,8 @@ function artifactId(relativePath, index) {
 }
 
 function executableArtifact(relativePath, mode) {
-  return relativePath === "app/code-oss"
-    || relativePath === "app/code-oss.exe"
+  return relativePath === "app/code-oss-runtime/code-oss"
+    || relativePath === "app/code-oss-runtime/Code - OSS.exe"
     || relativePath === "service/unit-test-service"
     || relativePath === "service/unit-test-service.exe"
     || (mode & 0o111) !== 0;
@@ -253,7 +256,7 @@ function currentSourceCommit(root) {
 }
 
 function usage() {
-  return "Usage: node tools/release/stage.mjs --platform <windows|linux> --architecture <x64> --version <semver> --code-oss <file> --service <file> --cmake-root <dir> --coverage-root <dir> --out <dir>";
+  return "Usage: node tools/release/stage.mjs --platform <windows|linux> --architecture <x64> --version <semver> --code-oss-root <dir> --code-oss-sha256 <lowercase-sha256> --service <file> --cmake-root <dir> --coverage-root <dir> --out <dir>";
 }
 
 function parseCliArguments(argv) {
@@ -294,7 +297,8 @@ function normalizeInput(input) {
     platform: input.platform,
     architecture: input.architecture,
     version: input.version,
-    codeOss: input.codeOss,
+    codeOssRoot: input.codeOssRoot,
+    codeOssSha256: input.codeOssSha256,
     service: input.service,
     cmakeRoot: input.cmakeRoot,
     coverageRoot: input.coverageRoot,
@@ -306,16 +310,23 @@ function normalizeInput(input) {
   };
 }
 
-export async function stageRelease(input) {
+export async function stageRelease(input, {
+  validateRuntime = validateCodeOssRuntime,
+} = {}) {
   const normalized = normalizeInput(input);
   const sourceEpoch = resolveSourceDateEpoch(normalized.sourceDateEpoch);
-  const [codeOss, service, cmakeRoot, coverageRoot, extensionRoot] = await Promise.all([
-    validateRealFile(normalized.codeOss, "code-oss runtime"),
+  const [validated, service, cmakeRoot, coverageRoot, extensionRoot] = await Promise.all([
+    validateRuntime({
+      root: normalized.codeOssRoot,
+      platform: normalized.platform,
+      expectedLauncherSha256: normalized.codeOssSha256,
+    }),
     validateRealFile(normalized.service, "service binary"),
     validateRealDirectory(normalized.cmakeRoot, "cmake bundle root"),
     validateRealDirectory(normalized.coverageRoot, "coverage bundle root"),
     validateRealDirectory(normalized.extensionRoot, "extension root"),
   ]);
+  const runtimeSource = { path: validated.root, canonicalPath: validated.canonicalRoot };
   const extensionDist = await validateRealDirectory(join(extensionRoot.path, "dist"), "extension dist");
   const extensionManifest = await validateRealFile(join(extensionRoot.path, "package.json"), "extension manifest");
 
@@ -335,19 +346,27 @@ export async function stageRelease(input) {
 
   const temporaryRoot = await mkdtemp(join(parentRoot, `.stage-${normalized.platform}-${normalized.architecture}-`));
   try {
-    const runtimeName = normalized.platform === "windows" ? "code-oss.exe" : "code-oss";
     const serviceName = normalized.platform === "windows" ? "unit-test-service.exe" : "unit-test-service";
-    await copyRegularFile(codeOss.path, join(temporaryRoot, "app", runtimeName));
+    await copyTree(runtimeSource, join(temporaryRoot, "app", "code-oss-runtime"));
     await copyRegularFile(service.path, join(temporaryRoot, "service", serviceName));
     await copyRegularFile(extensionManifest.path, join(temporaryRoot, "app", "extensions", "unit-test-ide", "package.json"));
     await copyTree(extensionDist, join(temporaryRoot, "app", "extensions", "unit-test-ide", "dist"));
     await copyTree(cmakeRoot, join(temporaryRoot, "bundles", "cmake"));
     await copyTree(coverageRoot, join(temporaryRoot, "bundles", "coverage"));
-    const [cmakeLicenses, coverageLicenses] = await Promise.all([
+    const stagedRuntimeRoot = join(temporaryRoot, "app", "code-oss-runtime");
+    const stagedRuntime = await validateRuntime({
+      root: stagedRuntimeRoot,
+      platform: normalized.platform,
+      expectedLauncherSha256: normalized.codeOssSha256,
+    });
+    const stagedRuntimeSource = { path: stagedRuntime.root, canonicalPath: stagedRuntime.canonicalRoot };
+    const [codeOssLicenses, cmakeLicenses, coverageLicenses] = await Promise.all([
+      copyLicenseSet(stagedRuntimeSource, temporaryRoot, "code-oss"),
       copyLicenseSet(cmakeRoot, temporaryRoot, "cmake"),
       copyLicenseSet(coverageRoot, temporaryRoot, "coverage"),
     ]);
-    const licenses = [...cmakeLicenses, ...coverageLicenses].sort((left, right) => left.localeCompare(right, "en"));
+    const licenses = [...codeOssLicenses, ...cmakeLicenses, ...coverageLicenses]
+      .sort((left, right) => left.localeCompare(right, "en"));
     const artifacts = await buildArtifacts(temporaryRoot);
     const manifest = await buildReleaseManifest({
       version: normalized.version,
