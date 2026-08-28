@@ -95,10 +95,10 @@ test("workflow contains only the four closed jobs on fixed hosted runners", () =
   const names = [...jobsSource.matchAll(/^  ([a-z][a-z0-9-]*):\s*$/gmu)].map((match) => match[1]);
   assert.deepEqual(names, ["authorize", "build-windows", "build-linux", "attest"]);
   assert.match(jobBlock("authorize"), /^    runs-on: ubuntu-24\.04$/mu);
-  assert.match(jobBlock("build-windows"), /^    runs-on: windows-2025-vs2026$/mu);
+  assert.match(jobBlock("build-windows"), /^    runs-on: windows-2022$/mu);
   assert.match(jobBlock("build-linux"), /^    runs-on: ubuntu-24\.04$/mu);
   assert.match(jobBlock("attest"), /^    runs-on: ubuntu-24\.04$/mu);
-  assert.doesNotMatch(workflow, /(?:self-hosted|unit-test-wfp|\b(?:windows|ubuntu)-latest\b)/iu);
+  assert.doesNotMatch(workflow, /(?:self-hosted|unit-test-wfp|windows-2025-vs2026|\b(?:windows|ubuntu)-latest\b)/iu);
 });
 
 test("authorization is fail-closed and every producer job depends on it", () => {
@@ -165,12 +165,15 @@ test("both builds use the fixed fresh checkout, toolchains, Gulp targets, and ou
   assert.match(linux, /\.producer\/VSCode-linux-x64/u);
   assert.match(linux, /VSCode-\*/u);
   assert.match(linux, /apt-get install --no-install-recommends -y build-essential g\+\+ libx11-dev libx11-xcb-dev libxkbfile-dev libsecret-1-dev pkg-config python-is-python3/u);
-  assert.doesNotMatch(workflow, /setup-go|spectre|fallback|--ignore-(?:engines|scripts)/iu);
+  assert.doesNotMatch(workflow, /setup-go|fallback|--ignore-(?:engines|scripts)|(?:disable|without|no)[-_ ]spectre/iu);
 });
 
 test("Windows validates, bounds launcher execution, inventories, and stages before upload", () => {
   const job = jobBlock("build-windows");
   assertOrdered(job, [
+    "name: Install fixed Yarn",
+    "name: Validate Visual Studio 2022 toolchain",
+    "name: Build fixed Windows Code-OSS target",
     "name: Validate Windows output root",
     "name: Validate Windows runtime",
     "name: Check Windows launcher version",
@@ -188,6 +191,15 @@ test("Windows validates, bounds launcher execution, inventories, and stages befo
   for (const output of outputs) {
     assert.match(job, new RegExp(`^      ${output}:`, "mu"));
   }
+  const preflight = namedStep(job, "Validate Visual Studio 2022 toolchain");
+  assert.match(preflight, /vswhere\.exe/u);
+  assert.match(preflight, /-products '\*' -version '\[17\.0,18\.0\)'[\s\S]*?-requires 'Microsoft\.VisualStudio\.Component\.VC\.Tools\.x86\.x64' 'Microsoft\.VisualStudio\.Component\.VC\.Runtimes\.x86\.x64\.Spectre'/u);
+  assert.match(preflight, /\$instances\.Count -ne 1/u);
+  assert.match(preflight, /installationVersion[\s\S]*?\^17\\\./u);
+  assert.match(preflight, /\$failure = 'RELEASE_PRODUCER_BUILD_FAILED: Visual Studio 2022 toolchain preflight failed'/u);
+  assert.match(preflight, /GYP_MSVS_VERSION=2022/u);
+  assert.match(preflight, /npm_config_msvs_version=2022/u);
+  assert.doesNotMatch(preflight, /(?:winget|choco|visualstudio\.microsoft\.com|vs_installer|--add|--remove|fallback|2019|2017)/iu);
 });
 
 test("Linux creates and validates modes, bounds launcher execution, inventories, and stages exact roots", () => {
@@ -268,13 +280,33 @@ test("attestation downloads exactly three current-run artifacts and independentl
     "name: Download Linux runtime",
     "name: Download appimagetool",
     "name: Validate exact transport roots",
-    "name: Revalidate transported runtimes and tool",
+    "name: Validate transported Linux mode inventory",
+    "name: Restore transported Linux modes",
+    "name: Inventory transported runtimes and tool",
     "name: Compare transported summaries",
+    "name: Check transported Linux launcher version",
     "name: Create and validate provenance",
     "name: Write validated workflow summary",
     "name: Upload release input provenance",
   ]);
-  assert.match(job, /runtime-mode-inventory\.mjs restore/u);
+  const modeGate = namedStep(job, "Validate transported Linux mode inventory");
+  const restore = namedStep(job, "Restore transported Linux modes");
+  const inventory = namedStep(job, "Inventory transported runtimes and tool");
+  const compare = namedStep(job, "Compare transported summaries");
+  const execute = namedStep(job, "Check transported Linux launcher version");
+  assert.match(modeGate, /validateRuntimeModeInventory/u);
+  assert.match(modeGate, /mode_inventory_sha256[\s\S]*?EXPECTED_MODE_INVENTORY_SHA256/u);
+  assert.doesNotMatch(modeGate, /runtime-mode-inventory\.mjs restore|timeout 30s/u);
+  assert.match(restore, /runtime-mode-inventory\.mjs restore/u);
+  assert.doesNotMatch(restore, /timeout 30s/u);
+  assert.match(inventory, /runtime-inventory\.mjs create/u);
+  assert.doesNotMatch(inventory, /timeout 30s/u);
+  assert.match(compare, /EXPECTED_WINDOWS_TREE_DIGEST/u);
+  assert.match(compare, /EXPECTED_LINUX_TREE_DIGEST/u);
+  assert.match(compare, /EXPECTED_MODE_INVENTORY_SHA256/u);
+  assert.match(compare, /EXPECTED_APPIMAGETOOL_SHA256/u);
+  assert.doesNotMatch(compare, /timeout 30s/u);
+  assert.match(execute, /timeout 30s \.release\/transport\/linux\/runtime\/code-oss/u);
   assert.match(job, /runtime-inventory\.mjs create/u);
   assert.match(job, /provenance\.mjs create/u);
   assert.match(job, /provenance\.mjs validate/u);

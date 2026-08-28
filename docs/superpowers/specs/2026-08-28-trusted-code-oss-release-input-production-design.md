@@ -89,7 +89,7 @@ The first job fails unless all of these values match exactly:
 
 GitHub permits selecting a ref for a manual workflow, so checking the ref inside the workflow is required; a non-master dispatch must fail rather than complete with all producer jobs skipped.
 
-The workflow uses only standard GitHub-hosted runners. It does not run on the persistent administrator/WFP runner and never reads self-hosted workspace paths. Build jobs receive `contents: read`; the workflow receives only the minimum artifact permissions required by the pinned upload/download actions.
+The workflow uses only standard GitHub-hosted runners: fixed `windows-2022` for the Windows producer and fixed `ubuntu-24.04` for authorization, Linux production, and attestation. `windows-2022` is required because the fixed Code-OSS checkout and its Node.js 20.14.0/node-gyp 10.1 native dependency path require Visual Studio 2022 rather than the Visual Studio 2026-only hosted image. The workflow does not run on the persistent administrator/WFP runner and never reads self-hosted workspace paths. Build jobs receive `contents: read`; the workflow receives only the minimum artifact permissions required by the pinned upload/download actions.
 
 ## Windows Producer
 
@@ -100,13 +100,14 @@ The Windows x64 job performs these ordered operations:
 3. Fetch `microsoft/vscode` at the exact 40-character commit into a new runner-local directory and verify `git rev-parse HEAD` byte-for-byte.
 4. Verify the upstream `.nvmrc`, `package.json` version, Electron target, product identity, and expected Gulp target names against the producer manifest.
 5. Install Node.js `20.14.0` and Yarn `1.22.22`.
-6. Run `yarn install --frozen-lockfile`, then `yarn gulp vscode-win32-x64`.
-7. Require the sole expected output root `VSCode-win32-x64` and reject redirected, linked, partial, or additional candidate roots.
-8. Run the repository's `code-oss-runtime.mjs` validator for Windows and execute the fixed launcher with `--version` using an isolated runner-local user-data directory.
-9. Enumerate the complete runtime into a sorted, portable path/size/SHA-256 inventory and calculate its tree digest.
-10. Upload the complete runtime root as `code-oss-windows-x64` with one-day retention only after every validation succeeds.
+6. Before dependency installation, run the hosted runner's `vswhere.exe` fail-closed and require one 17.x installation that simultaneously contains `Microsoft.VisualStudio.Component.VC.Tools.x86.x64` and `Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre`; then fix both node-gyp Visual Studio selectors to `2022`.
+7. Run `yarn install --frozen-lockfile`, then `yarn gulp vscode-win32-x64`.
+8. Require the sole expected output root `VSCode-win32-x64` and reject redirected, linked, partial, or additional candidate roots.
+9. Run the repository's `code-oss-runtime.mjs` validator for Windows and execute the fixed launcher with `--version` using an isolated runner-local user-data directory.
+10. Enumerate the complete runtime into a sorted, portable path/size/SHA-256 inventory and calculate its tree digest.
+11. Upload the complete runtime root as `code-oss-windows-x64` with one-day retention only after every validation succeeds.
 
-The job does not install a weaker compiler fallback. Missing Visual C++ or Spectre libraries, insufficient disk, dependency-install failure, native-module failure, output drift, launcher failure, or validator failure terminates the job before artifact upload.
+The job never installs, downgrades, or falls back to another compiler toolchain. A missing, linked, ambiguous, non-17.x, or incomplete Visual Studio installation fails with one fixed preflight error before `yarn install`. Missing Visual C++ or Spectre libraries, insufficient disk, dependency-install failure, native-module failure, output drift, launcher failure, or validator failure terminates the job before artifact upload.
 
 ## Linux Producer
 
@@ -129,11 +130,11 @@ The Linux runtime artifact intentionally preserves the existing closed two-entry
 
 A final Ubuntu attestation job depends on both producer jobs. It downloads the three fixed-name artifacts from the current run and fails unless the artifact root sets are exact. It then:
 
-- revalidates the Windows runtime without executing the Windows launcher;
-- validates the Linux inventory, restores all modes, revalidates the Linux runtime, and executes its launcher version check;
-- rechecks appimagetool name, size, and digest;
-- recomputes both complete runtime inventories and tree digests after artifact transport;
-- compares every recomputed value with the producer-job outputs;
+- validates the transported Linux mode inventory's closed structure and binds both its digest and launcher digest to the Linux producer-job outputs before applying any transported mode;
+- restores the already validated Linux modes, then revalidates and inventories both runtimes without executing either launcher;
+- rechecks appimagetool name, size, and digest and recomputes both complete runtime inventories and tree digests after artifact transport;
+- compares every recomputed runtime, mode-inventory, and appimagetool value with the producer-job outputs;
+- only after all producer-job output comparisons pass, executes the transported Linux launcher with the fixed 30-second version check; the Windows launcher is never executed on Ubuntu;
 - writes `release-input-provenance.json` only after all comparisons pass.
 
 The closed provenance shape contains:

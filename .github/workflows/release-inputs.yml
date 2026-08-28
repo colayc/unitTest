@@ -48,7 +48,7 @@ jobs:
 
   build-windows:
     needs: authorize
-    runs-on: windows-2025-vs2026
+    runs-on: windows-2022
     outputs:
       launcher_sha256: ${{ steps.runtime.outputs.launcher_sha256 }}
       file_count: ${{ steps.runtime.outputs.file_count }}
@@ -111,6 +111,35 @@ jobs:
           $actualYarn = (& (Join-Path $yarnRoot 'yarn.cmd') --version).Trim()
           if ($LASTEXITCODE -ne 0 -or $actualYarn -cne '1.22.22') { throw 'RELEASE_PRODUCER_BUILD_FAILED: Yarn version mismatch' }
           $yarnRoot | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Validate Visual Studio 2022 toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $failure = 'RELEASE_PRODUCER_BUILD_FAILED: Visual Studio 2022 toolchain preflight failed'
+          try {
+            $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+            $vswhereInfo = Get-Item -LiteralPath $vswhere -Force
+            if (-not $vswhereInfo.PSIsContainer -and -not ($vswhereInfo.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+              $raw = & $vswhere -products '*' -version '[17.0,18.0)' `
+                -requires 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64' 'Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre' `
+                -format json
+              if ($LASTEXITCODE -ne 0) { throw $failure }
+              $instances = @($raw | ConvertFrom-Json)
+              if ($instances.Count -ne 1 `
+                -or $instances[0].installationVersion -isnot [string] `
+                -or $instances[0].installationVersion -cnotmatch '^17\.' `
+                -or $instances[0].installationPath -isnot [string] `
+                -or -not (Test-Path -LiteralPath $instances[0].installationPath -PathType Container)) {
+                throw $failure
+              }
+            } else {
+              throw $failure
+            }
+            'GYP_MSVS_VERSION=2022' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            'npm_config_msvs_version=2022' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          } catch {
+            throw $failure
+          }
       - name: Build fixed Windows Code-OSS target
         shell: pwsh
         run: |
@@ -496,11 +525,75 @@ jobs:
             echo 'RELEASE_PRODUCER_OUTPUT_INVALID: transported Windows root is invalid' >&2
             exit 1
           }
-      - name: Revalidate transported runtimes and tool
-        id: transported
+      - name: Validate transported Linux mode inventory
+        id: mode-gate
+        env:
+          EXPECTED_LINUX_LAUNCHER_SHA256: ${{ needs.build-linux.outputs.launcher_sha256 }}
+          EXPECTED_MODE_INVENTORY_SHA256: ${{ needs.build-linux.outputs.mode_inventory_sha256 }}
         shell: bash
         run: |
           set -euo pipefail
+          digest_pattern='^[0-9a-f]{64}$'
+          [[ "$EXPECTED_LINUX_LAUNCHER_SHA256" =~ $digest_pattern && "$EXPECTED_MODE_INVENTORY_SHA256" =~ $digest_pattern ]] || {
+            echo 'RELEASE_PRODUCER_OUTPUT_INVALID: expected Linux mode coordinates are invalid' >&2
+            exit 1
+          }
+          mode_inventory='.release/transport/linux/code-oss-runtime-mode.json'
+          launcher='.release/transport/linux/runtime/code-oss'
+          [[ -f "$mode_inventory" && ! -L "$mode_inventory" && -f "$launcher" && ! -L "$launcher" ]] || {
+            echo 'RELEASE_PRODUCER_OUTPUT_INVALID: transported Linux mode inputs are invalid' >&2
+            exit 1
+          }
+          linux_launcher_sha256="$(sha256sum "$launcher" | cut -d' ' -f1)"
+          [[ "$linux_launcher_sha256" =~ $digest_pattern ]] || {
+            echo 'RELEASE_PRODUCER_OUTPUT_INVALID: transported Linux launcher digest is invalid' >&2
+            exit 1
+          }
+          node --input-type=module - "$linux_launcher_sha256" <<'NODE'
+          import { readFile } from "node:fs/promises";
+          import { validateRuntimeModeInventory } from "./tools/release/linux/runtime-mode-inventory.mjs";
+          try {
+            const inventory = JSON.parse(await readFile(".release/transport/linux/code-oss-runtime-mode.json", "utf8"));
+            validateRuntimeModeInventory(inventory, process.argv[2]);
+          } catch {
+            process.stderr.write("RELEASE_PRODUCER_OUTPUT_INVALID: transported Linux mode inventory is invalid\n");
+            process.exitCode = 1;
+          }
+          NODE
+          mode_inventory_sha256="$(sha256sum "$mode_inventory" | cut -d' ' -f1)"
+          [[ "$linux_launcher_sha256" == "$EXPECTED_LINUX_LAUNCHER_SHA256" && "$mode_inventory_sha256" == "$EXPECTED_MODE_INVENTORY_SHA256" ]] || {
+            echo 'RELEASE_PRODUCER_OUTPUT_INVALID: transported Linux mode coordinates mismatch build outputs' >&2
+            exit 1
+          }
+          printf 'linux_launcher_sha256=%s\n' "$linux_launcher_sha256" >> "$GITHUB_OUTPUT"
+          printf 'mode_inventory_sha256=%s\n' "$mode_inventory_sha256" >> "$GITHUB_OUTPUT"
+      - name: Restore transported Linux modes
+        env:
+          LINUX_LAUNCHER_SHA256: ${{ steps.mode-gate.outputs.linux_launcher_sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$LINUX_LAUNCHER_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+            echo 'RELEASE_PRODUCER_OUTPUT_INVALID: prevalidated Linux launcher digest is invalid' >&2
+            exit 1
+          }
+          node tools/release/linux/runtime-mode-inventory.mjs restore \
+            --root .release/transport/linux/runtime \
+            --inventory .release/transport/linux/code-oss-runtime-mode.json \
+            --launcher-sha256 "$LINUX_LAUNCHER_SHA256"
+      - name: Inventory transported runtimes and tool
+        id: transported
+        env:
+          PREVALIDATED_LINUX_LAUNCHER_SHA256: ${{ steps.mode-gate.outputs.linux_launcher_sha256 }}
+          PREVALIDATED_MODE_INVENTORY_SHA256: ${{ steps.mode-gate.outputs.mode_inventory_sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          digest_pattern='^[0-9a-f]{64}$'
+          [[ "$PREVALIDATED_LINUX_LAUNCHER_SHA256" =~ $digest_pattern && "$PREVALIDATED_MODE_INVENTORY_SHA256" =~ $digest_pattern ]] || {
+            echo 'RELEASE_PRODUCER_OUTPUT_INVALID: prevalidated Linux mode coordinates are invalid' >&2
+            exit 1
+          }
           mkdir -p .release/attest-work
           windows_launcher_sha256="$(sha256sum '.release/transport/windows/Code - OSS.exe' | cut -d' ' -f1)"
           [[ "$windows_launcher_sha256" =~ ^[0-9a-f]{64}$ ]] || { echo 'RELEASE_PRODUCER_OUTPUT_INVALID: transported Windows launcher digest is invalid' >&2; exit 1; }
@@ -516,24 +609,14 @@ jobs:
             --summary-out .release/attest-work/windows-summary.json
 
           linux_launcher_sha256="$(sha256sum .release/transport/linux/runtime/code-oss | cut -d' ' -f1)"
-          [[ "$linux_launcher_sha256" =~ ^[0-9a-f]{64}$ ]] || { echo 'RELEASE_PRODUCER_OUTPUT_INVALID: transported Linux launcher digest is invalid' >&2; exit 1; }
-          node tools/release/linux/runtime-mode-inventory.mjs restore \
-            --root .release/transport/linux/runtime \
-            --inventory .release/transport/linux/code-oss-runtime-mode.json \
-            --launcher-sha256 "$linux_launcher_sha256"
+          [[ "$linux_launcher_sha256" =~ $digest_pattern && "$linux_launcher_sha256" == "$PREVALIDATED_LINUX_LAUNCHER_SHA256" ]] || {
+            echo 'RELEASE_PRODUCER_OUTPUT_INVALID: transported Linux launcher changed after mode validation' >&2
+            exit 1
+          }
           node tools/release/code-oss-runtime.mjs \
             --platform linux \
             --root .release/transport/linux/runtime \
             --launcher-sha256 "$linux_launcher_sha256"
-          version_output="$(timeout 30s .release/transport/linux/runtime/code-oss --version --user-data-dir .release/attest-work/linux-user-data)" || {
-            echo 'RELEASE_PRODUCER_OUTPUT_INVALID: transported Linux launcher version check failed or timed out' >&2
-            exit 1
-          }
-          mapfile -t version_lines <<< "$version_output"
-          [[ "${#version_lines[@]}" -eq 3 && "${version_lines[0]}" == '1.92.0' && "${version_lines[1]}" == 'b1c0a14de1414fcdaa400695b4db1c0799bc3124' && "${version_lines[2]}" == 'x64' ]] || {
-            echo 'RELEASE_PRODUCER_OUTPUT_INVALID: transported Linux launcher version output is invalid' >&2
-            exit 1
-          }
           node tools/release/producer/runtime-inventory.mjs create \
             --platform linux \
             --root .release/transport/linux/runtime \
@@ -543,6 +626,10 @@ jobs:
             --summary-out .release/attest-work/linux-summary.json
 
           mode_inventory_sha256="$(sha256sum .release/transport/linux/code-oss-runtime-mode.json | cut -d' ' -f1)"
+          [[ "$mode_inventory_sha256" =~ $digest_pattern && "$mode_inventory_sha256" == "$PREVALIDATED_MODE_INVENTORY_SHA256" ]] || {
+            echo 'RELEASE_PRODUCER_OUTPUT_INVALID: transported Linux mode inventory changed after validation' >&2
+            exit 1
+          }
           tool='.release/transport/appimagetool/appimagetool-x86_64.AppImage'
           appimagetool_size="$(stat -c '%s' "$tool")"
           appimagetool_sha256="$(sha256sum "$tool" | cut -d' ' -f1)"
@@ -618,6 +705,30 @@ jobs:
           ];
           for (const [actual, expected, field] of comparisons) if (actual !== expected) fail(field);
           NODE
+      - name: Check transported Linux launcher version
+        env:
+          LINUX_LAUNCHER_SHA256: ${{ steps.transported.outputs.linux_launcher_sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$LINUX_LAUNCHER_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+            echo 'RELEASE_PRODUCER_OUTPUT_INVALID: compared Linux launcher digest is invalid' >&2
+            exit 1
+          }
+          actual_launcher_sha256="$(sha256sum .release/transport/linux/runtime/code-oss | cut -d' ' -f1)"
+          [[ "$actual_launcher_sha256" == "$LINUX_LAUNCHER_SHA256" ]] || {
+            echo 'RELEASE_PRODUCER_OUTPUT_INVALID: transported Linux launcher changed after summary comparison' >&2
+            exit 1
+          }
+          version_output="$(timeout 30s .release/transport/linux/runtime/code-oss --version --user-data-dir .release/attest-work/linux-user-data)" || {
+            echo 'RELEASE_PRODUCER_OUTPUT_INVALID: transported Linux launcher version check failed or timed out' >&2
+            exit 1
+          }
+          mapfile -t version_lines <<< "$version_output"
+          [[ "${#version_lines[@]}" -eq 3 && "${version_lines[0]}" == '1.92.0' && "${version_lines[1]}" == 'b1c0a14de1414fcdaa400695b4db1c0799bc3124' && "${version_lines[2]}" == 'x64' ]] || {
+            echo 'RELEASE_PRODUCER_OUTPUT_INVALID: transported Linux launcher version output is invalid' >&2
+            exit 1
+          }
       - name: Create and validate provenance
         env:
           PRODUCER_REPOSITORY: ${{ github.repository }}
