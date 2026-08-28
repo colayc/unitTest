@@ -23,7 +23,8 @@ const actionPins = Object.freeze({
 const pwsh = process.env.PWSH?.trim() || "pwsh";
 const visualStudioAstInspector = String.raw`
 $ErrorActionPreference = 'Stop'
-$source = [Console]::In.ReadToEnd()
+$sourceBytes = [Convert]::FromBase64String($env:UNIT_TEST_IDE_VS_PREFLIGHT_SOURCE_B64)
+$source = [Text.Encoding]::UTF8.GetString($sourceBytes)
 $tokens = $null
 $parseErrors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$parseErrors)
@@ -54,27 +55,36 @@ function Test-Variable([System.Management.Automation.Language.Ast] $node, [strin
   )
 }
 
-function Test-InstallationPathMember([System.Management.Automation.Language.Ast] $node) {
-  if ($node -isnot [System.Management.Automation.Language.MemberExpressionAst] -or $node.Static) { return $false }
-  if ($node.Member.Value -cne 'installationPath') { return $false }
-  $index = $node.Expression
-  return (
-    $index -is [System.Management.Automation.Language.IndexExpressionAst] -and
-    (Test-Variable $index.Target 'instances') -and
-    $index.Index -is [System.Management.Automation.Language.ConstantExpressionAst] -and
-    $index.Index.Value -eq 0
-  )
-}
-
-function Test-InstallationInfoMember(
+function Test-VariableMember(
   [System.Management.Automation.Language.Ast] $node,
+  [string] $variable,
   [string] $member
 ) {
   return (
     $node -is [System.Management.Automation.Language.MemberExpressionAst] -and
     -not $node.Static -and
     $node.Member.Value -ceq $member -and
-    (Test-Variable $node.Expression 'installationInfo')
+    (Test-Variable $node.Expression $variable)
+  )
+}
+
+function Test-InstancesMember(
+  [System.Management.Automation.Language.Ast] $node,
+  [string] $member
+) {
+  if (
+    $node -isnot [System.Management.Automation.Language.MemberExpressionAst] -or
+    $node.Static -or
+    $node.Member.Value -cne $member
+  ) {
+    return $false
+  }
+  $index = $node.Expression
+  return (
+    $index -is [System.Management.Automation.Language.IndexExpressionAst] -and
+    (Test-Variable $index.Target 'instances') -and
+    $index.Index -is [System.Management.Automation.Language.ConstantExpressionAst] -and
+    $index.Index.Value -eq 0
   )
 }
 
@@ -88,31 +98,103 @@ function Test-ReparsePointMember([System.Management.Automation.Language.Ast] $no
   )
 }
 
+function Test-StringType([System.Management.Automation.Language.Ast] $node) {
+  return (
+    $node -is [System.Management.Automation.Language.TypeExpressionAst] -and
+    $node.TypeName.FullName -ceq 'string'
+  )
+}
+
+function Test-DirectFailureThrow([System.Management.Automation.Language.StatementBlockAst] $body) {
+  if ($null -eq $body -or $body.Traps.Count -ne 0 -or $body.Statements.Count -ne 1) { return $false }
+  $throw = $body.Statements[0]
+  if ($throw -isnot [System.Management.Automation.Language.ThrowStatementAst]) { return $false }
+  return Test-Variable (Get-SingleExpression $throw.Pipeline) 'failure'
+}
+
 function Test-InstallationAssignment([System.Management.Automation.Language.Ast] $node) {
   if ($node -isnot [System.Management.Automation.Language.AssignmentStatementAst]) { return $false }
   if ($node.Operator -ne [System.Management.Automation.Language.TokenKind]::Equals) { return $false }
   if (-not (Test-Variable $node.Left 'installationInfo')) { return $false }
-  $commands = @($node.Right.FindAll({
-    param($candidate)
-    $candidate -is [System.Management.Automation.Language.CommandAst]
-  }, $true))
-  if ($commands.Count -ne 1) { return $false }
-  $command = $commands[0]
+  if (
+    $node.Right -isnot [System.Management.Automation.Language.PipelineAst] -or
+    $node.Right.Background -or
+    $node.Right.PipelineElements.Count -ne 1
+  ) {
+    return $false
+  }
+  $command = $node.Right.PipelineElements[0]
+  if ($command -isnot [System.Management.Automation.Language.CommandAst] -or $command.Redirections.Count -ne 0) {
+    return $false
+  }
   $elements = $command.CommandElements
   return (
-    $command.GetCommandName() -ieq 'Get-Item' -and
+    $command.GetCommandName() -ceq 'Get-Item' -and
     $elements.Count -eq 4 -and
     $elements[1] -is [System.Management.Automation.Language.CommandParameterAst] -and
-    $elements[1].ParameterName -ieq 'LiteralPath' -and
-    (Test-InstallationPathMember $elements[2]) -and
+    $elements[1].ParameterName -ceq 'LiteralPath' -and
+    (Test-InstancesMember $elements[2] 'installationPath') -and
     $elements[3] -is [System.Management.Automation.Language.CommandParameterAst] -and
-    $elements[3].ParameterName -ieq 'Force'
+    $elements[3].ParameterName -ceq 'Force'
+  )
+}
+
+function Test-InstancesGuard([System.Management.Automation.Language.Ast] $node) {
+  if ($node -isnot [System.Management.Automation.Language.IfStatementAst]) { return $false }
+  if ($node.Clauses.Count -ne 1 -or $null -ne $node.ElseClause) { return $false }
+  if (-not (Test-DirectFailureThrow $node.Clauses[0].Item2)) { return $false }
+  $outerOr = Get-SingleExpression $node.Clauses[0].Item1
+  if (
+    $outerOr -isnot [System.Management.Automation.Language.BinaryExpressionAst] -or
+    $outerOr.Operator -ne [System.Management.Automation.Language.TokenKind]::Or
+  ) {
+    return $false
+  }
+  $thirdOr = Get-SingleExpression $outerOr.Left
+  $installationPathTerm = Get-SingleExpression $outerOr.Right
+  if (
+    $thirdOr -isnot [System.Management.Automation.Language.BinaryExpressionAst] -or
+    $thirdOr.Operator -ne [System.Management.Automation.Language.TokenKind]::Or
+  ) {
+    return $false
+  }
+  $secondOr = Get-SingleExpression $thirdOr.Left
+  $versionPatternTerm = Get-SingleExpression $thirdOr.Right
+  if (
+    $secondOr -isnot [System.Management.Automation.Language.BinaryExpressionAst] -or
+    $secondOr.Operator -ne [System.Management.Automation.Language.TokenKind]::Or
+  ) {
+    return $false
+  }
+  $countTerm = Get-SingleExpression $secondOr.Left
+  $versionTypeTerm = Get-SingleExpression $secondOr.Right
+  return (
+    $countTerm -is [System.Management.Automation.Language.BinaryExpressionAst] -and
+    $countTerm.Operator -eq [System.Management.Automation.Language.TokenKind]::Ine -and
+    (Test-VariableMember $countTerm.Left 'instances' 'Count') -and
+    $countTerm.Right -is [System.Management.Automation.Language.ConstantExpressionAst] -and
+    $countTerm.Right.Value -eq 1 -and
+    $versionTypeTerm -is [System.Management.Automation.Language.BinaryExpressionAst] -and
+    $versionTypeTerm.Operator -eq [System.Management.Automation.Language.TokenKind]::IsNot -and
+    (Test-InstancesMember $versionTypeTerm.Left 'installationVersion') -and
+    (Test-StringType $versionTypeTerm.Right) -and
+    $versionPatternTerm -is [System.Management.Automation.Language.BinaryExpressionAst] -and
+    $versionPatternTerm.Operator -eq [System.Management.Automation.Language.TokenKind]::Cnotmatch -and
+    (Test-InstancesMember $versionPatternTerm.Left 'installationVersion') -and
+    $versionPatternTerm.Right -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+    $versionPatternTerm.Right.StringConstantType -eq [System.Management.Automation.Language.StringConstantType]::SingleQuoted -and
+    $versionPatternTerm.Right.Value -ceq '^17\.' -and
+    $installationPathTerm -is [System.Management.Automation.Language.BinaryExpressionAst] -and
+    $installationPathTerm.Operator -eq [System.Management.Automation.Language.TokenKind]::IsNot -and
+    (Test-InstancesMember $installationPathTerm.Left 'installationPath') -and
+    (Test-StringType $installationPathTerm.Right)
   )
 }
 
 function Test-InstallationGuard([System.Management.Automation.Language.Ast] $node) {
   if ($node -isnot [System.Management.Automation.Language.IfStatementAst]) { return $false }
   if ($node.Clauses.Count -ne 1 -or $null -ne $node.ElseClause) { return $false }
+  if (-not (Test-DirectFailureThrow $node.Clauses[0].Item2)) { return $false }
   $condition = Get-SingleExpression $node.Clauses[0].Item1
   if (
     $condition -isnot [System.Management.Automation.Language.BinaryExpressionAst] -or
@@ -124,108 +206,135 @@ function Test-InstallationGuard([System.Management.Automation.Language.Ast] $nod
   if (
     $containerGuard -isnot [System.Management.Automation.Language.UnaryExpressionAst] -or
     $containerGuard.TokenKind -ne [System.Management.Automation.Language.TokenKind]::Not -or
-    -not (Test-InstallationInfoMember $containerGuard.Child 'PSIsContainer')
+    -not (Test-VariableMember $containerGuard.Child 'installationInfo' 'PSIsContainer')
   ) {
     return $false
   }
   $reparseGuard = Get-SingleExpression $condition.Right
+  return (
+    $reparseGuard -is [System.Management.Automation.Language.BinaryExpressionAst] -and
+    $reparseGuard.Operator -eq [System.Management.Automation.Language.TokenKind]::Band -and
+    (Test-VariableMember $reparseGuard.Left 'installationInfo' 'Attributes') -and
+    (Test-ReparsePointMember $reparseGuard.Right)
+  )
+}
+
+function Test-VswhereGuard([System.Management.Automation.Language.IfStatementAst] $node) {
+  if ($null -eq $node -or $node.Clauses.Count -ne 1) { return $false }
+  if (-not (Test-DirectFailureThrow $node.ElseClause)) { return $false }
+  $condition = Get-SingleExpression $node.Clauses[0].Item1
   if (
-    $reparseGuard -isnot [System.Management.Automation.Language.BinaryExpressionAst] -or
-    $reparseGuard.Operator -ne [System.Management.Automation.Language.TokenKind]::Band -or
-    -not (Test-InstallationInfoMember $reparseGuard.Left 'Attributes') -or
-    -not (Test-ReparsePointMember $reparseGuard.Right)
+    $condition -isnot [System.Management.Automation.Language.BinaryExpressionAst] -or
+    $condition.Operator -ne [System.Management.Automation.Language.TokenKind]::And
   ) {
     return $false
   }
-  $throws = @($node.Clauses[0].Item2.FindAll({
-    param($candidate)
-    $candidate -is [System.Management.Automation.Language.ThrowStatementAst]
-  }, $true))
-  return $throws.Count -eq 1
+  $containerGuard = Get-SingleExpression $condition.Left
+  $reparseNot = Get-SingleExpression $condition.Right
+  if (
+    $containerGuard -isnot [System.Management.Automation.Language.UnaryExpressionAst] -or
+    $containerGuard.TokenKind -ne [System.Management.Automation.Language.TokenKind]::Not -or
+    -not (Test-VariableMember $containerGuard.Child 'vswhereInfo' 'PSIsContainer') -or
+    $reparseNot -isnot [System.Management.Automation.Language.UnaryExpressionAst] -or
+    $reparseNot.TokenKind -ne [System.Management.Automation.Language.TokenKind]::Not
+  ) {
+    return $false
+  }
+  $reparseGuard = Get-SingleExpression $reparseNot.Child
+  return (
+    $reparseGuard -is [System.Management.Automation.Language.BinaryExpressionAst] -and
+    $reparseGuard.Operator -eq [System.Management.Automation.Language.TokenKind]::Band -and
+    (Test-VariableMember $reparseGuard.Left 'vswhereInfo' 'Attributes') -and
+    (Test-ReparsePointMember $reparseGuard.Right)
+  )
 }
 
-function Get-StaticBoolean([System.Management.Automation.Language.Ast] $condition) {
-  $expression = Get-SingleExpression $condition
-  if ($expression -is [System.Management.Automation.Language.VariableExpressionAst]) {
-    if ($expression.VariablePath.UserPath -ceq 'false') {
-      return [pscustomobject]@{ Known = $true; Value = $false }
-    }
-    if ($expression.VariablePath.UserPath -ceq 'true') {
-      return [pscustomobject]@{ Known = $true; Value = $true }
-    }
-  }
-  if ($expression -is [System.Management.Automation.Language.ConstantExpressionAst]) {
-    return [pscustomobject]@{
-      Known = $true
-      Value = [System.Management.Automation.LanguagePrimitives]::IsTrue($expression.Value)
-    }
-  }
-  return [pscustomobject]@{ Known = $false; Value = $false }
-}
-
-function Test-IsDead([System.Management.Automation.Language.Ast] $node) {
-  $current = $node
-  while ($null -ne $current.Parent) {
-    $current = $current.Parent
+function Test-ForbiddenAncestor(
+  [System.Management.Automation.Language.Ast] $node,
+  [System.Management.Automation.Language.IfStatementAst] $expectedIf
+) {
+  $current = $node.Parent
+  while ($null -ne $current) {
     if (
+      $current -is [System.Management.Automation.Language.CatchClauseAst] -or
+      $current -is [System.Management.Automation.Language.TrapStatementAst] -or
       $current -is [System.Management.Automation.Language.FunctionDefinitionAst] -or
-      $current -is [System.Management.Automation.Language.ScriptBlockExpressionAst]
+      $current -is [System.Management.Automation.Language.ScriptBlockExpressionAst] -or
+      $current -is [System.Management.Automation.Language.LoopStatementAst] -or
+      ($current -is [System.Management.Automation.Language.IfStatementAst] -and
+        -not [object]::ReferenceEquals($current, $expectedIf))
     ) {
       return $true
     }
-    if (
-      $current -isnot [System.Management.Automation.Language.StatementBlockAst] -or
-      $current.Parent -isnot [System.Management.Automation.Language.IfStatementAst]
-    ) {
-      continue
-    }
-    $statement = $current.Parent
-    $clauseIndex = -1
-    for ($index = 0; $index -lt $statement.Clauses.Count; $index += 1) {
-      if ([object]::ReferenceEquals($statement.Clauses[$index].Item2, $current)) {
-        $clauseIndex = $index
-        break
-      }
-    }
-    if ($clauseIndex -ge 0) {
-      $truth = Get-StaticBoolean $statement.Clauses[$clauseIndex].Item1
-      if ($truth.Known -and -not $truth.Value) { return $true }
-      for ($index = 0; $index -lt $clauseIndex; $index += 1) {
-        $earlierTruth = Get-StaticBoolean $statement.Clauses[$index].Item1
-        if ($earlierTruth.Known -and $earlierTruth.Value) { return $true }
-      }
-    } elseif ([object]::ReferenceEquals($statement.ElseClause, $current)) {
-      foreach ($clause in $statement.Clauses) {
-        $truth = Get-StaticBoolean $clause.Item1
-        if ($truth.Known -and $truth.Value) { return $true }
-      }
-    }
+    $current = $current.Parent
   }
   return $false
 }
 
-$assignments = @($ast.FindAll({
-  param($node)
-  Test-InstallationAssignment $node
-}, $true))
-$guards = @($ast.FindAll({
-  param($node)
-  Test-InstallationGuard $node
-}, $true))
-$executableAssignments = @($assignments | Where-Object { -not (Test-IsDead $_) })
-$executableGuards = @($guards | Where-Object { -not (Test-IsDead $_) })
+function Test-ExpectedPreflightBlock([System.Management.Automation.Language.StatementBlockAst] $block) {
+  if ($null -eq $block -or $block.Traps.Count -ne 0) { return $false }
+  $outerGuard = $block.Parent
+  if (
+    $outerGuard -isnot [System.Management.Automation.Language.IfStatementAst] -or
+    -not [object]::ReferenceEquals($outerGuard.Clauses[0].Item2, $block) -or
+    -not (Test-VswhereGuard $outerGuard) -or
+    (Test-ForbiddenAncestor $block $outerGuard)
+  ) {
+    return $false
+  }
+  $tryBody = $outerGuard.Parent
+  if ($tryBody -isnot [System.Management.Automation.Language.StatementBlockAst]) { return $false }
+  $tryStatement = $tryBody.Parent
+  return (
+    $tryStatement -is [System.Management.Automation.Language.TryStatementAst] -and
+    [object]::ReferenceEquals($tryStatement.Body, $tryBody) -and
+    $tryStatement.Parent -is [System.Management.Automation.Language.NamedBlockAst]
+  )
+}
+
+function Get-DirectStatementIndex(
+  [System.Management.Automation.Language.StatementBlockAst] $block,
+  [System.Management.Automation.Language.Ast] $statement
+) {
+  for ($index = 0; $index -lt $block.Statements.Count; $index += 1) {
+    if ([object]::ReferenceEquals($block.Statements[$index], $statement)) { return $index }
+  }
+  return -1
+}
+
+$assignments = @($ast.FindAll({ param($node) Test-InstallationAssignment $node }, $true))
+$instancesGuards = @($ast.FindAll({ param($node) Test-InstancesGuard $node }, $true))
+$installationGuards = @($ast.FindAll({ param($node) Test-InstallationGuard $node }, $true))
+$linearPreflightCount = 0
+if ($assignments.Count -eq 1 -and $instancesGuards.Count -eq 1 -and $installationGuards.Count -eq 1) {
+  $block = $assignments[0].Parent
+  if (
+    $block -is [System.Management.Automation.Language.StatementBlockAst] -and
+    [object]::ReferenceEquals($instancesGuards[0].Parent, $block) -and
+    [object]::ReferenceEquals($installationGuards[0].Parent, $block) -and
+    (Test-ExpectedPreflightBlock $block)
+  ) {
+    $instancesIndex = Get-DirectStatementIndex $block $instancesGuards[0]
+    $assignmentIndex = Get-DirectStatementIndex $block $assignments[0]
+    $installationIndex = Get-DirectStatementIndex $block $installationGuards[0]
+    if (
+      $instancesIndex -ge 0 -and
+      $assignmentIndex -eq ($instancesIndex + 1) -and
+      $installationIndex -eq ($assignmentIndex + 1)
+    ) {
+      $linearPreflightCount = 1
+    }
+  }
+}
 $result = [ordered]@{
   parseErrorCount = $parseErrors.Count
   assignmentStatementCount = $assignments.Count
-  executableAssignmentCount = $executableAssignments.Count
-  guardStatementCount = $guards.Count
-  executableGuardCount = $executableGuards.Count
-  assignmentOffset = if ($executableAssignments.Count -eq 1) { $executableAssignments[0].Extent.StartOffset } else { -1 }
-  guardOffset = if ($executableGuards.Count -eq 1) { $executableGuards[0].Extent.StartOffset } else { -1 }
+  instancesGuardStatementCount = $instancesGuards.Count
+  installationGuardStatementCount = $installationGuards.Count
+  linearPreflightCount = $linearPreflightCount
 }
 [Console]::Out.Write(($result | ConvertTo-Json -Compress))
 `;
-const encodedVisualStudioAstInspector = Buffer.from(visualStudioAstInspector, "utf16le").toString("base64");
 
 function topLevelSection(name) {
   const lines = workflow.split("\n");
@@ -300,16 +409,21 @@ function powerShellRunBody(step) {
 }
 
 function inspectVisualStudioPreflightAst(preflight) {
+  const source = powerShellRunBody(preflight);
   const result = spawnSync(pwsh, [
     "-NoLogo",
     "-NoProfile",
     "-NonInteractive",
-    "-EncodedCommand",
-    encodedVisualStudioAstInspector,
+    "-Command",
+    "$script = [Console]::In.ReadToEnd(); & ([scriptblock]::Create($script))",
   ], {
     cwd: resolve("."),
     encoding: "utf8",
-    input: powerShellRunBody(preflight),
+    env: {
+      ...process.env,
+      UNIT_TEST_IDE_VS_PREFLIGHT_SOURCE_B64: Buffer.from(source, "utf8").toString("base64"),
+    },
+    input: visualStudioAstInspector,
     windowsHide: true,
   });
   assert.equal(result.error, undefined, `PowerShell AST inspector failed to start: ${result.error?.message ?? "unknown error"}`);
@@ -320,11 +434,10 @@ function inspectVisualStudioPreflightAst(preflight) {
 
 function assertExecutableVisualStudioInstallationGuard(inspection) {
   assert.equal(inspection.parseErrorCount, 0, "Visual Studio preflight PowerShell must parse cleanly");
-  assert.equal(inspection.assignmentStatementCount, 1, "Visual Studio installation Get-Item assignment must be one real statement");
-  assert.equal(inspection.executableAssignmentCount, 1, "Visual Studio installation Get-Item assignment must be executable");
-  assert.equal(inspection.guardStatementCount, 1, "Visual Studio container/reparse guard must be one real if statement");
-  assert.equal(inspection.executableGuardCount, 1, "Visual Studio container/reparse guard must be executable");
-  assert.ok(inspection.assignmentOffset < inspection.guardOffset, "Visual Studio installation assignment must precede its guard");
+  assert.equal(inspection.instancesGuardStatementCount, 1, "Visual Studio instance guard must be one exact if statement with a direct throw $failure");
+  assert.equal(inspection.assignmentStatementCount, 1, "Visual Studio installation Get-Item assignment must be one exact statement");
+  assert.equal(inspection.installationGuardStatementCount, 1, "Visual Studio installation guard must be one exact if statement with a direct throw $failure");
+  assert.equal(inspection.linearPreflightCount, 1, "Visual Studio instance guard, installation assignment, and installation guard must share one executable top-level linear block");
 }
 
 function assertVisualStudioPreflightContract(preflight) {
@@ -474,7 +587,7 @@ test("Visual Studio preflight contract rejects installation guards hidden in com
   const mutated = replaceVisualStudioInstallationGuard(preflight, commentedGuard);
   const inspection = inspectVisualStudioPreflightAst(mutated);
   assert.equal(inspection.parseErrorCount, 0, "comment mutation must remain valid PowerShell");
-  assert.throws(() => assertExecutableVisualStudioInstallationGuard(inspection), /must be one real statement/u);
+  assert.throws(() => assertExecutableVisualStudioInstallationGuard(inspection), /must be one exact statement/u);
 });
 
 test("Visual Studio preflight contract rejects installation guards in a constant-false branch", () => {
@@ -487,7 +600,51 @@ test("Visual Studio preflight contract rejects installation guards in a constant
   const mutated = replaceVisualStudioInstallationGuard(preflight, deadGuard);
   const inspection = inspectVisualStudioPreflightAst(mutated);
   assert.equal(inspection.parseErrorCount, 0, "constant-false mutation must remain valid PowerShell");
-  assert.throws(() => assertExecutableVisualStudioInstallationGuard(inspection), /must be executable/u);
+  assert.throws(() => assertExecutableVisualStudioInstallationGuard(inspection), /must share one executable top-level linear block/u);
+});
+
+test("Visual Studio preflight contract rejects installation guards in a never-entered catch", () => {
+  const preflight = namedStep(jobBlock("build-windows"), "Validate Visual Studio 2022 toolchain");
+  const deadGuard = [
+    "              try {",
+    "                $null = 1",
+    "              } catch {",
+    ...visualStudioInstallationGuard.split("\n").map((line) => `  ${line}`),
+    "              }",
+  ].join("\n");
+  const mutated = replaceVisualStudioInstallationGuard(preflight, deadGuard);
+  const inspection = inspectVisualStudioPreflightAst(mutated);
+  assert.equal(inspection.parseErrorCount, 0, "never-entered catch mutation must remain valid PowerShell");
+  assert.throws(() => assertExecutableVisualStudioInstallationGuard(inspection), /must share one executable top-level linear block/u);
+});
+
+test("Visual Studio preflight contract rejects installation guards in a constant-false loop", () => {
+  const preflight = namedStep(jobBlock("build-windows"), "Validate Visual Studio 2022 toolchain");
+  const deadGuard = [
+    "              while ($false) {",
+    ...visualStudioInstallationGuard.split("\n").map((line) => `  ${line}`),
+    "              }",
+  ].join("\n");
+  const mutated = replaceVisualStudioInstallationGuard(preflight, deadGuard);
+  const inspection = inspectVisualStudioPreflightAst(mutated);
+  assert.equal(inspection.parseErrorCount, 0, "constant-false loop mutation must remain valid PowerShell");
+  assert.throws(() => assertExecutableVisualStudioInstallationGuard(inspection), /must share one executable top-level linear block/u);
+});
+
+test("Visual Studio preflight contract rejects an installation guard whose throw is unreachable", () => {
+  const preflight = namedStep(jobBlock("build-windows"), "Validate Visual Studio 2022 toolchain");
+  const deadThrowGuard = visualStudioInstallationGuard.replace(
+    "                throw $failure",
+    [
+      "                if ($false) {",
+      "                  throw $failure",
+      "                }",
+    ].join("\n"),
+  );
+  const mutated = replaceVisualStudioInstallationGuard(preflight, deadThrowGuard);
+  const inspection = inspectVisualStudioPreflightAst(mutated);
+  assert.equal(inspection.parseErrorCount, 0, "unreachable throw mutation must remain valid PowerShell");
+  assert.throws(() => assertExecutableVisualStudioInstallationGuard(inspection), /installation guard must be one exact if statement/u);
 });
 
 test("Linux creates and validates modes, bounds launcher execution, inventories, and stages exact roots", () => {
