@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
-import { chmod, lstat, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { chmod, lstat, open, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -33,7 +33,9 @@ function isPlainObject(value) {
 
 function hasExactKeys(value, expectedKeys) {
   if (!isPlainObject(value)) return false;
-  const keys = Object.keys(value).sort();
+  const keys = Reflect.ownKeys(value);
+  if (keys.some((key) => typeof key !== "string")) return false;
+  keys.sort();
   return keys.length === expectedKeys.length && keys.every((key, index) => key === expectedKeys[index]);
 }
 
@@ -46,15 +48,26 @@ function withinRoot(rootPath, candidatePath) {
   return relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
 }
 
-async function hashFile(path) {
+async function hashFile(file) {
   const hash = createHash("sha256");
-  await new Promise((resolveHash, rejectHash) => {
-    const stream = createReadStream(path);
-    stream.on("data", (chunk) => hash.update(chunk));
-    stream.on("error", rejectHash);
-    stream.on("end", resolveHash);
-  });
-  return hash.digest("hex");
+  let handle;
+  try {
+    handle = await open(file.canonicalPath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    const before = await handle.stat();
+    if (!before.isFile() || before.size !== file.size || before.dev !== file.dev || before.ino !== file.ino) throw new Error("changed");
+    let counted = 0;
+    await new Promise((resolveHash, rejectHash) => {
+      const stream = handle.createReadStream({ autoClose: false });
+      stream.on("data", (chunk) => { counted += chunk.length; hash.update(chunk); });
+      stream.on("error", rejectHash);
+      stream.on("end", resolveHash);
+    });
+    const after = await handle.stat();
+    if (!after.isFile() || after.size !== file.size || after.dev !== file.dev || after.ino !== file.ino || counted !== file.size) throw new Error("changed");
+    return hash.digest("hex");
+  } finally {
+    await handle?.close().catch(() => {});
+  }
 }
 
 export function validateRuntimeModeInventory(inventory, expectedLauncherSha256) {
@@ -173,7 +186,7 @@ async function scanRuntimeTree(rootPath) {
       if (info.isDirectory()) {
         await scanDirectory(entryPath, relativePath);
       } else if (info.isFile()) {
-        files.set(relativePath, { path: entryPath, size: info.size, mode: info.mode });
+        files.set(relativePath, { path: entryPath, canonicalPath: canonicalEntry, size: info.size, mode: info.mode, dev: info.dev, ino: info.ino });
       } else {
         throw releaseInputError("RELEASE_INPUT_INVALID", "runtime tree contains a special entry");
       }
@@ -183,11 +196,12 @@ async function scanRuntimeTree(rootPath) {
   return files;
 }
 
-export async function createRuntimeModeInventory(
-  { root, expectedLauncherSha256 } = {},
-  { platform = process.platform } = {},
-) {
-  if (platform !== "linux") {
+export async function createRuntimeModeInventory(request = {}) {
+  if (!hasExactKeys(request, ["expectedLauncherSha256", "root"])) {
+    throw releaseInputError("RELEASE_INPUT_INVALID", "runtime mode inventory request must be a closed object");
+  }
+  const { root, expectedLauncherSha256 } = request;
+  if (process.platform !== "linux") {
     throw releaseInputError("RELEASE_INPUT_INVALID", "runtime mode inventory creation is supported only on Linux");
   }
   if (typeof root !== "string" || root.length === 0) {
@@ -204,7 +218,7 @@ export async function createRuntimeModeInventory(
   for (const [path, file] of files) {
     let sha256;
     try {
-      sha256 = await hashFile(file.path);
+      sha256 = await hashFile(file);
     } catch {
       throw releaseInputError("RELEASE_INPUT_INVALID", "runtime file cannot be read");
     }
@@ -260,7 +274,7 @@ async function verifyRuntimeFiles(rootPath, inventory) {
     }
     let digest;
     try {
-      digest = await hashFile(actual.path);
+      digest = await hashFile(actual);
     } catch {
       throw releaseInputError("RELEASE_INPUT_INVALID", "runtime file cannot be read");
     }

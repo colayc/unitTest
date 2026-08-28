@@ -172,6 +172,12 @@ test("create refuses to infer Linux executable state off Linux", async (t) => {
   );
 });
 
+test("mode creation request is a closed public shape", async () => {
+  for (const request of [null, { root: "runtime", expectedLauncherSha256: "a".repeat(64), extra: true }]) {
+    await assert.rejects(() => createRuntimeModeInventory(request), (error) => error?.code === "RELEASE_INPUT_INVALID");
+  }
+});
+
 for (const [label, operations, expectedMessage] of [
   ["chmod", { chmodFile: async () => { throw new Error("EACCES secret runtime path"); } }, "runtime file mode cannot be changed"],
   ["final lstat", {
