@@ -164,10 +164,10 @@ linuxOnly("create records every real runtime file in strict portable order and r
   }
 });
 
-test("create refuses to infer Linux executable state off Linux", async (t) => {
+(process.platform === "linux" ? test.skip : test)("create refuses to infer Linux executable state off Linux", async (t) => {
   const fixture = await createRuntimeFixture(t);
   await assert.rejects(
-    () => createRuntimeModeInventory({ root: fixture.root, expectedLauncherSha256: fixture.launcherSha256 }, { platform: "win32" }),
+    () => createRuntimeModeInventory({ root: fixture.root, expectedLauncherSha256: fixture.launcherSha256 }),
     (error) => error?.code === "RELEASE_INPUT_INVALID",
   );
 });
