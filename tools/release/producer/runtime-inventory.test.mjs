@@ -49,8 +49,10 @@ async function fixture(t, platform) {
   const root = join(parent, "runtime");
   const launcher = platform === "windows" ? "Code - OSS.exe" : "code-oss";
   const values = new Map([
+    [".runtime/.root-marker", Buffer.from("root hidden\n")],
     [launcher, Buffer.from("launcher\n")],
     ["chrome_crashpad_handler", Buffer.from("handler\n")],
+    ["resources/app/.config/.settings.json", Buffer.from('{"hidden":true}\n')],
     ["resources/app/package.json", Buffer.from("{}\n")],
     ["resources/app/product.json", Buffer.from('{"applicationName":"code-oss","licenseName":"MIT","nameShort":"Code - OSS"}\n')],
     ["resources/app/static/data.txt", Buffer.from("data\n")],
@@ -135,15 +137,19 @@ async function createDirectoryLink(t, target, path) {
 test("Windows inventory binds exact path, decimal size, digest, and executable record bytes", async (t) => {
   const input = await fixture(t, "windows");
   const inventory = await createRuntimeInventory(requestFor(input));
-  const expectedRecords = [...input.values].map(([path, bytes]) => ({
-    path,
-    size: bytes.length,
-    sha256: sha256(bytes),
-    executable: false,
-  })).sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+  const expectedRecords = [
+    { path: ".runtime/.root-marker", size: 12, sha256: "93b0d91eec2f8e253884993480d56820f4646eab0dd0f79c687e9b1e0bd1f6b4", executable: false },
+    { path: "Code - OSS.exe", size: 9, sha256: "2a3bb778a7c23f95b8aeaa10989471f42313993322e731a22138bb6f3c81f3c8", executable: false },
+    { path: "chrome_crashpad_handler", size: 8, sha256: "7f8043ca52bcf480f1d8705eeeacf2c75b75a48ebafd76d76ae7b47f8c159941", executable: false },
+    { path: "resources/app/.config/.settings.json", size: 16, sha256: "52e96442417aa78f3bfae20474d1f68c9f783a93ba29023b612ff2ccac50ba8f", executable: false },
+    { path: "resources/app/package.json", size: 3, sha256: "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356", executable: false },
+    { path: "resources/app/product.json", size: 76, sha256: "5c6992b939c5cc3a3452c3b354abc85d05e8ecea757de717ef781cb02591f601", executable: false },
+    { path: "resources/app/static/data.txt", size: 5, sha256: "6667b2d1aab6a00caa5aee5af8ad9f1465e567abf1c209d15727d57b3e8f6e5f", executable: false },
+  ];
 
   assert.deepEqual(inventory.files, expectedRecords);
-  assert.equal(inventory.totalBytes, 101);
+  assert.equal(inventory.totalBytes, 129);
+  assert.equal(inventory.treeDigest, "31ec6c2a39397a10f77339b88ff22525ef458a4dafc6fe7ad0e8f8c3498644a3");
   assert.equal(inventory.treeDigest, independentTreeDigest(expectedRecords));
   assert.equal(inventory.files.some((record) => record.path.includes(input.root)), false);
   assert.deepEqual(summarizeRuntimeInventory(inventory), {
@@ -153,8 +159,8 @@ test("Windows inventory binds exact path, decimal size, digest, and executable r
     launcherRelativePath: "Code - OSS.exe",
     launcherSha256: input.launcherSha256,
     fileCount: expectedRecords.length,
-    totalBytes: 101,
-    treeDigest: independentTreeDigest(expectedRecords),
+    totalBytes: 129,
+    treeDigest: "31ec6c2a39397a10f77339b88ff22525ef458a4dafc6fe7ad0e8f8c3498644a3",
   });
 });
 
@@ -203,7 +209,17 @@ test("tree digest independently binds path, decimal size, SHA, and executable by
 test("Linux inventory accepts only complete exact sorted size and digest mode records", async (t) => {
   const input = await fixture(t, "linux");
   const inventory = await createRuntimeInventory(requestFor(input, "linux"));
-  assert.deepEqual(inventory.files.map((record) => record.executable), [true, true, false, false, false]);
+  assert.deepEqual(inventory.files, [
+    { path: ".runtime/.root-marker", size: 12, sha256: "93b0d91eec2f8e253884993480d56820f4646eab0dd0f79c687e9b1e0bd1f6b4", executable: false },
+    { path: "chrome_crashpad_handler", size: 8, sha256: "7f8043ca52bcf480f1d8705eeeacf2c75b75a48ebafd76d76ae7b47f8c159941", executable: true },
+    { path: "code-oss", size: 9, sha256: "2a3bb778a7c23f95b8aeaa10989471f42313993322e731a22138bb6f3c81f3c8", executable: true },
+    { path: "resources/app/.config/.settings.json", size: 16, sha256: "52e96442417aa78f3bfae20474d1f68c9f783a93ba29023b612ff2ccac50ba8f", executable: false },
+    { path: "resources/app/package.json", size: 3, sha256: "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356", executable: false },
+    { path: "resources/app/product.json", size: 76, sha256: "5c6992b939c5cc3a3452c3b354abc85d05e8ecea757de717ef781cb02591f601", executable: false },
+    { path: "resources/app/static/data.txt", size: 5, sha256: "6667b2d1aab6a00caa5aee5af8ad9f1465e567abf1c209d15727d57b3e8f6e5f", executable: false },
+  ]);
+  assert.equal(inventory.totalBytes, 129);
+  assert.equal(inventory.treeDigest, "4269b25b04c8386ec4a7855b43b56fa572089cec6fadcd5c83d397498a0d8e71");
 
   const cases = [
     ["missing", (value) => { value.files.pop(); }],

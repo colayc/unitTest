@@ -1022,8 +1022,12 @@ test("foundation validates producer identity before downloading one exact proven
   assert.match(finalValidation, /^          mapfile -d '' -t provenance_entries < <\(find \.release\/provenance -mindepth 1 -maxdepth 1 -printf '%f\\0' \| LC_ALL=C sort -z\)$/mu);
   assert.match(finalValidation, /release-input-provenance\.json/u);
   assert.match(finalValidation, /^          node tools\/release\/producer\/trusted-run\.mjs validate-provenance \\\n            --run-json \.release\/producer-run-after\.json \\\n            --artifacts-json \.release\/producer-artifacts-after\.json \\\n            --run-id "\$\{\{ steps\.precheck\.outputs\.run_id \}\}" \\\n            --run-attempt "\$\{\{ steps\.precheck\.outputs\.run_attempt \}\}" \\\n            --consumer-commit "\$GITHUB_SHA" \\\n            --github-output "\$GITHUB_OUTPUT" \\\n            --provenance \.release\/provenance\/release-input-provenance\.json \\\n            --provenance-artifact-id "\$\{\{ steps\.precheck\.outputs\.provenance_artifact_id \}\}" \\\n            --provenance-artifact-digest "\$\{\{ steps\.precheck\.outputs\.provenance_artifact_digest \}\}"/mu);
-  for (const option of ["--windows-launcher-sha256", "--linux-launcher-sha256", "--appimagetool-sha256"]) {
-    assert.match(finalValidation, new RegExp(`${option} "\\$[A-Z0-9_]+"`, "u"));
+  for (const [option, variable] of [
+    ["--windows-launcher-sha256", "WINDOWS_LAUNCHER_SHA256"],
+    ["--linux-launcher-sha256", "LINUX_LAUNCHER_SHA256"],
+    ["--appimagetool-sha256", "APPIMAGETOOL_SHA256"],
+  ]) {
+    assert.ok(finalValidation.includes(`${option} "$${variable}"`), `${option} must use $${variable}`);
   }
   assert.equal((trust.match(/GITHUB_OUTPUT/gu) ?? []).length, 2, "only trusted-run may append step outputs");
   assert.equal((trust.match(/GH_TOKEN/gu) ?? []).length, 2, "GH_TOKEN must exist only as the two gh step environment keys");

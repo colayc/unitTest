@@ -31,8 +31,10 @@ async function createRuntimeFixture(t) {
   t.after(async () => rm(parent, { recursive: true, force: true }));
   const root = join(parent, "runtime");
   const values = new Map([
+    [".runtime/.root-marker", Buffer.from("root hidden\n")],
     ["chrome_crashpad_handler", Buffer.from("crash handler\n")],
     ["code-oss", Buffer.from("#!/bin/sh\nexit 0\n")],
+    ["resources/app/.config/.settings.json", Buffer.from('{"hidden":true}\n')],
     ["resources/app/package.json", Buffer.from("{}\n")],
     ["resources/app/product.json", Buffer.from(`${JSON.stringify({
       applicationName: "code-oss",
@@ -146,14 +148,16 @@ linuxOnly("create records every real runtime file in strict portable order and r
   });
 
   assert.deepEqual(validateRuntimeModeInventory(inventory, fixture.launcherSha256), inventory);
-  assert.deepEqual(inventory.files.map((record) => record.path), [
-    "chrome_crashpad_handler",
-    "code-oss",
-    "resources/app/package.json",
-    "resources/app/product.json",
-    "resources/app/static/data.txt",
+  assert.deepEqual(inventory.files, [
+    { path: ".runtime/.root-marker", size: 12, sha256: "93b0d91eec2f8e253884993480d56820f4646eab0dd0f79c687e9b1e0bd1f6b4", executable: false },
+    { path: "chrome_crashpad_handler", size: 14, sha256: "1f26cbb000d6104cf770e6af724ab836fff921d975e536e186bf3aea749e6d25", executable: true },
+    { path: "code-oss", size: 17, sha256: "306c6ca7407560340797866e077e053627ad409277d1b9da58106fce4cf717cb", executable: true },
+    { path: "resources/app/.config/.settings.json", size: 16, sha256: "52e96442417aa78f3bfae20474d1f68c9f783a93ba29023b612ff2ccac50ba8f", executable: false },
+    { path: "resources/app/package.json", size: 3, sha256: "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356", executable: false },
+    { path: "resources/app/product.json", size: 76, sha256: "5c6992b939c5cc3a3452c3b354abc85d05e8ecea757de717ef781cb02591f601", executable: false },
+    { path: "resources/app/static/data.txt", size: 5, sha256: "6667b2d1aab6a00caa5aee5af8ad9f1465e567abf1c209d15727d57b3e8f6e5f", executable: false },
   ]);
-  assert.deepEqual(inventory.files.map((record) => record.executable), [true, true, false, false, false]);
+  assert.equal(inventory.files.length, 7);
 
   const inventoryPath = join(dirname(fixture.root), "created-mode-inventory.json");
   await writeFile(inventoryPath, `${JSON.stringify(inventory)}\n`);
