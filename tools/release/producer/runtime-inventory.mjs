@@ -67,23 +67,28 @@ async function assertNoWindowsReparsePoints(rootPath) {
   }
 }
 
-async function hashScannedFile(file) {
+function sameSnapshot(left, right) {
+  return left.isFile() && (typeof right.isFile !== "function" || right.isFile()) && left.dev === right.dev && left.ino === right.ino && left.size === BigInt(right.size) && left.mode === right.mode && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
+}
+
+async function hashScannedFile(file, { captureBytes = false } = {}) {
   const hash = createHash("sha256");
   let handle;
   try {
     handle = await open(file.canonicalPath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
-    const before = await handle.stat();
-    if (!before.isFile() || before.size !== file.size || before.dev !== file.dev || before.ino !== file.ino) throw new Error("changed");
+    const before = await handle.stat({ bigint: true });
+    if (!sameSnapshot(before, file)) throw new Error("changed");
     let counted = 0;
+    const chunks = [];
     await new Promise((resolveHash, rejectHash) => {
       const stream = handle.createReadStream({ autoClose: false });
-      stream.on("data", (chunk) => { counted += chunk.length; hash.update(chunk); });
+      stream.on("data", (chunk) => { counted += chunk.length; hash.update(chunk); if (captureBytes) chunks.push(chunk); });
       stream.on("error", rejectHash);
       stream.on("end", resolveHash);
     });
-    const after = await handle.stat();
-    if (!after.isFile() || after.size !== file.size || after.dev !== file.dev || after.ino !== file.ino || counted !== file.size) throw new Error("changed");
-    return hash.digest("hex");
+    const after = await handle.stat({ bigint: true });
+    if (!sameSnapshot(after, file) || !sameSnapshot(before, after) || counted !== Number(before.size)) throw new Error("changed");
+    return { sha256: hash.digest("hex"), bytes: captureBytes ? Buffer.concat(chunks) : undefined };
   } finally {
     await handle?.close().catch(() => {});
   }
@@ -133,7 +138,7 @@ async function scanRuntimeTree(root) {
       let info;
       let canonicalEntry;
       try {
-        info = await lstat(entryPath);
+        info = await lstat(entryPath, { bigint: true });
         canonicalEntry = await realpath(entryPath);
       } catch {
         throw inputError("RELEASE_INPUT_INVALID", "runtime tree entry cannot be resolved");
@@ -147,10 +152,10 @@ async function scanRuntimeTree(root) {
       if (info.isDirectory()) {
         await scanDirectory(entryPath, relativePath);
       } else if (info.isFile()) {
-        if (!Number.isSafeInteger(info.size) || info.size < 0) {
+        if (info.size < 0n || info.size > BigInt(Number.MAX_SAFE_INTEGER)) {
           throw inputError("RELEASE_INPUT_INVALID", "runtime file size is invalid");
         }
-        files.push({ path: relativePath, canonicalPath: canonicalEntry, size: info.size, mode: info.mode, dev: info.dev, ino: info.ino });
+        files.push({ path: relativePath, canonicalPath: canonicalEntry, size: Number(info.size), mode: info.mode, dev: info.dev, ino: info.ino, mtimeNs: info.mtimeNs, ctimeNs: info.ctimeNs });
       } else {
         throw inputError("RELEASE_INPUT_INVALID", "runtime tree contains a special entry");
       }
@@ -235,7 +240,8 @@ async function assertCodeOssIdentity(files, platform, expectedLauncherSha256) {
   }
   let productMetadata;
   try {
-    productMetadata = JSON.parse(await readFile(product.canonicalPath, "utf8"));
+    if (product.size > 1024 * 1024) throw new Error("large");
+    productMetadata = JSON.parse((await hashScannedFile(product, { captureBytes: true })).bytes.toString("utf8"));
   } catch {
     throw inputError("RELEASE_INPUT_INVALID", "product metadata must be valid JSON");
   }
@@ -244,7 +250,7 @@ async function assertCodeOssIdentity(files, platform, expectedLauncherSha256) {
   }
   let launcherDigest;
   try {
-    launcherDigest = await hashScannedFile(launcher);
+    launcherDigest = (await hashScannedFile(launcher)).sha256;
   } catch {
     throw inputError("RELEASE_INPUT_INVALID", "platform launcher cannot be read");
   }
@@ -283,7 +289,7 @@ export async function createRuntimeInventory(request = {}) {
     if (!Number.isSafeInteger(totalBytes + file.size)) throw inputError("RELEASE_INPUT_INVALID", "runtime inventory total size overflows");
     let sha256;
     try {
-      sha256 = await hashScannedFile(file);
+      sha256 = (await hashScannedFile(file)).sha256;
     } catch {
       throw inputError("RELEASE_INPUT_INVALID", "runtime file cannot be read");
     }

@@ -39,6 +39,10 @@ function hasExactKeys(value, expectedKeys) {
   return keys.length === expectedKeys.length && keys.every((key, index) => key === expectedKeys[index]);
 }
 
+function sameSnapshot(left, right) {
+  return left.isFile() && (typeof right.isFile !== "function" || right.isFile()) && left.dev === right.dev && left.ino === right.ino && left.size === BigInt(right.size) && left.mode === right.mode && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
+}
+
 function comparePaths(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
 }
@@ -53,8 +57,8 @@ async function hashFile(file) {
   let handle;
   try {
     handle = await open(file.canonicalPath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
-    const before = await handle.stat();
-    if (!before.isFile() || before.size !== file.size || before.dev !== file.dev || before.ino !== file.ino) throw new Error("changed");
+    const before = await handle.stat({ bigint: true });
+    if (!sameSnapshot(before, file)) throw new Error("changed");
     let counted = 0;
     await new Promise((resolveHash, rejectHash) => {
       const stream = handle.createReadStream({ autoClose: false });
@@ -62,9 +66,9 @@ async function hashFile(file) {
       stream.on("error", rejectHash);
       stream.on("end", resolveHash);
     });
-    const after = await handle.stat();
-    if (!after.isFile() || after.size !== file.size || after.dev !== file.dev || after.ino !== file.ino || counted !== file.size) throw new Error("changed");
-    return hash.digest("hex");
+    const after = await handle.stat({ bigint: true });
+    if (!sameSnapshot(after, file) || !sameSnapshot(before, after) || counted !== Number(before.size)) throw new Error("changed");
+    return { sha256: hash.digest("hex"), mode: before.mode };
   } finally {
     await handle?.close().catch(() => {});
   }
@@ -172,7 +176,7 @@ async function scanRuntimeTree(rootPath) {
       let info;
       let canonicalEntry;
       try {
-        info = await lstat(entryPath);
+        info = await lstat(entryPath, { bigint: true });
         canonicalEntry = await realpath(entryPath);
       } catch {
         throw releaseInputError("RELEASE_INPUT_INVALID", "runtime tree entry cannot be resolved");
@@ -186,7 +190,8 @@ async function scanRuntimeTree(rootPath) {
       if (info.isDirectory()) {
         await scanDirectory(entryPath, relativePath);
       } else if (info.isFile()) {
-        files.set(relativePath, { path: entryPath, canonicalPath: canonicalEntry, size: info.size, mode: info.mode, dev: info.dev, ino: info.ino });
+        if (info.size < 0n || info.size > BigInt(Number.MAX_SAFE_INTEGER)) throw releaseInputError("RELEASE_INPUT_INVALID", "runtime file size is invalid");
+        files.set(relativePath, { path: entryPath, canonicalPath: canonicalEntry, size: Number(info.size), mode: info.mode, dev: info.dev, ino: info.ino, mtimeNs: info.mtimeNs, ctimeNs: info.ctimeNs });
       } else {
         throw releaseInputError("RELEASE_INPUT_INVALID", "runtime tree contains a special entry");
       }
@@ -218,7 +223,8 @@ export async function createRuntimeModeInventory(request = {}) {
   for (const [path, file] of files) {
     let sha256;
     try {
-      sha256 = await hashFile(file);
+      const hashed = await hashFile(file);
+      sha256 = hashed.sha256;
     } catch {
       throw releaseInputError("RELEASE_INPUT_INVALID", "runtime file cannot be read");
     }
@@ -226,7 +232,7 @@ export async function createRuntimeModeInventory(request = {}) {
       path,
       size: file.size,
       sha256,
-      executable: (file.mode & 0o111) !== 0,
+      executable: (hashed.mode & 0o111n) !== 0n,
     });
   }
   records.sort((left, right) => comparePaths(left.path, right.path));
@@ -274,7 +280,7 @@ async function verifyRuntimeFiles(rootPath, inventory) {
     }
     let digest;
     try {
-      digest = await hashFile(actual);
+      digest = (await hashFile(actual)).sha256;
     } catch {
       throw releaseInputError("RELEASE_INPUT_INVALID", "runtime file cannot be read");
     }
