@@ -16,6 +16,8 @@ const runKeys = ["conclusion", "event", "head_branch", "head_sha", "id", "path",
 const repositoryKeys = ["full_name"];
 const metadataKeys = ["expectedConsumerCommit", "expectedRunId", "run"].sort();
 const trustedInputKeys = ["expectedAppimagetoolSha256", "expectedConsumerCommit", "expectedLinuxLauncherSha256", "expectedRunId", "expectedWindowsLauncherSha256", "provenance", "run"].sort();
+const runOutputKeys = ["run_id"];
+const provenanceOutputKeys = ["run_id", "windows_launcher_sha256", "linux_launcher_sha256", "appimagetool_sha256"];
 const execFileAsync = promisify(execFile);
 const windowsReparsePointCommand = "$node=Get-Item -Force -LiteralPath $env:TRUSTED_RUN_PATH; while ($null -ne $node) { if (($node.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { [Console]::Out.Write('1'); exit 0 }; $node=$node.Parent }; [Console]::Out.Write('0')";
 
@@ -54,13 +56,7 @@ function snapshotDataObject(value, expectedKeys) {
 
 function snapshotProjectedDataObject(value, requiredKeys) {
   if (!isPlainObject(value)) return undefined;
-  const keys = Reflect.ownKeys(value);
-  if (keys.some((key) => typeof key !== "string")) return undefined;
   const snapshot = {};
-  for (const key of keys) {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (descriptor === undefined || !descriptor.enumerable || !Object.hasOwn(descriptor, "value")) return undefined;
-  }
   for (const key of requiredKeys) {
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
     if (descriptor === undefined || !descriptor.enumerable || !Object.hasOwn(descriptor, "value")) return undefined;
@@ -153,6 +149,14 @@ function sameFileIdentity(left, right) {
   return left.dev === right.dev && left.ino === right.ino && left.mode === right.mode && right.isFile();
 }
 
+function isSingleLinkedRegularFile(info) {
+  return info.isFile() && info.nlink === 1n;
+}
+
+function sameSingleLinkedFile(left, right) {
+  return isSingleLinkedRegularFile(left) && isSingleLinkedRegularFile(right) && sameFileIdentity(left, right);
+}
+
 async function rejectWindowsReparsePoints(path) {
   if (process.platform !== "win32") return;
   try {
@@ -181,7 +185,7 @@ async function realPath(path, requireFile) {
       current = join(current, components[index]);
       const info = await lstat(current, { bigint: true });
       const leaf = index === components.length - 1;
-      if (info.isSymbolicLink() || (leaf ? (requireFile && !info.isFile()) : !info.isDirectory())) failUntrusted("producer run path is invalid");
+      if (info.isSymbolicLink() || (leaf ? (requireFile && !isSingleLinkedRegularFile(info)) : !info.isDirectory())) failUntrusted("producer run path is invalid");
       if (!leaf) ancestors.push({ path: current, info });
       if (leaf) return { absolute, info, ancestors };
     }
@@ -207,12 +211,12 @@ async function readTrustedJson(path, errorCode) {
     checked = await realPath(path, true);
     handle = await open(checked.absolute, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
     const before = await handle.stat({ bigint: true });
-    if (!sameNode(checked.info, before)) failUntrusted("producer run input changed");
+    if (!sameSingleLinkedFile(checked.info, before)) failUntrusted("producer run input changed");
     const bytes = await handle.readFile();
     const after = await handle.stat({ bigint: true });
     const pathAfter = await lstat(checked.absolute, { bigint: true });
     await assertUnchangedAncestors(checked);
-    if (!sameNode(before, after) || !sameNode(checked.info, pathAfter)) failUntrusted("producer run input changed");
+    if (!sameSingleLinkedFile(before, after) || !sameSingleLinkedFile(checked.info, pathAfter)) failUntrusted("producer run input changed");
     try {
       return JSON.parse(bytes.toString("utf8"));
     } catch {
@@ -228,31 +232,86 @@ async function readTrustedJson(path, errorCode) {
   }
 }
 
-async function appendGithubOutput(path, entries) {
+function testHooks(value) {
+  if (!isPlainObject(value)) failUntrusted("GitHub output is invalid");
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== "string" || !["sync", "write"].includes(key)) failUntrusted("GitHub output is invalid");
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor === undefined || !descriptor.enumerable || !Object.hasOwn(descriptor, "value") || typeof descriptor.value !== "function") failUntrusted("GitHub output is invalid");
+  }
+  return value;
+}
+
+async function writeFully(handle, bytes, initialPosition, hooks) {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const result = hooks.write === undefined
+      ? await handle.write(bytes, offset, bytes.length - offset, initialPosition + offset)
+      : await hooks.write(handle, bytes, offset, bytes.length - offset, initialPosition + offset);
+    if (!Number.isSafeInteger(result?.bytesWritten) || result.bytesWritten <= 0 || result.bytesWritten > bytes.length - offset) failUntrusted("GitHub output could not be written");
+    offset += result.bytesWritten;
+  }
+}
+
+async function syncOutput(handle, hooks) {
+  if (hooks.sync === undefined) await handle.sync();
+  else await hooks.sync(handle);
+}
+
+async function rollbackAppend(handle, originalSize, hooks) {
+  try {
+    await handle.truncate(Number(originalSize));
+    await syncOutput(handle, hooks);
+    const restored = await handle.stat({ bigint: true });
+    if (!isSingleLinkedRegularFile(restored) || restored.size !== originalSize) failUntrusted("GitHub output rollback failed");
+  } catch (error) {
+    if (error?.code === UNTRUSTED) throw error;
+    failUntrusted("GitHub output rollback failed");
+  }
+}
+
+async function appendGithubOutput(path, entries, suppliedHooks = {}) {
+  const hooks = testHooks(suppliedHooks);
+  if (!Array.isArray(entries) || ![runOutputKeys, provenanceOutputKeys].some((expected) => (
+    entries.length === expected.length && entries.every((entry, index) => Array.isArray(entry) && entry.length === 2 && entry[0] === expected[index])
+  ))) failUntrusted("GitHub output is invalid");
   const bytes = Buffer.from(entries.map(([key, value]) => {
     if (!/^[a-z][a-z0-9_]*$/u.test(key) || !/^(?:[1-9][0-9]*|[0-9a-f]{64})$/u.test(value)) failUntrusted("GitHub output is invalid");
     return `${key}=${value}`;
   }).join("\n") + "\n", "utf8");
   let checked;
   let handle;
+  let originalSize;
+  let rollbackRequired = false;
   try {
     checked = await realPath(path, true);
-    handle = await open(checked.absolute, constants.O_WRONLY | constants.O_APPEND | (constants.O_NOFOLLOW ?? 0));
+    handle = await open(checked.absolute, constants.O_RDWR | (constants.O_NOFOLLOW ?? 0));
     const before = await handle.stat({ bigint: true });
-    if (!sameNode(checked.info, before)) failUntrusted("GitHub output changed");
-    await handle.write(bytes, 0, bytes.length);
-    await handle.sync();
+    if (!sameSingleLinkedFile(checked.info, before)) failUntrusted("GitHub output changed");
+    if (before.size > BigInt(Number.MAX_SAFE_INTEGER)) failUntrusted("GitHub output is invalid");
+    originalSize = before.size;
+    rollbackRequired = true;
+    await writeFully(handle, bytes, Number(originalSize), hooks);
+    await syncOutput(handle, hooks);
     const after = await handle.stat({ bigint: true });
     const pathAfter = await lstat(checked.absolute, { bigint: true });
     await assertUnchangedAncestors(checked);
-    if (!sameFileIdentity(checked.info, pathAfter) || !after.isFile() || after.size !== before.size + BigInt(bytes.length)) failUntrusted("GitHub output changed");
+    if (!sameSingleLinkedFile(checked.info, pathAfter) || !isSingleLinkedRegularFile(after) || after.size !== before.size + BigInt(bytes.length)) failUntrusted("GitHub output changed");
+    rollbackRequired = false;
   } catch (error) {
+    if (handle !== undefined && rollbackRequired && originalSize !== undefined) await rollbackAppend(handle, originalSize, hooks);
     if (error?.code === UNTRUSTED) throw error;
     failUntrusted("GitHub output cannot be written");
   } finally {
     await handle?.close().catch(() => {});
   }
 }
+
+export const __testOnlyTrustedRun = Object.freeze({
+  appendGithubOutput(path, entries, hooks) {
+    return appendGithubOutput(path, entries, testHooks(hooks));
+  },
+});
 
 function parseCli(argv) {
   const [command, ...args] = argv;

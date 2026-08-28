@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { link, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -9,6 +9,7 @@ import { createReleaseInputProvenance } from "./provenance.mjs";
 import {
   validateProducerRunMetadata,
   validateTrustedReleaseInputs,
+  __testOnlyTrustedRun,
 } from "./trusted-run.mjs";
 
 const directory = dirname(fileURLToPath(import.meta.url));
@@ -118,7 +119,9 @@ function cli(argumentsList) {
 }
 
 async function temporaryDirectory(t) {
-  const root = await mkdtemp(join(directory, ".trusted-run-test-"));
+  const parent = join(process.cwd(), ".superpowers", "sdd", "2026-08-28-trusted-code-oss-release-input-production", "task-4-test-fixtures");
+  await mkdir(parent, { recursive: true });
+  const root = await mkdtemp(join(parent, "trusted-run-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   return root;
 }
@@ -163,17 +166,32 @@ test("validateProducerRunMetadata independently rejects each run binding", () =>
   }
   assertUntrusted(() => validateProducerRunMetadata({ run: runFixture(), expectedRunId: "0", expectedConsumerCommit: commit }));
   assertUntrusted(() => validateProducerRunMetadata({ run: runFixture(), expectedRunId: "123x", expectedConsumerCommit: commit }));
+  for (const value of [0, -1, 1.5, 0n, -1n, 1n, Number.MAX_SAFE_INTEGER + 1, "0", "-1", "1.5", "0001"]) {
+    const run = runFixture(); run.id = value;
+    assertUntrusted(() => trustedRun(run));
+  }
   assertUntrusted(() => validateProducerRunMetadata({ run: runFixture(), expectedRunId: "123456789", expectedConsumerCommit: "A".repeat(40) }));
 });
 
-test("validateProducerRunMetadata rejects ambiguous external values without reading accessors", () => {
+test("validateProducerRunMetadata ignores unrelated API fields without reading them", () => {
+  const run = runFixture();
+  Object.defineProperty(run, "unrelated", { enumerable: true, get: () => { throw new Error("must not be read"); } });
+  Object.defineProperty(run, "nonEnumerableExtra", { value: true });
+  Object.defineProperty(run, Symbol("extra"), { enumerable: true, get: () => { throw new Error("must not be read"); } });
+  Object.defineProperty(run.repository, "unrelated", { enumerable: true, get: () => { throw new Error("must not be read"); } });
+  Object.defineProperty(run.repository, "nonEnumerableExtra", { value: true });
+  Object.defineProperty(run.repository, Symbol("extra"), { value: true });
+  assert.deepEqual(trustedRun(run), { runId: "123456789" });
+});
+
+test("validateProducerRunMetadata rejects ambiguous required API fields", () => {
   for (const mutate of [
     (run) => Object.defineProperty(run, "status", { enumerable: true, get: () => "completed" }),
-    (run) => Object.defineProperty(run, "hidden", { value: true }),
-    (run) => { run[Symbol("ambiguous")] = true; },
     (run) => Object.defineProperty(run.repository, "full_name", { enumerable: true, get: () => "colayc/unitTest" }),
-    (run) => Object.defineProperty(run.repository, "hidden", { value: true }),
-    (run) => { run.repository[Symbol("ambiguous")] = true; },
+    (run) => { const value = run.event; delete run.event; Object.defineProperty(run, "event", { value }); },
+    (run) => { const value = run.repository.full_name; delete run.repository.full_name; Object.defineProperty(run.repository, "full_name", { value }); },
+    (run) => { delete run.status; run[Symbol("status")] = "completed"; },
+    (run) => { delete run.repository.full_name; run.repository[Symbol("full_name")] = "colayc/unitTest"; },
   ]) {
     const run = runFixture();
     mutate(run);
@@ -235,6 +253,23 @@ test("validateTrustedReleaseInputs binds run, provenance, and canonical manual p
   }));
 });
 
+test("validateTrustedReleaseInputs applies every API run binding before provenance acceptance", () => {
+  const mutations = [
+    (run) => { run.id = 1; }, (run) => { run.repository.full_name = "other/unitTest"; },
+    (run) => { run.path = ".github/workflows/foundation.yml"; }, (run) => { run.event = "push"; },
+    (run) => { run.head_branch = "main"; }, (run) => { run.head_sha = "b".repeat(40); },
+    (run) => { run.status = "queued"; }, (run) => { run.conclusion = "failure"; },
+  ];
+  for (const mutate of mutations) {
+    const run = runFixture(); mutate(run);
+    assertUntrusted(() => validateTrustedReleaseInputs({
+      run, provenance: provenanceFixture(), expectedRunId: "123456789", expectedConsumerCommit: commit,
+      expectedWindowsLauncherSha256: digests.windows, expectedLinuxLauncherSha256: digests.linux,
+      expectedAppimagetoolSha256: digests.appimagetool,
+    }));
+  }
+});
+
 test("CLI validates run identity before exporting only fixed output keys", async (t) => {
   const root = await temporaryDirectory(t);
   const runPath = join(root, "run.json");
@@ -271,6 +306,63 @@ test("CLI provenance failures cannot inject GitHub output or leak local paths", 
   assert.equal(await readFile(outputPath, "utf8"), "unchanged=value\n");
 });
 
+test("CLI rejects hard-linked run or GitHub output files before either can modify another path", async (t) => {
+  const root = await temporaryDirectory(t);
+  const runPath = join(root, "run.json");
+  const runVictim = join(root, "run-victim.json");
+  const outputPath = join(root, "github-output");
+  const outputVictim = join(root, "output-victim");
+  await writeFile(runPath, `${JSON.stringify(runFixture())}\n`);
+  await writeFile(outputPath, "victim=unchanged\n");
+  await link(runPath, runVictim);
+  await link(outputPath, outputVictim);
+  assert.equal((await lstat(runPath, { bigint: true })).nlink, 2n);
+  assert.equal((await lstat(outputPath, { bigint: true })).nlink, 2n);
+  const rejectedInput = cli(["validate-run", "--run-json", runPath, "--run-id", "123456789", "--consumer-commit", commit, "--github-output", outputPath]);
+  assert.notEqual(rejectedInput.status, 0);
+  assert.match(rejectedInput.stderr, /^RELEASE_PRODUCER_UNTRUSTED: [^\r\n]+\r?\n$/u);
+  assert.equal(await readFile(outputVictim, "utf8"), "victim=unchanged\n");
+  await rm(runVictim);
+  const rejectedOutput = cli(["validate-run", "--run-json", runPath, "--run-id", "123456789", "--consumer-commit", commit, "--github-output", outputPath]);
+  assert.notEqual(rejectedOutput.status, 0);
+  assert.match(rejectedOutput.stderr, /^RELEASE_PRODUCER_UNTRUSTED: [^\r\n]+\r?\n$/u);
+  assert.equal(await readFile(outputVictim, "utf8"), "victim=unchanged\n");
+});
+
+test("GitHub output append rolls back partial writes and failed syncs on its original descriptor", async (t) => {
+  const root = await temporaryDirectory(t);
+  const outputPath = join(root, "github-output");
+  const original = "third_party=value\n";
+  let writes = 0;
+  let syncs = 0;
+  const cases = [
+    {
+      async write(handle, bytes, offset, _length, position) {
+        writes += 1;
+        if (writes === 1) return handle.write(bytes.subarray(offset, offset + 1), 0, 1, position);
+        throw new Error("short write then failure");
+      },
+    },
+    {
+      async sync(handle) {
+        syncs += 1;
+        if (syncs === 1) throw new Error("sync failure");
+        await handle.sync();
+      },
+    },
+  ];
+  for (const hooks of cases) {
+    writes = 0;
+    syncs = 0;
+    await writeFile(outputPath, original);
+    await assert.rejects(
+      () => __testOnlyTrustedRun.appendGithubOutput(outputPath, [["run_id", "123456789"]], hooks),
+      (error) => error?.code === UNTRUSTED,
+    );
+    assert.equal(await readFile(outputPath, "utf8"), original);
+  }
+});
+
 test("CLI repeats API validation for provenance and rejects linked inputs or outputs", async (t) => {
   const root = await temporaryDirectory(t);
   const runPath = join(root, "run.json");
@@ -301,4 +393,23 @@ test("CLI repeats API validation for provenance and rejects linked inputs or out
   assert.notEqual(rejectedOutput.status, 0);
   assert.match(rejectedOutput.stderr, /^RELEASE_PRODUCER_UNTRUSTED: [^\r\n]+\r?\n$/u);
   assert.equal((await readFile(outputPath, "utf8")).includes("run_id=123456789\nrun_id"), false);
+});
+
+test("CLI rejects a producer run reached through a directory junction", async (t) => {
+  const root = await temporaryDirectory(t);
+  const realDirectory = join(root, "real");
+  const linkedDirectory = join(root, "linked");
+  const outputPath = join(root, "github-output");
+  await mkdir(realDirectory, { recursive: true });
+  await writeFile(join(realDirectory, "run.json"), `${JSON.stringify(runFixture())}\n`);
+  await writeFile(outputPath, "");
+  try {
+    await symlink(realDirectory, linkedDirectory, "junction");
+  } catch (error) {
+    if (error?.code === "EPERM") { t.skip("directory links unavailable"); return; }
+    throw error;
+  }
+  const rejected = cli(["validate-run", "--run-json", join(linkedDirectory, "run.json"), "--run-id", "123456789", "--consumer-commit", commit, "--github-output", outputPath]);
+  assert.notEqual(rejected.status, 0);
+  assert.match(rejected.stderr, /^RELEASE_PRODUCER_UNTRUSTED: [^\r\n]+\r?\n$/u);
 });
