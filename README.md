@@ -89,16 +89,65 @@ pnpm release:stage -- --platform linux --architecture x64 --version 1.2.3 --code
 
 ## 受信任的 Code-OSS 发布输入与一次无签名资格验证
 
-上面的 `release:stage` 示例是本地开发/测试的 staging 接口，不是发布输入生产接口。用于发布的 Code-OSS runtime 只能由 GitHub Actions `.github/workflows/release-inputs.yml` 在 `master` 上手动生产：它固定检出 `microsoft/vscode` 的 `b1c0a14de1414fcdaa400695b4db1c0799bc3124`，并只使用 GitHub-hosted `windows-2022`（Visual Studio 2022、C++ 与 Spectre 库 preflight 不通过即失败）和 `ubuntu-24.04`。该工作流不使用管理员/WFP self-hosted runner；本地 Code-OSS runtime 和 `release-inputs/code-oss.exe` 都不是允许的 producer 输入。
+上面的 `release:stage` 示例是本地开发/测试的 staging 接口，不是发布输入生产接口。用于发布的 Code-OSS runtime 只能由显示名为 `Trusted Code-OSS release inputs` 的 GitHub Actions `.github/workflows/release-inputs.yml` 在 `master` 上手动生产：它固定检出 `microsoft/vscode` 的 `b1c0a14de1414fcdaa400695b4db1c0799bc3124`，并只使用 GitHub-hosted `windows-2022`（Visual Studio 2022、C++ 与 Spectre 库 preflight 不通过即失败）和 `ubuntu-24.04`。该工作流不使用管理员/WFP self-hosted runner；本地 Code-OSS runtime 和 `release-inputs/code-oss.exe` 都不是允许的 producer 输入。
 
 producer 只上传三个固定名制品：`code-oss-windows-x64`、`code-oss-linux-x64` 和 `appimagetool-linux-x64`；它们以及 `release-input-provenance` 都只保留 1 天。请在到期前完成检查；producer 重跑必须使用一套新的 producer artifact，不能把旧 run 的制品混入重跑。
 
 合并并确认 GitHub/Gitee 的 `master` 指向同一提交后，按如下顺序运行。命令里的变量只在当前 PowerShell 会话中保存，不能提交真实 run ID、摘要或凭据：
 
 ```powershell
-gh workflow run release-inputs.yml --repo colayc/unitTest --ref master
-$producer = gh run list --repo colayc/unitTest --workflow release-inputs.yml --branch master --event workflow_dispatch --limit 1 --json databaseId,headSha,status,conclusion,createdAt | ConvertFrom-Json | Select-Object -First 1
-$producerRunId = [string]$producer.databaseId
+function Get-GitHubMasterSha {
+  $sha = (& gh api repos/colayc/unitTest/git/ref/heads/master --jq '.object.sha').Trim()
+  if ($LASTEXITCODE -ne 0 -or $sha -cnotmatch '^[0-9a-f]{40}$') { throw 'could not read canonical GitHub master SHA' }
+  return $sha
+}
+
+function Start-ClosedWorkflowRun {
+  param(
+    [Parameter(Mandatory)] [string] $Workflow,
+    [Parameter(Mandatory)] [string] $ExpectedWorkflowName,
+    [Parameter(Mandatory)] [string] $ExpectedHeadSha,
+    [string[]] $WorkflowArguments = @()
+  )
+  $before = @(& gh run list --repo colayc/unitTest --workflow $Workflow --branch master --event workflow_dispatch --limit 100 --json databaseId,headSha,event,headBranch,workflowName | ConvertFrom-Json)
+  if ($LASTEXITCODE -ne 0) { throw "could not snapshot $Workflow runs" }
+  $beforeIds = @($before | ForEach-Object { [string]$_.databaseId })
+  $dispatchOutput = @(& gh workflow run $Workflow --repo colayc/unitTest --ref master @WorkflowArguments 2>&1)
+  if ($LASTEXITCODE -ne 0) { throw "dispatch failed for $Workflow" }
+
+  $urlMatches = @([regex]::Matches(($dispatchOutput | Out-String), 'https://github\.com/colayc/unitTest/actions/runs/(?<runId>[1-9][0-9]*)') | ForEach-Object { $_.Groups['runId'].Value } | Select-Object -Unique)
+  if ($urlMatches.Count -gt 1) { throw "dispatch returned multiple run URLs for $Workflow" }
+  $runId = if ($urlMatches.Count -eq 1) { $urlMatches[0] } else { $null }
+
+  if ($null -eq $runId) {
+    for ($attempt = 1; $attempt -le 12; $attempt++) {
+      $runs = @(& gh run list --repo colayc/unitTest --workflow $Workflow --branch master --event workflow_dispatch --limit 100 --json databaseId,headSha,event,headBranch,workflowName | ConvertFrom-Json)
+      if ($LASTEXITCODE -ne 0) { throw "could not poll $Workflow runs" }
+      $candidates = @($runs | Where-Object {
+        $beforeIds -notcontains [string]$_.databaseId -and
+        $_.headSha -ceq $ExpectedHeadSha -and
+        $_.event -ceq 'workflow_dispatch' -and
+        $_.headBranch -ceq 'master' -and
+        $_.workflowName -ceq $ExpectedWorkflowName
+      })
+      if ($candidates.Count -gt 1) { throw "multiple newly dispatched $Workflow runs matched; refusing to choose one" }
+      if ($candidates.Count -eq 1) { $runId = [string]$candidates[0].databaseId; break }
+      Start-Sleep -Seconds 5
+    }
+  }
+  if ($null -eq $runId) { throw "did not resolve exactly one newly dispatched run for $Workflow" }
+
+  $run = @(& gh run view $runId --repo colayc/unitTest --json databaseId,headSha,event,headBranch,workflowName | ConvertFrom-Json)
+  if ($LASTEXITCODE -ne 0 -or $run.Count -ne 1) { throw "could not read dispatched $Workflow run" }
+  $run = $run[0]
+  if ([string]$run.databaseId -cne $runId -or $run.headSha -cne $ExpectedHeadSha -or $run.event -cne 'workflow_dispatch' -or $run.headBranch -cne 'master' -or $run.workflowName -cne $ExpectedWorkflowName) {
+    throw "resolved $Workflow run did not match its closed identity"
+  }
+  return $runId
+}
+
+$producerMasterSha = Get-GitHubMasterSha
+$producerRunId = Start-ClosedWorkflowRun -Workflow 'release-inputs.yml' -ExpectedWorkflowName 'Trusted Code-OSS release inputs' -ExpectedHeadSha $producerMasterSha
 gh run watch $producerRunId --repo colayc/unitTest --exit-status
 
 $producerEvidence = ".release/evidence/producer-$producerRunId"
@@ -109,16 +158,16 @@ $windowsSha = [string]$provenance.runtimes.windows.launcherSha256
 $linuxSha = [string]$provenance.runtimes.linux.launcherSha256
 $appimagetoolSha = [string]$provenance.appimagetool.sha256
 
-gh workflow run foundation.yml --repo colayc/unitTest --ref master `
-  -f release_version=0.1.0 `
-  -f release_signing_required=0 `
-  -f release_input_run_id=$producerRunId `
-  -f windows_code_oss_sha256=$windowsSha `
-  -f linux_code_oss_sha256=$linuxSha `
-  -f linux_appimagetool_sha256=$appimagetoolSha
-
-$release = gh run list --repo colayc/unitTest --workflow foundation.yml --branch master --event workflow_dispatch --limit 1 --json databaseId,headSha,status,conclusion,createdAt | ConvertFrom-Json | Select-Object -First 1
-$releaseRunId = [string]$release.databaseId
+$foundationMasterSha = Get-GitHubMasterSha
+if ($foundationMasterSha -cne $producerMasterSha) { throw 'master changed after producer dispatch; create a fresh producer artifact set' }
+$releaseRunId = Start-ClosedWorkflowRun -Workflow 'foundation.yml' -ExpectedWorkflowName 'foundation' -ExpectedHeadSha $foundationMasterSha -WorkflowArguments @(
+  '-f', 'release_version=0.1.0',
+  '-f', 'release_signing_required=0',
+  '-f', "release_input_run_id=$producerRunId",
+  '-f', "windows_code_oss_sha256=$windowsSha",
+  '-f', "linux_code_oss_sha256=$linuxSha",
+  '-f', "linux_appimagetool_sha256=$appimagetoolSha"
+)
 gh run watch $releaseRunId --repo colayc/unitTest --exit-status
 
 $qualificationNames = @(gh api "repos/colayc/unitTest/actions/runs/$releaseRunId/artifacts" --jq '.artifacts[] | select(.name | startswith("release-qualification-")) | .name')
