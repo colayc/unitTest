@@ -77,9 +77,11 @@ async function fixture(t) {
   const producer = {
     repository: "colayc/unitTest",
     workflowPath: ".github/workflows/release-inputs.yml",
-    sourceCommit: "f".repeat(40),
+    sourceCommit: "a".repeat(40),
     event: "workflow_dispatch",
     ref: "refs/heads/master",
+    runId: "123456789",
+    runAttempt: 2,
   };
   return {
     parent,
@@ -92,16 +94,47 @@ async function fixture(t) {
     request: {
       sourceManifest: manifest,
       producer,
-      windows,
-      linux,
+      windows: {
+        ...windows,
+        artifactId: "1001",
+        artifactDigest: "1".repeat(64),
+        transportName: "code-oss-windows-x64-2",
+      },
+      linux: {
+        ...linux,
+        artifactId: "1002",
+        artifactDigest: "2".repeat(64),
+        transportName: "code-oss-linux-x64-2",
+      },
       linuxModeInventorySha256: sha256(modeBytes),
-      appimagetool: manifest.appimagetool,
+      appimagetool: {
+        ...manifest.appimagetool,
+        artifactId: "1003",
+        artifactDigest: "3".repeat(64),
+        transportName: "appimagetool-linux-x64-2",
+      },
     },
   };
 }
 
 function assertInvalid(action) {
   assert.throws(action, (error) => error?.code === INVALID);
+}
+
+function identityArgs(input) {
+  return [
+    "--producer-run-id", input.producer.runId,
+    "--producer-run-attempt", String(input.producer.runAttempt),
+    "--windows-artifact-id", input.request.windows.artifactId,
+    "--windows-artifact-digest", input.request.windows.artifactDigest,
+    "--windows-artifact-transport-name", input.request.windows.transportName,
+    "--linux-artifact-id", input.request.linux.artifactId,
+    "--linux-artifact-digest", input.request.linux.artifactDigest,
+    "--linux-artifact-transport-name", input.request.linux.transportName,
+    "--appimagetool-artifact-id", input.request.appimagetool.artifactId,
+    "--appimagetool-artifact-digest", input.request.appimagetool.artifactDigest,
+    "--appimagetool-artifact-transport-name", input.request.appimagetool.transportName,
+  ];
 }
 
 function nestedObjects(value, output = []) {
@@ -154,6 +187,21 @@ test("creation binds fixed source coordinates, summaries, and deterministic cano
   assert.equal(JSON.stringify(first), JSON.stringify(second));
   assert.equal(Object.isFrozen(first), true);
   assert.equal(Object.isFrozen(first.runtimes.linux), true);
+  assert.deepEqual(Object.keys(first.producer).sort(), ["event", "ref", "repository", "runAttempt", "runId", "sourceCommit", "workflowPath"]);
+  assert.deepEqual(Object.keys(first.runtimes.windows).sort(), ["artifactDigest", "artifactId", "artifactName", "fileCount", "launcherRelativePath", "launcherSha256", "schemaVersion", "totalBytes", "transportName", "treeDigest"]);
+  assert.deepEqual(Object.keys(first.runtimes.linux).sort(), ["artifactDigest", "artifactId", "artifactName", "fileCount", "launcherRelativePath", "launcherSha256", "modeInventorySha256", "schemaVersion", "totalBytes", "transportName", "treeDigest"]);
+  assert.deepEqual(Object.keys(first.appimagetool).sort(), ["artifactDigest", "artifactId", "artifactName", "assetId", "assetName", "repository", "sha256", "size", "transportName"]);
+  assert.equal(first.producer.runId, "123456789");
+  assert.equal(first.producer.runAttempt, 2);
+  assert.deepEqual(first.runtimes.windows.artifactId, "1001");
+  assert.deepEqual(first.runtimes.windows.artifactDigest, "1".repeat(64));
+  assert.deepEqual(first.runtimes.windows.transportName, "code-oss-windows-x64-2");
+  assert.deepEqual(first.runtimes.linux.artifactId, "1002");
+  assert.deepEqual(first.runtimes.linux.artifactDigest, "2".repeat(64));
+  assert.deepEqual(first.runtimes.linux.transportName, "code-oss-linux-x64-2");
+  assert.deepEqual(first.appimagetool.artifactId, "1003");
+  assert.deepEqual(first.appimagetool.artifactDigest, "3".repeat(64));
+  assert.deepEqual(first.appimagetool.transportName, "appimagetool-linux-x64-2");
   assert.deepEqual(first.codeOss, {
     repository: input.manifest.codeOss.repository,
     commit: input.manifest.codeOss.commit,
@@ -162,6 +210,38 @@ test("creation binds fixed source coordinates, summaries, and deterministic cano
     yarnVersion: input.manifest.codeOss.yarnVersion,
   });
   assert.equal(first.runtimes.linux.modeInventorySha256, sha256(input.modeBytes));
+});
+
+test("validation rejects mutated producer and immutable artifact identities", async (t) => {
+  const input = await fixture(t);
+  const valid = createReleaseInputProvenance(input.request);
+  const mutations = [
+    ["producer.runId", "0"],
+    ["producer.runId", "01"],
+    ["producer.runAttempt", 0],
+    ["producer.runAttempt", Number.MAX_SAFE_INTEGER + 1],
+    ["runtimes.windows.artifactId", "01"],
+    ["runtimes.windows.artifactDigest", "A".repeat(64)],
+    ["runtimes.windows.transportName", "code-oss-windows-x64-1"],
+    ["runtimes.linux.artifactId", "01"],
+    ["runtimes.linux.artifactDigest", "A".repeat(64)],
+    ["runtimes.linux.transportName", "code-oss-linux-x64-3"],
+    ["appimagetool.artifactId", "01"],
+    ["appimagetool.artifactDigest", "A".repeat(64)],
+    ["appimagetool.transportName", "appimagetool-linux-x64"],
+  ];
+  for (const [path, replacement] of mutations) {
+    const candidate = structuredClone(valid);
+    const segments = path.split(".");
+    const parent = atPath(candidate, segments);
+    parent[segments.at(-1)] = replacement;
+    assertInvalid(() => validateReleaseInputProvenance(candidate));
+  }
+  for (const path of ["producer", "runtimes.windows", "runtimes.linux", "appimagetool"]) {
+    const candidate = structuredClone(valid);
+    atPath(candidate, [...path.split("."), "placeholder"]).placeholder = true;
+    assertInvalid(() => validateReleaseInputProvenance(candidate));
+  }
 });
 
 test("validation rejects every provenance scalar mutation and every extra key", async (t) => {
@@ -275,7 +355,28 @@ test("CLI rehashes real mode and tool files, emits canonical bytes, validates ma
     "--producer-repository", input.producer.repository, "--producer-workflow-path", input.producer.workflowPath,
     "--producer-source-commit", input.producer.sourceCommit, "--producer-event", input.producer.event,
     "--producer-ref", input.producer.ref,
+    ...identityArgs(input),
   ];
+  const assertCliInvalid = (args) => {
+    const result = spawnSync(process.execPath, args, { encoding: "utf8" });
+    assert.notEqual(result.status, 0);
+    assert.equal(result.stdout, "");
+    assert.match(result.stderr, new RegExp(`^${INVALID}:`));
+    assert.equal(result.stderr.includes(resolve(input.parent)), false);
+  };
+  for (const flag of identityArgs(input).filter((_, index) => index % 2 === 0)) {
+    const index = createArgs.indexOf(flag);
+    assertCliInvalid([...createArgs.slice(0, index), ...createArgs.slice(index + 2)]);
+    assertCliInvalid([...createArgs, flag, createArgs[index + 1]]);
+  }
+  for (const [flag, value] of [
+    ["--producer-run-attempt", "2%"],
+    ["--appimagetool-artifact-transport-name", "appimagetool-linux-x64-2\n"],
+  ]) {
+    const args = [...createArgs];
+    args[args.indexOf(flag) + 1] = value;
+    assertCliInvalid(args);
+  }
   let result = spawnSync(process.execPath, createArgs, { encoding: "utf8" });
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, new RegExp(INVALID));
@@ -344,6 +445,7 @@ test("opt-in CLI creation binds mode file count, bytes, and exact tree digest", 
     "--producer-repository", input.producer.repository, "--producer-workflow-path", input.producer.workflowPath,
     "--producer-source-commit", input.producer.sourceCommit, "--producer-event", input.producer.event,
     "--producer-ref", input.producer.ref,
+    ...identityArgs(input),
   ];
   await Promise.all([
     writeFile(manifest, `${JSON.stringify(input.manifest)}\n`),

@@ -12,12 +12,13 @@ import { validateRuntimeModeInventory } from "../linux/runtime-mode-inventory.mj
 const INVALID = "RELEASE_PRODUCER_PROVENANCE_INVALID";
 const digestPattern = /^[0-9a-f]{64}$/u;
 const commitPattern = /^[0-9a-f]{40}$/u;
-const producerKeys = ["event", "ref", "repository", "sourceCommit", "workflowPath"].sort();
+const producerKeys = ["event", "ref", "repository", "runAttempt", "runId", "sourceCommit", "workflowPath"].sort();
 const codeOssKeys = ["commit", "nodeVersion", "repository", "version", "yarnVersion"].sort();
-const windowsKeys = ["artifactName", "fileCount", "launcherRelativePath", "launcherSha256", "schemaVersion", "totalBytes", "treeDigest"].sort();
+const artifactIdentityKeys = ["artifactDigest", "artifactId", "transportName"];
+const windowsKeys = ["artifactName", ...artifactIdentityKeys, "fileCount", "launcherRelativePath", "launcherSha256", "schemaVersion", "totalBytes", "treeDigest"].sort();
 const linuxKeys = [...windowsKeys, "modeInventorySha256"].sort();
 const runtimesKeys = ["linux", "windows"].sort();
-const appimagetoolKeys = ["artifactName", "assetId", "assetName", "repository", "sha256", "size"].sort();
+const appimagetoolKeys = ["artifactName", ...artifactIdentityKeys, "assetId", "assetName", "repository", "sha256", "size"].sort();
 const provenanceKeys = ["appimagetool", "codeOss", "producer", "runtimes", "schemaVersion"].sort();
 const creationKeys = ["appimagetool", "linux", "linuxModeInventorySha256", "producer", "sourceManifest", "windows"].sort();
 const fixedSourceManifest = validateSourceManifest(JSON.parse(readFileSync(new URL("./source-manifest.json", import.meta.url), "utf8")));
@@ -72,6 +73,14 @@ function positiveInteger(value) {
   return Number.isSafeInteger(value) && value > 0;
 }
 
+function canonicalDecimalString(value) {
+  return typeof value === "string" && /^[1-9][0-9]*$/u.test(value) ? value : undefined;
+}
+
+function canonicalAttempt(value) {
+  return Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
 function modeTreeDigest(files) {
   const hash = createHash("sha256");
   for (const record of files) {
@@ -104,14 +113,32 @@ function validateProducer(value) {
     || producer.workflowPath !== ".github/workflows/release-inputs.yml"
     || !commitPattern.test(producer.sourceCommit)
     || producer.event !== "workflow_dispatch"
-    || producer.ref !== "refs/heads/master") fail();
+    || producer.ref !== "refs/heads/master"
+    || canonicalDecimalString(producer.runId) === undefined
+    || canonicalAttempt(producer.runAttempt) === undefined) fail();
   return {
     repository: producer.repository,
     workflowPath: producer.workflowPath,
     sourceCommit: producer.sourceCommit,
     event: producer.event,
     ref: producer.ref,
+    runId: producer.runId,
+    runAttempt: producer.runAttempt,
   };
+}
+
+function validateArtifactIdentity(value, logicalName, runAttempt) {
+  const expectedKeys = logicalName === "code-oss-windows-x64"
+    ? windowsKeys
+    : logicalName === "code-oss-linux-x64"
+      ? linuxKeys
+      : logicalName === "appimagetool-linux-x64" ? appimagetoolKeys : undefined;
+  const artifact = expectedKeys === undefined ? false : snapshotExactObject(value, expectedKeys);
+  if (!artifact
+    || canonicalDecimalString(artifact.artifactId) === undefined
+    || typeof artifact.artifactDigest !== "string" || !digestPattern.test(artifact.artifactDigest)
+    || artifact.transportName !== `${logicalName}-${runAttempt}`) fail();
+  return artifact;
 }
 
 function validateCodeOss(value, manifest) {
@@ -132,11 +159,10 @@ function validateCodeOss(value, manifest) {
   };
 }
 
-function validateSummary(value, platform) {
-  const expectedKeys = platform === "linux" ? linuxKeys : windowsKeys;
+function validateSummary(value, platform, runAttempt) {
   const expectedLauncher = platform === "linux" ? "code-oss" : "Code - OSS.exe";
   const expectedArtifact = platform === "linux" ? "code-oss-linux-x64" : "code-oss-windows-x64";
-  const summary = snapshotExactObject(value, expectedKeys);
+  const summary = validateArtifactIdentity(value, expectedArtifact, runAttempt);
   if (!summary || summary.schemaVersion !== 1
     || summary.artifactName !== expectedArtifact
     || summary.launcherRelativePath !== expectedLauncher
@@ -146,13 +172,13 @@ function validateSummary(value, platform) {
     || typeof summary.treeDigest !== "string" || !digestPattern.test(summary.treeDigest)
     || (platform === "linux" && (typeof summary.modeInventorySha256 !== "string" || !digestPattern.test(summary.modeInventorySha256)))) fail();
   return platform === "linux"
-    ? { schemaVersion: 1, artifactName: expectedArtifact, launcherRelativePath: expectedLauncher, launcherSha256: summary.launcherSha256, fileCount: summary.fileCount, totalBytes: summary.totalBytes, treeDigest: summary.treeDigest, modeInventorySha256: summary.modeInventorySha256 }
-    : { schemaVersion: 1, artifactName: expectedArtifact, launcherRelativePath: expectedLauncher, launcherSha256: summary.launcherSha256, fileCount: summary.fileCount, totalBytes: summary.totalBytes, treeDigest: summary.treeDigest };
+    ? { schemaVersion: 1, artifactName: expectedArtifact, artifactId: summary.artifactId, artifactDigest: summary.artifactDigest, transportName: summary.transportName, launcherRelativePath: expectedLauncher, launcherSha256: summary.launcherSha256, fileCount: summary.fileCount, totalBytes: summary.totalBytes, treeDigest: summary.treeDigest, modeInventorySha256: summary.modeInventorySha256 }
+    : { schemaVersion: 1, artifactName: expectedArtifact, artifactId: summary.artifactId, artifactDigest: summary.artifactDigest, transportName: summary.transportName, launcherRelativePath: expectedLauncher, launcherSha256: summary.launcherSha256, fileCount: summary.fileCount, totalBytes: summary.totalBytes, treeDigest: summary.treeDigest };
 }
 
 function validateInputSummary(value, platform) {
   const expectedLauncher = platform === "linux" ? "code-oss" : "Code - OSS.exe";
-  const summary = snapshotExactObject(value, ["architecture", "fileCount", "launcherRelativePath", "launcherSha256", "platform", "schemaVersion", "totalBytes", "treeDigest"].sort());
+  const summary = snapshotExactObject(value, ["architecture", ...artifactIdentityKeys, "fileCount", "launcherRelativePath", "launcherSha256", "platform", "schemaVersion", "totalBytes", "treeDigest"].sort());
   if (!summary || summary.schemaVersion !== 1
     || summary.platform !== platform
     || summary.architecture !== "x64"
@@ -164,8 +190,8 @@ function validateInputSummary(value, platform) {
   return summary;
 }
 
-function validateAppimagetool(value, manifest) {
-  const appimagetool = snapshotExactObject(value, appimagetoolKeys);
+function validateAppimagetool(value, manifest, runAttempt) {
+  const appimagetool = validateArtifactIdentity(value, "appimagetool-linux-x64", runAttempt);
   if (!appimagetool) fail();
   const expected = manifest.appimagetool;
   if (appimagetool.repository !== expected.repository
@@ -177,6 +203,9 @@ function validateAppimagetool(value, manifest) {
   return {
     repository: expected.repository,
     artifactName: "appimagetool-linux-x64",
+    artifactId: appimagetool.artifactId,
+    artifactDigest: appimagetool.artifactDigest,
+    transportName: appimagetool.transportName,
     assetId: expected.assetId,
     assetName: expected.assetName,
     size: expected.size,
@@ -186,7 +215,7 @@ function validateAppimagetool(value, manifest) {
 
 function validateInputAppimagetool(value, manifest) {
   const expected = manifest.appimagetool;
-  const appimagetool = snapshotExactObject(value, Object.keys(expected).sort());
+  const appimagetool = snapshotExactObject(value, [...Object.keys(expected), ...artifactIdentityKeys].sort());
   if (!appimagetool || appimagetool.repository !== expected.repository
     || appimagetool.assetId !== expected.assetId
     || appimagetool.assetName !== expected.assetName
@@ -208,15 +237,16 @@ function normalizeProvenance(value, manifest) {
   if (!provenance || provenance.schemaVersion !== 1) fail();
   const runtimes = snapshotExactObject(provenance.runtimes, runtimesKeys);
   if (!runtimes) fail();
+  const producer = validateProducer(provenance.producer);
   return deepFreeze({
     schemaVersion: 1,
-    producer: validateProducer(provenance.producer),
+    producer,
     codeOss: validateCodeOss(provenance.codeOss, manifest),
     runtimes: {
-      windows: validateSummary(runtimes.windows, "windows"),
-      linux: validateSummary(runtimes.linux, "linux"),
+      windows: validateSummary(runtimes.windows, "windows", producer.runAttempt),
+      linux: validateSummary(runtimes.linux, "linux", producer.runAttempt),
     },
-    appimagetool: validateAppimagetool(provenance.appimagetool, manifest),
+    appimagetool: validateAppimagetool(provenance.appimagetool, manifest, producer.runAttempt),
   });
 }
 
@@ -233,13 +263,14 @@ export function createReleaseInputProvenance(request) {
   } catch {
     fail();
   }
+  const producer = validateProducer(input.producer);
   const windows = validateInputSummary(input.windows, "windows");
   const linux = validateInputSummary(input.linux, "linux");
   const appimagetool = validateInputAppimagetool(input.appimagetool, manifest);
   if (typeof input.linuxModeInventorySha256 !== "string" || !digestPattern.test(input.linuxModeInventorySha256)) fail();
   const candidate = {
     schemaVersion: 1,
-    producer: input.producer,
+    producer,
     codeOss: {
       repository: manifest.codeOss.repository,
       commit: manifest.codeOss.commit,
@@ -251,6 +282,9 @@ export function createReleaseInputProvenance(request) {
       windows: {
         schemaVersion: 1,
         artifactName: "code-oss-windows-x64",
+        artifactId: windows.artifactId,
+        artifactDigest: windows.artifactDigest,
+        transportName: windows.transportName,
         launcherRelativePath: windows.launcherRelativePath,
         launcherSha256: windows.launcherSha256,
         fileCount: windows.fileCount,
@@ -260,6 +294,9 @@ export function createReleaseInputProvenance(request) {
       linux: {
         schemaVersion: 1,
         artifactName: "code-oss-linux-x64",
+        artifactId: linux.artifactId,
+        artifactDigest: linux.artifactDigest,
+        transportName: linux.transportName,
         launcherRelativePath: linux.launcherRelativePath,
         launcherSha256: linux.launcherSha256,
         fileCount: linux.fileCount,
@@ -271,6 +308,9 @@ export function createReleaseInputProvenance(request) {
     appimagetool: {
       repository: appimagetool.repository,
       artifactName: "appimagetool-linux-x64",
+      artifactId: appimagetool.artifactId,
+      artifactDigest: appimagetool.artifactDigest,
+      transportName: appimagetool.transportName,
       assetId: appimagetool.assetId,
       assetName: appimagetool.assetName,
       size: appimagetool.size,
@@ -472,7 +512,7 @@ function parseCli(argv) {
     options[key] = value;
   }
   const expected = command === "create"
-    ? ["--appimagetool", "--linux-mode-inventory", "--linux-summary", "--manifest", "--out", "--producer-event", "--producer-ref", "--producer-repository", "--producer-source-commit", "--producer-workflow-path", "--windows-summary"].sort()
+    ? ["--appimagetool", "--appimagetool-artifact-digest", "--appimagetool-artifact-id", "--appimagetool-artifact-transport-name", "--linux-artifact-digest", "--linux-artifact-id", "--linux-artifact-transport-name", "--linux-mode-inventory", "--linux-summary", "--manifest", "--out", "--producer-event", "--producer-ref", "--producer-repository", "--producer-run-attempt", "--producer-run-id", "--producer-source-commit", "--producer-workflow-path", "--windows-artifact-digest", "--windows-artifact-id", "--windows-artifact-transport-name", "--windows-summary"].sort()
     : command === "validate" ? ["--manifest", "--provenance"] : [];
   if (!snapshotExactObject(options, expected)) fail();
   return { command, options };
@@ -555,14 +595,28 @@ async function main(argv) {
     validateReleaseInputProvenance(provenance.value);
     return;
   }
+  const producerRunAttemptText = canonicalDecimalString(options["--producer-run-attempt"]);
+  const producerRunAttempt = producerRunAttemptText === undefined ? undefined : Number(producerRunAttemptText);
+  if (producerRunAttemptText === undefined || canonicalAttempt(producerRunAttempt) === undefined
+    || String(producerRunAttempt) !== producerRunAttemptText) fail();
   const [windowsFile, linuxFile, modeInventoryFile, appimagetool] = await Promise.all([
     loadJsonFile(options["--windows-summary"]),
     loadJsonFile(options["--linux-summary"]),
     loadJsonFile(options["--linux-mode-inventory"]),
     hashRealFile(options["--appimagetool"]),
   ]);
-  const windows = validateInputSummary(windowsFile.value, "windows");
-  const linux = validateInputSummary(linuxFile.value, "linux");
+  const windows = validateInputSummary({
+    ...windowsFile.value,
+    artifactId: options["--windows-artifact-id"],
+    artifactDigest: options["--windows-artifact-digest"],
+    transportName: options["--windows-artifact-transport-name"],
+  }, "windows");
+  const linux = validateInputSummary({
+    ...linuxFile.value,
+    artifactId: options["--linux-artifact-id"],
+    artifactDigest: options["--linux-artifact-digest"],
+    transportName: options["--linux-artifact-transport-name"],
+  }, "linux");
   try {
     validateRuntimeModeInventory(modeInventoryFile.value, linux.launcherSha256);
   } catch {
@@ -577,9 +631,21 @@ async function main(argv) {
       sourceCommit: options["--producer-source-commit"],
       event: options["--producer-event"],
       ref: options["--producer-ref"],
+      runId: options["--producer-run-id"],
+      runAttempt: producerRunAttempt,
     },
-    windows,
-    linux,
+    windows: {
+      ...windows,
+      artifactId: options["--windows-artifact-id"],
+      artifactDigest: options["--windows-artifact-digest"],
+      transportName: options["--windows-artifact-transport-name"],
+    },
+    linux: {
+      ...linux,
+      artifactId: options["--linux-artifact-id"],
+      artifactDigest: options["--linux-artifact-digest"],
+      transportName: options["--linux-artifact-transport-name"],
+    },
     linuxModeInventorySha256: modeInventoryFile.sha256,
     appimagetool: {
       repository: manifest.appimagetool.repository,
@@ -587,6 +653,9 @@ async function main(argv) {
       assetName: manifest.appimagetool.assetName,
       size: appimagetool.size,
       sha256: appimagetool.sha256,
+      artifactId: options["--appimagetool-artifact-id"],
+      artifactDigest: options["--appimagetool-artifact-digest"],
+      transportName: options["--appimagetool-artifact-transport-name"],
     },
   });
   await writeCanonical(options["--out"], provenance);
