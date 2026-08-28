@@ -76,8 +76,18 @@ async function createCheckoutFixture(root, { yarnrc = 'target "30.1.2"\n', gulp 
   await writeFixtureFile(root, "package.json", JSON.stringify({ version: "1.92.0" }));
   await writeFixtureFile(root, ".yarnrc", yarnrc);
   await writeFixtureFile(root, "build/gulpfile.vscode.js", gulp ?? [
-    "const windows = ['vscode-win32-x64', 'VSCode-win32-x64'];",
-    "const linux = ['vscode-linux-x64', 'VSCode-linux-x64'];",
+    "const BUILD_TARGETS = [",
+    "  { platform: 'win32', arch: 'x64' },",
+    "  { platform: 'linux', arch: 'x64' },",
+    "];",
+    "BUILD_TARGETS.forEach(buildTarget => {",
+    "  const platform = buildTarget.platform;",
+    "  const arch = buildTarget.arch;",
+    "  const destinationFolderName = `VSCode${dashed(platform)}${dashed(arch)}`;",
+    "  const tasks = [packageTask(platform, arch, sourceFolderName, destinationFolderName, opts)];",
+    "  const vscodeTask = task.define(`vscode${dashed(platform)}${dashed(arch)}${dashed(minified)}`, task.series(...tasks));",
+    "  gulp.task(vscodeTask);",
+    "});",
   ].join("\n"));
 }
 
@@ -137,6 +147,10 @@ test("validateSourceManifest rejects every changed field and non-closed shape", 
     (value) => { value.codeOss.commit = "b1c0a14"; },
     (value) => { value.appimagetool.sha256 = "a".repeat(63); },
     (value) => { value.appimagetool.assetId = Number.MAX_SAFE_INTEGER + 1; },
+    (value) => { Object.defineProperty(value, "hidden", { value: true }); },
+    (value) => { value[Symbol("hidden")] = true; },
+    (value) => { Object.defineProperty(value.codeOss, "hidden", { value: true }); },
+    (value) => { value.appimagetool[Symbol("hidden")] = true; },
   ]) {
     const value = copy(expectedManifest);
     mutate(value);
@@ -152,13 +166,31 @@ test("loadSourceManifest accepts only a real canonical JSON file", async (t) => 
     await expectConfigFailureAsync(() => loadSourceManifest(manifestPath));
     const targetPath = await writeFixtureFile(root, "target.json", `${JSON.stringify(expectedManifest)}\n`);
     const linkPath = join(root, "linked.json");
-    try {
-      await symlink(targetPath, linkPath, "file");
+    await t.test("linked file", async (subtest) => {
+      try {
+        await symlink(targetPath, linkPath, "file");
+      } catch (error) {
+        if (error?.code === "EPERM") {
+          subtest.skip("symbolic links unavailable");
+          return;
+        }
+        throw error;
+      }
       await expectConfigFailureAsync(() => loadSourceManifest(linkPath));
+    });
+    const manifestDirectory = join(root, "manifest-directory");
+    await writeFixtureFile(manifestDirectory, "source-manifest.json", `${JSON.stringify(expectedManifest)}\n`);
+    const linkedDirectory = join(root, "linked-manifest-directory");
+    try {
+      await symlink(manifestDirectory, linkedDirectory, "junction");
     } catch (error) {
-      if (error?.code !== "EPERM") throw error;
-      t.skip("symbolic links unavailable");
+      if (error?.code === "EPERM") {
+        t.skip("directory links unavailable");
+        return;
+      }
+      throw error;
     }
+    await expectConfigFailureAsync(() => loadSourceManifest(join(linkedDirectory, "source-manifest.json")));
   });
 });
 
@@ -192,18 +224,62 @@ test("verifyCodeOssCheckout checks the fixed upstream metadata", async (t) => {
       ["version", "package.json", JSON.stringify({ version: "1.92.1" })],
       ["electron", ".yarnrc", 'target "30.1.3"\n'],
       ["duplicate electron target", ".yarnrc", 'target "30.1.2"\ntarget "30.1.2"\n'],
-      ["windows target", "build/gulpfile.vscode.js", "const x = ['vscode-win32-arm64', 'VSCode-win32-x64'];"],
-      ["windows output", "build/gulpfile.vscode.js", "const x = ['vscode-win32-x64', 'VSCode-win32-arm64'];"],
-      ["linux target", "build/gulpfile.vscode.js", "const x = ['vscode-linux-arm64', 'VSCode-linux-x64'];"],
-      ["linux output", "build/gulpfile.vscode.js", "const x = ['vscode-linux-x64', 'VSCode-linux-arm64'];"],
+      ["windows target", "build/gulpfile.vscode.js", "const BUILD_TARGETS = [{ platform: 'win32', arch: 'arm64' }];"],
+      ["windows output", "build/gulpfile.vscode.js", "const destinationFolderName = `VSCode-win32-arm64`;"],
+      ["linux target", "build/gulpfile.vscode.js", "const BUILD_TARGETS = [{ platform: 'linux', arch: 'arm64' }];"],
+      ["linux output", "build/gulpfile.vscode.js", "const destinationFolderName = `VSCode-linux-arm64`;"],
     ];
     for (const [, relativePath, content] of cases) {
       await createCheckoutFixture(root);
       await writeFixtureFile(root, relativePath, content);
       await expectUntrustedFailure(() => verifyCodeOssCheckout({ root, actualCommit: expectedManifest.codeOss.commit, manifest: expectedManifest }));
     }
+    await createCheckoutFixture(root, { gulp: [
+      "const BUILD_TARGETS = [",
+      "  { platform: 'win32', arch: 'arm64' },",
+      "  { platform: 'linux', arch: 'arm64' },",
+      "];",
+      "// 'vscode-win32-x64' 'VSCode-win32-x64' 'vscode-linux-x64' 'VSCode-linux-x64'",
+      "const deadTargets = ['vscode-win32-x64', 'VSCode-win32-x64', 'vscode-linux-x64', 'VSCode-linux-x64'];",
+      "BUILD_TARGETS.forEach(buildTarget => {",
+      "  const platform = buildTarget.platform;",
+      "  const arch = buildTarget.arch;",
+      "  const destinationFolderName = `VSCode${dashed(platform)}${dashed(arch)}`;",
+      "  const tasks = [packageTask(platform, arch, sourceFolderName, destinationFolderName, opts)];",
+      "  const vscodeTask = task.define(`vscode${dashed(platform)}${dashed(arch)}${dashed(minified)}`, task.series(...tasks));",
+      "});",
+    ].join("\n") });
+    await expectUntrustedFailure(() => verifyCodeOssCheckout({ root, actualCommit: expectedManifest.codeOss.commit, manifest: expectedManifest }));
     await createCheckoutFixture(root);
     await expectUntrustedFailure(() => verifyCodeOssCheckout({ root, actualCommit: "b1c0a14", manifest: expectedManifest }));
+  });
+});
+
+test("verifyCodeOssCheckout rejects a linked intermediate directory", async (t) => {
+  await withTemporaryDirectory(t, async (root) => {
+    await createCheckoutFixture(root);
+    const outsideBuild = join(root, "outside-build");
+    await writeFixtureFile(outsideBuild, "gulpfile.vscode.js", [
+      "// 'vscode-win32-x64' 'VSCode-win32-x64' 'vscode-linux-x64' 'VSCode-linux-x64'",
+      "const BUILD_TARGETS = [{ platform: 'win32', arch: 'x64' }, { platform: 'linux', arch: 'x64' }];",
+      "BUILD_TARGETS.forEach(buildTarget => {",
+      "  const platform = buildTarget.platform; const arch = buildTarget.arch;",
+      "  const destinationFolderName = `VSCode${dashed(platform)}${dashed(arch)}`;",
+      "  const tasks = [packageTask(platform, arch, sourceFolderName, destinationFolderName, opts)];",
+      "  const vscodeTask = task.define(`vscode${dashed(platform)}${dashed(arch)}${dashed(minified)}`, task.series(...tasks));",
+      "});",
+    ].join("\n"));
+    await rm(join(root, "build"), { recursive: true, force: true });
+    try {
+      await symlink(outsideBuild, join(root, "build"), "junction");
+    } catch (error) {
+      if (error?.code === "EPERM") {
+        t.skip("directory links unavailable");
+        return;
+      }
+      throw error;
+    }
+    await expectUntrustedFailure(() => verifyCodeOssCheckout({ root, actualCommit: expectedManifest.codeOss.commit, manifest: expectedManifest }));
   });
 });
 

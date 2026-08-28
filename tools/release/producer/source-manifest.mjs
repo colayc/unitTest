@@ -68,7 +68,7 @@ function isPlainObject(value) {
 
 function hasExactKeys(value, keys) {
   return isPlainObject(value)
-    && Object.keys(value).length === keys.length
+    && Reflect.ownKeys(value).length === keys.length
     && keys.every((key) => Object.hasOwn(value, key));
 }
 
@@ -96,12 +96,28 @@ export function validateSourceManifest(value) {
 
 async function realFile(path, errorCode, message) {
   try {
+    const parent = await lstat(dirname(path));
     const info = await lstat(path);
-    if (!info.isFile() || info.isSymbolicLink()) fail(errorCode, message);
+    if (parent.isSymbolicLink() || !info.isFile() || info.isSymbolicLink()) fail(errorCode, message);
     return await readFile(path, "utf8");
   } catch (error) {
     if (error instanceof ReleaseProducerError) throw error;
     fail(errorCode, message);
+  }
+}
+
+async function realCheckoutFile(root, components, message) {
+  let current = root;
+  try {
+    for (let index = 0; index < components.length; index += 1) {
+      current = join(current, components[index]);
+      const info = await lstat(current);
+      const finalComponent = index === components.length - 1;
+      if (info.isSymbolicLink() || (finalComponent ? !info.isFile() : !info.isDirectory())) fail(UNTRUSTED, message);
+    }
+    return await readFile(current, "utf8");
+  } catch {
+    fail(UNTRUSTED, message);
   }
 }
 
@@ -127,18 +143,133 @@ function validateElectronTarget(yarnrc) {
   }
 }
 
-function containsQuoted(text, value) {
-  return new RegExp(`["']${value}["']`, "u").test(text);
+function tokenizeJavaScript(source) {
+  const tokens = [];
+  for (let index = 0; index < source.length;) {
+    const character = source[index];
+    const next = source[index + 1];
+    if (/\s/u.test(character)) {
+      index += 1;
+    } else if (character === "/" && next === "/") {
+      index = source.indexOf("\n", index + 2);
+      if (index === -1) break;
+    } else if (character === "/" && next === "*") {
+      const end = source.indexOf("*/", index + 2);
+      if (end === -1) fail(UNTRUSTED, "upstream Gulp targets are not trusted");
+      index = end + 2;
+    } else if (character === "'" || character === '"') {
+      const quote = character;
+      let value = "";
+      index += 1;
+      while (index < source.length && source[index] !== quote) {
+        if (source[index] === "\\") index += 1;
+        if (index >= source.length) fail(UNTRUSTED, "upstream Gulp targets are not trusted");
+        value += source[index];
+        index += 1;
+      }
+      if (source[index] !== quote) fail(UNTRUSTED, "upstream Gulp targets are not trusted");
+      tokens.push({ type: "string", value });
+      index += 1;
+    } else if (character === "`") {
+      let value = "";
+      index += 1;
+      while (index < source.length && source[index] !== "`") {
+        if (source[index] === "\\") index += 1;
+        if (index >= source.length) fail(UNTRUSTED, "upstream Gulp targets are not trusted");
+        value += source[index];
+        index += 1;
+      }
+      if (source[index] !== "`") fail(UNTRUSTED, "upstream Gulp targets are not trusted");
+      tokens.push({ type: "template", value });
+      index += 1;
+    } else if (/[A-Za-z_$]/u.test(character)) {
+      const start = index;
+      index += 1;
+      while (index < source.length && /[A-Za-z0-9_$]/u.test(source[index])) index += 1;
+      tokens.push({ type: "identifier", value: source.slice(start, index) });
+    } else if (character === "=" && next === ">") {
+      tokens.push({ type: "operator", value: "=>" });
+      index += 2;
+    } else {
+      tokens.push({ type: "punctuation", value: character });
+      index += 1;
+    }
+  }
+  return tokens;
+}
+
+function matchingIndex(tokens, start, opening, closing) {
+  let depth = 0;
+  for (let index = start; index < tokens.length; index += 1) {
+    if (tokens[index].value === opening) depth += 1;
+    else if (tokens[index].value === closing) {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+  return -1;
+}
+
+function hasSequence(tokens, values) {
+  return values.every((value, index) => tokens[index]?.value === value);
+}
+
+function buildTargetsContain(tokens, platform, arch) {
+  for (let index = 0; index < tokens.length - 3; index += 1) {
+    if (!hasSequence(tokens.slice(index), ["const", "BUILD_TARGETS", "=", "["])) continue;
+    const end = matchingIndex(tokens, index + 3, "[", "]");
+    if (end === -1) return false;
+    for (let objectStart = index + 4; objectStart < end; objectStart += 1) {
+      if (tokens[objectStart].value !== "{") continue;
+      const objectEnd = matchingIndex(tokens, objectStart, "{", "}");
+      if (objectEnd === -1 || objectEnd > end) return false;
+      let matchedPlatform = false;
+      let matchedArch = false;
+      for (let field = objectStart + 1; field < objectEnd - 2; field += 1) {
+        if (tokens[field].value === "platform" && tokens[field + 1].value === ":" && tokens[field + 2].type === "string") matchedPlatform = tokens[field + 2].value === platform;
+        if (tokens[field].value === "arch" && tokens[field + 1].value === ":" && tokens[field + 2].type === "string") matchedArch = tokens[field + 2].value === arch;
+      }
+      if (matchedPlatform && matchedArch) return true;
+      objectStart = objectEnd;
+    }
+  }
+  return false;
+}
+
+function buildTargetLoopBody(tokens) {
+  for (let index = 0; index < tokens.length - 5; index += 1) {
+    if (!hasSequence(tokens.slice(index), ["BUILD_TARGETS", ".", "forEach", "("])) continue;
+    let arrow = index + 4;
+    while (arrow < tokens.length && tokens[arrow].value !== "=>") arrow += 1;
+    if (arrow === tokens.length || tokens[arrow + 1]?.value !== "{") continue;
+    const end = matchingIndex(tokens, arrow + 1, "{", "}");
+    if (end !== -1) return tokens.slice(arrow + 2, end);
+  }
+  return [];
+}
+
+function bodyDefinesTrustedGulpRelationship(body) {
+  const expectedOutputTemplate = "VSCode${dashed(platform)}${dashed(arch)}";
+  const expectedTargetTemplate = "vscode${dashed(platform)}${dashed(arch)}${dashed(minified)}";
+  let outputDefined = false;
+  let targetDefined = false;
+  let outputPackaged = false;
+  for (let index = 0; index < body.length; index += 1) {
+    if (hasSequence(body.slice(index), ["const", "destinationFolderName", "="])
+      && body[index + 3]?.type === "template" && body[index + 3].value === expectedOutputTemplate) outputDefined = true;
+    if (hasSequence(body.slice(index), ["const", "vscodeTask", "=", "task", ".", "define", "("])
+      && body[index + 7]?.type === "template" && body[index + 7].value === expectedTargetTemplate) targetDefined = true;
+    if (hasSequence(body.slice(index), ["packageTask", "(", "platform", ",", "arch", ",", "sourceFolderName", ",", "destinationFolderName", ",", "opts", ")"])) outputPackaged = true;
+  }
+  return outputDefined && targetDefined && outputPackaged;
 }
 
 function validateGulpTargets(gulp) {
-  for (const value of [
-    EXPECTED_MANIFEST.codeOss.windowsTarget,
-    EXPECTED_MANIFEST.codeOss.windowsOutput,
-    EXPECTED_MANIFEST.codeOss.linuxTarget,
-    EXPECTED_MANIFEST.codeOss.linuxOutput,
-  ]) {
-    if (!containsQuoted(gulp, value)) fail(UNTRUSTED, "upstream Gulp targets are not trusted");
+  const tokens = tokenizeJavaScript(gulp);
+  if (!buildTargetsContain(tokens, "win32", "x64")
+    || !buildTargetsContain(tokens, "linux", "x64")
+    || !bodyDefinesTrustedGulpRelationship(buildTargetLoopBody(tokens))) {
+    fail(UNTRUSTED, "upstream Gulp targets are not trusted");
   }
 }
 
@@ -149,10 +280,10 @@ export async function verifyCodeOssCheckout({ root, actualCommit, manifest }) {
   const rootInfo = await lstat(root).catch(() => null);
   if (!rootInfo?.isDirectory() || rootInfo.isSymbolicLink()) fail(UNTRUSTED, "upstream checkout is not trusted");
   const [nodeVersion, packageText, yarnrc, gulp] = await Promise.all([
-    realFile(join(root, ".nvmrc"), UNTRUSTED, "upstream Node version is not trusted"),
-    realFile(join(root, "package.json"), UNTRUSTED, "upstream package version is not trusted"),
-    realFile(join(root, ".yarnrc"), UNTRUSTED, "upstream Electron target is not trusted"),
-    realFile(join(root, "build", "gulpfile.vscode.js"), UNTRUSTED, "upstream Gulp targets are not trusted"),
+    realCheckoutFile(root, [".nvmrc"], "upstream Node version is not trusted"),
+    realCheckoutFile(root, ["package.json"], "upstream package version is not trusted"),
+    realCheckoutFile(root, [".yarnrc"], "upstream Electron target is not trusted"),
+    realCheckoutFile(root, ["build", "gulpfile.vscode.js"], "upstream Gulp targets are not trusted"),
   ]);
   if (nodeVersion.trimEnd() !== EXPECTED_MANIFEST.codeOss.nodeVersion) fail(UNTRUSTED, "upstream Node version is not trusted");
   let packageJson;
