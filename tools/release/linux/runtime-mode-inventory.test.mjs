@@ -1,17 +1,18 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-import {
-  createRuntimeModeInventory,
-  restoreRuntimeModes,
-  validateRuntimeModeInventory,
-} from "./runtime-mode-inventory.mjs";
+import * as modeInventoryModule from "./runtime-mode-inventory.mjs";
+
+const { createRuntimeModeInventory, restoreRuntimeModes, validateRuntimeModeInventory } = modeInventoryModule;
 
 const linuxOnly = process.platform === "linux" ? test : test.skip;
+const script = fileURLToPath(new URL("./runtime-mode-inventory.mjs", import.meta.url));
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -164,6 +165,117 @@ linuxOnly("create records every real runtime file in strict portable order and r
   }
 });
 
+linuxOnly("create rejects deterministic same-object same-size content and mode mutations", async (t) => {
+  const testOnly = modeInventoryModule.__testOnlyRuntimeModeInventory;
+  assert.ok(testOnly, "test-only descriptor hooks must be available");
+  for (const [label, mutate] of [
+    ["content", async (path) => writeFile(path, "DATA\n")],
+    ["mode", async (path) => chmod(path, 0o600)],
+  ]) {
+    const fixture = await createRuntimeFixture(t);
+    const target = join(fixture.root, "resources", "app", "static", "data.txt");
+    let mutated = false;
+    await assert.rejects(
+      () => testOnly.createRuntimeModeInventory({
+        root: fixture.root,
+        expectedLauncherSha256: fixture.launcherSha256,
+      }, {
+        afterOpenSnapshot: async ({ path }) => {
+          if (!mutated && path === "resources/app/static/data.txt") {
+            mutated = true;
+            await mutate(target);
+          }
+        },
+      }),
+      (error) => error?.code === "RELEASE_INPUT_INVALID" && Boolean(label),
+    );
+    assert.equal(mutated, true);
+  }
+});
+
+linuxOnly("mode creation rejects unsafe paths, case aliases, links, special files, and a non-executable launcher", async (t) => {
+  for (const kind of ["unsafe path", "case alias", "link", "special", "non-executable launcher"]) {
+    const fixture = await createRuntimeFixture(t);
+    if (kind === "unsafe path") {
+      await writeFile(join(fixture.root, "unsafe:name"), "unsafe\n");
+    } else if (kind === "case alias") {
+      await writeFile(join(fixture.root, "CODE-OSS"), "alias\n");
+    } else if (kind === "link") {
+      await symlink(join(fixture.root, "resources", "app", "package.json"), join(fixture.root, "linked-file"));
+    } else if (kind === "special") {
+      const result = spawnSync("mkfifo", [join(fixture.root, "runtime.fifo")]);
+      assert.equal(result.status, 0);
+    } else {
+      await chmod(join(fixture.root, "code-oss"), 0o644);
+    }
+    await assert.rejects(
+      () => createRuntimeModeInventory({ root: fixture.root, expectedLauncherSha256: fixture.launcherSha256 }),
+      (error) => error?.code === "RELEASE_INPUT_INVALID",
+    );
+  }
+});
+
+linuxOnly("mode create CLI writes canonical output and rejects malformed, stale-temp, and symlink targets", async (t) => {
+  const fixture = await createRuntimeFixture(t);
+  const parent = dirname(fixture.root);
+  const out = join(parent, "mode.json");
+  const args = [script, "create", "--root", fixture.root, "--launcher-sha256", fixture.launcherSha256, "--out", out];
+  let result = spawnSync(process.execPath, args, { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  const outputBytes = await readFile(out, "utf8");
+  assert.equal(outputBytes, result.stdout);
+  assert.equal(outputBytes, `${JSON.stringify(JSON.parse(outputBytes))}\n`);
+  assert.equal(outputBytes.includes(fixture.root), false);
+
+  result = spawnSync(process.execPath, args.slice(0, -2), { encoding: "utf8" });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /RELEASE_INPUT_INVALID/u);
+
+  const blockedParent = join(parent, "not-a-directory");
+  await writeFile(blockedParent, "blocked\n");
+  result = spawnSync(process.execPath, [...args.slice(0, -1), join(blockedParent, "mode.json")], { encoding: "utf8" });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /RELEASE_PRODUCER_OUTPUT_INVALID/u);
+
+  const staleTemporary = `${out}.tmp-${process.pid}`;
+  await writeFile(staleTemporary, "attacker-controlled\n");
+  result = spawnSync(process.execPath, args, { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(await readFile(out, "utf8"), outputBytes);
+  assert.equal(await readFile(staleTemporary, "utf8"), "attacker-controlled\n");
+
+  const outside = join(parent, "outside-mode.json");
+  const outputLink = join(parent, "mode-link.json");
+  await writeFile(outside, "outside\n");
+  await symlink(outside, outputLink);
+  result = spawnSync(process.execPath, [...args.slice(0, -1), outputLink], { encoding: "utf8" });
+  assert.notEqual(result.status, 0);
+  assert.equal(await readFile(outside, "utf8"), "outside\n");
+});
+
+linuxOnly("mode create CLI rejects a genuinely unwritable output directory", async (t) => {
+  if (typeof process.getuid === "function" && process.getuid() === 0) {
+    t.skip("root can bypass directory write permissions");
+    return;
+  }
+  const fixture = await createRuntimeFixture(t);
+  const outputDirectory = join(dirname(fixture.root), "unwritable");
+  const out = join(outputDirectory, "mode.json");
+  await mkdir(outputDirectory);
+  await chmod(outputDirectory, 0o555);
+  t.after(async () => chmod(outputDirectory, 0o755).catch(() => {}));
+  const result = spawnSync(process.execPath, [
+    script,
+    "create",
+    "--root", fixture.root,
+    "--launcher-sha256", fixture.launcherSha256,
+    "--out", out,
+  ], { encoding: "utf8" });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /RELEASE_PRODUCER_OUTPUT_INVALID/u);
+  await assert.rejects(() => readFile(out, "utf8"));
+});
+
 (process.platform === "linux" ? test.skip : test)("create refuses to infer Linux executable state off Linux", async (t) => {
   const fixture = await createRuntimeFixture(t);
   await assert.rejects(
@@ -176,6 +288,13 @@ test("mode creation request is a closed public shape", async () => {
   for (const request of [null, { root: "runtime", expectedLauncherSha256: "a".repeat(64), extra: true }]) {
     await assert.rejects(() => createRuntimeModeInventory(request), (error) => error?.code === "RELEASE_INPUT_INVALID");
   }
+  assert.throws(
+    () => modeInventoryModule.__testOnlyRuntimeModeInventory.createRuntimeModeInventory({
+      root: "runtime",
+      expectedLauncherSha256: "a".repeat(64),
+    }, { unknownHook: async () => {} }),
+    (error) => error?.code === "RELEASE_INPUT_INVALID",
+  );
 });
 
 for (const [label, operations, expectedMessage] of [
