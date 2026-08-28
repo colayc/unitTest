@@ -24,7 +24,7 @@ const creationKeys = ["appimagetool", "linux", "linuxModeInventorySha256", "prod
 const fixedSourceManifest = validateSourceManifest(JSON.parse(readFileSync(new URL("./source-manifest.json", import.meta.url), "utf8")));
 const execFileAsync = promisify(execFile);
 const windowsReparsePointCommand = "$node=Get-Item -Force -LiteralPath $env:RELEASE_PROVENANCE_INPUT; while ($null -ne $node) { if (($node.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { [Console]::Out.Write('1'); exit 0 }; $node=$node.Parent }; [Console]::Out.Write('0')";
-const windowsOwnedDirectoryCommand = "$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User; $acl=[IO.Directory]::GetAccessControl($env:RELEASE_PROVENANCE_INPUT); $owner=$acl.GetOwner([Security.Principal.SecurityIdentifier]); if ($owner.Value -eq $sid.Value) { [Console]::Out.Write('1') } else { [Console]::Out.Write('0') }";
+const windowsOwnedDirectoryCommand = "$identity=[Security.Principal.WindowsIdentity]::GetCurrent(); $acl=[IO.Directory]::GetAccessControl($env:RELEASE_PROVENANCE_INPUT); $owner=$acl.GetOwner([Security.Principal.SecurityIdentifier]); if ($owner.Value -eq $identity.User.Value -or $owner.Value -eq $identity.Owner.Value) { [Console]::Out.Write('1') } else { [Console]::Out.Write('0') }";
 
 function provenanceError(reason = "release input provenance is invalid") {
   const error = new Error(`${INVALID}: ${reason}`);
