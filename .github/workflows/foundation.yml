@@ -256,11 +256,95 @@ jobs:
       - if: always()
         run: git diff --exit-code
 
+  verify-release-input-run:
+    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      run_id: ${{ steps.verify-provenance.outputs.run_id }}
+      windows_launcher_sha256: ${{ steps.verify-provenance.outputs.windows_launcher_sha256 }}
+      linux_launcher_sha256: ${{ steps.verify-provenance.outputs.linux_launcher_sha256 }}
+      appimagetool_sha256: ${{ steps.verify-provenance.outputs.appimagetool_sha256 }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.0.2
+        with:
+          node-version: 24.18.0
+      - name: Select release input coordinates
+        shell: bash
+        env:
+          RELEASE_INPUT_RUN_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.release_input_run_id || vars.RELEASE_INPUT_RUN_ID }}
+          WINDOWS_LAUNCHER_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.windows_code_oss_sha256 || vars.RELEASE_CODE_OSS_WINDOWS_SHA256 }}
+          LINUX_LAUNCHER_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.linux_code_oss_sha256 || vars.RELEASE_CODE_OSS_LINUX_SHA256 }}
+          APPIMAGETOOL_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.linux_appimagetool_sha256 || vars.RELEASE_APPIMAGETOOL_LINUX_SHA256 }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_INPUT_RUN_ID" =~ ^[1-9][0-9]*$ ]] || { echo 'RELEASE_PRODUCER_UNTRUSTED: run ID must be canonical decimal digits' >&2; exit 1; }
+          [[ "$WINDOWS_LAUNCHER_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo 'RELEASE_PRODUCER_PROVENANCE_INVALID: Windows launcher digest must be lowercase SHA-256' >&2; exit 1; }
+          [[ "$LINUX_LAUNCHER_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo 'RELEASE_PRODUCER_PROVENANCE_INVALID: Linux launcher digest must be lowercase SHA-256' >&2; exit 1; }
+          [[ "$APPIMAGETOOL_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo 'RELEASE_PRODUCER_PROVENANCE_INVALID: appimagetool digest must be lowercase SHA-256' >&2; exit 1; }
+          {
+            printf 'RELEASE_INPUT_RUN_ID=%s\n' "$RELEASE_INPUT_RUN_ID"
+            printf 'WINDOWS_LAUNCHER_SHA256=%s\n' "$WINDOWS_LAUNCHER_SHA256"
+            printf 'LINUX_LAUNCHER_SHA256=%s\n' "$LINUX_LAUNCHER_SHA256"
+            printf 'APPIMAGETOOL_SHA256=%s\n' "$APPIMAGETOOL_SHA256"
+          } >> "$GITHUB_ENV"
+      - name: Fetch trusted producer run metadata
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ ! -e .release && ! -L .release ]] || { echo 'RELEASE_PRODUCER_UNTRUSTED: producer metadata directory must be fresh' >&2; exit 1; }
+          mkdir -m 700 .release
+          gh api "repos/colayc/unitTest/actions/runs/$RELEASE_INPUT_RUN_ID" > .release/producer-run.json
+          [[ -f .release/producer-run.json && ! -L .release/producer-run.json ]] || { echo 'RELEASE_PRODUCER_UNTRUSTED: producer run metadata is not a regular file' >&2; exit 1; }
+      - id: precheck
+        name: Validate trusted producer run before artifact download
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tools/release/producer/trusted-run.mjs validate-run \
+            --run-json .release/producer-run.json \
+            --run-id "$RELEASE_INPUT_RUN_ID" \
+            --consumer-commit "$GITHUB_SHA" \
+            --github-output "$GITHUB_OUTPUT"
+      - name: Download trusted release input provenance
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-input-provenance
+          path: .release/provenance
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.precheck.outputs.run_id }}
+      - id: verify-provenance
+        name: Validate trusted release input provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -d .release/provenance && ! -L .release/provenance ]] || { echo 'RELEASE_PRODUCER_PROVENANCE_INVALID: provenance artifact root is invalid' >&2; exit 1; }
+          mapfile -d '' -t provenance_entries < <(find .release/provenance -mindepth 1 -maxdepth 1 -printf '%f\0' | LC_ALL=C sort -z)
+          ((${#provenance_entries[@]} == 1)) && [[ "${provenance_entries[0]}" == 'release-input-provenance.json' ]] || { echo 'RELEASE_PRODUCER_PROVENANCE_INVALID: provenance artifact root must contain exactly release-input-provenance.json' >&2; exit 1; }
+          [[ -f .release/provenance/release-input-provenance.json && ! -L .release/provenance/release-input-provenance.json ]] || { echo 'RELEASE_PRODUCER_PROVENANCE_INVALID: provenance document is invalid' >&2; exit 1; }
+          node tools/release/producer/trusted-run.mjs validate-provenance \
+            --run-json .release/producer-run.json \
+            --run-id "$RELEASE_INPUT_RUN_ID" \
+            --consumer-commit "$GITHUB_SHA" \
+            --github-output "$GITHUB_OUTPUT" \
+            --provenance .release/provenance/release-input-provenance.json \
+            --windows-launcher-sha256 "$WINDOWS_LAUNCHER_SHA256" \
+            --linux-launcher-sha256 "$LINUX_LAUNCHER_SHA256" \
+            --appimagetool-sha256 "$APPIMAGETOOL_SHA256"
+
   package-windows:
     if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') }}
     needs:
       - verify-windows
       - verify-linux
+      - verify-release-input-run
     runs-on: windows-2025-vs2026
     timeout-minutes: 60
     outputs:
@@ -278,8 +362,8 @@ jobs:
       signature_required: ${{ steps.package-msix.outputs.signature_required }}
       signature_outcome: ${{ steps.package-msix.outputs.signature_outcome }}
     env:
-      RELEASE_INPUT_RUN_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.release_input_run_id || vars.RELEASE_INPUT_RUN_ID }}
-      CODE_OSS_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.windows_code_oss_sha256 || vars.RELEASE_CODE_OSS_WINDOWS_SHA256 }}
+      RELEASE_INPUT_RUN_ID: ${{ needs.verify-release-input-run.outputs.run_id }}
+      CODE_OSS_SHA256: ${{ needs.verify-release-input-run.outputs.windows_launcher_sha256 }}
       RELEASE_MSIX_PUBLISHER: ${{ vars.RELEASE_MSIX_PUBLISHER || 'CN=Unit Test IDE' }}
     steps:
       - uses: actions/checkout@v6
@@ -458,6 +542,7 @@ jobs:
     needs:
       - verify-windows
       - verify-linux
+      - verify-release-input-run
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     outputs:
@@ -476,9 +561,9 @@ jobs:
       baseline_manifest_sha256: ${{ steps.package-appimage.outputs.baseline_manifest_sha256 }}
       baseline_release_manifest_filename: ${{ steps.package-appimage.outputs.baseline_release_manifest_filename }}
     env:
-      RELEASE_INPUT_RUN_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.release_input_run_id || vars.RELEASE_INPUT_RUN_ID }}
-      CODE_OSS_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.linux_code_oss_sha256 || vars.RELEASE_CODE_OSS_LINUX_SHA256 }}
-      APPIMAGETOOL_SHA256: ${{ github.event_name == 'workflow_dispatch' && inputs.linux_appimagetool_sha256 || vars.RELEASE_APPIMAGETOOL_LINUX_SHA256 }}
+      RELEASE_INPUT_RUN_ID: ${{ needs.verify-release-input-run.outputs.run_id }}
+      CODE_OSS_SHA256: ${{ needs.verify-release-input-run.outputs.linux_launcher_sha256 }}
+      APPIMAGETOOL_SHA256: ${{ needs.verify-release-input-run.outputs.appimagetool_sha256 }}
     steps:
       - uses: actions/checkout@v6
       - name: Require release input coordinates

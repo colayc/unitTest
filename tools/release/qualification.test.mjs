@@ -542,6 +542,8 @@ test("release package jobs materialize digest-pinned runtime inputs before packa
     const start = workflow.indexOf(`  ${jobName}:`);
     const end = workflow.indexOf(`\n  ${nextJobName}:`, start + 3);
     const job = workflow.slice(start, end);
+    assert.match(job, /^    needs:\r?\n      - verify-windows\r?\n      - verify-linux\r?\n      - verify-release-input-run$/mu, `${jobName} trust dependency`);
+    assert.doesNotMatch(job, /(?:inputs\.(?:release_input_run_id|windows_code_oss_sha256|linux_code_oss_sha256|linux_appimagetool_sha256)|vars\.(?:RELEASE_INPUT_RUN_ID|RELEASE_CODE_OSS_[A-Z_]+|RELEASE_APPIMAGETOOL_[A-Z_]+))/u, `${jobName} raw coordinates`);
     const requireInputs = job.indexOf("Require release input coordinates");
     const download = job.search(/uses: actions\/download-artifact@[0-9a-f]{40}/u);
     const verifyDigest = job.indexOf("Verify and export release inputs");

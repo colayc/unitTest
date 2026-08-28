@@ -633,6 +633,32 @@ test("install smoke workflow downloads digest-bearing produced packages before e
   }
 });
 
+test("Linux packaging keeps trusted coordinates and transported mode validation ahead of staging", async () => {
+  const workflow = (await readFile(resolve(".github/workflows/foundation.yml"), "utf8")).replace(/\r\n?/gu, "\n");
+  const start = workflow.indexOf("  package-linux:");
+  const end = workflow.indexOf("\n  install-smoke-windows:", start);
+  const job = workflow.slice(start, end);
+  assert.ok(start >= 0 && end > start);
+  assert.match(job, /^      RELEASE_INPUT_RUN_ID: \$\{\{ needs\.verify-release-input-run\.outputs\.run_id \}\}$/mu);
+  assert.match(job, /^      CODE_OSS_SHA256: \$\{\{ needs\.verify-release-input-run\.outputs\.linux_launcher_sha256 \}\}$/mu);
+  assert.match(job, /^      APPIMAGETOOL_SHA256: \$\{\{ needs\.verify-release-input-run\.outputs\.appimagetool_sha256 \}\}$/mu);
+  const ordered = [
+    "name: Download fixed-name Linux Code-OSS runtime",
+    "name: Download fixed-name Linux appimagetool",
+    '[[ "$(sha256sum "$launcher"',
+    '[[ "$(sha256sum "${appimagetool_matches[0]}"',
+    "runtime-mode-inventory.mjs restore",
+    'echo "CODE_OSS_RUNTIME_ROOT=$runtime_root"',
+    "name: Stage and package Linux AppImage",
+  ];
+  let previous = -1;
+  for (const marker of ordered) {
+    const index = job.indexOf(marker);
+    assert.ok(index > previous, `${marker} must remain after the preceding Linux input gate`);
+    previous = index;
+  }
+});
+
 linuxOnly("Linux install smoke restores both AppImage execute bits before either verifier runs", async (t) => {
   await withTemporaryRoot(t, async (root) => {
     const scriptRoot = join(root, "tools", "release");

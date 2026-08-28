@@ -597,6 +597,23 @@ test("package-windows workflow passes RELEASE_VERSION through env instead of int
   assert.doesNotMatch(workflow, /\$version = '\$\{\{ inputs\.release_version \}\}'/u);
 });
 
+test("package-windows consumes closed trusted coordinates before digest verification and staging", async () => {
+  const workflow = (await readFile(workflowPath, "utf8")).replace(/\r\n?/gu, "\n");
+  const start = workflow.indexOf("  package-windows:");
+  const end = workflow.indexOf("\n  package-linux:", start);
+  const job = workflow.slice(start, end);
+  assert.ok(start >= 0 && end > start);
+  assert.match(job, /^    needs:\n      - verify-windows\n      - verify-linux\n      - verify-release-input-run$/mu);
+  assert.match(job, /^      RELEASE_INPUT_RUN_ID: \$\{\{ needs\.verify-release-input-run\.outputs\.run_id \}\}$/mu);
+  assert.match(job, /^      CODE_OSS_SHA256: \$\{\{ needs\.verify-release-input-run\.outputs\.windows_launcher_sha256 \}\}$/mu);
+  assert.doesNotMatch(job, /(?:inputs\.(?:release_input_run_id|windows_code_oss_sha256)|vars\.(?:RELEASE_INPUT_RUN_ID|RELEASE_CODE_OSS_WINDOWS_SHA256))/u);
+  const download = job.indexOf("name: Download fixed-name Windows Code-OSS runtime");
+  const digest = job.indexOf("Get-FileHash -LiteralPath $launcher -Algorithm SHA256");
+  const exportRuntime = job.indexOf('"CODE_OSS_RUNTIME_ROOT=$runtimeRoot"');
+  const staging = job.indexOf("name: Stage and package Windows MSIX");
+  assert.ok(0 <= download && download < digest && digest < exportRuntime && exportRuntime < staging);
+});
+
 windowsOnly("package-msix returns RELEASE_TOOL_MISSING when makeappx.exe is unavailable", async (t) => {
   await withTemporaryRoot(t, async (root) => {
     const fixture = await createStagingFixture(root);
