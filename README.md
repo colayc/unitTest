@@ -91,7 +91,9 @@ pnpm release:stage -- --platform linux --architecture x64 --version 1.2.3 --code
 
 上面的 `release:stage` 示例是本地开发/测试的 staging 接口，不是发布输入生产接口。用于发布的 Code-OSS runtime 只能由显示名为 `Trusted Code-OSS release inputs` 的 GitHub Actions `.github/workflows/release-inputs.yml` 在 `master` 上手动生产：它固定检出 `microsoft/vscode` 的 `b1c0a14de1414fcdaa400695b4db1c0799bc3124`，并只使用 GitHub-hosted `windows-2022`（Visual Studio 2022、C++ 与 Spectre 库 preflight 不通过即失败）和 `ubuntu-24.04`。该工作流不使用管理员/WFP self-hosted runner；本地 Code-OSS runtime 和 `release-inputs/code-oss.exe` 都不是允许的 producer 输入。
 
-producer 只上传三个固定名制品：`code-oss-windows-x64`、`code-oss-linux-x64` 和 `appimagetool-linux-x64`；它们以及 `release-input-provenance` 都只保留 1 天。请在到期前完成检查；producer 重跑必须使用一套新的 producer artifact，不能把旧 run 的制品混入重跑。
+`code-oss-windows-x64`、`code-oss-linux-x64`、`appimagetool-linux-x64` 和 `release-input-provenance` 是固定的 logical artifact names，全部保留 1 天；实际 transport names are suffixed by the run attempt，例如 `release-input-provenance-$producerRunAttempt`。run ID alone is not a complete artifact identity：consumer 必须将 run attempt 端到端绑定，而不是只按 run ID 或逻辑名称选择制品。runtime/tool downloads use immutable artifact IDs and upload digests；既有的 runtime content、Linux mode inventory 与 artifact inventory 完整性检查仍保留。
+
+producer re-run requires a new foundation dispatch：重跑会生成另一组 attempt-qualified transport artifacts，之前 foundation dispatch 不得继续使用。package jobs revalidate the attempt before and after download，以拒绝 producer 在验证与传输之间被重跑或制品被替换。
 
 合并并确认 GitHub/Gitee 的 `master` 指向同一提交后，按如下顺序运行。命令里的变量只在当前 PowerShell 会话中保存，不能提交真实 run ID、摘要或凭据：
 
@@ -151,7 +153,23 @@ $producerRunId = Start-ClosedWorkflowRun -Workflow 'release-inputs.yml' -Expecte
 gh run watch $producerRunId --repo colayc/unitTest --exit-status
 
 $producerEvidence = ".release/evidence/producer-$producerRunId"
-gh run download $producerRunId --repo colayc/unitTest --name release-input-provenance --dir $producerEvidence
+$producerRun = gh api "repos/colayc/unitTest/actions/runs/$producerRunId" | ConvertFrom-Json
+$producerRunAttempt = [int64]$producerRun.run_attempt
+$provenanceTransportName = "release-input-provenance-$producerRunAttempt"
+$artifactPage = gh api "repos/colayc/unitTest/actions/runs/$producerRunId/artifacts?per_page=100" | ConvertFrom-Json
+$provenanceMatches = @($artifactPage.artifacts | Where-Object { $_.name -ceq $provenanceTransportName -and $_.expired -eq $false })
+if ($artifactPage.total_count -ne $artifactPage.artifacts.Count -or $artifactPage.total_count -gt 100 -or $provenanceMatches.Count -ne 1) { throw 'producer provenance artifact identity is ambiguous' }
+$provenanceArtifactId = [string]$provenanceMatches[0].id
+$provenanceZip = Join-Path $producerEvidence 'release-input-provenance.zip'
+$downloadHeaders = @{
+  Accept = 'application/vnd.github+json'
+  Authorization = "Bearer $(gh auth token)"
+  'X-GitHub-Api-Version' = '2022-11-28'
+  'User-Agent' = 'colayc-unitTest-release-evidence'
+}
+Invoke-WebRequest -Uri "https://api.github.com/repos/colayc/unitTest/actions/artifacts/$provenanceArtifactId/zip" -Headers $downloadHeaders -OutFile $provenanceZip
+Expand-Archive -LiteralPath $provenanceZip -DestinationPath $producerEvidence -Force
+Remove-Item -LiteralPath $provenanceZip -Force
 node tools/release/producer/provenance.mjs validate --manifest tools/release/producer/source-manifest.json --provenance "$producerEvidence/release-input-provenance.json"
 $provenance = Get-Content -LiteralPath "$producerEvidence/release-input-provenance.json" -Raw | ConvertFrom-Json
 $windowsSha = [string]$provenance.runtimes.windows.launcherSha256
