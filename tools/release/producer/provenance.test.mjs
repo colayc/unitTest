@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 import { validateSourceManifest } from "./source-manifest.mjs";
 import {
+  __testOnlyReleaseInputProvenance,
   createReleaseInputProvenance,
   validateReleaseInputProvenance,
 } from "./provenance.mjs";
@@ -19,6 +20,21 @@ const INVALID = "RELEASE_PRODUCER_PROVENANCE_INVALID";
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function modeTreeDigest(files) {
+  const hash = createHash("sha256");
+  for (const record of files) {
+    hash.update(record.path, "utf8");
+    hash.update("\0", "utf8");
+    hash.update(String(record.size), "utf8");
+    hash.update("\0", "utf8");
+    hash.update(record.sha256, "utf8");
+    hash.update("\0", "utf8");
+    hash.update(record.executable ? "1" : "0", "utf8");
+    hash.update("\0", "utf8");
+  }
+  return hash.digest("hex");
 }
 
 async function fixture(t) {
@@ -56,6 +72,7 @@ async function fixture(t) {
       { path: "resources/app/package.json", size: 2, sha256: "e".repeat(64), executable: false },
     ],
   };
+  linux.treeDigest = modeTreeDigest(modeInventory.files);
   const modeBytes = Buffer.from(`${JSON.stringify(modeInventory)}\n`);
   const producer = {
     repository: "colayc/unitTest",
@@ -112,6 +129,20 @@ function corrupt(value) {
   if (typeof value === "number") return 0;
   if (typeof value === "string") return "invalid";
   return null;
+}
+
+function replaceWithTogglingGetter(object, key, values) {
+  delete object[key];
+  let index = 0;
+  Object.defineProperty(object, key, {
+    enumerable: true,
+    get() {
+      const value = values[Math.min(index, values.length - 1)];
+      index += 1;
+      return value;
+    },
+  });
+  return object;
 }
 
 test("creation binds fixed source coordinates, summaries, and deterministic canonical records", async (t) => {
@@ -196,6 +227,23 @@ test("validation rejects null, non-enumerable, symbol, drift, and path-bearing p
   ]) assertInvalid(() => validateReleaseInputProvenance(candidate));
 });
 
+test("creation and validation reject toggling accessor properties at every public boundary", async (t) => {
+  const input = await fixture(t);
+  const valid = createReleaseInputProvenance(input.request);
+  const producer = structuredClone(input.request);
+  replaceWithTogglingGetter(producer.producer, "sourceCommit", [input.producer.sourceCommit, "attacker-data"]);
+  const summary = structuredClone(input.request);
+  replaceWithTogglingGetter(summary.windows, "fileCount", [2, 2]);
+  const request = structuredClone(input.request);
+  replaceWithTogglingGetter(request, "producer", [request.producer, request.producer]);
+  const provenance = structuredClone(valid);
+  replaceWithTogglingGetter(provenance.runtimes.linux, "modeInventorySha256", [valid.runtimes.linux.modeInventorySha256, "attacker-data"]);
+  for (const candidate of [producer, summary, request]) {
+    assertInvalid(() => createReleaseInputProvenance(candidate));
+  }
+  assertInvalid(() => validateReleaseInputProvenance(provenance));
+});
+
 test("CLI rehashes real mode and tool files, emits canonical bytes, validates manifest and never leaks paths", async (t) => {
   const input = await fixture(t);
   const manifest = join(input.parent, "manifest.json");
@@ -263,4 +311,123 @@ test("CLI rejects a manifest reached through a directory link or junction", asyn
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, new RegExp(INVALID));
   assert.equal(result.stderr.includes(resolve(input.parent)), false);
+});
+
+test("opt-in CLI creation binds mode file count, bytes, and exact tree digest", async (t) => {
+  const appimagetool = process.env.UNIT_TEST_IDE_REAL_APPIMAGETOOL;
+  if (!appimagetool) {
+    t.skip("UNIT_TEST_IDE_REAL_APPIMAGETOOL is not set");
+    return;
+  }
+  const input = await fixture(t);
+  assert.equal(basename(appimagetool), input.manifest.appimagetool.assetName);
+  assert.equal(Number((await lstat(appimagetool, { bigint: true })).size), input.manifest.appimagetool.size);
+  assert.equal(sha256(await readFile(appimagetool)), input.manifest.appimagetool.sha256);
+  const manifest = join(input.parent, "manifest.json");
+  const windows = join(input.parent, "windows.json");
+  const linux = join(input.parent, "linux.json");
+  const mode = join(input.parent, "mode.json");
+  const out = join(input.parent, "out", "provenance.json");
+  const baseArguments = [
+    script, "create", "--manifest", manifest, "--windows-summary", windows, "--linux-summary", linux,
+    "--linux-mode-inventory", mode, "--appimagetool", appimagetool, "--out", out,
+    "--producer-repository", input.producer.repository, "--producer-workflow-path", input.producer.workflowPath,
+    "--producer-source-commit", input.producer.sourceCommit, "--producer-event", input.producer.event,
+    "--producer-ref", input.producer.ref,
+  ];
+  await Promise.all([
+    writeFile(manifest, `${JSON.stringify(input.manifest)}\n`),
+    writeFile(windows, `${JSON.stringify(input.windows)}\n`),
+    writeFile(linux, `${JSON.stringify(input.linux)}\n`),
+  ]);
+  const outside = join(input.parent, "outside-output");
+  const linkedOutput = join(input.parent, "linked-output");
+  await mkdir(outside);
+  try {
+    await symlink(outside, linkedOutput, process.platform === "win32" ? "junction" : "dir");
+    const linkedArguments = [...baseArguments];
+    linkedArguments[linkedArguments.indexOf("--out") + 1] = join(linkedOutput, "provenance.json");
+    await writeFile(mode, `${JSON.stringify(input.modeInventory)}\n`);
+    const linkedResult = spawnSync(process.execPath, linkedArguments, { encoding: "utf8" });
+    assert.notEqual(linkedResult.status, 0);
+    assert.equal(linkedResult.stderr.includes(resolve(input.parent)), false);
+    await assert.rejects(() => readFile(join(outside, "provenance.json"), "utf8"));
+  } catch (error) {
+    if (error?.code !== "EPERM" && error?.code !== "EACCES") throw error;
+  }
+  for (const mutate of [
+    (value) => { value.files.push({ path: "z-extra", size: 1, sha256: "f".repeat(64), executable: false }); },
+    (value) => { value.files[1].size = 3; },
+    (value) => { value.files[1].sha256 = "f".repeat(64); },
+  ]) {
+    const candidate = structuredClone(input.modeInventory);
+    mutate(candidate);
+    await writeFile(mode, `${JSON.stringify(candidate)}\n`);
+    const result = spawnSync(process.execPath, baseArguments, { encoding: "utf8" });
+    assert.notEqual(result.status, 0, result.stderr);
+    assert.match(result.stderr, new RegExp(INVALID));
+    await assert.rejects(() => readFile(out, "utf8"));
+  }
+  await writeFile(mode, `${JSON.stringify(input.modeInventory)}\n`);
+  const result = spawnSync(process.execPath, baseArguments, { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  const bytes = await readFile(out, "utf8");
+  const provenance = JSON.parse(bytes);
+  assert.equal(bytes, `${JSON.stringify(provenance)}\n`);
+  assert.equal(bytes.includes("\r"), false);
+  assert.equal(bytes.includes(resolve(input.parent)), false);
+  const validate = spawnSync(process.execPath, [script, "validate", "--manifest", manifest, "--provenance", out], { encoding: "utf8" });
+  assert.equal(validate.status, 0, validate.stderr);
+  assert.equal(validate.stdout, "");
+  assert.equal(validate.stderr, "");
+});
+
+test("descriptor attestation rejects an ancestor swapped to a directory link after open", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("Windows prevents renaming an ancestor while its child descriptor is open");
+    return;
+  }
+  const input = await fixture(t);
+  const root = join(input.parent, "input");
+  const nested = join(root, "nested");
+  const moved = join(input.parent, "moved");
+  const file = join(nested, "payload.json");
+  await mkdir(nested, { recursive: true });
+  await writeFile(file, "payload\n");
+  let swapped = false;
+  await assert.rejects(
+    () => __testOnlyReleaseInputProvenance.hashRealFile(file, {
+      afterOpenSnapshot: async () => {
+        await rename(root, moved);
+        await symlink(moved, root, process.platform === "win32" ? "junction" : "dir");
+        swapped = true;
+      },
+    }),
+    (error) => error?.code === INVALID,
+  );
+  assert.equal(swapped, true);
+});
+
+test("canonical output refuses linked and swapped output ancestors without partial publication", async (t) => {
+  const input = await fixture(t);
+  const valid = createReleaseInputProvenance(input.request);
+  const outputDirectory = join(input.parent, "output");
+  const relocated = join(input.parent, "relocated");
+  const outside = join(input.parent, "outside");
+  const out = join(outputDirectory, "provenance.json");
+  await Promise.all([mkdir(outputDirectory), mkdir(outside)]);
+  let swapped = false;
+  await assert.rejects(
+    () => __testOnlyReleaseInputProvenance.writeCanonical(out, valid, {
+      beforePublish: async () => {
+        await rename(outputDirectory, relocated);
+        await symlink(outside, outputDirectory, process.platform === "win32" ? "junction" : "dir");
+        swapped = true;
+      },
+    }),
+    (error) => error?.code === INVALID,
+  );
+  assert.equal(swapped, true);
+  await assert.rejects(() => readFile(join(outside, "provenance.json"), "utf8"));
+  await assert.rejects(() => readFile(join(relocated, "provenance.json"), "utf8"));
 });

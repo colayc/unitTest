@@ -38,42 +38,90 @@ function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
 }
 
-function hasExactKeys(value, expected) {
+function snapshotExactObject(value, expected) {
   if (!isPlainObject(value)) return false;
   const keys = Reflect.ownKeys(value);
   if (keys.some((key) => typeof key !== "string")) return false;
   keys.sort();
-  return keys.length === expected.length && keys.every((key, index) => key === expected[index]);
+  if (keys.length !== expected.length || !keys.every((key, index) => key === expected[index])) return false;
+  const snapshot = {};
+  for (const key of expected) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor === undefined || !descriptor.enumerable || !Object.hasOwn(descriptor, "value")) return false;
+    snapshot[key] = descriptor.value;
+  }
+  return snapshot;
+}
+
+function snapshotDataTree(value) {
+  if (value === null || typeof value !== "object") return value;
+  if (!isPlainObject(value)) fail();
+  const keys = Reflect.ownKeys(value);
+  if (keys.some((key) => typeof key !== "string")) fail();
+  const snapshot = {};
+  for (const key of keys) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor === undefined || !descriptor.enumerable || !Object.hasOwn(descriptor, "value")) fail();
+    snapshot[key] = snapshotDataTree(descriptor.value);
+  }
+  return snapshot;
 }
 
 function positiveInteger(value) {
   return Number.isSafeInteger(value) && value > 0;
 }
 
+function modeTreeDigest(files) {
+  const hash = createHash("sha256");
+  for (const record of files) {
+    hash.update(record.path, "utf8");
+    hash.update("\0", "utf8");
+    hash.update(String(record.size), "utf8");
+    hash.update("\0", "utf8");
+    hash.update(record.sha256, "utf8");
+    hash.update("\0", "utf8");
+    hash.update(record.executable ? "1" : "0", "utf8");
+    hash.update("\0", "utf8");
+  }
+  return hash.digest("hex");
+}
+
+function bindModeInventoryToLinuxSummary(modeInventory, linux) {
+  let totalBytes = 0;
+  for (const record of modeInventory.files) {
+    if (!Number.isSafeInteger(totalBytes + record.size)) fail();
+    totalBytes += record.size;
+  }
+  if (modeInventory.files.length !== linux.fileCount
+    || totalBytes !== linux.totalBytes
+    || modeTreeDigest(modeInventory.files) !== linux.treeDigest) fail();
+}
+
 function validateProducer(value) {
-  if (!hasExactKeys(value, producerKeys)
-    || value.repository !== "colayc/unitTest"
-    || value.workflowPath !== ".github/workflows/release-inputs.yml"
-    || !commitPattern.test(value.sourceCommit)
-    || value.event !== "workflow_dispatch"
-    || value.ref !== "refs/heads/master") fail();
+  const producer = snapshotExactObject(value, producerKeys);
+  if (!producer || producer.repository !== "colayc/unitTest"
+    || producer.workflowPath !== ".github/workflows/release-inputs.yml"
+    || !commitPattern.test(producer.sourceCommit)
+    || producer.event !== "workflow_dispatch"
+    || producer.ref !== "refs/heads/master") fail();
   return {
-    repository: value.repository,
-    workflowPath: value.workflowPath,
-    sourceCommit: value.sourceCommit,
-    event: value.event,
-    ref: value.ref,
+    repository: producer.repository,
+    workflowPath: producer.workflowPath,
+    sourceCommit: producer.sourceCommit,
+    event: producer.event,
+    ref: producer.ref,
   };
 }
 
 function validateCodeOss(value, manifest) {
-  if (!hasExactKeys(value, codeOssKeys)) fail();
+  const codeOss = snapshotExactObject(value, codeOssKeys);
+  if (!codeOss) fail();
   const expected = manifest.codeOss;
-  if (value.repository !== expected.repository
-    || value.commit !== expected.commit
-    || value.version !== expected.version
-    || value.nodeVersion !== expected.nodeVersion
-    || value.yarnVersion !== expected.yarnVersion) fail();
+  if (codeOss.repository !== expected.repository
+    || codeOss.commit !== expected.commit
+    || codeOss.version !== expected.version
+    || codeOss.nodeVersion !== expected.nodeVersion
+    || codeOss.yarnVersion !== expected.yarnVersion) fail();
   return {
     repository: expected.repository,
     commit: expected.commit,
@@ -87,43 +135,44 @@ function validateSummary(value, platform) {
   const expectedKeys = platform === "linux" ? linuxKeys : windowsKeys;
   const expectedLauncher = platform === "linux" ? "code-oss" : "Code - OSS.exe";
   const expectedArtifact = platform === "linux" ? "code-oss-linux-x64" : "code-oss-windows-x64";
-  if (!hasExactKeys(value, expectedKeys)
-    || value.schemaVersion !== 1
-    || value.artifactName !== expectedArtifact
-    || value.launcherRelativePath !== expectedLauncher
-    || typeof value.launcherSha256 !== "string" || !digestPattern.test(value.launcherSha256)
-    || !positiveInteger(value.fileCount)
-    || !positiveInteger(value.totalBytes)
-    || typeof value.treeDigest !== "string" || !digestPattern.test(value.treeDigest)
-    || (platform === "linux" && (typeof value.modeInventorySha256 !== "string" || !digestPattern.test(value.modeInventorySha256)))) fail();
+  const summary = snapshotExactObject(value, expectedKeys);
+  if (!summary || summary.schemaVersion !== 1
+    || summary.artifactName !== expectedArtifact
+    || summary.launcherRelativePath !== expectedLauncher
+    || typeof summary.launcherSha256 !== "string" || !digestPattern.test(summary.launcherSha256)
+    || !positiveInteger(summary.fileCount)
+    || !positiveInteger(summary.totalBytes)
+    || typeof summary.treeDigest !== "string" || !digestPattern.test(summary.treeDigest)
+    || (platform === "linux" && (typeof summary.modeInventorySha256 !== "string" || !digestPattern.test(summary.modeInventorySha256)))) fail();
   return platform === "linux"
-    ? { schemaVersion: 1, artifactName: expectedArtifact, launcherRelativePath: expectedLauncher, launcherSha256: value.launcherSha256, fileCount: value.fileCount, totalBytes: value.totalBytes, treeDigest: value.treeDigest, modeInventorySha256: value.modeInventorySha256 }
-    : { schemaVersion: 1, artifactName: expectedArtifact, launcherRelativePath: expectedLauncher, launcherSha256: value.launcherSha256, fileCount: value.fileCount, totalBytes: value.totalBytes, treeDigest: value.treeDigest };
+    ? { schemaVersion: 1, artifactName: expectedArtifact, launcherRelativePath: expectedLauncher, launcherSha256: summary.launcherSha256, fileCount: summary.fileCount, totalBytes: summary.totalBytes, treeDigest: summary.treeDigest, modeInventorySha256: summary.modeInventorySha256 }
+    : { schemaVersion: 1, artifactName: expectedArtifact, launcherRelativePath: expectedLauncher, launcherSha256: summary.launcherSha256, fileCount: summary.fileCount, totalBytes: summary.totalBytes, treeDigest: summary.treeDigest };
 }
 
 function validateInputSummary(value, platform) {
   const expectedLauncher = platform === "linux" ? "code-oss" : "Code - OSS.exe";
-  if (!hasExactKeys(value, ["architecture", "fileCount", "launcherRelativePath", "launcherSha256", "platform", "schemaVersion", "totalBytes", "treeDigest"].sort())
-    || value.schemaVersion !== 1
-    || value.platform !== platform
-    || value.architecture !== "x64"
-    || value.launcherRelativePath !== expectedLauncher
-    || typeof value.launcherSha256 !== "string" || !digestPattern.test(value.launcherSha256)
-    || !positiveInteger(value.fileCount)
-    || !positiveInteger(value.totalBytes)
-    || typeof value.treeDigest !== "string" || !digestPattern.test(value.treeDigest)) fail();
-  return value;
+  const summary = snapshotExactObject(value, ["architecture", "fileCount", "launcherRelativePath", "launcherSha256", "platform", "schemaVersion", "totalBytes", "treeDigest"].sort());
+  if (!summary || summary.schemaVersion !== 1
+    || summary.platform !== platform
+    || summary.architecture !== "x64"
+    || summary.launcherRelativePath !== expectedLauncher
+    || typeof summary.launcherSha256 !== "string" || !digestPattern.test(summary.launcherSha256)
+    || !positiveInteger(summary.fileCount)
+    || !positiveInteger(summary.totalBytes)
+    || typeof summary.treeDigest !== "string" || !digestPattern.test(summary.treeDigest)) fail();
+  return summary;
 }
 
 function validateAppimagetool(value, manifest) {
-  if (!hasExactKeys(value, appimagetoolKeys)) fail();
+  const appimagetool = snapshotExactObject(value, appimagetoolKeys);
+  if (!appimagetool) fail();
   const expected = manifest.appimagetool;
-  if (value.repository !== expected.repository
-    || value.artifactName !== "appimagetool-linux-x64"
-    || value.assetId !== expected.assetId
-    || value.assetName !== expected.assetName
-    || value.size !== expected.size
-    || value.sha256 !== expected.sha256) fail();
+  if (appimagetool.repository !== expected.repository
+    || appimagetool.artifactName !== "appimagetool-linux-x64"
+    || appimagetool.assetId !== expected.assetId
+    || appimagetool.assetName !== expected.assetName
+    || appimagetool.size !== expected.size
+    || appimagetool.sha256 !== expected.sha256) fail();
   return {
     repository: expected.repository,
     artifactName: "appimagetool-linux-x64",
@@ -136,13 +185,13 @@ function validateAppimagetool(value, manifest) {
 
 function validateInputAppimagetool(value, manifest) {
   const expected = manifest.appimagetool;
-  if (!hasExactKeys(value, Object.keys(expected).sort())
-    || value.repository !== expected.repository
-    || value.assetId !== expected.assetId
-    || value.assetName !== expected.assetName
-    || value.size !== expected.size
-    || value.sha256 !== expected.sha256) fail();
-  return value;
+  const appimagetool = snapshotExactObject(value, Object.keys(expected).sort());
+  if (!appimagetool || appimagetool.repository !== expected.repository
+    || appimagetool.assetId !== expected.assetId
+    || appimagetool.assetName !== expected.assetName
+    || appimagetool.size !== expected.size
+    || appimagetool.sha256 !== expected.sha256) fail();
+  return appimagetool;
 }
 
 function deepFreeze(value) {
@@ -154,16 +203,19 @@ function deepFreeze(value) {
 }
 
 function normalizeProvenance(value, manifest) {
-  if (!hasExactKeys(value, provenanceKeys) || value.schemaVersion !== 1 || !hasExactKeys(value.runtimes, runtimesKeys)) fail();
+  const provenance = snapshotExactObject(value, provenanceKeys);
+  if (!provenance || provenance.schemaVersion !== 1) fail();
+  const runtimes = snapshotExactObject(provenance.runtimes, runtimesKeys);
+  if (!runtimes) fail();
   return deepFreeze({
     schemaVersion: 1,
-    producer: validateProducer(value.producer),
-    codeOss: validateCodeOss(value.codeOss, manifest),
+    producer: validateProducer(provenance.producer),
+    codeOss: validateCodeOss(provenance.codeOss, manifest),
     runtimes: {
-      windows: validateSummary(value.runtimes.windows, "windows"),
-      linux: validateSummary(value.runtimes.linux, "linux"),
+      windows: validateSummary(runtimes.windows, "windows"),
+      linux: validateSummary(runtimes.linux, "linux"),
     },
-    appimagetool: validateAppimagetool(value.appimagetool, manifest),
+    appimagetool: validateAppimagetool(provenance.appimagetool, manifest),
   });
 }
 
@@ -172,20 +224,21 @@ export function validateReleaseInputProvenance(value) {
 }
 
 export function createReleaseInputProvenance(request) {
-  if (!hasExactKeys(request, creationKeys)) fail();
+  const input = snapshotExactObject(request, creationKeys);
+  if (!input) fail();
   let manifest;
   try {
-    manifest = validateSourceManifest(request.sourceManifest);
+    manifest = validateSourceManifest(snapshotDataTree(input.sourceManifest));
   } catch {
     fail();
   }
-  const windows = validateInputSummary(request.windows, "windows");
-  const linux = validateInputSummary(request.linux, "linux");
-  validateInputAppimagetool(request.appimagetool, manifest);
-  if (typeof request.linuxModeInventorySha256 !== "string" || !digestPattern.test(request.linuxModeInventorySha256)) fail();
+  const windows = validateInputSummary(input.windows, "windows");
+  const linux = validateInputSummary(input.linux, "linux");
+  const appimagetool = validateInputAppimagetool(input.appimagetool, manifest);
+  if (typeof input.linuxModeInventorySha256 !== "string" || !digestPattern.test(input.linuxModeInventorySha256)) fail();
   const candidate = {
     schemaVersion: 1,
-    producer: request.producer,
+    producer: input.producer,
     codeOss: {
       repository: manifest.codeOss.repository,
       commit: manifest.codeOss.commit,
@@ -211,16 +264,16 @@ export function createReleaseInputProvenance(request) {
         fileCount: linux.fileCount,
         totalBytes: linux.totalBytes,
         treeDigest: linux.treeDigest,
-        modeInventorySha256: request.linuxModeInventorySha256,
+        modeInventorySha256: input.linuxModeInventorySha256,
       },
     },
     appimagetool: {
-      repository: request.appimagetool.repository,
+      repository: appimagetool.repository,
       artifactName: "appimagetool-linux-x64",
-      assetId: request.appimagetool.assetId,
-      assetName: request.appimagetool.assetName,
-      size: request.appimagetool.size,
-      sha256: request.appimagetool.sha256,
+      assetId: appimagetool.assetId,
+      assetName: appimagetool.assetName,
+      size: appimagetool.size,
+      sha256: appimagetool.sha256,
     },
   };
   return normalizeProvenance(candidate, manifest);
@@ -229,6 +282,12 @@ export function createReleaseInputProvenance(request) {
 function sameSnapshot(left, right) {
   return left.isFile() && right.isFile() && left.dev === right.dev && left.ino === right.ino
     && left.size === right.size && left.mode === right.mode && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
+}
+
+function sameNode(left, right) {
+  return left.dev === right.dev && left.ino === right.ino && left.mode === right.mode
+    && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs
+    && left.isFile() === right.isFile() && left.isDirectory() === right.isDirectory();
 }
 
 async function rejectWindowsReparsePoints(path) {
@@ -255,19 +314,29 @@ async function assertRealFilePath(path) {
     await rejectWindowsReparsePoints(absolute);
     const rootInfo = await lstat(root, { bigint: true });
     if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) fail("attested file is not real");
+    const ancestors = [{ path: root, info: rootInfo }];
     for (const component of absolute.slice(root.length).split(/[\\/]+/u).filter(Boolean)) {
       current = join(current, component);
       const info = await lstat(current, { bigint: true });
       if (info.isSymbolicLink() || (!info.isFile() && current === absolute) || (!info.isDirectory() && current !== absolute)) fail("attested file is not real");
+      if (current !== absolute) ancestors.push({ path: current, info });
     }
-    return { absolute, info: await lstat(absolute, { bigint: true }) };
+    return { absolute, info: await lstat(absolute, { bigint: true }), ancestors };
   } catch (error) {
     if (error?.code === INVALID) throw error;
     fail("attested file cannot be read");
   }
 }
 
-async function hashRealFile(path) {
+async function assertUnchangedAncestors(checked) {
+  await rejectWindowsReparsePoints(checked.absolute);
+  for (const ancestor of checked.ancestors) {
+    const current = await lstat(ancestor.path, { bigint: true });
+    if (current.isSymbolicLink() || !current.isDirectory() || !sameNode(ancestor.info, current)) fail("attested input ancestor changed");
+  }
+}
+
+async function hashRealFile(path, hooks = {}) {
   const checked = await assertRealFilePath(path);
   if (!checked.info.isFile() || checked.info.size < 0n || checked.info.size > BigInt(Number.MAX_SAFE_INTEGER)) fail("attested file is invalid");
   let handle;
@@ -275,6 +344,7 @@ async function hashRealFile(path) {
     handle = await open(checked.absolute, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
     const before = await handle.stat({ bigint: true });
     if (!sameSnapshot(checked.info, before)) fail("attested file changed");
+    await hooks.afterOpenSnapshot?.();
     const hash = createHash("sha256");
     let byteCount = 0;
     const chunks = [];
@@ -286,6 +356,7 @@ async function hashRealFile(path) {
     });
     const after = await handle.stat({ bigint: true });
     const pathAfter = await lstat(checked.absolute, { bigint: true });
+    await assertUnchangedAncestors(checked);
     if (!sameSnapshot(checked.info, after) || !sameSnapshot(before, after) || !sameSnapshot(checked.info, pathAfter) || byteCount !== Number(before.size)) fail("attested file changed");
     return { sha256: hash.digest("hex"), size: byteCount, bytes: Buffer.concat(chunks) };
   } catch (error) {
@@ -294,6 +365,58 @@ async function hashRealFile(path) {
   } finally {
     await handle?.close().catch(() => {});
   }
+}
+
+async function snapshotRealOutputDirectory(path) {
+  const absolute = resolve(path);
+  const missing = [];
+  let current = absolute;
+  while (true) {
+    try {
+      const info = await lstat(current, { bigint: true });
+      if (info.isSymbolicLink() || !info.isDirectory()) fail("output directory is invalid");
+      break;
+    } catch (error) {
+      if (error?.code === INVALID) throw error;
+      if (error?.code !== "ENOENT") fail("output directory is invalid");
+      const parent = dirname(current);
+      if (parent === current) fail("output directory is invalid");
+      missing.push(current);
+      current = parent;
+    }
+  }
+  for (const directory of missing.reverse()) {
+    await mkdir(directory);
+    const info = await lstat(directory, { bigint: true });
+    if (info.isSymbolicLink() || !info.isDirectory()) fail("output directory is invalid");
+  }
+  const root = parse(absolute).root;
+  const ancestors = [];
+  current = root;
+  await rejectWindowsReparsePoints(absolute);
+  for (const component of absolute.slice(root.length).split(/[\\/]+/u).filter(Boolean)) {
+    current = join(current, component);
+    const info = await lstat(current, { bigint: true });
+    if (info.isSymbolicLink() || !info.isDirectory()) fail("output directory is invalid");
+    ancestors.push({ path: current, info });
+  }
+  return { absolute, ancestors };
+}
+
+async function assertUnchangedOutputDirectory(snapshot) {
+  await rejectWindowsReparsePoints(snapshot.absolute);
+  for (const ancestor of snapshot.ancestors) {
+    const current = await lstat(ancestor.path, { bigint: true });
+    if (current.isSymbolicLink() || !current.isDirectory() || current.dev !== ancestor.info.dev || current.ino !== ancestor.info.ino || current.mode !== ancestor.info.mode) fail("output ancestor changed");
+  }
+}
+
+function identity(info) {
+  return info === undefined ? undefined : { dev: info.dev, ino: info.ino };
+}
+
+function sameIdentity(left, right) {
+  return left === undefined ? right === undefined : right !== undefined && left.dev === right.dev && left.ino === right.ino;
 }
 
 async function loadJsonFile(path) {
@@ -317,26 +440,58 @@ function parseCli(argv) {
   const expected = command === "create"
     ? ["--appimagetool", "--linux-mode-inventory", "--linux-summary", "--manifest", "--out", "--producer-event", "--producer-ref", "--producer-repository", "--producer-source-commit", "--producer-workflow-path", "--windows-summary"].sort()
     : command === "validate" ? ["--manifest", "--provenance"] : [];
-  if (!hasExactKeys(options, expected)) fail();
+  if (!snapshotExactObject(options, expected)) fail();
   return { command, options };
 }
 
-async function writeCanonical(path, value) {
+async function writeCanonical(path, value, hooks = {}) {
   if (typeof path !== "string" || path.length === 0) fail();
   const target = resolve(path);
   const temporary = `${target}.tmp-${process.pid}-${Date.now()}`;
+  let directory;
   try {
-    await mkdir(dirname(target), { recursive: true });
+    directory = await snapshotRealOutputDirectory(dirname(target));
     const existing = await lstat(target).catch((error) => error?.code === "ENOENT" ? undefined : Promise.reject(error));
     if (existing?.isSymbolicLink() || (existing && !existing.isFile())) fail();
+    const expected = identity(existing);
+    await hooks.beforeStage?.();
+    await assertUnchangedOutputDirectory(directory);
     await writeFile(temporary, `${JSON.stringify(value)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    const staged = await lstat(temporary, { bigint: true });
+    if (staged.isSymbolicLink() || !staged.isFile()) fail();
+    await assertUnchangedOutputDirectory(directory);
+    const current = await lstat(target).catch((error) => error?.code === "ENOENT" ? undefined : Promise.reject(error));
+    if (current?.isSymbolicLink() || (current && !current.isFile()) || !sameIdentity(expected, identity(current))) fail();
+    await hooks.beforePublish?.();
+    await assertUnchangedOutputDirectory(directory);
+    const publishTarget = await lstat(target).catch((error) => error?.code === "ENOENT" ? undefined : Promise.reject(error));
+    if (publishTarget?.isSymbolicLink() || (publishTarget && !publishTarget.isFile()) || !sameIdentity(expected, identity(publishTarget))) fail();
     await rename(temporary, target);
+    await assertUnchangedOutputDirectory(directory);
+    const published = await lstat(target, { bigint: true });
+    if (published.isSymbolicLink() || !published.isFile() || !sameIdentity(identity(staged), identity(published))) fail();
   } catch (error) {
-    await rm(temporary, { force: true }).catch(() => {});
+    if (directory && await assertUnchangedOutputDirectory(directory).then(() => true, () => false)) {
+      await rm(temporary, { force: true }).catch(() => {});
+    }
     if (error?.code === INVALID) throw error;
     fail();
   }
 }
+
+function closedHooks(value, keys) {
+  if (!isPlainObject(value) || Reflect.ownKeys(value).some((key) => typeof key !== "string" || !keys.includes(key) || typeof value[key] !== "function")) fail();
+  return value;
+}
+
+export const __testOnlyReleaseInputProvenance = Object.freeze({
+  hashRealFile(path, hooks) {
+    return hashRealFile(path, closedHooks(hooks, ["afterOpenSnapshot"]));
+  },
+  writeCanonical(path, value, hooks) {
+    return writeCanonical(path, value, closedHooks(hooks, ["beforePublish", "beforeStage"]));
+  },
+});
 
 async function main(argv) {
   const { command, options } = parseCli(argv);
@@ -367,6 +522,7 @@ async function main(argv) {
   } catch {
     fail();
   }
+  bindModeInventoryToLinuxSummary(modeInventoryFile.value, linux);
   const provenance = createReleaseInputProvenance({
     sourceManifest: manifest,
     producer: {
