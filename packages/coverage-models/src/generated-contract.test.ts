@@ -43,7 +43,7 @@ test("root scripts gate Coverage generation drift and regressions", async () => 
   );
   assert.equal(
     root.scripts.test,
-    "pnpm run test:coverage-gen && pnpm run test:cmake-bundle && pnpm run test:coverage-bundle && pnpm run test:workspace && pnpm -r --if-present test && pnpm run test:go"
+    "pnpm run test:release-producer && pnpm run test:coverage-gen && pnpm run test:cmake-bundle && pnpm run test:coverage-bundle && pnpm run test:workspace && pnpm -r --if-present test && pnpm run test:go"
   );
   assert.equal(
     root.scripts.verify,
