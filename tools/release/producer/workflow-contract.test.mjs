@@ -12,6 +12,8 @@ const workflow = await readFile(workflowPath, "utf8").then(
     throw error;
   },
 );
+const foundationWorkflow = (await readFile(resolve(".github/workflows/foundation.yml"), "utf8"))
+  .replace(/\r\n?/gu, "\n");
 const packageJson = JSON.parse(await readFile(resolve("package.json"), "utf8"));
 
 const actionPins = Object.freeze({
@@ -348,8 +350,8 @@ $result = [ordered]@{
 [Console]::Out.Write(($result | ConvertTo-Json -Compress))
 `;
 
-function topLevelSection(name) {
-  const lines = workflow.split("\n");
+function topLevelSectionFrom(source, name) {
+  const lines = source.split("\n");
   const start = lines.findIndex((line) => line === `${name}:`);
   assert.notEqual(start, -1, `missing top-level ${name} section`);
   let end = lines.length;
@@ -362,10 +364,18 @@ function topLevelSection(name) {
   return lines.slice(start, end).join("\n").trimEnd();
 }
 
+function topLevelSection(name) {
+  return topLevelSectionFrom(workflow, name);
+}
+
 const jobsSource = topLevelSection("jobs");
 
 function jobBlock(name) {
-  const lines = jobsSource.split("\n");
+  return jobBlockFrom(jobsSource, name);
+}
+
+function jobBlockFrom(jobs, name) {
+  const lines = jobs.split("\n");
   const start = lines.findIndex((line) => line === `  ${name}:`);
   assert.notEqual(start, -1, `missing ${name} job`);
   let end = lines.length;
@@ -378,19 +388,45 @@ function jobBlock(name) {
   return lines.slice(start, end).join("\n");
 }
 
+function foundationJobBlock(name) {
+  return jobBlockFrom(topLevelSectionFrom(foundationWorkflow, "jobs"), name);
+}
+
 function stepBlocks(job) {
   const lines = job.split("\n");
   const starts = [];
   for (let index = 0; index < lines.length; index += 1) {
-    if (/^      - (?:name|uses):/u.test(lines[index])) starts.push(index);
+    if (/^      - (?:id|name|uses):/u.test(lines[index])) starts.push(index);
   }
   return starts.map((start, index) => lines.slice(start, starts[index + 1] ?? lines.length).join("\n"));
+}
+
+function stepHeaderValue(step, key) {
+  return step.match(new RegExp(`^      - ${key}:\\s*([^\\n#]+?)\\s*(?:#.*)?$`, "mu"))?.[1];
 }
 
 function namedStep(job, name) {
   const step = stepBlocks(job).find((candidate) => candidate.startsWith(`      - name: ${name}\n`));
   assert.ok(step, `missing step: ${name}`);
   return step;
+}
+
+function identifiedStep(job, id) {
+  const step = stepBlocks(job).find((candidate) => candidate.match(new RegExp(`^      - id: ${id}$`, "mu")));
+  assert.ok(step, `missing step id: ${id}`);
+  return step;
+}
+
+function directMappingValue(source, indentation, key) {
+  const prefix = " ".repeat(indentation);
+  return source.match(new RegExp(`^${prefix}${key}:\\s*([^\\n#]+?)\\s*(?:#.*)?$`, "mu"))?.[1];
+}
+
+function directList(source, indentation, key) {
+  const prefix = " ".repeat(indentation);
+  const match = source.match(new RegExp(`^${prefix}${key}:\\n((?:${prefix}  - [^\\n]+\\n?)+)`, "mu"));
+  assert.ok(match, `missing ${key} list`);
+  return [...match[1].matchAll(new RegExp(`^${prefix}  - ([^\\n]+)$`, "gmu"))].map((entry) => entry[1]);
 }
 
 function assertOrdered(source, labels) {
@@ -839,4 +875,117 @@ test("package scripts run the closed producer suite early and enumerate every pr
     "node --test tools/release/producer/source-manifest.test.mjs tools/release/producer/runtime-inventory.test.mjs tools/release/producer/provenance.test.mjs tools/release/producer/trusted-run.test.mjs tools/release/producer/workflow-contract.test.mjs",
   );
   assert.match(packageJson.scripts.test, /^pnpm run test:release-producer && /u);
+});
+
+test("foundation validates producer identity before downloading one exact provenance artifact", () => {
+  const trust = foundationJobBlock("verify-release-input-run");
+  const packageWindows = foundationJobBlock("package-windows");
+  const packageLinux = foundationJobBlock("package-linux");
+  const predicate = "${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') }}";
+  assert.equal(directMappingValue(trust, 4, "if"), predicate);
+  assert.equal(directMappingValue(packageWindows, 4, "if"), predicate);
+  assert.equal(directMappingValue(packageLinux, 4, "if"), predicate);
+
+  assert.deepEqual(jobOutputKeys(trust), [
+    "run_id",
+    "windows_launcher_sha256",
+    "linux_launcher_sha256",
+    "appimagetool_sha256",
+  ]);
+  for (const key of jobOutputKeys(trust)) {
+    assert.equal(
+      directMappingValue(trust, 6, key),
+      `\${{ steps.verify-provenance.outputs.${key} }}`,
+      `${key} must come from the final validation step`,
+    );
+  }
+
+  const checkout = stepBlocks(trust)[0];
+  assert.deepEqual(
+    stepBlocks(trust).map((step) => stepHeaderValue(step, "uses") ?? directMappingValue(step, 8, "uses")).filter(Boolean),
+    [
+      `actions/checkout@${actionPins["actions/checkout"]}`,
+      `actions/setup-node@${actionPins["actions/setup-node"]}`,
+      `actions/download-artifact@${actionPins["actions/download-artifact"]}`,
+    ],
+  );
+  assert.equal(stepHeaderValue(checkout, "uses"), `actions/checkout@${actionPins["actions/checkout"]}`);
+  assert.equal(inputValue(checkout, "ref"), "${{ github.sha }}");
+  const setupNode = stepBlocks(trust).find((step) => stepHeaderValue(step, "uses")?.startsWith("actions/setup-node@"));
+  assert.ok(setupNode, "trust job must install Node through a real step");
+  assert.equal(stepHeaderValue(setupNode, "uses"), `actions/setup-node@${actionPins["actions/setup-node"]}`);
+  assert.equal(inputValue(setupNode, "node-version"), "24.18.0");
+
+  const select = namedStep(trust, "Select release input coordinates");
+  assert.deepEqual([...select.matchAll(/^          ([A-Z0-9_]+):/gmu)].map((match) => match[1]), [
+    "RELEASE_INPUT_RUN_ID",
+    "WINDOWS_LAUNCHER_SHA256",
+    "LINUX_LAUNCHER_SHA256",
+    "APPIMAGETOOL_SHA256",
+  ]);
+  assert.match(select, /^          RELEASE_INPUT_RUN_ID: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.release_input_run_id \|\| vars\.RELEASE_INPUT_RUN_ID \}\}$/mu);
+  assert.match(select, /^          WINDOWS_LAUNCHER_SHA256: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.windows_code_oss_sha256 \|\| vars\.RELEASE_CODE_OSS_WINDOWS_SHA256 \}\}$/mu);
+  assert.match(select, /^          LINUX_LAUNCHER_SHA256: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.linux_code_oss_sha256 \|\| vars\.RELEASE_CODE_OSS_LINUX_SHA256 \}\}$/mu);
+  assert.match(select, /^          APPIMAGETOOL_SHA256: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.linux_appimagetool_sha256 \|\| vars\.RELEASE_APPIMAGETOOL_LINUX_SHA256 \}\}$/mu);
+  const selectRun = select.match(/^        run: \|\n([\s\S]*)$/mu)?.[1] ?? "";
+  assert.match(selectRun, /^          \[\[ "\$RELEASE_INPUT_RUN_ID" =~ \^\[1-9\]\[0-9\]\*\$ \]\]/mu);
+  assert.equal((selectRun.match(/^          \[\[ "\$(?:WINDOWS_LAUNCHER_SHA256|LINUX_LAUNCHER_SHA256|APPIMAGETOOL_SHA256)" =~ \^\[0-9a-f\]\{64\}\$ \]\]/gmu) ?? []).length, 3);
+  assertOrdered(selectRun, [
+    '[[ "$RELEASE_INPUT_RUN_ID"',
+    '[[ "$WINDOWS_LAUNCHER_SHA256"',
+    '[[ "$LINUX_LAUNCHER_SHA256"',
+    '[[ "$APPIMAGETOOL_SHA256"',
+    '} >> "$GITHUB_ENV"',
+  ]);
+
+  const api = namedStep(trust, "Fetch trusted producer run metadata");
+  assert.equal(directMappingValue(api, 10, "GH_TOKEN"), "${{ github.token }}");
+  assert.match(api, /^          gh api "repos\/colayc\/unitTest\/actions\/runs\/\$RELEASE_INPUT_RUN_ID" > \.release\/producer-run\.json$/mu);
+  assert.doesNotMatch(api, /(?:set -x|echo .*GH_TOKEN|cat \.release\/producer-run\.json)/u);
+
+  const precheck = identifiedStep(trust, "precheck");
+  const provenanceDownload = namedStep(trust, "Download trusted release input provenance");
+  const finalValidation = identifiedStep(trust, "verify-provenance");
+  assertOrdered(trust, [
+    "name: Fetch trusted producer run metadata",
+    "id: precheck",
+    "name: Download trusted release input provenance",
+    "id: verify-provenance",
+  ]);
+  assert.match(precheck, /^          node tools\/release\/producer\/trusted-run\.mjs validate-run \\\n            --run-json \.release\/producer-run\.json \\\n            --run-id "\$RELEASE_INPUT_RUN_ID" \\\n            --consumer-commit "\$GITHUB_SHA" \\\n            --github-output "\$GITHUB_OUTPUT"$/mu);
+  assert.equal(directMappingValue(provenanceDownload, 8, "uses"), `actions/download-artifact@${actionPins["actions/download-artifact"]}`);
+  assert.equal(inputValue(provenanceDownload, "name"), "release-input-provenance");
+  assert.equal(inputValue(provenanceDownload, "path"), ".release/provenance");
+  assert.equal(inputValue(provenanceDownload, "run-id"), "${{ steps.precheck.outputs.run_id }}");
+  assert.equal(inputValue(provenanceDownload, "github-token"), "${{ github.token }}");
+  assert.match(finalValidation, /^          mapfile -d '' -t provenance_entries < <\(find \.release\/provenance -mindepth 1 -maxdepth 1 -printf '%f\\0' \| LC_ALL=C sort -z\)$/mu);
+  assert.match(finalValidation, /release-input-provenance\.json/u);
+  assert.match(finalValidation, /^          node tools\/release\/producer\/trusted-run\.mjs validate-provenance \\/mu);
+  for (const option of ["--windows-launcher-sha256", "--linux-launcher-sha256", "--appimagetool-sha256"]) {
+    assert.match(finalValidation, new RegExp(`${option} "\\$[A-Z0-9_]+"`, "u"));
+  }
+  assert.equal((trust.match(/GITHUB_OUTPUT/gu) ?? []).length, 2, "only trusted-run may append step outputs");
+  assert.equal((trust.match(/GH_TOKEN/gu) ?? []).length, 1, "GH_TOKEN must exist only as the gh step environment key");
+});
+
+test("foundation package jobs consume only the trust job closed coordinates", () => {
+  const rawCoordinates = /(?:inputs\.(?:release_input_run_id|windows_code_oss_sha256|linux_code_oss_sha256|linux_appimagetool_sha256)|vars\.(?:RELEASE_INPUT_RUN_ID|RELEASE_CODE_OSS_[A-Z_]+|RELEASE_APPIMAGETOOL_[A-Z_]+))/u;
+  const trust = foundationJobBlock("verify-release-input-run");
+  assert.doesNotMatch(foundationWorkflow.replace(trust, ""), rawCoordinates, "raw coordinates must occur only in the trust job");
+  for (const [name, expectedEnv] of [
+    ["package-windows", {
+      RELEASE_INPUT_RUN_ID: "${{ needs.verify-release-input-run.outputs.run_id }}",
+      CODE_OSS_SHA256: "${{ needs.verify-release-input-run.outputs.windows_launcher_sha256 }}",
+    }],
+    ["package-linux", {
+      RELEASE_INPUT_RUN_ID: "${{ needs.verify-release-input-run.outputs.run_id }}",
+      CODE_OSS_SHA256: "${{ needs.verify-release-input-run.outputs.linux_launcher_sha256 }}",
+      APPIMAGETOOL_SHA256: "${{ needs.verify-release-input-run.outputs.appimagetool_sha256 }}",
+    }],
+  ]) {
+    const job = foundationJobBlock(name);
+    assert.deepEqual(directList(job, 4, "needs"), ["verify-windows", "verify-linux", "verify-release-input-run"]);
+    assert.doesNotMatch(job, rawCoordinates, `${name} must not read unvalidated coordinates`);
+    for (const [key, value] of Object.entries(expectedEnv)) assert.equal(directMappingValue(job, 6, key), value);
+  }
 });
