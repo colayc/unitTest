@@ -306,6 +306,17 @@ $assignments = @($ast.FindAll({ param($node) Test-InstallationAssignment $node }
 $instancesGuards = @($ast.FindAll({ param($node) Test-InstancesGuard $node }, $true))
 $installationGuards = @($ast.FindAll({ param($node) Test-InstallationGuard $node }, $true))
 $linearPreflightCount = 0
+$earlySuccessTerminationCount = 0
+if ($instancesGuards.Count -eq 1) {
+  $tripleStart = $instancesGuards[0].Extent.StartOffset
+  $earlySuccessTerminationCount = @($ast.EndBlock.FindAll({
+    param($node)
+    (
+      $node -is [System.Management.Automation.Language.ReturnStatementAst] -or
+      $node -is [System.Management.Automation.Language.ExitStatementAst]
+    ) -and $node.Extent.StartOffset -lt $tripleStart
+  }, $true)).Count
+}
 if ($assignments.Count -eq 1 -and $instancesGuards.Count -eq 1 -and $installationGuards.Count -eq 1) {
   $block = $assignments[0].Parent
   if (
@@ -332,6 +343,7 @@ $result = [ordered]@{
   instancesGuardStatementCount = $instancesGuards.Count
   installationGuardStatementCount = $installationGuards.Count
   linearPreflightCount = $linearPreflightCount
+  earlySuccessTerminationCount = $earlySuccessTerminationCount
 }
 [Console]::Out.Write(($result | ConvertTo-Json -Compress))
 `;
@@ -438,6 +450,7 @@ function assertExecutableVisualStudioInstallationGuard(inspection) {
   assert.equal(inspection.assignmentStatementCount, 1, "Visual Studio installation Get-Item assignment must be one exact statement");
   assert.equal(inspection.installationGuardStatementCount, 1, "Visual Studio installation guard must be one exact if statement with a direct throw $failure");
   assert.equal(inspection.linearPreflightCount, 1, "Visual Studio instance guard, installation assignment, and installation guard must share one executable top-level linear block");
+  assert.equal(inspection.earlySuccessTerminationCount, 0, "Visual Studio preflight must not contain return or exit before its linear validation triple");
 }
 
 function assertVisualStudioPreflightContract(preflight) {
@@ -460,9 +473,25 @@ const visualStudioInstallationGuard = [
   "              }",
 ].join("\n");
 
+const visualStudioInstancesGuard = [
+  "              if ($instances.Count -ne 1 `",
+  "                -or $instances[0].installationVersion -isnot [string] `",
+  "                -or $instances[0].installationVersion -cnotmatch '^17\\.' `",
+  "                -or $instances[0].installationPath -isnot [string]) {",
+  "                throw $failure",
+  "              }",
+].join("\n");
+
+const visualStudioPreflightLinearTriple = `${visualStudioInstancesGuard}\n${visualStudioInstallationGuard}`;
+
 function replaceVisualStudioInstallationGuard(preflight, replacement) {
   assert.ok(preflight.includes(visualStudioInstallationGuard), "fixture must contain the executable Visual Studio installation guard");
   return preflight.replace(visualStudioInstallationGuard, replacement);
+}
+
+function replaceVisualStudioPreflightLinearTriple(preflight, replacement) {
+  assert.ok(preflight.includes(visualStudioPreflightLinearTriple), "fixture must contain the executable Visual Studio preflight linear triple");
+  return preflight.replace(visualStudioPreflightLinearTriple, replacement);
 }
 
 test("workflow exposes only an input-free manual trigger and minimum read permissions", () => {
@@ -645,6 +674,28 @@ test("Visual Studio preflight contract rejects an installation guard whose throw
   const inspection = inspectVisualStudioPreflightAst(mutated);
   assert.equal(inspection.parseErrorCount, 0, "unreachable throw mutation must remain valid PowerShell");
   assert.throws(() => assertExecutableVisualStudioInstallationGuard(inspection), /installation guard must be one exact if statement/u);
+});
+
+test("Visual Studio preflight contract rejects return before its linear validation triple", () => {
+  const preflight = namedStep(jobBlock("build-windows"), "Validate Visual Studio 2022 toolchain");
+  const mutated = replaceVisualStudioPreflightLinearTriple(preflight, [
+    "              return",
+    visualStudioPreflightLinearTriple,
+  ].join("\n"));
+  const inspection = inspectVisualStudioPreflightAst(mutated);
+  assert.equal(inspection.parseErrorCount, 0, "early return mutation must remain valid PowerShell");
+  assert.throws(() => assertExecutableVisualStudioInstallationGuard(inspection), /must not contain return or exit before/u);
+});
+
+test("Visual Studio preflight contract rejects successful exit before its linear validation triple", () => {
+  const preflight = namedStep(jobBlock("build-windows"), "Validate Visual Studio 2022 toolchain");
+  const mutated = replaceVisualStudioPreflightLinearTriple(preflight, [
+    "              exit 0",
+    visualStudioPreflightLinearTriple,
+  ].join("\n"));
+  const inspection = inspectVisualStudioPreflightAst(mutated);
+  assert.equal(inspection.parseErrorCount, 0, "successful exit mutation must remain valid PowerShell");
+  assert.throws(() => assertExecutableVisualStudioInstallationGuard(inspection), /must not contain return or exit before/u);
 });
 
 test("Linux creates and validates modes, bounds launcher execution, inventories, and stages exact roots", () => {
