@@ -1,5 +1,5 @@
 import { lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, parse, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const CONFIG_INVALID = "RELEASE_PRODUCER_CONFIG_INVALID";
@@ -94,14 +94,33 @@ export function validateSourceManifest(value) {
   return frozenExpectedManifest();
 }
 
-async function realFile(path, errorCode, message) {
+async function realPathInfo(path, errorCode, message) {
   try {
-    const parent = await lstat(dirname(path));
-    const info = await lstat(path);
-    if (parent.isSymbolicLink() || !info.isFile() || info.isSymbolicLink()) fail(errorCode, message);
-    return await readFile(path, "utf8");
+    const absolutePath = resolve(path);
+    const anchor = parse(absolutePath).root;
+    const components = absolutePath.slice(anchor.length).split(/[\\/]+/u).filter(Boolean);
+    let current = anchor;
+    let info = await lstat(current);
+    if (!info.isDirectory() || info.isSymbolicLink()) fail(errorCode, message);
+    for (let index = 0; index < components.length; index += 1) {
+      current = join(current, components[index]);
+      info = await lstat(current);
+      const leaf = index === components.length - 1;
+      if (info.isSymbolicLink() || (!leaf && !info.isDirectory())) fail(errorCode, message);
+    }
+    return info;
   } catch (error) {
     if (error instanceof ReleaseProducerError) throw error;
+    fail(errorCode, message);
+  }
+}
+
+async function realFile(path, errorCode, message) {
+  const info = await realPathInfo(path, errorCode, message);
+  if (!info.isFile()) fail(errorCode, message);
+  try {
+    return await readFile(path, "utf8");
+  } catch {
     fail(errorCode, message);
   }
 }
@@ -251,17 +270,26 @@ function buildTargetLoopBody(tokens) {
 function bodyDefinesTrustedGulpRelationship(body) {
   const expectedOutputTemplate = "VSCode${dashed(platform)}${dashed(arch)}";
   const expectedTargetTemplate = "vscode${dashed(platform)}${dashed(arch)}${dashed(minified)}";
-  let outputDefined = false;
-  let targetDefined = false;
-  let outputPackaged = false;
+  let platformBinding = -1;
+  let archBinding = -1;
+  let outputDefinition = -1;
+  let targetDefinition = -1;
+  let outputPackaged = -1;
   for (let index = 0; index < body.length; index += 1) {
+    if (hasSequence(body.slice(index), ["const", "platform", "=", "buildTarget", ".", "platform"])) platformBinding = index;
+    if (hasSequence(body.slice(index), ["const", "arch", "=", "buildTarget", ".", "arch"])) archBinding = index;
     if (hasSequence(body.slice(index), ["const", "destinationFolderName", "="])
-      && body[index + 3]?.type === "template" && body[index + 3].value === expectedOutputTemplate) outputDefined = true;
+      && body[index + 3]?.type === "template" && body[index + 3].value === expectedOutputTemplate) outputDefinition = index;
     if (hasSequence(body.slice(index), ["const", "vscodeTask", "=", "task", ".", "define", "("])
-      && body[index + 7]?.type === "template" && body[index + 7].value === expectedTargetTemplate) targetDefined = true;
-    if (hasSequence(body.slice(index), ["packageTask", "(", "platform", ",", "arch", ",", "sourceFolderName", ",", "destinationFolderName", ",", "opts", ")"])) outputPackaged = true;
+      && body[index + 7]?.type === "template" && body[index + 7].value === expectedTargetTemplate) targetDefinition = index;
+    if (hasSequence(body.slice(index), ["packageTask", "(", "platform", ",", "arch", ",", "sourceFolderName", ",", "destinationFolderName", ",", "opts", ")"])) outputPackaged = index;
   }
-  return outputDefined && targetDefined && outputPackaged;
+  const bindingsEnd = Math.max(platformBinding, archBinding);
+  return platformBinding !== -1
+    && archBinding !== -1
+    && outputDefinition > bindingsEnd
+    && targetDefinition > bindingsEnd
+    && outputPackaged > bindingsEnd;
 }
 
 function validateGulpTargets(gulp) {
@@ -277,7 +305,7 @@ export async function verifyCodeOssCheckout({ root, actualCommit, manifest }) {
   validateSourceManifest(manifest);
   if (actualCommit !== EXPECTED_MANIFEST.codeOss.commit) fail(UNTRUSTED, "upstream commit is not trusted");
   if (typeof root !== "string" || root.length === 0) fail(UNTRUSTED, "upstream checkout is not trusted");
-  const rootInfo = await lstat(root).catch(() => null);
+  const rootInfo = await realPathInfo(root, UNTRUSTED, "upstream checkout is not trusted");
   if (!rootInfo?.isDirectory() || rootInfo.isSymbolicLink()) fail(UNTRUSTED, "upstream checkout is not trusted");
   const [nodeVersion, packageText, yarnrc, gulp] = await Promise.all([
     realCheckoutFile(root, [".nvmrc"], "upstream Node version is not trusted"),
