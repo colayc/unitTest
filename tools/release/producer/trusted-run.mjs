@@ -18,6 +18,7 @@ const metadataKeys = ["expectedConsumerCommit", "expectedRunId", "run"].sort();
 const trustedInputKeys = ["expectedAppimagetoolSha256", "expectedConsumerCommit", "expectedLinuxLauncherSha256", "expectedRunId", "expectedWindowsLauncherSha256", "provenance", "run"].sort();
 const runOutputKeys = ["run_id"];
 const provenanceOutputKeys = ["run_id", "windows_launcher_sha256", "linux_launcher_sha256", "appimagetool_sha256"];
+const maximumGithubOutputBytes = 1024 * 1024;
 const execFileAsync = promisify(execFile);
 const windowsReparsePointCommand = "$node=Get-Item -Force -LiteralPath $env:TRUSTED_RUN_PATH; while ($null -ne $node) { if (($node.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { [Console]::Out.Write('1'); exit 0 }; $node=$node.Parent }; [Console]::Out.Write('0')";
 
@@ -145,16 +146,12 @@ function sameDirectoryIdentity(left, right) {
   return left.dev === right.dev && left.ino === right.ino && left.mode === right.mode && right.isDirectory();
 }
 
-function sameFileIdentity(left, right) {
-  return left.dev === right.dev && left.ino === right.ino && left.mode === right.mode && right.isFile();
-}
-
 function isSingleLinkedRegularFile(info) {
   return info.isFile() && info.nlink === 1n;
 }
 
 function sameSingleLinkedFile(left, right) {
-  return isSingleLinkedRegularFile(left) && isSingleLinkedRegularFile(right) && sameFileIdentity(left, right);
+  return isSingleLinkedRegularFile(left) && isSingleLinkedRegularFile(right) && sameNode(left, right);
 }
 
 async function rejectWindowsReparsePoints(path) {
@@ -204,7 +201,18 @@ async function assertUnchangedAncestors(snapshot) {
   }
 }
 
-async function readTrustedJson(path, errorCode) {
+function readHooks(value) {
+  if (!isPlainObject(value)) failUntrusted("producer run input is invalid");
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== "string" || !["afterOpenSnapshot", "afterRead"].includes(key)) failUntrusted("producer run input is invalid");
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor === undefined || !descriptor.enumerable || !Object.hasOwn(descriptor, "value") || typeof descriptor.value !== "function") failUntrusted("producer run input is invalid");
+  }
+  return value;
+}
+
+async function readTrustedJson(path, errorCode, suppliedHooks = {}) {
+  const hooks = readHooks(suppliedHooks);
   let checked;
   let handle;
   try {
@@ -212,7 +220,9 @@ async function readTrustedJson(path, errorCode) {
     handle = await open(checked.absolute, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
     const before = await handle.stat({ bigint: true });
     if (!sameSingleLinkedFile(checked.info, before)) failUntrusted("producer run input changed");
+    await hooks.afterOpenSnapshot?.();
     const bytes = await handle.readFile();
+    await hooks.afterRead?.();
     const after = await handle.stat({ bigint: true });
     const pathAfter = await lstat(checked.absolute, { bigint: true });
     await assertUnchangedAncestors(checked);
@@ -232,10 +242,10 @@ async function readTrustedJson(path, errorCode) {
   }
 }
 
-function testHooks(value) {
+function outputHooks(value) {
   if (!isPlainObject(value)) failUntrusted("GitHub output is invalid");
   for (const key of Reflect.ownKeys(value)) {
-    if (typeof key !== "string" || !["sync", "write"].includes(key)) failUntrusted("GitHub output is invalid");
+    if (typeof key !== "string" || !["afterWrite", "sync", "write"].includes(key)) failUntrusted("GitHub output is invalid");
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
     if (descriptor === undefined || !descriptor.enumerable || !Object.hasOwn(descriptor, "value") || typeof descriptor.value !== "function") failUntrusted("GitHub output is invalid");
   }
@@ -258,12 +268,25 @@ async function syncOutput(handle, hooks) {
   else await hooks.sync(handle);
 }
 
-async function rollbackAppend(handle, originalSize, hooks) {
+async function readFully(handle, bytes, initialPosition) {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const result = await handle.read(bytes, offset, bytes.length - offset, initialPosition + offset);
+    if (!Number.isSafeInteger(result?.bytesRead) || result.bytesRead <= 0 || result.bytesRead > bytes.length - offset) failUntrusted("GitHub output changed");
+    offset += result.bytesRead;
+  }
+}
+
+async function rollbackAppend(handle, originalBytes, originalSize) {
   try {
+    await writeFully(handle, originalBytes, 0, {});
     await handle.truncate(Number(originalSize));
-    await syncOutput(handle, hooks);
+    await handle.sync();
     const restored = await handle.stat({ bigint: true });
     if (!isSingleLinkedRegularFile(restored) || restored.size !== originalSize) failUntrusted("GitHub output rollback failed");
+    const restoredBytes = Buffer.alloc(Number(originalSize));
+    await readFully(handle, restoredBytes, 0);
+    if (!restoredBytes.equals(originalBytes)) failUntrusted("GitHub output rollback failed");
   } catch (error) {
     if (error?.code === UNTRUSTED) throw error;
     failUntrusted("GitHub output rollback failed");
@@ -271,7 +294,7 @@ async function rollbackAppend(handle, originalSize, hooks) {
 }
 
 async function appendGithubOutput(path, entries, suppliedHooks = {}) {
-  const hooks = testHooks(suppliedHooks);
+  const hooks = outputHooks(suppliedHooks);
   if (!Array.isArray(entries) || ![runOutputKeys, provenanceOutputKeys].some((expected) => (
     entries.length === expected.length && entries.every((entry, index) => Array.isArray(entry) && entry.length === 2 && entry[0] === expected[index])
   ))) failUntrusted("GitHub output is invalid");
@@ -282,24 +305,33 @@ async function appendGithubOutput(path, entries, suppliedHooks = {}) {
   let checked;
   let handle;
   let originalSize;
+  let originalBytes;
   let rollbackRequired = false;
   try {
     checked = await realPath(path, true);
     handle = await open(checked.absolute, constants.O_RDWR | (constants.O_NOFOLLOW ?? 0));
     const before = await handle.stat({ bigint: true });
     if (!sameSingleLinkedFile(checked.info, before)) failUntrusted("GitHub output changed");
-    if (before.size > BigInt(Number.MAX_SAFE_INTEGER)) failUntrusted("GitHub output is invalid");
+    if (before.size > BigInt(maximumGithubOutputBytes)) failUntrusted("GitHub output is invalid");
     originalSize = before.size;
+    originalBytes = Buffer.alloc(Number(originalSize));
+    await readFully(handle, originalBytes, 0);
+    const afterSnapshot = await handle.stat({ bigint: true });
+    if (!sameSingleLinkedFile(before, afterSnapshot)) failUntrusted("GitHub output changed");
     rollbackRequired = true;
     await writeFully(handle, bytes, Number(originalSize), hooks);
+    await hooks.afterWrite?.();
     await syncOutput(handle, hooks);
+    const currentPrefix = Buffer.alloc(originalBytes.length);
+    await readFully(handle, currentPrefix, 0);
+    if (!currentPrefix.equals(originalBytes)) failUntrusted("GitHub output changed");
     const after = await handle.stat({ bigint: true });
     const pathAfter = await lstat(checked.absolute, { bigint: true });
     await assertUnchangedAncestors(checked);
-    if (!sameSingleLinkedFile(checked.info, pathAfter) || !isSingleLinkedRegularFile(after) || after.size !== before.size + BigInt(bytes.length)) failUntrusted("GitHub output changed");
+    if (!sameSingleLinkedFile(after, pathAfter) || !isSingleLinkedRegularFile(after) || after.size !== before.size + BigInt(bytes.length)) failUntrusted("GitHub output changed");
     rollbackRequired = false;
   } catch (error) {
-    if (handle !== undefined && rollbackRequired && originalSize !== undefined) await rollbackAppend(handle, originalSize, hooks);
+    if (handle !== undefined && rollbackRequired && originalSize !== undefined && originalBytes !== undefined) await rollbackAppend(handle, originalBytes, originalSize);
     if (error?.code === UNTRUSTED) throw error;
     failUntrusted("GitHub output cannot be written");
   } finally {
@@ -309,7 +341,10 @@ async function appendGithubOutput(path, entries, suppliedHooks = {}) {
 
 export const __testOnlyTrustedRun = Object.freeze({
   appendGithubOutput(path, entries, hooks) {
-    return appendGithubOutput(path, entries, testHooks(hooks));
+    return appendGithubOutput(path, entries, outputHooks(hooks));
+  },
+  readTrustedJson(path, errorCode, hooks) {
+    return readTrustedJson(path, errorCode, readHooks(hooks));
   },
 });
 

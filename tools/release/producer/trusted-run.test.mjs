@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { link, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { link, lstat, mkdir, mkdtemp, open, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -119,7 +120,7 @@ function cli(argumentsList) {
 }
 
 async function temporaryDirectory(t) {
-  const parent = join(process.cwd(), ".superpowers", "sdd", "2026-08-28-trusted-code-oss-release-input-production", "task-4-test-fixtures");
+  const parent = join(process.cwd(), ".superpowers", "test-fixtures");
   await mkdir(parent, { recursive: true });
   const root = await mkdtemp(join(parent, "trusted-run-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -166,6 +167,9 @@ test("validateProducerRunMetadata independently rejects each run binding", () =>
   }
   assertUntrusted(() => validateProducerRunMetadata({ run: runFixture(), expectedRunId: "0", expectedConsumerCommit: commit }));
   assertUntrusted(() => validateProducerRunMetadata({ run: runFixture(), expectedRunId: "123x", expectedConsumerCommit: commit }));
+  for (const expectedRunId of [0n, -1n, "-1", "0001"]) {
+    assertUntrusted(() => validateProducerRunMetadata({ run: runFixture(), expectedRunId, expectedConsumerCommit: commit }));
+  }
   for (const value of [0, -1, 1.5, 0n, -1n, 1n, Number.MAX_SAFE_INTEGER + 1, "0", "-1", "1.5", "0001"]) {
     const run = runFixture(); run.id = value;
     assertUntrusted(() => trustedRun(run));
@@ -329,6 +333,23 @@ test("CLI rejects hard-linked run or GitHub output files before either can modif
   assert.equal(await readFile(outputVictim, "utf8"), "victim=unchanged\n");
 });
 
+test("trusted JSON reads reject same-inode content changes after opening or reading", async (t) => {
+  const root = await temporaryDirectory(t);
+  const runPath = join(root, "run.json");
+  const original = `${JSON.stringify(runFixture())}\n`;
+  const replacement = original.replace("API fields", "XXX fields");
+  assert.equal(replacement.length, original.length);
+  for (const hookName of ["afterOpenSnapshot", "afterRead"]) {
+    await writeFile(runPath, original);
+    await assert.rejects(
+      () => __testOnlyTrustedRun.readTrustedJson(runPath, UNTRUSTED, {
+        async [hookName]() { await writeFile(runPath, replacement); },
+      }),
+      (error) => error?.code === UNTRUSTED,
+    );
+  }
+});
+
 test("GitHub output append rolls back partial writes and failed syncs on its original descriptor", async (t) => {
   const root = await temporaryDirectory(t);
   const outputPath = join(root, "github-output");
@@ -363,7 +384,24 @@ test("GitHub output append rolls back partial writes and failed syncs on its ori
   }
 });
 
-test("CLI repeats API validation for provenance and rejects linked inputs or outputs", async (t) => {
+test("GitHub output append rejects same-inode prefix replacement and restores its original bytes", async (t) => {
+  const root = await temporaryDirectory(t);
+  const outputPath = join(root, "github-output");
+  const original = "third_party=value\n";
+  await writeFile(outputPath, original);
+  await assert.rejects(
+    () => __testOnlyTrustedRun.appendGithubOutput(outputPath, [["run_id", "123456789"]], {
+      async afterWrite() {
+        const handle = await open(outputPath, constants.O_RDWR);
+        try { await handle.write(Buffer.from("X"), 0, 1, 0); } finally { await handle.close(); }
+      },
+    }),
+    (error) => error?.code === UNTRUSTED,
+  );
+  assert.equal(await readFile(outputPath, "utf8"), original);
+});
+
+test("CLI rejects a linked producer-run input", async (t) => {
   const root = await temporaryDirectory(t);
   const runPath = join(root, "run.json");
   const provenancePath = join(root, "provenance.json");
@@ -387,12 +425,25 @@ test("CLI repeats API validation for provenance and rejects linked inputs or out
   const rejected = cli(["validate-run", "--run-json", linkedRun, "--run-id", "123456789", "--consumer-commit", commit, "--github-output", outputPath]);
   assert.notEqual(rejected.status, 0);
   assert.match(rejected.stderr, /^RELEASE_PRODUCER_UNTRUSTED: [^\r\n]+\r?\n$/u);
+});
+
+test("CLI rejects a linked GitHub output", async (t) => {
+  const root = await temporaryDirectory(t);
+  const runPath = join(root, "run.json");
+  const outputPath = join(root, "github-output");
   const linkedOutput = join(root, "linked-output");
-  await symlink(outputPath, linkedOutput, "file");
-  const rejectedOutput = cli(["validate-run", "--run-json", runPath, "--run-id", "123456789", "--consumer-commit", commit, "--github-output", linkedOutput]);
-  assert.notEqual(rejectedOutput.status, 0);
-  assert.match(rejectedOutput.stderr, /^RELEASE_PRODUCER_UNTRUSTED: [^\r\n]+\r?\n$/u);
-  assert.equal((await readFile(outputPath, "utf8")).includes("run_id=123456789\nrun_id"), false);
+  await writeFile(runPath, `${JSON.stringify(runFixture())}\n`);
+  await writeFile(outputPath, "unchanged=value\n");
+  try {
+    await symlink(outputPath, linkedOutput, "file");
+  } catch (error) {
+    if (error?.code === "EPERM") { t.skip("symbolic links unavailable"); return; }
+    throw error;
+  }
+  const rejected = cli(["validate-run", "--run-json", runPath, "--run-id", "123456789", "--consumer-commit", commit, "--github-output", linkedOutput]);
+  assert.notEqual(rejected.status, 0);
+  assert.match(rejected.stderr, /^RELEASE_PRODUCER_UNTRUSTED: [^\r\n]+\r?\n$/u);
+  assert.equal(await readFile(outputPath, "utf8"), "unchanged=value\n");
 });
 
 test("CLI rejects a producer run reached through a directory junction", async (t) => {
