@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, lstat, open, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { validateCodeOssRuntime } from "../code-oss-runtime.mjs";
@@ -17,6 +17,7 @@ const inventoryKeys = [
   "files",
 ].sort();
 const fileKeys = ["path", "size", "sha256", "executable"].sort();
+const noTestHooks = Object.freeze({});
 
 function releaseInputError(code, message) {
   const error = new Error(`${code}: ${message}`);
@@ -43,6 +44,17 @@ function sameSnapshot(left, right) {
   return left.isFile() && (typeof right.isFile !== "function" || right.isFile()) && left.dev === right.dev && left.ino === right.ino && left.size === BigInt(right.size) && left.mode === right.mode && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
 }
 
+function closedTestHooks(value) {
+  if (value === undefined) return noTestHooks;
+  if (!isPlainObject(value)) throw releaseInputError("RELEASE_INPUT_INVALID", "test hooks must be a closed object");
+  for (const key of Reflect.ownKeys(value)) {
+    if (key !== "afterOpenSnapshot" || typeof value[key] !== "function") {
+      throw releaseInputError("RELEASE_INPUT_INVALID", "test hooks must be a closed object");
+    }
+  }
+  return Object.freeze({ ...value });
+}
+
 function comparePaths(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
 }
@@ -52,13 +64,14 @@ function withinRoot(rootPath, candidatePath) {
   return relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
 }
 
-async function hashFile(file) {
+async function hashFile(file, hooks = noTestHooks) {
   const hash = createHash("sha256");
   let handle;
   try {
     handle = await open(file.canonicalPath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
     const before = await handle.stat({ bigint: true });
     if (!sameSnapshot(before, file)) throw new Error("changed");
+    await hooks.afterOpenSnapshot?.(Object.freeze({ path: file.relativePath }));
     let counted = 0;
     await new Promise((resolveHash, rejectHash) => {
       const stream = handle.createReadStream({ autoClose: false });
@@ -191,7 +204,7 @@ async function scanRuntimeTree(rootPath) {
         await scanDirectory(entryPath, relativePath);
       } else if (info.isFile()) {
         if (info.size < 0n || info.size > BigInt(Number.MAX_SAFE_INTEGER)) throw releaseInputError("RELEASE_INPUT_INVALID", "runtime file size is invalid");
-        files.set(relativePath, { path: entryPath, canonicalPath: canonicalEntry, size: Number(info.size), mode: info.mode, dev: info.dev, ino: info.ino, mtimeNs: info.mtimeNs, ctimeNs: info.ctimeNs });
+        files.set(relativePath, { path: entryPath, relativePath, canonicalPath: canonicalEntry, size: Number(info.size), mode: info.mode, dev: info.dev, ino: info.ino, mtimeNs: info.mtimeNs, ctimeNs: info.ctimeNs });
       } else {
         throw releaseInputError("RELEASE_INPUT_INVALID", "runtime tree contains a special entry");
       }
@@ -201,7 +214,7 @@ async function scanRuntimeTree(rootPath) {
   return files;
 }
 
-export async function createRuntimeModeInventory(request = {}) {
+async function createRuntimeModeInventoryInternal(request, hooks) {
   if (!hasExactKeys(request, ["expectedLauncherSha256", "root"])) {
     throw releaseInputError("RELEASE_INPUT_INVALID", "runtime mode inventory request must be a closed object");
   }
@@ -221,17 +234,16 @@ export async function createRuntimeModeInventory(request = {}) {
   const files = await scanRuntimeTree(rootPath);
   const records = [];
   for (const [path, file] of files) {
-    let sha256;
+    let hashed;
     try {
-      const hashed = await hashFile(file);
-      sha256 = hashed.sha256;
+      hashed = await hashFile(file, hooks);
     } catch {
       throw releaseInputError("RELEASE_INPUT_INVALID", "runtime file cannot be read");
     }
     records.push({
       path,
       size: file.size,
-      sha256,
+      sha256: hashed.sha256,
       executable: (hashed.mode & 0o111n) !== 0n,
     });
   }
@@ -244,6 +256,10 @@ export async function createRuntimeModeInventory(request = {}) {
     launcherSha256: expectedLauncherSha256,
     files: records,
   }, expectedLauncherSha256);
+}
+
+export async function createRuntimeModeInventory(request = {}) {
+  return createRuntimeModeInventoryInternal(request, noTestHooks);
 }
 
 async function loadInventory(inventoryPath, expectedLauncherSha256) {
@@ -370,20 +386,82 @@ function parseCliArguments(argumentsList) {
   };
 }
 
+function comparablePath(path) {
+  const absolute = resolve(path);
+  return process.platform === "win32" ? absolute.toLowerCase() : absolute;
+}
+
+async function ensureRealOutputDirectory(path) {
+  const directory = resolve(path);
+  const missing = [];
+  let current = directory;
+  while (true) {
+    try {
+      const info = await lstat(current, { bigint: true });
+      if (info.isSymbolicLink() || !info.isDirectory()) throw new Error("unsafe output directory");
+      if (comparablePath(await realpath(current)) !== comparablePath(current)) throw new Error("unsafe output directory");
+      break;
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+      const parent = dirname(current);
+      if (parent === current) throw error;
+      missing.push(basename(current));
+      current = parent;
+    }
+  }
+  for (const component of missing.reverse()) {
+    current = join(current, component);
+    await mkdir(current);
+    const info = await lstat(current, { bigint: true });
+    if (info.isSymbolicLink() || !info.isDirectory()) throw new Error("unsafe output directory");
+    if (comparablePath(await realpath(current)) !== comparablePath(current)) throw new Error("unsafe output directory");
+  }
+  return directory;
+}
+
+function identity(info) {
+  return info === undefined ? undefined : { dev: info.dev, ino: info.ino };
+}
+
+function sameIdentity(left, right) {
+  return left === undefined ? right === undefined : right !== undefined && left.dev === right.dev && left.ino === right.ino;
+}
+
+async function assertOutputDirectoryIdentity(path, expected) {
+  const current = await lstat(path, { bigint: true });
+  if (current.isSymbolicLink() || !current.isDirectory() || !sameIdentity(expected, identity(current))) throw new Error("output directory changed");
+  if (comparablePath(await realpath(path)) !== comparablePath(path)) throw new Error("output directory changed");
+}
+
 async function writeCanonicalInventory(path, inventory) {
   if (typeof path !== "string" || path.length === 0) {
     throw releaseInputError("RELEASE_PRODUCER_OUTPUT_INVALID", "output path is required");
   }
   const outputPath = resolve(path);
-  const temporaryPath = `${outputPath}.tmp-${process.pid}`;
+  let temporaryDirectory;
+  let outputDirectory;
+  let outputDirectoryIdentity;
   try {
-    const existing = await lstat(outputPath).catch((error) => error?.code === "ENOENT" ? undefined : Promise.reject(error));
+    outputDirectory = await ensureRealOutputDirectory(dirname(outputPath));
+    outputDirectoryIdentity = identity(await lstat(outputDirectory, { bigint: true }));
+    const existing = await lstat(outputPath, { bigint: true }).catch((error) => error?.code === "ENOENT" ? undefined : Promise.reject(error));
     if (existing?.isSymbolicLink() || (existing !== undefined && !existing.isFile())) throw new Error("invalid output");
+    const expected = identity(existing);
+    await assertOutputDirectoryIdentity(outputDirectory, outputDirectoryIdentity);
+    temporaryDirectory = await mkdtemp(join(outputDirectory, ".release-mode-"));
+    await assertOutputDirectoryIdentity(outputDirectory, outputDirectoryIdentity);
+    const temporaryPath = join(temporaryDirectory, "payload.json");
     await writeFile(temporaryPath, `${JSON.stringify(inventory)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    await assertOutputDirectoryIdentity(outputDirectory, outputDirectoryIdentity);
+    const current = await lstat(outputPath, { bigint: true }).catch((error) => error?.code === "ENOENT" ? undefined : Promise.reject(error));
+    if (current?.isSymbolicLink() || (current && !current.isFile()) || !sameIdentity(expected, identity(current))) throw new Error("output changed");
     await rename(temporaryPath, outputPath);
   } catch {
-    await rm(temporaryPath, { force: true }).catch(() => {});
     throw releaseInputError("RELEASE_PRODUCER_OUTPUT_INVALID", "runtime mode inventory output cannot be written");
+  } finally {
+    if (temporaryDirectory && await assertOutputDirectoryIdentity(outputDirectory, outputDirectoryIdentity).then(() => true, () => false)) {
+      await rm(temporaryDirectory, { recursive: true, force: true }).catch(() => {});
+    }
   }
 }
 
@@ -392,7 +470,10 @@ async function runCli() {
     const options = parseCliArguments(process.argv.slice(2));
     const result = options.command === "restore"
       ? await restoreRuntimeModes(options)
-      : await createRuntimeModeInventory(options);
+      : await createRuntimeModeInventory({
+        root: options.root,
+        expectedLauncherSha256: options.expectedLauncherSha256,
+      });
     if (options.command === "create") await writeCanonicalInventory(options.out, result);
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } catch (error) {
@@ -400,5 +481,11 @@ async function runCli() {
     process.exitCode = 1;
   }
 }
+
+export const __testOnlyRuntimeModeInventory = Object.freeze({
+  createRuntimeModeInventory(request, hooks) {
+    return createRuntimeModeInventoryInternal(request, closedTestHooks(hooks));
+  },
+});
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await runCli();
