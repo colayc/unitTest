@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -425,11 +425,11 @@ test("canonical output refuses linked and swapped output ancestors without parti
   const relocated = join(input.parent, "relocated");
   const outside = join(input.parent, "outside");
   const out = join(outputDirectory, "provenance.json");
-  await Promise.all([mkdir(outputDirectory), mkdir(outside)]);
+  await mkdir(outside);
   let swapped = false;
   await assert.rejects(
     () => __testOnlyReleaseInputProvenance.writeCanonical(out, valid, {
-      beforePublish: async () => {
+      beforeStage: async () => {
         await rename(outputDirectory, relocated);
         await symlink(outside, outputDirectory, process.platform === "win32" ? "junction" : "dir");
         swapped = true;
@@ -447,7 +447,6 @@ test("canonical output never leaves a replaced staged file published after failu
   const valid = createReleaseInputProvenance(input.request);
   const outputDirectory = join(input.parent, "output");
   const out = join(outputDirectory, "provenance.json");
-  await mkdir(outputDirectory);
   await assert.rejects(
     () => __testOnlyReleaseInputProvenance.writeCanonical(out, valid, {
       beforePublish: async () => {
@@ -461,4 +460,95 @@ test("canonical output never leaves a replaced staged file published after failu
     (error) => error?.code === INVALID,
   );
   await assert.rejects(() => readFile(out, "utf8"));
+});
+
+test("canonical output requires a fresh dedicated output directory and preserves prior files", async (t) => {
+  const input = await fixture(t);
+  const valid = createReleaseInputProvenance(input.request);
+  const outputDirectory = join(input.parent, "output");
+  const out = join(outputDirectory, "provenance.json");
+  await mkdir(outputDirectory);
+
+  await assert.rejects(
+    () => __testOnlyReleaseInputProvenance.writeCanonical(out, valid, {}),
+    (error) => error?.code === INVALID,
+  );
+  await writeFile(out, "prior-owner-bytes\n");
+  await assert.rejects(
+    () => __testOnlyReleaseInputProvenance.writeCanonical(out, valid, {}),
+    (error) => error?.code === INVALID,
+  );
+  assert.equal(await readFile(out, "utf8"), "prior-owner-bytes\n");
+});
+
+test("POSIX canonical output rejects a group-or-world-writable output parent", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("Windows validates directory ownership and reparse state instead of POSIX mode bits");
+    return;
+  }
+  const input = await fixture(t);
+  const valid = createReleaseInputProvenance(input.request);
+  const out = join(input.parent, "output", "provenance.json");
+  await chmod(input.parent, 0o777);
+
+  await assert.rejects(
+    () => __testOnlyReleaseInputProvenance.writeCanonical(out, valid, {}),
+    (error) => error?.code === INVALID,
+  );
+  await assert.rejects(() => lstat(dirname(out)));
+});
+
+test("atomic no-clobber publication preserves a target created at the commit boundary", async (t) => {
+  const input = await fixture(t);
+  const valid = createReleaseInputProvenance(input.request);
+  const outputDirectory = join(input.parent, "output");
+  const out = join(outputDirectory, "provenance.json");
+
+  await assert.rejects(
+    () => __testOnlyReleaseInputProvenance.writeCanonical(out, valid, {
+      beforeCommit: async () => writeFile(out, "later-owner-bytes\n", { flag: "wx" }),
+    }),
+    (error) => error?.code === INVALID,
+  );
+  assert.equal(await readFile(out, "utf8"), "later-owner-bytes\n");
+});
+
+test("atomic publication refuses a stage exchanged at the commit boundary", async (t) => {
+  const input = await fixture(t);
+  const valid = createReleaseInputProvenance(input.request);
+  const outputDirectory = join(input.parent, "output");
+  const out = join(outputDirectory, "provenance.json");
+
+  await assert.rejects(
+    () => __testOnlyReleaseInputProvenance.writeCanonical(out, valid, {
+      beforeCommit: async () => {
+        const staged = (await readdir(outputDirectory)).find((name) => name.startsWith("provenance.json.tmp-"));
+        assert.ok(staged);
+        const stagePath = join(outputDirectory, staged);
+        await rm(stagePath);
+        await writeFile(stagePath, "attacker-bytes\n", { flag: "wx" });
+      },
+    }),
+    (error) => error?.code === INVALID,
+  );
+  await assert.rejects(() => readFile(out, "utf8"));
+});
+
+test("a post-commit failure never deletes a later replacement target", async (t) => {
+  const input = await fixture(t);
+  const valid = createReleaseInputProvenance(input.request);
+  const outputDirectory = join(input.parent, "output");
+  const out = join(outputDirectory, "provenance.json");
+
+  await assert.rejects(
+    () => __testOnlyReleaseInputProvenance.writeCanonical(out, valid, {
+      afterCommit: async () => {
+        await rm(out);
+        await writeFile(out, "later-owner-bytes\n", { flag: "wx" });
+        throw new Error("deterministic post-commit failure");
+      },
+    }),
+    (error) => error?.code === INVALID,
+  );
+  assert.equal(await readFile(out, "utf8"), "later-owner-bytes\n");
 });

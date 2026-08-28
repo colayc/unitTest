@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { constants, readFileSync } from "node:fs";
-import { lstat, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, open, readFile, rm } from "node:fs/promises";
 import { dirname, join, parse, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -23,6 +23,7 @@ const creationKeys = ["appimagetool", "linux", "linuxModeInventorySha256", "prod
 const fixedSourceManifest = validateSourceManifest(JSON.parse(readFileSync(new URL("./source-manifest.json", import.meta.url), "utf8")));
 const execFileAsync = promisify(execFile);
 const windowsReparsePointCommand = "$node=Get-Item -Force -LiteralPath $env:RELEASE_PROVENANCE_INPUT; while ($null -ne $node) { if (($node.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { [Console]::Out.Write('1'); exit 0 }; $node=$node.Parent }; [Console]::Out.Write('0')";
+const windowsOwnedDirectoryCommand = "$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User; $acl=[IO.Directory]::GetAccessControl($env:RELEASE_PROVENANCE_INPUT); $owner=$acl.GetOwner([Security.Principal.SecurityIdentifier]); if ($owner.Value -eq $sid.Value) { [Console]::Out.Write('1') } else { [Console]::Out.Write('0') }";
 
 function provenanceError(reason = "release input provenance is invalid") {
   const error = new Error(`${INVALID}: ${reason}`);
@@ -372,40 +373,76 @@ async function hashRealFile(path, hooks = {}) {
   }
 }
 
-async function snapshotRealOutputDirectory(path) {
+async function runWindowsDirectoryCheck(path, command, reason) {
+  if (process.platform !== "win32") return;
+  try {
+    const { stdout } = await execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], {
+      encoding: "utf8",
+      env: { ...process.env, RELEASE_PROVENANCE_INPUT: path },
+      windowsHide: true,
+    });
+    if (stdout.trim() !== "1") fail(reason);
+  } catch (error) {
+    if (error?.code === INVALID) throw error;
+    fail(reason);
+  }
+}
+
+async function snapshotOwnedOutputParent(path) {
   const absolute = resolve(path);
-  const missing = [];
-  let current = absolute;
-  while (true) {
-    try {
-      const info = await lstat(current, { bigint: true });
-      if (info.isSymbolicLink() || !info.isDirectory()) fail("output directory is invalid");
-      break;
-    } catch (error) {
-      if (error?.code === INVALID) throw error;
-      if (error?.code !== "ENOENT") fail("output directory is invalid");
-      const parent = dirname(current);
-      if (parent === current) fail("output directory is invalid");
-      missing.push(current);
-      current = parent;
-    }
-  }
-  for (const directory of missing.reverse()) {
-    await mkdir(directory);
-    const info = await lstat(directory, { bigint: true });
-    if (info.isSymbolicLink() || !info.isDirectory()) fail("output directory is invalid");
-  }
   const root = parse(absolute).root;
   const ancestors = [];
-  current = root;
-  await rejectWindowsReparsePoints(absolute);
-  for (const component of absolute.slice(root.length).split(/[\\/]+/u).filter(Boolean)) {
-    current = join(current, component);
-    const info = await lstat(current, { bigint: true });
-    if (info.isSymbolicLink() || !info.isDirectory()) fail("output directory is invalid");
-    ancestors.push({ path: current, info });
+  let current = root;
+  try {
+    await rejectWindowsReparsePoints(absolute);
+    const rootInfo = await lstat(root, { bigint: true });
+    if (rootInfo.isSymbolicLink() || !rootInfo.isDirectory()) fail("output parent is invalid");
+    ancestors.push({ path: root, info: rootInfo });
+    for (const component of absolute.slice(root.length).split(/[\\/]+/u).filter(Boolean)) {
+      current = join(current, component);
+      const info = await lstat(current, { bigint: true });
+      if (info.isSymbolicLink() || !info.isDirectory()) fail("output parent is invalid");
+      ancestors.push({ path: current, info });
+    }
+    const parent = ancestors.at(-1).info;
+    if (typeof process.getuid === "function") {
+      if (parent.uid !== BigInt(process.getuid()) || (parent.mode & 0o022n) !== 0n) fail("output parent is not private");
+    } else {
+      await runWindowsDirectoryCheck(absolute, windowsOwnedDirectoryCommand, "output parent owner is invalid");
+    }
+    return { absolute, ancestors };
+  } catch (error) {
+    if (error?.code === INVALID) throw error;
+    fail("output parent cannot be inspected");
   }
-  return { absolute, ancestors };
+}
+
+async function createPrivateOutputDirectory(path) {
+  const absolute = resolve(path);
+  const parentPath = dirname(absolute);
+  if (parentPath === absolute) fail("output directory is invalid");
+  const parent = await snapshotOwnedOutputParent(parentPath);
+  try {
+    await mkdir(absolute, { mode: 0o700 });
+  } catch (error) {
+    if (error?.code === "EEXIST") fail("output directory already exists");
+    if (error?.code === INVALID) throw error;
+    fail("output directory cannot be created");
+  }
+  try {
+    if (typeof process.getuid === "function") await chmod(absolute, 0o700);
+    else await runWindowsDirectoryCheck(absolute, windowsOwnedDirectoryCommand, "output directory owner is invalid");
+    await assertUnchangedOutputDirectory(parent);
+    await rejectWindowsReparsePoints(absolute);
+    const info = await lstat(absolute, { bigint: true });
+    if (info.isSymbolicLink() || !info.isDirectory()) fail("output directory is invalid");
+    if (typeof process.getuid === "function"
+      && (info.uid !== BigInt(process.getuid()) || (info.mode & 0o777n) !== 0o700n)) fail("output directory is not private");
+    return { absolute, ancestors: [...parent.ancestors, { path: absolute, info }] };
+  } catch (error) {
+    if (error?.code === INVALID) throw error;
+    fail("output directory cannot be secured");
+  }
 }
 
 async function assertUnchangedOutputDirectory(snapshot) {
@@ -414,14 +451,6 @@ async function assertUnchangedOutputDirectory(snapshot) {
     const current = await lstat(ancestor.path, { bigint: true });
     if (current.isSymbolicLink() || !current.isDirectory() || current.dev !== ancestor.info.dev || current.ino !== ancestor.info.ino || current.mode !== ancestor.info.mode) fail("output ancestor changed");
   }
-}
-
-function identity(info) {
-  return info === undefined ? undefined : { dev: info.dev, ino: info.ino };
-}
-
-function sameIdentity(left, right) {
-  return left === undefined ? right === undefined : right !== undefined && left.dev === right.dev && left.ino === right.ino;
 }
 
 async function loadJsonFile(path) {
@@ -455,44 +484,44 @@ async function writeCanonical(path, value, hooks = {}) {
   const temporary = `${target}.tmp-${process.pid}-${Date.now()}`;
   const bytes = Buffer.from(`${JSON.stringify(value)}\n`);
   let directory;
-  let published;
+  let handle;
+  let staged;
   try {
-    directory = await snapshotRealOutputDirectory(dirname(target));
-    const existing = await lstat(target).catch((error) => error?.code === "ENOENT" ? undefined : Promise.reject(error));
-    if (existing !== undefined) fail("output target already exists");
-    const expected = undefined;
+    // Security boundary: this producer runs on a fresh standard GitHub-hosted
+    // runner with no untrusted same-principal process. The CLI enforces that
+    // its private dedicated output directory did not exist before this call.
+    directory = await createPrivateOutputDirectory(dirname(target));
     await hooks.beforeStage?.();
     await assertUnchangedOutputDirectory(directory);
-    await writeFile(temporary, bytes, { flag: "wx", mode: 0o600 });
-    const staged = await lstat(temporary, { bigint: true });
-    if (staged.isSymbolicLink() || !staged.isFile() || !(await readFile(temporary)).equals(bytes)) fail();
-    await assertUnchangedOutputDirectory(directory);
-    const current = await lstat(target).catch((error) => error?.code === "ENOENT" ? undefined : Promise.reject(error));
-    if (current?.isSymbolicLink() || (current && !current.isFile()) || !sameIdentity(expected, identity(current))) fail();
+    handle = await open(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0), 0o600);
+    await handle.writeFile(bytes);
+    await handle.sync();
+    staged = await handle.stat({ bigint: true });
+    if (!staged.isFile() || staged.size !== BigInt(bytes.length)) fail("staged output is invalid");
     await hooks.beforePublish?.();
+    await hooks.beforeCommit?.();
     await assertUnchangedOutputDirectory(directory);
-    const publishTarget = await lstat(target).catch((error) => error?.code === "ENOENT" ? undefined : Promise.reject(error));
-    if (publishTarget?.isSymbolicLink() || (publishTarget && !publishTarget.isFile()) || !sameIdentity(expected, identity(publishTarget))) fail();
+    const handleStage = await handle.stat({ bigint: true });
     const currentStage = await lstat(temporary, { bigint: true });
-    if (currentStage.isSymbolicLink() || !currentStage.isFile() || !sameFileIdentity(staged, currentStage) || !(await readFile(temporary)).equals(bytes)) fail("staged output changed");
-    await rename(temporary, target);
-    await assertUnchangedOutputDirectory(directory);
-    published = await lstat(target, { bigint: true });
-    if (published.isSymbolicLink() || !published.isFile() || !sameFileIdentity(staged, published) || !(await readFile(target)).equals(bytes)) {
-      const current = await lstat(target, { bigint: true }).catch(() => undefined);
-      if (current !== undefined && sameFileIdentity(published, current)) await rm(target, { force: true });
-      fail("published output changed");
-    }
+    if (currentStage.isSymbolicLink() || !currentStage.isFile()
+      || !sameSnapshot(staged, handleStage) || !sameSnapshot(staged, currentStage)
+      || !(await readFile(temporary)).equals(bytes)) fail("staged output changed");
+    // link(2)/CreateHardLinkW is the commit point: it fails atomically when the
+    // final name exists and never has overwrite semantics.
+    await link(temporary, target);
+    await hooks.afterCommit?.();
   } catch (error) {
-    if (directory && await assertUnchangedOutputDirectory(directory).then(() => true, () => false)) {
-      if (published !== undefined) {
-        const current = await lstat(target, { bigint: true }).catch(() => undefined);
-        if (current !== undefined && sameFileIdentity(published, current)) await rm(target, { force: true }).catch(() => {});
-      }
-      await rm(temporary, { force: true }).catch(() => {});
-    }
     if (error?.code === INVALID) throw error;
     fail();
+  } finally {
+    await handle?.close().catch(() => {});
+    if (directory && staged && await assertUnchangedOutputDirectory(directory).then(() => true, () => false)) {
+      const current = await lstat(temporary, { bigint: true }).catch(() => undefined);
+      if (current !== undefined && sameFileIdentity(staged, current)
+        && await readFile(temporary).then((value) => value.equals(bytes), () => false)) {
+        await rm(temporary, { force: true }).catch(() => {});
+      }
+    }
   }
 }
 
@@ -506,7 +535,7 @@ export const __testOnlyReleaseInputProvenance = Object.freeze({
     return hashRealFile(path, closedHooks(hooks, ["afterOpenSnapshot"]));
   },
   writeCanonical(path, value, hooks) {
-    return writeCanonical(path, value, closedHooks(hooks, ["beforePublish", "beforeStage"]));
+    return writeCanonical(path, value, closedHooks(hooks, ["afterCommit", "beforeCommit", "beforePublish", "beforeStage"]));
   },
 });
 
