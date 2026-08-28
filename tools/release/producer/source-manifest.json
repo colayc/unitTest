@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "codeOss": {
+    "repository": "https://github.com/microsoft/vscode.git",
+    "commit": "b1c0a14de1414fcdaa400695b4db1c0799bc3124",
+    "version": "1.92.0",
+    "nodeVersion": "20.14.0",
+    "yarnVersion": "1.22.22",
+    "windowsTarget": "vscode-win32-x64",
+    "windowsOutput": "VSCode-win32-x64",
+    "linuxTarget": "vscode-linux-x64",
+    "linuxOutput": "VSCode-linux-x64"
+  },
+  "appimagetool": {
+    "repository": "AppImage/appimagetool",
+    "assetId": 324406882,
+    "assetName": "appimagetool-x86_64.AppImage",
+    "size": 15092216,
+    "sha256": "a6d71e2b6cd66f8e8d16c37ad164658985e0cf5fcaa950c90a482890cb9d13e0"
+  }
+}
