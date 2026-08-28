@@ -16,7 +16,7 @@ const runKeys = ["conclusion", "event", "head_branch", "head_sha", "id", "path",
 const repositoryKeys = ["full_name"];
 const metadataKeys = ["expectedConsumerCommit", "expectedRunAttempt", "expectedRunId", "run"].sort();
 const metadataKeysWithoutAttempt = ["expectedConsumerCommit", "expectedRunId", "run"].sort();
-const trustedInputKeys = ["artifacts", "expectedConsumerCommit", "expectedRunAttempt", "expectedRunId", "provenance", "provenanceArtifactDigest", "provenanceArtifactId", "run"].sort();
+const trustedInputKeys = ["artifacts", "expectedAppimagetoolSha256", "expectedConsumerCommit", "expectedLinuxLauncherSha256", "expectedRunAttempt", "expectedRunId", "expectedWindowsLauncherSha256", "provenance", "provenanceArtifactDigest", "provenanceArtifactId", "run"].sort();
 const artifactListKeys = ["artifacts", "total_count"];
 const artifactKeys = ["digest", "expired", "id", "name", "workflow_run"];
 const workflowRunKeys = ["id"];
@@ -191,7 +191,10 @@ export function validateTrustedReleaseInputs(request) {
   });
   const provenanceArtifactId = canonicalRepositoryId(input.provenanceArtifactId);
   const provenanceArtifactDigest = canonicalDigest(input.provenanceArtifactDigest);
-  if (!provenanceArtifactId || !provenanceArtifactDigest) failInvalid();
+  const windowsLauncherSha256 = canonicalDigest(input.expectedWindowsLauncherSha256);
+  const linuxLauncherSha256 = canonicalDigest(input.expectedLinuxLauncherSha256);
+  const appimagetoolSha256 = canonicalDigest(input.expectedAppimagetoolSha256);
+  if (!provenanceArtifactId || !provenanceArtifactDigest || !windowsLauncherSha256 || !linuxLauncherSha256 || !appimagetoolSha256) failInvalid();
   const artifacts = snapshotGithubArtifacts(input.artifacts, metadata.runId);
   const selectedProvenance = selectArtifact(artifacts, `release-input-provenance-${metadata.runAttempt}`);
   if (selectedProvenance.id !== provenanceArtifactId || selectedProvenance.digest !== provenanceArtifactDigest) failUntrusted("provenance artifact changed");
@@ -203,16 +206,19 @@ export function validateTrustedReleaseInputs(request) {
   }
   if (provenance.producer.sourceCommit !== metadata.expectedConsumerCommit
     || provenance.producer.runId !== metadata.runId
-    || provenance.producer.runAttempt !== metadata.runAttempt) failInvalid();
+    || provenance.producer.runAttempt !== metadata.runAttempt
+    || provenance.runtimes.windows.launcherSha256 !== windowsLauncherSha256
+    || provenance.runtimes.linux.launcherSha256 !== linuxLauncherSha256
+    || provenance.appimagetool.sha256 !== appimagetoolSha256) failInvalid();
   const windowsArtifact = validateArtifactBinding(artifacts, provenance.runtimes.windows, "code-oss-windows-x64", metadata.runAttempt);
   const linuxArtifact = validateArtifactBinding(artifacts, provenance.runtimes.linux, "code-oss-linux-x64", metadata.runAttempt);
   const appimagetoolArtifact = validateArtifactBinding(artifacts, provenance.appimagetool, "appimagetool-linux-x64", metadata.runAttempt);
   return Object.freeze({
     runId: metadata.runId,
     runAttempt: metadata.runAttempt,
-    windowsLauncherSha256: provenance.runtimes.windows.launcherSha256,
-    linuxLauncherSha256: provenance.runtimes.linux.launcherSha256,
-    appimagetoolSha256: provenance.appimagetool.sha256,
+    windowsLauncherSha256,
+    linuxLauncherSha256,
+    appimagetoolSha256,
     windowsArtifactId: windowsArtifact.id,
     windowsArtifactDigest: windowsArtifact.digest,
     linuxArtifactId: linuxArtifact.id,
@@ -449,7 +455,7 @@ function parseCli(argv) {
   const expected = command === "validate-run"
     ? ["--artifacts-json", "--consumer-commit", "--github-output", "--run-id", "--run-json"].sort()
     : command === "validate-provenance"
-      ? ["--artifacts-json", "--consumer-commit", "--github-output", "--provenance", "--provenance-artifact-digest", "--provenance-artifact-id", "--run-attempt", "--run-id", "--run-json"].sort()
+      ? ["--appimagetool-sha256", "--artifacts-json", "--consumer-commit", "--github-output", "--linux-launcher-sha256", "--provenance", "--provenance-artifact-digest", "--provenance-artifact-id", "--run-attempt", "--run-id", "--run-json", "--windows-launcher-sha256"].sort()
       : command === "validate-attempt"
         ? ["--consumer-commit", "--run-attempt", "--run-id", "--run-json"].sort()
         : [];
@@ -477,6 +483,8 @@ async function main(argv) {
       run, provenance, artifacts: await readTrustedJson(options["--artifacts-json"], UNTRUSTED),
       expectedRunId: options["--run-id"], expectedRunAttempt: options["--run-attempt"], expectedConsumerCommit: options["--consumer-commit"],
       provenanceArtifactId: options["--provenance-artifact-id"], provenanceArtifactDigest: options["--provenance-artifact-digest"],
+      expectedWindowsLauncherSha256: options["--windows-launcher-sha256"], expectedLinuxLauncherSha256: options["--linux-launcher-sha256"],
+      expectedAppimagetoolSha256: options["--appimagetool-sha256"],
     });
     await appendGithubOutput(options["--github-output"], [
       ["run_id", result.runId], ["run_attempt", String(result.runAttempt)], ["windows_launcher_sha256", result.windowsLauncherSha256],
