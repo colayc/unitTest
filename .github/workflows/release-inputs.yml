@@ -1,0 +1,686 @@
+name: Trusted Code-OSS release inputs
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  authorize:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out producer source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Set up repository Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.18.0
+      - name: Validate producer manifest and invocation
+        env:
+          PRODUCER_REPOSITORY: ${{ github.repository }}
+          PRODUCER_EVENT: ${{ github.event_name }}
+          PRODUCER_REF: ${{ github.ref }}
+          PRODUCER_WORKFLOW_REF: ${{ github.workflow_ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .release/authorize
+          node tools/release/producer/source-manifest.mjs export \
+            --manifest tools/release/producer/source-manifest.json \
+            --github-output .release/authorize/source-manifest.outputs
+          node tools/release/producer/source-manifest.mjs authorize \
+            --repository "$PRODUCER_REPOSITORY" \
+            --event "$PRODUCER_EVENT" \
+            --ref "$PRODUCER_REF" \
+            --workflow-ref "$PRODUCER_WORKFLOW_REF"
+      - name: Run producer contract tests on hosted Ubuntu
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global --prefix .release/tooling/pnpm --no-audit --no-fund pnpm@11.4.0
+          [[ "$(.release/tooling/pnpm/bin/pnpm --version)" == '11.4.0' ]] || { echo 'RELEASE_PRODUCER_CONFIG_INVALID: pnpm version mismatch' >&2; exit 1; }
+          .release/tooling/pnpm/bin/pnpm test:release-producer
+
+  build-windows:
+    needs: authorize
+    runs-on: windows-2025-vs2026
+    outputs:
+      launcher_sha256: ${{ steps.runtime.outputs.launcher_sha256 }}
+      file_count: ${{ steps.runtime.outputs.file_count }}
+      total_bytes: ${{ steps.runtime.outputs.total_bytes }}
+      tree_digest: ${{ steps.runtime.outputs.tree_digest }}
+    steps:
+      - name: Check out producer source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Set up repository Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.18.0
+      - name: Export validated source manifest
+        id: source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path '.release/source' | Out-Null
+          node tools/release/producer/source-manifest.mjs export `
+            --manifest tools/release/producer/source-manifest.json `
+            --github-output .release/source/windows.outputs
+          if ($LASTEXITCODE -ne 0) { throw 'RELEASE_PRODUCER_CONFIG_INVALID: source manifest export failed' }
+          Get-Content -LiteralPath '.release/source/windows.outputs' | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - name: Fetch and verify fixed Code-OSS source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (Test-Path -LiteralPath '.producer') { throw 'RELEASE_PRODUCER_UNTRUSTED: producer root must be fresh' }
+          git init .producer/vscode
+          if ($LASTEXITCODE -ne 0) { throw 'RELEASE_PRODUCER_BUILD_FAILED: source initialization failed' }
+          git -C .producer/vscode remote add origin https://github.com/microsoft/vscode.git
+          if ($LASTEXITCODE -ne 0) { throw 'RELEASE_PRODUCER_BUILD_FAILED: source remote initialization failed' }
+          git -C .producer/vscode -c protocol.version=2 fetch --depth=1 origin b1c0a14de1414fcdaa400695b4db1c0799bc3124
+          if ($LASTEXITCODE -ne 0) { throw 'RELEASE_PRODUCER_BUILD_FAILED: fixed source fetch failed' }
+          git -C .producer/vscode checkout --detach FETCH_HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'RELEASE_PRODUCER_BUILD_FAILED: fixed source checkout failed' }
+          $actualCommit = (git -C .producer/vscode rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actualCommit -cne 'b1c0a14de1414fcdaa400695b4db1c0799bc3124') {
+            throw 'RELEASE_PRODUCER_UNTRUSTED: fixed source commit mismatch'
+          }
+          node tools/release/producer/source-manifest.mjs verify-checkout `
+            --manifest tools/release/producer/source-manifest.json `
+            --root .producer/vscode `
+            --actual-commit $actualCommit
+          if ($LASTEXITCODE -ne 0) { throw 'RELEASE_PRODUCER_UNTRUSTED: fixed source contract failed' }
+      - name: Set up Code-OSS Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 20.14.0
+      - name: Install fixed Yarn
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npm install --global --prefix .release/tooling/yarn --no-audit --no-fund yarn@1.22.22
+          if ($LASTEXITCODE -ne 0) { throw 'RELEASE_PRODUCER_BUILD_FAILED: Yarn installation failed' }
+          $yarnRoot = [IO.Path]::GetFullPath('.release/tooling/yarn')
+          $actualYarn = (& (Join-Path $yarnRoot 'yarn.cmd') --version).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actualYarn -cne '1.22.22') { throw 'RELEASE_PRODUCER_BUILD_FAILED: Yarn version mismatch' }
+          $yarnRoot | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Build fixed Windows Code-OSS target
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Push-Location '.producer/vscode'
+          try {
+            yarn install --frozen-lockfile
+            if ($LASTEXITCODE -ne 0) { throw 'RELEASE_PRODUCER_BUILD_FAILED: dependency installation failed' }
+            yarn gulp vscode-win32-x64
+            if ($LASTEXITCODE -ne 0) { throw 'RELEASE_PRODUCER_BUILD_FAILED: Windows build failed' }
+          } finally {
+            Pop-Location
+          }
+      - name: Set up repository Node.js for validation
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.18.0
+      - name: Validate Windows output root
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $expected = [IO.Path]::GetFullPath((Join-Path $PWD '.producer/VSCode-win32-x64'))
+          $candidates = @(Get-ChildItem -LiteralPath '.producer' -Force | Where-Object { $_.Name -like 'VSCode-*' })
+          if ($candidates.Count -ne 1) { throw 'RELEASE_PRODUCER_OUTPUT_INVALID: Windows output root set is invalid' }
+          $candidate = $candidates[0]
+          if (-not $candidate.PSIsContainer -or ($candidate.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw 'RELEASE_PRODUCER_OUTPUT_INVALID: Windows output root is not a real directory'
+          }
+          if ([IO.Path]::GetFullPath($candidate.FullName) -cne $expected) {
+            throw 'RELEASE_PRODUCER_OUTPUT_INVALID: Windows output coordinate mismatch'
+          }
+      - name: Validate Windows runtime
+        id: windows-launcher
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $launcher = '.producer/VSCode-win32-x64/Code - OSS.exe'
+          $launcherSha256 = (Get-FileHash -LiteralPath $launcher -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($launcherSha256 -cnotmatch '^[0-9a-f]{64}$') { throw 'RELEASE_PRODUCER_OUTPUT_INVALID: Windows launcher digest is invalid' }
+          node tools/release/code-oss-runtime.mjs --platform windows --root .producer/VSCode-win32-x64 --launcher-sha256 $launcherSha256
+          if ($LASTEXITCODE -ne 0) { throw 'RELEASE_PRODUCER_OUTPUT_INVALID: Windows runtime validation failed' }
+          "launcher_sha256=$launcherSha256" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - name: Check Windows launcher version
+        env:
+          WINDOWS_LAUNCHER_SHA256: ${{ steps.windows-launcher.outputs.launcher_sha256 }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:WINDOWS_LAUNCHER_SHA256 -cnotmatch '^[0-9a-f]{64}$') { throw 'RELEASE_PRODUCER_OUTPUT_INVALID: Windows launcher digest is invalid' }
+          $userData = '.release/producer/windows/user-data'
+          New-Item -ItemType Directory -Force -Path $userData | Out-Null
+          $stdout = '.release/producer/windows/version.stdout'
+          $stderr = '.release/producer/windows/version.stderr'
+          $process = Start-Process -FilePath '.producer/VSCode-win32-x64/Code - OSS.exe' `
+            -ArgumentList @('--version', '--user-data-dir', $userData) `
+            -RedirectStandardOutput $stdout -RedirectStandardError $stderr -NoNewWindow -PassThru
+          if (-not $process.WaitForExit(30000)) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            throw 'RELEASE_PRODUCER_OUTPUT_INVALID: Windows launcher version check timed out'
+          }
+          $process.WaitForExit()
+          if ($process.ExitCode -ne 0) { throw 'RELEASE_PRODUCER_OUTPUT_INVALID: Windows launcher version check failed' }
+          $lines = @(Get-Content -LiteralPath $stdout | Where-Object { $_ -ne '' })
+          if ($lines.Count -ne 3 -or $lines[0] -cne '1.92.0' -or $lines[1] -cne 'b1c0a14de1414fcdaa400695b4db1c0799bc3124' -or $lines[2] -cne 'x64') {
+            throw 'RELEASE_PRODUCER_OUTPUT_INVALID: Windows launcher version output is invalid'
+          }
+      - name: Stage and inventory Windows runtime
+        id: runtime
+        env:
+          WINDOWS_LAUNCHER_SHA256: ${{ steps.windows-launcher.outputs.launcher_sha256 }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:WINDOWS_LAUNCHER_SHA256 -cnotmatch '^[0-9a-f]{64}$') { throw 'RELEASE_PRODUCER_OUTPUT_INVALID: Windows launcher digest is invalid' }
+          $stage = '.release/producer/windows/code-oss-windows-x64'
+          if (Test-Path -LiteralPath $stage) { throw 'RELEASE_PRODUCER_OUTPUT_INVALID: Windows stage must be fresh' }
+          Copy-Item -LiteralPath '.producer/VSCode-win32-x64' -Destination $stage -Recurse -Force
+          node tools/release/code-oss-runtime.mjs --platform windows --root $stage --launcher-sha256 $env:WINDOWS_LAUNCHER_SHA256
+          if ($LASTEXITCODE -ne 0) { throw 'RELEASE_PRODUCER_OUTPUT_INVALID: staged Windows runtime validation failed' }
+          node tools/release/producer/runtime-inventory.mjs create `
+            --platform windows `
+            --root $stage `
+            --launcher-sha256 $env:WINDOWS_LAUNCHER_SHA256 `
+            --out .release/producer/windows/runtime-inventory.json `
+            --summary-out .release/producer/windows/runtime-summary.json
+          if ($LASTEXITCODE -ne 0) { throw 'RELEASE_PRODUCER_OUTPUT_INVALID: Windows runtime inventory failed' }
+          $summary = Get-Content -LiteralPath '.release/producer/windows/runtime-summary.json' -Raw | ConvertFrom-Json
+          $fileCount = [int64]0
+          $totalBytes = [int64]0
+          if ($summary.launcherSha256 -cnotmatch '^[0-9a-f]{64}$' -or $summary.treeDigest -cnotmatch '^[0-9a-f]{64}$' `
+            -or -not [int64]::TryParse([string]$summary.fileCount, [ref]$fileCount) -or $fileCount -le 0 `
+            -or -not [int64]::TryParse([string]$summary.totalBytes, [ref]$totalBytes) -or $totalBytes -le 0) {
+            throw 'RELEASE_PRODUCER_OUTPUT_INVALID: Windows runtime summary is invalid'
+          }
+          @(
+            "launcher_sha256=$($summary.launcherSha256)"
+            "file_count=$fileCount"
+            "total_bytes=$totalBytes"
+            "tree_digest=$($summary.treeDigest)"
+          ) | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - name: Upload Windows runtime
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: code-oss-windows-x64
+          path: .release/producer/windows/code-oss-windows-x64
+          retention-days: 1
+          if-no-files-found: error
+          include-hidden-files: true
+
+  build-linux:
+    needs: authorize
+    runs-on: ubuntu-24.04
+    outputs:
+      launcher_sha256: ${{ steps.runtime.outputs.launcher_sha256 }}
+      file_count: ${{ steps.runtime.outputs.file_count }}
+      total_bytes: ${{ steps.runtime.outputs.total_bytes }}
+      tree_digest: ${{ steps.runtime.outputs.tree_digest }}
+      mode_inventory_sha256: ${{ steps.runtime.outputs.mode_inventory_sha256 }}
+      appimagetool_sha256: ${{ steps.tool.outputs.appimagetool_sha256 }}
+      appimagetool_size: ${{ steps.tool.outputs.appimagetool_size }}
+    steps:
+      - name: Check out producer source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Set up repository Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.18.0
+      - name: Export validated source manifest
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .release/source
+          node tools/release/producer/source-manifest.mjs export \
+            --manifest tools/release/producer/source-manifest.json \
+            --github-output .release/source/linux.outputs
+          cat .release/source/linux.outputs >> "$GITHUB_OUTPUT"
+      - name: Fetch and verify fixed Code-OSS source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e .producer || { echo 'RELEASE_PRODUCER_UNTRUSTED: producer root must be fresh' >&2; exit 1; }
+          git init .producer/vscode
+          git -C .producer/vscode remote add origin https://github.com/microsoft/vscode.git
+          git -C .producer/vscode -c protocol.version=2 fetch --depth=1 origin b1c0a14de1414fcdaa400695b4db1c0799bc3124
+          git -C .producer/vscode checkout --detach FETCH_HEAD
+          actual_commit="$(git -C .producer/vscode rev-parse HEAD)"
+          [[ "$actual_commit" == 'b1c0a14de1414fcdaa400695b4db1c0799bc3124' ]] || { echo 'RELEASE_PRODUCER_UNTRUSTED: fixed source commit mismatch' >&2; exit 1; }
+          node tools/release/producer/source-manifest.mjs verify-checkout \
+            --manifest tools/release/producer/source-manifest.json \
+            --root .producer/vscode \
+            --actual-commit "$actual_commit"
+      - name: Install fixed Linux build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y build-essential g++ libx11-dev libx11-xcb-dev libxkbfile-dev libsecret-1-dev pkg-config python-is-python3
+      - name: Set up Code-OSS Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 20.14.0
+      - name: Install fixed Yarn
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global --prefix .release/tooling/yarn --no-audit --no-fund yarn@1.22.22
+          [[ "$(.release/tooling/yarn/bin/yarn --version)" == '1.22.22' ]] || { echo 'RELEASE_PRODUCER_BUILD_FAILED: Yarn version mismatch' >&2; exit 1; }
+          printf '%s\n' "$PWD/.release/tooling/yarn/bin" >> "$GITHUB_PATH"
+      - name: Build fixed Linux Code-OSS target
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd .producer/vscode
+          yarn install --frozen-lockfile
+          yarn gulp vscode-linux-x64
+      - name: Set up repository Node.js for validation
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.18.0
+      - name: Validate Linux output root
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -d '' candidates < <(find .producer -mindepth 1 -maxdepth 1 -name 'VSCode-*' -print0)
+          [[ "${#candidates[@]}" -eq 1 && "${candidates[0]}" == '.producer/VSCode-linux-x64' && -d "${candidates[0]}" && ! -L "${candidates[0]}" ]] || {
+            echo 'RELEASE_PRODUCER_OUTPUT_INVALID: Linux output root set is invalid' >&2
+            exit 1
+          }
+      - name: Validate Linux runtime
+        id: linux-launcher
+        shell: bash
+        run: |
+          set -euo pipefail
+          launcher_sha256="$(sha256sum '.producer/VSCode-linux-x64/code-oss' | cut -d' ' -f1)"
+          [[ "$launcher_sha256" =~ ^[0-9a-f]{64}$ ]] || { echo 'RELEASE_PRODUCER_OUTPUT_INVALID: Linux launcher digest is invalid' >&2; exit 1; }
+          node tools/release/code-oss-runtime.mjs --platform linux --root .producer/VSCode-linux-x64 --launcher-sha256 "$launcher_sha256"
+          printf 'launcher_sha256=%s\n' "$launcher_sha256" >> "$GITHUB_OUTPUT"
+      - name: Create Linux mode inventory
+        env:
+          LINUX_LAUNCHER_SHA256: ${{ steps.linux-launcher.outputs.launcher_sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$LINUX_LAUNCHER_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo 'RELEASE_PRODUCER_OUTPUT_INVALID: Linux launcher digest is invalid' >&2; exit 1; }
+          mkdir -p .release/producer/linux
+          node tools/release/linux/runtime-mode-inventory.mjs create \
+            --root .producer/VSCode-linux-x64 \
+            --launcher-sha256 "$LINUX_LAUNCHER_SHA256" \
+            --out .release/producer/linux/code-oss-runtime-mode.json
+      - name: Stage and validate Linux runtime
+        env:
+          LINUX_LAUNCHER_SHA256: ${{ steps.linux-launcher.outputs.launcher_sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$LINUX_LAUNCHER_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo 'RELEASE_PRODUCER_OUTPUT_INVALID: Linux launcher digest is invalid' >&2; exit 1; }
+          stage='.release/producer/linux/code-oss-linux-x64'
+          test ! -e "$stage" || { echo 'RELEASE_PRODUCER_OUTPUT_INVALID: Linux stage must be fresh' >&2; exit 1; }
+          mkdir -p "$stage/runtime"
+          cp -a .producer/VSCode-linux-x64/. "$stage/runtime/"
+          cp .release/producer/linux/code-oss-runtime-mode.json "$stage/code-oss-runtime-mode.json"
+          mapfile -d '' roots < <(find "$stage" -mindepth 1 -maxdepth 1 -printf '%f\0' | sort -z)
+          [[ "${#roots[@]}" -eq 2 && "${roots[0]}" == 'code-oss-runtime-mode.json' && "${roots[1]}" == 'runtime' ]] || {
+            echo 'RELEASE_PRODUCER_OUTPUT_INVALID: Linux stage root set is invalid' >&2
+            exit 1
+          }
+          node tools/release/linux/runtime-mode-inventory.mjs restore \
+            --root "$stage/runtime" \
+            --inventory "$stage/code-oss-runtime-mode.json" \
+            --launcher-sha256 "$LINUX_LAUNCHER_SHA256"
+          node tools/release/code-oss-runtime.mjs --platform linux --root "$stage/runtime" --launcher-sha256 "$LINUX_LAUNCHER_SHA256"
+      - name: Check Linux launcher version
+        shell: bash
+        run: |
+          set -euo pipefail
+          user_data='.release/producer/linux/user-data'
+          mkdir -p "$user_data"
+          version_output="$(timeout 30s .release/producer/linux/code-oss-linux-x64/runtime/code-oss --version --user-data-dir "$user_data")" || {
+            echo 'RELEASE_PRODUCER_OUTPUT_INVALID: Linux launcher version check failed or timed out' >&2
+            exit 1
+          }
+          mapfile -t version_lines <<< "$version_output"
+          [[ "${#version_lines[@]}" -eq 3 && "${version_lines[0]}" == '1.92.0' && "${version_lines[1]}" == 'b1c0a14de1414fcdaa400695b4db1c0799bc3124' && "${version_lines[2]}" == 'x64' ]] || {
+            echo 'RELEASE_PRODUCER_OUTPUT_INVALID: Linux launcher version output is invalid' >&2
+            exit 1
+          }
+      - name: Inventory staged Linux runtime
+        id: runtime
+        env:
+          LINUX_LAUNCHER_SHA256: ${{ steps.linux-launcher.outputs.launcher_sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$LINUX_LAUNCHER_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo 'RELEASE_PRODUCER_OUTPUT_INVALID: Linux launcher digest is invalid' >&2; exit 1; }
+          node tools/release/producer/runtime-inventory.mjs create \
+            --platform linux \
+            --root .release/producer/linux/code-oss-linux-x64/runtime \
+            --launcher-sha256 "$LINUX_LAUNCHER_SHA256" \
+            --mode-inventory .release/producer/linux/code-oss-linux-x64/code-oss-runtime-mode.json \
+            --out .release/producer/linux/runtime-inventory.json \
+            --summary-out .release/producer/linux/runtime-summary.json
+          mode_inventory_sha256="$(sha256sum .release/producer/linux/code-oss-linux-x64/code-oss-runtime-mode.json | cut -d' ' -f1)"
+          node --input-type=module - "$GITHUB_OUTPUT" "$mode_inventory_sha256" <<'NODE'
+          import { appendFile, readFile } from "node:fs/promises";
+          const [output, modeDigest] = process.argv.slice(2);
+          const summary = JSON.parse(await readFile(".release/producer/linux/runtime-summary.json", "utf8"));
+          if (!/^[0-9a-f]{64}$/u.test(summary.launcherSha256)
+            || !/^[0-9a-f]{64}$/u.test(summary.treeDigest)
+            || !/^[0-9a-f]{64}$/u.test(modeDigest)
+            || !Number.isSafeInteger(summary.fileCount) || summary.fileCount <= 0
+            || !Number.isSafeInteger(summary.totalBytes) || summary.totalBytes <= 0) throw new Error("RELEASE_PRODUCER_OUTPUT_INVALID: Linux runtime summary is invalid");
+          await appendFile(output, [
+            `launcher_sha256=${summary.launcherSha256}`,
+            `file_count=${summary.fileCount}`,
+            `total_bytes=${summary.totalBytes}`,
+            `tree_digest=${summary.treeDigest}`,
+            `mode_inventory_sha256=${modeDigest}`,
+            "",
+          ].join("\n"));
+          NODE
+      - name: Acquire and validate appimagetool
+        id: tool
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tool_root='.release/producer/linux/appimagetool-linux-x64'
+          test ! -e "$tool_root" || { echo 'RELEASE_PRODUCER_TOOL_INVALID: appimagetool stage must be fresh' >&2; exit 1; }
+          mkdir -p "$tool_root"
+          tool="$tool_root/appimagetool-x86_64.AppImage"
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+            --header 'Accept: application/octet-stream' \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            --header 'User-Agent: colayc-unitTest-release-input-producer' \
+            https://api.github.com/repos/AppImage/appimagetool/releases/assets/324406882 \
+            --output "$tool"
+          mapfile -d '' tool_files < <(find "$tool_root" -mindepth 1 -maxdepth 1 -printf '%f\0')
+          [[ "${#tool_files[@]}" -eq 1 && "${tool_files[0]}" == 'appimagetool-x86_64.AppImage' && -f "$tool" && ! -L "$tool" ]] || {
+            echo 'RELEASE_PRODUCER_TOOL_INVALID: appimagetool root set is invalid' >&2
+            exit 1
+          }
+          tool_size="$(stat -c '%s' "$tool")"
+          tool_sha256="$(sha256sum "$tool" | cut -d' ' -f1)"
+          [[ "$tool_size" == '15092216' && "$tool_sha256" == 'a6d71e2b6cd66f8e8d16c37ad164658985e0cf5fcaa950c90a482890cb9d13e0' ]] || {
+            echo 'RELEASE_PRODUCER_TOOL_INVALID: appimagetool size or digest mismatch' >&2
+            exit 1
+          }
+          printf 'appimagetool_sha256=%s\n' "$tool_sha256" >> "$GITHUB_OUTPUT"
+          printf 'appimagetool_size=%s\n' "$tool_size" >> "$GITHUB_OUTPUT"
+      - name: Upload Linux runtime
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: code-oss-linux-x64
+          path: .release/producer/linux/code-oss-linux-x64
+          retention-days: 1
+          if-no-files-found: error
+          include-hidden-files: true
+      - name: Upload appimagetool
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: appimagetool-linux-x64
+          path: .release/producer/linux/appimagetool-linux-x64/appimagetool-x86_64.AppImage
+          retention-days: 1
+          if-no-files-found: error
+
+  attest:
+    needs:
+      - build-windows
+      - build-linux
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out producer source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Set up repository Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.18.0
+      - name: Download Windows runtime
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: code-oss-windows-x64
+          path: .release/transport/windows
+      - name: Download Linux runtime
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: code-oss-linux-x64
+          path: .release/transport/linux
+      - name: Download appimagetool
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: appimagetool-linux-x64
+          path: .release/transport/appimagetool
+      - name: Validate exact transport roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -d '' transport_roots < <(find .release/transport -mindepth 1 -maxdepth 1 -printf '%f\0' | sort -z)
+          [[ "${#transport_roots[@]}" -eq 3 && "${transport_roots[0]}" == 'appimagetool' && "${transport_roots[1]}" == 'linux' && "${transport_roots[2]}" == 'windows' ]] || {
+            echo 'RELEASE_PRODUCER_OUTPUT_INVALID: transport root set is invalid' >&2
+            exit 1
+          }
+          mapfile -d '' linux_roots < <(find .release/transport/linux -mindepth 1 -maxdepth 1 -printf '%f\0' | sort -z)
+          [[ "${#linux_roots[@]}" -eq 2 && "${linux_roots[0]}" == 'code-oss-runtime-mode.json' && "${linux_roots[1]}" == 'runtime' ]] || {
+            echo 'RELEASE_PRODUCER_OUTPUT_INVALID: transported Linux root set is invalid' >&2
+            exit 1
+          }
+          tool='.release/transport/appimagetool/appimagetool-x86_64.AppImage'
+          mapfile -d '' tool_roots < <(find .release/transport/appimagetool -mindepth 1 -maxdepth 1 -printf '%f\0')
+          [[ "${#tool_roots[@]}" -eq 1 && "${tool_roots[0]}" == 'appimagetool-x86_64.AppImage' && -f "$tool" && ! -L "$tool" ]] || {
+            echo 'RELEASE_PRODUCER_TOOL_INVALID: transported appimagetool root set is invalid' >&2
+            exit 1
+          }
+          [[ -f '.release/transport/windows/Code - OSS.exe' && ! -L '.release/transport/windows/Code - OSS.exe' ]] || {
+            echo 'RELEASE_PRODUCER_OUTPUT_INVALID: transported Windows root is invalid' >&2
+            exit 1
+          }
+      - name: Revalidate transported runtimes and tool
+        id: transported
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .release/attest-work
+          windows_launcher_sha256="$(sha256sum '.release/transport/windows/Code - OSS.exe' | cut -d' ' -f1)"
+          [[ "$windows_launcher_sha256" =~ ^[0-9a-f]{64}$ ]] || { echo 'RELEASE_PRODUCER_OUTPUT_INVALID: transported Windows launcher digest is invalid' >&2; exit 1; }
+          node tools/release/code-oss-runtime.mjs \
+            --platform windows \
+            --root .release/transport/windows \
+            --launcher-sha256 "$windows_launcher_sha256"
+          node tools/release/producer/runtime-inventory.mjs create \
+            --platform windows \
+            --root .release/transport/windows \
+            --launcher-sha256 "$windows_launcher_sha256" \
+            --out .release/attest-work/windows-inventory.json \
+            --summary-out .release/attest-work/windows-summary.json
+
+          linux_launcher_sha256="$(sha256sum .release/transport/linux/runtime/code-oss | cut -d' ' -f1)"
+          [[ "$linux_launcher_sha256" =~ ^[0-9a-f]{64}$ ]] || { echo 'RELEASE_PRODUCER_OUTPUT_INVALID: transported Linux launcher digest is invalid' >&2; exit 1; }
+          node tools/release/linux/runtime-mode-inventory.mjs restore \
+            --root .release/transport/linux/runtime \
+            --inventory .release/transport/linux/code-oss-runtime-mode.json \
+            --launcher-sha256 "$linux_launcher_sha256"
+          node tools/release/code-oss-runtime.mjs \
+            --platform linux \
+            --root .release/transport/linux/runtime \
+            --launcher-sha256 "$linux_launcher_sha256"
+          version_output="$(timeout 30s .release/transport/linux/runtime/code-oss --version --user-data-dir .release/attest-work/linux-user-data)" || {
+            echo 'RELEASE_PRODUCER_OUTPUT_INVALID: transported Linux launcher version check failed or timed out' >&2
+            exit 1
+          }
+          mapfile -t version_lines <<< "$version_output"
+          [[ "${#version_lines[@]}" -eq 3 && "${version_lines[0]}" == '1.92.0' && "${version_lines[1]}" == 'b1c0a14de1414fcdaa400695b4db1c0799bc3124' && "${version_lines[2]}" == 'x64' ]] || {
+            echo 'RELEASE_PRODUCER_OUTPUT_INVALID: transported Linux launcher version output is invalid' >&2
+            exit 1
+          }
+          node tools/release/producer/runtime-inventory.mjs create \
+            --platform linux \
+            --root .release/transport/linux/runtime \
+            --launcher-sha256 "$linux_launcher_sha256" \
+            --mode-inventory .release/transport/linux/code-oss-runtime-mode.json \
+            --out .release/attest-work/linux-inventory.json \
+            --summary-out .release/attest-work/linux-summary.json
+
+          mode_inventory_sha256="$(sha256sum .release/transport/linux/code-oss-runtime-mode.json | cut -d' ' -f1)"
+          tool='.release/transport/appimagetool/appimagetool-x86_64.AppImage'
+          appimagetool_size="$(stat -c '%s' "$tool")"
+          appimagetool_sha256="$(sha256sum "$tool" | cut -d' ' -f1)"
+          [[ "$appimagetool_size" == '15092216' && "$appimagetool_sha256" == 'a6d71e2b6cd66f8e8d16c37ad164658985e0cf5fcaa950c90a482890cb9d13e0' ]] || {
+            echo 'RELEASE_PRODUCER_TOOL_INVALID: transported appimagetool size or digest mismatch' >&2
+            exit 1
+          }
+          printf 'windows_launcher_sha256=%s\n' "$windows_launcher_sha256" >> "$GITHUB_OUTPUT"
+          printf 'linux_launcher_sha256=%s\n' "$linux_launcher_sha256" >> "$GITHUB_OUTPUT"
+          printf 'mode_inventory_sha256=%s\n' "$mode_inventory_sha256" >> "$GITHUB_OUTPUT"
+          printf 'appimagetool_sha256=%s\n' "$appimagetool_sha256" >> "$GITHUB_OUTPUT"
+          printf 'appimagetool_size=%s\n' "$appimagetool_size" >> "$GITHUB_OUTPUT"
+      - name: Compare transported summaries
+        env:
+          EXPECTED_WINDOWS_LAUNCHER_SHA256: ${{ needs.build-windows.outputs.launcher_sha256 }}
+          EXPECTED_WINDOWS_FILE_COUNT: ${{ needs.build-windows.outputs.file_count }}
+          EXPECTED_WINDOWS_TOTAL_BYTES: ${{ needs.build-windows.outputs.total_bytes }}
+          EXPECTED_WINDOWS_TREE_DIGEST: ${{ needs.build-windows.outputs.tree_digest }}
+          EXPECTED_LINUX_LAUNCHER_SHA256: ${{ needs.build-linux.outputs.launcher_sha256 }}
+          EXPECTED_LINUX_FILE_COUNT: ${{ needs.build-linux.outputs.file_count }}
+          EXPECTED_LINUX_TOTAL_BYTES: ${{ needs.build-linux.outputs.total_bytes }}
+          EXPECTED_LINUX_TREE_DIGEST: ${{ needs.build-linux.outputs.tree_digest }}
+          EXPECTED_MODE_INVENTORY_SHA256: ${{ needs.build-linux.outputs.mode_inventory_sha256 }}
+          EXPECTED_APPIMAGETOOL_SHA256: ${{ needs.build-linux.outputs.appimagetool_sha256 }}
+          EXPECTED_APPIMAGETOOL_SIZE: ${{ needs.build-linux.outputs.appimagetool_size }}
+          ACTUAL_MODE_INVENTORY_SHA256: ${{ steps.transported.outputs.mode_inventory_sha256 }}
+          ACTUAL_APPIMAGETOOL_SHA256: ${{ steps.transported.outputs.appimagetool_sha256 }}
+          ACTUAL_APPIMAGETOOL_SIZE: ${{ steps.transported.outputs.appimagetool_size }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module - <<'NODE'
+          import { readFile } from "node:fs/promises";
+          const digest = /^[0-9a-f]{64}$/u;
+          const decimal = /^(?:0|[1-9][0-9]*)$/u;
+          const fail = (field) => { throw new Error(`RELEASE_PRODUCER_PROVENANCE_INVALID: ${field} mismatch`); };
+          const windows = JSON.parse(await readFile(".release/attest-work/windows-summary.json", "utf8"));
+          const linux = JSON.parse(await readFile(".release/attest-work/linux-summary.json", "utf8"));
+          const expectedDigests = [
+            process.env.EXPECTED_WINDOWS_LAUNCHER_SHA256,
+            process.env.EXPECTED_WINDOWS_TREE_DIGEST,
+            process.env.EXPECTED_LINUX_LAUNCHER_SHA256,
+            process.env.EXPECTED_LINUX_TREE_DIGEST,
+            process.env.EXPECTED_MODE_INVENTORY_SHA256,
+            process.env.EXPECTED_APPIMAGETOOL_SHA256,
+            process.env.ACTUAL_MODE_INVENTORY_SHA256,
+            process.env.ACTUAL_APPIMAGETOOL_SHA256,
+          ];
+          if (expectedDigests.some((value) => !digest.test(value ?? ""))) fail("digest format");
+          const expectedDecimals = [
+            process.env.EXPECTED_WINDOWS_FILE_COUNT,
+            process.env.EXPECTED_WINDOWS_TOTAL_BYTES,
+            process.env.EXPECTED_LINUX_FILE_COUNT,
+            process.env.EXPECTED_LINUX_TOTAL_BYTES,
+            process.env.EXPECTED_APPIMAGETOOL_SIZE,
+            process.env.ACTUAL_APPIMAGETOOL_SIZE,
+          ];
+          if (expectedDecimals.some((value) => !decimal.test(value ?? ""))) fail("decimal format");
+          const comparisons = [
+            [windows.launcherSha256, process.env.EXPECTED_WINDOWS_LAUNCHER_SHA256, "Windows launcher"],
+            [String(windows.fileCount), process.env.EXPECTED_WINDOWS_FILE_COUNT, "Windows file count"],
+            [String(windows.totalBytes), process.env.EXPECTED_WINDOWS_TOTAL_BYTES, "Windows total bytes"],
+            [windows.treeDigest, process.env.EXPECTED_WINDOWS_TREE_DIGEST, "Windows tree digest"],
+            [linux.launcherSha256, process.env.EXPECTED_LINUX_LAUNCHER_SHA256, "Linux launcher"],
+            [String(linux.fileCount), process.env.EXPECTED_LINUX_FILE_COUNT, "Linux file count"],
+            [String(linux.totalBytes), process.env.EXPECTED_LINUX_TOTAL_BYTES, "Linux total bytes"],
+            [linux.treeDigest, process.env.EXPECTED_LINUX_TREE_DIGEST, "Linux tree digest"],
+            [process.env.ACTUAL_MODE_INVENTORY_SHA256, process.env.EXPECTED_MODE_INVENTORY_SHA256, "Linux mode inventory"],
+            [process.env.ACTUAL_APPIMAGETOOL_SHA256, process.env.EXPECTED_APPIMAGETOOL_SHA256, "appimagetool digest"],
+            [process.env.ACTUAL_APPIMAGETOOL_SIZE, process.env.EXPECTED_APPIMAGETOOL_SIZE, "appimagetool size"],
+            [process.env.ACTUAL_APPIMAGETOOL_SHA256, "a6d71e2b6cd66f8e8d16c37ad164658985e0cf5fcaa950c90a482890cb9d13e0", "fixed appimagetool digest"],
+            [process.env.ACTUAL_APPIMAGETOOL_SIZE, "15092216", "fixed appimagetool size"],
+          ];
+          for (const [actual, expected, field] of comparisons) if (actual !== expected) fail(field);
+          NODE
+      - name: Create and validate provenance
+        env:
+          PRODUCER_REPOSITORY: ${{ github.repository }}
+          PRODUCER_SOURCE_COMMIT: ${{ github.sha }}
+          PRODUCER_EVENT: ${{ github.event_name }}
+          PRODUCER_REF: ${{ github.ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$PRODUCER_REPOSITORY" == 'colayc/unitTest' ]] || { echo 'RELEASE_PRODUCER_UNTRUSTED: producer repository mismatch' >&2; exit 1; }
+          [[ "$PRODUCER_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo 'RELEASE_PRODUCER_UNTRUSTED: producer source commit is invalid' >&2; exit 1; }
+          [[ "$PRODUCER_EVENT" == 'workflow_dispatch' && "$PRODUCER_REF" == 'refs/heads/master' ]] || {
+            echo 'RELEASE_PRODUCER_UNTRUSTED: producer invocation mismatch' >&2
+            exit 1
+          }
+          test ! -e .release/attestation || { echo 'RELEASE_PRODUCER_PROVENANCE_INVALID: attestation output directory must be fresh' >&2; exit 1; }
+          node tools/release/producer/provenance.mjs create \
+            --manifest tools/release/producer/source-manifest.json \
+            --windows-summary .release/attest-work/windows-summary.json \
+            --linux-summary .release/attest-work/linux-summary.json \
+            --linux-mode-inventory .release/transport/linux/code-oss-runtime-mode.json \
+            --appimagetool .release/transport/appimagetool/appimagetool-x86_64.AppImage \
+            --producer-repository "$PRODUCER_REPOSITORY" \
+            --producer-workflow-path .github/workflows/release-inputs.yml \
+            --producer-source-commit "$PRODUCER_SOURCE_COMMIT" \
+            --producer-event "$PRODUCER_EVENT" \
+            --producer-ref "$PRODUCER_REF" \
+            --out .release/attestation/release-input-provenance.json
+          node tools/release/producer/provenance.mjs validate \
+            --manifest tools/release/producer/source-manifest.json \
+            --provenance .release/attestation/release-input-provenance.json
+          mapfile -d '' provenance_files < <(find .release/attestation -mindepth 1 -maxdepth 1 -printf '%f\0')
+          [[ "${#provenance_files[@]}" -eq 1 && "${provenance_files[0]}" == 'release-input-provenance.json' && -f .release/attestation/release-input-provenance.json && ! -L .release/attestation/release-input-provenance.json ]] || {
+            echo 'RELEASE_PRODUCER_PROVENANCE_INVALID: provenance output set is invalid' >&2
+            exit 1
+          }
+      - name: Write validated workflow summary
+        env:
+          PRODUCER_RUN_ID: ${{ github.run_id }}
+          SOURCE_COMMIT: ${{ github.sha }}
+          WINDOWS_LAUNCHER_SHA256: ${{ steps.transported.outputs.windows_launcher_sha256 }}
+          LINUX_LAUNCHER_SHA256: ${{ steps.transported.outputs.linux_launcher_sha256 }}
+          APPIMAGETOOL_SHA256: ${{ steps.transported.outputs.appimagetool_sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$PRODUCER_RUN_ID" =~ ^[1-9][0-9]*$ ]] || { echo 'RELEASE_PRODUCER_PROVENANCE_INVALID: producer run ID is invalid' >&2; exit 1; }
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo 'RELEASE_PRODUCER_PROVENANCE_INVALID: source commit is invalid' >&2; exit 1; }
+          for digest in "$WINDOWS_LAUNCHER_SHA256" "$LINUX_LAUNCHER_SHA256" "$APPIMAGETOOL_SHA256"; do
+            [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || { echo 'RELEASE_PRODUCER_PROVENANCE_INVALID: summary digest is invalid' >&2; exit 1; }
+          done
+          {
+            printf -- '- Producer run ID: `%s`\n' "$PRODUCER_RUN_ID"
+            printf -- '- Source commit: `%s`\n' "$SOURCE_COMMIT"
+            printf -- '- Windows launcher SHA-256: `%s`\n' "$WINDOWS_LAUNCHER_SHA256"
+            printf -- '- Linux launcher SHA-256: `%s`\n' "$LINUX_LAUNCHER_SHA256"
+            printf -- '- appimagetool SHA-256: `%s`\n' "$APPIMAGETOOL_SHA256"
+            printf -- '- Artifact retention: `1 day`\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload release input provenance
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-input-provenance
+          path: .release/attestation/release-input-provenance.json
+          retention-days: 1
+          if-no-files-found: error
