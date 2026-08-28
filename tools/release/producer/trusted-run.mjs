@@ -12,12 +12,16 @@ const INVALID = "RELEASE_PRODUCER_PROVENANCE_INVALID";
 const runIdPattern = /^[1-9][0-9]*$/u;
 const commitPattern = /^[0-9a-f]{40}$/u;
 const digestPattern = /^[0-9a-f]{64}$/u;
-const runKeys = ["conclusion", "event", "head_branch", "head_sha", "id", "path", "repository", "status"].sort();
+const runKeys = ["conclusion", "event", "head_branch", "head_sha", "id", "path", "repository", "run_attempt", "status"].sort();
 const repositoryKeys = ["full_name"];
-const metadataKeys = ["expectedConsumerCommit", "expectedRunId", "run"].sort();
-const trustedInputKeys = ["expectedAppimagetoolSha256", "expectedConsumerCommit", "expectedLinuxLauncherSha256", "expectedRunId", "expectedWindowsLauncherSha256", "provenance", "run"].sort();
-const runOutputKeys = ["run_id"];
-const provenanceOutputKeys = ["run_id", "windows_launcher_sha256", "linux_launcher_sha256", "appimagetool_sha256"];
+const metadataKeys = ["expectedConsumerCommit", "expectedRunAttempt", "expectedRunId", "run"].sort();
+const metadataKeysWithoutAttempt = ["expectedConsumerCommit", "expectedRunId", "run"].sort();
+const trustedInputKeys = ["artifacts", "expectedConsumerCommit", "expectedRunAttempt", "expectedRunId", "provenance", "provenanceArtifactDigest", "provenanceArtifactId", "run"].sort();
+const artifactListKeys = ["artifacts", "total_count"];
+const artifactKeys = ["digest", "expired", "id", "name", "workflow_run"];
+const workflowRunKeys = ["id"];
+const runOutputKeys = ["run_id", "run_attempt", "provenance_artifact_id", "provenance_artifact_digest"];
+const provenanceOutputKeys = ["run_id", "run_attempt", "windows_launcher_sha256", "linux_launcher_sha256", "appimagetool_sha256", "windows_artifact_id", "windows_artifact_digest", "linux_artifact_id", "linux_artifact_digest", "appimagetool_artifact_id", "appimagetool_artifact_digest"];
 const maximumGithubOutputBytes = 1024 * 1024;
 const execFileAsync = promisify(execFile);
 const windowsReparsePointCommand = "$node=Get-Item -Force -LiteralPath $env:TRUSTED_RUN_PATH; while ($null -ne $node) { if (($node.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { [Console]::Out.Write('1'); exit 0 }; $node=$node.Parent }; [Console]::Out.Write('0')";
@@ -66,8 +70,7 @@ function snapshotProjectedDataObject(value, requiredKeys) {
   return snapshot;
 }
 
-function canonicalRunId(value) {
-  if (typeof value === "string" && runIdPattern.test(value)) return value;
+function canonicalApiId(value) {
   if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) return String(value);
   return undefined;
 }
@@ -76,17 +79,40 @@ function canonicalExpectedRunId(value) {
   return typeof value === "string" && runIdPattern.test(value) ? value : undefined;
 }
 
+function canonicalExpectedAttempt(value) {
+  if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) return value;
+  if (typeof value !== "string" || !runIdPattern.test(value)) return undefined;
+  const attempt = Number(value);
+  return Number.isSafeInteger(attempt) ? attempt : undefined;
+}
+
+function canonicalApiAttempt(value) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
+function canonicalRepositoryId(value) {
+  return typeof value === "string" && runIdPattern.test(value) ? value : undefined;
+}
+
+function snapshotMetadataRequest(value) {
+  return snapshotDataObject(value, metadataKeys) ?? snapshotDataObject(value, metadataKeysWithoutAttempt);
+}
+
 function trustedMetadata(request) {
-  const input = snapshotDataObject(request, metadataKeys);
+  const input = snapshotMetadataRequest(request);
   if (!input) failUntrusted();
   const expectedRunId = canonicalExpectedRunId(input.expectedRunId);
   if (!expectedRunId || typeof input.expectedConsumerCommit !== "string" || !commitPattern.test(input.expectedConsumerCommit)) failUntrusted();
   const run = snapshotProjectedDataObject(input.run, runKeys);
   if (!run) failUntrusted();
   const repository = snapshotProjectedDataObject(run.repository, repositoryKeys);
-  const runId = canonicalRunId(run.id);
+  const runId = canonicalApiId(run.id);
+  const runAttempt = canonicalApiAttempt(run.run_attempt);
+  const expectedRunAttempt = Object.hasOwn(input, "expectedRunAttempt") ? canonicalExpectedAttempt(input.expectedRunAttempt) : undefined;
   if (!repository || !runId
+    || !runAttempt
     || runId !== expectedRunId
+    || (Object.hasOwn(input, "expectedRunAttempt") && (!expectedRunAttempt || runAttempt !== expectedRunAttempt))
     || repository.full_name !== "colayc/unitTest"
     || run.path !== ".github/workflows/release-inputs.yml"
     || run.event !== "workflow_dispatch"
@@ -94,16 +120,64 @@ function trustedMetadata(request) {
     || run.head_sha !== input.expectedConsumerCommit
     || run.status !== "completed"
     || run.conclusion !== "success") failUntrusted();
-  return Object.freeze({ runId, expectedConsumerCommit: input.expectedConsumerCommit });
+  return Object.freeze({ runId, runAttempt, expectedConsumerCommit: input.expectedConsumerCommit });
 }
 
 export function validateProducerRunMetadata(request) {
   const metadata = trustedMetadata(request);
-  return Object.freeze({ runId: metadata.runId });
+  return Object.freeze({ runId: metadata.runId, runAttempt: metadata.runAttempt });
 }
 
 function canonicalDigest(value) {
   return typeof value === "string" && digestPattern.test(value) ? value : undefined;
+}
+
+function snapshotGithubArtifacts(value, runId) {
+  const api = snapshotProjectedDataObject(value, artifactListKeys);
+  if (!api || !Array.isArray(api.artifacts)
+    || !Number.isSafeInteger(api.total_count) || api.total_count < 0
+    || api.total_count !== api.artifacts.length || api.total_count > 100) failUntrusted("producer artifacts are not trusted");
+  const artifacts = [];
+  for (const value of api.artifacts) {
+    const artifact = snapshotProjectedDataObject(value, artifactKeys);
+    const workflowRun = artifact && snapshotProjectedDataObject(artifact.workflow_run, workflowRunKeys);
+    const artifactId = artifact && canonicalApiId(artifact.id);
+    const workflowRunId = workflowRun && canonicalApiId(workflowRun.id);
+    const digest = artifact && typeof artifact.digest === "string" && artifact.digest.startsWith("sha256:")
+      ? canonicalDigest(artifact.digest.slice("sha256:".length)) : undefined;
+    if (!artifact || !workflowRun || !artifactId || !workflowRunId || workflowRunId !== runId
+      || typeof artifact.name !== "string" || typeof artifact.expired !== "boolean" || !digest) failUntrusted("producer artifacts are not trusted");
+    artifacts.push(Object.freeze({ id: artifactId, name: artifact.name, expired: artifact.expired, digest, runId: workflowRunId }));
+  }
+  return Object.freeze(artifacts);
+}
+
+function selectArtifact(artifacts, transportName) {
+  const matches = artifacts.filter((artifact) => artifact.name === transportName);
+  if (matches.length !== 1 || matches[0].expired) failUntrusted("producer artifact is not trusted");
+  return matches[0];
+}
+
+export function selectProvenanceArtifact(request) {
+  const input = snapshotDataObject(request, ["artifacts", "runAttempt", "runId"].sort());
+  const runId = input && canonicalRepositoryId(input.runId);
+  const runAttempt = input && canonicalExpectedAttempt(input.runAttempt);
+  if (!input || !runId || !runAttempt) failUntrusted("producer artifact selection is invalid");
+  const artifact = selectArtifact(snapshotGithubArtifacts(input.artifacts, runId), `release-input-provenance-${runAttempt}`);
+  return Object.freeze({
+    provenanceArtifactId: artifact.id,
+    provenanceArtifactDigest: artifact.digest,
+    provenanceTransportName: artifact.name,
+  });
+}
+
+function validateArtifactBinding(artifacts, provenanceArtifact, logicalName, runAttempt) {
+  const artifact = selectArtifact(artifacts, `${logicalName}-${runAttempt}`);
+  if (provenanceArtifact.artifactName !== logicalName
+    || provenanceArtifact.artifactId !== artifact.id
+    || provenanceArtifact.artifactDigest !== artifact.digest
+    || provenanceArtifact.transportName !== artifact.name) failInvalid();
+  return artifact;
 }
 
 export function validateTrustedReleaseInputs(request) {
@@ -113,11 +187,14 @@ export function validateTrustedReleaseInputs(request) {
     run: input.run,
     expectedRunId: input.expectedRunId,
     expectedConsumerCommit: input.expectedConsumerCommit,
+    expectedRunAttempt: input.expectedRunAttempt,
   });
-  const windows = canonicalDigest(input.expectedWindowsLauncherSha256);
-  const linux = canonicalDigest(input.expectedLinuxLauncherSha256);
-  const appimagetool = canonicalDigest(input.expectedAppimagetoolSha256);
-  if (!windows || !linux || !appimagetool) failInvalid();
+  const provenanceArtifactId = canonicalRepositoryId(input.provenanceArtifactId);
+  const provenanceArtifactDigest = canonicalDigest(input.provenanceArtifactDigest);
+  if (!provenanceArtifactId || !provenanceArtifactDigest) failInvalid();
+  const artifacts = snapshotGithubArtifacts(input.artifacts, metadata.runId);
+  const selectedProvenance = selectArtifact(artifacts, `release-input-provenance-${metadata.runAttempt}`);
+  if (selectedProvenance.id !== provenanceArtifactId || selectedProvenance.digest !== provenanceArtifactDigest) failUntrusted("provenance artifact changed");
   let provenance;
   try {
     provenance = validateReleaseInputProvenance(input.provenance);
@@ -125,14 +202,23 @@ export function validateTrustedReleaseInputs(request) {
     failInvalid();
   }
   if (provenance.producer.sourceCommit !== metadata.expectedConsumerCommit
-    || provenance.runtimes.windows.launcherSha256 !== windows
-    || provenance.runtimes.linux.launcherSha256 !== linux
-    || provenance.appimagetool.sha256 !== appimagetool) failInvalid();
+    || provenance.producer.runId !== metadata.runId
+    || provenance.producer.runAttempt !== metadata.runAttempt) failInvalid();
+  const windowsArtifact = validateArtifactBinding(artifacts, provenance.runtimes.windows, "code-oss-windows-x64", metadata.runAttempt);
+  const linuxArtifact = validateArtifactBinding(artifacts, provenance.runtimes.linux, "code-oss-linux-x64", metadata.runAttempt);
+  const appimagetoolArtifact = validateArtifactBinding(artifacts, provenance.appimagetool, "appimagetool-linux-x64", metadata.runAttempt);
   return Object.freeze({
     runId: metadata.runId,
-    windowsLauncherSha256: windows,
-    linuxLauncherSha256: linux,
-    appimagetoolSha256: appimagetool,
+    runAttempt: metadata.runAttempt,
+    windowsLauncherSha256: provenance.runtimes.windows.launcherSha256,
+    linuxLauncherSha256: provenance.runtimes.linux.launcherSha256,
+    appimagetoolSha256: provenance.appimagetool.sha256,
+    windowsArtifactId: windowsArtifact.id,
+    windowsArtifactDigest: windowsArtifact.digest,
+    linuxArtifactId: linuxArtifact.id,
+    linuxArtifactDigest: linuxArtifact.digest,
+    appimagetoolArtifactId: appimagetoolArtifact.id,
+    appimagetoolArtifactDigest: appimagetoolArtifact.digest,
   });
 }
 
@@ -361,10 +447,12 @@ function parseCli(argv) {
     options[key] = value;
   }
   const expected = command === "validate-run"
-    ? ["--consumer-commit", "--github-output", "--run-id", "--run-json"].sort()
+    ? ["--artifacts-json", "--consumer-commit", "--github-output", "--run-id", "--run-json"].sort()
     : command === "validate-provenance"
-      ? ["--appimagetool-sha256", "--consumer-commit", "--github-output", "--linux-launcher-sha256", "--provenance", "--run-id", "--run-json", "--windows-launcher-sha256"].sort()
-      : [];
+      ? ["--artifacts-json", "--consumer-commit", "--github-output", "--provenance", "--provenance-artifact-digest", "--provenance-artifact-id", "--run-attempt", "--run-id", "--run-json"].sort()
+      : command === "validate-attempt"
+        ? ["--consumer-commit", "--run-attempt", "--run-id", "--run-json"].sort()
+        : [];
   if (!snapshotDataObject(options, expected)) failUntrusted("command arguments are invalid");
   return { command, options };
 }
@@ -374,21 +462,35 @@ async function main(argv) {
   const run = await readTrustedJson(options["--run-json"], UNTRUSTED);
   if (command === "validate-run") {
     const result = validateProducerRunMetadata({ run, expectedRunId: options["--run-id"], expectedConsumerCommit: options["--consumer-commit"] });
-    await appendGithubOutput(options["--github-output"], [["run_id", result.runId]]);
+    const provenance = selectProvenanceArtifact({
+      artifacts: await readTrustedJson(options["--artifacts-json"], UNTRUSTED), runId: result.runId, runAttempt: result.runAttempt,
+    });
+    await appendGithubOutput(options["--github-output"], [
+      ["run_id", result.runId], ["run_attempt", String(result.runAttempt)],
+      ["provenance_artifact_id", provenance.provenanceArtifactId], ["provenance_artifact_digest", provenance.provenanceArtifactDigest],
+    ]);
     return;
   }
   if (command === "validate-provenance") {
     const provenance = await readTrustedJson(options["--provenance"], INVALID);
     const result = validateTrustedReleaseInputs({
-      run, provenance, expectedRunId: options["--run-id"], expectedConsumerCommit: options["--consumer-commit"],
-      expectedWindowsLauncherSha256: options["--windows-launcher-sha256"],
-      expectedLinuxLauncherSha256: options["--linux-launcher-sha256"],
-      expectedAppimagetoolSha256: options["--appimagetool-sha256"],
+      run, provenance, artifacts: await readTrustedJson(options["--artifacts-json"], UNTRUSTED),
+      expectedRunId: options["--run-id"], expectedRunAttempt: options["--run-attempt"], expectedConsumerCommit: options["--consumer-commit"],
+      provenanceArtifactId: options["--provenance-artifact-id"], provenanceArtifactDigest: options["--provenance-artifact-digest"],
     });
     await appendGithubOutput(options["--github-output"], [
-      ["run_id", result.runId], ["windows_launcher_sha256", result.windowsLauncherSha256],
+      ["run_id", result.runId], ["run_attempt", String(result.runAttempt)], ["windows_launcher_sha256", result.windowsLauncherSha256],
       ["linux_launcher_sha256", result.linuxLauncherSha256], ["appimagetool_sha256", result.appimagetoolSha256],
+      ["windows_artifact_id", result.windowsArtifactId], ["windows_artifact_digest", result.windowsArtifactDigest],
+      ["linux_artifact_id", result.linuxArtifactId], ["linux_artifact_digest", result.linuxArtifactDigest],
+      ["appimagetool_artifact_id", result.appimagetoolArtifactId], ["appimagetool_artifact_digest", result.appimagetoolArtifactDigest],
     ]);
+    return;
+  }
+  if (command === "validate-attempt") {
+    validateProducerRunMetadata({
+      run, expectedRunId: options["--run-id"], expectedRunAttempt: options["--run-attempt"], expectedConsumerCommit: options["--consumer-commit"],
+    });
     return;
   }
   failUntrusted("command is invalid");
