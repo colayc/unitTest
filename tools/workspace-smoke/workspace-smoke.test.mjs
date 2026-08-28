@@ -239,15 +239,17 @@ test("release documentation describes complete digest-pinned Code-OSS runtime ar
 });
 
 test("trusted producer documentation keeps unsigned qualification operational, closed, and incomplete", async () => {
-  const [readme, security, roadmap] = await Promise.all([
+  const [readme, security, roadmap, foundation] = await Promise.all([
     readFile("README.md", "utf8"),
     readFile("docs/security.md", "utf8"),
     readFile("docs/superpowers/plans/2026-07-21-cpp-unit-test-ide-roadmap.md", "utf8"),
+    readFile(".github/workflows/foundation.yml", "utf8"),
   ]);
 
   const producerProcedure = readme.slice(readme.indexOf("## 受信任的 Code-OSS 发布输入"));
   assert.notEqual(producerProcedure, readme, "README must own the qualification procedure in a dedicated section");
   assert.match(producerProcedure, /\.github\/workflows\/release-inputs\.yml/u);
+  assert.match(producerProcedure, /Trusted Code-OSS release inputs/u);
   assert.match(producerProcedure, /b1c0a14de1414fcdaa400695b4db1c0799bc3124/u);
   assert.match(producerProcedure, /windows-2022/u);
   assert.match(producerProcedure, /Visual Studio 2022[\s\S]*C\+\+[\s\S]*Spectre/u);
@@ -256,11 +258,18 @@ test("trusted producer documentation keeps unsigned qualification operational, c
     assert.match(producerProcedure, new RegExp(artifactName));
   }
   assert.match(producerProcedure, /保留.*1.*天|1.*天.*保留/u);
-  assert.match(producerProcedure, /gh workflow run release-inputs\.yml --repo colayc\/unitTest --ref master/u);
+  assert.match(producerProcedure, /Start-ClosedWorkflowRun -Workflow 'release-inputs\.yml' -ExpectedWorkflowName 'Trusted Code-OSS release inputs'/u);
+  assert.match(producerProcedure, /function Start-ClosedWorkflowRun/u);
+  assert.match(producerProcedure, /gh run list[\s\S]*--limit 100[\s\S]*--json databaseId,headSha,event,headBranch,workflowName/u);
+  assert.match(producerProcedure, /https:\/\/github\\\.com\/colayc\/unitTest\/actions\/runs\/\(\?<runId>\[1-9\]\[0-9\]\*\)/u);
+  assert.match(producerProcedure, /gh run view \$runId --repo colayc\/unitTest --json databaseId,headSha,event,headBranch,workflowName/u);
+  assert.match(producerProcedure, /headSha[\s\S]*event[\s\S]*headBranch[\s\S]*workflowName/u);
+  assert.match(producerProcedure, /candidate.*Count -gt 1|Count -gt 1.*candidate/u);
+  assert.match(producerProcedure, /did not resolve exactly one newly dispatched run/u);
+  assert.doesNotMatch(producerProcedure, /gh run list[^\n]*--limit\s+1(?![0-9])/u);
   assert.match(producerProcedure, /release_version=0\.1\.0/u);
   assert.match(producerProcedure, /release_signing_required=0/u);
-  assert.match(producerProcedure, /gh workflow run foundation\.yml --repo colayc\/unitTest --ref master/u);
-  assert.match(producerProcedure, /gh run list --repo colayc\/unitTest --workflow foundation\.yml --branch master --event workflow_dispatch/u);
+  assert.match(producerProcedure, /Start-ClosedWorkflowRun -Workflow 'foundation\.yml' -ExpectedWorkflowName 'foundation'/u);
   assert.match(producerProcedure, /gh api "repos\/colayc\/unitTest\/actions\/runs\/\$releaseRunId\/artifacts"/u);
   assert.match(producerProcedure, /重新运行.*新的.*producer|新的.*producer.*artifact|fresh producer artifact/u);
   assert.match(producerProcedure, /release-inputs\/code-oss\.exe.*不是允许|不是允许.*release-inputs\/code-oss\.exe/u);
@@ -275,12 +284,45 @@ test("trusted producer documentation keeps unsigned qualification operational, c
   assert.match(releaseTrustBoundary, /release-inputs\/code-oss\.exe.*禁止|禁止.*release-inputs\/code-oss\.exe/u);
   assert.match(releaseTrustBoundary, /GitHub Release.*不|不.*GitHub Release/u);
   assert.match(releaseTrustBoundary, /生产发布.*不|不.*生产发布/u);
+  assert.match(releaseTrustBoundary, /不使用.*self-hosted runner|禁止使用.*self-hosted runner/u);
 
   const phaseEight = roadmap.slice(roadmap.indexOf("## Phase 8"));
   assert.notEqual(phaseEight, roadmap, "roadmap must retain a dedicated Phase 8 status section");
   assert.match(phaseEight, /签名/u);
   assert.match(phaseEight, /license|许可|法律/u);
   assert.match(phaseEight, /仍未完成|尚未完成|未完成/u);
+
+  const documentedReleaseData = `${producerProcedure}\n${releaseTrustBoundary}\n${phaseEight}`;
+  assert.doesNotMatch(documentedReleaseData, /actions\/runs\/[1-9][0-9]*/u, "documentation must not commit a real workflow run ID");
+  const documentedDigests = [...documentedReleaseData.matchAll(/\b[0-9a-f]{64}\b/gu)].map((match) => match[0]);
+  assert.deepEqual(
+    documentedDigests,
+    documentedDigests.filter((digest) => digest === "a6d71e2b6cd66f8e8d16c37ad164658985e0cf5fcaa950c90a482890cb9d13e0"),
+    "documentation may only carry the fixed appimagetool source digest, never a run-specific digest",
+  );
+
+  const jobSource = (name) => {
+    const start = foundation.indexOf(`  ${name}:`);
+    assert.notEqual(start, -1, `foundation job ${name} is missing`);
+    const remainder = foundation.slice(start + 1);
+    const next = remainder.search(/\n {2}[a-z][a-z0-9-]*:\s*$/mu);
+    return foundation.slice(start, next === -1 ? undefined : start + 1 + next);
+  };
+  for (const [job, artifact] of [
+    ["install-smoke-windows", "install-smoke-windows-${{ github.run_attempt }}"],
+    ["install-smoke-linux", "install-smoke-linux-${{ github.run_attempt }}"],
+    ["release-qualification", "release-qualification-${{ github.run_attempt }}"],
+    ["release-qualification", "qualified-release-${{ steps.canonical-release-version.outputs.version }}-${{ github.run_attempt }}"],
+  ]) {
+    const source = jobSource(job);
+    const artifactAt = source.indexOf(`name: ${artifact}`);
+    assert.notEqual(artifactAt, -1, `${job} must upload ${artifact}`);
+    const stepStart = source.lastIndexOf("      - ", artifactAt);
+    const nextStep = source.indexOf("\n      - ", artifactAt);
+    const uploadStep = source.slice(stepStart, nextStep === -1 ? undefined : nextStep);
+    assert.match(uploadStep, /uses:\s*actions\/upload-artifact@v7/u);
+    assert.match(uploadStep, /^\s{10}retention-days:\s*1\s*$/mu, `${artifact} must retain unsigned qualification evidence for exactly one day`);
+  }
 });
 
 test("compiled Service runtime excludes HTTP, TLS, GitHub, and OAuth client stacks", () => {

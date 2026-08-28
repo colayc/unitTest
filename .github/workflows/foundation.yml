@@ -796,6 +796,7 @@ jobs:
           name: install-smoke-windows-${{ github.run_attempt }}
           path: .release/evidence/install-smoke-windows.json
           if-no-files-found: error
+          retention-days: 1
 
   install-smoke-linux:
     if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') }}
@@ -847,6 +848,7 @@ jobs:
           name: install-smoke-linux-${{ github.run_attempt }}
           path: .release/evidence/install-smoke-linux.json
           if-no-files-found: error
+          retention-days: 1
 
   release-qualification:
     if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') }}
@@ -917,6 +919,7 @@ jobs:
           name: release-qualification-${{ github.run_attempt }}
           path: .release/evidence/release-qualification.json
           if-no-files-found: error
+          retention-days: 1
       - name: Require a qualified release before publication
         if: always()
         shell: bash
@@ -965,3 +968,4 @@ jobs:
           name: qualified-release-${{ steps.canonical-release-version.outputs.version }}-${{ github.run_attempt }}
           path: .release/qualified
           if-no-files-found: error
+          retention-days: 1
