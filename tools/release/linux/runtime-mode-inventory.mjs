@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { chmod, lstat, readFile, readdir, realpath } from "node:fs/promises";
+import { chmod, lstat, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -173,7 +173,7 @@ async function scanRuntimeTree(rootPath) {
       if (info.isDirectory()) {
         await scanDirectory(entryPath, relativePath);
       } else if (info.isFile()) {
-        files.set(relativePath, { path: entryPath, size: info.size });
+        files.set(relativePath, { path: entryPath, size: info.size, mode: info.mode });
       } else {
         throw releaseInputError("RELEASE_INPUT_INVALID", "runtime tree contains a special entry");
       }
@@ -181,6 +181,49 @@ async function scanRuntimeTree(rootPath) {
   }
   await scanDirectory(rootPath);
   return files;
+}
+
+export async function createRuntimeModeInventory(
+  { root, expectedLauncherSha256 } = {},
+  { platform = process.platform } = {},
+) {
+  if (platform !== "linux") {
+    throw releaseInputError("RELEASE_INPUT_INVALID", "runtime mode inventory creation is supported only on Linux");
+  }
+  if (typeof root !== "string" || root.length === 0) {
+    throw releaseInputError("RELEASE_INPUT_INVALID", "runtime root is required");
+  }
+  const rootPath = resolve(root);
+  await validateCodeOssRuntime({
+    root: rootPath,
+    platform: "linux",
+    expectedLauncherSha256,
+  });
+  const files = await scanRuntimeTree(rootPath);
+  const records = [];
+  for (const [path, file] of files) {
+    let sha256;
+    try {
+      sha256 = await hashFile(file.path);
+    } catch {
+      throw releaseInputError("RELEASE_INPUT_INVALID", "runtime file cannot be read");
+    }
+    records.push({
+      path,
+      size: file.size,
+      sha256,
+      executable: (file.mode & 0o111) !== 0,
+    });
+  }
+  records.sort((left, right) => comparePaths(left.path, right.path));
+  return validateRuntimeModeInventory({
+    schemaVersion: 1,
+    platform: "linux",
+    architecture: "x64",
+    launcherRelativePath: "code-oss",
+    launcherSha256: expectedLauncherSha256,
+    files: records,
+  }, expectedLauncherSha256);
 }
 
 async function loadInventory(inventoryPath, expectedLauncherSha256) {
@@ -280,34 +323,60 @@ export async function restoreRuntimeModes(
 }
 
 function parseCliArguments(argumentsList) {
-  if (argumentsList[0] !== "restore") {
-    throw releaseInputError("RELEASE_INPUT_INVALID", "CLI requires the restore command");
-  }
+  const command = argumentsList[0];
+  if (command !== "restore" && command !== "create") throw releaseInputError("RELEASE_INPUT_INVALID", "CLI requires the create or restore command");
   const flags = new Map();
+  const allowed = command === "restore"
+    ? new Set(["--root", "--inventory", "--launcher-sha256"])
+    : new Set(["--root", "--launcher-sha256", "--out"]);
   for (let index = 1; index < argumentsList.length; index += 2) {
     const flag = argumentsList[index];
     const value = argumentsList[index + 1];
-    if (!new Set(["--root", "--inventory", "--launcher-sha256"]).has(flag) || value === undefined || flags.has(flag)) {
-      throw releaseInputError("RELEASE_INPUT_INVALID", "restore requires --root, --inventory, and --launcher-sha256");
+    if (!allowed.has(flag) || value === undefined || flags.has(flag)) {
+      throw releaseInputError("RELEASE_INPUT_INVALID", `${command} requires fixed valid flags`);
     }
     flags.set(flag, value);
   }
-  if (flags.size !== 3) {
-    throw releaseInputError("RELEASE_INPUT_INVALID", "restore requires --root, --inventory, and --launcher-sha256");
+  const required = command === "restore" ? ["--root", "--inventory", "--launcher-sha256"] : ["--root", "--launcher-sha256", "--out"];
+  if (flags.size !== required.length || required.some((flag) => !flags.has(flag))) {
+    throw releaseInputError("RELEASE_INPUT_INVALID", `${command} requires ${required.join(", ")}`);
   }
   return {
+    command,
     root: flags.get("--root"),
     inventoryPath: flags.get("--inventory"),
     expectedLauncherSha256: flags.get("--launcher-sha256"),
+    out: flags.get("--out"),
   };
+}
+
+async function writeCanonicalInventory(path, inventory) {
+  if (typeof path !== "string" || path.length === 0) {
+    throw releaseInputError("RELEASE_PRODUCER_OUTPUT_INVALID", "output path is required");
+  }
+  const outputPath = resolve(path);
+  const temporaryPath = `${outputPath}.tmp-${process.pid}`;
+  try {
+    const existing = await lstat(outputPath).catch((error) => error?.code === "ENOENT" ? undefined : Promise.reject(error));
+    if (existing?.isSymbolicLink() || (existing !== undefined && !existing.isFile())) throw new Error("invalid output");
+    await writeFile(temporaryPath, `${JSON.stringify(inventory)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    await rename(temporaryPath, outputPath);
+  } catch {
+    await rm(temporaryPath, { force: true }).catch(() => {});
+    throw releaseInputError("RELEASE_PRODUCER_OUTPUT_INVALID", "runtime mode inventory output cannot be written");
+  }
 }
 
 async function runCli() {
   try {
-    const result = await restoreRuntimeModes(parseCliArguments(process.argv.slice(2)));
+    const options = parseCliArguments(process.argv.slice(2));
+    const result = options.command === "restore"
+      ? await restoreRuntimeModes(options)
+      : await createRuntimeModeInventory(options);
+    if (options.command === "create") await writeCanonicalInventory(options.out, result);
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } catch (error) {
-    process.stderr.write(`${error?.message ?? "RELEASE_INPUT_INVALID: runtime mode restoration failed"}\n`);
+    process.stderr.write(`${error?.message ?? "RELEASE_INPUT_INVALID: runtime mode inventory operation failed"}\n`);
     process.exitCode = 1;
   }
 }

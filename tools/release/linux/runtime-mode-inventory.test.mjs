@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 
 import {
+  createRuntimeModeInventory,
   restoreRuntimeModes,
   validateRuntimeModeInventory,
 } from "./runtime-mode-inventory.mjs";
@@ -134,6 +135,41 @@ test("inventory validation rejects non-string digest values without coercion", (
     invalidFile.files[1].sha256 = invalidDigest;
     assertInvalid(() => validateRuntimeModeInventory(invalidFile, digest));
   }
+});
+
+linuxOnly("create records every real runtime file in strict portable order and restore round-trips modes", async (t) => {
+  const fixture = await createRuntimeFixture(t);
+  const inventory = await createRuntimeModeInventory({
+    root: fixture.root,
+    expectedLauncherSha256: fixture.launcherSha256,
+  });
+
+  assert.deepEqual(validateRuntimeModeInventory(inventory, fixture.launcherSha256), inventory);
+  assert.deepEqual(inventory.files.map((record) => record.path), [
+    "chrome_crashpad_handler",
+    "code-oss",
+    "resources/app/package.json",
+    "resources/app/product.json",
+    "resources/app/static/data.txt",
+  ]);
+  assert.deepEqual(inventory.files.map((record) => record.executable), [true, true, false, false, false]);
+
+  const inventoryPath = join(dirname(fixture.root), "created-mode-inventory.json");
+  await writeFile(inventoryPath, `${JSON.stringify(inventory)}\n`);
+  for (const record of inventory.files) await chmod(join(fixture.root, ...record.path.split("/")), 0o600);
+  await restoreRuntimeModes({ root: fixture.root, inventoryPath, expectedLauncherSha256: fixture.launcherSha256 });
+  for (const record of inventory.files) {
+    const info = await lstat(join(fixture.root, ...record.path.split("/")));
+    assert.equal(info.mode & 0o777, record.executable ? 0o755 : 0o644, record.path);
+  }
+});
+
+test("create refuses to infer Linux executable state off Linux", async (t) => {
+  const fixture = await createRuntimeFixture(t);
+  await assert.rejects(
+    () => createRuntimeModeInventory({ root: fixture.root, expectedLauncherSha256: fixture.launcherSha256 }, { platform: "win32" }),
+    (error) => error?.code === "RELEASE_INPUT_INVALID",
+  );
 });
 
 for (const [label, operations, expectedMessage] of [
