@@ -544,11 +544,29 @@ test("release package jobs materialize digest-pinned runtime inputs before packa
     const job = workflow.slice(start, end);
     assert.match(job, /^    needs:\r?\n      - verify-windows\r?\n      - verify-linux\r?\n      - verify-release-input-run$/mu, `${jobName} trust dependency`);
     assert.doesNotMatch(job, /(?:inputs\.(?:release_input_run_id|windows_code_oss_sha256|linux_code_oss_sha256|linux_appimagetool_sha256)|vars\.(?:RELEASE_INPUT_RUN_ID|RELEASE_CODE_OSS_[A-Z_]+|RELEASE_APPIMAGETOOL_[A-Z_]+))/u, `${jobName} raw coordinates`);
+    assert.match(job, /^      RELEASE_INPUT_RUN_ATTEMPT: \$\{\{ needs\.verify-release-input-run\.outputs\.run_attempt \}\}$/mu, `${jobName} trusted attempt`);
+    const attemptValidations = [...job.matchAll(/name: Validate producer attempt (before|after) (?:Windows|Linux) artifact download/gu)];
+    assert.deepEqual(attemptValidations.map((match) => match[1]), ["before", "after"], `${jobName} attempt validation gates`);
+    assert.equal(job.match(/GH_TOKEN: \$\{\{ github\.token \}\}/gu)?.length, 2, `${jobName} API tokens`);
+    assert.equal(job.match(/trusted-run\.mjs validate-attempt/gu)?.length, 2, `${jobName} attempt validations`);
     const requireInputs = job.indexOf("Require release input coordinates");
-    const download = job.search(/uses: actions\/download-artifact@[0-9a-f]{40}/u);
+    const downloads = [...job.matchAll(/uses: actions\/download-artifact@[0-9a-f]{40}/gu)];
+    const download = downloads[0]?.index ?? -1;
+    const finalDownload = downloads.at(-1)?.index ?? -1;
+    const beforeAttempt = job.indexOf("Validate producer attempt before");
+    const afterAttempt = job.indexOf("Validate producer attempt after");
     const verifyDigest = job.indexOf("Verify and export release inputs");
     const packageIndex = job.indexOf(packageStep);
-    assert.ok(0 <= requireInputs && requireInputs < download && download < verifyDigest && verifyDigest < packageIndex, jobName);
+    assert.ok(0 <= requireInputs && requireInputs < beforeAttempt && beforeAttempt < download && finalDownload < afterAttempt && afterAttempt < verifyDigest && verifyDigest < packageIndex, jobName);
+    const expectedArtifactIds = jobName === "package-windows"
+      ? ["windows_artifact_id"]
+      : ["linux_artifact_id", "appimagetool_artifact_id"];
+    assert.deepEqual(
+      [...job.matchAll(/artifact-ids: \$\{\{ needs\.verify-release-input-run\.outputs\.([a-z_]+) \}\}/gu)].map((match) => match[1]),
+      expectedArtifactIds,
+      `${jobName} immutable artifact identities`,
+    );
+    assert.equal(job.match(/merge-multiple: true/gu)?.length, expectedArtifactIds.length, `${jobName} fixed download roots`);
     assert.match(job, /RELEASE_INPUT_MISSING/u, jobName);
     assert.match(job, /CODE_OSS_RUNTIME_ROOT/u, `${jobName} runtime root`);
     assert.equal(job.match(/--code-oss-root/gu)?.length, 2, `${jobName} target and baseline runtime roots`);

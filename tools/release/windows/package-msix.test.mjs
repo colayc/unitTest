@@ -605,13 +605,21 @@ test("package-windows consumes closed trusted coordinates before digest verifica
   assert.ok(start >= 0 && end > start);
   assert.match(job, /^    needs:\n      - verify-windows\n      - verify-linux\n      - verify-release-input-run$/mu);
   assert.match(job, /^      RELEASE_INPUT_RUN_ID: \$\{\{ needs\.verify-release-input-run\.outputs\.run_id \}\}$/mu);
+  assert.match(job, /^      RELEASE_INPUT_RUN_ATTEMPT: \$\{\{ needs\.verify-release-input-run\.outputs\.run_attempt \}\}$/mu);
+  assert.match(job, /^      WINDOWS_ARTIFACT_ID: \$\{\{ needs\.verify-release-input-run\.outputs\.windows_artifact_id \}\}$/mu);
+  assert.match(job, /^      WINDOWS_ARTIFACT_DIGEST: \$\{\{ needs\.verify-release-input-run\.outputs\.windows_artifact_digest \}\}$/mu);
   assert.match(job, /^      CODE_OSS_SHA256: \$\{\{ needs\.verify-release-input-run\.outputs\.windows_launcher_sha256 \}\}$/mu);
   assert.doesNotMatch(job, /(?:inputs\.(?:release_input_run_id|windows_code_oss_sha256)|vars\.(?:RELEASE_INPUT_RUN_ID|RELEASE_CODE_OSS_WINDOWS_SHA256))/u);
-  const download = job.indexOf("name: Download fixed-name Windows Code-OSS runtime");
+  const beforeAttempt = job.indexOf("name: Validate producer attempt before Windows artifact download");
+  const download = job.indexOf("name: Download trusted Windows Code-OSS runtime");
+  const afterAttempt = job.indexOf("name: Validate producer attempt after Windows artifact download");
   const digest = job.indexOf("Get-FileHash -LiteralPath $launcher -Algorithm SHA256");
   const exportRuntime = job.indexOf('"CODE_OSS_RUNTIME_ROOT=$runtimeRoot"');
   const staging = job.indexOf("name: Stage and package Windows MSIX");
-  assert.ok(0 <= download && download < digest && digest < exportRuntime && exportRuntime < staging);
+  assert.ok(0 <= beforeAttempt && beforeAttempt < download && download < afterAttempt && afterAttempt < digest && digest < exportRuntime && exportRuntime < staging);
+  assert.match(job, /artifact-ids: \$\{\{ needs\.verify-release-input-run\.outputs\.windows_artifact_id \}\}[\s\S]*?merge-multiple: true/u);
+  assert.equal(job.match(/trusted-run\.mjs validate-attempt/gu)?.length, 2);
+  assert.equal(job.match(/GH_TOKEN: \$\{\{ github\.token \}\}/gu)?.length, 2);
 });
 
 windowsOnly("package-msix returns RELEASE_TOOL_MISSING when makeappx.exe is unavailable", async (t) => {

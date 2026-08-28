@@ -640,11 +640,16 @@ test("Linux packaging keeps trusted coordinates and transported mode validation 
   const job = workflow.slice(start, end);
   assert.ok(start >= 0 && end > start);
   assert.match(job, /^      RELEASE_INPUT_RUN_ID: \$\{\{ needs\.verify-release-input-run\.outputs\.run_id \}\}$/mu);
+  assert.match(job, /^      RELEASE_INPUT_RUN_ATTEMPT: \$\{\{ needs\.verify-release-input-run\.outputs\.run_attempt \}\}$/mu);
+  assert.match(job, /^      LINUX_ARTIFACT_ID: \$\{\{ needs\.verify-release-input-run\.outputs\.linux_artifact_id \}\}$/mu);
+  assert.match(job, /^      APPIMAGETOOL_ARTIFACT_ID: \$\{\{ needs\.verify-release-input-run\.outputs\.appimagetool_artifact_id \}\}$/mu);
   assert.match(job, /^      CODE_OSS_SHA256: \$\{\{ needs\.verify-release-input-run\.outputs\.linux_launcher_sha256 \}\}$/mu);
   assert.match(job, /^      APPIMAGETOOL_SHA256: \$\{\{ needs\.verify-release-input-run\.outputs\.appimagetool_sha256 \}\}$/mu);
   const ordered = [
-    "name: Download fixed-name Linux Code-OSS runtime",
-    "name: Download fixed-name Linux appimagetool",
+    "name: Validate producer attempt before Linux artifact download",
+    "name: Download trusted Linux Code-OSS runtime",
+    "name: Download trusted Linux appimagetool",
+    "name: Validate producer attempt after Linux artifact download",
     '[[ "$(sha256sum "$launcher"',
     '[[ "$(sha256sum "${appimagetool_matches[0]}"',
     "runtime-mode-inventory.mjs restore",
