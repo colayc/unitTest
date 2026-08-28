@@ -255,48 +255,104 @@ function buildTargetsContain(tokens, platform, arch) {
   return false;
 }
 
-function buildTargetLoopBody(tokens) {
+function buildTargetLoopBodies(tokens) {
+  const bodies = [];
+  let depth = 0;
   for (let index = 0; index < tokens.length - 5; index += 1) {
-    if (!hasSequence(tokens.slice(index), ["BUILD_TARGETS", ".", "forEach", "("])) continue;
+    if (depth !== 0 || !hasSequence(tokens.slice(index), ["BUILD_TARGETS", ".", "forEach", "("])) {
+      if (tokens[index].value === "{") depth += 1;
+      else if (tokens[index].value === "}") depth -= 1;
+      continue;
+    }
     let arrow = index + 4;
     while (arrow < tokens.length && tokens[arrow].value !== "=>") arrow += 1;
     if (arrow === tokens.length || tokens[arrow + 1]?.value !== "{") continue;
     const end = matchingIndex(tokens, arrow + 1, "{", "}");
-    if (end !== -1) return tokens.slice(arrow + 2, end);
+    if (end !== -1) {
+      bodies.push(tokens.slice(arrow + 2, end));
+      index = end;
+    }
+  }
+  return bodies;
+}
+
+function directSequenceIndex(tokens, values) {
+  let depth = 0;
+  for (let index = 0; index < tokens.length; index += 1) {
+    if (depth === 0 && hasSequence(tokens.slice(index), values)) return index;
+    if (tokens[index].value === "{") depth += 1;
+    else if (tokens[index].value === "}") depth -= 1;
+  }
+  return -1;
+}
+
+function declarationsInScope(tokens, names) {
+  const declarations = [];
+  let depth = 0;
+  for (let index = 0; index < tokens.length - 1; index += 1) {
+    if (["const", "let", "var"].includes(tokens[index].value) && names.includes(tokens[index + 1].value)) {
+      declarations.push({ kind: tokens[index].value, name: tokens[index + 1].value, depth, index });
+    }
+    if (tokens[index].value === "{") depth += 1;
+    else if (tokens[index].value === "}") depth -= 1;
+  }
+  return declarations;
+}
+
+function minifiedMapBody(loopBody) {
+  let depth = 0;
+  for (let index = 0; index < loopBody.length - 4; index += 1) {
+    if (depth === 0 && hasSequence(loopBody.slice(index), ["map", "(", "minified", "=>", "{"])) {
+      const end = matchingIndex(loopBody, index + 4, "{", "}");
+      if (end !== -1) return loopBody.slice(index + 5, end);
+    }
+    if (loopBody[index].value === "{") depth += 1;
+    else if (loopBody[index].value === "}") depth -= 1;
   }
   return [];
 }
 
-function bodyDefinesTrustedGulpRelationship(body) {
+function loopHasOnlyTrustedBindings(loopBody) {
+  const declarations = declarationsInScope(loopBody, ["platform", "arch", "destinationFolderName", "minified"]);
+  const expected = [
+    { kind: "const", name: "platform", depth: 0 },
+    { kind: "const", name: "arch", depth: 0 },
+    { kind: "const", name: "destinationFolderName", depth: 1 },
+  ];
+  return declarations.length === expected.length
+    && expected.every((item) => declarations.some((declaration) => (
+      declaration.kind === item.kind && declaration.name === item.name && declaration.depth === item.depth
+    )));
+}
+
+function mapDefinesTrustedGulpRelationship(body) {
   const expectedOutputTemplate = "VSCode${dashed(platform)}${dashed(arch)}";
   const expectedTargetTemplate = "vscode${dashed(platform)}${dashed(arch)}${dashed(minified)}";
-  let platformBinding = -1;
-  let archBinding = -1;
-  let outputDefinition = -1;
-  let targetDefinition = -1;
-  let outputPackaged = -1;
-  for (let index = 0; index < body.length; index += 1) {
-    if (hasSequence(body.slice(index), ["const", "platform", "=", "buildTarget", ".", "platform"])) platformBinding = index;
-    if (hasSequence(body.slice(index), ["const", "arch", "=", "buildTarget", ".", "arch"])) archBinding = index;
-    if (hasSequence(body.slice(index), ["const", "destinationFolderName", "="])
-      && body[index + 3]?.type === "template" && body[index + 3].value === expectedOutputTemplate) outputDefinition = index;
-    if (hasSequence(body.slice(index), ["const", "vscodeTask", "=", "task", ".", "define", "("])
-      && body[index + 7]?.type === "template" && body[index + 7].value === expectedTargetTemplate) targetDefinition = index;
-    if (hasSequence(body.slice(index), ["packageTask", "(", "platform", ",", "arch", ",", "sourceFolderName", ",", "destinationFolderName", ",", "opts", ")"])) outputPackaged = index;
-  }
-  const bindingsEnd = Math.max(platformBinding, archBinding);
-  return platformBinding !== -1
-    && archBinding !== -1
-    && outputDefinition > bindingsEnd
-    && targetDefinition > bindingsEnd
-    && outputPackaged > bindingsEnd;
+  const outputDefinition = directSequenceIndex(body, ["const", "destinationFolderName", "="]);
+  const targetDefinition = directSequenceIndex(body, ["const", "vscodeTask", "=", "task", ".", "define", "("]);
+  const outputPackaged = directSequenceIndex(body, ["packageTask", "(", "platform", ",", "arch", ",", "sourceFolderName", ",", "destinationFolderName", ",", "opts", ")"]);
+  return outputDefinition !== -1
+    && body[outputDefinition + 3]?.type === "template"
+    && body[outputDefinition + 3].value === expectedOutputTemplate
+    && targetDefinition !== -1
+    && body[targetDefinition + 7]?.type === "template"
+    && body[targetDefinition + 7].value === expectedTargetTemplate
+    && outputPackaged > outputDefinition
+    && targetDefinition > outputDefinition;
 }
 
 function validateGulpTargets(gulp) {
   const tokens = tokenizeJavaScript(gulp);
+  const loopBodies = buildTargetLoopBodies(tokens);
+  const [loopBody = []] = loopBodies;
+  const mapBody = minifiedMapBody(loopBody);
   if (!buildTargetsContain(tokens, "win32", "x64")
     || !buildTargetsContain(tokens, "linux", "x64")
-    || !bodyDefinesTrustedGulpRelationship(buildTargetLoopBody(tokens))) {
+    || loopBodies.length !== 1
+    || directSequenceIndex(loopBody, ["const", "platform", "=", "buildTarget", ".", "platform"]) === -1
+    || directSequenceIndex(loopBody, ["const", "arch", "=", "buildTarget", ".", "arch"]) === -1
+    || !loopHasOnlyTrustedBindings(loopBody)
+    || !mapDefinesTrustedGulpRelationship(mapBody)) {
     fail(UNTRUSTED, "upstream Gulp targets are not trusted");
   }
 }
