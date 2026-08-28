@@ -262,9 +262,16 @@ jobs:
     timeout-minutes: 10
     outputs:
       run_id: ${{ steps.verify-provenance.outputs.run_id }}
+      run_attempt: ${{ steps.verify-provenance.outputs.run_attempt }}
       windows_launcher_sha256: ${{ steps.verify-provenance.outputs.windows_launcher_sha256 }}
       linux_launcher_sha256: ${{ steps.verify-provenance.outputs.linux_launcher_sha256 }}
       appimagetool_sha256: ${{ steps.verify-provenance.outputs.appimagetool_sha256 }}
+      windows_artifact_id: ${{ steps.verify-provenance.outputs.windows_artifact_id }}
+      windows_artifact_digest: ${{ steps.verify-provenance.outputs.windows_artifact_digest }}
+      linux_artifact_id: ${{ steps.verify-provenance.outputs.linux_artifact_id }}
+      linux_artifact_digest: ${{ steps.verify-provenance.outputs.linux_artifact_digest }}
+      appimagetool_artifact_id: ${{ steps.verify-provenance.outputs.appimagetool_artifact_id }}
+      appimagetool_artifact_digest: ${{ steps.verify-provenance.outputs.appimagetool_artifact_digest }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v5.0.0
         with:
@@ -292,7 +299,7 @@ jobs:
             printf 'LINUX_LAUNCHER_SHA256=%s\n' "$LINUX_LAUNCHER_SHA256"
             printf 'APPIMAGETOOL_SHA256=%s\n' "$APPIMAGETOOL_SHA256"
           } >> "$GITHUB_ENV"
-      - name: Fetch trusted producer run metadata
+      - name: Fetch trusted producer metadata before provenance download
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -301,25 +308,40 @@ jobs:
           umask 077
           [[ ! -e .release && ! -L .release ]] || { echo 'RELEASE_PRODUCER_UNTRUSTED: producer metadata directory must be fresh' >&2; exit 1; }
           mkdir -m 700 .release
-          gh api "repos/colayc/unitTest/actions/runs/$RELEASE_INPUT_RUN_ID" > .release/producer-run.json
-          [[ -f .release/producer-run.json && ! -L .release/producer-run.json ]] || { echo 'RELEASE_PRODUCER_UNTRUSTED: producer run metadata is not a regular file' >&2; exit 1; }
+          gh api "repos/colayc/unitTest/actions/runs/$RELEASE_INPUT_RUN_ID" > .release/producer-run-before.json
+          gh api "repos/colayc/unitTest/actions/runs/$RELEASE_INPUT_RUN_ID/artifacts?per_page=100" > .release/producer-artifacts-before.json
+          [[ -f .release/producer-run-before.json && ! -L .release/producer-run-before.json ]] || { echo 'RELEASE_PRODUCER_UNTRUSTED: producer run metadata is not a regular file' >&2; exit 1; }
+          [[ -f .release/producer-artifacts-before.json && ! -L .release/producer-artifacts-before.json ]] || { echo 'RELEASE_PRODUCER_UNTRUSTED: producer artifact metadata is not a regular file' >&2; exit 1; }
       - id: precheck
         name: Validate trusted producer run before artifact download
         shell: bash
         run: |
           set -euo pipefail
           node tools/release/producer/trusted-run.mjs validate-run \
-            --run-json .release/producer-run.json \
+            --run-json .release/producer-run-before.json \
+            --artifacts-json .release/producer-artifacts-before.json \
             --run-id "$RELEASE_INPUT_RUN_ID" \
             --consumer-commit "$GITHUB_SHA" \
             --github-output "$GITHUB_OUTPUT"
       - name: Download trusted release input provenance
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: release-input-provenance
+          artifact-ids: ${{ steps.precheck.outputs.provenance_artifact_id }}
+          merge-multiple: true
           path: .release/provenance
           github-token: ${{ github.token }}
           run-id: ${{ steps.precheck.outputs.run_id }}
+      - name: Refetch trusted producer metadata after provenance download
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          gh api "repos/colayc/unitTest/actions/runs/$RELEASE_INPUT_RUN_ID" > .release/producer-run-after.json
+          gh api "repos/colayc/unitTest/actions/runs/$RELEASE_INPUT_RUN_ID/artifacts?per_page=100" > .release/producer-artifacts-after.json
+          [[ -f .release/producer-run-after.json && ! -L .release/producer-run-after.json ]] || { echo 'RELEASE_PRODUCER_UNTRUSTED: producer run metadata is not a regular file' >&2; exit 1; }
+          [[ -f .release/producer-artifacts-after.json && ! -L .release/producer-artifacts-after.json ]] || { echo 'RELEASE_PRODUCER_UNTRUSTED: producer artifact metadata is not a regular file' >&2; exit 1; }
       - id: verify-provenance
         name: Validate trusted release input provenance
         shell: bash
@@ -330,11 +352,15 @@ jobs:
           ((${#provenance_entries[@]} == 1)) && [[ "${provenance_entries[0]}" == 'release-input-provenance.json' ]] || { echo 'RELEASE_PRODUCER_PROVENANCE_INVALID: provenance artifact root must contain exactly release-input-provenance.json' >&2; exit 1; }
           [[ -f .release/provenance/release-input-provenance.json && ! -L .release/provenance/release-input-provenance.json ]] || { echo 'RELEASE_PRODUCER_PROVENANCE_INVALID: provenance document is invalid' >&2; exit 1; }
           node tools/release/producer/trusted-run.mjs validate-provenance \
-            --run-json .release/producer-run.json \
-            --run-id "$RELEASE_INPUT_RUN_ID" \
+            --run-json .release/producer-run-after.json \
+            --artifacts-json .release/producer-artifacts-after.json \
+            --run-id "${{ steps.precheck.outputs.run_id }}" \
+            --run-attempt "${{ steps.precheck.outputs.run_attempt }}" \
             --consumer-commit "$GITHUB_SHA" \
             --github-output "$GITHUB_OUTPUT" \
             --provenance .release/provenance/release-input-provenance.json \
+            --provenance-artifact-id "${{ steps.precheck.outputs.provenance_artifact_id }}" \
+            --provenance-artifact-digest "${{ steps.precheck.outputs.provenance_artifact_digest }}" \
             --windows-launcher-sha256 "$WINDOWS_LAUNCHER_SHA256" \
             --linux-launcher-sha256 "$LINUX_LAUNCHER_SHA256" \
             --appimagetool-sha256 "$APPIMAGETOOL_SHA256"
@@ -363,6 +389,9 @@ jobs:
       signature_outcome: ${{ steps.package-msix.outputs.signature_outcome }}
     env:
       RELEASE_INPUT_RUN_ID: ${{ needs.verify-release-input-run.outputs.run_id }}
+      RELEASE_INPUT_RUN_ATTEMPT: ${{ needs.verify-release-input-run.outputs.run_attempt }}
+      WINDOWS_ARTIFACT_ID: ${{ needs.verify-release-input-run.outputs.windows_artifact_id }}
+      WINDOWS_ARTIFACT_DIGEST: ${{ needs.verify-release-input-run.outputs.windows_artifact_digest }}
       CODE_OSS_SHA256: ${{ needs.verify-release-input-run.outputs.windows_launcher_sha256 }}
       RELEASE_MSIX_PUBLISHER: ${{ vars.RELEASE_MSIX_PUBLISHER || 'CN=Unit Test IDE' }}
     steps:
@@ -373,16 +402,49 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($env:RELEASE_INPUT_RUN_ID) -or $env:RELEASE_INPUT_RUN_ID -cnotmatch '^\d+$') {
             throw 'RELEASE_INPUT_MISSING: RELEASE_INPUT_RUN_ID must identify a trusted artifact-producing run'
           }
+          if ([string]::IsNullOrWhiteSpace($env:RELEASE_INPUT_RUN_ATTEMPT) -or $env:RELEASE_INPUT_RUN_ATTEMPT -cnotmatch '^[1-9]\d*$') {
+            throw 'RELEASE_INPUT_MISSING: RELEASE_INPUT_RUN_ATTEMPT must identify the trusted producer attempt'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_ARTIFACT_ID) -or $env:WINDOWS_ARTIFACT_ID -cnotmatch '^[1-9]\d*$') {
+            throw 'RELEASE_INPUT_MISSING: WINDOWS_ARTIFACT_ID must identify the trusted Windows runtime artifact'
+          }
+          if ($env:WINDOWS_ARTIFACT_DIGEST -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'RELEASE_INPUT_MISSING: WINDOWS_ARTIFACT_DIGEST must bind the trusted Windows runtime artifact'
+          }
           if ($env:CODE_OSS_SHA256 -cnotmatch '^[0-9a-f]{64}$') {
             throw 'RELEASE_INPUT_MISSING: CODE_OSS_SHA256 must pin root-level code-oss-windows-x64/Code - OSS.exe'
           }
-      - name: Download fixed-name Windows Code-OSS runtime
+      - name: Validate producer attempt before Windows artifact download
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Force -Path '.release' | Out-Null
+          gh api "repos/colayc/unitTest/actions/runs/$env:RELEASE_INPUT_RUN_ID" > .release/producer-run-windows-before.json
+          node tools/release/producer/trusted-run.mjs validate-attempt `
+            --run-json .release/producer-run-windows-before.json `
+            --run-id $env:RELEASE_INPUT_RUN_ID `
+            --run-attempt $env:RELEASE_INPUT_RUN_ATTEMPT `
+            --consumer-commit $env:GITHUB_SHA
+      - name: Download trusted Windows Code-OSS runtime
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: code-oss-windows-x64
+          artifact-ids: ${{ needs.verify-release-input-run.outputs.windows_artifact_id }}
+          merge-multiple: true
           path: .release/inputs/windows-code-oss
           github-token: ${{ github.token }}
-          run-id: ${{ env.RELEASE_INPUT_RUN_ID }}
+          run-id: ${{ needs.verify-release-input-run.outputs.run_id }}
+      - name: Validate producer attempt after Windows artifact download
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/colayc/unitTest/actions/runs/$env:RELEASE_INPUT_RUN_ID" > .release/producer-run-windows-after.json
+          node tools/release/producer/trusted-run.mjs validate-attempt `
+            --run-json .release/producer-run-windows-after.json `
+            --run-id $env:RELEASE_INPUT_RUN_ID `
+            --run-attempt $env:RELEASE_INPUT_RUN_ATTEMPT `
+            --consumer-commit $env:GITHUB_SHA
       - name: Verify and export release inputs
         shell: pwsh
         run: |
@@ -562,6 +624,11 @@ jobs:
       baseline_release_manifest_filename: ${{ steps.package-appimage.outputs.baseline_release_manifest_filename }}
     env:
       RELEASE_INPUT_RUN_ID: ${{ needs.verify-release-input-run.outputs.run_id }}
+      RELEASE_INPUT_RUN_ATTEMPT: ${{ needs.verify-release-input-run.outputs.run_attempt }}
+      LINUX_ARTIFACT_ID: ${{ needs.verify-release-input-run.outputs.linux_artifact_id }}
+      LINUX_ARTIFACT_DIGEST: ${{ needs.verify-release-input-run.outputs.linux_artifact_digest }}
+      APPIMAGETOOL_ARTIFACT_ID: ${{ needs.verify-release-input-run.outputs.appimagetool_artifact_id }}
+      APPIMAGETOOL_ARTIFACT_DIGEST: ${{ needs.verify-release-input-run.outputs.appimagetool_artifact_digest }}
       CODE_OSS_SHA256: ${{ needs.verify-release-input-run.outputs.linux_launcher_sha256 }}
       APPIMAGETOOL_SHA256: ${{ needs.verify-release-input-run.outputs.appimagetool_sha256 }}
     steps:
@@ -570,22 +637,54 @@ jobs:
         shell: bash
         run: |
           [[ "${RELEASE_INPUT_RUN_ID:-}" =~ ^[0-9]+$ ]] || { echo 'RELEASE_INPUT_MISSING: RELEASE_INPUT_RUN_ID must identify a trusted artifact-producing run' >&2; exit 1; }
+          [[ "${RELEASE_INPUT_RUN_ATTEMPT:-}" =~ ^[1-9][0-9]*$ ]] || { echo 'RELEASE_INPUT_MISSING: RELEASE_INPUT_RUN_ATTEMPT must identify the trusted producer attempt' >&2; exit 1; }
+          [[ "${LINUX_ARTIFACT_ID:-}" =~ ^[1-9][0-9]*$ ]] || { echo 'RELEASE_INPUT_MISSING: LINUX_ARTIFACT_ID must identify the trusted Linux runtime artifact' >&2; exit 1; }
+          [[ "${LINUX_ARTIFACT_DIGEST:-}" =~ ^[0-9a-f]{64}$ ]] || { echo 'RELEASE_INPUT_MISSING: LINUX_ARTIFACT_DIGEST must bind the trusted Linux runtime artifact' >&2; exit 1; }
+          [[ "${APPIMAGETOOL_ARTIFACT_ID:-}" =~ ^[1-9][0-9]*$ ]] || { echo 'RELEASE_INPUT_MISSING: APPIMAGETOOL_ARTIFACT_ID must identify the trusted appimagetool artifact' >&2; exit 1; }
+          [[ "${APPIMAGETOOL_ARTIFACT_DIGEST:-}" =~ ^[0-9a-f]{64}$ ]] || { echo 'RELEASE_INPUT_MISSING: APPIMAGETOOL_ARTIFACT_DIGEST must bind the trusted appimagetool artifact' >&2; exit 1; }
           [[ "${CODE_OSS_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] || { echo 'RELEASE_INPUT_MISSING: CODE_OSS_SHA256 must pin code-oss-linux-x64/code-oss' >&2; exit 1; }
           [[ "${APPIMAGETOOL_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] || { echo 'RELEASE_INPUT_MISSING: APPIMAGETOOL_SHA256 must pin appimagetool-linux-x64/appimagetool-x86_64.AppImage' >&2; exit 1; }
-      - name: Download fixed-name Linux Code-OSS runtime
+      - name: Validate producer attempt before Linux artifact download
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p .release
+          gh api "repos/colayc/unitTest/actions/runs/$RELEASE_INPUT_RUN_ID" > .release/producer-run-linux-before.json
+          node tools/release/producer/trusted-run.mjs validate-attempt \
+            --run-json .release/producer-run-linux-before.json \
+            --run-id "$RELEASE_INPUT_RUN_ID" \
+            --run-attempt "$RELEASE_INPUT_RUN_ATTEMPT" \
+            --consumer-commit "$GITHUB_SHA"
+      - name: Download trusted Linux Code-OSS runtime
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: code-oss-linux-x64
+          artifact-ids: ${{ needs.verify-release-input-run.outputs.linux_artifact_id }}
+          merge-multiple: true
           path: .release/inputs/linux-code-oss
           github-token: ${{ github.token }}
-          run-id: ${{ env.RELEASE_INPUT_RUN_ID }}
-      - name: Download fixed-name Linux appimagetool
+          run-id: ${{ needs.verify-release-input-run.outputs.run_id }}
+      - name: Download trusted Linux appimagetool
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: appimagetool-linux-x64
+          artifact-ids: ${{ needs.verify-release-input-run.outputs.appimagetool_artifact_id }}
+          merge-multiple: true
           path: .release/inputs/linux-appimagetool
           github-token: ${{ github.token }}
-          run-id: ${{ env.RELEASE_INPUT_RUN_ID }}
+          run-id: ${{ needs.verify-release-input-run.outputs.run_id }}
+      - name: Validate producer attempt after Linux artifact download
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/colayc/unitTest/actions/runs/$RELEASE_INPUT_RUN_ID" > .release/producer-run-linux-after.json
+          node tools/release/producer/trusted-run.mjs validate-attempt \
+            --run-json .release/producer-run-linux-after.json \
+            --run-id "$RELEASE_INPUT_RUN_ID" \
+            --run-attempt "$RELEASE_INPUT_RUN_ATTEMPT" \
+            --consumer-commit "$GITHUB_SHA"
       - uses: pnpm/action-setup@v4
         with:
           version: 11.4.0

@@ -933,9 +933,16 @@ test("foundation validates producer identity before downloading one exact proven
 
   assert.deepEqual(jobOutputKeys(trust), [
     "run_id",
+    "run_attempt",
     "windows_launcher_sha256",
     "linux_launcher_sha256",
     "appimagetool_sha256",
+    "windows_artifact_id",
+    "windows_artifact_digest",
+    "linux_artifact_id",
+    "linux_artifact_digest",
+    "appimagetool_artifact_id",
+    "appimagetool_artifact_digest",
   ]);
   for (const key of jobOutputKeys(trust)) {
     assert.equal(
@@ -983,34 +990,43 @@ test("foundation validates producer identity before downloading one exact proven
     '} >> "$GITHUB_ENV"',
   ]);
 
-  const api = namedStep(trust, "Fetch trusted producer run metadata");
-  assert.equal(directMappingValue(api, 10, "GH_TOKEN"), "${{ github.token }}");
-  assert.match(api, /^          gh api "repos\/colayc\/unitTest\/actions\/runs\/\$RELEASE_INPUT_RUN_ID" > \.release\/producer-run\.json$/mu);
-  assert.doesNotMatch(api, /(?:set -x|echo .*GH_TOKEN|cat \.release\/producer-run\.json)/u);
+  const apiBefore = namedStep(trust, "Fetch trusted producer metadata before provenance download");
+  assert.equal(directMappingValue(apiBefore, 10, "GH_TOKEN"), "${{ github.token }}");
+  assert.match(apiBefore, /^          gh api "repos\/colayc\/unitTest\/actions\/runs\/\$RELEASE_INPUT_RUN_ID" > \.release\/producer-run-before\.json$/mu);
+  assert.match(apiBefore, /^          gh api "repos\/colayc\/unitTest\/actions\/runs\/\$RELEASE_INPUT_RUN_ID\/artifacts\?per_page=100" > \.release\/producer-artifacts-before\.json$/mu);
+  assert.doesNotMatch(apiBefore, /(?:set -x|echo .*GH_TOKEN|cat \.release\/producer-(?:run|artifacts)-before\.json)/u);
 
   const precheck = identifiedStep(trust, "precheck");
   const provenanceDownload = namedStep(trust, "Download trusted release input provenance");
+  const apiAfter = namedStep(trust, "Refetch trusted producer metadata after provenance download");
   const finalValidation = identifiedStep(trust, "verify-provenance");
   assertOrdered(trust, [
-    "name: Fetch trusted producer run metadata",
+    "name: Fetch trusted producer metadata before provenance download",
     "id: precheck",
     "name: Download trusted release input provenance",
+    "name: Refetch trusted producer metadata after provenance download",
     "id: verify-provenance",
   ]);
-  assert.match(precheck, /^          node tools\/release\/producer\/trusted-run\.mjs validate-run \\\n            --run-json \.release\/producer-run\.json \\\n            --run-id "\$RELEASE_INPUT_RUN_ID" \\\n            --consumer-commit "\$GITHUB_SHA" \\\n            --github-output "\$GITHUB_OUTPUT"$/mu);
+  assert.match(precheck, /^          node tools\/release\/producer\/trusted-run\.mjs validate-run \\\n            --run-json \.release\/producer-run-before\.json \\\n            --artifacts-json \.release\/producer-artifacts-before\.json \\\n            --run-id "\$RELEASE_INPUT_RUN_ID" \\\n            --consumer-commit "\$GITHUB_SHA" \\\n            --github-output "\$GITHUB_OUTPUT"$/mu);
   assert.equal(directMappingValue(provenanceDownload, 8, "uses"), `actions/download-artifact@${actionPins["actions/download-artifact"]}`);
-  assert.equal(inputValue(provenanceDownload, "name"), "release-input-provenance");
+  assert.equal(inputValue(provenanceDownload, "artifact-ids"), "${{ steps.precheck.outputs.provenance_artifact_id }}");
+  assert.equal(inputValue(provenanceDownload, "merge-multiple"), "true");
   assert.equal(inputValue(provenanceDownload, "path"), ".release/provenance");
   assert.equal(inputValue(provenanceDownload, "run-id"), "${{ steps.precheck.outputs.run_id }}");
   assert.equal(inputValue(provenanceDownload, "github-token"), "${{ github.token }}");
+  assert.equal(inputValue(provenanceDownload, "name"), undefined);
+  assert.equal(directMappingValue(apiAfter, 10, "GH_TOKEN"), "${{ github.token }}");
+  assert.match(apiAfter, /^          gh api "repos\/colayc\/unitTest\/actions\/runs\/\$RELEASE_INPUT_RUN_ID" > \.release\/producer-run-after\.json$/mu);
+  assert.match(apiAfter, /^          gh api "repos\/colayc\/unitTest\/actions\/runs\/\$RELEASE_INPUT_RUN_ID\/artifacts\?per_page=100" > \.release\/producer-artifacts-after\.json$/mu);
+  assert.doesNotMatch(apiAfter, /(?:set -x|echo .*GH_TOKEN|cat \.release\/producer-(?:run|artifacts)-after\.json)/u);
   assert.match(finalValidation, /^          mapfile -d '' -t provenance_entries < <\(find \.release\/provenance -mindepth 1 -maxdepth 1 -printf '%f\\0' \| LC_ALL=C sort -z\)$/mu);
   assert.match(finalValidation, /release-input-provenance\.json/u);
-  assert.match(finalValidation, /^          node tools\/release\/producer\/trusted-run\.mjs validate-provenance \\/mu);
+  assert.match(finalValidation, /^          node tools\/release\/producer\/trusted-run\.mjs validate-provenance \\\n            --run-json \.release\/producer-run-after\.json \\\n            --artifacts-json \.release\/producer-artifacts-after\.json \\\n            --run-id "\$\{\{ steps\.precheck\.outputs\.run_id \}\}" \\\n            --run-attempt "\$\{\{ steps\.precheck\.outputs\.run_attempt \}\}" \\\n            --consumer-commit "\$GITHUB_SHA" \\\n            --github-output "\$GITHUB_OUTPUT" \\\n            --provenance \.release\/provenance\/release-input-provenance\.json \\\n            --provenance-artifact-id "\$\{\{ steps\.precheck\.outputs\.provenance_artifact_id \}\}" \\\n            --provenance-artifact-digest "\$\{\{ steps\.precheck\.outputs\.provenance_artifact_digest \}\}"/mu);
   for (const option of ["--windows-launcher-sha256", "--linux-launcher-sha256", "--appimagetool-sha256"]) {
     assert.match(finalValidation, new RegExp(`${option} "\\$[A-Z0-9_]+"`, "u"));
   }
   assert.equal((trust.match(/GITHUB_OUTPUT/gu) ?? []).length, 2, "only trusted-run may append step outputs");
-  assert.equal((trust.match(/GH_TOKEN/gu) ?? []).length, 1, "GH_TOKEN must exist only as the gh step environment key");
+  assert.equal((trust.match(/GH_TOKEN/gu) ?? []).length, 2, "GH_TOKEN must exist only as the two gh step environment keys");
 });
 
 test("foundation package jobs consume only the trust job closed coordinates", () => {
@@ -1020,10 +1036,18 @@ test("foundation package jobs consume only the trust job closed coordinates", ()
   for (const [name, expectedEnv] of [
     ["package-windows", {
       RELEASE_INPUT_RUN_ID: "${{ needs.verify-release-input-run.outputs.run_id }}",
+      RELEASE_INPUT_RUN_ATTEMPT: "${{ needs.verify-release-input-run.outputs.run_attempt }}",
+      WINDOWS_ARTIFACT_ID: "${{ needs.verify-release-input-run.outputs.windows_artifact_id }}",
+      WINDOWS_ARTIFACT_DIGEST: "${{ needs.verify-release-input-run.outputs.windows_artifact_digest }}",
       CODE_OSS_SHA256: "${{ needs.verify-release-input-run.outputs.windows_launcher_sha256 }}",
     }],
     ["package-linux", {
       RELEASE_INPUT_RUN_ID: "${{ needs.verify-release-input-run.outputs.run_id }}",
+      RELEASE_INPUT_RUN_ATTEMPT: "${{ needs.verify-release-input-run.outputs.run_attempt }}",
+      LINUX_ARTIFACT_ID: "${{ needs.verify-release-input-run.outputs.linux_artifact_id }}",
+      LINUX_ARTIFACT_DIGEST: "${{ needs.verify-release-input-run.outputs.linux_artifact_digest }}",
+      APPIMAGETOOL_ARTIFACT_ID: "${{ needs.verify-release-input-run.outputs.appimagetool_artifact_id }}",
+      APPIMAGETOOL_ARTIFACT_DIGEST: "${{ needs.verify-release-input-run.outputs.appimagetool_artifact_digest }}",
       CODE_OSS_SHA256: "${{ needs.verify-release-input-run.outputs.linux_launcher_sha256 }}",
       APPIMAGETOOL_SHA256: "${{ needs.verify-release-input-run.outputs.appimagetool_sha256 }}",
     }],
@@ -1032,5 +1056,34 @@ test("foundation package jobs consume only the trust job closed coordinates", ()
     assert.deepEqual(directList(job, 4, "needs"), ["verify-windows", "verify-linux", "verify-release-input-run"]);
     assert.doesNotMatch(job, rawCoordinates, `${name} must not read unvalidated coordinates`);
     for (const [key, value] of Object.entries(expectedEnv)) assert.equal(directMappingValue(job, 6, key), value);
+
+    const platform = name === "package-windows" ? "Windows" : "Linux";
+    const before = namedStep(job, `Validate producer attempt before ${platform} artifact download`);
+    const after = namedStep(job, `Validate producer attempt after ${platform} artifact download`);
+    assert.equal(directMappingValue(before, 10, "GH_TOKEN"), "${{ github.token }}");
+    assert.equal(directMappingValue(after, 10, "GH_TOKEN"), "${{ github.token }}");
+    for (const [step, phase] of [[before, "before"], [after, "after"]]) {
+      assert.match(step, /trusted-run\.mjs validate-attempt/u);
+      assert.match(step, /--run-attempt (?:\$env:RELEASE_INPUT_RUN_ATTEMPT|"\$RELEASE_INPUT_RUN_ATTEMPT")/u);
+      assert.match(step, new RegExp(`producer-run-(?:windows|linux)-${phase}\\.json`, "u"));
+      assert.doesNotMatch(step, /(?:set -x|echo .*GH_TOKEN|cat \.release\/producer-run)/u);
+    }
+
+    const downloads = stepBlocks(job).filter((step) => directMappingValue(step, 8, "uses") === `actions/download-artifact@${actionPins["actions/download-artifact"]}`);
+    const expectedIds = name === "package-windows"
+      ? ["${{ needs.verify-release-input-run.outputs.windows_artifact_id }}"]
+      : ["${{ needs.verify-release-input-run.outputs.linux_artifact_id }}", "${{ needs.verify-release-input-run.outputs.appimagetool_artifact_id }}"];
+    assert.deepEqual(downloads.map((step) => inputValue(step, "artifact-ids")), expectedIds);
+    for (const download of downloads) {
+      assert.equal(inputValue(download, "merge-multiple"), "true");
+      assert.equal(inputValue(download, "run-id"), "${{ needs.verify-release-input-run.outputs.run_id }}");
+      assert.equal(inputValue(download, "github-token"), "${{ github.token }}");
+      assert.equal(inputValue(download, "name"), undefined);
+    }
+    assertOrdered(job, [before, ...downloads, after]);
+    const firstSensitiveOperation = name === "package-windows"
+      ? job.indexOf("Verify and export release inputs")
+      : job.indexOf("node tools/release/linux/runtime-mode-inventory.mjs restore");
+    assert.ok(job.indexOf(after) < firstSensitiveOperation, `${name} must revalidate the attempt before staging, restoration, or execution`);
   }
 });
