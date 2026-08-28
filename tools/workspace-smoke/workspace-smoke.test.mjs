@@ -238,6 +238,51 @@ test("release documentation describes complete digest-pinned Code-OSS runtime ar
   assert.match(roadmap, /Phase 8 仍未完成/u);
 });
 
+test("trusted producer documentation keeps unsigned qualification operational, closed, and incomplete", async () => {
+  const [readme, security, roadmap] = await Promise.all([
+    readFile("README.md", "utf8"),
+    readFile("docs/security.md", "utf8"),
+    readFile("docs/superpowers/plans/2026-07-21-cpp-unit-test-ide-roadmap.md", "utf8"),
+  ]);
+
+  const producerProcedure = readme.slice(readme.indexOf("## 受信任的 Code-OSS 发布输入"));
+  assert.notEqual(producerProcedure, readme, "README must own the qualification procedure in a dedicated section");
+  assert.match(producerProcedure, /\.github\/workflows\/release-inputs\.yml/u);
+  assert.match(producerProcedure, /b1c0a14de1414fcdaa400695b4db1c0799bc3124/u);
+  assert.match(producerProcedure, /windows-2022/u);
+  assert.match(producerProcedure, /Visual Studio 2022[\s\S]*C\+\+[\s\S]*Spectre/u);
+  assert.match(producerProcedure, /ubuntu-24\.04/u);
+  for (const artifactName of ["code-oss-windows-x64", "code-oss-linux-x64", "appimagetool-linux-x64"]) {
+    assert.match(producerProcedure, new RegExp(artifactName));
+  }
+  assert.match(producerProcedure, /保留.*1.*天|1.*天.*保留/u);
+  assert.match(producerProcedure, /gh workflow run release-inputs\.yml --repo colayc\/unitTest --ref master/u);
+  assert.match(producerProcedure, /release_version=0\.1\.0/u);
+  assert.match(producerProcedure, /release_signing_required=0/u);
+  assert.match(producerProcedure, /gh workflow run foundation\.yml --repo colayc\/unitTest --ref master/u);
+  assert.match(producerProcedure, /gh run list --repo colayc\/unitTest --workflow foundation\.yml --branch master --event workflow_dispatch/u);
+  assert.match(producerProcedure, /gh api "repos\/colayc\/unitTest\/actions\/runs\/\$releaseRunId\/artifacts"/u);
+  assert.match(producerProcedure, /重新运行.*新的.*producer|新的.*producer.*artifact|fresh producer artifact/u);
+  assert.match(producerProcedure, /release-inputs\/code-oss\.exe.*不是允许|不是允许.*release-inputs\/code-oss\.exe/u);
+
+  const releaseTrustBoundary = security.slice(security.indexOf("## 发布输入信任边界"));
+  assert.notEqual(releaseTrustBoundary, security, "security.md must own the producer trust boundary");
+  assert.match(releaseTrustBoundary, /GitHub Actions.*API|GitHub.*run.*API/u);
+  assert.match(releaseTrustBoundary, /provenance/u);
+  assert.match(releaseTrustBoundary, /post-transport|传输后/u);
+  assert.match(releaseTrustBoundary, /release-manifest|package manifest|包.*manifest/u);
+  assert.match(releaseTrustBoundary, /本地.*Code-OSS runtime.*禁止|禁止.*本地.*Code-OSS runtime/u);
+  assert.match(releaseTrustBoundary, /release-inputs\/code-oss\.exe.*禁止|禁止.*release-inputs\/code-oss\.exe/u);
+  assert.match(releaseTrustBoundary, /GitHub Release.*不|不.*GitHub Release/u);
+  assert.match(releaseTrustBoundary, /生产发布.*不|不.*生产发布/u);
+
+  const phaseEight = roadmap.slice(roadmap.indexOf("## Phase 8"));
+  assert.notEqual(phaseEight, roadmap, "roadmap must retain a dedicated Phase 8 status section");
+  assert.match(phaseEight, /签名/u);
+  assert.match(phaseEight, /license|许可|法律/u);
+  assert.match(phaseEight, /仍未完成|尚未完成|未完成/u);
+});
+
 test("compiled Service runtime excludes HTTP, TLS, GitHub, and OAuth client stacks", () => {
   const dependencies = goList(["list", "-deps", serviceCommandPackage]);
   const forbidden = dependencies.filter((dependency) =>
