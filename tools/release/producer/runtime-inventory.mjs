@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
 import { constants } from "node:fs";
 import { lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 
 import { validateCodeOssRuntime } from "../code-oss-runtime.mjs";
 import { validateRuntimeModeInventory } from "../linux/runtime-mode-inventory.mjs";
@@ -20,6 +22,8 @@ const codeOssIdentity = {
   licenseName: "MIT",
   nameShort: "Code - OSS",
 };
+const execFileAsync = promisify(execFile);
+const windowsReparsePointCommand = "$root=New-Object IO.DirectoryInfo($env:CODE_OSS_RUNTIME_ROOT); function Test-ReparsePoint([IO.FileSystemInfo]$node) { if (($node.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $true }; if ($node -is [IO.DirectoryInfo]) { foreach ($child in $node.EnumerateFileSystemInfos()) { if (Test-ReparsePoint $child) { return $true } } }; return $false }; [Console]::Out.Write([int](Test-ReparsePoint $root))";
 
 function inputError(code, message) {
   const error = new Error(`${code}: ${message}`);
@@ -50,6 +54,17 @@ function comparePaths(left, right) {
 function withinRoot(rootPath, candidatePath) {
   const child = relative(rootPath, candidatePath);
   return child === "" || (!child.startsWith("..") && !isAbsolute(child));
+}
+
+async function assertNoWindowsReparsePoints(rootPath) {
+  if (process.platform !== "win32") return;
+  try {
+    const { stdout } = await execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", windowsReparsePointCommand], { encoding: "utf8", env: { ...process.env, CODE_OSS_RUNTIME_ROOT: rootPath }, windowsHide: true });
+    if (stdout.trim() === "1") throw inputError("RELEASE_INPUT_INVALID", "runtime tree contains a reparse point");
+  } catch (error) {
+    if (error?.code === "RELEASE_INPUT_INVALID") throw error;
+    throw inputError("RELEASE_INPUT_INVALID", "runtime tree reparse-point state cannot be inspected");
+  }
 }
 
 async function hashScannedFile(file) {
@@ -88,6 +103,7 @@ async function scanRuntimeTree(root) {
   if (rootInfo.isSymbolicLink() || !rootInfo.isDirectory()) {
     throw inputError("RELEASE_INPUT_INVALID", "runtime root must be a real directory");
   }
+  await assertNoWindowsReparsePoints(rootPath);
 
   const files = [];
   const aliases = new Map();
