@@ -1063,9 +1063,27 @@ test("foundation package jobs consume only the trust job closed coordinates", ()
     assert.equal(directMappingValue(before, 10, "GH_TOKEN"), "${{ github.token }}");
     assert.equal(directMappingValue(after, 10, "GH_TOKEN"), "${{ github.token }}");
     for (const [step, phase] of [[before, "before"], [after, "after"]]) {
-      assert.match(step, /trusted-run\.mjs validate-attempt/u);
-      assert.match(step, /--run-attempt (?:\$env:RELEASE_INPUT_RUN_ATTEMPT|"\$RELEASE_INPUT_RUN_ATTEMPT")/u);
-      assert.match(step, new RegExp(`producer-run-(?:windows|linux)-${phase}\\.json`, "u"));
+      const runJson = `.release/producer-run-${name === "package-windows" ? "windows" : "linux"}-${phase}.json`;
+      const expectedGate = name === "package-windows"
+        ? [
+            `          gh api "repos/colayc/unitTest/actions/runs/$env:RELEASE_INPUT_RUN_ID" > ${runJson}`,
+            "          node tools/release/producer/trusted-run.mjs validate-attempt `",
+            "            --run-json " + runJson + " `",
+            "            --run-id $env:RELEASE_INPUT_RUN_ID `",
+            "            --run-attempt $env:RELEASE_INPUT_RUN_ATTEMPT `",
+            "            --consumer-commit $env:GITHUB_SHA",
+          ].join("\n")
+        : [
+            `          gh api "repos/colayc/unitTest/actions/runs/$RELEASE_INPUT_RUN_ID" > ${runJson}`,
+            "          node tools/release/producer/trusted-run.mjs validate-attempt \\",
+            `            --run-json ${runJson} \\`,
+            '            --run-id "$RELEASE_INPUT_RUN_ID" \\',
+            '            --run-attempt "$RELEASE_INPUT_RUN_ATTEMPT" \\',
+            '            --consumer-commit "$GITHUB_SHA"',
+          ].join("\n");
+      assert.ok(step.includes(expectedGate), `${name} must fetch a fresh exact ${phase} snapshot immediately before exact attempt validation`);
+      assert.equal(step.match(/^          gh api /gmu)?.length, 1, `${name} ${phase} gate must fetch exactly once`);
+      assert.equal(step.match(/trusted-run\.mjs validate-attempt/gu)?.length, 1, `${name} ${phase} gate must validate exactly once`);
       assert.doesNotMatch(step, /(?:set -x|echo .*GH_TOKEN|cat \.release\/producer-run)/u);
     }
 
