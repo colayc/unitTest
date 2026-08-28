@@ -128,8 +128,12 @@ jobs:
               if ($instances.Count -ne 1 `
                 -or $instances[0].installationVersion -isnot [string] `
                 -or $instances[0].installationVersion -cnotmatch '^17\.' `
-                -or $instances[0].installationPath -isnot [string] `
-                -or -not (Test-Path -LiteralPath $instances[0].installationPath -PathType Container)) {
+                -or $instances[0].installationPath -isnot [string]) {
+                throw $failure
+              }
+              $installationInfo = Get-Item -LiteralPath $instances[0].installationPath -Force
+              if (-not $installationInfo.PSIsContainer `
+                -or ($installationInfo.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
                 throw $failure
               }
             } else {

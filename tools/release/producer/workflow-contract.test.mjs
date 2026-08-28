@@ -196,6 +196,9 @@ test("Windows validates, bounds launcher execution, inventories, and stages befo
   assert.match(preflight, /-products '\*' -version '\[17\.0,18\.0\)'[\s\S]*?-requires 'Microsoft\.VisualStudio\.Component\.VC\.Tools\.x86\.x64' 'Microsoft\.VisualStudio\.Component\.VC\.Runtimes\.x86\.x64\.Spectre'/u);
   assert.match(preflight, /\$instances\.Count -ne 1/u);
   assert.match(preflight, /installationVersion[\s\S]*?\^17\\\./u);
+  assert.match(preflight, /\$installationInfo = Get-Item -LiteralPath \$instances\[0\]\.installationPath -Force/u);
+  assert.match(preflight, /-not \$installationInfo\.PSIsContainer/u);
+  assert.match(preflight, /\$installationInfo\.Attributes -band \[IO\.FileAttributes\]::ReparsePoint/u);
   assert.match(preflight, /\$failure = 'RELEASE_PRODUCER_BUILD_FAILED: Visual Studio 2022 toolchain preflight failed'/u);
   assert.match(preflight, /GYP_MSVS_VERSION=2022/u);
   assert.match(preflight, /npm_config_msvs_version=2022/u);
