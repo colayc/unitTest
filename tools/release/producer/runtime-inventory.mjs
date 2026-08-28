@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
-import { lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -37,7 +37,9 @@ function isPlainObject(value) {
 
 function hasExactKeys(value, expected) {
   if (!isPlainObject(value)) return false;
-  const keys = Object.keys(value).sort();
+  const keys = Reflect.ownKeys(value);
+  if (keys.some((key) => typeof key !== "string")) return false;
+  keys.sort();
   return keys.length === expected.length && keys.every((key, index) => key === expected[index]);
 }
 
@@ -50,15 +52,26 @@ function withinRoot(rootPath, candidatePath) {
   return child === "" || (!child.startsWith("..") && !isAbsolute(child));
 }
 
-async function hashFile(path) {
+async function hashScannedFile(file) {
   const hash = createHash("sha256");
-  await new Promise((resolveHash, rejectHash) => {
-    const stream = createReadStream(path);
-    stream.on("data", (chunk) => hash.update(chunk));
-    stream.on("error", rejectHash);
-    stream.on("end", resolveHash);
-  });
-  return hash.digest("hex");
+  let handle;
+  try {
+    handle = await open(file.canonicalPath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    const before = await handle.stat();
+    if (!before.isFile() || before.size !== file.size || before.dev !== file.dev || before.ino !== file.ino) throw new Error("changed");
+    let counted = 0;
+    await new Promise((resolveHash, rejectHash) => {
+      const stream = handle.createReadStream({ autoClose: false });
+      stream.on("data", (chunk) => { counted += chunk.length; hash.update(chunk); });
+      stream.on("error", rejectHash);
+      stream.on("end", resolveHash);
+    });
+    const after = await handle.stat();
+    if (!after.isFile() || after.size !== file.size || after.dev !== file.dev || after.ino !== file.ino || counted !== file.size) throw new Error("changed");
+    return hash.digest("hex");
+  } finally {
+    await handle?.close().catch(() => {});
+  }
 }
 
 async function scanRuntimeTree(root) {
@@ -121,7 +134,7 @@ async function scanRuntimeTree(root) {
         if (!Number.isSafeInteger(info.size) || info.size < 0) {
           throw inputError("RELEASE_INPUT_INVALID", "runtime file size is invalid");
         }
-        files.push({ path: relativePath, canonicalPath: canonicalEntry, size: info.size, mode: info.mode });
+        files.push({ path: relativePath, canonicalPath: canonicalEntry, size: info.size, mode: info.mode, dev: info.dev, ino: info.ino });
       } else {
         throw inputError("RELEASE_INPUT_INVALID", "runtime tree contains a special entry");
       }
@@ -215,7 +228,7 @@ async function assertCodeOssIdentity(files, platform, expectedLauncherSha256) {
   }
   let launcherDigest;
   try {
-    launcherDigest = await hashFile(launcher.canonicalPath);
+    launcherDigest = await hashScannedFile(launcher);
   } catch {
     throw inputError("RELEASE_INPUT_INVALID", "platform launcher cannot be read");
   }
@@ -224,7 +237,11 @@ async function assertCodeOssIdentity(files, platform, expectedLauncherSha256) {
   }
 }
 
-export async function createRuntimeInventory({ root, platform, expectedLauncherSha256, modeInventory } = {}) {
+export async function createRuntimeInventory(request = {}) {
+  if (!isPlainObject(request)) throw inputError("RELEASE_INPUT_INVALID", "runtime inventory request must be a closed object");
+  const { root, platform, expectedLauncherSha256, modeInventory } = request;
+  const requiredKeys = platform === "linux" ? ["expectedLauncherSha256", "modeInventory", "platform", "root"] : ["expectedLauncherSha256", "platform", "root"];
+  if (!hasExactKeys(request, requiredKeys)) throw inputError("RELEASE_INPUT_INVALID", "runtime inventory request must be a closed object");
   if (!Object.hasOwn(layouts, platform) || typeof root !== "string" || root.length === 0) {
     throw inputError("RELEASE_INPUT_INVALID", "runtime root and platform are required");
   }
@@ -250,7 +267,7 @@ export async function createRuntimeInventory({ root, platform, expectedLauncherS
     if (!Number.isSafeInteger(totalBytes + file.size)) throw inputError("RELEASE_INPUT_INVALID", "runtime inventory total size overflows");
     let sha256;
     try {
-      sha256 = await hashFile(file.canonicalPath);
+      sha256 = await hashScannedFile(file);
     } catch {
       throw inputError("RELEASE_INPUT_INVALID", "runtime file cannot be read");
     }
@@ -287,19 +304,40 @@ export function summarizeRuntimeInventory(inventory) {
   };
 }
 
-async function writeCanonicalJson(path, value) {
+async function stageCanonicalJson(path, value) {
   if (typeof path !== "string" || path.length === 0) throw outputError("output path is required");
   const target = resolve(path);
-  const temporary = `${target}.tmp-${process.pid}`;
+  let temporaryDirectory;
   try {
     await mkdir(dirname(target), { recursive: true });
     const existing = await lstat(target).catch((error) => error?.code === "ENOENT" ? undefined : Promise.reject(error));
     if (existing?.isSymbolicLink() || (existing && !existing.isFile())) throw new Error("invalid output");
-    await writeFile(temporary, `${JSON.stringify(value)}\n`, { encoding: "utf8", mode: 0o600 });
-    await rename(temporary, target);
+    temporaryDirectory = await mkdtemp(join(dirname(target), ".release-runtime-"));
+    const temporary = join(temporaryDirectory, "payload.json");
+    await writeFile(temporary, `${JSON.stringify(value)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    return { target, temporary, temporaryDirectory, backup: join(temporaryDirectory, "previous.json"), hadExisting: existing !== undefined, committed: false };
   } catch {
-    await rm(temporary, { force: true }).catch(() => {});
+    if (temporaryDirectory) await rm(temporaryDirectory, { recursive: true, force: true }).catch(() => {});
     throw outputError("output file cannot be written");
+  }
+}
+
+async function commitCanonicalPair(first, second) {
+  try {
+    for (const item of [first, second]) {
+      if (item.hadExisting) await rename(item.target, item.backup);
+      await rename(item.temporary, item.target);
+      item.committed = true;
+    }
+  } catch {
+    for (const item of [second, first]) {
+      if (item.committed) await rm(item.target, { force: true }).catch(() => {});
+      if (item.hadExisting) await rename(item.backup, item.target).catch(() => {});
+    }
+    throw outputError("output file cannot be written");
+  } finally {
+    await rm(first.temporaryDirectory, { recursive: true, force: true }).catch(() => {});
+    await rm(second.temporaryDirectory, { recursive: true, force: true }).catch(() => {});
   }
 }
 
@@ -338,9 +376,10 @@ async function runCli() {
   try {
     const options = parseCliArguments(process.argv.slice(2));
     const modeInventory = options.modeInventoryPath ? await loadModeInventory(options.modeInventoryPath, options.expectedLauncherSha256) : undefined;
-    const inventory = await createRuntimeInventory({ ...options, modeInventory });
-    await writeCanonicalJson(options.out, inventory);
-    await writeCanonicalJson(options.summaryOut, summarizeRuntimeInventory(inventory));
+    if (resolve(options.out) === resolve(options.summaryOut)) throw outputError("output paths must be distinct");
+    const inventory = await createRuntimeInventory({ root: options.root, platform: options.platform, expectedLauncherSha256: options.expectedLauncherSha256, ...(modeInventory ? { modeInventory } : {}) });
+    const [full, summary] = await Promise.all([stageCanonicalJson(options.out, inventory), stageCanonicalJson(options.summaryOut, summarizeRuntimeInventory(inventory))]);
+    await commitCanonicalPair(full, summary);
   } catch (error) {
     process.stderr.write(`${error?.message ?? "RELEASE_PRODUCER_OUTPUT_INVALID: runtime inventory creation failed"}\n`);
     process.exitCode = 1;

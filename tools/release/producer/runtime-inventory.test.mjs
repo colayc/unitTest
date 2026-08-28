@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import { createRuntimeInventory, summarizeRuntimeInventory } from "./runtime-inventory.mjs";
@@ -97,4 +99,17 @@ test("tree digest changes with record bytes but not timestamps or directory mode
   await writeFile(join(input.root, "resources", "app", "static", "data.txt"), "changed\n");
   const changed = await createRuntimeInventory({ root: input.root, platform: "windows", expectedLauncherSha256: input.launcherSha256 });
   assert.notEqual(changed.treeDigest, original.treeDigest);
+});
+
+test("public inventory requests are closed and CLI refuses colliding outputs", async (t) => {
+  const input = await fixture(t, "windows");
+  for (const request of [null, { root: input.root, platform: "windows", expectedLauncherSha256: input.launcherSha256, extra: true }]) {
+    await assert.rejects(() => createRuntimeInventory(request), (error) => error?.code === "RELEASE_INPUT_INVALID");
+  }
+  const output = join(input.root, "inventory.json");
+  const script = fileURLToPath(new URL("./runtime-inventory.mjs", import.meta.url));
+  const result = spawnSync(process.execPath, [script, "create", "--platform", "windows", "--root", input.root, "--launcher-sha256", input.launcherSha256, "--out", output, "--summary-out", output], { encoding: "utf8" });
+  assert.notEqual(result.status, 0);
+  await assert.rejects(() => readFile(output, "utf8"));
+  assert.equal(result.stderr.includes(input.root), false);
 });
