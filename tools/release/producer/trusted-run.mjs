@@ -137,7 +137,7 @@ export function validateTrustedReleaseInputs(request) {
 }
 
 function sameNode(left, right) {
-  return left.dev === right.dev && left.ino === right.ino && left.mode === right.mode
+  return left.dev === right.dev && left.ino === right.ino && left.size === right.size && left.mode === right.mode
     && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs
     && left.isFile() === right.isFile() && left.isDirectory() === right.isDirectory();
 }
@@ -201,14 +201,20 @@ async function assertUnchangedAncestors(snapshot) {
   }
 }
 
-function readHooks(value) {
-  if (!isPlainObject(value)) failUntrusted("producer run input is invalid");
+function snapshotHooks(value, allowed, reason) {
+  if (!isPlainObject(value)) failUntrusted(reason);
+  const snapshot = {};
   for (const key of Reflect.ownKeys(value)) {
-    if (typeof key !== "string" || !["afterOpenSnapshot", "afterRead"].includes(key)) failUntrusted("producer run input is invalid");
+    if (typeof key !== "string" || !allowed.includes(key)) failUntrusted(reason);
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (descriptor === undefined || !descriptor.enumerable || !Object.hasOwn(descriptor, "value") || typeof descriptor.value !== "function") failUntrusted("producer run input is invalid");
+    if (descriptor === undefined || !descriptor.enumerable || !Object.hasOwn(descriptor, "value") || typeof descriptor.value !== "function") failUntrusted(reason);
+    snapshot[key] = descriptor.value;
   }
-  return value;
+  return Object.freeze(snapshot);
+}
+
+function readHooks(value) {
+  return snapshotHooks(value, ["afterOpenSnapshot", "afterRead"], "producer run input is invalid");
 }
 
 async function readTrustedJson(path, errorCode, suppliedHooks = {}) {
@@ -243,13 +249,7 @@ async function readTrustedJson(path, errorCode, suppliedHooks = {}) {
 }
 
 function outputHooks(value) {
-  if (!isPlainObject(value)) failUntrusted("GitHub output is invalid");
-  for (const key of Reflect.ownKeys(value)) {
-    if (typeof key !== "string" || !["afterWrite", "sync", "write"].includes(key)) failUntrusted("GitHub output is invalid");
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (descriptor === undefined || !descriptor.enumerable || !Object.hasOwn(descriptor, "value") || typeof descriptor.value !== "function") failUntrusted("GitHub output is invalid");
-  }
-  return value;
+  return snapshotHooks(value, ["afterWrite", "sync", "write"], "GitHub output is invalid");
 }
 
 async function writeFully(handle, bytes, initialPosition, hooks) {
@@ -322,10 +322,13 @@ async function appendGithubOutput(path, entries, suppliedHooks = {}) {
     await writeFully(handle, bytes, Number(originalSize), hooks);
     await hooks.afterWrite?.();
     await syncOutput(handle, hooks);
-    const currentPrefix = Buffer.alloc(originalBytes.length);
-    await readFully(handle, currentPrefix, 0);
-    if (!currentPrefix.equals(originalBytes)) failUntrusted("GitHub output changed");
+    const expectedBytes = Buffer.concat([originalBytes, bytes]);
+    const afterWrite = await handle.stat({ bigint: true });
+    if (!isSingleLinkedRegularFile(afterWrite) || afterWrite.size !== BigInt(expectedBytes.length)) failUntrusted("GitHub output changed");
+    const currentBytes = Buffer.alloc(expectedBytes.length);
+    await readFully(handle, currentBytes, 0);
     const after = await handle.stat({ bigint: true });
+    if (!sameSingleLinkedFile(afterWrite, after) || !currentBytes.equals(expectedBytes)) failUntrusted("GitHub output changed");
     const pathAfter = await lstat(checked.absolute, { bigint: true });
     await assertUnchangedAncestors(checked);
     if (!sameSingleLinkedFile(after, pathAfter) || !isSingleLinkedRegularFile(after) || after.size !== before.size + BigInt(bytes.length)) failUntrusted("GitHub output changed");

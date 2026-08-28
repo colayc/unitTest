@@ -348,6 +348,44 @@ test("trusted JSON reads reject same-inode content changes after opening or read
       (error) => error?.code === UNTRUSTED,
     );
   }
+  await writeFile(runPath, original);
+  await assert.rejects(
+    () => __testOnlyTrustedRun.readTrustedJson(runPath, UNTRUSTED, {
+      async afterOpenSnapshot() { await writeFile(runPath, `${replacement} `); },
+    }),
+    (error) => error?.code === UNTRUSTED,
+  );
+});
+
+test("test hooks snapshot functions before async boundaries instead of rereading replacement getters", async (t) => {
+  const root = await temporaryDirectory(t);
+  const runPath = join(root, "run.json");
+  await writeFile(runPath, `${JSON.stringify(runFixture())}\n`);
+  let readGetter = false;
+  const readHook = {
+    async afterOpenSnapshot() {
+      Object.defineProperty(readHook, "afterRead", {
+        enumerable: true,
+        get() { readGetter = true; return async () => {}; },
+      });
+    },
+  };
+  await __testOnlyTrustedRun.readTrustedJson(runPath, UNTRUSTED, readHook);
+  assert.equal(readGetter, false);
+
+  const outputPath = join(root, "github-output");
+  await writeFile(outputPath, "third_party=value\n");
+  let outputGetter = false;
+  const outputHook = {
+    async afterWrite() {
+      Object.defineProperty(outputHook, "sync", {
+        enumerable: true,
+        get() { outputGetter = true; return async (handle) => handle.sync(); },
+      });
+    },
+  };
+  await __testOnlyTrustedRun.appendGithubOutput(outputPath, [["run_id", "123456789"]], outputHook);
+  assert.equal(outputGetter, false);
 });
 
 test("GitHub output append rolls back partial writes and failed syncs on its original descriptor", async (t) => {
@@ -394,6 +432,23 @@ test("GitHub output append rejects same-inode prefix replacement and restores it
       async afterWrite() {
         const handle = await open(outputPath, constants.O_RDWR);
         try { await handle.write(Buffer.from("X"), 0, 1, 0); } finally { await handle.close(); }
+      },
+    }),
+    (error) => error?.code === UNTRUSTED,
+  );
+  assert.equal(await readFile(outputPath, "utf8"), original);
+});
+
+test("GitHub output append rejects same-length suffix replacement and restores its expected bytes", async (t) => {
+  const root = await temporaryDirectory(t);
+  const outputPath = join(root, "github-output");
+  const original = "third_party=value\n";
+  await writeFile(outputPath, original);
+  await assert.rejects(
+    () => __testOnlyTrustedRun.appendGithubOutput(outputPath, [["run_id", "123456789"]], {
+      async afterWrite() {
+        const handle = await open(outputPath, constants.O_RDWR);
+        try { await handle.write(Buffer.from("987654321"), 0, 9, original.length + "run_id=".length); } finally { await handle.close(); }
       },
     }),
     (error) => error?.code === UNTRUSTED,
