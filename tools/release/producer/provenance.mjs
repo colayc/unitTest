@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { constants, readFileSync } from "node:fs";
-import { lstat, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, parse, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -284,6 +284,11 @@ function sameSnapshot(left, right) {
     && left.size === right.size && left.mode === right.mode && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
 }
 
+function sameFileIdentity(left, right) {
+  return left.isFile() && right.isFile() && left.dev === right.dev && left.ino === right.ino
+    && left.size === right.size && left.mode === right.mode && left.mtimeNs === right.mtimeNs;
+}
+
 function sameNode(left, right) {
   return left.dev === right.dev && left.ino === right.ino && left.mode === right.mode
     && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs
@@ -448,17 +453,19 @@ async function writeCanonical(path, value, hooks = {}) {
   if (typeof path !== "string" || path.length === 0) fail();
   const target = resolve(path);
   const temporary = `${target}.tmp-${process.pid}-${Date.now()}`;
+  const bytes = Buffer.from(`${JSON.stringify(value)}\n`);
   let directory;
+  let published;
   try {
     directory = await snapshotRealOutputDirectory(dirname(target));
     const existing = await lstat(target).catch((error) => error?.code === "ENOENT" ? undefined : Promise.reject(error));
-    if (existing?.isSymbolicLink() || (existing && !existing.isFile())) fail();
-    const expected = identity(existing);
+    if (existing !== undefined) fail("output target already exists");
+    const expected = undefined;
     await hooks.beforeStage?.();
     await assertUnchangedOutputDirectory(directory);
-    await writeFile(temporary, `${JSON.stringify(value)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    await writeFile(temporary, bytes, { flag: "wx", mode: 0o600 });
     const staged = await lstat(temporary, { bigint: true });
-    if (staged.isSymbolicLink() || !staged.isFile()) fail();
+    if (staged.isSymbolicLink() || !staged.isFile() || !(await readFile(temporary)).equals(bytes)) fail();
     await assertUnchangedOutputDirectory(directory);
     const current = await lstat(target).catch((error) => error?.code === "ENOENT" ? undefined : Promise.reject(error));
     if (current?.isSymbolicLink() || (current && !current.isFile()) || !sameIdentity(expected, identity(current))) fail();
@@ -466,12 +473,22 @@ async function writeCanonical(path, value, hooks = {}) {
     await assertUnchangedOutputDirectory(directory);
     const publishTarget = await lstat(target).catch((error) => error?.code === "ENOENT" ? undefined : Promise.reject(error));
     if (publishTarget?.isSymbolicLink() || (publishTarget && !publishTarget.isFile()) || !sameIdentity(expected, identity(publishTarget))) fail();
+    const currentStage = await lstat(temporary, { bigint: true });
+    if (currentStage.isSymbolicLink() || !currentStage.isFile() || !sameFileIdentity(staged, currentStage) || !(await readFile(temporary)).equals(bytes)) fail("staged output changed");
     await rename(temporary, target);
     await assertUnchangedOutputDirectory(directory);
-    const published = await lstat(target, { bigint: true });
-    if (published.isSymbolicLink() || !published.isFile() || !sameIdentity(identity(staged), identity(published))) fail();
+    published = await lstat(target, { bigint: true });
+    if (published.isSymbolicLink() || !published.isFile() || !sameFileIdentity(staged, published) || !(await readFile(target)).equals(bytes)) {
+      const current = await lstat(target, { bigint: true }).catch(() => undefined);
+      if (current !== undefined && sameFileIdentity(published, current)) await rm(target, { force: true });
+      fail("published output changed");
+    }
   } catch (error) {
     if (directory && await assertUnchangedOutputDirectory(directory).then(() => true, () => false)) {
+      if (published !== undefined) {
+        const current = await lstat(target, { bigint: true }).catch(() => undefined);
+        if (current !== undefined && sameFileIdentity(published, current)) await rm(target, { force: true }).catch(() => {});
+      }
       await rm(temporary, { force: true }).catch(() => {});
     }
     if (error?.code === INVALID) throw error;

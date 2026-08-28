@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -244,6 +244,16 @@ test("creation and validation reject toggling accessor properties at every publi
   assertInvalid(() => validateReleaseInputProvenance(provenance));
 });
 
+test("creation and validation reject non-enumerable required fields", async (t) => {
+  const input = await fixture(t);
+  const request = structuredClone(input.request);
+  const provenance = structuredClone(createReleaseInputProvenance(input.request));
+  Object.defineProperty(request.windows, "fileCount", { enumerable: false, value: 2 });
+  Object.defineProperty(provenance.producer, "sourceCommit", { enumerable: false, value: input.producer.sourceCommit });
+  assertInvalid(() => createReleaseInputProvenance(request));
+  assertInvalid(() => validateReleaseInputProvenance(provenance));
+});
+
 test("CLI rehashes real mode and tool files, emits canonical bytes, validates manifest and never leaks paths", async (t) => {
   const input = await fixture(t);
   const manifest = join(input.parent, "manifest.json");
@@ -430,4 +440,25 @@ test("canonical output refuses linked and swapped output ancestors without parti
   assert.equal(swapped, true);
   await assert.rejects(() => readFile(join(outside, "provenance.json"), "utf8"));
   await assert.rejects(() => readFile(join(relocated, "provenance.json"), "utf8"));
+});
+
+test("canonical output never leaves a replaced staged file published after failure", async (t) => {
+  const input = await fixture(t);
+  const valid = createReleaseInputProvenance(input.request);
+  const outputDirectory = join(input.parent, "output");
+  const out = join(outputDirectory, "provenance.json");
+  await mkdir(outputDirectory);
+  await assert.rejects(
+    () => __testOnlyReleaseInputProvenance.writeCanonical(out, valid, {
+      beforePublish: async () => {
+        const staged = (await readdir(outputDirectory)).find((name) => name.startsWith("provenance.json.tmp-"));
+        assert.ok(staged);
+        const stagePath = join(outputDirectory, staged);
+        await rm(stagePath);
+        await writeFile(stagePath, "attacker-bytes\n");
+      },
+    }),
+    (error) => error?.code === INVALID,
+  );
+  await assert.rejects(() => readFile(out, "utf8"));
 });
