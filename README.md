@@ -87,6 +87,54 @@ pnpm release:stage -- --platform linux --architecture x64 --version 1.2.3 --code
 
 命令会生成 `dist/staging/<version>/<platform>-<architecture>/`，其中包含 Code-OSS runtime、扩展 `dist`、service、bundle、聚合后的 license notices，以及闭集 `release-manifest.json`。
 
+## 受信任的 Code-OSS 发布输入与一次无签名资格验证
+
+上面的 `release:stage` 示例是本地开发/测试的 staging 接口，不是发布输入生产接口。用于发布的 Code-OSS runtime 只能由 GitHub Actions `.github/workflows/release-inputs.yml` 在 `master` 上手动生产：它固定检出 `microsoft/vscode` 的 `b1c0a14de1414fcdaa400695b4db1c0799bc3124`，并只使用 GitHub-hosted `windows-2022`（Visual Studio 2022、C++ 与 Spectre 库 preflight 不通过即失败）和 `ubuntu-24.04`。该工作流不使用管理员/WFP self-hosted runner；本地 Code-OSS runtime 和 `release-inputs/code-oss.exe` 都不是允许的 producer 输入。
+
+producer 只上传三个固定名制品：`code-oss-windows-x64`、`code-oss-linux-x64` 和 `appimagetool-linux-x64`；它们以及 `release-input-provenance` 都只保留 1 天。请在到期前完成检查；producer 重跑必须使用一套新的 producer artifact，不能把旧 run 的制品混入重跑。
+
+合并并确认 GitHub/Gitee 的 `master` 指向同一提交后，按如下顺序运行。命令里的变量只在当前 PowerShell 会话中保存，不能提交真实 run ID、摘要或凭据：
+
+```powershell
+gh workflow run release-inputs.yml --repo colayc/unitTest --ref master
+$producer = gh run list --repo colayc/unitTest --workflow release-inputs.yml --branch master --event workflow_dispatch --limit 1 --json databaseId,headSha,status,conclusion,createdAt | ConvertFrom-Json | Select-Object -First 1
+$producerRunId = [string]$producer.databaseId
+gh run watch $producerRunId --repo colayc/unitTest --exit-status
+
+$producerEvidence = ".release/evidence/producer-$producerRunId"
+gh run download $producerRunId --repo colayc/unitTest --name release-input-provenance --dir $producerEvidence
+node tools/release/producer/provenance.mjs validate --manifest tools/release/producer/source-manifest.json --provenance "$producerEvidence/release-input-provenance.json"
+$provenance = Get-Content -LiteralPath "$producerEvidence/release-input-provenance.json" -Raw | ConvertFrom-Json
+$windowsSha = [string]$provenance.runtimes.windows.launcherSha256
+$linuxSha = [string]$provenance.runtimes.linux.launcherSha256
+$appimagetoolSha = [string]$provenance.appimagetool.sha256
+
+gh workflow run foundation.yml --repo colayc/unitTest --ref master `
+  -f release_version=0.1.0 `
+  -f release_signing_required=0 `
+  -f release_input_run_id=$producerRunId `
+  -f windows_code_oss_sha256=$windowsSha `
+  -f linux_code_oss_sha256=$linuxSha `
+  -f linux_appimagetool_sha256=$appimagetoolSha
+
+$release = gh run list --repo colayc/unitTest --workflow foundation.yml --branch master --event workflow_dispatch --limit 1 --json databaseId,headSha,status,conclusion,createdAt | ConvertFrom-Json | Select-Object -First 1
+$releaseRunId = [string]$release.databaseId
+gh run watch $releaseRunId --repo colayc/unitTest --exit-status
+
+$qualificationNames = @(gh api "repos/colayc/unitTest/actions/runs/$releaseRunId/artifacts" --jq '.artifacts[] | select(.name | startswith("release-qualification-")) | .name')
+if ($qualificationNames.Count -ne 1) { throw 'expected exactly one release qualification artifact' }
+$qualificationName = $qualificationNames[0]
+$qualificationEvidence = ".release/evidence/qualification-$releaseRunId"
+gh run download $releaseRunId --repo colayc/unitTest --name $qualificationName --dir $qualificationEvidence
+$qualification = Get-Content -LiteralPath "$qualificationEvidence/release-qualification.json" -Raw | ConvertFrom-Json
+if ($qualification.qualificationOutcome.qualified -ne $true) { throw 'unsigned release qualification did not pass' }
+if ($qualification.signatureOutcomes.windows -cne 'not-required') { throw 'unexpected unsigned signature outcome' }
+```
+
+先要求 producer 的 `authorize`、`build-windows`、`build-linux` 与 `attest` 都为 `success`，并确认其 `headSha` 等于两个远端的 `master`。foundation 同样必须使用这个源码提交，并且 `verify-windows`、`verify-linux`、`verify-release-input-run`、两个 package、两个 install-smoke 与 `release-qualification` 都必须为 `success`。它会先通过 GitHub Actions run API 绑定 producer run 身份和闭集 provenance，随后在制品传输后重新验证 runtime、Linux mode inventory 与 appimagetool，最后才由 staging/package manifest 再次绑定入包字节。这条 run API → provenance → post-transport → package-manifest/staging 信任链不接受 package job 直接信任手工输入。
+
+首次资格验证固定为免费无签名值 `release_version=0.1.0` 与 `release_signing_required=0`。它是短生命周期测试证据，不创建 GitHub Release，也不是生产发布。完成后应在这 1 天窗口内下载并检查 Windows/Linux package、release manifest、license audit、install-smoke 和 `release-qualification` evidence；任何失败都要经评审修复后，从新的 producer run 开始。
+
 ## 协议与安全边界
 
 协议模型由 `packages/protocol-schema/schema` 生成。生成的 TypeScript 和 Go 文件已提交；请编辑 Schema 并运行 `pnpm generate:protocol`，不要直接编辑生成文件。消息继续使用 UTF-8 NDJSON，每行编码后上限为 1 MiB。

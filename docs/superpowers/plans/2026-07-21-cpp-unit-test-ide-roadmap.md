@@ -134,7 +134,11 @@ GitHub Actions 的 PASS/report 是开发验收证据，GitHub 与 Gitee 只承�
 
 验收标准：干净机器安装、升级、回滚、卸载清理、许可证审查和高风险安全门禁均通过。
 
-当前状态：Phase 8 的确定性 staging 已消费摘要固定的完整 Code-OSS runtime 目录制品，并将完整 upstream runtime 分别绑定到 Windows MSIX 与 Linux AppImage；Linux 消费者合同已要求受信任 run 的 `runtime/` 与闭集 mode inventory，在 staging 前验证完整文件集合/摘要并恢复全部 `0755`/`0644`，避免 artifact transport 丢失执行位。安装包摘要校验、许可审计、安装/升级/回滚/卸载 smoke 与 fail-closed 发布资格门禁也已实现。Phase 8 仍未完成：受信任 Linux runtime artifact 的生产流程与原生 Linux AppImage/干净机器 CI 证据尚未落地，本地 Windows 工作区不能替代这些证据；测试签名路径也不能替代正式 Windows 签名证据，第三方声明仍须附加最终许可证/法务审查记录。资格报告会明确保留这些缺失原因，只有同一源码提交的双平台原生证据、摘要、签名要求、生命周期和许可记录全部闭合时才允许发布制品。
+当前状态：Phase 8 的确定性 staging 已消费摘要固定的完整 Code-OSS runtime 目录制品，并将完整 upstream runtime 分别绑定到 Windows MSIX 与 Linux AppImage；Linux 消费者合同已要求受信任 run 的 `runtime/` 与闭集 mode inventory，在 staging 前验证完整文件集合/摘要并恢复全部 `0755`/`0644`，避免 artifact transport 丢失执行位。安装包摘要校验、许可审计、安装/升级/回滚/卸载 smoke 与 fail-closed 发布资格门禁也已实现。
+
+受信任 producer 已定义为 `.github/workflows/release-inputs.yml`：它固定 Code-OSS commit `b1c0a14de1414fcdaa400695b4db1c0799bc3124`，在 GitHub-hosted `windows-2022`（VS2022/C++/Spectre fail-closed）和 `ubuntu-24.04` 上产生 1 天保留的 `code-oss-windows-x64`、`code-oss-linux-x64`、`appimagetool-linux-x64` 以及 provenance。一次 `release_version=0.1.0`、`release_signing_required=0` 的无签名资格验证只能作为短期测试证据；它不发布 GitHub Release，也不构成生产发布。本地 runtime 或 `release-inputs/code-oss.exe` 不能成为 producer 输入。
+
+Phase 8 仍未完成：首次 hosted producer 与无签名双平台资格验证尚待实际运行和检查；测试签名或无签名资格验证均不能替代正式 Windows 签名证据，第三方声明仍须附加最终 license/legal 审查记录。资格报告会明确保留这些缺失原因，只有同一源码提交的双平台原生证据、摘要、签名要求、生命周期和许可记录全部闭合时才允许发布制品。
 
 ### Phase 9：完整矩阵、性能与发布资格确认
 
