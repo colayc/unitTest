@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -59,7 +58,7 @@ async function expectConfigFailureAsync(run) {
 }
 
 async function withTemporaryDirectory(t, run) {
-  const directory = await mkdtemp(join(tmpdir(), "source-manifest-"));
+  const directory = await mkdtemp(join(process.cwd(), ".source-manifest-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   await run(directory);
 }
@@ -191,6 +190,19 @@ test("loadSourceManifest accepts only a real canonical JSON file", async (t) => 
       throw error;
     }
     await expectConfigFailureAsync(() => loadSourceManifest(join(linkedDirectory, "source-manifest.json")));
+    const nestedDirectory = join(root, "nested-manifest-directory");
+    await writeFixtureFile(nestedDirectory, "one/two/source-manifest.json", `${JSON.stringify(expectedManifest)}\n`);
+    const nestedLink = join(root, "nested-manifest-link");
+    try {
+      await symlink(nestedDirectory, nestedLink, "junction");
+    } catch (error) {
+      if (error?.code === "EPERM") {
+        t.skip("nested directory links unavailable");
+        return;
+      }
+      throw error;
+    }
+    await expectConfigFailureAsync(() => loadSourceManifest(join(nestedLink, "one", "two", "source-manifest.json")));
   });
 });
 
@@ -250,6 +262,20 @@ test("verifyCodeOssCheckout checks the fixed upstream metadata", async (t) => {
       "});",
     ].join("\n") });
     await expectUntrustedFailure(() => verifyCodeOssCheckout({ root, actualCommit: expectedManifest.codeOss.commit, manifest: expectedManifest }));
+    await createCheckoutFixture(root, { gulp: [
+      "const BUILD_TARGETS = [",
+      "  { platform: 'win32', arch: 'x64' },",
+      "  { platform: 'linux', arch: 'x64' },",
+      "];",
+      "BUILD_TARGETS.forEach(buildTarget => {",
+      "  const platform = 'win32';",
+      "  const arch = 'arm64';",
+      "  const destinationFolderName = `VSCode${dashed(platform)}${dashed(arch)}`;",
+      "  const tasks = [packageTask(platform, arch, sourceFolderName, destinationFolderName, opts)];",
+      "  const vscodeTask = task.define(`vscode${dashed(platform)}${dashed(arch)}${dashed(minified)}`, task.series(...tasks));",
+      "});",
+    ].join("\n") });
+    await expectUntrustedFailure(() => verifyCodeOssCheckout({ root, actualCommit: expectedManifest.codeOss.commit, manifest: expectedManifest }));
     await createCheckoutFixture(root);
     await expectUntrustedFailure(() => verifyCodeOssCheckout({ root, actualCommit: "b1c0a14", manifest: expectedManifest }));
   });
@@ -280,6 +306,29 @@ test("verifyCodeOssCheckout rejects a linked intermediate directory", async (t) 
       throw error;
     }
     await expectUntrustedFailure(() => verifyCodeOssCheckout({ root, actualCommit: expectedManifest.codeOss.commit, manifest: expectedManifest }));
+  });
+});
+
+test("verifyCodeOssCheckout rejects a linked ancestor of the supplied checkout root", async (t) => {
+  await withTemporaryDirectory(t, async (root) => {
+    const checkoutParent = join(root, "checkout-parent");
+    const checkoutRoot = join(checkoutParent, "checkout");
+    await createCheckoutFixture(checkoutRoot);
+    const linkedAncestor = join(root, "linked-checkout-parent");
+    try {
+      await symlink(checkoutParent, linkedAncestor, "junction");
+    } catch (error) {
+      if (error?.code === "EPERM") {
+        t.skip("directory links unavailable");
+        return;
+      }
+      throw error;
+    }
+    await expectUntrustedFailure(() => verifyCodeOssCheckout({
+      root: join(linkedAncestor, "checkout"),
+      actualCommit: expectedManifest.codeOss.commit,
+      manifest: expectedManifest,
+    }));
   });
 });
 
