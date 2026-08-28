@@ -136,6 +136,8 @@ function trustedInputs(overrides = {}) {
   return {
     run: runFixture(), artifacts: artifactsFixture(), provenance: provenanceFixture(),
     expectedRunId: "123456789", expectedRunAttempt: 2, expectedConsumerCommit: commit,
+    expectedWindowsLauncherSha256: digests.windows, expectedLinuxLauncherSha256: digests.linux,
+    expectedAppimagetoolSha256: digests.appimagetool,
     provenanceArtifactId: "1004", provenanceArtifactDigest: "4".repeat(64),
     ...overrides,
   };
@@ -294,6 +296,18 @@ test("validateTrustedReleaseInputs binds the second API snapshot to immutable pr
     appimagetoolArtifactId: "1003", appimagetoolArtifactDigest: "3".repeat(64),
   });
   assert.equal(Object.isFrozen(result), true);
+  for (const [field, expected] of [
+    ["expectedWindowsLauncherSha256", digests.windows],
+    ["expectedLinuxLauncherSha256", digests.linux],
+    ["expectedAppimagetoolSha256", digests.appimagetool],
+  ]) {
+    for (const value of [undefined, expected.toUpperCase(), `${expected}\ninjected=value`, "d".repeat(64)]) {
+      const request = trustedInputs();
+      if (value === undefined) delete request[field];
+      else request[field] = value;
+      assertInvalid(() => validateTrustedReleaseInputs(request));
+    }
+  }
   const changedBootstrap = trustedInputs();
   changedBootstrap.artifacts.artifacts[3].id = 1999;
   assertUntrusted(() => validateTrustedReleaseInputs(changedBootstrap));
@@ -361,11 +375,52 @@ test("CLI provenance failures cannot inject GitHub output or leak local paths", 
   await writeFile(provenancePath, `${JSON.stringify(provenanceFixture())}\n`);
   await writeFile(outputPath, "unchanged=value\n");
   const rejected = cli(["validate-provenance", "--run-json", runPath, "--artifacts-json", artifactsPath, "--run-id", "123456789", "--run-attempt", "2", "--consumer-commit", commit,
-    "--provenance", provenancePath, "--provenance-artifact-id", `1004\ninjected=value`, "--provenance-artifact-digest", "4".repeat(64), "--github-output", outputPath]);
+    "--provenance", provenancePath, "--provenance-artifact-id", `1004\ninjected=value`, "--provenance-artifact-digest", "4".repeat(64),
+    "--windows-launcher-sha256", digests.windows, "--linux-launcher-sha256", digests.linux, "--appimagetool-sha256", digests.appimagetool, "--github-output", outputPath]);
   assert.notEqual(rejected.status, 0);
   assert.match(rejected.stderr, /^RELEASE_PRODUCER_PROVENANCE_INVALID: [^\r\n]+\r?\n$/u);
   assert.equal(rejected.stderr.includes(root), false);
   assert.equal(await readFile(outputPath, "utf8"), "unchanged=value\n");
+});
+
+test("CLI validate-provenance closes independent content pins without output injection", async (t) => {
+  const root = await temporaryDirectory(t);
+  const runPath = join(root, "run.json");
+  const artifactsPath = join(root, "artifacts.json");
+  const provenancePath = join(root, "provenance.json");
+  const outputPath = join(root, "github-output");
+  await Promise.all([
+    writeFile(runPath, `${JSON.stringify(runFixture())}\n`),
+    writeFile(artifactsPath, `${JSON.stringify(artifactsFixture())}\n`),
+    writeFile(provenancePath, `${JSON.stringify(provenanceFixture())}\n`),
+    writeFile(outputPath, "prior=value\n"),
+  ]);
+  const pins = {
+    "--windows-launcher-sha256": digests.windows,
+    "--linux-launcher-sha256": digests.linux,
+    "--appimagetool-sha256": digests.appimagetool,
+  };
+  const argumentsFor = (values = pins) => ["validate-provenance", "--run-json", runPath, "--artifacts-json", artifactsPath, "--run-id", "123456789", "--run-attempt", "2", "--consumer-commit", commit,
+    "--provenance", provenancePath, "--provenance-artifact-id", "1004", "--provenance-artifact-digest", "4".repeat(64),
+    ...Object.entries(values).flat(), "--github-output", outputPath];
+  const accepted = cli(argumentsFor());
+  assert.equal(accepted.status, 0, accepted.stderr);
+  const baseline = await readFile(outputPath, "utf8");
+  for (const [key, digest] of Object.entries(pins)) {
+    for (const value of [digest.toUpperCase(), `${digest}\ninjected=value`]) {
+      const rejected = cli(argumentsFor({ ...pins, [key]: value }));
+      assert.notEqual(rejected.status, 0);
+      assert.equal(rejected.stderr.includes(root), false);
+      assert.equal(await readFile(outputPath, "utf8"), baseline);
+    }
+    const missing = { ...pins }; delete missing[key];
+    const missingResult = cli(argumentsFor(missing));
+    assert.notEqual(missingResult.status, 0);
+    assert.equal(await readFile(outputPath, "utf8"), baseline);
+    const duplicate = cli([...argumentsFor(), key, digest]);
+    assert.notEqual(duplicate.status, 0);
+    assert.equal(await readFile(outputPath, "utf8"), baseline);
+  }
 });
 
 test("CLI validate-attempt accepts only the exact current attempt and writes no output", async (t) => {
@@ -542,7 +597,8 @@ test("CLI rejects a linked producer-run input", async (t) => {
   await writeFile(provenancePath, `${JSON.stringify(provenanceFixture())}\n`);
   await writeFile(outputPath, "");
   const args = ["validate-provenance", "--run-json", runPath, "--artifacts-json", artifactsPath, "--run-id", "123456789", "--run-attempt", "2", "--consumer-commit", commit,
-    "--provenance", provenancePath, "--provenance-artifact-id", "1004", "--provenance-artifact-digest", "4".repeat(64), "--github-output", outputPath];
+    "--provenance", provenancePath, "--provenance-artifact-id", "1004", "--provenance-artifact-digest", "4".repeat(64),
+    "--windows-launcher-sha256", digests.windows, "--linux-launcher-sha256", digests.linux, "--appimagetool-sha256", digests.appimagetool, "--github-output", outputPath];
   const accepted = cli(args);
   assert.equal(accepted.status, 0, accepted.stderr);
   assert.equal(await readFile(outputPath, "utf8"), `run_id=123456789\nrun_attempt=2\nwindows_launcher_sha256=${digests.windows}\nlinux_launcher_sha256=${digests.linux}\nappimagetool_sha256=${digests.appimagetool}\nwindows_artifact_id=1001\nwindows_artifact_digest=${"1".repeat(64)}\nlinux_artifact_id=1002\nlinux_artifact_digest=${"2".repeat(64)}\nappimagetool_artifact_id=1003\nappimagetool_artifact_digest=${"3".repeat(64)}\n`);
