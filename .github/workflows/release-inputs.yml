@@ -54,6 +54,8 @@ jobs:
       file_count: ${{ steps.runtime.outputs.file_count }}
       total_bytes: ${{ steps.runtime.outputs.total_bytes }}
       tree_digest: ${{ steps.runtime.outputs.tree_digest }}
+      windows_artifact_id: ${{ steps.upload-windows-runtime.outputs.artifact-id }}
+      windows_artifact_digest: ${{ steps.upload-windows-runtime.outputs.artifact-digest }}
     steps:
       - name: Check out producer source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -245,9 +247,10 @@ jobs:
             "tree_digest=$($summary.treeDigest)"
           ) | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
       - name: Upload Windows runtime
+        id: upload-windows-runtime
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: code-oss-windows-x64
+          name: code-oss-windows-x64-${{ github.run_attempt }}
           path: .release/producer/windows/code-oss-windows-x64
           retention-days: 1
           if-no-files-found: error
@@ -264,6 +267,10 @@ jobs:
       mode_inventory_sha256: ${{ steps.runtime.outputs.mode_inventory_sha256 }}
       appimagetool_sha256: ${{ steps.tool.outputs.appimagetool_sha256 }}
       appimagetool_size: ${{ steps.tool.outputs.appimagetool_size }}
+      linux_artifact_id: ${{ steps.upload-linux-runtime.outputs.artifact-id }}
+      linux_artifact_digest: ${{ steps.upload-linux-runtime.outputs.artifact-digest }}
+      appimagetool_artifact_id: ${{ steps.upload-appimagetool.outputs.artifact-id }}
+      appimagetool_artifact_digest: ${{ steps.upload-appimagetool.outputs.artifact-digest }}
     steps:
       - name: Check out producer source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -460,17 +467,19 @@ jobs:
           printf 'appimagetool_sha256=%s\n' "$tool_sha256" >> "$GITHUB_OUTPUT"
           printf 'appimagetool_size=%s\n' "$tool_size" >> "$GITHUB_OUTPUT"
       - name: Upload Linux runtime
+        id: upload-linux-runtime
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: code-oss-linux-x64
+          name: code-oss-linux-x64-${{ github.run_attempt }}
           path: .release/producer/linux/code-oss-linux-x64
           retention-days: 1
           if-no-files-found: error
           include-hidden-files: true
       - name: Upload appimagetool
+        id: upload-appimagetool
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: appimagetool-linux-x64
+          name: appimagetool-linux-x64-${{ github.run_attempt }}
           path: .release/producer/linux/appimagetool-linux-x64/appimagetool-x86_64.AppImage
           retention-days: 1
           if-no-files-found: error
@@ -490,20 +499,42 @@ jobs:
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24.18.0
+      - name: Validate immutable artifact identities
+        env:
+          WINDOWS_ARTIFACT_ID: ${{ needs.build-windows.outputs.windows_artifact_id }}
+          WINDOWS_ARTIFACT_DIGEST: ${{ needs.build-windows.outputs.windows_artifact_digest }}
+          LINUX_ARTIFACT_ID: ${{ needs.build-linux.outputs.linux_artifact_id }}
+          LINUX_ARTIFACT_DIGEST: ${{ needs.build-linux.outputs.linux_artifact_digest }}
+          APPIMAGETOOL_ARTIFACT_ID: ${{ needs.build-linux.outputs.appimagetool_artifact_id }}
+          APPIMAGETOOL_ARTIFACT_DIGEST: ${{ needs.build-linux.outputs.appimagetool_artifact_digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ ]] || { echo 'RELEASE_PRODUCER_PROVENANCE_INVALID: producer run ID is invalid' >&2; exit 1; }
+          [[ "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || { echo 'RELEASE_PRODUCER_PROVENANCE_INVALID: producer run attempt is invalid' >&2; exit 1; }
+          [[ "$WINDOWS_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]] || { echo 'RELEASE_PRODUCER_PROVENANCE_INVALID: Windows artifact ID is invalid' >&2; exit 1; }
+          [[ "$WINDOWS_ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]] || { echo 'RELEASE_PRODUCER_PROVENANCE_INVALID: Windows artifact digest is invalid' >&2; exit 1; }
+          [[ "$LINUX_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]] || { echo 'RELEASE_PRODUCER_PROVENANCE_INVALID: Linux artifact ID is invalid' >&2; exit 1; }
+          [[ "$LINUX_ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]] || { echo 'RELEASE_PRODUCER_PROVENANCE_INVALID: Linux artifact digest is invalid' >&2; exit 1; }
+          [[ "$APPIMAGETOOL_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]] || { echo 'RELEASE_PRODUCER_PROVENANCE_INVALID: appimagetool artifact ID is invalid' >&2; exit 1; }
+          [[ "$APPIMAGETOOL_ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]] || { echo 'RELEASE_PRODUCER_PROVENANCE_INVALID: appimagetool artifact digest is invalid' >&2; exit 1; }
       - name: Download Windows runtime
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: code-oss-windows-x64
+          artifact-ids: ${{ needs.build-windows.outputs.windows_artifact_id }}
+          merge-multiple: true
           path: .release/transport/windows
       - name: Download Linux runtime
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: code-oss-linux-x64
+          artifact-ids: ${{ needs.build-linux.outputs.linux_artifact_id }}
+          merge-multiple: true
           path: .release/transport/linux
       - name: Download appimagetool
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: appimagetool-linux-x64
+          artifact-ids: ${{ needs.build-linux.outputs.appimagetool_artifact_id }}
+          merge-multiple: true
           path: .release/transport/appimagetool
       - name: Validate exact transport roots
         shell: bash
@@ -739,6 +770,12 @@ jobs:
           PRODUCER_SOURCE_COMMIT: ${{ github.sha }}
           PRODUCER_EVENT: ${{ github.event_name }}
           PRODUCER_REF: ${{ github.ref }}
+          WINDOWS_ARTIFACT_ID: ${{ needs.build-windows.outputs.windows_artifact_id }}
+          WINDOWS_ARTIFACT_DIGEST: ${{ needs.build-windows.outputs.windows_artifact_digest }}
+          LINUX_ARTIFACT_ID: ${{ needs.build-linux.outputs.linux_artifact_id }}
+          LINUX_ARTIFACT_DIGEST: ${{ needs.build-linux.outputs.linux_artifact_digest }}
+          APPIMAGETOOL_ARTIFACT_ID: ${{ needs.build-linux.outputs.appimagetool_artifact_id }}
+          APPIMAGETOOL_ARTIFACT_DIGEST: ${{ needs.build-linux.outputs.appimagetool_artifact_digest }}
         shell: bash
         run: |
           set -euo pipefail
@@ -760,6 +797,17 @@ jobs:
             --producer-source-commit "$PRODUCER_SOURCE_COMMIT" \
             --producer-event "$PRODUCER_EVENT" \
             --producer-ref "$PRODUCER_REF" \
+            --producer-run-id "$GITHUB_RUN_ID" \
+            --producer-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --windows-artifact-id "$WINDOWS_ARTIFACT_ID" \
+            --windows-artifact-digest "$WINDOWS_ARTIFACT_DIGEST" \
+            --windows-artifact-transport-name "code-oss-windows-x64-$GITHUB_RUN_ATTEMPT" \
+            --linux-artifact-id "$LINUX_ARTIFACT_ID" \
+            --linux-artifact-digest "$LINUX_ARTIFACT_DIGEST" \
+            --linux-artifact-transport-name "code-oss-linux-x64-$GITHUB_RUN_ATTEMPT" \
+            --appimagetool-artifact-id "$APPIMAGETOOL_ARTIFACT_ID" \
+            --appimagetool-artifact-digest "$APPIMAGETOOL_ARTIFACT_DIGEST" \
+            --appimagetool-artifact-transport-name "appimagetool-linux-x64-$GITHUB_RUN_ATTEMPT" \
             --out .release/attestation/release-input-provenance.json
           node tools/release/producer/provenance.mjs validate \
             --manifest tools/release/producer/source-manifest.json \
@@ -772,7 +820,11 @@ jobs:
       - name: Write validated workflow summary
         env:
           PRODUCER_RUN_ID: ${{ github.run_id }}
+          PRODUCER_RUN_ATTEMPT: ${{ github.run_attempt }}
           SOURCE_COMMIT: ${{ github.sha }}
+          WINDOWS_ARTIFACT_ID: ${{ needs.build-windows.outputs.windows_artifact_id }}
+          LINUX_ARTIFACT_ID: ${{ needs.build-linux.outputs.linux_artifact_id }}
+          APPIMAGETOOL_ARTIFACT_ID: ${{ needs.build-linux.outputs.appimagetool_artifact_id }}
           WINDOWS_LAUNCHER_SHA256: ${{ steps.transported.outputs.windows_launcher_sha256 }}
           LINUX_LAUNCHER_SHA256: ${{ steps.transported.outputs.linux_launcher_sha256 }}
           APPIMAGETOOL_SHA256: ${{ steps.transported.outputs.appimagetool_sha256 }}
@@ -780,22 +832,31 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$PRODUCER_RUN_ID" =~ ^[1-9][0-9]*$ ]] || { echo 'RELEASE_PRODUCER_PROVENANCE_INVALID: producer run ID is invalid' >&2; exit 1; }
+          [[ "$PRODUCER_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || { echo 'RELEASE_PRODUCER_PROVENANCE_INVALID: producer run attempt is invalid' >&2; exit 1; }
           [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo 'RELEASE_PRODUCER_PROVENANCE_INVALID: source commit is invalid' >&2; exit 1; }
+          for artifact_id in "$WINDOWS_ARTIFACT_ID" "$LINUX_ARTIFACT_ID" "$APPIMAGETOOL_ARTIFACT_ID"; do
+            [[ "$artifact_id" =~ ^[1-9][0-9]*$ ]] || { echo 'RELEASE_PRODUCER_PROVENANCE_INVALID: summary artifact ID is invalid' >&2; exit 1; }
+          done
           for digest in "$WINDOWS_LAUNCHER_SHA256" "$LINUX_LAUNCHER_SHA256" "$APPIMAGETOOL_SHA256"; do
             [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || { echo 'RELEASE_PRODUCER_PROVENANCE_INVALID: summary digest is invalid' >&2; exit 1; }
           done
           {
             printf -- '- Producer run ID: `%s`\n' "$PRODUCER_RUN_ID"
+            printf -- '- Producer run attempt: `%s`\n' "$PRODUCER_RUN_ATTEMPT"
             printf -- '- Source commit: `%s`\n' "$SOURCE_COMMIT"
+            printf -- '- Windows artifact ID: `%s`\n' "$WINDOWS_ARTIFACT_ID"
+            printf -- '- Linux artifact ID: `%s`\n' "$LINUX_ARTIFACT_ID"
+            printf -- '- appimagetool artifact ID: `%s`\n' "$APPIMAGETOOL_ARTIFACT_ID"
             printf -- '- Windows launcher SHA-256: `%s`\n' "$WINDOWS_LAUNCHER_SHA256"
             printf -- '- Linux launcher SHA-256: `%s`\n' "$LINUX_LAUNCHER_SHA256"
             printf -- '- appimagetool SHA-256: `%s`\n' "$APPIMAGETOOL_SHA256"
             printf -- '- Artifact retention: `1 day`\n'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Upload release input provenance
+        id: upload-provenance
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: release-input-provenance
+          name: release-input-provenance-${{ github.run_attempt }}
           path: .release/attestation/release-input-provenance.json
           retention-days: 1
           if-no-files-found: error
