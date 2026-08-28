@@ -697,7 +697,23 @@ Confirm the run head SHA equals both remote `master` hashes. Require `authorize`
 
 ```powershell
 $producerEvidence = ".release/evidence/producer-$producerRunId"
-gh run download $producerRunId --repo colayc/unitTest --name release-input-provenance --dir $producerEvidence
+$producerRun = gh api "repos/colayc/unitTest/actions/runs/$producerRunId" | ConvertFrom-Json
+$producerRunAttempt = [int64]$producerRun.run_attempt
+$provenanceTransportName = "release-input-provenance-$producerRunAttempt"
+$artifactPage = gh api "repos/colayc/unitTest/actions/runs/$producerRunId/artifacts?per_page=100" | ConvertFrom-Json
+$provenanceMatches = @($artifactPage.artifacts | Where-Object { $_.name -ceq $provenanceTransportName -and $_.expired -eq $false })
+if ($artifactPage.total_count -ne $artifactPage.artifacts.Count -or $artifactPage.total_count -gt 100 -or $provenanceMatches.Count -ne 1) { throw 'producer provenance artifact identity is ambiguous' }
+$provenanceArtifactId = [string]$provenanceMatches[0].id
+$provenanceZip = Join-Path $producerEvidence 'release-input-provenance.zip'
+$downloadHeaders = @{
+  Accept = 'application/vnd.github+json'
+  Authorization = "Bearer $(gh auth token)"
+  'X-GitHub-Api-Version' = '2022-11-28'
+  'User-Agent' = 'colayc-unitTest-release-evidence'
+}
+Invoke-WebRequest -Uri "https://api.github.com/repos/colayc/unitTest/actions/artifacts/$provenanceArtifactId/zip" -Headers $downloadHeaders -OutFile $provenanceZip
+Expand-Archive -LiteralPath $provenanceZip -DestinationPath $producerEvidence -Force
+Remove-Item -LiteralPath $provenanceZip -Force
 node tools/release/producer/provenance.mjs validate --manifest tools/release/producer/source-manifest.json --provenance "$producerEvidence/release-input-provenance.json"
 $provenance = Get-Content -LiteralPath "$producerEvidence/release-input-provenance.json" -Raw | ConvertFrom-Json
 $windowsSha = [string]$provenance.runtimes.windows.launcherSha256
@@ -705,7 +721,7 @@ $linuxSha = [string]$provenance.runtimes.linux.launcherSha256
 $appimagetoolSha = [string]$provenance.appimagetool.sha256
 ```
 
-Require provenance producer source commit to equal the producer run head SHA and all three fixed artifact names to match the design.
+Require provenance producer source commit to equal the producer run head SHA and all three fixed logical artifact names to match the design; the selected provenance transport name must carry the API-derived run attempt. The artifact page must be complete and bounded (all results returned in the 100-item page), exactly one non-expired attempt-qualified provenance artifact must match, and only its immutable artifact ID may be downloaded. `gh run download` has name/pattern selectors on this host, not an artifact-ID selector, so this authenticated REST ZIP endpoint must not fall back to name selection.
 
 - [ ] **Step 4: Dispatch `foundation.yml` with the attested values**
 

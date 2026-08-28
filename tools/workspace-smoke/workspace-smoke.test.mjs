@@ -325,6 +325,46 @@ test("trusted producer documentation keeps unsigned qualification operational, c
   }
 });
 
+test("release-input documentation binds run attempts and provenance to immutable artifact identities", async () => {
+  const [readme, security, roadmap, qualificationPlan] = await Promise.all([
+    readFile("README.md", "utf8"),
+    readFile("docs/security.md", "utf8"),
+    readFile("docs/superpowers/plans/2026-07-21-cpp-unit-test-ide-roadmap.md", "utf8"),
+    readFile("docs/superpowers/plans/2026-08-28-trusted-code-oss-release-input-production.md", "utf8"),
+  ]);
+  const documentation = `${readme}\n${security}\n${roadmap}`;
+
+  assert.match(documentation, /run ID alone.*(?:not|不).*complete artifact identity|run ID.*不足以.*完整.*artifact.*identity/iu);
+  assert.match(documentation, /run attempt.*(?:bound|绑定).*end to end|run attempt.*端到端.*绑定/iu);
+  assert.match(documentation, /immutable artifact IDs?.*upload digests|不可变.*artifact ID.*上传.*摘要/iu);
+  assert.match(documentation, /transport names?.*suffixed by.*run attempt|传输.*名称.*追加.*run attempt/iu);
+  assert.match(documentation, /producer re-?run.*new foundation dispatch|producer.*重跑.*新的.*foundation.*dispatch/iu);
+  assert.match(documentation, /package jobs?.*revalidate.*attempt.*before and after download|package.*(?:下载前后|前后).*重新验证.*attempt/iu);
+
+  for (const text of [readme, qualificationPlan]) {
+    assert.doesNotMatch(text, /gh\s+run\s+download[^\n]*--name\s+release-input-provenance(?:\s|$)/iu);
+  }
+
+  const taskNine = qualificationPlan.slice(qualificationPlan.indexOf("### Task 9:"));
+  assert.notEqual(taskNine, qualificationPlan, "qualification plan must retain Task 9");
+  for (const expected of [
+    '$producerRun = gh api "repos/colayc/unitTest/actions/runs/$producerRunId" | ConvertFrom-Json',
+    '$producerRunAttempt = [int64]$producerRun.run_attempt',
+    '$provenanceTransportName = "release-input-provenance-$producerRunAttempt"',
+    'artifacts?per_page=100',
+    '$artifactPage.total_count -ne $artifactPage.artifacts.Count',
+    '$artifactPage.total_count -gt 100',
+    '$provenanceMatches.Count -ne 1',
+    '$provenanceArtifactId = [string]$provenanceMatches[0].id',
+    'actions/artifacts/$provenanceArtifactId/zip',
+    'Invoke-WebRequest',
+    'Expand-Archive',
+  ]) {
+    assert.ok(taskNine.includes(expected), `Task 9 must document ${expected}`);
+  }
+  assert.doesNotMatch(taskNine, /gh\s+run\s+download\s+\$producerRunId[^\n]*(?:artifact(?:-id)?|\$provenanceArtifactId)/iu);
+});
+
 test("compiled Service runtime excludes HTTP, TLS, GitHub, and OAuth client stacks", () => {
   const dependencies = goList(["list", "-deps", serviceCommandPackage]);
   const forbidden = dependencies.filter((dependency) =>
