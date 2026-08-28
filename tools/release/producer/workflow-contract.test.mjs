@@ -633,7 +633,7 @@ test("Windows validates, bounds launcher execution, inventories, and stages befo
   assert.match(job, /\.release[\\/]producer[\\/]windows[\\/]code-oss-windows-x64/u);
   assert.match(job, /\$fileCount = \[int64\]0[\s\S]*?TryParse\([^\n]+\[ref\]\$fileCount\)/u);
   assert.match(job, /\$totalBytes = \[int64\]0[\s\S]*?TryParse\([^\n]+\[ref\]\$totalBytes\)/u);
-  const outputs = ["launcher_sha256", "file_count", "total_bytes", "tree_digest"];
+  const outputs = ["launcher_sha256", "file_count", "total_bytes", "tree_digest", "windows_artifact_id", "windows_artifact_digest"];
   assert.deepEqual(jobOutputKeys(job), outputs);
   for (const output of outputs) {
     assert.match(job, new RegExp(`^      ${output}:`, "mu"));
@@ -758,14 +758,14 @@ test("Linux creates and validates modes, bounds launcher execution, inventories,
   assert.match(job, /a6d71e2b6cd66f8e8d16c37ad164658985e0cf5fcaa950c90a482890cb9d13e0/u);
   assert.match(job, /find "\$tool_root" -mindepth 1 -maxdepth 1 -printf '%f\\0'/u);
   assert.match(job, /-f "\$tool" && ! -L "\$tool"/u);
-  const outputs = ["launcher_sha256", "file_count", "total_bytes", "tree_digest", "mode_inventory_sha256", "appimagetool_sha256", "appimagetool_size"];
+  const outputs = ["launcher_sha256", "file_count", "total_bytes", "tree_digest", "mode_inventory_sha256", "appimagetool_sha256", "appimagetool_size", "linux_artifact_id", "linux_artifact_digest", "appimagetool_artifact_id", "appimagetool_artifact_digest"];
   assert.deepEqual(jobOutputKeys(job), outputs);
   for (const output of outputs) {
     assert.match(job, new RegExp(`^      ${output}:`, "mu"));
   }
 });
 
-test("uploads have exact names, one-day failure-closed retention, and complete hidden runtime trees", () => {
+test("uploads expose immutable identities under attempt-qualified transport names", () => {
   const uploads = [];
   for (const name of ["build-windows", "build-linux", "attest"]) {
     for (const step of stepBlocks(jobBlock(name))) {
@@ -774,30 +774,38 @@ test("uploads have exact names, one-day failure-closed retention, and complete h
   }
   assert.equal(uploads.length, 4);
   const expected = new Map([
-    ["code-oss-windows-x64", { hidden: true, path: ".release/producer/windows/code-oss-windows-x64" }],
-    ["code-oss-linux-x64", { hidden: true, path: ".release/producer/linux/code-oss-linux-x64" }],
-    ["appimagetool-linux-x64", { hidden: false, path: ".release/producer/linux/appimagetool-linux-x64/appimagetool-x86_64.AppImage" }],
-    ["release-input-provenance", { hidden: false, path: ".release/attestation/release-input-provenance.json" }],
+    ["code-oss-windows-x64-${{ github.run_attempt }}", { id: "upload-windows-runtime", hidden: true, path: ".release/producer/windows/code-oss-windows-x64" }],
+    ["code-oss-linux-x64-${{ github.run_attempt }}", { id: "upload-linux-runtime", hidden: true, path: ".release/producer/linux/code-oss-linux-x64" }],
+    ["appimagetool-linux-x64-${{ github.run_attempt }}", { id: "upload-appimagetool", hidden: false, path: ".release/producer/linux/appimagetool-linux-x64/appimagetool-x86_64.AppImage" }],
+    ["release-input-provenance-${{ github.run_attempt }}", { id: "upload-provenance", hidden: false, path: ".release/attestation/release-input-provenance.json" }],
   ]);
   for (const step of uploads) {
     const name = inputValue(step, "name");
     assert.ok(expected.has(name), `unexpected upload artifact ${name}`);
+    assert.equal(inputValue(step, "id"), undefined, "upload identifiers must be step-level IDs");
+    assert.match(step, new RegExp(`^        id: ${expected.get(name).id}$`, "mu"));
     assert.equal(inputValue(step, "retention-days"), "1", `${name} retention drifted`);
     assert.equal(inputValue(step, "if-no-files-found"), "error", `${name} may silently upload no files`);
     assert.equal(inputValue(step, "path"), expected.get(name).path, `${name} upload root drifted`);
     assert.doesNotMatch(step, /^        if:\s*\$\{\{\s*always\(\)\s*\}\}/mu);
     if (expected.get(name).hidden) assert.equal(inputValue(step, "include-hidden-files"), "true", `${name} drops hidden runtime files`);
   }
+  assert.equal(directMappingValue(jobBlock("build-windows"), 6, "windows_artifact_id"), "${{ steps.upload-windows-runtime.outputs.artifact-id }}");
+  assert.equal(directMappingValue(jobBlock("build-windows"), 6, "windows_artifact_digest"), "${{ steps.upload-windows-runtime.outputs.artifact-digest }}");
+  assert.equal(directMappingValue(jobBlock("build-linux"), 6, "linux_artifact_id"), "${{ steps.upload-linux-runtime.outputs.artifact-id }}");
+  assert.equal(directMappingValue(jobBlock("build-linux"), 6, "linux_artifact_digest"), "${{ steps.upload-linux-runtime.outputs.artifact-digest }}");
+  assert.equal(directMappingValue(jobBlock("build-linux"), 6, "appimagetool_artifact_id"), "${{ steps.upload-appimagetool.outputs.artifact-id }}");
+  assert.equal(directMappingValue(jobBlock("build-linux"), 6, "appimagetool_artifact_digest"), "${{ steps.upload-appimagetool.outputs.artifact-digest }}");
 });
 
-test("attestation downloads exactly three current-run artifacts and independently revalidates them", () => {
+test("attestation validates immutable coordinates before ID-only downloads and independently revalidates them", () => {
   const job = jobBlock("attest");
   const downloads = stepBlocks(job).filter((step) => step.includes(`uses: actions/download-artifact@${actionPins["actions/download-artifact"]}`));
   assert.equal(downloads.length, 3);
-  assert.deepEqual(downloads.map((step) => inputValue(step, "name")), [
-    "code-oss-windows-x64",
-    "code-oss-linux-x64",
-    "appimagetool-linux-x64",
+  assert.deepEqual(downloads.map((step) => inputValue(step, "artifact-ids")), [
+    "${{ needs.build-windows.outputs.windows_artifact_id }}",
+    "${{ needs.build-linux.outputs.linux_artifact_id }}",
+    "${{ needs.build-linux.outputs.appimagetool_artifact_id }}",
   ]);
   assert.deepEqual(downloads.map((step) => inputValue(step, "path")), [
     ".release/transport/windows",
@@ -805,9 +813,26 @@ test("attestation downloads exactly three current-run artifacts and independentl
     ".release/transport/appimagetool",
   ]);
   for (const step of downloads) {
+    assert.equal(inputValue(step, "name"), undefined, "attestation must not select artifacts by name");
+    assert.equal(inputValue(step, "merge-multiple"), "true", "attestation must flatten its pinned artifact into its transport root");
     assert.equal(inputValue(step, "run-id"), undefined, "attestation must consume only artifacts from its current run");
   }
+  const preflight = namedStep(job, "Validate immutable artifact identities");
+  assert.doesNotMatch(preflight, /^          GITHUB_RUN_(?:ID|ATTEMPT):/mu, "preflight must use GitHub's canonical runtime variables");
+  assert.match(preflight, /WINDOWS_ARTIFACT_ID: \$\{\{ needs\.build-windows\.outputs\.windows_artifact_id \}\}/u);
+  assert.match(preflight, /WINDOWS_ARTIFACT_DIGEST: \$\{\{ needs\.build-windows\.outputs\.windows_artifact_digest \}\}/u);
+  assert.match(preflight, /LINUX_ARTIFACT_ID: \$\{\{ needs\.build-linux\.outputs\.linux_artifact_id \}\}/u);
+  assert.match(preflight, /LINUX_ARTIFACT_DIGEST: \$\{\{ needs\.build-linux\.outputs\.linux_artifact_digest \}\}/u);
+  assert.match(preflight, /APPIMAGETOOL_ARTIFACT_ID: \$\{\{ needs\.build-linux\.outputs\.appimagetool_artifact_id \}\}/u);
+  assert.match(preflight, /APPIMAGETOOL_ARTIFACT_DIGEST: \$\{\{ needs\.build-linux\.outputs\.appimagetool_artifact_digest \}\}/u);
+  for (const value of ["$GITHUB_RUN_ID", "$GITHUB_RUN_ATTEMPT", "$WINDOWS_ARTIFACT_ID", "$LINUX_ARTIFACT_ID", "$APPIMAGETOOL_ARTIFACT_ID"]) {
+    assert.match(preflight, new RegExp(`\\[\\[ "${value.replaceAll("$", "\\$")}" =~ \\^\\[1-9\\]\\[0-9\\]\\*\\$ \\]\\]`, "u"));
+  }
+  for (const value of ["$WINDOWS_ARTIFACT_DIGEST", "$LINUX_ARTIFACT_DIGEST", "$APPIMAGETOOL_ARTIFACT_DIGEST"]) {
+    assert.match(preflight, new RegExp(`\\[\\[ "${value.replaceAll("$", "\\$")}" =~ \\^\\[0-9a-f\\]\\{64\\}\\$ \\]\\]`, "u"));
+  }
   assertOrdered(job, [
+    "name: Validate immutable artifact identities",
     "name: Download Windows runtime",
     "name: Download Linux runtime",
     "name: Download appimagetool",
@@ -849,8 +874,24 @@ test("attestation downloads exactly three current-run artifacts and independentl
   assert.match(job, /find \.release\/attestation -mindepth 1 -maxdepth 1 -printf '%f\\0'/u);
 });
 
-test("post-validation summary is path-free and exposes only fixed trusted fields", () => {
+test("provenance and post-validation summary bind and expose only validated immutable identities", () => {
   const job = jobBlock("attest");
+  const provenance = namedStep(job, "Create and validate provenance");
+  for (const [option, value] of [
+    ["--producer-run-id", "$GITHUB_RUN_ID"],
+    ["--producer-run-attempt", "$GITHUB_RUN_ATTEMPT"],
+    ["--windows-artifact-id", "$WINDOWS_ARTIFACT_ID"],
+    ["--windows-artifact-digest", "$WINDOWS_ARTIFACT_DIGEST"],
+    ["--windows-artifact-transport-name", "code-oss-windows-x64-$GITHUB_RUN_ATTEMPT"],
+    ["--linux-artifact-id", "$LINUX_ARTIFACT_ID"],
+    ["--linux-artifact-digest", "$LINUX_ARTIFACT_DIGEST"],
+    ["--linux-artifact-transport-name", "code-oss-linux-x64-$GITHUB_RUN_ATTEMPT"],
+    ["--appimagetool-artifact-id", "$APPIMAGETOOL_ARTIFACT_ID"],
+    ["--appimagetool-artifact-digest", "$APPIMAGETOOL_ARTIFACT_DIGEST"],
+    ["--appimagetool-artifact-transport-name", "appimagetool-linux-x64-$GITHUB_RUN_ATTEMPT"],
+  ]) {
+    assert.match(provenance, new RegExp(`${option} "${value.replaceAll("$", "\\$")}"`, "u"));
+  }
   const validateIndex = job.indexOf("provenance.mjs validate");
   const summaryIndex = job.indexOf("name: Write validated workflow summary");
   assert.ok(validateIndex !== -1 && summaryIndex > validateIndex);
@@ -861,7 +902,11 @@ test("post-validation summary is path-free and exposes only fixed trusted fields
   const labels = [...run.matchAll(/printf -- '- ([^:]+):/gu)].map((match) => match[1]);
   assert.deepEqual(labels, [
     "Producer run ID",
+    "Producer run attempt",
     "Source commit",
+    "Windows artifact ID",
+    "Linux artifact ID",
+    "appimagetool artifact ID",
     "Windows launcher SHA-256",
     "Linux launcher SHA-256",
     "appimagetool SHA-256",
