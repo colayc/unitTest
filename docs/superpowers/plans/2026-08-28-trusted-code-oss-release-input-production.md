@@ -6,7 +6,7 @@
 
 **Architecture:** A repository-owned closed source manifest fixes every upstream coordinate. Small Node.js ESM modules validate that manifest, create deterministic runtime inventories, create/validate provenance, and verify the producer run against GitHub API metadata. A manual four-job producer workflow builds Windows and Linux artifacts and independently attests them after artifact transport. `foundation.yml` adds one fail-closed trust job whose validated outputs, rather than raw dispatch inputs, feed both package jobs.
 
-**Tech Stack:** Node.js 24.18.0 ESM and `node:test` for repository tooling, Code-OSS Node.js 20.14.0 and Yarn 1.22.22, PowerShell 7, Bash, GitHub Actions, GitHub REST API, Windows `windows-2025-vs2026`, Ubuntu 24.04, pnpm 11.4.0.
+**Tech Stack:** Node.js 24.18.0 ESM and `node:test` for repository tooling, Code-OSS Node.js 20.14.0 and Yarn 1.22.22, PowerShell 7, Bash, GitHub Actions, GitHub REST API, Windows `windows-2022` with Visual Studio 2022, Ubuntu 24.04, pnpm 11.4.0.
 
 **Spec:** `docs/superpowers/specs/2026-08-28-trusted-code-oss-release-input-production-design.md`
 
@@ -367,7 +367,7 @@ git commit -m "feat: verify trusted release input runs"
 
 **Workflow jobs:**
 - `authorize`: always runs on `ubuntu-24.04`, checks out the repository, parses the manifest, and fails non-master/non-trusted dispatches.
-- `build-windows`: needs `authorize`, runs on `windows-2025-vs2026`, builds and validates `code-oss-windows-x64`.
+- `build-windows`: needs `authorize`, runs on `windows-2022`, fails closed unless the hosted Visual Studio 2022 installation has the required C++ and Spectre components, then builds and validates `code-oss-windows-x64`.
 - `build-linux`: needs `authorize`, runs on `ubuntu-24.04`, builds/validates `code-oss-linux-x64` and downloads/validates `appimagetool-linux-x64`.
 - `attest`: needs both build jobs, runs on `ubuntu-24.04`, downloads all three current-run artifacts, revalidates transport results, and uploads `release-input-provenance`.
 
@@ -417,7 +417,7 @@ Compare `git rev-parse HEAD` byte-for-byte and call `source-manifest.mjs verify-
 
 - [ ] **Step 4: Implement the Windows producer in strict order**
 
-Use pinned `setup-node` with `20.14.0`, then install exact Yarn `1.22.22`. Run from `.producer/vscode`:
+Use pinned `setup-node` with `20.14.0`, then install exact Yarn `1.22.22`. Before `yarn install`, use the runner-installed `vswhere.exe` with version range `[17.0,18.0)` and a single query requiring both `Microsoft.VisualStudio.Component.VC.Tools.x86.x64` and `Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre`. Require one real 17.x installation and export both `GYP_MSVS_VERSION=2022` and `npm_config_msvs_version=2022`; a missing, ambiguous, linked, wrong-version, or incomplete installation must fail with the fixed producer preflight error. Do not install, downgrade, or fall back to another Visual Studio toolchain. Run from `.producer/vscode`:
 
 ```powershell
 yarn install --frozen-lockfile
@@ -459,10 +459,10 @@ Require exact name `appimagetool-x86_64.AppImage`, size `15092216`, and SHA-256 
 
 Download all three artifacts with the pinned download action into separate fixed directories. Require exact root sets. On Ubuntu:
 
-- validate and inventory the Windows runtime without executing its launcher;
-- validate the Linux mode inventory, restore exact modes, validate/inventory the Linux runtime, and execute the Linux launcher version check;
-- recompute appimagetool name/size/digest;
-- compare both runtime summaries and the mode-inventory digest against the build-job outputs;
+- validate the Linux mode inventory's closed structure and compare its digest plus launcher digest with the Linux build-job outputs before restoring any mode;
+- restore the validated Linux modes, then validate and inventory the Windows and Linux runtimes without executing either launcher;
+- recompute appimagetool name/size/digest and compare both runtime summaries, the mode-inventory digest, and the tool coordinates against all build-job outputs;
+- only after every build-job output comparison succeeds, execute the Linux launcher version check with the fixed 30-second bound; never execute the Windows launcher on Ubuntu;
 - create provenance with the exact producer scalars from `GITHUB_REPOSITORY`, `.github/workflows/release-inputs.yml`, `GITHUB_SHA`, `GITHUB_EVENT_NAME`, and `GITHUB_REF`, then call `provenance.mjs validate` against `tools/release/producer/source-manifest.json`;
 - append only producer run ID, source commit, Windows launcher SHA-256, Linux launcher SHA-256, appimagetool SHA-256, and one-day retention to `GITHUB_STEP_SUMMARY` after validation;
 - upload only `release-input-provenance.json` as `release-input-provenance` after every comparison succeeds.
