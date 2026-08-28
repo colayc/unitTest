@@ -697,6 +697,7 @@ Confirm the run head SHA equals both remote `master` hashes. Require `authorize`
 
 ```powershell
 $producerEvidence = ".release/evidence/producer-$producerRunId"
+New-Item -ItemType Directory -Force -Path $producerEvidence | Out-Null
 $producerRun = gh api "repos/colayc/unitTest/actions/runs/$producerRunId" | ConvertFrom-Json
 $producerRunAttempt = [int64]$producerRun.run_attempt
 $provenanceTransportName = "release-input-provenance-$producerRunAttempt"

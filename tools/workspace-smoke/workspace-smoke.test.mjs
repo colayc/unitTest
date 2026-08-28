@@ -332,14 +332,19 @@ test("release-input documentation binds run attempts and provenance to immutable
     readFile("docs/superpowers/plans/2026-07-21-cpp-unit-test-ide-roadmap.md", "utf8"),
     readFile("docs/superpowers/plans/2026-08-28-trusted-code-oss-release-input-production.md", "utf8"),
   ]);
-  const documentation = `${readme}\n${security}\n${roadmap}`;
-
-  assert.match(documentation, /run ID alone.*(?:not|不).*complete artifact identity|run ID.*不足以.*完整.*artifact.*identity/iu);
-  assert.match(documentation, /run attempt.*(?:bound|绑定).*end to end|run attempt.*端到端.*绑定/iu);
-  assert.match(documentation, /immutable artifact IDs?.*upload digests|不可变.*artifact ID.*上传.*摘要/iu);
-  assert.match(documentation, /transport names?.*suffixed by.*run attempt|传输.*名称.*追加.*run attempt/iu);
-  assert.match(documentation, /producer re-?run.*new foundation dispatch|producer.*重跑.*新的.*foundation.*dispatch/iu);
-  assert.match(documentation, /package jobs?.*revalidate.*attempt.*before and after download|package.*(?:下载前后|前后).*重新验证.*attempt/iu);
+  const requiredFacts = [
+    /run ID alone.*(?:not|不).*complete artifact identity|run ID.*不足以.*完整.*artifact.*identity/iu,
+    /run attempt.*(?:bound|绑定).*end to end|run attempt.*端到端.*绑定/iu,
+    /immutable artifact IDs?.*upload digests|不可变.*artifact ID.*上传.*摘要/iu,
+    /transport names?.*suffixed by.*run attempt|传输.*名称.*追加.*run attempt/iu,
+    /producer re-?run.*new foundation dispatch|producer.*重跑.*新的.*foundation.*dispatch/iu,
+    /package jobs?.*revalidate.*attempt.*before and after download|package.*(?:下载前后|前后).*重新验证.*attempt/iu,
+  ];
+  for (const [name, text] of [["README", readme], ["security guidance", security], ["roadmap", roadmap]]) {
+    for (const fact of requiredFacts) {
+      assert.match(text, fact, `${name} must document each attempt-bound release-input fact independently`);
+    }
+  }
 
   for (const text of [readme, qualificationPlan]) {
     assert.doesNotMatch(text, /gh\s+run\s+download[^\n]*--name\s+release-input-provenance(?:\s|$)/iu);
@@ -347,6 +352,10 @@ test("release-input documentation binds run attempts and provenance to immutable
 
   const taskNine = qualificationPlan.slice(qualificationPlan.indexOf("### Task 9:"));
   assert.notEqual(taskNine, qualificationPlan, "qualification plan must retain Task 9");
+  const stepThree = taskNine.slice(taskNine.indexOf("- [ ] **Step 3:"), taskNine.indexOf("- [ ] **Step 4:"));
+  assert.notEqual(stepThree, taskNine, "Task 9 must retain a separate producer provenance Step 3");
+  const stepThreeCommands = stepThree.match(/```powershell\r?\n([\s\S]*?)```/u)?.[1];
+  assert.ok(stepThreeCommands, "Task 9 Step 3 must retain a PowerShell evidence command block");
   for (const expected of [
     '$producerRun = gh api "repos/colayc/unitTest/actions/runs/$producerRunId" | ConvertFrom-Json',
     '$producerRunAttempt = [int64]$producerRun.run_attempt',
@@ -354,15 +363,25 @@ test("release-input documentation binds run attempts and provenance to immutable
     'artifacts?per_page=100',
     '$artifactPage.total_count -ne $artifactPage.artifacts.Count',
     '$artifactPage.total_count -gt 100',
+    '$_.expired -eq $false',
     '$provenanceMatches.Count -ne 1',
     '$provenanceArtifactId = [string]$provenanceMatches[0].id',
     'actions/artifacts/$provenanceArtifactId/zip',
     'Invoke-WebRequest',
+    'Authorization = "Bearer $(gh auth token)"',
+    'New-Item -ItemType Directory -Force -Path $producerEvidence | Out-Null',
     'Expand-Archive',
   ]) {
-    assert.ok(taskNine.includes(expected), `Task 9 must document ${expected}`);
+    assert.ok(stepThreeCommands.includes(expected), `Task 9 Step 3 must document ${expected}`);
   }
-  assert.doesNotMatch(taskNine, /gh\s+run\s+download\s+\$producerRunId[^\n]*(?:artifact(?:-id)?|\$provenanceArtifactId)/iu);
+  assert.ok(
+    stepThreeCommands.indexOf('New-Item -ItemType Directory -Force -Path $producerEvidence | Out-Null') < stepThreeCommands.indexOf('Invoke-WebRequest'),
+    "Task 9 Step 3 must create the evidence directory before downloading the ZIP",
+  );
+  assert.match(stepThree, /expired\s+-eq\s+\$false/iu);
+  assert.match(stepThree, /must not fall back to name selection/iu);
+  assert.doesNotMatch(stepThreeCommands, /\bgh\s+run\s+download\b/iu);
+  assert.doesNotMatch(stepThreeCommands, /--(?:name|artifact-id)\b/iu);
 });
 
 test("compiled Service runtime excludes HTTP, TLS, GitHub, and OAuth client stacks", () => {

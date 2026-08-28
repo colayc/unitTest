@@ -153,6 +153,7 @@ $producerRunId = Start-ClosedWorkflowRun -Workflow 'release-inputs.yml' -Expecte
 gh run watch $producerRunId --repo colayc/unitTest --exit-status
 
 $producerEvidence = ".release/evidence/producer-$producerRunId"
+New-Item -ItemType Directory -Force -Path $producerEvidence | Out-Null
 $producerRun = gh api "repos/colayc/unitTest/actions/runs/$producerRunId" | ConvertFrom-Json
 $producerRunAttempt = [int64]$producerRun.run_attempt
 $provenanceTransportName = "release-input-provenance-$producerRunAttempt"
