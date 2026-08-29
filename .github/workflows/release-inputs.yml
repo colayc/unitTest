@@ -113,7 +113,8 @@ jobs:
           $yarnRoot = [IO.Path]::GetFullPath('.release/tooling/yarn')
           $actualYarn = (& (Join-Path $yarnRoot 'yarn.cmd') --version).Trim()
           if ($LASTEXITCODE -ne 0 -or $actualYarn -cne '1.22.22') { throw 'RELEASE_PRODUCER_BUILD_FAILED: Yarn version mismatch' }
-          $yarnRoot | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $yarnBin = Join-Path $yarnRoot 'bin'
+          $yarnBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Validate Visual Studio 2022 toolchain
         shell: pwsh
         run: |
