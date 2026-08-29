@@ -621,14 +621,14 @@ test("both builds use the fixed fresh checkout, toolchains, Gulp targets, and ou
     assert.match(job, /source-manifest\.mjs verify-checkout/u);
     assert.match(job, /node-version: 20\.14\.0/u);
     assert.match(job, /yarn@1\.22\.22/u);
-    assert.match(job, /yarn install --frozen-lockfile/u);
+    assert.match(job, /install --frozen-lockfile/u);
   }
   const windows = jobBlock("build-windows");
-  assert.match(windows, /yarn gulp vscode-win32-x64/u);
+  assert.match(windows, /gulp vscode-win32-x64/u);
   assert.match(windows, /\.producer[\\/]VSCode-win32-x64/u);
   assert.match(windows, /VSCode-\*/u);
   const linux = jobBlock("build-linux");
-  assert.match(linux, /yarn gulp vscode-linux-x64/u);
+  assert.match(linux, /gulp vscode-linux-x64/u);
   assert.match(linux, /\.producer\/VSCode-linux-x64/u);
   assert.match(linux, /VSCode-\*/u);
   assert.match(linux, /apt-get install --no-install-recommends -y build-essential g\+\+ libx11-dev libx11-xcb-dev libxkbfile-dev libsecret-1-dev pkg-config python-is-python3/u);
@@ -647,6 +647,37 @@ test("Windows fixed Yarn exports its bin directory rather than the install root"
     "$yarnBin = Join-Path $yarnRoot 'bin'",
     "$yarnBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append",
   ].join("\n"));
+});
+
+test("build steps invoke the pinned Yarn executables without PATH resolution", () => {
+  const windows = powerShellRunBody(namedStep(jobBlock("build-windows"), "Build fixed Windows Code-OSS target"));
+  assert.equal(windows, [
+    "$ErrorActionPreference = 'Stop'",
+    "$yarnBin = Join-Path ([IO.Path]::GetFullPath('.release/tooling/yarn')) 'bin/yarn.cmd'",
+    "Push-Location '.producer/vscode'",
+    "try {",
+    "  & $yarnBin install --frozen-lockfile",
+    "  if ($LASTEXITCODE -ne 0) { throw 'RELEASE_PRODUCER_BUILD_FAILED: dependency installation failed' }",
+    "  & $yarnBin gulp vscode-win32-x64",
+    "  if ($LASTEXITCODE -ne 0) { throw 'RELEASE_PRODUCER_BUILD_FAILED: Windows build failed' }",
+    "} finally {",
+    "  Pop-Location",
+    "}",
+  ].join("\n"));
+
+  const linux = bashRunBody(namedStep(jobBlock("build-linux"), "Build fixed Linux Code-OSS target"));
+  assert.equal(linux, [
+    "set -euo pipefail",
+    'yarn_bin="$PWD/.release/tooling/yarn/bin/yarn"',
+    'test -x "$yarn_bin"',
+    "cd .producer/vscode",
+    '"$yarn_bin" install --frozen-lockfile',
+    '"$yarn_bin" gulp vscode-linux-x64',
+  ].join("\n"));
+
+  for (const body of [windows, linux]) {
+    assert.doesNotMatch(body, /^\s*yarn (?:install|gulp)\b/mu);
+  }
 });
 
 test("Windows validates, bounds launcher execution, inventories, and stages before upload", () => {
@@ -673,7 +704,7 @@ test("Windows validates, bounds launcher execution, inventories, and stages befo
     assert.match(job, new RegExp(`^      ${output}:`, "mu"));
   }
   const preflight = namedStep(job, "Validate Visual Studio 2022 toolchain");
-  assert.ok(job.indexOf("name: Validate Visual Studio 2022 toolchain") < job.indexOf("yarn install --frozen-lockfile"), "executable Visual Studio preflight must precede yarn install");
+  assert.ok(job.indexOf("name: Validate Visual Studio 2022 toolchain") < job.indexOf("name: Build fixed Windows Code-OSS target"), "executable Visual Studio preflight must precede the build step");
   assertVisualStudioPreflightContract(preflight);
 });
 
