@@ -352,8 +352,8 @@ jobs:
           set -euo pipefail
           yarn_js="$PWD/.release/tooling/yarn/node_modules/yarn/bin/yarn.js"
           test -f "$yarn_js"
-          yarn_root="$PWD/.release/tooling/yarn"
-          export PATH="$yarn_root:$PATH"
+          yarn_bin="$PWD/.release/tooling/yarn/bin"
+          export PATH="$yarn_bin:$PATH"
           cd .producer/vscode
           actual_yarn="$(node "$yarn_js" --version)"
           [[ "$actual_yarn" == '1.22.22' ]] || { echo 'RELEASE_PRODUCER_BUILD_FAILED: pinned Yarn entrypoint failed' >&2; exit 1; }
