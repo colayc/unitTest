@@ -17,7 +17,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, parse, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
@@ -106,6 +106,27 @@ function windowsShortPath(path) {
   if (result.status !== 0) return undefined;
   const shortPath = result.stdout.trim();
   return shortPath && resolve(shortPath).toLowerCase() !== resolve(path).toLowerCase() ? shortPath : undefined;
+}
+
+async function usableWindowsShortRoot(paths) {
+  for (const path of paths) {
+    const longPath = await realpath(path).catch(() => undefined);
+    if (longPath === undefined) continue;
+    const shortPath = windowsShortPath(longPath);
+    if (shortPath !== undefined && await lstat(shortPath).then((info) => info.isDirectory(), () => false)) {
+      return { longPath, shortPath };
+    }
+  }
+  return undefined;
+}
+
+function windowsVolumeAlias(path) {
+  const root = parse(path).root;
+  const result = spawnSync("mountvol.exe", [root, "/L"], { encoding: "utf8", windowsHide: true });
+  if (result.status !== 0 || result.stderr.trim() !== "") return undefined;
+  const volumeRoot = result.stdout.trim();
+  if (!/^\\\\\?\\Volume\{[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}\\$/iu.test(volumeRoot)) return undefined;
+  return `${volumeRoot}${path.slice(root.length)}`;
 }
 
 function assertCanonicalOneLine(bytes, value) {
@@ -391,9 +412,8 @@ test("CLI writes both success artifacts as canonical path-free one-line JSON", a
 windowsOnly("Windows CLI accepts a direct 8.3 output parent and rejects a short-long duplicate target", async (t) => {
   const input = await fixture(t, "windows");
   const repositoryRoot = resolve(dirname(script), "..", "..", "..");
-  const candidateRoots = await Promise.all([repositoryRoot, tmpdir()].map((path) => realpath(path)));
-  const aliasedRoot = candidateRoots.map((longPath) => ({ longPath, shortPath: windowsShortPath(longPath) })).find(({ shortPath }) => shortPath !== undefined);
-  if (aliasedRoot === undefined || !await lstat(aliasedRoot.shortPath).then((info) => info.isDirectory(), () => false)) {
+  const aliasedRoot = await usableWindowsShortRoot([repositoryRoot, tmpdir()]);
+  if (aliasedRoot === undefined) {
     t.skip("filesystem does not provide a distinct usable 8.3 alias");
     return;
   }
@@ -422,6 +442,29 @@ windowsOnly("Windows CLI accepts a direct 8.3 output parent and rejects a short-
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /output paths must be distinct/u);
   await assert.rejects(() => readFile(longDuplicate, "utf8"));
+});
+
+windowsOnly("Windows CLI rejects a same-identity Volume GUID output namespace alias", async (t) => {
+  const input = await fixture(t, "windows");
+  const repositoryRoot = await realpath(resolve(dirname(script), "..", "..", ".."));
+  const volumeRepositoryRoot = windowsVolumeAlias(repositoryRoot);
+  if (
+    volumeRepositoryRoot === undefined
+    || !await lstat(volumeRepositoryRoot).then((info) => info.isDirectory(), () => false)
+    || await realpath(volumeRepositoryRoot).then((path) => path.toLowerCase() !== repositoryRoot.toLowerCase(), () => true)
+  ) {
+    t.skip("host does not provide a distinct usable Volume GUID alias");
+    return;
+  }
+
+  const longParent = await mkdtemp(join(repositoryRoot, "runtime-inventory-volume-alias-"));
+  t.after(async () => rm(longParent, { recursive: true, force: true }));
+  const volumeParent = `${volumeRepositoryRoot}${longParent.slice(repositoryRoot.length)}`;
+  assert.equal((await lstat(volumeParent)).isDirectory(), true);
+  const result = runCli(input, join(volumeParent, "outputs", "inventory.json"), join(volumeParent, "outputs", "summary.json"));
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /RELEASE_PRODUCER_OUTPUT_INVALID/u);
+  assert.deepEqual(await readdir(longParent), []);
 });
 
 test("CLI rejects identical and hard-link-equivalent destinations before writing", async (t) => {
