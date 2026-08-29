@@ -695,7 +695,7 @@ test("build steps invoke pinned Yarn JS with a narrowly scoped parent-manager by
     "cd .producer/vscode",
     'actual_yarn="$(node "$yarn_js" --version)"',
     '[[ "$actual_yarn" == \'1.22.22\' ]] || { echo \'RELEASE_PRODUCER_BUILD_FAILED: pinned Yarn entrypoint failed\' >&2; exit 1; }',
-    'SKIP_YARN_COREPACK_CHECK=1 npm_execpath="$yarn_js" node "$yarn_js" install --frozen-lockfile',
+    'YARN_SILENT=0 SKIP_YARN_COREPACK_CHECK=1 npm_execpath="$yarn_js" node "$yarn_js" install --frozen-lockfile --verbose',
     'SKIP_YARN_COREPACK_CHECK=1 npm_execpath="$yarn_js" node "$yarn_js" gulp vscode-linux-x64',
   ].join("\n"));
 
