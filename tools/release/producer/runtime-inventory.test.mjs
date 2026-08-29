@@ -9,6 +9,7 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  realpath,
   rename,
   rm,
   symlink,
@@ -24,6 +25,7 @@ import * as runtimeInventoryModule from "./runtime-inventory.mjs";
 
 const { createRuntimeInventory, summarizeRuntimeInventory } = runtimeInventoryModule;
 const linuxOnly = process.platform === "linux" ? test : test.skip;
+const windowsOnly = process.platform === "win32" ? test : test.skip;
 const script = fileURLToPath(new URL("./runtime-inventory.mjs", import.meta.url));
 
 function sha256(value) {
@@ -97,6 +99,13 @@ function cliArguments(input, out, summaryOut) {
 
 function runCli(input, out, summaryOut) {
   return spawnSync(process.execPath, [script, ...cliArguments(input, out, summaryOut)], { encoding: "utf8" });
+}
+
+function windowsShortPath(path) {
+  const result = spawnSync("cmd.exe", ["/d", "/c", "for", "%I", "in", `("${path}")`, "do", "@echo", "%~sI"], { encoding: "utf8", windowsHide: true, windowsVerbatimArguments: true });
+  if (result.status !== 0) return undefined;
+  const shortPath = result.stdout.trim();
+  return shortPath && resolve(shortPath).toLowerCase() !== resolve(path).toLowerCase() ? shortPath : undefined;
 }
 
 function assertCanonicalOneLine(bytes, value) {
@@ -377,6 +386,42 @@ test("CLI writes both success artifacts as canonical path-free one-line JSON", a
     assert.equal(bytes.includes(resolve(input.root)), false);
     assert.equal(bytes.includes(resolve(input.parent)), false);
   }
+});
+
+windowsOnly("Windows CLI accepts a direct 8.3 output parent and rejects a short-long duplicate target", async (t) => {
+  const input = await fixture(t, "windows");
+  const repositoryRoot = resolve(dirname(script), "..", "..", "..");
+  const candidateRoots = await Promise.all([repositoryRoot, tmpdir()].map((path) => realpath(path)));
+  const aliasedRoot = candidateRoots.map((longPath) => ({ longPath, shortPath: windowsShortPath(longPath) })).find(({ shortPath }) => shortPath !== undefined);
+  if (aliasedRoot === undefined || !await lstat(aliasedRoot.shortPath).then((info) => info.isDirectory(), () => false)) {
+    t.skip("filesystem does not provide a distinct usable 8.3 alias");
+    return;
+  }
+
+  const longParent = await mkdtemp(join(aliasedRoot.longPath, "runtime-inventory-short-path-"));
+  t.after(async () => rm(longParent, { recursive: true, force: true }));
+  const shortParent = join(aliasedRoot.shortPath, longParent.slice(aliasedRoot.longPath.length + 1));
+  assert.equal((await lstat(shortParent)).isDirectory(), true);
+  const shortOutputDirectory = join(shortParent, "eight-dot-three-output");
+  const longOutputDirectory = join(longParent, "eight-dot-three-output");
+  const out = join(shortOutputDirectory, "inventory.json");
+  const summaryOut = join(shortOutputDirectory, "summary.json");
+  let result = runCli(input, out, summaryOut);
+  assert.equal(result.status, 0, result.stderr);
+  const fullBytes = await readFile(join(longOutputDirectory, "inventory.json"), "utf8");
+  const summaryBytes = await readFile(join(longOutputDirectory, "summary.json"), "utf8");
+  const full = JSON.parse(fullBytes);
+  const summary = JSON.parse(summaryBytes);
+  assertCanonicalOneLine(fullBytes, full);
+  assertCanonicalOneLine(summaryBytes, summary);
+  assert.deepEqual(summary, summarizeRuntimeInventory(full));
+
+  const longDuplicate = join(longOutputDirectory, "same-target.json");
+  const shortDuplicate = join(shortOutputDirectory, "same-target.json");
+  result = runCli(input, longDuplicate, shortDuplicate);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /output paths must be distinct/u);
+  await assert.rejects(() => readFile(longDuplicate, "utf8"));
 });
 
 test("CLI rejects identical and hard-link-equivalent destinations before writing", async (t) => {

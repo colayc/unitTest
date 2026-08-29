@@ -24,6 +24,7 @@ const codeOssIdentity = {
 };
 const execFileAsync = promisify(execFile);
 const windowsReparsePointCommand = "$root=New-Object IO.DirectoryInfo($env:CODE_OSS_RUNTIME_ROOT); function Test-ReparsePoint([IO.FileSystemInfo]$node) { if (($node.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $true }; if ($node -is [IO.DirectoryInfo]) { foreach ($child in $node.EnumerateFileSystemInfos()) { if (Test-ReparsePoint $child) { return $true } } }; return $false }; [Console]::Out.Write([int](Test-ReparsePoint $root))";
+const windowsOutputAncestorCommand = "$current=New-Object IO.DirectoryInfo($env:CODE_OSS_OUTPUT_DIRECTORY); while ($null -ne $current) { if (($current.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { [Console]::Out.Write(1); exit }; $current=$current.Parent }; [Console]::Out.Write(0)";
 const noTestHooks = Object.freeze({});
 
 function inputError(code, message) {
@@ -351,16 +352,29 @@ function sameIdentity(left, right) {
   return left === undefined ? right === undefined : right !== undefined && left.dev === right.dev && left.ino === right.ino;
 }
 
+async function inspectRealOutputDirectory(path) {
+  const info = await lstat(path, { bigint: true });
+  if (info.isSymbolicLink() || !info.isDirectory()) throw new Error("unsafe output directory");
+  const canonical = await realpath(path);
+  if (process.platform !== "win32") {
+    if (comparablePath(canonical) !== comparablePath(path)) throw new Error("unsafe output directory");
+    return canonical;
+  }
+  const canonicalInfo = await lstat(canonical, { bigint: true });
+  if (!sameIdentity(snapshotIdentity(info), snapshotIdentity(canonicalInfo))) throw new Error("unsafe output directory");
+  const { stdout } = await execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", windowsOutputAncestorCommand], { encoding: "utf8", env: { ...process.env, CODE_OSS_OUTPUT_DIRECTORY: path }, windowsHide: true });
+  if (stdout.trim() !== "0") throw new Error("unsafe output directory");
+  return canonical;
+}
+
 async function ensureRealOutputDirectory(path) {
   const directory = resolve(path);
   const missing = [];
   let current = directory;
+  let canonicalDirectory;
   while (true) {
     try {
-      const info = await lstat(current, { bigint: true });
-      if (info.isSymbolicLink() || !info.isDirectory()) throw new Error("unsafe output directory");
-      const canonical = await realpath(current);
-      if (comparablePath(canonical) !== comparablePath(current)) throw new Error("unsafe output directory");
+      canonicalDirectory = await inspectRealOutputDirectory(current);
       break;
     } catch (error) {
       if (error?.code !== "ENOENT") throw error;
@@ -373,19 +387,17 @@ async function ensureRealOutputDirectory(path) {
   for (const component of missing.reverse()) {
     current = join(current, component);
     await mkdir(current);
-    const info = await lstat(current, { bigint: true });
-    if (info.isSymbolicLink() || !info.isDirectory()) throw new Error("unsafe output directory");
-    const canonical = await realpath(current);
-    if (comparablePath(canonical) !== comparablePath(current)) throw new Error("unsafe output directory");
+    canonicalDirectory = await inspectRealOutputDirectory(current);
   }
-  return directory;
+  return canonicalDirectory;
 }
 
 async function inspectOutput(path) {
   if (typeof path !== "string" || path.length === 0) throw outputError("output path is required");
   try {
-    const target = resolve(path);
-    const directory = await ensureRealOutputDirectory(dirname(target));
+    const requestedTarget = resolve(path);
+    const directory = await ensureRealOutputDirectory(dirname(requestedTarget));
+    const target = join(directory, basename(requestedTarget));
     const directoryInfo = await lstat(directory, { bigint: true });
     const existing = await lstat(target, { bigint: true }).catch((error) => error?.code === "ENOENT" ? undefined : Promise.reject(error));
     if (existing?.isSymbolicLink() || (existing && !existing.isFile())) throw new Error("invalid output");
@@ -400,6 +412,7 @@ async function inspectDistinctOutputs(firstPath, secondPath) {
   if (comparablePath(firstPath) === comparablePath(secondPath)) throw outputError("output paths must be distinct");
   const first = await inspectOutput(firstPath);
   const second = await inspectOutput(secondPath);
+  if (comparablePath(first.target) === comparablePath(second.target)) throw outputError("output paths must be distinct");
   if (first.existing !== undefined && sameIdentity(first.existing, second.existing)) {
     throw outputError("output paths must be distinct");
   }
