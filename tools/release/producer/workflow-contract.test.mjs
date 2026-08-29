@@ -635,7 +635,7 @@ test("both builds use the fixed fresh checkout, toolchains, Gulp targets, and ou
   assert.doesNotMatch(workflow, /setup-go|fallback|--ignore-(?:engines|scripts)|(?:disable|without|no)[-_ ]spectre/iu);
 });
 
-test("Windows fixed Yarn exports its bin directory rather than the install root", () => {
+test("fixed Yarn exports the executable location required by Code-OSS preinstall", () => {
   const step = namedStep(jobBlock("build-windows"), "Install fixed Yarn");
   assert.equal(powerShellRunBody(step), [
     "$ErrorActionPreference = 'Stop'",
@@ -644,8 +644,7 @@ test("Windows fixed Yarn exports its bin directory rather than the install root"
     "$yarnRoot = [IO.Path]::GetFullPath('.release/tooling/yarn')",
     "$actualYarn = (& (Join-Path $yarnRoot 'yarn.cmd') --version).Trim()",
     "if ($LASTEXITCODE -ne 0 -or $actualYarn -cne '1.22.22') { throw 'RELEASE_PRODUCER_BUILD_FAILED: Yarn version mismatch' }",
-    "$yarnBin = Join-Path $yarnRoot 'bin'",
-    "$yarnBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append",
+    "$yarnRoot | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append",
   ].join("\n"));
 });
 
@@ -655,12 +654,17 @@ test("build steps invoke pinned Yarn JS with a narrowly scoped parent-manager by
     "$ErrorActionPreference = 'Stop'",
     "$yarnJs = Join-Path ([IO.Path]::GetFullPath('.release/tooling/yarn')) 'node_modules/yarn/bin/yarn.js'",
     "if (-not (Test-Path -LiteralPath $yarnJs -PathType Leaf)) { throw 'RELEASE_PRODUCER_BUILD_FAILED: Yarn entrypoint missing' }",
+    "$yarnRoot = [IO.Path]::GetFullPath('.release/tooling/yarn')",
     "$previousSkipYarnCorepackCheck = $env:SKIP_YARN_COREPACK_CHECK",
     "$previousNpmExecPath = $env:npm_execpath",
+    "$previousPath = $env:Path",
     "Push-Location '.producer/vscode'",
     "try {",
     "  $env:SKIP_YARN_COREPACK_CHECK = '1'",
     "  $env:npm_execpath = $yarnJs",
+    "  $env:Path = \"$yarnRoot;$env:Path\"",
+    "  $actualYarn = (& node $yarnJs --version).Trim()",
+    "  if ($LASTEXITCODE -ne 0 -or $actualYarn -cne '1.22.22') { throw 'RELEASE_PRODUCER_BUILD_FAILED: pinned Yarn entrypoint failed' }",
     "  & node $yarnJs install --frozen-lockfile",
     "  if ($LASTEXITCODE -ne 0) { throw 'RELEASE_PRODUCER_BUILD_FAILED: dependency installation failed' }",
     "  & node $yarnJs gulp vscode-win32-x64",
@@ -676,6 +680,7 @@ test("build steps invoke pinned Yarn JS with a narrowly scoped parent-manager by
     "  } else {",
     "    $env:npm_execpath = $previousNpmExecPath",
     "  }",
+    "  $env:Path = $previousPath",
     "  Pop-Location",
     "}",
   ].join("\n"));
@@ -685,7 +690,11 @@ test("build steps invoke pinned Yarn JS with a narrowly scoped parent-manager by
     "set -euo pipefail",
     'yarn_js="$PWD/.release/tooling/yarn/node_modules/yarn/bin/yarn.js"',
     'test -f "$yarn_js"',
+    'yarn_root="$PWD/.release/tooling/yarn"',
+    'export PATH="$yarn_root:$PATH"',
     "cd .producer/vscode",
+    'actual_yarn="$(node "$yarn_js" --version)"',
+    '[[ "$actual_yarn" == \'1.22.22\' ]] || { echo \'RELEASE_PRODUCER_BUILD_FAILED: pinned Yarn entrypoint failed\' >&2; exit 1; }',
     'SKIP_YARN_COREPACK_CHECK=1 npm_execpath="$yarn_js" node "$yarn_js" install --frozen-lockfile',
     'SKIP_YARN_COREPACK_CHECK=1 npm_execpath="$yarn_js" node "$yarn_js" gulp vscode-linux-x64',
   ].join("\n"));
