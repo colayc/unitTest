@@ -456,6 +456,15 @@ function powerShellRunBody(step) {
   }).join("\n");
 }
 
+function bashRunBody(step) {
+  const body = step.match(/^        shell: bash\n        run: \|\n([\s\S]*)$/mu)?.[1];
+  assert.notEqual(body, undefined, "step must contain a Bash literal run block");
+  return body.trimEnd().split("\n").map((line) => {
+    assert.match(line, /^ {10}/u, "Bash run block line must retain workflow indentation");
+    return line.slice(10);
+  }).join("\n");
+}
+
 function inspectVisualStudioPreflightAst(preflight) {
   const source = powerShellRunBody(preflight);
   const result = spawnSync(pwsh, [
@@ -562,6 +571,17 @@ test("authorization is fail-closed and every producer job depends on it", () => 
   assert.match(jobBlock("build-windows"), /^    needs: authorize$/mu);
   assert.match(jobBlock("build-linux"), /^    needs: authorize$/mu);
   assert.match(jobBlock("attest"), /^    needs:\n      - build-windows\n      - build-linux$/mu);
+});
+
+test("authorize exports the fixed local pnpm bin before running the producer suite", () => {
+  const step = namedStep(jobBlock("authorize"), "Run producer contract tests on hosted Ubuntu");
+  assert.equal(bashRunBody(step), [
+    "set -euo pipefail",
+    "npm install --global --prefix .release/tooling/pnpm --no-audit --no-fund pnpm@11.4.0",
+    "[[ \"$(.release/tooling/pnpm/bin/pnpm --version)\" == '11.4.0' ]] || { echo 'RELEASE_PRODUCER_CONFIG_INVALID: pnpm version mismatch' >&2; exit 1; }",
+    "export PATH=\"$PWD/.release/tooling/pnpm/bin:$PATH\"",
+    ".release/tooling/pnpm/bin/pnpm test:release-producer",
+  ].join("\n"));
 });
 
 test("all action references are reviewed full commit pins", () => {
