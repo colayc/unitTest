@@ -635,6 +635,20 @@ test("both builds use the fixed fresh checkout, toolchains, Gulp targets, and ou
   assert.doesNotMatch(workflow, /setup-go|fallback|--ignore-(?:engines|scripts)|(?:disable|without|no)[-_ ]spectre/iu);
 });
 
+test("Windows fixed Yarn exports its bin directory rather than the install root", () => {
+  const step = namedStep(jobBlock("build-windows"), "Install fixed Yarn");
+  assert.equal(powerShellRunBody(step), [
+    "$ErrorActionPreference = 'Stop'",
+    "npm install --global --prefix .release/tooling/yarn --no-audit --no-fund yarn@1.22.22",
+    "if ($LASTEXITCODE -ne 0) { throw 'RELEASE_PRODUCER_BUILD_FAILED: Yarn installation failed' }",
+    "$yarnRoot = [IO.Path]::GetFullPath('.release/tooling/yarn')",
+    "$actualYarn = (& (Join-Path $yarnRoot 'yarn.cmd') --version).Trim()",
+    "if ($LASTEXITCODE -ne 0 -or $actualYarn -cne '1.22.22') { throw 'RELEASE_PRODUCER_BUILD_FAILED: Yarn version mismatch' }",
+    "$yarnBin = Join-Path $yarnRoot 'bin'",
+    "$yarnBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append",
+  ].join("\n"));
+});
+
 test("Windows validates, bounds launcher execution, inventories, and stages before upload", () => {
   const job = jobBlock("build-windows");
   assertOrdered(job, [
