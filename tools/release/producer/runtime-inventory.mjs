@@ -24,7 +24,62 @@ const codeOssIdentity = {
 };
 const execFileAsync = promisify(execFile);
 const windowsReparsePointCommand = "$root=New-Object IO.DirectoryInfo($env:CODE_OSS_RUNTIME_ROOT); function Test-ReparsePoint([IO.FileSystemInfo]$node) { if (($node.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $true }; if ($node -is [IO.DirectoryInfo]) { foreach ($child in $node.EnumerateFileSystemInfos()) { if (Test-ReparsePoint $child) { return $true } } }; return $false }; [Console]::Out.Write([int](Test-ReparsePoint $root))";
-const windowsOutputAncestorCommand = "$current=New-Object IO.DirectoryInfo($env:CODE_OSS_OUTPUT_DIRECTORY); while ($null -ne $current) { if (($current.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { [Console]::Out.Write(1); exit }; $current=$current.Parent }; [Console]::Out.Write(0)";
+const windowsOutputDirectoryCommand = String.raw`
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+try {
+  Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class CodeOssOutputPathNative {
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  public static extern uint GetShortPathName(string longPath, StringBuilder shortPath, uint capacity);
+}
+'@ -ErrorAction Stop | Out-Null
+
+  function Get-VerifiedShortPath([string]$Path) {
+    $builder = [Text.StringBuilder]::new(32768)
+    $length = [CodeOssOutputPathNative]::GetShortPathName($Path, $builder, [uint32]$builder.Capacity)
+    if ($length -eq 0) { throw [ComponentModel.Win32Exception]::new([Runtime.InteropServices.Marshal]::GetLastWin32Error()) }
+    if ($length -ge $builder.Capacity) { throw 'short path exceeds fixed buffer' }
+    return $builder.ToString()
+  }
+
+  function Test-NoReparsePointAncestors([string]$Path) {
+    $current = [IO.DirectoryInfo]::new($Path)
+    while ($null -ne $current) {
+      $current.Refresh()
+      if (($current.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $false }
+      $current = $current.Parent
+    }
+    return $true
+  }
+
+  $requested = [IO.Path]::GetFullPath($env:CODE_OSS_OUTPUT_REQUESTED_DIRECTORY)
+  $canonical = [IO.Path]::GetFullPath($env:CODE_OSS_OUTPUT_CANONICAL_DIRECTORY)
+  $requestedRoot = [IO.Path]::GetPathRoot($requested)
+  $canonicalRoot = [IO.Path]::GetPathRoot($canonical)
+  if (-not (Test-NoReparsePointAncestors $requested) -or -not (Test-NoReparsePointAncestors $canonical)) { [Console]::Out.Write('1'); exit 0 }
+  if (-not [String]::Equals($requestedRoot, $canonicalRoot, [StringComparison]::OrdinalIgnoreCase)) { [Console]::Out.Write('1'); exit 0 }
+
+  $requestedComponents = @($requested.Substring($requestedRoot.Length) -split '[\\/]+' | Where-Object { $_.Length -gt 0 })
+  $canonicalComponents = @($canonical.Substring($canonicalRoot.Length) -split '[\\/]+' | Where-Object { $_.Length -gt 0 })
+  if ($requestedComponents.Count -ne $canonicalComponents.Count) { [Console]::Out.Write('1'); exit 0 }
+  $canonicalPrefix = $canonicalRoot
+  for ($index = 0; $index -lt $canonicalComponents.Count; $index += 1) {
+    $canonicalPrefix = [IO.Path]::Combine($canonicalPrefix, $canonicalComponents[$index])
+    if ([String]::Equals($requestedComponents[$index], $canonicalComponents[$index], [StringComparison]::OrdinalIgnoreCase)) { continue }
+    $shortPrefix = Get-VerifiedShortPath $canonicalPrefix
+    $shortComponent = [IO.Path]::GetFileName($shortPrefix.TrimEnd([char]'\'))
+    if (-not [String]::Equals($requestedComponents[$index], $shortComponent, [StringComparison]::OrdinalIgnoreCase)) { [Console]::Out.Write('1'); exit 0 }
+  }
+  [Console]::Out.Write('0')
+} catch {
+  [Console]::Error.Write('output directory inspection failed')
+  exit 2
+}
+`;
 const noTestHooks = Object.freeze({});
 
 function inputError(code, message) {
@@ -362,8 +417,16 @@ async function inspectRealOutputDirectory(path) {
   }
   const canonicalInfo = await lstat(canonical, { bigint: true });
   if (!sameIdentity(snapshotIdentity(info), snapshotIdentity(canonicalInfo))) throw new Error("unsafe output directory");
-  const { stdout } = await execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", windowsOutputAncestorCommand], { encoding: "utf8", env: { ...process.env, CODE_OSS_OUTPUT_DIRECTORY: path }, windowsHide: true });
-  if (stdout.trim() !== "0") throw new Error("unsafe output directory");
+  const { stdout, stderr } = await execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", windowsOutputDirectoryCommand], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      CODE_OSS_OUTPUT_REQUESTED_DIRECTORY: path,
+      CODE_OSS_OUTPUT_CANONICAL_DIRECTORY: canonical,
+    },
+    windowsHide: true,
+  });
+  if (stderr !== "" || stdout !== "0") throw new Error("unsafe output directory");
   return canonical;
 }
 
