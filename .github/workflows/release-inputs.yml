@@ -44,6 +44,7 @@ jobs:
           set -euo pipefail
           npm install --global --prefix .release/tooling/pnpm --no-audit --no-fund pnpm@11.4.0
           [[ "$(.release/tooling/pnpm/bin/pnpm --version)" == '11.4.0' ]] || { echo 'RELEASE_PRODUCER_CONFIG_INVALID: pnpm version mismatch' >&2; exit 1; }
+          export PATH="$PWD/.release/tooling/pnpm/bin:$PATH"
           .release/tooling/pnpm/bin/pnpm test:release-producer
 
   build-windows:
