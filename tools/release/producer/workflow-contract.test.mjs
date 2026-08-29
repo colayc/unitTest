@@ -649,18 +649,26 @@ test("Windows fixed Yarn exports its bin directory rather than the install root"
   ].join("\n"));
 });
 
-test("build steps invoke the pinned Yarn executables without PATH resolution", () => {
+test("build steps invoke pinned Yarn JS with a narrowly scoped parent-manager bypass", () => {
   const windows = powerShellRunBody(namedStep(jobBlock("build-windows"), "Build fixed Windows Code-OSS target"));
   assert.equal(windows, [
     "$ErrorActionPreference = 'Stop'",
-    "$yarnBin = Join-Path ([IO.Path]::GetFullPath('.release/tooling/yarn')) 'bin/yarn.cmd'",
+    "$yarnJs = Join-Path ([IO.Path]::GetFullPath('.release/tooling/yarn')) 'node_modules/yarn/bin/yarn.js'",
+    "if (-not (Test-Path -LiteralPath $yarnJs -PathType Leaf)) { throw 'RELEASE_PRODUCER_BUILD_FAILED: Yarn entrypoint missing' }",
+    "$previousSkipYarnCorepackCheck = $env:SKIP_YARN_COREPACK_CHECK",
     "Push-Location '.producer/vscode'",
     "try {",
-    "  & $yarnBin install --frozen-lockfile",
+    "  $env:SKIP_YARN_COREPACK_CHECK = '1'",
+    "  & node $yarnJs install --frozen-lockfile",
     "  if ($LASTEXITCODE -ne 0) { throw 'RELEASE_PRODUCER_BUILD_FAILED: dependency installation failed' }",
-    "  & $yarnBin gulp vscode-win32-x64",
+    "  & node $yarnJs gulp vscode-win32-x64",
     "  if ($LASTEXITCODE -ne 0) { throw 'RELEASE_PRODUCER_BUILD_FAILED: Windows build failed' }",
     "} finally {",
+    "  if ($null -eq $previousSkipYarnCorepackCheck) {",
+    "    Remove-Item Env:SKIP_YARN_COREPACK_CHECK -ErrorAction SilentlyContinue",
+    "  } else {",
+    "    $env:SKIP_YARN_COREPACK_CHECK = $previousSkipYarnCorepackCheck",
+    "  }",
     "  Pop-Location",
     "}",
   ].join("\n"));
@@ -668,14 +676,15 @@ test("build steps invoke the pinned Yarn executables without PATH resolution", (
   const linux = bashRunBody(namedStep(jobBlock("build-linux"), "Build fixed Linux Code-OSS target"));
   assert.equal(linux, [
     "set -euo pipefail",
-    'yarn_bin="$PWD/.release/tooling/yarn/bin/yarn"',
-    'test -x "$yarn_bin"',
+    'yarn_js="$PWD/.release/tooling/yarn/node_modules/yarn/bin/yarn.js"',
+    'test -f "$yarn_js"',
     "cd .producer/vscode",
-    '"$yarn_bin" install --frozen-lockfile',
-    '"$yarn_bin" gulp vscode-linux-x64',
+    'SKIP_YARN_COREPACK_CHECK=1 node "$yarn_js" install --frozen-lockfile',
+    'SKIP_YARN_COREPACK_CHECK=1 node "$yarn_js" gulp vscode-linux-x64',
   ].join("\n"));
 
   for (const body of [windows, linux]) {
+    assert.doesNotMatch(body, /yarn\.cmd|\.release\/tooling\/yarn\/bin\/yarn(?:\s|["'])/iu);
     assert.doesNotMatch(body, /^\s*yarn (?:install|gulp)\b/mu);
   }
 });
