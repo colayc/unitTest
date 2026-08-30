@@ -688,7 +688,7 @@ test("build steps invoke pinned Yarn JS with a narrowly scoped parent-manager by
   const linux = bashRunBody(namedStep(jobBlock("build-linux"), "Build fixed Linux Code-OSS target"));
   assert.equal(linux, [
     "set -euo pipefail",
-    'yarn_js="$PWD/.release/tooling/yarn/node_modules/yarn/bin/yarn.js"',
+    'yarn_js="$PWD/.release/tooling/yarn/lib/node_modules/yarn/bin/yarn.js"',
     'test -f "$yarn_js"',
     'yarn_bin="$PWD/.release/tooling/yarn/bin"',
     'export PATH="$yarn_bin:$PATH"',
