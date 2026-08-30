@@ -334,7 +334,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y build-essential g++ libx11-dev libx11-xcb-dev libxkbfile-dev libsecret-1-dev pkg-config python-is-python3
+          sudo apt-get install --no-install-recommends -y build-essential g++ libx11-dev libx11-xcb-dev libxkbfile-dev libsecret-1-dev libkrb5-dev pkg-config python-is-python3
       - name: Set up Code-OSS Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:

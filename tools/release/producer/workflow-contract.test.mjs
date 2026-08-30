@@ -631,7 +631,7 @@ test("both builds use the fixed fresh checkout, toolchains, Gulp targets, and ou
   assert.match(linux, /gulp vscode-linux-x64/u);
   assert.match(linux, /\.producer\/VSCode-linux-x64/u);
   assert.match(linux, /VSCode-\*/u);
-  assert.match(linux, /apt-get install --no-install-recommends -y build-essential g\+\+ libx11-dev libx11-xcb-dev libxkbfile-dev libsecret-1-dev pkg-config python-is-python3/u);
+  assert.match(linux, /apt-get install --no-install-recommends -y build-essential g\+\+ libx11-dev libx11-xcb-dev libxkbfile-dev libsecret-1-dev libkrb5-dev pkg-config python-is-python3/u);
   assert.doesNotMatch(workflow, /setup-go|fallback|--ignore-(?:engines|scripts)|(?:disable|without|no)[-_ ]spectre/iu);
 });
 
