@@ -855,6 +855,19 @@ test("Linux creates and validates modes, bounds launcher execution, inventories,
   }
 });
 
+test("launcher version checks execute packaged CLI wrappers instead of GUI binaries", () => {
+  const windows = namedStep(jobBlock("build-windows"), "Check Windows launcher version");
+  const linux = namedStep(jobBlock("build-linux"), "Check Linux launcher version");
+  const transportedLinux = namedStep(jobBlock("attest"), "Check transported Linux launcher version");
+
+  assert.match(windows, /Start-Process -FilePath '\.producer\/VSCode-win32-x64\/bin\/code-oss\.cmd'/u);
+  assert.doesNotMatch(windows, /Start-Process -FilePath '\.producer\/VSCode-win32-x64\/Code - OSS\.exe'/u);
+  assert.match(linux, /timeout 30s \.release\/producer\/linux\/code-oss-linux-x64\/runtime\/bin\/code-oss --version/u);
+  assert.doesNotMatch(linux, /runtime\/code-oss --version/u);
+  assert.match(transportedLinux, /timeout 30s \.release\/transport\/linux\/runtime\/bin\/code-oss --version/u);
+  assert.doesNotMatch(transportedLinux, /linux\/runtime\/code-oss --version/u);
+});
+
 test("uploads expose immutable identities under attempt-qualified transport names", () => {
   const uploads = [];
   for (const name of ["build-windows", "build-linux", "attest"]) {
@@ -953,7 +966,7 @@ test("attestation validates immutable coordinates before ID-only downloads and i
   assert.match(compare, /EXPECTED_MODE_INVENTORY_SHA256/u);
   assert.match(compare, /EXPECTED_APPIMAGETOOL_SHA256/u);
   assert.doesNotMatch(compare, /timeout 30s/u);
-  assert.match(execute, /timeout 30s \.release\/transport\/linux\/runtime\/code-oss/u);
+  assert.match(execute, /timeout 30s \.release\/transport\/linux\/runtime\/bin\/code-oss/u);
   assert.match(job, /runtime-inventory\.mjs create/u);
   assert.match(job, /provenance\.mjs create/u);
   assert.match(job, /provenance\.mjs validate/u);
