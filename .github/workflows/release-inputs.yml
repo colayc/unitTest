@@ -222,7 +222,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path $userData | Out-Null
           $stdout = '.release/producer/windows/version.stdout'
           $stderr = '.release/producer/windows/version.stderr'
-          $process = Start-Process -FilePath '.producer/VSCode-win32-x64/Code - OSS.exe' `
+          $process = Start-Process -FilePath '.producer/VSCode-win32-x64/bin/code-oss.cmd' `
             -ArgumentList @('--version', '--user-data-dir', $userData) `
             -RedirectStandardOutput $stdout -RedirectStandardError $stderr -NoNewWindow -PassThru
           if (-not $process.WaitForExit(30000)) {
@@ -421,7 +421,7 @@ jobs:
           set -euo pipefail
           user_data='.release/producer/linux/user-data'
           mkdir -p "$user_data"
-          version_output="$(timeout 30s .release/producer/linux/code-oss-linux-x64/runtime/code-oss --version --user-data-dir "$user_data")" || {
+          version_output="$(timeout 30s .release/producer/linux/code-oss-linux-x64/runtime/bin/code-oss --version --user-data-dir "$user_data")" || {
             echo 'RELEASE_PRODUCER_OUTPUT_INVALID: Linux launcher version check failed or timed out' >&2
             exit 1
           }
@@ -784,7 +784,7 @@ jobs:
             echo 'RELEASE_PRODUCER_OUTPUT_INVALID: transported Linux launcher changed after summary comparison' >&2
             exit 1
           }
-          version_output="$(timeout 30s .release/transport/linux/runtime/code-oss --version --user-data-dir .release/attest-work/linux-user-data)" || {
+          version_output="$(timeout 30s .release/transport/linux/runtime/bin/code-oss --version --user-data-dir .release/attest-work/linux-user-data)" || {
             echo 'RELEASE_PRODUCER_OUTPUT_INVALID: transported Linux launcher version check failed or timed out' >&2
             exit 1
           }
