@@ -171,6 +171,21 @@ function Get-SourceDateEpoch {
   }
 }
 
+function ConvertTo-CanonicalManifestTimestamp {
+  param([Parameter(Mandatory = $true)][object]$Value)
+
+  if ($Value -is [string]) {
+    return [string]$Value
+  }
+  if ($Value -is [DateTime]) {
+    return $Value.ToUniversalTime().ToString(
+      "yyyy-MM-dd'T'HH:mm:ss.fff'Z'",
+      [Globalization.CultureInfo]::InvariantCulture
+    )
+  }
+  Fail-Release -Code 'RELEASE_INPUT_MISSING' -Message 'release manifest generatedAt has an unsupported PowerShell representation'
+}
+
 function Set-NormalizedTimestamps {
   param([string]$Root, [DateTime]$UtcDateTime)
   $entries = @(Get-ChildItem -LiteralPath $Root -Recurse -Force | Sort-Object { $_.FullName.Length } -Descending)
@@ -270,7 +285,8 @@ if ($releaseManifest.version -ne $Version) {
 if ($releaseManifest.platform -ne 'windows') {
   Fail-Release -Code 'RELEASE_INPUT_MISSING' -Message 'staging release-manifest.json must target the windows platform'
 }
-if ([string]$releaseManifest.generatedAt -cne $sourceEpoch.Iso) {
+$manifestGeneratedAt = ConvertTo-CanonicalManifestTimestamp -Value $releaseManifest.generatedAt
+if ($manifestGeneratedAt -cne $sourceEpoch.Iso) {
   Fail-Release -Code 'RELEASE_INPUT_MISSING' -Message 'release manifest generatedAt does not match SOURCE_DATE_EPOCH'
 }
 

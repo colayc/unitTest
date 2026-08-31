@@ -254,8 +254,8 @@ switch ($Arguments[0].ToLowerInvariant()) {
   return toolPath;
 }
 
-function runPowerShellFile(filePath, args, env) {
-  return spawnSync("powershell.exe", [
+function runPowerShellFile(filePath, args, env, executable = "powershell.exe") {
+  return spawnSync(executable, [
     "-NoProfile",
     "-ExecutionPolicy",
     "Bypass",
@@ -282,8 +282,8 @@ async function rewriteReleaseManifest(fixture, mutate) {
   await setZipEntry(fixture.outputPath, "release-manifest.json", bytes);
 }
 
-function runPackage(args, env) {
-  return runPowerShellFile(packageScript, args, env);
+function runPackage(args, env, executable = "powershell.exe") {
+  return runPowerShellFile(packageScript, args, env, executable);
 }
 
 function runVerify(args, env) {
@@ -749,6 +749,48 @@ windowsOnly("package-msix fails closed when SOURCE_DATE_EPOCH is absent", async 
     assert.match(result.stderr, /SOURCE_DATE_EPOCH/u);
   });
 });
+
+windowsOnly("package-msix accepts canonical generatedAt under PowerShell 7", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await createStagingFixture(root);
+    const fakeMakeAppx = await createFakeMakeAppx(root);
+    const result = runPackage([
+      "-StagingRoot", fixture.stagingRoot,
+      "-Output", fixture.outputPath,
+      "-Version", fixture.version,
+      "-Publisher", "CN=Unit Test IDE",
+    ], {
+      RELEASE_MAKEAPPX_PATH: fakeMakeAppx,
+      RELEASE_SIGNING_REQUIRED: "0",
+    }, "pwsh.exe");
+
+    assert.equal(result.status, 0, result.stderr);
+  });
+});
+
+for (const executable of ["powershell.exe", "pwsh.exe"]) {
+  windowsOnly(`package-msix rejects a different canonical generatedAt under ${executable}`, async (t) => {
+    await withTemporaryRoot(t, async (root) => {
+      const fixture = await createStagingFixture(root);
+      const manifest = JSON.parse(await readFile(fixture.manifestPath, "utf8"));
+      manifest.generatedAt = "2026-08-25T00:00:01.000Z";
+      await writeFile(fixture.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+      const fakeMakeAppx = await createFakeMakeAppx(root);
+      const result = runPackage([
+        "-StagingRoot", fixture.stagingRoot,
+        "-Output", fixture.outputPath,
+        "-Version", fixture.version,
+        "-Publisher", "CN=Unit Test IDE",
+      ], {
+        RELEASE_MAKEAPPX_PATH: fakeMakeAppx,
+        RELEASE_SIGNING_REQUIRED: "0",
+      }, executable);
+
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /release manifest generatedAt does not match SOURCE_DATE_EPOCH/u);
+    });
+  });
+}
 
 windowsOnly("package-msix XML-escapes the Publisher and normalizes semver-like prerelease versions for AppxManifest", async (t) => {
   await withTemporaryRoot(t, async (root) => {
