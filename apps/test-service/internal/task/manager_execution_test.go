@@ -1538,6 +1538,14 @@ func TestManagerConcurrentCancellationDeliversOneQueuedCommand(t *testing.T) {
 		default:
 		}
 	}
+	deadline = time.After(time.Second)
+	for f.store.getCount(taskID) == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("queued cancellation delivery did not call Store.Get")
+		default:
+		}
+	}
 	if got := f.store.getCount(taskID); got != 1 {
 		t.Fatalf("Store.Get calls from concurrent Cancel delivery = %d, want 1", got)
 	}
