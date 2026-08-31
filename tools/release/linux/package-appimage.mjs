@@ -11,6 +11,7 @@ import { normalizePathTimestamp, normalizeTreeTimestamps, resolveSourceDateEpoch
 const toolDirectory = dirname(fileURLToPath(import.meta.url));
 const defaultAppRunTemplatePath = join(toolDirectory, "AppRun");
 const defaultDesktopTemplatePath = join(toolDirectory, "unit-test-ide.desktop");
+const defaultIconPath = join(toolDirectory, "unit-test-ide.svg");
 const semverLike = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u;
 const digestPattern = /^[0-9a-f]{64}$/u;
 const supportedKeys = [
@@ -19,6 +20,7 @@ const supportedKeys = [
   "architecture",
   "desktopTemplatePath",
   "expectedDigest",
+  "iconPath",
   "output",
   "sourceDateEpoch",
   "stagingRoot",
@@ -242,6 +244,11 @@ export async function packageAppImage(input) {
     "desktop template",
     "RELEASE_TEMPLATE_MISSING",
   );
+  const icon = await validateRealFile(
+    input.iconPath ?? defaultIconPath,
+    "icon template",
+    "RELEASE_TEMPLATE_MISSING",
+  );
 
   const actualToolDigest = await sha256File(appimagetool.path);
   if (actualToolDigest !== expectedDigest) {
@@ -259,6 +266,7 @@ export async function packageAppImage(input) {
     await copyRegularFile(appRunTemplate.path, join(appDir, "AppRun"));
     await chmod(join(appDir, "AppRun"), 0o755);
     await materializeDesktopEntry(desktopTemplate.path, join(appDir, "unit-test-ide.desktop"), input.version);
+    await copyRegularFile(icon.path, join(appDir, "unit-test-ide.svg"));
     await normalizeTreeTimestamps(appDir, sourceEpoch);
 
     const result = runExternalTool(appimagetool.path, [appDir, outputPath], {
