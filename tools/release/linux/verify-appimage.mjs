@@ -10,11 +10,13 @@ import { validateReleaseManifestRecord } from "../release-manifest-validation.mj
 const toolDirectory = dirname(fileURLToPath(import.meta.url));
 const defaultAppRunPath = join(toolDirectory, "AppRun");
 const defaultDesktopTemplatePath = join(toolDirectory, "unit-test-ide.desktop");
+const defaultIconPath = join(toolDirectory, "unit-test-ide.svg");
 const semverLike = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u;
 const digestPattern = /^[0-9a-f]{64}$/u;
 const fixedPaths = {
   appRun: "AppRun",
   desktopEntry: "unit-test-ide.desktop",
+  icon: "unit-test-ide.svg",
   launcher: "usr/lib/unit-test-ide/app/code-oss-runtime/code-oss",
   releaseManifestPath: "usr/lib/unit-test-ide/release-manifest.json",
   payloadRoot: "usr/lib/unit-test-ide",
@@ -301,6 +303,7 @@ function expectedPayloadPaths(releaseManifest) {
   const paths = new Set([
     fixedPaths.appRun,
     fixedPaths.desktopEntry,
+    fixedPaths.icon,
     fixedPaths.releaseManifestPath,
   ]);
   for (const artifact of releaseManifest.artifacts) {
@@ -351,6 +354,7 @@ export async function verifyAppImage({ image, manifest, requireDigest = false, e
   try {
     const appRun = requireFile(extraction.files, fixedPaths.appRun, "AppRun");
     const desktopEntry = requireFile(extraction.files, fixedPaths.desktopEntry, "desktop entry");
+    const icon = requireFile(extraction.files, fixedPaths.icon, "icon");
     const launcher = requireFile(extraction.files, fixedPaths.launcher, "launcher");
     const embeddedManifest = requireFile(extraction.files, fixedPaths.releaseManifestPath, "embedded release manifest");
 
@@ -362,6 +366,10 @@ export async function verifyAppImage({ image, manifest, requireDigest = false, e
     assertDesktopEntryContract(desktopEntry.content);
     assertBufferEquals(desktopEntry.content, expectedDesktop, "desktop entry");
     assertExecutable(desktopEntry.executable, false, "desktop entry");
+
+    const expectedIcon = await readFile(defaultIconPath);
+    assertBufferEquals(icon.content, expectedIcon, "icon");
+    assertExecutable(icon.executable, false, "icon");
 
     const embeddedDigest = createHash("sha256").update(embeddedManifest.content).digest("hex");
     if (embeddedDigest !== sidecarManifest.releaseManifestSha256) {

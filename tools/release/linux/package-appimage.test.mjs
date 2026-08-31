@@ -15,6 +15,7 @@ function sha256(value) {
 }
 
 const verifyCli = resolve("tools/release/linux/verify-appimage.mjs");
+const iconSource = resolve("tools/release/linux/unit-test-ide.svg");
 
 async function withTemporaryRoot(t, run) {
   const baseRoot = join(resolve("."), ".tmp", "release-appimage");
@@ -310,6 +311,30 @@ test("packageAppImage fails closed when AppRun is missing", async (t) => {
   });
 });
 
+test("packageAppImage fails closed when the fixed icon template is missing", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await createStagingFixture(root);
+    const fakeTool = await createFakeAppImageTool(root);
+    await assert.rejects(
+      () => packageAppImage({
+        stagingRoot: fixture.stagingRoot,
+        output: fixture.outputPath,
+        appimagetool: fakeTool.path,
+        expectedDigest: fakeTool.sha256,
+        sourceDateEpoch,
+        version: fixture.version,
+        architecture: "x64",
+        iconPath: join(root, "missing-unit-test-ide.svg"),
+      }),
+      (error) => {
+        assert.equal(error?.code, "RELEASE_TEMPLATE_MISSING");
+        assert.match(error?.message ?? "", /icon template/u);
+        return true;
+      },
+    );
+  });
+});
+
 test("packageAppImage fails closed when SOURCE_DATE_EPOCH is absent", async (t) => {
   await withTemporaryRoot(t, async (root) => {
     const fixture = await createStagingFixture(root);
@@ -336,6 +361,15 @@ test("packageAppImage emits a closed digest manifest and a desktop entry that po
     assert.match(desktop, /^Exec=usr\/lib\/unit-test-ide\/app\/code-oss-runtime\/code-oss$/mu);
     assert.match(desktop, /^TryExec=usr\/lib\/unit-test-ide\/app\/code-oss-runtime\/code-oss$/mu);
 
+    const iconBytes = await readFile(iconSource);
+    const appDirIcon = await readFile(join(result.appDir, "unit-test-ide.svg"));
+    assert.deepEqual(appDirIcon, iconBytes);
+    const envelope = await parseFakeEnvelope(result.outputPath);
+    const embeddedIcon = envelope.files["unit-test-ide.svg"];
+    assert.ok(embeddedIcon);
+    assert.deepEqual(Buffer.from(embeddedIcon.contentBase64, "base64"), iconBytes);
+    assert.equal(embeddedIcon.executable, false);
+
     const digestManifest = JSON.parse(await readFile(result.manifestPath, "utf8"));
     assert.equal(digestManifest.packageFile, basename(result.outputPath));
     assert.equal(digestManifest.launcher, "usr/lib/unit-test-ide/app/code-oss-runtime/code-oss");
@@ -352,6 +386,37 @@ test("packageAppImage emits a closed digest manifest and a desktop entry that po
     assert.equal(verification.packageSha256, digestManifest.packageSha256);
     assert.equal(verification.launcher, "usr/lib/unit-test-ide/app/code-oss-runtime/code-oss");
     assert.equal(verification.releaseManifestSha256, digestManifest.releaseManifestSha256);
+  });
+});
+
+test("verifyAppImage rejects missing, tampered, executable, and aliased icons", async (t) => {
+  const cases = [
+    ["missing", (files) => { delete files["unit-test-ide.svg"]; }, /icon is missing/u],
+    ["tampered", (files) => {
+      files["unit-test-ide.svg"].contentBase64 = Buffer.from("<svg/>\n").toString("base64");
+    }, /icon content does not match/u],
+    ["executable", (files) => { files["unit-test-ide.svg"].executable = true; }, /icon executable bit/u],
+    ["alias", (files) => {
+      files["unit-test-ide.png"] = { ...files["unit-test-ide.svg"] };
+    }, /unexpected payload path: unit-test-ide\.png/u],
+  ];
+
+  await withTemporaryRoot(t, async (root) => {
+    for (const [name, mutate, expected] of cases) {
+      const result = await packageWithFakeTool(join(root, name));
+      await updateFakeEnvelope(result.outputPath, async (envelope) => mutate(envelope.files));
+      await refreshSidecarManifest(result.manifestPath, result.outputPath);
+      await assert.rejects(
+        () => verifyAppImage({
+          image: result.outputPath,
+          manifest: result.manifestPath,
+          requireDigest: true,
+          extractor: result.extractor,
+        }),
+        expected,
+        name,
+      );
+    }
   });
 });
 
