@@ -161,6 +161,25 @@ async function createArtifact(root, version, {
   return artifactRoot;
 }
 
+async function addManifestArtifacts(artifactRoot, records) {
+  const manifestPath = join(artifactRoot, "release-manifest.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  for (const [id, relativePath, contents] of records) {
+    const bytes = Buffer.from(contents);
+    await writeFixtureFile(artifactRoot, relativePath, bytes);
+    manifest.artifacts.push({
+      id,
+      kind: "runtime",
+      relativePath,
+      size: bytes.length,
+      sha256: sha256(bytes),
+      executable: false,
+    });
+  }
+  manifest.artifacts.sort((left, right) => left.id.localeCompare(right.id, "en"));
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+}
+
 async function observeInstalledProductAfterLauncherCorruption(packageRoot, version, smokeFinished) {
   const launcher = join(packageRoot, "versions", version, ...launcherRelativePath.split("/"));
   const product = join(packageRoot, "versions", version, ...productRelativePath.split("/"));
@@ -198,6 +217,20 @@ test("installVersion publishes a verified first install before switching current
       await readFile(join(packageRoot, "versions", "1.0.0", ...launcherRelativePath.split("/")), "utf8"),
       "launch 1.0.0\n",
     );
+  });
+});
+
+test("installVersion compares the closed artifact file set independently of recursive traversal order", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const packageRoot = join(root, "package-owned");
+    const artifact = await createArtifact(root, "1.0.0");
+    await addManifestArtifacts(artifact, [
+      ["app-runtime-resources-pak", "app/code-oss-runtime/resources.pak", "sibling resource\n"],
+      ["app-runtime-resources-tree", "app/code-oss-runtime/resources/inside.txt", "nested resource\n"],
+    ]);
+    assert.deepEqual(await installVersion(packageRoot, artifact), { previousVersion: null, version: "1.0.0" });
+    assert.equal(await readFile(join(packageRoot, "versions", "1.0.0", "app/code-oss-runtime/resources.pak"), "utf8"), "sibling resource\n");
+    assert.equal(await readFile(join(packageRoot, "versions", "1.0.0", "app/code-oss-runtime/resources/inside.txt"), "utf8"), "nested resource\n");
   });
 });
 
