@@ -249,7 +249,8 @@ async function readVerifiedManifest(artifactRoot) {
       }
     }
   }
-  const actualFiles = await collectFiles(root.path);
+  const actualFiles = (await collectFiles(root.path))
+    .sort((left, right) => left.localeCompare(right, "en"));
   const expected = [...expectedFiles].sort((left, right) => left.localeCompare(right, "en"));
   if (actualFiles.length !== expected.length || actualFiles.some((value, index) => value !== expected[index])) {
     throw verificationFailure("release artifact file set is not closed");
