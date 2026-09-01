@@ -236,9 +236,7 @@ test("installVersion compares the closed artifact file set independently of recu
 
 test("package-backed production smoke corrupts the target then really launches the restored baseline", async (t) => {
   await withTemporaryRoot(t, async (root) => {
-    const launcherSource = process.platform === "win32"
-      ? join(process.env.SystemRoot, "System32", "mountvol.exe")
-      : "/usr/bin/true";
+    const launcherSource = process.execPath;
     const baselineArtifact = await createArtifact(root, "1.0.0", {
       launcherSource,
       manifestGeneratedAt: baselineGeneratedAt,
@@ -246,6 +244,12 @@ test("package-backed production smoke corrupts the target then really launches t
     });
     const artifact = await createArtifact(root, "2.0.0", { launcherSource });
     const sourceLauncher = join(artifact, ...launcherRelativePath.split("/"));
+    const sourceLauncherProbe = spawnSync(sourceLauncher, ["--version"], {
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    assert.equal(sourceLauncherProbe.status, 0, sourceLauncherProbe.stderr);
+    assert.equal(sourceLauncherProbe.stdout.trim(), process.version);
     const sourceProduct = join(artifact, ...productRelativePath.split("/"));
     const sourceBytes = await readFile(sourceLauncher);
     const sourceProductBytes = await readFile(sourceProduct);
@@ -287,6 +291,63 @@ test("package-backed production smoke corrupts the target then really launches t
     assert.deepEqual(await readFile(sourceLauncher), sourceBytes);
     assert.deepEqual(await installedProductAfterCorruption, sourceProductBytes);
     assert.deepEqual(await readFile(sourceProduct), sourceProductBytes);
+  });
+});
+
+test("package-backed smoke reports whitespace-only first-launch stdout usefully", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const baselineArtifact = await createArtifact(root, "1.0.0", {
+      manifestGeneratedAt: baselineGeneratedAt,
+      manifestSourceCommit: baselineSourceCommit,
+    });
+    const artifact = await createArtifact(root, "2.0.0");
+    const packagePath = await writeFixtureFile(
+      root,
+      "downloads/unit-test-ide-2.0.0.package",
+      "real package bytes\n",
+    );
+    const baselinePackagePath = await writeFixtureFile(
+      root,
+      "downloads/unit-test-ide-1.0.0.package",
+      "real baseline package bytes\n",
+    );
+    const baselineManifestSha256 = sha256(await readFile(join(baselineArtifact, "release-manifest.json")));
+    const baselinePackageSha256 = sha256(await readFile(baselinePackagePath));
+    const manifestSha256 = sha256(await readFile(join(artifact, "release-manifest.json")));
+    const packageSha256 = sha256(await readFile(packagePath));
+
+    await assert.rejects(
+      () => runSmokeLifecycle({
+        artifact,
+        baselineArtifact,
+        baselineManifestSha256,
+        baselinePackagePath,
+        baselinePackageSha256,
+        evidence: join(root, "install-smoke.json"),
+        manifestSha256,
+        packagePath,
+        packageSha256,
+        platform,
+        root: join(root, "disposable-smoke-root"),
+        version: "2.0.0",
+      }, {
+        launch: () => ({
+          status: 0,
+          signal: null,
+          error: undefined,
+          stdout: "\f".repeat(13),
+          stderr: "",
+        }),
+      }),
+      (error) => {
+        assert.equal(error?.code, "RELEASE_SMOKE_FAILED");
+        assert.equal(
+          error?.message,
+          "RELEASE_SMOKE_FAILED: first launch handshake failed: exit 0; stdout empty",
+        );
+        return true;
+      },
+    );
   });
 });
 

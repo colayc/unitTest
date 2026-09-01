@@ -263,3 +263,37 @@ is permitted by this expansion.
   and merge flow.
 - A fresh producer and fresh unsigned foundation run succeed on the merged commit.
 - Signing stays disabled and no GitHub Release is published.
+
+## Reviewed Scope Expansion: Stable Real Smoke Launcher Fixture
+
+Task 8 independently reproduced the intermittent Windows first-launch blocker in
+the package-backed production smoke test. The copied and renamed `mountvol.exe`
+fixture loses the MUI-backed stable output contract it has at its system path. The
+exact reproduced failures returned status `0`, no signal, no spawn error, empty
+stderr, and 13 form-feed stdout characters that trim to empty. Under the same
+32-worker load, system-path `mountvol.exe` and a copied Node 24 executable were each
+stable for 3,200/3,200 launches.
+
+The reviewed replacement fixture is `process.execPath` on both Windows and Linux.
+It remains a real native executable launch, is relocatable in this environment, and
+provides deterministic `--version` output equal to `process.version`. The test probes
+that copied launcher contract directly before exercising the install, corruption,
+rollback, and uninstall lifecycle.
+
+The production handshake remains fail-closed with its original success predicate:
+status must be `0` and stdout must contain non-whitespace text. No retries and no
+weaker success condition are introduced. Diagnostic selection is hardened only so
+that a nonempty spawn error message wins first, a nonempty stderr value wins second,
+and otherwise the failure reports exit or signal classification together with
+whether stdout is empty or unavailable. Diagnostics do not include stdout contents,
+environment values, usernames, tokens, or new absolute paths.
+
+This reviewed expansion permits changes only to:
+
+- `docs/superpowers/specs/2026-09-01-formal-packaging-followup-design.md`
+- `docs/superpowers/plans/2026-09-01-formal-packaging-followup.md`
+- `tools/release/update.mjs`
+- `tools/release/update.test.mjs`
+
+Task 7 must be rerun from scratch after the resulting commit. Its old passing
+evidence predates the changed source and does not qualify this scope expansion.

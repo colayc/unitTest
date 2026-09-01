@@ -858,3 +858,92 @@ Expected: only the reviewed design/plan scope record plus `update.mjs` and
 `update.test.mjs`; no workflow, schema, signing, publication, or package-format file
 changes. Stop before any push, PR, merge, master synchronization, workflow dispatch,
 or GitHub Release action without the corresponding explicit authorization.
+
+---
+
+### Task 8: Diagnose the intermittent first-launch handshake failure
+
+**Files:**
+- Preserve ignored evidence under `.superpowers/sdd/2026-09-01-formal-packaging-followup/`.
+- No tracked source changes.
+
+**Interfaces:**
+- Consumes: the package-backed production smoke test and its real `spawnSync`
+  handshake contract.
+- Produces: an evidence-backed root-cause ruling without changing the installed
+  product lifecycle or its fail-closed success predicate.
+
+- [ ] **Step 1: Reproduce and retain complete first-launch result fields**
+
+Capture status, signal, spawn error, stdout, and stderr for the exact copied launcher
+fixture without exposing environment values or unrelated host paths.
+
+- [ ] **Step 2: Separate observer effects, generic process load, and relocation**
+
+Compare observer-on/off lifecycle runs and 32-worker launcher controls for copied and
+renamed `mountvol.exe`, system-path `mountvol.exe`, and copied Node 24.
+
+- [ ] **Step 3: Record the root-cause ruling without implementing a fix**
+
+Document that copied/renamed `mountvol.exe` loses its MUI-backed output contract and
+can return status `0`, no signal/error, empty stderr, and 13 form-feed stdout bytes.
+Record the 3,200/3,200 system-path mountvol and copied Node controls, preserve all raw
+evidence under the ignored SDD directory, and restore a clean tracked worktree.
+
+---
+
+### Task 9: Stabilize the real smoke launcher fixture and diagnostics
+
+**Files:**
+- Modify: `docs/superpowers/specs/2026-09-01-formal-packaging-followup-design.md`
+- Modify: `docs/superpowers/plans/2026-09-01-formal-packaging-followup.md`
+- Modify: `tools/release/update.mjs`
+- Modify: `tools/release/update.test.mjs`
+
+**Interfaces:**
+- Consumes: `runSmokeLifecycle(inputs, {launch})` and the copied package launcher
+  used by the real production smoke regression.
+- Produces: a cross-platform `process.execPath` fixture with deterministic
+  `--version` output, plus useful fail-closed diagnostics for missing launch detail.
+
+- [ ] **Step 1: Prove the old copied-launcher contract RED**
+
+In the named package-backed production smoke, directly run the copied
+`sourceLauncher --version` and require status `0` plus exact
+`stdout.trim() === process.version`. Run only that test before changing the fixture
+source and preserve its copied-mountvol or `/usr/bin/true` failure.
+
+- [ ] **Step 2: Select the portable real launcher fixture and prove GREEN**
+
+Use `process.execPath` on both Windows and Linux, retain the direct copied-launcher
+probe, and rerun the named test. Do not add retries or weaken the status/nonblank
+stdout success condition.
+
+- [ ] **Step 3: Prove the blank diagnostic RED at the lifecycle boundary**
+
+With otherwise valid package, baseline, manifest, and digest inputs, inject the first
+launch result `{status: 0, signal: null, error: undefined, stdout: "\f".repeat(13),
+stderr: ""}`. Require code `RELEASE_SMOKE_FAILED` and exact detail
+`first launch handshake failed: exit 0; stdout empty` before changing production.
+
+- [ ] **Step 4: Harden diagnostic classification minimally and prove GREEN**
+
+Prefer a nonempty spawn error message, then nonempty stderr; otherwise report
+exit/signal classification and whether stdout is empty or unavailable. Do not emit
+stdout contents, environment values, usernames, tokens, or new absolute paths, and
+keep the original handshake predicate unchanged.
+
+- [ ] **Step 5: Verify the complete reviewed boundary**
+
+Run both changed cases together, the real named smoke 50 times sequentially, all of
+`tools/release/update.test.mjs`, and the seven-file focused release suite with the
+absolute bundled Node 24 executable. Require zero failures and only pre-existing
+explicit platform skips. Run `git diff --check`, exact four-file scope/name-status,
+and status audit. Do not run `pnpm verify` in this task.
+
+- [ ] **Step 6: Commit and invalidate old Task 7 evidence**
+
+Create one focused commit named `fix: stabilize release smoke launch fixture` if the
+shared Git index is writable. Preserve the Task 9 RED/GREEN and verification report
+under the ignored SDD directory. Task 7 must then be rerun from scratch; its old
+passing evidence cannot qualify the changed source.
