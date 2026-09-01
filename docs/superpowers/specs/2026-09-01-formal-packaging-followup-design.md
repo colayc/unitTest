@@ -213,6 +213,41 @@ No `package-appimage.mjs`, workflow, manifest schema, signing, or release public
 change is expected. Any discovered need outside this scope pauses implementation for
 design review.
 
+## Reviewed Scope Expansion: Install Artifact Closed-Set Ordering
+
+Fresh unsigned foundation run `33476360967` proved that both formal packages now
+build successfully, then exposed the same downstream install-smoke failure on Windows
+and Linux:
+
+```text
+RELEASE_VERIFICATION_FAILED: release artifact file set is not closed
+```
+
+The four release manifests extracted from artifacts `9788732178` and `9788796559`
+prove exact membership: Windows has 9,739 declared files with no missing or unlisted
+paths, while Linux has 10,324 declared files with no missing or unlisted paths. The
+first mismatch on both platforms is the same prefix collision: recursive traversal
+enters `app/code-oss-runtime/resources/...` before visiting the sibling file
+`app/code-oss-runtime/resources.pak`, while global full-path collation orders
+`resources.pak` first. A four-file fixture reproduces the exact CI failure code and
+message.
+
+The reviewed expansion permits production changes only in
+`tools/release/update.mjs` and regression changes only in
+`tools/release/update.test.mjs`. The actual file list is globally sorted with the
+same English collation already used for the expected manifest paths before their
+existing exact length and positional comparison. This is not a subset or
+order-insensitive shortcut: every path must still be unique and present, and every
+file must still pass the existing real-file, reparse-point, root-containment, size,
+and SHA-256 checks.
+
+The regression uses the real `installVersion` boundary with a valid manifest that
+contains both `app/code-oss-runtime/resources/inside.txt` and the sibling
+`app/code-oss-runtime/resources.pak`. It must fail before the production change with
+the observed closed-set error, then install both files successfully after the fix.
+No workflow, schema, signing, publication, producer-trust, or package-format change
+is permitted by this expansion.
+
 ## Acceptance Criteria
 
 - The prefix-collision license fixture passes only when actual and expected paths are

@@ -23,6 +23,9 @@
 - Do not publish a GitHub Release and keep `release_signing_required=0` throughout unsigned qualification.
 - Preserve the existing `.release/` evidence in `C:\codex_project\unitTest\.worktrees\trusted-release-input-producer`; never delete or overwrite it.
 - Producer run `33453419983` and foundation run `33457835747` remain diagnostic evidence only and cannot qualify the changed source commit.
+- Scope expansion approved after foundation run `33476360967`: production edits may additionally touch only `tools/release/update.mjs`, and regression edits may additionally touch only `tools/release/update.test.mjs`.
+- Preserve the exact install artifact closed-set contract, including real-file, reparse-point, root-containment, size, and SHA-256 validation; only traversal-order dependence may change.
+- Foundation run `33476360967` and producer run `33467817756` remain diagnostic evidence after the source commit changes and cannot qualify the follow-up fix.
 
 ## File Structure
 
@@ -721,3 +724,137 @@ Expected: the run concludes `success`, artifacts are unexpired and contain the W
 - [ ] **Step 8: Report the exact acceptance boundary**
 
 Report the merged commit, both remote master hashes, producer run ID/URL, foundation run ID/URL, three producer digests, package/evidence artifact names, and job conclusions. State explicitly that the evidence proves free unsigned cross-platform packaging and install qualification only; Windows signing and final third-party legal/license approval remain outside this acceptance.
+
+---
+
+### Task 6: Compare the closed install artifact set independently of traversal order
+
+**Files:**
+- Modify: `tools/release/update.test.mjs`
+- Modify: `tools/release/update.mjs:184-256`
+
+**Interfaces:**
+- Consumes: `installVersion(root: string, artifact: string): Promise<{previousVersion: string | null, version: string}>`.
+- Produces: the same public result and failure codes, with the complete actual artifact path list globally sorted by the same English collation as the expected manifest paths before exact comparison.
+
+- [ ] **Step 1: Add a real manifest-bound prefix-collision fixture**
+
+Add a test helper after `createArtifact` that writes each requested regular file,
+adds its exact size/SHA-256 artifact record, and sorts `manifest.artifacts` by `id`
+with `localeCompare(other, "en")` before rewriting `release-manifest.json`.
+
+Use the helper to add these two records to the normal `createArtifact` fixture:
+
+```js
+[
+  ["app-runtime-resources-pak", "app/code-oss-runtime/resources.pak", "sibling resource\n"],
+  ["app-runtime-resources-tree", "app/code-oss-runtime/resources/inside.txt", "nested resource\n"],
+]
+```
+
+- [ ] **Step 2: Write the behavior regression before production code**
+
+Add a test named exactly:
+
+```text
+installVersion compares the closed artifact file set independently of recursive traversal order
+```
+
+The test calls the real `installVersion`, requires the normal first-install result,
+and reads both installed collision files to verify their literal bytes. The
+production mutation it guards against is removal of global normalization from the
+actual complete file list.
+
+- [ ] **Step 3: Run the focused test and preserve RED**
+
+Run with the repository-compatible absolute Node 24 executable:
+
+```powershell
+& $node --test --test-name-pattern="installVersion compares the closed artifact file set independently" tools/release/update.test.mjs
+```
+
+Expected before the production change: one failing test with
+`RELEASE_VERIFICATION_FAILED: release artifact file set is not closed`. It must fail
+at the real install boundary, not because of malformed fixture data.
+
+- [ ] **Step 4: Apply the minimal global-order normalization**
+
+In `readVerifiedManifest`, replace the actual collection assignment with:
+
+```js
+const actualFiles = (await collectFiles(root.path))
+  .sort((left, right) => left.localeCompare(right, "en"));
+```
+
+Do not change collection safety checks, manifest validation, duplicate rejection,
+exact length/positional comparison, file type, reparse-point, containment, size, hash,
+copy, ownership, install, rollback, uninstall, or lifecycle behavior.
+
+- [ ] **Step 5: Run GREEN and the complete update test file**
+
+Run:
+
+```powershell
+& $node --test --test-name-pattern="installVersion compares the closed artifact file set independently" tools/release/update.test.mjs
+& $node --test tools/release/update.test.mjs
+```
+
+Expected: focused test passes; the complete file has zero failures and only its
+pre-existing platform skip where applicable; output is pristine.
+
+- [ ] **Step 6: Review and commit the focused fix**
+
+Run:
+
+```powershell
+git diff --check -- tools/release/update.mjs tools/release/update.test.mjs
+git diff -- tools/release/update.mjs tools/release/update.test.mjs
+git add tools/release/update.mjs tools/release/update.test.mjs
+git commit -m "fix: compare closed install artifact set by global path order"
+```
+
+Expected: one focused TDD commit containing only the verifier and regression test.
+
+---
+
+### Task 7: Verify the expanded local release contract
+
+**Files:**
+- No intended source changes.
+- Verify: `tools/release/update.test.mjs`
+- Verify: the focused release suite from Task 3.
+- Verify: the complete repository gate.
+
+**Interfaces:**
+- Consumes: the reviewed Task 6 commit on `codex/fix-update-file-set-order`.
+- Produces: a clean, locally qualified branch ready for a separately authorized dual-remote push and unmerged GitHub PR.
+
+- [ ] **Step 1: Run the focused release suite with the absolute bundled Node 24 executable**
+
+```powershell
+& $node --test tools/release/license-audit.test.mjs tools/release/linux/package-appimage.test.mjs tools/release/windows/package-msix.test.mjs tools/release/stage.test.mjs tools/release/qualification.test.mjs tools/release/update.test.mjs tools/release/producer/workflow-contract.test.mjs
+```
+
+Expected: zero failures; only explicit platform skips are permitted.
+
+- [ ] **Step 2: Run the complete repository verification gate with pnpm 11.4.0 and pinned CMake 4.3.4**
+
+Use the existing ledger ruling for the absolute bundled Node, exact cached pnpm
+11.4.0 package under offline configuration, and verified repository-pinned CMake
+4.3.4 bundle. Run `pnpm verify` through that exact toolchain.
+
+Expected: generated checks, builds, unit tests, Go race tests, and E2E all pass.
+
+- [ ] **Step 3: Audit scope and cleanliness**
+
+```powershell
+git diff --check github/master...HEAD
+git diff --name-status github/master...HEAD
+git status --short --branch
+git log --oneline --decorate github/master..HEAD
+```
+
+Expected: only the reviewed design/plan scope record plus `update.mjs` and
+`update.test.mjs`; no workflow, schema, signing, publication, or package-format file
+changes. Stop before any push, PR, merge, master synchronization, workflow dispatch,
+or GitHub Release action without the corresponding explicit authorization.
