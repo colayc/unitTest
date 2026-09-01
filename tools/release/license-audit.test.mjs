@@ -105,6 +105,20 @@ async function createStagingFixture(root) {
   return { dependencies, licenses, stagingRoot };
 }
 
+async function addManifestLicenseFiles(stagingRoot, entries) {
+  const manifestPath = join(stagingRoot, "release-manifest.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  for (const [path, content] of entries) {
+    await writeFixtureFile(stagingRoot, path, content);
+    manifest.licenses.push({
+      path,
+      size: Buffer.byteLength(content),
+      sha256: sha256(content),
+    });
+  }
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+}
+
 async function withTemporaryRoot(t, run) {
   const root = await mkdtemp(join(tmpdir(), "release-license-audit-"));
   t.after(async () => rm(root, { recursive: true, force: true }));
@@ -125,6 +139,27 @@ test("auditLicenses verifies digest-bearing notices and returns a sorted closed 
     assert.ok(result.some(({ path }) => path === "licenses/code-oss/resources/app/extensions/git/dist/main.js.LICENSE.txt"));
     assert.ok(result.some(({ path }) => path === "licenses/code-oss/resources/app/extensions/latex/cpp-bailout-license.txt"));
     assert.ok(result.some(({ path }) => path === "licenses/code-oss/resources/app/extensions/ms-vscode.js-debug/ThirdPartyNotices.txt"));
+  });
+});
+
+test("auditLicenses compares the closed file set independently of recursive traversal order", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const { stagingRoot } = await createStagingFixture(root);
+    const collisionEntries = [
+      ["licenses/code-oss/a/z.txt", "nested notice\n"],
+      ["licenses/code-oss/a-b.txt", "sibling notice\n"],
+    ];
+    await addManifestLicenseFiles(stagingRoot, collisionEntries);
+
+    const result = await auditLicenses(stagingRoot);
+
+    const collisionPaths = result
+      .map(({ path }) => path)
+      .filter((path) => path === collisionEntries[0][0] || path === collisionEntries[1][0]);
+    assert.deepEqual(
+      collisionPaths,
+      collisionEntries.map(([path]) => path).sort((left, right) => left.localeCompare(right, "en")),
+    );
   });
 });
 

@@ -260,7 +260,8 @@ export async function auditLicenses(stagingRoot) {
   auditCmakeLicense(releaseManifest, cmakeManifest);
   auditCoverageDependencies(releaseManifest, coverageManifest, coverageResolved, coverageNoticeCatalog, dependencies);
 
-  const actualFiles = await collectLicenseFiles(root);
+  const actualFiles = (await collectLicenseFiles(root))
+    .sort((left, right) => left.localeCompare(right, "en"));
   const expectedFiles = licenses.map(({ path }) => path);
   if (
     actualFiles.length !== expectedFiles.length
