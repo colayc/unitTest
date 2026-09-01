@@ -558,7 +558,15 @@ function launchHandshake(packageRoot, version, userDataRoot) {
 
 function requireLaunchHandshake(result, label) {
   if (result.status !== 0 || typeof result.stdout !== "string" || result.stdout.trim().length === 0) {
-    const detail = result.error?.message ?? result.stderr?.trim() ?? `exit ${result.status}`;
+    const errorMessage = typeof result.error?.message === "string" ? result.error.message.trim() : "";
+    const stderr = typeof result.stderr === "string" ? result.stderr.trim() : "";
+    const outcome = result.status === null
+      ? (result.signal ? `signal ${result.signal}` : "exit unavailable")
+      : `exit ${result.status}`;
+    const stdout = typeof result.stdout === "string"
+      ? (result.stdout.trim().length === 0 ? "stdout empty" : "stdout nonempty")
+      : "stdout unavailable";
+    const detail = errorMessage || stderr || `${outcome}; ${stdout}`;
     throw releaseError("RELEASE_SMOKE_FAILED", `${label} launch handshake failed: ${detail}`);
   }
 }
