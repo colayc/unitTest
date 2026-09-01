@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { lstat, mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, readdir, readlink, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,6 +16,7 @@ const digestPattern = /^[0-9a-f]{64}$/u;
 const fixedPaths = {
   appRun: "AppRun",
   desktopEntry: "unit-test-ide.desktop",
+  dirIcon: ".DirIcon",
   icon: "unit-test-ide.svg",
   launcher: "usr/lib/unit-test-ide/app/code-oss-runtime/code-oss",
   releaseManifestPath: "usr/lib/unit-test-ide/release-manifest.json",
@@ -100,12 +101,23 @@ async function collectDirectoryFiles(rootPath) {
         await walk(absolutePath, relativePath);
         continue;
       }
+      if (entry.isSymbolicLink()) {
+        if (relativePath !== fixedPaths.dirIcon) {
+          throw releaseFailure("RELEASE_VERIFICATION_FAILED", `unsupported AppImage symlink: ${relativePath}`);
+        }
+        files.set(relativePath, {
+          kind: "symlink",
+          target: await readlink(absolutePath),
+        });
+        continue;
+      }
       if (!entry.isFile()) {
         throw releaseFailure("RELEASE_VERIFICATION_FAILED", `unsupported AppImage entry: ${relativePath}`);
       }
       const info = await stat(absolutePath);
       const bytes = await readFile(absolutePath);
       files.set(relativePath, {
+        kind: "file",
         size: info.size,
         sha256: createHash("sha256").update(bytes).digest("hex"),
         executable: (info.mode & 0o111) !== 0,
@@ -171,15 +183,28 @@ async function readImageFiles(imagePath, extractor) {
     if (!extracted || !(extracted.files instanceof Map) || typeof extracted.cleanup !== "function") {
       throw releaseFailure("RELEASE_VERIFICATION_FAILED", "test extractor returned an invalid extraction result");
     }
-    for (const [relativePath, file] of extracted.files.entries()) {
+    for (const [relativePath, entry] of extracted.files.entries()) {
       if (!isPortableRelativePath(relativePath)) {
         throw releaseFailure("RELEASE_VERIFICATION_FAILED", `unsafe extracted AppImage path: ${relativePath}`);
       }
-      if (!file || !Buffer.isBuffer(file.content) || typeof file.executable !== "boolean") {
+      if (entry?.kind === "symlink") {
+        if (relativePath !== fixedPaths.dirIcon) {
+          throw releaseFailure("RELEASE_VERIFICATION_FAILED", `unsupported AppImage symlink: ${relativePath}`);
+        }
+        if (typeof entry.target !== "string") {
+          throw releaseFailure("RELEASE_VERIFICATION_FAILED", `invalid extracted AppImage symlink: ${relativePath}`);
+        }
+        continue;
+      }
+      if (
+        entry?.kind !== "file"
+        || !Buffer.isBuffer(entry.content)
+        || typeof entry.executable !== "boolean"
+      ) {
         throw releaseFailure("RELEASE_VERIFICATION_FAILED", `invalid extracted AppImage entry: ${relativePath}`);
       }
-      file.size = file.content.length;
-      file.sha256 = createHash("sha256").update(file.content).digest("hex");
+      entry.size = entry.content.length;
+      entry.sha256 = createHash("sha256").update(entry.content).digest("hex");
     }
     return extracted;
   }
@@ -233,11 +258,28 @@ function validateSidecarManifest(manifest) {
 }
 
 function requireFile(files, relativePath, label) {
-  const file = files.get(relativePath);
-  if (!file) {
+  const entry = files.get(relativePath);
+  if (!entry) {
     throw releaseFailure("RELEASE_VERIFICATION_FAILED", `${label} is missing from the AppImage: ${relativePath}`);
   }
-  return file;
+  if (entry.kind !== "file") {
+    throw releaseFailure("RELEASE_VERIFICATION_FAILED", `${label} must be a regular file: ${relativePath}`);
+  }
+  return entry;
+}
+
+function requireSymlink(files, relativePath, target, label) {
+  const entry = files.get(relativePath);
+  if (!entry) {
+    throw releaseFailure("RELEASE_VERIFICATION_FAILED", `${label} is missing from the AppImage: ${relativePath}`);
+  }
+  if (entry.kind !== "symlink") {
+    throw releaseFailure("RELEASE_VERIFICATION_FAILED", `${label} must be a symbolic link: ${relativePath}`);
+  }
+  if (entry.target !== target) {
+    throw releaseFailure("RELEASE_VERIFICATION_FAILED", `${label} target must be exactly ${target}`);
+  }
+  return entry;
 }
 
 async function renderExpectedDesktop(version) {
@@ -303,6 +345,7 @@ function expectedPayloadPaths(releaseManifest) {
   const paths = new Set([
     fixedPaths.appRun,
     fixedPaths.desktopEntry,
+    fixedPaths.dirIcon,
     fixedPaths.icon,
     fixedPaths.releaseManifestPath,
   ]);
@@ -354,6 +397,7 @@ export async function verifyAppImage({ image, manifest, requireDigest = false, e
   try {
     const appRun = requireFile(extraction.files, fixedPaths.appRun, "AppRun");
     const desktopEntry = requireFile(extraction.files, fixedPaths.desktopEntry, "desktop entry");
+    requireSymlink(extraction.files, fixedPaths.dirIcon, fixedPaths.icon, ".DirIcon");
     const icon = requireFile(extraction.files, fixedPaths.icon, "icon");
     const launcher = requireFile(extraction.files, fixedPaths.launcher, "launcher");
     const embeddedManifest = requireFile(extraction.files, fixedPaths.releaseManifestPath, "embedded release manifest");

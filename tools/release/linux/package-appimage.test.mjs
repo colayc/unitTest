@@ -159,6 +159,7 @@ async function collect(rootPath, current = "") {
     const bytes = await readFile(entryPath);
     const info = await stat(entryPath);
     files[relativePath] = {
+      kind: "file",
       sha256: sha256(bytes),
       size: info.size,
       executable: (info.mode & 0o111) !== 0
@@ -175,9 +176,14 @@ const [appDir, output] = process.argv.slice(2);
 if (!appDir || !output) {
   throw new Error("fake appimagetool expects <AppDir> <output>");
 }
+const files = await collect(appDir);
+files[".DirIcon"] = {
+  kind: "symlink",
+  target: "unit-test-ide.svg",
+};
 const payload = {
   marker: "UNIT_TEST_IDE_FAKE_APPIMAGE",
-  files: await collect(appDir),
+  files,
 };
 await mkdir(dirname(output), { recursive: true });
 await writeFile(output, JSON.stringify(payload, null, 2));
@@ -198,8 +204,17 @@ function createFakeEnvelopeExtractor() {
     assert.equal(envelope.marker, "UNIT_TEST_IDE_FAKE_APPIMAGE");
     const files = new Map();
     for (const [relativePath, entry] of Object.entries(envelope.files)) {
+      if (entry.kind === "symlink") {
+        files.set(relativePath, {
+          kind: "symlink",
+          target: entry.target,
+        });
+        continue;
+      }
+      assert.equal(entry.kind, "file", `unexpected fake entry kind for ${relativePath}`);
       const content = Buffer.from(entry.contentBase64, "base64");
       files.set(relativePath, {
+        kind: "file",
         size: content.length,
         sha256: sha256(content),
         executable: Boolean(entry.executable),
@@ -365,6 +380,10 @@ test("packageAppImage emits a closed digest manifest and a desktop entry that po
     const appDirIcon = await readFile(join(result.appDir, "unit-test-ide.svg"));
     assert.deepEqual(appDirIcon, iconBytes);
     const envelope = await parseFakeEnvelope(result.outputPath);
+    assert.deepEqual(envelope.files[".DirIcon"], {
+      kind: "symlink",
+      target: "unit-test-ide.svg",
+    });
     const embeddedIcon = envelope.files["unit-test-ide.svg"];
     assert.ok(embeddedIcon);
     assert.deepEqual(Buffer.from(embeddedIcon.contentBase64, "base64"), iconBytes);
@@ -406,6 +425,50 @@ test("verifyAppImage rejects missing, tampered, executable, and aliased icons", 
       const result = await packageWithFakeTool(join(root, name));
       await updateFakeEnvelope(result.outputPath, async (envelope) => mutate(envelope.files));
       await refreshSidecarManifest(result.manifestPath, result.outputPath);
+      await assert.rejects(
+        () => verifyAppImage({
+          image: result.outputPath,
+          manifest: result.manifestPath,
+          requireDigest: true,
+          extractor: result.extractor,
+        }),
+        expected,
+        name,
+      );
+    }
+  });
+});
+
+test("verifyAppImage accepts only the fixed root .DirIcon symlink", async (t) => {
+  const cases = [
+    ["missing", (files) => { delete files[".DirIcon"]; }, /\.DirIcon .*missing/u],
+    ["regular file", (files) => {
+      files[".DirIcon"] = {
+        kind: "file",
+        executable: false,
+        contentBase64: Buffer.from("unit-test-ide.svg\n").toString("base64"),
+      };
+    }, /\.DirIcon .*symbolic link/u],
+    ["wrong relative target", (files) => { files[".DirIcon"].target = "other.svg"; }, /\.DirIcon .*target/u],
+    ["dot target", (files) => { files[".DirIcon"].target = "./unit-test-ide.svg"; }, /\.DirIcon .*target/u],
+    ["parent target", (files) => { files[".DirIcon"].target = "../unit-test-ide.svg"; }, /\.DirIcon .*target/u],
+    ["absolute target", (files) => { files[".DirIcon"].target = "/unit-test-ide.svg"; }, /\.DirIcon .*target/u],
+    ["backslash target", (files) => { files[".DirIcon"].target = "icons\\unit-test-ide.svg"; }, /\.DirIcon .*target/u],
+    ["drive target", (files) => { files[".DirIcon"].target = "C:/unit-test-ide.svg"; }, /\.DirIcon .*target/u],
+    ["extra symlink", (files) => {
+      files["unit-test-ide-link"] = {
+        kind: "symlink",
+        target: "unit-test-ide.svg",
+      };
+    }, /unsupported AppImage symlink: unit-test-ide-link/u],
+  ];
+
+  await withTemporaryRoot(t, async (root) => {
+    for (const [name, mutate, expected] of cases) {
+      const result = await packageWithFakeTool(join(root, name.replaceAll(" ", "-")));
+      await updateFakeEnvelope(result.outputPath, async (envelope) => mutate(envelope.files));
+      await refreshSidecarManifest(result.manifestPath, result.outputPath);
+
       await assert.rejects(
         () => verifyAppImage({
           image: result.outputPath,
@@ -601,6 +664,7 @@ test("verifyAppImage rejects unexpected payload files outside the closed AppDir 
     const result = await packageWithFakeTool(root);
     await updateFakeEnvelope(result.outputPath, async (envelope) => {
       envelope.files["usr/lib/unit-test-ide/extra.txt"] = {
+        kind: "file",
         executable: false,
         contentBase64: Buffer.from("unexpected\n").toString("base64"),
       };
