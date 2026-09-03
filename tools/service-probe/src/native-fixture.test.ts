@@ -192,6 +192,8 @@ test("normalizeNativeDiagnostic leaves invalid workspace URIs unchanged", () => 
     "workspace://host/src/main.cpp",
     "workspace:///../secret.cpp",
     "workspace:///C:/secret.cpp",
+    "workspace:///src/main.cpp?line=1",
+    "workspace:///src/main.cpp#fragment",
   ]) {
     assert.equal(
       normalizeNativeDiagnostic(
