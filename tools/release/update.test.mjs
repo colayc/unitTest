@@ -152,6 +152,7 @@ async function createArtifact(root, version, {
   includeCli = true,
   cliExitCode = 0,
   cliMarkerPath,
+  expectedUserDataRoot = join(root, "disposable-smoke-root", "workspace"),
 } = {}) {
   const artifactRoot = join(root, `artifact-${version}`);
   const notice = `license ${version}\n`;
@@ -164,7 +165,7 @@ async function createArtifact(root, version, {
   const productBytes = Buffer.from(`${JSON.stringify({ nameShort: "Code - OSS", version })}\n`);
   const cliBytes = includeCli
     ? Buffer.from(createCliFixtureSource({
-      expectedUserDataRoot: join(root, "disposable-smoke-root", "workspace"),
+      expectedUserDataRoot,
       version,
       markerPath: cliMarkerPath,
       exitCode: cliExitCode,
@@ -488,10 +489,14 @@ windowsOnly("install-smoke completes the full lifecycle for real makeappx packag
   await withTemporaryRoot(t, async (root) => {
     const baselineArtifact = await createArtifact(root, "1.0.0", {
       launcherSource: process.execPath,
+      expectedUserDataRoot: join(root, "disposable-smoke-root", "lifecycle", "workspace"),
       manifestGeneratedAt: generatedAt,
       manifestSourceCommit: baselineSourceCommit,
     });
-    const artifact = await createArtifact(root, "2.0.0", { launcherSource: process.execPath });
+    const artifact = await createArtifact(root, "2.0.0", {
+      launcherSource: process.execPath,
+      expectedUserDataRoot: join(root, "disposable-smoke-root", "lifecycle", "workspace"),
+    });
     const baselinePackagePath = join(root, "downloads", "unit-test-ide-1.0.0.msix");
     const packagePath = join(root, "downloads", "unit-test-ide-2.0.0.msix");
     const baselinePackageResult = packageWithRealMakeAppx(
