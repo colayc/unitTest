@@ -227,7 +227,7 @@ export function normalizeNativeDiagnostic(
   ];
   let sourceUri = diagnostic.sourceUri;
   if (sourceUri !== undefined) {
-    const source = parseDiagnosticPath(sourceUri);
+    const source = parseDiagnosticPath(sourceUri, requireNativeAbsolutePath(roots.workspace));
     if (source !== undefined) {
       sourceUri = mapNativePath(source, mappings) ?? sourceUri;
     }
@@ -252,7 +252,7 @@ function requireNativeAbsolutePath(value: string): NativePath {
   return parsed;
 }
 
-function parseDiagnosticPath(value: string): NativePath | undefined {
+function parseDiagnosticPath(value: string, workspaceRoot: NativePath): NativePath | undefined {
   if (value.startsWith("file:")) {
     try {
       const url = new URL(value);
@@ -269,6 +269,42 @@ function parseDiagnosticPath(value: string): NativePath | undefined {
         return parseNativeAbsolutePath(decoded.slice(1).replaceAll("/", "\\"));
       }
       return parseNativeAbsolutePath(decoded);
+    } catch {
+      return undefined;
+    }
+  }
+  if (value.startsWith("workspace:")) {
+    if (!value.startsWith("workspace:///")) {
+      return undefined;
+    }
+    const queryIndex = value.indexOf("?", "workspace:///".length);
+    const fragmentIndex = value.indexOf("#", "workspace:///".length);
+    if (queryIndex !== -1 || fragmentIndex !== -1) {
+      return undefined;
+    }
+    try {
+      const rawPath = value.slice("workspace:///".length);
+      if (rawPath.length === 0) {
+        return undefined;
+      }
+      const decoded = decodeURIComponent(rawPath);
+      const segments = decoded.split("/");
+      if (
+        segments.length === 0 ||
+        segments.some((segment) =>
+          segment.length === 0 ||
+          segment === "." ||
+          segment === ".." ||
+          /^[A-Za-z]:/u.test(segment) ||
+          segment.includes("\\") ||
+          segment.includes("\0"),
+        )
+      ) {
+        return undefined;
+      }
+      const api = workspaceRoot.flavor === "windows" ? win32 : posix;
+      const joined = api.join(workspaceRoot.value, ...segments);
+      return parseNativeAbsolutePath(joined);
     } catch {
       return undefined;
     }

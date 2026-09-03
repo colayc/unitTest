@@ -162,6 +162,47 @@ test("normalizeNativeDiagnostic handles POSIX paths and prioritizes the build ro
   );
 });
 
+test("normalizeNativeDiagnostic maps strict workspace URIs to the workspace root", () => {
+  const roots = {
+    workspace: String.raw`C:\workspace`,
+    build: String.raw`C:\workspace\build`,
+  };
+  assert.equal(
+    normalizeNativeDiagnostic(
+      { severity: errorSeverity, code: "", sourceUri: "workspace:///src/main.cpp", message: "" },
+      roots,
+    ).sourceUri,
+    "<workspace>/src/main.cpp",
+  );
+  assert.equal(
+    normalizeNativeDiagnostic(
+      { severity: errorSeverity, code: "", sourceUri: "workspace:///src/%E6%B5%8B.cpp", message: "" },
+      roots,
+    ).sourceUri,
+    "<workspace>/src/测.cpp",
+  );
+});
+
+test("normalizeNativeDiagnostic leaves invalid workspace URIs unchanged", () => {
+  const roots = {
+    workspace: String.raw`C:\workspace`,
+    build: String.raw`C:\workspace\build`,
+  };
+  for (const value of [
+    "workspace://host/src/main.cpp",
+    "workspace:///../secret.cpp",
+    "workspace:///C:/secret.cpp",
+  ]) {
+    assert.equal(
+      normalizeNativeDiagnostic(
+        { severity: errorSeverity, code: "", sourceUri: value, message: "" },
+        roots,
+      ).sourceUri,
+      value,
+    );
+  }
+});
+
 test("normalizeNativeDiagnostic maps explicitly trusted external roots without exposing host paths", () => {
   const diagnostic: Diagnostic = {
     severity: errorSeverity,
