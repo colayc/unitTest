@@ -4,12 +4,117 @@ package diagnostic
 
 import (
 	"net/url"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"unit-test-ide.local/test-service/internal/workspace"
 )
+
+func TestWindowsPublicURIUsesCanonicalPathForJunctionAlias(t *testing.T) {
+	base := t.TempDir()
+	rootPath := filepath.Join(base, "root")
+	sourceDir := filepath.Join(rootPath, "src")
+	alias := filepath.Join(base, "source-alias")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	createDiagnosticTestJunction(t, alias, sourceDir)
+	root, err := workspace.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := NewParser(FamilyGNU, Options{
+		Root: root, WorkingDirectory: root.NativePath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	aliasedSource := filepath.Join(alias, "main.cpp")
+	diagnostics := append(value.Feed("stderr", []byte(
+		aliasedSource+":3:1: error: broken\n",
+	)), value.Close()...)
+	if len(diagnostics) != 1 {
+		t.Fatalf("diagnostics = %#v, want one", diagnostics)
+	}
+	wantFileURI := (&url.URL{Scheme: "file", Path: "/" + filepath.ToSlash(aliasedSource)}).String()
+	if diagnostics[0].FileURI != wantFileURI {
+		t.Fatalf("ordinary FileURI = %q, want lexical alias %q", diagnostics[0].FileURI, wantFileURI)
+	}
+	provider, ok := value.(PublicURIProvider)
+	if !ok {
+		t.Fatal("parser does not expose PublicURIProvider")
+	}
+	if got := provider.PublicURI(diagnostics[0].FileURI); got != "workspace:///src/main.cpp" {
+		t.Fatalf("PublicURI(%q) = %q, want canonical workspace path", diagnostics[0].FileURI, got)
+	}
+}
+
+func TestWindowsPublicURIUsesCanonicalPathAcrossVolumeAlias(t *testing.T) {
+	base := t.TempDir()
+	rootPath := filepath.Join(base, "root")
+	sourceDir := filepath.Join(rootPath, "src")
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	alias, cleanup := crossVolumeDiagnosticJunction(t, sourceDir, filepath.VolumeName(base))
+	defer cleanup()
+	root, err := workspace.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := NewParser(FamilyGNU, Options{
+		Root: root, WorkingDirectory: root.NativePath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, ok := value.(PublicURIProvider)
+	if !ok {
+		t.Fatal("parser does not expose PublicURIProvider")
+	}
+	aliasedSource := filepath.Join(alias, "main.cpp")
+	input := (&url.URL{Scheme: "file", Path: "/" + filepath.ToSlash(aliasedSource)}).String()
+	if got := provider.PublicURI(input); got != "workspace:///src/main.cpp" {
+		t.Fatalf("cross-volume PublicURI(%q) = %q, want canonical workspace path", input, got)
+	}
+}
+
+func createDiagnosticTestJunction(t *testing.T, link, target string) {
+	t.Helper()
+	if output, err := exec.Command("cmd.exe", "/d", "/c", "mklink", "/J", link, target).CombinedOutput(); err != nil {
+		t.Fatalf("create directory junction: %v\ncommand output: %s", err, strings.TrimSpace(string(output)))
+	}
+}
+
+func crossVolumeDiagnosticJunction(t *testing.T, target, excludedVolume string) (string, func()) {
+	t.Helper()
+	for drive := 'A'; drive <= 'Z'; drive++ {
+		volumeRoot := string(drive) + `:\`
+		if strings.EqualFold(filepath.VolumeName(volumeRoot), excludedVolume) {
+			continue
+		}
+		base, err := os.MkdirTemp(volumeRoot, "unit-test-ide-diagnostic-")
+		if err != nil {
+			continue
+		}
+		alias := filepath.Join(base, "source-alias")
+		output, err := exec.Command("cmd.exe", "/d", "/c", "mklink", "/J", alias, target).CombinedOutput()
+		if err == nil {
+			return alias, func() {
+				_ = os.Remove(alias)
+				_ = os.RemoveAll(base)
+			}
+		}
+		_ = os.RemoveAll(base)
+		t.Logf("volume %s rejected cross-volume junction: %v (%s)", volumeRoot, err, strings.TrimSpace(string(output)))
+	}
+	t.Skip("no writable second volume supports a cross-volume junction")
+	return "", func() {}
+}
 
 func TestWindowsWorkspaceDiagnosticIDIgnoresDriveAndPathCasingAcrossRoots(t *testing.T) {
 	parse := func(root workspace.Root, upper bool) Diagnostic {

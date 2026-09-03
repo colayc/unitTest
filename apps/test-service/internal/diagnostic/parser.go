@@ -478,14 +478,11 @@ func (p *parser) PublicURI(value string) string {
 	if !ok {
 		return value
 	}
-	if !p.options.Root.Contains(native) {
+	relative, err := p.options.Root.RelativePath(native)
+	if err != nil {
 		if runtime.GOOS == "windows" {
 			return "workspace:///"
 		}
-		return value
-	}
-	relative, err := filepath.Rel(p.options.Root.NativePath, native)
-	if err != nil {
 		return value
 	}
 	if relative == "." {
