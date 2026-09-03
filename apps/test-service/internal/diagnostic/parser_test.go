@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"os"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -867,6 +868,60 @@ func TestParserMapsExternalAbsolutePathWithoutHidingIt(t *testing.T) {
 	if !got[0].External || got[0].FileURI != "file:///opt/sdk/include/header.h" ||
 		got[0].ToolchainID != "gcc-local" {
 		t.Fatalf("diagnostic = %#v", got[0])
+	}
+}
+
+func TestParserPublicURIMapsWorkspaceChildrenAndExternalURIs(t *testing.T) {
+	rootPath := t.TempDir()
+	root, err := workspace.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parser, err := NewParser(FamilyGNU, Options{
+		Root:             root,
+		WorkingDirectory: root.NativePath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, ok := parser.(PublicURIProvider)
+	if !ok {
+		t.Fatal("parser does not expose PublicURIProvider")
+	}
+
+	siblingWant := root.URI + "-sibling/src/main.cpp"
+	if runtime.GOOS == "windows" {
+		siblingWant = "workspace:///"
+	}
+	for _, tc := range []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{
+			name:  "workspace child",
+			value: root.URI + "/src/main.cpp",
+			want:  "workspace:///src/main.cpp",
+		},
+		{
+			name:  "workspace root",
+			value: root.URI,
+			want:  "workspace:///",
+		},
+		{
+			name:  "external sibling",
+			value: root.URI + "-sibling/src/main.cpp",
+			want:  siblingWant,
+		},
+		{
+			name:  "non-file uri",
+			value: "https://example.invalid/src/main.cpp",
+			want:  "https://example.invalid/src/main.cpp",
+		},
+	} {
+		if got := provider.PublicURI(tc.value); got != tc.want {
+			t.Fatalf("%s: PublicURI(%q) = %q, want %q", tc.name, tc.value, got, tc.want)
+		}
 	}
 }
 

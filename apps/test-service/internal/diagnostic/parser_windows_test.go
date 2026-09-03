@@ -116,3 +116,53 @@ func TestWindowsUNCDiagnosticIdentityIgnoresHostShareAndPathCasing(t *testing.T)
 		t.Fatalf("UNC sibling crossed workspace path boundary: %q", got)
 	}
 }
+
+func TestWindowsWorkspacePublicURIMapsDriveAndUNCRootsWithoutLeakingHosts(t *testing.T) {
+	root, err := workspace.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	parser, err := NewParser(FamilyGNU, Options{
+		Root:             root,
+		WorkingDirectory: root.NativePath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, ok := parser.(PublicURIProvider)
+	if !ok {
+		t.Fatal("parser does not expose PublicURIProvider")
+	}
+
+	childInput := strings.ToUpper(root.URI) + "/SRC/MAIN.CPP"
+	childWant := "workspace:///SRC/MAIN.CPP"
+	if got := provider.PublicURI(childInput); got != childWant {
+		t.Fatalf("drive-root child PublicURI(%q) = %q, want %q", childInput, got, childWant)
+	}
+
+	rootWant := "workspace:///"
+	for _, value := range []string{
+		"file:///D:/sdk/include/header.hpp",
+		"file://buildserver/teamshare/sdk/include/header.hpp",
+	} {
+		got := provider.PublicURI(value)
+		if got != rootWant {
+			t.Fatalf("external PublicURI(%q) = %q, want %q", value, got, rootWant)
+		}
+		parsed, err := url.Parse(got)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if parsed.Host != "" || parsed.Path != "/" {
+			t.Fatalf("external workspace URI leaked host or drive: %q", got)
+		}
+	}
+
+	parsed, err := url.Parse(provider.PublicURI(childInput))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Host != "" || !strings.HasPrefix(parsed.Path, "/SRC/MAIN.CPP") {
+		t.Fatalf("child workspace URI lost path casing or leaked host: %q", parsed.String())
+	}
+}
