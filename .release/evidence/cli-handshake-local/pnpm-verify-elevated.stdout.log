@@ -1,0 +1,843 @@
+Scope: 7 of 8 workspace projects
+packages/protocol-models build$ tsc -b tsconfig.json
+packages/protocol-models build: Done
+packages/coverage-models build$ tsc -b tsconfig.json
+packages/test-client build$ tsc -b tsconfig.json
+packages/coverage-models build: Done
+packages/test-client build: Done
+tools/service-probe build$ tsc -b tsconfig.json
+tools/service-probe build: Done
+apps/code-oss-extension build$ tsc -b tsconfig.json
+apps/code-oss-extension build: Done
+✔ creation binds fixed source coordinates, summaries, and deterministic canonical records (17.8899ms)
+✔ validation rejects mutated producer and immutable artifact identities (8.699ms)
+✔ validation rejects every provenance scalar mutation and every extra key (8.5661ms)
+✔ creation rejects closed request and independent runtime summary shape violations (5.3657ms)
+✔ validation rejects null, non-enumerable, symbol, drift, and path-bearing provenance values (3.8353ms)
+✔ creation and validation reject toggling accessor properties at every public boundary (4.1525ms)
+✔ creation and validation reject non-enumerable required fields (3.0952ms)
+✔ CLI rehashes real mode and tool files, emits canonical bytes, validates manifest and never leaks paths (9829.2182ms)
+✔ CLI rejects a manifest reached through a directory link or junction (434.0614ms)
+﹣ opt-in CLI creation binds mode file count, bytes, and exact tree digest (0.9312ms) # UNIT_TEST_IDE_REAL_APPIMAGETOOL is not set
+﹣ descriptor attestation rejects an ancestor swapped to a directory link after open (0.226ms) # Windows prevents renaming an ancestor while its child descriptor is open
+✔ canonical output refuses linked and swapped output ancestors without partial publication (1753.8541ms)
+✔ canonical output never leaves a replaced staged file published after failure (2427.9153ms)
+✔ canonical output requires a fresh dedicated output directory and preserves prior files (1109.0316ms)
+﹣ POSIX canonical output rejects a group-or-world-writable output parent (0.2939ms) # Windows validates directory ownership and reparse state instead of POSIX mode bits
+✔ atomic no-clobber publication preserves a target created at the commit boundary (2484.5738ms)
+✔ atomic publication refuses a stage exchanged at the commit boundary (2455.9294ms)
+✔ a post-commit failure never deletes a later replacement target (2456.7722ms)
+✔ Windows inventory binds exact path, decimal size, digest, and executable record bytes (942.8047ms)
+✔ inventory validation rejects unsafe file integers and aggregate total overflow (2.5473ms)
+✔ tree digest independently binds path, decimal size, SHA, and executable bytes (1.4692ms)
+✔ Linux inventory accepts only complete exact sorted size and digest mode records (2289.4105ms)
+✔ tree digest changes with content but not timestamps or directory modes (2696.2183ms)
+✔ descriptor snapshots reject a deterministic same-object same-size content mutation (1130.9196ms)
+﹣ descriptor snapshots reject a deterministic same-object mode mutation (1.3977ms) # SKIP
+✔ descriptor-captured product bytes and launcher digest are the inventory identity source (1016.7624ms)
+✔ producer rejects missing required files and directory link or junction entries (801.2724ms)
+﹣ producer rejects direct symbolic links, unsafe paths, case aliases, and special files (0.3677ms) # SKIP
+✔ public inventory requests are closed and reject mode inventory on Windows (22.6577ms)
+✔ CLI writes both success artifacts as canonical path-free one-line JSON (2344.8256ms)
+✔ Windows CLI accepts a direct 8.3 output parent and rejects a short-long duplicate target (3522.0117ms)
+✔ Windows CLI rejects a same-identity Volume GUID output namespace alias (589.2744ms)
+✔ CLI rejects identical and hard-link-equivalent destinations before writing (1195.9107ms)
+✔ parallel second-stage failure removes the successful peer stage and creates no output (2233.7013ms)
+✔ second-commit failure removes new outputs and restores both pre-existing targets (3461.7089ms)
+✔ post-publish failure restores both pre-existing targets (1639.9029ms)
+✔ staging rejects an output ancestor replaced by a link after inspection (2343.8849ms)
+✔ CLI refuses a symlinked output ancestor without touching its referent (95.7301ms)
+✔ validateSourceManifest returns a frozen canonical copy (4.5674ms)
+✔ validateSourceManifest rejects every changed field and non-closed shape (2.8929ms)
+▶ loadSourceManifest accepts only a real canonical JSON file
+  ✔ linked file (2.9623ms)
+✔ loadSourceManifest accepts only a real canonical JSON file (33.2604ms)
+✔ validateProducerInvocation accepts only the fixed producer identity (0.7988ms)
+✔ verifyCodeOssCheckout checks the fixed upstream metadata (96.4002ms)
+✔ verifyCodeOssCheckout rejects a linked intermediate directory (11.0298ms)
+✔ verifyCodeOssCheckout rejects a linked ancestor of the supplied checkout root (28.2507ms)
+✔ CLI exports fixed outputs and keeps failures path-free and atomic (644.4383ms)
+✔ CLI authorize and verify-checkout emit no root path (409.6299ms)
+✔ validateProducerRunMetadata projects exactly the trusted successful run (4.3802ms)
+✔ validateProducerRunMetadata independently rejects each run binding (3.4312ms)
+✔ selectProvenanceArtifact closes the selected attempt artifact list (2.3044ms)
+✔ selectProvenanceArtifact ignores unrelated GitHub fields without reading them (0.3467ms)
+✔ validateProducerRunMetadata ignores unrelated API fields without reading them (0.399ms)
+✔ validateProducerRunMetadata rejects ambiguous required API fields (0.8407ms)
+✔ validateTrustedReleaseInputs binds the second API snapshot to immutable provenance identities (17.4981ms)
+✔ validateTrustedReleaseInputs applies every API run binding before provenance acceptance (3.8502ms)
+✔ CLI validates run identity before exporting only fixed output keys (2995.2453ms)
+✔ CLI provenance failures cannot inject GitHub output or leak local paths (2528.2901ms)
+✔ CLI validate-provenance closes independent content pins without output injection (15987.5186ms)
+✔ CLI validate-attempt accepts only the exact current attempt and writes no output (2764.8222ms)
+✔ CLI rejects hard-linked run or GitHub output files before either can modify another path (1795.9655ms)
+✔ trusted JSON reads reject same-inode content changes after opening or reading (1749.0466ms)
+✔ test hooks snapshot functions before async boundaries instead of rereading replacement getters (1077.2169ms)
+✔ GitHub output append rolls back partial writes and failed syncs on its original descriptor (537.644ms)
+✔ GitHub output append rejects same-inode prefix replacement and restores its original bytes (287.9393ms)
+✔ GitHub output append rejects same-length suffix replacement and restores its expected bytes (279.4949ms)
+✔ CLI rejects a linked producer-run input (2465.3208ms)
+✔ CLI rejects a linked GitHub output (1299.6973ms)
+✔ CLI rejects a producer run reached through a directory junction (329.0037ms)
+✔ workflow exposes only an input-free manual trigger and minimum read permissions (3.0794ms)
+✔ workflow contains only the four closed jobs on fixed hosted runners (3.3688ms)
+✔ authorization is fail-closed and every producer job depends on it (1.8043ms)
+✔ authorize exports the fixed local pnpm bin before running the producer suite (1.4664ms)
+✔ all action references are reviewed full commit pins (1.8959ms)
+✔ workflow has no secret, local-runtime, mutable-tool, or expression-in-shell escape hatch (2.5785ms)
+✔ both builds use the fixed fresh checkout, toolchains, Gulp targets, and output roots (1.9434ms)
+✔ fixed Yarn exports the executable location required by Code-OSS preinstall (0.6628ms)
+✔ build steps invoke pinned Yarn JS with a narrowly scoped parent-manager bypass (1.2899ms)
+✔ Windows validates, bounds launcher execution, inventories, and stages before upload (1276.9852ms)
+✔ Visual Studio preflight contract rejects installation guards hidden in comments (973.1454ms)
+✔ Visual Studio preflight contract rejects installation guards in a constant-false branch (996.4641ms)
+✔ Visual Studio preflight contract rejects installation guards in a never-entered catch (1037.2221ms)
+✔ Visual Studio preflight contract rejects installation guards in a constant-false loop (1297.172ms)
+✔ Visual Studio preflight contract rejects an installation guard whose throw is unreachable (1232.5734ms)
+✔ Visual Studio preflight contract rejects return before its linear validation triple (1342.5514ms)
+✔ Visual Studio preflight contract rejects successful exit before its linear validation triple (1051.0413ms)
+✔ Linux creates and validates modes, bounds launcher execution, inventories, and stages exact roots (1.0392ms)
+✔ launcher version checks execute packaged CLI wrappers instead of GUI binaries (0.6086ms)
+✔ uploads expose immutable identities under attempt-qualified transport names (3.0147ms)
+✔ attestation validates immutable coordinates before ID-only downloads and independently revalidates them (1.9829ms)
+✔ provenance and post-validation summary bind and expose only validated immutable identities (9.6133ms)
+✔ package scripts run the closed producer suite early and enumerate every producer contract (0.2493ms)
+✔ foundation validates producer identity before downloading one exact provenance artifact (4.7129ms)
+✔ foundation package jobs consume only the trust job closed coordinates (3.1765ms)
+ℹ tests 94
+ℹ suites 0
+ℹ pass 89
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 5
+ℹ todo 0
+ℹ duration_ms 34295.2955
+✔ check rejects generated TypeScript output with CRLF line endings (2017.3372ms)
+✔ check rejects generated TypeScript output without its final newline (1859.4205ms)
+✔ normal generation does not replace any target when a later generator fails (181.0065ms)
+✔ normal generation restores every destination and removes transaction files when replacement fails (184.781ms)
+ℹ tests 4
+ℹ suites 0
+ℹ pass 4
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 4355.5093
+✔ platformKey accepts only the supported operating system and architecture pairs (2.3758ms)
+✔ validateManifest accepts only the fixed closed supply-chain contract (4.5487ms)
+✔ tracked manifest keeps the reviewed CMake 4.3.4 trust anchors (6.824ms)
+✔ redirect validation keeps every response on the locked CMake distribution URL (0.4753ms)
+✔ CLI output stays inside the repository or an explicit absolute CI root (0.7621ms)
+✔ sha256File and verifyInstalledFiles stream and bind installed paths to digests (17.0069ms)
+✔ fixed prepareBundle rejects an archive digest mismatch without publishing staging (14.873ms)
+✔ preparation rejects an output root beneath a symlink or junction before download (3.2389ms)
+✔ preparation binds published manifest bytes to the validated manifest object (1.5041ms)
+✔ offline preparation publishes an immutable verified bundle and exact manifest (44.8783ms)
+▶ installed executable, CTest, or license mismatch removes staging and preserves no target
+  ✔ executable (17.0076ms)
+  ✔ ctest (18.6197ms)
+  ✔ license (19.748ms)
+✔ installed executable, CTest, or license mismatch removes staging and preserves no target (56.3365ms)
+✔ bundled CTest version must match the pinned CMake version (20.3651ms)
+✔ post-extraction audit rejects a symlink or junction omitted from the listing (18.1939ms)
+▶ unsafe archive entries are rejected before extraction
+  ✔ file /absolute/cmake (9.727ms)
+  ✔ file ../escape (11.2894ms)
+  ✔ file cmake-4.3.4-linux-x86_64/../../escape (11.6978ms)
+  ✔ file C:/escape (10.0053ms)
+  ✔ file cmake-4.3.4-linux-x86_64/file:stream (10.3477ms)
+  ✔ file other-root/bin/cmake (8.9337ms)
+  ✔ symlink cmake-4.3.4-linux-x86_64/link (10.7474ms)
+  ✔ device cmake-4.3.4-linux-x86_64/device (9.1083ms)
+✔ unsafe archive entries are rejected before extraction (83.194ms)
+✔ an existing complete bundle is verified and reused without downloading (33.7943ms)
+✔ a publish race keeps the existing valid target and discards staging (30.4807ms)
+✔ system archive inspection reports only regular files and directories (60.328ms)
+ℹ tests 28
+ℹ suites 0
+ℹ pass 28
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 496.9472
+✔ tracked manifest fixes the Python 3.14.6 and gcovr 8.6 source lock (78.5304ms)
+✔ source artifacts and every locked wheel use reviewed HTTPS URLs and lowercase SHA-256 (2.8433ms)
+✔ wheel lock has exact versions, unique normalized projects, no markers, editable packages, or sdists (1.3939ms)
+✔ license contract is complete for each locked package and the two bundled licenses are present (2.9674ms)
+✔ license contract rejects version drift and missing or truncated fixed lxml wheel materials (5.5268ms)
+✔ schema is closed and rejects version drift, unsafe sources, lock ambiguity, and unpinned transitive dependencies (40.7062ms)
+✔ schema predefines a closed resolved output record without pre-creating Task 2 digests (154.9755ms)
+✔ layout accepts only the separate Windows/Linux x64 bundle keys (2.1223ms)
+✔ platform-specific wheels are omitted from another platform's resolved inputs (10.4919ms)
+✔ cold prepare downloads only the platform manifest allowlist and verifies before inspection (35.1383ms)
+✔ tampered and interrupted downloads never reach inspection or leave partial cache files (5.5232ms)
+✔ archive audit rejects traversal, symlink and duplicate entries before extraction (0.423ms)
+✔ archive audit accepts safe internal spaces in regular filenames (0.3448ms)
+✔ prepare builds in a temp directory, writes READY last, and atomically publishes (30.6462ms)
+✔ interrupted prepare leaves no consumable bundle (29.5262ms)
+✔ post-install build failure leaves host-side staging removable and unpublished (11.0183ms)
+✔ cache hit performs full resolved-manifest verification and detects tampering (44.5894ms)
+✔ cache identity binds exact selected inputs and deterministic recipe provenance (52.0833ms)
+✔ resolved output list and bytes are deterministic and include only regular generated files (53.1921ms)
+✔ deterministic application ZIP round-trips every regular entry (3.6007ms)
+✔ Windows isolation path excludes import site and forbidden final layout entries (35.1457ms)
+✔ resolved layout rejects unexpected top-level and app files (10.1705ms)
+✔ cache verification reapplies exact app layout even when output digests were rewritten (31.1136ms)
+✔ byte-level ZIP audit rejects unsafe paths, aliases, types, metadata and expansion (11.5028ms)
+✔ byte-level TAR audit rejects unsafe paths, links, types, metadata and expansion (18.6227ms)
+✔ TAR audit accepts a safe GNU longname with identical extraction semantics (2.1144ms)
+✔ TAR audit accepts the locked release archive's V7 headers (2.1412ms)
+✔ TAR audit accepts a Linux source filename with a trailing dot (1.9531ms)
+✔ TAR audit accepts only path-safe local PAX and metadata-only global PAX semantics (2.686ms)
+✔ Linux builder contract pins image ABI, configure flags, source epoch and disables network (0.8494ms)
+✔ Linux prune removes Tcl/Tk symlink fixtures before generic symlink materialization (0.5958ms)
+✔ final layout rejects native Tk and Tcl/Tk runtime paths (47.4381ms)
+✔ Linux Python invocation is isolated and Python-related environment is sanitized (0.3777ms)
+✔ runner descriptor is closed and maps only fixed root/object/gcov/output fields (1.2797ms)
+✔ real Python runner contract rejects malformed descriptors (446.9209ms)
+ℹ tests 35
+ℹ suites 0
+ℹ pass 35
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1005.4011
+✔ UnitTestIDE CMake helper has strict deterministic framework registration (65857.4817ms)
+✔ workspace schema accepts supported structured configuration (156.8136ms)
+✔ workspace schema rejects shell-shaped fields as additional properties (112.474ms)
+✔ workspace schema rejects unsafe paths, duplicates, limits, and versions (69.6036ms)
+✔ workspace schema enforces family-discriminated manual toolchains (68.8418ms)
+✔ workspace schema accepts missing optional fields and rejects explicit null (31.5215ms)
+✔ workspace JSON parsing uses the last repeated object member before schema validation (26.9675ms)
+✔ workspace schema accepts closed v3 coverage profiles without widening v1 or v2 (26.7895ms)
+✔ workspace v3 schema rejects coverage injection, unsafe path, duplicates, and structural limits (33.9301ms)
+✔ workspace v3 schema accepts exact coarse coverage maxima (26.1242ms)
+✔ workspace pins supported toolchains (9.6011ms)
+✔ release manifest contract stays pinned to the repository product identity (2.9636ms)
+✔ README contains the complete local verification gate (1.3208ms)
+✔ Phase 3 documentation records desktop, bundle, native, and security boundaries (3.009ms)
+✔ Hosted CI pins native toolchain runners and gates unstable Windows native E2E (2.4933ms)
+✔ dependency metadata uses the official npm registry (1.1941ms)
+✔ documentation records pre-write token file preparation (1.4ms)
+✔ release documentation describes complete digest-pinned Code-OSS runtime artifacts (1.7533ms)
+✔ trusted producer documentation keeps unsigned qualification operational, closed, and incomplete (5.4709ms)
+✔ release-input documentation binds run attempts and provenance to immutable artifact identities (5.6132ms)
+✔ compiled Service runtime excludes HTTP, TLS, GitHub, and OAuth client stacks (852.0101ms)
+✔ Go import audit parses commented raw and aliased import specs before policy checks (460.0915ms)
+✔ network import policy permits pure URL parsing but still rejects transport stacks (0.2097ms)
+✔ production packages constrain network-capable code to local IPC boundaries (430.822ms)
+✔ cross-platform transports constrain network-capable calls to local IPC (1.7594ms)
+✔ guardian Windows boundary constrains network-capable selectors to local IPC only (0.8498ms)
+✔ guardian executable registration constrains network-capable selectors to local IPC only (1.4349ms)
+ℹ tests 27
+ℹ suites 0
+ℹ pass 27
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 65965.0306
+Scope: 7 of 8 workspace projects
+packages/coverage-schema test$ node --test test/schema.test.mjs
+packages/protocol-models test$ pnpm run build && node --test dist/generated-contract.test.js
+packages/protocol-schema test$ node --test test/schema.test.mjs
+packages/protocol-schema test: ✔ protocol v1 accepts authenticated handshake shape and rejects a missing token (132.9266ms)
+packages/coverage-schema test: ✔ Coverage JSON v1 accepts the canonical fixture and rejects structural violations (133.9376ms)
+packages/coverage-schema test: ✔ Coverage JSON v1 rejects forbidden operational metadata (65.5305ms)
+packages/coverage-schema test: ✔ Coverage JSON v1 invalid fixtures each contain exactly one planned mutation (5.6198ms)
+packages/coverage-schema test: ℹ tests 3
+packages/coverage-schema test: ℹ suites 0
+packages/coverage-schema test: ℹ pass 3
+packages/coverage-schema test: ℹ fail 0
+packages/coverage-schema test: ℹ cancelled 0
+packages/coverage-schema test: ℹ skipped 0
+packages/coverage-schema test: ℹ todo 0
+packages/coverage-schema test: ℹ duration_ms 468.3983
+packages/protocol-schema test: ✔ protocol 1.1 accepts controlled tasks and rejects shell input (96.74ms)
+packages/coverage-schema test: Done
+packages/protocol-schema test: ✔ protocol 1.1 tasks/start rejects every execution-plan injection field (75.0041ms)
+packages/protocol-schema test: ✔ protocol 1.1 simulation snapshots and event enum remain closed to Step fields (59.0225ms)
+packages/protocol-schema test: ✔ protocol 1.0 capabilities remain closed to 1.1 fields (26.0838ms)
+packages/protocol-models test: $ tsc -b tsconfig.json
+packages/protocol-schema test: ✔ protocol 1.2 validates workspace builds and keeps v1.1 strict (291.5507ms)
+packages/protocol-schema test: ✔ protocol 1.2 accepts the Service journal event payloads without weakening them (80.7272ms)
+packages/protocol-schema test: ✔ protocol 1.2 preserves the complete task, subscription, and artifact method surface (203.4355ms)
+packages/protocol-schema test: ✔ protocol 1.2 refuses execution details and native workspace paths (154.2796ms)
+packages/protocol-schema test: ✔ protocol 1.2 generates TargetList from the isolated workspace contract (3.3649ms)
+packages/protocol-schema test: ✔ protocol 1.2 accepts the complete CMake build artifact surface (27.0889ms)
+packages/protocol-models test: ✔ generated capabilities represent an empty Windows service (2.034ms)
+packages/protocol-models test: ✔ generated protocol 1.1 models represent finished tasks, events, and artifacts (0.4479ms)
+packages/protocol-models test: ✔ generated protocol 1.2 models expose workspace build contracts (0.5694ms)
+packages/protocol-models test: ✔ generated protocol 1.2 models preserve discriminated branches (0.3656ms)
+packages/protocol-models test: ✔ generated protocol 1.3 models expose closed test contracts (1.1376ms)
+packages/protocol-models test: ✔ generated protocol 1.3 selections and tasks preserve discriminated branches (0.3473ms)
+packages/protocol-models test: ✔ generated protocol 1.4 models expose the closed coverage contract (0.9229ms)
+packages/protocol-models test: ℹ tests 7
+packages/protocol-models test: ℹ suites 0
+packages/protocol-models test: ℹ pass 7
+packages/protocol-models test: ℹ fail 0
+packages/protocol-models test: ℹ cancelled 0
+packages/protocol-models test: ℹ skipped 0
+packages/protocol-models test: ℹ todo 0
+packages/protocol-models test: ℹ duration_ms 184.8079
+packages/protocol-models test: Done
+packages/protocol-schema test: ✔ protocol 1.3 accepts test discovery, run, catalog, and result contracts (366.6441ms)
+packages/protocol-schema test: ✔ protocol 1.3 rejects every execution-plan injection field at every test request boundary (287.6127ms)
+packages/protocol-schema test: ✔ protocol 1.3 enforces closed selections, stable IDs, safe integers, and bounded pages (388.9651ms)
+packages/protocol-schema test: ✔ protocol 1.3 preserves v1.0-v1.2 contracts without backporting test messages (375.1504ms)
+packages/protocol-schema test: ✔ protocol 1.4 accepts standalone coverage start, run, and report payloads (96.0569ms)
+packages/protocol-schema test: ✔ protocol 1.4 rejects execution-plan injection fields in coverage starts and selections (100.0774ms)
+packages/protocol-schema test: ✔ protocol 1.4 enforces coverage ranges, outcomes, completeness, and metadata boundaries (78.417ms)
+packages/protocol-schema test: ✔ protocol 1.4 exposes coverage messages as closed whole-message contracts (372.8627ms)
+packages/protocol-schema test: ✔ protocol 1.4 coverage request boundaries and pages are closed and bounded (434.9856ms)
+packages/protocol-schema test: ✔ protocol 1.4 capabilities and artifacts add only the public coverage surface (296.3752ms)
+packages/protocol-schema test: ✔ protocol 1.4 coverage tasks and journal events preserve closed task invariants (265.4877ms)
+packages/protocol-schema test: ✔ protocol 1.4 keeps earlier protocol validators strict and leaves tasks/start coverage-free (487.1276ms)
+packages/protocol-schema test: ℹ tests 23
+packages/protocol-schema test: ℹ suites 0
+packages/protocol-schema test: ℹ pass 23
+packages/protocol-schema test: ℹ fail 0
+packages/protocol-schema test: ℹ cancelled 0
+packages/protocol-schema test: ℹ skipped 0
+packages/protocol-schema test: ℹ todo 0
+packages/protocol-schema test: ℹ duration_ms 4979.4891
+packages/protocol-schema test: Done
+packages/test-client test$ pnpm run build && node --test dist/client.test.js
+packages/coverage-models test$ pnpm run build && node --test dist/generated-contract.test.js dist/decoder.test.js
+packages/test-client test: $ tsc -b tsconfig.json
+packages/coverage-models test: $ tsc -b tsconfig.json
+packages/coverage-models test: ✔ decoder returns a defensive canonical clone (11.3825ms)
+packages/coverage-models test: ✔ decoder rejects every shared invalid fixture for its target structural rule (3.8385ms)
+packages/coverage-models test: ✔ decoder accepts integer-valued decimal and exponent JSON number lexemes (1.9946ms)
+packages/coverage-models test: ✔ decoder enforces UTF-8 byte limits on provenance versions (6.3479ms)
+packages/coverage-models test: ✔ decoder accepts a 4096-byte URI and rejects a longer multibyte URI (2.3018ms)
+packages/coverage-models test: ✔ decoder rejects non-well-formed strings before UTF-8 conversion (1.925ms)
+packages/coverage-models test: ✔ decoder rejects cross-field and ordering violations (2.9472ms)
+packages/coverage-models test: ✔ generated Coverage JSON v1 types expose stable wire names (1.0901ms)
+packages/coverage-models test: ✔ root scripts gate Coverage generation drift and regressions (10.4144ms)
+packages/coverage-models test: ℹ tests 9
+packages/coverage-models test: ℹ suites 0
+packages/coverage-models test: ℹ pass 9
+packages/coverage-models test: ℹ fail 0
+packages/coverage-models test: ℹ cancelled 0
+packages/coverage-models test: ℹ skipped 0
+packages/coverage-models test: ℹ todo 0
+packages/coverage-models test: ℹ duration_ms 316.9096
+packages/coverage-models test: Done
+packages/test-client test: ✔ EventSubscription rejects an unsafe initial sequence (2.258ms)
+packages/test-client test: ✔ client prefers protocol 1.4 and accepts negotiated downgrades (93.548ms)
+packages/test-client test: ✔ client retries legacy services from the v1.4 ceiling (9.013ms)
+packages/test-client test: ✔ protocol 1.3 client routes typed discovery, run, catalog, and run query APIs (40.6259ms)
+packages/test-client test: ✔ protocol 1.4 keeps existing task, test, artifact, and event APIs usable (25.9955ms)
+packages/test-client test: ✔ protocol 1.4 client routes strict coverage APIs (18.0069ms)
+packages/test-client test: ✔ protocol 1.3 sessions reject every coverage API without writing (3.3962ms)
+packages/test-client test: ✔ coverage start and list validate and send one deep caller snapshot (5.0244ms)
+packages/test-client test: ✔ coverage request validation rejects execution-plan injection and invalid bounds without writing (5.0267ms)
+packages/test-client test: ✔ coverage responses reject every invalid schema value without returning a partial object (48.601ms)
+packages/test-client test: ✔ coverage semantic response failure closes the connection (2.7263ms)
+packages/test-client test: ✔ coverage public APIs defensively clone selection, completeness, summary, and provenance (8.8692ms)
+packages/test-client test: ✔ protocol 1.2 sessions reject every test API locally without writing (2.499ms)
+packages/test-client test: ✔ protocol 1.3 test request bounds and execution-plan fields are rejected before wire write (4.2927ms)
+packages/test-client test: ✔ protocol 1.3 decoders enforce catalog references, summary counts, iteration, and partial semantics (0.6897ms)
+packages/test-client test: ✔ protocol 1.3 decoder preserves closed mock failure subtype (0.2068ms)
+packages/test-client test: ✔ coverage decoders clone nested values and convert dates (0.2275ms)
+packages/test-client test: ✔ coverage decoders reject unsafe and inconsistent domain values (0.3364ms)
+packages/test-client test: ✔ protocol 1.4 decoder clones every coverage event payload and applies semantic checks (0.4615ms)
+packages/test-client test: ✔ protocol 1.4 response schemas reject invalid enum, URI, digest, safe integer, and date values (13.0967ms)
+packages/test-client test: ✔ protocol 1.4 existing API semantic failures close the connection without a partial result (6.3646ms)
+packages/test-client test: ✔ protocol 1.4 server ProtocolError leaves the connection healthy (5.3553ms)
+packages/test-client test: ✔ protocol 1.4 task and artifact pages enforce canonical response bounds (79.0478ms)
+packages/test-client test: ✔ protocol 1.3 response validation rejects unknown outcomes, unsafe integers, invalid URI, and invalid dates (10.6711ms)
+packages/test-client test: ✔ EventSubscription accepts protocol 1.3 test events and preserves sequence (4.8599ms)
+packages/test-client test: ✔ EventSubscription accepts protocol 1.4 coverage events and clones nested payloads (3.4658ms)
+packages/test-client test: ✔ ordinary events must exactly match the negotiated session version (6.1086ms)
+packages/test-client test: ✔ an event before successful handshake closes without delivery (13.1527ms)
+packages/test-client test: ✔ legacy unsupported handshake retries do not lock the event version (10.8422ms)
+packages/test-client test: ✔ protocol 1.4 event schema rejects invalid enums before semantic decoding (1.5048ms)
+packages/test-client test: ✔ protocol 1.2 client routes workspace, target, and CMake build APIs (10.5837ms)
+packages/test-client test: ✔ protocol 1.1 rejects Phase 3 methods locally without writing (1.8978ms)
+packages/test-client test: ✔ CMake build inputs are rejected locally before reaching the wire (1.4685ms)
+packages/test-client test: ✔ protocol 1.2 task decoder rejects unsafe integers, invalid dates, and unknown union kinds (5.2331ms)
+packages/test-client test: ✔ EventSubscription accepts protocol 1.2 events and preserves sequence (2.2575ms)
+packages/test-client test: ✔ client performs handshake, capabilities, and shutdown in order (2.035ms)
+packages/test-client test: ✔ client exposes stable server error codes (1.3716ms)
+packages/test-client test: ✔ client accepts a fragmented exact-limit response with CRLF (10.2306ms)
+packages/test-client test: ✔ client rejects a Max+1 response body with CRLF (5.15ms)
+packages/test-client test: ✔ protocol line limit uses UTF-8 bytes rather than JavaScript string length (6.3677ms)
+packages/test-client test: ✔ manual close rejects pending requests when the stream does not emit close (0.9791ms)
+packages/test-client test: ✔ readable EOF rejects a pending request even when the stream never emits close (1.5719ms)
+packages/test-client test: ✔ invalid JSON closes the connection and rejects every pending request (1.1042ms)
+packages/test-client test: ✔ unknown protocol versions close the connection (1.1456ms)
+packages/test-client test: ✔ client falls back to an exact 1.0 handshake (3.1032ms)
+packages/test-client test: ✔ a new Connection grants its first 1.1 handshake one legacy unsupported response (0.9821ms)
+packages/test-client test: ✔ client does not downgrade handshake errors other than UNSUPPORTED_PROTOCOL (1.1195ms)
+packages/test-client test: ✔ a same-version handshake failure consumes the Connection legacy opportunity (1.9984ms)
+packages/test-client test: ✔ an authenticated connection rejects a legacy-version handshake error (2.051ms)
+packages/test-client test: ✔ a 1.0 fallback handshake rejects response payload fields outside the legacy shape (1.4356ms)
+packages/test-client test: ✔ client routes interleaved responses and deduplicates events (5.0747ms)
+packages/test-client test: ✔ subscribe installs its event sink before the subscribe response can be followed by an event (1.6903ms)
+packages/test-client test: ✔ a replacement subscription keeps pre-ack events on the old subscription (2.389ms)
+packages/test-client test: ✔ a failed replacement subscription closes the retired old subscription (2.2686ms)
+packages/test-client test: ✔ subscribe rejects an acknowledgement for a different cursor (1.4928ms)
+packages/test-client test: ✔ legacy task.output keeps exact payload keys while contiguous sequence gaps remain fatal (0.2629ms)
+packages/test-client test: ✔ a forward event gap does not advance the cursor and invalidates the connection (1.5593ms)
+packages/test-client test: ✔ an attached stream failure rejects pending requests and closes the subscription (2.3859ms)
+packages/test-client test: ✔ phase 2 methods reject a negotiated 1.0 session locally (1.3179ms)
+packages/test-client test: ✔ typed task responses are validated instead of trusted as arbitrary objects (1.2921ms)
+packages/test-client test: ✔ wire date-time strings decode to Date values in generated public models (2.6092ms)
+packages/test-client test: ✔ a schema-valid date-time that cannot become a Date is rejected (1.5221ms)
+packages/test-client test: ✔ generated task and artifact models reject unsafe sequence and size integers (2.1676ms)
+packages/test-client test: ✔ runtime-invalid requests are rejected locally without reaching the wire (2.9612ms)
+packages/test-client test: ✔ an oversized outbound request rejects only that request and leaves the connection usable (13.7954ms)
+packages/test-client test: ✔ Connection validates all handshake request versions before writing (1.5757ms)
+packages/test-client test: ✔ Connection closes on malformed v1.4 response and event envelopes (2.7904ms)
+packages/test-client test: ✔ a response protocol version mismatch closes the connection (1.7712ms)
+packages/test-client test: ✔ task and artifact methods send typed payloads and validate list responses (3.2669ms)
+packages/test-client test: ✔ attach clients reject reconnect with a stable explicit error (0.4267ms)
+packages/test-client test: ✔ reconnect reuses credentials and the active subscription cursor (3.124ms)
+packages/test-client test: ✔ reconnect validates its acknowledgement before accepting a same-chunk replay event (2.6834ms)
+packages/test-client test: ✔ reconnect discards a same-chunk replay event when the acknowledgement cursor mismatches (2.5486ms)
+packages/test-client test: ✔ concurrent reconnect is rejected and does not create extra connections (2.2279ms)
+packages/test-client test: ✔ subscribe is rejected without disturbing an active reconnect (3.1408ms)
+packages/test-client test: ✔ reconnect is rejected without disturbing an active subscribe (3.1936ms)
+packages/test-client test: ✔ close invalidates a reconnect waiting for its connector and destroys the late stream (1.4371ms)
+packages/test-client test: ✔ reconnect rejects a downgraded session when an active subscription must be restored (2.5163ms)
+packages/test-client test: ✔ failed reconnect handshakes and subscriptions retain the active cursor for a later retry (4.7966ms)
+packages/test-client test: ✔ readArtifact joins 64 KiB chunks and verifies SHA-256 (4.7186ms)
+packages/test-client test: ✔ readArtifact rejects an incorrect digest (1.4565ms)
+packages/test-client test: ✔ readArtifact rejects malformed Base64URL and non-progressing offsets (2.4216ms)
+packages/test-client test: ✔ readArtifact rejects metadata changes between chunks (1.8127ms)
+packages/test-client test: ✔ readArtifact rejects a declared total above the client download limit (1.7045ms)
+packages/test-client test: ✔ readArtifact rejects unsafe size and offset integers (2.8739ms)
+packages/test-client test: ✔ readArtifact rejects a non-EOF chunk that already reaches the declared size (5.0924ms)
+packages/test-client test: ℹ tests 86
+packages/test-client test: ℹ suites 0
+packages/test-client test: ℹ pass 86
+packages/test-client test: ℹ fail 0
+packages/test-client test: ℹ cancelled 0
+packages/test-client test: ℹ skipped 0
+packages/test-client test: ℹ todo 0
+packages/test-client test: ℹ duration_ms 1991.2235
+packages/test-client test: Done
+tools/service-probe test$ pnpm run build && node --test dist/coverage-bundle.test.js dist/native-fixture.test.js dist/native-build-linux.test.js dist/native-network-guard.test.js dist/wfp-offline-boundary.test.js dist/wfp-offline-boundary.e2e.test.js dist/windows-offline-boundary-legacy.test.js dist/native-work-root.test.js dist/test-framework-fixture.test.js
+tools/service-probe test: $ tsc -b tsconfig.json
+tools/service-probe test: ✔ coverage probe sanitizes Python, proxy, registry, and user-site environment (3.8263ms)
+tools/service-probe test: ✔ coverage network guard blocks DNS, socket, HTTP and restores state (2.8764ms)
+tools/service-probe test: ✔ coverage report has provenance but never installation paths (1.4894ms)
+tools/service-probe test: ✔ coverage report accepts an explicit environment-blocked runner outcome (0.4339ms)
+tools/service-probe test: ✔ WFP offline report fixture stays closed and path-free (14.415ms)
+tools/service-probe test: ✔ WFP offline report rejects extra fields, paths, and invalid timestamps (1.6549ms)
+tools/service-probe test: ✔ WFP offline report builder enforces the success contract (0.4997ms)
+tools/service-probe test: ✔ negative evidence distinguishes a real rejection from a null status (0.3828ms)
+tools/service-probe test: ✔ report writer is atomic and only emits the stable schema (15.2996ms)
+tools/service-probe test: ✔ required native toolchain parsing is closed and deterministic (3.3988ms)
+tools/service-probe test: ✔ prepared bundle verification fails for a missing bundle before any Service launch (7.5706ms)
+tools/service-probe test: ✔ prepared bundle verification binds state, version, and installed digests (18.2731ms)
+tools/service-probe test: ✔ native matrix uses only the verified bundle and explicit trusted workspace options (7.3476ms)
+tools/service-probe test: ✔ declared required family absence fails and bundle preflight stays before launch (4.8626ms)
+tools/service-probe test: ✔ generated family build repeats its fresh checkpoint after one stale Start (1.29ms)
+tools/service-probe test: ✔ generated family stale-checkpoint retry is bounded to one (0.9668ms)
+tools/service-probe test: ✔ late named-target build establishes a fresh workspace checkpoint (0.596ms)
+tools/service-probe test: ✔ late named-target build repeats its checkpoint when target listing is stale (0.8848ms)
+tools/service-probe test: ✔ late named-target build relists its target after one stale checkpoint (1.0116ms)
+tools/service-probe test: ✔ late named-target stale-checkpoint retry is bounded to one (0.6103ms)
+tools/service-probe test: ✔ cancellation recovery establishes a fresh default-build checkpoint (0.6687ms)
+tools/service-probe test: ✔ native liveness recovery retries a transient reconnect failure (251.4336ms)
+tools/service-probe test: ✔ diagnostic fixture refreshes one stale generation before Task creation (0.7485ms)
+tools/service-probe test: ✔ diagnostic fixture stale-generation retry is bounded to one (0.4301ms)
+tools/service-probe test: ✔ diagnostic fixture retries one transient stale inspection before Task creation (0.3269ms)
+tools/service-probe test: ✔ native report contains stable summaries and rejects absolute tool paths (0.5717ms)
+tools/service-probe test: ✔ copyNativeFixture creates an isolated workspace without modifying the repository fixture (42.7694ms)
+tools/service-probe test: ✔ copyNativeFixture supports a new workspace directory containing spaces and Unicode (28.4231ms)
+tools/service-probe test: ✔ safe fixture copy rejects symlink or junction content without following it (12.509ms)
+tools/service-probe test: ✔ copyNativeFixture rejects names and fixture keys that could escape the destination (7.3804ms)
+tools/service-probe test: ✔ fixture entry ordering is deterministic by Unicode code point (1.574ms)
+tools/service-probe test: ✔ normalizeNativeDiagnostic handles Windows paths before normalizing separators (2.3341ms)
+tools/service-probe test: ✔ normalizeNativeDiagnostic handles POSIX paths and prioritizes the build root (0.7017ms)
+tools/service-probe test: ✔ normalizeNativeDiagnostic maps explicitly trusted external roots without exposing host paths (1.7245ms)
+tools/service-probe test: ✔ normalization preserves diagnostic identity and unrelated source text (0.9416ms)
+tools/service-probe test: ✔ normalization does not treat a sibling path as a child root (1.3598ms)
+tools/service-probe test: ✔ normalization keeps a foreign file URI authority outside local roots (0.5929ms)
+tools/service-probe test: ✔ tracked golden diagnostics keep the cross-compiler minimum contract (7.2463ms)
+tools/service-probe test: ✔ MSVC linker fixture uses a supported unresolved entrypoint option (0.9267ms)
+tools/service-probe test: ✔ native E2E network guard rejects HTTP(S) entry points and restores state (4.2624ms)
+tools/service-probe test: ✔ public Windows native offline boundary export keeps the boundary contract (11.7227ms)
+tools/service-probe test: ✔ HTTP guard remains installed when WFP removal cannot be proven (2.64ms)
+tools/service-probe test: ✔ Windows native work root stays short across normal clones and managed worktrees (2.7599ms)
+tools/service-probe test: ✔ Linux native work root remains under the system temporary directory (0.4496ms)
+tools/service-probe test: ✔ native work root rejects relative and malformed roots (1.045ms)
+tools/service-probe test: ✔ test framework workspace is closed and pins the fixture executable (21.6169ms)
+tools/service-probe test: ✔ local WFP access denial fails after verified preflight before Service/native side effects (8.1716ms)
+tools/service-probe test: ✔ required WFP access denial fails before Service/native side effects (1.2895ms)
+tools/service-probe test: ﹣ default sibling preflight and guardian become Ready before Service/native starts (0.3617ms) # Windows WFP integration requires UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED=1
+tools/service-probe test: ✔ same-user rogue cannot forge guardian authentication before Hello (5.2535ms)
+tools/service-probe test: ✔ local unavailable preflight skips before guardian side effects (3.4742ms)
+tools/service-probe test: ✔ required unavailable preflight fails before guardian side effects (1.3678ms)
+tools/service-probe test: ✔ verified preflight rejects a version-only result without exact tool identity digest (0.5878ms)
+tools/service-probe test: ✔ verified preflight requires Hello then Ready before boundary is returned (2.5201ms)
+tools/service-probe test: ✔ guardian Ready without Hello fails closed (1.3464ms)
+tools/service-probe test: ✔ startup failure waits for guardian termination before rejecting (10.7862ms)
+tools/service-probe test: ✔ startup termination wait is bounded when the guardian never exits (25.3411ms)
+tools/service-probe test: ✔ local WFP access denial is not skipped when guardian termination cannot be proven (30.9128ms)
+tools/service-probe test: ✔ close sends Release then waits for Bye and process exit (1.4005ms)
+tools/service-probe test: ✔ close accepts guardian exit observed before an already-written Bye arrives (1.598ms)
+tools/service-probe test: ✔ guardian crash after Ready prevents a guarded native callback from starting (1.7985ms)
+tools/service-probe test: ✔ guardian crash during a guarded native callback aborts it and runs fail-closed cleanup (1.4178ms)
+tools/service-probe test: ✔ guardian crash while close waits for Bye rejects instead of hanging (23.9473ms)
+tools/service-probe test: ✔ frame reader rejects a pending Hello or Bye read when its socket closes (44.2355ms)
+tools/service-probe test: ✔ malformed guardian frames terminate and fail closed (0.684ms)
+tools/service-probe test: ✔ default native guardian wiring canonicalizes a sibling spawn failure (3.8391ms)
+tools/service-probe test: ✔ legacy cleanup removes only canonically audited historical residue (1431.3949ms)
+tools/service-probe test: ✔ legacy cleanup rejects late LateUnknownMarker TOCTOU residue without deleting it (917.2311ms)
+tools/service-probe test: ✔ legacy cleanup rejects late LateExtraLeaf TOCTOU residue without deleting it (932.2705ms)
+tools/service-probe test: ✔ legacy cleanup rejects late LateReparseReplacement TOCTOU residue without deleting it (870.8725ms)
+tools/service-probe test: ✔ legacy cleanup rejects WrongNonce/Valid residue without deleting it (715.5999ms)
+tools/service-probe test: ✔ legacy cleanup rejects WrongOwnerPid/Valid residue without deleting it (722.573ms)
+tools/service-probe test: ✔ legacy cleanup rejects WrongRuleMarker/Valid residue without deleting it (743.7618ms)
+tools/service-probe test: ✔ legacy cleanup rejects ExtraMarker/Valid residue without deleting it (680.1753ms)
+tools/service-probe test: ✔ legacy cleanup rejects UnknownState/Valid residue without deleting it (743.3501ms)
+tools/service-probe test: ✔ legacy cleanup rejects Valid/ExtraRule residue without deleting it (812.6976ms)
+tools/service-probe test: ✔ legacy cleanup rejects Valid/WrongAction residue without deleting it (791.3995ms)
+tools/service-probe test: ℹ tests 77
+tools/service-probe test: ℹ suites 0
+tools/service-probe test: ℹ pass 76
+tools/service-probe test: ℹ fail 0
+tools/service-probe test: ℹ cancelled 0
+tools/service-probe test: ℹ skipped 1
+tools/service-probe test: ℹ todo 0
+tools/service-probe test: ℹ duration_ms 9559.8184
+tools/service-probe test: Done
+apps/code-oss-extension test$ pnpm run build && node --test dist/test/coverage-service-smoke-support.test.js dist/test/manifest.test.js dist/test/service-manager.test.js dist/test/service-resources.test.js dist/test/trust-gate.test.js dist/test/extension.test.js dist/test/testing-api.test.js dist/test/testing-api-benchmark.test.js dist/test/vscode-testing-bridge.test.js
+apps/code-oss-extension test: $ tsc -b tsconfig.json
+apps/code-oss-extension test: ✔ local unavailable coverage toolset skips before every boundary and execution side effect (4.9784ms)
+apps/code-oss-extension test: ✔ required unavailable coverage toolset fails before every boundary and execution side effect (1.0155ms)
+apps/code-oss-extension test: ✔ verified coverage toolset establishes the boundary before Service and native execution (0.9492ms)
+apps/code-oss-extension test: ✔ strict JUnit tokenizer accepts quoted attributes and legal builtin/numeric entities (2.8863ms)
+apps/code-oss-extension test: ✔ strict JUnit tokenizer rejects malformed entities (2.0888ms)
+apps/code-oss-extension test: ✔ strict JUnit tokenizer rejects unquoted, duplicate, missing and unknown attributes (1.097ms)
+apps/code-oss-extension test: ✔ strict JUnit tokenizer rejects mismatched nesting, extra roots and forbidden declarations (1.2067ms)
+apps/code-oss-extension test: ✔ strict JUnit tokenizer enforces the closed schema and declared counts (0.8343ms)
+apps/code-oss-extension test: ✔ atomic evidence validates temporary readback before publishing (29.3451ms)
+apps/code-oss-extension test: ✔ atomic evidence removes its temporary write when injected readback fails (11.4915ms)
+apps/code-oss-extension test: ✔ teardown failure runs every cleanup and suppresses evidence publication (2.3478ms)
+apps/code-oss-extension test: ✔ evidence publication occurs only after every teardown succeeds (0.4649ms)
+apps/code-oss-extension test: ✔ coverage smoke stops Service, closes the guardian, removes its fixture, then publishes (0.3947ms)
+apps/code-oss-extension test: ✔ guardian loss before native execution suppresses the callback and evidence publication (0.2718ms)
+apps/code-oss-extension test: ✔ activation completion marker is emitted only after controller activation resolves (10.537ms)
+apps/code-oss-extension test: ✔ activation completion marker is not emitted when controller activation rejects (0.9717ms)
+apps/code-oss-extension test: ✔ untrusted activation publishes blocked status and does not start service (1.4352ms)
+apps/code-oss-extension test: ✔ trusted activation registers one Testing API controller and refreshes through the active session (3.0911ms)
+apps/code-oss-extension test: ✔ untrusted activation and trust loss leave the Testing API without a usable protocol run path (2.7689ms)
+apps/code-oss-extension test: ✔ deactivate closes the Testing API profile and controller exactly once (1.8785ms)
+apps/code-oss-extension test: ✔ root switch synchronously revokes the old Testing API session before stop completes (4.9436ms)
+apps/code-oss-extension test: ✔ manual stop rejects Testing API refresh and run while service shutdown is pending (1.8236ms)
+apps/code-oss-extension test: ✔ inspect command delegates only to workspace/inspect (0.8143ms)
+apps/code-oss-extension test: ✔ trusted single-root activation autostarts and publishes ready status (0.3455ms)
+apps/code-oss-extension test: ▶ commands are blocked before touching the manager outside a trusted single-root workspace
+apps/code-oss-extension test:   ✔ no workspace (0.4605ms)
+apps/code-oss-extension test:   ✔ multi-root (0.1772ms)
+apps/code-oss-extension test:   ✔ untrusted (0.1364ms)
+apps/code-oss-extension test: ✔ commands are blocked before touching the manager outside a trusted single-root workspace (1.491ms)
+apps/code-oss-extension test: ✔ start and stop commands drive service lifecycle and status projection (0.4286ms)
+apps/code-oss-extension test: ✔ commands publish starting and stopping while lifecycle operations are pending (3.4039ms)
+apps/code-oss-extension test: ✔ granting trust autostarts and losing the workspace stops the service (1.0722ms)
+apps/code-oss-extension test: ✔ activation replaces the service when the single workspace root changes (0.357ms)
+apps/code-oss-extension test: ✔ manager failures show the redacted manager detail and publish failed status (0.4206ms)
+apps/code-oss-extension test: ✔ deactivation bounds an unresponsive manager stop (14.1401ms)
+apps/code-oss-extension test: ✔ deactivation reports a redacted manager stop failure (0.6546ms)
+apps/code-oss-extension test: ✔ queued trust reconciliation cannot start after deactivation begins (0.5332ms)
+apps/code-oss-extension test: ✔ inspect command rechecks live trust while workspace stop is pending (1.845ms)
+apps/code-oss-extension test: ✔ default activation resolves an empty executable setting to the bundled service (1.1731ms)
+apps/code-oss-extension test: ▶ service executable overrides require development mode and an approved absolute path
+apps/code-oss-extension test:   ✔ production override (0.3476ms)
+apps/code-oss-extension test:   ✔ development relative path (0.7559ms)
+apps/code-oss-extension test:   ✔ development unapproved basename (0.2643ms)
+apps/code-oss-extension test: ✔ service executable overrides require development mode and an approved absolute path (2.0768ms)
+apps/code-oss-extension test: ✔ development mode accepts an approved absolute service executable override (0.2864ms)
+apps/code-oss-extension test: ✔ executable absolute paths follow the host platform (0.3187ms)
+apps/code-oss-extension test: ✔ protocol adapter delegates its endpoint to ProtocolClient.connect (0.163ms)
+apps/code-oss-extension test: ✔ inspect errors never present raw paths or tokens (0.309ms)
+apps/code-oss-extension test: ✔ cleanup errors without manager detail never present raw paths or tokens (0.2689ms)
+apps/code-oss-extension test: ✔ commands paused at authorization cannot start or inspect after deactivation begins (3.0244ms)
+apps/code-oss-extension test: ✔ extension manifest declares workspace extension and safe commands (9.897ms)
+apps/code-oss-extension test: ✔ contracts expose explicit lifecycle states (2.3293ms)
+apps/code-oss-extension test: ✔ service lifecycle starts in prepare, spawn, READY, connect, handshake, capabilities order (12.2349ms)
+apps/code-oss-extension test: ✔ service lifecycle trust gate performs no external operation when untrusted (1.0108ms)
+apps/code-oss-extension test: ✔ queued start rechecks trust before allocating startup resources (0.4682ms)
+apps/code-oss-extension test: ✔ trust loss during token preparation cancels startup before spawn (2.8736ms)
+apps/code-oss-extension test: ✔ restart rechecks trust after a stop that overlaps trust loss (2.2573ms)
+apps/code-oss-extension test: ✔ trust loss during handshake cleans the spawned service without entering running (1.7847ms)
+apps/code-oss-extension test: ▶ service lifecycle startup failures enter failed and clean owned resources
+apps/code-oss-extension test:   ✔ READY timeout (13.7987ms)
+apps/code-oss-extension test:   ✔ handshake (1.937ms)
+apps/code-oss-extension test:   ✔ capabilities (1.766ms)
+apps/code-oss-extension test: ✔ service lifecycle startup failures enter failed and clean owned resources (18.6414ms)
+apps/code-oss-extension test: ✔ service lifecycle stop is idempotent for the connection and child (2.828ms)
+apps/code-oss-extension test: ✔ service lifecycle preserves stop, start, stop call order (3.1832ms)
+apps/code-oss-extension test: ✔ service lifecycle preserves start, stop, start call order (2.3514ms)
+apps/code-oss-extension test: ✔ service restart replaces the token, endpoint, and client (2.3806ms)
+apps/code-oss-extension test: ✔ service lifecycle enters failed when the child exits (1.6866ms)
+apps/code-oss-extension test: ✔ service lifecycle rejects a child exit between READY and connection (1.7782ms)
+apps/code-oss-extension test: ✔ service lifecycle enters failed when the connection closes (1.6653ms)
+apps/code-oss-extension test: ✔ service lifecycle serializes delayed failure cleanup before replacement start (3.7505ms)
+apps/code-oss-extension test: ✔ service lifecycle diagnostics retain only redacted stdout and stderr (1.9456ms)
+apps/code-oss-extension test: ✔ repeated service lifecycle never reuses resources or cleans an owner twice (122.1796ms)
+apps/code-oss-extension test: ✔ service resource uses a unique Windows named pipe without a Unix directory (2.7405ms)
+apps/code-oss-extension test: ✔ service resource uses an owner-only Linux directory and fits sockaddr_un (11.1152ms)
+apps/code-oss-extension test: ✔ service resource creates independent 32-byte base64url tokens (1.2209ms)
+apps/code-oss-extension test: ✔ service resource timeout diagnostics retain only the operation and duration (0.4457ms)
+apps/code-oss-extension test: ✔ 10,000 item catalog keeps Test Item identity for the same revision (198.9163ms)
+apps/code-oss-extension test: ℹ {"runtime":"node-24.19.0","platform":"win32-x64","itemCount":10000,"revision":"benchmark-r1","elapsedMs":112.544,"replacementCount":0}
+apps/code-oss-extension test: ✔ refresh inspects sorted workspace, discovers once, and maps a stable nested catalog tree (75.9277ms)
+apps/code-oss-extension test: ✔ refresh does not rebuild the tree when the catalog revision is unchanged (123.4344ms)
+apps/code-oss-extension test: ✔ refresh follows catalog cursors and projects more than one service page (55.5719ms)
+apps/code-oss-extension test: ✔ a slower older refresh cannot overwrite a newer catalog revision (165.5237ms)
+apps/code-oss-extension test: ✔ refresh atomically replaces stale catalog children when the revision changes (128.7036ms)
+apps/code-oss-extension test: ✔ refresh filters unrelated catalog publications and retains the matching event cursor (52.9706ms)
+apps/code-oss-extension test: ✔ refresh falls back to bounded catalog polling when no catalog event is available (115.808ms)
+apps/code-oss-extension test: ✔ refresh waits for a catalog event when discovery is still running (101.1775ms)
+apps/code-oss-extension test: ✔ refresh stops after the bounded catalog polling backoff is exhausted (6466.0364ms)
+apps/code-oss-extension test: ▶ refresh rejects a catalog response for another project or profile
+apps/code-oss-extension test:   ✔ project (64.5104ms)
+apps/code-oss-extension test:   ✔ profile (61.7771ms)
+apps/code-oss-extension test: ✔ refresh rejects a catalog response for another project or profile (127.2322ms)
+apps/code-oss-extension test: ✔ refresh revalidates trust after inspect before it starts discovery (0.3589ms)
+apps/code-oss-extension test: ✔ refresh revalidates the same session after discovery before subscription (0.3359ms)
+apps/code-oss-extension test: ✔ refresh revalidates the same session after subscription before catalog access (0.366ms)
+apps/code-oss-extension test: ▶ refresh does not issue protocol calls outside a trusted single-root session
+apps/code-oss-extension test:   ✔ untrusted (0.2364ms)
+apps/code-oss-extension test:   ✔ multi-root (0.1181ms)
+apps/code-oss-extension test:   ✔ no session (0.1539ms)
+apps/code-oss-extension test: ✔ refresh does not issue protocol calls outside a trusted single-root session (1.0327ms)
+apps/code-oss-extension test: ✔ run profile converts root, container, and item selections into stable protocol IDs (52.7308ms)
+apps/code-oss-extension test: ✔ concurrent runs share one subscription and dispatch matching run events without cancelling either run (51.9485ms)
+apps/code-oss-extension test: ✔ container events update their catalog container and failure details are redacted (64.8355ms)
+apps/code-oss-extension test: ✔ catalog revision replacement aborts an old run before queued old events can update the new tree (125.9868ms)
+apps/code-oss-extension test: ✔ a Test Item from a replaced catalog revision is rejected without a new run subscription (105.6443ms)
+apps/code-oss-extension test: ▶ pre-dispatch trust or session loss marks the selected targets before ending
+apps/code-oss-extension test:   ✔ trust (64.4296ms)
+apps/code-oss-extension test:   ✔ session (65.2334ms)
+apps/code-oss-extension test: ✔ pre-dispatch trust or session loss marks the selected targets before ending (130.2657ms)
+apps/code-oss-extension test: ✔ an event sequence gap closes the shared stream and converges every active run (51.4146ms)
+apps/code-oss-extension test: ▶ closed event streams converge incomplete and failed snapshots as errored items
+apps/code-oss-extension test:   ✔ running (65.6369ms)
+apps/code-oss-extension test:   ✔ incomplete (65.7826ms)
+apps/code-oss-extension test:   ✔ get-error (55.577ms)
+apps/code-oss-extension test: ✔ closed event streams converge incomplete and failed snapshots as errored items (188.062ms)
+apps/code-oss-extension test: ▶ non-passed terminal run outcomes mark selected items even after every item event arrived
+apps/code-oss-extension test:   ✔ failed (60.9675ms)
+apps/code-oss-extension test:   ✔ cancelled (52.5671ms)
+apps/code-oss-extension test:   ✔ timed_out (50.8902ms)
+apps/code-oss-extension test:   ✔ errored (65.0804ms)
+apps/code-oss-extension test: ✔ non-passed terminal run outcomes mark selected items even after every item event arrived (230.5102ms)
+apps/code-oss-extension test: ▶ final snapshot identity mismatches mark selected targets after all events completed
+apps/code-oss-extension test:   ✔ runId (52.6155ms)
+apps/code-oss-extension test:   ✔ projectId (62.1969ms)
+apps/code-oss-extension test:   ✔ profileId (50.7709ms)
+apps/code-oss-extension test:   ✔ catalogRevision (51.2697ms)
+apps/code-oss-extension test: ✔ final snapshot identity mismatches mark selected targets after all events completed (217.8724ms)
+apps/code-oss-extension test: ▶ delayed run dispatch marks its pre-dispatch selection on trust, session, or revision loss
+apps/code-oss-extension test:   ✔ trust (64.8719ms)
+apps/code-oss-extension test:   ✔ session (50.3505ms)
+apps/code-oss-extension test:   ✔ revision (113.3668ms)
+apps/code-oss-extension test: ✔ delayed run dispatch marks its pre-dispatch selection on trust, session, or revision loss (229.3403ms)
+apps/code-oss-extension test: ✔ trust loss aborts every active run without further protocol calls (52.4686ms)
+apps/code-oss-extension test: ✔ session replacement aborts every active run without calls through the replacement client (50.5167ms)
+apps/code-oss-extension test: ✔ run profile rejects unknown IDs and stale run revisions without subscribing (50.6228ms)
+apps/code-oss-extension test: ✔ refresh failure aborts active runs and closes their event stream (122.4036ms)
+apps/code-oss-extension test: ✔ run event mapping projects started and all result outcomes with failure details (59.2814ms)
+apps/code-oss-extension test: ✔ run completion and a closed event subscription converge through getTestRun (117.7187ms)
+apps/code-oss-extension test: ✔ deactivate closes active run subscriptions before later events can update the TestRun (62.4637ms)
+apps/code-oss-extension test: ✔ TestingApiAdapter creates a fakeable host contract without a runtime vscode import (2.8629ms)
+apps/code-oss-extension test: ✔ no workspace and multi-root workspaces are not executable (2.3224ms)
+apps/code-oss-extension test: ✔ untrusted single-root workspace never becomes executable (0.2949ms)
+apps/code-oss-extension test: ✔ trusted single-root workspace can start the service (0.2614ms)
+apps/code-oss-extension test: ✔ trust transition emits trusted only for one trusted folder (0.412ms)
+apps/code-oss-extension test: ✔ trust gate transitions from trusted when trust is revoked (0.3562ms)
+apps/code-oss-extension test: ✔ trust gate transitions from trusted when workspace becomes multi-root (0.4111ms)
+apps/code-oss-extension test: ✔ trust gate cannot produce the service-only failed state (0.3504ms)
+apps/code-oss-extension test: ✔ trust gate listeners run once per state transition (1.6958ms)
+apps/code-oss-extension test: ✔ production bridge converts Testing API values to real VS Code shapes (4.5735ms)
+apps/code-oss-extension test: ✔ activation uses the explicit bridge without hiding TestController incompatibilities (9.6987ms)
+apps/code-oss-extension test: ℹ tests 139
+apps/code-oss-extension test: ℹ suites 0
+apps/code-oss-extension test: ℹ pass 139
+apps/code-oss-extension test: ℹ fail 0
+apps/code-oss-extension test: ℹ cancelled 0
+apps/code-oss-extension test: ℹ skipped 0
+apps/code-oss-extension test: ℹ todo 0
+apps/code-oss-extension test: ℹ duration_ms 11153.4091
+apps/code-oss-extension test: Done
+ok  	unit-test-ide.local/test-service/cmd/cmake-fixture	(cached)
+?   	unit-test-ide.local/test-service/cmd/coverage-toolset-preflight	[no test files]
+?   	unit-test-ide.local/test-service/cmd/native-offline-guardian	[no test files]
+ok  	unit-test-ide.local/test-service/cmd/test-framework-fixture	(cached)
+ok  	unit-test-ide.local/test-service/cmd/unit-test-service	(cached)
+ok  	unit-test-ide.local/test-service/cmd/unity-runner-generator	(cached)
+ok  	unit-test-ide.local/test-service/internal/artifactstore	(cached)
+ok  	unit-test-ide.local/test-service/internal/build	(cached)
+?   	unit-test-ide.local/test-service/internal/buildcontract	[no test files]
+ok  	unit-test-ide.local/test-service/internal/cmake	(cached)
+ok  	unit-test-ide.local/test-service/internal/coveragebundle	(cached)
+ok  	unit-test-ide.local/test-service/internal/coveragecoord	(cached)
+ok  	unit-test-ide.local/test-service/internal/coveragedomain	(cached)
+ok  	unit-test-ide.local/test-service/internal/coverageexec	(cached)
+ok  	unit-test-ide.local/test-service/internal/coveragellvm	(cached)
+ok  	unit-test-ide.local/test-service/internal/coveragemodel	(cached)
+ok  	unit-test-ide.local/test-service/internal/coveragemodel/v1	(cached)
+ok  	unit-test-ide.local/test-service/internal/coveragenormalize	(cached)
+ok  	unit-test-ide.local/test-service/internal/coverageparser/llvm	(cached)
+ok  	unit-test-ide.local/test-service/internal/coveragereport	(cached)
+ok  	unit-test-ide.local/test-service/internal/coveragerun	(cached)
+ok  	unit-test-ide.local/test-service/internal/ctest	(cached)
+ok  	unit-test-ide.local/test-service/internal/diagnostic	30.168s
+ok  	unit-test-ide.local/test-service/internal/discovery	(cached)
+ok  	unit-test-ide.local/test-service/internal/eventbroker	(cached)
+ok  	unit-test-ide.local/test-service/internal/instance	(cached)
+ok  	unit-test-ide.local/test-service/internal/offlineboundary	(cached)
+ok  	unit-test-ide.local/test-service/internal/probe	(cached)
+ok  	unit-test-ide.local/test-service/internal/processcontrol	(cached)
+ok  	unit-test-ide.local/test-service/internal/processhost	(cached)
+ok  	unit-test-ide.local/test-service/internal/protocol	(cached)
+ok  	unit-test-ide.local/test-service/internal/protocolmodel	(cached)
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_2/artifact	[no test files]
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_2/capabilities	[no test files]
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_2/diagnostic	[no test files]
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_2/event	[no test files]
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_2/targetlist	[no test files]
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_2/task	[no test files]
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_2/workspace	[no test files]
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_3/artifact	[no test files]
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_3/capabilities	[no test files]
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_3/diagnostic	[no test files]
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_3/event	[no test files]
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_3/task	[no test files]
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_3/test	[no test files]
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_4/artifact	[no test files]
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_4/capabilities	[no test files]
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_4/coverage	[no test files]
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_4/diagnostic	[no test files]
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_4/event	[no test files]
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_4/task	[no test files]
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_4/test	[no test files]
+ok  	unit-test-ide.local/test-service/internal/runtime	(cached)
+ok  	unit-test-ide.local/test-service/internal/server	(cached)
+ok  	unit-test-ide.local/test-service/internal/serviceanchor	(cached)
+ok  	unit-test-ide.local/test-service/internal/session	(cached)
+ok  	unit-test-ide.local/test-service/internal/task	(cached)
+ok  	unit-test-ide.local/test-service/internal/taskfixture	(cached)
+ok  	unit-test-ide.local/test-service/internal/taskstore	(cached)
+ok  	unit-test-ide.local/test-service/internal/testcontrol	(cached)
+ok  	unit-test-ide.local/test-service/internal/testdiscovery	(cached)
+ok  	unit-test-ide.local/test-service/internal/testdomain	(cached)
+ok  	unit-test-ide.local/test-service/internal/testframework	(cached)
+ok  	unit-test-ide.local/test-service/internal/testframework/cpputest	(cached)
+ok  	unit-test-ide.local/test-service/internal/testframework/unity	(cached)
+ok  	unit-test-ide.local/test-service/internal/testrun	(cached)
+ok  	unit-test-ide.local/test-service/internal/toolchain	(cached)
+?   	unit-test-ide.local/test-service/internal/transport	[no test files]
+ok  	unit-test-ide.local/test-service/internal/unityrunner	(cached)
+ok  	unit-test-ide.local/test-service/internal/winprocess	(cached)
+ok  	unit-test-ide.local/test-service/internal/workspace	(cached)
+ok  	unit-test-ide.local/test-service/cmd/cmake-fixture	(cached)
+?   	unit-test-ide.local/test-service/cmd/coverage-toolset-preflight	[no test files]
+?   	unit-test-ide.local/test-service/cmd/native-offline-guardian	[no test files]
+ok  	unit-test-ide.local/test-service/cmd/test-framework-fixture	(cached)
+ok  	unit-test-ide.local/test-service/cmd/unit-test-service	(cached)
+ok  	unit-test-ide.local/test-service/cmd/unity-runner-generator	(cached)
+ok  	unit-test-ide.local/test-service/internal/artifactstore	(cached)
+ok  	unit-test-ide.local/test-service/internal/build	(cached)
+?   	unit-test-ide.local/test-service/internal/buildcontract	[no test files]
+ok  	unit-test-ide.local/test-service/internal/cmake	(cached)
+ok  	unit-test-ide.local/test-service/internal/coveragebundle	4.402s
+ok  	unit-test-ide.local/test-service/internal/coveragecoord	(cached)
+ok  	unit-test-ide.local/test-service/internal/coveragedomain	(cached)
+ok  	unit-test-ide.local/test-service/internal/coverageexec	(cached)
+ok  	unit-test-ide.local/test-service/internal/coveragellvm	(cached)
+ok  	unit-test-ide.local/test-service/internal/coveragemodel	(cached)
+ok  	unit-test-ide.local/test-service/internal/coveragemodel/v1	(cached)
+ok  	unit-test-ide.local/test-service/internal/coveragenormalize	(cached)
+ok  	unit-test-ide.local/test-service/internal/coverageparser/llvm	(cached)
+ok  	unit-test-ide.local/test-service/internal/coveragereport	(cached)
+ok  	unit-test-ide.local/test-service/internal/coveragerun	(cached)
+ok  	unit-test-ide.local/test-service/internal/ctest	(cached)
+ok  	unit-test-ide.local/test-service/internal/diagnostic	108.357s
+ok  	unit-test-ide.local/test-service/internal/discovery	(cached)
+ok  	unit-test-ide.local/test-service/internal/eventbroker	(cached)
+ok  	unit-test-ide.local/test-service/internal/instance	(cached)
+ok  	unit-test-ide.local/test-service/internal/offlineboundary	(cached)
+ok  	unit-test-ide.local/test-service/internal/probe	(cached)
+ok  	unit-test-ide.local/test-service/internal/processcontrol	(cached)
+ok  	unit-test-ide.local/test-service/internal/processhost	(cached)
+ok  	unit-test-ide.local/test-service/internal/protocol	(cached)
+ok  	unit-test-ide.local/test-service/internal/protocolmodel	(cached)
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_2/artifact	[no test files]
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_2/capabilities	[no test files]
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_2/diagnostic	[no test files]
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_2/event	[no test files]
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_2/targetlist	[no test files]
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_2/task	[no test files]
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_2/workspace	[no test files]
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_3/artifact	[no test files]
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_3/capabilities	[no test files]
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_3/diagnostic	[no test files]
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_3/event	[no test files]
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_3/task	[no test files]
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_3/test	[no test files]
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_4/artifact	[no test files]
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_4/capabilities	[no test files]
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_4/coverage	[no test files]
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_4/diagnostic	[no test files]
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_4/event	[no test files]
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_4/task	[no test files]
+?   	unit-test-ide.local/test-service/internal/protocolmodel/v1_4/test	[no test files]
+ok  	unit-test-ide.local/test-service/internal/runtime	(cached)
+ok  	unit-test-ide.local/test-service/internal/server	(cached)
+ok  	unit-test-ide.local/test-service/internal/serviceanchor	(cached)
+ok  	unit-test-ide.local/test-service/internal/session	(cached)
+ok  	unit-test-ide.local/test-service/internal/task	(cached)
+ok  	unit-test-ide.local/test-service/internal/taskfixture	(cached)
+ok  	unit-test-ide.local/test-service/internal/taskstore	89.210s
+ok  	unit-test-ide.local/test-service/internal/testcontrol	(cached)
+ok  	unit-test-ide.local/test-service/internal/testdiscovery	(cached)
+ok  	unit-test-ide.local/test-service/internal/testdomain	(cached)
+ok  	unit-test-ide.local/test-service/internal/testframework	(cached)
+ok  	unit-test-ide.local/test-service/internal/testframework/cpputest	(cached)
+ok  	unit-test-ide.local/test-service/internal/testframework/unity	(cached)
+ok  	unit-test-ide.local/test-service/internal/testrun	(cached)
+ok  	unit-test-ide.local/test-service/internal/toolchain	(cached)
+?   	unit-test-ide.local/test-service/internal/transport	[no test files]
+ok  	unit-test-ide.local/test-service/internal/unityrunner	(cached)
+ok  	unit-test-ide.local/test-service/internal/winprocess	(cached)
+ok  	unit-test-ide.local/test-service/internal/workspace	(cached)
+✔ Unix endpoint stays within sockaddr_un when the workspace path is long (1.2649ms)
+✔ Windows endpoint remains an isolated Named Pipe (0.5598ms)
+✔ named timeout bounds a pending RPC with a safe operation label (29.0976ms)
+✔ service fixture bounds pending token preparation (34.1293ms)
+✔ owned startup timeout ignores late token preparation and removes its fixture directory (466.1076ms)
+✔ dispose serializes with an in-flight restart and cleans the restarted service (371.6592ms)
+✔ service fixture bounds a pending handshake RPC and cleans up its process (616.1314ms)
+✔ token preparation failures recursively redact nested diagnostics (1.1578ms)
+✔ spawn failures recursively redact nested diagnostics (29.3822ms)
+✔ service launch forwards workspace trust and CMake options as isolated arguments (29.4202ms)
+✔ connect failures recursively redact nested diagnostics (111.3895ms)
+✔ handshake failures recursively redact nested diagnostics (108.276ms)
+✔ collector consumes queued replay through the stable target sequence (0.6045ms)
+✔ prepares the token file before writing the secret (29.0798ms)
+✔ probe authenticates, reads capabilities, and shuts the service down (169.5978ms)
+✔ successful simulation preserves the complete negotiated event stream (188.0614ms)
+✔ trusted workspace completes deterministic CMake builds and skips the second configure (55901.9477ms)
+✔ protocol v1.3 discovers, runs, replays, and reruns deterministic CppUTest failures (140700.1781ms)
+✔ task survives reconnect, cancels its tree, persists history and artifact (289.0173ms)
+✔ service crash recovers an active task exactly once as interrupted (279.867ms)
+ℹ tests 20
+ℹ suites 0
+ℹ pass 20
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 200393.7337

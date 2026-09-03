@@ -1,0 +1,10 @@
+$ pnpm check:protocol-generated && pnpm check:coverage-generated && pnpm build && pnpm test && pnpm test:go:race && pnpm test:e2e
+$ node tools/protocol-gen/generate.mjs --check
+$ node tools/coverage-gen/generate.mjs --check
+$ pnpm -r build && go build ./apps/test-service/...
+$ pnpm run test:release-producer && pnpm run test:coverage-gen && pnpm run test:cmake-bundle && pnpm run test:coverage-bundle && pnpm run test:workspace && pnpm -r --if-present test && pnpm run test:go
+$ node --test tools/release/producer/source-manifest.test.mjs tools/release/producer/runtime-inventory.test.mjs tools/release/producer/provenance.test.mjs tools/release/producer/trusted-run.test.mjs tools/release/producer/workflow-contract.test.mjs
+$ node --test tools/coverage-gen/generate.test.mjs
+$ node --test tools/cmake-bundle/prepare.test.mjs
+$ node --test tools/coverage-bundle/manifest.test.mjs tools/coverage-bundle/prepare.test.mjs
+$ node --test tools/workspace-smoke/workspace-smoke.test.mjs tools/workspace-smoke/workspace-config-schema.test.mjs tools/workspace-smoke/unit-test-ide-cmake-helper.test.mjs

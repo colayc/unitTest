@@ -1,0 +1,4 @@
+C:\codex_project\unitTest\.worktrees\fix-cli-launch-handshake\tools\service-probe:
+[ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL] @unit-test-ide/service-probe@0.1.0 test:e2e:native: `node build-service.mjs && pnpm run build && node dist/native-run.js`
+Exit status 1
+[ELIFECYCLE] Command failed with exit code 1.
