@@ -536,16 +536,26 @@ function launcherRelativePath() {
 }
 
 function launchHandshake(packageRoot, version, userDataRoot) {
+  const versionRoot = join(packageRoot, "versions", version);
   const executable = join(
-    packageRoot,
-    "versions",
-    version,
+    versionRoot,
     ...launcherRelativePath().split("/"),
   );
-  return spawnSync(executable, ["--version"], {
+  const cli = join(
+    versionRoot,
+    "app",
+    "code-oss-runtime",
+    "resources",
+    "app",
+    "out",
+    "cli.js",
+  );
+  return spawnSync(executable, [cli, "--version", "--user-data-dir", userDataRoot], {
     encoding: "utf8",
     env: {
       ...process.env,
+      ELECTRON_RUN_AS_NODE: "1",
+      VSCODE_DEV: "",
       HOME: userDataRoot,
       USERPROFILE: userDataRoot,
       XDG_CACHE_HOME: join(userDataRoot, "cache"),
