@@ -579,7 +579,7 @@ func TestManagerPublishesStructuredDiagnosticsFromRuntimeOnlyStepParser(t *testi
 	request.Plan.Steps[0].DiagnosticParser = &staticDiagnosticParser{
 		values: []diagnostic.Diagnostic{{
 			Severity: "error", Code: "C100", Message: "compile failed",
-			FileURI: "file:///workspace/main.cpp",
+			FileURI: "file:///E:/private/workspace/test.cpp",
 			Range:   &diagnostic.Range{Start: diagnostic.Position{Line: 11, Character: 2}},
 		}},
 	}
@@ -613,7 +613,7 @@ func TestManagerPublishesStructuredDiagnosticsFromRuntimeOnlyStepParser(t *testi
 	if !found || payload.Diagnostic.Severity != "error" ||
 		payload.Diagnostic.Code != "C100" ||
 		payload.Diagnostic.Message != "compile failed" ||
-		payload.Diagnostic.SourceURI != "file:///workspace/main.cpp" ||
+		payload.Diagnostic.SourceURI != "workspace:///" ||
 		payload.Diagnostic.Line != 12 || payload.Diagnostic.Column != 3 {
 		t.Fatalf("diagnostic payload = %#v", payload)
 	}
