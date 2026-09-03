@@ -9,6 +9,9 @@ func TestTaskOutputRedactsNativePaths(t *testing.T) {
 	if got := publicDiagnosticURI("file:///E:/private/workspace/test.cpp"); got != "workspace:///" {
 		t.Fatalf("diagnostic URI retained a native drive: %q", got)
 	}
+	if got := publicDiagnosticURI("file:///workspace/test.cpp"); got != "file:///workspace/test.cpp" {
+		t.Fatalf("non-native diagnostic URI changed unexpectedly: %q", got)
+	}
 	if got := nativePathInTaskOutput.ReplaceAllString("unit-test-ide://artifact/abc", "$1[redacted-path]"); got != "unit-test-ide://artifact/abc" {
 		t.Fatalf("protocol URI was mistaken for a native path: %q", got)
 	}

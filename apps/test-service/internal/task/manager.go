@@ -1119,10 +1119,16 @@ func (m *Manager) persistDiagnostics(
 	values []diagnostic.Diagnostic,
 	active map[string]*activeTask,
 ) {
+	mapPublicURI := publicDiagnosticURI
+	if current.nextStep < len(current.plan.Steps) {
+		if provider, ok := current.plan.Steps[current.nextStep].DiagnosticParser.(diagnostic.PublicURIProvider); ok {
+			mapPublicURI = provider.PublicURI
+		}
+	}
 	for _, value := range values {
-		value.FileURI = publicDiagnosticURI(value.FileURI)
+		value.FileURI = mapPublicURI(value.FileURI)
 		for index := range value.Related {
-			value.Related[index].FileURI = publicDiagnosticURI(value.Related[index].FileURI)
+			value.Related[index].FileURI = mapPublicURI(value.Related[index].FileURI)
 		}
 		value.TaskID = current.task.ID
 		if value.StepID == "" {
