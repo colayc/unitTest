@@ -620,6 +620,102 @@ func TestManagerPublishesStructuredDiagnosticsFromRuntimeOnlyStepParser(t *testi
 	f.process.complete(task.ProcessResult{ExitCode: 1})
 }
 
+func TestManagerPublishesPublicURIProviderMappedDiagnosticURIs(t *testing.T) {
+	store := newFakeStore()
+	publisher := &recordingPublisher{}
+	process := newFakeProcess()
+	processes := &fakeProcessFactory{next: process}
+	artifacts := &recordingDiagnosticArtifactWriter{}
+	clock := newFakeClock()
+	var next byte = 150
+	manager, err := task.NewManager(task.ManagerConfig{
+		Store: store, Publisher: publisher, Processes: processes, Artifacts: artifacts,
+		Clock:               clock,
+		NewID:               func() string { next++; return testID(next) },
+		ServiceExecutable:   "trusted-service",
+		ServiceInstanceID:   testID(199),
+		TerminationGrace:    time.Second,
+		OutputFlushInterval: 25 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		process.completeOnce(task.ProcessResult{Err: errors.New("test cleanup")})
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = manager.Shutdown(ctx)
+	})
+
+	request := twoStepStartRequest(testID(66), time.Minute, fixedBoundary{})
+	request.Plan.Steps[0].DiagnosticParser = &publicURIDiagnosticParser{
+		values: []diagnostic.Diagnostic{{
+			Severity: "error", Code: "C200", Message: "compile failed",
+			FileURI: "file:///E:/private/workspace/src/main.cpp",
+			Range:   &diagnostic.Range{Start: diagnostic.Position{Line: 4, Character: 1}},
+			Related: []diagnostic.Related{{
+				Message: "declared here",
+				FileURI: "file:///E:/private/workspace/include/main.hpp",
+			}},
+		}},
+	}
+	started, err := manager.Start(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	process.output(task.ProcessOutput{Stream: "stderr", Data: []byte("diagnostic\n")})
+
+	deadline := time.After(time.Second)
+	for len(artifacts.diagnosticsCopy()) == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("diagnostic was not appended to artifact sink")
+		default:
+		}
+	}
+
+	diagnostics := artifacts.diagnosticsCopy()
+	if len(diagnostics) != 1 {
+		t.Fatalf("artifact diagnostics = %#v", diagnostics)
+	}
+	if diagnostics[0].FileURI != "workspace:///src/main.cpp" {
+		t.Fatalf("primary diagnostic URI = %q, want provider-mapped workspace URI", diagnostics[0].FileURI)
+	}
+	if len(diagnostics[0].Related) != 1 || diagnostics[0].Related[0].FileURI != "workspace:///src/main.cpp" {
+		t.Fatalf("related diagnostic URIs = %#v, want provider-mapped workspace URI", diagnostics[0].Related)
+	}
+
+	events := store.eventsForTask(started.ID)
+	deadline = time.After(time.Second)
+	for eventDiagnosticCount(events) == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("diagnostic event was not appended")
+		default:
+		}
+		events = store.eventsForTask(started.ID)
+	}
+	var payload struct {
+		Diagnostic struct {
+			SourceURI string `json:"sourceUri"`
+		} `json:"diagnostic"`
+	}
+	found := false
+	for _, event := range events {
+		if event.Type != task.EventTaskDiagnostic {
+			continue
+		}
+		found = true
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !found || payload.Diagnostic.SourceURI != "workspace:///src/main.cpp" {
+		t.Fatalf("diagnostic payload = %#v", payload)
+	}
+	process.complete(task.ProcessResult{ExitCode: 1})
+}
+
 func TestManagerWritesOutputAndDiagnosticsToSinkBeforeJournal(t *testing.T) {
 	f := newManagerFixture(t)
 	request := twoStepCMakeStartRequest(testID(102), time.Minute, fixedBoundary{})
@@ -732,6 +828,22 @@ func (p *staticDiagnosticParser) Feed(string, []byte) []diagnostic.Diagnostic {
 
 func (p *staticDiagnosticParser) Close() []diagnostic.Diagnostic { return nil }
 
+type publicURIDiagnosticParser struct {
+	values []diagnostic.Diagnostic
+}
+
+func (p *publicURIDiagnosticParser) Feed(string, []byte) []diagnostic.Diagnostic {
+	values := p.values
+	p.values = nil
+	return values
+}
+
+func (p *publicURIDiagnosticParser) Close() []diagnostic.Diagnostic { return nil }
+
+func (*publicURIDiagnosticParser) PublicURI(string) string {
+	return "workspace:///src/main.cpp"
+}
+
 type panickingDiagnosticParser struct{}
 
 func (panickingDiagnosticParser) Feed(string, []byte) []diagnostic.Diagnostic {
@@ -771,6 +883,76 @@ func (o *recordingStepObserver) Succeeded(
 	o.step = step
 	return o.err
 }
+
+type recordingDiagnosticArtifactWriter struct {
+	mu          sync.Mutex
+	diagnostics []diagnostic.Diagnostic
+}
+
+func (w *recordingDiagnosticArtifactWriter) OpenTask(
+	_ context.Context,
+	taskID string,
+	kind task.Kind,
+) (task.ArtifactSink, error) {
+	return &recordingDiagnosticArtifactSink{
+		taskID: taskID,
+		kind:   kind,
+		writer: w,
+	}, nil
+}
+
+func (w *recordingDiagnosticArtifactWriter) diagnosticsCopy() []diagnostic.Diagnostic {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]diagnostic.Diagnostic(nil), w.diagnostics...)
+}
+
+type recordingDiagnosticArtifactSink struct {
+	taskID string
+	kind   task.Kind
+	writer *recordingDiagnosticArtifactWriter
+}
+
+func (*recordingDiagnosticArtifactSink) AppendOutput(context.Context, string, string, []byte) error {
+	return nil
+}
+
+func (s *recordingDiagnosticArtifactSink) AppendDiagnostic(
+	_ context.Context,
+	value diagnostic.Diagnostic,
+) error {
+	s.writer.mu.Lock()
+	defer s.writer.mu.Unlock()
+	s.writer.diagnostics = append(s.writer.diagnostics, value)
+	return nil
+}
+
+func (*recordingDiagnosticArtifactSink) CommitJSON(context.Context, string, string, any) error {
+	return nil
+}
+
+func (*recordingDiagnosticArtifactSink) CommitJSONLines(context.Context, string, string, []json.RawMessage) error {
+	return nil
+}
+
+func (s *recordingDiagnosticArtifactSink) Finalize(_ context.Context, at time.Time) ([]task.Artifact, error) {
+	if s.kind != task.KindCMakeBuild {
+		return nil, nil
+	}
+	return []task.Artifact{
+		{
+			ID:           "diag-artifact",
+			TaskID:       s.taskID,
+			Kind:         "diagnostics",
+			RelativePath: fmt.Sprintf("tasks/%s/diag-artifact", s.taskID),
+			MIMEType:     "application/x-ndjson",
+			SHA256:       strings.Repeat("a", 64),
+			CreatedAt:    at,
+		},
+	}, nil
+}
+
+func (*recordingDiagnosticArtifactSink) Abort(context.Context) error { return nil }
 
 func TestManagerStepEventPublisherFailureKeepsDurableProcessHandoff(t *testing.T) {
 	f := newManagerFixture(t)
@@ -2509,4 +2691,14 @@ func assertStepStatuses(t *testing.T, got task.Task, want ...task.StepStatus) {
 			t.Fatalf("step[%d] status = %s, want %s; steps = %#v", index, got.Steps[index].Status, want[index], got.Steps)
 		}
 	}
+}
+
+func eventDiagnosticCount(events []task.Event) int {
+	count := 0
+	for _, event := range events {
+		if event.Type == task.EventTaskDiagnostic {
+			count++
+		}
+	}
+	return count
 }
