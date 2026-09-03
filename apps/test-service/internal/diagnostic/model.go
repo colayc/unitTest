@@ -35,3 +35,7 @@ type Parser interface {
 	Feed(stream string, data []byte) []Diagnostic
 	Close() []Diagnostic
 }
+
+type PublicURIProvider interface {
+	PublicURI(value string) string
+}

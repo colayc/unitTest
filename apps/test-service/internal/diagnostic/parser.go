@@ -465,6 +465,64 @@ func (p *parser) identityURI(value string) string {
 	return value
 }
 
+func (p *parser) PublicURI(value string) string {
+	if p == nil || value == "" {
+		return value
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || !strings.EqualFold(parsed.Scheme, "file") ||
+		parsed.RawQuery != "" || parsed.Fragment != "" {
+		return value
+	}
+	native, ok := fileURIPath(parsed)
+	if !ok {
+		return value
+	}
+	if !p.options.Root.Contains(native) {
+		if runtime.GOOS == "windows" {
+			return "workspace:///"
+		}
+		return value
+	}
+	relative, err := filepath.Rel(p.options.Root.NativePath, native)
+	if err != nil {
+		return value
+	}
+	if relative == "." {
+		return "workspace:///"
+	}
+	return (&url.URL{Scheme: "workspace", Path: "/" + filepath.ToSlash(relative)}).String()
+}
+
+func fileURIPath(value *url.URL) (string, bool) {
+	if value == nil {
+		return "", false
+	}
+	if runtime.GOOS == "windows" {
+		if value.Host != "" {
+			native := `\\` + value.Host + `\` +
+				strings.TrimPrefix(filepath.FromSlash(value.Path), `\`)
+			if !filepath.IsAbs(native) {
+				return "", false
+			}
+			return filepath.Clean(native), true
+		}
+		native := filepath.FromSlash(strings.TrimPrefix(value.Path, "/"))
+		if !filepath.IsAbs(native) {
+			return "", false
+		}
+		return filepath.Clean(native), true
+	}
+	if value.Host != "" {
+		return "", false
+	}
+	native := filepath.Clean(value.Path)
+	if !filepath.IsAbs(native) {
+		return "", false
+	}
+	return native, true
+}
+
 func windowsWorkspaceIdentityURI(root, value string) (string, bool) {
 	if runtime.GOOS != "windows" {
 		return "", false
