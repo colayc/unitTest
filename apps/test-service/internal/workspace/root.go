@@ -74,11 +74,29 @@ func (r Root) ResolveRelative(relative string) (string, error) {
 }
 
 func (r Root) Contains(path string) bool {
-	if r.NativePath == "" || path == "" {
-		return false
+	_, err := r.RelativePath(path)
+	return err == nil
+}
+
+func (r Root) RelativePath(path string) (string, error) {
+	if r.NativePath == "" {
+		return "", ErrInvalidRoot
+	}
+	if path == "" {
+		return "", ErrInvalidRelativePath
 	}
 	finalPath, _, err := finalPathWithMissingTail(path)
-	return err == nil && pathWithinRoot(r.NativePath, finalPath)
+	if err != nil {
+		return "", fmt.Errorf("%w: resolve path: %v", ErrInvalidRelativePath, err)
+	}
+	if !pathWithinRoot(r.NativePath, finalPath) {
+		return "", ErrPathOutsideRoot
+	}
+	relative, err := filepath.Rel(r.NativePath, finalPath)
+	if err != nil {
+		return "", fmt.Errorf("%w: make relative: %v", ErrInvalidRelativePath, err)
+	}
+	return relative, nil
 }
 
 func finalPathWithMissingTail(path string) (string, string, error) {
