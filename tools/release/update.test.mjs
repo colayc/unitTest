@@ -20,6 +20,7 @@ const platform = process.platform === "win32" ? "windows" : "linux";
 const launcherRelativePath = process.platform === "win32"
   ? "app/code-oss-runtime/Code - OSS.exe"
   : "app/code-oss-runtime/code-oss";
+const cliRelativePath = "app/code-oss-runtime/resources/app/out/cli.js";
 const productRelativePath = "app/code-oss-runtime/resources/app/product.json";
 const corruptedLauncherBytes = Buffer.from([0x00, 0xff, 0x00, 0x7f, 0x55, 0xaa]);
 const generatedAt = "2026-08-25T00:00:00.000Z";
@@ -108,11 +109,49 @@ async function writeFixtureFile(root, relativePath, value) {
   return filePath;
 }
 
+function createCliFixtureSource({
+  expectedUserDataRoot,
+  version,
+  markerPath,
+  exitCode = 0,
+}) {
+  const expectedArguments = ["--version", "--user-data-dir", expectedUserDataRoot];
+  const markerStatement = markerPath === undefined
+    ? ""
+    : `appendFileSync(${JSON.stringify(markerPath)}, ${JSON.stringify(`${version}\n`)});`;
+  return `"use strict";
+const { appendFileSync } = require("node:fs");
+const actualArguments = process.argv.slice(2);
+const expectedArguments = ${JSON.stringify(expectedArguments)};
+if (process.env.ELECTRON_RUN_AS_NODE !== "1") {
+  process.stderr.write("fixture CLI requires ELECTRON_RUN_AS_NODE=1\\n");
+  process.exit(71);
+}
+if (process.env.VSCODE_DEV !== "") {
+  process.stderr.write("fixture CLI requires empty VSCODE_DEV\\n");
+  process.exit(72);
+}
+if (JSON.stringify(actualArguments) !== JSON.stringify(expectedArguments)) {
+  process.stderr.write("fixture CLI argument mismatch\\n");
+  process.exit(73);
+}
+if (${exitCode} !== 0) {
+  process.stderr.write(${JSON.stringify(`fixture CLI exit ${exitCode}\n`)});
+  process.exit(${exitCode});
+}
+${markerStatement}
+process.stdout.write(${JSON.stringify(`${version}\n`)});
+`;
+}
+
 async function createArtifact(root, version, {
   launcher = `launch ${version}\n`,
   launcherSource,
   manifestGeneratedAt = generatedAt,
   manifestSourceCommit = sourceCommit,
+  includeCli = true,
+  cliExitCode = 0,
+  cliMarkerPath,
 } = {}) {
   const artifactRoot = join(root, `artifact-${version}`);
   const notice = `license ${version}\n`;
@@ -123,6 +162,15 @@ async function createArtifact(root, version, {
   if (process.platform !== "win32") await chmod(launcherPath, 0o755);
   const launcherBytes = await readFile(launcherPath);
   const productBytes = Buffer.from(`${JSON.stringify({ nameShort: "Code - OSS", version })}\n`);
+  const cliBytes = includeCli
+    ? Buffer.from(createCliFixtureSource({
+      expectedUserDataRoot: join(root, "disposable-smoke-root", "workspace"),
+      version,
+      markerPath: cliMarkerPath,
+      exitCode: cliExitCode,
+    }))
+    : null;
+  if (cliBytes !== null) await writeFixtureFile(artifactRoot, cliRelativePath, cliBytes);
   await writeFixtureFile(artifactRoot, productRelativePath, productBytes);
   await writeFixtureFile(artifactRoot, "licenses/NOTICE.txt", notice);
   const manifest = {
@@ -141,6 +189,14 @@ async function createArtifact(root, version, {
         sha256: sha256(launcherBytes),
         executable: true,
       },
+      ...(cliBytes === null ? [] : [{
+        id: "app-code-oss-cli",
+        kind: "runtime",
+        relativePath: cliRelativePath,
+        size: cliBytes.length,
+        sha256: sha256(cliBytes),
+        executable: false,
+      }]),
       {
         id: "app-code-oss-product",
         kind: "runtime",
@@ -200,6 +256,34 @@ async function withTemporaryRoot(t, run) {
   await run(root);
 }
 
+async function createSmokeInputs(root, {
+  baselineArtifactOptions = {},
+  targetArtifactOptions = {},
+} = {}) {
+  const baselineArtifact = await createArtifact(root, "1.0.0", {
+    manifestGeneratedAt: baselineGeneratedAt,
+    manifestSourceCommit: baselineSourceCommit,
+    ...baselineArtifactOptions,
+  });
+  const artifact = await createArtifact(root, "2.0.0", targetArtifactOptions);
+  const packagePath = await writeFixtureFile(root, "downloads/unit-test-ide-2.0.0.package", "real package bytes\n");
+  const baselinePackagePath = await writeFixtureFile(root, "downloads/unit-test-ide-1.0.0.package", "real baseline package bytes\n");
+  return {
+    artifact,
+    baselineArtifact,
+    baselineManifestSha256: sha256(await readFile(join(baselineArtifact, "release-manifest.json"))),
+    baselinePackagePath,
+    baselinePackageSha256: sha256(await readFile(baselinePackagePath)),
+    evidence: join(root, "install-smoke.json"),
+    manifestSha256: sha256(await readFile(join(artifact, "release-manifest.json"))),
+    packagePath,
+    packageSha256: sha256(await readFile(packagePath)),
+    platform,
+    root: join(root, "disposable-smoke-root"),
+    version: "2.0.0",
+  };
+}
+
 async function currentVersion(packageRoot) {
   return (await readFile(join(packageRoot, "current"), "utf8")).trim();
 }
@@ -234,22 +318,32 @@ test("installVersion compares the closed artifact file set independently of recu
   });
 });
 
-test("package-backed production smoke corrupts the target then really launches the restored baseline", async (t) => {
+test("package-backed production smoke executes the installed CLI before and after rollback", async (t) => {
   await withTemporaryRoot(t, async (root) => {
     const launcherSource = process.execPath;
+    const workspaceRoot = join(root, "disposable-smoke-root", "workspace");
+    const cliMarkerPath = join(root, "cli-handshake-markers.txt");
     const baselineArtifact = await createArtifact(root, "1.0.0", {
+      cliMarkerPath,
       launcherSource,
       manifestGeneratedAt: baselineGeneratedAt,
       manifestSourceCommit: baselineSourceCommit,
     });
-    const artifact = await createArtifact(root, "2.0.0", { launcherSource });
+    const artifact = await createArtifact(root, "2.0.0", { cliMarkerPath, launcherSource });
     const sourceLauncher = join(artifact, ...launcherRelativePath.split("/"));
-    const sourceLauncherProbe = spawnSync(sourceLauncher, ["--version"], {
-      encoding: "utf8",
-      windowsHide: true,
-    });
+    const sourceCli = join(artifact, ...cliRelativePath.split("/"));
+    const sourceLauncherProbe = spawnSync(
+      sourceLauncher,
+      [sourceCli, "--version", "--user-data-dir", workspaceRoot],
+      {
+        encoding: "utf8",
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: "1", VSCODE_DEV: "" },
+        windowsHide: true,
+      },
+    );
     assert.equal(sourceLauncherProbe.status, 0, sourceLauncherProbe.stderr);
-    assert.equal(sourceLauncherProbe.stdout.trim(), process.version);
+    assert.equal(sourceLauncherProbe.stdout.trim(), "2.0.0");
+    await rm(cliMarkerPath, { force: true });
     const sourceProduct = join(artifact, ...productRelativePath.split("/"));
     const sourceBytes = await readFile(sourceLauncher);
     const sourceProductBytes = await readFile(sourceProduct);
@@ -291,30 +385,61 @@ test("package-backed production smoke corrupts the target then really launches t
     assert.deepEqual(await readFile(sourceLauncher), sourceBytes);
     assert.deepEqual(await installedProductAfterCorruption, sourceProductBytes);
     assert.deepEqual(await readFile(sourceProduct), sourceProductBytes);
+    const cliMarkers = (await readFile(cliMarkerPath, "utf8")).trim().split(/\r?\n/u);
+    assert.deepEqual(cliMarkers, ["1.0.0", "1.0.0"]);
+  });
+});
+
+test("package-backed smoke fails closed when the installed CLI script is missing", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const inputs = await createSmokeInputs(root, {
+      baselineArtifactOptions: { includeCli: false, launcherSource: process.execPath },
+      targetArtifactOptions: { includeCli: false, launcherSource: process.execPath },
+    });
+    await assert.rejects(
+      () => runSmokeLifecycle(inputs),
+      (error) => error?.code === "RELEASE_SMOKE_FAILED",
+    );
+  });
+});
+
+test("package-backed smoke fails closed when the installed CLI exits nonzero", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const inputs = await createSmokeInputs(root, {
+      baselineArtifactOptions: { cliExitCode: 23, launcherSource: process.execPath },
+      targetArtifactOptions: { launcherSource: process.execPath },
+    });
+    await assert.rejects(
+      () => runSmokeLifecycle(inputs),
+      (error) => {
+        assert.equal(error?.code, "RELEASE_SMOKE_FAILED");
+        assert.equal(error?.message, "RELEASE_SMOKE_FAILED: first launch handshake failed: fixture CLI exit 23");
+        return true;
+      },
+    );
+  });
+});
+
+test("package-backed smoke reports a timed out launch handshake usefully", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const inputs = await createSmokeInputs(root);
+    const timeoutError = Object.assign(new Error("spawnSync Code - OSS.exe ETIMEDOUT"), { code: "ETIMEDOUT" });
+    await assert.rejects(
+      () => runSmokeLifecycle(inputs, {
+        launch: () => ({ status: null, signal: null, error: timeoutError, stdout: "", stderr: "" }),
+      }),
+      (error) => {
+        assert.equal(error?.code, "RELEASE_SMOKE_FAILED");
+        assert.equal(error?.message, "RELEASE_SMOKE_FAILED: first launch handshake failed: spawnSync Code - OSS.exe ETIMEDOUT");
+        return true;
+      },
+    );
   });
 });
 
 test("package-backed smoke reports whitespace-only first-launch stdout usefully", async (t) => {
   await withTemporaryRoot(t, async (root) => {
-    const baselineArtifact = await createArtifact(root, "1.0.0", {
-      manifestGeneratedAt: baselineGeneratedAt,
-      manifestSourceCommit: baselineSourceCommit,
-    });
-    const artifact = await createArtifact(root, "2.0.0");
-    const packagePath = await writeFixtureFile(
-      root,
-      "downloads/unit-test-ide-2.0.0.package",
-      "real package bytes\n",
-    );
-    const baselinePackagePath = await writeFixtureFile(
-      root,
-      "downloads/unit-test-ide-1.0.0.package",
-      "real baseline package bytes\n",
-    );
-    const baselineManifestSha256 = sha256(await readFile(join(baselineArtifact, "release-manifest.json")));
-    const baselinePackageSha256 = sha256(await readFile(baselinePackagePath));
-    const manifestSha256 = sha256(await readFile(join(artifact, "release-manifest.json")));
-    const packageSha256 = sha256(await readFile(packagePath));
+    const { artifact, baselineArtifact, baselineManifestSha256, baselinePackagePath, baselinePackageSha256, evidence, manifestSha256, packagePath, packageSha256, root: smokeRoot, version } = await createSmokeInputs(root);
 
     await assert.rejects(
       () => runSmokeLifecycle({
@@ -323,13 +448,13 @@ test("package-backed smoke reports whitespace-only first-launch stdout usefully"
         baselineManifestSha256,
         baselinePackagePath,
         baselinePackageSha256,
-        evidence: join(root, "install-smoke.json"),
+        evidence,
         manifestSha256,
         packagePath,
         packageSha256,
         platform,
-        root: join(root, "disposable-smoke-root"),
-        version: "2.0.0",
+        root: smokeRoot,
+        version,
       }, {
         launch: () => ({
           status: 0,
