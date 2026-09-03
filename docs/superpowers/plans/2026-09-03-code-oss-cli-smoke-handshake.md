@@ -473,7 +473,8 @@ $cli = Join-Path $runtimeRoot 'resources\app\out\cli.js'
 if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) { throw 'Retained Code-OSS executable is missing' }
 if (-not (Test-Path -LiteralPath $cli -PathType Leaf)) { throw 'Retained Code-OSS CLI is missing' }
 $launcherSha = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash
-if ($launcherSha -cne '1C777E2EE43BACF066AE344142C25ADABD21CFA09BA7E7A9DC9DA6D0185A8672') {
+# Producer run 33494864475 binds this retained Windows runtime launcher to this SHA-256.
+if ($launcherSha -cne 'DF9704CE34E32153C5CC6DC09B90764CE4F57B6D070C6D29302956630934F36D') {
   throw "Retained Code-OSS launcher digest mismatch: $launcherSha"
 }
 $probeRoot = Join-Path ([IO.Path]::GetTempPath()) "unit-test-ide-cli-probe-$([guid]::NewGuid().ToString('N'))"
