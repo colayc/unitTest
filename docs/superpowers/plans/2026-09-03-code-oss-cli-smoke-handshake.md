@@ -50,7 +50,7 @@
 - Produces: private `launchHandshake(packageRoot: string, version: string, userDataRoot: string)` returning the UTF-8 `spawnSync` result for the installed root executable and installed CLI script.
 - Produces in tests: `cliRelativePath: string`, `createCliFixtureSource(options): string`, extended `createArtifact(..., options)`, and `createSmokeInputs(root, options)`.
 - `createCliFixtureSource` options are `{ expectedUserDataRoot: string, version: string, markerPath?: string, exitCode?: number }`.
-- `createArtifact` adds `{ includeCli?: boolean, cliExitCode?: number, cliMarkerPath?: string }`; defaults are `true`, `0`, and `undefined`.
+- `createArtifact` adds `{ includeCli?: boolean, cliExitCode?: number, cliMarkerPath?: string, expectedUserDataRoot?: string }`; defaults are `true`, `0`, `undefined`, and `join(root, "disposable-smoke-root", "workspace")` respectively. `expectedUserDataRoot` is a test-only exact string and is compared with complete equality; path sets or fuzzy matching are not permitted.
 - `createSmokeInputs` options are `{ baselineArtifactOptions?: object, targetArtifactOptions?: object }` and it returns the complete valid input object accepted by `runSmokeLifecycle`.
 
 - [ ] **Step 1: Select a compatible local Node and exact pnpm before editing**
@@ -131,6 +131,7 @@ async function createArtifact(root, version, {
   includeCli = true,
   cliExitCode = 0,
   cliMarkerPath,
+  expectedUserDataRoot = join(root, "disposable-smoke-root", "workspace"),
 } = {}) {
 ```
 
@@ -139,7 +140,7 @@ For every normal fixture, write the CLI script and bind its exact bytes into the
 ```js
 const cliBytes = includeCli
   ? Buffer.from(createCliFixtureSource({
-    expectedUserDataRoot: join(root, "disposable-smoke-root", "workspace"),
+    expectedUserDataRoot,
     version,
     markerPath: cliMarkerPath,
     exitCode: cliExitCode,
@@ -234,6 +235,7 @@ const baselineArtifact = await createArtifact(root, "1.0.0", {
 const artifact = await createArtifact(root, "2.0.0", {
   cliMarkerPath,
   launcherSource,
+  expectedUserDataRoot: join(root, "disposable-smoke-root", "workspace"),
 });
 ```
 
@@ -396,6 +398,8 @@ Run:
 ```
 
 Expected: every selected case passes; the complete update test file has zero failures and only pre-existing explicit platform skips. The real makeappx test runs when the Windows SDK tool is available and uses the manifest-bound fixture CLI.
+
+The real makeappx fixture must pass `expectedUserDataRoot: join(root, "disposable-smoke-root", "lifecycle", "workspace")` to each artifact because the wrapper invokes the lifecycle beneath the `lifecycle` root. The fixture must retain complete equality checking of the three arguments; do not accept a path set or fuzzy match.
 
 - [ ] **Step 8: Review and commit the focused implementation**
 
