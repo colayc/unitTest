@@ -1,0 +1,264 @@
+Scope: 7 of 8 workspace projects
+packages/protocol-models build$ tsc -b tsconfig.json
+packages/protocol-models build: Done
+packages/coverage-models build$ tsc -b tsconfig.json
+packages/test-client build$ tsc -b tsconfig.json
+packages/coverage-models build: Done
+packages/test-client build: Done
+tools/service-probe build$ tsc -b tsconfig.json
+tools/service-probe build: Done
+apps/code-oss-extension build$ tsc -b tsconfig.json
+apps/code-oss-extension build: Done
+✔ creation binds fixed source coordinates, summaries, and deterministic canonical records (38.6379ms)
+✔ validation rejects mutated producer and immutable artifact identities (7.5485ms)
+✔ validation rejects every provenance scalar mutation and every extra key (9.2609ms)
+✔ creation rejects closed request and independent runtime summary shape violations (5.2591ms)
+✔ validation rejects null, non-enumerable, symbol, drift, and path-bearing provenance values (4.1672ms)
+✔ creation and validation reject toggling accessor properties at every public boundary (3.4771ms)
+✔ creation and validation reject non-enumerable required fields (3.3495ms)
+✔ CLI rehashes real mode and tool files, emits canonical bytes, validates manifest and never leaks paths (11481.8156ms)
+✔ CLI rejects a manifest reached through a directory link or junction (491.1915ms)
+﹣ opt-in CLI creation binds mode file count, bytes, and exact tree digest (0.5545ms) # UNIT_TEST_IDE_REAL_APPIMAGETOOL is not set
+﹣ descriptor attestation rejects an ancestor swapped to a directory link after open (0.1454ms) # Windows prevents renaming an ancestor while its child descriptor is open
+✔ canonical output refuses linked and swapped output ancestors without partial publication (2023.1248ms)
+✔ canonical output never leaves a replaced staged file published after failure (2808.8606ms)
+✔ canonical output requires a fresh dedicated output directory and preserves prior files (1264.6022ms)
+﹣ POSIX canonical output rejects a group-or-world-writable output parent (0.2435ms) # Windows validates directory ownership and reparse state instead of POSIX mode bits
+✔ atomic no-clobber publication preserves a target created at the commit boundary (3006.3845ms)
+✔ atomic publication refuses a stage exchanged at the commit boundary (2945.6024ms)
+✔ a post-commit failure never deletes a later replacement target (2914.7085ms)
+✔ Windows inventory binds exact path, decimal size, digest, and executable record bytes (1424.4903ms)
+✔ inventory validation rejects unsafe file integers and aggregate total overflow (2.3547ms)
+✔ tree digest independently binds path, decimal size, SHA, and executable bytes (1.1895ms)
+✔ Linux inventory accepts only complete exact sorted size and digest mode records (2876.4019ms)
+✔ tree digest changes with content but not timestamps or directory modes (3336.3122ms)
+✔ descriptor snapshots reject a deterministic same-object same-size content mutation (1352.833ms)
+﹣ descriptor snapshots reject a deterministic same-object mode mutation (0.4868ms) # SKIP
+✔ descriptor-captured product bytes and launcher digest are the inventory identity source (1000.3866ms)
+✔ producer rejects missing required files and directory link or junction entries (902.8446ms)
+﹣ producer rejects direct symbolic links, unsafe paths, case aliases, and special files (0.4055ms) # SKIP
+✔ public inventory requests are closed and reject mode inventory on Windows (15.2368ms)
+✔ CLI writes both success artifacts as canonical path-free one-line JSON (2545.9365ms)
+✔ Windows CLI accepts a direct 8.3 output parent and rejects a short-long duplicate target (3833.1331ms)
+✔ Windows CLI rejects a same-identity Volume GUID output namespace alias (685.9711ms)
+✔ CLI rejects identical and hard-link-equivalent destinations before writing (1448.834ms)
+✔ parallel second-stage failure removes the successful peer stage and creates no output (2644.3419ms)
+✔ second-commit failure removes new outputs and restores both pre-existing targets (3960.5528ms)
+✔ post-publish failure restores both pre-existing targets (1899.7847ms)
+✔ staging rejects an output ancestor replaced by a link after inspection (2794.7575ms)
+✔ CLI refuses a symlinked output ancestor without touching its referent (92.9214ms)
+✔ validateSourceManifest returns a frozen canonical copy (20.5353ms)
+✔ validateSourceManifest rejects every changed field and non-closed shape (2.0175ms)
+▶ loadSourceManifest accepts only a real canonical JSON file
+  ﹣ linked file (1.6138ms) # symbolic links unavailable
+✔ loadSourceManifest accepts only a real canonical JSON file (34.1205ms)
+✔ validateProducerInvocation accepts only the fixed producer identity (0.8107ms)
+✔ verifyCodeOssCheckout checks the fixed upstream metadata (215.8478ms)
+✔ verifyCodeOssCheckout rejects a linked intermediate directory (14.8196ms)
+✔ verifyCodeOssCheckout rejects a linked ancestor of the supplied checkout root (19.2834ms)
+✔ CLI exports fixed outputs and keeps failures path-free and atomic (798.0218ms)
+✔ CLI authorize and verify-checkout emit no root path (362.6981ms)
+✔ validateProducerRunMetadata projects exactly the trusted successful run (4.5468ms)
+✔ validateProducerRunMetadata independently rejects each run binding (3.4883ms)
+✔ selectProvenanceArtifact closes the selected attempt artifact list (2.711ms)
+✔ selectProvenanceArtifact ignores unrelated GitHub fields without reading them (0.4572ms)
+✔ validateProducerRunMetadata ignores unrelated API fields without reading them (0.434ms)
+✔ validateProducerRunMetadata rejects ambiguous required API fields (0.7655ms)
+✔ validateTrustedReleaseInputs binds the second API snapshot to immutable provenance identities (13.4493ms)
+✔ validateTrustedReleaseInputs applies every API run binding before provenance acceptance (3.1184ms)
+✔ CLI validates run identity before exporting only fixed output keys (3748.8831ms)
+✔ CLI provenance failures cannot inject GitHub output or leak local paths (3267.9973ms)
+✔ CLI validate-provenance closes independent content pins without output injection (19423.0599ms)
+✔ CLI validate-attempt accepts only the exact current attempt and writes no output (3261.9374ms)
+✔ CLI rejects hard-linked run or GitHub output files before either can modify another path (2250.0237ms)
+✔ trusted JSON reads reject same-inode content changes after opening or reading (2049.412ms)
+✔ test hooks snapshot functions before async boundaries instead of rereading replacement getters (1376.1405ms)
+✔ GitHub output append rolls back partial writes and failed syncs on its original descriptor (684.1484ms)
+✔ GitHub output append rejects same-inode prefix replacement and restores its original bytes (356.0278ms)
+✔ GitHub output append rejects same-length suffix replacement and restores its expected bytes (366.1649ms)
+﹣ CLI rejects a linked producer-run input (2804.6693ms) # symbolic links unavailable
+﹣ CLI rejects a linked GitHub output (3.4845ms) # symbolic links unavailable
+✔ CLI rejects a producer run reached through a directory junction (425.3694ms)
+✔ workflow exposes only an input-free manual trigger and minimum read permissions (3.6746ms)
+✔ workflow contains only the four closed jobs on fixed hosted runners (2.9069ms)
+✔ authorization is fail-closed and every producer job depends on it (1.0234ms)
+✔ authorize exports the fixed local pnpm bin before running the producer suite (1.2857ms)
+✔ all action references are reviewed full commit pins (1.0253ms)
+✔ workflow has no secret, local-runtime, mutable-tool, or expression-in-shell escape hatch (2.8289ms)
+✔ both builds use the fixed fresh checkout, toolchains, Gulp targets, and output roots (1.2215ms)
+✔ fixed Yarn exports the executable location required by Code-OSS preinstall (1.0483ms)
+✔ build steps invoke pinned Yarn JS with a narrowly scoped parent-manager bypass (1.6391ms)
+✔ Windows validates, bounds launcher execution, inventories, and stages before upload (1639.3079ms)
+✔ Visual Studio preflight contract rejects installation guards hidden in comments (1104.0235ms)
+✔ Visual Studio preflight contract rejects installation guards in a constant-false branch (1071.1597ms)
+✔ Visual Studio preflight contract rejects installation guards in a never-entered catch (1175.7701ms)
+✔ Visual Studio preflight contract rejects installation guards in a constant-false loop (1590.1085ms)
+✔ Visual Studio preflight contract rejects an installation guard whose throw is unreachable (1263.9142ms)
+✔ Visual Studio preflight contract rejects return before its linear validation triple (1408.8265ms)
+✔ Visual Studio preflight contract rejects successful exit before its linear validation triple (1173.2221ms)
+✔ Linux creates and validates modes, bounds launcher execution, inventories, and stages exact roots (1.2323ms)
+✔ launcher version checks execute packaged CLI wrappers instead of GUI binaries (1.1358ms)
+✔ uploads expose immutable identities under attempt-qualified transport names (2.7226ms)
+✔ attestation validates immutable coordinates before ID-only downloads and independently revalidates them (2.0437ms)
+✔ provenance and post-validation summary bind and expose only validated immutable identities (1.3485ms)
+✔ package scripts run the closed producer suite early and enumerate every producer contract (0.1712ms)
+✔ foundation validates producer identity before downloading one exact provenance artifact (5.0017ms)
+✔ foundation package jobs consume only the trust job closed coordinates (4.2228ms)
+ℹ tests 94
+ℹ suites 0
+ℹ pass 86
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 8
+ℹ todo 0
+ℹ duration_ms 40436.6694
+✔ check rejects generated TypeScript output with CRLF line endings (1871.6754ms)
+✔ check rejects generated TypeScript output without its final newline (1838.0554ms)
+✔ normal generation does not replace any target when a later generator fails (186.8508ms)
+✔ normal generation restores every destination and removes transaction files when replacement fails (194.4811ms)
+ℹ tests 4
+ℹ suites 0
+ℹ pass 4
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 4182.0411
+✔ platformKey accepts only the supported operating system and architecture pairs (1.4625ms)
+✔ validateManifest accepts only the fixed closed supply-chain contract (2.7228ms)
+✔ tracked manifest keeps the reviewed CMake 4.3.4 trust anchors (6.2043ms)
+✔ redirect validation keeps every response on the locked CMake distribution URL (0.3994ms)
+✔ CLI output stays inside the repository or an explicit absolute CI root (0.6936ms)
+✔ sha256File and verifyInstalledFiles stream and bind installed paths to digests (14.0967ms)
+✔ fixed prepareBundle rejects an archive digest mismatch without publishing staging (13.8807ms)
+✔ preparation rejects an output root beneath a symlink or junction before download (3.3117ms)
+✔ preparation binds published manifest bytes to the validated manifest object (1.4343ms)
+✔ offline preparation publishes an immutable verified bundle and exact manifest (40.7052ms)
+▶ installed executable, CTest, or license mismatch removes staging and preserves no target
+  ✔ executable (19.0011ms)
+  ✔ ctest (21.3056ms)
+  ✔ license (19.5365ms)
+✔ installed executable, CTest, or license mismatch removes staging and preserves no target (60.769ms)
+✔ bundled CTest version must match the pinned CMake version (19.4013ms)
+✔ post-extraction audit rejects a symlink or junction omitted from the listing (18.1585ms)
+▶ unsafe archive entries are rejected before extraction
+  ✔ file /absolute/cmake (10.8868ms)
+  ✔ file ../escape (10.068ms)
+  ✔ file cmake-4.3.4-linux-x86_64/../../escape (11.0995ms)
+  ✔ file C:/escape (10.4581ms)
+  ✔ file cmake-4.3.4-linux-x86_64/file:stream (9.9551ms)
+  ✔ file other-root/bin/cmake (10.248ms)
+  ✔ symlink cmake-4.3.4-linux-x86_64/link (10.6786ms)
+  ✔ device cmake-4.3.4-linux-x86_64/device (13.0058ms)
+✔ unsafe archive entries are rejected before extraction (87.6437ms)
+✔ an existing complete bundle is verified and reused without downloading (38.0118ms)
+✔ a publish race keeps the existing valid target and discards staging (36.7712ms)
+✔ system archive inspection reports only regular files and directories (73.8559ms)
+ℹ tests 28
+ℹ suites 0
+ℹ pass 28
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 523.1791
+✔ tracked manifest fixes the Python 3.14.6 and gcovr 8.6 source lock (68.4416ms)
+✔ source artifacts and every locked wheel use reviewed HTTPS URLs and lowercase SHA-256 (2.556ms)
+✔ wheel lock has exact versions, unique normalized projects, no markers, editable packages, or sdists (1.7107ms)
+✔ license contract is complete for each locked package and the two bundled licenses are present (2.1821ms)
+✔ license contract rejects version drift and missing or truncated fixed lxml wheel materials (5.1453ms)
+✔ schema is closed and rejects version drift, unsafe sources, lock ambiguity, and unpinned transitive dependencies (35.9242ms)
+✔ schema predefines a closed resolved output record without pre-creating Task 2 digests (133.6724ms)
+✔ layout accepts only the separate Windows/Linux x64 bundle keys (1.7944ms)
+✔ platform-specific wheels are omitted from another platform's resolved inputs (11.4618ms)
+✔ cold prepare downloads only the platform manifest allowlist and verifies before inspection (38.2172ms)
+✔ tampered and interrupted downloads never reach inspection or leave partial cache files (5.8472ms)
+✔ archive audit rejects traversal, symlink and duplicate entries before extraction (0.431ms)
+✔ archive audit accepts safe internal spaces in regular filenames (0.3277ms)
+✔ prepare builds in a temp directory, writes READY last, and atomically publishes (32.3718ms)
+✔ interrupted prepare leaves no consumable bundle (29.7838ms)
+✔ post-install build failure leaves host-side staging removable and unpublished (9.8529ms)
+✔ cache hit performs full resolved-manifest verification and detects tampering (45.3184ms)
+✔ cache identity binds exact selected inputs and deterministic recipe provenance (47.4937ms)
+✔ resolved output list and bytes are deterministic and include only regular generated files (54.2371ms)
+✔ deterministic application ZIP round-trips every regular entry (3.2437ms)
+✔ Windows isolation path excludes import site and forbidden final layout entries (35.1913ms)
+✔ resolved layout rejects unexpected top-level and app files (8.7635ms)
+✔ cache verification reapplies exact app layout even when output digests were rewritten (26.5722ms)
+✔ byte-level ZIP audit rejects unsafe paths, aliases, types, metadata and expansion (12.4797ms)
+✔ byte-level TAR audit rejects unsafe paths, links, types, metadata and expansion (16.3076ms)
+✔ TAR audit accepts a safe GNU longname with identical extraction semantics (2.639ms)
+✔ TAR audit accepts the locked release archive's V7 headers (2.3809ms)
+✔ TAR audit accepts a Linux source filename with a trailing dot (2.9184ms)
+✔ TAR audit accepts only path-safe local PAX and metadata-only global PAX semantics (2.5084ms)
+✔ Linux builder contract pins image ABI, configure flags, source epoch and disables network (1.2766ms)
+✔ Linux prune removes Tcl/Tk symlink fixtures before generic symlink materialization (0.6539ms)
+✔ final layout rejects native Tk and Tcl/Tk runtime paths (52.2996ms)
+✔ Linux Python invocation is isolated and Python-related environment is sanitized (0.3406ms)
+✔ runner descriptor is closed and maps only fixed root/object/gcov/output fields (1.2577ms)
+﹣ real Python runner contract rejects malformed descriptors (14.6362ms) # Python subprocess unavailable (EPERM): spawnSync python EPERM
+ℹ tests 35
+ℹ suites 0
+ℹ pass 34
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 1
+ℹ todo 0
+ℹ duration_ms 579.7786
+✖ UnitTestIDE CMake helper has strict deterministic framework registration (901.5513ms)
+✔ workspace schema accepts supported structured configuration (87.4699ms)
+✔ workspace schema rejects shell-shaped fields as additional properties (54.0667ms)
+✔ workspace schema rejects unsafe paths, duplicates, limits, and versions (66.0933ms)
+✔ workspace schema enforces family-discriminated manual toolchains (56.5852ms)
+✔ workspace schema accepts missing optional fields and rejects explicit null (63.2588ms)
+✔ workspace JSON parsing uses the last repeated object member before schema validation (26.6786ms)
+✔ workspace schema accepts closed v3 coverage profiles without widening v1 or v2 (34.4573ms)
+✔ workspace v3 schema rejects coverage injection, unsafe path, duplicates, and structural limits (29.4626ms)
+✔ workspace v3 schema accepts exact coarse coverage maxima (26.9695ms)
+✔ workspace pins supported toolchains (8.5451ms)
+✔ release manifest contract stays pinned to the repository product identity (2.5207ms)
+✔ README contains the complete local verification gate (1.0784ms)
+✔ Phase 3 documentation records desktop, bundle, native, and security boundaries (2.4495ms)
+✔ Hosted CI pins native toolchain runners and gates unstable Windows native E2E (1.9316ms)
+✔ dependency metadata uses the official npm registry (0.9669ms)
+✔ documentation records pre-write token file preparation (2.0703ms)
+✔ release documentation describes complete digest-pinned Code-OSS runtime artifacts (2.6539ms)
+✔ trusted producer documentation keeps unsigned qualification operational, closed, and incomplete (4.4277ms)
+✔ release-input documentation binds run attempts and provenance to immutable artifact identities (4.8828ms)
+✔ compiled Service runtime excludes HTTP, TLS, GitHub, and OAuth client stacks (7172.1788ms)
+✔ Go import audit parses commented raw and aliased import specs before policy checks (1271.1219ms)
+✔ network import policy permits pure URL parsing but still rejects transport stacks (0.2903ms)
+✔ production packages constrain network-capable code to local IPC boundaries (572.2498ms)
+✔ cross-platform transports constrain network-capable calls to local IPC (1.4261ms)
+✔ guardian Windows boundary constrains network-capable selectors to local IPC only (0.7594ms)
+✔ guardian executable registration constrains network-capable selectors to local IPC only (0.837ms)
+ℹ tests 27
+ℹ suites 0
+ℹ pass 26
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 9160.9606
+
+✖ failing tests:
+
+test at tools\workspace-smoke\unit-test-ide-cmake-helper.test.mjs:90:1
+✖ UnitTestIDE CMake helper has strict deterministic framework registration (901.5513ms)
+  Error: spawnSync cmake ENOENT
+      at Object.spawnSync (node:internal/child_process:1160:20)
+      at spawnSync (node:child_process:928:24)
+      at execute (file:///C:/codex_project/unitTest/.worktrees/fix-cli-launch-handshake/tools/workspace-smoke/unit-test-ide-cmake-helper.test.mjs:27:18)
+      at configure (file:///C:/codex_project/unitTest/.worktrees/fix-cli-launch-handshake/tools/workspace-smoke/unit-test-ide-cmake-helper.test.mjs:83:10)
+      at TestContext.<anonymous> (file:///C:/codex_project/unitTest/.worktrees/fix-cli-launch-handshake/tools/workspace-smoke/unit-test-ide-cmake-helper.test.mjs:99:5)
+      at async Test.run (node:internal/test_runner/test:1389:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:387:3) {
+    errno: -4058,
+    code: 'ENOENT',
+    syscall: 'spawnSync cmake',
+    path: 'cmake',
+    spawnargs: [ '-S', 'C:\\Users\\DELL\\AppData\\Local\\Temp\\utide-cmake-helper-A1ew6T\\source with spaces-单元', '-B', 'C:\\Users\\DELL\\AppData\\Local\\Temp\\utide-cmake-helper-A1ew6T\\build with spaces-单元', '-DUNIT_TEST_IDE_HELPER=C:\\codex_project\\unitTest\\.worktrees\\fix-cli-launch-handshake\\sdk\\cmake\\UnitTestIDE.cmake', '-DUTIDE_SCENARIO=valid', '-DUTIDE_UNITY_RUNNER_GENERATOR=C:\\Users\\DELL\\AppData\\Local\\Temp\\utide-cmake-helper-A1ew6T\\unity-runner-generator.exe' ]
+  }
+[ELIFECYCLE] Command failed with exit code 1.
+[ELIFECYCLE] Test failed. See above for more details.
+[ELIFECYCLE] Command failed with exit code 1.

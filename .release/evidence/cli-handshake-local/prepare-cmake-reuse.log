@@ -1,0 +1,2 @@
+$ node tools/cmake-bundle/prepare.mjs
+{"key":"win32-x64","cmakeVersion":"4.3.4","root":"C:\\codex_project\\unitTest\\.worktrees\\fix-cli-launch-handshake\\.bundled-tools\\cmake\\4.3.4\\win32-x64","executable":"C:\\codex_project\\unitTest\\.worktrees\\fix-cli-launch-handshake\\.bundled-tools\\cmake\\4.3.4\\win32-x64\\cmake-4.3.4-windows-x86_64\\bin\\cmake.exe","ctestExecutable":"C:\\codex_project\\unitTest\\.worktrees\\fix-cli-launch-handshake\\.bundled-tools\\cmake\\4.3.4\\win32-x64\\cmake-4.3.4-windows-x86_64\\bin\\ctest.exe","reused":true}

@@ -1,0 +1,5 @@
+$ pnpm check:protocol-generated && pnpm check:coverage-generated && pnpm build && pnpm test && pnpm test:go:race && pnpm test:e2e
+$ node tools/protocol-gen/generate.mjs --check
+$ node tools/coverage-gen/generate.mjs --check
+$ pnpm -r build && go build ./apps/test-service/...
+pattern ./apps/test-service/...: open C:\Users\DELL\AppData\Local\go-build\c5\c5588ec079d675df950a3abe9c2e49455f4a20d9ba57b53fb6514370401bde68-d: Access is denied.

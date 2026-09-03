@@ -1,0 +1,13 @@
+Scope: 7 of 8 workspace projects
+packages/protocol-models build$ tsc -b tsconfig.json
+packages/protocol-models build: Done
+packages/coverage-models build$ tsc -b tsconfig.json
+packages/test-client build$ tsc -b tsconfig.json
+packages/coverage-models build: Done
+packages/test-client build: Done
+tools/service-probe build$ tsc -b tsconfig.json
+tools/service-probe build: Done
+apps/code-oss-extension build$ tsc -b tsconfig.json
+apps/code-oss-extension build: Done
+[ELIFECYCLE] Command failed with exit code 1.
+[ELIFECYCLE] Command failed with exit code 1.
