@@ -1095,8 +1095,8 @@ test("foundation validates producer identity before downloading one exact proven
 
   const apiBefore = namedStep(trust, "Fetch trusted producer metadata before provenance download");
   assert.equal(directMappingValue(apiBefore, 10, "GH_TOKEN"), "${{ github.token }}");
-  assert.match(apiBefore, /^          gh api "repos\/colayc\/unitTest\/actions\/runs\/\$RELEASE_INPUT_RUN_ID" > \.release\/producer-run-before\.json$/mu);
-  assert.match(apiBefore, /^          gh api "repos\/colayc\/unitTest\/actions\/runs\/\$RELEASE_INPUT_RUN_ID\/artifacts\?per_page=100" > \.release\/producer-artifacts-before\.json$/mu);
+  assert.match(apiBefore, /^          gh api "repos\/colayc\/unitTest\/actions\/runs\/\$RELEASE_INPUT_RUN_ID" > "\$verify_root\/producer-run-before\.json"$/mu);
+  assert.match(apiBefore, /^          gh api "repos\/colayc\/unitTest\/actions\/runs\/\$RELEASE_INPUT_RUN_ID\/artifacts\?per_page=100" > "\$verify_root\/producer-artifacts-before\.json"$/mu);
   assert.doesNotMatch(apiBefore, /(?:set -x|echo .*GH_TOKEN|cat \.release\/producer-(?:run|artifacts)-before\.json)/u);
 
   const precheck = identifiedStep(trust, "precheck");
@@ -1110,21 +1110,21 @@ test("foundation validates producer identity before downloading one exact proven
     "name: Refetch trusted producer metadata after provenance download",
     "id: verify-provenance",
   ]);
-  assert.match(precheck, /^          node tools\/release\/producer\/trusted-run\.mjs validate-run \\\n            --run-json \.release\/producer-run-before\.json \\\n            --artifacts-json \.release\/producer-artifacts-before\.json \\\n            --run-id "\$RELEASE_INPUT_RUN_ID" \\\n            --consumer-commit "\$GITHUB_SHA" \\\n            --github-output "\$GITHUB_OUTPUT"$/mu);
+  assert.match(precheck, /^          node tools\/release\/producer\/trusted-run\.mjs validate-run \\\n            --run-json \.release\/producer-verification\/producer-run-before\.json \\\n            --artifacts-json \.release\/producer-verification\/producer-artifacts-before\.json \\\n            --run-id "\$RELEASE_INPUT_RUN_ID" \\\n            --consumer-commit "\$GITHUB_SHA" \\\n            --github-output "\$GITHUB_OUTPUT"$/mu);
   assert.equal(directMappingValue(provenanceDownload, 8, "uses"), `actions/download-artifact@${actionPins["actions/download-artifact"]}`);
   assert.equal(inputValue(provenanceDownload, "artifact-ids"), "${{ steps.precheck.outputs.provenance_artifact_id }}");
   assert.equal(inputValue(provenanceDownload, "merge-multiple"), "true");
-  assert.equal(inputValue(provenanceDownload, "path"), ".release/provenance");
+  assert.equal(inputValue(provenanceDownload, "path"), ".release/producer-verification/provenance");
   assert.equal(inputValue(provenanceDownload, "run-id"), "${{ steps.precheck.outputs.run_id }}");
   assert.equal(inputValue(provenanceDownload, "github-token"), "${{ github.token }}");
   assert.equal(inputValue(provenanceDownload, "name"), undefined);
   assert.equal(directMappingValue(apiAfter, 10, "GH_TOKEN"), "${{ github.token }}");
-  assert.match(apiAfter, /^          gh api "repos\/colayc\/unitTest\/actions\/runs\/\$RELEASE_INPUT_RUN_ID" > \.release\/producer-run-after\.json$/mu);
-  assert.match(apiAfter, /^          gh api "repos\/colayc\/unitTest\/actions\/runs\/\$RELEASE_INPUT_RUN_ID\/artifacts\?per_page=100" > \.release\/producer-artifacts-after\.json$/mu);
+  assert.match(apiAfter, /^          gh api "repos\/colayc\/unitTest\/actions\/runs\/\$RELEASE_INPUT_RUN_ID" > "\$verify_root\/producer-run-after\.json"$/mu);
+  assert.match(apiAfter, /^          gh api "repos\/colayc\/unitTest\/actions\/runs\/\$RELEASE_INPUT_RUN_ID\/artifacts\?per_page=100" > "\$verify_root\/producer-artifacts-after\.json"$/mu);
   assert.doesNotMatch(apiAfter, /(?:set -x|echo .*GH_TOKEN|cat \.release\/producer-(?:run|artifacts)-after\.json)/u);
-  assert.match(finalValidation, /^          mapfile -d '' -t provenance_entries < <\(find \.release\/provenance -mindepth 1 -maxdepth 1 -printf '%f\\0' \| LC_ALL=C sort -z\)$/mu);
+  assert.match(finalValidation, /^          mapfile -d '' -t provenance_entries < <\(find \.release\/producer-verification\/provenance -mindepth 1 -maxdepth 1 -printf '%f\\0' \| LC_ALL=C sort -z\)$/mu);
   assert.match(finalValidation, /release-input-provenance\.json/u);
-  assert.match(finalValidation, /^          node tools\/release\/producer\/trusted-run\.mjs validate-provenance \\\n            --run-json \.release\/producer-run-after\.json \\\n            --artifacts-json \.release\/producer-artifacts-after\.json \\\n            --run-id "\$\{\{ steps\.precheck\.outputs\.run_id \}\}" \\\n            --run-attempt "\$\{\{ steps\.precheck\.outputs\.run_attempt \}\}" \\\n            --consumer-commit "\$GITHUB_SHA" \\\n            --github-output "\$GITHUB_OUTPUT" \\\n            --provenance \.release\/provenance\/release-input-provenance\.json \\\n            --provenance-artifact-id "\$\{\{ steps\.precheck\.outputs\.provenance_artifact_id \}\}" \\\n            --provenance-artifact-digest "\$\{\{ steps\.precheck\.outputs\.provenance_artifact_digest \}\}"/mu);
+  assert.match(finalValidation, /^          node tools\/release\/producer\/trusted-run\.mjs validate-provenance \\\n            --run-json \.release\/producer-verification\/producer-run-after\.json \\\n            --artifacts-json \.release\/producer-verification\/producer-artifacts-after\.json \\\n            --run-id "\$\{\{ steps\.precheck\.outputs\.run_id \}\}" \\\n            --run-attempt "\$\{\{ steps\.precheck\.outputs\.run_attempt \}\}" \\\n            --consumer-commit "\$GITHUB_SHA" \\\n            --github-output "\$GITHUB_OUTPUT" \\\n            --provenance \.release\/producer-verification\/provenance\/release-input-provenance\.json \\\n            --provenance-artifact-id "\$\{\{ steps\.precheck\.outputs\.provenance_artifact_id \}\}" \\\n            --provenance-artifact-digest "\$\{\{ steps\.precheck\.outputs\.provenance_artifact_digest \}\}"/mu);
   for (const [option, variable] of [
     ["--windows-launcher-sha256", "WINDOWS_LAUNCHER_SHA256"],
     ["--linux-launcher-sha256", "LINUX_LAUNCHER_SHA256"],
