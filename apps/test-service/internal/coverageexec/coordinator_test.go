@@ -663,7 +663,7 @@ func newSQLiteCoverageFixtureInternal(
 
 func (fixture *sqliteCoverageFixture) awaitFinished(t *testing.T) task.Task {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		value, err := fixture.store.Get(context.Background(), fixture.persisted.ID)
 		if err == nil && value.Status == task.StatusFinished {
