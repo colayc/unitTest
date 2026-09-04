@@ -522,6 +522,10 @@ test("foundation release publication is downstream of a successful qualification
   const workflow = await readFile(resolve(".github/workflows/foundation.yml"), "utf8");
 
   assert.match(workflow, /release-qualification:\r?\n[\s\S]*?needs:\r?\n\s+- install-smoke-windows\r?\n\s+- install-smoke-linux/u);
+  const qualificationStart = workflow.indexOf("  release-qualification:");
+  const qualificationJob = workflow.slice(qualificationStart);
+  assert.match(qualificationJob, /uses: pnpm\/action-setup@v4[\s\S]*?version: 11\.4\.0[\s\S]*?run_install: false/u);
+  assert.match(qualificationJob, /run: pnpm install --frozen-lockfile/u);
   assert.match(workflow, /node tools\/release\/qualification\.mjs[\s\S]*?release-qualification\.json/u);
   assert.match(workflow, /signature_required=\$env:RELEASE_SIGNING_REQUIRED/u);
   assert.match(workflow, /qualificationOutcome\.qualified[\s\S]*?actions\/upload-artifact@v7/u);
