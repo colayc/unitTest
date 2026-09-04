@@ -308,6 +308,8 @@ test("trusted producer documentation keeps unsigned qualification operational, c
     const next = remainder.search(/\n {2}[a-z][a-z0-9-]*:\s*$/mu);
     return foundation.slice(start, next === -1 ? undefined : start + 1 + next);
   };
+  assert.match(foundation, /\.release\/producer-verification/u, "foundation must isolate producer metadata from tracked release evidence");
+  assert.doesNotMatch(foundation, /\[\[ ! -e \.release && ! -L \.release \]\]/u, "foundation must not require the tracked .release root to be absent");
   for (const [job, artifact] of [
     ["install-smoke-windows", "install-smoke-windows-${{ github.run_attempt }}"],
     ["install-smoke-linux", "install-smoke-linux-${{ github.run_attempt }}"],
