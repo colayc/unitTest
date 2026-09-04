@@ -306,20 +306,21 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
-          [[ ! -e .release && ! -L .release ]] || { echo 'RELEASE_PRODUCER_UNTRUSTED: producer metadata directory must be fresh' >&2; exit 1; }
-          mkdir -m 700 .release
-          gh api "repos/colayc/unitTest/actions/runs/$RELEASE_INPUT_RUN_ID" > .release/producer-run-before.json
-          gh api "repos/colayc/unitTest/actions/runs/$RELEASE_INPUT_RUN_ID/artifacts?per_page=100" > .release/producer-artifacts-before.json
-          [[ -f .release/producer-run-before.json && ! -L .release/producer-run-before.json ]] || { echo 'RELEASE_PRODUCER_UNTRUSTED: producer run metadata is not a regular file' >&2; exit 1; }
-          [[ -f .release/producer-artifacts-before.json && ! -L .release/producer-artifacts-before.json ]] || { echo 'RELEASE_PRODUCER_UNTRUSTED: producer artifact metadata is not a regular file' >&2; exit 1; }
+          verify_root='.release/producer-verification'
+          [[ ! -e "$verify_root" && ! -L "$verify_root" ]] || { echo 'RELEASE_PRODUCER_UNTRUSTED: producer verification directory must be fresh' >&2; exit 1; }
+          mkdir -m 700 "$verify_root"
+          gh api "repos/colayc/unitTest/actions/runs/$RELEASE_INPUT_RUN_ID" > "$verify_root/producer-run-before.json"
+          gh api "repos/colayc/unitTest/actions/runs/$RELEASE_INPUT_RUN_ID/artifacts?per_page=100" > "$verify_root/producer-artifacts-before.json"
+          [[ -f "$verify_root/producer-run-before.json" && ! -L "$verify_root/producer-run-before.json" ]] || { echo 'RELEASE_PRODUCER_UNTRUSTED: producer run metadata is not a regular file' >&2; exit 1; }
+          [[ -f "$verify_root/producer-artifacts-before.json" && ! -L "$verify_root/producer-artifacts-before.json" ]] || { echo 'RELEASE_PRODUCER_UNTRUSTED: producer artifact metadata is not a regular file' >&2; exit 1; }
       - id: precheck
         name: Validate trusted producer run before artifact download
         shell: bash
         run: |
           set -euo pipefail
           node tools/release/producer/trusted-run.mjs validate-run \
-            --run-json .release/producer-run-before.json \
-            --artifacts-json .release/producer-artifacts-before.json \
+            --run-json .release/producer-verification/producer-run-before.json \
+            --artifacts-json .release/producer-verification/producer-artifacts-before.json \
             --run-id "$RELEASE_INPUT_RUN_ID" \
             --consumer-commit "$GITHUB_SHA" \
             --github-output "$GITHUB_OUTPUT"
@@ -328,7 +329,7 @@ jobs:
         with:
           artifact-ids: ${{ steps.precheck.outputs.provenance_artifact_id }}
           merge-multiple: true
-          path: .release/provenance
+          path: .release/producer-verification/provenance
           github-token: ${{ github.token }}
           run-id: ${{ steps.precheck.outputs.run_id }}
       - name: Refetch trusted producer metadata after provenance download
@@ -338,27 +339,28 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
-          gh api "repos/colayc/unitTest/actions/runs/$RELEASE_INPUT_RUN_ID" > .release/producer-run-after.json
-          gh api "repos/colayc/unitTest/actions/runs/$RELEASE_INPUT_RUN_ID/artifacts?per_page=100" > .release/producer-artifacts-after.json
-          [[ -f .release/producer-run-after.json && ! -L .release/producer-run-after.json ]] || { echo 'RELEASE_PRODUCER_UNTRUSTED: producer run metadata is not a regular file' >&2; exit 1; }
-          [[ -f .release/producer-artifacts-after.json && ! -L .release/producer-artifacts-after.json ]] || { echo 'RELEASE_PRODUCER_UNTRUSTED: producer artifact metadata is not a regular file' >&2; exit 1; }
+          verify_root='.release/producer-verification'
+          gh api "repos/colayc/unitTest/actions/runs/$RELEASE_INPUT_RUN_ID" > "$verify_root/producer-run-after.json"
+          gh api "repos/colayc/unitTest/actions/runs/$RELEASE_INPUT_RUN_ID/artifacts?per_page=100" > "$verify_root/producer-artifacts-after.json"
+          [[ -f "$verify_root/producer-run-after.json" && ! -L "$verify_root/producer-run-after.json" ]] || { echo 'RELEASE_PRODUCER_UNTRUSTED: producer run metadata is not a regular file' >&2; exit 1; }
+          [[ -f "$verify_root/producer-artifacts-after.json" && ! -L "$verify_root/producer-artifacts-after.json" ]] || { echo 'RELEASE_PRODUCER_UNTRUSTED: producer artifact metadata is not a regular file' >&2; exit 1; }
       - id: verify-provenance
         name: Validate trusted release input provenance
         shell: bash
         run: |
           set -euo pipefail
-          [[ -d .release/provenance && ! -L .release/provenance ]] || { echo 'RELEASE_PRODUCER_PROVENANCE_INVALID: provenance artifact root is invalid' >&2; exit 1; }
-          mapfile -d '' -t provenance_entries < <(find .release/provenance -mindepth 1 -maxdepth 1 -printf '%f\0' | LC_ALL=C sort -z)
+          [[ -d .release/producer-verification/provenance && ! -L .release/producer-verification/provenance ]] || { echo 'RELEASE_PRODUCER_PROVENANCE_INVALID: provenance artifact root is invalid' >&2; exit 1; }
+          mapfile -d '' -t provenance_entries < <(find .release/producer-verification/provenance -mindepth 1 -maxdepth 1 -printf '%f\0' | LC_ALL=C sort -z)
           ((${#provenance_entries[@]} == 1)) && [[ "${provenance_entries[0]}" == 'release-input-provenance.json' ]] || { echo 'RELEASE_PRODUCER_PROVENANCE_INVALID: provenance artifact root must contain exactly release-input-provenance.json' >&2; exit 1; }
-          [[ -f .release/provenance/release-input-provenance.json && ! -L .release/provenance/release-input-provenance.json ]] || { echo 'RELEASE_PRODUCER_PROVENANCE_INVALID: provenance document is invalid' >&2; exit 1; }
+          [[ -f .release/producer-verification/provenance/release-input-provenance.json && ! -L .release/producer-verification/provenance/release-input-provenance.json ]] || { echo 'RELEASE_PRODUCER_PROVENANCE_INVALID: provenance document is invalid' >&2; exit 1; }
           node tools/release/producer/trusted-run.mjs validate-provenance \
-            --run-json .release/producer-run-after.json \
-            --artifacts-json .release/producer-artifacts-after.json \
+            --run-json .release/producer-verification/producer-run-after.json \
+            --artifacts-json .release/producer-verification/producer-artifacts-after.json \
             --run-id "${{ steps.precheck.outputs.run_id }}" \
             --run-attempt "${{ steps.precheck.outputs.run_attempt }}" \
             --consumer-commit "$GITHUB_SHA" \
             --github-output "$GITHUB_OUTPUT" \
-            --provenance .release/provenance/release-input-provenance.json \
+            --provenance .release/producer-verification/provenance/release-input-provenance.json \
             --provenance-artifact-id "${{ steps.precheck.outputs.provenance_artifact_id }}" \
             --provenance-artifact-digest "${{ steps.precheck.outputs.provenance_artifact_digest }}" \
             --windows-launcher-sha256 "$WINDOWS_LAUNCHER_SHA256" \
