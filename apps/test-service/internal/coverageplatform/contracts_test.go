@@ -42,7 +42,15 @@ type contractClaim struct{}
 func (*contractClaim) Commit()   {}
 func (*contractClaim) Rollback() {}
 
-type contractToolset struct{ valid bool }
+type contractToolset struct {
+	valid          bool
+	cCompiler      coveragerun.TrustedPath
+	cCompilerSet   bool
+	cxxCompiler    coveragerun.TrustedPath
+	cxxCompilerSet bool
+	tools          []coveragerun.TrustedPath
+	toolsSet       bool
+}
 
 func (toolset *contractToolset) Version() string {
 	if toolset != nil && toolset.valid {
@@ -57,13 +65,26 @@ func (toolset *contractToolset) Identity() string {
 	return ""
 }
 func (toolset *contractToolset) CCompiler() coveragerun.TrustedPath {
+	if toolset != nil && toolset.cCompilerSet {
+		return toolset.cCompiler
+	}
 	return &contractPath{valid: toolset != nil && toolset.valid}
 }
 func (toolset *contractToolset) CXXCompiler() coveragerun.TrustedPath {
+	if toolset != nil && toolset.cxxCompilerSet {
+		return toolset.cxxCompiler
+	}
 	return &contractPath{valid: toolset != nil && toolset.valid}
 }
 func (toolset *contractToolset) Tools() []coveragerun.TrustedPath {
-	return []coveragerun.TrustedPath{&contractPath{valid: toolset != nil && toolset.valid}}
+	if toolset != nil && toolset.toolsSet {
+		return append([]coveragerun.TrustedPath(nil), toolset.tools...)
+	}
+	return []coveragerun.TrustedPath{
+		&contractPath{valid: toolset != nil && toolset.valid},
+		&contractPath{valid: toolset != nil && toolset.valid},
+		&contractPath{valid: toolset != nil && toolset.valid},
+	}
 }
 func (toolset *contractToolset) Verify() error {
 	if toolset == nil || !toolset.valid {
@@ -120,6 +141,36 @@ func TestContractCapabilitiesRejectTypedNilAndMalformedValues(t *testing.T) {
 	}
 	if VerifyToolset(&contractToolset{}) == nil {
 		t.Fatal("toolset with malformed capabilities was accepted")
+	}
+	for _, test := range []struct {
+		name string
+		edit func(*contractToolset)
+	}{
+		{"nil C compiler", func(toolset *contractToolset) { toolset.cCompilerSet = true }},
+		{"invalid C compiler", func(toolset *contractToolset) { toolset.cCompilerSet = true; toolset.cCompiler = &contractPath{} }},
+		{"nil CXX compiler", func(toolset *contractToolset) { toolset.cxxCompilerSet = true }},
+		{"invalid CXX compiler", func(toolset *contractToolset) { toolset.cxxCompilerSet = true; toolset.cxxCompiler = &contractPath{} }},
+		{"nil tools slice", func(toolset *contractToolset) { toolset.toolsSet = true }},
+		{"nil first tool", func(toolset *contractToolset) {
+			toolset.toolsSet = true
+			toolset.tools = []coveragerun.TrustedPath{nil, &contractPath{valid: true}, &contractPath{valid: true}}
+		}},
+		{"invalid second tool", func(toolset *contractToolset) {
+			toolset.toolsSet = true
+			toolset.tools = []coveragerun.TrustedPath{&contractPath{valid: true}, &contractPath{}, &contractPath{valid: true}}
+		}},
+		{"invalid third tool", func(toolset *contractToolset) {
+			toolset.toolsSet = true
+			toolset.tools = []coveragerun.TrustedPath{&contractPath{valid: true}, &contractPath{valid: true}, &contractPath{}}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			toolset := &contractToolset{valid: true}
+			test.edit(toolset)
+			if VerifyToolset(toolset) == nil {
+				t.Fatal("toolset with malformed capability was accepted")
+			}
+		})
 	}
 }
 
