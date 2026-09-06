@@ -35,6 +35,31 @@ All commands were run from `apps/test-service` with `GOENV=off`,
 - `GOOS=windows GOARCH=amd64 go test ./internal/coverageplatform ./internal/coveragegcc -run '^$'` — PASS
 - `git diff --check` — PASS
 
+## Fix round 3 — Windows ancestry and collision cleanup
+
+- Windows publication now records every path segment from the volume root to
+  the task root, retains native directory handles where the ACL permits, and
+  verifies the current identity of every retained/inspectable segment both
+  before creating a temporary file and before reporting success. The final
+  writable root is still used only through native handle-relative create and
+  rename. This prevents returning an include path under a replaced directory.
+- Collision cleanup now deletes the retained read-only temporary through
+  `FileDispositionInformationEx` with `IGNORE_READONLY_ATTRIBUTE`; older
+  filesystems use a retained-handle writable-attribute plus legacy disposition
+  fallback. Cleanup errors are joined into the failure result rather than
+  ignored.
+- Added deterministic Windows tests for root and ancestor replacement blocking
+  and a pre-rename collision injection that asserts the collision is the only
+  final entry and no temporary residue remains.
+
+### Fix-round verification
+
+- full `coverageplatform`, `coveragegcc`, and `coveragellvm` tests — PASS
+- GCC evidence/allocator race selection — PASS
+- Linux amd64 `coveragegcc` and `coverageplatform` test-binary compilation — PASS
+- Windows amd64 compile-only check — PASS
+- `git diff --check` — PASS
+
 ## Host limitation
 
 This worker is Windows, so Linux-only evidence behavior was cross-compiled but

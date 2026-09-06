@@ -3,6 +3,7 @@ package coverageplatform
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"path/filepath"
 	"strings"
 )
@@ -16,7 +17,7 @@ func PublishInstrumentation(root, name, contents, version string) (Instrumentati
 		return Instrumentation{}, ErrInvalidCapability
 	}
 	if err := publishInstrumentationFile(root, name, []byte(contents)); err != nil {
-		return Instrumentation{}, ErrInvalidCapability
+		return Instrumentation{}, errors.Join(ErrInvalidCapability, err)
 	}
 	digest := sha256.Sum256([]byte(contents))
 	digestText := hex.EncodeToString(digest[:])
