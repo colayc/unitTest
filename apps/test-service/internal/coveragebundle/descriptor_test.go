@@ -142,6 +142,41 @@ func TestDescriptorRejectsUnboundAuthority(t *testing.T) {
 	}
 }
 
+func TestDescriptorCapabilitiesRejectTypedNilWithoutPanic(t *testing.T) {
+	base := strictTestTempDir(t)
+	collector, root, objects, gcov := filepath.Join(base, "collector"), filepath.Join(base, "root"), filepath.Join(base, "objects"), filepath.Join(base, "gcov")
+	for _, directory := range []string{collector, root, objects} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(gcov, []byte("gcov"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	descriptor := Descriptor{SchemaVersion: 1, Root: root, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(collector, "gcovr", "coverage.json")}
+	for _, mutate := range []func(*DescriptorCapabilities){
+		func(capabilities *DescriptorCapabilities) {
+			var value *VerifiedDirectory
+			capabilities.CollectorRoot = value
+		},
+		func(capabilities *DescriptorCapabilities) { var value *VerifiedDirectory; capabilities.Root = value },
+		func(capabilities *DescriptorCapabilities) {
+			var value *VerifiedDirectory
+			capabilities.ObjectDirectory = value
+		},
+		func(capabilities *DescriptorCapabilities) {
+			var value *VerifiedExecutable
+			capabilities.GcovExecutable = value
+		},
+	} {
+		capabilities := descriptorCapabilitiesForTest(t, collector, root, objects, gcov)
+		mutate(&capabilities)
+		if _, err := descriptor.WriteAtomic(capabilities); err == nil {
+			t.Fatal("WriteAtomic accepted typed-nil capability")
+		}
+	}
+}
+
 func TestParseDescriptorRejectsUnknownAndDuplicateMembers(t *testing.T) {
 	valid := `{"schemaVersion":1,"root":"C:/root","objectDirectory":"C:/objects","gcovExecutable":"C:/gcov.exe","outputPath":"C:/task/coverage.json"}`
 	if _, err := ParseDescriptor([]byte(strings.Replace(valid, `"outputPath"`, `"unknown":true,"outputPath"`, 1))); err == nil {

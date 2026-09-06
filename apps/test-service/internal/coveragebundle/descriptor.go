@@ -617,10 +617,10 @@ func (descriptor Descriptor) WriteAtomic(capabilities DescriptorCapabilities) (*
 	if err := validateDescriptorFields(descriptor); err != nil {
 		return nil, err
 	}
-	if capabilities.CollectorRoot == nil {
-		return nil, integrityError("descriptor capabilities", errors.New("all verified capabilities are required"))
+	coverageRoot, err := directoryCapabilityPath(capabilities.CollectorRoot)
+	if err != nil {
+		return nil, integrityError("collector root capability", err)
 	}
-	coverageRoot := capabilities.CollectorRoot.Path()
 	if err := validateDescriptorCapabilities(coverageRoot, descriptor, capabilities); err != nil {
 		return nil, err
 	}
@@ -647,9 +647,12 @@ func (descriptor Descriptor) WriteAtomic(capabilities DescriptorCapabilities) (*
 		return nil, integrityError("task root capability", err)
 	}
 	cleanup := func() {
-		// Deliberately leak the task root on failure. Recursive pathname
-		// deletion cannot be made race-free on every supported host; safety is
-		// preferred over deleting a replaced attacker-controlled tree.
+		if err := taskRootCapability.Verify(); err != nil {
+			return
+		}
+		_ = os.Remove(filepath.Join(taskRoot, "descriptor.json"))
+		_ = os.Remove(descriptor.OutputPath)
+		_ = os.Remove(taskRoot)
 	}
 	closeTaskRoot := func() {
 		// Never recursively clean a path after its retained capability has
@@ -659,8 +662,8 @@ func (descriptor Descriptor) WriteAtomic(capabilities DescriptorCapabilities) (*
 		}
 		_ = taskRootCapability.Close()
 	}
-	if err := capabilities.CollectorRoot.Verify(); err != nil {
-		_ = taskRootCapability.Close()
+	if err := validateDescriptorCapabilities(coverageRoot, descriptor, capabilities); err != nil {
+		closeTaskRoot()
 		return nil, integrityError("collector root", err)
 	}
 	if !pathWithin(taskRoot, descriptor.OutputPath) || filepath.Dir(descriptor.OutputPath) != taskRoot {
@@ -787,6 +790,9 @@ func (owned *OwnedDescriptor) verifyOutputAfterLocked() error {
 	if owned.closed || owned.taskRootCapability == nil {
 		return ErrDescriptorClosed
 	}
+	if err := owned.verifyLocked(); err != nil {
+		return err
+	}
 	if err := owned.taskRootCapability.Verify(); err != nil {
 		return err
 	}
@@ -871,8 +877,8 @@ func (owned *OwnedDescriptor) verifyLocked() error {
 	if owned.closed || owned.descriptorFile == nil || owned.collectorRoot == nil || owned.collectorChild == nil || owned.taskRootCapability == nil || owned.rootCapability == nil || owned.objectCapability == nil || owned.gcovCapability == nil {
 		return ErrDescriptorClosed
 	}
-	if err := owned.collectorRoot.Verify(); err != nil {
-		return fmt.Errorf("%w: collector root: %v", ErrDescriptorIntegrity, err)
+	if err := validateOwnedCapabilities(owned); err != nil {
+		return err
 	}
 	if owned.taskRootCapability == nil || owned.taskRootCapability.Verify() != nil {
 		return fmt.Errorf("%w: task root identity changed", ErrDescriptorIntegrity)
@@ -937,11 +943,23 @@ func (owned *OwnedDescriptor) Close() error {
 }
 
 func validateDescriptorCapabilities(coverageRoot string, descriptor Descriptor, capabilities DescriptorCapabilities) error {
-	if capabilities.CollectorRoot == nil || capabilities.Root == nil || capabilities.ObjectDirectory == nil || capabilities.GcovExecutable == nil {
-		return integrityError("descriptor capabilities", errors.New("all verified capabilities are required"))
+	collectorRoot, err := directoryCapabilityPath(capabilities.CollectorRoot)
+	if err != nil {
+		return integrityError("collector root capability", err)
 	}
-	if capabilities.CollectorRoot.Path() != coverageRoot || capabilities.Root.Path() != descriptor.Root ||
-		capabilities.ObjectDirectory.Path() != descriptor.ObjectDirectory || capabilities.GcovExecutable.Path() != descriptor.GcovExecutable {
+	root, err := directoryCapabilityPath(capabilities.Root)
+	if err != nil {
+		return integrityError("root capability", err)
+	}
+	objects, err := directoryCapabilityPath(capabilities.ObjectDirectory)
+	if err != nil {
+		return integrityError("object directory capability", err)
+	}
+	gcov, err := trustedCapabilityPath(capabilities.GcovExecutable)
+	if err != nil {
+		return integrityError("gcov executable capability", err)
+	}
+	if collectorRoot != coverageRoot || root != descriptor.Root || objects != descriptor.ObjectDirectory || gcov != descriptor.GcovExecutable {
 		return integrityError("descriptor capabilities", errors.New("capability paths do not match descriptor"))
 	}
 	if err := coverageplatform.VerifyDirectory(capabilities.CollectorRoot); err != nil {
@@ -963,13 +981,77 @@ func validateDescriptorCapabilities(coverageRoot string, descriptor Descriptor, 
 }
 
 func verifyTrustedCapability(value coveragerun.TrustedPath) error {
-	if value == nil || reflect.ValueOf(value).Kind() == reflect.Ptr && reflect.ValueOf(value).IsNil() {
-		return coverageplatform.ErrInvalidCapability
-	}
-	if value.Path() == "" {
-		return coverageplatform.ErrInvalidCapability
+	if _, err := trustedCapabilityPath(value); err != nil {
+		return err
 	}
 	return value.Verify()
+}
+
+func directoryCapabilityPath(value coverageplatform.DirectoryVerifier) (string, error) {
+	if interfaceNil(value) {
+		return "", coverageplatform.ErrInvalidCapability
+	}
+	path := value.Path()
+	if path == "" {
+		return "", coverageplatform.ErrInvalidCapability
+	}
+	return path, nil
+}
+
+func trustedCapabilityPath(value coveragerun.TrustedPath) (string, error) {
+	if interfaceNil(value) {
+		return "", coverageplatform.ErrInvalidCapability
+	}
+	path := value.Path()
+	if path == "" {
+		return "", coverageplatform.ErrInvalidCapability
+	}
+	return path, nil
+}
+
+func interfaceNil(value any) bool {
+	if value == nil {
+		return true
+	}
+	v := reflect.ValueOf(value)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return v.IsNil()
+	default:
+		return false
+	}
+}
+
+func validateOwnedCapabilities(owned *OwnedDescriptor) error {
+	collectorRoot, err := directoryCapabilityPath(owned.collectorRoot)
+	if err != nil || collectorRoot != owned.root {
+		return fmt.Errorf("%w: collector root", ErrDescriptorIntegrity)
+	}
+	root, err := directoryCapabilityPath(owned.rootCapability)
+	if err != nil || root != owned.descriptor.Root {
+		return fmt.Errorf("%w: root", ErrDescriptorIntegrity)
+	}
+	objects, err := directoryCapabilityPath(owned.objectCapability)
+	if err != nil || objects != owned.descriptor.ObjectDirectory {
+		return fmt.Errorf("%w: object directory", ErrDescriptorIntegrity)
+	}
+	gcov, err := trustedCapabilityPath(owned.gcovCapability)
+	if err != nil || gcov != owned.descriptor.GcovExecutable {
+		return fmt.Errorf("%w: gcov executable", ErrDescriptorIntegrity)
+	}
+	if err := coverageplatform.VerifyDirectory(owned.collectorRoot); err != nil {
+		return fmt.Errorf("%w: collector root: %v", ErrDescriptorIntegrity, err)
+	}
+	if err := coverageplatform.VerifyDirectory(owned.rootCapability); err != nil {
+		return fmt.Errorf("%w: root: %v", ErrDescriptorIntegrity, err)
+	}
+	if err := coverageplatform.VerifyDirectory(owned.objectCapability); err != nil {
+		return fmt.Errorf("%w: object directory: %v", ErrDescriptorIntegrity, err)
+	}
+	if err := verifyTrustedCapability(owned.gcovCapability); err != nil {
+		return fmt.Errorf("%w: gcov executable: %v", ErrDescriptorIntegrity, err)
+	}
+	return nil
 }
 
 func validateDescriptorFields(descriptor Descriptor) error {
