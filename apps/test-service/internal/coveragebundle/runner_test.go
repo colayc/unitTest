@@ -1,6 +1,7 @@
 package coveragebundle
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -17,6 +18,11 @@ type fakeRunnerPin struct {
 	closeCalls   int
 	closed       bool
 }
+
+type bareDirectoryCapability struct{ path string }
+
+func (capability bareDirectoryCapability) Path() string  { return capability.path }
+func (capability bareDirectoryCapability) Verify() error { return nil }
 
 func (pin *fakeRunnerPin) Installation() Installation { return pin.installation }
 func (pin *fakeRunnerPin) Verify() error {
@@ -51,9 +57,9 @@ func TestPrepareRunnerBuildsExactIsolatedProcessSpec(t *testing.T) {
 		}
 	}
 	pin := &fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}}
-	execution, err := PrepareRunner(pin, coverageRoot, "task", DescriptorInput{
+	execution, err := PrepareRunner(pin, DescriptorInput{
 		Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov,
-		OutputPath: filepath.Join(coverageRoot, "task", "coverage.json"),
+		OutputPath: filepath.Join(coverageRoot, "gcovr", "coverage.json"),
 	}, descriptorCapabilitiesForTest(t, coverageRoot, projectRoot, objects, gcov))
 	if err != nil {
 		t.Fatal(err)
@@ -104,6 +110,89 @@ func TestPrepareRunnerBuildsExactIsolatedProcessSpec(t *testing.T) {
 	}
 }
 
+func TestPrepareRunnerAcceptsIndependentCapabilities(t *testing.T) {
+	collectorBase := strictTestTempDir(t)
+	rootBase := strictTestTempDir(t)
+	objectsBase := strictTestTempDir(t)
+	gcovBase := strictTestTempDir(t)
+	collectorRoot, projectRoot := filepath.Join(collectorBase, "collector"), filepath.Join(rootBase, "project")
+	objects, gcov := filepath.Join(objectsBase, "objects"), filepath.Join(gcovBase, "gcov")
+	for _, directory := range []string{collectorRoot, projectRoot, objects} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(gcov, []byte("gcov"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	python, runner := filepath.Join(collectorBase, "python"), filepath.Join(collectorBase, "runner.pyz")
+	for _, path := range []string{python, runner} {
+		if err := os.WriteFile(path, []byte(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	capabilities := descriptorCapabilitiesForTest(t, collectorRoot, projectRoot, objects, gcov)
+	execution, err := PrepareRunner(&fakeRunnerPin{installation: Installation{Root: collectorBase, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}}, DescriptorInput{
+		Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov,
+		OutputPath: filepath.Join(collectorRoot, "gcovr", "coverage.json"),
+	}, capabilities)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := execution.TaskRoot(), filepath.Join(collectorRoot, "gcovr"); got != want {
+		t.Fatalf("TaskRoot = %q, want %q", got, want)
+	}
+	if err := execution.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := capabilities.CollectorRoot.Verify(); err != nil {
+		t.Fatalf("collector owner Verify = %v", err)
+	}
+	if err := capabilities.Root.Verify(); err != nil {
+		t.Fatalf("root owner Verify = %v", err)
+	}
+	if err := capabilities.ObjectDirectory.Verify(); err != nil {
+		t.Fatalf("object owner Verify = %v", err)
+	}
+	if err := capabilities.GcovExecutable.Verify(); err != nil {
+		t.Fatalf("gcov owner Verify = %v", err)
+	}
+}
+
+func TestPrepareRunnerRejectsBareCollectorCapabilityWithoutClosingOwners(t *testing.T) {
+	base := strictTestTempDir(t)
+	collectorRoot, root, objects := filepath.Join(base, "collector"), filepath.Join(base, "root"), filepath.Join(base, "objects")
+	for _, directory := range []string{collectorRoot, root, objects} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gcov, python, runner := filepath.Join(base, "gcov"), filepath.Join(base, "python"), filepath.Join(base, "runner")
+	for _, path := range []string{gcov, python, runner} {
+		if err := os.WriteFile(path, []byte(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	capabilities := descriptorCapabilitiesForTest(t, collectorRoot, root, objects, gcov)
+	capabilities.CollectorRoot = bareDirectoryCapability{path: collectorRoot}
+	_, err := PrepareRunner(&fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}}, DescriptorInput{Root: root, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(collectorRoot, "gcovr", "coverage.json")}, capabilities)
+	if err == nil {
+		t.Fatal("PrepareRunner accepted a bare collector path")
+	}
+	if err := capabilities.Root.Verify(); err != nil {
+		t.Fatalf("root owner was closed: %v", err)
+	}
+	if err := capabilities.ObjectDirectory.Verify(); err != nil {
+		t.Fatalf("object owner was closed: %v", err)
+	}
+	if err := capabilities.GcovExecutable.Verify(); err != nil {
+		t.Fatalf("gcov owner was closed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(collectorRoot, "gcovr")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("collector child residue: %v", err)
+	}
+}
+
 func TestPrepareRunnerRejectsTamperedPinAndOutputEscape(t *testing.T) {
 	base := strictTestTempDir(t)
 	coverageRoot := filepath.Join(base, "coverage")
@@ -124,7 +213,7 @@ func TestPrepareRunnerRejectsTamperedPinAndOutputEscape(t *testing.T) {
 		}
 	}
 	pin := &fakeRunnerPin{installation: installation}
-	_, err := PrepareRunner(pin, coverageRoot, "task", DescriptorInput{
+	_, err := PrepareRunner(pin, DescriptorInput{
 		Root: filepath.Join(base, "root"), ObjectDirectory: filepath.Join(base, "objects"),
 		GcovExecutable: filepath.Join(base, "gcov"), OutputPath: filepath.Join(base, "outside.json"),
 	}, DescriptorCapabilities{})
@@ -152,9 +241,9 @@ func TestPreparedExecutionDetectsRootAndGcovTamper(t *testing.T) {
 		}
 	}
 	pin := &fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}}
-	execution, err := PrepareRunner(pin, coverageRoot, "task", DescriptorInput{
+	execution, err := PrepareRunner(pin, DescriptorInput{
 		Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov,
-		OutputPath: filepath.Join(coverageRoot, "task", "coverage.json"),
+		OutputPath: filepath.Join(coverageRoot, "gcovr", "coverage.json"),
 	}, descriptorCapabilitiesForTest(t, coverageRoot, projectRoot, objects, gcov))
 	if err != nil {
 		t.Fatal(err)
@@ -186,9 +275,9 @@ func TestPreparedExecutionDetectsOutputReplacementAfterVerifyAfter(t *testing.T)
 			t.Fatal(err)
 		}
 	}
-	execution, err := PrepareRunner(&fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}}, coverageRoot, "task", DescriptorInput{
+	execution, err := PrepareRunner(&fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}}, DescriptorInput{
 		Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov,
-		OutputPath: filepath.Join(coverageRoot, "task", "coverage.json"),
+		OutputPath: filepath.Join(coverageRoot, "gcovr", "coverage.json"),
 	}, descriptorCapabilitiesForTest(t, coverageRoot, projectRoot, objects, gcov))
 	if err != nil {
 		t.Fatal(err)
@@ -232,8 +321,8 @@ func TestPreparedExecutionDetectsOutputInPlaceMutation(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	execution, err := PrepareRunner(&fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}}, coverageRoot, "task", DescriptorInput{
-		Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(coverageRoot, "task", "coverage.json"),
+	execution, err := PrepareRunner(&fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}}, DescriptorInput{
+		Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(coverageRoot, "gcovr", "coverage.json"),
 	}, descriptorCapabilitiesForTest(t, coverageRoot, projectRoot, objects, gcov))
 	if err != nil {
 		t.Fatal(err)
@@ -268,7 +357,7 @@ func TestPinnedOutputConsumesWithoutPathReopen(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	execution, err := PrepareRunner(&fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}}, coverageRoot, "task", DescriptorInput{Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(coverageRoot, "task", "coverage.json")}, descriptorCapabilitiesForTest(t, coverageRoot, projectRoot, objects, gcov))
+	execution, err := PrepareRunner(&fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}}, DescriptorInput{Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(coverageRoot, "gcovr", "coverage.json")}, descriptorCapabilitiesForTest(t, coverageRoot, projectRoot, objects, gcov))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,8 +396,8 @@ func TestPreparedExecutionRejectsTaskRootReplacementBeforeOutputOpen(t *testing.
 			t.Fatal(err)
 		}
 	}
-	execution, err := PrepareRunner(&fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}}, coverageRoot, "task", DescriptorInput{
-		Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(coverageRoot, "task", "coverage.json"),
+	execution, err := PrepareRunner(&fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}}, DescriptorInput{
+		Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(coverageRoot, "gcovr", "coverage.json"),
 	}, descriptorCapabilitiesForTest(t, coverageRoot, projectRoot, objects, gcov))
 	if err != nil {
 		t.Fatal(err)

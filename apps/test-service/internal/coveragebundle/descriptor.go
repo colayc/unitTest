@@ -10,10 +10,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
 
+	"unit-test-ide.local/test-service/internal/coverageplatform"
+	"unit-test-ide.local/test-service/internal/coveragerun"
 	"unit-test-ide.local/test-service/internal/serviceanchor"
 )
 
@@ -104,12 +107,12 @@ type OwnedDescriptor struct {
 
 	descriptorFile     *os.File
 	descriptorInfo     os.FileInfo
-	coverageRoot       *VerifiedDirectory
+	collectorRoot      coverageplatform.DirectoryVerifier
+	collectorChild     *VerifiedDirectory
 	taskRootCapability *VerifiedDirectory
-	rootCapability     *VerifiedDirectory
-	objectCapability   *VerifiedDirectory
-	gcovCapability     *VerifiedExecutable
-	provenance         *VerifiedDirectory
+	rootCapability     coverageplatform.DirectoryVerifier
+	objectCapability   coverageplatform.DirectoryVerifier
+	gcovCapability     coveragerun.TrustedPath
 	outputPin          *pinnedObject
 	outputFile         *os.File
 	outputInfo         os.FileInfo
@@ -194,15 +197,10 @@ type VerifiedExecutable struct {
 }
 
 type DescriptorCapabilities struct {
-	// Provenance is the service-owned authority from which all three
-	// descriptor directories are resolved. Bare absolute paths are not an
-	// authorization boundary.
-	Provenance      *VerifiedDirectory
-	Anchor          serviceanchor.Anchor
-	CoverageRoot    *VerifiedDirectory
-	Root            *VerifiedDirectory
-	ObjectDirectory *VerifiedDirectory
-	GcovExecutable  *VerifiedExecutable
+	CollectorRoot   coverageplatform.DirectoryVerifier
+	Root            coverageplatform.DirectoryVerifier
+	ObjectDirectory coverageplatform.DirectoryVerifier
+	GcovExecutable  coveragerun.TrustedPath
 }
 
 func NewVerifiedDirectory(path string) (*VerifiedDirectory, error) {
@@ -615,35 +613,36 @@ func directoryFinalPin(directory *VerifiedDirectory) *pinnedObject {
 	return nil
 }
 
-func (descriptor Descriptor) WriteAtomic(coverageRoot, taskID string, capabilities DescriptorCapabilities) (*OwnedDescriptor, error) {
+func (descriptor Descriptor) WriteAtomic(capabilities DescriptorCapabilities) (*OwnedDescriptor, error) {
 	if err := validateDescriptorFields(descriptor); err != nil {
 		return nil, err
 	}
-	coverageRoot, err := canonicalAbsoluteDirectory(coverageRoot)
-	if err != nil {
-		return nil, integrityError("coverage root", err)
+	if capabilities.CollectorRoot == nil {
+		return nil, integrityError("descriptor capabilities", errors.New("all verified capabilities are required"))
 	}
+	coverageRoot := capabilities.CollectorRoot.Path()
 	if err := validateDescriptorCapabilities(coverageRoot, descriptor, capabilities); err != nil {
 		return nil, err
 	}
-	if !validTaskID(taskID) {
-		return nil, integrityError("task id", errors.New("invalid task id"))
+	collectorRoot, ok := capabilities.CollectorRoot.(*VerifiedDirectory)
+	if !ok || collectorRoot == nil {
+		return nil, integrityError("collector root", errors.New("collector root cannot mint a retained child"))
 	}
-	taskRoot := filepath.Join(coverageRoot, taskID)
-	if filepath.Clean(taskRoot) != taskRoot || !pathWithin(coverageRoot, taskRoot) {
-		return nil, integrityError("task root", errors.New("task root escapes coverage root"))
-	}
-	coveragePin := directoryFinalPin(capabilities.CoverageRoot)
+	taskRoot := filepath.Join(coverageRoot, "gcovr")
+	coveragePin := directoryFinalPin(collectorRoot)
 	if coveragePin == nil {
-		return nil, integrityError("task root", errors.New("coverage root capability is not pinned"))
+		return nil, integrityError("collector root", errors.New("collector root capability is not pinned"))
 	}
-	if err := mkdirPinnedChild(coveragePin, taskID, 0o700); err != nil {
-		return nil, integrityError("task root", err)
+	if _, err := os.Lstat(taskRoot); err == nil || !errors.Is(err, os.ErrNotExist) {
+		return nil, integrityError("collector child", errors.New("gcovr child already exists"))
+	}
+	if err := mkdirPinnedChild(coveragePin, "gcovr", 0o700); err != nil {
+		return nil, integrityError("collector child", err)
 	}
 	if err := syncPinnedDirectory(coveragePin); err != nil {
-		return nil, integrityError("task root sync", err)
+		return nil, integrityError("collector child sync", err)
 	}
-	taskRootCapability, err := NewVerifiedDirectoryFrom(capabilities.CoverageRoot, filepath.Base(taskRoot))
+	taskRootCapability, err := NewVerifiedDirectoryFrom(collectorRoot, "gcovr")
 	if err != nil {
 		return nil, integrityError("task root capability", err)
 	}
@@ -660,9 +659,9 @@ func (descriptor Descriptor) WriteAtomic(coverageRoot, taskID string, capabiliti
 		}
 		_ = taskRootCapability.Close()
 	}
-	if err := capabilities.CoverageRoot.Verify(); err != nil {
+	if err := capabilities.CollectorRoot.Verify(); err != nil {
 		_ = taskRootCapability.Close()
-		return nil, integrityError("coverage root", err)
+		return nil, integrityError("collector root", err)
 	}
 	if !pathWithin(taskRoot, descriptor.OutputPath) || filepath.Dir(descriptor.OutputPath) != taskRoot {
 		closeTaskRoot()
@@ -736,10 +735,10 @@ func (descriptor Descriptor) WriteAtomic(coverageRoot, taskID string, capabiliti
 		descriptor: descriptor,
 		path:       path, root: coverageRoot, taskRoot: taskRoot,
 		digest: digest, descriptorFile: descriptorFile,
-		descriptorInfo: descriptorInfo, coverageRoot: capabilities.CoverageRoot,
+		descriptorInfo: descriptorInfo, collectorRoot: capabilities.CollectorRoot, collectorChild: taskRootCapability,
 		taskRootCapability: taskRootCapability,
 		rootCapability:     capabilities.Root, objectCapability: capabilities.ObjectDirectory,
-		gcovCapability: capabilities.GcovExecutable, provenance: capabilities.Provenance,
+		gcovCapability: capabilities.GcovExecutable,
 	}
 	if err := owned.Verify(); err != nil {
 		_ = owned.Close()
@@ -869,11 +868,11 @@ func (owned *OwnedDescriptor) Verify() error {
 }
 
 func (owned *OwnedDescriptor) verifyLocked() error {
-	if owned.closed || owned.descriptorFile == nil || owned.coverageRoot == nil || owned.taskRootCapability == nil || owned.rootCapability == nil || owned.objectCapability == nil || owned.gcovCapability == nil {
+	if owned.closed || owned.descriptorFile == nil || owned.collectorRoot == nil || owned.collectorChild == nil || owned.taskRootCapability == nil || owned.rootCapability == nil || owned.objectCapability == nil || owned.gcovCapability == nil {
 		return ErrDescriptorClosed
 	}
-	if err := owned.coverageRoot.Verify(); err != nil {
-		return fmt.Errorf("%w: coverage root: %v", ErrDescriptorIntegrity, err)
+	if err := owned.collectorRoot.Verify(); err != nil {
+		return fmt.Errorf("%w: collector root: %v", ErrDescriptorIntegrity, err)
 	}
 	if owned.taskRootCapability == nil || owned.taskRootCapability.Verify() != nil {
 		return fmt.Errorf("%w: task root identity changed", ErrDescriptorIntegrity)
@@ -925,77 +924,52 @@ func (owned *OwnedDescriptor) Close() error {
 		closeErr = errors.Join(closeErr, owned.outputPin.Close())
 		owned.outputPin = nil
 	}
-	if owned.gcovCapability != nil {
-		closeErr = errors.Join(closeErr, owned.gcovCapability.Close())
-		owned.gcovCapability = nil
-	}
-	if owned.objectCapability != nil {
-		closeErr = errors.Join(closeErr, owned.objectCapability.Close())
-		owned.objectCapability = nil
-	}
-	if owned.rootCapability != nil {
-		closeErr = errors.Join(closeErr, owned.rootCapability.Close())
-		owned.rootCapability = nil
-	}
-	if owned.coverageRoot != nil {
-		closeErr = errors.Join(closeErr, owned.coverageRoot.Close())
-		owned.coverageRoot = nil
-	}
 	if owned.taskRootCapability != nil {
 		closeErr = errors.Join(closeErr, owned.taskRootCapability.Close())
 		owned.taskRootCapability = nil
 	}
-	if owned.provenance != nil {
-		closeErr = errors.Join(closeErr, owned.provenance.Close())
-		owned.provenance = nil
-	}
+	owned.collectorChild = nil
+	owned.collectorRoot = nil
+	owned.rootCapability = nil
+	owned.objectCapability = nil
+	owned.gcovCapability = nil
 	return errors.Join(verifyErr, closeErr)
 }
 
 func validateDescriptorCapabilities(coverageRoot string, descriptor Descriptor, capabilities DescriptorCapabilities) error {
-	if err := capabilities.Anchor.Verify(coverageRoot); err != nil {
-		return integrityError("service authority", err)
-	}
-	if capabilities.Provenance == nil || capabilities.CoverageRoot == nil || capabilities.Root == nil || capabilities.ObjectDirectory == nil || capabilities.GcovExecutable == nil {
+	if capabilities.CollectorRoot == nil || capabilities.Root == nil || capabilities.ObjectDirectory == nil || capabilities.GcovExecutable == nil {
 		return integrityError("descriptor capabilities", errors.New("all verified capabilities are required"))
 	}
-	if err := capabilities.Anchor.Verify(capabilities.Provenance.Path()); err != nil {
-		return integrityError("capability authority", err)
-	}
-	if capabilities.Provenance.authority == nil || !capabilities.Anchor.SameIssuer(*capabilities.Provenance.authority) || capabilities.CoverageRoot.authority != capabilities.Provenance.authority || capabilities.Root.authority != capabilities.Provenance.authority || capabilities.ObjectDirectory.authority != capabilities.Provenance.authority || capabilities.GcovExecutable.root == nil || capabilities.GcovExecutable.root.authority != capabilities.Provenance.authority {
-		return integrityError("capability authority", errors.New("capabilities do not share one authority issuer"))
-	}
-	for label, path := range map[string]string{
-		"coverage root": coverageRoot, "root": descriptor.Root,
-		"object directory": descriptor.ObjectDirectory, "gcov executable": descriptor.GcovExecutable,
-	} {
-		if err := capabilities.Anchor.Verify(path); err != nil {
-			return integrityError("capability authority "+label, err)
-		}
-	}
-	if capabilities.CoverageRoot.parent != capabilities.Provenance || capabilities.Root.parent != capabilities.Provenance || capabilities.ObjectDirectory.parent != capabilities.Provenance || capabilities.GcovExecutable.parent != capabilities.Provenance {
-		return integrityError("descriptor capabilities", errors.New("capabilities lack common authorized provenance"))
-	}
-	if err := capabilities.Provenance.Verify(); err != nil {
-		return integrityError("capability provenance", err)
-	}
-	if capabilities.CoverageRoot.Path() != coverageRoot || capabilities.Root.Path() != descriptor.Root ||
+	if capabilities.CollectorRoot.Path() != coverageRoot || capabilities.Root.Path() != descriptor.Root ||
 		capabilities.ObjectDirectory.Path() != descriptor.ObjectDirectory || capabilities.GcovExecutable.Path() != descriptor.GcovExecutable {
 		return integrityError("descriptor capabilities", errors.New("capability paths do not match descriptor"))
 	}
-	if err := capabilities.CoverageRoot.Verify(); err != nil {
-		return integrityError("coverage root capability", err)
+	if err := coverageplatform.VerifyDirectory(capabilities.CollectorRoot); err != nil {
+		return integrityError("collector root capability", err)
 	}
-	if err := capabilities.Root.Verify(); err != nil {
+	if err := coverageplatform.VerifyDirectory(capabilities.Root); err != nil {
 		return integrityError("root capability", err)
 	}
-	if err := capabilities.ObjectDirectory.Verify(); err != nil {
+	if err := coverageplatform.VerifyDirectory(capabilities.ObjectDirectory); err != nil {
 		return integrityError("object directory capability", err)
 	}
-	if err := capabilities.GcovExecutable.Verify(); err != nil {
+	if err := verifyTrustedCapability(capabilities.GcovExecutable); err != nil {
 		return integrityError("gcov executable capability", err)
 	}
+	if descriptor.OutputPath != filepath.Join(coverageRoot, "gcovr", "coverage.json") {
+		return integrityError("output path", errors.New("output must be collector/gcovr/coverage.json"))
+	}
 	return nil
+}
+
+func verifyTrustedCapability(value coveragerun.TrustedPath) error {
+	if value == nil || reflect.ValueOf(value).Kind() == reflect.Ptr && reflect.ValueOf(value).IsNil() {
+		return coverageplatform.ErrInvalidCapability
+	}
+	if value.Path() == "" {
+		return coverageplatform.ErrInvalidCapability
+	}
+	return value.Verify()
 }
 
 func validateDescriptorFields(descriptor Descriptor) error {

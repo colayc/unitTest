@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"unit-test-ide.local/test-service/internal/coverageplatform"
 	"unit-test-ide.local/test-service/internal/task"
 )
 
@@ -32,7 +33,9 @@ type PreparedExecution struct {
 	closed         bool
 }
 
-func PrepareRunner(pin Pin, coverageRoot, taskID string, input DescriptorInput, capabilities DescriptorCapabilities) (*PreparedExecution, error) {
+var _ coverageplatform.CollectorExecution = (*PreparedExecution)(nil)
+
+func PrepareRunner(pin Pin, input DescriptorInput, capabilities DescriptorCapabilities) (*PreparedExecution, error) {
 	if isNilPin(pin) {
 		return nil, ErrBundleIntegrity
 	}
@@ -47,9 +50,8 @@ func PrepareRunner(pin Pin, coverageRoot, taskID string, input DescriptorInput, 
 	if err != nil {
 		return nil, err
 	}
-	owned, err := descriptor.WriteAtomic(coverageRoot, taskID, capabilities)
+	owned, err := descriptor.WriteAtomic(capabilities)
 	if err != nil {
-		closeDescriptorCapabilities(capabilities)
 		return nil, err
 	}
 	if parsed, err := owned.Parse(); err != nil || parsed != descriptor {
@@ -71,24 +73,6 @@ func PrepareRunner(pin Pin, coverageRoot, taskID string, input DescriptorInput, 
 		return nil, err
 	}
 	return execution, nil
-}
-
-func closeDescriptorCapabilities(capabilities DescriptorCapabilities) {
-	if capabilities.GcovExecutable != nil {
-		_ = capabilities.GcovExecutable.Close()
-	}
-	if capabilities.ObjectDirectory != nil {
-		_ = capabilities.ObjectDirectory.Close()
-	}
-	if capabilities.Root != nil {
-		_ = capabilities.Root.Close()
-	}
-	if capabilities.CoverageRoot != nil {
-		_ = capabilities.CoverageRoot.Close()
-	}
-	if capabilities.Provenance != nil {
-		_ = capabilities.Provenance.Close()
-	}
 }
 
 func (execution *PreparedExecution) ProcessSpec() task.ProcessSpec {
@@ -181,7 +165,7 @@ func (execution *PreparedExecution) VerifyAfter() error {
 	return descriptor.VerifyOutputAfter()
 }
 
-func (execution *PreparedExecution) PinnedOutput() (*PinnedOutput, error) {
+func (execution *PreparedExecution) PinnedOutput() (coverageplatform.Output, error) {
 	if execution == nil {
 		return nil, ErrBundleIntegrity
 	}

@@ -44,7 +44,7 @@ func TestDescriptorWriteAtomicIsClosedAndDeterministic(t *testing.T) {
 	if err := os.WriteFile(gcov, []byte("gcov"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	taskRoot := filepath.Join(coverageRoot, "task-1")
+	taskRoot := filepath.Join(coverageRoot, "gcovr")
 	descriptor, err := NewDescriptor(
 		root,
 		objects,
@@ -54,7 +54,7 @@ func TestDescriptorWriteAtomicIsClosedAndDeterministic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	owned, err := descriptor.WriteAtomic(coverageRoot, "task-1", descriptorCapabilitiesForTest(t, coverageRoot, root, objects, gcov))
+	owned, err := descriptor.WriteAtomic(descriptorCapabilitiesForTest(t, coverageRoot, root, objects, gcov))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +123,7 @@ func TestDescriptorRejectsClosedContractAndNativeEscapes(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if _, err := test.make().WriteAtomic(coverageRoot, "task", DescriptorCapabilities{}); err == nil {
+			if _, err := test.make().WriteAtomic(DescriptorCapabilities{}); err == nil {
 				t.Fatal("WriteAtomic accepted unsafe descriptor")
 			}
 		})
@@ -137,7 +137,7 @@ func TestDescriptorRejectsUnboundAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	descriptor := Descriptor{SchemaVersion: 1, Root: base, ObjectDirectory: base, GcovExecutable: filepath.Join(base, "gcov"), OutputPath: filepath.Join(coverage, "task", "out.json")}
-	if _, err := descriptor.WriteAtomic(coverage, "task", DescriptorCapabilities{}); err == nil {
+	if _, err := descriptor.WriteAtomic(DescriptorCapabilities{}); err == nil {
 		t.Fatal("WriteAtomic accepted an unbound service authority")
 	}
 }
@@ -182,7 +182,7 @@ func TestDescriptorRejectsSymlinkEscape(t *testing.T) {
 		GcovExecutable:  filepath.Join(outside, "gcov"),
 		OutputPath:      filepath.Join(coverageRoot, "task", "out.json"),
 	}
-	if _, err := descriptor.WriteAtomic(coverageRoot, "task", DescriptorCapabilities{}); err == nil {
+	if _, err := descriptor.WriteAtomic(DescriptorCapabilities{}); err == nil {
 		t.Fatal("WriteAtomic accepted symlink root escape")
 	}
 }
@@ -292,8 +292,8 @@ func TestDescriptorDetectsTamperBeforeCloseAndClosesOnce(t *testing.T) {
 	if err := os.WriteFile(gcov, []byte("gcov"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	descriptor := Descriptor{SchemaVersion: 1, Root: root, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(coverageRoot, "task", "out.json")}
-	owned, err := descriptor.WriteAtomic(coverageRoot, "task", descriptorCapabilitiesForTest(t, coverageRoot, root, objects, gcov))
+	descriptor := Descriptor{SchemaVersion: 1, Root: root, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(coverageRoot, "gcovr", "coverage.json")}
+	owned, err := descriptor.WriteAtomic(descriptorCapabilitiesForTest(t, coverageRoot, root, objects, gcov))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,42 +313,30 @@ func TestDescriptorDetectsTamperBeforeCloseAndClosesOnce(t *testing.T) {
 
 func descriptorCapabilitiesForTest(t *testing.T, coverageRoot, root, objects, gcov string) DescriptorCapabilities {
 	t.Helper()
-	provenancePath := filepath.Dir(coverageRoot)
-	for !pathWithin(provenancePath, root) || !pathWithin(provenancePath, objects) || !pathWithin(provenancePath, gcov) {
-		provenancePath = filepath.Dir(provenancePath)
+	directoryCapability := func(path string) *VerifiedDirectory {
+		anchor, err := testNewServiceAnchor(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		capability, err := NewVerifiedDirectoryFromAnchor(anchor, ".")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return capability
 	}
-	anchor, err := testNewServiceAnchor(provenancePath)
+	coverageCapability := directoryCapability(coverageRoot)
+	rootCapability := directoryCapability(root)
+	objectCapability := directoryCapability(objects)
+	gcovAnchor, err := testNewServiceAnchor(filepath.Dir(gcov))
 	if err != nil {
 		t.Fatal(err)
 	}
-	provenance, err := NewVerifiedDirectoryFromAnchor(anchor, ".")
-	if err != nil {
-		t.Fatal(err)
-	}
-	relative := func(path string) string {
-		value, _ := filepath.Rel(provenancePath, path)
-		return value
-	}
-	coverageCapability, err := NewVerifiedDirectoryFrom(provenance, relative(coverageRoot))
-	if err != nil {
-		t.Fatal(err)
-	}
-	rootCapability, err := NewVerifiedDirectoryFrom(provenance, relative(root))
-	if err != nil {
-		t.Fatal(err)
-	}
-	objectCapability, err := NewVerifiedDirectoryFrom(provenance, relative(objects))
-	if err != nil {
-		t.Fatal(err)
-	}
-	gcovCapability, err := NewVerifiedExecutableFrom(provenance, relative(gcov))
+	gcovCapability, err := NewVerifiedExecutableFromAnchor(gcovAnchor, filepath.Base(gcov))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return DescriptorCapabilities{
-		Anchor:       anchor,
-		Provenance:   provenance,
-		CoverageRoot: coverageCapability, Root: rootCapability,
+		CollectorRoot: coverageCapability, Root: rootCapability,
 		ObjectDirectory: objectCapability, GcovExecutable: gcovCapability,
 	}
 }
