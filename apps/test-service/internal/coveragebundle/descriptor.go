@@ -646,25 +646,31 @@ func (descriptor Descriptor) WriteAtomic(capabilities DescriptorCapabilities) (*
 		_ = collectorRoot.Close()
 		return nil, integrityError("collector child", err)
 	}
+	removeCreatedChild := func() error {
+		child, err := pinChildObject(coveragePin, "gcovr", true)
+		if err != nil {
+			return err
+		}
+		defer child.Close()
+		return removePinnedChild(coveragePin, child, "gcovr")
+	}
 	if err := syncPinnedDirectory(coveragePin); err != nil {
+		cleanupErr := removeCreatedChild()
 		_ = collectorRoot.Close()
-		return nil, integrityError("collector child sync", err)
+		return nil, integrityError("collector child sync", errors.Join(err, cleanupErr))
 	}
 	taskRootCapability, err := NewVerifiedDirectoryFrom(collectorRoot, "gcovr")
 	if err != nil {
-		child, childErr := pinChildObject(coveragePin, "gcovr", true)
-		if childErr == nil {
-			_ = removePinnedChild(coveragePin, child, "gcovr")
-			_ = child.Close()
-		}
+		cleanupErr := removeCreatedChild()
 		_ = collectorRoot.Close()
-		return nil, integrityError("task root capability", err)
+		return nil, integrityError("task root capability", errors.Join(err, cleanupErr))
 	}
 	taskPin := directoryFinalPin(taskRootCapability)
 	if taskPin == nil {
 		_ = taskRootCapability.Close()
+		cleanupErr := removeCreatedChild()
 		_ = collectorRoot.Close()
-		return nil, integrityError("task root capability", errors.New("task root is not pinned"))
+		return nil, integrityError("task root capability", errors.Join(errors.New("task root is not pinned"), cleanupErr))
 	}
 	var temporaryName string
 	cleanup := func() {
