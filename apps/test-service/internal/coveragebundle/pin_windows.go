@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -48,8 +49,23 @@ func renamePinnedChild(parent *pinnedObject, oldName, newName string) error {
 }
 
 func removePinnedChild(parent, child *pinnedObject, name string) error {
-	return errors.New("safe handle-relative child removal is unavailable on windows")
+	if parent == nil || child == nil || name == "" || filepath.Base(name) != name {
+		return errors.New("invalid pinned child removal")
+	}
+	if err := parent.verifyIdentity(); err != nil {
+		return err
+	}
+	if err := child.verifyIdentity(); err != nil {
+		return err
+	}
+	info := fileDispositionInfo{DeleteFile: 1}
+	if err := windows.SetFileInformationByHandle(windows.Handle(child.file.Fd()), windows.FileDispositionInfo, (*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info))); err != nil {
+		return err
+	}
+	return parent.verifyIdentity()
 }
+
+type fileDispositionInfo struct{ DeleteFile byte }
 
 func syncPinnedDirectory(parent *pinnedObject) error {
 	if err := parent.file.Sync(); err != nil {
