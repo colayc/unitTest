@@ -35,6 +35,27 @@ All commands were run from `apps/test-service` with `GOENV=off`,
 - `GOOS=windows GOARCH=amd64 go test ./internal/coverageplatform ./internal/coveragegcc -run '^$'` — PASS
 - `git diff --check` — PASS
 
+## Fix round 4 — strict Windows ancestry binding
+
+- Every Windows ancestry segment now acquires its identity and retained
+  non-delete-sharing handle through the same native `OPEN_REPARSE_POINT`
+  operation. Any ACL, access, or metadata failure returns before the temporary
+  file is created; there is no unbound fallback.
+- Reparse-point ancestors are rejected from that same retained handle, rather
+  than being inspected with one API and followed with another.
+- Added deterministic access-denied and metadata-binding failure injections,
+  both asserting an empty root, plus a real symlink-ancestor rejection test
+  where host policy permits symlink creation.
+
+### Fix-round verification
+
+- targeted Windows publication and GCC evidence/allocator tests — PASS
+- full `coverageplatform`, `coveragegcc`, and `coveragellvm` tests — PASS
+- GCC evidence/allocator race selection — PASS
+- Linux amd64 `coveragegcc` and `coverageplatform` test-binary compilation — PASS
+- Windows amd64 compile-only check — PASS
+- `git diff --check` — PASS
+
 ## Fix round 3 — Windows ancestry and collision cleanup
 
 - Windows publication now records every path segment from the volume root to

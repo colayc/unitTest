@@ -25,7 +25,7 @@ type fileDispositionInformation struct{ DeleteFile byte }
 type windowsFileIdentity struct{ volume, indexHigh, indexLow uint32 }
 type windowsDirectoryPin struct {
 	path     string
-	file     *os.File
+	handle   windows.Handle
 	identity windowsFileIdentity
 	bound    bool
 }
@@ -33,6 +33,7 @@ type windowsDirectoryPin struct {
 var instrumentationWindowsRootPinnedForTest = func() {}
 var instrumentationWindowsAncestorsPinnedForTest = func() {}
 var instrumentationWindowsBeforeRenameForTest = func() {}
+var instrumentationWindowsAncestorBindingFailureForTest = func(string) error { return nil }
 
 func publishInstrumentationFile(root, name string, contents []byte) error {
 	pins, err := pinWindowsAncestors(root)
@@ -118,8 +119,8 @@ func pinWindowsAncestors(root string) ([]windowsDirectoryPin, error) {
 		}
 	}
 	pins := make([]windowsDirectoryPin, 0, len(paths))
-	for index, path := range paths {
-		pin, err := openPinnedWindowsDirectory(path, index != len(paths)-1)
+	for _, path := range paths {
+		pin, err := openPinnedWindowsDirectory(path)
 		if err != nil {
 			closeWindowsPins(pins)
 			return nil, errors.Join(errors.New("open instrumentation ancestor "+path), err)
@@ -129,80 +130,47 @@ func pinWindowsAncestors(root string) ([]windowsDirectoryPin, error) {
 	return pins, nil
 }
 
-func openPinnedWindowsDirectory(path string, allowAncestorReparse bool) (windowsDirectoryPin, error) {
-	link, err := os.Lstat(path)
-	if err != nil || (!allowAncestorReparse && (link.Mode()&os.ModeSymlink != 0 || !link.IsDir())) {
-		return windowsDirectoryPin{}, errors.New("invalid instrumentation ancestor")
-	}
-	if allowAncestorReparse {
-		resolved, err := os.Stat(path)
-		if err != nil || !resolved.IsDir() {
-			return windowsDirectoryPin{}, errors.New("invalid instrumentation ancestor")
-		}
-	}
-	identity, err := windowsPathIdentity(path)
-	if err != nil {
-		if os.IsPermission(err) {
-			return windowsDirectoryPin{path: path}, nil
-		}
-		return windowsDirectoryPin{}, errors.Join(errors.New("invalid instrumentation ancestor"), err)
-	}
-	// No FILE_SHARE_DELETE pins this segment against rename/replacement until
-	// every descendant and the final relative publication have completed.
-	file, err := os.Open(path)
-	if err != nil {
-		// Some inherited user-profile ACLs permit metadata inspection but deny a
-		// delete-sharing lock. Keep the inspected identity and validate it both
-		// before writing and before success; never return a replacement path.
-		if os.IsPermission(err) {
-			return windowsDirectoryPin{path: path, identity: identity, bound: true}, nil
-		}
+func openPinnedWindowsDirectory(path string) (windowsDirectoryPin, error) {
+	if err := instrumentationWindowsAncestorBindingFailureForTest(path); err != nil {
 		return windowsDirectoryPin{}, err
 	}
-	info, err := file.Stat()
-	if err != nil || !info.IsDir() {
-		_ = file.Close()
+	name, err := windows.NewNTUnicodeString("\\??\\" + path)
+	if err != nil {
+		return windowsDirectoryPin{}, err
+	}
+	attributes := &windows.OBJECT_ATTRIBUTES{ObjectName: name}
+	attributes.Length = uint32(unsafe.Sizeof(*attributes))
+	var status windows.IO_STATUS_BLOCK
+	var allocationSize int64
+	var handle windows.Handle
+	// This one handle both obtains the identity and blocks delete/rename. We do
+	// not inspect a reparse point and then follow it through a second path API.
+	if err := windows.NtCreateFile(&handle, windows.FILE_READ_ATTRIBUTES, attributes, &status, &allocationSize, 0, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, windows.FILE_OPEN, windows.FILE_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT, 0, 0); err != nil {
+		return windowsDirectoryPin{}, err
+	}
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil || info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		_ = windows.CloseHandle(handle)
 		return windowsDirectoryPin{}, errors.New("invalid instrumentation ancestor")
 	}
-	return windowsDirectoryPin{path: path, file: file, identity: identity, bound: true}, nil
+	return windowsDirectoryPin{path: path, handle: handle, identity: windowsFileIdentity{info.VolumeSerialNumber, info.FileIndexHigh, info.FileIndexLow}, bound: true}, nil
 }
 func validateWindowsPins(pins []windowsDirectoryPin) error {
 	if len(pins) == 0 {
 		return errors.New("missing instrumentation root pin")
 	}
 	for _, pin := range pins {
-		if !pin.bound {
-			continue
-		}
-		identity, err := windowsPathIdentity(pin.path)
-		if err != nil || pin.identity != identity {
+		var info windows.ByHandleFileInformation
+		if !pin.bound || windows.GetFileInformationByHandle(pin.handle, &info) != nil || pin.identity != (windowsFileIdentity{info.VolumeSerialNumber, info.FileIndexHigh, info.FileIndexLow}) {
 			return errors.New("instrumentation ancestor identity changed")
 		}
 	}
 	return nil
 }
 
-func windowsPathIdentity(path string) (windowsFileIdentity, error) {
-	encoded, err := windows.UTF16PtrFromString(path)
-	if err != nil {
-		return windowsFileIdentity{}, err
-	}
-	handle, err := windows.CreateFile(encoded, windows.FILE_READ_ATTRIBUTES, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
-	if err != nil {
-		return windowsFileIdentity{}, err
-	}
-	defer windows.CloseHandle(handle)
-	var info windows.ByHandleFileInformation
-	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
-		return windowsFileIdentity{}, errors.New("invalid instrumentation ancestor")
-	}
-	return windowsFileIdentity{info.VolumeSerialNumber, info.FileIndexHigh, info.FileIndexLow}, nil
-}
 func closeWindowsPins(pins []windowsDirectoryPin) {
 	for index := len(pins) - 1; index >= 0; index-- {
-		if pins[index].file != nil {
-			_ = pins[index].file.Close()
-		}
+		_ = windows.CloseHandle(pins[index].handle)
 	}
 }
 

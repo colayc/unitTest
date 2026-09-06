@@ -3,6 +3,7 @@
 package coverageplatform
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -83,5 +84,50 @@ func TestPublishInstrumentationWindowsCleansReadOnlyTemporaryAfterCollision(t *t
 	contents, err := os.ReadFile(filepath.Join(root, "coverage.cmake"))
 	if err != nil || string(contents) != "collision" {
 		t.Fatalf("collision changed: %q, %v", contents, err)
+	}
+}
+
+func TestPublishInstrumentationWindowsFailsClosedWhenAncestorBindingFails(t *testing.T) {
+	for _, injected := range []error{os.ErrPermission, errors.New("metadata unavailable")} {
+		t.Run(injected.Error(), func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "root")
+			if err := os.Mkdir(root, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			oldHook := instrumentationWindowsAncestorBindingFailureForTest
+			instrumentationWindowsAncestorBindingFailureForTest = func(path string) error {
+				if path == root {
+					return injected
+				}
+				return nil
+			}
+			t.Cleanup(func() { instrumentationWindowsAncestorBindingFailureForTest = oldHook })
+			if _, err := PublishInstrumentation(root, "coverage.cmake", "line\n", "v1"); err == nil {
+				t.Fatal("unbound ancestor published")
+			}
+			entries, err := os.ReadDir(root)
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("failed binding wrote root: %#v, %v", entries, err)
+			}
+		})
+	}
+}
+
+func TestPublishInstrumentationWindowsRejectsSymlinkAncestorBeforeWriting(t *testing.T) {
+	base := t.TempDir()
+	target := filepath.Join(base, "target")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if _, err := PublishInstrumentation(link, "coverage.cmake", "line\n", "v1"); err == nil {
+		t.Fatal("symlink ancestor published")
+	}
+	entries, err := os.ReadDir(target)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("symlink target changed: %#v, %v", entries, err)
 	}
 }
