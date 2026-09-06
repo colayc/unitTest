@@ -34,6 +34,7 @@
 4. GCC instrumentation、`.gcno/.gcda` manifest、清理和收集尚未实现。
 5. Coordinator 只会解析 LLVM stdout export，尚不能消费 gcovr 的 pinned JSON output。
 6. Linux GCC CoverageRun 的 collector version 当前错误地沿用 compiler version，而不是 bundle manifest 中的 gcovr 版本。
+7. `coveragebundle.DescriptorCapabilities` 当前要求 Workspace root、coverage object directory、gcov 和 output root 都位于同一个 Service data anchor 下；真实 Workspace 与系统 toolchain 不满足该前提。现有 test helper 通过寻找共同祖先构造测试 anchor，不能代表 production Runtime。`WriteAtomic` 还会创建 `<coverageRoot>/<taskID>`，与 Coordinator 已分配的 execution root 发生命名冲突。
 
 因此本批次首先泛化既有边界，再新增 GCC 实现；Windows LLVM 的可观察行为必须保持不变。
 
@@ -50,6 +51,7 @@
 9. CppUTest 与 Unity 复用同一个 embedded test execution path，不建立框架专用 coverage pipeline。
 10. Protocol v1.4、Coverage JSON v1、三种 report artifact 和 Code-OSS UX contract 不改变。
 11. 本批次不启用签名、不发布 GitHub Release，也不替代最终第三方 license/legal 人工审批。
+12. gcovr descriptor 使用四个独立、非路径授权的 retained capability：Workspace 由 Build Boundary 验证，object directory 由 coverage build pin 验证，gcov 由 GCC Toolset 验证，descriptor/output root 由 Coverage execution owner 验证。不得把共同 authority 提升到磁盘根目录，也不得把 Workspace、object tree 或 gcov 复制进 Service data root。
 
 ## 4. 范围
 
@@ -147,6 +149,8 @@ Build Boundary 改为持有通用 coverage attachment：
 attachment 必须保留当前 claim/commit/rollback ownership 语义。失败 attach 不转移所有权；成功 attach 后只有 Boundary 负责关闭。Boundary 在 configure、build、test、collector 启动前后重新验证相关 identity。
 
 LLVM attachment 继续固定 compiler、profdata、cov。GCC attachment 固定 C compiler、C++ compiler 与 gcov；gcovr collector execution 在 `.gcno/.gcda` manifest 封存后再附加。
+
+Boundary 还提供只读、非 owning 的 verified views：Workspace root 与 coverage object directory。view 只暴露 `Path()` 和 `Verify()`，不能 mint 新路径、关闭 owner 或扩大 root。Workspace directory、coverage build directory 和 toolset 各自保留自己的 file handle/native identity；它们不伪装成同一个 Service data authority。
 
 ### 6.4 Embedded test decoration
 
@@ -279,16 +283,27 @@ cleanup 失败会阻止当前结果 publish，并让下一次 pre-test cleanup �
 
 这与现有 release staging 一致：packager 已把所选 platform bundle 复制到 `bundles/coverage`。本批次负责让 Linux runtime 真正消费该资源；不改变签名和 Release 决策。
 
-### 10.2 owned descriptor
+### 10.2 independent descriptor capabilities
 
-GCC Adapter 调用现有 `coveragebundle.PrepareRunner`，descriptor 只包含：
+GCC Adapter 调用泛化后的 `coveragebundle.PrepareRunner`，descriptor 只包含：
 
 - verified Workspace root；
 - verified coverage object directory；
 - verified gcov executable；
 - Task-owned gcovr JSON output path。
 
-四项均通过 `serviceanchor`/verified directory/executable capabilities 关联到同一 authority。descriptor 在 owner-only root 中原子创建，大小有界，字段 closed，执行前后验证。
+`DescriptorCapabilities` 不再要求四项拥有共同 filesystem ancestor 或共同 `serviceanchor.Anchor`。它接收四个由 production owner 构造的 retained verifier：
+
+- source root verifier：由 Build Boundary 的 retained Workspace root 签发；
+- object directory verifier：由 Build Boundary 的 retained coverage binary directory 签发；
+- gcov verifier：由 `coveragegcc.Toolset` 的 retained gcov snapshot 签发；
+- collector root verifier：由 `coverageexec.executionRootOwner` 签发。
+
+这些 verifier 是非 owning view。`PreparedExecution.Close` 不关闭 Build Boundary、Toolset 或 execution root owner；它只关闭自己拥有的 bundle pin、descriptor、output handle 和 collector child handles。各 owner 的生命周期必须覆盖 collector execution 与 normalization。
+
+`coveragebundle` 对每个 verifier 分别执行 typed-nil、exact path 和 `Verify()` 检查，并在 descriptor publication、process validation、process completion、pinned output read 前后重复检查。传入 bare absolute path 仍不能授权执行。
+
+Coordinator 在 `<executionRoot>/collector` 下预先创建并固定 owner-only directory。runner 使用固定内部 ID `gcovr`，descriptor/output 位于 `<executionRoot>/collector/gcovr`。它不复用 `<coverageRoot>/<taskID>`，因此不会与既有 execution root allocation 冲突。descriptor 在该专用 root 中原子创建，大小有界，字段 closed，执行前后验证。
 
 ### 10.3 fixed process
 
@@ -305,6 +320,8 @@ runner 只生成固定 gcovr argv：root、object-directory、gcov-executable、
 ### 10.4 pinned output
 
 collector 成功退出后，Boundary 先调用 `VerifyCoverageExecutionAfter`，再通过 retained handle 取得 `PinnedCoverageOutput`。normalizer 只从 pinned handle 读取，不能根据 mutable path 重新打开文件。output size、identity、digest 和 tree shape 在 parser 前后验证。
+
+在 output read 和 parser 期间，四个 independent verifier 与 collector child root 都必须保持有效；任一 owner 提前关闭、路径替换或 identity 改变都映射为 `normalization_failed`，不发布部分 artifact。
 
 ## 11. gcovr parser 与 GCC normalizer
 
@@ -367,6 +384,7 @@ JUnit outcome 继续只来自关联 TestRun；HTML 继续从 canonical Coverage 
 - `.gcno/.gcda` budgets、closed set、cleanup、unknown file、symlink、hard link、directory replacement；
 - GCC test decoration 对 hostile gcov environment 的处理；
 - bundle/manifest/READY/Python/runner/descriptor/output mutation；
+- independent capability 的 typed nil、path mismatch、owner 提前关闭、共同祖先伪造和 collector child collision；
 - gcovr parser 的 simple、branch、function、empty、malformed、duplicate、unsupported version、overflow、depth 和 size fixtures；
 - NormalizeGCC 的 filters、Linux case-sensitive paths、symlink escape、source digest、sort 和 canonical writer；
 - cancel、timeout、crash、assertion failure、missing data、collector failure、cleanup failure 和 publish rollback。
@@ -444,11 +462,12 @@ Batch A 只有同时满足以下条件才完成：
 2. GCC、G++、gcov 和 gcovr bundle 全部有真实、可重复验证的 provenance。
 3. CppUTest 与 Unity 都产生准确的 Coverage JSON v1、JUnit XML 和 HTML。
 4. `.gcda` stale/unknown/symlink/hard-link/escape 不会被静默读取或任意删除。
-5. crash/timeout/assertion/collector/parser/persistence failure 的 outcome/reason 符合本设计。
-6. 相同输入连续两次的 Coverage JSON byte-identical。
-7. native offline boundary 覆盖 Service 完整子进程树且为 required PASS。
-8. `coverage-linux-gcc` 成功并进入 `master` 分支保护。
-9. 现有 Windows LLVM 与所有 foundation/unsigned qualification 回归成功。
-10. 工作区、日志、Protocol 和 CI evidence 不泄漏 native path、environment 或秘密。
-11. Linux Clang 仍以精确 unsupported 结束，没有假报告。
-12. 不发布 Release、不启用签名；最终 legal/signing gate 继续保留到正式公开发布前。
+5. Workspace、object directory、gcov 与 collector root 分别由真实 owner 验证；不使用磁盘根 anchor，不复制真实输入来伪造共同 authority，也不与既有 task execution root 冲突。
+6. crash/timeout/assertion/collector/parser/persistence failure 的 outcome/reason 符合本设计。
+7. 相同输入连续两次的 Coverage JSON byte-identical。
+8. native offline boundary 覆盖 Service 完整子进程树且为 required PASS。
+9. `coverage-linux-gcc` 成功并进入 `master` 分支保护。
+10. 现有 Windows LLVM 与所有 foundation/unsigned qualification 回归成功。
+11. 工作区、日志、Protocol 和 CI evidence 不泄漏 native path、environment 或秘密。
+12. Linux Clang 仍以精确 unsupported 结束，没有假报告。
+13. 不发布 Release、不启用签名；最终 legal/signing gate 继续保留到正式公开发布前。
