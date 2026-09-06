@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"unit-test-ide.local/test-service/internal/coverageplatform"
 )
 
 const (
@@ -22,11 +24,7 @@ const (
 		"add_link_options(\"-fprofile-instr-generate\")\n"
 )
 
-type Instrumentation struct {
-	IncludePath string
-	SHA256      string
-	Fingerprint string
-}
+type Instrumentation = coverageplatform.Instrumentation
 
 type instrumentationRootPin struct {
 	path   string
@@ -51,7 +49,7 @@ func InstrumentationSHA256() string {
 	return hex.EncodeToString(digest[:])
 }
 
-func WriteInstrumentation(taskRoot string) (Instrumentation, error) {
+func WriteInstrumentation(taskRoot string) (coverageplatform.Instrumentation, error) {
 	if taskRoot == "" || strings.ContainsRune(taskRoot, 0) || !filepath.IsAbs(taskRoot) || filepath.Clean(taskRoot) != taskRoot {
 		return Instrumentation{}, ErrInvalidToolset
 	}

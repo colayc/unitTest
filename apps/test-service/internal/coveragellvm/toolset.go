@@ -5,6 +5,7 @@ import (
 	"os"
 	"sync"
 
+	"unit-test-ide.local/test-service/internal/coverageplatform"
 	"unit-test-ide.local/test-service/internal/coveragerun"
 )
 
@@ -80,6 +81,18 @@ func (t *Toolset) Compiler() coveragerun.TrustedPath {
 	return trustedTool{owner: t, role: compilerRole}
 }
 
+func (t *Toolset) CCompiler() coveragerun.TrustedPath {
+	return t.Compiler()
+}
+
+func (t *Toolset) CXXCompiler() coveragerun.TrustedPath {
+	return t.Compiler()
+}
+
+func (t *Toolset) Tools() []coveragerun.TrustedPath {
+	return []coveragerun.TrustedPath{t.Compiler(), t.Profdata(), t.Cov()}
+}
+
 func (t *Toolset) Profdata() coveragerun.TrustedPath {
 	return trustedTool{owner: t, role: profdataRole}
 }
@@ -106,7 +119,7 @@ func (t *Toolset) Identity() string {
 	return t.identity
 }
 
-func (t *Toolset) ClaimOwnership() (*OwnershipClaim, error) {
+func (t *Toolset) ClaimOwnership() (coverageplatform.OwnershipClaim, error) {
 	if t == nil {
 		return nil, ErrInvalidToolset
 	}
@@ -215,3 +228,5 @@ func (t *Toolset) Close() error {
 	defer t.mu.Unlock()
 	return t.closeErr
 }
+
+var _ coverageplatform.Toolset = (*Toolset)(nil)

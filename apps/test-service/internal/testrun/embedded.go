@@ -2,9 +2,7 @@ package testrun
 
 import (
 	"context"
-	"fmt"
 	"reflect"
-	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +17,7 @@ const MaxProfileCount = 250
 type ProfileExpectation struct {
 	InvocationID string
 	Iteration    int64
+	Sequence     int
 	FileName     string
 }
 
@@ -31,7 +30,8 @@ type InvocationOutcome struct {
 }
 
 type ProfileAllocator interface {
-	Decorate(ProfileExpectation, task.ProcessSpec) (task.ProcessSpec, error)
+	Decorate(ProfileExpectation, task.ProcessSpec) (ProfileExpectation, task.ProcessSpec, error)
+	Validate(ProfileExpectation, task.ProcessSpec, task.ProcessSpec) error
 }
 
 type EmbeddedRequest struct {
@@ -206,13 +206,9 @@ func (coordinator *Coordinator) PrepareEmbedded(
 		expectation := ProfileExpectation{
 			InvocationID: invocation.Job.ID,
 			Iteration:    invocation.Job.Iteration,
-			FileName: fmt.Sprintf(
-				"p-%06d-i-%06d-%%p-%%m.profraw",
-				index+1,
-				invocation.Job.Iteration,
-			),
+			Sequence:     index + 1,
 		}
-		decorated, err := request.Allocator.Decorate(
+		completed, decorated, err := request.Allocator.Decorate(
 			expectation,
 			invocation.Step.Process,
 		)
@@ -222,14 +218,11 @@ func (coordinator *Coordinator) PrepareEmbedded(
 		if !sameEmbeddedProcessTarget(
 			invocation.Step.Process,
 			decorated,
-		) || countEmbeddedEnvironment(
-			decorated.Env,
-			"LLVM_PROFILE_FILE",
-		) != 1 {
+		) || request.Allocator.Validate(completed, invocation.Step.Process, decorated) != nil {
 			return nil, task.ErrInvalidArgument
 		}
 		invocation.Step.Process = decorated
-		expectations[index] = expectation
+		expectations[index] = completed
 	}
 	if err := pinPlannedInvocations(prepared, planned); err != nil {
 		return nil, err
@@ -315,17 +308,6 @@ func sameEmbeddedProcessTarget(left, right task.ProcessSpec) bool {
 		reflect.DeepEqual(left.Args, right.Args) &&
 		left.Dir == right.Dir &&
 		len(left.Batch) == 0 && len(right.Batch) == 0
-}
-
-func countEmbeddedEnvironment(values []string, key string) int {
-	count := 0
-	for _, value := range values {
-		name, _, found := strings.Cut(value, "=")
-		if found && strings.EqualFold(name, key) {
-			count++
-		}
-	}
-	return count
 }
 
 type embeddedExecution struct {

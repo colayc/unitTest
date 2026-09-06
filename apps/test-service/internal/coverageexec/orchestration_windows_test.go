@@ -592,8 +592,12 @@ type countingProfileAllocator struct {
 	closes    int
 }
 
-func (allocator *countingProfileAllocator) Decorate(expectation testrun.ProfileExpectation, spec task.ProcessSpec) (task.ProcessSpec, error) {
+func (allocator *countingProfileAllocator) Decorate(expectation testrun.ProfileExpectation, spec task.ProcessSpec) (testrun.ProfileExpectation, task.ProcessSpec, error) {
 	return allocator.delegate.Decorate(expectation, spec)
+}
+
+func (allocator *countingProfileAllocator) Validate(expectation testrun.ProfileExpectation, original, decorated task.ProcessSpec) error {
+	return allocator.delegate.Validate(expectation, original, decorated)
 }
 
 func (allocator *countingProfileAllocator) Close() error {
@@ -686,18 +690,24 @@ type orchestrationEmbeddedPreparer struct {
 }
 
 func (preparer orchestrationEmbeddedPreparer) PrepareEmbedded(_ context.Context, request testrun.EmbeddedRequest) (testrun.EmbeddedRun, error) {
-	expectation := testrun.ProfileExpectation{InvocationID: "invocation-1", Iteration: 1, FileName: "p-000001-i-000001-%p-%m.profraw"}
-	decorated, err := request.Allocator.Decorate(expectation, task.ProcessSpec{
+	expectation := testrun.ProfileExpectation{InvocationID: "invocation-1", Iteration: 1, Sequence: 1}
+	completed, decorated, err := request.Allocator.Decorate(expectation, task.ProcessSpec{
 		Executable: request.PreparedBuild.Toolchain().CXXCompiler,
 		Args:       []string{"--test"}, Dir: filepath.Dir(request.PreparedBuild.Toolchain().CXXCompiler),
 	})
 	if err != nil {
 		return nil, err
 	}
-	return &orchestrationEmbeddedRun{run: request.Run.Clone(), store: preparer.store, result: preparer.result, expectation: expectation, step: task.ExecutionStep{
+	if err := request.Allocator.Validate(completed, task.ProcessSpec{
+		Executable: request.PreparedBuild.Toolchain().CXXCompiler,
+		Args:       []string{"--test"}, Dir: filepath.Dir(request.PreparedBuild.Toolchain().CXXCompiler),
+	}, decorated); err != nil {
+		return nil, err
+	}
+	return &orchestrationEmbeddedRun{run: request.Run.Clone(), store: preparer.store, result: preparer.result, expectation: completed, step: task.ExecutionStep{
 		ID: "test-wave-1", Kind: task.StepTestRun,
 		Process: task.ProcessSpec{Batch: []task.ProcessBatchItem{{
-			ID: expectation.InvocationID, Executable: decorated.Executable,
+			ID: completed.InvocationID, Executable: decorated.Executable,
 			Args: decorated.Args, Env: decorated.Env, EnvUnset: decorated.EnvUnset,
 			Dir: decorated.Dir, Timeout: time.Second,
 		}}},

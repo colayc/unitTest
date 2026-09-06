@@ -28,7 +28,7 @@ func TestProfileAllocatorSanitizesEnvironmentAndAppendsOneOwnedPattern(
 	}
 	defer closeProfileAllocator(t, allocator)
 	expectation := profileExpectation(1, 1)
-	spec, err := allocator.Decorate(expectation, task.ProcessSpec{
+	completed, spec, err := allocator.Decorate(expectation, task.ProcessSpec{
 		Executable: "test.exe",
 		Args:       []string{"--run"},
 		Env: []string{
@@ -48,7 +48,7 @@ func TestProfileAllocatorSanitizesEnvironmentAndAppendsOneOwnedPattern(
 		t.Fatal(err)
 	}
 	wantProfile := "LLVM_PROFILE_FILE=" +
-		filepath.Join(root, expectation.FileName)
+		filepath.Join(root, completed.FileName)
 	if countEnvironmentKey(spec.Env, "LLVM_PROFILE_FILE") != 1 ||
 		!slices.Contains(spec.Env, wantProfile) ||
 		!slices.Contains(spec.Env, "PATH=kept") {
@@ -82,7 +82,7 @@ func TestProfileAllocatorEnforcesUniqueConcurrentCapacity(t *testing.T) {
 		}
 		defer closeProfileAllocator(t, allocator)
 		spec := task.ProcessSpec{Executable: "test.exe", Dir: root}
-		if _, err := allocator.Decorate(
+		if _, _, err := allocator.Decorate(
 			profileExpectation(999, 1),
 			task.ProcessSpec{
 				Batch: []task.ProcessBatchItem{{ID: "invalid"}},
@@ -99,7 +99,7 @@ func TestProfileAllocatorEnforcesUniqueConcurrentCapacity(t *testing.T) {
 			duplicates.Add(1)
 			go func() {
 				defer duplicates.Done()
-				_, err := allocator.Decorate(first, spec)
+				_, _, err := allocator.Decorate(first, spec)
 				errorsByCall <- err
 			}()
 		}
@@ -111,14 +111,14 @@ func TestProfileAllocatorEnforcesUniqueConcurrentCapacity(t *testing.T) {
 			}
 		}
 		for invocation := int64(2); invocation <= maxProfileCount; invocation++ {
-			if _, err := allocator.Decorate(profileExpectation(invocation, 1), spec); err != nil {
+			if _, _, err := allocator.Decorate(profileExpectation(invocation, 1), spec); err != nil {
 				t.Fatalf("allocation %d/%d = %v", invocation, maxProfileCount, err)
 			}
 		}
-		if _, err := allocator.Decorate(profileExpectation(maxProfileCount+1, 1), spec); !errors.Is(err, ErrInvalidProfiles) {
+		if _, _, err := allocator.Decorate(profileExpectation(maxProfileCount+1, 1), spec); !errors.Is(err, ErrInvalidProfiles) {
 			t.Fatalf("allocation %d error = %v", maxProfileCount+1, err)
 		}
-		if _, err := allocator.Decorate(first, spec); err != nil {
+		if _, _, err := allocator.Decorate(first, spec); err != nil {
 			t.Fatalf("duplicate at capacity consumed another slot: %v", err)
 		}
 	})
@@ -142,7 +142,7 @@ func TestProfileAllocatorEnforcesUniqueConcurrentCapacity(t *testing.T) {
 			allocations.Add(1)
 			go func() {
 				defer allocations.Done()
-				_, err := allocator.Decorate(expectation, spec)
+				_, _, err := allocator.Decorate(expectation, spec)
 				results <- allocationResult{expectation: expectation, err: err}
 			}()
 		}
@@ -163,10 +163,50 @@ func TestProfileAllocatorEnforcesUniqueConcurrentCapacity(t *testing.T) {
 		if accepted != maxProfileCount {
 			t.Fatalf("concurrent accepted = %d, want %d", accepted, maxProfileCount)
 		}
-		if _, err := allocator.Decorate(acceptedExpectation, spec); err != nil {
+		if _, _, err := allocator.Decorate(acceptedExpectation, spec); err != nil {
 			t.Fatalf("accepted duplicate after concurrent capacity = %v", err)
 		}
 	})
+}
+
+func TestProfileAllocatorRejectsDuplicateSequenceAndInvalidDecoration(t *testing.T) {
+	root := newProfileRoot(t)
+	allocator, err := NewProfileAllocator(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeProfileAllocator(t, allocator)
+	original := task.ProcessSpec{Executable: "test.exe", Args: []string{"--run"}, Dir: root}
+	first := testrun.ProfileExpectation{InvocationID: "first", Iteration: 1, Sequence: 1}
+	completed, decorated, err := allocator.Decorate(first, original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.FileName != "p-000001-i-000001-%p-%m.profraw" {
+		t.Fatalf("completed expectation = %#v", completed)
+	}
+	if _, _, err := allocator.Decorate(testrun.ProfileExpectation{InvocationID: "second", Iteration: 1, Sequence: 1}, original); !errors.Is(err, ErrInvalidProfiles) {
+		t.Fatalf("duplicate sequence error = %v", err)
+	}
+	for _, test := range []struct {
+		name string
+		edit func(*task.ProcessSpec)
+	}{
+		{"executable", func(spec *task.ProcessSpec) { spec.Executable = "other.exe" }},
+		{"argv", func(spec *task.ProcessSpec) { spec.Args = []string{"--other"} }},
+		{"directory", func(spec *task.ProcessSpec) { spec.Dir = t.TempDir() }},
+		{"missing LLVM profile", func(spec *task.ProcessSpec) { spec.Env = nil }},
+		{"duplicate LLVM profile", func(spec *task.ProcessSpec) { spec.Env = append(spec.Env, spec.Env[0]) }},
+		{"hostile casing", func(spec *task.ProcessSpec) { spec.Env = append(spec.Env, "llvm_PROFILE_file=outside") }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := cloneProfileProcessSpec(decorated)
+			test.edit(&candidate)
+			if err := allocator.Validate(completed, original, candidate); !errors.Is(err, ErrInvalidProfiles) {
+				t.Fatalf("Validate() error = %v", err)
+			}
+		})
+	}
 }
 
 func TestSealProfilesReturnsClosedSameSnapshotManifest(t *testing.T) {
@@ -370,6 +410,7 @@ func profileExpectation(invocation, iteration int64) testrun.ProfileExpectation 
 	return testrun.ProfileExpectation{
 		InvocationID: "test-" + leftPad6(invocation),
 		Iteration:    iteration,
+		Sequence:     int(invocation),
 		FileName: "p-" + leftPad6(invocation) + "-i-" +
 			leftPad6(iteration) + "-%p-%m.profraw",
 	}

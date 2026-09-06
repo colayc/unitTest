@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -29,7 +30,7 @@ type profileAllocator struct {
 	mu        sync.Mutex
 	root      *instrumentationRootPin
 	allocated map[string]testrun.ProfileExpectation
-	fileNames map[string]string
+	sequences map[int]string
 	closed    bool
 }
 
@@ -54,30 +55,32 @@ func NewProfileAllocator(
 func (allocator *profileAllocator) Decorate(
 	expectation testrun.ProfileExpectation,
 	spec task.ProcessSpec,
-) (task.ProcessSpec, error) {
-	if allocator == nil || !validProfileExpectation(expectation) ||
+) (testrun.ProfileExpectation, task.ProcessSpec, error) {
+	if allocator == nil || !validProfileAllocation(expectation) ||
 		len(spec.Batch) != 0 {
-		return task.ProcessSpec{}, ErrInvalidProfiles
+		return testrun.ProfileExpectation{}, task.ProcessSpec{}, ErrInvalidProfiles
 	}
 	allocator.mu.Lock()
 	defer allocator.mu.Unlock()
 	if allocator.closed || allocator.root == nil ||
 		verifyInstrumentationRoot(allocator.root) != nil {
-		return task.ProcessSpec{}, ErrInvalidProfiles
+		return testrun.ProfileExpectation{}, task.ProcessSpec{}, ErrInvalidProfiles
 	}
 	key := profileExpectationKey(
 		expectation.InvocationID,
 		expectation.Iteration,
 	)
 	if existing, exists := allocator.allocated[key]; exists {
-		if existing != expectation {
-			return task.ProcessSpec{}, ErrInvalidProfiles
+		if existing.InvocationID != expectation.InvocationID || existing.Iteration != expectation.Iteration || existing.Sequence != expectation.Sequence {
+			return testrun.ProfileExpectation{}, task.ProcessSpec{}, ErrInvalidProfiles
 		}
+		expectation = existing
 	} else {
-		if _, duplicate := allocator.fileNames[expectation.FileName]; duplicate ||
+		if _, duplicate := allocator.sequences[expectation.Sequence]; duplicate ||
 			len(allocator.allocated) >= maxProfileCount {
-			return task.ProcessSpec{}, ErrInvalidProfiles
+			return testrun.ProfileExpectation{}, task.ProcessSpec{}, ErrInvalidProfiles
 		}
+		expectation.FileName = fmt.Sprintf("p-%06d-i-%06d-%%p-%%m.profraw", expectation.Sequence, expectation.Iteration)
 	}
 	result := cloneProfileProcessSpec(spec)
 	environment := make([]string, 0, len(result.Env)+1)
@@ -86,7 +89,7 @@ func (allocator *profileAllocator) Decorate(
 		name, _, found := strings.Cut(entry, "=")
 		if !found || !validProfileEnvironmentName(name) ||
 			strings.ContainsRune(entry, '\x00') {
-			return task.ProcessSpec{}, ErrInvalidProfiles
+			return testrun.ProfileExpectation{}, task.ProcessSpec{}, ErrInvalidProfiles
 		}
 		if hostileProfileEnvironmentKey(name) {
 			unsafeNames = append(unsafeNames, name)
@@ -100,7 +103,7 @@ func (allocator *profileAllocator) Decorate(
 		false,
 	)
 	if err != nil || len(environment)+1+len(unset) > 256 {
-		return task.ProcessSpec{}, ErrInvalidProfiles
+		return testrun.ProfileExpectation{}, task.ProcessSpec{}, ErrInvalidProfiles
 	}
 	result.Env = append(
 		environment,
@@ -115,13 +118,63 @@ func (allocator *profileAllocator) Decorate(
 			map[string]testrun.ProfileExpectation,
 			maxProfileCount,
 		)
-		allocator.fileNames = make(map[string]string, maxProfileCount)
+		allocator.sequences = make(map[int]string, maxProfileCount)
 	}
 	if _, exists := allocator.allocated[key]; !exists {
 		allocator.allocated[key] = expectation
-		allocator.fileNames[expectation.FileName] = key
+		allocator.sequences[expectation.Sequence] = key
 	}
-	return result, nil
+	return expectation, result, nil
+}
+
+func (allocator *profileAllocator) Validate(expectation testrun.ProfileExpectation, original, decorated task.ProcessSpec) error {
+	if allocator == nil || !validProfileExpectation(expectation) || !sameProfileProcessTarget(original, decorated) {
+		return ErrInvalidProfiles
+	}
+	allocator.mu.Lock()
+	defer allocator.mu.Unlock()
+	if allocator.closed || allocator.root == nil || verifyInstrumentationRoot(allocator.root) != nil || allocator.allocated[profileExpectationKey(expectation.InvocationID, expectation.Iteration)] != expectation {
+		return ErrInvalidProfiles
+	}
+	want := "LLVM_PROFILE_FILE=" + filepath.Join(allocator.root.path, expectation.FileName)
+	if countProfileEnvironment(decorated.Env, "LLVM_PROFILE_FILE") != 1 || !containsProfileEnvironment(decorated.Env, want) || containsProfileEnvironmentKey(decorated.EnvUnset, "LLVM_PROFILE_FILE") {
+		return ErrInvalidProfiles
+	}
+	return nil
+}
+
+func sameProfileProcessTarget(left, right task.ProcessSpec) bool {
+	return left.Executable == right.Executable && left.Dir == right.Dir &&
+		reflect.DeepEqual(left.Args, right.Args) && len(left.Batch) == 0 && len(right.Batch) == 0
+}
+
+func countProfileEnvironment(values []string, key string) int {
+	count := 0
+	for _, value := range values {
+		name, _, found := strings.Cut(value, "=")
+		if found && strings.EqualFold(name, key) {
+			count++
+		}
+	}
+	return count
+}
+
+func containsProfileEnvironment(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func containsProfileEnvironmentKey(values []string, key string) bool {
+	for _, value := range values {
+		if strings.EqualFold(value, key) {
+			return true
+		}
+	}
+	return false
 }
 
 func (allocator *profileAllocator) Close() error {
@@ -434,13 +487,13 @@ func canonicalProfileReasons(
 
 func validProfileExpectation(value testrun.ProfileExpectation) bool {
 	if value.InvocationID == "" || len(value.InvocationID) > 128 ||
-		value.Iteration < 1 || value.Iteration > MaxProfileIteration ||
+		value.Iteration < 1 || value.Iteration > MaxProfileIteration || value.Sequence < 1 || value.Sequence > maxProfileCount ||
 		len(value.FileName) != len("p-000001-i-000001-%p-%m.profraw") ||
 		!strings.HasPrefix(value.FileName, "p-") ||
 		value.FileName[8:11] != "-i-" ||
 		value.FileName[17:] != "-%p-%m.profraw" ||
 		parseSixProfileDigits(value.FileName[11:17]) != value.Iteration ||
-		parseSixProfileDigits(value.FileName[2:8]) < 1 {
+		parseSixProfileDigits(value.FileName[2:8]) != int64(value.Sequence) {
 		return false
 	}
 	for _, character := range value.InvocationID {
@@ -453,6 +506,15 @@ func validProfileExpectation(value testrun.ProfileExpectation) bool {
 		return false
 	}
 	return true
+}
+
+func validProfileAllocation(value testrun.ProfileExpectation) bool {
+	if value.FileName != "" {
+		return validProfileExpectation(value)
+	}
+	return value.InvocationID != "" && len(value.InvocationID) <= 128 &&
+		value.Iteration >= 1 && value.Iteration <= MaxProfileIteration &&
+		value.Sequence >= 1 && value.Sequence <= maxProfileCount
 }
 
 const MaxProfileIteration int64 = 100
@@ -473,7 +535,7 @@ func parseSixProfileDigits(value string) int64 {
 
 func matchProfileFile(pattern, name string) bool {
 	if !validProfileExpectation(testrun.ProfileExpectation{
-		InvocationID: "profile", Iteration: parseSixProfileDigits(pattern[11:17]), FileName: pattern,
+		InvocationID: "profile", Iteration: parseSixProfileDigits(pattern[11:17]), Sequence: int(parseSixProfileDigits(pattern[2:8])), FileName: pattern,
 	}) || len(name) > 255 || !strings.HasPrefix(name, pattern[:17]+"-") ||
 		!strings.HasSuffix(name, ".profraw") {
 		return false
