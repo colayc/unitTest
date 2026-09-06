@@ -215,10 +215,13 @@ func (coordinator *Coordinator) PrepareEmbedded(
 		if err != nil {
 			return nil, err
 		}
-		if !sameEmbeddedProcessTarget(
-			invocation.Step.Process,
-			decorated,
-		) || request.Allocator.Validate(completed, invocation.Step.Process, decorated) != nil {
+		if completed.InvocationID != expectation.InvocationID ||
+			completed.Iteration != expectation.Iteration ||
+			completed.Sequence != expectation.Sequence ||
+			!sameEmbeddedProcessTarget(
+				invocation.Step.Process,
+				decorated,
+			) || request.Allocator.Validate(completed, invocation.Step.Process, decorated) != nil {
 			return nil, task.ErrInvalidArgument
 		}
 		invocation.Step.Process = decorated

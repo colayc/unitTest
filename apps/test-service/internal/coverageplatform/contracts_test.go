@@ -1,31 +1,76 @@
 package coverageplatform
 
 import (
-	"errors"
 	"testing"
 
 	"unit-test-ide.local/test-service/internal/coveragerun"
 	"unit-test-ide.local/test-service/internal/task"
 )
 
-type contractVerifier struct{}
+type contractVerifier struct{ valid bool }
 
-func (*contractVerifier) Path() string  { return "C:\\coverage" }
-func (*contractVerifier) Verify() error { return nil }
+func (verifier *contractVerifier) Path() string {
+	if verifier == nil || !verifier.valid {
+		return ""
+	}
+	return "C:\\coverage"
+}
+func (verifier *contractVerifier) Verify() error {
+	if verifier == nil || !verifier.valid {
+		return ErrInvalidCapability
+	}
+	return nil
+}
+
+type contractPath struct{ valid bool }
+
+func (path *contractPath) Path() string {
+	if path == nil || !path.valid {
+		return ""
+	}
+	return "C:\\tool.exe"
+}
+func (path *contractPath) Verify() error {
+	if path == nil || !path.valid {
+		return ErrInvalidCapability
+	}
+	return nil
+}
 
 type contractClaim struct{}
 
 func (*contractClaim) Commit()   {}
 func (*contractClaim) Rollback() {}
 
-type contractToolset struct{}
+type contractToolset struct{ valid bool }
 
-func (*contractToolset) Version() string                      { return "v1" }
-func (*contractToolset) Identity() string                     { return "identity" }
-func (*contractToolset) CCompiler() coveragerun.TrustedPath   { return nil }
-func (*contractToolset) CXXCompiler() coveragerun.TrustedPath { return nil }
-func (*contractToolset) Tools() []coveragerun.TrustedPath     { return nil }
-func (*contractToolset) Verify() error                        { return nil }
+func (toolset *contractToolset) Version() string {
+	if toolset != nil && toolset.valid {
+		return "v1"
+	}
+	return ""
+}
+func (toolset *contractToolset) Identity() string {
+	if toolset != nil && toolset.valid {
+		return "identity"
+	}
+	return ""
+}
+func (toolset *contractToolset) CCompiler() coveragerun.TrustedPath {
+	return &contractPath{valid: toolset != nil && toolset.valid}
+}
+func (toolset *contractToolset) CXXCompiler() coveragerun.TrustedPath {
+	return &contractPath{valid: toolset != nil && toolset.valid}
+}
+func (toolset *contractToolset) Tools() []coveragerun.TrustedPath {
+	return []coveragerun.TrustedPath{&contractPath{valid: toolset != nil && toolset.valid}}
+}
+func (toolset *contractToolset) Verify() error {
+	if toolset == nil || !toolset.valid {
+		return ErrInvalidCapability
+	}
+	return nil
+}
 func (*contractToolset) ClaimOwnership() (OwnershipClaim, error) {
 	return &contractClaim{}, nil
 }
@@ -47,10 +92,10 @@ func (*contractCollector) PinnedOutput() (Output, error) { return &contractOutpu
 func (*contractCollector) Close() error                  { return nil }
 
 func TestContractInterfacesAcceptTypedImplementations(t *testing.T) {
-	var verifier DirectoryVerifier = &contractVerifier{}
-	var toolset Toolset = &contractToolset{}
+	var verifier DirectoryVerifier = &contractVerifier{valid: true}
+	var toolset Toolset = &contractToolset{valid: true}
 	var collector CollectorExecution = &contractCollector{}
-	if verifier.Path() == "" || toolset.Version() == "" || collector.Verify() != nil {
+	if VerifyDirectory(verifier) != nil || VerifyToolset(toolset) != nil || collector.Verify() != nil {
 		t.Fatal("coverage platform contracts are not usable")
 	}
 	output, err := collector.PinnedOutput()
@@ -59,9 +104,28 @@ func TestContractInterfacesAcceptTypedImplementations(t *testing.T) {
 	}
 }
 
+func TestContractCapabilitiesRejectTypedNilAndMalformedValues(t *testing.T) {
+	var nilVerifier *contractVerifier
+	var typedNilVerifier DirectoryVerifier = nilVerifier
+	if VerifyDirectory(typedNilVerifier) == nil {
+		t.Fatal("typed-nil directory verifier was accepted")
+	}
+	if VerifyDirectory(&contractVerifier{}) == nil {
+		t.Fatal("malformed directory verifier was accepted")
+	}
+	var nilToolset *contractToolset
+	var typedNilToolset Toolset = nilToolset
+	if VerifyToolset(typedNilToolset) == nil {
+		t.Fatal("typed-nil toolset was accepted")
+	}
+	if VerifyToolset(&contractToolset{}) == nil {
+		t.Fatal("toolset with malformed capabilities was accepted")
+	}
+}
+
 func TestContractInstrumentationIsValueComparable(t *testing.T) {
 	value := Instrumentation{IncludePath: "C:\\coverage.cmake", SHA256: "sha", Fingerprint: "fingerprint"}
-	if value == (Instrumentation{}) || errors.Is(nil, errors.New("unexpected")) {
+	if value == (Instrumentation{}) {
 		t.Fatal("instrumentation contract lost its value semantics")
 	}
 }

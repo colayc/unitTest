@@ -263,13 +263,32 @@ func TestPrepareEmbeddedRejectsAllocatorTargetAndEnvironmentPolicyViolations(t *
 	}
 }
 
+func TestPrepareEmbeddedRejectsAllocatorIdentityTampering(t *testing.T) {
+	for _, tamper := range []func(*ProfileExpectation){
+		func(expectation *ProfileExpectation) { expectation.InvocationID = "other-invocation" },
+		func(expectation *ProfileExpectation) { expectation.Iteration++ },
+		func(expectation *ProfileExpectation) { expectation.Sequence++ },
+	} {
+		fixture, request, _ := newEmbeddedFixture(t, 1)
+		request.Allocator = invalidEmbeddedAllocator{tamperExpectation: tamper, validateNil: true}
+		if _, err := fixture.coordinator.PrepareEmbedded(context.Background(), request); !errors.Is(err, task.ErrInvalidArgument) {
+			t.Fatalf("PrepareEmbedded() error = %v", err)
+		}
+	}
+}
+
 type invalidEmbeddedAllocator struct {
-	tamper    func(*task.ProcessSpec)
-	duplicate bool
+	tamper            func(*task.ProcessSpec)
+	tamperExpectation func(*ProfileExpectation)
+	duplicate         bool
+	validateNil       bool
 }
 
 func (allocator invalidEmbeddedAllocator) Decorate(expectation ProfileExpectation, spec task.ProcessSpec) (ProfileExpectation, task.ProcessSpec, error) {
 	expectation.FileName = "p-000001-i-000001-%p-%m.profraw"
+	if allocator.tamperExpectation != nil {
+		allocator.tamperExpectation(&expectation)
+	}
 	result := spec
 	if allocator.tamper != nil {
 		allocator.tamper(&result)
@@ -281,6 +300,9 @@ func (allocator invalidEmbeddedAllocator) Decorate(expectation ProfileExpectatio
 }
 
 func (allocator invalidEmbeddedAllocator) Validate(_ ProfileExpectation, _ task.ProcessSpec, decorated task.ProcessSpec) error {
+	if allocator.validateNil {
+		return nil
+	}
 	if countEmbeddedEnvironment(decorated.Env, "LLVM_PROFILE_FILE") != 1 {
 		return task.ErrInvalidArgument
 	}

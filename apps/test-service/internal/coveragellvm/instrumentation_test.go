@@ -61,6 +61,19 @@ func TestWriteInstrumentationPublishesGoldenReadOnlyInclude(t *testing.T) {
 	}
 }
 
+func TestInstrumentationContractPreservesGoldenBytesAndIdentity(t *testing.T) {
+	sum := sha256.Sum256([]byte(goldenInstrumentation))
+	wantSHA256 := hex.EncodeToString(sum[:])
+	if InstrumentationSHA256() != wantSHA256 {
+		t.Fatalf("InstrumentationSHA256() = %q, want %q", InstrumentationSHA256(), wantSHA256)
+	}
+	fingerprint := sha256.Sum256([]byte(instrumentationVersion + "\x00" + wantSHA256))
+	wantFingerprint := hex.EncodeToString(fingerprint[:])
+	if InstrumentationFingerprint() != wantFingerprint {
+		t.Fatalf("InstrumentationFingerprint() = %q, want %q", InstrumentationFingerprint(), wantFingerprint)
+	}
+}
+
 func TestWriteInstrumentationRejectsNonFreshOrAliasedTaskRoot(t *testing.T) {
 	t.Run("non-fresh", func(t *testing.T) {
 		root := filepath.Join(t.TempDir(), "task")
