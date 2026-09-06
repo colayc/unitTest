@@ -290,6 +290,9 @@ func (adapter *gnuAdapter) Probe(ctx context.Context, candidate Candidate) (Inst
 	if coverageSnapshot != nil {
 		defer coverageSnapshot.Close()
 		if err := coverageSnapshot.Verify(ctx); err != nil {
+			if isContextError(err) {
+				return Instance{}, err
+			}
 			coverageSnapshot = nil
 		}
 	}
@@ -316,8 +319,14 @@ func (adapter *gnuAdapter) Probe(ctx context.Context, candidate Candidate) (Inst
 		}
 	}
 	coverage := CoverageCapability{}
-	if coverageSnapshot != nil && coverageSnapshot.Verify(ctx) == nil {
-		coverage = coverageSnapshot.capability
+	if coverageSnapshot != nil {
+		if err := coverageSnapshot.Verify(ctx); err != nil {
+			if isContextError(err) {
+				return Instance{}, err
+			}
+		} else {
+			coverage = coverageSnapshot.capability
+		}
 	}
 	instance := Instance{
 		Family:             adapter.family,

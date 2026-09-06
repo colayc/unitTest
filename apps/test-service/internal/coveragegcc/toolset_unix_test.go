@@ -69,11 +69,13 @@ func TestGCCPinToolsetRejectsSymlinkAndNonRegularPaths(t *testing.T) {
 			instance.Coverage.GCov = link
 		},
 		"directory": func(instance *toolchain.Instance) {
-			directory := filepath.Join(filepath.Dir(instance.Coverage.GCov), "gcov-directory")
+			directory := instance.Coverage.GCov
+			if err := os.Remove(directory); err != nil {
+				t.Fatal(err)
+			}
 			if err := os.Mkdir(directory, 0o755); err != nil {
 				t.Fatal(err)
 			}
-			instance.Coverage.GCov = directory
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -84,6 +86,26 @@ func TestGCCPinToolsetRejectsSymlinkAndNonRegularPaths(t *testing.T) {
 				t.Fatal("PinToolset accepted an unsafe path")
 			}
 		})
+	}
+}
+
+func TestGCCToolRoleDecorationRejectsMalformedNames(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct{ name, role string }{
+		{"gcc-banana", "gcc"}, {"gcc-", "gcc"}, {"-gcc", "gcc"},
+		{"g++-banana", "g++"}, {"g++-", "g++"}, {"-g++", "g++"},
+		{"gcov-banana", "gcov"}, {"gcov-", "gcov"}, {"-gcov", "gcov"},
+	} {
+		if _, ok := toolRoleDecoration(test.name, test.role); ok {
+			t.Fatalf("toolRoleDecoration(%q, %q) accepted malformed decoration", test.name, test.role)
+		}
+	}
+	for _, test := range []struct{ name, role string }{
+		{"gcc", "gcc"}, {"gcc-13", "gcc"}, {"x86_64-linux-gnu-gcc", "gcc"}, {"x86_64-linux-gnu-gcc-13.2", "gcc"},
+	} {
+		if _, ok := toolRoleDecoration(test.name, test.role); !ok {
+			t.Fatalf("toolRoleDecoration(%q, %q) rejected valid decoration", test.name, test.role)
+		}
 	}
 }
 

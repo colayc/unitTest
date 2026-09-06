@@ -133,17 +133,60 @@ func toolRoleDecoration(name, role string) (string, bool) {
 		return "", false
 	}
 	prefix, suffix := name[:index], name[index+len(role):]
-	if prefix != "" && !strings.HasSuffix(prefix, "-") || suffix != "" && !strings.HasPrefix(suffix, "-") {
-		return "", false
-	}
-	for _, character := range prefix + suffix {
-		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
-			character >= '0' && character <= '9' || character == '-' || character == '_' || character == '.' || character == '+' {
-			continue
-		}
+	if !validTripletDecoration(prefix) || !validVersionDecoration(suffix) {
 		return "", false
 	}
 	return prefix + "\x00" + suffix, true
+}
+
+func validTripletDecoration(prefix string) bool {
+	if prefix == "" {
+		return true
+	}
+	if !strings.HasSuffix(prefix, "-") {
+		return false
+	}
+	parts := strings.Split(strings.TrimSuffix(prefix, "-"), "-")
+	if len(parts) < 3 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" {
+			return false
+		}
+		for _, character := range part {
+			if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+				character >= '0' && character <= '9' || character == '_' || character == '.' || character == '+' {
+				continue
+			}
+			return false
+		}
+	}
+	return true
+}
+
+func validVersionDecoration(suffix string) bool {
+	if suffix == "" {
+		return true
+	}
+	if !strings.HasPrefix(suffix, "-") {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(suffix, "-"), ".")
+	if len(parts) == 0 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" {
+			return false
+		}
+		for _, character := range part {
+			if character < '0' || character > '9' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func canonicalDirectUnixPath(path string) (string, error) {

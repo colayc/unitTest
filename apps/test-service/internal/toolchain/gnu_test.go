@@ -250,6 +250,38 @@ func TestGCCProbeClearsCoverageWhenGCovChangesDuringLaterGeneratorProbe(t *testi
 	}
 }
 
+func TestGCCCoverageSnapshotPropagatesCancellationDuringFinalVerification(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("GCC coverage discovery is Linux-only")
+	}
+	fixture := newGNUFixture(t)
+	runner := newGNUFakeRunner(t, fixture)
+	adapter, err := newGNUAdapter(runner, FamilyGCC, nil, "x64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiler, err := openExecutableSnapshot(context.Background(), fixture.gcc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer compiler.Close()
+	cxx, err := openExecutableSnapshot(context.Background(), fixture.gxx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cxx.Close()
+	snapshot := adapter.probeGCCCoverage(context.Background(), compiler, cxx, "13.2.0", "x64", func() error { return nil })
+	if snapshot == nil {
+		t.Fatal("probeGCCCoverage() returned nil")
+	}
+	defer snapshot.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := snapshot.Verify(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("final snapshot Verify() error = %v, want context.Canceled", err)
+	}
+}
+
 func TestGCCToolsetIdentityBindsEachDistinctUnixExecutable(t *testing.T) {
 	t.Parallel()
 	paths := []string{"/tools/gcc", "/tools/g++", "/tools/gcov"}
