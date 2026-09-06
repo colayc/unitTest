@@ -268,6 +268,37 @@ func TestDescriptorRejectsUnretainedRootAndObjectCapabilities(t *testing.T) {
 	}
 }
 
+func TestDescriptorRejectsExistingGcovrCollisionWithoutRemovingIt(t *testing.T) {
+	base := strictTestTempDir(t)
+	coverageRoot, root := filepath.Join(base, "coverage"), filepath.Join(base, "root")
+	objects, gcov := filepath.Join(base, "objects"), filepath.Join(base, "gcov")
+	for _, directory := range []string{coverageRoot, root, objects, filepath.Join(coverageRoot, "gcovr")} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	marker := filepath.Join(coverageRoot, "gcovr", "existing.txt")
+	if err := os.WriteFile(marker, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(gcov, []byte("gcov"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	descriptor, err := NewDescriptor(root, objects, gcov, filepath.Join(coverageRoot, "gcovr", "coverage.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owned, err := descriptor.WriteAtomic(descriptorCapabilitiesForTest(t, coverageRoot, root, objects, gcov)); err == nil || owned != nil {
+		if owned != nil {
+			_ = owned.Close()
+		}
+		t.Fatal("WriteAtomic accepted an existing gcovr collision")
+	}
+	if contents, err := os.ReadFile(marker); err != nil || string(contents) != "keep" {
+		t.Fatalf("collision content changed: %q, %v", contents, err)
+	}
+}
+
 func TestParseDescriptorRejectsUnknownAndDuplicateMembers(t *testing.T) {
 	valid := `{"schemaVersion":1,"root":"C:/root","objectDirectory":"C:/objects","gcovExecutable":"C:/gcov.exe","outputPath":"C:/task/coverage.json"}`
 	if _, err := ParseDescriptor([]byte(strings.Replace(valid, `"outputPath"`, `"unknown":true,"outputPath"`, 1))); err == nil {
@@ -423,14 +454,27 @@ func TestDescriptorDetectsTamperBeforeCloseAndClosesOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(owned.Path(), []byte(`{"schemaVersion":1}`), 0o600); err == nil {
-		t.Fatal("raw descriptor replacement was not blocked by retained delete pin")
-	}
-	if err := owned.Verify(); err != nil {
-		t.Fatalf("Verify after blocked tamper = %v", err)
-	}
-	if err := owned.Close(); err != nil {
-		t.Fatalf("Close after blocked tamper = %v", err)
+	writeErr := os.WriteFile(owned.Path(), []byte(`{"schemaVersion":1}`), 0o600)
+	if runtime.GOOS == "windows" {
+		if writeErr == nil {
+			t.Fatal("raw descriptor replacement was not blocked by retained delete pin")
+		}
+		if err := owned.Verify(); err != nil {
+			t.Fatalf("Verify after blocked tamper = %v", err)
+		}
+		if err := owned.Close(); err != nil {
+			t.Fatalf("Close after blocked tamper = %v", err)
+		}
+	} else {
+		if writeErr != nil {
+			t.Fatalf("Unix in-place write = %v", writeErr)
+		}
+		if err := owned.Verify(); !errors.Is(err, ErrDescriptorIntegrity) {
+			t.Fatalf("Verify after in-place tamper = %v, want ErrDescriptorIntegrity", err)
+		}
+		if err := owned.Close(); !errors.Is(err, ErrDescriptorIntegrity) {
+			t.Fatalf("Close after in-place tamper = %v, want ErrDescriptorIntegrity", err)
+		}
 	}
 	if err := owned.Close(); err != nil {
 		t.Fatalf("second Close after tamper = %v", err)

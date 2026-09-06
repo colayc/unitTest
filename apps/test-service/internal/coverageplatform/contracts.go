@@ -96,7 +96,12 @@ func RetainDirectory(value DirectoryVerifier) (RetainedDirectory, error) {
 	if retained == nil || nilRetainedDirectory(retained) {
 		return nil, ErrInvalidCapability
 	}
-	if sameCapabilityObject(retained, value) || retained.Path() != value.Path() {
+	if sameCapabilityObject(retained, value) {
+		// The producer returned the caller-owned object rather than a clone.
+		// Reject it without closing it: ownership never crossed the boundary.
+		return nil, ErrInvalidCapability
+	}
+	if retained.Path() != value.Path() {
 		return nil, errors.Join(ErrInvalidCapability, retained.Close())
 	}
 	if err := VerifyDirectory(retained); err != nil {

@@ -9,6 +9,7 @@ type retainedContractVerifier struct {
 	path   string
 	valid  bool
 	retain RetainedDirectory
+	closes int
 }
 
 type nilRetainedClone struct{}
@@ -38,7 +39,12 @@ func (verifier *retainedContractVerifier) RetainDirectory() (RetainedDirectory, 
 	return verifier.retain, nil
 }
 
-func (*retainedContractVerifier) Close() error { return nil }
+func (verifier *retainedContractVerifier) Close() error {
+	if verifier != nil {
+		verifier.closes++
+	}
+	return nil
+}
 
 func TestRetainDirectoryRequiresAttestedExactClone(t *testing.T) {
 	if _, err := RetainDirectory(&contractVerifier{valid: true}); !errors.Is(err, ErrInvalidCapability) {
@@ -66,5 +72,16 @@ func TestRetainDirectoryRejectsTypedNilCloneWithoutPanic(t *testing.T) {
 	retainer.retain = typedNil
 	if _, err := RetainDirectory(retainer); !errors.Is(err, ErrInvalidCapability) {
 		t.Fatalf("RetainDirectory accepted typed-nil clone: %v", err)
+	}
+}
+
+func TestRetainDirectoryDoesNotCloseCallerWhenCloneIsCaller(t *testing.T) {
+	retainer := &retainedContractVerifier{path: "C:\\coverage", valid: true}
+	retainer.retain = retainer
+	if _, err := RetainDirectory(retainer); !errors.Is(err, ErrInvalidCapability) {
+		t.Fatalf("RetainDirectory accepted caller as clone: %v", err)
+	}
+	if retainer.closes != 0 {
+		t.Fatalf("RetainDirectory closed caller-owned capability %d times", retainer.closes)
 	}
 }
