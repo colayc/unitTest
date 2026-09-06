@@ -335,11 +335,12 @@ func TestPreparedExecutionDetectsOutputInPlaceMutation(t *testing.T) {
 	if err := execution.VerifyAfter(); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(outputPath, []byte("{\"mutated\":true}"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := execution.VerifyAfter(); err == nil {
-		t.Fatal("VerifyAfter accepted in-place output mutation")
+	if err := os.WriteFile(outputPath, []byte("{\"mutated\":true}"), 0o600); err == nil {
+		if err := execution.VerifyAfter(); err == nil {
+			t.Fatal("VerifyAfter accepted in-place output mutation")
+		}
+	} else if err := execution.VerifyAfter(); err != nil {
+		t.Fatalf("VerifyAfter rejected output after retained DELETE pin blocked mutation: %v", err)
 	}
 }
 

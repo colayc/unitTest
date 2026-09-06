@@ -93,17 +93,21 @@ func RetainDirectory(value DirectoryVerifier) (RetainedDirectory, error) {
 	if err != nil {
 		return nil, errors.Join(ErrInvalidCapability, err)
 	}
-	if sameCapabilityObject(retained, value) || retained.Path() != value.Path() {
+	if retained == nil || nilRetainedDirectory(retained) {
 		return nil, ErrInvalidCapability
+	}
+	if sameCapabilityObject(retained, value) || retained.Path() != value.Path() {
+		return nil, errors.Join(ErrInvalidCapability, retained.Close())
 	}
 	if err := VerifyDirectory(retained); err != nil {
-		return nil, err
+		return nil, errors.Join(err, retained.Close())
 	}
 	if err := VerifyDirectory(value); err != nil || retained.Path() != value.Path() {
+		closeErr := retained.Close()
 		if err != nil {
-			return nil, err
+			return nil, errors.Join(err, closeErr)
 		}
-		return nil, ErrInvalidCapability
+		return nil, errors.Join(ErrInvalidCapability, closeErr)
 	}
 	return retained, nil
 }
@@ -146,6 +150,9 @@ func nilDirectoryVerifier(value DirectoryVerifier) bool {
 	return nilInterfaceValue(reflect.ValueOf(value))
 }
 func nilRetainedDirectoryVerifier(value RetainedDirectoryVerifier) bool {
+	return nilInterfaceValue(reflect.ValueOf(value))
+}
+func nilRetainedDirectory(value RetainedDirectory) bool {
 	return nilInterfaceValue(reflect.ValueOf(value))
 }
 func nilToolset(value Toolset) bool { return nilInterfaceValue(reflect.ValueOf(value)) }

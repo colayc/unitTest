@@ -1,7 +1,6 @@
 package coveragebundle
 
 import (
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -63,19 +62,12 @@ func TestDescriptorWriteAtomicIsClosedAndDeterministic(t *testing.T) {
 	if owned.Path() == "" || filepath.Dir(owned.Path()) != taskRoot {
 		t.Fatalf("descriptor path = %q, want task-owned root %q", owned.Path(), taskRoot)
 	}
-	contents, err := os.ReadFile(owned.Path())
+	decoded, err := owned.Parse()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasSuffix(string(contents), "\n") {
-		t.Fatal("descriptor is not newline terminated")
-	}
-	var decoded map[string]any
-	if err := json.Unmarshal(contents, &decoded); err != nil {
-		t.Fatal(err)
-	}
-	if len(decoded) != 5 || decoded["schemaVersion"] != float64(1) {
-		t.Fatalf("descriptor fields = %#v", decoded)
+	if decoded != descriptor {
+		t.Fatalf("descriptor = %#v, want %#v", decoded, descriptor)
 	}
 	if err := owned.Verify(); err != nil {
 		t.Fatalf("Verify() = %v", err)
@@ -431,17 +423,58 @@ func TestDescriptorDetectsTamperBeforeCloseAndClosesOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(owned.Path(), []byte(`{"schemaVersion":1}`), 0o600); err != nil {
-		t.Fatal(err)
+	if err := os.WriteFile(owned.Path(), []byte(`{"schemaVersion":1}`), 0o600); err == nil {
+		t.Fatal("raw descriptor replacement was not blocked by retained delete pin")
 	}
-	if err := owned.Verify(); !errors.Is(err, ErrDescriptorIntegrity) {
-		t.Fatalf("Verify after tamper = %v, want ErrDescriptorIntegrity", err)
+	if err := owned.Verify(); err != nil {
+		t.Fatalf("Verify after blocked tamper = %v", err)
 	}
-	if err := owned.Close(); !errors.Is(err, ErrDescriptorIntegrity) {
-		t.Fatalf("Close after tamper = %v, want ErrDescriptorIntegrity", err)
+	if err := owned.Close(); err != nil {
+		t.Fatalf("Close after blocked tamper = %v", err)
 	}
 	if err := owned.Close(); err != nil {
 		t.Fatalf("second Close after tamper = %v", err)
+	}
+}
+
+func TestDescriptorRetainedDeletePinBlocksReplacementBeforeCleanup(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows DELETE-handle behavior")
+	}
+	base := strictTestTempDir(t)
+	coverageRoot, root := filepath.Join(base, "coverage"), filepath.Join(base, "root")
+	objects, gcov := filepath.Join(base, "objects"), filepath.Join(base, "gcov")
+	for _, directory := range []string{coverageRoot, root, objects} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(gcov, []byte("gcov"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	descriptor, err := NewDescriptor(root, objects, gcov, filepath.Join(coverageRoot, "gcovr", "coverage.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	owned, err := descriptor.WriteAtomic(descriptorCapabilitiesForTest(t, coverageRoot, root, objects, gcov))
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := owned.Path() + ".replacement"
+	if err := os.Rename(owned.Path(), replacement); err == nil {
+		if err := owned.Close(); err == nil {
+			t.Fatal("cleanup deleted after descriptor replacement instead of failing closed")
+		}
+		if _, err := os.Lstat(replacement); err != nil {
+			t.Fatalf("replacement was removed during failed cleanup: %v", err)
+		}
+		return
+	}
+	if err := owned.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(coverageRoot, "gcovr")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cleanup left task root: %v", err)
 	}
 }
 

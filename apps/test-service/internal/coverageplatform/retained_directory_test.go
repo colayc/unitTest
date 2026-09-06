@@ -11,6 +11,12 @@ type retainedContractVerifier struct {
 	retain RetainedDirectory
 }
 
+type nilRetainedClone struct{}
+
+func (*nilRetainedClone) Path() string { panic("typed-nil retained clone Path called") }
+func (*nilRetainedClone) Verify() error { panic("typed-nil retained clone Verify called") }
+func (*nilRetainedClone) Close() error { panic("typed-nil retained clone Close called") }
+
 func (verifier *retainedContractVerifier) Path() string {
 	if verifier == nil || !verifier.valid {
 		return ""
@@ -51,5 +57,14 @@ func TestRetainDirectoryRequiresAttestedExactClone(t *testing.T) {
 	mismatch.retain = &retainedContractVerifier{path: "C:\\other", valid: true}
 	if _, err := RetainDirectory(mismatch); !errors.Is(err, ErrInvalidCapability) {
 		t.Fatalf("RetainDirectory accepted path mismatch: %v", err)
+	}
+}
+
+func TestRetainDirectoryRejectsTypedNilCloneWithoutPanic(t *testing.T) {
+	retainer := &retainedContractVerifier{path: "C:\\coverage", valid: true}
+	var typedNil *nilRetainedClone
+	retainer.retain = typedNil
+	if _, err := RetainDirectory(retainer); !errors.Is(err, ErrInvalidCapability) {
+		t.Fatalf("RetainDirectory accepted typed-nil clone: %v", err)
 	}
 }

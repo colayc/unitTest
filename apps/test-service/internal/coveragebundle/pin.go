@@ -315,7 +315,10 @@ func pinOutputChild(parent *pinnedObject, name string) (*pinnedObject, error) {
 		}
 		return nil, err
 	}
-	file, err := openPinnedOutputChild(parent, name)
+	// The output pin is retained through descriptor cleanup. On Windows it must
+	// carry DELETE from first observation so cleanup never reopens a mutable
+	// pathname to acquire it later.
+	file, err := openPinnedChildForDelete(parent, name, false)
 	if err != nil {
 		return nil, err
 	}
