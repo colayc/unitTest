@@ -499,6 +499,9 @@ func (coordinator *Coordinator) prepare(
 		prepared.AttachCoverageToolset(preparedAdapter.Toolset()) != nil {
 		return nil, task.ExecutionPlan{}, failPreparation(coveragerun.PhaseBuild, task.ErrInvalidArgument)
 	}
+	if owner, ok := preparedAdapter.(interface{ RelinquishToolsetOwnership() }); ok {
+		owner.RelinquishToolsetOwnership()
+	}
 	plan, err := rewriteBuildPlan(prepared.Plan())
 	if err != nil {
 		return nil, task.ExecutionPlan{}, failPreparation(coveragerun.PhaseBuild, err)

@@ -21,7 +21,6 @@ import (
 	"unit-test-ide.local/test-service/internal/coveragecoord"
 	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/coverageexec"
-	"unit-test-ide.local/test-service/internal/coveragellvm"
 	"unit-test-ide.local/test-service/internal/coverageplatform"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/taskstore"
@@ -101,6 +100,9 @@ type retainedConstructorPreparedBuild struct {
 	profile             cmake.BuildProfile
 	plan                task.ExecutionPlan
 	coverageBinaryDir   string
+	toolset             coverageplatform.Toolset
+	releaseOnce         sync.Once
+	releaseErr          error
 }
 
 func (prepared *retainedConstructorPreparedBuild) Plan() task.ExecutionPlan { return prepared.plan }
@@ -123,7 +125,14 @@ func (*retainedConstructorPreparedBuild) Targets() []cmake.Target { return []cma
 func (*retainedConstructorPreparedBuild) AllowTestExecutable(cmake.FingerprintFile) error {
 	return nil
 }
-func (*retainedConstructorPreparedBuild) ReleaseIfUnadopted() {}
+func (prepared *retainedConstructorPreparedBuild) ReleaseIfUnadopted() {
+	prepared.releaseOnce.Do(func() {
+		if prepared.toolset != nil {
+			prepared.releaseErr = prepared.toolset.Close()
+			prepared.toolset = nil
+		}
+	})
+}
 func (prepared *retainedConstructorPreparedBuild) CoverageBinaryDir() string {
 	return prepared.coverageBinaryDir
 }
@@ -140,6 +149,7 @@ func (prepared *retainedConstructorPreparedBuild) AttachCoverageToolset(toolset 
 	for _, path := range toolset.Tools() {
 		prepared.owner.paths = append(prepared.owner.paths, path.Path())
 	}
+	prepared.toolset = toolset
 	return nil
 }
 func (*retainedConstructorPreparedBuild) AttachCoverageExecution(coverageplatform.CollectorExecution) error {

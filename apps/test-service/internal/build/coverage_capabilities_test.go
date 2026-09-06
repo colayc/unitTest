@@ -2,13 +2,16 @@ package build
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"unit-test-ide.local/test-service/internal/coverageplatform"
 	"unit-test-ide.local/test-service/internal/coveragerun"
 	"unit-test-ide.local/test-service/internal/task"
+	"unit-test-ide.local/test-service/internal/toolchain"
 )
 
 func TestCoverageCapabilityViewsAreIndependentAndNonOwning(t *testing.T) {
@@ -28,6 +31,58 @@ func TestCoverageCapabilityViewsAreIndependentAndNonOwning(t *testing.T) {
 	if closer, ok := source.(interface{ Close() error }); ok {
 		t.Fatalf("source view leaked ownership through Close: %#v", closer)
 	}
+}
+
+func TestCoverageCapabilityViewsRejectClosedOrReplacedDirectories(t *testing.T) {
+	fixture := newCoordinatorFixture(t)
+	identity := strings.Repeat("a", 64)
+	boundary := preparedCoverageBoundary(t, fixture, identity, "replaced")
+	source := boundary.coverageSourceRoot()
+	objects := boundary.coverageObjectDirectory()
+	objectPath := objects.Path()
+	replacement := objectPath + "-old"
+	if err := os.Rename(objectPath, replacement); err == nil {
+		if err := os.Mkdir(objectPath, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := objects.Verify(); err == nil {
+			t.Fatal("object capability accepted a replacement directory")
+		}
+	} else if err := objects.Verify(); err != nil {
+		t.Fatalf("blocked replacement damaged object capability: %v", err)
+	}
+	if err := boundary.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Verify(); err == nil {
+		t.Fatal("workspace capability remained valid after boundary release")
+	}
+	if err := objects.Verify(); err == nil {
+		t.Fatal("object capability remained valid after boundary release")
+	}
+}
+
+func TestCoverageCapabilityViewVerifySerializesWithBoundaryRelease(t *testing.T) {
+	fixture := newCoordinatorFixture(t)
+	boundary := preparedCoverageBoundary(t, fixture, strings.Repeat("a", 64), "concurrent")
+	view := boundary.coverageSourceRoot()
+	start := make(chan struct{})
+	var group sync.WaitGroup
+	group.Add(2)
+	go func() {
+		defer group.Done()
+		<-start
+		for range 100 {
+			_ = view.Verify()
+		}
+	}()
+	go func() {
+		defer group.Done()
+		<-start
+		_ = boundary.Release()
+	}()
+	close(start)
+	group.Wait()
 }
 
 func TestCoverageAttachmentFailureLeavesCallerCapabilitiesOpen(t *testing.T) {
@@ -112,6 +167,69 @@ func TestCoverageCapabilityAttachmentRejectsMismatchedCompilers(t *testing.T) {
 	}
 	if toolset.closed != 0 || toolset.claimed {
 		t.Fatalf("failed attachment consumed mismatched toolset: closed=%d claimed=%v", toolset.closed, toolset.claimed)
+	}
+}
+
+func TestCoveragePreparedPlanRejectsCXXVersionAndIdentityMismatches(t *testing.T) {
+	fixture := newCoordinatorFixture(t)
+	identity := strings.Repeat("a", 64)
+	for _, test := range []struct {
+		name   string
+		mutate func(*capabilityToolset)
+	}{
+		{"CXX compiler", func(toolset *capabilityToolset) {
+			toolset.cxx = capabilityPath{path: filepath.Join(fixture.dataRoot(), "wrong-cxx")}
+		}},
+		{"version", func(toolset *capabilityToolset) { toolset.version = "19.0.0" }},
+		{"identity", func(toolset *capabilityToolset) { toolset.identity = strings.Repeat("b", 64) }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			boundary := preparedCoverageBoundary(t, fixture, identity, strings.ReplaceAll(test.name, " ", "-"))
+			defer boundary.Release()
+			instance := fixture.toolchain
+			instance.Version = "20.1.8"
+			plan := &PreparedPlan{prepared: &preparedBuild{
+				boundary: boundary, coverage: &CoverageOptions{ToolsetIdentity: identity}, toolchain: instance,
+			}}
+			toolset := &capabilityToolset{
+				version: "20.1.8", identity: identity,
+				c: capabilityPath{path: fixture.toolchain.CCompiler}, cxx: capabilityPath{path: fixture.toolchain.CXXCompiler},
+				tools: []coveragerun.TrustedPath{capabilityPath{path: fixture.toolchain.CCompiler}},
+			}
+			test.mutate(toolset)
+			if err := plan.AttachCoverageToolset(toolset); err == nil {
+				t.Fatal("mismatched toolset was accepted")
+			}
+			if toolset.closed != 0 || toolset.claimed {
+				t.Fatalf("failed attachment consumed caller toolset: closed=%d claimed=%v", toolset.closed, toolset.claimed)
+			}
+		})
+	}
+}
+
+func TestCoverageAttachmentRejectsCollectorWithoutCompleteCoverageBuild(t *testing.T) {
+	fixture := newCoordinatorFixture(t)
+	boundary, err := newExecutionBoundary(fixture.installation, fixture.root, fixture.dataRoot(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer boundary.Release()
+	collector := &capabilityCollector{spec: task.ProcessSpec{Executable: fixture.installation.Executable, Dir: fixture.root.NativePath}}
+	if err := boundary.AttachCoverageExecution(collector); err == nil {
+		t.Fatal("collector attached without a complete coverage build")
+	}
+	if collector.closed {
+		t.Fatal("failed collector attachment closed caller-owned collector")
+	}
+}
+
+func TestCoverageFamilySwitchKeepsOrdinaryGCCBuildsButRejectsIncompleteCoverage(t *testing.T) {
+	gcc := toolchain.Instance{Family: toolchain.FamilyGCC}
+	if _, err := coverageToolsetIdentity(gcc, false); err != nil {
+		t.Fatalf("ordinary GCC build capability = %v", err)
+	}
+	if _, err := coverageToolsetIdentity(gcc, true); err == nil {
+		t.Fatal("incomplete GCC coverage capability was accepted")
 	}
 }
 

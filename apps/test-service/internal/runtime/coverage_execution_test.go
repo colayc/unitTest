@@ -50,6 +50,45 @@ func TestCoverageBuildPreparerPreservesCurrentPreparedPlanCapability(t *testing.
 	}
 }
 
+func TestLLVMPreparedAdapterDoesNotCloseTransferredToolset(t *testing.T) {
+	closer := &nonIdempotentCoverageCloser{}
+	adapter := &llvmPreparedCoverageAdapter{toolsetCloser: closer, ownsToolset: true}
+	adapter.RelinquishToolsetOwnership()
+	if err := adapter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if closer.calls != 0 {
+		t.Fatalf("transferred toolset close count = %d, want 0", closer.calls)
+	}
+}
+
+func TestLLVMPreparedAdapterClosesUntransferredToolsetExactlyOnce(t *testing.T) {
+	closer := &nonIdempotentCoverageCloser{}
+	adapter := &llvmPreparedCoverageAdapter{toolsetCloser: closer, ownsToolset: true}
+	if err := adapter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if closer.calls != 1 {
+		t.Fatalf("untransferred toolset close count = %d, want 1", closer.calls)
+	}
+}
+
+type nonIdempotentCoverageCloser struct{ calls int }
+
+func (closer *nonIdempotentCoverageCloser) Close() error {
+	closer.calls++
+	if closer.calls > 1 {
+		return errors.New("double close")
+	}
+	return nil
+}
+
 type recordingExecutionCoordinator struct {
 	resumeCalls      []string
 	unsupportedCalls []string

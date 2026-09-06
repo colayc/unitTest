@@ -6,8 +6,57 @@ import (
 	"path/filepath"
 	"testing"
 
+	"unit-test-ide.local/test-service/internal/coverageplatform"
+	"unit-test-ide.local/test-service/internal/coveragerun"
 	"unit-test-ide.local/test-service/internal/task"
 )
+
+func TestGenericToolsetExecutableAuthorizationRejectsEarlyClose(t *testing.T) {
+	tool := &boundaryTestPath{path: filepath.Join(t.TempDir(), "gcovr")}
+	toolset := &boundaryTestToolset{tool: tool}
+	if !validatesToolsetExecutable(toolset, tool.path) {
+		t.Fatal("generic Tools capability was not authorized")
+	}
+	tool.closed = true
+	if validatesToolsetExecutable(toolset, tool.path) {
+		t.Fatal("early-closed generic tool capability was authorized")
+	}
+}
+
+type boundaryTestPath struct {
+	path   string
+	closed bool
+}
+
+func (path *boundaryTestPath) Path() string { return path.path }
+func (path *boundaryTestPath) Verify() error {
+	if path == nil || path.closed {
+		return errors.New("closed")
+	}
+	return nil
+}
+
+type boundaryTestToolset struct{ tool *boundaryTestPath }
+
+func (*boundaryTestToolset) Version() string                              { return "1" }
+func (*boundaryTestToolset) Identity() string                             { return "identity" }
+func (toolset *boundaryTestToolset) CCompiler() coveragerun.TrustedPath   { return toolset.tool }
+func (toolset *boundaryTestToolset) CXXCompiler() coveragerun.TrustedPath { return toolset.tool }
+func (toolset *boundaryTestToolset) Tools() []coveragerun.TrustedPath {
+	return []coveragerun.TrustedPath{toolset.tool}
+}
+func (toolset *boundaryTestToolset) Verify() error { return toolset.tool.Verify() }
+func (*boundaryTestToolset) ClaimOwnership() (coverageplatform.OwnershipClaim, error) {
+	return boundaryTestClaim{}, nil
+}
+func (*boundaryTestToolset) Close() error { return nil }
+
+type boundaryTestClaim struct{}
+
+func (boundaryTestClaim) Commit()   {}
+func (boundaryTestClaim) Rollback() {}
+
+var _ coverageplatform.Toolset = (*boundaryTestToolset)(nil)
 
 func TestExecutionRootCleanupDoesNotFollowReplacedPath(t *testing.T) {
 	parent := t.TempDir()

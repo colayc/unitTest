@@ -17,6 +17,7 @@ import (
 
 	"unit-test-ide.local/test-service/internal/cmake"
 	"unit-test-ide.local/test-service/internal/coveragebundle"
+	"unit-test-ide.local/test-service/internal/coveragerun"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/toolchain"
 	"unit-test-ide.local/test-service/internal/workspace"
@@ -1269,6 +1270,35 @@ func TestExecutionBoundaryAttachesAndRevalidatesFixedCoverageExecution(t *testin
 	}
 	gcov := filepath.Join(fixture.dataRoot, "coverage", "gcov.exe")
 	if err := os.WriteFile(gcov, []byte(gcov), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	coverageDirectory, err := pinVerifiedDirectory(objects)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := boundaryValue.attachCoverageDirectory(coverageDirectory); err != nil {
+		t.Fatal(err)
+	}
+	include := filepath.Join(fixture.dataRoot, "coverage", "coverage.cmake")
+	includeContents := []byte("trusted coverage instrumentation\n")
+	if err := os.WriteFile(include, includeContents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	includeDigest := sha256.Sum256(includeContents)
+	identity := strings.Repeat("a", 64)
+	if err := boundaryValue.attachCoveragePlan(&CoverageOptions{
+		BinaryDir: objects,
+		TopLevelInclude: cmake.FingerprintFile{
+			Path: include, Identity: strings.Repeat("b", 64), SHA256: hex.EncodeToString(includeDigest[:]),
+		},
+		InstrumentationFingerprint: strings.Repeat("b", 64), ToolsetIdentity: identity,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := boundaryValue.attachCoverageToolset(&capabilityToolset{
+		version: "20.1.8", identity: identity,
+		tools: []coveragerun.TrustedPath{capabilityPath{path: gcov}},
+	}); err != nil {
 		t.Fatal(err)
 	}
 	pin := &testCoveragePin{installation: coveragebundle.Installation{Root: fixture.dataRoot, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}}

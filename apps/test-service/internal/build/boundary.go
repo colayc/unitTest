@@ -46,21 +46,47 @@ type executionBoundary struct {
 
 // coverageDirectoryView is intentionally a value-only capability. It keeps
 // verification coupled to the boundary's retained handle but never exposes a
-// close operation for a directory owned by the boundary.
-type coverageDirectoryView struct{ directory *verifiedDirectory }
+// close operation for a directory owned by the boundary. Verification holds
+// the boundary lock until the retained directory returns, so Release cannot
+// close its handle concurrently.
+type coverageDirectoryView struct {
+	boundary  *executionBoundary
+	workspace bool
+}
 
 func (view coverageDirectoryView) Path() string {
-	if view.directory == nil {
+	if view.boundary == nil {
 		return ""
 	}
-	return view.directory.path
+	view.boundary.mu.Lock()
+	defer view.boundary.mu.Unlock()
+	directory := view.boundary.coverageDirectory
+	if view.workspace {
+		directory = view.boundary.workspaceDirectory
+	}
+	if directory == nil {
+		return ""
+	}
+	return directory.path
 }
 
 func (view coverageDirectoryView) Verify() error {
-	if view.directory == nil {
+	if view.boundary == nil {
 		return task.ErrInvalidArgument
 	}
-	return view.directory.Verify()
+	view.boundary.mu.Lock()
+	defer view.boundary.mu.Unlock()
+	if view.boundary.executableFile == nil {
+		return task.ErrInvalidArgument
+	}
+	directory := view.boundary.coverageDirectory
+	if view.workspace {
+		directory = view.boundary.workspaceDirectory
+	}
+	if directory == nil {
+		return task.ErrInvalidArgument
+	}
+	return directory.Verify()
 }
 
 var _ coverageplatform.DirectoryVerifier = coverageDirectoryView{}
@@ -507,7 +533,7 @@ func (b *executionBoundary) coverageSourceRoot() coverageplatform.DirectoryVerif
 	if b.executableFile == nil || b.workspaceDirectory == nil {
 		return nil
 	}
-	return coverageDirectoryView{directory: b.workspaceDirectory}
+	return coverageDirectoryView{boundary: b, workspace: true}
 }
 
 func (b *executionBoundary) coverageObjectDirectory() coverageplatform.DirectoryVerifier {
@@ -519,7 +545,7 @@ func (b *executionBoundary) coverageObjectDirectory() coverageplatform.Directory
 	if b.executableFile == nil || b.coverageDirectory == nil {
 		return nil
 	}
-	return coverageDirectoryView{directory: b.coverageDirectory}
+	return coverageDirectoryView{boundary: b}
 }
 
 func (b *executionBoundary) attachCoverageToolset(toolset coverageplatform.Toolset) error {
@@ -589,7 +615,10 @@ func (b *executionBoundary) AttachCoverageExecution(execution coverageplatform.C
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.executableFile == nil || b.coverageExecution != nil {
+	if b.executableFile == nil || b.coverageExecution != nil ||
+		b.coverageBinaryDir == "" || b.coverageDirectory == nil || b.coverageIncludeParent == nil ||
+		b.coverageInclude.file == nil || b.coverageToolset == nil ||
+		b.verifyCoveragePlanLocked() != nil {
 		return task.ErrInvalidArgument
 	}
 	b.coverageExecution = execution

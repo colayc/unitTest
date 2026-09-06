@@ -216,14 +216,8 @@ func (boundary *executionBoundary) ValidateExecutable(path string) error {
 	defer boundary.execution.mu.Unlock()
 	adapter := boundary.execution.adapter
 	if adapter != nil && adapter.Toolset() != nil {
-		toolset := adapter.Toolset()
-		if coverageplatform.VerifyToolset(toolset) != nil {
-			return task.ErrInvalidArgument
-		}
-		for _, candidate := range toolset.Tools() {
-			if samePath(candidate.Path(), path) && candidate.Verify() == nil {
-				return nil
-			}
+		if validatesToolsetExecutable(adapter.Toolset(), path) {
+			return nil
 		}
 	}
 	for _, candidate := range boundary.execution.binaries {
@@ -232,6 +226,18 @@ func (boundary *executionBoundary) ValidateExecutable(path string) error {
 		}
 	}
 	return task.ErrInvalidArgument
+}
+
+func validatesToolsetExecutable(toolset coverageplatform.Toolset, path string) bool {
+	if coverageplatform.VerifyToolset(toolset) != nil {
+		return false
+	}
+	for _, candidate := range toolset.Tools() {
+		if samePath(candidate.Path(), path) && candidate.Verify() == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func (boundary *executionBoundary) ValidateWorkingDirectory(path string) error {

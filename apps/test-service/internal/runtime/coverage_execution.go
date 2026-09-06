@@ -122,18 +122,34 @@ func (llvmCoverageAdapter) Prepare(ctx context.Context, input coverageexec.Adapt
 		return nil, err
 	}
 	return &llvmPreparedCoverageAdapter{
-		toolset: toolset, instrumentation: instrumentation,
-		allocator: allocator, profileRoot: input.ProfileRoot,
+		toolset: toolset, toolsetCloser: toolset, ownsToolset: true,
+		instrumentation: instrumentation,
+		allocator:       allocator, profileRoot: input.ProfileRoot,
 	}, nil
 }
 
 type llvmPreparedCoverageAdapter struct {
 	toolset         *coveragellvm.Toolset
+	toolsetCloser   io.Closer
+	ownershipMu     sync.Mutex
+	ownsToolset     bool
 	instrumentation coveragellvm.Instrumentation
 	allocator       testrun.ProfileAllocator
 	profileRoot     string
 	closeOnce       sync.Once
 	closeErr        error
+}
+
+// RelinquishToolsetOwnership is called only after Build Boundary commits the
+// toolset ownership claim. The adapter retains a non-owning operational view
+// for collector construction, but Close must not close the transferred owner.
+func (adapter *llvmPreparedCoverageAdapter) RelinquishToolsetOwnership() {
+	if adapter == nil {
+		return
+	}
+	adapter.ownershipMu.Lock()
+	adapter.ownsToolset = false
+	adapter.ownershipMu.Unlock()
 }
 
 func (adapter *llvmPreparedCoverageAdapter) Toolset() coverageplatform.Toolset {
@@ -179,8 +195,13 @@ func (adapter *llvmPreparedCoverageAdapter) Close() error {
 		if closer, ok := adapter.allocator.(io.Closer); ok {
 			adapter.closeErr = errors.Join(adapter.closeErr, closer.Close())
 		}
-		if adapter.toolset != nil {
-			adapter.closeErr = errors.Join(adapter.closeErr, adapter.toolset.Close())
+		adapter.ownershipMu.Lock()
+		toolsetCloser := adapter.toolsetCloser
+		ownsToolset := adapter.ownsToolset
+		adapter.ownsToolset = false
+		adapter.ownershipMu.Unlock()
+		if ownsToolset && toolsetCloser != nil {
+			adapter.closeErr = errors.Join(adapter.closeErr, toolsetCloser.Close())
 		}
 	})
 	return adapter.closeErr

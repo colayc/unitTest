@@ -308,6 +308,27 @@ func (plan *PreparedPlan) CoverageObjectDirectory() coverageplatform.DirectoryVe
 	return plan.prepared.boundary.coverageObjectDirectory()
 }
 
+func (plan *PreparedPlan) AttachCoverageExecution(execution coverageplatform.CollectorExecution) error {
+	if plan == nil || plan.prepared == nil || plan.prepared.coverage == nil || plan.prepared.boundary == nil {
+		return task.ErrInvalidArgument
+	}
+	return plan.prepared.boundary.AttachCoverageExecution(execution)
+}
+
+func (plan *PreparedPlan) VerifyCoverageExecutionAfter() error {
+	if plan == nil || plan.prepared == nil || plan.prepared.coverage == nil || plan.prepared.boundary == nil {
+		return task.ErrInvalidArgument
+	}
+	return plan.prepared.boundary.VerifyCoverageExecutionAfter()
+}
+
+func (plan *PreparedPlan) PinnedCoverageOutput() (coverageplatform.Output, error) {
+	if plan == nil || plan.prepared == nil || plan.prepared.coverage == nil || plan.prepared.boundary == nil {
+		return nil, task.ErrInvalidArgument
+	}
+	return plan.prepared.boundary.PinnedCoverageOutput()
+}
+
 func (plan *PreparedPlan) AllowTestExecutable(
 	state cmake.FingerprintFile,
 ) error {
@@ -410,20 +431,11 @@ func (c *Coordinator) prepare(
 		return nil, err
 	}
 	if coverage != nil {
-		switch instance.Family {
-		case toolchain.FamilyClangCL:
-			if instance.Version == "" || instance.Coverage.LLVMProfdata == "" ||
-				instance.Coverage.LLVMCov == "" || !validLowerSHA256(instance.Coverage.ToolsetIdentity) {
-				return nil, task.ErrInvalidArgument
-			}
-			coverage.ToolsetIdentity = instance.Coverage.ToolsetIdentity
-		case toolchain.FamilyGCC:
-			// GCC remains a valid ordinary build toolchain. Its coverage producer is
-			// intentionally rejected until a complete discovered capability exists.
-			return nil, task.ErrInvalidArgument
-		default:
+		toolsetIdentity, capabilityErr := coverageToolsetIdentity(instance, true)
+		if capabilityErr != nil {
 			return nil, task.ErrInvalidArgument
 		}
+		coverage.ToolsetIdentity = toolsetIdentity
 		profile.BinaryDir = coverage.BinaryDir
 	}
 	if err := c.ensureBuildDirectory(profile.BinaryDir); err != nil {
@@ -574,6 +586,26 @@ func (c *Coordinator) prepare(
 		targets:   cloneTargets(targets),
 		coverage:  cloneCoverageOptions(coverage),
 	}, nil
+}
+
+func coverageToolsetIdentity(instance toolchain.Instance, coverageRequested bool) (string, error) {
+	if !coverageRequested {
+		return "", nil
+	}
+	switch instance.Family {
+	case toolchain.FamilyClangCL:
+		if instance.Version == "" || instance.Coverage.LLVMProfdata == "" ||
+			instance.Coverage.LLVMCov == "" || !validLowerSHA256(instance.Coverage.ToolsetIdentity) {
+			return "", task.ErrInvalidArgument
+		}
+		return instance.Coverage.ToolsetIdentity, nil
+	case toolchain.FamilyGCC:
+		// GCC remains a valid ordinary build toolchain. Its coverage producer is
+		// intentionally rejected until a complete discovered capability exists.
+		return "", task.ErrInvalidArgument
+	default:
+		return "", task.ErrInvalidArgument
+	}
 }
 
 func cloneBuildExecutionPlan(value task.ExecutionPlan) task.ExecutionPlan {
