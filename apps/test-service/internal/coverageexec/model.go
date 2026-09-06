@@ -65,6 +65,10 @@ type AdapterInput struct {
 
 type PreparedAdapter interface {
 	Toolset() coverageplatform.Toolset
+	// RelinquishToolsetOwnership is called exactly once after Build Boundary
+	// commits the toolset claim. Implementations retain an operational view but
+	// must not close the transferred toolset afterwards.
+	RelinquishToolsetOwnership()
 	Instrumentation() coveragellvm.Instrumentation
 	Allocator() testrun.ProfileAllocator
 	SealProfiles([]testrun.ProfileExpectation, []testrun.InvocationOutcome) (coveragellvm.Manifest, error)

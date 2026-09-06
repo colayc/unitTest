@@ -539,7 +539,7 @@ func (adapter *orchestrationAdapter) Prepare(_ context.Context, input AdapterInp
 	}
 	prepared := &orchestrationPreparedAdapter{
 		toolset: toolset, instrumentation: instrumentation,
-		allocator: countedAllocator, profileRoot: input.ProfileRoot,
+		allocator: countedAllocator, profileRoot: input.ProfileRoot, ownsToolset: true,
 	}
 	adapter.mu.Lock()
 	adapter.prepared = prepared
@@ -621,6 +621,7 @@ type orchestrationPreparedAdapter struct {
 	profileRoot     string
 	closeOnce       sync.Once
 	mu              sync.Mutex
+	ownsToolset     bool
 	closes          int
 	seals           int
 	manifest        *coveragellvm.Manifest
@@ -628,6 +629,11 @@ type orchestrationPreparedAdapter struct {
 
 func (adapter *orchestrationPreparedAdapter) Toolset() coverageplatform.Toolset {
 	return adapter.toolset
+}
+func (adapter *orchestrationPreparedAdapter) RelinquishToolsetOwnership() {
+	adapter.mu.Lock()
+	adapter.ownsToolset = false
+	adapter.mu.Unlock()
 }
 func (adapter *orchestrationPreparedAdapter) Instrumentation() coveragellvm.Instrumentation {
 	return adapter.instrumentation
@@ -656,11 +662,15 @@ func (adapter *orchestrationPreparedAdapter) Close() error {
 	adapter.closeOnce.Do(func() {
 		adapter.mu.Lock()
 		adapter.closes++
+		ownsToolset := adapter.ownsToolset
+		adapter.ownsToolset = false
 		adapter.mu.Unlock()
 		if closer, ok := adapter.allocator.(io.Closer); ok {
 			result = errors.Join(result, closer.Close())
 		}
-		result = errors.Join(result, adapter.toolset.Close())
+		if ownsToolset {
+			result = errors.Join(result, adapter.toolset.Close())
+		}
 	})
 	return result
 }

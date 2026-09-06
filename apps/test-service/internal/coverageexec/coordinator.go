@@ -22,6 +22,7 @@ import (
 	coveragemodelv1 "unit-test-ide.local/test-service/internal/coveragemodel/v1"
 	"unit-test-ide.local/test-service/internal/coveragenormalize"
 	"unit-test-ide.local/test-service/internal/coverageparser/llvm"
+	"unit-test-ide.local/test-service/internal/coverageplatform"
 	"unit-test-ide.local/test-service/internal/coveragereport"
 	"unit-test-ide.local/test-service/internal/coveragerun"
 	"unit-test-ide.local/test-service/internal/task"
@@ -495,12 +496,8 @@ func (coordinator *Coordinator) prepare(
 	if err := validatePreparedIdentity(prepared, run, testRun, profile, currentToolchain); err != nil {
 		return nil, task.ExecutionPlan{}, failPreparation(coveragerun.PhaseBuild, err)
 	}
-	if !samePath(prepared.CoverageBinaryDir(), buildRoot) ||
-		prepared.AttachCoverageToolset(preparedAdapter.Toolset()) != nil {
+	if err := attachPreparedCoverageToolset(prepared, preparedAdapter, buildRoot); err != nil {
 		return nil, task.ExecutionPlan{}, failPreparation(coveragerun.PhaseBuild, task.ErrInvalidArgument)
-	}
-	if owner, ok := preparedAdapter.(interface{ RelinquishToolsetOwnership() }); ok {
-		owner.RelinquishToolsetOwnership()
 	}
 	plan, err := rewriteBuildPlan(prepared.Plan())
 	if err != nil {
@@ -512,6 +509,18 @@ func (coordinator *Coordinator) prepare(
 	execution.addApprovedSteps(plan.Steps)
 	cleanup = false
 	return execution, plan, nil
+}
+
+func attachPreparedCoverageToolset(prepared PreparedBuild, adapter PreparedAdapter, buildRoot string) error {
+	if prepared == nil || adapter == nil || !samePath(prepared.CoverageBinaryDir(), buildRoot) {
+		return task.ErrInvalidArgument
+	}
+	toolset := adapter.Toolset()
+	if coverageplatform.VerifyToolset(toolset) != nil || prepared.AttachCoverageToolset(toolset) != nil {
+		return task.ErrInvalidArgument
+	}
+	adapter.RelinquishToolsetOwnership()
+	return nil
 }
 
 func (coordinator *Coordinator) loadGraph(
