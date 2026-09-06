@@ -47,6 +47,22 @@ func renamePinnedChild(parent *pinnedObject, oldName, newName string) error {
 	return parent.verifyIdentity()
 }
 
+func removePinnedChild(parent, child *pinnedObject, name string) error {
+	if parent == nil || child == nil || name == "" || filepath.Base(name) != name {
+		return errors.New("invalid pinned child removal")
+	}
+	if err := parent.verifyIdentity(); err != nil {
+		return err
+	}
+	if err := child.verifyIdentity(); err != nil {
+		return err
+	}
+	if err := os.Remove(filepath.Join(parent.path, name)); err != nil {
+		return err
+	}
+	return parent.verifyIdentity()
+}
+
 func syncPinnedDirectory(parent *pinnedObject) error {
 	if err := parent.file.Sync(); err != nil {
 		// Windows does not expose directory metadata flush through an ordinary

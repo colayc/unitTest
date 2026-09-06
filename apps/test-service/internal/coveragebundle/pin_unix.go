@@ -38,6 +38,26 @@ func renamePinnedChild(parent *pinnedObject, oldName, newName string) error {
 	return unix.Renameat(int(parent.file.Fd()), oldName, int(parent.file.Fd()), newName)
 }
 
+func removePinnedChild(parent, child *pinnedObject, name string) error {
+	if parent == nil || child == nil || name == "" || filepath.Base(name) != name {
+		return errors.New("invalid pinned child removal")
+	}
+	if err := parent.verifyIdentity(); err != nil {
+		return err
+	}
+	if err := child.verifyIdentity(); err != nil {
+		return err
+	}
+	flags := 0
+	if child.directory {
+		flags = unix.AT_REMOVEDIR
+	}
+	if err := unix.Unlinkat(int(parent.file.Fd()), name, flags); err != nil {
+		return err
+	}
+	return parent.verifyIdentity()
+}
+
 func syncPinnedDirectory(parent *pinnedObject) error {
 	return unix.Fsync(int(parent.file.Fd()))
 }

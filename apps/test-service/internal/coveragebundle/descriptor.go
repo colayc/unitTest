@@ -646,13 +646,29 @@ func (descriptor Descriptor) WriteAtomic(capabilities DescriptorCapabilities) (*
 	if err != nil {
 		return nil, integrityError("task root capability", err)
 	}
+	taskPin := directoryFinalPin(taskRootCapability)
+	if taskPin == nil {
+		_ = taskRootCapability.Close()
+		return nil, integrityError("task root capability", errors.New("task root is not pinned"))
+	}
+	var temporaryName string
 	cleanup := func() {
 		if err := taskRootCapability.Verify(); err != nil {
 			return
 		}
-		_ = os.Remove(filepath.Join(taskRoot, "descriptor.json"))
-		_ = os.Remove(descriptor.OutputPath)
-		_ = os.Remove(taskRoot)
+		for _, name := range []string{temporaryName, "descriptor.json", "coverage.json"} {
+			if name == "" {
+				continue
+			}
+			child, err := pinChildObject(taskPin, name, false)
+			if err == nil {
+				_ = removePinnedChild(taskPin, child, name)
+				_ = child.Close()
+			}
+		}
+		if err := removePinnedChild(coveragePin, taskPin, "gcovr"); err != nil {
+			return
+		}
 	}
 	closeTaskRoot := func() {
 		// Never recursively clean a path after its retained capability has
@@ -676,17 +692,18 @@ func (descriptor Descriptor) WriteAtomic(capabilities DescriptorCapabilities) (*
 		return nil, integrityError("marshal descriptor", err)
 	}
 	raw = append(raw, '\n')
-	taskPin := directoryFinalPin(taskRootCapability)
-	if taskPin == nil {
-		closeTaskRoot()
-		return nil, integrityError("task root capability", errors.New("task root is not pinned"))
-	}
 	temporary, temporaryName, err := createPinnedTemp(taskPin, ".descriptor")
 	if err != nil {
 		closeTaskRoot()
 		return nil, integrityError("create descriptor temporary", err)
 	}
-	removeTemporaryFile := func() {}
+	removeTemporaryFile := func() {
+		child, childErr := pinChildObject(taskPin, temporaryName, false)
+		if childErr == nil {
+			_ = removePinnedChild(taskPin, child, temporaryName)
+			_ = child.Close()
+		}
+	}
 	removeTemporary := func() {
 		_ = temporary.Close()
 		removeTemporaryFile()
