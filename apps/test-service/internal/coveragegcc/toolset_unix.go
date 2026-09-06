@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
+	"unicode/utf8"
 
 	"unit-test-ide.local/test-service/internal/toolchain"
 )
@@ -50,13 +51,15 @@ func PinToolset(instance toolchain.Instance) (*Toolset, error) {
 		return nil, ErrInvalidToolset
 	}
 	paths := []string{instance.CCompiler, instance.CXXCompiler, instance.Coverage.GCov}
-	names := []string{"gcc", "g++", "gcov"}
 	for index := range paths {
 		canonical, err := canonicalDirectUnixPath(paths[index])
-		if err != nil || filepath.Base(canonical) != names[index] {
+		if err != nil {
 			return nil, ErrInvalidToolset
 		}
 		paths[index] = canonical
+	}
+	if !matchingToolRoles(paths) {
+		return nil, ErrInvalidToolset
 	}
 	evidence := []toolchain.ExecutableEvidence{instance.Coverage.CompilerEvidence, instance.Coverage.CXXCompilerEvidence, instance.Coverage.GCovEvidence}
 	if toolchain.GCCToolsetIdentity(instance.Version, paths, evidence) != instance.Coverage.ToolsetIdentity {
@@ -99,6 +102,48 @@ func validVersion(value string) bool {
 		}
 	}
 	return true
+}
+
+// matchingToolRoles allows direct canonical GCC installations to use either
+// unversioned names (gcc/g++/gcov) or a matching version/triplet decoration.
+// It never accepts arbitrary executables merely because their evidence hashes
+// happen to be valid.
+func matchingToolRoles(paths []string) bool {
+	if len(paths) != 3 {
+		return false
+	}
+	compiler, ok := toolRoleDecoration(filepath.Base(paths[0]), "gcc")
+	if !ok {
+		return false
+	}
+	cxx, ok := toolRoleDecoration(filepath.Base(paths[1]), "g++")
+	if !ok || cxx != compiler {
+		return false
+	}
+	gcov, ok := toolRoleDecoration(filepath.Base(paths[2]), "gcov")
+	return ok && gcov == compiler
+}
+
+func toolRoleDecoration(name, role string) (string, bool) {
+	if name == "" || !utf8.ValidString(name) || strings.ContainsRune(name, 0) {
+		return "", false
+	}
+	index := strings.LastIndex(name, role)
+	if index < 0 || strings.Contains(name[index+len(role):], role) {
+		return "", false
+	}
+	prefix, suffix := name[:index], name[index+len(role):]
+	if prefix != "" && !strings.HasSuffix(prefix, "-") || suffix != "" && !strings.HasPrefix(suffix, "-") {
+		return "", false
+	}
+	for _, character := range prefix + suffix {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' || character == '-' || character == '_' || character == '.' || character == '+' {
+			continue
+		}
+		return "", false
+	}
+	return prefix + "\x00" + suffix, true
 }
 
 func canonicalDirectUnixPath(path string) (string, error) {

@@ -72,6 +72,13 @@ type executableSnapshot struct {
 	maximum  int64
 }
 
+type gccCoverageSnapshot struct {
+	capability CoverageCapability
+	compiler   *executableSnapshot
+	cxx        *executableSnapshot
+	gcov       *executableSnapshot
+}
+
 type toolchainProbeError struct {
 	code string
 	text string
@@ -279,7 +286,13 @@ func (adapter *gnuAdapter) Probe(ctx context.Context, candidate Candidate) (Inst
 	if err != nil {
 		return Instance{}, invalidProbe("TOOLCHAIN_PROBE_FAILED", "compiler target architecture is unsupported")
 	}
-	coverage := adapter.probeGCCCoverage(ctx, cCompiler, cxxCompiler, cDescriptor.version, targetArchitecture, verifyCompilers)
+	coverageSnapshot := adapter.probeGCCCoverage(ctx, cCompiler, cxxCompiler, cDescriptor.version, targetArchitecture, verifyCompilers)
+	if coverageSnapshot != nil {
+		defer coverageSnapshot.Close()
+		if err := coverageSnapshot.Verify(ctx); err != nil {
+			coverageSnapshot = nil
+		}
+	}
 
 	generators, err := adapter.probeGenerator(ctx, candidate, verifyCompilers)
 	if err != nil {
@@ -301,6 +314,10 @@ func (adapter *gnuAdapter) Probe(ctx context.Context, candidate Candidate) (Inst
 			currentSDKIdentity != cDescriptor.identity {
 			return Instance{}, invalidProbe("TOOLCHAIN_PROBE_FAILED", "compiler SDK identity changed")
 		}
+	}
+	coverage := CoverageCapability{}
+	if coverageSnapshot != nil && coverageSnapshot.Verify(ctx) == nil {
+		coverage = coverageSnapshot.capability
 	}
 	instance := Instance{
 		Family:             adapter.family,
@@ -339,10 +356,10 @@ func (adapter *gnuAdapter) probeGCCCoverage(
 	compiler, cxx *executableSnapshot,
 	compilerVersion, targetArchitecture string,
 	verify func() error,
-) CoverageCapability {
+) *gccCoverageSnapshot {
 	if adapter == nil || adapter.family != FamilyGCC || runtime.GOOS != "linux" ||
 		adapter.hostArch != "x64" || targetArchitecture != "x64" || compiler == nil || cxx == nil {
-		return CoverageCapability{}
+		return nil
 	}
 	verifyAll := func() error {
 		if err := verify(); err != nil {
@@ -352,17 +369,17 @@ func (adapter *gnuAdapter) probeGCCCoverage(
 	}
 	output, err := adapter.runProbe(ctx, compiler.path, "-print-prog-name=gcov", verifyAll)
 	if err != nil {
-		return CoverageCapability{}
+		return nil
 	}
 	gcovPath, err := resolveGCovPath(compiler.path, output)
 	if err != nil {
-		return CoverageCapability{}
+		return nil
 	}
 	gcov, err := openDirectExecutableSnapshot(ctx, gcovPath)
 	if err != nil {
-		return CoverageCapability{}
+		return nil
 	}
-	defer gcov.Close()
+	result := &gccCoverageSnapshot{compiler: compiler, cxx: cxx, gcov: gcov}
 	verifyAll = func() error {
 		if err := verify(); err != nil {
 			return err
@@ -371,29 +388,55 @@ func (adapter *gnuAdapter) probeGCCCoverage(
 	}
 	versionOutput, err := adapter.runProbe(ctx, gcov.path, "--version", verifyAll)
 	if err != nil {
-		return CoverageCapability{}
+		_ = result.Close()
+		return nil
 	}
 	gcovVersion, err := parseGCovVersion(versionOutput)
 	if err != nil || gcovVersion != compilerVersion || verifyAll() != nil {
-		return CoverageCapability{}
+		_ = result.Close()
+		return nil
 	}
 	evidence := make([]ExecutableEvidence, 3)
 	for index, snapshot := range []*executableSnapshot{compiler, cxx, gcov} {
 		item, evidenceErr := unixExecutableEvidence(snapshot)
 		if evidenceErr != nil {
-			return CoverageCapability{}
+			_ = result.Close()
+			return nil
 		}
 		evidence[index] = item
 	}
 	paths := []string{compiler.path, cxx.path, gcov.path}
 	identity := GCCToolsetIdentity(compilerVersion, paths, evidence)
 	if identity == "" {
-		return CoverageCapability{}
+		_ = result.Close()
+		return nil
 	}
-	return CoverageCapability{
+	result.capability = CoverageCapability{
 		GCov: gcov.path, CompilerEvidence: evidence[0], CXXCompilerEvidence: evidence[1],
 		GCovEvidence: evidence[2], GCovVersion: gcovVersion, ToolsetIdentity: identity,
 	}
+	return result
+}
+
+func (snapshot *gccCoverageSnapshot) Verify(ctx context.Context) error {
+	if snapshot == nil || snapshot.compiler == nil || snapshot.cxx == nil || snapshot.gcov == nil {
+		return errors.New("GCC coverage snapshot is incomplete")
+	}
+	for _, executable := range []*executableSnapshot{snapshot.compiler, snapshot.cxx, snapshot.gcov} {
+		if err := executable.Verify(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (snapshot *gccCoverageSnapshot) Close() error {
+	if snapshot == nil || snapshot.gcov == nil {
+		return nil
+	}
+	err := snapshot.gcov.Close()
+	snapshot.gcov = nil
+	return err
 }
 
 func resolveGCovPath(compiler string, output []byte) (string, error) {

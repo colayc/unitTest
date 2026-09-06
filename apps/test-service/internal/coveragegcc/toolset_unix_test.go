@@ -87,13 +87,94 @@ func TestGCCPinToolsetRejectsSymlinkAndNonRegularPaths(t *testing.T) {
 	}
 }
 
+func TestGCCPinToolsetAcceptsVersionedCanonicalRolePairs(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux-only GCC toolset")
+	}
+	instance := gccToolchainFixtureWithNames(t, "x86_64-linux-gnu-gcc-13", "x86_64-linux-gnu-g++-13", "x86_64-linux-gnu-gcov-13")
+	toolset, err := PinToolset(instance)
+	if err != nil {
+		t.Fatalf("PinToolset() error = %v for versioned canonical pair", err)
+	}
+	defer toolset.Close()
+	if toolset.CCompiler().Path() != instance.CCompiler || toolset.CXXCompiler().Path() != instance.CXXCompiler || toolset.GCov().Path() != instance.Coverage.GCov {
+		t.Fatalf("versioned roles = %q, %q, %q", toolset.CCompiler().Path(), toolset.CXXCompiler().Path(), toolset.GCov().Path())
+	}
+}
+
+func TestGCCPinToolsetRejectsOversizeAndNoncanonicalPaths(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux-only GCC toolset")
+	}
+	t.Run("oversize", func(t *testing.T) {
+		instance := gccToolchainFixture(t)
+		if err := os.Truncate(instance.Coverage.GCov, maximumGCCToolBytes+1); err != nil {
+			t.Fatal(err)
+		}
+		if toolset, err := PinToolset(instance); err == nil {
+			_ = toolset.Close()
+			t.Fatal("PinToolset accepted an oversized gcov")
+		}
+	})
+	t.Run("noncanonical absolute", func(t *testing.T) {
+		instance := gccToolchainFixture(t)
+		instance.Coverage.GCov = filepath.Dir(instance.Coverage.GCov) + "/./gcov"
+		if toolset, err := PinToolset(instance); err == nil {
+			_ = toolset.Close()
+			t.Fatal("PinToolset accepted a noncanonical absolute path")
+		}
+	})
+}
+
+func TestGCCPinToolsetOwnershipAndCloseInvalidateEveryCapability(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux-only GCC toolset")
+	}
+	toolset, err := PinToolset(gccToolchainFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := toolset.ClaimOwnership()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := toolset.ClaimOwnership(); err == nil {
+		t.Fatal("second owner claimed the retained toolset")
+	}
+	claim.Rollback()
+	claim, err = toolset.ClaimOwnership()
+	if err != nil {
+		t.Fatalf("ClaimOwnership after rollback = %v", err)
+	}
+	claim.Commit()
+	if _, err := toolset.ClaimOwnership(); err == nil {
+		t.Fatal("committed ownership was claimable again")
+	}
+	paths := []interface{ Verify() error }{toolset.CCompiler(), toolset.CXXCompiler(), toolset.GCov()}
+	if err := toolset.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := toolset.Verify(); err == nil {
+		t.Fatal("closed toolset remained verifiable")
+	}
+	for _, path := range paths {
+		if err := path.Verify(); err == nil {
+			t.Fatal("closed retained capability remained verifiable")
+		}
+	}
+}
+
 func gccToolchainFixture(t *testing.T) toolchain.Instance {
+	return gccToolchainFixtureWithNames(t, "gcc", "g++", "gcov")
+}
+
+func gccToolchainFixtureWithNames(t *testing.T, compilerName, cxxName, gcovName string) toolchain.Instance {
 	t.Helper()
 	root := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	paths := []string{filepath.Join(root, "gcc"), filepath.Join(root, "g++"), filepath.Join(root, "gcov")}
+	paths := []string{filepath.Join(root, compilerName), filepath.Join(root, cxxName), filepath.Join(root, gcovName)}
 	for index, path := range paths {
 		if err := os.WriteFile(path, []byte{byte('a' + index)}, 0o755); err != nil {
 			t.Fatal(err)

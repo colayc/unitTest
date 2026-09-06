@@ -207,11 +207,46 @@ func TestGCCProbeDoesNotRetainCoverageWhenExecutableChangesDuringProbe(t *testin
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = adapter.Probe(context.Background(), Candidate{Family: FamilyGCC, CCompiler: fixture.gcc, CXXCompiler: fixture.gxx, Ninja: fixture.ninja})
+			instance, err := adapter.Probe(context.Background(), Candidate{Family: FamilyGCC, CCompiler: fixture.gcc, CXXCompiler: fixture.gxx, Ninja: fixture.ninja})
+			if name == "gcov" {
+				if err != nil {
+					t.Fatalf("Probe() error = %v, want ordinary GCC without coverage", err)
+				}
+				if instance.Coverage != (CoverageCapability{}) {
+					t.Fatalf("Probe() advertised stale gcov evidence: %#v", instance.Coverage)
+				}
+				return
+			}
 			if err == nil {
-				t.Fatal("Probe() accepted an executable replacement during a coverage probe")
+				t.Fatal("Probe() accepted a compiler replacement during a coverage probe")
 			}
 		})
+	}
+}
+
+func TestGCCProbeClearsCoverageWhenGCovChangesDuringLaterGeneratorProbe(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS != "linux" {
+		t.Skip("GCC coverage discovery is Linux-only")
+	}
+	fixture := newGNUFixture(t)
+	runner := newGNUFakeRunner(t, fixture)
+	runner.afterCall = func(call probeCall) {
+		if call == (probeCall{fixture.ninja, "--version"}) {
+			_ = os.WriteFile(fixture.gcov, []byte("replacement"), 0o755)
+			runner.afterCall = nil
+		}
+	}
+	adapter, err := newGNUAdapter(runner, FamilyGCC, nil, "x64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance, err := adapter.Probe(context.Background(), Candidate{Family: FamilyGCC, CCompiler: fixture.gcc, CXXCompiler: fixture.gxx, Ninja: fixture.ninja})
+	if err != nil {
+		t.Fatalf("Probe() error = %v, want ordinary GCC descriptor", err)
+	}
+	if instance.Coverage != (CoverageCapability{}) {
+		t.Fatalf("Probe() advertised stale coverage after gcov replacement: %#v", instance.Coverage)
 	}
 }
 
