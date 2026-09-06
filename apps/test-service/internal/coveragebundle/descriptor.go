@@ -105,19 +105,20 @@ type OwnedDescriptor struct {
 	taskRoot   string
 	digest     string
 
-	descriptorFile     *os.File
-	descriptorInfo     os.FileInfo
-	collectorRoot      coverageplatform.DirectoryVerifier
-	collectorChild     *VerifiedDirectory
-	taskRootCapability *VerifiedDirectory
-	rootCapability     coverageplatform.DirectoryVerifier
-	objectCapability   coverageplatform.DirectoryVerifier
-	gcovCapability     coveragerun.TrustedPath
-	outputPin          *pinnedObject
-	outputFile         *os.File
-	outputInfo         os.FileInfo
-	outputDigest       string
-	closed             bool
+	descriptorFile       *os.File
+	descriptorInfo       os.FileInfo
+	collectorRoot        coverageplatform.DirectoryVerifier
+	collectorCleanupRoot *VerifiedDirectory
+	collectorChild       *VerifiedDirectory
+	taskRootCapability   *VerifiedDirectory
+	rootCapability       coverageplatform.DirectoryVerifier
+	objectCapability     coverageplatform.DirectoryVerifier
+	gcovCapability       coveragerun.TrustedPath
+	outputPin            *pinnedObject
+	outputFile           *os.File
+	outputInfo           os.FileInfo
+	outputDigest         string
+	closed               bool
 }
 
 // PinnedOutput is a consumer handle backed by the already-open output file.
@@ -624,31 +625,45 @@ func (descriptor Descriptor) WriteAtomic(capabilities DescriptorCapabilities) (*
 	if err := validateDescriptorCapabilities(coverageRoot, descriptor, capabilities); err != nil {
 		return nil, err
 	}
-	collectorRoot, ok := capabilities.CollectorRoot.(*VerifiedDirectory)
-	if !ok || collectorRoot == nil {
+	if _, ok := capabilities.CollectorRoot.(*VerifiedDirectory); !ok {
 		return nil, integrityError("collector root", errors.New("collector root cannot mint a retained child"))
+	}
+	collectorRoot, err := newVerifiedDirectory(coverageRoot)
+	if err != nil {
+		return nil, integrityError("collector root", err)
 	}
 	taskRoot := filepath.Join(coverageRoot, "gcovr")
 	coveragePin := directoryFinalPin(collectorRoot)
 	if coveragePin == nil {
+		_ = collectorRoot.Close()
 		return nil, integrityError("collector root", errors.New("collector root capability is not pinned"))
 	}
 	if _, err := os.Lstat(taskRoot); err == nil || !errors.Is(err, os.ErrNotExist) {
+		_ = collectorRoot.Close()
 		return nil, integrityError("collector child", errors.New("gcovr child already exists"))
 	}
 	if err := mkdirPinnedChild(coveragePin, "gcovr", 0o700); err != nil {
+		_ = collectorRoot.Close()
 		return nil, integrityError("collector child", err)
 	}
 	if err := syncPinnedDirectory(coveragePin); err != nil {
+		_ = collectorRoot.Close()
 		return nil, integrityError("collector child sync", err)
 	}
 	taskRootCapability, err := NewVerifiedDirectoryFrom(collectorRoot, "gcovr")
 	if err != nil {
+		child, childErr := pinChildObject(coveragePin, "gcovr", true)
+		if childErr == nil {
+			_ = removePinnedChild(coveragePin, child, "gcovr")
+			_ = child.Close()
+		}
+		_ = collectorRoot.Close()
 		return nil, integrityError("task root capability", err)
 	}
 	taskPin := directoryFinalPin(taskRootCapability)
 	if taskPin == nil {
 		_ = taskRootCapability.Close()
+		_ = collectorRoot.Close()
 		return nil, integrityError("task root capability", errors.New("task root is not pinned"))
 	}
 	var temporaryName string
@@ -677,6 +692,7 @@ func (descriptor Descriptor) WriteAtomic(capabilities DescriptorCapabilities) (*
 			cleanup()
 		}
 		_ = taskRootCapability.Close()
+		_ = collectorRoot.Close()
 	}
 	if err := validateDescriptorCapabilities(coverageRoot, descriptor, capabilities); err != nil {
 		closeTaskRoot()
@@ -755,7 +771,7 @@ func (descriptor Descriptor) WriteAtomic(capabilities DescriptorCapabilities) (*
 		descriptor: descriptor,
 		path:       path, root: coverageRoot, taskRoot: taskRoot,
 		digest: digest, descriptorFile: descriptorFile,
-		descriptorInfo: descriptorInfo, collectorRoot: capabilities.CollectorRoot, collectorChild: taskRootCapability,
+		descriptorInfo: descriptorInfo, collectorRoot: capabilities.CollectorRoot, collectorCleanupRoot: collectorRoot, collectorChild: taskRootCapability,
 		taskRootCapability: taskRootCapability,
 		rootCapability:     capabilities.Root, objectCapability: capabilities.ObjectDirectory,
 		gcovCapability: capabilities.GcovExecutable,
@@ -950,6 +966,10 @@ func (owned *OwnedDescriptor) Close() error {
 	if owned.taskRootCapability != nil {
 		closeErr = errors.Join(closeErr, owned.taskRootCapability.Close())
 		owned.taskRootCapability = nil
+	}
+	if owned.collectorCleanupRoot != nil {
+		closeErr = errors.Join(closeErr, owned.collectorCleanupRoot.Close())
+		owned.collectorCleanupRoot = nil
 	}
 	owned.collectorChild = nil
 	owned.collectorRoot = nil
