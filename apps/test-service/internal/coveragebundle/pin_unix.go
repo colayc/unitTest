@@ -15,6 +15,13 @@ import (
 
 var descriptorTempSequence uint64
 
+// cleanupAuthorityAvailable is deliberately false on Unix. POSIX exposes
+// unlinkat only by a mutable directory entry name; it cannot bind an unlink to
+// the retained child file descriptor. Descriptor cleanup therefore fails
+// closed before creating any task child instead of verifying a name and later
+// unlinking a replacement through that name.
+func cleanupAuthorityAvailable() bool { return false }
+
 func mkdirPinnedChild(parent *pinnedObject, name string, mode uint32) error {
 	return unix.Mkdirat(int(parent.file.Fd()), name, mode)
 }
@@ -42,20 +49,7 @@ func removePinnedChild(parent, child *pinnedObject, name string) error {
 	if parent == nil || child == nil || name == "" || filepath.Base(name) != name {
 		return errors.New("invalid pinned child removal")
 	}
-	if err := parent.verifyIdentity(); err != nil {
-		return err
-	}
-	if err := child.verifyIdentity(); err != nil {
-		return err
-	}
-	flags := 0
-	if child.directory {
-		flags = unix.AT_REMOVEDIR
-	}
-	if err := unix.Unlinkat(int(parent.file.Fd()), name, flags); err != nil {
-		return err
-	}
-	return parent.verifyIdentity()
+	return errors.New("identity-bound Unix unlink is unavailable; cleanup refused before deletion")
 }
 
 func syncPinnedDirectory(parent *pinnedObject) error {

@@ -672,6 +672,10 @@ func (descriptor Descriptor) WriteAtomic(capabilities DescriptorCapabilities) (*
 		_ = closeRetainedInputs()
 		return nil, integrityError("collector root", errors.New("collector root capability is not pinned"))
 	}
+	if !cleanupAuthorityAvailable() {
+		_ = closeRetainedInputs()
+		return nil, integrityError("collector cleanup authority", errors.New("platform cannot prove identity-bound task cleanup before creation"))
+	}
 	if _, err := os.Lstat(taskRoot); err == nil || !errors.Is(err, os.ErrNotExist) {
 		_ = closeRetainedInputs()
 		return nil, integrityError("collector child", errors.New("gcovr child already exists"))

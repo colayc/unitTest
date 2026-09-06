@@ -13,6 +13,8 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func cleanupAuthorityAvailable() bool { return true }
+
 func mkdirPinnedChild(parent *pinnedObject, name string, mode uint32) error {
 	if err := parent.verifyIdentity(); err != nil {
 		return err
