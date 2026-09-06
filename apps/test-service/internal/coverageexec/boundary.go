@@ -12,7 +12,7 @@ import (
 	"strings"
 	"sync"
 
-	"unit-test-ide.local/test-service/internal/coveragerun"
+	"unit-test-ide.local/test-service/internal/coverageplatform"
 	"unit-test-ide.local/test-service/internal/task"
 )
 
@@ -216,11 +216,11 @@ func (boundary *executionBoundary) ValidateExecutable(path string) error {
 	defer boundary.execution.mu.Unlock()
 	adapter := boundary.execution.adapter
 	if adapter != nil && adapter.Toolset() != nil {
-		for _, candidate := range []coveragerun.TrustedPath{
-			adapter.Toolset().Compiler(),
-			adapter.Toolset().Profdata(),
-			adapter.Toolset().Cov(),
-		} {
+		toolset := adapter.Toolset()
+		if coverageplatform.VerifyToolset(toolset) != nil {
+			return task.ErrInvalidArgument
+		}
+		for _, candidate := range toolset.Tools() {
 			if samePath(candidate.Path(), path) && candidate.Verify() == nil {
 				return nil
 			}

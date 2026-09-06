@@ -16,6 +16,7 @@ import (
 	"unit-test-ide.local/test-service/internal/coveragecoord"
 	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/coveragellvm"
+	"unit-test-ide.local/test-service/internal/coverageplatform"
 	"unit-test-ide.local/test-service/internal/coveragerun"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/taskstore"
@@ -833,8 +834,17 @@ func (prepared *fakePreparedBuild) RefreshTargets(context.Context) ([]cmake.Targ
 	}
 	return nil, nil
 }
-func (prepared *fakePreparedBuild) AttachCoverageToolset(*coveragellvm.Toolset) error {
+func (*fakePreparedBuild) CoverageSourceRoot() coverageplatform.DirectoryVerifier      { return nil }
+func (*fakePreparedBuild) CoverageObjectDirectory() coverageplatform.DirectoryVerifier { return nil }
+func (prepared *fakePreparedBuild) AttachCoverageToolset(coverageplatform.Toolset) error {
 	return prepared.attachErr
+}
+func (*fakePreparedBuild) AttachCoverageExecution(coverageplatform.CollectorExecution) error {
+	return nil
+}
+func (*fakePreparedBuild) VerifyCoverageExecutionAfter() error { return task.ErrInvalidArgument }
+func (*fakePreparedBuild) PinnedCoverageOutput() (coverageplatform.Output, error) {
+	return nil, task.ErrInvalidArgument
 }
 
 func preparedBuildForFixture(fixture *sqliteCoverageFixture) *fakePreparedBuild {

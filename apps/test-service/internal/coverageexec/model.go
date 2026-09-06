@@ -12,6 +12,7 @@ import (
 
 	"unit-test-ide.local/test-service/internal/build"
 	"unit-test-ide.local/test-service/internal/coveragellvm"
+	"unit-test-ide.local/test-service/internal/coverageplatform"
 	"unit-test-ide.local/test-service/internal/coveragereport"
 	"unit-test-ide.local/test-service/internal/coveragerun"
 	"unit-test-ide.local/test-service/internal/task"
@@ -44,7 +45,12 @@ type BuildPreparer interface {
 type PreparedBuild interface {
 	testrun.PreparedBuild
 	CoverageBinaryDir() string
-	AttachCoverageToolset(*coveragellvm.Toolset) error
+	CoverageSourceRoot() coverageplatform.DirectoryVerifier
+	CoverageObjectDirectory() coverageplatform.DirectoryVerifier
+	AttachCoverageToolset(coverageplatform.Toolset) error
+	AttachCoverageExecution(coverageplatform.CollectorExecution) error
+	VerifyCoverageExecutionAfter() error
+	PinnedCoverageOutput() (coverageplatform.Output, error)
 }
 
 type EmbeddedTestPreparer interface {
@@ -58,7 +64,7 @@ type AdapterInput struct {
 }
 
 type PreparedAdapter interface {
-	Toolset() *coveragellvm.Toolset
+	Toolset() coverageplatform.Toolset
 	Instrumentation() coveragellvm.Instrumentation
 	Allocator() testrun.ProfileAllocator
 	SealProfiles([]testrun.ProfileExpectation, []testrun.InvocationOutcome) (coveragellvm.Manifest, error)

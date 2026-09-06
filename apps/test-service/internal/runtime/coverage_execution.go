@@ -10,6 +10,7 @@ import (
 	"unit-test-ide.local/test-service/internal/build"
 	"unit-test-ide.local/test-service/internal/coverageexec"
 	"unit-test-ide.local/test-service/internal/coveragellvm"
+	"unit-test-ide.local/test-service/internal/coverageplatform"
 	"unit-test-ide.local/test-service/internal/coveragerun"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/testrun"
@@ -135,7 +136,7 @@ type llvmPreparedCoverageAdapter struct {
 	closeErr        error
 }
 
-func (adapter *llvmPreparedCoverageAdapter) Toolset() *coveragellvm.Toolset {
+func (adapter *llvmPreparedCoverageAdapter) Toolset() coverageplatform.Toolset {
 	if adapter == nil {
 		return nil
 	}

@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"unit-test-ide.local/test-service/internal/cmake"
-	"unit-test-ide.local/test-service/internal/coveragellvm"
+	"unit-test-ide.local/test-service/internal/coverageplatform"
 	"unit-test-ide.local/test-service/internal/discovery"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/taskstore"
@@ -283,15 +283,29 @@ func (plan *PreparedPlan) PersistConfiguration(ctx context.Context) error {
 	return task.ErrInvalidArgument
 }
 
-func (plan *PreparedPlan) AttachCoverageToolset(toolset *coveragellvm.Toolset) error {
+func (plan *PreparedPlan) AttachCoverageToolset(toolset coverageplatform.Toolset) error {
 	if plan == nil || plan.prepared == nil || plan.prepared.coverage == nil ||
-		plan.prepared.boundary == nil || toolset == nil || toolset.Version() != plan.prepared.toolchain.Version ||
+		plan.prepared.boundary == nil || coverageplatform.VerifyToolset(toolset) != nil || toolset.Version() != plan.prepared.toolchain.Version ||
 		toolset.Identity() != plan.prepared.coverage.ToolsetIdentity ||
-		!sameNativePath(toolset.Compiler().Path(), plan.prepared.toolchain.CXXCompiler) ||
-		!sameNativePath(toolset.Compiler().Path(), plan.prepared.toolchain.CCompiler) {
+		!sameNativePath(toolset.CCompiler().Path(), plan.prepared.toolchain.CCompiler) ||
+		!sameNativePath(toolset.CXXCompiler().Path(), plan.prepared.toolchain.CXXCompiler) {
 		return task.ErrInvalidArgument
 	}
 	return plan.prepared.boundary.attachCoverageToolset(toolset)
+}
+
+func (plan *PreparedPlan) CoverageSourceRoot() coverageplatform.DirectoryVerifier {
+	if plan == nil || plan.prepared == nil || plan.prepared.coverage == nil || plan.prepared.boundary == nil {
+		return nil
+	}
+	return plan.prepared.boundary.coverageSourceRoot()
+}
+
+func (plan *PreparedPlan) CoverageObjectDirectory() coverageplatform.DirectoryVerifier {
+	if plan == nil || plan.prepared == nil || plan.prepared.coverage == nil || plan.prepared.boundary == nil {
+		return nil
+	}
+	return plan.prepared.boundary.coverageObjectDirectory()
 }
 
 func (plan *PreparedPlan) AllowTestExecutable(
@@ -396,12 +410,20 @@ func (c *Coordinator) prepare(
 		return nil, err
 	}
 	if coverage != nil {
-		if instance.Family != toolchain.FamilyClangCL || instance.Version == "" ||
-			instance.Coverage.LLVMProfdata == "" || instance.Coverage.LLVMCov == "" ||
-			!validLowerSHA256(instance.Coverage.ToolsetIdentity) {
+		switch instance.Family {
+		case toolchain.FamilyClangCL:
+			if instance.Version == "" || instance.Coverage.LLVMProfdata == "" ||
+				instance.Coverage.LLVMCov == "" || !validLowerSHA256(instance.Coverage.ToolsetIdentity) {
+				return nil, task.ErrInvalidArgument
+			}
+			coverage.ToolsetIdentity = instance.Coverage.ToolsetIdentity
+		case toolchain.FamilyGCC:
+			// GCC remains a valid ordinary build toolchain. Its coverage producer is
+			// intentionally rejected until a complete discovered capability exists.
+			return nil, task.ErrInvalidArgument
+		default:
 			return nil, task.ErrInvalidArgument
 		}
-		coverage.ToolsetIdentity = instance.Coverage.ToolsetIdentity
 		profile.BinaryDir = coverage.BinaryDir
 	}
 	if err := c.ensureBuildDirectory(profile.BinaryDir); err != nil {

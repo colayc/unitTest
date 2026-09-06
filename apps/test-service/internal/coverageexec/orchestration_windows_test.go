@@ -22,6 +22,7 @@ import (
 	"unit-test-ide.local/test-service/internal/cmake"
 	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/coveragellvm"
+	"unit-test-ide.local/test-service/internal/coverageplatform"
 	"unit-test-ide.local/test-service/internal/coveragerun"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/testdomain"
@@ -625,7 +626,9 @@ type orchestrationPreparedAdapter struct {
 	manifest        *coveragellvm.Manifest
 }
 
-func (adapter *orchestrationPreparedAdapter) Toolset() *coveragellvm.Toolset { return adapter.toolset }
+func (adapter *orchestrationPreparedAdapter) Toolset() coverageplatform.Toolset {
+	return adapter.toolset
+}
 func (adapter *orchestrationPreparedAdapter) Instrumentation() coveragellvm.Instrumentation {
 	return adapter.instrumentation
 }

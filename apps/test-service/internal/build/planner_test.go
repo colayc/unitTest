@@ -1272,8 +1272,8 @@ func TestExecutionBoundaryAttachesAndRevalidatesFixedCoverageExecution(t *testin
 		t.Fatal(err)
 	}
 	pin := &testCoveragePin{installation: coveragebundle.Installation{Root: fixture.dataRoot, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}}
-	execution, err := coveragebundle.PrepareRunner(pin, filepath.Join(fixture.dataRoot, "coverage"), "task", coveragebundle.DescriptorInput{
-		Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(fixture.dataRoot, "coverage", "task", "coverage.json"),
+	execution, err := coveragebundle.PrepareRunner(pin, coveragebundle.DescriptorInput{
+		Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(fixture.dataRoot, "coverage", "gcovr", "coverage.json"),
 	}, testCoverageCapabilities(t, filepath.Join(fixture.dataRoot, "coverage"), projectRoot, objects, gcov))
 	if err != nil {
 		t.Fatal(err)
@@ -1352,7 +1352,7 @@ func testCoverageCapabilities(t *testing.T, coverageRoot, projectRoot, objects, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	return coveragebundle.DescriptorCapabilities{Anchor: authority, Provenance: provenance, CoverageRoot: coverageCapability, Root: rootCapability, ObjectDirectory: objectCapability, GcovExecutable: gcovCapability}
+	return coveragebundle.DescriptorCapabilities{CollectorRoot: coverageCapability, Root: rootCapability, ObjectDirectory: objectCapability, GcovExecutable: gcovCapability}
 }
 
 func pathWithinLocal(root, child string) bool {

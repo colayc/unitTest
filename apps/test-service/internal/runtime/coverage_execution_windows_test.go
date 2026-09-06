@@ -22,6 +22,7 @@ import (
 	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/coverageexec"
 	"unit-test-ide.local/test-service/internal/coveragellvm"
+	"unit-test-ide.local/test-service/internal/coverageplatform"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/taskstore"
 	"unit-test-ide.local/test-service/internal/testdomain"
@@ -126,14 +127,29 @@ func (*retainedConstructorPreparedBuild) ReleaseIfUnadopted() {}
 func (prepared *retainedConstructorPreparedBuild) CoverageBinaryDir() string {
 	return prepared.coverageBinaryDir
 }
-func (prepared *retainedConstructorPreparedBuild) AttachCoverageToolset(toolset *coveragellvm.Toolset) error {
+func (*retainedConstructorPreparedBuild) CoverageSourceRoot() coverageplatform.DirectoryVerifier {
+	return nil
+}
+func (*retainedConstructorPreparedBuild) CoverageObjectDirectory() coverageplatform.DirectoryVerifier {
+	return nil
+}
+func (prepared *retainedConstructorPreparedBuild) AttachCoverageToolset(toolset coverageplatform.Toolset) error {
 	prepared.owner.mu.Lock()
 	defer prepared.owner.mu.Unlock()
 	prepared.owner.attached = append(prepared.owner.attached, toolset.Identity())
-	prepared.owner.paths = append(prepared.owner.paths,
-		toolset.Compiler().Path(), toolset.Profdata().Path(), toolset.Cov().Path(),
-	)
+	for _, path := range toolset.Tools() {
+		prepared.owner.paths = append(prepared.owner.paths, path.Path())
+	}
 	return nil
+}
+func (*retainedConstructorPreparedBuild) AttachCoverageExecution(coverageplatform.CollectorExecution) error {
+	return nil
+}
+func (*retainedConstructorPreparedBuild) VerifyCoverageExecutionAfter() error {
+	return task.ErrInvalidArgument
+}
+func (*retainedConstructorPreparedBuild) PinnedCoverageOutput() (coverageplatform.Output, error) {
+	return nil, task.ErrInvalidArgument
 }
 
 type retainedConstructorBoundary struct{}
