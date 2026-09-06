@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 
+	"unit-test-ide.local/test-service/internal/cmake"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/testrun"
 )
@@ -36,22 +37,10 @@ func (a *Allocator) Decorate(expectation testrun.ProfileExpectation, original ta
 	if existing, ok := a.allocated[key]; ok && existing != expectation {
 		return testrun.ProfileExpectation{}, task.ProcessSpec{}, ErrInvalidToolset
 	}
-	result := cloneGCCProcessSpec(original)
-	result.Env = result.Env[:0]
-	var removed []string
-	for _, value := range original.Env {
-		name, _, found := strings.Cut(value, "=")
-		if !found || !validGCCEnvironmentName(name) || strings.ContainsRune(value, 0) {
-			return testrun.ProfileExpectation{}, task.ProcessSpec{}, ErrInvalidToolset
-		}
-		if hostileGCCEnvironmentName(name) {
-			removed = append(removed, name)
-			continue
-		}
-		result.Env = append(result.Env, value)
+	result, err := decoratedGCCProcessSpec(original)
+	if err != nil {
+		return testrun.ProfileExpectation{}, task.ProcessSpec{}, err
 	}
-	result.EnvUnset = append(result.EnvUnset, removed...)
-	result.EnvUnset = canonicalGCCUnset(result.EnvUnset)
 	a.allocated[key] = expectation
 	return expectation, result, nil
 }
@@ -65,16 +54,9 @@ func (a *Allocator) Validate(expectation testrun.ProfileExpectation, original, d
 	if a.closed || a.allocated[allocationKey(expectation)] != expectation {
 		return ErrInvalidToolset
 	}
-	for _, value := range decorated.Env {
-		name, _, found := strings.Cut(value, "=")
-		if !found || hostileGCCEnvironmentName(name) {
-			return ErrInvalidToolset
-		}
-	}
-	for _, value := range decorated.EnvUnset {
-		if !validGCCEnvironmentName(value) {
-			return ErrInvalidToolset
-		}
+	want, err := decoratedGCCProcessSpec(original)
+	if err != nil || !reflect.DeepEqual(want.Env, decorated.Env) || !reflect.DeepEqual(want.EnvUnset, decorated.EnvUnset) {
+		return ErrInvalidToolset
 	}
 	return nil
 }
@@ -95,6 +77,8 @@ func validAllocation(v testrun.ProfileExpectation) bool {
 }
 func cloneGCCProcessSpec(v task.ProcessSpec) task.ProcessSpec {
 	r := v
+	r.LaunchPlan = append([]string(nil), v.LaunchPlan...)
+	r.LaunchInputs = append([]cmake.FingerprintFile(nil), v.LaunchInputs...)
 	r.Args = append([]string(nil), v.Args...)
 	r.Env = append([]string(nil), v.Env...)
 	r.EnvUnset = append([]string(nil), v.EnvUnset...)
@@ -102,7 +86,36 @@ func cloneGCCProcessSpec(v task.ProcessSpec) task.ProcessSpec {
 	return r
 }
 func sameGCCProcessTarget(a, b task.ProcessSpec) bool {
-	return a.Executable == b.Executable && a.Dir == b.Dir && reflect.DeepEqual(a.Args, b.Args) && len(a.Batch) == 0 && len(b.Batch) == 0
+	return a.Executable == b.Executable && a.Dir == b.Dir &&
+		reflect.DeepEqual(a.Args, b.Args) && reflect.DeepEqual(a.LaunchPlan, b.LaunchPlan) &&
+		reflect.DeepEqual(a.LaunchInputs, b.LaunchInputs) && len(a.Batch) == 0 && len(b.Batch) == 0
+}
+
+func decoratedGCCProcessSpec(original task.ProcessSpec) (task.ProcessSpec, error) {
+	if len(original.Batch) != 0 {
+		return task.ProcessSpec{}, ErrInvalidToolset
+	}
+	result := cloneGCCProcessSpec(original)
+	result.Env = result.Env[:0]
+	removed := make([]string, 0, len(original.Env))
+	for _, value := range original.Env {
+		name, _, found := strings.Cut(value, "=")
+		if !found || !validGCCEnvironmentName(name) || strings.ContainsRune(value, 0) {
+			return task.ProcessSpec{}, ErrInvalidToolset
+		}
+		if hostileGCCEnvironmentName(name) {
+			removed = append(removed, name)
+			continue
+		}
+		result.Env = append(result.Env, value)
+	}
+	for _, value := range original.EnvUnset {
+		if !validGCCEnvironmentName(value) {
+			return task.ProcessSpec{}, ErrInvalidToolset
+		}
+	}
+	result.EnvUnset = canonicalGCCUnset(append(append([]string(nil), original.EnvUnset...), removed...))
+	return result, nil
 }
 func hostileGCCEnvironmentName(name string) bool {
 	return strings.HasPrefix(name, "GCOV_") || strings.HasPrefix(name, "GCOVR_")

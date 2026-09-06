@@ -4,6 +4,7 @@ package coveragegcc
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -30,98 +31,142 @@ type unixEvidenceState struct {
 	identity evidenceIdentity
 	closed   bool
 }
+type evidenceIdentity struct{ dev, ino uint64 }
 
 func sealEvidence(ctx context.Context, root string, outcomes []testrun.InvocationOutcome) (Manifest, error) {
-	if ctx == nil || ctx.Err() != nil || root == "" || !filepath.IsAbs(root) || filepath.Clean(root) != root || strings.ContainsRune(root, 0) {
-		return Manifest{}, ErrInvalidEvidence
-	}
-	fd, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	state, err := openEvidenceState(ctx, root)
 	if err != nil {
-		return Manifest{}, errors.Join(ErrInvalidEvidence, err)
-	}
-	state := &unixEvidenceState{root: root, fd: fd}
-	var stat unix.Stat_t
-	if err := unix.Fstat(fd, &stat); err != nil || stat.Ino == 0 || stat.Dev == 0 {
-		_ = unix.Close(fd)
-		return Manifest{}, ErrInvalidEvidence
-	}
-	state.identity = evidenceIdentity{dev: uint64(stat.Dev), ino: uint64(stat.Ino)}
-	fail := func(err error) (Manifest, error) {
-		_ = unix.Close(fd)
-		return Manifest{}, errors.Join(ErrInvalidEvidence, err)
-	}
-	notes, data, err := scanEvidence(ctx, fd, "", 0)
-	if err != nil {
-		return fail(err)
-	}
-	sort.Slice(notes, func(i, j int) bool { return notes[i].RelativePath < notes[j].RelativePath })
-	sort.Slice(data, func(i, j int) bool { return data[i].RelativePath < data[j].RelativePath })
-	if err := validateEvidenceEntries(notes, data); err != nil {
-		return fail(err)
-	}
-	if len(notes) == 0 && len(data) > 0 {
-		return fail(errors.New("data exists without notes"))
-	}
-	expected := make(map[string]struct{}, len(notes))
-	for _, e := range notes {
-		expected[strings.TrimSuffix(e.RelativePath, ".gcno")+".gcda"] = struct{}{}
-	}
-	for _, e := range data {
-		if _, ok := expected[e.RelativePath]; !ok {
-			return fail(errors.New("unexpected gcda"))
-		}
-	}
-	reasons := evidenceReasons(outcomes)
-	for _, want := range sortedEvidenceKeys(expected) {
-		if !hasEvidenceEntry(data, want) {
-			if len(reasons) == 0 {
-				return fail(errors.New("expected gcda missing"))
-			}
-		}
-	}
-	manifest := Manifest{Notes: notes, Data: data, PartialReasons: reasons, state: &evidenceState{}}
-	manifest.state.verify = func() error { return state.verify(root, notes, data) }
-	manifest.state.close = state.close
-	manifest.state.cleanup = state.unlink
-	manifest.state.prepare = func(notes []Entry) error { return state.verify(root, notes, nil) }
-	manifest.state.root = root
-	if err := manifest.Verify(); err != nil {
-		_ = manifest.Close()
 		return Manifest{}, err
+	}
+	fail := func(cause error) (Manifest, error) {
+		_ = state.close()
+		return Manifest{}, errors.Join(ErrInvalidEvidence, cause)
+	}
+	notes, data, err := scanEvidence(ctx, state.fd, "", 0)
+	if err != nil {
+		return fail(err)
+	}
+	if err := validateEvidenceEntries(notes, data); err != nil || len(notes) == 0 {
+		return fail(ErrInvalidEvidence)
+	}
+	if err := validateEvidenceData(notes, data, outcomes); err != nil {
+		return fail(err)
+	}
+	manifest, err := newEvidenceManifest(state, notes, data, evidenceReasons(outcomes), true)
+	if err != nil {
+		return fail(err)
 	}
 	return manifest, nil
 }
 
 func prepareEvidence(root string) (*PreparedEvidence, error) {
-	manifest, err := sealEvidence(context.Background(), root, []testrun.InvocationOutcome{{Crashed: true}})
+	state, err := openEvidenceState(context.Background(), root)
 	if err != nil {
 		return nil, err
 	}
-	// Sealing validates the direct object tree. Only stale data derived from a
-	// sealed note entry can be removed before test execution.
-	for _, entry := range manifest.Data {
-		if manifest.state.cleanup == nil || manifest.state.cleanup(entry.RelativePath) != nil {
-			_ = manifest.Close()
-			return nil, ErrInvalidEvidence
+	fail := func(cause error) (*PreparedEvidence, error) {
+		_ = state.close()
+		return nil, errors.Join(ErrInvalidEvidence, cause)
+	}
+	notes, data, err := scanEvidence(context.Background(), state.fd, "", 0)
+	if err != nil {
+		return fail(err)
+	}
+	if err := validateEvidenceEntries(notes, data); err != nil || len(notes) == 0 {
+		return fail(ErrInvalidEvidence)
+	}
+	if err := validateEvidenceData(notes, data, []testrun.InvocationOutcome{{Crashed: true}}); err != nil {
+		return fail(err)
+	}
+	noteSnapshots, err := snapshotEvidenceEntries(state.fd, notes)
+	if err != nil {
+		return fail(err)
+	}
+	dataSnapshots, err := snapshotEvidenceEntries(state.fd, data)
+	if err != nil {
+		return fail(err)
+	}
+	for _, entry := range data {
+		if err := state.removeExpected(entry, dataSnapshots[entry.RelativePath]); err != nil {
+			return fail(err)
 		}
 	}
-	p := &PreparedEvidence{Notes: append([]Entry(nil), manifest.Notes...), state: manifest.state}
-	manifest.state = nil
-	p.state.verify = func() error { return p.state.prepare(p.Notes) }
+	sealedNotes := cloneEvidenceEntries(notes)
+	p := &PreparedEvidence{Notes: cloneEvidenceEntries(notes), state: &evidenceState{}}
+	p.state.prepare = func(observed []Entry) error {
+		if !sameEvidenceEntries(sealedNotes, observed) || state.verifyEntries(noteSnapshots) != nil {
+			return ErrInvalidEvidence
+		}
+		actualNotes, actualData, err := scanEvidence(context.Background(), state.fd, "", 0)
+		if err != nil || !sameEvidenceEntries(sealedNotes, actualNotes) || len(actualData) != 0 {
+			return ErrInvalidEvidence
+		}
+		return nil
+	}
+	p.state.seal = func(ctx context.Context, observed []Entry, outcomes []testrun.InvocationOutcome) (Manifest, error) {
+		if ctx == nil || ctx.Err() != nil || p.state.prepare(observed) != nil {
+			return Manifest{}, ErrInvalidEvidence
+		}
+		nowNotes, nowData, err := scanEvidence(ctx, state.fd, "", 0)
+		if err != nil || !sameEvidenceEntries(sealedNotes, nowNotes) || validateEvidenceEntries(nowNotes, nowData) != nil || validateEvidenceData(nowNotes, nowData, outcomes) != nil {
+			return Manifest{}, ErrInvalidEvidence
+		}
+		return newEvidenceManifest(state, nowNotes, nowData, evidenceReasons(outcomes), true)
+	}
+	p.state.close = func([]Entry) error { return state.close() }
 	return p, nil
 }
+
 func sealPreparedEvidence(ctx context.Context, p *PreparedEvidence, outcomes []testrun.InvocationOutcome) (Manifest, error) {
-	if p == nil || p.state == nil || p.state.verify == nil || p.state.verify() != nil {
+	if p == nil || p.state == nil || p.state.seal == nil {
 		return Manifest{}, ErrInvalidEvidence
 	}
-	return sealEvidence(ctx, p.state.root, outcomes)
+	return p.state.seal(ctx, p.Notes, outcomes)
+}
+
+func newEvidenceManifest(state *unixEvidenceState, notes, data []Entry, reasons []coveragedomain.CompletenessReason, cleanup bool) (Manifest, error) {
+	notes, data, reasons = cloneEvidenceEntries(notes), cloneEvidenceEntries(data), cloneEvidenceReasons(reasons)
+	noteSnapshots, err := snapshotEvidenceEntries(state.fd, notes)
+	if err != nil {
+		return Manifest{}, ErrInvalidEvidence
+	}
+	dataSnapshots, err := snapshotEvidenceEntries(state.fd, data)
+	if err != nil {
+		return Manifest{}, ErrInvalidEvidence
+	}
+	result := Manifest{Notes: cloneEvidenceEntries(notes), Data: cloneEvidenceEntries(data), PartialReasons: cloneEvidenceReasons(reasons), state: &evidenceState{}}
+	result.state.verify = func(observedNotes, observedData []Entry, observedReasons []coveragedomain.CompletenessReason) error {
+		if !sameEvidenceEntries(notes, observedNotes) || !sameEvidenceEntries(data, observedData) || !sameEvidenceReasons(reasons, observedReasons) {
+			return ErrInvalidEvidence
+		}
+		if state.verifyEntries(noteSnapshots) != nil || state.verifyEntries(dataSnapshots) != nil {
+			return ErrInvalidEvidence
+		}
+		return nil
+	}
+	result.state.close = func([]Entry) error {
+		if cleanup {
+			for _, entry := range data {
+				if err := state.removeExpected(entry, dataSnapshots[entry.RelativePath]); err != nil {
+					_ = state.close()
+					return ErrInvalidEvidence
+				}
+			}
+		}
+		return state.close()
+	}
+	if err := result.Verify(); err != nil {
+		_ = result.Close()
+		return Manifest{}, ErrInvalidEvidence
+	}
+	return result, nil
 }
 
 func verifyEvidenceManifest(m Manifest) error {
-	if m.state == nil || m.state.verify == nil || !sortedEntries(m.Notes) || !sortedEntries(m.Data) {
+	if m.state == nil || m.state.verify == nil || !sortedEntries(m.Notes) || !sortedEntries(m.Data) || !validEvidenceReasons(m.PartialReasons) {
 		return ErrInvalidEvidence
 	}
-	if err := m.state.verify(); err != nil {
+	if err := m.state.verify(m.Notes, m.Data, m.PartialReasons); err != nil {
 		return ErrInvalidEvidence
 	}
 	return nil
@@ -130,15 +175,32 @@ func closeEvidenceManifest(m *Manifest) error {
 	if m == nil || m.state == nil || m.state.close == nil {
 		return nil
 	}
-	return m.state.close()
+	state := m.state
+	m.state = nil
+	return state.close(m.Data)
+}
+
+func openEvidenceState(ctx context.Context, root string) (*unixEvidenceState, error) {
+	if ctx == nil || ctx.Err() != nil || root == "" || !filepath.IsAbs(root) || filepath.Clean(root) != root || strings.ContainsRune(root, 0) {
+		return nil, ErrInvalidEvidence
+	}
+	fd, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, errors.Join(ErrInvalidEvidence, err)
+	}
+	state := &unixEvidenceState{root: root, fd: fd}
+	var stat unix.Stat_t
+	if unix.Fstat(fd, &stat) != nil || stat.Ino == 0 || stat.Dev == 0 {
+		_ = unix.Close(fd)
+		return nil, ErrInvalidEvidence
+	}
+	state.identity = evidenceIdentity{uint64(stat.Dev), uint64(stat.Ino)}
+	return state, nil
 }
 
 func scanEvidence(ctx context.Context, fd int, prefix string, depth int) ([]Entry, []Entry, error) {
-	if ctx.Err() != nil {
-		return nil, nil, ctx.Err()
-	}
-	if depth > maxEvidenceDepth {
-		return nil, nil, errors.New("evidence depth exceeded")
+	if ctx == nil || ctx.Err() != nil || depth > maxEvidenceDepth {
+		return nil, nil, ErrInvalidEvidence
 	}
 	duplicate, err := unix.Dup(fd)
 	if err != nil {
@@ -154,11 +216,11 @@ func scanEvidence(ctx context.Context, fd int, prefix string, depth int) ([]Entr
 	var notes, data []Entry
 	for _, name := range names {
 		if name == "." || name == ".." || strings.ContainsRune(name, 0) {
-			return nil, nil, errors.New("invalid evidence name")
+			return nil, nil, ErrInvalidEvidence
 		}
 		var st unix.Stat_t
-		if err := unix.Fstatat(fd, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-			return nil, nil, err
+		if unix.Fstatat(fd, name, &st, unix.AT_SYMLINK_NOFOLLOW) != nil {
+			return nil, nil, ErrInvalidEvidence
 		}
 		relative := name
 		if prefix != "" {
@@ -166,11 +228,8 @@ func scanEvidence(ctx context.Context, fd int, prefix string, depth int) ([]Entr
 		}
 		switch st.Mode & unix.S_IFMT {
 		case unix.S_IFREG:
-			if st.Nlink != 1 {
-				return nil, nil, errors.New("linked evidence file")
-			}
-			if !strings.HasSuffix(name, ".gcno") && !strings.HasSuffix(name, ".gcda") {
-				return nil, nil, errors.New("unknown evidence extension")
+			if st.Nlink != 1 || (!strings.HasSuffix(name, ".gcno") && !strings.HasSuffix(name, ".gcda")) {
+				return nil, nil, ErrInvalidEvidence
 			}
 			entry, err := digestEvidenceFile(fd, name, relative, st.Size)
 			if err != nil {
@@ -191,20 +250,22 @@ func scanEvidence(ctx context.Context, fd int, prefix string, depth int) ([]Entr
 			if err != nil {
 				return nil, nil, err
 			}
-			notes = append(notes, childNotes...)
-			data = append(data, childData...)
+			notes, data = append(notes, childNotes...), append(data, childData...)
 		default:
-			return nil, nil, errors.New("special evidence file")
+			return nil, nil, ErrInvalidEvidence
 		}
 		if len(notes)+len(data) > maxEvidenceEntries {
-			return nil, nil, errors.New("evidence count exceeded")
+			return nil, nil, ErrInvalidEvidence
 		}
 	}
+	sort.Slice(notes, func(i, j int) bool { return notes[i].RelativePath < notes[j].RelativePath })
+	sort.Slice(data, func(i, j int) bool { return data[i].RelativePath < data[j].RelativePath })
 	return notes, data, nil
 }
+
 func digestEvidenceFile(parent int, name, relative string, size int64) (Entry, error) {
 	if size < 0 || size > maxEvidenceBytes {
-		return Entry{}, errors.New("evidence size exceeded")
+		return Entry{}, ErrInvalidEvidence
 	}
 	fd, err := unix.Openat(parent, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
@@ -215,17 +276,28 @@ func digestEvidenceFile(parent int, name, relative string, size int64) (Entry, e
 	h := sha256.New()
 	n, err := io.Copy(h, io.LimitReader(file, maxEvidenceBytes+1))
 	if err != nil || n != size {
-		return Entry{}, errors.New("evidence changed")
+		return Entry{}, ErrInvalidEvidence
 	}
 	return Entry{RelativePath: relative, SHA256: hex.EncodeToString(h.Sum(nil)), Size: size}, nil
 }
-func sortedEvidenceKeys(values map[string]struct{}) []string {
-	r := make([]string, 0, len(values))
-	for k := range values {
-		r = append(r, k)
+
+func validateEvidenceData(notes, data []Entry, outcomes []testrun.InvocationOutcome) error {
+	expected := make(map[string]struct{}, len(notes))
+	for _, e := range notes {
+		expected[strings.TrimSuffix(e.RelativePath, ".gcno")+".gcda"] = struct{}{}
 	}
-	sort.Strings(r)
-	return r
+	for _, e := range data {
+		if _, ok := expected[e.RelativePath]; !ok {
+			return ErrInvalidEvidence
+		}
+	}
+	reasons := evidenceReasons(outcomes)
+	for name := range expected {
+		if !hasEvidenceEntry(data, name) && len(reasons) == 0 {
+			return ErrInvalidEvidence
+		}
+	}
+	return nil
 }
 func hasEvidenceEntry(entries []Entry, want string) bool {
 	for _, e := range entries {
@@ -237,10 +309,7 @@ func hasEvidenceEntry(entries []Entry, want string) bool {
 }
 func sortedEntries(entries []Entry) bool {
 	for i, e := range entries {
-		if e.RelativePath == "" || e.SHA256 == "" || e.Size < 0 {
-			return false
-		}
-		if i > 0 && entries[i-1].RelativePath >= e.RelativePath {
+		if e.RelativePath == "" || e.SHA256 == "" || e.Size < 0 || (i > 0 && entries[i-1].RelativePath >= e.RelativePath) {
 			return false
 		}
 	}
@@ -248,24 +317,23 @@ func sortedEntries(entries []Entry) bool {
 }
 func validateEvidenceEntries(notes, data []Entry) error {
 	if !sortedEntries(notes) || !sortedEntries(data) || len(notes)+len(data) > maxEvidenceEntries {
-		return errors.New("invalid evidence entries")
+		return ErrInvalidEvidence
 	}
-	var total int64
-	seen := map[string]struct{}{}
-	folded := map[string]struct{}{}
-	for _, entry := range append(append([]Entry(nil), notes...), data...) {
-		if _, ok := seen[entry.RelativePath]; ok {
-			return errors.New("duplicate evidence")
+	total := int64(0)
+	seen, folded := map[string]struct{}{}, map[string]struct{}{}
+	for _, e := range append(append([]Entry(nil), notes...), data...) {
+		if _, ok := seen[e.RelativePath]; ok {
+			return ErrInvalidEvidence
 		}
-		seen[entry.RelativePath] = struct{}{}
-		key := strings.ToLower(entry.RelativePath)
+		seen[e.RelativePath] = struct{}{}
+		key := strings.ToLower(e.RelativePath)
 		if _, ok := folded[key]; ok {
-			return errors.New("case duplicate evidence")
+			return ErrInvalidEvidence
 		}
 		folded[key] = struct{}{}
-		total += entry.Size
+		total += e.Size
 		if total > maxEvidenceBytes {
-			return errors.New("evidence total too large")
+			return ErrInvalidEvidence
 		}
 	}
 	return nil
@@ -280,29 +348,175 @@ func evidenceReasons(outcomes []testrun.InvocationOutcome) []coveragedomain.Comp
 		}
 	}
 	order := []coveragedomain.CompletenessReason{coveragedomain.CompletenessReasonTestCrashed, coveragedomain.CompletenessReasonTestTimedOut}
-	r := make([]coveragedomain.CompletenessReason, 0, len(order))
-	for _, v := range order {
-		if _, ok := seen[v]; ok {
-			r = append(r, v)
+	result := make([]coveragedomain.CompletenessReason, 0, len(order))
+	for _, r := range order {
+		if _, ok := seen[r]; ok {
+			result = append(result, r)
 		}
 	}
-	return r
+	return result
+}
+func validEvidenceReasons(values []coveragedomain.CompletenessReason) bool {
+	seen := map[coveragedomain.CompletenessReason]struct{}{}
+	for _, v := range values {
+		if v != coveragedomain.CompletenessReasonTestCrashed && v != coveragedomain.CompletenessReasonTestTimedOut {
+			return false
+		}
+		if _, ok := seen[v]; ok {
+			return false
+		}
+		seen[v] = struct{}{}
+	}
+	return sameEvidenceReasons(values, evidenceReasonsFromSet(seen))
+}
+func evidenceReasonsFromSet(seen map[coveragedomain.CompletenessReason]struct{}) []coveragedomain.CompletenessReason {
+	result := make([]coveragedomain.CompletenessReason, 0, len(seen))
+	for _, v := range []coveragedomain.CompletenessReason{coveragedomain.CompletenessReasonTestCrashed, coveragedomain.CompletenessReasonTestTimedOut} {
+		if _, ok := seen[v]; ok {
+			result = append(result, v)
+		}
+	}
+	return result
+}
+func cloneEvidenceEntries(values []Entry) []Entry { return append([]Entry(nil), values...) }
+func cloneEvidenceReasons(values []coveragedomain.CompletenessReason) []coveragedomain.CompletenessReason {
+	return append([]coveragedomain.CompletenessReason(nil), values...)
+}
+func sameEvidenceEntries(a, b []Entry) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+func sameEvidenceReasons(a, b []coveragedomain.CompletenessReason) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
-func (state *unixEvidenceState) verify(root string, notes, data []Entry) error {
+type evidenceSnapshot struct {
+	entry    Entry
+	identity evidenceIdentity
+}
+
+func snapshotEvidenceEntries(root int, entries []Entry) (map[string]evidenceSnapshot, error) {
+	result := make(map[string]evidenceSnapshot, len(entries))
+	for _, entry := range entries {
+		actual, identity, err := inspectEvidenceRelative(root, entry.RelativePath)
+		if err != nil || actual != entry {
+			return nil, ErrInvalidEvidence
+		}
+		result[entry.RelativePath] = evidenceSnapshot{actual, identity}
+	}
+	return result, nil
+}
+func (state *unixEvidenceState) verifyEntries(entries map[string]evidenceSnapshot) error {
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if state.closed || state.fd < 0 {
+	if state.closed || state.fd < 0 || !state.rootMatchesLocked() {
 		return ErrInvalidEvidence
 	}
-	var held, path unix.Stat_t
-	if unix.Fstat(state.fd, &held) != nil || unix.Lstat(root, &path) != nil || uint64(held.Dev) != state.identity.dev || uint64(held.Ino) != state.identity.ino || uint64(path.Dev) != state.identity.dev || uint64(path.Ino) != state.identity.ino {
-		return ErrInvalidEvidence
-	}
-	for _, entry := range append(append([]Entry(nil), notes...), data...) {
-		if _, err := digestEvidenceRelative(state.fd, entry.RelativePath); err != nil {
+	for path, expected := range entries {
+		actual, identity, err := inspectEvidenceRelative(state.fd, path)
+		if err != nil || actual != expected.entry || identity != expected.identity {
 			return ErrInvalidEvidence
 		}
+	}
+	return nil
+}
+func (state *unixEvidenceState) rootMatchesLocked() bool {
+	var held, path unix.Stat_t
+	return unix.Fstat(state.fd, &held) == nil && unix.Lstat(state.root, &path) == nil && uint64(held.Dev) == state.identity.dev && uint64(held.Ino) == state.identity.ino && uint64(path.Dev) == state.identity.dev && uint64(path.Ino) == state.identity.ino
+}
+func inspectEvidenceRelative(root int, relative string) (Entry, evidenceIdentity, error) {
+	parent, name, err := openEvidenceParent(root, relative)
+	if err != nil {
+		return Entry{}, evidenceIdentity{}, err
+	}
+	defer unix.Close(parent)
+	var before unix.Stat_t
+	if unix.Fstatat(parent, name, &before, unix.AT_SYMLINK_NOFOLLOW) != nil || before.Mode&unix.S_IFMT != unix.S_IFREG || before.Nlink != 1 {
+		return Entry{}, evidenceIdentity{}, ErrInvalidEvidence
+	}
+	entry, err := digestEvidenceFile(parent, name, relative, before.Size)
+	if err != nil {
+		return Entry{}, evidenceIdentity{}, err
+	}
+	var after unix.Stat_t
+	if unix.Fstatat(parent, name, &after, unix.AT_SYMLINK_NOFOLLOW) != nil || before.Dev != after.Dev || before.Ino != after.Ino || before.Size != after.Size || after.Nlink != 1 {
+		return Entry{}, evidenceIdentity{}, ErrInvalidEvidence
+	}
+	return entry, evidenceIdentity{uint64(after.Dev), uint64(after.Ino)}, nil
+}
+func openEvidenceParent(root int, relative string) (int, string, error) {
+	parts := strings.Split(relative, "/")
+	if len(parts) == 0 {
+		return -1, "", ErrInvalidEvidence
+	}
+	parent, err := unix.Dup(root)
+	if err != nil {
+		return -1, "", err
+	}
+	for _, part := range parts[:len(parts)-1] {
+		if part == "" || part == "." || part == ".." {
+			_ = unix.Close(parent)
+			return -1, "", ErrInvalidEvidence
+		}
+		next, err := unix.Openat(parent, part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		_ = unix.Close(parent)
+		if err != nil {
+			return -1, "", err
+		}
+		parent = next
+	}
+	name := parts[len(parts)-1]
+	if name == "" || name == "." || name == ".." {
+		_ = unix.Close(parent)
+		return -1, "", ErrInvalidEvidence
+	}
+	return parent, name, nil
+}
+func (state *unixEvidenceState) removeExpected(entry Entry, expected evidenceSnapshot) error {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.closed || state.fd < 0 || !state.rootMatchesLocked() {
+		return ErrInvalidEvidence
+	}
+	actual, identity, err := inspectEvidenceRelative(state.fd, entry.RelativePath)
+	if err != nil || actual != entry || identity != expected.identity {
+		return ErrInvalidEvidence
+	}
+	parent, name, err := openEvidenceParent(state.fd, entry.RelativePath)
+	if err != nil {
+		return ErrInvalidEvidence
+	}
+	defer unix.Close(parent)
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return ErrInvalidEvidence
+	}
+	holding := ".coverage-cleanup-" + hex.EncodeToString(nonce[:])
+	if err := unix.Renameat2(parent, name, parent, holding, unix.RENAME_NOREPLACE); err != nil {
+		return ErrInvalidEvidence
+	}
+	holdingEntry, holdingIdentity, err := inspectEvidenceRelative(parent, holding)
+	if err != nil || holdingEntry.SHA256 != entry.SHA256 || holdingEntry.Size != entry.Size || holdingIdentity != expected.identity {
+		_ = unix.Renameat2(parent, holding, parent, name, unix.RENAME_NOREPLACE)
+		return ErrInvalidEvidence
+	}
+	if err := unix.Unlinkat(parent, holding, 0); err != nil {
+		return ErrInvalidEvidence
 	}
 	return nil
 }
@@ -317,70 +531,3 @@ func (state *unixEvidenceState) close() error {
 	state.fd = -1
 	return err
 }
-
-func digestEvidenceRelative(root int, relative string) (Entry, error) {
-	parts := strings.Split(relative, "/")
-	if len(parts) == 0 {
-		return Entry{}, ErrInvalidEvidence
-	}
-	parent, err := unix.Dup(root)
-	if err != nil {
-		return Entry{}, err
-	}
-	defer unix.Close(parent)
-	for _, part := range parts[:len(parts)-1] {
-		if part == "" || part == "." || part == ".." {
-			return Entry{}, ErrInvalidEvidence
-		}
-		next, err := unix.Openat(parent, part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
-		if err != nil {
-			return Entry{}, err
-		}
-		_ = unix.Close(parent)
-		parent = next
-	}
-	name := parts[len(parts)-1]
-	var st unix.Stat_t
-	if name == "" || unix.Fstatat(parent, name, &st, unix.AT_SYMLINK_NOFOLLOW) != nil || st.Mode&unix.S_IFMT != unix.S_IFREG || st.Nlink != 1 {
-		return Entry{}, ErrInvalidEvidence
-	}
-	return digestEvidenceFile(parent, name, relative, st.Size)
-}
-
-func unlinkEvidenceRelative(root int, relative string) error {
-	if root < 0 {
-		return ErrInvalidEvidence
-	}
-	parts := strings.Split(relative, "/")
-	parent, err := unix.Dup(root)
-	if err != nil {
-		return err
-	}
-	defer unix.Close(parent)
-	for _, part := range parts[:len(parts)-1] {
-		if part == "" || part == "." || part == ".." {
-			return ErrInvalidEvidence
-		}
-		next, err := unix.Openat(parent, part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
-		if err != nil {
-			return err
-		}
-		_ = unix.Close(parent)
-		parent = next
-	}
-	name := parts[len(parts)-1]
-	if name == "" {
-		return ErrInvalidEvidence
-	}
-	return unix.Unlinkat(parent, name, 0)
-}
-func (state *unixEvidenceState) unlink(relative string) error {
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	if state.closed || state.fd < 0 {
-		return ErrInvalidEvidence
-	}
-	return unlinkEvidenceRelative(state.fd, relative)
-}
-
-type evidenceIdentity struct{ dev, ino uint64 }

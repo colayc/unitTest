@@ -26,11 +26,10 @@ type PreparedEvidence struct {
 	state *evidenceState
 }
 type evidenceState struct {
-	verify  func() error
-	close   func() error
-	cleanup func(string) error
+	verify  func([]Entry, []Entry, []coveragedomain.CompletenessReason) error
+	close   func([]Entry) error
 	prepare func([]Entry) error
-	root    string
+	seal    func(context.Context, []Entry, []testrun.InvocationOutcome) (Manifest, error)
 }
 
 func SealEvidence(ctx context.Context, objectRoot string, outcomes []testrun.InvocationOutcome) (Manifest, error) {
@@ -40,13 +39,21 @@ func PrepareEvidence(objectRoot string) (*PreparedEvidence, error) {
 	return prepareEvidence(objectRoot)
 }
 func (p *PreparedEvidence) Seal(ctx context.Context, outcomes []testrun.InvocationOutcome) (Manifest, error) {
-	return sealPreparedEvidence(ctx, p, outcomes)
+	manifest, err := sealPreparedEvidence(ctx, p, outcomes)
+	if err == nil && p != nil {
+		p.Notes = nil
+		p.state = nil
+	}
+	return manifest, err
 }
 func (p *PreparedEvidence) Close() error {
 	if p == nil || p.state == nil || p.state.close == nil {
 		return nil
 	}
-	return p.state.close()
+	state := p.state
+	p.state = nil
+	p.Notes = nil
+	return state.close(nil)
 }
 func (m Manifest) Verify() error { return verifyEvidenceManifest(m) }
 func (m *Manifest) Close() error { return closeEvidenceManifest(m) }

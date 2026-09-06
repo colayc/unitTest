@@ -45,3 +45,47 @@ its compile-only check passed. The cache directory was removed after testing.
 
 The parked Task 2A debt and user-owned `.merge-stash-20260903/` were not
 modified. No remote, pull request, merge, release, or signing action occurred.
+
+## Fix round 1 — evidence and publication invariants
+
+- Manifest verification now binds its private sealed snapshot to the public
+  `Notes`, `Data`, and `PartialReasons` views, and independently rechecks each
+  retained root-relative file identity, size, and SHA-256. Public-slice edits,
+  content edits, and same-path ABA replacement are rejected.
+- Preparation rejects a zero-note tree, seals the exact pre-test `.gcno` set,
+  removes only sealed stale `.gcda` entries, and rejects every later added or
+  missing `.gcno`/`.gcda` entry. Manifest close removes only its sealed current
+  run `.gcda` entries by a retained-root relative, no-replace staging move and
+  identity check; unlisted files are never selected for deletion.
+- GCC allocator validation now reconstructs the sole allowed environment
+  transformation and compares it exactly, while cloning and preserving the
+  launch plan and launch inputs as well as the executable, arguments, and
+  directory.
+- The shared instrumentation publisher now uses an opened Unix root directory,
+  `openat`, `renameat2(RENAME_NOREPLACE)`, and root identity checks around
+  publication. The Windows implementation uses no-replace `MoveFileEx` and
+  rechecks the retained root identity. LLVM’s input bytes/fingerprint contract
+  is unchanged.
+
+### Additional RED coverage
+
+Added negative coverage for zero notes; added prepared notes/data; public
+manifest and partial-reason mutation; same-path file replacement; FIFO,
+hard-link, and case-collision evidence; stale/current/unlisted cleanup;
+allocator environment/launch-plan/launch-input tampering and aliasing; and
+Windows GCC unsupported calls without filesystem side effects.
+
+### Fix-round verification
+
+From the repository root with `GOENV=off`, `GOTOOLCHAIN=local`, and a
+workspace-local `.gocache-task4-fix`:
+
+- targeted `coverageplatform`/`coveragegcc` test selection — PASS
+- full `coverageplatform`, `coveragegcc`, and `coveragellvm` tests — PASS
+- `go test -race ./apps/test-service/internal/coveragegcc -run 'Evidence|Close|Replace|Cancel|Allocator' -count=1` — PASS
+- Linux amd64 `coveragegcc` and `coverageplatform` test-binary compilation — PASS
+- Windows amd64 compile-only `coverageplatform`/`coveragegcc` check — PASS
+- `git diff --check` — PASS
+
+The host is Windows, so Linux-only `openat`/`renameat2` behavior is compiled
+but not executed on this host. No external or remote action occurred.

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"unit-test-ide.local/test-service/internal/testrun"
 )
 
 func TestSealEvidenceDerivesDataOnlyFromSealedNotes(t *testing.T) {
@@ -38,6 +40,19 @@ func TestSealEvidenceRejectsUnexpectedOrMissingData(t *testing.T) {
 	if _, err := SealEvidence(context.Background(), root, nil); err == nil {
 		t.Fatal("unexpected data succeeded")
 	}
+	root = evidenceRoot(t)
+	writeEvidence(t, root, "a.gcno", "note")
+	if _, err := SealEvidence(context.Background(), root, nil); err == nil {
+		t.Fatal("missing data without partial reason succeeded")
+	}
+	manifest, err := SealEvidence(context.Background(), root, []testrun.InvocationOutcome{{TimedOut: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manifest.Close()
+	if len(manifest.PartialReasons) != 1 {
+		t.Fatalf("partial reasons = %#v", manifest.PartialReasons)
+	}
 }
 
 func TestSealEvidenceHonorsCancellation(t *testing.T) {
@@ -49,6 +64,57 @@ func TestSealEvidenceHonorsCancellation(t *testing.T) {
 	cancel()
 	if _, err := SealEvidence(ctx, root, nil); err == nil {
 		t.Fatal("cancelled seal succeeded")
+	}
+}
+
+func TestPrepareEvidenceRejectsZeroNotesAndNewPreparedEntries(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("GCC evidence is intentionally unsupported on Windows")
+	}
+	t.Run("zero notes", func(t *testing.T) {
+		if _, err := PrepareEvidence(evidenceRoot(t)); err == nil {
+			t.Fatal("zero-note preparation succeeded")
+		}
+	})
+	t.Run("new note", func(t *testing.T) {
+		root := evidenceRoot(t)
+		writeEvidence(t, root, "a.gcno", "note")
+		prepared, err := PrepareEvidence(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer prepared.Close()
+		writeEvidence(t, root, "b.gcno", "new")
+		if _, err := prepared.Seal(context.Background(), nil); err == nil {
+			t.Fatal("new note sealed")
+		}
+	})
+	t.Run("new data", func(t *testing.T) {
+		root := evidenceRoot(t)
+		writeEvidence(t, root, "a.gcno", "note")
+		prepared, err := PrepareEvidence(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer prepared.Close()
+		writeEvidence(t, root, "b.gcda", "new")
+		if _, err := prepared.Seal(context.Background(), []testrun.InvocationOutcome{{Crashed: true}}); err == nil {
+			t.Fatal("unexpected data sealed")
+		}
+	})
+}
+
+func TestEvidenceWindowsHasNoSideEffects(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-only unsupported contract")
+	}
+	root := evidenceRoot(t)
+	writeEvidence(t, root, "a.gcno", "note")
+	if _, err := PrepareEvidence(root); err == nil {
+		t.Fatal("Windows evidence preparation succeeded")
+	}
+	if _, err := os.Lstat(filepath.Join(root, "a.gcno")); err != nil {
+		t.Fatalf("unsupported call changed evidence: %v", err)
 	}
 }
 

@@ -43,3 +43,20 @@ func TestWriteInstrumentationPublishesExactGCCContract(t *testing.T) {
 		t.Fatalf("fingerprint = %q", got)
 	}
 }
+
+func TestWriteInstrumentationWindowsHasNoSideEffects(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-only unsupported contract")
+	}
+	root := filepath.Join(t.TempDir(), "root")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := WriteInstrumentation(root); err == nil {
+		t.Fatal("Windows GCC instrumentation succeeded")
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("unsupported call changed root: entries=%#v err=%v", entries, err)
+	}
+}
