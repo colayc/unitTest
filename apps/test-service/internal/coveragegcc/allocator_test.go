@@ -27,10 +27,34 @@ func TestAllocatorClearsOnlyCaseSensitiveHostileGCOVVariables(t *testing.T) {
 	if !reflect.DeepEqual(decorated.Env, []string{"gcovr_x=preserved", "SAFE=ok"}) {
 		t.Fatalf("env = %#v", decorated.Env)
 	}
-	if !reflect.DeepEqual(decorated.EnvUnset, []string{"GCOV_PREFIX", "GCOVR_X", "OLD"}) {
+	if !reflect.DeepEqual(decorated.EnvUnset, []string{"OLD", "GCOV_PREFIX", "GCOVR_X"}) {
 		t.Fatalf("unset = %#v", decorated.EnvUnset)
 	}
 	if err := allocator.Validate(gotExpectation, original, decorated); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAllocatorPreservesNonHostileUnsetOrderAndDuplicates(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("GCC allocator is intentionally unsupported on Windows")
+	}
+	original := task.ProcessSpec{
+		Executable: "test",
+		Env:        []string{"GCOV_PREFIX=a", "SAFE=ok", "GCOV_PREFIX=b"},
+		EnvUnset:   []string{"Z", "KEEP", "Z", "KEEP"},
+	}
+	allocator := NewAllocator()
+	expectation := testrun.ProfileExpectation{InvocationID: "invocation", Iteration: 1, Sequence: 1}
+	got, decorated, err := allocator.Decorate(expectation, original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"Z", "KEEP", "Z", "KEEP", "GCOV_PREFIX", "GCOV_PREFIX"}
+	if !reflect.DeepEqual(decorated.EnvUnset, want) {
+		t.Fatalf("EnvUnset = %#v, want %#v", decorated.EnvUnset, want)
+	}
+	if err := allocator.Validate(got, original, decorated); err != nil {
 		t.Fatal(err)
 	}
 }

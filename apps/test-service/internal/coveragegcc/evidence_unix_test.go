@@ -212,3 +212,85 @@ func TestEvidenceRejectsDepthCountAndByteBounds(t *testing.T) {
 		}
 	})
 }
+
+func TestSealEvidenceHonorsCancellationDuringTraversalAndHash(t *testing.T) {
+	t.Run("traversal", func(t *testing.T) {
+		root := evidenceRoot(t)
+		writeEvidence(t, root, "a.gcno", "a")
+		writeEvidence(t, root, "b.gcno", "b")
+		ctx, cancel := context.WithCancel(context.Background())
+		oldHook := evidenceScannedEntryForTest
+		called := false
+		evidenceScannedEntryForTest = func() {
+			if !called {
+				called = true
+				cancel()
+			}
+		}
+		t.Cleanup(func() { evidenceScannedEntryForTest = oldHook; cancel() })
+		if _, err := SealEvidence(ctx, root, []testrun.InvocationOutcome{{Crashed: true}}); err == nil {
+			t.Fatal("cancelled traversal sealed")
+		}
+		if !called {
+			t.Fatal("traversal cancellation hook was not reached")
+		}
+	})
+	t.Run("hash", func(t *testing.T) {
+		root := evidenceRoot(t)
+		writeEvidence(t, root, "a.gcno", string(make([]byte, 128*1024)))
+		ctx, cancel := context.WithCancel(context.Background())
+		oldHook := evidenceHashedChunkForTest
+		called := false
+		evidenceHashedChunkForTest = func() {
+			if !called {
+				called = true
+				cancel()
+			}
+		}
+		t.Cleanup(func() { evidenceHashedChunkForTest = oldHook; cancel() })
+		if _, err := SealEvidence(ctx, root, []testrun.InvocationOutcome{{Crashed: true}}); err == nil {
+			t.Fatal("cancelled hash sealed")
+		}
+		if !called {
+			t.Fatal("hash cancellation hook was not reached")
+		}
+	})
+}
+
+func TestManifestCloseIsIdempotentAndRejectsReplacementWithoutDeletion(t *testing.T) {
+	t.Run("idempotent", func(t *testing.T) {
+		root := evidenceRoot(t)
+		writeEvidence(t, root, "a.gcno", "n")
+		writeEvidence(t, root, "a.gcda", "d")
+		manifest, err := SealEvidence(context.Background(), root, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := manifest.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := manifest.Close(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("replacement", func(t *testing.T) {
+		root := evidenceRoot(t)
+		writeEvidence(t, root, "a.gcno", "n")
+		writeEvidence(t, root, "a.gcda", "d")
+		manifest, err := SealEvidence(context.Background(), root, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(filepath.Join(root, "a.gcda")); err != nil {
+			t.Fatal(err)
+		}
+		writeEvidence(t, root, "a.gcda", "replacement")
+		if err := manifest.Close(); err == nil {
+			t.Fatal("replacement cleanup succeeded")
+		}
+		contents, err := os.ReadFile(filepath.Join(root, "a.gcda"))
+		if err != nil || string(contents) != "replacement" {
+			t.Fatalf("replacement deleted or changed: %q, %v", contents, err)
+		}
+	})
+}

@@ -89,3 +89,30 @@ workspace-local `.gocache-task4-fix`:
 
 The host is Windows, so Linux-only `openat`/`renameat2` behavior is compiled
 but not executed on this host. No external or remote action occurred.
+
+## Fix round 2 — publication and execution edge cases
+
+- Windows publication now opens the root through `NtCreateFile` without
+  delete-sharing, creates the temporary file relative to that retained handle,
+  and uses `NtSetInformationFile` with `RootDirectory` and no replacement flag
+  for the final rename. A live root handle blocks replacement throughout the
+  operation; failed paths mark only the retained temporary handle for deletion.
+- GCC allocator keeps every pre-existing `EnvUnset` entry byte-for-byte,
+  including order and duplicates, then appends precisely the hostile entries
+  removed from `Env`. Validation recomputes this exact result.
+- Evidence traversal now checks cancellation at each directory entry and each
+  hash chunk. New tests exercise cancellation after traversal and hashing have
+  started, idempotent close, and replacement during cleanup (which is rejected
+  without deleting the replacement).
+- Publication coverage now proves platform-specific read-only modes, one-winner
+  concurrent creation, root replacement protection, and destination-symlink
+  rejection. Windows uses a native retained-root replacement test.
+
+### Fix-round verification
+
+- targeted `coverageplatform`/`coveragegcc` selection — PASS
+- full `coverageplatform`, `coveragegcc`, and `coveragellvm` tests — PASS
+- GCC evidence/allocator race selection — PASS
+- Linux amd64 `coveragegcc` and `coverageplatform` test-binary compilation — PASS
+- Windows amd64 compile-only check — PASS
+- `git diff --check` — PASS

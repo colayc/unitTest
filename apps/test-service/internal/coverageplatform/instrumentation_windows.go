@@ -7,78 +7,112 @@ import (
 	"encoding/hex"
 	"errors"
 	"os"
-	"path/filepath"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
+type fileRenameInformation struct {
+	ReplaceIfExists uint32
+	RootDirectory   windows.Handle
+	FileNameLength  uint32
+	FileName        [1]uint16
+}
+
+type fileDispositionInformation struct{ DeleteFile byte }
+
+var instrumentationWindowsRootPinnedForTest = func() {}
+
 func publishInstrumentationFile(root, name string, contents []byte) error {
-	rootHandle, err := os.Open(root)
+	rootName, err := windows.NewNTUnicodeString("\\??\\" + root)
 	if err != nil {
 		return err
 	}
-	defer rootHandle.Close()
-	before, err := rootHandle.Stat()
-	if err != nil || !before.IsDir() {
-		return errors.New("invalid root")
+	attributes := &windows.OBJECT_ATTRIBUTES{ObjectName: rootName}
+	attributes.Length = uint32(unsafe.Sizeof(*attributes))
+	var status windows.IO_STATUS_BLOCK
+	var allocationSize int64
+	var rootHandle windows.Handle
+	// Deliberately omit FILE_SHARE_DELETE: while this retained directory handle
+	// is live, Windows cannot replace the root between relative create and rename.
+	if err := windows.NtCreateFile(&rootHandle, windows.FILE_GENERIC_READ|windows.FILE_GENERIC_WRITE, attributes, &status, &allocationSize, 0, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, windows.FILE_OPEN, windows.FILE_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT, 0, 0); err != nil {
+		return err
 	}
-	entries, err := rootHandle.ReadDir(-1)
-	if err != nil || len(entries) != 0 {
-		return errors.New("root is not empty")
+	defer windows.CloseHandle(rootHandle)
+	var rootInfo windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(rootHandle, &rootInfo); err != nil || rootInfo.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return errors.New("invalid instrumentation root")
 	}
+	instrumentationWindowsRootPinnedForTest()
+	if err := requireEmptyWindowsDirectory(root); err != nil {
+		return err
+	}
+
 	var nonce [16]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return err
 	}
-	temporary := filepath.Join(root, ".coverage-instrumentation-"+hex.EncodeToString(nonce[:])+".tmp")
-	file, err := os.OpenFile(temporary, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	temporary := ".coverage-instrumentation-" + hex.EncodeToString(nonce[:]) + ".tmp"
+	temporaryName, err := windows.NewNTUnicodeString(temporary)
 	if err != nil {
 		return err
 	}
-	cleanup := true
+	attributes.RootDirectory, attributes.ObjectName = rootHandle, temporaryName
+	var temporaryHandle windows.Handle
+	if err := windows.NtCreateFile(&temporaryHandle, windows.FILE_GENERIC_READ|windows.FILE_GENERIC_WRITE|windows.DELETE, attributes, &status, &allocationSize, 0, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, windows.FILE_CREATE, windows.FILE_NON_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT, 0, 0); err != nil {
+		return err
+	}
+	file := os.NewFile(uintptr(temporaryHandle), temporary)
+	deleteOnFailure := true
 	defer func() {
-		if cleanup {
-			_ = os.Remove(temporary)
+		if deleteOnFailure {
+			_ = markWindowsFileForDeletion(temporaryHandle)
 		}
+		_ = file.Close()
 	}()
 	if _, err := file.Write(contents); err != nil {
-		_ = file.Close()
 		return err
 	}
 	if err := file.Chmod(0o400); err != nil {
-		_ = file.Close()
 		return err
 	}
 	if err := file.Sync(); err != nil {
-		_ = file.Close()
 		return err
 	}
-	if err := file.Close(); err != nil {
+	if err := renameWindowsFileRelative(temporaryHandle, rootHandle, name); err != nil {
 		return err
 	}
-	pathInfo, err := os.Stat(root)
-	if err != nil || !os.SameFile(before, pathInfo) {
-		return errors.New("root changed")
-	}
-	from, err := windows.UTF16PtrFromString(temporary)
+	deleteOnFailure = false
+	return nil
+}
+
+func renameWindowsFileRelative(file, root windows.Handle, name string) error {
+	encoded, err := windows.UTF16FromString(name)
 	if err != nil {
 		return err
 	}
-	to, err := windows.UTF16PtrFromString(filepath.Join(root, name))
-	if err != nil {
-		return err
-	}
-	if err := windows.MoveFileEx(from, to, 0); err != nil {
-		return err
-	}
-	cleanup = false
-	pathInfo, err = os.Stat(root)
-	if err != nil || !os.SameFile(before, pathInfo) {
-		return errors.New("root changed")
-	}
-	info, err := os.Lstat(filepath.Join(root, name))
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-		return errors.New("invalid final")
+	bytes := len(encoded)*2 - 2
+	var layout fileRenameInformation
+	bufferSize := int(unsafe.Offsetof(layout.FileName)) + bytes
+	buffer := make([]byte, bufferSize)
+	value := (*fileRenameInformation)(unsafe.Pointer(&buffer[0]))
+	value.RootDirectory = root
+	value.FileNameLength = uint32(bytes)
+	copy((*[windows.MAX_LONG_PATH]uint16)(unsafe.Pointer(&value.FileName[0]))[:bytes/2:bytes/2], encoded)
+	var status windows.IO_STATUS_BLOCK
+	return windows.NtSetInformationFile(file, &status, &buffer[0], uint32(bufferSize), windows.FileRenameInformation)
+}
+
+func markWindowsFileForDeletion(file windows.Handle) error {
+	value := fileDispositionInformation{DeleteFile: 1}
+	var status windows.IO_STATUS_BLOCK
+	return windows.NtSetInformationFile(file, &status, (*byte)(unsafe.Pointer(&value)), uint32(unsafe.Sizeof(value)), windows.FileDispositionInformation)
+}
+
+func requireEmptyWindowsDirectory(root string) error {
+	entries, err := os.ReadDir(root)
+	if err != nil || len(entries) != 0 {
+		return errors.New("instrumentation root is not empty")
 	}
 	return nil
 }

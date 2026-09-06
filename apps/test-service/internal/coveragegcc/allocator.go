@@ -3,7 +3,6 @@ package coveragegcc
 import (
 	"reflect"
 	"runtime"
-	"sort"
 	"strings"
 	"sync"
 
@@ -114,7 +113,10 @@ func decoratedGCCProcessSpec(original task.ProcessSpec) (task.ProcessSpec, error
 			return task.ProcessSpec{}, ErrInvalidToolset
 		}
 	}
-	result.EnvUnset = canonicalGCCUnset(append(append([]string(nil), original.EnvUnset...), removed...))
+	// EnvUnset is part of the caller's launch contract. Preserve it byte-for-
+	// byte (including order and duplicates), then append exactly the hostile
+	// inherited variables removed from Env.
+	result.EnvUnset = append(append([]string(nil), original.EnvUnset...), removed...)
 	return result, nil
 }
 func hostileGCCEnvironmentName(name string) bool {
@@ -131,22 +133,6 @@ func validGCCEnvironmentName(v string) bool {
 		return false
 	}
 	return true
-}
-func canonicalGCCUnset(values []string) []string {
-	seen := map[string]struct{}{}
-	result := make([]string, 0, len(values))
-	for _, v := range values {
-		if !validGCCEnvironmentName(v) {
-			continue
-		}
-		if _, ok := seen[v]; ok {
-			continue
-		}
-		seen[v] = struct{}{}
-		result = append(result, v)
-	}
-	sort.Strings(result)
-	return result
 }
 
 var _ testrun.ProfileAllocator = (*Allocator)(nil)

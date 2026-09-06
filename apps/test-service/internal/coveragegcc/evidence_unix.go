@@ -33,6 +33,9 @@ type unixEvidenceState struct {
 }
 type evidenceIdentity struct{ dev, ino uint64 }
 
+var evidenceScannedEntryForTest = func() {}
+var evidenceHashedChunkForTest = func() {}
+
 func sealEvidence(ctx context.Context, root string, outcomes []testrun.InvocationOutcome) (Manifest, error) {
 	state, err := openEvidenceState(ctx, root)
 	if err != nil {
@@ -215,6 +218,9 @@ func scanEvidence(ctx context.Context, fd int, prefix string, depth int) ([]Entr
 	sort.Strings(names)
 	var notes, data []Entry
 	for _, name := range names {
+		if ctx.Err() != nil {
+			return nil, nil, ErrInvalidEvidence
+		}
 		if name == "." || name == ".." || strings.ContainsRune(name, 0) {
 			return nil, nil, ErrInvalidEvidence
 		}
@@ -231,7 +237,7 @@ func scanEvidence(ctx context.Context, fd int, prefix string, depth int) ([]Entr
 			if st.Nlink != 1 || (!strings.HasSuffix(name, ".gcno") && !strings.HasSuffix(name, ".gcda")) {
 				return nil, nil, ErrInvalidEvidence
 			}
-			entry, err := digestEvidenceFile(fd, name, relative, st.Size)
+			entry, err := digestEvidenceFile(ctx, fd, name, relative, st.Size)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -257,13 +263,14 @@ func scanEvidence(ctx context.Context, fd int, prefix string, depth int) ([]Entr
 		if len(notes)+len(data) > maxEvidenceEntries {
 			return nil, nil, ErrInvalidEvidence
 		}
+		evidenceScannedEntryForTest()
 	}
 	sort.Slice(notes, func(i, j int) bool { return notes[i].RelativePath < notes[j].RelativePath })
 	sort.Slice(data, func(i, j int) bool { return data[i].RelativePath < data[j].RelativePath })
 	return notes, data, nil
 }
 
-func digestEvidenceFile(parent int, name, relative string, size int64) (Entry, error) {
+func digestEvidenceFile(ctx context.Context, parent int, name, relative string, size int64) (Entry, error) {
 	if size < 0 || size > maxEvidenceBytes {
 		return Entry{}, ErrInvalidEvidence
 	}
@@ -274,8 +281,31 @@ func digestEvidenceFile(parent int, name, relative string, size int64) (Entry, e
 	file := os.NewFile(uintptr(fd), name)
 	defer file.Close()
 	h := sha256.New()
-	n, err := io.Copy(h, io.LimitReader(file, maxEvidenceBytes+1))
-	if err != nil || n != size {
+	var n int64
+	buffer := make([]byte, 32*1024)
+	for {
+		if ctx == nil || ctx.Err() != nil {
+			return Entry{}, ErrInvalidEvidence
+		}
+		count, readErr := file.Read(buffer)
+		if count > 0 {
+			n += int64(count)
+			if n > maxEvidenceBytes {
+				return Entry{}, ErrInvalidEvidence
+			}
+			if _, err := h.Write(buffer[:count]); err != nil {
+				return Entry{}, ErrInvalidEvidence
+			}
+			evidenceHashedChunkForTest()
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return Entry{}, ErrInvalidEvidence
+		}
+	}
+	if n != size {
 		return Entry{}, ErrInvalidEvidence
 	}
 	return Entry{RelativePath: relative, SHA256: hex.EncodeToString(h.Sum(nil)), Size: size}, nil
@@ -449,7 +479,7 @@ func inspectEvidenceRelative(root int, relative string) (Entry, evidenceIdentity
 	if unix.Fstatat(parent, name, &before, unix.AT_SYMLINK_NOFOLLOW) != nil || before.Mode&unix.S_IFMT != unix.S_IFREG || before.Nlink != 1 {
 		return Entry{}, evidenceIdentity{}, ErrInvalidEvidence
 	}
-	entry, err := digestEvidenceFile(parent, name, relative, before.Size)
+	entry, err := digestEvidenceFile(context.Background(), parent, name, relative, before.Size)
 	if err != nil {
 		return Entry{}, evidenceIdentity{}, err
 	}

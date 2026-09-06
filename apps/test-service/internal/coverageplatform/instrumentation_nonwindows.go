@@ -11,6 +11,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+var instrumentationRootPinnedForTest = func() {}
+
 func publishInstrumentationFile(root, name string, contents []byte) error {
 	fd, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
@@ -21,6 +23,7 @@ func publishInstrumentationFile(root, name string, contents []byte) error {
 	if unix.Fstat(fd, &before) != nil || before.Ino == 0 || before.Dev == 0 {
 		return errors.New("invalid root")
 	}
+	instrumentationRootPinnedForTest()
 	copyFD, err := unix.Dup(fd)
 	if err != nil {
 		return err
