@@ -89,7 +89,30 @@ func (view coverageDirectoryView) Verify() error {
 	return directory.Verify()
 }
 
+// RetainDirectory mints a caller-owned clone while holding the boundary lock.
+// The boundary keeps ownership of its original pin; callers receive a separate
+// verifier that remains usable after the boundary is released.
+func (view coverageDirectoryView) RetainDirectory() (coverageplatform.RetainedDirectory, error) {
+	if view.boundary == nil {
+		return nil, task.ErrInvalidArgument
+	}
+	view.boundary.mu.Lock()
+	defer view.boundary.mu.Unlock()
+	if view.boundary.executableFile == nil {
+		return nil, task.ErrInvalidArgument
+	}
+	directory := view.boundary.coverageDirectory
+	if view.workspace {
+		directory = view.boundary.workspaceDirectory
+	}
+	if directory == nil {
+		return nil, task.ErrInvalidArgument
+	}
+	return directory.RetainDirectory()
+}
+
 var _ coverageplatform.DirectoryVerifier = coverageDirectoryView{}
+var _ coverageplatform.RetainedDirectoryVerifier = coverageDirectoryView{}
 
 type pinnedTestExecutable struct {
 	file   *os.File

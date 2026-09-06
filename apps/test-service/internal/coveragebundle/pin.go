@@ -276,6 +276,10 @@ func pinDirectObject(path string, directory bool) (*pinnedObject, error) {
 }
 
 func pinChildObject(parent *pinnedObject, name string, directory bool) (*pinnedObject, error) {
+	return pinChildObjectWithDelete(parent, name, directory, false)
+}
+
+func pinChildObjectWithDelete(parent *pinnedObject, name string, directory, deleteAccess bool) (*pinnedObject, error) {
 	if parent == nil || parent.file == nil || !parent.directory || name == "" || name == "." || name == ".." || filepath.Base(name) != name {
 		return nil, errors.New("invalid pinned parent or child name")
 	}
@@ -287,7 +291,12 @@ func pinChildObject(parent *pinnedObject, name string, directory bool) (*pinnedO
 	if before.IsDir() != directory {
 		return nil, errors.New("bundle object type does not match")
 	}
-	file, err := openPinnedChild(parent, name, directory)
+	var file *os.File
+	if deleteAccess {
+		file, err = openPinnedChildForDelete(parent, name, directory)
+	} else {
+		file, err = openPinnedChild(parent, name, directory)
+	}
 	if err != nil {
 		return nil, err
 	}

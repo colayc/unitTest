@@ -115,6 +115,10 @@ func openPinnedChild(parent *pinnedObject, name string, directory bool) (*os.Fil
 	return openPinnedWindowsObject(filepath.Join(parent.path, name), directory)
 }
 
+func openPinnedChildForDelete(parent *pinnedObject, name string, directory bool) (*os.File, error) {
+	return openPinnedWindowsObjectWithDelete(filepath.Join(parent.path, name), directory, true)
+}
+
 func openPinnedOutputChild(parent *pinnedObject, name string) (*os.File, error) {
 	path := filepath.Join(parent.path, name)
 	utf16, err := windows.UTF16PtrFromString(path)
@@ -131,7 +135,22 @@ func openPinnedOutputChild(parent *pinnedObject, name string) (*os.File, error) 
 }
 
 func openPinnedDirectoryReader(parent *pinnedObject) (*os.File, error) {
-	return os.Open(parent.path)
+	if parent == nil || parent.file == nil || !parent.directory {
+		return nil, errors.New("invalid pinned directory reader")
+	}
+	var duplicate windows.Handle
+	if err := windows.DuplicateHandle(
+		windows.CurrentProcess(), windows.Handle(parent.file.Fd()),
+		windows.CurrentProcess(), &duplicate, 0, false, windows.DUPLICATE_SAME_ACCESS,
+	); err != nil {
+		return nil, err
+	}
+	reader := os.NewFile(uintptr(duplicate), parent.path)
+	if reader == nil {
+		_ = windows.CloseHandle(duplicate)
+		return nil, errors.New("duplicate pinned directory reader")
+	}
+	return reader, nil
 }
 
 func pinnedChildDirectory(parent *pinnedObject, name string) (bool, error) {
@@ -177,6 +196,10 @@ func pinProductRootAncestors(absolute string) ([]*pinnedObject, error) {
 }
 
 func openPinnedWindowsObject(path string, directory bool) (*os.File, error) {
+	return openPinnedWindowsObjectWithDelete(path, directory, false)
+}
+
+func openPinnedWindowsObjectWithDelete(path string, directory, deleteAccess bool) (*os.File, error) {
 	name, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return nil, err
@@ -185,9 +208,14 @@ func openPinnedWindowsObject(path string, directory bool) (*os.File, error) {
 	flags := uint32(windows.FILE_ATTRIBUTE_NORMAL | windows.FILE_FLAG_OPEN_REPARSE_POINT)
 	share := uint32(windows.FILE_SHARE_READ | windows.FILE_SHARE_DELETE)
 	if directory {
-		access = 0
+		access = windows.FILE_READ_ATTRIBUTES | windows.FILE_LIST_DIRECTORY
 		flags = windows.FILE_FLAG_BACKUP_SEMANTICS
 		share |= windows.FILE_SHARE_WRITE
+	}
+	if deleteAccess {
+		// A child created and later cleaned by the descriptor must carry DELETE
+		// access from the time it is pinned; cleanup never reopens by pathname.
+		access |= windows.DELETE
 	}
 	handle, err := windows.CreateFile(name, access, share, nil, windows.OPEN_EXISTING, flags, 0)
 	if err != nil {

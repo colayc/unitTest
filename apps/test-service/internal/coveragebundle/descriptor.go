@@ -109,7 +109,7 @@ type OwnedDescriptor struct {
 	descriptorInfo       os.FileInfo
 	collectorRoot        coverageplatform.DirectoryVerifier
 	collectorCleanupRoot *VerifiedDirectory
-	collectorChild       *VerifiedDirectory
+	collectorChild       *pinnedObject
 	taskRootCapability   *VerifiedDirectory
 	rootCapability       coverageplatform.DirectoryVerifier
 	objectCapability     coverageplatform.DirectoryVerifier
@@ -458,6 +458,28 @@ func (directory *VerifiedDirectory) Verify() error {
 	return nil
 }
 
+// RetainDirectory returns an independently owned pin for this exact direct
+// directory. It deliberately does not transfer or close the source
+// capability, which may be a caller-owned Build Boundary view.
+func (directory *VerifiedDirectory) RetainDirectory() (coverageplatform.RetainedDirectory, error) {
+	if directory == nil || directory.Verify() != nil {
+		return nil, ErrDescriptorClosed
+	}
+	path := directory.Path()
+	retained, err := newVerifiedDirectory(path)
+	if err != nil {
+		return nil, err
+	}
+	fail := func(cause error) (coverageplatform.RetainedDirectory, error) {
+		_ = retained.Close()
+		return nil, cause
+	}
+	if retained.Path() != path || directory.Verify() != nil || retained.Verify() != nil {
+		return fail(ErrDescriptorIntegrity)
+	}
+	return retained, nil
+}
+
 func (directory *VerifiedDirectory) Close() error {
 	if directory == nil {
 		return nil
@@ -625,99 +647,80 @@ func (descriptor Descriptor) WriteAtomic(capabilities DescriptorCapabilities) (*
 	if err := validateDescriptorCapabilities(coverageRoot, descriptor, capabilities); err != nil {
 		return nil, err
 	}
-	if _, ok := capabilities.CollectorRoot.(*VerifiedDirectory); !ok {
-		return nil, integrityError("collector root", errors.New("collector root cannot mint a retained child"))
-	}
-	collectorRoot, err := newVerifiedDirectory(coverageRoot)
+	rootCapability, err := retainInternalDirectory(capabilities.Root, descriptor.Root)
 	if err != nil {
+		return nil, integrityError("root capability", err)
+	}
+	objectCapability, err := retainInternalDirectory(capabilities.ObjectDirectory, descriptor.ObjectDirectory)
+	if err != nil {
+		_ = rootCapability.Close()
+		return nil, integrityError("object directory capability", err)
+	}
+	collectorRoot, err := retainInternalDirectory(capabilities.CollectorRoot, coverageRoot)
+	if err != nil {
+		_ = objectCapability.Close()
+		_ = rootCapability.Close()
 		return nil, integrityError("collector root", err)
+	}
+	closeRetainedInputs := func() error {
+		return errors.Join(collectorRoot.Close(), objectCapability.Close(), rootCapability.Close())
 	}
 	taskRoot := filepath.Join(coverageRoot, "gcovr")
 	coveragePin := directoryFinalPin(collectorRoot)
 	if coveragePin == nil {
-		_ = collectorRoot.Close()
+		_ = closeRetainedInputs()
 		return nil, integrityError("collector root", errors.New("collector root capability is not pinned"))
 	}
 	if _, err := os.Lstat(taskRoot); err == nil || !errors.Is(err, os.ErrNotExist) {
-		_ = collectorRoot.Close()
+		_ = closeRetainedInputs()
 		return nil, integrityError("collector child", errors.New("gcovr child already exists"))
 	}
 	if err := mkdirPinnedChild(coveragePin, "gcovr", 0o700); err != nil {
-		_ = collectorRoot.Close()
+		_ = closeRetainedInputs()
 		return nil, integrityError("collector child", err)
 	}
+	cleanupChild, err := pinChildObjectWithDelete(coveragePin, "gcovr", true, true)
+	if err != nil {
+		_ = closeRetainedInputs()
+		return nil, integrityError("collector child cleanup pin", err)
+	}
 	removeCreatedChild := func() error {
-		child, err := pinChildObject(coveragePin, "gcovr", true)
-		if err != nil {
-			return err
-		}
-		defer child.Close()
-		return removePinnedChild(coveragePin, child, "gcovr")
+		return errors.Join(removePinnedChild(coveragePin, cleanupChild, "gcovr"), cleanupChild.Close())
 	}
 	if err := syncPinnedDirectory(coveragePin); err != nil {
 		cleanupErr := removeCreatedChild()
-		_ = collectorRoot.Close()
-		return nil, integrityError("collector child sync", errors.Join(err, cleanupErr))
+		return nil, integrityError("collector child sync", errors.Join(err, cleanupErr, closeRetainedInputs()))
 	}
 	taskRootCapability, err := NewVerifiedDirectoryFrom(collectorRoot, "gcovr")
 	if err != nil {
 		cleanupErr := removeCreatedChild()
-		_ = collectorRoot.Close()
-		return nil, integrityError("task root capability", errors.Join(err, cleanupErr))
+		return nil, integrityError("task root capability", errors.Join(err, cleanupErr, closeRetainedInputs()))
 	}
 	taskPin := directoryFinalPin(taskRootCapability)
 	if taskPin == nil {
 		_ = taskRootCapability.Close()
 		cleanupErr := removeCreatedChild()
-		_ = collectorRoot.Close()
-		return nil, integrityError("task root capability", errors.Join(errors.New("task root is not pinned"), cleanupErr))
+		return nil, integrityError("task root capability", errors.Join(errors.New("task root is not pinned"), cleanupErr, closeRetainedInputs()))
 	}
 	var temporaryName string
-	cleanup := func() {
-		if err := taskRootCapability.Verify(); err != nil {
-			return
-		}
-		for _, name := range []string{temporaryName, "descriptor.json", "coverage.json"} {
-			if name == "" {
-				continue
-			}
-			child, err := pinChildObject(taskPin, name, false)
-			if err == nil {
-				_ = removePinnedChild(taskPin, child, name)
-				_ = child.Close()
-			}
-		}
-		if err := removePinnedChild(coveragePin, taskPin, "gcovr"); err != nil {
-			return
-		}
-	}
-	closeTaskRoot := func() {
-		// Never recursively clean a path after its retained capability has
-		// changed; doing so could delete an attacker-controlled replacement.
-		if err := taskRootCapability.Verify(); err == nil {
-			cleanup()
-		}
-		_ = taskRootCapability.Close()
-		_ = collectorRoot.Close()
+	closeTaskRoot := func() error {
+		cleanupErr := cleanupDescriptorTaskRoot(collectorRoot, taskRootCapability, cleanupChild, temporaryName)
+		return errors.Join(cleanupErr, taskRootCapability.Close(), cleanupChild.Close(), closeRetainedInputs())
 	}
 	if err := validateDescriptorCapabilities(coverageRoot, descriptor, capabilities); err != nil {
-		closeTaskRoot()
-		return nil, integrityError("collector root", err)
+		return nil, integrityError("collector root", errors.Join(err, closeTaskRoot()))
 	}
 	if !pathWithin(taskRoot, descriptor.OutputPath) || filepath.Dir(descriptor.OutputPath) != taskRoot {
-		closeTaskRoot()
-		return nil, integrityError("output path", errors.New("output must be a direct child of task root"))
+		return nil, integrityError("output path", errors.Join(errors.New("output must be a direct child of task root"), closeTaskRoot()))
 	}
 	raw, err := json.Marshal(descriptor)
 	if err != nil {
-		closeTaskRoot()
-		return nil, integrityError("marshal descriptor", err)
+		return nil, integrityError("marshal descriptor", errors.Join(err, closeTaskRoot()))
 	}
 	raw = append(raw, '\n')
 	temporary, temporaryName, err := createPinnedTemp(taskPin, ".descriptor")
 	if err != nil {
-		closeTaskRoot()
-		return nil, integrityError("create descriptor temporary", err)
+		return nil, integrityError("create descriptor temporary", errors.Join(err, closeTaskRoot()))
 	}
 	removeTemporaryFile := func() {
 		child, childErr := pinChildObject(taskPin, temporaryName, false)
@@ -729,7 +732,7 @@ func (descriptor Descriptor) WriteAtomic(capabilities DescriptorCapabilities) (*
 	removeTemporary := func() {
 		_ = temporary.Close()
 		removeTemporaryFile()
-		closeTaskRoot()
+		_ = closeTaskRoot()
 	}
 	if _, err := temporary.Write(raw); err != nil {
 		removeTemporary()
@@ -741,45 +744,38 @@ func (descriptor Descriptor) WriteAtomic(capabilities DescriptorCapabilities) (*
 	}
 	if err := temporary.Close(); err != nil {
 		removeTemporaryFile()
-		closeTaskRoot()
-		return nil, integrityError("close descriptor temporary", err)
+		return nil, integrityError("close descriptor temporary", errors.Join(err, closeTaskRoot()))
 	}
 	descriptorPath := filepath.Join(taskRoot, "descriptor.json")
 	if err := renamePinnedChild(taskPin, temporaryName, "descriptor.json"); err != nil {
 		removeTemporaryFile()
-		closeTaskRoot()
-		return nil, integrityError("publish descriptor", err)
+		return nil, integrityError("publish descriptor", errors.Join(err, closeTaskRoot()))
 	}
 	if err := syncPinnedDirectory(taskPin); err != nil {
-		closeTaskRoot()
-		return nil, integrityError("publish descriptor sync", err)
+		return nil, integrityError("publish descriptor sync", errors.Join(err, closeTaskRoot()))
 	}
 	path := descriptorPath
 	descriptorFile, err := openDescriptorOutput(path)
 	if err != nil {
-		closeTaskRoot()
-		cleanup()
-		return nil, integrityError("open descriptor", err)
+		return nil, integrityError("open descriptor", errors.Join(err, closeTaskRoot()))
 	}
 	descriptorInfo, err := descriptorFile.Stat()
 	if err != nil {
 		_ = descriptorFile.Close()
-		closeTaskRoot()
-		return nil, integrityError("stat descriptor", err)
+		return nil, integrityError("stat descriptor", errors.Join(err, closeTaskRoot()))
 	}
 	digest, err := digestFile(descriptorFile)
 	if err != nil {
 		_ = descriptorFile.Close()
-		closeTaskRoot()
-		return nil, integrityError("digest descriptor", err)
+		return nil, integrityError("digest descriptor", errors.Join(err, closeTaskRoot()))
 	}
 	owned := &OwnedDescriptor{
 		descriptor: descriptor,
 		path:       path, root: coverageRoot, taskRoot: taskRoot,
 		digest: digest, descriptorFile: descriptorFile,
-		descriptorInfo: descriptorInfo, collectorRoot: capabilities.CollectorRoot, collectorCleanupRoot: collectorRoot, collectorChild: taskRootCapability,
+		descriptorInfo: descriptorInfo, collectorRoot: capabilities.CollectorRoot, collectorCleanupRoot: collectorRoot, collectorChild: cleanupChild,
 		taskRootCapability: taskRootCapability,
-		rootCapability:     capabilities.Root, objectCapability: capabilities.ObjectDirectory,
+		rootCapability:     rootCapability, objectCapability: objectCapability,
 		gcovCapability: capabilities.GcovExecutable,
 	}
 	if err := owned.Verify(); err != nil {
@@ -787,6 +783,94 @@ func (descriptor Descriptor) WriteAtomic(capabilities DescriptorCapabilities) (*
 		return nil, err
 	}
 	return owned, nil
+}
+
+// retainInternalDirectory accepts only the narrow retained-capability contract,
+// then mints a coveragebundle-local capability after both the producer's
+// retained clone and the new local pin have independently verified the exact
+// same path. The producer's view is never closed here.
+func retainInternalDirectory(source coverageplatform.DirectoryVerifier, expected string) (*VerifiedDirectory, error) {
+	retained, err := coverageplatform.RetainDirectory(source)
+	if err != nil {
+		return nil, err
+	}
+	if retained.Path() != expected || retained.Verify() != nil || source.Path() != expected || source.Verify() != nil {
+		return nil, errors.Join(coverageplatform.ErrInvalidCapability, retained.Close())
+	}
+	local, err := newVerifiedDirectory(expected)
+	if err != nil {
+		return nil, errors.Join(err, retained.Close())
+	}
+	fail := func(cause error) (*VerifiedDirectory, error) {
+		return nil, errors.Join(cause, local.Close(), retained.Close())
+	}
+	if local.Path() != expected || local.Verify() != nil || retained.Verify() != nil || source.Verify() != nil || retained.Path() != expected || source.Path() != expected {
+		return fail(coverageplatform.ErrInvalidCapability)
+	}
+	if err := retained.Close(); err != nil {
+		return nil, errors.Join(err, local.Close())
+	}
+	return local, nil
+}
+
+// cleanupDescriptorTaskRoot removes only the task-private direct children
+// pinned from the retained task root, then removes that exact pinned root from
+// its retained parent. Any identity change, unexpected entry, or deletion
+// failure stops cleanup and is returned to the caller; it never falls back to
+// a pathname walk or recursive deletion.
+func cleanupDescriptorTaskRoot(collectorRoot, taskRoot *VerifiedDirectory, cleanupChild *pinnedObject, temporaryName string) error {
+	if collectorRoot == nil || taskRoot == nil || cleanupChild == nil {
+		return ErrDescriptorClosed
+	}
+	if err := collectorRoot.Verify(); err != nil {
+		return fmt.Errorf("verify cleanup collector root: %w", err)
+	}
+	if err := taskRoot.Verify(); err != nil {
+		return fmt.Errorf("verify cleanup task root: %w", err)
+	}
+	collectorPin := directoryFinalPin(collectorRoot)
+	taskPin := directoryFinalPin(taskRoot)
+	if collectorPin == nil || taskPin == nil {
+		return ErrDescriptorIntegrity
+	}
+	var result error
+	for _, name := range []string{temporaryName, "descriptor.json", "coverage.json"} {
+		if name == "" {
+			continue
+		}
+		child, err := pinChildObjectWithDelete(taskPin, name, false, true)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			result = errors.Join(result, fmt.Errorf("pin cleanup child %q: %w", name, err))
+			continue
+		}
+		if err := removePinnedChild(taskPin, child, name); err != nil {
+			result = errors.Join(result, fmt.Errorf("remove cleanup child %q: %w", name, err))
+		}
+		if err := child.Close(); err != nil {
+			result = errors.Join(result, fmt.Errorf("close cleanup child %q: %w", name, err))
+		}
+	}
+	if result != nil {
+		return result
+	}
+	if err := forEachPinnedDirectoryEntry(taskPin, func(entry os.DirEntry) error {
+		return fmt.Errorf("unowned descriptor task child %q", entry.Name())
+	}); err != nil {
+		return err
+	}
+	if err := cleanupChild.verifyIdentity(); err != nil {
+		return fmt.Errorf("verify task cleanup child: %w", err)
+	}
+	if err := removePinnedChild(collectorPin, cleanupChild, "gcovr"); err != nil {
+		return fmt.Errorf("remove task cleanup child: %w", err)
+	}
+	if err := syncPinnedDirectory(collectorPin); err != nil {
+		return fmt.Errorf("sync collector after cleanup: %w", err)
+	}
+	return nil
 }
 
 func (owned *OwnedDescriptor) Path() string {
@@ -953,6 +1037,9 @@ func (owned *OwnedDescriptor) Close() error {
 		return nil
 	}
 	verifyErr := owned.verifyLocked()
+	if verifyErr != nil {
+		verifyErr = fmt.Errorf("verify before descriptor close: %w", verifyErr)
+	}
 	owned.closed = true
 	var closeErr error
 	if owned.descriptorFile != nil {
@@ -969,17 +1056,41 @@ func (owned *OwnedDescriptor) Close() error {
 		closeErr = errors.Join(closeErr, owned.outputPin.Close())
 		owned.outputPin = nil
 	}
+	if owned.collectorCleanupRoot != nil && owned.taskRootCapability != nil {
+		closeErr = errors.Join(closeErr, cleanupDescriptorTaskRoot(
+			owned.collectorCleanupRoot, owned.taskRootCapability, owned.collectorChild, "",
+		))
+	}
 	if owned.taskRootCapability != nil {
-		closeErr = errors.Join(closeErr, owned.taskRootCapability.Close())
+		if err := owned.taskRootCapability.Close(); err != nil {
+			closeErr = errors.Join(closeErr, fmt.Errorf("close task root capability: %w", err))
+		}
 		owned.taskRootCapability = nil
 	}
 	if owned.collectorCleanupRoot != nil {
-		closeErr = errors.Join(closeErr, owned.collectorCleanupRoot.Close())
+		if err := owned.collectorCleanupRoot.Close(); err != nil {
+			closeErr = errors.Join(closeErr, fmt.Errorf("close cleanup collector root: %w", err))
+		}
 		owned.collectorCleanupRoot = nil
 	}
-	owned.collectorChild = nil
+	if owned.collectorChild != nil {
+		if err := owned.collectorChild.Close(); err != nil {
+			closeErr = errors.Join(closeErr, fmt.Errorf("close task cleanup child: %w", err))
+		}
+		owned.collectorChild = nil
+	}
 	owned.collectorRoot = nil
+	if owned.rootCapability != nil {
+		if closer, ok := owned.rootCapability.(interface{ Close() error }); ok {
+			closeErr = errors.Join(closeErr, closer.Close())
+		}
+	}
 	owned.rootCapability = nil
+	if owned.objectCapability != nil {
+		if closer, ok := owned.objectCapability.(interface{ Close() error }); ok {
+			closeErr = errors.Join(closeErr, closer.Close())
+		}
+	}
 	owned.objectCapability = nil
 	owned.gcovCapability = nil
 	return errors.Join(verifyErr, closeErr)

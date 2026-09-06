@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"unit-test-ide.local/test-service/internal/coverageplatform"
 )
 
 func strictTestTempDir(t *testing.T) string {
@@ -173,6 +175,103 @@ func TestDescriptorCapabilitiesRejectTypedNilWithoutPanic(t *testing.T) {
 		mutate(&capabilities)
 		if _, err := descriptor.WriteAtomic(capabilities); err == nil {
 			t.Fatal("WriteAtomic accepted typed-nil capability")
+		}
+	}
+}
+
+type retainedDirectoryFacade struct{ source *VerifiedDirectory }
+
+func (facade retainedDirectoryFacade) Path() string {
+	if facade.source == nil {
+		return ""
+	}
+	return facade.source.Path()
+}
+
+func (facade retainedDirectoryFacade) Verify() error {
+	if facade.source == nil {
+		return ErrDescriptorIntegrity
+	}
+	return facade.source.Verify()
+}
+
+func (facade retainedDirectoryFacade) RetainDirectory() (coverageplatform.RetainedDirectory, error) {
+	if facade.source == nil {
+		return nil, ErrDescriptorIntegrity
+	}
+	return facade.source.RetainDirectory()
+}
+
+func TestDescriptorBridgesRetainedCollectorWithoutOwningSource(t *testing.T) {
+	base := strictTestTempDir(t)
+	coverageRoot := filepath.Join(base, "coverage")
+	root := filepath.Join(base, "root")
+	objects := filepath.Join(base, "objects")
+	gcov := filepath.Join(base, "gcov")
+	for _, directory := range []string{coverageRoot, root, objects} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(gcov, []byte("gcov"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	capabilities := descriptorCapabilitiesForTest(t, coverageRoot, root, objects, gcov)
+	source, ok := capabilities.CollectorRoot.(*VerifiedDirectory)
+	if !ok {
+		t.Fatal("test collector is not retained")
+	}
+	capabilities.CollectorRoot = retainedDirectoryFacade{source: source}
+	descriptor, err := NewDescriptor(root, objects, gcov, filepath.Join(coverageRoot, "gcovr", "coverage.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	owned, err := descriptor.WriteAtomic(capabilities)
+	if err != nil {
+		t.Fatalf("WriteAtomic() = %v", err)
+	}
+	if err := source.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := owned.Close(); err == nil {
+		t.Fatal("Close() hid external source closure")
+	}
+	if _, err := os.Lstat(filepath.Join(coverageRoot, "gcovr")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Close() left task root after source close: %v", err)
+	}
+	if err := owned.Close(); err != nil {
+		t.Fatalf("second Close() = %v", err)
+	}
+}
+
+func TestDescriptorRejectsUnretainedRootAndObjectCapabilities(t *testing.T) {
+	base := strictTestTempDir(t)
+	coverageRoot, root := filepath.Join(base, "coverage"), filepath.Join(base, "root")
+	objects, gcov := filepath.Join(base, "objects"), filepath.Join(base, "gcov")
+	for _, directory := range []string{coverageRoot, root, objects} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(gcov, []byte("gcov"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	descriptor, err := NewDescriptor(root, objects, gcov, filepath.Join(coverageRoot, "gcovr", "coverage.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mutate := range []func(*DescriptorCapabilities){
+		func(capabilities *DescriptorCapabilities) { capabilities.Root = bareDirectoryCapability{path: root} },
+		func(capabilities *DescriptorCapabilities) { capabilities.ObjectDirectory = bareDirectoryCapability{path: objects} },
+	} {
+		capabilities := descriptorCapabilitiesForTest(t, coverageRoot, root, objects, gcov)
+		mutate(&capabilities)
+		owned, err := descriptor.WriteAtomic(capabilities)
+		if owned != nil {
+			_ = owned.Close()
+		}
+		if err == nil {
+			t.Fatal("WriteAtomic accepted an unretained directory capability")
 		}
 	}
 }

@@ -82,6 +82,10 @@ func openPinnedChild(parent *pinnedObject, name string, directory bool) (*os.Fil
 	return openPinnedUnixObjectAt(int(parent.file.Fd()), name, flags, filepath.Join(parent.path, name))
 }
 
+func openPinnedChildForDelete(parent *pinnedObject, name string, directory bool) (*os.File, error) {
+	return openPinnedChild(parent, name, directory)
+}
+
 func openPinnedOutputChild(parent *pinnedObject, name string) (*os.File, error) {
 	return openPinnedChild(parent, name, false)
 }

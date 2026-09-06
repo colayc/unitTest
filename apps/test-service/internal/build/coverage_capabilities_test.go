@@ -33,6 +33,35 @@ func TestCoverageCapabilityViewsAreIndependentAndNonOwning(t *testing.T) {
 	}
 }
 
+func TestCoverageCapabilityViewMintsIndependentRetainedClone(t *testing.T) {
+	fixture := newCoordinatorFixture(t)
+	boundary := preparedCoverageBoundary(t, fixture, strings.Repeat("a", 64), "retained-view")
+	view := boundary.coverageSourceRoot()
+	retained, err := coverageplatform.RetainDirectory(view)
+	if err != nil {
+		_ = boundary.Release()
+		t.Fatalf("RetainDirectory() = %v", err)
+	}
+	if retained.Path() != view.Path() || retained.Verify() != nil {
+		_ = boundary.Release()
+		t.Fatalf("retained clone is invalid: path=%q err=%v", retained.Path(), retained.Verify())
+	}
+	if err := boundary.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if view.Verify() == nil {
+		t.Fatal("non-owning view remained valid after boundary release")
+	}
+	if err := retained.Verify(); err != nil {
+		t.Fatalf("retained clone depended on closed boundary: %v", err)
+	}
+	if closer, ok := retained.(interface{ Close() error }); ok {
+		if err := closer.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestCoverageCapabilityViewsRejectClosedOrReplacedDirectories(t *testing.T) {
 	fixture := newCoordinatorFixture(t)
 	identity := strings.Repeat("a", 64)
