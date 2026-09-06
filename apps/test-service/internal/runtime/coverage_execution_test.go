@@ -494,6 +494,7 @@ func TestDefaultLinuxCoverageWrapperTerminalizesWithoutNativePreparationOrExecut
 	})
 	toolchainSnapshot, err := coverageToolchainSnapshot(toolchain.Instance{
 		ID: "gcc-linux", Family: toolchain.FamilyGCC, Version: "14.2.0", TargetArchitecture: "amd64",
+		Coverage: toolchain.CoverageCapability{GCov: "/usr/bin/gcov", GCovVersion: "14.2.0", ToolsetIdentity: stringsOf('a', 64)},
 	}, "linux")
 	if err != nil {
 		t.Fatal(err)

@@ -265,13 +265,27 @@ func normalizeInstance(instance Instance) (Instance, bool) {
 		!boundedString(instance.Coverage.LLVMCov, maxRegistryPathBytes) ||
 		!boundedString(instance.Coverage.GCov, maxRegistryPathBytes) ||
 		!boundedString(instance.Coverage.CompilerEvidence.FileIdentity, 128) ||
+		!boundedString(instance.Coverage.CXXCompilerEvidence.FileIdentity, 128) ||
 		!boundedString(instance.Coverage.ProfdataEvidence.FileIdentity, 128) ||
 		!boundedString(instance.Coverage.CovEvidence.FileIdentity, 128) ||
+		!boundedString(instance.Coverage.GCovEvidence.FileIdentity, 128) ||
 		!boundedString(instance.Coverage.CompilerEvidence.SHA256, 64) ||
+		!boundedString(instance.Coverage.CXXCompilerEvidence.SHA256, 64) ||
 		!boundedString(instance.Coverage.ProfdataEvidence.SHA256, 64) ||
 		!boundedString(instance.Coverage.CovEvidence.SHA256, 64) ||
+		!boundedString(instance.Coverage.GCovEvidence.SHA256, 64) ||
+		!boundedString(instance.Coverage.GCovVersion, maxRegistryVersionBytes) ||
 		!boundedString(instance.Coverage.ToolsetIdentity, 64) {
 		return Instance{}, false
+	}
+	if instance.Family == FamilyGCC && !emptyCoverageCapability(instance.Coverage) {
+		paths := []string{instance.CCompiler, instance.CXXCompiler, instance.Coverage.GCov}
+		evidence := []ExecutableEvidence{instance.Coverage.CompilerEvidence, instance.Coverage.CXXCompilerEvidence, instance.Coverage.GCovEvidence}
+		if instance.Coverage.GCov == "" || instance.Coverage.GCovVersion != instance.Version ||
+			instance.Coverage.ToolsetIdentity == "" ||
+			GCCToolsetIdentity(instance.Version, paths, evidence) != instance.Coverage.ToolsetIdentity {
+			return Instance{}, false
+		}
 	}
 	if instance.Family == FamilyClangCL && (instance.Coverage.LLVMProfdata != "" || instance.Coverage.LLVMCov != "") {
 		paths := []string{instance.CCompiler, instance.Coverage.LLVMProfdata, instance.Coverage.LLVMCov}
@@ -286,8 +300,11 @@ func normalizeInstance(instance Instance) (Instance, bool) {
 		len(instance.Sysroot) + len(instance.Coverage.LLVMProfdata) +
 		len(instance.Coverage.LLVMCov) + len(instance.Coverage.GCov) +
 		len(instance.Coverage.CompilerEvidence.FileIdentity) + len(instance.Coverage.CompilerEvidence.SHA256) +
+		len(instance.Coverage.CXXCompilerEvidence.FileIdentity) + len(instance.Coverage.CXXCompilerEvidence.SHA256) +
 		len(instance.Coverage.ProfdataEvidence.FileIdentity) + len(instance.Coverage.ProfdataEvidence.SHA256) +
 		len(instance.Coverage.CovEvidence.FileIdentity) + len(instance.Coverage.CovEvidence.SHA256) +
+		len(instance.Coverage.GCovEvidence.FileIdentity) + len(instance.Coverage.GCovEvidence.SHA256) +
+		len(instance.Coverage.GCovVersion) +
 		len(instance.Coverage.ToolsetIdentity)
 	environmentBytes, environmentOK := registryEnvironmentBytes(instance.Environment)
 	if !environmentOK || len(instance.Generators) > maxRegistryGeneratorEntries {
@@ -313,6 +330,10 @@ func normalizeInstance(instance Instance) (Instance, bool) {
 	instance.Environment = sortedUnique(instance.Environment)
 	instance.Generators = sortedUnique(instance.Generators)
 	return instance, true
+}
+
+func emptyCoverageCapability(value CoverageCapability) bool {
+	return value == (CoverageCapability{})
 }
 
 func registryEnvironmentBytes(environment []string) (int, bool) {
@@ -363,10 +384,15 @@ func descriptorKey(instance Instance) string {
 		identityPath(instance.Coverage.GCov),
 		instance.Coverage.CompilerEvidence.FileIdentity,
 		instance.Coverage.CompilerEvidence.SHA256,
+		instance.Coverage.CXXCompilerEvidence.FileIdentity,
+		instance.Coverage.CXXCompilerEvidence.SHA256,
 		instance.Coverage.ProfdataEvidence.FileIdentity,
 		instance.Coverage.ProfdataEvidence.SHA256,
 		instance.Coverage.CovEvidence.FileIdentity,
 		instance.Coverage.CovEvidence.SHA256,
+		instance.Coverage.GCovEvidence.FileIdentity,
+		instance.Coverage.GCovEvidence.SHA256,
+		instance.Coverage.GCovVersion,
 		instance.Coverage.ToolsetIdentity,
 	}
 	return strings.Join(values, "\x00")

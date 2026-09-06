@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 
 	"unit-test-ide.local/test-service/internal/coveragecoord"
 	"unit-test-ide.local/test-service/internal/coveragedomain"
+	"unit-test-ide.local/test-service/internal/coveragegcc"
 	"unit-test-ide.local/test-service/internal/coveragellvm"
 	"unit-test-ide.local/test-service/internal/session"
 	"unit-test-ide.local/test-service/internal/task"
@@ -219,7 +221,7 @@ func TestRuntimeCoverageBackendDelegatesCanonicalReads(t *testing.T) {
 	}
 }
 
-func TestCoverageToolchainSnapshotAcceptsOnlySupportedPlatformFamilies(t *testing.T) {
+func TestCoverageSnapshotAcceptsOnlySupportedPlatformFamilies(t *testing.T) {
 	valid := []struct {
 		name     string
 		platform string
@@ -234,14 +236,24 @@ func TestCoverageToolchainSnapshotAcceptsOnlySupportedPlatformFamilies(t *testin
 	}
 	for _, test := range valid {
 		t.Run(test.name, func(t *testing.T) {
-			got, err := coverageToolchainSnapshot(toolchain.Instance{ID: "toolchain", Family: test.family, Version: "18.1.8", TargetArchitecture: "amd64"}, test.platform)
+			instance := toolchain.Instance{ID: "toolchain", Family: test.family, Version: "18.1.8", TargetArchitecture: "amd64"}
+			if test.family == toolchain.FamilyGCC {
+				instance.Coverage = toolchain.CoverageCapability{GCov: "/usr/bin/gcov", GCovVersion: "18.1.8", ToolsetIdentity: strings.Repeat("a", 64)}
+			}
+			got, err := coverageToolchainSnapshot(instance, test.platform)
 			if err != nil {
 				t.Fatalf("coverageToolchainSnapshot() error = %v", err)
 			}
 			if got.Compiler.Family != test.compiler || got.Driver.Name != test.driver || got.Collector.Name != test.collect || len(got.InstrumentationFingerprint) != 64 {
 				t.Fatalf("snapshot = %#v", got)
 			}
+			if test.family == toolchain.FamilyGCC && (got.Collector.Version != "8.6" || got.InstrumentationFingerprint != coveragegcc.InstrumentationFingerprint()) {
+				t.Fatalf("GCC snapshot = %#v, want gcovr/8.6 and the GCC instrumentation contract", got)
+			}
 		})
+	}
+	if _, err := coverageToolchainSnapshot(toolchain.Instance{ID: "toolchain", Family: toolchain.FamilyGCC, Version: "18.1.8", TargetArchitecture: "amd64"}, "linux"); !errors.Is(err, coveragedomain.ErrInvalidToolchain) {
+		t.Fatalf("incomplete GCC coverage snapshot error = %v", err)
 	}
 	if _, err := coverageToolchainSnapshot(toolchain.Instance{ID: "toolchain", Family: toolchain.FamilyMSVC, Version: "19.0", TargetArchitecture: "amd64"}, "windows"); !errors.Is(err, coveragedomain.ErrInvalidToolchain) {
 		t.Fatalf("unsupported family error = %v", err)

@@ -13,6 +13,7 @@ import (
 	"unit-test-ide.local/test-service/internal/cmake"
 	"unit-test-ide.local/test-service/internal/coveragecoord"
 	"unit-test-ide.local/test-service/internal/coveragedomain"
+	"unit-test-ide.local/test-service/internal/coveragegcc"
 	"unit-test-ide.local/test-service/internal/coveragellvm"
 	"unit-test-ide.local/test-service/internal/session"
 	"unit-test-ide.local/test-service/internal/task"
@@ -282,9 +283,14 @@ func coverageToolchainSnapshot(instance toolchain.Instance, platform string) (co
 		result.Collector = coveragedomain.CollectorSnapshot{Name: coveragedomain.CollectorLLVMCov, Version: instance.Version}
 		result.InstrumentationFingerprint = coveragellvm.InstrumentationFingerprint()
 	case result.Platform == coveragedomain.PlatformLinux && instance.Family == toolchain.FamilyGCC:
+		if instance.Coverage.GCov == "" || instance.Coverage.GCovVersion != instance.Version ||
+			instance.Coverage.ToolsetIdentity == "" {
+			return coveragedomain.ToolchainSnapshot{}, coveragedomain.ErrInvalidToolchain
+		}
 		result.Compiler.Family = coveragedomain.CompilerFamilyGCC
 		result.Driver = coveragedomain.DriverSnapshot{Name: coveragedomain.DriverGCov, Version: instance.Version}
-		result.Collector = coveragedomain.CollectorSnapshot{Name: coveragedomain.CollectorGCovr, Version: instance.Version}
+		result.Collector = coveragedomain.CollectorSnapshot{Name: coveragedomain.CollectorGCovr, Version: "8.6"}
+		result.InstrumentationFingerprint = coveragegcc.InstrumentationFingerprint()
 	case result.Platform == coveragedomain.PlatformLinux && instance.Family == toolchain.FamilyClang:
 		result.Compiler.Family = coveragedomain.CompilerFamilyClang
 		result.Driver = coveragedomain.DriverSnapshot{Name: coveragedomain.DriverLLVMCov, Version: instance.Version}
