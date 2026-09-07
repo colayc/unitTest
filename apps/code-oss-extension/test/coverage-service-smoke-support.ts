@@ -88,6 +88,18 @@ const NATIVE_PATH = /(?:^[A-Za-z]:[\\/]|^\\\\|^\/|file:\/{2,})/iu;
 const TEST_ONLY_COVERAGE_FAULTS = new Set<TestOnlyCoverageFault>([
   "crash", "timeout", "cancel", "missing-data", "malformed-pinned-json"
 ]);
+const FIXTURE_METRICS: Readonly<Record<LinuxGccCoverageCaseEvidence["framework"], LinuxGccCoverageCaseEvidence["summary"]>> = {
+  cpputest: {
+    lines: { covered: 2, total: 3 },
+    branches: { covered: 1, total: 2 },
+    functions: { covered: 1, total: 1 }
+  },
+  unity: {
+    lines: { covered: 3, total: 3 },
+    branches: { covered: 2, total: 2 },
+    functions: { covered: 1, total: 1 }
+  }
+};
 
 /** Builds the closed, path-free Linux native smoke evidence payload. */
 export function buildLinuxGccCoverageEvidence(
@@ -137,17 +149,24 @@ export function validateLinuxGccCoverageEvidence(value: unknown): asserts value 
     const item = closedObject(entry, [
       "framework", "testRunOutcome", "coverageRunOutcome", "reportOutcome", "summary", "artifactDigest"
     ], "case");
+    const framework = item.framework;
+    if (framework !== "cpputest" && framework !== "unity") {
+      throw linuxEvidenceError("has an invalid framework outcome");
+    }
     if (
-      (item.framework !== "cpputest" && item.framework !== "unity") ||
-      (item.testRunOutcome !== "failed" && item.testRunOutcome !== "passed") ||
+      (framework === "cpputest" && item.testRunOutcome !== "failed") ||
+      (framework === "unity" && item.testRunOutcome !== "passed") ||
       item.coverageRunOutcome !== "available" || item.reportOutcome !== "available" ||
-      !isDigest(item.artifactDigest) || frameworks.has(item.framework)
+      !isDigest(item.artifactDigest) || frameworks.has(framework)
     ) {
       throw linuxEvidenceError("has an invalid framework outcome");
     }
-    frameworks.add(item.framework);
+    frameworks.add(framework);
     const summary = closedObject(item.summary, ["lines", "branches", "functions"], "summary");
     for (const metric of [summary.lines, summary.branches, summary.functions]) validateMetric(metric);
+    if (!sameMetrics(summary, FIXTURE_METRICS[framework])) {
+      throw linuxEvidenceError("does not match the known fixture coverage counts");
+    }
   }
   if (!frameworks.has("cpputest") || !frameworks.has("unity")) {
     throw linuxEvidenceError("must identify both required frameworks");
@@ -647,7 +666,19 @@ function isDigest(value: unknown): value is string {
 
 function isTimestamp(value: unknown): value is string {
   if (typeof value !== "string" || !ISO_TIMESTAMP.test(value)) return false;
-  return Number.isFinite(Date.parse(value));
+  const instant = new Date(value);
+  return Number.isFinite(instant.getTime()) && instant.toISOString() === value;
+}
+
+function sameMetrics(
+  value: Record<string, unknown>,
+  expected: LinuxGccCoverageCaseEvidence["summary"]
+): boolean {
+  for (const name of ["lines", "branches", "functions"] as const) {
+    const metric = value[name] as Record<string, unknown>;
+    if (metric.covered !== expected[name].covered || metric.total !== expected[name].total) return false;
+  }
+  return true;
 }
 
 function rejectSensitiveEvidence(value: unknown): void {

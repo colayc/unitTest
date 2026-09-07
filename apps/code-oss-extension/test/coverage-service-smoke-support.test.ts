@@ -68,7 +68,12 @@ test("Linux GCC evidence rejects paths, process inputs, secrets and additional p
     { ...linuxEvidence, argv: ["gcovr"] },
     { ...linuxEvidence, token: "secret" },
     { ...linuxEvidence, bundleDigest: "C:\\native\\leak" },
-    { ...linuxEvidence, cases: [...linuxEvidence.cases, { ...linuxEvidence.cases[0]!, artifactDigest: "/tmp/leak" }] }
+    { ...linuxEvidence, cases: [...linuxEvidence.cases, { ...linuxEvidence.cases[0]!, artifactDigest: "/tmp/leak" }] },
+    { ...linuxEvidence, startedAt: "2026-02-31T00:00:00.000Z" },
+    { ...linuxEvidence, cases: [{ ...linuxEvidence.cases[0]!, testRunOutcome: "passed" }, linuxEvidence.cases[1]! ] },
+    { ...linuxEvidence, cases: [linuxEvidence.cases[0]!, { ...linuxEvidence.cases[1]!, testRunOutcome: "failed" }] },
+    { ...linuxEvidence, cases: [{ ...linuxEvidence.cases[0]!, summary: { ...linuxEvidence.cases[0]!.summary, lines: { covered: 0, total: 0 } } }, linuxEvidence.cases[1]! ] },
+    { ...linuxEvidence, cases: [{ ...linuxEvidence.cases[0]!, summary: { ...linuxEvidence.cases[0]!.summary, lines: { ...linuxEvidence.cases[0]!.summary.lines, nativePath: "/tmp/leak" } } }, linuxEvidence.cases[1]! ] }
   ];
   for (const candidate of invalid) {
     assert.throws(() => validateLinuxGccCoverageEvidence(candidate), /Linux GCC coverage evidence/u);
