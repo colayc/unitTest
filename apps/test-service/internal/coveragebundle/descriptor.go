@@ -23,6 +23,14 @@ import (
 var (
 	ErrDescriptorIntegrity = errors.New("coverage descriptor integrity check failed")
 	ErrDescriptorClosed    = errors.New("coverage descriptor is closed")
+
+	// cleanupAuthorityPreflight is a narrow platform boundary. It is kept as a
+	// variable so tests can prove that failure occurs before creating gcovr.
+	cleanupAuthorityPreflight = preflightPinnedCleanupAuthority
+
+	// descriptorPostPublication is a test seam for the error path after the
+	// published descriptor has acquired its retained cleanup handle.
+	descriptorPostPublication = func() error { return nil }
 )
 
 // Descriptor is the closed JSON contract consumed by the bundled runner.
@@ -676,6 +684,10 @@ func (descriptor Descriptor) WriteAtomic(capabilities DescriptorCapabilities) (*
 		_ = closeRetainedInputs()
 		return nil, integrityError("collector cleanup authority", errors.New("platform cannot prove identity-bound task cleanup before creation"))
 	}
+	if err := cleanupAuthorityPreflight(collectorRoot, coveragePin); err != nil {
+		_ = closeRetainedInputs()
+		return nil, integrityError("collector cleanup authority", err)
+	}
 	if _, err := os.Lstat(taskRoot); err == nil || !errors.Is(err, os.ErrNotExist) {
 		_ = closeRetainedInputs()
 		return nil, integrityError("collector child", errors.New("gcovr child already exists"))
@@ -728,12 +740,15 @@ func (descriptor Descriptor) WriteAtomic(capabilities DescriptorCapabilities) (*
 	if err != nil {
 		return nil, integrityError("create descriptor temporary", errors.Join(err, closeTaskRoot()))
 	}
+	temporaryCleanupPin, err := duplicatePinnedTemporary(taskPin, temporary, temporaryName)
+	if err != nil {
+		cleanupErr := removeCreatedTemporary(taskPin, temporary, temporaryName)
+		_ = temporary.Close()
+		return nil, integrityError("retain descriptor temporary", errors.Join(err, cleanupErr, closeTaskRoot()))
+	}
 	removeTemporaryFile := func() {
-		child, childErr := pinChildObject(taskPin, temporaryName, false)
-		if childErr == nil {
-			_ = removePinnedChild(taskPin, child, temporaryName)
-			_ = child.Close()
-		}
+		_ = removePinnedChild(taskPin, temporaryCleanupPin, temporaryName)
+		_ = temporaryCleanupPin.Close()
 	}
 	removeTemporary := func() {
 		_ = temporary.Close()
@@ -757,9 +772,16 @@ func (descriptor Descriptor) WriteAtomic(capabilities DescriptorCapabilities) (*
 		removeTemporaryFile()
 		return nil, integrityError("publish descriptor", errors.Join(err, closeTaskRoot()))
 	}
-	descriptorCleanupPin, err = pinChildObjectWithDelete(taskPin, "descriptor.json", false, true)
-	if err != nil {
+	// The retained temporary handle was acquired while the creation handle was
+	// still open. After the relative rename it is the exact descriptor identity
+	// used for cleanup; no mutable descriptor pathname is reopened.
+	temporaryCleanupPin.path = descriptorPath
+	descriptorCleanupPin = temporaryCleanupPin
+	if err := temporaryCleanupPin.verifyIdentity(); err != nil {
 		return nil, integrityError("retain published descriptor", errors.Join(err, closeTaskRoot()))
+	}
+	if err := descriptorPostPublication(); err != nil {
+		return nil, integrityError("post-publication descriptor", errors.Join(err, closeTaskRoot()))
 	}
 	if err := syncPinnedDirectory(taskPin); err != nil {
 		return nil, integrityError("publish descriptor sync", errors.Join(err, closeTaskRoot()))

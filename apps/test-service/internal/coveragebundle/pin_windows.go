@@ -8,12 +8,48 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
 func cleanupAuthorityAvailable() bool { return true }
+
+var cleanupPreflightSequence uint64
+var descriptorTempSequence uint64
+
+// preflightPinnedCleanupAuthority proves that the service can obtain DELETE
+// authority in the retained collector before any task child is created. The
+// probe is DELETE_ON_CLOSE, so success leaves no entry and failure occurs
+// before gcovr or a descriptor temporary exists.
+func preflightPinnedCleanupAuthority(directory *VerifiedDirectory, parent *pinnedObject) error {
+	if directory == nil || parent == nil || parent.path != directory.Path() {
+		return errors.New("invalid cleanup collector")
+	}
+	if err := directory.Verify(); err != nil {
+		return err
+	}
+	if err := parent.verifyIdentity(); err != nil {
+		return err
+	}
+	name := fmt.Sprintf(".coverage-delete-preflight-%d", atomic.AddUint64(&cleanupPreflightSequence, 1))
+	path := filepath.Join(parent.path, name)
+	utf16, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return err
+	}
+	handle, err := windows.CreateFile(utf16, windows.GENERIC_READ|windows.DELETE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil, windows.CREATE_NEW, windows.FILE_ATTRIBUTE_TEMPORARY|windows.FILE_FLAG_DELETE_ON_CLOSE, 0)
+	if err != nil {
+		return err
+	}
+	if err := windows.CloseHandle(handle); err != nil {
+		return err
+	}
+	return parent.verifyIdentity()
+}
 
 func mkdirPinnedChild(parent *pinnedObject, name string, mode uint32) error {
 	if err := parent.verifyIdentity(); err != nil {
@@ -29,15 +65,66 @@ func createPinnedTemp(parent *pinnedObject, prefix string) (*os.File, string, er
 	if err := parent.verifyIdentity(); err != nil {
 		return nil, "", err
 	}
-	file, err := os.CreateTemp(parent.path, prefix+"-*.tmp")
+	for attempt := 0; attempt < 32; attempt++ {
+		name := fmt.Sprintf("%s-%d.tmp", prefix, atomic.AddUint64(&descriptorTempSequence, 1))
+		path := filepath.Join(parent.path, name)
+		utf16, err := windows.UTF16PtrFromString(path)
+		if err != nil {
+			return nil, "", err
+		}
+		handle, err := windows.CreateFile(utf16, windows.GENERIC_READ|windows.GENERIC_WRITE|windows.DELETE,
+			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+			nil, windows.CREATE_NEW, windows.FILE_ATTRIBUTE_NORMAL, 0)
+		if err == windows.ERROR_FILE_EXISTS {
+			continue
+		}
+		if err != nil {
+			return nil, "", err
+		}
+		file := os.NewFile(uintptr(handle), path)
+		if file == nil {
+			_ = windows.CloseHandle(handle)
+			return nil, "", errors.New("construct descriptor temporary")
+		}
+		if err := parent.verifyIdentity(); err != nil {
+			_ = file.Close()
+			return nil, "", err
+		}
+		return file, name, nil
+	}
+	return nil, "", errors.New("unable to allocate descriptor temporary")
+}
+
+func duplicatePinnedTemporary(parent *pinnedObject, original *os.File, name string) (*pinnedObject, error) {
+	if parent == nil || original == nil || name == "" || filepath.Base(name) != name {
+		return nil, errors.New("invalid temporary pin")
+	}
+	var duplicate windows.Handle
+	if err := windows.DuplicateHandle(windows.CurrentProcess(), windows.Handle(original.Fd()), windows.CurrentProcess(), &duplicate, 0, false, windows.DUPLICATE_SAME_ACCESS); err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(duplicate), filepath.Join(parent.path, name))
+	if file == nil {
+		_ = windows.CloseHandle(duplicate)
+		return nil, errors.New("duplicate descriptor temporary")
+	}
+	info, err := file.Stat()
 	if err != nil {
-		return nil, "", err
+		_ = file.Close()
+		return nil, err
+	}
+	return pinOpenedObject(filepath.Join(parent.path, name), false, info, file)
+}
+
+func removeCreatedTemporary(parent *pinnedObject, original *os.File, name string) error {
+	if parent == nil || original == nil || name == "" || filepath.Base(name) != name {
+		return errors.New("invalid created temporary cleanup")
 	}
 	if err := parent.verifyIdentity(); err != nil {
-		_ = file.Close()
-		return nil, "", err
+		return err
 	}
-	return file, filepath.Base(file.Name()), nil
+	info := fileDispositionInfo{DeleteFile: 1}
+	return windows.SetFileInformationByHandle(windows.Handle(original.Fd()), windows.FileDispositionInfo, (*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)))
 }
 
 func renamePinnedChild(parent *pinnedObject, oldName, newName string) error {

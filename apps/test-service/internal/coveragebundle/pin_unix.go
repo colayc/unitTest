@@ -9,24 +9,90 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 )
 
 var descriptorTempSequence uint64
 
-// cleanupAuthorityAvailable is deliberately false on Unix. POSIX exposes
-// unlinkat only by a mutable directory entry name; it cannot bind an unlink to
-// the retained child file descriptor. Descriptor cleanup therefore fails
-// closed before creating any task child instead of verifying a name and later
-// unlinking a replacement through that name.
-func cleanupAuthorityAvailable() bool { return false }
+// unixBeforePinnedUnlink exists only to make the identity recheck race
+// deterministic in the Unix regression test. Production leaves it nil.
+var unixBeforePinnedUnlink func()
+
+// cleanupAuthorityAvailable is safe only under the private directory model
+// enforced by preflightPinnedCleanupAuthority and removePinnedChild. POSIX
+// unlinkat names an entry, so no untrusted actor may be able to replace a
+// child between the retained-identity check and relative unlinkat.
+func cleanupAuthorityAvailable() bool { return true }
+
+func preflightPinnedCleanupAuthority(directory *VerifiedDirectory, parent *pinnedObject) error {
+	if directory == nil || parent == nil || parent.path != directory.Path() {
+		return errors.New("invalid private cleanup collector")
+	}
+	if err := directory.Verify(); err != nil {
+		return err
+	}
+	if err := verifyPrivateUnixDirectory(parent); err != nil {
+		return fmt.Errorf("private collector directory: %w", err)
+	}
+	for _, identity := range directory.identities {
+		if identity.path == directory.path {
+			continue
+		}
+		if err := verifyUnixAncestorMode(identity.info); err != nil {
+			return fmt.Errorf("private collector ancestor %q: %w", identity.path, err)
+		}
+	}
+	return nil
+}
+
+func verifyPrivateUnixDirectory(directory *pinnedObject) error {
+	if directory == nil || directory.file == nil || !directory.directory {
+		return errors.New("invalid private cleanup directory")
+	}
+	var status unix.Stat_t
+	if err := unix.Fstat(int(directory.file.Fd()), &status); err != nil {
+		return err
+	}
+	if err := validatePrivateUnixDirectoryStatus(status, uint32(os.Geteuid())); err != nil {
+		return err
+	}
+	return directory.verifyIdentity()
+}
+
+func validatePrivateUnixDirectoryStatus(status unix.Stat_t, currentUID uint32) error {
+	if status.Mode&unix.S_IFMT != unix.S_IFDIR || status.Mode&0o777 != 0o700 {
+		return errors.New("directory is not private mode 0700")
+	}
+	if status.Uid != currentUID {
+		return errors.New("directory is not owned by current service user")
+	}
+	return nil
+}
+
+func verifyUnixAncestorMode(info os.FileInfo) error {
+	status, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || status == nil {
+		return errors.New("ancestor ownership metadata unavailable")
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return errors.New("ancestor permits group or other writes")
+	}
+	return nil
+}
 
 func mkdirPinnedChild(parent *pinnedObject, name string, mode uint32) error {
+	if err := verifyPrivateUnixDirectory(parent); err != nil {
+		return err
+	}
 	return unix.Mkdirat(int(parent.file.Fd()), name, mode)
 }
 
 func createPinnedTemp(parent *pinnedObject, prefix string) (*os.File, string, error) {
+	if err := verifyPrivateUnixDirectory(parent); err != nil {
+		return nil, "", err
+	}
 	for attempt := 0; attempt < 32; attempt++ {
 		name := fmt.Sprintf("%s-%d.tmp", prefix, atomic.AddUint64(&descriptorTempSequence, 1))
 		fd, err := unix.Openat(int(parent.file.Fd()), name, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC, 0o600)
@@ -41,7 +107,41 @@ func createPinnedTemp(parent *pinnedObject, prefix string) (*os.File, string, er
 	return nil, "", errors.New("unable to allocate descriptor temporary")
 }
 
+func duplicatePinnedTemporary(parent *pinnedObject, original *os.File, name string) (*pinnedObject, error) {
+	if parent == nil || original == nil || name == "" || filepath.Base(name) != name {
+		return nil, errors.New("invalid temporary pin")
+	}
+	fd, err := unix.Dup(int(original.Fd()))
+	if err != nil {
+		return nil, err
+	}
+	duplicate := os.NewFile(uintptr(fd), filepath.Join(parent.path, name))
+	if duplicate == nil {
+		_ = unix.Close(fd)
+		return nil, errors.New("duplicate temporary pin")
+	}
+	info, err := duplicate.Stat()
+	if err != nil {
+		_ = duplicate.Close()
+		return nil, err
+	}
+	return pinOpenedObject(filepath.Join(parent.path, name), false, info, duplicate)
+}
+
+func removeCreatedTemporary(parent *pinnedObject, original *os.File, name string) error {
+	if parent == nil || original == nil || name == "" || filepath.Base(name) != name {
+		return errors.New("invalid created temporary cleanup")
+	}
+	if err := verifyPrivateUnixDirectory(parent); err != nil {
+		return err
+	}
+	return unix.Unlinkat(int(parent.file.Fd()), name, 0)
+}
+
 func renamePinnedChild(parent *pinnedObject, oldName, newName string) error {
+	if err := verifyPrivateUnixDirectory(parent); err != nil {
+		return err
+	}
 	return unix.Renameat(int(parent.file.Fd()), oldName, int(parent.file.Fd()), newName)
 }
 
@@ -49,7 +149,25 @@ func removePinnedChild(parent, child *pinnedObject, name string) error {
 	if parent == nil || child == nil || name == "" || filepath.Base(name) != name {
 		return errors.New("invalid pinned child removal")
 	}
-	return errors.New("identity-bound Unix unlink is unavailable; cleanup refused before deletion")
+	if err := verifyPrivateUnixDirectory(parent); err != nil {
+		return fmt.Errorf("private cleanup parent: %w", err)
+	}
+	if err := child.verifyIdentity(); err != nil {
+		return fmt.Errorf("verify cleanup child: %w", err)
+	}
+	if unixBeforePinnedUnlink != nil {
+		unixBeforePinnedUnlink()
+	}
+	// The private 0700 parent precondition means only this service can mutate
+	// direct children. Rechecking after the testable interleave rejects any
+	// observed replacement before unlinkat names an entry.
+	if err := child.verifyIdentity(); err != nil {
+		return fmt.Errorf("verify cleanup child before unlink: %w", err)
+	}
+	if err := unix.Unlinkat(int(parent.file.Fd()), name, 0); err != nil {
+		return err
+	}
+	return parent.verifyIdentity()
 }
 
 func syncPinnedDirectory(parent *pinnedObject) error {

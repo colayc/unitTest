@@ -136,6 +136,56 @@ func TestDescriptorRejectsUnboundAuthority(t *testing.T) {
 	}
 }
 
+func TestDescriptorCleanupPreflightFailsBeforeCreatingTaskRoot(t *testing.T) {
+	base := strictTestTempDir(t)
+	coverageRoot, root := filepath.Join(base, "coverage"), filepath.Join(base, "root")
+	objects, gcov := filepath.Join(base, "objects"), filepath.Join(base, "gcov")
+	for _, directory := range []string{coverageRoot, root, objects} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(gcov, []byte("gcov"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	descriptor := Descriptor{SchemaVersion: 1, Root: root, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(coverageRoot, "gcovr", "coverage.json")}
+	original := cleanupAuthorityPreflight
+	cleanupAuthorityPreflight = func(*VerifiedDirectory, *pinnedObject) error {
+		return errors.New("injected cleanup authority failure")
+	}
+	t.Cleanup(func() { cleanupAuthorityPreflight = original })
+	if owned, err := descriptor.WriteAtomic(descriptorCapabilitiesForTest(t, coverageRoot, root, objects, gcov)); err == nil || owned != nil {
+		t.Fatalf("WriteAtomic() = (%v, %v), want preflight failure", owned, err)
+	}
+	if _, err := os.Lstat(filepath.Join(coverageRoot, "gcovr")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("preflight failure left task root: %v", err)
+	}
+}
+
+func TestDescriptorPostPublicationFailureCleansTaskRoot(t *testing.T) {
+	base := strictTestTempDir(t)
+	coverageRoot, root := filepath.Join(base, "coverage"), filepath.Join(base, "root")
+	objects, gcov := filepath.Join(base, "objects"), filepath.Join(base, "gcov")
+	for _, directory := range []string{coverageRoot, root, objects} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(gcov, []byte("gcov"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	descriptor := Descriptor{SchemaVersion: 1, Root: root, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(coverageRoot, "gcovr", "coverage.json")}
+	original := descriptorPostPublication
+	descriptorPostPublication = func() error { return errors.New("injected post-publication failure") }
+	t.Cleanup(func() { descriptorPostPublication = original })
+	if owned, err := descriptor.WriteAtomic(descriptorCapabilitiesForTest(t, coverageRoot, root, objects, gcov)); err == nil || owned != nil {
+		t.Fatalf("WriteAtomic() = (%v, %v), want post-publication failure", owned, err)
+	}
+	if _, err := os.Lstat(filepath.Join(coverageRoot, "gcovr")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("post-publication failure left task root: %v", err)
+	}
+}
+
 func TestDescriptorCapabilitiesRejectTypedNilWithoutPanic(t *testing.T) {
 	base := strictTestTempDir(t)
 	collector, root, objects, gcov := filepath.Join(base, "collector"), filepath.Join(base, "root"), filepath.Join(base, "objects"), filepath.Join(base, "gcov")
