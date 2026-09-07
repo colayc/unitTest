@@ -25,6 +25,46 @@ export interface EvidencePublishOptions {
   readonly readBack?: (path: string) => Promise<Uint8Array>;
 }
 
+export interface LinuxGccCoverageEvidence {
+  readonly schemaVersion: 1;
+  readonly platform: "linux-x64";
+  readonly toolchain: { readonly family: "gcc"; readonly digest: string };
+  readonly bundleDigest: string;
+  readonly cases: readonly LinuxGccCoverageCaseEvidence[];
+  readonly determinism: {
+    readonly coverageJsonByteIdentical: true;
+    readonly sha256Identical: true;
+  };
+  readonly startedAt: string;
+  readonly finishedAt: string;
+}
+
+export interface LinuxGccCoverageCaseEvidence {
+  readonly framework: "cpputest" | "unity";
+  readonly testRunOutcome: "failed" | "passed";
+  readonly coverageRunOutcome: "available";
+  readonly reportOutcome: "available";
+  readonly summary: {
+    readonly lines: CoverageMetricEvidence;
+    readonly branches: CoverageMetricEvidence;
+    readonly functions: CoverageMetricEvidence;
+  };
+  readonly artifactDigest: string;
+}
+
+export interface CoverageMetricEvidence {
+  readonly covered: number;
+  readonly total: number;
+}
+
+/** Test-only fault seam; it is intentionally absent from Workspace/Protocol schemas. */
+export type TestOnlyCoverageFault =
+  | "crash"
+  | "timeout"
+  | "cancel"
+  | "missing-data"
+  | "malformed-pinned-json";
+
 export type CoverageToolsetPreflight =
   | { readonly status: "unavailable"; readonly digest: string }
   | { readonly status: "verified"; readonly version: string; readonly digest: string };
@@ -41,6 +81,98 @@ export interface CoverageToolsetPreflightGate<Boundary, Result> {
 }
 
 const COVERAGE_TOOLSET_SKIP = "SKIP: verified clang-cl coverage toolset is unavailable";
+const SHA256 = /^[0-9a-f]{64}$/u;
+const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
+const SENSITIVE_EVIDENCE_KEY = /(?:path|env|argv|secret|token|password|cwd|command|executable|endpoint)/iu;
+const NATIVE_PATH = /(?:^[A-Za-z]:[\\/]|^\\\\|^\/|file:\/{2,})/iu;
+const TEST_ONLY_COVERAGE_FAULTS = new Set<TestOnlyCoverageFault>([
+  "crash", "timeout", "cancel", "missing-data", "malformed-pinned-json"
+]);
+
+/** Builds the closed, path-free Linux native smoke evidence payload. */
+export function buildLinuxGccCoverageEvidence(
+  input: LinuxGccCoverageEvidence
+): LinuxGccCoverageEvidence {
+  validateLinuxGccCoverageEvidence(input);
+  return {
+    schemaVersion: 1,
+    platform: "linux-x64",
+    toolchain: { family: "gcc", digest: input.toolchain.digest },
+    bundleDigest: input.bundleDigest,
+    cases: input.cases.map((entry) => ({
+      framework: entry.framework,
+      testRunOutcome: entry.testRunOutcome,
+      coverageRunOutcome: entry.coverageRunOutcome,
+      reportOutcome: entry.reportOutcome,
+      summary: {
+        lines: { ...entry.summary.lines },
+        branches: { ...entry.summary.branches },
+        functions: { ...entry.summary.functions }
+      },
+      artifactDigest: entry.artifactDigest
+    })),
+    determinism: { ...input.determinism },
+    startedAt: input.startedAt,
+    finishedAt: input.finishedAt
+  };
+}
+
+/** Rejects schema drift and values that could disclose native execution inputs. */
+export function validateLinuxGccCoverageEvidence(value: unknown): asserts value is LinuxGccCoverageEvidence {
+  const evidence = closedObject(value, [
+    "schemaVersion", "platform", "toolchain", "bundleDigest", "cases", "determinism", "startedAt", "finishedAt"
+  ], "evidence");
+  if (evidence.schemaVersion !== 1 || evidence.platform !== "linux-x64") {
+    throw linuxEvidenceError("has an invalid identity");
+  }
+  const toolchain = closedObject(evidence.toolchain, ["family", "digest"], "toolchain");
+  if (toolchain.family !== "gcc" || !isDigest(toolchain.digest) || !isDigest(evidence.bundleDigest)) {
+    throw linuxEvidenceError("has an invalid toolchain or bundle digest");
+  }
+  if (!Array.isArray(evidence.cases) || evidence.cases.length !== 2) {
+    throw linuxEvidenceError("must contain exactly the CppUTest and Unity cases");
+  }
+  const frameworks = new Set<string>();
+  for (const entry of evidence.cases) {
+    const item = closedObject(entry, [
+      "framework", "testRunOutcome", "coverageRunOutcome", "reportOutcome", "summary", "artifactDigest"
+    ], "case");
+    if (
+      (item.framework !== "cpputest" && item.framework !== "unity") ||
+      (item.testRunOutcome !== "failed" && item.testRunOutcome !== "passed") ||
+      item.coverageRunOutcome !== "available" || item.reportOutcome !== "available" ||
+      !isDigest(item.artifactDigest) || frameworks.has(item.framework)
+    ) {
+      throw linuxEvidenceError("has an invalid framework outcome");
+    }
+    frameworks.add(item.framework);
+    const summary = closedObject(item.summary, ["lines", "branches", "functions"], "summary");
+    for (const metric of [summary.lines, summary.branches, summary.functions]) validateMetric(metric);
+  }
+  if (!frameworks.has("cpputest") || !frameworks.has("unity")) {
+    throw linuxEvidenceError("must identify both required frameworks");
+  }
+  const determinism = closedObject(evidence.determinism, ["coverageJsonByteIdentical", "sha256Identical"], "determinism");
+  if (determinism.coverageJsonByteIdentical !== true || determinism.sha256Identical !== true) {
+    throw linuxEvidenceError("must prove byte and digest determinism");
+  }
+  if (!isTimestamp(evidence.startedAt) || !isTimestamp(evidence.finishedAt) || evidence.startedAt > evidence.finishedAt) {
+    throw linuxEvidenceError("has invalid timestamps");
+  }
+  rejectSensitiveEvidence(value);
+}
+
+export async function runWithTestOnlyCoverageFault<Result>(
+  fault: TestOnlyCoverageFault,
+  inject: (fault: TestOnlyCoverageFault) => Promise<void>,
+  execute: () => Promise<Result>
+): Promise<Result> {
+  if (!TEST_ONLY_COVERAGE_FAULTS.has(fault)) {
+    throw new Error("test-only coverage fault is not recognized");
+  }
+  await inject(fault);
+  return await execute();
+}
 
 export async function runAfterVerifiedCoverageToolsetPreflight<Boundary, Result>(
   gate: CoverageToolsetPreflightGate<Boundary, Result>
@@ -479,6 +611,63 @@ function parseCount(value: string): number {
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed)) throw junitError("suite count exceeds the safe range");
   return parsed;
+}
+
+function closedObject(
+  value: unknown,
+  keys: readonly string[],
+  label: string
+): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw linuxEvidenceError(`${label} must be an object`);
+  }
+  const record = value as Record<string, unknown>;
+  const actual = Object.keys(record).sort();
+  const expected = [...keys].sort();
+  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
+    throw linuxEvidenceError(`${label} has an additional, missing or forbidden property`);
+  }
+  return record;
+}
+
+function validateMetric(value: unknown): void {
+  const metric = closedObject(value, ["covered", "total"], "summary metric");
+  if (
+    !Number.isSafeInteger(metric.covered) || !Number.isSafeInteger(metric.total) ||
+    (metric.covered as number) < 0 || (metric.total as number) < 0 ||
+    (metric.covered as number) > (metric.total as number)
+  ) {
+    throw linuxEvidenceError("has an invalid known coverage metric");
+  }
+}
+
+function isDigest(value: unknown): value is string {
+  return typeof value === "string" && SHA256.test(value);
+}
+
+function isTimestamp(value: unknown): value is string {
+  if (typeof value !== "string" || !ISO_TIMESTAMP.test(value)) return false;
+  return Number.isFinite(Date.parse(value));
+}
+
+function rejectSensitiveEvidence(value: unknown): void {
+  if (typeof value === "string") {
+    if (NATIVE_PATH.test(value)) throw linuxEvidenceError("contains a native path");
+    return;
+  }
+  if (value === null || typeof value !== "object") return;
+  if (Array.isArray(value)) {
+    for (const item of value) rejectSensitiveEvidence(item);
+    return;
+  }
+  for (const [key, nested] of Object.entries(value)) {
+    if (SENSITIVE_EVIDENCE_KEY.test(key)) throw linuxEvidenceError("contains a sensitive process field");
+    rejectSensitiveEvidence(nested);
+  }
+}
+
+function linuxEvidenceError(message: string): Error {
+  return new Error(`Linux GCC coverage evidence ${message}`);
 }
 
 function validateCanonicalJSON(bytes: Buffer): void {

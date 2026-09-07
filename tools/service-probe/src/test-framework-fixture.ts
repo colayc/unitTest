@@ -6,6 +6,13 @@ export interface TestFrameworkWorkspace {
   readonly testExecutable: string;
 }
 
+/** Test-only fixture selector; it is never serialized into Workspace config. */
+export type TestFramework = "cpputest" | "unity";
+
+export interface TestFrameworkFixtureOptions {
+  readonly framework?: TestFramework;
+}
+
 export function testFixtureExecutableName(
   platform: NodeJS.Platform = process.platform
 ): string {
@@ -13,11 +20,13 @@ export function testFixtureExecutableName(
 }
 
 export async function prepareTestFrameworkWorkspace(
-  workspaceDirectory: string
+  workspaceDirectory: string,
+  options: TestFrameworkFixtureOptions = {}
 ): Promise<TestFrameworkWorkspace> {
   if (!workspaceDirectory) {
     throw new Error("test framework workspace path is required");
   }
+  const framework = options.framework ?? "cpputest";
   const configurationDirectory = join(
     workspaceDirectory,
     ".unit-test-ide"
@@ -43,7 +52,7 @@ export async function prepareTestFrameworkWorkspace(
         tests: {
           containers: [{
             ctestName: "framework-tests",
-            framework: "cpputest"
+            framework
           }]
         }
       }]
@@ -53,15 +62,15 @@ export async function prepareTestFrameworkWorkspace(
     join(workspaceDirectory, "CMakeLists.txt"),
     [
       "cmake_minimum_required(VERSION 3.25)",
-      "project(test_framework_fixture LANGUAGES CXX)",
-      "add_executable(fixture-app main.cpp)",
+      `project(test_framework_fixture LANGUAGES ${framework === "unity" ? "C" : "CXX"})`,
+      `add_executable(fixture-app ${framework === "unity" ? "main.c" : "main.cpp"})`,
       "add_test(NAME framework-tests COMMAND fixture-app)",
       ""
     ].join("\n")
   );
   await writeFile(
-    join(workspaceDirectory, "main.cpp"),
-    "int main() { return 0; }\n"
+    join(workspaceDirectory, framework === "unity" ? "main.c" : "main.cpp"),
+    "int main(void) { return 0; }\n"
   );
   await writeFile(
     join(workspaceDirectory, "CMakePresets.json"),

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   prepareTestFrameworkWorkspace,
+  type TestFramework,
   testFixtureExecutableName
 } from "./test-framework-fixture.js";
 
@@ -49,6 +50,27 @@ test("test framework workspace is closed and pins the fixture executable", async
     assert.deepEqual(config.projects[0]?.tests.containers, [{
       ctestName: "framework-tests",
       framework: "cpputest"
+    }]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("test-only framework fixture can declare a closed Unity C workspace", async () => {
+  const root = await mkdtemp(join(tmpdir(), "unit-test-framework-unity-fixture-"));
+  try {
+    const framework: TestFramework = "unity";
+    const workspace = join(root, "workspace");
+    await prepareTestFrameworkWorkspace(workspace, { framework });
+    const cmake = await readFile(join(workspace, "CMakeLists.txt"), "utf8");
+    assert.match(cmake, /LANGUAGES C/u);
+    assert.match(cmake, /fixture-app main\.c/u);
+    const config = JSON.parse(await readFile(
+      join(workspace, ".unit-test-ide", "workspace.json"), "utf8"
+    )) as { projects: Array<{ tests: { containers: Array<{ framework: string }> } }> };
+    assert.deepEqual(config.projects[0]?.tests.containers, [{
+      ctestName: "framework-tests",
+      framework: "unity"
     }]);
   } finally {
     await rm(root, { recursive: true, force: true });

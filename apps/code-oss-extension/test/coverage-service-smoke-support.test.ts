@@ -4,17 +4,97 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  buildLinuxGccCoverageEvidence,
   executeCoverageServiceSmoke,
   parseStrictJUnit,
   publishEvidenceAtomically,
   runAfterVerifiedCoverageToolsetPreflight,
-  teardownThenPublish
+  runWithTestOnlyCoverageFault,
+  teardownThenPublish,
+  validateLinuxGccCoverageEvidence
 } from "./coverage-service-smoke-support.js";
 
 const itemA = `utid-v1-${"a".repeat(64)}`;
 const itemB = `utid-v1-${"b".repeat(64)}`;
 const container = `utid-v1-${"c".repeat(64)}`;
 const unavailableMessage = "SKIP: verified clang-cl coverage toolset is unavailable";
+
+const linuxEvidence = {
+  schemaVersion: 1,
+  platform: "linux-x64",
+  toolchain: { family: "gcc", digest: "a".repeat(64) },
+  bundleDigest: "b".repeat(64),
+  cases: [
+    {
+      framework: "cpputest",
+      testRunOutcome: "failed",
+      coverageRunOutcome: "available",
+      reportOutcome: "available",
+      summary: {
+        lines: { covered: 2, total: 3 },
+        branches: { covered: 1, total: 2 },
+        functions: { covered: 1, total: 1 }
+      },
+      artifactDigest: "c".repeat(64)
+    },
+    {
+      framework: "unity",
+      testRunOutcome: "passed",
+      coverageRunOutcome: "available",
+      reportOutcome: "available",
+      summary: {
+        lines: { covered: 3, total: 3 },
+        branches: { covered: 2, total: 2 },
+        functions: { covered: 1, total: 1 }
+      },
+      artifactDigest: "d".repeat(64)
+    }
+  ],
+  determinism: { coverageJsonByteIdentical: true, sha256Identical: true },
+  startedAt: "2026-09-07T00:00:00.000Z",
+  finishedAt: "2026-09-07T00:00:01.000Z"
+} as const;
+
+test("Linux GCC evidence is a path-free closed schema", () => {
+  const evidence = buildLinuxGccCoverageEvidence(linuxEvidence);
+  assert.deepEqual(evidence, linuxEvidence);
+  validateLinuxGccCoverageEvidence(evidence);
+});
+
+test("Linux GCC evidence rejects paths, process inputs, secrets and additional properties", () => {
+  const invalid = [
+    { ...linuxEvidence, workspacePath: "/tmp/leak" },
+    { ...linuxEvidence, environment: { HOME: "/tmp/leak" } },
+    { ...linuxEvidence, argv: ["gcovr"] },
+    { ...linuxEvidence, token: "secret" },
+    { ...linuxEvidence, bundleDigest: "C:\\native\\leak" },
+    { ...linuxEvidence, cases: [...linuxEvidence.cases, { ...linuxEvidence.cases[0]!, artifactDigest: "/tmp/leak" }] }
+  ];
+  for (const candidate of invalid) {
+    assert.throws(() => validateLinuxGccCoverageEvidence(candidate), /Linux GCC coverage evidence/u);
+  }
+});
+
+test("test-only coverage fault hooks cover every Linux smoke failure seam without Workspace fields", async () => {
+  const observed: string[] = [];
+  for (const fault of [
+    "crash", "timeout", "cancel", "missing-data", "malformed-pinned-json"
+  ] as const) {
+    const result = await runWithTestOnlyCoverageFault(
+      fault,
+      async (injected) => { observed.push(`inject:${injected}`); },
+      async () => { observed.push(`execute:${fault}`); return fault; }
+    );
+    assert.equal(result, fault);
+  }
+  assert.deepEqual(observed, [
+    "inject:crash", "execute:crash",
+    "inject:timeout", "execute:timeout",
+    "inject:cancel", "execute:cancel",
+    "inject:missing-data", "execute:missing-data",
+    "inject:malformed-pinned-json", "execute:malformed-pinned-json"
+  ]);
+});
 
 test("local unavailable coverage toolset skips before every boundary and execution side effect", async () => {
   const trace: string[] = [];
