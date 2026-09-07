@@ -434,6 +434,59 @@ func TestDescriptorBridgesRetainedCollectorWithoutOwningSource(t *testing.T) {
 	}
 }
 
+func TestOwnedDescriptorRejectsEveryEarlyClosedProducerCapability(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		close func(DescriptorCapabilities) error
+	}{
+		{"collector", func(capabilities DescriptorCapabilities) error {
+			return capabilities.CollectorRoot.(*VerifiedDirectory).Close()
+		}},
+		{"source", func(capabilities DescriptorCapabilities) error { return capabilities.Root.(*VerifiedDirectory).Close() }},
+		{"objects", func(capabilities DescriptorCapabilities) error {
+			return capabilities.ObjectDirectory.(*VerifiedDirectory).Close()
+		}},
+		{"gcov", func(capabilities DescriptorCapabilities) error {
+			return capabilities.GcovExecutable.(*VerifiedExecutable).Close()
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			base := strictTestTempDir(t)
+			collector := filepath.Join(base, "collector")
+			root := filepath.Join(base, "root")
+			objects := filepath.Join(base, "objects")
+			gcov := filepath.Join(base, "gcov")
+			for _, directory := range []string{collector, root, objects} {
+				if err := os.MkdirAll(directory, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(gcov, []byte("gcov"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			capabilities := descriptorCapabilitiesForTest(t, collector, root, objects, gcov)
+			descriptor, err := NewDescriptor(root, objects, gcov, filepath.Join(collector, "gcovr", "coverage.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			owned, err := descriptor.WriteAtomic(capabilities)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := test.close(capabilities); err != nil {
+				t.Fatal(err)
+			}
+			if err := owned.Verify(); err == nil {
+				t.Fatal("Verify accepted an early-closed producer capability")
+			}
+			if _, err := owned.PinnedOutput(); err == nil {
+				t.Fatal("PinnedOutput accepted an early-closed producer capability")
+			}
+			_ = owned.Close()
+		})
+	}
+}
+
 func TestDescriptorRejectsUnretainedRootAndObjectCapabilities(t *testing.T) {
 	base := strictTestTempDir(t)
 	coverageRoot, root := filepath.Join(base, "coverage"), filepath.Join(base, "root")

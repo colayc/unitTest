@@ -262,7 +262,7 @@ func fixedRunnerEnvUnset() []string {
 		"PIP_TRUSTED_HOST": {}, "VIRTUAL_ENV": {}, "CONDA_PREFIX": {}, "CONDA_DEFAULT_ENV": {},
 		"HTTP_PROXY": {}, "HTTPS_PROXY": {}, "ALL_PROXY": {}, "NO_PROXY": {},
 		"LANG": {}, "LANGUAGE": {},
-		"GCOV": {}, "GCOVR_CONFIG": {}, "GCOVR_ROOT": {}, "GCOVR_EXCLUDE": {},
+		"GCOV": {}, "GCOV_PREFIX": {}, "GCOV_PREFIX_STRIP": {}, "GCOVR_CONFIG": {}, "GCOVR_ROOT": {}, "GCOVR_EXCLUDE": {},
 		"LD_PRELOAD": {}, "LD_LIBRARY_PATH": {}, "DYLD_INSERT_LIBRARIES": {}, "DYLD_LIBRARY_PATH": {},
 	}
 	for _, entry := range os.Environ() {
@@ -272,7 +272,7 @@ func fixedRunnerEnvUnset() []string {
 		}
 		upper := strings.ToUpper(key)
 		if strings.HasPrefix(upper, "PYTHON") || strings.HasPrefix(upper, "PIP_") || strings.HasPrefix(upper, "CONDA_") ||
-			upper == "GCOV" || strings.HasPrefix(upper, "GCOVR_") || strings.HasPrefix(upper, "LD_") || strings.HasPrefix(upper, "DYLD_") ||
+			upper == "GCOV" || strings.HasPrefix(upper, "GCOV_") || strings.HasPrefix(upper, "GCOVR_") || strings.HasPrefix(upper, "LD_") || strings.HasPrefix(upper, "DYLD_") ||
 			strings.HasSuffix(upper, "_PROXY") || upper == "VIRTUAL_ENV" || upper == "LANG" || upper == "LANGUAGE" || strings.HasPrefix(upper, "LC_") {
 			// Keep every original spelling.  Process environments on Unix can
 			// contain both PYTHONPATH and pYtHoNpAtH; folding them would leave

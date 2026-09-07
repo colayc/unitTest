@@ -46,7 +46,17 @@ var (
 	// that a newly created task child is removed through its retained pin when
 	// first-use validation fails.
 	validateCreatedCleanupDirectory = func(*pinnedObject) error { return nil }
+
+	// readPinnedOutputFile is a narrow test seam around the bounded read. The
+	// post-read verification in PinnedOutput is production behavior, not a
+	// test-only substitute for the retained file identity check.
+	readPinnedOutputFile = readCollectorOutput
 )
+
+// maximumCollectorOutputBytes bounds every gcovr result retained, hashed, and
+// handed to normalization. The output is untrusted process data even though
+// its pathname is private to the collector.
+const maximumCollectorOutputBytes int64 = 64 * 1024 * 1024
 
 // Descriptor is the closed JSON contract consumed by the bundled runner.
 // Keep the field set in this order: encoding/json preserves struct order and
@@ -135,6 +145,8 @@ type OwnedDescriptor struct {
 	collectorCleanupRoot *VerifiedDirectory
 	collectorChild       *pinnedObject
 	taskRootCapability   *VerifiedDirectory
+	sourceRoot           coverageplatform.DirectoryVerifier
+	objectRoot           coverageplatform.DirectoryVerifier
 	rootCapability       coverageplatform.DirectoryVerifier
 	objectCapability     coverageplatform.DirectoryVerifier
 	gcovCapability       coveragerun.TrustedPath
@@ -181,10 +193,17 @@ func (output *PinnedOutput) ReadAll() ([]byte, error) {
 	if err := d.verifyOutputAfterLocked(); err != nil {
 		return nil, err
 	}
-	if _, err := d.outputFile.Seek(0, io.SeekStart); err != nil {
+	contents, err := readPinnedOutputFile(d.outputFile)
+	if err != nil {
 		return nil, err
 	}
-	return io.ReadAll(d.outputFile)
+	// A retained file descriptor prevents pathname ABA, but content may still
+	// change while a consumer is reading. Reverify the pin, digest, and every
+	// lifetime capability after the bounded read before releasing bytes.
+	if err := d.verifyOutputAfterLocked(); err != nil {
+		return nil, err
+	}
+	return contents, nil
 }
 
 type pathIdentity struct {
@@ -810,7 +829,8 @@ func (descriptor Descriptor) WriteAtomic(capabilities DescriptorCapabilities) (*
 		digest: digest, descriptorFile: descriptorFile,
 		descriptorInfo: descriptorInfo, descriptorPin: descriptorCleanupPin, collectorRoot: capabilities.CollectorRoot, collectorCleanupRoot: collectorRoot, collectorChild: cleanupChild,
 		taskRootCapability: taskRootCapability,
-		rootCapability:     rootCapability, objectCapability: objectCapability,
+		sourceRoot:         capabilities.Root, objectRoot: capabilities.ObjectDirectory,
+		rootCapability: rootCapability, objectCapability: objectCapability,
 		gcovCapability: capabilities.GcovExecutable,
 	}
 	if err := owned.Verify(); err != nil {
@@ -977,8 +997,12 @@ func (owned *OwnedDescriptor) verifyOutputAfterLocked() error {
 			_ = outputPin.Close()
 			return fmt.Errorf("%w: output is not a direct regular file", ErrDescriptorIntegrity)
 		}
+		if outputPin.identity.Size() < 0 || outputPin.identity.Size() > maximumCollectorOutputBytes {
+			_ = outputPin.Close()
+			return fmt.Errorf("%w: output exceeds size budget", ErrDescriptorIntegrity)
+		}
 		owned.outputPin, owned.outputFile, owned.outputInfo = outputPin, outputPin.file, outputPin.identity
-		digest, digestErr := digestFile(outputPin.file)
+		digest, digestErr := digestCollectorOutput(outputPin.file)
 		if digestErr != nil {
 			_ = outputPin.Close()
 			owned.outputPin, owned.outputFile, owned.outputInfo = nil, nil, nil
@@ -1000,7 +1024,7 @@ func (owned *OwnedDescriptor) verifyOutputAfterLocked() error {
 	if err := verifyFilePath(path, owned.outputInfo, owned.outputFile); err != nil {
 		return err
 	}
-	digest, err := digestFile(owned.outputFile)
+	digest, err := digestCollectorOutput(owned.outputFile)
 	if err != nil || digest != owned.outputDigest {
 		if err == nil {
 			err = errors.New("runner output digest changed")
@@ -1032,7 +1056,7 @@ func (owned *OwnedDescriptor) Verify() error {
 }
 
 func (owned *OwnedDescriptor) verifyLocked() error {
-	if owned.closed || owned.descriptorFile == nil || owned.collectorRoot == nil || owned.collectorChild == nil || owned.taskRootCapability == nil || owned.rootCapability == nil || owned.objectCapability == nil || owned.gcovCapability == nil {
+	if owned.closed || owned.descriptorFile == nil || owned.collectorRoot == nil || owned.collectorChild == nil || owned.taskRootCapability == nil || owned.sourceRoot == nil || owned.objectRoot == nil || owned.rootCapability == nil || owned.objectCapability == nil || owned.gcovCapability == nil {
 		return ErrDescriptorClosed
 	}
 	if err := validateOwnedCapabilities(owned); err != nil {
@@ -1123,6 +1147,10 @@ func (owned *OwnedDescriptor) Close() error {
 		owned.collectorChild = nil
 	}
 	owned.collectorRoot = nil
+	// These are caller-owned producer views. Forget them without closing so a
+	// collector never consumes ownership that failed to cross the boundary.
+	owned.sourceRoot = nil
+	owned.objectRoot = nil
 	if owned.rootCapability != nil {
 		if closer, ok := owned.rootCapability.(interface{ Close() error }); ok {
 			closeErr = errors.Join(closeErr, closer.Close())
@@ -1224,11 +1252,11 @@ func validateOwnedCapabilities(owned *OwnedDescriptor) error {
 	if err != nil || collectorRoot != owned.root {
 		return fmt.Errorf("%w: collector root", ErrDescriptorIntegrity)
 	}
-	root, err := directoryCapabilityPath(owned.rootCapability)
+	root, err := directoryCapabilityPath(owned.sourceRoot)
 	if err != nil || root != owned.descriptor.Root {
 		return fmt.Errorf("%w: root", ErrDescriptorIntegrity)
 	}
-	objects, err := directoryCapabilityPath(owned.objectCapability)
+	objects, err := directoryCapabilityPath(owned.objectRoot)
 	if err != nil || objects != owned.descriptor.ObjectDirectory {
 		return fmt.Errorf("%w: object directory", ErrDescriptorIntegrity)
 	}
@@ -1239,11 +1267,17 @@ func validateOwnedCapabilities(owned *OwnedDescriptor) error {
 	if err := coverageplatform.VerifyDirectory(owned.collectorRoot); err != nil {
 		return fmt.Errorf("%w: collector root: %v", ErrDescriptorIntegrity, err)
 	}
+	if err := coverageplatform.VerifyDirectory(owned.sourceRoot); err != nil {
+		return fmt.Errorf("%w: source root: %v", ErrDescriptorIntegrity, err)
+	}
+	if err := coverageplatform.VerifyDirectory(owned.objectRoot); err != nil {
+		return fmt.Errorf("%w: object root: %v", ErrDescriptorIntegrity, err)
+	}
 	if err := coverageplatform.VerifyDirectory(owned.rootCapability); err != nil {
-		return fmt.Errorf("%w: root: %v", ErrDescriptorIntegrity, err)
+		return fmt.Errorf("%w: retained source root: %v", ErrDescriptorIntegrity, err)
 	}
 	if err := coverageplatform.VerifyDirectory(owned.objectCapability); err != nil {
-		return fmt.Errorf("%w: object directory: %v", ErrDescriptorIntegrity, err)
+		return fmt.Errorf("%w: retained object root: %v", ErrDescriptorIntegrity, err)
 	}
 	if err := verifyTrustedCapability(owned.gcovCapability); err != nil {
 		return fmt.Errorf("%w: gcov executable: %v", ErrDescriptorIntegrity, err)
@@ -1357,6 +1391,58 @@ func digestFile(file *os.File) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func digestCollectorOutput(file *os.File) (string, error) {
+	if file == nil {
+		return "", ErrDescriptorClosed
+	}
+	info, err := file.Stat()
+	if err != nil || info.Size() < 0 || info.Size() > maximumCollectorOutputBytes {
+		if err == nil {
+			err = errors.New("collector output exceeds size budget")
+		}
+		return "", err
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return "", err
+	}
+	hash := sha256.New()
+	count, err := io.Copy(hash, io.LimitReader(file, maximumCollectorOutputBytes+1))
+	if err != nil {
+		return "", err
+	}
+	if count > maximumCollectorOutputBytes {
+		return "", errors.New("collector output exceeds size budget")
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func readCollectorOutput(file *os.File) ([]byte, error) {
+	if file == nil {
+		return nil, ErrDescriptorClosed
+	}
+	info, err := file.Stat()
+	if err != nil || info.Size() < 0 || info.Size() > maximumCollectorOutputBytes {
+		if err == nil {
+			err = errors.New("collector output exceeds size budget")
+		}
+		return nil, err
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	contents, err := io.ReadAll(io.LimitReader(file, maximumCollectorOutputBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(contents)) > maximumCollectorOutputBytes {
+		return nil, errors.New("collector output exceeds size budget")
+	}
+	return contents, nil
 }
 
 func validTaskID(value string) bool {

@@ -482,6 +482,87 @@ func TestPinnedOutputConsumesWithoutPathReopen(t *testing.T) {
 	}
 }
 
+func TestPreparedExecutionRejectsOversizedCollectorOutput(t *testing.T) {
+	base := strictTestTempDir(t)
+	coverageRoot, projectRoot, objects := filepath.Join(base, "coverage"), filepath.Join(base, "project"), filepath.Join(base, "objects")
+	for _, directory := range []string{coverageRoot, projectRoot, objects} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	python, runner, gcov := filepath.Join(base, "python.exe"), filepath.Join(base, "runner.pyz"), filepath.Join(base, "gcov.exe")
+	for _, path := range []string{python, runner, gcov} {
+		if err := os.WriteFile(path, []byte(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	execution, err := PrepareRunner(&fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: RequiredPythonVersion, GcovrVersion: RequiredGCovrVersion, ManifestSHA256: strings.Repeat("a", 64)}}, DescriptorInput{Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(coverageRoot, "gcovr", "coverage.json")}, descriptorCapabilitiesForTest(t, coverageRoot, projectRoot, objects, gcov))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer execution.Close()
+	if err := os.WriteFile(execution.Descriptor().OutputPath, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(execution.Descriptor().OutputPath, maximumCollectorOutputBytes+1); err != nil {
+		t.Fatal(err)
+	}
+	if err := execution.VerifyAfter(); err == nil {
+		t.Fatal("VerifyAfter accepted an oversized collector output")
+	}
+}
+
+func TestPinnedOutputRejectsReplacementDuringBoundedRead(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("retained DELETE handle blocks the replacement fixture on Windows")
+	}
+	base := strictTestTempDir(t)
+	coverageRoot, projectRoot, objects := filepath.Join(base, "coverage"), filepath.Join(base, "project"), filepath.Join(base, "objects")
+	for _, directory := range []string{coverageRoot, projectRoot, objects} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	python, runner, gcov := filepath.Join(base, "python"), filepath.Join(base, "runner.pyz"), filepath.Join(base, "gcov")
+	for _, path := range []string{python, runner, gcov} {
+		if err := os.WriteFile(path, []byte(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	execution, err := PrepareRunner(&fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: RequiredPythonVersion, GcovrVersion: RequiredGCovrVersion, ManifestSHA256: strings.Repeat("a", 64)}}, DescriptorInput{Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(coverageRoot, "gcovr", "coverage.json")}, descriptorCapabilitiesForTest(t, coverageRoot, projectRoot, objects, gcov))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer execution.Close()
+	outputPath := execution.Descriptor().OutputPath
+	if err := os.WriteFile(outputPath, []byte(`{"original":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	output, err := execution.PinnedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalRead := readPinnedOutputFile
+	readPinnedOutputFile = func(file *os.File) ([]byte, error) {
+		contents, err := originalRead(file)
+		if err != nil {
+			return nil, err
+		}
+		replacement := outputPath + ".replacement"
+		if err := os.WriteFile(replacement, []byte(`{"replacement":true}`), 0o600); err != nil {
+			return nil, err
+		}
+		if err := os.Rename(replacement, outputPath); err != nil {
+			return nil, err
+		}
+		return contents, nil
+	}
+	t.Cleanup(func() { readPinnedOutputFile = originalRead })
+	if _, err := output.ReadAll(); err == nil {
+		t.Fatal("PinnedOutput.ReadAll accepted output replacement during the read")
+	}
+}
+
 func TestPreparedExecutionRejectsTaskRootReplacementBeforeOutputOpen(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("task-root replacement fixture requires rename/symlink support")
@@ -536,6 +617,8 @@ func TestIsolatedRunnerRejectsHostileEnvironment(t *testing.T) {
 	t.Setenv("hTtP_PrOxY", "http://hostile.invalid")
 	t.Setenv("lC_ALL", "C.UTF-8")
 	t.Setenv("GCOV", "hostile-gcov")
+	t.Setenv("GCOV_PREFIX", "hostile-prefix")
+	t.Setenv("gCoV_PrEfIx_StRiP", "hostile-prefix-strip")
 	t.Setenv("GCOVR_EXCLUDE", "hostile-gcovr")
 	t.Setenv("LD_PRELOAD", "hostile-loader")
 	unset := fixedRunnerEnvUnset()
@@ -543,7 +626,7 @@ func TestIsolatedRunnerRejectsHostileEnvironment(t *testing.T) {
 	for _, key := range unset {
 		seen[strings.ToUpper(key)] = true
 	}
-	for _, key := range []string{"PYTHONPATH", "PIP_INDEX_URL", "VIRTUAL_ENV", "HTTP_PROXY", "LC_ALL", "GCOV", "GCOVR_EXCLUDE", "LD_PRELOAD"} {
+	for _, key := range []string{"PYTHONPATH", "PIP_INDEX_URL", "VIRTUAL_ENV", "HTTP_PROXY", "LC_ALL", "GCOV", "GCOV_PREFIX", "GCOV_PREFIX_STRIP", "GCOVR_EXCLUDE", "LD_PRELOAD"} {
 		if !seen[key] {
 			t.Fatalf("fixed runner environment did not clear %s: %#v", key, unset)
 		}
