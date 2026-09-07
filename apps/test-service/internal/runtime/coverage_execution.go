@@ -1,15 +1,24 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"path/filepath"
 	"sort"
 	"sync"
 
 	"unit-test-ide.local/test-service/internal/build"
+	"unit-test-ide.local/test-service/internal/coveragedomain"
+	"unit-test-ide.local/test-service/internal/coveragebundle"
 	"unit-test-ide.local/test-service/internal/coverageexec"
+	"unit-test-ide.local/test-service/internal/coveragegcc"
 	"unit-test-ide.local/test-service/internal/coveragellvm"
+	coveragemodelv1 "unit-test-ide.local/test-service/internal/coveragemodel/v1"
+	"unit-test-ide.local/test-service/internal/coveragenormalize"
+	"unit-test-ide.local/test-service/internal/coverageparser/llvm"
+	coverageparsergcovr "unit-test-ide.local/test-service/internal/coverageparser/gcovr"
 	"unit-test-ide.local/test-service/internal/coverageplatform"
 	"unit-test-ide.local/test-service/internal/coveragerun"
 	"unit-test-ide.local/test-service/internal/task"
@@ -60,15 +69,23 @@ type coverageExecutionConfig struct {
 	Tests         coverageexec.EmbeddedTestPreparer
 	WorkspaceRoot workspace.Root
 	ExecutionRoot string
+	// CoverageBundleRoot is an internal, canonical exact bundle root seam.
+	// It is intentionally absent from protocol and workspace configuration.
+	CoverageBundleRoot string
 	Clock         task.Clock
 	NewID         task.IDGenerator
 }
 
 func newRuntimeCoverageExecutor(config coverageExecutionConfig) (coverageExecutor, error) {
 	var adapter coverageexec.Adapter = unsupportedCoverageAdapter{}
-	native := config.Platform == "windows"
-	if native {
+	native := false
+	switch config.Platform {
+	case "windows":
+		native = true
 		adapter = llvmCoverageAdapter{}
+	case "linux":
+		native = true
+		adapter = gccCoverageAdapter{bundleRoot: config.CoverageBundleRoot}
 	}
 	coordinator, err := coverageexec.NewCoordinator(coverageexec.Config{
 		Tasks: config.Tasks, Store: config.Store, Build: config.Build,
@@ -97,6 +114,8 @@ func (preparer coverageBuildPreparer) PreparePlan(ctx context.Context, request b
 }
 
 type llvmCoverageAdapter struct{}
+
+type gccCoverageAdapter struct{ bundleRoot string }
 
 func (llvmCoverageAdapter) Prepare(ctx context.Context, input coverageexec.AdapterInput) (coverageexec.PreparedAdapter, error) {
 	if ctx == nil {
@@ -136,6 +155,7 @@ type llvmPreparedCoverageAdapter struct {
 	instrumentation coveragellvm.Instrumentation
 	allocator       testrun.ProfileAllocator
 	profileRoot     string
+	manifest        *coveragellvm.Manifest
 	closeOnce       sync.Once
 	closeErr        error
 }
@@ -173,18 +193,33 @@ func (adapter *llvmPreparedCoverageAdapter) Allocator() testrun.ProfileAllocator
 	return adapter.allocator
 }
 
-func (adapter *llvmPreparedCoverageAdapter) SealProfiles(expectations []testrun.ProfileExpectation, outcomes []testrun.InvocationOutcome) (coveragellvm.Manifest, error) {
-	if adapter == nil {
-		return coveragellvm.Manifest{}, coveragellvm.ErrInvalidProfiles
-	}
-	return coveragellvm.SealProfiles(adapter.profileRoot, expectations, outcomes)
+func (adapter *llvmPreparedCoverageAdapter) PrepareTests(context.Context, coverageexec.PreparedBuild) error {
+	return nil
 }
 
-func (adapter *llvmPreparedCoverageAdapter) Collector(manifest coveragellvm.Manifest, binaries []coveragerun.TrustedPath) (task.ProcessSpec, task.ProcessSpec, error) {
+func (adapter *llvmPreparedCoverageAdapter) SealEvidence(expectations []testrun.ProfileExpectation, outcomes []testrun.InvocationOutcome) ([]coveragedomain.CompletenessReason, error) {
 	if adapter == nil {
-		return task.ProcessSpec{}, task.ProcessSpec{}, coveragellvm.ErrInvalidProfiles
+		return nil, coveragellvm.ErrInvalidProfiles
 	}
-	return coveragellvm.BuildCollectorInvocation(adapter.toolset, manifest, binaries)
+	manifest, err := coveragellvm.SealProfiles(adapter.profileRoot, expectations, outcomes)
+	if err != nil { return nil, err }
+	adapter.manifest = &manifest
+	return append([]coveragedomain.CompletenessReason(nil), manifest.PartialReasons...), nil
+}
+
+func (adapter *llvmPreparedCoverageAdapter) PrepareCollector(_ context.Context, _ coverageexec.PreparedBuild, _ coverageplatform.DirectoryVerifier, binaries []coveragerun.TrustedPath) (coverageexec.CollectionPlan, error) {
+	if adapter == nil || adapter.manifest == nil {
+		return coverageexec.CollectionPlan{}, coveragellvm.ErrInvalidProfiles
+	}
+	merge, normalize, err := coveragellvm.BuildCollectorInvocation(adapter.toolset, *adapter.manifest, binaries)
+	if err != nil { return coverageexec.CollectionPlan{}, err }
+	return coverageexec.CollectionPlan{Aggregate: merge, Normalize: &normalize}, nil
+}
+
+func (adapter *llvmPreparedCoverageAdapter) Normalize(_ context.Context, input coverageexec.NormalizeInput) (coveragemodelv1.CoverageDocumentV1, []coveragenormalize.SourceBinding, error) {
+	parsed, err := llvm.Parse(bytes.NewReader(input.ProcessOutput), llvm.Limits{MaxInputBytes: input.Limits.MaxInputBytes, MaxDepth: input.Limits.MaxDepth, MaxFiles: input.Limits.MaxFiles, MaxFunctions: input.Limits.MaxFunctions, MaxLines: input.Limits.MaxLines, MaxBranches: input.Limits.MaxBranches, MaxStringBytes: input.Limits.MaxStringBytes})
+	if err != nil { return coveragemodelv1.CoverageDocumentV1{}, nil, err }
+	return coveragenormalize.NormalizeLLVM(coveragenormalize.LLVMInput{Export: parsed, WorkspaceRoot: input.WorkspaceRoot, Matcher: input.Matcher, Toolchain: input.Toolchain, Completeness: input.Completeness, Limits: input.Limits})
 }
 
 func (adapter *llvmPreparedCoverageAdapter) Close() error {
@@ -192,6 +227,10 @@ func (adapter *llvmPreparedCoverageAdapter) Close() error {
 		return nil
 	}
 	adapter.closeOnce.Do(func() {
+		if adapter.manifest != nil {
+			adapter.closeErr = errors.Join(adapter.closeErr, adapter.manifest.Close())
+			adapter.manifest = nil
+		}
 		if closer, ok := adapter.allocator.(io.Closer); ok {
 			adapter.closeErr = errors.Join(adapter.closeErr, closer.Close())
 		}
@@ -206,6 +245,68 @@ func (adapter *llvmPreparedCoverageAdapter) Close() error {
 	})
 	return adapter.closeErr
 }
+
+func (adapter gccCoverageAdapter) Prepare(ctx context.Context, input coverageexec.AdapterInput) (coverageexec.PreparedAdapter, error) {
+	if ctx == nil || ctx.Err() != nil || adapter.bundleRoot == "" || !filepath.IsAbs(adapter.bundleRoot) || filepath.Clean(adapter.bundleRoot) != adapter.bundleRoot {
+		return nil, task.ErrInvalidArgument
+	}
+	toolset, err := coveragegcc.PinToolset(input.Toolchain)
+	if err != nil { return nil, err }
+	bundle, err := coveragebundle.ResolveExact(adapter.bundleRoot)
+	if err != nil { _ = toolset.Close(); return nil, err }
+	instrumentation, err := coveragegcc.WriteInstrumentation(input.TaskRoot)
+	if err != nil { _ = bundle.Close(); _ = toolset.Close(); return nil, err }
+	return &gccPreparedCoverageAdapter{toolset: toolset, bundle: bundle, instrumentation: instrumentation, allocator: coveragegcc.NewAllocator(), ownsToolset: true}, nil
+}
+
+type gccPreparedCoverageAdapter struct {
+	toolset *coveragegcc.Toolset
+	bundle coveragebundle.Pin
+	instrumentation coverageplatform.Instrumentation
+	allocator *coveragegcc.Allocator
+	evidence *coveragegcc.PreparedEvidence
+	manifest *coveragegcc.Manifest
+	mu sync.Mutex
+	ownsToolset bool
+	closeOnce sync.Once
+	closeErr error
+}
+func (a *gccPreparedCoverageAdapter) Toolset() coverageplatform.Toolset { if a == nil { return nil }; return a.toolset }
+func (a *gccPreparedCoverageAdapter) RelinquishToolsetOwnership() { if a != nil { a.mu.Lock(); a.ownsToolset=false; a.mu.Unlock() } }
+func (a *gccPreparedCoverageAdapter) Instrumentation() coverageplatform.Instrumentation { if a == nil { return coverageplatform.Instrumentation{} }; return a.instrumentation }
+func (a *gccPreparedCoverageAdapter) Allocator() testrun.ProfileAllocator { if a == nil { return nil }; return a.allocator }
+func (a *gccPreparedCoverageAdapter) PrepareTests(ctx context.Context, prepared coverageexec.PreparedBuild) error {
+	if a == nil || ctx == nil || prepared == nil || coverageplatform.VerifyDirectory(prepared.CoverageObjectDirectory()) != nil { return task.ErrInvalidArgument }
+	evidence, err := coveragegcc.PrepareEvidence(prepared.CoverageObjectDirectory().Path())
+	if err != nil { return err }
+	a.mu.Lock(); old := a.evidence; a.evidence = evidence; a.mu.Unlock()
+	if old != nil { return old.Close() }; return nil
+}
+func (a *gccPreparedCoverageAdapter) SealEvidence(_ []testrun.ProfileExpectation, outcomes []testrun.InvocationOutcome) ([]coveragedomain.CompletenessReason, error) {
+	if a == nil { return nil, task.ErrInvalidArgument }
+	a.mu.Lock(); evidence:=a.evidence; a.mu.Unlock()
+	if evidence == nil { return nil, task.ErrInvalidArgument }
+	manifest, err := evidence.Seal(context.Background(), outcomes)
+	if err != nil { return nil, err }
+	a.mu.Lock(); a.manifest=&manifest; a.mu.Unlock()
+	return append([]coveragedomain.CompletenessReason(nil), manifest.PartialReasons...), nil
+}
+func (a *gccPreparedCoverageAdapter) PrepareCollector(ctx context.Context, prepared coverageexec.PreparedBuild, collector coverageplatform.DirectoryVerifier, _ []coveragerun.TrustedPath) (coverageexec.CollectionPlan, error) {
+	if a == nil || ctx == nil || prepared == nil || a.bundle == nil || a.toolset == nil { return coverageexec.CollectionPlan{}, task.ErrInvalidArgument }
+	if err := a.bundle.Verify(); err != nil { return coverageexec.CollectionPlan{}, err }
+	execution, err := coveragegcc.PrepareCollector(a.bundle, collector, prepared.CoverageSourceRoot(), prepared.CoverageObjectDirectory(), a.toolset.GCov())
+	if err != nil { return coverageexec.CollectionPlan{}, err }
+	if err := prepared.AttachCoverageExecution(execution); err != nil { _ = execution.Close(); return coverageexec.CollectionPlan{}, err }
+	return coverageexec.CollectionPlan{Aggregate: execution.ProcessSpec()}, nil
+}
+func (a *gccPreparedCoverageAdapter) Normalize(_ context.Context, input coverageexec.NormalizeInput) (coveragemodelv1.CoverageDocumentV1, []coveragenormalize.SourceBinding, error) {
+	if input.PinnedOutput == nil { return coveragemodelv1.CoverageDocumentV1{}, nil, task.ErrInvalidArgument }
+	raw, err := input.PinnedOutput.ReadAll(); if err != nil { return coveragemodelv1.CoverageDocumentV1{}, nil, err }
+	export, err := coverageparsergcovr.Parse(bytes.NewReader(raw), coverageparsergcovr.Limits{MaxInputBytes: input.Limits.MaxInputBytes, MaxDepth: input.Limits.MaxDepth, MaxFiles: input.Limits.MaxFiles, MaxFunctions: input.Limits.MaxFunctions, MaxLines: input.Limits.MaxLines, MaxBranches: input.Limits.MaxBranches, MaxStringBytes: input.Limits.MaxStringBytes})
+	if err != nil { return coveragemodelv1.CoverageDocumentV1{}, nil, err }
+	return coveragenormalize.NormalizeGCC(coveragenormalize.GCCInput{Export: export, WorkspaceRoot: input.WorkspaceRoot, Matcher: input.Matcher, Toolchain: input.Toolchain, Completeness: input.Completeness, Limits: input.Limits})
+}
+func (a *gccPreparedCoverageAdapter) Close() error { if a == nil { return nil }; a.closeOnce.Do(func(){ a.mu.Lock(); evidence, manifest, bundle, owns := a.evidence,a.manifest,a.bundle,a.ownsToolset; a.evidence=nil; a.manifest=nil; a.bundle=nil; a.ownsToolset=false; a.mu.Unlock(); if manifest != nil { a.closeErr=errors.Join(a.closeErr,manifest.Close()) }; if evidence != nil { a.closeErr=errors.Join(a.closeErr,evidence.Close()) }; if bundle != nil { a.closeErr=errors.Join(a.closeErr,bundle.Close()) }; if owns && a.toolset != nil { a.closeErr=errors.Join(a.closeErr,a.toolset.Close()) }; if a.allocator != nil { a.closeErr=errors.Join(a.closeErr,a.allocator.Close()) } }); return a.closeErr }
 
 type unsupportedCoverageAdapter struct{}
 

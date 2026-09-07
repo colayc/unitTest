@@ -17,6 +17,8 @@ import (
 	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/coveragellvm"
 	"unit-test-ide.local/test-service/internal/coverageplatform"
+	coveragemodelv1 "unit-test-ide.local/test-service/internal/coveragemodel/v1"
+	"unit-test-ide.local/test-service/internal/coveragenormalize"
 	"unit-test-ide.local/test-service/internal/coveragerun"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/taskstore"
@@ -143,16 +145,18 @@ func (adapter *handoffTestAdapter) RelinquishToolsetOwnership() {
 	adapter.relinquished = true
 	adapter.ownsToolset = false
 }
-func (*handoffTestAdapter) Instrumentation() coveragellvm.Instrumentation {
-	return coveragellvm.Instrumentation{}
+func (*handoffTestAdapter) Instrumentation() coverageplatform.Instrumentation {
+	return coverageplatform.Instrumentation{}
 }
 func (*handoffTestAdapter) Allocator() testrun.ProfileAllocator { return handoffTestAllocator{} }
-func (*handoffTestAdapter) SealProfiles([]testrun.ProfileExpectation, []testrun.InvocationOutcome) (coveragellvm.Manifest, error) {
-	return coveragellvm.Manifest{}, errors.New("unused")
+func (*handoffTestAdapter) PrepareTests(context.Context, PreparedBuild) error { return nil }
+func (*handoffTestAdapter) SealEvidence([]testrun.ProfileExpectation, []testrun.InvocationOutcome) ([]coveragedomain.CompletenessReason, error) {
+	return nil, errors.New("unused")
 }
-func (*handoffTestAdapter) Collector(coveragellvm.Manifest, []coveragerun.TrustedPath) (task.ProcessSpec, task.ProcessSpec, error) {
-	return task.ProcessSpec{}, task.ProcessSpec{}, errors.New("unused")
+func (*handoffTestAdapter) PrepareCollector(context.Context, PreparedBuild, coverageplatform.DirectoryVerifier, []coveragerun.TrustedPath) (CollectionPlan, error) {
+	return CollectionPlan{}, errors.New("unused")
 }
+func (*handoffTestAdapter) Normalize(context.Context, NormalizeInput) (coveragemodelv1.CoverageDocumentV1, []coveragenormalize.SourceBinding, error) { return coveragemodelv1.CoverageDocumentV1{}, nil, errors.New("unused") }
 func (adapter *handoffTestAdapter) Close() error {
 	if adapter.ownsToolset {
 		adapter.ownsToolset = false
@@ -164,18 +168,20 @@ func (adapter *handoffTestAdapter) Close() error {
 type orchestrationStyleAdapterWithoutHandoff struct{}
 
 func (*orchestrationStyleAdapterWithoutHandoff) Toolset() coverageplatform.Toolset { return nil }
-func (*orchestrationStyleAdapterWithoutHandoff) Instrumentation() coveragellvm.Instrumentation {
-	return coveragellvm.Instrumentation{}
+func (*orchestrationStyleAdapterWithoutHandoff) Instrumentation() coverageplatform.Instrumentation {
+	return coverageplatform.Instrumentation{}
 }
 func (*orchestrationStyleAdapterWithoutHandoff) Allocator() testrun.ProfileAllocator {
 	return handoffTestAllocator{}
 }
-func (*orchestrationStyleAdapterWithoutHandoff) SealProfiles([]testrun.ProfileExpectation, []testrun.InvocationOutcome) (coveragellvm.Manifest, error) {
-	return coveragellvm.Manifest{}, errors.New("unused")
+func (*orchestrationStyleAdapterWithoutHandoff) PrepareTests(context.Context, PreparedBuild) error { return nil }
+func (*orchestrationStyleAdapterWithoutHandoff) SealEvidence([]testrun.ProfileExpectation, []testrun.InvocationOutcome) ([]coveragedomain.CompletenessReason, error) {
+	return nil, errors.New("unused")
 }
-func (*orchestrationStyleAdapterWithoutHandoff) Collector(coveragellvm.Manifest, []coveragerun.TrustedPath) (task.ProcessSpec, task.ProcessSpec, error) {
-	return task.ProcessSpec{}, task.ProcessSpec{}, errors.New("unused")
+func (*orchestrationStyleAdapterWithoutHandoff) PrepareCollector(context.Context, PreparedBuild, coverageplatform.DirectoryVerifier, []coveragerun.TrustedPath) (CollectionPlan, error) {
+	return CollectionPlan{}, errors.New("unused")
 }
+func (*orchestrationStyleAdapterWithoutHandoff) Normalize(context.Context, NormalizeInput) (coveragemodelv1.CoverageDocumentV1, []coveragenormalize.SourceBinding, error) { return coveragemodelv1.CoverageDocumentV1{}, nil, errors.New("unused") }
 func (*orchestrationStyleAdapterWithoutHandoff) Close() error { return nil }
 
 func TestCoverageBuildInterpretationContinuesOnlyAfterSuccess(t *testing.T) {

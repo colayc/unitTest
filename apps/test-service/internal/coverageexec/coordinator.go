@@ -18,10 +18,8 @@ import (
 	"unit-test-ide.local/test-service/internal/build"
 	"unit-test-ide.local/test-service/internal/cmake"
 	"unit-test-ide.local/test-service/internal/coveragedomain"
-	"unit-test-ide.local/test-service/internal/coveragellvm"
 	coveragemodelv1 "unit-test-ide.local/test-service/internal/coveragemodel/v1"
 	"unit-test-ide.local/test-service/internal/coveragenormalize"
-	"unit-test-ide.local/test-service/internal/coverageparser/llvm"
 	"unit-test-ide.local/test-service/internal/coverageplatform"
 	"unit-test-ide.local/test-service/internal/coveragereport"
 	"unit-test-ide.local/test-service/internal/coveragerun"
@@ -57,7 +55,7 @@ type execution struct {
 	buildRoot       string
 	toolchain       toolchain.Instance
 	preparedTargets []cmake.Target
-	instrument      coveragellvm.Instrumentation
+	instrument      coverageplatform.Instrumentation
 	unsupported     bool
 	terminalErr     error
 	terminalOutcome task.Outcome
@@ -67,7 +65,6 @@ type execution struct {
 	testOriginals     map[string]task.ExecutionStep
 	testOrder         []string
 	outcomes          map[string]testrun.InvocationOutcome
-	manifest          *coveragellvm.Manifest
 	binaries          []*retainedFile
 	targets           []processTarget
 	state             coveragerun.State
@@ -725,9 +722,6 @@ func (execution *execution) verifyRetained() error {
 		execution.adapter == nil || execution.validateAdapterIdentityLocked() != nil {
 		return task.ErrInvalidArgument
 	}
-	if execution.manifest != nil && execution.manifest.Verify() != nil {
-		return task.ErrInvalidArgument
-	}
 	for _, binary := range execution.binaries {
 		if binary.Verify() != nil {
 			return task.ErrInvalidArgument
@@ -758,7 +752,7 @@ func (execution *execution) validateAdapterIdentityLocked() error {
 
 func validateInstrumentationContract(
 	snapshot coveragedomain.ToolchainSnapshot,
-	instrumentation coveragellvm.Instrumentation,
+	instrumentation coverageplatform.Instrumentation,
 ) error {
 	if snapshot.InstrumentationFingerprint == "" ||
 		instrumentation.Fingerprint == "" ||
@@ -897,7 +891,7 @@ func (execution *execution) Interpret(
 			execution.setFailedPhase(coveragerun.PhaseNormalize)
 			return task.StepVerdictDefault, errors.New("coverage export failed")
 		}
-		if err := execution.normalize(); err != nil {
+		if err := execution.normalize(ctx, nil); err != nil {
 			execution.setFailedPhase(coveragerun.PhaseNormalize)
 			return task.StepVerdictDefault, err
 		}
@@ -992,6 +986,25 @@ func (execution *execution) ExecuteServiceAction(
 		return task.StepResult{}, err
 	}
 	switch step.Action {
+	case task.ServiceActionCoverageNormalize:
+		execution.setFailedPhase(coveragerun.PhaseNormalize)
+		execution.mu.Lock()
+		prepared := execution.prepared
+		execution.mu.Unlock()
+		if prepared == nil {
+			return task.StepResult{}, task.ErrInvalidArgument
+		}
+		output, err := prepared.PinnedCoverageOutput()
+		if err != nil {
+			return task.StepResult{}, err
+		}
+		if err := execution.normalize(ctx, output); err != nil {
+			return task.StepResult{}, err
+		}
+		if err := prepared.VerifyCoverageExecutionAfter(); err != nil {
+			return task.StepResult{}, err
+		}
+		return task.StepResult{Verdict: task.StepVerdictSucceeded}, nil
 	case task.ServiceActionCoverageReport:
 		execution.setFailedPhase(coveragerun.PhaseReport)
 		run, err := execution.finishEmbedded(ctx, execution.config.Clock.Now(), task.OutcomeSucceeded)
@@ -1059,6 +1072,10 @@ func (execution *execution) prepareTests(ctx context.Context, current task.Task)
 	if prepared == nil {
 		execution.setFailedPhase(coveragerun.PhaseTest)
 		return nil, task.ErrInvalidArgument
+	}
+	if err := execution.adapter.PrepareTests(ctx, prepared); err != nil {
+		execution.setFailedPhase(coveragerun.PhaseTest)
+		return nil, err
 	}
 	if len(targets) != 0 {
 		prepared = &preparedBuildWithTargets{PreparedBuild: prepared, targets: targets}
@@ -1172,19 +1189,23 @@ func (execution *execution) prepareCollector(ctx context.Context) ([]task.Execut
 		execution.setFailedPhase(coveragerun.PhaseTest)
 		return nil, task.ErrInvalidArgument
 	}
-	manifest, err := execution.adapter.SealProfiles(expectations, outcomes)
+	reasonList, err := execution.adapter.SealEvidence(expectations, outcomes)
 	if err != nil {
 		execution.setFailedPhase(coveragerun.PhaseTest)
 		return nil, err
 	}
 	execution.mu.Lock()
-	execution.manifest = &manifest
 	binaries := make([]coveragerun.TrustedPath, len(execution.binaries))
 	for index, binary := range execution.binaries {
 		binaries[index] = binary
 	}
+	prepared := execution.prepared
+	root := execution.root
 	execution.mu.Unlock()
-	merge, export, err := execution.adapter.Collector(manifest, binaries)
+	if prepared == nil || root == nil {
+		return nil, task.ErrInvalidArgument
+	}
+	collection, err := execution.adapter.PrepareCollector(ctx, prepared, root.CollectorRoot(), binaries)
 	if err != nil {
 		execution.setFailedPhase(coveragerun.PhaseMerge)
 		return nil, err
@@ -1197,8 +1218,8 @@ func (execution *execution) prepareCollector(ctx context.Context) ([]task.Execut
 	for _, result := range run.Results {
 		assertionFailure = assertionFailure || result.Outcome == testdomain.ItemFailed
 	}
-	reasons := make(map[coveragedomain.CompletenessReason]struct{}, len(manifest.PartialReasons))
-	for _, reason := range manifest.PartialReasons {
+	reasons := make(map[coveragedomain.CompletenessReason]struct{}, len(reasonList))
+	for _, reason := range reasonList {
 		reasons[reason] = struct{}{}
 	}
 	if err := execution.applyPhase(coveragerun.StepResult{
@@ -1220,7 +1241,7 @@ func (execution *execution) prepareCollector(ctx context.Context) ([]task.Execut
 		})
 	}
 	execution.mu.Unlock()
-	steps, err := collectorSteps(merge, export)
+	steps, err := collectorSteps(collection)
 	if err != nil {
 		return nil, err
 	}
@@ -1228,25 +1249,13 @@ func (execution *execution) prepareCollector(ctx context.Context) ([]task.Execut
 	return steps, nil
 }
 
-func (execution *execution) normalize() error {
+func (execution *execution) normalize(ctx context.Context, pinned coverageplatform.Output) error {
 	execution.mu.Lock()
 	raw := append([]byte(nil), execution.exportOutput.Bytes()...)
 	state := execution.state
 	profile := execution.profile
 	execution.mu.Unlock()
 	limits := coveragenormalize.DefaultLimits()
-	parsed, err := llvm.Parse(bytes.NewReader(raw), llvm.Limits{
-		MaxInputBytes:  limits.MaxInputBytes,
-		MaxDepth:       limits.MaxDepth,
-		MaxFiles:       limits.MaxFiles,
-		MaxFunctions:   limits.MaxFunctions,
-		MaxLines:       limits.MaxLines,
-		MaxBranches:    limits.MaxBranches,
-		MaxStringBytes: limits.MaxStringBytes,
-	})
-	if err != nil {
-		return err
-	}
 	matcher, err := coveragenormalize.NewGlobMatcher(profile.Include, profile.Exclude)
 	if err != nil {
 		return err
@@ -1256,13 +1265,16 @@ func (execution *execution) normalize() error {
 		completeness.Outcome = coveragedomain.OutcomePartial
 		completeness.Reasons = append([]coveragedomain.CompletenessReason(nil), state.PartialReasons...)
 	}
-	document, bindings, err := coveragenormalize.NormalizeLLVM(coveragenormalize.LLVMInput{
-		Export:        parsed,
-		WorkspaceRoot: execution.config.WorkspaceRoot.NativePath,
-		Matcher:       matcher,
-		Toolchain:     execution.run.Toolchain,
-		Completeness:  completeness,
-		Limits:        limits,
+	execution.mu.Lock()
+	adapter := execution.adapter
+	execution.mu.Unlock()
+	if adapter == nil {
+		return task.ErrInvalidArgument
+	}
+	document, bindings, err := adapter.Normalize(ctx, NormalizeInput{
+		ProcessOutput: raw, PinnedOutput: pinned,
+		WorkspaceRoot: execution.config.WorkspaceRoot.NativePath, Matcher: matcher,
+		Toolchain: execution.run.Toolchain, Completeness: completeness, Limits: limits,
 	})
 	if err != nil {
 		return err
@@ -1412,19 +1424,14 @@ func (execution *execution) closeRuntime() error {
 	execution.closeOnce.Do(func() {
 		execution.mu.Lock()
 		prepared := execution.prepared
-		manifest := execution.manifest
 		binaries := append([]*retainedFile(nil), execution.binaries...)
 		adapter := execution.adapter
 		root := execution.root
-		execution.manifest = nil
 		execution.binaries = nil
 		execution.adapter = nil
 		execution.mu.Unlock()
 		if prepared != nil {
 			prepared.ReleaseIfUnadopted()
-		}
-		if manifest != nil {
-			execution.closeErr = errors.Join(execution.closeErr, manifest.Close())
 		}
 		for _, binary := range binaries {
 			execution.closeErr = errors.Join(execution.closeErr, binary.Close())

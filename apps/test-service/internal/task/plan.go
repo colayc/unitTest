@@ -78,6 +78,7 @@ type CommandSummary struct {
 type ServiceAction string
 
 const (
+	ServiceActionCoverageNormalize ServiceAction = "coverage-normalize"
 	ServiceActionCoverageReport  ServiceAction = "coverage-report"
 	ServiceActionCoveragePublish ServiceAction = "coverage-publish"
 )
@@ -215,6 +216,8 @@ func validExecutionStep(step ExecutionStep, boundary ExecutionBoundary) bool {
 
 func validServiceAction(kind StepKind, action ServiceAction) bool {
 	switch action {
+	case ServiceActionCoverageNormalize:
+		return kind == StepCoverageNormalize
 	case ServiceActionCoverageReport:
 		return kind == StepCoverageReport
 	case ServiceActionCoveragePublish:

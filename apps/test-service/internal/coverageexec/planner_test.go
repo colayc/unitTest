@@ -91,10 +91,11 @@ func TestPlannerBuildsTheOnlyAllowedCoveragePhaseOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	collector, err := collectorSteps(
-		task.ProcessSpec{Executable: "llvm-profdata", Dir: "profiles"},
-		task.ProcessSpec{Executable: "llvm-cov", Dir: "profiles"},
-	)
+	normalize := task.ProcessSpec{Executable: "llvm-cov", Dir: "profiles"}
+	collector, err := collectorSteps(CollectionPlan{
+		Aggregate: task.ProcessSpec{Executable: "llvm-profdata", Dir: "profiles"},
+		Normalize: &normalize,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,5 +115,18 @@ func TestPlannerBuildsTheOnlyAllowedCoveragePhaseOrder(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("coverage phase order = %v, want %v", got, want)
+	}
+}
+
+func TestPlannerBuildsGCCServiceNormalizeAfterCollector(t *testing.T) {
+	collector, err := collectorSteps(CollectionPlan{Aggregate: task.ProcessSpec{Executable: "gcovr", Dir: "collector"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(collector) != 2 || collector[0].Kind != task.StepCoverageMerge ||
+		collector[1].Kind != task.StepCoverageNormalize ||
+		collector[1].Action != task.ServiceActionCoverageNormalize ||
+		collector[1].Process.Executable != "" {
+		t.Fatalf("GCC collector steps = %#v", collector)
 	}
 }

@@ -440,7 +440,7 @@ func (processes *productionUnsupportedProcesses) count() int {
 	return processes.calls
 }
 
-func TestDefaultLinuxCoverageWrapperTerminalizesWithoutNativePreparationOrExecutionRoot(t *testing.T) {
+func TestDefaultLinuxCoverageWrapperEntersNativeCoordinatorAndFailsClosed(t *testing.T) {
 	base := t.TempDir()
 	workspacePath := filepath.Join(base, "workspace")
 	if err := os.MkdirAll(filepath.Join(workspacePath, ".unit-test-ide"), 0o700); err != nil {
@@ -528,7 +528,7 @@ func TestDefaultLinuxCoverageWrapperTerminalizesWithoutNativePreparationOrExecut
 	}
 	t.Cleanup(func() { _ = executor.Close() })
 	platform, ok := executor.(*platformCoverageExecutor)
-	if !ok || platform.native {
+	if !ok || !platform.native {
 		t.Fatalf("Linux default coverage executor = %#v", executor)
 	}
 	if _, ok := platform.coordinator.(*coverageexec.Coordinator); !ok {
@@ -550,10 +550,10 @@ func TestDefaultLinuxCoverageWrapperTerminalizesWithoutNativePreparationOrExecut
 	page, artifactErr := store.ListArtifacts(context.Background(), persisted.ID, "", 10)
 	entries, rootErr := os.ReadDir(executionRoot)
 	if err != nil || runErr != nil || artifactErr != nil || rootErr != nil ||
-		finished.Status != task.StatusFinished || finished.Outcome != task.OutcomeInfrastructureFailed ||
+		finished.Status != task.StatusFinished || finished.Outcome != task.OutcomeCommandFailed ||
 		run.Status != coveragedomain.StatusFinished || run.Outcome != coveragedomain.OutcomeUnavailable ||
-		run.Reason != coveragedomain.ReasonInstrumentationFailed || run.ReportID != "" || len(page.Items) != 0 ||
-		buildPreparer.calls != 0 || processes.count() != 0 || len(entries) != 0 {
+		run.Reason != coveragedomain.ReasonBuildFailed || run.ReportID != "" || len(page.Items) != 0 ||
+		buildPreparer.calls != 1 || processes.count() != 0 || len(entries) != 0 {
 		t.Fatalf("Linux production terminal: task=%#v/%v run=%#v/%v artifacts=%#v/%v build=%d process=%d root=%#v/%v",
 			finished, err, run, runErr, page.Items, artifactErr, buildPreparer.calls, processes.count(), entries, rootErr)
 	}

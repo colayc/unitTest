@@ -3,6 +3,7 @@
 package coverageexec
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -23,6 +24,9 @@ import (
 	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/coveragellvm"
 	"unit-test-ide.local/test-service/internal/coverageplatform"
+	coveragemodelv1 "unit-test-ide.local/test-service/internal/coveragemodel/v1"
+	"unit-test-ide.local/test-service/internal/coveragenormalize"
+	"unit-test-ide.local/test-service/internal/coverageparser/llvm"
 	"unit-test-ide.local/test-service/internal/coveragerun"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/testdomain"
@@ -635,13 +639,14 @@ func (adapter *orchestrationPreparedAdapter) RelinquishToolsetOwnership() {
 	adapter.ownsToolset = false
 	adapter.mu.Unlock()
 }
-func (adapter *orchestrationPreparedAdapter) Instrumentation() coveragellvm.Instrumentation {
+func (adapter *orchestrationPreparedAdapter) Instrumentation() coverageplatform.Instrumentation {
 	return adapter.instrumentation
 }
 func (adapter *orchestrationPreparedAdapter) Allocator() testrun.ProfileAllocator {
 	return adapter.allocator
 }
-func (adapter *orchestrationPreparedAdapter) SealProfiles(expectations []testrun.ProfileExpectation, outcomes []testrun.InvocationOutcome) (coveragellvm.Manifest, error) {
+func (adapter *orchestrationPreparedAdapter) PrepareTests(context.Context, PreparedBuild) error { return nil }
+func (adapter *orchestrationPreparedAdapter) SealEvidence(expectations []testrun.ProfileExpectation, outcomes []testrun.InvocationOutcome) ([]coveragedomain.CompletenessReason, error) {
 	manifest, err := coveragellvm.SealProfiles(adapter.profileRoot, expectations, outcomes)
 	if err == nil {
 		copy := manifest
@@ -650,12 +655,17 @@ func (adapter *orchestrationPreparedAdapter) SealProfiles(expectations []testrun
 		adapter.manifest = &copy
 		adapter.mu.Unlock()
 	}
-	return manifest, err
+	return append([]coveragedomain.CompletenessReason(nil), manifest.PartialReasons...), err
 }
-func (adapter *orchestrationPreparedAdapter) Collector(_ coveragellvm.Manifest, _ []coveragerun.TrustedPath) (task.ProcessSpec, task.ProcessSpec, error) {
+func (adapter *orchestrationPreparedAdapter) PrepareCollector(_ context.Context, _ PreparedBuild, _ coverageplatform.DirectoryVerifier, _ []coveragerun.TrustedPath) (CollectionPlan, error) {
 	dir := filepath.Dir(adapter.profileRoot)
-	return task.ProcessSpec{Executable: adapter.toolset.Profdata().Path(), Args: []string{"--merge"}, Dir: dir},
-		task.ProcessSpec{Executable: adapter.toolset.Cov().Path(), Args: []string{"--export"}, Dir: dir}, nil
+	normalize := task.ProcessSpec{Executable: adapter.toolset.Cov().Path(), Args: []string{"--export"}, Dir: dir}
+	return CollectionPlan{Aggregate: task.ProcessSpec{Executable: adapter.toolset.Profdata().Path(), Args: []string{"--merge"}, Dir: dir}, Normalize: &normalize}, nil
+}
+func (*orchestrationPreparedAdapter) Normalize(_ context.Context, input NormalizeInput) (coveragemodelv1.CoverageDocumentV1, []coveragenormalize.SourceBinding, error) {
+	parsed, err := llvm.Parse(bytes.NewReader(input.ProcessOutput), llvm.Limits{MaxInputBytes: input.Limits.MaxInputBytes, MaxDepth: input.Limits.MaxDepth, MaxFiles: input.Limits.MaxFiles, MaxFunctions: input.Limits.MaxFunctions, MaxLines: input.Limits.MaxLines, MaxBranches: input.Limits.MaxBranches, MaxStringBytes: input.Limits.MaxStringBytes})
+	if err != nil { return coveragemodelv1.CoverageDocumentV1{}, nil, err }
+	return coveragenormalize.NormalizeLLVM(coveragenormalize.LLVMInput{Export: parsed, WorkspaceRoot: input.WorkspaceRoot, Matcher: input.Matcher, Toolchain: input.Toolchain, Completeness: input.Completeness, Limits: input.Limits})
 }
 func (adapter *orchestrationPreparedAdapter) Close() error {
 	var result error
@@ -668,6 +678,10 @@ func (adapter *orchestrationPreparedAdapter) Close() error {
 		if closer, ok := adapter.allocator.(io.Closer); ok {
 			result = errors.Join(result, closer.Close())
 		}
+		adapter.mu.Lock()
+		manifest := adapter.manifest
+		adapter.mu.Unlock()
+		if manifest != nil { result = errors.Join(result, manifest.Close()) }
 		if ownsToolset {
 			result = errors.Join(result, adapter.toolset.Close())
 		}
