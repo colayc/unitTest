@@ -30,6 +30,8 @@ export interface LinuxGccCoverageEvidence {
   readonly platform: "linux-x64";
   readonly toolchain: { readonly family: "gcc"; readonly digest: string };
   readonly bundleDigest: string;
+  readonly frameworkBundleDigest: string;
+  readonly faults: readonly LinuxGccFaultEvidence[];
   readonly cases: readonly LinuxGccCoverageCaseEvidence[];
   readonly determinism: {
     readonly coverageJsonByteIdentical: true;
@@ -37,6 +39,13 @@ export interface LinuxGccCoverageEvidence {
   };
   readonly startedAt: string;
   readonly finishedAt: string;
+}
+
+export interface LinuxGccFaultEvidence {
+  readonly fault: TestOnlyCoverageFault;
+  readonly testRunOutcome: string;
+  readonly coverageRunOutcome: string;
+  readonly reason: string;
 }
 
 export interface LinuxGccCoverageCaseEvidence {
@@ -90,14 +99,14 @@ const TEST_ONLY_COVERAGE_FAULTS = new Set<TestOnlyCoverageFault>([
 ]);
 const FIXTURE_METRICS: Readonly<Record<LinuxGccCoverageCaseEvidence["framework"], LinuxGccCoverageCaseEvidence["summary"]>> = {
   cpputest: {
-    lines: { covered: 2, total: 3 },
-    branches: { covered: 1, total: 2 },
-    functions: { covered: 1, total: 1 }
+    lines: { covered: 7, total: 8 },
+    branches: { covered: 3, total: 4 },
+    functions: { covered: 2, total: 2 }
   },
   unity: {
-    lines: { covered: 3, total: 3 },
+    lines: { covered: 6, total: 6 },
     branches: { covered: 2, total: 2 },
-    functions: { covered: 1, total: 1 }
+    functions: { covered: 2, total: 2 }
   }
 };
 
@@ -111,6 +120,8 @@ export function buildLinuxGccCoverageEvidence(
     platform: "linux-x64",
     toolchain: { family: "gcc", digest: input.toolchain.digest },
     bundleDigest: input.bundleDigest,
+    frameworkBundleDigest: input.frameworkBundleDigest,
+    faults: input.faults.map((entry) => ({ ...entry })),
     cases: input.cases.map((entry) => ({
       framework: entry.framework,
       testRunOutcome: entry.testRunOutcome,
@@ -132,14 +143,30 @@ export function buildLinuxGccCoverageEvidence(
 /** Rejects schema drift and values that could disclose native execution inputs. */
 export function validateLinuxGccCoverageEvidence(value: unknown): asserts value is LinuxGccCoverageEvidence {
   const evidence = closedObject(value, [
-    "schemaVersion", "platform", "toolchain", "bundleDigest", "cases", "determinism", "startedAt", "finishedAt"
+    "schemaVersion", "platform", "toolchain", "bundleDigest", "frameworkBundleDigest", "faults", "cases", "determinism", "startedAt", "finishedAt"
   ], "evidence");
   if (evidence.schemaVersion !== 1 || evidence.platform !== "linux-x64") {
     throw linuxEvidenceError("has an invalid identity");
   }
   const toolchain = closedObject(evidence.toolchain, ["family", "digest"], "toolchain");
-  if (toolchain.family !== "gcc" || !isDigest(toolchain.digest) || !isDigest(evidence.bundleDigest)) {
+  if (toolchain.family !== "gcc" || !isDigest(toolchain.digest) || !isDigest(evidence.bundleDigest) || !isDigest(evidence.frameworkBundleDigest)) {
     throw linuxEvidenceError("has an invalid toolchain or bundle digest");
+  }
+  const mappings: Record<TestOnlyCoverageFault, readonly string[]> = {
+    crash: ["errored", "partial", "none"],
+    timeout: ["timed_out", "cancelled", "task_timed_out"],
+    cancel: ["cancelled", "cancelled", "user_cancelled"],
+    "missing-data": ["passed", "unavailable", "profile_collection_failed"],
+    "malformed-pinned-json": ["passed", "unavailable", "normalization_failed"]
+  };
+  if (!Array.isArray(evidence.faults) || evidence.faults.length !== 5) throw linuxEvidenceError("must prove all five fault mappings");
+  const seenFaults = new Set<string>();
+  for (const value of evidence.faults) {
+    const entry = closedObject(value, ["fault", "testRunOutcome", "coverageRunOutcome", "reason"], "fault");
+    if (typeof entry.fault !== "string" || !Object.hasOwn(mappings, entry.fault) || seenFaults.has(entry.fault)) throw linuxEvidenceError("has an invalid fault mapping");
+    const expected = mappings[entry.fault as TestOnlyCoverageFault];
+    if (entry.testRunOutcome !== expected[0] || entry.coverageRunOutcome !== expected[1] || entry.reason !== expected[2]) throw linuxEvidenceError("has an invalid fault mapping");
+    seenFaults.add(entry.fault);
   }
   if (!Array.isArray(evidence.cases) || evidence.cases.length !== 2) {
     throw linuxEvidenceError("must contain exactly the CppUTest and Unity cases");

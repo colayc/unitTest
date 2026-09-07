@@ -3,6 +3,7 @@ import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { createGccFaultOverlay } from "./coverage-service-smoke-linux-support.js";
 import {
   buildLinuxGccCoverageEvidence,
   executeCoverageServiceSmoke,
@@ -19,11 +20,30 @@ const itemB = `utid-v1-${"b".repeat(64)}`;
 const container = `utid-v1-${"c".repeat(64)}`;
 const unavailableMessage = "SKIP: verified clang-cl coverage toolset is unavailable";
 
+test("Linux fault overlay fails closed when its production seam changes", async () => {
+  const source = await readFile(new URL("../../../../apps/test-service/internal/runtime/coverage_execution.go", import.meta.url), "utf8").catch(() =>
+    readFile(new URL("../../../../../apps/test-service/internal/runtime/coverage_execution.go", import.meta.url), "utf8"));
+  for (const fault of ["missing-data", "malformed-pinned-json"] as const) {
+    const changed = createGccFaultOverlay(source, fault);
+    assert.notEqual(changed, source);
+    assert.throws(() => createGccFaultOverlay("package runtime", fault), /test-only overlay seam/u);
+    assert.throws(() => createGccFaultOverlay(source + source, fault), /test-only overlay seam/u);
+  }
+});
+
 const linuxEvidence = {
   schemaVersion: 1,
   platform: "linux-x64",
   toolchain: { family: "gcc", digest: "a".repeat(64) },
   bundleDigest: "b".repeat(64),
+  frameworkBundleDigest: "e".repeat(64),
+  faults: [
+    { fault: "crash", testRunOutcome: "errored", coverageRunOutcome: "partial", reason: "none" },
+    { fault: "timeout", testRunOutcome: "timed_out", coverageRunOutcome: "cancelled", reason: "task_timed_out" },
+    { fault: "cancel", testRunOutcome: "cancelled", coverageRunOutcome: "cancelled", reason: "user_cancelled" },
+    { fault: "missing-data", testRunOutcome: "passed", coverageRunOutcome: "unavailable", reason: "profile_collection_failed" },
+    { fault: "malformed-pinned-json", testRunOutcome: "passed", coverageRunOutcome: "unavailable", reason: "normalization_failed" }
+  ],
   cases: [
     {
       framework: "cpputest",
@@ -31,9 +51,9 @@ const linuxEvidence = {
       coverageRunOutcome: "available",
       reportOutcome: "available",
       summary: {
-        lines: { covered: 2, total: 3 },
-        branches: { covered: 1, total: 2 },
-        functions: { covered: 1, total: 1 }
+        lines: { covered: 7, total: 8 },
+        branches: { covered: 3, total: 4 },
+        functions: { covered: 2, total: 2 }
       },
       artifactDigest: "c".repeat(64)
     },
@@ -43,9 +63,9 @@ const linuxEvidence = {
       coverageRunOutcome: "available",
       reportOutcome: "available",
       summary: {
-        lines: { covered: 3, total: 3 },
+        lines: { covered: 6, total: 6 },
         branches: { covered: 2, total: 2 },
-        functions: { covered: 1, total: 1 }
+        functions: { covered: 2, total: 2 }
       },
       artifactDigest: "d".repeat(64)
     }
@@ -63,6 +83,9 @@ test("Linux GCC evidence is a path-free closed schema", () => {
 
 test("Linux GCC evidence rejects paths, process inputs, secrets and additional properties", () => {
   const invalid = [
+    { ...linuxEvidence, faults: [] },
+    { ...linuxEvidence, faults: [...linuxEvidence.faults.slice(1), linuxEvidence.faults[1]] },
+    { ...linuxEvidence, faults: [{ ...linuxEvidence.faults[0], reason: "normalization_failed" }, ...linuxEvidence.faults.slice(1)] },
     { ...linuxEvidence, workspacePath: "/tmp/leak" },
     { ...linuxEvidence, environment: { HOME: "/tmp/leak" } },
     { ...linuxEvidence, argv: ["gcovr"] },

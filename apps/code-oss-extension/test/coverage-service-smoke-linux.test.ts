@@ -1,60 +1,306 @@
 import assert from "node:assert/strict";
-import { lstat } from "node:fs/promises";
+import { execFile as execCallback, spawn } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
+import { once } from "node:events";
+import { createConnection } from "node:net";
+import { cp, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import {
-  buildLinuxGccCoverageEvidence,
-  type LinuxGccCoverageEvidence
-} from "./coverage-service-smoke-support.js";
+import { promisify } from "node:util";
+import { pathToFileURL } from "node:url";
+import { ProtocolClient, ProtocolError, TestSelectionModeV14, type CoverageRun, type WorkspaceSnapshot, type ProtocolArtifactMetadata } from "@unit-test-ide/test-client";
+import { decodeCoverageDocumentV1 } from "@unit-test-ide/coverage-models";
+import { ServiceManager } from "../src/service-manager.js";
+import { createCoverageController } from "../src/coverage-controller.js";
+import { openCoverageHtml } from "../src/coverage-viewer.js";
+import { redactServiceError } from "../src/service-resources.js";
+import { buildLinuxGccCoverageEvidence, parseStrictJUnit, publishEvidenceAtomically, type LinuxGccCoverageCaseEvidence, type LinuxGccFaultEvidence, type TestOnlyCoverageFault } from "./coverage-service-smoke-support.js";
+import { createGccFaultOverlay } from "./coverage-service-smoke-linux-support.js";
 
-const repositoryRoot = resolve(import.meta.dirname, "../../../..");
-const linuxFixtureRoot = join(repositoryRoot, "apps", "code-oss-extension", "test", "fixtures");
+const execFile = promisify(execCallback);
+const root = resolve(import.meta.dirname, "../../../..");
+const timeout = 300_000;
+const projectId = "coverage-fixture";
+const coverageProfileId = "coverage-gcc";
+const evidencePath = join(root, ".native-e2e/artifacts/linux/coverage-execution-report.json");
+const delay = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
+const digest = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
+type Framework = "cpputest" | "unity";
+type Selected = ReturnType<typeof selectGcc>;
 
-/**
- * This is the Linux-only production smoke entrypoint. Task 9 supplies the
- * offline process-tree boundary and locked framework bootstrap; until then a
- * missing prerequisite is an explicit deferred native test, never a Windows
- * substitution or a PASS evidence artifact.
- */
-test("Linux GCC production coverage smoke has a sealed Unix-socket fixture contract", {
-  skip: process.platform !== "linux" ? "Linux GCC smoke runs only on Linux" : false
-}, async (t) => {
-  const bundleRoot = process.env.UNIT_TEST_IDE_TEST_COVERAGE_BUNDLE_ROOT;
-  if (bundleRoot === undefined || !isExactAbsolute(bundleRoot)) {
-    t.skip("DEFERRED: Task 9 must provide an explicit exact test-only coverage bundle seam");
-    return;
+function selectGcc(snapshot: WorkspaceSnapshot) {
+  const project = snapshot.projects.find((item) => item.projectId === projectId);
+  const choices = snapshot.toolchains.filter((tool) => tool.family === "gcc" && tool.hostArchitecture === "x64" && tool.targetArchitecture === "x64" && tool.capabilities.coverageDrivers.some((driver) => driver === "gcov"))
+    .sort((a, b) => a.toolchainId.localeCompare(b.toolchainId, "en"));
+  for (const toolchain of choices) {
+    const profile = project?.buildProfiles.find((item) => item.toolchainId === toolchain.toolchainId && item.generator === "Ninja" && item.configuration === "Debug" && item.origin === "generated");
+    if (profile) return { snapshot, toolchain, profile };
   }
-  for (const fixture of ["coverage", "coverage-unity"]) {
-    try {
-      await lstat(join(linuxFixtureRoot, fixture));
-    } catch {
-      assert.fail(`required Linux framework fixture is unavailable: ${fixture}`);
+  throw new Error("verified GCC/gcov Debug Ninja profile is unavailable");
+}
+
+async function taskFinished(client: ProtocolClient, id: string) {
+  const deadline = Date.now() + timeout;
+  for (;;) {
+    const task = await client.getTask(id);
+    if (task.status === "finished") { assert.equal(task.outcome, "succeeded"); return task; }
+    if (Date.now() >= deadline) throw new Error("native task completion timeout");
+    await delay(100);
+  }
+}
+
+async function coverageFinished(client: ProtocolClient, id: string): Promise<CoverageRun> {
+  const deadline = Date.now() + timeout;
+  for (;;) {
+    const run = await client.getCoverageRun(id);
+    if (run.status === "finished") return run;
+    if (Date.now() >= deadline) throw new Error("native coverage completion timeout");
+    await delay(100);
+  }
+}
+
+async function config(workspace: string, framework: Framework, base?: string) {
+  await mkdir(join(workspace, ".unit-test-ide"), { recursive: true });
+  await writeFile(join(workspace, ".unit-test-ide/workspace.json"), JSON.stringify({
+    version: 3,
+    projects: [{ id: projectId, sourceDir: ".", fallback: { configurations: ["Debug"], preferredGenerator: "Ninja" }, tests: { containers: [{ ctestName: framework === "unity" ? "coverage-unity-tests" : "coverage-tests", framework }] } }],
+    ...(base ? { coverageProfiles: [{ id: coverageProfileId, baseBuildProfileId: base, include: ["src/**"], exclude: ["test/**"] }] } : {})
+  }));
+}
+
+/** No shell interpolation: CMake bracket arguments are closed over verified paths. */
+function cmakePath(value: string): string {
+  assert.ok(value.startsWith("/") && value === resolve(value) && !/[\r\n\0]/u.test(value) && !value.includes("]=]"));
+  return `[=[${value}]=]`;
+}
+
+async function injectFixtureFault(workspace: string, fault: TestOnlyCoverageFault): Promise<string | undefined> {
+  if (fault === "missing-data" || fault === "malformed-pinned-json") return undefined;
+  const marker = join(workspace, "test-only-invocation-started");
+  const body = fault === "crash" ? "if (__gcov_dump) __gcov_dump(); raise(SIGSEGV);" : "sleep(240);";
+  // Compile-time fixture seam, not environment/Workspace/Protocol configuration.
+  const preamble = `#include <signal.h>\n#include <stdio.h>\n#include <unistd.h>\nextern void __gcov_dump(void) __attribute__((weak));\nstatic void test_only_fault(void) { FILE *f = fopen(${JSON.stringify(marker)}, "w"); if (f) { fputs("started", f); fclose(f); } ${body} }\n`;
+  const path = join(workspace, "test/test_math.c");
+  const source = await readFile(path, "utf8");
+  const needle = "void test_covers_positive_branch(void) {";
+  assert.equal(source.split(needle).length, 2);
+  await writeFile(path, preamble + source.replace(needle, `${needle}\n test_only_fault();`));
+  return marker;
+}
+
+async function artifacts(client: ProtocolClient, run: CoverageRun, framework: Framework, selected: Selected, catalogRevision: string, partial = false) {
+  assert.ok(run.reportId);
+  const report = await client.getCoverageReport(run.reportId);
+  const metadata: ProtocolArtifactMetadata[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await client.listArtifacts(run.taskId, { limit: 200, ...(cursor ? { cursor } : {}) });
+    metadata.push(...page.items); cursor = page.nextCursor;
+  } while (cursor !== undefined);
+  const data = new Map<string, Uint8Array>();
+  for (const kind of ["coverage-json", "junit-xml", "coverage-html"] as const) {
+    const matches = metadata.filter((item) => item.kind === kind);
+    assert.equal(matches.length, 1);
+    const item = matches[0]!;
+    // readArtifact owns the v1.4 offset/chunk/total size/digest protocol checks.
+    const bytes = await client.readArtifact(item.artifactId);
+    assert.equal(bytes.byteLength, item.sizeBytes);
+    assert.equal(digest(bytes), item.sha256);
+    if (kind === "coverage-json") assert.equal(item.artifactId, report.artifactId);
+    data.set(kind, bytes);
+  }
+  const bytes = data.get("coverage-json")!;
+  const document = decodeCoverageDocumentV1(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)));
+  assert.deepEqual(document.summary, report.summary);
+  assert.deepEqual(document.provenance, report.toolProvenance);
+  assert.equal(document.provenance.platform, "linux");
+  assert.equal(document.provenance.architecture, "x64");
+  assert.equal(document.provenance.compiler.family, "gcc");
+  assert.equal(document.provenance.compiler.version, selected.toolchain.version);
+  assert.equal(document.provenance.driver.name, "gcov");
+  assert.equal(document.provenance.driver.version, selected.toolchain.version);
+  assert.deepEqual(document.provenance.collector, { name: "gcovr", version: "8.6" });
+  assert.deepEqual(document.files.map((item) => item.uri), [framework === "unity" ? "src/math.c" : "src/math.cpp"]);
+  const junit = parseStrictJUnit(data.get("junit-xml")!);
+  assert.equal(junit.tests, 2);
+  if (!partial) assert.deepEqual(junit, { tests: 2, failures: framework === "cpputest" ? 1 : 0, errors: 0, skipped: 0 });
+  let html = "";
+  await openCoverageHtml({ openCoverageHtml: (value) => { html = value; } }, { kind: "coverage-html", bytes: data.get("coverage-html")! });
+  assert.match(html, /Content-Security-Policy/u);
+  assert.match(html, /default-src 'none'/u);
+  assert.match(html, /Completeness:/u);
+  for (const file of document.files) { assert.ok(html.includes(file.uri)); assert.ok(html.includes(file.sha256)); }
+  assert.doesNotMatch(html, /https?:\/\//iu);
+  const controller = createCoverageController({ readContext: () => ({ trust: "trusted", client, serviceRunning: true, workspaceGeneration: selected.snapshot.workspaceGeneration, catalog: { projectId, profileId: selected.profile.buildProfileId, revision: catalogRevision, workspaceGeneration: selected.snapshot.workspaceGeneration }, coverageProfileId }) });
+  try {
+    const state = await controller.refresh(run.coverageRunId);
+    assert.equal(state.state, partial ? "partial" : "available");
+    assert.equal(state.reportId, report.reportId);
+    assert.deepEqual(state.summary, report.summary);
+  } finally { controller.dispose(); }
+  return { bytes, document, report, data };
+}
+
+test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault mappings", { skip: process.platform !== "linux" ? "Linux-native smoke requires Linux" : false, timeout: 30 * 60_000 }, async () => {
+  await rm(evidencePath, { force: true });
+  const startedAt = new Date().toISOString();
+  const bundleInput = process.env.UNIT_TEST_IDE_TEST_COVERAGE_BUNDLE_ROOT;
+  const lockedBundle = join(root, ".superpowers/runtime/coverage-bundle/linux-x64");
+  assert.equal(bundleInput, lockedBundle, "an explicit, exact locked test-only coverage bundle input is required");
+  // Real namespace/socket/DNS proof; an environment variable cannot bypass it.
+  await execFile(process.execPath, [join(root, "tools/linux-offline/probe.mjs")], { timeout: 30_000 });
+  await execFile(process.execPath, [join(root, "tools/coverage-bundle/prepare.mjs"), "--check"], { cwd: root, timeout });
+  const buildRoot = join(root, "build");
+  await mkdir(buildRoot, { recursive: true });
+  const scratch = await mkdtemp(join(buildRoot, "linux-gcc-smoke-"));
+  const secret = `linux-gcc-smoke-${randomBytes(16).toString("hex")}`;
+  const sensitive = [scratch, lockedBundle, secret, root];
+  let manager: ServiceManager | undefined;
+  try {
+    const go = process.env.UNIT_TEST_IDE_GO_EXECUTABLE || "go";
+    const goEnv = { ...process.env, GOENV: "off", GOTOOLCHAIN: "local" };
+    const service = join(scratch, "unit-test-service");
+    const generator = join(scratch, "unity-runner-generator");
+    await execFile(go, ["build", "-trimpath", "-o", service, "./apps/test-service/cmd/unit-test-service"], { cwd: root, env: goEnv, timeout });
+    await execFile(go, ["build", "-trimpath", "-o", generator, "./apps/test-service/cmd/unity-runner-generator"], { cwd: root, env: goEnv, timeout });
+    const { prepareLinuxFrameworkInputs } = await import(pathToFileURL(join(root, "tools/service-probe/dist/linux-framework-inputs.js")).href);
+    const frameworkBoundary = await prepareLinuxFrameworkInputs({
+      manifest: JSON.parse(await readFile(join(root, "tools/framework-bundle/manifest.json"), "utf8")), cacheRoot: join(root, ".superpowers/cache/framework-bundle"), sourceRoot: join(root, ".superpowers/runtime/framework-bundle/linux-x64"), helperPath: join(root, "sdk/cmake/UnitTestIDE.cmake"), generatorPath: generator, repositoryRoot: root
+    }) as { identityDigest: string; environment: Record<string, string> };
+    const inputs = frameworkBoundary.environment;
+    await mkdir(join(scratch, "bundles"));
+    await cp(lockedBundle, join(scratch, "bundles/coverage"), { recursive: true, force: false, errorOnExist: true });
+    const bundleDigest = digest(await readFile(join(scratch, "bundles/coverage/manifest.resolved.json")));
+    const faultServices = new Map<string, string>();
+    for (const fault of ["missing-data", "malformed-pinned-json"] as const) {
+      const original = join(root, "apps/test-service/internal/runtime/coverage_execution.go");
+      const replacement = join(scratch, `${fault}.go`);
+      const overlay = join(scratch, `${fault}.json`);
+      await writeFile(replacement, createGccFaultOverlay(await readFile(original, "utf8"), fault));
+      await writeFile(overlay, JSON.stringify({ Replace: { [original]: replacement } }));
+      const binary = join(scratch, `unit-test-service-${fault}`);
+      await execFile(go, ["build", "-trimpath", "-overlay", overlay, "-o", binary, "./apps/test-service/cmd/unit-test-service"], { cwd: root, env: goEnv, timeout });
+      faultServices.set(fault, binary);
     }
-  }
-  // Task 9 replaces this deferred checkpoint with the offline Service process
-  // tree. Keep the expected evidence shape exercised here so no Linux result
-  // can be emitted without both framework cases and deterministic artifacts.
-  const expected = buildLinuxGccCoverageEvidence(expectedEvidence());
-  assert.equal(expected.platform, "linux-x64");
-  t.skip("DEFERRED: Task 9 offline boundary and locked CppUTest/Unity bootstrap are required before native execution");
+    const cases: LinuxGccCoverageCaseEvidence[] = [];
+    const faults: LinuxGccFaultEvidence[] = [];
+    let unityBytes: Uint8Array | undefined;
+    let toolchainDigest = "";
+    for (const scenario of ["cpputest", "unity", "crash", "timeout", "cancel", "missing-data", "malformed-pinned-json"] as const) {
+      const framework: Framework = scenario === "cpputest" ? "cpputest" : "unity";
+      const fault = scenario === "cpputest" || scenario === "unity" ? undefined : scenario;
+      const workspace = join(scratch, scenario);
+      await cp(join(root, "apps/code-oss-extension/test/fixtures", framework === "unity" ? "coverage-unity" : "coverage"), workspace, { recursive: true });
+      await writeFile(join(workspace, "linux-inputs.cmake"), [
+        `set(UTIDE_TEST_CPPUTEST_ROOT ${cmakePath(inputs.UNIT_TEST_IDE_TEST_CPPUTEST_ROOT!)})`,
+        `set(UTIDE_TEST_UNITY_ROOT ${cmakePath(inputs.UNIT_TEST_IDE_TEST_UNITY_ROOT!)})`,
+        `set(UTIDE_TEST_CMAKE_HELPER ${cmakePath(inputs.UNIT_TEST_IDE_TEST_CMAKE_HELPER!)})`,
+        `set(UTIDE_UNITY_RUNNER_GENERATOR ${cmakePath(inputs.UNIT_TEST_IDE_TEST_UNITY_RUNNER_GENERATOR!)})`, ""
+      ].join("\n"));
+      const marker = fault ? await injectFixtureFault(workspace, fault) : undefined;
+      await config(workspace, framework);
+      let wire: Buffer[] = [];
+      let wireSize = 0;
+      let wireOverflow = false;
+      const recordWire = (value: Uint8Array | string) => {
+        const bytes = Buffer.from(value); wireSize += bytes.length;
+        // Never throw out of a socket event handler; the awaited test boundary
+        // below fails closed and retains normal Service teardown ownership.
+        if (wireSize > 64 * 1024 * 1024) { wireOverflow = true; return; }
+        wire.push(bytes);
+      };
+      manager = new ServiceManager({ serviceExecutable: faultServices.get(scenario) ?? service, workspaceRoot: workspace, dataDirectory: join(scratch, `data-${scenario}`), timeoutMs: 120_000, trusted: () => true, operations: {
+        spawnService(binary, args) { return spawn(binary, [...args, "--cmake-bundle-root", join(root, ".bundled-tools/cmake")], { stdio: "pipe", env: { ...process.env, UNIT_TEST_IDE_COVERAGE_SMOKE_SECRET: secret } }); },
+        async connect(endpoint) {
+          const socket = createConnection(endpoint);
+          const write = socket.write.bind(socket) as unknown as (...args: unknown[]) => boolean;
+          socket.write = ((chunk: unknown, ...args: unknown[]) => {
+            if (typeof chunk === "string" || chunk instanceof Uint8Array) recordWire(chunk);
+            return write(chunk, ...args);
+          }) as typeof socket.write;
+          socket.on("data", recordWire);
+          try { await once(socket, "connect"); } catch (error) { socket.destroy(); throw error; }
+          return ProtocolClient.attach(socket);
+        }
+      } });
+      const session = await manager.start();
+      sensitive.push(session.endpoint, session.tokenFile, session.sessionDirectory, await readFile(session.tokenFile, "utf8"));
+      assert.ok((await lstat(session.endpoint)).isSocket(), "Service must expose a real Unix socket");
+      const client = session.client;
+      const caps = await client.getCapabilities();
+      assert.ok("coverageRun" in caps && caps.coverageRun && "coverageReport" in caps && caps.coverageReport);
+      let selected = selectGcc(await client.inspectWorkspace());
+      await config(workspace, framework, selected.profile.buildProfileId);
+      for (let attempt = 0; ; attempt++) {
+        selected = selectGcc(await client.inspectWorkspace());
+        try {
+          const build = await client.startCMakeBuild({ idempotencyKey: randomBytes(16).toString("hex"), workspaceGeneration: selected.snapshot.workspaceGeneration, projectId, buildProfileId: selected.profile.buildProfileId, targetIds: [], jobs: 2, timeoutMs: timeout });
+          await taskFinished(client, build.taskId); break;
+        } catch (error) { if (!(error instanceof ProtocolError) || error.code !== "WORKSPACE_CHANGED" || attempt >= 1) throw error; }
+      }
+      selected = selectGcc(await client.inspectWorkspace());
+      const discovery = await client.discoverTests({ idempotencyKey: randomBytes(16).toString("hex"), projectId, profileId: selected.profile.buildProfileId });
+      await taskFinished(client, discovery.taskId);
+      const catalog = await client.getTestCatalog({ projectId, profileId: selected.profile.buildProfileId, limit: 100 });
+      assert.equal(catalog.partial, false);
+      assert.equal(catalog.items.filter((item) => item.kind === "case").length, 2);
+      selected = selectGcc(await client.inspectWorkspace());
+      const currentDigest = digest(JSON.stringify({ toolchainId: selected.toolchain.toolchainId, version: selected.toolchain.version }));
+      if (!toolchainDigest) toolchainDigest = currentDigest;
+      assert.equal(currentDigest, toolchainDigest);
+      for (let repeat = 0; repeat < (scenario === "unity" ? 2 : 1); repeat++) {
+        // Workspace inspection legitimately includes source URIs; only the
+        // coverage/run/report/artifact exchange is subject to this leak gate.
+        wire = []; wireSize = 0; wireOverflow = false;
+        const initial = await client.startCoverage({ idempotencyKey: randomBytes(16).toString("hex"), workspaceGeneration: selected.snapshot.workspaceGeneration, projectId, coverageProfileId, catalogRevision: catalog.revision, selection: { mode: TestSelectionModeV14.All }, repeatCount: 1, timeoutMs: fault === "timeout" ? 120_000 : timeout });
+        if (fault === "cancel") {
+          assert.ok(marker);
+          const deadline = Date.now() + timeout;
+          while (!(await lstat(marker).catch(() => undefined))?.isFile()) {
+            assert.notEqual((await client.getCoverageRun(initial.coverageRunId)).status, "finished", "cancel fixture must enter test execution");
+            if (Date.now() >= deadline) throw new Error("cancel fixture never entered test execution");
+            await delay(50);
+          }
+          await client.cancelTask(initial.taskId);
+        }
+        const run = await coverageFinished(client, initial.coverageRunId);
+        const testRun = await client.getTestRun(run.testRunId);
+        assert.equal(testRun.status, "completed");
+        if (fault === "cancel" || fault === "timeout") {
+          assert.ok(marker && (await lstat(marker)).isFile(), "timeout/cancel must reach a real native test invocation");
+          assert.equal(run.outcome, "cancelled");
+          assert.equal(run.reason, fault === "cancel" ? "user_cancelled" : "task_timed_out");
+          assert.equal(testRun.outcome, fault === "cancel" ? "cancelled" : "timed_out");
+          assert.equal(run.reportId, undefined);
+        } else if (fault === "missing-data" || fault === "malformed-pinned-json") {
+          assert.equal(run.outcome, "unavailable");
+          assert.equal(run.reason, fault === "missing-data" ? "profile_collection_failed" : "normalization_failed");
+          assert.equal(testRun.outcome, "passed");
+          assert.equal(run.reportId, undefined);
+        } else {
+          assert.equal(run.outcome, fault === "crash" ? "partial" : "available");
+          assert.equal(run.reason, undefined);
+          assert.equal(testRun.outcome, fault === "crash" ? "errored" : framework === "cpputest" ? "failed" : "passed");
+          const result = await artifacts(client, run, framework, selected, catalog.revision, fault === "crash");
+          if (fault === "crash") assert.ok(result.report.completeness.reasons.some((reason) => reason === "test_crashed"));
+          for (const bytes of result.data.values()) for (const value of sensitive) assert.ok(!Buffer.from(bytes).includes(Buffer.from(value)), "artifact leaked a private execution value");
+          if (!fault && repeat === 0) cases.push({ framework, testRunOutcome: framework === "cpputest" ? "failed" : "passed", coverageRunOutcome: "available", reportOutcome: "available", summary: result.document.summary, artifactDigest: digest(result.bytes) });
+          if (scenario === "unity") {
+            if (repeat === 0) unityBytes = result.bytes;
+            else { assert.deepEqual(result.bytes, unityBytes, "equivalent successful runs must be byte-identical"); assert.equal(digest(result.bytes), digest(unityBytes!)); }
+          }
+        }
+        assert.equal(wireOverflow, false, "bounded coverage wire capture exceeded");
+        const publicWire = Buffer.concat(wire);
+        for (const value of sensitive) assert.ok(!publicWire.includes(Buffer.from(value)), "coverage Protocol exchange leaked a private execution value");
+        if (fault) faults.push({ fault, testRunOutcome: testRun.outcome!, coverageRunOutcome: run.outcome!, reason: run.reason ?? "none" });
+      }
+      await manager.stop(); manager = undefined;
+    }
+    const evidence = buildLinuxGccCoverageEvidence({ schemaVersion: 1, platform: "linux-x64", toolchain: { family: "gcc", digest: toolchainDigest }, bundleDigest, frameworkBundleDigest: frameworkBoundary.identityDigest, cases, faults, determinism: { coverageJsonByteIdentical: true, sha256Identical: true }, startedAt, finishedAt: new Date().toISOString() });
+    const bytes = Buffer.from(`${JSON.stringify(evidence)}\n`);
+    await rm(scratch, { recursive: true, force: true });
+    await publishEvidenceAtomically(evidencePath, bytes);
+  } catch (error) { throw redactServiceError(error, sensitive); }
+  finally { try { await manager?.stop(); } finally { await rm(scratch, { recursive: true, force: true }); } }
 });
-
-function isExactAbsolute(value: string): boolean {
-  return value.startsWith("/") && !value.includes("\0") && value === resolve(value);
-}
-
-function expectedEvidence(): LinuxGccCoverageEvidence {
-  return {
-    schemaVersion: 1,
-    platform: "linux-x64",
-    toolchain: { family: "gcc", digest: "a".repeat(64) },
-    bundleDigest: "b".repeat(64),
-    cases: [
-      { framework: "cpputest", testRunOutcome: "failed", coverageRunOutcome: "available", reportOutcome: "available", summary: { lines: { covered: 2, total: 3 }, branches: { covered: 1, total: 2 }, functions: { covered: 1, total: 1 } }, artifactDigest: "c".repeat(64) },
-      { framework: "unity", testRunOutcome: "passed", coverageRunOutcome: "available", reportOutcome: "available", summary: { lines: { covered: 3, total: 3 }, branches: { covered: 2, total: 2 }, functions: { covered: 1, total: 1 } }, artifactDigest: "d".repeat(64) }
-    ],
-    determinism: { coverageJsonByteIdentical: true, sha256Identical: true },
-    startedAt: "2026-09-07T00:00:00.000Z",
-    finishedAt: "2026-09-07T00:00:01.000Z"
-  };
-}
