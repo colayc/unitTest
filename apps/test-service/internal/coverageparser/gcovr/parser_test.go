@@ -2,6 +2,9 @@ package gcovr
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -53,6 +56,66 @@ func TestParseGCovrLockedFormatFixtures(t *testing.T) {
 				t.Fatalf("Parse() = %#v, %v", got, err)
 			}
 		})
+	}
+}
+
+func TestGCovrFixtureProvenancePinsBundleAndFixtureDigests(t *testing.T) {
+	encoded, err := os.ReadFile("testdata/provenance.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var provenance struct {
+		Bundle    struct{ ManifestSHA256, PythonVersion, GCovrVersion string }
+		Generator struct{ Source, SourceSHA256, Command, RawOutputSHA256 string }
+		Fixtures  map[string]struct{ SHA256 string }
+	}
+	if err := json.Unmarshal(encoded, &provenance); err != nil {
+		t.Fatal(err)
+	}
+	if provenance.Bundle.ManifestSHA256 != "62ce3b007ce12261f7d29484ab08ec5e85da63e150d45a2cd26d96b2b4bdb61a" || provenance.Bundle.PythonVersion != "3.14.6" || provenance.Bundle.GCovrVersion != "8.6" {
+		t.Fatalf("bundle provenance = %#v", provenance.Bundle)
+	}
+	manifest, err := os.ReadFile("../../../../../tools/coverage-bundle/manifest.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestDigest := sha256.Sum256(manifest)
+	if provenance.Bundle.ManifestSHA256 != hex.EncodeToString(manifestDigest[:]) {
+		t.Fatalf("manifest digest = %s", hex.EncodeToString(manifestDigest[:]))
+	}
+	if provenance.Generator.Source != "fixture-source.c" || provenance.Generator.Command != "bash apps/test-service/internal/coverageparser/gcovr/testdata/generate-linux-fixtures.sh" || provenance.Generator.RawOutputSHA256 == "" {
+		t.Fatalf("generator provenance = %#v", provenance.Generator)
+	}
+	source, err := os.ReadFile("testdata/" + provenance.Generator.Source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceDigest := sha256.Sum256(source)
+	if provenance.Generator.SourceSHA256 != hex.EncodeToString(sourceDigest[:]) {
+		t.Fatalf("source digest = %s", hex.EncodeToString(sourceDigest[:]))
+	}
+	script, err := os.ReadFile("testdata/generate-linux-fixtures.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range [][]byte{[]byte("-I -S"), []byte("manifest.json"), []byte("raw-output-sha256")} {
+		if !bytes.Contains(script, required) {
+			t.Fatalf("generator lacks %q", required)
+		}
+	}
+	for _, name := range []string{"simple.json", "branches.json", "functions.json", "empty.json", "schema-variants.json", "malformed.json", "duplicate.json"} {
+		record, ok := provenance.Fixtures[name]
+		if !ok || len(record.SHA256) != 64 {
+			t.Fatalf("missing digest for %s", name)
+		}
+		fixture, err := os.ReadFile("testdata/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		actual := sha256.Sum256(fixture)
+		if record.SHA256 != hex.EncodeToString(actual[:]) {
+			t.Fatalf("digest for %s = %s", name, hex.EncodeToString(actual[:]))
+		}
 	}
 }
 

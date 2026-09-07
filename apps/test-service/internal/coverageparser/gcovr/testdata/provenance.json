@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "bundle": {
+    "sourceManifest": "tools/coverage-bundle/manifest.json",
+    "manifestSHA256": "62ce3b007ce12261f7d29484ab08ec5e85da63e150d45a2cd26d96b2b4bdb61a",
+    "pythonVersion": "3.14.6",
+    "gcovrVersion": "8.6",
+    "platform": "linux-x64"
+  },
+  "generator": {
+    "source": "fixture-source.c",
+    "sourceSHA256": "864a47f1a0ffef239a426b8e8aa81969af6cac575cf13ad8d48daccb9c364912",
+    "command": "bash apps/test-service/internal/coverageparser/gcovr/testdata/generate-linux-fixtures.sh",
+    "rawOutput": "optional path set by UNIT_TEST_IDE_GCOVR_FIXTURE_RAW_OUTPUT",
+    "rawOutputSHA256": "CI-generated: printed by generate-linux-fixtures.sh",
+    "localStatus": "not generated on Windows; Linux CI runs the locked bundle command"
+  },
+  "fixtures": {
+    "simple.json": {"sha256": "7cc06543f2196c2f438a537a04a222b0c01fd4bd7eae298dfea024c1b9948223", "kind": "canonical reduced format-0.14 fixture"},
+    "branches.json": {"sha256": "3022b963cddedc58aaf599fc528612e082bd2bd560673e63591c0f9f85a73e76", "kind": "canonical reduced format-0.14 fixture"},
+    "functions.json": {"sha256": "b414890a40657ad2e0065deb731010ad77b582f4b3a4ca6c57c522d9ec5a940c", "kind": "canonical reduced format-0.14 fixture"},
+    "empty.json": {"sha256": "50fdb4e28b888dd794c7b7a4a944e3da2a651e11787f83e95cc88b91ce26f3d9", "kind": "canonical reduced format-0.14 fixture"},
+    "schema-variants.json": {"sha256": "5d8e03364431c6aa28c2f74c48084cee5f8d50bc0868e59918339d1b8a9aac67", "kind": "hand-composed documented format-0.14 variant, checked against CI raw output"},
+    "malformed.json": {"sha256": "69a2da8fc6d691ec786b134779fdceaa7d08c55a67105c3ae8f482b8107e3546", "kind": "intentional parser-negative transformation"},
+    "duplicate.json": {"sha256": "a89542e0486f66432075e571c9808e80053c736ffe2bad104e7bd893943cd948", "kind": "intentional parser-negative transformation"}
+  }
+}
