@@ -706,13 +706,22 @@ func (descriptor Descriptor) WriteAtomic(capabilities DescriptorCapabilities) (*
 		_ = closeRetainedInputs()
 		return nil, integrityError("collector child", err)
 	}
+	creationChild, err := pinChildObject(coveragePin, "gcovr", true)
+	if err != nil {
+		return nil, integrityError("collector child identity", errors.Join(err, closeRetainedInputs()))
+	}
+	removeFreshCreatedChild := func() error {
+		return errors.Join(removeFreshPinnedDirectory(coveragePin, "gcovr", creationChild), creationChild.Close(), syncPinnedDirectory(coveragePin))
+	}
 	cleanupChild, err := acquireCleanupDirectoryPin(coveragePin, "gcovr")
 	if err != nil {
-		_ = closeRetainedInputs()
-		return nil, integrityError("collector child cleanup pin", err)
+		return nil, integrityError("collector child cleanup pin", errors.Join(err, removeFreshCreatedChild(), closeRetainedInputs()))
 	}
 	removeCreatedChild := func() error {
 		return errors.Join(removePinnedChildForCleanup(coveragePin, cleanupChild, "gcovr"), cleanupChild.Close())
+	}
+	if err := creationChild.Close(); err != nil {
+		return nil, integrityError("collector child creation pin", errors.Join(err, removeCreatedChild(), closeRetainedInputs()))
 	}
 	if err := syncPinnedDirectory(coveragePin); err != nil {
 		cleanupErr := removeCreatedChild()
@@ -814,8 +823,7 @@ func (descriptor Descriptor) WriteAtomic(capabilities DescriptorCapabilities) (*
 		gcovCapability: capabilities.GcovExecutable,
 	}
 	if err := owned.Verify(); err != nil {
-		_ = owned.Close()
-		return nil, err
+		return nil, errors.Join(err, owned.Close())
 	}
 	return owned, nil
 }

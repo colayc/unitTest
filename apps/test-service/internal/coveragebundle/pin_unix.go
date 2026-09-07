@@ -90,18 +90,25 @@ func preflightPinnedCleanupDirectory(parent *pinnedObject) error {
 	if err := mkdirPinnedChild(parent, name, 0o700); err != nil {
 		return err
 	}
+	creationChild, err := pinChildObject(parent, name, true)
+	if err != nil {
+		return err
+	}
 	child, err := acquireCleanupDirectoryPin(parent, name)
 	if err != nil {
-		return errors.Join(err, removeFreshPinnedDirectory(parent, name))
+		return errors.Join(err, removeFreshPinnedDirectory(parent, name, creationChild), creationChild.Close())
 	}
-	return errors.Join(removePinnedChild(parent, child, name), child.Close(), syncPinnedDirectory(parent))
+	return errors.Join(removePinnedChild(parent, child, name), child.Close(), creationChild.Close(), syncPinnedDirectory(parent))
 }
 
-func removeFreshPinnedDirectory(parent *pinnedObject, name string) error {
-	if parent == nil || name == "" || filepath.Base(name) != name {
+func removeFreshPinnedDirectory(parent *pinnedObject, name string, expected *pinnedObject) error {
+	if parent == nil || expected == nil || name == "" || filepath.Base(name) != name {
 		return errors.New("invalid fresh directory cleanup")
 	}
 	if err := verifyPrivateUnixDirectory(parent); err != nil {
+		return err
+	}
+	if err := expected.verifyIdentity(); err != nil {
 		return err
 	}
 	return unix.Unlinkat(int(parent.file.Fd()), name, unix.AT_REMOVEDIR)
@@ -189,7 +196,11 @@ func removePinnedChild(parent, child *pinnedObject, name string) error {
 	if err := child.verifyIdentity(); err != nil {
 		return fmt.Errorf("verify cleanup child before unlink: %w", err)
 	}
-	if err := unix.Unlinkat(int(parent.file.Fd()), name, 0); err != nil {
+	flags := 0
+	if child.directory {
+		flags = unix.AT_REMOVEDIR
+	}
+	if err := unix.Unlinkat(int(parent.file.Fd()), name, flags); err != nil {
 		return err
 	}
 	return parent.verifyIdentity()

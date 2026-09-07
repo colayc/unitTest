@@ -41,21 +41,35 @@ func preflightPinnedCleanupDirectory(parent *pinnedObject) error {
 	if err := mkdirPinnedChild(parent, name, 0o700); err != nil {
 		return err
 	}
+	creationChild, err := pinChildObject(parent, name, true)
+	if err != nil {
+		return err
+	}
 	child, err := acquireCleanupDirectoryPin(parent, name)
 	if err != nil {
-		return errors.Join(err, removeFreshPinnedDirectory(parent, name))
+		return errors.Join(err, removeFreshPinnedDirectory(parent, name, creationChild), creationChild.Close())
 	}
-	return errors.Join(removePinnedChild(parent, child, name), child.Close(), syncPinnedDirectory(parent))
+	return errors.Join(removePinnedChild(parent, child, name), child.Close(), creationChild.Close(), syncPinnedDirectory(parent))
 }
 
-func removeFreshPinnedDirectory(parent *pinnedObject, name string) error {
-	if parent == nil || name == "" || filepath.Base(name) != name {
+func removeFreshPinnedDirectory(parent *pinnedObject, name string, expected *pinnedObject) error {
+	if parent == nil || expected == nil || name == "" || filepath.Base(name) != name {
 		return errors.New("invalid fresh directory cleanup")
 	}
 	if err := parent.verifyIdentity(); err != nil {
 		return err
 	}
-	return os.Remove(filepath.Join(parent.path, name))
+	if err := expected.verifyIdentity(); err != nil {
+		return err
+	}
+	child, err := pinChildObjectWithDelete(parent, name, true, true)
+	if err != nil {
+		return err
+	}
+	if child.nativeToken == nil || expected.nativeToken == nil || child.nativeToken != expected.nativeToken {
+		return errors.Join(errors.New("fresh directory identity changed before cleanup"), child.Close())
+	}
+	return errors.Join(removePinnedChild(parent, child, name), child.Close(), syncPinnedDirectory(parent))
 }
 
 func mkdirPinnedChild(parent *pinnedObject, name string, mode uint32) error {

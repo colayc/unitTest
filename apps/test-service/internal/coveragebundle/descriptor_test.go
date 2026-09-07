@@ -192,6 +192,35 @@ func TestDescriptorDirectoryCleanupPinPreflightFailureLeavesNoResidue(t *testing
 	}
 }
 
+func TestDescriptorGcovrCleanupPinFailureRemovesFreshTaskRoot(t *testing.T) {
+	base := strictTestTempDir(t)
+	coverageRoot, root := filepath.Join(base, "coverage"), filepath.Join(base, "root")
+	objects, gcov := filepath.Join(base, "objects"), filepath.Join(base, "gcov")
+	for _, directory := range []string{coverageRoot, root, objects} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(gcov, []byte("gcov"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	descriptor := Descriptor{SchemaVersion: 1, Root: root, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(coverageRoot, "gcovr", "coverage.json")}
+	original := acquireCleanupDirectoryPin
+	acquireCleanupDirectoryPin = func(parent *pinnedObject, name string) (*pinnedObject, error) {
+		if name == "gcovr" {
+			return nil, errors.New("injected gcovr cleanup pin failure")
+		}
+		return original(parent, name)
+	}
+	t.Cleanup(func() { acquireCleanupDirectoryPin = original })
+	if owned, err := descriptor.WriteAtomic(descriptorCapabilitiesForTest(t, coverageRoot, root, objects, gcov)); err == nil || owned != nil {
+		t.Fatalf("WriteAtomic() = (%v, %v), want gcovr cleanup pin failure", owned, err)
+	}
+	if _, err := os.Lstat(filepath.Join(coverageRoot, "gcovr")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("gcovr cleanup pin failure left task root: %v", err)
+	}
+}
+
 func TestDescriptorTemporaryCleanupFailureIsReturnedWithoutResidue(t *testing.T) {
 	base := strictTestTempDir(t)
 	coverageRoot, root := filepath.Join(base, "coverage"), filepath.Join(base, "root")
@@ -306,6 +335,61 @@ func (facade retainedDirectoryFacade) RetainDirectory() (coverageplatform.Retain
 		return nil, ErrDescriptorIntegrity
 	}
 	return facade.source.RetainDirectory()
+}
+
+type finalVerifyFailureDirectoryFacade struct {
+	source *VerifiedDirectory
+	fail   *bool
+	err    error
+}
+
+func (facade finalVerifyFailureDirectoryFacade) Path() string { return facade.source.Path() }
+
+func (facade finalVerifyFailureDirectoryFacade) Verify() error {
+	if *facade.fail {
+		return facade.err
+	}
+	return facade.source.Verify()
+}
+
+func (facade finalVerifyFailureDirectoryFacade) RetainDirectory() (coverageplatform.RetainedDirectory, error) {
+	return facade.source.RetainDirectory()
+}
+
+func TestDescriptorFinalVerifyReturnsCleanupFailure(t *testing.T) {
+	base := strictTestTempDir(t)
+	coverageRoot, root := filepath.Join(base, "coverage"), filepath.Join(base, "root")
+	objects, gcov := filepath.Join(base, "objects"), filepath.Join(base, "gcov")
+	for _, directory := range []string{coverageRoot, root, objects} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(gcov, []byte("gcov"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	descriptor := Descriptor{SchemaVersion: 1, Root: root, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(coverageRoot, "gcovr", "coverage.json")}
+	capabilities := descriptorCapabilitiesForTest(t, coverageRoot, root, objects, gcov)
+	source := capabilities.CollectorRoot.(*VerifiedDirectory)
+	shouldFail := false
+	verifyFailure := errors.New("injected final verification failure")
+	capabilities.CollectorRoot = finalVerifyFailureDirectoryFacade{source: source, fail: &shouldFail, err: verifyFailure}
+	cleanupFailure := errors.New("injected final cleanup failure")
+	originalPostPublication, originalRemove := descriptorPostPublication, removePinnedChildForCleanup
+	descriptorPostPublication = func() error { shouldFail = true; return nil }
+	removePinnedChildForCleanup = func(parent, child *pinnedObject, name string) error {
+		return errors.Join(removePinnedChild(parent, child, name), cleanupFailure)
+	}
+	t.Cleanup(func() {
+		descriptorPostPublication = originalPostPublication
+		removePinnedChildForCleanup = originalRemove
+		_ = source.Close()
+	})
+	if owned, err := descriptor.WriteAtomic(capabilities); err == nil || owned != nil {
+		t.Fatalf("WriteAtomic() = (%v, %v), want final verification failure", owned, err)
+	} else if !strings.Contains(err.Error(), verifyFailure.Error()) || !errors.Is(err, cleanupFailure) {
+		t.Fatalf("WriteAtomic() = %v, want final verification and cleanup failures", err)
+	}
 }
 
 func TestDescriptorBridgesRetainedCollectorWithoutOwningSource(t *testing.T) {

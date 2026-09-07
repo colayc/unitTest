@@ -92,6 +92,37 @@ func TestPrivateUnixCleanupRemovesRetainedChild(t *testing.T) {
 	}
 }
 
+func TestPrivateUnixCleanupRemovesRetainedDirectoryWithDirectoryFlag(t *testing.T) {
+	root := filepath.Join(strictTestTempDir(t), "coverage")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	parent, err := pinDirectObject(root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = parent.Close() })
+	const name = "owned-directory"
+	path := filepath.Join(root, name)
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	child, err := pinChildObjectWithDelete(parent, name, true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := removePinnedChild(parent, child, name); err != nil {
+		_ = child.Close()
+		t.Fatalf("remove retained directory: %v", err)
+	}
+	if err := child.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatalf("retained directory remains after cleanup: %v", err)
+	}
+}
+
 func TestPrivateUnixCleanupRejectsReplacementWithoutDeletingIt(t *testing.T) {
 	root := filepath.Join(strictTestTempDir(t), "coverage")
 	if err := os.Mkdir(root, 0o700); err != nil {
