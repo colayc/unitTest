@@ -11,7 +11,7 @@ generation="$artifact_dir/generation.json"
 # Node validates the closed generation schema before using any metadata path.
 # Sidecars use only fixed basenames, so this remains valid after artifact move.
 node -e '
-const fs = require("node:fs"), path = require("node:path"), crypto = require("node:crypto");
+const fs = require("node:fs"), path = require("node:path"), crypto = require("node:crypto"), {spawnSync} = require("node:child_process");
 const [artifactDir, generationPath, provenancePath] = process.argv.slice(1);
 const fail = message => { throw new Error(message); };
 const exactKeys = (value, keys, label) => {
@@ -25,6 +25,18 @@ const absolute = value => typeof value === "string" && path.posix.isAbsolute(val
 const child = (value, root) => value.startsWith(`${root}/`);
 const hash = file => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 const safeName = value => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value) && path.posix.basename(value) === value;
+const firstSemver = output => (String(output).match(/\b\d+(?:\.\d+)+\b/) || [])[0];
+const detectedToolchainVersion = executable => {
+  let result = spawnSync(executable, ["-dumpfullversion", "-dumpversion"], {encoding: "utf8"});
+  let version = result.status === 0 ? firstSemver(result.stdout) : undefined;
+  if (!version) {
+    result = spawnSync(executable, ["--version"], {encoding: "utf8"});
+    version = result.status === 0 ? firstSemver(result.stdout) : undefined;
+  }
+  return version;
+};
+const expectedToolchainVersion = process.env.UNIT_TEST_IDE_GCC_VERSION;
+if (!semver(expectedToolchainVersion)) fail("explicit CI toolchain version pin is required");
 const generated = JSON.parse(fs.readFileSync(generationPath, "utf8"));
 const provenance = JSON.parse(fs.readFileSync(provenancePath, "utf8"));
 exactKeys(generated, ["schemaVersion", "bundle", "source", "toolchain", "artifacts"], "generation");
@@ -35,10 +47,21 @@ exactKeys(generated.source, ["path", "sha256"], "source");
 if (generated.source.path !== "fixture-source.c" || !digest(generated.source.sha256) || generated.source.sha256 !== provenance.generator?.sourceSHA256) fail("source metadata verification failed");
 exactKeys(generated.toolchain, ["allowedDirectory", "gcc", "gcov"], "toolchain");
 if (!absolute(generated.toolchain.allowedDirectory)) fail("toolchain metadata verification failed");
+let trustedAllowedDirectory;
+try {
+  trustedAllowedDirectory = fs.realpathSync(generated.toolchain.allowedDirectory);
+  if (!fs.statSync(trustedAllowedDirectory).isDirectory()) fail("toolchain metadata verification failed");
+} catch { fail("trusted allowedDirectory is unavailable"); }
 for (const name of ["gcc", "gcov"]) {
   const tool = generated.toolchain[name];
   exactKeys(tool, ["path", "version", "sha256"], `toolchain.${name}`);
-  if (!absolute(tool.path) || !child(tool.path, generated.toolchain.allowedDirectory) || !semver(tool.version) || !digest(tool.sha256)) fail("toolchain metadata verification failed");
+  if (!absolute(tool.path) || !semver(tool.version) || !digest(tool.sha256)) fail("toolchain metadata verification failed");
+  let actualPath;
+  try {
+    actualPath = fs.realpathSync(tool.path);
+    if (!fs.statSync(actualPath).isFile()) fail("toolchain metadata verification failed");
+  } catch { fail("toolchain metadata verification failed"); }
+  if (actualPath !== tool.path || !child(actualPath, trustedAllowedDirectory) || tool.sha256 !== hash(actualPath) || tool.version !== expectedToolchainVersion || detectedToolchainVersion(actualPath) !== expectedToolchainVersion) fail("toolchain metadata verification failed");
 }
 exactKeys(generated.artifacts, ["raw", "canonical"], "artifacts");
 const expected = {raw: ["raw-coverage.json", "raw-coverage.json.sha256"], canonical: ["gcovr-8.6.canonical.json", "gcovr-8.6.canonical.json.sha256"]};

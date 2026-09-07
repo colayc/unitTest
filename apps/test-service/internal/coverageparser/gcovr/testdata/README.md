@@ -37,8 +37,14 @@ the closed generation metadata (bundle, source, toolchain path/version/digest,
 and artifact names), recomputes both digests, and verifies canonical byte
 identity before parsing raw evidence. Sidecars are exactly `SHA-256  basename`
 records: they contain no generating-host path and remain valid if the complete
-artifact directory is moved. It therefore cannot claim a raw-output comparison
-when no raw artifact exists.
+artifact directory is moved. For full provenance verification, CI must also
+provide `UNIT_TEST_IDE_GCC_VERSION`: the verifier re-resolves the recorded GCC
+and gcov paths, requires regular executables below the recorded trusted
+toolchain root, rehashes their bytes, re-detects each first GNU semver token,
+and compares all of those values with both metadata and the explicit pin.
+`verifier-toolchain-tampering.json` records replacement-path, replacement-byte,
+and replacement-version regressions that must fail. It therefore cannot claim
+a raw-output comparison when no raw artifact exists.
 
 `schema-variants.json` is a hand-composed canonical variant covering the
 documented 8.6 field family (destination block IDs, conditions, decisions,

@@ -20,7 +20,9 @@
     "toolchain": {
       "allowedDirectory": "required UNIT_TEST_IDE_GCOVR_ALLOWED_TOOLCHAIN_DIR",
       "versionPin": "required UNIT_TEST_IDE_GCC_VERSION semver",
-      "gnuVersionFixture": "gnu-tool-version-output.json"
+      "gnuVersionFixture": "gnu-tool-version-output.json",
+      "verifierRequiresVersionPin": "required UNIT_TEST_IDE_GCC_VERSION semver",
+      "verifierTamperingFixture": "verifier-toolchain-tampering.json"
     },
     "localStatus": "not generated on Windows; Linux CI must publish and verify the required raw artifact"
   },

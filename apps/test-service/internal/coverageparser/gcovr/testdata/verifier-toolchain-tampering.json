@@ -1,0 +1,19 @@
+{
+  "cases": [
+    {
+      "name": "replacement regular compiler",
+      "mutation": "replace gcc at the recorded absolute path with another regular executable",
+      "mustReject": "actual executable SHA-256 differs from generation.toolchain.gcc.sha256"
+    },
+    {
+      "name": "banner compatible replacement version",
+      "mutation": "replace gcov with a regular executable that reports semver 14.3.0 while metadata and pin remain 14.2.0",
+      "mustReject": "fresh first-semver detection differs from metadata.version and UNIT_TEST_IDE_GCC_VERSION"
+    },
+    {
+      "name": "metadata tool outside allowed root",
+      "mutation": "set a syntactically valid absolute gcc metadata path outside allowedDirectory",
+      "mustReject": "realpath is not a child of the trusted allowedDirectory"
+    }
+  ]
+}

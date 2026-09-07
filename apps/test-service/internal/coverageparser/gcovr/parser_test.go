@@ -49,6 +49,51 @@ func TestGCovrGNUVersionFixturePairsGCCAndGCovWithPin(t *testing.T) {
 	}
 }
 
+func TestGCovrVerifierToolchainBindingStaticRegression(t *testing.T) {
+	script, err := os.ReadFile("testdata/verify-linux-fixtures.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range [][]byte{
+		[]byte("fs.realpathSync"), []byte("fs.statSync"), []byte("isFile()"),
+		[]byte("UNIT_TEST_IDE_GCC_VERSION"), []byte("tool.sha256 !== hash"),
+		[]byte("tool.version !== expectedToolchainVersion"), []byte("trusted allowedDirectory"),
+	} {
+		if !bytes.Contains(script, required) {
+			t.Fatalf("verifier lacks actual toolchain binding %q", required)
+		}
+	}
+	encoded, err := os.ReadFile("testdata/verifier-toolchain-tampering.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture struct {
+		Cases []struct {
+			Name, Mutation, MustReject string
+		}
+	}
+	if err := json.Unmarshal(encoded, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"replacement regular compiler":          "actual executable SHA-256 differs from generation.toolchain.gcc.sha256",
+		"banner compatible replacement version": "fresh first-semver detection differs from metadata.version and UNIT_TEST_IDE_GCC_VERSION",
+		"metadata tool outside allowed root":    "realpath is not a child of the trusted allowedDirectory",
+	}
+	if len(fixture.Cases) != len(want) {
+		t.Fatalf("tamper cases = %#v", fixture.Cases)
+	}
+	for _, test := range fixture.Cases {
+		if test.Mutation == "" || test.MustReject != want[test.Name] {
+			t.Fatalf("incomplete tamper case = %#v", test)
+		}
+		delete(want, test.Name)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing tamper cases = %#v", want)
+	}
+}
+
 func TestParseGCovrLockedFormatFixtures(t *testing.T) {
 	for _, name := range []string{"simple.json", "branches.json", "functions.json", "schema-variants.json", "empty.json"} {
 		t.Run(name, func(t *testing.T) {
