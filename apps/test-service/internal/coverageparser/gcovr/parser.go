@@ -120,8 +120,10 @@ func (p *parser) file() (File, error) {
 				if err := p.increment(&p.lines, p.limits.MaxLines); err != nil {
 					return err
 				}
-				line, err := p.line()
-				result.Lines = append(result.Lines, line)
+				line, included, err := p.line()
+				if included {
+					result.Lines = append(result.Lines, line)
+				}
 				return err
 			})
 		},
@@ -130,15 +132,17 @@ func (p *parser) file() (File, error) {
 				if err := p.increment(&p.functions, p.limits.MaxFunctions); err != nil {
 					return err
 				}
-				covered, err := p.function()
-				if covered {
+				covered, included, err := p.function()
+				if included && covered {
 					result.Functions.Covered++
 				}
-				result.Functions.Total++
+				if included {
+					result.Functions.Total++
+				}
 				return err
 			})
 		},
-		"gcovr/data_sources": p.skipStringArray,
+		"gcovr/data_sources": p.dataSources,
 	}, "file", "lines", "functions")
 	if err != nil {
 		return File{}, err
@@ -156,8 +160,9 @@ func (p *parser) file() (File, error) {
 	return result, nil
 }
 
-func (p *parser) line() (Line, error) {
+func (p *parser) line() (Line, bool, error) {
 	var result Line
+	excluded := false
 	err := p.object(map[string]func() error{
 		"line_number": func() error { value, err := p.integer(); result.Number = value; return err },
 		"count":       func() error { value, err := p.integer(); result.Count = value; return err },
@@ -166,50 +171,56 @@ func (p *parser) line() (Line, error) {
 				if err := p.increment(&p.branches, p.limits.MaxBranches); err != nil {
 					return err
 				}
-				covered, err := p.branch()
-				if covered {
+				covered, included, err := p.branch()
+				if included && covered {
 					result.Branches.Covered++
 				}
-				result.Branches.Total++
+				if included {
+					result.Branches.Total++
+				}
 				return err
 			})
 		},
-		"gcovr/noncode":      func() error { _, err := p.boolean(); return err },
 		"function_name":      func() error { _, err := p.string(); return err },
-		"block_ids":          p.skipIntegerArray,
-		"conditions":         p.skipValue,
-		"gcovr/decision":     p.skipValue,
-		"calls":              p.skipValue,
+		"block_ids":          p.integerArray,
+		"conditions":         p.conditions,
+		"gcovr/decision":     p.decision,
+		"calls":              p.calls,
 		"gcovr/md5":          func() error { _, err := p.string(); return err },
-		"gcovr/excluded":     func() error { _, err := p.boolean(); return err },
-		"gcovr/data_sources": p.skipStringArray,
+		"gcovr/excluded":     func() error { value, err := p.boolean(); excluded = value; return err },
+		"gcovr/data_sources": p.dataSources,
 	}, "line_number", "count", "branches")
 	if err != nil {
-		return Line{}, err
+		return Line{}, false, err
 	}
 	if result.Number < 1 {
-		return Line{}, errors.New("invalid line number")
+		return Line{}, false, errors.New("invalid line number")
 	}
-	return result, nil
+	return result, !excluded, nil
 }
 
-func (p *parser) branch() (bool, error) {
+func (p *parser) branch() (bool, bool, error) {
 	var count int64
+	excluded := false
 	err := p.object(map[string]func() error{
-		"count":           func() error { value, err := p.integer(); count = value; return err },
-		"fallthrough":     func() error { _, err := p.boolean(); return err },
-		"throw":           func() error { _, err := p.boolean(); return err },
-		"branchno":        func() error { _, err := p.integer(); return err },
-		"source_block_id": func() error { _, err := p.integer(); return err },
+		"count":                func() error { value, err := p.integer(); count = value; return err },
+		"fallthrough":          func() error { _, err := p.boolean(); return err },
+		"throw":                func() error { _, err := p.boolean(); return err },
+		"branchno":             func() error { _, err := p.integer(); return err },
+		"source_block_id":      func() error { _, err := p.integer(); return err },
+		"destination_block_id": func() error { _, err := p.integer(); return err },
+		"gcovr/excluded":       func() error { value, err := p.boolean(); excluded = value; return err },
+		"gcovr/data_sources":   p.dataSources,
 	}, "count", "fallthrough", "throw")
-	return count > 0, err
+	return count > 0, !excluded, err
 }
 
-func (p *parser) function() (bool, error) {
+func (p *parser) function() (bool, bool, error) {
 	var name string
 	var line, count int64
 	var percent float64
 	hasCount := false
+	excluded := false
 	err := p.object(map[string]func() error{
 		"name": func() error { value, err := p.string(); name = value; return err },
 		"demangled_name": func() error {
@@ -222,20 +233,22 @@ func (p *parser) function() (bool, error) {
 		"lineno":             func() error { value, err := p.integer(); line = value; return err },
 		"execution_count":    func() error { value, err := p.integer(); count = value; hasCount = true; return err },
 		"blocks_percent":     func() error { value, err := p.number(); percent = value; return err },
-		"pos":                p.skipStringArray,
-		"gcovr/excluded":     func() error { _, err := p.boolean(); return err },
-		"gcovr/data_sources": p.skipStringArray,
-	}, "lineno", "blocks_percent")
+		"pos":                p.position,
+		"gcovr/excluded":     func() error { value, err := p.boolean(); excluded = value; return err },
+		"gcovr/data_sources": p.dataSources,
+	})
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
-	if name == "" || line < 1 || percent < 0 || percent > 100 {
-		return false, errors.New("invalid function")
+	if name == "" || (line != 0 && line < 1) || percent < 0 || percent > 100 {
+		return false, false, errors.New("invalid function")
 	}
 	if !hasCount {
-		count = 0
+		// gcovr omits execution metrics for <unknown function>; retaining it
+		// would fabricate an uncovered function in the public summary.
+		return false, false, nil
 	}
-	return count > 0, nil
+	return count > 0, !excluded, nil
 }
 
 func (p *parser) object(handlers map[string]func() error, required ...string) error {
@@ -372,43 +385,135 @@ func (p *parser) boolean() (bool, error) {
 	}
 	return value, nil
 }
-func (p *parser) skipStringArray() error {
-	return p.array(func() error { _, err := p.string(); return err })
-}
-func (p *parser) skipIntegerArray() error {
-	return p.array(func() error { _, err := p.integer(); return err })
-}
-func (p *parser) skipValue() error {
-	token, err := p.token()
-	if err != nil {
-		return err
-	}
-	delim, ok := token.(json.Delim)
-	if !ok {
-		return nil
-	}
-	p.depth++
-	if p.depth > p.limits.MaxDepth {
-		return ErrLimitExceeded
-	}
-	for p.decoder.More() {
-		if err := p.skipValue(); err != nil {
+func (p *parser) dataSources() error {
+	var count int64
+	return p.array(func() error {
+		if err := p.increment(&count, p.limits.MaxFiles); err != nil {
 			return err
 		}
-	}
-	end, err := p.token()
+		_, err := p.string()
+		return err
+	})
+}
+
+func (p *parser) integerArray() error {
+	var count int64
+	return p.array(func() error {
+		if err := p.increment(&count, p.limits.MaxBranches); err != nil {
+			return err
+		}
+		_, err := p.integer()
+		return err
+	})
+}
+
+func (p *parser) position() error {
+	var count int64
+	err := p.array(func() error {
+		if err := p.increment(&count, 2); err != nil {
+			return err
+		}
+		value, err := p.string()
+		if err != nil || !validPosition(value) {
+			return errors.New("invalid function position")
+		}
+		return nil
+	})
 	if err != nil {
 		return err
 	}
-	want := json.Delim('}')
-	if delim == '[' {
-		want = ']'
+	if count != 2 {
+		return errors.New("invalid function position")
 	}
-	if actual, ok := end.(json.Delim); !ok || actual != want {
-		return fmt.Errorf("expected %q", want)
-	}
-	p.depth--
 	return nil
+}
+
+func (p *parser) conditions() error {
+	return p.array(func() error {
+		if err := p.increment(&p.branches, p.limits.MaxBranches); err != nil {
+			return err
+		}
+		var count, covered int64
+		err := p.object(map[string]func() error{
+			"conditionno":        func() error { _, err := p.integer(); return err },
+			"count":              func() error { value, err := p.integer(); count = value; return err },
+			"covered":            func() error { value, err := p.integer(); covered = value; return err },
+			"not_covered_false":  p.integerArray,
+			"not_covered_true":   p.integerArray,
+			"gcovr/excluded":     func() error { _, err := p.boolean(); return err },
+			"gcovr/data_sources": p.dataSources,
+		}, "conditionno", "count", "covered", "not_covered_false", "not_covered_true")
+		if err != nil {
+			return err
+		}
+		if covered > count {
+			return errors.New("invalid condition")
+		}
+		return nil
+	})
+}
+
+func (p *parser) decision() error {
+	var kind string
+	var trueCount, falseCount, count int64
+	var hasTrue, hasFalse, hasCount bool
+	err := p.object(map[string]func() error{
+		"type":               func() error { value, err := p.string(); kind = value; return err },
+		"count_true":         func() error { value, err := p.integer(); trueCount = value; hasTrue = true; return err },
+		"count_false":        func() error { value, err := p.integer(); falseCount = value; hasFalse = true; return err },
+		"count":              func() error { value, err := p.integer(); count = value; hasCount = true; return err },
+		"gcovr/data_sources": p.dataSources,
+	}, "type")
+	if err != nil {
+		return err
+	}
+	switch kind {
+	case "uncheckable":
+		if hasTrue || hasFalse || hasCount {
+			return errors.New("invalid uncheckable decision")
+		}
+	case "conditional":
+		if !hasTrue || !hasFalse || hasCount || trueCount > maxSafeInteger || falseCount > maxSafeInteger {
+			return errors.New("invalid conditional decision")
+		}
+	case "switch":
+		if !hasCount || hasTrue || hasFalse || count > maxSafeInteger {
+			return errors.New("invalid switch decision")
+		}
+	default:
+		return errors.New("unsupported decision")
+	}
+	return nil
+}
+
+func (p *parser) calls() error {
+	return p.array(func() error {
+		if err := p.increment(&p.branches, p.limits.MaxBranches); err != nil {
+			return err
+		}
+		return p.object(map[string]func() error{
+			"callno":               func() error { _, err := p.integer(); return err },
+			"source_block_id":      func() error { _, err := p.integer(); return err },
+			"destination_block_id": func() error { _, err := p.integer(); return err },
+			"returned":             func() error { _, err := p.integer(); return err },
+			"gcovr/excluded":       func() error { _, err := p.boolean(); return err },
+			"gcovr/data_sources":   p.dataSources,
+		}, "returned")
+	})
+}
+
+func validPosition(value string) bool {
+	parts := strings.Split(value, ":")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return false
+	}
+	for _, part := range parts {
+		value, err := strconv.ParseInt(part, 10, 64)
+		if err != nil || value < 1 {
+			return false
+		}
+	}
+	return true
 }
 func (p *parser) increment(value *int64, maximum int64) error {
 	*value++

@@ -28,7 +28,7 @@ func TestParseGCovrExportAcrossChunks(t *testing.T) {
 }
 
 func TestParseGCovrLockedFormatFixtures(t *testing.T) {
-	for _, name := range []string{"simple.json", "branches.json", "functions.json", "empty.json"} {
+	for _, name := range []string{"simple.json", "branches.json", "functions.json", "schema-variants.json", "empty.json"} {
 		t.Run(name, func(t *testing.T) {
 			encoded, err := os.ReadFile("testdata/" + name)
 			if err != nil {
@@ -50,6 +50,45 @@ func TestParseGCovrLockedFormatFixtures(t *testing.T) {
 				t.Fatal(err)
 			}
 			if got, err := Parse(bytes.NewReader(encoded), DefaultLimits()); err == nil || !reflect.DeepEqual(got, Export{}) {
+				t.Fatalf("Parse() = %#v, %v", got, err)
+			}
+		})
+	}
+}
+
+func TestParseGCovrAcceptsDocumentedSchemaVariantsAndExcludesEvidence(t *testing.T) {
+	got, err := Parse(bytes.NewBufferString(schemaVariantExport()), DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Files) != 1 || len(got.Files[0].Lines) != 2 {
+		t.Fatalf("files/lines = %#v", got)
+	}
+	if got.Files[0].Lines[0].Branches != (Metric{Covered: 1, Total: 1}) {
+		t.Fatalf("first branch metric = %#v", got.Files[0].Lines[0].Branches)
+	}
+	if got.Files[0].Lines[1].Number != 3 || got.Files[0].Lines[1].Branches != (Metric{Total: 1}) {
+		t.Fatalf("excluded branch or line leaked: %#v", got.Files[0].Lines)
+	}
+	if got.Files[0].Functions != (Metric{Covered: 1, Total: 1}) {
+		t.Fatalf("excluded or unknown function metric = %#v", got.Files[0].Functions)
+	}
+}
+
+func TestParseGCovrRejectsMalformedNestedSchemaValues(t *testing.T) {
+	valid := schemaVariantExport()
+	cases := map[string]string{
+		"unknown condition":      strings.Replace(valid, `"conditionno":0`, `"unexpected":1,"conditionno":0`, 1),
+		"duplicate call":         strings.Replace(valid, `"callno":0`, `"callno":0,"callno":0`, 1),
+		"negative decision":      strings.Replace(valid, `"count_true":1`, `"count_true":-1`, 1),
+		"fractional destination": strings.Replace(valid, `"destination_block_id":1`, `"destination_block_id":1.5`, 1),
+		"overflow data":          strings.Replace(valid, `"source_block_id":0`, `"source_block_id":9007199254740992`, 1),
+		"deprecated noncode":     strings.Replace(valid, `"function_name"`, `"gcovr/noncode":false,"function_name"`, 1),
+	}
+	for name, encoded := range cases {
+		t.Run(name, func(t *testing.T) {
+			got, err := Parse(bytes.NewBufferString(encoded), DefaultLimits())
+			if err == nil || !reflect.DeepEqual(got, Export{}) {
 				t.Fatalf("Parse() = %#v, %v", got, err)
 			}
 		})
@@ -119,6 +158,13 @@ func exportFiles(files ...string) string {
 }
 func fileJSON(path string) string {
 	return `{"file":"` + path + `","lines":[{"line_number":1,"function_name":"entry","count":2,"branches":[{"branchno":0,"count":1,"fallthrough":false,"throw":false,"source_block_id":0},{"branchno":1,"count":0,"fallthrough":false,"throw":false,"source_block_id":0}],"gcovr/md5":"0123456789abcdef0123456789abcdef"}],"functions":[{"name":"entry","lineno":1,"execution_count":2,"blocks_percent":100}]}`
+}
+
+// schemaVariantExport is a fixed test input copied from the field shapes in
+// gcovr 8.6's JSON format reference (format 0.14). It is not claimed to be
+// generated on this Windows host; native bundle generation is exercised in CI.
+func schemaVariantExport() string {
+	return `{"gcovr/format_version":"0.14","files":[{"file":"src/variant.c","gcovr/data_sources":["object.gcda"],"lines":[{"line_number":1,"function_name":"entry","block_ids":[0],"count":2,"branches":[{"branchno":0,"count":1,"fallthrough":false,"throw":false,"source_block_id":0,"destination_block_id":1,"gcovr/data_sources":["object.gcda"]}],"conditions":[{"conditionno":0,"count":2,"covered":1,"not_covered_false":[1],"not_covered_true":[0],"gcovr/data_sources":["object.gcda"]}],"gcovr/decision":{"type":"conditional","count_true":1,"count_false":1,"gcovr/data_sources":["object.gcda"]},"calls":[{"callno":0,"source_block_id":0,"destination_block_id":1,"returned":1,"gcovr/data_sources":["object.gcda"]}],"gcovr/md5":"0123456789abcdef0123456789abcdef","gcovr/data_sources":["object.gcda"]},{"line_number":2,"count":9,"branches":[],"gcovr/excluded":true},{"line_number":3,"count":4,"branches":[{"count":10,"fallthrough":false,"throw":false,"gcovr/excluded":true},{"count":0,"fallthrough":false,"throw":false}]}],"functions":[{"name":"entry","lineno":1,"execution_count":1,"blocks_percent":100},{"name":"excluded","lineno":2,"execution_count":9,"blocks_percent":100,"gcovr/excluded":true},{"name":"<unknown function>"}]}]}`
 }
 
 type chunkReader struct {
