@@ -11,6 +11,16 @@ export type TestFramework = "cpputest" | "unity";
 
 export interface TestFrameworkFixtureOptions {
   readonly framework?: TestFramework;
+  /** Linux-only test seam for already-verified framework inputs. */
+  readonly linuxFrameworkInputs?: LinuxFrameworkFixtureInputs;
+  readonly platform?: NodeJS.Platform;
+}
+
+export interface LinuxFrameworkFixtureInputs {
+  readonly cpputestRoot: string;
+  readonly unityRoot: string;
+  readonly cmakeHelper: string;
+  readonly unityRunnerGenerator: string;
 }
 
 export function testFixtureExecutableName(
@@ -27,6 +37,11 @@ export async function prepareTestFrameworkWorkspace(
     throw new Error("test framework workspace path is required");
   }
   const framework = options.framework ?? "cpputest";
+  const platform = options.platform ?? process.platform;
+  if (options.linuxFrameworkInputs !== undefined && platform !== "linux") {
+    throw new Error("Linux framework fixture inputs are only valid on Linux");
+  }
+  const linuxInputs = options.linuxFrameworkInputs;
   const configurationDirectory = join(
     workspaceDirectory,
     ".unit-test-ide"
@@ -63,6 +78,7 @@ export async function prepareTestFrameworkWorkspace(
     [
       "cmake_minimum_required(VERSION 3.25)",
       `project(test_framework_fixture LANGUAGES ${framework === "unity" ? "C" : "CXX"})`,
+      ...(linuxInputs === undefined ? [] : linuxFrameworkCmake(linuxInputs, framework)),
       `add_executable(fixture-app ${framework === "unity" ? "main.c" : "main.cpp"})`,
       "add_test(NAME framework-tests COMMAND fixture-app)",
       ""
@@ -84,4 +100,18 @@ export async function prepareTestFrameworkWorkspace(
     })
   );
   return { buildDirectory, testExecutable };
+}
+
+function linuxFrameworkCmake(inputs: LinuxFrameworkFixtureInputs, framework: TestFramework): string[] {
+  for (const [name, value] of Object.entries(inputs)) {
+    if (!value || value.includes("\0")) throw new Error(`Linux framework fixture ${name} is invalid`);
+  }
+  return [
+    `list(PREPEND CMAKE_PREFIX_PATH "${inputs.cpputestRoot}")`,
+    `set(UTIDE_UNITY_RUNNER_GENERATOR "${inputs.unityRunnerGenerator}")`,
+    `include("${inputs.cmakeHelper}")`,
+    ...(framework === "unity"
+      ? [`list(PREPEND CMAKE_MODULE_PATH "${inputs.unityRoot}")`, "find_package(Unity REQUIRED CONFIG)"]
+      : ["find_package(CppUTest REQUIRED CONFIG)"])
+  ];
 }

@@ -76,3 +76,27 @@ test("test-only framework fixture can declare a closed Unity C workspace", async
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("Linux test-only fixture accepts only an explicit verified framework seam", async () => {
+  const root = await mkdtemp(join(tmpdir(), "unit-test-framework-linux-seam-"));
+  try {
+    const workspace = join(root, "workspace");
+    const inputs = {
+      cpputestRoot: join(root, "cpputest"),
+      unityRoot: join(root, "unity"),
+      cmakeHelper: join(root, "UnitTestIDE.cmake"),
+      unityRunnerGenerator: join(root, "unity-runner-generator")
+    };
+    await prepareTestFrameworkWorkspace(workspace, {
+      framework: "unity",
+      platform: "linux",
+      linuxFrameworkInputs: inputs
+    });
+    const cmake = await readFile(join(workspace, "CMakeLists.txt"), "utf8");
+    assert.match(cmake, /UTIDE_UNITY_RUNNER_GENERATOR/u);
+    assert.match(cmake, /UnitTestIDE\.cmake/u);
+    assert.match(cmake, /Unity/u);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
