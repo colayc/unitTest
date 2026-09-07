@@ -16,11 +16,16 @@ die() { printf '%s\n' "fixture generation: $*" >&2; exit 1; }
 : "${UNIT_TEST_IDE_GCC:?set an explicitly pinned absolute GCC executable}"
 : "${UNIT_TEST_IDE_GCOV:?set an explicitly pinned absolute gcov executable}"
 : "${UNIT_TEST_IDE_GCC_VERSION:?set the explicitly pinned GCC/gcov version}"
+: "${UNIT_TEST_IDE_GCOVR_ALLOWED_TOOLCHAIN_DIR:?set the allowed CI toolchain directory}"
 : "${UNIT_TEST_IDE_GCOVR_FIXTURE_ARTIFACT_DIR:?set the required CI artifact directory}"
 readonly gcc=$(realpath "$UNIT_TEST_IDE_GCC")
 readonly gcov=$(realpath "$UNIT_TEST_IDE_GCOV")
 [[ "$UNIT_TEST_IDE_GCC" == /* && "$UNIT_TEST_IDE_GCOV" == /* ]] || die "GCC and gcov must be absolute paths"
 [[ -x "$gcc" && -x "$gcov" ]] || die "pinned GCC or gcov is not executable"
+readonly allowed_toolchain_dir=$(realpath "$UNIT_TEST_IDE_GCOVR_ALLOWED_TOOLCHAIN_DIR")
+[[ -d "$allowed_toolchain_dir" ]] || die "allowed toolchain directory must exist"
+case "$gcc" in "$allowed_toolchain_dir"/*) ;; *) die "GCC is outside the allowed CI toolchain directory" ;; esac
+case "$gcov" in "$allowed_toolchain_dir"/*) ;; *) die "gcov is outside the allowed CI toolchain directory" ;; esac
 readonly artifact_dir=$(realpath "$UNIT_TEST_IDE_GCOVR_FIXTURE_ARTIFACT_DIR")
 [[ -d "$artifact_dir" ]] || die "artifact directory must already exist"
 
@@ -36,7 +41,24 @@ const digest = crypto.createHash("sha256").update(manifestBytes).digest("hex");
 if (digest !== expectedDigest || manifest.python?.version !== "3.14.6" || manifest.gcovr?.version !== "8.6" || resolved.schemaVersion !== 1 || resolved.platform !== "linux-x64" || resolved.pythonVersion !== manifest.python.version || resolved.gcovrVersion !== manifest.gcovr.version || !Array.isArray(resolved.outputs) || resolved.outputs.length === 0 || !fs.existsSync(`${root}/READY`)) process.exit(1);
 ' "$repo_root/tools/coverage-bundle/manifest.json" "$bundle_root/manifest.resolved.json" "$expected_manifest_sha256" "$bundle_root" || die "resolved bundle does not match the locked manifest"
 
-tool_version() { "$1" -dumpfullversion -dumpversion 2>/dev/null || "$1" --version | head -n 1; }
+normalize_semver() {
+  local output=$1 token
+  token=$(printf '%s\n' "$output" | grep -Eom1 '[0-9]+(\.[0-9]+)+' || true)
+  [[ "$token" =~ ^[0-9]+(\.[0-9]+)+$ ]] || return 1
+  printf '%s\n' "$token"
+}
+tool_version() {
+  local output version
+  output=$("$1" -dumpfullversion -dumpversion 2>/dev/null || true)
+  version=$(normalize_semver "$output" || true)
+  if [[ -z "$version" ]]; then
+    output=$("$1" --version 2>&1)
+    version=$(normalize_semver "$output" || true)
+  fi
+  [[ -n "$version" ]] || return 1
+  printf '%s\n' "$version"
+}
+[[ "$UNIT_TEST_IDE_GCC_VERSION" =~ ^[0-9]+(\.[0-9]+)+$ ]] || die "CI toolchain version pin must be a semver"
 readonly gcc_version=$(tool_version "$gcc")
 readonly gcov_version=$(tool_version "$gcov")
 [[ "$gcc_version" == "$UNIT_TEST_IDE_GCC_VERSION" && "$gcov_version" == "$UNIT_TEST_IDE_GCC_VERSION" ]] || die "GCC/gcov version does not match the CI pin"
@@ -63,18 +85,18 @@ readonly raw_sidecar="$artifact_dir/raw-coverage.json.sha256"
 readonly canonical="$artifact_dir/gcovr-8.6.canonical.json"
 readonly canonical_sidecar="$artifact_dir/gcovr-8.6.canonical.json.sha256"
 cp "$scratch/raw-coverage.json" "$raw"
-sha256sum "$raw" > "$raw_sidecar"
 node -e '
 const fs = require("node:fs"); const [input, output] = process.argv.slice(1);
 fs.writeFileSync(output, `${JSON.stringify(JSON.parse(fs.readFileSync(input, "utf8")))}\n`);
 ' "$raw" "$canonical"
-sha256sum "$canonical" > "$canonical_sidecar"
 readonly source_sha256=$(sha256sum "$testdata/fixture-source.c" | awk '{print $1}')
 readonly raw_sha256=$(sha256sum "$raw" | awk '{print $1}')
 readonly canonical_sha256=$(sha256sum "$canonical" | awk '{print $1}')
+printf '%s  %s\n' "$raw_sha256" "$(basename "$raw")" > "$raw_sidecar"
+printf '%s  %s\n' "$canonical_sha256" "$(basename "$canonical")" > "$canonical_sidecar"
 node -e '
 const fs = require("node:fs");
-const [output, manifestSHA256, sourceSHA256, rawSHA256, canonicalSHA256, gccPath, gccVersion, gccSHA256, gcovPath, gcovVersion, gcovSHA256] = process.argv.slice(1);
-fs.writeFileSync(output, `${JSON.stringify({schemaVersion: 1, bundle: {manifestSHA256, platform: "linux-x64", pythonVersion: "3.14.6", gcovrVersion: "8.6"}, source: {path: "fixture-source.c", sha256: sourceSHA256}, toolchain: {gcc: {path: gccPath, version: gccVersion, sha256: gccSHA256}, gcov: {path: gcovPath, version: gcovVersion, sha256: gcovSHA256}}, artifacts: {raw: {path: "raw-coverage.json", sha256: rawSHA256, sidecar: "raw-coverage.json.sha256"}, canonical: {path: "gcovr-8.6.canonical.json", sha256: canonicalSHA256, sidecar: "gcovr-8.6.canonical.json.sha256"}}})}\n`);
-' "$artifact_dir/generation.json" "$expected_manifest_sha256" "$source_sha256" "$raw_sha256" "$canonical_sha256" "$gcc" "$gcc_version" "$gcc_sha256" "$gcov" "$gcov_version" "$gcov_sha256"
+const [output, manifestSHA256, sourceSHA256, rawSHA256, canonicalSHA256, allowedDirectory, gccPath, gccVersion, gccSHA256, gcovPath, gcovVersion, gcovSHA256] = process.argv.slice(1);
+fs.writeFileSync(output, `${JSON.stringify({schemaVersion: 1, bundle: {manifestSHA256, platform: "linux-x64", pythonVersion: "3.14.6", gcovrVersion: "8.6"}, source: {path: "fixture-source.c", sha256: sourceSHA256}, toolchain: {allowedDirectory, gcc: {path: gccPath, version: gccVersion, sha256: gccSHA256}, gcov: {path: gcovPath, version: gcovVersion, sha256: gcovSHA256}}, artifacts: {raw: {path: "raw-coverage.json", sha256: rawSHA256, sidecar: "raw-coverage.json.sha256"}, canonical: {path: "gcovr-8.6.canonical.json", sha256: canonicalSHA256, sidecar: "gcovr-8.6.canonical.json.sha256"}}})}\n`);
+' "$artifact_dir/generation.json" "$expected_manifest_sha256" "$source_sha256" "$raw_sha256" "$canonical_sha256" "$allowed_toolchain_dir" "$gcc" "$gcc_version" "$gcc_sha256" "$gcov" "$gcov_version" "$gcov_sha256"
 printf 'source-sha256=%s\nmanifest-sha256=%s\nraw-output-sha256=%s\ncanonical-output-sha256=%s\ngcc-sha256=%s\ngcov-sha256=%s\n' "$source_sha256" "$expected_manifest_sha256" "$raw_sha256" "$canonical_sha256" "$gcc_sha256" "$gcov_sha256"

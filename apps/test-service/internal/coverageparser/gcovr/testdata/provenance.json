@@ -17,6 +17,11 @@
     "canonicalOutput": "gcovr-8.6.canonical.json",
     "canonicalOutputDigestSidecar": "gcovr-8.6.canonical.json.sha256",
     "verificationCommand": "bash apps/test-service/internal/coverageparser/gcovr/testdata/verify-linux-fixtures.sh <artifact-dir>",
+    "toolchain": {
+      "allowedDirectory": "required UNIT_TEST_IDE_GCOVR_ALLOWED_TOOLCHAIN_DIR",
+      "versionPin": "required UNIT_TEST_IDE_GCC_VERSION semver",
+      "gnuVersionFixture": "gnu-tool-version-output.json"
+    },
     "localStatus": "not generated on Windows; Linux CI must publish and verify the required raw artifact"
   },
   "fixtures": {

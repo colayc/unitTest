@@ -13,9 +13,14 @@ checker and cross-checks `manifest.resolved.json` with the SHA-256 of
 is rejected.
 
 CI must provide absolute, explicitly version-pinned `UNIT_TEST_IDE_GCC` and
-`UNIT_TEST_IDE_GCOV` paths plus `UNIT_TEST_IDE_GCC_VERSION`. The generator
-records compiler version and executable SHA-256 rather than accepting a
-compiler selected from ambient `PATH`. The caller must create and set
+`UNIT_TEST_IDE_GCOV` paths, a semver `UNIT_TEST_IDE_GCC_VERSION`, and
+`UNIT_TEST_IDE_GCOVR_ALLOWED_TOOLCHAIN_DIR`; both resolved executables must be
+below that directory. The generator extracts the first semver token from each
+GNU tool's dump output (falling back to its first banner token), then requires
+both to equal the pin. `gnu-tool-version-output.json` locks the paired GCC/gcov
+multi-line-banner regression case. The generator records compiler version and
+executable SHA-256 rather than accepting a compiler selected from ambient
+`PATH`. The caller must create and set
 `UNIT_TEST_IDE_GCOVR_FIXTURE_ARTIFACT_DIR`. Generation writes a raw JSON file
 and digest sidecar, a deterministic canonical JSON projection and digest
 sidecar, plus timestamp-free `generation.json`; no raw digest placeholder is
@@ -27,11 +32,13 @@ After generation, CI must run:
 bash apps/test-service/internal/coverageparser/gcovr/testdata/verify-linux-fixtures.sh <artifact-dir>
 ```
 
-The verifier fails when raw evidence or a sidecar is absent, recomputes both
-digests, verifies canonical byte identity, validates the locked
-bundle/source metadata, parses raw evidence, and verifies the committed
-fixture digests. It therefore cannot claim a raw-output comparison when no
-raw artifact exists.
+The verifier fails when raw evidence or a sidecar is absent, strictly validates
+the closed generation metadata (bundle, source, toolchain path/version/digest,
+and artifact names), recomputes both digests, and verifies canonical byte
+identity before parsing raw evidence. Sidecars are exactly `SHA-256  basename`
+records: they contain no generating-host path and remain valid if the complete
+artifact directory is moved. It therefore cannot claim a raw-output comparison
+when no raw artifact exists.
 
 `schema-variants.json` is a hand-composed canonical variant covering the
 documented 8.6 field family (destination block IDs, conditions, decisions,
