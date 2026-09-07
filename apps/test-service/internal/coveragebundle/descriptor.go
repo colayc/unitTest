@@ -197,6 +197,10 @@ func (output *PinnedOutput) ReadAll() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	returnedDigest := sha256.Sum256(contents)
+	if hex.EncodeToString(returnedDigest[:]) != d.outputDigest {
+		return nil, fmt.Errorf("%w: output changed during read", ErrDescriptorIntegrity)
+	}
 	// A retained file descriptor prevents pathname ABA, but content may still
 	// change while a consumer is reading. Reverify the pin, digest, and every
 	// lifetime capability after the bounded read before releasing bytes.

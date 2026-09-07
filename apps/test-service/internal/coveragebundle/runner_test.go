@@ -563,6 +563,52 @@ func TestPinnedOutputRejectsReplacementDuringBoundedRead(t *testing.T) {
 	}
 }
 
+func TestPinnedOutputRejectsABARestorationDuringBoundedRead(t *testing.T) {
+	base := strictTestTempDir(t)
+	coverageRoot, projectRoot, objects := filepath.Join(base, "coverage"), filepath.Join(base, "project"), filepath.Join(base, "objects")
+	for _, directory := range []string{coverageRoot, projectRoot, objects} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	python, runner, gcov := filepath.Join(base, "python"), filepath.Join(base, "runner.pyz"), filepath.Join(base, "gcov")
+	for _, path := range []string{python, runner, gcov} {
+		if err := os.WriteFile(path, []byte(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	execution, err := PrepareRunner(&fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: RequiredPythonVersion, GcovrVersion: RequiredGCovrVersion, ManifestSHA256: strings.Repeat("a", 64)}}, DescriptorInput{Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(coverageRoot, "gcovr", "coverage.json")}, descriptorCapabilitiesForTest(t, coverageRoot, projectRoot, objects, gcov))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer execution.Close()
+	outputPath := execution.Descriptor().OutputPath
+	stable := []byte(`{"stable":"A"}`)
+	if err := os.WriteFile(outputPath, stable, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	output, err := execution.PinnedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalRead := readPinnedOutputFile
+	readPinnedOutputFile = func(file *os.File) ([]byte, error) {
+		// Model the bytes observed after A changed to B and then was restored to
+		// A before the post-read filesystem verification. This deterministic
+		// seam is necessary on Windows, where the retained DELETE handle blocks
+		// the in-place mutation fixture used by the Unix replacement test.
+		_, err := originalRead(file)
+		if err != nil {
+			return nil, err
+		}
+		return []byte(`{"transient":"B"}`), nil
+	}
+	t.Cleanup(func() { readPinnedOutputFile = originalRead })
+	if contents, err := output.ReadAll(); err == nil || string(contents) == string(stable) {
+		t.Fatalf("PinnedOutput.ReadAll() = %q, %v, want ABA rejection", contents, err)
+	}
+}
+
 func TestPreparedExecutionRejectsTaskRootReplacementBeforeOutputOpen(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("task-root replacement fixture requires rename/symlink support")
