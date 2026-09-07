@@ -246,6 +246,16 @@ jobs:
       # Bootstrap/download/cache work completes before the fail-closed native namespace.
       - run: pnpm prepare:coverage-bundle
       - run: pnpm check:coverage-bundle
+      - name: Prepare Go module cache before Linux offline namespace
+        working-directory: apps/test-service
+        shell: bash
+        env:
+          GOPRIVATE: ""
+          GONOPROXY: ""
+          GONOSUMDB: ""
+          GOSUMDB: sum.golang.org
+          GOPROXY: https://proxy.golang.org,direct
+        run: go mod download
       - name: Verify fail-closed Linux offline namespace
         run: node tools/linux-offline/run.mjs -- node tools/linux-offline/probe.mjs
       - run: node tools/linux-offline/run.mjs -- pnpm verify

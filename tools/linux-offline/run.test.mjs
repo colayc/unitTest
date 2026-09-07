@@ -18,8 +18,10 @@ test("Linux workflow prepares downloads before entering a namespace and wraps fi
   const workflow = await readFile(resolve(import.meta.dirname, "..", "..", ".github", "workflows", "foundation.yml"), "utf8");
   const coveragePrepare = workflow.indexOf("- run: pnpm prepare:coverage-bundle");
   const frameworkPrepare = workflow.indexOf("- name: Prepare locked Linux framework inputs");
+  const goModuleDownload = workflow.indexOf("- name: Prepare Go module cache before Linux offline namespace");
   const namespaceProbe = workflow.indexOf("Verify fail-closed Linux offline namespace");
-  assert.ok(coveragePrepare !== -1 && frameworkPrepare !== -1 && namespaceProbe !== -1 && coveragePrepare < namespaceProbe && frameworkPrepare < namespaceProbe);
+  assert.ok(coveragePrepare !== -1 && frameworkPrepare !== -1 && goModuleDownload !== -1 && namespaceProbe !== -1 && coveragePrepare < namespaceProbe && frameworkPrepare < namespaceProbe && goModuleDownload < namespaceProbe);
+  assert.match(workflow, /node tools\/linux-offline\/run\.mjs -- pnpm verify/u);
   assert.match(workflow, /node tools\/linux-offline\/run\.mjs -- pnpm test:e2e:native/u);
   assert.doesNotMatch(workflow, /\n\s*- run: pnpm test:e2e:native\n/u);
 });
