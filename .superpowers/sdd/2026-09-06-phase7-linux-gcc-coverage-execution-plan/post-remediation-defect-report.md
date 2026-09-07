@@ -33,6 +33,24 @@ All commands used workspace-local `GOCACHE` directories.
   `GOOS=windows GOARCH=amd64 go test -c ./apps/test-service/internal/coveragebundle`
 - `git diff --check`: PASS.
 
+## Round 2 follow-up: remaining deterministic branches
+
+Added the two review-requested regression cases without production changes:
+
+1. Unix now injects the actual `acquireCleanupDirectoryPin` failure for the
+   `gcovr` child after the ordinary preflight succeeds, and asserts that
+   `WriteAtomic` returns that failure without leaving `gcovr` residue. This
+   test is build-tagged Unix; Linux amd64 test compilation passed on this
+   Windows host.
+2. The runner now covers `Parse` returning a descriptor mismatch with no parse
+   error while `owned.Close()` also reports a cleanup failure. The returned
+   error is asserted to contain both `ErrBundleIntegrity` and the injected
+   cleanup error.
+
+Verification: focused Windows-host test PASS; full coveragebundle PASS; race
+coveragebundle PASS; Linux amd64 compile-only PASS; Windows amd64 compile-only
+PASS; `git diff --check` PASS.
+
 The initial Linux `go test -run '^$'` attempt could not execute a Linux test
 binary on this Windows host (`%1 is not a valid Win32 application`); it was
 replaced with the successful compile-only command above.

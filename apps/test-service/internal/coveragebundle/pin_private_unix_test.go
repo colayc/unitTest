@@ -88,6 +88,36 @@ func TestPrivateUnixCleanupPreflightFirstPinFailureLeavesNoResidue(t *testing.T)
 	}
 }
 
+func TestPrivateUnixWriteAtomicCleanupPinFailureLeavesNoGcovrResidue(t *testing.T) {
+	base := strictTestTempDir(t)
+	coverageRoot, root := filepath.Join(base, "coverage"), filepath.Join(base, "root")
+	objects, gcov := filepath.Join(base, "objects"), filepath.Join(base, "gcov")
+	for _, directory := range []string{coverageRoot, root, objects} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(gcov, []byte("gcov"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	failure := errors.New("injected gcovr cleanup pin failure")
+	original := acquireCleanupDirectoryPin
+	acquireCleanupDirectoryPin = func(parent *pinnedObject, name string) (*pinnedObject, error) {
+		if name == "gcovr" {
+			return nil, failure
+		}
+		return original(parent, name)
+	}
+	t.Cleanup(func() { acquireCleanupDirectoryPin = original })
+	descriptor := Descriptor{SchemaVersion: 1, Root: root, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(coverageRoot, "gcovr", "coverage.json")}
+	if owned, err := descriptor.WriteAtomic(descriptorCapabilitiesForTest(t, coverageRoot, root, objects, gcov)); owned != nil || !errors.Is(err, failure) {
+		t.Fatalf("WriteAtomic() = (%v, %v), want cleanup pin failure", owned, err)
+	}
+	if _, err := os.Lstat(filepath.Join(coverageRoot, "gcovr")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cleanup pin failure left gcovr residue: %v", err)
+	}
+}
+
 func TestPrivateUnixCleanupRemovesRetainedChild(t *testing.T) {
 	root := filepath.Join(strictTestTempDir(t), "coverage")
 	if err := os.Mkdir(root, 0o700); err != nil {
