@@ -9,12 +9,12 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
-	"syscall"
 
 	"golang.org/x/sys/unix"
 )
 
 var descriptorTempSequence uint64
+var cleanupPreflightSequence uint64
 
 // unixBeforePinnedUnlink exists only to make the identity recheck race
 // deterministic in the Unix regression test. Production leaves it nil.
@@ -36,15 +36,15 @@ func preflightPinnedCleanupAuthority(directory *VerifiedDirectory, parent *pinne
 	if err := verifyPrivateUnixDirectory(parent); err != nil {
 		return fmt.Errorf("private collector directory: %w", err)
 	}
-	for _, identity := range directory.identities {
-		if identity.path == directory.path {
+	for _, ancestor := range directory.pins {
+		if ancestor.path == directory.path {
 			continue
 		}
-		if err := verifyUnixAncestorMode(identity.info); err != nil {
-			return fmt.Errorf("private collector ancestor %q: %w", identity.path, err)
+		if err := verifyPrivateUnixAncestor(ancestor); err != nil {
+			return fmt.Errorf("private collector ancestor %q: %w", ancestor.path, err)
 		}
 	}
-	return nil
+	return preflightPinnedCleanupDirectory(parent)
 }
 
 func verifyPrivateUnixDirectory(directory *pinnedObject) error {
@@ -71,15 +71,40 @@ func validatePrivateUnixDirectoryStatus(status unix.Stat_t, currentUID uint32) e
 	return nil
 }
 
-func verifyUnixAncestorMode(info os.FileInfo) error {
-	status, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || status == nil {
-		return errors.New("ancestor ownership metadata unavailable")
+func verifyPrivateUnixAncestor(directory *pinnedObject) error {
+	if directory == nil || directory.file == nil || !directory.directory {
+		return errors.New("invalid private cleanup ancestor")
 	}
-	if info.Mode().Perm()&0o022 != 0 {
+	var status unix.Stat_t
+	if err := unix.Fstat(int(directory.file.Fd()), &status); err != nil {
+		return err
+	}
+	if status.Mode&unix.S_IFMT != unix.S_IFDIR || status.Mode&0o022 != 0 {
 		return errors.New("ancestor permits group or other writes")
 	}
-	return nil
+	return directory.verifyIdentity()
+}
+
+func preflightPinnedCleanupDirectory(parent *pinnedObject) error {
+	name := fmt.Sprintf(".coverage-directory-delete-preflight-%d", atomic.AddUint64(&cleanupPreflightSequence, 1))
+	if err := mkdirPinnedChild(parent, name, 0o700); err != nil {
+		return err
+	}
+	child, err := acquireCleanupDirectoryPin(parent, name)
+	if err != nil {
+		return errors.Join(err, removeFreshPinnedDirectory(parent, name))
+	}
+	return errors.Join(removePinnedChild(parent, child, name), child.Close(), syncPinnedDirectory(parent))
+}
+
+func removeFreshPinnedDirectory(parent *pinnedObject, name string) error {
+	if parent == nil || name == "" || filepath.Base(name) != name {
+		return errors.New("invalid fresh directory cleanup")
+	}
+	if err := verifyPrivateUnixDirectory(parent); err != nil {
+		return err
+	}
+	return unix.Unlinkat(int(parent.file.Fd()), name, unix.AT_REMOVEDIR)
 }
 
 func mkdirPinnedChild(parent *pinnedObject, name string, mode uint32) error {

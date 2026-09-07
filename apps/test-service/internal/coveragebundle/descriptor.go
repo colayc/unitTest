@@ -31,6 +31,16 @@ var (
 	// descriptorPostPublication is a test seam for the error path after the
 	// published descriptor has acquired its retained cleanup handle.
 	descriptorPostPublication = func() error { return nil }
+
+	// These narrow seams let failure-path tests prove cleanup failures are
+	// returned to callers while the real retained operation still runs.
+	acquireCleanupDirectoryPin = func(parent *pinnedObject, name string) (*pinnedObject, error) {
+		return pinChildObjectWithDelete(parent, name, true, true)
+	}
+	writeDescriptorTemporary = func(file *os.File, contents []byte) (int, error) {
+		return file.Write(contents)
+	}
+	removePinnedChildForCleanup = removePinnedChild
 )
 
 // Descriptor is the closed JSON contract consumed by the bundled runner.
@@ -696,13 +706,13 @@ func (descriptor Descriptor) WriteAtomic(capabilities DescriptorCapabilities) (*
 		_ = closeRetainedInputs()
 		return nil, integrityError("collector child", err)
 	}
-	cleanupChild, err := pinChildObjectWithDelete(coveragePin, "gcovr", true, true)
+	cleanupChild, err := acquireCleanupDirectoryPin(coveragePin, "gcovr")
 	if err != nil {
 		_ = closeRetainedInputs()
 		return nil, integrityError("collector child cleanup pin", err)
 	}
 	removeCreatedChild := func() error {
-		return errors.Join(removePinnedChild(coveragePin, cleanupChild, "gcovr"), cleanupChild.Close())
+		return errors.Join(removePinnedChildForCleanup(coveragePin, cleanupChild, "gcovr"), cleanupChild.Close())
 	}
 	if err := syncPinnedDirectory(coveragePin); err != nil {
 		cleanupErr := removeCreatedChild()
@@ -743,34 +753,27 @@ func (descriptor Descriptor) WriteAtomic(capabilities DescriptorCapabilities) (*
 	temporaryCleanupPin, err := duplicatePinnedTemporary(taskPin, temporary, temporaryName)
 	if err != nil {
 		cleanupErr := removeCreatedTemporary(taskPin, temporary, temporaryName)
-		_ = temporary.Close()
-		return nil, integrityError("retain descriptor temporary", errors.Join(err, cleanupErr, closeTaskRoot()))
+		closeErr := temporary.Close()
+		return nil, integrityError("retain descriptor temporary", errors.Join(err, cleanupErr, closeErr, closeTaskRoot()))
 	}
-	removeTemporaryFile := func() {
-		_ = removePinnedChild(taskPin, temporaryCleanupPin, temporaryName)
-		_ = temporaryCleanupPin.Close()
+	removeTemporaryFile := func() error {
+		return errors.Join(removePinnedChildForCleanup(taskPin, temporaryCleanupPin, temporaryName), temporaryCleanupPin.Close())
 	}
-	removeTemporary := func() {
-		_ = temporary.Close()
-		removeTemporaryFile()
-		_ = closeTaskRoot()
+	removeTemporary := func() error {
+		return errors.Join(temporary.Close(), removeTemporaryFile(), closeTaskRoot())
 	}
-	if _, err := temporary.Write(raw); err != nil {
-		removeTemporary()
-		return nil, integrityError("write descriptor", err)
+	if _, err := writeDescriptorTemporary(temporary, raw); err != nil {
+		return nil, integrityError("write descriptor", errors.Join(err, removeTemporary()))
 	}
 	if err := temporary.Sync(); err != nil {
-		removeTemporary()
-		return nil, integrityError("sync descriptor", err)
+		return nil, integrityError("sync descriptor", errors.Join(err, removeTemporary()))
 	}
 	if err := temporary.Close(); err != nil {
-		removeTemporaryFile()
-		return nil, integrityError("close descriptor temporary", errors.Join(err, closeTaskRoot()))
+		return nil, integrityError("close descriptor temporary", errors.Join(err, removeTemporaryFile(), closeTaskRoot()))
 	}
 	descriptorPath := filepath.Join(taskRoot, "descriptor.json")
 	if err := renamePinnedChild(taskPin, temporaryName, "descriptor.json"); err != nil {
-		removeTemporaryFile()
-		return nil, integrityError("publish descriptor", errors.Join(err, closeTaskRoot()))
+		return nil, integrityError("publish descriptor", errors.Join(err, removeTemporaryFile(), closeTaskRoot()))
 	}
 	// The retained temporary handle was acquired while the creation handle was
 	// still open. After the relative rename it is the exact descriptor identity
@@ -879,7 +882,7 @@ func cleanupDescriptorTaskRoot(collectorRoot, taskRoot *VerifiedDirectory, clean
 			result = errors.Join(result, fmt.Errorf("verify cleanup child %q: %w", name, err))
 			continue
 		}
-		if err := removePinnedChild(taskPin, child, name); err != nil {
+		if err := removePinnedChildForCleanup(taskPin, child, name); err != nil {
 			result = errors.Join(result, fmt.Errorf("remove cleanup child %q: %w", name, err))
 		}
 		if err := child.Close(); err != nil {
@@ -897,7 +900,7 @@ func cleanupDescriptorTaskRoot(collectorRoot, taskRoot *VerifiedDirectory, clean
 	if err := cleanupChild.verifyIdentity(); err != nil {
 		return fmt.Errorf("verify task cleanup child: %w", err)
 	}
-	if err := removePinnedChild(collectorPin, cleanupChild, "gcovr"); err != nil {
+	if err := removePinnedChildForCleanup(collectorPin, cleanupChild, "gcovr"); err != nil {
 		return fmt.Errorf("remove task cleanup child: %w", err)
 	}
 	if err := syncPinnedDirectory(collectorPin); err != nil {

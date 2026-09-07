@@ -41,6 +41,26 @@ func TestPrivateUnixCleanupAuthorityRejectsNonPrivateCollector(t *testing.T) {
 	}
 }
 
+func TestPrivateUnixCleanupAuthorityRejectsAncestorModeChangedAfterMint(t *testing.T) {
+	base := strictTestTempDir(t)
+	root := filepath.Join(base, "coverage")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	directory, err := newVerifiedDirectory(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = directory.Close() })
+	if err := os.Chmod(base, 0o770); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(base, 0o700) })
+	if err := preflightPinnedCleanupAuthority(directory, directoryFinalPin(directory)); err == nil {
+		t.Fatal("private cleanup preflight accepted ancestor mode changed after capability mint")
+	}
+}
+
 func TestPrivateUnixCleanupRemovesRetainedChild(t *testing.T) {
 	root := filepath.Join(strictTestTempDir(t), "coverage")
 	if err := os.Mkdir(root, 0o700); err != nil {

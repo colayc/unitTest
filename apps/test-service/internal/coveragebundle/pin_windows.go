@@ -33,22 +33,29 @@ func preflightPinnedCleanupAuthority(directory *VerifiedDirectory, parent *pinne
 	if err := parent.verifyIdentity(); err != nil {
 		return err
 	}
-	name := fmt.Sprintf(".coverage-delete-preflight-%d", atomic.AddUint64(&cleanupPreflightSequence, 1))
-	path := filepath.Join(parent.path, name)
-	utf16, err := windows.UTF16PtrFromString(path)
+	return preflightPinnedCleanupDirectory(parent)
+}
+
+func preflightPinnedCleanupDirectory(parent *pinnedObject) error {
+	name := fmt.Sprintf(".coverage-directory-delete-preflight-%d", atomic.AddUint64(&cleanupPreflightSequence, 1))
+	if err := mkdirPinnedChild(parent, name, 0o700); err != nil {
+		return err
+	}
+	child, err := acquireCleanupDirectoryPin(parent, name)
 	if err != nil {
+		return errors.Join(err, removeFreshPinnedDirectory(parent, name))
+	}
+	return errors.Join(removePinnedChild(parent, child, name), child.Close(), syncPinnedDirectory(parent))
+}
+
+func removeFreshPinnedDirectory(parent *pinnedObject, name string) error {
+	if parent == nil || name == "" || filepath.Base(name) != name {
+		return errors.New("invalid fresh directory cleanup")
+	}
+	if err := parent.verifyIdentity(); err != nil {
 		return err
 	}
-	handle, err := windows.CreateFile(utf16, windows.GENERIC_READ|windows.DELETE,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
-		nil, windows.CREATE_NEW, windows.FILE_ATTRIBUTE_TEMPORARY|windows.FILE_FLAG_DELETE_ON_CLOSE, 0)
-	if err != nil {
-		return err
-	}
-	if err := windows.CloseHandle(handle); err != nil {
-		return err
-	}
-	return parent.verifyIdentity()
+	return os.Remove(filepath.Join(parent.path, name))
 }
 
 func mkdirPinnedChild(parent *pinnedObject, name string, mode uint32) error {

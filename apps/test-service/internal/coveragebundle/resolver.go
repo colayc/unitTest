@@ -280,5 +280,8 @@ func canonicalTreePath(value string) bool {
 }
 
 func integrityError(label string, cause error) error {
-	return fmt.Errorf("%w: %s: %v", ErrBundleIntegrity, label, cause)
+	// Preserve both the stable package classification and every joined cause so
+	// callers can reliably distinguish an operation failure from a cleanup
+	// failure that occurred while unwinding it.
+	return fmt.Errorf("%w: %s: %w", ErrBundleIntegrity, label, cause)
 }
