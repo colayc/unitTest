@@ -3,6 +3,7 @@
 package coveragebundle
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -58,6 +59,32 @@ func TestPrivateUnixCleanupAuthorityRejectsAncestorModeChangedAfterMint(t *testi
 	t.Cleanup(func() { _ = os.Chmod(base, 0o700) })
 	if err := preflightPinnedCleanupAuthority(directory, directoryFinalPin(directory)); err == nil {
 		t.Fatal("private cleanup preflight accepted ancestor mode changed after capability mint")
+	}
+}
+
+func TestPrivateUnixCleanupPreflightFirstPinFailureLeavesNoResidue(t *testing.T) {
+	root := filepath.Join(strictTestTempDir(t), "coverage")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	directory, err := newVerifiedDirectory(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = directory.Close() })
+	failure := errors.New("injected first cleanup pin failure")
+	original := validateCreatedCleanupDirectory
+	validateCreatedCleanupDirectory = func(*pinnedObject) error { return failure }
+	t.Cleanup(func() { validateCreatedCleanupDirectory = original })
+	if err := preflightPinnedCleanupAuthority(directory, directoryFinalPin(directory)); !errors.Is(err, failure) {
+		t.Fatalf("preflight error = %v, want injected first cleanup pin failure", err)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("first cleanup pin failure left preflight residue: %#v", entries)
 	}
 }
 

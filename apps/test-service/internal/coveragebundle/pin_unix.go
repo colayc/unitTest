@@ -87,18 +87,35 @@ func verifyPrivateUnixAncestor(directory *pinnedObject) error {
 
 func preflightPinnedCleanupDirectory(parent *pinnedObject) error {
 	name := fmt.Sprintf(".coverage-directory-delete-preflight-%d", atomic.AddUint64(&cleanupPreflightSequence, 1))
-	if err := mkdirPinnedChild(parent, name, 0o700); err != nil {
-		return err
-	}
-	creationChild, err := pinChildObject(parent, name, true)
+	child, err := createPinnedCleanupDirectory(parent, name, 0o700)
 	if err != nil {
 		return err
+	}
+	return errors.Join(removePinnedChild(parent, child, name), child.Close(), syncPinnedDirectory(parent))
+}
+
+func createPinnedCleanupDirectory(parent *pinnedObject, name string, mode uint32) (*pinnedObject, error) {
+	if err := mkdirPinnedChild(parent, name, mode); err != nil {
+		return nil, err
 	}
 	child, err := acquireCleanupDirectoryPin(parent, name)
 	if err != nil {
-		return errors.Join(err, removeFreshPinnedDirectory(parent, name, creationChild), creationChild.Close())
+		return nil, errors.Join(err, removeUnpinnedFreshDirectory(parent, name), syncPinnedDirectory(parent))
 	}
-	return errors.Join(removePinnedChild(parent, child, name), child.Close(), creationChild.Close(), syncPinnedDirectory(parent))
+	if err := validateCreatedCleanupDirectory(child); err != nil {
+		return nil, errors.Join(err, removePinnedChild(parent, child, name), child.Close(), syncPinnedDirectory(parent))
+	}
+	return child, nil
+}
+
+func removeUnpinnedFreshDirectory(parent *pinnedObject, name string) error {
+	if parent == nil || name == "" || filepath.Base(name) != name {
+		return errors.New("invalid unpinned fresh directory cleanup")
+	}
+	if err := verifyPrivateUnixDirectory(parent); err != nil {
+		return err
+	}
+	return unix.Unlinkat(int(parent.file.Fd()), name, unix.AT_REMOVEDIR)
 }
 
 func removeFreshPinnedDirectory(parent *pinnedObject, name string, expected *pinnedObject) error {

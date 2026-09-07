@@ -42,3 +42,30 @@ replaced with the successful compile-only command above.
 - No remote push, PR, merge, release, or signing action.
 - No Task 5 implementation.
 - User-owned `.merge-stash-20260903/` remains untouched.
+
+## Round 1 follow-up: first pin and runner cleanup propagation
+
+The first post-remediation review found two remaining ownership gaps. This
+round closes both without extending into Task 5.
+
+1. Task-child creation now returns an immediately usable retained cleanup pin.
+   On Unix, `createPinnedCleanupDirectory` creates the private child and, if
+   the first DELETE-pin acquisition fails, deletes it relative to the retained
+   private `0700` parent with `AT_REMOVEDIR`. On Windows it creates the child
+   relative to the retained parent handle using `NtCreateFile` and receives the
+   DELETE-capable handle atomically; no mutable child pathname fallback is
+   used. The shared post-create validation seam removes through that exact pin
+   before returning its injected failure.
+2. `PrepareRunner` now joins cleanup failures on both ownership-transfer error
+   paths: descriptor parse/mismatch joins `owned.Close()`, and final execution
+   verification joins `execution.Close()`. Regression tests inject and assert
+   both cleanup failures.
+
+Additional verification (all with workspace-local `GOCACHE`):
+
+- Focused first-pin and runner cleanup regressions: PASS.
+- Full `coveragebundle` package: PASS.
+- `coveragebundle` race package: PASS.
+- Linux amd64 compile-only: PASS.
+- Windows amd64 compile-only: PASS.
+- `git diff --check`: PASS.

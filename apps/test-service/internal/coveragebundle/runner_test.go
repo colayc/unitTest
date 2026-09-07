@@ -17,6 +17,7 @@ type fakeRunnerPin struct {
 	verifyCalls  int
 	closeCalls   int
 	closed       bool
+	closeErr     error
 }
 
 type bareDirectoryCapability struct{ path string }
@@ -35,7 +36,63 @@ func (pin *fakeRunnerPin) Verify() error {
 func (pin *fakeRunnerPin) Close() error {
 	pin.closeCalls++
 	pin.closed = true
-	return nil
+	return pin.closeErr
+}
+
+func TestPrepareRunnerReturnsOwnedCleanupFailureAfterParseMismatch(t *testing.T) {
+	base := strictTestTempDir(t)
+	coverageRoot, projectRoot, objects := filepath.Join(base, "coverage"), filepath.Join(base, "project"), filepath.Join(base, "objects")
+	for _, directory := range []string{coverageRoot, projectRoot, objects} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	python, runner, gcov := filepath.Join(base, "python.exe"), filepath.Join(base, "runner.pyz"), filepath.Join(base, "gcov.exe")
+	for _, path := range []string{python, runner, gcov} {
+		if err := os.WriteFile(path, []byte(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	parseFailure := errors.New("injected descriptor parse failure")
+	cleanupFailure := errors.New("injected owned cleanup failure")
+	originalParse, originalRemove := parsePreparedDescriptor, removePinnedChildForCleanup
+	parsePreparedDescriptor = func(*OwnedDescriptor) (Descriptor, error) { return Descriptor{}, parseFailure }
+	removePinnedChildForCleanup = func(parent, child *pinnedObject, name string) error {
+		return errors.Join(removePinnedChild(parent, child, name), cleanupFailure)
+	}
+	t.Cleanup(func() {
+		parsePreparedDescriptor = originalParse
+		removePinnedChildForCleanup = originalRemove
+	})
+	pin := &fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}}
+	if execution, err := PrepareRunner(pin, DescriptorInput{Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(coverageRoot, "gcovr", "coverage.json")}, descriptorCapabilitiesForTest(t, coverageRoot, projectRoot, objects, gcov)); execution != nil || !errors.Is(err, parseFailure) || !errors.Is(err, cleanupFailure) {
+		t.Fatalf("PrepareRunner() = (%v, %v), want parse and owned cleanup failures", execution, err)
+	}
+}
+
+func TestPrepareRunnerReturnsExecutionCleanupFailureAfterFinalVerify(t *testing.T) {
+	base := strictTestTempDir(t)
+	coverageRoot, projectRoot, objects := filepath.Join(base, "coverage"), filepath.Join(base, "project"), filepath.Join(base, "objects")
+	for _, directory := range []string{coverageRoot, projectRoot, objects} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	python, runner, gcov := filepath.Join(base, "python.exe"), filepath.Join(base, "runner.pyz"), filepath.Join(base, "gcov.exe")
+	for _, path := range []string{python, runner, gcov} {
+		if err := os.WriteFile(path, []byte(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	verifyFailure := errors.New("injected final execution verification failure")
+	closeFailure := errors.New("injected execution cleanup failure")
+	originalVerify := verifyPreparedExecution
+	verifyPreparedExecution = func(*PreparedExecution) error { return verifyFailure }
+	t.Cleanup(func() { verifyPreparedExecution = originalVerify })
+	pin := &fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}, closeErr: closeFailure}
+	if execution, err := PrepareRunner(pin, DescriptorInput{Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(coverageRoot, "gcovr", "coverage.json")}, descriptorCapabilitiesForTest(t, coverageRoot, projectRoot, objects, gcov)); execution != nil || !errors.Is(err, verifyFailure) || !errors.Is(err, closeFailure) {
+		t.Fatalf("PrepareRunner() = (%v, %v), want execution verification and cleanup failures", execution, err)
+	}
 }
 
 func TestPrepareRunnerBuildsExactIsolatedProcessSpec(t *testing.T) {

@@ -35,6 +35,13 @@ type PreparedExecution struct {
 
 var _ coverageplatform.CollectorExecution = (*PreparedExecution)(nil)
 
+var (
+	// These narrow seams cover the two ownership-transfer error paths. Production
+	// always calls the concrete methods below.
+	parsePreparedDescriptor = func(owned *OwnedDescriptor) (Descriptor, error) { return owned.Parse() }
+	verifyPreparedExecution = func(execution *PreparedExecution) error { return execution.Verify() }
+)
+
 func PrepareRunner(pin Pin, input DescriptorInput, capabilities DescriptorCapabilities) (*PreparedExecution, error) {
 	if isNilPin(pin) {
 		return nil, ErrBundleIntegrity
@@ -54,12 +61,11 @@ func PrepareRunner(pin Pin, input DescriptorInput, capabilities DescriptorCapabi
 	if err != nil {
 		return nil, err
 	}
-	if parsed, err := owned.Parse(); err != nil || parsed != descriptor {
-		_ = owned.Close()
+	if parsed, err := parsePreparedDescriptor(owned); err != nil || parsed != descriptor {
 		if err == nil {
 			err = ErrBundleIntegrity
 		}
-		return nil, err
+		return nil, errors.Join(err, owned.Close())
 	}
 	spec := task.ProcessSpec{
 		Executable: install.Python,
@@ -68,9 +74,8 @@ func PrepareRunner(pin Pin, input DescriptorInput, capabilities DescriptorCapabi
 		Dir:        owned.TaskRoot(),
 	}
 	execution := &PreparedExecution{pin: pin, install: install, descriptor: owned, descriptorPath: owned.Path(), spec: spec}
-	if err := execution.Verify(); err != nil {
-		_ = execution.Close()
-		return nil, err
+	if err := verifyPreparedExecution(execution); err != nil {
+		return nil, errors.Join(err, execution.Close())
 	}
 	return execution, nil
 }

@@ -175,11 +175,11 @@ func TestDescriptorDirectoryCleanupPinPreflightFailureLeavesNoResidue(t *testing
 		t.Fatal(err)
 	}
 	descriptor := Descriptor{SchemaVersion: 1, Root: root, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(coverageRoot, "gcovr", "coverage.json")}
-	original := acquireCleanupDirectoryPin
-	acquireCleanupDirectoryPin = func(*pinnedObject, string) (*pinnedObject, error) {
-		return nil, errors.New("injected directory delete pin failure")
+	original := validateCreatedCleanupDirectory
+	validateCreatedCleanupDirectory = func(*pinnedObject) error {
+		return errors.New("injected directory delete pin failure")
 	}
-	t.Cleanup(func() { acquireCleanupDirectoryPin = original })
+	t.Cleanup(func() { validateCreatedCleanupDirectory = original })
 	if owned, err := descriptor.WriteAtomic(descriptorCapabilitiesForTest(t, coverageRoot, root, objects, gcov)); err == nil || owned != nil {
 		t.Fatalf("WriteAtomic() = (%v, %v), want directory preflight failure", owned, err)
 	}
@@ -192,7 +192,7 @@ func TestDescriptorDirectoryCleanupPinPreflightFailureLeavesNoResidue(t *testing
 	}
 }
 
-func TestDescriptorGcovrCleanupPinFailureRemovesFreshTaskRoot(t *testing.T) {
+func TestDescriptorGcovrFirstCleanupPinFailureRemovesFreshTaskRoot(t *testing.T) {
 	base := strictTestTempDir(t)
 	coverageRoot, root := filepath.Join(base, "coverage"), filepath.Join(base, "root")
 	objects, gcov := filepath.Join(base, "objects"), filepath.Join(base, "gcov")
@@ -205,16 +205,16 @@ func TestDescriptorGcovrCleanupPinFailureRemovesFreshTaskRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	descriptor := Descriptor{SchemaVersion: 1, Root: root, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(coverageRoot, "gcovr", "coverage.json")}
-	original := acquireCleanupDirectoryPin
-	acquireCleanupDirectoryPin = func(parent *pinnedObject, name string) (*pinnedObject, error) {
-		if name == "gcovr" {
-			return nil, errors.New("injected gcovr cleanup pin failure")
+	original := validateCreatedCleanupDirectory
+	validateCreatedCleanupDirectory = func(child *pinnedObject) error {
+		if filepath.Base(child.path) == "gcovr" {
+			return errors.New("injected gcovr first cleanup pin failure")
 		}
-		return original(parent, name)
+		return original(child)
 	}
-	t.Cleanup(func() { acquireCleanupDirectoryPin = original })
+	t.Cleanup(func() { validateCreatedCleanupDirectory = original })
 	if owned, err := descriptor.WriteAtomic(descriptorCapabilitiesForTest(t, coverageRoot, root, objects, gcov)); err == nil || owned != nil {
-		t.Fatalf("WriteAtomic() = (%v, %v), want gcovr cleanup pin failure", owned, err)
+		t.Fatalf("WriteAtomic() = (%v, %v), want gcovr first cleanup pin failure", owned, err)
 	}
 	if _, err := os.Lstat(filepath.Join(coverageRoot, "gcovr")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("gcovr cleanup pin failure left task root: %v", err)
@@ -452,7 +452,9 @@ func TestDescriptorRejectsUnretainedRootAndObjectCapabilities(t *testing.T) {
 	}
 	for _, mutate := range []func(*DescriptorCapabilities){
 		func(capabilities *DescriptorCapabilities) { capabilities.Root = bareDirectoryCapability{path: root} },
-		func(capabilities *DescriptorCapabilities) { capabilities.ObjectDirectory = bareDirectoryCapability{path: objects} },
+		func(capabilities *DescriptorCapabilities) {
+			capabilities.ObjectDirectory = bareDirectoryCapability{path: objects}
+		},
 	} {
 		capabilities := descriptorCapabilitiesForTest(t, coverageRoot, root, objects, gcov)
 		mutate(&capabilities)

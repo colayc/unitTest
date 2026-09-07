@@ -38,18 +38,76 @@ func preflightPinnedCleanupAuthority(directory *VerifiedDirectory, parent *pinne
 
 func preflightPinnedCleanupDirectory(parent *pinnedObject) error {
 	name := fmt.Sprintf(".coverage-directory-delete-preflight-%d", atomic.AddUint64(&cleanupPreflightSequence, 1))
-	if err := mkdirPinnedChild(parent, name, 0o700); err != nil {
-		return err
-	}
-	creationChild, err := pinChildObject(parent, name, true)
+	child, err := createPinnedCleanupDirectory(parent, name, 0o700)
 	if err != nil {
 		return err
 	}
-	child, err := acquireCleanupDirectoryPin(parent, name)
-	if err != nil {
-		return errors.Join(err, removeFreshPinnedDirectory(parent, name, creationChild), creationChild.Close())
+	return errors.Join(removePinnedChild(parent, child, name), child.Close(), syncPinnedDirectory(parent))
+}
+
+func createPinnedCleanupDirectory(parent *pinnedObject, name string, mode uint32) (*pinnedObject, error) {
+	if parent == nil || parent.file == nil || !parent.directory || name == "" || filepath.Base(name) != name {
+		return nil, errors.New("invalid pinned cleanup directory")
 	}
-	return errors.Join(removePinnedChild(parent, child, name), child.Close(), creationChild.Close(), syncPinnedDirectory(parent))
+	if err := parent.verifyIdentity(); err != nil {
+		return nil, err
+	}
+	_ = mode // Windows cleanup authority is handle-bound; directory ACLs remain caller-owned.
+	objectName, err := windows.NewNTUnicodeString(name)
+	if err != nil {
+		return nil, err
+	}
+	attributes := &windows.OBJECT_ATTRIBUTES{
+		Length:        uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})),
+		RootDirectory: windows.Handle(parent.file.Fd()),
+		ObjectName:    objectName,
+		Attributes:    windows.OBJ_CASE_INSENSITIVE,
+	}
+	var handle windows.Handle
+	var status windows.IO_STATUS_BLOCK
+	allocation := int64(0)
+	if err := windows.NtCreateFile(&handle, windows.FILE_GENERIC_READ|windows.FILE_GENERIC_WRITE|windows.DELETE, attributes, &status,
+		&allocation, 0, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, windows.FILE_CREATE,
+		windows.FILE_DIRECTORY_FILE|windows.FILE_SYNCHRONOUS_IO_NONALERT, 0, 0); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(parent.path, name)
+	file := os.NewFile(uintptr(handle), path)
+	if file == nil {
+		_ = windows.CloseHandle(handle)
+		return nil, errors.New("construct pinned cleanup directory")
+	}
+	removeCreated := func(cause error) (*pinnedObject, error) {
+		info := fileDispositionInfo{DeleteFile: 1}
+		deleteErr := windows.SetFileInformationByHandle(windows.Handle(file.Fd()), windows.FileDispositionInfo, (*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)))
+		return nil, errors.Join(cause, deleteErr, file.Close(), syncPinnedDirectory(parent))
+	}
+	before, err := directObjectInfo(path)
+	if err != nil || !before.IsDir() {
+		if err == nil {
+			err = errors.New("created cleanup child is not a directory")
+		}
+		return removeCreated(err)
+	}
+	token, err := captureNativeIdentity(file)
+	if err != nil {
+		return removeCreated(err)
+	}
+	handleInfo, err := file.Stat()
+	if err != nil || !handleInfo.IsDir() || !os.SameFile(before, handleInfo) {
+		if err == nil {
+			err = errors.New("cleanup child identity changed while creating")
+		}
+		return removeCreated(err)
+	}
+	child := &pinnedObject{path: path, file: file, identity: handleInfo, directory: true, nativeToken: token}
+	if err := child.verifyIdentity(); err != nil {
+		return removeCreated(err)
+	}
+	if err := validateCreatedCleanupDirectory(child); err != nil {
+		return nil, errors.Join(err, removePinnedChild(parent, child, name), child.Close(), syncPinnedDirectory(parent))
+	}
+	return child, nil
 }
 
 func removeFreshPinnedDirectory(parent *pinnedObject, name string, expected *pinnedObject) error {

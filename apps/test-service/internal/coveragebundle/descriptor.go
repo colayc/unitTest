@@ -41,6 +41,11 @@ var (
 		return file.Write(contents)
 	}
 	removePinnedChildForCleanup = removePinnedChild
+
+	// validateCreatedCleanupDirectory is a narrow post-create seam. It proves
+	// that a newly created task child is removed through its retained pin when
+	// first-use validation fails.
+	validateCreatedCleanupDirectory = func(*pinnedObject) error { return nil }
 )
 
 // Descriptor is the closed JSON contract consumed by the bundled runner.
@@ -702,26 +707,12 @@ func (descriptor Descriptor) WriteAtomic(capabilities DescriptorCapabilities) (*
 		_ = closeRetainedInputs()
 		return nil, integrityError("collector child", errors.New("gcovr child already exists"))
 	}
-	if err := mkdirPinnedChild(coveragePin, "gcovr", 0o700); err != nil {
-		_ = closeRetainedInputs()
-		return nil, integrityError("collector child", err)
-	}
-	creationChild, err := pinChildObject(coveragePin, "gcovr", true)
+	cleanupChild, err := createPinnedCleanupDirectory(coveragePin, "gcovr", 0o700)
 	if err != nil {
-		return nil, integrityError("collector child identity", errors.Join(err, closeRetainedInputs()))
-	}
-	removeFreshCreatedChild := func() error {
-		return errors.Join(removeFreshPinnedDirectory(coveragePin, "gcovr", creationChild), creationChild.Close(), syncPinnedDirectory(coveragePin))
-	}
-	cleanupChild, err := acquireCleanupDirectoryPin(coveragePin, "gcovr")
-	if err != nil {
-		return nil, integrityError("collector child cleanup pin", errors.Join(err, removeFreshCreatedChild(), closeRetainedInputs()))
+		return nil, integrityError("collector child cleanup pin", errors.Join(err, closeRetainedInputs()))
 	}
 	removeCreatedChild := func() error {
 		return errors.Join(removePinnedChildForCleanup(coveragePin, cleanupChild, "gcovr"), cleanupChild.Close())
-	}
-	if err := creationChild.Close(); err != nil {
-		return nil, integrityError("collector child creation pin", errors.Join(err, removeCreatedChild(), closeRetainedInputs()))
 	}
 	if err := syncPinnedDirectory(coveragePin); err != nil {
 		cleanupErr := removeCreatedChild()
