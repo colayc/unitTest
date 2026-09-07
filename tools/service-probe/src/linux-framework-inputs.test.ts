@@ -17,6 +17,10 @@ function manifest(): LinuxFrameworkInputManifest {
   return {
     schemaVersion: 1,
     platform: "linux-x64",
+    fixtureTools: {
+      cmakeHelper: { path: "sdk/cmake/UnitTestIDE.cmake", sha256: "2297b37584d134b901f0da0dea5d60d67853a496dbf18874c220643ffd2cd2da" },
+      unityRunnerGenerator: { name: "unity-runner-generator", schemaVersion: 1, version: "1.0.0", runnerProtocol: "utide.runner.v1" }
+    },
     frameworks: [
       {
         id: "cpputest",
@@ -27,7 +31,8 @@ function manifest(): LinuxFrameworkInputManifest {
           sha256: "21c692105db15299b5529af81a11a7ad80397f92c122bd7bf1e4a4b0e85654f7"
         },
         license: "BSD-3-Clause",
-        sourceDirectory: "cpputest-4.0"
+        sourceDirectory: "cpputest-4.0",
+        treeSha256: "3b83f01045ca74b9a0996913723fb7e24824452dee0e5fd050f847bb15e404a1"
       },
       {
         id: "unity",
@@ -38,7 +43,8 @@ function manifest(): LinuxFrameworkInputManifest {
           sha256: "b41a66d45a6b99758fb3202ace6178177014d52fc524bf1f72687d93e9867292"
         },
         license: "MIT",
-        sourceDirectory: "Unity-2.6.1"
+        sourceDirectory: "Unity-2.6.1",
+        treeSha256: "ef6b833c394d7af7c2b733f87d38eb5bae4442bc1c237778bbaa8c0086ba00db"
       }
     ]
   };
@@ -51,10 +57,12 @@ test("Linux framework lock is closed and rejects missing, tampered, escaped and 
     { ...valid, frameworks: valid.frameworks.slice(0, 1) },
     { ...valid, frameworks: valid.frameworks.map((item, index) => index === 0 ? { ...item, version: "4.1" } : item) },
     { ...valid, frameworks: valid.frameworks.map((item, index) => index === 0 ? { ...item, sourceDirectory: "../cpputest" } : item) },
+    { ...valid, frameworks: valid.frameworks.map((item, index) => index === 0 ? { ...item, treeSha256: "0".repeat(64) } : item) },
+    { ...valid, fixtureTools: { ...valid.fixtureTools, cmakeHelper: { ...valid.fixtureTools.cmakeHelper, sha256: "0".repeat(64) } } },
     { ...valid, frameworks: valid.frameworks.map((item, index) => index === 0 ? { ...item, source: { ...item.source, url: "http://example.invalid/cpputest.tar.gz" } } : item) },
     { ...valid, token: "must-not-leak" }
   ]) {
-    assert.throws(() => validateLinuxFrameworkInputManifest(candidate), /Linux framework input/u);
+    assert.throws(() => validateLinuxFrameworkInputManifest(candidate), /Linux framework (input|fixture)/u);
   }
 });
 
@@ -69,6 +77,7 @@ test("Linux framework boundary accepts only expanded trees bound to the resolved
     await writeFile(join(unity, "src", "unity.c"), "void UnityBegin(void) {}\n");
     const expected = await verifyResolvedFrameworkTrees(root, manifest(), undefined);
     await verifyResolvedFrameworkTrees(root, manifest(), expected);
+    await assert.rejects(verifyResolvedFrameworkTrees(root, manifest(), manifest().frameworks), /tree digest mismatch/u);
     await writeFile(join(cpputest, "CMakeLists.txt"), "tampered\n");
     await assert.rejects(verifyResolvedFrameworkTrees(root, manifest(), expected), /tree digest mismatch/u);
   } finally {

@@ -10,9 +10,13 @@ const digest = (value) => createHash("sha256").update(value).digest("hex");
 const manifest = () => ({
   schemaVersion: 1,
   platform: "linux-x64",
+  fixtureTools: {
+    cmakeHelper: { path: "sdk/cmake/UnitTestIDE.cmake", sha256: "2297b37584d134b901f0da0dea5d60d67853a496dbf18874c220643ffd2cd2da" },
+    unityRunnerGenerator: { name: "unity-runner-generator", schemaVersion: 1, version: "1.0.0", runnerProtocol: "utide.runner.v1" }
+  },
   frameworks: [
-    { id: "cpputest", version: "4.0", source: { filename: "cpputest-4.0.tar.gz", url: "https://github.com/cpputest/cpputest/releases/download/v4.0/cpputest-4.0.tar.gz", sha256: "21c692105db15299b5529af81a11a7ad80397f92c122bd7bf1e4a4b0e85654f7" }, license: "BSD-3-Clause", sourceDirectory: "cpputest-4.0" },
-    { id: "unity", version: "2.6.1", source: { filename: "Unity-2.6.1.tar.gz", url: "https://github.com/ThrowTheSwitch/Unity/archive/refs/tags/v2.6.1.tar.gz", sha256: "b41a66d45a6b99758fb3202ace6178177014d52fc524bf1f72687d93e9867292" }, license: "MIT", sourceDirectory: "Unity-2.6.1" }
+    { id: "cpputest", version: "4.0", source: { filename: "cpputest-4.0.tar.gz", url: "https://github.com/cpputest/cpputest/releases/download/v4.0/cpputest-4.0.tar.gz", sha256: "21c692105db15299b5529af81a11a7ad80397f92c122bd7bf1e4a4b0e85654f7" }, license: "BSD-3-Clause", sourceDirectory: "cpputest-4.0", treeSha256: "3b83f01045ca74b9a0996913723fb7e24824452dee0e5fd050f847bb15e404a1" },
+    { id: "unity", version: "2.6.1", source: { filename: "Unity-2.6.1.tar.gz", url: "https://github.com/ThrowTheSwitch/Unity/archive/refs/tags/v2.6.1.tar.gz", sha256: "b41a66d45a6b99758fb3202ace6178177014d52fc524bf1f72687d93e9867292" }, license: "MIT", sourceDirectory: "Unity-2.6.1", treeSha256: "ef6b833c394d7af7c2b733f87d38eb5bae4442bc1c237778bbaa8c0086ba00db" }
   ]
 });
 
@@ -23,8 +27,10 @@ test("framework bootstrap manifest is closed and locks only reviewed Linux HTTPS
     { ...valid, platform: "windows-x64" },
     { ...valid, frameworks: valid.frameworks.map((item, index) => index === 0 ? { ...item, source: { ...item.source, url: "https://evil.invalid/cpputest.tgz" } } : item) },
     { ...valid, frameworks: valid.frameworks.map((item, index) => index === 0 ? { ...item, sourceDirectory: "../cpputest" } : item) },
+    { ...valid, frameworks: valid.frameworks.map((item, index) => index === 0 ? { ...item, treeSha256: "0".repeat(64) } : item) },
+    { ...valid, fixtureTools: { ...valid.fixtureTools, cmakeHelper: { ...valid.fixtureTools.cmakeHelper, sha256: "0".repeat(64) } } },
     { ...valid, secret: "nope" }
-  ]) assert.throws(() => validateManifest(invalid), /framework manifest|framework input/iu);
+  ]) assert.throws(() => validateManifest(invalid), /framework manifest|framework input|framework fixture/u);
 });
 
 test("framework bootstrap rejects a missing or tampered immutable cache archive", async () => {

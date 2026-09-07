@@ -93,6 +93,8 @@ test("Linux test-only fixture accepts only an explicit verified framework seam",
       linuxFrameworkInputs: inputs
     });
     const cmake = await readFile(join(workspace, "CMakeLists.txt"), "utf8");
+    assert.ok(cmake.indexOf("add_executable(fixture-app fixture-unity.c)") < cmake.indexOf("target_link_libraries(fixture-app PRIVATE unit_test_ide_unity)"));
+    assert.ok(cmake.indexOf("add_executable(fixture-app fixture-unity.c)") < cmake.indexOf("include(\"" + inputs.cmakeHelper + "\")"));
     assert.match(cmake, /UTIDE_UNITY_RUNNER_GENERATOR/u);
     assert.match(cmake, /UnitTestIDE\.cmake/u);
     assert.match(cmake, /add_library\(unit_test_ide_unity STATIC/u);

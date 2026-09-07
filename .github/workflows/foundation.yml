@@ -228,15 +228,6 @@ jobs:
           key: framework-bundle-linux-x64-v1-${{ steps.framework-manifest.outputs.digest }}
       - name: Prepare locked Linux framework inputs
         run: pnpm prepare:framework-bundle
-      - name: Verify fail-closed Linux offline namespace
-        run: node tools/linux-offline/run.mjs -- node tools/linux-offline/probe.mjs
-      - run: node tools/linux-offline/run.mjs -- pnpm verify
-      - name: Build and consume locked CppUTest and Unity inputs
-        run: |
-          node tools/linux-offline/run.mjs -- node tools/service-probe/build-service.mjs
-          node tools/linux-offline/run.mjs -- node tools/framework-bundle/consume.mjs --cmake "$CMAKE"
-      - name: Verify native Linux release contracts
-        run: node tools/linux-offline/run.mjs -- node --test tools/release/linux/runtime-mode-inventory.test.mjs tools/release/qualification.test.mjs tools/release/update.test.mjs tools/workspace-smoke/workspace-smoke.test.mjs
       - id: coverage-manifest
         shell: bash
         run: |
@@ -252,14 +243,24 @@ jobs:
           # Keep the recipe epoch alongside the source lock digest so a cache
           # produced by an older prepare/check implementation is not reused.
           key: coverage-bundle-linux-x64-recipe-v3-${{ steps.coverage-manifest.outputs.digest }}
-      - run: node tools/linux-offline/run.mjs -- pnpm prepare:coverage-bundle
-      - run: node tools/linux-offline/run.mjs -- pnpm check:coverage-bundle
+      # Bootstrap/download/cache work completes before the fail-closed native namespace.
+      - run: pnpm prepare:coverage-bundle
+      - run: pnpm check:coverage-bundle
+      - name: Verify fail-closed Linux offline namespace
+        run: node tools/linux-offline/run.mjs -- node tools/linux-offline/probe.mjs
+      - run: node tools/linux-offline/run.mjs -- pnpm verify
+      - name: Build and consume locked CppUTest and Unity inputs
+        run: |
+          node tools/linux-offline/run.mjs -- node tools/service-probe/build-service.mjs
+          node tools/linux-offline/run.mjs -- node tools/framework-bundle/consume.mjs --cmake "$CMAKE"
+      - name: Verify native Linux release contracts
+        run: node tools/linux-offline/run.mjs -- node --test tools/release/linux/runtime-mode-inventory.test.mjs tools/release/qualification.test.mjs tools/release/update.test.mjs tools/workspace-smoke/workspace-smoke.test.mjs
       - run: node tools/linux-offline/run.mjs -- pnpm --filter @unit-test-ide/service-probe test:coverage-bundle
       # Exercise the real Unix Socket service contract; host smoke remains an honest SKIP without CODE_OSS_EXECUTABLE.
       - run: node tools/linux-offline/run.mjs -- pnpm --filter code-oss-extension test:service-smoke
       - run: node tools/linux-offline/run.mjs -- pnpm --filter code-oss-extension test:benchmark
       - run: node tools/linux-offline/run.mjs -- pnpm --filter code-oss-extension test:host
-      - run: pnpm test:e2e:native
+      - run: node tools/linux-offline/run.mjs -- pnpm test:e2e:native
       - if: always()
         uses: actions/upload-artifact@v7
         with:

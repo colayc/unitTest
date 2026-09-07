@@ -13,8 +13,12 @@ const DIGEST = /^[0-9a-f]{64}$/u;
 const toolDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(toolDirectory, "..", "..");
 const approved = {
-  cpputest: { version: "4.0", license: "BSD-3-Clause", url: "https://github.com/cpputest/cpputest/releases/download/v4.0/cpputest-4.0.tar.gz", filename: "cpputest-4.0.tar.gz", sha256: "21c692105db15299b5529af81a11a7ad80397f92c122bd7bf1e4a4b0e85654f7", sourceDirectory: "cpputest-4.0" },
-  unity: { version: "2.6.1", license: "MIT", url: "https://github.com/ThrowTheSwitch/Unity/archive/refs/tags/v2.6.1.tar.gz", filename: "Unity-2.6.1.tar.gz", sha256: "b41a66d45a6b99758fb3202ace6178177014d52fc524bf1f72687d93e9867292", sourceDirectory: "Unity-2.6.1" }
+  cpputest: { version: "4.0", license: "BSD-3-Clause", url: "https://github.com/cpputest/cpputest/releases/download/v4.0/cpputest-4.0.tar.gz", filename: "cpputest-4.0.tar.gz", sha256: "21c692105db15299b5529af81a11a7ad80397f92c122bd7bf1e4a4b0e85654f7", sourceDirectory: "cpputest-4.0", treeSha256: "3b83f01045ca74b9a0996913723fb7e24824452dee0e5fd050f847bb15e404a1" },
+  unity: { version: "2.6.1", license: "MIT", url: "https://github.com/ThrowTheSwitch/Unity/archive/refs/tags/v2.6.1.tar.gz", filename: "Unity-2.6.1.tar.gz", sha256: "b41a66d45a6b99758fb3202ace6178177014d52fc524bf1f72687d93e9867292", sourceDirectory: "Unity-2.6.1", treeSha256: "ef6b833c394d7af7c2b733f87d38eb5bae4442bc1c237778bbaa8c0086ba00db" }
+};
+const approvedFixtureTools = {
+  cmakeHelper: { path: "sdk/cmake/UnitTestIDE.cmake", sha256: "2297b37584d134b901f0da0dea5d60d67853a496dbf18874c220643ffd2cd2da" },
+  unityRunnerGenerator: { name: "unity-runner-generator", schemaVersion: 1, version: "1.0.0", runnerProtocol: "utide.runner.v1" }
 };
 const downloadLimit = 64 * 1024 * 1024;
 const maxArchiveEntries = 8192;
@@ -22,15 +26,19 @@ const maxArchiveDepth = 32;
 const maxExpandedBytes = 256 * 1024 * 1024;
 
 export function validateManifest(value) {
-  closed(value, ["schemaVersion", "platform", "frameworks"], "framework manifest");
+  closed(value, ["schemaVersion", "platform", "fixtureTools", "frameworks"], "framework manifest");
   if (value.schemaVersion !== 1 || value.platform !== "linux-x64" || !Array.isArray(value.frameworks) || value.frameworks.length !== 2) throw new Error("framework manifest has an invalid Linux identity");
+  closed(value.fixtureTools, ["cmakeHelper", "unityRunnerGenerator"], "framework fixture tools");
+  closed(value.fixtureTools.cmakeHelper, ["path", "sha256"], "framework CMake helper");
+  closed(value.fixtureTools.unityRunnerGenerator, ["name", "schemaVersion", "version", "runnerProtocol"], "framework Unity generator");
+  if (JSON.stringify(value.fixtureTools) !== JSON.stringify(approvedFixtureTools) || !DIGEST.test(value.fixtureTools.cmakeHelper.sha256)) throw new Error("framework fixture tools are not locked");
   const ids = new Set();
   for (const entry of value.frameworks) {
-    closed(entry, ["id", "version", "source", "license", "sourceDirectory"], "framework input");
+    closed(entry, ["id", "version", "source", "license", "sourceDirectory", "treeSha256"], "framework input");
     if (!(entry.id in approved) || ids.has(entry.id)) throw new Error("framework input has an invalid identity");
     const required = approved[entry.id];
     closed(entry.source, ["filename", "url", "sha256"], "framework input source");
-    if (entry.version !== required.version || entry.license !== required.license || entry.source.url !== required.url || entry.source.filename !== required.filename || entry.source.sha256 !== required.sha256 || entry.sourceDirectory !== required.sourceDirectory || !safeFilename(entry.source.filename) || !DIGEST.test(entry.source.sha256) || !safeDirectory(entry.sourceDirectory)) {
+    if (entry.version !== required.version || entry.license !== required.license || entry.source.url !== required.url || entry.source.filename !== required.filename || entry.source.sha256 !== required.sha256 || entry.sourceDirectory !== required.sourceDirectory || entry.treeSha256 !== required.treeSha256 || !safeFilename(entry.source.filename) || !DIGEST.test(entry.source.sha256) || !DIGEST.test(entry.treeSha256) || !safeDirectory(entry.sourceDirectory)) {
       throw new Error("framework input is not locked");
     }
     ids.add(entry.id);
@@ -86,14 +94,19 @@ export async function prepareFrameworkBundle(options = {}) {
     const resolved = {
       schemaVersion: 1,
       platform: "linux-x64",
-      frameworks: await Promise.all(manifest.frameworks.map(async ({ id, version, source, license, sourceDirectory }) => ({
+      fixtureTools: manifest.fixtureTools,
+      frameworks: await Promise.all(manifest.frameworks.map(async ({ id, version, source, license, sourceDirectory, treeSha256 }) => {
+        const actualTreeSha256 = await directoryDigest(join(staging, sourceDirectory));
+        if (actualTreeSha256 !== treeSha256) throw new Error(`framework source tree digest mismatch: ${id}`);
+        return {
         id,
         version,
         source: { filename: source.filename, sha256: source.sha256 },
         license,
         sourceDirectory,
-        treeSha256: await directoryDigest(join(staging, sourceDirectory))
-      })))
+        treeSha256
+        };
+      }))
     };
     await assertNoSymlinkComponents(repositoryRoot, outputRoot);
     await writeFile(join(staging, "manifest.resolved.json"), `${JSON.stringify(resolved, null, 2)}\n`, { flag: "wx", mode: 0o600 });
@@ -198,7 +211,7 @@ async function verifySourceTree(root, input) {
 async function directoryDigest(root) {
   const hash = createHash("sha256");
   async function visit(directory, prefix) {
-    for (const entry of (await readdir(directory, { withFileTypes: true })).sort((left, right) => left.name.localeCompare(right.name))) {
+    for (const entry of (await readdir(directory, { withFileTypes: true })).sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0)) {
       const path = join(directory, entry.name);
       const relativeName = prefix ? `${prefix}/${entry.name}` : entry.name;
       const metadata = await lstat(path);
