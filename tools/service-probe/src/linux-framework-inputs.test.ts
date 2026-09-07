@@ -6,6 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   prepareLinuxFrameworkInputs,
+  verifyResolvedFrameworkTrees,
   validateLinuxFrameworkInputManifest,
   type LinuxFrameworkInputManifest
 } from "./linux-framework-inputs.js";
@@ -54,6 +55,24 @@ test("Linux framework lock is closed and rejects missing, tampered, escaped and 
     { ...valid, token: "must-not-leak" }
   ]) {
     assert.throws(() => validateLinuxFrameworkInputManifest(candidate), /Linux framework input/u);
+  }
+});
+
+test("Linux framework boundary accepts only expanded trees bound to the resolved bootstrap identity", async () => {
+  const root = await mkdtemp(join(tmpdir(), "unit-test-linux-framework-tree-"));
+  try {
+    const cpputest = join(root, "cpputest-4.0");
+    const unity = join(root, "Unity-2.6.1");
+    await mkdir(join(unity, "src"), { recursive: true });
+    await mkdir(cpputest, { recursive: true });
+    await writeFile(join(cpputest, "CMakeLists.txt"), "project(CppUTest)\n");
+    await writeFile(join(unity, "src", "unity.c"), "void UnityBegin(void) {}\n");
+    const expected = await verifyResolvedFrameworkTrees(root, manifest(), undefined);
+    await verifyResolvedFrameworkTrees(root, manifest(), expected);
+    await writeFile(join(cpputest, "CMakeLists.txt"), "tampered\n");
+    await assert.rejects(verifyResolvedFrameworkTrees(root, manifest(), expected), /tree digest mismatch/u);
+  } finally {
+    await import("node:fs/promises").then(({ rm }) => rm(root, { recursive: true, force: true }));
   }
 });
 

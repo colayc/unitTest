@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
-import { validateManifest, verifyLockedArchive } from "./prepare.mjs";
+import { validateBundlePaths, validateManifest, validateTarEntries, verifyLockedArchive } from "./prepare.mjs";
 
 const digest = (value) => createHash("sha256").update(value).digest("hex");
 const manifest = () => ({
@@ -36,4 +36,26 @@ test("framework bootstrap rejects a missing or tampered immutable cache archive"
   await assert.rejects(verifyLockedArchive(root, locked), /digest mismatch/iu);
   await writeFile(archive, "cpp");
   assert.equal(await verifyLockedArchive(root, locked), archive);
+});
+
+test("framework bootstrap confines every mutable path to its approved repository roots", () => {
+  const root = resolve("C:/unit-test-ide-framework-boundary");
+  const valid = {
+    manifestPath: join(root, "tools", "framework-bundle", "manifest.json"),
+    cacheRoot: join(root, ".superpowers", "cache", "framework-bundle"),
+    outputRoot: join(root, ".superpowers", "runtime", "framework-bundle", "linux-x64")
+  };
+  assert.deepEqual(validateBundlePaths(valid, root), valid);
+  for (const invalid of [
+    { ...valid, manifestPath: join(root, "manifest.json") },
+    { ...valid, cacheRoot: join(root, ".superpowers", "cache", "..", "outside") },
+    { ...valid, outputRoot: join(root, ".superpowers", "runtime", "framework-bundle", "other") }
+  ]) assert.throws(() => validateBundlePaths(invalid, root), /approved|repository/u);
+});
+
+test("framework bootstrap rejects archives whose expanded shape exceeds bounded extraction limits", () => {
+  assert.doesNotThrow(() => validateTarEntries(["cpputest-4.0/", "cpputest-4.0/CMakeLists.txt"], ["drwxr-xr-x owner/group 0 2026-01-01 00:00 cpputest-4.0/", "-rw-r--r-- owner/group 8 2026-01-01 00:00 cpputest-4.0/CMakeLists.txt"]));
+  assert.throws(() => validateTarEntries(["root/".repeat(33)], ["-rw-r--r-- owner/group 1 2026-01-01 00:00 deep"]), /depth/u);
+  assert.throws(() => validateTarEntries(["root/file"], ["-rw-r--r-- owner/group 268435457 2026-01-01 00:00 root/file"]), /expanded size/u);
+  assert.throws(() => validateTarEntries(Array.from({ length: 8193 }, (_, index) => `root/${index}`), Array.from({ length: 8193 }, () => "-rw-r--r-- owner/group 0 2026-01-01 00:00 file")), /entry count/u);
 });

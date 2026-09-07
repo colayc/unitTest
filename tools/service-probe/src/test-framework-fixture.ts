@@ -79,14 +79,16 @@ export async function prepareTestFrameworkWorkspace(
       "cmake_minimum_required(VERSION 3.25)",
       `project(test_framework_fixture LANGUAGES ${framework === "unity" ? "C" : "CXX"})`,
       ...(linuxInputs === undefined ? [] : linuxFrameworkCmake(linuxInputs, framework)),
-      `add_executable(fixture-app ${framework === "unity" ? "main.c" : "main.cpp"})`,
-      "add_test(NAME framework-tests COMMAND fixture-app)",
+      `add_executable(fixture-app ${framework === "unity" ? (linuxInputs === undefined ? "main.c" : "fixture-unity.c") : "main.cpp"})`,
+      ...(framework === "unity" && linuxInputs !== undefined ? [] : ["add_test(NAME framework-tests COMMAND fixture-app)"]),
       ""
     ].join("\n")
   );
   await writeFile(
-    join(workspaceDirectory, framework === "unity" ? "main.c" : "main.cpp"),
-    "int main(void) { return 0; }\n"
+    join(workspaceDirectory, framework === "unity" ? (linuxInputs === undefined ? "main.c" : "fixture-unity.c") : "main.cpp"),
+    framework === "unity" && linuxInputs !== undefined
+      ? "#include <unity.h>\nvoid test_fixture_passes(void) { TEST_ASSERT_TRUE(1); }\n"
+      : "int main(void) { return 0; }\n"
   );
   await writeFile(
     join(workspaceDirectory, "CMakePresets.json"),
@@ -107,11 +109,18 @@ function linuxFrameworkCmake(inputs: LinuxFrameworkFixtureInputs, framework: Tes
     if (!value || value.includes("\0")) throw new Error(`Linux framework fixture ${name} is invalid`);
   }
   return [
-    `list(PREPEND CMAKE_PREFIX_PATH "${inputs.cpputestRoot}")`,
     `set(UTIDE_UNITY_RUNNER_GENERATOR "${inputs.unityRunnerGenerator}")`,
     `include("${inputs.cmakeHelper}")`,
     ...(framework === "unity"
-      ? [`list(PREPEND CMAKE_MODULE_PATH "${inputs.unityRoot}")`, "find_package(Unity REQUIRED CONFIG)"]
-      : ["find_package(CppUTest REQUIRED CONFIG)"])
+      ? [
+          `add_library(unit_test_ide_unity STATIC "${inputs.unityRoot}/src/unity.c")`,
+          `target_include_directories(unit_test_ide_unity PUBLIC "${inputs.unityRoot}/src")`,
+          "target_link_libraries(fixture-app PRIVATE unit_test_ide_unity)",
+          "unit_test_ide_add_unity_test(TEST framework-tests TARGET fixture-app TEST_SOURCES fixture-unity.c)"
+        ]
+      : [
+          `add_subdirectory("${inputs.cpputestRoot}" "\${CMAKE_BINARY_DIR}/unit-test-ide-cpputest" EXCLUDE_FROM_ALL)`,
+          "target_link_libraries(fixture-app PRIVATE CppUTest)"
+        ])
   ];
 }

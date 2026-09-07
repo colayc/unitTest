@@ -54,6 +54,11 @@ export interface LinuxFrameworkInputBoundary {
   readonly environment: Readonly<Record<string, string>>;
 }
 
+export interface ResolvedLinuxFrameworkTree {
+  readonly id: LinuxFrameworkID;
+  readonly treeSha256: string;
+}
+
 export function validateLinuxFrameworkInputManifest(value: unknown): LinuxFrameworkInputManifest {
   const manifest = closedObject(value, ["schemaVersion", "platform", "frameworks"], "Linux framework input manifest");
   if (manifest.schemaVersion !== 1 || manifest.platform !== "linux-x64" || !Array.isArray(manifest.frameworks) || manifest.frameworks.length !== 2) {
@@ -86,19 +91,19 @@ export async function prepareLinuxFrameworkInputs(options: LinuxFrameworkInputBo
   const helper = await regularFileWithin(repositoryRoot, options.helperPath, "UnitTestIDE helper");
   const generator = await regularFileWithin(repositoryRoot, options.generatorPath, "Unity runner generator");
   const roots = new Map<LinuxFrameworkID, string>();
-  const trees = new Map<LinuxFrameworkID, string>();
   for (const framework of manifest.frameworks) {
     const archive = join(cacheRoot, `${framework.source.sha256}-${framework.source.filename}`);
     if (await digestFile(archive) !== framework.source.sha256) throw new Error(`Linux framework input archive digest mismatch: ${framework.id}`);
     const sourceDirectory = childDirectory(sourceRoot, framework.sourceDirectory, `${framework.id} source directory`);
     await requiredFrameworkFile(sourceDirectory, framework.id === "cpputest" ? "CMakeLists.txt" : "src/unity.c", framework.id);
     roots.set(framework.id, sourceDirectory);
-    trees.set(framework.id, await directoryDigest(sourceDirectory));
   }
+  const resolved = await readResolvedFrameworkTrees(sourceRoot, manifest);
+  const trees = await verifyResolvedFrameworkTrees(sourceRoot, manifest, resolved);
   const identityDigest = createHash("sha256").update(JSON.stringify({
     schemaVersion: manifest.schemaVersion,
     platform: manifest.platform,
-    frameworks: [...manifest.frameworks].sort((left, right) => left.id.localeCompare(right.id)).map(({ id, version, source, license, sourceDirectory }) => ({ id, version, source, license, sourceDirectory, treeSha256: trees.get(id) })),
+    frameworks: [...manifest.frameworks].sort((left, right) => left.id.localeCompare(right.id)).map(({ id, version, source, license, sourceDirectory }) => ({ id, version, source, license, sourceDirectory, treeSha256: trees.find((tree) => tree.id === id)?.treeSha256 })),
     helperSha256: helper.digest,
     generatorSha256: generator.digest
   })).digest("hex");
@@ -112,6 +117,49 @@ export async function prepareLinuxFrameworkInputs(options: LinuxFrameworkInputBo
       UNIT_TEST_IDE_TEST_UNITY_RUNNER_GENERATOR: generator.path
     })
   };
+}
+
+/** Verifies recursively measured source trees against bootstrap-published identities. */
+export async function verifyResolvedFrameworkTrees(
+  sourceRoot: string,
+  manifest: LinuxFrameworkInputManifest,
+  expected: readonly ResolvedLinuxFrameworkTree[] | undefined
+): Promise<readonly ResolvedLinuxFrameworkTree[]> {
+  const root = absoluteDirectory(sourceRoot, "source root");
+  const actual: ResolvedLinuxFrameworkTree[] = [];
+  for (const framework of validateLinuxFrameworkInputManifest(manifest).frameworks) {
+    const sourceDirectory = childDirectory(root, framework.sourceDirectory, `${framework.id} source directory`);
+    await requiredFrameworkFile(sourceDirectory, framework.id === "cpputest" ? "CMakeLists.txt" : "src/unity.c", framework.id);
+    actual.push({ id: framework.id, treeSha256: await directoryDigest(sourceDirectory) });
+  }
+  actual.sort((left, right) => left.id.localeCompare(right.id));
+  if (expected !== undefined) {
+    if (expected.length !== actual.length) throw new Error("Linux framework resolved tree identity is incomplete");
+    for (const tree of actual) {
+      const locked = expected.find((candidate) => candidate.id === tree.id);
+      if (locked === undefined || !DIGEST.test(locked.treeSha256) || locked.treeSha256 !== tree.treeSha256) throw new Error(`Linux framework tree digest mismatch: ${tree.id}`);
+    }
+  }
+  return actual;
+}
+
+async function readResolvedFrameworkTrees(sourceRoot: string, manifest: LinuxFrameworkInputManifest): Promise<readonly ResolvedLinuxFrameworkTree[]> {
+  const path = join(sourceRoot, "manifest.resolved.json");
+  const metadata = await lstat(path);
+  if (!metadata.isFile() || metadata.isSymbolicLink()) throw new Error("Linux framework resolved manifest is invalid");
+  const resolved = closedObject(JSON.parse(await readFile(path, "utf8")), ["schemaVersion", "platform", "frameworks"], "Linux framework resolved manifest");
+  if (resolved.schemaVersion !== 1 || resolved.platform !== "linux-x64" || !Array.isArray(resolved.frameworks) || resolved.frameworks.length !== 2) throw new Error("Linux framework resolved manifest has an invalid identity");
+  const result: ResolvedLinuxFrameworkTree[] = [];
+  for (const item of resolved.frameworks) {
+    const candidate = closedObject(item, ["id", "version", "source", "license", "sourceDirectory", "treeSha256"], "Linux framework resolved input");
+    if (candidate.id !== "cpputest" && candidate.id !== "unity") throw new Error("Linux framework resolved input has an invalid ID");
+    const locked = manifest.frameworks.find((framework) => framework.id === candidate.id);
+    const source = closedObject(candidate.source, ["filename", "sha256"], "Linux framework resolved input source");
+    if (!locked || candidate.version !== locked.version || candidate.license !== locked.license || candidate.sourceDirectory !== locked.sourceDirectory || source.filename !== locked.source.filename || source.sha256 !== locked.source.sha256 || typeof candidate.treeSha256 !== "string" || !DIGEST.test(candidate.treeSha256)) throw new Error("Linux framework resolved input is not locked");
+    result.push({ id: candidate.id, treeSha256: candidate.treeSha256 });
+  }
+  if (new Set(result.map((item) => item.id)).size !== 2) throw new Error("Linux framework resolved manifest has duplicate inputs");
+  return result;
 }
 
 function closedObject(value: unknown, expected: readonly string[], label: string): Record<string, unknown> {

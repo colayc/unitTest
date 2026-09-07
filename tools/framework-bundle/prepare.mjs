@@ -1,7 +1,7 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { createWriteStream } from "node:fs";
-import { lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, posix, relative, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Transform } from "node:stream";
@@ -17,6 +17,9 @@ const approved = {
   unity: { version: "2.6.1", license: "MIT", url: "https://github.com/ThrowTheSwitch/Unity/archive/refs/tags/v2.6.1.tar.gz", filename: "Unity-2.6.1.tar.gz", sha256: "b41a66d45a6b99758fb3202ace6178177014d52fc524bf1f72687d93e9867292", sourceDirectory: "Unity-2.6.1" }
 };
 const downloadLimit = 64 * 1024 * 1024;
+const maxArchiveEntries = 8192;
+const maxArchiveDepth = 32;
+const maxExpandedBytes = 256 * 1024 * 1024;
 
 export function validateManifest(value) {
   closed(value, ["schemaVersion", "platform", "frameworks"], "framework manifest");
@@ -47,11 +50,17 @@ export async function verifyLockedArchive(cacheRoot, input) {
 
 export async function prepareFrameworkBundle(options = {}) {
   if (process.platform !== "linux") throw new Error("Linux framework bootstrap requires a Linux runner");
-  const manifestPath = options.manifestPath ?? join(toolDirectory, "manifest.json");
-  const cacheRoot = options.cacheRoot ?? join(repositoryRoot, ".superpowers", "cache", "framework-bundle");
-  const outputRoot = options.outputRoot ?? join(repositoryRoot, ".superpowers", "runtime", "framework-bundle", "linux-x64");
+  const { manifestPath, cacheRoot, outputRoot } = validateBundlePaths({
+    manifestPath: options.manifestPath ?? join(toolDirectory, "manifest.json"),
+    cacheRoot: options.cacheRoot ?? join(repositoryRoot, ".superpowers", "cache", "framework-bundle"),
+    outputRoot: options.outputRoot ?? join(repositoryRoot, ".superpowers", "runtime", "framework-bundle", "linux-x64")
+  });
+  await assertNoSymlinkComponents(repositoryRoot, manifestPath);
+  const manifestMetadata = await lstat(manifestPath);
+  if (!manifestMetadata.isFile() || manifestMetadata.isSymbolicLink()) throw new Error("framework manifest must be a regular repository file");
   const manifest = validateManifest(JSON.parse(await readFile(manifestPath, "utf8")));
   await mkdir(cacheRoot, { recursive: true, mode: 0o700 });
+  await assertNoSymlinkComponents(repositoryRoot, cacheRoot);
   const archives = new Map();
   for (const input of manifest.frameworks) {
     try {
@@ -64,6 +73,7 @@ export async function prepareFrameworkBundle(options = {}) {
   }
   const parent = dirname(outputRoot);
   await mkdir(parent, { recursive: true, mode: 0o700 });
+  await assertNoSymlinkComponents(repositoryRoot, parent);
   const staging = join(parent, `.framework-bundle-${process.pid}-${randomBytes(8).toString("hex")}`);
   await mkdir(staging, { mode: 0o700 });
   try {
@@ -76,10 +86,19 @@ export async function prepareFrameworkBundle(options = {}) {
     const resolved = {
       schemaVersion: 1,
       platform: "linux-x64",
-      frameworks: manifest.frameworks.map(({ id, version, source, license, sourceDirectory }) => ({ id, version, source: { filename: source.filename, sha256: source.sha256 }, license, sourceDirectory }))
+      frameworks: await Promise.all(manifest.frameworks.map(async ({ id, version, source, license, sourceDirectory }) => ({
+        id,
+        version,
+        source: { filename: source.filename, sha256: source.sha256 },
+        license,
+        sourceDirectory,
+        treeSha256: await directoryDigest(join(staging, sourceDirectory))
+      })))
     };
+    await assertNoSymlinkComponents(repositoryRoot, outputRoot);
     await writeFile(join(staging, "manifest.resolved.json"), `${JSON.stringify(resolved, null, 2)}\n`, { flag: "wx", mode: 0o600 });
     await writeFile(join(staging, "READY"), "framework-bundle-v1\n", { flag: "wx", mode: 0o600 });
+    await assertNoSymlinkComponents(repositoryRoot, outputRoot);
     await rm(outputRoot, { recursive: true, force: true });
     await rename(staging, outputRoot);
   } catch (error) {
@@ -87,6 +106,21 @@ export async function prepareFrameworkBundle(options = {}) {
     throw error;
   }
   return { root: outputRoot, manifest };
+}
+
+export function validateBundlePaths(value, root = repositoryRoot) {
+  const approvedRoot = absolute(root, "repository root");
+  if (!within(approvedRoot, approvedRoot)) throw new Error("framework repository root is invalid");
+  const expected = {
+    manifestPath: join(approvedRoot, "tools", "framework-bundle", "manifest.json"),
+    cacheRoot: join(approvedRoot, ".superpowers", "cache", "framework-bundle"),
+    outputRoot: join(approvedRoot, ".superpowers", "runtime", "framework-bundle", "linux-x64")
+  };
+  for (const key of Object.keys(expected)) {
+    const candidate = absolute(value[key], `framework ${key}`);
+    if (candidate !== expected[key] || !within(approvedRoot, candidate)) throw new Error(`framework ${key} is outside its approved repository root`);
+  }
+  return expected;
 }
 
 function closed(value, keys, label) {
@@ -125,7 +159,24 @@ async function verifySafeTar(archive) {
   ]);
   const types = verbose.stdout.split(/\r?\n/u).filter(Boolean);
   const names = listed.stdout.split(/\r?\n/u).filter(Boolean);
-  if (types.length === 0 || types.length !== names.length || types.some((entry) => !/^[d-]/u.test(entry) || entry.includes(" -> ")) || names.some((name) => !safeTarPath(name))) throw new Error("framework archive contains an unsafe entry");
+  validateTarEntries(names, types);
+}
+
+export function validateTarEntries(names, types) {
+  if (names.length === 0 || names.length !== types.length || names.length > maxArchiveEntries) throw new Error(names.length > maxArchiveEntries ? "framework archive exceeds entry count limit" : "framework archive contains an unsafe entry");
+  let expandedBytes = 0;
+  for (let index = 0; index < names.length; index += 1) {
+    const name = names[index];
+    const entry = types[index];
+    if (!/^[d-]/u.test(entry) || entry.includes(" -> ") || !safeTarPath(name)) throw new Error("framework archive contains an unsafe entry");
+    const depth = name.replace(/\/$/u, "").split("/").length;
+    if (depth > maxArchiveDepth) throw new Error("framework archive exceeds path depth limit");
+    const fields = entry.trim().split(/\s+/u);
+    const size = fields.find((field) => /^\d+$/u.test(field));
+    if (size === undefined || !Number.isSafeInteger(Number(size))) throw new Error("framework archive has an invalid expanded size");
+    expandedBytes += Number(size);
+    if (!Number.isSafeInteger(expandedBytes) || expandedBytes > maxExpandedBytes) throw new Error("framework archive exceeds expanded size limit");
+  }
 }
 
 function safeTarPath(name) {
@@ -142,6 +193,45 @@ async function verifySourceTree(root, input) {
   const marker = input.id === "cpputest" ? join(path, "CMakeLists.txt") : join(path, "src", "unity.c");
   const markerMetadata = await lstat(marker);
   if (!markerMetadata.isFile() || markerMetadata.isSymbolicLink()) throw new Error(`framework source marker is invalid: ${input.id}`);
+}
+
+async function directoryDigest(root) {
+  const hash = createHash("sha256");
+  async function visit(directory, prefix) {
+    for (const entry of (await readdir(directory, { withFileTypes: true })).sort((left, right) => left.name.localeCompare(right.name))) {
+      const path = join(directory, entry.name);
+      const relativeName = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const metadata = await lstat(path);
+      if (metadata.isSymbolicLink() || (!metadata.isDirectory() && !metadata.isFile())) throw new Error("framework source tree contains an unsafe entry");
+      hash.update(`${metadata.isDirectory() ? "d" : "f"}:${relativeName}\0`);
+      if (metadata.isDirectory()) await visit(path, relativeName);
+      else hash.update(await readFile(path));
+    }
+  }
+  await visit(root, "");
+  return hash.digest("hex");
+}
+
+function within(root, target) {
+  const value = relative(root, target);
+  return value === "" || (!value.startsWith("..") && !isAbsolute(value));
+}
+
+async function assertNoSymlinkComponents(root, target) {
+  if (!within(root, target)) throw new Error("framework path is outside repository root");
+  let current = root;
+  const rootMetadata = await lstat(current);
+  if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink()) throw new Error("framework repository root is unsafe");
+  for (const part of relative(root, target).split(/[\\/]/u).filter(Boolean)) {
+    current = join(current, part);
+    try {
+      const metadata = await lstat(current);
+      if (metadata.isSymbolicLink()) throw new Error("framework path contains a symbolic-link component");
+    } catch (error) {
+      if (error?.code === "ENOENT") return;
+      throw error;
+    }
+  }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(import.meta.filename)) {
