@@ -20,8 +20,109 @@ type executionRootOwner struct {
 	path      string
 	file      *os.File
 	info      os.FileInfo
+	collector *retainedExecutionDirectory
 	closeOnce sync.Once
 	closeErr  error
+}
+
+// retainedExecutionDirectory is a handle-backed child of the private
+// execution root. It can mint independent handle views without giving a
+// caller the right to remove the execution-owned directory.
+type retainedExecutionDirectory struct {
+	owner     *executionRootOwner
+	path      string
+	file      *os.File
+	info      os.FileInfo
+	closeOnce sync.Once
+	closeErr  error
+}
+
+type executionDirectoryView struct{ directory *retainedExecutionDirectory }
+
+func retainExecutionDirectory(owner *executionRootOwner, path string) (*retainedExecutionDirectory, error) {
+	if owner == nil || owner.VerifyDirectory(path) != nil {
+		return nil, task.ErrInvalidArgument
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, task.ErrInvalidArgument
+	}
+	file, err := openRetainedDirectory(path)
+	if err != nil {
+		return nil, task.ErrInvalidArgument
+	}
+	directory := &retainedExecutionDirectory{owner: owner, path: path, file: file, info: info}
+	if err := directory.Verify(); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return directory, nil
+}
+
+func (directory *retainedExecutionDirectory) Path() string {
+	if directory == nil {
+		return ""
+	}
+	return directory.path
+}
+
+func (directory *retainedExecutionDirectory) Verify() error {
+	if directory == nil || directory.owner == nil || directory.file == nil || directory.info == nil ||
+		directory.owner.VerifyDirectory(directory.path) != nil {
+		return task.ErrInvalidArgument
+	}
+	pathInfo, err := os.Lstat(directory.path)
+	if err != nil || !pathInfo.IsDir() || pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(directory.info, pathInfo) {
+		return task.ErrInvalidArgument
+	}
+	handleInfo, err := directory.file.Stat()
+	if err != nil || !handleInfo.IsDir() || !os.SameFile(directory.info, handleInfo) {
+		return task.ErrInvalidArgument
+	}
+	return nil
+}
+
+func (directory *retainedExecutionDirectory) Close() error {
+	if directory == nil {
+		return nil
+	}
+	directory.closeOnce.Do(func() {
+		if directory.file != nil {
+			directory.closeErr = directory.file.Close()
+			directory.file = nil
+		}
+	})
+	return directory.closeErr
+}
+
+func (view executionDirectoryView) Path() string {
+	if view.directory == nil {
+		return ""
+	}
+	return view.directory.Path()
+}
+
+func (view executionDirectoryView) Verify() error {
+	if view.directory == nil {
+		return task.ErrInvalidArgument
+	}
+	return view.directory.Verify()
+}
+
+func (view executionDirectoryView) RetainDirectory() (coverageplatform.RetainedDirectory, error) {
+	if err := view.Verify(); err != nil {
+		return nil, err
+	}
+	return retainExecutionDirectory(view.directory.owner, view.directory.path)
+}
+
+// CollectorRoot exposes the execution-owned collector directory as a
+// non-owning verifier. Consumers must retain a clone before keeping it.
+func (owner *executionRootOwner) CollectorRoot() coverageplatform.DirectoryVerifier {
+	if owner == nil || owner.collector == nil {
+		return nil
+	}
+	return executionDirectoryView{directory: owner.collector}
 }
 
 func retainExecutionRoot(path string) (*executionRootOwner, error) {
@@ -80,16 +181,24 @@ func (owner *executionRootOwner) Close() error {
 		return nil
 	}
 	owner.closeOnce.Do(func() {
+		collector := owner.collector
+		owner.collector = nil
 		if err := owner.Verify(); err != nil {
-			owner.closeErr = err
+			owner.closeErr = errors.Join(owner.closeErr, err)
+			if collector != nil {
+				owner.closeErr = errors.Join(owner.closeErr, collector.Close())
+			}
 			if owner.file != nil {
 				owner.closeErr = errors.Join(owner.closeErr, owner.file.Close())
 				owner.file = nil
 			}
 			return
 		}
+		if collector != nil {
+			owner.closeErr = errors.Join(owner.closeErr, collector.Close())
+		}
 		if owner.file != nil {
-			owner.closeErr = owner.file.Close()
+			owner.closeErr = errors.Join(owner.closeErr, owner.file.Close())
 			owner.file = nil
 		}
 		if owner.closeErr == nil {

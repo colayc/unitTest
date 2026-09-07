@@ -39,6 +39,25 @@ func TestBundleManifestRejectsUnknownSchemaPlatformAndArchitecture(t *testing.T)
 	}
 }
 
+func TestBundleManifestRequiresPinnedCollectorVersions(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{"python", func(manifest map[string]any) { manifest["pythonVersion"] = "3.14.5" }},
+		{"gcovr", func(manifest map[string]any) { manifest["gcovrVersion"] = "8.5" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			productRoot, bundleRoot := createBundleFixture(t)
+			mutateBundleManifest(t, bundleRoot, test.mutate)
+			if pin, err := Resolve(productRoot); err == nil {
+				_ = pin.Close()
+				t.Fatalf("Resolve accepted a %s version outside the locked collector contract", test.name)
+			}
+		})
+	}
+}
+
 func TestBundleManifestRejectsDuplicateCaseAliasAndNonCanonicalPaths(t *testing.T) {
 	for _, candidate := range []string{
 		"app/gcovr-runner.pyz/",

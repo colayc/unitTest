@@ -15,6 +15,12 @@ import (
 const (
 	manifestName = "manifest.resolved.json"
 	readyName    = "READY"
+
+	// RequiredPythonVersion and RequiredGCovrVersion are the closed runtime
+	// contract for the product-owned collector. A syntactically valid manifest
+	// for some other tool pair is not an executable coverage bundle.
+	RequiredPythonVersion = "3.14.6"
+	RequiredGCovrVersion  = "8.6"
 )
 
 var (
@@ -234,6 +240,9 @@ func (manifest resolvedManifest) validate(expectedPlatform string) error {
 	}
 	if !versionPattern.MatchString(manifest.PythonVersion) || !versionPattern.MatchString(manifest.GcovrVersion) {
 		return errors.New("resolved manifest has invalid versions")
+	}
+	if manifest.PythonVersion != RequiredPythonVersion || manifest.GcovrVersion != RequiredGCovrVersion {
+		return errors.New("resolved manifest versions do not match the locked collector contract")
 	}
 	if err := manifest.Inputs.validate(manifest); err != nil {
 		return err

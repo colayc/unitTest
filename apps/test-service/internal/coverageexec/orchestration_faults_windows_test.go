@@ -592,6 +592,15 @@ func TestCoordinatorDirectExecutionRootReplacementFailsClosedWithoutFollowingRep
 				if err := preparedAdapter.releaseProfileRootRenameBlockerForTest(); err != nil {
 					return err
 				}
+				// Task 5 adds a retained private collector directory below the
+				// execution root. Release that test-only rename blocker as well;
+				// the root identity capability under test remains live.
+				if rootOwner.collector == nil {
+					return errors.New("retained collector capability missing")
+				}
+				if err := rootOwner.collector.Close(); err != nil {
+					return err
+				}
 				if rootOwner.file == nil || rootOwner.Verify() != nil {
 					return errors.New("root identity capability was disturbed before replacement")
 				}

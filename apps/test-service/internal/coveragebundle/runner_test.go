@@ -125,6 +125,18 @@ func TestPrepareRunnerReturnsExecutionCleanupFailureAfterFinalVerify(t *testing.
 	}
 }
 
+func TestValidateInstallationRequiresTheLockedCollectorVersions(t *testing.T) {
+	base := strictTestTempDir(t)
+	for _, test := range []Installation{
+		{Root: base, Python: filepath.Join(base, "python"), Runner: filepath.Join(base, "runner"), PythonVersion: "3.14.5", GcovrVersion: RequiredGCovrVersion, ManifestSHA256: strings.Repeat("a", 64)},
+		{Root: base, Python: filepath.Join(base, "python"), Runner: filepath.Join(base, "runner"), PythonVersion: RequiredPythonVersion, GcovrVersion: "8.5", ManifestSHA256: strings.Repeat("a", 64)},
+	} {
+		if err := validateInstallation(test); err == nil {
+			t.Fatalf("validateInstallation(%#v) accepted an unlocked collector version", test)
+		}
+	}
+}
+
 func TestPrepareRunnerBuildsExactIsolatedProcessSpec(t *testing.T) {
 	base := strictTestTempDir(t)
 	coverageRoot := filepath.Join(base, "coverage")
@@ -445,7 +457,8 @@ func TestPinnedOutputConsumesWithoutPathReopen(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	execution, err := PrepareRunner(&fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}}, DescriptorInput{Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(coverageRoot, "gcovr", "coverage.json")}, descriptorCapabilitiesForTest(t, coverageRoot, projectRoot, objects, gcov))
+	pin := &fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}}
+	execution, err := PrepareRunner(pin, DescriptorInput{Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(coverageRoot, "gcovr", "coverage.json")}, descriptorCapabilitiesForTest(t, coverageRoot, projectRoot, objects, gcov))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -453,9 +466,13 @@ func TestPinnedOutputConsumesWithoutPathReopen(t *testing.T) {
 	if err := os.WriteFile(execution.Descriptor().OutputPath, []byte(`{"ok":true}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	beforePinnedRead := pin.verifyCalls
 	output, err := execution.PinnedOutput()
 	if err != nil {
 		t.Fatal(err)
+	}
+	if pin.verifyCalls <= beforePinnedRead {
+		t.Fatal("PinnedOutput did not revalidate the bundle pin before handing out output")
 	}
 	if execution.descriptor.outputPin == nil || execution.descriptor.outputFile == nil {
 		t.Fatal("PinnedOutput did not retain output capability")
@@ -518,12 +535,15 @@ func TestIsolatedRunnerRejectsHostileEnvironment(t *testing.T) {
 	t.Setenv("vIrTuAl_Env", "hostile")
 	t.Setenv("hTtP_PrOxY", "http://hostile.invalid")
 	t.Setenv("lC_ALL", "C.UTF-8")
+	t.Setenv("GCOV", "hostile-gcov")
+	t.Setenv("GCOVR_EXCLUDE", "hostile-gcovr")
+	t.Setenv("LD_PRELOAD", "hostile-loader")
 	unset := fixedRunnerEnvUnset()
 	seen := make(map[string]bool, len(unset))
 	for _, key := range unset {
 		seen[strings.ToUpper(key)] = true
 	}
-	for _, key := range []string{"PYTHONPATH", "PIP_INDEX_URL", "VIRTUAL_ENV", "HTTP_PROXY", "LC_ALL"} {
+	for _, key := range []string{"PYTHONPATH", "PIP_INDEX_URL", "VIRTUAL_ENV", "HTTP_PROXY", "LC_ALL", "GCOV", "GCOVR_EXCLUDE", "LD_PRELOAD"} {
 		if !seen[key] {
 			t.Fatalf("fixed runner environment did not clear %s: %#v", key, unset)
 		}

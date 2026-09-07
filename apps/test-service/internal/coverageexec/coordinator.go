@@ -1459,6 +1459,15 @@ func allocateExecutionRoots(root, taskID string) (*executionRootOwner, string, s
 		_ = owner.Close()
 		return nil, "", "", "", task.ErrInvalidArgument
 	}
+	collectorRoot := filepath.Join(executionRoot, "collector")
+	if err := createOwnerOnlyExecutionDirectory(collectorRoot); err != nil || owner.VerifyDirectory(collectorRoot) != nil {
+		return fail()
+	}
+	collector, err := retainExecutionDirectory(owner, collectorRoot)
+	if err != nil {
+		return fail()
+	}
+	owner.collector = collector
 	paths := []string{
 		filepath.Join(executionRoot, "instrumentation"),
 		filepath.Join(executionRoot, "profiles"),

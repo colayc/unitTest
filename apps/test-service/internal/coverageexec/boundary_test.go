@@ -170,6 +170,40 @@ func TestAllocateExecutionRootsReturnsIsolatedInstrumentationProfileAndBuildRoot
 	}
 }
 
+func TestAllocateExecutionRootsPublishesANonOwningCollectorCapability(t *testing.T) {
+	base := t.TempDir()
+	owner, _, _, _, err := allocateExecutionRoots(base, "33333333333333333333333333333333")
+	if err != nil {
+		t.Fatal(err)
+	}
+	collector := owner.CollectorRoot()
+	if collector == nil || collector.Path() != filepath.Join(base, "33333333333333333333333333333333", "collector") || collector.Verify() != nil {
+		_ = owner.Close()
+		t.Fatalf("collector capability = %#v", collector)
+	}
+	if _, ok := collector.(interface{ Close() error }); ok {
+		_ = owner.Close()
+		t.Fatal("collector capability leaked execution-root ownership")
+	}
+	retained, err := coverageplatform.RetainDirectory(collector)
+	if err != nil {
+		_ = owner.Close()
+		t.Fatalf("RetainDirectory(collector) = %v", err)
+	}
+	if retained.Path() != collector.Path() || retained.Verify() != nil {
+		_ = retained.Close()
+		_ = owner.Close()
+		t.Fatalf("retained collector capability is invalid")
+	}
+	if err := retained.Close(); err != nil {
+		_ = owner.Close()
+		t.Fatal(err)
+	}
+	if err := owner.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestProcessTargetAuthorizationBindsArgumentsEnvironmentAndDirectory(t *testing.T) {
 	target := processTarget{
 		executable:  `C:\llvm\llvm-profdata.exe`,

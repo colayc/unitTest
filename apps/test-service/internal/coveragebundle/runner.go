@@ -174,6 +174,11 @@ func (execution *PreparedExecution) PinnedOutput() (coverageplatform.Output, err
 	if execution == nil {
 		return nil, ErrBundleIntegrity
 	}
+	// Verify through the execution boundary first so every output handoff
+	// rechecks the bundle pin as well as the descriptor's external inputs.
+	if err := execution.Verify(); err != nil {
+		return nil, err
+	}
 	execution.mu.Lock()
 	defer execution.mu.Unlock()
 	if execution.closed || execution.descriptor == nil {
@@ -230,7 +235,7 @@ func validateInstallation(install Installation) error {
 			return integrityError(label, err)
 		}
 	}
-	if install.PythonVersion == "" || install.GcovrVersion != "8.6" || len(install.ManifestSHA256) != 64 {
+	if install.PythonVersion != RequiredPythonVersion || install.GcovrVersion != RequiredGCovrVersion || len(install.ManifestSHA256) != 64 {
 		return integrityError("installation identity", errors.New("invalid pinned identity"))
 	}
 	return nil
@@ -257,6 +262,8 @@ func fixedRunnerEnvUnset() []string {
 		"PIP_TRUSTED_HOST": {}, "VIRTUAL_ENV": {}, "CONDA_PREFIX": {}, "CONDA_DEFAULT_ENV": {},
 		"HTTP_PROXY": {}, "HTTPS_PROXY": {}, "ALL_PROXY": {}, "NO_PROXY": {},
 		"LANG": {}, "LANGUAGE": {},
+		"GCOV": {}, "GCOVR_CONFIG": {}, "GCOVR_ROOT": {}, "GCOVR_EXCLUDE": {},
+		"LD_PRELOAD": {}, "LD_LIBRARY_PATH": {}, "DYLD_INSERT_LIBRARIES": {}, "DYLD_LIBRARY_PATH": {},
 	}
 	for _, entry := range os.Environ() {
 		key, _, found := strings.Cut(entry, "=")
@@ -265,6 +272,7 @@ func fixedRunnerEnvUnset() []string {
 		}
 		upper := strings.ToUpper(key)
 		if strings.HasPrefix(upper, "PYTHON") || strings.HasPrefix(upper, "PIP_") || strings.HasPrefix(upper, "CONDA_") ||
+			upper == "GCOV" || strings.HasPrefix(upper, "GCOVR_") || strings.HasPrefix(upper, "LD_") || strings.HasPrefix(upper, "DYLD_") ||
 			strings.HasSuffix(upper, "_PROXY") || upper == "VIRTUAL_ENV" || upper == "LANG" || upper == "LANGUAGE" || strings.HasPrefix(upper, "LC_") {
 			// Keep every original spelling.  Process environments on Unix can
 			// contain both PYTHONPATH and pYtHoNpAtH; folding them would leave

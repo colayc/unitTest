@@ -74,6 +74,22 @@ func TestBundleResolverUsesOnlyFixedProductInstallationPath(t *testing.T) {
 	}
 }
 
+func TestResolveExactAcceptsOnlyTheSelectedPlatformBundleRoot(t *testing.T) {
+	productRoot, bundleRoot := createBundleFixture(t)
+	pin, err := ResolveExact(bundleRoot)
+	if err != nil {
+		t.Fatalf("ResolveExact(%q) = %v", bundleRoot, err)
+	}
+	t.Cleanup(func() { _ = pin.Close() })
+	if got := pin.Installation().Root; got != bundleRoot {
+		t.Fatalf("ResolveExact() root = %q, want %q", got, bundleRoot)
+	}
+	if rejected, err := ResolveExact(productRoot); err == nil {
+		_ = rejected.Close()
+		t.Fatal("ResolveExact accepted the product root instead of the selected bundle root")
+	}
+}
+
 func TestBundleResolverRejectsClosedSetMismatch(t *testing.T) {
 	productRoot, bundleRoot := createBundleFixture(t)
 	if err := os.WriteFile(filepath.Join(bundleRoot, "python", "unexpected.dll"), []byte("unlisted"), 0o600); err != nil {
