@@ -1,3 +1,24 @@
+import assert from "node:assert/strict";
+
+interface Presentation {
+  readonly state: string;
+  readonly completeness?: { readonly outcome: string; readonly reasons: readonly string[] };
+}
+
+export function assertLinuxCoveragePresentation(
+  state: Presentation,
+  runOutcome: string | undefined,
+  completeness: NonNullable<Presentation["completeness"]>,
+  partial: boolean
+): void {
+  // "available" describes the controller's ability to display a report; it
+  // does not claim complete coverage. Completeness remains a separate field.
+  assert.equal(state.state, "available");
+  assert.equal(runOutcome, partial ? "partial" : "available");
+  assert.equal(completeness.outcome, partial ? "partial" : "available");
+  assert.deepEqual(state.completeness, completeness);
+}
+
 /** Compile-time test seams. These bytes are supplied only through Go -overlay;
  * neither the tracked runtime nor its Workspace/Protocol contract is changed. */
 export function createGccFaultOverlay(source: string, fault: "missing-data" | "malformed-pinned-json"): string {

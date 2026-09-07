@@ -15,7 +15,7 @@ import { createCoverageController } from "../src/coverage-controller.js";
 import { openCoverageHtml } from "../src/coverage-viewer.js";
 import { redactServiceError } from "../src/service-resources.js";
 import { buildLinuxGccCoverageEvidence, parseStrictJUnit, publishEvidenceAtomically, type LinuxGccCoverageCaseEvidence, type LinuxGccFaultEvidence, type TestOnlyCoverageFault } from "./coverage-service-smoke-support.js";
-import { createGccFaultOverlay } from "./coverage-service-smoke-linux-support.js";
+import { assertLinuxCoveragePresentation, createGccFaultOverlay } from "./coverage-service-smoke-linux-support.js";
 
 const execFile = promisify(execCallback);
 const root = resolve(import.meta.dirname, "../../../..");
@@ -134,7 +134,7 @@ async function artifacts(client: ProtocolClient, run: CoverageRun, framework: Fr
   const controller = createCoverageController({ readContext: () => ({ trust: "trusted", client, serviceRunning: true, workspaceGeneration: selected.snapshot.workspaceGeneration, catalog: { projectId, profileId: selected.profile.buildProfileId, revision: catalogRevision, workspaceGeneration: selected.snapshot.workspaceGeneration }, coverageProfileId }) });
   try {
     const state = await controller.refresh(run.coverageRunId);
-    assert.equal(state.state, partial ? "partial" : "available");
+    assertLinuxCoveragePresentation(state, run.outcome, report.completeness, partial);
     assert.equal(state.reportId, report.reportId);
     assert.deepEqual(state.summary, report.summary);
   } finally { controller.dispose(); }

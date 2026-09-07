@@ -3,7 +3,7 @@ import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createGccFaultOverlay } from "./coverage-service-smoke-linux-support.js";
+import { assertLinuxCoveragePresentation, createGccFaultOverlay } from "./coverage-service-smoke-linux-support.js";
 import {
   buildLinuxGccCoverageEvidence,
   executeCoverageServiceSmoke,
@@ -19,6 +19,17 @@ const itemA = `utid-v1-${"a".repeat(64)}`;
 const itemB = `utid-v1-${"b".repeat(64)}`;
 const container = `utid-v1-${"c".repeat(64)}`;
 const unavailableMessage = "SKIP: verified clang-cl coverage toolset is unavailable";
+
+test("Linux partial reports remain available to the controller without losing partial outcomes", () => {
+  const completeness = { outcome: "partial", reasons: ["test_crashed"] };
+  const state = { state: "available", completeness };
+  assert.doesNotThrow(() => assertLinuxCoveragePresentation(state, "partial", completeness, true));
+  assert.throws(() => assertLinuxCoveragePresentation({ ...state, state: "partial" }, "partial", completeness, true));
+  assert.throws(() => assertLinuxCoveragePresentation(state, "available", completeness, true));
+  assert.throws(() => assertLinuxCoveragePresentation(state, "partial", { outcome: "available", reasons: [] }, true));
+  assert.throws(() => assertLinuxCoveragePresentation({ ...state, completeness: { outcome: "available", reasons: [] } }, "partial", completeness, true));
+  assert.doesNotThrow(() => assertLinuxCoveragePresentation({ state: "available", completeness: { outcome: "available", reasons: [] } }, "available", { outcome: "available", reasons: [] }, false));
+});
 
 test("Linux fault overlay fails closed when its production seam changes", async () => {
   const source = await readFile(new URL("../../../../apps/test-service/internal/runtime/coverage_execution.go", import.meta.url), "utf8").catch(() =>
