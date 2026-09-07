@@ -63,3 +63,26 @@ func TestEncodeCanonicalRejectsInvalidOrNonRoundTrippableDocument(t *testing.T) 
 		t.Fatalf("EncodeCanonical() = %q, %v", encoded, err)
 	}
 }
+
+func TestEncodeCanonicalGCCGoldenIsPathFree(t *testing.T) {
+	document, bindings, err := NormalizeGCC(gccNormalizationFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := EncodeCanonical(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	golden, err := os.ReadFile("testdata/gcc-coverage-v1.golden.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(encoded, golden) {
+		t.Fatalf("GCC canonical output differs from golden: %s", encoded)
+	}
+	for _, binding := range bindings {
+		if bytes.Contains(encoded, []byte(binding.NativePath)) {
+			t.Fatalf("native GCC source path leaked: %q", binding.NativePath)
+		}
+	}
+}

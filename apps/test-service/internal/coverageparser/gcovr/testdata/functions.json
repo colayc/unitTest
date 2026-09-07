@@ -1,0 +1,1 @@
+{"gcovr/format_version":"0.14","files":[{"file":"src/functions.c","lines":[{"line_number":1,"count":0,"branches":[]}],"functions":[{"name":"called","lineno":1,"execution_count":1,"blocks_percent":100},{"name":"not_called","lineno":2,"execution_count":0,"blocks_percent":0}]}]}

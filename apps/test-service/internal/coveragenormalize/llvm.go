@@ -3,7 +3,6 @@ package coveragenormalize
 import (
 	"errors"
 	"fmt"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -174,37 +173,6 @@ func supportedLLVMVersion(value string) bool {
 	return true
 }
 
-func canonicalWorkspaceRoot(value string) (string, error) {
-	if !validPathString(value) || !filepath.IsAbs(value) {
-		return "", ErrInvalidSourcePath
-	}
-	root, err := filepath.Abs(filepath.Clean(value))
-	if err != nil || !filepath.IsAbs(root) {
-		return "", ErrInvalidSourcePath
-	}
-	return root, nil
-}
-
-func workspaceRelativeSource(root, value string) (string, string, error) {
-	if !validPathString(value) || !filepath.IsAbs(value) {
-		return "", "", ErrInvalidSourcePath
-	}
-	path, err := filepath.Abs(filepath.Clean(value))
-	if err != nil || !filepath.IsAbs(path) {
-		return "", "", ErrInvalidSourcePath
-	}
-	relative, err := filepath.Rel(root, path)
-	if err != nil || relative == "." || relative == ".." ||
-		strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
-		return "", "", ErrInvalidSourcePath
-	}
-	relative = filepath.ToSlash(relative)
-	if !validRelativeURI(relative) {
-		return "", "", ErrInvalidSourcePath
-	}
-	return path, relative, nil
-}
-
 func normalizeLLVMFile(file coverageparserllvm.File, binding SourceBinding) (coveragemodelv1.CoverageFileV1, error) {
 	lines := append([]coverageparserllvm.Line(nil), file.Lines...)
 	sort.Slice(lines, func(i, j int) bool { return lines[i].Number < lines[j].Number })
@@ -213,12 +181,12 @@ func normalizeLLVMFile(file coverageparserllvm.File, binding SourceBinding) (cov
 		Sha256: binding.SHA256,
 		URI:    binding.URI,
 		Summary: coveragemodelv1.CoverageSummaryV1{
-			Functions: metricV1(file.Functions),
+			Functions: metricV1(file.Functions.Covered, file.Functions.Total),
 		},
 	}
 	for index, line := range lines {
 		normalized := coveragemodelv1.CoverageLineV1{
-			Branches: metricV1(line.Branches),
+			Branches: metricV1(line.Branches.Covered, line.Branches.Total),
 			Count:    line.Count,
 			Line:     line.Number,
 		}
@@ -236,37 +204,6 @@ func normalizeLLVMFile(file coverageparserllvm.File, binding SourceBinding) (cov
 	return result, nil
 }
 
-func metricV1(value coverageparserllvm.Metric) coveragemodelv1.CoverageMetricV1 {
-	return coveragemodelv1.CoverageMetricV1{Covered: value.Covered, Total: value.Total}
-}
-
-func completenessV1(value coveragedomain.Completeness) coveragemodelv1.CoverageCompletenessV1 {
-	reasons := make([]coveragemodelv1.Reason, len(value.Reasons))
-	for index, reason := range value.Reasons {
-		reasons[index] = coveragemodelv1.Reason(reason)
-	}
-	sort.Slice(reasons, func(i, j int) bool { return reasons[i] < reasons[j] })
-	return coveragemodelv1.CoverageCompletenessV1{Outcome: coveragemodelv1.Outcome(value.Outcome), Reasons: reasons}
-}
-
-func provenanceV1(value coveragedomain.ToolchainSnapshot) coveragemodelv1.CoverageProvenanceV1 {
-	return coveragemodelv1.CoverageProvenanceV1{
-		Architecture: coveragemodelv1.Architecture(value.Architecture),
-		Collector: coveragemodelv1.CoverageCollectorV1{
-			Name: coveragemodelv1.CollectorName(value.Collector.Name), Version: value.Collector.Version,
-		},
-		Compiler: coveragemodelv1.CoverageCompilerV1{
-			Family: coveragemodelv1.Family(value.Compiler.Family), Version: value.Compiler.Version,
-		},
-		Driver: coveragemodelv1.CoverageDriverV1{
-			Name: coveragemodelv1.DriverName(value.Driver.Name), Version: value.Driver.Version,
-		},
-		InstrumentationFingerprint: value.InstrumentationFingerprint,
-		NormalizerVersion:          value.NormalizerVersion,
-		Platform:                   coveragemodelv1.Platform(value.Platform),
-	}
-}
-
 func validateLLVMToolchain(value coveragedomain.ToolchainSnapshot) error {
 	if value.Driver.Name != coveragedomain.DriverLLVMCov || value.Collector.Name != coveragedomain.CollectorLLVMCov ||
 		value.Compiler.Version == "" || value.Compiler.Version != value.Driver.Version ||
@@ -279,29 +216,4 @@ func validateLLVMToolchain(value coveragedomain.ToolchainSnapshot) error {
 		return ErrInvalidLLVM
 	}
 	return nil
-}
-
-func addMetricV1(first, second coveragemodelv1.CoverageMetricV1) (coveragemodelv1.CoverageMetricV1, error) {
-	if first.Covered < 0 || second.Covered < 0 || first.Total < 0 || second.Total < 0 ||
-		first.Covered > coveragedomain.MaxSafeInteger-second.Covered ||
-		first.Total > coveragedomain.MaxSafeInteger-second.Total {
-		return coveragemodelv1.CoverageMetricV1{}, ErrInvalidLLVM
-	}
-	return coveragemodelv1.CoverageMetricV1{Covered: first.Covered + second.Covered, Total: first.Total + second.Total}, nil
-}
-
-func addSummaryV1(first, second coveragemodelv1.CoverageSummaryV1) (coveragemodelv1.CoverageSummaryV1, error) {
-	branches, err := addMetricV1(first.Branches, second.Branches)
-	if err != nil {
-		return coveragemodelv1.CoverageSummaryV1{}, err
-	}
-	functions, err := addMetricV1(first.Functions, second.Functions)
-	if err != nil {
-		return coveragemodelv1.CoverageSummaryV1{}, err
-	}
-	lines, err := addMetricV1(first.Lines, second.Lines)
-	if err != nil {
-		return coveragemodelv1.CoverageSummaryV1{}, err
-	}
-	return coveragemodelv1.CoverageSummaryV1{Branches: branches, Functions: functions, Lines: lines}, nil
 }
