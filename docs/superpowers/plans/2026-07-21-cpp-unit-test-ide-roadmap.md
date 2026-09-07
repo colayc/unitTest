@@ -122,6 +122,16 @@ Phase 6B 状态：实现与本地 Windows 验证已就绪，等待 Hosted CI 双
 
 GitHub Actions 的 PASS/report 是开发验收证据，GitHub 与 Gitee 只承担源码托管、协作和开发分发；production Service 的 coverage execution 不访问这两个平台或其他网络服务。Windows required-PASS gate 完成不表示 Linux coverage 或完整 Phase 7 UX 已完成。
 
+Phase 7 Batch A 的 Task 10 本地候选已增加独立 `coverage-linux-gcc`
+required-check 定义，以及 Linux/Windows 上传前的 exact evidence validator。
+Linux job 会在 offline bootstrap 完成后，通过 production Unix Socket Service
+运行 GCC + CppUTest/Unity、故障映射和 determinism，并 fail-closed 上传闭合、
+path-free 的 `linux-gcc-coverage-report.json`。受信任 `master` push 的 Windows
+job 则在专用 runner 上无条件要求 Named Pipe/WFP coverage smoke 和闭合证据。
+本次仅完成本地实现与可运行回归；新的 Linux native job、Windows privileged
+job、workflow run ID、artifact ID 和 branch protection 仍为 `NOT-RUN/CI-only`，
+必须在后续获得远端写入授权并由真实 CI 成功后才能把 Batch A 标记完成。
+
 依赖：Phase 5 的报告能力和 Phase 6 的扩展集成。
 
 验收标准：完整的主要用户旅程无需终端命令即可完成，并在 10,000 个测试项时保持响应。

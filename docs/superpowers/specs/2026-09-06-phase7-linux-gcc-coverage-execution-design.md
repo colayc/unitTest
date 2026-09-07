@@ -443,6 +443,23 @@ job 始终上传 closed schema `linux-gcc-coverage-report.json`，但 artifact �
 
 Gitee 同步继续遵守现有流程：只有 GitHub PR 合并并验证后才把 GitHub `master` 普通同步到 Gitee `master`，不强制覆盖。
 
+Task 10 的本地候选实现将上述要求固化为独立且唯一的
+`coverage-linux-gcc` job。它在任何 network namespace entry 之前完成
+依赖、CMake、framework、coverage bundle 和 Go module bootstrap；真实
+CppUTest/Unity Service smoke 只通过 `test:coverage-service-smoke:linux`
+进入 fail-closed namespace，使 Service、CMake、GCC/G++、测试进程、gcov
+与 bundled gcovr 都成为同一受控进程树的后代。smoke 成功后，CI 再读取
+实际待上传文件，验证 canonical bytes、闭合 schema、摘要、工具链/framework
+身份、故障映射、determinism 和无路径/环境/秘密泄漏，然后生成固定文件名
+`linux-gcc-coverage-report.json`；`always()` 上传只负责保留证据，不能把失败
+job 转成成功。
+
+受信任的 `master` push 在专用 Windows runner 上无条件要求 Named Pipe +
+WFP smoke，并在上传前重验 exact evidence bytes。Pull request 仍只使用无特权
+Hosted Windows runner，避免不受信任的 fork 代码进入管理员主机。当前本地
+候选尚未产生 GitHub workflow run 或 artifact ID，因此 Linux/Windows 原生
+结论必须保持 `NOT-RUN/CI-only`，不得从 Windows 工作站推断为 PASS。
+
 ## 15. 分阶段实施顺序
 
 1. 泛化 shared coverage contracts，并用 Windows LLVM characterization tests 保证无行为漂移。

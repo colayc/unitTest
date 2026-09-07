@@ -12,6 +12,7 @@ import {
   runAfterVerifiedCoverageToolsetPreflight,
   runWithTestOnlyCoverageFault,
   teardownThenPublish,
+  validateCoverageEvidenceBytes,
   validateLinuxGccCoverageEvidence
 } from "./coverage-service-smoke-support.js";
 
@@ -112,6 +113,54 @@ test("Linux GCC evidence rejects paths, process inputs, secrets and additional p
   for (const candidate of invalid) {
     assert.throws(() => validateLinuxGccCoverageEvidence(candidate), /Linux GCC coverage evidence/u);
   }
+});
+
+test("CI validates the exact canonical Linux and Windows coverage evidence bytes", () => {
+  const linuxBytes = Buffer.from(`${JSON.stringify(linuxEvidence)}\n`);
+  assert.deepEqual(validateCoverageEvidenceBytes("linux", linuxBytes), linuxEvidence);
+  const windowsEvidence = {
+    schemaVersion: 1,
+    outcome: "passed",
+    reason: "None",
+    toolchainDigest: "f".repeat(64),
+    guardianOutcome: "released",
+    filterAuditOutcome: "passed",
+    startedAt: "2026-09-07T00:00:00.000Z",
+    finishedAt: "2026-09-07T00:00:01.000Z"
+  } as const;
+  assert.deepEqual(
+    validateCoverageEvidenceBytes("windows", Buffer.from(`${JSON.stringify(windowsEvidence)}\n`)),
+    windowsEvidence
+  );
+});
+
+test("CI evidence validation rejects noncanonical, skipped and leaking reports", () => {
+  const windows = {
+    schemaVersion: 1,
+    outcome: "skipped",
+    reason: "ToolchainUnavailable",
+    toolchainDigest: "f".repeat(64),
+    guardianOutcome: "not-run",
+    filterAuditOutcome: "not-run",
+    startedAt: "2026-09-07T00:00:00.000Z",
+    finishedAt: "2026-09-07T00:00:01.000Z"
+  };
+  assert.throws(
+    () => validateCoverageEvidenceBytes("windows", Buffer.from(`${JSON.stringify(windows)}\n`)),
+    /required Windows coverage evidence must pass/u
+  );
+  assert.throws(
+    () => validateCoverageEvidenceBytes("linux", Buffer.from(`${JSON.stringify(linuxEvidence, null, 2)}\n`)),
+    /one newline-terminated JSON object|canonical compact JSON/u
+  );
+  assert.throws(
+    () => validateCoverageEvidenceBytes("linux", Buffer.from(`${JSON.stringify({ ...linuxEvidence, workspacePath: "/tmp/leak" })}\n`)),
+    /Linux GCC coverage evidence/u
+  );
+  assert.throws(
+    () => validateCoverageEvidenceBytes("linux", Buffer.from(`${JSON.stringify(linuxEvidence)}\ntrailer`)),
+    /one newline-terminated JSON object/u
+  );
 });
 
 test("test-only coverage fault hooks cover every Linux smoke failure seam without Workspace fields", async () => {

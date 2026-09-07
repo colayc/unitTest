@@ -189,19 +189,19 @@ test("Hosted CI pins native toolchain runners and gates unstable Windows native 
       const privilegedStep = source.slice(source.lastIndexOf("      - ", privilegedWfp), coverageSmoke);
       assert.match(
         privilegedStep,
-        /UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED:\s*\$\{\{\s*github\.event_name\s*==\s*['"]push['"]\s*&&\s*github\.ref\s*==\s*['"]refs\/heads\/master['"]\s*&&\s*vars\.UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED\s*\|\|\s*['"]0['"]\s*\}\}/u,
-        "WFP integration must be strict only when the privileged repository variable is enabled"
+        /UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED:\s*\$\{\{\s*github\.event_name\s*==\s*['"]push['"]\s*&&\s*github\.ref\s*==\s*['"]refs\/heads\/master['"]\s*&&\s*['"]1['"]\s*\|\|\s*['"]0['"]\s*\}\}/u,
+        "WFP integration must be strict on every trusted master push"
       );
       const coverageStep = source.slice(source.lastIndexOf("      - ", coverageSmoke), legacyCleanup);
       assert.match(
         coverageStep,
-        /if:\s*\$\{\{\s*github\.event_name\s*==\s*['"]push['"]\s*&&\s*github\.ref\s*==\s*['"]refs\/heads\/master['"]\s*&&\s*vars\.UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED\s*==\s*['"]1['"]\s*\}\}/u,
-        "Windows LLVM coverage must be gated by the privileged WFP repository variable"
+        /if:\s*\$\{\{\s*github\.event_name\s*==\s*['"]push['"]\s*&&\s*github\.ref\s*==\s*['"]refs\/heads\/master['"]\s*\}\}/u,
+        "Windows LLVM coverage must run on every trusted master push"
       );
       const coverageReport = source.indexOf("coverage-execution-report.json");
       assert.notEqual(coverageReport, -1);
       const uploadStep = source.slice(source.lastIndexOf("      - ", coverageReport), coverageReport);
-      assert.match(uploadStep, /steps\.windows-coverage-smoke\.outcome\s*==\s*'success'/u, "WFP evidence upload must depend on the required verified smoke step");
+      assert.match(uploadStep, /steps\.windows-coverage-evidence\.outcome\s*==\s*'success'/u, "WFP evidence upload must depend on validation of the exact report bytes");
       assert.match(source, /coverage-execution-windows-[\s\S]*if-no-files-found:\s*error/u, "required verified Windows runs must fail closed without evidence");
       const cleanupStep = source.slice(source.lastIndexOf("      - ", legacyCleanup), serviceSmoke);
       assert.match(cleanupStep, /windows-offline-boundary\.ps1/u);
@@ -211,6 +211,64 @@ test("Hosted CI pins native toolchain runners and gates unstable Windows native 
       assert.doesNotMatch(source, /-Action\s+Guard/u, "production CI must not revive the legacy PowerShell boundary");
       assert.doesNotMatch(cleanupStep, /CleanupAll/u, "legacy cleanup must be bounded to known historical residue only");
     }
+  }
+});
+
+test("coverage acceptance is a required, closed-evidence cross-platform CI gate", async () => {
+  const workflow = await readFile(".github/workflows/foundation.yml", "utf8");
+  const jobs = [...workflow.matchAll(/^ {2}([a-z][a-z0-9-]*):\s*$/gmu)].map((match) => match[1]);
+  assert.equal(jobs.filter((name) => name === "coverage-linux-gcc").length, 1);
+
+  const jobSource = (name) => {
+    const start = workflow.indexOf(`  ${name}:`);
+    assert.notEqual(start, -1, `foundation job ${name} is missing`);
+    const remainder = workflow.slice(start + 1);
+    const next = remainder.search(/\n {2}[a-z][a-z0-9-]*:\s*$/mu);
+    return workflow.slice(start, next === -1 ? undefined : start + 1 + next);
+  };
+
+  const linux = jobSource("coverage-linux-gcc");
+  assert.match(linux, /^ {4}name:\s*coverage-linux-gcc\s*$/mu);
+  assert.match(linux, /^ {4}runs-on:\s*ubuntu-24\.04\s*$/mu);
+  assert.doesNotMatch(linux, /continue-on-error|ToolchainUnavailable|\bSKIP\b/u);
+  for (const command of [
+    "go test ./apps/test-service/... -count=1",
+    "go test -race ./apps/test-service/internal/coverageplatform ./apps/test-service/internal/coveragegcc ./apps/test-service/internal/coveragebundle ./apps/test-service/internal/coverageexec -count=1",
+    "go vet ./apps/test-service/...",
+    "pnpm --filter @unit-test-ide/service-probe test",
+    "pnpm --filter code-oss-extension test:coverage-service-smoke:linux",
+    "pnpm --filter code-oss-extension validate:coverage-evidence:linux",
+  ]) {
+    assert.match(linux, new RegExp(command.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), `missing required command: ${command}`);
+  }
+  const bootstrap = linux.indexOf("pnpm prepare:coverage-bundle");
+  const framework = linux.indexOf("pnpm prepare:framework-bundle");
+  const goDownload = linux.indexOf("go mod download");
+  const native = linux.indexOf("test:coverage-service-smoke:linux");
+  const validator = linux.indexOf("validate:coverage-evidence:linux");
+  assert.ok(bootstrap !== -1 && framework !== -1 && goDownload !== -1);
+  assert.ok(native > bootstrap && native > framework && native > goDownload);
+  assert.ok(validator > native, "the exact published evidence must be validated after native execution");
+  assert.match(linux, /name:\s*linux-gcc-coverage-report-\$\{\{ github\.run_attempt \}\}/u);
+  const report = linux.indexOf("linux-gcc-coverage-report.json");
+  assert.notEqual(report, -1);
+  const upload = linux.slice(linux.lastIndexOf("      - ", report), report + 300);
+  assert.match(upload, /if:\s*always\(\)/u);
+  assert.match(upload, /if-no-files-found:\s*error/u);
+
+  const windows = jobSource("verify-windows");
+  const privileged = windows.indexOf("TestPrivilegedWindowsWFPDynamicLifecycle");
+  const smoke = windows.indexOf("test:coverage-service-smoke");
+  const evidenceValidator = windows.indexOf("validate:coverage-evidence:windows");
+  assert.ok(privileged !== -1 && smoke > privileged && evidenceValidator > smoke);
+  const privilegedStep = windows.slice(windows.lastIndexOf("      - ", privileged), smoke);
+  assert.match(privilegedStep, /github\.event_name\s*==\s*['"]push['"][\s\S]*github\.ref\s*==\s*['"]refs\/heads\/master['"][\s\S]*['"]1['"]\s*\|\|\s*['"]0['"]/u);
+  const smokeStep = windows.slice(windows.lastIndexOf("      - ", smoke), evidenceValidator);
+  assert.match(smokeStep, /github\.event_name\s*==\s*['"]push['"][\s\S]*github\.ref\s*==\s*['"]refs\/heads\/master['"]/u);
+  assert.doesNotMatch(smokeStep, /vars\.UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED/u);
+
+  for (const retained of ["verify-windows", "verify-linux", "package-windows", "package-linux", "release-qualification"]) {
+    assert.ok(jobs.includes(retained), `existing ${retained} job must remain present`);
   }
 });
 

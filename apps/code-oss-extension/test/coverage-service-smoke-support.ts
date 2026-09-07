@@ -8,6 +8,10 @@ import {
   rm
 } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
+import {
+  validateWfpOfflineReport,
+  type WfpOfflineReport
+} from "@unit-test-ide/service-probe/coverage-bundle";
 
 const XML_DECLARATION = '<?xml version="1.0" encoding="UTF-8"?>';
 const MAX_JUNIT_BYTES = 64 * 1024 * 1024;
@@ -206,6 +210,25 @@ export function validateLinuxGccCoverageEvidence(value: unknown): asserts value 
     throw linuxEvidenceError("has invalid timestamps");
   }
   rejectSensitiveEvidence(value);
+}
+
+/** Revalidates the exact bytes that CI publishes, including canonical encoding. */
+export function validateCoverageEvidenceBytes(
+  platform: "linux" | "windows",
+  bytes: Uint8Array
+): LinuxGccCoverageEvidence | WfpOfflineReport {
+  const value = validateCanonicalJSON(Buffer.from(bytes));
+  if (platform === "linux") {
+    validateLinuxGccCoverageEvidence(value);
+    return value;
+  }
+  validateWfpOfflineReport(value as WfpOfflineReport);
+  const report = value as WfpOfflineReport;
+  if (report.outcome !== "passed") {
+    throw new Error("required Windows coverage evidence must pass");
+  }
+  rejectSensitiveEvidence(report);
+  return report;
 }
 
 export async function runWithTestOnlyCoverageFault<Result>(
@@ -728,7 +751,7 @@ function linuxEvidenceError(message: string): Error {
   return new Error(`Linux GCC coverage evidence ${message}`);
 }
 
-function validateCanonicalJSON(bytes: Buffer): void {
+function validateCanonicalJSON(bytes: Buffer): unknown {
   let text: string;
   try {
     text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
@@ -750,6 +773,7 @@ function validateCanonicalJSON(bytes: Buffer): void {
   if (`${JSON.stringify(parsed)}\n` !== text) {
     throw new Error("coverage evidence must use canonical compact JSON encoding");
   }
+  return parsed;
 }
 
 function junitError(message: string, cause?: unknown): Error {
