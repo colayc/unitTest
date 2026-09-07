@@ -2,7 +2,7 @@ import { execFile as execFileCallback } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { createWriteStream } from "node:fs";
 import { lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, posix, relative, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Transform } from "node:stream";
 import { fileURLToPath } from "node:url";
@@ -13,8 +13,8 @@ const DIGEST = /^[0-9a-f]{64}$/u;
 const toolDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(toolDirectory, "..", "..");
 const approved = {
-  cpputest: { version: "4.0", license: "BSD-3-Clause", url: "https://github.com/cpputest/cpputest/releases/download/v4.0/cpputest-4.0.tar.gz" },
-  unity: { version: "2.6.1", license: "MIT", url: "https://github.com/ThrowTheSwitch/Unity/archive/refs/tags/v2.6.1.tar.gz" }
+  cpputest: { version: "4.0", license: "BSD-3-Clause", url: "https://github.com/cpputest/cpputest/releases/download/v4.0/cpputest-4.0.tar.gz", filename: "cpputest-4.0.tar.gz", sha256: "21c692105db15299b5529af81a11a7ad80397f92c122bd7bf1e4a4b0e85654f7", sourceDirectory: "cpputest-4.0" },
+  unity: { version: "2.6.1", license: "MIT", url: "https://github.com/ThrowTheSwitch/Unity/archive/refs/tags/v2.6.1.tar.gz", filename: "Unity-2.6.1.tar.gz", sha256: "b41a66d45a6b99758fb3202ace6178177014d52fc524bf1f72687d93e9867292", sourceDirectory: "Unity-2.6.1" }
 };
 const downloadLimit = 64 * 1024 * 1024;
 
@@ -27,7 +27,7 @@ export function validateManifest(value) {
     if (!(entry.id in approved) || ids.has(entry.id)) throw new Error("framework input has an invalid identity");
     const required = approved[entry.id];
     closed(entry.source, ["filename", "url", "sha256"], "framework input source");
-    if (entry.version !== required.version || entry.license !== required.license || entry.source.url !== required.url || !safeFilename(entry.source.filename) || !DIGEST.test(entry.source.sha256) || !safeDirectory(entry.sourceDirectory)) {
+    if (entry.version !== required.version || entry.license !== required.license || entry.source.url !== required.url || entry.source.filename !== required.filename || entry.source.sha256 !== required.sha256 || entry.sourceDirectory !== required.sourceDirectory || !safeFilename(entry.source.filename) || !DIGEST.test(entry.source.sha256) || !safeDirectory(entry.sourceDirectory)) {
       throw new Error("framework input is not locked");
     }
     ids.add(entry.id);
@@ -119,9 +119,19 @@ async function downloadLockedArchive(cacheRoot, input) {
 }
 
 async function verifySafeTar(archive) {
-  const result = await execFile("tar", ["-tvzf", archive], { shell: false, windowsHide: true, timeout: 60_000, maxBuffer: 8 * 1024 * 1024 });
-  const entries = result.stdout.split(/\r?\n/u).filter(Boolean);
-  if (entries.length === 0 || entries.some((entry) => !/^[d-]/u.test(entry) || /(?:\s|^)\.\.\//u.test(entry) || entry.includes(" -> "))) throw new Error("framework archive contains an unsafe entry");
+  const [verbose, listed] = await Promise.all([
+    execFile("tar", ["-tvzf", archive], { shell: false, windowsHide: true, timeout: 60_000, maxBuffer: 8 * 1024 * 1024 }),
+    execFile("tar", ["-tzf", archive], { shell: false, windowsHide: true, timeout: 60_000, maxBuffer: 8 * 1024 * 1024 })
+  ]);
+  const types = verbose.stdout.split(/\r?\n/u).filter(Boolean);
+  const names = listed.stdout.split(/\r?\n/u).filter(Boolean);
+  if (types.length === 0 || types.length !== names.length || types.some((entry) => !/^[d-]/u.test(entry) || entry.includes(" -> ")) || names.some((name) => !safeTarPath(name))) throw new Error("framework archive contains an unsafe entry");
+}
+
+function safeTarPath(name) {
+  if (!name || /[\0\r\n\\]/u.test(name) || name.startsWith("/") || /^[A-Za-z]:/u.test(name)) return false;
+  const normalized = posix.normalize(name.replace(/\/$/u, ""));
+  return normalized !== "." && normalized === name.replace(/\/$/u, "") && !normalized.split("/").some((part) => part === ".." || part === "");
 }
 
 async function verifySourceTree(root, input) {

@@ -11,8 +11,8 @@ const manifest = () => ({
   schemaVersion: 1,
   platform: "linux-x64",
   frameworks: [
-    { id: "cpputest", version: "4.0", source: { filename: "cpputest-4.0.tar.gz", url: "https://github.com/cpputest/cpputest/releases/download/v4.0/cpputest-4.0.tar.gz", sha256: digest("cpp") }, license: "BSD-3-Clause", sourceDirectory: "cpputest-4.0" },
-    { id: "unity", version: "2.6.1", source: { filename: "Unity-2.6.1.tar.gz", url: "https://github.com/ThrowTheSwitch/Unity/archive/refs/tags/v2.6.1.tar.gz", sha256: digest("unity") }, license: "MIT", sourceDirectory: "Unity-2.6.1" }
+    { id: "cpputest", version: "4.0", source: { filename: "cpputest-4.0.tar.gz", url: "https://github.com/cpputest/cpputest/releases/download/v4.0/cpputest-4.0.tar.gz", sha256: "21c692105db15299b5529af81a11a7ad80397f92c122bd7bf1e4a4b0e85654f7" }, license: "BSD-3-Clause", sourceDirectory: "cpputest-4.0" },
+    { id: "unity", version: "2.6.1", source: { filename: "Unity-2.6.1.tar.gz", url: "https://github.com/ThrowTheSwitch/Unity/archive/refs/tags/v2.6.1.tar.gz", sha256: "b41a66d45a6b99758fb3202ace6178177014d52fc524bf1f72687d93e9867292" }, license: "MIT", sourceDirectory: "Unity-2.6.1" }
   ]
 });
 
@@ -29,7 +29,7 @@ test("framework bootstrap manifest is closed and locks only reviewed Linux HTTPS
 
 test("framework bootstrap rejects a missing or tampered immutable cache archive", async () => {
   const root = await mkdtemp(join(tmpdir(), "unit-test-framework-archive-"));
-  const locked = manifest().frameworks[0];
+  const locked = { ...manifest().frameworks[0], source: { ...manifest().frameworks[0].source, sha256: digest("cpp") } };
   const archive = join(root, `${locked.source.sha256}-${locked.source.filename}`);
   await assert.rejects(verifyLockedArchive(root, locked), /missing|ENOENT/iu);
   await writeFile(archive, "tampered");

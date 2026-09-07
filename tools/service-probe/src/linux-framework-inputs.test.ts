@@ -23,7 +23,7 @@ function manifest(): LinuxFrameworkInputManifest {
         source: {
           filename: "cpputest-4.0.tar.gz",
           url: "https://github.com/cpputest/cpputest/releases/download/v4.0/cpputest-4.0.tar.gz",
-          sha256: digest("cpputest source archive")
+          sha256: "21c692105db15299b5529af81a11a7ad80397f92c122bd7bf1e4a4b0e85654f7"
         },
         license: "BSD-3-Clause",
         sourceDirectory: "cpputest-4.0"
@@ -34,7 +34,7 @@ function manifest(): LinuxFrameworkInputManifest {
         source: {
           filename: "Unity-2.6.1.tar.gz",
           url: "https://github.com/ThrowTheSwitch/Unity/archive/refs/tags/v2.6.1.tar.gz",
-          sha256: digest("unity source archive")
+          sha256: "b41a66d45a6b99758fb3202ace6178177014d52fc524bf1f72687d93e9867292"
         },
         license: "MIT",
         sourceDirectory: "Unity-2.6.1"
@@ -57,7 +57,7 @@ test("Linux framework lock is closed and rejects missing, tampered, escaped and 
   }
 });
 
-test("Linux framework boundary verifies locked archives, license metadata and the sealed test-only helper seam", async () => {
+test("Linux framework boundary rejects a fabricated expanded tree whose locked archive bytes do not match", async () => {
   const root = await mkdtemp(join(tmpdir(), "unit-test-linux-framework-inputs-"));
   const cacheRoot = join(root, "cache");
   const sourceRoot = join(root, "sources");
@@ -74,18 +74,12 @@ test("Linux framework boundary verifies locked archives, license metadata and th
   await writeFile(helperPath, "# verified helper\n");
   await writeFile(generatorPath, "verified generator\n");
 
-  const boundary = await prepareLinuxFrameworkInputs({
+  await assert.rejects(prepareLinuxFrameworkInputs({
     manifest: valid,
     cacheRoot,
     sourceRoot,
     helperPath,
-    generatorPath
-  });
-
-  assert.deepEqual(boundary.frameworks, ["cpputest", "unity"]);
-  assert.equal(boundary.environment.UNIT_TEST_IDE_TEST_CPPUTEST_ROOT, join(sourceRoot, "cpputest-4.0"));
-  assert.equal(boundary.environment.UNIT_TEST_IDE_TEST_UNITY_ROOT, join(sourceRoot, "Unity-2.6.1"));
-  assert.equal(boundary.environment.UNIT_TEST_IDE_TEST_CMAKE_HELPER, helperPath);
-  assert.equal(boundary.environment.UNIT_TEST_IDE_TEST_UNITY_RUNNER_GENERATOR, generatorPath);
-  assert.match(boundary.identityDigest, /^[0-9a-f]{64}$/u);
+    generatorPath,
+    repositoryRoot: root
+  }), /archive digest mismatch/u);
 });
