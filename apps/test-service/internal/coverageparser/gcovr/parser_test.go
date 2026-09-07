@@ -59,20 +59,45 @@ func TestParseGCovrLockedFormatFixtures(t *testing.T) {
 	}
 }
 
+// TestParseGCovrRawLinuxArtifact is intentionally driven only by
+// verify-linux-fixtures.sh. The verifier rejects a missing artifact before it
+// invokes this test, so ordinary host-independent test runs remain hermetic.
+func TestParseGCovrRawLinuxArtifact(t *testing.T) {
+	path := os.Getenv("UNIT_TEST_IDE_GCOVR_RAW_FIXTURE")
+	if path == "" {
+		t.Skip("raw gcovr fixture artifact is supplied by the Linux verifier")
+	}
+	encoded, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Parse(bytes.NewReader(encoded), DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.FormatVersion != "0.14" || len(got.Files) == 0 {
+		t.Fatalf("raw artifact export = %#v", got)
+	}
+}
+
 func TestGCovrFixtureProvenancePinsBundleAndFixtureDigests(t *testing.T) {
 	encoded, err := os.ReadFile("testdata/provenance.json")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var provenance struct {
-		Bundle    struct{ ManifestSHA256, PythonVersion, GCovrVersion string }
-		Generator struct{ Source, SourceSHA256, Command, RawOutputSHA256 string }
-		Fixtures  map[string]struct{ SHA256 string }
+		Bundle struct {
+			ManifestSHA256, PythonVersion, GCovrVersion, Platform string
+		}
+		Generator struct {
+			Source, SourceSHA256, Command, ArtifactDirectory, RawOutput, RawOutputDigestSidecar, CanonicalOutput, CanonicalOutputDigestSidecar, VerificationCommand string
+		}
+		Fixtures map[string]struct{ SHA256 string }
 	}
 	if err := json.Unmarshal(encoded, &provenance); err != nil {
 		t.Fatal(err)
 	}
-	if provenance.Bundle.ManifestSHA256 != "62ce3b007ce12261f7d29484ab08ec5e85da63e150d45a2cd26d96b2b4bdb61a" || provenance.Bundle.PythonVersion != "3.14.6" || provenance.Bundle.GCovrVersion != "8.6" {
+	if provenance.Bundle.ManifestSHA256 != "62ce3b007ce12261f7d29484ab08ec5e85da63e150d45a2cd26d96b2b4bdb61a" || provenance.Bundle.PythonVersion != "3.14.6" || provenance.Bundle.GCovrVersion != "8.6" || provenance.Bundle.Platform != "linux-x64" {
 		t.Fatalf("bundle provenance = %#v", provenance.Bundle)
 	}
 	manifest, err := os.ReadFile("../../../../../tools/coverage-bundle/manifest.json")
@@ -83,7 +108,7 @@ func TestGCovrFixtureProvenancePinsBundleAndFixtureDigests(t *testing.T) {
 	if provenance.Bundle.ManifestSHA256 != hex.EncodeToString(manifestDigest[:]) {
 		t.Fatalf("manifest digest = %s", hex.EncodeToString(manifestDigest[:]))
 	}
-	if provenance.Generator.Source != "fixture-source.c" || provenance.Generator.Command != "bash apps/test-service/internal/coverageparser/gcovr/testdata/generate-linux-fixtures.sh" || provenance.Generator.RawOutputSHA256 == "" {
+	if bytes.Contains(encoded, []byte("rawOutputSHA256")) || provenance.Generator.Source != "fixture-source.c" || provenance.Generator.Command != "bash apps/test-service/internal/coverageparser/gcovr/testdata/generate-linux-fixtures.sh" || provenance.Generator.ArtifactDirectory != "required UNIT_TEST_IDE_GCOVR_FIXTURE_ARTIFACT_DIR" || provenance.Generator.RawOutput != "raw-coverage.json" || provenance.Generator.RawOutputDigestSidecar != "raw-coverage.json.sha256" || provenance.Generator.CanonicalOutput != "gcovr-8.6.canonical.json" || provenance.Generator.CanonicalOutputDigestSidecar != "gcovr-8.6.canonical.json.sha256" || provenance.Generator.VerificationCommand != "bash apps/test-service/internal/coverageparser/gcovr/testdata/verify-linux-fixtures.sh <artifact-dir>" {
 		t.Fatalf("generator provenance = %#v", provenance.Generator)
 	}
 	source, err := os.ReadFile("testdata/" + provenance.Generator.Source)
@@ -98,9 +123,24 @@ func TestGCovrFixtureProvenancePinsBundleAndFixtureDigests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range [][]byte{[]byte("-I -S"), []byte("manifest.json"), []byte("raw-output-sha256")} {
+	for _, required := range [][]byte{
+		[]byte("-I -S"), []byte("manifest.resolved.json"), []byte("prepare.mjs"),
+		[]byte("linux-x64"), []byte("3.14.6"), []byte("8.6"),
+		[]byte("UNIT_TEST_IDE_GCC"), []byte("UNIT_TEST_IDE_GCOV"),
+		[]byte("UNIT_TEST_IDE_GCOVR_FIXTURE_ARTIFACT_DIR"), []byte("raw-coverage.json.sha256"),
+		[]byte("unbound bundle root override is forbidden"), []byte("expected_manifest_sha256"),
+	} {
 		if !bytes.Contains(script, required) {
 			t.Fatalf("generator lacks %q", required)
+		}
+	}
+	verifier, err := os.ReadFile("testdata/verify-linux-fixtures.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range [][]byte{[]byte("raw artifact is required"), []byte("raw-coverage.json.sha256"), []byte("TestParseGCovrRawLinuxArtifact"), []byte("TestGCovrFixtureProvenancePinsBundleAndFixtureDigests")} {
+		if !bytes.Contains(verifier, required) {
+			t.Fatalf("verifier lacks %q", required)
 		}
 	}
 	for _, name := range []string{"simple.json", "branches.json", "functions.json", "empty.json", "schema-variants.json", "malformed.json", "duplicate.json"} {

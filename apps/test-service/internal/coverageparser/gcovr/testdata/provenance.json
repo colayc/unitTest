@@ -11,9 +11,13 @@
     "source": "fixture-source.c",
     "sourceSHA256": "864a47f1a0ffef239a426b8e8aa81969af6cac575cf13ad8d48daccb9c364912",
     "command": "bash apps/test-service/internal/coverageparser/gcovr/testdata/generate-linux-fixtures.sh",
-    "rawOutput": "optional path set by UNIT_TEST_IDE_GCOVR_FIXTURE_RAW_OUTPUT",
-    "rawOutputSHA256": "CI-generated: printed by generate-linux-fixtures.sh",
-    "localStatus": "not generated on Windows; Linux CI runs the locked bundle command"
+    "artifactDirectory": "required UNIT_TEST_IDE_GCOVR_FIXTURE_ARTIFACT_DIR",
+    "rawOutput": "raw-coverage.json",
+    "rawOutputDigestSidecar": "raw-coverage.json.sha256",
+    "canonicalOutput": "gcovr-8.6.canonical.json",
+    "canonicalOutputDigestSidecar": "gcovr-8.6.canonical.json.sha256",
+    "verificationCommand": "bash apps/test-service/internal/coverageparser/gcovr/testdata/verify-linux-fixtures.sh <artifact-dir>",
+    "localStatus": "not generated on Windows; Linux CI must publish and verify the required raw artifact"
   },
   "fixtures": {
     "simple.json": {"sha256": "7cc06543f2196c2f438a537a04a222b0c01fd4bd7eae298dfea024c1b9948223", "kind": "canonical reduced format-0.14 fixture"},
