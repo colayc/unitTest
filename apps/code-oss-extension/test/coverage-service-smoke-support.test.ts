@@ -161,6 +161,13 @@ test("CI evidence validation rejects noncanonical, skipped and leaking reports",
     () => validateCoverageEvidenceBytes("linux", Buffer.from(`${JSON.stringify(linuxEvidence)}\ntrailer`)),
     /one newline-terminated JSON object/u
   );
+  assert.throws(
+    () => validateCoverageEvidenceBytes(
+      "linux",
+      Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(`${JSON.stringify(linuxEvidence)}\n`)])
+    ),
+    /UTF-8 BOM|canonical/u
+  );
 });
 
 test("test-only coverage fault hooks cover every Linux smoke failure seam without Workspace fields", async () => {

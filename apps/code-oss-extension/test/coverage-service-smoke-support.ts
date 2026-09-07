@@ -752,6 +752,12 @@ function linuxEvidenceError(message: string): Error {
 }
 
 function validateCanonicalJSON(bytes: Buffer): unknown {
+  if (bytes[0] !== 0x7b) {
+    const utf8BOM = bytes.byteLength >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf;
+    throw new Error(utf8BOM
+      ? "coverage evidence must not use a UTF-8 BOM or other noncanonical prefix"
+      : "coverage evidence must begin with the canonical JSON object byte");
+  }
   let text: string;
   try {
     text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
