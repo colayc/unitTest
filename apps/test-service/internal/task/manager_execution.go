@@ -1328,6 +1328,11 @@ func debugProcessErrorMessage(err error, fallback string) string {
 		"process-host status unavailable",
 		"process-host rejected start",
 		"process wait failed",
+		"configure required",
+		"target not found",
+		"workspace trust required",
+		"project not found",
+		"build profile not found",
 	} {
 		if strings.Contains(message, category) {
 			return category
