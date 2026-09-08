@@ -855,7 +855,7 @@ func (execution *execution) Interpret(
 	switch step.Kind {
 	case task.StepCoverageConfigure:
 		if result.ExitCode != 0 || result.TimedOut {
-			debugCoveragef("coverage configure process failed exit=%d timedOut=%t err=%v", result.ExitCode, result.TimedOut, result.Err)
+			debugCoveragef("coverage configure process failed: exit %d, timed out %t, error %v", result.ExitCode, result.TimedOut, result.Err)
 			execution.setFailedPhase(coveragerun.PhaseConfigure)
 			return task.StepVerdictDefault, errors.New("coverage instrumentation configure failed")
 		}
@@ -919,6 +919,9 @@ func (execution *execution) ObserveOutput(
 		return err
 	}
 	execution.ensureCoverageStarted()
+	if step.Kind == task.StepCoverageConfigure {
+		debugCoveragef("coverage configure output from %s %s: %s", output.Source, output.Stream, string(output.Data))
+	}
 	if step.Kind == task.StepCoverageTest {
 		execution.mu.Lock()
 		embedded := execution.embedded
