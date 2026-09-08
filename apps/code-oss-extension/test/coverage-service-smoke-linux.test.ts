@@ -8,7 +8,7 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
-import { ProtocolClient, ProtocolError, TestSelectionModeV14, type CoverageRun, type WorkspaceSnapshot, type ProtocolArtifactMetadata } from "@unit-test-ide/test-client";
+import { ProtocolClient, ProtocolError, TestSelectionModeV14, type CoverageRun, type WorkspaceSnapshot, type ProtocolArtifactMetadata, type ProtocolTaskEvent, EventSubscription } from "@unit-test-ide/test-client";
 import { decodeCoverageDocumentV1 } from "@unit-test-ide/coverage-models";
 import { ServiceManager } from "../src/service-manager.js";
 import { createCoverageController } from "../src/coverage-controller.js";
@@ -60,14 +60,29 @@ async function selectGccEventually(client: ProtocolClient): Promise<Selected> {
   }
 }
 
-async function taskFinished(client: ProtocolClient, id: string, label = "native task") {
+function collectTaskOutput(subscription: EventSubscription) {
+  const output = new Map<string, string>();
+  const pump = (async () => {
+    for await (const event of subscription) {
+      if (event.event !== "task.output") continue;
+      const text = (event as ProtocolTaskEvent & { payload: { text?: unknown } }).payload.text;
+      if (typeof text !== "string") continue;
+      const previous = output.get(event.taskId) ?? "";
+      output.set(event.taskId, previous.length >= 32_768 ? previous : `${previous}${text}`.slice(0, 32_768));
+    }
+  })();
+  return { output, async close() { subscription.close(); await pump; } };
+}
+
+async function taskFinished(client: ProtocolClient, id: string, label = "native task", output?: Map<string, string>) {
   const deadline = Date.now() + timeout;
   for (;;) {
     const task = await client.getTask(id);
     if (task.status === "finished") {
       if (task.outcome !== "succeeded") {
         const detail = task.errorMessage ? `: ${task.errorMessage}` : "";
-        throw new Error(`${label} finished with outcome ${task.outcome ?? "unknown"}${task.errorCode ? ` (${task.errorCode})` : ""}${detail}`);
+        const commandOutput = output?.get(id);
+        throw new Error(`${label} finished with outcome ${task.outcome ?? "unknown"}${task.errorCode ? ` (${task.errorCode})` : ""}${detail}${commandOutput ? `; output=${commandOutput}` : ""}`);
       }
       return task;
     }
@@ -260,10 +275,13 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
       await config(workspace, framework, selected.profile.buildProfileId);
       for (let attempt = 0; ; attempt++) {
         selected = await selectGccEventually(client);
+        const outputSubscription = await client.subscribeEvents(0);
+        const taskOutput = collectTaskOutput(outputSubscription);
         try {
           const build = await client.startCMakeBuild({ idempotencyKey: randomBytes(16).toString("hex"), workspaceGeneration: selected.snapshot.workspaceGeneration, projectId, buildProfileId: selected.profile.buildProfileId, targetIds: [], jobs: 2, timeoutMs: timeout });
-          await taskFinished(client, build.taskId, `${scenario} build`); break;
+          await taskFinished(client, build.taskId, `${scenario} build`, taskOutput.output); break;
         } catch (error) { if (!(error instanceof ProtocolError) || error.code !== "WORKSPACE_CHANGED" || attempt >= 1) throw error; }
+        finally { await taskOutput.close(); }
       }
       selected = await selectGccEventually(client);
       const discovery = await client.discoverTests({ idempotencyKey: randomBytes(16).toString("hex"), projectId, profileId: selected.profile.buildProfileId });
