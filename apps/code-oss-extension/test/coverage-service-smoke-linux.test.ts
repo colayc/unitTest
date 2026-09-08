@@ -314,8 +314,6 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
         // Workspace inspection legitimately includes source URIs; only the
         // coverage/run/report/artifact exchange is subject to this leak gate.
         wire = []; wireSize = 0; wireOverflow = false;
-        const coverageOutputSubscription = await client.subscribeEvents(0);
-        const coverageTaskOutput = collectTaskOutput(coverageOutputSubscription);
         try {
           const initial = await client.startCoverage({ idempotencyKey: randomBytes(16).toString("hex"), workspaceGeneration: selected.snapshot.workspaceGeneration, projectId, coverageProfileId, catalogRevision: catalog.revision, selection: { mode: TestSelectionModeV14.All }, repeatCount: 1, timeoutMs: fault === "timeout" ? 120_000 : timeout });
           if (fault === "cancel") {
@@ -344,11 +342,10 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
             assert.equal(run.reportId, undefined);
           } else {
             const expectedCoverageOutcome = fault === "crash" ? "partial" : "available";
-            const output = coverageTaskOutput.output.get(initial.taskId) ?? "";
             assert.equal(
               run.outcome,
               expectedCoverageOutcome,
-              `coverage ${scenario} outcome ${run.outcome ?? "<none>"} reason ${run.reason ?? "<none>"}${output ? ` output ${output}` : ""}`,
+              `coverage ${scenario} outcome ${run.outcome ?? "<none>"} reason ${run.reason ?? "<none>"}`,
             );
           assert.equal(run.reason, undefined);
           assert.equal(testRun.outcome, fault === "crash" ? "errored" : framework === "cpputest" ? "failed" : "passed");
@@ -368,7 +365,7 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
           throw new Error(`coverage scenario ${scenario} repeat ${repeat}: ${detail}`);
-        } finally { await coverageTaskOutput.close().catch(() => undefined); }
+        }
       }
       await manager.stop(); manager = undefined;
     }
