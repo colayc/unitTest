@@ -239,10 +239,19 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
       const fault = scenario === "cpputest" || scenario === "unity" ? undefined : scenario;
       const workspace = join(scratch, scenario);
       await cp(join(root, "apps/code-oss-extension/test/fixtures", framework === "unity" ? "coverage-unity" : "coverage"), workspace, { recursive: true });
+      // Keep every CMake File API input inside the trusted temporary workspace.
+      // The framework bundle and helper are verified before this copy; the
+      // Service must not widen its read boundary to arbitrary repository paths.
+      const localCppUTestRoot = join(workspace, ".framework/cpputest");
+      const localUnityRoot = join(workspace, ".framework/unity");
+      const localCMakeHelper = join(workspace, ".framework/UnitTestIDE.cmake");
+      await cp(inputs.UNIT_TEST_IDE_TEST_CPPUTEST_ROOT!, localCppUTestRoot, { recursive: true });
+      await cp(inputs.UNIT_TEST_IDE_TEST_UNITY_ROOT!, localUnityRoot, { recursive: true });
+      await cp(inputs.UNIT_TEST_IDE_TEST_CMAKE_HELPER!, localCMakeHelper);
       await writeFile(join(workspace, "linux-inputs.cmake"), [
-        `set(UTIDE_TEST_CPPUTEST_ROOT ${cmakePath(inputs.UNIT_TEST_IDE_TEST_CPPUTEST_ROOT!)})`,
-        `set(UTIDE_TEST_UNITY_ROOT ${cmakePath(inputs.UNIT_TEST_IDE_TEST_UNITY_ROOT!)})`,
-        `set(UTIDE_TEST_CMAKE_HELPER ${cmakePath(inputs.UNIT_TEST_IDE_TEST_CMAKE_HELPER!)})`,
+        `set(UTIDE_TEST_CPPUTEST_ROOT ${cmakePath(localCppUTestRoot)})`,
+        `set(UTIDE_TEST_UNITY_ROOT ${cmakePath(localUnityRoot)})`,
+        `set(UTIDE_TEST_CMAKE_HELPER ${cmakePath(localCMakeHelper)})`,
         `set(UTIDE_UNITY_RUNNER_GENERATOR ${cmakePath(inputs.UNIT_TEST_IDE_TEST_UNITY_RUNNER_GENERATOR!)})`, ""
       ].join("\n"));
       const marker = fault ? await injectFixtureFault(workspace, fault) : undefined;
