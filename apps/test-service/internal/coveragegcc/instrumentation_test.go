@@ -10,9 +10,12 @@ import (
 )
 
 const goldenGCCInstrumentation = "cmake_minimum_required(VERSION 3.25)\n" +
-	"if(NOT CMAKE_C_COMPILER_ID STREQUAL \"GNU\" OR NOT CMAKE_CXX_COMPILER_ID STREQUAL \"GNU\")\n" +
-	"  message(FATAL_ERROR \"unit-test-ide coverage requires GCC and G++\")\n" +
-	"endif()\n" +
+	"function(_unit_test_ide_verify_gcc)\n" +
+	"  if(NOT CMAKE_C_COMPILER_ID STREQUAL \"GNU\" OR NOT CMAKE_CXX_COMPILER_ID STREQUAL \"GNU\")\n" +
+	"    message(FATAL_ERROR \"unit-test-ide coverage requires GCC and G++\")\n" +
+	"  endif()\n" +
+	"endfunction()\n" +
+	"cmake_language(DEFER CALL _unit_test_ide_verify_gcc)\n" +
 	"add_compile_options(\"$<$<COMPILE_LANGUAGE:C,CXX>:--coverage>\" \"$<$<COMPILE_LANGUAGE:C,CXX>:-O0>\" \"$<$<COMPILE_LANGUAGE:C,CXX>:-g>\")\n" +
 	"add_link_options(\"--coverage\")\n"
 
