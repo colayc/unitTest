@@ -179,6 +179,50 @@ func TestPrepareEvidenceRemovesOnlySealedStaleDataAndManifestCloseRemovesOnlyLis
 	}
 }
 
+func TestPrepareBuildEvidenceAdmitsCMakeArtifactsButRejectsUnknownRootFiles(t *testing.T) {
+	root := evidenceRoot(t)
+	writeEvidence(t, root, "a.gcno", "n")
+	writeEvidence(t, root, "a.gcda", "stale")
+	for _, name := range []string{"CMakeCache.txt", "build.ninja", "rules.ninja", ".unit-test-ide.lock", "coverage-custom-command.stamp", "libcoverage_math.a"} {
+		writeEvidence(t, root, name, "generated")
+	}
+	if err := os.WriteFile(filepath.Join(root, "coverage-tests"), []byte("binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "CMakeFiles"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeEvidence(t, filepath.Join(root, "CMakeFiles"), "rules.make", "generated")
+	if err := os.MkdirAll(filepath.Join(root, ".cmake", "api", "v1", "reply"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeEvidence(t, filepath.Join(root, ".cmake", "api", "v1", "reply"), "index.json", "generated")
+	if err := os.MkdirAll(filepath.Join(root, "cpputest", "src", "CppUTest"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeEvidence(t, filepath.Join(root, "cpputest", "src", "CppUTest"), "framework.gcno", "note")
+	prepared, err := PrepareBuildEvidence(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.Close()
+	writeEvidence(t, root, "a.gcda", "current")
+	manifest, err := prepared.Seal(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manifest.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	unknown := evidenceRoot(t)
+	writeEvidence(t, unknown, "a.gcno", "n")
+	writeEvidence(t, unknown, "foreign.txt", "unexpected")
+	if _, err := PrepareBuildEvidence(unknown); err == nil {
+		t.Fatal("unknown root artifact succeeded")
+	}
+}
+
 func TestEvidenceRejectsDepthCountAndByteBounds(t *testing.T) {
 	t.Run("depth", func(t *testing.T) {
 		root := evidenceRoot(t)

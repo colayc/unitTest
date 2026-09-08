@@ -277,7 +277,7 @@ func (a *gccPreparedCoverageAdapter) Instrumentation() coverageplatform.Instrume
 func (a *gccPreparedCoverageAdapter) Allocator() testrun.ProfileAllocator { if a == nil { return nil }; return a.allocator }
 func (a *gccPreparedCoverageAdapter) PrepareTests(ctx context.Context, prepared coverageexec.PreparedBuild) error {
 	if a == nil || ctx == nil || prepared == nil || coverageplatform.VerifyDirectory(prepared.CoverageObjectDirectory()) != nil { return task.ErrInvalidArgument }
-	evidence, err := coveragegcc.PrepareEvidence(prepared.CoverageObjectDirectory().Path())
+	evidence, err := coveragegcc.PrepareBuildEvidence(prepared.CoverageObjectDirectory().Path())
 	if err != nil { return err }
 	a.mu.Lock(); old := a.evidence; a.evidence = evidence; a.mu.Unlock()
 	if old != nil { return old.Close() }; return nil

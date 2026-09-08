@@ -32,7 +32,7 @@ export function createGccFaultOverlay(source: string, fault: "missing-data" | "m
   } else {
     replaceOnce("import (", 'import (\n "os"\n "strings"');
     replaceOnce("type gccPreparedCoverageAdapter struct {", "type gccPreparedCoverageAdapter struct {\n testOnlyObjectRoot string");
-    replaceOnce("evidence, err := coveragegcc.PrepareEvidence(prepared.CoverageObjectDirectory().Path())", "a.testOnlyObjectRoot = prepared.CoverageObjectDirectory().Path()\n evidence, err := coveragegcc.PrepareEvidence(prepared.CoverageObjectDirectory().Path())");
+    replaceOnce("evidence, err := coveragegcc.PrepareBuildEvidence(prepared.CoverageObjectDirectory().Path())", "a.testOnlyObjectRoot = prepared.CoverageObjectDirectory().Path()\n evidence, err := coveragegcc.PrepareBuildEvidence(prepared.CoverageObjectDirectory().Path())");
     replaceOnce("manifest, err := evidence.Seal(context.Background(), outcomes)", `// test-only: remove only known gcda peers before the real sealing check.
  for _, note := range evidence.Notes {
    path := filepath.Join(a.testOnlyObjectRoot, strings.TrimSuffix(note.RelativePath, ".gcno") + ".gcda")

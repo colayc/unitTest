@@ -10,7 +10,8 @@ import (
 func sealEvidence(context.Context, string, []testrun.InvocationOutcome) (Manifest, error) {
 	return Manifest{}, ErrUnsupportedPlatform
 }
-func prepareEvidence(string) (*PreparedEvidence, error) { return nil, ErrUnsupportedPlatform }
+func prepareEvidence(string) (*PreparedEvidence, error)      { return nil, ErrUnsupportedPlatform }
+func prepareBuildEvidence(string) (*PreparedEvidence, error) { return nil, ErrUnsupportedPlatform }
 func sealPreparedEvidence(context.Context, *PreparedEvidence, []testrun.InvocationOutcome) (Manifest, error) {
 	return Manifest{}, ErrUnsupportedPlatform
 }

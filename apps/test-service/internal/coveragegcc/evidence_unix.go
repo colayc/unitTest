@@ -63,6 +63,14 @@ func sealEvidence(ctx context.Context, root string, outcomes []testrun.Invocatio
 }
 
 func prepareEvidence(root string) (*PreparedEvidence, error) {
+	return prepareEvidenceWithMode(root, false)
+}
+
+func prepareBuildEvidence(root string) (*PreparedEvidence, error) {
+	return prepareEvidenceWithMode(root, true)
+}
+
+func prepareEvidenceWithMode(root string, allowBuildArtifacts bool) (*PreparedEvidence, error) {
 	state, err := openEvidenceState(context.Background(), root)
 	if err != nil {
 		return nil, err
@@ -71,7 +79,7 @@ func prepareEvidence(root string) (*PreparedEvidence, error) {
 		_ = state.close()
 		return nil, errors.Join(ErrInvalidEvidence, cause)
 	}
-	notes, data, err := scanEvidence(context.Background(), state.fd, "", 0)
+	notes, data, err := scanEvidenceMode(context.Background(), state.fd, "", 0, allowBuildArtifacts)
 	if err != nil {
 		return fail(err)
 	}
@@ -111,7 +119,7 @@ func prepareEvidence(root string) (*PreparedEvidence, error) {
 		if err := p.state.prepare(observed); err != nil {
 			return Manifest{}, ErrInvalidEvidence
 		}
-		nowNotes, nowData, err := scanEvidence(ctx, state.fd, "", 0)
+		nowNotes, nowData, err := scanEvidenceMode(ctx, state.fd, "", 0, allowBuildArtifacts)
 		if err != nil {
 			return Manifest{}, ErrInvalidEvidence
 		}
@@ -212,6 +220,10 @@ func openEvidenceState(ctx context.Context, root string) (*unixEvidenceState, er
 }
 
 func scanEvidence(ctx context.Context, fd int, prefix string, depth int) ([]Entry, []Entry, error) {
+	return scanEvidenceMode(ctx, fd, prefix, depth, false)
+}
+
+func scanEvidenceMode(ctx context.Context, fd int, prefix string, depth int, allowBuildArtifacts bool) ([]Entry, []Entry, error) {
 	if ctx == nil || ctx.Err() != nil || depth > maxEvidenceDepth {
 		return nil, nil, ErrInvalidEvidence
 	}
@@ -247,7 +259,16 @@ func scanEvidence(ctx context.Context, fd int, prefix string, depth int) ([]Entr
 		}
 		switch st.Mode & unix.S_IFMT {
 		case unix.S_IFREG:
-			if st.Nlink != 1 || (!strings.HasSuffix(name, ".gcno") && !strings.HasSuffix(name, ".gcda")) {
+			if st.Nlink != 1 {
+				return nil, nil, ErrInvalidEvidence
+			}
+			if allowBuildArtifacts && ignoredBuildEvidence(prefix) && (strings.HasSuffix(name, ".gcno") || strings.HasSuffix(name, ".gcda")) {
+				continue
+			}
+			if !strings.HasSuffix(name, ".gcno") && !strings.HasSuffix(name, ".gcda") {
+				if allowBuildArtifacts && allowedBuildArtifact(prefix, name, st.Mode) {
+					continue
+				}
 				return nil, nil, ErrInvalidEvidence
 			}
 			entry, err := digestEvidenceFile(ctx, fd, name, relative, st.Size)
@@ -264,7 +285,7 @@ func scanEvidence(ctx context.Context, fd int, prefix string, depth int) ([]Entr
 			if err != nil {
 				return nil, nil, err
 			}
-			childNotes, childData, err := scanEvidence(ctx, child, relative, depth+1)
+			childNotes, childData, err := scanEvidenceMode(ctx, child, relative, depth+1, allowBuildArtifacts)
 			_ = unix.Close(child)
 			if err != nil {
 				return nil, nil, err
@@ -281,6 +302,33 @@ func scanEvidence(ctx context.Context, fd int, prefix string, depth int) ([]Entr
 	sort.Slice(notes, func(i, j int) bool { return notes[i].RelativePath < notes[j].RelativePath })
 	sort.Slice(data, func(i, j int) bool { return data[i].RelativePath < data[j].RelativePath })
 	return notes, data, nil
+}
+
+func allowedBuildArtifact(prefix, name string, mode uint32) bool {
+	if prefix == "" {
+		switch name {
+		case "CMakeCache.txt", "build.ninja", "rules.ninja", ".ninja_deps", ".ninja_log", ".unit-test-ide.lock", "cmake_install.cmake", "CTestTestfile.cmake", "Makefile", "install_manifest.txt", "coverage-custom-command.stamp":
+			return true
+		}
+		// Static libraries are emitted beside the executable by the fixture's
+		// Ninja build and are not executable on Unix.
+		if strings.HasSuffix(name, ".a") {
+			return true
+		}
+		// CMake target binaries at the build root are executable. Coverage
+		// files are handled by the caller before reaching this branch.
+		return mode&0111 != 0
+	}
+	first := prefix
+	if index := strings.IndexByte(first, '/'); index >= 0 {
+		first = first[:index]
+	}
+	switch first {
+	case ".cmake", "CMakeFiles", "Testing", "cpputest":
+		return true
+	default:
+		return false
+	}
 }
 
 func digestEvidenceFile(ctx context.Context, parent int, name, relative string, size int64) (Entry, error) {
@@ -342,6 +390,15 @@ func validateEvidenceData(notes, data []Entry, outcomes []testrun.InvocationOutc
 	}
 	return nil
 }
+
+func ignoredBuildEvidence(prefix string) bool {
+	first := prefix
+	if index := strings.IndexByte(first, '/'); index >= 0 {
+		first = first[:index]
+	}
+	return first == "cpputest"
+}
+
 func hasEvidenceEntry(entries []Entry, want string) bool {
 	for _, e := range entries {
 		if e.RelativePath == want {
