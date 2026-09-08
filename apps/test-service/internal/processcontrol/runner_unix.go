@@ -444,8 +444,14 @@ func (process *unixProcess) Start(ctx context.Context) error {
 		}
 		process.closeControl()
 		process.finishAfterHost(Result{Err: errProcessStartFailed})
-		if status.Message != "" && os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
-			return fmt.Errorf("%w: %s", errProcessStartFailed, status.Message)
+		if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+			if status.Message != "" {
+				return fmt.Errorf("%w: %s", errProcessStartFailed, status.Message)
+			}
+			if err != nil {
+				return fmt.Errorf("%w: process-host status unavailable", errProcessStartFailed)
+			}
+			return fmt.Errorf("%w: process-host rejected start", errProcessStartFailed)
 		}
 		return errProcessStartFailed
 	}
@@ -568,6 +574,9 @@ func (process *unixProcess) watchExit() {
 		status, err := process.readStatus(context.Background())
 		if err != nil {
 			result.Err = errProcessHostFailed
+			if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+				result.Err = fmt.Errorf("%w: process-host status unavailable", errProcessHostFailed)
+			}
 			break
 		}
 		if status.Kind == "output" {
