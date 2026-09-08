@@ -100,10 +100,8 @@ func prepareEvidence(root string) (*PreparedEvidence, error) {
 		if !sameEvidenceEntries(sealedNotes, observed) || state.verifyEntries(noteSnapshots) != nil {
 			return ErrInvalidEvidence
 		}
-		actualNotes, _, err := scanEvidence(context.Background(), state.fd, "", 0)
-		if err != nil || !sameEvidenceEntries(sealedNotes, actualNotes) {
-			return ErrInvalidEvidence
-		}
+		// Data entries are intentionally created after PrepareEvidence returns;
+		// the final seal scan below validates their names, bytes, and identities.
 		return nil
 	}
 	p.state.seal = func(ctx context.Context, observed []Entry, outcomes []testrun.InvocationOutcome) (Manifest, error) {

@@ -106,12 +106,12 @@ func TestManifestRejectsPublicMutationAndFileReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer manifest.Close()
-	if err := os.Remove(filepath.Join(root, "a.gcda")); err != nil {
-		t.Fatal(err)
-	}
 	// Keep the replacement inode allocated before removing the original so the
 	// ABA check is deterministic even when the filesystem would reuse inodes.
 	writeEvidence(t, root, "replacement.gcda", "d")
+	if err := os.Remove(filepath.Join(root, "a.gcda")); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Rename(filepath.Join(root, "replacement.gcda"), filepath.Join(root, "a.gcda")); err != nil {
 		t.Fatal(err)
 	}
