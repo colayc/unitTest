@@ -156,23 +156,29 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
   const secret = `linux-gcc-smoke-${randomBytes(16).toString("hex")}`;
   const sensitive = [scratch, lockedBundle, secret, root];
   let manager: ServiceManager | undefined;
+  let stage = "initialization";
   try {
     const go = process.env.UNIT_TEST_IDE_GO_EXECUTABLE || "go";
     const goEnv = { ...process.env, GOENV: "off", GOTOOLCHAIN: "local" };
     const service = join(scratch, "unit-test-service");
     const generator = join(scratch, "unity-runner-generator");
+    stage = "build-service";
     await execFile(go, ["build", "-trimpath", "-o", service, "./apps/test-service/cmd/unit-test-service"], { cwd: root, env: goEnv, timeout });
+    stage = "build-generator";
     await execFile(go, ["build", "-trimpath", "-o", generator, "./apps/test-service/cmd/unity-runner-generator"], { cwd: root, env: goEnv, timeout });
+    stage = "prepare-framework-inputs";
     const { prepareLinuxFrameworkInputs } = await import(pathToFileURL(join(root, "tools/service-probe/dist/linux-framework-inputs.js")).href);
     const frameworkBoundary = await prepareLinuxFrameworkInputs({
       manifest: JSON.parse(await readFile(join(root, "tools/framework-bundle/manifest.json"), "utf8")), cacheRoot: join(root, ".superpowers/cache/framework-bundle"), sourceRoot: join(root, ".superpowers/runtime/framework-bundle/linux-x64"), helperPath: join(root, "sdk/cmake/UnitTestIDE.cmake"), generatorPath: generator, repositoryRoot: root
     }) as { identityDigest: string; environment: Record<string, string> };
     const inputs = frameworkBoundary.environment;
+    stage = "copy-coverage-bundle";
     await mkdir(join(scratch, "bundles"));
     await cp(lockedBundle, join(scratch, "bundles/coverage"), { recursive: true, force: false, errorOnExist: true });
     const bundleDigest = digest(await readFile(join(scratch, "bundles/coverage/manifest.resolved.json")));
     const faultServices = new Map<string, string>();
     for (const fault of ["missing-data", "malformed-pinned-json"] as const) {
+      stage = `build-fault-service:${fault}`;
       const original = join(root, "apps/test-service/internal/runtime/coverage_execution.go");
       const replacement = join(scratch, `${fault}.go`);
       const overlay = join(scratch, `${fault}.json`);
@@ -187,6 +193,7 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
     let unityBytes: Uint8Array | undefined;
     let toolchainDigest = "";
     for (const scenario of ["cpputest", "unity", "crash", "timeout", "cancel", "missing-data", "malformed-pinned-json"] as const) {
+      stage = `scenario:${scenario}:setup`;
       const framework: Framework = scenario === "cpputest" ? "cpputest" : "unity";
       const fault = scenario === "cpputest" || scenario === "unity" ? undefined : scenario;
       const workspace = join(scratch, scenario);
@@ -223,22 +230,27 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
           return ProtocolClient.attach(socket);
         }
       } });
+      stage = `scenario:${scenario}:start-service`;
       const session = await manager.start();
       sensitive.push(session.endpoint, session.tokenFile, session.sessionDirectory, await readFile(session.tokenFile, "utf8"));
       assert.ok((await lstat(session.endpoint)).isSocket(), "Service must expose a real Unix socket");
       const client = session.client;
+      stage = `scenario:${scenario}:capabilities`;
       const caps = await client.getCapabilities();
       assert.ok("coverageRun" in caps && caps.coverageRun && "coverageReport" in caps && caps.coverageReport);
+      stage = `scenario:${scenario}:inspect-workspace`;
       let selected = selectGcc(await client.inspectWorkspace());
       await config(workspace, framework, selected.profile.buildProfileId);
       for (let attempt = 0; ; attempt++) {
         selected = selectGcc(await client.inspectWorkspace());
         try {
+          stage = `scenario:${scenario}:build`;
           const build = await client.startCMakeBuild({ idempotencyKey: randomBytes(16).toString("hex"), workspaceGeneration: selected.snapshot.workspaceGeneration, projectId, buildProfileId: selected.profile.buildProfileId, targetIds: [], jobs: 2, timeoutMs: timeout });
           await taskFinished(client, build.taskId); break;
         } catch (error) { if (!(error instanceof ProtocolError) || error.code !== "WORKSPACE_CHANGED" || attempt >= 1) throw error; }
       }
       selected = selectGcc(await client.inspectWorkspace());
+      stage = `scenario:${scenario}:discovery`;
       const discovery = await client.discoverTests({ idempotencyKey: randomBytes(16).toString("hex"), projectId, profileId: selected.profile.buildProfileId });
       await taskFinished(client, discovery.taskId);
       const catalog = await client.getTestCatalog({ projectId, profileId: selected.profile.buildProfileId, limit: 100 });
@@ -252,6 +264,7 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
         // Workspace inspection legitimately includes source URIs; only the
         // coverage/run/report/artifact exchange is subject to this leak gate.
         wire = []; wireSize = 0; wireOverflow = false;
+        stage = `scenario:${scenario}:coverage`;
         const initial = await client.startCoverage({ idempotencyKey: randomBytes(16).toString("hex"), workspaceGeneration: selected.snapshot.workspaceGeneration, projectId, coverageProfileId, catalogRevision: catalog.revision, selection: { mode: TestSelectionModeV14.All }, repeatCount: 1, timeoutMs: fault === "timeout" ? 120_000 : timeout });
         if (fault === "cancel") {
           assert.ok(marker);
@@ -301,6 +314,6 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
     const bytes = Buffer.from(`${JSON.stringify(evidence)}\n`);
     await rm(scratch, { recursive: true, force: true });
     await publishEvidenceAtomically(evidencePath, bytes);
-  } catch (error) { throw redactServiceError(error, sensitive); }
+  } catch (error) { console.error(`coverage smoke failed at ${stage}`); throw redactServiceError(error, sensitive); }
   finally { try { await manager?.stop(); } finally { await rm(scratch, { recursive: true, force: true }); } }
 });
