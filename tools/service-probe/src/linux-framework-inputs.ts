@@ -11,13 +11,13 @@ const EXPECTED: Readonly<Record<LinuxFrameworkID, Readonly<{ version: string; li
     version: "4.0",
     license: "BSD-3-Clause",
     url: "https://github.com/cpputest/cpputest/releases/download/v4.0/cpputest-4.0.tar.gz",
-    filename: "cpputest-4.0.tar.gz", sha256: "21c692105db15299b5529af81a11a7ad80397f92c122bd7bf1e4a4b0e85654f7", sourceDirectory: "cpputest-4.0", treeSha256: "3b83f01045ca74b9a0996913723fb7e24824452dee0e5fd050f847bb15e404a1"
+    filename: "cpputest-4.0.tar.gz", sha256: "21c692105db15299b5529af81a11a7ad80397f92c122bd7bf1e4a4b0e85654f7", sourceDirectory: "cpputest-4.0", treeSha256: "c564fb5e4e32836dc66f46efb86edb6f1f2fa6afa255a57052031aa00fc56f04"
   },
   unity: {
     version: "2.6.1",
     license: "MIT",
     url: "https://github.com/ThrowTheSwitch/Unity/archive/refs/tags/v2.6.1.tar.gz",
-    filename: "Unity-2.6.1.tar.gz", sha256: "b41a66d45a6b99758fb3202ace6178177014d52fc524bf1f72687d93e9867292", sourceDirectory: "Unity-2.6.1", treeSha256: "ef6b833c394d7af7c2b733f87d38eb5bae4442bc1c237778bbaa8c0086ba00db"
+    filename: "Unity-2.6.1.tar.gz", sha256: "b41a66d45a6b99758fb3202ace6178177014d52fc524bf1f72687d93e9867292", sourceDirectory: "Unity-2.6.1", treeSha256: "abfb7b2b7aec36739a7b138490d2e9dd178cc4f00e806ed372cbb8cfe98f73ae"
   }
 };
 const EXPECTED_FIXTURE_TOOLS = {
@@ -208,8 +208,9 @@ function childDirectory(root: string, child: string, label: string): string {
 
 async function regularFileWithin(root: string, value: string, label: string): Promise<{ path: string; digest: string }> {
   if (typeof value !== "string" || value.includes("\0") || !isAbsolute(value)) throw new Error(`Linux framework ${label} must be an absolute path`);
+  const canonicalRoot = await realpath(root);
   const path = await realpath(resolve(value));
-  if (relative(root, path).startsWith("..") || relative(root, path) === "") throw new Error(`Linux framework ${label} escapes repository identity`);
+  if (relative(canonicalRoot, path).startsWith("..") || relative(canonicalRoot, path) === "") throw new Error(`Linux framework ${label} escapes repository identity`);
   const metadata = await lstat(path);
   if (!metadata.isFile() || metadata.isSymbolicLink()) throw new Error(`Linux framework ${label} must be a regular file`);
   return { path, digest: await digestFile(path) };

@@ -13,8 +13,8 @@ const DIGEST = /^[0-9a-f]{64}$/u;
 const toolDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(toolDirectory, "..", "..");
 const approved = {
-  cpputest: { version: "4.0", license: "BSD-3-Clause", url: "https://github.com/cpputest/cpputest/releases/download/v4.0/cpputest-4.0.tar.gz", filename: "cpputest-4.0.tar.gz", sha256: "21c692105db15299b5529af81a11a7ad80397f92c122bd7bf1e4a4b0e85654f7", sourceDirectory: "cpputest-4.0", treeSha256: "3b83f01045ca74b9a0996913723fb7e24824452dee0e5fd050f847bb15e404a1" },
-  unity: { version: "2.6.1", license: "MIT", url: "https://github.com/ThrowTheSwitch/Unity/archive/refs/tags/v2.6.1.tar.gz", filename: "Unity-2.6.1.tar.gz", sha256: "b41a66d45a6b99758fb3202ace6178177014d52fc524bf1f72687d93e9867292", sourceDirectory: "Unity-2.6.1", treeSha256: "ef6b833c394d7af7c2b733f87d38eb5bae4442bc1c237778bbaa8c0086ba00db" }
+  cpputest: { version: "4.0", license: "BSD-3-Clause", url: "https://github.com/cpputest/cpputest/releases/download/v4.0/cpputest-4.0.tar.gz", filename: "cpputest-4.0.tar.gz", sha256: "21c692105db15299b5529af81a11a7ad80397f92c122bd7bf1e4a4b0e85654f7", sourceDirectory: "cpputest-4.0", treeSha256: "c564fb5e4e32836dc66f46efb86edb6f1f2fa6afa255a57052031aa00fc56f04" },
+  unity: { version: "2.6.1", license: "MIT", url: "https://github.com/ThrowTheSwitch/Unity/archive/refs/tags/v2.6.1.tar.gz", filename: "Unity-2.6.1.tar.gz", sha256: "b41a66d45a6b99758fb3202ace6178177014d52fc524bf1f72687d93e9867292", sourceDirectory: "Unity-2.6.1", treeSha256: "abfb7b2b7aec36739a7b138490d2e9dd178cc4f00e806ed372cbb8cfe98f73ae" }
 };
 const approvedFixtureTools = {
   cmakeHelper: { path: "sdk/cmake/UnitTestIDE.cmake", sha256: "2297b37584d134b901f0da0dea5d60d67853a496dbf18874c220643ffd2cd2da" },

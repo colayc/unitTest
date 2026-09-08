@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -32,7 +32,7 @@ function manifest(): LinuxFrameworkInputManifest {
         },
         license: "BSD-3-Clause",
         sourceDirectory: "cpputest-4.0",
-        treeSha256: "3b83f01045ca74b9a0996913723fb7e24824452dee0e5fd050f847bb15e404a1"
+        treeSha256: "c564fb5e4e32836dc66f46efb86edb6f1f2fa6afa255a57052031aa00fc56f04"
       },
       {
         id: "unity",
@@ -44,7 +44,7 @@ function manifest(): LinuxFrameworkInputManifest {
         },
         license: "MIT",
         sourceDirectory: "Unity-2.6.1",
-        treeSha256: "ef6b833c394d7af7c2b733f87d38eb5bae4442bc1c237778bbaa8c0086ba00db"
+        treeSha256: "abfb7b2b7aec36739a7b138490d2e9dd178cc4f00e806ed372cbb8cfe98f73ae"
       }
     ]
   };
@@ -82,6 +82,26 @@ test("Linux framework boundary accepts only expanded trees bound to the resolved
     await assert.rejects(verifyResolvedFrameworkTrees(root, manifest(), expected), /tree digest mismatch/u);
   } finally {
     await import("node:fs/promises").then(({ rm }) => rm(root, { recursive: true, force: true }));
+  }
+});
+
+test("Linux framework tree boundary accepts a canonical tree reached through a filesystem alias", async () => {
+  const root = await mkdtemp(join(tmpdir(), "unit-test-linux-framework-alias-"));
+  const actual = join(root, "actual");
+  const alias = join(root, "alias");
+  try {
+    await mkdir(join(actual, "cpputest-4.0"), { recursive: true });
+    await mkdir(join(actual, "Unity-2.6.1", "src"), { recursive: true });
+    await writeFile(join(actual, "cpputest-4.0", "CMakeLists.txt"), "project(CppUTest)\n");
+    await writeFile(join(actual, "Unity-2.6.1", "src", "unity.c"), "void UnityBegin(void) {}\n");
+    await symlink(actual, alias, process.platform === "win32" ? "junction" : "dir");
+
+    assert.deepEqual(
+      await verifyResolvedFrameworkTrees(alias, manifest(), undefined),
+      await verifyResolvedFrameworkTrees(actual, manifest(), undefined)
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
 

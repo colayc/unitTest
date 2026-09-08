@@ -24,7 +24,7 @@
       },
       "license": "BSD-3-Clause",
       "sourceDirectory": "cpputest-4.0",
-      "treeSha256": "3b83f01045ca74b9a0996913723fb7e24824452dee0e5fd050f847bb15e404a1"
+      "treeSha256": "c564fb5e4e32836dc66f46efb86edb6f1f2fa6afa255a57052031aa00fc56f04"
     },
     {
       "id": "unity",
@@ -36,7 +36,7 @@
       },
       "license": "MIT",
       "sourceDirectory": "Unity-2.6.1",
-      "treeSha256": "ef6b833c394d7af7c2b733f87d38eb5bae4442bc1c237778bbaa8c0086ba00db"
+      "treeSha256": "abfb7b2b7aec36739a7b138490d2e9dd178cc4f00e806ed372cbb8cfe98f73ae"
     }
   ]
 }
