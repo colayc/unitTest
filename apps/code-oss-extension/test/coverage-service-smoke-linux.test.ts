@@ -314,38 +314,42 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
         // Workspace inspection legitimately includes source URIs; only the
         // coverage/run/report/artifact exchange is subject to this leak gate.
         wire = []; wireSize = 0; wireOverflow = false;
+        const coverageOutputSubscription = await client.subscribeEvents(0);
+        const coverageTaskOutput = collectTaskOutput(coverageOutputSubscription);
         const initial = await client.startCoverage({ idempotencyKey: randomBytes(16).toString("hex"), workspaceGeneration: selected.snapshot.workspaceGeneration, projectId, coverageProfileId, catalogRevision: catalog.revision, selection: { mode: TestSelectionModeV14.All }, repeatCount: 1, timeoutMs: fault === "timeout" ? 120_000 : timeout });
-        if (fault === "cancel") {
-          assert.ok(marker);
-          const deadline = Date.now() + timeout;
-          while (!(await lstat(marker).catch(() => undefined))?.isFile()) {
-            assert.notEqual((await client.getCoverageRun(initial.coverageRunId)).status, "finished", "cancel fixture must enter test execution");
-            if (Date.now() >= deadline) throw new Error("cancel fixture never entered test execution");
-            await delay(50);
+        try {
+          if (fault === "cancel") {
+            assert.ok(marker);
+            const deadline = Date.now() + timeout;
+            while (!(await lstat(marker).catch(() => undefined))?.isFile()) {
+              assert.notEqual((await client.getCoverageRun(initial.coverageRunId)).status, "finished", "cancel fixture must enter test execution");
+              if (Date.now() >= deadline) throw new Error("cancel fixture never entered test execution");
+              await delay(50);
+            }
+            await client.cancelTask(initial.taskId);
           }
-          await client.cancelTask(initial.taskId);
-        }
-        const run = await coverageFinished(client, initial.coverageRunId);
-        const testRun = await client.getTestRun(run.testRunId);
-        assert.equal(testRun.status, "completed");
-        if (fault === "cancel" || fault === "timeout") {
-          assert.ok(marker && (await lstat(marker)).isFile(), "timeout/cancel must reach a real native test invocation");
-          assert.equal(run.outcome, "cancelled");
-          assert.equal(run.reason, fault === "cancel" ? "user_cancelled" : "task_timed_out");
-          assert.equal(testRun.outcome, fault === "cancel" ? "cancelled" : "timed_out");
-          assert.equal(run.reportId, undefined);
-        } else if (fault === "missing-data" || fault === "malformed-pinned-json") {
-          assert.equal(run.outcome, "unavailable");
-          assert.equal(run.reason, fault === "missing-data" ? "profile_collection_failed" : "normalization_failed");
-          assert.equal(testRun.outcome, "passed");
-          assert.equal(run.reportId, undefined);
-        } else {
-          const expectedCoverageOutcome = fault === "crash" ? "partial" : "available";
-          assert.equal(
-            run.outcome,
-            expectedCoverageOutcome,
-            `coverage ${scenario} outcome ${run.outcome ?? "<none>"} reason ${run.reason ?? "<none>"}`,
-          );
+          const run = await coverageFinished(client, initial.coverageRunId);
+          const testRun = await client.getTestRun(run.testRunId);
+          assert.equal(testRun.status, "completed");
+          if (fault === "cancel" || fault === "timeout") {
+            assert.ok(marker && (await lstat(marker)).isFile(), "timeout/cancel must reach a real native test invocation");
+            assert.equal(run.outcome, "cancelled");
+            assert.equal(run.reason, fault === "cancel" ? "user_cancelled" : "task_timed_out");
+            assert.equal(testRun.outcome, fault === "cancel" ? "cancelled" : "timed_out");
+            assert.equal(run.reportId, undefined);
+          } else if (fault === "missing-data" || fault === "malformed-pinned-json") {
+            assert.equal(run.outcome, "unavailable");
+            assert.equal(run.reason, fault === "missing-data" ? "profile_collection_failed" : "normalization_failed");
+            assert.equal(testRun.outcome, "passed");
+            assert.equal(run.reportId, undefined);
+          } else {
+            const expectedCoverageOutcome = fault === "crash" ? "partial" : "available";
+            const output = coverageTaskOutput.output.get(initial.taskId) ?? "";
+            assert.equal(
+              run.outcome,
+              expectedCoverageOutcome,
+              `coverage ${scenario} outcome ${run.outcome ?? "<none>"} reason ${run.reason ?? "<none>"}${output ? ` output ${output}` : ""}`,
+            );
           assert.equal(run.reason, undefined);
           assert.equal(testRun.outcome, fault === "crash" ? "errored" : framework === "cpputest" ? "failed" : "passed");
           const result = await artifacts(client, run, framework, selected, catalog.revision, fault === "crash");
@@ -356,11 +360,12 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
             if (repeat === 0) unityBytes = result.bytes;
             else { assert.deepEqual(result.bytes, unityBytes, "equivalent successful runs must be byte-identical"); assert.equal(digest(result.bytes), digest(unityBytes!)); }
           }
-        }
-        assert.equal(wireOverflow, false, "bounded coverage wire capture exceeded");
-        const publicWire = Buffer.concat(wire);
-        for (const value of sensitive) assert.ok(!publicWire.includes(Buffer.from(value)), "coverage Protocol exchange leaked a private execution value");
-        if (fault) faults.push({ fault, testRunOutcome: testRun.outcome!, coverageRunOutcome: run.outcome!, reason: run.reason ?? "none" });
+          }
+          assert.equal(wireOverflow, false, "bounded coverage wire capture exceeded");
+          const publicWire = Buffer.concat(wire);
+          for (const value of sensitive) assert.ok(!publicWire.includes(Buffer.from(value)), "coverage Protocol exchange leaked a private execution value");
+          if (fault) faults.push({ fault, testRunOutcome: testRun.outcome!, coverageRunOutcome: run.outcome!, reason: run.reason ?? "none" });
+        } finally { await coverageTaskOutput.close(); }
       }
       await manager.stop(); manager = undefined;
     }
