@@ -238,6 +238,7 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
       const framework: Framework = scenario === "cpputest" ? "cpputest" : "unity";
       const fault = scenario === "cpputest" || scenario === "unity" ? undefined : scenario;
       const workspace = join(scratch, scenario);
+      let serviceStderr = "";
       await cp(join(root, "apps/code-oss-extension/test/fixtures", framework === "unity" ? "coverage-unity" : "coverage"), workspace, { recursive: true });
       // Keep every CMake File API input inside the trusted temporary workspace.
       // The framework bundle and helper are verified before this copy; the
@@ -269,7 +270,14 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
         wire.push(bytes);
       };
       manager = new ServiceManager({ serviceExecutable: faultServices.get(scenario) ?? service, workspaceRoot: workspace, dataDirectory: join(scratch, `data-${scenario}`), timeoutMs: 120_000, trusted: () => true, operations: {
-        spawnService(binary, args) { return spawn(binary, [...args, "--cmake-bundle-root", join(root, ".bundled-tools/cmake"), "--debug-process-host-failures=true"], { stdio: "pipe", env: { ...process.env, UNIT_TEST_IDE_COVERAGE_SMOKE_SECRET: secret, UT_DEBUG_PROCESS_HOST_FAILURES: "1" } }); },
+        spawnService(binary, args) {
+          const child = spawn(binary, [...args, "--cmake-bundle-root", join(root, ".bundled-tools/cmake"), "--debug-process-host-failures=true"], { stdio: "pipe", env: { ...process.env, UNIT_TEST_IDE_COVERAGE_SMOKE_SECRET: secret, UT_DEBUG_PROCESS_HOST_FAILURES: "1" } });
+          child.stderr?.on("data", (value: Uint8Array | string) => {
+            const text = Buffer.from(value).toString("utf8");
+            serviceStderr = `${serviceStderr}${text}`.slice(-32_768);
+          });
+          return child;
+        },
         async connect(endpoint) {
           const socket = createConnection(endpoint);
           const write = socket.write.bind(socket) as unknown as (...args: unknown[]) => boolean;
@@ -368,7 +376,7 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
           if (fault) faults.push({ fault, testRunOutcome: testRun.outcome!, coverageRunOutcome: run.outcome!, reason: run.reason ?? "none" });
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
-          throw new Error(`coverage scenario ${scenario} repeat ${repeat}: ${detail}`);
+          throw new Error(`coverage scenario ${scenario} repeat ${repeat}: ${detail}${serviceStderr ? `; service-stderr=${serviceStderr}` : ""}`);
         }
       }
       await manager.stop(); manager = undefined;
