@@ -677,12 +677,16 @@ func (c *Coordinator) Succeeded(
 	toolchainIdentity := effectiveToolchainIdentity(
 		state.Profile, toolchain.Instance{ID: state.ToolchainID}, reply,
 	)
-	fingerprint := configureFingerprint(
+	input := fingerprintInput(
 		state.WorkspaceGeneration, state.Profile, state.CMakeIdentity,
 		toolchainIdentity, reply, state.UnityRunnerGeneratorIdentity,
 		state.Coverage,
 	)
+	fingerprint := cmake.ConfigureFingerprint(input)
 	if fingerprint == "" {
+		if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+			return fmt.Errorf("%w: %s", ErrConfigureRequired, classifyFingerprintFailure(input))
+		}
 		return ErrConfigureRequired
 	}
 	return c.config.Configurations.PutBuildConfiguration(
@@ -709,6 +713,44 @@ func classifyConfigureReplyFailure(err error) string {
 	default:
 		return "CMake File API reply unavailable"
 	}
+}
+
+func classifyFingerprintFailure(input cmake.ProfileFingerprintInput) string {
+	switch {
+	case input.WorkspaceGeneration == "":
+		return "configure fingerprint missing workspace generation"
+	case input.Profile.ID == "" || input.Profile.ProjectID == "":
+		return "configure fingerprint missing profile identity"
+	case input.CMakeIdentity == "":
+		return "configure fingerprint missing CMake identity"
+	case input.ToolchainIdentity == "":
+		return "configure fingerprint missing toolchain identity"
+	case len(input.CMakeInputStates) == 0:
+		return "configure fingerprint missing CMake inputs"
+	case len(input.FileAPIState) == 0:
+		return "configure fingerprint missing File API state"
+	case !validFingerprintFilesForDiagnostic(input.CMakeInputStates, []cmake.FingerprintFile{input.Cache}, input.FileAPIState):
+		return "configure fingerprint has invalid file state"
+	default:
+		return "configure fingerprint input rejected"
+	}
+}
+
+func validFingerprintFilesForDiagnostic(groups ...[]cmake.FingerprintFile) bool {
+	for _, group := range groups {
+		for _, file := range group {
+			if file.Path == "" || file.Identity == "" || len(file.SHA256) != 64 {
+				return false
+			}
+		}
+	}
+	if len(groups) > 1 {
+		cache := groups[1]
+		if len(cache) != 1 {
+			return false
+		}
+	}
+	return true
 }
 
 type configureStepState struct {

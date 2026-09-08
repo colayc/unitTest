@@ -1337,6 +1337,14 @@ func debugProcessErrorMessage(err error, fallback string) string {
 		"CMake File API limit failure",
 		"invalid CMake File API reply",
 		"CMake File API reply unavailable",
+		"configure fingerprint missing workspace generation",
+		"configure fingerprint missing profile identity",
+		"configure fingerprint missing CMake identity",
+		"configure fingerprint missing toolchain identity",
+		"configure fingerprint missing CMake inputs",
+		"configure fingerprint missing File API state",
+		"configure fingerprint has invalid file state",
+		"configure fingerprint input rejected",
 	} {
 		if strings.Contains(message, category) {
 			return category
