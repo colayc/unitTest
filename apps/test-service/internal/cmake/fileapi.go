@@ -768,6 +768,9 @@ func (reader *fileAPIReader) assemble(
 	}
 	cache, err := reader.snapshotAllowed(filepath.Join(buildPath, "CMakeCache.txt"))
 	if err != nil {
+		if errors.Is(err, ErrFileAPILimit) {
+			return FileAPIReply{}, err
+		}
 		return FileAPIReply{}, fmt.Errorf("%w: CMake cache: %v", ErrFileAPIReply, err)
 	}
 	result.Cache = cache
@@ -782,6 +785,9 @@ func (reader *fileAPIReader) assemble(
 		result.CMakeInputs = append(result.CMakeInputs, resolved)
 		state, err := reader.snapshotAllowed(resolved)
 		if err != nil {
+			if errors.Is(err, ErrFileAPILimit) {
+				return FileAPIReply{}, err
+			}
 			return FileAPIReply{}, fmt.Errorf("%w: CMake input %q: %v", ErrFileAPIReply, resolved, err)
 		}
 		result.CMakeInputStates = append(result.CMakeInputStates, state)
