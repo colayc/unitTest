@@ -117,7 +117,7 @@ func prepareEvidence(root string) (*PreparedEvidence, error) {
 			return Manifest{}, errors.Join(ErrInvalidEvidence, errors.New("prepared evidence scan failed"), err)
 		}
 		if !sameEvidenceEntries(sealedNotes, nowNotes) {
-			return Manifest{}, errors.Join(ErrInvalidEvidence, errors.New("prepared evidence notes differ"))
+			return Manifest{}, errors.Join(ErrInvalidEvidence, errors.New("prepared evidence notes differ"), fmt.Errorf("expected=%#v observed=%#v", sealedNotes, nowNotes))
 		}
 		if err := validateEvidenceEntries(nowNotes, nowData); err != nil {
 			return Manifest{}, errors.Join(ErrInvalidEvidence, errors.New("prepared evidence entries invalid"), err)
