@@ -310,6 +310,7 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
           if (!(error instanceof ProtocolError) || error.code !== "WORKSPACE_CHANGED" || attempt >= 1) throw error;
         }
       }
+      await taskOutput.close().catch(() => undefined);
       selected = await selectGccEventually(client);
       const discovery = await client.discoverTests({ idempotencyKey: randomBytes(16).toString("hex"), projectId, profileId: selected.profile.buildProfileId });
       await taskFinished(client, discovery.taskId, `${scenario} discovery`);
@@ -352,11 +353,10 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
             assert.equal(run.reportId, undefined);
           } else {
             const expectedCoverageOutcome = fault === "crash" ? "partial" : "available";
-            const output = taskOutput.output.get(initial.taskId) ?? "";
             assert.equal(
               run.outcome,
               expectedCoverageOutcome,
-              `coverage ${scenario} outcome ${run.outcome ?? "<none>"} reason ${run.reason ?? "<none>"}${output ? ` output=${output}` : ""}`,
+              `coverage ${scenario} outcome ${run.outcome ?? "<none>"} reason ${run.reason ?? "<none>"}`,
             );
           assert.equal(run.reason, undefined);
           assert.equal(testRun.outcome, fault === "crash" ? "errored" : framework === "cpputest" ? "failed" : "passed");
@@ -378,7 +378,6 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
           throw new Error(`coverage scenario ${scenario} repeat ${repeat}: ${detail}${serviceStderr ? `; service-stderr=${serviceStderr}` : ""}`);
         }
       }
-      await taskOutput.close().catch(() => undefined);
       await manager.stop(); manager = undefined;
     }
     const evidence = buildLinuxGccCoverageEvidence({ schemaVersion: 1, platform: "linux-x64", toolchain: { family: "gcc", digest: toolchainDigest }, bundleDigest, frameworkBundleDigest: frameworkBoundary.identityDigest, cases, faults, determinism: { coverageJsonByteIdentical: true, sha256Identical: true }, startedAt, finishedAt: new Date().toISOString() });
