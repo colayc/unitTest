@@ -368,7 +368,7 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
           throw new Error(`coverage scenario ${scenario} repeat ${repeat}: ${detail}`);
-        } finally { await coverageTaskOutput.close(); }
+        } finally { await coverageTaskOutput.close().catch(() => undefined); }
       }
       await manager.stop(); manager = undefined;
     }
