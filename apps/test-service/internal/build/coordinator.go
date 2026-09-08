@@ -703,6 +703,24 @@ func classifyConfigureReplyFailure(err error) string {
 	case errors.Is(err, cmake.ErrFileAPILimit):
 		return "CMake File API limit failure"
 	case errors.Is(err, cmake.ErrFileAPIReply):
+		message := err.Error()
+		for _, detail := range []struct{ fragment, category string }{
+			{"current CMake reply is an error", "CMake File API current reply error"},
+			{"decode index", "CMake File API index decode failure"},
+			{"client query", "CMake File API query shape failure"},
+			{"no CMake reply index", "CMake File API reply index missing"},
+			{"codemodel", "CMake File API codemodel failure"},
+			{"cmakeFiles", "CMake File API CMake files failure"},
+			{"CMake cache", "CMake File API cache failure"},
+			{"CMake input", "CMake File API input failure"},
+			{"toolchain", "CMake File API toolchain failure"},
+			{"target", "CMake File API target failure"},
+			{"configuration", "CMake File API configuration failure"},
+		} {
+			if strings.Contains(message, detail.fragment) {
+				return detail.category
+			}
+		}
 		return "invalid CMake File API reply"
 	default:
 		return "CMake File API reply unavailable"
