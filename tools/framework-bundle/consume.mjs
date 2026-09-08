@@ -39,7 +39,7 @@ export async function consumeLockedFrameworks(cmake) {
           unityRunnerGenerator: boundary.environment.UNIT_TEST_IDE_TEST_UNITY_RUNNER_GENERATOR
         }
       });
-      await execFile(cmake, ["--preset", "fixture"], { cwd: workspace, shell: false, timeout: 120_000, maxBuffer: 1024 * 1024 });
+      await execFile(cmake, ["--preset", "fixture", "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"], { cwd: workspace, shell: false, timeout: 120_000, maxBuffer: 1024 * 1024 });
       await execFile(cmake, ["--build", "build-fixture"], { cwd: workspace, shell: false, timeout: 120_000, maxBuffer: 1024 * 1024 });
       await execFile("ctest", ["--test-dir", "build-fixture", "--output-on-failure"], { cwd: workspace, shell: false, timeout: 120_000, maxBuffer: 1024 * 1024 });
     }
