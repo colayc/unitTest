@@ -240,6 +240,9 @@ func (coordinator *Coordinator) resumePreparationFailure(
 	persisted task.Task,
 	failure preparationFailure,
 ) (task.Task, error) {
+	if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+		_, _ = os.Stderr.WriteString("coverage preparation failure phase=" + string(failure.phase) + " cause=" + failure.cause.Error() + "\n")
+	}
 	stored, err := coordinator.config.Store.Get(ctx, persisted.ID)
 	if err != nil || !sameQueuedTask(stored, persisted) {
 		return task.Task{}, errOrInvalid(err)
