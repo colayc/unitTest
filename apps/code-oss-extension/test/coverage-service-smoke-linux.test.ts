@@ -232,7 +232,9 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
       } });
       stage = `scenario:${scenario}:start-service`;
       const session = await manager.start();
+      stage = `scenario:${scenario}:read-session-token`;
       sensitive.push(session.endpoint, session.tokenFile, session.sessionDirectory, await readFile(session.tokenFile, "utf8"));
+      stage = `scenario:${scenario}:check-session-endpoint`;
       assert.ok((await lstat(session.endpoint)).isSocket(), "Service must expose a real Unix socket");
       const client = session.client;
       stage = `scenario:${scenario}:capabilities`;
@@ -314,6 +316,10 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
     const bytes = Buffer.from(`${JSON.stringify(evidence)}\n`);
     await rm(scratch, { recursive: true, force: true });
     await publishEvidenceAtomically(evidencePath, bytes);
-  } catch (error) { console.error(`coverage smoke failed at ${stage}`); throw redactServiceError(error, sensitive); }
+  } catch (error) {
+    const detail = manager?.status.state === "failed" ? manager.status.detail : "none";
+    console.error(`coverage smoke failed at ${stage}; manager=${redactServiceError(new Error(detail), sensitive).message}`);
+    throw redactServiceError(error, sensitive);
+  }
   finally { try { await manager?.stop(); } finally { await rm(scratch, { recursive: true, force: true }); } }
 });
