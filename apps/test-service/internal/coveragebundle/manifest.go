@@ -42,6 +42,7 @@ type resolvedManifest struct {
 type resolvedInputs struct {
 	PythonArtifact inputArtifact   `json:"pythonArtifact"`
 	Wheels         []wheelInput    `json:"wheels"`
+	BuildSources   []inputArtifact `json:"buildSources"`
 	Provenance     inputProvenance `json:"provenance"`
 }
 
@@ -105,7 +106,7 @@ func validateResolvedJSONShape(contents []byte) error {
 	if err != nil {
 		return err
 	}
-	inputs, err := exactJSONObject(root["inputs"], []string{"pythonArtifact", "wheels", "provenance"}, "resolved inputs")
+	inputs, err := exactJSONObject(root["inputs"], []string{"pythonArtifact", "wheels", "buildSources", "provenance"}, "resolved inputs")
 	if err != nil {
 		return err
 	}
@@ -118,6 +119,15 @@ func validateResolvedJSONShape(contents []byte) error {
 	}
 	for _, wheel := range wheels {
 		if _, err := exactJSONObject(wheel, []string{"project", "version", "kind", "filename", "url", "sha256"}, "resolved wheel input"); err != nil {
+			return err
+		}
+	}
+	var buildSources []json.RawMessage
+	if err := json.Unmarshal(inputs["buildSources"], &buildSources); err != nil {
+		return errors.New("resolved build sources must be an array")
+	}
+	for _, source := range buildSources {
+		if _, err := exactJSONObject(source, []string{"kind", "filename", "url", "sha256"}, "resolved build source"); err != nil {
 			return err
 		}
 	}
@@ -294,6 +304,11 @@ func (inputs resolvedInputs) validate(manifest resolvedManifest) error {
 	if len(inputs.Wheels) == 0 {
 		return errors.New("resolved wheel inputs are empty")
 	}
+	for _, source := range inputs.BuildSources {
+		if source.Kind != "source-archive" || !validInputFile(source.Filename) || !strings.HasSuffix(strings.ToLower(source.Filename), ".tar.gz") || !validBuildSourceURL(source.URL) || !digestPattern.MatchString(source.SHA256) {
+			return fmt.Errorf("invalid resolved build source %q", source.Filename)
+		}
+	}
 	seen := map[string]struct{}{}
 	gcovrFound := false
 	previous := ""
@@ -375,4 +390,12 @@ func validInputURL(value string) bool {
 		return false
 	}
 	return parsed.Hostname() == "www.python.org" || parsed.Hostname() == "files.pythonhosted.org"
+}
+
+func validBuildSourceURL(value string) bool {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "https" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Path == "" {
+		return false
+	}
+	return parsed.Hostname() == "github.com"
 }

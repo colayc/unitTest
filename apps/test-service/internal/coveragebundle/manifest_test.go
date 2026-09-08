@@ -210,6 +210,20 @@ func TestBundleManifestRejectsUnknownFieldsAndTrailingJSON(t *testing.T) {
 	}
 }
 
+func TestBundleManifestAcceptsLockedBuildSources(t *testing.T) {
+	productRoot, bundleRoot := createBundleFixture(t)
+	mutateBundleManifest(t, bundleRoot, func(manifest map[string]any) {
+		manifest["inputs"].(map[string]any)["buildSources"] = []any{}
+	})
+	pin, err := Resolve(productRoot)
+	if err != nil {
+		t.Fatalf("Resolve rejected the locked buildSources field: %v", err)
+	}
+	if err := pin.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func createBundleFixture(t *testing.T) (string, string) {
 	t.Helper()
 	key, err := currentPlatformKey()
@@ -274,6 +288,7 @@ func createBundleFixture(t *testing.T) (string, string) {
 			"wheels": []any{map[string]any{
 				"project": "gcovr", "version": "8.6", "kind": "wheel", "filename": "gcovr.whl", "url": "https://files.pythonhosted.org/gcovr.whl", "sha256": digestBytes([]byte("gcovr wheel")),
 			}},
+			"buildSources": []any{},
 			"provenance": map[string]any{
 				"recipe": map[string]any{"name": "coverage-bundle-recipe-v2", "sha256": digestBytes([]byte("recipe"))},
 				"builderImage": func() any {
