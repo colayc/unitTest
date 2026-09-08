@@ -120,7 +120,10 @@ func TestEvidenceWindowsHasNoSideEffects(t *testing.T) {
 
 func evidenceRoot(t *testing.T) string {
 	t.Helper()
-	base := filepath.Join("..", "..", "..", "..", ".task4-scratch", "coveragegcc")
+	base, err := filepath.Abs(filepath.Join("..", "..", "..", "..", ".task4-scratch", "coveragegcc"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(base, 0o700); err != nil {
 		t.Fatal(err)
 	}

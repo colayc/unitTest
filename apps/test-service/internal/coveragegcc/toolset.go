@@ -15,11 +15,10 @@ import (
 
 const instrumentationContract = "gcc-gcov-instrumentation-v1"
 
-// InstrumentationFingerprint identifies the GCC coverage compilation contract.
-// The concrete CMake materialization is supplied by the later instrumentation
-// boundary; the snapshot must already bind to the stable contract identity.
+// InstrumentationFingerprint identifies the exact GCC coverage compilation
+// contract, including the bytes published by WriteInstrumentation.
 func InstrumentationFingerprint() string {
-	sum := sha256.Sum256([]byte(instrumentationContract))
+	sum := sha256.Sum256([]byte(instrumentationContract + "\x00" + InstrumentationSHA256()))
 	return hex.EncodeToString(sum[:])
 }
 
