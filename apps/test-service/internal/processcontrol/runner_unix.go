@@ -635,7 +635,11 @@ func (process *unixProcess) finishAfterHost(result Result) {
 	<-process.hostExited
 	<-process.outputDone
 	process.closeOutput()
-	process.publish(process.applyOutputOverflow(result))
+	result = process.applyOutputOverflow(result)
+	if result.Err != nil && os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+		_, _ = fmt.Fprintf(os.Stderr, "process-control finished error %v exit %d children %d\n", result.Err, result.ExitCode, len(result.Children))
+	}
+	process.publish(result)
 }
 
 func (process *unixProcess) applyOutputOverflow(result Result) Result {
