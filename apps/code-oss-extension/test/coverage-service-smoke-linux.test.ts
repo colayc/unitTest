@@ -39,6 +39,27 @@ function selectGcc(snapshot: WorkspaceSnapshot) {
   throw new Error("verified GCC/gcov Debug Ninja profile is unavailable");
 }
 
+async function selectGccEventually(client: ProtocolClient): Promise<Selected> {
+  const deadline = Date.now() + 120_000;
+  let lastSnapshot: WorkspaceSnapshot | undefined;
+  let lastError: unknown;
+  for (;;) {
+    lastSnapshot = await client.inspectWorkspace();
+    try {
+      return selectGcc(lastSnapshot);
+    } catch (error) {
+      lastError = error;
+      if (Date.now() >= deadline) {
+        const project = lastSnapshot.projects.find((item) => item.projectId === projectId);
+        const toolchains = lastSnapshot.toolchains.map((item) => ({ id: item.toolchainId, family: item.family, host: item.hostArchitecture, target: item.targetArchitecture, generators: item.generators, coverage: item.capabilities.coverageDrivers }));
+        const profiles = project?.buildProfiles.map((item) => ({ id: item.buildProfileId, origin: item.origin, generator: item.generator, configuration: item.configuration, toolchainId: item.toolchainId })) ?? [];
+        throw new Error(`verified GCC/gcov Debug Ninja profile is unavailable after bounded discovery wait; toolchains=${JSON.stringify(toolchains)} profiles=${JSON.stringify(profiles)}: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
+      }
+      await delay(1000);
+    }
+  }
+}
+
 async function taskFinished(client: ProtocolClient, id: string) {
   const deadline = Date.now() + timeout;
   for (;;) {
@@ -229,22 +250,22 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
       const client = session.client;
       const caps = await client.getCapabilities();
       assert.ok("coverageRun" in caps && caps.coverageRun && "coverageReport" in caps && caps.coverageReport);
-      let selected = selectGcc(await client.inspectWorkspace());
+      let selected = await selectGccEventually(client);
       await config(workspace, framework, selected.profile.buildProfileId);
       for (let attempt = 0; ; attempt++) {
-        selected = selectGcc(await client.inspectWorkspace());
+        selected = await selectGccEventually(client);
         try {
           const build = await client.startCMakeBuild({ idempotencyKey: randomBytes(16).toString("hex"), workspaceGeneration: selected.snapshot.workspaceGeneration, projectId, buildProfileId: selected.profile.buildProfileId, targetIds: [], jobs: 2, timeoutMs: timeout });
           await taskFinished(client, build.taskId); break;
         } catch (error) { if (!(error instanceof ProtocolError) || error.code !== "WORKSPACE_CHANGED" || attempt >= 1) throw error; }
       }
-      selected = selectGcc(await client.inspectWorkspace());
+      selected = await selectGccEventually(client);
       const discovery = await client.discoverTests({ idempotencyKey: randomBytes(16).toString("hex"), projectId, profileId: selected.profile.buildProfileId });
       await taskFinished(client, discovery.taskId);
       const catalog = await client.getTestCatalog({ projectId, profileId: selected.profile.buildProfileId, limit: 100 });
       assert.equal(catalog.partial, false);
       assert.equal(catalog.items.filter((item) => item.kind === "case").length, 2);
-      selected = selectGcc(await client.inspectWorkspace());
+      selected = await selectGccEventually(client);
       const currentDigest = digest(JSON.stringify({ toolchainId: selected.toolchain.toolchainId, version: selected.toolchain.version }));
       if (!toolchainDigest) toolchainDigest = currentDigest;
       assert.equal(currentDigest, toolchainDigest);
