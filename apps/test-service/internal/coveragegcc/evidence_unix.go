@@ -100,8 +100,8 @@ func prepareEvidence(root string) (*PreparedEvidence, error) {
 		if !sameEvidenceEntries(sealedNotes, observed) || state.verifyEntries(noteSnapshots) != nil {
 			return ErrInvalidEvidence
 		}
-		actualNotes, actualData, err := scanEvidence(context.Background(), state.fd, "", 0)
-		if err != nil || !sameEvidenceEntries(sealedNotes, actualNotes) || len(actualData) != 0 {
+		actualNotes, _, err := scanEvidence(context.Background(), state.fd, "", 0)
+		if err != nil || !sameEvidenceEntries(sealedNotes, actualNotes) {
 			return ErrInvalidEvidence
 		}
 		return nil
