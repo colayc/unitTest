@@ -111,7 +111,8 @@ export async function prepareLinuxFrameworkInputs(options: LinuxFrameworkInputBo
   }
   const helper = await regularFileWithin(repositoryRoot, options.helperPath, "UnitTestIDE helper");
   const generator = await regularFileWithin(repositoryRoot, options.generatorPath, "Unity runner generator");
-  if (helper.path !== resolve(repositoryRoot, manifest.fixtureTools.cmakeHelper.path) || helper.digest !== manifest.fixtureTools.cmakeHelper.sha256) throw new Error("Linux framework CMake helper digest mismatch");
+  const expectedHelperPath = await realpath(resolve(repositoryRoot, manifest.fixtureTools.cmakeHelper.path));
+  if (helper.path !== expectedHelperPath || helper.digest !== manifest.fixtureTools.cmakeHelper.sha256) throw new Error("Linux framework CMake helper digest mismatch");
   await verifyUnityRunnerGenerator(generator.path, manifest.fixtureTools.unityRunnerGenerator);
   const resolved = await readResolvedFrameworkTrees(sourceRoot, manifest);
   const trees = await verifyResolvedFrameworkTrees(sourceRoot, manifest, resolved);
