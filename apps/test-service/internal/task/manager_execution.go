@@ -1353,6 +1353,8 @@ func debugProcessErrorMessage(err error, fallback string) string {
 		"CMake File API input permission denied",
 		"CMake File API input identity unavailable",
 		"CMake File API input snapshot closed",
+		"CMake File API input symlink rejected",
+		"CMake File API input unsupported",
 		"CMake File API toolchain failure",
 		"CMake File API target failure",
 		"CMake File API configuration failure",

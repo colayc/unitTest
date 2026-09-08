@@ -720,6 +720,9 @@ func classifyConfigureReplyFailure(err error) string {
 			{"CMake cache", "CMake File API cache failure"},
 			{"snapshot", "CMake File API input snapshot failure"},
 			{"does not exist", "CMake File API input missing"},
+			{"no such file or directory", "CMake File API input missing"},
+			{"too many levels of symbolic links", "CMake File API input symlink rejected"},
+			{"operation not supported", "CMake File API input unsupported"},
 			{"changed while reading", "CMake File API input changed"},
 			{"not a direct regular file", "CMake File API input is not a regular file"},
 			{"identity changed", "CMake File API input identity changed"},
@@ -728,10 +731,10 @@ func classifyConfigureReplyFailure(err error) string {
 			{"permission denied", "CMake File API input permission denied"},
 			{"read OS file identity", "CMake File API input identity unavailable"},
 			{"file snapshot is closed", "CMake File API input snapshot closed"},
-			{"CMake input", "CMake File API input failure"},
 			{"toolchain", "CMake File API toolchain failure"},
 			{"target", "CMake File API target failure"},
 			{"configuration", "CMake File API configuration failure"},
+			{"CMake input", "CMake File API input failure"},
 		} {
 			if strings.Contains(message, detail.fragment) {
 				return detail.category
