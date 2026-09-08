@@ -65,7 +65,10 @@ async function taskFinished(client: ProtocolClient, id: string, label = "native 
   for (;;) {
     const task = await client.getTask(id);
     if (task.status === "finished") {
-      if (task.outcome !== "succeeded") throw new Error(`${label} finished with outcome ${task.outcome ?? "unknown"}${task.errorCode ? ` (${task.errorCode})` : ""}`);
+      if (task.outcome !== "succeeded") {
+        const detail = task.errorMessage ? `: ${task.errorMessage}` : "";
+        throw new Error(`${label} finished with outcome ${task.outcome ?? "unknown"}${task.errorCode ? ` (${task.errorCode})` : ""}${detail}`);
+      }
       return task;
     }
     if (Date.now() >= deadline) throw new Error("native task completion timeout");
