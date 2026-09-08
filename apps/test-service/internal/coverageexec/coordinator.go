@@ -1200,9 +1200,11 @@ func (execution *execution) prepareCollector(ctx context.Context) ([]task.Execut
 	}
 	execution.mu.Unlock()
 	if embedded == nil {
+		debugCoveragef("coverage collector preparation missing embedded run")
 		return nil, task.ErrInvalidArgument
 	}
 	expectations := embedded.Expectations()
+	debugCoveragef("coverage collector preparation expectations %d outcomes %d", len(expectations), len(outcomes))
 	sort.Slice(outcomes, func(left, right int) bool {
 		if outcomes[left].InvocationID != outcomes[right].InvocationID {
 			return outcomes[left].InvocationID < outcomes[right].InvocationID
@@ -1211,11 +1213,13 @@ func (execution *execution) prepareCollector(ctx context.Context) ([]task.Execut
 	})
 	if len(outcomes) != len(expectations) {
 		execution.setFailedPhase(coveragerun.PhaseTest)
+		debugCoveragef("coverage collector preparation outcome count mismatch")
 		return nil, task.ErrInvalidArgument
 	}
 	reasonList, err := execution.adapter.SealEvidence(expectations, outcomes)
 	if err != nil {
 		execution.setFailedPhase(coveragerun.PhaseTest)
+		debugCoveragef("coverage collector preparation seal evidence failed: %v", err)
 		return nil, err
 	}
 	execution.mu.Lock()
@@ -1232,6 +1236,7 @@ func (execution *execution) prepareCollector(ctx context.Context) ([]task.Execut
 	collection, err := execution.adapter.PrepareCollector(ctx, prepared, root.CollectorRoot(), binaries)
 	if err != nil {
 		execution.setFailedPhase(coveragerun.PhaseMerge)
+		debugCoveragef("coverage collector preparation prepare collector failed: %v", err)
 		return nil, err
 	}
 	run, err := execution.config.Store.GetRunForTask(ctx, execution.taskID)
