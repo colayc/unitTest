@@ -469,10 +469,11 @@ func openDirectExecutableSnapshot(ctx context.Context, path string) (*executable
 	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return nil, errors.New("gcov path is not canonical")
 	}
-	info, err := os.Lstat(path)
-	if err != nil || info.Mode()&os.ModeSymlink != 0 {
-		return nil, errors.New("gcov path is not a direct regular file")
-	}
+	// Distribution toolchains commonly expose gcov through a stable symlink
+	// (for example /usr/bin/gcov -> gcov-13). Resolve that entry to its
+	// canonical target and pin the target's identity/content in the snapshot.
+	// openExecutableSnapshot performs the canonicalization and verifies the
+	// opened file against the path before returning it.
 	return openExecutableSnapshot(ctx, path)
 }
 
