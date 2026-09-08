@@ -493,6 +493,10 @@ func (coordinator *Coordinator) prepare(
 	if err != nil || prepared == nil {
 		return nil, task.ExecutionPlan{}, failPreparation(coveragerun.PhaseBuild, errOrInvalid(err))
 	}
+	debugCoveragef("coverage prepared toolchain family=%s c=%s cxx=%s profile-origin=%s", currentToolchain.Family, currentToolchain.CCompiler, currentToolchain.CXXCompiler, prepared.Profile().Origin)
+	for _, preparedStep := range prepared.Plan().Steps {
+		debugCoveragef("coverage prepared step kind=%s args=%q", preparedStep.Kind, preparedStep.Process.Args)
+	}
 	execution.prepared = prepared
 	if err := validatePreparedIdentity(prepared, run, testRun, profile, currentToolchain); err != nil {
 		return nil, task.ExecutionPlan{}, failPreparation(coveragerun.PhaseBuild, err)
