@@ -1087,6 +1087,7 @@ func (execution *execution) prepareTests(ctx context.Context, current task.Task)
 		ctx, run, expectedCatalog, true,
 	)
 	if err != nil {
+		debugCoveragef("coverage test preparation catalog refresh failed: %v", err)
 		return nil, err
 	}
 	execution.mu.Lock()
@@ -1095,10 +1096,12 @@ func (execution *execution) prepareTests(ctx context.Context, current task.Task)
 	execution.mu.Unlock()
 	if prepared == nil {
 		execution.setFailedPhase(coveragerun.PhaseTest)
+		debugCoveragef("coverage test preparation missing prepared build")
 		return nil, task.ErrInvalidArgument
 	}
 	if err := execution.adapter.PrepareTests(ctx, prepared); err != nil {
 		execution.setFailedPhase(coveragerun.PhaseTest)
+		debugCoveragef("coverage test preparation adapter failed: %v", err)
 		return nil, err
 	}
 	if len(targets) != 0 {
@@ -1114,14 +1117,17 @@ func (execution *execution) prepareTests(ctx context.Context, current task.Task)
 	})
 	if err != nil || nilPort(embedded) {
 		execution.setFailedPhase(coveragerun.PhaseTest)
+		debugCoveragef("coverage test preparation embedded runner failed: %v", errOrInvalid(err))
 		return nil, errOrInvalid(err)
 	}
 	steps, originals, err := rewriteTestSteps(embedded.Steps())
 	if err != nil {
+		debugCoveragef("coverage test preparation rewrite steps failed: %v", err)
 		return nil, err
 	}
 	binaries, err := retainTestBinaries(originals)
 	if err != nil {
+		debugCoveragef("coverage test preparation retain binaries failed: %v", err)
 		return nil, err
 	}
 	execution.mu.Lock()
