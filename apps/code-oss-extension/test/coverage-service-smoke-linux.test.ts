@@ -365,6 +365,9 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
           const publicWire = Buffer.concat(wire);
           for (const value of sensitive) assert.ok(!publicWire.includes(Buffer.from(value)), "coverage Protocol exchange leaked a private execution value");
           if (fault) faults.push({ fault, testRunOutcome: testRun.outcome!, coverageRunOutcome: run.outcome!, reason: run.reason ?? "none" });
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          throw new Error(`coverage scenario ${scenario} repeat ${repeat}: ${detail}`);
         } finally { await coverageTaskOutput.close(); }
       }
       await manager.stop(); manager = undefined;
