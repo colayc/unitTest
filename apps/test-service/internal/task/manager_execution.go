@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -578,6 +579,9 @@ func (m *Manager) startNextStep(current *activeTask, active map[string]*activeTa
 		return nil
 	}
 	if prepareErr != nil {
+		if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+			fmt.Fprintf(os.Stderr, "task manager process prepare error task %s step %s: %v\n", current.task.ID, step.Kind, prepareErr)
+		}
 		m.cleanupPreparedProcess(current)
 		return nil
 	}
@@ -638,6 +642,9 @@ func (m *Manager) startNextStep(current *activeTask, active map[string]*activeTa
 	}
 	startErr := process.Start(current.execution.ctx)
 	if startErr != nil {
+		if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+			fmt.Fprintf(os.Stderr, "task manager process start error task %s step %s: %v\n", current.task.ID, step.Kind, startErr)
+		}
 		cause := current.execution.resolve(OutcomeInfrastructureFailed)
 		current.cleanupWithoutDone = true
 		m.terminate(current)
