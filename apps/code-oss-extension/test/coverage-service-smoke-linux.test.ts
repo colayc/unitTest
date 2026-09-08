@@ -290,15 +290,14 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
       assert.ok("coverageRun" in caps && caps.coverageRun && "coverageReport" in caps && caps.coverageReport);
       let selected = await selectGccEventually(client);
       await config(workspace, framework, selected.profile.buildProfileId);
+      const outputSubscription = await client.subscribeEvents(0);
+      const taskOutput = collectTaskOutput(outputSubscription);
       for (let attempt = 0; ; attempt++) {
         selected = await selectGccEventually(client);
-        const outputSubscription = await client.subscribeEvents(0);
-        const taskOutput = collectTaskOutput(outputSubscription);
         try {
           const build = await client.startCMakeBuild({ idempotencyKey: randomBytes(16).toString("hex"), workspaceGeneration: selected.snapshot.workspaceGeneration, projectId, buildProfileId: selected.profile.buildProfileId, targetIds: [], jobs: 2, timeoutMs: timeout });
           await taskFinished(client, build.taskId, `${scenario} build`, taskOutput.output); break;
         } catch (error) { if (!(error instanceof ProtocolError) || error.code !== "WORKSPACE_CHANGED" || attempt >= 1) throw error; }
-        finally { await taskOutput.close(); }
       }
       selected = await selectGccEventually(client);
       const discovery = await client.discoverTests({ idempotencyKey: randomBytes(16).toString("hex"), projectId, profileId: selected.profile.buildProfileId });
@@ -342,10 +341,11 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
             assert.equal(run.reportId, undefined);
           } else {
             const expectedCoverageOutcome = fault === "crash" ? "partial" : "available";
+            const output = taskOutput.output.get(initial.taskId) ?? "";
             assert.equal(
               run.outcome,
               expectedCoverageOutcome,
-              `coverage ${scenario} outcome ${run.outcome ?? "<none>"} reason ${run.reason ?? "<none>"}`,
+              `coverage ${scenario} outcome ${run.outcome ?? "<none>"} reason ${run.reason ?? "<none>"}${output ? ` output ${output}` : ""}`,
             );
           assert.equal(run.reason, undefined);
           assert.equal(testRun.outcome, fault === "crash" ? "errored" : framework === "cpputest" ? "failed" : "passed");
@@ -367,6 +367,7 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
           throw new Error(`coverage scenario ${scenario} repeat ${repeat}: ${detail}`);
         }
       }
+      await taskOutput.close().catch(() => undefined);
       await manager.stop(); manager = undefined;
     }
     const evidence = buildLinuxGccCoverageEvidence({ schemaVersion: 1, platform: "linux-x64", toolchain: { family: "gcc", digest: toolchainDigest }, bundleDigest, frameworkBundleDigest: frameworkBoundary.identityDigest, cases, faults, determinism: { coverageJsonByteIdentical: true, sha256Identical: true }, startedAt, finishedAt: new Date().toISOString() });
