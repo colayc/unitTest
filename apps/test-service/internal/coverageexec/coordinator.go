@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -854,6 +855,7 @@ func (execution *execution) Interpret(
 	switch step.Kind {
 	case task.StepCoverageConfigure:
 		if result.ExitCode != 0 || result.TimedOut {
+			debugCoveragef("coverage configure process failed exit=%d timedOut=%t err=%v", result.ExitCode, result.TimedOut, result.Err)
 			execution.setFailedPhase(coveragerun.PhaseConfigure)
 			return task.StepVerdictDefault, errors.New("coverage instrumentation configure failed")
 		}
@@ -927,6 +929,7 @@ func (execution *execution) ObserveOutput(
 		}
 		err := embedded.ObserveOutput(ctx, current, original, output)
 		if err != nil {
+			debugCoveragef("coverage test output observation failed source=%s stream=%s err=%v output=%q", output.Source, output.Stream, err, string(output.Data))
 		}
 		return err
 	}
@@ -941,6 +944,12 @@ func (execution *execution) ObserveOutput(
 	}
 	_, _ = execution.exportOutput.Write(output.Data)
 	return nil
+}
+
+func debugCoveragef(format string, args ...any) {
+	if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+		_, _ = fmt.Fprintf(os.Stderr, format+"\n", args...)
+	}
 }
 
 func (execution *execution) DrainDomainEvents() []task.DomainEvent {
