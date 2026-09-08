@@ -1126,6 +1126,9 @@ func (m *Manager) persistFinished(
 	}
 	errorMessage := outcomeErrorMessage(outcome)
 	errorMessage = debugProcessErrorMessage(result.Err, errorMessage)
+	if current.Kind == KindCMakeBuild && outcome == OutcomeInfrastructureFailed && result.Err == nil {
+		errorMessage = "missing process completion error"
+	}
 	finished, err := ApplyTransition(current, Transition{
 		From: current.Status, To: StatusFinished, Outcome: outcome, At: finishedAt,
 		ErrorCode: outcomeErrorCode(outcome), ErrorMessage: errorMessage,
@@ -1342,6 +1345,9 @@ func debugProcessErrorMessage(err error, fallback string) string {
 		"configure fingerprint missing File API state",
 		"configure fingerprint has invalid file state",
 		"configure fingerprint input rejected",
+		"invalid argument",
+		"storage unavailable",
+		"conflict",
 	} {
 		if strings.Contains(message, category) {
 			return category
