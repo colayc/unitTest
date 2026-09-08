@@ -1324,8 +1324,10 @@ func debugProcessErrorMessage(err error, fallback string) string {
 		"target identity unavailable",
 		"target permission denied",
 		"target executable or working directory missing",
+		"target process could not start",
 		"process-host status unavailable",
 		"process-host rejected start",
+		"process wait failed",
 	} {
 		if strings.Contains(message, category) {
 			return category
