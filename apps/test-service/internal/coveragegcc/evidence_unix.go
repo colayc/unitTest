@@ -8,7 +8,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -107,17 +106,17 @@ func prepareEvidence(root string) (*PreparedEvidence, error) {
 	}
 	p.state.seal = func(ctx context.Context, observed []Entry, outcomes []testrun.InvocationOutcome) (Manifest, error) {
 		if ctx == nil || ctx.Err() != nil {
-			return Manifest{}, errors.Join(ErrInvalidEvidence, errors.New("prepared evidence context invalid"))
+			return Manifest{}, ErrInvalidEvidence
 		}
 		if err := p.state.prepare(observed); err != nil {
-			return Manifest{}, errors.Join(ErrInvalidEvidence, errors.New("prepared evidence notes changed"), err, fmt.Errorf("expected=%#v observed=%#v", sealedNotes, observed))
+			return Manifest{}, ErrInvalidEvidence
 		}
 		nowNotes, nowData, err := scanEvidence(ctx, state.fd, "", 0)
 		if err != nil {
-			return Manifest{}, errors.Join(ErrInvalidEvidence, errors.New("prepared evidence scan failed"), err)
+			return Manifest{}, ErrInvalidEvidence
 		}
 		if !sameEvidenceEntries(sealedNotes, nowNotes) {
-			return Manifest{}, errors.Join(ErrInvalidEvidence, errors.New("prepared evidence notes differ"), fmt.Errorf("expected=%#v observed=%#v", sealedNotes, nowNotes))
+			return Manifest{}, ErrInvalidEvidence
 		}
 		if err := validateEvidenceEntries(nowNotes, nowData); err != nil {
 			return Manifest{}, errors.Join(ErrInvalidEvidence, errors.New("prepared evidence entries invalid"), err)
@@ -216,7 +215,10 @@ func scanEvidence(ctx context.Context, fd int, prefix string, depth int) ([]Entr
 	if ctx == nil || ctx.Err() != nil || depth > maxEvidenceDepth {
 		return nil, nil, ErrInvalidEvidence
 	}
-	duplicate, err := unix.Dup(fd)
+	// Open a fresh directory description for every scan. Duplicating a
+	// directory descriptor shares its read offset, so a second scan would
+	// incorrectly observe an empty directory after the first scan consumed it.
+	duplicate, err := unix.Openat(fd, ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, nil, err
 	}
