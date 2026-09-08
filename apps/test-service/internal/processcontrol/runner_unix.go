@@ -588,6 +588,13 @@ func (process *unixProcess) watchExit() {
 		result.ExitCode = status.ExitCode
 		result.Children = children
 		if status.ErrorCode != "" {
+			if status.Message != "" {
+				process.sendOutput(Output{
+					Source: "process-host",
+					Stream: StreamStderr,
+					Data:   []byte(status.ErrorCode + ": " + status.Message),
+				})
+			}
 			result.Err = errProcessHostFailed
 		}
 		break

@@ -261,16 +261,42 @@ func Run(ctx context.Context, platform Platform, control io.Reader, status io.Wr
 		return 2
 	}
 	errorCode := ""
-	if result.err != nil {
+	message := ""
+	if result.err != nil && os.Getenv("UNIT_TEST_IDE_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+		errorCode = "PROCESS_WAIT_FAILED"
+		message = processWaitFailureMessage(result.err)
+	} else if result.err != nil {
 		errorCode = "PROCESS_WAIT_FAILED"
 	}
-	if err := writeStatus(status, processcontrol.HostStatus{Kind: "exit", ExitCode: result.exitCode, ErrorCode: errorCode}); err != nil {
+	if err := writeStatus(status, processcontrol.HostStatus{Kind: "exit", ExitCode: result.exitCode, ErrorCode: errorCode, Message: message}); err != nil {
 		return 1
 	}
 	if result.err != nil {
 		return 1
 	}
 	return 0
+}
+
+// Keep process-host diagnostics closed and path-free. The caller can use the
+// category to distinguish target cleanup from wait failures without exposing
+// command lines or filesystem locations.
+func processWaitFailureMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	message := err.Error()
+	switch {
+	case strings.Contains(message, "target process group remained alive"):
+		return "target process group remained alive"
+	case strings.Contains(message, "target process group termination failed"):
+		return "target process group termination failed"
+	case strings.Contains(message, "target process group kill failed"):
+		return "target process group kill failed"
+	case strings.Contains(message, "process group identity mismatch"):
+		return "process group identity mismatch"
+	default:
+		return "process wait failed"
+	}
 }
 
 type batchTarget struct {
