@@ -1333,6 +1333,10 @@ func debugProcessErrorMessage(err error, fallback string) string {
 		"workspace trust required",
 		"project not found",
 		"build profile not found",
+		"CMake File API boundary failure",
+		"CMake File API limit failure",
+		"invalid CMake File API reply",
+		"CMake File API reply unavailable",
 	} {
 		if strings.Contains(message, category) {
 			return category

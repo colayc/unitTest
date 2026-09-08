@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -659,6 +660,9 @@ func (c *Coordinator) Succeeded(
 		state.Profile.BinaryDir, state.AllowedRoots, state.Profile,
 	)
 	if err != nil {
+		if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+			return fmt.Errorf("%w: %s", ErrConfigureRequired, classifyConfigureReplyFailure(err))
+		}
 		return ErrConfigureRequired
 	}
 	byID := make(map[string]string, len(reply.Targets))
@@ -692,6 +696,19 @@ func (c *Coordinator) Succeeded(
 			ConfiguredAt:    c.dependencies.now(),
 		},
 	)
+}
+
+func classifyConfigureReplyFailure(err error) string {
+	switch {
+	case errors.Is(err, cmake.ErrFileAPIBoundary):
+		return "CMake File API boundary failure"
+	case errors.Is(err, cmake.ErrFileAPILimit):
+		return "CMake File API limit failure"
+	case errors.Is(err, cmake.ErrFileAPIReply):
+		return "invalid CMake File API reply"
+	default:
+		return "CMake File API reply unavailable"
+	}
 }
 
 type configureStepState struct {
