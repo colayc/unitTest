@@ -660,7 +660,10 @@ func (c *Coordinator) Succeeded(
 		state.Profile.BinaryDir, state.AllowedRoots, state.Profile,
 	)
 	if err != nil {
-		return fmt.Errorf("%w: %s", ErrConfigureRequired, classifyConfigureReplyFailure(err))
+		if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+			return fmt.Errorf("%w: %s", ErrConfigureRequired, classifyConfigureReplyFailure(err))
+		}
+		return ErrConfigureRequired
 	}
 	byID := make(map[string]string, len(reply.Targets))
 	for _, target := range reply.Targets {
@@ -681,7 +684,10 @@ func (c *Coordinator) Succeeded(
 	)
 	fingerprint := cmake.ConfigureFingerprint(input)
 	if fingerprint == "" {
-		return fmt.Errorf("%w: %s", ErrConfigureRequired, classifyFingerprintFailure(input))
+		if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+			return fmt.Errorf("%w: %s", ErrConfigureRequired, classifyFingerprintFailure(input))
+		}
+		return ErrConfigureRequired
 	}
 	return c.config.Configurations.PutBuildConfiguration(
 		ctx,

@@ -1125,9 +1125,8 @@ func (m *Manager) persistFinished(
 		}
 	}
 	errorMessage := outcomeErrorMessage(outcome)
-	errorMessage = debugProcessErrorMessage(result.Err, errorMessage)
-	if current.Kind == KindCMakeBuild && outcome == OutcomeInfrastructureFailed && result.Err == nil {
-		errorMessage = "missing process completion error"
+	if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+		errorMessage = debugProcessErrorMessage(result.Err, errorMessage)
 	}
 	finished, err := ApplyTransition(current, Transition{
 		From: current.Status, To: StatusFinished, Outcome: outcome, At: finishedAt,
