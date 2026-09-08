@@ -163,6 +163,7 @@ func TestManagerRunsSuccessfulStepObserverBeforeStartingNextStep(t *testing.T) {
 	}
 	first.complete(task.ProcessResult{ExitCode: 0})
 	f.awaitEventType(t, task.EventTaskStepStarted, 2)
+	awaitProcessStart(t, second)
 	if observer.calls != 1 || observer.taskID != started.ID || observer.step.ID != "first" {
 		t.Fatalf("observer = %#v", observer)
 	}
