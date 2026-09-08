@@ -25,6 +25,9 @@ if(WIN32)
   add_test(NAME coverage-tests COMMAND coverage-tests)
 else()
   include("${CMAKE_CURRENT_LIST_DIR}/linux-inputs.cmake")
+  # CppUTest 4.0 declares a pre-3.5 minimum. CMake 4.x no longer enables
+  # that compatibility mode unless the embedding project opts in explicitly.
+  set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
   set(TESTS OFF CACHE BOOL "" FORCE)
   add_subdirectory("${UTIDE_TEST_CPPUTEST_ROOT}" "${CMAKE_CURRENT_BINARY_DIR}/cpputest" EXCLUDE_FROM_ALL)
   target_compile_options(CppUTest PRIVATE -fno-profile-arcs -fno-test-coverage)
