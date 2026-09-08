@@ -856,6 +856,7 @@ func (execution *execution) Interpret(
 		return task.StepVerdictDefault, err
 	}
 	execution.ensureCoverageStarted()
+	debugCoveragef("coverage process result kind %s exit %d timed-out %t error %v", step.Kind, result.ExitCode, result.TimedOut, result.Err)
 	switch step.Kind {
 	case task.StepCoverageConfigure:
 		if result.ExitCode != 0 || result.TimedOut {
@@ -923,8 +924,8 @@ func (execution *execution) ObserveOutput(
 		return err
 	}
 	execution.ensureCoverageStarted()
-	if step.Kind == task.StepCoverageConfigure {
-		debugCoveragef("coverage configure output from %s %s: %s", output.Source, output.Stream, string(output.Data))
+	if step.Kind != task.StepCoverageTest {
+		debugCoveragef("coverage process output from %s %s: %s", output.Source, output.Stream, string(output.Data))
 	}
 	if step.Kind == task.StepCoverageTest {
 		execution.mu.Lock()
