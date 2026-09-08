@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -109,7 +110,7 @@ func prepareEvidence(root string) (*PreparedEvidence, error) {
 			return Manifest{}, errors.Join(ErrInvalidEvidence, errors.New("prepared evidence context invalid"))
 		}
 		if err := p.state.prepare(observed); err != nil {
-			return Manifest{}, errors.Join(ErrInvalidEvidence, errors.New("prepared evidence notes changed"), err)
+			return Manifest{}, errors.Join(ErrInvalidEvidence, errors.New("prepared evidence notes changed"), err, fmt.Errorf("expected=%#v observed=%#v", sealedNotes, observed))
 		}
 		nowNotes, nowData, err := scanEvidence(ctx, state.fd, "", 0)
 		if err != nil {
