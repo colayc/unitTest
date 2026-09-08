@@ -552,10 +552,7 @@ func TestDescriptorRejectsExistingGcovrCollisionWithoutRemovingIt(t *testing.T) 
 	}
 }
 
-func TestDescriptorFailsBeforeGcovrCreationWithoutAtomicCleanupAuthority(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows has retained DELETE-handle cleanup authority")
-	}
+func TestDescriptorUsesAtomicCleanupAuthority(t *testing.T) {
 	base := strictTestTempDir(t)
 	coverageRoot, root := filepath.Join(base, "coverage"), filepath.Join(base, "root")
 	objects, gcov := filepath.Join(base, "objects"), filepath.Join(base, "gcov")
@@ -571,11 +568,12 @@ func TestDescriptorFailsBeforeGcovrCreationWithoutAtomicCleanupAuthority(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if owned, err := descriptor.WriteAtomic(descriptorCapabilitiesForTest(t, coverageRoot, root, objects, gcov)); err == nil || owned != nil {
-		if owned != nil {
-			_ = owned.Close()
-		}
-		t.Fatal("WriteAtomic created a task root without atomic cleanup authority")
+	owned, err := descriptor.WriteAtomic(descriptorCapabilitiesForTest(t, coverageRoot, root, objects, gcov))
+	if err != nil || owned == nil {
+		t.Fatalf("WriteAtomic() = (%v, %v), want cleanup-authorized descriptor", owned, err)
+	}
+	if err := owned.Close(); err != nil {
+		t.Fatalf("Close() = %v", err)
 	}
 	if _, err := os.Lstat(filepath.Join(coverageRoot, "gcovr")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("unsafe cleanup authority left gcovr residue: %v", err)

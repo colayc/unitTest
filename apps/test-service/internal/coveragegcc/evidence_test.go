@@ -120,7 +120,16 @@ func TestEvidenceWindowsHasNoSideEffects(t *testing.T) {
 
 func evidenceRoot(t *testing.T) string {
 	t.Helper()
-	root := filepath.Join(t.TempDir(), "objects")
+	base := filepath.Join("..", "..", "..", "..", ".task4-scratch", "coveragegcc")
+	if err := os.MkdirAll(base, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	directory, err := os.MkdirTemp(base, "case-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	root := filepath.Join(directory, "objects")
 	if err := os.Mkdir(root, 0o700); err != nil {
 		t.Fatal(err)
 	}

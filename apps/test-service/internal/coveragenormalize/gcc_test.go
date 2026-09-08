@@ -145,7 +145,8 @@ func gccNormalizationFixture(t *testing.T) GCCInput {
 }
 
 func TestNormalizeGCCGolden(t *testing.T) {
-	document, _, err := NormalizeGCC(gccNormalizationFixture(t))
+	fixture := gccNormalizationFixture(t)
+	document, _, err := NormalizeGCC(fixture)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +161,7 @@ func TestNormalizeGCCGolden(t *testing.T) {
 	if !bytes.Equal(encoded, golden) {
 		t.Fatalf("GCC golden differs\n%s", encoded)
 	}
-	if bytes.Contains(encoded, []byte(filepath.VolumeName(gccNormalizationFixture(t).WorkspaceRoot))) {
+	if volume := filepath.VolumeName(fixture.WorkspaceRoot); volume != "" && bytes.Contains(encoded, []byte(volume)) {
 		t.Fatal("native path leaked")
 	}
 }

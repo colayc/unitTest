@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -128,14 +129,18 @@ func coverageProtocolExchange(t *testing.T, connection net.Conn, request protoco
 
 func coverageServerAggregate(t *testing.T) coveragecoord.QueuedAggregate {
 	t.Helper()
-	toolchainSnapshot, err := coverageToolchainSnapshot(toolchain.Instance{
+	instance := toolchain.Instance{
 		ID: "retained-toolchain", Family: func() toolchain.Family {
 			if platformForTest() == "windows" {
 				return toolchain.FamilyClangCL
 			}
 			return toolchain.FamilyGCC
 		}(), Version: "18.1.8", TargetArchitecture: "amd64",
-	}, platformForTest())
+	}
+	if platformForTest() == "linux" {
+		instance.Coverage = toolchain.CoverageCapability{GCov: "/usr/bin/gcov", GCovVersion: instance.Version, ToolsetIdentity: strings.Repeat("a", 64)}
+	}
+	toolchainSnapshot, err := coverageToolchainSnapshot(instance, platformForTest())
 	if err != nil {
 		t.Fatal(err)
 	}

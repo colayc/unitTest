@@ -613,7 +613,7 @@ func TestPreparedExecutionRejectsTaskRootReplacementBeforeOutputOpen(t *testing.
 	if runtime.GOOS == "windows" {
 		t.Skip("task-root replacement fixture requires rename/symlink support")
 	}
-	base := t.TempDir()
+	base := strictTestTempDir(t)
 	coverageRoot := filepath.Join(base, "coverage")
 	projectRoot := filepath.Join(base, "project")
 	objects := filepath.Join(base, "objects")

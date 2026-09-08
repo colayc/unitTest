@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -364,9 +365,11 @@ func persistCoverageForRuntimeRecovery(t *testing.T, store *taskstore.Store, sel
 	if platformForTest() == "windows" {
 		family = toolchain.FamilyClangCL
 	}
-	toolchainSnapshot, err := coverageToolchainSnapshot(toolchain.Instance{
-		ID: "retained-toolchain", Family: family, Version: "18.1.8", TargetArchitecture: "amd64",
-	}, platformForTest())
+	instance := toolchain.Instance{ID: "retained-toolchain", Family: family, Version: "18.1.8", TargetArchitecture: "amd64"}
+	if platformForTest() == "linux" {
+		instance.Coverage = toolchain.CoverageCapability{GCov: "/usr/bin/gcov", GCovVersion: instance.Version, ToolsetIdentity: strings.Repeat("a", 64)}
+	}
+	toolchainSnapshot, err := coverageToolchainSnapshot(instance, platformForTest())
 	if err != nil {
 		t.Fatal(err)
 	}
