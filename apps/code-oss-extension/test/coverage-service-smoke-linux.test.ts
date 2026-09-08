@@ -298,18 +298,16 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
       assert.ok("coverageRun" in caps && caps.coverageRun && "coverageReport" in caps && caps.coverageReport);
       let selected = await selectGccEventually(client);
       await config(workspace, framework, selected.profile.buildProfileId);
+      const outputSubscription = await client.subscribeEvents(0);
+      const taskOutput = collectTaskOutput(outputSubscription);
       for (let attempt = 0; ; attempt++) {
         selected = await selectGccEventually(client);
-        const outputSubscription = await client.subscribeEvents(0);
-        const taskOutput = collectTaskOutput(outputSubscription);
         try {
           const build = await client.startCMakeBuild({ idempotencyKey: randomBytes(16).toString("hex"), workspaceGeneration: selected.snapshot.workspaceGeneration, projectId, buildProfileId: selected.profile.buildProfileId, targetIds: [], jobs: 2, timeoutMs: timeout });
           await taskFinished(client, build.taskId, `${scenario} build`, taskOutput.output);
           break;
         } catch (error) {
           if (!(error instanceof ProtocolError) || error.code !== "WORKSPACE_CHANGED" || attempt >= 1) throw error;
-        } finally {
-          await taskOutput.close().catch(() => undefined);
         }
       }
       selected = await selectGccEventually(client);
@@ -326,8 +324,6 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
         // Workspace inspection legitimately includes source URIs; only the
         // coverage/run/report/artifact exchange is subject to this leak gate.
         wire = []; wireSize = 0; wireOverflow = false;
-        const coverageOutputSubscription = await client.subscribeEvents(0);
-        const coverageTaskOutput = collectTaskOutput(coverageOutputSubscription);
         try {
           const initial = await client.startCoverage({ idempotencyKey: randomBytes(16).toString("hex"), workspaceGeneration: selected.snapshot.workspaceGeneration, projectId, coverageProfileId, catalogRevision: catalog.revision, selection: { mode: TestSelectionModeV14.All }, repeatCount: 1, timeoutMs: fault === "timeout" ? 120_000 : timeout });
           if (fault === "cancel") {
@@ -356,7 +352,7 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
             assert.equal(run.reportId, undefined);
           } else {
             const expectedCoverageOutcome = fault === "crash" ? "partial" : "available";
-            const output = coverageTaskOutput.output.get(initial.taskId) ?? "";
+            const output = taskOutput.output.get(initial.taskId) ?? "";
             assert.equal(
               run.outcome,
               expectedCoverageOutcome,
@@ -380,10 +376,9 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
           throw new Error(`coverage scenario ${scenario} repeat ${repeat}: ${detail}${serviceStderr ? `; service-stderr=${serviceStderr}` : ""}`);
-        } finally {
-          await coverageTaskOutput.close().catch(() => undefined);
         }
       }
+      await taskOutput.close().catch(() => undefined);
       await manager.stop(); manager = undefined;
     }
     const evidence = buildLinuxGccCoverageEvidence({ schemaVersion: 1, platform: "linux-x64", toolchain: { family: "gcc", digest: toolchainDigest }, bundleDigest, frameworkBundleDigest: frameworkBoundary.identityDigest, cases, faults, determinism: { coverageJsonByteIdentical: true, sha256Identical: true }, startedAt, finishedAt: new Date().toISOString() });
