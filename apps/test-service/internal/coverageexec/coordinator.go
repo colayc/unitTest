@@ -848,6 +848,7 @@ func (execution *execution) Interpret(
 	step task.ExecutionStep,
 	result task.ProcessResult,
 ) (task.StepVerdict, error) {
+	debugCoveragef("coverage interpret kind %s exit %d timed-out %t error %v children %d", step.Kind, result.ExitCode, result.TimedOut, result.Err, len(result.Children))
 	if execution == nil || ctx == nil || current.ID != execution.taskID ||
 		result.Err != nil {
 		return task.StepVerdictDefault, task.ErrInvalidArgument
@@ -924,6 +925,9 @@ func (execution *execution) ObserveOutput(
 		return err
 	}
 	execution.ensureCoverageStarted()
+	if output.Source == "process-host" {
+		debugCoveragef("coverage process-host output %s: %s", output.Stream, string(output.Data))
+	}
 	if step.Kind != task.StepCoverageTest {
 		debugCoveragef("coverage process output from %s %s: %s", output.Source, output.Stream, string(output.Data))
 	}
