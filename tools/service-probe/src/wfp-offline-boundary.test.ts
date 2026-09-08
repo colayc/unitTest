@@ -434,7 +434,7 @@ test("frame reader rejects a pending Hello or Bye read when its socket closes", 
     /guardian frame is invalid/u,
   );
   socket.destroy();
-  server.close();
+  await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 
 test("malformed guardian frames terminate and fail closed", async () => {
