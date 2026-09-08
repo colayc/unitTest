@@ -707,6 +707,19 @@ func classifyConfigureReplyFailure(err error) string {
 	case errors.Is(err, cmake.ErrFileAPIBoundary):
 		return "CMake File API boundary failure"
 	case errors.Is(err, cmake.ErrFileAPILimit):
+		message := err.Error()
+		for _, detail := range []struct{ fragment, category string }{
+			{"consumed files exceed", "CMake File API consumed file limit"},
+			{"total consumed bytes exceed", "CMake File API total bytes limit"},
+			{"CMake inputs exceed", "CMake File API input count limit"},
+			{"cache entries exceed", "CMake File API cache entry limit"},
+			{"reply directory entries exceed", "CMake File API reply directory limit"},
+			{"reply index/error candidates exceed", "CMake File API reply candidate limit"},
+		} {
+			if strings.Contains(message, detail.fragment) {
+				return detail.category
+			}
+		}
 		return "CMake File API limit failure"
 	case errors.Is(err, cmake.ErrFileAPIReply):
 		if os.IsNotExist(err) {

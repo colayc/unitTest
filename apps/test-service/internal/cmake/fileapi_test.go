@@ -1123,7 +1123,7 @@ func TestFileAPIReplyEnforcesTargetDetailTotalFileAndTotalByteLimits(t *testing.
 		padding int
 	}{
 		{name: "target detail files", count: 257},
-		{name: "total files", count: 136},
+		{name: "total files", count: maxFileAPITotalFiles + 1},
 		{name: "total bytes", count: 10, padding: 450 * 1024},
 	}
 	for _, test := range tests {
