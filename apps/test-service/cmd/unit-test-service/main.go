@@ -60,6 +60,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	flags.Var(&trustedWorkspace, "trusted-workspace", "allow workspace build execution (explicit true or false)")
 	cmakeBundleRoot := flags.String("cmake-bundle-root", "", "verified CMake bundle root")
 	devCMakeExecutable := flags.String("dev-cmake-executable", "", "development CMake executable")
+	debugProcessHostFailures := flags.Bool("debug-process-host-failures", false, "expose fixed process-host failure categories")
 	prepareTokenFilePath := flags.String("prepare-token-file", "", "create an empty owner-only authentication token file")
 	processHost := flags.Bool("process-host", false, "run the internal process host")
 	probeSupervisor := flags.Bool("probe-supervisor", false, "run the internal probe supervisor")
@@ -83,7 +84,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		case "prepare-token-file":
 			prepareModeFlagProvided = true
 		case "endpoint", "token-file", "data-dir", "workspace-root", "trusted-workspace",
-			"cmake-bundle-root", "dev-cmake-executable":
+			"cmake-bundle-root", "dev-cmake-executable", "debug-process-host-failures":
 			serviceModeFlagProvided = true
 		case "process-host":
 			processHostFlagProvided = true
@@ -162,6 +163,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if *endpoint == "" || *tokenFile == "" || *dataDir == "" || *workspaceRoot == "" {
 		fmt.Fprintln(stderr, "--endpoint, --token-file, --data-dir, and --workspace-root are required")
 		return 2
+	}
+	if *debugProcessHostFailures {
+		_ = os.Setenv("UT_DEBUG_PROCESS_HOST_FAILURES", "1")
 	}
 	token, err := consumeTokenFileForRun(*tokenFile)
 	if err != nil {
