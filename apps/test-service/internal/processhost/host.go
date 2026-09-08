@@ -243,7 +243,7 @@ func Run(ctx context.Context, platform Platform, control io.Reader, status io.Wr
 	target, err := platform.Start(*start.Spec, stdout, stderr)
 	if err != nil || target == nil {
 		message := "target process could not start"
-		if os.Getenv("UNIT_TEST_IDE_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+		if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
 			message = processStartFailureMessage(err)
 		}
 		_ = writeStatus(status, processcontrol.HostStatus{Kind: "error", ErrorCode: "PROCESS_START_FAILED", Message: message})
@@ -266,7 +266,7 @@ func Run(ctx context.Context, platform Platform, control io.Reader, status io.Wr
 	}
 	errorCode := ""
 	message := ""
-	if result.err != nil && os.Getenv("UNIT_TEST_IDE_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+	if result.err != nil && os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
 		errorCode = "PROCESS_WAIT_FAILED"
 		message = processWaitFailureMessage(result.err)
 	} else if result.err != nil {
