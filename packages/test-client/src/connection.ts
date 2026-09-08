@@ -267,7 +267,10 @@ export class Connection {
     for (const listener of [...this.#closeListeners]) listener(error);
     this.#eventListeners.clear();
     this.#closeListeners.clear();
-    this.stream.destroy();
+    // Preserve the initiating protocol error so callers can distinguish a
+    // deliberate fail-closed shutdown (for example an event sequence gap)
+    // from an unannounced peer disconnect.
+    this.stream.destroy(error);
   }
 }
 
