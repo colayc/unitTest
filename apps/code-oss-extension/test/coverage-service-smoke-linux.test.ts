@@ -60,11 +60,14 @@ async function selectGccEventually(client: ProtocolClient): Promise<Selected> {
   }
 }
 
-async function taskFinished(client: ProtocolClient, id: string) {
+async function taskFinished(client: ProtocolClient, id: string, label = "native task") {
   const deadline = Date.now() + timeout;
   for (;;) {
     const task = await client.getTask(id);
-    if (task.status === "finished") { assert.equal(task.outcome, "succeeded"); return task; }
+    if (task.status === "finished") {
+      if (task.outcome !== "succeeded") throw new Error(`${label} finished with outcome ${task.outcome ?? "unknown"}${task.errorCode ? ` (${task.errorCode})` : ""}`);
+      return task;
+    }
     if (Date.now() >= deadline) throw new Error("native task completion timeout");
     await delay(100);
   }
@@ -256,12 +259,12 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
         selected = await selectGccEventually(client);
         try {
           const build = await client.startCMakeBuild({ idempotencyKey: randomBytes(16).toString("hex"), workspaceGeneration: selected.snapshot.workspaceGeneration, projectId, buildProfileId: selected.profile.buildProfileId, targetIds: [], jobs: 2, timeoutMs: timeout });
-          await taskFinished(client, build.taskId); break;
+          await taskFinished(client, build.taskId, `${scenario} build`); break;
         } catch (error) { if (!(error instanceof ProtocolError) || error.code !== "WORKSPACE_CHANGED" || attempt >= 1) throw error; }
       }
       selected = await selectGccEventually(client);
       const discovery = await client.discoverTests({ idempotencyKey: randomBytes(16).toString("hex"), projectId, profileId: selected.profile.buildProfileId });
-      await taskFinished(client, discovery.taskId);
+      await taskFinished(client, discovery.taskId, `${scenario} discovery`);
       const catalog = await client.getTestCatalog({ projectId, profileId: selected.profile.buildProfileId, limit: 100 });
       assert.equal(catalog.partial, false);
       assert.equal(catalog.items.filter((item) => item.kind === "case").length, 2);
