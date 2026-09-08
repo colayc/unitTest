@@ -105,12 +105,24 @@ func prepareEvidence(root string) (*PreparedEvidence, error) {
 		return nil
 	}
 	p.state.seal = func(ctx context.Context, observed []Entry, outcomes []testrun.InvocationOutcome) (Manifest, error) {
-		if ctx == nil || ctx.Err() != nil || p.state.prepare(observed) != nil {
-			return Manifest{}, ErrInvalidEvidence
+		if ctx == nil || ctx.Err() != nil {
+			return Manifest{}, errors.Join(ErrInvalidEvidence, errors.New("prepared evidence context invalid"))
+		}
+		if err := p.state.prepare(observed); err != nil {
+			return Manifest{}, errors.Join(ErrInvalidEvidence, errors.New("prepared evidence notes changed"), err)
 		}
 		nowNotes, nowData, err := scanEvidence(ctx, state.fd, "", 0)
-		if err != nil || !sameEvidenceEntries(sealedNotes, nowNotes) || validateEvidenceEntries(nowNotes, nowData) != nil || validateEvidenceData(nowNotes, nowData, outcomes) != nil {
-			return Manifest{}, ErrInvalidEvidence
+		if err != nil {
+			return Manifest{}, errors.Join(ErrInvalidEvidence, errors.New("prepared evidence scan failed"), err)
+		}
+		if !sameEvidenceEntries(sealedNotes, nowNotes) {
+			return Manifest{}, errors.Join(ErrInvalidEvidence, errors.New("prepared evidence notes differ"))
+		}
+		if err := validateEvidenceEntries(nowNotes, nowData); err != nil {
+			return Manifest{}, errors.Join(ErrInvalidEvidence, errors.New("prepared evidence entries invalid"), err)
+		}
+		if err := validateEvidenceData(nowNotes, nowData, outcomes); err != nil {
+			return Manifest{}, errors.Join(ErrInvalidEvidence, errors.New("prepared evidence data invalid"), err)
 		}
 		return newEvidenceManifest(state, nowNotes, nowData, evidenceReasons(outcomes), true)
 	}
