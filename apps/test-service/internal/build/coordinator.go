@@ -709,6 +709,12 @@ func classifyConfigureReplyFailure(err error) string {
 	case errors.Is(err, cmake.ErrFileAPILimit):
 		return "CMake File API limit failure"
 	case errors.Is(err, cmake.ErrFileAPIReply):
+		if os.IsNotExist(err) {
+			return "CMake File API input missing"
+		}
+		if os.IsPermission(err) {
+			return "CMake File API input permission denied"
+		}
 		message := err.Error()
 		for _, detail := range []struct{ fragment, category string }{
 			{"current CMake reply is an error", "CMake File API current reply error"},

@@ -245,14 +245,16 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
       const localCppUTestRoot = join(workspace, ".framework/cpputest");
       const localUnityRoot = join(workspace, ".framework/unity");
       const localCMakeHelper = join(workspace, ".framework/UnitTestIDE.cmake");
+      const localUnityRunnerGenerator = join(workspace, ".framework/unity-runner-generator");
       await cp(inputs.UNIT_TEST_IDE_TEST_CPPUTEST_ROOT!, localCppUTestRoot, { recursive: true });
       await cp(inputs.UNIT_TEST_IDE_TEST_UNITY_ROOT!, localUnityRoot, { recursive: true });
       await cp(inputs.UNIT_TEST_IDE_TEST_CMAKE_HELPER!, localCMakeHelper);
+      await cp(inputs.UNIT_TEST_IDE_TEST_UNITY_RUNNER_GENERATOR!, localUnityRunnerGenerator);
       await writeFile(join(workspace, "linux-inputs.cmake"), [
         `set(UTIDE_TEST_CPPUTEST_ROOT ${cmakePath(localCppUTestRoot)})`,
         `set(UTIDE_TEST_UNITY_ROOT ${cmakePath(localUnityRoot)})`,
         `set(UTIDE_TEST_CMAKE_HELPER ${cmakePath(localCMakeHelper)})`,
-        `set(UTIDE_UNITY_RUNNER_GENERATOR ${cmakePath(inputs.UNIT_TEST_IDE_TEST_UNITY_RUNNER_GENERATOR!)})`, ""
+        `set(UTIDE_UNITY_RUNNER_GENERATOR ${cmakePath(localUnityRunnerGenerator)})`, ""
       ].join("\n"));
       const marker = fault ? await injectFixtureFault(workspace, fault) : undefined;
       await config(workspace, framework);
