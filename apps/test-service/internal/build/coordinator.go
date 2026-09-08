@@ -601,9 +601,23 @@ func coverageToolsetIdentity(instance toolchain.Instance, coverageRequested bool
 		}
 		return instance.Coverage.ToolsetIdentity, nil
 	case toolchain.FamilyGCC:
-		// GCC remains a valid ordinary build toolchain. Its coverage producer is
-		// intentionally rejected until a complete discovered capability exists.
-		return "", task.ErrInvalidArgument
+		coverage := instance.Coverage
+		if instance.Version == "" || coverage.GCov == "" ||
+			coverage.GCovVersion != instance.Version ||
+			!validLowerSHA256(coverage.ToolsetIdentity) {
+			return "", task.ErrInvalidArgument
+		}
+		identity := toolchain.GCCToolsetIdentity(
+			instance.Version,
+			[]string{instance.CCompiler, instance.CXXCompiler, coverage.GCov},
+			[]toolchain.ExecutableEvidence{
+				coverage.CompilerEvidence, coverage.CXXCompilerEvidence, coverage.GCovEvidence,
+			},
+		)
+		if identity == "" || identity != coverage.ToolsetIdentity {
+			return "", task.ErrInvalidArgument
+		}
+		return identity, nil
 	default:
 		return "", task.ErrInvalidArgument
 	}
