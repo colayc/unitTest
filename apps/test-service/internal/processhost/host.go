@@ -242,7 +242,11 @@ func Run(ctx context.Context, platform Platform, control io.Reader, status io.Wr
 	}
 	target, err := platform.Start(*start.Spec, stdout, stderr)
 	if err != nil || target == nil {
-		_ = writeStatus(status, processcontrol.HostStatus{Kind: "error", ErrorCode: "PROCESS_START_FAILED", Message: "target process could not start"})
+		message := "target process could not start"
+		if os.Getenv("UNIT_TEST_IDE_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+			message = processStartFailureMessage(err)
+		}
+		_ = writeStatus(status, processcontrol.HostStatus{Kind: "error", ErrorCode: "PROCESS_START_FAILED", Message: message})
 		return 1
 	}
 	if err := writeStatus(status, processcontrol.HostStatus{Kind: "started", PID: target.PID(), ProcessGroup: target.ProcessGroup()}); err != nil {
@@ -296,6 +300,23 @@ func processWaitFailureMessage(err error) string {
 		return "process group identity mismatch"
 	default:
 		return "process wait failed"
+	}
+}
+
+func processStartFailureMessage(err error) string {
+	if err == nil {
+		return "target process could not start"
+	}
+	message := err.Error()
+	switch {
+	case strings.Contains(message, "target identity unavailable"):
+		return "target identity unavailable"
+	case strings.Contains(message, "permission denied"):
+		return "target permission denied"
+	case strings.Contains(message, "no such file"):
+		return "target executable or working directory missing"
+	default:
+		return "target process could not start"
 	}
 }
 

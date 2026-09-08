@@ -428,6 +428,13 @@ func (process *unixProcess) Start(ctx context.Context) error {
 
 	status, err := process.readStatus(ctx)
 	if err != nil || status.Kind == "error" {
+		if status.Kind == "error" && status.ErrorCode != "" && status.Message != "" && os.Getenv("UNIT_TEST_IDE_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+			process.sendOutput(Output{
+				Source: "process-host",
+				Stream: StreamStderr,
+				Data:   []byte(status.ErrorCode + ": " + status.Message),
+			})
+		}
 		process.closeControl()
 		process.finishAfterHost(Result{Err: errProcessStartFailed})
 		return errProcessStartFailed
