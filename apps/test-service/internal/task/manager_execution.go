@@ -1011,7 +1011,7 @@ func (m *Manager) persistTerminal(
 		updatedTask := current.task
 		updatedTask.ActiveStep = ""
 		steps := terminalStepMutations(current, result, outcome, failPending, finishedAt)
-		finished, err := m.persistFinished(current, updatedTask, outcome, deleteLease, steps, active)
+		finished, err := m.persistFinished(current, updatedTask, result, outcome, deleteLease, steps, active)
 		if !errors.Is(err, ErrConflict) {
 			return finished, err
 		}
@@ -1111,6 +1111,7 @@ func terminalStepMutations(
 func (m *Manager) persistFinished(
 	owner *activeTask,
 	current Task,
+	result ProcessResult,
 	outcome Outcome,
 	deleteLease bool,
 	steps []StepMutation,
@@ -1123,9 +1124,13 @@ func (m *Manager) persistFinished(
 			return current, ErrStorageUnavailable
 		}
 	}
+	errorMessage := outcomeErrorMessage(outcome)
+	if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+		errorMessage = debugProcessErrorMessage(result.Err, errorMessage)
+	}
 	finished, err := ApplyTransition(current, Transition{
 		From: current.Status, To: StatusFinished, Outcome: outcome, At: finishedAt,
-		ErrorCode: outcomeErrorCode(outcome), ErrorMessage: outcomeErrorMessage(outcome),
+		ErrorCode: outcomeErrorCode(outcome), ErrorMessage: errorMessage,
 	})
 	if err != nil {
 		return current, err
@@ -1150,7 +1155,7 @@ func (m *Manager) persistFinished(
 		outcome = OutcomeInfrastructureFailed
 		finished, completionErr = ApplyTransition(current, Transition{
 			From: current.Status, To: StatusFinished, Outcome: outcome, At: finishedAt,
-			ErrorCode: outcomeErrorCode(outcome), ErrorMessage: outcomeErrorMessage(outcome),
+			ErrorCode: outcomeErrorCode(outcome), ErrorMessage: debugProcessErrorMessage(result.Err, outcomeErrorMessage(outcome)),
 		})
 		if completionErr == nil {
 			steps = terminalStepMutations(
@@ -1195,7 +1200,7 @@ func (m *Manager) persistFinished(
 		outcome = OutcomeInfrastructureFailed
 		finished, artifactErr = ApplyTransition(current, Transition{
 			From: current.Status, To: StatusFinished, Outcome: outcome, At: finishedAt,
-			ErrorCode: outcomeErrorCode(outcome), ErrorMessage: outcomeErrorMessage(outcome),
+			ErrorCode: outcomeErrorCode(outcome), ErrorMessage: debugProcessErrorMessage(result.Err, outcomeErrorMessage(outcome)),
 		})
 		if artifactErr == nil {
 			steps = terminalStepMutations(
@@ -1301,6 +1306,30 @@ func (m *Manager) persistFinished(
 		return stored, ErrStorageUnavailable
 	}
 	return stored, nil
+}
+
+// debugProcessErrorMessage exposes only fixed process-host failure categories
+// under the opt-in CI diagnostic switch. It never transports paths or command
+// lines through the task protocol.
+func debugProcessErrorMessage(err error, fallback string) string {
+	if err == nil {
+		return fallback
+	}
+	message := err.Error()
+	for _, category := range []string{
+		"target process group remained alive",
+		"target process group termination failed",
+		"target process group kill failed",
+		"process group identity mismatch",
+		"target identity unavailable",
+		"target permission denied",
+		"target executable or working directory missing",
+	} {
+		if strings.Contains(message, category) {
+			return category
+		}
+	}
+	return fallback
 }
 
 func rollbackFinalizedArtifacts(owner *activeTask, artifacts []Artifact) error {

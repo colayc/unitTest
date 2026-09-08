@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -443,6 +444,9 @@ func (process *unixProcess) Start(ctx context.Context) error {
 		}
 		process.closeControl()
 		process.finishAfterHost(Result{Err: errProcessStartFailed})
+		if status.Message != "" && os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+			return fmt.Errorf("%w: %s", errProcessStartFailed, status.Message)
+		}
 		return errProcessStartFailed
 	}
 	if len(process.specValue.Batch) == 0 &&
@@ -609,6 +613,9 @@ func (process *unixProcess) watchExit() {
 				})
 			}
 			result.Err = errProcessHostFailed
+			if status.Message != "" && os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+				result.Err = fmt.Errorf("%w: %s", errProcessHostFailed, status.Message)
+			}
 		}
 		break
 	}
