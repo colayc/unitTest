@@ -196,6 +196,12 @@ func (runner *unixRunner) Prepare(ctx context.Context, spec Spec, taskID, servic
 	host.Stderr = stderrWriter
 	host.ExtraFiles = []*os.File{statusWriter}
 	host.Env = append(SanitizeEnvironment(nil, nil), "UNIT_TEST_IDE_STATUS_HANDLE="+strconv.Itoa(statusHandleNumber))
+	// Keep the process-host failure classifier opt-in and path-free. This is
+	// deliberately outside the service-owned UNIT_TEST_IDE_/UTIDE_ namespaces
+	// so normal target environment sanitization cannot enable it accidentally.
+	if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+		host.Env = append(host.Env, "UT_DEBUG_PROCESS_HOST_FAILURES=1")
+	}
 	host.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Pdeathsig: syscall.SIGTERM}
 	identityReady := make(chan struct{})
 	var hostIdentity string
