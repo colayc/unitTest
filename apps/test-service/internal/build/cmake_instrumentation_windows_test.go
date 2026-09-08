@@ -16,11 +16,15 @@ import (
 	"unit-test-ide.local/test-service/internal/cmake"
 	"unit-test-ide.local/test-service/internal/coveragellvm"
 	"unit-test-ide.local/test-service/internal/task"
+	"unit-test-ide.local/test-service/internal/toolchain"
 )
 
 func TestPlannerAcceptsRetainedCoverageInstrumentation(t *testing.T) {
 	activatePlannerWFPRegistration(t)
 	fixture := newPlannerFixture(t)
+	// This fixture exercises the retained LLVM instrumentation contract; the
+	// generic planner fixture defaults to a GCC toolchain for Unix tests.
+	fixture.toolchain.Family = toolchain.FamilyClangCL
 	instrumentationRoot := filepath.Join(fixture.dataRoot, "retained-instrumentation")
 	makeOwnerOnlyPlannerInstrumentationRoot(t, instrumentationRoot)
 	instrumentation, err := coveragellvm.WriteInstrumentation(instrumentationRoot)
