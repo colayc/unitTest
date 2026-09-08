@@ -434,6 +434,8 @@ test("frame reader rejects a pending Hello or Bye read when its socket closes", 
     /guardian frame is invalid/u,
   );
   socket.destroy();
+  const closeAllConnections = (server as net.Server & { closeAllConnections?: () => void }).closeAllConnections;
+  closeAllConnections?.call(server);
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 
