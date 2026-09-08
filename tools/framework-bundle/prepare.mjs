@@ -17,7 +17,7 @@ const approved = {
   unity: { version: "2.6.1", license: "MIT", url: "https://github.com/ThrowTheSwitch/Unity/archive/refs/tags/v2.6.1.tar.gz", filename: "Unity-2.6.1.tar.gz", sha256: "b41a66d45a6b99758fb3202ace6178177014d52fc524bf1f72687d93e9867292", sourceDirectory: "Unity-2.6.1", treeSha256: "abfb7b2b7aec36739a7b138490d2e9dd178cc4f00e806ed372cbb8cfe98f73ae" }
 };
 const approvedFixtureTools = {
-  cmakeHelper: { path: "sdk/cmake/UnitTestIDE.cmake", sha256: "2297b37584d134b901f0da0dea5d60d67853a496dbf18874c220643ffd2cd2da" },
+  cmakeHelper: { path: "sdk/cmake/UnitTestIDE.cmake", sha256: "101ba1a2cb15b54dfbdce49c5d92d9e6a32ffef35e038d4aaf96ae9f4746f4d3" },
   unityRunnerGenerator: { name: "unity-runner-generator", schemaVersion: 1, version: "1.0.0", runnerProtocol: "utide.runner.v1" }
 };
 const downloadLimit = 64 * 1024 * 1024;

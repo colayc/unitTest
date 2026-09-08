@@ -21,7 +21,7 @@ const EXPECTED: Readonly<Record<LinuxFrameworkID, Readonly<{ version: string; li
   }
 };
 const EXPECTED_FIXTURE_TOOLS = {
-  cmakeHelper: { path: "sdk/cmake/UnitTestIDE.cmake", sha256: "2297b37584d134b901f0da0dea5d60d67853a496dbf18874c220643ffd2cd2da" },
+  cmakeHelper: { path: "sdk/cmake/UnitTestIDE.cmake", sha256: "101ba1a2cb15b54dfbdce49c5d92d9e6a32ffef35e038d4aaf96ae9f4746f4d3" },
   unityRunnerGenerator: { name: "unity-runner-generator", schemaVersion: 1, version: "1.0.0", runnerProtocol: "utide.runner.v1" }
 } as const;
 
