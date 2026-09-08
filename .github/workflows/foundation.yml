@@ -261,20 +261,20 @@ jobs:
           GOPROXY: https://proxy.golang.org,direct
         run: go mod download
       - name: Verify fail-closed Linux offline namespace
-        run: node tools/linux-offline/run.mjs -- node tools/linux-offline/probe.mjs
-      - run: node tools/linux-offline/run.mjs -- pnpm verify
+        run: node tools/linux-offline/run.mjs --allow-sudo-root -- node tools/linux-offline/probe.mjs
+      - run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm verify
       - name: Build and consume locked CppUTest and Unity inputs
         run: |
-          node tools/linux-offline/run.mjs -- node tools/service-probe/build-service.mjs
-          node tools/linux-offline/run.mjs -- node tools/framework-bundle/consume.mjs --cmake "$CMAKE"
+          node tools/linux-offline/run.mjs --allow-sudo-root -- node tools/service-probe/build-service.mjs
+          node tools/linux-offline/run.mjs --allow-sudo-root -- node tools/framework-bundle/consume.mjs --cmake "$CMAKE"
       - name: Verify native Linux release contracts
-        run: node tools/linux-offline/run.mjs -- node --test tools/release/linux/runtime-mode-inventory.test.mjs tools/release/qualification.test.mjs tools/release/update.test.mjs tools/workspace-smoke/workspace-smoke.test.mjs
-      - run: node tools/linux-offline/run.mjs -- pnpm --filter @unit-test-ide/service-probe test:coverage-bundle
+        run: node tools/linux-offline/run.mjs --allow-sudo-root -- node --test tools/release/linux/runtime-mode-inventory.test.mjs tools/release/qualification.test.mjs tools/release/update.test.mjs tools/workspace-smoke/workspace-smoke.test.mjs
+      - run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm --filter @unit-test-ide/service-probe test:coverage-bundle
       # Exercise the real Unix Socket service contract; host smoke remains an honest SKIP without CODE_OSS_EXECUTABLE.
-      - run: node tools/linux-offline/run.mjs -- pnpm --filter code-oss-extension test:service-smoke
-      - run: node tools/linux-offline/run.mjs -- pnpm --filter code-oss-extension test:benchmark
-      - run: node tools/linux-offline/run.mjs -- pnpm --filter code-oss-extension test:host
-      - run: node tools/linux-offline/run.mjs -- pnpm test:e2e:native
+      - run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm --filter code-oss-extension test:service-smoke
+      - run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm --filter code-oss-extension test:benchmark
+      - run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm --filter code-oss-extension test:host
+      - run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm test:e2e:native
       - if: always()
         uses: actions/upload-artifact@v7
         with:
@@ -353,30 +353,30 @@ jobs:
           GOTOOLCHAIN: local
         run: go mod download
       - name: Verify fail-closed Linux namespace
-        run: node tools/linux-offline/run.mjs -- node tools/linux-offline/probe.mjs
+        run: node tools/linux-offline/run.mjs --allow-sudo-root -- node tools/linux-offline/probe.mjs
       - name: Run Go coverage unit and integration tests
         env:
           GOENV: "off"
           GOTOOLCHAIN: local
-        run: go test ./apps/test-service/... -count=1
+        run: node tools/linux-offline/run.mjs --allow-sudo-root -- go test ./apps/test-service/... -count=1
       - name: Run focused Go coverage race tests
         env:
           GOENV: "off"
           GOTOOLCHAIN: local
-        run: go test -race ./apps/test-service/internal/coverageplatform ./apps/test-service/internal/coveragegcc ./apps/test-service/internal/coveragebundle ./apps/test-service/internal/coverageexec -count=1
+        run: node tools/linux-offline/run.mjs --allow-sudo-root -- go test -race ./apps/test-service/internal/coverageplatform ./apps/test-service/internal/coveragegcc ./apps/test-service/internal/coveragebundle ./apps/test-service/internal/coverageexec -count=1
       - name: Vet the production Service
         env:
           GOENV: "off"
           GOTOOLCHAIN: local
-        run: go vet ./apps/test-service/...
+        run: node tools/linux-offline/run.mjs --allow-sudo-root -- go vet ./apps/test-service/...
       - name: Run TypeScript coverage boundary tests
-        run: pnpm --filter @unit-test-ide/service-probe test
+        run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm --filter @unit-test-ide/service-probe test
       - name: Run required offline Linux GCC framework smoke
         env:
           UNIT_TEST_IDE_TEST_COVERAGE_BUNDLE_ROOT: ${{ github.workspace }}/.superpowers/runtime/coverage-bundle/linux-x64
-        run: pnpm --filter code-oss-extension test:coverage-service-smoke:linux
+        run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm --filter code-oss-extension test:coverage-service-smoke:linux
       - name: Validate and close Linux GCC coverage evidence
-        run: pnpm --filter code-oss-extension validate:coverage-evidence:linux
+        run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm --filter code-oss-extension validate:coverage-evidence:linux
       - name: Upload closed Linux GCC coverage evidence
         if: always()
         uses: actions/upload-artifact@v7

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"reflect"
 	"regexp"
 	"strings"
@@ -233,6 +234,16 @@ func TestGCovrFixtureProvenancePinsBundleAndFixtureDigests(t *testing.T) {
 		if record.SHA256 != hex.EncodeToString(actual[:]) {
 			t.Fatalf("digest for %s = %s", name, hex.EncodeToString(actual[:]))
 		}
+	}
+}
+
+func TestGCovrProvenanceSourceCheckoutIsAlwaysLF(t *testing.T) {
+	output, err := exec.Command("git", "check-attr", "eol", "--", "testdata/fixture-source.c").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git check-attr: %v: %s", err, output)
+	}
+	if got, want := strings.TrimSpace(string(output)), "testdata/fixture-source.c: eol: lf"; got != want {
+		t.Fatalf("checkout attribute = %q, want %q", got, want)
 	}
 }
 
