@@ -64,11 +64,17 @@ function collectTaskOutput(subscription: EventSubscription) {
   const output = new Map<string, string>();
   const pump = (async () => {
     for await (const event of subscription) {
-      if (event.event !== "task.output") continue;
-      const text = (event as ProtocolTaskEvent & { payload: { text?: unknown } }).payload.text;
-      if (typeof text !== "string") continue;
       const previous = output.get(event.taskId) ?? "";
-      output.set(event.taskId, previous.length >= 32_768 ? previous : `${previous}${text}`.slice(0, 32_768));
+      if (event.event === "task.output") {
+        const text = (event as ProtocolTaskEvent & { payload: { text?: unknown } }).payload.text;
+        if (typeof text === "string") output.set(event.taskId, previous.length >= 32_768 ? previous : `${previous}${text}`.slice(0, 32_768));
+      } else if (event.event === "task.diagnostic") {
+        const diagnostic = (event as ProtocolTaskEvent & { payload: { diagnostic?: { code?: unknown; message?: unknown } } }).payload.diagnostic;
+        if (diagnostic && typeof diagnostic.code === "string" && typeof diagnostic.message === "string") {
+          const detail = `diagnostic=${diagnostic.code}: ${diagnostic.message}`;
+          output.set(event.taskId, previous.length >= 32_768 ? previous : `${previous}${previous ? "\n" : ""}${detail}`.slice(0, 32_768));
+        }
+      }
     }
   })();
   return { output, async close() { subscription.close(); await pump; } };
