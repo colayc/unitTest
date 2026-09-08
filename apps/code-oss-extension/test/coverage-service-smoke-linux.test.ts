@@ -329,11 +329,10 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
             assert.equal(run.reportId, undefined);
           } else {
             const expectedCoverageOutcome = fault === "crash" ? "partial" : "available";
-            const coverageTask = await client.getTask(initial.taskId);
             assert.equal(
               run.outcome,
               expectedCoverageOutcome,
-              `coverage ${scenario} outcome ${run.outcome ?? "<none>"} reason ${run.reason ?? "<none>"} task=${coverageTask.status}/${coverageTask.outcome ?? "<none>"} code=${coverageTask.errorCode ?? "<none>"} message=${coverageTask.errorMessage ?? "<none>"}`,
+              `coverage ${scenario} outcome ${run.outcome ?? "<none>"} reason ${run.reason ?? "<none>"}`,
             );
           assert.equal(run.reason, undefined);
           assert.equal(testRun.outcome, fault === "crash" ? "errored" : framework === "cpputest" ? "failed" : "passed");
