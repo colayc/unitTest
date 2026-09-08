@@ -316,8 +316,8 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
         wire = []; wireSize = 0; wireOverflow = false;
         const coverageOutputSubscription = await client.subscribeEvents(0);
         const coverageTaskOutput = collectTaskOutput(coverageOutputSubscription);
-        const initial = await client.startCoverage({ idempotencyKey: randomBytes(16).toString("hex"), workspaceGeneration: selected.snapshot.workspaceGeneration, projectId, coverageProfileId, catalogRevision: catalog.revision, selection: { mode: TestSelectionModeV14.All }, repeatCount: 1, timeoutMs: fault === "timeout" ? 120_000 : timeout });
         try {
+          const initial = await client.startCoverage({ idempotencyKey: randomBytes(16).toString("hex"), workspaceGeneration: selected.snapshot.workspaceGeneration, projectId, coverageProfileId, catalogRevision: catalog.revision, selection: { mode: TestSelectionModeV14.All }, repeatCount: 1, timeoutMs: fault === "timeout" ? 120_000 : timeout });
           if (fault === "cancel") {
             assert.ok(marker);
             const deadline = Date.now() + timeout;
