@@ -344,7 +344,7 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
           assert.equal(
             run.outcome,
             expectedCoverageOutcome,
-            `coverage ${scenario} outcome=${run.outcome ?? "<none>"} reason=${run.reason ?? "<none>"}`,
+            `coverage ${scenario} outcome ${run.outcome ?? "<none>"} reason ${run.reason ?? "<none>"}`,
           );
           assert.equal(run.reason, undefined);
           assert.equal(testRun.outcome, fault === "crash" ? "errored" : framework === "cpputest" ? "failed" : "passed");
