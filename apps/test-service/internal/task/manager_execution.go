@@ -1125,9 +1125,7 @@ func (m *Manager) persistFinished(
 		}
 	}
 	errorMessage := outcomeErrorMessage(outcome)
-	if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
-		errorMessage = debugProcessErrorMessage(result.Err, errorMessage)
-	}
+	errorMessage = debugProcessErrorMessage(result.Err, errorMessage)
 	finished, err := ApplyTransition(current, Transition{
 		From: current.Status, To: StatusFinished, Outcome: outcome, At: finishedAt,
 		ErrorCode: outcomeErrorCode(outcome), ErrorMessage: errorMessage,
@@ -1308,9 +1306,8 @@ func (m *Manager) persistFinished(
 	return stored, nil
 }
 
-// debugProcessErrorMessage exposes only fixed process-host failure categories
-// under the opt-in CI diagnostic switch. It never transports paths or command
-// lines through the task protocol.
+// debugProcessErrorMessage exposes only fixed process-host failure categories.
+// It never transports paths or command lines through the task protocol.
 func debugProcessErrorMessage(err error, fallback string) string {
 	if err == nil {
 		return fallback
