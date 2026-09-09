@@ -3,7 +3,15 @@ package task
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 )
+
+func debugTaskCompletionf(format string, args ...any) {
+	if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+		_, _ = fmt.Fprintf(os.Stderr, format+"\n", args...)
+	}
+}
 
 type pendingProcessCompletion struct {
 	Result      ProcessResult
@@ -45,6 +53,7 @@ func (m *Manager) completeServiceAction(
 			)
 		}
 		if callbackErr == nil && current.continuation != nil {
+			debugTaskCompletionf("task completion continuation begin task %s step %s", current.task.ID, current.plan.Steps[current.nextStep].Kind)
 			var continuation Continuation
 			continuation, callbackErr = callContinuation(
 				current.execution.ctx,
@@ -87,9 +96,10 @@ func (m *Manager) completeServiceAction(
 			} else {
 				current.nextStep++
 				return m.startNextStep(current, active)
+				}
 			}
+			debugTaskCompletionf("task completion continuation end task %s err %v nextPlan %d", current.task.ID, callbackErr, len(nextPlan.Steps))
 		}
-	}
 	finished, err := m.persistTerminal(
 		current,
 		result.Process,
@@ -168,6 +178,7 @@ func (m *Manager) commitClosedCompletion(
 	appendedSnapshots := []StepSnapshot(nil)
 	if outcome == OutcomeSucceeded {
 		var callbackErr error
+		debugTaskCompletionf("task completion observer begin task %s step %s next %d plan %d", current.task.ID, current.plan.Steps[current.nextStep].Kind, current.nextStep, len(current.plan.Steps))
 		if m.stepObserver != nil &&
 			current.nextStep+1 < len(current.plan.Steps) {
 			callbackErr = m.stepObserver.Succeeded(
@@ -175,6 +186,7 @@ func (m *Manager) commitClosedCompletion(
 				cloneRuntimeTask(current.task),
 				cloneRuntimeStep(current.plan.Steps[current.nextStep]),
 			)
+			debugTaskCompletionf("task completion observer end task %s err %v", current.task.ID, callbackErr)
 		}
 		if callbackErr == nil && current.continuation != nil {
 			var continuation Continuation
@@ -223,6 +235,7 @@ func (m *Manager) commitClosedCompletion(
 				pending.FailPending = false
 				outcome = OutcomeInfrastructureFailed
 			} else {
+				debugTaskCompletionf("task completion starting next task %s step %d kind %s", current.task.ID, current.nextStep+1, nextPlan.Steps[current.nextStep+1].Kind)
 				current.nextStep++
 				resetClosedProcess(current)
 				return m.startNextStep(current, active)
