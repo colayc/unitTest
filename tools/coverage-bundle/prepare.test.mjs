@@ -755,7 +755,8 @@ test("runner descriptor is closed and maps only fixed root/object/gcov/output fi
   assert.match(contract, /schemaVersion/u);
   for (const field of ["root", "objectDirectory", "gcovExecutable", "outputPath"]) assert.match(contract, new RegExp(field, "u"));
   assert.match(contract, /set\([^\n]+\)\s*!=\s*|keys\(\)[^\n]+!=/u);
-  assert.doesNotMatch(contract, /include|exclude/iu);
+  assert.match(contract, /gcov-exclude-directory/u);
+  assert.match(contract, /cpputest/u);
   assert.match(main, /sys\.executable/u);
   assert.match(main, /shell=False/u);
   assert.doesNotMatch(main, /shell=True|pip\s+install/iu);
