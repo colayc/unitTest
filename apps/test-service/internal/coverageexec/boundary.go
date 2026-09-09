@@ -367,7 +367,23 @@ func validatesToolsetExecutable(toolset coverageplatform.Toolset, path string) b
 func (boundary *executionBoundary) ValidateWorkingDirectory(path string) error {
 	debugCoveragef("coverage boundary validate directory begin %s", filepath.Base(path))
 	if boundary == nil || boundary.execution == nil || boundary.root == nil ||
-		boundary.root.Verify() != nil || boundary.execution.verifyRetained() != nil {
+		boundary.root.Verify() != nil {
+		return task.ErrInvalidArgument
+	}
+	// A collector/continuation target is approved only after its complete
+	// launch contract has been retained.  Re-verifying the entire toolset for
+	// the directory half of that same target can recursively re-enter the
+	// prepared coverage boundary while a plan is being extended.  The root
+	// handle and the exact approved directory are still checked here, so an
+	// approved target cannot escape the execution-owned tree or be replaced by
+	// a symlink.
+	if boundary.execution.approvesDirectory(path) {
+		if boundary.root.VerifyDirectory(path) == nil {
+			debugCoveragef("coverage boundary validate directory approved %s", filepath.Base(path))
+			return nil
+		}
+	}
+	if boundary.execution.verifyRetained() != nil {
 		return task.ErrInvalidArgument
 	}
 	if boundary.delegate != nil && boundary.delegate.ValidateWorkingDirectory(path) == nil {
@@ -421,6 +437,20 @@ func (execution *execution) approvesExecutable(path string) bool {
 	defer execution.mu.Unlock()
 	for _, target := range execution.targets {
 		if samePath(target.executable, path) {
+			return true
+		}
+	}
+	return false
+}
+
+func (execution *execution) approvesDirectory(path string) bool {
+	if execution == nil {
+		return false
+	}
+	execution.mu.Lock()
+	defer execution.mu.Unlock()
+	for _, target := range execution.targets {
+		if samePath(target.directory, path) {
 			return true
 		}
 	}
