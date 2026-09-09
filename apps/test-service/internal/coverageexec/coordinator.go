@@ -1228,6 +1228,7 @@ func (execution *execution) prepareCollector(ctx context.Context) ([]task.Execut
 		debugCoveragef("coverage collector preparation seal evidence failed: %v", err)
 		return nil, err
 	}
+	debugCoveragef("coverage collector preparation evidence sealed reasons %d", len(reasonList))
 	execution.mu.Lock()
 	binaries := make([]coveragerun.TrustedPath, len(execution.binaries))
 	for index, binary := range execution.binaries {
@@ -1239,12 +1240,14 @@ func (execution *execution) prepareCollector(ctx context.Context) ([]task.Execut
 	if prepared == nil || root == nil {
 		return nil, task.ErrInvalidArgument
 	}
+	debugCoveragef("coverage collector preparation invoking adapter")
 	collection, err := execution.adapter.PrepareCollector(ctx, prepared, root.CollectorRoot(), binaries)
 	if err != nil {
 		execution.setFailedPhase(coveragerun.PhaseMerge)
 		debugCoveragef("coverage collector preparation prepare collector failed: %v", err)
 		return nil, err
 	}
+	debugCoveragef("coverage collector preparation adapter returned aggregate %s args %d", filepath.Base(collection.Aggregate.Executable), len(collection.Aggregate.Args))
 	run, err := execution.config.Store.GetRunForTask(ctx, execution.taskID)
 	if err != nil {
 		return nil, err
@@ -1281,6 +1284,7 @@ func (execution *execution) prepareCollector(ctx context.Context) ([]task.Execut
 		return nil, err
 	}
 	execution.addApprovedSteps(steps)
+	debugCoveragef("coverage collector preparation approved steps %d", len(steps))
 	return steps, nil
 }
 
