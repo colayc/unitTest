@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -709,6 +710,9 @@ func (b *executionBoundary) PinnedCoverageOutput() (coverageplatform.Output, err
 	}
 	output, err := execution.PinnedOutput()
 	if err != nil {
+		if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+			fmt.Fprintf(os.Stderr, "coverage pinned output failed: %v\n", err)
+		}
 		return nil, task.ErrInvalidArgument
 	}
 	return output, nil
