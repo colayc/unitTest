@@ -196,19 +196,24 @@ func (m *Manager) commitClosedCompletion(
 				cloneRuntimeStep(current.plan.Steps[current.nextStep]),
 				StepResult{Process: pending.Result, Verdict: verdict},
 			)
+			debugTaskCompletionf("task completion continuation returned task %s err %v steps %d", current.task.ID, callbackErr, len(continuation.Steps))
+			debugTaskCompletionf("task completion domain events begin task %s", current.task.ID)
 			if eventErr := m.persistDomainEvents(
 				current,
 				active,
 			); eventErr != nil {
 				return eventErr
 			}
+			debugTaskCompletionf("task completion domain events end task %s", current.task.ID)
 			if callbackErr == nil {
+				debugTaskCompletionf("task completion plan extension begin task %s", current.task.ID)
 				nextPlan, appendedSnapshots, callbackErr =
 					extendExecutionPlan(
 						current.plan,
 						continuation,
 						current.boundary,
 					)
+				debugTaskCompletionf("task completion plan extension end task %s err %v steps %d", current.task.ID, callbackErr, len(nextPlan.Steps))
 			}
 			debugTaskCompletionf("task completion continuation end task %s err %v nextPlan %d", current.task.ID, callbackErr, len(nextPlan.Steps))
 		}
@@ -221,6 +226,7 @@ func (m *Manager) commitClosedCompletion(
 			pending.FailPending = false
 			outcome = OutcomeInfrastructureFailed
 		} else if current.nextStep+1 < len(nextPlan.Steps) {
+			debugTaskCompletionf("task completion persist step begin task %s", current.task.ID)
 			if err := m.persistSuccessfulStep(
 				current,
 				pending.Result,
@@ -235,6 +241,7 @@ func (m *Manager) commitClosedCompletion(
 				pending.FailPending = false
 				outcome = OutcomeInfrastructureFailed
 			} else {
+				debugTaskCompletionf("task completion persist step end task %s", current.task.ID)
 				debugTaskCompletionf("task completion starting next task %s step %d kind %s", current.task.ID, current.nextStep+1, nextPlan.Steps[current.nextStep+1].Kind)
 				current.nextStep++
 				resetClosedProcess(current)
