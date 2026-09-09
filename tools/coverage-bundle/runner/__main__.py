@@ -60,7 +60,10 @@ def _run_from(directory: Path) -> int:
     from contract import gcovr_arguments, load_descriptor
     from gcovr.__main__ import main as gcovr_main
 
-    return int(gcovr_main(gcovr_arguments(load_descriptor(sys.argv[1]))) or 0)
+    print("coverage runner entering gcovr", file=sys.stderr, flush=True)
+    result = int(gcovr_main(gcovr_arguments(load_descriptor(sys.argv[1]))) or 0)
+    print(f"coverage runner leaving gcovr result={result}", file=sys.stderr, flush=True)
+    return result
 
 
 def main() -> int:
