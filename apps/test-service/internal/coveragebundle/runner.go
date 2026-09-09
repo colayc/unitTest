@@ -69,7 +69,7 @@ func PrepareRunner(pin Pin, input DescriptorInput, capabilities DescriptorCapabi
 	}
 	spec := task.ProcessSpec{
 		Executable: install.Python,
-		Args:       []string{"-I", "-S", install.Runner, owned.Path()},
+		Args:       []string{"-B", "-I", "-S", install.Runner, owned.Path()},
 		EnvUnset:   fixedRunnerEnvUnset(),
 		Dir:        owned.TaskRoot(),
 	}
@@ -146,9 +146,9 @@ func (execution *PreparedExecution) Verify() error {
 	if install != execution.install {
 		return ErrBundleIntegrity
 	}
-	if execution.spec.Executable != install.Python || len(execution.spec.Args) != 4 ||
-		execution.spec.Args[0] != "-I" || execution.spec.Args[1] != "-S" ||
-		execution.spec.Args[2] != install.Runner || execution.spec.Args[3] != execution.descriptor.Path() ||
+	if execution.spec.Executable != install.Python || len(execution.spec.Args) != 5 ||
+		execution.spec.Args[0] != "-B" || execution.spec.Args[1] != "-I" || execution.spec.Args[2] != "-S" ||
+		execution.spec.Args[3] != install.Runner || execution.spec.Args[4] != execution.descriptor.Path() ||
 		execution.spec.Dir != execution.descriptor.TaskRoot() || len(execution.spec.Env) != 0 || len(execution.spec.Batch) != 0 ||
 		!reflect.DeepEqual(execution.spec.EnvUnset, fixedRunnerEnvUnset()) {
 		return ErrBundleIntegrity

@@ -167,7 +167,7 @@ func TestPrepareRunnerBuildsExactIsolatedProcessSpec(t *testing.T) {
 	if got, want := spec.Executable, python; got != want {
 		t.Fatalf("Executable = %q, want %q", got, want)
 	}
-	if got, want := spec.Args, []string{"-I", "-S", runner, execution.DescriptorPath()}; !reflect.DeepEqual(got, want) {
+	if got, want := spec.Args, []string{"-B", "-I", "-S", runner, execution.DescriptorPath()}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("Args = %#v, want %#v", got, want)
 	}
 	if len(spec.Batch) != 0 || len(spec.Env) != 0 {

@@ -736,7 +736,7 @@ test("final layout rejects native Tk and Tcl/Tk runtime paths", async (t) => {
 test("Linux Python invocation is isolated and Python-related environment is sanitized", () => {
   assert.deepEqual(
     __testing.pythonInvocationArguments("linux-x64", "/bundle/app/gcovr-runner.pyz", ["descriptor.json"]),
-    ["-I", "-S", "/bundle/app/gcovr-runner.pyz", "descriptor.json"],
+    ["-B", "-I", "-S", "/bundle/app/gcovr-runner.pyz", "descriptor.json"],
   );
   const clean = __testing.sanitizePythonEnvironment({
     PATH: "/trusted/bin",
@@ -763,7 +763,7 @@ test("runner descriptor is closed and maps only fixed root/object/gcov/output fi
   assert.match(main, /gcovr/u);
   assert.ok(contract.indexOf('"--json"') < contract.indexOf('descriptor["outputPath"]'));
   assert.ok(contract.indexOf('descriptor["outputPath"]') < contract.indexOf('"--json-pretty"'));
-  assert.match(main, /"-I"[\s\S]*"-S"/u);
+  assert.match(main, /"-B"[\s\S]*"-I"[\s\S]*"-S"/u);
   assert.match(main, /PYTHON/iu);
 });
 

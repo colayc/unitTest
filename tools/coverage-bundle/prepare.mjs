@@ -744,7 +744,7 @@ export function sanitizePythonEnvironment(environment = process.env) {
 
 export function pythonInvocationArguments(key, application, arguments_) {
   if (!["windows-x64", "linux-x64"].includes(key)) throw new Error(`unsupported coverage bundle platform: ${key}`);
-  return ["-I", "-S", application, ...arguments_];
+  return ["-B", "-I", "-S", application, ...arguments_];
 }
 
 async function smokeBundle(root, key, manifest) {

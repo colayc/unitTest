@@ -1318,7 +1318,7 @@ func TestExecutionBoundaryAttachesAndRevalidatesFixedCoverageExecution(t *testin
 		t.Fatalf("ValidateProcessTarget() = %v", err)
 	}
 	if err := boundaryValue.ValidateProcessTarget(
-		spec.Executable, []string{"-I", "-S", runner, "tampered.json"},
+		spec.Executable, []string{"-B", "-I", "-S", runner, "tampered.json"},
 		nil, nil, spec.Dir,
 	); err == nil {
 		t.Fatal("ValidateProcessTarget accepted replaced descriptor")

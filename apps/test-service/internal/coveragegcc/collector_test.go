@@ -57,7 +57,7 @@ func TestPrepareCollectorBuildsTheFixedGCovrRunner(t *testing.T) {
 	spec := execution.ProcessSpec()
 	wantDescriptor := filepath.Join(collectorRoot, "gcovr", "descriptor.json")
 	if spec.Executable != python || spec.Dir != filepath.Join(collectorRoot, "gcovr") ||
-		strings.Join(spec.Args, "\x00") != strings.Join([]string{"-I", "-S", runner, wantDescriptor}, "\x00") {
+		strings.Join(spec.Args, "\x00") != strings.Join([]string{"-B", "-I", "-S", runner, wantDescriptor}, "\x00") {
 		t.Fatalf("collector process = %#v, want fixed gcovr runner", spec)
 	}
 }

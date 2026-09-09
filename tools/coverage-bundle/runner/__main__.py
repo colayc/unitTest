@@ -78,7 +78,7 @@ def main() -> int:
             environment = _sanitized_environment()
             environment["UNIT_TEST_IDE_GCOVR_MATERIALIZED"] = "1"
             completed = subprocess.run(
-                [sys.executable, "-I", "-S", str(directory / "__main__.py"), *sys.argv[1:]],
+                [sys.executable, "-B", "-I", "-S", str(directory / "__main__.py"), *sys.argv[1:]],
                 check=False,
                 env=environment,
                 shell=False,
