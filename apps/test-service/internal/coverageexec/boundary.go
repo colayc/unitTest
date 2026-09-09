@@ -318,6 +318,14 @@ func (boundary *executionBoundary) ValidateExecutable(path string) error {
 		boundary.root.Verify() != nil || boundary.execution.verifyRetained() != nil {
 		return task.ErrInvalidArgument
 	}
+	// Continuation processes are explicitly approved by the coverage execution
+	// after their retained capabilities and launch contract have been checked.
+	// Accept that capability here without delegating back into the build
+	// boundary, whose coverage-plan verification would recursively re-verify the
+	// same toolset while the plan is being extended.
+	if boundary.execution.approvesExecutable(path) {
+		return nil
+	}
 	if boundary.delegate != nil && boundary.delegate.ValidateExecutable(path) == nil {
 		return nil
 	}
@@ -374,6 +382,10 @@ func (boundary *executionBoundary) ValidateProcessTarget(
 		) {
 		return task.ErrInvalidArgument
 	}
+	if boundary.ValidateExecutable(executable) == nil &&
+		boundary.ValidateWorkingDirectory(directory) == nil {
+		return nil
+	}
 	if target, ok := boundary.delegate.(task.ProcessTargetBoundary); ok {
 		if target.ValidateProcessTarget(
 			executable, arguments, environment, unset, directory,
@@ -386,6 +398,20 @@ func (boundary *executionBoundary) ValidateProcessTarget(
 		return task.ErrInvalidArgument
 	}
 	return nil
+}
+
+func (execution *execution) approvesExecutable(path string) bool {
+	if execution == nil {
+		return false
+	}
+	execution.mu.Lock()
+	defer execution.mu.Unlock()
+	for _, target := range execution.targets {
+		if samePath(target.executable, path) {
+			return true
+		}
+	}
+	return false
 }
 
 func (execution *execution) approvesTarget(
