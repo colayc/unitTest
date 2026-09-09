@@ -53,7 +53,6 @@ func (m *Manager) completeServiceAction(
 			)
 		}
 		if callbackErr == nil && current.continuation != nil {
-			debugTaskCompletionf("task completion continuation begin task %s step %s", current.task.ID, current.plan.Steps[current.nextStep].Kind)
 			var continuation Continuation
 			continuation, callbackErr = callContinuation(
 				current.execution.ctx,
@@ -96,10 +95,9 @@ func (m *Manager) completeServiceAction(
 			} else {
 				current.nextStep++
 				return m.startNextStep(current, active)
-				}
 			}
-			debugTaskCompletionf("task completion continuation end task %s err %v nextPlan %d", current.task.ID, callbackErr, len(nextPlan.Steps))
 		}
+	}
 	finished, err := m.persistTerminal(
 		current,
 		result.Process,
@@ -189,6 +187,7 @@ func (m *Manager) commitClosedCompletion(
 			debugTaskCompletionf("task completion observer end task %s err %v", current.task.ID, callbackErr)
 		}
 		if callbackErr == nil && current.continuation != nil {
+			debugTaskCompletionf("task completion continuation begin task %s step %s", current.task.ID, current.plan.Steps[current.nextStep].Kind)
 			var continuation Continuation
 			continuation, callbackErr = callContinuation(
 				current.execution.ctx,
@@ -211,6 +210,7 @@ func (m *Manager) commitClosedCompletion(
 						current.boundary,
 					)
 			}
+			debugTaskCompletionf("task completion continuation end task %s err %v nextPlan %d", current.task.ID, callbackErr, len(nextPlan.Steps))
 		}
 		if cause := current.execution.currentCause(); cause != "" {
 			outcome = cause
