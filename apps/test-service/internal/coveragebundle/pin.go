@@ -161,6 +161,18 @@ func (pin *bundlePin) verifyCurrentTree() error {
 		return err
 	}
 	if len(files) != len(pin.files) || len(directories) != len(pin.relativeDirectories) {
+		if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+			for relative := range files {
+				if _, ok := pin.files[relative]; !ok {
+					fmt.Fprintf(os.Stderr, "coverage bundle unexpected file %s\n", relative)
+				}
+			}
+			for relative := range directories {
+				if _, ok := pin.directoryByRelative[relative]; !ok {
+					fmt.Fprintf(os.Stderr, "coverage bundle unexpected directory %s\n", relative)
+				}
+			}
+		}
 		return errors.New("bundle tree shape changed")
 	}
 	for relative := range pin.files {
