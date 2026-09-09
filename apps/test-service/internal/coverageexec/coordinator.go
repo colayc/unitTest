@@ -1005,10 +1005,13 @@ func (execution *execution) ExecuteServiceAction(
 		}
 		return task.StepResult{}, execution.terminalErr
 	}
+	debugCoveragef("coverage service action begin %s", step.Action)
 	if err := execution.revalidate(ctx, true); err != nil {
+		debugCoveragef("coverage service action revalidate failed %s: %v", step.Action, err)
 		execution.setFailedPhase(phaseForStep(step.Kind))
 		return task.StepResult{}, err
 	}
+	debugCoveragef("coverage service action revalidate passed %s", step.Action)
 	switch step.Action {
 	case task.ServiceActionCoverageNormalize:
 		execution.setFailedPhase(coveragerun.PhaseNormalize)
@@ -1020,9 +1023,12 @@ func (execution *execution) ExecuteServiceAction(
 		}
 		output, err := prepared.PinnedCoverageOutput()
 		if err != nil {
+			debugCoveragef("coverage service action pinned output failed: %v", err)
 			return task.StepResult{}, err
 		}
+		debugCoveragef("coverage service action pinned output ready")
 		if err := execution.normalize(ctx, output); err != nil {
+			debugCoveragef("coverage service action normalize failed: %v", err)
 			return task.StepResult{}, err
 		}
 		if err := prepared.VerifyCoverageExecutionAfter(); err != nil {
@@ -1289,6 +1295,7 @@ func (execution *execution) prepareCollector(ctx context.Context) ([]task.Execut
 }
 
 func (execution *execution) normalize(ctx context.Context, pinned coverageplatform.Output) error {
+	debugCoveragef("coverage normalize begin pinned=%t", pinned != nil)
 	execution.mu.Lock()
 	raw := append([]byte(nil), execution.exportOutput.Bytes()...)
 	state := execution.state
@@ -1316,8 +1323,10 @@ func (execution *execution) normalize(ctx context.Context, pinned coverageplatfo
 		Toolchain: execution.run.Toolchain, Completeness: completeness, Limits: limits,
 	})
 	if err != nil {
+		debugCoveragef("coverage normalize adapter failed: %v", err)
 		return err
 	}
+	debugCoveragef("coverage normalize adapter returned files %d", len(document.Files))
 	coverageJSON, err := coveragenormalize.EncodeCanonical(document)
 	if err != nil {
 		return err
@@ -1328,6 +1337,7 @@ func (execution *execution) normalize(ctx context.Context, pinned coverageplatfo
 	execution.normalized = true
 	execution.bindings = append([]coveragenormalize.SourceBinding(nil), bindings...)
 	execution.mu.Unlock()
+	debugCoveragef("coverage normalize end")
 	return nil
 }
 
