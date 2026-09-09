@@ -68,6 +68,7 @@ def _run_from(directory: Path) -> int:
 
 def main() -> int:
     try:
+        print("coverage runner starting", file=sys.stderr, flush=True)
         materialized = Path(__file__).resolve()
         if os.environ.get("UNIT_TEST_IDE_GCOVR_MATERIALIZED") == "1" and materialized.is_file():
             return _run_from(materialized.parent)
