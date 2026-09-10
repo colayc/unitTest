@@ -346,7 +346,15 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
               if (Date.now() >= deadline) throw new Error("cancel fixture never entered test execution");
               await delay(50);
             }
-            await client.cancelTask(initial.taskId);
+            for (let cancelAttempt = 0; ; cancelAttempt++) {
+              try {
+                await client.cancelTask(initial.taskId);
+                break;
+              } catch (error) {
+                if (!(error instanceof ProtocolError) || error.code !== "STORAGE_UNAVAILABLE" || cancelAttempt >= 2) throw error;
+                await delay(100);
+              }
+            }
           }
           stage = "coverageFinished";
           const run = await coverageFinished(client, initial.coverageRunId);
