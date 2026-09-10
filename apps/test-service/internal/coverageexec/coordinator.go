@@ -814,6 +814,9 @@ func (execution *execution) AfterStep(
 		}
 		steps, err := execution.prepareCollector(ctx)
 		if err != nil {
+			if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+				_, _ = fmt.Fprintf(os.Stderr, "coverage collector continuation failed type=%T\n", err)
+			}
 			return task.Continuation{}, err
 		}
 		return task.Continuation{Steps: steps}, nil

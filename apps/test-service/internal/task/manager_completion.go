@@ -71,6 +71,9 @@ func (m *Manager) completeServiceAction(
 					current.boundary,
 				)
 			}
+			if callbackErr != nil {
+				debugTaskCompletionf("task completion continuation error task %s step %s: %T", current.task.ID, current.plan.Steps[current.nextStep].Kind, callbackErr)
+			}
 		}
 		if cause := current.execution.currentCause(); cause != "" {
 			outcome = cause
