@@ -13,7 +13,10 @@ import (
 	"unit-test-ide.local/test-service/internal/testframework"
 )
 
-const maxControlResultBytes int64 = 128 * 1024 * 1024
+// Control files are allocated by testcontrol, whose hard upper bound is
+// 64 MiB. Keep the reader limit aligned with that owner-side contract so
+// framework adapters using control files can actually be interpreted.
+const maxControlResultBytes int64 = 64 * 1024 * 1024
 
 type ResultAppender interface {
 	AppendResult(
