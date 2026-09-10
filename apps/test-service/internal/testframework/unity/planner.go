@@ -2,6 +2,8 @@ package unity
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"reflect"
 	"sort"
 
@@ -10,6 +12,13 @@ import (
 	"unit-test-ide.local/test-service/internal/testframework"
 	"unit-test-ide.local/test-service/internal/unityrunner"
 )
+
+func runPlanError(reason string) error {
+	if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+		return fmt.Errorf("%w: %s", ErrInvalidRunPlan, reason)
+	}
+	return ErrInvalidRunPlan
+}
 
 type selectedCase struct {
 	item     testframework.RunItem
@@ -24,14 +33,14 @@ func buildRunPlan(
 ) (testframework.RunPlan, error) {
 	if ctx == nil || evidence == nil || nilInterface(allocator) ||
 		len(input.Items) == 0 || len(input.Items) > maxRecords {
-		return testframework.RunPlan{}, ErrInvalidRunPlan
+		return testframework.RunPlan{}, runPlanError("invalid input")
 	}
 	switch input.Mode {
 	case testframework.RunSelectionAll,
 		testframework.RunSelectionGroup,
 		testframework.RunSelectionCases:
 	default:
-		return testframework.RunPlan{}, ErrInvalidRunPlan
+		return testframework.RunPlan{}, runPlanError("invalid selection mode")
 	}
 
 	selected := make([]selectedCase, len(input.Items))
@@ -48,14 +57,14 @@ func buildRunPlan(
 			!reflect.DeepEqual(item.Parameters, caseParameters(testCase)) ||
 			input.Mode == testframework.RunSelectionGroup &&
 				item.ParentLogicalName != group {
-			return testframework.RunPlan{}, ErrInvalidRunPlan
+			return testframework.RunPlan{}, runPlanError("catalog item does not match manifest")
 		}
 		if _, duplicate := ids[item.ItemID]; duplicate {
-			return testframework.RunPlan{}, ErrInvalidRunPlan
+			return testframework.RunPlan{}, runPlanError("duplicate item id")
 		}
 		key := item.ParentLogicalName + "\x00" + item.LogicalName
 		if _, duplicate := identities[key]; duplicate {
-			return testframework.RunPlan{}, ErrInvalidRunPlan
+			return testframework.RunPlan{}, runPlanError("duplicate item identity")
 		}
 		ids[item.ItemID] = struct{}{}
 		identities[key] = struct{}{}
