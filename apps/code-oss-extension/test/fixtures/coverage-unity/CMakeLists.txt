@@ -11,8 +11,10 @@ set_source_files_properties(
   "${UTIDE_TEST_UNITY_ROOT}/src/unity.c"
   PROPERTIES COMPILE_OPTIONS "-fno-profile-arcs;-fno-test-coverage"
 )
-target_compile_options(utide_unity PRIVATE -fno-profile-arcs -fno-test-coverage)
 include("${UTIDE_TEST_CMAKE_HELPER}")
+# Apply the target-local override after the helper has installed the service's
+# directory-level coverage options, so third-party Unity remains uninstrumented.
+target_compile_options(utide_unity PRIVATE -fno-profile-arcs -fno-test-coverage)
 
 add_library(coverage_unity_math STATIC src/math.c)
 set_target_properties(coverage_unity_math PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED YES)
