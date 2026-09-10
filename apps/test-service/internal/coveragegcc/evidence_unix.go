@@ -408,6 +408,9 @@ func validateEvidenceData(notes, data []Entry, outcomes []testrun.InvocationOutc
 	reasons := evidenceReasons(outcomes)
 	for name := range expected {
 		if !hasEvidenceEntry(data, name) && len(reasons) == 0 {
+			if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+				return fmt.Errorf("%w: missing profile data for %q", ErrInvalidEvidence, name)
+			}
 			return ErrInvalidEvidence
 		}
 	}
