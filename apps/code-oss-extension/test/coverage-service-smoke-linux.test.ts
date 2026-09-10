@@ -67,7 +67,20 @@ async function taskFinished(client: ProtocolClient, id: string, label = "native 
     if (task.status === "finished") {
       if (task.outcome !== "succeeded") {
         const detail = task.errorMessage ? `: ${task.errorMessage}` : "";
-        throw new Error(`${label} finished with outcome ${task.outcome ?? "unknown"}${task.errorCode ? ` (${task.errorCode})` : ""}${detail}`);
+        let output = "";
+        try {
+          const page = await client.listArtifacts(id, { limit: 200 });
+          const streams = page.items.filter((item) => item.kind === "stdout" || item.kind === "stderr");
+          const chunks: string[] = [];
+          for (const item of streams) {
+            const bytes = await client.readArtifact(item.artifactId);
+            chunks.push(`${item.kind}=${Buffer.from(bytes).toString("utf8").slice(-8_192)}`);
+          }
+          output = chunks.length > 0 ? `; output=${chunks.join(" | ")}` : "";
+        } catch {
+          // Preserve the original task failure when diagnostics are unavailable.
+        }
+        throw new Error(`${label} finished with outcome ${task.outcome ?? "unknown"}${task.errorCode ? ` (${task.errorCode})` : ""}${detail}${output}`);
       }
       return task;
     }
