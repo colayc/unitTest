@@ -331,6 +331,28 @@ func TestRequestCanonicalJSONAndCoverageRunIDGoldens(t *testing.T) {
 	}
 }
 
+func TestParseCanonicalRequestRestoresProtocolMilliseconds(t *testing.T) {
+	original, err := NewRequest(validRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := original.CanonicalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	parsed, err := ParseCanonicalRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(parsed, original) {
+		t.Fatalf("ParseCanonicalRequest() = %#v, want %#v", parsed, original)
+	}
+	if parsed.Timeout != 5*time.Second {
+		t.Fatalf("parsed timeout = %s, want 5s", parsed.Timeout)
+	}
+}
+
 func TestCoverageRunIDIsStableForSetOrderAndSensitiveToInputs(t *testing.T) {
 	base := validRequest()
 	baseID, err := CoverageRunID(base)

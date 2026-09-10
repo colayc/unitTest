@@ -32,6 +32,7 @@ import (
 	capabilitiesv13 "unit-test-ide.local/test-service/internal/protocolmodel/v1_3/capabilities"
 	taskv13 "unit-test-ide.local/test-service/internal/protocolmodel/v1_3/task"
 	testv13 "unit-test-ide.local/test-service/internal/protocolmodel/v1_3/test"
+	taskv14 "unit-test-ide.local/test-service/internal/protocolmodel/v1_4/task"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/testdomain"
 	"unit-test-ide.local/test-service/internal/toolchain"
@@ -476,44 +477,34 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 		if legacyTaskHidden(version, value.Kind) {
 			return taskNotFound(version, request)
 		}
+		var run *testdomain.TestRun
+		if version == protocol.Version13 || version == protocol.Version14 {
+			if value.Kind == task.KindTestRun || version == protocol.Version14 && value.Kind == task.KindCoverageRun {
+				testBackend, ok := s.backend.(TestBackend)
+				if !ok {
+					return backendFailure(version, request, task.ErrStorageUnavailable)
+				}
+				persisted, runErr := testBackend.GetTestRunForTask(ctx, value.ID)
+				if runErr != nil {
+					return backendFailure(version, request, runErr)
+				}
+				run = &persisted
+			}
+		}
 		if request.Method == "tasks/cancel" {
 			value, err = s.backend.Cancel(ctx, payload.TaskID)
 		}
 		if err != nil {
 			return backendFailure(version, request, err)
 		}
-		if version == protocol.Version13 || version == protocol.Version14 {
-			if version == protocol.Version14 && value.Kind == task.KindCoverageRun {
-				projected, projectErr := s.toProtocolCoverageTaskV14(ctx, value)
-				if projectErr != nil {
-					return backendFailure(version, request, projectErr)
-				}
-				return handled(protocol.Success(version, request, projected))
+		if version == protocol.Version14 {
+			projected, projectErr := toProtocolTaskV14(value, run)
+			if projectErr != nil {
+				return backendFailure(version, request, projectErr)
 			}
-			var run *testdomain.TestRun
-			if value.Kind == task.KindTestRun {
-				testBackend, ok := s.backend.(TestBackend)
-				if !ok {
-					return backendFailure(
-						version,
-						request,
-						task.ErrStorageUnavailable,
-					)
-				}
-				persisted, runErr :=
-					testBackend.GetTestRunForTask(
-						ctx,
-						value.ID,
-					)
-				if runErr != nil {
-					return backendFailure(
-						version,
-						request,
-						runErr,
-					)
-				}
-				run = &persisted
-			}
+			return handled(protocol.Success(version, request, projected))
+		}
+		if version == protocol.Version13 {
 			projected, projectErr :=
 				toProtocolTaskV13(value, run)
 			if projectErr != nil {
@@ -551,12 +542,19 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 				task.KindSimulation,
 				task.KindCMakeBuild,
 			}
+		} else if version == protocol.Version13 {
+			kinds = []task.Kind{
+				task.KindSimulation,
+				task.KindCMakeBuild,
+				task.KindTestDiscovery,
+				task.KindTestRun,
+			}
 		}
 		page, err := s.backend.List(ctx, cursor, limit, kinds)
 		if err != nil {
 			return backendFailure(version, request, err)
 		}
-		if version == protocol.Version13 || version == protocol.Version14 {
+		if version == protocol.Version14 {
 			testBackend, ok := s.backend.(TestBackend)
 			if !ok {
 				return backendFailure(
@@ -565,14 +563,10 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 					task.ErrStorageUnavailable,
 				)
 			}
-			items := make(
-				[]taskv13.TaskSnapshotV13,
-				len(page.Items),
-			)
+			items := make([]taskv14.TaskSnapshotV14, len(page.Items))
 			for index := range page.Items {
 				var run *testdomain.TestRun
-				if page.Items[index].Kind ==
-					task.KindTestRun {
+				if page.Items[index].Kind == task.KindTestRun || page.Items[index].Kind == task.KindCoverageRun {
 					persisted, runErr :=
 						testBackend.GetTestRunForTask(
 							ctx,
@@ -587,7 +581,7 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 					}
 					run = &persisted
 				}
-				items[index], err = toProtocolTaskV13(
+				items[index], err = toProtocolTaskV14(
 					page.Items[index],
 					run,
 				)
@@ -603,13 +597,38 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 				version,
 				request,
 				struct {
-					Items      []taskv13.TaskSnapshotV13 `json:"items"`
+					Items      []taskv14.TaskSnapshotV14 `json:"items"`
 					NextCursor string                    `json:"nextCursor,omitempty"`
 				}{
 					Items:      items,
 					NextCursor: page.NextCursor,
 				},
 			))
+		}
+		if version == protocol.Version13 {
+			testBackend, ok := s.backend.(TestBackend)
+			if !ok {
+				return backendFailure(version, request, task.ErrStorageUnavailable)
+			}
+			items := make([]taskv13.TaskSnapshotV13, len(page.Items))
+			for index := range page.Items {
+				var run *testdomain.TestRun
+				if page.Items[index].Kind == task.KindTestRun {
+					persisted, runErr := testBackend.GetTestRunForTask(ctx, page.Items[index].ID)
+					if runErr != nil {
+						return backendFailure(version, request, runErr)
+					}
+					run = &persisted
+				}
+				items[index], err = toProtocolTaskV13(page.Items[index], run)
+				if err != nil {
+					return backendFailure(version, request, err)
+				}
+			}
+			return handled(protocol.Success(version, request, struct {
+				Items      []taskv13.TaskSnapshotV13 `json:"items"`
+				NextCursor string                    `json:"nextCursor,omitempty"`
+			}{Items: items, NextCursor: page.NextCursor}))
 		}
 		if version == protocol.Version12 {
 			items := make([]taskv12.TaskSnapshotV12, len(page.Items))
@@ -704,64 +723,48 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 	}
 }
 
-func (s *Session) toProtocolCoverageTaskV14(ctx context.Context, value task.Task) (map[string]any, error) {
-	if ctx == nil {
-		return nil, task.ErrStorageUnavailable
-	}
-	var request coveragedomain.Request
-	if err := json.Unmarshal(value.Request, &request); err != nil {
-		return nil, task.ErrInvalidArgument
-	}
-	request, err := coveragedomain.NewRequest(request)
+func toProtocolCoverageTaskV14(value task.Task, run *testdomain.TestRun) (taskv14.CoverageRunTaskSnapshotV14, error) {
+	request, err := coveragedomain.ParseCanonicalRequest(value.Request)
 	if err != nil {
-		return nil, err
+		return taskv14.CoverageRunTaskSnapshotV14{}, err
 	}
 	runID, err := coveragedomain.CoverageRunID(request)
 	if err != nil {
-		return nil, err
+		return taskv14.CoverageRunTaskSnapshotV14{}, err
 	}
-	testBackend, ok := s.backend.(TestBackend)
-	if !ok {
-		return nil, task.ErrStorageUnavailable
+	if run == nil || run.TaskID != value.ID || !validID(run.RunID) ||
+		value.WorkspaceGeneration != request.WorkspaceGeneration || value.Timeout != request.Timeout {
+		return taskv14.CoverageRunTaskSnapshotV14{}, errors.New("invalid persisted coverage task")
 	}
-	var testRun testdomain.TestRun
-	for attempt := 0; ; attempt++ {
-		testRun, err = testBackend.GetTestRunForTask(ctx, value.ID)
-		if err == nil || !errors.Is(err, task.ErrStorageUnavailable) || attempt >= 2 {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(50 * time.Millisecond):
-		}
+	result := taskv14.CoverageRunTaskSnapshotV14{
+		TaskID: value.ID, Kind: taskv14.TaskKindCoverageRunV14,
+		WorkspaceGeneration: request.WorkspaceGeneration, ProjectID: request.ProjectID,
+		CoverageProfileID: request.CoverageProfileID, CatalogRevision: request.CatalogRevision,
+		CoverageRunID: runID, TestRunID: run.RunID, RepeatCount: request.RepeatCount,
+		TimeoutMS: request.Timeout.Milliseconds(), Status: taskv14.TaskStatusV14(value.Status),
+		CreatedAt: value.CreatedAt, LastSequence: value.LastSequence,
 	}
-	if err != nil {
-		return nil, err
-	}
-	payload := map[string]any{
-		"taskId": value.ID, "kind": "coverageRun", "workspaceGeneration": request.WorkspaceGeneration,
-		"projectId": request.ProjectID, "coverageProfileId": request.CoverageProfileID,
-		"catalogRevision": request.CatalogRevision, "coverageRunId": runID, "testRunId": testRun.RunID,
-		"repeatCount": request.RepeatCount, "timeoutMs": request.Timeout.Milliseconds(),
-		"status": value.Status, "createdAt": value.CreatedAt, "lastSequence": value.LastSequence,
-	}
-	if value.Outcome != "" {
-		payload["outcome"] = value.Outcome
+	if value.Status == task.StatusFinished {
+		outcome := taskv14.TaskOutcomeV14(value.Outcome)
+		result.Outcome = &outcome
 	}
 	if value.StartedAt != nil {
-		payload["startedAt"] = *value.StartedAt
+		started := *value.StartedAt
+		result.StartedAt = &started
 	}
 	if value.FinishedAt != nil {
-		payload["finishedAt"] = *value.FinishedAt
+		finished := *value.FinishedAt
+		result.FinishedAt = &finished
 	}
 	if value.ErrorCode != "" {
-		payload["errorCode"] = value.ErrorCode
+		code := value.ErrorCode
+		result.ErrorCode = &code
 	}
 	if value.ErrorMessage != "" {
-		payload["errorMessage"] = value.ErrorMessage
+		message := value.ErrorMessage
+		result.ErrorMessage = &message
 	}
-	return payload, nil
+	return result, nil
 }
 
 func (s *Session) handlePhase4(
@@ -2190,6 +2193,8 @@ func legacyTaskHidden(version string, kind task.Kind) bool {
 	case protocol.Version12:
 		return kind != task.KindSimulation &&
 			kind != task.KindCMakeBuild
+	case protocol.Version13:
+		return kind == task.KindCoverageRun
 	default:
 		return false
 	}
