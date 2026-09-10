@@ -374,7 +374,6 @@ jobs:
       - name: Run required offline Linux GCC framework smoke
         env:
           UNIT_TEST_IDE_TEST_COVERAGE_BUNDLE_ROOT: ${{ github.workspace }}/.superpowers/runtime/coverage-bundle/linux-x64
-          UT_DEBUG_PROCESS_HOST_FAILURES: "1"
         run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm --filter code-oss-extension test:coverage-service-smoke:linux
       - name: Validate and close Linux GCC coverage evidence
         run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm --filter code-oss-extension validate:coverage-evidence:linux

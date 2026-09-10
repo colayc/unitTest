@@ -67,20 +67,7 @@ async function taskFinished(client: ProtocolClient, id: string, label = "native 
     if (task.status === "finished") {
       if (task.outcome !== "succeeded") {
         const detail = task.errorMessage ? `: ${task.errorMessage}` : "";
-        let output = "";
-        try {
-          const page = await client.listArtifacts(id, { limit: 200 });
-          const streams = page.items.filter((item) => item.kind === "stdout" || item.kind === "stderr");
-          const chunks: string[] = [];
-          for (const item of streams) {
-            const bytes = await client.readArtifact(item.artifactId);
-            chunks.push(`${item.kind}=${Buffer.from(bytes).toString("utf8").slice(-8_192)}`);
-          }
-          output = chunks.length > 0 ? `; output=${chunks.join(" | ")}` : "";
-        } catch {
-          // Preserve the original task failure when diagnostics are unavailable.
-        }
-        throw new Error(`${label} finished with outcome ${task.outcome ?? "unknown"}${task.errorCode ? ` (${task.errorCode})` : ""}${detail}${output}`);
+        throw new Error(`${label} finished with outcome ${task.outcome ?? "unknown"}${task.errorCode ? ` (${task.errorCode})` : ""}${detail}`);
       }
       return task;
     }
@@ -263,12 +250,10 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
       };
       manager = new ServiceManager({ serviceExecutable: faultServices.get(scenario) ?? service, workspaceRoot: workspace, dataDirectory: join(scratch, `data-${scenario}`), timeoutMs: 120_000, trusted: () => true, operations: {
         spawnService(binary, args) {
-          const child = spawn(binary, [...args, "--cmake-bundle-root", join(root, ".bundled-tools/cmake"), "--debug-process-host-failures=true"], { stdio: "pipe", env: { ...process.env, UNIT_TEST_IDE_COVERAGE_SMOKE_SECRET: secret, UT_DEBUG_PROCESS_HOST_FAILURES: "1" } });
+          const child = spawn(binary, [...args, "--cmake-bundle-root", join(root, ".bundled-tools/cmake")], { stdio: "pipe", env: { ...process.env, UNIT_TEST_IDE_COVERAGE_SMOKE_SECRET: secret } });
           child.stderr?.on("data", (value: Uint8Array | string) => {
             const text = Buffer.from(value).toString("utf8");
-            // Keep enough bounded diagnostics to retain the collector failure
-            // after the intentionally verbose boundary validation trace.
-            serviceStderr = `${serviceStderr}${text}`.slice(-256_000);
+            serviceStderr = `${serviceStderr}${text}`.slice(-32_768);
           });
           return child;
         },
@@ -346,15 +331,7 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
               if (Date.now() >= deadline) throw new Error("cancel fixture never entered test execution");
               await delay(50);
             }
-            for (let cancelAttempt = 0; ; cancelAttempt++) {
-              try {
-                await client.cancelTask(initial.taskId);
-                break;
-              } catch (error) {
-                if (!(error instanceof ProtocolError) || error.code !== "STORAGE_UNAVAILABLE" || cancelAttempt >= 2) throw error;
-                await delay(100);
-              }
-            }
+            await client.cancelTask(initial.taskId);
           }
           stage = "coverageFinished";
           const run = await coverageFinished(client, initial.coverageRunId);

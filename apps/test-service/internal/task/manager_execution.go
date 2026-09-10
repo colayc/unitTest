@@ -1148,9 +1148,6 @@ func (m *Manager) persistFinished(
 		finishedAt,
 		outcome,
 	)
-	if completionErr != nil {
-		debugTaskCompletionf("task completion domain completion failed type=%T error=%v", completionErr, completionErr)
-	}
 	if completionErr != nil && current.Kind == KindCoverageRun {
 		if owner.artifactSink == nil ||
 			owner.artifactSink.Abort(context.Background()) != nil {
@@ -1195,9 +1192,6 @@ func (m *Manager) persistFinished(
 		outcome,
 		steps,
 	)
-	if artifactErr != nil {
-		debugTaskCompletionf("task completion artifact finalization failed type=%T error=%v", artifactErr, artifactErr)
-	}
 	if artifactErr != nil && current.Kind == KindCoverageRun {
 		owner.artifactSink = nil
 		discarder, ok := owner.resultInterpreter.(PreparedCompletionDiscarder)
@@ -1283,7 +1277,6 @@ func (m *Manager) persistFinished(
 		FinishRun: completion.TestRun, FinishCoverage: completion.Coverage,
 	})
 	if err != nil {
-		debugTaskCompletionf("task completion store apply failed type=%T error=%v", err, err)
 		if current.Kind == KindCoverageRun {
 			rollbackErr := rollbackFinalizedArtifacts(owner, artifacts)
 			if discarder, ok := owner.resultInterpreter.(PreparedCompletionDiscarder); ok {
@@ -1312,12 +1305,10 @@ func (m *Manager) persistFinished(
 		owner.leasePersisted = false
 	}
 	if !m.publishAll(committed) {
-		debugTaskCompletionf("task completion event publication failed")
 		m.tripPublisher(active)
 		return stored, ErrStorageUnavailable
 	}
 	if artifactReleaseErr != nil {
-		debugTaskCompletionf("task completion artifact release failed type=%T error=%v", artifactReleaseErr, artifactReleaseErr)
 		m.tripStorage(active)
 		return stored, ErrStorageUnavailable
 	}

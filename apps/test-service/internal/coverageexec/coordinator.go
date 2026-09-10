@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -241,9 +240,6 @@ func (coordinator *Coordinator) resumePreparationFailure(
 	persisted task.Task,
 	failure preparationFailure,
 ) (task.Task, error) {
-	if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
-		_, _ = os.Stderr.WriteString("coverage preparation failure phase=" + string(failure.phase) + " cause=" + failure.cause.Error() + "\n")
-	}
 	stored, err := coordinator.config.Store.Get(ctx, persisted.ID)
 	if err != nil || !sameQueuedTask(stored, persisted) {
 		return task.Task{}, errOrInvalid(err)
@@ -492,10 +488,6 @@ func (coordinator *Coordinator) prepare(
 	prepared, err := coordinator.config.Build.PreparePlan(ctx, coverageInput)
 	if err != nil || prepared == nil {
 		return nil, task.ExecutionPlan{}, failPreparation(coveragerun.PhaseBuild, errOrInvalid(err))
-	}
-	debugCoveragef("coverage prepared toolchain family %s compiler %s cxx %s profile-origin %s", currentToolchain.Family, filepath.Base(currentToolchain.CCompiler), filepath.Base(currentToolchain.CXXCompiler), prepared.Profile().Origin)
-	for _, preparedStep := range prepared.Plan().Steps {
-		debugCoveragef("coverage prepared step kind=%s args=%q", preparedStep.Kind, preparedStep.Process.Args)
 	}
 	execution.prepared = prepared
 	if err := validatePreparedIdentity(prepared, run, testRun, profile, currentToolchain); err != nil {
@@ -814,9 +806,6 @@ func (execution *execution) AfterStep(
 		}
 		steps, err := execution.prepareCollector(ctx)
 		if err != nil {
-			if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
-				_, _ = fmt.Fprintf(os.Stderr, "coverage collector continuation failed type=%T\n", err)
-			}
 			return task.Continuation{}, err
 		}
 		return task.Continuation{Steps: steps}, nil
@@ -851,7 +840,6 @@ func (execution *execution) Interpret(
 	step task.ExecutionStep,
 	result task.ProcessResult,
 ) (task.StepVerdict, error) {
-	debugCoveragef("coverage interpret kind %s exit %d timed-out %t error %v children %d", step.Kind, result.ExitCode, result.TimedOut, result.Err, len(result.Children))
 	if execution == nil || ctx == nil || current.ID != execution.taskID ||
 		result.Err != nil {
 		return task.StepVerdictDefault, task.ErrInvalidArgument
@@ -860,11 +848,9 @@ func (execution *execution) Interpret(
 		return task.StepVerdictDefault, err
 	}
 	execution.ensureCoverageStarted()
-	debugCoveragef("coverage process result kind %s exit %d timed-out %t error %v", step.Kind, result.ExitCode, result.TimedOut, result.Err)
 	switch step.Kind {
 	case task.StepCoverageConfigure:
 		if result.ExitCode != 0 || result.TimedOut {
-			debugCoveragef("coverage configure process failed: exit %d, timed out %t, error %v", result.ExitCode, result.TimedOut, result.Err)
 			execution.setFailedPhase(coveragerun.PhaseConfigure)
 			return task.StepVerdictDefault, errors.New("coverage instrumentation configure failed")
 		}
@@ -889,7 +875,6 @@ func (execution *execution) Interpret(
 		}
 		verdict, err := embedded.Interpret(ctx, current, original, result)
 		if err != nil || verdict != task.StepVerdictSucceeded {
-			debugCoveragef("coverage embedded test interpretation failed verdict[%s] error[%v] children[%d]", verdict, err, len(result.Children))
 			execution.setFailedPhase(coveragerun.PhaseTest)
 			return verdict, err
 		}
@@ -929,12 +914,6 @@ func (execution *execution) ObserveOutput(
 		return err
 	}
 	execution.ensureCoverageStarted()
-	if output.Source == "process-host" {
-		debugCoveragef("coverage process-host output %s: %s", output.Stream, string(output.Data))
-	}
-	if step.Kind != task.StepCoverageTest {
-		debugCoveragef("coverage process output from %s %s: %s", output.Source, output.Stream, string(output.Data))
-	}
 	if step.Kind == task.StepCoverageTest {
 		execution.mu.Lock()
 		embedded := execution.embedded
@@ -943,11 +922,7 @@ func (execution *execution) ObserveOutput(
 		if embedded == nil || original.ID == "" {
 			return task.ErrInvalidArgument
 		}
-		err := embedded.ObserveOutput(ctx, current, original, output)
-		if err != nil {
-			debugCoveragef("coverage test output observation failed source=%s stream=%s err=%v output=%q", output.Source, output.Stream, err, string(output.Data))
-		}
-		return err
+		return embedded.ObserveOutput(ctx, current, original, output)
 	}
 	if step.Kind != task.StepCoverageNormalize || output.Stream != "stdout" {
 		return nil
@@ -960,15 +935,6 @@ func (execution *execution) ObserveOutput(
 	}
 	_, _ = execution.exportOutput.Write(output.Data)
 	return nil
-}
-
-func debugCoveragef(format string, args ...any) {
-	if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
-		if strings.HasPrefix(format, "coverage boundary") && os.Getenv("UT_DEBUG_COVERAGE_BOUNDARY") != "1" {
-			return
-		}
-		_, _ = fmt.Fprintf(os.Stderr, format+"\n", args...)
-	}
 }
 
 func (execution *execution) DrainDomainEvents() []task.DomainEvent {
@@ -1012,13 +978,10 @@ func (execution *execution) ExecuteServiceAction(
 		}
 		return task.StepResult{}, execution.terminalErr
 	}
-	debugCoveragef("coverage service action begin %s", step.Action)
 	if err := execution.revalidate(ctx, true); err != nil {
-		debugCoveragef("coverage service action revalidate failed %s: %v", step.Action, err)
 		execution.setFailedPhase(phaseForStep(step.Kind))
 		return task.StepResult{}, err
 	}
-	debugCoveragef("coverage service action revalidate passed %s", step.Action)
 	switch step.Action {
 	case task.ServiceActionCoverageNormalize:
 		execution.setFailedPhase(coveragerun.PhaseNormalize)
@@ -1030,12 +993,9 @@ func (execution *execution) ExecuteServiceAction(
 		}
 		output, err := prepared.PinnedCoverageOutput()
 		if err != nil {
-			debugCoveragef("coverage service action pinned output failed: %v", err)
 			return task.StepResult{}, err
 		}
-		debugCoveragef("coverage service action pinned output ready")
 		if err := execution.normalize(ctx, output); err != nil {
-			debugCoveragef("coverage service action normalize failed: %v", err)
 			return task.StepResult{}, err
 		}
 		if err := prepared.VerifyCoverageExecutionAfter(); err != nil {
@@ -1100,7 +1060,6 @@ func (execution *execution) prepareTests(ctx context.Context, current task.Task)
 		ctx, run, expectedCatalog, true,
 	)
 	if err != nil {
-		debugCoveragef("coverage test preparation catalog refresh failed: %v", err)
 		return nil, err
 	}
 	execution.mu.Lock()
@@ -1109,12 +1068,10 @@ func (execution *execution) prepareTests(ctx context.Context, current task.Task)
 	execution.mu.Unlock()
 	if prepared == nil {
 		execution.setFailedPhase(coveragerun.PhaseTest)
-		debugCoveragef("coverage test preparation missing prepared build")
 		return nil, task.ErrInvalidArgument
 	}
 	if err := execution.adapter.PrepareTests(ctx, prepared); err != nil {
 		execution.setFailedPhase(coveragerun.PhaseTest)
-		debugCoveragef("coverage test preparation adapter failed: %v", err)
 		return nil, err
 	}
 	if len(targets) != 0 {
@@ -1130,17 +1087,14 @@ func (execution *execution) prepareTests(ctx context.Context, current task.Task)
 	})
 	if err != nil || nilPort(embedded) {
 		execution.setFailedPhase(coveragerun.PhaseTest)
-		debugCoveragef("coverage test preparation embedded runner failed: %v", errOrInvalid(err))
 		return nil, errOrInvalid(err)
 	}
 	steps, originals, err := rewriteTestSteps(embedded.Steps())
 	if err != nil {
-		debugCoveragef("coverage test preparation rewrite steps failed: %v", err)
 		return nil, err
 	}
 	binaries, err := retainTestBinaries(originals)
 	if err != nil {
-		debugCoveragef("coverage test preparation retain binaries failed: %v", err)
 		return nil, err
 	}
 	execution.mu.Lock()
@@ -1219,11 +1173,9 @@ func (execution *execution) prepareCollector(ctx context.Context) ([]task.Execut
 	}
 	execution.mu.Unlock()
 	if embedded == nil {
-		debugCoveragef("coverage collector preparation missing embedded run")
 		return nil, task.ErrInvalidArgument
 	}
 	expectations := embedded.Expectations()
-	debugCoveragef("coverage collector preparation expectations %d outcomes %d", len(expectations), len(outcomes))
 	sort.Slice(outcomes, func(left, right int) bool {
 		if outcomes[left].InvocationID != outcomes[right].InvocationID {
 			return outcomes[left].InvocationID < outcomes[right].InvocationID
@@ -1232,16 +1184,13 @@ func (execution *execution) prepareCollector(ctx context.Context) ([]task.Execut
 	})
 	if len(outcomes) != len(expectations) {
 		execution.setFailedPhase(coveragerun.PhaseTest)
-		debugCoveragef("coverage collector preparation outcome count mismatch")
 		return nil, task.ErrInvalidArgument
 	}
 	reasonList, err := execution.adapter.SealEvidence(expectations, outcomes)
 	if err != nil {
 		execution.setFailedPhase(coveragerun.PhaseTest)
-		debugCoveragef("coverage collector preparation seal evidence failed: %v", err)
 		return nil, err
 	}
-	debugCoveragef("coverage collector preparation evidence sealed reasons %d", len(reasonList))
 	execution.mu.Lock()
 	binaries := make([]coveragerun.TrustedPath, len(execution.binaries))
 	for index, binary := range execution.binaries {
@@ -1253,14 +1202,11 @@ func (execution *execution) prepareCollector(ctx context.Context) ([]task.Execut
 	if prepared == nil || root == nil {
 		return nil, task.ErrInvalidArgument
 	}
-	debugCoveragef("coverage collector preparation invoking adapter")
 	collection, err := execution.adapter.PrepareCollector(ctx, prepared, root.CollectorRoot(), binaries)
 	if err != nil {
 		execution.setFailedPhase(coveragerun.PhaseMerge)
-		debugCoveragef("coverage collector preparation prepare collector failed: %v", err)
 		return nil, err
 	}
-	debugCoveragef("coverage collector preparation adapter returned aggregate %s args %d", filepath.Base(collection.Aggregate.Executable), len(collection.Aggregate.Args))
 	run, err := execution.config.Store.GetRunForTask(ctx, execution.taskID)
 	if err != nil {
 		return nil, err
@@ -1297,12 +1243,10 @@ func (execution *execution) prepareCollector(ctx context.Context) ([]task.Execut
 		return nil, err
 	}
 	execution.addApprovedSteps(steps)
-	debugCoveragef("coverage collector preparation approved steps %d", len(steps))
 	return steps, nil
 }
 
 func (execution *execution) normalize(ctx context.Context, pinned coverageplatform.Output) error {
-	debugCoveragef("coverage normalize begin pinned=%t", pinned != nil)
 	execution.mu.Lock()
 	raw := append([]byte(nil), execution.exportOutput.Bytes()...)
 	state := execution.state
@@ -1330,10 +1274,8 @@ func (execution *execution) normalize(ctx context.Context, pinned coverageplatfo
 		Toolchain: execution.run.Toolchain, Completeness: completeness, Limits: limits,
 	})
 	if err != nil {
-		debugCoveragef("coverage normalize adapter failed: %v", err)
 		return err
 	}
-	debugCoveragef("coverage normalize adapter returned files %d", len(document.Files))
 	coverageJSON, err := coveragenormalize.EncodeCanonical(document)
 	if err != nil {
 		return err
@@ -1344,7 +1286,6 @@ func (execution *execution) normalize(ctx context.Context, pinned coverageplatfo
 	execution.normalized = true
 	execution.bindings = append([]coveragenormalize.SourceBinding(nil), bindings...)
 	execution.mu.Unlock()
-	debugCoveragef("coverage normalize end")
 	return nil
 }
 

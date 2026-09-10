@@ -314,10 +314,8 @@ type processTarget struct {
 }
 
 func (boundary *executionBoundary) ValidateExecutable(path string) error {
-	debugCoveragef("coverage boundary validate executable begin %s", filepath.Base(path))
 	if boundary == nil || boundary.execution == nil || boundary.root == nil ||
 		boundary.root.Verify() != nil || boundary.execution.verifyRetained() != nil {
-		debugCoveragef("coverage boundary validate executable retained failed %s", filepath.Base(path))
 		return task.ErrInvalidArgument
 	}
 	// Continuation processes are explicitly approved by the coverage execution
@@ -326,12 +324,9 @@ func (boundary *executionBoundary) ValidateExecutable(path string) error {
 	// boundary, whose coverage-plan verification would recursively re-verify the
 	// same toolset while the plan is being extended.
 	if boundary.execution.approvesExecutable(path) {
-		debugCoveragef("coverage boundary validate executable approved %s", filepath.Base(path))
 		return nil
 	}
-	debugCoveragef("coverage boundary validate executable delegate begin %s", filepath.Base(path))
 	if boundary.delegate != nil && boundary.delegate.ValidateExecutable(path) == nil {
-		debugCoveragef("coverage boundary validate executable delegate accepted %s", filepath.Base(path))
 		return nil
 	}
 	boundary.execution.mu.Lock()
@@ -339,13 +334,11 @@ func (boundary *executionBoundary) ValidateExecutable(path string) error {
 	adapter := boundary.execution.adapter
 	if adapter != nil && adapter.Toolset() != nil {
 		if validatesToolsetExecutable(adapter.Toolset(), path) {
-			debugCoveragef("coverage boundary validate executable toolset accepted %s", filepath.Base(path))
 			return nil
 		}
 	}
 	for _, candidate := range boundary.execution.binaries {
 		if samePath(candidate.Path(), path) && candidate.Verify() == nil {
-			debugCoveragef("coverage boundary validate executable binary accepted %s", filepath.Base(path))
 			return nil
 		}
 	}
@@ -365,7 +358,6 @@ func validatesToolsetExecutable(toolset coverageplatform.Toolset, path string) b
 }
 
 func (boundary *executionBoundary) ValidateWorkingDirectory(path string) error {
-	debugCoveragef("coverage boundary validate directory begin %s", filepath.Base(path))
 	if boundary == nil || boundary.execution == nil || boundary.root == nil ||
 		boundary.root.Verify() != nil {
 		return task.ErrInvalidArgument
@@ -379,7 +371,6 @@ func (boundary *executionBoundary) ValidateWorkingDirectory(path string) error {
 	// a symlink.
 	if boundary.execution.approvesDirectory(path) {
 		if boundary.root.VerifyDirectory(path) == nil {
-			debugCoveragef("coverage boundary validate directory approved %s", filepath.Base(path))
 			return nil
 		}
 	}
@@ -387,14 +378,11 @@ func (boundary *executionBoundary) ValidateWorkingDirectory(path string) error {
 		return task.ErrInvalidArgument
 	}
 	if boundary.delegate != nil && boundary.delegate.ValidateWorkingDirectory(path) == nil {
-		debugCoveragef("coverage boundary validate directory delegate accepted %s", filepath.Base(path))
 		return nil
 	}
 	if boundary.root.VerifyDirectory(path) == nil {
-		debugCoveragef("coverage boundary validate directory root accepted %s", filepath.Base(path))
 		return nil
 	}
-	debugCoveragef("coverage boundary validate directory rejected %s", filepath.Base(path))
 	return task.ErrInvalidArgument
 }
 
@@ -403,7 +391,6 @@ func (boundary *executionBoundary) ValidateProcessTarget(
 	arguments, environment, unset []string,
 	directory string,
 ) error {
-	debugCoveragef("coverage boundary validate target begin %s args %d", filepath.Base(executable), len(arguments))
 	if boundary == nil || boundary.execution == nil ||
 		!boundary.execution.approvesTarget(
 			executable, arguments, environment, unset, directory,
@@ -412,7 +399,6 @@ func (boundary *executionBoundary) ValidateProcessTarget(
 	}
 	if boundary.ValidateExecutable(executable) == nil &&
 		boundary.ValidateWorkingDirectory(directory) == nil {
-		debugCoveragef("coverage boundary validate target accepted locally %s", filepath.Base(executable))
 		return nil
 	}
 	if target, ok := boundary.delegate.(task.ProcessTargetBoundary); ok {

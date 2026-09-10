@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"regexp"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -629,7 +628,6 @@ func (m *Manager) loop() {
 			if current := active[value.taskID]; current != nil && current.terminationGeneration == value.generation {
 				current.terminationComplete = true
 				if value.err != nil {
-					debugTaskCompletionf("task termination failed task[%s] error[%v]", value.taskID, value.err)
 					current.terminationFailed = true
 					m.healthy.Store(false)
 					m.stageProcessCompletion(
@@ -643,7 +641,7 @@ func (m *Manager) loop() {
 		case closeResultCommand:
 			if current := active[value.taskID]; current != nil && current.closeGeneration == value.generation {
 				if value.err != nil {
-					m.recordCloseFailure(current, value.err)
+					m.recordCloseFailure(current)
 					recoveryHandoffSafe := current.task.Status != StatusFinished &&
 						current.leasePersisted
 					if (m.circuitFailed() || current.recoveryRequired) && recoveryHandoffSafe {
@@ -717,7 +715,6 @@ func (m *Manager) loop() {
 
 func (m *Manager) cancel(id string, active map[string]*activeTask) taskResponse {
 	if m.circuitFailed() {
-		debugTaskCompletionf("task cancel rejected by circuit task[%s] storageFailed[%t] publisherFailed[%t]", id, m.storageFailed, m.publisherFailed)
 		return taskResponse{err: ErrStorageUnavailable}
 	}
 	stored, err := m.store.Get(context.Background(), id)
@@ -729,7 +726,6 @@ func (m *Manager) cancel(id string, active map[string]*activeTask) taskResponse 
 	}
 	current := active[id]
 	if current == nil {
-		debugTaskCompletionf("task cancel missing active task[%s] storedStatus[%s]", id, stored.Status)
 		return taskResponse{task: stored, err: ErrConflict}
 	}
 	requested, outcome := current.execution.state()
@@ -764,7 +760,6 @@ func (m *Manager) cancel(id string, active map[string]*activeTask) taskResponse 
 	now := m.clock.Now()
 	cancelling, err := ApplyTransition(current.task, Transition{From: StatusRunning, To: StatusCancelling, At: now})
 	if err != nil {
-		debugTaskCompletionf("task cancel transition failed task[%s] status[%s] error[%v]", id, current.task.Status, err)
 		return taskResponse{task: current.task, err: err}
 	}
 	cancelling, events, err := m.store.Apply(context.Background(), Mutation{
@@ -772,7 +767,6 @@ func (m *Manager) cancel(id string, active map[string]*activeTask) taskResponse 
 		Events: []EventDraft{eventDraft(id, EventTaskCancellationRequested, now, map[string]any{"status": StatusCancelling})},
 	})
 	if err != nil {
-		debugTaskCompletionf("task cancel store apply failed task[%s] error[%v]", id, err)
 		if errors.Is(err, ErrStorageUnavailable) {
 			m.tripStorage(active)
 		} else if errors.Is(err, ErrConflict) {
@@ -785,7 +779,6 @@ func (m *Manager) cancel(id string, active map[string]*activeTask) taskResponse 
 	current.task = cancelling
 	current.execution.resolve(OutcomeCancelled)
 	if !m.publishAll(events) {
-		debugTaskCompletionf("task cancel event publish failed task[%s]", id)
 		m.tripPublisher(active)
 		return taskResponse{task: current.task, err: ErrStorageUnavailable}
 	}
@@ -1386,12 +1379,7 @@ func (m *Manager) startClose(current *activeTask, retryFailed bool) {
 	}()
 }
 
-func (m *Manager) recordCloseFailure(current *activeTask, errors ...error) {
-	var err error
-	if len(errors) > 0 {
-		err = errors[0]
-	}
-	debugTaskCompletionf("task process close failed task[%s] error[%v]", current.task.ID, err)
+func (m *Manager) recordCloseFailure(current *activeTask) {
 	if !m.circuitFailed() &&
 		!current.recoveryRequired {
 		outcome := current.execution.resolve(OutcomeInfrastructureFailed)
@@ -1416,13 +1404,6 @@ func (m *Manager) canRemove(current *activeTask) bool {
 func (m *Manager) tripStorage(active map[string]*activeTask) {
 	if m.storageFailed {
 		return
-	}
-	if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
-		if pc, _, _, ok := runtime.Caller(1); ok {
-			if caller := runtime.FuncForPC(pc); caller != nil {
-				debugTaskCompletionf("task storage circuit opened caller[%s]", caller.Name())
-			}
-		}
 	}
 	m.storageFailed = true
 	m.healthy.Store(false)
@@ -1458,13 +1439,6 @@ func (m *Manager) quiesceActive(active map[string]*activeTask) {
 func (m *Manager) tripPublisher(active map[string]*activeTask) {
 	if m.publisherFailed {
 		return
-	}
-	if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
-		if pc, _, _, ok := runtime.Caller(1); ok {
-			if caller := runtime.FuncForPC(pc); caller != nil {
-				debugTaskCompletionf("task publisher circuit opened caller[%s]", caller.Name())
-			}
-		}
 	}
 	m.publisherFailed = true
 	m.healthy.Store(false)

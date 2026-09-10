@@ -6,8 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"os"
 	goruntime "runtime"
 	"strings"
 	"sync"
@@ -25,12 +23,6 @@ import (
 )
 
 var errInvalidCoverageBackend = errors.New("invalid runtime coverage backend")
-
-func debugCoverageBackendf(format string, args ...any) {
-	if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
-		_, _ = fmt.Fprintf(os.Stderr, format+"\n", args...)
-	}
-}
 
 type coverageQueue interface {
 	Start(context.Context, coveragecoord.QueuedStartInput) (coveragecoord.QueuedStartResult, error)
@@ -86,13 +78,11 @@ func (backend *queuedCoverageBackend) StartCoverageRun(
 	}
 	queued, err := backend.resolve(ctx, input)
 	if err != nil {
-		debugCoverageBackendf("coverage start resolve failed error[%v]", err)
 		backend.mu.RUnlock()
 		return task.Task{}, coveragedomain.Run{}, testdomain.TestRun{}, err
 	}
 	result, err := backend.queue.Start(ctx, queued)
 	if err != nil {
-		debugCoverageBackendf("coverage start queue failed error[%v]", err)
 		backend.mu.RUnlock()
 		return task.Task{}, coveragedomain.Run{}, testdomain.TestRun{}, err
 	}
@@ -106,13 +96,7 @@ func (backend *queuedCoverageBackend) StartCoverageRun(
 	}
 	backend.mu.RUnlock()
 	_, resumeErr := backend.executor.Resume(ctx, result.Task)
-	if resumeErr != nil {
-		debugCoverageBackendf("coverage start resume failed task[%s] error[%v]", result.Task.ID, resumeErr)
-	}
 	canonicalTask, canonicalRun, canonicalTestRun, reloadErr := backend.reloadGraph(ctx, result)
-	if reloadErr != nil {
-		debugCoverageBackendf("coverage start reload failed task[%s] error[%v]", result.Task.ID, reloadErr)
-	}
 	if reloadErr != nil {
 		return result.Task, result.Run, result.TestRun, errors.Join(resumeErr, reloadErr)
 	}
@@ -184,7 +168,6 @@ func (r *Runtime) resolveCoverageStart(ctx context.Context, input session.Covera
 		return coveragecoord.QueuedStartInput{}, err
 	}
 	if snapshot.Generation != input.WorkspaceGeneration {
-		debugCoverageBackendf("coverage start workspace generation mismatch expected[%s] actual[%s]", input.WorkspaceGeneration, snapshot.Generation)
 		return coveragecoord.QueuedStartInput{}, task.ErrConflict
 	}
 	var project workspace.ProjectConfig
@@ -232,7 +215,6 @@ func (r *Runtime) resolveCoverageStart(ctx context.Context, input session.Covera
 		return coveragecoord.QueuedStartInput{}, err
 	}
 	if catalog.Revision != input.CatalogRevision {
-		debugCoverageBackendf("coverage start catalog revision mismatch expected[%s] actual[%s]", input.CatalogRevision, catalog.Revision)
 		return coveragecoord.QueuedStartInput{}, task.ErrConflict
 	}
 	selection, err := testdomain.ResolveSelection(catalog, input.Selection, testdomain.Limits{MaxSelectionSize: 100_000})
