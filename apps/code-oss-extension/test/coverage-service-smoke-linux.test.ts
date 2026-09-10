@@ -119,12 +119,12 @@ async function injectFixtureFault(workspace: string, fault: TestOnlyCoverageFaul
   const marker = join(workspace, "test-only-invocation-started");
   const body = fault === "crash" ? "if (__gcov_dump) __gcov_dump(); raise(SIGSEGV);" : "sleep(240);";
   // Compile-time fixture seam, not environment/Workspace/Protocol configuration.
-  const preamble = `#include <signal.h>\n#include <stdio.h>\n#include <unistd.h>\nextern void __gcov_dump(void) __attribute__((weak));\nstatic void test_only_fault(void) { FILE *f = fopen(${JSON.stringify(marker)}, "w"); if (f) { fputs("started", f); fclose(f); } ${body} }\n`;
+  const preamble = `#include <signal.h>\n#include <stdio.h>\n#include <unistd.h>\nextern void __gcov_dump(void) __attribute__((weak));\nstatic void utide_fault_hook(void) { FILE *f = fopen(${JSON.stringify(marker)}, "w"); if (f) { fputs("started", f); fclose(f); } ${body} }\n`;
   const path = join(workspace, "test/test_math.c");
   const source = await readFile(path, "utf8");
   const needle = "void test_covers_positive_branch(void) {";
   assert.equal(source.split(needle).length, 2);
-  await writeFile(path, preamble + source.replace(needle, `${needle}\n test_only_fault();`));
+  await writeFile(path, preamble + source.replace(needle, `${needle}\n utide_fault_hook();`));
   return marker;
 }
 
