@@ -325,13 +325,16 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
         try {
           let initial: CoverageRun;
           for (let startAttempt = 0; ; startAttempt++) {
-            selected = await selectGccEventually(client);
-            catalog = await client.getTestCatalog({ projectId, profileId: selected.profile.buildProfileId, limit: 100 });
             try {
               initial = await client.startCoverage({ idempotencyKey: randomBytes(16).toString("hex"), workspaceGeneration: selected.snapshot.workspaceGeneration, projectId, coverageProfileId, catalogRevision: catalog.revision, selection: { mode: TestSelectionModeV14.All }, repeatCount: 1, timeoutMs: fault === "timeout" ? 120_000 : timeout });
               break;
             } catch (error) {
               if (!(error instanceof ProtocolError) || error.code !== "SERVICE_UNHEALTHY" || startAttempt >= 1) throw error;
+              // Refresh stale inputs outside the coverage wire leak gate, then
+              // discard the failed request before capturing the retry exchange.
+              selected = await selectGccEventually(client);
+              catalog = await client.getTestCatalog({ projectId, profileId: selected.profile.buildProfileId, limit: 100 });
+              wire = []; wireSize = 0; wireOverflow = false;
               await delay(100);
             }
           }
