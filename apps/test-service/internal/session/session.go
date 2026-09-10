@@ -18,6 +18,7 @@ import (
 	"unit-test-ide.local/test-service/internal/artifactstore"
 	"unit-test-ide.local/test-service/internal/build"
 	"unit-test-ide.local/test-service/internal/cmake"
+	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/diagnostic"
 	"unit-test-ide.local/test-service/internal/discovery"
 	"unit-test-ide.local/test-service/internal/eventbroker"
@@ -482,6 +483,17 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 			return backendFailure(version, request, err)
 		}
 		if version == protocol.Version13 || version == protocol.Version14 {
+			if version == protocol.Version14 && value.Kind == task.KindCoverageRun {
+				coverage, ok := s.backend.(CoverageBackend)
+				if !ok {
+					return backendFailure(version, request, task.ErrStorageUnavailable)
+				}
+				projected, projectErr := s.toProtocolCoverageTaskV14(ctx, value, coverage)
+				if projectErr != nil {
+					return backendFailure(version, request, projectErr)
+				}
+				return handled(protocol.Success(version, request, projected))
+			}
 			var run *testdomain.TestRun
 			if value.Kind == task.KindTestRun {
 				testBackend, ok := s.backend.(TestBackend)
@@ -694,6 +706,56 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 	default:
 		return handled(protocol.Failure(version, request, "METHOD_NOT_FOUND", "method is not supported", false))
 	}
+}
+
+func (s *Session) toProtocolCoverageTaskV14(ctx context.Context, value task.Task, backend CoverageBackend) (map[string]any, error) {
+	if ctx == nil || backend == nil {
+		return nil, task.ErrStorageUnavailable
+	}
+	cursor := ""
+	var run coveragedomain.Run
+	for pageIndex := 0; pageIndex < 100; pageIndex++ {
+		page, err := backend.ListCoverageRuns(ctx, coveragedomain.RunPageRequest{Cursor: cursor, Limit: coveragedomain.MaxRunPageSize})
+		if err != nil {
+			return nil, err
+		}
+		for _, candidate := range page.Items {
+			if candidate.TaskID == value.ID {
+				run = candidate
+				break
+			}
+		}
+		if run.ID != "" || page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
+	}
+	if run.ID == "" || run.TestRunID == "" {
+		return nil, task.ErrNotFound
+	}
+	payload := map[string]any{
+		"taskId": value.ID, "kind": "coverageRun", "workspaceGeneration": run.Request.WorkspaceGeneration,
+		"projectId": run.Request.ProjectID, "coverageProfileId": run.Request.CoverageProfileID,
+		"catalogRevision": run.Request.CatalogRevision, "coverageRunId": run.ID, "testRunId": run.TestRunID,
+		"repeatCount": run.Request.RepeatCount, "timeoutMs": run.Request.Timeout.Milliseconds(),
+		"status": value.Status, "createdAt": value.CreatedAt, "lastSequence": value.LastSequence,
+	}
+	if value.Outcome != "" {
+		payload["outcome"] = value.Outcome
+	}
+	if value.StartedAt != nil {
+		payload["startedAt"] = *value.StartedAt
+	}
+	if value.FinishedAt != nil {
+		payload["finishedAt"] = *value.FinishedAt
+	}
+	if value.ErrorCode != "" {
+		payload["errorCode"] = value.ErrorCode
+	}
+	if value.ErrorMessage != "" {
+		payload["errorMessage"] = value.ErrorMessage
+	}
+	return payload, nil
 }
 
 func (s *Session) handlePhase4(
