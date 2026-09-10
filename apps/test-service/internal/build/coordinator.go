@@ -723,6 +723,14 @@ func classifyConfigureReplyFailure(err error) string {
 	case errors.Is(err, cmake.ErrFileAPILimit):
 		message := err.Error()
 		for _, detail := range []struct{ fragment, category string }{
+			{"file exceeds", "CMake File API input exceeds limit"},
+			{"index objects exceed", "CMake File API index object limit"},
+			{"configurations exceed", "CMake File API configuration limit"},
+			{"targets exceed", "CMake File API target limit"},
+			{"target detail files exceed", "CMake File API target detail file limit"},
+			{"total target artifacts exceed", "CMake File API total artifact limit"},
+			{"artifacts exceed", "CMake File API target artifact limit"},
+			{"toolchains exceed", "CMake File API toolchain limit"},
 			{"consumed files exceed", "CMake File API consumed file limit"},
 			{"total consumed bytes exceed", "CMake File API total bytes limit"},
 			{"CMake inputs exceed", "CMake File API input count limit"},
