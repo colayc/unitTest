@@ -253,7 +253,9 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
           const child = spawn(binary, [...args, "--cmake-bundle-root", join(root, ".bundled-tools/cmake"), "--debug-process-host-failures=true"], { stdio: "pipe", env: { ...process.env, UNIT_TEST_IDE_COVERAGE_SMOKE_SECRET: secret, UT_DEBUG_PROCESS_HOST_FAILURES: "1" } });
           child.stderr?.on("data", (value: Uint8Array | string) => {
             const text = Buffer.from(value).toString("utf8");
-            serviceStderr = `${serviceStderr}${text}`.slice(-32_768);
+            // Keep enough bounded diagnostics to retain the collector failure
+            // after the intentionally verbose boundary validation trace.
+            serviceStderr = `${serviceStderr}${text}`.slice(-256_000);
           });
           return child;
         },
