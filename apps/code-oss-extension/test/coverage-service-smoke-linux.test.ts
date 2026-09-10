@@ -292,7 +292,7 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
       selected = await selectGccEventually(client);
       const discovery = await client.discoverTests({ idempotencyKey: randomBytes(16).toString("hex"), projectId, profileId: selected.profile.buildProfileId });
       await taskFinished(client, discovery.taskId, `${scenario} discovery`);
-      const catalog = await client.getTestCatalog({ projectId, profileId: selected.profile.buildProfileId, limit: 100 });
+      let catalog = await client.getTestCatalog({ projectId, profileId: selected.profile.buildProfileId, limit: 100 });
       assert.equal(catalog.partial, false);
       assert.equal(catalog.items.filter((item) => item.kind === "case").length, 2);
       selected = await selectGccEventually(client);
@@ -300,6 +300,11 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
       if (!toolchainDigest) toolchainDigest = currentDigest;
       assert.equal(currentDigest, toolchainDigest);
       for (let repeat = 0; repeat < (scenario === "unity" ? 2 : 1); repeat++) {
+        // A completed native coverage run may refresh the generated catalog
+        // (notably for Unity). Rebind both snapshot and catalog revision before
+        // every start so the request satisfies the service's stale-state guard.
+        selected = await selectGccEventually(client);
+        catalog = await client.getTestCatalog({ projectId, profileId: selected.profile.buildProfileId, limit: 100 });
         // Workspace inspection legitimately includes source URIs; only the
         // coverage/run/report/artifact exchange is subject to this leak gate.
         wire = []; wireSize = 0; wireOverflow = false;
