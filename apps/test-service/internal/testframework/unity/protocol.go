@@ -375,7 +375,7 @@ func newParser(
 	testCase, ok := findManifestCase(evidence.manifest, item.LogicalName)
 	if !ok || !testdomain.ValidID(item.ItemID) ||
 		item.ParentLogicalName != testCase.Location.Path ||
-		!reflect.DeepEqual(item.Parameters, caseParameters(testCase)) {
+		!equalCaseParameters(item.Parameters, caseParameters(testCase)) {
 		return nil, ErrInvalidResult
 	}
 	item.Parameters = append([]testdomain.Parameter(nil), item.Parameters...)
@@ -695,6 +695,13 @@ func caseParameters(testCase unityrunner.TestCase) []testdomain.Parameter {
 		}
 	}
 	return result
+}
+
+func equalCaseParameters(left, right []testdomain.Parameter) bool {
+	if len(left) == 0 && len(right) == 0 {
+		return true
+	}
+	return reflect.DeepEqual(left, right)
 }
 
 func validTermination(value testframework.ProcessTermination) bool {

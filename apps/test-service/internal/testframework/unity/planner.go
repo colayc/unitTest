@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"reflect"
 	"sort"
 
 	"unit-test-ide.local/test-service/internal/ctest"
@@ -61,7 +60,7 @@ func buildRunPlan(
 		if item.ParentLogicalName != testCase.Location.Path {
 			return testframework.RunPlan{}, runPlanError("catalog source path mismatch")
 		}
-		if !reflect.DeepEqual(item.Parameters, caseParameters(testCase)) {
+		if !equalCaseParameters(item.Parameters, caseParameters(testCase)) {
 			return testframework.RunPlan{}, runPlanError("catalog parameters mismatch")
 		}
 		if input.Mode == testframework.RunSelectionGroup &&
