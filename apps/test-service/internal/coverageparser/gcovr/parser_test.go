@@ -266,6 +266,21 @@ func TestParseGCovrAcceptsDocumentedSchemaVariantsAndExcludesEvidence(t *testing
 	}
 }
 
+func TestParseGCovrCoalescesDuplicateLineRecords(t *testing.T) {
+	encoded := exportFiles(`{"file":"src/duplicate-lines.c","lines":[{"line_number":4,"count":2,"branches":[{"count":1,"fallthrough":false,"throw":false}]},{"line_number":4,"count":7,"branches":[{"count":0,"fallthrough":false,"throw":false},{"count":1,"fallthrough":false,"throw":false}]}],"functions":[]}`)
+	got, err := Parse(bytes.NewBufferString(encoded), DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Files) != 1 || len(got.Files[0].Lines) != 1 {
+		t.Fatalf("files/lines = %#v", got)
+	}
+	want := Line{Number: 4, Count: 7, Branches: Metric{Covered: 1, Total: 2}}
+	if got.Files[0].Lines[0] != want {
+		t.Fatalf("coalesced line = %#v, want %#v", got.Files[0].Lines[0], want)
+	}
+}
+
 func TestParseGCovrRejectsMalformedNestedSchemaValues(t *testing.T) {
 	valid := schemaVariantExport()
 	cases := map[string]string{

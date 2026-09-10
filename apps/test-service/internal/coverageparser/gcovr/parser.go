@@ -150,13 +150,31 @@ func (p *parser) file() (File, error) {
 	if !validRelativePath(result.RelativePath) {
 		return File{}, errors.New("invalid source path")
 	}
-	seen := make(map[int64]struct{}, len(result.Lines))
+	// gcovr can emit more than one record for a source line when the line is
+	// represented by multiple functions or data sources. The public model is
+	// line-based, so coalesce those records deterministically instead of
+	// rejecting an otherwise valid export. Counts and branch metrics use the
+	// maximum observed value to avoid double-counting overlapping records.
+	coalesced := make([]Line, 0, len(result.Lines))
+	indices := make(map[int64]int, len(result.Lines))
 	for _, line := range result.Lines {
-		if _, ok := seen[line.Number]; ok {
-			return File{}, errors.New("duplicate line")
+		if index, ok := indices[line.Number]; ok {
+			current := &coalesced[index]
+			if line.Count > current.Count {
+				current.Count = line.Count
+			}
+			if line.Branches.Covered > current.Branches.Covered {
+				current.Branches.Covered = line.Branches.Covered
+			}
+			if line.Branches.Total > current.Branches.Total {
+				current.Branches.Total = line.Branches.Total
+			}
+			continue
 		}
-		seen[line.Number] = struct{}{}
+		indices[line.Number] = len(coalesced)
+		coalesced = append(coalesced, line)
 	}
+	result.Lines = coalesced
 	return result, nil
 }
 
