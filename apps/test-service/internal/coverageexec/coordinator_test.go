@@ -527,7 +527,12 @@ func TestCoordinatorUnsupportedCompletesOneRealSQLiteAggregate(t *testing.T) {
 	var finished task.Task
 	for time.Now().Before(deadline) {
 		finished, err = store.Get(ctx, persisted.ID)
-		if err == nil && finished.Status == task.StatusFinished {
+		// The durable aggregate commits before its events are published, so wait
+		// for both externally observable sides of completion.
+		if err == nil && finished.Status == task.StatusFinished &&
+			publisher.count(task.EventTestRunFinished) == 1 &&
+			publisher.count(task.EventCoverageRunFinished) == 1 &&
+			publisher.count(task.EventTaskFinished) == 1 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
