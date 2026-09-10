@@ -309,6 +309,13 @@ func scanEvidenceMode(ctx context.Context, fd int, prefix string, depth int, all
 }
 
 func allowedBuildArtifact(prefix, name string, mode uint32) bool {
+	if strings.HasPrefix(prefix, ".unit-test-ide/") {
+		parts := strings.Split(prefix, "/")
+		if len(parts) == 2 && validRunnerIdentity(parts[1]) {
+			return name == "manifest.json" || name == "runner.c"
+		}
+		return false
+	}
 	if prefix == "" {
 		switch name {
 		case "CMakeCache.txt", "build.ninja", "rules.ninja", ".ninja_deps", ".ninja_log", ".unit-test-ide.lock", "cmake_install.cmake", "CTestTestfile.cmake", "Makefile", "install_manifest.txt", "coverage-custom-command.stamp":
@@ -333,6 +340,18 @@ func allowedBuildArtifact(prefix, name string, mode uint32) bool {
 	default:
 		return false
 	}
+}
+
+func validRunnerIdentity(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, character := range value {
+		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 func digestEvidenceFile(ctx context.Context, parent int, name, relative string, size int64) (Entry, error) {

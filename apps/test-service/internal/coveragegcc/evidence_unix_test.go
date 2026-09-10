@@ -201,6 +201,12 @@ func TestPrepareBuildEvidenceAdmitsCMakeArtifactsButRejectsUnknownRootFiles(t *t
 		t.Fatal(err)
 	}
 	writeEvidence(t, filepath.Join(root, "cpputest", "src", "CppUTest"), "framework.gcno", "note")
+	runnerRoot := filepath.Join(root, ".unit-test-ide", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	if err := os.MkdirAll(runnerRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeEvidence(t, runnerRoot, "manifest.json", "manifest")
+	writeEvidence(t, runnerRoot, "runner.c", "runner")
 	prepared, err := PrepareBuildEvidence(root)
 	if err != nil {
 		t.Fatal(err)
