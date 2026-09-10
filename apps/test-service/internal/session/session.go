@@ -484,11 +484,7 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 		}
 		if version == protocol.Version13 || version == protocol.Version14 {
 			if version == protocol.Version14 && value.Kind == task.KindCoverageRun {
-				coverage, ok := s.backend.(CoverageBackend)
-				if !ok {
-					return backendFailure(version, request, task.ErrStorageUnavailable)
-				}
-				projected, projectErr := s.toProtocolCoverageTaskV14(ctx, value, coverage)
+				projected, projectErr := s.toProtocolCoverageTaskV14(ctx, value)
 				if projectErr != nil {
 					return backendFailure(version, request, projectErr)
 				}
@@ -708,48 +704,46 @@ func (s *Session) handlePhase2(ctx context.Context, version string, request prot
 	}
 }
 
-func (s *Session) toProtocolCoverageTaskV14(ctx context.Context, value task.Task, backend CoverageBackend) (map[string]any, error) {
-	if ctx == nil || backend == nil {
+func (s *Session) toProtocolCoverageTaskV14(ctx context.Context, value task.Task) (map[string]any, error) {
+	if ctx == nil {
 		return nil, task.ErrStorageUnavailable
 	}
-	cursor := ""
-	var run coveragedomain.Run
-	for pageIndex := 0; pageIndex < 100; pageIndex++ {
-		var page coveragedomain.RunPage
-		var err error
-		for attempt := 0; ; attempt++ {
-			page, err = backend.ListCoverageRuns(ctx, coveragedomain.RunPageRequest{Cursor: cursor, Limit: coveragedomain.MaxRunPageSize})
-			if err == nil || !errors.Is(err, task.ErrStorageUnavailable) || attempt >= 2 {
-				break
-			}
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(50 * time.Millisecond):
-			}
-		}
-		if err != nil {
-			return nil, err
-		}
-		for _, candidate := range page.Items {
-			if candidate.TaskID == value.ID {
-				run = candidate
-				break
-			}
-		}
-		if run.ID != "" || page.NextCursor == "" {
+	var request coveragedomain.Request
+	if err := json.Unmarshal(value.Request, &request); err != nil {
+		return nil, task.ErrInvalidArgument
+	}
+	request, err := coveragedomain.NewRequest(request)
+	if err != nil {
+		return nil, err
+	}
+	runID, err := coveragedomain.CoverageRunID(request)
+	if err != nil {
+		return nil, err
+	}
+	testBackend, ok := s.backend.(TestBackend)
+	if !ok {
+		return nil, task.ErrStorageUnavailable
+	}
+	var testRun testdomain.TestRun
+	for attempt := 0; ; attempt++ {
+		testRun, err = testBackend.GetTestRunForTask(ctx, value.ID)
+		if err == nil || !errors.Is(err, task.ErrStorageUnavailable) || attempt >= 2 {
 			break
 		}
-		cursor = page.NextCursor
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
 	}
-	if run.ID == "" || run.TestRunID == "" {
-		return nil, task.ErrNotFound
+	if err != nil {
+		return nil, err
 	}
 	payload := map[string]any{
-		"taskId": value.ID, "kind": "coverageRun", "workspaceGeneration": run.Request.WorkspaceGeneration,
-		"projectId": run.Request.ProjectID, "coverageProfileId": run.Request.CoverageProfileID,
-		"catalogRevision": run.Request.CatalogRevision, "coverageRunId": run.ID, "testRunId": run.TestRunID,
-		"repeatCount": run.Request.RepeatCount, "timeoutMs": run.Request.Timeout.Milliseconds(),
+		"taskId": value.ID, "kind": "coverageRun", "workspaceGeneration": request.WorkspaceGeneration,
+		"projectId": request.ProjectID, "coverageProfileId": request.CoverageProfileID,
+		"catalogRevision": request.CatalogRevision, "coverageRunId": runID, "testRunId": testRun.RunID,
+		"repeatCount": request.RepeatCount, "timeoutMs": request.Timeout.Milliseconds(),
 		"status": value.Status, "createdAt": value.CreatedAt, "lastSequence": value.LastSequence,
 	}
 	if value.Outcome != "" {
