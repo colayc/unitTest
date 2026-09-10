@@ -20,7 +20,10 @@ const (
 	fileAPIQueryRelativePath = ".cmake/api/v1/query/client-unit-test-ide/query.json"
 	fileAPIReplyRelativePath = ".cmake/api/v1/reply"
 
-	maxFileAPIFileBytes  = 512 * 1024
+	// Modern CMake cache/codemodel replies can exceed 512 KiB for framework
+	// builds with large toolchain metadata. Keep the per-file bound tight while
+	// allowing those verified replies; the aggregate bound remains 4 MiB.
+	maxFileAPIFileBytes  = 2 * 1024 * 1024
 	maxFileAPITotalBytes = 4 * 1024 * 1024
 	// Modern CMake toolchains can include a large set of platform/compiler
 	// modules in cmakeFiles.inputs. Keep a bounded cap while allowing the

@@ -1004,7 +1004,7 @@ func TestFileAPIReplyEnforcesFixedLimits(t *testing.T) {
 			setup: func(t *testing.T, fixture fileAPIReplyFixture) {
 				path := filepath.Join(fixture.replyDir, "cache-v2.json")
 				data := `{"kind":"cache","version":{"major":2,"minor":0},"entries":[],"padding":"` +
-					strings.Repeat("x", 512*1024) + `"}`
+					strings.Repeat("x", 2*1024*1024) + `"}`
 				if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 					t.Fatal(err)
 				}
