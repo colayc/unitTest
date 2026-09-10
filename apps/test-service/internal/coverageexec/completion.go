@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
 	"reflect"
 	"slices"
 	"time"
@@ -144,6 +146,9 @@ func (execution *execution) prepareCompletion(
 	embedded := execution.embedded
 	outcomeCount := len(execution.outcomes)
 	execution.mu.Unlock()
+	if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+		_, _ = fmt.Fprintf(os.Stderr, "coverage completion outcome=%s failedPhase=%s state=%s outcomeCount=%d\n", outcome, failedPhase, state.Outcome, outcomeCount)
+	}
 
 	coverageOutcome, reason, err := projectCoverageOutcome(outcome, failedPhase, state)
 	if err != nil || task.CoverageTaskOutcome(coverageOutcome, reason) != outcome {
