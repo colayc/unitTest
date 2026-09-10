@@ -323,7 +323,18 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
         wire = []; wireSize = 0; wireOverflow = false;
         let stage = "startCoverage";
         try {
-          const initial = await client.startCoverage({ idempotencyKey: randomBytes(16).toString("hex"), workspaceGeneration: selected.snapshot.workspaceGeneration, projectId, coverageProfileId, catalogRevision: catalog.revision, selection: { mode: TestSelectionModeV14.All }, repeatCount: 1, timeoutMs: fault === "timeout" ? 120_000 : timeout });
+          let initial: CoverageRun;
+          for (let startAttempt = 0; ; startAttempt++) {
+            selected = await selectGccEventually(client);
+            catalog = await client.getTestCatalog({ projectId, profileId: selected.profile.buildProfileId, limit: 100 });
+            try {
+              initial = await client.startCoverage({ idempotencyKey: randomBytes(16).toString("hex"), workspaceGeneration: selected.snapshot.workspaceGeneration, projectId, coverageProfileId, catalogRevision: catalog.revision, selection: { mode: TestSelectionModeV14.All }, repeatCount: 1, timeoutMs: fault === "timeout" ? 120_000 : timeout });
+              break;
+            } catch (error) {
+              if (!(error instanceof ProtocolError) || error.code !== "SERVICE_UNHEALTHY" || startAttempt >= 1) throw error;
+              await delay(100);
+            }
+          }
           if (fault === "cancel") {
             assert.ok(marker);
             const deadline = Date.now() + timeout;
