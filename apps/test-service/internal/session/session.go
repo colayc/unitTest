@@ -715,7 +715,19 @@ func (s *Session) toProtocolCoverageTaskV14(ctx context.Context, value task.Task
 	cursor := ""
 	var run coveragedomain.Run
 	for pageIndex := 0; pageIndex < 100; pageIndex++ {
-		page, err := backend.ListCoverageRuns(ctx, coveragedomain.RunPageRequest{Cursor: cursor, Limit: coveragedomain.MaxRunPageSize})
+		var page coveragedomain.RunPage
+		var err error
+		for attempt := 0; ; attempt++ {
+			page, err = backend.ListCoverageRuns(ctx, coveragedomain.RunPageRequest{Cursor: cursor, Limit: coveragedomain.MaxRunPageSize})
+			if err == nil || !errors.Is(err, task.ErrStorageUnavailable) || attempt >= 2 {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(50 * time.Millisecond):
+			}
+		}
 		if err != nil {
 			return nil, err
 		}
