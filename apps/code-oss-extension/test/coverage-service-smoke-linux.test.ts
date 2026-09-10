@@ -303,6 +303,7 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
         // Workspace inspection legitimately includes source URIs; only the
         // coverage/run/report/artifact exchange is subject to this leak gate.
         wire = []; wireSize = 0; wireOverflow = false;
+        let stage = "startCoverage";
         try {
           const initial = await client.startCoverage({ idempotencyKey: randomBytes(16).toString("hex"), workspaceGeneration: selected.snapshot.workspaceGeneration, projectId, coverageProfileId, catalogRevision: catalog.revision, selection: { mode: TestSelectionModeV14.All }, repeatCount: 1, timeoutMs: fault === "timeout" ? 120_000 : timeout });
           if (fault === "cancel") {
@@ -315,7 +316,9 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
             }
             await client.cancelTask(initial.taskId);
           }
+          stage = "coverageFinished";
           const run = await coverageFinished(client, initial.coverageRunId);
+          stage = "getTestRun";
           const testRun = await client.getTestRun(run.testRunId);
           assert.equal(testRun.status, "completed");
           if (fault === "cancel" || fault === "timeout") {
@@ -338,6 +341,7 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
             );
           assert.equal(run.reason, undefined);
           assert.equal(testRun.outcome, fault === "crash" ? "errored" : framework === "cpputest" ? "failed" : "passed");
+          stage = "artifacts";
           const result = await artifacts(client, run, framework, selected, catalog.revision, fault === "crash");
           if (fault === "crash") assert.ok(result.report.completeness.reasons.some((reason) => reason === "test_crashed"));
           for (const bytes of result.data.values()) for (const value of sensitive) assert.ok(!Buffer.from(bytes).includes(Buffer.from(value)), "artifact leaked a private execution value");
@@ -353,7 +357,7 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
           if (fault) faults.push({ fault, testRunOutcome: testRun.outcome!, coverageRunOutcome: run.outcome!, reason: run.reason ?? "none" });
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
-          throw new Error(`coverage scenario ${scenario} repeat ${repeat}: ${detail}${serviceStderr ? `; service-stderr=${serviceStderr}` : ""}`);
+          throw new Error(`coverage scenario ${scenario} repeat ${repeat} stage ${stage}: ${detail}${serviceStderr ? `; service-stderr=${serviceStderr}` : ""}`);
         }
       }
       await manager.stop(); manager = undefined;
