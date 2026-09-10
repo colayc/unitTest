@@ -889,6 +889,7 @@ func (execution *execution) Interpret(
 		}
 		verdict, err := embedded.Interpret(ctx, current, original, result)
 		if err != nil || verdict != task.StepVerdictSucceeded {
+			debugCoveragef("coverage embedded test interpretation failed verdict[%s] error[%v] children[%d]", verdict, err, len(result.Children))
 			execution.setFailedPhase(coveragerun.PhaseTest)
 			return verdict, err
 		}
