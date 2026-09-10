@@ -629,6 +629,7 @@ func (m *Manager) loop() {
 			if current := active[value.taskID]; current != nil && current.terminationGeneration == value.generation {
 				current.terminationComplete = true
 				if value.err != nil {
+					debugTaskCompletionf("task termination failed task[%s] error[%v]", value.taskID, value.err)
 					current.terminationFailed = true
 					m.healthy.Store(false)
 					m.stageProcessCompletion(
@@ -642,7 +643,7 @@ func (m *Manager) loop() {
 		case closeResultCommand:
 			if current := active[value.taskID]; current != nil && current.closeGeneration == value.generation {
 				if value.err != nil {
-					m.recordCloseFailure(current)
+					m.recordCloseFailure(current, value.err)
 					recoveryHandoffSafe := current.task.Status != StatusFinished &&
 						current.leasePersisted
 					if (m.circuitFailed() || current.recoveryRequired) && recoveryHandoffSafe {
@@ -1380,7 +1381,12 @@ func (m *Manager) startClose(current *activeTask, retryFailed bool) {
 	}()
 }
 
-func (m *Manager) recordCloseFailure(current *activeTask) {
+func (m *Manager) recordCloseFailure(current *activeTask, errors ...error) {
+	var err error
+	if len(errors) > 0 {
+		err = errors[0]
+	}
+	debugTaskCompletionf("task process close failed task[%s] error[%v]", current.task.ID, err)
 	if !m.circuitFailed() &&
 		!current.recoveryRequired {
 		outcome := current.execution.resolve(OutcomeInfrastructureFailed)
@@ -1447,6 +1453,13 @@ func (m *Manager) quiesceActive(active map[string]*activeTask) {
 func (m *Manager) tripPublisher(active map[string]*activeTask) {
 	if m.publisherFailed {
 		return
+	}
+	if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+		if pc, _, _, ok := runtime.Caller(1); ok {
+			if caller := runtime.FuncForPC(pc); caller != nil {
+				debugTaskCompletionf("task publisher circuit opened caller[%s]", caller.Name())
+			}
+		}
 	}
 	m.publisherFailed = true
 	m.healthy.Store(false)
