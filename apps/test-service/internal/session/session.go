@@ -7,8 +7,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/url"
+	"os"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -1034,6 +1036,9 @@ func invalidPayload(version string, request protocol.Request) HandleResult {
 }
 
 func backendFailure(version string, request protocol.Request, err error) HandleResult {
+	if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+		_, _ = fmt.Fprintf(os.Stderr, "session backend failure method[%s] type[%T] error[%v]\n", request.Method, err, err)
+	}
 	code, message, retryable := "SERVICE_UNHEALTHY", "task service is unavailable", true
 	if request.Method == "events/subscribe" {
 		code, message = "STORAGE_UNAVAILABLE", "event subscription storage is unavailable"
