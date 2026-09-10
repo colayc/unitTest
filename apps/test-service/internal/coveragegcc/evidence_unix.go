@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -268,6 +269,9 @@ func scanEvidenceMode(ctx context.Context, fd int, prefix string, depth int, all
 			if !strings.HasSuffix(name, ".gcno") && !strings.HasSuffix(name, ".gcda") {
 				if allowBuildArtifacts && allowedBuildArtifact(prefix, name, st.Mode) {
 					continue
+				}
+				if allowBuildArtifacts && os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+					return nil, nil, fmt.Errorf("unexpected build evidence file %q", relative)
 				}
 				return nil, nil, ErrInvalidEvidence
 			}
