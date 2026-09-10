@@ -717,6 +717,7 @@ func (m *Manager) loop() {
 
 func (m *Manager) cancel(id string, active map[string]*activeTask) taskResponse {
 	if m.circuitFailed() {
+		debugTaskCompletionf("task cancel rejected by circuit task[%s] storageFailed[%t] publisherFailed[%t]", id, m.storageFailed, m.publisherFailed)
 		return taskResponse{err: ErrStorageUnavailable}
 	}
 	stored, err := m.store.Get(context.Background(), id)
@@ -728,6 +729,7 @@ func (m *Manager) cancel(id string, active map[string]*activeTask) taskResponse 
 	}
 	current := active[id]
 	if current == nil {
+		debugTaskCompletionf("task cancel missing active task[%s] storedStatus[%s]", id, stored.Status)
 		return taskResponse{task: stored, err: ErrConflict}
 	}
 	requested, outcome := current.execution.state()
@@ -762,6 +764,7 @@ func (m *Manager) cancel(id string, active map[string]*activeTask) taskResponse 
 	now := m.clock.Now()
 	cancelling, err := ApplyTransition(current.task, Transition{From: StatusRunning, To: StatusCancelling, At: now})
 	if err != nil {
+		debugTaskCompletionf("task cancel transition failed task[%s] status[%s] error[%v]", id, current.task.Status, err)
 		return taskResponse{task: current.task, err: err}
 	}
 	cancelling, events, err := m.store.Apply(context.Background(), Mutation{
@@ -769,6 +772,7 @@ func (m *Manager) cancel(id string, active map[string]*activeTask) taskResponse 
 		Events: []EventDraft{eventDraft(id, EventTaskCancellationRequested, now, map[string]any{"status": StatusCancelling})},
 	})
 	if err != nil {
+		debugTaskCompletionf("task cancel store apply failed task[%s] error[%v]", id, err)
 		if errors.Is(err, ErrStorageUnavailable) {
 			m.tripStorage(active)
 		} else if errors.Is(err, ErrConflict) {
@@ -781,6 +785,7 @@ func (m *Manager) cancel(id string, active map[string]*activeTask) taskResponse 
 	current.task = cancelling
 	current.execution.resolve(OutcomeCancelled)
 	if !m.publishAll(events) {
+		debugTaskCompletionf("task cancel event publish failed task[%s]", id)
 		m.tripPublisher(active)
 		return taskResponse{task: current.task, err: ErrStorageUnavailable}
 	}
