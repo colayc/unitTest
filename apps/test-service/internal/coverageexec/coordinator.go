@@ -963,6 +963,9 @@ func (execution *execution) ObserveOutput(
 
 func debugCoveragef(format string, args ...any) {
 	if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+		if strings.HasPrefix(format, "coverage boundary") && os.Getenv("UT_DEBUG_COVERAGE_BOUNDARY") != "1" {
+			return
+		}
 		_, _ = fmt.Fprintf(os.Stderr, format+"\n", args...)
 	}
 }
