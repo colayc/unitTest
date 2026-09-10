@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1404,6 +1405,13 @@ func (m *Manager) canRemove(current *activeTask) bool {
 func (m *Manager) tripStorage(active map[string]*activeTask) {
 	if m.storageFailed {
 		return
+	}
+	if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+		if pc, _, _, ok := runtime.Caller(1); ok {
+			if caller := runtime.FuncForPC(pc); caller != nil {
+				debugTaskCompletionf("task storage circuit opened caller[%s]", caller.Name())
+			}
+		}
 	}
 	m.storageFailed = true
 	m.healthy.Store(false)
