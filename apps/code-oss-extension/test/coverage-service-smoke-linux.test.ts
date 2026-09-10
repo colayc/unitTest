@@ -315,6 +315,7 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
           }
           const run = await coverageFinished(client, initial.coverageRunId);
           const testRun = await client.getTestRun(run.testRunId);
+          const coverageTask = await client.getTask(run.taskId);
           assert.equal(testRun.status, "completed");
           if (fault === "cancel" || fault === "timeout") {
             assert.ok(marker && (await lstat(marker)).isFile(), "timeout/cancel must reach a real native test invocation");
@@ -332,7 +333,7 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
             assert.equal(
               run.outcome,
               expectedCoverageOutcome,
-              `coverage ${scenario} outcome ${run.outcome ?? "<none>"} reason ${run.reason ?? "<none>"}`,
+              `coverage ${scenario} outcome ${run.outcome ?? "<none>"} reason ${run.reason ?? "<none>"}; task=${coverageTask.outcome ?? "<none>"} error=${coverageTask.errorMessage ?? "<none>"}`,
             );
           assert.equal(run.reason, undefined);
           assert.equal(testRun.outcome, fault === "crash" ? "errored" : framework === "cpputest" ? "failed" : "passed");
