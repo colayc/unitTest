@@ -52,12 +52,21 @@ func buildRunPlan(
 			return testframework.RunPlan{}, err
 		}
 		testCase, found := findManifestCase(evidence.manifest, item.LogicalName)
-		if !found || !testdomain.ValidID(item.ItemID) ||
-			item.ParentLogicalName != testCase.Location.Path ||
-			!reflect.DeepEqual(item.Parameters, caseParameters(testCase)) ||
-			input.Mode == testframework.RunSelectionGroup &&
-				item.ParentLogicalName != group {
-			return testframework.RunPlan{}, runPlanError("catalog item does not match manifest")
+		if !found {
+			return testframework.RunPlan{}, runPlanError("manifest case not found")
+		}
+		if !testdomain.ValidID(item.ItemID) {
+			return testframework.RunPlan{}, runPlanError("invalid catalog item id")
+		}
+		if item.ParentLogicalName != testCase.Location.Path {
+			return testframework.RunPlan{}, runPlanError("catalog source path mismatch")
+		}
+		if !reflect.DeepEqual(item.Parameters, caseParameters(testCase)) {
+			return testframework.RunPlan{}, runPlanError("catalog parameters mismatch")
+		}
+		if input.Mode == testframework.RunSelectionGroup &&
+			item.ParentLogicalName != group {
+			return testframework.RunPlan{}, runPlanError("catalog group mismatch")
 		}
 		if _, duplicate := ids[item.ItemID]; duplicate {
 			return testframework.RunPlan{}, runPlanError("duplicate item id")
