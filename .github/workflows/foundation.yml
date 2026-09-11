@@ -1192,14 +1192,19 @@ jobs:
             printf '%s\n' "${matches[0]}"
           }
           mkdir -p .release/qualified
-          cp -- "$(find_input .release/qualification/windows '${{ needs.package-windows.outputs.package_filename }}')" .release/qualified/
-          cp -- "$(find_input .release/qualification/windows '${{ needs.package-windows.outputs.manifest_filename }}')" .release/qualified/
-          cp -- "$(find_input .release/qualification/windows license-audit-windows.json)" .release/qualified/
-          cp -- "$(find_input .release/qualification/linux '${{ needs.package-linux.outputs.package_filename }}')" .release/qualified/
-          cp -- "$(find_input .release/qualification/linux '${{ needs.package-linux.outputs.manifest_filename }}')" .release/qualified/
-          cp -- "$(find_input .release/qualification/linux '${{ needs.package-linux.outputs.release_manifest_filename }}')" .release/qualified/
-          cp -- "$(find_input .release/qualification/linux license-audit-linux.json)" .release/qualified/
-          cp -- .release/evidence/release-qualification.json .release/qualified/
+          node tools/release/stage-qualified-release.mjs \
+            --version '${{ steps.canonical-release-version.outputs.version }}' \
+            --out .release/qualified \
+            --windows-package "$(find_input .release/qualification/windows '${{ needs.package-windows.outputs.package_filename }}')" \
+            --windows-manifest "$(find_input .release/qualification/windows '${{ needs.package-windows.outputs.manifest_filename }}')" \
+            --windows-manifest-sha256 '${{ needs.package-windows.outputs.manifest_sha256 }}' \
+            --windows-license-audit "$(find_input .release/qualification/windows license-audit-windows.json)" \
+            --linux-package "$(find_input .release/qualification/linux '${{ needs.package-linux.outputs.package_filename }}')" \
+            --linux-package-manifest "$(find_input .release/qualification/linux '${{ needs.package-linux.outputs.manifest_filename }}')" \
+            --linux-manifest "$(find_input .release/qualification/linux '${{ needs.package-linux.outputs.release_manifest_filename }}')" \
+            --linux-manifest-sha256 '${{ needs.package-linux.outputs.release_manifest_sha256 }}' \
+            --linux-license-audit "$(find_input .release/qualification/linux license-audit-linux.json)" \
+            --qualification .release/evidence/release-qualification.json
       - name: Publish qualified release artifacts
         uses: actions/upload-artifact@v7
         with:
