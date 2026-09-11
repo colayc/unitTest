@@ -1191,7 +1191,6 @@ jobs:
             ((${#matches[@]} == 1)) || { echo "expected exactly one qualified release input named $name" >&2; exit 1; }
             printf '%s\n' "${matches[0]}"
           }
-          mkdir -p .release/qualified
           node tools/release/stage-qualified-release.mjs \
             --version '${{ steps.canonical-release-version.outputs.version }}' \
             --out .release/qualified \
