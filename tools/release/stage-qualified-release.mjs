@@ -1,4 +1,4 @@
-import { copyFile, mkdir, mkdtemp, readdir, rename, rm } from "node:fs/promises";
+import { copyFile, lstat, mkdir, mkdtemp, readdir, rename, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
 const destinationRecords = (input) => [
@@ -13,21 +13,22 @@ const destinationRecords = (input) => [
 ];
 
 const collated = (left, right) => left.localeCompare(right, "en");
+const STAGING_ERROR_CODE = "RELEASE_QUALIFIED_STAGING_FAILED";
+
+const stagingError = () => {
+  const error = new Error("Qualified release staging failed");
+  error.code = STAGING_ERROR_CODE;
+  return error;
+};
 
 export async function stageQualifiedRelease(input) {
-  const finalRoot = resolve(input.outRoot);
-  await mkdir(dirname(finalRoot), { recursive: true });
+  let temporaryRoot;
   try {
-    await readdir(finalRoot);
-  } catch (error) {
-    if (error.code !== "ENOENT") throw error;
-  }
-  if (await directoryExists(finalRoot)) {
-    throw new Error(`Qualified release output already exists: ${finalRoot}`);
-  }
+    const finalRoot = resolve(input.outRoot);
+    await mkdir(dirname(finalRoot), { recursive: true });
+    if (await pathExists(finalRoot)) throw stagingError();
 
-  const temporaryRoot = await mkdtemp(`${finalRoot}.tmp-`);
-  try {
+    temporaryRoot = await mkdtemp(`${finalRoot}.tmp-`);
     const records = destinationRecords(input);
     for (const [source, destination] of records) {
       await copyFile(source, join(temporaryRoot, destination));
@@ -46,14 +47,21 @@ export async function stageQualifiedRelease(input) {
     await rename(temporaryRoot, finalRoot);
     return { outputRoot: finalRoot, files };
   } catch (error) {
-    await rm(temporaryRoot, { recursive: true, force: true });
-    throw error;
+    if (temporaryRoot) {
+      try {
+        await rm(temporaryRoot, { recursive: true, force: true });
+      } catch {
+        // Preserve the stable public error even if cleanup itself fails.
+      }
+    }
+    if (error?.code === STAGING_ERROR_CODE && error.message === "Qualified release staging failed") throw error;
+    throw stagingError();
   }
 }
 
-async function directoryExists(path) {
+async function pathExists(path) {
   try {
-    await readdir(path);
+    await lstat(path);
     return true;
   } catch (error) {
     if (error.code === "ENOENT") return false;

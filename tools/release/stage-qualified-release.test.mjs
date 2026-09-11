@@ -79,3 +79,33 @@ test("stageQualifiedRelease preserves both platform manifests in an exact flat f
     await assert.rejects(access(join(result.outputRoot, `unit-test-ide-${version}.release-manifest.json`)), /ENOENT/u);
   });
 });
+
+test("stageQualifiedRelease reports an existing output directory with a stable error", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await createFixture(root);
+    await mkdir(fixture.input.outRoot, { recursive: true });
+
+    await assert.rejects(
+      stageQualifiedRelease(fixture.input),
+      (error) => error.code === "RELEASE_QUALIFIED_STAGING_FAILED" && error.message === "Qualified release staging failed",
+    );
+  });
+});
+
+test("stageQualifiedRelease wraps source filesystem failures without leaking diagnostics", async (t) => {
+  await withTemporaryRoot(t, async (root) => {
+    const fixture = await createFixture(root);
+    const missingSource = join(root, "missing-source-with-sensitive-name.msix");
+
+    await assert.rejects(
+      stageQualifiedRelease({ ...fixture.input, windowsPackage: missingSource }),
+      (error) => {
+        assert.equal(error.code, "RELEASE_QUALIFIED_STAGING_FAILED");
+        assert.equal(error.message, "Qualified release staging failed");
+        assert.equal(error.message.includes(missingSource), false);
+        return true;
+      },
+    );
+    await assert.rejects(access(resolve(fixture.input.outRoot)), /ENOENT/u);
+  });
+});
