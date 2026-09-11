@@ -166,6 +166,10 @@ test("stageQualifiedRelease CLI maps exact flags and fails safely", async (t) =>
     assert.equal(success.status, 0); assert.equal(success.stderr, "");
     const result = JSON.parse(success.stdout); assert.deepEqual(new Set(result.files), new Set(["license-audit-linux.json", "license-audit-windows.json", "release-qualification.json", `unit-test-ide-${version}.AppImage`, `unit-test-ide-${version}.AppImage.sha256.json`, `unit-test-ide-${version}.linux-x64.release-manifest.json`, `unit-test-ide-${version}.msix`, `unit-test-ide-${version}.windows-x64.release-manifest.json`]));
     const unknown = runCli(["--secret-file", fixture.input.windowsManifest]); assert.equal(unknown.status, 1); assert.match(unknown.stderr, /RELEASE_QUALIFIED_STAGING_FAILED: unknown argument: --secret-file/u); assert.doesNotMatch(unknown.stderr, new RegExp(root.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
+    const secretToken = "--secret=top-secret-C:\\fixture\\private.json";
+    const leaked = runCli([secretToken]); assert.equal(leaked.status, 1); assert.match(leaked.stderr, /RELEASE_QUALIFIED_STAGING_FAILED: unknown argument/u); assert.doesNotMatch(leaked.stderr, /top-secret|fixture|private\.json/u);
+    const positionalPath = "C:\\fixture\\private-input.json";
+    const positional = runCli([positionalPath]); assert.equal(positional.status, 1); assert.doesNotMatch(positional.stderr, /fixture|private-input\.json/u);
     const missingValue = runCli(["--version"]); assert.equal(missingValue.status, 1); assert.match(missingValue.stderr, /RELEASE_QUALIFIED_STAGING_FAILED: missing value for --version/u);
   });
 });
