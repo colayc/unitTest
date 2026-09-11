@@ -532,6 +532,22 @@ test("foundation release publication is downstream of a successful qualification
   assert.match(workflow, /id: canonical-release-version[\s\S]*?name: qualified-release-\$\{\{ steps\.canonical-release-version\.outputs\.version \}\}/u);
 });
 
+test("foundation stages a closed qualified release", async () => {
+  const workflow = await readFile(resolve(".github/workflows/foundation.yml"), "utf8");
+  const qualificationStart = workflow.indexOf("  release-qualification:");
+  const qualificationJob = workflow.slice(qualificationStart);
+
+  assert.match(qualificationJob, /node tools\/release\/stage-qualified-release\.mjs/u);
+  assert.match(qualificationJob, /--windows-manifest-sha256 '\$\{\{ needs\.package-windows\.outputs\.manifest_sha256 \}\}'/u);
+  assert.match(qualificationJob, /--linux-manifest-sha256 '\$\{\{ needs\.package-linux\.outputs\.release_manifest_sha256 \}\}'/u);
+  assert.match(qualificationJob, /--windows-manifest "\$\(find_input \.release\/qualification\/windows '\$\{\{ needs\.package-windows\.outputs\.manifest_filename \}\}'\)"/u);
+  assert.match(qualificationJob, /--linux-manifest "\$\(find_input \.release\/qualification\/linux '\$\{\{ needs\.package-linux\.outputs\.release_manifest_filename \}\}'\)"/u);
+  assert.doesNotMatch(qualificationJob, /cp -- "\$\(find_input \.release\/qualification\/(?:windows|linux)/u);
+  const stageIndex = qualificationJob.indexOf("node tools/release/stage-qualified-release.mjs");
+  const uploadIndex = qualificationJob.indexOf("name: Publish qualified release artifacts");
+  assert.ok(stageIndex >= 0 && uploadIndex > stageIndex);
+});
+
 test("release package jobs materialize digest-pinned runtime inputs before packaging", async () => {
   const workflow = await readFile(resolve(".github/workflows/foundation.yml"), "utf8");
   assert.match(workflow, /permissions:\r?\n\s+actions: read\r?\n\s+contents: read/u);

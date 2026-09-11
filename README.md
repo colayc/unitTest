@@ -203,6 +203,8 @@ if ($qualification.signatureOutcomes.windows -cne 'not-required') { throw 'unexp
 
 首次资格验证固定为免费无签名值 `release_version=0.1.0` 与 `release_signing_required=0`。它是短生命周期测试证据，不创建 GitHub Release，也不是生产发布。完成后应在这 1 天窗口内下载并检查 Windows/Linux package、release manifest、license audit、install-smoke 和 `release-qualification` evidence；任何失败都要经评审修复后，从新的 producer run 开始。
 
+通过资格验证后，`qualified-release-<version>-<attempt>` 恰好包含八个文件：Windows package、Windows qualified manifest `unit-test-ide-<version>.windows-x64.release-manifest.json`、Windows license audit、Linux package、Linux package manifest、Linux qualified manifest `unit-test-ide-<version>.linux-x64.release-manifest.json`、Linux license audit，以及 `release-qualification.json`。平台 package artifacts 及其嵌入的 manifest 名称保持不变。
+
 ## 协议与安全边界
 
 协议模型由 `packages/protocol-schema/schema` 生成。生成的 TypeScript 和 Go 文件已提交；请编辑 Schema 并运行 `pnpm generate:protocol`，不要直接编辑生成文件。消息继续使用 UTF-8 NDJSON，每行编码后上限为 1 MiB。
