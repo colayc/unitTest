@@ -543,6 +543,7 @@ test("foundation stages a closed qualified release", async () => {
   assert.match(qualificationJob, /--windows-manifest "\$\(find_input \.release\/qualification\/windows '\$\{\{ needs\.package-windows\.outputs\.manifest_filename \}\}'\)"/u);
   assert.match(qualificationJob, /--linux-manifest "\$\(find_input \.release\/qualification\/linux '\$\{\{ needs\.package-linux\.outputs\.release_manifest_filename \}\}'\)"/u);
   assert.doesNotMatch(qualificationJob, /cp -- "\$\(find_input \.release\/qualification\/(?:windows|linux)/u);
+  assert.doesNotMatch(qualificationJob, /mkdir -p \.release\/qualified/u);
   const stageIndex = qualificationJob.indexOf("node tools/release/stage-qualified-release.mjs");
   const uploadIndex = qualificationJob.indexOf("name: Publish qualified release artifacts");
   assert.ok(stageIndex >= 0 && uploadIndex > stageIndex);
