@@ -170,6 +170,9 @@ test("stageQualifiedRelease CLI maps exact flags and fails safely", async (t) =>
     const leaked = runCli([secretToken]); assert.equal(leaked.status, 1); assert.match(leaked.stderr, /RELEASE_QUALIFIED_STAGING_FAILED: unknown argument/u); assert.doesNotMatch(leaked.stderr, /top-secret|fixture|private\.json/u);
     const positionalPath = "C:\\fixture\\private-input.json";
     const positional = runCli([positionalPath]); assert.equal(positional.status, 1); assert.doesNotMatch(positional.stderr, /fixture|private-input\.json/u);
+    for (const token of ["--secret-file:C:\\fixture\\private.json", "--flag/path-C:\\fixture", "--control\u0007secret"]) {
+      const unsafeFlag = runCli([token]); assert.equal(unsafeFlag.status, 1); assert.match(unsafeFlag.stderr, /RELEASE_QUALIFIED_STAGING_FAILED: unknown argument: <token>/u); assert.doesNotMatch(unsafeFlag.stderr, /secret-file|fixture|private\.json|flag\/path|control/u);
+    }
     const missingValue = runCli(["--version"]); assert.equal(missingValue.status, 1); assert.match(missingValue.stderr, /RELEASE_QUALIFIED_STAGING_FAILED: missing value for --version/u);
   });
 });
