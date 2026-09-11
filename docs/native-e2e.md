@@ -84,6 +84,17 @@ Windows LLVM coverage required gate 另有更强的 OS 级边界：独立 Go pre
 
 Go production import audit 禁止 HTTP/TLS/GitHub/OAuth client stack，并只允许本地 IPC 代码使用受限的 `net` 能力。
 
+Ubuntu 24.04 会通过 AppArmor 限制未受配置的 unprivileged user namespace，
+因此 Linux offline wrapper 先实际探测 rootless `user + net` namespace。
+rootless 可用时始终优先使用；只有工作流在每次调用中显式传入
+`--allow-sudo-root`，才允许在 rootless 探测失败后尝试 passwordless sudo。
+sudo 只负责创建 `net + mount-proc` namespace，随后用 `setpriv` 恢复原始
+UID/GID 并清空 supplementary groups，再启动目标命令。所选模式会写入日志；
+rootless、sudo、`unshare` 或降权链任一探测失败都会在目标命令启动前失败，
+绝不回退到宿主网络。依赖、bundle 和 Go module 下载必须在此前完成；
+Service、构建/测试进程和 coverage evidence validator 都通过同一显式 wrapper
+进入 offline namespace，artifact upload 才在 namespace 外执行。
+
 ## 报告
 
 报告位置：

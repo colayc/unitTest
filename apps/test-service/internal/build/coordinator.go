@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -16,7 +17,7 @@ import (
 	"time"
 
 	"unit-test-ide.local/test-service/internal/cmake"
-	"unit-test-ide.local/test-service/internal/coveragellvm"
+	"unit-test-ide.local/test-service/internal/coverageplatform"
 	"unit-test-ide.local/test-service/internal/discovery"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/taskstore"
@@ -283,15 +284,50 @@ func (plan *PreparedPlan) PersistConfiguration(ctx context.Context) error {
 	return task.ErrInvalidArgument
 }
 
-func (plan *PreparedPlan) AttachCoverageToolset(toolset *coveragellvm.Toolset) error {
+func (plan *PreparedPlan) AttachCoverageToolset(toolset coverageplatform.Toolset) error {
 	if plan == nil || plan.prepared == nil || plan.prepared.coverage == nil ||
-		plan.prepared.boundary == nil || toolset == nil || toolset.Version() != plan.prepared.toolchain.Version ||
+		plan.prepared.boundary == nil || coverageplatform.VerifyToolset(toolset) != nil || toolset.Version() != plan.prepared.toolchain.Version ||
 		toolset.Identity() != plan.prepared.coverage.ToolsetIdentity ||
-		!sameNativePath(toolset.Compiler().Path(), plan.prepared.toolchain.CXXCompiler) ||
-		!sameNativePath(toolset.Compiler().Path(), plan.prepared.toolchain.CCompiler) {
+		!sameNativePath(toolset.CCompiler().Path(), plan.prepared.toolchain.CCompiler) ||
+		!sameNativePath(toolset.CXXCompiler().Path(), plan.prepared.toolchain.CXXCompiler) {
 		return task.ErrInvalidArgument
 	}
 	return plan.prepared.boundary.attachCoverageToolset(toolset)
+}
+
+func (plan *PreparedPlan) CoverageSourceRoot() coverageplatform.DirectoryVerifier {
+	if plan == nil || plan.prepared == nil || plan.prepared.coverage == nil || plan.prepared.boundary == nil {
+		return nil
+	}
+	return plan.prepared.boundary.coverageSourceRoot()
+}
+
+func (plan *PreparedPlan) CoverageObjectDirectory() coverageplatform.DirectoryVerifier {
+	if plan == nil || plan.prepared == nil || plan.prepared.coverage == nil || plan.prepared.boundary == nil {
+		return nil
+	}
+	return plan.prepared.boundary.coverageObjectDirectory()
+}
+
+func (plan *PreparedPlan) AttachCoverageExecution(execution coverageplatform.CollectorExecution) error {
+	if plan == nil || plan.prepared == nil || plan.prepared.coverage == nil || plan.prepared.boundary == nil {
+		return task.ErrInvalidArgument
+	}
+	return plan.prepared.boundary.AttachCoverageExecution(execution)
+}
+
+func (plan *PreparedPlan) VerifyCoverageExecutionAfter() error {
+	if plan == nil || plan.prepared == nil || plan.prepared.coverage == nil || plan.prepared.boundary == nil {
+		return task.ErrInvalidArgument
+	}
+	return plan.prepared.boundary.VerifyCoverageExecutionAfter()
+}
+
+func (plan *PreparedPlan) PinnedCoverageOutput() (coverageplatform.Output, error) {
+	if plan == nil || plan.prepared == nil || plan.prepared.coverage == nil || plan.prepared.boundary == nil {
+		return nil, task.ErrInvalidArgument
+	}
+	return plan.prepared.boundary.PinnedCoverageOutput()
 }
 
 func (plan *PreparedPlan) AllowTestExecutable(
@@ -396,12 +432,11 @@ func (c *Coordinator) prepare(
 		return nil, err
 	}
 	if coverage != nil {
-		if instance.Family != toolchain.FamilyClangCL || instance.Version == "" ||
-			instance.Coverage.LLVMProfdata == "" || instance.Coverage.LLVMCov == "" ||
-			!validLowerSHA256(instance.Coverage.ToolsetIdentity) {
+		toolsetIdentity, capabilityErr := coverageToolsetIdentity(instance, true)
+		if capabilityErr != nil {
 			return nil, task.ErrInvalidArgument
 		}
-		coverage.ToolsetIdentity = instance.Coverage.ToolsetIdentity
+		coverage.ToolsetIdentity = toolsetIdentity
 		profile.BinaryDir = coverage.BinaryDir
 	}
 	if err := c.ensureBuildDirectory(profile.BinaryDir); err != nil {
@@ -554,6 +589,40 @@ func (c *Coordinator) prepare(
 	}, nil
 }
 
+func coverageToolsetIdentity(instance toolchain.Instance, coverageRequested bool) (string, error) {
+	if !coverageRequested {
+		return "", nil
+	}
+	switch instance.Family {
+	case toolchain.FamilyClangCL:
+		if instance.Version == "" || instance.Coverage.LLVMProfdata == "" ||
+			instance.Coverage.LLVMCov == "" || !validLowerSHA256(instance.Coverage.ToolsetIdentity) {
+			return "", task.ErrInvalidArgument
+		}
+		return instance.Coverage.ToolsetIdentity, nil
+	case toolchain.FamilyGCC:
+		coverage := instance.Coverage
+		if instance.Version == "" || coverage.GCov == "" ||
+			coverage.GCovVersion != instance.Version ||
+			!validLowerSHA256(coverage.ToolsetIdentity) {
+			return "", task.ErrInvalidArgument
+		}
+		identity := toolchain.GCCToolsetIdentity(
+			instance.Version,
+			[]string{instance.CCompiler, instance.CXXCompiler, coverage.GCov},
+			[]toolchain.ExecutableEvidence{
+				coverage.CompilerEvidence, coverage.CXXCompilerEvidence, coverage.GCovEvidence,
+			},
+		)
+		if identity == "" || identity != coverage.ToolsetIdentity {
+			return "", task.ErrInvalidArgument
+		}
+		return identity, nil
+	default:
+		return "", task.ErrInvalidArgument
+	}
+}
+
 func cloneBuildExecutionPlan(value task.ExecutionPlan) task.ExecutionPlan {
 	result := value
 	result.Steps = make([]task.ExecutionStep, len(value.Steps))
@@ -605,6 +674,9 @@ func (c *Coordinator) Succeeded(
 		state.Profile.BinaryDir, state.AllowedRoots, state.Profile,
 	)
 	if err != nil {
+		if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+			return fmt.Errorf("%w: %s (%v)", ErrConfigureRequired, classifyConfigureReplyFailure(err), err)
+		}
 		return ErrConfigureRequired
 	}
 	byID := make(map[string]string, len(reply.Targets))
@@ -619,12 +691,16 @@ func (c *Coordinator) Succeeded(
 	toolchainIdentity := effectiveToolchainIdentity(
 		state.Profile, toolchain.Instance{ID: state.ToolchainID}, reply,
 	)
-	fingerprint := configureFingerprint(
+	input := fingerprintInput(
 		state.WorkspaceGeneration, state.Profile, state.CMakeIdentity,
 		toolchainIdentity, reply, state.UnityRunnerGeneratorIdentity,
 		state.Coverage,
 	)
+	fingerprint := cmake.ConfigureFingerprint(input)
 	if fingerprint == "" {
+		if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+			return fmt.Errorf("%w: %s", ErrConfigureRequired, classifyFingerprintFailure(input))
+		}
 		return ErrConfigureRequired
 	}
 	return c.config.Configurations.PutBuildConfiguration(
@@ -638,6 +714,128 @@ func (c *Coordinator) Succeeded(
 			ConfiguredAt:    c.dependencies.now(),
 		},
 	)
+}
+
+func classifyConfigureReplyFailure(err error) string {
+	switch {
+	case errors.Is(err, cmake.ErrFileAPIBoundary):
+		return "CMake File API boundary failure"
+	case errors.Is(err, cmake.ErrFileAPILimit):
+		message := err.Error()
+		for _, detail := range []struct{ fragment, category string }{
+			{"file exceeds", "CMake File API input exceeds limit"},
+			{"index objects exceed", "CMake File API index object limit"},
+			{"configurations exceed", "CMake File API configuration limit"},
+			{"targets exceed", "CMake File API target limit"},
+			{"target detail files exceed", "CMake File API target detail file limit"},
+			{"total target artifacts exceed", "CMake File API total artifact limit"},
+			{"artifacts exceed", "CMake File API target artifact limit"},
+			{"toolchains exceed", "CMake File API toolchain limit"},
+			{"consumed files exceed", "CMake File API consumed file limit"},
+			{"total consumed bytes exceed", "CMake File API total bytes limit"},
+			{"CMake inputs exceed", "CMake File API input count limit"},
+			{"cache entries exceed", "CMake File API cache entry limit"},
+			{"reply directory entries exceed", "CMake File API reply directory limit"},
+			{"reply index/error candidates exceed", "CMake File API reply candidate limit"},
+		} {
+			if strings.Contains(message, detail.fragment) {
+				return detail.category
+			}
+		}
+		return "CMake File API limit failure"
+	case errors.Is(err, cmake.ErrFileAPIReply):
+		if os.IsNotExist(err) {
+			return "CMake File API input missing"
+		}
+		if os.IsPermission(err) {
+			return "CMake File API input permission denied"
+		}
+		message := err.Error()
+		for _, detail := range []struct{ fragment, category string }{
+			{"current CMake reply is an error", "CMake File API current reply error"},
+			{"decode index", "CMake File API index decode failure"},
+			{"client query", "CMake File API query shape failure"},
+			{"no CMake reply index", "CMake File API reply index missing"},
+			{"codemodel", "CMake File API codemodel failure"},
+			{"cmakeFiles", "CMake File API CMake files failure"},
+			{"CMake cache", "CMake File API cache failure"},
+			{"consumed files exceed", "CMake File API limit failure"},
+			{"total consumed bytes exceed", "CMake File API limit failure"},
+			{"reply exceeds limit", "CMake File API limit failure"},
+			{"snapshot", "CMake File API input snapshot failure"},
+			{"does not exist", "CMake File API input missing"},
+			{"no such file or directory", "CMake File API input missing"},
+			{"too many levels of symbolic links", "CMake File API input symlink rejected"},
+			{"operation not supported", "CMake File API input unsupported"},
+			{"invalid argument", "CMake File API input unsupported"},
+			{"not a directory", "CMake File API input missing"},
+			{"is a directory", "CMake File API input is not a regular file"},
+			{"input/output error", "CMake File API input read failure"},
+			{"stale file handle", "CMake File API input stale"},
+			{"bad file descriptor", "CMake File API input descriptor failure"},
+			{"text file busy", "CMake File API input busy"},
+			{"changed while reading", "CMake File API input changed"},
+			{"path now names a different file", "CMake File API input identity changed"},
+			{"path changed while verifying", "CMake File API input changed"},
+			{"open file identity changed", "CMake File API input identity changed"},
+			{"not a direct regular file", "CMake File API input is not a regular file"},
+			{"identity changed", "CMake File API input identity changed"},
+			{"file content changed", "CMake File API input content changed"},
+			{"file exceeds", "CMake File API input exceeds limit"},
+			{"permission denied", "CMake File API input permission denied"},
+			{"read OS file identity", "CMake File API input identity unavailable"},
+			{"file snapshot is closed", "CMake File API input snapshot closed"},
+			{"toolchain", "CMake File API toolchain failure"},
+			{"target", "CMake File API target failure"},
+			{"configuration", "CMake File API configuration failure"},
+			{"CMake input", "CMake File API input failure"},
+		} {
+			if strings.Contains(message, detail.fragment) {
+				return detail.category
+			}
+		}
+		return "invalid CMake File API reply"
+	default:
+		return "CMake File API reply unavailable"
+	}
+}
+
+func classifyFingerprintFailure(input cmake.ProfileFingerprintInput) string {
+	switch {
+	case input.WorkspaceGeneration == "":
+		return "configure fingerprint missing workspace generation"
+	case input.Profile.ID == "" || input.Profile.ProjectID == "":
+		return "configure fingerprint missing profile identity"
+	case input.CMakeIdentity == "":
+		return "configure fingerprint missing CMake identity"
+	case input.ToolchainIdentity == "":
+		return "configure fingerprint missing toolchain identity"
+	case len(input.CMakeInputStates) == 0:
+		return "configure fingerprint missing CMake inputs"
+	case len(input.FileAPIState) == 0:
+		return "configure fingerprint missing File API state"
+	case !validFingerprintFilesForDiagnostic(input.CMakeInputStates, []cmake.FingerprintFile{input.Cache}, input.FileAPIState):
+		return "configure fingerprint has invalid file state"
+	default:
+		return "configure fingerprint input rejected"
+	}
+}
+
+func validFingerprintFilesForDiagnostic(groups ...[]cmake.FingerprintFile) bool {
+	for _, group := range groups {
+		for _, file := range group {
+			if file.Path == "" || file.Identity == "" || len(file.SHA256) != 64 {
+				return false
+			}
+		}
+	}
+	if len(groups) > 1 {
+		cache := groups[1]
+		if len(cache) != 1 {
+			return false
+		}
+	}
+	return true
 }
 
 type configureStepState struct {

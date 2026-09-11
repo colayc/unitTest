@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   prepareTestFrameworkWorkspace,
+  type TestFramework,
   testFixtureExecutableName
 } from "./test-framework-fixture.js";
 
@@ -50,6 +51,56 @@ test("test framework workspace is closed and pins the fixture executable", async
       ctestName: "framework-tests",
       framework: "cpputest"
     }]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("test-only framework fixture can declare a closed Unity C workspace", async () => {
+  const root = await mkdtemp(join(tmpdir(), "unit-test-framework-unity-fixture-"));
+  try {
+    const framework: TestFramework = "unity";
+    const workspace = join(root, "workspace");
+    await prepareTestFrameworkWorkspace(workspace, { framework });
+    const cmake = await readFile(join(workspace, "CMakeLists.txt"), "utf8");
+    assert.match(cmake, /LANGUAGES C/u);
+    assert.match(cmake, /fixture-app main\.c/u);
+    const config = JSON.parse(await readFile(
+      join(workspace, ".unit-test-ide", "workspace.json"), "utf8"
+    )) as { projects: Array<{ tests: { containers: Array<{ framework: string }> } }> };
+    assert.deepEqual(config.projects[0]?.tests.containers, [{
+      ctestName: "framework-tests",
+      framework: "unity"
+    }]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Linux test-only fixture accepts only an explicit verified framework seam", async () => {
+  const root = await mkdtemp(join(tmpdir(), "unit-test-framework-linux-seam-"));
+  try {
+    const workspace = join(root, "workspace");
+    const inputs = {
+      cpputestRoot: join(root, "cpputest"),
+      unityRoot: join(root, "unity"),
+      cmakeHelper: join(root, "UnitTestIDE.cmake"),
+      unityRunnerGenerator: join(root, "unity-runner-generator")
+    };
+    await prepareTestFrameworkWorkspace(workspace, {
+      framework: "unity",
+      platform: "linux",
+      linuxFrameworkInputs: inputs
+    });
+    const cmake = await readFile(join(workspace, "CMakeLists.txt"), "utf8");
+    assert.ok(cmake.indexOf("add_executable(fixture-app fixture-unity.c)") < cmake.indexOf("target_link_libraries(fixture-app PRIVATE unit_test_ide_unity)"));
+    assert.ok(cmake.indexOf("add_executable(fixture-app fixture-unity.c)") < cmake.indexOf("include(\"" + inputs.cmakeHelper + "\")"));
+    assert.match(cmake, /UTIDE_UNITY_RUNNER_GENERATOR/u);
+    assert.match(cmake, /UnitTestIDE\.cmake/u);
+    assert.match(cmake, /add_library\(unit_test_ide_unity STATIC/u);
+    assert.match(cmake, /target_link_libraries\(fixture-app PRIVATE unit_test_ide_unity\)/u);
+    assert.match(cmake, /unit_test_ide_add_unity_test\(TEST framework-tests TARGET fixture-app TEST_SOURCES fixture-unity\.c\)/u);
+    assert.doesNotMatch(cmake, /find_package\(Unity/u);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

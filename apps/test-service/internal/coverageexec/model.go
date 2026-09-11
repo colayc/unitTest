@@ -11,7 +11,10 @@ import (
 	"time"
 
 	"unit-test-ide.local/test-service/internal/build"
-	"unit-test-ide.local/test-service/internal/coveragellvm"
+	"unit-test-ide.local/test-service/internal/coveragedomain"
+	coveragemodelv1 "unit-test-ide.local/test-service/internal/coveragemodel/v1"
+	"unit-test-ide.local/test-service/internal/coveragenormalize"
+	"unit-test-ide.local/test-service/internal/coverageplatform"
 	"unit-test-ide.local/test-service/internal/coveragereport"
 	"unit-test-ide.local/test-service/internal/coveragerun"
 	"unit-test-ide.local/test-service/internal/task"
@@ -20,6 +23,24 @@ import (
 	"unit-test-ide.local/test-service/internal/toolchain"
 	"unit-test-ide.local/test-service/internal/workspace"
 )
+
+// CollectionPlan keeps the durable step vocabulary while allowing collectors
+// that produce a pinned file (gcovr) to normalize in the service instead of
+// treating process stdout as evidence.
+type CollectionPlan struct {
+	Aggregate task.ProcessSpec
+	Normalize *task.ProcessSpec
+}
+
+type NormalizeInput struct {
+	ProcessOutput []byte
+	PinnedOutput coverageplatform.Output
+	WorkspaceRoot string
+	Matcher       *coveragenormalize.GlobMatcher
+	Toolchain     coveragedomain.ToolchainSnapshot
+	Completeness  coveragedomain.Completeness
+	Limits        coveragenormalize.Limits
+}
 
 type TaskResumer interface {
 	ResumeQueued(context.Context, task.ResumeRequest) (task.Task, error)
@@ -44,7 +65,12 @@ type BuildPreparer interface {
 type PreparedBuild interface {
 	testrun.PreparedBuild
 	CoverageBinaryDir() string
-	AttachCoverageToolset(*coveragellvm.Toolset) error
+	CoverageSourceRoot() coverageplatform.DirectoryVerifier
+	CoverageObjectDirectory() coverageplatform.DirectoryVerifier
+	AttachCoverageToolset(coverageplatform.Toolset) error
+	AttachCoverageExecution(coverageplatform.CollectorExecution) error
+	VerifyCoverageExecutionAfter() error
+	PinnedCoverageOutput() (coverageplatform.Output, error)
 }
 
 type EmbeddedTestPreparer interface {
@@ -58,11 +84,17 @@ type AdapterInput struct {
 }
 
 type PreparedAdapter interface {
-	Toolset() *coveragellvm.Toolset
-	Instrumentation() coveragellvm.Instrumentation
+	Toolset() coverageplatform.Toolset
+	// RelinquishToolsetOwnership is called exactly once after Build Boundary
+	// commits the toolset claim. Implementations retain an operational view but
+	// must not close the transferred toolset afterwards.
+	RelinquishToolsetOwnership()
+	Instrumentation() coverageplatform.Instrumentation
 	Allocator() testrun.ProfileAllocator
-	SealProfiles([]testrun.ProfileExpectation, []testrun.InvocationOutcome) (coveragellvm.Manifest, error)
-	Collector(coveragellvm.Manifest, []coveragerun.TrustedPath) (merge, export task.ProcessSpec, err error)
+	PrepareTests(context.Context, PreparedBuild) error
+	SealEvidence([]testrun.ProfileExpectation, []testrun.InvocationOutcome) ([]coveragedomain.CompletenessReason, error)
+	PrepareCollector(context.Context, PreparedBuild, coverageplatform.DirectoryVerifier, []coveragerun.TrustedPath) (CollectionPlan, error)
+	Normalize(context.Context, NormalizeInput) (coveragemodelv1.CoverageDocumentV1, []coveragenormalize.SourceBinding, error)
 	Close() error
 }
 

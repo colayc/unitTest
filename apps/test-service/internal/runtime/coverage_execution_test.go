@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -48,6 +49,45 @@ func TestCoverageBuildPreparerPreservesCurrentPreparedPlanCapability(t *testing.
 	if got != want || !reflect.DeepEqual(delegate.request, request) {
 		t.Fatalf("typed build adapter returned %#v with request %#v", got, delegate.request)
 	}
+}
+
+func TestLLVMPreparedAdapterDoesNotCloseTransferredToolset(t *testing.T) {
+	closer := &nonIdempotentCoverageCloser{}
+	adapter := &llvmPreparedCoverageAdapter{toolsetCloser: closer, ownsToolset: true}
+	adapter.RelinquishToolsetOwnership()
+	if err := adapter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if closer.calls != 0 {
+		t.Fatalf("transferred toolset close count = %d, want 0", closer.calls)
+	}
+}
+
+func TestLLVMPreparedAdapterClosesUntransferredToolsetExactlyOnce(t *testing.T) {
+	closer := &nonIdempotentCoverageCloser{}
+	adapter := &llvmPreparedCoverageAdapter{toolsetCloser: closer, ownsToolset: true}
+	if err := adapter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if closer.calls != 1 {
+		t.Fatalf("untransferred toolset close count = %d, want 1", closer.calls)
+	}
+}
+
+type nonIdempotentCoverageCloser struct{ calls int }
+
+func (closer *nonIdempotentCoverageCloser) Close() error {
+	closer.calls++
+	if closer.calls > 1 {
+		return errors.New("double close")
+	}
+	return nil
 }
 
 type recordingExecutionCoordinator struct {
@@ -325,9 +365,11 @@ func persistCoverageForRuntimeRecovery(t *testing.T, store *taskstore.Store, sel
 	if platformForTest() == "windows" {
 		family = toolchain.FamilyClangCL
 	}
-	toolchainSnapshot, err := coverageToolchainSnapshot(toolchain.Instance{
-		ID: "retained-toolchain", Family: family, Version: "18.1.8", TargetArchitecture: "amd64",
-	}, platformForTest())
+	instance := toolchain.Instance{ID: "retained-toolchain", Family: family, Version: "18.1.8", TargetArchitecture: "amd64"}
+	if platformForTest() == "linux" {
+		instance.Coverage = toolchain.CoverageCapability{GCov: "/usr/bin/gcov", GCovVersion: instance.Version, ToolsetIdentity: strings.Repeat("a", 64)}
+	}
+	toolchainSnapshot, err := coverageToolchainSnapshot(instance, platformForTest())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -401,7 +443,7 @@ func (processes *productionUnsupportedProcesses) count() int {
 	return processes.calls
 }
 
-func TestDefaultLinuxCoverageWrapperTerminalizesWithoutNativePreparationOrExecutionRoot(t *testing.T) {
+func TestDefaultLinuxCoverageWrapperEntersNativeCoordinatorAndFailsClosed(t *testing.T) {
 	base := t.TempDir()
 	workspacePath := filepath.Join(base, "workspace")
 	if err := os.MkdirAll(filepath.Join(workspacePath, ".unit-test-ide"), 0o700); err != nil {
@@ -455,6 +497,7 @@ func TestDefaultLinuxCoverageWrapperTerminalizesWithoutNativePreparationOrExecut
 	})
 	toolchainSnapshot, err := coverageToolchainSnapshot(toolchain.Instance{
 		ID: "gcc-linux", Family: toolchain.FamilyGCC, Version: "14.2.0", TargetArchitecture: "amd64",
+		Coverage: toolchain.CoverageCapability{GCov: "/usr/bin/gcov", GCovVersion: "14.2.0", ToolsetIdentity: stringsOf('a', 64)},
 	}, "linux")
 	if err != nil {
 		t.Fatal(err)
@@ -488,7 +531,7 @@ func TestDefaultLinuxCoverageWrapperTerminalizesWithoutNativePreparationOrExecut
 	}
 	t.Cleanup(func() { _ = executor.Close() })
 	platform, ok := executor.(*platformCoverageExecutor)
-	if !ok || platform.native {
+	if !ok || !platform.native {
 		t.Fatalf("Linux default coverage executor = %#v", executor)
 	}
 	if _, ok := platform.coordinator.(*coverageexec.Coordinator); !ok {
@@ -510,10 +553,10 @@ func TestDefaultLinuxCoverageWrapperTerminalizesWithoutNativePreparationOrExecut
 	page, artifactErr := store.ListArtifacts(context.Background(), persisted.ID, "", 10)
 	entries, rootErr := os.ReadDir(executionRoot)
 	if err != nil || runErr != nil || artifactErr != nil || rootErr != nil ||
-		finished.Status != task.StatusFinished || finished.Outcome != task.OutcomeInfrastructureFailed ||
+		finished.Status != task.StatusFinished || finished.Outcome != task.OutcomeCommandFailed ||
 		run.Status != coveragedomain.StatusFinished || run.Outcome != coveragedomain.OutcomeUnavailable ||
-		run.Reason != coveragedomain.ReasonInstrumentationFailed || run.ReportID != "" || len(page.Items) != 0 ||
-		buildPreparer.calls != 0 || processes.count() != 0 || len(entries) != 0 {
+		run.Reason != coveragedomain.ReasonBuildFailed || run.ReportID != "" || len(page.Items) != 0 ||
+		buildPreparer.calls != 1 || processes.count() != 0 || len(entries) != 0 {
 		t.Fatalf("Linux production terminal: task=%#v/%v run=%#v/%v artifacts=%#v/%v build=%d process=%d root=%#v/%v",
 			finished, err, run, runErr, page.Items, artifactErr, buildPreparer.calls, processes.count(), entries, rootErr)
 	}

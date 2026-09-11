@@ -33,6 +33,7 @@ func TestPrepareEmbeddedUsesPersistedRunWithoutNestedTask(t *testing.T) {
 	seenNames := make(map[string]struct{}, len(expectations))
 	for index, expectation := range expectations {
 		if expectation.InvocationID == "" || expectation.Iteration < 1 ||
+			expectation.Sequence != index+1 ||
 			!strings.HasPrefix(expectation.FileName, "p-") ||
 			!strings.Contains(expectation.FileName, "-i-") ||
 			!strings.HasSuffix(expectation.FileName, "-%p-%m.profraw") {
@@ -241,6 +242,73 @@ func TestPrepareEmbeddedEnforcesProfileCapacityBeforeAllocation(t *testing.T) {
 	}
 }
 
+func TestPrepareEmbeddedRejectsAllocatorTargetAndEnvironmentPolicyViolations(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		allocator ProfileAllocator
+	}{
+		{"executable tampering", invalidEmbeddedAllocator{tamper: func(spec *task.ProcessSpec) { spec.Executable = "other.exe" }}},
+		{"argv tampering", invalidEmbeddedAllocator{tamper: func(spec *task.ProcessSpec) { spec.Args = []string{"--other"} }}},
+		{"directory tampering", invalidEmbeddedAllocator{tamper: func(spec *task.ProcessSpec) { spec.Dir = "other" }}},
+		{"missing LLVM profile", invalidEmbeddedAllocator{}},
+		{"duplicate LLVM profile", invalidEmbeddedAllocator{duplicate: true}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture, request, _ := newEmbeddedFixture(t, 1)
+			request.Allocator = test.allocator
+			if _, err := fixture.coordinator.PrepareEmbedded(context.Background(), request); !errors.Is(err, task.ErrInvalidArgument) {
+				t.Fatalf("PrepareEmbedded() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestPrepareEmbeddedRejectsAllocatorIdentityTampering(t *testing.T) {
+	for _, tamper := range []func(*ProfileExpectation){
+		func(expectation *ProfileExpectation) { expectation.InvocationID = "other-invocation" },
+		func(expectation *ProfileExpectation) { expectation.Iteration++ },
+		func(expectation *ProfileExpectation) { expectation.Sequence++ },
+	} {
+		fixture, request, _ := newEmbeddedFixture(t, 1)
+		request.Allocator = invalidEmbeddedAllocator{tamperExpectation: tamper, validateNil: true}
+		if _, err := fixture.coordinator.PrepareEmbedded(context.Background(), request); !errors.Is(err, task.ErrInvalidArgument) {
+			t.Fatalf("PrepareEmbedded() error = %v", err)
+		}
+	}
+}
+
+type invalidEmbeddedAllocator struct {
+	tamper            func(*task.ProcessSpec)
+	tamperExpectation func(*ProfileExpectation)
+	duplicate         bool
+	validateNil       bool
+}
+
+func (allocator invalidEmbeddedAllocator) Decorate(expectation ProfileExpectation, spec task.ProcessSpec) (ProfileExpectation, task.ProcessSpec, error) {
+	expectation.FileName = "p-000001-i-000001-%p-%m.profraw"
+	if allocator.tamperExpectation != nil {
+		allocator.tamperExpectation(&expectation)
+	}
+	result := spec
+	if allocator.tamper != nil {
+		allocator.tamper(&result)
+	}
+	if allocator.duplicate {
+		result.Env = []string{"LLVM_PROFILE_FILE=one", "llvm_profile_file=two"}
+	}
+	return expectation, result, nil
+}
+
+func (allocator invalidEmbeddedAllocator) Validate(_ ProfileExpectation, _ task.ProcessSpec, decorated task.ProcessSpec) error {
+	if allocator.validateNil {
+		return nil
+	}
+	if countEmbeddedEnvironment(decorated.Env, "LLVM_PROFILE_FILE") != 1 {
+		return task.ErrInvalidArgument
+	}
+	return nil
+}
+
 type recordingProfileAllocator struct {
 	values []ProfileExpectation
 }
@@ -248,11 +316,36 @@ type recordingProfileAllocator struct {
 func (allocator *recordingProfileAllocator) Decorate(
 	expectation ProfileExpectation,
 	spec task.ProcessSpec,
-) (task.ProcessSpec, error) {
+) (ProfileExpectation, task.ProcessSpec, error) {
+	if expectation.FileName == "" {
+		expectation.FileName = fmt.Sprintf("p-%06d-i-%06d-%%p-%%m.profraw", expectation.Sequence, expectation.Iteration)
+	}
 	allocator.values = append(allocator.values, expectation)
 	result := spec
 	result.Env = append(append([]string(nil), spec.Env...), "LLVM_PROFILE_FILE="+expectation.FileName)
-	return result, nil
+	return expectation, result, nil
+}
+
+func countEmbeddedEnvironment(values []string, key string) int {
+	count := 0
+	for _, value := range values {
+		name, _, found := strings.Cut(value, "=")
+		if found && strings.EqualFold(name, key) {
+			count++
+		}
+	}
+	return count
+}
+
+func (allocator *recordingProfileAllocator) Validate(
+	expectation ProfileExpectation,
+	original task.ProcessSpec,
+	decorated task.ProcessSpec,
+) error {
+	if countEmbeddedEnvironment(decorated.Env, "LLVM_PROFILE_FILE") != 1 {
+		return task.ErrInvalidArgument
+	}
+	return nil
 }
 
 func newEmbeddedFixture(

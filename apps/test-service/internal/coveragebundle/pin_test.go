@@ -135,16 +135,10 @@ func TestPinVerifyRechecksDigestsBeforeAndAfter(t *testing.T) {
 }
 
 func TestPinPinsAndDetectsOrPreventsProductAncestorReplacement(t *testing.T) {
-	sourceProduct, _ := createBundleFixture(t)
 	base := testScratchDir(t)
 	ancestor := filepath.Join(base, "stable-ancestor")
-	if err := os.Mkdir(ancestor, 0o700); err != nil {
-		t.Fatal(err)
-	}
 	productRoot := filepath.Join(ancestor, "product")
-	if err := os.Rename(sourceProduct, productRoot); err != nil {
-		t.Fatal(err)
-	}
+	createBundleFixtureAt(t, productRoot)
 	resolved, err := resolveBundle(productRoot, resolveHooks{})
 	if err != nil {
 		t.Fatal(err)

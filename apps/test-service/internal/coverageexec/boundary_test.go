@@ -6,8 +6,57 @@ import (
 	"path/filepath"
 	"testing"
 
+	"unit-test-ide.local/test-service/internal/coverageplatform"
+	"unit-test-ide.local/test-service/internal/coveragerun"
 	"unit-test-ide.local/test-service/internal/task"
 )
+
+func TestGenericToolsetExecutableAuthorizationRejectsEarlyClose(t *testing.T) {
+	tool := &boundaryTestPath{path: filepath.Join(t.TempDir(), "gcovr")}
+	toolset := &boundaryTestToolset{tool: tool}
+	if !validatesToolsetExecutable(toolset, tool.path) {
+		t.Fatal("generic Tools capability was not authorized")
+	}
+	tool.closed = true
+	if validatesToolsetExecutable(toolset, tool.path) {
+		t.Fatal("early-closed generic tool capability was authorized")
+	}
+}
+
+type boundaryTestPath struct {
+	path   string
+	closed bool
+}
+
+func (path *boundaryTestPath) Path() string { return path.path }
+func (path *boundaryTestPath) Verify() error {
+	if path == nil || path.closed {
+		return errors.New("closed")
+	}
+	return nil
+}
+
+type boundaryTestToolset struct{ tool *boundaryTestPath }
+
+func (*boundaryTestToolset) Version() string                              { return "1" }
+func (*boundaryTestToolset) Identity() string                             { return "identity" }
+func (toolset *boundaryTestToolset) CCompiler() coveragerun.TrustedPath   { return toolset.tool }
+func (toolset *boundaryTestToolset) CXXCompiler() coveragerun.TrustedPath { return toolset.tool }
+func (toolset *boundaryTestToolset) Tools() []coveragerun.TrustedPath {
+	return []coveragerun.TrustedPath{toolset.tool}
+}
+func (toolset *boundaryTestToolset) Verify() error { return toolset.tool.Verify() }
+func (*boundaryTestToolset) ClaimOwnership() (coverageplatform.OwnershipClaim, error) {
+	return boundaryTestClaim{}, nil
+}
+func (*boundaryTestToolset) Close() error { return nil }
+
+type boundaryTestClaim struct{}
+
+func (boundaryTestClaim) Commit()   {}
+func (boundaryTestClaim) Rollback() {}
+
+var _ coverageplatform.Toolset = (*boundaryTestToolset)(nil)
 
 func TestExecutionRootCleanupDoesNotFollowReplacedPath(t *testing.T) {
 	parent := t.TempDir()
@@ -118,6 +167,40 @@ func TestAllocateExecutionRootsReturnsIsolatedInstrumentationProfileAndBuildRoot
 	}
 	if _, err := os.Stat(taskRoot); !os.IsNotExist(err) {
 		t.Fatalf("owned task root remains after Close: %v", err)
+	}
+}
+
+func TestAllocateExecutionRootsPublishesANonOwningCollectorCapability(t *testing.T) {
+	base := t.TempDir()
+	owner, _, _, _, err := allocateExecutionRoots(base, "33333333333333333333333333333333")
+	if err != nil {
+		t.Fatal(err)
+	}
+	collector := owner.CollectorRoot()
+	if collector == nil || collector.Path() != filepath.Join(base, "33333333333333333333333333333333", "collector") || collector.Verify() != nil {
+		_ = owner.Close()
+		t.Fatalf("collector capability = %#v", collector)
+	}
+	if _, ok := collector.(interface{ Close() error }); ok {
+		_ = owner.Close()
+		t.Fatal("collector capability leaked execution-root ownership")
+	}
+	retained, err := coverageplatform.RetainDirectory(collector)
+	if err != nil {
+		_ = owner.Close()
+		t.Fatalf("RetainDirectory(collector) = %v", err)
+	}
+	if retained.Path() != collector.Path() || retained.Verify() != nil {
+		_ = retained.Close()
+		_ = owner.Close()
+		t.Fatalf("retained collector capability is invalid")
+	}
+	if err := retained.Close(); err != nil {
+		_ = owner.Close()
+		t.Fatal(err)
+	}
+	if err := owner.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

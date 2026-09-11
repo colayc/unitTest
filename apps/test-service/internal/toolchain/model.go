@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"strconv"
 	"strings"
 )
 
@@ -23,13 +24,16 @@ type ExecutableEvidence struct {
 }
 
 type CoverageCapability struct {
-	LLVMProfdata     string
-	LLVMCov          string
-	GCov             string
-	CompilerEvidence ExecutableEvidence
-	ProfdataEvidence ExecutableEvidence
-	CovEvidence      ExecutableEvidence
-	ToolsetIdentity  string
+	LLVMProfdata        string
+	LLVMCov             string
+	GCov                string
+	CompilerEvidence    ExecutableEvidence
+	CXXCompilerEvidence ExecutableEvidence
+	ProfdataEvidence    ExecutableEvidence
+	CovEvidence         ExecutableEvidence
+	GCovEvidence        ExecutableEvidence
+	GCovVersion         string
+	ToolsetIdentity     string
 }
 
 // LLVMToolsetIdentity binds a discovery version and the three exact executable
@@ -40,7 +44,7 @@ func LLVMToolsetIdentity(version string, paths []string, evidence []ExecutableEv
 	}
 	parts := []string{"llvm-toolset-v1", version}
 	for index := range paths {
-		if paths[index] == "" || !validExecutableEvidence(evidence[index]) {
+		if paths[index] == "" || !validWindowsExecutableEvidence(evidence[index]) {
 			return ""
 		}
 		parts = append(parts, identityPath(paths[index]), evidence[index].FileIdentity, evidence[index].SHA256)
@@ -49,7 +53,22 @@ func LLVMToolsetIdentity(version string, paths []string, evidence []ExecutableEv
 	return hex.EncodeToString(sum[:])
 }
 
-func validExecutableEvidence(value ExecutableEvidence) bool {
+func GCCToolsetIdentity(version string, paths []string, evidence []ExecutableEvidence) string {
+	if version == "" || len(paths) != 3 || len(evidence) != 3 {
+		return ""
+	}
+	parts := []string{"gcc-toolset-v1", version}
+	for index := range paths {
+		if paths[index] == "" || !validUnixExecutableEvidence(evidence[index]) {
+			return ""
+		}
+		parts = append(parts, identityPath(paths[index]), evidence[index].FileIdentity, evidence[index].SHA256)
+	}
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	return hex.EncodeToString(sum[:])
+}
+
+func validWindowsExecutableEvidence(value ExecutableEvidence) bool {
 	if !strings.HasPrefix(value.FileIdentity, "windows:") || len(value.FileIdentity) != len("windows:")+8+1+16 ||
 		len(value.SHA256) != 64 || value.SHA256 != strings.ToLower(value.SHA256) {
 		return false
@@ -60,6 +79,30 @@ func validExecutableEvidence(value ExecutableEvidence) bool {
 		}
 	}
 	return true
+}
+
+// validExecutableEvidence is retained for the Windows LLVM validation tests;
+// GCC callers must use the explicit Unix validator through GCCToolsetIdentity.
+func validExecutableEvidence(value ExecutableEvidence) bool {
+	return validWindowsExecutableEvidence(value)
+}
+
+func validUnixExecutableEvidence(value ExecutableEvidence) bool {
+	if len(value.SHA256) != 64 || value.SHA256 != strings.ToLower(value.SHA256) ||
+		!strings.HasPrefix(value.FileIdentity, "unix:") {
+		return false
+	}
+	parts := strings.Split(value.FileIdentity, ":")
+	if len(parts) != 3 || parts[1] == "" || parts[2] == "" {
+		return false
+	}
+	for _, part := range parts[1:] {
+		if _, err := strconv.ParseUint(part, 10, 64); err != nil {
+			return false
+		}
+	}
+	_, err := hex.DecodeString(value.SHA256)
+	return err == nil
 }
 
 type Instance struct {

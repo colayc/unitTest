@@ -1004,7 +1004,7 @@ func TestFileAPIReplyEnforcesFixedLimits(t *testing.T) {
 			setup: func(t *testing.T, fixture fileAPIReplyFixture) {
 				path := filepath.Join(fixture.replyDir, "cache-v2.json")
 				data := `{"kind":"cache","version":{"major":2,"minor":0},"entries":[],"padding":"` +
-					strings.Repeat("x", 512*1024) + `"}`
+					strings.Repeat("x", 8*1024*1024) + `"}`
 				if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 					t.Fatal(err)
 				}
@@ -1123,8 +1123,8 @@ func TestFileAPIReplyEnforcesTargetDetailTotalFileAndTotalByteLimits(t *testing.
 		padding int
 	}{
 		{name: "target detail files", count: 257},
-		{name: "total files", count: 136},
-		{name: "total bytes", count: 10, padding: 450 * 1024},
+		{name: "total files", count: maxFileAPITotalFiles + 1},
+		{name: "total bytes", count: 20, padding: 900 * 1024},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

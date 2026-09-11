@@ -17,6 +17,7 @@ import (
 
 	"unit-test-ide.local/test-service/internal/cmake"
 	"unit-test-ide.local/test-service/internal/coveragebundle"
+	"unit-test-ide.local/test-service/internal/coveragerun"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/toolchain"
 	"unit-test-ide.local/test-service/internal/workspace"
@@ -1271,9 +1272,38 @@ func TestExecutionBoundaryAttachesAndRevalidatesFixedCoverageExecution(t *testin
 	if err := os.WriteFile(gcov, []byte(gcov), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	coverageDirectory, err := pinVerifiedDirectory(objects)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := boundaryValue.attachCoverageDirectory(coverageDirectory); err != nil {
+		t.Fatal(err)
+	}
+	include := filepath.Join(fixture.dataRoot, "coverage", "coverage.cmake")
+	includeContents := []byte("trusted coverage instrumentation\n")
+	if err := os.WriteFile(include, includeContents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	includeDigest := sha256.Sum256(includeContents)
+	identity := strings.Repeat("a", 64)
+	if err := boundaryValue.attachCoveragePlan(&CoverageOptions{
+		BinaryDir: objects,
+		TopLevelInclude: cmake.FingerprintFile{
+			Path: include, Identity: strings.Repeat("b", 64), SHA256: hex.EncodeToString(includeDigest[:]),
+		},
+		InstrumentationFingerprint: strings.Repeat("b", 64), ToolsetIdentity: identity,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := boundaryValue.attachCoverageToolset(&capabilityToolset{
+		version: "20.1.8", identity: identity,
+		tools: []coveragerun.TrustedPath{capabilityPath{path: gcov}},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	pin := &testCoveragePin{installation: coveragebundle.Installation{Root: fixture.dataRoot, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}}
-	execution, err := coveragebundle.PrepareRunner(pin, filepath.Join(fixture.dataRoot, "coverage"), "task", coveragebundle.DescriptorInput{
-		Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(fixture.dataRoot, "coverage", "task", "coverage.json"),
+	execution, err := coveragebundle.PrepareRunner(pin, coveragebundle.DescriptorInput{
+		Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(fixture.dataRoot, "coverage", "gcovr", "coverage.json"),
 	}, testCoverageCapabilities(t, filepath.Join(fixture.dataRoot, "coverage"), projectRoot, objects, gcov))
 	if err != nil {
 		t.Fatal(err)
@@ -1288,7 +1318,7 @@ func TestExecutionBoundaryAttachesAndRevalidatesFixedCoverageExecution(t *testin
 		t.Fatalf("ValidateProcessTarget() = %v", err)
 	}
 	if err := boundaryValue.ValidateProcessTarget(
-		spec.Executable, []string{"-I", "-S", runner, "tampered.json"},
+		spec.Executable, []string{"-B", "-I", "-S", runner, "tampered.json"},
 		nil, nil, spec.Dir,
 	); err == nil {
 		t.Fatal("ValidateProcessTarget accepted replaced descriptor")
@@ -1352,7 +1382,7 @@ func testCoverageCapabilities(t *testing.T, coverageRoot, projectRoot, objects, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	return coveragebundle.DescriptorCapabilities{Anchor: authority, Provenance: provenance, CoverageRoot: coverageCapability, Root: rootCapability, ObjectDirectory: objectCapability, GcovExecutable: gcovCapability}
+	return coveragebundle.DescriptorCapabilities{CollectorRoot: coverageCapability, Root: rootCapability, ObjectDirectory: objectCapability, GcovExecutable: gcovCapability}
 }
 
 func pathWithinLocal(root, child string) bool {

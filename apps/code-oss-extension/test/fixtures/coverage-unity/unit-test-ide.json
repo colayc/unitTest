@@ -1,0 +1,21 @@
+{
+  "version": 3,
+  "projects": [
+    {
+      "id": "coverage-unity-fixture",
+      "sourceDir": ".",
+      "fallback": {
+        "configurations": ["Debug"],
+        "preferredGenerator": "Ninja"
+      },
+      "tests": {
+        "containers": [
+          {
+            "ctestName": "coverage-unity-tests",
+            "framework": "unity"
+          }
+        ]
+      }
+    }
+  ]
+}

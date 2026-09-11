@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"path/filepath"
 	goruntime "runtime"
 	"sync"
 	"time"
@@ -452,10 +453,16 @@ func Open(config Config) (*Runtime, error) {
 		if !ok {
 			return runtimeValue.failOpen(task.ErrStorageUnavailable)
 		}
+		servicePath, servicePathErr := filepath.Abs(config.ServiceExecutable)
+		if servicePathErr != nil || filepath.Clean(servicePath) != servicePath {
+			return runtimeValue.failOpen(task.ErrInvalidArgument)
+		}
+		coverageBundleRoot := filepath.Join(filepath.Dir(servicePath), "bundles", "coverage")
 		coverageExecutor, err := deps.newCoverageExecutor(coverageExecutionConfig{
 			Platform: config.Platform, Tasks: manager, Store: store,
 			Build: coverageBuildPreparer{delegate: buildPreparer}, Tests: embeddedTests,
 			WorkspaceRoot: workspaceRoot, ExecutionRoot: layout.Coverage,
+			CoverageBundleRoot: coverageBundleRoot,
 			Clock: config.Clock, NewID: newID,
 		})
 		if err != nil {

@@ -1,0 +1,1 @@
+{"gcovr/format_version":"0.14","files":[{"file":"src/simple.c","lines":[{"line_number":1,"function_name":"entry","count":2,"branches":[],"gcovr/md5":"0123456789abcdef0123456789abcdef"}],"functions":[{"name":"entry","lineno":1,"execution_count":2,"blocks_percent":100}]}]}

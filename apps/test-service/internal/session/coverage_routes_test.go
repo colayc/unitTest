@@ -2,14 +2,18 @@ package session_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/discovery"
 	"unit-test-ide.local/test-service/internal/protocol"
 	capabilitiesv14 "unit-test-ide.local/test-service/internal/protocolmodel/v1_4/capabilities"
+	taskv14 "unit-test-ide.local/test-service/internal/protocolmodel/v1_4/task"
 	"unit-test-ide.local/test-service/internal/session"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/testdomain"
@@ -119,9 +123,145 @@ func TestV14CoverageStartAcceptsMillisecondTimeout(t *testing.T) {
 	}
 }
 
+func TestV14CoverageTaskCancelLoadsRelationsBeforeCancellation(t *testing.T) {
+	request, err := coveragedomain.NewRequest(coveragedomain.Request{
+		IdempotencyKey: strings.Repeat("1", 32), WorkspaceGeneration: strings.Repeat("2", 64),
+		ProjectID: "core", CoverageProfileID: "coverage-debug", CatalogRevision: strings.Repeat("3", 64),
+		Selection: testdomain.Selection{Mode: testdomain.SelectionAll}, RepeatCount: 1, Timeout: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := request.CanonicalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID, err := coveragedomain.CoverageRunID(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := fixedTime.Add(time.Second)
+	taskID, testRunID := strings.Repeat("4", 32), strings.Repeat("5", 32)
+	running := task.Task{
+		ID: taskID, Kind: task.KindCoverageRun, Request: canonical,
+		WorkspaceGeneration: request.WorkspaceGeneration, Timeout: request.Timeout,
+		Status: task.StatusRunning, CreatedAt: fixedTime, StartedAt: &started, LastSequence: 7,
+	}
+	cancelling := running
+	cancelling.Status, cancelling.LastSequence = task.StatusCancelling, 8
+	backend := &coverageBackend{
+		fakeBackend:              &fakeBackend{getResult: running, cancelResult: cancelling},
+		testRun:                  testdomain.TestRun{RunID: testRunID, TaskID: taskID},
+		failRelationsAfterCancel: true,
+	}
+	active := session.NewWithCoverage("0123456789abcdef", "linux", "unix-socket", backend, backend)
+	if result := active.Handle(context.Background(), requestVersion(t, protocol.Version14, "handshake", map[string]any{
+		"token": "0123456789abcdef", "clientName": "test", "clientVersion": "0.5.0",
+		"supportedProtocolVersions": []string{protocol.Version14},
+	})); result.Response.Kind != "response" {
+		t.Fatalf("handshake = %#v", result.Response)
+	}
+
+	result := active.Handle(context.Background(), requestVersion(t, protocol.Version14, "tasks/cancel", map[string]any{"taskId": taskID}))
+	projected, ok := result.Response.Payload.(taskv14.CoverageRunTaskSnapshotV14)
+	if result.Response.Error != nil || !ok {
+		t.Fatalf("tasks/cancel = %#v", result.Response)
+	}
+	if !backend.testRunLoadedBeforeCancel || projected.CoverageRunID != runID || projected.TestRunID != testRunID || projected.TimeoutMS != 5_000 || projected.Status != taskv14.TaskCancellingV14 {
+		t.Fatalf("projection = %#v, loaded-before-cancel=%t", projected, backend.testRunLoadedBeforeCancel)
+	}
+}
+
+func TestV14CoverageTaskListProjectsCoverageItems(t *testing.T) {
+	request, err := coveragedomain.NewRequest(coveragedomain.Request{
+		IdempotencyKey: strings.Repeat("6", 32), WorkspaceGeneration: strings.Repeat("7", 64),
+		ProjectID: "core", CoverageProfileID: "coverage-debug", CatalogRevision: strings.Repeat("8", 64),
+		Selection: testdomain.Selection{Mode: testdomain.SelectionAll}, RepeatCount: 2, Timeout: 9 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := request.CanonicalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID, err := coveragedomain.CoverageRunID(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, testRunID := strings.Repeat("9", 32), strings.Repeat("a", 32)
+	coverageTask := task.Task{
+		ID: taskID, Kind: task.KindCoverageRun, Request: canonical,
+		WorkspaceGeneration: request.WorkspaceGeneration, Timeout: request.Timeout,
+		Status: task.StatusQueued, CreatedAt: fixedTime, LastSequence: 3,
+	}
+	backend := &coverageBackend{
+		fakeBackend: &fakeBackend{listResult: task.Page[task.Task]{Items: []task.Task{coverageTask}, NextCursor: "next"}},
+		testRun:     testdomain.TestRun{RunID: testRunID, TaskID: taskID},
+	}
+	active := session.NewWithCoverage("0123456789abcdef", "linux", "unix-socket", backend, backend)
+	if result := active.Handle(context.Background(), requestVersion(t, protocol.Version14, "handshake", map[string]any{
+		"token": "0123456789abcdef", "clientName": "test", "clientVersion": "0.5.0",
+		"supportedProtocolVersions": []string{protocol.Version14},
+	})); result.Response.Kind != "response" {
+		t.Fatalf("handshake = %#v", result.Response)
+	}
+
+	result := active.Handle(context.Background(), requestVersion(t, protocol.Version14, "tasks/list", map[string]any{"limit": 10}))
+	if result.Response.Error != nil {
+		t.Fatalf("tasks/list = %#v", result.Response)
+	}
+	raw, err := json.Marshal(result.Response.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var page struct {
+		Items      []taskv14.CoverageRunTaskSnapshotV14 `json:"items"`
+		NextCursor string                               `json:"nextCursor"`
+	}
+	if err := json.Unmarshal(raw, &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 1 || page.Items[0].CoverageRunID != runID || page.Items[0].TestRunID != testRunID || page.Items[0].TimeoutMS != 9_000 || page.NextCursor != "next" {
+		t.Fatalf("tasks/list payload = %s", raw)
+	}
+}
+
+func TestV13CompatibilityHidesCoverageTasks(t *testing.T) {
+	coverageTask := task.Task{ID: strings.Repeat("b", 32), Kind: task.KindCoverageRun}
+	backend := &coverageBackend{fakeBackend: &fakeBackend{
+		getResult:  coverageTask,
+		listResult: task.Page[task.Task]{},
+	}}
+	active := session.NewWithCoverage("0123456789abcdef", "linux", "unix-socket", backend, backend)
+	if result := active.Handle(context.Background(), requestVersion(t, protocol.Version14, "handshake", map[string]any{
+		"token": "0123456789abcdef", "clientName": "test", "clientVersion": "0.5.0",
+		"supportedProtocolVersions": []string{protocol.Version13},
+	})); result.Response.Kind != "response" || active.NegotiatedVersion() != protocol.Version13 {
+		t.Fatalf("handshake = %#v, negotiated=%q", result.Response, active.NegotiatedVersion())
+	}
+
+	getResult := active.Handle(context.Background(), requestVersion(t, protocol.Version13, "tasks/get", map[string]any{"taskId": coverageTask.ID}))
+	if getResult.Response.Error == nil || getResult.Response.Error.Code != "TASK_NOT_FOUND" {
+		t.Fatalf("tasks/get = %#v", getResult.Response)
+	}
+	listResult := active.Handle(context.Background(), requestVersion(t, protocol.Version13, "tasks/list", map[string]any{"limit": 10}))
+	if listResult.Response.Error != nil {
+		t.Fatalf("tasks/list = %#v", listResult.Response)
+	}
+	wantKinds := []task.Kind{task.KindSimulation, task.KindCMakeBuild, task.KindTestDiscovery, task.KindTestRun}
+	if !reflect.DeepEqual(backend.listKinds, wantKinds) {
+		t.Fatalf("tasks/list kinds = %#v, want %#v", backend.listKinds, wantKinds)
+	}
+}
+
 type coverageBackend struct {
 	*fakeBackend
-	calls int
+	calls                     int
+	testRun                   testdomain.TestRun
+	cancelCalled              bool
+	failRelationsAfterCancel  bool
+	testRunLoadedBeforeCancel bool
 }
 
 func (*coverageBackend) InspectWorkspace(context.Context) (discovery.Snapshot, error) {
@@ -140,8 +280,12 @@ func (*coverageBackend) GetTestCatalog(context.Context, testdomain.CatalogPageRe
 func (*coverageBackend) GetTestRun(context.Context, string) (testdomain.TestRun, error) {
 	return testdomain.TestRun{}, nil
 }
-func (*coverageBackend) GetTestRunForTask(context.Context, string) (testdomain.TestRun, error) {
-	return testdomain.TestRun{}, nil
+func (backend *coverageBackend) GetTestRunForTask(context.Context, string) (testdomain.TestRun, error) {
+	if backend.failRelationsAfterCancel && backend.cancelCalled {
+		return testdomain.TestRun{}, task.ErrStorageUnavailable
+	}
+	backend.testRunLoadedBeforeCancel = true
+	return backend.testRun, nil
 }
 func (*coverageBackend) ListTestRuns(context.Context, testdomain.RunPageRequest) (testdomain.RunPage, error) {
 	return testdomain.RunPage{}, nil
@@ -161,4 +305,9 @@ func (backend *coverageBackend) ListCoverageRuns(context.Context, coveragedomain
 func (backend *coverageBackend) GetCoverageReport(context.Context, string) (coveragedomain.Report, error) {
 	backend.calls++
 	return coveragedomain.Report{}, errors.New("unexpected coverage call")
+}
+
+func (backend *coverageBackend) Cancel(ctx context.Context, taskID string) (task.Task, error) {
+	backend.cancelCalled = true
+	return backend.fakeBackend.Cancel(ctx, taskID)
 }

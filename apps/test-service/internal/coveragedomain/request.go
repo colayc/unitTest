@@ -2,6 +2,7 @@
 package coveragedomain
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -116,6 +117,47 @@ func (value Request) CanonicalJSON() ([]byte, error) {
 		CatalogRevision: request.CatalogRevision, Selection: selectionWireFrom(request.Selection),
 		RepeatCount: request.RepeatCount, TimeoutMS: request.Timeout.Milliseconds(),
 	})
+}
+
+// ParseCanonicalRequest restores the validated request persisted by CanonicalJSON.
+func ParseCanonicalRequest(encoded []byte) (Request, error) {
+	var wire requestWire
+	if err := json.Unmarshal(encoded, &wire); err != nil {
+		return Request{}, invalid("canonicalJson", "must contain a valid coverage request")
+	}
+	if wire.TimeoutMS < 1 || wire.TimeoutMS > int64((24*time.Hour)/time.Millisecond) {
+		return Request{}, invalid("timeoutMs", "must be between 1 and 86400000")
+	}
+	selection := testdomain.Selection{
+		Mode:         wire.Selection.Mode,
+		ContainerIDs: wire.Selection.ContainerIDs,
+		ItemIDs:      wire.Selection.ItemIDs,
+		RunID:        wire.Selection.RunID,
+	}
+	if wire.Selection.Filter != nil {
+		selection.Filter = testdomain.Filter{
+			Group:          wire.Selection.Filter.Group,
+			Suite:          wire.Selection.Filter.Suite,
+			Label:          wire.Selection.Filter.Label,
+			NameContains:   wire.Selection.Filter.NameContains,
+			IncludeItemIDs: wire.Selection.Filter.IncludeItemIDs,
+			ExcludeItemIDs: wire.Selection.Filter.ExcludeItemIDs,
+		}
+	}
+	request, err := NewRequest(Request{
+		IdempotencyKey: wire.IdempotencyKey, WorkspaceGeneration: wire.WorkspaceGeneration,
+		ProjectID: wire.ProjectID, CoverageProfileID: wire.CoverageProfileID,
+		CatalogRevision: wire.CatalogRevision, Selection: selection,
+		RepeatCount: wire.RepeatCount, Timeout: time.Duration(wire.TimeoutMS) * time.Millisecond,
+	})
+	if err != nil {
+		return Request{}, err
+	}
+	canonical, err := request.CanonicalJSON()
+	if err != nil || !bytes.Equal(canonical, encoded) {
+		return Request{}, invalid("canonicalJson", "must use the canonical coverage request encoding")
+	}
+	return request, nil
 }
 
 // CoverageRunID derives the stable identity from the canonical validated request.

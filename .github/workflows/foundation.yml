@@ -112,22 +112,26 @@ jobs:
       - run: pnpm --filter @unit-test-ide/service-probe test:coverage-bundle
       # Exercise the real Named Pipe service contract. The host harness reports SKIP without CODE_OSS_EXECUTABLE.
       - run: node tools/service-probe/build-service.mjs
-      # Public hosted Windows runners may not grant WFP management permission.
-      # Set the repository variable to "1" only when this job runs with that privilege.
+      # Trusted master pushes run on the dedicated privileged runner and must
+      # prove the real WFP boundary. Pull requests remain safely unprivileged.
       - name: Verify privileged Windows WFP lifecycle
         env:
-          UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && vars.UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED || '0' }}
+          UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && '1' || '0' }}
         run: go test ./apps/test-service/internal/offlineboundary -run '^TestPrivilegedWindowsWFPDynamicLifecycle$' -count=1 -v
       - name: Verify TypeScript WFP sibling sequencing
         env:
-          UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && vars.UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED || '0' }}
+          UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && '1' || '0' }}
         run: pnpm --filter @unit-test-ide/service-probe test:wfp-integration
       - id: windows-coverage-smoke
         name: Verify Windows LLVM coverage execution
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && vars.UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED == '1' }}
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
         env:
           UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS: clang-cl
         run: pnpm --filter code-oss-extension test:coverage-service-smoke
+      - id: windows-coverage-evidence
+        name: Validate closed Windows coverage evidence
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+        run: pnpm --filter code-oss-extension validate:coverage-evidence:windows
       - name: Legacy cleanup Windows offline boundary residue
         if: always()
         shell: pwsh
@@ -153,7 +157,7 @@ jobs:
           name: native-toolchain-windows-${{ github.run_attempt }}
           path: .native-e2e/artifacts/windows/toolchain-report.json
           if-no-files-found: error
-      - if: ${{ steps.windows-coverage-smoke.outcome == 'success' }}
+      - if: ${{ steps.windows-coverage-evidence.outcome == 'success' }}
         uses: actions/upload-artifact@v7
         with:
           name: coverage-execution-windows-${{ github.run_attempt }}
@@ -214,9 +218,20 @@ jobs:
           cmake="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).executable)' "$result")"
           echo "$(dirname "$cmake")" >> "$GITHUB_PATH"
           echo "CMAKE=$cmake" >> "$GITHUB_ENV"
-      - run: pnpm verify
-      - name: Verify native Linux release contracts
-        run: node --test tools/release/linux/runtime-mode-inventory.test.mjs tools/release/qualification.test.mjs tools/release/update.test.mjs tools/workspace-smoke/workspace-smoke.test.mjs
+      - id: framework-manifest
+        shell: bash
+        run: |
+          digest="$(sha256sum tools/framework-bundle/manifest.json | cut -d' ' -f1)"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - id: framework-cache
+        uses: actions/cache@v4
+        with:
+          # Cache immutable archives only; expanded sources are re-created and
+          # re-verified before any later native Linux process tree starts.
+          path: .superpowers/cache/framework-bundle
+          key: framework-bundle-linux-x64-v1-${{ steps.framework-manifest.outputs.digest }}
+      - name: Prepare locked Linux framework inputs
+        run: pnpm prepare:framework-bundle
       - id: coverage-manifest
         shell: bash
         run: |
@@ -232,15 +247,34 @@ jobs:
           # Keep the recipe epoch alongside the source lock digest so a cache
           # produced by an older prepare/check implementation is not reused.
           key: coverage-bundle-linux-x64-recipe-v3-${{ steps.coverage-manifest.outputs.digest }}
+      # Bootstrap/download/cache work completes before the fail-closed native namespace.
       - run: pnpm prepare:coverage-bundle
       - run: pnpm check:coverage-bundle
-      - run: pnpm --filter @unit-test-ide/service-probe test:coverage-bundle
+      - name: Prepare Go module cache before Linux offline namespace
+        working-directory: apps/test-service
+        shell: bash
+        env:
+          GOPRIVATE: ""
+          GONOPROXY: ""
+          GONOSUMDB: ""
+          GOSUMDB: sum.golang.org
+          GOPROXY: https://proxy.golang.org,direct
+        run: go mod download
+      - name: Verify fail-closed Linux offline namespace
+        run: node tools/linux-offline/run.mjs --allow-sudo-root -- node tools/linux-offline/probe.mjs
+      - run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm verify
+      - name: Build and consume locked CppUTest and Unity inputs
+        run: |
+          node tools/linux-offline/run.mjs --allow-sudo-root -- node tools/service-probe/build-service.mjs
+          node tools/linux-offline/run.mjs --allow-sudo-root -- node tools/framework-bundle/consume.mjs --cmake "$CMAKE"
+      - name: Verify native Linux release contracts
+        run: node tools/linux-offline/run.mjs --allow-sudo-root -- node --test tools/release/linux/runtime-mode-inventory.test.mjs tools/release/qualification.test.mjs tools/release/update.test.mjs tools/workspace-smoke/workspace-smoke.test.mjs
+      - run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm --filter @unit-test-ide/service-probe test:coverage-bundle
       # Exercise the real Unix Socket service contract; host smoke remains an honest SKIP without CODE_OSS_EXECUTABLE.
-      - run: node tools/service-probe/build-service.mjs
-      - run: pnpm --filter code-oss-extension test:service-smoke
-      - run: pnpm --filter code-oss-extension test:benchmark
-      - run: pnpm --filter code-oss-extension test:host
-      - run: pnpm test:e2e:native
+      - run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm --filter code-oss-extension test:service-smoke
+      - run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm --filter code-oss-extension test:benchmark
+      - run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm --filter code-oss-extension test:host
+      - run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm test:e2e:native
       - if: always()
         uses: actions/upload-artifact@v7
         with:
@@ -252,6 +286,103 @@ jobs:
         with:
           name: coverage-bundle-linux-${{ github.run_attempt }}
           path: .native-e2e/artifacts/linux/coverage-bundle-report.json
+          if-no-files-found: error
+      - if: always()
+        run: git diff --exit-code
+
+  coverage-linux-gcc:
+    name: coverage-linux-gcc
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS: gcc
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.4.0
+          run_install: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 1.26.6
+          cache-dependency-path: apps/test-service/go.sum
+      - run: pnpm install --frozen-lockfile
+      - id: cmake-manifest
+        shell: bash
+        run: |
+          digest="$(sha256sum tools/cmake-bundle/manifest.json | cut -d' ' -f1)"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: .bundled-tools/cmake
+          key: coverage-gate-cmake-linux-x64-v1-${{ steps.cmake-manifest.outputs.digest }}
+      - name: Prepare CMake bundle
+        run: pnpm prepare:cmake-bundle
+      - id: framework-manifest
+        shell: bash
+        run: |
+          digest="$(sha256sum tools/framework-bundle/manifest.json | cut -d' ' -f1)"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: .superpowers/cache/framework-bundle
+          key: coverage-gate-framework-linux-x64-v1-${{ steps.framework-manifest.outputs.digest }}
+      - name: Prepare locked framework inputs before namespace entry
+        run: pnpm prepare:framework-bundle
+      - id: coverage-manifest
+        shell: bash
+        run: |
+          digest="$(sha256sum tools/coverage-bundle/manifest.json | cut -d' ' -f1)"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: .superpowers/cache/coverage-bundle
+          key: coverage-gate-bundle-linux-x64-recipe-v3-${{ steps.coverage-manifest.outputs.digest }}
+      - name: Prepare and verify coverage bundle before namespace entry
+        run: |
+          pnpm prepare:coverage-bundle
+          pnpm check:coverage-bundle
+      - name: Prepare Go modules before namespace entry
+        working-directory: apps/test-service
+        env:
+          GOENV: "off"
+          GOTOOLCHAIN: local
+        run: go mod download
+      - name: Verify fail-closed Linux namespace
+        run: node tools/linux-offline/run.mjs --allow-sudo-root -- node tools/linux-offline/probe.mjs
+      - name: Run Go coverage unit and integration tests
+        env:
+          GOENV: "off"
+          GOTOOLCHAIN: local
+        run: node tools/linux-offline/run.mjs --allow-sudo-root -- go test ./apps/test-service/... -count=1
+      - name: Run focused Go coverage race tests
+        env:
+          GOENV: "off"
+          GOTOOLCHAIN: local
+        run: node tools/linux-offline/run.mjs --allow-sudo-root -- go test -race ./apps/test-service/internal/coverageplatform ./apps/test-service/internal/coveragegcc ./apps/test-service/internal/coveragebundle ./apps/test-service/internal/coverageexec -count=1
+      - name: Vet the production Service
+        env:
+          GOENV: "off"
+          GOTOOLCHAIN: local
+        run: node tools/linux-offline/run.mjs --allow-sudo-root -- go vet ./apps/test-service/...
+      - name: Run TypeScript coverage boundary tests
+        run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm --filter @unit-test-ide/service-probe test
+      - name: Run required offline Linux GCC framework smoke
+        env:
+          UNIT_TEST_IDE_TEST_COVERAGE_BUNDLE_ROOT: ${{ github.workspace }}/.superpowers/runtime/coverage-bundle/linux-x64
+        run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm --filter code-oss-extension test:coverage-service-smoke:linux
+      - name: Validate and close Linux GCC coverage evidence
+        run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm --filter code-oss-extension validate:coverage-evidence:linux
+      - name: Upload closed Linux GCC coverage evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-gcc-coverage-report-${{ github.run_attempt }}
+          path: .native-e2e/artifacts/linux/linux-gcc-coverage-report.json
           if-no-files-found: error
       - if: always()
         run: git diff --exit-code

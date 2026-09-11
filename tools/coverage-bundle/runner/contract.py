@@ -53,6 +53,13 @@ def gcovr_arguments(descriptor: dict[str, Any]) -> list[str]:
         descriptor["root"],
         "--object-directory",
         descriptor["objectDirectory"],
+        # Framework sources are trusted build inputs, but their raw GCC
+        # metadata is not part of the product coverage report.  Excluding
+        # directories named cpputest during raw-data discovery also prevents
+        # gcovr from invoking gcov for unexecuted third-party translation
+        # units, which can otherwise stall collection on GCC/CMake builds.
+        "--gcov-exclude-directory",
+        r"(^|/)cpputest(/|$)",
         "--gcov-executable",
         descriptor["gcovExecutable"],
         "--json",

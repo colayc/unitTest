@@ -6,6 +6,23 @@ export interface TestFrameworkWorkspace {
   readonly testExecutable: string;
 }
 
+/** Test-only fixture selector; it is never serialized into Workspace config. */
+export type TestFramework = "cpputest" | "unity";
+
+export interface TestFrameworkFixtureOptions {
+  readonly framework?: TestFramework;
+  /** Linux-only test seam for already-verified framework inputs. */
+  readonly linuxFrameworkInputs?: LinuxFrameworkFixtureInputs;
+  readonly platform?: NodeJS.Platform;
+}
+
+export interface LinuxFrameworkFixtureInputs {
+  readonly cpputestRoot: string;
+  readonly unityRoot: string;
+  readonly cmakeHelper: string;
+  readonly unityRunnerGenerator: string;
+}
+
 export function testFixtureExecutableName(
   platform: NodeJS.Platform = process.platform
 ): string {
@@ -13,11 +30,20 @@ export function testFixtureExecutableName(
 }
 
 export async function prepareTestFrameworkWorkspace(
-  workspaceDirectory: string
+  workspaceDirectory: string,
+  options: TestFrameworkFixtureOptions = {}
 ): Promise<TestFrameworkWorkspace> {
   if (!workspaceDirectory) {
     throw new Error("test framework workspace path is required");
   }
+  const framework = options.framework ?? "cpputest";
+  const platform = options.platform ?? process.platform;
+  if (options.linuxFrameworkInputs !== undefined && platform !== "linux") {
+    throw new Error("Linux framework fixture inputs are only valid on Linux");
+  }
+  const linuxInputs = options.linuxFrameworkInputs;
+  const linuxPreamble = linuxInputs === undefined ? [] : linuxFrameworkPreamble(linuxInputs, framework);
+  const linuxTargetBindings = linuxInputs === undefined ? [] : linuxFrameworkTargetBindings(linuxInputs, framework);
   const configurationDirectory = join(
     workspaceDirectory,
     ".unit-test-ide"
@@ -43,7 +69,7 @@ export async function prepareTestFrameworkWorkspace(
         tests: {
           containers: [{
             ctestName: "framework-tests",
-            framework: "cpputest"
+            framework
           }]
         }
       }]
@@ -53,15 +79,19 @@ export async function prepareTestFrameworkWorkspace(
     join(workspaceDirectory, "CMakeLists.txt"),
     [
       "cmake_minimum_required(VERSION 3.25)",
-      "project(test_framework_fixture LANGUAGES CXX)",
-      "add_executable(fixture-app main.cpp)",
-      "add_test(NAME framework-tests COMMAND fixture-app)",
+      `project(test_framework_fixture LANGUAGES ${framework === "unity" ? "C" : "CXX"})`,
+      ...linuxPreamble,
+      `add_executable(fixture-app ${framework === "unity" ? (linuxInputs === undefined ? "main.c" : "fixture-unity.c") : "main.cpp"})`,
+      ...linuxTargetBindings,
+      ...(framework === "unity" && linuxInputs !== undefined ? [] : ["add_test(NAME framework-tests COMMAND fixture-app)"]),
       ""
     ].join("\n")
   );
   await writeFile(
-    join(workspaceDirectory, "main.cpp"),
-    "int main() { return 0; }\n"
+    join(workspaceDirectory, framework === "unity" ? (linuxInputs === undefined ? "main.c" : "fixture-unity.c") : "main.cpp"),
+    framework === "unity" && linuxInputs !== undefined
+      ? "#include <unity.h>\nvoid test_fixture_passes(void) { TEST_ASSERT_TRUE(1); }\n"
+      : "int main(void) { return 0; }\n"
   );
   await writeFile(
     join(workspaceDirectory, "CMakePresets.json"),
@@ -75,4 +105,35 @@ export async function prepareTestFrameworkWorkspace(
     })
   );
   return { buildDirectory, testExecutable };
+}
+
+function validateLinuxFrameworkInputs(inputs: LinuxFrameworkFixtureInputs): void {
+  for (const [name, value] of Object.entries(inputs)) {
+    if (!value || value.includes("\0")) throw new Error(`Linux framework fixture ${name} is invalid`);
+  }
+}
+
+function linuxFrameworkPreamble(inputs: LinuxFrameworkFixtureInputs, framework: TestFramework): string[] {
+  validateLinuxFrameworkInputs(inputs);
+  return [
+    ...(framework === "unity"
+      ? [
+          `add_library(unit_test_ide_unity STATIC "${inputs.unityRoot}/src/unity.c")`,
+          `target_include_directories(unit_test_ide_unity PUBLIC "${inputs.unityRoot}/src")`
+        ]
+      : [
+          `add_subdirectory("${inputs.cpputestRoot}" "\${CMAKE_BINARY_DIR}/unit-test-ide-cpputest" EXCLUDE_FROM_ALL)`
+        ])
+  ];
+}
+
+function linuxFrameworkTargetBindings(inputs: LinuxFrameworkFixtureInputs, framework: TestFramework): string[] {
+  validateLinuxFrameworkInputs(inputs);
+  return [
+    `set(UTIDE_UNITY_RUNNER_GENERATOR "${inputs.unityRunnerGenerator}")`,
+    `include("${inputs.cmakeHelper}")`,
+    ...(framework === "unity"
+      ? ["target_link_libraries(fixture-app PRIVATE unit_test_ide_unity)", "unit_test_ide_add_unity_test(TEST framework-tests TARGET fixture-app TEST_SOURCES fixture-unity.c)"]
+      : ["target_link_libraries(fixture-app PRIVATE CppUTest)"])
+  ];
 }

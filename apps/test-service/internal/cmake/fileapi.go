@@ -20,9 +20,15 @@ const (
 	fileAPIQueryRelativePath = ".cmake/api/v1/query/client-unit-test-ide/query.json"
 	fileAPIReplyRelativePath = ".cmake/api/v1/reply"
 
-	maxFileAPIFileBytes        = 512 * 1024
-	maxFileAPITotalBytes       = 4 * 1024 * 1024
-	maxFileAPITotalFiles       = 140
+	// Modern CMake cache/codemodel replies can exceed a few MiB for framework
+	// builds with large toolchain metadata. Keep both bounds finite while
+	// allowing those verified replies.
+	maxFileAPIFileBytes  = 8 * 1024 * 1024
+	maxFileAPITotalBytes = 16 * 1024 * 1024
+	// Modern CMake toolchains can include a large set of platform/compiler
+	// modules in cmakeFiles.inputs. Keep a bounded cap while allowing the
+	// verified Linux GCC framework bundle to be fingerprinted completely.
+	maxFileAPITotalFiles       = 512
 	maxFileAPIObjects          = 64
 	maxFileAPIConfigs          = 64
 	maxFileAPITargets          = 1024
@@ -768,6 +774,9 @@ func (reader *fileAPIReader) assemble(
 	}
 	cache, err := reader.snapshotAllowed(filepath.Join(buildPath, "CMakeCache.txt"))
 	if err != nil {
+		if errors.Is(err, ErrFileAPILimit) {
+			return FileAPIReply{}, err
+		}
 		return FileAPIReply{}, fmt.Errorf("%w: CMake cache: %v", ErrFileAPIReply, err)
 	}
 	result.Cache = cache
@@ -782,6 +791,9 @@ func (reader *fileAPIReader) assemble(
 		result.CMakeInputs = append(result.CMakeInputs, resolved)
 		state, err := reader.snapshotAllowed(resolved)
 		if err != nil {
+			if errors.Is(err, ErrFileAPILimit) {
+				return FileAPIReply{}, err
+			}
 			return FileAPIReply{}, fmt.Errorf("%w: CMake input %q: %v", ErrFileAPIReply, resolved, err)
 		}
 		result.CMakeInputStates = append(result.CMakeInputStates, state)

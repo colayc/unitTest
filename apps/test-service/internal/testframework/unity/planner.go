@@ -2,7 +2,8 @@ package unity
 
 import (
 	"context"
-	"reflect"
+	"fmt"
+	"os"
 	"sort"
 
 	"unit-test-ide.local/test-service/internal/ctest"
@@ -10,6 +11,13 @@ import (
 	"unit-test-ide.local/test-service/internal/testframework"
 	"unit-test-ide.local/test-service/internal/unityrunner"
 )
+
+func runPlanError(reason string) error {
+	if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+		return fmt.Errorf("%w: %s", ErrInvalidRunPlan, reason)
+	}
+	return ErrInvalidRunPlan
+}
 
 type selectedCase struct {
 	item     testframework.RunItem
@@ -24,14 +32,14 @@ func buildRunPlan(
 ) (testframework.RunPlan, error) {
 	if ctx == nil || evidence == nil || nilInterface(allocator) ||
 		len(input.Items) == 0 || len(input.Items) > maxRecords {
-		return testframework.RunPlan{}, ErrInvalidRunPlan
+		return testframework.RunPlan{}, runPlanError("invalid input")
 	}
 	switch input.Mode {
 	case testframework.RunSelectionAll,
 		testframework.RunSelectionGroup,
 		testframework.RunSelectionCases:
 	default:
-		return testframework.RunPlan{}, ErrInvalidRunPlan
+		return testframework.RunPlan{}, runPlanError("invalid selection mode")
 	}
 
 	selected := make([]selectedCase, len(input.Items))
@@ -43,19 +51,28 @@ func buildRunPlan(
 			return testframework.RunPlan{}, err
 		}
 		testCase, found := findManifestCase(evidence.manifest, item.LogicalName)
-		if !found || !testdomain.ValidID(item.ItemID) ||
-			item.ParentLogicalName != testCase.Location.Path ||
-			!reflect.DeepEqual(item.Parameters, caseParameters(testCase)) ||
-			input.Mode == testframework.RunSelectionGroup &&
-				item.ParentLogicalName != group {
-			return testframework.RunPlan{}, ErrInvalidRunPlan
+		if !found {
+			return testframework.RunPlan{}, runPlanError("manifest case not found")
+		}
+		if !testdomain.ValidID(item.ItemID) {
+			return testframework.RunPlan{}, runPlanError("invalid catalog item id")
+		}
+		if item.ParentLogicalName != testCase.Location.Path {
+			return testframework.RunPlan{}, runPlanError("catalog source path mismatch")
+		}
+		if !equalCaseParameters(item.Parameters, caseParameters(testCase)) {
+			return testframework.RunPlan{}, runPlanError("catalog parameters mismatch")
+		}
+		if input.Mode == testframework.RunSelectionGroup &&
+			item.ParentLogicalName != group {
+			return testframework.RunPlan{}, runPlanError("catalog group mismatch")
 		}
 		if _, duplicate := ids[item.ItemID]; duplicate {
-			return testframework.RunPlan{}, ErrInvalidRunPlan
+			return testframework.RunPlan{}, runPlanError("duplicate item id")
 		}
 		key := item.ParentLogicalName + "\x00" + item.LogicalName
 		if _, duplicate := identities[key]; duplicate {
-			return testframework.RunPlan{}, ErrInvalidRunPlan
+			return testframework.RunPlan{}, runPlanError("duplicate item identity")
 		}
 		ids[item.ItemID] = struct{}{}
 		identities[key] = struct{}{}

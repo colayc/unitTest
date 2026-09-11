@@ -1,6 +1,7 @@
 package coveragebundle
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -16,7 +17,13 @@ type fakeRunnerPin struct {
 	verifyCalls  int
 	closeCalls   int
 	closed       bool
+	closeErr     error
 }
+
+type bareDirectoryCapability struct{ path string }
+
+func (capability bareDirectoryCapability) Path() string  { return capability.path }
+func (capability bareDirectoryCapability) Verify() error { return nil }
 
 func (pin *fakeRunnerPin) Installation() Installation { return pin.installation }
 func (pin *fakeRunnerPin) Verify() error {
@@ -29,7 +36,105 @@ func (pin *fakeRunnerPin) Verify() error {
 func (pin *fakeRunnerPin) Close() error {
 	pin.closeCalls++
 	pin.closed = true
-	return nil
+	return pin.closeErr
+}
+
+func TestPrepareRunnerReturnsOwnedCleanupFailureAfterParseMismatch(t *testing.T) {
+	base := strictTestTempDir(t)
+	coverageRoot, projectRoot, objects := filepath.Join(base, "coverage"), filepath.Join(base, "project"), filepath.Join(base, "objects")
+	for _, directory := range []string{coverageRoot, projectRoot, objects} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	python, runner, gcov := filepath.Join(base, "python.exe"), filepath.Join(base, "runner.pyz"), filepath.Join(base, "gcov.exe")
+	for _, path := range []string{python, runner, gcov} {
+		if err := os.WriteFile(path, []byte(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	parseFailure := errors.New("injected descriptor parse failure")
+	cleanupFailure := errors.New("injected owned cleanup failure")
+	originalParse, originalRemove := parsePreparedDescriptor, removePinnedChildForCleanup
+	parsePreparedDescriptor = func(*OwnedDescriptor) (Descriptor, error) { return Descriptor{}, parseFailure }
+	removePinnedChildForCleanup = func(parent, child *pinnedObject, name string) error {
+		return errors.Join(removePinnedChild(parent, child, name), cleanupFailure)
+	}
+	t.Cleanup(func() {
+		parsePreparedDescriptor = originalParse
+		removePinnedChildForCleanup = originalRemove
+	})
+	pin := &fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}}
+	if execution, err := PrepareRunner(pin, DescriptorInput{Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(coverageRoot, "gcovr", "coverage.json")}, descriptorCapabilitiesForTest(t, coverageRoot, projectRoot, objects, gcov)); execution != nil || !errors.Is(err, parseFailure) || !errors.Is(err, cleanupFailure) {
+		t.Fatalf("PrepareRunner() = (%v, %v), want parse and owned cleanup failures", execution, err)
+	}
+}
+
+func TestPrepareRunnerReturnsMismatchAndOwnedCleanupFailure(t *testing.T) {
+	base := strictTestTempDir(t)
+	coverageRoot, projectRoot, objects := filepath.Join(base, "coverage"), filepath.Join(base, "project"), filepath.Join(base, "objects")
+	for _, directory := range []string{coverageRoot, projectRoot, objects} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	python, runner, gcov := filepath.Join(base, "python.exe"), filepath.Join(base, "runner.pyz"), filepath.Join(base, "gcov.exe")
+	for _, path := range []string{python, runner, gcov} {
+		if err := os.WriteFile(path, []byte(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cleanupFailure := errors.New("injected mismatch cleanup failure")
+	originalParse, originalRemove := parsePreparedDescriptor, removePinnedChildForCleanup
+	parsePreparedDescriptor = func(*OwnedDescriptor) (Descriptor, error) { return Descriptor{}, nil }
+	removePinnedChildForCleanup = func(parent, child *pinnedObject, name string) error {
+		return errors.Join(removePinnedChild(parent, child, name), cleanupFailure)
+	}
+	t.Cleanup(func() {
+		parsePreparedDescriptor = originalParse
+		removePinnedChildForCleanup = originalRemove
+	})
+	pin := &fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}}
+	if execution, err := PrepareRunner(pin, DescriptorInput{Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(coverageRoot, "gcovr", "coverage.json")}, descriptorCapabilitiesForTest(t, coverageRoot, projectRoot, objects, gcov)); execution != nil || !errors.Is(err, ErrBundleIntegrity) || !errors.Is(err, cleanupFailure) {
+		t.Fatalf("PrepareRunner() = (%v, %v), want descriptor mismatch and owned cleanup failures", execution, err)
+	}
+}
+
+func TestPrepareRunnerReturnsExecutionCleanupFailureAfterFinalVerify(t *testing.T) {
+	base := strictTestTempDir(t)
+	coverageRoot, projectRoot, objects := filepath.Join(base, "coverage"), filepath.Join(base, "project"), filepath.Join(base, "objects")
+	for _, directory := range []string{coverageRoot, projectRoot, objects} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	python, runner, gcov := filepath.Join(base, "python.exe"), filepath.Join(base, "runner.pyz"), filepath.Join(base, "gcov.exe")
+	for _, path := range []string{python, runner, gcov} {
+		if err := os.WriteFile(path, []byte(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	verifyFailure := errors.New("injected final execution verification failure")
+	closeFailure := errors.New("injected execution cleanup failure")
+	originalVerify := verifyPreparedExecution
+	verifyPreparedExecution = func(*PreparedExecution) error { return verifyFailure }
+	t.Cleanup(func() { verifyPreparedExecution = originalVerify })
+	pin := &fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}, closeErr: closeFailure}
+	if execution, err := PrepareRunner(pin, DescriptorInput{Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(coverageRoot, "gcovr", "coverage.json")}, descriptorCapabilitiesForTest(t, coverageRoot, projectRoot, objects, gcov)); execution != nil || !errors.Is(err, verifyFailure) || !errors.Is(err, closeFailure) {
+		t.Fatalf("PrepareRunner() = (%v, %v), want execution verification and cleanup failures", execution, err)
+	}
+}
+
+func TestValidateInstallationRequiresTheLockedCollectorVersions(t *testing.T) {
+	base := strictTestTempDir(t)
+	for _, test := range []Installation{
+		{Root: base, Python: filepath.Join(base, "python"), Runner: filepath.Join(base, "runner"), PythonVersion: "3.14.5", GcovrVersion: RequiredGCovrVersion, ManifestSHA256: strings.Repeat("a", 64)},
+		{Root: base, Python: filepath.Join(base, "python"), Runner: filepath.Join(base, "runner"), PythonVersion: RequiredPythonVersion, GcovrVersion: "8.5", ManifestSHA256: strings.Repeat("a", 64)},
+	} {
+		if err := validateInstallation(test); err == nil {
+			t.Fatalf("validateInstallation(%#v) accepted an unlocked collector version", test)
+		}
+	}
 }
 
 func TestPrepareRunnerBuildsExactIsolatedProcessSpec(t *testing.T) {
@@ -51,9 +156,9 @@ func TestPrepareRunnerBuildsExactIsolatedProcessSpec(t *testing.T) {
 		}
 	}
 	pin := &fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}}
-	execution, err := PrepareRunner(pin, coverageRoot, "task", DescriptorInput{
+	execution, err := PrepareRunner(pin, DescriptorInput{
 		Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov,
-		OutputPath: filepath.Join(coverageRoot, "task", "coverage.json"),
+		OutputPath: filepath.Join(coverageRoot, "gcovr", "coverage.json"),
 	}, descriptorCapabilitiesForTest(t, coverageRoot, projectRoot, objects, gcov))
 	if err != nil {
 		t.Fatal(err)
@@ -62,7 +167,7 @@ func TestPrepareRunnerBuildsExactIsolatedProcessSpec(t *testing.T) {
 	if got, want := spec.Executable, python; got != want {
 		t.Fatalf("Executable = %q, want %q", got, want)
 	}
-	if got, want := spec.Args, []string{"-I", "-S", runner, execution.DescriptorPath()}; !reflect.DeepEqual(got, want) {
+	if got, want := spec.Args, []string{"-B", "-I", "-S", runner, execution.DescriptorPath()}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("Args = %#v, want %#v", got, want)
 	}
 	if len(spec.Batch) != 0 || len(spec.Env) != 0 {
@@ -104,6 +209,89 @@ func TestPrepareRunnerBuildsExactIsolatedProcessSpec(t *testing.T) {
 	}
 }
 
+func TestPrepareRunnerAcceptsIndependentCapabilities(t *testing.T) {
+	collectorBase := strictTestTempDir(t)
+	rootBase := strictTestTempDir(t)
+	objectsBase := strictTestTempDir(t)
+	gcovBase := strictTestTempDir(t)
+	collectorRoot, projectRoot := filepath.Join(collectorBase, "collector"), filepath.Join(rootBase, "project")
+	objects, gcov := filepath.Join(objectsBase, "objects"), filepath.Join(gcovBase, "gcov")
+	for _, directory := range []string{collectorRoot, projectRoot, objects} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(gcov, []byte("gcov"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	python, runner := filepath.Join(collectorBase, "python"), filepath.Join(collectorBase, "runner.pyz")
+	for _, path := range []string{python, runner} {
+		if err := os.WriteFile(path, []byte(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	capabilities := descriptorCapabilitiesForTest(t, collectorRoot, projectRoot, objects, gcov)
+	execution, err := PrepareRunner(&fakeRunnerPin{installation: Installation{Root: collectorBase, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}}, DescriptorInput{
+		Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov,
+		OutputPath: filepath.Join(collectorRoot, "gcovr", "coverage.json"),
+	}, capabilities)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := execution.TaskRoot(), filepath.Join(collectorRoot, "gcovr"); got != want {
+		t.Fatalf("TaskRoot = %q, want %q", got, want)
+	}
+	if err := execution.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := capabilities.CollectorRoot.Verify(); err != nil {
+		t.Fatalf("collector owner Verify = %v", err)
+	}
+	if err := capabilities.Root.Verify(); err != nil {
+		t.Fatalf("root owner Verify = %v", err)
+	}
+	if err := capabilities.ObjectDirectory.Verify(); err != nil {
+		t.Fatalf("object owner Verify = %v", err)
+	}
+	if err := capabilities.GcovExecutable.Verify(); err != nil {
+		t.Fatalf("gcov owner Verify = %v", err)
+	}
+}
+
+func TestPrepareRunnerRejectsBareCollectorCapabilityWithoutClosingOwners(t *testing.T) {
+	base := strictTestTempDir(t)
+	collectorRoot, root, objects := filepath.Join(base, "collector"), filepath.Join(base, "root"), filepath.Join(base, "objects")
+	for _, directory := range []string{collectorRoot, root, objects} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gcov, python, runner := filepath.Join(base, "gcov"), filepath.Join(base, "python"), filepath.Join(base, "runner")
+	for _, path := range []string{gcov, python, runner} {
+		if err := os.WriteFile(path, []byte(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	capabilities := descriptorCapabilitiesForTest(t, collectorRoot, root, objects, gcov)
+	capabilities.CollectorRoot = bareDirectoryCapability{path: collectorRoot}
+	_, err := PrepareRunner(&fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}}, DescriptorInput{Root: root, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(collectorRoot, "gcovr", "coverage.json")}, capabilities)
+	if err == nil {
+		t.Fatal("PrepareRunner accepted a bare collector path")
+	}
+	if err := capabilities.Root.Verify(); err != nil {
+		t.Fatalf("root owner was closed: %v", err)
+	}
+	if err := capabilities.ObjectDirectory.Verify(); err != nil {
+		t.Fatalf("object owner was closed: %v", err)
+	}
+	if err := capabilities.GcovExecutable.Verify(); err != nil {
+		t.Fatalf("gcov owner was closed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(collectorRoot, "gcovr")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("collector child residue: %v", err)
+	}
+}
+
 func TestPrepareRunnerRejectsTamperedPinAndOutputEscape(t *testing.T) {
 	base := strictTestTempDir(t)
 	coverageRoot := filepath.Join(base, "coverage")
@@ -124,7 +312,7 @@ func TestPrepareRunnerRejectsTamperedPinAndOutputEscape(t *testing.T) {
 		}
 	}
 	pin := &fakeRunnerPin{installation: installation}
-	_, err := PrepareRunner(pin, coverageRoot, "task", DescriptorInput{
+	_, err := PrepareRunner(pin, DescriptorInput{
 		Root: filepath.Join(base, "root"), ObjectDirectory: filepath.Join(base, "objects"),
 		GcovExecutable: filepath.Join(base, "gcov"), OutputPath: filepath.Join(base, "outside.json"),
 	}, DescriptorCapabilities{})
@@ -152,9 +340,9 @@ func TestPreparedExecutionDetectsRootAndGcovTamper(t *testing.T) {
 		}
 	}
 	pin := &fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}}
-	execution, err := PrepareRunner(pin, coverageRoot, "task", DescriptorInput{
+	execution, err := PrepareRunner(pin, DescriptorInput{
 		Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov,
-		OutputPath: filepath.Join(coverageRoot, "task", "coverage.json"),
+		OutputPath: filepath.Join(coverageRoot, "gcovr", "coverage.json"),
 	}, descriptorCapabilitiesForTest(t, coverageRoot, projectRoot, objects, gcov))
 	if err != nil {
 		t.Fatal(err)
@@ -186,9 +374,9 @@ func TestPreparedExecutionDetectsOutputReplacementAfterVerifyAfter(t *testing.T)
 			t.Fatal(err)
 		}
 	}
-	execution, err := PrepareRunner(&fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}}, coverageRoot, "task", DescriptorInput{
+	execution, err := PrepareRunner(&fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}}, DescriptorInput{
 		Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov,
-		OutputPath: filepath.Join(coverageRoot, "task", "coverage.json"),
+		OutputPath: filepath.Join(coverageRoot, "gcovr", "coverage.json"),
 	}, descriptorCapabilitiesForTest(t, coverageRoot, projectRoot, objects, gcov))
 	if err != nil {
 		t.Fatal(err)
@@ -232,8 +420,8 @@ func TestPreparedExecutionDetectsOutputInPlaceMutation(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	execution, err := PrepareRunner(&fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}}, coverageRoot, "task", DescriptorInput{
-		Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(coverageRoot, "task", "coverage.json"),
+	execution, err := PrepareRunner(&fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}}, DescriptorInput{
+		Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(coverageRoot, "gcovr", "coverage.json"),
 	}, descriptorCapabilitiesForTest(t, coverageRoot, projectRoot, objects, gcov))
 	if err != nil {
 		t.Fatal(err)
@@ -246,11 +434,12 @@ func TestPreparedExecutionDetectsOutputInPlaceMutation(t *testing.T) {
 	if err := execution.VerifyAfter(); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(outputPath, []byte("{\"mutated\":true}"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := execution.VerifyAfter(); err == nil {
-		t.Fatal("VerifyAfter accepted in-place output mutation")
+	if err := os.WriteFile(outputPath, []byte("{\"mutated\":true}"), 0o600); err == nil {
+		if err := execution.VerifyAfter(); err == nil {
+			t.Fatal("VerifyAfter accepted in-place output mutation")
+		}
+	} else if err := execution.VerifyAfter(); err != nil {
+		t.Fatalf("VerifyAfter rejected output after retained DELETE pin blocked mutation: %v", err)
 	}
 }
 
@@ -268,7 +457,8 @@ func TestPinnedOutputConsumesWithoutPathReopen(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	execution, err := PrepareRunner(&fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}}, coverageRoot, "task", DescriptorInput{Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(coverageRoot, "task", "coverage.json")}, descriptorCapabilitiesForTest(t, coverageRoot, projectRoot, objects, gcov))
+	pin := &fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}}
+	execution, err := PrepareRunner(pin, DescriptorInput{Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(coverageRoot, "gcovr", "coverage.json")}, descriptorCapabilitiesForTest(t, coverageRoot, projectRoot, objects, gcov))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,9 +466,13 @@ func TestPinnedOutputConsumesWithoutPathReopen(t *testing.T) {
 	if err := os.WriteFile(execution.Descriptor().OutputPath, []byte(`{"ok":true}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	beforePinnedRead := pin.verifyCalls
 	output, err := execution.PinnedOutput()
 	if err != nil {
 		t.Fatal(err)
+	}
+	if pin.verifyCalls <= beforePinnedRead {
+		t.Fatal("PinnedOutput did not revalidate the bundle pin before handing out output")
 	}
 	if execution.descriptor.outputPin == nil || execution.descriptor.outputFile == nil {
 		t.Fatal("PinnedOutput did not retain output capability")
@@ -288,11 +482,138 @@ func TestPinnedOutputConsumesWithoutPathReopen(t *testing.T) {
 	}
 }
 
+func TestPreparedExecutionRejectsOversizedCollectorOutput(t *testing.T) {
+	base := strictTestTempDir(t)
+	coverageRoot, projectRoot, objects := filepath.Join(base, "coverage"), filepath.Join(base, "project"), filepath.Join(base, "objects")
+	for _, directory := range []string{coverageRoot, projectRoot, objects} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	python, runner, gcov := filepath.Join(base, "python.exe"), filepath.Join(base, "runner.pyz"), filepath.Join(base, "gcov.exe")
+	for _, path := range []string{python, runner, gcov} {
+		if err := os.WriteFile(path, []byte(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	execution, err := PrepareRunner(&fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: RequiredPythonVersion, GcovrVersion: RequiredGCovrVersion, ManifestSHA256: strings.Repeat("a", 64)}}, DescriptorInput{Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(coverageRoot, "gcovr", "coverage.json")}, descriptorCapabilitiesForTest(t, coverageRoot, projectRoot, objects, gcov))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer execution.Close()
+	if err := os.WriteFile(execution.Descriptor().OutputPath, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(execution.Descriptor().OutputPath, maximumCollectorOutputBytes+1); err != nil {
+		t.Fatal(err)
+	}
+	if err := execution.VerifyAfter(); err == nil {
+		t.Fatal("VerifyAfter accepted an oversized collector output")
+	}
+}
+
+func TestPinnedOutputRejectsReplacementDuringBoundedRead(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("retained DELETE handle blocks the replacement fixture on Windows")
+	}
+	base := strictTestTempDir(t)
+	coverageRoot, projectRoot, objects := filepath.Join(base, "coverage"), filepath.Join(base, "project"), filepath.Join(base, "objects")
+	for _, directory := range []string{coverageRoot, projectRoot, objects} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	python, runner, gcov := filepath.Join(base, "python"), filepath.Join(base, "runner.pyz"), filepath.Join(base, "gcov")
+	for _, path := range []string{python, runner, gcov} {
+		if err := os.WriteFile(path, []byte(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	execution, err := PrepareRunner(&fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: RequiredPythonVersion, GcovrVersion: RequiredGCovrVersion, ManifestSHA256: strings.Repeat("a", 64)}}, DescriptorInput{Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(coverageRoot, "gcovr", "coverage.json")}, descriptorCapabilitiesForTest(t, coverageRoot, projectRoot, objects, gcov))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer execution.Close()
+	outputPath := execution.Descriptor().OutputPath
+	if err := os.WriteFile(outputPath, []byte(`{"original":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	output, err := execution.PinnedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalRead := readPinnedOutputFile
+	readPinnedOutputFile = func(file *os.File) ([]byte, error) {
+		contents, err := originalRead(file)
+		if err != nil {
+			return nil, err
+		}
+		replacement := outputPath + ".replacement"
+		if err := os.WriteFile(replacement, []byte(`{"replacement":true}`), 0o600); err != nil {
+			return nil, err
+		}
+		if err := os.Rename(replacement, outputPath); err != nil {
+			return nil, err
+		}
+		return contents, nil
+	}
+	t.Cleanup(func() { readPinnedOutputFile = originalRead })
+	if _, err := output.ReadAll(); err == nil {
+		t.Fatal("PinnedOutput.ReadAll accepted output replacement during the read")
+	}
+}
+
+func TestPinnedOutputRejectsABARestorationDuringBoundedRead(t *testing.T) {
+	base := strictTestTempDir(t)
+	coverageRoot, projectRoot, objects := filepath.Join(base, "coverage"), filepath.Join(base, "project"), filepath.Join(base, "objects")
+	for _, directory := range []string{coverageRoot, projectRoot, objects} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	python, runner, gcov := filepath.Join(base, "python"), filepath.Join(base, "runner.pyz"), filepath.Join(base, "gcov")
+	for _, path := range []string{python, runner, gcov} {
+		if err := os.WriteFile(path, []byte(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	execution, err := PrepareRunner(&fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: RequiredPythonVersion, GcovrVersion: RequiredGCovrVersion, ManifestSHA256: strings.Repeat("a", 64)}}, DescriptorInput{Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(coverageRoot, "gcovr", "coverage.json")}, descriptorCapabilitiesForTest(t, coverageRoot, projectRoot, objects, gcov))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer execution.Close()
+	outputPath := execution.Descriptor().OutputPath
+	stable := []byte(`{"stable":"A"}`)
+	if err := os.WriteFile(outputPath, stable, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	output, err := execution.PinnedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalRead := readPinnedOutputFile
+	readPinnedOutputFile = func(file *os.File) ([]byte, error) {
+		// Model the bytes observed after A changed to B and then was restored to
+		// A before the post-read filesystem verification. This deterministic
+		// seam is necessary on Windows, where the retained DELETE handle blocks
+		// the in-place mutation fixture used by the Unix replacement test.
+		_, err := originalRead(file)
+		if err != nil {
+			return nil, err
+		}
+		return []byte(`{"transient":"B"}`), nil
+	}
+	t.Cleanup(func() { readPinnedOutputFile = originalRead })
+	if contents, err := output.ReadAll(); err == nil || string(contents) == string(stable) {
+		t.Fatalf("PinnedOutput.ReadAll() = %q, %v, want ABA rejection", contents, err)
+	}
+}
+
 func TestPreparedExecutionRejectsTaskRootReplacementBeforeOutputOpen(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("task-root replacement fixture requires rename/symlink support")
 	}
-	base := t.TempDir()
+	base := strictTestTempDir(t)
 	coverageRoot := filepath.Join(base, "coverage")
 	projectRoot := filepath.Join(base, "project")
 	objects := filepath.Join(base, "objects")
@@ -307,8 +628,8 @@ func TestPreparedExecutionRejectsTaskRootReplacementBeforeOutputOpen(t *testing.
 			t.Fatal(err)
 		}
 	}
-	execution, err := PrepareRunner(&fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}}, coverageRoot, "task", DescriptorInput{
-		Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(coverageRoot, "task", "coverage.json"),
+	execution, err := PrepareRunner(&fakeRunnerPin{installation: Installation{Root: base, Python: python, Runner: runner, PythonVersion: "3.14.6", GcovrVersion: "8.6", ManifestSHA256: strings.Repeat("a", 64)}}, DescriptorInput{
+		Root: projectRoot, ObjectDirectory: objects, GcovExecutable: gcov, OutputPath: filepath.Join(coverageRoot, "gcovr", "coverage.json"),
 	}, descriptorCapabilitiesForTest(t, coverageRoot, projectRoot, objects, gcov))
 	if err != nil {
 		t.Fatal(err)
@@ -341,12 +662,17 @@ func TestIsolatedRunnerRejectsHostileEnvironment(t *testing.T) {
 	t.Setenv("vIrTuAl_Env", "hostile")
 	t.Setenv("hTtP_PrOxY", "http://hostile.invalid")
 	t.Setenv("lC_ALL", "C.UTF-8")
+	t.Setenv("GCOV", "hostile-gcov")
+	t.Setenv("GCOV_PREFIX", "hostile-prefix")
+	t.Setenv("gCoV_PrEfIx_StRiP", "hostile-prefix-strip")
+	t.Setenv("GCOVR_EXCLUDE", "hostile-gcovr")
+	t.Setenv("LD_PRELOAD", "hostile-loader")
 	unset := fixedRunnerEnvUnset()
 	seen := make(map[string]bool, len(unset))
 	for _, key := range unset {
 		seen[strings.ToUpper(key)] = true
 	}
-	for _, key := range []string{"PYTHONPATH", "PIP_INDEX_URL", "VIRTUAL_ENV", "HTTP_PROXY", "LC_ALL"} {
+	for _, key := range []string{"PYTHONPATH", "PIP_INDEX_URL", "VIRTUAL_ENV", "HTTP_PROXY", "LC_ALL", "GCOV", "GCOV_PREFIX", "GCOV_PREFIX_STRIP", "GCOVR_EXCLUDE", "LD_PRELOAD"} {
 		if !seen[key] {
 			t.Fatalf("fixed runner environment did not clear %s: %#v", key, unset)
 		}

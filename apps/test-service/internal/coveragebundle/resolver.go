@@ -43,36 +43,44 @@ func resolveBundle(productRoot string, hooks resolveHooks) (*bundlePin, error) {
 		return nil, integrityError("product root", errors.New("must be an absolute canonical path"))
 	}
 	bundleRoot := filepath.Join(productRoot, "coverage-bundle", key)
+	return resolveExactBundle(bundleRoot, key, hooks)
+}
+
+// ResolveExact verifies a bundle root selected by the product runtime or CI
+// configuration. Unlike Resolve, the caller supplies the platform bundle root
+// itself rather than the legacy productRoot/coverage-bundle/<platform> layout.
+func ResolveExact(bundleRoot string) (Pin, error) {
+	key, err := currentPlatformKey()
+	if err != nil {
+		return nil, integrityError("platform", err)
+	}
+	if bundleRoot == "" || !filepath.IsAbs(bundleRoot) || filepath.Clean(bundleRoot) != bundleRoot {
+		return nil, integrityError("bundle root", errors.New("must be an absolute canonical path"))
+	}
+	return resolveExactBundle(bundleRoot, key, resolveHooks{})
+}
+
+func resolveExactBundle(bundleRoot, key string, hooks resolveHooks) (*bundlePin, error) {
 	result := &bundlePin{bundleRoot: bundleRoot, files: map[string]*pinnedObject{}, directoryByRelative: map[string]*pinnedObject{}}
 	fail := func(label string, cause error) (*bundlePin, error) {
 		_ = result.Close()
 		return nil, integrityError(label, cause)
 	}
 
-	ancestors, err := pinProductRootAncestors(productRoot)
+	ancestors, err := pinProductRootAncestors(bundleRoot)
 	if err != nil {
-		return fail("pin product root ancestors", err)
+		return fail("pin bundle root ancestors", err)
 	}
 	for _, ancestor := range ancestors {
 		if err := result.resource.reserveHandle(); err != nil {
 			for index := len(ancestors) - 1; index >= 0; index-- {
 				_ = ancestors[index].Close()
 			}
-			return fail("pin product root ancestors", err)
+			return fail("pin bundle root ancestors", err)
 		}
 		result.directories = append(result.directories, ancestor)
 	}
-	productRootPin := ancestors[len(ancestors)-1]
-	coverageRootPin, err := result.pinChild(productRootPin, "coverage-bundle", true, 0)
-	if err != nil {
-		return fail("pin coverage bundle root", err)
-	}
-	result.directories = append(result.directories, coverageRootPin)
-	bundleRootPin, err := result.pinChild(coverageRootPin, key, true, 0)
-	if err != nil {
-		return fail("pin platform bundle root", err)
-	}
-	result.directories = append(result.directories, bundleRootPin)
+	bundleRootPin := ancestors[len(ancestors)-1]
 	result.bundleRootPin = bundleRootPin
 	result.directoryByRelative[""] = bundleRootPin
 
@@ -280,5 +288,8 @@ func canonicalTreePath(value string) bool {
 }
 
 func integrityError(label string, cause error) error {
-	return fmt.Errorf("%w: %s: %v", ErrBundleIntegrity, label, cause)
+	// Preserve both the stable package classification and every joined cause so
+	// callers can reliably distinguish an operation failure from a cleanup
+	// failure that occurred while unwinding it.
+	return fmt.Errorf("%w: %s: %w", ErrBundleIntegrity, label, cause)
 }

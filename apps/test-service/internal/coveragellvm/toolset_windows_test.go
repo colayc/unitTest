@@ -15,6 +15,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
+	"unit-test-ide.local/test-service/internal/coverageplatform"
 	"unit-test-ide.local/test-service/internal/toolchain"
 )
 
@@ -30,6 +31,32 @@ func TestLLVMToolsetRejectsReplacementBetweenDiscoveryAndPin(t *testing.T) {
 	if toolset, err := PinToolset(instance); err == nil {
 		_ = toolset.Close()
 		t.Fatal("PinToolset accepted a replacement created after discovery evidence")
+	}
+}
+
+func TestLLVMToolsetImplementsCoveragePlatformContractWithoutAliasingTools(t *testing.T) {
+	toolset, err := PinToolset(llvmToolchainFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer toolset.Close()
+	var contract coverageplatform.Toolset = toolset
+	if contract.CCompiler().Path() != toolset.Compiler().Path() || contract.CXXCompiler().Path() != toolset.Compiler().Path() {
+		t.Fatal("coverage platform compiler capabilities did not retain clang-cl")
+	}
+	first, second := contract.Tools(), contract.Tools()
+	if len(first) != 3 || len(second) != 3 || first[0].Path() != toolset.Compiler().Path() || first[1].Path() != toolset.Profdata().Path() || first[2].Path() != toolset.Cov().Path() {
+		t.Fatalf("Tools() = %#v", first)
+	}
+	first[0] = nil
+	if second[0] == nil || contract.Tools()[0] == nil {
+		t.Fatal("Tools returned an aliased slice")
+	}
+	var typedNil *Toolset
+	var nilContract coverageplatform.Toolset = typedNil
+	claim, claimErr := nilContract.ClaimOwnership()
+	if nilContract.Verify() == nil || nilContract.CCompiler().Verify() == nil || claim != nil || claimErr == nil {
+		t.Fatal("typed-nil toolset was accepted")
 	}
 }
 

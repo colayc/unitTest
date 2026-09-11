@@ -653,8 +653,9 @@ function buildEvidence(
   return evidence;
 }
 
-test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed TestRun report", async (t) => {
-  assert.equal(process.platform, "win32", "coverage service smoke is Windows-only");
+test("real Protocol v1.4 Windows clang-cl coverage publishes and opens a failed TestRun report", {
+  skip: process.platform !== "win32" ? "Windows named-pipe/WFP smoke runs only on Windows" : false
+}, async (t) => {
   await rm(evidencePath, { force: true });
   let fixture: Fixture | undefined;
   let manager: ServiceManager | undefined;

@@ -39,6 +39,25 @@ func TestBundleManifestRejectsUnknownSchemaPlatformAndArchitecture(t *testing.T)
 	}
 }
 
+func TestBundleManifestRequiresPinnedCollectorVersions(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{"python", func(manifest map[string]any) { manifest["pythonVersion"] = "3.14.5" }},
+		{"gcovr", func(manifest map[string]any) { manifest["gcovrVersion"] = "8.5" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			productRoot, bundleRoot := createBundleFixture(t)
+			mutateBundleManifest(t, bundleRoot, test.mutate)
+			if pin, err := Resolve(productRoot); err == nil {
+				_ = pin.Close()
+				t.Fatalf("Resolve accepted a %s version outside the locked collector contract", test.name)
+			}
+		})
+	}
+}
+
 func TestBundleManifestRejectsDuplicateCaseAliasAndNonCanonicalPaths(t *testing.T) {
 	for _, candidate := range []string{
 		"app/gcovr-runner.pyz/",
@@ -191,13 +210,31 @@ func TestBundleManifestRejectsUnknownFieldsAndTrailingJSON(t *testing.T) {
 	}
 }
 
+func TestBundleManifestAcceptsLockedBuildSources(t *testing.T) {
+	productRoot, bundleRoot := createBundleFixture(t)
+	mutateBundleManifest(t, bundleRoot, func(manifest map[string]any) {
+		manifest["inputs"].(map[string]any)["buildSources"] = []any{}
+	})
+	pin, err := Resolve(productRoot)
+	if err != nil {
+		t.Fatalf("Resolve rejected the locked buildSources field: %v", err)
+	}
+	if err := pin.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func createBundleFixture(t *testing.T) (string, string) {
+	t.Helper()
+	return createBundleFixtureAt(t, filepath.Join(testScratchDir(t), "product"))
+}
+
+func createBundleFixtureAt(t *testing.T, productRoot string) (string, string) {
 	t.Helper()
 	key, err := currentPlatformKey()
 	if err != nil {
 		t.Skipf("unsupported test platform: %v", err)
 	}
-	productRoot := filepath.Join(testScratchDir(t), "product")
 	bundleRoot := filepath.Join(productRoot, "coverage-bundle", key)
 	files := map[string][]byte{
 		"app/gcovr-runner.pyz": []byte("runner and locked dependencies"),
@@ -255,6 +292,7 @@ func createBundleFixture(t *testing.T) (string, string) {
 			"wheels": []any{map[string]any{
 				"project": "gcovr", "version": "8.6", "kind": "wheel", "filename": "gcovr.whl", "url": "https://files.pythonhosted.org/gcovr.whl", "sha256": digestBytes([]byte("gcovr wheel")),
 			}},
+			"buildSources": []any{},
 			"provenance": map[string]any{
 				"recipe": map[string]any{"name": "coverage-bundle-recipe-v2", "sha256": digestBytes([]byte("recipe"))},
 				"builderImage": func() any {

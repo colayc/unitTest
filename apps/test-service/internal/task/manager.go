@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -849,6 +850,9 @@ func (m *Manager) watch(current *activeTask) {
 					result, ok := <-process.Done()
 					if !ok {
 						result = ProcessResult{Err: errors.New("process result unavailable")}
+					}
+					if result.Err != nil && os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+						fmt.Fprintf(os.Stderr, "task manager process result error task %s: %v exit %d children %d\n", taskID, result.Err, result.ExitCode, len(result.Children))
 					}
 					m.sendInternal(processDoneCommand{taskID: taskID, result: result})
 					return

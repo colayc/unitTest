@@ -15,7 +15,7 @@ func TestRegistrySortsDeduplicatesAndDefensivelyCopiesResults(t *testing.T) {
 
 	sharedEnvironment := []string{"LANG=C"}
 	sharedGenerators := []string{"Ninja"}
-	sharedCoverage := CoverageCapability{GCov: "/usr/bin/gcov"}
+	sharedCoverage := CoverageCapability{}
 	gcc := Instance{
 		ID:                 "gcc-id",
 		Family:             FamilyGCC,
@@ -79,6 +79,39 @@ func TestRegistrySortsDeduplicatesAndDefensivelyCopiesResults(t *testing.T) {
 	}
 	if again[1].Coverage != sharedCoverage {
 		t.Fatalf("second Discover() Coverage = %+v, want %+v", again[1].Coverage, sharedCoverage)
+	}
+}
+
+func TestRegistryRecomputesGCCCoverageIdentityAndKeepsEvidenceOwnership(t *testing.T) {
+	t.Parallel()
+
+	coverage := CoverageCapability{
+		GCov: "/tools/gcov", GCovVersion: "13.2.0",
+		CompilerEvidence:    ExecutableEvidence{FileIdentity: "unix:1:11", SHA256: strings.Repeat("a", 64)},
+		CXXCompilerEvidence: ExecutableEvidence{FileIdentity: "unix:1:12", SHA256: strings.Repeat("b", 64)},
+		GCovEvidence:        ExecutableEvidence{FileIdentity: "unix:1:13", SHA256: strings.Repeat("c", 64)},
+	}
+	coverage.ToolsetIdentity = GCCToolsetIdentity("13.2.0", []string{"/tools/gcc", "/tools/g++", "/tools/gcov"}, []ExecutableEvidence{coverage.CompilerEvidence, coverage.CXXCompilerEvidence, coverage.GCovEvidence})
+	instance := Instance{ID: "gcc-covered", Family: FamilyGCC, CCompiler: "/tools/gcc", CXXCompiler: "/tools/g++", Version: "13.2.0", TargetTriple: "x86_64-linux-gnu", HostArchitecture: "x64", TargetArchitecture: "x64", Sysroot: "/", Generators: []string{"Ninja"}, Coverage: coverage}
+	registry, err := NewRegistry(&staticAdapter{instances: []Instance{instance}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, issues := registry.Discover(context.Background())
+	if len(issues) != 0 || len(got) != 1 || got[0].Coverage.ToolsetIdentity != coverage.ToolsetIdentity {
+		t.Fatalf("Discover() = %#v, %#v", got, issues)
+	}
+	got[0].Coverage.GCovEvidence.SHA256 = strings.Repeat("d", 64)
+	again, _ := registry.Discover(context.Background())
+	if again[0].Coverage.GCovEvidence.SHA256 != coverage.GCovEvidence.SHA256 {
+		t.Fatal("registry returned an aliased GCC coverage descriptor")
+	}
+
+	tampered := instance
+	tampered.Coverage.GCovEvidence.SHA256 = strings.Repeat("d", 64)
+	invalid, invalidIssues := normalizeRegistryResults([]adapterResult{{instances: []Instance{tampered}}})
+	if len(invalid) != 0 || len(invalidIssues) != 1 || invalidIssues[0].Code != "TOOLCHAIN_INVALID" {
+		t.Fatalf("tampered GCC identity = %#v, %#v", invalid, invalidIssues)
 	}
 }
 
@@ -260,6 +293,7 @@ func TestRegistryAcceptsExactInstanceFieldBudgets(t *testing.T) {
 	t.Parallel()
 
 	instance := boundedRegistryInstance(0)
+	instance.Family = FamilyClang
 	instance.ID = "i" + strings.Repeat("a", maxRegistryIDBytes-1)
 	instance.CCompiler = "/" + strings.Repeat("c", maxRegistryPathBytes-1)
 	instance.CXXCompiler = "/" + strings.Repeat("x", maxRegistryPathBytes-1)

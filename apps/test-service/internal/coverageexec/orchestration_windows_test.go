@@ -3,6 +3,7 @@
 package coverageexec
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -22,6 +23,10 @@ import (
 	"unit-test-ide.local/test-service/internal/cmake"
 	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/coveragellvm"
+	"unit-test-ide.local/test-service/internal/coverageplatform"
+	coveragemodelv1 "unit-test-ide.local/test-service/internal/coveragemodel/v1"
+	"unit-test-ide.local/test-service/internal/coveragenormalize"
+	"unit-test-ide.local/test-service/internal/coverageparser/llvm"
 	"unit-test-ide.local/test-service/internal/coveragerun"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/testdomain"
@@ -538,7 +543,7 @@ func (adapter *orchestrationAdapter) Prepare(_ context.Context, input AdapterInp
 	}
 	prepared := &orchestrationPreparedAdapter{
 		toolset: toolset, instrumentation: instrumentation,
-		allocator: countedAllocator, profileRoot: input.ProfileRoot,
+		allocator: countedAllocator, profileRoot: input.ProfileRoot, ownsToolset: true,
 	}
 	adapter.mu.Lock()
 	adapter.prepared = prepared
@@ -592,8 +597,12 @@ type countingProfileAllocator struct {
 	closes    int
 }
 
-func (allocator *countingProfileAllocator) Decorate(expectation testrun.ProfileExpectation, spec task.ProcessSpec) (task.ProcessSpec, error) {
+func (allocator *countingProfileAllocator) Decorate(expectation testrun.ProfileExpectation, spec task.ProcessSpec) (testrun.ProfileExpectation, task.ProcessSpec, error) {
 	return allocator.delegate.Decorate(expectation, spec)
+}
+
+func (allocator *countingProfileAllocator) Validate(expectation testrun.ProfileExpectation, original, decorated task.ProcessSpec) error {
+	return allocator.delegate.Validate(expectation, original, decorated)
 }
 
 func (allocator *countingProfileAllocator) Close() error {
@@ -616,19 +625,28 @@ type orchestrationPreparedAdapter struct {
 	profileRoot     string
 	closeOnce       sync.Once
 	mu              sync.Mutex
+	ownsToolset     bool
 	closes          int
 	seals           int
 	manifest        *coveragellvm.Manifest
 }
 
-func (adapter *orchestrationPreparedAdapter) Toolset() *coveragellvm.Toolset { return adapter.toolset }
-func (adapter *orchestrationPreparedAdapter) Instrumentation() coveragellvm.Instrumentation {
+func (adapter *orchestrationPreparedAdapter) Toolset() coverageplatform.Toolset {
+	return adapter.toolset
+}
+func (adapter *orchestrationPreparedAdapter) RelinquishToolsetOwnership() {
+	adapter.mu.Lock()
+	adapter.ownsToolset = false
+	adapter.mu.Unlock()
+}
+func (adapter *orchestrationPreparedAdapter) Instrumentation() coverageplatform.Instrumentation {
 	return adapter.instrumentation
 }
 func (adapter *orchestrationPreparedAdapter) Allocator() testrun.ProfileAllocator {
 	return adapter.allocator
 }
-func (adapter *orchestrationPreparedAdapter) SealProfiles(expectations []testrun.ProfileExpectation, outcomes []testrun.InvocationOutcome) (coveragellvm.Manifest, error) {
+func (adapter *orchestrationPreparedAdapter) PrepareTests(context.Context, PreparedBuild) error { return nil }
+func (adapter *orchestrationPreparedAdapter) SealEvidence(expectations []testrun.ProfileExpectation, outcomes []testrun.InvocationOutcome) ([]coveragedomain.CompletenessReason, error) {
 	manifest, err := coveragellvm.SealProfiles(adapter.profileRoot, expectations, outcomes)
 	if err == nil {
 		copy := manifest
@@ -637,23 +655,36 @@ func (adapter *orchestrationPreparedAdapter) SealProfiles(expectations []testrun
 		adapter.manifest = &copy
 		adapter.mu.Unlock()
 	}
-	return manifest, err
+	return append([]coveragedomain.CompletenessReason(nil), manifest.PartialReasons...), err
 }
-func (adapter *orchestrationPreparedAdapter) Collector(_ coveragellvm.Manifest, _ []coveragerun.TrustedPath) (task.ProcessSpec, task.ProcessSpec, error) {
+func (adapter *orchestrationPreparedAdapter) PrepareCollector(_ context.Context, _ PreparedBuild, _ coverageplatform.DirectoryVerifier, _ []coveragerun.TrustedPath) (CollectionPlan, error) {
 	dir := filepath.Dir(adapter.profileRoot)
-	return task.ProcessSpec{Executable: adapter.toolset.Profdata().Path(), Args: []string{"--merge"}, Dir: dir},
-		task.ProcessSpec{Executable: adapter.toolset.Cov().Path(), Args: []string{"--export"}, Dir: dir}, nil
+	normalize := task.ProcessSpec{Executable: adapter.toolset.Cov().Path(), Args: []string{"--export"}, Dir: dir}
+	return CollectionPlan{Aggregate: task.ProcessSpec{Executable: adapter.toolset.Profdata().Path(), Args: []string{"--merge"}, Dir: dir}, Normalize: &normalize}, nil
+}
+func (*orchestrationPreparedAdapter) Normalize(_ context.Context, input NormalizeInput) (coveragemodelv1.CoverageDocumentV1, []coveragenormalize.SourceBinding, error) {
+	parsed, err := llvm.Parse(bytes.NewReader(input.ProcessOutput), llvm.Limits{MaxInputBytes: input.Limits.MaxInputBytes, MaxDepth: input.Limits.MaxDepth, MaxFiles: input.Limits.MaxFiles, MaxFunctions: input.Limits.MaxFunctions, MaxLines: input.Limits.MaxLines, MaxBranches: input.Limits.MaxBranches, MaxStringBytes: input.Limits.MaxStringBytes})
+	if err != nil { return coveragemodelv1.CoverageDocumentV1{}, nil, err }
+	return coveragenormalize.NormalizeLLVM(coveragenormalize.LLVMInput{Export: parsed, WorkspaceRoot: input.WorkspaceRoot, Matcher: input.Matcher, Toolchain: input.Toolchain, Completeness: input.Completeness, Limits: input.Limits})
 }
 func (adapter *orchestrationPreparedAdapter) Close() error {
 	var result error
 	adapter.closeOnce.Do(func() {
 		adapter.mu.Lock()
 		adapter.closes++
+		ownsToolset := adapter.ownsToolset
+		adapter.ownsToolset = false
 		adapter.mu.Unlock()
 		if closer, ok := adapter.allocator.(io.Closer); ok {
 			result = errors.Join(result, closer.Close())
 		}
-		result = errors.Join(result, adapter.toolset.Close())
+		adapter.mu.Lock()
+		manifest := adapter.manifest
+		adapter.mu.Unlock()
+		if manifest != nil { result = errors.Join(result, manifest.Close()) }
+		if ownsToolset {
+			result = errors.Join(result, adapter.toolset.Close())
+		}
 	})
 	return result
 }
@@ -686,18 +717,24 @@ type orchestrationEmbeddedPreparer struct {
 }
 
 func (preparer orchestrationEmbeddedPreparer) PrepareEmbedded(_ context.Context, request testrun.EmbeddedRequest) (testrun.EmbeddedRun, error) {
-	expectation := testrun.ProfileExpectation{InvocationID: "invocation-1", Iteration: 1, FileName: "p-000001-i-000001-%p-%m.profraw"}
-	decorated, err := request.Allocator.Decorate(expectation, task.ProcessSpec{
+	expectation := testrun.ProfileExpectation{InvocationID: "invocation-1", Iteration: 1, Sequence: 1}
+	completed, decorated, err := request.Allocator.Decorate(expectation, task.ProcessSpec{
 		Executable: request.PreparedBuild.Toolchain().CXXCompiler,
 		Args:       []string{"--test"}, Dir: filepath.Dir(request.PreparedBuild.Toolchain().CXXCompiler),
 	})
 	if err != nil {
 		return nil, err
 	}
-	return &orchestrationEmbeddedRun{run: request.Run.Clone(), store: preparer.store, result: preparer.result, expectation: expectation, step: task.ExecutionStep{
+	if err := request.Allocator.Validate(completed, task.ProcessSpec{
+		Executable: request.PreparedBuild.Toolchain().CXXCompiler,
+		Args:       []string{"--test"}, Dir: filepath.Dir(request.PreparedBuild.Toolchain().CXXCompiler),
+	}, decorated); err != nil {
+		return nil, err
+	}
+	return &orchestrationEmbeddedRun{run: request.Run.Clone(), store: preparer.store, result: preparer.result, expectation: completed, step: task.ExecutionStep{
 		ID: "test-wave-1", Kind: task.StepTestRun,
 		Process: task.ProcessSpec{Batch: []task.ProcessBatchItem{{
-			ID: expectation.InvocationID, Executable: decorated.Executable,
+			ID: completed.InvocationID, Executable: decorated.Executable,
 			Args: decorated.Args, Env: decorated.Env, EnvUnset: decorated.EnvUnset,
 			Dir: decorated.Dir, Timeout: time.Second,
 		}}},

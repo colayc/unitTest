@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -578,6 +579,9 @@ func (m *Manager) startNextStep(current *activeTask, active map[string]*activeTa
 		return nil
 	}
 	if prepareErr != nil {
+		if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+			fmt.Fprintf(os.Stderr, "task manager process prepare error task %s step %s: %v\n", current.task.ID, step.Kind, prepareErr)
+		}
 		m.cleanupPreparedProcess(current)
 		return nil
 	}
@@ -638,6 +642,9 @@ func (m *Manager) startNextStep(current *activeTask, active map[string]*activeTa
 	}
 	startErr := process.Start(current.execution.ctx)
 	if startErr != nil {
+		if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+			fmt.Fprintf(os.Stderr, "task manager process start error task %s step %s: %v\n", current.task.ID, step.Kind, startErr)
+		}
 		cause := current.execution.resolve(OutcomeInfrastructureFailed)
 		current.cleanupWithoutDone = true
 		m.terminate(current)
@@ -1011,7 +1018,7 @@ func (m *Manager) persistTerminal(
 		updatedTask := current.task
 		updatedTask.ActiveStep = ""
 		steps := terminalStepMutations(current, result, outcome, failPending, finishedAt)
-		finished, err := m.persistFinished(current, updatedTask, outcome, deleteLease, steps, active)
+		finished, err := m.persistFinished(current, updatedTask, result, outcome, deleteLease, steps, active)
 		if !errors.Is(err, ErrConflict) {
 			return finished, err
 		}
@@ -1111,6 +1118,7 @@ func terminalStepMutations(
 func (m *Manager) persistFinished(
 	owner *activeTask,
 	current Task,
+	result ProcessResult,
 	outcome Outcome,
 	deleteLease bool,
 	steps []StepMutation,
@@ -1123,9 +1131,13 @@ func (m *Manager) persistFinished(
 			return current, ErrStorageUnavailable
 		}
 	}
+	errorMessage := outcomeErrorMessage(outcome)
+	if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+		errorMessage = debugProcessErrorMessage(result.Err, errorMessage)
+	}
 	finished, err := ApplyTransition(current, Transition{
 		From: current.Status, To: StatusFinished, Outcome: outcome, At: finishedAt,
-		ErrorCode: outcomeErrorCode(outcome), ErrorMessage: outcomeErrorMessage(outcome),
+		ErrorCode: outcomeErrorCode(outcome), ErrorMessage: errorMessage,
 	})
 	if err != nil {
 		return current, err
@@ -1150,7 +1162,7 @@ func (m *Manager) persistFinished(
 		outcome = OutcomeInfrastructureFailed
 		finished, completionErr = ApplyTransition(current, Transition{
 			From: current.Status, To: StatusFinished, Outcome: outcome, At: finishedAt,
-			ErrorCode: outcomeErrorCode(outcome), ErrorMessage: outcomeErrorMessage(outcome),
+			ErrorCode: outcomeErrorCode(outcome), ErrorMessage: debugProcessErrorMessage(result.Err, outcomeErrorMessage(outcome)),
 		})
 		if completionErr == nil {
 			steps = terminalStepMutations(
@@ -1195,7 +1207,7 @@ func (m *Manager) persistFinished(
 		outcome = OutcomeInfrastructureFailed
 		finished, artifactErr = ApplyTransition(current, Transition{
 			From: current.Status, To: StatusFinished, Outcome: outcome, At: finishedAt,
-			ErrorCode: outcomeErrorCode(outcome), ErrorMessage: outcomeErrorMessage(outcome),
+			ErrorCode: outcomeErrorCode(outcome), ErrorMessage: debugProcessErrorMessage(result.Err, outcomeErrorMessage(outcome)),
 		})
 		if artifactErr == nil {
 			steps = terminalStepMutations(
@@ -1301,6 +1313,89 @@ func (m *Manager) persistFinished(
 		return stored, ErrStorageUnavailable
 	}
 	return stored, nil
+}
+
+// debugProcessErrorMessage exposes only fixed process-host failure categories.
+// It never transports paths or command lines through the task protocol.
+func debugProcessErrorMessage(err error, fallback string) string {
+	if err == nil {
+		return fallback
+	}
+	message := err.Error()
+	for _, category := range []string{
+		"target process group remained alive",
+		"target process group termination failed",
+		"target process group kill failed",
+		"process group identity mismatch",
+		"target identity unavailable",
+		"target permission denied",
+		"target executable or working directory missing",
+		"target process could not start",
+		"process-host status unavailable",
+		"process-host rejected start",
+		"process wait failed",
+		"target not found",
+		"workspace trust required",
+		"project not found",
+		"build profile not found",
+		"CMake File API boundary failure",
+		"CMake File API limit failure",
+		"CMake File API consumed file limit",
+		"CMake File API total bytes limit",
+		"CMake File API input count limit",
+		"CMake File API cache entry limit",
+		"CMake File API reply directory limit",
+		"CMake File API reply candidate limit",
+		"invalid CMake File API reply",
+		"CMake File API reply unavailable",
+		"CMake File API current reply error",
+		"CMake File API index decode failure",
+		"CMake File API query shape failure",
+		"CMake File API reply index missing",
+		"CMake File API codemodel failure",
+		"CMake File API CMake files failure",
+		"CMake File API cache failure",
+		"CMake File API input failure",
+		"CMake File API input snapshot failure",
+		"CMake File API input missing",
+		"CMake File API input changed",
+		"CMake File API input is not a regular file",
+		"CMake File API input identity changed",
+		"CMake File API input content changed",
+		"CMake File API input exceeds limit",
+		"CMake File API input permission denied",
+		"CMake File API input identity unavailable",
+		"CMake File API input snapshot closed",
+		"CMake File API input symlink rejected",
+		"CMake File API input unsupported",
+		"CMake File API input read failure",
+		"CMake File API input stale",
+		"CMake File API input descriptor failure",
+		"CMake File API input busy",
+		"CMake File API toolchain failure",
+		"CMake File API target failure",
+		"CMake File API configuration failure",
+		"configure fingerprint missing workspace generation",
+		"configure fingerprint missing profile identity",
+		"configure fingerprint missing CMake identity",
+		"configure fingerprint missing toolchain identity",
+		"configure fingerprint missing CMake inputs",
+		"configure fingerprint missing File API state",
+		"configure fingerprint has invalid file state",
+		"configure fingerprint input rejected",
+		"configure required",
+		"invalid GCC coverage evidence",
+		"missing profile data",
+		"unexpected build evidence",
+		"invalid argument",
+		"storage unavailable",
+		"conflict",
+	} {
+		if strings.Contains(message, category) {
+			return category
+		}
+	}
+	return fallback
 }
 
 func rollbackFinalizedArtifacts(owner *activeTask, artifacts []Artifact) error {

@@ -12,7 +12,7 @@ import (
 	"strings"
 	"sync"
 
-	"unit-test-ide.local/test-service/internal/coveragerun"
+	"unit-test-ide.local/test-service/internal/coverageplatform"
 	"unit-test-ide.local/test-service/internal/task"
 )
 
@@ -20,8 +20,109 @@ type executionRootOwner struct {
 	path      string
 	file      *os.File
 	info      os.FileInfo
+	collector *retainedExecutionDirectory
 	closeOnce sync.Once
 	closeErr  error
+}
+
+// retainedExecutionDirectory is a handle-backed child of the private
+// execution root. It can mint independent handle views without giving a
+// caller the right to remove the execution-owned directory.
+type retainedExecutionDirectory struct {
+	owner     *executionRootOwner
+	path      string
+	file      *os.File
+	info      os.FileInfo
+	closeOnce sync.Once
+	closeErr  error
+}
+
+type executionDirectoryView struct{ directory *retainedExecutionDirectory }
+
+func retainExecutionDirectory(owner *executionRootOwner, path string) (*retainedExecutionDirectory, error) {
+	if owner == nil || owner.VerifyDirectory(path) != nil {
+		return nil, task.ErrInvalidArgument
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, task.ErrInvalidArgument
+	}
+	file, err := openRetainedDirectory(path)
+	if err != nil {
+		return nil, task.ErrInvalidArgument
+	}
+	directory := &retainedExecutionDirectory{owner: owner, path: path, file: file, info: info}
+	if err := directory.Verify(); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return directory, nil
+}
+
+func (directory *retainedExecutionDirectory) Path() string {
+	if directory == nil {
+		return ""
+	}
+	return directory.path
+}
+
+func (directory *retainedExecutionDirectory) Verify() error {
+	if directory == nil || directory.owner == nil || directory.file == nil || directory.info == nil ||
+		directory.owner.VerifyDirectory(directory.path) != nil {
+		return task.ErrInvalidArgument
+	}
+	pathInfo, err := os.Lstat(directory.path)
+	if err != nil || !pathInfo.IsDir() || pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(directory.info, pathInfo) {
+		return task.ErrInvalidArgument
+	}
+	handleInfo, err := directory.file.Stat()
+	if err != nil || !handleInfo.IsDir() || !os.SameFile(directory.info, handleInfo) {
+		return task.ErrInvalidArgument
+	}
+	return nil
+}
+
+func (directory *retainedExecutionDirectory) Close() error {
+	if directory == nil {
+		return nil
+	}
+	directory.closeOnce.Do(func() {
+		if directory.file != nil {
+			directory.closeErr = directory.file.Close()
+			directory.file = nil
+		}
+	})
+	return directory.closeErr
+}
+
+func (view executionDirectoryView) Path() string {
+	if view.directory == nil {
+		return ""
+	}
+	return view.directory.Path()
+}
+
+func (view executionDirectoryView) Verify() error {
+	if view.directory == nil {
+		return task.ErrInvalidArgument
+	}
+	return view.directory.Verify()
+}
+
+func (view executionDirectoryView) RetainDirectory() (coverageplatform.RetainedDirectory, error) {
+	if err := view.Verify(); err != nil {
+		return nil, err
+	}
+	return retainExecutionDirectory(view.directory.owner, view.directory.path)
+}
+
+// CollectorRoot exposes the execution-owned collector directory as a
+// non-owning verifier. Consumers must retain a clone before keeping it.
+func (owner *executionRootOwner) CollectorRoot() coverageplatform.DirectoryVerifier {
+	if owner == nil || owner.collector == nil {
+		return nil
+	}
+	return executionDirectoryView{directory: owner.collector}
 }
 
 func retainExecutionRoot(path string) (*executionRootOwner, error) {
@@ -80,16 +181,24 @@ func (owner *executionRootOwner) Close() error {
 		return nil
 	}
 	owner.closeOnce.Do(func() {
+		collector := owner.collector
+		owner.collector = nil
 		if err := owner.Verify(); err != nil {
-			owner.closeErr = err
+			owner.closeErr = errors.Join(owner.closeErr, err)
+			if collector != nil {
+				owner.closeErr = errors.Join(owner.closeErr, collector.Close())
+			}
 			if owner.file != nil {
 				owner.closeErr = errors.Join(owner.closeErr, owner.file.Close())
 				owner.file = nil
 			}
 			return
 		}
+		if collector != nil {
+			owner.closeErr = errors.Join(owner.closeErr, collector.Close())
+		}
 		if owner.file != nil {
-			owner.closeErr = owner.file.Close()
+			owner.closeErr = errors.Join(owner.closeErr, owner.file.Close())
 			owner.file = nil
 		}
 		if owner.closeErr == nil {
@@ -209,6 +318,14 @@ func (boundary *executionBoundary) ValidateExecutable(path string) error {
 		boundary.root.Verify() != nil || boundary.execution.verifyRetained() != nil {
 		return task.ErrInvalidArgument
 	}
+	// Continuation processes are explicitly approved by the coverage execution
+	// after their retained capabilities and launch contract have been checked.
+	// Accept that capability here without delegating back into the build
+	// boundary, whose coverage-plan verification would recursively re-verify the
+	// same toolset while the plan is being extended.
+	if boundary.execution.approvesExecutable(path) {
+		return nil
+	}
 	if boundary.delegate != nil && boundary.delegate.ValidateExecutable(path) == nil {
 		return nil
 	}
@@ -216,14 +333,8 @@ func (boundary *executionBoundary) ValidateExecutable(path string) error {
 	defer boundary.execution.mu.Unlock()
 	adapter := boundary.execution.adapter
 	if adapter != nil && adapter.Toolset() != nil {
-		for _, candidate := range []coveragerun.TrustedPath{
-			adapter.Toolset().Compiler(),
-			adapter.Toolset().Profdata(),
-			adapter.Toolset().Cov(),
-		} {
-			if samePath(candidate.Path(), path) && candidate.Verify() == nil {
-				return nil
-			}
+		if validatesToolsetExecutable(adapter.Toolset(), path) {
+			return nil
 		}
 	}
 	for _, candidate := range boundary.execution.binaries {
@@ -234,9 +345,36 @@ func (boundary *executionBoundary) ValidateExecutable(path string) error {
 	return task.ErrInvalidArgument
 }
 
+func validatesToolsetExecutable(toolset coverageplatform.Toolset, path string) bool {
+	if coverageplatform.VerifyToolset(toolset) != nil {
+		return false
+	}
+	for _, candidate := range toolset.Tools() {
+		if samePath(candidate.Path(), path) && candidate.Verify() == nil {
+			return true
+		}
+	}
+	return false
+}
+
 func (boundary *executionBoundary) ValidateWorkingDirectory(path string) error {
 	if boundary == nil || boundary.execution == nil || boundary.root == nil ||
-		boundary.root.Verify() != nil || boundary.execution.verifyRetained() != nil {
+		boundary.root.Verify() != nil {
+		return task.ErrInvalidArgument
+	}
+	// A collector/continuation target is approved only after its complete
+	// launch contract has been retained.  Re-verifying the entire toolset for
+	// the directory half of that same target can recursively re-enter the
+	// prepared coverage boundary while a plan is being extended.  The root
+	// handle and the exact approved directory are still checked here, so an
+	// approved target cannot escape the execution-owned tree or be replaced by
+	// a symlink.
+	if boundary.execution.approvesDirectory(path) {
+		if boundary.root.VerifyDirectory(path) == nil {
+			return nil
+		}
+	}
+	if boundary.execution.verifyRetained() != nil {
 		return task.ErrInvalidArgument
 	}
 	if boundary.delegate != nil && boundary.delegate.ValidateWorkingDirectory(path) == nil {
@@ -259,6 +397,10 @@ func (boundary *executionBoundary) ValidateProcessTarget(
 		) {
 		return task.ErrInvalidArgument
 	}
+	if boundary.ValidateExecutable(executable) == nil &&
+		boundary.ValidateWorkingDirectory(directory) == nil {
+		return nil
+	}
 	if target, ok := boundary.delegate.(task.ProcessTargetBoundary); ok {
 		if target.ValidateProcessTarget(
 			executable, arguments, environment, unset, directory,
@@ -271,6 +413,34 @@ func (boundary *executionBoundary) ValidateProcessTarget(
 		return task.ErrInvalidArgument
 	}
 	return nil
+}
+
+func (execution *execution) approvesExecutable(path string) bool {
+	if execution == nil {
+		return false
+	}
+	execution.mu.Lock()
+	defer execution.mu.Unlock()
+	for _, target := range execution.targets {
+		if samePath(target.executable, path) {
+			return true
+		}
+	}
+	return false
+}
+
+func (execution *execution) approvesDirectory(path string) bool {
+	if execution == nil {
+		return false
+	}
+	execution.mu.Lock()
+	defer execution.mu.Unlock()
+	for _, target := range execution.targets {
+		if samePath(target.directory, path) {
+			return true
+		}
+	}
+	return false
 }
 
 func (execution *execution) approvesTarget(

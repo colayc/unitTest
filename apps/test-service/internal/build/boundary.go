@@ -4,14 +4,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sync"
 
 	"unit-test-ide.local/test-service/internal/cmake"
-	"unit-test-ide.local/test-service/internal/coveragebundle"
-	"unit-test-ide.local/test-service/internal/coveragellvm"
+	"unit-test-ide.local/test-service/internal/coverageplatform"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/workspace"
 )
@@ -29,7 +29,7 @@ type executionBoundary struct {
 	unityRunnerGeneratorSHA256 string
 	testExecutables            map[string]pinnedTestExecutable
 	workspaceRoot              workspace.Root
-	workspaceInfo              os.FileInfo
+	workspaceDirectory         *verifiedDirectory
 	dataRoot                   workspace.Root
 	dataInfo                   os.FileInfo
 	lock                       *DirectoryLock
@@ -37,13 +37,83 @@ type executionBoundary struct {
 	adoptedTaskID              string
 	releaseOnce                sync.Once
 	releaseErr                 error
-	coverageExecution          *coveragebundle.PreparedExecution
-	coverageToolset            *coveragellvm.Toolset
+	coverageExecution          coverageplatform.CollectorExecution
+	coverageToolset            coverageplatform.Toolset
 	coverageBinaryDir          string
 	coverageDirectory          *verifiedDirectory
 	coverageIncludeParent      *verifiedDirectory
 	coverageInclude            pinnedTestExecutable
 }
+
+// coverageDirectoryView is intentionally a value-only capability. It keeps
+// verification coupled to the boundary's retained handle but never exposes a
+// close operation for a directory owned by the boundary. Verification holds
+// the boundary lock until the retained directory returns, so Release cannot
+// close its handle concurrently.
+type coverageDirectoryView struct {
+	boundary  *executionBoundary
+	workspace bool
+}
+
+func (view coverageDirectoryView) Path() string {
+	if view.boundary == nil {
+		return ""
+	}
+	view.boundary.mu.Lock()
+	defer view.boundary.mu.Unlock()
+	directory := view.boundary.coverageDirectory
+	if view.workspace {
+		directory = view.boundary.workspaceDirectory
+	}
+	if directory == nil {
+		return ""
+	}
+	return directory.path
+}
+
+func (view coverageDirectoryView) Verify() error {
+	if view.boundary == nil {
+		return task.ErrInvalidArgument
+	}
+	view.boundary.mu.Lock()
+	defer view.boundary.mu.Unlock()
+	if view.boundary.executableFile == nil {
+		return task.ErrInvalidArgument
+	}
+	directory := view.boundary.coverageDirectory
+	if view.workspace {
+		directory = view.boundary.workspaceDirectory
+	}
+	if directory == nil {
+		return task.ErrInvalidArgument
+	}
+	return directory.Verify()
+}
+
+// RetainDirectory mints a caller-owned clone while holding the boundary lock.
+// The boundary keeps ownership of its original pin; callers receive a separate
+// verifier that remains usable after the boundary is released.
+func (view coverageDirectoryView) RetainDirectory() (coverageplatform.RetainedDirectory, error) {
+	if view.boundary == nil {
+		return nil, task.ErrInvalidArgument
+	}
+	view.boundary.mu.Lock()
+	defer view.boundary.mu.Unlock()
+	if view.boundary.executableFile == nil {
+		return nil, task.ErrInvalidArgument
+	}
+	directory := view.boundary.coverageDirectory
+	if view.workspace {
+		directory = view.boundary.workspaceDirectory
+	}
+	if directory == nil {
+		return nil, task.ErrInvalidArgument
+	}
+	return directory.RetainDirectory()
+}
+
+var _ coverageplatform.DirectoryVerifier = coverageDirectoryView{}
+var _ coverageplatform.RetainedDirectoryVerifier = coverageDirectoryView{}
 
 type pinnedTestExecutable struct {
 	file   *os.File
@@ -121,18 +191,20 @@ func newExecutionBoundary(
 			return fail()
 		}
 	}
-	workspaceInfo, err := os.Stat(workspaceRoot.NativePath)
-	if err != nil || !workspaceInfo.IsDir() {
+	workspaceDirectory, err := pinVerifiedDirectory(workspaceRoot.NativePath)
+	if err != nil {
 		return fail()
 	}
 	dataRoot, err := workspace.OpenRoot(serviceDataRoot)
 	if err != nil || dataRoot.ID == workspaceRoot.ID ||
 		dataRoot.Contains(workspaceRoot.NativePath) ||
 		workspaceRoot.Contains(dataRoot.NativePath) {
+		_ = workspaceDirectory.Close()
 		return fail()
 	}
 	dataInfo, err := os.Stat(dataRoot.NativePath)
 	if err != nil || !dataInfo.IsDir() {
+		_ = workspaceDirectory.Close()
 		return fail()
 	}
 	return &executionBoundary{
@@ -145,7 +217,7 @@ func newExecutionBoundary(
 		unityRunnerGeneratorInfo:   unityRunnerGeneratorInfo,
 		unityRunnerGeneratorSHA256: installation.UnityRunnerGenerator.SHA256,
 		testExecutables:            make(map[string]pinnedTestExecutable),
-		workspaceRoot:              workspaceRoot, workspaceInfo: workspaceInfo,
+		workspaceRoot:              workspaceRoot, workspaceDirectory: workspaceDirectory,
 		dataRoot: dataRoot, dataInfo: dataInfo, lock: lock,
 	}, nil
 }
@@ -316,6 +388,7 @@ func (b *executionBoundary) Release() error {
 		coverageExecution := b.coverageExecution
 		coverageToolset := b.coverageToolset
 		coverageDirectory := b.coverageDirectory
+		workspaceDirectory := b.workspaceDirectory
 		coverageIncludeParent := b.coverageIncludeParent
 		coverageInclude := b.coverageInclude
 		b.lock = nil
@@ -326,6 +399,7 @@ func (b *executionBoundary) Release() error {
 		b.coverageExecution = nil
 		b.coverageToolset = nil
 		b.coverageDirectory = nil
+		b.workspaceDirectory = nil
 		b.coverageIncludeParent = nil
 		b.coverageInclude = pinnedTestExecutable{}
 		b.coverageBinaryDir = ""
@@ -355,6 +429,9 @@ func (b *executionBoundary) Release() error {
 		}
 		if coverageDirectory != nil {
 			result = errors.Join(result, coverageDirectory.Close())
+		}
+		if workspaceDirectory != nil {
+			result = errors.Join(result, workspaceDirectory.Close())
 		}
 		if coverageIncludeParent != nil {
 			result = errors.Join(result, coverageIncludeParent.Close())
@@ -401,11 +478,9 @@ func (b *executionBoundary) ValidateWorkingDirectory(path string) error {
 			return nil
 		}
 	}
-	workspaceInfo, workspaceErr := os.Stat(b.workspaceRoot.NativePath)
 	dataInfo, dataErr := os.Stat(b.dataRoot.NativePath)
-	if workspaceErr != nil || dataErr != nil ||
-		!os.SameFile(b.workspaceInfo, workspaceInfo) ||
-		!os.SameFile(b.dataInfo, dataInfo) {
+	if b.workspaceDirectory == nil || b.workspaceDirectory.Verify() != nil ||
+		dataErr != nil || !os.SameFile(b.dataInfo, dataInfo) {
 		return task.ErrInvalidArgument
 	}
 	absolute, err := filepath.Abs(path)
@@ -473,8 +548,32 @@ func (b *executionBoundary) attachCoverageDirectory(directory *verifiedDirectory
 	return nil
 }
 
-func (b *executionBoundary) attachCoverageToolset(toolset *coveragellvm.Toolset) error {
-	if b == nil || toolset == nil || toolset.Verify() != nil {
+func (b *executionBoundary) coverageSourceRoot() coverageplatform.DirectoryVerifier {
+	if b == nil {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.executableFile == nil || b.workspaceDirectory == nil {
+		return nil
+	}
+	return coverageDirectoryView{boundary: b, workspace: true}
+}
+
+func (b *executionBoundary) coverageObjectDirectory() coverageplatform.DirectoryVerifier {
+	if b == nil {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.executableFile == nil || b.coverageDirectory == nil {
+		return nil
+	}
+	return coverageDirectoryView{boundary: b}
+}
+
+func (b *executionBoundary) attachCoverageToolset(toolset coverageplatform.Toolset) error {
+	if b == nil || coverageplatform.VerifyToolset(toolset) != nil {
 		return task.ErrInvalidArgument
 	}
 	claim, err := toolset.ClaimOwnership()
@@ -515,7 +614,7 @@ func (b *executionBoundary) verifyCoveragePlanLocked() error {
 	if err != nil || digest != b.coverageInclude.sha256 {
 		return task.ErrInvalidArgument
 	}
-	if b.coverageToolset.Verify() != nil {
+	if coverageplatform.VerifyToolset(b.coverageToolset) != nil {
 		return task.ErrInvalidArgument
 	}
 	return nil
@@ -524,17 +623,15 @@ func (b *executionBoundary) verifyCoveragePlanLocked() error {
 // AttachCoverageExecution transfers ownership to the boundary only after the
 // execution has passed its pin and descriptor verification. A failed attach
 // leaves ownership with the caller.
-func (b *executionBoundary) AttachCoverageExecution(execution *coveragebundle.PreparedExecution) error {
-	if b == nil || execution == nil {
+func (b *executionBoundary) AttachCoverageExecution(execution coverageplatform.CollectorExecution) error {
+	if b == nil || nilInterface(execution) {
 		return task.ErrInvalidArgument
 	}
 	if err := execution.Verify(); err != nil {
 		return task.ErrInvalidArgument
 	}
 	spec := execution.ProcessSpec()
-	if spec.Executable == "" || len(spec.Args) != 4 || spec.Args[0] != "-I" || spec.Args[1] != "-S" ||
-		spec.Args[2] == "" || spec.Args[3] == "" || spec.Dir == "" || len(spec.Env) != 0 || len(spec.EnvUnset) == 0 || len(spec.Batch) != 0 ||
-		spec.Dir != execution.TaskRoot() || execution.DescriptorPath() != spec.Args[3] {
+	if spec.Executable == "" || spec.Dir == "" {
 		return task.ErrInvalidArgument
 	}
 	if err := execution.ValidateProcessTarget(spec.Executable, spec.Args, spec.Env, spec.EnvUnset, spec.Dir); err != nil {
@@ -542,7 +639,10 @@ func (b *executionBoundary) AttachCoverageExecution(execution *coveragebundle.Pr
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.executableFile == nil || b.coverageExecution != nil {
+	if b.executableFile == nil || b.coverageExecution != nil ||
+		b.coverageBinaryDir == "" || b.coverageDirectory == nil || b.coverageIncludeParent == nil ||
+		b.coverageInclude.file == nil || b.coverageToolset == nil ||
+		b.verifyCoveragePlanLocked() != nil {
 		return task.ErrInvalidArgument
 	}
 	b.coverageExecution = execution
@@ -598,7 +698,7 @@ func (b *executionBoundary) VerifyCoverageExecutionAfter() error {
 
 // PinnedCoverageOutput hands downstream consumers the retained output handle;
 // consumers must use ReadAll and cannot reopen a mutable pathname.
-func (b *executionBoundary) PinnedCoverageOutput() (*coveragebundle.PinnedOutput, error) {
+func (b *executionBoundary) PinnedCoverageOutput() (coverageplatform.Output, error) {
 	if b == nil {
 		return nil, task.ErrInvalidArgument
 	}
@@ -610,6 +710,9 @@ func (b *executionBoundary) PinnedCoverageOutput() (*coveragebundle.PinnedOutput
 	}
 	output, err := execution.PinnedOutput()
 	if err != nil {
+		if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+			fmt.Fprintf(os.Stderr, "coverage pinned output failed: %v\n", err)
+		}
 		return nil, task.ErrInvalidArgument
 	}
 	return output, nil

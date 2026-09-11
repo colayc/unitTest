@@ -11,7 +11,9 @@ import (
 	"strings"
 
 	"unit-test-ide.local/test-service/internal/cmake"
+	"unit-test-ide.local/test-service/internal/coveragegcc"
 	"unit-test-ide.local/test-service/internal/coveragellvm"
+	"unit-test-ide.local/test-service/internal/toolchain"
 )
 
 const (
@@ -56,6 +58,7 @@ type cmakeLaunchValidator struct {
 	instrumentationPath    string
 	instrumentationDigest  string
 	instrumentationTrusted bool
+	instrumentationFamily  toolchain.Family
 	toolchainTarget        string
 	files                  int
 	totalBytes             int64
@@ -158,10 +161,19 @@ func validateCMakeLaunchPlan(input PlanInput, sourceDir string, launchPlan []str
 		validator.allowedRoots = append(validator.allowedRoots, filepath.Dir(include))
 		validator.instrumentationPath = cmakeLaunchPathKey(include)
 		validator.instrumentationDigest = input.Coverage.TopLevelInclude.SHA256
-		validator.instrumentationTrusted =
-			input.Coverage.InstrumentationFingerprint == coveragellvm.InstrumentationFingerprint() &&
-				input.Coverage.TopLevelInclude.Identity == coveragellvm.InstrumentationFingerprint() &&
-				input.Coverage.TopLevelInclude.SHA256 == coveragellvm.InstrumentationSHA256()
+		validator.instrumentationFamily = input.Toolchain.Family
+		switch input.Toolchain.Family {
+		case toolchain.FamilyGCC:
+			validator.instrumentationTrusted =
+				input.Coverage.InstrumentationFingerprint == coveragegcc.InstrumentationFingerprint() &&
+					input.Coverage.TopLevelInclude.Identity == coveragegcc.InstrumentationFingerprint() &&
+					input.Coverage.TopLevelInclude.SHA256 == coveragegcc.InstrumentationSHA256()
+		default:
+			validator.instrumentationTrusted =
+				input.Coverage.InstrumentationFingerprint == coveragellvm.InstrumentationFingerprint() &&
+					input.Coverage.TopLevelInclude.Identity == coveragellvm.InstrumentationFingerprint() &&
+					input.Coverage.TopLevelInclude.SHA256 == coveragellvm.InstrumentationSHA256()
+		}
 		if input.Installation.UnityRunnerGenerator.Valid() {
 			validator.trustedFiles[cmakeLaunchPathKey(include)] = map[string]string{
 				"${generator}": input.Installation.UnityRunnerGenerator.Path,
@@ -814,19 +826,33 @@ func (validator *cmakeLaunchValidator) validateInstrumentationOptions(invocation
 	if !validator.instrumentationTrusted || sourceKey != validator.instrumentationPath || !snapshotted ||
 		state.Identity == "" || cmakeLaunchPathKey(state.Path) != sourceKey ||
 		state.SHA256 != validator.instrumentationDigest ||
-		state.SHA256 != coveragellvm.InstrumentationSHA256() {
+		state.SHA256 != expectedInstrumentationSHA256(validator.instrumentationFamily) {
 		return errInvalidCMakeLaunchDeclaration
 	}
 	var expected []string
-	switch strings.ToLower(invocation.name) {
-	case "add_compile_options":
-		expected = []string{
-			"$<$<COMPILE_LANGUAGE:C,CXX>:-fprofile-instr-generate>",
-			"$<$<COMPILE_LANGUAGE:C,CXX>:-fcoverage-mapping>",
+	if validator.instrumentationFamily == toolchain.FamilyGCC {
+		switch strings.ToLower(invocation.name) {
+		case "add_compile_options":
+			expected = []string{
+				"$<$<COMPILE_LANGUAGE:C,CXX>:--coverage>",
+				"$<$<COMPILE_LANGUAGE:C,CXX>:-O0>",
+				"$<$<COMPILE_LANGUAGE:C,CXX>:-g>",
+			}
+		case "add_link_options":
+			expected = []string{"--coverage"}
 		}
-	case "add_link_options":
-		expected = []string{"-fprofile-instr-generate"}
-	default:
+	} else {
+		switch strings.ToLower(invocation.name) {
+		case "add_compile_options":
+			expected = []string{
+				"$<$<COMPILE_LANGUAGE:C,CXX>:-fprofile-instr-generate>",
+				"$<$<COMPILE_LANGUAGE:C,CXX>:-fcoverage-mapping>",
+			}
+		case "add_link_options":
+			expected = []string{"-fprofile-instr-generate"}
+		}
+	}
+	if len(expected) == 0 {
 		return errInvalidCMakeLaunchDeclaration
 	}
 	if len(invocation.arguments) != len(expected) {
@@ -838,6 +864,13 @@ func (validator *cmakeLaunchValidator) validateInstrumentationOptions(invocation
 		}
 	}
 	return nil
+}
+
+func expectedInstrumentationSHA256(family toolchain.Family) string {
+	if family == toolchain.FamilyGCC {
+		return coveragegcc.InstrumentationSHA256()
+	}
+	return coveragellvm.InstrumentationSHA256()
 }
 
 func (validator *cmakeLaunchValidator) validateProject(invocation cmakeInvocation, sourceKey string) error {

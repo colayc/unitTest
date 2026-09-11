@@ -481,7 +481,7 @@ func hasReservedArguments(arguments []string) bool {
 
 func validateControlFile(control testframework.ControlFile) error {
 	if nilInterface(control) || !absoluteCleanPath(control.Path()) {
-		return ErrInvalidRunPlan
+		return runPlanError("invalid control file")
 	}
 	return nil
 }

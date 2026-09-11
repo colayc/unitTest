@@ -41,6 +41,9 @@
     "test": "pnpm run build && node --test dist/test/coverage-service-smoke-support.test.js dist/test/manifest.test.js dist/test/service-manager.test.js dist/test/service-resources.test.js dist/test/trust-gate.test.js dist/test/extension.test.js dist/test/testing-api.test.js dist/test/testing-api-benchmark.test.js dist/test/vscode-testing-bridge.test.js",
     "test:benchmark": "pnpm run build && node --test dist/test/testing-api-benchmark.test.js",
     "test:coverage-service-smoke": "pnpm run build && node --test dist/test/coverage-service-smoke.test.js",
+    "test:coverage-service-smoke:linux": "pnpm run build && node --test dist/test/coverage-service-smoke-linux.test.js",
+    "validate:coverage-evidence:linux": "node dist/test/coverage-evidence-validator.js --platform linux --input ../../.native-e2e/artifacts/linux/coverage-execution-report.json --output ../../.native-e2e/artifacts/linux/linux-gcc-coverage-report.json",
+    "validate:coverage-evidence:windows": "node dist/test/coverage-evidence-validator.js --platform windows --input ../../.native-e2e/artifacts/windows/coverage-execution-report.json",
     "test:service-smoke": "pnpm run build && node --test dist/test/service-smoke.test.js",
     "test:host": "pnpm run build && node test/extension-host-smoke.mjs"
   }

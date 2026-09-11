@@ -16,10 +16,14 @@ import (
 	"unit-test-ide.local/test-service/internal/coveragecoord"
 	"unit-test-ide.local/test-service/internal/coveragedomain"
 	"unit-test-ide.local/test-service/internal/coveragellvm"
+	"unit-test-ide.local/test-service/internal/coverageplatform"
+	coveragemodelv1 "unit-test-ide.local/test-service/internal/coveragemodel/v1"
+	"unit-test-ide.local/test-service/internal/coveragenormalize"
 	"unit-test-ide.local/test-service/internal/coveragerun"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/taskstore"
 	"unit-test-ide.local/test-service/internal/testdomain"
+	"unit-test-ide.local/test-service/internal/testrun"
 	"unit-test-ide.local/test-service/internal/toolchain"
 	"unit-test-ide.local/test-service/internal/workspace"
 )
@@ -56,6 +60,129 @@ func TestCoordinatorAcceptsOnlyTheRetainedInstrumentationContract(t *testing.T) 
 		t.Fatalf("mismatched adapter contract error = %v", err)
 	}
 }
+
+func TestCoverageToolsetHandoffIsMandatoryAndClosesExactlyOnce(t *testing.T) {
+	toolset := &handoffTestToolset{path: "C:/toolchain/gcovr"}
+	adapter := &handoffTestAdapter{toolset: toolset, ownsToolset: true}
+	prepared := &fakePreparedBuild{coverageBinaryDir: "C:/coverage/build"}
+	if err := attachPreparedCoverageToolset(prepared, adapter, "C:/coverage/build"); err != nil {
+		t.Fatalf("toolset handoff = %v", err)
+	}
+	if !adapter.relinquished {
+		t.Fatal("adapter retained ownership after successful Build Boundary handoff")
+	}
+	if err := adapter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if toolset.closes != 0 {
+		t.Fatalf("adapter closed transferred non-idempotent toolset %d times", toolset.closes)
+	}
+	prepared.ReleaseIfUnadopted()
+	prepared.ReleaseIfUnadopted()
+	if toolset.closes != 1 {
+		t.Fatalf("Build Boundary ownership close count = %d, want 1", toolset.closes)
+	}
+	if _, accepted := any(&orchestrationStyleAdapterWithoutHandoff{}).(PreparedAdapter); accepted {
+		t.Fatal("adapter without mandatory ownership handoff satisfies PreparedAdapter")
+	}
+}
+
+type handoffTestPath struct{ path string }
+
+func (path handoffTestPath) Path() string { return path.path }
+func (handoffTestPath) Verify() error     { return nil }
+
+type handoffTestClaim struct{}
+
+func (handoffTestClaim) Commit()   {}
+func (handoffTestClaim) Rollback() {}
+
+type handoffTestToolset struct {
+	path   string
+	closes int
+}
+
+func (*handoffTestToolset) Version() string  { return "1" }
+func (*handoffTestToolset) Identity() string { return "identity" }
+func (toolset *handoffTestToolset) CCompiler() coveragerun.TrustedPath {
+	return handoffTestPath{path: toolset.path}
+}
+func (toolset *handoffTestToolset) CXXCompiler() coveragerun.TrustedPath {
+	return handoffTestPath{path: toolset.path}
+}
+func (toolset *handoffTestToolset) Tools() []coveragerun.TrustedPath {
+	return []coveragerun.TrustedPath{handoffTestPath{path: toolset.path}}
+}
+func (*handoffTestToolset) Verify() error { return nil }
+func (*handoffTestToolset) ClaimOwnership() (coverageplatform.OwnershipClaim, error) {
+	return handoffTestClaim{}, nil
+}
+func (toolset *handoffTestToolset) Close() error {
+	toolset.closes++
+	if toolset.closes > 1 {
+		return errors.New("double close")
+	}
+	return nil
+}
+
+type handoffTestAllocator struct{}
+
+func (handoffTestAllocator) Decorate(value testrun.ProfileExpectation, spec task.ProcessSpec) (testrun.ProfileExpectation, task.ProcessSpec, error) {
+	return value, spec, nil
+}
+func (handoffTestAllocator) Validate(testrun.ProfileExpectation, task.ProcessSpec, task.ProcessSpec) error {
+	return nil
+}
+
+type handoffTestAdapter struct {
+	toolset      coverageplatform.Toolset
+	ownsToolset  bool
+	relinquished bool
+}
+
+func (adapter *handoffTestAdapter) Toolset() coverageplatform.Toolset { return adapter.toolset }
+func (adapter *handoffTestAdapter) RelinquishToolsetOwnership() {
+	adapter.relinquished = true
+	adapter.ownsToolset = false
+}
+func (*handoffTestAdapter) Instrumentation() coverageplatform.Instrumentation {
+	return coverageplatform.Instrumentation{}
+}
+func (*handoffTestAdapter) Allocator() testrun.ProfileAllocator { return handoffTestAllocator{} }
+func (*handoffTestAdapter) PrepareTests(context.Context, PreparedBuild) error { return nil }
+func (*handoffTestAdapter) SealEvidence([]testrun.ProfileExpectation, []testrun.InvocationOutcome) ([]coveragedomain.CompletenessReason, error) {
+	return nil, errors.New("unused")
+}
+func (*handoffTestAdapter) PrepareCollector(context.Context, PreparedBuild, coverageplatform.DirectoryVerifier, []coveragerun.TrustedPath) (CollectionPlan, error) {
+	return CollectionPlan{}, errors.New("unused")
+}
+func (*handoffTestAdapter) Normalize(context.Context, NormalizeInput) (coveragemodelv1.CoverageDocumentV1, []coveragenormalize.SourceBinding, error) { return coveragemodelv1.CoverageDocumentV1{}, nil, errors.New("unused") }
+func (adapter *handoffTestAdapter) Close() error {
+	if adapter.ownsToolset {
+		adapter.ownsToolset = false
+		return adapter.toolset.Close()
+	}
+	return nil
+}
+
+type orchestrationStyleAdapterWithoutHandoff struct{}
+
+func (*orchestrationStyleAdapterWithoutHandoff) Toolset() coverageplatform.Toolset { return nil }
+func (*orchestrationStyleAdapterWithoutHandoff) Instrumentation() coverageplatform.Instrumentation {
+	return coverageplatform.Instrumentation{}
+}
+func (*orchestrationStyleAdapterWithoutHandoff) Allocator() testrun.ProfileAllocator {
+	return handoffTestAllocator{}
+}
+func (*orchestrationStyleAdapterWithoutHandoff) PrepareTests(context.Context, PreparedBuild) error { return nil }
+func (*orchestrationStyleAdapterWithoutHandoff) SealEvidence([]testrun.ProfileExpectation, []testrun.InvocationOutcome) ([]coveragedomain.CompletenessReason, error) {
+	return nil, errors.New("unused")
+}
+func (*orchestrationStyleAdapterWithoutHandoff) PrepareCollector(context.Context, PreparedBuild, coverageplatform.DirectoryVerifier, []coveragerun.TrustedPath) (CollectionPlan, error) {
+	return CollectionPlan{}, errors.New("unused")
+}
+func (*orchestrationStyleAdapterWithoutHandoff) Normalize(context.Context, NormalizeInput) (coveragemodelv1.CoverageDocumentV1, []coveragenormalize.SourceBinding, error) { return coveragemodelv1.CoverageDocumentV1{}, nil, errors.New("unused") }
+func (*orchestrationStyleAdapterWithoutHandoff) Close() error { return nil }
 
 func TestCoverageBuildInterpretationContinuesOnlyAfterSuccess(t *testing.T) {
 	step := task.ExecutionStep{Kind: task.StepCoverageBuild}
@@ -400,7 +527,12 @@ func TestCoordinatorUnsupportedCompletesOneRealSQLiteAggregate(t *testing.T) {
 	var finished task.Task
 	for time.Now().Before(deadline) {
 		finished, err = store.Get(ctx, persisted.ID)
-		if err == nil && finished.Status == task.StatusFinished {
+		// The durable aggregate commits before its events are published, so wait
+		// for both externally observable sides of completion.
+		if err == nil && finished.Status == task.StatusFinished &&
+			publisher.count(task.EventTestRunFinished) == 1 &&
+			publisher.count(task.EventCoverageRunFinished) == 1 &&
+			publisher.count(task.EventTaskFinished) == 1 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -813,6 +945,8 @@ type fakePreparedBuild struct {
 	coverageBinaryDir   string
 	attachErr           error
 	refresh             func() error
+	attachedToolset     coverageplatform.Toolset
+	releaseOnce         sync.Once
 }
 
 func (prepared *fakePreparedBuild) Plan() task.ExecutionPlan               { return prepared.plan }
@@ -823,8 +957,15 @@ func (prepared *fakePreparedBuild) Profile() cmake.BuildProfile            { ret
 func (prepared *fakePreparedBuild) Toolchain() toolchain.Instance          { return prepared.toolchain }
 func (*fakePreparedBuild) Targets() []cmake.Target                         { return []cmake.Target{} }
 func (*fakePreparedBuild) AllowTestExecutable(cmake.FingerprintFile) error { return nil }
-func (*fakePreparedBuild) ReleaseIfUnadopted()                             {}
-func (prepared *fakePreparedBuild) CoverageBinaryDir() string              { return prepared.coverageBinaryDir }
+func (prepared *fakePreparedBuild) ReleaseIfUnadopted() {
+	prepared.releaseOnce.Do(func() {
+		if prepared.attachedToolset != nil {
+			_ = prepared.attachedToolset.Close()
+			prepared.attachedToolset = nil
+		}
+	})
+}
+func (prepared *fakePreparedBuild) CoverageBinaryDir() string { return prepared.coverageBinaryDir }
 func (prepared *fakePreparedBuild) RefreshTargets(context.Context) ([]cmake.Target, error) {
 	if prepared.refresh != nil {
 		if err := prepared.refresh(); err != nil {
@@ -833,8 +974,21 @@ func (prepared *fakePreparedBuild) RefreshTargets(context.Context) ([]cmake.Targ
 	}
 	return nil, nil
 }
-func (prepared *fakePreparedBuild) AttachCoverageToolset(*coveragellvm.Toolset) error {
-	return prepared.attachErr
+func (*fakePreparedBuild) CoverageSourceRoot() coverageplatform.DirectoryVerifier      { return nil }
+func (*fakePreparedBuild) CoverageObjectDirectory() coverageplatform.DirectoryVerifier { return nil }
+func (prepared *fakePreparedBuild) AttachCoverageToolset(toolset coverageplatform.Toolset) error {
+	if prepared.attachErr != nil {
+		return prepared.attachErr
+	}
+	prepared.attachedToolset = toolset
+	return nil
+}
+func (*fakePreparedBuild) AttachCoverageExecution(coverageplatform.CollectorExecution) error {
+	return nil
+}
+func (*fakePreparedBuild) VerifyCoverageExecutionAfter() error { return task.ErrInvalidArgument }
+func (*fakePreparedBuild) PinnedCoverageOutput() (coverageplatform.Output, error) {
+	return nil, task.ErrInvalidArgument
 }
 
 func preparedBuildForFixture(fixture *sqliteCoverageFixture) *fakePreparedBuild {

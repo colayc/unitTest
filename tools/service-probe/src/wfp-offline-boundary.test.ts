@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import net from "node:net";
+import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -411,21 +411,10 @@ test("guardian crash while close waits for Bye rejects instead of hanging", asyn
 });
 
 test("frame reader rejects a pending Hello or Bye read when its socket closes", async () => {
-  const server = net.createServer();
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolve);
-  });
-  const address = server.address();
-  assert.notEqual(address, null);
-  assert.equal(typeof address, "object");
-  if (address === null || typeof address === "string") return;
-  const accepted = new Promise<net.Socket>((resolve) => server.once("connection", resolve));
-  const peer = net.createConnection({ host: "127.0.0.1", port: address.port });
-  const socket = await accepted;
-  const reader = new GuardianFrameReader(socket);
+  const socket = new EventEmitter();
+  const reader = new GuardianFrameReader(socket as unknown as import("node:net").Socket);
   const pending = reader.read();
-  peer.destroy();
+  socket.emit("close");
   await assert.rejects(
     Promise.race([
       pending,
@@ -433,8 +422,6 @@ test("frame reader rejects a pending Hello or Bye read when its socket closes", 
     ]),
     /guardian frame is invalid/u,
   );
-  socket.destroy();
-  server.close();
 });
 
 test("malformed guardian frames terminate and fail closed", async () => {

@@ -144,7 +144,6 @@ func (execution *execution) prepareCompletion(
 	embedded := execution.embedded
 	outcomeCount := len(execution.outcomes)
 	execution.mu.Unlock()
-
 	coverageOutcome, reason, err := projectCoverageOutcome(outcome, failedPhase, state)
 	if err != nil || task.CoverageTaskOutcome(coverageOutcome, reason) != outcome {
 		return task.DomainCompletion{}, task.ErrInvalidArgument

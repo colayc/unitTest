@@ -60,11 +60,15 @@ def _run_from(directory: Path) -> int:
     from contract import gcovr_arguments, load_descriptor
     from gcovr.__main__ import main as gcovr_main
 
-    return int(gcovr_main(gcovr_arguments(load_descriptor(sys.argv[1]))) or 0)
+    print("coverage runner entering gcovr", file=sys.stderr, flush=True)
+    result = int(gcovr_main(gcovr_arguments(load_descriptor(sys.argv[1]))) or 0)
+    print(f"coverage runner leaving gcovr result={result}", file=sys.stderr, flush=True)
+    return result
 
 
 def main() -> int:
     try:
+        print("coverage runner starting", file=sys.stderr, flush=True)
         materialized = Path(__file__).resolve()
         if os.environ.get("UNIT_TEST_IDE_GCOVR_MATERIALIZED") == "1" and materialized.is_file():
             return _run_from(materialized.parent)
@@ -74,7 +78,7 @@ def main() -> int:
             environment = _sanitized_environment()
             environment["UNIT_TEST_IDE_GCOVR_MATERIALIZED"] = "1"
             completed = subprocess.run(
-                [sys.executable, "-I", "-S", str(directory / "__main__.py"), *sys.argv[1:]],
+                [sys.executable, "-B", "-I", "-S", str(directory / "__main__.py"), *sys.argv[1:]],
                 check=False,
                 env=environment,
                 shell=False,

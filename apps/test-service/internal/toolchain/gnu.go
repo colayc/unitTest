@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -42,6 +43,7 @@ var (
 	errExecutableTooLarge = errors.New("toolchain executable exceeds size limit")
 
 	gccVersionPattern   = regexp.MustCompile(`(?i)(?:\bgcc\b|(?:^|[^A-Za-z0-9_])g\+\+(?:$|[^A-Za-z0-9_])|\bgnu compiler collection\b)[^\r\n]*?\b([0-9]+\.[0-9]+(?:\.[0-9]+)?)\b`)
+	gcovVersionPattern  = regexp.MustCompile(`(?i)\bgcov\b[^\r\n]*?\b([0-9]+\.[0-9]+(?:\.[0-9]+)?)\b`)
 	clangVersionPattern = regexp.MustCompile(`(?i)\bclang version ([0-9]+\.[0-9]+(?:\.[0-9]+)?)\b`)
 	versionPattern      = regexp.MustCompile(`^[0-9]+\.[0-9]+(?:\.[0-9]+)?$`)
 	triplePattern       = regexp.MustCompile(`^[A-Za-z0-9_+.]+(?:-[A-Za-z0-9_+.]+)+$`)
@@ -68,6 +70,13 @@ type executableSnapshot struct {
 	digest   string
 	identity string
 	maximum  int64
+}
+
+type gccCoverageSnapshot struct {
+	capability CoverageCapability
+	compiler   *executableSnapshot
+	cxx        *executableSnapshot
+	gcov       *executableSnapshot
 }
 
 type toolchainProbeError struct {
@@ -277,6 +286,16 @@ func (adapter *gnuAdapter) Probe(ctx context.Context, candidate Candidate) (Inst
 	if err != nil {
 		return Instance{}, invalidProbe("TOOLCHAIN_PROBE_FAILED", "compiler target architecture is unsupported")
 	}
+	coverageSnapshot := adapter.probeGCCCoverage(ctx, cCompiler, cxxCompiler, cDescriptor.version, targetArchitecture, verifyCompilers)
+	if coverageSnapshot != nil {
+		defer coverageSnapshot.Close()
+		if err := coverageSnapshot.Verify(ctx); err != nil {
+			if isContextError(err) {
+				return Instance{}, err
+			}
+			coverageSnapshot = nil
+		}
+	}
 
 	generators, err := adapter.probeGenerator(ctx, candidate, verifyCompilers)
 	if err != nil {
@@ -299,7 +318,16 @@ func (adapter *gnuAdapter) Probe(ctx context.Context, candidate Candidate) (Inst
 			return Instance{}, invalidProbe("TOOLCHAIN_PROBE_FAILED", "compiler SDK identity changed")
 		}
 	}
-
+	coverage := CoverageCapability{}
+	if coverageSnapshot != nil {
+		if err := coverageSnapshot.Verify(ctx); err != nil {
+			if isContextError(err) {
+				return Instance{}, err
+			}
+		} else {
+			coverage = coverageSnapshot.capability
+		}
+	}
 	instance := Instance{
 		Family:             adapter.family,
 		CCompiler:          cCompiler.path,
@@ -311,6 +339,7 @@ func (adapter *gnuAdapter) Probe(ctx context.Context, candidate Candidate) (Inst
 		Sysroot:            cDescriptor.sdk,
 		Environment:        []string{},
 		Generators:         generators,
+		Coverage:           coverage,
 	}
 	if candidate.Manual {
 		instance.ID = candidate.ID
@@ -326,6 +355,181 @@ func (adapter *gnuAdapter) Probe(ctx context.Context, candidate Candidate) (Inst
 		}
 	}
 	return instance, nil
+}
+
+// probeGCCCoverage is deliberately best-effort. A valid ordinary GCC
+// toolchain remains usable for non-coverage work when its matching gcov
+// executable is absent or fails any pinning check.
+func (adapter *gnuAdapter) probeGCCCoverage(
+	ctx context.Context,
+	compiler, cxx *executableSnapshot,
+	compilerVersion, targetArchitecture string,
+	verify func() error,
+) *gccCoverageSnapshot {
+	if adapter == nil || adapter.family != FamilyGCC || runtime.GOOS != "linux" ||
+		adapter.hostArch != "x64" || targetArchitecture != "x64" || compiler == nil || cxx == nil {
+		return nil
+	}
+	verifyAll := func() error {
+		if err := verify(); err != nil {
+			return err
+		}
+		return nil
+	}
+	output, err := adapter.runProbe(ctx, compiler.path, "-print-prog-name=gcov", verifyAll)
+	if err != nil {
+		return nil
+	}
+	gcovPath, err := resolveGCovPath(compiler.path, output)
+	if err != nil {
+		return nil
+	}
+	gcov, err := openDirectExecutableSnapshot(ctx, gcovPath)
+	if err != nil {
+		return nil
+	}
+	result := &gccCoverageSnapshot{compiler: compiler, cxx: cxx, gcov: gcov}
+	verifyAll = func() error {
+		if err := verify(); err != nil {
+			return err
+		}
+		return gcov.Verify(ctx)
+	}
+	versionOutput, err := adapter.runProbe(ctx, gcov.path, "--version", verifyAll)
+	if err != nil {
+		_ = result.Close()
+		return nil
+	}
+	gcovVersion, err := parseGCovVersion(versionOutput)
+	if err != nil || gcovVersion != compilerVersion || verifyAll() != nil {
+		_ = result.Close()
+		return nil
+	}
+	evidence := make([]ExecutableEvidence, 3)
+	for index, snapshot := range []*executableSnapshot{compiler, cxx, gcov} {
+		item, evidenceErr := unixExecutableEvidence(snapshot)
+		if evidenceErr != nil {
+			_ = result.Close()
+			return nil
+		}
+		evidence[index] = item
+	}
+	paths := []string{compiler.path, cxx.path, gcov.path}
+	identity := GCCToolsetIdentity(compilerVersion, paths, evidence)
+	if identity == "" {
+		_ = result.Close()
+		return nil
+	}
+	result.capability = CoverageCapability{
+		GCov: gcov.path, CompilerEvidence: evidence[0], CXXCompilerEvidence: evidence[1],
+		GCovEvidence: evidence[2], GCovVersion: gcovVersion, ToolsetIdentity: identity,
+	}
+	return result
+}
+
+func (snapshot *gccCoverageSnapshot) Verify(ctx context.Context) error {
+	if snapshot == nil || snapshot.compiler == nil || snapshot.cxx == nil || snapshot.gcov == nil {
+		return errors.New("GCC coverage snapshot is incomplete")
+	}
+	for _, executable := range []*executableSnapshot{snapshot.compiler, snapshot.cxx, snapshot.gcov} {
+		if err := executable.Verify(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (snapshot *gccCoverageSnapshot) Close() error {
+	if snapshot == nil || snapshot.gcov == nil {
+		return nil
+	}
+	err := snapshot.gcov.Close()
+	snapshot.gcov = nil
+	return err
+}
+
+func resolveGCovPath(compiler string, output []byte) (string, error) {
+	value, err := parseSingleLine(output, 4096)
+	if err != nil || strings.IndexByte(value, 0) >= 0 {
+		return "", errors.New("gcov location is malformed")
+	}
+	if filepath.IsAbs(value) {
+		if filepath.Clean(value) != value {
+			return "", errors.New("gcov absolute location is not canonical")
+		}
+		return value, nil
+	}
+	if value != "gcov" {
+		return "", errors.New("gcov location is not deterministic")
+	}
+	return filepath.Join(filepath.Dir(compiler), value), nil
+}
+
+func openDirectExecutableSnapshot(ctx context.Context, path string) (*executableSnapshot, error) {
+	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return nil, errors.New("gcov path is not canonical")
+	}
+	// Distribution toolchains commonly expose gcov through a stable symlink
+	// (for example /usr/bin/gcov -> gcov-13). Resolve that entry to its
+	// canonical target and pin the target's identity/content in the snapshot.
+	// openExecutableSnapshot performs the canonicalization and verifies the
+	// opened file against the path before returning it.
+	return openExecutableSnapshot(ctx, path)
+}
+
+func parseGCovVersion(output []byte) (string, error) {
+	line, err := parseFirstLine(output, 4096)
+	if err != nil {
+		return "", err
+	}
+	match := gcovVersionPattern.FindStringSubmatch(line)
+	if len(match) != 2 || !versionPattern.MatchString(match[1]) {
+		return "", errors.New("unrecognized gcov version banner")
+	}
+	return match[1], nil
+}
+
+func unixExecutableEvidence(snapshot *executableSnapshot) (ExecutableEvidence, error) {
+	if snapshot == nil || snapshot.info == nil || snapshot.digest == "" {
+		return ExecutableEvidence{}, errors.New("executable snapshot is incomplete")
+	}
+	value := reflect.ValueOf(snapshot.info.Sys())
+	if value.Kind() == reflect.Pointer {
+		if value.IsNil() {
+			return ExecutableEvidence{}, errors.New("executable has no native identity")
+		}
+		value = value.Elem()
+	}
+	if value.Kind() != reflect.Struct {
+		return ExecutableEvidence{}, errors.New("executable has no Unix identity")
+	}
+	device, ok := nativeUnsignedField(value, "Dev")
+	if !ok {
+		return ExecutableEvidence{}, errors.New("executable device identity is unavailable")
+	}
+	inode, ok := nativeUnsignedField(value, "Ino")
+	if !ok {
+		return ExecutableEvidence{}, errors.New("executable inode identity is unavailable")
+	}
+	return ExecutableEvidence{FileIdentity: "unix:" + strconv.FormatUint(device, 10) + ":" + strconv.FormatUint(inode, 10), SHA256: snapshot.digest}, nil
+}
+
+func nativeUnsignedField(value reflect.Value, name string) (uint64, bool) {
+	field := value.FieldByName(name)
+	if !field.IsValid() {
+		return 0, false
+	}
+	switch field.Kind() {
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return field.Uint(), true
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		if field.Int() < 0 {
+			return 0, false
+		}
+		return uint64(field.Int()), true
+	default:
+		return 0, false
+	}
 }
 
 func (adapter *gnuAdapter) probeCompiler(

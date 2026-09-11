@@ -240,6 +240,18 @@ func TestValidatePlanAcceptsOnlyClosedServiceActions(t *testing.T) {
 	}
 }
 
+func TestValidatePlanAcceptsCoverageNormalizeServiceAction(t *testing.T) {
+	step := task.ExecutionStep{
+		ID:     "coverage-normalize",
+		Kind:   task.StepCoverageNormalize,
+		Action: task.ServiceActionCoverageNormalize,
+		Public: task.CommandSummary{Executable: "coverage-normalize"},
+	}
+	if err := task.ValidatePlan(task.ExecutionPlan{Version: 1, Steps: []task.ExecutionStep{step}}, fixedBoundary{}); err != nil {
+		t.Fatalf("coverage normalize service action rejected: %v", err)
+	}
+}
+
 func TestValidatePlanAcceptsBoundedProcessBatchAndFingerprintsIt(
 	t *testing.T,
 ) {

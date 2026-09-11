@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -196,6 +197,12 @@ func (runner *unixRunner) Prepare(ctx context.Context, spec Spec, taskID, servic
 	host.Stderr = stderrWriter
 	host.ExtraFiles = []*os.File{statusWriter}
 	host.Env = append(SanitizeEnvironment(nil, nil), "UNIT_TEST_IDE_STATUS_HANDLE="+strconv.Itoa(statusHandleNumber))
+	// Keep the process-host failure classifier opt-in and path-free. This is
+	// deliberately outside the service-owned UNIT_TEST_IDE_/UTIDE_ namespaces
+	// so normal target environment sanitization cannot enable it accidentally.
+	if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+		host.Env = append(host.Env, "UT_DEBUG_PROCESS_HOST_FAILURES=1")
+	}
 	host.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Pdeathsig: syscall.SIGTERM}
 	identityReady := make(chan struct{})
 	var hostIdentity string
@@ -428,8 +435,24 @@ func (process *unixProcess) Start(ctx context.Context) error {
 
 	status, err := process.readStatus(ctx)
 	if err != nil || status.Kind == "error" {
+		if status.Kind == "error" && status.ErrorCode != "" && status.Message != "" && os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+			process.sendOutput(Output{
+				Source: "process-host",
+				Stream: StreamStderr,
+				Data:   []byte(status.ErrorCode + ": " + status.Message),
+			})
+		}
 		process.closeControl()
 		process.finishAfterHost(Result{Err: errProcessStartFailed})
+		if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+			if status.Message != "" {
+				return fmt.Errorf("%w: %s", errProcessStartFailed, status.Message)
+			}
+			if err != nil {
+				return fmt.Errorf("%w: process-host status unavailable", errProcessStartFailed)
+			}
+			return fmt.Errorf("%w: process-host rejected start", errProcessStartFailed)
+		}
 		return errProcessStartFailed
 	}
 	if len(process.specValue.Batch) == 0 &&
@@ -551,6 +574,9 @@ func (process *unixProcess) watchExit() {
 		status, err := process.readStatus(context.Background())
 		if err != nil {
 			result.Err = errProcessHostFailed
+			if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+				result.Err = fmt.Errorf("%w: process-host status unavailable", errProcessHostFailed)
+			}
 			break
 		}
 		if status.Kind == "output" {
@@ -588,7 +614,17 @@ func (process *unixProcess) watchExit() {
 		result.ExitCode = status.ExitCode
 		result.Children = children
 		if status.ErrorCode != "" {
+			if status.Message != "" {
+				process.sendOutput(Output{
+					Source: "process-host",
+					Stream: StreamStderr,
+					Data:   []byte(status.ErrorCode + ": " + status.Message),
+				})
+			}
 			result.Err = errProcessHostFailed
+			if status.Message != "" && os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+				result.Err = fmt.Errorf("%w: %s", errProcessHostFailed, status.Message)
+			}
 		}
 		break
 	}
@@ -599,7 +635,11 @@ func (process *unixProcess) finishAfterHost(result Result) {
 	<-process.hostExited
 	<-process.outputDone
 	process.closeOutput()
-	process.publish(process.applyOutputOverflow(result))
+	result = process.applyOutputOverflow(result)
+	if result.Err != nil && os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+		_, _ = fmt.Fprintf(os.Stderr, "process-control finished error %v exit %d children %d\n", result.Err, result.ExitCode, len(result.Children))
+	}
+	process.publish(result)
 }
 
 func (process *unixProcess) applyOutputOverflow(result Result) Result {

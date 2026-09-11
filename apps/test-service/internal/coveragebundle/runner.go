@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"unit-test-ide.local/test-service/internal/coverageplatform"
 	"unit-test-ide.local/test-service/internal/task"
 )
 
@@ -32,7 +33,16 @@ type PreparedExecution struct {
 	closed         bool
 }
 
-func PrepareRunner(pin Pin, coverageRoot, taskID string, input DescriptorInput, capabilities DescriptorCapabilities) (*PreparedExecution, error) {
+var _ coverageplatform.CollectorExecution = (*PreparedExecution)(nil)
+
+var (
+	// These narrow seams cover the two ownership-transfer error paths. Production
+	// always calls the concrete methods below.
+	parsePreparedDescriptor = func(owned *OwnedDescriptor) (Descriptor, error) { return owned.Parse() }
+	verifyPreparedExecution = func(execution *PreparedExecution) error { return execution.Verify() }
+)
+
+func PrepareRunner(pin Pin, input DescriptorInput, capabilities DescriptorCapabilities) (*PreparedExecution, error) {
 	if isNilPin(pin) {
 		return nil, ErrBundleIntegrity
 	}
@@ -47,48 +57,27 @@ func PrepareRunner(pin Pin, coverageRoot, taskID string, input DescriptorInput, 
 	if err != nil {
 		return nil, err
 	}
-	owned, err := descriptor.WriteAtomic(coverageRoot, taskID, capabilities)
+	owned, err := descriptor.WriteAtomic(capabilities)
 	if err != nil {
-		closeDescriptorCapabilities(capabilities)
 		return nil, err
 	}
-	if parsed, err := owned.Parse(); err != nil || parsed != descriptor {
-		_ = owned.Close()
+	if parsed, err := parsePreparedDescriptor(owned); err != nil || parsed != descriptor {
 		if err == nil {
 			err = ErrBundleIntegrity
 		}
-		return nil, err
+		return nil, errors.Join(err, owned.Close())
 	}
 	spec := task.ProcessSpec{
 		Executable: install.Python,
-		Args:       []string{"-I", "-S", install.Runner, owned.Path()},
+		Args:       []string{"-B", "-I", "-S", install.Runner, owned.Path()},
 		EnvUnset:   fixedRunnerEnvUnset(),
 		Dir:        owned.TaskRoot(),
 	}
 	execution := &PreparedExecution{pin: pin, install: install, descriptor: owned, descriptorPath: owned.Path(), spec: spec}
-	if err := execution.Verify(); err != nil {
-		_ = execution.Close()
-		return nil, err
+	if err := verifyPreparedExecution(execution); err != nil {
+		return nil, errors.Join(err, execution.Close())
 	}
 	return execution, nil
-}
-
-func closeDescriptorCapabilities(capabilities DescriptorCapabilities) {
-	if capabilities.GcovExecutable != nil {
-		_ = capabilities.GcovExecutable.Close()
-	}
-	if capabilities.ObjectDirectory != nil {
-		_ = capabilities.ObjectDirectory.Close()
-	}
-	if capabilities.Root != nil {
-		_ = capabilities.Root.Close()
-	}
-	if capabilities.CoverageRoot != nil {
-		_ = capabilities.CoverageRoot.Close()
-	}
-	if capabilities.Provenance != nil {
-		_ = capabilities.Provenance.Close()
-	}
 }
 
 func (execution *PreparedExecution) ProcessSpec() task.ProcessSpec {
@@ -157,9 +146,9 @@ func (execution *PreparedExecution) Verify() error {
 	if install != execution.install {
 		return ErrBundleIntegrity
 	}
-	if execution.spec.Executable != install.Python || len(execution.spec.Args) != 4 ||
-		execution.spec.Args[0] != "-I" || execution.spec.Args[1] != "-S" ||
-		execution.spec.Args[2] != install.Runner || execution.spec.Args[3] != execution.descriptor.Path() ||
+	if execution.spec.Executable != install.Python || len(execution.spec.Args) != 5 ||
+		execution.spec.Args[0] != "-B" || execution.spec.Args[1] != "-I" || execution.spec.Args[2] != "-S" ||
+		execution.spec.Args[3] != install.Runner || execution.spec.Args[4] != execution.descriptor.Path() ||
 		execution.spec.Dir != execution.descriptor.TaskRoot() || len(execution.spec.Env) != 0 || len(execution.spec.Batch) != 0 ||
 		!reflect.DeepEqual(execution.spec.EnvUnset, fixedRunnerEnvUnset()) {
 		return ErrBundleIntegrity
@@ -181,9 +170,14 @@ func (execution *PreparedExecution) VerifyAfter() error {
 	return descriptor.VerifyOutputAfter()
 }
 
-func (execution *PreparedExecution) PinnedOutput() (*PinnedOutput, error) {
+func (execution *PreparedExecution) PinnedOutput() (coverageplatform.Output, error) {
 	if execution == nil {
 		return nil, ErrBundleIntegrity
+	}
+	// Verify through the execution boundary first so every output handoff
+	// rechecks the bundle pin as well as the descriptor's external inputs.
+	if err := execution.Verify(); err != nil {
+		return nil, err
 	}
 	execution.mu.Lock()
 	defer execution.mu.Unlock()
@@ -241,7 +235,7 @@ func validateInstallation(install Installation) error {
 			return integrityError(label, err)
 		}
 	}
-	if install.PythonVersion == "" || install.GcovrVersion != "8.6" || len(install.ManifestSHA256) != 64 {
+	if install.PythonVersion != RequiredPythonVersion || install.GcovrVersion != RequiredGCovrVersion || len(install.ManifestSHA256) != 64 {
 		return integrityError("installation identity", errors.New("invalid pinned identity"))
 	}
 	return nil
@@ -268,6 +262,8 @@ func fixedRunnerEnvUnset() []string {
 		"PIP_TRUSTED_HOST": {}, "VIRTUAL_ENV": {}, "CONDA_PREFIX": {}, "CONDA_DEFAULT_ENV": {},
 		"HTTP_PROXY": {}, "HTTPS_PROXY": {}, "ALL_PROXY": {}, "NO_PROXY": {},
 		"LANG": {}, "LANGUAGE": {},
+		"GCOV": {}, "GCOV_PREFIX": {}, "GCOV_PREFIX_STRIP": {}, "GCOVR_CONFIG": {}, "GCOVR_ROOT": {}, "GCOVR_EXCLUDE": {},
+		"LD_PRELOAD": {}, "LD_LIBRARY_PATH": {}, "DYLD_INSERT_LIBRARIES": {}, "DYLD_LIBRARY_PATH": {},
 	}
 	for _, entry := range os.Environ() {
 		key, _, found := strings.Cut(entry, "=")
@@ -276,6 +272,7 @@ func fixedRunnerEnvUnset() []string {
 		}
 		upper := strings.ToUpper(key)
 		if strings.HasPrefix(upper, "PYTHON") || strings.HasPrefix(upper, "PIP_") || strings.HasPrefix(upper, "CONDA_") ||
+			upper == "GCOV" || strings.HasPrefix(upper, "GCOV_") || strings.HasPrefix(upper, "GCOVR_") || strings.HasPrefix(upper, "LD_") || strings.HasPrefix(upper, "DYLD_") ||
 			strings.HasSuffix(upper, "_PROXY") || upper == "VIRTUAL_ENV" || upper == "LANG" || upper == "LANGUAGE" || strings.HasPrefix(upper, "LC_") {
 			// Keep every original spelling.  Process environments on Unix can
 			// contain both PYTHONPATH and pYtHoNpAtH; folding them would leave

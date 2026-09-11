@@ -55,23 +55,31 @@ func rewriteTestSteps(input []task.ExecutionStep) ([]task.ExecutionStep, map[str
 	return result, originals, nil
 }
 
-func collectorSteps(merge, export task.ProcessSpec) ([]task.ExecutionStep, error) {
-	if merge.Executable == "" || export.Executable == "" ||
-		len(merge.Batch) != 0 || len(export.Batch) != 0 {
+func collectorSteps(plan CollectionPlan) ([]task.ExecutionStep, error) {
+	merge := plan.Aggregate
+	if merge.Executable == "" || len(merge.Batch) != 0 {
 		return nil, task.ErrInvalidArgument
 	}
-	return []task.ExecutionStep{
+	steps := []task.ExecutionStep{
 		{
 			ID: "coverage-merge", Kind: task.StepCoverageMerge,
 			Process: cloneProcess(merge),
 			Public:  task.CommandSummary{Executable: string(task.StepCoverageMerge)},
 		},
-		{
-			ID: "coverage-normalize", Kind: task.StepCoverageNormalize,
-			Process: cloneProcess(export),
-			Public:  task.CommandSummary{Executable: string(task.StepCoverageNormalize)},
-		},
-	}, nil
+	}
+	if plan.Normalize == nil {
+		steps = append(steps, task.ExecutionStep{ID: "coverage-normalize", Kind: task.StepCoverageNormalize,
+			Action: task.ServiceActionCoverageNormalize,
+			Public: task.CommandSummary{Executable: string(task.StepCoverageNormalize)}})
+		return steps, nil
+	}
+	export := *plan.Normalize
+	if export.Executable == "" || len(export.Batch) != 0 {
+		return nil, task.ErrInvalidArgument
+	}
+	steps = append(steps, task.ExecutionStep{ID: "coverage-normalize", Kind: task.StepCoverageNormalize,
+		Process: cloneProcess(export), Public: task.CommandSummary{Executable: string(task.StepCoverageNormalize)}})
+	return steps, nil
 }
 
 func reportActionStep() task.ExecutionStep {

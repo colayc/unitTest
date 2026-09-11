@@ -3,18 +3,193 @@ import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { assertLinuxCoveragePresentation, createGccFaultOverlay } from "./coverage-service-smoke-linux-support.js";
 import {
+  buildLinuxGccCoverageEvidence,
   executeCoverageServiceSmoke,
   parseStrictJUnit,
   publishEvidenceAtomically,
   runAfterVerifiedCoverageToolsetPreflight,
-  teardownThenPublish
+  runWithTestOnlyCoverageFault,
+  teardownThenPublish,
+  validateCoverageEvidenceBytes,
+  validateLinuxGccCoverageEvidence
 } from "./coverage-service-smoke-support.js";
 
 const itemA = `utid-v1-${"a".repeat(64)}`;
 const itemB = `utid-v1-${"b".repeat(64)}`;
 const container = `utid-v1-${"c".repeat(64)}`;
 const unavailableMessage = "SKIP: verified clang-cl coverage toolset is unavailable";
+
+test("Linux partial reports remain available to the controller without losing partial outcomes", () => {
+  const completeness = { outcome: "partial", reasons: ["test_crashed"] };
+  const state = { state: "available", completeness };
+  assert.doesNotThrow(() => assertLinuxCoveragePresentation(state, "partial", completeness, true));
+  assert.throws(() => assertLinuxCoveragePresentation({ ...state, state: "partial" }, "partial", completeness, true));
+  assert.throws(() => assertLinuxCoveragePresentation(state, "available", completeness, true));
+  assert.throws(() => assertLinuxCoveragePresentation(state, "partial", { outcome: "available", reasons: [] }, true));
+  assert.throws(() => assertLinuxCoveragePresentation({ ...state, completeness: { outcome: "available", reasons: [] } }, "partial", completeness, true));
+  assert.doesNotThrow(() => assertLinuxCoveragePresentation({ state: "available", completeness: { outcome: "available", reasons: [] } }, "available", { outcome: "available", reasons: [] }, false));
+});
+
+test("Linux fault overlay fails closed when its production seam changes", async () => {
+  const source = await readFile(new URL("../../../../apps/test-service/internal/runtime/coverage_execution.go", import.meta.url), "utf8").catch(() =>
+    readFile(new URL("../../../../../apps/test-service/internal/runtime/coverage_execution.go", import.meta.url), "utf8"));
+  for (const fault of ["missing-data", "malformed-pinned-json"] as const) {
+    const changed = createGccFaultOverlay(source, fault);
+    assert.notEqual(changed, source);
+    assert.throws(() => createGccFaultOverlay("package runtime", fault), /test-only overlay seam/u);
+    assert.throws(() => createGccFaultOverlay(source + source, fault), /test-only overlay seam/u);
+  }
+});
+
+const linuxEvidence = {
+  schemaVersion: 1,
+  platform: "linux-x64",
+  toolchain: { family: "gcc", digest: "a".repeat(64) },
+  bundleDigest: "b".repeat(64),
+  frameworkBundleDigest: "e".repeat(64),
+  faults: [
+    { fault: "crash", testRunOutcome: "errored", coverageRunOutcome: "partial", reason: "none" },
+    { fault: "timeout", testRunOutcome: "timed_out", coverageRunOutcome: "cancelled", reason: "task_timed_out" },
+    { fault: "cancel", testRunOutcome: "cancelled", coverageRunOutcome: "cancelled", reason: "user_cancelled" },
+    { fault: "missing-data", testRunOutcome: "passed", coverageRunOutcome: "unavailable", reason: "profile_collection_failed" },
+    { fault: "malformed-pinned-json", testRunOutcome: "passed", coverageRunOutcome: "unavailable", reason: "normalization_failed" }
+  ],
+  cases: [
+    {
+      framework: "cpputest",
+      testRunOutcome: "failed",
+      coverageRunOutcome: "available",
+      reportOutcome: "available",
+      summary: {
+        lines: { covered: 7, total: 8 },
+        branches: { covered: 3, total: 4 },
+        functions: { covered: 2, total: 2 }
+      },
+      artifactDigest: "c".repeat(64)
+    },
+    {
+      framework: "unity",
+      testRunOutcome: "passed",
+      coverageRunOutcome: "available",
+      reportOutcome: "available",
+      summary: {
+        lines: { covered: 6, total: 6 },
+        branches: { covered: 2, total: 2 },
+        functions: { covered: 2, total: 2 }
+      },
+      artifactDigest: "d".repeat(64)
+    }
+  ],
+  determinism: { coverageJsonByteIdentical: true, sha256Identical: true },
+  startedAt: "2026-09-07T00:00:00.000Z",
+  finishedAt: "2026-09-07T00:00:01.000Z"
+} as const;
+
+test("Linux GCC evidence is a path-free closed schema", () => {
+  const evidence = buildLinuxGccCoverageEvidence(linuxEvidence);
+  assert.deepEqual(evidence, linuxEvidence);
+  validateLinuxGccCoverageEvidence(evidence);
+});
+
+test("Linux GCC evidence rejects paths, process inputs, secrets and additional properties", () => {
+  const invalid = [
+    { ...linuxEvidence, faults: [] },
+    { ...linuxEvidence, faults: [...linuxEvidence.faults.slice(1), linuxEvidence.faults[1]] },
+    { ...linuxEvidence, faults: [{ ...linuxEvidence.faults[0], reason: "normalization_failed" }, ...linuxEvidence.faults.slice(1)] },
+    { ...linuxEvidence, workspacePath: "/tmp/leak" },
+    { ...linuxEvidence, environment: { HOME: "/tmp/leak" } },
+    { ...linuxEvidence, argv: ["gcovr"] },
+    { ...linuxEvidence, token: "secret" },
+    { ...linuxEvidence, bundleDigest: "C:\\native\\leak" },
+    { ...linuxEvidence, cases: [...linuxEvidence.cases, { ...linuxEvidence.cases[0]!, artifactDigest: "/tmp/leak" }] },
+    { ...linuxEvidence, startedAt: "2026-02-31T00:00:00.000Z" },
+    { ...linuxEvidence, cases: [{ ...linuxEvidence.cases[0]!, testRunOutcome: "passed" }, linuxEvidence.cases[1]! ] },
+    { ...linuxEvidence, cases: [linuxEvidence.cases[0]!, { ...linuxEvidence.cases[1]!, testRunOutcome: "failed" }] },
+    { ...linuxEvidence, cases: [{ ...linuxEvidence.cases[0]!, summary: { ...linuxEvidence.cases[0]!.summary, lines: { covered: 0, total: 0 } } }, linuxEvidence.cases[1]! ] },
+    { ...linuxEvidence, cases: [{ ...linuxEvidence.cases[0]!, summary: { ...linuxEvidence.cases[0]!.summary, lines: { ...linuxEvidence.cases[0]!.summary.lines, nativePath: "/tmp/leak" } } }, linuxEvidence.cases[1]! ] }
+  ];
+  for (const candidate of invalid) {
+    assert.throws(() => validateLinuxGccCoverageEvidence(candidate), /Linux GCC coverage evidence/u);
+  }
+});
+
+test("CI validates the exact canonical Linux and Windows coverage evidence bytes", () => {
+  const linuxBytes = Buffer.from(`${JSON.stringify(linuxEvidence)}\n`);
+  assert.deepEqual(validateCoverageEvidenceBytes("linux", linuxBytes), linuxEvidence);
+  const windowsEvidence = {
+    schemaVersion: 1,
+    outcome: "passed",
+    reason: "None",
+    toolchainDigest: "f".repeat(64),
+    guardianOutcome: "released",
+    filterAuditOutcome: "passed",
+    startedAt: "2026-09-07T00:00:00.000Z",
+    finishedAt: "2026-09-07T00:00:01.000Z"
+  } as const;
+  assert.deepEqual(
+    validateCoverageEvidenceBytes("windows", Buffer.from(`${JSON.stringify(windowsEvidence)}\n`)),
+    windowsEvidence
+  );
+});
+
+test("CI evidence validation rejects noncanonical, skipped and leaking reports", () => {
+  const windows = {
+    schemaVersion: 1,
+    outcome: "skipped",
+    reason: "ToolchainUnavailable",
+    toolchainDigest: "f".repeat(64),
+    guardianOutcome: "not-run",
+    filterAuditOutcome: "not-run",
+    startedAt: "2026-09-07T00:00:00.000Z",
+    finishedAt: "2026-09-07T00:00:01.000Z"
+  };
+  assert.throws(
+    () => validateCoverageEvidenceBytes("windows", Buffer.from(`${JSON.stringify(windows)}\n`)),
+    /required Windows coverage evidence must pass/u
+  );
+  assert.throws(
+    () => validateCoverageEvidenceBytes("linux", Buffer.from(`${JSON.stringify(linuxEvidence, null, 2)}\n`)),
+    /one newline-terminated JSON object|canonical compact JSON/u
+  );
+  assert.throws(
+    () => validateCoverageEvidenceBytes("linux", Buffer.from(`${JSON.stringify({ ...linuxEvidence, workspacePath: "/tmp/leak" })}\n`)),
+    /Linux GCC coverage evidence/u
+  );
+  assert.throws(
+    () => validateCoverageEvidenceBytes("linux", Buffer.from(`${JSON.stringify(linuxEvidence)}\ntrailer`)),
+    /one newline-terminated JSON object/u
+  );
+  assert.throws(
+    () => validateCoverageEvidenceBytes(
+      "linux",
+      Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(`${JSON.stringify(linuxEvidence)}\n`)])
+    ),
+    /UTF-8 BOM|canonical/u
+  );
+});
+
+test("test-only coverage fault hooks cover every Linux smoke failure seam without Workspace fields", async () => {
+  const observed: string[] = [];
+  for (const fault of [
+    "crash", "timeout", "cancel", "missing-data", "malformed-pinned-json"
+  ] as const) {
+    const result = await runWithTestOnlyCoverageFault(
+      fault,
+      async (injected) => { observed.push(`inject:${injected}`); },
+      async () => { observed.push(`execute:${fault}`); return fault; }
+    );
+    assert.equal(result, fault);
+  }
+  assert.deepEqual(observed, [
+    "inject:crash", "execute:crash",
+    "inject:timeout", "execute:timeout",
+    "inject:cancel", "execute:cancel",
+    "inject:missing-data", "execute:missing-data",
+    "inject:malformed-pinned-json", "execute:malformed-pinned-json"
+  ]);
+});
 
 test("local unavailable coverage toolset skips before every boundary and execution side effect", async () => {
   const trace: string[] = [];

@@ -7,3 +7,7 @@ int coverage_branch(int value) {
   }
   return 0;
 }
+
+int coverage_square(int value) {
+  return value * value;
+}

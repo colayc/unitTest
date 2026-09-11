@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -36,6 +37,7 @@ func TestGCCProbeUsesFixedArgumentsAndBuildsDescriptor(t *testing.T) {
 	if instance.ID == "" {
 		t.Fatal("Probe() ID is empty")
 	}
+	coverage := instance.Coverage
 	instance.ID = "<stable>"
 	want := Instance{
 		ID:                 "<stable>",
@@ -50,18 +52,255 @@ func TestGCCProbeUsesFixedArgumentsAndBuildsDescriptor(t *testing.T) {
 		Environment:        []string{},
 		Generators:         []string{"Ninja"},
 	}
+	if runtime.GOOS == "linux" {
+		want.Coverage.GCov = fixture.gcov
+		instance.Coverage = CoverageCapability{GCov: coverage.GCov}
+	}
 	if !reflect.DeepEqual(instance, want) {
 		t.Fatalf("Probe() = %+v, want %+v", instance, want)
 	}
-	runner.assertCalls(
+	calls := []probeCall{
 		probeCall{fixture.gcc, "--version"},
 		probeCall{fixture.gcc, "-dumpmachine"},
 		probeCall{fixture.gcc, "--print-sysroot"},
 		probeCall{fixture.gxx, "--version"},
 		probeCall{fixture.gxx, "-dumpmachine"},
 		probeCall{fixture.gxx, "--print-sysroot"},
-		probeCall{fixture.ninja, "--version"},
-	)
+	}
+	if runtime.GOOS == "linux" {
+		calls = append(calls, probeCall{fixture.gcc, "-print-prog-name=gcov"}, probeCall{fixture.gcov, "--version"})
+	}
+	calls = append(calls, probeCall{fixture.ninja, "--version"})
+	runner.assertCalls(calls...)
+}
+
+// TestGCCProbeRetainsGCovEvidence catches removal of the discovery-time
+// gcov pin. The precise evidence fields are added by the implementation;
+// this RED assertion begins with the observable requirement that a usable
+// GCC descriptor advertises its matching gcov executable.
+func TestGCCProbeRetainsGCovEvidence(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS != "linux" {
+		t.Skip("GCC coverage discovery is Linux-only")
+	}
+
+	fixture := newGNUFixture(t)
+	runner := newGNUFakeRunner(t, fixture)
+	adapter, err := newGNUAdapter(runner, FamilyGCC, nil, "x64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance, err := adapter.Probe(context.Background(), Candidate{
+		Family: FamilyGCC, CCompiler: fixture.gcc, CXXCompiler: fixture.gxx, Ninja: fixture.ninja,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if instance.Coverage.GCov != fixture.gcov {
+		t.Fatalf("Probe() gcov = %q, want %q", instance.Coverage.GCov, fixture.gcov)
+	}
+	if instance.Coverage.ToolsetIdentity == "" {
+		t.Fatal("Probe() did not retain a GCC coverage toolset identity")
+	}
+	if instance.Coverage.CompilerEvidence == instance.Coverage.CXXCompilerEvidence ||
+		instance.Coverage.GCovEvidence.FileIdentity == "" || instance.Coverage.GCovVersion != instance.Version {
+		t.Fatalf("Probe() did not retain distinct GCC/g++/gcov evidence: %#v", instance.Coverage)
+	}
+}
+
+func TestGCCProbePreservesOrdinaryDiscoveryWhenGCovIsUnavailable(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS != "linux" {
+		t.Skip("GCC coverage discovery is Linux-only")
+	}
+
+	fixture := newGNUFixture(t)
+	runner := newGNUFakeRunner(t, fixture)
+	runner.outputs[probeKey(fixture.gcc, "-print-prog-name=gcov")] = successfulOutput("\n")
+	adapter, err := newGNUAdapter(runner, FamilyGCC, nil, "x64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance, err := adapter.Probe(context.Background(), Candidate{
+		Family: FamilyGCC, CCompiler: fixture.gcc, CXXCompiler: fixture.gxx, Ninja: fixture.ninja,
+	})
+	if err != nil {
+		t.Fatalf("Probe() error = %v, want ordinary GCC discovery to succeed", err)
+	}
+	if instance.Coverage != (CoverageCapability{}) {
+		t.Fatalf("Probe() Coverage = %#v, want empty when gcov cannot be pinned", instance.Coverage)
+	}
+}
+
+func TestGCCProbeRejectsMalformedGCovLocationWithoutDiscardingToolchain(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS != "linux" {
+		t.Skip("GCC coverage discovery is Linux-only")
+	}
+
+	for name, output := range map[string]string{
+		"multiline":       "gcov\nother\n",
+		"relative escape": "../gcov\n",
+		"NUL":             "gcov\x00\n",
+		"invalid UTF-8":   string([]byte{'g', 'c', 0xff, 'o', 'v', '\n'}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newGNUFixture(t)
+			runner := newGNUFakeRunner(t, fixture)
+			runner.outputs[probeKey(fixture.gcc, "-print-prog-name=gcov")] = successfulOutput(output)
+			adapter, err := newGNUAdapter(runner, FamilyGCC, nil, "x64")
+			if err != nil {
+				t.Fatal(err)
+			}
+			instance, err := adapter.Probe(context.Background(), Candidate{
+				Family: FamilyGCC, CCompiler: fixture.gcc, CXXCompiler: fixture.gxx, Ninja: fixture.ninja,
+			})
+			if err != nil {
+				t.Fatalf("Probe() error = %v, want ordinary discovery", err)
+			}
+			if instance.Coverage != (CoverageCapability{}) {
+				t.Fatalf("Probe() Coverage = %#v, want empty", instance.Coverage)
+			}
+		})
+	}
+}
+
+func TestGCCProbeLeavesCoverageEmptyOnGCovVersionMismatch(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS != "linux" {
+		t.Skip("GCC coverage discovery is Linux-only")
+	}
+	fixture := newGNUFixture(t)
+	runner := newGNUFakeRunner(t, fixture)
+	runner.outputs[probeKey(fixture.gcov, "--version")] = successfulOutput("gcov (Ubuntu 13.3.0) 13.3.0\n")
+	adapter, err := newGNUAdapter(runner, FamilyGCC, nil, "x64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance, err := adapter.Probe(context.Background(), Candidate{Family: FamilyGCC, CCompiler: fixture.gcc, CXXCompiler: fixture.gxx, Ninja: fixture.ninja})
+	if err != nil || instance.Coverage != (CoverageCapability{}) {
+		t.Fatalf("Probe() = %#v, %v; want ordinary GCC without coverage", instance, err)
+	}
+}
+
+func TestGCCProbeDoesNotRetainCoverageWhenExecutableChangesDuringProbe(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS != "linux" {
+		t.Skip("GCC coverage discovery is Linux-only")
+	}
+	for name, replacement := range map[string]func(*gnuFixture) string{
+		"C compiler":   func(f *gnuFixture) string { return f.gcc },
+		"C++ compiler": func(f *gnuFixture) string { return f.gxx },
+		"gcov":         func(f *gnuFixture) string { return f.gcov },
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newGNUFixture(t)
+			runner := newGNUFakeRunner(t, fixture)
+			target := replacement(fixture)
+			runner.afterCall = func(call probeCall) {
+				if call.executable == target {
+					_ = os.WriteFile(target, []byte("replaced"), 0o755)
+					runner.afterCall = nil
+				}
+			}
+			adapter, err := newGNUAdapter(runner, FamilyGCC, nil, "x64")
+			if err != nil {
+				t.Fatal(err)
+			}
+			instance, err := adapter.Probe(context.Background(), Candidate{Family: FamilyGCC, CCompiler: fixture.gcc, CXXCompiler: fixture.gxx, Ninja: fixture.ninja})
+			if name == "gcov" {
+				if err != nil {
+					t.Fatalf("Probe() error = %v, want ordinary GCC without coverage", err)
+				}
+				if instance.Coverage != (CoverageCapability{}) {
+					t.Fatalf("Probe() advertised stale gcov evidence: %#v", instance.Coverage)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("Probe() accepted a compiler replacement during a coverage probe")
+			}
+		})
+	}
+}
+
+func TestGCCProbeClearsCoverageWhenGCovChangesDuringLaterGeneratorProbe(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS != "linux" {
+		t.Skip("GCC coverage discovery is Linux-only")
+	}
+	fixture := newGNUFixture(t)
+	runner := newGNUFakeRunner(t, fixture)
+	runner.afterCall = func(call probeCall) {
+		if call == (probeCall{fixture.ninja, "--version"}) {
+			_ = os.WriteFile(fixture.gcov, []byte("replacement"), 0o755)
+			runner.afterCall = nil
+		}
+	}
+	adapter, err := newGNUAdapter(runner, FamilyGCC, nil, "x64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance, err := adapter.Probe(context.Background(), Candidate{Family: FamilyGCC, CCompiler: fixture.gcc, CXXCompiler: fixture.gxx, Ninja: fixture.ninja})
+	if err != nil {
+		t.Fatalf("Probe() error = %v, want ordinary GCC descriptor", err)
+	}
+	if instance.Coverage != (CoverageCapability{}) {
+		t.Fatalf("Probe() advertised stale coverage after gcov replacement: %#v", instance.Coverage)
+	}
+}
+
+func TestGCCCoverageSnapshotPropagatesCancellationDuringFinalVerification(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("GCC coverage discovery is Linux-only")
+	}
+	fixture := newGNUFixture(t)
+	runner := newGNUFakeRunner(t, fixture)
+	adapter, err := newGNUAdapter(runner, FamilyGCC, nil, "x64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiler, err := openExecutableSnapshot(context.Background(), fixture.gcc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer compiler.Close()
+	cxx, err := openExecutableSnapshot(context.Background(), fixture.gxx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cxx.Close()
+	snapshot := adapter.probeGCCCoverage(context.Background(), compiler, cxx, "13.2.0", "x64", func() error { return nil })
+	if snapshot == nil {
+		t.Fatal("probeGCCCoverage() returned nil")
+	}
+	defer snapshot.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := snapshot.Verify(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("final snapshot Verify() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestGCCToolsetIdentityBindsEachDistinctUnixExecutable(t *testing.T) {
+	t.Parallel()
+	paths := []string{"/tools/gcc", "/tools/g++", "/tools/gcov"}
+	evidence := []ExecutableEvidence{
+		{FileIdentity: "unix:1:11", SHA256: strings.Repeat("a", 64)},
+		{FileIdentity: "unix:1:12", SHA256: strings.Repeat("b", 64)},
+		{FileIdentity: "unix:1:13", SHA256: strings.Repeat("c", 64)},
+	}
+	first := GCCToolsetIdentity("13.2.0", paths, evidence)
+	if len(first) != 64 {
+		t.Fatalf("GCCToolsetIdentity() = %q", first)
+	}
+	evidence[2].FileIdentity = "unix:1:14"
+	if second := GCCToolsetIdentity("13.2.0", paths, evidence); second == first {
+		t.Fatal("GCCToolsetIdentity ignored gcov identity")
+	}
+	if GCCToolsetIdentity("13.2.0", paths, []ExecutableEvidence{{FileIdentity: "windows:00000000:0000000000000000", SHA256: strings.Repeat("a", 64)}, evidence[1], evidence[2]}) != "" {
+		t.Fatal("GCCToolsetIdentity accepted Windows evidence")
+	}
 }
 
 func TestParseCompilerVersionAcceptsUbuntuGCCAndGXXBanners(t *testing.T) {
@@ -703,6 +942,7 @@ type gnuFixture struct {
 	root     string
 	gcc      string
 	gxx      string
+	gcov     string
 	gcc2     string
 	gxx2     string
 	clang    string
@@ -724,6 +964,7 @@ func newGNUFixture(t *testing.T) *gnuFixture {
 		root:     root,
 		gcc:      filepath.Join(bin, executableName("gcc")),
 		gxx:      filepath.Join(bin, executableName("g++")),
+		gcov:     filepath.Join(bin, executableName("gcov")),
 		gcc2:     filepath.Join(bin, executableName("gcc-13")),
 		gxx2:     filepath.Join(bin, executableName("g++-13")),
 		clang:    filepath.Join(bin, executableName("clang")),
@@ -739,7 +980,7 @@ func newGNUFixture(t *testing.T) *gnuFixture {
 		}
 	}
 	for _, executable := range []string{
-		fixture.gcc, fixture.gxx, fixture.gcc2, fixture.gxx2,
+		fixture.gcc, fixture.gxx, fixture.gcov, fixture.gcc2, fixture.gxx2,
 		fixture.clang, fixture.clangxx, fixture.ninja, fixture.make,
 	} {
 		if err := os.WriteFile(executable, []byte(filepath.Base(executable)), 0o755); err != nil {
@@ -775,6 +1016,10 @@ func newGNUFakeRunner(t *testing.T, fixture *gnuFixture) *gnuFakeRunner {
 		outputs[probeKey(executable, "-dumpmachine")] = successfulOutput("x86_64-linux-gnu\n")
 		outputs[probeKey(executable, "--print-sysroot")] = successfulOutput(fixture.sysroot + "\n")
 	}
+	for _, executable := range []string{fixture.gcc, fixture.gcc2} {
+		outputs[probeKey(executable, "-print-prog-name=gcov")] = successfulOutput(fixture.gcov + "\n")
+	}
+	outputs[probeKey(fixture.gcov, "--version")] = successfulOutput("gcov (Ubuntu 13.2.0-1ubuntu1) 13.2.0\n")
 	for _, executable := range []string{fixture.gxx, fixture.gxx2} {
 		outputs[probeKey(executable, "--version")] = successfulOutput("g++ (Ubuntu 13.2.0-1ubuntu1) 13.2.0\n")
 		outputs[probeKey(executable, "-dumpmachine")] = successfulOutput("x86_64-linux-gnu\n")

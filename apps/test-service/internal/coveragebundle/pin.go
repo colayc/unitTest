@@ -161,6 +161,18 @@ func (pin *bundlePin) verifyCurrentTree() error {
 		return err
 	}
 	if len(files) != len(pin.files) || len(directories) != len(pin.relativeDirectories) {
+		if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+			for relative := range files {
+				if _, ok := pin.files[relative]; !ok {
+					fmt.Fprintf(os.Stderr, "coverage bundle unexpected file %s\n", relative)
+				}
+			}
+			for relative := range directories {
+				if _, ok := pin.directoryByRelative[relative]; !ok {
+					fmt.Fprintf(os.Stderr, "coverage bundle unexpected directory %s\n", relative)
+				}
+			}
+		}
 		return errors.New("bundle tree shape changed")
 	}
 	for relative := range pin.files {
@@ -276,6 +288,10 @@ func pinDirectObject(path string, directory bool) (*pinnedObject, error) {
 }
 
 func pinChildObject(parent *pinnedObject, name string, directory bool) (*pinnedObject, error) {
+	return pinChildObjectWithDelete(parent, name, directory, false)
+}
+
+func pinChildObjectWithDelete(parent *pinnedObject, name string, directory, deleteAccess bool) (*pinnedObject, error) {
 	if parent == nil || parent.file == nil || !parent.directory || name == "" || name == "." || name == ".." || filepath.Base(name) != name {
 		return nil, errors.New("invalid pinned parent or child name")
 	}
@@ -287,7 +303,12 @@ func pinChildObject(parent *pinnedObject, name string, directory bool) (*pinnedO
 	if before.IsDir() != directory {
 		return nil, errors.New("bundle object type does not match")
 	}
-	file, err := openPinnedChild(parent, name, directory)
+	var file *os.File
+	if deleteAccess {
+		file, err = openPinnedChildForDelete(parent, name, directory)
+	} else {
+		file, err = openPinnedChild(parent, name, directory)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -306,7 +327,10 @@ func pinOutputChild(parent *pinnedObject, name string) (*pinnedObject, error) {
 		}
 		return nil, err
 	}
-	file, err := openPinnedOutputChild(parent, name)
+	// The output pin is retained through descriptor cleanup. On Windows it must
+	// carry DELETE from first observation so cleanup never reopens a mutable
+	// pathname to acquire it later.
+	file, err := openPinnedChildForDelete(parent, name, false)
 	if err != nil {
 		return nil, err
 	}
