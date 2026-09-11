@@ -226,11 +226,15 @@ func TestBundleManifestAcceptsLockedBuildSources(t *testing.T) {
 
 func createBundleFixture(t *testing.T) (string, string) {
 	t.Helper()
+	return createBundleFixtureAt(t, filepath.Join(testScratchDir(t), "product"))
+}
+
+func createBundleFixtureAt(t *testing.T, productRoot string) (string, string) {
+	t.Helper()
 	key, err := currentPlatformKey()
 	if err != nil {
 		t.Skipf("unsupported test platform: %v", err)
 	}
-	productRoot := filepath.Join(testScratchDir(t), "product")
 	bundleRoot := filepath.Join(productRoot, "coverage-bundle", key)
 	files := map[string][]byte{
 		"app/gcovr-runner.pyz": []byte("runner and locked dependencies"),
