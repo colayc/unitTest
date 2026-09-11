@@ -219,6 +219,9 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
       const workspace = join(scratch, scenario);
       let serviceStderr = "";
       await cp(join(root, "apps/code-oss-extension/test/fixtures", framework === "unity" ? "coverage-unity" : "coverage"), workspace, { recursive: true });
+      if (framework === "cpputest") {
+        await cp(join(workspace, "CMakeLists.linux.txt"), join(workspace, "CMakeLists.txt"), { force: true });
+      }
       // Keep every CMake File API input inside the trusted temporary workspace.
       // The framework bundle and helper are verified before this copy; the
       // Service must not widen its read boundary to arbitrary repository paths.

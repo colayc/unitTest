@@ -103,6 +103,37 @@ func TestPlannerFixtureProvidesVerifiedWindowsNinja(t *testing.T) {
 	}
 }
 
+func TestPlannerAcceptsTrackedWindowsCoverageFixtureUnderWFP(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows WFP launch declaration")
+	}
+	activatePlannerWFPRegistration(t)
+	fixture := newPlannerFixture(t)
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	trackedFixture := filepath.Join(
+		workingDirectory, "..", "..", "..", "..", "apps", "code-oss-extension",
+		"test", "fixtures", "coverage", "CMakeLists.txt",
+	)
+	contents, err := os.ReadFile(trackedFixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fixture.sourceDir, "CMakeLists.txt"), contents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Plan(PlanInput{
+		Installation: fixture.installation, WorkspaceRoot: fixture.root,
+		Project: fixture.project, Profile: fixture.profile,
+		Toolchain: fixture.toolchain, Jobs: 1, Configure: true,
+	}); err != nil {
+		t.Fatalf("Plan() rejected the tracked Windows coverage fixture: %v", err)
+	}
+}
+
 func TestNativeBuildLaunchPlanDeclaresClosedWindowsCoverageTree(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows launch declaration")
