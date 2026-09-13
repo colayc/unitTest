@@ -29,8 +29,8 @@ const execFileAsync = promisify(execFile);
 const candidateCommit = "a".repeat(40);
 const currentCommit = candidateCommit;
 const repositoryRoot = join(import.meta.dirname, "..", "..");
-const phase14RegistryPath = join(import.meta.dirname, "gates.json");
-const PHASE_1_THROUGH_4_GATE_IDS = [
+const gateRegistryPath = join(import.meta.dirname, "gates.json");
+const ALL_GATE_IDS = [
   "P1-IPC-PER-USER-AUTH",
   "P1-PROTOCOL-NO-SHELL",
   "P1-PROTOCOL-VERSION-COMPAT",
@@ -52,6 +52,47 @@ const PHASE_1_THROUGH_4_GATE_IDS = [
   "P4-RECOVERY-AND-10000-BACKEND",
   "P4-SELECTION-AND-RERUN",
   "P4-UNITY-CMOCK",
+  "P5-COVERAGE-FAULT-MAPPING",
+  "P5-COVERAGE-REPORTS",
+  "P5-LINUX-CLANG-COVERAGE",
+  "P5-LINUX-GCC-COVERAGE",
+  "P5-PROTOCOL-V14-COMPAT",
+  "P5-WINDOWS-LLVM-COVERAGE",
+  "P6-BRANDING-AND-BUILTIN-REGISTRATION",
+  "P6-CODEOSS-HOST-SMOKE",
+  "P6-SERVICE-LIFECYCLE",
+  "P6-TESTING-API",
+  "P6-TESTING-API-10000-ITEMS",
+  "P6-WORKSPACE-TRUST-GATE",
+  "P7-COVERAGE-UI-AND-SOURCE-DECORATION",
+  "P7-HISTORY-AND-ARTIFACT-BROWSER",
+  "P7-LINUX-GCC-OFFLINE",
+  "P7-MAIN-USER-JOURNEY",
+  "P7-MOCK-CONFIGURATION-UX",
+  "P7-WINDOWS-WFP-OFFLINE",
+  "P8-DOCS-CLOSEOUT",
+  "P8-INSTALL-LIFECYCLE-LINUX",
+  "P8-INSTALL-LIFECYCLE-WINDOWS",
+  "P8-LEGAL-THIRD-PARTY",
+  "P8-LICENSE-AUDIT",
+  "P8-LINUX-APPIMAGE-PACKAGE",
+  "P8-QUALIFICATION-UNSIGNED",
+  "P8-RUNTIME-PRODUCER-PROVENANCE",
+  "P8-SIGN-WINDOWS",
+  "P8-WINDOWS-MSIX-PACKAGE",
+  "P9-MATRIX-CONTRACT",
+  "P9-MATRIX-E2E",
+  "P9-MATRIX-FAULT-INJECTION",
+  "P9-MATRIX-INTEGRATION",
+  "P9-MATRIX-UNIT",
+  "P9-PERF-CANCEL",
+  "P9-PERF-DISCOVERY-10000",
+  "P9-PERF-FILTER",
+  "P9-PERF-HARDWARE-BASELINE",
+  "P9-PERF-MEMORY",
+  "P9-PERF-REPORT",
+  "P9-PERF-STARTUP",
+  "P9-UPSTREAM-CODEOSS",
 ];
 const PHASE_1_THROUGH_4_SOURCE_PATHS = [
   "docs/superpowers/specs/2026-07-21-secure-token-file-preparation-design.md",
@@ -63,6 +104,48 @@ const PHASE_1_THROUGH_4_SOURCE_PATHS = [
   "docs/superpowers/specs/2026-07-30-test-framework-discovery-execution-design.md",
   "docs/superpowers/specs/2026-09-03-native-diagnostic-uri-design.md",
 ];
+const ALL_SOURCE_PATHS = [
+  "docs/superpowers/plans/2026-07-21-cpp-unit-test-ide-roadmap.md",
+  "docs/superpowers/specs/2026-07-21-secure-token-file-preparation-design.md",
+  "docs/superpowers/specs/2026-07-22-task-engine-persistence-design.md",
+  "docs/superpowers/specs/2026-07-26-workspace-cmake-toolchains-design.md",
+  "docs/superpowers/specs/2026-07-27-prepared-process-lease-ownership-design.md",
+  "docs/superpowers/specs/2026-07-27-publisher-failure-task-ownership-design.md",
+  "docs/superpowers/specs/2026-07-28-close-before-terminalization-design.md",
+  "docs/superpowers/specs/2026-07-30-test-framework-discovery-execution-design.md",
+  "docs/superpowers/specs/2026-08-03-coverage-report-pipeline-design.md",
+  "docs/superpowers/specs/2026-08-05-typescript-client-v1-4-coverage-design.md",
+  "docs/superpowers/specs/2026-08-16-phase6-code-oss-extension-design.md",
+  "docs/superpowers/specs/2026-08-18-phase6b-testing-api-design.md",
+  "docs/superpowers/specs/2026-08-20-phase8-windows-llvm-coverage-execution-design.md",
+  "docs/superpowers/specs/2026-08-21-windows-wfp-offline-boundary-design.md",
+  "docs/superpowers/specs/2026-08-27-code-oss-runtime-packaging-design.md",
+  "docs/superpowers/specs/2026-08-28-release-input-attempt-artifact-identity-design.md",
+  "docs/superpowers/specs/2026-08-28-trusted-code-oss-release-input-production-design.md",
+  "docs/superpowers/specs/2026-08-31-formal-packaging-blockers-design.md",
+  "docs/superpowers/specs/2026-09-01-formal-packaging-followup-design.md",
+  "docs/superpowers/specs/2026-09-03-code-oss-cli-smoke-handshake-design.md",
+  "docs/superpowers/specs/2026-09-03-native-diagnostic-uri-design.md",
+  "docs/superpowers/specs/2026-09-06-phase7-linux-gcc-coverage-execution-design.md",
+  "docs/superpowers/specs/2026-09-11-qualified-release-manifest-collision-design.md",
+  "docs/superpowers/specs/2026-09-11-windows-llvm-coverage-regression-design.md",
+  "docs/superpowers/specs/2026-09-13-phase9-gate-evidence-matrix-design.md",
+];
+const PHASE_9_GATE_IDS = ALL_GATE_IDS.filter((id) => id.startsWith("P9-"));
+const EXACT_DEFERMENTS = {
+  "P8-DOCS-CLOSEOUT": {
+    reason: "Phase 8 状态文档收口",
+    resumeCondition: "前两项通过后更新 roadmap、security、README、验收证据和对应文档测试",
+  },
+  "P8-LEGAL-THIRD-PARTY": {
+    reason: "第三方 license/legal 人工审批",
+    resumeCondition: "真实公开发布前，由有权负责人或合格法律审查者对精确候选制品和 notice/license 闭集作出书面审批",
+  },
+  "P8-SIGN-WINDOWS": {
+    reason: "正式 Windows 签名",
+    resumeCondition: "真实公开发布前，用正式证书和时间戳完成签名、干净机器验签和签名版 foundation 资格验证",
+  },
+};
 const LOCALIZATION_ONLY_SOURCE = "docs/superpowers/specs/2026-07-22-markdown-chinese-localization-design.md";
 const UNSAFE_CATALOG_COMMAND_PATTERN = /[\0\r\n`;<>]|\$\(|&&|\|\|/u;
 
@@ -433,15 +516,18 @@ test("schema contract is closed and contains the required definitions", () => {
 });
 
 test("Phase 1 through 4 catalog has exact source, heading, gate, and verification coverage", async () => {
-  const registry = await readCanonicalJson(phase14RegistryPath, { label: "Phase 1 through 4 registry", maxBytes: 1024 * 1024 });
+  const registry = await readCanonicalJson(gateRegistryPath, { label: "Phase 1 through 4 registry", maxBytes: 1024 * 1024 });
 
   assert.equal(registry.schemaVersion, 1);
   assert.equal(registry.product, "unit-test-ide");
   assert.equal(registry.repository, "colayc/unitTest");
   assert.deepEqual(registry.allowedDeferredGateIds, ["P8-DOCS-CLOSEOUT", "P8-LEGAL-THIRD-PARTY", "P8-SIGN-WINDOWS"]);
-  assert.deepEqual(registry.sources.map(({ path }) => path), PHASE_1_THROUGH_4_SOURCE_PATHS);
+  assert.deepEqual(
+    registry.sources.map(({ path }) => path).filter((path) => PHASE_1_THROUGH_4_SOURCE_PATHS.includes(path)),
+    PHASE_1_THROUGH_4_SOURCE_PATHS,
+  );
   assert.equal(registry.sources.some(({ path }) => path === LOCALIZATION_ONLY_SOURCE), false);
-  assert.deepEqual(registry.gates.map(({ id }) => id), PHASE_1_THROUGH_4_GATE_IDS);
+  assert.deepEqual(registry.gates.filter(({ phase }) => phase <= 4).map(({ id }) => id), ALL_GATE_IDS.filter((id) => /^P[1-4]-/u.test(id)));
   assert.equal(validateRegistry(registry), true);
 
   const sourcePaths = registry.sources.map(({ path }) => path);
@@ -459,7 +545,7 @@ test("Phase 1 through 4 catalog has exact source, heading, gate, and verificatio
     }
   }
 
-  for (const gate of registry.gates) {
+  for (const gate of registry.gates.filter(({ phase }) => phase <= 4)) {
     assert.equal(gate.disposition, "required");
     assert.ok(gate.requirementRefs.length > 0, `${gate.id} must reference a source heading`);
     const { commands, jobs, artifacts } = gate.verification;
@@ -481,7 +567,7 @@ test("Phase 1 through 4 catalog has exact source, heading, gate, and verificatio
 });
 
 test("Phase 1 through 4 catalog cites direct no-shell, process-tree, and toolchain requirements", async () => {
-  const registry = await readCanonicalJson(phase14RegistryPath, { label: "Phase 1 through 4 registry", maxBytes: 1024 * 1024 });
+  const registry = await readCanonicalJson(gateRegistryPath, { label: "Phase 1 through 4 registry", maxBytes: 1024 * 1024 });
   const taskEngineSource = "docs/superpowers/specs/2026-07-22-task-engine-persistence-design.md";
   const toolchainSource = "docs/superpowers/specs/2026-07-26-workspace-cmake-toolchains-design.md";
   const expected = [
@@ -514,6 +600,107 @@ test("Phase 1 through 4 catalog cites direct no-shell, process-tree, and toolcha
     const end = endOffset === -1 ? lines.length : start + 1 + endOffset;
     const sectionText = lines.slice(start, end).join("\n");
     for (const term of terms) assert.ok(sectionText.includes(term), `${section} must contain ${term}`);
+  }
+});
+
+test("Phase 1 through 9 catalog has the exact complete inventory and source coverage", async () => {
+  const registry = await readCanonicalJson(gateRegistryPath, { label: "Phase 1 through 9 registry", maxBytes: 1024 * 1024 });
+
+  assert.deepEqual(registry.gates.map(({ id }) => id), ALL_GATE_IDS);
+  assert.deepEqual(registry.sources.map(({ path }) => path), ALL_SOURCE_PATHS);
+  assert.equal(validateRegistry(registry), true);
+
+  const references = new Set(registry.gates.flatMap(({ requirementRefs }) => requirementRefs.map(
+    ({ source, section }) => `${source}\0${section}`,
+  )));
+  for (const source of registry.sources) {
+    const markdown = await readFile(join(repositoryRoot, source.path), "utf8");
+    const headings = new Set(markdown.split(/\r?\n/u).map((line) => /^#{1,6} (.+)$/u.exec(line)?.[1]).filter(Boolean));
+    for (const section of source.sections) {
+      assert.ok(headings.has(section), `${source.path} is missing exact heading: ${section}`);
+      assert.ok(references.has(`${source.path}\0${section}`), `${source.path} section is not referenced: ${section}`);
+    }
+  }
+
+  const deferred = registry.gates.filter(({ disposition }) => disposition === "deferred");
+  assert.deepEqual(deferred.map(({ id }) => id), Object.keys(EXACT_DEFERMENTS));
+  for (const gate of registry.gates) {
+    assert.ok(gate.requirementRefs.length > 0, `${gate.id} must cite a direct requirement`);
+    const { commands, jobs, artifacts } = gate.verification;
+    assert.ok(commands.length + jobs.length + artifacts.length > 0, `${gate.id} must declare a verification channel`);
+    assert.equal(gate.disposition, gate.id in EXACT_DEFERMENTS ? "deferred" : "required");
+    assert.deepEqual(gate.deferment, EXACT_DEFERMENTS[gate.id]);
+  }
+});
+
+test("Phase 5 through 8 toolchain, package, signing, and legal gates cite substantive requirements", async () => {
+  const registry = await readCanonicalJson(gateRegistryPath, { label: "Phase 5 through 8 registry", maxBytes: 1024 * 1024 });
+  const coverageSource = "docs/superpowers/specs/2026-08-03-coverage-report-pipeline-design.md";
+  const linuxCoverageSource = "docs/superpowers/specs/2026-09-06-phase7-linux-gcc-coverage-execution-design.md";
+  const runtimeSource = "docs/superpowers/specs/2026-08-27-code-oss-runtime-packaging-design.md";
+  const blockersSource = "docs/superpowers/specs/2026-08-31-formal-packaging-blockers-design.md";
+  const trustedProducerSource = "docs/superpowers/specs/2026-08-28-trusted-code-oss-release-input-production-design.md";
+  const expected = [
+    ["P5-LINUX-CLANG-COVERAGE", coverageSource, "10.1 工具约束", ["clang-cl/Clang", "llvm-profdata", "llvm-cov"]],
+    ["P5-LINUX-GCC-COVERAGE", linuxCoverageSource, "7. GCC/gcov Toolset Identity", ["GCC", "gcov"]],
+    ["P5-WINDOWS-LLVM-COVERAGE", coverageSource, "10.1 工具约束", ["clang-cl/Clang", "llvm-profdata", "llvm-cov"]],
+    ["P8-INSTALL-LIFECYCLE-LINUX", runtimeSource, "Install and Rollback Smoke", ["First-install", "rollback"]],
+    ["P8-INSTALL-LIFECYCLE-WINDOWS", runtimeSource, "Install and Rollback Smoke", ["First-install", "rollback"]],
+    ["P8-LICENSE-AUDIT", runtimeSource, "License Handling", ["license-audit.mjs", "NOTICE"]],
+    ["P8-LINUX-APPIMAGE-PACKAGE", blockersSource, "Linux AppImage", ["appimagetool", "SVG"]],
+    ["P8-WINDOWS-MSIX-PACKAGE", blockersSource, "Windows MSIX", ["package-msix.ps1", "SOURCE_DATE_EPOCH"]],
+    ["P8-LEGAL-THIRD-PARTY", trustedProducerSource, "Goal", ["license/legal review", "separate requirements"]],
+    ["P8-SIGN-WINDOWS", trustedProducerSource, "Goal", ["formal Windows signing", "separate requirements"]],
+  ];
+  const markdownBySource = new Map(await Promise.all([...new Set(expected.map(([, source]) => source))].map(async (source) => [
+    source,
+    await readFile(join(repositoryRoot, source), "utf8"),
+  ])));
+
+  for (const [gateId, source, section, terms] of expected) {
+    const gate = registry.gates.find(({ id }) => id === gateId);
+    assert.ok(gate.requirementRefs.some((reference) => reference.source === source && reference.section === section),
+      `${gateId} must cite ${section}`);
+    const lines = markdownBySource.get(source).split(/\r?\n/u);
+    const start = lines.findIndex((line) => /^#{1,6} (.+)$/u.exec(line)?.[1] === section);
+    assert.notEqual(start, -1, `${source} must contain heading ${section}`);
+    const level = /^#+/u.exec(lines[start])[0].length;
+    const endOffset = lines.slice(start + 1).findIndex((line) => {
+      const match = /^(#{1,6}) /u.exec(line);
+      return match && match[1].length <= level;
+    });
+    const end = endOffset === -1 ? lines.length : start + 1 + endOffset;
+    const sectionText = lines.slice(start, end).join("\n");
+    for (const term of terms) assert.ok(sectionText.includes(term), `${section} must contain ${term}`);
+  }
+
+  const legal = registry.gates.find(({ id }) => id === "P8-LEGAL-THIRD-PARTY");
+  assert.deepEqual(legal.verification, {
+    artifacts: [],
+    commands: ["review exact release candidate notices and licenses"],
+    jobs: [],
+    workflowPath: ".github/workflows/phase9-gates.yml",
+  });
+  const signing = registry.gates.find(({ id }) => id === "P8-SIGN-WINDOWS");
+  assert.deepEqual(signing.verification.artifacts, ["signed-windows-release"]);
+  assert.deepEqual(signing.verification.jobs, ["package-windows", "release-qualification"]);
+});
+
+test("future Phase 9 work remains MISSING and only the approved Phase 8 boundary is DEFERRED", async () => {
+  const registry = await readCanonicalJson(gateRegistryPath, { label: "Phase 1 through 9 registry", maxBytes: 1024 * 1024 });
+  const matrix = evaluateRecordedMatrix({
+    registry,
+    baseline: { schemaVersion: 1, candidateCommit, evaluationMode: "historical", receiptIds: [] },
+    receipts: [],
+    currentCommit,
+    changedPaths: [],
+  });
+
+  for (const gateId of PHASE_9_GATE_IDS) {
+    assert.equal(matrix.gates.find(({ id }) => id === gateId).status, "MISSING", `${gateId} must remain future work`);
+  }
+  for (const gateId of Object.keys(EXACT_DEFERMENTS)) {
+    assert.equal(matrix.gates.find(({ id }) => id === gateId).status, "DEFERRED", `${gateId} must remain explicitly deferred`);
   }
 });
 
