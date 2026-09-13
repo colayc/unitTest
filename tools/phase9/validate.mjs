@@ -203,6 +203,12 @@ function normalizeChangedPath(value) {
   return value;
 }
 
+function testedContentLineageFailure() {
+  const error = phase9Failure("PHASE9_EVIDENCE_UNTRUSTED", "candidate changes include tested content");
+  error.candidateLineageReason = CANDIDATE_LINEAGE_REASON;
+  return error;
+}
+
 export function validateCandidateChanges({ candidateCommit, currentCommit, changedPaths }) {
   if (!COMMIT_PATTERN.test(candidateCommit) || !COMMIT_PATTERN.test(currentCommit) || !Array.isArray(changedPaths)) {
     throw phase9Failure("PHASE9_EVIDENCE_UNTRUSTED", "candidate lineage input is invalid");
@@ -212,10 +218,13 @@ export function validateCandidateChanges({ candidateCommit, currentCommit, chang
     if (normalizedPaths.length === 0) return "exact";
     throw phase9Failure("PHASE9_EVIDENCE_UNTRUSTED", "exact candidate contains changed paths");
   }
-  if (normalizedPaths.length > 0 && normalizedPaths.every((path) => EVIDENCE_ONLY_PATHS.some((prefix) => path.startsWith(prefix)))) {
+  if (normalizedPaths.length === 0) {
+    throw phase9Failure("PHASE9_EVIDENCE_UNTRUSTED", "candidate changed path set is empty");
+  }
+  if (normalizedPaths.every((path) => EVIDENCE_ONLY_PATHS.some((prefix) => path.startsWith(prefix)))) {
     return "evidence-only-descendant";
   }
-  throw phase9Failure("PHASE9_EVIDENCE_UNTRUSTED", "candidate changes include tested content");
+  throw testedContentLineageFailure();
 }
 
 async function execFileText(command, arguments_) {
@@ -237,8 +246,11 @@ async function repositoryState(repositoryRoot, candidateCommit) {
       "-C", repositoryRoot, "merge-base", "--is-ancestor", candidateCommit, currentCommit,
     ]);
   } catch (error) {
-    if (Number.isInteger(error?.code)) {
+    if (error?.code === 1) {
       throw phase9Failure("PHASE9_EVIDENCE_UNTRUSTED", "candidate is not an ancestor", error);
+    }
+    if (Number.isInteger(error?.code)) {
+      throw phase9Failure("PHASE9_EVIDENCE_UNTRUSTED", "candidate ancestry Git execution failed", error);
     }
     throw error;
   }
@@ -303,7 +315,8 @@ export function evaluateRecordedMatrix({ registry, baseline, receipts, currentCo
     try {
       validateCandidateChanges({ candidateCommit: baseline.candidateCommit, currentCommit, changedPaths });
     } catch (error) {
-      if (error?.code !== "PHASE9_EVIDENCE_UNTRUSTED") throw error;
+      if (error?.code !== "PHASE9_EVIDENCE_UNTRUSTED"
+          || error.candidateLineageReason !== CANDIDATE_LINEAGE_REASON) throw error;
       candidateLineageInvalid = true;
     }
   }

@@ -524,6 +524,25 @@ test("candidate mode fails only would-be PASS rows after tested-content changes"
   });
 });
 
+test("candidate mode does not downgrade malformed or unsafe lineage inputs", () => {
+  const receipt = githubReceipt();
+  const base = {
+    registry: validRegistry({ deferred: false }),
+    baseline: validBaseline("candidate", [receipt.receiptId]),
+    receipts: [receipt],
+  };
+  for (const state of [
+    { currentCommit: "d".repeat(40), changedPaths: [] },
+    { currentCommit: "d".repeat(40), changedPaths: ["../unsafe"] },
+    { currentCommit: "not-a-commit", changedPaths: [] },
+  ]) {
+    assert.throws(
+      () => evaluateRecordedMatrix({ ...base, ...state }),
+      /PHASE9_(?:EVIDENCE_UNTRUSTED|GATE_SCHEMA_INVALID)/u,
+    );
+  }
+});
+
 test("historical mode preserves receipt-backed rows after later product changes", () => {
   const receipt = githubReceipt();
   const matrix = evaluateRecordedMatrix({
@@ -566,6 +585,21 @@ test("candidate CLI rejects unrelated history without disclosing repository path
       return true;
     },
   );
+});
+
+test("candidate CLI wraps Git exit 128 as an untrusted execution failure without path disclosure", async () => {
+  const lineage = await createGitLineageFixture();
+  const missingObject = "f".repeat(40);
+  const inputs = await createCliInputs(missingObject);
+  await assert.rejects(
+    execFileAsync(process.execPath, validatorArguments(inputs, lineage.root)),
+    (error) => {
+      assert.match(`${error.stderr}`, /PHASE9_EVIDENCE_UNTRUSTED: validation failed\r?\n$/u);
+      assert.doesNotMatch(`${error.stderr}`, new RegExp(lineage.root.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
+      return true;
+    },
+  );
+  await assert.rejects(readFile(inputs.out, "utf8"), { code: "ENOENT" });
 });
 
 test("candidate CLI passes shell-sensitive repository roots as literal Git arguments", async () => {
