@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -9,13 +9,19 @@ import {
   readCanonicalJson,
   writeCanonicalJson,
 } from "./canonical-json.mjs";
+import schema from "./gates.schema.json" with { type: "json" };
 
 async function fixture(name, bytes) {
   const root = await mkdtemp(join(tmpdir(), "phase9-json-"));
+  fixtureRoots.push(root);
   const path = join(root, name);
   await writeFile(path, bytes);
   return path;
 }
+const fixtureRoots = [];
+test.afterEach(async () => {
+  await Promise.all(fixtureRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
 
 test("canonical JSON recursively sorts object keys and ends with one newline", () => {
   assert.equal(
@@ -72,4 +78,38 @@ test("writer creates parents and writes canonical UTF-8 bytes", async () => {
   const path = join(root, "nested", "output.json");
   await writeCanonicalJson(path, { b: "值", a: 1 });
   assert.deepEqual(await readCanonicalJson(path, { label: "output", maxBytes: 1024 }), { a: 1, b: "值" });
+});
+
+test("writer rejects unsafe top-level values", async () => {
+  const root = await mkdtemp(join(tmpdir(), "phase9-json-"));
+  try {
+    for (const value of [[], null, true, 1, "text", undefined, Number.NaN]) {
+      await assert.rejects(writeCanonicalJson(join(root, "unsafe.json"), value), /PHASE9_GATE_SCHEMA_INVALID/u);
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("schema contract is closed and contains the required definitions", () => {
+  assert.equal(schema.$schema, "https://json-schema.org/draft/2020-12/schema");
+  assert.equal(schema.$id, "https://unit-test-ide.invalid/schemas/phase9-gates-v1.json");
+  for (const name of ["registry", "baseline", "githubActionsReceipt", "manualApprovalReceipt", "matrix", "runSnapshot", "jobSnapshot", "artifactSnapshot"]) {
+    assert.ok(schema.$defs[name]);
+  }
+  const defs = schema.$defs;
+  assert.deepEqual(defs.commit.pattern, "^[0-9a-f]{40}$");
+  assert.deepEqual(defs.digest.pattern, "^[0-9a-f]{64}$");
+  assert.deepEqual(defs.decimalId.pattern, "^[1-9][0-9]*$");
+  assert.deepEqual(defs.status.enum, ["PASS", "MISSING", "FAILED", "DEFERRED"]);
+  assert.deepEqual(defs.conclusion.enum, ["success", "failure", "cancelled", "timed_out", "action_required", "neutral", "skipped"]);
+  assert.deepEqual(defs.baseline.properties.evaluationMode.enum, ["historical", "candidate"]);
+  assert.equal(defs.registry.properties.schemaVersion.const, 1);
+  assert.equal(defs.baseline.properties.schemaVersion.const, 1);
+  assert.equal(defs.matrix.properties.schemaVersion.const, 1);
+  assert.equal(defs.receipt.oneOf.length, 2);
+  const visit = (value) => {
+    if (!value || typeof value !== "object") return;
+    if (value.type === "object") assert.equal(value.additionalProperties, false);
+    for (const child of Object.values(value)) visit(child);
+  };
+  visit(schema);
 });

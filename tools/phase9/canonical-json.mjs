@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, open, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 export class Phase9GateError extends Error {
@@ -24,15 +24,54 @@ function canonicalValue(value) {
   return value;
 }
 
+function assertSafeJsonValue(value) {
+  if (value === null) return;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw phase9Failure("PHASE9_GATE_SCHEMA_INVALID", "value is not valid JSON");
+    return;
+  }
+  if (typeof value === "string" || typeof value === "boolean") return;
+  if (Array.isArray(value)) {
+    for (const item of value) assertSafeJsonValue(item);
+    return;
+  }
+  if (typeof value === "object") {
+    for (const [key, item] of Object.entries(value)) {
+      if (typeof key !== "string") throw phase9Failure("PHASE9_GATE_SCHEMA_INVALID", "value is not valid JSON");
+      assertSafeJsonValue(item);
+    }
+    return;
+  }
+  throw phase9Failure("PHASE9_GATE_SCHEMA_INVALID", "value is not valid JSON");
+}
+
 export function encodeCanonicalJson(value) {
+  if (value === null || Array.isArray(value) || typeof value !== "object") {
+    throw phase9Failure("PHASE9_GATE_SCHEMA_INVALID", "top-level value must be an object");
+  }
+  assertSafeJsonValue(value);
   return `${JSON.stringify(canonicalValue(value), null, 2)}\n`;
 }
 
 export async function readCanonicalJson(path, { label, maxBytes }) {
-  const bytes = await readFile(path);
-  if (bytes.length === 0 || bytes.length > maxBytes) {
-    throw phase9Failure("PHASE9_GATE_SCHEMA_INVALID", `${label} byte length is invalid`);
+  const chunks = [];
+  let total = 0;
+  const handle = await open(path, "r");
+  try {
+    while (total <= maxBytes) {
+      const size = Math.min(65536, maxBytes + 1 - total);
+      if (size <= 0) break;
+      const chunk = Buffer.allocUnsafe(size);
+      const { bytesRead } = await handle.read(chunk, 0, size, null);
+      if (bytesRead === 0) break;
+      chunks.push(chunk.subarray(0, bytesRead));
+      total += bytesRead;
+    }
+  } finally {
+    await handle.close();
   }
+  if (total === 0 || total > maxBytes) throw phase9Failure("PHASE9_GATE_SCHEMA_INVALID", `${label} byte length is invalid`);
+  const bytes = Buffer.concat(chunks, total);
   let text;
   try {
     text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
