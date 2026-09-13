@@ -130,7 +130,8 @@ test("Phase 9 audit workflow is read-only, fixed-coordinate, and fail-closed", a
   assert.match(workflow, /GH_TOKEN: \$\{\{ github\.token \}\}/u);
 
   assert.match(workflow, /node tools\/phase9\/audit\.mjs/u);
-  assert.match(workflow, /--recorded-matrix docs\/superpowers\/evidence\/phase9\/gate-matrix\.json/u);
+  assert.match(workflow, /--recorded-matrix \.superpowers\/phase9\/recorded-matrix\.json/u);
+  assert.doesNotMatch(workflow, /--recorded-matrix docs\/superpowers\/evidence\/phase9\/gate-matrix\.json/u);
   assert.match(workflow, /--receipts docs\/superpowers\/evidence\/phase9\/receipts/u);
   assert.match(workflow, /--snapshots \.superpowers\/phase9\/snapshots/u);
   assert.match(workflow, /--json-out \.superpowers\/phase9\/audit\/phase9-gate-matrix\.json/u);

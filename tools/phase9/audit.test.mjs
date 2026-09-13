@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 
 import { writeCanonicalJson } from "./canonical-json.mjs";
 import { auditGithubReceipt, evaluateAuditedMatrix } from "./audit.mjs";
+import { ALLOWED_DEFERRED_GATE_IDS, evaluateRecordedMatrix } from "./validate.mjs";
 
 const execFileAsync = promisify(execFile);
 const candidateCommit = "a".repeat(40);
@@ -358,6 +359,60 @@ test("a recorded PASS remains bound to its candidate commit and gate ID", () => 
     recordedMatrix: recordedMatrix(), receipts: [unrelatedReceipt], snapshotsByRunId: snapshots(),
   });
   assert.equal(gateMismatch.gates[0].status, "FAILED");
+});
+
+test("auditing preserves validator lineage failures after tested-content drift", () => {
+  const receipt = validReceipt();
+  const registry = {
+    schemaVersion: 1,
+    product: "unit-test-ide",
+    repository: "colayc/unitTest",
+    allowedDeferredGateIds: [...ALLOWED_DEFERRED_GATE_IDS],
+    sources: [{ path: "docs/spec.md", sections: ["Acceptance"] }],
+    gates: [{
+      id: "P9-MATRIX-UNIT",
+      phase: 9,
+      category: "quality",
+      title: "Matrix unit tests",
+      requirementRefs: [{ source: "docs/spec.md", section: "Acceptance" }],
+      disposition: "required",
+      verification: {
+        commands: [],
+        workflowPath: receipt.evidence.workflowPath,
+        jobs: ["verify-linux"],
+        artifacts: ["native-toolchain-linux-1"],
+      },
+    }],
+  };
+  const freshMatrix = evaluateRecordedMatrix({
+    registry,
+    baseline: {
+      schemaVersion: 1,
+      candidateCommit,
+      evaluationMode: "candidate",
+      receiptIds: [receiptId],
+    },
+    receipts: [receipt],
+    currentCommit: "c".repeat(40),
+    changedPaths: ["apps/test-service/internal/task/manager.go"],
+  });
+
+  assert.deepEqual(freshMatrix.gates[0], {
+    id: "P9-MATRIX-UNIT",
+    status: "FAILED",
+    receiptId,
+    artifactAvailability: "available",
+    reason: "candidate-descendant-changed-tested-content",
+  });
+  const auditedMatrix = evaluateAuditedMatrix({
+    recordedMatrix: freshMatrix,
+    receipts: [receipt],
+    snapshotsByRunId: snapshots(),
+  });
+  assert.deepEqual(auditedMatrix.counts, { pass: 0, missing: 0, failed: 1, deferred: 0 });
+  assert.equal(auditedMatrix.releaseReady, false);
+  assert.equal(auditedMatrix.gates[0].status, "FAILED");
+  assert.equal(auditedMatrix.gates[0].reason, "candidate-descendant-changed-tested-content");
 });
 
 test("CLI loads only local fixed snapshots and writes deterministic renderer output", async () => {
