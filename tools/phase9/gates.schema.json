@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://unit-test-ide.invalid/schemas/phase9-gates-v1.json",
+  "$ref": "#/$defs/registry",
+  "$defs": {
+    "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "decimalId": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+    "utcIso": { "type": "string", "format": "date-time", "pattern": "Z$" },
+    "status": { "enum": ["PASS", "MISSING", "FAILED", "DEFERRED"] },
+    "conclusion": { "enum": ["success", "failure", "cancelled", "timed_out", "action_required", "neutral", "skipped"] },
+    "requirementRef": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source", "section"],
+      "properties": { "source": { "type": "string" }, "section": { "type": "string" } }
+    },
+    "source": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "sections"],
+      "properties": { "path": { "type": "string" }, "sections": { "type": "array", "items": { "type": "string" }, "minItems": 1 } }
+    },
+    "verification": {
+      "type": "object", "additionalProperties": false,
+      "required": ["commands", "workflowPath", "jobs", "artifacts"],
+      "properties": {
+        "commands": { "type": "array", "items": { "type": "string" } },
+        "workflowPath": { "type": "string" },
+        "jobs": { "type": "array", "items": { "type": "string" } },
+        "artifacts": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "gate": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "phase", "category", "title", "requirementRefs", "disposition", "verification"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[A-Z0-9][A-Z0-9-]*$" }, "phase": { "type": "integer", "minimum": 1, "maximum": 9 },
+        "category": { "type": "string" }, "title": { "type": "string" },
+        "requirementRefs": { "type": "array", "items": { "$ref": "#/$defs/requirementRef" }, "minItems": 1 },
+        "disposition": { "enum": ["required", "deferred"] }, "verification": { "$ref": "#/$defs/verification" },
+        "deferment": { "type": "object", "additionalProperties": false, "required": ["reason", "resumeCondition"], "properties": { "reason": { "type": "string" }, "resumeCondition": { "type": "string" } } }
+      }
+    },
+    "registry": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "product", "repository", "allowedDeferredGateIds", "sources", "gates"],
+      "properties": {
+        "schemaVersion": { "const": 1 }, "product": { "type": "string" }, "repository": { "type": "string" },
+        "allowedDeferredGateIds": { "type": "array", "items": { "type": "string" } },
+        "sources": { "type": "array", "items": { "$ref": "#/$defs/source" } }, "gates": { "type": "array", "items": { "$ref": "#/$defs/gate" } }
+      }
+    },
+    "baseline": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "candidateCommit", "evaluationMode", "receiptIds"],
+      "properties": { "schemaVersion": { "const": 1 }, "candidateCommit": { "$ref": "#/$defs/commit" }, "evaluationMode": { "enum": ["historical", "candidate"] }, "receiptIds": { "type": "array", "items": { "type": "string" } } }
+    },
+    "githubActionsReceipt": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "receiptId", "candidateCommit", "observedAt", "gateIds", "evidence"],
+      "properties": {
+        "schemaVersion": { "const": 1 }, "receiptId": { "type": "string" }, "candidateCommit": { "$ref": "#/$defs/commit" }, "observedAt": { "$ref": "#/$defs/utcIso" }, "gateIds": { "type": "array", "items": { "type": "string" } },
+        "evidence": { "type": "object", "additionalProperties": false, "required": ["kind", "repository", "workflowPath", "runId", "runAttempt", "event", "headSha", "conclusion", "jobs", "artifacts"], "properties": {
+          "kind": { "const": "github-actions" }, "repository": { "type": "string" }, "workflowPath": { "type": "string" }, "runId": { "$ref": "#/$defs/decimalId" }, "runAttempt": { "type": "integer", "minimum": 1 }, "event": { "type": "string" }, "headSha": { "$ref": "#/$defs/commit" }, "conclusion": { "$ref": "#/$defs/conclusion" },
+          "jobs": { "type": "array", "items": { "$ref": "#/$defs/job" } }, "artifacts": { "type": "array", "items": { "$ref": "#/$defs/artifact" } }
+        } }
+      }
+    },
+    "manualApprovalReceipt": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "receiptId", "candidateCommit", "observedAt", "gateIds", "evidence"],
+      "properties": {
+        "schemaVersion": { "const": 1 }, "receiptId": { "type": "string" }, "candidateCommit": { "$ref": "#/$defs/commit" }, "observedAt": { "$ref": "#/$defs/utcIso" }, "gateIds": { "type": "array", "items": { "type": "string" } },
+        "evidence": { "type": "object", "additionalProperties": false, "required": ["kind", "approvalPath", "approvalDigest", "approvedAt", "role", "decision"], "properties": { "kind": { "const": "manual-approval" }, "approvalPath": { "type": "string" }, "approvalDigest": { "$ref": "#/$defs/digest" }, "approvedAt": { "$ref": "#/$defs/utcIso" }, "role": { "type": "string" }, "decision": { "enum": ["approved", "rejected"] } } }
+      }
+    },
+    "receipt": { "oneOf": [{ "$ref": "#/$defs/githubActionsReceipt" }, { "$ref": "#/$defs/manualApprovalReceipt" }] },
+    "job": { "type": "object", "additionalProperties": false, "required": ["name", "conclusion"], "properties": { "name": { "type": "string" }, "conclusion": { "$ref": "#/$defs/conclusion" } } },
+    "artifact": { "type": "object", "additionalProperties": false, "required": ["id", "name", "digest", "expired"], "properties": { "id": { "$ref": "#/$defs/decimalId" }, "name": { "type": "string" }, "digest": { "$ref": "#/$defs/digest" }, "expired": { "type": "boolean" } } },
+    "matrixGate": { "type": "object", "additionalProperties": false, "required": ["id", "status"], "properties": { "id": { "type": "string" }, "status": { "$ref": "#/$defs/status" }, "receiptId": { "type": "string" }, "artifactAvailability": { "enum": ["available", "expired", "missing"] } } },
+    "matrix": { "type": "object", "additionalProperties": false, "required": ["schemaVersion", "catalogComplete", "releaseReady", "evaluationMode", "candidateCommit", "currentCommit", "counts", "gates"], "properties": { "schemaVersion": { "const": 1 }, "catalogComplete": { "type": "boolean" }, "releaseReady": { "type": "boolean" }, "evaluationMode": { "enum": ["historical", "candidate"] }, "candidateCommit": { "$ref": "#/$defs/commit" }, "currentCommit": { "$ref": "#/$defs/commit" }, "counts": { "type": "object", "additionalProperties": false, "required": ["pass", "missing", "failed", "deferred"], "properties": { "pass": { "type": "integer", "minimum": 0 }, "missing": { "type": "integer", "minimum": 0 }, "failed": { "type": "integer", "minimum": 0 }, "deferred": { "type": "integer", "minimum": 0 } } }, "gates": { "type": "array", "items": { "$ref": "#/$defs/matrixGate" } } } },
+    "runSnapshot": { "type": "object", "additionalProperties": false, "required": ["id", "run_attempt", "event", "head_sha", "status", "conclusion", "path", "repository"], "properties": { "id": { "type": "integer", "minimum": 1 }, "run_attempt": { "type": "integer", "minimum": 1 }, "event": { "type": "string" }, "head_sha": { "$ref": "#/$defs/commit" }, "status": { "type": "string" }, "conclusion": { "$ref": "#/$defs/conclusion" }, "path": { "type": "string" }, "repository": { "type": "object", "additionalProperties": false, "required": ["full_name"], "properties": { "full_name": { "type": "string" } } } } },
+    "jobSnapshot": { "type": "object", "additionalProperties": false, "required": ["total_count", "jobs"], "properties": { "total_count": { "type": "integer", "minimum": 0 }, "jobs": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["id", "run_id", "name", "status", "conclusion"], "properties": { "id": { "type": "integer", "minimum": 1 }, "run_id": { "type": "integer", "minimum": 1 }, "name": { "type": "string" }, "status": { "type": "string" }, "conclusion": { "$ref": "#/$defs/conclusion" } } } } } },
+    "artifactSnapshot": { "type": "object", "additionalProperties": false, "required": ["total_count", "artifacts"], "properties": { "total_count": { "type": "integer", "minimum": 0 }, "artifacts": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["id", "name", "digest", "expired", "workflow_run"], "properties": { "id": { "type": "integer", "minimum": 1 }, "name": { "type": "string" }, "digest": { "type": "string" }, "expired": { "type": "boolean" }, "workflow_run": { "type": "object", "additionalProperties": false, "required": ["id"], "properties": { "id": { "type": "integer", "minimum": 1 } } } } } } } }
+  }
+}
