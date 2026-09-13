@@ -1,0 +1,282 @@
+{
+  "candidateCommit": "1e20a5ceee370e9823f9fe05f40980f893cd9ed3",
+  "catalogComplete": true,
+  "counts": {
+    "deferred": 3,
+    "failed": 0,
+    "missing": 49,
+    "pass": 10
+  },
+  "currentCommit": "7a42c0d5d33b7e78ba86cbdfde60fc22b66f36f6",
+  "evaluationMode": "historical",
+  "gates": [
+    {
+      "id": "P1-IPC-PER-USER-AUTH",
+      "status": "MISSING"
+    },
+    {
+      "id": "P1-PROTOCOL-NO-SHELL",
+      "status": "MISSING"
+    },
+    {
+      "id": "P1-PROTOCOL-VERSION-COMPAT",
+      "status": "MISSING"
+    },
+    {
+      "id": "P1-TOKEN-FILE-SECURE",
+      "status": "MISSING"
+    },
+    {
+      "id": "P2-ARTIFACT-ATOMIC-CLEANUP",
+      "status": "MISSING"
+    },
+    {
+      "id": "P2-EVENT-REPLAY-PERSISTENCE",
+      "status": "MISSING"
+    },
+    {
+      "id": "P2-FAILURE-OWNERSHIP",
+      "status": "MISSING"
+    },
+    {
+      "id": "P2-PROCESS-TREE-TERMINATION",
+      "status": "MISSING"
+    },
+    {
+      "id": "P2-TASK-CANCEL-TIMEOUT",
+      "status": "MISSING"
+    },
+    {
+      "id": "P3-CMAKE-CONFIGURE-BUILD",
+      "status": "MISSING"
+    },
+    {
+      "id": "P3-DIAGNOSTIC-URI",
+      "status": "MISSING"
+    },
+    {
+      "id": "P3-TOOLCHAIN-LINUX-CLANG",
+      "status": "MISSING"
+    },
+    {
+      "id": "P3-TOOLCHAIN-LINUX-GCC",
+      "status": "MISSING"
+    },
+    {
+      "id": "P3-TOOLCHAIN-WINDOWS-CLANGCL",
+      "status": "MISSING"
+    },
+    {
+      "id": "P3-TOOLCHAIN-WINDOWS-MSVC",
+      "status": "MISSING"
+    },
+    {
+      "id": "P3-WORKSPACE-TRUST-PATHS",
+      "status": "MISSING"
+    },
+    {
+      "id": "P4-CPPUTEST-CPPUMOCK",
+      "status": "MISSING"
+    },
+    {
+      "id": "P4-DISCOVERY-CTEST",
+      "status": "MISSING"
+    },
+    {
+      "id": "P4-RECOVERY-AND-10000-BACKEND",
+      "status": "MISSING"
+    },
+    {
+      "id": "P4-SELECTION-AND-RERUN",
+      "status": "MISSING"
+    },
+    {
+      "id": "P4-UNITY-CMOCK",
+      "status": "MISSING"
+    },
+    {
+      "id": "P5-COVERAGE-FAULT-MAPPING",
+      "status": "MISSING"
+    },
+    {
+      "id": "P5-COVERAGE-REPORTS",
+      "status": "MISSING"
+    },
+    {
+      "artifactAvailability": "missing",
+      "id": "P5-LINUX-CLANG-COVERAGE",
+      "status": "MISSING"
+    },
+    {
+      "id": "P5-LINUX-GCC-COVERAGE",
+      "receiptId": "github-actions-34731651809-1",
+      "status": "PASS"
+    },
+    {
+      "id": "P5-PROTOCOL-V14-COMPAT",
+      "status": "MISSING"
+    },
+    {
+      "id": "P5-WINDOWS-LLVM-COVERAGE",
+      "status": "MISSING"
+    },
+    {
+      "id": "P6-BRANDING-AND-BUILTIN-REGISTRATION",
+      "status": "MISSING"
+    },
+    {
+      "artifactAvailability": "missing",
+      "id": "P6-CODEOSS-HOST-SMOKE",
+      "status": "MISSING"
+    },
+    {
+      "id": "P6-SERVICE-LIFECYCLE",
+      "status": "MISSING"
+    },
+    {
+      "id": "P6-TESTING-API",
+      "status": "MISSING"
+    },
+    {
+      "id": "P6-TESTING-API-10000-ITEMS",
+      "status": "MISSING"
+    },
+    {
+      "id": "P6-WORKSPACE-TRUST-GATE",
+      "status": "MISSING"
+    },
+    {
+      "artifactAvailability": "missing",
+      "id": "P7-COVERAGE-UI-AND-SOURCE-DECORATION",
+      "status": "MISSING"
+    },
+    {
+      "artifactAvailability": "missing",
+      "id": "P7-HISTORY-AND-ARTIFACT-BROWSER",
+      "status": "MISSING"
+    },
+    {
+      "id": "P7-LINUX-GCC-OFFLINE",
+      "receiptId": "github-actions-34731651809-1",
+      "status": "PASS"
+    },
+    {
+      "artifactAvailability": "missing",
+      "id": "P7-MAIN-USER-JOURNEY",
+      "status": "MISSING"
+    },
+    {
+      "artifactAvailability": "missing",
+      "id": "P7-MOCK-CONFIGURATION-UX",
+      "status": "MISSING"
+    },
+    {
+      "id": "P7-WINDOWS-WFP-OFFLINE",
+      "receiptId": "github-actions-34731651809-1",
+      "status": "PASS"
+    },
+    {
+      "id": "P8-DOCS-CLOSEOUT",
+      "status": "DEFERRED"
+    },
+    {
+      "id": "P8-INSTALL-LIFECYCLE-LINUX",
+      "receiptId": "github-actions-34731651809-1",
+      "status": "PASS"
+    },
+    {
+      "id": "P8-INSTALL-LIFECYCLE-WINDOWS",
+      "receiptId": "github-actions-34731651809-1",
+      "status": "PASS"
+    },
+    {
+      "id": "P8-LEGAL-THIRD-PARTY",
+      "status": "DEFERRED"
+    },
+    {
+      "id": "P8-LICENSE-AUDIT",
+      "receiptId": "github-actions-34731651809-1",
+      "status": "PASS"
+    },
+    {
+      "id": "P8-LINUX-APPIMAGE-PACKAGE",
+      "receiptId": "github-actions-34731651809-1",
+      "status": "PASS"
+    },
+    {
+      "id": "P8-QUALIFICATION-UNSIGNED",
+      "receiptId": "github-actions-34731651809-1",
+      "status": "PASS"
+    },
+    {
+      "id": "P8-RUNTIME-PRODUCER-PROVENANCE",
+      "receiptId": "github-actions-34728889872-1",
+      "status": "PASS"
+    },
+    {
+      "id": "P8-SIGN-WINDOWS",
+      "status": "DEFERRED"
+    },
+    {
+      "id": "P8-WINDOWS-MSIX-PACKAGE",
+      "receiptId": "github-actions-34731651809-1",
+      "status": "PASS"
+    },
+    {
+      "id": "P9-MATRIX-CONTRACT",
+      "status": "MISSING"
+    },
+    {
+      "id": "P9-MATRIX-E2E",
+      "status": "MISSING"
+    },
+    {
+      "id": "P9-MATRIX-FAULT-INJECTION",
+      "status": "MISSING"
+    },
+    {
+      "id": "P9-MATRIX-INTEGRATION",
+      "status": "MISSING"
+    },
+    {
+      "id": "P9-MATRIX-UNIT",
+      "status": "MISSING"
+    },
+    {
+      "id": "P9-PERF-CANCEL",
+      "status": "MISSING"
+    },
+    {
+      "id": "P9-PERF-DISCOVERY-10000",
+      "status": "MISSING"
+    },
+    {
+      "id": "P9-PERF-FILTER",
+      "status": "MISSING"
+    },
+    {
+      "artifactAvailability": "missing",
+      "id": "P9-PERF-HARDWARE-BASELINE",
+      "status": "MISSING"
+    },
+    {
+      "id": "P9-PERF-MEMORY",
+      "status": "MISSING"
+    },
+    {
+      "id": "P9-PERF-REPORT",
+      "status": "MISSING"
+    },
+    {
+      "id": "P9-PERF-STARTUP",
+      "status": "MISSING"
+    },
+    {
+      "id": "P9-UPSTREAM-CODEOSS",
+      "status": "MISSING"
+    }
+  ],
+  "recordedByCommit": "7a42c0d5d33b7e78ba86cbdfde60fc22b66f36f6",
+  "releaseReady": false,
+  "schemaVersion": 1
+}

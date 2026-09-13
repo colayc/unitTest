@@ -1023,6 +1023,26 @@ test("historical mode preserves receipt-backed rows after later product changes"
   assert.equal("reason" in matrix.gates[0], false);
 });
 
+test("checked-in historical evidence keeps deferred and unproven gates closed", async () => {
+  const evidenceRoot = join(repositoryRoot, "docs", "superpowers", "evidence", "phase9");
+  const inputs = await loadPhase9Inputs({
+    registryPath: gateRegistryPath,
+    baselinePath: join(evidenceRoot, "baseline.json"),
+    receiptsDirectory: join(evidenceRoot, "receipts"),
+  });
+  const matrix = await readCanonicalJson(join(evidenceRoot, "gate-matrix.json"), {
+    label: "checked-in gate matrix",
+    maxBytes: 1024 * 1024,
+  });
+  const gatesById = new Map(matrix.gates.map((gate) => [gate.id, gate]));
+
+  assert.equal(inputs.baseline.evaluationMode, "historical");
+  assert.equal(matrix.evaluationMode, "historical");
+  assert.equal(matrix.releaseReady, false);
+  assert.equal(gatesById.get("P8-SIGN-WINDOWS")?.status, "DEFERRED");
+  assert.equal(gatesById.get("P9-PERF-MEMORY")?.status, "MISSING");
+});
+
 test("candidate CLI derives tested-content changes from Git", async () => {
   const lineage = await createGitLineageFixture();
   const inputs = await createCliInputs(lineage.candidate);
