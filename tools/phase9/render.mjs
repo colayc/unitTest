@@ -154,6 +154,7 @@ async function main() {
   const args = parseArguments(process.argv.slice(2));
   const inputs = await loadPhase9Inputs({ registryPath: args.registry, baselinePath: args.baseline, receiptsDirectory: args.receipts });
   let recordedByCommit;
+  let recordedCurrentCommit;
   if (args.check === true) {
     let existing;
     try {
@@ -162,13 +163,15 @@ async function main() {
       throw phase9Failure("PHASE9_MATRIX_DRIFT", "existing matrix JSON is invalid", error);
     }
     recordedByCommit = existing.recordedByCommit;
-    if (!COMMIT_PATTERN.test(recordedByCommit ?? "")) {
+    recordedCurrentCommit = existing.currentCommit;
+    if (!COMMIT_PATTERN.test(recordedByCommit ?? "") || !COMMIT_PATTERN.test(recordedCurrentCommit ?? "")) {
       throw phase9Failure("PHASE9_MATRIX_DRIFT", "existing recorded commit is invalid");
     }
   }
   const state = await repositoryState(args["repository-root"], inputs.baseline.candidateCommit);
   const matrix = evaluateRecordedMatrix({ ...inputs, ...state });
   const currentCommit = state.currentCommit;
+  matrix.currentCommit = recordedCurrentCommit ?? currentCommit;
   matrix.recordedByCommit = recordedByCommit ?? currentCommit;
   matrix.gates = matrix.gates.map((gate) => {
     const definition = inputs.registry.gates.find(({ id }) => id === gate.id);

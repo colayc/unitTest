@@ -1,0 +1,84 @@
+name: Phase 9 gate evidence audit
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Validate recorded Phase 9 evidence offline
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p .superpowers/phase9
+          node tools/phase9/validate.mjs \
+            --registry tools/phase9/gates.json \
+            --baseline docs/superpowers/evidence/phase9/baseline.json \
+            --receipts docs/superpowers/evidence/phase9/receipts \
+            --repository-root . \
+            --out .superpowers/phase9/recorded-matrix.json \
+            --requests-out .superpowers/phase9/requests.json
+
+      - name: Fetch fixed GitHub Actions evidence snapshots
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mapfile -t run_ids < <(jq -r '.runIds[]' .superpowers/phase9/requests.json)
+          for run_id in "${run_ids[@]}"; do
+            [[ "$run_id" =~ ^[1-9][0-9]*$ ]] || {
+              echo 'PHASE9_GATE_SCHEMA_INVALID: run ID is not canonical' >&2
+              exit 1
+            }
+            mkdir -p ".superpowers/phase9/snapshots/$run_id"
+            gh api "repos/colayc/unitTest/actions/runs/$run_id" > ".superpowers/phase9/snapshots/$run_id/run.json"
+            gh api "repos/colayc/unitTest/actions/runs/$run_id/jobs?per_page=100" > ".superpowers/phase9/snapshots/$run_id/jobs.json"
+            gh api "repos/colayc/unitTest/actions/runs/$run_id/artifacts?per_page=100" > ".superpowers/phase9/snapshots/$run_id/artifacts.json"
+          done
+
+      - name: Audit Phase 9 evidence offline
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p .superpowers/phase9/audit
+          node tools/phase9/audit.mjs \
+            --recorded-matrix docs/superpowers/evidence/phase9/gate-matrix.json \
+            --receipts docs/superpowers/evidence/phase9/receipts \
+            --snapshots .superpowers/phase9/snapshots \
+            --json-out .superpowers/phase9/audit/phase9-gate-matrix.json \
+            --markdown-out .superpowers/phase9/audit/phase9-gate-matrix.md
+
+      - name: Upload Phase 9 audit evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: phase9-gate-audit-${{ github.run_attempt }}
+          path: |
+            .superpowers/phase9/audit/phase9-gate-matrix.json
+            .superpowers/phase9/audit/phase9-gate-matrix.md
+          if-no-files-found: error
+          retention-days: 14

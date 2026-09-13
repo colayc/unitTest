@@ -421,6 +421,10 @@ test("renderer CLI check preserves a valid recorded snapshot commit across HEAD 
   await writeFile(markdownOut, markdown);
   const beforeJson = await readFile(jsonOut);
   const beforeMarkdown = await readFile(markdownOut);
+  const laterEvidencePath = join(lineage.root, "docs", "superpowers", "evidence", "phase9", "later.json");
+  await writeFile(laterEvidencePath, "{}\n");
+  await git(lineage.root, ["add", "--", "docs/superpowers/evidence/phase9/later.json"]);
+  await git(lineage.root, ["commit", "-m", "later evidence"]);
   await execFileAsync(process.execPath, [...args, "--check"]);
   assert.deepEqual(await readFile(jsonOut), beforeJson);
   assert.deepEqual(await readFile(markdownOut), beforeMarkdown);
