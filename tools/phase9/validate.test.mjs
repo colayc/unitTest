@@ -443,6 +443,24 @@ test("renderer CLI check rejects malformed recorded snapshot commits without wri
   assert.deepEqual(await readFile(markdownOut), beforeMarkdown);
 });
 
+test("renderer CLI check detects changed receipt status without overwriting either output", async () => {
+  const lineage = await createGitLineageFixture();
+  const inputs = await createCliInputs(lineage.candidate);
+  const markdownOut = join(lineage.root, "matrix.md");
+  const jsonOut = join(lineage.root, "matrix.json");
+  const args = [join(import.meta.dirname, "render.mjs"), "--registry", inputs.registryPath, "--baseline", inputs.baselinePath, "--receipts", inputs.receiptsDirectory, "--repository-root", lineage.root, "--json-out", jsonOut, "--markdown-out", markdownOut];
+  await execFileAsync(process.execPath, args);
+  const beforeJson = await readFile(jsonOut);
+  const beforeMarkdown = await readFile(markdownOut);
+  const receiptPath = join(inputs.receiptsDirectory, "receipt.json");
+  const receipt = JSON.parse(await readFile(receiptPath, "utf8"));
+  receipt.evidence.conclusion = "failure";
+  await writeCanonicalJson(receiptPath, receipt);
+  await assert.rejects(execFileAsync(process.execPath, [...args, "--check"]), /PHASE9_MATRIX_DRIFT/u);
+  assert.deepEqual(await readFile(jsonOut), beforeJson);
+  assert.deepEqual(await readFile(markdownOut), beforeMarkdown);
+});
+
 test("canonical JSON recursively sorts object keys and ends with one newline", () => {
   assert.equal(
     encodeCanonicalJson({ z: 1, a: { y: 2, x: 3 }, list: [{ b: 2, a: 1 }] }),
