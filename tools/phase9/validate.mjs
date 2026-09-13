@@ -38,6 +38,7 @@ addFormats(ajv);
 const validateRegistrySchema = ajv.compile(schema);
 const validateBaselineSchema = ajv.getSchema(`${schema.$id}#/$defs/baseline`);
 const validateReceiptSchema = ajv.getSchema(`${schema.$id}#/$defs/receipt`);
+const validateMatrixSchema = ajv.getSchema(`${schema.$id}#/$defs/matrix`);
 
 function schemaFailure(label) {
   throw phase9Failure("PHASE9_GATE_SCHEMA_INVALID", `${label} is invalid`);
@@ -195,6 +196,13 @@ export function validateReceipt(value) {
     assertSafeRepositoryPath(value.evidence.approvalPath, "approval path");
     assertNonemptyExactString(value.evidence.role, "approval role");
   }
+  return true;
+}
+
+export function validateMatrix(value) {
+  assertSchema(validateMatrixSchema, value, "matrix");
+  const gateIds = value.gates.map(({ id }) => id);
+  if (hasDuplicates(gateIds)) schemaFailure("matrix gates");
   return true;
 }
 

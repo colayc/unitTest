@@ -345,12 +345,12 @@ test("renderer emits exact deterministic Markdown summary, sorted gates, reasons
     "",
     "## Gates",
     "",
-    "| Gate | Phase | Category | Status | Evidence | Reason |",
-    "|---|---:|---|---|---|---|",
-    "| P8-DOCS-CLOSEOUT | 8 | docs\\\\for\\ncloseout | DEFERRED |  |  |",
-    "| P9-FAILED | 9 | qa | FAILED | receipt-3 | candidate-descendant-changed-tested-content |",
-    "| P9-MATRIX-UNIT | 9 | quality\\|checks | PASS | receipt\\`1 |  |",
-    "| P9-MISSING | 9 | qa | MISSING |  |  |",
+    "| Gate | Phase | Category | Status | Evidence | Availability | Reason |",
+    "|---|---:|---|---|---|---|---|",
+    "| P8-DOCS-CLOSEOUT | 8 | docs\\\\for\\ncloseout | DEFERRED |  |  |  |",
+    "| P9-FAILED | 9 | qa | FAILED | receipt-3 |  | candidate-descendant-changed-tested-content |",
+    "| P9-MATRIX-UNIT | 9 | quality\\|checks | PASS | receipt\\`1 | available |  |",
+    "| P9-MISSING | 9 | qa | MISSING |  |  |  |",
     "",
   ].join("\n"));
 });

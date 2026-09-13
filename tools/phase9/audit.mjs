@@ -4,6 +4,7 @@ import { pathToFileURL } from "node:url";
 
 import { phase9Failure, readCanonicalJson } from "./canonical-json.mjs";
 import { writeMatrixOutputs } from "./render.mjs";
+import { validateMatrix } from "./validate.mjs";
 
 const EXPECTED_REPOSITORY = "colayc/unitTest";
 const RECEIPT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
@@ -283,10 +284,8 @@ function downgradePass(row) {
 }
 
 export function evaluateAuditedMatrix({ recordedMatrix, receipts, snapshotsByRunId }) {
-  if (!isObject(recordedMatrix)
-      || !["candidate", "historical"].includes(recordedMatrix.evaluationMode)
-      || !isDenseArray(recordedMatrix.gates)
-      || !isDenseArray(receipts)
+  validateMatrix(recordedMatrix);
+  if (!isDenseArray(receipts)
       || (!isObject(snapshotsByRunId) && !(snapshotsByRunId instanceof Map))) {
     throw phase9Failure("PHASE9_GATE_SCHEMA_INVALID", "audited matrix inputs are invalid");
   }
@@ -326,7 +325,7 @@ export function evaluateAuditedMatrix({ recordedMatrix, receipts, snapshotsByRun
   const counts = { pass: 0, missing: 0, failed: 0, deferred: 0 };
   for (const gate of gates) counts[gate.status.toLowerCase()] += 1;
   const allArtifactsAvailable = gates.every((gate) => gate.artifactAvailability === undefined || gate.artifactAvailability === "available");
-  return {
+  const matrix = {
     ...recordedMatrix,
     releaseReady: recordedMatrix.catalogComplete === true
       && recordedMatrix.evaluationMode === "candidate"
@@ -335,6 +334,8 @@ export function evaluateAuditedMatrix({ recordedMatrix, receipts, snapshotsByRun
     counts,
     gates,
   };
+  validateMatrix(matrix);
+  return matrix;
 }
 
 async function readRawJson(path, { label, maxBytes }) {
@@ -446,8 +447,7 @@ async function main() {
     jsonPath: arguments_["json-out"],
     markdownPath: arguments_["markdown-out"],
   });
-  const auditedById = new Map(matrix.gates.map((gate) => [gate.id, gate]));
-  if (recordedMatrix.gates.some((gate) => gate.status === "PASS" && auditedById.get(gate.id)?.status !== "PASS")) {
+  if (matrix.counts.failed > 0) {
     throw phase9Failure("PHASE9_EVIDENCE_UNTRUSTED", "audited evidence failed");
   }
 }

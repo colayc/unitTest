@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import { encodeCanonicalJson, phase9Failure, readCanonicalJson } from "./canonical-json.mjs";
-import { evaluateRecordedMatrix, loadPhase9Inputs } from "./validate.mjs";
+import { evaluateRecordedMatrix, loadPhase9Inputs, validateMatrix } from "./validate.mjs";
 
 const execFileAsync = promisify(execFile);
 const SAFE_REASON = "candidate-descendant-changed-tested-content";
@@ -40,7 +40,9 @@ function jsonProjection(matrix) {
 }
 
 export function renderMatrixJson(matrix) {
-  return encodeCanonicalJson(jsonProjection(matrix));
+  const output = jsonProjection(matrix);
+  validateMatrix(output);
+  return encodeCanonicalJson(output);
 }
 
 function escapeCell(value) {
@@ -81,11 +83,11 @@ export function renderMatrixMarkdown(matrix) {
     "",
     "## Gates",
     "",
-    "| Gate | Phase | Category | Status | Evidence | Reason |",
-    "|---|---:|---|---|---|---|",
+    "| Gate | Phase | Category | Status | Evidence | Availability | Reason |",
+    "|---|---:|---|---|---|---|---|",
   ];
   for (const gate of gates) {
-    lines.push(`| ${escapeCell(gate.id)} | ${escapeCell(gate.phase)} | ${escapeCell(gate.category)} | ${escapeCell(gate.status)} | ${escapeCell(evidenceCell(gate))} | ${escapeCell(gate.reason)} |`);
+    lines.push(`| ${escapeCell(gate.id)} | ${escapeCell(gate.phase)} | ${escapeCell(gate.category)} | ${escapeCell(gate.status)} | ${escapeCell(evidenceCell(gate))} | ${escapeCell(gate.artifactAvailability)} | ${escapeCell(gate.reason)} |`);
   }
   return `${lines.join("\n")}\n`;
 }

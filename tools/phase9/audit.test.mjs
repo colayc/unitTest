@@ -269,6 +269,75 @@ function snapshots(expired = false) {
   };
 }
 
+function validatorLineageFailure() {
+  const receipt = validReceipt();
+  const registry = {
+    schemaVersion: 1,
+    product: "unit-test-ide",
+    repository: "colayc/unitTest",
+    allowedDeferredGateIds: [...ALLOWED_DEFERRED_GATE_IDS],
+    sources: [{ path: "docs/spec.md", sections: ["Acceptance"] }],
+    gates: [{
+      id: "P9-MATRIX-UNIT",
+      phase: 9,
+      category: "quality",
+      title: "Matrix unit tests",
+      requirementRefs: [{ source: "docs/spec.md", section: "Acceptance" }],
+      disposition: "required",
+      verification: {
+        commands: [],
+        workflowPath: receipt.evidence.workflowPath,
+        jobs: ["verify-linux"],
+        artifacts: ["native-toolchain-linux-1"],
+      },
+    }],
+  };
+  return {
+    receipt,
+    matrix: evaluateRecordedMatrix({
+      registry,
+      baseline: {
+        schemaVersion: 1,
+        candidateCommit,
+        evaluationMode: "candidate",
+        receiptIds: [receiptId],
+      },
+      receipts: [receipt],
+      currentCommit: "c".repeat(40),
+      changedPaths: ["apps/test-service/internal/task/manager.go"],
+    }),
+  };
+}
+
+function assertSchemaInvalid(run) {
+  assert.throws(run, (error) => {
+    assert.equal(error?.code, "PHASE9_GATE_SCHEMA_INVALID");
+    return true;
+  });
+}
+
+test("rejects schema-invalid, duplicate, and empty recorded matrices at the export boundary", () => {
+  const cases = [];
+  const unknownField = recordedMatrix();
+  unknownField.extra = "not-allowed";
+  cases.push(unknownField);
+  cases.push({ ...recordedMatrix(), schemaVersion: 999 });
+  cases.push({ ...recordedMatrix(), candidateCommit: "not-a-commit" });
+  cases.push(recordedMatrix({ gates: [
+    { id: "P9-MATRIX-UNIT", status: "MISSING" },
+    { id: "P9-MATRIX-UNIT", status: "FAILED" },
+  ] }));
+  cases.push(recordedMatrix({ gates: [] }));
+
+  for (const invalid of cases) {
+    assertSchemaInvalid(() => evaluateAuditedMatrix({
+      recordedMatrix: invalid,
+      receipts: [],
+      snapshotsByRunId: {},
+    }));
+  }
+});
+
 test("downgrades a recorded PASS to FAILED when its receipt cannot be audited", () => {
   const broken = snapshots();
   broken[runId].runSnapshot.head_sha = "c".repeat(40);
@@ -362,40 +431,7 @@ test("a recorded PASS remains bound to its candidate commit and gate ID", () => 
 });
 
 test("auditing preserves validator lineage failures after tested-content drift", () => {
-  const receipt = validReceipt();
-  const registry = {
-    schemaVersion: 1,
-    product: "unit-test-ide",
-    repository: "colayc/unitTest",
-    allowedDeferredGateIds: [...ALLOWED_DEFERRED_GATE_IDS],
-    sources: [{ path: "docs/spec.md", sections: ["Acceptance"] }],
-    gates: [{
-      id: "P9-MATRIX-UNIT",
-      phase: 9,
-      category: "quality",
-      title: "Matrix unit tests",
-      requirementRefs: [{ source: "docs/spec.md", section: "Acceptance" }],
-      disposition: "required",
-      verification: {
-        commands: [],
-        workflowPath: receipt.evidence.workflowPath,
-        jobs: ["verify-linux"],
-        artifacts: ["native-toolchain-linux-1"],
-      },
-    }],
-  };
-  const freshMatrix = evaluateRecordedMatrix({
-    registry,
-    baseline: {
-      schemaVersion: 1,
-      candidateCommit,
-      evaluationMode: "candidate",
-      receiptIds: [receiptId],
-    },
-    receipts: [receipt],
-    currentCommit: "c".repeat(40),
-    changedPaths: ["apps/test-service/internal/task/manager.go"],
-  });
+  const { receipt, matrix: freshMatrix } = validatorLineageFailure();
 
   assert.deepEqual(freshMatrix.gates[0], {
     id: "P9-MATRIX-UNIT",
@@ -413,6 +449,36 @@ test("auditing preserves validator lineage failures after tested-content drift",
   assert.equal(auditedMatrix.releaseReady, false);
   assert.equal(auditedMatrix.gates[0].status, "FAILED");
   assert.equal(auditedMatrix.gates[0].reason, "candidate-descendant-changed-tested-content");
+});
+
+test("CLI writes diagnostics then exits nonzero for a pre-existing validator lineage failure", async () => {
+  const root = await mkdtemp(join(tmpdir(), "phase9-audit-failed-"));
+  fixtureRoots.push(root);
+  const receiptsDirectory = join(root, "receipts");
+  const snapshotsDirectory = join(root, "snapshots");
+  await mkdir(receiptsDirectory, { recursive: true });
+  await mkdir(snapshotsDirectory, { recursive: true });
+  const matrixPath = join(root, "recorded.json");
+  const jsonOut = join(root, "audited.json");
+  const markdownOut = join(root, "audited.md");
+  const { matrix } = validatorLineageFailure();
+  await writeCanonicalJson(matrixPath, matrix);
+
+  await assert.rejects(execFileAsync(process.execPath, [
+    join(import.meta.dirname, "audit.mjs"),
+    "--recorded-matrix", matrixPath,
+    "--receipts", receiptsDirectory,
+    "--snapshots", snapshotsDirectory,
+    "--json-out", jsonOut,
+    "--markdown-out", markdownOut,
+  ], { env: { ...process.env, NODE_NO_WARNINGS: "1" } }), (error) => {
+    assert.match(`${error.stderr}`, /^PHASE9_EVIDENCE_UNTRUSTED: audit failed\r?\n$/u);
+    return true;
+  });
+  const output = JSON.parse(await readFile(jsonOut, "utf8"));
+  assert.equal(output.counts.failed, 1);
+  assert.equal(output.gates[0].status, "FAILED");
+  assert.match(await readFile(markdownOut, "utf8"), /\| P9-MATRIX-UNIT \| .* \| FAILED \|/u);
 });
 
 test("CLI loads only local fixed snapshots and writes deterministic renderer output", async () => {
@@ -478,7 +544,48 @@ test("CLI blocks candidate readiness when omitted availability audits as expired
   assert.equal(output.gates[0].status, "PASS");
   assert.equal(output.gates[0].artifactAvailability, "expired");
   assert.equal(output.releaseReady, false);
-  assert.match(await readFile(markdownOut, "utf8"), /Release ready: `false`/u);
+  const markdown = await readFile(markdownOut, "utf8");
+  assert.match(markdown, /Release ready: `false`/u);
+  assert.match(markdown, /\| expired \|/u);
+});
+
+test("CLI rejects malformed, duplicate, and empty gate matrices without writing outputs", async () => {
+  const invalidMatrices = [];
+  const unknownField = recordedMatrix();
+  unknownField.extra = "not-allowed";
+  invalidMatrices.push(unknownField);
+  invalidMatrices.push(recordedMatrix({ gates: [
+    { id: "P9-MATRIX-UNIT", status: "MISSING" },
+    { id: "P9-MATRIX-UNIT", status: "FAILED" },
+  ] }));
+  invalidMatrices.push(recordedMatrix({ gates: [] }));
+
+  for (const [index, matrix] of invalidMatrices.entries()) {
+    const root = await mkdtemp(join(tmpdir(), `phase9-audit-invalid-${index}-`));
+    fixtureRoots.push(root);
+    const receiptsDirectory = join(root, "receipts");
+    const snapshotsDirectory = join(root, "snapshots");
+    await mkdir(receiptsDirectory, { recursive: true });
+    await mkdir(snapshotsDirectory, { recursive: true });
+    const matrixPath = join(root, "recorded.json");
+    const jsonOut = join(root, "audited.json");
+    const markdownOut = join(root, "audited.md");
+    await writeCanonicalJson(matrixPath, matrix);
+
+    await assert.rejects(execFileAsync(process.execPath, [
+      join(import.meta.dirname, "audit.mjs"),
+      "--recorded-matrix", matrixPath,
+      "--receipts", receiptsDirectory,
+      "--snapshots", snapshotsDirectory,
+      "--json-out", jsonOut,
+      "--markdown-out", markdownOut,
+    ], { env: { ...process.env, NODE_NO_WARNINGS: "1" } }), (error) => {
+      assert.match(`${error.stderr}`, /^PHASE9_GATE_SCHEMA_INVALID: audit failed\r?\n$/u);
+      return true;
+    });
+    await assert.rejects(readFile(jsonOut), { code: "ENOENT" });
+    await assert.rejects(readFile(markdownOut), { code: "ENOENT" });
+  }
 });
 
 test("CLI rejects noncanonical snapshot directory IDs and does not write outputs", async () => {
