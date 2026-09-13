@@ -277,6 +277,7 @@ test("registry rejects unsafe display strings, paths, duplicates, and empty veri
     (gate) => { gate.verification.commands = ["node test > out"]; },
     (gate) => { gate.verification.commands = ["node C:\\temp\\script.mjs"]; },
     (gate) => { gate.verification.commands = ["node /tmp/script.mjs"]; },
+    (gate) => { gate.verification.commands = ["go test ../other-service/..."]; },
     (gate) => { gate.verification.jobs = ["phase9", "phase9"]; },
     (gate) => { gate.verification.artifacts = ["../report"]; },
     (gate) => { gate.verification.commands = []; gate.verification.jobs = []; gate.verification.artifacts = []; },
@@ -292,6 +293,15 @@ test("registry rejects unsafe display strings, paths, duplicates, and empty veri
   unsafeSource.sources[0].path = "../spec.md";
   for (const gate of unsafeSource.gates) gate.requirementRefs[0].source = "../spec.md";
   assert.throws(() => validateRegistry(unsafeSource), /PHASE9_GATE_SCHEMA_INVALID/u);
+});
+
+test("registry accepts safe relative package arguments in display-only commands", () => {
+  const registry = validRegistry();
+  registry.gates.find(({ id }) => id === "P9-MATRIX-UNIT").verification.commands = [
+    "./tools/check.mjs",
+    "go test ./apps/test-service/...",
+  ];
+  assert.equal(validateRegistry(registry), true);
 });
 
 test("deferred gates require nonempty exact reason and resume condition strings", () => {
@@ -341,6 +351,17 @@ test("recorded status is PASS, FAILED, or MISSING according to exact receipt evi
     });
     assert.equal(matrix.gates.find(({ id }) => id === "P9-MATRIX-UNIT").status, status);
   }
+});
+
+test("successful evidence from another repository cannot PASS a gate", () => {
+  const receipt = githubReceipt({ evidence: { repository: "attacker/unitTest" } });
+  const matrix = evaluateRecordedMatrix({
+    registry: validRegistry({ deferred: false }),
+    baseline: validBaseline("candidate", [receipt.receiptId]),
+    receipts: [receipt], currentCommit, changedPaths: [],
+  });
+  assert.equal(matrix.gates.find(({ id }) => id === "P9-MATRIX-UNIT").status, "MISSING");
+  assert.equal(matrix.releaseReady, false);
 });
 
 test("conflicting selected receipts for one gate fail closed", () => {

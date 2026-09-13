@@ -74,14 +74,15 @@ function assertSafeRepositoryPath(value, label) {
   if (!isSafeRepositoryPath(value)) schemaFailure(label);
 }
 
-function assertUniqueSortedDisplayStrings(values, label, { requireOne = false } = {}) {
+function assertUniqueSortedDisplayStrings(values, label, { command = false, requireOne = false } = {}) {
   if ((requireOne && values.length === 0) || hasDuplicates(values) || !isSorted(values)) schemaFailure(label);
   for (const value of values) {
     assertNonemptyDisplayString(value, label);
-    if (value.includes("\\") || /(?:^|\s)\//u.test(value) || /(?:^|[\s/])\.\.(?:$|[\s/])/u.test(value) || value.includes("//")) {
+    if (value.includes("\\") || /(?:^|\s)(?:\/|[A-Za-z]:\/)/u.test(value)
+        || /(?:^|[\s/])\.\.(?:$|[\s/])/u.test(value) || value.includes("//")) {
       schemaFailure(label);
     }
-    if (value.includes("/") && !isSafeRepositoryPath(value)) schemaFailure(label);
+    if (!command && value.includes("/") && !isSafeRepositoryPath(value)) schemaFailure(label);
   }
 }
 
@@ -144,7 +145,7 @@ export function validateRegistry(value) {
     }
 
     const { commands, workflowPath, jobs, artifacts } = gate.verification;
-    assertUniqueSortedDisplayStrings(commands, `gate ${gate.id} commands`);
+    assertUniqueSortedDisplayStrings(commands, `gate ${gate.id} commands`, { command: true });
     assertSafeRepositoryPath(workflowPath, `gate ${gate.id} workflow path`);
     assertUniqueSortedDisplayStrings(jobs, `gate ${gate.id} jobs`);
     assertUniqueSortedDisplayStrings(artifacts, `gate ${gate.id} artifacts`);
@@ -210,10 +211,11 @@ export function validateCandidateChanges({ candidateCommit, currentCommit, chang
   throw phase9Failure("PHASE9_EVIDENCE_UNTRUSTED", "candidate changes include tested content");
 }
 
-function evidenceSatisfiesVerification(verification, receipt) {
+function evidenceSatisfiesVerification(repository, verification, receipt) {
   if (receipt.evidence.kind === "manual-approval") {
     return receipt.evidence.decision === "approved" && verification.jobs.length === 0 && verification.artifacts.length === 0;
   }
+  if (receipt.evidence.repository !== repository) return false;
   if (receipt.evidence.workflowPath !== verification.workflowPath) return false;
   const jobs = new Map(receipt.evidence.jobs.map((job) => [job.name, job]));
   const artifacts = new Map(receipt.evidence.artifacts.map((artifact) => [artifact.name, artifact]));
@@ -221,11 +223,11 @@ function evidenceSatisfiesVerification(verification, receipt) {
   return verification.artifacts.every((name) => artifacts.get(name)?.expired === false);
 }
 
-function recordedStatus(gate, receipt) {
+function recordedStatus(repository, gate, receipt) {
   if (gate.disposition === "deferred") return "DEFERRED";
   if (receipt === undefined) return "MISSING";
   if (receipt.evidence.kind === "github-actions" && receipt.evidence.conclusion !== "success") return "FAILED";
-  if (!evidenceSatisfiesVerification(gate.verification, receipt)) return "MISSING";
+  if (!evidenceSatisfiesVerification(repository, gate.verification, receipt)) return "MISSING";
   return "PASS";
 }
 
@@ -264,7 +266,7 @@ export function evaluateRecordedMatrix({ registry, baseline, receipts, currentCo
     .sort((left, right) => left.id.localeCompare(right.id, "en"))
     .map((gate) => {
       const receipt = receiptForGate.get(gate.id);
-      const status = recordedStatus(gate, receipt);
+      const status = recordedStatus(registry.repository, gate, receipt);
       const row = { id: gate.id, status };
       if (receipt !== undefined && gate.disposition !== "deferred") row.receiptId = receipt.receiptId;
       if (gate.verification.artifacts.length > 0 && gate.disposition !== "deferred") {
