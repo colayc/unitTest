@@ -480,6 +480,43 @@ test("Phase 1 through 4 catalog has exact source, heading, gate, and verificatio
   assert.throws(() => validateRegistry(missing), /PHASE9_GATE_MISSING/u);
 });
 
+test("Phase 1 through 4 catalog cites direct no-shell, process-tree, and toolchain requirements", async () => {
+  const registry = await readCanonicalJson(phase14RegistryPath, { label: "Phase 1 through 4 registry", maxBytes: 1024 * 1024 });
+  const taskEngineSource = "docs/superpowers/specs/2026-07-22-task-engine-persistence-design.md";
+  const toolchainSource = "docs/superpowers/specs/2026-07-26-workspace-cmake-toolchains-design.md";
+  const expected = [
+    ["P1-PROTOCOL-NO-SHELL", taskEngineSource, "4. 非目标", ["外部命令", "Shell"]],
+    ["P2-PROCESS-TREE-TERMINATION", taskEngineSource, "9. 跨平台进程树控制", ["Windows", "Linux", "进程树"]],
+    ["P3-TOOLCHAIN-LINUX-CLANG", toolchainSource, "12.4 Linux GCC 与 Clang", ["GCC", "Clang"]],
+    ["P3-TOOLCHAIN-LINUX-CLANG", toolchainSource, "19.4 Native E2E Matrix", ["Linux + Clang"]],
+    ["P3-TOOLCHAIN-LINUX-GCC", toolchainSource, "12.4 Linux GCC 与 Clang", ["GCC", "Clang"]],
+    ["P3-TOOLCHAIN-LINUX-GCC", toolchainSource, "19.4 Native E2E Matrix", ["Linux + GCC"]],
+    ["P3-TOOLCHAIN-WINDOWS-CLANGCL", toolchainSource, "12.3 Windows clang-cl", ["clang-cl", "lld-link"]],
+    ["P3-TOOLCHAIN-WINDOWS-CLANGCL", toolchainSource, "19.4 Native E2E Matrix", ["Windows + clang-cl"]],
+  ];
+  const markdownBySource = new Map(await Promise.all([taskEngineSource, toolchainSource].map(async (source) => [
+    source,
+    await readFile(join(repositoryRoot, source), "utf8"),
+  ])));
+
+  for (const [gateId, source, section, terms] of expected) {
+    const gate = registry.gates.find(({ id }) => id === gateId);
+    assert.ok(gate.requirementRefs.some((reference) => reference.source === source && reference.section === section),
+      `${gateId} must cite ${section}`);
+    const lines = markdownBySource.get(source).split(/\r?\n/u);
+    const start = lines.findIndex((line) => /^#{1,6} (.+)$/u.exec(line)?.[1] === section);
+    assert.notEqual(start, -1, `${source} must contain heading ${section}`);
+    const level = /^#+/u.exec(lines[start])[0].length;
+    const endOffset = lines.slice(start + 1).findIndex((line) => {
+      const match = /^(#{1,6}) /u.exec(line);
+      return match && match[1].length <= level;
+    });
+    const end = endOffset === -1 ? lines.length : start + 1 + endOffset;
+    const sectionText = lines.slice(start, end).join("\n");
+    for (const term of terms) assert.ok(sectionText.includes(term), `${section} must contain ${term}`);
+  }
+});
+
 test("only the exact three approved Phase 8 gates may be deferred", () => {
   assert.deepEqual(ALLOWED_DEFERRED_GATE_IDS, [
     "P8-DOCS-CLOSEOUT",

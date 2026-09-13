@@ -38,6 +38,10 @@
         {
           "section": "测试",
           "source": "docs/superpowers/specs/2026-07-21-secure-token-file-preparation-design.md"
+        },
+        {
+          "section": "4. 非目标",
+          "source": "docs/superpowers/specs/2026-07-22-task-engine-persistence-design.md"
         }
       ],
       "title": "Protocol cannot invoke arbitrary shells",
@@ -202,6 +206,10 @@
         {
           "section": "16. 完成门禁",
           "source": "docs/superpowers/specs/2026-07-22-task-engine-persistence-design.md"
+        },
+        {
+          "section": "9. 跨平台进程树控制",
+          "source": "docs/superpowers/specs/2026-07-22-task-engine-persistence-design.md"
         }
       ],
       "title": "Cross-platform process tree termination",
@@ -305,6 +313,14 @@
       "phase": 3,
       "requirementRefs": [
         {
+          "section": "12.4 Linux GCC 与 Clang",
+          "source": "docs/superpowers/specs/2026-07-26-workspace-cmake-toolchains-design.md"
+        },
+        {
+          "section": "19.4 Native E2E Matrix",
+          "source": "docs/superpowers/specs/2026-07-26-workspace-cmake-toolchains-design.md"
+        },
+        {
           "section": "20. 验收场景",
           "source": "docs/superpowers/specs/2026-07-26-workspace-cmake-toolchains-design.md"
         }
@@ -328,6 +344,14 @@
       "phase": 3,
       "requirementRefs": [
         {
+          "section": "12.4 Linux GCC 与 Clang",
+          "source": "docs/superpowers/specs/2026-07-26-workspace-cmake-toolchains-design.md"
+        },
+        {
+          "section": "19.4 Native E2E Matrix",
+          "source": "docs/superpowers/specs/2026-07-26-workspace-cmake-toolchains-design.md"
+        },
+        {
           "section": "20. 验收场景",
           "source": "docs/superpowers/specs/2026-07-26-workspace-cmake-toolchains-design.md"
         }
@@ -350,6 +374,14 @@
       "id": "P3-TOOLCHAIN-WINDOWS-CLANGCL",
       "phase": 3,
       "requirementRefs": [
+        {
+          "section": "12.3 Windows clang-cl",
+          "source": "docs/superpowers/specs/2026-07-26-workspace-cmake-toolchains-design.md"
+        },
+        {
+          "section": "19.4 Native E2E Matrix",
+          "source": "docs/superpowers/specs/2026-07-26-workspace-cmake-toolchains-design.md"
+        },
         {
           "section": "20. 验收场景",
           "source": "docs/superpowers/specs/2026-07-26-workspace-cmake-toolchains-design.md"
@@ -552,13 +584,18 @@
         "13. 错误、安全与流量控制",
         "14. 测试策略",
         "15. 验收场景",
-        "16. 完成门禁"
+        "16. 完成门禁",
+        "4. 非目标",
+        "9. 跨平台进程树控制"
       ]
     },
     {
       "path": "docs/superpowers/specs/2026-07-26-workspace-cmake-toolchains-design.md",
       "sections": [
+        "12.3 Windows clang-cl",
+        "12.4 Linux GCC 与 Clang",
         "19. 测试策略",
+        "19.4 Native E2E Matrix",
         "20. 验收场景",
         "21. 完成门禁",
         "6. Workspace 绑定与信任边界"
