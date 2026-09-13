@@ -704,6 +704,45 @@ test("future Phase 9 work remains MISSING and only the approved Phase 8 boundary
   }
 });
 
+test("generic successful foundation jobs cannot satisfy feature-specific gates without their artifacts", async () => {
+  const registry = await readCanonicalJson(gateRegistryPath, { label: "Phase 1 through 9 registry", maxBytes: 1024 * 1024 });
+  const gateArtifacts = {
+    "P5-LINUX-CLANG-COVERAGE": "linux-clang-coverage-report",
+    "P6-CODEOSS-HOST-SMOKE": "code-oss-host-smoke-report",
+    "P7-COVERAGE-UI-AND-SOURCE-DECORATION": "coverage-ui-source-decoration-report",
+    "P7-HISTORY-AND-ARTIFACT-BROWSER": "history-artifact-browser-report",
+    "P7-MAIN-USER-JOURNEY": "main-user-journey-report",
+    "P7-MOCK-CONFIGURATION-UX": "mock-configuration-ux-report",
+  };
+  const gateIds = Object.keys(gateArtifacts);
+  const receipt = githubReceipt({
+    receiptId: "github-actions-foundation-generic",
+    gateIds,
+    evidence: {
+      workflowPath: ".github/workflows/foundation.yml",
+      runId: "40",
+      jobs: [
+        { name: "verify-linux", conclusion: "success" },
+        { name: "verify-windows", conclusion: "success" },
+      ],
+      artifacts: [],
+    },
+  });
+  const matrix = evaluateRecordedMatrix({
+    registry,
+    baseline: { schemaVersion: 1, candidateCommit, evaluationMode: "historical", receiptIds: [receipt.receiptId] },
+    receipts: [receipt],
+    currentCommit,
+    changedPaths: [],
+  });
+
+  assert.equal(new Set(Object.values(gateArtifacts)).size, gateIds.length);
+  for (const gateId of gateIds) {
+    assert.equal(matrix.gates.find(({ id }) => id === gateId).status, "MISSING", `${gateId} requires feature-specific evidence`);
+    assert.deepEqual(registry.gates.find(({ id }) => id === gateId).verification.artifacts, [gateArtifacts[gateId]]);
+  }
+});
+
 test("only the exact three approved Phase 8 gates may be deferred", () => {
   assert.deepEqual(ALLOWED_DEFERRED_GATE_IDS, [
     "P8-DOCS-CLOSEOUT",

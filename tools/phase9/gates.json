@@ -643,7 +643,9 @@
       ],
       "title": "Linux Clang LLVM coverage execution",
       "verification": {
-        "artifacts": [],
+        "artifacts": [
+          "linux-clang-coverage-report"
+        ],
         "commands": [
           "pnpm test:e2e:native"
         ],
@@ -792,7 +794,9 @@
       ],
       "title": "Code-OSS Extension Host and installed CLI smoke",
       "verification": {
-        "artifacts": [],
+        "artifacts": [
+          "code-oss-host-smoke-report"
+        ],
         "commands": [
           "pnpm --filter code-oss-extension test:host"
         ],
@@ -920,7 +924,9 @@
       ],
       "title": "Coverage UI and source decoration",
       "verification": {
-        "artifacts": [],
+        "artifacts": [
+          "coverage-ui-source-decoration-report"
+        ],
         "commands": [
           "pnpm --filter code-oss-extension test"
         ],
@@ -944,7 +950,9 @@
       ],
       "title": "Local history and artifact browser",
       "verification": {
-        "artifacts": [],
+        "artifacts": [
+          "history-artifact-browser-report"
+        ],
         "commands": [
           "pnpm --filter code-oss-extension test"
         ],
@@ -991,7 +999,9 @@
       ],
       "title": "Terminal-free main user journey",
       "verification": {
-        "artifacts": [],
+        "artifacts": [
+          "main-user-journey-report"
+        ],
         "commands": [
           "pnpm --filter code-oss-extension test:host"
         ],
@@ -1015,7 +1025,9 @@
       ],
       "title": "Mock and stub configuration UX",
       "verification": {
-        "artifacts": [],
+        "artifacts": [
+          "mock-configuration-ux-report"
+        ],
         "commands": [
           "pnpm --filter code-oss-extension test"
         ],
