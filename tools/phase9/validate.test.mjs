@@ -22,6 +22,7 @@ import {
   validateReceipt,
   validateRegistry,
 } from "./validate.mjs";
+import { renderMatrixJson, renderMatrixMarkdown, writeMatrixOutputs } from "./render.mjs";
 
 const execFileAsync = promisify(execFile);
 const candidateCommit = "a".repeat(40);
@@ -181,6 +182,75 @@ function validatorArguments(inputs, repositoryRoot) {
 const fixtureRoots = [];
 test.afterEach(async () => {
   await Promise.all(fixtureRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
+function rendererMatrix() {
+  return {
+    schemaVersion: 1,
+    catalogComplete: true,
+    releaseReady: false,
+    evaluationMode: "historical",
+    candidateCommit: "a".repeat(40),
+    currentCommit: "b".repeat(40),
+    recordedByCommit: "c".repeat(40),
+    counts: { pass: 1, missing: 1, failed: 1, deferred: 1 },
+    gates: [
+      { id: "P9-MATRIX-UNIT", phase: 9, category: "quality|checks", status: "PASS", receiptId: "receipt`1", artifactAvailability: "available" },
+      { id: "P8-DOCS-CLOSEOUT", phase: 8, category: "docs", status: "DEFERRED", reason: "waiting\\for\ncloseout" },
+      { id: "P9-FAILED", phase: 9, category: "qa", status: "FAILED", receiptId: "receipt-3", reason: "candidate-descendant-changed-tested-content" },
+      { id: "P9-MISSING", phase: 9, category: "qa", status: "MISSING" },
+    ],
+  };
+}
+
+test("renderer emits exact deterministic Markdown summary, sorted gates, reasons, and escaping", () => {
+  assert.equal(renderMatrixMarkdown(rendererMatrix()), [
+    "# Phase 9 Gate Matrix",
+    "",
+    "- Candidate commit: `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`",
+    "- Recorded by commit: `cccccccccccccccccccccccccccccccccccccccc`",
+    "- Evaluation mode: historical",
+    "- Catalog complete: true",
+    "- Release ready: false",
+    "",
+    "## Status summary",
+    "",
+    "| Status | Count |",
+    "|---|---:|",
+    "| PASS | 1 |",
+    "| MISSING | 1 |",
+    "| FAILED | 1 |",
+    "| DEFERRED | 1 |",
+    "",
+    "## Gates",
+    "",
+    "| Gate | Phase | Category | Status | Evidence | Reason |",
+    "|---|---:|---|---|---|---|",
+    "| P8-DOCS-CLOSEOUT | 8 | docs | DEFERRED |  | waiting\\\\for\\ncloseout |",
+    "| P9-FAILED | 9 | qa | FAILED | receipt-3 | candidate-descendant-changed-tested-content |",
+    "| P9-MATRIX-UNIT | 9 | quality\\|checks | PASS | receipt\\`1 (available) |  |",
+    "| P9-MISSING | 9 | qa | MISSING |  |  |",
+    "",
+  ].join("\n"));
+});
+
+test("renderer JSON is canonical and deterministic across repeated renders", () => {
+  const matrix = rendererMatrix();
+  assert.equal(renderMatrixJson(matrix), renderMatrixJson(structuredClone(matrix)));
+  assert.equal(renderMatrixJson(matrix), encodeCanonicalJson(JSON.parse(renderMatrixJson(matrix))));
+  assert.match(renderMatrixJson(matrix), /\n$/u);
+});
+
+test("renderer check detects one-byte Markdown drift without overwriting", async () => {
+  const root = await mkdtemp(join(tmpdir(), "phase9-render-"));
+  fixtureRoots.push(root);
+  const jsonPath = join(root, "out", "matrix.json");
+  const markdownPath = join(root, "out", "matrix.md");
+  await writeMatrixOutputs({ matrix: rendererMatrix(), jsonPath, markdownPath, check: false });
+  const original = await readFile(markdownPath, "utf8");
+  await writeFile(markdownPath, `${original.slice(0, -1)}X\n`);
+  await assert.rejects(writeMatrixOutputs({ matrix: rendererMatrix(), jsonPath, markdownPath, check: true }), /PHASE9_MATRIX_DRIFT/u);
+  assert.equal(await readFile(markdownPath, "utf8"), `${original.slice(0, -1)}X\n`);
 });
 
 test("canonical JSON recursively sorts object keys and ends with one newline", () => {
