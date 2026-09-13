@@ -4,11 +4,12 @@ import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
-import { encodeCanonicalJson, phase9Failure } from "./canonical-json.mjs";
+import { encodeCanonicalJson, phase9Failure, readCanonicalJson } from "./canonical-json.mjs";
 import { evaluateRecordedMatrix, loadPhase9Inputs } from "./validate.mjs";
 
 const execFileAsync = promisify(execFile);
 const SAFE_REASON = "candidate-descendant-changed-tested-content";
+const COMMIT_PATTERN = /^[0-9a-f]{40}$/u;
 
 function jsonProjection(matrix) {
   const output = {
@@ -152,10 +153,23 @@ function parseArguments(args) {
 async function main() {
   const args = parseArguments(process.argv.slice(2));
   const inputs = await loadPhase9Inputs({ registryPath: args.registry, baselinePath: args.baseline, receiptsDirectory: args.receipts });
+  let recordedByCommit;
+  if (args.check === true) {
+    let existing;
+    try {
+      existing = await readCanonicalJson(args["json-out"], { label: "matrix", maxBytes: 1024 * 1024 });
+    } catch (error) {
+      throw phase9Failure("PHASE9_MATRIX_DRIFT", "existing matrix JSON is invalid", error);
+    }
+    recordedByCommit = existing.recordedByCommit;
+    if (!COMMIT_PATTERN.test(recordedByCommit ?? "")) {
+      throw phase9Failure("PHASE9_MATRIX_DRIFT", "existing recorded commit is invalid");
+    }
+  }
   const state = await repositoryState(args["repository-root"], inputs.baseline.candidateCommit);
   const matrix = evaluateRecordedMatrix({ ...inputs, ...state });
   const currentCommit = state.currentCommit;
-  matrix.recordedByCommit = currentCommit;
+  matrix.recordedByCommit = recordedByCommit ?? currentCommit;
   matrix.gates = matrix.gates.map((gate) => {
     const definition = inputs.registry.gates.find(({ id }) => id === gate.id);
     return { ...gate, phase: definition?.phase, category: definition?.category };

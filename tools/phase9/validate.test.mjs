@@ -406,6 +406,43 @@ test("renderer CLI check reports drift without overwriting Markdown", async () =
   assert.equal(await readFile(markdownOut, "utf8"), `${original.slice(0, -1)}X\n`);
 });
 
+test("renderer CLI check preserves a valid recorded snapshot commit across HEAD changes", async () => {
+  const lineage = await createGitLineageFixture();
+  const inputs = await createCliInputs(lineage.candidate);
+  const markdownOut = join(lineage.root, "matrix.md");
+  const jsonOut = join(lineage.root, "matrix.json");
+  const args = [join(import.meta.dirname, "render.mjs"), "--registry", inputs.registryPath, "--baseline", inputs.baselinePath, "--receipts", inputs.receiptsDirectory, "--repository-root", lineage.root, "--json-out", jsonOut, "--markdown-out", markdownOut];
+  await execFileAsync(process.execPath, args);
+  const snapshot = "1".repeat(40);
+  const json = JSON.parse(await readFile(jsonOut, "utf8"));
+  json.recordedByCommit = snapshot;
+  await writeCanonicalJson(jsonOut, json);
+  const markdown = (await readFile(markdownOut, "utf8")).replace(/- Recorded by commit: `[0-9a-f]{40}`/u, "- Recorded by commit: `" + snapshot + "`");
+  await writeFile(markdownOut, markdown);
+  const beforeJson = await readFile(jsonOut);
+  const beforeMarkdown = await readFile(markdownOut);
+  await execFileAsync(process.execPath, [...args, "--check"]);
+  assert.deepEqual(await readFile(jsonOut), beforeJson);
+  assert.deepEqual(await readFile(markdownOut), beforeMarkdown);
+});
+
+test("renderer CLI check rejects malformed recorded snapshot commits without writes", async () => {
+  const lineage = await createGitLineageFixture();
+  const inputs = await createCliInputs(lineage.candidate);
+  const markdownOut = join(lineage.root, "matrix.md");
+  const jsonOut = join(lineage.root, "matrix.json");
+  const args = [join(import.meta.dirname, "render.mjs"), "--registry", inputs.registryPath, "--baseline", inputs.baselinePath, "--receipts", inputs.receiptsDirectory, "--repository-root", lineage.root, "--json-out", jsonOut, "--markdown-out", markdownOut];
+  await execFileAsync(process.execPath, args);
+  const json = JSON.parse(await readFile(jsonOut, "utf8"));
+  json.recordedByCommit = "not-a-commit";
+  await writeCanonicalJson(jsonOut, json);
+  const beforeJson = await readFile(jsonOut);
+  const beforeMarkdown = await readFile(markdownOut);
+  await assert.rejects(execFileAsync(process.execPath, [...args, "--check"]), /PHASE9_MATRIX_DRIFT/u);
+  assert.deepEqual(await readFile(jsonOut), beforeJson);
+  assert.deepEqual(await readFile(markdownOut), beforeMarkdown);
+});
+
 test("canonical JSON recursively sorts object keys and ends with one newline", () => {
   assert.equal(
     encodeCanonicalJson({ z: 1, a: { y: 2, x: 3 }, list: [{ b: 2, a: 1 }] }),
