@@ -28,6 +28,43 @@ import { renderMatrixJson, renderMatrixMarkdown, writeMatrixOutputs } from "./re
 const execFileAsync = promisify(execFile);
 const candidateCommit = "a".repeat(40);
 const currentCommit = candidateCommit;
+const repositoryRoot = join(import.meta.dirname, "..", "..");
+const phase14RegistryPath = join(import.meta.dirname, "gates.json");
+const PHASE_1_THROUGH_4_GATE_IDS = [
+  "P1-IPC-PER-USER-AUTH",
+  "P1-PROTOCOL-NO-SHELL",
+  "P1-PROTOCOL-VERSION-COMPAT",
+  "P1-TOKEN-FILE-SECURE",
+  "P2-ARTIFACT-ATOMIC-CLEANUP",
+  "P2-EVENT-REPLAY-PERSISTENCE",
+  "P2-FAILURE-OWNERSHIP",
+  "P2-PROCESS-TREE-TERMINATION",
+  "P2-TASK-CANCEL-TIMEOUT",
+  "P3-CMAKE-CONFIGURE-BUILD",
+  "P3-DIAGNOSTIC-URI",
+  "P3-TOOLCHAIN-LINUX-CLANG",
+  "P3-TOOLCHAIN-LINUX-GCC",
+  "P3-TOOLCHAIN-WINDOWS-CLANGCL",
+  "P3-TOOLCHAIN-WINDOWS-MSVC",
+  "P3-WORKSPACE-TRUST-PATHS",
+  "P4-CPPUTEST-CPPUMOCK",
+  "P4-DISCOVERY-CTEST",
+  "P4-RECOVERY-AND-10000-BACKEND",
+  "P4-SELECTION-AND-RERUN",
+  "P4-UNITY-CMOCK",
+];
+const PHASE_1_THROUGH_4_SOURCE_PATHS = [
+  "docs/superpowers/specs/2026-07-21-secure-token-file-preparation-design.md",
+  "docs/superpowers/specs/2026-07-22-task-engine-persistence-design.md",
+  "docs/superpowers/specs/2026-07-26-workspace-cmake-toolchains-design.md",
+  "docs/superpowers/specs/2026-07-27-prepared-process-lease-ownership-design.md",
+  "docs/superpowers/specs/2026-07-27-publisher-failure-task-ownership-design.md",
+  "docs/superpowers/specs/2026-07-28-close-before-terminalization-design.md",
+  "docs/superpowers/specs/2026-07-30-test-framework-discovery-execution-design.md",
+  "docs/superpowers/specs/2026-09-03-native-diagnostic-uri-design.md",
+];
+const LOCALIZATION_ONLY_SOURCE = "docs/superpowers/specs/2026-07-22-markdown-chinese-localization-design.md";
+const UNSAFE_CATALOG_COMMAND_PATTERN = /[\0\r\n`;<>]|\$\(|&&|\|\|/u;
 
 function requiredGate(id = "P9-MATRIX-UNIT", source = "docs/spec.md", section = "Acceptance") {
   return {
@@ -393,6 +430,54 @@ test("schema contract is closed and contains the required definitions", () => {
     for (const child of Object.values(value)) visit(child);
   };
   visit(schema);
+});
+
+test("Phase 1 through 4 catalog has exact source, heading, gate, and verification coverage", async () => {
+  const registry = await readCanonicalJson(phase14RegistryPath, { label: "Phase 1 through 4 registry", maxBytes: 1024 * 1024 });
+
+  assert.equal(registry.schemaVersion, 1);
+  assert.equal(registry.product, "unit-test-ide");
+  assert.equal(registry.repository, "colayc/unitTest");
+  assert.deepEqual(registry.allowedDeferredGateIds, ["P8-DOCS-CLOSEOUT", "P8-LEGAL-THIRD-PARTY", "P8-SIGN-WINDOWS"]);
+  assert.deepEqual(registry.sources.map(({ path }) => path), PHASE_1_THROUGH_4_SOURCE_PATHS);
+  assert.equal(registry.sources.some(({ path }) => path === LOCALIZATION_ONLY_SOURCE), false);
+  assert.deepEqual(registry.gates.map(({ id }) => id), PHASE_1_THROUGH_4_GATE_IDS);
+  assert.equal(validateRegistry(registry), true);
+
+  const sourcePaths = registry.sources.map(({ path }) => path);
+  const sourceSections = registry.sources.flatMap(({ path, sections }) => sections.map((section) => `${path}\0${section}`));
+  const gateIds = registry.gates.map(({ id }) => id);
+  assert.equal(new Set(sourcePaths).size, sourcePaths.length);
+  assert.equal(new Set(sourceSections).size, sourceSections.length);
+  assert.equal(new Set(gateIds).size, gateIds.length);
+
+  for (const source of registry.sources) {
+    const markdown = await readFile(join(repositoryRoot, source.path), "utf8");
+    const headings = new Set(markdown.split(/\r?\n/u).map((line) => /^#{1,6} (.+)$/u.exec(line)?.[1]).filter(Boolean));
+    for (const section of source.sections) {
+      assert.ok(headings.has(section), `${source.path} is missing exact heading: ${section}`);
+    }
+  }
+
+  for (const gate of registry.gates) {
+    assert.equal(gate.disposition, "required");
+    assert.ok(gate.requirementRefs.length > 0, `${gate.id} must reference a source heading`);
+    const { commands, jobs, artifacts } = gate.verification;
+    assert.ok(commands.length + jobs.length + artifacts.length > 0, `${gate.id} must declare verification evidence`);
+    for (const command of commands) assert.doesNotMatch(command, UNSAFE_CATALOG_COMMAND_PATTERN);
+  }
+
+  const missingSource = "docs/superpowers/specs/2026-07-27-prepared-process-lease-ownership-design.md";
+  const missingSection = "14. 完成标准";
+  const missingKey = `${missingSource}\0${missingSection}`;
+  const references = registry.gates.flatMap(({ requirementRefs }) => requirementRefs);
+  assert.equal(references.filter(({ source, section }) => `${source}\0${section}` === missingKey).length, 1);
+  const missing = structuredClone(registry);
+  const owner = missing.gates.find(({ requirementRefs }) => requirementRefs.some(
+    ({ source, section }) => `${source}\0${section}` === missingKey,
+  ));
+  owner.requirementRefs = owner.requirementRefs.filter(({ source, section }) => `${source}\0${section}` !== missingKey);
+  assert.throws(() => validateRegistry(missing), /PHASE9_GATE_MISSING/u);
 });
 
 test("only the exact three approved Phase 8 gates may be deferred", () => {

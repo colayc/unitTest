@@ -1,0 +1,606 @@
+{
+  "allowedDeferredGateIds": [
+    "P8-DOCS-CLOSEOUT",
+    "P8-LEGAL-THIRD-PARTY",
+    "P8-SIGN-WINDOWS"
+  ],
+  "gates": [
+    {
+      "category": "security",
+      "disposition": "required",
+      "id": "P1-IPC-PER-USER-AUTH",
+      "phase": 1,
+      "requirementRefs": [
+        {
+          "section": "13. 错误、安全与流量控制",
+          "source": "docs/superpowers/specs/2026-07-22-task-engine-persistence-design.md"
+        }
+      ],
+      "title": "Per-user IPC authentication",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "pnpm test:e2e"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "security",
+      "disposition": "required",
+      "id": "P1-PROTOCOL-NO-SHELL",
+      "phase": 1,
+      "requirementRefs": [
+        {
+          "section": "测试",
+          "source": "docs/superpowers/specs/2026-07-21-secure-token-file-preparation-design.md"
+        }
+      ],
+      "title": "Protocol cannot invoke arbitrary shells",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "pnpm verify"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "compatibility",
+      "disposition": "required",
+      "id": "P1-PROTOCOL-VERSION-COMPAT",
+      "phase": 1,
+      "requirementRefs": [
+        {
+          "section": "14. 测试策略",
+          "source": "docs/superpowers/specs/2026-07-22-task-engine-persistence-design.md"
+        }
+      ],
+      "title": "Protocol version compatibility",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "go test ./apps/test-service/internal/protocol ./apps/test-service/internal/session"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "security",
+      "disposition": "required",
+      "id": "P1-TOKEN-FILE-SECURE",
+      "phase": 1,
+      "requirementRefs": [
+        {
+          "section": "安全创建",
+          "source": "docs/superpowers/specs/2026-07-21-secure-token-file-preparation-design.md"
+        }
+      ],
+      "title": "Secure token file preparation",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "go test ./apps/test-service/cmd/unit-test-service"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "artifacts",
+      "disposition": "required",
+      "id": "P2-ARTIFACT-ATOMIC-CLEANUP",
+      "phase": 2,
+      "requirementRefs": [
+        {
+          "section": "13. 测试矩阵",
+          "source": "docs/superpowers/specs/2026-07-28-close-before-terminalization-design.md"
+        },
+        {
+          "section": "14. 验收条件",
+          "source": "docs/superpowers/specs/2026-07-28-close-before-terminalization-design.md"
+        }
+      ],
+      "title": "Atomic artifact publication and cleanup",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "go test ./apps/test-service/internal/artifactstore ./apps/test-service/internal/task"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "persistence",
+      "disposition": "required",
+      "id": "P2-EVENT-REPLAY-PERSISTENCE",
+      "phase": 2,
+      "requirementRefs": [
+        {
+          "section": "15. 验收场景",
+          "source": "docs/superpowers/specs/2026-07-22-task-engine-persistence-design.md"
+        }
+      ],
+      "title": "Persistent event replay without gaps",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "go test ./apps/test-service/internal/eventbroker ./apps/test-service/internal/session ./apps/test-service/internal/taskstore"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "reliability",
+      "disposition": "required",
+      "id": "P2-FAILURE-OWNERSHIP",
+      "phase": 2,
+      "requirementRefs": [
+        {
+          "section": "12. 测试设计",
+          "source": "docs/superpowers/specs/2026-07-27-prepared-process-lease-ownership-design.md"
+        },
+        {
+          "section": "14. 完成标准",
+          "source": "docs/superpowers/specs/2026-07-27-prepared-process-lease-ownership-design.md"
+        },
+        {
+          "section": "11. 错误与安全",
+          "source": "docs/superpowers/specs/2026-07-27-publisher-failure-task-ownership-design.md"
+        },
+        {
+          "section": "12. 测试设计",
+          "source": "docs/superpowers/specs/2026-07-27-publisher-failure-task-ownership-design.md"
+        },
+        {
+          "section": "14. 完成标准",
+          "source": "docs/superpowers/specs/2026-07-27-publisher-failure-task-ownership-design.md"
+        }
+      ],
+      "title": "Failure ownership remains durable and fail closed",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "go test ./apps/test-service/internal/task ./apps/test-service/internal/taskstore"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "process",
+      "disposition": "required",
+      "id": "P2-PROCESS-TREE-TERMINATION",
+      "phase": 2,
+      "requirementRefs": [
+        {
+          "section": "16. 完成门禁",
+          "source": "docs/superpowers/specs/2026-07-22-task-engine-persistence-design.md"
+        }
+      ],
+      "title": "Cross-platform process tree termination",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "go test ./apps/test-service/internal/processcontrol ./apps/test-service/internal/processhost"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "task-control",
+      "disposition": "required",
+      "id": "P2-TASK-CANCEL-TIMEOUT",
+      "phase": 2,
+      "requirementRefs": [
+        {
+          "section": "14. 测试策略",
+          "source": "docs/superpowers/specs/2026-07-22-task-engine-persistence-design.md"
+        }
+      ],
+      "title": "Task cancellation and timeout first cause",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "go test ./apps/test-service/internal/task ./apps/test-service/internal/testrun"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "build",
+      "disposition": "required",
+      "id": "P3-CMAKE-CONFIGURE-BUILD",
+      "phase": 3,
+      "requirementRefs": [
+        {
+          "section": "19. 测试策略",
+          "source": "docs/superpowers/specs/2026-07-26-workspace-cmake-toolchains-design.md"
+        }
+      ],
+      "title": "CMake configure and build execution",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "go test ./apps/test-service/internal/build ./apps/test-service/internal/cmake"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "diagnostics",
+      "disposition": "required",
+      "id": "P3-DIAGNOSTIC-URI",
+      "phase": 3,
+      "requirementRefs": [
+        {
+          "section": "Acceptance criteria",
+          "source": "docs/superpowers/specs/2026-09-03-native-diagnostic-uri-design.md"
+        },
+        {
+          "section": "Compatibility and security boundaries",
+          "source": "docs/superpowers/specs/2026-09-03-native-diagnostic-uri-design.md"
+        },
+        {
+          "section": "Verification strategy",
+          "source": "docs/superpowers/specs/2026-09-03-native-diagnostic-uri-design.md"
+        }
+      ],
+      "title": "Private portable diagnostic URI mapping",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "go test ./apps/test-service/internal/diagnostic ./apps/test-service/internal/task",
+          "pnpm test:e2e:native"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "toolchain",
+      "disposition": "required",
+      "id": "P3-TOOLCHAIN-LINUX-CLANG",
+      "phase": 3,
+      "requirementRefs": [
+        {
+          "section": "20. 验收场景",
+          "source": "docs/superpowers/specs/2026-07-26-workspace-cmake-toolchains-design.md"
+        }
+      ],
+      "title": "Linux Clang toolchain",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "pnpm test:e2e:native"
+        ],
+        "jobs": [
+          "verify-linux"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "toolchain",
+      "disposition": "required",
+      "id": "P3-TOOLCHAIN-LINUX-GCC",
+      "phase": 3,
+      "requirementRefs": [
+        {
+          "section": "20. 验收场景",
+          "source": "docs/superpowers/specs/2026-07-26-workspace-cmake-toolchains-design.md"
+        }
+      ],
+      "title": "Linux GCC toolchain",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "pnpm test:e2e:native"
+        ],
+        "jobs": [
+          "verify-linux"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "toolchain",
+      "disposition": "required",
+      "id": "P3-TOOLCHAIN-WINDOWS-CLANGCL",
+      "phase": 3,
+      "requirementRefs": [
+        {
+          "section": "20. 验收场景",
+          "source": "docs/superpowers/specs/2026-07-26-workspace-cmake-toolchains-design.md"
+        }
+      ],
+      "title": "Windows clang-cl toolchain",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "pnpm test:e2e:native"
+        ],
+        "jobs": [
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "toolchain",
+      "disposition": "required",
+      "id": "P3-TOOLCHAIN-WINDOWS-MSVC",
+      "phase": 3,
+      "requirementRefs": [
+        {
+          "section": "21. 完成门禁",
+          "source": "docs/superpowers/specs/2026-07-26-workspace-cmake-toolchains-design.md"
+        }
+      ],
+      "title": "Windows MSVC toolchain",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "pnpm test:e2e:native"
+        ],
+        "jobs": [
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "workspace-security",
+      "disposition": "required",
+      "id": "P3-WORKSPACE-TRUST-PATHS",
+      "phase": 3,
+      "requirementRefs": [
+        {
+          "section": "6. Workspace 绑定与信任边界",
+          "source": "docs/superpowers/specs/2026-07-26-workspace-cmake-toolchains-design.md"
+        }
+      ],
+      "title": "Workspace trust and path containment",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "go test ./apps/test-service/internal/workspace"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "framework",
+      "disposition": "required",
+      "id": "P4-CPPUTEST-CPPUMOCK",
+      "phase": 4,
+      "requirementRefs": [
+        {
+          "section": "20. 测试策略",
+          "source": "docs/superpowers/specs/2026-07-30-test-framework-discovery-execution-design.md"
+        }
+      ],
+      "title": "CppUTest and CppUMock discovery and execution",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "go test ./apps/test-service/internal/testframework/cpputest"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "discovery",
+      "disposition": "required",
+      "id": "P4-DISCOVERY-CTEST",
+      "phase": 4,
+      "requirementRefs": [
+        {
+          "section": "19. 安全边界",
+          "source": "docs/superpowers/specs/2026-07-30-test-framework-discovery-execution-design.md"
+        }
+      ],
+      "title": "CTest discovery and execution safety",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "go test ./apps/test-service/internal/ctest ./apps/test-service/internal/testdiscovery"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "resilience",
+      "disposition": "required",
+      "id": "P4-RECOVERY-AND-10000-BACKEND",
+      "phase": 4,
+      "requirementRefs": [
+        {
+          "section": "22. 验收标准",
+          "source": "docs/superpowers/specs/2026-07-30-test-framework-discovery-execution-design.md"
+        }
+      ],
+      "title": "Recovery and 10000 item backend",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "pnpm verify"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "execution",
+      "disposition": "required",
+      "id": "P4-SELECTION-AND-RERUN",
+      "phase": 4,
+      "requirementRefs": [
+        {
+          "section": "20. 测试策略",
+          "source": "docs/superpowers/specs/2026-07-30-test-framework-discovery-execution-design.md"
+        }
+      ],
+      "title": "Test selection and failed rerun",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "go test ./apps/test-service/internal/testdomain ./apps/test-service/internal/testrun"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "framework",
+      "disposition": "required",
+      "id": "P4-UNITY-CMOCK",
+      "phase": 4,
+      "requirementRefs": [
+        {
+          "section": "20. 测试策略",
+          "source": "docs/superpowers/specs/2026-07-30-test-framework-discovery-execution-design.md"
+        }
+      ],
+      "title": "Unity and CMock discovery and execution",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "go test ./apps/test-service/internal/testframework/unity ./apps/test-service/internal/unityrunner"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    }
+  ],
+  "product": "unit-test-ide",
+  "repository": "colayc/unitTest",
+  "schemaVersion": 1,
+  "sources": [
+    {
+      "path": "docs/superpowers/specs/2026-07-21-secure-token-file-preparation-design.md",
+      "sections": [
+        "安全创建",
+        "测试"
+      ]
+    },
+    {
+      "path": "docs/superpowers/specs/2026-07-22-task-engine-persistence-design.md",
+      "sections": [
+        "13. 错误、安全与流量控制",
+        "14. 测试策略",
+        "15. 验收场景",
+        "16. 完成门禁"
+      ]
+    },
+    {
+      "path": "docs/superpowers/specs/2026-07-26-workspace-cmake-toolchains-design.md",
+      "sections": [
+        "19. 测试策略",
+        "20. 验收场景",
+        "21. 完成门禁",
+        "6. Workspace 绑定与信任边界"
+      ]
+    },
+    {
+      "path": "docs/superpowers/specs/2026-07-27-prepared-process-lease-ownership-design.md",
+      "sections": [
+        "12. 测试设计",
+        "14. 完成标准"
+      ]
+    },
+    {
+      "path": "docs/superpowers/specs/2026-07-27-publisher-failure-task-ownership-design.md",
+      "sections": [
+        "11. 错误与安全",
+        "12. 测试设计",
+        "14. 完成标准"
+      ]
+    },
+    {
+      "path": "docs/superpowers/specs/2026-07-28-close-before-terminalization-design.md",
+      "sections": [
+        "13. 测试矩阵",
+        "14. 验收条件"
+      ]
+    },
+    {
+      "path": "docs/superpowers/specs/2026-07-30-test-framework-discovery-execution-design.md",
+      "sections": [
+        "19. 安全边界",
+        "20. 测试策略",
+        "22. 验收标准"
+      ]
+    },
+    {
+      "path": "docs/superpowers/specs/2026-09-03-native-diagnostic-uri-design.md",
+      "sections": [
+        "Acceptance criteria",
+        "Compatibility and security boundaries",
+        "Verification strategy"
+      ]
+    }
+  ]
+}
