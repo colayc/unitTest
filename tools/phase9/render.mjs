@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
@@ -8,7 +8,7 @@ import { encodeCanonicalJson, phase9Failure } from "./canonical-json.mjs";
 import { evaluateRecordedMatrix, loadPhase9Inputs } from "./validate.mjs";
 
 const execFileAsync = promisify(execFile);
-const STATUSES = ["PASS", "MISSING", "FAILED", "DEFERRED"];
+const SAFE_REASON = "candidate-descendant-changed-tested-content";
 
 function jsonProjection(matrix) {
   const output = {
@@ -24,7 +24,12 @@ function jsonProjection(matrix) {
       .map((gate) => {
         const row = { id: gate.id, status: gate.status };
         for (const key of ["receiptId", "artifactAvailability", "reason"]) {
-          if (gate[key] !== undefined) row[key] = gate[key];
+          if (gate[key] !== undefined) {
+            if (key === "reason" && gate[key] !== SAFE_REASON) {
+              throw phase9Failure("PHASE9_GATE_SCHEMA_INVALID", "matrix reason is unsafe");
+            }
+            row[key] = gate[key];
+          }
         }
         return row;
       }),
@@ -49,7 +54,6 @@ function escapeCell(value) {
 function evidenceCell(gate) {
   const values = [];
   if (gate.receiptId !== undefined) values.push(gate.receiptId);
-  if (gate.artifactAvailability !== undefined) values.push(`(${gate.artifactAvailability})`);
   return values.join(" ");
 }
 
@@ -61,9 +65,9 @@ export function renderMatrixMarkdown(matrix) {
     "",
     `- Candidate commit: \`${escapeCell(matrix.candidateCommit)}\``,
     `- Recorded by commit: \`${escapeCell(matrix.recordedByCommit ?? matrix.currentCommit)}\``,
-    `- Evaluation mode: ${escapeCell(matrix.evaluationMode)}`,
-    `- Catalog complete: ${String(matrix.catalogComplete)}`,
-    `- Release ready: ${String(matrix.releaseReady)}`,
+    `- Evaluation mode: \`${escapeCell(matrix.evaluationMode)}\``,
+    `- Catalog complete: \`${String(matrix.catalogComplete)}\``,
+    `- Release ready: \`${String(matrix.releaseReady)}\``,
     "",
     "## Status summary",
     "",

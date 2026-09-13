@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import Ajv2020 from "ajv/dist/2020.js";
 import { execFile } from "node:child_process";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -196,7 +197,7 @@ function rendererMatrix() {
     counts: { pass: 1, missing: 1, failed: 1, deferred: 1 },
     gates: [
       { id: "P9-MATRIX-UNIT", phase: 9, category: "quality|checks", status: "PASS", receiptId: "receipt`1", artifactAvailability: "available" },
-      { id: "P8-DOCS-CLOSEOUT", phase: 8, category: "docs", status: "DEFERRED", reason: "waiting\\for\ncloseout" },
+      { id: "P8-DOCS-CLOSEOUT", phase: 8, category: "docs\\for\ncloseout", status: "DEFERRED" },
       { id: "P9-FAILED", phase: 9, category: "qa", status: "FAILED", receiptId: "receipt-3", reason: "candidate-descendant-changed-tested-content" },
       { id: "P9-MISSING", phase: 9, category: "qa", status: "MISSING" },
     ],
@@ -209,9 +210,9 @@ test("renderer emits exact deterministic Markdown summary, sorted gates, reasons
     "",
     "- Candidate commit: `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`",
     "- Recorded by commit: `cccccccccccccccccccccccccccccccccccccccc`",
-    "- Evaluation mode: historical",
-    "- Catalog complete: true",
-    "- Release ready: false",
+    "- Evaluation mode: `historical`",
+    "- Catalog complete: `true`",
+    "- Release ready: `false`",
     "",
     "## Status summary",
     "",
@@ -226,9 +227,9 @@ test("renderer emits exact deterministic Markdown summary, sorted gates, reasons
     "",
     "| Gate | Phase | Category | Status | Evidence | Reason |",
     "|---|---:|---|---|---|---|",
-    "| P8-DOCS-CLOSEOUT | 8 | docs | DEFERRED |  | waiting\\\\for\\ncloseout |",
+    "| P8-DOCS-CLOSEOUT | 8 | docs\\\\for\\ncloseout | DEFERRED |  |  |",
     "| P9-FAILED | 9 | qa | FAILED | receipt-3 | candidate-descendant-changed-tested-content |",
-    "| P9-MATRIX-UNIT | 9 | quality\\|checks | PASS | receipt\\`1 (available) |  |",
+    "| P9-MATRIX-UNIT | 9 | quality\\|checks | PASS | receipt\\`1 |  |",
     "| P9-MISSING | 9 | qa | MISSING |  |  |",
     "",
   ].join("\n"));
@@ -241,6 +242,18 @@ test("renderer JSON is canonical and deterministic across repeated renders", () 
   assert.match(renderMatrixJson(matrix), /\n$/u);
 });
 
+test("renderer JSON validates against the closed matrix schema and rejects unsafe reasons", () => {
+  const ajv = new Ajv2020({ strict: true });
+  ajv.addSchema(schema);
+  const validateMatrix = ajv.getSchema(`${schema.$id}#/$defs/matrix`);
+  const value = JSON.parse(renderMatrixJson(rendererMatrix()));
+  assert.equal(validateMatrix(value), true);
+  assert.equal(validateMatrix.errors, null);
+  const unsafe = structuredClone(value);
+  unsafe.gates[1].reason = "secret\nlocal path";
+  assert.equal(validateMatrix(unsafe), false);
+});
+
 test("renderer check detects one-byte Markdown drift without overwriting", async () => {
   const root = await mkdtemp(join(tmpdir(), "phase9-render-"));
   fixtureRoots.push(root);
@@ -251,6 +264,26 @@ test("renderer check detects one-byte Markdown drift without overwriting", async
   await writeFile(markdownPath, `${original.slice(0, -1)}X\n`);
   await assert.rejects(writeMatrixOutputs({ matrix: rendererMatrix(), jsonPath, markdownPath, check: true }), /PHASE9_MATRIX_DRIFT/u);
   assert.equal(await readFile(markdownPath, "utf8"), `${original.slice(0, -1)}X\n`);
+});
+
+test("renderer CLI check reports drift without overwriting Markdown", async () => {
+  const lineage = await createGitLineageFixture();
+  const inputs = await createCliInputs(lineage.candidate);
+  const markdownOut = join(lineage.root, "matrix.md");
+  const jsonOut = join(lineage.root, "matrix.json");
+  const args = [
+    join(import.meta.dirname, "render.mjs"),
+    "--registry", inputs.registryPath, "--baseline", inputs.baselinePath, "--receipts", inputs.receiptsDirectory,
+    "--repository-root", lineage.root, "--json-out", jsonOut, "--markdown-out", markdownOut,
+  ];
+  await execFileAsync(process.execPath, args);
+  const original = await readFile(markdownOut, "utf8");
+  await writeFile(markdownOut, `${original.slice(0, -1)}X\n`);
+  await assert.rejects(execFileAsync(process.execPath, [...args, "--check"]), (error) => {
+    assert.match(`${error.stderr}`, /PHASE9_MATRIX_DRIFT/u);
+    return true;
+  });
+  assert.equal(await readFile(markdownOut, "utf8"), `${original.slice(0, -1)}X\n`);
 });
 
 test("canonical JSON recursively sorts object keys and ends with one newline", () => {
@@ -348,8 +381,9 @@ test("schema contract is closed and contains the required definitions", () => {
   assert.equal(defs.registry.properties.schemaVersion.const, 1);
   assert.equal(defs.baseline.properties.schemaVersion.const, 1);
   assert.equal(defs.matrix.properties.schemaVersion.const, 1);
-  assert.deepEqual(defs.matrixGate.properties.reason, { type: "string" });
+  assert.deepEqual(defs.matrixGate.properties.reason, { const: "candidate-descendant-changed-tested-content" });
   assert.equal(defs.matrixGate.required.includes("reason"), false);
+  assert.deepEqual(defs.matrix.properties.recordedByCommit, { $ref: "#/$defs/commit" });
   assert.equal(defs.receipt.oneOf.length, 2);
   assert.equal(defs.githubActionsReceipt.properties.evidence.properties.kind.const, "github-actions");
   assert.equal(defs.manualApprovalReceipt.properties.evidence.properties.kind.const, "manual-approval");
