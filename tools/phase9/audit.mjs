@@ -316,8 +316,7 @@ export function evaluateAuditedMatrix({ recordedMatrix, receipts, snapshotsByRun
     if (!isObject(snapshots)) return downgradePass(gate);
     try {
       const result = auditGithubReceipt({ receipt, ...snapshots });
-      const output = { ...gate };
-      if (Object.hasOwn(output, "artifactAvailability")) output.artifactAvailability = result.artifactAvailability;
+      const output = { ...gate, artifactAvailability: result.artifactAvailability };
       return output;
     } catch (error) {
       if (error?.code !== "PHASE9_EVIDENCE_UNTRUSTED") throw error;

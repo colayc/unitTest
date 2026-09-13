@@ -319,6 +319,31 @@ test("candidate release readiness requires every PASS artifact to remain availab
   assert.equal(historical.releaseReady, false);
 });
 
+test("audited availability is authoritative when recorded availability is omitted", () => {
+  const rows = [{ id: "P9-MATRIX-UNIT", status: "PASS", receiptId }];
+  const available = evaluateAuditedMatrix({
+    recordedMatrix: recordedMatrix({ gates: rows }), receipts: [validReceipt()], snapshotsByRunId: snapshots(),
+  });
+  assert.equal(available.gates[0].artifactAvailability, "available");
+  assert.equal(available.releaseReady, true);
+
+  const expired = evaluateAuditedMatrix({
+    recordedMatrix: recordedMatrix({ gates: rows }), receipts: [validReceipt()], snapshotsByRunId: snapshots(true),
+  });
+  assert.equal(expired.gates[0].status, "PASS");
+  assert.equal(expired.gates[0].artifactAvailability, "expired");
+  assert.equal(expired.releaseReady, false);
+
+  const historical = evaluateAuditedMatrix({
+    recordedMatrix: recordedMatrix({ evaluationMode: "historical", gates: rows }),
+    receipts: [validReceipt()],
+    snapshotsByRunId: snapshots(true),
+  });
+  assert.equal(historical.gates[0].status, "PASS");
+  assert.equal(historical.gates[0].artifactAvailability, "expired");
+  assert.equal(historical.releaseReady, false);
+});
+
 test("a recorded PASS remains bound to its candidate commit and gate ID", () => {
   const otherCandidate = validReceipt({ candidateCommit: "c".repeat(40), evidence: { headSha: "c".repeat(40) } });
   const otherSnapshots = snapshots();
@@ -346,7 +371,9 @@ test("CLI loads only local fixed snapshots and writes deterministic renderer out
   const matrixPath = join(root, "recorded.json");
   const jsonOut = join(root, "audited.json");
   const markdownOut = join(root, "audited.md");
-  await writeCanonicalJson(matrixPath, recordedMatrix());
+  await writeCanonicalJson(matrixPath, recordedMatrix({
+    gates: [{ id: "P9-MATRIX-UNIT", status: "PASS", receiptId }],
+  }));
   await writeCanonicalJson(join(receiptsDirectory, `${receiptId}.json`), validReceipt());
   await writeFile(join(runDirectory, "run.json"), `${JSON.stringify(validRunSnapshot())}\n`);
   await writeFile(join(runDirectory, "jobs.json"), `${JSON.stringify(validJobSnapshot())}\n`);
@@ -362,7 +389,41 @@ test("CLI loads only local fixed snapshots and writes deterministic renderer out
   const output = JSON.parse(await readFile(jsonOut, "utf8"));
   assert.equal(output.releaseReady, true);
   assert.equal(output.gates[0].status, "PASS");
+  assert.equal(output.gates[0].artifactAvailability, "available");
   assert.match(await readFile(markdownOut, "utf8"), /Release ready: `true`/u);
+});
+
+test("CLI blocks candidate readiness when omitted availability audits as expired", async () => {
+  const root = await mkdtemp(join(tmpdir(), "phase9-audit-expired-"));
+  fixtureRoots.push(root);
+  const receiptsDirectory = join(root, "receipts");
+  const snapshotsDirectory = join(root, "snapshots");
+  const runDirectory = join(snapshotsDirectory, runId);
+  await mkdir(receiptsDirectory, { recursive: true });
+  await mkdir(runDirectory, { recursive: true });
+  const matrixPath = join(root, "recorded.json");
+  const jsonOut = join(root, "audited.json");
+  const markdownOut = join(root, "audited.md");
+  await writeCanonicalJson(matrixPath, recordedMatrix({
+    gates: [{ id: "P9-MATRIX-UNIT", status: "PASS", receiptId }],
+  }));
+  await writeCanonicalJson(join(receiptsDirectory, `${receiptId}.json`), validReceipt());
+  await writeFile(join(runDirectory, "run.json"), `${JSON.stringify(validRunSnapshot())}\n`);
+  await writeFile(join(runDirectory, "jobs.json"), `${JSON.stringify(validJobSnapshot())}\n`);
+  await writeFile(join(runDirectory, "artifacts.json"), `${JSON.stringify(validArtifactSnapshot({ expired: true }))}\n`);
+  await execFileAsync(process.execPath, [
+    join(import.meta.dirname, "audit.mjs"),
+    "--recorded-matrix", matrixPath,
+    "--receipts", receiptsDirectory,
+    "--snapshots", snapshotsDirectory,
+    "--json-out", jsonOut,
+    "--markdown-out", markdownOut,
+  ]);
+  const output = JSON.parse(await readFile(jsonOut, "utf8"));
+  assert.equal(output.gates[0].status, "PASS");
+  assert.equal(output.gates[0].artifactAvailability, "expired");
+  assert.equal(output.releaseReady, false);
+  assert.match(await readFile(markdownOut, "utf8"), /Release ready: `false`/u);
 });
 
 test("CLI rejects noncanonical snapshot directory IDs and does not write outputs", async () => {
