@@ -402,6 +402,7 @@ git commit -m "feat: validate phase 9 gate states"
 **Files:**
 - Modify: `tools/phase9/validate.mjs`
 - Modify: `tools/phase9/validate.test.mjs`
+- Modify: `tools/phase9/gates.schema.json`
 
 **Interfaces:**
 - Consumes: `baseline.evaluationMode`, `candidateCommit`, `currentCommit`, and a normalized repository-relative `changedPaths` array.
@@ -458,9 +459,9 @@ Treat a nonzero ancestry result, malformed Git output, or any non-evidence path 
 
 - [ ] **Step 4: Connect lineage to matrix evaluation**
 
-For `evaluationMode=historical`, require the recorded candidate to be an ancestor of current HEAD, preserve exact receipt-backed rows as historical conclusions, label them `historical`, and force `releaseReady=false` regardless of counts.
+For `evaluationMode=historical`, require the recorded candidate to be an ancestor of current HEAD, preserve exact receipt-backed rows as historical conclusions, label the matrix with its root `evaluationMode=historical`, and force `releaseReady=false` regardless of counts. The existing root mode is the historical label; do not add a per-row scope field.
 
-For `evaluationMode=candidate`, allow recorded `PASS` rows only when current HEAD equals `baseline.candidateCommit` or every changed path is evidence-only. `validateCandidateChanges` throws on unrelated history or tested-content changes; `evaluateRecordedMatrix` catches only that stable lineage error and changes receipt-backed would-be `PASS` rows to `FAILED` with reason `candidate-descendant-changed-tested-content`. Do not catch schema, registry, conflict, or Git execution errors.
+For `evaluationMode=candidate`, allow recorded `PASS` rows only when current HEAD equals `baseline.candidateCommit` or every changed path is evidence-only. `validateCandidateChanges` throws on unrelated history or tested-content changes; `evaluateRecordedMatrix` catches only that stable lineage error and changes receipt-backed would-be `PASS` rows to `FAILED` with reason `candidate-descendant-changed-tested-content`. Add optional closed `reason` to the schema's `matrixGate` object for this stable diagnostic. Do not catch schema, registry, conflict, or Git execution errors.
 
 - [ ] **Step 5: Run all validator tests**
 
