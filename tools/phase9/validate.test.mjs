@@ -109,6 +109,75 @@ async function fixture(name, bytes) {
   await writeFile(path, bytes);
   return path;
 }
+
+async function git(root, arguments_) {
+  return execFileAsync("git", ["-C", root, ...arguments_]);
+}
+
+async function createGitLineageFixture({ shellSensitiveRoot = false } = {}) {
+  const base = await mkdtemp(join(tmpdir(), "phase9-lineage-"));
+  fixtureRoots.push(base);
+  const root = shellSensitiveRoot ? join(base, "repo & echo untrusted") : base;
+  if (shellSensitiveRoot) await mkdir(root);
+  await execFileAsync("git", ["init", root]);
+  await git(root, ["config", "user.email", "phase9@example.invalid"]);
+  await git(root, ["config", "user.name", "Phase 9 Test"]);
+
+  const productPath = join(root, "apps", "test-service", "internal", "task", "manager.go");
+  await mkdir(join(root, "apps", "test-service", "internal", "task"), { recursive: true });
+  await writeFile(productPath, `package task\n// ${base}\n`);
+  await git(root, ["add", "--", "apps/test-service/internal/task/manager.go"]);
+  await git(root, ["commit", "-m", "candidate"]);
+  const candidate = (await git(root, ["rev-parse", "HEAD"])).stdout.trim();
+
+  const evidencePath = join(root, "docs", "superpowers", "evidence", "phase9", "receipts", "run.json");
+  await mkdir(join(root, "docs", "superpowers", "evidence", "phase9", "receipts"), { recursive: true });
+  await writeFile(evidencePath, "{}\n");
+  await git(root, ["add", "--", "docs/superpowers/evidence/phase9/receipts/run.json"]);
+  await git(root, ["commit", "-m", "evidence"]);
+  const evidenceCommit = (await git(root, ["rev-parse", "HEAD"])).stdout.trim();
+
+  await writeFile(productPath, `package task\n// ${base}\n\nfunc changed() {}\n`);
+  await git(root, ["add", "--", "apps/test-service/internal/task/manager.go"]);
+  await git(root, ["commit", "-m", "product change"]);
+  const productCommit = (await git(root, ["rev-parse", "HEAD"])).stdout.trim();
+  return { root, candidate, evidenceCommit, productCommit };
+}
+
+async function createCliInputs(candidate, evaluationMode = "candidate") {
+  const root = await mkdtemp(join(tmpdir(), "phase9-cli-inputs-"));
+  fixtureRoots.push(root);
+  const receiptsDirectory = join(root, "receipts");
+  await mkdir(receiptsDirectory);
+  const receipt = githubReceipt({
+    candidateCommit: candidate,
+    evidence: { headSha: candidate },
+  });
+  await writeCanonicalJson(join(root, "registry.json"), validRegistry({ deferred: false }));
+  await writeCanonicalJson(join(root, "baseline.json"), {
+    ...validBaseline(evaluationMode, [receipt.receiptId]), candidateCommit: candidate,
+  });
+  await writeCanonicalJson(join(receiptsDirectory, "receipt.json"), receipt);
+  return {
+    registryPath: join(root, "registry.json"),
+    baselinePath: join(root, "baseline.json"),
+    receiptsDirectory,
+    out: join(root, "matrix.json"),
+    requestsOut: join(root, "requests.json"),
+  };
+}
+
+function validatorArguments(inputs, repositoryRoot) {
+  return [
+    join(import.meta.dirname, "validate.mjs"),
+    "--registry", inputs.registryPath,
+    "--baseline", inputs.baselinePath,
+    "--receipts", inputs.receiptsDirectory,
+    "--repository-root", repositoryRoot,
+    "--out", inputs.out,
+    "--requests-out", inputs.requestsOut,
+  ];
+}
 const fixtureRoots = [];
 test.afterEach(async () => {
   await Promise.all(fixtureRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -209,6 +278,8 @@ test("schema contract is closed and contains the required definitions", () => {
   assert.equal(defs.registry.properties.schemaVersion.const, 1);
   assert.equal(defs.baseline.properties.schemaVersion.const, 1);
   assert.equal(defs.matrix.properties.schemaVersion.const, 1);
+  assert.deepEqual(defs.matrixGate.properties.reason, { type: "string" });
+  assert.equal(defs.matrixGate.required.includes("reason"), false);
   assert.equal(defs.receipt.oneOf.length, 2);
   assert.equal(defs.githubActionsReceipt.properties.evidence.properties.kind.const, "github-actions");
   assert.equal(defs.manualApprovalReceipt.properties.evidence.properties.kind.const, "manual-approval");
@@ -399,11 +470,112 @@ test("candidate path validation accepts exact and evidence-only states and rejec
     currentCommit: "d".repeat(40),
     changedPaths: ["docs/superpowers/evidence/phase9/receipts/run.json"],
   }), "evidence-only-descendant");
-  for (const changedPath of ["apps/service.js", "../secret", "/absolute", "C:\\secret", "docs/superpowers/evidence/phase9-evil/x", "docs//superpowers/evidence/phase9/x"]) {
+  for (const changedPath of [
+    "", "apps/service.js", "../secret", "./docs/superpowers/evidence/phase9/x", "/absolute", "C:\\secret",
+    "docs/superpowers/evidence/phase9-evil/x", "docs//superpowers/evidence/phase9/x",
+    "docs/superpowers/evidence/phase9/x/../y", "docs/superpowers/evidence/phase9/x\ny",
+    ".github/workflows/foundation.yml",
+  ]) {
     assert.throws(() => validateCandidateChanges({
       candidateCommit, currentCommit: "d".repeat(40), changedPaths: [changedPath],
     }), /PHASE9_EVIDENCE_UNTRUSTED/u);
   }
+  assert.throws(() => validateCandidateChanges({
+    candidateCommit, currentCommit: "d".repeat(40), changedPaths: [],
+  }), /PHASE9_EVIDENCE_UNTRUSTED/u);
+  for (const malformedCommit of ["", "A".repeat(40), "a".repeat(39), "$(whoami)"]) {
+    assert.throws(() => validateCandidateChanges({
+      candidateCommit: malformedCommit, currentCommit, changedPaths: [],
+    }), /PHASE9_EVIDENCE_UNTRUSTED/u);
+  }
+});
+
+test("candidate evidence survives only an evidence-only descendant", async () => {
+  const lineage = await createGitLineageFixture();
+  assert.doesNotThrow(() => validateCandidateChanges({
+    candidateCommit: lineage.candidate,
+    currentCommit: lineage.evidenceCommit,
+    changedPaths: ["docs/superpowers/evidence/phase9/receipts/run.json"],
+  }));
+  assert.throws(() => validateCandidateChanges({
+    candidateCommit: lineage.candidate,
+    currentCommit: lineage.productCommit,
+    changedPaths: ["apps/test-service/internal/task/manager.go"],
+  }), /PHASE9_EVIDENCE_UNTRUSTED/u);
+});
+
+test("candidate mode fails only would-be PASS rows after tested-content changes", () => {
+  const receipt = githubReceipt();
+  const matrix = evaluateRecordedMatrix({
+    registry: validRegistry({ deferred: false }),
+    baseline: validBaseline("candidate", [receipt.receiptId]),
+    receipts: [receipt],
+    currentCommit: "d".repeat(40),
+    changedPaths: ["apps/test-service/internal/task/manager.go"],
+  });
+  assert.equal(matrix.releaseReady, false);
+  assert.deepEqual(matrix.counts, { pass: 0, missing: 0, failed: 1, deferred: 0 });
+  assert.deepEqual(matrix.gates[0], {
+    id: "P9-MATRIX-UNIT",
+    status: "FAILED",
+    receiptId: receipt.receiptId,
+    artifactAvailability: "available",
+    reason: "candidate-descendant-changed-tested-content",
+  });
+});
+
+test("historical mode preserves receipt-backed rows after later product changes", () => {
+  const receipt = githubReceipt();
+  const matrix = evaluateRecordedMatrix({
+    registry: validRegistry({ deferred: false }),
+    baseline: validBaseline("historical", [receipt.receiptId]),
+    receipts: [receipt],
+    currentCommit: "d".repeat(40),
+    changedPaths: ["apps/test-service/internal/task/manager.go"],
+  });
+  assert.equal(matrix.evaluationMode, "historical");
+  assert.equal(matrix.releaseReady, false);
+  assert.equal(matrix.gates[0].status, "PASS");
+  assert.equal("reason" in matrix.gates[0], false);
+});
+
+test("candidate CLI derives tested-content changes from Git", async () => {
+  const lineage = await createGitLineageFixture();
+  const inputs = await createCliInputs(lineage.candidate);
+  await execFileAsync(process.execPath, validatorArguments(inputs, lineage.root));
+  const matrix = JSON.parse(await readFile(inputs.out, "utf8"));
+  assert.equal(matrix.currentCommit, lineage.productCommit);
+  assert.deepEqual(matrix.gates[0], {
+    artifactAvailability: "available",
+    id: "P9-MATRIX-UNIT",
+    reason: "candidate-descendant-changed-tested-content",
+    receiptId: "github-actions-20-1",
+    status: "FAILED",
+  });
+});
+
+test("candidate CLI rejects unrelated history without disclosing repository paths", async () => {
+  const candidateLineage = await createGitLineageFixture();
+  const unrelatedLineage = await createGitLineageFixture();
+  const inputs = await createCliInputs(candidateLineage.candidate);
+  await assert.rejects(
+    execFileAsync(process.execPath, validatorArguments(inputs, unrelatedLineage.root)),
+    (error) => {
+      assert.match(`${error.stderr}`, /PHASE9_EVIDENCE_UNTRUSTED/u);
+      assert.doesNotMatch(`${error.stderr}`, new RegExp(unrelatedLineage.root.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
+      return true;
+    },
+  );
+});
+
+test("candidate CLI passes shell-sensitive repository roots as literal Git arguments", async () => {
+  const lineage = await createGitLineageFixture({ shellSensitiveRoot: true });
+  await git(lineage.root, ["checkout", "--detach", lineage.candidate]);
+  const inputs = await createCliInputs(lineage.candidate);
+  await execFileAsync(process.execPath, validatorArguments(inputs, lineage.root));
+  const matrix = JSON.parse(await readFile(inputs.out, "utf8"));
+  assert.equal(matrix.currentCommit, lineage.candidate);
+  assert.equal(matrix.releaseReady, true);
 });
 
 test("loader enforces canonical input bounds and receipt count", async () => {
@@ -443,10 +615,23 @@ test("CLI writes canonical matrix and numerically sorted unique run requests", a
   fixtureRoots.push(root);
   const receiptsDirectory = join(root, "receipts");
   await mkdir(receiptsDirectory);
-  const first = githubReceipt({ receiptId: "run-10", evidence: { runId: "10" } });
-  const second = githubReceipt({ receiptId: "run-2", gateIds: [], evidence: { runId: "2" } });
+  await execFileAsync("git", ["init", root]);
+  await git(root, ["config", "user.email", "phase9@example.invalid"]);
+  await git(root, ["config", "user.name", "Phase 9 Test"]);
+  await writeFile(join(root, "candidate.txt"), "candidate\n");
+  await git(root, ["add", "--", "candidate.txt"]);
+  await git(root, ["commit", "-m", "candidate"]);
+  const commit = (await git(root, ["rev-parse", "HEAD"])).stdout.trim();
+  const first = githubReceipt({
+    receiptId: "run-10", candidateCommit: commit, evidence: { runId: "10", headSha: commit },
+  });
+  const second = githubReceipt({
+    receiptId: "run-2", candidateCommit: commit, gateIds: [], evidence: { runId: "2", headSha: commit },
+  });
   await writeCanonicalJson(join(root, "registry.json"), validRegistry({ deferred: false }));
-  await writeCanonicalJson(join(root, "baseline.json"), validBaseline("candidate", [first.receiptId, second.receiptId]));
+  await writeCanonicalJson(join(root, "baseline.json"), {
+    ...validBaseline("candidate", [first.receiptId, second.receiptId]), candidateCommit: commit,
+  });
   await writeCanonicalJson(join(receiptsDirectory, "10.json"), first);
   await writeCanonicalJson(join(receiptsDirectory, "2.json"), second);
   const out = join(root, "matrix.json");

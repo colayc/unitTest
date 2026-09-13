@@ -1,6 +1,8 @@
+import { execFile } from "node:child_process";
 import { readdir } from "node:fs/promises";
 import { posix } from "node:path";
 import { pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 
 import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
@@ -28,6 +30,8 @@ const MAX_RECEIPT_BYTES = 256 * 1024;
 const MAX_RECEIPTS = 256;
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/u;
 const UNSAFE_DISPLAY_PATTERN = /[\0\r\n`;<>&|]/u;
+const CANDIDATE_LINEAGE_REASON = "candidate-descendant-changed-tested-content";
+const execFileAsync = promisify(execFile);
 
 const ajv = new Ajv2020({ allErrors: true, strict: true });
 addFormats(ajv);
@@ -204,11 +208,47 @@ export function validateCandidateChanges({ candidateCommit, currentCommit, chang
     throw phase9Failure("PHASE9_EVIDENCE_UNTRUSTED", "candidate lineage input is invalid");
   }
   const normalizedPaths = changedPaths.map(normalizeChangedPath);
-  if (candidateCommit === currentCommit) return "exact";
+  if (candidateCommit === currentCommit) {
+    if (normalizedPaths.length === 0) return "exact";
+    throw phase9Failure("PHASE9_EVIDENCE_UNTRUSTED", "exact candidate contains changed paths");
+  }
   if (normalizedPaths.length > 0 && normalizedPaths.every((path) => EVIDENCE_ONLY_PATHS.some((prefix) => path.startsWith(prefix)))) {
     return "evidence-only-descendant";
   }
   throw phase9Failure("PHASE9_EVIDENCE_UNTRUSTED", "candidate changes include tested content");
+}
+
+async function execFileText(command, arguments_) {
+  const { stdout } = await execFileAsync(command, arguments_, { encoding: "utf8", windowsHide: true });
+  return stdout;
+}
+
+async function repositoryState(repositoryRoot, candidateCommit) {
+  if (!COMMIT_PATTERN.test(candidateCommit)) {
+    throw phase9Failure("PHASE9_EVIDENCE_UNTRUSTED", "candidate commit is invalid");
+  }
+  const currentOutput = await execFileText("git", ["-C", repositoryRoot, "rev-parse", "HEAD"]);
+  const currentCommit = currentOutput.trim();
+  if (!COMMIT_PATTERN.test(currentCommit) || !/^([0-9a-f]{40})\r?\n?$/u.test(currentOutput)) {
+    throw phase9Failure("PHASE9_EVIDENCE_UNTRUSTED", "current commit output is invalid");
+  }
+  try {
+    await execFileText("git", [
+      "-C", repositoryRoot, "merge-base", "--is-ancestor", candidateCommit, currentCommit,
+    ]);
+  } catch (error) {
+    if (Number.isInteger(error?.code)) {
+      throw phase9Failure("PHASE9_EVIDENCE_UNTRUSTED", "candidate is not an ancestor", error);
+    }
+    throw error;
+  }
+  const changedOutput = await execFileText("git", [
+    "-C", repositoryRoot,
+    "diff", "--name-only", "--diff-filter=ACDMRTUXB",
+    `${candidateCommit}..${currentCommit}`,
+  ]);
+  const changedPaths = changedOutput.split(/\r?\n/u).filter((path) => path.length > 0).map(normalizeChangedPath);
+  return { changedPaths, currentCommit };
 }
 
 function evidenceSatisfiesVerification(repository, verification, receipt) {
@@ -258,16 +298,27 @@ export function evaluateRecordedMatrix({ registry, baseline, receipts, currentCo
       receiptForGate.set(gateId, receipt);
     }
   }
+  let candidateLineageInvalid = false;
   if (baseline.evaluationMode === "candidate") {
-    validateCandidateChanges({ candidateCommit: baseline.candidateCommit, currentCommit, changedPaths });
+    try {
+      validateCandidateChanges({ candidateCommit: baseline.candidateCommit, currentCommit, changedPaths });
+    } catch (error) {
+      if (error?.code !== "PHASE9_EVIDENCE_UNTRUSTED") throw error;
+      candidateLineageInvalid = true;
+    }
   }
 
   const gates = [...registry.gates]
     .sort((left, right) => left.id.localeCompare(right.id, "en"))
     .map((gate) => {
       const receipt = receiptForGate.get(gate.id);
-      const status = recordedStatus(registry.repository, gate, receipt);
+      let status = recordedStatus(registry.repository, gate, receipt);
       const row = { id: gate.id, status };
+      if (candidateLineageInvalid && status === "PASS") {
+        status = "FAILED";
+        row.status = status;
+        row.reason = CANDIDATE_LINEAGE_REASON;
+      }
       if (receipt !== undefined && gate.disposition !== "deferred") row.receiptId = receipt.receiptId;
       if (gate.verification.artifacts.length > 0 && gate.disposition !== "deferred") {
         row.artifactAvailability = receipt?.evidence.kind === "github-actions"
@@ -334,12 +385,13 @@ async function main() {
     baselinePath: arguments_.baseline,
     receiptsDirectory: arguments_.receipts,
   });
+  const state = await repositoryState(arguments_["repository-root"], baseline.candidateCommit);
   const matrix = evaluateRecordedMatrix({
     registry,
     baseline,
     receipts,
-    currentCommit: baseline.candidateCommit,
-    changedPaths: [],
+    currentCommit: state.currentCommit,
+    changedPaths: state.changedPaths,
   });
   const selected = new Set(baseline.receiptIds);
   const runIds = [...new Set(receipts
@@ -348,7 +400,6 @@ async function main() {
     .sort((left, right) => (BigInt(left) < BigInt(right) ? -1 : BigInt(left) > BigInt(right) ? 1 : 0));
   await writeCanonicalJson(arguments_.out, matrix);
   await writeCanonicalJson(arguments_["requests-out"], { schemaVersion: 1, runIds });
-  void arguments_["repository-root"];
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
