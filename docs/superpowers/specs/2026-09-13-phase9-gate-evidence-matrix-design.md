@@ -122,7 +122,12 @@ docs/superpowers/evidence/phase9/baseline.json
 docs/superpowers/evidence/phase9/receipts/*.json
 ```
 
-`baseline.json` 指定当前被评估的精确候选提交和启用的回执 ID。它不包含秘密、机器路径或大型 artifact。
+`baseline.json` 指定当前被评估的精确候选提交、启用的回执 ID，以及闭集 `evaluationMode`：
+
+- `historical`：只陈述该历史候选提交已经取得的证据；允许在 Batch A 实现提交上重放这些结论，但无条件保持 `releaseReady=false`；
+- `candidate`：用于判断当前发布候选；当前提交必须与候选提交完全相同，或仅包含 `docs/superpowers/evidence/phase9/` 下的证据记录变更。
+
+它不包含秘密、机器路径或大型 artifact。Batch A 的初始基线使用 `historical`，因为现有 producer/foundation 回执绑定的是 Batch A 实现之前的 `1e20a5ceee370e9823f9fe05f40980f893cd9ed3`。
 
 自动化证据回执使用以下闭集结构：
 
@@ -158,11 +163,12 @@ docs/superpowers/evidence/phase9/receipts/*.json
 
 对于候选之后的变更：
 
-- 仅修改 `docs/superpowers/evidence/phase9/` 下的回执、基线和生成矩阵时，证据仍可用于原候选；
-- 产品源码、既有测试、producer、foundation 或其他 workflow 发生变化时，旧证据不能成为新候选的 `PASS`；
+- `historical` 模式可保留原候选的历史 `PASS`，但必须清楚标记为历史结论，并无条件保持 `releaseReady=false`；
+- `candidate` 模式下，仅修改 `docs/superpowers/evidence/phase9/` 下的回执、基线和生成矩阵时，证据仍可用于原候选；
+- `candidate` 模式下，产品源码、既有测试、producer、foundation、Phase 9 实现或其他 workflow 发生变化时，旧证据不能成为当前候选的 `PASS`；
 - Batch A 自身的 schema、validator、renderer 和只读审计 workflow 由其自己的 CI 验证，不能反向改写已经记录的历史产品结论。
 
-矩阵始终显示 `candidateCommit` 与生成矩阵的仓库提交，防止把“测试对象”和“记录证据的提交”混为一谈。
+矩阵始终显示 `evaluationMode`、`candidateCommit` 与生成矩阵的仓库提交，防止把“历史测试对象”“当前发布候选”和“记录证据的提交”混为一谈。只有 `candidate` 模式且全部门禁为 `PASS` 时，`releaseReady` 才可能为 `true`。
 
 ### 4.4 离线校验与渲染
 
@@ -198,7 +204,7 @@ docs/superpowers/evidence/phase9/gate-matrix.md
 
 生成内容不包含当前机器路径、用户名、随机数或渲染时钟。`--check` 模式逐字节检查已提交结果，发现手工修改或漂移时返回 `PHASE9_MATRIX_DRIFT`。
 
-`audit.mjs` 不自行联网。在线 workflow 先对回执中的 canonical decimal ID 作离线校验，再通过固定 GitHub API 路径取得 run 与 artifact JSON 快照，最后把快照交给 `audit.mjs`。单元测试因此可以使用相同接口和完全离线的合成快照，不需要模拟另一套审计逻辑。
+`audit.mjs` 不自行联网。在线 workflow 先对回执中的 canonical decimal ID 作离线校验，再通过固定 GitHub API 路径分别取得 run、job 与 artifact JSON 快照，最后把三类快照交给 `audit.mjs`。原始 GitHub API JSON 是有大小上限的临时输入；审计器只提取受信字段形成闭集内部对象，额外 API 字段不能影响身份判断。单元测试因此可以使用相同接口和完全离线的合成快照，不需要模拟另一套审计逻辑。
 
 ### 4.5 在线证据审计
 
@@ -248,7 +254,7 @@ workflow 不引用 repository、environment 或 organization secret，不接触�
 }
 ```
 
-`catalogComplete=true` 只表示所有权威章节和门禁已被建模。`releaseReady=true` 必须同时满足 `missing=0`、`failed=0`、`deferred=0`，因此当前 Batch A 不可能把产品标为可正式发布。
+`catalogComplete=true` 只表示所有权威章节和门禁已被建模。`releaseReady=true` 必须同时满足 `evaluationMode=candidate`、`missing=0`、`failed=0`、`deferred=0`，因此当前 Batch A 的 `historical` 基线不可能把产品标为可正式发布。
 
 仓库内生成矩阵表达最后一次已提交回执的记录状态；在线 workflow 产生的审计 artifact 是当次 CI 的权威复核结果。若在线结果与仓库矩阵不一致，workflow 失败并把对应 gate 输出为 `FAILED`，不能继续使用仓库中的历史 `PASS` 作为当次发布判断。
 
@@ -296,9 +302,9 @@ PHASE9_DEFERRED_NOT_ALLOWED
 PHASE9_MATRIX_DRIFT
 ```
 
-所有输入采用大小上限、严格 UTF-8、重复 key 拒绝和闭集字段检查。路径拒绝绝对路径、反斜杠、冒号、控制字符、空段、`.`、`..` 与规范化别名。错误消息只输出 gate/receipt ID 与稳定原因，不输出 API token、环境、用户名、runner root、PFX 或其他秘密。
+所有仓库控制的 JSON 输入采用大小上限、严格 UTF-8、重复 key 拒绝和闭集字段检查。临时 GitHub API 快照采用大小上限与严格 UTF-8，随后只抽取允许的受信字段进入闭集校验；未知原始 API 字段被忽略且不能覆盖受信字段。路径拒绝绝对路径、反斜杠、冒号、控制字符、空段、`.`、`..` 与规范化别名。错误消息只输出 gate/receipt ID 与稳定原因，不输出 API token、环境、用户名、runner root、PFX 或其他秘密。
 
-注册表中的命令、路径、workflow 和 artifact 名永远被当作数据。在线 auditor 使用固定 API 路径构造规则，run/artifact ID 先通过规范十进制校验，不能注入 URL、shell 或 GitHub expression。
+注册表中的命令、路径、workflow 和 artifact 名永远被当作数据。在线 auditor 使用固定 API 路径构造规则，run/job/artifact ID 先通过规范十进制校验，不能注入 URL、shell 或 GitHub expression。
 
 未知状态、额外字段、API 限流、网络错误、run 消失、attempt 改变、workflow 不匹配和 artifact digest 漂移全部 fail-closed。失败不会生成可被后续消费者误读为成功的资格文件。
 
@@ -306,7 +312,7 @@ PHASE9_MATRIX_DRIFT
 
 ### 9.1 单元与合成集成测试
 
-`tools/phase9/validate.test.mjs` 使用临时目录和离线 GitHub API fixture 覆盖：
+`tools/phase9/validate.test.mjs` 与 `tools/phase9/audit.test.mjs` 使用临时目录和离线 GitHub API fixture 覆盖：
 
 - 最小合法 registry、baseline、receipt 与矩阵；
 - 第四个延期 gate 被拒绝；
@@ -315,8 +321,9 @@ PHASE9_MATRIX_DRIFT
 - run、attempt、commit、job、artifact ID/digest 任一不匹配；
 - 重复 JSON key、额外字段、大小超限和非法路径；
 - 重复 gate/receipt、一个 gate 的冲突回执；
-- candidate 后只有 evidence 变更时允许保留历史绑定；
-- candidate 后产品或既有 workflow 变化时旧证据失效；
+- `historical` 基线可保留历史绑定但永远不能 release-ready；
+- `candidate` 基线后只有 evidence 变更时允许保留候选绑定；
+- `candidate` 基线后产品、Phase 9 实现或既有 workflow 变化时旧证据失效；
 - artifact 过期显示不可下载但保留历史结果；
 - renderer 字节级确定性与 `--check` 漂移失败；
 - 错误输出不泄露路径、环境或 secret fixture。
