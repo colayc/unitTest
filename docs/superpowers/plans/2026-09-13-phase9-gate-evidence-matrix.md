@@ -551,7 +551,7 @@ Escape Markdown table pipes and line breaks. Evidence cells contain only receipt
 
 - [ ] **Step 4: Implement write and check modes**
 
-In write mode create parent directories and write canonical JSON plus Markdown. In check mode read both files and compare exact UTF-8 bytes; throw `PHASE9_MATRIX_DRIFT` without modifying either file.
+In write mode create parent directories and write canonical JSON plus Markdown. In check mode read both files and compare exact UTF-8 bytes; throw `PHASE9_MATRIX_DRIFT` without modifying either file. Preserve the existing valid `recordedByCommit` from the checked-in JSON while recomputing all current candidate/status fields, so committing the generated matrix does not create self-referential drift. Write mode records the current HEAD as `recordedByCommit`.
 
 - [ ] **Step 5: Run renderer and validator tests**
 

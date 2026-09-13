@@ -204,6 +204,8 @@ docs/superpowers/evidence/phase9/gate-matrix.md
 
 生成内容不包含当前机器路径、用户名、随机数或渲染时钟。`--check` 模式逐字节检查已提交结果，发现手工修改或漂移时返回 `PHASE9_MATRIX_DRIFT`。
 
+为避免把“生成矩阵的提交”做成无法稳定复核的自引用，写入模式将当前 HEAD 记录为 `recordedByCommit`；`--check` 模式先读取已提交矩阵中格式合法的 `recordedByCommit`，保留该快照字段，同时用当前仓库状态重新计算门禁，再进行逐字节比较。这样提交矩阵后 HEAD 的正常变化不会制造虚假漂移，但候选、回执或状态变化仍会被检查发现。
+
 `audit.mjs` 不自行联网。在线 workflow 先对回执中的 canonical decimal ID 作离线校验，再通过固定 GitHub API 路径分别取得 run、job 与 artifact JSON 快照，最后把三类快照交给 `audit.mjs`。原始 GitHub API JSON 是有大小上限的临时输入；审计器只提取受信字段形成闭集内部对象，额外 API 字段不能影响身份判断。单元测试因此可以使用相同接口和完全离线的合成快照，不需要模拟另一套审计逻辑。
 
 ### 4.5 在线证据审计
