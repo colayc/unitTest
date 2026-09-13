@@ -24,7 +24,7 @@ function canonicalValue(value) {
   return value;
 }
 
-function assertSafeJsonValue(value) {
+function assertSafeJsonValue(value, ancestors = new WeakSet()) {
   if (value === null) return;
   if (typeof value === "number") {
     if (!Number.isFinite(value)) throw phase9Failure("PHASE9_GATE_SCHEMA_INVALID", "value is not valid JSON");
@@ -32,14 +32,20 @@ function assertSafeJsonValue(value) {
   }
   if (typeof value === "string" || typeof value === "boolean") return;
   if (Array.isArray(value)) {
-    for (const item of value) assertSafeJsonValue(item);
+    if (ancestors.has(value)) throw phase9Failure("PHASE9_GATE_SCHEMA_INVALID", "value contains a cycle");
+    ancestors.add(value);
+    for (const item of value) assertSafeJsonValue(item, ancestors);
+    ancestors.delete(value);
     return;
   }
   if (typeof value === "object") {
+    if (ancestors.has(value)) throw phase9Failure("PHASE9_GATE_SCHEMA_INVALID", "value contains a cycle");
+    ancestors.add(value);
     for (const [key, item] of Object.entries(value)) {
       if (typeof key !== "string") throw phase9Failure("PHASE9_GATE_SCHEMA_INVALID", "value is not valid JSON");
-      assertSafeJsonValue(item);
+      assertSafeJsonValue(item, ancestors);
     }
+    ancestors.delete(value);
     return;
   }
   throw phase9Failure("PHASE9_GATE_SCHEMA_INVALID", "value is not valid JSON");

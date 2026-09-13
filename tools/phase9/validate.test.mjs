@@ -75,9 +75,11 @@ test("reader rejects arrays, null, and unsafe top-level primitives", async () =>
 
 test("writer creates parents and writes canonical UTF-8 bytes", async () => {
   const root = await mkdtemp(join(tmpdir(), "phase9-json-"));
-  const path = join(root, "nested", "output.json");
-  await writeCanonicalJson(path, { b: "值", a: 1 });
-  assert.deepEqual(await readCanonicalJson(path, { label: "output", maxBytes: 1024 }), { a: 1, b: "值" });
+  try {
+    const path = join(root, "nested", "output.json");
+    await writeCanonicalJson(path, { b: "值", a: 1 });
+    assert.deepEqual(await readCanonicalJson(path, { label: "output", maxBytes: 1024 }), { a: 1, b: "值" });
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("writer rejects unsafe top-level values", async () => {
@@ -87,6 +89,15 @@ test("writer rejects unsafe top-level values", async () => {
       await assert.rejects(writeCanonicalJson(join(root, "unsafe.json"), value), /PHASE9_GATE_SCHEMA_INVALID/u);
     }
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("writer rejects cyclic objects with a stable schema error", async () => {
+  const value = {};
+  value.self = value;
+  await assert.rejects(
+    writeCanonicalJson(join(tmpdir(), "phase9-cycle.json"), value),
+    /PHASE9_GATE_SCHEMA_INVALID: value contains a cycle/u,
+  );
 });
 
 test("schema contract is closed and contains the required definitions", () => {
@@ -101,11 +112,15 @@ test("schema contract is closed and contains the required definitions", () => {
   assert.deepEqual(defs.decimalId.pattern, "^[1-9][0-9]*$");
   assert.deepEqual(defs.status.enum, ["PASS", "MISSING", "FAILED", "DEFERRED"]);
   assert.deepEqual(defs.conclusion.enum, ["success", "failure", "cancelled", "timed_out", "action_required", "neutral", "skipped"]);
+  assert.equal(defs.utcIso.format, "date-time");
+  assert.equal(defs.utcIso.pattern, "Z$");
   assert.deepEqual(defs.baseline.properties.evaluationMode.enum, ["historical", "candidate"]);
   assert.equal(defs.registry.properties.schemaVersion.const, 1);
   assert.equal(defs.baseline.properties.schemaVersion.const, 1);
   assert.equal(defs.matrix.properties.schemaVersion.const, 1);
   assert.equal(defs.receipt.oneOf.length, 2);
+  assert.equal(defs.githubActionsReceipt.properties.evidence.properties.kind.const, "github-actions");
+  assert.equal(defs.manualApprovalReceipt.properties.evidence.properties.kind.const, "manual-approval");
   const visit = (value) => {
     if (!value || typeof value !== "object") return;
     if (value.type === "object") assert.equal(value.additionalProperties, false);
