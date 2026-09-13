@@ -278,6 +278,8 @@ test("registry rejects unsafe display strings, paths, duplicates, and empty veri
     (gate) => { gate.verification.commands = ["node C:\\temp\\script.mjs"]; },
     (gate) => { gate.verification.commands = ["node /tmp/script.mjs"]; },
     (gate) => { gate.verification.commands = ["go test ../other-service/..."]; },
+    (gate) => { gate.verification.commands = ["node --require=/tmp/x"]; },
+    (gate) => { gate.verification.commands = ["go test --pkg=../other"]; },
     (gate) => { gate.verification.jobs = ["phase9", "phase9"]; },
     (gate) => { gate.verification.artifacts = ["../report"]; },
     (gate) => { gate.verification.commands = []; gate.verification.jobs = []; gate.verification.artifacts = []; },

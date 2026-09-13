@@ -78,8 +78,8 @@ function assertUniqueSortedDisplayStrings(values, label, { command = false, requ
   if ((requireOne && values.length === 0) || hasDuplicates(values) || !isSorted(values)) schemaFailure(label);
   for (const value of values) {
     assertNonemptyDisplayString(value, label);
-    if (value.includes("\\") || /(?:^|\s)(?:\/|[A-Za-z]:\/)/u.test(value)
-        || /(?:^|[\s/])\.\.(?:$|[\s/])/u.test(value) || value.includes("//")) {
+    if (value.includes("\\") || /(?:^|[^.\p{L}\p{N}_-])(?:\/|[A-Za-z]:\/)/u.test(value)
+        || /(?:^|[^.\p{L}\p{N}_-])\.\.(?![.\p{L}\p{N}_-])/u.test(value) || value.includes("//")) {
       schemaFailure(label);
     }
     if (!command && value.includes("/") && !isSafeRepositoryPath(value)) schemaFailure(label);
