@@ -490,6 +490,19 @@ test("candidate path validation accepts exact and evidence-only states and rejec
   }
 });
 
+test("candidate path validation rejects sparse changed-path arrays", () => {
+  for (const changedPaths of [
+    new Array(1),
+    [, "docs/superpowers/evidence/phase9/x"],
+  ]) {
+    assert.throws(() => validateCandidateChanges({
+      candidateCommit,
+      currentCommit: "d".repeat(40),
+      changedPaths,
+    }), /PHASE9_EVIDENCE_UNTRUSTED/u);
+  }
+});
+
 test("candidate evidence survives only an evidence-only descendant", async () => {
   const lineage = await createGitLineageFixture();
   assert.doesNotThrow(() => validateCandidateChanges({

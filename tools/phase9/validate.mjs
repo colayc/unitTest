@@ -213,6 +213,11 @@ export function validateCandidateChanges({ candidateCommit, currentCommit, chang
   if (!COMMIT_PATTERN.test(candidateCommit) || !COMMIT_PATTERN.test(currentCommit) || !Array.isArray(changedPaths)) {
     throw phase9Failure("PHASE9_EVIDENCE_UNTRUSTED", "candidate lineage input is invalid");
   }
+  for (let index = 0; index < changedPaths.length; index += 1) {
+    if (!Object.hasOwn(changedPaths, index)) {
+      throw phase9Failure("PHASE9_EVIDENCE_UNTRUSTED", "candidate changed path set is sparse");
+    }
+  }
   const normalizedPaths = changedPaths.map(normalizeChangedPath);
   if (candidateCommit === currentCommit) {
     if (normalizedPaths.length === 0) return "exact";
