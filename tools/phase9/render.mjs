@@ -117,8 +117,9 @@ async function repositoryHead(repositoryRoot) {
   return stdout.trim();
 }
 
-async function repositoryState(repositoryRoot, candidateCommit) {
+async function repositoryState(repositoryRoot, candidateCommit, { requireAncestry = true } = {}) {
   const currentCommit = await repositoryHead(repositoryRoot);
+  if (!requireAncestry) return { currentCommit, changedPaths: [] };
   try {
     await execFileAsync("git", ["-C", repositoryRoot, "merge-base", "--is-ancestor", candidateCommit, currentCommit], { windowsHide: true });
   } catch (error) {
@@ -170,7 +171,9 @@ async function main() {
       throw phase9Failure("PHASE9_MATRIX_DRIFT", "existing recorded commit is invalid");
     }
   }
-  const state = await repositoryState(args["repository-root"], inputs.baseline.candidateCommit);
+  const state = await repositoryState(args["repository-root"], inputs.baseline.candidateCommit, {
+    requireAncestry: inputs.baseline.evaluationMode === "candidate",
+  });
   const matrix = evaluateRecordedMatrix({ ...inputs, ...state });
   const currentCommit = state.currentCommit;
   matrix.currentCommit = recordedCurrentCommit ?? currentCommit;

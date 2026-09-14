@@ -5,6 +5,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import {
@@ -428,6 +429,30 @@ test("renderer CLI check preserves a valid recorded snapshot commit across HEAD 
   await execFileAsync(process.execPath, [...args, "--check"]);
   assert.deepEqual(await readFile(jsonOut), beforeJson);
   assert.deepEqual(await readFile(markdownOut), beforeMarkdown);
+});
+
+test("historical renderer check tolerates unavailable ancestry while candidate mode rejects it", async () => {
+  const lineage = await createGitLineageFixture();
+  const inputs = await createCliInputs(lineage.candidate, "historical");
+  const markdownOut = join(lineage.root, "matrix.md");
+  const jsonOut = join(lineage.root, "matrix.json");
+  const args = [join(import.meta.dirname, "render.mjs"), "--registry", inputs.registryPath, "--baseline", inputs.baselinePath, "--receipts", inputs.receiptsDirectory, "--repository-root", lineage.root, "--json-out", jsonOut, "--markdown-out", markdownOut];
+  await execFileAsync(process.execPath, args);
+
+  const shallowRoot = await mkdtemp(join(tmpdir(), "phase9-shallow-"));
+  fixtureRoots.push(shallowRoot);
+  await execFileAsync("git", ["clone", "--depth=1", pathToFileURL(lineage.root).href, shallowRoot]);
+  await assert.rejects(git(shallowRoot, ["cat-file", "-e", lineage.candidate]));
+
+  const shallowArgs = args.map((argument) => argument === lineage.root ? shallowRoot : argument);
+  await execFileAsync(process.execPath, [...shallowArgs, "--check"]);
+
+  const baseline = JSON.parse(await readFile(inputs.baselinePath, "utf8"));
+  await writeCanonicalJson(inputs.baselinePath, { ...baseline, evaluationMode: "candidate" });
+  await assert.rejects(execFileAsync(process.execPath, [...shallowArgs, "--check"]), (error) => {
+    assert.match(`${error.stderr}`, /PHASE9_EVIDENCE_UNTRUSTED: rendering failed\r?\n$/u);
+    return true;
+  });
 });
 
 test("renderer CLI check rejects malformed recorded snapshot commits without writes", async () => {
