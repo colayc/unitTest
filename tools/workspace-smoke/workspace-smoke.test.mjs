@@ -115,6 +115,7 @@ test("Phase 9 audit workflow is read-only, fixed-coordinate, and fail-closed", a
     ["phase9-offline", ["node --test tools/phase9/validate.test.mjs tools/phase9/audit.test.mjs"]],
     ["phase9-matrix-e2e", ["pnpm test:e2e"]],
     ["phase9-fault-injection", [
+      "pnpm prepare:cmake-bundle",
       "go mod download",
       "node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm test:e2e:native",
     ]],

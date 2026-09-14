@@ -133,6 +133,8 @@ jobs:
           go-version: 1.26.6
           cache-dependency-path: apps/test-service/go.sum
       - run: pnpm install --frozen-lockfile
+      - name: Prepare CMake bundle before namespace entry
+        run: pnpm prepare:cmake-bundle
       - name: Prepare Go modules before namespace entry
         working-directory: apps/test-service
         env:
