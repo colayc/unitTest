@@ -81,6 +81,120 @@ test("workspace pins supported toolchains", async () => {
   );
 });
 
+test("Phase 9 audit workflow is read-only, fixed-coordinate, and fail-closed", async () => {
+  const workflow = await readFile(".github/workflows/phase9-gates.yml", "utf8");
+
+  assert.match(
+    workflow,
+    /^on:\r?\n {2}pull_request:\r?\n {2}push:\r?\n {4}branches: \[master\]\r?\n {2}workflow_dispatch:\s*$/mu,
+  );
+  assert.deepEqual(workflow.match(/^permissions:\s*$/gmu), ["permissions:"]);
+  assert.match(workflow, /permissions:\r?\n {2}actions: read\r?\n {2}contents: read/u);
+  assert.match(workflow, /^ {4}runs-on: ubuntu-24\.04\s*$/mu);
+  assert.match(workflow, /^ {4}timeout-minutes: 15\s*$/mu);
+  assert.doesNotMatch(workflow, /secrets\./u);
+  assert.doesNotMatch(workflow, /repository_dispatch|workflow_call/u);
+  assert.doesNotMatch(workflow, /^\s*inputs:\s*$/mu);
+  assert.doesNotMatch(workflow, /continue-on-error/u);
+  assert.doesNotMatch(workflow, /\beval\b|\bsh\s+-c\b/u);
+
+  for (const pin of [
+    "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
+    "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
+    "pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa",
+    "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+  ]) {
+    assert.equal(workflow.split(pin).length - 1, 1, `${pin} must appear exactly once`);
+  }
+  assert.match(workflow, /fetch-depth: 0/u);
+  assert.match(workflow, /persist-credentials: false/u);
+  assert.match(workflow, /node-version: 24\.18\.0/u);
+  assert.match(workflow, /pnpm install --frozen-lockfile/u);
+
+  const validation = workflow.indexOf("node tools/phase9/validate.mjs");
+  const requestsOutput = workflow.indexOf("--requests-out .superpowers/phase9/requests.json");
+  const firstApi = workflow.indexOf('gh api "repos/colayc/unitTest/actions/runs/$run_id"');
+  const runIdGuard = workflow.indexOf('[[ "$run_id" =~ ^[1-9][0-9]*$ ]]');
+  const umask = workflow.indexOf("umask 077");
+  assert.ok(validation >= 0, "offline Phase 9 validation is missing");
+  assert.ok(requestsOutput > validation, "validation must write the fixed request file");
+  assert.ok(umask >= 0 && umask < firstApi, "umask 077 must precede every GitHub API call");
+  assert.ok(runIdGuard >= 0 && runIdGuard < firstApi, "canonical run-ID validation must precede every GitHub API call");
+  for (const endpoint of [
+    'gh api "repos/colayc/unitTest/actions/runs/$run_id" > ".superpowers/phase9/snapshots/$run_id/run.json"',
+    'gh api "repos/colayc/unitTest/actions/runs/$run_id/jobs?per_page=100" > ".superpowers/phase9/snapshots/$run_id/jobs.json"',
+    'gh api "repos/colayc/unitTest/actions/runs/$run_id/artifacts?per_page=100" > ".superpowers/phase9/snapshots/$run_id/artifacts.json"',
+  ]) {
+    assert.match(workflow, new RegExp(endpoint.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
+  }
+  assert.match(workflow, /GH_TOKEN: \$\{\{ github\.token \}\}/u);
+
+  assert.match(workflow, /node tools\/phase9\/audit\.mjs/u);
+  assert.match(workflow, /--recorded-matrix \.superpowers\/phase9\/recorded-matrix\.json/u);
+  assert.doesNotMatch(workflow, /--recorded-matrix docs\/superpowers\/evidence\/phase9\/gate-matrix\.json/u);
+  assert.match(workflow, /--receipts docs\/superpowers\/evidence\/phase9\/receipts/u);
+  assert.match(workflow, /--snapshots \.superpowers\/phase9\/snapshots/u);
+  assert.match(workflow, /--json-out \.superpowers\/phase9\/audit\/phase9-gate-matrix\.json/u);
+  assert.match(workflow, /--markdown-out \.superpowers\/phase9\/audit\/phase9-gate-matrix\.md/u);
+
+  const uploadStart = workflow.indexOf("- name: Upload Phase 9 audit evidence");
+  const upload = workflow.slice(uploadStart);
+  assert.ok(uploadStart >= 0, "audit upload step is missing");
+  assert.match(upload, /if: always\(\)/u);
+  assert.match(upload, /name: phase9-gate-audit-\$\{\{ github\.run_attempt \}\}/u);
+  assert.match(upload, /\.superpowers\/phase9\/audit\/phase9-gate-matrix\.json/u);
+  assert.match(upload, /\.superpowers\/phase9\/audit\/phase9-gate-matrix\.md/u);
+  assert.match(upload, /if-no-files-found: error/u);
+  assert.match(upload, /retention-days: 14/u);
+});
+
+test("root verification runs Phase 9 contracts and preserves the exact deferred boundary", async () => {
+  const [manifest, registry, matrix] = await Promise.all([
+    readFile("package.json", "utf8").then(JSON.parse),
+    readFile("tools/phase9/gates.json", "utf8").then(JSON.parse),
+    readFile("docs/superpowers/evidence/phase9/gate-matrix.json", "utf8").then(JSON.parse),
+  ]);
+  assert.equal(
+    manifest.scripts["check:phase9-gates"],
+    "node tools/phase9/render.mjs --registry tools/phase9/gates.json --baseline docs/superpowers/evidence/phase9/baseline.json --receipts docs/superpowers/evidence/phase9/receipts --repository-root . --json-out docs/superpowers/evidence/phase9/gate-matrix.json --markdown-out docs/superpowers/evidence/phase9/gate-matrix.md --check",
+  );
+  assert.equal(
+    manifest.scripts["test:phase9-gates"],
+    "node --test tools/phase9/validate.test.mjs tools/phase9/audit.test.mjs",
+  );
+  assert.ok(
+    manifest.scripts.test.indexOf("pnpm run test:phase9-gates")
+      < manifest.scripts.test.indexOf("pnpm run test:workspace"),
+    "Phase 9 tests must run before workspace tests",
+  );
+  assert.ok(
+    manifest.scripts.verify.indexOf("pnpm check:coverage-generated")
+      < manifest.scripts.verify.indexOf("pnpm check:phase9-gates"),
+    "the Phase 9 matrix check must follow generated protocol and coverage checks",
+  );
+  assert.ok(
+    manifest.scripts.verify.indexOf("pnpm check:phase9-gates")
+      < manifest.scripts.verify.indexOf("pnpm build"),
+    "the Phase 9 matrix check must remain a pre-build verification gate",
+  );
+
+  const deferredIds = [
+    "P8-DOCS-CLOSEOUT",
+    "P8-LEGAL-THIRD-PARTY",
+    "P8-SIGN-WINDOWS",
+  ];
+  assert.deepEqual(registry.allowedDeferredGateIds, deferredIds);
+  assert.deepEqual(
+    registry.gates.filter(({ disposition }) => disposition === "deferred").map(({ id }) => id).sort(),
+    deferredIds,
+  );
+  assert.deepEqual(
+    matrix.gates.filter(({ status }) => status === "DEFERRED").map(({ id }) => id).sort(),
+    deferredIds,
+  );
+  assert.equal(matrix.counts.deferred, 3);
+});
+
 test("release manifest contract stays pinned to the repository product identity", async () => {
   const [config, schema] = await Promise.all([
     JSON.parse(await readFile("tools/release/release-config.json", "utf8")),

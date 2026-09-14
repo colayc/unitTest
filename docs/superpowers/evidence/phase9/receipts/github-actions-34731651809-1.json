@@ -1,0 +1,127 @@
+{
+  "candidateCommit": "1e20a5ceee370e9823f9fe05f40980f893cd9ed3",
+  "evidence": {
+    "artifacts": [
+      {
+        "digest": "70e8d30ec50429c5a5a783b959a61ce608eac94486f2de367c7fd21c2aef9f27",
+        "expired": false,
+        "id": "10310420278",
+        "name": "native-toolchain-linux-1"
+      },
+      {
+        "digest": "ec2ec63fbe8f16892cd03cd59f5e8769dc7d43a6330f2482965171adb81824f3",
+        "expired": false,
+        "id": "10310365352",
+        "name": "coverage-bundle-linux-1"
+      },
+      {
+        "digest": "628a9a2ff2372f60435c7eac051182cd05432fcd887bdc0813befae0bc81cf79",
+        "expired": false,
+        "id": "10310246247",
+        "name": "qualified-release-0.1.0-1"
+      },
+      {
+        "digest": "292c4e9a2810941823fe14e4358241de92fe596654bfaf59c37eb3c5f72e0cae",
+        "expired": false,
+        "id": "10310171601",
+        "name": "coverage-bundle-windows-1"
+      },
+      {
+        "digest": "7987c46fa6262e83b7f3f8df094f217d0bcaee6056c8e7675f94e6de8be1eb27",
+        "expired": false,
+        "id": "10310027267",
+        "name": "install-smoke-windows-1"
+      },
+      {
+        "digest": "b41cf848c685842e2963ecec1e38f000d880359c73a905392b349be85fe596ac",
+        "expired": false,
+        "id": "10309967342",
+        "name": "release-input-linux-0.1.0-1"
+      },
+      {
+        "digest": "76bf3f7a2fa1ea62b9f508cb213ff4a4f532f97f7a8264146f30e701bd078973",
+        "expired": false,
+        "id": "10309967175",
+        "name": "release-input-windows-0.1.0-1"
+      },
+      {
+        "digest": "28a0a172af8a519baab7e973a6150c75a9d43d17455d8b8ff623090ff2a680c0",
+        "expired": false,
+        "id": "10309881602",
+        "name": "linux-gcc-coverage-report-1"
+      },
+      {
+        "digest": "c08b2db08ced3723f092a2663027811846f9cecffae0c5515cb4f67f7c6034e2",
+        "expired": false,
+        "id": "10309453360",
+        "name": "release-qualification-1"
+      },
+      {
+        "digest": "d41206510e598acd9526065b11cf6a335b9b204308019092da185ca4fbb13aff",
+        "expired": false,
+        "id": "10309453290",
+        "name": "install-smoke-linux-1"
+      }
+    ],
+    "conclusion": "success",
+    "event": "workflow_dispatch",
+    "headSha": "1e20a5ceee370e9823f9fe05f40980f893cd9ed3",
+    "jobs": [
+      {
+        "conclusion": "success",
+        "name": "coverage-linux-gcc"
+      },
+      {
+        "conclusion": "success",
+        "name": "install-smoke-linux"
+      },
+      {
+        "conclusion": "success",
+        "name": "install-smoke-windows"
+      },
+      {
+        "conclusion": "success",
+        "name": "package-linux"
+      },
+      {
+        "conclusion": "success",
+        "name": "package-windows"
+      },
+      {
+        "conclusion": "success",
+        "name": "release-qualification"
+      },
+      {
+        "conclusion": "success",
+        "name": "verify-linux"
+      },
+      {
+        "conclusion": "success",
+        "name": "verify-release-input-run"
+      },
+      {
+        "conclusion": "success",
+        "name": "verify-windows"
+      }
+    ],
+    "kind": "github-actions",
+    "repository": "colayc/unitTest",
+    "runAttempt": 1,
+    "runId": "34731651809",
+    "workflowPath": ".github/workflows/foundation.yml"
+  },
+  "gateIds": [
+    "P5-LINUX-GCC-COVERAGE",
+    "P7-LINUX-GCC-OFFLINE",
+    "P7-WINDOWS-WFP-OFFLINE",
+    "P8-INSTALL-LIFECYCLE-LINUX",
+    "P8-INSTALL-LIFECYCLE-WINDOWS",
+    "P8-LICENSE-AUDIT",
+    "P8-LINUX-APPIMAGE-PACKAGE",
+    "P8-QUALIFICATION-UNSIGNED",
+    "P8-WINDOWS-MSIX-PACKAGE"
+  ],
+  "observedAt": "2026-09-13T12:13:32.860Z",
+  "receiptId": "github-actions-34731651809-1",
+  "schemaVersion": 1
+}

@@ -1,0 +1,63 @@
+{
+  "candidateCommit": "1e20a5ceee370e9823f9fe05f40980f893cd9ed3",
+  "evidence": {
+    "artifacts": [
+      {
+        "digest": "633300fc1c8aa1398adbf0ab830c8f1972a60fe506fb17ac0f14c4e37a5ecb0b",
+        "expired": false,
+        "id": "10310125633",
+        "name": "code-oss-windows-x64-1"
+      },
+      {
+        "digest": "45979b3ef5ae575a79b50fddcd06d5cd67cecc582731be2c8d8d44330cef4241",
+        "expired": false,
+        "id": "10309416757",
+        "name": "release-input-provenance-1"
+      },
+      {
+        "digest": "8d7d80c08fbd120feb2f90c87a53d51f724966608e9049330f641afa9b4485d3",
+        "expired": false,
+        "id": "10309375277",
+        "name": "appimagetool-linux-x64-1"
+      },
+      {
+        "digest": "dcad449b10fb9304218e1f4c2c9c4b307ec450a5691b33bd561ee290032e8e81",
+        "expired": false,
+        "id": "10308294547",
+        "name": "code-oss-linux-x64-1"
+      }
+    ],
+    "conclusion": "success",
+    "event": "workflow_dispatch",
+    "headSha": "1e20a5ceee370e9823f9fe05f40980f893cd9ed3",
+    "jobs": [
+      {
+        "conclusion": "success",
+        "name": "authorize"
+      },
+      {
+        "conclusion": "success",
+        "name": "build-linux"
+      },
+      {
+        "conclusion": "success",
+        "name": "build-windows"
+      },
+      {
+        "conclusion": "success",
+        "name": "attest"
+      }
+    ],
+    "kind": "github-actions",
+    "repository": "colayc/unitTest",
+    "runAttempt": 1,
+    "runId": "34728889872",
+    "workflowPath": ".github/workflows/release-inputs.yml"
+  },
+  "gateIds": [
+    "P8-RUNTIME-PRODUCER-PROVENANCE"
+  ],
+  "observedAt": "2026-09-13T12:13:32.860Z",
+  "receiptId": "github-actions-34728889872-1",
+  "schemaVersion": 1
+}

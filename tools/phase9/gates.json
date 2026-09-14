@@ -1,0 +1,1911 @@
+{
+  "allowedDeferredGateIds": [
+    "P8-DOCS-CLOSEOUT",
+    "P8-LEGAL-THIRD-PARTY",
+    "P8-SIGN-WINDOWS"
+  ],
+  "gates": [
+    {
+      "category": "security",
+      "disposition": "required",
+      "id": "P1-IPC-PER-USER-AUTH",
+      "phase": 1,
+      "requirementRefs": [
+        {
+          "section": "13. 错误、安全与流量控制",
+          "source": "docs/superpowers/specs/2026-07-22-task-engine-persistence-design.md"
+        }
+      ],
+      "title": "Per-user IPC authentication",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "pnpm test:e2e"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "security",
+      "disposition": "required",
+      "id": "P1-PROTOCOL-NO-SHELL",
+      "phase": 1,
+      "requirementRefs": [
+        {
+          "section": "测试",
+          "source": "docs/superpowers/specs/2026-07-21-secure-token-file-preparation-design.md"
+        },
+        {
+          "section": "4. 非目标",
+          "source": "docs/superpowers/specs/2026-07-22-task-engine-persistence-design.md"
+        }
+      ],
+      "title": "Protocol cannot invoke arbitrary shells",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "pnpm verify"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "compatibility",
+      "disposition": "required",
+      "id": "P1-PROTOCOL-VERSION-COMPAT",
+      "phase": 1,
+      "requirementRefs": [
+        {
+          "section": "14. 测试策略",
+          "source": "docs/superpowers/specs/2026-07-22-task-engine-persistence-design.md"
+        }
+      ],
+      "title": "Protocol version compatibility",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "go test ./apps/test-service/internal/protocol ./apps/test-service/internal/session"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "security",
+      "disposition": "required",
+      "id": "P1-TOKEN-FILE-SECURE",
+      "phase": 1,
+      "requirementRefs": [
+        {
+          "section": "安全创建",
+          "source": "docs/superpowers/specs/2026-07-21-secure-token-file-preparation-design.md"
+        }
+      ],
+      "title": "Secure token file preparation",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "go test ./apps/test-service/cmd/unit-test-service"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "artifacts",
+      "disposition": "required",
+      "id": "P2-ARTIFACT-ATOMIC-CLEANUP",
+      "phase": 2,
+      "requirementRefs": [
+        {
+          "section": "13. 测试矩阵",
+          "source": "docs/superpowers/specs/2026-07-28-close-before-terminalization-design.md"
+        },
+        {
+          "section": "14. 验收条件",
+          "source": "docs/superpowers/specs/2026-07-28-close-before-terminalization-design.md"
+        }
+      ],
+      "title": "Atomic artifact publication and cleanup",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "go test ./apps/test-service/internal/artifactstore ./apps/test-service/internal/task"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "persistence",
+      "disposition": "required",
+      "id": "P2-EVENT-REPLAY-PERSISTENCE",
+      "phase": 2,
+      "requirementRefs": [
+        {
+          "section": "15. 验收场景",
+          "source": "docs/superpowers/specs/2026-07-22-task-engine-persistence-design.md"
+        }
+      ],
+      "title": "Persistent event replay without gaps",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "go test ./apps/test-service/internal/eventbroker ./apps/test-service/internal/session ./apps/test-service/internal/taskstore"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "reliability",
+      "disposition": "required",
+      "id": "P2-FAILURE-OWNERSHIP",
+      "phase": 2,
+      "requirementRefs": [
+        {
+          "section": "12. 测试设计",
+          "source": "docs/superpowers/specs/2026-07-27-prepared-process-lease-ownership-design.md"
+        },
+        {
+          "section": "14. 完成标准",
+          "source": "docs/superpowers/specs/2026-07-27-prepared-process-lease-ownership-design.md"
+        },
+        {
+          "section": "11. 错误与安全",
+          "source": "docs/superpowers/specs/2026-07-27-publisher-failure-task-ownership-design.md"
+        },
+        {
+          "section": "12. 测试设计",
+          "source": "docs/superpowers/specs/2026-07-27-publisher-failure-task-ownership-design.md"
+        },
+        {
+          "section": "14. 完成标准",
+          "source": "docs/superpowers/specs/2026-07-27-publisher-failure-task-ownership-design.md"
+        }
+      ],
+      "title": "Failure ownership remains durable and fail closed",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "go test ./apps/test-service/internal/task ./apps/test-service/internal/taskstore"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "process",
+      "disposition": "required",
+      "id": "P2-PROCESS-TREE-TERMINATION",
+      "phase": 2,
+      "requirementRefs": [
+        {
+          "section": "16. 完成门禁",
+          "source": "docs/superpowers/specs/2026-07-22-task-engine-persistence-design.md"
+        },
+        {
+          "section": "9. 跨平台进程树控制",
+          "source": "docs/superpowers/specs/2026-07-22-task-engine-persistence-design.md"
+        }
+      ],
+      "title": "Cross-platform process tree termination",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "go test ./apps/test-service/internal/processcontrol ./apps/test-service/internal/processhost"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "task-control",
+      "disposition": "required",
+      "id": "P2-TASK-CANCEL-TIMEOUT",
+      "phase": 2,
+      "requirementRefs": [
+        {
+          "section": "14. 测试策略",
+          "source": "docs/superpowers/specs/2026-07-22-task-engine-persistence-design.md"
+        }
+      ],
+      "title": "Task cancellation and timeout first cause",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "go test ./apps/test-service/internal/task ./apps/test-service/internal/testrun"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "build",
+      "disposition": "required",
+      "id": "P3-CMAKE-CONFIGURE-BUILD",
+      "phase": 3,
+      "requirementRefs": [
+        {
+          "section": "19. 测试策略",
+          "source": "docs/superpowers/specs/2026-07-26-workspace-cmake-toolchains-design.md"
+        }
+      ],
+      "title": "CMake configure and build execution",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "go test ./apps/test-service/internal/build ./apps/test-service/internal/cmake"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "diagnostics",
+      "disposition": "required",
+      "id": "P3-DIAGNOSTIC-URI",
+      "phase": 3,
+      "requirementRefs": [
+        {
+          "section": "Acceptance criteria",
+          "source": "docs/superpowers/specs/2026-09-03-native-diagnostic-uri-design.md"
+        },
+        {
+          "section": "Compatibility and security boundaries",
+          "source": "docs/superpowers/specs/2026-09-03-native-diagnostic-uri-design.md"
+        },
+        {
+          "section": "Verification strategy",
+          "source": "docs/superpowers/specs/2026-09-03-native-diagnostic-uri-design.md"
+        }
+      ],
+      "title": "Private portable diagnostic URI mapping",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "go test ./apps/test-service/internal/diagnostic ./apps/test-service/internal/task",
+          "pnpm test:e2e:native"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "toolchain",
+      "disposition": "required",
+      "id": "P3-TOOLCHAIN-LINUX-CLANG",
+      "phase": 3,
+      "requirementRefs": [
+        {
+          "section": "12.4 Linux GCC 与 Clang",
+          "source": "docs/superpowers/specs/2026-07-26-workspace-cmake-toolchains-design.md"
+        },
+        {
+          "section": "19.4 Native E2E Matrix",
+          "source": "docs/superpowers/specs/2026-07-26-workspace-cmake-toolchains-design.md"
+        },
+        {
+          "section": "20. 验收场景",
+          "source": "docs/superpowers/specs/2026-07-26-workspace-cmake-toolchains-design.md"
+        }
+      ],
+      "title": "Linux Clang toolchain",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "pnpm test:e2e:native"
+        ],
+        "jobs": [
+          "verify-linux"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "toolchain",
+      "disposition": "required",
+      "id": "P3-TOOLCHAIN-LINUX-GCC",
+      "phase": 3,
+      "requirementRefs": [
+        {
+          "section": "12.4 Linux GCC 与 Clang",
+          "source": "docs/superpowers/specs/2026-07-26-workspace-cmake-toolchains-design.md"
+        },
+        {
+          "section": "19.4 Native E2E Matrix",
+          "source": "docs/superpowers/specs/2026-07-26-workspace-cmake-toolchains-design.md"
+        },
+        {
+          "section": "20. 验收场景",
+          "source": "docs/superpowers/specs/2026-07-26-workspace-cmake-toolchains-design.md"
+        }
+      ],
+      "title": "Linux GCC toolchain",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "pnpm test:e2e:native"
+        ],
+        "jobs": [
+          "verify-linux"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "toolchain",
+      "disposition": "required",
+      "id": "P3-TOOLCHAIN-WINDOWS-CLANGCL",
+      "phase": 3,
+      "requirementRefs": [
+        {
+          "section": "12.3 Windows clang-cl",
+          "source": "docs/superpowers/specs/2026-07-26-workspace-cmake-toolchains-design.md"
+        },
+        {
+          "section": "19.4 Native E2E Matrix",
+          "source": "docs/superpowers/specs/2026-07-26-workspace-cmake-toolchains-design.md"
+        },
+        {
+          "section": "20. 验收场景",
+          "source": "docs/superpowers/specs/2026-07-26-workspace-cmake-toolchains-design.md"
+        }
+      ],
+      "title": "Windows clang-cl toolchain",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "pnpm test:e2e:native"
+        ],
+        "jobs": [
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "toolchain",
+      "disposition": "required",
+      "id": "P3-TOOLCHAIN-WINDOWS-MSVC",
+      "phase": 3,
+      "requirementRefs": [
+        {
+          "section": "21. 完成门禁",
+          "source": "docs/superpowers/specs/2026-07-26-workspace-cmake-toolchains-design.md"
+        }
+      ],
+      "title": "Windows MSVC toolchain",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "pnpm test:e2e:native"
+        ],
+        "jobs": [
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "workspace-security",
+      "disposition": "required",
+      "id": "P3-WORKSPACE-TRUST-PATHS",
+      "phase": 3,
+      "requirementRefs": [
+        {
+          "section": "6. Workspace 绑定与信任边界",
+          "source": "docs/superpowers/specs/2026-07-26-workspace-cmake-toolchains-design.md"
+        }
+      ],
+      "title": "Workspace trust and path containment",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "go test ./apps/test-service/internal/workspace"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "framework",
+      "disposition": "required",
+      "id": "P4-CPPUTEST-CPPUMOCK",
+      "phase": 4,
+      "requirementRefs": [
+        {
+          "section": "20. 测试策略",
+          "source": "docs/superpowers/specs/2026-07-30-test-framework-discovery-execution-design.md"
+        }
+      ],
+      "title": "CppUTest and CppUMock discovery and execution",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "go test ./apps/test-service/internal/testframework/cpputest"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "discovery",
+      "disposition": "required",
+      "id": "P4-DISCOVERY-CTEST",
+      "phase": 4,
+      "requirementRefs": [
+        {
+          "section": "19. 安全边界",
+          "source": "docs/superpowers/specs/2026-07-30-test-framework-discovery-execution-design.md"
+        }
+      ],
+      "title": "CTest discovery and execution safety",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "go test ./apps/test-service/internal/ctest ./apps/test-service/internal/testdiscovery"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "resilience",
+      "disposition": "required",
+      "id": "P4-RECOVERY-AND-10000-BACKEND",
+      "phase": 4,
+      "requirementRefs": [
+        {
+          "section": "22. 验收标准",
+          "source": "docs/superpowers/specs/2026-07-30-test-framework-discovery-execution-design.md"
+        }
+      ],
+      "title": "Recovery and 10000 item backend",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "pnpm verify"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "execution",
+      "disposition": "required",
+      "id": "P4-SELECTION-AND-RERUN",
+      "phase": 4,
+      "requirementRefs": [
+        {
+          "section": "20. 测试策略",
+          "source": "docs/superpowers/specs/2026-07-30-test-framework-discovery-execution-design.md"
+        }
+      ],
+      "title": "Test selection and failed rerun",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "go test ./apps/test-service/internal/testdomain ./apps/test-service/internal/testrun"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "framework",
+      "disposition": "required",
+      "id": "P4-UNITY-CMOCK",
+      "phase": 4,
+      "requirementRefs": [
+        {
+          "section": "20. 测试策略",
+          "source": "docs/superpowers/specs/2026-07-30-test-framework-discovery-execution-design.md"
+        }
+      ],
+      "title": "Unity and CMock discovery and execution",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "go test ./apps/test-service/internal/testframework/unity ./apps/test-service/internal/unityrunner"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "coverage",
+      "disposition": "required",
+      "id": "P5-COVERAGE-FAULT-MAPPING",
+      "phase": 5,
+      "requirementRefs": [
+        {
+          "section": "20. 错误分类",
+          "source": "docs/superpowers/specs/2026-08-03-coverage-report-pipeline-design.md"
+        },
+        {
+          "section": "22.5 Scale 与 fault injection",
+          "source": "docs/superpowers/specs/2026-08-03-coverage-report-pipeline-design.md"
+        }
+      ],
+      "title": "Coverage failure and fault mapping",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "go test ./apps/test-service/internal/coverageexec ./apps/test-service/internal/coveragerun"
+        ],
+        "jobs": [
+          "coverage-linux-gcc",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "reports",
+      "disposition": "required",
+      "id": "P5-COVERAGE-REPORTS",
+      "phase": 5,
+      "requirementRefs": [
+        {
+          "section": "Phase 5：覆盖率与报告管道",
+          "source": "docs/superpowers/plans/2026-07-21-cpp-unit-test-ide-roadmap.md"
+        },
+        {
+          "section": "14. Report renderer",
+          "source": "docs/superpowers/specs/2026-08-03-coverage-report-pipeline-design.md"
+        },
+        {
+          "section": "24. 验收标准",
+          "source": "docs/superpowers/specs/2026-08-03-coverage-report-pipeline-design.md"
+        }
+      ],
+      "title": "Deterministic coverage JSON JUnit and HTML reports",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "go test ./apps/test-service/internal/coveragereport ./apps/test-service/internal/coveragerun"
+        ],
+        "jobs": [
+          "coverage-linux-gcc",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "toolchain",
+      "disposition": "required",
+      "id": "P5-LINUX-CLANG-COVERAGE",
+      "phase": 5,
+      "requirementRefs": [
+        {
+          "section": "Phase 5：覆盖率与报告管道",
+          "source": "docs/superpowers/plans/2026-07-21-cpp-unit-test-ide-roadmap.md"
+        },
+        {
+          "section": "10.1 工具约束",
+          "source": "docs/superpowers/specs/2026-08-03-coverage-report-pipeline-design.md"
+        }
+      ],
+      "title": "Linux Clang LLVM coverage execution",
+      "verification": {
+        "artifacts": [
+          "linux-clang-coverage-report"
+        ],
+        "commands": [
+          "pnpm test:e2e:native"
+        ],
+        "jobs": [
+          "verify-linux"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "toolchain",
+      "disposition": "required",
+      "id": "P5-LINUX-GCC-COVERAGE",
+      "phase": 5,
+      "requirementRefs": [
+        {
+          "section": "11. GCC/gcovr coverage pipeline",
+          "source": "docs/superpowers/specs/2026-08-03-coverage-report-pipeline-design.md"
+        },
+        {
+          "section": "7. GCC/gcov Toolset Identity",
+          "source": "docs/superpowers/specs/2026-09-06-phase7-linux-gcc-coverage-execution-design.md"
+        }
+      ],
+      "title": "Linux GCC gcovr coverage execution",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "pnpm --filter code-oss-extension test:coverage-service-smoke:linux"
+        ],
+        "jobs": [
+          "coverage-linux-gcc"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "compatibility",
+      "disposition": "required",
+      "id": "P5-PROTOCOL-V14-COMPAT",
+      "phase": 5,
+      "requirementRefs": [
+        {
+          "section": "15.4 Compatibility",
+          "source": "docs/superpowers/specs/2026-08-03-coverage-report-pipeline-design.md"
+        },
+        {
+          "section": "5. 版本协商与方法路由",
+          "source": "docs/superpowers/specs/2026-08-05-typescript-client-v1-4-coverage-design.md"
+        },
+        {
+          "section": "9. Compatibility",
+          "source": "docs/superpowers/specs/2026-08-05-typescript-client-v1-4-coverage-design.md"
+        }
+      ],
+      "title": "Protocol v1.4 coverage compatibility",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "pnpm --filter @unit-test-ide/test-client test"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "toolchain",
+      "disposition": "required",
+      "id": "P5-WINDOWS-LLVM-COVERAGE",
+      "phase": 5,
+      "requirementRefs": [
+        {
+          "section": "10.1 工具约束",
+          "source": "docs/superpowers/specs/2026-08-03-coverage-report-pipeline-design.md"
+        },
+        {
+          "section": "9.3 Windows 真实 smoke",
+          "source": "docs/superpowers/specs/2026-08-20-phase8-windows-llvm-coverage-execution-design.md"
+        },
+        {
+          "section": "Repair design",
+          "source": "docs/superpowers/specs/2026-09-11-windows-llvm-coverage-regression-design.md"
+        }
+      ],
+      "title": "Windows clang-cl LLVM coverage execution",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "pnpm --filter code-oss-extension test:coverage-service-smoke"
+        ],
+        "jobs": [
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "product-shell",
+      "disposition": "required",
+      "id": "P6-BRANDING-AND-BUILTIN-REGISTRATION",
+      "phase": 6,
+      "requirementRefs": [
+        {
+          "section": "Phase 6：Code-OSS 外壳与内置扩展",
+          "source": "docs/superpowers/plans/2026-07-21-cpp-unit-test-ide-roadmap.md"
+        },
+        {
+          "section": "4.1 采用独立 Extension Host",
+          "source": "docs/superpowers/specs/2026-08-16-phase6-code-oss-extension-design.md"
+        }
+      ],
+      "title": "Code-OSS branding and built-in extension registration",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "node --test tools/workspace-smoke/workspace-smoke.test.mjs"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "integration",
+      "disposition": "required",
+      "id": "P6-CODEOSS-HOST-SMOKE",
+      "phase": 6,
+      "requirementRefs": [
+        {
+          "section": "Phase 6：Code-OSS 外壳与内置扩展",
+          "source": "docs/superpowers/plans/2026-07-21-cpp-unit-test-ide-roadmap.md"
+        },
+        {
+          "section": "9.3 Extension integration smoke",
+          "source": "docs/superpowers/specs/2026-08-16-phase6-code-oss-extension-design.md"
+        },
+        {
+          "section": "CLI handshake construction",
+          "source": "docs/superpowers/specs/2026-09-03-code-oss-cli-smoke-handshake-design.md"
+        }
+      ],
+      "title": "Code-OSS Extension Host and installed CLI smoke",
+      "verification": {
+        "artifacts": [
+          "code-oss-host-smoke-report"
+        ],
+        "commands": [
+          "pnpm --filter code-oss-extension test:host"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "lifecycle",
+      "disposition": "required",
+      "id": "P6-SERVICE-LIFECYCLE",
+      "phase": 6,
+      "requirementRefs": [
+        {
+          "section": "6. Service lifecycle",
+          "source": "docs/superpowers/specs/2026-08-16-phase6-code-oss-extension-design.md"
+        }
+      ],
+      "title": "Extension-managed service lifecycle",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "pnpm --filter code-oss-extension test"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "testing-api",
+      "disposition": "required",
+      "id": "P6-TESTING-API",
+      "phase": 6,
+      "requirementRefs": [
+        {
+          "section": "3. Refresh 数据流",
+          "source": "docs/superpowers/specs/2026-08-18-phase6b-testing-api-design.md"
+        },
+        {
+          "section": "4. Run Profile 与结果映射",
+          "source": "docs/superpowers/specs/2026-08-18-phase6b-testing-api-design.md"
+        }
+      ],
+      "title": "Code-OSS Testing API discovery and run integration",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "pnpm --filter code-oss-extension test"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "performance",
+      "disposition": "required",
+      "id": "P6-TESTING-API-10000-ITEMS",
+      "phase": 6,
+      "requirementRefs": [
+        {
+          "section": "Integration/CI",
+          "source": "docs/superpowers/specs/2026-08-18-phase6b-testing-api-design.md"
+        }
+      ],
+      "title": "Testing API 10000 item identity benchmark",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "pnpm --filter code-oss-extension test:benchmark"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "workspace-security",
+      "disposition": "required",
+      "id": "P6-WORKSPACE-TRUST-GATE",
+      "phase": 6,
+      "requirementRefs": [
+        {
+          "section": "5. Workspace Trust gate",
+          "source": "docs/superpowers/specs/2026-08-16-phase6-code-oss-extension-design.md"
+        }
+      ],
+      "title": "Code-OSS workspace trust execution gate",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "pnpm --filter code-oss-extension test"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "user-interface",
+      "disposition": "required",
+      "id": "P7-COVERAGE-UI-AND-SOURCE-DECORATION",
+      "phase": 7,
+      "requirementRefs": [
+        {
+          "section": "Phase 7：产品测试 UX、Mock 配置、历史记录与报告",
+          "source": "docs/superpowers/plans/2026-07-21-cpp-unit-test-ide-roadmap.md"
+        },
+        {
+          "section": "7. 后续接口",
+          "source": "docs/superpowers/specs/2026-08-18-phase6b-testing-api-design.md"
+        }
+      ],
+      "title": "Coverage UI and source decoration",
+      "verification": {
+        "artifacts": [
+          "coverage-ui-source-decoration-report"
+        ],
+        "commands": [
+          "pnpm --filter code-oss-extension test"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "user-interface",
+      "disposition": "required",
+      "id": "P7-HISTORY-AND-ARTIFACT-BROWSER",
+      "phase": 7,
+      "requirementRefs": [
+        {
+          "section": "Phase 7：产品测试 UX、Mock 配置、历史记录与报告",
+          "source": "docs/superpowers/plans/2026-07-21-cpp-unit-test-ide-roadmap.md"
+        }
+      ],
+      "title": "Local history and artifact browser",
+      "verification": {
+        "artifacts": [
+          "history-artifact-browser-report"
+        ],
+        "commands": [
+          "pnpm --filter code-oss-extension test"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "offline",
+      "disposition": "required",
+      "id": "P7-LINUX-GCC-OFFLINE",
+      "phase": 7,
+      "requirementRefs": [
+        {
+          "section": "13.3 Linux native offline boundary",
+          "source": "docs/superpowers/specs/2026-09-06-phase7-linux-gcc-coverage-execution-design.md"
+        }
+      ],
+      "title": "Linux GCC native offline boundary",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "pnpm --filter code-oss-extension test:coverage-service-smoke:linux"
+        ],
+        "jobs": [
+          "coverage-linux-gcc"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "user-journey",
+      "disposition": "required",
+      "id": "P7-MAIN-USER-JOURNEY",
+      "phase": 7,
+      "requirementRefs": [
+        {
+          "section": "Phase 7：产品测试 UX、Mock 配置、历史记录与报告",
+          "source": "docs/superpowers/plans/2026-07-21-cpp-unit-test-ide-roadmap.md"
+        }
+      ],
+      "title": "Terminal-free main user journey",
+      "verification": {
+        "artifacts": [
+          "main-user-journey-report"
+        ],
+        "commands": [
+          "pnpm --filter code-oss-extension test:host"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "user-interface",
+      "disposition": "required",
+      "id": "P7-MOCK-CONFIGURATION-UX",
+      "phase": 7,
+      "requirementRefs": [
+        {
+          "section": "Phase 7：产品测试 UX、Mock 配置、历史记录与报告",
+          "source": "docs/superpowers/plans/2026-07-21-cpp-unit-test-ide-roadmap.md"
+        }
+      ],
+      "title": "Mock and stub configuration UX",
+      "verification": {
+        "artifacts": [
+          "mock-configuration-ux-report"
+        ],
+        "commands": [
+          "pnpm --filter code-oss-extension test"
+        ],
+        "jobs": [
+          "verify-linux",
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "offline",
+      "disposition": "required",
+      "id": "P7-WINDOWS-WFP-OFFLINE",
+      "phase": 7,
+      "requirementRefs": [
+        {
+          "section": "3. 信任模型与权限",
+          "source": "docs/superpowers/specs/2026-08-21-windows-wfp-offline-boundary-design.md"
+        },
+        {
+          "section": "4.2 WFP filters",
+          "source": "docs/superpowers/specs/2026-08-21-windows-wfp-offline-boundary-design.md"
+        },
+        {
+          "section": "8. 验收标准",
+          "source": "docs/superpowers/specs/2026-08-21-windows-wfp-offline-boundary-design.md"
+        }
+      ],
+      "title": "Windows WFP native offline boundary",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "pnpm --filter code-oss-extension test:coverage-service-smoke"
+        ],
+        "jobs": [
+          "verify-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "documentation",
+      "deferment": {
+        "reason": "Phase 8 状态文档收口",
+        "resumeCondition": "前两项通过后更新 roadmap、security、README、验收证据和对应文档测试"
+      },
+      "disposition": "deferred",
+      "id": "P8-DOCS-CLOSEOUT",
+      "phase": 8,
+      "requirementRefs": [
+        {
+          "section": "Phase 8：打包、更新、许可与加固",
+          "source": "docs/superpowers/plans/2026-07-21-cpp-unit-test-ide-roadmap.md"
+        },
+        {
+          "section": "2. 当前基线与明确延期",
+          "source": "docs/superpowers/specs/2026-09-13-phase9-gate-evidence-matrix-design.md"
+        }
+      ],
+      "title": "Phase 8 documentation closeout",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "pnpm test:workspace"
+        ],
+        "jobs": [],
+        "workflowPath": ".github/workflows/phase9-gates.yml"
+      }
+    },
+    {
+      "category": "install-lifecycle",
+      "disposition": "required",
+      "id": "P8-INSTALL-LIFECYCLE-LINUX",
+      "phase": 8,
+      "requirementRefs": [
+        {
+          "section": "Install and Rollback Smoke",
+          "source": "docs/superpowers/specs/2026-08-27-code-oss-runtime-packaging-design.md"
+        },
+        {
+          "section": "Reviewed Scope Expansion: Install Artifact Closed-Set Ordering",
+          "source": "docs/superpowers/specs/2026-09-01-formal-packaging-followup-design.md"
+        },
+        {
+          "section": "First install",
+          "source": "docs/superpowers/specs/2026-09-03-code-oss-cli-smoke-handshake-design.md"
+        }
+      ],
+      "title": "Linux install upgrade rollback and uninstall lifecycle",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "node --test tools/release/update.test.mjs"
+        ],
+        "jobs": [
+          "install-smoke-linux"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "install-lifecycle",
+      "disposition": "required",
+      "id": "P8-INSTALL-LIFECYCLE-WINDOWS",
+      "phase": 8,
+      "requirementRefs": [
+        {
+          "section": "Install and Rollback Smoke",
+          "source": "docs/superpowers/specs/2026-08-27-code-oss-runtime-packaging-design.md"
+        },
+        {
+          "section": "Reviewed Scope Expansion: Install Artifact Closed-Set Ordering",
+          "source": "docs/superpowers/specs/2026-09-01-formal-packaging-followup-design.md"
+        },
+        {
+          "section": "Failed upgrade and rollback",
+          "source": "docs/superpowers/specs/2026-09-03-code-oss-cli-smoke-handshake-design.md"
+        }
+      ],
+      "title": "Windows install upgrade rollback and uninstall lifecycle",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "node --test tools/release/update.test.mjs"
+        ],
+        "jobs": [
+          "install-smoke-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "legal",
+      "deferment": {
+        "reason": "第三方 license/legal 人工审批",
+        "resumeCondition": "真实公开发布前，由有权负责人或合格法律审查者对精确候选制品和 notice/license 闭集作出书面审批"
+      },
+      "disposition": "deferred",
+      "id": "P8-LEGAL-THIRD-PARTY",
+      "phase": 8,
+      "requirementRefs": [
+        {
+          "section": "Goal",
+          "source": "docs/superpowers/specs/2026-08-28-trusted-code-oss-release-input-production-design.md"
+        },
+        {
+          "section": "2. 当前基线与明确延期",
+          "source": "docs/superpowers/specs/2026-09-13-phase9-gate-evidence-matrix-design.md"
+        }
+      ],
+      "title": "Third-party license and legal approval",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "review exact release candidate notices and licenses"
+        ],
+        "jobs": [],
+        "workflowPath": ".github/workflows/phase9-gates.yml"
+      }
+    },
+    {
+      "category": "legal",
+      "disposition": "required",
+      "id": "P8-LICENSE-AUDIT",
+      "phase": 8,
+      "requirementRefs": [
+        {
+          "section": "License Handling",
+          "source": "docs/superpowers/specs/2026-08-27-code-oss-runtime-packaging-design.md"
+        },
+        {
+          "section": "License audit",
+          "source": "docs/superpowers/specs/2026-09-01-formal-packaging-followup-design.md"
+        }
+      ],
+      "title": "Closed third-party license inventory audit",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "node --test tools/release/license-audit.test.mjs"
+        ],
+        "jobs": [
+          "package-linux",
+          "package-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "packaging",
+      "disposition": "required",
+      "id": "P8-LINUX-APPIMAGE-PACKAGE",
+      "phase": 8,
+      "requirementRefs": [
+        {
+          "section": "Linux Data Flow",
+          "source": "docs/superpowers/specs/2026-08-27-code-oss-runtime-packaging-design.md"
+        },
+        {
+          "section": "Linux AppImage",
+          "source": "docs/superpowers/specs/2026-08-31-formal-packaging-blockers-design.md"
+        },
+        {
+          "section": "AppImage verification",
+          "source": "docs/superpowers/specs/2026-09-01-formal-packaging-followup-design.md"
+        }
+      ],
+      "title": "Linux AppImage package integrity",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "node --test tools/release/linux/package-appimage.test.mjs"
+        ],
+        "jobs": [
+          "package-linux"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "qualification",
+      "disposition": "required",
+      "id": "P8-QUALIFICATION-UNSIGNED",
+      "phase": 8,
+      "requirementRefs": [
+        {
+          "section": "First Unsigned Test Release",
+          "source": "docs/superpowers/specs/2026-08-28-trusted-code-oss-release-input-production-design.md"
+        },
+        {
+          "section": "Acceptance Criteria",
+          "source": "docs/superpowers/specs/2026-09-11-qualified-release-manifest-collision-design.md"
+        },
+        {
+          "section": "Foundation workflow",
+          "source": "docs/superpowers/specs/2026-09-11-qualified-release-manifest-collision-design.md"
+        }
+      ],
+      "title": "Unsigned cross-platform release qualification",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "node --test tools/release/qualification.test.mjs tools/release/stage-qualified-release.test.mjs"
+        ],
+        "jobs": [
+          "release-qualification"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "supply-chain",
+      "disposition": "required",
+      "id": "P8-RUNTIME-PRODUCER-PROVENANCE",
+      "phase": 8,
+      "requirementRefs": [
+        {
+          "section": "Trusted Identity Model",
+          "source": "docs/superpowers/specs/2026-08-28-release-input-attempt-artifact-identity-design.md"
+        },
+        {
+          "section": "Artifact Attestation and Provenance",
+          "source": "docs/superpowers/specs/2026-08-28-trusted-code-oss-release-input-production-design.md"
+        }
+      ],
+      "title": "Trusted runtime producer provenance and artifact identity",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "pnpm test:release-producer"
+        ],
+        "jobs": [
+          "attest"
+        ],
+        "workflowPath": ".github/workflows/release-inputs.yml"
+      }
+    },
+    {
+      "category": "signing",
+      "deferment": {
+        "reason": "正式 Windows 签名",
+        "resumeCondition": "真实公开发布前，用正式证书和时间戳完成签名、干净机器验签和签名版 foundation 资格验证"
+      },
+      "disposition": "deferred",
+      "id": "P8-SIGN-WINDOWS",
+      "phase": 8,
+      "requirementRefs": [
+        {
+          "section": "Goal",
+          "source": "docs/superpowers/specs/2026-08-28-trusted-code-oss-release-input-production-design.md"
+        },
+        {
+          "section": "2. 当前基线与明确延期",
+          "source": "docs/superpowers/specs/2026-09-13-phase9-gate-evidence-matrix-design.md"
+        }
+      ],
+      "title": "Formal Windows signing and timestamp verification",
+      "verification": {
+        "artifacts": [
+          "signed-windows-release"
+        ],
+        "commands": [
+          "node --test tools/release/windows/package-msix.test.mjs"
+        ],
+        "jobs": [
+          "package-windows",
+          "release-qualification"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "packaging",
+      "disposition": "required",
+      "id": "P8-WINDOWS-MSIX-PACKAGE",
+      "phase": 8,
+      "requirementRefs": [
+        {
+          "section": "Windows Data Flow",
+          "source": "docs/superpowers/specs/2026-08-27-code-oss-runtime-packaging-design.md"
+        },
+        {
+          "section": "Windows MSIX",
+          "source": "docs/superpowers/specs/2026-08-31-formal-packaging-blockers-design.md"
+        }
+      ],
+      "title": "Windows MSIX package integrity",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "node --test tools/release/windows/package-msix.test.mjs"
+        ],
+        "jobs": [
+          "package-windows"
+        ],
+        "workflowPath": ".github/workflows/foundation.yml"
+      }
+    },
+    {
+      "category": "contract",
+      "disposition": "required",
+      "id": "P9-MATRIX-CONTRACT",
+      "phase": 9,
+      "requirementRefs": [
+        {
+          "section": "12. Batch A 验收标准",
+          "source": "docs/superpowers/specs/2026-09-13-phase9-gate-evidence-matrix-design.md"
+        },
+        {
+          "section": "4.1 门禁注册表",
+          "source": "docs/superpowers/specs/2026-09-13-phase9-gate-evidence-matrix-design.md"
+        }
+      ],
+      "title": "Phase 9 gate matrix contract",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "node --test tools/phase9/validate.test.mjs"
+        ],
+        "jobs": [
+          "phase9-offline"
+        ],
+        "workflowPath": ".github/workflows/phase9-gates.yml"
+      }
+    },
+    {
+      "category": "end-to-end",
+      "disposition": "required",
+      "id": "P9-MATRIX-E2E",
+      "phase": 9,
+      "requirementRefs": [
+        {
+          "section": "12. Batch A 验收标准",
+          "source": "docs/superpowers/specs/2026-09-13-phase9-gate-evidence-matrix-design.md"
+        },
+        {
+          "section": "7. 需求覆盖方法",
+          "source": "docs/superpowers/specs/2026-09-13-phase9-gate-evidence-matrix-design.md"
+        }
+      ],
+      "title": "Complete Phase 9 end-to-end matrix",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "pnpm test:e2e"
+        ],
+        "jobs": [
+          "phase9-matrix-e2e"
+        ],
+        "workflowPath": ".github/workflows/phase9-gates.yml"
+      }
+    },
+    {
+      "category": "fault-injection",
+      "disposition": "required",
+      "id": "P9-MATRIX-FAULT-INJECTION",
+      "phase": 9,
+      "requirementRefs": [
+        {
+          "section": "7. 需求覆盖方法",
+          "source": "docs/superpowers/specs/2026-09-13-phase9-gate-evidence-matrix-design.md"
+        }
+      ],
+      "title": "Complete Phase 9 fault injection matrix",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "pnpm test:e2e:native"
+        ],
+        "jobs": [
+          "phase9-fault-injection"
+        ],
+        "workflowPath": ".github/workflows/phase9-gates.yml"
+      }
+    },
+    {
+      "category": "integration",
+      "disposition": "required",
+      "id": "P9-MATRIX-INTEGRATION",
+      "phase": 9,
+      "requirementRefs": [
+        {
+          "section": "9.1 单元与合成集成测试",
+          "source": "docs/superpowers/specs/2026-09-13-phase9-gate-evidence-matrix-design.md"
+        }
+      ],
+      "title": "Complete Phase 9 integration test matrix",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "node --test tools/phase9/validate.test.mjs tools/phase9/audit.test.mjs"
+        ],
+        "jobs": [
+          "phase9-offline"
+        ],
+        "workflowPath": ".github/workflows/phase9-gates.yml"
+      }
+    },
+    {
+      "category": "unit",
+      "disposition": "required",
+      "id": "P9-MATRIX-UNIT",
+      "phase": 9,
+      "requirementRefs": [
+        {
+          "section": "9.1 单元与合成集成测试",
+          "source": "docs/superpowers/specs/2026-09-13-phase9-gate-evidence-matrix-design.md"
+        }
+      ],
+      "title": "Complete Phase 9 unit test matrix",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "node --test tools/phase9/validate.test.mjs tools/phase9/audit.test.mjs"
+        ],
+        "jobs": [
+          "phase9-offline"
+        ],
+        "workflowPath": ".github/workflows/phase9-gates.yml"
+      }
+    },
+    {
+      "category": "performance",
+      "disposition": "required",
+      "id": "P9-PERF-CANCEL",
+      "phase": 9,
+      "requirementRefs": [
+        {
+          "section": "Phase 9：完整矩阵、性能与发布资格确认",
+          "source": "docs/superpowers/plans/2026-07-21-cpp-unit-test-ide-roadmap.md"
+        },
+        {
+          "section": "13. 后续批次边界",
+          "source": "docs/superpowers/specs/2026-09-13-phase9-gate-evidence-matrix-design.md"
+        }
+      ],
+      "title": "Cancellation performance baseline",
+      "verification": {
+        "artifacts": [],
+        "commands": [],
+        "jobs": [
+          "phase9-performance"
+        ],
+        "workflowPath": ".github/workflows/phase9-gates.yml"
+      }
+    },
+    {
+      "category": "performance",
+      "disposition": "required",
+      "id": "P9-PERF-DISCOVERY-10000",
+      "phase": 9,
+      "requirementRefs": [
+        {
+          "section": "Phase 9：完整矩阵、性能与发布资格确认",
+          "source": "docs/superpowers/plans/2026-07-21-cpp-unit-test-ide-roadmap.md"
+        },
+        {
+          "section": "13. 后续批次边界",
+          "source": "docs/superpowers/specs/2026-09-13-phase9-gate-evidence-matrix-design.md"
+        }
+      ],
+      "title": "10000 item discovery performance baseline",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "pnpm --filter code-oss-extension test:benchmark"
+        ],
+        "jobs": [
+          "phase9-performance"
+        ],
+        "workflowPath": ".github/workflows/phase9-gates.yml"
+      }
+    },
+    {
+      "category": "performance",
+      "disposition": "required",
+      "id": "P9-PERF-FILTER",
+      "phase": 9,
+      "requirementRefs": [
+        {
+          "section": "Phase 9：完整矩阵、性能与发布资格确认",
+          "source": "docs/superpowers/plans/2026-07-21-cpp-unit-test-ide-roadmap.md"
+        },
+        {
+          "section": "13. 后续批次边界",
+          "source": "docs/superpowers/specs/2026-09-13-phase9-gate-evidence-matrix-design.md"
+        }
+      ],
+      "title": "Filtering performance baseline",
+      "verification": {
+        "artifacts": [],
+        "commands": [],
+        "jobs": [
+          "phase9-performance"
+        ],
+        "workflowPath": ".github/workflows/phase9-gates.yml"
+      }
+    },
+    {
+      "category": "performance",
+      "disposition": "required",
+      "id": "P9-PERF-HARDWARE-BASELINE",
+      "phase": 9,
+      "requirementRefs": [
+        {
+          "section": "Phase 9：完整矩阵、性能与发布资格确认",
+          "source": "docs/superpowers/plans/2026-07-21-cpp-unit-test-ide-roadmap.md"
+        },
+        {
+          "section": "13. 后续批次边界",
+          "source": "docs/superpowers/specs/2026-09-13-phase9-gate-evidence-matrix-design.md"
+        }
+      ],
+      "title": "Hardware-qualified performance baseline",
+      "verification": {
+        "artifacts": [
+          "phase9-performance-baseline"
+        ],
+        "commands": [],
+        "jobs": [
+          "phase9-performance"
+        ],
+        "workflowPath": ".github/workflows/phase9-gates.yml"
+      }
+    },
+    {
+      "category": "performance",
+      "disposition": "required",
+      "id": "P9-PERF-MEMORY",
+      "phase": 9,
+      "requirementRefs": [
+        {
+          "section": "Phase 9：完整矩阵、性能与发布资格确认",
+          "source": "docs/superpowers/plans/2026-07-21-cpp-unit-test-ide-roadmap.md"
+        },
+        {
+          "section": "13. 后续批次边界",
+          "source": "docs/superpowers/specs/2026-09-13-phase9-gate-evidence-matrix-design.md"
+        }
+      ],
+      "title": "Memory performance baseline",
+      "verification": {
+        "artifacts": [],
+        "commands": [],
+        "jobs": [
+          "phase9-performance"
+        ],
+        "workflowPath": ".github/workflows/phase9-gates.yml"
+      }
+    },
+    {
+      "category": "performance",
+      "disposition": "required",
+      "id": "P9-PERF-REPORT",
+      "phase": 9,
+      "requirementRefs": [
+        {
+          "section": "Phase 9：完整矩阵、性能与发布资格确认",
+          "source": "docs/superpowers/plans/2026-07-21-cpp-unit-test-ide-roadmap.md"
+        },
+        {
+          "section": "13. 后续批次边界",
+          "source": "docs/superpowers/specs/2026-09-13-phase9-gate-evidence-matrix-design.md"
+        }
+      ],
+      "title": "Report generation performance baseline",
+      "verification": {
+        "artifacts": [],
+        "commands": [],
+        "jobs": [
+          "phase9-performance"
+        ],
+        "workflowPath": ".github/workflows/phase9-gates.yml"
+      }
+    },
+    {
+      "category": "performance",
+      "disposition": "required",
+      "id": "P9-PERF-STARTUP",
+      "phase": 9,
+      "requirementRefs": [
+        {
+          "section": "Phase 9：完整矩阵、性能与发布资格确认",
+          "source": "docs/superpowers/plans/2026-07-21-cpp-unit-test-ide-roadmap.md"
+        },
+        {
+          "section": "13. 后续批次边界",
+          "source": "docs/superpowers/specs/2026-09-13-phase9-gate-evidence-matrix-design.md"
+        }
+      ],
+      "title": "Startup performance baseline",
+      "verification": {
+        "artifacts": [],
+        "commands": [],
+        "jobs": [
+          "phase9-performance"
+        ],
+        "workflowPath": ".github/workflows/phase9-gates.yml"
+      }
+    },
+    {
+      "category": "upstream",
+      "disposition": "required",
+      "id": "P9-UPSTREAM-CODEOSS",
+      "phase": 9,
+      "requirementRefs": [
+        {
+          "section": "Phase 9：完整矩阵、性能与发布资格确认",
+          "source": "docs/superpowers/plans/2026-07-21-cpp-unit-test-ide-roadmap.md"
+        },
+        {
+          "section": "13. 后续批次边界",
+          "source": "docs/superpowers/specs/2026-09-13-phase9-gate-evidence-matrix-design.md"
+        }
+      ],
+      "title": "Code-OSS upstream merge regression",
+      "verification": {
+        "artifacts": [],
+        "commands": [
+          "pnpm test:workspace"
+        ],
+        "jobs": [
+          "phase9-upstream-codeoss"
+        ],
+        "workflowPath": ".github/workflows/phase9-gates.yml"
+      }
+    }
+  ],
+  "product": "unit-test-ide",
+  "repository": "colayc/unitTest",
+  "schemaVersion": 1,
+  "sources": [
+    {
+      "path": "docs/superpowers/plans/2026-07-21-cpp-unit-test-ide-roadmap.md",
+      "sections": [
+        "Phase 5：覆盖率与报告管道",
+        "Phase 6：Code-OSS 外壳与内置扩展",
+        "Phase 7：产品测试 UX、Mock 配置、历史记录与报告",
+        "Phase 8：打包、更新、许可与加固",
+        "Phase 9：完整矩阵、性能与发布资格确认"
+      ]
+    },
+    {
+      "path": "docs/superpowers/specs/2026-07-21-secure-token-file-preparation-design.md",
+      "sections": [
+        "安全创建",
+        "测试"
+      ]
+    },
+    {
+      "path": "docs/superpowers/specs/2026-07-22-task-engine-persistence-design.md",
+      "sections": [
+        "13. 错误、安全与流量控制",
+        "14. 测试策略",
+        "15. 验收场景",
+        "16. 完成门禁",
+        "4. 非目标",
+        "9. 跨平台进程树控制"
+      ]
+    },
+    {
+      "path": "docs/superpowers/specs/2026-07-26-workspace-cmake-toolchains-design.md",
+      "sections": [
+        "12.3 Windows clang-cl",
+        "12.4 Linux GCC 与 Clang",
+        "19. 测试策略",
+        "19.4 Native E2E Matrix",
+        "20. 验收场景",
+        "21. 完成门禁",
+        "6. Workspace 绑定与信任边界"
+      ]
+    },
+    {
+      "path": "docs/superpowers/specs/2026-07-27-prepared-process-lease-ownership-design.md",
+      "sections": [
+        "12. 测试设计",
+        "14. 完成标准"
+      ]
+    },
+    {
+      "path": "docs/superpowers/specs/2026-07-27-publisher-failure-task-ownership-design.md",
+      "sections": [
+        "11. 错误与安全",
+        "12. 测试设计",
+        "14. 完成标准"
+      ]
+    },
+    {
+      "path": "docs/superpowers/specs/2026-07-28-close-before-terminalization-design.md",
+      "sections": [
+        "13. 测试矩阵",
+        "14. 验收条件"
+      ]
+    },
+    {
+      "path": "docs/superpowers/specs/2026-07-30-test-framework-discovery-execution-design.md",
+      "sections": [
+        "19. 安全边界",
+        "20. 测试策略",
+        "22. 验收标准"
+      ]
+    },
+    {
+      "path": "docs/superpowers/specs/2026-08-03-coverage-report-pipeline-design.md",
+      "sections": [
+        "10.1 工具约束",
+        "11. GCC/gcovr coverage pipeline",
+        "14. Report renderer",
+        "15.4 Compatibility",
+        "20. 错误分类",
+        "22.5 Scale 与 fault injection",
+        "24. 验收标准"
+      ]
+    },
+    {
+      "path": "docs/superpowers/specs/2026-08-05-typescript-client-v1-4-coverage-design.md",
+      "sections": [
+        "5. 版本协商与方法路由",
+        "9. Compatibility"
+      ]
+    },
+    {
+      "path": "docs/superpowers/specs/2026-08-16-phase6-code-oss-extension-design.md",
+      "sections": [
+        "4.1 采用独立 Extension Host",
+        "5. Workspace Trust gate",
+        "6. Service lifecycle",
+        "9.3 Extension integration smoke"
+      ]
+    },
+    {
+      "path": "docs/superpowers/specs/2026-08-18-phase6b-testing-api-design.md",
+      "sections": [
+        "3. Refresh 数据流",
+        "4. Run Profile 与结果映射",
+        "7. 后续接口",
+        "Integration/CI"
+      ]
+    },
+    {
+      "path": "docs/superpowers/specs/2026-08-20-phase8-windows-llvm-coverage-execution-design.md",
+      "sections": [
+        "9.3 Windows 真实 smoke"
+      ]
+    },
+    {
+      "path": "docs/superpowers/specs/2026-08-21-windows-wfp-offline-boundary-design.md",
+      "sections": [
+        "3. 信任模型与权限",
+        "4.2 WFP filters",
+        "8. 验收标准"
+      ]
+    },
+    {
+      "path": "docs/superpowers/specs/2026-08-27-code-oss-runtime-packaging-design.md",
+      "sections": [
+        "Install and Rollback Smoke",
+        "License Handling",
+        "Linux Data Flow",
+        "Windows Data Flow"
+      ]
+    },
+    {
+      "path": "docs/superpowers/specs/2026-08-28-release-input-attempt-artifact-identity-design.md",
+      "sections": [
+        "Trusted Identity Model"
+      ]
+    },
+    {
+      "path": "docs/superpowers/specs/2026-08-28-trusted-code-oss-release-input-production-design.md",
+      "sections": [
+        "Artifact Attestation and Provenance",
+        "First Unsigned Test Release",
+        "Goal"
+      ]
+    },
+    {
+      "path": "docs/superpowers/specs/2026-08-31-formal-packaging-blockers-design.md",
+      "sections": [
+        "Linux AppImage",
+        "Windows MSIX"
+      ]
+    },
+    {
+      "path": "docs/superpowers/specs/2026-09-01-formal-packaging-followup-design.md",
+      "sections": [
+        "AppImage verification",
+        "License audit",
+        "Reviewed Scope Expansion: Install Artifact Closed-Set Ordering"
+      ]
+    },
+    {
+      "path": "docs/superpowers/specs/2026-09-03-code-oss-cli-smoke-handshake-design.md",
+      "sections": [
+        "CLI handshake construction",
+        "Failed upgrade and rollback",
+        "First install"
+      ]
+    },
+    {
+      "path": "docs/superpowers/specs/2026-09-03-native-diagnostic-uri-design.md",
+      "sections": [
+        "Acceptance criteria",
+        "Compatibility and security boundaries",
+        "Verification strategy"
+      ]
+    },
+    {
+      "path": "docs/superpowers/specs/2026-09-06-phase7-linux-gcc-coverage-execution-design.md",
+      "sections": [
+        "13.3 Linux native offline boundary",
+        "7. GCC/gcov Toolset Identity"
+      ]
+    },
+    {
+      "path": "docs/superpowers/specs/2026-09-11-qualified-release-manifest-collision-design.md",
+      "sections": [
+        "Acceptance Criteria",
+        "Foundation workflow"
+      ]
+    },
+    {
+      "path": "docs/superpowers/specs/2026-09-11-windows-llvm-coverage-regression-design.md",
+      "sections": [
+        "Repair design"
+      ]
+    },
+    {
+      "path": "docs/superpowers/specs/2026-09-13-phase9-gate-evidence-matrix-design.md",
+      "sections": [
+        "12. Batch A 验收标准",
+        "13. 后续批次边界",
+        "2. 当前基线与明确延期",
+        "4.1 门禁注册表",
+        "7. 需求覆盖方法",
+        "9.1 单元与合成集成测试"
+      ]
+    }
+  ]
+}
