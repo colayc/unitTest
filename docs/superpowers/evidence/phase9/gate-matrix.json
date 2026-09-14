@@ -3,12 +3,12 @@
   "catalogComplete": true,
   "counts": {
     "deferred": 3,
-    "failed": 0,
+    "failed": 10,
     "missing": 49,
-    "pass": 10
+    "pass": 0
   },
-  "currentCommit": "9fc76aed9b671c8840a2f0709be2ee83b5081271",
-  "evaluationMode": "historical",
+  "currentCommit": "d643b460d5672d439446305822ced506fbeb9c65",
+  "evaluationMode": "candidate",
   "gates": [
     {
       "id": "P1-IPC-PER-USER-AUTH",
@@ -109,8 +109,9 @@
     },
     {
       "id": "P5-LINUX-GCC-COVERAGE",
+      "reason": "candidate-descendant-changed-tested-content",
       "receiptId": "github-actions-34731651809-1",
-      "status": "PASS"
+      "status": "FAILED"
     },
     {
       "id": "P5-PROTOCOL-V14-COMPAT",
@@ -157,8 +158,9 @@
     },
     {
       "id": "P7-LINUX-GCC-OFFLINE",
+      "reason": "candidate-descendant-changed-tested-content",
       "receiptId": "github-actions-34731651809-1",
-      "status": "PASS"
+      "status": "FAILED"
     },
     {
       "artifactAvailability": "missing",
@@ -172,8 +174,9 @@
     },
     {
       "id": "P7-WINDOWS-WFP-OFFLINE",
+      "reason": "candidate-descendant-changed-tested-content",
       "receiptId": "github-actions-34731651809-1",
-      "status": "PASS"
+      "status": "FAILED"
     },
     {
       "id": "P8-DOCS-CLOSEOUT",
@@ -181,13 +184,15 @@
     },
     {
       "id": "P8-INSTALL-LIFECYCLE-LINUX",
+      "reason": "candidate-descendant-changed-tested-content",
       "receiptId": "github-actions-34731651809-1",
-      "status": "PASS"
+      "status": "FAILED"
     },
     {
       "id": "P8-INSTALL-LIFECYCLE-WINDOWS",
+      "reason": "candidate-descendant-changed-tested-content",
       "receiptId": "github-actions-34731651809-1",
-      "status": "PASS"
+      "status": "FAILED"
     },
     {
       "id": "P8-LEGAL-THIRD-PARTY",
@@ -195,23 +200,27 @@
     },
     {
       "id": "P8-LICENSE-AUDIT",
+      "reason": "candidate-descendant-changed-tested-content",
       "receiptId": "github-actions-34731651809-1",
-      "status": "PASS"
+      "status": "FAILED"
     },
     {
       "id": "P8-LINUX-APPIMAGE-PACKAGE",
+      "reason": "candidate-descendant-changed-tested-content",
       "receiptId": "github-actions-34731651809-1",
-      "status": "PASS"
+      "status": "FAILED"
     },
     {
       "id": "P8-QUALIFICATION-UNSIGNED",
+      "reason": "candidate-descendant-changed-tested-content",
       "receiptId": "github-actions-34731651809-1",
-      "status": "PASS"
+      "status": "FAILED"
     },
     {
       "id": "P8-RUNTIME-PRODUCER-PROVENANCE",
+      "reason": "candidate-descendant-changed-tested-content",
       "receiptId": "github-actions-34728889872-1",
-      "status": "PASS"
+      "status": "FAILED"
     },
     {
       "id": "P8-SIGN-WINDOWS",
@@ -219,8 +228,9 @@
     },
     {
       "id": "P8-WINDOWS-MSIX-PACKAGE",
+      "reason": "candidate-descendant-changed-tested-content",
       "receiptId": "github-actions-34731651809-1",
-      "status": "PASS"
+      "status": "FAILED"
     },
     {
       "id": "P9-MATRIX-CONTRACT",
@@ -276,7 +286,7 @@
       "status": "MISSING"
     }
   ],
-  "recordedByCommit": "9fc76aed9b671c8840a2f0709be2ee83b5081271",
+  "recordedByCommit": "d643b460d5672d439446305822ced506fbeb9c65",
   "releaseReady": false,
   "schemaVersion": 1
 }

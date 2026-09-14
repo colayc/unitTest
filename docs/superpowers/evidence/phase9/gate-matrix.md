@@ -1,8 +1,8 @@
 # Phase 9 Gate Matrix
 
 - Candidate commit: `1e20a5ceee370e9823f9fe05f40980f893cd9ed3`
-- Recorded by commit: `9fc76aed9b671c8840a2f0709be2ee83b5081271`
-- Evaluation mode: `historical`
+- Recorded by commit: `d643b460d5672d439446305822ced506fbeb9c65`
+- Evaluation mode: `candidate`
 - Catalog complete: `true`
 - Release ready: `false`
 
@@ -10,9 +10,9 @@
 
 | Status | Count |
 |---|---:|
-| PASS | 10 |
+| PASS | 0 |
 | MISSING | 49 |
-| FAILED | 0 |
+| FAILED | 10 |
 | DEFERRED | 3 |
 
 ## Gates
@@ -43,7 +43,7 @@
 | P5-COVERAGE-FAULT-MAPPING | 5 | coverage | MISSING |  |  |  |
 | P5-COVERAGE-REPORTS | 5 | reports | MISSING |  |  |  |
 | P5-LINUX-CLANG-COVERAGE | 5 | toolchain | MISSING |  | missing |  |
-| P5-LINUX-GCC-COVERAGE | 5 | toolchain | PASS | github-actions-34731651809-1 |  |  |
+| P5-LINUX-GCC-COVERAGE | 5 | toolchain | FAILED | github-actions-34731651809-1 |  | candidate-descendant-changed-tested-content |
 | P5-PROTOCOL-V14-COMPAT | 5 | compatibility | MISSING |  |  |  |
 | P5-WINDOWS-LLVM-COVERAGE | 5 | toolchain | MISSING |  |  |  |
 | P6-BRANDING-AND-BUILTIN-REGISTRATION | 6 | product-shell | MISSING |  |  |  |
@@ -54,20 +54,20 @@
 | P6-WORKSPACE-TRUST-GATE | 6 | workspace-security | MISSING |  |  |  |
 | P7-COVERAGE-UI-AND-SOURCE-DECORATION | 7 | user-interface | MISSING |  | missing |  |
 | P7-HISTORY-AND-ARTIFACT-BROWSER | 7 | user-interface | MISSING |  | missing |  |
-| P7-LINUX-GCC-OFFLINE | 7 | offline | PASS | github-actions-34731651809-1 |  |  |
+| P7-LINUX-GCC-OFFLINE | 7 | offline | FAILED | github-actions-34731651809-1 |  | candidate-descendant-changed-tested-content |
 | P7-MAIN-USER-JOURNEY | 7 | user-journey | MISSING |  | missing |  |
 | P7-MOCK-CONFIGURATION-UX | 7 | user-interface | MISSING |  | missing |  |
-| P7-WINDOWS-WFP-OFFLINE | 7 | offline | PASS | github-actions-34731651809-1 |  |  |
+| P7-WINDOWS-WFP-OFFLINE | 7 | offline | FAILED | github-actions-34731651809-1 |  | candidate-descendant-changed-tested-content |
 | P8-DOCS-CLOSEOUT | 8 | documentation | DEFERRED |  |  |  |
-| P8-INSTALL-LIFECYCLE-LINUX | 8 | install-lifecycle | PASS | github-actions-34731651809-1 |  |  |
-| P8-INSTALL-LIFECYCLE-WINDOWS | 8 | install-lifecycle | PASS | github-actions-34731651809-1 |  |  |
+| P8-INSTALL-LIFECYCLE-LINUX | 8 | install-lifecycle | FAILED | github-actions-34731651809-1 |  | candidate-descendant-changed-tested-content |
+| P8-INSTALL-LIFECYCLE-WINDOWS | 8 | install-lifecycle | FAILED | github-actions-34731651809-1 |  | candidate-descendant-changed-tested-content |
 | P8-LEGAL-THIRD-PARTY | 8 | legal | DEFERRED |  |  |  |
-| P8-LICENSE-AUDIT | 8 | legal | PASS | github-actions-34731651809-1 |  |  |
-| P8-LINUX-APPIMAGE-PACKAGE | 8 | packaging | PASS | github-actions-34731651809-1 |  |  |
-| P8-QUALIFICATION-UNSIGNED | 8 | qualification | PASS | github-actions-34731651809-1 |  |  |
-| P8-RUNTIME-PRODUCER-PROVENANCE | 8 | supply-chain | PASS | github-actions-34728889872-1 |  |  |
+| P8-LICENSE-AUDIT | 8 | legal | FAILED | github-actions-34731651809-1 |  | candidate-descendant-changed-tested-content |
+| P8-LINUX-APPIMAGE-PACKAGE | 8 | packaging | FAILED | github-actions-34731651809-1 |  | candidate-descendant-changed-tested-content |
+| P8-QUALIFICATION-UNSIGNED | 8 | qualification | FAILED | github-actions-34731651809-1 |  | candidate-descendant-changed-tested-content |
+| P8-RUNTIME-PRODUCER-PROVENANCE | 8 | supply-chain | FAILED | github-actions-34728889872-1 |  | candidate-descendant-changed-tested-content |
 | P8-SIGN-WINDOWS | 8 | signing | DEFERRED |  |  |  |
-| P8-WINDOWS-MSIX-PACKAGE | 8 | packaging | PASS | github-actions-34731651809-1 |  |  |
+| P8-WINDOWS-MSIX-PACKAGE | 8 | packaging | FAILED | github-actions-34731651809-1 |  | candidate-descendant-changed-tested-content |
 | P9-MATRIX-CONTRACT | 9 | contract | MISSING |  |  |  |
 | P9-MATRIX-E2E | 9 | end-to-end | MISSING |  |  |  |
 | P9-MATRIX-FAULT-INJECTION | 9 | fault-injection | MISSING |  |  |  |
