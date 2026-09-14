@@ -15,6 +15,7 @@ const DIGEST_PATTERN = /^[0-9a-f]{64}$/u;
 const UTC_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/u;
 const SAFE_TEXT_PATTERN = /^[^\0\r\n]+$/u;
 const CONCLUSIONS = new Set(["success", "failure", "cancelled", "timed_out", "action_required", "neutral", "skipped"]);
+const GENERATED_AUDIT_ARTIFACT_PATTERN = /^phase9-gate-audit-[1-9][0-9]*$/u;
 const SNAPSHOT_FILES = Object.freeze(["artifacts.json", "jobs.json", "run.json"]);
 const ALLOWED_DEFERRED_GATE_IDS = new Set([
   "P8-DOCS-CLOSEOUT",
@@ -229,7 +230,8 @@ export function auditGithubReceipt({ receipt, runSnapshot, jobSnapshot, artifact
   const expected = receipt.evidence;
   const run = normalizeRunSnapshot(receipt, runSnapshot);
   const jobs = normalizeJobSnapshot(receipt, jobSnapshot);
-  const artifacts = normalizeArtifactSnapshot(receipt, artifactSnapshot);
+  const artifacts = normalizeArtifactSnapshot(receipt, artifactSnapshot)
+    .filter((artifact) => !GENERATED_AUDIT_ARTIFACT_PATTERN.test(artifact.name));
   const expectedAttempt = String(expected.runAttempt);
   if (run.id !== expected.runId) fail(receipt, "run ID does not match");
   if (run.runAttempt !== expectedAttempt) fail(receipt, "run attempt does not match");

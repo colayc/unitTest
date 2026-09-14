@@ -1,14 +1,14 @@
 {
-  "candidateCommit": "86d861aefb76f80d013d2278766831e40b717379",
+  "candidateCommit": "1e20a5ceee370e9823f9fe05f40980f893cd9ed3",
   "catalogComplete": true,
   "counts": {
     "deferred": 3,
     "failed": 0,
-    "missing": 54,
-    "pass": 5
+    "missing": 49,
+    "pass": 10
   },
-  "currentCommit": "86d861aefb76f80d013d2278766831e40b717379",
-  "evaluationMode": "candidate",
+  "currentCommit": "9fc76aed9b671c8840a2f0709be2ee83b5081271",
+  "evaluationMode": "historical",
   "gates": [
     {
       "id": "P1-IPC-PER-USER-AUTH",
@@ -109,7 +109,8 @@
     },
     {
       "id": "P5-LINUX-GCC-COVERAGE",
-      "status": "MISSING"
+      "receiptId": "github-actions-34731651809-1",
+      "status": "PASS"
     },
     {
       "id": "P5-PROTOCOL-V14-COMPAT",
@@ -156,7 +157,8 @@
     },
     {
       "id": "P7-LINUX-GCC-OFFLINE",
-      "status": "MISSING"
+      "receiptId": "github-actions-34731651809-1",
+      "status": "PASS"
     },
     {
       "artifactAvailability": "missing",
@@ -170,7 +172,8 @@
     },
     {
       "id": "P7-WINDOWS-WFP-OFFLINE",
-      "status": "MISSING"
+      "receiptId": "github-actions-34731651809-1",
+      "status": "PASS"
     },
     {
       "id": "P8-DOCS-CLOSEOUT",
@@ -178,11 +181,13 @@
     },
     {
       "id": "P8-INSTALL-LIFECYCLE-LINUX",
-      "status": "MISSING"
+      "receiptId": "github-actions-34731651809-1",
+      "status": "PASS"
     },
     {
       "id": "P8-INSTALL-LIFECYCLE-WINDOWS",
-      "status": "MISSING"
+      "receiptId": "github-actions-34731651809-1",
+      "status": "PASS"
     },
     {
       "id": "P8-LEGAL-THIRD-PARTY",
@@ -190,19 +195,23 @@
     },
     {
       "id": "P8-LICENSE-AUDIT",
-      "status": "MISSING"
+      "receiptId": "github-actions-34731651809-1",
+      "status": "PASS"
     },
     {
       "id": "P8-LINUX-APPIMAGE-PACKAGE",
-      "status": "MISSING"
+      "receiptId": "github-actions-34731651809-1",
+      "status": "PASS"
     },
     {
       "id": "P8-QUALIFICATION-UNSIGNED",
-      "status": "MISSING"
+      "receiptId": "github-actions-34731651809-1",
+      "status": "PASS"
     },
     {
       "id": "P8-RUNTIME-PRODUCER-PROVENANCE",
-      "status": "MISSING"
+      "receiptId": "github-actions-34728889872-1",
+      "status": "PASS"
     },
     {
       "id": "P8-SIGN-WINDOWS",
@@ -210,32 +219,28 @@
     },
     {
       "id": "P8-WINDOWS-MSIX-PACKAGE",
-      "status": "MISSING"
+      "receiptId": "github-actions-34731651809-1",
+      "status": "PASS"
     },
     {
       "id": "P9-MATRIX-CONTRACT",
-      "receiptId": "github-actions-34818145925-1",
-      "status": "PASS"
+      "status": "MISSING"
     },
     {
       "id": "P9-MATRIX-E2E",
-      "receiptId": "github-actions-34818145925-1",
-      "status": "PASS"
+      "status": "MISSING"
     },
     {
       "id": "P9-MATRIX-FAULT-INJECTION",
-      "receiptId": "github-actions-34818145925-1",
-      "status": "PASS"
+      "status": "MISSING"
     },
     {
       "id": "P9-MATRIX-INTEGRATION",
-      "receiptId": "github-actions-34818145925-1",
-      "status": "PASS"
+      "status": "MISSING"
     },
     {
       "id": "P9-MATRIX-UNIT",
-      "receiptId": "github-actions-34818145925-1",
-      "status": "PASS"
+      "status": "MISSING"
     },
     {
       "id": "P9-PERF-CANCEL",
@@ -271,7 +276,7 @@
       "status": "MISSING"
     }
   ],
-  "recordedByCommit": "86d861aefb76f80d013d2278766831e40b717379",
+  "recordedByCommit": "9fc76aed9b671c8840a2f0709be2ee83b5081271",
   "releaseReady": false,
   "schemaVersion": 1
 }

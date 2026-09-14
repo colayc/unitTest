@@ -114,6 +114,24 @@ test("audits a complete successful GitHub Actions receipt", () => {
   });
 });
 
+test("ignores the workflow-generated audit artifact when auditing source evidence", () => {
+  const input = auditInputs();
+  input.artifactSnapshot.total_count = 2;
+  input.artifactSnapshot.artifacts.push({
+    id: 10336584316,
+    name: "phase9-gate-audit-1",
+    digest: `sha256:${"c".repeat(64)}`,
+    expired: false,
+    workflow_run: { id: 34731651809 },
+  });
+  assert.deepEqual(auditGithubReceipt(input), {
+    receiptId,
+    status: "PASS",
+    artifactAvailability: "available",
+    releaseUsable: true,
+  });
+});
+
 const mismatchCases = [
   ["repository", ({ runSnapshot }) => { runSnapshot.repository.full_name = "attacker/unitTest"; }],
   ["workflow path", ({ runSnapshot }) => { runSnapshot.path = ".github/workflows/other.yml"; }],

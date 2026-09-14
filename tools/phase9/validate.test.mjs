@@ -1120,8 +1120,8 @@ test("checked-in candidate evidence keeps deferred and unproven gates closed", a
   });
   const gatesById = new Map(matrix.gates.map((gate) => [gate.id, gate]));
 
-  assert.ok(["historical", "candidate"].includes(inputs.baseline.evaluationMode));
-  assert.equal(matrix.evaluationMode, inputs.baseline.evaluationMode);
+  assert.equal(inputs.baseline.evaluationMode, "candidate");
+  assert.equal(matrix.evaluationMode, "candidate");
   assert.equal(matrix.releaseReady, false);
   assert.equal(gatesById.get("P8-SIGN-WINDOWS")?.status, "DEFERRED");
   assert.equal(gatesById.get("P9-PERF-MEMORY")?.status, "MISSING");
