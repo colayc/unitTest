@@ -1,13 +1,13 @@
 {
-  "candidateCommit": "1ac91525aba9f603c7f27e56f5c0fbc54f8fdfe9",
+  "candidateCommit": "ed75c3cbedbccb9ffa2cf7ef6eda8984ac469692",
   "catalogComplete": true,
   "counts": {
     "deferred": 3,
     "failed": 0,
-    "missing": 54,
-    "pass": 5
+    "missing": 59,
+    "pass": 0
   },
-  "currentCommit": "1ac91525aba9f603c7f27e56f5c0fbc54f8fdfe9",
+  "currentCommit": "ed75c3cbedbccb9ffa2cf7ef6eda8984ac469692",
   "evaluationMode": "candidate",
   "gates": [
     {
@@ -214,28 +214,23 @@
     },
     {
       "id": "P9-MATRIX-CONTRACT",
-      "receiptId": "github-actions-34820089297-1",
-      "status": "PASS"
+      "status": "MISSING"
     },
     {
       "id": "P9-MATRIX-E2E",
-      "receiptId": "github-actions-34820089297-1",
-      "status": "PASS"
+      "status": "MISSING"
     },
     {
       "id": "P9-MATRIX-FAULT-INJECTION",
-      "receiptId": "github-actions-34820089297-1",
-      "status": "PASS"
+      "status": "MISSING"
     },
     {
       "id": "P9-MATRIX-INTEGRATION",
-      "receiptId": "github-actions-34820089297-1",
-      "status": "PASS"
+      "status": "MISSING"
     },
     {
       "id": "P9-MATRIX-UNIT",
-      "receiptId": "github-actions-34820089297-1",
-      "status": "PASS"
+      "status": "MISSING"
     },
     {
       "id": "P9-PERF-CANCEL",
@@ -271,7 +266,7 @@
       "status": "MISSING"
     }
   ],
-  "recordedByCommit": "1ac91525aba9f603c7f27e56f5c0fbc54f8fdfe9",
+  "recordedByCommit": "ed75c3cbedbccb9ffa2cf7ef6eda8984ac469692",
   "releaseReady": false,
   "schemaVersion": 1
 }
