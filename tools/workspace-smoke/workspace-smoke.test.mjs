@@ -110,15 +110,19 @@ test("Phase 9 audit workflow is read-only, fixed-coordinate, and fail-closed", a
     "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
     "pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa",
   ];
-  for (const [name, command] of [
-    ["phase9-offline", "node --test tools/phase9/validate.test.mjs tools/phase9/audit.test.mjs"],
-    ["phase9-matrix-e2e", "pnpm test:e2e"],
-    ["phase9-fault-injection", "node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm test:e2e:native"],
+  const setupGoPin = "actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16";
+  for (const [name, commands] of [
+    ["phase9-offline", ["node --test tools/phase9/validate.test.mjs tools/phase9/audit.test.mjs"]],
+    ["phase9-matrix-e2e", ["pnpm test:e2e"]],
+    ["phase9-fault-injection", [
+      "go mod download",
+      "node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm test:e2e:native",
+    ]],
   ]) {
     const source = jobSource(name);
     assert.match(source, /^ {4}runs-on: ubuntu-24\.04\s*$/mu, `${name} must use the fixed Ubuntu runner`);
     assert.match(source, /^ {4}timeout-minutes: 30\s*$/mu, `${name} must use the fixed timeout`);
-    assert.doesNotMatch(source, /^\s+(?:env|inputs):/mu, `${name} must not accept dynamic data`);
+    assert.doesNotMatch(source, /^\s+inputs:/mu, `${name} must not accept dynamic inputs`);
     assert.doesNotMatch(source, /secrets\.|\$\{\{/u, `${name} must not interpolate dynamic data`);
     for (const pin of setupPins) {
       assert.equal(source.split(pin).length - 1, 1, `${name} must use ${pin} exactly once`);
@@ -127,12 +131,33 @@ test("Phase 9 audit workflow is read-only, fixed-coordinate, and fail-closed", a
     assert.match(source, /^ {10}persist-credentials: false\s*$/mu, `${name} checkout must not persist credentials`);
     assert.match(source, /^ {10}node-version: 24\.18\.0\s*$/mu, `${name} must use the pinned Node version`);
     assert.match(source, /^ {10}cache: pnpm\s*$/mu, `${name} must use the pnpm cache`);
+    if (name === "phase9-fault-injection") {
+      assert.equal(source.split(setupGoPin).length - 1, 1, `${name} must use pinned setup-go exactly once`);
+      assert.match(
+        source,
+        /^ {6}- uses: actions\/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6\r?\n {8}with:\r?\n {10}go-version: 1\.26\.6\r?\n {10}cache-dependency-path: apps\/test-service\/go\.sum\s*$/mu,
+      );
+      assert.equal([...source.matchAll(/^[ \t]+env:/gmu)].length, 2, `${name} must have exactly two static environment blocks`);
+      assert.match(
+        source,
+        /^ {6}- name: Prepare Go modules before namespace entry\r?\n {8}working-directory: apps\/test-service\r?\n {8}env:\r?\n {10}GOENV: "off"\r?\n {10}GOTOOLCHAIN: local\r?\n {8}run: go mod download\s*$/mu,
+      );
+      assert.match(
+        source,
+        /^ {6}- name: Run native fault injection offline\r?\n {8}env:\r?\n {10}GOENV: "off"\r?\n {10}GOTOOLCHAIN: local\r?\n {8}run: node tools\/linux-offline\/run\.mjs --allow-sudo-root -- pnpm test:e2e:native\s*$/mu,
+      );
+      assert.ok(source.indexOf(setupGoPin) < source.indexOf("go mod download"), `${name} must set up Go before downloading modules`);
+    } else {
+      assert.equal(source.split(setupGoPin).length - 1, 0, `${name} must not set up Go`);
+      assert.doesNotMatch(source, /^\s+env:/mu, `${name} must not define an environment`);
+    }
     assert.deepEqual(
       [...source.matchAll(/^[ \t]+(?:-[ \t]+)?run:[ \t]*(.*?)[ \t]*$/gmu)].map((match) => match[1]),
-      ["pnpm install --frozen-lockfile", command],
+      ["pnpm install --frozen-lockfile", ...commands],
       `${name} must install from the lockfile and run only its exact fixed command`,
     );
   }
+  assert.equal(workflow.split(setupGoPin).length - 1, 1, `${setupGoPin} must appear exactly once`);
 
   for (const [pin, expectedCount] of [
     ["actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803", 4],
