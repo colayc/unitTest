@@ -128,7 +128,7 @@ test("Phase 9 audit workflow is read-only, fixed-coordinate, and fail-closed", a
     assert.match(source, /^ {10}node-version: 24\.18\.0\s*$/mu, `${name} must use the pinned Node version`);
     assert.match(source, /^ {10}cache: pnpm\s*$/mu, `${name} must use the pnpm cache`);
     assert.deepEqual(
-      [...source.matchAll(/^ {6}- run: (.+)\s*$/gmu)].map((match) => match[1]),
+      [...source.matchAll(/^[ \t]+(?:-[ \t]+)?run:[ \t]*(.*?)[ \t]*$/gmu)].map((match) => match[1]),
       ["pnpm install --frozen-lockfile", command],
       `${name} must install from the lockfile and run only its exact fixed command`,
     );
