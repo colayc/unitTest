@@ -119,8 +119,10 @@ test("Phase 9 audit workflow is read-only, fixed-coordinate, and fail-closed", a
       "go mod download",
       "node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm test:e2e:native",
     ]],
+    ["phase9-upstream-codeoss", ["pnpm test:workspace"]],
   ]) {
     const source = jobSource(name);
+    assert.match(source, new RegExp(`^  ${name}:\\s*$`, "mu"), `${name} must retain its exact job name`);
     assert.match(source, /^ {4}runs-on: ubuntu-24\.04\s*$/mu, `${name} must use the fixed Ubuntu runner`);
     assert.match(source, /^ {4}timeout-minutes: 30\s*$/mu, `${name} must use the fixed timeout`);
     assert.doesNotMatch(source, /^\s+inputs:/mu, `${name} must not accept dynamic inputs`);
@@ -161,9 +163,9 @@ test("Phase 9 audit workflow is read-only, fixed-coordinate, and fail-closed", a
   assert.equal(workflow.split(setupGoPin).length - 1, 1, `${setupGoPin} must appear exactly once`);
 
   for (const [pin, expectedCount] of [
-    ["actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803", 4],
-    ["actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38", 4],
-    ["pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa", 4],
+    ["actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803", 5],
+    ["actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38", 5],
+    ["pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa", 5],
     ["actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", 1],
   ]) {
     assert.equal(workflow.split(pin).length - 1, expectedCount, `${pin} must appear exactly ${expectedCount} times`);
