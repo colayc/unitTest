@@ -97,12 +97,42 @@ test("Phase 9 audit workflow is read-only, fixed-coordinate, and fail-closed", a
   assert.doesNotMatch(workflow, /^\s*inputs:\s*$/mu);
   assert.doesNotMatch(workflow, /continue-on-error/u);
   assert.doesNotMatch(workflow, /\beval\b|\bsh\s+-c\b/u);
-  assert.match(workflow, /phase9-offline:/u);
-  assert.match(workflow, /node --test tools\/phase9\/validate\.test\.mjs tools\/phase9\/audit\.test\.mjs/u);
-  assert.match(workflow, /phase9-matrix-e2e:/u);
-  assert.match(workflow, /pnpm test:e2e/u);
-  assert.match(workflow, /phase9-fault-injection:/u);
-  assert.match(workflow, /pnpm test:e2e:native/u);
+
+  const jobSource = (name) => {
+    const start = workflow.indexOf(`  ${name}:`);
+    assert.notEqual(start, -1, `Phase 9 execution job ${name} is missing`);
+    const remainder = workflow.slice(start + 1);
+    const next = remainder.search(/\r?\n {2}[a-z][a-z0-9-]*:\s*$/mu);
+    return workflow.slice(start, next === -1 ? undefined : start + 1 + next);
+  };
+  const setupPins = [
+    "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
+    "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
+    "pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa",
+  ];
+  for (const [name, command] of [
+    ["phase9-offline", "node --test tools/phase9/validate.test.mjs tools/phase9/audit.test.mjs"],
+    ["phase9-matrix-e2e", "pnpm test:e2e"],
+    ["phase9-fault-injection", "node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm test:e2e:native"],
+  ]) {
+    const source = jobSource(name);
+    assert.match(source, /^ {4}runs-on: ubuntu-24\.04\s*$/mu, `${name} must use the fixed Ubuntu runner`);
+    assert.match(source, /^ {4}timeout-minutes: 30\s*$/mu, `${name} must use the fixed timeout`);
+    assert.doesNotMatch(source, /^\s+(?:env|inputs):/mu, `${name} must not accept dynamic data`);
+    assert.doesNotMatch(source, /secrets\.|\$\{\{/u, `${name} must not interpolate dynamic data`);
+    for (const pin of setupPins) {
+      assert.equal(source.split(pin).length - 1, 1, `${name} must use ${pin} exactly once`);
+    }
+    assert.match(source, /^ {10}fetch-depth: 0\s*$/mu, `${name} must fetch fixed checkout history`);
+    assert.match(source, /^ {10}persist-credentials: false\s*$/mu, `${name} checkout must not persist credentials`);
+    assert.match(source, /^ {10}node-version: 24\.18\.0\s*$/mu, `${name} must use the pinned Node version`);
+    assert.match(source, /^ {10}cache: pnpm\s*$/mu, `${name} must use the pnpm cache`);
+    assert.deepEqual(
+      [...source.matchAll(/^ {6}- run: (.+)\s*$/gmu)].map((match) => match[1]),
+      ["pnpm install --frozen-lockfile", command],
+      `${name} must install from the lockfile and run only its exact fixed command`,
+    );
+  }
 
   for (const [pin, expectedCount] of [
     ["actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803", 4],
