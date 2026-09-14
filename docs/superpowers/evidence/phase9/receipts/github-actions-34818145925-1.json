@@ -1,7 +1,14 @@
 {
   "candidateCommit": "86d861aefb76f80d013d2278766831e40b717379",
   "evidence": {
-    "artifacts": [],
+    "artifacts": [
+      {
+        "digest": "131c0b1670a31080ac80f532995a67660a9f6d0d79570a274f5c921f8cf05170",
+        "expired": false,
+        "id": "10336584316",
+        "name": "phase9-gate-audit-1"
+      }
+    ],
     "conclusion": "success",
     "event": "workflow_dispatch",
     "headSha": "86d861aefb76f80d013d2278766831e40b717379",
