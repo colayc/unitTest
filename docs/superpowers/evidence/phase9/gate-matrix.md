@@ -1,7 +1,7 @@
 # Phase 9 Gate Matrix
 
-- Candidate commit: `1e20a5ceee370e9823f9fe05f40980f893cd9ed3`
-- Recorded by commit: `46b71cc05e7907883cfa6140d1effbda718a7f1a`
+- Candidate commit: `1ac91525aba9f603c7f27e56f5c0fbc54f8fdfe9`
+- Recorded by commit: `1ac91525aba9f603c7f27e56f5c0fbc54f8fdfe9`
 - Evaluation mode: `candidate`
 - Catalog complete: `true`
 - Release ready: `false`
@@ -10,8 +10,8 @@
 
 | Status | Count |
 |---|---:|
-| PASS | 0 |
-| MISSING | 59 |
+| PASS | 5 |
+| MISSING | 54 |
 | FAILED | 0 |
 | DEFERRED | 3 |
 
@@ -68,11 +68,11 @@
 | P8-RUNTIME-PRODUCER-PROVENANCE | 8 | supply-chain | MISSING |  |  |  |
 | P8-SIGN-WINDOWS | 8 | signing | DEFERRED |  |  |  |
 | P8-WINDOWS-MSIX-PACKAGE | 8 | packaging | MISSING |  |  |  |
-| P9-MATRIX-CONTRACT | 9 | contract | MISSING |  |  |  |
-| P9-MATRIX-E2E | 9 | end-to-end | MISSING |  |  |  |
-| P9-MATRIX-FAULT-INJECTION | 9 | fault-injection | MISSING |  |  |  |
-| P9-MATRIX-INTEGRATION | 9 | integration | MISSING |  |  |  |
-| P9-MATRIX-UNIT | 9 | unit | MISSING |  |  |  |
+| P9-MATRIX-CONTRACT | 9 | contract | PASS | github-actions-34820089297-1 |  |  |
+| P9-MATRIX-E2E | 9 | end-to-end | PASS | github-actions-34820089297-1 |  |  |
+| P9-MATRIX-FAULT-INJECTION | 9 | fault-injection | PASS | github-actions-34820089297-1 |  |  |
+| P9-MATRIX-INTEGRATION | 9 | integration | PASS | github-actions-34820089297-1 |  |  |
+| P9-MATRIX-UNIT | 9 | unit | PASS | github-actions-34820089297-1 |  |  |
 | P9-PERF-CANCEL | 9 | performance | MISSING |  |  |  |
 | P9-PERF-DISCOVERY-10000 | 9 | performance | MISSING |  |  |  |
 | P9-PERF-FILTER | 9 | performance | MISSING |  |  |  |
