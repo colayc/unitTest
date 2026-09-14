@@ -97,14 +97,20 @@ test("Phase 9 audit workflow is read-only, fixed-coordinate, and fail-closed", a
   assert.doesNotMatch(workflow, /^\s*inputs:\s*$/mu);
   assert.doesNotMatch(workflow, /continue-on-error/u);
   assert.doesNotMatch(workflow, /\beval\b|\bsh\s+-c\b/u);
+  assert.match(workflow, /phase9-offline:/u);
+  assert.match(workflow, /node --test tools\/phase9\/validate\.test\.mjs tools\/phase9\/audit\.test\.mjs/u);
+  assert.match(workflow, /phase9-matrix-e2e:/u);
+  assert.match(workflow, /pnpm test:e2e/u);
+  assert.match(workflow, /phase9-fault-injection:/u);
+  assert.match(workflow, /pnpm test:e2e:native/u);
 
-  for (const pin of [
-    "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
-    "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
-    "pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa",
-    "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+  for (const [pin, expectedCount] of [
+    ["actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803", 4],
+    ["actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38", 4],
+    ["pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa", 4],
+    ["actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", 1],
   ]) {
-    assert.equal(workflow.split(pin).length - 1, 1, `${pin} must appear exactly once`);
+    assert.equal(workflow.split(pin).length - 1, expectedCount, `${pin} must appear exactly ${expectedCount} times`);
   }
   assert.match(workflow, /fetch-depth: 0/u);
   assert.match(workflow, /persist-credentials: false/u);
