@@ -1107,7 +1107,7 @@ test("historical mode preserves receipt-backed rows after later product changes"
   assert.equal("reason" in matrix.gates[0], false);
 });
 
-test("checked-in historical evidence keeps deferred and unproven gates closed", async () => {
+test("checked-in candidate evidence keeps deferred and unproven gates closed", async () => {
   const evidenceRoot = join(repositoryRoot, "docs", "superpowers", "evidence", "phase9");
   const inputs = await loadPhase9Inputs({
     registryPath: gateRegistryPath,
@@ -1120,8 +1120,8 @@ test("checked-in historical evidence keeps deferred and unproven gates closed", 
   });
   const gatesById = new Map(matrix.gates.map((gate) => [gate.id, gate]));
 
-  assert.equal(inputs.baseline.evaluationMode, "historical");
-  assert.equal(matrix.evaluationMode, "historical");
+  assert.equal(inputs.baseline.evaluationMode, "candidate");
+  assert.equal(matrix.evaluationMode, "candidate");
   assert.equal(matrix.releaseReady, false);
   assert.equal(gatesById.get("P8-SIGN-WINDOWS")?.status, "DEFERRED");
   assert.equal(gatesById.get("P9-PERF-MEMORY")?.status, "MISSING");
