@@ -1,0 +1,43 @@
+{
+  "candidateCommit": "e25f9c180a702901319bacded043be36a87bec72",
+  "evidence": {
+    "artifacts": [],
+    "conclusion": "success",
+    "event": "workflow_dispatch",
+    "headSha": "e25f9c180a702901319bacded043be36a87bec72",
+    "jobs": [
+      {
+        "conclusion": "success",
+        "name": "phase9-fault-injection"
+      },
+      {
+        "conclusion": "success",
+        "name": "phase9-matrix-e2e"
+      },
+      {
+        "conclusion": "success",
+        "name": "phase9-offline"
+      },
+      {
+        "conclusion": "success",
+        "name": "phase9-upstream-codeoss"
+      }
+    ],
+    "kind": "github-actions",
+    "repository": "colayc/unitTest",
+    "runAttempt": 1,
+    "runId": "34830228205",
+    "workflowPath": ".github/workflows/phase9-gates.yml"
+  },
+  "gateIds": [
+    "P9-MATRIX-CONTRACT",
+    "P9-MATRIX-E2E",
+    "P9-MATRIX-FAULT-INJECTION",
+    "P9-MATRIX-INTEGRATION",
+    "P9-MATRIX-UNIT",
+    "P9-UPSTREAM-CODEOSS"
+  ],
+  "observedAt": "2026-09-14T09:53:57Z",
+  "receiptId": "github-actions-34830228205-1",
+  "schemaVersion": 1
+}
