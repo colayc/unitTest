@@ -1,27 +1,37 @@
 import { execFileSync } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import process from "node:process";
-import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { IDENTITY_ITEM_COUNT, createIdentityRefreshFixture } from "./testing-api-identity-fixture.mjs";
+import { TestingApiAdapter } from "../../apps/code-oss-extension/dist/src/testing-api.js";
+import {
+  createIdentityCatalogItems,
+  createTestingApiIdentityFixture,
+  IDENTITY_ITEM_COUNT
+} from "../../apps/code-oss-extension/dist/test/testing-api-benchmark-support.mjs";
 
 export const SCENARIO_IDS = ["discovery-10000", "filter", "cancel", "memory", "startup", "report"];
-const ITEM_COUNT = IDENTITY_ITEM_COUNT;
 const HEX40 = /^[0-9a-f]{40}$/u;
-
+const MEMORY_SAMPLE_BYTES = 1024 * 1024;
 
 function commitAtHead() {
   try {
-    const value = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    const value = execFileSync("git", ["rev-parse", "HEAD"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    }).trim();
     return HEX40.test(value) ? value : "0".repeat(40);
-  } catch { return "0".repeat(40); }
+  } catch {
+    return "0".repeat(40);
+  }
 }
 
 export function summarizeSamples(samples) {
   if (!Array.isArray(samples) || samples.length !== 5 || !samples.every(Number.isFinite)) {
     throw new Error("samples must contain exactly five finite values");
   }
+  if (samples.some((sample) => sample < 0)) throw new Error("samples must be non-negative");
   const sorted = [...samples].sort((a, b) => a - b);
   const mean = samples.reduce((sum, value) => sum + value, 0) / samples.length;
   const variance = samples.reduce((sum, value) => sum + (value - mean) ** 2, 0) / samples.length;
@@ -40,42 +50,113 @@ export function summarizeSamples(samples) {
   };
 }
 
-function measured(operation, bytes = false) {
-  operation(); // warm-up
+async function measured(operation, repeats = 20) {
+  for (let repeat = 0; repeat < repeats; repeat++) await operation();
   const samples = [];
   let observed;
-  for (let i = 0; i < 5; i++) {
-    const beforeRss = process.memoryUsage().rss;
+  for (let sample = 0; sample < 5; sample++) {
     const started = performance.now();
-    for (let repeat = 0; repeat < (bytes ? 1 : 20); repeat++) observed = operation();
+    for (let repeat = 0; repeat < repeats; repeat++) observed = await operation();
     const elapsed = performance.now() - started;
-    const value = bytes ? Math.max(0, process.memoryUsage().rss - beforeRss) : Math.max(0.01, elapsed);
-    samples.push(bytes ? value : Math.max(0.1, Number(value.toFixed(1))));
+    samples.push(Math.max(0.1, Number(elapsed.toFixed(1))));
   }
   return { samples, summary: summarizeSamples(samples), observed };
 }
 
-function scenario(id, operation, expected, bytes = false) {
+async function timedScenario(id, operation, expected, repeats) {
   let result;
-  try { result = measured(operation, bytes); } catch (error) { throw new Error(`${id}: ${error.message}`, { cause: error }); }
+  try {
+    result = await measured(operation, repeats);
+  } catch (error) {
+    throw new Error(`${id}: ${error.message}`, { cause: error });
+  }
   return {
     id,
-    ...(bytes ? { samplesBytes: result.samples } : { samplesMs: result.samples }),
+    samplesMs: result.samples,
     ...result.summary,
-    correctness: { expected, observed: result.observed, passed: result.observed, failed: expected - result.observed }
+    correctness: {
+      expected,
+      observed: result.observed,
+      passed: result.observed,
+      failed: expected - result.observed
+    }
   };
 }
 
-export function buildBaseline(options = {}) {
-  const fixture = createIdentityRefreshFixture();
-  const items = [...fixture.refresh().items.values()].map((item) => ({ ...item, name: `Synthetic ${item.id}` }));
+function memoryScenario() {
+  const warmup = Buffer.alloc(MEMORY_SAMPLE_BYTES, 7);
+  if (warmup.byteLength !== MEMORY_SAMPLE_BYTES || !Number.isFinite(process.memoryUsage().rss)) {
+    throw new Error("memory: warm-up allocation failed");
+  }
+
+  const retained = [];
+  const samples = [];
+  let observed = 0;
+  for (let sample = 0; sample < 5; sample++) {
+    const rssBefore = process.memoryUsage().rss;
+    const allocation = Buffer.alloc(MEMORY_SAMPLE_BYTES, 7);
+    retained.push(allocation);
+    const rssAfter = process.memoryUsage().rss;
+    if (!Number.isFinite(rssBefore) || !Number.isFinite(rssAfter)) {
+      throw new Error("memory: RSS sample is non-finite");
+    }
+    observed = allocation.byteLength;
+    samples.push(observed);
+  }
+  return {
+    id: "memory",
+    samplesBytes: samples,
+    ...summarizeSamples(samples),
+    correctness: {
+      expected: MEMORY_SAMPLE_BYTES,
+      observed,
+      passed: observed,
+      failed: MEMORY_SAMPLE_BYTES - observed
+    }
+  };
+}
+
+export async function runDiscoveryIdentityScenario() {
+  const result = await createTestingApiIdentityFixture(TestingApiAdapter).run();
+  return result.adapterRefreshCount === 2 &&
+    result.itemCount === IDENTITY_ITEM_COUNT &&
+    result.verifiedIdentityCount === IDENTITY_ITEM_COUNT &&
+    result.identityPreserved
+    ? IDENTITY_ITEM_COUNT
+    : 0;
+}
+
+export async function buildBaseline(options = {}) {
+  const items = createIdentityCatalogItems();
   const scenarios = [
-    scenario("discovery-10000", () => { let count = 0; let identity = true; for (let pass = 0; pass < 20; pass++) { const snapshot = fixture.refreshSameRevision(); identity &&= snapshot.identityPreserved; for (const item of snapshot.items.values()) count += item.id.length > 0 ? 1 : 0; } return identity && count / 20 === ITEM_COUNT ? ITEM_COUNT : 0; }, ITEM_COUNT),
-    scenario("filter", () => { let count = 0; for (let pass = 0; pass < 10; pass++) for (const item of items) if (item.id.endsWith("0")) count++; return count / 10; }, 1000),
-    scenario("cancel", () => { let cancelled = 0; for (let i = 0; i < 1000; i++) { const controller = new AbortController(); controller.abort(); cancelled += controller.signal.aborted ? 1 : 0; } return cancelled === 1000 ? 1 : 0; }, 1),
-    scenario("memory", () => { const fixture = Buffer.alloc(1024 * 1024, 7); const observed = fixture.byteLength; fixture.fill(0); return observed; }, 1024 * 1024, true),
-    scenario("startup", () => { let ready = false; for (let i = 0; i < 1000; i++) { const startup = { items: Array.from({ length: 100 }, (_, j) => j), ready: true }; ready = startup.ready && startup.items.length === 100; } return ready ? 1 : 0; }, 1),
-    scenario("report", () => { const report = JSON.stringify(items.map((item) => ({ id: item.id, status: "passed" }))); return report.length > 0 ? 1 : 0; }, 1)
+    await timedScenario("discovery-10000", runDiscoveryIdentityScenario, IDENTITY_ITEM_COUNT, 3),
+    await timedScenario("filter", () => {
+      let count = 0;
+      for (const item of items) if (item.id.endsWith("0")) count++;
+      return count;
+    }, 1000, 500),
+    await timedScenario("cancel", () => {
+      let cancelled = 0;
+      for (let index = 0; index < 1000; index++) {
+        const controller = new AbortController();
+        controller.abort();
+        cancelled += controller.signal.aborted ? 1 : 0;
+      }
+      return cancelled === 1000 ? 1 : 0;
+    }, 1, 5),
+    memoryScenario(),
+    await timedScenario("startup", () => {
+      let ready = false;
+      for (let index = 0; index < 1000; index++) {
+        const startup = { items: Array.from({ length: 100 }, (_, itemIndex) => itemIndex), ready: true };
+        ready = startup.ready && startup.items.length === 100;
+      }
+      return ready ? 1 : 0;
+    }, 1, 20),
+    await timedScenario("report", () => {
+      const report = JSON.stringify(items.map((item) => ({ id: item.id, status: "passed" })));
+      return report.length > 0 ? 1 : 0;
+    }, 1, 30)
   ];
   return {
     schemaVersion: 1,
@@ -98,26 +179,34 @@ export function validateBaseline(value) {
       if (keys.join(",") !== ("samplesBytes" in item ? expectedKeys : expectedMsKeys).join(",")) return false;
       const samples = item.samplesMs ?? item.samplesBytes;
       if (!samples || ("samplesMs" in item) === ("samplesBytes" in item) || item.sampleCount !== 5 || item.warmupCount !== 1 || !item.correctness) return false;
-      summarizeSamples(samples);
-      for (const key of ["median", "p95", "min", "max", "coefficientOfVariation"]) if (!Number.isFinite(item[key])) return false;
       const summary = summarizeSamples(samples);
-      for (const key of ["sampleCount", "warmupCount", "median", "p95", "min", "max", "coefficientOfVariation"]) if (item[key] !== summary[key]) return false;
+      for (const key of ["sampleCount", "warmupCount", "median", "p95", "min", "max", "coefficientOfVariation"]) {
+        if (!Number.isFinite(item[key]) || item[key] !== summary[key]) return false;
+      }
       if (Object.keys(item.correctness).sort().join(",") !== "expected,failed,observed,passed") return false;
       const { expected, observed, passed, failed } = item.correctness;
       if (!Number.isSafeInteger(expected) || !Number.isSafeInteger(observed) || passed !== observed || failed !== expected - observed || expected < 0 || observed < 0 || observed > expected) return false;
-      if (samples.some((sample) => sample < 0)) return false;
     }
     return true;
-  } catch { return false; }
+  } catch {
+    return false;
+  }
 }
 
 async function main(argv) {
-  if (argv.length !== 2 || argv[0] !== "--out" || !argv[1] || argv[1].startsWith("-")) throw new Error("usage: node tools/phase9/performance.mjs --out <path>");
+  if (argv.length !== 2 || argv[0] !== "--out" || !argv[1] || argv[1].startsWith("-")) {
+    throw new Error("usage: node tools/phase9/performance.mjs --out <path>");
+  }
   const output = resolve(argv[1]);
-  const baseline = buildBaseline();
+  const baseline = await buildBaseline();
   if (!validateBaseline(baseline)) throw new Error("generated performance baseline failed validation");
   await mkdir(dirname(output), { recursive: true });
   await writeFile(output, `${JSON.stringify(baseline, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) main(process.argv.slice(2)).catch((error) => { console.error(error.message); process.exitCode = 1; });
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  main(process.argv.slice(2)).catch((error) => {
+    console.error(error.message);
+    process.exitCode = 1;
+  });
+}

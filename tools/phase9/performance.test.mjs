@@ -7,25 +7,28 @@ import test from "node:test";
 import {
   SCENARIO_IDS,
   buildBaseline,
+  runDiscoveryIdentityScenario,
   summarizeSamples,
   validateBaseline
 } from "./performance.mjs";
-import { createIdentityRefreshFixture, IDENTITY_ITEM_COUNT } from "./testing-api-identity-fixture.mjs";
+import { IDENTITY_ITEM_COUNT } from "../../apps/code-oss-extension/dist/test/testing-api-benchmark-support.mjs";
 
-test("shared Testing API fixture preserves identity across same-revision refresh", () => {
-  const fixture = createIdentityRefreshFixture();
-  assert.equal(fixture.refresh().items.size, IDENTITY_ITEM_COUNT);
-  assert.equal(fixture.refreshSameRevision().identityPreserved, true);
+const CANDIDATE_COMMIT = "0123456789abcdef0123456789abcdef01234567";
+let baselinePromise;
+const baseline = () => baselinePromise ??= buildBaseline({ candidateCommit: CANDIDATE_COMMIT });
+
+test("discovery scenario executes the shared TestingApiAdapter identity fixture", async () => {
+  assert.equal(await runDiscoveryIdentityScenario(), IDENTITY_ITEM_COUNT);
 });
 
-test("performance baseline has the exact closed schema and six bounded scenarios", () => {
-  const baseline = buildBaseline({ candidateCommit: "0123456789abcdef0123456789abcdef01234567" });
-  assert.deepEqual(Object.keys(baseline).sort(), ["candidateCommit", "hardware", "runtime", "scenarios", "schemaVersion"]);
-  assert.deepEqual(baseline.scenarios.map(({ id }) => id), SCENARIO_IDS);
-  assert.equal(baseline.schemaVersion, 1);
-  assert.match(baseline.candidateCommit, /^[0-9a-f]{40}$/);
-  assert.equal(validateBaseline(baseline), true);
-  for (const scenario of baseline.scenarios) {
+test("performance baseline has the exact closed schema and six bounded scenarios", async () => {
+  const value = await baseline();
+  assert.deepEqual(Object.keys(value).sort(), ["candidateCommit", "hardware", "runtime", "scenarios", "schemaVersion"]);
+  assert.deepEqual(value.scenarios.map(({ id }) => id), SCENARIO_IDS);
+  assert.equal(value.schemaVersion, 1);
+  assert.match(value.candidateCommit, /^[0-9a-f]{40}$/);
+  assert.equal(validateBaseline(value), true);
+  for (const scenario of value.scenarios) {
     assert.equal(scenario.sampleCount, 5);
     assert.equal(scenario.warmupCount, 1);
     const samples = scenario.samplesMs ?? scenario.samplesBytes;
@@ -37,6 +40,10 @@ test("performance baseline has the exact closed schema and six bounded scenarios
     assert.ok(scenario.coefficientOfVariation <= 0.20);
     assert.ok(scenario.correctness && scenario.correctness.passed > 0);
   }
+  assert.deepEqual(
+    value.scenarios.find(({ id }) => id === "memory")?.samplesBytes,
+    Array(5).fill(1024 * 1024)
+  );
 });
 
 test("summarization rejects unstable and non-finite samples", () => {
@@ -44,8 +51,8 @@ test("summarization rejects unstable and non-finite samples", () => {
   assert.throws(() => summarizeSamples([1, 2, Number.NaN, 4, 5]), /finite/u);
 });
 
-test("baseline redacts sensitive strings and absolute paths", () => {
-  const serialized = JSON.stringify(buildBaseline({ candidateCommit: "0123456789abcdef0123456789abcdef01234567" }));
+test("baseline redacts sensitive strings and absolute paths", async () => {
+  const serialized = JSON.stringify(await baseline());
   assert.doesNotMatch(serialized, /C:\\|\/home\/|token|secret|password|Bearer/iu);
   assert.doesNotMatch(serialized, /[A-Za-z]:\\/u);
   assert.ok(serialized.length < 250_000);
@@ -63,9 +70,9 @@ test("CLI rejects malformed arguments and writes JSON for the fixed interface", 
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
-test("validator rejects mutated summaries, correctness, and scenario fields", () => {
-  const baseline = buildBaseline({ candidateCommit: "0123456789abcdef0123456789abcdef01234567" });
-  const mutate = (fn) => { const copy = structuredClone(baseline); fn(copy); return copy; };
+test("validator rejects mutated summaries, correctness, and scenario fields", async () => {
+  const value = await baseline();
+  const mutate = (fn) => { const copy = structuredClone(value); fn(copy); return copy; };
   assert.equal(validateBaseline(mutate((v) => { v.extra = true; })), false);
   assert.equal(validateBaseline(mutate((v) => { v.scenarios[0].median++; })), false);
   assert.equal(validateBaseline(mutate((v) => { v.scenarios[0].samplesBytes = [1, 1, 1, 1, 1]; })), false);
