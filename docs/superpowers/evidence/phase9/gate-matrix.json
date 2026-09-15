@@ -7,7 +7,7 @@
     "missing": 46,
     "pass": 0
   },
-  "currentCommit": "ff3e1130b869b36e443afbf1b9e82ba05ff1077f",
+  "currentCommit": "9186780eebb6ca8986d5bf95a1971c10b5169ed8",
   "evaluationMode": "candidate",
   "gates": [
     {
@@ -188,10 +188,12 @@
       "status": "DEFERRED"
     },
     {
+      "artifactAvailability": "missing",
       "id": "P8-INSTALL-LIFECYCLE-LINUX",
       "status": "MISSING"
     },
     {
+      "artifactAvailability": "missing",
       "id": "P8-INSTALL-LIFECYCLE-WINDOWS",
       "status": "MISSING"
     },
@@ -200,18 +202,22 @@
       "status": "DEFERRED"
     },
     {
+      "artifactAvailability": "missing",
       "id": "P8-LICENSE-AUDIT",
       "status": "MISSING"
     },
     {
+      "artifactAvailability": "missing",
       "id": "P8-LINUX-APPIMAGE-PACKAGE",
       "status": "MISSING"
     },
     {
+      "artifactAvailability": "missing",
       "id": "P8-QUALIFICATION-UNSIGNED",
       "status": "MISSING"
     },
     {
+      "artifactAvailability": "missing",
       "id": "P8-RUNTIME-PRODUCER-PROVENANCE",
       "status": "MISSING"
     },
@@ -220,6 +226,7 @@
       "status": "DEFERRED"
     },
     {
+      "artifactAvailability": "missing",
       "id": "P8-WINDOWS-MSIX-PACKAGE",
       "status": "MISSING"
     },
@@ -303,7 +310,7 @@
       "status": "FAILED"
     }
   ],
-  "recordedByCommit": "ff3e1130b869b36e443afbf1b9e82ba05ff1077f",
+  "recordedByCommit": "9186780eebb6ca8986d5bf95a1971c10b5169ed8",
   "releaseReady": false,
   "schemaVersion": 1
 }

@@ -1,7 +1,7 @@
 # Phase 9 Gate Matrix
 
 - Candidate commit: `b84c2281ca4f96874dbf27f686df375d7082b305`
-- Recorded by commit: `ff3e1130b869b36e443afbf1b9e82ba05ff1077f`
+- Recorded by commit: `9186780eebb6ca8986d5bf95a1971c10b5169ed8`
 - Evaluation mode: `candidate`
 - Catalog complete: `true`
 - Release ready: `false`
@@ -59,15 +59,15 @@
 | P7-MOCK-CONFIGURATION-UX | 7 | user-interface | MISSING |  | missing |  |
 | P7-WINDOWS-WFP-OFFLINE | 7 | offline | MISSING |  | missing |  |
 | P8-DOCS-CLOSEOUT | 8 | documentation | DEFERRED |  |  |  |
-| P8-INSTALL-LIFECYCLE-LINUX | 8 | install-lifecycle | MISSING |  |  |  |
-| P8-INSTALL-LIFECYCLE-WINDOWS | 8 | install-lifecycle | MISSING |  |  |  |
+| P8-INSTALL-LIFECYCLE-LINUX | 8 | install-lifecycle | MISSING |  | missing |  |
+| P8-INSTALL-LIFECYCLE-WINDOWS | 8 | install-lifecycle | MISSING |  | missing |  |
 | P8-LEGAL-THIRD-PARTY | 8 | legal | DEFERRED |  |  |  |
-| P8-LICENSE-AUDIT | 8 | legal | MISSING |  |  |  |
-| P8-LINUX-APPIMAGE-PACKAGE | 8 | packaging | MISSING |  |  |  |
-| P8-QUALIFICATION-UNSIGNED | 8 | qualification | MISSING |  |  |  |
-| P8-RUNTIME-PRODUCER-PROVENANCE | 8 | supply-chain | MISSING |  |  |  |
+| P8-LICENSE-AUDIT | 8 | legal | MISSING |  | missing |  |
+| P8-LINUX-APPIMAGE-PACKAGE | 8 | packaging | MISSING |  | missing |  |
+| P8-QUALIFICATION-UNSIGNED | 8 | qualification | MISSING |  | missing |  |
+| P8-RUNTIME-PRODUCER-PROVENANCE | 8 | supply-chain | MISSING |  | missing |  |
 | P8-SIGN-WINDOWS | 8 | signing | DEFERRED |  |  |  |
-| P8-WINDOWS-MSIX-PACKAGE | 8 | packaging | MISSING |  |  |  |
+| P8-WINDOWS-MSIX-PACKAGE | 8 | packaging | MISSING |  | missing |  |
 | P9-MATRIX-CONTRACT | 9 | contract | FAILED | github-actions-34928523525-performance |  | candidate-descendant-changed-tested-content |
 | P9-MATRIX-E2E | 9 | end-to-end | FAILED | github-actions-34928523525-performance |  | candidate-descendant-changed-tested-content |
 | P9-MATRIX-FAULT-INJECTION | 9 | fault-injection | FAILED | github-actions-34928523525-performance |  | candidate-descendant-changed-tested-content |
