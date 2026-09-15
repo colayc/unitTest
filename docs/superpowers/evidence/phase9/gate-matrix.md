@@ -1,7 +1,7 @@
 # Phase 9 Gate Matrix
 
-- Candidate commit: `a3e8a844479983a4ba1f803babd4001ead0422c6`
-- Recorded by commit: `a3e8a844479983a4ba1f803babd4001ead0422c6`
+- Candidate commit: `19a9be9a8e45d957f26b7b7d5bd56d63dc354778`
+- Recorded by commit: `e999eddb84c34220f61f2bca82b0b76570b1c41d`
 - Evaluation mode: `candidate`
 - Catalog complete: `true`
 - Release ready: `false`
@@ -68,16 +68,16 @@
 | P8-RUNTIME-PRODUCER-PROVENANCE | 8 | supply-chain | MISSING |  |  |  |
 | P8-SIGN-WINDOWS | 8 | signing | DEFERRED |  |  |  |
 | P8-WINDOWS-MSIX-PACKAGE | 8 | packaging | MISSING |  |  |  |
-| P9-MATRIX-CONTRACT | 9 | contract | PASS | github-actions-34924279448-performance |  |  |
-| P9-MATRIX-E2E | 9 | end-to-end | PASS | github-actions-34924279448-performance |  |  |
-| P9-MATRIX-FAULT-INJECTION | 9 | fault-injection | PASS | github-actions-34924279448-performance |  |  |
-| P9-MATRIX-INTEGRATION | 9 | integration | PASS | github-actions-34924279448-performance |  |  |
-| P9-MATRIX-UNIT | 9 | unit | PASS | github-actions-34924279448-performance |  |  |
-| P9-PERF-CANCEL | 9 | performance | PASS | github-actions-34924279448-performance |  |  |
-| P9-PERF-DISCOVERY-10000 | 9 | performance | PASS | github-actions-34924279448-performance |  |  |
-| P9-PERF-FILTER | 9 | performance | PASS | github-actions-34924279448-performance |  |  |
-| P9-PERF-HARDWARE-BASELINE | 9 | performance | PASS | github-actions-34924279448-performance | available |  |
-| P9-PERF-MEMORY | 9 | performance | PASS | github-actions-34924279448-performance |  |  |
-| P9-PERF-REPORT | 9 | performance | PASS | github-actions-34924279448-performance |  |  |
-| P9-PERF-STARTUP | 9 | performance | PASS | github-actions-34924279448-performance |  |  |
-| P9-UPSTREAM-CODEOSS | 9 | upstream | PASS | github-actions-34924279448-performance |  |  |
+| P9-MATRIX-CONTRACT | 9 | contract | PASS | github-actions-34927686633-performance |  |  |
+| P9-MATRIX-E2E | 9 | end-to-end | PASS | github-actions-34927686633-performance |  |  |
+| P9-MATRIX-FAULT-INJECTION | 9 | fault-injection | PASS | github-actions-34927686633-performance |  |  |
+| P9-MATRIX-INTEGRATION | 9 | integration | PASS | github-actions-34927686633-performance |  |  |
+| P9-MATRIX-UNIT | 9 | unit | PASS | github-actions-34927686633-performance |  |  |
+| P9-PERF-CANCEL | 9 | performance | PASS | github-actions-34927686633-performance |  |  |
+| P9-PERF-DISCOVERY-10000 | 9 | performance | PASS | github-actions-34927686633-performance |  |  |
+| P9-PERF-FILTER | 9 | performance | PASS | github-actions-34927686633-performance |  |  |
+| P9-PERF-HARDWARE-BASELINE | 9 | performance | PASS | github-actions-34927686633-performance | available |  |
+| P9-PERF-MEMORY | 9 | performance | PASS | github-actions-34927686633-performance |  |  |
+| P9-PERF-REPORT | 9 | performance | PASS | github-actions-34927686633-performance |  |  |
+| P9-PERF-STARTUP | 9 | performance | PASS | github-actions-34927686633-performance |  |  |
+| P9-UPSTREAM-CODEOSS | 9 | upstream | PASS | github-actions-34927686633-performance |  |  |

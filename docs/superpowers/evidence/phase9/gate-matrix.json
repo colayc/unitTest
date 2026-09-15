@@ -1,5 +1,5 @@
 {
-  "candidateCommit": "a3e8a844479983a4ba1f803babd4001ead0422c6",
+  "candidateCommit": "19a9be9a8e45d957f26b7b7d5bd56d63dc354778",
   "catalogComplete": true,
   "counts": {
     "deferred": 3,
@@ -7,7 +7,7 @@
     "missing": 46,
     "pass": 13
   },
-  "currentCommit": "a3e8a844479983a4ba1f803babd4001ead0422c6",
+  "currentCommit": "e999eddb84c34220f61f2bca82b0b76570b1c41d",
   "evaluationMode": "candidate",
   "gates": [
     {
@@ -214,72 +214,72 @@
     },
     {
       "id": "P9-MATRIX-CONTRACT",
-      "receiptId": "github-actions-34924279448-performance",
+      "receiptId": "github-actions-34927686633-performance",
       "status": "PASS"
     },
     {
       "id": "P9-MATRIX-E2E",
-      "receiptId": "github-actions-34924279448-performance",
+      "receiptId": "github-actions-34927686633-performance",
       "status": "PASS"
     },
     {
       "id": "P9-MATRIX-FAULT-INJECTION",
-      "receiptId": "github-actions-34924279448-performance",
+      "receiptId": "github-actions-34927686633-performance",
       "status": "PASS"
     },
     {
       "id": "P9-MATRIX-INTEGRATION",
-      "receiptId": "github-actions-34924279448-performance",
+      "receiptId": "github-actions-34927686633-performance",
       "status": "PASS"
     },
     {
       "id": "P9-MATRIX-UNIT",
-      "receiptId": "github-actions-34924279448-performance",
+      "receiptId": "github-actions-34927686633-performance",
       "status": "PASS"
     },
     {
       "id": "P9-PERF-CANCEL",
-      "receiptId": "github-actions-34924279448-performance",
+      "receiptId": "github-actions-34927686633-performance",
       "status": "PASS"
     },
     {
       "id": "P9-PERF-DISCOVERY-10000",
-      "receiptId": "github-actions-34924279448-performance",
+      "receiptId": "github-actions-34927686633-performance",
       "status": "PASS"
     },
     {
       "id": "P9-PERF-FILTER",
-      "receiptId": "github-actions-34924279448-performance",
+      "receiptId": "github-actions-34927686633-performance",
       "status": "PASS"
     },
     {
       "artifactAvailability": "available",
       "id": "P9-PERF-HARDWARE-BASELINE",
-      "receiptId": "github-actions-34924279448-performance",
+      "receiptId": "github-actions-34927686633-performance",
       "status": "PASS"
     },
     {
       "id": "P9-PERF-MEMORY",
-      "receiptId": "github-actions-34924279448-performance",
+      "receiptId": "github-actions-34927686633-performance",
       "status": "PASS"
     },
     {
       "id": "P9-PERF-REPORT",
-      "receiptId": "github-actions-34924279448-performance",
+      "receiptId": "github-actions-34927686633-performance",
       "status": "PASS"
     },
     {
       "id": "P9-PERF-STARTUP",
-      "receiptId": "github-actions-34924279448-performance",
+      "receiptId": "github-actions-34927686633-performance",
       "status": "PASS"
     },
     {
       "id": "P9-UPSTREAM-CODEOSS",
-      "receiptId": "github-actions-34924279448-performance",
+      "receiptId": "github-actions-34927686633-performance",
       "status": "PASS"
     }
   ],
-  "recordedByCommit": "a3e8a844479983a4ba1f803babd4001ead0422c6",
+  "recordedByCommit": "e999eddb84c34220f61f2bca82b0b76570b1c41d",
   "releaseReady": false,
   "schemaVersion": 1
 }

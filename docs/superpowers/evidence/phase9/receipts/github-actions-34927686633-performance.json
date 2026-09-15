@@ -1,0 +1,61 @@
+{
+  "candidateCommit": "19a9be9a8e45d957f26b7b7d5bd56d63dc354778",
+  "evidence": {
+    "artifacts": [
+      {
+        "digest": "9b2ce1f7806f42df08c4fbbf920238e5ae7451955f0b0e6ef0841f96125dc187",
+        "expired": false,
+        "id": "10380705708",
+        "name": "phase9-performance-baseline"
+      }
+    ],
+    "conclusion": "success",
+    "event": "workflow_dispatch",
+    "headSha": "19a9be9a8e45d957f26b7b7d5bd56d63dc354778",
+    "jobs": [
+      {
+        "conclusion": "success",
+        "name": "phase9-fault-injection"
+      },
+      {
+        "conclusion": "success",
+        "name": "phase9-matrix-e2e"
+      },
+      {
+        "conclusion": "success",
+        "name": "phase9-offline"
+      },
+      {
+        "conclusion": "success",
+        "name": "phase9-performance"
+      },
+      {
+        "conclusion": "success",
+        "name": "phase9-upstream-codeoss"
+      }
+    ],
+    "kind": "github-actions",
+    "repository": "colayc/unitTest",
+    "runAttempt": 1,
+    "runId": "34927686633",
+    "workflowPath": ".github/workflows/phase9-gates.yml"
+  },
+  "gateIds": [
+    "P9-MATRIX-CONTRACT",
+    "P9-MATRIX-E2E",
+    "P9-MATRIX-FAULT-INJECTION",
+    "P9-MATRIX-INTEGRATION",
+    "P9-MATRIX-UNIT",
+    "P9-PERF-CANCEL",
+    "P9-PERF-DISCOVERY-10000",
+    "P9-PERF-FILTER",
+    "P9-PERF-HARDWARE-BASELINE",
+    "P9-PERF-MEMORY",
+    "P9-PERF-REPORT",
+    "P9-PERF-STARTUP",
+    "P9-UPSTREAM-CODEOSS"
+  ],
+  "observedAt": "2026-09-15T04:09:40Z",
+  "receiptId": "github-actions-34927686633-performance",
+  "schemaVersion": 1
+}
