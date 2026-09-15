@@ -24,6 +24,21 @@ test("required native toolchain parsing is closed and deterministic", () => {
   assert.throws(() => parseRequiredToolchains("gcc,cuda"), /invalid required/);
 });
 
+test("preset compiler validation accepts another installed version of the requested family", () => {
+  const events = [{
+    event: "task.output",
+    payload: { text: "-- The CXX compiler identification is MSVC 19.43.34810.0\n" },
+  }];
+
+  assert.doesNotThrow(() =>
+    __testing.assertPresetCompiler(
+      events as never,
+      "msvc",
+      "MSVC",
+    )
+  );
+});
+
 test("prepared bundle verification fails for a missing bundle before any Service launch", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "native-bundle-missing-"));
   t.after(() => rm(root, { recursive: true, force: true }));

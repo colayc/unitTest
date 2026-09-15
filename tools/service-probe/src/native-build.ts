@@ -703,7 +703,6 @@ async function runPresetBuildScenario(
       events,
       context.family,
       expectedCompiler,
-      context.toolchain.version,
     );
   } finally {
     await fixture?.dispose();
@@ -833,18 +832,18 @@ function assertPresetCompiler(
   events: readonly ProtocolTaskEvent[],
   family: RequiredToolchainFamily,
   expectedCompiler: string,
-  expectedVersion: string,
 ): void {
   const output = events
     .filter((event) => event.event === "task.output")
     .map((event) => String((event.payload as { text?: unknown }).text ?? ""))
     .join("");
-  if (
-    !output.includes(`CXX compiler identification is ${expectedCompiler}`) ||
-    !output.includes(expectedVersion)
-  ) {
+  const identification = new RegExp(
+    `CXX compiler identification is ${expectedCompiler} [0-9]+(?:\\.[0-9]+)+`,
+    "u",
+  );
+  if (!identification.test(output)) {
     throw new Error(
-      `${family} preset build did not identify ${expectedCompiler} ${expectedVersion}; output=${
+      `${family} preset build did not identify ${expectedCompiler} with a concrete version; output=${
         scrubNativeErrorText(output)
       }`,
     );
@@ -1649,6 +1648,7 @@ function withinRoot(root: string, candidate: string): boolean {
 }
 
 export const __testing = Object.freeze({
+  assertPresetCompiler,
   runNativeMatrixWithDependencies,
   selectGeneratedProfile,
   startFamilyBuildAtCheckpoint,
