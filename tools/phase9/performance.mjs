@@ -13,7 +13,7 @@ import {
 
 export const SCENARIO_IDS = ["discovery-10000", "filter", "cancel", "memory", "startup", "report"];
 const HEX40 = /^[0-9a-f]{40}$/u;
-const MEMORY_SAMPLE_BYTES = 1024 * 1024;
+const MEMORY_ALLOCATION_BYTES = 1024 * 1024;
 
 function commitAtHead() {
   try {
@@ -84,8 +84,8 @@ async function timedScenario(id, operation, expected, repeats) {
 }
 
 function memoryScenario() {
-  const warmup = Buffer.alloc(MEMORY_SAMPLE_BYTES, 7);
-  if (warmup.byteLength !== MEMORY_SAMPLE_BYTES || !Number.isFinite(process.memoryUsage().rss)) {
+  const warmup = Buffer.alloc(MEMORY_ALLOCATION_BYTES, 7);
+  if (warmup.byteLength !== MEMORY_ALLOCATION_BYTES || !Number.isFinite(process.memoryUsage().rss)) {
     throw new Error("memory: warm-up allocation failed");
   }
 
@@ -94,24 +94,27 @@ function memoryScenario() {
   let observed = 0;
   for (let sample = 0; sample < 5; sample++) {
     const rssBefore = process.memoryUsage().rss;
-    const allocation = Buffer.alloc(MEMORY_SAMPLE_BYTES, 7);
+    const allocation = Buffer.alloc(MEMORY_ALLOCATION_BYTES, 7);
     retained.push(allocation);
     const rssAfter = process.memoryUsage().rss;
     if (!Number.isFinite(rssBefore) || !Number.isFinite(rssAfter)) {
       throw new Error("memory: RSS sample is non-finite");
     }
     observed = allocation.byteLength;
-    samples.push(observed);
+    // Measure absolute post-operation process RSS, not allocated bytes or a
+    // noisy small delta. Keep all five buffers resident for this bounded run.
+    // Raw RSS readings go through the same fail-closed stability gate as time.
+    samples.push(rssAfter);
   }
   return {
     id: "memory",
     samplesBytes: samples,
     ...summarizeSamples(samples),
     correctness: {
-      expected: MEMORY_SAMPLE_BYTES,
+      expected: MEMORY_ALLOCATION_BYTES,
       observed,
       passed: observed,
-      failed: MEMORY_SAMPLE_BYTES - observed
+      failed: MEMORY_ALLOCATION_BYTES - observed
     }
   };
 }
@@ -173,6 +176,7 @@ export function validateBaseline(value) {
   if (value.scenarios.length !== 6 || value.scenarios.map((item) => item.id).join(",") !== SCENARIO_IDS.join(",")) return false;
   try {
     for (const item of value.scenarios) {
+      if (item.id === "memory" ? !("samplesBytes" in item) : !("samplesMs" in item)) return false;
       const keys = Object.keys(item).sort();
       const expectedKeys = ["coefficientOfVariation", "correctness", "id", "max", "median", "min", "p95", "sampleCount", "samplesBytes", "warmupCount"];
       const expectedMsKeys = expectedKeys.map((key) => key === "samplesBytes" ? "samplesMs" : key).sort();

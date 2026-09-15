@@ -3,7 +3,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { mock } from "node:test";
 import {
   SCENARIO_IDS,
   buildBaseline,
@@ -15,7 +15,20 @@ import { IDENTITY_ITEM_COUNT } from "../../apps/code-oss-extension/dist/test/tes
 
 const CANDIDATE_COMMIT = "0123456789abcdef0123456789abcdef01234567";
 let baselinePromise;
-const baseline = () => baselinePromise ??= buildBaseline({ candidateCommit: CANDIDATE_COMMIT });
+const rssReadings = [];
+const baseline = () => baselinePromise ??= (async () => {
+  const memoryUsage = process.memoryUsage;
+  const probe = mock.method(process, "memoryUsage", (...args) => {
+    const usage = memoryUsage(...args);
+    rssReadings.push(usage.rss);
+    return usage;
+  });
+  try {
+    return await buildBaseline({ candidateCommit: CANDIDATE_COMMIT });
+  } finally {
+    probe.mock.restore();
+  }
+})();
 
 test("discovery scenario executes the shared TestingApiAdapter identity fixture", async () => {
   assert.equal(await runDiscoveryIdentityScenario(), IDENTITY_ITEM_COUNT);
@@ -40,10 +53,19 @@ test("performance baseline has the exact closed schema and six bounded scenarios
     assert.ok(scenario.coefficientOfVariation <= 0.20);
     assert.ok(scenario.correctness && scenario.correctness.passed > 0);
   }
-  assert.deepEqual(
-    value.scenarios.find(({ id }) => id === "memory")?.samplesBytes,
-    Array(5).fill(1024 * 1024)
-  );
+});
+
+test("memory samples publish the actual post-allocation process RSS readings", async () => {
+  const value = await baseline();
+  // One warm-up RSS probe, then before/after probes for five allocations.
+  assert.equal(rssReadings.length, 11);
+  const memory = value.scenarios.find(({ id }) => id === "memory");
+  assert.deepEqual(memory.samplesBytes, [
+    rssReadings[2], rssReadings[4], rssReadings[6], rssReadings[8], rssReadings[10]
+  ]);
+  assert.deepEqual(memory.correctness, {
+    expected: 1048576, observed: 1048576, passed: 1048576, failed: 0
+  });
 });
 
 test("summarization rejects unstable and non-finite samples", () => {
@@ -80,4 +102,14 @@ test("validator rejects mutated summaries, correctness, and scenario fields", as
   assert.equal(validateBaseline(mutate((v) => { v.scenarios[0].correctness.extra = 1; })), false);
   assert.equal(validateBaseline(mutate((v) => { v.scenarios[0].samplesMs[0] = -1; })), false);
   assert.equal(validateBaseline(mutate((v) => { v.scenarios[0].coefficientOfVariation = 0.21; })), false);
+  assert.equal(validateBaseline(mutate((v) => {
+    const memory = v.scenarios.find(({ id }) => id === "memory");
+    memory.samplesMs = memory.samplesBytes;
+    delete memory.samplesBytes;
+  })), false);
+  for (const samples of [[-1, -1, -1, -1, -1], [1, 1, NaN, 1, 1], [1, 1, Infinity, 1, 1], [1, 1, 1, 1, 100]]) {
+    assert.equal(validateBaseline(mutate((v) => {
+      v.scenarios.find(({ id }) => id === "memory").samplesBytes = samples;
+    })), false);
+  }
 });
