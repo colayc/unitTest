@@ -37,6 +37,15 @@
 - [ ] **Step 4: Update README source coordinates** and run the full CMake bundle test suite plus existing workspace smoke.
 - [ ] **Step 5: Commit** with `fix: use verified github cmake release asset` and write `.superpowers/sdd/2026-09-15-cmake-source-fallback/task-1-report.md`.
 
-### Task 2: Re-run Phase 9 candidate evidence
+### Task 2: Synchronize the Go consumer URL contract
 
-After Task 1 review passes, return to `docs/superpowers/plans/2026-09-14-phase9-batch-d-performance.md` Task 3's staging sequence. Push the new implementation commit to both already-authorized remotes, dispatch the workflow, create the candidate receipt only after all required jobs succeed, and keep `releaseReady=false`.
+**Files:**
+- Modify: `apps/test-service/internal/cmake/manifest.go`
+- Modify: `apps/test-service/internal/cmake/manifest_test.go`
+- Modify: `apps/test-service/internal/cmake/testdata/bundle-manifest.valid.json`
+
+Update the Linux expected URL and URL validator to accept only the exact Kitware GitHub release path used by the manifest, while retaining the exact `cmake.org` Windows rule. Add rejection tests for foreign repositories/tags/paths, credentials, query/fragment, non-HTTPS, and unrelated hosts. Run the Go CMake tests and the native service-probe contract tests; write a report and commit `fix: align cmake consumer source contract`.
+
+### Task 3: Re-run Phase 9 candidate evidence
+
+After Tasks 1–2 review pass, return to `docs/superpowers/plans/2026-09-14-phase9-batch-d-performance.md` Task 3's staging sequence. Push the new implementation commits to both already-authorized remotes, dispatch the workflow, create the candidate receipt only after all required jobs succeed, and keep `releaseReady=false`.
