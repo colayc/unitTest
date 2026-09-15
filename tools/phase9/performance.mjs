@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
+import os from "node:os";
 import { dirname, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import process from "node:process";
@@ -13,6 +14,9 @@ import {
 
 export const SCENARIO_IDS = ["discovery-10000", "filter", "cancel", "memory", "startup", "report"];
 const HEX40 = /^[0-9a-f]{40}$/u;
+const NODE_VERSION = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;
+const PLATFORMS = new Set(["aix", "android", "darwin", "freebsd", "haiku", "linux", "openbsd", "sunos", "win32", "cygwin", "netbsd"]);
+const ARCHITECTURES = new Set(["arm", "arm64", "ia32", "loong64", "mips", "mipsel", "ppc64", "riscv64", "s390x", "x64"]);
 const MEMORY_ALLOCATION_BYTES = 1024 * 1024;
 
 function commitAtHead() {
@@ -165,7 +169,7 @@ export async function buildBaseline(options = {}) {
     schemaVersion: 1,
     candidateCommit: options.candidateCommit ?? commitAtHead(),
     runtime: { node: process.versions.node, platform: process.platform, arch: process.arch },
-    hardware: { cpus: 1 },
+    hardware: { cpus: os.cpus().length, totalMemoryBytes: os.totalmem() },
     scenarios
   };
 }
@@ -173,6 +177,11 @@ export async function buildBaseline(options = {}) {
 export function validateBaseline(value) {
   if (!value || typeof value !== "object" || Object.keys(value).sort().join(",") !== "candidateCommit,hardware,runtime,scenarios,schemaVersion") return false;
   if (value.schemaVersion !== 1 || !HEX40.test(value.candidateCommit) || !Array.isArray(value.scenarios)) return false;
+  const { runtime, hardware } = value;
+  if (!runtime || typeof runtime !== "object" || Array.isArray(runtime) || Object.keys(runtime).sort().join(",") !== "arch,node,platform") return false;
+  if (typeof runtime.node !== "string" || !NODE_VERSION.test(runtime.node) || runtime.node.trim() !== runtime.node || !PLATFORMS.has(runtime.platform) || !ARCHITECTURES.has(runtime.arch)) return false;
+  if (!hardware || typeof hardware !== "object" || Array.isArray(hardware) || Object.keys(hardware).sort().join(",") !== "cpus,totalMemoryBytes") return false;
+  if (!Number.isSafeInteger(hardware.cpus) || hardware.cpus <= 0 || !Number.isSafeInteger(hardware.totalMemoryBytes) || hardware.totalMemoryBytes <= 0) return false;
   if (value.scenarios.length !== 6 || value.scenarios.map((item) => item.id).join(",") !== SCENARIO_IDS.join(",")) return false;
   try {
     for (const item of value.scenarios) {
@@ -189,7 +198,7 @@ export function validateBaseline(value) {
       }
       if (Object.keys(item.correctness).sort().join(",") !== "expected,failed,observed,passed") return false;
       const { expected, observed, passed, failed } = item.correctness;
-      if (!Number.isSafeInteger(expected) || !Number.isSafeInteger(observed) || passed !== observed || failed !== expected - observed || expected < 0 || observed < 0 || observed > expected) return false;
+      if (!Number.isSafeInteger(expected) || expected < 0 || expected !== observed || expected !== passed || failed !== 0) return false;
     }
     return true;
   } catch {

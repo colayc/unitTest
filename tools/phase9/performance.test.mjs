@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import os, { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { mock } from "node:test";
 import {
@@ -16,6 +16,7 @@ import { IDENTITY_ITEM_COUNT } from "../../apps/code-oss-extension/dist/test/tes
 const CANDIDATE_COMMIT = "0123456789abcdef0123456789abcdef01234567";
 let baselinePromise;
 const rssReadings = [];
+const hardwareReadings = { cpus: [], totalMemoryBytes: [] };
 const baseline = () => baselinePromise ??= (async () => {
   const memoryUsage = process.memoryUsage;
   const probe = mock.method(process, "memoryUsage", (...args) => {
@@ -23,12 +24,132 @@ const baseline = () => baselinePromise ??= (async () => {
     rssReadings.push(usage.rss);
     return usage;
   });
+  const cpus = os.cpus;
+  const totalmem = os.totalmem;
+  const cpuProbe = mock.method(os, "cpus", () => {
+    const value = cpus();
+    hardwareReadings.cpus.push(value.length);
+    return value;
+  });
+  const memoryProbe = mock.method(os, "totalmem", () => {
+    const value = totalmem();
+    hardwareReadings.totalMemoryBytes.push(value);
+    return value;
+  });
   try {
     return await buildBaseline({ candidateCommit: CANDIDATE_COMMIT });
   } finally {
     probe.mock.restore();
+    cpuProbe.mock.restore();
+    memoryProbe.mock.restore();
   }
 })();
+
+// Hand-authored stable schema fixture keeps malformed-input checks independent
+// of timing noise and exercises portable recorded hardware metadata.
+function validSchemaBaseline() {
+  return {
+    schemaVersion: 1,
+    candidateCommit: CANDIDATE_COMMIT,
+    runtime: { node: process.versions.node, platform: process.platform, arch: process.arch },
+    hardware: { cpus: 2, totalMemoryBytes: 8589934592 },
+    scenarios: [
+      ["discovery-10000", 10000], ["filter", 1000], ["cancel", 1],
+      ["memory", 1048576], ["startup", 1], ["report", 1]
+    ].map(([id, expected]) => ({
+      id,
+      [id === "memory" ? "samplesBytes" : "samplesMs"]: [10, 10, 10, 10, 10],
+      sampleCount: 5, warmupCount: 1, median: 10, p95: 10, min: 10, max: 10,
+      coefficientOfVariation: 0,
+      correctness: { expected, observed: expected, passed: expected, failed: 0 }
+    }))
+  };
+}
+
+test("validator requires successful exact correctness records in every scenario", () => {
+  assert.equal(validateBaseline(validSchemaBaseline()), true);
+  for (let index = 0; index < 6; index++) {
+    for (const change of [
+      (c) => { c.observed--; c.passed--; c.failed = 1; },
+      (c) => { c.observed--; },
+      (c) => { c.passed--; },
+      (c) => { c.failed = 1; },
+      (c) => { c.extra = "secret"; },
+      ...["expected", "observed", "passed", "failed"].map((key) => (c) => { delete c[key]; }),
+      (c) => { c.expected = c.observed = c.passed = -1; },
+      (c) => { c.expected = c.observed = c.passed = 0.5; },
+      (c) => { c.expected = c.observed = c.passed = Number.MAX_SAFE_INTEGER + 1; }
+    ]) {
+      const value = validSchemaBaseline();
+      change(value.scenarios[index].correctness);
+      assert.equal(validateBaseline(value), false, JSON.stringify(value.scenarios[index].correctness));
+    }
+  }
+});
+
+test("validator closes runtime metadata and rejects injected or non-runtime strings", () => {
+  for (const runtime of [null, [], "secret", 1, {},
+    { ...validSchemaBaseline().runtime, extra: "C:\\private\\secret" }]) {
+    const value = validSchemaBaseline();
+    value.runtime = runtime;
+    assert.equal(validateBaseline(value), false);
+  }
+  for (const key of ["node", "platform", "arch"]) {
+    for (const replacement of [undefined, null, 1, {}, [], "", "C:\\private\\secret", "/home/private", "Bearer token", "not-runtime"]) {
+      const value = validSchemaBaseline();
+      if (replacement === undefined) delete value.runtime[key];
+      else value.runtime[key] = replacement;
+      assert.equal(validateBaseline(value), false, `${key}: ${JSON.stringify(replacement)}`);
+    }
+  }
+});
+
+test("validator accepts canonical runtime metadata recorded on a different host", () => {
+  for (const runtime of [
+    { node: "24.18.0", platform: "linux", arch: "arm64" },
+    { node: "24.19.0", platform: "win32", arch: "x64" }
+  ]) {
+    const value = validSchemaBaseline();
+    value.runtime = runtime;
+    assert.equal(validateBaseline(value), true);
+  }
+  for (const node of ["24", "24.18", "v24.18.0", "024.18.0", "24.018.0", "24.18.00", "24.18.0\n", "24.18.0 secret"]) {
+    const value = validSchemaBaseline();
+    value.runtime.node = node;
+    assert.equal(validateBaseline(value), false);
+  }
+});
+
+test("validator closes hardware metadata and requires positive safe integer measurements", () => {
+  assert.equal(validateBaseline(validSchemaBaseline()), true);
+  for (const hardware of [null, [], "secret", 1, {},
+    { ...validSchemaBaseline().hardware, extra: "/home/private/secret" }]) {
+    const value = validSchemaBaseline();
+    value.hardware = hardware;
+    assert.equal(validateBaseline(value), false);
+  }
+  for (const key of ["cpus", "totalMemoryBytes"]) {
+    for (const replacement of [undefined, null, "1", {}, [], 0, -1, 0.5, NaN, Infinity,
+      Number.MAX_SAFE_INTEGER + 1, "C:\\private\\secret", "/home/private", "Bearer token"]) {
+      const value = validSchemaBaseline();
+      if (replacement === undefined) delete value.hardware[key];
+      else value.hardware[key] = replacement;
+      assert.equal(validateBaseline(value), false, `${key}: ${String(replacement)}`);
+    }
+  }
+});
+
+test("baseline publishes actual runtime and OS-probed CPU and total memory measurements", async () => {
+  const value = await baseline();
+  assert.deepEqual(value.runtime, { node: process.versions.node, platform: process.platform, arch: process.arch });
+  assert.equal(hardwareReadings.cpus.length, 1);
+  assert.equal(hardwareReadings.totalMemoryBytes.length, 1);
+  assert.deepEqual(value.hardware, {
+    cpus: hardwareReadings.cpus[0], totalMemoryBytes: hardwareReadings.totalMemoryBytes[0]
+  });
+  assert.ok(Number.isSafeInteger(value.hardware.cpus) && value.hardware.cpus > 0);
+  assert.ok(Number.isSafeInteger(value.hardware.totalMemoryBytes) && value.hardware.totalMemoryBytes > 0);
+});
 
 test("discovery scenario executes the shared TestingApiAdapter identity fixture", async () => {
   assert.equal(await runDiscoveryIdentityScenario(), IDENTITY_ITEM_COUNT);
