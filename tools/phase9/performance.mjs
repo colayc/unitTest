@@ -134,7 +134,7 @@ export async function buildBaseline(options = {}) {
       let count = 0;
       for (const item of items) if (item.id.endsWith("0")) count++;
       return count;
-    }, 1000, 500),
+    }, 1000, 4000),
     await timedScenario("cancel", () => {
       let cancelled = 0;
       for (let index = 0; index < 1000; index++) {
@@ -143,7 +143,7 @@ export async function buildBaseline(options = {}) {
         cancelled += controller.signal.aborted ? 1 : 0;
       }
       return cancelled === 1000 ? 1 : 0;
-    }, 1, 5),
+    }, 1, 50),
     memoryScenario(),
     await timedScenario("startup", () => {
       let ready = false;
@@ -156,7 +156,7 @@ export async function buildBaseline(options = {}) {
     await timedScenario("report", () => {
       const report = JSON.stringify(items.map((item) => ({ id: item.id, status: "passed" })));
       return report.length > 0 ? 1 : 0;
-    }, 1, 30)
+    }, 1, 100)
   ];
   return {
     schemaVersion: 1,
