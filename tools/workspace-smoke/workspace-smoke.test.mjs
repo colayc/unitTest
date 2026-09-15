@@ -238,6 +238,51 @@ test("Phase 9 audit workflow is read-only, fixed-coordinate, and fail-closed", a
   assert.match(upload, /retention-days: 14/u);
 });
 
+test("P4 native framework matrix workflow is opt-in, fixed, and fail-closed until real reports exist", async () => {
+  const workflow = await readFile(".github/workflows/foundation.yml", "utf8");
+  const start = workflow.indexOf("  verify-framework-matrix:");
+  assert.notEqual(start, -1, "verify-framework-matrix job is missing");
+  const remainder = workflow.slice(start + 1);
+  const next = remainder.search(/\r?\n {2}[a-z][a-z0-9-]*:\s*$/mu);
+  const job = workflow.slice(start, next === -1 ? undefined : start + 1 + next);
+
+  assert.match(job, /^ {4}if: \$\{\{ vars\.UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED == '1' \}\}\s*$/mu);
+  assert.match(job, /^ {4}needs:\r?\n {6}- verify-linux\r?\n {6}- verify-windows\s*$/mu);
+  assert.match(job, /^ {4}runs-on: ubuntu-24\.04\s*$/mu);
+  assert.match(job, /^ {4}timeout-minutes: 30\s*$/mu);
+  assert.doesNotMatch(job, /secrets\.|continue-on-error|workflow_dispatch|inputs:/u);
+  for (const pin of [
+    "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
+    "pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa",
+    "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
+    "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+    "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+  ]) assert.match(job, new RegExp(pin));
+  for (const artifact of ["native-framework-linux", "native-framework-windows", "native-framework-matrix-report"]) {
+    assert.match(job, new RegExp(`^ {10}name: ${artifact}\\s*$`, "mu"));
+  }
+  assert.match(job, /^ {6}- run: pnpm install --frozen-lockfile\s*$/mu);
+  assert.match(
+    job,
+    /node tools\/phase9\/p4-report\.mjs \\\r?\n {12}--windows \.native-e2e\/framework-inputs\/windows\/framework-report\.json \\\r?\n {12}--linux \.native-e2e\/framework-inputs\/linux\/framework-report\.json \\\r?\n {12}--candidate "\$GITHUB_SHA" \\\r?\n {12}--out \.superpowers\/phase9\/p4\/native-framework-matrix-report\.json/u,
+  );
+  assert.match(job, /^ {10}path: \.superpowers\/phase9\/p4\/native-framework-matrix-report\.json\s*$/mu);
+
+  for (const [platform, path] of [
+    ["windows", ".native-e2e/artifacts/windows/framework-report.json"],
+    ["linux", ".native-e2e/artifacts/linux/framework-report.json"],
+  ]) {
+    assert.match(workflow, new RegExp(
+      `^ {6}- name: Upload P4 ${platform === "windows" ? "Windows" : "Linux"} framework report\\r?\\n`
+      + ` {8}if: \\$\\{\\{ always\\(\\) && vars\\.UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED == '1' \\}\\}\\r?\\n`
+      + ` {8}uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7\\r?\\n`
+      + ` {8}with:\\r?\\n {10}name: native-framework-${platform}\\r?\\n {10}path: ${path}\\r?\\n`
+      + " {10}if-no-files-found: error\\r?\\n {10}retention-days: 14\\s*$",
+      "mu",
+    ));
+  }
+});
+
 test("root verification runs Phase 9 contracts and preserves the exact deferred boundary", async () => {
   const [manifest, registry, matrix] = await Promise.all([
     readFile("package.json", "utf8").then(JSON.parse),

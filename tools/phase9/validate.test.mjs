@@ -24,6 +24,7 @@ import {
   validateReceipt,
   validateRegistry,
 } from "./validate.mjs";
+import { buildMatrixReport } from "./p4-report.mjs";
 import { renderMatrixJson, renderMatrixMarkdown, writeMatrixOutputs } from "./render.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -31,6 +32,25 @@ const candidateCommit = "a".repeat(40);
 const currentCommit = candidateCommit;
 const repositoryRoot = join(import.meta.dirname, "..", "..");
 const gateRegistryPath = join(import.meta.dirname, "gates.json");
+const P4_SCENARIO_IDS = [
+  "all",
+  "assertion-failure",
+  "cancel",
+  "crash",
+  "discovery",
+  "failed-rerun",
+  "filter",
+  "malformed-output",
+  "mock-failure",
+  "opaque-fallback",
+  "reconnect-replay",
+  "repeat",
+  "service-restart",
+  "single",
+  "skip",
+  "stale-catalog",
+  "timeout",
+];
 const ALL_GATE_IDS = [
   "P1-IPC-PER-USER-AUTH",
   "P1-PROTOCOL-NO-SHELL",
@@ -223,6 +243,46 @@ function githubReceipt(overrides = {}) {
     },
   };
   return { ...receipt, ...overrides, evidence: { ...receipt.evidence, ...overrides.evidence } };
+}
+
+function p4PlatformReport(platform) {
+  const families = platform === "win32" ? ["clang-cl", "msvc"] : ["clang", "gcc"];
+  return {
+    schemaVersion: 1,
+    candidateCommit,
+    platform,
+    architecture: "x64",
+    toolchains: families.map((family) => ({
+      family,
+      compilerVersion: family === "msvc" ? "19.44.35228.0" : "22.1.8",
+      frameworks: [
+        {
+          id: "cpputest",
+          dependencyVersion: "4.0",
+          dependencySha256: "21c692105db15299b5529af81a11a7ad80397f92c122bd7bf1e4a4b0e85654f7",
+          dependencyTreeSha256: "c564fb5e4e32836dc66f46efb86edb6f1f2fa6afa255a57052031aa00fc56f04",
+          stableIdDigest: "b".repeat(64),
+          scenarios: P4_SCENARIO_IDS.map((id) => ({ id, status: "passed" })),
+        },
+        {
+          id: "unity",
+          dependencyVersion: "2.6.1",
+          dependencySha256: "b41a66d45a6b99758fb3202ace6178177014d52fc524bf1f72687d93e9867292",
+          dependencyTreeSha256: "abfb7b2b7aec36739a7b138490d2e9dd178cc4f00e806ed372cbb8cfe98f73ae",
+          stableIdDigest: "c".repeat(64),
+          scenarios: P4_SCENARIO_IDS.map((id) => ({ id, status: "passed" })),
+        },
+      ],
+    })),
+    benchmark: {
+      id: "catalog-10000",
+      itemCount: 10000,
+      sampleCount: 3,
+      allocationsPerOperation: [320000, 320000, 320000],
+      stableIdDigest: "d".repeat(64),
+      status: "passed",
+    },
+  };
 }
 
 async function fixture(name, bytes) {
@@ -824,6 +884,112 @@ test("generic successful foundation jobs cannot satisfy feature-specific gates w
   for (const gateId of gateIds) {
     assert.equal(matrix.gates.find(({ id }) => id === gateId).status, "MISSING", `${gateId} requires feature-specific evidence`);
     assert.deepEqual(registry.gates.find(({ id }) => id === gateId).verification.artifacts, [gateArtifacts[gateId]]);
+  }
+});
+
+test("generic foundation verification cannot PASS P4 without the native framework matrix report", async () => {
+  const registry = await readCanonicalJson(gateRegistryPath, { label: "Phase 4 registry", maxBytes: 1024 * 1024 });
+  const gateIds = [
+    "P4-CPPUTEST-CPPUMOCK",
+    "P4-DISCOVERY-CTEST",
+    "P4-RECOVERY-AND-10000-BACKEND",
+    "P4-SELECTION-AND-RERUN",
+    "P4-UNITY-CMOCK",
+  ];
+  const receipt = githubReceipt({
+    receiptId: "github-actions-foundation-generic-p4",
+    gateIds,
+    evidence: {
+      workflowPath: ".github/workflows/foundation.yml",
+      runId: "41",
+      jobs: [
+        { name: "verify-linux", conclusion: "success" },
+        { name: "verify-windows", conclusion: "success" },
+      ],
+      artifacts: [],
+    },
+  });
+  const matrix = evaluateRecordedMatrix({
+    registry,
+    baseline: { schemaVersion: 1, candidateCommit, evaluationMode: "historical", receiptIds: [receipt.receiptId] },
+    receipts: [receipt],
+    currentCommit,
+    changedPaths: [],
+  });
+
+  for (const gateId of gateIds) {
+    assert.equal(matrix.gates.find(({ id }) => id === gateId).status, "MISSING", `${gateId} requires P4-specific evidence`);
+    assert.deepEqual(registry.gates.find(({ id }) => id === gateId).verification, {
+      artifacts: ["native-framework-matrix-report"],
+      commands: registry.gates.find(({ id }) => id === gateId).verification.commands,
+      jobs: ["verify-framework-matrix", "verify-linux", "verify-windows"],
+      workflowPath: ".github/workflows/foundation.yml",
+    });
+  }
+});
+
+test("P4 report CLI aggregates the exact four-toolchain framework and backend benchmark contract", async () => {
+  const root = await mkdtemp(join(tmpdir(), "phase9-p4-report-"));
+  fixtureRoots.push(root);
+  const windows = join(root, "windows.json");
+  const linux = join(root, "linux.json");
+  const output = join(root, "matrix.json");
+  await writeFile(windows, encodeCanonicalJson(p4PlatformReport("win32")));
+  await writeFile(linux, encodeCanonicalJson(p4PlatformReport("linux")));
+
+  let failure;
+  try {
+    await execFileAsync(process.execPath, [
+      join(import.meta.dirname, "p4-report.mjs"),
+      "--windows", windows,
+      "--linux", linux,
+      "--candidate", candidateCommit,
+      "--out", output,
+    ]);
+  } catch (error) {
+    failure = error;
+  }
+  assert.equal(failure, undefined, failure?.stderr);
+
+  const matrix = await readCanonicalJson(output, { label: "P4 matrix report", maxBytes: 1024 * 1024 });
+  assert.equal(matrix.schemaVersion, 1);
+  assert.equal(matrix.candidateCommit, candidateCommit);
+  assert.equal(matrix.overallStatus, "passed");
+  assert.deepEqual(matrix.platforms.map(({ platform }) => platform), ["linux", "win32"]);
+  assert.deepEqual(matrix.platforms.flatMap(({ toolchains }) => toolchains.map(({ family }) => family)), [
+    "clang", "gcc", "clang-cl", "msvc",
+  ]);
+  assert.deepEqual(matrix.frameworkStableIdDigests, {
+    cpputest: "b".repeat(64),
+    unity: "c".repeat(64),
+  });
+  assert.deepEqual(matrix.backendBenchmark, {
+    id: "catalog-10000",
+    itemCount: 10000,
+    sampleCountPerPlatform: 3,
+    stableIdDigest: "d".repeat(64),
+    status: "passed",
+  });
+});
+
+test("P4 report validator rejects incomplete, unlocked, failed, or cross-platform-inconsistent evidence", () => {
+  const cases = [
+    (windows) => { windows.toolchains[0].family = "gcc"; },
+    (windows) => { windows.toolchains[0].frameworks[0].scenarios.pop(); },
+    (windows) => { windows.toolchains[0].frameworks[0].scenarios[0].status = "failed"; },
+    (windows) => { windows.toolchains[0].frameworks[0].dependencySha256 = "0".repeat(64); },
+    (windows) => { windows.toolchains[0].frameworks[0].stableIdDigest = "0".repeat(64); },
+    (windows) => { windows.benchmark.itemCount = 9999; },
+    (windows) => { windows.unreviewed = true; },
+  ];
+  for (const mutate of cases) {
+    const windows = p4PlatformReport("win32");
+    const linux = p4PlatformReport("linux");
+    mutate(windows);
+    assert.throws(
+      () => buildMatrixReport({ candidateCommit, windows, linux }),
+      /PHASE9_P4_REPORT_INVALID/u,
+    );
   }
 });
 

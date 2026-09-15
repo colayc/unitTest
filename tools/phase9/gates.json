@@ -459,11 +459,14 @@
       ],
       "title": "CppUTest and CppUMock discovery and execution",
       "verification": {
-        "artifacts": [],
+        "artifacts": [
+          "native-framework-matrix-report"
+        ],
         "commands": [
           "go test ./apps/test-service/internal/testframework/cpputest"
         ],
         "jobs": [
+          "verify-framework-matrix",
           "verify-linux",
           "verify-windows"
         ],
@@ -483,11 +486,14 @@
       ],
       "title": "CTest discovery and execution safety",
       "verification": {
-        "artifacts": [],
+        "artifacts": [
+          "native-framework-matrix-report"
+        ],
         "commands": [
           "go test ./apps/test-service/internal/ctest ./apps/test-service/internal/testdiscovery"
         ],
         "jobs": [
+          "verify-framework-matrix",
           "verify-linux",
           "verify-windows"
         ],
@@ -507,11 +513,14 @@
       ],
       "title": "Recovery and 10000 item backend",
       "verification": {
-        "artifacts": [],
+        "artifacts": [
+          "native-framework-matrix-report"
+        ],
         "commands": [
           "pnpm verify"
         ],
         "jobs": [
+          "verify-framework-matrix",
           "verify-linux",
           "verify-windows"
         ],
@@ -531,11 +540,14 @@
       ],
       "title": "Test selection and failed rerun",
       "verification": {
-        "artifacts": [],
+        "artifacts": [
+          "native-framework-matrix-report"
+        ],
         "commands": [
           "go test ./apps/test-service/internal/testdomain ./apps/test-service/internal/testrun"
         ],
         "jobs": [
+          "verify-framework-matrix",
           "verify-linux",
           "verify-windows"
         ],
@@ -555,11 +567,14 @@
       ],
       "title": "Unity and CMock discovery and execution",
       "verification": {
-        "artifacts": [],
+        "artifacts": [
+          "native-framework-matrix-report"
+        ],
         "commands": [
           "go test ./apps/test-service/internal/testframework/unity ./apps/test-service/internal/unityrunner"
         ],
         "jobs": [
+          "verify-framework-matrix",
           "verify-linux",
           "verify-windows"
         ],

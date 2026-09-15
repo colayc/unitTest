@@ -1,0 +1,275 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://unit-test-ide.invalid/schemas/phase9-p4-report-v1.json",
+  "$ref": "#/$defs/matrixReport",
+  "$defs": {
+    "commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "scenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "status"
+      ],
+      "properties": {
+        "id": {
+          "enum": [
+            "all",
+            "assertion-failure",
+            "cancel",
+            "crash",
+            "discovery",
+            "failed-rerun",
+            "filter",
+            "malformed-output",
+            "mock-failure",
+            "opaque-fallback",
+            "reconnect-replay",
+            "repeat",
+            "service-restart",
+            "single",
+            "skip",
+            "stale-catalog",
+            "timeout"
+          ]
+        },
+        "status": {
+          "const": "passed"
+        }
+      }
+    },
+    "framework": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "dependencyVersion",
+        "dependencySha256",
+        "dependencyTreeSha256",
+        "stableIdDigest",
+        "scenarios"
+      ],
+      "properties": {
+        "id": {
+          "enum": [
+            "cpputest",
+            "unity"
+          ]
+        },
+        "dependencyVersion": {
+          "type": "string",
+          "pattern": "^[0-9]+(?:\\.[0-9]+){1,2}$"
+        },
+        "dependencySha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "dependencyTreeSha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "stableIdDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "scenarios": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/scenario"
+          },
+          "minItems": 17,
+          "maxItems": 17
+        }
+      }
+    },
+    "toolchain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "family",
+        "compilerVersion",
+        "frameworks"
+      ],
+      "properties": {
+        "family": {
+          "enum": [
+            "clang",
+            "clang-cl",
+            "gcc",
+            "msvc"
+          ]
+        },
+        "compilerVersion": {
+          "type": "string",
+          "pattern": "^[0-9]+(?:\\.[0-9]+){1,3}$",
+          "maxLength": 64
+        },
+        "frameworks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/framework"
+          },
+          "minItems": 2,
+          "maxItems": 2
+        }
+      }
+    },
+    "benchmark": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "itemCount",
+        "sampleCount",
+        "allocationsPerOperation",
+        "stableIdDigest",
+        "status"
+      ],
+      "properties": {
+        "id": {
+          "const": "catalog-10000"
+        },
+        "itemCount": {
+          "const": 10000
+        },
+        "sampleCount": {
+          "const": 3
+        },
+        "allocationsPerOperation": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "stableIdDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "status": {
+          "const": "passed"
+        }
+      }
+    },
+    "platformReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "candidateCommit",
+        "platform",
+        "architecture",
+        "toolchains",
+        "benchmark"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "candidateCommit": {
+          "$ref": "#/$defs/commit"
+        },
+        "platform": {
+          "enum": [
+            "linux",
+            "win32"
+          ]
+        },
+        "architecture": {
+          "const": "x64"
+        },
+        "toolchains": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/toolchain"
+          },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "benchmark": {
+          "$ref": "#/$defs/benchmark"
+        }
+      }
+    },
+    "matrixReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "candidateCommit",
+        "platforms",
+        "frameworkStableIdDigests",
+        "backendBenchmark",
+        "overallStatus"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "candidateCommit": {
+          "$ref": "#/$defs/commit"
+        },
+        "platforms": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/platformReport"
+          },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "frameworkStableIdDigests": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "cpputest",
+            "unity"
+          ],
+          "properties": {
+            "cpputest": {
+              "$ref": "#/$defs/digest"
+            },
+            "unity": {
+              "$ref": "#/$defs/digest"
+            }
+          }
+        },
+        "backendBenchmark": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "itemCount",
+            "sampleCountPerPlatform",
+            "stableIdDigest",
+            "status"
+          ],
+          "properties": {
+            "id": {
+              "const": "catalog-10000"
+            },
+            "itemCount": {
+              "const": 10000
+            },
+            "sampleCountPerPlatform": {
+              "const": 3
+            },
+            "stableIdDigest": {
+              "$ref": "#/$defs/digest"
+            },
+            "status": {
+              "const": "passed"
+            }
+          }
+        },
+        "overallStatus": {
+          "const": "passed"
+        }
+      }
+    }
+  }
+}
