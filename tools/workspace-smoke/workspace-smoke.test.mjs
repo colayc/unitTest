@@ -89,9 +89,16 @@ test("Phase 9 performance baseline job contract is fixed and reviewed", async ()
   const next = remainder.search(/\r?\n {2}[a-z][a-z0-9-]*:\s*$/mu);
   const job = workflow.slice(start, next === -1 ? undefined : start + 1 + next);
   assert.match(job, /^ {4}runs-on: ubuntu-24\.04\s*$/mu);
-  assert.match(job, /^ {6}run: node tools\/phase9\/performance\.mjs --out \.superpowers\/phase9\/performance\/baseline\.json\s*$/mu);
+  assert.match(job, /^ {4}timeout-minutes: 30\s*$/mu);
+  assert.match(job, /^ {6}- run: pnpm install --frozen-lockfile\s*$/mu);
+  assert.match(job, /^ {6}- run: pnpm test:phase9:performance\s*$/mu);
+  assert.match(job, /^ {6}- run: node tools\/phase9\/performance\.mjs --out \.superpowers\/phase9\/performance\/baseline\.json\s*$/mu);
+  assert.match(job, /^ {10}node-version: 24\.18\.0\s*$/mu);
+  assert.match(job, /^ {10}cache: pnpm\s*$/mu);
   assert.match(job, /^ {10}name: phase9-performance-baseline\s*$/mu);
   assert.match(job, /^ {10}path: \.superpowers\/phase9\/performance\/baseline\.json\s*$/mu);
+  assert.match(job, /^ {10}if-no-files-found: error\s*$/mu);
+  assert.match(job, /^ {10}retention-days: 14\s*$/mu);
   for (const sha of [
     "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
     "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
@@ -182,10 +189,10 @@ test("Phase 9 audit workflow is read-only, fixed-coordinate, and fail-closed", a
   assert.equal(workflow.split(setupGoPin).length - 1, 1, `${setupGoPin} must appear exactly once`);
 
   for (const [pin, expectedCount] of [
-    ["actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803", 5],
-    ["actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38", 5],
-    ["pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa", 5],
-    ["actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", 1],
+    ["actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803", 6],
+    ["actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38", 6],
+    ["pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa", 6],
+    ["actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", 2],
   ]) {
     assert.equal(workflow.split(pin).length - 1, expectedCount, `${pin} must appear exactly ${expectedCount} times`);
   }
