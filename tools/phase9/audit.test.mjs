@@ -114,6 +114,43 @@ test("audits a complete successful GitHub Actions receipt", () => {
   });
 });
 
+test("audits an attempt-2 snapshot containing uniquely qualified artifacts from both attempts", () => {
+  const input = auditInputs();
+  input.receipt.receiptId = `github-actions-${runId}-2`;
+  input.receipt.evidence.runAttempt = 2;
+  input.receipt.evidence.artifacts = [
+    { id: "10310420277", name: "linux-gcc-coverage-report-1", digest: "c".repeat(64), expired: false },
+    { id: artifactId, name: "linux-gcc-coverage-report-2", digest, expired: false },
+  ];
+  input.runSnapshot.run_attempt = 2;
+  input.artifactSnapshot = {
+    total_count: 2,
+    artifacts: [
+      {
+        id: 10310420277,
+        name: "linux-gcc-coverage-report-1",
+        digest: `sha256:${"c".repeat(64)}`,
+        expired: false,
+        workflow_run: { id: 34731651809 },
+      },
+      {
+        id: 10310420278,
+        name: "linux-gcc-coverage-report-2",
+        digest: `sha256:${digest}`,
+        expired: false,
+        workflow_run: { id: 34731651809 },
+      },
+    ],
+  };
+
+  assert.deepEqual(auditGithubReceipt(input), {
+    receiptId: `github-actions-${runId}-2`,
+    status: "PASS",
+    artifactAvailability: "available",
+    releaseUsable: true,
+  });
+});
+
 test("ignores the workflow-generated audit artifact when auditing source evidence", () => {
   const input = auditInputs();
   input.artifactSnapshot.total_count = 2;

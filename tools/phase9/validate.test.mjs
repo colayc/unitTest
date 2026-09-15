@@ -951,7 +951,7 @@ test("generic successful foundation jobs cannot satisfy feature-specific gates w
   const registry = await readCanonicalJson(gateRegistryPath, { label: "Phase 1 through 9 registry", maxBytes: 1024 * 1024 });
   const gateArtifacts = {
     "P5-LINUX-CLANG-COVERAGE": "linux-clang-coverage-report",
-    "P5-WINDOWS-LLVM-COVERAGE": "coverage-execution-windows",
+    "P5-WINDOWS-LLVM-COVERAGE": "coverage-execution-windows-{runAttempt}",
     "P6-CODEOSS-HOST-SMOKE": "code-oss-host-smoke-report",
     "P7-COVERAGE-UI-AND-SOURCE-DECORATION": "coverage-ui-source-decoration-report",
     "P7-HISTORY-AND-ARTIFACT-BROWSER": "history-artifact-browser-report",
@@ -990,10 +990,10 @@ test("generic successful foundation jobs cannot satisfy feature-specific gates w
 test("P5 coverage gates require the closed Linux GCC and Windows LLVM artifacts", async () => {
   const registry = await readCanonicalJson(gateRegistryPath, { label: "Phase 5 registry", maxBytes: 1024 * 1024 });
   const gateArtifacts = {
-    "P5-COVERAGE-FAULT-MAPPING": ["coverage-execution-windows", "linux-gcc-coverage-report"],
-    "P5-COVERAGE-REPORTS": ["coverage-execution-windows", "linux-gcc-coverage-report"],
-    "P5-LINUX-GCC-COVERAGE": ["linux-gcc-coverage-report"],
-    "P5-WINDOWS-LLVM-COVERAGE": ["coverage-execution-windows"],
+    "P5-COVERAGE-FAULT-MAPPING": ["coverage-execution-windows-{runAttempt}", "linux-gcc-coverage-report-{runAttempt}"],
+    "P5-COVERAGE-REPORTS": ["coverage-execution-windows-{runAttempt}", "linux-gcc-coverage-report-{runAttempt}"],
+    "P5-LINUX-GCC-COVERAGE": ["linux-gcc-coverage-report-{runAttempt}"],
+    "P5-WINDOWS-LLVM-COVERAGE": ["coverage-execution-windows-{runAttempt}"],
   };
   const gateIds = Object.keys(gateArtifacts);
   const receipt = githubReceipt({
@@ -1021,6 +1021,43 @@ test("P5 coverage gates require the closed Linux GCC and Windows LLVM artifacts"
     assert.equal(matrix.gates.find(({ id }) => id === gateId).status, "MISSING", `${gateId} requires closed coverage artifacts`);
     assert.deepEqual(registry.gates.find(({ id }) => id === gateId).verification.artifacts, gateArtifacts[gateId]);
   }
+});
+
+test("P5 attempt-qualified artifact contracts derive exact names from receipt runAttempt", async () => {
+  const registry = await readCanonicalJson(gateRegistryPath, { label: "Phase 5 registry", maxBytes: 1024 * 1024 });
+  const receipt = githubReceipt({
+    receiptId: "github-actions-p5-attempt-2",
+    gateIds: ["P5-LINUX-GCC-COVERAGE"],
+    evidence: {
+      workflowPath: ".github/workflows/foundation.yml",
+      runId: "42",
+      runAttempt: 2,
+      jobs: [{ name: "coverage-linux-gcc", conclusion: "success" }],
+      artifacts: [
+        { id: "51", name: "linux-gcc-coverage-report-1", digest: "c".repeat(64), expired: false },
+        { id: "52", name: "linux-gcc-coverage-report-2", digest: "d".repeat(64), expired: false },
+      ],
+    },
+  });
+  const matrix = evaluateRecordedMatrix({
+    registry,
+    baseline: { schemaVersion: 1, candidateCommit, evaluationMode: "historical", receiptIds: [receipt.receiptId] },
+    receipts: [receipt],
+    currentCommit,
+    changedPaths: [],
+  });
+
+  assert.equal(matrix.gates.find(({ id }) => id === "P5-LINUX-GCC-COVERAGE").status, "PASS");
+
+  receipt.evidence.artifacts[1].name = "linux-gcc-coverage-report-3";
+  const wrongAttemptMatrix = evaluateRecordedMatrix({
+    registry,
+    baseline: { schemaVersion: 1, candidateCommit, evaluationMode: "historical", receiptIds: [receipt.receiptId] },
+    receipts: [receipt],
+    currentCommit,
+    changedPaths: [],
+  });
+  assert.equal(wrongAttemptMatrix.gates.find(({ id }) => id === "P5-LINUX-GCC-COVERAGE").status, "MISSING");
 });
 
 test("generic foundation verification cannot PASS P4 without the native framework matrix report", async () => {
@@ -1227,6 +1264,9 @@ test("registry rejects unsafe display strings, paths, duplicates, and empty veri
     (gate) => { gate.verification.commands = ["go test --pkg=../other"]; },
     (gate) => { gate.verification.jobs = ["phase9", "phase9"]; },
     (gate) => { gate.verification.artifacts = ["../report"]; },
+    (gate) => { gate.verification.artifacts = ["report{runAttempt}"]; },
+    (gate) => { gate.verification.artifacts = ["report-{runAttempt}-extra"]; },
+    (gate) => { gate.verification.artifacts = ["report-{runAttempt}{runAttempt}"]; },
     (gate) => { gate.verification.commands = []; gate.verification.jobs = []; gate.verification.artifacts = []; },
     (gate) => { gate.verification.workflowPath = "C:\\workflow.yml"; },
   ];

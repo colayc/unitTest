@@ -30,6 +30,7 @@ const MAX_RECEIPT_BYTES = 256 * 1024;
 const MAX_RECEIPTS = 256;
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/u;
 const UNSAFE_DISPLAY_PATTERN = /[\0\r\n`;<>&|]/u;
+const RUN_ATTEMPT_ARTIFACT_SUFFIX = "-{runAttempt}";
 const CANDIDATE_LINEAGE_REASON = "candidate-descendant-changed-tested-content";
 const execFileAsync = promisify(execFile);
 
@@ -154,6 +155,14 @@ export function validateRegistry(value) {
     assertSafeRepositoryPath(workflowPath, `gate ${gate.id} workflow path`);
     assertUniqueSortedDisplayStrings(jobs, `gate ${gate.id} jobs`);
     assertUniqueSortedDisplayStrings(artifacts, `gate ${gate.id} artifacts`);
+    for (const name of artifacts) {
+      const firstToken = name.indexOf("{runAttempt}");
+      if (firstToken !== -1
+          && (firstToken !== name.length - "{runAttempt}".length
+            || !name.endsWith(RUN_ATTEMPT_ARTIFACT_SUFFIX))) {
+        schemaFailure(`gate ${gate.id} artifacts`);
+      }
+    }
     if (commands.length + jobs.length + artifacts.length === 0) schemaFailure(`gate ${gate.id} verification policy`);
   }
   for (const sourceSection of declaredSections) {
@@ -285,7 +294,13 @@ function evidenceSatisfiesVerification(repository, verification, receipt) {
   const jobs = new Map(receipt.evidence.jobs.map((job) => [job.name, job]));
   const artifacts = new Map(receipt.evidence.artifacts.map((artifact) => [artifact.name, artifact]));
   if (!verification.jobs.every((name) => jobs.get(name)?.conclusion === "success")) return false;
-  return verification.artifacts.every((name) => artifacts.get(name)?.expired === false);
+  return verification.artifacts.every((name) => artifacts.get(artifactNameForRunAttempt(name, receipt.evidence.runAttempt))?.expired === false);
+}
+
+function artifactNameForRunAttempt(name, runAttempt) {
+  return name.endsWith(RUN_ATTEMPT_ARTIFACT_SUFFIX)
+    ? `${name.slice(0, -RUN_ATTEMPT_ARTIFACT_SUFFIX.length)}-${runAttempt}`
+    : name;
 }
 
 function recordedStatus(repository, gate, receipt) {
@@ -348,7 +363,9 @@ export function evaluateRecordedMatrix({ registry, baseline, receipts, currentCo
       if (receipt !== undefined && gate.disposition !== "deferred") row.receiptId = receipt.receiptId;
       if (gate.verification.artifacts.length > 0 && gate.disposition !== "deferred") {
         row.artifactAvailability = receipt?.evidence.kind === "github-actions"
-          && gate.verification.artifacts.every((name) => receipt.evidence.artifacts.some((item) => item.name === name && !item.expired))
+          && gate.verification.artifacts.every((name) => receipt.evidence.artifacts.some(
+            (item) => item.name === artifactNameForRunAttempt(name, receipt.evidence.runAttempt) && !item.expired,
+          ))
           ? "available" : "missing";
       }
       return row;

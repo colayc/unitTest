@@ -166,9 +166,9 @@ jobs:
           if-no-files-found: error
           retention-days: 14
       - if: ${{ steps.windows-coverage-evidence.outcome == 'success' }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: coverage-execution-windows
+          name: coverage-execution-windows-${{ github.run_attempt }}
           path: .native-e2e/artifacts/windows/coverage-execution-report.json
           if-no-files-found: error
       - if: always()
@@ -441,9 +441,9 @@ jobs:
         run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm --filter code-oss-extension validate:coverage-evidence:linux
       - name: Upload closed Linux GCC coverage evidence
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: linux-gcc-coverage-report
+          name: linux-gcc-coverage-report-${{ github.run_attempt }}
           path: .native-e2e/artifacts/linux/linux-gcc-coverage-report.json
           if-no-files-found: error
       - if: always()

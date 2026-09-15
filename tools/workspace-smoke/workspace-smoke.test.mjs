@@ -451,7 +451,7 @@ test("Hosted CI pins native toolchain runners and gates unstable Windows native 
       assert.notEqual(coverageReport, -1);
       const uploadStep = source.slice(source.lastIndexOf("      - ", coverageReport), coverageReport);
       assert.match(uploadStep, /steps\.windows-coverage-evidence\.outcome\s*==\s*'success'/u, "WFP evidence upload must depend on validation of the exact report bytes");
-      assert.match(source, /name:\s*coverage-execution-windows\s*[\s\S]*if-no-files-found:\s*error/u, "required verified Windows runs must fail closed without evidence");
+      assert.match(source, /name:\s*coverage-execution-windows-\$\{\{\s*github\.run_attempt\s*\}\}\s*[\s\S]*if-no-files-found:\s*error/u, "required verified Windows runs must upload attempt-qualified evidence and fail closed without it");
       const cleanupStep = source.slice(source.lastIndexOf("      - ", legacyCleanup), serviceSmoke);
       assert.match(cleanupStep, /windows-offline-boundary\.ps1/u);
       assert.match(cleanupStep, /-Action\s+LegacyCleanup/u);
@@ -498,10 +498,11 @@ test("coverage acceptance is a required, closed-evidence cross-platform CI gate"
   assert.ok(bootstrap !== -1 && framework !== -1 && goDownload !== -1);
   assert.ok(native > bootstrap && native > framework && native > goDownload);
   assert.ok(validator > native, "the exact published evidence must be validated after native execution");
-  assert.match(linux, /name:\s*linux-gcc-coverage-report\s*$/mu);
+  assert.match(linux, /name:\s*linux-gcc-coverage-report-\$\{\{\s*github\.run_attempt\s*\}\}\s*$/mu);
   const report = linux.indexOf("linux-gcc-coverage-report.json");
   assert.notEqual(report, -1);
   const upload = linux.slice(linux.lastIndexOf("      - ", report), report + 300);
+  assert.match(upload, /uses:\s*actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a\s*#\s*v7/u);
   assert.match(upload, /if:\s*always\(\)/u);
   assert.match(upload, /if-no-files-found:\s*error/u);
 
@@ -515,7 +516,10 @@ test("coverage acceptance is a required, closed-evidence cross-platform CI gate"
   const smokeStep = windows.slice(windows.lastIndexOf("      - ", smoke), evidenceValidator);
   assert.match(smokeStep, /github\.event_name\s*==\s*['"]push['"][\s\S]*github\.ref\s*==\s*['"]refs\/heads\/master['"]/u);
   assert.doesNotMatch(smokeStep, /vars\.UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED/u);
-  assert.match(windows, /name:\s*coverage-execution-windows\s*$/mu);
+  assert.match(windows, /name:\s*coverage-execution-windows-\$\{\{\s*github\.run_attempt\s*\}\}\s*$/mu);
+  const windowsReport = windows.indexOf("coverage-execution-report.json");
+  const windowsUpload = windows.slice(windows.lastIndexOf("      - ", windowsReport), windowsReport + 300);
+  assert.match(windowsUpload, /uses:\s*actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a\s*#\s*v7/u);
 
   for (const retained of ["verify-windows", "verify-linux", "package-windows", "package-linux", "release-qualification"]) {
     assert.ok(jobs.includes(retained), `existing ${retained} job must remain present`);
