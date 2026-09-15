@@ -1,7 +1,7 @@
 # Phase 9 Gate Matrix
 
 - Candidate commit: `b84c2281ca4f96874dbf27f686df375d7082b305`
-- Recorded by commit: `b84c2281ca4f96874dbf27f686df375d7082b305`
+- Recorded by commit: `141f1cee8341e2d1d1d2075e579e80ad55231ac2`
 - Evaluation mode: `candidate`
 - Catalog complete: `true`
 - Release ready: `false`
@@ -10,9 +10,9 @@
 
 | Status | Count |
 |---|---:|
-| PASS | 13 |
+| PASS | 0 |
 | MISSING | 46 |
-| FAILED | 0 |
+| FAILED | 13 |
 | DEFERRED | 3 |
 
 ## Gates
@@ -68,16 +68,16 @@
 | P8-RUNTIME-PRODUCER-PROVENANCE | 8 | supply-chain | MISSING |  |  |  |
 | P8-SIGN-WINDOWS | 8 | signing | DEFERRED |  |  |  |
 | P8-WINDOWS-MSIX-PACKAGE | 8 | packaging | MISSING |  |  |  |
-| P9-MATRIX-CONTRACT | 9 | contract | PASS | github-actions-34928523525-performance |  |  |
-| P9-MATRIX-E2E | 9 | end-to-end | PASS | github-actions-34928523525-performance |  |  |
-| P9-MATRIX-FAULT-INJECTION | 9 | fault-injection | PASS | github-actions-34928523525-performance |  |  |
-| P9-MATRIX-INTEGRATION | 9 | integration | PASS | github-actions-34928523525-performance |  |  |
-| P9-MATRIX-UNIT | 9 | unit | PASS | github-actions-34928523525-performance |  |  |
-| P9-PERF-CANCEL | 9 | performance | PASS | github-actions-34928523525-performance |  |  |
-| P9-PERF-DISCOVERY-10000 | 9 | performance | PASS | github-actions-34928523525-performance |  |  |
-| P9-PERF-FILTER | 9 | performance | PASS | github-actions-34928523525-performance |  |  |
-| P9-PERF-HARDWARE-BASELINE | 9 | performance | PASS | github-actions-34928523525-performance | available |  |
-| P9-PERF-MEMORY | 9 | performance | PASS | github-actions-34928523525-performance |  |  |
-| P9-PERF-REPORT | 9 | performance | PASS | github-actions-34928523525-performance |  |  |
-| P9-PERF-STARTUP | 9 | performance | PASS | github-actions-34928523525-performance |  |  |
-| P9-UPSTREAM-CODEOSS | 9 | upstream | PASS | github-actions-34928523525-performance |  |  |
+| P9-MATRIX-CONTRACT | 9 | contract | FAILED | github-actions-34928523525-performance |  | candidate-descendant-changed-tested-content |
+| P9-MATRIX-E2E | 9 | end-to-end | FAILED | github-actions-34928523525-performance |  | candidate-descendant-changed-tested-content |
+| P9-MATRIX-FAULT-INJECTION | 9 | fault-injection | FAILED | github-actions-34928523525-performance |  | candidate-descendant-changed-tested-content |
+| P9-MATRIX-INTEGRATION | 9 | integration | FAILED | github-actions-34928523525-performance |  | candidate-descendant-changed-tested-content |
+| P9-MATRIX-UNIT | 9 | unit | FAILED | github-actions-34928523525-performance |  | candidate-descendant-changed-tested-content |
+| P9-PERF-CANCEL | 9 | performance | FAILED | github-actions-34928523525-performance |  | candidate-descendant-changed-tested-content |
+| P9-PERF-DISCOVERY-10000 | 9 | performance | FAILED | github-actions-34928523525-performance |  | candidate-descendant-changed-tested-content |
+| P9-PERF-FILTER | 9 | performance | FAILED | github-actions-34928523525-performance |  | candidate-descendant-changed-tested-content |
+| P9-PERF-HARDWARE-BASELINE | 9 | performance | FAILED | github-actions-34928523525-performance | available | candidate-descendant-changed-tested-content |
+| P9-PERF-MEMORY | 9 | performance | FAILED | github-actions-34928523525-performance |  | candidate-descendant-changed-tested-content |
+| P9-PERF-REPORT | 9 | performance | FAILED | github-actions-34928523525-performance |  | candidate-descendant-changed-tested-content |
+| P9-PERF-STARTUP | 9 | performance | FAILED | github-actions-34928523525-performance |  | candidate-descendant-changed-tested-content |
+| P9-UPSTREAM-CODEOSS | 9 | upstream | FAILED | github-actions-34928523525-performance |  | candidate-descendant-changed-tested-content |
