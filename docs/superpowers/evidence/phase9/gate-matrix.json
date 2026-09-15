@@ -7,7 +7,7 @@
     "missing": 46,
     "pass": 0
   },
-  "currentCommit": "f14c8682a679e494a9bead74563394d4a7b9a0ae",
+  "currentCommit": "ff3e1130b869b36e443afbf1b9e82ba05ff1077f",
   "evaluationMode": "candidate",
   "gates": [
     {
@@ -179,6 +179,7 @@
       "status": "MISSING"
     },
     {
+      "artifactAvailability": "missing",
       "id": "P7-WINDOWS-WFP-OFFLINE",
       "status": "MISSING"
     },
@@ -302,7 +303,7 @@
       "status": "FAILED"
     }
   ],
-  "recordedByCommit": "f14c8682a679e494a9bead74563394d4a7b9a0ae",
+  "recordedByCommit": "ff3e1130b869b36e443afbf1b9e82ba05ff1077f",
   "releaseReady": false,
   "schemaVersion": 1
 }

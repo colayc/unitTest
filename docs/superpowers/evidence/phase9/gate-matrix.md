@@ -1,7 +1,7 @@
 # Phase 9 Gate Matrix
 
 - Candidate commit: `b84c2281ca4f96874dbf27f686df375d7082b305`
-- Recorded by commit: `f14c8682a679e494a9bead74563394d4a7b9a0ae`
+- Recorded by commit: `ff3e1130b869b36e443afbf1b9e82ba05ff1077f`
 - Evaluation mode: `candidate`
 - Catalog complete: `true`
 - Release ready: `false`
@@ -57,7 +57,7 @@
 | P7-LINUX-GCC-OFFLINE | 7 | offline | MISSING |  |  |  |
 | P7-MAIN-USER-JOURNEY | 7 | user-journey | MISSING |  | missing |  |
 | P7-MOCK-CONFIGURATION-UX | 7 | user-interface | MISSING |  | missing |  |
-| P7-WINDOWS-WFP-OFFLINE | 7 | offline | MISSING |  |  |  |
+| P7-WINDOWS-WFP-OFFLINE | 7 | offline | MISSING |  | missing |  |
 | P8-DOCS-CLOSEOUT | 8 | documentation | DEFERRED |  |  |  |
 | P8-INSTALL-LIFECYCLE-LINUX | 8 | install-lifecycle | MISSING |  |  |  |
 | P8-INSTALL-LIFECYCLE-WINDOWS | 8 | install-lifecycle | MISSING |  |  |  |
