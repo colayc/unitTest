@@ -7,7 +7,7 @@
     "missing": 46,
     "pass": 0
   },
-  "currentCommit": "5655022c9bab62b229bc09327174b80625c6a80b",
+  "currentCommit": "f14c8682a679e494a9bead74563394d4a7b9a0ae",
   "evaluationMode": "candidate",
   "gates": [
     {
@@ -129,6 +129,7 @@
       "status": "MISSING"
     },
     {
+      "artifactAvailability": "missing",
       "id": "P6-BRANDING-AND-BUILTIN-REGISTRATION",
       "status": "MISSING"
     },
@@ -301,7 +302,7 @@
       "status": "FAILED"
     }
   ],
-  "recordedByCommit": "5655022c9bab62b229bc09327174b80625c6a80b",
+  "recordedByCommit": "f14c8682a679e494a9bead74563394d4a7b9a0ae",
   "releaseReady": false,
   "schemaVersion": 1
 }

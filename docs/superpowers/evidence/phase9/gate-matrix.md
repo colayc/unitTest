@@ -1,7 +1,7 @@
 # Phase 9 Gate Matrix
 
 - Candidate commit: `b84c2281ca4f96874dbf27f686df375d7082b305`
-- Recorded by commit: `5655022c9bab62b229bc09327174b80625c6a80b`
+- Recorded by commit: `f14c8682a679e494a9bead74563394d4a7b9a0ae`
 - Evaluation mode: `candidate`
 - Catalog complete: `true`
 - Release ready: `false`
@@ -46,7 +46,7 @@
 | P5-LINUX-GCC-COVERAGE | 5 | toolchain | MISSING |  | missing |  |
 | P5-PROTOCOL-V14-COMPAT | 5 | compatibility | MISSING |  |  |  |
 | P5-WINDOWS-LLVM-COVERAGE | 5 | toolchain | MISSING |  | missing |  |
-| P6-BRANDING-AND-BUILTIN-REGISTRATION | 6 | product-shell | MISSING |  |  |  |
+| P6-BRANDING-AND-BUILTIN-REGISTRATION | 6 | product-shell | MISSING |  | missing |  |
 | P6-CODEOSS-HOST-SMOKE | 6 | integration | MISSING |  | missing |  |
 | P6-SERVICE-LIFECYCLE | 6 | lifecycle | MISSING |  |  |  |
 | P6-TESTING-API | 6 | testing-api | MISSING |  |  |  |
