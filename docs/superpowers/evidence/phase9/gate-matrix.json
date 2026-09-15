@@ -7,7 +7,7 @@
     "missing": 46,
     "pass": 0
   },
-  "currentCommit": "f1671d6d23e29847ffb6bcb523cc15c81be6be54",
+  "currentCommit": "bd05c9ccfbe9c457b8ca5fc96a0629fd5280877f",
   "evaluationMode": "candidate",
   "gates": [
     {
@@ -75,22 +75,27 @@
       "status": "MISSING"
     },
     {
+      "artifactAvailability": "missing",
       "id": "P4-CPPUTEST-CPPUMOCK",
       "status": "MISSING"
     },
     {
+      "artifactAvailability": "missing",
       "id": "P4-DISCOVERY-CTEST",
       "status": "MISSING"
     },
     {
+      "artifactAvailability": "missing",
       "id": "P4-RECOVERY-AND-10000-BACKEND",
       "status": "MISSING"
     },
     {
+      "artifactAvailability": "missing",
       "id": "P4-SELECTION-AND-RERUN",
       "status": "MISSING"
     },
     {
+      "artifactAvailability": "missing",
       "id": "P4-UNITY-CMOCK",
       "status": "MISSING"
     },
@@ -292,7 +297,7 @@
       "status": "FAILED"
     }
   ],
-  "recordedByCommit": "f1671d6d23e29847ffb6bcb523cc15c81be6be54",
+  "recordedByCommit": "bd05c9ccfbe9c457b8ca5fc96a0629fd5280877f",
   "releaseReady": false,
   "schemaVersion": 1
 }

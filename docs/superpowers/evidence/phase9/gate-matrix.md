@@ -1,7 +1,7 @@
 # Phase 9 Gate Matrix
 
 - Candidate commit: `b84c2281ca4f96874dbf27f686df375d7082b305`
-- Recorded by commit: `f1671d6d23e29847ffb6bcb523cc15c81be6be54`
+- Recorded by commit: `bd05c9ccfbe9c457b8ca5fc96a0629fd5280877f`
 - Evaluation mode: `candidate`
 - Catalog complete: `true`
 - Release ready: `false`
@@ -35,11 +35,11 @@
 | P3-TOOLCHAIN-WINDOWS-CLANGCL | 3 | toolchain | MISSING |  |  |  |
 | P3-TOOLCHAIN-WINDOWS-MSVC | 3 | toolchain | MISSING |  |  |  |
 | P3-WORKSPACE-TRUST-PATHS | 3 | workspace-security | MISSING |  |  |  |
-| P4-CPPUTEST-CPPUMOCK | 4 | framework | MISSING |  |  |  |
-| P4-DISCOVERY-CTEST | 4 | discovery | MISSING |  |  |  |
-| P4-RECOVERY-AND-10000-BACKEND | 4 | resilience | MISSING |  |  |  |
-| P4-SELECTION-AND-RERUN | 4 | execution | MISSING |  |  |  |
-| P4-UNITY-CMOCK | 4 | framework | MISSING |  |  |  |
+| P4-CPPUTEST-CPPUMOCK | 4 | framework | MISSING |  | missing |  |
+| P4-DISCOVERY-CTEST | 4 | discovery | MISSING |  | missing |  |
+| P4-RECOVERY-AND-10000-BACKEND | 4 | resilience | MISSING |  | missing |  |
+| P4-SELECTION-AND-RERUN | 4 | execution | MISSING |  | missing |  |
+| P4-UNITY-CMOCK | 4 | framework | MISSING |  | missing |  |
 | P5-COVERAGE-FAULT-MAPPING | 5 | coverage | MISSING |  |  |  |
 | P5-COVERAGE-REPORTS | 5 | reports | MISSING |  |  |  |
 | P5-LINUX-CLANG-COVERAGE | 5 | toolchain | MISSING |  | missing |  |
