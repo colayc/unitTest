@@ -7,7 +7,7 @@
     "missing": 46,
     "pass": 0
   },
-  "currentCommit": "bd05c9ccfbe9c457b8ca5fc96a0629fd5280877f",
+  "currentCommit": "c5529e19bcab31674d73a599e29c22d30bcdb80a",
   "evaluationMode": "candidate",
   "gates": [
     {
@@ -100,10 +100,12 @@
       "status": "MISSING"
     },
     {
+      "artifactAvailability": "missing",
       "id": "P5-COVERAGE-FAULT-MAPPING",
       "status": "MISSING"
     },
     {
+      "artifactAvailability": "missing",
       "id": "P5-COVERAGE-REPORTS",
       "status": "MISSING"
     },
@@ -113,6 +115,7 @@
       "status": "MISSING"
     },
     {
+      "artifactAvailability": "missing",
       "id": "P5-LINUX-GCC-COVERAGE",
       "status": "MISSING"
     },
@@ -121,6 +124,7 @@
       "status": "MISSING"
     },
     {
+      "artifactAvailability": "missing",
       "id": "P5-WINDOWS-LLVM-COVERAGE",
       "status": "MISSING"
     },
@@ -297,7 +301,7 @@
       "status": "FAILED"
     }
   ],
-  "recordedByCommit": "bd05c9ccfbe9c457b8ca5fc96a0629fd5280877f",
+  "recordedByCommit": "c5529e19bcab31674d73a599e29c22d30bcdb80a",
   "releaseReady": false,
   "schemaVersion": 1
 }

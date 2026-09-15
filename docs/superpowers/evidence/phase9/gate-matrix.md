@@ -1,7 +1,7 @@
 # Phase 9 Gate Matrix
 
 - Candidate commit: `b84c2281ca4f96874dbf27f686df375d7082b305`
-- Recorded by commit: `bd05c9ccfbe9c457b8ca5fc96a0629fd5280877f`
+- Recorded by commit: `c5529e19bcab31674d73a599e29c22d30bcdb80a`
 - Evaluation mode: `candidate`
 - Catalog complete: `true`
 - Release ready: `false`
@@ -40,12 +40,12 @@
 | P4-RECOVERY-AND-10000-BACKEND | 4 | resilience | MISSING |  | missing |  |
 | P4-SELECTION-AND-RERUN | 4 | execution | MISSING |  | missing |  |
 | P4-UNITY-CMOCK | 4 | framework | MISSING |  | missing |  |
-| P5-COVERAGE-FAULT-MAPPING | 5 | coverage | MISSING |  |  |  |
-| P5-COVERAGE-REPORTS | 5 | reports | MISSING |  |  |  |
+| P5-COVERAGE-FAULT-MAPPING | 5 | coverage | MISSING |  | missing |  |
+| P5-COVERAGE-REPORTS | 5 | reports | MISSING |  | missing |  |
 | P5-LINUX-CLANG-COVERAGE | 5 | toolchain | MISSING |  | missing |  |
-| P5-LINUX-GCC-COVERAGE | 5 | toolchain | MISSING |  |  |  |
+| P5-LINUX-GCC-COVERAGE | 5 | toolchain | MISSING |  | missing |  |
 | P5-PROTOCOL-V14-COMPAT | 5 | compatibility | MISSING |  |  |  |
-| P5-WINDOWS-LLVM-COVERAGE | 5 | toolchain | MISSING |  |  |  |
+| P5-WINDOWS-LLVM-COVERAGE | 5 | toolchain | MISSING |  | missing |  |
 | P6-BRANDING-AND-BUILTIN-REGISTRATION | 6 | product-shell | MISSING |  |  |  |
 | P6-CODEOSS-HOST-SMOKE | 6 | integration | MISSING |  | missing |  |
 | P6-SERVICE-LIFECYCLE | 6 | lifecycle | MISSING |  |  |  |
