@@ -528,3 +528,145 @@ exit 1
 - Timing gates are unchanged and remain fail-closed; four full final-code performance runs passed on this host, but this does not guarantee stability under arbitrary CI contention. This fix did not run Ubuntu CI.
 - Canonical runtime validation accepts stable three-component Node release versions. A future policy permitting prerelease/nightly runtime strings or newly introduced platform/architecture values would need an explicit schema update.
 - The historical checked-in performance evidence was intentionally not rewritten by this code-only fix; publishing replacement candidate evidence remains separate authorized work.
+
+## Final-fix continuation — reject intermittent operation failures (2026-09-15)
+
+### Final code SHA and scope
+
+- Final code SHA for this continuation: `20535d6a60f660a72e11688c0cd7bcd840439ae5` — `test: add phase9 performance baseline harness`. This supersedes `61cb0d7d4658319098b0f6a5cfc2bb24993ac849` as the latest reviewed harness code state and retains its portable runtime/hardware validation.
+- Only `tools/phase9/performance.mjs`, `tools/phase9/performance.test.mjs`, and this appended report changed. Workflow, evidence, CMake, release, producer/foundation, and signing were not modified; no agents were dispatched.
+- `measured()` previously discarded warm-up results and retained only the final measured result. It now collects every operation result from the complete warm-up and all repeats in all five samples, then requires every result to equal the fixed expected value before summarization or publishing a correctness record. Any mismatch rejects the scenario with a fixed, scenario-prefixed error that does not echo the observed value.
+- The memory scenario likewise checks each allocation's byte length instead of allowing an early incorrect allocation to be overwritten by a later successful one. Its existing warm-up check remains intact.
+- Existing `timedScenario` and `memoryScenario` functions were exposed as named exports without changing their behavior before running RED tests. This permits focused regression testing through the real scenario implementations without adding test-only runtime configuration. The timed unit tests use a deterministic clock only to isolate correctness from timing noise; full baseline/CLI tests still use the actual clock and unmodified stability checks.
+
+### RED evidence before the behavioral change
+
+The initial two grouped regressions failed for the expected missing rejection/exception, while the success-case characterization passed (3 tests, 1 pass, 2 fail, `1091.0362 ms`). The cases were then split into subtests so every first/middle failure was independently demonstrated against the old behavior:
+
+```text
+$ node --test --test-name-pattern='timed scenarios|memory scenario rejects' tools/phase9/performance.test.mjs
+▶ timed scenarios reject intermittent incorrect results throughout warm-up and samples
+  ✖ incorrect operation 0 (2.7654ms)
+  ✖ incorrect operation 1 (0.3924ms)
+  ✖ incorrect operation 3 (0.3032ms)
+  ✖ incorrect operation 7 (0.3108ms)
+  ✖ incorrect operation 17 (0.3516ms)
+✖ timed scenarios reject intermittent incorrect results throughout warm-up and samples (5.8874ms)
+✔ timed scenarios preserve the fixed expected count when all repetitions succeed (1.0135ms)
+▶ memory scenario rejects an incorrect first or middle allocation before a later success
+  ✖ incorrect allocation 1 (1.6828ms)
+  ✖ incorrect allocation 3 (1.4628ms)
+✖ memory scenario rejects an incorrect first or middle allocation before a later success (3.6239ms)
+ℹ tests 10
+ℹ pass 1
+ℹ fail 9
+ℹ duration_ms 1072.9405
+AssertionError [ERR_ASSERTION]: Missing expected rejection.
+AssertionError [ERR_ASSERTION]: Missing expected exception.
+exit 1
+```
+
+Indices are zero-based: timed operations 0 and 1 are early/middle warm-up; 3 and 7 are early/middle measured operations; 17 is the final operation. Each case injects exactly one incorrect result. Memory allocation 0 is warm-up; 1 and 3 are first/middle measured allocations, with subsequent allocations configured to succeed.
+
+### GREEN focused evidence
+
+```text
+$ node --test --test-name-pattern='timed scenarios|memory scenario rejects' tools/phase9/performance.test.mjs
+▶ timed scenarios reject intermittent incorrect results throughout warm-up and samples
+  ✔ incorrect operation 0 (1.6769ms)
+  ✔ incorrect operation 1 (0.3079ms)
+  ✔ incorrect operation 3 (0.246ms)
+  ✔ incorrect operation 7 (0.268ms)
+  ✔ incorrect operation 17 (0.3281ms)
+✔ timed scenarios reject intermittent incorrect results throughout warm-up and samples (4.3625ms)
+✔ timed scenarios preserve the fixed expected count when all repetitions succeed (1.168ms)
+▶ memory scenario rejects an incorrect first or middle allocation before a later success
+  ✔ incorrect allocation 1 (0.7583ms)
+  ✔ incorrect allocation 3 (0.9616ms)
+✔ memory scenario rejects an incorrect first or middle allocation before a later success (2.1436ms)
+ℹ tests 10
+ℹ pass 10
+ℹ fail 0
+ℹ duration_ms 1081.502
+exit 0
+```
+
+### Fresh full verification
+
+All commands used the same pinned Node `v24.19.0` PATH described above and pnpm `11.4.0` wrapper. Counts include nested subtests.
+
+```text
+$ 1..3 | ForEach-Object { Write-Output "Intermittent-fix performance run $_"; node --test tools/phase9/performance.test.mjs; Write-Output "Exit code: $LASTEXITCODE" }
+Intermittent-fix performance run 1
+ℹ tests 22
+ℹ pass 22
+ℹ fail 0
+ℹ duration_ms 21901.5668
+Exit code: 0
+Intermittent-fix performance run 2
+ℹ tests 22
+ℹ pass 22
+ℹ fail 0
+ℹ duration_ms 22018.8848
+Exit code: 0
+Intermittent-fix performance run 3
+ℹ tests 22
+ℹ pass 22
+ℹ fail 0
+ℹ duration_ms 22309.1028
+Exit code: 0
+
+$ .superpowers/runtime/task10-fixed-bin/pnpm.cmd test:phase9:performance
+$ tsc -b apps/code-oss-extension/tsconfig.json && node --test tools/phase9/performance.test.mjs
+ℹ tests 22
+ℹ pass 22
+ℹ fail 0
+ℹ duration_ms 21876.4565
+exit 0
+
+$ node node_modules/typescript/bin/tsc -b apps/code-oss-extension/tsconfig.json --force
+(no stdout; exit 0)
+
+$ node --test apps/code-oss-extension/dist/test/testing-api-benchmark.test.js
+✔ 10,000 item catalog keeps every Test Item identity for the same revision (130.0672ms)
+ℹ {"runtime":"node-24.19.0","platform":"win32-x64","itemCount":10000,"verifiedIdentityCount":10000,"revision":"benchmark-r1","elapsedMs":126.49,"replacementCountAfterSameRevision":0}
+ℹ tests 1
+ℹ pass 1
+ℹ fail 0
+ℹ duration_ms 1210.7666
+exit 0
+
+$ node --test tools/workspace-smoke/workspace-smoke.test.mjs
+ℹ tests 21
+ℹ pass 21
+ℹ fail 0
+ℹ duration_ms 1525.2577
+exit 0
+
+$ node --test tools/phase9/validate.test.mjs tools/phase9/audit.test.mjs
+ℹ tests 98
+ℹ pass 98
+ℹ fail 0
+ℹ duration_ms 11856.3903
+exit 0
+
+$ git diff --check
+(no whitespace errors; exit 0; LF-to-CRLF conversion warnings only)
+```
+
+### Renderer check: expected evidence-lineage drift remains unresolved
+
+```text
+$ node tools/phase9/render.mjs --registry tools/phase9/gates.json --baseline docs/superpowers/evidence/phase9/baseline.json --receipts docs/superpowers/evidence/phase9/receipts --repository-root . --json-out docs/superpowers/evidence/phase9/gate-matrix.json --markdown-out docs/superpowers/evidence/phase9/gate-matrix.md --check
+PHASE9_MATRIX_DRIFT: rendering failed
+exit 1
+```
+
+The earlier schema-wave renderer check ran before its code commit and passed. After that commit, the checked-in candidate `a3e8a844479983a4ba1f803babd4001ead0422c6` has a descendant with tested-content changes, so the existing candidate matrix no longer matches. A read-only evaluation using `loadPhase9Inputs`, Git's candidate-to-HEAD changed paths, and `evaluateRecordedMatrix` confirmed:
+
+```text
+{"counts":{"pass":0,"missing":46,"failed":13,"deferred":3},"reasons":["candidate-descendant-changed-tested-content"]}
+exit 0
+```
+
+No evidence was rewritten to clear this failure. Replacement candidate evidence requires the separately authorized evidence workflow. The prior optional expanded workspace-suite CMake/PATH limitation also remains; that out-of-scope suite was not rerun in this continuation. No timing gates, sample handling, portable schema fields, or CI authority boundaries were relaxed.
