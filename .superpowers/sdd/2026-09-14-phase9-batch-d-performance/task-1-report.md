@@ -113,7 +113,7 @@ No workflow changes were made; the Task 2 workflow contract remains intentionall
 Reviewed code commit:
 
 ```text
-19ec2b1d1db3316232ebc390c3ad966e22d50277 — test: add phase9 performance baseline harness
+cdd278967510dc4dc048dbd86fd4b8034692c092 — test: add phase9 performance baseline harness
 ```
 
 ### Changes
@@ -122,7 +122,7 @@ Reviewed code commit:
 - The shared fixture instantiates the real `TestingApiAdapter`, performs two refreshes of the same 10,000-item catalog revision, snapshots all 10,000 item references, and verifies every identity plus the complete count and mutation totals.
 - The Node performance runner imports the built adapter and the emitted shared fixture. Its discovery measurements therefore execute the same real adapter behavior as the compiled TypeScript benchmark.
 - The memory scenario retains five separate 1 MiB `Buffer` allocations, probes `process.memoryUsage().rss` before and after each allocation, and records the allocation's exact `byteLength`. This avoids GC/page-accounting noise without rewriting observed samples. Validation still rejects negative, non-finite, malformed, or CV-over-0.20 samples.
-- Timed warm-ups now use the same repeat count as measured samples. The formerly too-short filter workload was lengthened enough to measure scheduler/JIT noise rather than rounding noise while retaining fail-closed CV validation.
+- Timed warm-ups now use the same repeat count as measured samples. A committed-state standalone CLI check then correctly failed closed on short filter/cancel samples; those bounded workloads were lengthened and three subsequent standalone runs had maximum CVs `0.0922442076474254`, `0.11179821135254`, and `0.115839611487121`, all below `0.20` without rewriting samples.
 - `test:phase9:performance` now builds the extension TypeScript target before running the Node contract tests, making the runner's built adapter dependency explicit.
 
 ### RED evidence
@@ -161,7 +161,7 @@ Error [ERR_MODULE_NOT_FOUND]: Cannot find module 'C:\codex_project\unitTest\apps
 
 ### Verification
 
-Three consecutive fresh focused runs passed; their total durations were `15962.4662 ms`, `15841.115 ms`, and `15630.8871 ms`:
+Three consecutive focused runs passed during the main refactor; their total durations were `15962.4662 ms`, `15841.115 ms`, and `15630.8871 ms`. After final stability tuning, the pinned package run and an additional direct run both passed:
 
 ```text
 $ node --test tools/phase9/performance.test.mjs
@@ -169,6 +169,8 @@ $ node --test tools/phase9/performance.test.mjs
 # tests 6
 # pass 6
 # fail 0
+# pinned duration_ms 23423.635
+# direct duration_ms 22855.9399
 ```
 
 Pinned repository toolchain verification used bundled Node `v24.19.0` and pnpm `11.4.0`:
@@ -179,7 +181,7 @@ $ tsc -b apps/code-oss-extension/tsconfig.json && node --test tools/phase9/perfo
 tests 6
 pass 6
 fail 0
-duration_ms 13664.6591
+duration_ms 23423.635
 ```
 
 Fresh TypeScript build and compiled benchmark:
@@ -201,10 +203,11 @@ duration_ms 1280.4554
 Canonical CLI run:
 
 ```text
-$ node tools/phase9/performance.mjs --out .superpowers/phase9/performance/baseline.json
-(no stdout; exit 0)
-memory samplesBytes: [1048576,1048576,1048576,1048576,1048576]
-maximum scenario coefficientOfVariation: 0.13590599839688408
+$ 1..3 | ForEach-Object { node tools/phase9/performance.mjs --out ".superpowers/phase9/performance/baseline-$_.json" }
+run 1: filter CV 0.0657549158605745; cancel CV 0.0594886863151849; maximum CV 0.0922442076474254
+run 2: filter CV 0.0181643373745536; cancel CV 0.0579070626834118; maximum CV 0.11179821135254
+run 3: filter CV 0.0719699448000002; cancel CV 0.0491398852347939; maximum CV 0.115839611487121
+all memory samplesBytes: [1048576,1048576,1048576,1048576,1048576]
 ```
 
 Workspace smoke remains intentionally RED until Task 2 adds the workflow job:
