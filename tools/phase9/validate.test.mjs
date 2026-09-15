@@ -951,6 +951,7 @@ test("generic successful foundation jobs cannot satisfy feature-specific gates w
   const registry = await readCanonicalJson(gateRegistryPath, { label: "Phase 1 through 9 registry", maxBytes: 1024 * 1024 });
   const gateArtifacts = {
     "P5-LINUX-CLANG-COVERAGE": "linux-clang-coverage-report",
+    "P5-WINDOWS-LLVM-COVERAGE": "coverage-execution-windows",
     "P6-CODEOSS-HOST-SMOKE": "code-oss-host-smoke-report",
     "P7-COVERAGE-UI-AND-SOURCE-DECORATION": "coverage-ui-source-decoration-report",
     "P7-HISTORY-AND-ARTIFACT-BROWSER": "history-artifact-browser-report",
@@ -983,6 +984,42 @@ test("generic successful foundation jobs cannot satisfy feature-specific gates w
   for (const gateId of gateIds) {
     assert.equal(matrix.gates.find(({ id }) => id === gateId).status, "MISSING", `${gateId} requires feature-specific evidence`);
     assert.deepEqual(registry.gates.find(({ id }) => id === gateId).verification.artifacts, [gateArtifacts[gateId]]);
+  }
+});
+
+test("P5 coverage gates require the closed Linux GCC and Windows LLVM artifacts", async () => {
+  const registry = await readCanonicalJson(gateRegistryPath, { label: "Phase 5 registry", maxBytes: 1024 * 1024 });
+  const gateArtifacts = {
+    "P5-COVERAGE-FAULT-MAPPING": ["coverage-execution-windows", "linux-gcc-coverage-report"],
+    "P5-COVERAGE-REPORTS": ["coverage-execution-windows", "linux-gcc-coverage-report"],
+    "P5-LINUX-GCC-COVERAGE": ["linux-gcc-coverage-report"],
+    "P5-WINDOWS-LLVM-COVERAGE": ["coverage-execution-windows"],
+  };
+  const gateIds = Object.keys(gateArtifacts);
+  const receipt = githubReceipt({
+    receiptId: "github-actions-p5-without-closed-artifacts",
+    gateIds,
+    evidence: {
+      workflowPath: ".github/workflows/foundation.yml",
+      runId: "42",
+      jobs: [
+        { name: "coverage-linux-gcc", conclusion: "success" },
+        { name: "verify-windows", conclusion: "success" },
+      ],
+      artifacts: [],
+    },
+  });
+  const matrix = evaluateRecordedMatrix({
+    registry,
+    baseline: { schemaVersion: 1, candidateCommit, evaluationMode: "historical", receiptIds: [receipt.receiptId] },
+    receipts: [receipt],
+    currentCommit,
+    changedPaths: [],
+  });
+
+  for (const gateId of gateIds) {
+    assert.equal(matrix.gates.find(({ id }) => id === gateId).status, "MISSING", `${gateId} requires closed coverage artifacts`);
+    assert.deepEqual(registry.gates.find(({ id }) => id === gateId).verification.artifacts, gateArtifacts[gateId]);
   }
 });
 

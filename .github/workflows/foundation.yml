@@ -168,7 +168,7 @@ jobs:
       - if: ${{ steps.windows-coverage-evidence.outcome == 'success' }}
         uses: actions/upload-artifact@v7
         with:
-          name: coverage-execution-windows-${{ github.run_attempt }}
+          name: coverage-execution-windows
           path: .native-e2e/artifacts/windows/coverage-execution-report.json
           if-no-files-found: error
       - if: always()
@@ -443,7 +443,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: linux-gcc-coverage-report-${{ github.run_attempt }}
+          name: linux-gcc-coverage-report
           path: .native-e2e/artifacts/linux/linux-gcc-coverage-report.json
           if-no-files-found: error
       - if: always()

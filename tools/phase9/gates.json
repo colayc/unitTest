@@ -598,7 +598,10 @@
       ],
       "title": "Coverage failure and fault mapping",
       "verification": {
-        "artifacts": [],
+        "artifacts": [
+          "coverage-execution-windows",
+          "linux-gcc-coverage-report"
+        ],
         "commands": [
           "go test ./apps/test-service/internal/coverageexec ./apps/test-service/internal/coveragerun"
         ],
@@ -630,7 +633,10 @@
       ],
       "title": "Deterministic coverage JSON JUnit and HTML reports",
       "verification": {
-        "artifacts": [],
+        "artifacts": [
+          "coverage-execution-windows",
+          "linux-gcc-coverage-report"
+        ],
         "commands": [
           "go test ./apps/test-service/internal/coveragereport ./apps/test-service/internal/coveragerun"
         ],
@@ -687,7 +693,9 @@
       ],
       "title": "Linux GCC gcovr coverage execution",
       "verification": {
-        "artifacts": [],
+        "artifacts": [
+          "linux-gcc-coverage-report"
+        ],
         "commands": [
           "pnpm --filter code-oss-extension test:coverage-service-smoke:linux"
         ],
@@ -750,7 +758,9 @@
       ],
       "title": "Windows clang-cl LLVM coverage execution",
       "verification": {
-        "artifacts": [],
+        "artifacts": [
+          "coverage-execution-windows"
+        ],
         "commands": [
           "pnpm --filter code-oss-extension test:coverage-service-smoke"
         ],
