@@ -1125,10 +1125,15 @@ test("checked-in candidate evidence keeps deferred and unproven gates closed", a
   assert.equal(matrix.releaseReady, false);
   assert.equal(gatesById.get("P8-SIGN-WINDOWS")?.status, "DEFERRED");
   const selectedReceipts = inputs.receipts.filter((receipt) => inputs.baseline.receiptIds.includes(receipt.receiptId));
-  const expectedPerformanceStatus = selectedReceipts.some((receipt) => receipt.gateIds.includes("P9-PERF-MEMORY"))
-    ? "PASS"
-    : "MISSING";
-  assert.equal(gatesById.get("P9-PERF-MEMORY")?.status, expectedPerformanceStatus);
+  const performanceGate = gatesById.get("P9-PERF-MEMORY");
+  assert.equal(performanceGate?.status, "FAILED");
+  assert.equal(performanceGate?.reason, "candidate-descendant-changed-tested-content");
+  assert.equal(
+    selectedReceipts.some(
+      (receipt) => receipt.receiptId === performanceGate?.receiptId && receipt.gateIds.includes("P9-PERF-MEMORY"),
+    ),
+    true,
+  );
 });
 
 test("candidate CLI derives tested-content changes from Git", async () => {
