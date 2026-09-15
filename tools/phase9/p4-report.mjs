@@ -36,6 +36,25 @@ const SCENARIO_IDS = Object.freeze([
   "stale-catalog",
   "timeout",
 ]);
+const SCENARIO_RESULTS = Object.freeze({
+  all: Object.freeze(["failed", "aggregate"]),
+  "assertion-failure": Object.freeze(["failed", "assertion"]),
+  cancel: Object.freeze(["cancelled", "cancelled"]),
+  crash: Object.freeze(["errored", "crash"]),
+  discovery: Object.freeze(["passed", "discovery"]),
+  "failed-rerun": Object.freeze(["failed", "assertion"]),
+  filter: Object.freeze(["passed", "selection"]),
+  "malformed-output": Object.freeze(["errored", "malformed-output"]),
+  "mock-failure": Object.freeze(["failed", "mock-expectation"]),
+  "opaque-fallback": Object.freeze(["passed", "opaque-fallback"]),
+  "reconnect-replay": Object.freeze(["passed", "replay"]),
+  repeat: Object.freeze(["passed", "repeat"]),
+  "service-restart": Object.freeze(["interrupted", "service-restarted"]),
+  single: Object.freeze(["passed", "test"]),
+  skip: Object.freeze(["skipped", "ignored"]),
+  "stale-catalog": Object.freeze(["rejected", "stale-catalog"]),
+  timeout: Object.freeze(["timed-out", "timeout"]),
+});
 const FRAMEWORK_IDENTITIES = Object.freeze({
   cpputest: Object.freeze({
     version: "4.0",
@@ -62,10 +81,27 @@ function exactIds(values, expected) {
   return values.length === expected.length && values.every((value, index) => value === expected[index]);
 }
 
+function timestamp(value, label) {
+  const milliseconds = Date.parse(value);
+  if (!Number.isFinite(milliseconds) || new Date(milliseconds).toISOString() !== value) invalid(label);
+  return milliseconds;
+}
+
+function validateInterval(startedAt, finishedAt, label, outer) {
+  const started = timestamp(startedAt, `${label} startedAt`);
+  const finished = timestamp(finishedAt, `${label} finishedAt`);
+  if (started >= finished || (outer && (started < outer.started || finished > outer.finished))) invalid(`${label} interval`);
+  return { started, finished };
+}
+
 export function validatePlatformReport(report, { candidateCommit, platform }) {
   if (typeof validatePlatformSchema !== "function" || !validatePlatformSchema(report)) invalid("platform report schema");
-  if (report.candidateCommit !== candidateCommit || report.platform !== platform) invalid("platform report identity");
+  if (report.candidateCommit !== candidateCommit || report.sourceCommit !== candidateCommit || report.platform !== platform) {
+    invalid("platform report identity");
+  }
+  const platformInterval = validateInterval(report.startedAt, report.finishedAt, `${platform} report`);
   if (!exactIds(report.toolchains.map(({ family }) => family), PLATFORM_TOOLCHAINS[platform])) invalid("platform toolchains");
+  const resultArtifactDigests = new Set();
   for (const toolchain of report.toolchains) {
     if (!exactIds(toolchain.frameworks.map(({ id }) => id), FRAMEWORK_IDS)) invalid("framework set");
     for (const framework of toolchain.frameworks) {
@@ -73,9 +109,27 @@ export function validatePlatformReport(report, { candidateCommit, platform }) {
       if (framework.dependencyVersion !== identity.version
           || framework.dependencySha256 !== identity.sha256
           || framework.dependencyTreeSha256 !== identity.treeSha256) invalid("framework dependency identity");
+      if ((framework.id === "unity") !== Object.hasOwn(framework, "cMockProvenance")) invalid("CMock provenance");
       if (!exactIds(framework.scenarios.map(({ id }) => id), SCENARIO_IDS)) invalid("framework scenarios");
+      for (const scenario of framework.scenarios) {
+        const expected = SCENARIO_RESULTS[scenario.id];
+        if (scenario.candidateCommit !== candidateCommit
+            || scenario.platform !== platform
+            || scenario.toolchainFamily !== toolchain.family
+            || scenario.frameworkId !== framework.id
+            || scenario.catalogRevision !== framework.catalogRevision
+            || scenario.sourceArtifactSha256 !== framework.sourceArtifactSha256
+            || scenario.sourceLocationDigest !== framework.sourceLocationDigest
+            || scenario.executableArtifactSha256 !== framework.executableArtifactSha256
+            || scenario.observedOutcome !== expected[0]
+            || scenario.classification !== expected[1]) invalid(`${scenario.id} evidence binding`);
+        validateInterval(scenario.startedAt, scenario.finishedAt, `${scenario.id} scenario`, platformInterval);
+        if (resultArtifactDigests.has(scenario.resultArtifactSha256)) invalid("duplicate scenario artifact digest");
+        resultArtifactDigests.add(scenario.resultArtifactSha256);
+      }
     }
   }
+  validateInterval(report.benchmark.startedAt, report.benchmark.finishedAt, `${platform} benchmark`, platformInterval);
   return true;
 }
 
@@ -86,12 +140,25 @@ export function buildMatrixReport({ candidateCommit, windows, linux }) {
   const platforms = [linux, windows];
   const frameworkStableIdDigests = {};
   for (const frameworkId of FRAMEWORK_IDS) {
-    const digests = new Set(platforms.flatMap(({ toolchains }) => toolchains.map(
-      ({ frameworks }) => frameworks.find(({ id }) => id === frameworkId).stableIdDigest,
-    )));
-    if (digests.size !== 1) invalid(`${frameworkId} stable ID digest`);
-    frameworkStableIdDigests[frameworkId] = [...digests][0];
+    const frameworks = platforms.flatMap(({ toolchains }) => toolchains.map(
+      ({ frameworks: values }) => values.find(({ id }) => id === frameworkId),
+    ));
+    const stableIdDigests = new Set(frameworks.map(({ stableIdDigest }) => stableIdDigest));
+    const sourceArtifactDigests = new Set(frameworks.map(({ sourceArtifactSha256 }) => sourceArtifactSha256));
+    const sourceLocationDigests = new Set(frameworks.map(({ sourceLocationDigest }) => sourceLocationDigest));
+    if (stableIdDigests.size !== 1 || sourceArtifactDigests.size !== 1 || sourceLocationDigests.size !== 1) {
+      invalid(`${frameworkId} cross-platform evidence digest`);
+    }
+    if (frameworkId === "unity") {
+      const provenance = new Set(frameworks.map(({ cMockProvenance }) => JSON.stringify(cMockProvenance)));
+      if (provenance.size !== 1) invalid("CMock provenance drift");
+    }
+    frameworkStableIdDigests[frameworkId] = [...stableIdDigests][0];
   }
+  const resultArtifactDigests = platforms.flatMap(({ toolchains }) => toolchains.flatMap(
+    ({ frameworks }) => frameworks.flatMap(({ scenarios }) => scenarios.map(({ resultArtifactSha256 }) => resultArtifactSha256)),
+  ));
+  if (new Set(resultArtifactDigests).size !== resultArtifactDigests.length) invalid("cross-matrix scenario artifact substitution");
   if (linux.benchmark.stableIdDigest !== windows.benchmark.stableIdDigest) invalid("backend benchmark stable ID digest");
   const matrix = {
     schemaVersion: 1,
@@ -102,6 +169,7 @@ export function buildMatrixReport({ candidateCommit, windows, linux }) {
       id: "catalog-10000",
       itemCount: 10000,
       sampleCountPerPlatform: 3,
+      allocationBudgetPerOperation: 300000,
       stableIdDigest: linux.benchmark.stableIdDigest,
       status: "passed",
     },

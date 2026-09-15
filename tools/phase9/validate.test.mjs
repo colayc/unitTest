@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import Ajv2020 from "ajv/dist/2020.js";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -245,16 +246,46 @@ function githubReceipt(overrides = {}) {
   return { ...receipt, ...overrides, evidence: { ...receipt.evidence, ...overrides.evidence } };
 }
 
+function fixtureDigest(label) {
+  return createHash("sha256").update(label, "utf8").digest("hex");
+}
+
+const P4_SCENARIO_RESULTS = {
+  all: ["failed", "aggregate"],
+  "assertion-failure": ["failed", "assertion"],
+  cancel: ["cancelled", "cancelled"],
+  crash: ["errored", "crash"],
+  discovery: ["passed", "discovery"],
+  "failed-rerun": ["failed", "assertion"],
+  filter: ["passed", "selection"],
+  "malformed-output": ["errored", "malformed-output"],
+  "mock-failure": ["failed", "mock-expectation"],
+  "opaque-fallback": ["passed", "opaque-fallback"],
+  "reconnect-replay": ["passed", "replay"],
+  repeat: ["passed", "repeat"],
+  "service-restart": ["interrupted", "service-restarted"],
+  single: ["passed", "test"],
+  skip: ["skipped", "ignored"],
+  "stale-catalog": ["rejected", "stale-catalog"],
+  timeout: ["timed-out", "timeout"],
+};
+
 function p4PlatformReport(platform) {
   const families = platform === "win32" ? ["clang-cl", "msvc"] : ["clang", "gcc"];
   return {
     schemaVersion: 1,
     candidateCommit,
+    sourceCommit: candidateCommit,
     platform,
     architecture: "x64",
+    executionMode: "native",
+    publication: "atomic-after-cleanup",
+    startedAt: "2026-09-15T00:00:00.000Z",
+    finishedAt: "2026-09-15T00:20:00.000Z",
     toolchains: families.map((family) => ({
       family,
       compilerVersion: family === "msvc" ? "19.44.35228.0" : "22.1.8",
+      compilerSha256: fixtureDigest(`compiler:${platform}:${family}`),
       frameworks: [
         {
           id: "cpputest",
@@ -262,7 +293,6 @@ function p4PlatformReport(platform) {
           dependencySha256: "21c692105db15299b5529af81a11a7ad80397f92c122bd7bf1e4a4b0e85654f7",
           dependencyTreeSha256: "c564fb5e4e32836dc66f46efb86edb6f1f2fa6afa255a57052031aa00fc56f04",
           stableIdDigest: "b".repeat(64),
-          scenarios: P4_SCENARIO_IDS.map((id) => ({ id, status: "passed" })),
         },
         {
           id: "unity",
@@ -270,19 +300,88 @@ function p4PlatformReport(platform) {
           dependencySha256: "b41a66d45a6b99758fb3202ace6178177014d52fc524bf1f72687d93e9867292",
           dependencyTreeSha256: "abfb7b2b7aec36739a7b138490d2e9dd178cc4f00e806ed372cbb8cfe98f73ae",
           stableIdDigest: "c".repeat(64),
-          scenarios: P4_SCENARIO_IDS.map((id) => ({ id, status: "passed" })),
+          cMockProvenance: {
+            revision: "6f6f662d72657669657765642d636d6f636b2d31",
+            generatorVersion: "2.5.3",
+            inputSha256: fixtureDigest("cmock:input"),
+            outputSha256: fixtureDigest("cmock:output"),
+            manifestSha256: fixtureDigest("cmock:manifest"),
+            generatedAtRuntime: false,
+          },
         },
-      ],
+      ].map((framework) => {
+        const catalogRevision = fixtureDigest(`catalog-revision:${platform}:${family}:${framework.id}`);
+        const sourceArtifactSha256 = fixtureDigest(`source:${framework.id}`);
+        const sourceLocationDigest = fixtureDigest(`source-locations:${framework.id}`);
+        const executableArtifactSha256 = fixtureDigest(`executable:${platform}:${family}:${framework.id}`);
+        return {
+          ...framework,
+          catalogRevision,
+          catalogArtifactSha256: fixtureDigest(`catalog-artifact:${platform}:${family}:${framework.id}`),
+          sourceArtifactSha256,
+          sourceLocationDigest,
+          executableArtifactSha256,
+          scenarios: P4_SCENARIO_IDS.map((id, index) => ({
+            id,
+            status: "passed",
+            candidateCommit,
+            platform,
+            toolchainFamily: family,
+            frameworkId: framework.id,
+            catalogRevision,
+            sourceArtifactSha256,
+            sourceLocationDigest,
+            executableArtifactSha256,
+            resultArtifactSha256: fixtureDigest(`result:${platform}:${family}:${framework.id}:${id}`),
+            resultArtifactSizeBytes: 1024 + index,
+            startedAt: `2026-09-15T00:00:${String(10 + index).padStart(2, "0")}.000Z`,
+            finishedAt: `2026-09-15T00:01:${String(10 + index).padStart(2, "0")}.000Z`,
+            observedOutcome: P4_SCENARIO_RESULTS[id][0],
+            classification: P4_SCENARIO_RESULTS[id][1],
+          })),
+        };
+      }),
     })),
     benchmark: {
       id: "catalog-10000",
       itemCount: 10000,
       sampleCount: 3,
-      allocationsPerOperation: [320000, 320000, 320000],
+      allocationBudgetPerOperation: 300000,
+      allocationsPerOperation: [210120, 210120, 210120],
+      catalogRevision: fixtureDigest(`benchmark-catalog-revision:${platform}`),
+      catalogArtifactSha256: fixtureDigest(`benchmark-catalog-artifact:${platform}`),
       stableIdDigest: "d".repeat(64),
+      startedAt: "2026-09-15T00:18:00.000Z",
+      finishedAt: "2026-09-15T00:19:00.000Z",
       status: "passed",
     },
   };
+}
+
+function labelOnlyP4PlatformReport(platform) {
+  const report = p4PlatformReport(platform);
+  delete report.sourceCommit;
+  delete report.executionMode;
+  delete report.publication;
+  delete report.startedAt;
+  delete report.finishedAt;
+  for (const toolchain of report.toolchains) {
+    delete toolchain.compilerSha256;
+    for (const framework of toolchain.frameworks) {
+      delete framework.catalogRevision;
+      delete framework.catalogArtifactSha256;
+      delete framework.sourceArtifactSha256;
+      delete framework.sourceLocationDigest;
+      delete framework.executableArtifactSha256;
+      delete framework.cMockProvenance;
+      framework.scenarios = framework.scenarios.map(({ id, status }) => ({ id, status }));
+    }
+  }
+  delete report.benchmark.catalogRevision;
+  delete report.benchmark.catalogArtifactSha256;
+  delete report.benchmark.startedAt;
+  delete report.benchmark.finishedAt;
+  return report;
 }
 
 async function fixture(name, bytes) {
@@ -967,6 +1066,7 @@ test("P4 report CLI aggregates the exact four-toolchain framework and backend be
     id: "catalog-10000",
     itemCount: 10000,
     sampleCountPerPlatform: 3,
+    allocationBudgetPerOperation: 300000,
     stableIdDigest: "d".repeat(64),
     status: "passed",
   });
@@ -975,11 +1075,23 @@ test("P4 report CLI aggregates the exact four-toolchain framework and backend be
 test("P4 report validator rejects incomplete, unlocked, failed, or cross-platform-inconsistent evidence", () => {
   const cases = [
     (windows) => { windows.toolchains[0].family = "gcc"; },
+    (windows) => { delete windows.startedAt; },
+    (windows) => { delete windows.toolchains[0].compilerSha256; },
     (windows) => { windows.toolchains[0].frameworks[0].scenarios.pop(); },
     (windows) => { windows.toolchains[0].frameworks[0].scenarios[0].status = "failed"; },
+    (windows) => { delete windows.toolchains[0].frameworks[0].catalogRevision; },
+    (windows) => { delete windows.toolchains[0].frameworks[0].sourceArtifactSha256; },
+    (windows) => { delete windows.toolchains[0].frameworks[0].sourceLocationDigest; },
+    (windows) => { delete windows.toolchains[0].frameworks[0].scenarios[0].resultArtifactSha256; },
+    (windows) => { delete windows.toolchains[0].frameworks[1].cMockProvenance; },
     (windows) => { windows.toolchains[0].frameworks[0].dependencySha256 = "0".repeat(64); },
     (windows) => { windows.toolchains[0].frameworks[0].stableIdDigest = "0".repeat(64); },
+    (windows) => { windows.toolchains[0].frameworks[1].cMockProvenance.outputSha256 = "0".repeat(64); },
+    (windows) => { windows.toolchains[0].frameworks[0].scenarios[0].catalogRevision = "0".repeat(64); },
+    (windows) => { windows.toolchains[0].frameworks[0].scenarios[0].finishedAt = windows.startedAt; },
     (windows) => { windows.benchmark.itemCount = 9999; },
+    (windows) => { windows.benchmark.allocationsPerOperation[0] = 300001; },
+    (windows) => { delete windows.benchmark.catalogArtifactSha256; },
     (windows) => { windows.unreviewed = true; },
   ];
   for (const mutate of cases) {
@@ -991,6 +1103,29 @@ test("P4 report validator rejects incomplete, unlocked, failed, or cross-platfor
       /PHASE9_P4_REPORT_INVALID/u,
     );
   }
+});
+
+test("P4 report validator rejects label-only reports without native evidence bindings", () => {
+  assert.throws(
+    () => buildMatrixReport({
+      candidateCommit,
+      windows: labelOnlyP4PlatformReport("win32"),
+      linux: labelOnlyP4PlatformReport("linux"),
+    }),
+    /PHASE9_P4_REPORT_INVALID/u,
+  );
+});
+
+test("P4 report validator rejects a scenario result substituted from another toolchain", () => {
+  const windows = p4PlatformReport("win32");
+  const linux = p4PlatformReport("linux");
+  windows.toolchains[1].frameworks[0].scenarios[0] = structuredClone(
+    windows.toolchains[0].frameworks[0].scenarios[0],
+  );
+  assert.throws(
+    () => buildMatrixReport({ candidateCommit, windows, linux }),
+    /PHASE9_P4_REPORT_INVALID/u,
+  );
 });
 
 test("only the exact three approved Phase 8 gates may be deferred", () => {

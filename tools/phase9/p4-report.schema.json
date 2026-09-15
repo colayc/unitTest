@@ -11,12 +11,63 @@
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$"
+    },
+    "cmockProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "revision",
+        "generatorVersion",
+        "inputSha256",
+        "outputSha256",
+        "manifestSha256",
+        "generatedAtRuntime"
+      ],
+      "properties": {
+        "revision": {
+          "$ref": "#/$defs/commit"
+        },
+        "generatorVersion": {
+          "type": "string",
+          "pattern": "^[0-9]+(?:\\.[0-9]+){1,2}$"
+        },
+        "inputSha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "outputSha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "manifestSha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "generatedAtRuntime": {
+          "const": false
+        }
+      }
+    },
     "scenario": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "id",
-        "status"
+        "status",
+        "candidateCommit",
+        "platform",
+        "toolchainFamily",
+        "frameworkId",
+        "catalogRevision",
+        "sourceArtifactSha256",
+        "sourceLocationDigest",
+        "executableArtifactSha256",
+        "resultArtifactSha256",
+        "resultArtifactSizeBytes",
+        "startedAt",
+        "finishedAt",
+        "observedOutcome",
+        "classification"
       ],
       "properties": {
         "id": {
@@ -42,6 +93,87 @@
         },
         "status": {
           "const": "passed"
+        },
+        "candidateCommit": {
+          "$ref": "#/$defs/commit"
+        },
+        "platform": {
+          "enum": [
+            "linux",
+            "win32"
+          ]
+        },
+        "toolchainFamily": {
+          "enum": [
+            "clang",
+            "clang-cl",
+            "gcc",
+            "msvc"
+          ]
+        },
+        "frameworkId": {
+          "enum": [
+            "cpputest",
+            "unity"
+          ]
+        },
+        "catalogRevision": {
+          "$ref": "#/$defs/digest"
+        },
+        "sourceArtifactSha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "sourceLocationDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "executableArtifactSha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "resultArtifactSha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "resultArtifactSizeBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1073741824
+        },
+        "startedAt": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "finishedAt": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "observedOutcome": {
+          "enum": [
+            "cancelled",
+            "errored",
+            "failed",
+            "interrupted",
+            "passed",
+            "rejected",
+            "skipped",
+            "timed-out"
+          ]
+        },
+        "classification": {
+          "enum": [
+            "aggregate",
+            "assertion",
+            "cancelled",
+            "crash",
+            "discovery",
+            "ignored",
+            "malformed-output",
+            "mock-expectation",
+            "opaque-fallback",
+            "repeat",
+            "replay",
+            "selection",
+            "service-restarted",
+            "stale-catalog",
+            "test",
+            "timeout"
+          ]
         }
       }
     },
@@ -53,6 +185,11 @@
         "dependencyVersion",
         "dependencySha256",
         "dependencyTreeSha256",
+        "catalogRevision",
+        "catalogArtifactSha256",
+        "sourceArtifactSha256",
+        "sourceLocationDigest",
+        "executableArtifactSha256",
         "stableIdDigest",
         "scenarios"
       ],
@@ -73,8 +210,26 @@
         "dependencyTreeSha256": {
           "$ref": "#/$defs/digest"
         },
+        "catalogRevision": {
+          "$ref": "#/$defs/digest"
+        },
+        "catalogArtifactSha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "sourceArtifactSha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "sourceLocationDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "executableArtifactSha256": {
+          "$ref": "#/$defs/digest"
+        },
         "stableIdDigest": {
           "$ref": "#/$defs/digest"
+        },
+        "cMockProvenance": {
+          "$ref": "#/$defs/cmockProvenance"
         },
         "scenarios": {
           "type": "array",
@@ -92,6 +247,7 @@
       "required": [
         "family",
         "compilerVersion",
+        "compilerSha256",
         "frameworks"
       ],
       "properties": {
@@ -107,6 +263,9 @@
           "type": "string",
           "pattern": "^[0-9]+(?:\\.[0-9]+){1,3}$",
           "maxLength": 64
+        },
+        "compilerSha256": {
+          "$ref": "#/$defs/digest"
         },
         "frameworks": {
           "type": "array",
@@ -125,8 +284,13 @@
         "id",
         "itemCount",
         "sampleCount",
+        "allocationBudgetPerOperation",
         "allocationsPerOperation",
+        "catalogRevision",
+        "catalogArtifactSha256",
         "stableIdDigest",
+        "startedAt",
+        "finishedAt",
         "status"
       ],
       "properties": {
@@ -139,17 +303,33 @@
         "sampleCount": {
           "const": 3
         },
+        "allocationBudgetPerOperation": {
+          "const": 300000
+        },
         "allocationsPerOperation": {
           "type": "array",
           "items": {
             "type": "integer",
-            "minimum": 0
+            "minimum": 0,
+            "maximum": 300000
           },
           "minItems": 3,
           "maxItems": 3
         },
+        "catalogRevision": {
+          "$ref": "#/$defs/digest"
+        },
+        "catalogArtifactSha256": {
+          "$ref": "#/$defs/digest"
+        },
         "stableIdDigest": {
           "$ref": "#/$defs/digest"
+        },
+        "startedAt": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "finishedAt": {
+          "$ref": "#/$defs/timestamp"
         },
         "status": {
           "const": "passed"
@@ -162,8 +342,13 @@
       "required": [
         "schemaVersion",
         "candidateCommit",
+        "sourceCommit",
         "platform",
         "architecture",
+        "executionMode",
+        "publication",
+        "startedAt",
+        "finishedAt",
         "toolchains",
         "benchmark"
       ],
@@ -174,6 +359,9 @@
         "candidateCommit": {
           "$ref": "#/$defs/commit"
         },
+        "sourceCommit": {
+          "$ref": "#/$defs/commit"
+        },
         "platform": {
           "enum": [
             "linux",
@@ -182,6 +370,18 @@
         },
         "architecture": {
           "const": "x64"
+        },
+        "executionMode": {
+          "const": "native"
+        },
+        "publication": {
+          "const": "atomic-after-cleanup"
+        },
+        "startedAt": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "finishedAt": {
+          "$ref": "#/$defs/timestamp"
         },
         "toolchains": {
           "type": "array",
@@ -245,6 +445,7 @@
             "id",
             "itemCount",
             "sampleCountPerPlatform",
+            "allocationBudgetPerOperation",
             "stableIdDigest",
             "status"
           ],
@@ -257,6 +458,9 @@
             },
             "sampleCountPerPlatform": {
               "const": 3
+            },
+            "allocationBudgetPerOperation": {
+              "const": 300000
             },
             "stableIdDigest": {
               "$ref": "#/$defs/digest"

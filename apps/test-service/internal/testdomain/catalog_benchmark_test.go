@@ -8,10 +8,24 @@ import (
 
 var catalog10000Result Catalog
 
+func TestCatalog10000AllocationBudget(t *testing.T) {
+	const maxAllocationsPerOperation = 300_000
+	input := catalog10000Input(t)
+	var err error
+	allocations := testing.AllocsPerRun(3, func() {
+		catalog10000Result, err = NewCatalog(input)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allocations > maxAllocationsPerOperation {
+		t.Fatalf("NewCatalog(10000 items) allocations/op = %.0f, want <= %d", allocations, maxAllocationsPerOperation)
+	}
+}
+
 func BenchmarkCatalog10000(b *testing.B) {
 	input := catalog10000Input(b)
 	b.ReportAllocs()
-	b.SetBytes(10_000)
 	b.ResetTimer()
 	for range b.N {
 		catalog, err := NewCatalog(input)
@@ -22,11 +36,11 @@ func BenchmarkCatalog10000(b *testing.B) {
 	}
 }
 
-func catalog10000Input(b *testing.B) Catalog {
-	b.Helper()
+func catalog10000Input(tb testing.TB) Catalog {
+	tb.Helper()
 	containerID, err := ContainerID("benchmark", "catalog.tests")
 	if err != nil {
-		b.Fatal(err)
+		tb.Fatal(err)
 	}
 	items := make([]Item, 10_000)
 	for index := range items {
@@ -38,7 +52,7 @@ func catalog10000Input(b *testing.B) Catalog {
 			Name:      name,
 		})
 		if itemErr != nil {
-			b.Fatal(itemErr)
+			tb.Fatal(itemErr)
 		}
 		items[index] = Item{
 			ID:          itemID,
