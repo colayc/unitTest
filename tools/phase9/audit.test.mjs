@@ -6,8 +6,9 @@ import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
-import { writeCanonicalJson } from "./canonical-json.mjs";
-import { auditGithubReceipt, evaluateAuditedMatrix } from "./audit.mjs";
+import { encodeCanonicalJson, writeCanonicalJson } from "./canonical-json.mjs";
+import { auditGithubReceipt, evaluateAuditedMatrix, parseP8ReportArchive } from "./audit.mjs";
+import { artifactNameForP8Gate } from "./p8-report.mjs";
 import { ALLOWED_DEFERRED_GATE_IDS, evaluateRecordedMatrix } from "./validate.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -126,8 +127,6 @@ function p8QualificationReport(signing = { signature_required: "0", signature_ou
     ],
     signing,
     outcome: "passed",
-    startedAt: "2026-09-15T00:00:00.000Z",
-    finishedAt: "2026-09-15T00:00:01.000Z",
     outcomes: [
       { id: "appimage-package", status: "passed" },
       { id: "install-lifecycle-linux", status: "passed" },
@@ -139,10 +138,11 @@ function p8QualificationReport(signing = { signature_required: "0", signature_ou
   };
 }
 
-function p8QualificationAuditInputs({ includeReport = true, signing, mutateReport } = {}) {
-  const name = "p8-qualification-unsigned-report-1";
+function p8QualificationAuditInputs({ includeReport = true, signing, mutateReport, contentSigning } = {}) {
   const report = p8QualificationReport(signing);
   mutateReport?.(report);
+  const contentReport = p8QualificationReport(contentSigning ?? signing);
+  const name = artifactNameForP8Gate("P8-QUALIFICATION-UNSIGNED", 1, contentReport);
   const packages = p8QualificationReport(signing).packages;
   return {
     receipt: validReceipt({
@@ -170,7 +170,48 @@ function p8QualificationAuditInputs({ includeReport = true, signing, mutateRepor
         { id: 10310420278, name, digest: `sha256:${digest}`, expired: false, workflow_run: { id: 34731651809 } },
       ],
     }),
+    reportArtifacts: new Map([[artifactId, { archiveDigest: digest, report: contentReport }]]),
   };
+}
+
+function crc32(bytes) {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function storedZip(name, content) {
+  const nameBytes = Buffer.from(name, "utf8");
+  const checksum = crc32(content);
+  const local = Buffer.alloc(30);
+  local.writeUInt32LE(0x04034b50, 0);
+  local.writeUInt16LE(20, 4);
+  local.writeUInt16LE(0x800, 6);
+  local.writeUInt32LE(checksum, 14);
+  local.writeUInt32LE(content.length, 18);
+  local.writeUInt32LE(content.length, 22);
+  local.writeUInt16LE(nameBytes.length, 26);
+  const central = Buffer.alloc(46);
+  central.writeUInt32LE(0x02014b50, 0);
+  central.writeUInt16LE(20, 4);
+  central.writeUInt16LE(20, 6);
+  central.writeUInt16LE(0x800, 8);
+  central.writeUInt32LE(checksum, 16);
+  central.writeUInt32LE(content.length, 20);
+  central.writeUInt32LE(content.length, 24);
+  central.writeUInt16LE(nameBytes.length, 28);
+  const centralOffset = local.length + nameBytes.length + content.length;
+  const centralSize = central.length + nameBytes.length;
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(1, 8);
+  eocd.writeUInt16LE(1, 10);
+  eocd.writeUInt32LE(centralSize, 12);
+  eocd.writeUInt32LE(centralOffset, 16);
+  return Buffer.concat([local, nameBytes, content, central, nameBytes, eocd]);
 }
 
 function assertUntrusted(run, expectedReceiptId = receiptId) {
@@ -511,6 +552,33 @@ test("auditing accepts only an exact unsigned P8 qualification report", () => {
     artifactAvailability: "available",
     releaseUsable: true,
   });
+});
+
+test("P8 report archive parser authenticates one canonical report entry", () => {
+  const report = p8QualificationReport();
+  const archive = storedZip("p8-report.json", Buffer.from(encodeCanonicalJson(report), "utf8"));
+  const parsed = parseP8ReportArchive(archive);
+  assert.deepEqual(parsed.report, report);
+  assert.match(parsed.archiveDigest, /^[0-9a-f]{64}$/u);
+
+  const substituted = Buffer.from(archive);
+  substituted[40] ^= 1;
+  assert.throws(() => parseP8ReportArchive(substituted), { code: "PHASE9_EVIDENCE_UNTRUSTED" });
+});
+
+test("Phase 9 audit workflow downloads only digest-qualified P8 report archives by artifact ID", async () => {
+  const workflow = await readFile(join(import.meta.dirname, "..", "..", ".github", "workflows", "phase9-gates.yml"), "utf8");
+  assert.match(workflow, /actions\/artifacts\/\$artifact_id\/zip/u);
+  assert.match(workflow, /\$reports_root\/\$artifact_id\.zip/u);
+  assert.match(workflow, /p8-\(install-lifecycle-linux\|install-lifecycle-windows\|license-audit\|linux-appimage-package\|qualification-unsigned\|runtime-producer-provenance\|windows-msix-package\)-report-\[1-9\]\[0-9\]\*-\[0-9a-f\]\{64\}/u);
+  assert.doesNotMatch(workflow, /actions\/artifacts\/\$artifact_name\/zip/u);
+});
+
+test("auditing rejects an unsigned embedded report substituted for signed artifact content", () => {
+  const input = p8QualificationAuditInputs({
+    contentSigning: { signature_required: "1", signature_outcome: "verified" },
+  });
+  assertUntrusted(() => auditGithubReceipt({ ...input, gateId: "P8-QUALIFICATION-UNSIGNED" }));
 });
 
 test("auditing downgrades missing or signed P8 qualification reports", () => {

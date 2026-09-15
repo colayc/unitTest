@@ -875,12 +875,13 @@ test("uploads expose immutable identities under attempt-qualified transport name
       if (step.includes(`uses: actions/upload-artifact@${actionPins["actions/upload-artifact"]}`)) uploads.push(step);
     }
   }
-  assert.equal(uploads.length, 4);
+  assert.equal(uploads.length, 5);
   const expected = new Map([
     ["code-oss-windows-x64-${{ github.run_attempt }}", { id: "upload-windows-runtime", hidden: true, path: ".release/producer/windows/code-oss-windows-x64" }],
     ["code-oss-linux-x64-${{ github.run_attempt }}", { id: "upload-linux-runtime", hidden: true, path: ".release/producer/linux/code-oss-linux-x64" }],
     ["appimagetool-linux-x64-${{ github.run_attempt }}", { id: "upload-appimagetool", hidden: false, path: ".release/producer/linux/appimagetool-linux-x64/appimagetool-x86_64.AppImage" }],
     ["release-input-provenance-${{ github.run_attempt }}", { id: "upload-provenance", hidden: false, path: ".release/attestation/release-input-provenance.json" }],
+    ["${{ steps.p8-producer-report.outputs.runtime_producer_provenance_artifact_name }}", { id: "upload-p8-producer-report", hidden: false, path: ".release/attestation/p8-reports/p8-runtime-producer-provenance/p8-report.json" }],
   ]);
   for (const step of uploads) {
     const name = inputValue(step, "name");
@@ -899,6 +900,16 @@ test("uploads expose immutable identities under attempt-qualified transport name
   assert.equal(directMappingValue(jobBlock("build-linux"), 6, "linux_artifact_digest"), "${{ steps.upload-linux-runtime.outputs.artifact-digest }}");
   assert.equal(directMappingValue(jobBlock("build-linux"), 6, "appimagetool_artifact_id"), "${{ steps.upload-appimagetool.outputs.artifact-id }}");
   assert.equal(directMappingValue(jobBlock("build-linux"), 6, "appimagetool_artifact_digest"), "${{ steps.upload-appimagetool.outputs.artifact-digest }}");
+});
+
+test("producer uploads a deterministic content-bound closed P8 report after provenance", () => {
+  const provenanceUpload = workflow.indexOf("id: upload-provenance");
+  const reportGeneration = workflow.indexOf("id: p8-producer-report");
+  const reportUpload = workflow.indexOf("name: Upload closed P8 producer report");
+  assert.ok(provenanceUpload >= 0 && provenanceUpload < reportGeneration && reportGeneration < reportUpload);
+  assert.match(workflow, /node tools\/phase9\/p8-report-create\.mjs \\\n\s+--input \.release\/attestation\/p8-report-input\.json \\\n\s+--out-dir \.release\/attestation\/p8-reports \\\n\s+--github-output "\$GITHUB_OUTPUT"/u);
+  assert.match(workflow, /name: \$\{\{ steps\.p8-producer-report\.outputs\.runtime_producer_provenance_artifact_name \}\}/u);
+  assert.match(workflow, /path: \.release\/attestation\/p8-reports\/p8-runtime-producer-provenance\/p8-report\.json/u);
 });
 
 test("attestation validates immutable coordinates before ID-only downloads and independently revalidates them", () => {
@@ -1046,12 +1057,15 @@ test("foundation validates producer identity before downloading one exact proven
     "linux_artifact_digest",
     "appimagetool_artifact_id",
     "appimagetool_artifact_digest",
+    "provenance_artifact_id",
+    "provenance_artifact_digest",
   ]);
   for (const key of jobOutputKeys(trust)) {
+    const step = key.startsWith("provenance_artifact_") ? "precheck" : "verify-provenance";
     assert.equal(
       directMappingValue(trust, 6, key),
-      `\${{ steps.verify-provenance.outputs.${key} }}`,
-      `${key} must come from the final validation step`,
+      `\${{ steps.${step}.outputs.${key} }}`,
+      `${key} must come from a trusted validation step`,
     );
   }
 

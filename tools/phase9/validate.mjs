@@ -168,12 +168,14 @@ export function validateRegistry(value) {
     assertSafeRepositoryPath(workflowPath, `gate ${gate.id} workflow path`);
     assertUniqueSortedDisplayStrings(jobs, `gate ${gate.id} jobs`);
     assertUniqueSortedDisplayStrings(artifacts, `gate ${gate.id} artifacts`);
-    for (const name of artifacts) {
-      const firstToken = name.indexOf("{runAttempt}");
-      if (firstToken !== -1
-          && (firstToken !== name.length - "{runAttempt}".length
-            || !name.endsWith(RUN_ATTEMPT_ARTIFACT_SUFFIX))) {
-        schemaFailure(`gate ${gate.id} artifacts`);
+    if (P8_REPORT_ARTIFACTS[gate.id] === undefined) {
+      for (const name of artifacts) {
+        const firstToken = name.indexOf("{runAttempt}");
+        if (firstToken !== -1
+            && (firstToken !== name.length - "{runAttempt}".length
+              || !name.endsWith(RUN_ATTEMPT_ARTIFACT_SUFFIX))) {
+          schemaFailure(`gate ${gate.id} artifacts`);
+        }
       }
     }
     const expectedP8Artifact = P8_REPORT_ARTIFACTS[gate.id];
@@ -317,7 +319,8 @@ function evidenceSatisfiesVerification(repository, gate, receipt) {
   const jobs = new Map(receipt.evidence.jobs.map((job) => [job.name, job]));
   const artifacts = new Map(receipt.evidence.artifacts.map((artifact) => [artifact.name, artifact]));
   if (!verification.jobs.every((name) => jobs.get(name)?.conclusion === "success")) return false;
-  if (!verification.artifacts.every((name) => artifacts.get(artifactNameForRunAttempt(name, receipt.evidence.runAttempt))?.expired === false)) return false;
+  if (!P8_SEMANTIC_REPORT_GATES.has(gate.id)
+      && !verification.artifacts.every((name) => artifacts.get(artifactNameForRunAttempt(name, receipt.evidence.runAttempt))?.expired === false)) return false;
   if (gate.id === "P7-WINDOWS-WFP-OFFLINE" && receipt.evidence.event !== "push") return false;
   if (P7_SEMANTIC_REPORT_GATES.has(gate.id)) {
     if (verification.artifacts.length !== 1) return false;
@@ -336,8 +339,10 @@ function evidenceSatisfiesVerification(repository, gate, receipt) {
   }
   if (P8_SEMANTIC_REPORT_GATES.has(gate.id)) {
     if (verification.artifacts.length !== 1 || verification.artifacts[0] !== P8_REPORT_ARTIFACTS[gate.id]) return false;
-    const artifact = artifacts.get(artifactNameForRunAttempt(verification.artifacts[0], receipt.evidence.runAttempt));
-    if (artifact?.report === undefined) return false;
+    const reports = receipt.evidence.artifacts.filter((artifact) => artifact.report?.gateId === gate.id);
+    if (reports.length !== 1) return false;
+    const [artifact] = reports;
+    if (artifact.expired !== false) return false;
     try {
       validateP8Report(artifact.report, {
         gateId: gate.id,
@@ -346,6 +351,7 @@ function evidenceSatisfiesVerification(repository, gate, receipt) {
         runAttempt: receipt.evidence.runAttempt,
         workflowPath: receipt.evidence.workflowPath,
         artifacts: receipt.evidence.artifacts,
+        reportArtifactName: artifact.name,
       });
     } catch (error) {
       if (error?.code !== "PHASE9_P8_REPORT_INVALID") throw error;

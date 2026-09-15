@@ -1,14 +1,15 @@
 import { open, readdir } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { inflateRawSync } from "node:zlib";
 
-import { phase9Failure, readCanonicalJson } from "./canonical-json.mjs";
+import { encodeCanonicalJson, phase9Failure, readCanonicalJson } from "./canonical-json.mjs";
 import { writeMatrixOutputs } from "./render.mjs";
 import { validateMatrix } from "./validate.mjs";
 import { validateP7Report, validateP7ReportDocument } from "./p7-report.mjs";
 import {
   P8_REPORT_ARTIFACTS,
-  artifactNameForP8Gate,
   validateP8Report,
   validateP8ReportDocument,
 } from "./p8-report.mjs";
@@ -43,6 +44,9 @@ const MAX_SNAPSHOT_DIRECTORIES = 256;
 const MAX_RUN_BYTES = 2 * 1024 * 1024;
 const MAX_JOBS_BYTES = 8 * 1024 * 1024;
 const MAX_ARTIFACTS_BYTES = 8 * 1024 * 1024;
+const MAX_REPORT_ARCHIVE_BYTES = 256 * 1024;
+const MAX_REPORT_BYTES = 128 * 1024;
+const REPORT_ARCHIVE_NAME = /^([1-9][0-9]*)\.zip$/u;
 
 function safeReceiptId(receipt) {
   return RECEIPT_ID_PATTERN.test(receipt?.receiptId ?? "") ? receipt.receiptId : "unknown-receipt";
@@ -105,6 +109,90 @@ function normalizedDigest(value) {
   if (typeof value !== "string") return undefined;
   const digest = value.startsWith("sha256:") ? value.slice("sha256:".length) : value;
   return DIGEST_PATTERN.test(digest) ? digest : undefined;
+}
+
+function crc32(bytes) {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+export function parseP8ReportArchive(bytes) {
+  if (!Buffer.isBuffer(bytes) || bytes.length === 0 || bytes.length > MAX_REPORT_ARCHIVE_BYTES) {
+    throw phase9Failure("PHASE9_EVIDENCE_UNTRUSTED", "P8 report archive size is invalid");
+  }
+  const minimumEocd = 22;
+  let eocd = -1;
+  for (let index = bytes.length - minimumEocd; index >= Math.max(0, bytes.length - 65557); index -= 1) {
+    if (bytes.readUInt32LE(index) === 0x06054b50) {
+      eocd = index;
+      break;
+    }
+  }
+  if (eocd < 0
+      || bytes.readUInt16LE(eocd + 4) !== 0
+      || bytes.readUInt16LE(eocd + 6) !== 0
+      || bytes.readUInt16LE(eocd + 8) !== 1
+      || bytes.readUInt16LE(eocd + 10) !== 1
+      || bytes.readUInt16LE(eocd + 20) !== 0
+      || eocd + minimumEocd !== bytes.length) {
+    throw phase9Failure("PHASE9_EVIDENCE_UNTRUSTED", "P8 report archive directory is invalid");
+  }
+  const centralSize = bytes.readUInt32LE(eocd + 12);
+  const centralOffset = bytes.readUInt32LE(eocd + 16);
+  if (centralOffset + centralSize !== eocd || centralSize < 46
+      || bytes.readUInt32LE(centralOffset) !== 0x02014b50) {
+    throw phase9Failure("PHASE9_EVIDENCE_UNTRUSTED", "P8 report archive entry is invalid");
+  }
+  const flags = bytes.readUInt16LE(centralOffset + 8);
+  const method = bytes.readUInt16LE(centralOffset + 10);
+  const expectedCrc = bytes.readUInt32LE(centralOffset + 16);
+  const compressedSize = bytes.readUInt32LE(centralOffset + 20);
+  const uncompressedSize = bytes.readUInt32LE(centralOffset + 24);
+  const nameLength = bytes.readUInt16LE(centralOffset + 28);
+  const extraLength = bytes.readUInt16LE(centralOffset + 30);
+  const commentLength = bytes.readUInt16LE(centralOffset + 32);
+  const localOffset = bytes.readUInt32LE(centralOffset + 42);
+  const centralEnd = centralOffset + 46 + nameLength + extraLength + commentLength;
+  if ((flags & ~0x808) !== 0 || ![0, 8].includes(method)
+      || compressedSize > MAX_REPORT_ARCHIVE_BYTES || uncompressedSize === 0 || uncompressedSize > MAX_REPORT_BYTES
+      || commentLength !== 0 || centralEnd !== eocd
+      || localOffset + 30 > centralOffset || bytes.readUInt32LE(localOffset) !== 0x04034b50) {
+    throw phase9Failure("PHASE9_EVIDENCE_UNTRUSTED", "P8 report archive entry is invalid");
+  }
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  let centralName;
+  let localName;
+  try {
+    centralName = decoder.decode(bytes.subarray(centralOffset + 46, centralOffset + 46 + nameLength));
+    const localFlags = bytes.readUInt16LE(localOffset + 6);
+    const localMethod = bytes.readUInt16LE(localOffset + 8);
+    const localNameLength = bytes.readUInt16LE(localOffset + 26);
+    const localExtraLength = bytes.readUInt16LE(localOffset + 28);
+    localName = decoder.decode(bytes.subarray(localOffset + 30, localOffset + 30 + localNameLength));
+    if (localFlags !== flags || localMethod !== method || localName !== centralName) throw new Error("local header mismatch");
+    const dataOffset = localOffset + 30 + localNameLength + localExtraLength;
+    if (dataOffset + compressedSize > centralOffset) throw new Error("entry overlaps directory");
+    const compressed = bytes.subarray(dataOffset, dataOffset + compressedSize);
+    const content = method === 0 ? Buffer.from(compressed) : inflateRawSync(compressed, { maxOutputLength: MAX_REPORT_BYTES });
+    if (centralName !== "p8-report.json" || content.length !== uncompressedSize || crc32(content) !== expectedCrc) {
+      throw new Error("entry content mismatch");
+    }
+    const source = decoder.decode(content);
+    const report = JSON.parse(source);
+    if (report === null || typeof report !== "object" || Array.isArray(report)
+        || encodeCanonicalJson(report) !== source) throw new Error("report is not canonical");
+    validateP8ReportDocument(report);
+    return {
+      archiveDigest: createHash("sha256").update(bytes).digest("hex"),
+      report,
+    };
+  } catch (error) {
+    throw phase9Failure("PHASE9_EVIDENCE_UNTRUSTED", "P8 report archive content is invalid", error);
+  }
 }
 
 function assertReceipt(receipt) {
@@ -255,7 +343,7 @@ function normalizeArtifactSnapshot(receipt, snapshot) {
   });
 }
 
-export function auditGithubReceipt({ receipt, runSnapshot, jobSnapshot, artifactSnapshot, gateId }) {
+export function auditGithubReceipt({ receipt, runSnapshot, jobSnapshot, artifactSnapshot, reportArtifacts, gateId }) {
   assertReceipt(receipt);
   const expected = receipt.evidence;
   const run = normalizeRunSnapshot(receipt, runSnapshot);
@@ -311,17 +399,23 @@ export function auditGithubReceipt({ receipt, runSnapshot, jobSnapshot, artifact
     }
   }
   if (P8_SEMANTIC_REPORT_GATES.has(gateId)) {
-    const expectedName = artifactNameForP8Gate(gateId, expected.runAttempt);
-    const reports = expected.artifacts.filter((artifact) => artifact.name === expectedName && artifact.report?.gateId === gateId);
+    const reports = expected.artifacts.filter((artifact) => artifact.report?.gateId === gateId);
     if (reports.length !== 1) fail(receipt, "required P8 semantic report is missing");
+    const authenticated = reportArtifacts instanceof Map ? reportArtifacts.get(reports[0].id) : undefined;
+    const rawReportArtifact = artifactsById.get(reports[0].id);
+    if (authenticated?.archiveDigest !== rawReportArtifact?.digest
+        || encodeCanonicalJson(authenticated?.report ?? {}) !== encodeCanonicalJson(reports[0].report)) {
+      fail(receipt, "required P8 report bytes are untrusted");
+    }
     try {
-      validateP8Report(reports[0].report, {
+      validateP8Report(authenticated.report, {
         gateId,
         candidateCommit: receipt.candidateCommit,
         runId: expected.runId,
         runAttempt: expected.runAttempt,
         workflowPath: expected.workflowPath,
         artifacts: expected.artifacts,
+        reportArtifactName: rawReportArtifact.name,
       });
     } catch {
       fail(receipt, "required P8 semantic report is invalid");
@@ -436,6 +530,55 @@ async function readRawJson(path, { label, maxBytes }) {
   }
 }
 
+async function readBoundedBytes(path, { label, maxBytes }) {
+  const chunks = [];
+  let total = 0;
+  const handle = await open(path, "r");
+  try {
+    while (total <= maxBytes) {
+      const size = Math.min(65536, maxBytes + 1 - total);
+      if (size <= 0) break;
+      const chunk = Buffer.allocUnsafe(size);
+      const { bytesRead } = await handle.read(chunk, 0, size, null);
+      if (bytesRead === 0) break;
+      chunks.push(chunk.subarray(0, bytesRead));
+      total += bytesRead;
+    }
+  } finally {
+    await handle.close();
+  }
+  if (total === 0 || total > maxBytes) throw phase9Failure("PHASE9_GATE_SCHEMA_INVALID", `${label} byte length is invalid`);
+  return Buffer.concat(chunks, total);
+}
+
+async function loadReportArtifacts(directory) {
+  let entries;
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch (error) {
+    if (error?.code === "ENOENT") return new Map();
+    throw error;
+  }
+  if (entries.length > 32 || entries.some((entry) => !entry.isFile() || !REPORT_ARCHIVE_NAME.test(entry.name))) {
+    throw phase9Failure("PHASE9_GATE_SCHEMA_INVALID", "P8 report archive files are invalid");
+  }
+  entries.sort((left, right) => {
+    const leftId = BigInt(REPORT_ARCHIVE_NAME.exec(left.name)[1]);
+    const rightId = BigInt(REPORT_ARCHIVE_NAME.exec(right.name)[1]);
+    return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
+  });
+  const reports = new Map();
+  for (const entry of entries) {
+    const id = REPORT_ARCHIVE_NAME.exec(entry.name)[1];
+    if (reports.has(id)) throw phase9Failure("PHASE9_GATE_SCHEMA_INVALID", "P8 report archive IDs are duplicated");
+    const bytes = await readBoundedBytes(join(directory, entry.name), {
+      label: "P8 report archive", maxBytes: MAX_REPORT_ARCHIVE_BYTES,
+    });
+    reports.set(id, parseP8ReportArchive(bytes));
+  }
+  return reports;
+}
+
 async function loadReceipts(directory) {
   const entries = await readdir(directory, { withFileTypes: true });
   const files = entries.filter((entry) => entry.isFile() && entry.name.endsWith(".json"));
@@ -461,21 +604,25 @@ async function loadSnapshots(directory) {
   for (const entry of entries) {
     const root = join(directory, entry.name);
     const children = await readdir(root, { withFileTypes: true });
-    const names = children.map(({ name }) => name).sort((left, right) => left.localeCompare(right, "en"));
-    if (children.some((child) => !child.isFile())
+    const files = children.filter((child) => child.isFile());
+    const reportDirectories = children.filter((child) => child.isDirectory() && child.name === "reports");
+    const names = files.map(({ name }) => name).sort((left, right) => left.localeCompare(right, "en"));
+    if (children.length !== files.length + reportDirectories.length
+        || reportDirectories.length > 1
         || names.length !== SNAPSHOT_FILES.length
         || names.some((name, index) => name !== SNAPSHOT_FILES[index])) {
       throw phase9Failure("PHASE9_GATE_SCHEMA_INVALID", "snapshot filenames are invalid");
     }
-    const [runSnapshot, jobSnapshot, artifactSnapshot] = await Promise.all([
+    const [runSnapshot, jobSnapshot, artifactSnapshot, reportArtifacts] = await Promise.all([
       readRawJson(join(root, "run.json"), { label: "run snapshot", maxBytes: MAX_RUN_BYTES }),
       readRawJson(join(root, "jobs.json"), { label: "job snapshot", maxBytes: MAX_JOBS_BYTES }),
       readRawJson(join(root, "artifacts.json"), { label: "artifact snapshot", maxBytes: MAX_ARTIFACTS_BYTES }),
+      loadReportArtifacts(join(root, "reports")),
     ]);
     if (canonicalId(runSnapshot.id) !== entry.name) {
       throw phase9Failure("PHASE9_GATE_SCHEMA_INVALID", "snapshot directory identity is invalid");
     }
-    snapshots[entry.name] = { runSnapshot, jobSnapshot, artifactSnapshot };
+    snapshots[entry.name] = { runSnapshot, jobSnapshot, artifactSnapshot, reportArtifacts };
   }
   return snapshots;
 }

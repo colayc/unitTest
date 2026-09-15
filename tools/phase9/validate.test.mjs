@@ -27,6 +27,8 @@ import {
 } from "./validate.mjs";
 import { buildMatrixReport } from "./p4-report.mjs";
 import { validateP7Report } from "./p7-report.mjs";
+import { artifactNameForP8Gate } from "./p8-report.mjs";
+import { createP8ReportArtifacts } from "./p8-report-create.mjs";
 import { renderMatrixJson, renderMatrixMarkdown, writeMatrixOutputs } from "./render.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -35,13 +37,13 @@ const currentCommit = candidateCommit;
 const repositoryRoot = join(import.meta.dirname, "..", "..");
 const gateRegistryPath = join(import.meta.dirname, "gates.json");
 const P8_REQUIRED_ARTIFACTS = Object.freeze({
-  "P8-INSTALL-LIFECYCLE-LINUX": "p8-install-lifecycle-linux-report-{runAttempt}",
-  "P8-INSTALL-LIFECYCLE-WINDOWS": "p8-install-lifecycle-windows-report-{runAttempt}",
-  "P8-LICENSE-AUDIT": "p8-license-audit-report-{runAttempt}",
-  "P8-LINUX-APPIMAGE-PACKAGE": "p8-linux-appimage-package-report-{runAttempt}",
-  "P8-QUALIFICATION-UNSIGNED": "p8-qualification-unsigned-report-{runAttempt}",
-  "P8-RUNTIME-PRODUCER-PROVENANCE": "p8-runtime-producer-provenance-report-{runAttempt}",
-  "P8-WINDOWS-MSIX-PACKAGE": "p8-windows-msix-package-report-{runAttempt}",
+  "P8-INSTALL-LIFECYCLE-LINUX": "p8-install-lifecycle-linux-report-{runAttempt}-{reportDigest}",
+  "P8-INSTALL-LIFECYCLE-WINDOWS": "p8-install-lifecycle-windows-report-{runAttempt}-{reportDigest}",
+  "P8-LICENSE-AUDIT": "p8-license-audit-report-{runAttempt}-{reportDigest}",
+  "P8-LINUX-APPIMAGE-PACKAGE": "p8-linux-appimage-package-report-{runAttempt}-{reportDigest}",
+  "P8-QUALIFICATION-UNSIGNED": "p8-qualification-unsigned-report-{runAttempt}-{reportDigest}",
+  "P8-RUNTIME-PRODUCER-PROVENANCE": "p8-runtime-producer-provenance-report-{runAttempt}-{reportDigest}",
+  "P8-WINDOWS-MSIX-PACKAGE": "p8-windows-msix-package-report-{runAttempt}-{reportDigest}",
 });
 const P4_SCENARIO_IDS = [
   "all",
@@ -336,8 +338,6 @@ function p8Report(gateId, overrides = {}) {
     ],
     signing: { signature_required: "0", signature_outcome: "not-required" },
     outcome: "passed",
-    startedAt: "2026-09-15T00:00:00.000Z",
-    finishedAt: "2026-09-15T00:00:01.000Z",
     outcomes: outcomes[gateId].map((id) => ({ id, status: "passed" })),
   };
   if (producerGate) {
@@ -349,7 +349,7 @@ function p8Report(gateId, overrides = {}) {
 }
 
 function p8Receipt(gate, { report = p8Report(gate.id), includeReport = true, receiptId } = {}) {
-  const artifactName = P8_REQUIRED_ARTIFACTS[gate.id].replace("{runAttempt}", String(report.runAttempt));
+  const artifactName = artifactNameForP8Gate(gate.id, report.runAttempt, report);
   const boundArtifacts = gate.id === "P8-RUNTIME-PRODUCER-PROVENANCE"
     ? report.producerRun.artifacts
     : report.packages;
@@ -1147,6 +1147,60 @@ test("closed P8 reports bind candidate producer artifacts packages and exact pas
   }
 });
 
+test("P8 report generation is deterministic closed and produces provider-name content bindings", async () => {
+  const producer = p8Report("P8-RUNTIME-PRODUCER-PROVENANCE");
+  const producerInput = {
+    schemaVersion: 1,
+    mode: "producer",
+    candidateCommit,
+    runId: producer.runId,
+    runAttempt: producer.runAttempt,
+    artifacts: producer.producerRun.artifacts,
+  };
+  const root = await mkdtemp(join(tmpdir(), "phase9-p8-reports-"));
+  fixtureRoots.push(root);
+  const first = await createP8ReportArtifacts(producerInput, join(root, "producer-first"));
+  const second = await createP8ReportArtifacts(producerInput, join(root, "producer-second"));
+  assert.deepEqual(first, second);
+  assert.equal(first.reports.length, 1);
+  const producerEntry = first.reports[0];
+  assert.equal(producerEntry.artifactName, artifactNameForP8Gate(
+    producerEntry.gateId,
+    producer.runAttempt,
+    await readCanonicalJson(join(root, "producer-first", producerEntry.file), { label: "generated P8 report", maxBytes: 128 * 1024 }),
+  ));
+
+  const qualification = p8Report("P8-QUALIFICATION-UNSIGNED");
+  const foundation = await createP8ReportArtifacts({
+    schemaVersion: 1,
+    mode: "foundation",
+    candidateCommit,
+    runId: qualification.runId,
+    runAttempt: qualification.runAttempt,
+    producerRun: qualification.producerRun,
+    releaseVersion: qualification.releaseVersion,
+    packages: qualification.packages,
+    signing: qualification.signing,
+  }, join(root, "foundation"));
+  assert.equal(foundation.reports.length, 6);
+  assert.deepEqual(foundation.reports.map(({ gateId }) => gateId), Object.keys(P8_REQUIRED_ARTIFACTS)
+    .filter((gateId) => gateId !== "P8-RUNTIME-PRODUCER-PROVENANCE").sort((left, right) => left.localeCompare(right, "en")));
+  await assert.rejects(createP8ReportArtifacts({ ...producerInput, arbitrary: true }, join(root, "open-input")), {
+    code: "PHASE9_P8_REPORT_INVALID",
+  });
+  await assert.rejects(createP8ReportArtifacts({
+    schemaVersion: 1,
+    mode: "foundation",
+    candidateCommit,
+    runId: qualification.runId,
+    runAttempt: qualification.runAttempt,
+    producerRun: qualification.producerRun,
+    releaseVersion: qualification.releaseVersion,
+    packages: qualification.packages,
+    signing: { signature_required: "1", signature_outcome: "verified" },
+  }, join(root, "signed-input")), { code: "PHASE9_P8_REPORT_INVALID" });
+});
+
 test("unsigned P8 qualification rejects signed ambiguous and malformed reports", async () => {
   const registry = await readCanonicalJson(gateRegistryPath, { label: "Phase 8 registry", maxBytes: 1024 * 1024 });
   const gate = registry.gates.find(({ id }) => id === "P8-QUALIFICATION-UNSIGNED");
@@ -1184,11 +1238,11 @@ test("unsigned P8 qualification rejects signed ambiguous and malformed reports",
   assert.equal(substitutedMatrix.gates.find(({ id }) => id === gate.id).status, "MISSING");
   const missingProducerArtifact = structuredClone(p8Report(gate.id));
   missingProducerArtifact.producerRun.artifacts.pop();
-  assert.throws(() => status(missingProducerArtifact), /PHASE9_GATE_SCHEMA_INVALID/u);
+  assert.throws(() => status(missingProducerArtifact), /PHASE9_P8_REPORT_INVALID/u);
   const ambiguous = structuredClone(p8Report(gate.id));
   delete ambiguous.signing;
   assert.equal(status(ambiguous), "MISSING");
-  assert.throws(() => status({ ...p8Report(gate.id), unrelated: true }), /PHASE9_GATE_SCHEMA_INVALID/u);
+  assert.throws(() => status({ ...p8Report(gate.id), unrelated: true }), /PHASE9_P8_REPORT_INVALID/u);
 });
 
 test("generic successful foundation jobs cannot satisfy feature-specific gates without their artifacts", async () => {

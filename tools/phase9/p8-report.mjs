@@ -1,7 +1,9 @@
+import { createHash } from "node:crypto";
+
 import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
 
-import { phase9Failure } from "./canonical-json.mjs";
+import { encodeCanonicalJson, phase9Failure } from "./canonical-json.mjs";
 import schema from "./gates.schema.json" with { type: "json" };
 
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/u;
@@ -11,13 +13,13 @@ const PRODUCER_WORKFLOW = ".github/workflows/release-inputs.yml";
 const FOUNDATION_WORKFLOW = ".github/workflows/foundation.yml";
 
 export const P8_REPORT_ARTIFACTS = Object.freeze({
-  "P8-INSTALL-LIFECYCLE-LINUX": "p8-install-lifecycle-linux-report-{runAttempt}",
-  "P8-INSTALL-LIFECYCLE-WINDOWS": "p8-install-lifecycle-windows-report-{runAttempt}",
-  "P8-LICENSE-AUDIT": "p8-license-audit-report-{runAttempt}",
-  "P8-LINUX-APPIMAGE-PACKAGE": "p8-linux-appimage-package-report-{runAttempt}",
-  "P8-QUALIFICATION-UNSIGNED": "p8-qualification-unsigned-report-{runAttempt}",
-  "P8-RUNTIME-PRODUCER-PROVENANCE": "p8-runtime-producer-provenance-report-{runAttempt}",
-  "P8-WINDOWS-MSIX-PACKAGE": "p8-windows-msix-package-report-{runAttempt}",
+  "P8-INSTALL-LIFECYCLE-LINUX": "p8-install-lifecycle-linux-report-{runAttempt}-{reportDigest}",
+  "P8-INSTALL-LIFECYCLE-WINDOWS": "p8-install-lifecycle-windows-report-{runAttempt}-{reportDigest}",
+  "P8-LICENSE-AUDIT": "p8-license-audit-report-{runAttempt}-{reportDigest}",
+  "P8-LINUX-APPIMAGE-PACKAGE": "p8-linux-appimage-package-report-{runAttempt}-{reportDigest}",
+  "P8-QUALIFICATION-UNSIGNED": "p8-qualification-unsigned-report-{runAttempt}-{reportDigest}",
+  "P8-RUNTIME-PRODUCER-PROVENANCE": "p8-runtime-producer-provenance-report-{runAttempt}-{reportDigest}",
+  "P8-WINDOWS-MSIX-PACKAGE": "p8-windows-msix-package-report-{runAttempt}-{reportDigest}",
 });
 
 const CONTRACTS = Object.freeze({
@@ -67,12 +69,6 @@ function invalid(label) {
   throw phase9Failure("PHASE9_P8_REPORT_INVALID", `${label} is invalid`);
 }
 
-function canonicalTimestamp(value, label) {
-  const milliseconds = Date.parse(value);
-  if (!Number.isFinite(milliseconds) || new Date(milliseconds).toISOString() !== value) invalid(label);
-  return milliseconds;
-}
-
 function exactValues(actual, expected) {
   return actual.length === expected.length && actual.every((value, index) => value === expected[index]);
 }
@@ -101,17 +97,21 @@ function assertArtifactBindings(bindings, artifacts, label) {
   }
 }
 
-export function artifactNameForP8Gate(gateId, runAttempt) {
+export function p8ReportDigest(report) {
+  validateP8ReportDocument(report);
+  return createHash("sha256").update(encodeCanonicalJson(report), "utf8").digest("hex");
+}
+
+export function artifactNameForP8Gate(gateId, runAttempt, reportOrDigest) {
   const template = P8_REPORT_ARTIFACTS[gateId];
-  if (template === undefined || !Number.isSafeInteger(runAttempt) || runAttempt < 1) invalid("P8 report artifact name");
-  return template.replace("{runAttempt}", String(runAttempt));
+  const reportDigest = typeof reportOrDigest === "string" ? reportOrDigest : p8ReportDigest(reportOrDigest);
+  if (template === undefined || !Number.isSafeInteger(runAttempt) || runAttempt < 1
+      || !/^[0-9a-f]{64}$/u.test(reportDigest)) invalid("P8 report artifact name");
+  return template.replace("{runAttempt}", String(runAttempt)).replace("{reportDigest}", reportDigest);
 }
 
 export function validateP8ReportDocument(report) {
   if (typeof validateSchema !== "function" || !validateSchema(report)) invalid("P8 report schema");
-  const started = canonicalTimestamp(report.startedAt, "P8 report startedAt");
-  const finished = canonicalTimestamp(report.finishedAt, "P8 report finishedAt");
-  if (started >= finished) invalid("P8 report interval");
   assertUniqueSorted(report.outcomes.map(({ id }) => id), "P8 report outcomes");
   assertUniqueSorted(report.producerRun.artifacts.map(({ kind }) => kind), "P8 producer artifacts");
   assertUnique(report.producerRun.artifacts.map(({ id }) => id), "P8 producer artifact IDs");
@@ -123,7 +123,7 @@ export function validateP8ReportDocument(report) {
 }
 
 export function validateP8Report(report, {
-  gateId, candidateCommit, runId, runAttempt, workflowPath, artifacts,
+  gateId, candidateCommit, runId, runAttempt, workflowPath, artifacts, reportArtifactName,
 }) {
   validateP8ReportDocument(report);
   const contract = CONTRACTS[gateId];
@@ -146,6 +146,9 @@ export function validateP8Report(report, {
       || report.producerRun.sourceCommit !== candidateCommit
       || report.producerRun.codeOssCommit !== REVIEWED_CODE_OSS_COMMIT) {
     invalid("P8 report semantic contract");
+  }
+  if (reportArtifactName !== artifactNameForP8Gate(gateId, runAttempt, report)) {
+    invalid("P8 report content binding");
   }
 
   const producerNames = [
@@ -180,6 +183,75 @@ export function validateP8Report(report, {
     assertArtifactBindings(report.packages, artifacts, "P8 package artifact bindings");
   }
   return true;
+}
+
+export function createP8ProducerReport({ candidateCommit, runId, runAttempt, artifacts }) {
+  const report = {
+    schemaVersion: 1,
+    gateId: "P8-RUNTIME-PRODUCER-PROVENANCE",
+    candidateCommit,
+    sourceCommit: candidateCommit,
+    runId,
+    runAttempt,
+    producerRun: {
+      workflowPath: PRODUCER_WORKFLOW,
+      sourceCommit: candidateCommit,
+      codeOssCommit: REVIEWED_CODE_OSS_COMMIT,
+      runId,
+      runAttempt,
+      artifacts,
+    },
+    executionMode: "producer",
+    outcome: "passed",
+    outcomes: CONTRACTS["P8-RUNTIME-PRODUCER-PROVENANCE"].outcomes.map((id) => ({ id, status: "passed" })),
+  };
+  const reportArtifactName = artifactNameForP8Gate(report.gateId, runAttempt, report);
+  validateP8Report(report, {
+    gateId: report.gateId,
+    candidateCommit,
+    runId,
+    runAttempt,
+    workflowPath: PRODUCER_WORKFLOW,
+    artifacts: artifacts.map((artifact) => ({ ...artifact, expired: false })),
+    reportArtifactName,
+  });
+  return report;
+}
+
+export function createP8FoundationReports({
+  candidateCommit, runId, runAttempt, producerRun, releaseVersion, packages, signing,
+}) {
+  const reports = {};
+  for (const [gateId, contract] of Object.entries(CONTRACTS)) {
+    if (contract.executionMode !== "unsigned-foundation") continue;
+    const report = {
+      schemaVersion: 1,
+      gateId,
+      candidateCommit,
+      sourceCommit: candidateCommit,
+      runId,
+      runAttempt,
+      producerRun,
+      executionMode: "unsigned-foundation",
+      releaseVersion,
+      packages,
+      signing,
+      outcome: "passed",
+      outcomes: contract.outcomes.map((id) => ({ id, status: "passed" })),
+    };
+    const reportArtifactName = artifactNameForP8Gate(gateId, runAttempt, report);
+    validateP8Report(report, {
+      gateId,
+      candidateCommit,
+      runId,
+      runAttempt,
+      workflowPath: FOUNDATION_WORKFLOW,
+      artifacts: packages.map((artifact) => ({ ...artifact, expired: false })),
+      reportArtifactName,
+    });
+    reports[gateId] = report;
+  }
+  return reports;
 }
 
 export const __testing = Object.freeze({ CONTRACTS });

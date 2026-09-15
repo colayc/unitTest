@@ -495,6 +495,8 @@ jobs:
       linux_artifact_digest: ${{ steps.verify-provenance.outputs.linux_artifact_digest }}
       appimagetool_artifact_id: ${{ steps.verify-provenance.outputs.appimagetool_artifact_id }}
       appimagetool_artifact_digest: ${{ steps.verify-provenance.outputs.appimagetool_artifact_digest }}
+      provenance_artifact_id: ${{ steps.precheck.outputs.provenance_artifact_id }}
+      provenance_artifact_digest: ${{ steps.precheck.outputs.provenance_artifact_digest }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v5.0.0
         with:
@@ -612,6 +614,8 @@ jobs:
       baseline_manifest_sha256: ${{ steps.package-msix.outputs.baseline_manifest_sha256 }}
       signature_required: ${{ steps.package-msix.outputs.signature_required }}
       signature_outcome: ${{ steps.package-msix.outputs.signature_outcome }}
+      artifact_id: ${{ steps.upload-package-windows.outputs.artifact-id }}
+      artifact_digest: ${{ steps.upload-package-windows.outputs.artifact-digest }}
     env:
       RELEASE_INPUT_RUN_ID: ${{ needs.verify-release-input-run.outputs.run_id }}
       RELEASE_INPUT_RUN_ATTEMPT: ${{ needs.verify-release-input-run.outputs.run_attempt }}
@@ -812,7 +816,8 @@ jobs:
           "license_audit_path=$licenseAuditPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "signature_required=$env:RELEASE_SIGNING_REQUIRED" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "signature_outcome=$(if ($env:RELEASE_SIGNING_REQUIRED -eq '1') { 'verified' } else { 'not-required' })" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-      - uses: actions/upload-artifact@v7
+      - id: upload-package-windows
+        uses: actions/upload-artifact@v7
         with:
           name: release-input-windows-${{ steps.package-msix.outputs.version }}-${{ github.run_attempt }}
           path: |
@@ -847,6 +852,8 @@ jobs:
       baseline_manifest_filename: ${{ steps.package-appimage.outputs.baseline_manifest_filename }}
       baseline_manifest_sha256: ${{ steps.package-appimage.outputs.baseline_manifest_sha256 }}
       baseline_release_manifest_filename: ${{ steps.package-appimage.outputs.baseline_release_manifest_filename }}
+      artifact_id: ${{ steps.upload-package-linux.outputs.artifact-id }}
+      artifact_digest: ${{ steps.upload-package-linux.outputs.artifact-digest }}
     env:
       RELEASE_INPUT_RUN_ID: ${{ needs.verify-release-input-run.outputs.run_id }}
       RELEASE_INPUT_RUN_ATTEMPT: ${{ needs.verify-release-input-run.outputs.run_attempt }}
@@ -1057,7 +1064,8 @@ jobs:
           echo "baseline_release_manifest_path=$baseline_release_manifest_path" >> "$GITHUB_OUTPUT"
           echo "baseline_release_manifest_filename=$(basename "$baseline_release_manifest_path")" >> "$GITHUB_OUTPUT"
           echo "license_audit_path=$license_audit_path" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v7
+      - id: upload-package-linux
+        uses: actions/upload-artifact@v7
         with:
           name: release-input-linux-${{ steps.package-appimage.outputs.version }}-${{ github.run_attempt }}
           path: |
@@ -1181,6 +1189,7 @@ jobs:
       - install-smoke-linux
       - package-windows
       - package-linux
+      - verify-release-input-run
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -1296,6 +1305,118 @@ jobs:
             --linux-manifest-sha256 '${{ needs.package-linux.outputs.release_manifest_sha256 }}' \
             --linux-license-audit "$(find_input .release/qualification/linux license-audit-linux.json)" \
             --qualification .release/evidence/release-qualification.json
+      - name: Generate closed P8 foundation reports
+        id: p8-foundation-reports
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.release_signing_required == '0' }}
+        shell: bash
+        env:
+          PRODUCER_RUN_ID: ${{ needs.verify-release-input-run.outputs.run_id }}
+          PRODUCER_RUN_ATTEMPT: ${{ needs.verify-release-input-run.outputs.run_attempt }}
+          APPIMAGETOOL_ARTIFACT_ID: ${{ needs.verify-release-input-run.outputs.appimagetool_artifact_id }}
+          APPIMAGETOOL_ARTIFACT_DIGEST: ${{ needs.verify-release-input-run.outputs.appimagetool_artifact_digest }}
+          LINUX_RUNTIME_ARTIFACT_ID: ${{ needs.verify-release-input-run.outputs.linux_artifact_id }}
+          LINUX_RUNTIME_ARTIFACT_DIGEST: ${{ needs.verify-release-input-run.outputs.linux_artifact_digest }}
+          PROVENANCE_ARTIFACT_ID: ${{ needs.verify-release-input-run.outputs.provenance_artifact_id }}
+          PROVENANCE_ARTIFACT_DIGEST: ${{ needs.verify-release-input-run.outputs.provenance_artifact_digest }}
+          WINDOWS_RUNTIME_ARTIFACT_ID: ${{ needs.verify-release-input-run.outputs.windows_artifact_id }}
+          WINDOWS_RUNTIME_ARTIFACT_DIGEST: ${{ needs.verify-release-input-run.outputs.windows_artifact_digest }}
+          LINUX_PACKAGE_ARTIFACT_ID: ${{ needs.package-linux.outputs.artifact_id }}
+          LINUX_PACKAGE_ARTIFACT_DIGEST: ${{ needs.package-linux.outputs.artifact_digest }}
+          LINUX_PACKAGE_ARTIFACT_NAME: ${{ needs.package-linux.outputs.artifact_name }}
+          WINDOWS_PACKAGE_ARTIFACT_ID: ${{ needs.package-windows.outputs.artifact_id }}
+          WINDOWS_PACKAGE_ARTIFACT_DIGEST: ${{ needs.package-windows.outputs.artifact_digest }}
+          WINDOWS_PACKAGE_ARTIFACT_NAME: ${{ needs.package-windows.outputs.artifact_name }}
+          RELEASE_VERSION: ${{ steps.canonical-release-version.outputs.version }}
+          SIGNATURE_REQUIRED: ${{ needs.package-windows.outputs.signature_required }}
+          SIGNATURE_OUTCOME: ${{ needs.package-windows.outputs.signature_outcome }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import { writeCanonicalJson } from "./tools/phase9/canonical-json.mjs";
+          const attempt = Number(process.env.GITHUB_RUN_ATTEMPT);
+          const producerAttempt = Number(process.env.PRODUCER_RUN_ATTEMPT);
+          await writeCanonicalJson(".release/evidence/p8-report-input.json", {
+            schemaVersion: 1,
+            mode: "foundation",
+            candidateCommit: process.env.GITHUB_SHA,
+            runId: process.env.GITHUB_RUN_ID,
+            runAttempt: attempt,
+            producerRun: {
+              workflowPath: ".github/workflows/release-inputs.yml",
+              sourceCommit: process.env.GITHUB_SHA,
+              codeOssCommit: "b1c0a14de1414fcdaa400695b4db1c0799bc3124",
+              runId: process.env.PRODUCER_RUN_ID,
+              runAttempt: producerAttempt,
+              artifacts: [
+                { kind: "appimagetool", id: process.env.APPIMAGETOOL_ARTIFACT_ID, name: `appimagetool-linux-x64-${producerAttempt}`, digest: process.env.APPIMAGETOOL_ARTIFACT_DIGEST },
+                { kind: "linux-runtime", id: process.env.LINUX_RUNTIME_ARTIFACT_ID, name: `code-oss-linux-x64-${producerAttempt}`, digest: process.env.LINUX_RUNTIME_ARTIFACT_DIGEST },
+                { kind: "provenance", id: process.env.PROVENANCE_ARTIFACT_ID, name: `release-input-provenance-${producerAttempt}`, digest: process.env.PROVENANCE_ARTIFACT_DIGEST },
+                { kind: "windows-runtime", id: process.env.WINDOWS_RUNTIME_ARTIFACT_ID, name: `code-oss-windows-x64-${producerAttempt}`, digest: process.env.WINDOWS_RUNTIME_ARTIFACT_DIGEST },
+              ],
+            },
+            releaseVersion: process.env.RELEASE_VERSION,
+            packages: [
+              { platform: "linux", id: process.env.LINUX_PACKAGE_ARTIFACT_ID, name: process.env.LINUX_PACKAGE_ARTIFACT_NAME, digest: process.env.LINUX_PACKAGE_ARTIFACT_DIGEST },
+              { platform: "windows", id: process.env.WINDOWS_PACKAGE_ARTIFACT_ID, name: process.env.WINDOWS_PACKAGE_ARTIFACT_NAME, digest: process.env.WINDOWS_PACKAGE_ARTIFACT_DIGEST },
+            ],
+            signing: {
+              signature_required: process.env.SIGNATURE_REQUIRED,
+              signature_outcome: process.env.SIGNATURE_OUTCOME,
+            },
+          });
+          NODE
+          node tools/phase9/p8-report-create.mjs \
+            --input .release/evidence/p8-report-input.json \
+            --out-dir .release/evidence/p8-reports \
+            --github-output "$GITHUB_OUTPUT"
+      - name: Upload P8 Linux lifecycle report
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.release_signing_required == '0' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ steps.p8-foundation-reports.outputs.install_lifecycle_linux_artifact_name }}
+          path: .release/evidence/p8-reports/p8-install-lifecycle-linux/p8-report.json
+          if-no-files-found: error
+          retention-days: 1
+      - name: Upload P8 Windows lifecycle report
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.release_signing_required == '0' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ steps.p8-foundation-reports.outputs.install_lifecycle_windows_artifact_name }}
+          path: .release/evidence/p8-reports/p8-install-lifecycle-windows/p8-report.json
+          if-no-files-found: error
+          retention-days: 1
+      - name: Upload P8 license audit report
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.release_signing_required == '0' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ steps.p8-foundation-reports.outputs.license_audit_artifact_name }}
+          path: .release/evidence/p8-reports/p8-license-audit/p8-report.json
+          if-no-files-found: error
+          retention-days: 1
+      - name: Upload P8 Linux AppImage package report
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.release_signing_required == '0' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ steps.p8-foundation-reports.outputs.linux_appimage_package_artifact_name }}
+          path: .release/evidence/p8-reports/p8-linux-appimage-package/p8-report.json
+          if-no-files-found: error
+          retention-days: 1
+      - name: Upload P8 unsigned qualification report
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.release_signing_required == '0' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ steps.p8-foundation-reports.outputs.qualification_unsigned_artifact_name }}
+          path: .release/evidence/p8-reports/p8-qualification-unsigned/p8-report.json
+          if-no-files-found: error
+          retention-days: 1
+      - name: Upload P8 Windows MSIX package report
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.release_signing_required == '0' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ steps.p8-foundation-reports.outputs.windows_msix_package_artifact_name }}
+          path: .release/evidence/p8-reports/p8-windows-msix-package/p8-report.json
+          if-no-files-found: error
+          retention-days: 1
       - name: Publish qualified release artifacts
         uses: actions/upload-artifact@v7
         with:

@@ -58,6 +58,20 @@ jobs:
             gh api "repos/colayc/unitTest/actions/runs/$run_id" > ".superpowers/phase9/snapshots/$run_id/run.json"
             gh api "repos/colayc/unitTest/actions/runs/$run_id/jobs?per_page=100" > ".superpowers/phase9/snapshots/$run_id/jobs.json"
             gh api "repos/colayc/unitTest/actions/runs/$run_id/artifacts?per_page=100" > ".superpowers/phase9/snapshots/$run_id/artifacts.json"
+            reports_root=".superpowers/phase9/snapshots/$run_id/reports"
+            while IFS= read -r artifact_id; do
+              [[ "$artifact_id" =~ ^[1-9][0-9]*$ ]] || {
+                echo 'PHASE9_GATE_SCHEMA_INVALID: artifact ID is not canonical' >&2
+                exit 1
+              }
+              mkdir -p "$reports_root"
+              gh api "repos/colayc/unitTest/actions/artifacts/$artifact_id/zip" > "$reports_root/$artifact_id.zip"
+            done < <(jq -r '
+              .artifacts[]
+              | select(.expired == false)
+              | select(.name | test("^p8-(install-lifecycle-linux|install-lifecycle-windows|license-audit|linux-appimage-package|qualification-unsigned|runtime-producer-provenance|windows-msix-package)-report-[1-9][0-9]*-[0-9a-f]{64}$"))
+              | .id
+            ' ".superpowers/phase9/snapshots/$run_id/artifacts.json")
           done
 
       - name: Audit Phase 9 evidence offline

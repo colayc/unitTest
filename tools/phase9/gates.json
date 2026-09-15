@@ -1145,7 +1145,7 @@
       "title": "Linux install upgrade rollback and uninstall lifecycle",
       "verification": {
         "artifacts": [
-          "p8-install-lifecycle-linux-report-{runAttempt}"
+          "p8-install-lifecycle-linux-report-{runAttempt}-{reportDigest}"
         ],
         "commands": [
           "node --test tools/release/update.test.mjs"
@@ -1178,7 +1178,7 @@
       "title": "Windows install upgrade rollback and uninstall lifecycle",
       "verification": {
         "artifacts": [
-          "p8-install-lifecycle-windows-report-{runAttempt}"
+          "p8-install-lifecycle-windows-report-{runAttempt}-{reportDigest}"
         ],
         "commands": [
           "node --test tools/release/update.test.mjs"
@@ -1236,7 +1236,7 @@
       "title": "Closed third-party license inventory audit",
       "verification": {
         "artifacts": [
-          "p8-license-audit-report-{runAttempt}"
+          "p8-license-audit-report-{runAttempt}-{reportDigest}"
         ],
         "commands": [
           "node --test tools/release/license-audit.test.mjs"
@@ -1270,7 +1270,7 @@
       "title": "Linux AppImage package integrity",
       "verification": {
         "artifacts": [
-          "p8-linux-appimage-package-report-{runAttempt}"
+          "p8-linux-appimage-package-report-{runAttempt}-{reportDigest}"
         ],
         "commands": [
           "node --test tools/release/linux/package-appimage.test.mjs"
@@ -1303,7 +1303,7 @@
       "title": "Unsigned cross-platform release qualification",
       "verification": {
         "artifacts": [
-          "p8-qualification-unsigned-report-{runAttempt}"
+          "p8-qualification-unsigned-report-{runAttempt}-{reportDigest}"
         ],
         "commands": [
           "node --test tools/release/qualification.test.mjs tools/release/stage-qualified-release.test.mjs"
@@ -1332,7 +1332,7 @@
       "title": "Trusted runtime producer provenance and artifact identity",
       "verification": {
         "artifacts": [
-          "p8-runtime-producer-provenance-report-{runAttempt}"
+          "p8-runtime-producer-provenance-report-{runAttempt}-{reportDigest}"
         ],
         "commands": [
           "pnpm test:release-producer"
@@ -1395,7 +1395,7 @@
       "title": "Windows MSIX package integrity",
       "verification": {
         "artifacts": [
-          "p8-windows-msix-package-report-{runAttempt}"
+          "p8-windows-msix-package-report-{runAttempt}-{reportDigest}"
         ],
         "commands": [
           "node --test tools/release/windows/package-msix.test.mjs"

@@ -549,6 +549,30 @@ test("foundation stages a closed qualified release", async () => {
   assert.ok(stageIndex >= 0 && uploadIndex > stageIndex);
 });
 
+test("foundation uploads all six deterministic content-bound unsigned P8 reports", async () => {
+  const workflow = await readFile(resolve(".github/workflows/foundation.yml"), "utf8");
+  const qualificationStart = workflow.indexOf("  release-qualification:");
+  const job = workflow.slice(qualificationStart);
+  assert.match(job, /- verify-release-input-run/u);
+  assert.match(job, /id: p8-foundation-reports/u);
+  assert.match(job, /node tools\/phase9\/p8-report-create\.mjs/u);
+  for (const output of [
+    "install_lifecycle_linux_artifact_name",
+    "install_lifecycle_windows_artifact_name",
+    "license_audit_artifact_name",
+    "linux_appimage_package_artifact_name",
+    "qualification_unsigned_artifact_name",
+    "windows_msix_package_artifact_name",
+  ]) {
+    assert.ok(job.includes("name: ${{ steps.p8-foundation-reports.outputs." + output + " }}"));
+  }
+  assert.match(workflow, /artifact_id: \$\{\{ steps\.upload-package-windows\.outputs\.artifact-id \}\}/u);
+  assert.match(workflow, /artifact_id: \$\{\{ steps\.upload-package-linux\.outputs\.artifact-id \}\}/u);
+  assert.match(job, /SIGNATURE_REQUIRED: \$\{\{ needs\.package-windows\.outputs\.signature_required \}\}/u);
+  assert.match(job, /SIGNATURE_OUTCOME: \$\{\{ needs\.package-windows\.outputs\.signature_outcome \}\}/u);
+  assert.equal((job.match(/if: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.release_signing_required == '0' \}\}/gu) ?? []).length, 7);
+});
+
 test("release package jobs materialize digest-pinned runtime inputs before packaging", async () => {
   const workflow = await readFile(resolve(".github/workflows/foundation.yml"), "utf8");
   assert.match(workflow, /permissions:\r?\n\s+actions: read\r?\n\s+contents: read/u);
