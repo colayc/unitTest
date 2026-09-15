@@ -54,23 +54,24 @@ export function summarizeSamples(samples) {
   };
 }
 
-async function measured(operation, repeats = 20) {
-  for (let repeat = 0; repeat < repeats; repeat++) await operation();
+async function measured(operation, expected, repeats = 20) {
+  const observations = [];
+  for (let repeat = 0; repeat < repeats; repeat++) observations.push(await operation());
   const samples = [];
-  let observed;
   for (let sample = 0; sample < 5; sample++) {
     const started = performance.now();
-    for (let repeat = 0; repeat < repeats; repeat++) observed = await operation();
+    for (let repeat = 0; repeat < repeats; repeat++) observations.push(await operation());
     const elapsed = performance.now() - started;
     samples.push(Math.max(0.1, Number(elapsed.toFixed(1))));
   }
-  return { samples, summary: summarizeSamples(samples), observed };
+  if (observations.some((observed) => observed !== expected)) throw new Error("correctness mismatch");
+  return { samples, summary: summarizeSamples(samples), observed: observations.at(-1) };
 }
 
-async function timedScenario(id, operation, expected, repeats) {
+export async function timedScenario(id, operation, expected, repeats) {
   let result;
   try {
-    result = await measured(operation, repeats);
+    result = await measured(operation, expected, repeats);
   } catch (error) {
     throw new Error(`${id}: ${error.message}`, { cause: error });
   }
@@ -87,7 +88,7 @@ async function timedScenario(id, operation, expected, repeats) {
   };
 }
 
-function memoryScenario() {
+export function memoryScenario() {
   const warmup = Buffer.alloc(MEMORY_ALLOCATION_BYTES, 7);
   if (warmup.byteLength !== MEMORY_ALLOCATION_BYTES || !Number.isFinite(process.memoryUsage().rss)) {
     throw new Error("memory: warm-up allocation failed");
@@ -105,6 +106,7 @@ function memoryScenario() {
       throw new Error("memory: RSS sample is non-finite");
     }
     observed = allocation.byteLength;
+    if (observed !== MEMORY_ALLOCATION_BYTES) throw new Error("memory: correctness mismatch");
     // Measure absolute post-operation process RSS, not allocated bytes or a
     // noisy small delta. Keep all five buffers resident for this bounded run.
     // Raw RSS readings go through the same fail-closed stability gate as time.

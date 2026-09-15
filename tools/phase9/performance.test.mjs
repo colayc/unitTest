@@ -3,12 +3,15 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import os, { tmpdir } from "node:os";
 import { join } from "node:path";
+import { performance } from "node:perf_hooks";
 import test, { mock } from "node:test";
 import {
   SCENARIO_IDS,
   buildBaseline,
+  memoryScenario,
   runDiscoveryIdentityScenario,
   summarizeSamples,
+  timedScenario,
   validateBaseline
 } from "./performance.mjs";
 import { IDENTITY_ITEM_COUNT } from "../../apps/code-oss-extension/dist/test/testing-api-benchmark-support.mjs";
@@ -153,6 +156,58 @@ test("baseline publishes actual runtime and OS-probed CPU and total memory measu
 
 test("discovery scenario executes the shared TestingApiAdapter identity fixture", async () => {
   assert.equal(await runDiscoveryIdentityScenario(), IDENTITY_ITEM_COUNT);
+});
+
+test("timed scenarios reject intermittent incorrect results throughout warm-up and samples", async (t) => {
+  let now = 0;
+  const clock = mock.method(performance, "now", () => ++now);
+  try {
+    // Three warm-up operations, then five samples with three operations each.
+    // Include early/middle warm-up, early/middle measured work, and the last result.
+    for (const incorrectAt of [0, 1, 3, 7, 17]) {
+      await t.test(`incorrect operation ${incorrectAt}`, async () => {
+        let calls = 0;
+        await assert.rejects(timedScenario("intermittent", () => {
+          return calls++ === incorrectAt ? 0 : 2;
+        }, 2, 3), /intermittent: correctness mismatch/u);
+      });
+    }
+  } finally {
+    clock.mock.restore();
+  }
+});
+
+test("timed scenarios preserve the fixed expected count when all repetitions succeed", async () => {
+  let now = 0;
+  let calls = 0;
+  const clock = mock.method(performance, "now", () => ++now);
+  try {
+    const scenario = await timedScenario("correct", () => { calls++; return 2; }, 2, 3);
+    assert.equal(calls, 18);
+    assert.deepEqual(scenario.correctness, { expected: 2, observed: 2, passed: 2, failed: 0 });
+    assert.deepEqual(scenario.samplesMs, [1, 1, 1, 1, 1]);
+    assert.equal(scenario.warmupCount, 1);
+    assert.equal(scenario.sampleCount, 5);
+  } finally {
+    clock.mock.restore();
+  }
+});
+
+test("memory scenario rejects an incorrect first or middle allocation before a later success", async (t) => {
+  const alloc = Buffer.alloc;
+  for (const incorrectAt of [1, 3]) {
+    await t.test(`incorrect allocation ${incorrectAt}`, () => {
+      let calls = 0;
+      const allocation = mock.method(Buffer, "alloc", (size, ...args) => {
+        return alloc(calls++ === incorrectAt ? size - 1 : size, ...args);
+      });
+      try {
+        assert.throws(() => memoryScenario(), /memory: correctness mismatch/u);
+      } finally {
+        allocation.mock.restore();
+      }
+    });
+  }
 });
 
 test("performance baseline has the exact closed schema and six bounded scenarios", async () => {
