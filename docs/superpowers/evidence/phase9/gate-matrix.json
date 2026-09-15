@@ -7,7 +7,7 @@
     "missing": 46,
     "pass": 0
   },
-  "currentCommit": "fcf15ee7906ece23564565bc9ab4e916bb9a1904",
+  "currentCommit": "2573f5a30be8337c978def9a6efafcdfe98300c3",
   "evaluationMode": "candidate",
   "gates": [
     {
@@ -310,7 +310,7 @@
       "status": "FAILED"
     }
   ],
-  "recordedByCommit": "fcf15ee7906ece23564565bc9ab4e916bb9a1904",
+  "recordedByCommit": "2573f5a30be8337c978def9a6efafcdfe98300c3",
   "releaseReady": false,
   "schemaVersion": 1
 }
