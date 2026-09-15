@@ -97,6 +97,82 @@ function auditInputs(overrides = {}) {
   };
 }
 
+function p8QualificationReport(signing = { signature_required: "0", signature_outcome: "not-required" }) {
+  return {
+    schemaVersion: 1,
+    gateId: "P8-QUALIFICATION-UNSIGNED",
+    candidateCommit,
+    sourceCommit: candidateCommit,
+    runId,
+    runAttempt: 1,
+    producerRun: {
+      workflowPath: ".github/workflows/release-inputs.yml",
+      sourceCommit: candidateCommit,
+      codeOssCommit: "b1c0a14de1414fcdaa400695b4db1c0799bc3124",
+      runId: "70",
+      runAttempt: 2,
+      artifacts: [
+        { kind: "appimagetool", id: "701", name: "appimagetool-linux-x64-2", digest: "1".repeat(64) },
+        { kind: "linux-runtime", id: "702", name: "code-oss-linux-x64-2", digest: "2".repeat(64) },
+        { kind: "provenance", id: "703", name: "release-input-provenance-2", digest: "3".repeat(64) },
+        { kind: "windows-runtime", id: "704", name: "code-oss-windows-x64-2", digest: "4".repeat(64) },
+      ],
+    },
+    executionMode: "unsigned-foundation",
+    releaseVersion: "1.2.3",
+    packages: [
+      { platform: "linux", id: "801", name: "release-input-linux-1.2.3-1", digest: "5".repeat(64) },
+      { platform: "windows", id: "802", name: "release-input-windows-1.2.3-1", digest: "6".repeat(64) },
+    ],
+    signing,
+    outcome: "passed",
+    startedAt: "2026-09-15T00:00:00.000Z",
+    finishedAt: "2026-09-15T00:00:01.000Z",
+    outcomes: [
+      { id: "appimage-package", status: "passed" },
+      { id: "install-lifecycle-linux", status: "passed" },
+      { id: "install-lifecycle-windows", status: "passed" },
+      { id: "license-audit-linux", status: "passed" },
+      { id: "license-audit-windows", status: "passed" },
+      { id: "msix-package", status: "passed" },
+    ],
+  };
+}
+
+function p8QualificationAuditInputs({ includeReport = true, signing, mutateReport } = {}) {
+  const name = "p8-qualification-unsigned-report-1";
+  const report = p8QualificationReport(signing);
+  mutateReport?.(report);
+  const packages = p8QualificationReport(signing).packages;
+  return {
+    receipt: validReceipt({
+      gateIds: ["P8-QUALIFICATION-UNSIGNED"],
+      evidence: {
+        jobs: [{ name: "release-qualification", conclusion: "success" }],
+        artifacts: [
+          ...packages.map(({ id, name: packageName, digest: packageDigest }) => ({
+            id, name: packageName, digest: packageDigest, expired: false,
+          })),
+          { id: artifactId, name, digest, expired: false, ...(includeReport ? { report } : {}) },
+        ],
+      },
+    }),
+    runSnapshot: validRunSnapshot(),
+    jobSnapshot: validJobSnapshot({
+      jobs: [{ id: 9001, run_id: 34731651809, name: "release-qualification", status: "completed", conclusion: "success" }],
+    }),
+    artifactSnapshot: validArtifactSnapshot({
+      total_count: 3,
+      artifacts: [
+        ...packages.map(({ id, name: packageName, digest: packageDigest }) => ({
+          id: Number(id), name: packageName, digest: `sha256:${packageDigest}`, expired: false, workflow_run: { id: 34731651809 },
+        })),
+        { id: 10310420278, name, digest: `sha256:${digest}`, expired: false, workflow_run: { id: 34731651809 } },
+      ],
+    }),
+  };
+}
+
 function assertUntrusted(run, expectedReceiptId = receiptId) {
   assert.throws(run, (error) => {
     assert.equal(error?.code, "PHASE9_EVIDENCE_UNTRUSTED");
@@ -425,6 +501,39 @@ test("auditing downgrades a synthetic P7 PASS without its closed semantic report
   assert.equal(matrix.gates[0].status, "FAILED");
   assert.equal(matrix.gates[0].artifactAvailability, "missing");
   assert.equal(matrix.releaseReady, false);
+});
+
+test("auditing accepts only an exact unsigned P8 qualification report", () => {
+  const input = p8QualificationAuditInputs();
+  assert.deepEqual(auditGithubReceipt({ ...input, gateId: "P8-QUALIFICATION-UNSIGNED" }), {
+    receiptId,
+    status: "PASS",
+    artifactAvailability: "available",
+    releaseUsable: true,
+  });
+});
+
+test("auditing downgrades missing or signed P8 qualification reports", () => {
+  const row = {
+    id: "P8-QUALIFICATION-UNSIGNED",
+    status: "PASS",
+    receiptId,
+    artifactAvailability: "available",
+  };
+  for (const input of [
+    p8QualificationAuditInputs({ includeReport: false }),
+    p8QualificationAuditInputs({ signing: { signature_required: "1", signature_outcome: "verified" } }),
+    p8QualificationAuditInputs({ mutateReport: (report) => { report.packages[0].id = "999"; } }),
+  ]) {
+    const matrix = evaluateAuditedMatrix({
+      recordedMatrix: recordedMatrix({ gates: [row] }),
+      receipts: [input.receipt],
+      snapshotsByRunId: { [runId]: input },
+    });
+    assert.equal(matrix.gates[0].status, "FAILED");
+    assert.equal(matrix.gates[0].artifactAvailability, "missing");
+    assert.equal(matrix.releaseReady, false);
+  }
 });
 
 test("preserves MISSING and allowed DEFERRED rows while recomputing counts", () => {

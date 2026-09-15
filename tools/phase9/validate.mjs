@@ -14,6 +14,11 @@ import {
 } from "./canonical-json.mjs";
 import schema from "./gates.schema.json" with { type: "json" };
 import { validateP7Report, validateP7ReportDocument } from "./p7-report.mjs";
+import {
+  P8_REPORT_ARTIFACTS,
+  validateP8Report,
+  validateP8ReportDocument,
+} from "./p8-report.mjs";
 
 export const ALLOWED_DEFERRED_GATE_IDS = Object.freeze([
   "P8-DOCS-CLOSEOUT",
@@ -39,6 +44,7 @@ const P7_SEMANTIC_REPORT_GATES = new Set([
   "P7-MAIN-USER-JOURNEY",
   "P7-MOCK-CONFIGURATION-UX",
 ]);
+const P8_SEMANTIC_REPORT_GATES = new Set(Object.keys(P8_REPORT_ARTIFACTS));
 const execFileAsync = promisify(execFile);
 
 const ajv = new Ajv2020({ allErrors: true, strict: true });
@@ -170,6 +176,11 @@ export function validateRegistry(value) {
         schemaFailure(`gate ${gate.id} artifacts`);
       }
     }
+    const expectedP8Artifact = P8_REPORT_ARTIFACTS[gate.id];
+    if (expectedP8Artifact !== undefined
+        && (artifacts.length !== 1 || artifacts[0] !== expectedP8Artifact)) {
+      schemaFailure(`gate ${gate.id} artifacts`);
+    }
     if (commands.length + jobs.length + artifacts.length === 0) schemaFailure(`gate ${gate.id} verification policy`);
   }
   for (const sourceSection of declaredSections) {
@@ -209,7 +220,8 @@ export function validateReceipt(value) {
       throw phase9Failure("PHASE9_EVIDENCE_UNTRUSTED", `receipt ${value.receiptId} contains expired captured evidence`);
     }
     for (const artifact of value.evidence.artifacts) {
-      if (artifact.report !== undefined) validateP7ReportDocument(artifact.report);
+      if (artifact.report?.gateId?.startsWith("P7-")) validateP7ReportDocument(artifact.report);
+      else if (artifact.report !== undefined) validateP8ReportDocument(artifact.report);
     }
   } else {
     assertSafeRepositoryPath(value.evidence.approvalPath, "approval path");
@@ -319,6 +331,24 @@ function evidenceSatisfiesVerification(repository, gate, receipt) {
       });
     } catch (error) {
       if (error?.code !== "PHASE9_P7_REPORT_INVALID") throw error;
+      return false;
+    }
+  }
+  if (P8_SEMANTIC_REPORT_GATES.has(gate.id)) {
+    if (verification.artifacts.length !== 1 || verification.artifacts[0] !== P8_REPORT_ARTIFACTS[gate.id]) return false;
+    const artifact = artifacts.get(artifactNameForRunAttempt(verification.artifacts[0], receipt.evidence.runAttempt));
+    if (artifact?.report === undefined) return false;
+    try {
+      validateP8Report(artifact.report, {
+        gateId: gate.id,
+        candidateCommit: receipt.candidateCommit,
+        runId: receipt.evidence.runId,
+        runAttempt: receipt.evidence.runAttempt,
+        workflowPath: receipt.evidence.workflowPath,
+        artifacts: receipt.evidence.artifacts,
+      });
+    } catch (error) {
+      if (error?.code !== "PHASE9_P8_REPORT_INVALID") throw error;
       return false;
     }
   }

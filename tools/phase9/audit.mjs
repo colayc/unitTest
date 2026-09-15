@@ -6,6 +6,12 @@ import { phase9Failure, readCanonicalJson } from "./canonical-json.mjs";
 import { writeMatrixOutputs } from "./render.mjs";
 import { validateMatrix } from "./validate.mjs";
 import { validateP7Report, validateP7ReportDocument } from "./p7-report.mjs";
+import {
+  P8_REPORT_ARTIFACTS,
+  artifactNameForP8Gate,
+  validateP8Report,
+  validateP8ReportDocument,
+} from "./p8-report.mjs";
 
 const EXPECTED_REPOSITORY = "colayc/unitTest";
 const RECEIPT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
@@ -29,6 +35,7 @@ const P7_SEMANTIC_REPORT_GATES = new Set([
   "P7-MAIN-USER-JOURNEY",
   "P7-MOCK-CONFIGURATION-UX",
 ]);
+const P8_SEMANTIC_REPORT_GATES = new Set(Object.keys(P8_REPORT_ARTIFACTS));
 const MAX_MATRIX_BYTES = 1024 * 1024;
 const MAX_RECEIPT_BYTES = 256 * 1024;
 const MAX_RECEIPTS = 256;
@@ -160,7 +167,8 @@ function assertReceipt(receipt) {
     artifactNames.add(artifact.name);
     if (artifact.report !== undefined) {
       try {
-        validateP7ReportDocument(artifact.report);
+        if (artifact.report?.gateId?.startsWith("P7-")) validateP7ReportDocument(artifact.report);
+        else validateP8ReportDocument(artifact.report);
       } catch {
         fail(receipt, "receipt artifact report is invalid");
       }
@@ -300,6 +308,23 @@ export function auditGithubReceipt({ receipt, runSnapshot, jobSnapshot, artifact
       });
     } catch {
       fail(receipt, "required P7 semantic report is invalid");
+    }
+  }
+  if (P8_SEMANTIC_REPORT_GATES.has(gateId)) {
+    const expectedName = artifactNameForP8Gate(gateId, expected.runAttempt);
+    const reports = expected.artifacts.filter((artifact) => artifact.name === expectedName && artifact.report?.gateId === gateId);
+    if (reports.length !== 1) fail(receipt, "required P8 semantic report is missing");
+    try {
+      validateP8Report(reports[0].report, {
+        gateId,
+        candidateCommit: receipt.candidateCommit,
+        runId: expected.runId,
+        runAttempt: expected.runAttempt,
+        workflowPath: expected.workflowPath,
+        artifacts: expected.artifacts,
+      });
+    } catch {
+      fail(receipt, "required P8 semantic report is invalid");
     }
   }
   return {

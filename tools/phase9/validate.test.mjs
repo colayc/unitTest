@@ -34,6 +34,15 @@ const candidateCommit = "a".repeat(40);
 const currentCommit = candidateCommit;
 const repositoryRoot = join(import.meta.dirname, "..", "..");
 const gateRegistryPath = join(import.meta.dirname, "gates.json");
+const P8_REQUIRED_ARTIFACTS = Object.freeze({
+  "P8-INSTALL-LIFECYCLE-LINUX": "p8-install-lifecycle-linux-report-{runAttempt}",
+  "P8-INSTALL-LIFECYCLE-WINDOWS": "p8-install-lifecycle-windows-report-{runAttempt}",
+  "P8-LICENSE-AUDIT": "p8-license-audit-report-{runAttempt}",
+  "P8-LINUX-APPIMAGE-PACKAGE": "p8-linux-appimage-package-report-{runAttempt}",
+  "P8-QUALIFICATION-UNSIGNED": "p8-qualification-unsigned-report-{runAttempt}",
+  "P8-RUNTIME-PRODUCER-PROVENANCE": "p8-runtime-producer-provenance-report-{runAttempt}",
+  "P8-WINDOWS-MSIX-PACKAGE": "p8-windows-msix-package-report-{runAttempt}",
+});
 const P4_SCENARIO_IDS = [
   "all",
   "assertion-failure",
@@ -285,6 +294,85 @@ function p7Report(gateId, overrides = {}) {
     checks: contract.checks.map((id) => ({ id, status: "passed" })),
     ...overrides,
   };
+}
+
+function p8Report(gateId, overrides = {}) {
+  const outcomes = {
+    "P8-INSTALL-LIFECYCLE-LINUX": ["install-linux", "launch-linux", "rollback-linux", "uninstall-linux", "upgrade-linux"],
+    "P8-INSTALL-LIFECYCLE-WINDOWS": ["install-windows", "launch-windows", "rollback-windows", "uninstall-windows", "upgrade-windows"],
+    "P8-LICENSE-AUDIT": ["license-audit-linux", "license-audit-windows"],
+    "P8-LINUX-APPIMAGE-PACKAGE": ["appimage-envelope", "appimage-licenses", "appimage-manifest", "appimage-payload", "appimage-runtime"],
+    "P8-QUALIFICATION-UNSIGNED": ["appimage-package", "install-lifecycle-linux", "install-lifecycle-windows", "license-audit-linux", "license-audit-windows", "msix-package"],
+    "P8-RUNTIME-PRODUCER-PROVENANCE": ["appimagetool", "fixed-code-oss-source", "provenance", "runtime-linux", "runtime-windows"],
+    "P8-WINDOWS-MSIX-PACKAGE": ["msix-licenses", "msix-manifest", "msix-payload", "msix-runtime", "msix-unsigned"],
+  };
+  const producerRun = {
+    workflowPath: ".github/workflows/release-inputs.yml",
+    sourceCommit: candidateCommit,
+    codeOssCommit: "b1c0a14de1414fcdaa400695b4db1c0799bc3124",
+    runId: "70",
+    runAttempt: 2,
+    artifacts: [
+      { kind: "appimagetool", id: "701", name: "appimagetool-linux-x64-2", digest: fixtureDigest("producer-appimagetool") },
+      { kind: "linux-runtime", id: "702", name: "code-oss-linux-x64-2", digest: fixtureDigest("producer-linux") },
+      { kind: "provenance", id: "703", name: "release-input-provenance-2", digest: fixtureDigest("producer-provenance") },
+      { kind: "windows-runtime", id: "704", name: "code-oss-windows-x64-2", digest: fixtureDigest("producer-windows") },
+    ],
+  };
+  const producerGate = gateId === "P8-RUNTIME-PRODUCER-PROVENANCE";
+  const report = {
+    schemaVersion: 1,
+    gateId,
+    candidateCommit,
+    sourceCommit: candidateCommit,
+    runId: producerGate ? producerRun.runId : "80",
+    runAttempt: producerGate ? producerRun.runAttempt : 1,
+    producerRun,
+    executionMode: producerGate ? "producer" : "unsigned-foundation",
+    releaseVersion: "1.2.3",
+    packages: [
+      { platform: "linux", id: "801", name: "release-input-linux-1.2.3-1", digest: fixtureDigest("package-linux") },
+      { platform: "windows", id: "802", name: "release-input-windows-1.2.3-1", digest: fixtureDigest("package-windows") },
+    ],
+    signing: { signature_required: "0", signature_outcome: "not-required" },
+    outcome: "passed",
+    startedAt: "2026-09-15T00:00:00.000Z",
+    finishedAt: "2026-09-15T00:00:01.000Z",
+    outcomes: outcomes[gateId].map((id) => ({ id, status: "passed" })),
+  };
+  if (producerGate) {
+    delete report.releaseVersion;
+    delete report.packages;
+    delete report.signing;
+  }
+  return { ...report, ...overrides };
+}
+
+function p8Receipt(gate, { report = p8Report(gate.id), includeReport = true, receiptId } = {}) {
+  const artifactName = P8_REQUIRED_ARTIFACTS[gate.id].replace("{runAttempt}", String(report.runAttempt));
+  const boundArtifacts = gate.id === "P8-RUNTIME-PRODUCER-PROVENANCE"
+    ? report.producerRun.artifacts
+    : report.packages;
+  return githubReceipt({
+    receiptId: receiptId ?? `github-actions-p8-${gate.id.toLowerCase()}`,
+    gateIds: [gate.id],
+    evidence: {
+      workflowPath: gate.verification.workflowPath,
+      runId: report.runId,
+      runAttempt: report.runAttempt,
+      jobs: gate.verification.jobs.map((name) => ({ name, conclusion: "success" })),
+      artifacts: [
+        ...boundArtifacts.map(({ id, name, digest }) => ({ id, name, digest, expired: false })),
+        {
+          id: String(900 + Object.keys(P8_REQUIRED_ARTIFACTS).indexOf(gate.id)),
+          name: artifactName,
+          digest: fixtureDigest(`p8-report:${gate.id}`),
+          expired: false,
+          ...(includeReport ? { report } : {}),
+        },
+      ],
+    },
+  });
 }
 
 const P4_SCENARIO_RESULTS = {
@@ -982,6 +1070,125 @@ test("future Phase 9 work remains MISSING and only the approved Phase 8 boundary
   for (const gateId of Object.keys(EXACT_DEFERMENTS)) {
     assert.equal(matrix.gates.find(({ id }) => id === gateId).status, "DEFERRED", `${gateId} must remain explicitly deferred`);
   }
+});
+
+test("generic successful workflow metadata and arbitrary gate IDs cannot satisfy required P8 gates", async () => {
+  const registry = await readCanonicalJson(gateRegistryPath, { label: "Phase 8 registry", maxBytes: 1024 * 1024 });
+  const requiredGates = registry.gates.filter(({ id }) => Object.hasOwn(P8_REQUIRED_ARTIFACTS, id));
+  const foundationGates = requiredGates.filter(({ id }) => id !== "P8-RUNTIME-PRODUCER-PROVENANCE");
+  const producerGate = requiredGates.find(({ id }) => id === "P8-RUNTIME-PRODUCER-PROVENANCE");
+  const foundationReceipt = githubReceipt({
+    receiptId: "github-actions-p8-generic-foundation",
+    gateIds: foundationGates.map(({ id }) => id),
+    evidence: {
+      workflowPath: ".github/workflows/foundation.yml",
+      runId: "80",
+      jobs: [...new Set(foundationGates.flatMap(({ verification }) => verification.jobs))]
+        .map((name) => ({ name, conclusion: "success" })),
+      artifacts: [],
+    },
+  });
+  const producerReceipt = githubReceipt({
+    receiptId: "github-actions-p8-generic-producer",
+    gateIds: [producerGate.id],
+    evidence: {
+      workflowPath: ".github/workflows/release-inputs.yml",
+      runId: "70",
+      jobs: [{ name: "attest", conclusion: "success" }],
+      artifacts: [],
+    },
+  });
+  const matrix = evaluateRecordedMatrix({
+    registry,
+    baseline: {
+      schemaVersion: 1,
+      candidateCommit,
+      evaluationMode: "historical",
+      receiptIds: [foundationReceipt.receiptId, producerReceipt.receiptId],
+    },
+    receipts: [foundationReceipt, producerReceipt],
+    currentCommit,
+    changedPaths: [],
+  });
+
+  for (const gate of requiredGates) {
+    assert.deepEqual(gate.verification.artifacts, [P8_REQUIRED_ARTIFACTS[gate.id]]);
+    assert.equal(matrix.gates.find(({ id }) => id === gate.id).status, "MISSING", `${gate.id} requires gate-specific semantic evidence`);
+  }
+});
+
+test("attempt-qualified P8 artifacts without closed semantic reports remain MISSING", async () => {
+  const registry = await readCanonicalJson(gateRegistryPath, { label: "Phase 8 registry", maxBytes: 1024 * 1024 });
+  for (const gate of registry.gates.filter(({ id }) => Object.hasOwn(P8_REQUIRED_ARTIFACTS, id))) {
+    const receipt = p8Receipt(gate, { includeReport: false });
+    const matrix = evaluateRecordedMatrix({
+      registry,
+      baseline: { schemaVersion: 1, candidateCommit, evaluationMode: "historical", receiptIds: [receipt.receiptId] },
+      receipts: [receipt],
+      currentCommit,
+      changedPaths: [],
+    });
+    assert.equal(matrix.gates.find(({ id }) => id === gate.id).status, "MISSING", `${gate.id} rejects an arbitrary same-name artifact`);
+  }
+});
+
+test("closed P8 reports bind candidate producer artifacts packages and exact passing outcomes", async () => {
+  const registry = await readCanonicalJson(gateRegistryPath, { label: "Phase 8 registry", maxBytes: 1024 * 1024 });
+  for (const gate of registry.gates.filter(({ id }) => Object.hasOwn(P8_REQUIRED_ARTIFACTS, id))) {
+    const receipt = p8Receipt(gate);
+    const matrix = evaluateRecordedMatrix({
+      registry,
+      baseline: { schemaVersion: 1, candidateCommit, evaluationMode: "historical", receiptIds: [receipt.receiptId] },
+      receipts: [receipt],
+      currentCommit,
+      changedPaths: [],
+    });
+    assert.equal(matrix.gates.find(({ id }) => id === gate.id).status, "PASS", `${gate.id} accepts its exact semantic report`);
+  }
+});
+
+test("unsigned P8 qualification rejects signed ambiguous and malformed reports", async () => {
+  const registry = await readCanonicalJson(gateRegistryPath, { label: "Phase 8 registry", maxBytes: 1024 * 1024 });
+  const gate = registry.gates.find(({ id }) => id === "P8-QUALIFICATION-UNSIGNED");
+  const status = (report, includeReport = true) => {
+    const receipt = p8Receipt(gate, { report, includeReport, receiptId: "github-actions-p8-unsigned-negative" });
+    return evaluateRecordedMatrix({
+      registry,
+      baseline: { schemaVersion: 1, candidateCommit, evaluationMode: "historical", receiptIds: [receipt.receiptId] },
+      receipts: [receipt],
+      currentCommit,
+      changedPaths: [],
+    }).gates.find(({ id }) => id === gate.id).status;
+  };
+
+  assert.equal(status(p8Report(gate.id), false), "MISSING");
+  assert.equal(status(p8Report(gate.id, {
+    signing: { signature_required: "1", signature_outcome: "verified" },
+  })), "MISSING");
+  const wrongSource = p8Report(gate.id, { sourceCommit: "c".repeat(40) });
+  assert.equal(status(wrongSource), "MISSING");
+  const substitutedPackage = structuredClone(p8Report(gate.id));
+  substitutedPackage.packages[0].id = "999";
+  const substitutedReceipt = p8Receipt(gate, {
+    report: substitutedPackage,
+    receiptId: "github-actions-p8-substituted-package",
+  });
+  substitutedReceipt.evidence.artifacts[0].id = "801";
+  const substitutedMatrix = evaluateRecordedMatrix({
+    registry,
+    baseline: { schemaVersion: 1, candidateCommit, evaluationMode: "historical", receiptIds: [substitutedReceipt.receiptId] },
+    receipts: [substitutedReceipt],
+    currentCommit,
+    changedPaths: [],
+  });
+  assert.equal(substitutedMatrix.gates.find(({ id }) => id === gate.id).status, "MISSING");
+  const missingProducerArtifact = structuredClone(p8Report(gate.id));
+  missingProducerArtifact.producerRun.artifacts.pop();
+  assert.throws(() => status(missingProducerArtifact), /PHASE9_GATE_SCHEMA_INVALID/u);
+  const ambiguous = structuredClone(p8Report(gate.id));
+  delete ambiguous.signing;
+  assert.equal(status(ambiguous), "MISSING");
+  assert.throws(() => status({ ...p8Report(gate.id), unrelated: true }), /PHASE9_GATE_SCHEMA_INVALID/u);
 });
 
 test("generic successful foundation jobs cannot satisfy feature-specific gates without their artifacts", async () => {
