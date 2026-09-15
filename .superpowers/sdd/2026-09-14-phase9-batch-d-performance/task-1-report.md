@@ -341,3 +341,190 @@ Workspace smoke remains intentionally RED until Task 2 adds the job.
 - This report is committed separately with the same required message; its resulting commit SHA is supplied in the completion handoff, since a commit cannot contain its own SHA.
 - Absolute process RSS includes the Node runtime and earlier in-process workloads; it is not an estimate of isolated buffer cost. The fixed runner/toolchain is important for comparisons.
 - Three consecutive standalone baselines demonstrated stable raw RSS on this Windows host; Ubuntu CI has not been executed here. One repeated focused run demonstrated the unchanged discovery timing gate can still reject a noisy run.
+
+## Final whole-branch schema fix (2026-09-15)
+
+### Scope and final code SHA
+
+- Final code commit: `61cb0d7d4658319098b0f6a5cfc2bb24993ac849` — `test: add phase9 performance baseline harness`.
+- Code changes are limited to `tools/phase9/performance.mjs` and `tools/phase9/performance.test.mjs`. This report is committed separately with the same required message, so it can record the immutable code SHA.
+- No workflow, evidence, CMake, producer/foundation, signing, Release, or PR behavior was changed. No agents were dispatched. The pre-existing untracked `.merge-stash-20260903/` directory was left alone.
+
+### Changes
+
+- Every scenario must have the existing exact correctness keys and successful counts: non-negative safe-integer `expected === observed === passed`, with `failed === 0`. Internally consistent but unsuccessful records are now rejected.
+- Runtime is a closed object containing only `node`, `platform`, and `arch`. The validator accepts canonical three-component Node release versions and known platform/architecture strings; missing values, primitives, arrays, extra keys, malformed values, secret strings, and paths are rejected. Platform/architecture allowlists follow the repository's installed `@types/node` declarations.
+- Runtime validation is intentionally portable: a baseline recorded on Node 24.18/Linux/arm64 may be validated on Node 24.19/Windows/x64. Builder tests separately require exact current-process runtime values.
+- Hardware is a closed object containing only `cpus` and `totalMemoryBytes`, both positive safe integers. Validation checks recorded values, not equality to the validating host. The builder now uses the unaltered results of `os.cpus().length` and `os.totalmem()` rather than a constant CPU count.
+- The builder test wraps the real OS calls, records their unmodified results, and checks emitted equality plus positive integer values. It also verifies the probes occurred, so a literal constant fails even on a single-CPU host. Existing RSS probes, five-sample and warm-up checks, scenario/summary checks, CV-at-most-0.20 rejection, unit checks, CLI behavior, and path/secret-redaction tests remain intact.
+- New deterministic mutation fixtures exercise all six correctness records, both metadata objects, each required key, extra keys, wrong types, malformed strings, invalid numbers, and cross-host acceptance independently of benchmark timing.
+
+### Toolchain and host readings
+
+All verification below prepended `C:\Users\DELL\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin` to PATH; the system default Node is older and was not used.
+
+```text
+$ node --version
+v24.19.0
+$ .superpowers/runtime/task10-fixed-bin/pnpm.cmd --version
+11.4.0
+$ node -e 'const os=require("node:os"); console.log(JSON.stringify({runtime:{node:process.versions.node,platform:process.platform,arch:process.arch},hardware:{cpus:os.cpus().length,totalMemoryBytes:os.totalmem()}}))'
+{"runtime":{"node":"24.19.0","platform":"win32","arch":"x64"},"hardware":{"cpus":12,"totalMemoryBytes":16949751808}}
+```
+
+### RED then GREEN evidence
+
+The four regression groups were written and run before the production fix. Relevant exact output:
+
+```text
+$ node --test --test-name-pattern='validator requires successful|validator closes|baseline publishes actual' tools/phase9/performance.test.mjs
+✖ validator requires successful exact correctness records in every scenario (2.4739ms)
+✖ validator closes runtime metadata and rejects injected or non-runtime strings (0.3403ms)
+✖ validator closes hardware metadata and requires positive safe integer measurements (0.893ms)
+✖ baseline publishes actual runtime and OS-probed CPU and total memory measurements (7657.8064ms)
+ℹ tests 4
+ℹ pass 0
+ℹ fail 4
+ℹ duration_ms 8742.7016
+AssertionError [ERR_ASSERTION]: {"expected":10000,"observed":9999,"passed":9999,"failed":1}
+true !== false
+runtime: true !== false
+hardware: true !== false
+CPU probe count: 0 !== 1
+exit 1
+```
+
+The same command after the initial production fix:
+
+```text
+✔ validator requires successful exact correctness records in every scenario (4.68ms)
+✔ validator closes runtime metadata and rejects injected or non-runtime strings (0.6545ms)
+✔ validator closes hardware metadata and requires positive safe integer measurements (0.6261ms)
+✔ baseline publishes actual runtime and OS-probed CPU and total memory measurements (8140.483ms)
+ℹ tests 4
+ℹ pass 4
+ℹ fail 0
+ℹ duration_ms 9248.546
+exit 0
+```
+
+The parent clarified that runtime validation, like hardware validation, must remain portable across audit hosts. The cross-host regression was added before replacing host equality with canonical-format validation:
+
+```text
+$ node --test --test-name-pattern='different host' tools/phase9/performance.test.mjs
+✖ validator accepts canonical runtime metadata recorded on a different host (2.209ms)
+ℹ tests 1
+ℹ pass 0
+ℹ fail 1
+ℹ duration_ms 1128.1471
+false !== true
+exit 1
+
+$ node --test --test-name-pattern='validator' tools/phase9/performance.test.mjs
+✔ validator requires successful exact correctness records in every scenario (4.3513ms)
+✔ validator closes runtime metadata and rejects injected or non-runtime strings (0.6788ms)
+✔ validator accepts canonical runtime metadata recorded on a different host (0.3408ms)
+✔ validator closes hardware metadata and requires positive safe integer measurements (0.6247ms)
+✔ validator rejects mutated summaries, correctness, and scenario fields (8552.8653ms)
+ℹ tests 5
+ℹ pass 5
+ℹ fail 0
+ℹ duration_ms 9719.5366
+exit 0
+```
+
+An initial repeated suite overlapped that deliberate RED portability addition: runs 1 and 2 passed 11/11 (`23157.625 ms`, `22347.133 ms`), and run 3 loaded the new test before the implementation change and failed only that test (12 tests, 11 pass, 1 fail, `22431.8948 ms`). This was an intermediate test-first state, not a final-code verification result. The final unchanged code was then verified afresh as follows.
+
+### Final repeated performance and pinned package verification
+
+```text
+$ 1..3 | ForEach-Object { Write-Output "Final performance verification run $_"; node --test tools/phase9/performance.test.mjs; Write-Output "Exit code: $LASTEXITCODE" }
+Final performance verification run 1
+ℹ tests 12
+ℹ pass 12
+ℹ fail 0
+ℹ duration_ms 22633.7896
+Exit code: 0
+Final performance verification run 2
+ℹ tests 12
+ℹ pass 12
+ℹ fail 0
+ℹ duration_ms 22386.236
+Exit code: 0
+Final performance verification run 3
+ℹ tests 12
+ℹ pass 12
+ℹ fail 0
+ℹ duration_ms 22695.6063
+Exit code: 0
+
+$ .superpowers/runtime/task10-fixed-bin/pnpm.cmd test:phase9:performance
+$ tsc -b apps/code-oss-extension/tsconfig.json && node --test tools/phase9/performance.test.mjs
+ℹ tests 12
+ℹ pass 12
+ℹ fail 0
+ℹ duration_ms 22563.8818
+exit 0
+```
+
+Every full performance run above includes a successful standalone CLI subprocess that writes JSON, then reads it back through `validateBaseline`; its temporary output is removed by the existing test. No checked-in evidence was regenerated.
+
+### Forced TypeScript build and compiled benchmark
+
+```text
+$ node node_modules/typescript/bin/tsc -b apps/code-oss-extension/tsconfig.json --force
+(no stdout; exit 0)
+$ node --test apps/code-oss-extension/dist/test/testing-api-benchmark.test.js
+✔ 10,000 item catalog keeps every Test Item identity for the same revision (120.9387ms)
+ℹ {"runtime":"node-24.19.0","platform":"win32-x64","itemCount":10000,"verifiedIdentityCount":10000,"revision":"benchmark-r1","elapsedMs":117.264,"replacementCountAfterSameRevision":0}
+ℹ tests 1
+ℹ pass 1
+ℹ fail 0
+ℹ duration_ms 1169.1388
+exit 0
+```
+
+### Workspace smoke, gate/renderer, and diff verification
+
+```text
+$ node --test tools/workspace-smoke/workspace-smoke.test.mjs
+✔ Phase 9 performance baseline job contract is fixed and reviewed (1.3698ms)
+ℹ tests 21
+ℹ pass 21
+ℹ fail 0
+ℹ duration_ms 1211.4248
+exit 0
+
+$ node --test tools/phase9/validate.test.mjs tools/phase9/audit.test.mjs
+ℹ tests 98
+ℹ pass 98
+ℹ fail 0
+ℹ duration_ms 11679.1678
+exit 0
+
+$ node tools/phase9/render.mjs --registry tools/phase9/gates.json --baseline docs/superpowers/evidence/phase9/baseline.json --receipts docs/superpowers/evidence/phase9/receipts --repository-root . --json-out docs/superpowers/evidence/phase9/gate-matrix.json --markdown-out docs/superpowers/evidence/phase9/gate-matrix.md --check
+(no stdout; exit 0)
+
+$ git diff --check
+(no whitespace errors; exit 0; Git emitted LF-to-CRLF conversion warnings)
+```
+
+The additional broader workspace suite was also attempted; its CMake prerequisite is absent from this command environment:
+
+```text
+$ node --test tools/workspace-smoke/workspace-smoke.test.mjs tools/workspace-smoke/workspace-config-schema.test.mjs tools/workspace-smoke/unit-test-ide-cmake-helper.test.mjs
+✖ UnitTestIDE CMake helper has strict deterministic framework registration (1446.2695ms)
+ℹ tests 31
+ℹ pass 30
+ℹ fail 1
+ℹ duration_ms 1718.9692
+Error: spawnSync cmake ENOENT
+exit 1
+```
+
+### Remaining concerns
+
+- The requested verification set passes; the optional broader workspace run cannot pass with CMake missing from PATH. No CMake files or toolchain configuration were changed to address an out-of-scope environment prerequisite.
+- Timing gates are unchanged and remain fail-closed; four full final-code performance runs passed on this host, but this does not guarantee stability under arbitrary CI contention. This fix did not run Ubuntu CI.
+- Canonical runtime validation accepts stable three-component Node release versions. A future policy permitting prerelease/nightly runtime strings or newly introduced platform/architecture values would need an explicit schema update.
+- The historical checked-in performance evidence was intentionally not rewritten by this code-only fix; publishing replacement candidate evidence remains separate authorized work.
