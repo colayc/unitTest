@@ -231,3 +231,113 @@ $ git diff --check
 
 - The runner intentionally requires the extension TypeScript build because discovery now measures the real emitted `TestingApiAdapter`; the package script performs that build before the contract tests.
 - The Task 2 workflow contract remains the only expected workspace-smoke failure. No workflow file was modified in Task 1 round 4.
+
+## Review-fix round 5 (final requested fix round)
+
+### Changes and metric definition
+
+- `tools/phase9/performance.mjs` now publishes the unmodified `process.memoryUsage().rss` reading immediately after each allocation as `memory.samplesBytes`. This is **absolute post-operation process RSS**, not an allocation-size proxy and not an allocation delta. The five 1 MiB buffers remain retained during sampling; one allocation/probe is performed as warm-up.
+- Renamed the allocation-size constant to `MEMORY_ALLOCATION_BYTES`. Allocation size remains the correctness check, independent of the RSS performance metric.
+- The RSS finite checks and shared non-negative/finite/five-sample/CV-at-most-0.20 validation remain fail-closed. No retry, sample replacement, clipping, normalization, or threshold relaxation was added.
+- The validator now requires `samplesBytes` for memory and `samplesMs` for timed scenarios.
+- `tools/phase9/performance.test.mjs` wraps the real RSS probe without altering its returned value and compares the five published samples with the actual post-allocation readings. It also checks allocation correctness and rejects wrong-unit, negative, NaN, infinite, and unstable memory samples. The former constant-value expectation was removed.
+- No workflow or product-runtime file was modified. No agents were dispatched.
+
+### RED evidence before the production fix
+
+Pinned Node `v24.19.0` was used throughout. The new live-probe and wrong-unit regression checks failed against the round-4 code:
+
+```text
+$ node --test --test-name-pattern='memory samples|validator rejects' tools/phase9/performance.test.mjs
+✖ memory samples publish the actual post-allocation process RSS readings (8262.5082ms)
+✖ validator rejects mutated summaries, correctness, and scenario fields (1.9643ms)
+tests 2
+pass 0
+fail 2
+duration_ms 9428.0175
+actual:   [1048576,1048576,1048576,1048576,1048576]
+expected: [317947904,319000576,320053248,321105920,322158592]
+validator wrong-unit assertion: true !== false
+exit 1
+```
+
+### Repeated focused verification (including the observed failure)
+
+```text
+$ 1..3 | ForEach-Object { node --test tools/phase9/performance.test.mjs; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
+run 1: tests 7; pass 7; fail 0; duration_ms 23766.9198
+run 2: tests 7; pass 7; fail 0; duration_ms 22659.8127
+run 3: tests 7; pass 3; fail 4; duration_ms 19464.7521
+run 3 error: discovery-10000: coefficient of variation exceeds 0.20
+exit 1
+```
+
+The third run failed in the existing discovery timing workload before memory ran; the rejected cached baseline caused four dependent tests to fail. Its independent CLI subprocess passed. This failure was not suppressed, and no discovery workload change was made in this RSS-focused fix. It is evidence of environmental timing sensitivity, not proof of universal CI stability.
+
+The subsequent pinned package verification passed:
+
+```text
+$ .superpowers/runtime/task10-fixed-bin/pnpm.cmd --version
+11.4.0
+$ .superpowers/runtime/task10-fixed-bin/pnpm.cmd test:phase9:performance
+$ tsc -b apps/code-oss-extension/tsconfig.json && node --test tools/phase9/performance.test.mjs
+tests 7
+pass 7
+fail 0
+duration_ms 21911.1566
+exit 0
+```
+
+### Build and compiled benchmark
+
+```text
+$ node node_modules/typescript/bin/tsc -b apps/code-oss-extension/tsconfig.json --force
+(no stdout; exit 0)
+$ node --test apps/code-oss-extension/dist/test/testing-api-benchmark.test.js
+✔ 10,000 item catalog keeps every Test Item identity for the same revision (116.099ms)
+{"runtime":"node-24.19.0","platform":"win32-x64","itemCount":10000,"verifiedIdentityCount":10000,"revision":"benchmark-r1","elapsedMs":112.44,"replacementCountAfterSameRevision":0}
+tests 1
+pass 1
+fail 0
+duration_ms 1159.2203
+exit 0
+```
+
+### Three consecutive standalone RSS baselines
+
+```text
+$ 1..3 | ForEach-Object { node tools/phase9/performance.mjs --out ".superpowers/phase9/performance/round5-baseline-$_.json" }
+run 1 samplesBytes: [297832448,298885120,299937792,300990464,302043136]
+run 1 memory CV: 0.004963372602044129; maximum scenario CV: 0.0795476452742814
+run 2 samplesBytes: [314146816,315199488,316252160,317304832,318357504]
+run 2 memory CV: 0.004707329174069232; maximum scenario CV: 0.0522579508926273
+run 3 samplesBytes: [297189376,298242048,299294720,300347392,301400064]
+run 3 memory CV: 0.004974037026548315; maximum scenario CV: 0.073685861495377
+all runs: sampleCount 5; warmupCount 1
+all memory correctness: {"expected":1048576,"observed":1048576,"passed":1048576,"failed":0}
+all runs: exit 0
+```
+
+### Workspace smoke and final checks
+
+```text
+$ node --test tools/workspace-smoke/workspace-smoke.test.mjs
+tests 21
+pass 20
+fail 1
+duration_ms 1496.3505
+AssertionError [ERR_ASSERTION]: phase9-performance job is missing
+exit 1
+
+$ git diff --check
+(no whitespace errors; exit 0; Git emitted LF-to-CRLF conversion warnings)
+```
+
+Workspace smoke remains intentionally RED until Task 2 adds the job.
+
+### Commit and remaining concerns
+
+- Final round-5 code SHA: `b38b96c99c4cb4c914cca0fb1772cfa2d4496e44` — `test: add phase9 performance baseline harness`.
+- This report is committed separately with the same required message; its resulting commit SHA is supplied in the completion handoff, since a commit cannot contain its own SHA.
+- Absolute process RSS includes the Node runtime and earlier in-process workloads; it is not an estimate of isolated buffer cost. The fixed runner/toolchain is important for comparisons.
+- Three consecutive standalone baselines demonstrated stable raw RSS on this Windows host; Ubuntu CI has not been executed here. One repeated focused run demonstrated the unchanged discovery timing gate can still reject a noisy run.
