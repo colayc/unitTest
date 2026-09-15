@@ -446,9 +446,11 @@ export function createExtensionController(
 
 export async function activateControllerWithMarker(
   controller: { activate(): Promise<void> },
-  emitMarker: (marker: string) => void = (marker) => console.log(marker)
+  emitMarker: (marker: string) => void = (marker) => console.log(marker),
+  publishDurableMarker: () => Promise<void> = async () => undefined
 ): Promise<void> {
   await controller.activate();
+  await publishDurableMarker();
   emitMarker(EXTENSION_ACTIVATION_MARKER);
 }
 
@@ -525,13 +527,13 @@ export async function activate(context: vscodeTypes.ExtensionContext): Promise<v
   const vscode = createRequire(import.meta.url)("vscode") as typeof vscodeTypes;
   const controller = createExtensionController(createVSCodeHost(vscode, context));
   activeController = controller;
-  await activateControllerWithMarker(controller);
-  if (
+  const publishDurableMarker = (
     process.env.UNIT_TEST_IDE_HOST_SMOKE === "1" &&
     (context.extensionMode === vscode.ExtensionMode.Development || context.extensionMode === vscode.ExtensionMode.Test)
-  ) {
-    await writeDevelopmentActivationMarker(context.globalStorageUri.fsPath);
-  }
+  )
+    ? () => writeDevelopmentActivationMarker(context.globalStorageUri.fsPath)
+    : undefined;
+  await activateControllerWithMarker(controller, undefined, publishDurableMarker);
 }
 
 export async function deactivate(): Promise<void> {

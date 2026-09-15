@@ -1,9 +1,9 @@
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { EXTENSION_ACTIVATION_MARKER } from "../dist/src/extension.js";
 import { redactServiceError } from "../dist/src/service-resources.js";
+import { waitForActivation } from "./extension-host-smoke-support.mjs";
 
 const executable = process.env.CODE_OSS_EXECUTABLE?.trim();
 if (!executable) {
@@ -21,65 +21,6 @@ const sensitive = [executable, repositoryRoot, extensionPath, smokeRoot, workspa
 
 function redactedFailure(message, output = "") {
   return redactServiceError(new Error(`${message}; process-output=${output}`), sensitive);
-}
-
-function boundedOutput(current, chunk) {
-  const next = current + String(chunk);
-  return next.length <= 131_072 ? next : next.slice(-131_072);
-}
-
-function waitForActivation(child, markerPath) {
-  return new Promise((resolveActivation, rejectActivation) => {
-    let output = "";
-    let settled = false;
-    let markerPoll;
-    const timer = setTimeout(() => finish(new Error("activation marker timed out")), 30_000);
-    const cleanup = () => {
-      clearTimeout(timer);
-      clearTimeout(markerPoll);
-      child.stdout.off("data", onData);
-      child.stderr.off("data", onData);
-      child.off("error", onError);
-      child.off("exit", onExit);
-    };
-    const finish = (error) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      if (error) rejectActivation(redactedFailure(error.message, output));
-      else resolveActivation();
-    };
-    const onData = (chunk) => {
-      output = boundedOutput(output, chunk);
-      if (output.includes(EXTENSION_ACTIVATION_MARKER)) finish();
-    };
-    const onError = (error) => finish(error);
-    const onExit = (code, signal) => finish(new Error(
-      `Code-OSS exited before activation marker with code ${String(code)} and signal ${String(signal)}`
-    ));
-    const pollMarker = async () => {
-      if (settled) return;
-      try {
-        const marker = await readFile(markerPath, "utf8");
-        if (marker !== `${EXTENSION_ACTIVATION_MARKER}\n`) {
-          finish(new Error("Code-OSS activation marker file is invalid"));
-          return;
-        }
-        finish();
-      } catch (error) {
-        if (error?.code !== "ENOENT") {
-          finish(error);
-          return;
-        }
-        markerPoll = setTimeout(() => void pollMarker(), 50);
-      }
-    };
-    child.stdout.on("data", onData);
-    child.stderr.on("data", onData);
-    child.once("error", onError);
-    child.once("exit", onExit);
-    void pollMarker();
-  });
 }
 
 function waitForExit(child, timeoutMs) {
@@ -133,7 +74,8 @@ try {
 
   await waitForActivation(
     child,
-    join(userDataDirectory, "User", "globalStorage", "unit-test-ide.code-oss-extension", "activation.marker")
+    join(userDataDirectory, "User", "globalStorage", "unit-test-ide.code-oss-extension", "activation.marker"),
+    redactedFailure
   );
   child.kill("SIGTERM");
   try {

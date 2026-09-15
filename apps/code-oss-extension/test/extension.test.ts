@@ -437,6 +437,20 @@ test("activation completion marker is not emitted when controller activation rej
   assert.deepEqual(markers, []);
 });
 
+test("activation completion marker is not emitted when durable marker publication rejects", async () => {
+  const markers: string[] = [];
+
+  await assert.rejects(
+    () => activateControllerWithMarker(
+      { activate: async () => undefined },
+      (marker) => markers.push(marker),
+      async () => { throw new Error("marker write rejected"); }
+    ),
+    /marker write rejected/
+  );
+  assert.deepEqual(markers, []);
+});
+
 test("untrusted activation publishes blocked status and does not start service", async () => {
   const host = createExtensionHarness({ folderCount: 1, isTrusted: false });
 

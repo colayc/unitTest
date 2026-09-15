@@ -787,13 +787,14 @@
       ],
       "title": "Code-OSS branding and built-in extension registration",
       "verification": {
-        "artifacts": [],
+        "artifacts": [
+          "code-oss-branding-builtin-report"
+        ],
         "commands": [
           "node --test tools/workspace-smoke/workspace-smoke.test.mjs"
         ],
         "jobs": [
-          "verify-linux",
-          "verify-windows"
+          "code-oss-branding-builtin"
         ],
         "workflowPath": ".github/workflows/foundation.yml"
       }

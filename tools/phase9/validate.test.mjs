@@ -952,6 +952,7 @@ test("generic successful foundation jobs cannot satisfy feature-specific gates w
   const gateArtifacts = {
     "P5-LINUX-CLANG-COVERAGE": "linux-clang-coverage-report",
     "P5-WINDOWS-LLVM-COVERAGE": "coverage-execution-windows-{runAttempt}",
+    "P6-BRANDING-AND-BUILTIN-REGISTRATION": "code-oss-branding-builtin-report",
     "P6-CODEOSS-HOST-SMOKE": "code-oss-host-smoke-report",
     "P7-COVERAGE-UI-AND-SOURCE-DECORATION": "coverage-ui-source-decoration-report",
     "P7-HISTORY-AND-ARTIFACT-BROWSER": "history-artifact-browser-report",
@@ -985,6 +986,10 @@ test("generic successful foundation jobs cannot satisfy feature-specific gates w
     assert.equal(matrix.gates.find(({ id }) => id === gateId).status, "MISSING", `${gateId} requires feature-specific evidence`);
     assert.deepEqual(registry.gates.find(({ id }) => id === gateId).verification.artifacts, [gateArtifacts[gateId]]);
   }
+  assert.deepEqual(
+    registry.gates.find(({ id }) => id === "P6-BRANDING-AND-BUILTIN-REGISTRATION").verification.jobs,
+    ["code-oss-branding-builtin"],
+  );
 });
 
 test("P5 coverage gates require the closed Linux GCC and Windows LLVM artifacts", async () => {

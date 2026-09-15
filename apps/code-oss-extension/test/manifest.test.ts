@@ -36,8 +36,9 @@ test("contracts expose explicit lifecycle states", async () => {
 
 test("Code-OSS can require the extension entrypoint before activating its ESM implementation", async () => {
   const manifest = JSON.parse(await readFile(resolve(root, "package.json"), "utf8")) as { main: string };
+  const supportsRequireModuleFlag = Number.parseInt(process.versions.node.split(".")[0]!, 10) >= 22;
   const result = spawnSync(process.execPath, [
-    "--no-experimental-require-module",
+    ...(supportsRequireModuleFlag ? ["--no-experimental-require-module"] : []),
     "-e",
     "const entrypoint = require(process.argv[1]); process.stdout.write(`${typeof entrypoint.activate},${typeof entrypoint.deactivate}`);",
     resolve(root, manifest.main)
