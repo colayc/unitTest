@@ -524,11 +524,11 @@ test("foundation release publication is downstream of a successful qualification
   assert.match(workflow, /release-qualification:\r?\n[\s\S]*?needs:\r?\n\s+- install-smoke-windows\r?\n\s+- install-smoke-linux/u);
   const qualificationStart = workflow.indexOf("  release-qualification:");
   const qualificationJob = workflow.slice(qualificationStart);
-  assert.match(qualificationJob, /uses: pnpm\/action-setup@v4[\s\S]*?version: 11\.4\.0[\s\S]*?run_install: false/u);
+  assert.match(qualificationJob, /uses: pnpm\/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4[\s\S]*?version: 11\.4\.0[\s\S]*?run_install: false/u);
   assert.match(qualificationJob, /run: pnpm install --frozen-lockfile/u);
   assert.match(workflow, /node tools\/release\/qualification\.mjs[\s\S]*?release-qualification\.json/u);
   assert.match(workflow, /signature_required=\$env:RELEASE_SIGNING_REQUIRED/u);
-  assert.match(workflow, /qualificationOutcome\.qualified[\s\S]*?actions\/upload-artifact@v7/u);
+  assert.match(workflow, /qualificationOutcome\.qualified[\s\S]*?actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7/u);
   assert.match(workflow, /id: canonical-release-version[\s\S]*?name: qualified-release-\$\{\{ steps\.canonical-release-version\.outputs\.version \}\}/u);
 });
 
@@ -571,6 +571,44 @@ test("foundation uploads all six deterministic content-bound unsigned P8 reports
   assert.match(job, /SIGNATURE_REQUIRED: \$\{\{ needs\.package-windows\.outputs\.signature_required \}\}/u);
   assert.match(job, /SIGNATURE_OUTCOME: \$\{\{ needs\.package-windows\.outputs\.signature_outcome \}\}/u);
   assert.equal((job.match(/if: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.release_signing_required == '0' \}\}/gu) ?? []).length, 7);
+});
+
+test("foundation P8 report trust path uses only reviewed immutable action commits", async () => {
+  const workflow = await readFile(resolve(".github/workflows/foundation.yml"), "utf8");
+  const approvedActions = new Map([
+    ["actions/cache", "0057852bfaa89a56745cba8c7296529d2fc39830"],
+    ["actions/checkout", "d23441a48e516b6c34aea4fa41551a30e30af803"],
+    ["actions/download-artifact", "d3f86a106a0bac45b974a628896c90dbdf5c8093"],
+    ["actions/setup-go", "924ae3a1cded613372ab5595356fb5720e22ba16"],
+    ["actions/setup-node", "249970729cb0ef3589644e2896645e5dc5ba9c38"],
+    ["actions/upload-artifact", "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"],
+    ["pnpm/action-setup", "f40ffcd9367d9f12939873eb1018b921a783ffaa"],
+  ]);
+  const trustPathJobs = [
+    "verify-windows",
+    "verify-linux",
+    "verify-release-input-run",
+    "package-windows",
+    "package-linux",
+    "install-smoke-windows",
+    "install-smoke-linux",
+    "release-qualification",
+  ];
+
+  for (const jobName of trustPathJobs) {
+    const start = workflow.indexOf(`  ${jobName}:`);
+    assert.ok(start >= 0, `${jobName} must exist`);
+    const nextJob = workflow.slice(start + 1).search(/^  [a-z0-9][a-z0-9-]*:/mu);
+    const end = nextJob < 0 ? workflow.length : start + 1 + nextJob;
+    const job = workflow.slice(start, end);
+    const invocations = [...job.matchAll(/^\s+uses:\s+([^\s#]+)/gmu)].map((match) => match[1]);
+    assert.ok(invocations.length > 0, `${jobName} must contain action invocations`);
+    for (const invocation of invocations) {
+      const match = /^([^@]+)@([0-9a-f]{40})$/u.exec(invocation);
+      assert.ok(match, `${jobName} contains mutable action ${invocation}`);
+      assert.equal(match[2], approvedActions.get(match[1]), `${jobName} contains unreviewed action ${invocation}`);
+    }
+  }
 });
 
 test("release package jobs materialize digest-pinned runtime inputs before packaging", async () => {

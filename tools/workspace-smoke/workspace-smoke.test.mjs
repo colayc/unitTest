@@ -400,7 +400,7 @@ test("Hosted CI pins native toolchain runners and gates unstable Windows native 
     assert.ok(verify > prepare && prepare !== -1 && native > verify);
     assert.match(source, /path:\s*\.bundled-tools\/cmake/);
     assert.match(source, /GITHUB_PATH/);
-    assert.match(source, /uses:\s*actions\/upload-artifact@v7/);
+    assert.match(source, /uses:\s*actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a\s*#\s*v7/);
     assert.match(source, /if:\s*always\(\)/);
     assert.match(
       source,
@@ -634,7 +634,7 @@ test("trusted producer documentation keeps unsigned qualification operational, c
     const stepStart = source.lastIndexOf("      - ", artifactAt);
     const nextStep = source.indexOf("\n      - ", artifactAt);
     const uploadStep = source.slice(stepStart, nextStep === -1 ? undefined : nextStep);
-    assert.match(uploadStep, /uses:\s*actions\/upload-artifact@v7/u);
+    assert.match(uploadStep, /uses:\s*actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a\s*#\s*v7/u);
     assert.match(uploadStep, /^\s{10}retention-days:\s*1\s*$/mu, `${artifact} must retain unsigned qualification evidence for exactly one day`);
   }
 });
