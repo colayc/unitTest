@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "main": "./dist/src/extension.js",
+  "main": "./dist/src/extension-entry.cjs",
   "engines": { "vscode": ">=1.90.0" },
   "activationEvents": ["onStartupFinished"],
   "extensionKind": ["workspace"],

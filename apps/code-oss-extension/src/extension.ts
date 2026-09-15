@@ -1,3 +1,5 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { basename, isAbsolute, join } from "node:path";
 import type { CoverageSourceSnapshotV14 } from "@unit-test-ide/test-client";
 import type * as vscodeTypes from "vscode";
@@ -24,6 +26,7 @@ import { TrustGate, type WorkspaceSnapshot } from "./trust-gate.js";
 
 const DEFAULT_STOP_TIMEOUT_MS = 2_000;
 export const EXTENSION_ACTIVATION_MARKER = "UNIT_TEST_IDE_EXTENSION_ACTIVATED";
+const DEVELOPMENT_ACTIVATION_MARKER_FILE = "activation.marker";
 
 export interface ExtensionWorkspaceSnapshot extends WorkspaceSnapshot {
   workspaceRoot?: string;
@@ -449,6 +452,15 @@ export async function activateControllerWithMarker(
   emitMarker(EXTENSION_ACTIVATION_MARKER);
 }
 
+export async function writeDevelopmentActivationMarker(directory: string): Promise<void> {
+  await mkdir(directory, { recursive: true });
+  await writeFile(
+    join(directory, DEVELOPMENT_ACTIVATION_MARKER_FILE),
+    `${EXTENSION_ACTIVATION_MARKER}\n`,
+    { encoding: "utf8", flag: "wx", mode: 0o600 }
+  );
+}
+
 function createVSCodeHost(
   vscode: typeof vscodeTypes,
   context: vscodeTypes.ExtensionContext
@@ -510,10 +522,16 @@ function createVSCodeHost(
 let activeController: { deactivate(): Promise<void> } | undefined;
 
 export async function activate(context: vscodeTypes.ExtensionContext): Promise<void> {
-  const vscode = await import("vscode");
+  const vscode = createRequire(import.meta.url)("vscode") as typeof vscodeTypes;
   const controller = createExtensionController(createVSCodeHost(vscode, context));
   activeController = controller;
   await activateControllerWithMarker(controller);
+  if (
+    process.env.UNIT_TEST_IDE_HOST_SMOKE === "1" &&
+    (context.extensionMode === vscode.ExtensionMode.Development || context.extensionMode === vscode.ExtensionMode.Test)
+  ) {
+    await writeDevelopmentActivationMarker(context.globalStorageUri.fsPath);
+  }
 }
 
 export async function deactivate(): Promise<void> {

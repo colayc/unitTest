@@ -11,5 +11,5 @@
     { "path": "../../packages/coverage-models/tsconfig.json" },
     { "path": "../../tools/service-probe/tsconfig.json" }
   ],
-  "include": ["src/**/*.ts", "test/**/*.ts", "test/testing-api-benchmark-support.mjs"]
+  "include": ["src/**/*.ts", "src/**/*.cts", "test/**/*.ts", "test/testing-api-benchmark-support.mjs"]
 }

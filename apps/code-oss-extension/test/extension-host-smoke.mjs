@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { EXTENSION_ACTIVATION_MARKER } from "../dist/src/extension.js";
@@ -28,13 +28,15 @@ function boundedOutput(current, chunk) {
   return next.length <= 131_072 ? next : next.slice(-131_072);
 }
 
-function waitForActivation(child) {
+function waitForActivation(child, markerPath) {
   return new Promise((resolveActivation, rejectActivation) => {
     let output = "";
     let settled = false;
+    let markerPoll;
     const timer = setTimeout(() => finish(new Error("activation marker timed out")), 30_000);
     const cleanup = () => {
       clearTimeout(timer);
+      clearTimeout(markerPoll);
       child.stdout.off("data", onData);
       child.stderr.off("data", onData);
       child.off("error", onError);
@@ -55,10 +57,28 @@ function waitForActivation(child) {
     const onExit = (code, signal) => finish(new Error(
       `Code-OSS exited before activation marker with code ${String(code)} and signal ${String(signal)}`
     ));
+    const pollMarker = async () => {
+      if (settled) return;
+      try {
+        const marker = await readFile(markerPath, "utf8");
+        if (marker !== `${EXTENSION_ACTIVATION_MARKER}\n`) {
+          finish(new Error("Code-OSS activation marker file is invalid"));
+          return;
+        }
+        finish();
+      } catch (error) {
+        if (error?.code !== "ENOENT") {
+          finish(error);
+          return;
+        }
+        markerPoll = setTimeout(() => void pollMarker(), 50);
+      }
+    };
     child.stdout.on("data", onData);
     child.stderr.on("data", onData);
     child.once("error", onError);
     child.once("exit", onExit);
+    void pollMarker();
   });
 }
 
@@ -105,13 +125,16 @@ try {
   ];
   child = spawn(executable, args, {
     cwd: repositoryRoot,
-    env: process.env,
+    env: { ...process.env, UNIT_TEST_IDE_HOST_SMOKE: "1" },
     shell: false,
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"]
   });
 
-  await waitForActivation(child);
+  await waitForActivation(
+    child,
+    join(userDataDirectory, "User", "globalStorage", "unit-test-ide.code-oss-extension", "activation.marker")
+  );
   child.kill("SIGTERM");
   try {
     await waitForExit(child, 5_000);
