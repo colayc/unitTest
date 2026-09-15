@@ -670,3 +670,122 @@ exit 0
 ```
 
 No evidence was rewritten to clear this failure. Replacement candidate evidence requires the separately authorized evidence workflow. The prior optional expanded workspace-suite CMake/PATH limitation also remains; that out-of-scope suite was not rerun in this continuation. No timing gates, sample handling, portable schema fields, or CI authority boundaries were relaxed.
+
+## Final-fix continuation — bind scenario-specific expected counts (2026-09-15)
+
+- Latest final code SHA: `98777392b6aab1160d658c49fb188961763afce7` — `test: add phase9 performance baseline harness`.
+- Added a closed, frozen expected-count map: discovery-10000 = 10000; filter = 1000; cancel = 1; memory = 1048576; startup = 1; report = 1. Validation now requires equality to that scenario-specific count in addition to `expected === observed === passed` and `failed === 0`.
+- Added two independent mutations for each of the six scenarios: internally consistent all-zero correctness and internally consistent expected/observed/passed counts increased by one. Every mutation was demonstrated RED before implementation.
+- Every repeated operation result remains collected and checked, including warm-up. The portable runtime/hardware schema and all prior stability, sample, unit, and redaction checks remain unchanged. Scope remains the two harness files plus this report; no workflow/evidence/CMake/release changes or delegation occurred.
+
+### Test-first evidence
+
+```text
+$ node --test --test-name-pattern='fixed expected count' tools/phase9/performance.test.mjs
+▶ validator binds correctness to each scenario's fixed expected count
+  ✖ discovery-10000 rejects expected 0 (2.2789ms)
+  ✖ discovery-10000 rejects expected 10001 (0.3926ms)
+  ✖ filter rejects expected 0 (0.2373ms)
+  ✖ filter rejects expected 1001 (0.2125ms)
+  ✖ cancel rejects expected 0 (0.2408ms)
+  ✖ cancel rejects expected 2 (0.2054ms)
+  ✖ memory rejects expected 0 (0.2209ms)
+  ✖ memory rejects expected 1048577 (0.2367ms)
+  ✖ startup rejects expected 0 (0.2451ms)
+  ✖ startup rejects expected 2 (0.2495ms)
+  ✖ report rejects expected 0 (0.2008ms)
+  ✖ report rejects expected 2 (0.2007ms)
+✖ validator binds correctness to each scenario's fixed expected count (7.1859ms)
+✔ timed scenarios preserve the fixed expected count when all repetitions succeed (1.5218ms)
+ℹ tests 14
+ℹ pass 1
+ℹ fail 13
+ℹ duration_ms 1107.8175
+true !== false
+exit 1
+```
+
+Same command after implementation:
+
+```text
+ℹ tests 14
+ℹ pass 14
+ℹ fail 0
+ℹ duration_ms 1115.706
+exit 0
+```
+
+### Fresh verification, including observed timing failure
+
+Pinned Node `v24.19.0` and pnpm `11.4.0` were used as above. The three repeated runs were not all green; the exact outcome is retained rather than hidden with retries:
+
+```text
+$ 1..3 | ForEach-Object { Write-Output "Fixed-count performance run $_"; node --test tools/phase9/performance.test.mjs; Write-Output "Exit code: $LASTEXITCODE" }
+Fixed-count performance run 1
+ℹ tests 35
+ℹ pass 35
+ℹ fail 0
+ℹ duration_ms 22633.5444
+Exit code: 0
+Fixed-count performance run 2
+ℹ tests 35
+ℹ pass 35
+ℹ fail 0
+ℹ duration_ms 22238.4299
+Exit code: 0
+Fixed-count performance run 3
+cancel: coefficient of variation exceeds 0.20
+✖ CLI rejects malformed arguments and writes JSON for the fixed interface (13352.8387ms)
+ℹ tests 35
+ℹ pass 34
+ℹ fail 1
+ℹ duration_ms 22233.9542
+Exit code: 1
+```
+
+Only the standalone CLI subprocess's cancel workload exceeded the existing CV limit; the main baseline, all fixed-count mutations, and all intermittent-operation regressions passed in that run. No retry, sample rewriting, workload tuning, or threshold change was added. The subsequent required pinned package invocation passed:
+
+```text
+$ .superpowers/runtime/task10-fixed-bin/pnpm.cmd test:phase9:performance
+$ tsc -b apps/code-oss-extension/tsconfig.json && node --test tools/phase9/performance.test.mjs
+ℹ tests 35
+ℹ pass 35
+ℹ fail 0
+ℹ duration_ms 21137.8911
+exit 0
+
+$ node node_modules/typescript/bin/tsc -b apps/code-oss-extension/tsconfig.json --force
+(no stdout; exit 0)
+
+$ node --test apps/code-oss-extension/dist/test/testing-api-benchmark.test.js
+✔ 10,000 item catalog keeps every Test Item identity for the same revision (121.6918ms)
+ℹ {"runtime":"node-24.19.0","platform":"win32-x64","itemCount":10000,"verifiedIdentityCount":10000,"revision":"benchmark-r1","elapsedMs":118.413,"replacementCountAfterSameRevision":0}
+ℹ tests 1
+ℹ pass 1
+ℹ fail 0
+ℹ duration_ms 1122.6728
+exit 0
+
+$ node --test tools/workspace-smoke/workspace-smoke.test.mjs
+ℹ tests 21
+ℹ pass 21
+ℹ fail 0
+ℹ duration_ms 1462.7501
+exit 0
+
+$ node --test tools/phase9/validate.test.mjs tools/phase9/audit.test.mjs
+ℹ tests 98
+ℹ pass 98
+ℹ fail 0
+ℹ duration_ms 11129.3291
+exit 0
+
+$ node tools/phase9/render.mjs --registry tools/phase9/gates.json --baseline docs/superpowers/evidence/phase9/baseline.json --receipts docs/superpowers/evidence/phase9/receipts --repository-root . --json-out docs/superpowers/evidence/phase9/gate-matrix.json --markdown-out docs/superpowers/evidence/phase9/gate-matrix.md --check
+PHASE9_MATRIX_DRIFT: rendering failed
+exit 1
+
+$ git diff --check
+(no whitespace errors; exit 0; LF-to-CRLF conversion warnings only)
+```
+
+Renderer drift remains the previously confirmed candidate-descendant tested-content mismatch. Candidate evidence was deliberately not rewritten. Remaining concerns are the observed fail-closed cancel timing variability, separately required candidate evidence refresh, and the earlier optional CMake/PATH prerequisite; none was hidden or relaxed by this fix.
