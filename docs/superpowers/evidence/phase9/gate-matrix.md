@@ -1,7 +1,7 @@
 # Phase 9 Gate Matrix
 
-- Candidate commit: `19a9be9a8e45d957f26b7b7d5bd56d63dc354778`
-- Recorded by commit: `0f8632d132a245e2d00f16e74cb0b20d3b442068`
+- Candidate commit: `b84c2281ca4f96874dbf27f686df375d7082b305`
+- Recorded by commit: `b84c2281ca4f96874dbf27f686df375d7082b305`
 - Evaluation mode: `candidate`
 - Catalog complete: `true`
 - Release ready: `false`
@@ -10,8 +10,8 @@
 
 | Status | Count |
 |---|---:|
-| PASS | 0 |
-| MISSING | 59 |
+| PASS | 13 |
+| MISSING | 46 |
 | FAILED | 0 |
 | DEFERRED | 3 |
 
@@ -68,16 +68,16 @@
 | P8-RUNTIME-PRODUCER-PROVENANCE | 8 | supply-chain | MISSING |  |  |  |
 | P8-SIGN-WINDOWS | 8 | signing | DEFERRED |  |  |  |
 | P8-WINDOWS-MSIX-PACKAGE | 8 | packaging | MISSING |  |  |  |
-| P9-MATRIX-CONTRACT | 9 | contract | MISSING |  |  |  |
-| P9-MATRIX-E2E | 9 | end-to-end | MISSING |  |  |  |
-| P9-MATRIX-FAULT-INJECTION | 9 | fault-injection | MISSING |  |  |  |
-| P9-MATRIX-INTEGRATION | 9 | integration | MISSING |  |  |  |
-| P9-MATRIX-UNIT | 9 | unit | MISSING |  |  |  |
-| P9-PERF-CANCEL | 9 | performance | MISSING |  |  |  |
-| P9-PERF-DISCOVERY-10000 | 9 | performance | MISSING |  |  |  |
-| P9-PERF-FILTER | 9 | performance | MISSING |  |  |  |
-| P9-PERF-HARDWARE-BASELINE | 9 | performance | MISSING |  | missing |  |
-| P9-PERF-MEMORY | 9 | performance | MISSING |  |  |  |
-| P9-PERF-REPORT | 9 | performance | MISSING |  |  |  |
-| P9-PERF-STARTUP | 9 | performance | MISSING |  |  |  |
-| P9-UPSTREAM-CODEOSS | 9 | upstream | MISSING |  |  |  |
+| P9-MATRIX-CONTRACT | 9 | contract | PASS | github-actions-34928523525-performance |  |  |
+| P9-MATRIX-E2E | 9 | end-to-end | PASS | github-actions-34928523525-performance |  |  |
+| P9-MATRIX-FAULT-INJECTION | 9 | fault-injection | PASS | github-actions-34928523525-performance |  |  |
+| P9-MATRIX-INTEGRATION | 9 | integration | PASS | github-actions-34928523525-performance |  |  |
+| P9-MATRIX-UNIT | 9 | unit | PASS | github-actions-34928523525-performance |  |  |
+| P9-PERF-CANCEL | 9 | performance | PASS | github-actions-34928523525-performance |  |  |
+| P9-PERF-DISCOVERY-10000 | 9 | performance | PASS | github-actions-34928523525-performance |  |  |
+| P9-PERF-FILTER | 9 | performance | PASS | github-actions-34928523525-performance |  |  |
+| P9-PERF-HARDWARE-BASELINE | 9 | performance | PASS | github-actions-34928523525-performance | available |  |
+| P9-PERF-MEMORY | 9 | performance | PASS | github-actions-34928523525-performance |  |  |
+| P9-PERF-REPORT | 9 | performance | PASS | github-actions-34928523525-performance |  |  |
+| P9-PERF-STARTUP | 9 | performance | PASS | github-actions-34928523525-performance |  |  |
+| P9-UPSTREAM-CODEOSS | 9 | upstream | PASS | github-actions-34928523525-performance |  |  |
