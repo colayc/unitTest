@@ -32,12 +32,53 @@ func TestManifestMatchesProductionBundleShape(t *testing.T) {
 		t.Fatalf("win32-x64 archive = %#v", windows)
 	}
 	linux := manifest.Archives["linux-x64"]
-	if linux.URL != "https://cmake.org/files/v4.3/cmake-4.3.4-linux-x86_64.tar.gz" ||
+	if linux.URL != "https://github.com/Kitware/CMake/releases/download/v4.3.4/cmake-4.3.4-linux-x86_64.tar.gz" ||
 		linux.RootDirectory != "cmake-4.3.4-linux-x86_64" ||
 		linux.Executable != "bin/cmake" ||
 		linux.CTestExecutable != "bin/ctest" ||
 		linux.LicensePath != "doc/cmake/LICENSE.rst" {
 		t.Fatalf("linux-x64 archive = %#v", linux)
+	}
+}
+
+func TestManifestAcceptsExactLinuxArchiveURL(t *testing.T) {
+	manifest, err := loadManifest(filepath.Join("testdata", "bundle-manifest.valid.json"))
+	if err != nil {
+		t.Fatalf("loadManifest() error = %v", err)
+	}
+	if got := manifest.Archives["linux-x64"].URL; got != "https://github.com/Kitware/CMake/releases/download/v4.3.4/cmake-4.3.4-linux-x86_64.tar.gz" {
+		t.Fatalf("linux-x64 URL = %q", got)
+	}
+}
+
+func TestManifestRejectsUnapprovedLinuxArchiveURLs(t *testing.T) {
+	tests := map[string]string{
+		"foreign repository": "https://github.com/Other/CMake/releases/download/v4.3.4/cmake-4.3.4-linux-x86_64.tar.gz",
+		"foreign tag":        "https://github.com/Kitware/CMake/releases/download/v4.3.3/cmake-4.3.4-linux-x86_64.tar.gz",
+		"foreign path":       "https://github.com/Kitware/CMake/releases/download/v4.3.4/assets/cmake-4.3.4-linux-x86_64.tar.gz",
+		"credentials":        "https://user:password@github.com/Kitware/CMake/releases/download/v4.3.4/cmake-4.3.4-linux-x86_64.tar.gz",
+		"query":              "https://github.com/Kitware/CMake/releases/download/v4.3.4/cmake-4.3.4-linux-x86_64.tar.gz?download=1",
+		"fragment":           "https://github.com/Kitware/CMake/releases/download/v4.3.4/cmake-4.3.4-linux-x86_64.tar.gz#archive",
+		"non-HTTPS":          "http://github.com/Kitware/CMake/releases/download/v4.3.4/cmake-4.3.4-linux-x86_64.tar.gz",
+		"unrelated host":     "https://example.com/Kitware/CMake/releases/download/v4.3.4/cmake-4.3.4-linux-x86_64.tar.gz",
+	}
+
+	for name, archiveURL := range tests {
+		t.Run(name, func(t *testing.T) {
+			path := writeManifestMutation(t, func(source string) string {
+				return strings.Replace(
+					source,
+					"https://github.com/Kitware/CMake/releases/download/v4.3.4/cmake-4.3.4-linux-x86_64.tar.gz",
+					archiveURL,
+					1,
+				)
+			})
+
+			_, err := loadManifest(path)
+			if !errors.Is(err, ErrInvalidManifest) {
+				t.Fatalf("loadManifest() error = %v, want ErrInvalidManifest", err)
+			}
+		})
 	}
 }
 

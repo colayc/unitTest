@@ -308,7 +308,7 @@ func productionManifestPolicy() Manifest {
 				},
 			},
 			"linux-x64": {
-				URL:             "https://cmake.org/files/v4.3/cmake-4.3.4-linux-x86_64.tar.gz",
+				URL:             "https://github.com/Kitware/CMake/releases/download/v4.3.4/cmake-4.3.4-linux-x86_64.tar.gz",
 				ArchiveSha256:   "ca6f08ccbd5e6b0a9068d33317d0d1aff7278d08cccaed4529b8fbead7942a68",
 				RootDirectory:   "cmake-4.3.4-linux-x86_64",
 				Executable:      "bin/cmake",
@@ -330,28 +330,25 @@ func validateArchive(version, key string, archive Archive) error {
 		majorMinor = majorMinor[:separator]
 	}
 
-	var expectedURL, expectedRoot, expectedExecutable, expectedCTestExecutable string
+	var expectedHost, expectedPath, expectedRoot, expectedExecutable, expectedCTestExecutable string
 	switch key {
 	case "win32-x64":
 		expectedRoot = "cmake-" + version + "-windows-x86_64"
 		expectedExecutable = "bin/cmake.exe"
 		expectedCTestExecutable = "bin/ctest.exe"
-		expectedURL = "https://cmake.org/files/v" + majorMinor + "/" + expectedRoot + ".zip"
+		expectedHost = "cmake.org"
+		expectedPath = "/files/v" + majorMinor + "/" + expectedRoot + ".zip"
 	case "linux-x64":
 		expectedRoot = "cmake-" + version + "-linux-x86_64"
 		expectedExecutable = "bin/cmake"
 		expectedCTestExecutable = "bin/ctest"
-		expectedURL = "https://cmake.org/files/v" + majorMinor + "/" + expectedRoot + ".tar.gz"
+		expectedHost = "github.com"
+		expectedPath = "/Kitware/CMake/releases/download/v" + version + "/" + expectedRoot + ".tar.gz"
 	default:
 		return fmt.Errorf("unsupported platform key")
 	}
-	if archive.URL != expectedURL {
-		return fmt.Errorf("url = %q", archive.URL)
-	}
-	parsedURL, err := url.Parse(archive.URL)
-	if err != nil || parsedURL.Scheme != "https" || parsedURL.Host != "cmake.org" ||
-		parsedURL.RawQuery != "" || parsedURL.Fragment != "" {
-		return fmt.Errorf("url is not the fixed HTTPS cmake.org location")
+	if err := validateArchiveURL(archive.URL, expectedHost, expectedPath); err != nil {
+		return err
 	}
 	if !validSHA256(archive.ArchiveSha256) {
 		return fmt.Errorf("invalid archiveSha256")
@@ -388,6 +385,19 @@ func validateArchive(version, key string, archive Archive) error {
 	}
 	if _, ok := archive.InstalledFiles[archive.LicensePath]; !ok {
 		return fmt.Errorf("license is missing from installedFiles")
+	}
+	return nil
+}
+
+func validateArchiveURL(value, expectedHost, expectedPath string) error {
+	if value != "https://"+expectedHost+expectedPath {
+		return fmt.Errorf("url = %q", value)
+	}
+	parsedURL, err := url.Parse(value)
+	if err != nil || parsedURL.Scheme != "https" || parsedURL.Host != expectedHost ||
+		parsedURL.Path != expectedPath || parsedURL.RawPath != "" || parsedURL.User != nil ||
+		parsedURL.RawQuery != "" || parsedURL.Fragment != "" {
+		return fmt.Errorf("url is not the fixed HTTPS source location")
 	}
 	return nil
 }
