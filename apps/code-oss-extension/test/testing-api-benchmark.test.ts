@@ -10,6 +10,8 @@ import type {
   WorkspaceSnapshot
 } from "@unit-test-ide/test-client";
 import { EventSubscription } from "@unit-test-ide/test-client";
+// @ts-expect-error Shared JS-compatible identity fixture used by the Phase 9 runner.
+import { createIdentityCatalogItems } from "../../../tools/phase9/testing-api-identity-fixture.mjs";
 import type { ExtensionProtocolClient } from "../src/protocol-client.js";
 import {
   TestingApiAdapter,
@@ -73,16 +75,7 @@ function benchmarkCatalog(): ProtocolTestCatalog {
         canRunCase: true
       }
     }],
-    items: Array.from({ length: ITEM_COUNT }, (_, index) => ({
-      id: `benchmark-item-${index.toString().padStart(5, "0")}`,
-      containerId: "benchmark-container",
-      displayName: `Benchmark item ${index}`,
-      logicalName: `benchmark.${index}`,
-      framework: "ctest",
-      kind: "case",
-      disabled: false,
-      labels: []
-    })),
+    items: createIdentityCatalogItems(),
     diagnostics: []
   } as unknown as ProtocolTestCatalog;
 }

@@ -81,6 +81,25 @@ test("workspace pins supported toolchains", async () => {
   );
 });
 
+test("Phase 9 performance baseline job contract is fixed and reviewed", async () => {
+  const workflow = await readFile(".github/workflows/phase9-gates.yml", "utf8");
+  const start = workflow.indexOf("  phase9-performance:");
+  assert.notEqual(start, -1, "phase9-performance job is missing");
+  const remainder = workflow.slice(start + 1);
+  const next = remainder.search(/\r?\n {2}[a-z][a-z0-9-]*:\s*$/mu);
+  const job = workflow.slice(start, next === -1 ? undefined : start + 1 + next);
+  assert.match(job, /^ {4}runs-on: ubuntu-24\.04\s*$/mu);
+  assert.match(job, /^ {6}run: node tools\/phase9\/performance\.mjs --out \.superpowers\/phase9\/performance\/baseline\.json\s*$/mu);
+  assert.match(job, /^ {10}name: phase9-performance-baseline\s*$/mu);
+  assert.match(job, /^ {10}path: \.superpowers\/phase9\/performance\/baseline\.json\s*$/mu);
+  for (const sha of [
+    "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
+    "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
+    "pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa",
+    "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+  ]) assert.match(job, new RegExp(sha.replaceAll("@", "\\@")));
+});
+
 test("Phase 9 audit workflow is read-only, fixed-coordinate, and fail-closed", async () => {
   const workflow = await readFile(".github/workflows/phase9-gates.yml", "utf8");
 
