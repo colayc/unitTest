@@ -951,14 +951,13 @@
       "title": "Coverage UI and source decoration",
       "verification": {
         "artifacts": [
-          "coverage-ui-source-decoration-report"
+          "coverage-ui-source-decoration-report-{runAttempt}"
         ],
         "commands": [
           "pnpm --filter code-oss-extension test"
         ],
         "jobs": [
-          "verify-linux",
-          "verify-windows"
+          "verify-p7-ui-journey"
         ],
         "workflowPath": ".github/workflows/foundation.yml"
       }
@@ -977,14 +976,13 @@
       "title": "Local history and artifact browser",
       "verification": {
         "artifacts": [
-          "history-artifact-browser-report"
+          "history-artifact-browser-report-{runAttempt}"
         ],
         "commands": [
           "pnpm --filter code-oss-extension test"
         ],
         "jobs": [
-          "verify-linux",
-          "verify-windows"
+          "verify-p7-ui-journey"
         ],
         "workflowPath": ".github/workflows/foundation.yml"
       }
@@ -1026,14 +1024,13 @@
       "title": "Terminal-free main user journey",
       "verification": {
         "artifacts": [
-          "main-user-journey-report"
+          "main-user-journey-report-{runAttempt}"
         ],
         "commands": [
           "pnpm --filter code-oss-extension test:host"
         ],
         "jobs": [
-          "verify-linux",
-          "verify-windows"
+          "verify-p7-ui-journey"
         ],
         "workflowPath": ".github/workflows/foundation.yml"
       }
@@ -1052,14 +1049,13 @@
       "title": "Mock and stub configuration UX",
       "verification": {
         "artifacts": [
-          "mock-configuration-ux-report"
+          "mock-configuration-ux-report-{runAttempt}"
         ],
         "commands": [
           "pnpm --filter code-oss-extension test"
         ],
         "jobs": [
-          "verify-linux",
-          "verify-windows"
+          "verify-p7-ui-journey"
         ],
         "workflowPath": ".github/workflows/foundation.yml"
       }
@@ -1085,12 +1081,15 @@
       ],
       "title": "Windows WFP native offline boundary",
       "verification": {
-        "artifacts": [],
+        "artifacts": [
+          "coverage-execution-windows-{runAttempt}"
+        ],
         "commands": [
           "pnpm --filter code-oss-extension test:coverage-service-smoke"
         ],
         "jobs": [
-          "verify-windows"
+          "verify-windows",
+          "verify-windows-wfp"
         ],
         "workflowPath": ".github/workflows/foundation.yml"
       }

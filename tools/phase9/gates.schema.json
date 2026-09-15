@@ -75,7 +75,33 @@
     },
     "receipt": { "oneOf": [{ "$ref": "#/$defs/githubActionsReceipt" }, { "$ref": "#/$defs/manualApprovalReceipt" }] },
     "job": { "type": "object", "additionalProperties": false, "required": ["name", "conclusion"], "properties": { "name": { "type": "string" }, "conclusion": { "$ref": "#/$defs/conclusion" } } },
-    "artifact": { "type": "object", "additionalProperties": false, "required": ["id", "name", "digest", "expired"], "properties": { "id": { "$ref": "#/$defs/decimalId" }, "name": { "type": "string" }, "digest": { "$ref": "#/$defs/digest" }, "expired": { "type": "boolean" } } },
+    "p7Report": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "gateId", "candidateCommit", "sourceCommit", "runAttempt", "producer", "executionMode", "outcome", "startedAt", "finishedAt", "checks"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "gateId": { "enum": ["P7-COVERAGE-UI-AND-SOURCE-DECORATION", "P7-HISTORY-AND-ARTIFACT-BROWSER", "P7-MAIN-USER-JOURNEY", "P7-MOCK-CONFIGURATION-UX"] },
+        "candidateCommit": { "$ref": "#/$defs/commit" },
+        "sourceCommit": { "$ref": "#/$defs/commit" },
+        "runAttempt": { "type": "integer", "minimum": 1 },
+        "producer": { "const": "code-oss-extension-host" },
+        "executionMode": { "enum": ["activation-only", "terminal-free-journey", "ui-contract"] },
+        "outcome": { "enum": ["passed", "failed", "skipped"] },
+        "startedAt": { "$ref": "#/$defs/utcIso" },
+        "finishedAt": { "$ref": "#/$defs/utcIso" },
+        "checks": {
+          "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["id", "status"],
+            "properties": {
+              "id": { "enum": ["activation", "artifact-browser", "coverage-tree", "coverage-ui", "discover-tests", "history-browser", "html-report-offline", "mock-configuration", "mock-failure-navigation", "protocol-artifact-integrity", "run-tests", "service-lifecycle", "source-decoration", "stub-configuration", "terminal-free"] },
+              "status": { "enum": ["passed", "failed", "skipped"] }
+            }
+          }
+        }
+      }
+    },
+    "artifact": { "type": "object", "additionalProperties": false, "required": ["id", "name", "digest", "expired"], "properties": { "id": { "$ref": "#/$defs/decimalId" }, "name": { "type": "string" }, "digest": { "$ref": "#/$defs/digest" }, "expired": { "type": "boolean" }, "report": { "$ref": "#/$defs/p7Report" } } },
     "matrixGate": { "type": "object", "additionalProperties": false, "required": ["id", "status"], "properties": { "id": { "type": "string" }, "status": { "$ref": "#/$defs/status" }, "receiptId": { "type": "string" }, "artifactAvailability": { "enum": ["available", "expired", "missing"] }, "reason": { "const": "candidate-descendant-changed-tested-content" } } },
     "matrix": { "type": "object", "additionalProperties": false, "required": ["schemaVersion", "catalogComplete", "releaseReady", "evaluationMode", "candidateCommit", "currentCommit", "counts", "gates"], "properties": { "schemaVersion": { "const": 1 }, "catalogComplete": { "type": "boolean" }, "recordedByCommit": { "$ref": "#/$defs/commit" }, "releaseReady": { "type": "boolean" }, "evaluationMode": { "enum": ["historical", "candidate"] }, "candidateCommit": { "$ref": "#/$defs/commit" }, "currentCommit": { "$ref": "#/$defs/commit" }, "counts": { "type": "object", "additionalProperties": false, "required": ["pass", "missing", "failed", "deferred"], "properties": { "pass": { "type": "integer", "minimum": 0 }, "missing": { "type": "integer", "minimum": 0 }, "failed": { "type": "integer", "minimum": 0 }, "deferred": { "type": "integer", "minimum": 0 } } }, "gates": { "type": "array", "items": { "$ref": "#/$defs/matrixGate" }, "minItems": 1 } } },
     "runSnapshot": { "type": "object", "additionalProperties": false, "required": ["id", "run_attempt", "event", "head_sha", "status", "conclusion", "path", "repository"], "properties": { "id": { "type": "integer", "minimum": 1 }, "run_attempt": { "type": "integer", "minimum": 1 }, "event": { "type": "string" }, "head_sha": { "$ref": "#/$defs/commit" }, "status": { "type": "string" }, "conclusion": { "$ref": "#/$defs/conclusion" }, "path": { "type": "string" }, "repository": { "type": "object", "additionalProperties": false, "required": ["full_name"], "properties": { "full_name": { "type": "string" } } } } },

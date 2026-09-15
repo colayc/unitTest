@@ -26,6 +26,7 @@ import {
   validateRegistry,
 } from "./validate.mjs";
 import { buildMatrixReport } from "./p4-report.mjs";
+import { validateP7Report } from "./p7-report.mjs";
 import { renderMatrixJson, renderMatrixMarkdown, writeMatrixOutputs } from "./render.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -248,6 +249,42 @@ function githubReceipt(overrides = {}) {
 
 function fixtureDigest(label) {
   return createHash("sha256").update(label, "utf8").digest("hex");
+}
+
+function p7Report(gateId, overrides = {}) {
+  const contracts = {
+    "P7-COVERAGE-UI-AND-SOURCE-DECORATION": {
+      executionMode: "ui-contract",
+      checks: ["coverage-tree", "html-report-offline", "source-decoration"],
+    },
+    "P7-HISTORY-AND-ARTIFACT-BROWSER": {
+      executionMode: "ui-contract",
+      checks: ["artifact-browser", "history-browser", "protocol-artifact-integrity"],
+    },
+    "P7-MAIN-USER-JOURNEY": {
+      executionMode: "terminal-free-journey",
+      checks: ["artifact-browser", "coverage-ui", "discover-tests", "history-browser", "mock-configuration", "run-tests", "service-lifecycle", "terminal-free"],
+    },
+    "P7-MOCK-CONFIGURATION-UX": {
+      executionMode: "ui-contract",
+      checks: ["mock-configuration", "mock-failure-navigation", "stub-configuration"],
+    },
+  };
+  const contract = contracts[gateId];
+  return {
+    schemaVersion: 1,
+    gateId,
+    candidateCommit,
+    sourceCommit: candidateCommit,
+    runAttempt: 1,
+    producer: "code-oss-extension-host",
+    executionMode: contract.executionMode,
+    outcome: "passed",
+    startedAt: "2026-09-15T00:00:00.000Z",
+    finishedAt: "2026-09-15T00:00:01.000Z",
+    checks: contract.checks.map((id) => ({ id, status: "passed" })),
+    ...overrides,
+  };
 }
 
 const P4_SCENARIO_RESULTS = {
@@ -954,10 +991,10 @@ test("generic successful foundation jobs cannot satisfy feature-specific gates w
     "P5-WINDOWS-LLVM-COVERAGE": "coverage-execution-windows-{runAttempt}",
     "P6-BRANDING-AND-BUILTIN-REGISTRATION": "code-oss-branding-builtin-report",
     "P6-CODEOSS-HOST-SMOKE": "code-oss-host-smoke-report",
-    "P7-COVERAGE-UI-AND-SOURCE-DECORATION": "coverage-ui-source-decoration-report",
-    "P7-HISTORY-AND-ARTIFACT-BROWSER": "history-artifact-browser-report",
-    "P7-MAIN-USER-JOURNEY": "main-user-journey-report",
-    "P7-MOCK-CONFIGURATION-UX": "mock-configuration-ux-report",
+    "P7-COVERAGE-UI-AND-SOURCE-DECORATION": "coverage-ui-source-decoration-report-{runAttempt}",
+    "P7-HISTORY-AND-ARTIFACT-BROWSER": "history-artifact-browser-report-{runAttempt}",
+    "P7-MAIN-USER-JOURNEY": "main-user-journey-report-{runAttempt}",
+    "P7-MOCK-CONFIGURATION-UX": "mock-configuration-ux-report-{runAttempt}",
   };
   const gateIds = Object.keys(gateArtifacts);
   const receipt = githubReceipt({
@@ -990,6 +1027,174 @@ test("generic successful foundation jobs cannot satisfy feature-specific gates w
     registry.gates.find(({ id }) => id === "P6-BRANDING-AND-BUILTIN-REGISTRATION").verification.jobs,
     ["code-oss-branding-builtin"],
   );
+});
+
+test("P7 UI and journey gates reject arbitrary same-name artifacts without closed semantic reports", async () => {
+  const registry = await readCanonicalJson(gateRegistryPath, { label: "Phase 7 registry", maxBytes: 1024 * 1024 });
+  const artifacts = {
+    "P7-COVERAGE-UI-AND-SOURCE-DECORATION": "coverage-ui-source-decoration-report-1",
+    "P7-HISTORY-AND-ARTIFACT-BROWSER": "history-artifact-browser-report-1",
+    "P7-MAIN-USER-JOURNEY": "main-user-journey-report-1",
+    "P7-MOCK-CONFIGURATION-UX": "mock-configuration-ux-report-1",
+  };
+  const gateIds = Object.keys(artifacts);
+  const receipt = githubReceipt({
+    receiptId: "github-actions-p7-arbitrary-artifacts",
+    gateIds,
+    evidence: {
+      workflowPath: ".github/workflows/foundation.yml",
+      runId: "43",
+      jobs: [{ name: "verify-p7-ui-journey", conclusion: "success" }],
+      artifacts: gateIds.map((gateId, index) => ({
+        id: String(60 + index),
+        name: artifacts[gateId],
+        digest: String(index + 1).repeat(64),
+        expired: false,
+      })),
+    },
+  });
+  const matrix = evaluateRecordedMatrix({
+    registry,
+    baseline: { schemaVersion: 1, candidateCommit, evaluationMode: "historical", receiptIds: [receipt.receiptId] },
+    receipts: [receipt],
+    currentCommit,
+    changedPaths: [],
+  });
+
+  for (const gateId of gateIds) {
+    assert.equal(matrix.gates.find(({ id }) => id === gateId).status, "MISSING", `${gateId} requires a closed semantic report`);
+  }
+});
+
+test("P7 report validator accepts only exact passing UI and terminal-free contracts", () => {
+  for (const gateId of [
+    "P7-COVERAGE-UI-AND-SOURCE-DECORATION",
+    "P7-HISTORY-AND-ARTIFACT-BROWSER",
+    "P7-MAIN-USER-JOURNEY",
+    "P7-MOCK-CONFIGURATION-UX",
+  ]) {
+    assert.equal(validateP7Report(p7Report(gateId), { gateId, candidateCommit, runAttempt: 1 }), true);
+  }
+
+  assert.throws(
+    () => validateP7Report({ ...p7Report("P7-MOCK-CONFIGURATION-UX"), unrelated: true }, {
+      gateId: "P7-MOCK-CONFIGURATION-UX", candidateCommit, runAttempt: 1,
+    }),
+    /PHASE9_P7_REPORT_INVALID/u,
+  );
+  assert.throws(
+    () => validateP7Report(p7Report("P7-MAIN-USER-JOURNEY", {
+      executionMode: "activation-only",
+      outcome: "skipped",
+      checks: [{ id: "activation", status: "passed" }],
+    }), { gateId: "P7-MAIN-USER-JOURNEY", candidateCommit, runAttempt: 1 }),
+    /PHASE9_P7_REPORT_INVALID/u,
+  );
+});
+
+test("P7 closed reports remain MISSING until the dedicated producer job succeeds", async () => {
+  const registry = await readCanonicalJson(gateRegistryPath, { label: "Phase 7 registry", maxBytes: 1024 * 1024 });
+  const gateId = "P7-COVERAGE-UI-AND-SOURCE-DECORATION";
+  const receipt = githubReceipt({
+    receiptId: "github-actions-p7-producer-required",
+    gateIds: [gateId],
+    evidence: {
+      workflowPath: ".github/workflows/foundation.yml",
+      runId: "46",
+      jobs: [],
+      artifacts: [{
+        id: "72",
+        name: "coverage-ui-source-decoration-report-1",
+        digest: "9".repeat(64),
+        expired: false,
+        report: p7Report(gateId),
+      }],
+    },
+  });
+  const evaluate = () => evaluateRecordedMatrix({
+    registry,
+    baseline: { schemaVersion: 1, candidateCommit, evaluationMode: "historical", receiptIds: [receipt.receiptId] },
+    receipts: [receipt],
+    currentCommit,
+    changedPaths: [],
+  }).gates.find(({ id }) => id === gateId).status;
+
+  assert.equal(evaluate(), "MISSING");
+  receipt.evidence.jobs.push({ name: "verify-p7-ui-journey", conclusion: "success" });
+  assert.equal(evaluate(), "PASS");
+});
+
+test("P7 main journey rejects an activation-only skipped report", async () => {
+  const registry = await readCanonicalJson(gateRegistryPath, { label: "Phase 7 registry", maxBytes: 1024 * 1024 });
+  const receipt = githubReceipt({
+    receiptId: "github-actions-p7-activation-only",
+    gateIds: ["P7-MAIN-USER-JOURNEY"],
+    evidence: {
+      workflowPath: ".github/workflows/foundation.yml",
+      runId: "44",
+      jobs: [{ name: "verify-p7-ui-journey", conclusion: "success" }],
+      artifacts: [{
+        id: "70",
+        name: "main-user-journey-report-1",
+        digest: "7".repeat(64),
+        expired: false,
+        report: {
+          schemaVersion: 1,
+          gateId: "P7-MAIN-USER-JOURNEY",
+          candidateCommit,
+          sourceCommit: candidateCommit,
+          runAttempt: 1,
+          producer: "code-oss-extension-host",
+          executionMode: "activation-only",
+          outcome: "skipped",
+          startedAt: "2026-09-15T00:00:00.000Z",
+          finishedAt: "2026-09-15T00:00:01.000Z",
+          checks: [{ id: "activation", status: "passed" }],
+        },
+      }],
+    },
+  });
+  const matrix = evaluateRecordedMatrix({
+    registry,
+    baseline: { schemaVersion: 1, candidateCommit, evaluationMode: "historical", receiptIds: [receipt.receiptId] },
+    receipts: [receipt],
+    currentCommit,
+    changedPaths: [],
+  });
+
+  assert.equal(matrix.gates.find(({ id }) => id === "P7-MAIN-USER-JOURNEY").status, "MISSING");
+});
+
+test("P7 Windows WFP gate rejects workflow_dispatch runs that skip native coverage", async () => {
+  const registry = await readCanonicalJson(gateRegistryPath, { label: "Phase 7 registry", maxBytes: 1024 * 1024 });
+  const receipt = githubReceipt({
+    receiptId: "github-actions-p7-wfp-dispatch-skip",
+    gateIds: ["P7-WINDOWS-WFP-OFFLINE"],
+    evidence: {
+      workflowPath: ".github/workflows/foundation.yml",
+      runId: "45",
+      event: "workflow_dispatch",
+      jobs: [
+        { name: "verify-windows", conclusion: "success" },
+        { name: "verify-windows-wfp", conclusion: "success" },
+      ],
+      artifacts: [{
+        id: "71",
+        name: "coverage-execution-windows-1",
+        digest: "8".repeat(64),
+        expired: false,
+      }],
+    },
+  });
+  const matrix = evaluateRecordedMatrix({
+    registry,
+    baseline: { schemaVersion: 1, candidateCommit, evaluationMode: "historical", receiptIds: [receipt.receiptId] },
+    receipts: [receipt],
+    currentCommit,
+    changedPaths: [],
+  });
+
+  assert.equal(matrix.gates.find(({ id }) => id === "P7-WINDOWS-WFP-OFFLINE").status, "MISSING");
 });
 
 test("P5 coverage gates require the closed Linux GCC and Windows LLVM artifacts", async () => {

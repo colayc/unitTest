@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import { phase9Failure, readCanonicalJson } from "./canonical-json.mjs";
 import { writeMatrixOutputs } from "./render.mjs";
 import { validateMatrix } from "./validate.mjs";
+import { validateP7Report, validateP7ReportDocument } from "./p7-report.mjs";
 
 const EXPECTED_REPOSITORY = "colayc/unitTest";
 const RECEIPT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
@@ -21,6 +22,12 @@ const ALLOWED_DEFERRED_GATE_IDS = new Set([
   "P8-DOCS-CLOSEOUT",
   "P8-LEGAL-THIRD-PARTY",
   "P8-SIGN-WINDOWS",
+]);
+const P7_SEMANTIC_REPORT_GATES = new Set([
+  "P7-COVERAGE-UI-AND-SOURCE-DECORATION",
+  "P7-HISTORY-AND-ARTIFACT-BROWSER",
+  "P7-MAIN-USER-JOURNEY",
+  "P7-MOCK-CONFIGURATION-UX",
 ]);
 const MAX_MATRIX_BYTES = 1024 * 1024;
 const MAX_RECEIPT_BYTES = 256 * 1024;
@@ -137,7 +144,10 @@ function assertReceipt(receipt) {
   const artifactIds = new Set();
   const artifactNames = new Set();
   for (const artifact of evidence.artifacts) {
-    if (!hasExactKeys(artifact, ["id", "name", "digest", "expired"])
+    const artifactKeys = artifact?.report === undefined
+      ? ["id", "name", "digest", "expired"]
+      : ["id", "name", "digest", "expired", "report"];
+    if (!hasExactKeys(artifact, artifactKeys)
         || canonicalId(artifact.id) !== artifact.id
         || !isSafeText(artifact.name)
         || !DIGEST_PATTERN.test(artifact.digest ?? "")
@@ -148,6 +158,18 @@ function assertReceipt(receipt) {
     }
     artifactIds.add(artifact.id);
     artifactNames.add(artifact.name);
+    if (artifact.report !== undefined) {
+      try {
+        validateP7ReportDocument(artifact.report);
+      } catch {
+        fail(receipt, "receipt artifact report is invalid");
+      }
+      if (artifact.report.candidateCommit !== receipt.candidateCommit
+          || artifact.report.sourceCommit !== receipt.candidateCommit
+          || artifact.report.runAttempt !== evidence.runAttempt) {
+        fail(receipt, "receipt artifact report identity is invalid");
+      }
+    }
   }
 }
 
@@ -225,7 +247,7 @@ function normalizeArtifactSnapshot(receipt, snapshot) {
   });
 }
 
-export function auditGithubReceipt({ receipt, runSnapshot, jobSnapshot, artifactSnapshot }) {
+export function auditGithubReceipt({ receipt, runSnapshot, jobSnapshot, artifactSnapshot, gateId }) {
   assertReceipt(receipt);
   const expected = receipt.evidence;
   const run = normalizeRunSnapshot(receipt, runSnapshot);
@@ -263,6 +285,22 @@ export function auditGithubReceipt({ receipt, runSnapshot, jobSnapshot, artifact
       fail(receipt, "artifact identity does not match");
     }
     if (artifact.expired) artifactAvailability = "expired";
+  }
+  if (gateId === "P7-WINDOWS-WFP-OFFLINE" && expected.event !== "push") {
+    fail(receipt, "Windows WFP evidence is not from a push run");
+  }
+  if (P7_SEMANTIC_REPORT_GATES.has(gateId)) {
+    const reports = expected.artifacts.filter((artifact) => artifact.report?.gateId === gateId);
+    if (reports.length !== 1) fail(receipt, "required P7 semantic report is missing");
+    try {
+      validateP7Report(reports[0].report, {
+        gateId,
+        candidateCommit: receipt.candidateCommit,
+        runAttempt: expected.runAttempt,
+      });
+    } catch {
+      fail(receipt, "required P7 semantic report is invalid");
+    }
   }
   return {
     receiptId: receipt.receiptId,
@@ -316,7 +354,7 @@ export function evaluateAuditedMatrix({ recordedMatrix, receipts, snapshotsByRun
     const snapshots = snapshotsForRun(snapshotsByRunId, receipt.evidence.runId);
     if (!isObject(snapshots)) return downgradePass(gate);
     try {
-      const result = auditGithubReceipt({ receipt, ...snapshots });
+      const result = auditGithubReceipt({ receipt, ...snapshots, gateId: gate.id });
       const output = { ...gate, artifactAvailability: result.artifactAvailability };
       return output;
     } catch (error) {

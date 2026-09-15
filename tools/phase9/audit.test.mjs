@@ -409,6 +409,24 @@ test("downgrades a recorded PASS to FAILED when its receipt cannot be audited", 
   });
 });
 
+test("auditing downgrades a synthetic P7 PASS without its closed semantic report", () => {
+  const receipt = validReceipt({ gateIds: ["P7-MAIN-USER-JOURNEY"] });
+  const matrix = evaluateAuditedMatrix({
+    recordedMatrix: recordedMatrix({ gates: [{
+      id: "P7-MAIN-USER-JOURNEY",
+      status: "PASS",
+      receiptId,
+      artifactAvailability: "available",
+    }] }),
+    receipts: [receipt],
+    snapshotsByRunId: snapshots(),
+  });
+
+  assert.equal(matrix.gates[0].status, "FAILED");
+  assert.equal(matrix.gates[0].artifactAvailability, "missing");
+  assert.equal(matrix.releaseReady, false);
+});
+
 test("preserves MISSING and allowed DEFERRED rows while recomputing counts", () => {
   const rows = [
     { id: "P9-MATRIX-UNIT", status: "PASS", receiptId, artifactAvailability: "available" },
