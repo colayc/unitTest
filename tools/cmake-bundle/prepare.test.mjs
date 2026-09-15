@@ -33,6 +33,10 @@ const ARCHIVE_BYTES = Buffer.from("offline archive fixture");
 const EXECUTABLE_BYTES = Buffer.from("deterministic cmake executable");
 const CTEST_BYTES = Buffer.from("deterministic ctest executable");
 const LICENSE_BYTES = Buffer.from("BSD 3-Clause fixture license");
+const LINUX_ARCHIVE_URL =
+  "https://github.com/Kitware/CMake/releases/download/v4.3.4/cmake-4.3.4-linux-x86_64.tar.gz";
+const LINUX_REDIRECT_URL =
+  "https://release-assets.githubusercontent.com/github-production-release-asset/537699/66016ec2-c886-4780-bbca-25417a5e8f4b?sp=r&sv=2018-11-09&sr=b&spr=https&se=2026-09-15T03%3A13%3A15Z&rscd=attachment%3B+filename%3Dcmake-4.3.4-linux-x86_64.tar.gz&rsct=application%2Foctet-stream&skoid=96c2d410-5711-43a1-aedd-ab1947aa7ab0&sktid=398a6654-997b-47e9-b12b-9515b896b4de&skt=2026-09-15T02%3A12%3A50Z&ske=2026-09-15T03%3A13%3A15Z&sks=b&skv=2018-11-09&sig=fixture-signature&jwt=fixture-token&response-content-disposition=attachment%3B%20filename%3Dcmake-4.3.4-linux-x86_64.tar.gz&response-content-type=application%2Foctet-stream";
 
 function digest(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
@@ -58,7 +62,7 @@ function manifestFixture() {
         },
       },
       "linux-x64": {
-        url: "https://cmake.org/files/v4.3/cmake-4.3.4-linux-x86_64.tar.gz",
+        url: LINUX_ARCHIVE_URL,
         archiveSha256: digest(ARCHIVE_BYTES),
         rootDirectory: "cmake-4.3.4-linux-x86_64",
         executable: "bin/cmake",
@@ -196,6 +200,7 @@ test("tracked manifest keeps the reviewed CMake 4.3.4 trust anchors", async () =
   validateManifest(manifest);
   assert.deepEqual(
     {
+      linuxURL: manifest.archives["linux-x64"].url,
       windowsArchive: manifest.archives["win32-x64"].archiveSha256,
       windowsExecutable: manifest.archives["win32-x64"].installedFiles["bin/cmake.exe"],
       windowsCTest: manifest.archives["win32-x64"].installedFiles["bin/ctest.exe"],
@@ -206,6 +211,7 @@ test("tracked manifest keeps the reviewed CMake 4.3.4 trust anchors", async () =
       linuxLicense: manifest.archives["linux-x64"].installedFiles["doc/cmake/LICENSE.rst"],
     },
     {
+      linuxURL: LINUX_ARCHIVE_URL,
       windowsArchive: "86e5fcafb38bdf58346a78b187c7b6b4f252ae5242cffe24c463a92bbd2e77d1",
       windowsExecutable: "1aa884bf1f4949327fffcc8ee4a97c2d684bdc1d0a64b71f01dc16321c7fbc64",
       windowsCTest: "73baacbeb272ca6f40422b4f789403390af678beb491783cef1727d69cd3e1cb",
@@ -218,16 +224,53 @@ test("tracked manifest keeps the reviewed CMake 4.3.4 trust anchors", async () =
   );
 });
 
-test("redirect validation keeps every response on the locked CMake distribution URL", () => {
-  const locked = "https://cmake.org/files/v4.3/cmake-4.3.4-linux-x86_64.tar.gz";
+test("redirect validation accepts only the locked Kitware Linux release asset", () => {
+  assert.doesNotThrow(() => __testing.validateDistributionURL(LINUX_ARCHIVE_URL, LINUX_ARCHIVE_URL));
+  assert.doesNotThrow(() => __testing.validateDistributionURL(LINUX_REDIRECT_URL, LINUX_ARCHIVE_URL));
+
+  const redirect = new URL(LINUX_REDIRECT_URL);
+  const cases = [
+    "http://github.com/Kitware/CMake/releases/download/v4.3.4/cmake-4.3.4-linux-x86_64.tar.gz",
+    "https://github.com/Other/CMake/releases/download/v4.3.4/cmake-4.3.4-linux-x86_64.tar.gz",
+    "https://github.com/Kitware/CMake/releases/download/v4.3.5/cmake-4.3.4-linux-x86_64.tar.gz",
+    "https://github.com/Kitware/CMake/releases/download/v4.3.4/other.tar.gz",
+    "https://cmake.org/files/v4.3/cmake-4.3.4-linux-x86_64.tar.gz",
+    "https://user@github.com/Kitware/CMake/releases/download/v4.3.4/cmake-4.3.4-linux-x86_64.tar.gz",
+    `${LINUX_ARCHIVE_URL}?mirror=1`,
+    `${LINUX_ARCHIVE_URL}#fragment`,
+    LINUX_REDIRECT_URL.replace("https://", "http://"),
+    LINUX_REDIRECT_URL.replace("release-assets.githubusercontent.com", "example.com"),
+    LINUX_REDIRECT_URL.replace("66016ec2-c886-4780-bbca-25417a5e8f4b", "other-asset"),
+    `${LINUX_REDIRECT_URL}&mirror=1`,
+    LINUX_REDIRECT_URL.replace(
+      "response-content-disposition=attachment%3B%20filename%3Dcmake-4.3.4-linux-x86_64.tar.gz",
+      "response-content-disposition=attachment%3B%20filename%3Dother.tar.gz",
+    ),
+    `${LINUX_REDIRECT_URL}#fragment`,
+    (() => {
+      redirect.username = "user";
+      return redirect.href;
+    })(),
+  ];
+  for (const value of cases) {
+    assert.throws(
+      () => __testing.validateDistributionURL(value, LINUX_ARCHIVE_URL),
+      /outside the fixed distribution origin/,
+    );
+  }
+});
+
+test("redirect validation preserves the locked cmake.org Windows source", () => {
+  const locked = "https://cmake.org/files/v4.3/cmake-4.3.4-windows-x86_64.zip";
   assert.doesNotThrow(() => __testing.validateDistributionURL(locked, locked));
   for (const value of [
-    "http://cmake.org/files/v4.3/cmake-4.3.4-linux-x86_64.tar.gz",
-    "https://example.com/files/v4.3/cmake-4.3.4-linux-x86_64.tar.gz",
-    "https://user@cmake.org/files/v4.3/cmake-4.3.4-linux-x86_64.tar.gz",
-    "https://cmake.org/files/v4.3/cmake-4.3.4-linux-x86_64.tar.gz?mirror=1",
-    "https://cmake.org/files/v4.3/other.tar.gz",
-    "https://cmake.org/files/v4.4/cmake-4.3.4-linux-x86_64.tar.gz",
+    "http://cmake.org/files/v4.3/cmake-4.3.4-windows-x86_64.zip",
+    "https://github.com/Kitware/CMake/releases/download/v4.3.4/cmake-4.3.4-windows-x86_64.zip",
+    "https://user@cmake.org/files/v4.3/cmake-4.3.4-windows-x86_64.zip",
+    `${locked}?mirror=1`,
+    `${locked}#fragment`,
+    "https://cmake.org/files/v4.3/other.zip",
+    "https://cmake.org/files/v4.4/cmake-4.3.4-windows-x86_64.zip",
   ]) {
     assert.throws(
       () => __testing.validateDistributionURL(value, locked),

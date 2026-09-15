@@ -7,7 +7,7 @@
 当前只接受 CMake `4.3.4` 的两个官方 x64 archive：
 
 - Windows：`https://cmake.org/files/v4.3/cmake-4.3.4-windows-x86_64.zip`
-- Linux：`https://cmake.org/files/v4.3/cmake-4.3.4-linux-x86_64.tar.gz`
+- Linux：`https://github.com/Kitware/CMake/releases/download/v4.3.4/cmake-4.3.4-linux-x86_64.tar.gz`
 
 `manifest.json` 同时固定：
 
