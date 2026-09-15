@@ -22,6 +22,59 @@ const linuxBaselineManifestSha256 = "b".repeat(64);
 const windowsBaselineManifestSha256 = "c".repeat(64);
 const generatedAt = "2026-08-25T00:00:00.000Z";
 const baselineGeneratedAt = "2026-08-24T00:00:00.000Z";
+const foundationTrustPathActionPins = new Map([
+  ["actions/cache", "0057852bfaa89a56745cba8c7296529d2fc39830"],
+  ["actions/checkout", "d23441a48e516b6c34aea4fa41551a30e30af803"],
+  ["actions/download-artifact", "d3f86a106a0bac45b974a628896c90dbdf5c8093"],
+  ["actions/setup-go", "924ae3a1cded613372ab5595356fb5720e22ba16"],
+  ["actions/setup-node", "249970729cb0ef3589644e2896645e5dc5ba9c38"],
+  ["actions/upload-artifact", "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"],
+  ["pnpm/action-setup", "f40ffcd9367d9f12939873eb1018b921a783ffaa"],
+]);
+const foundationTrustPathJobs = [
+  "verify-windows",
+  "verify-linux",
+  "verify-release-input-run",
+  "package-windows",
+  "package-linux",
+  "install-smoke-windows",
+  "install-smoke-linux",
+  "release-qualification",
+];
+const foundationTrustPathActionCounts = new Map([
+  ["verify-windows", 10],
+  ["verify-linux", 10],
+  ["verify-release-input-run", 3],
+  ["package-windows", 6],
+  ["package-linux", 7],
+  ["install-smoke-windows", 5],
+  ["install-smoke-linux", 5],
+  ["release-qualification", 15],
+]);
+
+function foundationJobSource(workflow, jobName) {
+  const start = workflow.indexOf(`  ${jobName}:`);
+  assert.ok(start >= 0, `${jobName} must exist`);
+  const nextJob = workflow.slice(start + 1).search(/^  [a-z0-9][a-z0-9-]*:/mu);
+  const end = nextJob < 0 ? workflow.length : start + 1 + nextJob;
+  return workflow.slice(start, end);
+}
+
+function assertFoundationP8TrustPathPinned(workflow) {
+  let invocationCount = 0;
+  for (const jobName of foundationTrustPathJobs) {
+    const job = foundationJobSource(workflow, jobName);
+    const invocations = [...job.matchAll(/^\s+(?:-\s+)?uses:\s+([^\s#]+)/gmu)].map((match) => match[1]);
+    assert.equal(invocations.length, foundationTrustPathActionCounts.get(jobName), `${jobName} action invocation count`);
+    invocationCount += invocations.length;
+    for (const invocation of invocations) {
+      const match = /^([^@]+)@([0-9a-f]{40})$/u.exec(invocation);
+      assert.ok(match, `${jobName} contains mutable action ${invocation}`);
+      assert.equal(match[2], foundationTrustPathActionPins.get(match[1]), `${jobName} contains unreviewed action ${invocation}`);
+    }
+  }
+  assert.equal(invocationCount, 61, "foundation P8 trust path action invocation count");
+}
 
 const lifecyclePass = Object.freeze({
   install: "pass",
@@ -575,40 +628,17 @@ test("foundation uploads all six deterministic content-bound unsigned P8 reports
 
 test("foundation P8 report trust path uses only reviewed immutable action commits", async () => {
   const workflow = await readFile(resolve(".github/workflows/foundation.yml"), "utf8");
-  const approvedActions = new Map([
-    ["actions/cache", "0057852bfaa89a56745cba8c7296529d2fc39830"],
-    ["actions/checkout", "d23441a48e516b6c34aea4fa41551a30e30af803"],
-    ["actions/download-artifact", "d3f86a106a0bac45b974a628896c90dbdf5c8093"],
-    ["actions/setup-go", "924ae3a1cded613372ab5595356fb5720e22ba16"],
-    ["actions/setup-node", "249970729cb0ef3589644e2896645e5dc5ba9c38"],
-    ["actions/upload-artifact", "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"],
-    ["pnpm/action-setup", "f40ffcd9367d9f12939873eb1018b921a783ffaa"],
-  ]);
-  const trustPathJobs = [
-    "verify-windows",
-    "verify-linux",
-    "verify-release-input-run",
-    "package-windows",
-    "package-linux",
-    "install-smoke-windows",
-    "install-smoke-linux",
-    "release-qualification",
-  ];
+  assertFoundationP8TrustPathPinned(workflow);
+});
 
-  for (const jobName of trustPathJobs) {
-    const start = workflow.indexOf(`  ${jobName}:`);
-    assert.ok(start >= 0, `${jobName} must exist`);
-    const nextJob = workflow.slice(start + 1).search(/^  [a-z0-9][a-z0-9-]*:/mu);
-    const end = nextJob < 0 ? workflow.length : start + 1 + nextJob;
-    const job = workflow.slice(start, end);
-    const invocations = [...job.matchAll(/^\s+uses:\s+([^\s#]+)/gmu)].map((match) => match[1]);
-    assert.ok(invocations.length > 0, `${jobName} must contain action invocations`);
-    for (const invocation of invocations) {
-      const match = /^([^@]+)@([0-9a-f]{40})$/u.exec(invocation);
-      assert.ok(match, `${jobName} contains mutable action ${invocation}`);
-      assert.equal(match[2], approvedActions.get(match[1]), `${jobName} contains unreviewed action ${invocation}`);
-    }
-  }
+test("foundation P8 trust path rejects a mutable direct sequence action", async () => {
+  const workflow = await readFile(resolve(".github/workflows/foundation.yml"), "utf8");
+  const mutated = workflow.replace(
+    "- uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6",
+    "- uses: actions/checkout@v6",
+  );
+  assert.notEqual(mutated, workflow);
+  assert.throws(() => assertFoundationP8TrustPathPinned(mutated), /verify-windows contains mutable action actions\/checkout@v6/u);
 });
 
 test("release package jobs materialize digest-pinned runtime inputs before packaging", async () => {
