@@ -13,6 +13,9 @@ import {
 } from "../../apps/code-oss-extension/dist/test/testing-api-benchmark-support.mjs";
 
 export const SCENARIO_IDS = ["discovery-10000", "filter", "cancel", "memory", "startup", "report"];
+const EXPECTED_COUNTS = Object.freeze({
+  "discovery-10000": 10000, filter: 1000, cancel: 1, memory: 1048576, startup: 1, report: 1
+});
 const HEX40 = /^[0-9a-f]{40}$/u;
 const NODE_VERSION = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;
 const PLATFORMS = new Set(["aix", "android", "darwin", "freebsd", "haiku", "linux", "openbsd", "sunos", "win32", "cygwin", "netbsd"]);
@@ -200,7 +203,7 @@ export function validateBaseline(value) {
       }
       if (Object.keys(item.correctness).sort().join(",") !== "expected,failed,observed,passed") return false;
       const { expected, observed, passed, failed } = item.correctness;
-      if (!Number.isSafeInteger(expected) || expected < 0 || expected !== observed || expected !== passed || failed !== 0) return false;
+      if (!Number.isSafeInteger(expected) || expected !== EXPECTED_COUNTS[item.id] || expected !== observed || expected !== passed || failed !== 0) return false;
     }
     return true;
   } catch {

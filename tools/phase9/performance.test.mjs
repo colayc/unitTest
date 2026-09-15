@@ -90,6 +90,19 @@ test("validator requires successful exact correctness records in every scenario"
   }
 });
 
+test("validator binds correctness to each scenario's fixed expected count", async (t) => {
+  for (let index = 0; index < 6; index++) {
+    const scenario = validSchemaBaseline().scenarios[index];
+    for (const expected of [0, scenario.correctness.expected + 1]) {
+      await t.test(`${scenario.id} rejects expected ${expected}`, () => {
+        const value = validSchemaBaseline();
+        value.scenarios[index].correctness = { expected, observed: expected, passed: expected, failed: 0 };
+        assert.equal(validateBaseline(value), false);
+      });
+    }
+  }
+});
+
 test("validator closes runtime metadata and rejects injected or non-runtime strings", () => {
   for (const runtime of [null, [], "secret", 1, {},
     { ...validSchemaBaseline().runtime, extra: "C:\\private\\secret" }]) {
