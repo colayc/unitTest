@@ -32,7 +32,7 @@ async function regularFile(path, label) { let stat; try { stat = await lstat(pat
 function assertGeneratedBytes(path, bytes) {
   let text; try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); } catch (error) { throw failure(`generated output is not UTF-8: ${path}`, error); }
   if (text.includes("\r")) throw failure(`generated output uses CRLF: ${path}`);
-  if (/(?:[A-Za-z]:[\\/]|(?:^|[\s"'(])\/[^\s"')]+)/mu.test(text)) throw failure(`generated output contains an absolute path: ${path}`);
+  if (/(?:[A-Za-z]:[\\/][^\s"')]+|(?:^|[\s"'(=])\/(?:[A-Za-z0-9_.~-]+\/)+[A-Za-z0-9_.~-]+)/mu.test(text)) throw failure(`generated output contains an absolute path: ${path}`);
   if (/Generated on|\b20\d\d-\d\d-\d\d(?:T|\s)\d\d:\d\d/u.test(text)) throw failure(`generated output contains a timestamp: ${path}`);
 }
 

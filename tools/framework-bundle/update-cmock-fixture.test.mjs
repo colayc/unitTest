@@ -14,7 +14,7 @@ function assertArgumentPair(arguments_, pair) {
 }
 
 test("buildDockerArguments pins the container and removes ambient privileges", () => {
-  const arguments_ = buildDockerArguments({ cmockRoot: "C:/locked/cmock", fixtureRoot: "C:/repo/testdata/frameworks/unity", outputRoot: "C:/temporary/out" });
+  const arguments_ = buildDockerArguments({ cmockRoot: "C:/locked/cmock", unityRoot: "C:/locked/unity", fixtureRoot: "C:/repo/testdata/frameworks/unity", outputRoot: "C:/temporary/out" });
   for (const pair of [
     ["--platform", "linux/amd64"],
     ["--network", "none"],
@@ -25,8 +25,9 @@ test("buildDockerArguments pins the container and removes ambient privileges", (
   assert.ok(arguments_.includes("--read-only"));
   assert.ok(arguments_.includes("docker.io/library/ruby:3.3.6-bookworm@sha256:7184e67a2927ea0749093abd199f38c1da5f371ab4bf7056b6fff50669031556"));
   const mounts = arguments_.filter((value) => value.startsWith("type=bind,"));
-  assert.equal(mounts.length, 3);
+  assert.equal(mounts.length, 4);
   assert.ok(mounts.some((value) => value.includes("dst=/cmock") && value.endsWith(",readonly")));
+  assert.ok(mounts.some((value) => value.includes("dst=/cmock/vendor/unity") && value.endsWith(",readonly")));
   assert.ok(mounts.some((value) => value.includes("dst=/fixture") && value.endsWith(",readonly")));
   assert.ok(mounts.some((value) => value.includes("dst=/out") && !value.includes("readonly")));
   const image = arguments_.indexOf("docker.io/library/ruby:3.3.6-bookworm@sha256:7184e67a2927ea0749093abd199f38c1da5f371ab4bf7056b6fff50669031556");
@@ -53,7 +54,8 @@ async function fixture() {
     write(root, "testdata/frameworks/unity/mocks/MockDependency.c", "old-c\n"),
     write(root, "testdata/frameworks/unity/mocks/MockDependency.h", "old-h\n"),
     write(root, "testdata/frameworks/unity/mocks/cmock-generation.json", "old-provenance\n"),
-    write(root, `.superpowers/runtime/framework-bundle/v2/${manifestSha256}/CMock-2.7.0/lib/cmock.rb`, "# locked\n")
+    write(root, `.superpowers/runtime/framework-bundle/v2/${manifestSha256}/CMock-2.7.0/lib/cmock.rb`, "# locked\n"),
+    write(root, `.superpowers/runtime/framework-bundle/v2/${manifestSha256}/Unity-2.6.1/auto/type_sanitizer.rb`, "# locked\n")
   ]);
   return { root, manifest, manifestSha256, preparedRoot: join(root, ".superpowers/runtime/framework-bundle/v2", manifestSha256) };
 }

@@ -27,10 +27,11 @@ function mount(source, destination, readonly) { return `type=bind,src=${resolve(
 function dockerExecutable() { return process.platform === "win32" ? "docker.exe" : "docker"; }
 
 export function buildDockerArguments(input) {
-  if (!input || typeof input !== "object" || [input.cmockRoot, input.fixtureRoot, input.outputRoot].some((value) => typeof value !== "string" || value.length === 0)) throw failure("CMOCK_GENERATION_ENVIRONMENT_UNTRUSTED", "generator paths are invalid");
+  if (!input || typeof input !== "object" || [input.cmockRoot, input.unityRoot, input.fixtureRoot, input.outputRoot].some((value) => typeof value !== "string" || value.length === 0)) throw failure("CMOCK_GENERATION_ENVIRONMENT_UNTRUSTED", "generator paths are invalid");
   return [
     "run", "--rm", "--platform", "linux/amd64", "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "64",
     "--mount", mount(input.cmockRoot, "/cmock", true),
+    "--mount", mount(input.unityRoot, "/cmock/vendor/unity", true),
     "--mount", mount(input.fixtureRoot, "/fixture", true),
     "--mount", mount(input.outputRoot, "/out", false),
     image, "ruby", "/cmock/lib/cmock.rb", "-o/fixture/cmock.yml", "/fixture/include/Dependency.h"
@@ -128,17 +129,20 @@ export async function updateCMockFixture(options = {}) {
     const preparedRoot = join(root, ".superpowers", "runtime", "framework-bundle", "v2", manifestSha256);
     try { await regularDirectory(preparedRoot, "prepared framework source"); await (operations.verifyPreparedBundle ?? verifyPreparedFrameworkBundle)({ root: preparedRoot, manifest, manifestSha256 }); } catch (error) { if (error?.code === "CMOCK_GENERATION_ENVIRONMENT_UNTRUSTED") throw error; throw failure("CMOCK_GENERATION_ENVIRONMENT_UNTRUSTED", "prepared framework source is not trusted", error); }
     const cmock = manifest.frameworks.find((framework) => framework.id === "cmock");
+    const unity = manifest.frameworks.find((framework) => framework.id === "unity");
     const generator = manifest.fixtureTools.cmockGenerator;
-    if (!cmock || !generator || generator.containerImage !== "docker.io/library/ruby" || generator.containerTag !== "3.3.6-bookworm" || generator.containerPlatform !== "linux/amd64" || generator.containerDigest !== image.slice(image.indexOf("@") + 1) || generator.entrypoint !== "lib/cmock.rb") throw failure("CMOCK_GENERATION_ENVIRONMENT_UNTRUSTED", "manifest generator identity is not trusted");
+    if (!cmock || !unity || !generator || generator.containerImage !== "docker.io/library/ruby" || generator.containerTag !== "3.3.6-bookworm" || generator.containerPlatform !== "linux/amd64" || generator.containerDigest !== image.slice(image.indexOf("@") + 1) || generator.entrypoint !== "lib/cmock.rb") throw failure("CMOCK_GENERATION_ENVIRONMENT_UNTRUSTED", "manifest generator identity is not trusted");
     const cmockRoot = join(preparedRoot, cmock.sourceDirectory);
+    const unityRoot = join(preparedRoot, unity.sourceDirectory);
     await regularDirectory(cmockRoot, "prepared CMock source");
+    await regularDirectory(unityRoot, "prepared Unity source");
     const fixtureRoot = join(root, "testdata", "frameworks", "unity");
     const [configuration, input] = await Promise.all([readFixedFile(join(root, configPath), configBytes, "CMock configuration"), readFixedFile(join(root, headerPath), headerBytes, "CMock input header")]);
     const stagingRoot = join(dirname(target), nonce(".cmock-generation-"));
     await mkdir(stagingRoot, { recursive: false, mode: 0o700 });
     try {
     const runs = [join(stagingRoot, "run-a"), join(stagingRoot, "run-b")];
-    for (const outputRoot of runs) { await mkdir(outputRoot, { recursive: false, mode: 0o700 }); await runGenerator({ cmockRoot, fixtureRoot, outputRoot }, operations); }
+    for (const outputRoot of runs) { await mkdir(outputRoot, { recursive: false, mode: 0o700 }); await runGenerator({ cmockRoot, unityRoot, fixtureRoot, outputRoot }, operations); }
     const [left, right] = await Promise.all(runs.map(readClosedOutput));
     if (!sameFiles(left, right)) throw failure("CMOCK_GENERATION_NONDETERMINISTIC", "locked generator produced different output bytes");
     const value = provenance(manifest, manifestSha256, configuration, input, left);

@@ -15,7 +15,7 @@ async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "utide-cmock-provenance-"));
   const config = "---\n:cmock:\n  :mock_path: /out\n";
   const input = "#ifndef UNIT_TEST_IDE_PHASE9_DEPENDENCY_H\n#define UNIT_TEST_IDE_PHASE9_DEPENDENCY_H\nint Dependency_Read(int channel);\n#endif\n";
-  const c = "#include \"MockDependency.h\"\nint Dependency_Read_CMockReturnMemThruPtr(void) { return 0; }\n";
+  const c = "/* Generated CMock fixture */\n// Ordinary generated comment\n#include \"MockDependency.h\"\nint Dependency_Read_CMockReturnMemThruPtr(void) { return 0; }\n";
   const h = "#ifndef MOCKDEPENDENCY_H\n#define MOCKDEPENDENCY_H\n#endif\n";
   await Promise.all([write(root, "testdata/frameworks/unity/cmock.yml", config), write(root, "testdata/frameworks/unity/include/Dependency.h", input), write(root, "testdata/frameworks/unity/mocks/MockDependency.c", c), write(root, "testdata/frameworks/unity/mocks/MockDependency.h", h)]);
   const files = [{ path: "MockDependency.c", bytes: Buffer.from(c) }, { path: "MockDependency.h", bytes: Buffer.from(h) }];

@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "cmock": {
+    "version": "2.7.0",
+    "tag": "v2.7.0",
+    "revision": "6ea503340b1d3fdc0f2bcaf69273ba0160ec83af"
+  },
+  "generator": {
+    "entrypoint": "lib/cmock.rb",
+    "version": "2.7.0",
+    "containerImage": "docker.io/library/ruby",
+    "containerPlatform": "linux/amd64",
+    "containerDigest": "sha256:7184e67a2927ea0749093abd199f38c1da5f371ab4bf7056b6fff50669031556"
+  },
+  "configuration": {
+    "path": "testdata/frameworks/unity/cmock.yml",
+    "sha256": "a087b00f6c8954490ebf8daf35b7466c33afa34097fb8834d8ebadc630596f66"
+  },
+  "input": {
+    "path": "testdata/frameworks/unity/include/Dependency.h",
+    "sha256": "007f23aea2dba06d111f66be95905adde8fe32e7d2031bf8a8c70117a8209f57"
+  },
+  "outputs": [
+    {
+      "path": "MockDependency.c",
+      "sha256": "9e2eccb2c75b75539dbbe8561aa74a89d242b09ffc48974e8f2b3798d7ffad6c"
+    },
+    {
+      "path": "MockDependency.h",
+      "sha256": "ff7840200288f8aae7bcae82134ef31f9076befa3b3931bc1dbc2b06a5a433df"
+    }
+  ],
+  "outputSha256": "1565d1a2d39b655eb551a729663fae7e167f1c0d6cd3f9a8c2aafe2d67348128",
+  "frameworkManifestSha256": "2f08cfd45b9374a5331f0484d53b466c3813312d046e5226c64754c0c986f87b",
+  "generatedAtRuntime": false
+}
