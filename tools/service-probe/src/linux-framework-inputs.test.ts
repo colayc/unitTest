@@ -132,7 +132,10 @@ test("Linux framework boundary accepts only expanded trees bound to the resolved
     await writeFile(join(cpputest, "CMakeLists.txt"), "project(CppUTest)\n");
     await writeFile(join(unity, "src", "unity.c"), "void UnityBegin(void) {}\n");
     await writeFile(join(cmock, "lib", "cmock.rb"), "# cmock\n");
+    await writeFile(join(cmock, "B"), "B");
+    await writeFile(join(cmock, "a"), "a");
     const expected = await verifyResolvedFrameworkTrees(root, manifest(), undefined);
+    assert.equal(expected.find((item) => item.id === "cmock")?.treeSha256, "20e071e0cf2d6eccede5c0f4206c0a8bf2b04496640d11047b457f81d52c5ef2");
     await verifyResolvedFrameworkTrees(root, manifest(), expected);
     await assert.rejects(verifyResolvedFrameworkTrees(root, manifest(), manifest().frameworks), /tree digest mismatch/u);
     await writeFile(join(cpputest, "CMakeLists.txt"), "tampered\n");
