@@ -7,6 +7,7 @@ import type {
   FrameworkToolchainFamily,
 } from "./native-framework-report.js";
 import type {
+  F1FrameworkIdentity,
   FrameworkPlatformOptions,
   FrameworkPlatformFrameworkOptions,
 } from "./native-framework-matrix.js";
@@ -18,14 +19,26 @@ const RUNTIME_KEYS = ["benchmark", "candidateCommit", "contractSha256", "platfor
 export const frameworkRequiredEnvironment = "UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED";
 
 export interface LoadedFrameworkRuntime {
+  readonly identity: F1FrameworkIdentity;
   readonly options: FrameworkPlatformOptions;
   dispose(): Promise<void>;
 }
+
+interface FrameworkRuntimeDependencies {
+  readonly loadFrameworkIdentity: (repositoryRoot: string) => Promise<F1FrameworkIdentity>;
+  readonly startService: typeof startService;
+}
+
+const defaultDependencies: FrameworkRuntimeDependencies = {
+  loadFrameworkIdentity,
+  startService,
+};
 
 export async function loadRequiredFrameworkRuntime(
   repositoryRoot: string,
   platform: FrameworkPlatform,
   artifactDirectory: string,
+  dependencies: FrameworkRuntimeDependencies = defaultDependencies,
 ): Promise<LoadedFrameworkRuntime> {
   const platformName = platform === "win32" ? "windows" : "linux";
   const manifestPath = join(repositoryRoot, ".native-e2e", "framework-runtime", `${platformName}.json`);
@@ -46,6 +59,7 @@ export async function loadRequiredFrameworkRuntime(
   if (digest(contract) !== manifest.contractSha256) {
     throw new Error("required framework runtime manifest is not bound to the matrix contract");
   }
+  const identity = await dependencies.loadFrameworkIdentity(repositoryRoot);
 
   const fixtures: TaskServiceFixture[] = [];
   try {
@@ -73,7 +87,7 @@ export async function loadRequiredFrameworkRuntime(
           throw new Error("framework runtime framework ID is invalid");
         }
         const workspaceBase = join(repositoryRoot, ".native-e2e", "framework-work", platformName, family, frameworkId);
-        const fixture = await startService(serviceBinary, join(workspaceBase, "service"), {
+        const fixture = await dependencies.startService(serviceBinary, join(workspaceBase, "service"), {
           timeoutMs: 120_000,
           workspaceRoot: join(workspaceBase, "workspace"),
           trustedWorkspace: true,
@@ -105,6 +119,7 @@ export async function loadRequiredFrameworkRuntime(
       toolchains,
     };
     return {
+      identity,
       options,
       async dispose() {
         await disposeFixtures(fixtures);
@@ -114,6 +129,14 @@ export async function loadRequiredFrameworkRuntime(
     await disposeFixtures(fixtures).catch(() => undefined);
     throw error;
   }
+}
+
+async function loadFrameworkIdentity(root: string): Promise<F1FrameworkIdentity> {
+  // @ts-expect-error consume.mjs is validated by its direct Node test suite.
+  const module = await import("../../framework-bundle/consume.mjs") as {
+    loadF1FrameworkIdentity(repositoryRoot: string): Promise<F1FrameworkIdentity>;
+  };
+  return module.loadF1FrameworkIdentity(root);
 }
 
 export function frameworkMatrixRequired(environment: NodeJS.ProcessEnv): boolean {

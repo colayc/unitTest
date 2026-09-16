@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import type { WorkspaceSnapshot } from "@unit-test-ide/protocol-models";
 import type { TaskServiceFixture } from "./probe.js";
+import { FRAMEWORK_SCENARIO_IDS } from "./native-framework-report.js";
 import {
   __testing,
   type NativeMatrixOptions,
@@ -94,7 +95,8 @@ test("required Windows native run binds both real framework executables and publ
         dispose: async () => { events.push(`dispose:${family}`); },
       } as unknown as TaskServiceFixture;
     },
-    runFrameworkToolchain: async (_options, family) => {
+    runFrameworkToolchain: async (_options, family, identity) => {
+      assert.equal(identity, f1Identity, "validated F1 identity must reach the Service catalog runner");
       events.push(`framework:${family}`);
       return {
         family,
@@ -102,7 +104,24 @@ test("required Windows native run binds both real framework executables and publ
         compilerSha256: digest(`compiler:${family}`),
         frameworks: (["cpputest", "unity"] as const).map((id) => ({
           id,
-          scenarios: Array.from({ length: 17 }, (_, index) => ({ id: `scenario-${index}` })),
+          dependencyVersion: id === "cpputest" ? "4.0" : "2.6.1",
+          dependencySha256: digest(`dependency:${id}`),
+          dependencyTreeSha256: f1Identity.frameworkTreeSha256[id],
+          catalogRevision: digest(`revision:${family}:${id}`),
+          catalogArtifactSha256: digest(`catalog:${family}:${id}`),
+          sourceArtifactSha256: f1Identity.fixtures[id].sourceSha256,
+          sourceLocationDigest: digest(`locations:${id}`),
+          executableArtifactSha256: digest(`executable:${family}:${id}`),
+          stableIdDigest: digest(`stable:${family}:${id}`),
+          ...(id === "unity" ? { cMockProvenance: {
+            revision: "6ea503340b1d3fdc0f2bcaf69273ba0160ec83af",
+            generatorVersion: "2.7.0",
+            inputSha256: "007f23aea2dba06d111f66be95905adde8fe32e7d2031bf8a8c70117a8209f57",
+            outputSha256: "1565d1a2d39b655eb551a729663fae7e167f1c0d6cd3f9a8c2aafe2d67348128",
+            manifestSha256: f1Identity.cMockProvenanceSha256,
+            generatedAtRuntime: false,
+          } } : {}),
+          scenarios: FRAMEWORK_SCENARIO_IDS.map((scenarioId) => ({ id: scenarioId })),
         })),
       } as never;
     },
@@ -122,7 +141,9 @@ test("required Windows native run binds both real framework executables and publ
         platform: "win32",
         toolchains: toolchains.map(({ family, frameworks }) => ({
           family,
-          frameworks: frameworks.map(({ id, scenarios }) => ({ id, scenarios })),
+          frameworks: frameworks.map(({ id, scenarios, sourceArtifactSha256, stableIdDigest, cMockProvenance }) => ({
+            id, scenarios, sourceArtifactSha256, stableIdDigest, cMockProvenance,
+          })),
         })),
       };
       await mkdir(artifactDirectory, { recursive: true });
@@ -133,15 +154,40 @@ test("required Windows native run binds both real framework executables and publ
     verifyFrameworkReport: async (directory, platform) => {
       const report = JSON.parse(await readFile(join(directory, "framework-report.json"), "utf8")) as {
         platform: string;
-        toolchains: Array<{ family: string; frameworks: Array<{ id: string; scenarios: unknown[] }> }>;
+        toolchains: Array<{ family: string; frameworks: Array<{
+          id: string;
+          scenarios: Array<{ id: string }>;
+          sourceArtifactSha256: string;
+          stableIdDigest: string;
+          cMockProvenance?: { manifestSha256: string; generatedAtRuntime: boolean };
+        }> }>;
       };
       assert.equal(platform, "win32");
       assert.equal(report.platform, "win32");
       assert.deepEqual(report.toolchains.map(({ family }) => family), ["msvc", "clang-cl"]);
-      assert.ok(report.toolchains.every(({ frameworks }) =>
-        frameworks.map(({ id }) => id).join(",") === "cpputest,unity" &&
-        frameworks.every(({ scenarios }) => scenarios.length === 17)
-      ));
+      for (const { family, frameworks } of report.toolchains) {
+        assert.deepEqual(frameworks.map(({ id }) => id), ["cpputest", "unity"]);
+        for (const framework of frameworks) {
+          assert.deepEqual(framework.scenarios.map(({ id }) => id), [...FRAMEWORK_SCENARIO_IDS]);
+          assert.equal(
+            framework.sourceArtifactSha256,
+            f1Identity.fixtures[framework.id as "cpputest" | "unity"].sourceSha256,
+          );
+          assert.equal(framework.stableIdDigest, digest(`stable:${family}:${framework.id}`));
+          if (framework.id === "unity") {
+            assert.deepEqual(framework.cMockProvenance, {
+              revision: "6ea503340b1d3fdc0f2bcaf69273ba0160ec83af",
+              generatorVersion: "2.7.0",
+              inputSha256: "007f23aea2dba06d111f66be95905adde8fe32e7d2031bf8a8c70117a8209f57",
+              outputSha256: "1565d1a2d39b655eb551a729663fae7e167f1c0d6cd3f9a8c2aafe2d67348128",
+              manifestSha256: f1Identity.cMockProvenanceSha256,
+              generatedAtRuntime: false,
+            });
+          } else {
+            assert.equal(framework.cMockProvenance, undefined);
+          }
+        }
+      }
       events.push("verify-framework-report");
       return report as never;
     },

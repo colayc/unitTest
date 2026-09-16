@@ -13,6 +13,7 @@ import {
 import {
   runFrameworkMatrix,
   runFrameworkPlatform,
+  runFrameworkToolchain,
   stableFrameworkIdDigest,
   type F1FrameworkIdentity,
   type FrameworkMatrixOptions,
@@ -22,6 +23,7 @@ import {
   frameworkMatrixRequired,
   loadRequiredFrameworkRuntime,
 } from "./native-framework-runtime.js";
+import { main as runNativeMain } from "./native-run.js";
 import {
   __testing as nativeBuildTesting,
   type NativeMatrixOptions,
@@ -698,6 +700,117 @@ test("required framework mode is explicit and its missing fixed manifest fails c
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("required runtime validates F1 identity before starting any framework Service and carries it forward", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "framework-runtime-order-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const artifactDirectory = join(root, ".native-e2e", "artifacts", "linux");
+  const contract = Buffer.from('{"schemaVersion":1}\n');
+  await mkdir(join(root, "testdata", "framework-matrix"), { recursive: true });
+  await mkdir(join(root, ".native-e2e", "framework-runtime"), { recursive: true });
+  await writeFile(join(root, "testdata", "framework-matrix", "contract.json"), contract);
+  await writeFile(join(root, ".native-e2e", "framework-runtime", "linux.json"), `${JSON.stringify({
+    schemaVersion: 1,
+    platform: "linux",
+    candidateCommit,
+    contractSha256: digestBytes(contract),
+    benchmark: {},
+    toolchains: [{
+      family: "clang",
+      compilerVersion: "18.1.0",
+      compilerSha256: digest("compiler:clang"),
+      frameworks: [{
+        frameworkId: "cpputest",
+        catalogArtifactSha256: digest("catalog:clang:cpputest"),
+        dependencyVersion: "4.0",
+        dependencySha256: digest("archive:cpputest"),
+        dependencyTreeSha256: f1Identity.frameworkTreeSha256.cpputest,
+        stableIdDigest: digest("stable:cpputest"),
+        timeoutMs: 100,
+        evidence: {
+          sourceArtifactSha256: f1Identity.fixtures.cpputest.sourceSha256,
+          sourceLocationDigest: digest("locations:cpputest"),
+          executableArtifactSha256: digest("binary:clang:cpputest"),
+        },
+      }],
+    }],
+  })}\n`);
+  const events: string[] = [];
+  const loaded = await loadRequiredFrameworkRuntime(root, "linux", artifactDirectory, {
+    loadFrameworkIdentity: async () => {
+      events.push("identity");
+      return f1Identity;
+    },
+    startService: async () => {
+      events.push("service");
+      return {
+        client: {},
+        dispose: async () => { events.push("dispose"); },
+      } as unknown as TaskServiceFixture;
+    },
+  });
+  assert.equal(loaded.identity, f1Identity);
+  assert.deepEqual(events, ["identity", "service"]);
+  await loaded.dispose();
+  assert.deepEqual(events, ["identity", "service", "dispose"]);
+});
+
+test("required native CLI carries the pre-Service F1 identity into native-build", async () => {
+  const sentinel = new Error("matrix runner reached");
+  let disposed = false;
+  await assert.rejects(
+    runNativeMain(
+      [],
+      undefined,
+      { UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED: "1" },
+      async (_root, platform, artifactDirectory) => ({
+        identity: f1Identity,
+        options: {
+          artifactDirectory,
+          platform,
+        } as FrameworkPlatformOptions,
+        dispose: async () => { disposed = true; },
+      }),
+      async (options) => {
+        assert.equal(options.frameworkIdentity, f1Identity);
+        throw sentinel;
+      },
+    ),
+    sentinel,
+  );
+  assert.equal(disposed, true);
+});
+
+test("required toolchain rejects a stable ID that omits discovered catalog or F1 fixture identity", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "framework-stable-binding-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const options = platformOptions(join(root, ".native-e2e", "artifacts", "linux"));
+  const clang = options.toolchains.find(({ family }) => family === "clang")!;
+  for (const framework of clang.frameworks) {
+    const catalog = await framework.fixture.client.getTestCatalog({
+      projectId: "root", profileId: "profile", limit: 1000,
+    });
+    (framework as { stableIdDigest: string }).stableIdDigest = stableFrameworkIdDigest(
+      framework.frameworkId,
+      catalog,
+      f1Identity,
+    );
+  }
+  const substitutedIdentity: F1FrameworkIdentity = {
+    ...f1Identity,
+    fixtures: {
+      ...f1Identity.fixtures,
+      cpputest: {
+        ...f1Identity.fixtures.cpputest,
+        executableSha256: digest("substituted F1 executable identity"),
+      },
+    },
+  };
+  await assert.rejects(
+    runFrameworkToolchain(options, "clang", substitutedIdentity),
+    /cpputest stable ID does not match discovered Service catalog and F1 identity/u,
+  );
 });
 
 for (const [operation, prepare, pattern] of [

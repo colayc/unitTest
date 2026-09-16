@@ -220,7 +220,10 @@ interface ScenarioObservation {
   readonly artifactSizeBytes: number;
 }
 
-export async function runFrameworkMatrix(options: FrameworkMatrixOptions): Promise<FrameworkMatrixResult> {
+export async function runFrameworkMatrix(
+  options: FrameworkMatrixOptions,
+  requiredIdentity?: Readonly<{ provenance: F1FrameworkIdentity; stableIdDigest: string }>,
+): Promise<FrameworkMatrixResult> {
   validateMatrixOptions(options);
   const contract = await loadMatrixContract(options.frameworkId);
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -261,6 +264,12 @@ export async function runFrameworkMatrix(options: FrameworkMatrixOptions): Promi
     timeoutMs,
   );
   validateCatalog(catalog, selected, options.frameworkId);
+  if (
+    requiredIdentity !== undefined &&
+    stableFrameworkIdDigest(options.frameworkId, catalog, requiredIdentity.provenance) !== requiredIdentity.stableIdDigest
+  ) {
+    throw new Error(`${options.frameworkId} stable ID does not match discovered Service catalog and F1 identity`);
+  }
   const selection = catalogSelection(catalog, options.frameworkId, contract);
   const discoveryArtifact = await readTaskArtifact(
     options.fixture.client,
@@ -349,6 +358,7 @@ export async function runFrameworkPlatform(options: FrameworkPlatformOptions): P
 export async function runFrameworkToolchain(
   options: FrameworkPlatformOptions,
   family: FrameworkToolchainFamily,
+  requiredIdentity?: F1FrameworkIdentity,
 ): Promise<FrameworkToolchainEvidence> {
   validatePlatformOptions(options);
   if (!PLATFORM_FAMILIES[options.platform].includes(family)) {
@@ -369,6 +379,9 @@ export async function runFrameworkToolchain(
       platform: options.platform,
       ...(framework.timeoutMs === undefined ? {} : { timeoutMs: framework.timeoutMs }),
       toolchainFamily: family,
+    }, requiredIdentity === undefined ? undefined : {
+      provenance: requiredIdentity,
+      stableIdDigest: framework.stableIdDigest,
     });
     frameworks.push({
       id: frameworkId,

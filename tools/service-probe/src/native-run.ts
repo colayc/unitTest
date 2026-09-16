@@ -37,8 +37,10 @@ export async function main(
   frameworkPlatform?: FrameworkPlatformOptions,
   environment: NodeJS.ProcessEnv = process.env,
   runtimeLoader: typeof loadRequiredFrameworkRuntime = loadRequiredFrameworkRuntime,
+  matrixRunner?: typeof import("./native-build.js").runNativeMatrix,
 ): Promise<void> {
   const { runNativeMatrix } = await import("./native-build.js");
+  const executeMatrix = matrixRunner ?? runNativeMatrix;
   const platform = parsePlatform(arguments_);
   if (platform !== process.platform) {
     throw new Error(`native E2E for ${platform} must run on ${platform}`);
@@ -58,12 +60,13 @@ export async function main(
     frameworkPlatform = loaded.options;
   }
   try {
-    const results = await runNativeMatrix({
+    const results = await executeMatrix({
       platform,
       requiredFamilies,
       artifactDirectory,
       workDirectory: resolveNativeWorkDirectory(repositoryRoot, platform, tmpdir()),
       ...(frameworkPlatform === undefined ? {} : { frameworkPlatform }),
+      ...(loaded === undefined ? {} : { frameworkIdentity: loaded.identity }),
     });
     process.stdout.write(`${JSON.stringify({
       platform,

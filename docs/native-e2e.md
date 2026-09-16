@@ -94,7 +94,26 @@ closed runtime manifest 放在固定位置
 workspace 放在固定的 `.native-e2e/framework-work/` 树中；CLI 和环境变量都不能指定
 替代路径、命令、shell、hook 或 executable。
 
-Windows 本地完整验收：
+当前分支没有创建这些 runtime 输入的本地 producer。Task 6 hosted producer 是完整验收的
+明确前置条件；下面的 F1/CMake/fixture 命令只验证静态输入和单独 fixture，**不会**创建
+runtime manifest 或 Service workspace。在 Task 6 producer 落地并成功运行前，不应把
+`test:e2e:native` required-mode 命令报告为完整 P4 验收。producer 必须原子地产生且只产生：
+
+```text
+.native-e2e/framework-runtime/windows.json
+.native-e2e/framework-work/windows/{msvc,clang-cl}/{cpputest,unity}/{service,workspace}/...
+.native-e2e/framework-runtime/linux.json
+.native-e2e/framework-work/linux/{gcc,clang}/{cpputest,unity}/{service,workspace}/...
+```
+
+每个 manifest 必须绑定 committed matrix contract、当前 candidate、compiler identity、
+F1 tree/source/provenance identity、从实际 Service catalog 重算的 stable ID，以及固定 build
+root 中唯一 compiled executable 的摘要。缺少 Task 6 producer 或上述任一路径时，当前
+可运行且可信的检查是 `pnpm check:framework-bundle` 和
+`pnpm verify:framework-fixtures -- ...`；required native 命令会在 Service matrix 执行前
+fail closed，而不是自行合成这些输入。
+
+Task 6 producer 已提供固定输入之后，Windows 本地完整验收：
 
 ```powershell
 pnpm check:framework-bundle
@@ -108,7 +127,8 @@ $env:UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED='1'
 pnpm test:e2e:native -- --platform win32
 ```
 
-Linux 使用同一流程，把 generator 输出名改为无 `.exe`，并设置：
+Task 6 producer 已提供固定输入之后，Linux 使用同一流程，把 generator 输出名改为无
+`.exe`，并设置：
 
 ```sh
 export UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS=gcc,clang

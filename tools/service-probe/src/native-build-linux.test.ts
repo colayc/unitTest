@@ -7,6 +7,7 @@ import test from "node:test";
 import type { WorkspaceSnapshot } from "@unit-test-ide/protocol-models";
 import { ProtocolError, type EventSubscription, type ProtocolClient } from "@unit-test-ide/test-client";
 import type { TaskServiceFixture } from "./probe.js";
+import { FRAMEWORK_SCENARIO_IDS } from "./native-framework-report.js";
 import {
   __testing,
   parseRequiredToolchains,
@@ -311,6 +312,139 @@ test("required Linux framework preflight rejects a missing fixture or F1 provena
     /required unity provenance does not match F1/u,
   );
   assert.equal(launches, 0);
+});
+
+test("required Linux native run carries F1 identity and verifies exact 2x2x17 report evidence", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "native-framework-platform-linux-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const artifactDirectory = join(root, "artifacts");
+  const serviceBinary = join(root, "build", "unit-test-service");
+  await mkdir(dirname(serviceBinary), { recursive: true });
+  await writeFile(serviceBinary, "fixture");
+  const frameworkPlatform = requiredLinuxFrameworkPlatform(artifactDirectory);
+  const events: string[] = [];
+  let launchIndex = 0;
+  const dependencies: Parameters<typeof __testing.runNativeMatrixWithDependencies>[1] = {
+    environment: {
+      UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS: "gcc,clang",
+      UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED: "1",
+    },
+    architecture: "x64",
+    repositoryRoot: root,
+    verifyBundle: async () => fakePreparedBundle(join(root, ".bundled-tools", "cmake")),
+    loadFrameworkIdentity: async () => frameworkIdentity,
+    frameworkExecutableDigest: async (_root, _platform, family, frameworkId) =>
+      createHash("sha256").update(`${family}:${frameworkId}`).digest("hex"),
+    createWorkspace: async (_work, _platform, family) => {
+      const familyRoot = join(root, "work", family);
+      const workspaceRoot = join(familyRoot, "workspace");
+      const serviceDirectory = join(familyRoot, "service");
+      await mkdir(workspaceRoot, { recursive: true });
+      await mkdir(serviceDirectory, { recursive: true });
+      return { root: familyRoot, workspaceRoot, serviceDirectory };
+    },
+    launchService: async () => {
+      const family = (["gcc", "clang"] as const)[launchIndex++]!;
+      return {
+        client: { inspectWorkspace: async () => workspaceSnapshot(family) },
+        dispose: async () => { events.push(`dispose:${family}`); },
+      } as unknown as TaskServiceFixture;
+    },
+    runFrameworkToolchain: async (_options, family, identity) => {
+      assert.equal(identity, frameworkIdentity, "validated F1 identity must reach the Linux Service catalog runner");
+      events.push(`framework:${family}`);
+      return {
+        family,
+        compilerVersion: "15.1.0",
+        compilerSha256: createHash("sha256").update(`compiler:${family}`).digest("hex"),
+        frameworks: (["cpputest", "unity"] as const).map((id) => ({
+          id,
+          dependencyVersion: id === "cpputest" ? "4.0" : "2.6.1",
+          dependencySha256: createHash("sha256").update(`dependency:${id}`).digest("hex"),
+          dependencyTreeSha256: frameworkIdentity.frameworkTreeSha256[id],
+          catalogRevision: createHash("sha256").update(`revision:${family}:${id}`).digest("hex"),
+          catalogArtifactSha256: createHash("sha256").update(`catalog:${family}:${id}`).digest("hex"),
+          sourceArtifactSha256: frameworkIdentity.fixtures[id].sourceSha256,
+          sourceLocationDigest: createHash("sha256").update(`locations:${id}`).digest("hex"),
+          executableArtifactSha256: createHash("sha256").update(`${family}:${id}`).digest("hex"),
+          stableIdDigest: createHash("sha256").update(`stable:${family}:${id}`).digest("hex"),
+          ...(id === "unity" ? { cMockProvenance: {
+            revision: "6ea503340b1d3fdc0f2bcaf69273ba0160ec83af",
+            generatorVersion: "2.7.0",
+            inputSha256: "007f23aea2dba06d111f66be95905adde8fe32e7d2031bf8a8c70117a8209f57",
+            outputSha256: "1565d1a2d39b655eb551a729663fae7e167f1c0d6cd3f9a8c2aafe2d67348128",
+            manifestSha256: frameworkIdentity.cMockProvenanceSha256,
+            generatedAtRuntime: false,
+          } } : {}),
+          scenarios: FRAMEWORK_SCENARIO_IDS.map((scenarioId) => ({ id: scenarioId })),
+        })),
+      } as never;
+    },
+    executeScenarios: async ({ family }) => {
+      events.push(`core:${family}`);
+      return { "default-build": "passed" };
+    },
+    cleanupWorkspace: async ({ root: workspaceRoot }) => {
+      events.push(`cleanup:${workspaceRoot.includes("gcc") ? "gcc" : "clang"}`);
+    },
+    writeReport: async () => join(artifactDirectory, "toolchain-report.json"),
+    publishFrameworkReport: async (_options, toolchains) => {
+      const serialized = {
+        platform: "linux",
+        toolchains: toolchains.map(({ family, frameworks }) => ({
+          family,
+          frameworks: frameworks.map(({ id, scenarios, sourceArtifactSha256, stableIdDigest, cMockProvenance }) => ({
+            id, scenarios, sourceArtifactSha256, stableIdDigest, cMockProvenance,
+          })),
+        })),
+      };
+      await mkdir(artifactDirectory, { recursive: true });
+      await writeFile(join(artifactDirectory, "framework-report.json"), `${JSON.stringify(serialized)}\n`);
+      return serialized as never;
+    },
+    verifyFrameworkReport: async (directory, platform) => {
+      const report = JSON.parse(await readFile(join(directory, "framework-report.json"), "utf8")) as {
+        platform: string;
+        toolchains: Array<{ family: string; frameworks: Array<{
+          id: "cpputest" | "unity";
+          scenarios: Array<{ id: string }>;
+          sourceArtifactSha256: string;
+          stableIdDigest: string;
+          cMockProvenance?: { manifestSha256: string; generatedAtRuntime: boolean };
+        }> }>;
+      };
+      assert.equal(platform, "linux");
+      assert.equal(report.platform, "linux");
+      assert.deepEqual(report.toolchains.map(({ family }) => family), ["gcc", "clang"]);
+      for (const { family, frameworks } of report.toolchains) {
+        assert.deepEqual(frameworks.map(({ id }) => id), ["cpputest", "unity"]);
+        for (const framework of frameworks) {
+          assert.deepEqual(framework.scenarios.map(({ id }) => id), [...FRAMEWORK_SCENARIO_IDS]);
+          assert.equal(framework.sourceArtifactSha256, frameworkIdentity.fixtures[framework.id].sourceSha256);
+          assert.equal(
+            framework.stableIdDigest,
+            createHash("sha256").update(`stable:${family}:${framework.id}`).digest("hex"),
+          );
+          assert.equal(framework.cMockProvenance?.manifestSha256,
+            framework.id === "unity" ? frameworkIdentity.cMockProvenanceSha256 : undefined);
+          assert.equal(framework.cMockProvenance?.generatedAtRuntime,
+            framework.id === "unity" ? false : undefined);
+        }
+      }
+      return report as never;
+    },
+  };
+
+  await __testing.runNativeMatrixWithDependencies({
+    platform: "linux",
+    requiredFamilies: ["gcc", "clang"],
+    artifactDirectory,
+    frameworkPlatform,
+  }, dependencies);
+  assert.deepEqual(events, [
+    "framework:gcc", "core:gcc", "dispose:gcc", "cleanup:gcc",
+    "framework:clang", "core:clang", "dispose:clang", "cleanup:clang",
+  ]);
 });
 
 test("generated family build repeats its fresh checkpoint after one stale Start", async () => {

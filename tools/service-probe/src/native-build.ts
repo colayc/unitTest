@@ -100,6 +100,8 @@ export interface NativeMatrixOptions {
    * the committed framework workspace identities.
    */
   frameworkPlatform?: FrameworkPlatformOptions;
+  /** Validated F1 identity loaded before required framework Services start. */
+  frameworkIdentity?: F1FrameworkIdentity;
 }
 
 interface FamilyWorkspace {
@@ -188,7 +190,8 @@ async function runNativeMatrixWithDependencies(
     throw new Error("required framework platform is missing");
   }
   const frameworkIdentity = frameworkRequiredValue === "1"
-    ? await (dependencies.loadFrameworkIdentity ?? loadFrameworkIdentity)(dependencies.repositoryRoot)
+    ? options.frameworkIdentity ??
+      await (dependencies.loadFrameworkIdentity ?? loadFrameworkIdentity)(dependencies.repositoryRoot)
     : undefined;
   if (frameworkIdentity !== undefined) validateRequiredFrameworkInputs(options.frameworkPlatform!, frameworkIdentity);
   const enforced = parseRequiredToolchains(dependencies.environment[requiredEnvironmentName]);
@@ -262,6 +265,7 @@ async function runNativeMatrixWithDependencies(
         frameworkToolchains.push(await (dependencies.runFrameworkToolchain ?? runFrameworkToolchain)(
           options.frameworkPlatform,
           family,
+          frameworkIdentity,
         ));
       }
       const scenarios = await dependencies.executeScenarios({
@@ -338,6 +342,9 @@ function validateMatrixOptions(options: NativeMatrixOptions, architecture: strin
     ) {
       throw new Error("framework platform output must match the native matrix platform and artifact directory");
     }
+  }
+  if (options.frameworkIdentity !== undefined && options.frameworkPlatform === undefined) {
+    throw new Error("framework identity requires a framework platform");
   }
 }
 
