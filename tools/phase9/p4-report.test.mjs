@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import Ajv2020 from "ajv/dist/2020.js";
+import { readCMockGeneration } from "../framework-bundle/cmock-provenance.mjs";
+import { readFrameworkManifest } from "../framework-bundle/manifest.mjs";
 import schema from "./p4-report.schema.json" with { type: "json" };
 
 const ajv = new Ajv2020({ allErrors: true, strict: true });
@@ -14,6 +16,18 @@ const scenarioIds = [
   "filter", "malformed-output", "mock-failure", "opaque-fallback", "reconnect-replay",
   "repeat", "service-restart", "single", "skip", "stale-catalog", "timeout",
 ];
+
+test("committed CMock provenance digest comes from the closed F1 reader", async () => {
+  const { manifest, manifestSha256 } = await readFrameworkManifest();
+  const provenance = await readCMockGeneration("testdata/frameworks/unity/mocks/cmock-generation.json", {
+    root: process.cwd(),
+    manifest,
+    manifestSha256,
+  });
+  assert.equal(manifestSha256, "2f08cfd45b9374a5331f0484d53b466c3813312d046e5226c64754c0c986f87b");
+  assert.equal(provenance.cMockProvenanceSha256, "4f0a73e5decc2402930fc4d609d1640150fe6addb30e20cc9900e1cf418520a8");
+  assert.notEqual(provenance.cMockProvenanceSha256, manifestSha256);
+});
 
 test("schema exposes a closed exact-order scenario-set contract", () => {
   assert.equal(typeof validateScenarioSet, "function");

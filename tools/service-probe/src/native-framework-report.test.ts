@@ -81,7 +81,7 @@ function platformInput(platform: "linux" | "win32" = "linux"): FrameworkPlatform
               generatorVersion: "2.7.0",
               inputSha256: "007f23aea2dba06d111f66be95905adde8fe32e7d2031bf8a8c70117a8209f57",
               outputSha256: "1565d1a2d39b655eb551a729663fae7e167f1c0d6cd3f9a8c2aafe2d67348128",
-              manifestSha256: "2f08cfd45b9374a5331f0484d53b466c3813312d046e5226c64754c0c986f87b",
+              manifestSha256: "4f0a73e5decc2402930fc4d609d1640150fe6addb30e20cc9900e1cf418520a8",
               generatedAtRuntime: false as const,
             },
           } : {}),
@@ -171,6 +171,11 @@ test("builder binds the committed F1 digests and immutable CMock provenance", ()
   const mutable = platformInput();
   mutable.toolchains[0]!.frameworks[1]!.cMockProvenance!.generatedAtRuntime = true as false;
   assert.throws(() => buildFrameworkPlatformReport(mutable), /CMock.*provenance|runtime/iu);
+
+  const frameworkManifestSubstitution = platformInput();
+  frameworkManifestSubstitution.toolchains[0]!.frameworks[1]!.cMockProvenance!.manifestSha256 =
+    "2f08cfd45b9374a5331f0484d53b466c3813312d046e5226c64754c0c986f87b";
+  assert.throws(() => buildFrameworkPlatformReport(frameworkManifestSubstitution), /CMock.*provenance/iu);
 });
 
 test("builder rejects duplicate result artifact digests across the platform report", () => {
