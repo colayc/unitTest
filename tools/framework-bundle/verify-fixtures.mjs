@@ -1,6 +1,6 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { readFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { mkdir, readFile, rm } from "node:fs/promises";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { readFrameworkManifest } from "./manifest.mjs";
@@ -32,7 +32,7 @@ export function parseVerifyFrameworkFixtureArguments(arguments_) {
   if (!Array.isArray(arguments_) || arguments_.length !== 8 || arguments_[0] !== "--cmake" || arguments_[2] !== "--generator" || arguments_[4] !== "--toolchains" || arguments_[6] !== "--frameworks") usage();
   const [cmake, generator, toolchains, frameworks] = [arguments_[1], arguments_[3], arguments_[5], arguments_[7]];
   if (!absolute(cmake) || !absolute(generator)) usage();
-  return { cmake, generator, toolchains: csv(toolchains, new Set(["msvc", "clang-cl"])), frameworks: csv(frameworks, fixtureFrameworks) };
+  return { cmake, generator, toolchains: csv(toolchains, fixtureToolchains), frameworks: csv(frameworks, fixtureFrameworks) };
 }
 
 function supportedToolchain(toolchain, platform) {
@@ -51,13 +51,13 @@ function cmakeCompilerArguments(toolchain) {
   return [];
 }
 
-function commandOptions(timeout) {
-  return { shell: false, windowsHide: true, timeout, maxBuffer: 8 * 1024 * 1024 };
+function commandOptions(timeout, environment) {
+  return { shell: false, windowsHide: true, timeout, maxBuffer: 8 * 1024 * 1024, ...(environment ? { env: environment } : {}) };
 }
 
-async function invoke(execFile, command, arguments_, timeout) {
+async function invoke(execFile, command, arguments_, timeout, environment) {
   try {
-    const result = await execFile(command, arguments_, commandOptions(timeout));
+    const result = await execFile(command, arguments_, commandOptions(timeout, environment));
     return { code: 0, signal: null, killed: false, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
   } catch (error) {
     return { code: typeof error.code === "number" ? error.code : null, signal: error.signal ?? null, killed: error.killed === true, stdout: error.stdout ?? "", stderr: error.stderr ?? "", error };
@@ -82,9 +82,17 @@ function assertScenarioResult(scenario, result) {
 async function defaultFrameworkInputs(repositoryRoot) {
   const { manifest, manifestSha256 } = await readFrameworkManifest(join(repositoryRoot, "tools", "framework-bundle", "manifest.json"));
   const root = join(repositoryRoot, ".superpowers", "runtime", "framework-bundle", "v2", manifestSha256);
-  const cpputest = manifest.frameworks.find((framework) => framework.id === "cpputest");
-  if (!cpputest) throw new Error("CppUTest is absent from the framework manifest");
-  return { cpputestRoot: join(root, cpputest.sourceDirectory), helper: join(repositoryRoot, manifest.fixtureTools.cmakeHelper.path) };
+  const frameworkRoot = (id) => {
+    const framework = manifest.frameworks.find((candidate) => candidate.id === id);
+    if (!framework) throw new Error(`${id} is absent from the framework manifest`);
+    return join(root, framework.sourceDirectory);
+  };
+  return {
+    cpputestRoot: frameworkRoot("cpputest"),
+    unityRoot: frameworkRoot("unity"),
+    cmockRoot: frameworkRoot("cmock"),
+    helper: join(repositoryRoot, manifest.fixtureTools.cmakeHelper.path),
+  };
 }
 
 async function readCppUTestFixture(repositoryRoot) {
@@ -116,19 +124,144 @@ async function verifyCppUTestFixture(options, toolchain, inputs) {
   return { framework: "cpputest", toolchain, scenarios };
 }
 
+const unityManifestDirectory = join(".unit-test-ide", "3599003af019a34669698d4cd38b175ce63ea767e834dc13cec3d415b1345988");
+const runnerProtocol = "utide.runner.v1";
+const runnerStatuses = new Set(["passed", "failed", "skipped"]);
+
+function containedPath(root, path) {
+  const resolvedRoot = resolve(root);
+  const resolvedPath = resolve(path);
+  const pathRelative = relative(resolvedRoot, resolvedPath);
+  return pathRelative === "" || (!pathRelative.startsWith(`..${sep}`) && pathRelative !== ".." && !isAbsolute(pathRelative));
+}
+
+function resultPath(root, name) {
+  const output = resolve(root, name);
+  if (!containedPath(root, output)) throw new Error("Unity runner result file escapes its controlled directory");
+  return output;
+}
+
+async function readJsonl(path, kind) {
+  let text;
+  try {
+    text = await readFile(path, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  }
+  if (text.length === 0) return [];
+  const lines = text.endsWith("\n") ? text.slice(0, -1).split("\n") : text.split("\n");
+  if (lines.some((line) => line.length === 0)) throw new Error("malformed Unity runner JSONL");
+  return lines.map((line) => {
+    try {
+      const record = JSON.parse(line);
+      if (!record || typeof record !== "object" || Array.isArray(record) || record.magic !== "unit-test-ide" || record.protocol !== runnerProtocol || record.record !== kind || typeof record.identity !== "string" || record.identity.length === 0) throw new Error("invalid record");
+      return record;
+    } catch {
+      throw new Error("malformed Unity runner JSONL");
+    }
+  });
+}
+
+async function readUnityFixture(repositoryRoot) {
+  const fixture = JSON.parse(await readFile(join(repositoryRoot, "testdata", "frameworks", "unity", "fixture.json"), "utf8"));
+  if (fixture.schemaVersion !== 1 || fixture.framework !== "unity" || fixture.ctestName !== "unity.framework" || !Array.isArray(fixture.scenarios) || fixture.scenarios.length !== 6) throw new Error("Unity fixture contract is invalid");
+  const expected = [
+    ["pass", "test_pass", "passed"], ["assertion-failure", "test_assertion_failure", "failed"], ["skip", "test_skipped", "skipped"],
+    ["mock-failure", "test_cmock_expectation_failure", "mock-failure"], ["crash", "test_crash", "crash"], ["timeout", "test_timeout", "timeout"],
+  ];
+  if (fixture.scenarios.some((scenario, index) => scenario.id !== expected[index][0] || scenario.name !== expected[index][1] || scenario.outcome !== expected[index][2])) throw new Error("Unity fixture contract is invalid");
+  return fixture;
+}
+
+async function verifyUnityManifest(buildDirectory, fixture) {
+  let manifest;
+  try {
+    manifest = JSON.parse(await readFile(join(buildDirectory, unityManifestDirectory, "manifest.json"), "utf8"));
+  } catch (error) {
+    throw new Error(`Unity runner manifest is invalid: ${error.message}`);
+  }
+  if (!Array.isArray(manifest.cases)) throw new Error("Unity runner manifest is invalid");
+  const expected = fixture.scenarios.map((scenario) => scenario.name);
+  const actual = manifest.cases.map((testCase) => testCase?.identity);
+  if (actual.length !== expected.length || new Set(actual).size !== actual.length || actual.some((identity) => !expected.includes(identity)) || manifest.cases.some((testCase) => testCase?.name !== testCase?.identity)) throw new Error("Unity runner manifest does not match fixture");
+  return actual;
+}
+
+function validateListRecords(records, identities) {
+  const actual = records.map((record) => record.identity);
+  if (new Set(actual).size !== actual.length) throw new Error("duplicate Unity list identity");
+  if (records.some((record) => typeof record.case !== "string" || record.case !== record.identity) || actual.length !== identities.length || actual.some((identity, index) => identity !== identities[index])) throw new Error("Unity list records do not match fixture");
+}
+
+function completeResult(records, requestedIdentity) {
+  if (records.length !== 1) return null;
+  const [record] = records;
+  if (record.identity !== requestedIdentity) throw new Error("Unity runner result identity does not match requested identity");
+  if (!runnerStatuses.has(record.status)) throw new Error("unknown Unity runner status");
+  return record;
+}
+
+async function verifyUnityScenario(options, executable, resultDirectory, scenario) {
+  const output = resultPath(resultDirectory, `${scenario.name}.jsonl`);
+  const invocation = await invoke(options.execFile, executable, [
+    "--utide-protocol", runnerProtocol, "--utide-mode", "run", "--utide-case", scenario.name, "--utide-result", output,
+  ], scenario.outcome === "timeout" ? 1_000 : scenarioTimeout, options.environment);
+  const records = await readJsonl(output, "testFinished");
+  const record = completeResult(records, scenario.name);
+  if (scenario.outcome === "crash") {
+    if (record !== null || invocation.code === 0) throw new Error("Unity crash scenario did not terminate before a complete result");
+    return;
+  }
+  if (scenario.outcome === "timeout") {
+    if (!invocation.killed || record !== null) throw new Error("Unity timeout scenario did not reach the verifier deadline");
+    return;
+  }
+  if (record === null) throw new Error(`Unity ${scenario.id} did not publish a complete result`);
+  const expectedStatus = scenario.outcome === "mock-failure" ? "failed" : scenario.outcome;
+  if (record.status !== expectedStatus) throw new Error(`Unity ${scenario.id} produced ${record.status}`);
+  if (scenario.outcome === "mock-failure" && !/(cmock|mismatch|expected|was)/iu.test(resultText(invocation))) throw new Error("Unity mock-failure scenario lacks CMock mismatch evidence");
+}
+
+async function verifyUnityFixture(options, toolchain, inputs) {
+  const fixture = await readUnityFixture(options.repositoryRoot);
+  const fixtureDirectory = join(options.repositoryRoot, "testdata", "frameworks", "unity");
+  const buildRoot = resolve(options.fixtureBuildRoot ?? join(options.repositoryRoot, ".superpowers", "runtime", "framework-fixtures"));
+  const buildDirectory = join(buildRoot, toolchain, "unity");
+  const resultDirectory = join(buildDirectory, "runner-results");
+  await rm(buildDirectory, { recursive: true, force: true });
+  await mkdir(resultDirectory, { recursive: true });
+  const configure = ["-S", fixtureDirectory, "-B", buildDirectory, "-G", cmakeGenerator(toolchain), "-DCMAKE_POLICY_VERSION_MINIMUM=3.5", `-DUNIT_TEST_IDE_UNITY_ROOT=${inputs.unityRoot}`, `-DUNIT_TEST_IDE_CMOCK_ROOT=${inputs.cmockRoot}`, `-DUNIT_TEST_IDE_HELPER=${inputs.helper}`, `-DUTIDE_UNITY_RUNNER_GENERATOR=${options.generator}`, ...cmakeCompilerArguments(toolchain)];
+  if (toolchain === "msvc") configure.push("-A", "x64");
+  const configured = await invoke(options.execFile, options.cmake, configure, configureTimeout, options.environment);
+  if (configured.code !== 0) throw new Error(`Unity configure failed: ${resultText(configured)}`);
+  const built = await invoke(options.execFile, options.cmake, ["--build", buildDirectory, "--config", "Debug"], configureTimeout, options.environment);
+  if (built.code !== 0) throw new Error(`Unity build failed: ${resultText(built)}`);
+  const identities = await verifyUnityManifest(buildDirectory, fixture);
+  const executable = join(buildDirectory, "bin", options.platform === "win32" ? "phase9_unity.exe" : "phase9_unity");
+  const listOutput = resultPath(resultDirectory, "list.jsonl");
+  const listed = await invoke(options.execFile, executable, ["--utide-protocol", runnerProtocol, "--utide-mode", "list", "--utide-result", listOutput], scenarioTimeout, options.environment);
+  if (listed.code !== 0) throw new Error(`Unity list failed: ${resultText(listed)}`);
+  validateListRecords(await readJsonl(listOutput, "case"), identities);
+  for (const scenario of fixture.scenarios) await verifyUnityScenario(options, executable, resultDirectory, scenario);
+  return { framework: "unity", toolchain, scenarios: fixture.scenarios.map((scenario) => ({ id: scenario.id, outcome: scenario.outcome })) };
+}
+
 export async function verifyFrameworkFixtures(options = {}) {
   const repositoryRoot = resolve(options.repositoryRoot ?? defaultRepositoryRoot);
   const platform = options.platform ?? process.platform;
   if (!absolute(options.cmake) || !absolute(options.generator) || !Array.isArray(options.toolchains) || !Array.isArray(options.frameworks)) usage();
-  if (options.frameworks.some((framework) => framework !== "cpputest")) throw new Error("Unity fixture verification is not available yet");
   const inputs = { ...await defaultFrameworkInputs(repositoryRoot), ...(options.frameworkInputs ?? {}) };
-  if (!absolute(inputs.cpputestRoot) || !absolute(inputs.helper)) throw new Error("CppUTest fixture inputs must be absolute paths");
+  if (!absolute(inputs.cpputestRoot) || !absolute(inputs.unityRoot) || !absolute(inputs.cmockRoot) || !absolute(inputs.helper)) throw new Error("framework fixture inputs must be absolute paths");
   const execFile = options.execFile ?? defaultExecFile;
   const results = [];
   for (const toolchain of options.toolchains) {
     if (!fixtureToolchains.has(toolchain)) usage();
     supportedToolchain(toolchain, platform);
-    results.push(await verifyCppUTestFixture({ ...options, repositoryRoot, platform, execFile }, toolchain, inputs));
+    const fixtureOptions = { ...options, repositoryRoot, platform, execFile };
+    for (const framework of options.frameworks) {
+      results.push(framework === "cpputest" ? await verifyCppUTestFixture(fixtureOptions, toolchain, inputs) : await verifyUnityFixture(fixtureOptions, toolchain, inputs));
+    }
   }
   return results;
 }

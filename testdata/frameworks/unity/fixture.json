@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "framework": "unity",
+  "ctestName": "unity.framework",
+  "scenarios": [
+    { "id": "pass", "name": "test_pass", "outcome": "passed" },
+    { "id": "assertion-failure", "name": "test_assertion_failure", "outcome": "failed" },
+    { "id": "skip", "name": "test_skipped", "outcome": "skipped" },
+    { "id": "mock-failure", "name": "test_cmock_expectation_failure", "outcome": "mock-failure" },
+    { "id": "crash", "name": "test_crash", "outcome": "crash" },
+    { "id": "timeout", "name": "test_timeout", "outcome": "timeout" }
+  ]
+}
