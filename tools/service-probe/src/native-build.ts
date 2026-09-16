@@ -42,6 +42,12 @@ import {
   type TaskServiceFixture,
 } from "./probe.js";
 import { writeNativeToolchainReport } from "./native-report.js";
+import {
+  publishFrameworkPlatformReport,
+  runFrameworkToolchain,
+  type FrameworkPlatformOptions,
+} from "./native-framework-matrix.js";
+import type { FrameworkToolchainEvidence } from "./native-framework-report.js";
 
 const execFile = promisify(execFileCallback);
 const repositoryRoot = resolve(import.meta.dirname, "../../..");
@@ -82,6 +88,12 @@ export interface NativeMatrixOptions {
   requiredFamilies: readonly RequiredToolchainFamily[];
   artifactDirectory: string;
   workDirectory?: string;
+  /**
+   * Prepared Service-owned framework fixtures. The native CLI never builds
+   * this value from command-line input; F1 consumers supply it after validating
+   * the committed framework workspace identities.
+   */
+  frameworkPlatform?: FrameworkPlatformOptions;
 }
 
 interface FamilyWorkspace {
@@ -173,6 +185,10 @@ async function runNativeMatrixWithDependencies(
   await requireDirectFile(serviceBinary, "native Service binary");
 
   const results: NativeScenarioResult[] = [];
+  const frameworkToolchains: FrameworkToolchainEvidence[] = [];
+  const frameworkStartedAt = options.frameworkPlatform === undefined
+    ? undefined
+    : (options.frameworkPlatform.now ?? (() => new Date()))().toISOString();
   const workDirectory = options.workDirectory ??
     join(tmpdir(), "uti-native");
   for (const family of options.requiredFamilies) {
@@ -206,6 +222,9 @@ async function runNativeMatrixWithDependencies(
         results.push(skippedResult(options.platform, family, bundle.cmakeVersion));
         continue;
       }
+      if (options.frameworkPlatform !== undefined) {
+        frameworkToolchains.push(await runFrameworkToolchain(options.frameworkPlatform, family));
+      }
       const scenarios = await dependencies.executeScenarios({
         ...selected,
         family,
@@ -234,6 +253,13 @@ async function runNativeMatrixWithDependencies(
     bundle,
     results,
   );
+  if (options.frameworkPlatform !== undefined) {
+    await publishFrameworkPlatformReport(
+      options.frameworkPlatform,
+      frameworkToolchains,
+      frameworkStartedAt!,
+    );
+  }
   return results;
 }
 
@@ -257,6 +283,15 @@ function validateMatrixOptions(options: NativeMatrixOptions, architecture: strin
   for (const family of options.requiredFamilies) {
     if (!allowed.includes(family)) {
       throw new Error(`toolchain family ${family} is incompatible with ${options.platform}`);
+    }
+  }
+  if (options.frameworkPlatform !== undefined) {
+    const frameworkPlatform = options.platform === "win32" ? "win32" : "linux";
+    if (
+      options.frameworkPlatform.platform !== frameworkPlatform ||
+      resolve(options.frameworkPlatform.artifactDirectory) !== resolve(options.artifactDirectory)
+    ) {
+      throw new Error("framework platform output must match the native matrix platform and artifact directory");
     }
   }
 }

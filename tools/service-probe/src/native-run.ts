@@ -2,6 +2,7 @@ import { resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import type { RequiredToolchainFamily } from "./native-build.js";
+import type { FrameworkPlatformOptions } from "./native-framework-matrix.js";
 import { installNativeHttpNetworkGuard } from "./native-network-guard.js";
 import { resolveNativeWorkDirectory } from "./native-work-root.js";
 
@@ -26,7 +27,10 @@ function parsePlatform(arguments_: readonly string[]): "linux" | "win32" {
   return arguments_[1];
 }
 
-export async function main(arguments_: readonly string[] = process.argv.slice(2)): Promise<void> {
+export async function main(
+  arguments_: readonly string[] = process.argv.slice(2),
+  frameworkPlatform?: FrameworkPlatformOptions,
+): Promise<void> {
   const { runNativeMatrix } = await import("./native-build.js");
   const platform = parsePlatform(arguments_);
   if (platform !== process.platform) {
@@ -45,6 +49,7 @@ export async function main(arguments_: readonly string[] = process.argv.slice(2)
       platform === "linux" ? "linux" : "windows",
     ),
     workDirectory: resolveNativeWorkDirectory(repositoryRoot, platform, tmpdir()),
+    ...(frameworkPlatform === undefined ? {} : { frameworkPlatform }),
   });
   process.stdout.write(`${JSON.stringify({
     platform,
