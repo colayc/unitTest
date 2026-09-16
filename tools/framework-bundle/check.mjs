@@ -8,7 +8,17 @@ import { verifyPreparedFrameworkBundle } from "./prepare.mjs";
 const toolDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(toolDirectory, "..", "..");
 function cacheFailure(message, cause) { return frameworkFailure("FRAMEWORK_CACHE_INVALID", message, cause); }
-async function existingDirectory(path) { try { const stat = await lstat(path); return stat.isDirectory() && !stat.isSymbolicLink(); } catch (error) { if (error?.code === "ENOENT") return false; throw cacheFailure("framework cache cannot be inspected", error); } }
+async function existingDirectory(path) {
+  try {
+    const stat = await lstat(path);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw cacheFailure("prepared framework cache has an unsafe type");
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    if (error?.code === "FRAMEWORK_CACHE_INVALID") throw error;
+    throw cacheFailure("framework cache cannot be inspected", error);
+  }
+}
 function validateLicenseInventory(value, manifest) {
   const expected = manifest.frameworks.map((framework) => ({ id: framework.id, version: framework.version, revision: framework.revision, spdx: framework.license.spdx, archiveLicensePath: framework.license.path, archiveLicenseSha256: framework.license.sha256 }));
   if (!value || value.schemaVersion !== 1 || !Array.isArray(value.dependencies) || value.dependencies.length !== expected.length) throw cacheFailure("license inventory is invalid");
