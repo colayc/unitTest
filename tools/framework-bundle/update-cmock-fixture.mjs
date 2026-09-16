@@ -4,7 +4,7 @@ import { lstat, mkdir, open, readdir, readFile, rename, rm, writeFile } from "no
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { aggregateOutputDigest, validateCMockGeneration } from "./cmock-provenance.mjs";
+import { aggregateOutputDigest, containsUnsafeGeneratedPath, validateCMockGeneration } from "./cmock-provenance.mjs";
 import { frameworkFailure, readFrameworkManifest } from "./manifest.mjs";
 import { verifyPreparedFrameworkBundle } from "./prepare.mjs";
 
@@ -53,7 +53,7 @@ function assertGeneratedBytes(path, bytes) {
   let text;
   try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); } catch (error) { throw failure("CMOCK_GENERATION_OUTPUT_INVALID", `generated output is not UTF-8: ${path}`, error); }
   if (text.includes("\r")) throw failure("CMOCK_GENERATION_OUTPUT_INVALID", `generated output uses CRLF: ${path}`);
-  if (/(?:[A-Za-z]:[\\/][^\s"')]+|(?:^|[\s"'(=])\/(?:[A-Za-z0-9_.~-]+\/)+[A-Za-z0-9_.~-]+)/mu.test(text)) throw failure("CMOCK_GENERATION_OUTPUT_INVALID", `generated output contains an absolute path: ${path}`);
+  if (containsUnsafeGeneratedPath(text)) throw failure("CMOCK_GENERATION_OUTPUT_INVALID", `generated output contains an absolute path: ${path}`);
   if (/Generated on|\b20\d\d-\d\d-\d\d(?:T|\s)\d\d:\d\d/u.test(text)) throw failure("CMOCK_GENERATION_OUTPUT_INVALID", `generated output contains a timestamp: ${path}`);
 }
 async function readClosedOutput(root) {
@@ -96,11 +96,12 @@ async function runGenerator(input, operations) {
 }
 async function publish(target, stage, stagingRoot, operations) {
   const backup = join(dirname(target), nonce(".cmock-backup-"));
+  const move = operations.rename ?? rename;
   let moved = false;
   try {
-    try { await rename(target, backup); moved = true; } catch (error) { if (error?.code !== "ENOENT") throw error; }
-    try { await rename(stage, target); } catch (error) {
-      if (moved) await rename(backup, target);
+    try { await move(target, backup); moved = true; } catch (error) { if (error?.code !== "ENOENT") throw error; }
+    try { await move(stage, target); } catch (error) {
+      if (moved) await move(backup, target);
       throw error;
     }
     try { await (operations.cleanupBackup ?? ((path) => rm(path, { recursive: true, force: true })))(backup); } catch { /* Publication has committed; stale backup is safe for later cleanup. */ }

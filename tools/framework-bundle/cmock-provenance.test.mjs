@@ -37,6 +37,8 @@ for (const [name, mutate] of [
   ["output substitution", async ({ provenance, value }) => { value.outputs[0].sha256 = "0".repeat(64); await writeFile(provenance, canonical(value)); }],
   ["CRLF generated output", async ({ root }) => writeFile(join(root, "testdata/frameworks/unity/mocks/MockDependency.c"), "x\r\n")],
   ["absolute path generated output", async ({ root }) => writeFile(join(root, "testdata/frameworks/unity/mocks/MockDependency.c"), "C:\\\\Users\\\\unsafe\n")],
+  ["UNC path generated output", async ({ root }) => writeFile(join(root, "testdata/frameworks/unity/mocks/MockDependency.c"), "/* source: \\\\buildhost\\private\\project\\Dependency.h */\n")],
+  ["single-component POSIX path generated output", async ({ root }) => writeFile(join(root, "testdata/frameworks/unity/mocks/MockDependency.c"), "/* source: /workspace */\n")],
   ["timestamp generated banner", async ({ root }) => writeFile(join(root, "testdata/frameworks/unity/mocks/MockDependency.c"), "Generated on 2026-09-16T12:00\n")],
   ["non-UTF-8 generated output", async ({ root }) => writeFile(join(root, "testdata/frameworks/unity/mocks/MockDependency.c"), Buffer.from([0xff]))],
   ["unknown output file", async ({ root }) => writeFile(join(root, "testdata/frameworks/unity/mocks/unexpected"), "x")]

@@ -12,6 +12,9 @@ const outputDirectory = "testdata/frameworks/unity/mocks";
 function failure(message, cause) { return frameworkFailure("CMOCK_PROVENANCE_INVALID", message, cause); }
 function canonicalJson(value) { return `${JSON.stringify(value, null, 2)}\n`; }
 function sha256(bytes) { return createHash("sha256").update(bytes).digest("hex"); }
+export function containsUnsafeGeneratedPath(text) {
+  return /(?:[A-Za-z]:[\\/][^\s"')]+|(?:^|[\s"'(=])\\\\[^\s\\/"')]+\\[^\s"')]+|(?:^|[\s"'(=])\/[A-Za-z0-9_.~-]+(?:\/[A-Za-z0-9_.~-]+)*)/mu.test(text);
+}
 function closedValue(actual, expected) {
   if (typeof expected !== "object" || expected === null) return Object.is(actual, expected);
   if (!actual || typeof actual !== "object" || Array.isArray(actual) !== Array.isArray(expected)) return false;
@@ -32,7 +35,7 @@ async function regularFile(path, label) { let stat; try { stat = await lstat(pat
 function assertGeneratedBytes(path, bytes) {
   let text; try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); } catch (error) { throw failure(`generated output is not UTF-8: ${path}`, error); }
   if (text.includes("\r")) throw failure(`generated output uses CRLF: ${path}`);
-  if (/(?:[A-Za-z]:[\\/][^\s"')]+|(?:^|[\s"'(=])\/(?:[A-Za-z0-9_.~-]+\/)+[A-Za-z0-9_.~-]+)/mu.test(text)) throw failure(`generated output contains an absolute path: ${path}`);
+  if (containsUnsafeGeneratedPath(text)) throw failure(`generated output contains an absolute path: ${path}`);
   if (/Generated on|\b20\d\d-\d\d-\d\d(?:T|\s)\d\d:\d\d/u.test(text)) throw failure(`generated output contains a timestamp: ${path}`);
 }
 

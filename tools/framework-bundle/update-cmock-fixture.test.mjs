@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -107,7 +107,9 @@ test("updateCMockFixture accepts ordinary generated C comments", async () => {
 for (const [name, outputs, code] of [
   ["one-byte drift", (run) => run === 0 ? generatedA : { ...generatedA, "MockDependency.c": `${generatedA["MockDependency.c"]} ` }, "CMOCK_GENERATION_NONDETERMINISTIC"],
   ["missing output", { "MockDependency.c": generatedA["MockDependency.c"] }, "CMOCK_GENERATION_OUTPUT_INVALID"],
-  ["extra output", { ...generatedA, surprise: "no\n" }, "CMOCK_GENERATION_OUTPUT_INVALID"]
+  ["extra output", { ...generatedA, surprise: "no\n" }, "CMOCK_GENERATION_OUTPUT_INVALID"],
+  ["UNC path", { ...generatedA, "MockDependency.c": "/* source: \\\\buildhost\\private\\project\\Dependency.h */\n" }, "CMOCK_GENERATION_OUTPUT_INVALID"],
+  ["single-component POSIX path", { ...generatedA, "MockDependency.c": "/* source: /workspace */\n" }, "CMOCK_GENERATION_OUTPUT_INVALID"]
 ]) test(`updateCMockFixture rolls back when ${name} is generated`, async () => {
   const item = await fixture();
   try {
@@ -134,6 +136,17 @@ test("updateCMockFixture keeps the published fixture when backup cleanup fails",
     assert.equal(provenance.outputSha256.length, 64);
     assert.equal(cleanupCalls, 1);
     assert.equal(await readFile(join(item.root, "testdata/frameworks/unity/mocks/MockDependency.c"), "utf8"), generatedA["MockDependency.c"]);
+  } finally { await rm(item.root, { recursive: true, force: true }); }
+});
+
+test("updateCMockFixture restores the previous fixture when final publication rename fails", async () => {
+  const item = await fixture();
+  let calls = 0;
+  try {
+    const before = await oldMocks(item.root);
+    await assert.rejects(updateCMockFixture(updateOptions(item, fakeRunner(generatedA), { rename: async (from, to) => { calls += 1; if (calls === 2) throw new Error("final rename denied"); await rename(from, to); } })), (error) => error?.code === "CMOCK_GENERATION_ENVIRONMENT_UNTRUSTED");
+    assert.equal(calls, 3);
+    assert.deepEqual(await oldMocks(item.root), before);
   } finally { await rm(item.root, { recursive: true, force: true }); }
 });
 
