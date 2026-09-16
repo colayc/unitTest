@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import test from "node:test";
 import { resolve } from "node:path";
 import { controlledUnityResultPath, parseVerifyFrameworkFixtureArguments, verifyFrameworkFixtures } from "./verify-fixtures.mjs";
@@ -111,6 +112,7 @@ test("plans clang-cl and Linux GCC compilers and rejects incompatible toolchains
 test("verifies Unity through the sealed list/run runner protocol", async () => {
   const temporary = await mkdtemp(join(tmpdir(), "utide-unity-verifier-"));
   const calls = [];
+  const dockerResolutions = [];
   const cases = [
     ["test_pass", "passed"],
     ["test_assertion_failure", "failed"],
@@ -121,8 +123,19 @@ test("verifies Unity through the sealed list/run runner protocol", async () => {
   ];
   const record = (identity, status) => JSON.stringify({ magic: "unit-test-ide", protocol: "utide.runner.v1", record: "testFinished", identity, status });
   try {
-    const fakeExecFile = async (_command, arguments_, options) => {
-      calls.push({ arguments_, options });
+    const dockerDirectory = join(temporary, "with-docker");
+    const emptyDirectory = join(temporary, "without-docker");
+    await mkdir(dockerDirectory, { recursive: true });
+    await mkdir(emptyDirectory, { recursive: true });
+    await writeFile(join(dockerDirectory, "docker.exe"), "fixture docker executable");
+    const resolveDocker = (environment) => (environment?.PATH ?? "").split(delimiter)
+      .map((directory) => join(directory, "docker.exe"))
+      .find((path) => existsSync(path));
+    const fakeExecFile = async (command, arguments_, options) => {
+      const resolvedDocker = resolveDocker(options.env);
+      dockerResolutions.push(resolvedDocker ?? null);
+      calls.push({ command, arguments_, options });
+      if (command === resolvedDocker || /(?:^|[\\/])docker(?:\.exe)?$/iu.test(command) || arguments_.some((argument) => /^docker(?:\.exe)?$/iu.test(argument))) throw new Error("Docker must not be invoked by the Unity fixture verifier");
       if (arguments_.includes("--build")) return { stdout: "", stderr: "" };
       const resultPath = arguments_[arguments_.indexOf("--utide-result") + 1];
       if (arguments_.includes("--utide-mode") && arguments_.includes("list")) {
@@ -158,24 +171,27 @@ test("verifies Unity through the sealed list/run runner protocol", async () => {
       environment,
       execFile: fakeExecFile,
     });
-    const summary = await runPlan({ PATH: "C:\\fixture-path-without-docker" });
+    const summary = await runPlan({ PATH: dockerDirectory });
     assert.deepEqual(summary, [{ framework: "unity", toolchain: "msvc", scenarios: [
       { id: "pass", outcome: "passed" }, { id: "assertion-failure", outcome: "failed" }, { id: "skip", outcome: "skipped" },
       { id: "mock-failure", outcome: "mock-failure" }, { id: "crash", outcome: "crash" }, { id: "timeout", outcome: "timeout" },
     ] }]);
-    const hiddenDockerPlan = calls.map((call) => call.arguments_);
+    const availableDockerPlan = calls.map((call) => call.arguments_);
     const list = calls.find((call) => call.arguments_.includes("list"));
     assert.deepEqual(list.arguments_.slice(-6), ["--utide-protocol", "utide.runner.v1", "--utide-mode", "list", "--utide-result", list.arguments_.at(-1)]);
     assert.equal(calls.filter((call) => call.arguments_.includes("run")).length, 6);
     assert.ok(calls.filter((call) => call.arguments_.includes("run")).every((call) => call.arguments_.includes("--utide-case")));
-    assert.ok(calls.every((call) => call.options.env?.PATH === "C:\\fixture-path-without-docker"));
+    assert.ok(calls.every((call) => call.options.env?.PATH === dockerDirectory));
+    assert.ok(dockerResolutions.every((resolvedDocker) => resolvedDocker === join(dockerDirectory, "docker.exe")));
     const forbidden = /ruby|ceedling|lib\/cmock\.rb|update-cmock-fixture|docker run/iu;
     assert.doesNotMatch(await readFile(join(repositoryRoot, "testdata/frameworks/unity/CMakeLists.txt"), "utf8"), forbidden);
     assert.ok(calls.every((call) => !call.arguments_.some((argument) => forbidden.test(argument))));
     calls.length = 0;
-    await runPlan({ PATH: "C:\\fixture-path-with-docker" });
-    assert.deepEqual(calls.map((call) => call.arguments_), hiddenDockerPlan);
-    assert.ok(calls.every((call) => call.options.env?.PATH === "C:\\fixture-path-with-docker"));
+    dockerResolutions.length = 0;
+    await runPlan({ PATH: emptyDirectory });
+    assert.deepEqual(calls.map((call) => call.arguments_), availableDockerPlan);
+    assert.ok(calls.every((call) => call.options.env?.PATH === emptyDirectory));
+    assert.ok(dockerResolutions.every((resolvedDocker) => resolvedDocker === null));
     assert.ok(calls.every((call) => !call.arguments_.some((argument) => forbidden.test(argument))));
   } finally {
     await rm(temporary, { recursive: true, force: true });
