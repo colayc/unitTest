@@ -70,13 +70,14 @@ async function oldMocks(root) {
   return Promise.all(["MockDependency.c", "MockDependency.h", "cmock-generation.json"].map((path) => readFile(join(root, "testdata/frameworks/unity/mocks", path), "utf8")));
 }
 
-function updateOptions(item, runner) {
+function updateOptions(item, runner, extraOperations = {}) {
   return {
     repositoryRoot: item.root,
     operations: {
       readManifest: async () => ({ manifest: item.manifest, manifestSha256: item.manifestSha256 }),
       verifyPreparedBundle: async () => true,
-      runGenerator: runner
+      runGenerator: runner,
+      ...extraOperations
     }
   };
 }
@@ -89,6 +90,15 @@ test("updateCMockFixture publishes only byte-identical closed generator output",
     assert.equal(provenance.configuration.sha256, digest(canonicalConfig));
     assert.equal(provenance.input.sha256, digest(canonicalHeader));
     assert.deepEqual(await oldMocks(item.root), [generatedA["MockDependency.c"], generatedA["MockDependency.h"], `${JSON.stringify(provenance, null, 2)}\n`]);
+  } finally { await rm(item.root, { recursive: true, force: true }); }
+});
+
+test("updateCMockFixture accepts ordinary generated C comments", async () => {
+  const item = await fixture();
+  try {
+    const comments = { ...generatedA, "MockDependency.c": `/* Generated mock implementation */\n// public mock API\n${generatedA["MockDependency.c"]}` };
+    await updateCMockFixture(updateOptions(item, fakeRunner(comments)));
+    assert.equal(await readFile(join(item.root, "testdata/frameworks/unity/mocks/MockDependency.c"), "utf8"), comments["MockDependency.c"]);
   } finally { await rm(item.root, { recursive: true, force: true }); }
 });
 
@@ -112,4 +122,29 @@ test("updateCMockFixture rolls back when its generator process fails", async () 
     await assert.rejects(updateCMockFixture(updateOptions(item, async () => { throw new Error("process failed"); })), (error) => error?.code === "CMOCK_GENERATION_ENVIRONMENT_UNTRUSTED");
     assert.deepEqual(await oldMocks(item.root), before);
   } finally { await rm(item.root, { recursive: true, force: true }); }
+});
+
+test("updateCMockFixture keeps the published fixture when backup cleanup fails", async () => {
+  const item = await fixture();
+  let cleanupCalls = 0;
+  try {
+    const provenance = await updateCMockFixture(updateOptions(item, fakeRunner(generatedA), { cleanupBackup: async () => { cleanupCalls += 1; throw new Error("cleanup denied"); } }));
+    assert.equal(provenance.outputSha256.length, 64);
+    assert.equal(cleanupCalls, 1);
+    assert.equal(await readFile(join(item.root, "testdata/frameworks/unity/mocks/MockDependency.c"), "utf8"), generatedA["MockDependency.c"]);
+  } finally { await rm(item.root, { recursive: true, force: true }); }
+});
+
+test("updateCMockFixture rejects a concurrent invocation before it can publish", async () => {
+  const item = await fixture();
+  let started;
+  const startedPromise = new Promise((resolve) => { started = resolve; });
+  let release;
+  const releasePromise = new Promise((resolve) => { release = resolve; });
+  try {
+    const first = updateCMockFixture(updateOptions(item, async ({ outputRoot }) => { started(); await releasePromise; await fakeRunner(generatedA)({ outputRoot }); }));
+    await startedPromise;
+    try { await assert.rejects(updateCMockFixture(updateOptions(item, fakeRunner(generatedA))), (error) => error?.code === "CMOCK_GENERATION_ENVIRONMENT_UNTRUSTED"); }
+    finally { release(); await first; }
+  } finally { release?.(); await rm(item.root, { recursive: true, force: true }); }
 });

@@ -1,6 +1,6 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { lstat, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -52,7 +52,7 @@ function assertGeneratedBytes(path, bytes) {
   let text;
   try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); } catch (error) { throw failure("CMOCK_GENERATION_OUTPUT_INVALID", `generated output is not UTF-8: ${path}`, error); }
   if (text.includes("\r")) throw failure("CMOCK_GENERATION_OUTPUT_INVALID", `generated output uses CRLF: ${path}`);
-  if (/(?:[A-Za-z]:[\\/]|(?:^|[\s"'(])\/[^\s"')]+)/mu.test(text)) throw failure("CMOCK_GENERATION_OUTPUT_INVALID", `generated output contains an absolute path: ${path}`);
+  if (/(?:[A-Za-z]:[\\/][^\s"')]+|(?:^|[\s"'(=])\/(?:[A-Za-z0-9_.~-]+\/)+[A-Za-z0-9_.~-]+)/mu.test(text)) throw failure("CMOCK_GENERATION_OUTPUT_INVALID", `generated output contains an absolute path: ${path}`);
   if (/Generated on|\b20\d\d-\d\d-\d\d(?:T|\s)\d\d:\d\d/u.test(text)) throw failure("CMOCK_GENERATION_OUTPUT_INVALID", `generated output contains a timestamp: ${path}`);
 }
 async function readClosedOutput(root) {
@@ -93,7 +93,7 @@ async function runGenerator(input, operations) {
     else await execFile(dockerExecutable(), args, { shell: false, windowsHide: true, timeout, maxBuffer: 8 * 1024 * 1024, env: { ...process.env, LANG: "C", LC_ALL: "C" } });
   } catch (error) { throw failure("CMOCK_GENERATION_ENVIRONMENT_UNTRUSTED", "locked generator execution failed", error); }
 }
-async function publish(target, stage, stagingRoot) {
+async function publish(target, stage, stagingRoot, operations) {
   const backup = join(dirname(target), nonce(".cmock-backup-"));
   let moved = false;
   try {
@@ -102,29 +102,41 @@ async function publish(target, stage, stagingRoot) {
       if (moved) await rename(backup, target);
       throw error;
     }
-    await rm(backup, { recursive: true, force: true });
+    try { await (operations.cleanupBackup ?? ((path) => rm(path, { recursive: true, force: true })))(backup); } catch { /* Publication has committed; stale backup is safe for later cleanup. */ }
   } catch (error) { throw failure("CMOCK_GENERATION_ENVIRONMENT_UNTRUSTED", "cannot atomically publish generated fixture", error); }
-  finally { await rm(stagingRoot, { recursive: true, force: true }); }
+  finally { try { await rm(stagingRoot, { recursive: true, force: true }); } catch { /* The committed target remains authoritative. */ } }
+}
+
+async function acquireFixtureLock(target) {
+  const path = `${target}.update.lock`;
+  try { return { path, handle: await open(path, "wx", 0o600) }; }
+  catch (error) { throw failure("CMOCK_GENERATION_ENVIRONMENT_UNTRUSTED", error?.code === "EEXIST" ? "another CMock fixture update is active" : "cannot acquire fixture update lock", error); }
+}
+async function releaseFixtureLock(lock) {
+  try { await lock.handle.close(); } catch { /* A closed handle does not invalidate the published fixture. */ }
+  try { await rm(lock.path, { force: true }); } catch { /* A stale lock fails closed on the next invocation. */ }
 }
 
 export async function updateCMockFixture(options = {}) {
   const root = resolve(options.repositoryRoot ?? repositoryRoot);
   const operations = options.operations ?? {};
-  const locked = await (operations.readManifest ?? readFrameworkManifest)(join(root, "tools", "framework-bundle", "manifest.json"));
-  const { manifest, manifestSha256 } = locked;
-  const preparedRoot = join(root, ".superpowers", "runtime", "framework-bundle", "v2", manifestSha256);
-  try { await regularDirectory(preparedRoot, "prepared framework source"); await (operations.verifyPreparedBundle ?? verifyPreparedFrameworkBundle)({ root: preparedRoot, manifest, manifestSha256 }); } catch (error) { if (error?.code === "CMOCK_GENERATION_ENVIRONMENT_UNTRUSTED") throw error; throw failure("CMOCK_GENERATION_ENVIRONMENT_UNTRUSTED", "prepared framework source is not trusted", error); }
-  const cmock = manifest.frameworks.find((framework) => framework.id === "cmock");
-  const generator = manifest.fixtureTools.cmockGenerator;
-  if (!cmock || !generator || generator.containerImage !== "docker.io/library/ruby" || generator.containerTag !== "3.3.6-bookworm" || generator.containerPlatform !== "linux/amd64" || generator.containerDigest !== image.slice(image.indexOf("@") + 1) || generator.entrypoint !== "lib/cmock.rb") throw failure("CMOCK_GENERATION_ENVIRONMENT_UNTRUSTED", "manifest generator identity is not trusted");
-  const cmockRoot = join(preparedRoot, cmock.sourceDirectory);
-  await regularDirectory(cmockRoot, "prepared CMock source");
-  const fixtureRoot = join(root, "testdata", "frameworks", "unity");
-  const [configuration, input] = await Promise.all([readFixedFile(join(root, configPath), configBytes, "CMock configuration"), readFixedFile(join(root, headerPath), headerBytes, "CMock input header")]);
   const target = join(root, outputPath);
-  const stagingRoot = join(dirname(target), nonce(".cmock-generation-"));
-  await mkdir(stagingRoot, { recursive: false, mode: 0o700 });
+  const lock = await acquireFixtureLock(target);
   try {
+    const locked = await (operations.readManifest ?? readFrameworkManifest)(join(root, "tools", "framework-bundle", "manifest.json"));
+    const { manifest, manifestSha256 } = locked;
+    const preparedRoot = join(root, ".superpowers", "runtime", "framework-bundle", "v2", manifestSha256);
+    try { await regularDirectory(preparedRoot, "prepared framework source"); await (operations.verifyPreparedBundle ?? verifyPreparedFrameworkBundle)({ root: preparedRoot, manifest, manifestSha256 }); } catch (error) { if (error?.code === "CMOCK_GENERATION_ENVIRONMENT_UNTRUSTED") throw error; throw failure("CMOCK_GENERATION_ENVIRONMENT_UNTRUSTED", "prepared framework source is not trusted", error); }
+    const cmock = manifest.frameworks.find((framework) => framework.id === "cmock");
+    const generator = manifest.fixtureTools.cmockGenerator;
+    if (!cmock || !generator || generator.containerImage !== "docker.io/library/ruby" || generator.containerTag !== "3.3.6-bookworm" || generator.containerPlatform !== "linux/amd64" || generator.containerDigest !== image.slice(image.indexOf("@") + 1) || generator.entrypoint !== "lib/cmock.rb") throw failure("CMOCK_GENERATION_ENVIRONMENT_UNTRUSTED", "manifest generator identity is not trusted");
+    const cmockRoot = join(preparedRoot, cmock.sourceDirectory);
+    await regularDirectory(cmockRoot, "prepared CMock source");
+    const fixtureRoot = join(root, "testdata", "frameworks", "unity");
+    const [configuration, input] = await Promise.all([readFixedFile(join(root, configPath), configBytes, "CMock configuration"), readFixedFile(join(root, headerPath), headerBytes, "CMock input header")]);
+    const stagingRoot = join(dirname(target), nonce(".cmock-generation-"));
+    await mkdir(stagingRoot, { recursive: false, mode: 0o700 });
+    try {
     const runs = [join(stagingRoot, "run-a"), join(stagingRoot, "run-b")];
     for (const outputRoot of runs) { await mkdir(outputRoot, { recursive: false, mode: 0o700 }); await runGenerator({ cmockRoot, fixtureRoot, outputRoot }, operations); }
     const [left, right] = await Promise.all(runs.map(readClosedOutput));
@@ -135,9 +147,10 @@ export async function updateCMockFixture(options = {}) {
     await mkdir(stage, { recursive: false, mode: 0o700 });
     await Promise.all(left.map((file) => writeFile(join(stage, file.path), file.bytes, { flag: "wx", mode: 0o600 })));
     await writeFile(join(stage, "cmock-generation.json"), `${JSON.stringify(value, null, 2)}\n`, { flag: "wx", mode: 0o600 });
-    await publish(target, stage, stagingRoot);
+    await publish(target, stage, stagingRoot, operations);
     return value;
-  } catch (error) { await rm(stagingRoot, { recursive: true, force: true }); throw error; }
+    } catch (error) { await rm(stagingRoot, { recursive: true, force: true }); throw error; }
+  } finally { await releaseFixtureLock(lock); }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) updateCMockFixture().then((value) => process.stdout.write(`${JSON.stringify(value)}\n`)).catch((error) => { process.stderr.write(`cmock-fixture-update: ${error.message}\n`); process.exitCode = 1; });
