@@ -12,3 +12,11 @@ substitute for the deferred human third-party license/legal approval.
 
 The lock is an input boundary, not a runtime network exception: CI may populate
 the immutable archive cache before the native offline boundary is entered.
+
+`prepare.mjs` is the only publisher. It accepts only the locked GitHub download
+chain, validates a bounded `tar` listing before extraction, and stores each
+archive under its SHA-256. It then publishes a fully audited, digest-keyed
+bundle at `.superpowers/runtime/framework-bundle/v2/<manifest SHA-256>/`.
+Existing ready bundles are re-verified and reused; they are never deleted or
+replaced. `READY` is written only after source markers, license bytes, and all
+three source-tree digests have been verified.
