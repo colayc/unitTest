@@ -6,6 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   prepareLinuxFrameworkInputs,
+  readResolvedFrameworkTrees,
   verifyResolvedFrameworkTrees,
   validateLinuxFrameworkInputManifest,
   type LinuxFrameworkInputManifest
@@ -83,6 +84,41 @@ test("Linux framework lock is closed and rejects missing, tampered, escaped and 
   }
 });
 
+test("Linux framework boundary requires a manifest digest before inspecting inputs", async () => {
+  const root = await mkdtemp(join(tmpdir(), "unit-test-linux-framework-required-digest-"));
+  try {
+    await assert.rejects(prepareLinuxFrameworkInputs({
+      manifest: manifest(), cacheRoot: join(root, "cache"), sourceRoot: join(root, "sources"), helperPath: join(root, "helper"), generatorPath: join(root, "generator"), repositoryRoot: root,
+      manifestSha256: undefined as unknown as string
+    }), /manifest digest is required/u);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Linux framework boundary rejects an altered prepared manifest digest and CMock tree substitution", async () => {
+  const root = await mkdtemp(join(tmpdir(), "unit-test-linux-framework-v2-"));
+  const valid = manifest();
+  try {
+    await writeFile(join(root, "manifest.resolved.json"), `${JSON.stringify({
+      schemaVersion: valid.schemaVersion, manifestSha256: "a".repeat(64), platforms: valid.platforms, fixtureTools: valid.fixtureTools,
+      frameworks: valid.frameworks.map(({ id, version, tag, revision, source, license, sourceDirectory, treeSha256 }) => ({ id, version, tag, revision, source: { filename: source.filename, sha256: source.sha256 }, license, sourceDirectory, treeSha256 }))
+    })}\n`);
+    await assert.rejects(readResolvedFrameworkTrees(root, valid, "b".repeat(64)), /resolved manifest has an invalid identity/u);
+
+    const cmock = join(root, "CMock-2.7.0");
+    const cpputest = join(root, "cpputest-4.0");
+    const unity = join(root, "Unity-2.6.1");
+    await mkdir(join(cmock, "lib"), { recursive: true });
+    await mkdir(join(unity, "src"), { recursive: true });
+    await mkdir(cpputest, { recursive: true });
+    await writeFile(join(cmock, "lib", "cmock.rb"), "# expected\n");
+    await writeFile(join(cpputest, "CMakeLists.txt"), "project(CppUTest)\n");
+    await writeFile(join(unity, "src", "unity.c"), "void UnityBegin(void) {}\n");
+    const expected = await verifyResolvedFrameworkTrees(root, valid, undefined);
+    await writeFile(join(cmock, "lib", "cmock.rb"), "# substituted\n");
+    await assert.rejects(verifyResolvedFrameworkTrees(root, valid, expected), /tree digest mismatch: cmock/u);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("Linux framework boundary accepts only expanded trees bound to the resolved bootstrap identity", async () => {
   const root = await mkdtemp(join(tmpdir(), "unit-test-linux-framework-tree-"));
   try {
@@ -146,6 +182,7 @@ test("Linux framework boundary rejects a fabricated expanded tree whose locked a
 
   await assert.rejects(prepareLinuxFrameworkInputs({
     manifest: valid,
+    manifestSha256: "a".repeat(64),
     cacheRoot,
     sourceRoot,
     helperPath,
