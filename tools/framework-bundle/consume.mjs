@@ -1,10 +1,6 @@
-import { execFile as execFileCallback } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { promisify } from "node:util";
-
-const execFile = promisify(execFileCallback);
+import { readFrameworkManifest } from "./manifest.mjs";
 const repositoryRoot = resolve(import.meta.dirname, "..", "..");
 
 function parseArguments(arguments_) {
@@ -15,37 +11,27 @@ function parseArguments(arguments_) {
 export async function consumeLockedFrameworks(cmake) {
   if (process.platform !== "linux") throw new Error("locked framework consumption requires a Linux runner");
   const { prepareLinuxFrameworkInputs } = await import("../service-probe/dist/linux-framework-inputs.js");
-  const { prepareTestFrameworkWorkspace } = await import("../service-probe/dist/test-framework-fixture.js");
-  const sourceRoot = join(repositoryRoot, ".superpowers", "runtime", "framework-bundle", "linux-x64");
+  const { verifyFrameworkFixtures } = await import("./verify-fixtures.mjs");
+  const manifestPath = join(repositoryRoot, "tools", "framework-bundle", "manifest.json");
+  const lockedManifest = await readFrameworkManifest(manifestPath);
+  const manifestBytes = await readFile(manifestPath);
+  const manifestSha256 = (await import("node:crypto")).createHash("sha256").update(manifestBytes).digest("hex");
+  if (manifestSha256 !== lockedManifest.manifestSha256) throw new Error("framework manifest reader digest mismatch");
+  const sourceRoot = join(repositoryRoot, ".superpowers", "runtime", "framework-bundle", "v2", manifestSha256);
   const boundary = await prepareLinuxFrameworkInputs({
-    manifest: JSON.parse(await readFile(join(repositoryRoot, "tools", "framework-bundle", "manifest.json"), "utf8")),
+    manifest: lockedManifest.manifest,
     cacheRoot: join(repositoryRoot, ".superpowers", "cache", "framework-bundle"),
     sourceRoot,
     helperPath: join(repositoryRoot, "sdk", "cmake", "UnitTestIDE.cmake"),
     generatorPath: join(repositoryRoot, "build", "unity-runner-generator"),
-    repositoryRoot
+    repositoryRoot,
+    manifestSha256
   });
-  const root = await mkdtemp(join(tmpdir(), "unit-test-ide-locked-frameworks-"));
-  try {
-    for (const framework of ["cpputest", "unity"]) {
-      const workspace = join(root, framework);
-      await prepareTestFrameworkWorkspace(workspace, {
-        framework,
-        platform: "linux",
-        linuxFrameworkInputs: {
-          cpputestRoot: boundary.environment.UNIT_TEST_IDE_TEST_CPPUTEST_ROOT,
-          unityRoot: boundary.environment.UNIT_TEST_IDE_TEST_UNITY_ROOT,
-          cmakeHelper: boundary.environment.UNIT_TEST_IDE_TEST_CMAKE_HELPER,
-          unityRunnerGenerator: boundary.environment.UNIT_TEST_IDE_TEST_UNITY_RUNNER_GENERATOR
-        }
-      });
-      await execFile(cmake, ["--preset", "fixture", "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"], { cwd: workspace, shell: false, timeout: 120_000, maxBuffer: 1024 * 1024 });
-      await execFile(cmake, ["--build", "build-fixture"], { cwd: workspace, shell: false, timeout: 120_000, maxBuffer: 1024 * 1024 });
-      await execFile("ctest", ["--test-dir", "build-fixture", "--output-on-failure"], { cwd: workspace, shell: false, timeout: 120_000, maxBuffer: 1024 * 1024 });
-    }
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
+  await verifyFrameworkFixtures({
+    repositoryRoot, cmake, generator: boundary.environment.UNIT_TEST_IDE_TEST_UNITY_RUNNER_GENERATOR,
+    toolchains: ["gcc"], frameworks: ["cpputest", "unity"], platform: "linux",
+    frameworkInputs: { cpputestRoot: boundary.environment.UNIT_TEST_IDE_TEST_CPPUTEST_ROOT, unityRoot: boundary.environment.UNIT_TEST_IDE_TEST_UNITY_ROOT, cmockRoot: boundary.environment.UNIT_TEST_IDE_TEST_CMOCK_ROOT, helper: boundary.environment.UNIT_TEST_IDE_TEST_CMAKE_HELPER }
+  });
   process.stdout.write(`${JSON.stringify({ frameworkBoundary: "verified", identityDigest: boundary.identityDigest })}\n`);
 }
 

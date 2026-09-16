@@ -191,8 +191,10 @@ test("real offline Protocol v1.4 Linux GCC CppUTest/Unity coverage and fault map
     await execFile(go, ["build", "-trimpath", "-o", service, "./apps/test-service/cmd/unit-test-service"], { cwd: root, env: goEnv, timeout });
     await execFile(go, ["build", "-trimpath", "-o", generator, "./apps/test-service/cmd/unity-runner-generator"], { cwd: root, env: goEnv, timeout });
     const { prepareLinuxFrameworkInputs } = await import(pathToFileURL(join(root, "tools/service-probe/dist/linux-framework-inputs.js")).href);
+    const frameworkManifestBytes = await readFile(join(root, "tools/framework-bundle/manifest.json"));
+    const frameworkManifestSha256 = createHash("sha256").update(frameworkManifestBytes).digest("hex");
     const frameworkBoundary = await prepareLinuxFrameworkInputs({
-      manifest: JSON.parse(await readFile(join(root, "tools/framework-bundle/manifest.json"), "utf8")), cacheRoot: join(root, ".superpowers/cache/framework-bundle"), sourceRoot: join(root, ".superpowers/runtime/framework-bundle/linux-x64"), helperPath: join(root, "sdk/cmake/UnitTestIDE.cmake"), generatorPath: generator, repositoryRoot: root
+      manifest: JSON.parse(frameworkManifestBytes.toString("utf8")), cacheRoot: join(root, ".superpowers/cache/framework-bundle"), sourceRoot: join(root, ".superpowers/runtime/framework-bundle/v2", frameworkManifestSha256), helperPath: join(root, "sdk/cmake/UnitTestIDE.cmake"), generatorPath: generator, repositoryRoot: root, manifestSha256: frameworkManifestSha256
     }) as { identityDigest: string; environment: Record<string, string> };
     const inputs = frameworkBoundary.environment;
     await mkdir(join(scratch, "bundles"));
