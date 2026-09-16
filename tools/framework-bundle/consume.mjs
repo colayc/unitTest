@@ -1,7 +1,146 @@
-import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { lstat, readFile, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { readFrameworkManifest } from "./manifest.mjs";
+import { checkFrameworkBundle } from "./check.mjs";
+import { frameworkFailure, readFrameworkManifest } from "./manifest.mjs";
 const repositoryRoot = resolve(import.meta.dirname, "..", "..");
+
+const lockedFixtures = Object.freeze({
+  cpputest: Object.freeze({
+    sourceSha256: "114b3d7c6aadcc487b2df01a917c4c0702ba1fdb381456b12c406839181ac5f2",
+    metadataSha256: "6eef50ec7940e4a6b80891d0ff452ed503b5996de313df711ecad607185761ee",
+    dependencies: Object.freeze(["cpputest"]),
+    files: Object.freeze([".unit-test-ide/workspace.json", "CMakeLists.txt", "fixture.json", "tests/framework_tests.cpp"]),
+  }),
+  unity: Object.freeze({
+    sourceSha256: "eaf9b66d897a3361b05f7d050a779d47d35339804ccaa5fa800f7986f1ecb34c",
+    metadataSha256: "1287993f09fb2d8079933ac89a85bd464122edac7b3c92621692a02484536333",
+    dependencies: Object.freeze(["unity", "cmock"]),
+    files: Object.freeze([
+      ".unit-test-ide/workspace.json", "CMakeLists.txt", "cmock.yml", "fixture.json", "include/Dependency.h",
+      "mocks/MockDependency.c", "mocks/MockDependency.h", "mocks/cmock-generation.json",
+      "tests/fixture_runtime.c", "tests/framework_tests.c",
+    ]),
+  }),
+});
+
+function fixtureFailure(message, cause) {
+  return frameworkFailure("FRAMEWORK_FIXTURE_VALIDATION_FAILED", message, cause);
+}
+
+function sha256(bytes) {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+async function regularBytes(path, label) {
+  try {
+    const metadata = await lstat(path);
+    if (!metadata.isFile() || metadata.isSymbolicLink()) throw fixtureFailure(`${label} is not a regular file`);
+    return await readFile(path);
+  } catch (error) {
+    if (error?.code === "FRAMEWORK_FIXTURE_VALIDATION_FAILED") throw error;
+    throw fixtureFailure(`${label} cannot be read`, error);
+  }
+}
+
+async function canonicalFixtureSourceDigest(root, locked, label) {
+  let rootMetadata;
+  try {
+    rootMetadata = await lstat(root);
+  } catch (error) {
+    throw fixtureFailure(`${label} source cannot be inspected`, error);
+  }
+  if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink()) throw fixtureFailure(`${label} source root is unsafe`);
+  const expectedFiles = new Set(locked.files);
+  const expectedDirectories = new Set(locked.files.flatMap((path) => {
+    const parts = path.split("/");
+    return parts.slice(0, -1).map((_, index) => parts.slice(0, index + 1).join("/"));
+  }));
+  const foundFiles = new Set();
+  async function visit(directory, prefix) {
+    let entries;
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch (error) {
+      throw fixtureFailure(`${label} source cannot be inspected`, error);
+    }
+    entries.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
+    for (const entry of entries) {
+      const relative = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
+      const metadata = await lstat(join(directory, entry.name));
+      if (metadata.isSymbolicLink()) throw fixtureFailure(`${label} source contains a symbolic link`);
+      if (metadata.isDirectory()) {
+        if (!expectedDirectories.has(relative)) throw fixtureFailure(`${label} source contains an unlocked directory`);
+        await visit(join(directory, entry.name), relative);
+      } else if (metadata.isFile() && expectedFiles.has(relative)) {
+        foundFiles.add(relative);
+      } else {
+        throw fixtureFailure(`${label} source contains an unlocked entry`);
+      }
+    }
+  }
+  await visit(root, "");
+  if (foundFiles.size !== expectedFiles.size) throw fixtureFailure(`${label} source is missing a locked file`);
+  const hash = createHash("sha256");
+  for (const relative of [...locked.files].sort()) {
+    const bytes = await regularBytes(join(root, ...relative.split("/")), `${label} source ${relative}`);
+    let text;
+    try {
+      text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } catch (error) {
+      throw fixtureFailure(`${label} source ${relative} is not UTF-8`, error);
+    }
+    text = text.replaceAll("\r\n", "\n");
+    if (text.includes("\r") || text.includes("\0")) throw fixtureFailure(`${label} source ${relative} has unsafe text bytes`);
+    hash.update(`f:${relative}\0`);
+    hash.update(text, "utf8");
+  }
+  return hash.digest("hex");
+}
+
+async function loadLockedFixture(root, frameworkId, manifestSha256, treeSha256, cMockProvenanceSha256) {
+  const locked = lockedFixtures[frameworkId];
+  const fixtureRoot = join(root, "testdata", "frameworks", frameworkId);
+  const sourceSha256 = await canonicalFixtureSourceDigest(fixtureRoot, locked, `${frameworkId} fixture`);
+  if (sourceSha256 !== locked.sourceSha256) throw fixtureFailure(`${frameworkId} fixture source does not match the committed lock`);
+  const metadataSha256 = sha256(await regularBytes(join(fixtureRoot, "fixture.json"), `${frameworkId} fixture metadata`));
+  if (metadataSha256 !== locked.metadataSha256) throw fixtureFailure(`${frameworkId} fixture metadata does not match the committed lock`);
+  const dependencies = locked.dependencies.map((id) => ({ id, treeSha256: treeSha256[id] }));
+  const executableSha256 = sha256(Buffer.from(JSON.stringify({
+    schemaVersion: 1,
+    frameworkId,
+    manifestSha256,
+    sourceSha256,
+    dependencies,
+    ...(frameworkId === "unity" ? { cMockProvenanceSha256 } : {}),
+  }), "utf8"));
+  return Object.freeze({ metadataSha256, sourceSha256, executableSha256 });
+}
+
+export async function loadF1FrameworkIdentity(repositoryRootValue) {
+  if (typeof repositoryRootValue !== "string" || repositoryRootValue.length === 0 || repositoryRootValue.includes("\0")) {
+    throw fixtureFailure("repository root is invalid");
+  }
+  const root = resolve(repositoryRootValue);
+  const manifestPath = join(root, "tools", "framework-bundle", "manifest.json");
+  const { manifest, manifestSha256 } = await readFrameworkManifest(manifestPath);
+  const checked = await checkFrameworkBundle({ repositoryRoot: root, manifestPath });
+  if (checked.manifestSha256 !== manifestSha256) throw fixtureFailure("framework manifest identity changed during validation");
+  const frameworkTreeSha256 = Object.freeze(Object.fromEntries(
+    manifest.frameworks.map(({ id, treeSha256 }) => [id, treeSha256]),
+  ));
+  const fixtures = Object.freeze(Object.fromEntries(await Promise.all(
+    Object.keys(lockedFixtures).map(async (frameworkId) => [frameworkId, await loadLockedFixture(
+      root, frameworkId, manifestSha256, frameworkTreeSha256, checked.cMockProvenanceSha256,
+    )]),
+  )));
+  return Object.freeze({
+    manifestSha256,
+    frameworkTreeSha256,
+    cMockProvenanceSha256: checked.cMockProvenanceSha256,
+    fixtures,
+  });
+}
 
 function parseArguments(arguments_) {
   if (arguments_.length !== 2 || arguments_[0] !== "--cmake" || !arguments_[1].startsWith("/") || arguments_[1].includes("\0")) throw new Error("usage: consume.mjs --cmake <absolute-linux-cmake>");

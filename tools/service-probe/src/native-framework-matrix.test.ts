@@ -13,6 +13,8 @@ import {
 import {
   runFrameworkMatrix,
   runFrameworkPlatform,
+  stableFrameworkIdDigest,
+  type F1FrameworkIdentity,
   type FrameworkMatrixOptions,
   type FrameworkPlatformOptions,
 } from "./native-framework-matrix.js";
@@ -35,10 +37,161 @@ const evidence = Object.freeze({
   executableArtifactSha256: digest("executable"),
 });
 
+const f1Identity: F1FrameworkIdentity = Object.freeze({
+  manifestSha256: "2f08cfd45b9374a5331f0484d53b466c3813312d046e5226c64754c0c986f87b",
+  frameworkTreeSha256: Object.freeze({
+    cpputest: "c564fb5e4e32836dc66f46efb86edb6f1f2fa6afa255a57052031aa00fc56f04",
+    unity: "abfb7b2b7aec36739a7b138490d2e9dd178cc4f00e806ed372cbb8cfe98f73ae",
+    cmock: "19e013d70a3f032decb2e836b875a997d085ca72b34c92c91b528e6ad2e49ac3",
+  }),
+  cMockProvenanceSha256: "4f0a73e5decc2402930fc4d609d1640150fe6addb30e20cc9900e1cf418520a8",
+  fixtures: Object.freeze({
+    cpputest: Object.freeze({ metadataSha256: digest("cpp-meta"), sourceSha256: digest("cpp-source"), executableSha256: digest("cpp-executable") }),
+    unity: Object.freeze({ metadataSha256: digest("unity-meta"), sourceSha256: digest("unity-source"), executableSha256: digest("unity-executable") }),
+  }),
+});
+
 const frameworkNames = {
   cpputest: ["Pass", "AssertionFailure", "Crash", "MockMissingCall", "Skipped", "Timeout"],
   unity: ["test_pass", "test_assertion_failure", "test_crash", "test_cmock_expectation_failure", "test_skipped", "test_timeout"],
 } as const;
+
+function stableDigestCatalog() {
+  const cppContainer = `utid-v1-${digest("cpp-container")}`;
+  const unityContainer = `utid-v1-${digest("unity-container")}`;
+  const cppSuite = `utid-v1-${digest("cpp-suite")}`;
+  return {
+    containers: [
+      {
+        capabilities: {
+          canDiscoverCases: true, canReportMockDetails: true, canReportSkipped: true,
+          canReportSourceLocation: true, canRunCase: true,
+        },
+        ctestLogicalName: "cpputest.framework",
+        disabled: false,
+        displayName: "CppUTest framework",
+        framework: "cpputest",
+        id: cppContainer,
+        labels: ["smoke", "Framework"],
+        projectId: "project-win32-msvc",
+        sourceLocation: {
+          line: 1, navigable: true, provenance: "framework-manifest",
+          uri: "file:///C:/agent/build/testdata/frameworks/cpputest/CMakeLists.txt",
+        },
+      },
+      {
+        capabilities: {
+          canDiscoverCases: true, canReportMockDetails: true, canReportSkipped: true,
+          canReportSourceLocation: true, canRunCase: true,
+        },
+        ctestLogicalName: "unity.framework",
+        disabled: false,
+        displayName: "Unity framework",
+        framework: "unity",
+        id: unityContainer,
+        labels: ["Framework"],
+        projectId: "project-win32-msvc",
+      },
+    ],
+    diagnostics: [],
+    generatedAt: new Date("2026-09-16T01:02:03.000Z"),
+    items: [
+      {
+        containerId: cppContainer, disabled: false, displayName: "Upper", framework: "cpputest",
+        id: cppSuite, kind: "suite", labels: ["z", "A"], logicalName: "Upper",
+        sourceLocation: {
+          line: 10, column: 2, navigable: true, provenance: "test-declaration",
+          uri: "file:///C:/agent/build/testdata/frameworks/cpputest/tests/A_test.cpp",
+        },
+      },
+      {
+        containerId: cppContainer, disabled: false, displayName: "lower", framework: "cpputest",
+        id: `utid-v1-${digest("cpp-lower")}`, kind: "case", labels: ["beta", "Alpha"], logicalName: "lower",
+        parameters: [{ name: "second", value: 2 }, { name: "first", value: "one" }],
+        parentId: cppSuite,
+        sourceLocation: {
+          line: 20, navigable: true, provenance: "test-declaration",
+          uri: "file:///C:/agent/build/testdata/frameworks/cpputest/tests/a_test.cpp",
+        },
+      },
+      {
+        containerId: unityContainer, disabled: false, displayName: "other", framework: "unity",
+        id: `utid-v1-${digest("unity-other")}`, kind: "case", labels: [], logicalName: "other",
+      },
+    ],
+    partial: false,
+    profileId: "profile-win32-msvc",
+    projectId: "project-win32-msvc",
+    revision: digest("catalog-win32-msvc"),
+  } as Parameters<typeof stableFrameworkIdDigest>[1];
+}
+
+test("stable framework digest ignores timestamps, array indexes, compiler, platform, and build roots", () => {
+  const original = stableDigestCatalog();
+  const substituted = structuredClone(original) as typeof original & { compilerVersion?: string; platform?: string };
+  substituted.generatedAt = new Date("2038-01-19T03:14:07.000Z");
+  substituted.projectId = "project-linux-gcc";
+  substituted.profileId = "profile-linux-gcc";
+  substituted.revision = digest("catalog-linux-gcc");
+  substituted.compilerVersion = "gcc 99";
+  substituted.platform = "linux";
+  substituted.containers.reverse();
+  substituted.items.reverse();
+  for (const container of substituted.containers) {
+    container.id = `utid-v1-${digest(`replacement:${container.ctestLogicalName}`)}`;
+    container.projectId = substituted.projectId;
+    container.labels.reverse();
+    if (container.sourceLocation !== undefined) {
+      container.sourceLocation.uri = "file:///opt/runner/out/testdata/frameworks/cpputest/CMakeLists.txt";
+    }
+  }
+  const cppContainer = substituted.containers.find((value) => value.framework === "cpputest")!;
+  const cppItems = substituted.items.filter((value) => value.framework === "cpputest");
+  const suite = cppItems.find((value) => value.kind === "suite")!;
+  const oldSuiteId = suite.id;
+  suite.id = `utid-v1-${digest("replacement-suite")}`;
+  for (const item of cppItems) {
+    item.containerId = cppContainer.id;
+    item.labels.reverse();
+    item.parameters?.reverse();
+    if (item.parentId === oldSuiteId) item.parentId = suite.id;
+    if (item.sourceLocation !== undefined) {
+      const basename = item.sourceLocation.uri.endsWith("A_test.cpp") ? "A_test.cpp" : "a_test.cpp";
+      item.sourceLocation.uri = `/var/lib/build/testdata/frameworks/cpputest/tests/${basename}`;
+    }
+  }
+
+  const expected = stableFrameworkIdDigest("cpputest", original, f1Identity);
+  assert.match(expected, /^[0-9a-f]{64}$/u);
+  assert.equal(stableFrameworkIdDigest("cpputest", substituted, f1Identity), expected);
+});
+
+test("stable framework digest uses code-point path ordering and detects source or provenance drift", () => {
+  const original = stableDigestCatalog();
+  const reordered = structuredClone(original);
+  reordered.items.reverse();
+  assert.equal(
+    stableFrameworkIdDigest("cpputest", reordered, f1Identity),
+    stableFrameworkIdDigest("cpputest", original, f1Identity),
+  );
+
+  const caseDrift = structuredClone(original);
+  const upper = caseDrift.items.find((value) => value.logicalName === "Upper")!;
+  upper.sourceLocation!.uri = upper.sourceLocation!.uri.replace("A_test.cpp", "a_test.cpp");
+  assert.notEqual(
+    stableFrameworkIdDigest("cpputest", caseDrift, f1Identity),
+    stableFrameworkIdDigest("cpputest", original, f1Identity),
+  );
+
+  const provenanceDrift: F1FrameworkIdentity = {
+    ...f1Identity,
+    frameworkTreeSha256: { ...f1Identity.frameworkTreeSha256, cpputest: digest("drifted-tree") },
+  };
+  assert.notEqual(
+    stableFrameworkIdDigest("cpputest", original, provenanceDrift),
+    stableFrameworkIdDigest("cpputest", original, f1Identity),
+  );
+});
 
 function fakeCatalogItems(frameworkId: FrameworkId) {
   const primaryId = `utid-v1-${digest(`container:${frameworkId}`)}`;

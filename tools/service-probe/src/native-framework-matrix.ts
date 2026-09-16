@@ -52,10 +52,84 @@ const EVIDENCE_KEYS = [
 
 type FrameworkFixture = Pick<TaskServiceFixture, "client" | "kill" | "restart">;
 
+export interface F1FrameworkFixtureIdentity {
+  readonly metadataSha256: string;
+  readonly sourceSha256: string;
+  readonly executableSha256: string;
+}
+
+export interface F1FrameworkIdentity {
+  readonly manifestSha256: string;
+  readonly frameworkTreeSha256: Readonly<Record<"cpputest" | "unity" | "cmock", string>>;
+  readonly cMockProvenanceSha256: string;
+  readonly fixtures: Readonly<Record<FrameworkId, F1FrameworkFixtureIdentity>>;
+}
+
 export interface FrameworkMatrixEvidence {
   readonly sourceArtifactSha256: string;
   readonly sourceLocationDigest: string;
   readonly executableArtifactSha256: string;
+}
+
+export function stableFrameworkIdDigest(
+  frameworkId: FrameworkId,
+  catalog: ProtocolTestCatalog,
+  provenance: F1FrameworkIdentity,
+): string {
+  if (frameworkId !== "cpputest" && frameworkId !== "unity") throw new Error("stable framework ID is invalid");
+  validateF1Identity(provenance);
+  if (catalog.partial) throw new Error("stable framework identity requires a complete catalog");
+  const selectedContainers = catalog.containers.filter((container) =>
+    container.framework === frameworkId ||
+    (container.framework === "opaque-ctest" && container.ctestLogicalName.startsWith(`${frameworkId}.`))
+  );
+  if (selectedContainers.length === 0) throw new Error(`${frameworkId} stable identity has no catalog container`);
+  const selectedContainerIds = new Set(selectedContainers.map(({ id }) => id));
+  const itemsById = new Map(catalog.items.map((item) => [item.id, item]));
+  const containers = selectedContainers.map((container) => ({
+    capabilities: container.capabilities,
+    ctestLogicalName: container.ctestLogicalName,
+    degradedReason: container.degradedReason ?? null,
+    disabled: container.disabled,
+    displayName: container.displayName,
+    framework: container.framework,
+    labels: [...container.labels].sort(codePointCompare),
+    sourceLocation: canonicalSourceLocation(container.sourceLocation, frameworkId),
+  })).sort(canonicalCompare);
+  const items = catalog.items.filter(({ containerId }) => selectedContainerIds.has(containerId)).map((item) => {
+    const container = selectedContainers.find(({ id }) => id === item.containerId);
+    if (container === undefined) throw new Error("stable framework item container is missing");
+    const parent = item.parentId === undefined ? undefined : itemsById.get(item.parentId);
+    if (item.parentId !== undefined && (parent === undefined || !selectedContainerIds.has(parent.containerId))) {
+      throw new Error("stable framework item parent is outside the selected framework");
+    }
+    return {
+      containerCTestLogicalName: container.ctestLogicalName,
+      disabled: item.disabled,
+      displayName: item.displayName,
+      framework: item.framework,
+      kind: item.kind,
+      labels: [...item.labels].sort(codePointCompare),
+      logicalName: item.logicalName,
+      parameters: [...(item.parameters ?? [])].map(({ name, value }) => ({ name, value })).sort(canonicalCompare),
+      parent: parent === undefined ? null : { kind: parent.kind, logicalName: parent.logicalName },
+      sourceLocation: canonicalSourceLocation(item.sourceLocation, frameworkId),
+    };
+  }).sort(canonicalCompare);
+  const relevantTrees = frameworkId === "unity"
+    ? { cmock: provenance.frameworkTreeSha256.cmock, unity: provenance.frameworkTreeSha256.unity }
+    : { cpputest: provenance.frameworkTreeSha256.cpputest };
+  return digestText(canonicalJson({
+    schemaVersion: 1,
+    frameworkId,
+    catalog: { containers, items },
+    provenance: {
+      manifestSha256: provenance.manifestSha256,
+      frameworkTreeSha256: relevantTrees,
+      fixture: provenance.fixtures[frameworkId],
+      ...(frameworkId === "unity" ? { cMockProvenanceSha256: provenance.cMockProvenanceSha256 } : {}),
+    },
+  }));
 }
 
 export interface FrameworkMatrixOptions {
@@ -1046,6 +1120,97 @@ function bounded<T>(label: string, promise: Promise<T>, timeoutMs: number): Prom
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function validateF1Identity(identity: F1FrameworkIdentity): void {
+  exactKeys(identity, ["cMockProvenanceSha256", "fixtures", "frameworkTreeSha256", "manifestSha256"], "F1 framework identity");
+  exactKeys(identity.frameworkTreeSha256, ["cmock", "cpputest", "unity"], "F1 framework tree identity");
+  exactKeys(identity.fixtures, ["cpputest", "unity"], "F1 fixture identities");
+  const digests = [
+    identity.manifestSha256,
+    identity.cMockProvenanceSha256,
+    ...Object.values(identity.frameworkTreeSha256),
+  ];
+  for (const frameworkId of ["cpputest", "unity"] as const) {
+    const fixture = identity.fixtures[frameworkId];
+    exactKeys(fixture, ["executableSha256", "metadataSha256", "sourceSha256"], `${frameworkId} F1 fixture identity`);
+    digests.push(fixture.metadataSha256, fixture.sourceSha256, fixture.executableSha256);
+  }
+  if (digests.some((value) => !DIGEST.test(value))) throw new Error("F1 framework identity digest is invalid");
+}
+
+function exactKeys(value: unknown, keys: readonly string[], label: string): void {
+  closedKeys(value, keys, label);
+  if (keys.some((key) => !Object.hasOwn(value as object, key))) throw new Error(`${label} is missing required fields`);
+}
+
+function canonicalSourceLocation(
+  location: ProtocolTestCatalog["containers"][number]["sourceLocation"],
+  frameworkId: FrameworkId,
+): { readonly column: number | null; readonly line: number | null; readonly navigable: boolean; readonly path: string; readonly provenance: string } | null {
+  if (location === undefined) return null;
+  return {
+    column: location.column ?? null,
+    line: location.line ?? null,
+    navigable: location.navigable,
+    path: portableSourcePath(location.uri, frameworkId),
+    provenance: location.provenance,
+  };
+}
+
+function portableSourcePath(uri: string, frameworkId: FrameworkId): string {
+  if (typeof uri !== "string" || uri.length === 0 || uri.includes("\0")) throw new Error("catalog source URI is invalid");
+  let pathname = uri;
+  try {
+    pathname = new URL(uri).pathname;
+  } catch {
+    // Protocol source locations may use platform paths rather than URL syntax.
+  }
+  try {
+    pathname = decodeURIComponent(pathname);
+  } catch {
+    throw new Error("catalog source URI encoding is invalid");
+  }
+  pathname = pathname.replaceAll("\\", "/");
+  const markers = [
+    `/testdata/frameworks/${frameworkId}/`,
+    "/testdata/framework-matrix/",
+  ];
+  let portable;
+  for (const marker of markers) {
+    const index = pathname.lastIndexOf(marker);
+    if (index !== -1) {
+      portable = pathname.slice(index + marker.length);
+      break;
+    }
+  }
+  if (portable === undefined) {
+    for (const marker of ["/tests/", "/include/", "/mocks/"]) {
+      const index = pathname.lastIndexOf(marker);
+      if (index !== -1) {
+        portable = pathname.slice(index + 1);
+        break;
+      }
+    }
+  }
+  if (portable === undefined) {
+    const basename = pathname.slice(pathname.lastIndexOf("/") + 1);
+    if (["CMakeLists.txt", "fixture.json"].includes(basename)) portable = basename;
+  }
+  if (
+    portable === undefined || portable.length === 0 || portable.startsWith("/") ||
+    portable.split("/").some((part) => part === "" || part === "." || part === "..") ||
+    /[\0\r\n]/u.test(portable)
+  ) throw new Error("catalog source URI cannot be reduced to a portable fixture path");
+  return portable;
+}
+
+function codePointCompare(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function canonicalCompare(left: unknown, right: unknown): number {
+  return codePointCompare(canonicalJson(left), canonicalJson(right));
 }
 
 function digestText(value: string): string {
