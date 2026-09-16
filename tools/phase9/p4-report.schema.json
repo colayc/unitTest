@@ -177,6 +177,31 @@
         }
       }
     },
+    "scenarioSet": {
+      "type": "array",
+      "minItems": 17,
+      "maxItems": 17,
+      "prefixItems": [
+        { "type": "object", "required": ["id"], "properties": { "id": { "const": "all" } } },
+        { "type": "object", "required": ["id"], "properties": { "id": { "const": "assertion-failure" } } },
+        { "type": "object", "required": ["id"], "properties": { "id": { "const": "cancel" } } },
+        { "type": "object", "required": ["id"], "properties": { "id": { "const": "crash" } } },
+        { "type": "object", "required": ["id"], "properties": { "id": { "const": "discovery" } } },
+        { "type": "object", "required": ["id"], "properties": { "id": { "const": "failed-rerun" } } },
+        { "type": "object", "required": ["id"], "properties": { "id": { "const": "filter" } } },
+        { "type": "object", "required": ["id"], "properties": { "id": { "const": "malformed-output" } } },
+        { "type": "object", "required": ["id"], "properties": { "id": { "const": "mock-failure" } } },
+        { "type": "object", "required": ["id"], "properties": { "id": { "const": "opaque-fallback" } } },
+        { "type": "object", "required": ["id"], "properties": { "id": { "const": "reconnect-replay" } } },
+        { "type": "object", "required": ["id"], "properties": { "id": { "const": "repeat" } } },
+        { "type": "object", "required": ["id"], "properties": { "id": { "const": "service-restart" } } },
+        { "type": "object", "required": ["id"], "properties": { "id": { "const": "single" } } },
+        { "type": "object", "required": ["id"], "properties": { "id": { "const": "skip" } } },
+        { "type": "object", "required": ["id"], "properties": { "id": { "const": "stale-catalog" } } },
+        { "type": "object", "required": ["id"], "properties": { "id": { "const": "timeout" } } }
+      ],
+      "items": false
+    },
     "framework": {
       "type": "object",
       "additionalProperties": false,
@@ -232,12 +257,10 @@
           "$ref": "#/$defs/cmockProvenance"
         },
         "scenarios": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/scenario"
-          },
-          "minItems": 17,
-          "maxItems": 17
+          "allOf": [
+            { "$ref": "#/$defs/scenarioSet" },
+            { "type": "array", "items": { "$ref": "#/$defs/scenario" } }
+          ]
         }
       }
     },
@@ -336,9 +359,50 @@
         }
       }
     },
+    "platformToolchains": {
+      "type": "object",
+      "required": ["platform", "toolchains"],
+      "allOf": [
+        {
+          "if": { "properties": { "platform": { "const": "linux" } }, "required": ["platform"] },
+          "then": {
+            "properties": {
+              "toolchains": {
+                "type": "array",
+                "prefixItems": [
+                  { "type": "object", "required": ["family"], "properties": { "family": { "const": "clang" } } },
+                  { "type": "object", "required": ["family"], "properties": { "family": { "const": "gcc" } } }
+                ],
+                "items": false,
+                "minItems": 2,
+                "maxItems": 2
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "platform": { "const": "win32" },
+              "toolchains": {
+                "type": "array",
+                "prefixItems": [
+                  { "type": "object", "required": ["family"], "properties": { "family": { "const": "clang-cl" } } },
+                  { "type": "object", "required": ["family"], "properties": { "family": { "const": "msvc" } } }
+                ],
+                "items": false,
+                "minItems": 2,
+                "maxItems": 2
+              }
+            }
+          }
+        }
+      ]
+    },
     "platformReport": {
       "type": "object",
       "additionalProperties": false,
+      "allOf": [
+        { "$ref": "#/$defs/platformToolchains" }
+      ],
       "required": [
         "schemaVersion",
         "candidateCommit",
