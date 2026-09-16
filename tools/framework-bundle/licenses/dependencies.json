@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "dependencies": [
+    {
+      "id": "cpputest",
+      "version": "4.0",
+      "revision": "b9b841c56c524a10ccd40e88c3acaf9d5ec751c2",
+      "spdx": "BSD-3-Clause",
+      "archiveLicensePath": "COPYING",
+      "archiveLicenseSha256": "d8fe282e4047197e1fbd6ef2527bde832a1514be6bd82fac7d1296ce184285c8",
+      "sourceLicenseUrl": "https://github.com/cpputest/cpputest/blob/b9b841c56c524a10ccd40e88c3acaf9d5ec751c2/COPYING"
+    },
+    {
+      "id": "unity",
+      "version": "2.6.1",
+      "revision": "cbcd08fa7de711053a3deec6339ee89cad5d2697",
+      "spdx": "MIT",
+      "archiveLicensePath": "LICENSE.txt",
+      "archiveLicenseSha256": "907d9e859c6433703c0c183de3ddeaaf4baf3d517382f8f368b2c190fd2581d1",
+      "sourceLicenseUrl": "https://github.com/ThrowTheSwitch/Unity/blob/cbcd08fa7de711053a3deec6339ee89cad5d2697/LICENSE.txt"
+    },
+    {
+      "id": "cmock",
+      "version": "2.7.0",
+      "revision": "6ea503340b1d3fdc0f2bcaf69273ba0160ec83af",
+      "spdx": "MIT",
+      "archiveLicensePath": "LICENSE.txt",
+      "archiveLicenseSha256": "f19bba29498b9405a86ab5fdc6bc58654fffb197603834e6d1423d583649b35c",
+      "sourceLicenseUrl": "https://github.com/ThrowTheSwitch/CMock/blob/6ea503340b1d3fdc0f2bcaf69273ba0160ec83af/LICENSE.txt"
+    }
+  ]
+}
