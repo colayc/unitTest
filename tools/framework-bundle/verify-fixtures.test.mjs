@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { resolve } from "node:path";
-import { parseVerifyFrameworkFixtureArguments, verifyFrameworkFixtures } from "./verify-fixtures.mjs";
+import { controlledUnityResultPath, parseVerifyFrameworkFixtureArguments, verifyFrameworkFixtures } from "./verify-fixtures.mjs";
 
 const repositoryRoot = resolve(import.meta.dirname, "..", "..");
 
@@ -24,6 +24,12 @@ test("parses the closed framework fixture CLI", () => {
   assert.deepEqual(parseVerifyFrameworkFixtureArguments([
     "--cmake", "C:/tools/cmake.exe", "--generator", "C:/tools/generator.exe", "--toolchains", "gcc", "--frameworks", "cpputest",
   ]).toolchains, ["gcc"]);
+});
+
+test("rejects Unity runner result paths that escape the controlled directory", () => {
+  assert.equal(controlledUnityResultPath("C:/fixture/results", "case.jsonl"), resolve("C:/fixture/results/case.jsonl"));
+  assert.throws(() => controlledUnityResultPath("C:/fixture/results", "../escape.jsonl"), /controlled directory/u);
+  assert.throws(() => controlledUnityResultPath("C:/fixture/results", "C:/outside.jsonl"), /controlled directory/u);
 });
 
 test("plans a Windows MSVC fixture build and classifies every CppUTest scenario", async () => {
@@ -142,20 +148,22 @@ test("verifies Unity through the sealed list/run runner protocol", async () => {
       }
       return { stdout: "", stderr: "" };
     };
-    const summary = await verifyFrameworkFixtures({
+    const runPlan = (environment) => verifyFrameworkFixtures({
       repositoryRoot,
       cmake: "C:/tools/cmake.exe",
       generator: "C:/tools/unity-runner-generator.exe",
       toolchains: ["msvc"], frameworks: ["unity"], platform: "win32",
       fixtureBuildRoot: temporary,
       frameworkInputs: { unityRoot: "C:/frameworks/unity", cmockRoot: "C:/frameworks/cmock", helper: "C:/frameworks/UnitTestIDE.cmake" },
-      environment: { PATH: "C:\\fixture-path-without-docker" },
+      environment,
       execFile: fakeExecFile,
     });
+    const summary = await runPlan({ PATH: "C:\\fixture-path-without-docker" });
     assert.deepEqual(summary, [{ framework: "unity", toolchain: "msvc", scenarios: [
       { id: "pass", outcome: "passed" }, { id: "assertion-failure", outcome: "failed" }, { id: "skip", outcome: "skipped" },
       { id: "mock-failure", outcome: "mock-failure" }, { id: "crash", outcome: "crash" }, { id: "timeout", outcome: "timeout" },
     ] }]);
+    const hiddenDockerPlan = calls.map((call) => call.arguments_);
     const list = calls.find((call) => call.arguments_.includes("list"));
     assert.deepEqual(list.arguments_.slice(-6), ["--utide-protocol", "utide.runner.v1", "--utide-mode", "list", "--utide-result", list.arguments_.at(-1)]);
     assert.equal(calls.filter((call) => call.arguments_.includes("run")).length, 6);
@@ -163,6 +171,11 @@ test("verifies Unity through the sealed list/run runner protocol", async () => {
     assert.ok(calls.every((call) => call.options.env?.PATH === "C:\\fixture-path-without-docker"));
     const forbidden = /ruby|ceedling|lib\/cmock\.rb|update-cmock-fixture|docker run/iu;
     assert.doesNotMatch(await readFile(join(repositoryRoot, "testdata/frameworks/unity/CMakeLists.txt"), "utf8"), forbidden);
+    assert.ok(calls.every((call) => !call.arguments_.some((argument) => forbidden.test(argument))));
+    calls.length = 0;
+    await runPlan({ PATH: "C:\\fixture-path-with-docker" });
+    assert.deepEqual(calls.map((call) => call.arguments_), hiddenDockerPlan);
+    assert.ok(calls.every((call) => call.options.env?.PATH === "C:\\fixture-path-with-docker"));
     assert.ok(calls.every((call) => !call.arguments_.some((argument) => forbidden.test(argument))));
   } finally {
     await rm(temporary, { recursive: true, force: true });

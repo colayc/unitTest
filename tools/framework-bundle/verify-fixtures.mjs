@@ -135,7 +135,7 @@ function containedPath(root, path) {
   return pathRelative === "" || (!pathRelative.startsWith(`..${sep}`) && pathRelative !== ".." && !isAbsolute(pathRelative));
 }
 
-function resultPath(root, name) {
+export function controlledUnityResultPath(root, name) {
   const output = resolve(root, name);
   if (!containedPath(root, output)) throw new Error("Unity runner result file escapes its controlled directory");
   return output;
@@ -203,7 +203,7 @@ function completeResult(records, requestedIdentity) {
 }
 
 async function verifyUnityScenario(options, executable, resultDirectory, scenario) {
-  const output = resultPath(resultDirectory, `${scenario.name}.jsonl`);
+  const output = controlledUnityResultPath(resultDirectory, `${scenario.name}.jsonl`);
   const invocation = await invoke(options.execFile, executable, [
     "--utide-protocol", runnerProtocol, "--utide-mode", "run", "--utide-case", scenario.name, "--utide-result", output,
   ], scenario.outcome === "timeout" ? 1_000 : scenarioTimeout, options.environment);
@@ -239,7 +239,7 @@ async function verifyUnityFixture(options, toolchain, inputs) {
   if (built.code !== 0) throw new Error(`Unity build failed: ${resultText(built)}`);
   const identities = await verifyUnityManifest(buildDirectory, fixture);
   const executable = join(buildDirectory, "bin", options.platform === "win32" ? "phase9_unity.exe" : "phase9_unity");
-  const listOutput = resultPath(resultDirectory, "list.jsonl");
+  const listOutput = controlledUnityResultPath(resultDirectory, "list.jsonl");
   const listed = await invoke(options.execFile, executable, ["--utide-protocol", runnerProtocol, "--utide-mode", "list", "--utide-result", listOutput], scenarioTimeout, options.environment);
   if (listed.code !== 0) throw new Error(`Unity list failed: ${resultText(listed)}`);
   validateListRecords(await readJsonl(listOutput, "case"), identities);
