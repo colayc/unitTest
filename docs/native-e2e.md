@@ -85,6 +85,45 @@ pnpm verify:framework-fixtures -- --cmake $cmake --generator $generator --toolch
 license inventory 不等于第三方 license/legal 人工审批。Phase 8 的正式 Windows
 签名、人工 legal 审批、文档收尾仍为已批准的三个 DEFERRED 项，`releaseReady=false`。
 
+## Phase 9 F2 本地 framework matrix
+
+F2 required mode 只消费已经通过 `check:framework-bundle` 的 F1 输入。它不会在
+测试运行时启动 CMock、Ruby 或 Docker，也不会下载 framework。可信准备步骤必须先把
+closed runtime manifest 放在固定位置
+`.native-e2e/framework-runtime/{windows|linux}.json`，并把每个 family/framework
+workspace 放在固定的 `.native-e2e/framework-work/` 树中；CLI 和环境变量都不能指定
+替代路径、命令、shell、hook 或 executable。
+
+Windows 本地完整验收：
+
+```powershell
+pnpm check:framework-bundle
+go -C apps/test-service build -trimpath -o ../../build/unity-runner-generator.exe ./cmd/unity-runner-generator
+pnpm prepare:framework-bundle
+$cmake = (node tools/cmake-bundle/prepare.mjs | ConvertFrom-Json).executable
+$generator = (Resolve-Path build\unity-runner-generator.exe).Path
+pnpm verify:framework-fixtures -- --cmake $cmake --generator $generator --toolchains msvc,clang-cl --frameworks cpputest,unity
+$env:UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS='msvc,clang-cl'
+$env:UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED='1'
+pnpm test:e2e:native -- --platform win32
+```
+
+Linux 使用同一流程，把 generator 输出名改为无 `.exe`，并设置：
+
+```sh
+export UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS=gcc,clang
+export UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED=1
+pnpm test:e2e:native -- --platform linux
+```
+
+required mode 不允许 skip。缺少任一 compiler、F1 fixture/provenance、预生成 CMock
+输出、固定 runtime manifest、已编译 framework executable、17 场景中的任一项或
+最终 `framework-report.json` 都会使命令失败。报告中的
+`executableArtifactSha256` 是固定 Service build root 中唯一实际编译 executable
+的 SHA-256；`sourceArtifactSha256` 和 stable ID 继续绑定 Task 3 的跨平台 F1 输入
+identity。平台成功结果必须是 2 个 toolchain × 2 个 framework × 每 framework 17
+个有序场景，并且 framework 报告只在全部 workspace/Service cleanup 后原子发布。
+
 ## Hosted CI（Service native E2E）
 
 `.github/workflows/foundation.yml` 使用两个固定 job：
@@ -130,7 +169,9 @@ Service、构建/测试进程和 coverage evidence validator 都通过同一显�
 
 ```text
 .native-e2e/artifacts/windows/toolchain-report.json
+.native-e2e/artifacts/windows/framework-report.json
 .native-e2e/artifacts/linux/toolchain-report.json
+.native-e2e/artifacts/linux/framework-report.json
 ```
 
 报告只包含：
@@ -143,6 +184,12 @@ Service、构建/测试进程和 coverage evidence validator 都通过同一显�
 - 每个场景的 `passed`/`skipped` 状态。
 
 报告写入采用临时文件加原子 rename，并拒绝绝对路径、token、environment 和不受限字符串。CI 即使 native job 失败也会尝试上传已有报告，便于定位失败。
+
+`framework-report.json` 另包含两个平台 toolchain、每个 toolchain 的 CppUTest/CppUMock
+与 Unity/CMock evidence、每个 framework 的 17 个有序场景、F1 provenance、catalog/source
+stable identity、实际 executable digest 和 Service artifact digest。required mode 会在
+命令成功前重新读取并按 closed schema 验证该文件；缺失、截断、路径字段、scenario
+缺失或 provenance 缺失均不能被 `toolchain-report.json` 掩盖。
 
 ## 后续阶段
 

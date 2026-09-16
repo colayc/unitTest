@@ -4,6 +4,7 @@ const tests = [
   "dist/coverage-bundle.test.js",
   "dist/native-fixture.test.js",
   "dist/native-build-linux.test.js",
+  "dist/native-build-windows.test.js",
   "dist/native-network-guard.test.js",
   "dist/wfp-offline-boundary.test.js",
   "dist/wfp-offline-boundary.e2e.test.js",
@@ -18,10 +19,14 @@ const tests = [
 const requested = process.argv.slice(2).filter((value) => value !== "--");
 let selected = tests;
 if (requested.length > 0) {
-  if (requested.length !== 1 || !["native-framework-matrix.test.ts", "dist/native-framework-matrix.test.js"].includes(requested[0])) {
-    throw new Error("service-probe test accepts only native-framework-matrix.test.ts as a focused test");
+  const nativeBuildPair = ["native-build-windows.test.ts", "native-build-linux.test.ts"];
+  if (requested.length === 1 && ["native-framework-matrix.test.ts", "dist/native-framework-matrix.test.js"].includes(requested[0])) {
+    selected = ["dist/native-framework-matrix.test.js"];
+  } else if (requested.length === 2 && nativeBuildPair.every((value) => requested.includes(value))) {
+    selected = ["dist/native-build-windows.test.js", "dist/native-build-linux.test.js"];
+  } else {
+    throw new Error("service-probe focused tests must be the framework matrix or the Windows/Linux native-build pair");
   }
-  selected = ["dist/native-framework-matrix.test.js"];
 }
 const result = spawnSync(process.execPath, ["--test", ...selected], {
   cwd: import.meta.dirname,
