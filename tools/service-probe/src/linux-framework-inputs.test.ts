@@ -98,6 +98,7 @@ test("Linux framework boundary rejects an altered prepared manifest digest and C
   const root = await mkdtemp(join(tmpdir(), "unit-test-linux-framework-v2-"));
   const valid = manifest();
   try {
+    await assert.rejects(readResolvedFrameworkTrees(join(root, "does-not-exist"), valid, "not-a-digest"), /resolved manifest has an invalid identity/u);
     await writeFile(join(root, "manifest.resolved.json"), `${JSON.stringify({
       schemaVersion: valid.schemaVersion, manifestSha256: "a".repeat(64), platforms: valid.platforms, fixtureTools: valid.fixtureTools,
       frameworks: valid.frameworks.map(({ id, version, tag, revision, source, license, sourceDirectory, treeSha256 }) => ({ id, version, tag, revision, source: { filename: source.filename, sha256: source.sha256 }, license, sourceDirectory, treeSha256 }))
