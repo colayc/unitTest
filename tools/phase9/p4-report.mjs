@@ -4,6 +4,7 @@ import { pathToFileURL } from "node:url";
 import Ajv2020 from "ajv/dist/2020.js";
 
 import {
+  encodeCanonicalJson,
   phase9Failure,
   readCanonicalJson,
   writeCanonicalJson,
@@ -176,7 +177,7 @@ export function buildMatrixReport({ candidateCommit, windows, linux }) {
     overallStatus: "passed",
   };
   if (typeof validateMatrixSchema !== "function" || !validateMatrixSchema(matrix)) invalid("matrix report schema");
-  return matrix;
+  return JSON.parse(encodeCanonicalJson(matrix));
 }
 
 function parseArguments(argv) {

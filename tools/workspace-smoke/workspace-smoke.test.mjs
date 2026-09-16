@@ -364,6 +364,28 @@ test("root verification runs Phase 9 contracts and preserves the exact deferred 
     deferredIds,
   );
   assert.equal(matrix.counts.deferred, 3);
+  assert.equal(matrix.releaseReady, false);
+});
+
+test("root exposes one closed native framework matrix producer-validator suite", async () => {
+  const manifest = JSON.parse(await readFile("package.json", "utf8"));
+  assert.equal(
+    manifest.scripts["test:native-framework-matrix"],
+    "node --test tools/phase9/p4-report.test.mjs",
+  );
+  assert.equal(
+    Object.values(manifest.scripts).filter((command) => command.includes("tools/phase9/p4-report.test.mjs")).length,
+    1,
+  );
+  assert.equal(manifest.scripts.test.split("pnpm run test:native-framework-matrix").length, 2);
+  assert.ok(
+    manifest.scripts.test.indexOf("pnpm run test:phase9-gates")
+      < manifest.scripts.test.indexOf("pnpm run test:native-framework-matrix"),
+  );
+  assert.ok(
+    manifest.scripts.test.indexOf("pnpm run test:native-framework-matrix")
+      < manifest.scripts.test.indexOf("pnpm run test:workspace"),
+  );
 });
 
 test("release manifest contract stays pinned to the repository product identity", async () => {
