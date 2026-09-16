@@ -17,6 +17,10 @@ import {
   type FrameworkPlatformOptions,
 } from "./native-framework-matrix.js";
 import {
+  frameworkMatrixRequired,
+  loadRequiredFrameworkRuntime,
+} from "./native-framework-runtime.js";
+import {
   __testing as nativeBuildTesting,
   type NativeMatrixOptions,
   type PreparedCMakeBundle,
@@ -31,24 +35,39 @@ const evidence = Object.freeze({
   executableArtifactSha256: digest("executable"),
 });
 
-const catalogItems = [
-  ["pass", "Pass"],
-  ["assertion", "AssertionFailure"],
-  ["crash", "Crash"],
-  ["malformed", "MalformedOutput"],
-  ["mock", "MockMissingCall"],
-  ["skip", "Skipped"],
-  ["timeout", "Timeout"],
-].map(([suffix, logicalName]) => ({
-  id: `utid-v1-${digest(suffix!)}`,
-  containerId: `utid-v1-${digest("container")}`,
-  disabled: logicalName === "Skipped",
-  displayName: logicalName,
-  framework: "cpputest",
-  kind: "case",
-  labels: [],
-  logicalName,
-}));
+const frameworkNames = {
+  cpputest: ["Pass", "AssertionFailure", "Crash", "MockMissingCall", "Skipped", "Timeout"],
+  unity: ["test_pass", "test_assertion_failure", "test_crash", "test_cmock_expectation_failure", "test_skipped", "test_timeout"],
+} as const;
+
+function fakeCatalogItems(frameworkId: FrameworkId) {
+  const primaryId = `utid-v1-${digest(`container:${frameworkId}`)}`;
+  const values: Array<{
+    id: string; containerId: string; disabled: boolean; displayName: string;
+    framework: FrameworkId; kind: string; labels: never[]; logicalName: string;
+  }> = frameworkNames[frameworkId].map((logicalName) => ({
+    id: `utid-v1-${digest(`${frameworkId}:${logicalName}`)}`,
+    containerId: primaryId,
+    disabled: logicalName.toLowerCase().includes("skip"),
+    displayName: logicalName,
+    framework: frameworkId,
+    kind: "case",
+    labels: [],
+    logicalName,
+  }));
+  const malformedName = frameworkId === "cpputest" ? "MalformedOutput" : "test_malformed_output";
+  values.push({
+    id: `utid-v1-${digest(`${frameworkId}:${malformedName}`)}`,
+    containerId: `utid-v1-${digest(`malformed-container:${frameworkId}`)}`,
+    disabled: false,
+    displayName: malformedName,
+    framework: frameworkId,
+    kind: "case",
+    labels: [],
+    logicalName: malformedName,
+  });
+  return values;
+}
 
 const scenarioRunOrder = FRAMEWORK_SCENARIO_IDS.filter((id) => id !== "discovery");
 const scenarioOutcomes = new Map([
@@ -75,26 +94,55 @@ interface ProtocolCall {
   readonly value?: unknown;
 }
 
+interface FakeClientState {
+  readonly calls: ProtocolCall[];
+  readonly runRequests: Array<Record<string, unknown>>;
+  readonly tasks: Map<string, Record<string, unknown>>;
+  readonly runs: Map<string, Record<string, unknown>>;
+  readonly artifactsByTask: Map<string, Array<Record<string, unknown>>>;
+  readonly artifactBytes: Map<string, Uint8Array>;
+  runIndex: number;
+}
+
 class FakeProtocolClient {
-  readonly calls: ProtocolCall[] = [];
-  readonly runRequests: Array<Record<string, unknown>> = [];
-  readonly #tasks = new Map<string, Record<string, unknown>>();
-  readonly #runs = new Map<string, Record<string, unknown>>();
-  #runIndex = 0;
+  readonly calls: ProtocolCall[];
+  readonly runRequests: Array<Record<string, unknown>>;
+  readonly #state: FakeClientState;
   reconnectPromise: Promise<void> | undefined;
   cancelPromise: Promise<Record<string, unknown>> | undefined;
   readonly #frameworkId: FrameworkId;
   readonly #family: FrameworkToolchainFamily;
   readonly #onInspect?: () => void;
+  #retired = false;
 
   constructor(
     frameworkId: FrameworkId = "cpputest",
     family: FrameworkToolchainFamily = "clang",
     onInspect?: () => void,
+    state?: FakeClientState,
   ) {
     this.#frameworkId = frameworkId;
     this.#family = family;
     this.#onInspect = onInspect;
+    this.#state = state ?? {
+      calls: [], runRequests: [], tasks: new Map(), runs: new Map(),
+      artifactsByTask: new Map(), artifactBytes: new Map(), runIndex: 0,
+    };
+    this.calls = this.#state.calls;
+    this.runRequests = this.#state.runRequests;
+  }
+
+  replacement(): FakeProtocolClient {
+    this.#retired = true;
+    return new FakeProtocolClient(this.#frameworkId, this.#family, this.#onInspect, this.#state);
+  }
+
+  artifact(taskId: string, kind: string): Record<string, unknown> | undefined {
+    return this.#state.artifactsByTask.get(taskId)?.find((value) => value.kind === kind);
+  }
+
+  task(taskId: string): Record<string, unknown> | undefined {
+    return this.#state.tasks.get(taskId);
   }
 
   async inspectWorkspace() {
@@ -131,8 +179,12 @@ class FakeProtocolClient {
 
   async discoverTests(value: Record<string, unknown>) {
     this.calls.push({ method: "discoverTests", value });
-    const task = taskSnapshot("discovery-task", "succeeded");
-    this.#tasks.set("discovery-task", task);
+    const taskId = `discovery-task-${this.#frameworkId}-${this.#family}`;
+    const task = taskSnapshot(taskId, "succeeded");
+    this.#state.tasks.set(taskId, task);
+    this.addArtifact(taskId, "test-catalog", Buffer.from(JSON.stringify({
+      catalog: "validated", framework: this.#frameworkId, family: this.#family,
+    }) + "\n"));
     return task;
   }
 
@@ -147,11 +199,11 @@ class FakeProtocolClient {
           canReportSourceLocation: true,
           canRunCase: true,
         },
-        ctestLogicalName: "framework-tests",
+        ctestLogicalName: `${this.#frameworkId}.framework`,
         disabled: false,
         displayName: "framework-tests",
         framework: this.#frameworkId,
-        id: `utid-v1-${digest("container")}`,
+        id: `utid-v1-${digest(`container:${this.#frameworkId}`)}`,
         labels: [],
         projectId: "root",
       }, {
@@ -162,18 +214,45 @@ class FakeProtocolClient {
           canReportSourceLocation: false,
           canRunCase: false,
         },
-        ctestLogicalName: "opaque-framework-tests",
+        ctestLogicalName: `${this.#frameworkId}.matrix.malformed`,
+        disabled: false,
+        displayName: "matrix-malformed",
+        framework: this.#frameworkId,
+        id: `utid-v1-${digest(`malformed-container:${this.#frameworkId}`)}`,
+        labels: [],
+        projectId: "root",
+      }, {
+        capabilities: {
+          canDiscoverCases: false,
+          canReportMockDetails: false,
+          canReportSkipped: false,
+          canReportSourceLocation: false,
+          canRunCase: false,
+        },
+        ctestLogicalName: `${this.#frameworkId}.matrix.opaque`,
         degradedReason: "adapter-contract-invalid",
         disabled: false,
         displayName: "opaque-framework-tests",
         framework: "opaque-ctest",
-        id: `utid-v1-${digest("opaque-container")}`,
+        id: `utid-v1-${digest(`opaque-container:${this.#frameworkId}`)}`,
         labels: [],
         projectId: "root",
       }],
       diagnostics: [],
       generatedAt: new Date("2026-09-16T00:00:00.000Z"),
-      items: catalogItems,
+      items: [
+        ...fakeCatalogItems(this.#frameworkId),
+        {
+          id: `utid-v1-${digest("foreign-pass")}`,
+          containerId: `utid-v1-${digest("foreign-container")}`,
+          disabled: false,
+          displayName: "Pass",
+          framework: this.#frameworkId === "cpputest" ? "unity" : "cpputest",
+          kind: "case",
+          labels: [],
+          logicalName: this.#frameworkId === "cpputest" ? "test_pass" : "Pass",
+        },
+      ],
       partial: false,
       profileId: "profile",
       projectId: "root",
@@ -182,7 +261,8 @@ class FakeProtocolClient {
   }
 
   async runTests(value: Record<string, unknown>) {
-    const scenario = scenarioRunOrder[this.#runIndex++];
+    if (this.#retired) throw new Error("stale client used after Service restart");
+    const scenario = scenarioRunOrder[this.#state.runIndex++];
     assert.ok(scenario, "runner started more than the contracted scenario set");
     this.calls.push({ method: "runTests", value: { scenario, ...value } });
     this.runRequests.push(value);
@@ -191,8 +271,8 @@ class FakeProtocolClient {
       Object.assign(error, { code: "CATALOG_STALE" });
       throw error;
     }
-    const taskId = `task-${scenario}`;
-    const runId = `run-${scenario}`;
+    const taskId = `task-${scenario}-${this.#frameworkId}-${this.#family}`;
+    const runId = `run-${scenario}-${this.#frameworkId}-${this.#family}`;
     const outcome = scenarioOutcomes.get(scenario)!;
     const task = {
       ...taskSnapshot(taskId, outcome === "interrupted" ? "interrupted" : outcome === "timed_out" ? "timed_out" : outcome === "cancelled" ? "cancelled" : "succeeded"),
@@ -204,8 +284,8 @@ class FakeProtocolClient {
       repeatCount: value.repeatCount,
     };
     const skipped = scenario === "skip" ? 1 : 0;
-    this.#tasks.set(taskId, task);
-    this.#runs.set(runId, {
+    this.#state.tasks.set(taskId, task);
+    const run = {
       catalogRevision,
       incomplete: false,
       outcome,
@@ -231,20 +311,28 @@ class FakeProtocolClient {
       },
       taskId,
       toolchainId: "toolchain",
-    });
+    };
+    this.#state.runs.set(runId, run);
+    const results = fakeResults(scenario, value, this.#frameworkId);
+    this.addArtifact(taskId, "test-results", Buffer.from(results.map((item) => JSON.stringify(item)).join("\n") + "\n"));
+    this.addArtifact(taskId, "test-run-summary", Buffer.from(JSON.stringify({
+      runId, taskId, status: "completed", outcome, startedAt: run.startedAt,
+      finishedAt: run.finishedAt, summary: run.summary, resultRevision: run.resultRevision,
+      incomplete: false, catalogRevision,
+    }) + "\n"));
     return task;
   }
 
   async getTask(taskId: string) {
     this.calls.push({ method: "getTask", value: taskId });
-    const task = this.#tasks.get(taskId);
+    const task = this.#state.tasks.get(taskId);
     if (!task) throw new Error(`unknown task ${taskId}`);
     return task;
   }
 
   async getTestRun(runId: string) {
     this.calls.push({ method: "getTestRun", value: runId });
-    const run = this.#runs.get(runId);
+    const run = this.#state.runs.get(runId);
     if (!run) throw new Error(`unknown run ${runId}`);
     return run;
   }
@@ -258,13 +346,40 @@ class FakeProtocolClient {
     this.calls.push({ method: "reconnect" });
     return this.reconnectPromise ?? Promise.resolve();
   }
+
+  async listArtifacts(taskId: string) {
+    this.calls.push({ method: "listArtifacts", value: taskId });
+    return { items: this.#state.artifactsByTask.get(taskId) ?? [] };
+  }
+
+  async readArtifact(artifactId: string) {
+    this.calls.push({ method: "readArtifact", value: artifactId });
+    const bytes = this.#state.artifactBytes.get(artifactId);
+    if (bytes === undefined) throw new Error(`unknown artifact ${artifactId}`);
+    return bytes;
+  }
+
+  private addArtifact(taskId: string, kind: string, bytes: Uint8Array): void {
+    const artifactId = `artifact-${taskId}-${kind}`;
+    const metadata = {
+      artifactId, createdAt: new Date("2026-09-16T00:00:01.000Z"), kind,
+      mimeType: kind === "test-results" ? "application/x-ndjson" : "application/json",
+      sha256: digestBytes(bytes), sizeBytes: bytes.byteLength, taskId,
+      uri: `artifact://${artifactId}`,
+    };
+    const values = this.#state.artifactsByTask.get(taskId) ?? [];
+    values.push(metadata);
+    this.#state.artifactsByTask.set(taskId, values);
+    this.#state.artifactBytes.set(artifactId, bytes);
+  }
 }
 
 class FakeFixture {
-  readonly client: FakeProtocolClient;
+  client: FakeProtocolClient;
   readonly calls: string[] = [];
   killPromise: Promise<void> | undefined;
   restartPromise: Promise<this> | undefined;
+  clientBeforeRestart: FakeProtocolClient | undefined;
 
   constructor(
     frameworkId: FrameworkId = "cpputest",
@@ -281,7 +396,49 @@ class FakeFixture {
 
   async restart(): Promise<this> {
     this.calls.push("restart");
-    return this.restartPromise ?? Promise.resolve(this);
+    if (this.restartPromise !== undefined) return this.restartPromise;
+    this.clientBeforeRestart = this.client;
+    this.client = this.client.replacement();
+    return this;
+  }
+}
+
+function fakeResults(
+  scenario: typeof scenarioRunOrder[number],
+  request: Record<string, unknown>,
+  frameworkId: FrameworkId,
+): Array<Record<string, unknown>> {
+  const primaryId = `utid-v1-${digest(`container:${frameworkId}`)}`;
+  const malformedId = `utid-v1-${digest(`malformed-container:${frameworkId}`)}`;
+  const opaqueId = `utid-v1-${digest(`opaque-container:${frameworkId}`)}`;
+  const selected = request.selection as { itemIds?: string[]; containerIds?: string[] };
+  const selectedItem = selected.itemIds?.[0] ?? `utid-v1-${digest(`${frameworkId}:Pass`)}`;
+  const make = (
+    outcome: string,
+    failureDetails: Array<Record<string, unknown>> = [],
+    extra: Record<string, unknown> = {},
+  ) => ({
+    itemId: selectedItem, containerId: primaryId, iteration: 1, outcome,
+    failureDetails, outputRefs: [], partial: false, ...extra,
+  });
+  const assertion = { category: "assertion_failure", evidenceRefs: [], locations: [], message: "redacted" };
+  switch (scenario) {
+    case "all": return [make("passed"), make("failed", [assertion], { itemId: `utid-v1-${digest("aggregate-failure")}` })];
+    case "assertion-failure":
+    case "failed-rerun": return [make("failed", [assertion])];
+    case "cancel": return [make("cancelled")];
+    case "crash": return [make("errored", [{ category: "test_process_crash", evidenceRefs: [], locations: [], message: "redacted" }])];
+    case "filter":
+    case "reconnect-replay":
+    case "single": return [make("passed")];
+    case "malformed-output": return [make("errored", [{ category: "framework_output_invalid", evidenceRefs: [], locations: [], message: "redacted" }], { containerId: malformedId })];
+    case "mock-failure": return [make("failed", [{ ...assertion, subtype: "mock_missing_call" }])];
+    case "opaque-fallback": return [make("passed", [], { containerId: opaqueId, itemId: opaqueId })];
+    case "repeat": return [make("passed"), make("passed", [], { iteration: 2 })];
+    case "service-restart": return [make("not_run", [], { reason: "service_restarted" })];
+    case "skip": return [make("skipped")];
+    case "timeout": return [make("timed_out", [{ category: "test_timeout", evidenceRefs: [], locations: [], message: "redacted" }])];
+    case "stale-catalog": return [];
   }
 }
 
@@ -302,10 +459,11 @@ test("runner emits the exact 17 scenarios and derives every selection from the c
       ["timed-out", "timeout"],
     ],
   );
-  const itemIds = new Set(catalogItems.map(({ id }) => id));
+  const itemIds = new Set(fakeCatalogItems("cpputest").map(({ id }) => id));
   const containerIds = new Set([
-    `utid-v1-${digest("container")}`,
-    `utid-v1-${digest("opaque-container")}`,
+    `utid-v1-${digest("container:cpputest")}`,
+    `utid-v1-${digest("malformed-container:cpputest")}`,
+    `utid-v1-${digest("opaque-container:cpputest")}`,
   ]);
   const priorRunIds = new Set<string>();
   for (const request of fixture.client.runRequests) {
@@ -329,7 +487,7 @@ test("runner emits the exact 17 scenarios and derives every selection from the c
     )?.value;
     if (runId) {
       const scenario = (runId as { scenario: string }).scenario;
-      if (scenario !== "stale-catalog") priorRunIds.add(`run-${scenario}`);
+      if (scenario !== "stale-catalog") priorRunIds.add(`run-${scenario}-cpputest-clang`);
     }
   }
   assert.equal(fixture.client.calls.filter(({ method }) => method === "inspectWorkspace").length >= 1, true);
@@ -341,9 +499,41 @@ test("runner emits the exact 17 scenarios and derives every selection from the c
   )?.value as { selection?: unknown } | undefined;
   assert.deepEqual(opaque?.selection, {
     mode: "containers",
-    containerIds: [`utid-v1-${digest("opaque-container")}`],
+    containerIds: [`utid-v1-${digest("opaque-container:cpputest")}`],
   });
+  const foreignItem = `utid-v1-${digest("foreign-pass")}`;
+  assert.ok(fixture.client.runRequests.every((request) =>
+    !JSON.stringify(request.selection).includes(foreignItem)
+  ), "mixed-framework catalog entries must never enter selections");
   assert.deepEqual(fixture.calls, ["kill", "restart"]);
+  assert.notEqual(fixture.client, fixture.clientBeforeRestart, "restart must reacquire a replacement client");
+  const timeoutTaskId = "task-timeout-cpputest-clang";
+  assert.equal(fixture.client.task(timeoutTaskId)?.outcome, "timed_out");
+  const timeoutScenario = result.scenarios.find(({ id }) => id === "timeout")!;
+  assert.equal(
+    timeoutScenario.resultArtifactSha256,
+    fixture.client.artifact(timeoutTaskId, "test-run-summary")?.sha256,
+    "reported digest must come from the Service summary artifact",
+  );
+});
+
+test("required framework mode is explicit and its missing fixed manifest fails closed", async () => {
+  assert.equal(frameworkMatrixRequired({}), false);
+  assert.equal(frameworkMatrixRequired({ UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED: "0" }), false);
+  assert.equal(frameworkMatrixRequired({ UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED: "1" }), true);
+  assert.throws(
+    () => frameworkMatrixRequired({ UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED: "yes" }),
+    /must be 0 or 1/,
+  );
+  const root = await mkdtemp(join(tmpdir(), "framework-runtime-missing-"));
+  try {
+    await assert.rejects(
+      loadRequiredFrameworkRuntime(root, "linux", join(root, ".native-e2e", "artifacts", "linux")),
+      /required framework runtime manifest is missing/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 for (const [operation, prepare, pattern] of [
@@ -555,5 +745,9 @@ function monotonicClock(): () => Date {
 }
 
 function digest(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function digestBytes(value: Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");
 }

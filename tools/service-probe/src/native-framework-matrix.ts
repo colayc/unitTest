@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { lstat, mkdir, open, rename, rm } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { isAbsolute, join, normalize, resolve, sep } from "node:path";
 import type {
   BuildProfileElement,
@@ -8,6 +8,7 @@ import type {
 } from "@unit-test-ide/protocol-models";
 import type {
   ProtocolClient,
+  ProtocolArtifactMetadata,
   ProtocolTaskSnapshot,
   ProtocolTestCatalog,
   ProtocolTestRun,
@@ -33,25 +34,8 @@ const MAX_TIMEOUT_MS = 120_000;
 const DIGEST = /^[0-9a-f]{64}$/u;
 const COMMIT = /^[0-9a-f]{40}$/u;
 
-const SCENARIO_RESULTS = {
-  all: ["failed", "aggregate"],
-  "assertion-failure": ["failed", "assertion"],
-  cancel: ["cancelled", "cancelled"],
-  crash: ["errored", "crash"],
-  discovery: ["passed", "discovery"],
-  "failed-rerun": ["failed", "assertion"],
-  filter: ["passed", "selection"],
-  "malformed-output": ["errored", "malformed-output"],
-  "mock-failure": ["failed", "mock-expectation"],
-  "opaque-fallback": ["passed", "opaque-fallback"],
-  "reconnect-replay": ["passed", "replay"],
-  repeat: ["passed", "repeat"],
-  "service-restart": ["interrupted", "service-restarted"],
-  single: ["passed", "test"],
-  skip: ["skipped", "ignored"],
-  "stale-catalog": ["rejected", "stale-catalog"],
-  timeout: ["timed-out", "timeout"],
-} as const;
+const repositoryRoot = resolve(import.meta.dirname, "../../..");
+const contractRoot = join(repositoryRoot, "testdata", "framework-matrix");
 
 const PLATFORM_FAMILIES: Readonly<Record<FrameworkPlatform, readonly FrameworkToolchainFamily[]>> = {
   linux: ["clang", "gcc"],
@@ -123,7 +107,7 @@ interface SelectedWorkspace {
 }
 
 interface CatalogSelection {
-  readonly all: { readonly mode: "all" };
+  readonly all: { readonly mode: "items"; readonly itemIds: string[] };
   readonly assertion: { readonly mode: "items"; readonly itemIds: string[] };
   readonly crash: { readonly mode: "items"; readonly itemIds: string[] };
   readonly malformed: { readonly mode: "items"; readonly itemIds: string[] };
@@ -138,8 +122,33 @@ interface CatalogSelection {
   readonly timeout: { readonly mode: "items"; readonly itemIds: string[] };
 }
 
+interface MatrixFrameworkContract {
+  readonly fixtureSha256: string;
+  readonly augmentationSha256: string;
+  readonly primaryCTestName: string;
+  readonly malformedCTestName: string;
+  readonly opaqueCTestName: string;
+  readonly pass: string;
+  readonly assertion: string;
+  readonly crash: string;
+  readonly malformed: string;
+  readonly mock: string;
+  readonly skip: string;
+  readonly timeout: string;
+}
+
+interface ScenarioObservation {
+  readonly taskId?: string;
+  readonly runId?: string;
+  readonly outcome: FrameworkScenarioEvidence["observedOutcome"];
+  readonly classification: FrameworkScenarioEvidence["classification"];
+  readonly artifactSha256: string;
+  readonly artifactSizeBytes: number;
+}
+
 export async function runFrameworkMatrix(options: FrameworkMatrixOptions): Promise<FrameworkMatrixResult> {
   validateMatrixOptions(options);
+  const contract = await loadMatrixContract(options.frameworkId);
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const now = options.now ?? (() => new Date());
   const client = options.fixture.client;
@@ -178,14 +187,26 @@ export async function runFrameworkMatrix(options: FrameworkMatrixOptions): Promi
     timeoutMs,
   );
   validateCatalog(catalog, selected, options.frameworkId);
-  const selection = catalogSelection(catalog, options.frameworkId);
+  const selection = catalogSelection(catalog, options.frameworkId, contract);
+  const discoveryArtifact = await readTaskArtifact(
+    options.fixture.client,
+    discovery.taskId,
+    "test-catalog",
+    timeoutMs,
+  );
   const discoveryRecord = scenarioRecord(
     options,
     "discovery",
     catalog.revision,
     discoveryStarted,
     now(),
-    { taskId: discovery.taskId, outcome: "passed" },
+    {
+      taskId: discovery.taskId,
+      outcome: "passed",
+      classification: "discovery",
+      artifactSha256: discoveryArtifact.sha256,
+      artifactSizeBytes: discoveryArtifact.bytes.byteLength,
+    },
   );
   const completedRunIds = new Map<FrameworkScenarioId, string>();
   const scenarios: FrameworkScenarioEvidence[] = [];
@@ -198,20 +219,27 @@ export async function runFrameworkMatrix(options: FrameworkMatrixOptions): Promi
     const startedAt = now();
     const observation = await executeScenario({
       catalog,
-      client: options.fixture.client,
       completedRunIds,
       fixture: options.fixture,
       frameworkId: options.frameworkId,
       id,
       projectId: selected.projectId,
       profileId: selected.profile.buildProfileId,
+      platform: options.platform,
       selection,
+      contract,
       timeoutMs,
+      toolchainFamily: options.toolchainFamily,
     });
-    const expected = SCENARIO_RESULTS[id][0];
+    const expected = expectedOutcome(id);
     if (observation.outcome !== expected) {
       throw new Error(
         `${options.frameworkId} ${id} observed ${observation.outcome}, expected ${expected}`,
+      );
+    }
+    if (observation.classification !== expectedClassification(id)) {
+      throw new Error(
+        `${options.frameworkId} ${id} classified ${observation.classification}, expected ${expectedClassification(id)}`,
       );
     }
     if (observation.runId !== undefined) completedRunIds.set(id, observation.runId);
@@ -331,22 +359,17 @@ export async function publishFrameworkPlatformReport(
 
 interface ScenarioContext {
   readonly catalog: ProtocolTestCatalog;
-  readonly client: ProtocolClient;
   readonly completedRunIds: ReadonlyMap<FrameworkScenarioId, string>;
   readonly fixture: FrameworkFixture;
   readonly frameworkId: FrameworkId;
   readonly id: Exclude<FrameworkScenarioId, "discovery">;
   readonly projectId: string;
   readonly profileId: string;
+  readonly platform: FrameworkPlatform;
   readonly selection: CatalogSelection;
+  readonly contract: MatrixFrameworkContract;
   readonly timeoutMs: number;
-}
-
-interface ScenarioObservation {
-  readonly taskId?: string;
-  readonly runId?: string;
-  readonly outcome: FrameworkScenarioEvidence["observedOutcome"];
-  readonly resultRevision?: string;
+  readonly toolchainFamily: FrameworkToolchainFamily;
 }
 
 async function executeScenario(context: ScenarioContext): Promise<ScenarioObservation> {
@@ -357,7 +380,7 @@ async function executeScenario(context: ScenarioContext): Promise<ScenarioObserv
   try {
     task = await bounded(
       `${context.frameworkId} ${context.id} start`,
-      context.client.runTests({
+      context.fixture.client.runTests({
         idempotencyKey: idempotencyKey(),
         projectId: context.projectId,
         profileId: context.profileId,
@@ -369,7 +392,21 @@ async function executeScenario(context: ScenarioContext): Promise<ScenarioObserv
     );
   } catch (error) {
     if (context.id === "stale-catalog" && staleCatalogError(error)) {
-      return { outcome: "rejected", resultRevision: digestText(errorCode(error)) };
+      const bytes = Buffer.from(canonicalJson({
+        code: errorCode(error),
+        frameworkId: context.frameworkId,
+        projectId: context.projectId,
+        profileId: context.profileId,
+        platform: context.platform,
+        requestedCatalogRevision: catalogRevision,
+        toolchainFamily: context.toolchainFamily,
+      }), "utf8");
+      return {
+        outcome: "rejected",
+        classification: "stale-catalog",
+        artifactSha256: digestBytes(bytes),
+        artifactSizeBytes: bytes.byteLength,
+      };
     }
     throw error;
   }
@@ -383,13 +420,13 @@ async function executeScenario(context: ScenarioContext): Promise<ScenarioObserv
   if (context.id === "cancel") {
     await bounded(
       `${context.frameworkId} cancel task`,
-      context.client.cancelTask(task.taskId),
+      context.fixture.client.cancelTask(task.taskId),
       context.timeoutMs,
     );
   } else if (context.id === "reconnect-replay") {
     await bounded(
       `${context.frameworkId} reconnect replay`,
-      context.client.reconnect(),
+      context.fixture.client.reconnect(),
       context.timeoutMs,
     );
   } else if (context.id === "service-restart") {
@@ -405,7 +442,7 @@ async function executeScenario(context: ScenarioContext): Promise<ScenarioObserv
     );
   }
 
-  await waitForTerminalTask(
+  const terminalTask = await waitForTerminalTask(
     () => context.fixture.client,
     task.taskId,
     `${context.frameworkId} ${context.id}`,
@@ -416,12 +453,14 @@ async function executeScenario(context: ScenarioContext): Promise<ScenarioObserv
     context.fixture.client.getTestRun(task.runId),
     context.timeoutMs,
   );
-  const outcome = observedOutcome(context.id, run);
+  if (context.id === "timeout" && terminalTask.outcome !== "timed_out") {
+    throw new Error("timeout scenario did not produce a durable Service timed_out task");
+  }
+  const evidence = await readRunEvidence(context, task.taskId, task.runId, run);
   return {
     taskId: task.taskId,
     runId: task.runId,
-    outcome,
-    resultRevision: run.resultRevision,
+    ...evidence,
   };
 }
 
@@ -451,48 +490,55 @@ function selectionForScenario(context: ScenarioContext) {
   }
 }
 
-function observedOutcome(
-  id: Exclude<FrameworkScenarioId, "discovery" | "stale-catalog">,
-  run: ProtocolTestRun,
-): FrameworkScenarioEvidence["observedOutcome"] {
-  if (id === "skip") {
-    if (run.summary.skipped < 1) throw new Error("skip scenario produced no skipped item");
-    return "skipped";
+function catalogSelection(
+  catalog: ProtocolTestCatalog,
+  frameworkId: FrameworkId,
+  contract: MatrixFrameworkContract,
+): CatalogSelection {
+  const primary = catalog.containers.find((candidate) =>
+    candidate.framework === frameworkId && candidate.ctestLogicalName === contract.primaryCTestName
+  );
+  const malformedContainer = catalog.containers.find((candidate) =>
+    candidate.framework === frameworkId && candidate.ctestLogicalName === contract.malformedCTestName
+  );
+  const opaqueContainer = catalog.containers.find((candidate) =>
+    candidate.framework === "opaque-ctest" && candidate.ctestLogicalName === contract.opaqueCTestName
+  );
+  if (primary === undefined || malformedContainer === undefined || opaqueContainer === undefined) {
+    throw new Error(`${frameworkId} catalog does not satisfy the bound matrix workspace contract`);
   }
-  if (run.outcome === "timed_out") return "timed-out";
-  if (
-    run.outcome === "passed" || run.outcome === "failed" || run.outcome === "errored" ||
-    run.outcome === "cancelled" || run.outcome === "interrupted"
-  ) return run.outcome;
-  throw new Error(`${id} produced unsupported TestRun outcome ${String(run.outcome)}`);
-}
-
-function catalogSelection(catalog: ProtocolTestCatalog, frameworkId: FrameworkId): CatalogSelection {
-  const item = (label: string, pattern: RegExp): ProtocolTestCatalog["items"][number] => {
+  const item = (
+    label: string,
+    logicalName: string,
+    containerId = primary.id,
+  ): ProtocolTestCatalog["items"][number] => {
     const matched = catalog.items.find((candidate) =>
-      candidate.kind === "case" && pattern.test(candidate.logicalName)
+      candidate.kind === "case" && candidate.containerId === containerId &&
+      candidate.framework === frameworkId && candidate.logicalName === logicalName
     );
     if (matched === undefined) throw new Error(`catalog is missing the ${label} case`);
     return matched;
   };
-  const pass = item("passing", /^(?:Pass|test_pass)$/iu);
-  const assertion = item("assertion failure", /assertion[_ -]?failure/iu);
-  const crash = item("crash", /crash/iu);
-  const malformed = item("malformed output", /malformed[_ -]?output/iu);
-  const mock = item("mock failure", /(?:c?mock).*(?:failure|missing|unexpected|mismatch)|(?:missing|unexpected|mismatch).*call/iu);
-  const skip = item("skipped", /skip/iu);
-  const timeout = item("timeout", /timeout/iu);
-  const container = catalog.containers.find((candidate) => candidate.framework === "opaque-ctest");
-  if (container === undefined) {
-    throw new Error(`${frameworkId} catalog has no opaque fallback container`);
-  }
+  const pass = item("passing", contract.pass);
+  const assertion = item("assertion failure", contract.assertion);
+  const crash = item("crash", contract.crash);
+  const malformed = item("malformed output", contract.malformed, malformedContainer.id);
+  const mock = item("mock failure", contract.mock);
+  const skip = item("skipped", contract.skip);
+  const timeout = item("timeout", contract.timeout);
   return {
-    all: { mode: "all" },
+    all: {
+      mode: "items",
+      itemIds: catalog.items.filter((candidate) =>
+        candidate.kind === "case" && candidate.containerId === primary.id &&
+        candidate.id !== crash.id && candidate.id !== timeout.id
+      ).map(({ id }) => id).sort(),
+    },
     assertion: { mode: "items", itemIds: [assertion.id] },
     crash: { mode: "items", itemIds: [crash.id] },
     malformed: { mode: "items", itemIds: [malformed.id] },
     mock: { mode: "items", itemIds: [mock.id] },
-    opaque: { mode: "containers", containerIds: [container.id] },
+    opaque: { mode: "containers", containerIds: [opaqueContainer.id] },
     pass: { mode: "items", itemIds: [pass.id] },
     filter: { mode: "filter", filter: { includeItemIds: [pass.id] } },
     skip: { mode: "items", itemIds: [skip.id] },
@@ -544,23 +590,9 @@ function scenarioRecord(
   finishedAtValue: Date,
   observation: ScenarioObservation,
 ): FrameworkScenarioEvidence {
-  const [observedOutcomeValue, classification] = SCENARIO_RESULTS[id];
   if (finishedAtValue.getTime() <= startedAtValue.getTime()) {
     finishedAtValue = new Date(startedAtValue.getTime() + 1);
   }
-  const resultBytes = Buffer.from(canonicalJson({
-    candidateCommit: options.candidateCommit,
-    catalogRevision: catalogRevisionValue,
-    classification,
-    frameworkId: options.frameworkId,
-    id,
-    observedOutcome: observation.outcome,
-    platform: options.platform,
-    resultRevision: observation.resultRevision ?? "none",
-    runId: observation.runId ?? "none",
-    taskId: observation.taskId ?? "none",
-    toolchainFamily: options.toolchainFamily,
-  }));
   return {
     id,
     status: "passed",
@@ -572,13 +604,267 @@ function scenarioRecord(
     sourceArtifactSha256: options.evidence.sourceArtifactSha256,
     sourceLocationDigest: options.evidence.sourceLocationDigest,
     executableArtifactSha256: options.evidence.executableArtifactSha256,
-    resultArtifactSha256: digestBytes(resultBytes),
-    resultArtifactSizeBytes: resultBytes.byteLength,
+    resultArtifactSha256: observation.artifactSha256,
+    resultArtifactSizeBytes: observation.artifactSizeBytes,
     startedAt: startedAtValue.toISOString(),
     finishedAt: finishedAtValue.toISOString(),
-    observedOutcome: observedOutcomeValue,
-    classification,
+    observedOutcome: observation.outcome,
+    classification: observation.classification,
   };
+}
+
+interface ArtifactEvidence {
+  readonly metadata: ProtocolArtifactMetadata;
+  readonly bytes: Uint8Array;
+  readonly sha256: string;
+}
+
+interface ResultItemEvidence {
+  readonly itemId: string;
+  readonly containerId: string;
+  readonly iteration: number;
+  readonly outcome: string;
+  readonly reason?: string;
+  readonly failureDetails: readonly { readonly category: string; readonly subtype?: string }[];
+}
+
+async function readRunEvidence(
+  context: ScenarioContext,
+  taskId: string,
+  runId: string,
+  run: ProtocolTestRun,
+): Promise<ScenarioObservation> {
+  const [summaryArtifact, resultsArtifact] = await Promise.all([
+    readTaskArtifact(context.fixture.client, taskId, "test-run-summary", context.timeoutMs),
+    readTaskArtifact(context.fixture.client, taskId, "test-results", context.timeoutMs),
+  ]);
+  const summary = parseJsonObject(summaryArtifact.bytes, "test-run-summary");
+  if (
+    summary.runId !== runId || summary.taskId !== taskId || summary.status !== "completed" ||
+    summary.outcome !== run.outcome || summary.resultRevision !== run.resultRevision ||
+    summary.catalogRevision !== context.catalog.revision ||
+    canonicalJson(summary.summary) !== canonicalJson(run.summary)
+  ) throw new Error(`${context.frameworkId} ${context.id} summary artifact is not bound to its Service run`);
+  const results = parseResultLines(resultsArtifact.bytes);
+  const classification = classifyRunEvidence(context, run, results);
+  const outcome = evidenceOutcome(context.id, run, results);
+  return {
+    outcome,
+    classification,
+    artifactSha256: summaryArtifact.sha256,
+    artifactSizeBytes: summaryArtifact.bytes.byteLength,
+  };
+}
+
+async function readTaskArtifact(
+  client: ProtocolClient,
+  taskId: string,
+  kind: string,
+  timeoutMs: number,
+): Promise<ArtifactEvidence> {
+  const page = await bounded(
+    `${kind} artifact listing`,
+    client.listArtifacts(taskId, { limit: 100 }),
+    timeoutMs,
+  );
+  if (page.nextCursor !== undefined) throw new Error(`${kind} artifact listing was unexpectedly paginated`);
+  const matches = page.items.filter((candidate) => candidate.kind === kind);
+  if (matches.length !== 1) throw new Error(`task must expose exactly one ${kind} artifact`);
+  const metadata = matches[0]!;
+  if (
+    metadata.taskId !== taskId || !DIGEST.test(metadata.sha256) ||
+    !Number.isSafeInteger(metadata.sizeBytes) || metadata.sizeBytes < 0
+  ) throw new Error(`${kind} artifact metadata is invalid`);
+  const bytes = await bounded(
+    `${kind} artifact read`,
+    client.readArtifact(metadata.artifactId),
+    timeoutMs,
+  );
+  const sha256 = digestBytes(bytes);
+  if (bytes.byteLength !== metadata.sizeBytes || sha256 !== metadata.sha256) {
+    throw new Error(`${kind} artifact bytes do not match Service metadata`);
+  }
+  return { metadata, bytes, sha256 };
+}
+
+function parseResultLines(bytes: Uint8Array): ResultItemEvidence[] {
+  const text = Buffer.from(bytes).toString("utf8");
+  if (text.length === 0) return [];
+  return text.trimEnd().split("\n").map((line) => {
+    const value = parseJsonObject(Buffer.from(line, "utf8"), "test-results line");
+    if (
+      typeof value.itemId !== "string" || typeof value.containerId !== "string" ||
+      !Number.isSafeInteger(value.iteration) || typeof value.outcome !== "string" ||
+      !Array.isArray(value.failureDetails)
+    ) throw new Error("test-results artifact contains an invalid result");
+    const failureDetails = value.failureDetails.map((detail) => {
+      if (detail === null || typeof detail !== "object" || Array.isArray(detail) ||
+          typeof (detail as Record<string, unknown>).category !== "string") {
+        throw new Error("test-results artifact contains invalid failure evidence");
+      }
+      const record = detail as Record<string, unknown>;
+      return {
+        category: record.category as string,
+        ...(typeof record.subtype === "string" ? { subtype: record.subtype } : {}),
+      };
+    });
+    return {
+      itemId: value.itemId,
+      containerId: value.containerId,
+      iteration: value.iteration as number,
+      outcome: value.outcome,
+      ...(typeof value.reason === "string" ? { reason: value.reason } : {}),
+      failureDetails,
+    };
+  });
+}
+
+function parseJsonObject(bytes: Uint8Array, label: string): Record<string, unknown> {
+  let value: unknown;
+  try {
+    value = JSON.parse(Buffer.from(bytes).toString("utf8"));
+  } catch {
+    throw new Error(`${label} artifact is not valid JSON`);
+  }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} artifact must contain an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function classifyRunEvidence(
+  context: ScenarioContext,
+  run: ProtocolTestRun,
+  results: readonly ResultItemEvidence[],
+): FrameworkScenarioEvidence["classification"] {
+  const details = results.flatMap(({ failureDetails }) => failureDetails);
+  if (details.some(({ category }) => category === "framework_output_invalid")) return "malformed-output";
+  if (details.some(({ subtype }) => subtype?.startsWith("mock_") || subtype === "mock_failure")) return "mock-expectation";
+  if (details.some(({ category }) => category === "test_process_crash")) return "crash";
+  if (details.some(({ category }) => category === "test_timeout") && run.outcome === "timed_out") return "timeout";
+  if (results.some(({ reason }) => reason === "service_restarted") && run.outcome === "interrupted") return "service-restarted";
+  if (run.outcome === "cancelled") return "cancelled";
+  if (results.some(({ outcome }) => outcome === "skipped")) return "ignored";
+  if (details.some(({ category }) => category === "assertion_failure")) {
+    if (results.length > 1) return "aggregate";
+    return "assertion";
+  }
+  const opaqueId = context.selection.opaque.containerIds[0];
+  if (results.length > 0 && results.every(({ containerId }) => containerId === opaqueId)) return "opaque-fallback";
+  if (new Set(results.map(({ iteration }) => iteration)).size > 1) return "repeat";
+  if (context.id === "reconnect-replay") return "replay";
+  if (context.id === "filter") return "selection";
+  return "test";
+}
+
+function evidenceOutcome(
+  id: FrameworkScenarioId,
+  run: ProtocolTestRun,
+  results: readonly ResultItemEvidence[],
+): FrameworkScenarioEvidence["observedOutcome"] {
+  if (id === "discovery" || id === "stale-catalog") {
+    throw new Error(`${id} does not produce a TestRun artifact`);
+  }
+  if (id === "skip") {
+    if (!results.some(({ outcome }) => outcome === "skipped")) {
+      throw new Error("skip scenario produced no skipped item evidence");
+    }
+    return "skipped";
+  }
+  if (run.outcome === "timed_out") return "timed-out";
+  if (
+    run.outcome === "passed" || run.outcome === "failed" || run.outcome === "errored" ||
+    run.outcome === "cancelled" || run.outcome === "interrupted"
+  ) return run.outcome;
+  throw new Error(`${id} produced unsupported TestRun outcome ${String(run.outcome)}`);
+}
+
+function expectedOutcome(id: FrameworkScenarioId): FrameworkScenarioEvidence["observedOutcome"] {
+  switch (id) {
+    case "all":
+    case "assertion-failure":
+    case "failed-rerun": return "failed";
+    case "cancel": return "cancelled";
+    case "crash":
+    case "malformed-output": return "errored";
+    case "discovery":
+    case "filter":
+    case "opaque-fallback":
+    case "reconnect-replay":
+    case "repeat":
+    case "single": return "passed";
+    case "mock-failure": return "failed";
+    case "service-restart": return "interrupted";
+    case "skip": return "skipped";
+    case "stale-catalog": return "rejected";
+    case "timeout": return "timed-out";
+  }
+}
+
+function expectedClassification(id: FrameworkScenarioId): FrameworkScenarioEvidence["classification"] {
+  switch (id) {
+    case "all": return "aggregate";
+    case "assertion-failure":
+    case "failed-rerun": return "assertion";
+    case "cancel": return "cancelled";
+    case "crash": return "crash";
+    case "discovery": return "discovery";
+    case "filter": return "selection";
+    case "malformed-output": return "malformed-output";
+    case "mock-failure": return "mock-expectation";
+    case "opaque-fallback": return "opaque-fallback";
+    case "reconnect-replay": return "replay";
+    case "repeat": return "repeat";
+    case "service-restart": return "service-restarted";
+    case "single": return "test";
+    case "skip": return "ignored";
+    case "stale-catalog": return "stale-catalog";
+    case "timeout": return "timeout";
+  }
+}
+
+async function loadMatrixContract(frameworkId: FrameworkId): Promise<MatrixFrameworkContract> {
+  const contractPath = join(contractRoot, "contract.json");
+  const contract = parseJsonObject(await readFile(contractPath), "framework matrix contract");
+  closedKeys(contract, ["frameworks", "schemaVersion", "workspace"], "framework matrix contract");
+  if (contract.schemaVersion !== 1) throw new Error("framework matrix contract version is invalid");
+  const frameworks = contract.frameworks as Record<string, unknown> | undefined;
+  const workspace = contract.workspace as Record<string, unknown> | undefined;
+  if (frameworks === undefined || workspace === undefined) throw new Error("framework matrix contract is incomplete");
+  closedKeys(frameworks, ["cpputest", "unity"], "framework matrix frameworks");
+  closedKeys(workspace, ["cmakeSha256", "opaqueSourceSha256"], "framework matrix workspace contract");
+  const selected = frameworks[frameworkId];
+  if (selected === null || typeof selected !== "object" || Array.isArray(selected)) {
+    throw new Error("framework matrix contract has no selected framework");
+  }
+  const value = selected as unknown as MatrixFrameworkContract;
+  closedKeys(value, [
+    "assertion", "augmentationSha256", "crash", "fixtureSha256", "malformed",
+    "malformedCTestName", "mock", "opaqueCTestName", "pass", "primaryCTestName", "skip", "timeout",
+  ], "framework matrix framework contract");
+  const expectedDigests = [value.fixtureSha256, value.augmentationSha256, workspace.cmakeSha256, workspace.opaqueSourceSha256];
+  if (!expectedDigests.every((digest) => typeof digest === "string" && DIGEST.test(digest))) {
+    throw new Error("framework matrix contract digest is invalid");
+  }
+  for (const name of [
+    value.primaryCTestName, value.malformedCTestName, value.opaqueCTestName,
+    value.pass, value.assertion, value.crash, value.malformed, value.mock, value.skip, value.timeout,
+  ]) {
+    if (typeof name !== "string" || name.length === 0 || name.length > 128 || /[\\/\0]/u.test(name)) {
+      throw new Error("framework matrix contract identity is invalid");
+    }
+  }
+  const [fixture, augmentation, cmake, opaque] = await Promise.all([
+    readFile(join(repositoryRoot, "testdata", "frameworks", frameworkId, "fixture.json")),
+    readFile(join(contractRoot, frameworkId === "cpputest" ? "malformed_cpputest.cpp" : "malformed_unity.c")),
+    readFile(join(contractRoot, "CMakeLists.txt")),
+    readFile(join(contractRoot, "opaque.c")),
+  ]);
+  const actualDigests = [fixture, augmentation, cmake, opaque].map(digestBytes);
+  if (actualDigests.some((digest, index) => digest !== expectedDigests[index])) {
+    throw new Error("framework matrix workspace digest binding failed");
+  }
+  return Object.freeze({ ...value });
 }
 
 function validateMatrixOptions(options: FrameworkMatrixOptions): void {
