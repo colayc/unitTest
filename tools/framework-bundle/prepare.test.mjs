@@ -21,7 +21,10 @@ test("archive validator bounds entry count, depth, and expanded bytes", () => {
   assert.throws(() => validateArchiveEntries([{ path: `CMock-2.7.0/${Array.from({ length: 33 }, () => "d").join("/")}`, type: "file", size: 0 }], { sourceDirectory: "CMock-2.7.0" }), (error) => error?.code === "FRAMEWORK_ARCHIVE_UNSAFE");
   assert.throws(() => validateArchiveEntries([{ path: "CMock-2.7.0/large", type: "file", size: 256 * 1024 * 1024 + 1 }], { sourceDirectory: "CMock-2.7.0" }), (error) => error?.code === "FRAMEWORK_ARCHIVE_UNSAFE");
 });
-async function prepareFixture({ entries, actualLicense = Buffer.from("license"), expectedLicense = actualLicense } = {}) {
+test("archive validator requires the declared source root to be a directory", () => {
+  assert.throws(() => validateArchiveEntries([{ path: "CMock-2.7.0", type: "file", size: 0 }], { sourceDirectory: "CMock-2.7.0" }), (error) => error?.code === "FRAMEWORK_ARCHIVE_UNSAFE");
+});
+async function prepareFixture({ entries, actualLicense = Buffer.from("license"), expectedLicense = actualLicense, extraRootFile = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), "utide-framework-")); const cacheRoot = join(root, "cache"); const runtimeRoot = join(root, "runtime");
   const descriptions = [["cpputest", "cpputest-4.0", "CMakeLists.txt"], ["unity", "Unity-2.6.1", "src/unity.c"], ["cmock", "CMock-2.7.0", "lib/cmock.rb"]];
   const manifest = { schemaVersion: 2, platforms: ["linux-x64", "windows-x64"], fixtureTools: {}, frameworks: [] };
@@ -31,7 +34,7 @@ async function prepareFixture({ entries, actualLicense = Buffer.from("license"),
     readManifest: async () => ({ manifest, manifestSha256: sha(Buffer.from("fixture-manifest")) }),
     download: async (input, target) => writeFile(target, Buffer.from(`archive-${input.id}`)),
     inspectArchive: async (input) => entries ?? [{ path: `${input.sourceDirectory}/`, type: "directory", size: 0 }, { path: `${input.sourceDirectory}/${input.marker}`, type: "file", size: 1 }, { path: `${input.sourceDirectory}/LICENSE.txt`, type: "file", size: actualLicense.length }],
-    extractArchive: async (input, staging) => { await __testing.mkdirp(dirname(join(staging, input.sourceDirectory, input.marker))); await writeFile(join(staging, input.sourceDirectory, input.marker), "x"); await writeFile(join(staging, input.sourceDirectory, "LICENSE.txt"), actualLicense); }
+    extractArchive: async (input, staging) => { await __testing.mkdirp(dirname(join(staging, input.sourceDirectory, input.marker))); await writeFile(join(staging, input.sourceDirectory, input.marker), "x"); await writeFile(join(staging, input.sourceDirectory, "LICENSE.txt"), actualLicense); if (extraRootFile) await writeFile(join(staging, "unexpected"), "x"); }
   };
   return { root, runtimeRoot, cacheRoot, operations, result: await prepareFrameworkBundle({ cacheRoot, runtimeRoot, operations }) };
 }
@@ -41,3 +44,4 @@ test("preparation publishes a digest-keyed v2 bundle and reuses a verified targe
 });
 test("preparation rejects unsafe entries before extraction", async () => { await assert.rejects(prepareFixture({ entries: [{ path: "C:/escape", type: "file", size: 1 }] }), (error) => error?.code === "FRAMEWORK_ARCHIVE_UNSAFE"); });
 test("preparation rejects substituted license bytes", async () => { await assert.rejects(prepareFixture({ actualLicense: Buffer.from("substituted"), expectedLicense: Buffer.from("license") }), (error) => error?.code === "FRAMEWORK_LICENSE_MISMATCH"); });
+test("preparation rejects unexpected top-level files", async () => { await assert.rejects(prepareFixture({ extraRootFile: true }), (error) => error?.code === "FRAMEWORK_ARCHIVE_UNSAFE"); });
