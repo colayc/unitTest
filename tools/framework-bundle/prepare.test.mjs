@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { lstat, mkdtemp, readdir, readFile, symlink, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -33,7 +33,7 @@ test("download durability sync opens the completed archive with write access on 
 test("archive inspection accepts Windows tar listings with locale-mangled month tokens", () => {
   assert.deepEqual(__testing.parseArchiveEntries(["CMock-2.7.0/", "CMock-2.7.0/lib/cmock.rb"], ["drwxr-xr-x  0 501    20          0 5�� 27  2020 CMock-2.7.0/", "-rw-r--r--  0 501    20       1234 5�� 27  2020 CMock-2.7.0/lib/cmock.rb"]), [{ path: "CMock-2.7.0/", type: "directory", size: 0 }, { path: "CMock-2.7.0/lib/cmock.rb", type: "file", size: 1234 }]);
 });
-async function prepareFixture({ entries, actualLicense = Buffer.from("license"), expectedLicense = actualLicense, extraRootFile = false } = {}) {
+async function prepareFixture({ entries, actualLicense = Buffer.from("license"), expectedLicense = actualLicense, extraRootFile = false, publish = true } = {}) {
   const root = await mkdtemp(join(tmpdir(), "utide-framework-")); const cacheRoot = join(root, "cache"); const runtimeRoot = join(root, "runtime");
   const descriptions = [["cpputest", "cpputest-4.0", "CMakeLists.txt"], ["unity", "Unity-2.6.1", "src/unity.c"], ["cmock", "CMock-2.7.0", "lib/cmock.rb"]];
   const manifest = { schemaVersion: 2, platforms: ["linux-x64", "windows-x64"], fixtureTools: {}, frameworks: [] };
@@ -45,7 +45,7 @@ async function prepareFixture({ entries, actualLicense = Buffer.from("license"),
     inspectArchive: async (input) => entries ?? [{ path: `${input.sourceDirectory}/`, type: "directory", size: 0 }, { path: `${input.sourceDirectory}/${input.marker}`, type: "file", size: 1 }, { path: `${input.sourceDirectory}/LICENSE.txt`, type: "file", size: actualLicense.length }],
     extractArchive: async (input, staging) => { await __testing.mkdirp(dirname(join(staging, input.sourceDirectory, input.marker))); await writeFile(join(staging, input.sourceDirectory, input.marker), "x"); await writeFile(join(staging, input.sourceDirectory, "LICENSE.txt"), actualLicense); if (extraRootFile) await writeFile(join(staging, "unexpected"), "x"); }
   };
-  return { root, runtimeRoot, cacheRoot, operations, result: await prepareFrameworkBundle({ cacheRoot, runtimeRoot, operations }) };
+  return { root, runtimeRoot, cacheRoot, operations, result: publish ? await prepareFrameworkBundle({ cacheRoot, runtimeRoot, operations }) : undefined };
 }
 test("preparation publishes a digest-keyed v2 bundle and reuses a verified target", async () => {
   const fixture = await prepareFixture(); assert.equal(fixture.result.root, join(fixture.runtimeRoot, "v2", fixture.result.manifestSha256)); assert.equal(fixture.result.reused, false); assert.deepEqual(await readdir(fixture.runtimeRoot), ["v2"]);
@@ -59,3 +59,55 @@ test("preparation rejects a symlinked runtime component before reusing a bundle"
 test("preparation rejects unsafe entries before extraction", async () => { await assert.rejects(prepareFixture({ entries: [{ path: "C:/escape", type: "file", size: 1 }] }), (error) => error?.code === "FRAMEWORK_ARCHIVE_UNSAFE"); });
 test("preparation rejects substituted license bytes", async () => { await assert.rejects(prepareFixture({ actualLicense: Buffer.from("substituted"), expectedLicense: Buffer.from("license") }), (error) => error?.code === "FRAMEWORK_LICENSE_MISMATCH"); });
 test("preparation rejects unexpected top-level files", async () => { await assert.rejects(prepareFixture({ extraRootFile: true }), (error) => error?.code === "FRAMEWORK_ARCHIVE_UNSAFE"); });
+
+test("archive publication never overwrites a competing cache entry", async () => {
+  const fixture = await prepareFixture({ publish: false });
+  let racedPath;
+  try {
+    const download = fixture.operations.download;
+    fixture.operations.download = async (input, partial) => {
+      await download(input, partial);
+      racedPath = join(fixture.cacheRoot, `${input.source.sha256}-${input.source.filename}`);
+      await writeFile(racedPath, "competing invalid archive", { flag: "wx" });
+    };
+    await assert.rejects(prepareFrameworkBundle(fixture), (error) => error.code === "FRAMEWORK_ARCHIVE_UNTRUSTED");
+    assert.equal(await readFile(racedPath, "utf8"), "competing invalid archive");
+    assert.equal((await readdir(fixture.cacheRoot)).some((name) => name.startsWith(".partial-")), false);
+  } finally { await rm(fixture.root, { recursive: true, force: true }); }
+});
+for (const code of ["EEXIST", "ENOTEMPTY"]) {
+  test(`bundle publication reuses a ${code} winner and always removes losing staging`, async () => {
+    const fixture = await prepareFixture({ publish: false });
+    let races = 0;
+    try {
+      fixture.operations.renameBundle = async (staging, target) => {
+        races += 1;
+        await cp(staging, target, { recursive: true, errorOnExist: true, force: false });
+        throw Object.assign(new Error("competing publisher"), { code });
+      };
+      const result = await prepareFrameworkBundle(fixture);
+      assert.equal(races, 1);
+      assert.equal(result.reused, true);
+      assert.deepEqual(await readdir(join(fixture.runtimeRoot, "v2")), [result.manifestSha256]);
+    } finally { await rm(fixture.root, { recursive: true, force: true }); }
+  });
+}
+test("concurrent bundle publishers cannot clobber the winner or leave staging", async () => {
+  const fixture = await prepareFixture({ publish: false });
+  try {
+    const results = await Promise.all([prepareFrameworkBundle(fixture), prepareFrameworkBundle(fixture)]);
+    assert.deepEqual(results.map((value) => value.reused).sort(), [false, true]);
+    assert.deepEqual(await readdir(join(fixture.runtimeRoot, "v2")), [results[0].manifestSha256]);
+  } finally { await rm(fixture.root, { recursive: true, force: true }); }
+});
+test("an existing incomplete bundle directory is rejected without replacement", async () => {
+  const fixture = await prepareFixture({ publish: false });
+  try {
+    const { manifestSha256 } = await fixture.operations.readManifest();
+    const target = join(fixture.runtimeRoot, "v2", manifestSha256);
+    await mkdir(target, { recursive: true });
+    await assert.rejects(prepareFrameworkBundle(fixture), (error) => error.code === "FRAMEWORK_CACHE_INVALID");
+    assert.deepEqual(await readdir(target), []);
+    assert.deepEqual(await readdir(join(fixture.runtimeRoot, "v2")), [manifestSha256]);
+  } finally { await rm(fixture.root, { recursive: true, force: true }); }
+});

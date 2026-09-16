@@ -1,12 +1,13 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { createWriteStream, createReadStream } from "node:fs";
-import { lstat, mkdir, open, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { link, lstat, mkdir, open, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Transform } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { setTimeout as delay } from "node:timers/promises";
 import { directoryDigest, frameworkFailure, readFrameworkManifest, sha256File } from "./manifest.mjs";
 
 const execFile = promisify(execFileCallback);
@@ -90,7 +91,7 @@ export async function verifyLockedArchive(cacheRoot, input) {
 async function ensureArchive(cacheRoot, input, download) {
   try { return await verifyLockedArchive(cacheRoot, input); } catch (error) { if (error?.code !== "ENOENT") throw error; }
   const target = join(cacheRoot, `${input.source.sha256}-${input.source.filename}`), partial = join(cacheRoot, randomName(".partial-"));
-  try { await download(input, partial); if (await sha256File(partial) !== input.source.sha256) throw failure("FRAMEWORK_ARCHIVE_UNTRUSTED", `downloaded archive identity mismatch: ${input.id}`); try { await rename(partial, target); } catch (error) { if (error?.code !== "EEXIST" && error?.code !== "EPERM") throw error; } return await verifyLockedArchive(cacheRoot, input); } finally { await rm(partial, { force: true }); }
+  try { await download(input, partial); if (await sha256File(partial) !== input.source.sha256) throw failure("FRAMEWORK_ARCHIVE_UNTRUSTED", `downloaded archive identity mismatch: ${input.id}`); try { await link(partial, target); } catch (error) { if (error?.code !== "EEXIST") throw error; } return await verifyLockedArchive(cacheRoot, input); } finally { await rm(partial, { force: true }); }
 }
 async function requiredStat(path, code, message) {
   try { return await lstat(path); } catch (error) { if (error?.code === "ENOENT") throw failure(code, message, error); throw error; }
@@ -117,18 +118,46 @@ export async function verifyPreparedFrameworkBundle({ root, manifest, manifestSh
   const resolved = JSON.parse(await readFile(join(root, "manifest.resolved.json"), "utf8")); if (JSON.stringify(resolved) !== JSON.stringify(canonicalResolved(manifest, manifestSha256))) throw failure("FRAMEWORK_ARCHIVE_UNSAFE", "prepared bundle manifest differs");
   for (const input of manifest.frameworks) await auditTree(root, input); return true;
 }
+async function reusePreparedBundle(root, manifest, manifestSha256) {
+  let stat;
+  try { stat = await lstat(root); } catch (error) { if (error.code === "ENOENT") return false; throw error; }
+  if (!stat.isDirectory() || stat.isSymbolicLink()) throw failure("FRAMEWORK_CACHE_INVALID", "prepared bundle target has an unsafe type");
+  try { await verifyPreparedFrameworkBundle({ root, manifest, manifestSha256 }); }
+  catch { throw failure("FRAMEWORK_CACHE_INVALID", "existing prepared bundle is invalid"); }
+  return true;
+}
+async function publishPreparedBundle(staging, target, manifest, manifestSha256, renameBundle) {
+  // All cooperating publishers serialize the existence check and directory rename.
+  // An existing target, even an empty/incomplete one, is never a replacement target.
+  const lockPath = join(dirname(target), `.framework-publish-${manifestSha256}.lock`);
+  let lock;
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    try { lock = await open(lockPath, "wx", 0o600); break; }
+    catch (error) { if (error.code !== "EEXIST") throw error; await delay(25); }
+  }
+  if (!lock) throw failure("FRAMEWORK_CACHE_INVALID", "prepared bundle publisher is busy");
+  try {
+    if (await reusePreparedBundle(target, manifest, manifestSha256)) return true;
+    try { await renameBundle(staging, target); return false; }
+    catch (error) {
+      if (!["EEXIST", "ENOTEMPTY", "EPERM"].includes(error.code)) throw error;
+      if (!await reusePreparedBundle(target, manifest, manifestSha256)) throw failure("FRAMEWORK_CACHE_INVALID", "prepared bundle could not be published");
+      return true;
+    }
+  } finally { await lock.close(); await rm(lockPath, { force: true }); }
+}
 export async function prepareFrameworkBundle(options = {}) {
   const runtimeRoot = resolve(options.runtimeRoot ?? join(repositoryRoot, ".superpowers", "runtime", "framework-bundle")); const cacheRoot = resolve(options.cacheRoot ?? join(repositoryRoot, ".superpowers", "cache", "framework-bundle")); const ops = options.operations ?? {};
   const locked = await (ops.readManifest ?? readFrameworkManifest)(options.manifestPath); const { manifest, manifestSha256 } = locked; const target = join(runtimeRoot, "v2", manifestSha256);
   await assertNoSymlinkComponents(dirname(target));
-  try { await verifyPreparedFrameworkBundle({ root: target, manifest, manifestSha256 }); return { root: target, manifest, manifestSha256, reused: true }; } catch (error) { if (error?.code === "ENOENT") {} else if (error?.code) throw error; }
+  if (await reusePreparedBundle(target, manifest, manifestSha256)) return { root: target, manifest, manifestSha256, reused: true };
   await mkdir(cacheRoot, { recursive: true, mode: 0o700 }); await mkdir(dirname(target), { recursive: true, mode: 0o700 }); await assertNoSymlinkComponents(cacheRoot); await assertNoSymlinkComponents(dirname(target)); const staging = join(dirname(target), randomName(".framework-bundle-")); await mkdir(staging, { mode: 0o700 });
   try { for (const input of manifest.frameworks) { const archive = await ensureArchive(cacheRoot, input, ops.download ?? defaultDownload); const entries = ops.inspectArchive ? await ops.inspectArchive(input, archive) : await inspectArchive(archive); validateArchiveEntries(entries, input); await verifyLockedArchive(cacheRoot, input); if (ops.extractArchive) await ops.extractArchive(input, staging, archive); else await extractArchive(archive, staging); }
     const topLevel = await readdir(staging, { withFileTypes: true }); const actualRoots = topLevel.filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort(); const expectedRoots = manifest.frameworks.map((item) => item.sourceDirectory).sort(); if (topLevel.some((entry) => !entry.isDirectory()) || JSON.stringify(actualRoots) !== JSON.stringify(expectedRoots)) throw failure("FRAMEWORK_ARCHIVE_UNSAFE", "extraction roots do not match manifest");
     for (const input of manifest.frameworks) await auditTree(staging, input); await writeFile(join(staging, "manifest.resolved.json"), `${JSON.stringify(canonicalResolved(manifest, manifestSha256), null, 2)}\n`, { flag: "wx", mode: 0o600 }); await writeFile(join(staging, "READY"), "framework-bundle-v2\n", { flag: "wx", mode: 0o600 });
-    try { await rename(staging, target); } catch (error) { if (error?.code !== "EEXIST" && error?.code !== "EPERM") throw error; await verifyPreparedFrameworkBundle({ root: target, manifest, manifestSha256 }); return { root: target, manifest, manifestSha256, reused: true }; }
-    return { root: target, manifest, manifestSha256, reused: false };
-  } catch (error) { await rm(staging, { recursive: true, force: true }); throw error; }
+    const reused = await publishPreparedBundle(staging, target, manifest, manifestSha256, ops.renameBundle ?? rename);
+    return { root: target, manifest, manifestSha256, reused };
+  } finally { await rm(staging, { recursive: true, force: true }); }
 }
 export const __testing = Object.freeze({ mkdirp: async (path) => mkdir(path, { recursive: true }), fsyncFile, inspectArchive, parseArchiveEntries, extractArchive, trustedUrl });
 if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) prepareFrameworkBundle().then((result) => process.stdout.write(`${JSON.stringify(result)}\n`)).catch((error) => { process.stderr.write(`framework-bundle: ${error.message}\n`); process.exitCode = 1; });

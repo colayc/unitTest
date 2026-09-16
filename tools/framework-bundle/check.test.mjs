@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { cp, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { checkFrameworkBundle } from "./check.mjs";
+import { auditArchiveCache, checkFrameworkBundle } from "./check.mjs";
 
 const sourceRoot = join(import.meta.dirname, "..", "..");
 async function fixture() {
@@ -17,3 +17,52 @@ async function fixture() {
 test("offline check validates repository inputs without cache or external seams", async () => { const root = await fixture(); try { const result = await checkFrameworkBundle({ repositoryRoot: root, fetch: () => { throw new Error("called"); }, execFile: () => { throw new Error("called"); }, docker: () => { throw new Error("called"); }, generator: () => { throw new Error("called"); } }); assert.match(result.manifestSha256, /^[0-9a-f]{64}$/u); assert.match(result.cMockProvenanceSha256, /^[0-9a-f]{64}$/u); } finally { await rm(root, { recursive: true, force: true }); } });
 test("offline check redacts local paths for invalid provenance and prepared cache", async () => { const root = await fixture(); try { await writeFile(join(root, "testdata/frameworks/unity/mocks/MockDependency.c"), "x\r\n"); await assert.rejects(checkFrameworkBundle({ repositoryRoot: root }), (error) => error?.code === "CMOCK_PROVENANCE_INVALID" && !error.message.includes(root)); await writeFile(join(root, "testdata/frameworks/unity/mocks/MockDependency.c"), "#include \"MockDependency.h\"\n"); await (await import("node:fs/promises")).mkdir(join(root, ".superpowers/runtime/framework-bundle/v2", "0".repeat(64)), { recursive: true }); await assert.rejects(checkFrameworkBundle({ repositoryRoot: root, preparedRoot: join(root, ".superpowers/runtime/framework-bundle/v2", "0".repeat(64)) }), (error) => error?.code === "FRAMEWORK_CACHE_INVALID" && !error.message.includes(root)); } finally { await rm(root, { recursive: true, force: true }); } });
 test("offline check rejects existing prepared file and symlink paths", async (t) => { const root = await fixture(); try { const file = join(root, "prepared-file"); await writeFile(file, "x"); await assert.rejects(checkFrameworkBundle({ repositoryRoot: root, preparedRoot: file }), (error) => error?.code === "FRAMEWORK_CACHE_INVALID" && !error.message.includes(root)); const link = join(root, "prepared-link"); try { await symlink(file, link, "file"); } catch (error) { t.skip(`symlink unavailable: ${error.code}`); return; } await assert.rejects(checkFrameworkBundle({ repositoryRoot: root, preparedRoot: link }), (error) => error?.code === "FRAMEWORK_CACHE_INVALID" && !error.message.includes(root)); } finally { await rm(root, { recursive: true, force: true }); } });
+
+test("offline check rejects corrupt and unrecognized existing archive cache entries", async () => {
+  const root = await fixture();
+  try {
+    const cache = join(root, ".superpowers/cache/framework-bundle");
+    await mkdir(cache, { recursive: true });
+    await assert.doesNotReject(checkFrameworkBundle({ repositoryRoot: root }));
+    const manifest = JSON.parse(await readFile(join(root, "tools/framework-bundle/manifest.json"), "utf8"));
+    const input = manifest.frameworks[0];
+    const path = join(cache, `${input.source.sha256}-${input.source.filename}`);
+    await writeFile(path, "substituted cached archive");
+    await assert.rejects(checkFrameworkBundle({ repositoryRoot: root }), (error) => error.code === "FRAMEWORK_CACHE_INVALID" && !error.message.includes(root));
+    await rm(path);
+    await writeFile(join(cache, "unlocked.tgz"), "unknown");
+    await assert.rejects(checkFrameworkBundle({ repositoryRoot: root }), (error) => error.code === "FRAMEWORK_CACHE_INVALID");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+test("offline check rejects archive cache links and non-directory roots without downloading", async () => {
+  const root = await fixture();
+  try {
+    const cache = join(root, ".superpowers/cache/framework-bundle");
+    await mkdir(dirname(cache), { recursive: true });
+    await writeFile(cache, "not a directory");
+    await assert.rejects(checkFrameworkBundle({ repositoryRoot: root }), (error) => error.code === "FRAMEWORK_CACHE_INVALID");
+    await rm(cache);
+    const target = join(root, "external-cache");
+    await mkdir(target);
+    await symlink(target, cache, process.platform === "win32" ? "junction" : "dir");
+    await assert.rejects(checkFrameworkBundle({ repositoryRoot: root }), (error) => error.code === "FRAMEWORK_CACHE_INVALID");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+test("archive cache audit accepts a verified partial cache but rejects file links", async () => {
+  const root = await mkdtemp(join(tmpdir(), "utide-archive-audit-"));
+  const bytes = Buffer.from("trusted archive bytes");
+  const digest = (await import("node:crypto")).createHash("sha256").update(bytes).digest("hex");
+  const input = { id: "cpputest", source: { sha256: digest, filename: "fixture.tgz" } };
+  const path = join(root, `${digest}-fixture.tgz`);
+  try {
+    await writeFile(path, bytes);
+    await assert.doesNotReject(auditArchiveCache(root, { frameworks: [input, { id: "absent", source: { sha256: "a".repeat(64), filename: "absent.tgz" } }] }));
+    await rm(path);
+    const external = join(root, "..", `${root.split(/[\\/]/u).at(-1)}-target`);
+    try {
+      await writeFile(external, bytes);
+      await symlink(external, path, "file");
+      await assert.rejects(auditArchiveCache(root, { frameworks: [input] }), (error) => error.code === "FRAMEWORK_CACHE_INVALID");
+    } finally { await rm(external, { force: true }); }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

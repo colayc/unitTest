@@ -1,9 +1,9 @@
-import { lstat, readFile } from "node:fs/promises";
+import { lstat, readFile, readdir } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readCMockGeneration, CMOCK_PROVENANCE_PATHS } from "./cmock-provenance.mjs";
 import { frameworkFailure, readFrameworkManifest } from "./manifest.mjs";
-import { verifyPreparedFrameworkBundle } from "./prepare.mjs";
+import { verifyLockedArchive, verifyPreparedFrameworkBundle } from "./prepare.mjs";
 
 const toolDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(toolDirectory, "..", "..");
@@ -24,6 +24,22 @@ function validateLicenseInventory(value, manifest) {
   if (!value || value.schemaVersion !== 1 || !Array.isArray(value.dependencies) || value.dependencies.length !== expected.length) throw cacheFailure("license inventory is invalid");
   for (const [index, dependency] of value.dependencies.entries()) { const locked = expected[index]; if (!locked || Object.keys(dependency).length !== 7 || Object.entries(locked).some(([key, item]) => dependency[key] !== item) || typeof dependency.sourceLicenseUrl !== "string" || !dependency.sourceLicenseUrl.startsWith("https://github.com/")) throw cacheFailure("license inventory does not match the manifest"); }
 }
+export async function auditArchiveCache(cacheRoot, manifest) {
+  try {
+    // Even an absent leaf must not hide a redirected existing parent.
+    for (let path = resolve(cacheRoot); dirname(path) !== path; path = dirname(path)) {
+      try { if ((await lstat(path)).isSymbolicLink()) throw cacheFailure("archive cache contains a symbolic-link component"); }
+      catch (error) { if (error.code !== "ENOENT") throw error; }
+    }
+    if (!await existingDirectory(cacheRoot)) return;
+    const locked = new Map(manifest.frameworks.map((input) => [`${input.source.sha256}-${input.source.filename}`, input]));
+    for (const name of await readdir(cacheRoot)) {
+      const input = locked.get(name);
+      if (!input) throw cacheFailure("archive cache contains an unlocked entry");
+      await verifyLockedArchive(cacheRoot, input);
+    }
+  } catch { throw cacheFailure("existing archive cache is invalid"); }
+}
 export async function checkFrameworkBundle(options = {}) {
   const root = resolve(options.repositoryRoot ?? repositoryRoot);
   const manifestPath = options.manifestPath ?? join(root, "tools", "framework-bundle", "manifest.json");
@@ -31,6 +47,7 @@ export async function checkFrameworkBundle(options = {}) {
   let licenses; try { licenses = JSON.parse(await readFile(options.licensesPath ?? join(root, "tools", "framework-bundle", "licenses", "dependencies.json"), "utf8")); } catch (error) { throw cacheFailure("license inventory cannot be read", error); }
   validateLicenseInventory(licenses, manifest);
   const provenance = await readCMockGeneration(options.provenancePath ?? join(root, CMOCK_PROVENANCE_PATHS.outputDirectory, "cmock-generation.json"), { root, manifest, manifestSha256 });
+  await auditArchiveCache(options.cacheRoot ?? join(root, ".superpowers", "cache", "framework-bundle"), manifest);
   const preparedRoot = options.preparedRoot ?? join(root, ".superpowers", "runtime", "framework-bundle", "v2", manifestSha256);
   if (await existingDirectory(preparedRoot)) { try { await verifyPreparedFrameworkBundle({ root: preparedRoot, manifest, manifestSha256 }); } catch (error) { throw cacheFailure("prepared framework cache is invalid", error); } }
   return { manifestSha256, cMockProvenanceSha256: provenance.cMockProvenanceSha256 };

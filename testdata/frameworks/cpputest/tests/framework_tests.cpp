@@ -6,6 +6,9 @@
 #include <chrono>
 #include <cstdlib>
 #include <thread>
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 
 TEST_GROUP(Phase9)
 {
@@ -44,6 +47,10 @@ TEST(Phase9, MockParameterMismatch)
 
 TEST(Phase9, Crash)
 {
+#if defined(_WIN32)
+    SetErrorMode(SEM_NOGPFAULTERRORBOX | SEM_FAILCRITICALERRORS);
+    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+#endif
     std::abort();
 }
 

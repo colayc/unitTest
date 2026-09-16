@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -42,6 +43,65 @@ test("accepts one pnpm argument separator but rejects extra separators or argume
     assert.throws(() => parseVerifyFrameworkFixtureArguments(invalid), /usage/u);
   }
 });
+
+function classificationExecutor(framework, crashError) {
+  const identities = ["test_pass", "test_assertion_failure", "test_skipped", "test_cmock_expectation_failure", "test_crash", "test_timeout"];
+  return async (_command, args) => {
+    if (framework === "cpputest") {
+      if (args.includes("Crash")) throw crashError;
+      if (args.includes("Timeout")) throw Object.assign(new Error("timeout"), { code: null, signal: "SIGTERM", killed: true });
+      if (args.includes("AssertionFailure")) throw Object.assign(new Error("assertion"), { code: 1, stdout: "CHECK failed" });
+      if (args.some((arg) => /Mock/u.test(arg))) throw Object.assign(new Error("mock"), { code: 1, stdout: "Mock Failure" });
+      return { stdout: args.includes("Skipped") ? "IGNORED" : "OK" };
+    }
+    if (args.includes("-S")) {
+      const directory = join(args[args.indexOf("-B") + 1], ".unit-test-ide", "3599003af019a34669698d4cd38b175ce63ea767e834dc13cec3d415b1345988");
+      await mkdir(directory, { recursive: true });
+      await writeFile(join(directory, "manifest.json"), JSON.stringify({ cases: identities.map((identity) => ({ identity, name: identity })) }));
+    } else if (args.includes("list")) {
+      await writeFile(args.at(-1), identities.map((identity) => JSON.stringify({ magic: "unit-test-ide", protocol: "utide.runner.v1", record: "case", identity, case: identity })).join("\n"));
+    } else if (args.includes("run")) {
+      const identity = args[args.indexOf("--utide-case") + 1];
+      if (identity === "test_crash") throw crashError;
+      if (identity === "test_timeout") throw Object.assign(new Error("timeout"), { code: null, signal: "SIGTERM", killed: true });
+      const status = identity === "test_skipped" ? "skipped" : identity === "test_pass" ? "passed" : "failed";
+      await writeFile(args.at(-1), JSON.stringify({ magic: "unit-test-ide", protocol: "utide.runner.v1", record: "testFinished", identity, status }));
+      return { stdout: "CMock expected mismatch" };
+    }
+    return { stdout: "" };
+  };
+}
+for (const framework of ["cpputest", "unity"]) {
+  test(`${framework} accepts an observed abort signal as crash evidence`, async () => {
+    const result = await verifyFrameworkFixtures({ repositoryRoot, cmake: "/tools/cmake", generator: "/tools/generator", toolchains: ["gcc"], frameworks: [framework], platform: "linux", execFile: classificationExecutor(framework, Object.assign(new Error("abort"), { code: null, signal: "SIGABRT", killed: false })) });
+    assert.equal(result[0].scenarios.find((scenario) => scenario.id === "crash").outcome, "crash");
+  });
+  test(`${framework} rejects ordinary POSIX exit 3 as crash evidence`, async () => {
+    await assert.rejects(verifyFrameworkFixtures({ repositoryRoot, cmake: "/tools/cmake", generator: "/tools/generator", toolchains: ["gcc"], frameworks: [framework], platform: "linux", execFile: classificationExecutor(framework, Object.assign(new Error("ordinary exit"), { code: 3 })) }), (error) => error.code === "FRAMEWORK_SCENARIO_MISMATCH");
+  });
+  for (const [reason, fields] of [["spawn ENOENT", { code: "ENOENT" }], ["deadline kill", { code: null, signal: "SIGTERM", killed: true }], ["ordinary exit", { code: 1 }]]) {
+    test(`${framework} rejects ${reason} as crash evidence`, async () => {
+      await assert.rejects(verifyFrameworkFixtures({ repositoryRoot, cmake: "C:/tools/cmake.exe", generator: "C:/tools/generator.exe", toolchains: ["msvc"], frameworks: [framework], platform: "win32", execFile: classificationExecutor(framework, Object.assign(new Error("C:/private/path secret diagnostic"), fields)) }), (error) => error.code === "FRAMEWORK_SCENARIO_MISMATCH" && !error.message.includes("private"));
+    });
+  }
+}
+test("verifier CLI redacts real spawn paths and catches malformed arguments without a stack", () => {
+  const script = join(repositoryRoot, "tools/framework-bundle/verify-fixtures.mjs");
+  const result = spawnSync(process.execPath, [script, "--cmake", "C:/private/nonexistent-cmake.exe", "--generator", "C:/private/generator.exe", "--toolchains", process.platform === "win32" ? "msvc" : "gcc", "--frameworks", "cpputest"], { encoding: "utf8", windowsHide: true });
+  assert.equal(result.status, 1);
+  assert.equal(result.stderr, "verify-fixtures: FRAMEWORK_CONFIGURE_FAILED: CppUTest configure failed\n");
+  const malformed = spawnSync(process.execPath, [script, "--secret=C:/private/input"], { encoding: "utf8", windowsHide: true });
+  assert.equal(malformed.status, 1);
+  assert.doesNotMatch(malformed.stderr, /private|at parse|file:\/\//u);
+});
+for (const framework of ["cpputest", "unity"]) {
+  for (const stage of ["configure", "build"]) {
+    test(`${framework} ${stage} failure exposes only a stable redacted diagnostic`, async () => {
+      const failure = Object.assign(new Error("C:/private/secret.exe"), { code: 1, stdout: "/home/private/source.c", stderr: "token=private-value C:\\private\\source.c" });
+      await assert.rejects(verifyFrameworkFixtures({ repositoryRoot, cmake: "C:/private/cmake.exe", generator: "C:/private/generator.exe", toolchains: ["msvc"], frameworks: [framework], platform: "win32", execFile: async (_cmd, args) => { if (stage === "configure" || args.includes("--build")) throw failure; return {}; } }), (error) => error.code === `FRAMEWORK_${stage.toUpperCase()}_FAILED` && !JSON.stringify({ message: error.message, ...error }).includes("private"));
+    });
+  }
+}
 
 test("plans a Windows MSVC fixture build and classifies every CppUTest scenario", async () => {
   const calls = [];
@@ -91,7 +151,7 @@ test("plans a Windows MSVC fixture build and classifies every CppUTest scenario"
   assert.ok(calls.filter((call) => call.arguments_.includes("--build")).every((call) => call.options.timeout === 120_000));
   const timeout = calls.find((call) => call.arguments_.includes("Timeout"));
   assert.equal(timeout.options.timeout, 1_000);
-  assert.ok(calls.find((call) => call.arguments_.includes("Crash")).arguments_.includes("-p"));
+  assert.ok(!calls.find((call) => call.arguments_.includes("Crash")).arguments_.includes("-p"), "crash must terminate the observed process, not an unsupported or forked runner mode");
   assert.ok(calls.filter((call) => call.arguments_.includes("Pass")).every((call) => call.options.timeout === 10_000));
 });
 
@@ -101,7 +161,7 @@ test("plans clang-cl and Linux GCC compilers and rejects incompatible toolchains
     calls.push({ arguments_, options });
     if (arguments_.includes("AssertionFailure")) throw Object.assign(new Error("failed"), { code: 1, stdout: "CHECK failed", stderr: "" });
     if (arguments_.some((argument) => /Mock/u.test(argument))) throw Object.assign(new Error("mock failed"), { code: 1, stdout: "Mock Failure", stderr: "" });
-    if (arguments_.includes("Crash")) throw Object.assign(new Error("crashed"), { code: 3, stdout: "", stderr: "" });
+    if (arguments_.includes("Crash")) throw Object.assign(new Error("crashed"), { code: null, signal: "SIGABRT", stdout: "", stderr: "" });
     if (arguments_.includes("Timeout")) throw Object.assign(new Error("timed out"), { code: null, signal: "SIGTERM", killed: true, stdout: "", stderr: "" });
     return { stdout: arguments_.includes("Skipped") ? "IGNORED" : "OK", stderr: "" };
   };
