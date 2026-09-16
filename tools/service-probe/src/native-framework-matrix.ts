@@ -738,6 +738,18 @@ function classifyRunEvidence(
   results: readonly ResultItemEvidence[],
 ): FrameworkScenarioEvidence["classification"] {
   const details = results.flatMap(({ failureDetails }) => failureDetails);
+  if (context.id === "all") {
+    const selected = new Set(context.selection.all.itemIds);
+    const observed = new Set(results.map(({ itemId }) => itemId));
+    if (
+      run.outcome !== "failed" || selected.size < 2 || observed.size < 2 ||
+      results.length < 2 || results.some(({ itemId }) => !selected.has(itemId)) ||
+      !results.some(({ outcome }) => outcome === "failed")
+    ) {
+      throw new Error("all scenario did not produce bound aggregate Service result evidence");
+    }
+    return "aggregate";
+  }
   if (details.some(({ category }) => category === "framework_output_invalid")) return "malformed-output";
   if (details.some(({ subtype }) => subtype?.startsWith("mock_") || subtype === "mock_failure")) return "mock-expectation";
   if (details.some(({ category }) => category === "test_process_crash")) return "crash";

@@ -412,7 +412,8 @@ function fakeResults(
   const malformedId = `utid-v1-${digest(`malformed-container:${frameworkId}`)}`;
   const opaqueId = `utid-v1-${digest(`opaque-container:${frameworkId}`)}`;
   const selected = request.selection as { itemIds?: string[]; containerIds?: string[] };
-  const selectedItem = selected.itemIds?.[0] ?? `utid-v1-${digest(`${frameworkId}:Pass`)}`;
+  const selectedItems = selected.itemIds ?? [];
+  const selectedItem = selectedItems[0] ?? `utid-v1-${digest(`${frameworkId}:Pass`)}`;
   const make = (
     outcome: string,
     failureDetails: Array<Record<string, unknown>> = [],
@@ -422,8 +423,13 @@ function fakeResults(
     failureDetails, outputRefs: [], partial: false, ...extra,
   });
   const assertion = { category: "assertion_failure", evidenceRefs: [], locations: [], message: "redacted" };
+  const mock = { ...assertion, subtype: "mock_missing_call" };
   switch (scenario) {
-    case "all": return [make("passed"), make("failed", [assertion], { itemId: `utid-v1-${digest("aggregate-failure")}` })];
+    case "all": return [
+      make("passed", [], { itemId: selectedItems[0] }),
+      make("failed", [assertion], { itemId: selectedItems[1] }),
+      make("failed", [mock], { itemId: selectedItems[2] }),
+    ];
     case "assertion-failure":
     case "failed-rerun": return [make("failed", [assertion])];
     case "cancel": return [make("cancelled")];
@@ -432,7 +438,7 @@ function fakeResults(
     case "reconnect-replay":
     case "single": return [make("passed")];
     case "malformed-output": return [make("errored", [{ category: "framework_output_invalid", evidenceRefs: [], locations: [], message: "redacted" }], { containerId: malformedId })];
-    case "mock-failure": return [make("failed", [{ ...assertion, subtype: "mock_missing_call" }])];
+    case "mock-failure": return [make("failed", [mock])];
     case "opaque-fallback": return [make("passed", [], { containerId: opaqueId, itemId: opaqueId })];
     case "repeat": return [make("passed"), make("passed", [], { iteration: 2 })];
     case "service-restart": return [make("not_run", [], { reason: "service_restarted" })];
@@ -459,6 +465,11 @@ test("runner emits the exact 17 scenarios and derives every selection from the c
       ["timed-out", "timeout"],
     ],
   );
+  const aggregateEvidence = Buffer.from(await fixture.client.readArtifact(
+    "artifact-task-all-cpputest-clang-test-results",
+  )).toString("utf8");
+  assert.match(aggregateEvidence, /"subtype":"mock_missing_call"/u);
+  assert.equal(result.scenarios.find(({ id }) => id === "all")?.classification, "aggregate");
   const itemIds = new Set(fakeCatalogItems("cpputest").map(({ id }) => id));
   const containerIds = new Set([
     `utid-v1-${digest("container:cpputest")}`,
