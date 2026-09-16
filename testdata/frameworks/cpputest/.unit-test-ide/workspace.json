@@ -1,0 +1,17 @@
+{
+  "version": 2,
+  "projects": [
+    {
+      "id": "cpputest-fixture",
+      "sourceDir": ".",
+      "fallback": {
+        "configurations": ["Debug"]
+      },
+      "tests": {
+        "containers": [
+          { "ctestName": "cpputest.framework", "framework": "cpputest" }
+        ]
+      }
+    }
+  ]
+}
