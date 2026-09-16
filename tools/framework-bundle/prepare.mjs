@@ -46,12 +46,17 @@ async function inspectArchive(archive) {
   const [names, verbose] = await Promise.all([execFile(tar, ["-tf", archive], options), execFile(tar, ["-tvf", archive], options)]);
   const listed = names.stdout.split(/\r?\n/u).filter(Boolean), lines = verbose.stdout.split(/\r?\n/u).filter(Boolean);
   if (listed.length !== lines.length) throw failure("FRAMEWORK_ARCHIVE_UNSAFE", "archive listings disagree");
+  return parseArchiveEntries(listed, lines);
+}
+function parseArchiveEntries(listed, lines) {
+  if (!Array.isArray(listed) || !Array.isArray(lines) || listed.length !== lines.length) throw failure("FRAMEWORK_ARCHIVE_UNSAFE", "archive listings disagree");
   return listed.map((path, index) => {
     const line = lines[index]; const marker = line[0];
     if (marker !== "-" && marker !== "d") throw failure("FRAMEWORK_ARCHIVE_UNSAFE", "archive has a non-regular entry");
     const fields = line.trim().split(/\s+/u); const date = fields.findIndex((part) => /^\d{4}-\d\d-\d\d$/u.test(part) || /^[A-Z][a-z]{2}$/u.test(part));
-    if (date < 1 || !/^\d+$/u.test(fields[date - 1])) throw failure("FRAMEWORK_ARCHIVE_UNSAFE", "archive has an unparseable entry size");
-    const size = Number(fields[date - 1]); if (!Number.isSafeInteger(size)) throw failure("FRAMEWORK_ARCHIVE_UNSAFE", "archive has an invalid entry size");
+    const sizeToken = date >= 1 ? fields[date - 1] : /^\d+$/u.test(fields[1] ?? "") ? fields[4] : undefined;
+    if (!/^\d+$/u.test(sizeToken ?? "")) throw failure("FRAMEWORK_ARCHIVE_UNSAFE", "archive has an unparseable entry size");
+    const size = Number(sizeToken); if (!Number.isSafeInteger(size)) throw failure("FRAMEWORK_ARCHIVE_UNSAFE", "archive has an invalid entry size");
     return { path, type: marker === "d" ? "directory" : "file", size };
   });
 }
@@ -59,7 +64,7 @@ async function extractArchive(archive, staging) {
   let tar = tarExecutable(); try { await lstat(tar); } catch { if (process.platform !== "win32") tar = "/bin/tar"; }
   await execFile(tar, ["-xf", archive, "-C", staging], { shell: false, windowsHide: true, timeout: 120_000, maxBuffer: 8 * 1024 * 1024, env: { ...process.env, LANG: "C", LC_ALL: "C" } });
 }
-async function fsyncFile(path) { const handle = await open(path, "r"); try { await handle.sync(); } finally { await handle.close(); } }
+async function fsyncFile(path) { const handle = await open(path, "r+"); try { await handle.sync(); } finally { await handle.close(); } }
 function trustedUrl(url, initial = false) {
   let parsed; try { parsed = new URL(url); } catch { throw failure("FRAMEWORK_ARCHIVE_UNTRUSTED", "archive URL is invalid"); }
   const host = parsed.hostname.toLowerCase();
@@ -125,5 +130,5 @@ export async function prepareFrameworkBundle(options = {}) {
     return { root: target, manifest, manifestSha256, reused: false };
   } catch (error) { await rm(staging, { recursive: true, force: true }); throw error; }
 }
-export const __testing = Object.freeze({ mkdirp: async (path) => mkdir(path, { recursive: true }), inspectArchive, extractArchive, trustedUrl });
+export const __testing = Object.freeze({ mkdirp: async (path) => mkdir(path, { recursive: true }), fsyncFile, inspectArchive, parseArchiveEntries, extractArchive, trustedUrl });
 if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) prepareFrameworkBundle().then((result) => process.stdout.write(`${JSON.stringify(result)}\n`)).catch((error) => { process.stderr.write(`framework-bundle: ${error.message}\n`); process.exitCode = 1; });

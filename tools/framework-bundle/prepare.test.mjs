@@ -24,6 +24,15 @@ test("archive validator bounds entry count, depth, and expanded bytes", () => {
 test("archive validator requires the declared source root to be a directory", () => {
   assert.throws(() => validateArchiveEntries([{ path: "CMock-2.7.0", type: "file", size: 0 }], { sourceDirectory: "CMock-2.7.0" }), (error) => error?.code === "FRAMEWORK_ARCHIVE_UNSAFE");
 });
+test("download durability sync opens the completed archive with write access on Windows", async () => {
+  const root = await mkdtemp(join(tmpdir(), "utide-framework-fsync-"));
+  const archive = join(root, "archive.tgz");
+  try { await writeFile(archive, "locked archive"); await assert.doesNotReject(__testing.fsyncFile(archive)); }
+  finally { await (await import("node:fs/promises")).rm(root, { recursive: true, force: true }); }
+});
+test("archive inspection accepts Windows tar listings with locale-mangled month tokens", () => {
+  assert.deepEqual(__testing.parseArchiveEntries(["CMock-2.7.0/", "CMock-2.7.0/lib/cmock.rb"], ["drwxr-xr-x  0 501    20          0 5�� 27  2020 CMock-2.7.0/", "-rw-r--r--  0 501    20       1234 5�� 27  2020 CMock-2.7.0/lib/cmock.rb"]), [{ path: "CMock-2.7.0/", type: "directory", size: 0 }, { path: "CMock-2.7.0/lib/cmock.rb", type: "file", size: 1234 }]);
+});
 async function prepareFixture({ entries, actualLicense = Buffer.from("license"), expectedLicense = actualLicense, extraRootFile = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), "utide-framework-")); const cacheRoot = join(root, "cache"); const runtimeRoot = join(root, "runtime");
   const descriptions = [["cpputest", "cpputest-4.0", "CMakeLists.txt"], ["unity", "Unity-2.6.1", "src/unity.c"], ["cmock", "CMock-2.7.0", "lib/cmock.rb"]];
