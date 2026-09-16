@@ -29,6 +29,7 @@ function csv(value, allowed) {
 }
 
 export function parseVerifyFrameworkFixtureArguments(arguments_) {
+  if (Array.isArray(arguments_) && arguments_[0] === "--") arguments_ = arguments_.slice(1);
   if (!Array.isArray(arguments_) || arguments_.length !== 8 || arguments_[0] !== "--cmake" || arguments_[2] !== "--generator" || arguments_[4] !== "--toolchains" || arguments_[6] !== "--frameworks") usage();
   const [cmake, generator, toolchains, frameworks] = [arguments_[1], arguments_[3], arguments_[5], arguments_[7]];
   if (!absolute(cmake) || !absolute(generator)) usage();

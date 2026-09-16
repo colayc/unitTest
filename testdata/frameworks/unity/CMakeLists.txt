@@ -29,6 +29,10 @@ target_include_directories(utide_cmock PUBLIC
   "${CMAKE_CURRENT_SOURCE_DIR}/mocks"
 )
 set_target_properties(utide_cmock PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED YES)
+if(MSVC)
+  # The MSVC C11 library has no max_align_t; use CMock's supported fallback.
+  target_compile_definitions(utide_cmock PRIVATE UNITY_EXCLUDE_STDDEF_H=1)
+endif()
 
 add_executable(phase9_unity tests/framework_tests.c tests/fixture_runtime.c)
 target_include_directories(phase9_unity PRIVATE

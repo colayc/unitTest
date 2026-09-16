@@ -16,13 +16,16 @@
     "prepare:cmake-bundle": "node tools/cmake-bundle/prepare.mjs",
     "prepare:coverage-bundle": "node tools/coverage-bundle/prepare.mjs",
     "prepare:framework-bundle": "node tools/framework-bundle/prepare.mjs",
+    "check:framework-bundle": "node tools/framework-bundle/check.mjs",
+    "update:cmock-fixture": "node tools/framework-bundle/update-cmock-fixture.mjs",
+    "verify:framework-fixtures": "node tools/framework-bundle/verify-fixtures.mjs",
     "prepare:release-manifest": "node tools/release/manifest.mjs --config tools/release/release-config.json",
     "release:stage": "node tools/release/stage.mjs",
     "check:coverage-bundle": "node tools/coverage-bundle/prepare.mjs --check",
     "test:coverage-gen": "node --test tools/coverage-gen/generate.test.mjs",
     "test:cmake-bundle": "node --test tools/cmake-bundle/prepare.test.mjs",
     "test:coverage-bundle": "node --test tools/coverage-bundle/manifest.test.mjs tools/coverage-bundle/prepare.test.mjs",
-    "test:framework-bundle": "node --test tools/framework-bundle/prepare.test.mjs tools/linux-offline/run.test.mjs",
+    "test:framework-bundle": "node --test tools/framework-bundle/manifest.test.mjs tools/framework-bundle/prepare.test.mjs tools/framework-bundle/cmock-provenance.test.mjs tools/framework-bundle/check.test.mjs tools/framework-bundle/update-cmock-fixture.test.mjs tools/framework-bundle/verify-fixtures.test.mjs tools/linux-offline/run.test.mjs",
     "test:release-producer": "node --test tools/release/producer/source-manifest.test.mjs tools/release/producer/runtime-inventory.test.mjs tools/release/producer/provenance.test.mjs tools/release/producer/trusted-run.test.mjs tools/release/producer/workflow-contract.test.mjs",
     "check:phase9-gates": "node tools/phase9/render.mjs --registry tools/phase9/gates.json --baseline docs/superpowers/evidence/phase9/baseline.json --receipts docs/superpowers/evidence/phase9/receipts --repository-root . --json-out docs/superpowers/evidence/phase9/gate-matrix.json --markdown-out docs/superpowers/evidence/phase9/gate-matrix.md --check",
     "test:phase9-gates": "node --test tools/phase9/validate.test.mjs tools/phase9/audit.test.mjs",
@@ -33,7 +36,7 @@
     "test": "pnpm run test:release-producer && pnpm run test:coverage-gen && pnpm run test:cmake-bundle && pnpm run test:coverage-bundle && pnpm run test:framework-bundle && pnpm run test:phase9-gates && pnpm run test:workspace && pnpm -r --if-present test && pnpm run test:go",
     "test:e2e": "pnpm --filter @unit-test-ide/service-probe test:e2e",
     "test:e2e:native": "pnpm --filter @unit-test-ide/service-probe test:e2e:native",
-    "verify": "pnpm check:protocol-generated && pnpm check:coverage-generated && pnpm check:phase9-gates && pnpm build && pnpm test && pnpm test:go:race && pnpm test:e2e"
+    "verify": "pnpm check:protocol-generated && pnpm check:coverage-generated && pnpm check:phase9-gates && pnpm check:framework-bundle && pnpm build && pnpm test && pnpm test:go:race && pnpm test:e2e"
   },
   "devDependencies": {
     "@types/node": "24.13.3",

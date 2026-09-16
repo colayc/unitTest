@@ -20,3 +20,51 @@ bundle at `.superpowers/runtime/framework-bundle/v2/<manifest SHA-256>/`.
 Existing ready bundles are re-verified and reused; they are never deleted or
 replaced. `READY` is written only after source markers, license bytes, and all
 three source-tree digests have been verified.
+
+## Maintainer preparation and acceptance
+
+Run from the repository root in a Windows developer shell with MSVC, clang-cl
+and Ninja available. Docker must support Linux containers for the explicit
+maintainer update only:
+
+```powershell
+pnpm prepare:cmake-bundle
+pnpm prepare:framework-bundle
+pnpm update:cmock-fixture
+pnpm check:framework-bundle
+go -C apps/test-service build -trimpath -o ../../build/unity-runner-generator.exe ./cmd/unity-runner-generator
+$cmake = (node tools/cmake-bundle/prepare.mjs | ConvertFrom-Json).executable
+$generator = (Resolve-Path build\unity-runner-generator.exe).Path
+pnpm verify:framework-fixtures -- --cmake $cmake --generator $generator --toolchains msvc,clang-cl --frameworks cpputest,unity
+```
+
+`update:cmock-fixture` is maintainer-only: it uses the pinned container without
+network access to regenerate the committed `MockDependency.c`,
+`MockDependency.h`, and provenance. Review and commit their changes together.
+Generated mock sources are never created by the product or ordinary CI.
+`check:framework-bundle` verifies the lock, license inventory, provenance, and
+any existing prepared cache offline; an absent cache does not trigger a download.
+The ordinary `test` and `verify` chains are generator-free: they never invoke
+Docker, Ruby, or Ceedling. The updater's unit tests use controlled executors,
+not the container. Preparation and native compilation are explicit operations,
+outside `verify`.
+
+For Linux GCC acceptance, build `build/unity-runner-generator` from
+`apps/test-service/cmd/unity-runner-generator`, prepare the same bundles, then run:
+
+```sh
+pnpm verify:framework-fixtures -- --cmake /absolute/path/to/cmake --generator "$PWD/build/unity-runner-generator" --toolchains gcc --frameworks cpputest,unity
+```
+
+The native verifier requires every requested compiler; missing compilers fail
+rather than skip. Its stdout summary contains only framework/toolchain IDs and
+contracted scenario outcomes, not local paths or credentials. It does not write
+P4 `framework-report.json`, receipts, or gate status. F2 owns hosted four-toolchain
+evidence (MSVC, clang-cl, GCC, Clang); F1 local acceptance is not that evidence.
+`releaseReady` remains false. Windows signing, third-party license/legal human
+approval, and Phase 8 documentation closeout remain the three approved deferrals.
+
+The Unity fixture gives only the CMock library target the
+`UNITY_EXCLUDE_STDDEF_H=1` compatibility definition on MSVC-compatible compilers:
+the MSVC C11 standard library lacks `max_align_t`, so CMock uses its supported
+alignment fallback. No vendored source, archive hash, or generated mock is changed.

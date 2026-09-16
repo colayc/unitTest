@@ -56,7 +56,36 @@ UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS=gcc,clang pnpm test:e2e:native
 
 环境变量只能包含当前平台允许的 family；重复、未知或跨平台 family 会在 Service 启动前失败。CI 总是设置完整 required family，因此不能把缺失工具链降级为 `skipped`。
 
-## Hosted CI
+## Phase 9 F1 静态 framework fixture 验收
+
+F1 的 fixture 验证独立于 Service native E2E；它验证锁定的 CppUTest/CppUMock
+八个场景和 Unity/CMock 六个场景，不生成或替代 P4 的正式矩阵报告。
+在具有 MSVC、clang-cl、Ninja 的 Windows developer shell 中执行：
+
+```powershell
+pnpm prepare:cmake-bundle
+pnpm prepare:framework-bundle
+pnpm update:cmock-fixture
+pnpm check:framework-bundle
+go -C apps/test-service build -trimpath -o ../../build/unity-runner-generator.exe ./cmd/unity-runner-generator
+$cmake = (node tools/cmake-bundle/prepare.mjs | ConvertFrom-Json).executable
+$generator = (Resolve-Path build\unity-runner-generator.exe).Path
+pnpm verify:framework-fixtures -- --cmake $cmake --generator $generator --toolchains msvc,clang-cl --frameworks cpputest,unity
+```
+
+`update:cmock-fixture` 仅供维护者显式使用，需要 Linux Docker；生成文件与 provenance
+一起提交。普通 CI 的 `test`/`verify` 只检查这些已提交输入，不运行 Docker、Ruby
+或 Ceedling。网络准备和 native 编译不进入普通 `verify`。离线
+`check:framework-bundle` 不下载缺失缓存，已有缓存必须完整通过校验。
+每个请求的 compiler 都是必需项，缺失即失败，不能记为 skip。
+
+本地 stdout 验收摘要不包含绝对路径、环境变量或凭据，且不写
+`framework-report.json`、P4 receipt 或 gate status。F2 负责 hosted 四工具链
+（MSVC、clang-cl、GCC、Clang）正式证据；F1 通过不代表 P4 gate 已通过。
+license inventory 不等于第三方 license/legal 人工审批。Phase 8 的正式 Windows
+签名、人工 legal 审批、文档收尾仍为已批准的三个 DEFERRED 项，`releaseReady=false`。
+
+## Hosted CI（Service native E2E）
 
 `.github/workflows/foundation.yml` 使用两个固定 job：
 

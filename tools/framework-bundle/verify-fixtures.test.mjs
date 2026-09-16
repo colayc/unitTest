@@ -33,6 +33,16 @@ test("rejects Unity runner result paths that escape the controlled directory", (
   assert.throws(() => controlledUnityResultPath("C:/fixture/results", "C:/outside.jsonl"), /controlled directory/u);
 });
 
+test("accepts one pnpm argument separator but rejects extra separators or arguments", () => {
+  const args = ["--cmake", "C:/tools/cmake.exe", "--generator", "C:/tools/generator.exe", "--toolchains", "msvc,clang-cl", "--frameworks", "cpputest,unity"];
+  assert.deepEqual(parseVerifyFrameworkFixtureArguments(["--", ...args]), {
+    cmake: "C:/tools/cmake.exe", generator: "C:/tools/generator.exe", toolchains: ["msvc", "clang-cl"], frameworks: ["cpputest", "unity"],
+  });
+  for (const invalid of [["--", "--", ...args], [...args, "--"], ["--", ...args, "extra"]]) {
+    assert.throws(() => parseVerifyFrameworkFixtureArguments(invalid), /usage/u);
+  }
+});
+
 test("plans a Windows MSVC fixture build and classifies every CppUTest scenario", async () => {
   const calls = [];
   const fakeExecFile = async (command, arguments_, options) => {
@@ -239,4 +249,6 @@ test("fixture is closed, ordered, and never emits a P4 report", async () => {
   assert.equal(fixture.scenarios.find((scenario) => scenario.id === "timeout").outcome, "timeout");
   const verifier = await readFile(resolve(repositoryRoot, "tools/framework-bundle/verify-fixtures.mjs"), "utf8");
   assert.doesNotMatch(verifier, /framework-report\.json/u);
+  const unityCmake = await readFile(join(repositoryRoot, "testdata/frameworks/unity/CMakeLists.txt"), "utf8");
+  assert.match(unityCmake, /if\(MSVC\)\s*(?:#[^\n]*\n\s*)*target_compile_definitions\(utide_cmock PRIVATE UNITY_EXCLUDE_STDDEF_H=1\)\s*endif\(\)/u);
 });

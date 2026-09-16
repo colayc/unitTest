@@ -81,6 +81,42 @@ test("workspace pins supported toolchains", async () => {
   );
 });
 
+test("ordinary verification checks committed framework inputs without running maintainer generation", async () => {
+  const { scripts } = JSON.parse(await readFile("package.json", "utf8"));
+  for (const [name, file] of Object.entries({
+    "check:framework-bundle": "check.mjs",
+    "prepare:framework-bundle": "prepare.mjs",
+    "update:cmock-fixture": "update-cmock-fixture.mjs",
+    "verify:framework-fixtures": "verify-fixtures.mjs",
+  })) assert.equal(scripts[name], `node tools/framework-bundle/${file}`);
+  const tests = (await readdir("tools/framework-bundle")).filter((name) => name.endsWith(".test.mjs"));
+  for (const name of tests) assert.ok(scripts["test:framework-bundle"].split(/\s+/u).includes(`tools/framework-bundle/${name}`), `${name} is not wired`);
+  assert.ok(scripts["test:framework-bundle"].includes("tools/linux-offline/run.test.mjs"));
+  const steps = scripts.verify.split(/\s*&&\s*/u);
+  assert.ok(steps.indexOf("pnpm check:framework-bundle") > steps.indexOf("pnpm check:coverage-generated"));
+  assert.ok(steps.indexOf("pnpm check:framework-bundle") < steps.indexOf("pnpm build"));
+  for (const name of ["test", "verify"]) {
+    assert.doesNotMatch(scripts[name], /update:cmock-fixture|docker|ruby|ceedling/iu);
+    assert.doesNotMatch(scripts[name], /pnpm (?:prepare:framework-bundle|verify:framework-fixtures)/u);
+  }
+});
+
+test("runtime and workflow sources cannot execute the maintainer-only CMock generator", async () => {
+  const files = execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ".github/workflows/*.yml", "apps", "sdk", "tools/service-probe/src"], { encoding: "utf8", windowsHide: true }).split("\0").filter(Boolean);
+  const forbidden = /lib[\\/]cmock\.rb|update-cmock-fixture|\bruby\b|docker\s+run/iu;
+  for (const file of files.filter((path) => /\.(?:yml|yaml|[cm]?js|tsx?|go|json|cmake|txt|ps1|sh|bat|cmd|c|cpp|h|hpp)$/iu.test(path))) {
+    const source = await readFile(file, "utf8");
+    if (!forbidden.test(source)) continue;
+    // These validators compare inert manifest identity/marker data, not generation commands.
+    if (["tools/service-probe/src/linux-framework-inputs.ts", "tools/service-probe/src/linux-framework-inputs.test.ts"].includes(file)) {
+      assert.doesNotMatch(source, /\b(?:execFile|execSync|spawn|spawnSync|exec)\s*\([^;]*cmockGenerator/u, `${file} must not execute CMock manifest identity data`);
+      for (const line of source.split(/\r?\n/u).filter((line) => forbidden.test(line))) {
+        assert.match(line, /cmockGenerator:\s*\{|^function marker\(/u, `${file} contains generator use outside inert identity data`);
+      }
+    } else assert.doesNotMatch(source, forbidden, `${file} crosses the maintainer generation boundary`);
+  }
+});
+
 test("Phase 9 performance baseline job contract is fixed and reviewed", async () => {
   const workflow = await readFile(".github/workflows/phase9-gates.yml", "utf8");
   const start = workflow.indexOf("  phase9-performance:");
