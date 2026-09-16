@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { lstat, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, readdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -41,6 +41,11 @@ async function prepareFixture({ entries, actualLicense = Buffer.from("license"),
 test("preparation publishes a digest-keyed v2 bundle and reuses a verified target", async () => {
   const fixture = await prepareFixture(); assert.equal(fixture.result.root, join(fixture.runtimeRoot, "v2", fixture.result.manifestSha256)); assert.equal(fixture.result.reused, false); assert.deepEqual(await readdir(fixture.runtimeRoot), ["v2"]);
   const repeated = await prepareFrameworkBundle({ cacheRoot: fixture.cacheRoot, runtimeRoot: fixture.runtimeRoot, operations: fixture.operations }); assert.equal(repeated.reused, true); assert.equal((await lstat(join(repeated.root, "READY"))).isFile(), true);
+});
+test("preparation rejects a symlinked runtime component before reusing a bundle", async () => {
+  const fixture = await prepareFixture(); const linkedRuntime = join(fixture.root, "linked-runtime");
+  await symlink(fixture.runtimeRoot, linkedRuntime, process.platform === "win32" ? "junction" : "dir");
+  await assert.rejects(prepareFrameworkBundle({ cacheRoot: fixture.cacheRoot, runtimeRoot: linkedRuntime, operations: fixture.operations }), (error) => error?.code === "FRAMEWORK_PATH_UNSAFE");
 });
 test("preparation rejects unsafe entries before extraction", async () => { await assert.rejects(prepareFixture({ entries: [{ path: "C:/escape", type: "file", size: 1 }] }), (error) => error?.code === "FRAMEWORK_ARCHIVE_UNSAFE"); });
 test("preparation rejects substituted license bytes", async () => { await assert.rejects(prepareFixture({ actualLicense: Buffer.from("substituted"), expectedLicense: Buffer.from("license") }), (error) => error?.code === "FRAMEWORK_LICENSE_MISMATCH"); });
