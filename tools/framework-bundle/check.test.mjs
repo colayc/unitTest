@@ -66,3 +66,26 @@ test("archive cache audit accepts a verified partial cache but rejects file link
     } finally { await rm(external, { force: true }); }
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+for (const [name, mutate] of [
+  ["extra root field", (value) => { value.unreviewed = true; }],
+  ["other GitHub repository", (value) => { value.dependencies[0].sourceLicenseUrl = "https://github.com/other/project/blob/" + value.dependencies[0].revision + "/COPYING"; }],
+  ["mutable branch", (value) => { value.dependencies[0].sourceLicenseUrl = "https://github.com/cpputest/cpputest/blob/master/COPYING"; }],
+  ["different revision", (value) => { value.dependencies[0].sourceLicenseUrl = "https://github.com/cpputest/cpputest/blob/" + "a".repeat(40) + "/COPYING"; }],
+  ["different license path", (value) => { value.dependencies[0].sourceLicenseUrl = value.dependencies[0].sourceLicenseUrl.replace("/COPYING", "/LICENSE"); }],
+  ["URL query", (value) => { value.dependencies[0].sourceLicenseUrl += "?raw=1"; }],
+  ["URL fragment", (value) => { value.dependencies[0].sourceLicenseUrl += "#extra"; }],
+  ["extra dependency field", (value) => { value.dependencies[0].extra = "unreviewed"; }],
+  ["null dependency", (value) => { value.dependencies[0] = null; }],
+]) {
+  test(`license inventory rejects ${name}`, async () => {
+    const root = await fixture();
+    try {
+      const path = join(root, "tools/framework-bundle/licenses/dependencies.json");
+      const value = JSON.parse(await readFile(path, "utf8"));
+      mutate(value);
+      await writeFile(path, JSON.stringify(value));
+      await assert.rejects(checkFrameworkBundle({ repositoryRoot: root }), (error) => error.code === "FRAMEWORK_CACHE_INVALID");
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+}

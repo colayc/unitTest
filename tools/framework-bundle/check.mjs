@@ -20,9 +20,19 @@ async function existingDirectory(path) {
   }
 }
 function validateLicenseInventory(value, manifest) {
-  const expected = manifest.frameworks.map((framework) => ({ id: framework.id, version: framework.version, revision: framework.revision, spdx: framework.license.spdx, archiveLicensePath: framework.license.path, archiveLicenseSha256: framework.license.sha256 }));
-  if (!value || value.schemaVersion !== 1 || !Array.isArray(value.dependencies) || value.dependencies.length !== expected.length) throw cacheFailure("license inventory is invalid");
-  for (const [index, dependency] of value.dependencies.entries()) { const locked = expected[index]; if (!locked || Object.keys(dependency).length !== 7 || Object.entries(locked).some(([key, item]) => dependency[key] !== item) || typeof dependency.sourceLicenseUrl !== "string" || !dependency.sourceLicenseUrl.startsWith("https://github.com/")) throw cacheFailure("license inventory does not match the manifest"); }
+  const repositories = { cpputest: "cpputest/cpputest", unity: "ThrowTheSwitch/Unity", cmock: "ThrowTheSwitch/CMock" };
+  const exactKeys = (object, keys) => object !== null && typeof object === "object" && !Array.isArray(object)
+    && Object.keys(object).length === keys.length && keys.every((key) => Object.hasOwn(object, key));
+  const expected = manifest.frameworks.map((framework) => ({
+    id: framework.id, version: framework.version, revision: framework.revision, spdx: framework.license.spdx,
+    archiveLicensePath: framework.license.path, archiveLicenseSha256: framework.license.sha256,
+    sourceLicenseUrl: `https://github.com/${repositories[framework.id]}/blob/${framework.revision}/${framework.license.path}`,
+  }));
+  if (!exactKeys(value, ["schemaVersion", "dependencies"]) || value.schemaVersion !== 1 || !Array.isArray(value.dependencies) || value.dependencies.length !== expected.length) throw cacheFailure("license inventory is invalid");
+  for (const [index, dependency] of value.dependencies.entries()) {
+    const locked = expected[index];
+    if (!exactKeys(dependency, Object.keys(locked)) || Object.entries(locked).some(([key, item]) => dependency[key] !== item)) throw cacheFailure("license inventory does not match the manifest");
+  }
 }
 export async function auditArchiveCache(cacheRoot, manifest) {
   try {

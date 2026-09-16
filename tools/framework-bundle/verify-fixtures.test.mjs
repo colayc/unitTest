@@ -1,14 +1,47 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { promisify } from "node:util";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import test from "node:test";
 import { resolve } from "node:path";
-import { controlledUnityResultPath, parseVerifyFrameworkFixtureArguments, verifyFrameworkFixtures } from "./verify-fixtures.mjs";
+import { __testing, controlledUnityResultPath, parseVerifyFrameworkFixtureArguments, verifyFrameworkFixtures } from "./verify-fixtures.mjs";
 
 const repositoryRoot = resolve(import.meta.dirname, "..", "..");
+
+// Model a live child for positive deadline tests. Immediate maxBuffer/spawn failures
+// still reject immediately; only the verifier's timer may terminate a live child.
+function withDeadlineChild(executor) {
+  return (command, args, options) => {
+    const child = new EventEmitter();
+    const pending = new Promise((resolve, reject) => {
+      child.kill = () => { reject(Object.assign(new Error("deadline"), { code: null, signal: "SIGTERM", killed: true })); return true; };
+      queueMicrotask(() => child.emit("spawn"));
+      executor(command, args, options).then(resolve, (error) => {
+        if (!(args.includes("Timeout") || args.includes("test_timeout")) || error.code !== null || error.signal !== "SIGTERM") reject(error);
+      });
+    });
+    pending.child = child;
+    return pending;
+  };
+}
+
+test("deadline classification requires a started process and verifier-owned timer", async () => {
+  const execute = promisify(execFile);
+  const expired = await __testing.invoke(execute, process.execPath, ["-e", "setInterval(()=>{}, 10000)"], 50);
+  assert.equal(expired.timedOut, true);
+  const overflow = await __testing.invoke(execute, process.execPath, ["-e", "process.stdout.write('x'.repeat(9*1024*1024)); setInterval(()=>{},10000)"], 5000);
+  assert.equal(overflow.error.code, "ERR_CHILD_PROCESS_STDIO_MAXBUFFER");
+  assert.equal(overflow.timedOut, false);
+  const missing = await __testing.invoke(execute, join(repositoryRoot, "missing-native-tool.exe"), [], 1);
+  assert.equal(missing.error.code, "ENOENT");
+  assert.equal(missing.timedOut, false);
+  const killed = await __testing.invoke(async () => { throw Object.assign(new Error("killed"), { killed: true }); }, "", [], 1);
+  assert.equal(killed.timedOut, false);
+});
 
 test("parses the closed framework fixture CLI", () => {
   assert.deepEqual(parseVerifyFrameworkFixtureArguments([
@@ -44,12 +77,12 @@ test("accepts one pnpm argument separator but rejects extra separators or argume
   }
 });
 
-function classificationExecutor(framework, crashError) {
+function classificationExecutor(framework, crashError, timeoutError = Object.assign(new Error("timeout"), { code: null, signal: "SIGTERM", killed: true })) {
   const identities = ["test_pass", "test_assertion_failure", "test_skipped", "test_cmock_expectation_failure", "test_crash", "test_timeout"];
-  return async (_command, args) => {
+  return withDeadlineChild(async (_command, args) => {
     if (framework === "cpputest") {
       if (args.includes("Crash")) throw crashError;
-      if (args.includes("Timeout")) throw Object.assign(new Error("timeout"), { code: null, signal: "SIGTERM", killed: true });
+      if (args.includes("Timeout")) throw timeoutError;
       if (args.includes("AssertionFailure")) throw Object.assign(new Error("assertion"), { code: 1, stdout: "CHECK failed" });
       if (args.some((arg) => /Mock/u.test(arg))) throw Object.assign(new Error("mock"), { code: 1, stdout: "Mock Failure" });
       return { stdout: args.includes("Skipped") ? "IGNORED" : "OK" };
@@ -63,25 +96,29 @@ function classificationExecutor(framework, crashError) {
     } else if (args.includes("run")) {
       const identity = args[args.indexOf("--utide-case") + 1];
       if (identity === "test_crash") throw crashError;
-      if (identity === "test_timeout") throw Object.assign(new Error("timeout"), { code: null, signal: "SIGTERM", killed: true });
+      if (identity === "test_timeout") throw timeoutError;
       const status = identity === "test_skipped" ? "skipped" : identity === "test_pass" ? "passed" : "failed";
       await writeFile(args.at(-1), JSON.stringify({ magic: "unit-test-ide", protocol: "utide.runner.v1", record: "testFinished", identity, status }));
       return { stdout: "CMock expected mismatch" };
     }
     return { stdout: "" };
-  };
+  });
 }
 for (const framework of ["cpputest", "unity"]) {
+  test(`${framework} rejects maxBuffer termination before the deadline as timeout evidence`, async () => {
+    const overflow = Object.assign(new Error("buffer exceeded"), { code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER", killed: true });
+    await assert.rejects(verifyFrameworkFixtures({ repositoryRoot, cmake: "C:/tools/cmake.exe", generator: "C:/tools/generator.exe", toolchains: ["msvc"], frameworks: [framework], platform: "win32", execFile: classificationExecutor(framework, Object.assign(new Error("abort"), { code: 3 }), overflow) }), (error) => error.code === "FRAMEWORK_FIXTURE_VALIDATION_FAILED");
+  });
   test(`${framework} accepts an observed abort signal as crash evidence`, async () => {
     const result = await verifyFrameworkFixtures({ repositoryRoot, cmake: "/tools/cmake", generator: "/tools/generator", toolchains: ["gcc"], frameworks: [framework], platform: "linux", execFile: classificationExecutor(framework, Object.assign(new Error("abort"), { code: null, signal: "SIGABRT", killed: false })) });
     assert.equal(result[0].scenarios.find((scenario) => scenario.id === "crash").outcome, "crash");
   });
   test(`${framework} rejects ordinary POSIX exit 3 as crash evidence`, async () => {
-    await assert.rejects(verifyFrameworkFixtures({ repositoryRoot, cmake: "/tools/cmake", generator: "/tools/generator", toolchains: ["gcc"], frameworks: [framework], platform: "linux", execFile: classificationExecutor(framework, Object.assign(new Error("ordinary exit"), { code: 3 })) }), (error) => error.code === "FRAMEWORK_SCENARIO_MISMATCH");
+    await assert.rejects(verifyFrameworkFixtures({ repositoryRoot, cmake: "/tools/cmake", generator: "/tools/generator", toolchains: ["gcc"], frameworks: [framework], platform: "linux", execFile: classificationExecutor(framework, Object.assign(new Error("ordinary exit"), { code: 3 })) }), (error) => error.code === "FRAMEWORK_FIXTURE_VALIDATION_FAILED");
   });
   for (const [reason, fields] of [["spawn ENOENT", { code: "ENOENT" }], ["deadline kill", { code: null, signal: "SIGTERM", killed: true }], ["ordinary exit", { code: 1 }]]) {
     test(`${framework} rejects ${reason} as crash evidence`, async () => {
-      await assert.rejects(verifyFrameworkFixtures({ repositoryRoot, cmake: "C:/tools/cmake.exe", generator: "C:/tools/generator.exe", toolchains: ["msvc"], frameworks: [framework], platform: "win32", execFile: classificationExecutor(framework, Object.assign(new Error("C:/private/path secret diagnostic"), fields)) }), (error) => error.code === "FRAMEWORK_SCENARIO_MISMATCH" && !error.message.includes("private"));
+      await assert.rejects(verifyFrameworkFixtures({ repositoryRoot, cmake: "C:/tools/cmake.exe", generator: "C:/tools/generator.exe", toolchains: ["msvc"], frameworks: [framework], platform: "win32", execFile: classificationExecutor(framework, Object.assign(new Error("C:/private/path secret diagnostic"), fields)) }), (error) => error.code === "FRAMEWORK_FIXTURE_VALIDATION_FAILED" && !error.message.includes("private"));
     });
   }
 }
@@ -89,7 +126,7 @@ test("verifier CLI redacts real spawn paths and catches malformed arguments with
   const script = join(repositoryRoot, "tools/framework-bundle/verify-fixtures.mjs");
   const result = spawnSync(process.execPath, [script, "--cmake", "C:/private/nonexistent-cmake.exe", "--generator", "C:/private/generator.exe", "--toolchains", process.platform === "win32" ? "msvc" : "gcc", "--frameworks", "cpputest"], { encoding: "utf8", windowsHide: true });
   assert.equal(result.status, 1);
-  assert.equal(result.stderr, "verify-fixtures: FRAMEWORK_CONFIGURE_FAILED: CppUTest configure failed\n");
+  assert.equal(result.stderr, "verify-fixtures: FRAMEWORK_FIXTURE_VALIDATION_FAILED: CppUTest configure failed\n");
   const malformed = spawnSync(process.execPath, [script, "--secret=C:/private/input"], { encoding: "utf8", windowsHide: true });
   assert.equal(malformed.status, 1);
   assert.doesNotMatch(malformed.stderr, /private|at parse|file:\/\//u);
@@ -98,7 +135,7 @@ for (const framework of ["cpputest", "unity"]) {
   for (const stage of ["configure", "build"]) {
     test(`${framework} ${stage} failure exposes only a stable redacted diagnostic`, async () => {
       const failure = Object.assign(new Error("C:/private/secret.exe"), { code: 1, stdout: "/home/private/source.c", stderr: "token=private-value C:\\private\\source.c" });
-      await assert.rejects(verifyFrameworkFixtures({ repositoryRoot, cmake: "C:/private/cmake.exe", generator: "C:/private/generator.exe", toolchains: ["msvc"], frameworks: [framework], platform: "win32", execFile: async (_cmd, args) => { if (stage === "configure" || args.includes("--build")) throw failure; return {}; } }), (error) => error.code === `FRAMEWORK_${stage.toUpperCase()}_FAILED` && !JSON.stringify({ message: error.message, ...error }).includes("private"));
+      await assert.rejects(verifyFrameworkFixtures({ repositoryRoot, cmake: "C:/private/cmake.exe", generator: "C:/private/generator.exe", toolchains: ["msvc"], frameworks: [framework], platform: "win32", execFile: async (_cmd, args) => { if (stage === "configure" || args.includes("--build")) throw failure; return {}; } }), (error) => error.code === "FRAMEWORK_FIXTURE_VALIDATION_FAILED" && !JSON.stringify({ message: error.message, ...error }).includes("private"));
     });
   }
 }
@@ -126,7 +163,7 @@ test("plans a Windows MSVC fixture build and classifies every CppUTest scenario"
       cpputestRoot: "C:/frameworks/cpputest",
       helper: "C:/frameworks/UnitTestIDE.cmake",
     },
-    execFile: fakeExecFile,
+    execFile: withDeadlineChild(fakeExecFile),
   });
 
   assert.deepEqual(summary, [{
@@ -147,12 +184,12 @@ test("plans a Windows MSVC fixture build and classifies every CppUTest scenario"
   assert.ok(configure);
   assert.deepEqual(configure.arguments_.slice(-2), ["-A", "x64"]);
   assert.ok(configure.arguments_.includes("-DCMAKE_POLICY_VERSION_MINIMUM=3.5"));
-  assert.equal(configure.options.timeout, 120_000);
-  assert.ok(calls.filter((call) => call.arguments_.includes("--build")).every((call) => call.options.timeout === 120_000));
+  assert.equal(configure.options.deadlineMs, 120_000);
+  assert.ok(calls.filter((call) => call.arguments_.includes("--build")).every((call) => call.options.deadlineMs === 120_000));
   const timeout = calls.find((call) => call.arguments_.includes("Timeout"));
-  assert.equal(timeout.options.timeout, 1_000);
+  assert.equal(timeout.options.deadlineMs, 1_000);
   assert.ok(!calls.find((call) => call.arguments_.includes("Crash")).arguments_.includes("-p"), "crash must terminate the observed process, not an unsupported or forked runner mode");
-  assert.ok(calls.filter((call) => call.arguments_.includes("Pass")).every((call) => call.options.timeout === 10_000));
+  assert.ok(calls.filter((call) => call.arguments_.includes("Pass")).every((call) => call.options.deadlineMs === 10_000));
 });
 
 test("plans clang-cl and Linux GCC compilers and rejects incompatible toolchains", async () => {
@@ -165,18 +202,18 @@ test("plans clang-cl and Linux GCC compilers and rejects incompatible toolchains
     if (arguments_.includes("Timeout")) throw Object.assign(new Error("timed out"), { code: null, signal: "SIGTERM", killed: true, stdout: "", stderr: "" });
     return { stdout: arguments_.includes("Skipped") ? "IGNORED" : "OK", stderr: "" };
   };
-  await verifyFrameworkFixtures({ repositoryRoot, cmake: "/tools/cmake", generator: "/tools/generator", toolchains: ["clang-cl"], frameworks: ["cpputest"], platform: "win32", frameworkInputs: { cpputestRoot: "/frameworks/cpputest", helper: "/frameworks/helper.cmake" }, execFile: fakeExecFile });
+  await verifyFrameworkFixtures({ repositoryRoot, cmake: "/tools/cmake", generator: "/tools/generator", toolchains: ["clang-cl"], frameworks: ["cpputest"], platform: "win32", frameworkInputs: { cpputestRoot: "/frameworks/cpputest", helper: "/frameworks/helper.cmake" }, execFile: withDeadlineChild(fakeExecFile) });
   const clangConfigure = calls.find((call) => call.arguments_.includes("Ninja"));
   assert.ok(clangConfigure.arguments_.includes("-DCMAKE_C_COMPILER=clang-cl"));
   assert.ok(clangConfigure.arguments_.includes("-DCMAKE_CXX_COMPILER=clang-cl"));
-  await assert.rejects(() => verifyFrameworkFixtures({ repositoryRoot, cmake: "/tools/cmake", generator: "/tools/generator", toolchains: ["gcc"], frameworks: ["cpputest"], platform: "win32", frameworkInputs: { cpputestRoot: "/frameworks/cpputest", helper: "/frameworks/helper.cmake" }, execFile: fakeExecFile }), /not supported/u);
+  await assert.rejects(() => verifyFrameworkFixtures({ repositoryRoot, cmake: "/tools/cmake", generator: "/tools/generator", toolchains: ["gcc"], frameworks: ["cpputest"], platform: "win32", frameworkInputs: { cpputestRoot: "/frameworks/cpputest", helper: "/frameworks/helper.cmake" }, execFile: withDeadlineChild(fakeExecFile) }), /not supported/u);
 
   calls.length = 0;
-  await verifyFrameworkFixtures({ repositoryRoot, cmake: "/tools/cmake", generator: "/tools/generator", toolchains: ["gcc"], frameworks: ["cpputest"], platform: "linux", frameworkInputs: { cpputestRoot: "/frameworks/cpputest", helper: "/frameworks/helper.cmake" }, execFile: fakeExecFile });
+  await verifyFrameworkFixtures({ repositoryRoot, cmake: "/tools/cmake", generator: "/tools/generator", toolchains: ["gcc"], frameworks: ["cpputest"], platform: "linux", frameworkInputs: { cpputestRoot: "/frameworks/cpputest", helper: "/frameworks/helper.cmake" }, execFile: withDeadlineChild(fakeExecFile) });
   const gccConfigure = calls.find((call) => call.arguments_.includes("Ninja"));
   assert.ok(gccConfigure.arguments_.includes("-DCMAKE_C_COMPILER=gcc"));
   assert.ok(gccConfigure.arguments_.includes("-DCMAKE_CXX_COMPILER=g++"));
-  await assert.rejects(() => verifyFrameworkFixtures({ repositoryRoot, cmake: "/tools/cmake", generator: "/tools/generator", toolchains: ["msvc"], frameworks: ["cpputest"], platform: "linux", frameworkInputs: { cpputestRoot: "/frameworks/cpputest", helper: "/frameworks/helper.cmake" }, execFile: fakeExecFile }), /not supported/u);
+  await assert.rejects(() => verifyFrameworkFixtures({ repositoryRoot, cmake: "/tools/cmake", generator: "/tools/generator", toolchains: ["msvc"], frameworks: ["cpputest"], platform: "linux", frameworkInputs: { cpputestRoot: "/frameworks/cpputest", helper: "/frameworks/helper.cmake" }, execFile: withDeadlineChild(fakeExecFile) }), /not supported/u);
 });
 
 test("verifies Unity through the sealed list/run runner protocol", async () => {
@@ -239,7 +276,7 @@ test("verifies Unity through the sealed list/run runner protocol", async () => {
       fixtureBuildRoot: temporary,
       frameworkInputs: { unityRoot: "C:/frameworks/unity", cmockRoot: "C:/frameworks/cmock", helper: "C:/frameworks/UnitTestIDE.cmake" },
       environment,
-      execFile: fakeExecFile,
+      execFile: withDeadlineChild(fakeExecFile),
     });
     const summary = await runPlan({ PATH: dockerDirectory });
     assert.deepEqual(summary, [{ framework: "unity", toolchain: "msvc", scenarios: [

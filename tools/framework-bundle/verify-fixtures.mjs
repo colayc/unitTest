@@ -13,7 +13,7 @@ const scenarioTimeout = 10_000;
 const fixtureFrameworks = new Set(["cpputest", "unity"]);
 const fixtureToolchains = new Set(["msvc", "clang-cl", "gcc"]);
 class FixtureError extends Error {
-  constructor(message, code = "FRAMEWORK_FIXTURE_INVALID") { super(message); this.code = code; }
+  constructor(message) { super(message); this.code = "FRAMEWORK_FIXTURE_VALIDATION_FAILED"; }
 }
 function crashEvidence(result, platform) {
   if (result.killed || (result.error && typeof result.error.code === "string")) return false;
@@ -61,17 +61,36 @@ function cmakeCompilerArguments(toolchain) {
 }
 
 function commandOptions(timeout, environment) {
-  return { shell: false, windowsHide: true, timeout, maxBuffer: 8 * 1024 * 1024, ...(environment ? { env: environment } : {}) };
+  // Only our spawn-aware deadline may classify a timeout, not execFile's killed flag.
+  return { shell: false, windowsHide: true, timeout: 0, deadlineMs: timeout, maxBuffer: 8 * 1024 * 1024, ...(environment ? { env: environment } : {}) };
 }
 
 async function invoke(execFile, command, arguments_, timeout, environment) {
+  let timer;
+  let timedOut = false;
+  let settled = false;
   try {
-    const result = await execFile(command, arguments_, commandOptions(timeout, environment));
-    return { code: 0, signal: null, killed: false, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+    const pending = execFile(command, arguments_, commandOptions(timeout, environment));
+    pending.child?.once("spawn", () => {
+      if (settled) return;
+      timer = setTimeout(() => {
+        if (!settled && pending.child.exitCode == null && pending.child.signalCode == null) {
+          timedOut = true;
+          pending.child.kill();
+        }
+      }, timeout);
+    });
+    const result = await pending;
+    return { code: 0, signal: null, killed: false, timedOut, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
   } catch (error) {
-    return { code: typeof error.code === "number" ? error.code : null, signal: error.signal ?? null, killed: error.killed === true, stdout: error.stdout ?? "", stderr: error.stderr ?? "", error };
+    return { code: typeof error.code === "number" ? error.code : null, signal: error.signal ?? null, killed: error.killed === true, timedOut, stdout: error.stdout ?? "", stderr: error.stderr ?? "", error };
+  } finally {
+    settled = true;
+    clearTimeout(timer);
   }
 }
+
+export const __testing = { invoke };
 
 function resultText(result) { return `${result.stdout}\n${result.stderr}`; }
 
@@ -83,9 +102,9 @@ function assertScenarioResult(scenario, result, platform) {
       : scenario.outcome === "skipped" ? result.code === 0 && /IGNORE/iu.test(text)
         : scenario.outcome === "mock-failure" ? nonzero && /(mock|unexpected|parameter|expected)/iu.test(text)
           : scenario.outcome === "crash" ? crashEvidence(result, platform)
-            : scenario.outcome === "timeout" ? result.killed
+            : scenario.outcome === "timeout" ? result.timedOut
               : false;
-  if (!valid) throw new FixtureError("CppUTest scenario did not produce its contracted outcome", "FRAMEWORK_SCENARIO_MISMATCH");
+  if (!valid) throw new FixtureError("CppUTest scenario did not produce its contracted outcome");
 }
 
 async function defaultFrameworkInputs(repositoryRoot) {
@@ -118,9 +137,9 @@ async function verifyCppUTestFixture(options, toolchain, inputs) {
   const configure = ["-S", fixtureDirectory, "-B", buildDirectory, "-G", cmakeGenerator(toolchain), "-DCMAKE_POLICY_VERSION_MINIMUM=3.5", `-DUNIT_TEST_IDE_CPPUTEST_ROOT=${inputs.cpputestRoot}`, `-DUNIT_TEST_IDE_HELPER=${inputs.helper}`, ...cmakeCompilerArguments(toolchain)];
   if (toolchain === "msvc") configure.push("-A", "x64");
   const configured = await invoke(options.execFile, options.cmake, configure, configureTimeout);
-  if (configured.code !== 0) throw new FixtureError("CppUTest configure failed", "FRAMEWORK_CONFIGURE_FAILED");
+  if (configured.code !== 0) throw new FixtureError("CppUTest configure failed");
   const built = await invoke(options.execFile, options.cmake, ["--build", buildDirectory, "--config", "Debug"], configureTimeout);
-  if (built.code !== 0) throw new FixtureError("CppUTest build failed", "FRAMEWORK_BUILD_FAILED");
+  if (built.code !== 0) throw new FixtureError("CppUTest build failed");
   const executable = join(buildDirectory, "bin", options.platform === "win32" ? "phase9_cpputest.exe" : "phase9_cpputest");
   const scenarios = [];
   for (const scenario of fixture.scenarios) {
@@ -218,17 +237,17 @@ async function verifyUnityScenario(options, executable, resultDirectory, scenari
   const records = await readJsonl(output, "testFinished");
   const record = completeResult(records, scenario.name);
   if (scenario.outcome === "crash") {
-    if (record !== null || !crashEvidence(invocation, options.platform)) throw new FixtureError("Unity crash scenario lacks abnormal termination evidence", "FRAMEWORK_SCENARIO_MISMATCH");
+    if (record !== null || !crashEvidence(invocation, options.platform)) throw new FixtureError("Unity crash scenario lacks abnormal termination evidence");
     return;
   }
   if (scenario.outcome === "timeout") {
-    if (!invocation.killed || record !== null) throw new FixtureError("Unity timeout scenario did not reach the verifier deadline", "FRAMEWORK_SCENARIO_MISMATCH");
+    if (!invocation.timedOut || record !== null) throw new FixtureError("Unity timeout scenario did not reach the verifier deadline");
     return;
   }
-  if (record === null) throw new FixtureError("Unity scenario did not publish a complete result", "FRAMEWORK_SCENARIO_MISMATCH");
+  if (record === null) throw new FixtureError("Unity scenario did not publish a complete result");
   const expectedStatus = scenario.outcome === "mock-failure" ? "failed" : scenario.outcome;
-  if (record.status !== expectedStatus) throw new FixtureError("Unity scenario produced an unexpected status", "FRAMEWORK_SCENARIO_MISMATCH");
-  if (scenario.outcome === "mock-failure" && !/(cmock|mismatch|expected|was)/iu.test(resultText(invocation))) throw new FixtureError("Unity mock-failure scenario lacks CMock mismatch evidence", "FRAMEWORK_SCENARIO_MISMATCH");
+  if (record.status !== expectedStatus) throw new FixtureError("Unity scenario produced an unexpected status");
+  if (scenario.outcome === "mock-failure" && !/(cmock|mismatch|expected|was)/iu.test(resultText(invocation))) throw new FixtureError("Unity mock-failure scenario lacks CMock mismatch evidence");
 }
 
 async function verifyUnityFixture(options, toolchain, inputs) {
@@ -242,14 +261,14 @@ async function verifyUnityFixture(options, toolchain, inputs) {
   const configure = ["-S", fixtureDirectory, "-B", buildDirectory, "-G", cmakeGenerator(toolchain), "-DCMAKE_POLICY_VERSION_MINIMUM=3.5", `-DUNIT_TEST_IDE_UNITY_ROOT=${inputs.unityRoot}`, `-DUNIT_TEST_IDE_CMOCK_ROOT=${inputs.cmockRoot}`, `-DUNIT_TEST_IDE_HELPER=${inputs.helper}`, `-DUTIDE_UNITY_RUNNER_GENERATOR=${options.generator}`, ...cmakeCompilerArguments(toolchain)];
   if (toolchain === "msvc") configure.push("-A", "x64");
   const configured = await invoke(options.execFile, options.cmake, configure, configureTimeout, options.environment);
-  if (configured.code !== 0) throw new FixtureError("Unity configure failed", "FRAMEWORK_CONFIGURE_FAILED");
+  if (configured.code !== 0) throw new FixtureError("Unity configure failed");
   const built = await invoke(options.execFile, options.cmake, ["--build", buildDirectory, "--config", "Debug"], configureTimeout, options.environment);
-  if (built.code !== 0) throw new FixtureError("Unity build failed", "FRAMEWORK_BUILD_FAILED");
+  if (built.code !== 0) throw new FixtureError("Unity build failed");
   const identities = await verifyUnityManifest(buildDirectory, fixture);
   const executable = join(buildDirectory, "bin", options.platform === "win32" ? "phase9_unity.exe" : "phase9_unity");
   const listOutput = controlledUnityResultPath(resultDirectory, "list.jsonl");
   const listed = await invoke(options.execFile, executable, ["--utide-protocol", runnerProtocol, "--utide-mode", "list", "--utide-result", listOutput], scenarioTimeout, options.environment);
-  if (listed.code !== 0) throw new FixtureError("Unity list failed", "FRAMEWORK_NATIVE_FAILED");
+  if (listed.code !== 0) throw new FixtureError("Unity list failed");
   validateListRecords(await readJsonl(listOutput, "case"), identities);
   for (const scenario of fixture.scenarios) await verifyUnityScenario(options, executable, resultDirectory, scenario);
   return { framework: "unity", toolchain, scenarios: fixture.scenarios.map((scenario) => ({ id: scenario.id, outcome: scenario.outcome })) };
