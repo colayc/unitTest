@@ -446,6 +446,8 @@ git commit -m "feat: prepare framework runtime from service evidence"
 **Files:**
 - Create: `tools/service-probe/src/native-framework-publish.ts`
 - Test: `tools/service-probe/src/native-framework-publish.test.ts`
+- Create: `tools/service-probe/src/native-framework-benchmark.ts`
+- Test: `tools/service-probe/src/native-framework-benchmark.test.ts`
 - Modify: `tools/service-probe/src/native-framework-prepare.ts`
 - Test: `tools/service-probe/src/native-framework-prepare.test.ts`
 - Modify: `tools/service-probe/package.json`
@@ -458,6 +460,7 @@ git commit -m "feat: prepare framework runtime from service evidence"
 - Produces: `parseFrameworkPrepareArguments(arguments_: readonly string[]): { platform: FrameworkPlatform; candidateCommit: string }`.
 - Produces CLI command: `pnpm prepare:native-framework-runtime -- --platform win32 --candidate 0123456789abcdef0123456789abcdef01234567`.
 - The CLI loads benchmark evidence only from the fixed, repository-owned audited source selected by the implementation; it accepts no benchmark values or paths from argv/environment.
+- Produces `loadAuditedFrameworkBenchmark(repositoryRoot: string): Promise<VerifiedFrameworkBenchmark>` from a committed, path-free benchmark evidence fixture; the loader verifies exact schema, bytes, and digest before returning it.
 - Consumed by: Task 6 hosted workflow.
 
 - [ ] **Step 1: Add RED tests for atomic publication and rollback**
@@ -494,6 +497,8 @@ Validate staging ownership before every mutation. Rename the current platform ma
 - [ ] **Step 4: Implement the closed CLI and package entry**
 
 `parseFrameworkPrepareArguments` accepts exactly four arguments in the order `--platform`, platform value, `--candidate`, commit. `main` derives the repository root from `import.meta.dirname`, calls prepare then publish, and writes one path-free JSON summary containing schema version, platform, candidate, toolchain families, and manifest SHA-256.
+
+Implement `loadAuditedFrameworkBenchmark` in the new benchmark module. The fixture is repository-owned and immutable, contains only the already-reviewed `catalog-10000` evidence fields, and is validated with Task 1's benchmark rules. Reject any caller-supplied benchmark path, values, environment override, or mutable fixture substitution. Tests must prove byte/digest mismatch and path-bearing fixture values fail closed.
 
 Add:
 
