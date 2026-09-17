@@ -15,6 +15,7 @@ const tests = [
   "dist/native-framework-report.test.js",
   "dist/native-framework-matrix.test.js",
   "dist/native-framework-runtime-contract.test.js",
+  "dist/native-framework-workspace.test.js",
 ];
 
 const requested = process.argv.slice(2).filter((value) => value !== "--");
@@ -26,6 +27,8 @@ if (requested.length > 0) {
     ["dist/native-framework-matrix.test.js", "dist/native-framework-matrix.test.js"],
     ["native-framework-runtime-contract.test.ts", "dist/native-framework-runtime-contract.test.js"],
     ["dist/native-framework-runtime-contract.test.js", "dist/native-framework-runtime-contract.test.js"],
+    ["native-framework-workspace.test.ts", "dist/native-framework-workspace.test.js"],
+    ["dist/native-framework-workspace.test.js", "dist/native-framework-workspace.test.js"],
   ]);
   const focused = requested.length === 1 ? focusedTests.get(requested[0]) : undefined;
   if (focused !== undefined) {
