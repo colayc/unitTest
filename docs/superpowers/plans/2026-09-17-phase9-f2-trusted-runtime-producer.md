@@ -14,7 +14,7 @@
 
 - The producer accepts only `--platform linux|win32` and `--candidate` followed by a lowercase 40-character Git commit.
 - Caller-selected output paths, workspace paths, Service binaries, compiler paths, commands, shells, hooks, executable overrides, and arbitrary environment maps are forbidden.
-- Fixed output paths are `.native-e2e/framework-runtime/{windows|linux}.json` and `.native-e2e/framework-work/{windows|linux}/{toolchain}/{cpputest|unity}/{service,workspace}`.
+- Fixed output paths are `.native-e2e/framework-runtime/{windows|linux}.json` and published `.native-e2e/framework-work/{windows|linux}/{toolchain}/{cpputest|unity}/{service,workspace}`; unpublished owned staging is confined to `.native-e2e/framework-work/.staging/{invocation}/{platform}/{toolchain}/{framework}` on the same volume.
 - Windows toolchains are exactly `msvc,clang-cl`; Linux toolchains are exactly `gcc,clang`.
 - Every platform runtime contains two toolchains, two frameworks per toolchain, and the exact committed F1/F2 identity fields.
 - Required execution remains fail-closed; no missing compiler, fixture, catalog, executable, scenario, report, or provenance field may be skipped.
@@ -232,7 +232,7 @@ git commit -m "feat: expose verified compiler digest"
 - Modify: `tools/service-probe/run-tests.mjs`
 
 **Interfaces:**
-- Produces: `FrameworkWorkspaceStageOptions` with repository root, owned staging root, platform, toolchain family, framework ID, prepared framework roots, CMake helper, and Unity generator.
+- Produces: `FrameworkWorkspaceStageOptions` with repository root, owned same-volume staging root, platform, toolchain family, framework ID, prepared framework roots, CMake helper, and Unity generator.
 - Produces: `stageFrameworkWorkspace(options: FrameworkWorkspaceStageOptions): Promise<StagedFrameworkWorkspace>`.
 - Produces: `validateOwnedFrameworkStage(stageRoot: string, ownershipId: string): Promise<void>`.
 - `StagedFrameworkWorkspace` exposes only `serviceDirectory`, `workspaceRoot`, `buildRoot`, `family`, and `frameworkId`.
@@ -241,7 +241,7 @@ git commit -m "feat: expose verified compiler digest"
 
 - [ ] **Step 1: Add filesystem safety and layout tests**
 
-Create temporary repository fixtures with the exact committed matrix files and F1 fixture inventories. Assert that staging produces one closed workspace containing:
+Create temporary repository fixtures with the exact committed matrix files and F1 fixture inventories. Assert that staging produces one owned same-volume staging workspace below `.native-e2e/framework-work/.staging/{invocation}/{platform}/{family}/{framework}` containing:
 
 ```text
 owner.json
@@ -256,7 +256,7 @@ workspace/source/frameworks/cpputest/
 workspace/source/frameworks/unity/
 ```
 
-Add mutation cases for source symlinks, extra files, missing generated CMock output, unknown prior ownership, path escape attempts, unsupported family/platform combinations, and an invalid generator path.
+Add mutation cases for source symlinks, extra files, missing generated CMock output, unknown prior ownership, path escape attempts, final published-root substitution, unsupported family/platform combinations, and an invalid generator path.
 
 ```ts
 await assert.rejects(
@@ -282,7 +282,7 @@ Expected: FAIL because the workspace staging module is absent.
 
 - [ ] **Step 3: Implement the closed source inventory and ownership record**
 
-Use explicit file inventories, `lstat`, regular-file checks, path containment checks, and canonical JSON. Do not recursively copy unvalidated directory contents. The ownership record contains only schema version, random invocation ID, platform, and candidate; it contains no absolute path.
+Use explicit file inventories, `lstat`, regular-file checks, path containment checks, and canonical JSON. Do not recursively copy unvalidated directory contents. The ownership record contains only schema version, random invocation ID, platform, and candidate; it contains no absolute path. Require the staging root to be the canonical `.native-e2e/framework-work/.staging/{invocation}/{platform}/{family}/{framework}` path and keep it on the same volume as the published root.
 
 ```ts
 const MATRIX_FILES = Object.freeze([
@@ -394,7 +394,7 @@ export interface DiscoveredFrameworkCatalog {
 
 - [ ] **Step 4: Implement producer orchestration**
 
-For the platform's exact families and both frameworks, load the closed F1 identity, prepared dependency roots, matrix contract, CMake bundle, Service binary, generator, and the already-verified benchmark evidence dependency. Stage the workspace, start the Service, discover/build the catalog, calculate stable ID and actual executable digest, and assemble a closed runtime record.
+For the platform's exact families and both frameworks, load the closed F1 identity, prepared dependency roots, matrix contract, CMake bundle, Service binary, generator, and the already-verified benchmark evidence dependency. Stage each workspace below the owned same-volume staging root, start the Service, discover/build the catalog, calculate stable ID and actual executable digest, and assemble a closed runtime record.
 
 Use `try/finally` so every Service is disposed before returning. Do not execute the 17 scenario matrix during preparation.
 
@@ -448,8 +448,11 @@ git commit -m "feat: prepare framework runtime from service evidence"
 - Test: `tools/service-probe/src/native-framework-publish.test.ts`
 - Create: `tools/service-probe/src/native-framework-benchmark.ts`
 - Test: `tools/service-probe/src/native-framework-benchmark.test.ts`
+- Modify: `apps/test-service/internal/testdomain/catalog_benchmark_test.go`
 - Modify: `tools/service-probe/src/native-framework-prepare.ts`
 - Test: `tools/service-probe/src/native-framework-prepare.test.ts`
+- Modify: `tools/service-probe/src/native-framework-workspace.ts`
+- Test: `tools/service-probe/src/native-framework-workspace.test.ts`
 - Modify: `tools/service-probe/package.json`
 - Modify: `tools/service-probe/run-tests.mjs`
 - Modify: `package.json`
@@ -460,7 +463,7 @@ git commit -m "feat: prepare framework runtime from service evidence"
 - Produces: `parseFrameworkPrepareArguments(arguments_: readonly string[]): { platform: FrameworkPlatform; candidateCommit: string }`.
 - Produces CLI command: `pnpm prepare:native-framework-runtime -- --platform win32 --candidate 0123456789abcdef0123456789abcdef01234567`.
 - The CLI loads benchmark evidence only from the fixed, repository-owned audited source selected by the implementation; it accepts no benchmark values or paths from argv/environment.
-- Produces `loadAuditedFrameworkBenchmark(repositoryRoot: string): Promise<VerifiedFrameworkBenchmark>` from a committed, path-free benchmark evidence fixture; the loader verifies exact schema, bytes, and digest before returning it.
+- Produces `collectAuditedFrameworkBenchmark(repositoryRoot: string): Promise<VerifiedFrameworkBenchmark>` by invoking only the fixed repository-owned Go `BenchmarkCatalog10000` command three times; it parses exactly three allocation samples, combines them with fixed catalog identity anchors, and validates the closed benchmark contract before returning it.
 - Consumed by: Task 6 hosted workflow.
 
 - [ ] **Step 1: Add RED tests for atomic publication and rollback**
@@ -498,7 +501,7 @@ Validate staging ownership before every mutation. Rename the current platform ma
 
 `parseFrameworkPrepareArguments` accepts exactly four arguments in the order `--platform`, platform value, `--candidate`, commit. `main` derives the repository root from `import.meta.dirname`, calls prepare then publish, and writes one path-free JSON summary containing schema version, platform, candidate, toolchain families, and manifest SHA-256.
 
-Implement `loadAuditedFrameworkBenchmark` in the new benchmark module. The fixture is repository-owned and immutable, contains only the already-reviewed `catalog-10000` evidence fields, and is validated with Task 1's benchmark rules. Reject any caller-supplied benchmark path, values, environment override, or mutable fixture substitution. Tests must prove byte/digest mismatch and path-bearing fixture values fail closed.
+Implement `collectAuditedFrameworkBenchmark` in the new benchmark module. Run the fixed Go benchmark with a fixed package, benchmark name, `-benchtime=1x`, and `-count=3`; parse exactly three `allocs/op` values and reject malformed or over-budget output. Bind catalog revision/artifact/stable-ID digests to fixed constants derived from the committed benchmark input, then validate the complete record with Task 1's benchmark rules. Reject caller-supplied benchmark paths, values, environment overrides, shell text, or mutable fixture substitution. Tests must prove malformed/over-budget output and path-bearing values fail closed.
 
 Add:
 
