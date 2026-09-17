@@ -8,8 +8,11 @@ import type {
   FrameworkPlatformOptions,
   FrameworkPlatformFrameworkOptions,
 } from "./native-framework-matrix.js";
+import { stableFrameworkIdDigest } from "./native-framework-matrix.js";
 import { parseFrameworkRuntimeManifest } from "./native-framework-runtime-contract.js";
 import { acquireFrameworkRuntimeLock } from "./native-framework-publish.js";
+import { collectAuditedFrameworkBenchmark } from "./native-framework-benchmark.js";
+import { hashCompiledFrameworkExecutable, verifyFrameworkWorkspaceSources } from "./native-framework-workspace.js";
 
 export const frameworkRequiredEnvironment = "UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED";
 
@@ -22,6 +25,7 @@ export interface LoadedFrameworkRuntime {
 interface FrameworkRuntimeDependencies {
   readonly loadFrameworkIdentity: (repositoryRoot: string) => Promise<F1FrameworkIdentity>;
   readonly startService: typeof startService;
+  readonly collectBenchmark?: typeof collectAuditedFrameworkBenchmark;
 }
 
 const defaultDependencies: FrameworkRuntimeDependencies = {
@@ -92,7 +96,7 @@ async function loadLockedFrameworkRuntime(
       for (const input of toolchain.frameworks) {
         const frameworkId = input.frameworkId;
         const publishedBase = join(repositoryRoot, ".native-e2e", "framework-work", platformName, family, frameworkId);
-        const workspaceBase = join(consumptionRoot, family, frameworkId);
+        const workspaceBase = join(consumptionRoot, platformName, family, frameworkId);
         await cp(publishedBase, workspaceBase, {
           recursive: true, force: false, errorOnExist: true,
           filter: async (source) => {
@@ -100,9 +104,13 @@ async function loadLockedFrameworkRuntime(
             if (info.isSymbolicLink() || (!info.isDirectory() && !info.isFile()) || await realpath(source) !== resolve(source)) {
               throw new Error("framework consumer input is unsafe");
             }
+            // Build-profile identities include the workspace path. A fresh Service
+            // must rebuild its own tree, not mix producer and consumer profiles.
+            if (source === join(publishedBase, "service")) return false;
             return true;
           },
         });
+        await mkdir(join(workspaceBase, "service"), { mode: 0o700 });
         const fixture = await dependencies.startService(serviceBinary, join(workspaceBase, "service"), {
           timeoutMs: 120_000,
           workspaceRoot: join(workspaceBase, "workspace"),
@@ -118,6 +126,22 @@ async function loadLockedFrameworkRuntime(
           dependencyTreeSha256: input.dependencyTreeSha256,
           dependencyVersion: input.dependencyVersion,
           evidence: input.evidence,
+          executionEvidence: async (discovery) => {
+            if (stableFrameworkIdDigest(frameworkId, discovery.catalog, identity) !== input.stableIdDigest) {
+              throw new Error("consumer catalog identity does not match validated F1 input");
+            }
+            await verifyFrameworkWorkspaceSources(join(workspaceBase, "workspace"), identity, contract);
+            const current = await fixture.client.inspectWorkspace();
+            const compiler = current.toolchains.find(({ toolchainId }) => toolchainId === discovery.toolchain.toolchainId);
+            if (compiler?.family !== family || compiler.version !== discovery.toolchain.version || compiler.compilerSha256 !== discovery.toolchain.compilerSha256) {
+              throw new Error("consumer compiler identity changed during execution");
+            }
+            return {
+              sourceArtifactSha256: identity.fixtures[frameworkId].sourceSha256,
+              sourceLocationDigest: identity.fixtures[frameworkId].metadataSha256,
+              executableArtifactSha256: await hashCompiledFrameworkExecutable(consumptionRoot, platform, family, frameworkId),
+            };
+          },
           fixture,
           frameworkId,
           platform,
@@ -143,6 +167,7 @@ async function loadLockedFrameworkRuntime(
           manifest.benchmark.allocationsPerOperation[2],
         ],
       },
+      collectBenchmark: () => (dependencies.collectBenchmark ?? collectAuditedFrameworkBenchmark)(repositoryRoot),
       candidateCommit: manifest.candidateCommit,
       platform,
       toolchains,

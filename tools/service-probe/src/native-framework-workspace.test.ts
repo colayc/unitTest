@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import {
   hashCompiledFrameworkExecutable,
@@ -23,6 +24,40 @@ const FIXTURE_FILES = {
   ],
 } as const;
 
+test("actual staged Unity configure keeps F1 and malformed sources inside the CMake source root", async (t) => {
+  const input = await workspaceFixture(t);
+  const repository = resolve(import.meta.dirname, "../../..");
+  for (const path of ["testdata/frameworks", "testdata/framework-matrix", "sdk/cmake"]) {
+    await cp(join(repository, path), join(input.repositoryRoot, path), { recursive: true });
+  }
+  // Configuration resolves these dependency source files; compilation is not needed here.
+  for (const name of ["unity", "cmock"]) await write(input.repositoryRoot, `.prepared/${name}/src/${name}.c`, "/* configure fixture */\n");
+  const execute = (command: string, args: string[]) => {
+    const result = spawnSync(command, args, { cwd: repository, encoding: "utf8", windowsHide: true, timeout: 120_000 });
+    assert.equal(result.status, 0, result.error?.message ?? `${result.stdout}\n${result.stderr}`);
+    return result.stdout;
+  };
+  const generator = join(input.repositoryRoot, process.platform === "win32" ? "generator.exe" : "generator");
+  execute("go", ["build", "-o", generator, "./apps/test-service/cmd/unity-runner-generator"]);
+  const platform = process.platform === "win32" ? "win32" : "linux";
+  const family = platform === "win32" ? "msvc" : "gcc";
+  const stage = await stageFrameworkWorkspace({
+    ...input.options, platform, family, frameworkId: "unity", unityRunnerGenerator: generator,
+    stageRoot: join(input.repositoryRoot, ".native-e2e/framework-work/.staging", input.options.ownershipId, platform === "win32" ? "windows" : "linux", family, "unity"),
+  });
+  const workspace = JSON.parse(await readFile(join(stage.workspaceRoot, ".unit-test-ide/workspace.json"), "utf8"));
+  const build = join(input.repositoryRoot, "configure-test");
+  execute(process.env.CMAKE ?? "cmake", ["-S", join(stage.workspaceRoot, workspace.projects[0].sourceDir), "-B", build,
+    "-DUNIT_TEST_IDE_FRAMEWORK=unity", `-DUNIT_TEST_IDE_HELPER=${input.options.cmakeHelper}`,
+    `-DUNIT_TEST_IDE_UNITY_ROOT=${input.options.preparedFrameworkRoots.unity}`,
+    `-DUNIT_TEST_IDE_CMOCK_ROOT=${input.options.preparedFrameworkRoots.cmock}`, `-DUTIDE_UNITY_RUNNER_GENERATOR=${generator}`]);
+  for (const [name, source] of [["unity.framework", "frameworks/unity/tests/framework_tests.c"], ["unity.matrix.malformed", "framework-matrix/malformed_unity.c"]]) {
+    const manifest = JSON.parse(await readFile(join(build, ".unit-test-ide", createHash("sha256").update(name!).digest("hex"), "manifest.json"), "utf8"));
+    assert.deepEqual(manifest.sources, [source]);
+    assert.ok(manifest.sources.every((path: string) => !path.split("/").includes("..")));
+  }
+});
+
 test("staging creates one closed owned framework workspace with canonical configuration", async (t) => {
   const fixture = await workspaceFixture(t);
   const staged = await stageFrameworkWorkspace(fixture.options);
@@ -37,9 +72,10 @@ test("staging creates one closed owned framework workspace with canonical config
     "workspace/.unit-test-ide/",
     "workspace/.unit-test-ide/workspace.json",
     "workspace/source/",
+    "workspace/source/CMakeLists.txt",
+    "workspace/source/CMakePresets.json",
     "workspace/source/framework-matrix/",
     "workspace/source/framework-matrix/CMakeLists.txt",
-    "workspace/source/framework-matrix/CMakePresets.json",
     "workspace/source/framework-matrix/contract.json",
     "workspace/source/framework-matrix/malformed_cpputest.cpp",
     "workspace/source/framework-matrix/malformed_unity.c",
@@ -76,7 +112,7 @@ test("staging creates one closed owned framework workspace with canonical config
   assert.deepEqual(workspace, {
     projects: [{
       fallback: { configurations: ["Debug"], preferredGenerator: "Ninja" },
-      id: "framework-matrix", sourceDir: "source/framework-matrix",
+      id: "framework-matrix", sourceDir: "source",
       tests: { containers: [
         { ctestName: "cpputest.framework", framework: "cpputest" },
         { ctestName: "cpputest.matrix.malformed", framework: "cpputest" },
@@ -84,7 +120,7 @@ test("staging creates one closed owned framework workspace with canonical config
       ] },
     }], version: 2,
   });
-  const presets = JSON.parse(await readFile(join(staged.workspaceRoot, "source", "framework-matrix", "CMakePresets.json"), "utf8"));
+  const presets = JSON.parse(await readFile(join(staged.workspaceRoot, "source", "CMakePresets.json"), "utf8"));
   assert.equal(presets.configurePresets[0].cacheVariables.UNIT_TEST_IDE_FRAMEWORK, "cpputest");
   assert.equal(presets.configurePresets[0].cacheVariables.CMAKE_C_COMPILER, "gcc");
   assert.equal(presets.configurePresets[0].cacheVariables.CMAKE_CXX_COMPILER, "g++");

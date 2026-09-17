@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { copyFile, lstat, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { FrameworkId, FrameworkPlatform, FrameworkToolchainFamily } from "./native-framework-report.js";
+import type { F1FrameworkIdentity } from "./native-framework-matrix.js";
 
 const MATRIX_FILES = Object.freeze([
   "CMakeLists.txt",
@@ -109,7 +110,12 @@ export async function stageFrameworkWorkspace(
     }
     await mkdir(join(workspaceRoot, ".unit-test-ide"), { recursive: true, mode: 0o700 });
     await writeCanonical(join(workspaceRoot, ".unit-test-ide", "workspace.json"), workspaceConfiguration(options, contract));
-    await writeCanonical(join(matrixDestination, "CMakePresets.json"), presetConfiguration(
+    // Both the locked F1 fixtures and the matrix overlay must be descendants of
+    // CMAKE_SOURCE_DIR; the Unity generator deliberately rejects source escapes.
+    await writeFile(join(workspaceRoot, "source", "CMakeLists.txt"),
+      'cmake_minimum_required(VERSION 3.28)\nproject(unit_test_ide_framework_workspace LANGUAGES C CXX)\nenable_testing()\nadd_subdirectory(framework-matrix)\n',
+      { flag: "wx", mode: 0o600 });
+    await writeCanonical(join(workspaceRoot, "source", "CMakePresets.json"), presetConfiguration(
       options, preparedFrameworkRoots, cmakeHelper, unityRunnerGenerator,
     ));
     return Object.freeze({
@@ -140,6 +146,41 @@ export async function validateOwnedFrameworkStage(stageRoot: string, ownershipId
       owner.schemaVersion !== 1 || owner.invocationId !== ownershipId || !COMMIT.test(String(owner.candidate)) ||
       (owner.platform !== "linux" && owner.platform !== "win32")) {
     throw new Error("staging ownership does not match the current invocation");
+  }
+}
+
+/** Proves the copied source evidence is still the repository's validated F1/matrix input. */
+export async function verifyFrameworkWorkspaceSources(workspaceRoot: string, identity: F1FrameworkIdentity, contractBytes: Uint8Array): Promise<void> {
+  const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+  const matrixRoot = join(workspaceRoot, "source/framework-matrix");
+  await validateInventory(matrixRoot, MATRIX_FILES, "consumer matrix source");
+  const contract = JSON.parse(Buffer.from(contractBytes).toString("utf8"));
+  const expected: Readonly<Record<typeof MATRIX_FILES[number], string>> = {
+    "contract.json": sha256(contractBytes),
+    "CMakeLists.txt": contract.workspace.cmakeSha256,
+    "opaque.c": contract.workspace.opaqueSourceSha256,
+    "malformed_cpputest.cpp": contract.frameworks.cpputest.augmentationSha256,
+    "malformed_unity.c": contract.frameworks.unity.augmentationSha256,
+  };
+  for (const name of MATRIX_FILES) {
+    const path = await requireContainedFile(workspaceRoot, join(matrixRoot, name), "consumer matrix source");
+    if (sha256(await readFile(path)) !== expected[name]) throw new Error("consumer matrix source digest mismatch");
+  }
+  for (const frameworkId of ["cpputest", "unity"] as const) {
+    const root = join(workspaceRoot, "source/frameworks", frameworkId);
+    await validateInventory(root, FIXTURE_FILES[frameworkId], "consumer framework source");
+    const hash = createHash("sha256");
+    for (const name of [...FIXTURE_FILES[frameworkId]].sort()) {
+      const path = await requireContainedFile(workspaceRoot, join(root, name), "consumer framework source");
+      const bytes = await readFile(path);
+      const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes).replaceAll("\r\n", "\n");
+      if (text.includes("\r") || text.includes("\0")) throw new Error("consumer framework source has unsafe text bytes");
+      if (name === "fixture.json" && sha256(bytes) !== identity.fixtures[frameworkId].metadataSha256) {
+        throw new Error("consumer framework source metadata digest mismatch");
+      }
+      hash.update(`f:${name}\0`).update(text, "utf8");
+    }
+    if (hash.digest("hex") !== identity.fixtures[frameworkId].sourceSha256) throw new Error("consumer framework source digest mismatch");
   }
 }
 
@@ -244,7 +285,7 @@ function workspaceConfiguration(options: FrameworkWorkspaceStageOptions, contrac
     version: 2,
     projects: [{
       id: "framework-matrix",
-      sourceDir: "source/framework-matrix",
+      sourceDir: "source",
       fallback: { configurations: ["Debug"], preferredGenerator: generator(options.family) },
       tests: { containers: [contract.primary, contract.malformed, contract.opaque].map((ctestName) => ({
         ctestName, framework: options.frameworkId,

@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import {
   FRAMEWORK_SCENARIO_IDS,
@@ -12,6 +13,8 @@ import {
 } from "./native-framework-report.js";
 import {
   discoverFrameworkCatalog,
+  loadMatrixContract,
+  publishFrameworkPlatformReport,
   runFrameworkMatrix,
   runFrameworkPlatform,
   runFrameworkToolchain,
@@ -49,8 +52,8 @@ const f1Identity: F1FrameworkIdentity = Object.freeze({
   }),
   cMockProvenanceSha256: "4f0a73e5decc2402930fc4d609d1640150fe6addb30e20cc9900e1cf418520a8",
   fixtures: Object.freeze({
-    cpputest: Object.freeze({ metadataSha256: digest("cpp-meta"), sourceSha256: digest("cpp-source"), executableSha256: digest("cpp-executable") }),
-    unity: Object.freeze({ metadataSha256: digest("unity-meta"), sourceSha256: digest("unity-source"), executableSha256: digest("unity-executable") }),
+    cpputest: Object.freeze({ metadataSha256: "6eef50ec7940e4a6b80891d0ff452ed503b5996de313df711ecad607185761ee", sourceSha256: "114b3d7c6aadcc487b2df01a917c4c0702ba1fdb381456b12c406839181ac5f2", executableSha256: digest("cpp-executable") }),
+    unity: Object.freeze({ metadataSha256: "1287993f09fb2d8079933ac89a85bd464122edac7b3c92621692a02484536333", sourceSha256: "eaf9b66d897a3361b05f7d050a779d47d35339804ccaa5fa800f7986f1ecb34c", executableSha256: digest("unity-executable") }),
   }),
 });
 
@@ -196,6 +199,33 @@ test("stable framework digest uses code-point path ordering and detects source o
   );
 });
 
+test("stable identity accepts the staged Unity adapter malformed-source location", () => {
+  const original = stableDigestCatalog();
+  const malformed = original.items.find(({ framework }) => framework === "unity")!;
+  malformed.sourceLocation = { ...original.items[0]!.sourceLocation!, line: 7, uri: "file:///repo/testdata/framework-matrix/malformed_unity.c" };
+  const staged = structuredClone(original);
+  staged.items.find(({ framework }) => framework === "unity")!.sourceLocation!.uri = "file:///repo/.native-e2e/framework-work/linux/clang/unity/workspace/source/framework-matrix/malformed_unity.c";
+  assert.equal(stableFrameworkIdDigest("unity", staged, f1Identity), stableFrameworkIdDigest("unity", original, f1Identity));
+});
+
+test("clean autocrlf checkout preserves raw matrix contract digests", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "framework-autocrlf-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repository = resolve(import.meta.dirname, "../../..");
+  for (const path of [".gitattributes", "testdata/framework-matrix", "testdata/frameworks"]) {
+    await cp(join(repository, path), join(root, path), { recursive: true });
+  }
+  const git = (...args: string[]) => {
+    const result = spawnSync("git", args, { cwd: root, encoding: "utf8", windowsHide: true });
+    assert.equal(result.status, 0, result.error?.message ?? result.stderr);
+  };
+  git("init", "--quiet");
+  git("-c", "core.autocrlf=false", "add", ".");
+  const checkout = join(root, "checkout");
+  git("-c", "core.autocrlf=true", "checkout-index", "--all", `--prefix=${checkout.replaceAll("\\", "/")}/`);
+  for (const frameworkId of ["cpputest", "unity"] as const) await loadMatrixContract(frameworkId, checkout);
+});
+
 function fakeCatalogItems(frameworkId: FrameworkId) {
   const primaryId = `utid-v1-${digest(`container:${frameworkId}`)}`;
   const values: Array<{
@@ -258,6 +288,7 @@ interface FakeClientState {
   readonly artifactsByTask: Map<string, Array<Record<string, unknown>>>;
   readonly artifactBytes: Map<string, Uint8Array>;
   runIndex: number;
+  compilerIdentity?: { version: string; compilerSha256: string };
 }
 
 class FakeProtocolClient {
@@ -293,6 +324,10 @@ class FakeProtocolClient {
     return new FakeProtocolClient(this.#frameworkId, this.#family, this.#onInspect, this.#state);
   }
 
+  setCompilerIdentity(version: string, compilerSha256: string): void {
+    this.#state.compilerIdentity = { version, compilerSha256 };
+  }
+
   artifact(taskId: string, kind: string): Record<string, unknown> | undefined {
     return this.#state.artifactsByTask.get(taskId)?.find((value) => value.kind === kind);
   }
@@ -326,7 +361,9 @@ class FakeProtocolClient {
         targetArchitecture: "x64",
         targetTriple: "x86_64-test",
         toolchainId: "toolchain",
-        version: "18.1.0",
+        version: this.#family === "gcc" ? "15.2.0" : "18.1.0",
+        compilerSha256: digest(`compiler:${this.#family}`),
+        ...this.#state.compilerIdentity,
       }],
       workspaceGeneration: digest("workspace"),
       workspaceUri: "file:///workspace",
@@ -866,6 +903,16 @@ test("runner rejects arbitrary execution controls before contacting the Service"
   }
 });
 
+test("consumer execution-evidence verification is bounded before any scenarios", async () => {
+  const fixture = new FakeFixture();
+  const guard = AbortSignal.timeout(500);
+  await assert.rejects(Promise.race([
+    runFrameworkMatrix({ ...matrixOptions(fixture, 10), executionEvidence: async () => new Promise(() => undefined) }),
+    new Promise<never>((_resolve, reject) => guard.addEventListener("abort", () => reject(new Error("test guard expired")), { once: true })),
+  ]), /execution evidence.*timed out/u);
+  assert.equal(fixture.client.runRequests.length, 0);
+});
+
 test("platform runner writes one validated report atomically after both frameworks", async () => {
   const root = await mkdtemp(join(tmpdir(), "framework-platform-"));
   const artifactDirectory = join(root, ".native-e2e", "artifacts", "linux");
@@ -881,6 +928,147 @@ test("platform runner writes one validated report atomically after both framewor
     assert.deepEqual(await readdir(artifactDirectory), ["framework-report.json"]);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("constant clock keeps benchmark and scenario intervals positive and inside the report", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "framework-constant-clock-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const options = { ...platformOptions(join(root, ".native-e2e", "artifacts", "linux")), now: () => new Date("2026-09-16T00:00:00.000Z") };
+  const report = await runFrameworkPlatform(options);
+  assert.ok(Date.parse(report.startedAt) < Date.parse(report.finishedAt));
+  for (const interval of [report.benchmark, ...report.toolchains.flatMap(({ frameworks }) => frameworks.flatMap(({ scenarios }) => scenarios))]) {
+    assert.ok(Date.parse(interval.startedAt) < Date.parse(interval.finishedAt));
+    assert.ok(Date.parse(interval.startedAt) >= Date.parse(report.startedAt));
+    assert.ok(Date.parse(interval.finishedAt) <= Date.parse(report.finishedAt));
+  }
+});
+
+test("default clock cannot publish a zero-duration benchmark", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "framework-default-clock-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const options = platformOptions(join(root, ".native-e2e", "artifacts", "linux"));
+  const toolchains = [await runFrameworkToolchain(options, "clang"), await runFrameworkToolchain(options, "gcc")];
+  const { now: _now, ...defaultClockOptions } = options;
+  t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-09-16T01:00:00.000Z") });
+  const report = await publishFrameworkPlatformReport(defaultClockOptions, toolchains, "2026-09-16T00:00:00.000Z");
+  assert.ok(Date.parse(report.benchmark.finishedAt) > Date.parse(report.benchmark.startedAt));
+  assert.ok(Date.parse(report.finishedAt) >= Date.parse(report.benchmark.finishedAt));
+});
+
+for (const mutation of ["none", "source", "source-and-repository", "catalog-identity", "executable-during-run", "compiler-during-run", "benchmark-failure", "benchmark-missing"] as const) test(`loaded consumer binds execution and preserves published inputs (${mutation})`, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "framework-consumer-runtime-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const artifactDirectory = join(root, ".native-e2e/artifacts/linux");
+  const repository = resolve(import.meta.dirname, "../../..");
+  await cp(join(repository, "testdata"), join(root, "testdata"), { recursive: true });
+  const producer = platformOptions(artifactDirectory);
+  const manifest = {
+    schemaVersion: 1, candidateCommit, platform: "linux",
+    contractSha256: digestBytes(await readFile(join(root, "testdata/framework-matrix/contract.json"))),
+    benchmark: producer.benchmark,
+    toolchains: await Promise.all([...producer.toolchains].sort((left, right) => left.family.localeCompare(right.family)).map(async (toolchain) => ({
+      ...toolchain,
+      frameworks: await Promise.all(toolchain.frameworks.map(async ({ fixture, now: _now, candidateCommit: _candidate, platform: _platform, toolchainFamily: _family, ...framework }) => {
+        const workspace = join(root, ".native-e2e/framework-work/linux", toolchain.family, framework.frameworkId, "workspace");
+        for (const name of ["framework-matrix", "frameworks"]) await cp(join(root, "testdata", name), join(workspace, "source", name), { recursive: true });
+        const service = join(workspace, "../service/data/build", "b".repeat(64), "bin");
+        await mkdir(service, { recursive: true });
+        await writeFile(join(service, `phase9_${framework.frameworkId}`), "producer binary");
+        return { ...framework, timeoutMs: 5000, stableIdDigest: stableFrameworkIdDigest(framework.frameworkId, await fixture.client.getTestCatalog({ projectId: "root", profileId: "profile", limit: 1000 }), f1Identity) };
+      })),
+    }))),
+  };
+  await mkdir(join(root, ".native-e2e/framework-runtime"), { recursive: true });
+  const manifestPath = join(root, ".native-e2e/framework-runtime/linux.json");
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  const freshBenchmark = { ...producer.benchmark, allocationsPerOperation: [201, 202, 203] as [number, number, number], catalogArtifactSha256: digest("consumer benchmark artifact") };
+  const consumers: FakeFixture[] = [];
+  const loaded = await loadRequiredFrameworkRuntime(root, "linux", artifactDirectory, {
+    loadFrameworkIdentity: async () => f1Identity,
+    collectBenchmark: async () => {
+      if (mutation === "benchmark-failure") throw new Error("benchmark collection failed");
+      return mutation === "benchmark-missing" ? undefined as never : freshBenchmark;
+    },
+    startService: async (_binary, directory) => {
+      const [family, frameworkId] = directory.replaceAll("\\", "/").split("/").slice(-3, -1) as [FrameworkToolchainFamily, FrameworkId];
+      const fixture = new FakeFixture(frameworkId, family);
+      consumers.push(fixture);
+      fixture.client.setCompilerIdentity("99.0.0", digest(`consumer:${family}`));
+      const discover = fixture.client.discoverTests.bind(fixture.client);
+      fixture.client.discoverTests = async (request) => {
+        const bin = join(directory, "data/build", "a".repeat(64), "bin");
+        await mkdir(bin, { recursive: true });
+        await writeFile(join(bin, `phase9_${frameworkId}`), `consumer:${family}:${frameworkId}`);
+        return discover(request);
+      };
+      if (family === "clang" && frameworkId === "cpputest") {
+        if (mutation === "catalog-identity") {
+          const catalog = fixture.client.getTestCatalog.bind(fixture.client);
+          fixture.client.getTestCatalog = async (request) => {
+            const result = await catalog(request);
+            result.containers[0]!.displayName = "changed consumer catalog identity";
+            return result;
+          };
+        }
+        if (mutation === "source" || mutation === "source-and-repository") {
+          await writeFile(join(directory, "../workspace/source/frameworks/cpputest/tests/framework_tests.cpp"), "changed consumer source");
+          if (mutation === "source-and-repository") await writeFile(join(root, "testdata/frameworks/cpputest/tests/framework_tests.cpp"), "changed consumer source");
+        }
+        const run = fixture.client.runTests.bind(fixture.client);
+        fixture.client.runTests = async (request) => {
+          const result = await run(request);
+          if (mutation === "compiler-during-run") fixture.client.setCompilerIdentity("99.0.0", digest("changed compiler during execution"));
+          if (mutation === "executable-during-run") await writeFile(join(directory, "data/build", "a".repeat(64), "bin/phase9_cpputest"), "changed consumer binary during run");
+          return result;
+        };
+      }
+      return Object.assign(fixture, { dispose: async () => { await rm(directory, { recursive: true, force: true }); } }) as unknown as TaskServiceFixture;
+    },
+  });
+  try {
+    if (mutation !== "none") {
+      await assert.rejects(runFrameworkPlatform({ ...loaded.options, now: monotonicClock() }), /source|executable|compiler|benchmark|catalog|execution evidence/u);
+      if (mutation === "source" || mutation === "source-and-repository") assert.ok(consumers.every(({ client }) => client.runRequests.length === 0), "unverified sources must not execute scenarios");
+      await assert.rejects(readFile(join(artifactDirectory, "framework-report.json")), { code: "ENOENT" });
+      return;
+    }
+    const report = await runFrameworkPlatform({ ...loaded.options, now: monotonicClock() });
+    assert.deepEqual(report.benchmark.allocationsPerOperation, [201, 202, 203]);
+    assert.equal(report.benchmark.catalogArtifactSha256, digest("consumer benchmark artifact"));
+    for (const toolchain of report.toolchains) for (const framework of toolchain.frameworks) {
+      assert.equal(toolchain.compilerVersion, "99.0.0");
+      assert.equal(toolchain.compilerSha256, digest(`consumer:${toolchain.family}`));
+      assert.equal(framework.executableArtifactSha256, digest(`consumer:${toolchain.family}:${framework.id}`));
+      assert.equal(framework.catalogArtifactSha256, framework.scenarios.find(({ id }) => id === "discovery")!.resultArtifactSha256);
+      assert.ok(framework.scenarios.every(({ executableArtifactSha256 }) => executableArtifactSha256 === framework.executableArtifactSha256));
+      assert.equal(await readFile(join(root, ".native-e2e/framework-work/linux", toolchain.family, framework.id, "service/data/build", "b".repeat(64), "bin", `phase9_${framework.id}`), "utf8"), "producer binary");
+    }
+    assert.deepEqual(JSON.parse(await readFile(manifestPath, "utf8")), manifest);
+  } finally { await loaded.dispose(); }
+});
+
+test("toolchain report binds changed consumer compiler and discovery artifact instead of producer evidence", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "framework-consumer-binding-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const options = platformOptions(join(root, ".native-e2e", "artifacts", "linux"));
+  const clang = options.toolchains.find(({ family }) => family === "clang")!;
+  for (const framework of clang.frameworks) {
+    const client = framework.fixture.client as unknown as FakeProtocolClient;
+    const inspect = client.inspectWorkspace.bind(client);
+    client.inspectWorkspace = async () => {
+      const result = await inspect();
+      Object.assign(result.toolchains[0]!, { version: "99.0.0", compilerSha256: digest("consumer compiler") });
+      return result;
+    };
+  }
+  const report = await runFrameworkToolchain(options, "clang");
+  assert.equal(report.compilerVersion, "99.0.0");
+  assert.equal(report.compilerSha256, digest("consumer compiler"));
+  for (const framework of report.frameworks) {
+    const discovery = framework.scenarios.find(({ id }) => id === "discovery")!;
+    assert.equal(framework.catalogArtifactSha256, discovery.resultArtifactSha256);
+    assert.notEqual(framework.catalogArtifactSha256, clang.frameworks.find(({ frameworkId }) => frameworkId === framework.id)!.catalogArtifactSha256);
   }
 });
 

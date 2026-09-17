@@ -43,7 +43,7 @@ const PLATFORM_FAMILIES: Readonly<Record<FrameworkPlatform, readonly FrameworkTo
 
 const MATRIX_KEYS = [
   "candidateCommit", "evidence", "fixture", "frameworkId", "now", "platform",
-  "timeoutMs", "toolchainFamily",
+  "timeoutMs", "toolchainFamily", "executionEvidence",
 ] as const;
 const EVIDENCE_KEYS = [
   "executableArtifactSha256", "sourceArtifactSha256", "sourceLocationDigest",
@@ -140,11 +140,17 @@ export interface FrameworkMatrixOptions {
   readonly toolchainFamily: FrameworkToolchainFamily;
   readonly timeoutMs?: number;
   readonly now?: () => Date;
+  /** In-process consumer binding; never accepted from the serialized runtime manifest. */
+  readonly executionEvidence?: (discovery: DiscoveredFrameworkCatalog) => Promise<FrameworkMatrixEvidence>;
 }
 
 export interface FrameworkMatrixResult {
   readonly frameworkId: FrameworkId;
   readonly catalogRevision: string;
+  readonly catalogArtifactSha256: string;
+  readonly compilerVersion: string;
+  readonly compilerSha256: string;
+  readonly evidence: FrameworkMatrixEvidence;
   readonly scenarios: readonly FrameworkScenarioEvidence[];
 }
 
@@ -167,6 +173,7 @@ export interface FrameworkPlatformToolchainOptions {
 export interface FrameworkPlatformOptions {
   readonly artifactDirectory: string;
   readonly benchmark: Omit<FrameworkBenchmarkEvidence, "startedAt" | "finishedAt">;
+  readonly collectBenchmark?: () => Promise<Omit<FrameworkBenchmarkEvidence, "startedAt" | "finishedAt">>;
   readonly candidateCommit: string;
   readonly now?: () => Date;
   readonly platform: FrameworkPlatform;
@@ -293,15 +300,33 @@ export async function runFrameworkMatrix(
   const discovery = await discoverFrameworkCatalog({ fixture: options.fixture, frameworkId: options.frameworkId, toolchainFamily: options.toolchainFamily, timeoutMs });
   const { catalog } = discovery;
   const selected = discovery;
+  const compilerVersion = discovery.toolchain.version;
+  const compilerSha256 = discovery.toolchain.compilerSha256;
+  if (typeof compilerSha256 !== "string" || !DIGEST.test(compilerSha256) ||
+      !/^[0-9]+(?:\.[0-9]+){1,3}$/u.test(compilerVersion)) {
+    throw new Error("verified Service compiler identity is required");
+  }
   if (
     requiredIdentity !== undefined &&
     stableFrameworkIdDigest(options.frameworkId, catalog, requiredIdentity.provenance) !== requiredIdentity.stableIdDigest
   ) {
     throw new Error(`${options.frameworkId} stable ID does not match discovered Service catalog and F1 identity`);
   }
+  const readExecutionEvidence = () => options.executionEvidence === undefined ? Promise.resolve(options.evidence) :
+    bounded(`${options.frameworkId} execution evidence`, options.executionEvidence(discovery), timeoutMs);
+  const evidence = { ...await readExecutionEvidence() };
+  const boundOptions = { ...options, evidence };
+  validateMatrixOptions(boundOptions);
+  const verifyExecution = async () => {
+    if (options.executionEvidence === undefined) return;
+    const current = await readExecutionEvidence();
+    if (EVIDENCE_KEYS.some((key) => current[key] !== evidence[key])) {
+      throw new Error(`${options.frameworkId} execution evidence changed during scenarios`);
+    }
+  };
   const selection = catalogSelection(catalog, options.frameworkId, contract);
   const discoveryRecord = scenarioRecord(
-    options,
+    boundOptions,
     "discovery",
     catalog.revision,
     discoveryStarted,
@@ -322,6 +347,7 @@ export async function runFrameworkMatrix(
       scenarios.push(discoveryRecord);
       continue;
     }
+    await verifyExecution();
     const startedAt = now();
     const observation = await executeScenario({
       catalog,
@@ -337,6 +363,7 @@ export async function runFrameworkMatrix(
       timeoutMs,
       toolchainFamily: options.toolchainFamily,
     });
+    await verifyExecution();
     const expected = expectedOutcome(id);
     if (observation.outcome !== expected) {
       throw new Error(
@@ -350,7 +377,7 @@ export async function runFrameworkMatrix(
     }
     if (observation.runId !== undefined) completedRunIds.set(id, observation.runId);
     scenarios.push(scenarioRecord(
-      options,
+      boundOptions,
       id,
       catalog.revision,
       startedAt,
@@ -361,6 +388,10 @@ export async function runFrameworkMatrix(
   return Object.freeze({
     frameworkId: options.frameworkId,
     catalogRevision: catalog.revision,
+    catalogArtifactSha256: discovery.catalogArtifactSha256,
+    compilerVersion,
+    compilerSha256,
+    evidence: Object.freeze(evidence),
     scenarios: Object.freeze(scenarios),
   });
 }
@@ -391,11 +422,13 @@ export async function runFrameworkToolchain(
   const toolchain = options.toolchains.find((candidate) => candidate.family === family)!;
   const byFramework = new Map(toolchain.frameworks.map((framework) => [framework.frameworkId, framework]));
   const frameworks: FrameworkEvidence[] = [];
+  let compiler: { compilerVersion: string; compilerSha256: string } | undefined;
   for (const frameworkId of ["cpputest", "unity"] as const) {
     const framework = byFramework.get(frameworkId)!;
     const matrix = await runFrameworkMatrix({
       candidateCommit: options.candidateCommit,
       evidence: framework.evidence,
+      ...(framework.executionEvidence === undefined ? {} : { executionEvidence: framework.executionEvidence }),
       fixture: framework.fixture,
       frameworkId,
       now,
@@ -406,16 +439,20 @@ export async function runFrameworkToolchain(
       provenance: requiredIdentity,
       stableIdDigest: framework.stableIdDigest,
     });
+    if (compiler !== undefined && (compiler.compilerVersion !== matrix.compilerVersion || compiler.compilerSha256 !== matrix.compilerSha256)) {
+      throw new Error("Service compiler identity changed across frameworks");
+    }
+    compiler = { compilerVersion: matrix.compilerVersion, compilerSha256: matrix.compilerSha256 };
     frameworks.push({
       id: frameworkId,
       dependencyVersion: framework.dependencyVersion,
       dependencySha256: framework.dependencySha256,
       dependencyTreeSha256: framework.dependencyTreeSha256,
       catalogRevision: matrix.catalogRevision,
-      catalogArtifactSha256: framework.catalogArtifactSha256,
-      sourceArtifactSha256: framework.evidence.sourceArtifactSha256,
-      sourceLocationDigest: framework.evidence.sourceLocationDigest,
-      executableArtifactSha256: framework.evidence.executableArtifactSha256,
+      catalogArtifactSha256: matrix.catalogArtifactSha256,
+      sourceArtifactSha256: matrix.evidence.sourceArtifactSha256,
+      sourceLocationDigest: matrix.evidence.sourceLocationDigest,
+      executableArtifactSha256: matrix.evidence.executableArtifactSha256,
       stableIdDigest: framework.stableIdDigest,
       ...(frameworkId === "unity" ? { cMockProvenance: framework.cMockProvenance! } : {}),
       scenarios: [...matrix.scenarios],
@@ -423,8 +460,7 @@ export async function runFrameworkToolchain(
   }
   return {
     family,
-    compilerVersion: toolchain.compilerVersion,
-    compilerSha256: toolchain.compilerSha256,
+    ...compiler!,
     frameworks,
   };
 }
@@ -442,9 +478,13 @@ export async function publishFrameworkPlatformReport(
   if (orderedToolchains.some((toolchain) => toolchain === undefined) || byFamily.size !== orderedToolchains.length) {
     throw new Error("framework platform execution is incomplete");
   }
-  const benchmarkStartedAt = now().toISOString();
-  const benchmarkFinishedAt = now().toISOString();
-  const finishedAt = now().toISOString();
+  const lastScenarioFinish = Math.max(Date.parse(startedAt), ...toolchains.flatMap(({ frameworks }) =>
+    frameworks.flatMap(({ scenarios }) => scenarios.map(({ finishedAt }) => Date.parse(finishedAt)))));
+  const benchmarkStartedAt = new Date(Math.max(now().getTime(), lastScenarioFinish)).toISOString();
+  const benchmark = options.collectBenchmark === undefined ? options.benchmark : await options.collectBenchmark();
+  if (benchmark === undefined || benchmark === null) throw new Error("consumer benchmark evidence is missing");
+  const benchmarkFinishedAt = new Date(Math.max(now().getTime(), Date.parse(benchmarkStartedAt) + 1)).toISOString();
+  const finishedAt = new Date(Math.max(now().getTime(), Date.parse(benchmarkFinishedAt))).toISOString();
   const report = buildFrameworkPlatformReport({
     schemaVersion: 1,
     candidateCommit: options.candidateCommit,
@@ -457,8 +497,8 @@ export async function publishFrameworkPlatformReport(
     finishedAt,
     toolchains: orderedToolchains as FrameworkToolchainEvidence[],
     benchmark: {
-      ...options.benchmark,
-      allocationsPerOperation: [...options.benchmark.allocationsPerOperation],
+      ...benchmark,
+      allocationsPerOperation: [...benchmark.allocationsPerOperation],
       startedAt: benchmarkStartedAt,
       finishedAt: benchmarkFinishedAt,
     },
@@ -992,7 +1032,7 @@ export async function loadMatrixContract(frameworkId: FrameworkId, root = reposi
 
 function validateMatrixOptions(options: FrameworkMatrixOptions): void {
   closedKeys(options, MATRIX_KEYS, "framework matrix options");
-  closedKeys(options.evidence, EVIDENCE_KEYS, "framework matrix evidence");
+  exactKeys(options.evidence, EVIDENCE_KEYS, "framework matrix evidence");
   if (!COMMIT.test(options.candidateCommit)) throw new Error("candidate commit is invalid");
   if (options.frameworkId !== "cpputest" && options.frameworkId !== "unity") {
     throw new Error("framework ID is invalid");
@@ -1017,14 +1057,20 @@ function validateMatrixOptions(options: FrameworkMatrixOptions): void {
   if (options.now !== undefined && typeof options.now !== "function") {
     throw new Error("framework matrix clock is invalid");
   }
+  if (options.executionEvidence !== undefined && typeof options.executionEvidence !== "function") {
+    throw new Error("framework execution evidence binding is invalid");
+  }
 }
 
 function validatePlatformOptions(options: FrameworkPlatformOptions): void {
   closedKeys(
     options,
-    ["artifactDirectory", "benchmark", "candidateCommit", "now", "platform", "toolchains"],
+    ["artifactDirectory", "benchmark", "candidateCommit", "collectBenchmark", "now", "platform", "toolchains"],
     "framework platform options",
   );
+  if (options.collectBenchmark !== undefined && typeof options.collectBenchmark !== "function") {
+    throw new Error("framework benchmark collector is invalid");
+  }
   if (!isAbsolute(options.artifactDirectory) || options.artifactDirectory.includes("\0")) {
     throw new Error("framework artifact directory must be absolute");
   }
@@ -1069,6 +1115,7 @@ function validatePlatformFramework(
   validateMatrixOptions({
     candidateCommit: options.candidateCommit,
     evidence: framework.evidence,
+    ...(framework.executionEvidence === undefined ? {} : { executionEvidence: framework.executionEvidence }),
     fixture: framework.fixture,
     frameworkId: framework.frameworkId,
     platform: options.platform,
@@ -1212,6 +1259,8 @@ function portableSourcePath(uri: string, frameworkId: FrameworkId): string {
   const markers = [
     `/testdata/frameworks/${frameworkId}/`,
     "/testdata/framework-matrix/",
+    `/source/frameworks/${frameworkId}/`,
+    "/source/framework-matrix/",
   ];
   let portable;
   for (const marker of markers) {
