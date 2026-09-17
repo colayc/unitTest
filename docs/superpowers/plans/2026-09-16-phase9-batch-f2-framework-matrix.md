@@ -145,7 +145,9 @@
 
 **Interfaces:**
 - `pnpm test:native-framework-matrix` runs the closed producer/validator suite.
-- `node tools/phase9/p4-report.mjs --windows .native-e2e/framework-inputs/windows/framework-report.json --linux .native-e2e/framework-inputs/linux/framework-report.json --candidate \"$GITHUB_SHA\" --out .superpowers/phase9/p4/native-framework-matrix-report.json` remains the sole matrix aggregation command.
+- The trusted runtime producer publishes only `.native-e2e/framework-runtime/{windows|linux}.json` and the owned `.native-e2e/framework-work/{windows|linux}/{toolchain}/{cpputest|unity}/{service,workspace}` trees. Runtime inputs are not downloaded platform reports.
+- Required native execution consumes those fixed runtime outputs and writes `.native-e2e/artifacts/{windows|linux}/framework-report.json`. The aggregator downloads the two reports into `.native-e2e/framework-inputs/{windows|linux}`; these are aggregation input directories, not runtime producer outputs.
+- `node tools/phase9/p4-report.mjs --windows .native-e2e/framework-inputs/windows/framework-report.json --linux .native-e2e/framework-inputs/linux/framework-report.json --candidate \"$GITHUB_SHA\" --out .superpowers/phase9/p4/native-framework-matrix-report.json` remains the sole matrix aggregation command over the downloaded reports.
 
 - [ ] **Step 1: Add failing contract tests** for exact artifact names, candidate SHA binding, two platform reports, eight toolchain/framework blocks, 136 scenario records, and refusal of unsigned or path-bearing substitutions.
 - [ ] **Step 2: Run the contract tests**
@@ -173,19 +175,19 @@
 - Modify: `docs/native-e2e.md`
 
 **Interfaces:**
-- `verify-windows` publishes `native-framework-windows` only after `msvc` and `clang-cl` complete.
-- `verify-linux` publishes `native-framework-linux` only after `gcc` and `clang` complete.
-- `verify-framework-matrix` downloads both exact artifacts, runs the fixed P4 aggregator, and uploads `native-framework-matrix-report` with retention 14 days.
+- Independent `verify-framework-windows` on fixed `windows-2022` prepares the trusted Windows runtime and publishes `native-framework-windows` only after required `msvc` and `clang-cl` execution completes. The existing `verify-windows` and `verify-windows-wfp` administrator/WFP paths are unchanged and are not this producer.
+- `verify-linux` prepares the trusted Linux runtime and runs required `gcc` and `clang` execution through the existing offline wrapper after dependency preparation; it publishes `native-framework-linux` only after both complete.
+- `verify-framework-matrix` depends on exactly `verify-framework-windows` and `verify-linux`, downloads both exact artifacts, runs the fixed P4 aggregator, and uploads `native-framework-matrix-report` with retention 14 days and error-on-missing behavior.
 
-- [ ] **Step 1: Extend failing workflow contract tests** to require fixed runners, `UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED`, no mutable actions or secrets, exact artifact paths, and `if-no-files-found: error`.
-- [ ] **Step 2: Run the workflow contract tests** and observe failure for the missing F2 producer invocation.
-- [ ] **Step 3: Wire the existing jobs** to call the Service-driven framework matrix after F1 bundle validation; do not add administrator/WFP privileges, release inputs, signing, or network downloads after namespace entry.
-- [ ] **Step 4: Run local static checks**
+- [x] **Step 1: Extend failing workflow contract tests** to require fixed runners, `UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED`, no mutable actions or secrets, exact artifact paths, and `if-no-files-found: error`.
+- [x] **Step 2: Run the workflow contract tests** and observe failure for the missing F2 producer invocation.
+- [x] **Step 3: Wire the independent `verify-framework-windows` and offline `verify-linux` producer paths** to prepare the fixed runtime and call the Service-driven framework matrix after F1 bundle validation; do not add administrator/WFP privileges, release inputs, signing, or network downloads after namespace entry.
+- [x] **Step 4: Run local static checks**
 
     node --test tools/workspace-smoke/workspace-smoke.test.mjs tools/linux-offline/run.test.mjs
     git diff --check
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit the static workflow wiring** (completed by the trusted-runtime follow-up, `5213943` and hardening `28ee186`; no hosted execution is implied).
 
     git add .github/workflows/foundation.yml tools/workspace-smoke/workspace-smoke.test.mjs docs/native-e2e.md
     git commit -m "ci: run phase9 framework matrix on four toolchains"
@@ -214,7 +216,7 @@
 - Modify: `docs/superpowers/plans/2026-09-16-phase9-batch-f2-framework-matrix.md`
 - Modify: ignored `.superpowers/sdd/2026-09-16-phase9-batch-f2-framework-matrix/progress.md`
 
-- [ ] **Step 1: Run the complete local gate**
+- [x] **Step 1: Run the complete local gate** (2026-09-17 trusted-runtime follow-up; local verification only).
 
     pnpm verify
     git diff --check
@@ -223,10 +225,19 @@
 - [ ] **Step 3: Record the four-toolchain hosted run IDs, attempts, artifact digests, and any environment-only skips; Linux native evidence must be reported as PASS only when hosted jobs actually pass.
 - [ ] **Step 4: Obtain final code review approval and stop before release operations.
 
+## Trusted-runtime follow-up and hosted handoff (2026-09-17)
+
+- [x] Trusted runtime producer implementation is locally complete under `2026-09-17-phase9-f2-trusted-runtime-producer.md`: closed manifests, owned staging, Service-derived compiler/catalog/executable identity, audited benchmark input, coordinated atomic publication, and required runtime consumption.
+- [x] Static hosted workflow wiring is locally complete: independent `verify-framework-windows`, offline `verify-linux`, and the exact two-artifact P4 aggregator contract. These checks do not execute the hosted four-toolchain matrix.
+- [x] Final local verification passed with bundled Node 24.19.0 and pinned pnpm 11.4.0: all four focused producer suites, workflow/offline checks, full service-probe, framework-bundle, P4 matrix, workspace, Phase 9 consistency, and `pnpm verify` (including Go race checks and 20/20 Service E2E tests). Only existing platform-dependent/opt-in skips were accepted; generated tracked files and recorded evidence are unchanged. The ignored Task 7 report records the corrected environment, separately repaired stale script assertion, and initial CppUTest timeout followed by unchanged successful reruns.
+- [ ] Hosted `msvc`, `clang-cl`, `gcc`, and `clang` execution and candidate-bound 136-scenario evidence remain incomplete; remote execution requires separate user authorization/actions.
+- [ ] Immutable hosted artifact audit, receipt creation, and gate-matrix update/promotion remain incomplete. Task 7 and Task 8's hosted evidence/approval steps above remain open; local success is not hosted evidence.
+- [ ] Push, PR creation, merge, signing, Release publication, and legal approval remain incomplete and require separate authorization/user actions. None is authorized by this local handoff.
+
+The recorded Phase 9 evidence is unchanged, including the three Phase 8 deferred gates and `releaseReady=false`. A passing local `check:phase9-gates` confirms consistency of that existing record, not P4 acceptance or release readiness.
+
 ## Self-review
 
 - Every F2 handoff requirement is mapped: four hosted toolchains (Tasks 4 and 6), 17 scenarios per framework (Tasks 1–4), platform reports and cross-platform stable digests (Tasks 1, 3, and 5), workflow artifacts and online audit (Tasks 6–7), and candidate-bound receipts (Task 7).
 - No task permits dependency downloads, CMock generation, signing, legal approval, Release publication, or mutation of F1 provenance.
 - All commands use the repository's existing package scripts, pinned hosted runners, and current report validator interfaces; no new shell-input surface is introduced.
-
-
