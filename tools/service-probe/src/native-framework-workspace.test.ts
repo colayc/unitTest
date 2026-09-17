@@ -132,6 +132,26 @@ test("staging preserves an unknown prior stage and validates exact ownership", a
   await assert.rejects(validateOwnedFrameworkStage(join(fixture.stageRoot, ".."), fixture.options.ownershipId), /staging ownership/u);
 });
 
+test("staging accepts only the fixed repository framework-work coordinate", async (t) => {
+  const fixture = await workspaceFixture(t);
+  (fixture.options as { stageRoot: string }).stageRoot = join(fixture.repositoryRoot, ".owned-stage", "framework");
+  await assert.rejects(stageFrameworkWorkspace(fixture.options), /fixed framework-work layout/u);
+  await assert.rejects(lstat(fixture.options.stageRoot), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
+});
+
+test("staging rejects a linked framework-work ancestor without mutating its outside target", async (t) => {
+  const fixture = await workspaceFixture(t);
+  const outside = await mkdtemp(join(tmpdir(), "utide-framework-outside-"));
+  t.after(() => rm(outside, { recursive: true, force: true }));
+  await mkdir(join(fixture.repositoryRoot, ".native-e2e"), { recursive: true });
+  const linkedParent = join(fixture.repositoryRoot, ".native-e2e", "framework-work");
+  try { await symlink(outside, linkedParent, process.platform === "win32" ? "junction" : "dir"); }
+  catch (error) { t.skip(`directory link unavailable: ${(error as NodeJS.ErrnoException).code}`); return; }
+
+  await assert.rejects(stageFrameworkWorkspace(fixture.options), /staging ancestor|symbolic link|unsafe/u);
+  await assert.rejects(lstat(join(outside, "linux")), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
+});
+
 test("compiled executable hashing accepts one fixed regular build artifact", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "utide-framework-executable-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -161,7 +181,7 @@ async function workspaceFixture(t: test.TestContext) {
   for (const name of ["cpputest", "unity", "cmock"]) await mkdir(join(prepared, name), { recursive: true });
   await write(repositoryRoot, "sdk/cmake/UnitTestIDE.cmake", "# helper\n");
   await write(repositoryRoot, "generator", "generator\n");
-  const stageRoot = join(repositoryRoot, ".owned-stage", "framework");
+  const stageRoot = join(repositoryRoot, ".native-e2e", "framework-work", "linux", "gcc", "cpputest");
   const options: FrameworkWorkspaceStageOptions = {
     repositoryRoot, stageRoot, platform: "linux", family: "gcc", frameworkId: "cpputest",
     ownershipId: "01234567-89ab-4def-8123-456789abcdef", candidateCommit: "1".repeat(40),

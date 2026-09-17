@@ -55,7 +55,13 @@ export async function stageFrameworkWorkspace(
   validateClosedOptions(options);
   const repositoryRoot = await requireDirectDirectory(resolve(options.repositoryRoot), "repository root");
   const stageRoot = resolve(options.stageRoot);
-  requireContained(repositoryRoot, stageRoot, "owned staging root");
+  const platformName = options.platform === "win32" ? "windows" : "linux";
+  const expectedStageRoot = join(
+    repositoryRoot, ".native-e2e", "framework-work", platformName, options.family, options.frameworkId,
+  );
+  if (!samePath(stageRoot, expectedStageRoot)) {
+    throw new Error("owned staging root must use the fixed framework-work layout");
+  }
   const existing = await lstat(stageRoot).catch(missingOnly);
   if (existing !== undefined) throw new Error("staging ownership cannot be established for an existing stage");
 
@@ -76,9 +82,7 @@ export async function stageFrameworkWorkspace(
   await validateInventory(fixtureRoots.unity, FIXTURE_FILES.unity, "Unity fixture");
   const contract = parseContract(await readFile(join(matrixRoot, "contract.json")), options.frameworkId);
 
-  await mkdir(dirname(stageRoot), { recursive: true, mode: 0o700 });
-  const parent = await realpath(dirname(stageRoot));
-  requireContained(repositoryRoot, parent, "owned staging parent");
+  await createVerifiedStageAncestors(repositoryRoot, dirname(stageRoot));
   await mkdir(stageRoot, { recursive: false, mode: 0o700 });
   let owned = false;
   try {
@@ -338,6 +342,30 @@ function requireContained(root: string, path: string, label: string): void {
   if (child === "" || child === ".." || child.startsWith(`..${sep}`) || isAbsolute(child)) {
     throw new Error(`${label} is outside the repository root`);
   }
+}
+
+async function createVerifiedStageAncestors(repositoryRoot: string, parent: string): Promise<void> {
+  requireContained(repositoryRoot, parent, "staging ancestor");
+  const components = relative(repositoryRoot, parent).split(sep);
+  let current = repositoryRoot;
+  for (const component of components) {
+    current = join(current, component);
+    let info = await lstat(current).catch(missingOnly);
+    if (info === undefined) {
+      await mkdir(current, { recursive: false, mode: 0o700 });
+      info = await lstat(current);
+    }
+    if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("staging ancestor is a symbolic link or unsafe");
+    const canonical = await realpath(current);
+    if (!samePath(canonical, current)) throw new Error("staging ancestor is not a direct directory");
+    requireContained(repositoryRoot, canonical, "staging ancestor");
+  }
+}
+
+function samePath(left: string, right: string): boolean {
+  return process.platform === "win32"
+    ? resolve(left).toLowerCase() === resolve(right).toLowerCase()
+    : resolve(left) === resolve(right);
 }
 
 async function writeCanonical(path: string, value: unknown): Promise<void> {
