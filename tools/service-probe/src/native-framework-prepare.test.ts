@@ -8,6 +8,8 @@ import * as prepareModule from "./native-framework-prepare.js";
 import { prepareFrameworkRuntime, type FrameworkRuntimePrepareDependencies } from "./native-framework-prepare.js";
 import { stableFrameworkIdDigest } from "./native-framework-matrix.js";
 import { hashCompiledFrameworkExecutable } from "./native-framework-workspace.js";
+import { publishFrameworkRuntime } from "./native-framework-publish.js";
+import { loadRequiredFrameworkRuntime } from "./native-framework-runtime.js";
 import type { FrameworkId, FrameworkToolchainFamily } from "./native-framework-report.js";
 import type { TaskServiceFixture } from "./probe.js";
 
@@ -148,6 +150,23 @@ test("prepared executable evidence survives destructive Service disposal without
     const serviceRoot = join(workRoot, "linux", toolchain.family, framework.frameworkId, "service");
     assert.deepEqual(await readdir(serviceRoot), ["data"]);
     assert.equal(await readFile(join(serviceRoot, "data/build", "a".repeat(64), "bin", `phase9_${framework.frameworkId}`), "utf8"), `compiled:${toolchain.family}:${framework.frameworkId}`);
+  }
+});
+
+test("prepare and publish can replace a runtime after deletion-equivalent consumer disposal", async (t) => {
+  const input = await fixture(t);
+  const options = { repositoryRoot: input.repositoryRoot, platform: "linux", candidateCommit: "1".repeat(40) } as const;
+  await publishFrameworkRuntime(await prepareFrameworkRuntime(options, input.dependencies));
+  const runtime = await loadRequiredFrameworkRuntime(input.repositoryRoot, "linux", join(input.repositoryRoot, "artifacts"), {
+    loadFrameworkIdentity: async () => ({}) as any,
+    startService: input.dependencies.startService!,
+  });
+  await runtime.dispose();
+  const next = await prepareFrameworkRuntime({ ...options, candidateCommit: "2".repeat(40) }, input.dependencies);
+  const published = await publishFrameworkRuntime(next);
+  assert.equal(published.candidateCommit, "2".repeat(40));
+  for (const toolchain of next.manifest.toolchains) for (const framework of toolchain.frameworks) {
+    assert.equal(await hashCompiledFrameworkExecutable(join(input.repositoryRoot, ".native-e2e/framework-work"), "linux", toolchain.family, framework.frameworkId), framework.evidence.executableArtifactSha256);
   }
 });
 

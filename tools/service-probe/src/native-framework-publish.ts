@@ -66,6 +66,7 @@ async function publish(prepared: PreparedFrameworkRuntime): Promise<PublishedFra
   const stagedManifest = join(staging, "runtime.json");
   const backupPlatform = join(workRoot, `.backup-${name}`);
   const backupManifest = join(dirname(finalManifest), `.backup-${name}.json`);
+  const failedPlatform = join(workRoot, `.failed-${prepared.ownershipId}`);
   const roots = manifest.toolchains.flatMap(toolchain => toolchain.frameworks.map(framework => join(stagePlatform, toolchain.family, framework.frameworkId)));
   if (roots.some((root, index) => root !== prepared.ownedStagingRoots[index])) throw new Error("staging coordinates changed");
   const release = await acquireFrameworkRuntimeLock(repositoryRoot, manifest.platform);
@@ -74,13 +75,14 @@ async function publish(prepared: PreparedFrameworkRuntime): Promise<PublishedFra
   let manifestBackedUp = false;
   let workBackedUp = false;
   let installedWork = false;
+  let installedIdentity: { dev: number; ino: number } | undefined;
   let installedManifest = false;
   let ownedStage = false;
   let committed = false;
   try {
     await validateStage(staging, manifest, prepared.ownershipId, false);
     ownedStage = true;
-    if (await exists(backupPlatform) || await exists(backupManifest)) throw new Error("unknown backup");
+    if (await exists(backupPlatform) || await exists(backupManifest) || await exists(failedPlatform)) throw new Error("unknown backup or quarantine");
     const contractSha256 = digest(await fs.readFile(join(repositoryRoot, "testdata/framework-matrix/contract.json")));
     if (manifest.contractSha256 !== contractSha256) throw new Error("contract changed");
     const hasManifest = await exists(finalManifest);
@@ -104,6 +106,7 @@ async function publish(prepared: PreparedFrameworkRuntime): Promise<PublishedFra
       workBackedUp = true;
     }
     await validateStage(staging, manifest, prepared.ownershipId, true);
+    installedIdentity = await fs.lstat(stagePlatform);
     await fs.rename(stagePlatform, finalPlatform);
     installedWork = true;
     await directFile(stagedManifest);
@@ -134,15 +137,32 @@ async function publish(prepared: PreparedFrameworkRuntime): Promise<PublishedFra
   } catch (error) {
     if (!committed) {
       if (installedManifest) { await directFile(finalManifest); await fs.unlink(finalManifest); }
-      if (installedWork) {
-        await validatePlatform(finalPlatform, manifest, prepared.ownershipId, false);
-        await fs.rm(finalPlatform, { recursive: true });
+      if (installedWork && await exists(finalPlatform)) {
+        // Do not revalidate the structure that just failed validation. The
+        // directory identity captured before our rename proves which tree we
+        // installed; quarantine it intact, including any unknown new contents.
+        await directDirectory(finalPlatform);
+        const current = await fs.lstat(finalPlatform);
+        if (current.dev !== installedIdentity!.dev || current.ino !== installedIdentity!.ino || await exists(failedPlatform)) {
+          throw new Error("failed runtime ownership changed");
+        }
+        await fs.rename(finalPlatform, failedPlatform);
       }
       if (workBackedUp) {
         await validatePlatform(backupPlatform, oldManifest!, oldOwner!, false);
         await fs.rename(backupPlatform, finalPlatform);
       }
-      if (manifestBackedUp) { await directFile(backupManifest); await fs.rename(backupManifest, finalManifest); }
+      if (manifestBackedUp) {
+        await directFile(backupManifest);
+        const backup = parseFrameworkRuntimeManifest(await fs.readFile(backupManifest), manifest.platform, oldManifest!.contractSha256);
+        if (JSON.stringify(backup) !== JSON.stringify(oldManifest)) throw new Error("backup identity changed");
+        await fs.rename(backupManifest, finalManifest);
+      }
+      if (manifestBackedUp || workBackedUp) {
+        const restored = parseFrameworkRuntimeManifest(await fs.readFile(finalManifest), manifest.platform, oldManifest!.contractSha256);
+        if (JSON.stringify(restored) !== JSON.stringify(oldManifest)) throw new Error("restored runtime identity changed");
+        await validatePlatform(finalPlatform, restored, oldOwner!, true);
+      }
       if (ownedStage) await cleanupStage(staging, manifest, prepared.ownershipId);
     }
     throw error;

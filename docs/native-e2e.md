@@ -115,11 +115,15 @@ offline boundary 内运行 producer 和 required matrix。Go benchmark 强制 `G
 
 准备过程使用同卷 `.native-e2e/framework-work/.staging/{invocation}/...`。发布和 consumer
 共用 `.native-e2e/framework-runtime/{windows|linux}.lock`，consumer 持锁直到 dispose；
+consumer 在锁目录内复制 workspace/service 后执行，销毁临时 Service 不会删除已发布的
+compiled evidence，因此正常消费后仍可再次 prepare/publish 替换。
 锁已存在时直接 fail closed，不自动清理未知锁。发布在持锁期间备份旧 manifest/work tree、
 rename 新内容并重新验证，失败恢复完整旧 pair。仅删除已验证属于本次操作的 staging/backup；
 未知所有权、符号链接、残留 backup 或不完整旧 runtime 均保留并拒绝覆盖。崩溃留下的锁和
 backup 需人工检查，不能作为成功证据。stdout 的 producer 摘要仅包含 schema/platform/
 candidate/toolchain families/manifest SHA-256，不包含路径、环境、凭据或原始子进程输出。
+最终结构验证失败时，新树按已记录的目录身份移入 `.native-e2e/framework-work/.failed-{invocation}`
+隔离区（保留未知条目），随后恢复并重新验证完整旧 pair；隔离区不作为可消费 runtime。
 
 Windows 本地准备与 required matrix（先在联网准备阶段完成 bundle/cache，随后进入 offline boundary）：
 

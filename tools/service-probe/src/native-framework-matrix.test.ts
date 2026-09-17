@@ -757,6 +757,11 @@ test("required runtime validates F1 identity before starting any framework Servi
     })),
   })}\n`);
   const events: string[] = [];
+  for (const family of ["clang", "gcc"]) for (const framework of ["cpputest", "unity"]) {
+    const base = join(root, ".native-e2e/framework-work/linux", family, framework);
+    await mkdir(join(base, "service"), { recursive: true });
+    await mkdir(join(base, "workspace"), { recursive: true });
+  }
   const loaded = await loadRequiredFrameworkRuntime(root, "linux", artifactDirectory, {
     loadFrameworkIdentity: async () => {
       events.push("identity");

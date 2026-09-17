@@ -137,3 +137,42 @@ test("lock release preserves unknown ownership instead of clearing another invoc
   await assert.rejects(release(), /publication lock release/u);
   assert.equal(await fs.readFile(owner, "utf8"), "unknown");
 });
+
+test("destructive consumer disposal preserves published evidence for subsequent replacement", async (t) => {
+  const input = await fixture(t);
+  await publishFrameworkRuntime(input.prepared);
+  const runtime = await loadRequiredFrameworkRuntime(input.repositoryRoot, "linux", join(input.repositoryRoot, "artifacts"), {
+    loadFrameworkIdentity: async () => ({}) as any,
+    startService: async (_binary, directory) => ({
+      dispose: async () => { await fs.rm(directory, { recursive: true, force: true }); },
+    }) as any,
+  });
+  await runtime.dispose();
+  await assertComplete(input, "1".repeat(40));
+  const next = await fixture(t, input.repositoryRoot, "2".repeat(40));
+  await publishFrameworkRuntime(next.prepared);
+  await assertComplete(input, "2".repeat(40));
+  assert.deepEqual(await fs.readdir(dirname(input.manifest)), ["linux.json"]);
+});
+
+for (const mutation of ["missing-directory", "extra-entry"] as const) test(`structural ${mutation} final validation failure restores complete old pair`, async (t) => {
+  const input = await fixture(t);
+  await publishFrameworkRuntime(input.prepared);
+  const next = await fixture(t, input.repositoryRoot, "2".repeat(40));
+  const rename = fs.rename;
+  let injected = false;
+  t.mock.method(fs, "rename", async (from: string, to: string) => {
+    await rename(from, to);
+    if (to === input.manifest && !injected) {
+      injected = true;
+      if (mutation === "missing-directory") await fs.rm(join(input.work, "linux/clang/cpputest/service"), { recursive: true });
+      else await fs.writeFile(join(input.work, "linux/unknown"), "preserve unknown entry");
+    }
+  });
+  await assert.rejects(publishFrameworkRuntime(next.prepared), /publication failed/u);
+  assert.ok(injected);
+  await assertComplete(input, "1".repeat(40));
+  await assert.rejects(fs.lstat(join(input.work, ".backup-linux")), { code: "ENOENT" });
+  if (mutation === "extra-entry") assert.equal(await fs.readFile(join(input.work, `.failed-${next.prepared.ownershipId}`, "unknown"), "utf8"), "preserve unknown entry");
+  await (await acquireFrameworkRuntimeLock(input.repositoryRoot, "linux"))();
+});

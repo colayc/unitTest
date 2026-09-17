@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstat, readFile } from "node:fs/promises";
+import { cp, lstat, mkdir, readFile, realpath, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { startService, type TaskServiceFixture } from "./probe.js";
 import type { FrameworkPlatform } from "./native-framework-report.js";
@@ -65,6 +65,23 @@ async function loadLockedFrameworkRuntime(
   const identity = await dependencies.loadFrameworkIdentity(repositoryRoot);
 
   const fixtures: TaskServiceFixture[] = [];
+  // Published workspaces and executable evidence are immutable inputs. Services
+  // own (and recursively delete) their runtime directory, so run only copies.
+  const lockRoot = join(repositoryRoot, ".native-e2e/framework-runtime", `${platformName}.lock`);
+  const lockOwner = await readFile(join(lockRoot, "owner"), "utf8");
+  const consumptionRoot = join(lockRoot, "consumer");
+  await mkdir(consumptionRoot, { mode: 0o700 });
+  const consumptionIdentity = await lstat(consumptionRoot);
+  const cleanup = async () => {
+    const current = await lstat(consumptionRoot);
+    if (!current.isDirectory() || current.isSymbolicLink() ||
+        current.dev !== consumptionIdentity.dev || current.ino !== consumptionIdentity.ino ||
+        await realpath(consumptionRoot) !== resolve(consumptionRoot) ||
+        await readFile(join(lockRoot, "owner"), "utf8") !== lockOwner) {
+      throw new Error("framework consumer ownership changed");
+    }
+    await rm(consumptionRoot, { recursive: true });
+  };
   try {
     const serviceBinary = join(repositoryRoot, "build", platform === "win32" ? "unit-test-service.exe" : "unit-test-service");
     const bundleRoot = join(repositoryRoot, ".bundled-tools", "cmake");
@@ -74,7 +91,18 @@ async function loadLockedFrameworkRuntime(
       const frameworks: FrameworkPlatformFrameworkOptions[] = [];
       for (const input of toolchain.frameworks) {
         const frameworkId = input.frameworkId;
-        const workspaceBase = join(repositoryRoot, ".native-e2e", "framework-work", platformName, family, frameworkId);
+        const publishedBase = join(repositoryRoot, ".native-e2e", "framework-work", platformName, family, frameworkId);
+        const workspaceBase = join(consumptionRoot, family, frameworkId);
+        await cp(publishedBase, workspaceBase, {
+          recursive: true, force: false, errorOnExist: true,
+          filter: async (source) => {
+            const info = await lstat(source);
+            if (info.isSymbolicLink() || (!info.isDirectory() && !info.isFile()) || await realpath(source) !== resolve(source)) {
+              throw new Error("framework consumer input is unsafe");
+            }
+            return true;
+          },
+        });
         const fixture = await dependencies.startService(serviceBinary, join(workspaceBase, "service"), {
           timeoutMs: 120_000,
           workspaceRoot: join(workspaceBase, "workspace"),
@@ -124,10 +152,12 @@ async function loadLockedFrameworkRuntime(
       options,
       async dispose() {
         await disposeFixtures(fixtures);
+        await cleanup();
       },
     };
   } catch (error) {
-    await disposeFixtures(fixtures).catch(() => undefined);
+    await disposeFixtures(fixtures);
+    await cleanup();
     throw error;
   }
 }
