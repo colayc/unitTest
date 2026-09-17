@@ -340,6 +340,7 @@ git commit -m "feat: stage closed framework runtime workspaces"
 - Produces: `prepareFrameworkRuntime(options: FrameworkRuntimePrepareOptions, dependencies?: FrameworkRuntimePrepareDependencies): Promise<PreparedFrameworkRuntime>`.
 - Produces: `discoverFrameworkCatalog(options: FrameworkDiscoveryOptions): Promise<DiscoveredFrameworkCatalog>` extracted from the existing scenario runner.
 - `DiscoveredFrameworkCatalog` contains the selected project/profile/toolchain, complete catalog, and verified `test-catalog` artifact digest and size.
+- `FrameworkRuntimePrepareDependencies` carries a complete, already-verified `catalog-10000` benchmark evidence record; preparation does not execute or synthesize benchmark measurements.
 - Consumed by: Task 5 atomic CLI publication.
 
 - [ ] **Step 1: Add RED tests for discovery reuse and identity binding**
@@ -393,7 +394,7 @@ export interface DiscoveredFrameworkCatalog {
 
 - [ ] **Step 4: Implement producer orchestration**
 
-For the platform's exact families and both frameworks, load the closed F1 identity, prepared dependency roots, matrix contract, CMake bundle, Service binary, and generator. Stage the workspace, start the Service, discover/build the catalog, calculate stable ID and actual executable digest, and assemble a closed runtime record.
+For the platform's exact families and both frameworks, load the closed F1 identity, prepared dependency roots, matrix contract, CMake bundle, Service binary, generator, and the already-verified benchmark evidence dependency. Stage the workspace, start the Service, discover/build the catalog, calculate stable ID and actual executable digest, and assemble a closed runtime record.
 
 Use `try/finally` so every Service is disposed before returning. Do not execute the 17 scenario matrix during preparation.
 
@@ -415,7 +416,7 @@ const executableArtifactSha256 = await hashCompiledFrameworkExecutable(
 
 - [ ] **Step 5: Build and validate the closed manifest**
 
-Require the selected Service toolchain's optional wire field `compilerSha256` to be present and lowercase SHA-256, then populate compiler version/SHA from that selected toolchain. Populate dependency version/archive/tree from the locked F1 manifest and identity, source evidence from the fixture identity, catalog digest from the Service artifact, executable digest from the staged build root, and the canonical CMock record from `cmock-generation.json`. Pass the result through `buildFrameworkRuntimeManifest` before returning it.
+Require the selected Service toolchain's optional wire field `compilerSha256` to be present and lowercase SHA-256, then populate compiler version/SHA from that selected toolchain. Populate dependency version/archive/tree from the locked F1 manifest and identity, source evidence from the fixture identity, catalog digest from the Service artifact, executable digest from the staged build root, and the canonical CMock record from `cmock-generation.json`. Carry the complete verified benchmark dependency unchanged; do not fabricate timings or allocation counts. Pass the result through `buildFrameworkRuntimeManifest` before returning it.
 
 - [ ] **Step 6: Verify GREEN**
 
@@ -456,6 +457,7 @@ git commit -m "feat: prepare framework runtime from service evidence"
 - Produces: `publishFrameworkRuntime(prepared: PreparedFrameworkRuntime): Promise<PublishedFrameworkRuntime>`.
 - Produces: `parseFrameworkPrepareArguments(arguments_: readonly string[]): { platform: FrameworkPlatform; candidateCommit: string }`.
 - Produces CLI command: `pnpm prepare:native-framework-runtime -- --platform win32 --candidate 0123456789abcdef0123456789abcdef01234567`.
+- The CLI loads benchmark evidence only from the fixed, repository-owned audited source selected by the implementation; it accepts no benchmark values or paths from argv/environment.
 - Consumed by: Task 6 hosted workflow.
 
 - [ ] **Step 1: Add RED tests for atomic publication and rollback**
