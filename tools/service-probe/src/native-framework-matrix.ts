@@ -35,7 +35,6 @@ const DIGEST = /^[0-9a-f]{64}$/u;
 const COMMIT = /^[0-9a-f]{40}$/u;
 
 const repositoryRoot = resolve(import.meta.dirname, "../../..");
-const contractRoot = join(repositoryRoot, "testdata", "framework-matrix");
 
 const PLATFORM_FAMILIES: Readonly<Record<FrameworkPlatform, readonly FrameworkToolchainFamily[]>> = {
   linux: ["clang", "gcc"],
@@ -220,14 +219,26 @@ interface ScenarioObservation {
   readonly artifactSizeBytes: number;
 }
 
-export async function runFrameworkMatrix(
-  options: FrameworkMatrixOptions,
-  requiredIdentity?: Readonly<{ provenance: F1FrameworkIdentity; stableIdDigest: string }>,
-): Promise<FrameworkMatrixResult> {
-  validateMatrixOptions(options);
+export interface FrameworkDiscoveryOptions {
+  readonly fixture: FrameworkFixture;
+  readonly frameworkId: FrameworkId;
+  readonly toolchainFamily: FrameworkToolchainFamily;
+  readonly timeoutMs?: number;
+}
+
+export interface DiscoveredFrameworkCatalog extends SelectedWorkspace {
+  readonly catalog: ProtocolTestCatalog;
+  readonly catalogArtifactSha256: string;
+  readonly catalogArtifactSizeBytes: number;
+  readonly taskId: string;
+}
+
+export async function discoverFrameworkCatalog(options: FrameworkDiscoveryOptions): Promise<DiscoveredFrameworkCatalog> {
+  closedKeys(options, ["fixture", "frameworkId", "toolchainFamily", "timeoutMs"], "framework discovery options");
+  if (options.frameworkId !== "cpputest" && options.frameworkId !== "unity") throw new Error("framework ID is invalid");
   const contract = await loadMatrixContract(options.frameworkId);
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const now = options.now ?? (() => new Date());
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS) throw new Error("framework discovery timeout is invalid");
   const client = options.fixture.client;
   const workspace = await bounded(
     `${options.frameworkId} workspace inspection`,
@@ -235,7 +246,6 @@ export async function runFrameworkMatrix(
     timeoutMs,
   );
   const selected = selectWorkspace(workspace, options.toolchainFamily);
-  const discoveryStarted = now();
   const discovery = await bounded(
     `${options.frameworkId} discovery start`,
     client.discoverTests({
@@ -264,6 +274,23 @@ export async function runFrameworkMatrix(
     timeoutMs,
   );
   validateCatalog(catalog, selected, options.frameworkId);
+  catalogSelection(catalog, options.frameworkId, contract);
+  const artifact = await readTaskArtifact(options.fixture.client, discovery.taskId, "test-catalog", timeoutMs);
+  return { ...selected, catalog, taskId: discovery.taskId, catalogArtifactSha256: artifact.sha256, catalogArtifactSizeBytes: artifact.bytes.byteLength };
+}
+
+export async function runFrameworkMatrix(
+  options: FrameworkMatrixOptions,
+  requiredIdentity?: Readonly<{ provenance: F1FrameworkIdentity; stableIdDigest: string }>,
+): Promise<FrameworkMatrixResult> {
+  validateMatrixOptions(options);
+  const contract = await loadMatrixContract(options.frameworkId);
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const now = options.now ?? (() => new Date());
+  const discoveryStarted = now();
+  const discovery = await discoverFrameworkCatalog({ fixture: options.fixture, frameworkId: options.frameworkId, toolchainFamily: options.toolchainFamily, timeoutMs });
+  const { catalog } = discovery;
+  const selected = discovery;
   if (
     requiredIdentity !== undefined &&
     stableFrameworkIdDigest(options.frameworkId, catalog, requiredIdentity.provenance) !== requiredIdentity.stableIdDigest
@@ -271,12 +298,6 @@ export async function runFrameworkMatrix(
     throw new Error(`${options.frameworkId} stable ID does not match discovered Service catalog and F1 identity`);
   }
   const selection = catalogSelection(catalog, options.frameworkId, contract);
-  const discoveryArtifact = await readTaskArtifact(
-    options.fixture.client,
-    discovery.taskId,
-    "test-catalog",
-    timeoutMs,
-  );
   const discoveryRecord = scenarioRecord(
     options,
     "discovery",
@@ -287,8 +308,8 @@ export async function runFrameworkMatrix(
       taskId: discovery.taskId,
       outcome: "passed",
       classification: "discovery",
-      artifactSha256: discoveryArtifact.sha256,
-      artifactSizeBytes: discoveryArtifact.bytes.byteLength,
+      artifactSha256: discovery.catalogArtifactSha256,
+      artifactSizeBytes: discovery.catalogArtifactSizeBytes,
     },
   );
   const completedRunIds = new Map<FrameworkScenarioId, string>();
@@ -922,7 +943,8 @@ function expectedClassification(id: FrameworkScenarioId): FrameworkScenarioEvide
   }
 }
 
-async function loadMatrixContract(frameworkId: FrameworkId): Promise<MatrixFrameworkContract> {
+export async function loadMatrixContract(frameworkId: FrameworkId, root = repositoryRoot): Promise<MatrixFrameworkContract> {
+  const contractRoot = join(root, "testdata", "framework-matrix");
   const contractPath = join(contractRoot, "contract.json");
   const contract = parseJsonObject(await readFile(contractPath), "framework matrix contract");
   closedKeys(contract, ["frameworks", "schemaVersion", "workspace"], "framework matrix contract");
@@ -954,7 +976,7 @@ async function loadMatrixContract(frameworkId: FrameworkId): Promise<MatrixFrame
     }
   }
   const [fixture, augmentation, cmake, opaque] = await Promise.all([
-    readFile(join(repositoryRoot, "testdata", "frameworks", frameworkId, "fixture.json")),
+    readFile(join(root, "testdata", "frameworks", frameworkId, "fixture.json")),
     readFile(join(contractRoot, frameworkId === "cpputest" ? "malformed_cpputest.cpp" : "malformed_unity.c")),
     readFile(join(contractRoot, "CMakeLists.txt")),
     readFile(join(contractRoot, "opaque.c")),

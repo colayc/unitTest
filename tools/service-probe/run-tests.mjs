@@ -16,6 +16,7 @@ const tests = [
   "dist/native-framework-matrix.test.js",
   "dist/native-framework-runtime-contract.test.js",
   "dist/native-framework-workspace.test.js",
+  "dist/native-framework-prepare.test.js",
 ];
 
 const requested = process.argv.slice(2).filter((value) => value !== "--");
@@ -23,6 +24,8 @@ let selected = tests;
 if (requested.length > 0) {
   const nativeBuildPair = ["native-build-windows.test.ts", "native-build-linux.test.ts"];
   const focusedTests = new Map([
+    ["native-framework-prepare.test.ts", "dist/native-framework-prepare.test.js"],
+    ["dist/native-framework-prepare.test.js", "dist/native-framework-prepare.test.js"],
     ["native-framework-matrix.test.ts", "dist/native-framework-matrix.test.js"],
     ["dist/native-framework-matrix.test.js", "dist/native-framework-matrix.test.js"],
     ["native-framework-runtime-contract.test.ts", "dist/native-framework-runtime-contract.test.js"],

@@ -11,6 +11,7 @@ import {
   type FrameworkToolchainFamily,
 } from "./native-framework-report.js";
 import {
+  discoverFrameworkCatalog,
   runFrameworkMatrix,
   runFrameworkPlatform,
   runFrameworkToolchain,
@@ -950,6 +951,44 @@ function matrixOptions(fixture: FakeFixture, timeoutMs = 100): FrameworkMatrixOp
     toolchainFamily: "clang",
     now: monotonicClock(),
   };
+}
+
+test("discovery-only path returns verified catalog evidence without executing scenarios", async () => {
+  const fixture = new FakeFixture();
+  const result = await discoverFrameworkCatalog({ fixture: fixture as never, frameworkId: "cpputest", toolchainFamily: "clang", timeoutMs: 100 });
+  assert.equal(result.catalog.revision, catalogRevision);
+  assert.equal(result.catalogArtifactSha256, digest(JSON.stringify({ catalog: "validated", framework: "cpputest", family: "clang" }) + "\n"));
+  assert.ok(result.catalogArtifactSizeBytes > 0);
+  assert.equal(fixture.client.runRequests.length, 0);
+});
+
+for (const mutation of ["partial", "framework", "container", "family", "artifact", "task"] as const) {
+  test(`both discovery consumers reject ${mutation} substitution`, async () => {
+    for (const producer of [false, true]) {
+      const fixture = new FakeFixture();
+      const catalog = fixture.client.getTestCatalog.bind(fixture.client);
+      fixture.client.getTestCatalog = async (value) => {
+        const result = await catalog(value);
+        if (mutation === "partial") result.partial = true;
+        if (mutation === "framework") result.containers[0]!.framework = "unity";
+        if (mutation === "container") result.containers[0]!.ctestLogicalName = "substituted.framework";
+        return result;
+      };
+      if (mutation === "family") {
+        const inspect = fixture.client.inspectWorkspace.bind(fixture.client);
+        fixture.client.inspectWorkspace = async () => { const value = await inspect(); value.toolchains[0]!.family = "gcc"; return value; };
+      }
+      if (mutation === "artifact") fixture.client.readArtifact = async () => Buffer.from("substituted");
+      if (mutation === "task") {
+        const discover = fixture.client.discoverTests.bind(fixture.client);
+        fixture.client.discoverTests = async (value) => { const task = await discover(value); fixture.client.task(task.taskId as string)!.outcome = "failed"; return task; };
+      }
+      await assert.rejects(producer
+        ? discoverFrameworkCatalog({ fixture: fixture as never, frameworkId: "cpputest", toolchainFamily: "clang", timeoutMs: 100 })
+        : runFrameworkMatrix(matrixOptions(fixture)));
+      assert.equal(fixture.client.runRequests.length, 0);
+    }
+  });
 }
 
 function platformOptions(artifactDirectory: string, events?: string[]): FrameworkPlatformOptions {
