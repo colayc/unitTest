@@ -4,6 +4,8 @@ package toolchain
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -78,6 +80,31 @@ func TestClangCLAdapterCombinesValidatedMSVCEnvironmentAndLLVMTools(t *testing.T
 	runner.requireCall(t, fixture.llvmProfdata, []string{"--version"})
 	runner.requireCall(t, fixture.llvmCov, []string{"--version"})
 	runner.requireCall(t, fixture.ninja, []string{"--version"})
+}
+
+func TestClangCLPublishesVerifiedCompilerSHA256(t *testing.T) {
+	fixture := newWindowsToolchainFixture(t)
+	runner := newWindowsFakeRunner(fixture)
+	manual := []workspace.ToolchainConfig{{
+		ID: "manual-clang-cl", Family: string(FamilyClangCL),
+		CCompiler: fixture.clang, CPPCompiler: fixture.clang,
+	}}
+	adapters, err := newWindowsAdapters(runner, manual, fixture.options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	instances, err := adapters[1].Discover(context.Background())
+	if err != nil || len(instances) != 1 {
+		t.Fatalf("Discover() = %#v, %v", instances, err)
+	}
+	contents, err := os.ReadFile(fixture.clang)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := sha256.Sum256(contents)
+	if instances[0].CompilerSHA256 != hex.EncodeToString(want[:]) {
+		t.Fatalf("CompilerSHA256 = %q, want verified clang-cl digest %q", instances[0].CompilerSHA256, hex.EncodeToString(want[:]))
+	}
 }
 
 func TestClangCLAddsVerifiedNinjaToProductionShapedEnvironment(t *testing.T) {

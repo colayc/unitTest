@@ -140,6 +140,7 @@ test("generated protocol 1.2 models expose workspace build contracts", () => {
     toolchains: [{
       toolchainId: "gcc-test",
       family: Family.GCC,
+      compilerSha256: "b".repeat(64),
       version: "15.1.0",
       targetTriple: "x86_64-linux-gnu",
       hostArchitecture: TArchitecture.X64,

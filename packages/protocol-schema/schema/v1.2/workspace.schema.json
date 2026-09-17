@@ -100,6 +100,7 @@
         "targetTriple": { "type": "string", "minLength": 1, "maxLength": 256 },
         "hostArchitecture": { "enum": ["x86", "x64", "arm64"] },
         "targetArchitecture": { "enum": ["x86", "x64", "arm64"] },
+        "compilerSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "generators": {
           "type": "array",
           "maxItems": 4,

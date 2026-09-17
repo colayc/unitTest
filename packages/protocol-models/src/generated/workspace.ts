@@ -58,6 +58,7 @@ export enum Origin {
 
 export interface ToolchainElement {
     capabilities:       ToolchainCapabilities;
+    compilerSha256?:    string;
     family:             Family;
     generators:         Generator[];
     hostArchitecture:   TArchitecture;

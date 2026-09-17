@@ -41,6 +41,7 @@ type BuildProfileElement struct {
 
 type ToolchainElement struct {
 	Capabilities       ToolchainCapabilities `json:"capabilities"`
+	CompilerSha256     *string               `json:"compilerSha256,omitempty"`
 	Family             Family                `json:"family"`
 	Generators         []Generator           `json:"generators"`
 	HostArchitecture   TArchitecture         `json:"hostArchitecture"`

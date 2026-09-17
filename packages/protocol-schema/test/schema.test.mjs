@@ -166,6 +166,24 @@ test("protocol 1.2 validates workspace builds and keeps v1.1 strict", async () =
     }
   }), true, JSON.stringify(validateV12.errors));
   assert.equal(validateV12(await load("../fixtures/v1.2/workspace-inspect.valid.json")), true, JSON.stringify(validateV12.errors));
+
+  const workspaceInspect = await load("../fixtures/v1.2/workspace-inspect.valid.json");
+  assert.equal(workspaceInspect.payload.toolchains[0].compilerSha256, "b".repeat(64));
+  const legacyToolchain = { ...workspaceInspect.payload.toolchains[0] };
+  delete legacyToolchain.compilerSha256;
+  assert.equal(validateV12({
+    ...workspaceInspect,
+    payload: { ...workspaceInspect.payload, toolchains: [legacyToolchain] }
+  }), true, JSON.stringify(validateV12.errors));
+  for (const compilerSha256 of ["B".repeat(64), "not-a-sha256"]) {
+    assert.equal(validateV12({
+      ...workspaceInspect,
+      payload: {
+        ...workspaceInspect.payload,
+        toolchains: [{ ...workspaceInspect.payload.toolchains[0], compilerSha256 }]
+      }
+    }), false, `accepted compilerSha256 ${compilerSha256}`);
+  }
   assert.equal(validateV12(await load("../fixtures/v1.2/targets-list.valid.json")), true, JSON.stringify(validateV12.errors));
   assert.equal(validateV12(await load("../fixtures/v1.2/cmake-build-start.valid.json")), true, JSON.stringify(validateV12.errors));
   assert.equal(validateV12(await load("../fixtures/v1.2/event-diagnostic.valid.json")), true, JSON.stringify(validateV12.errors));

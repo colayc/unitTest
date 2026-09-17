@@ -114,6 +114,7 @@ type Instance struct {
 	TargetTriple       string
 	HostArchitecture   string
 	TargetArchitecture string
+	CompilerSHA256     string
 	Sysroot            string
 	Environment        []string
 	Generators         []string

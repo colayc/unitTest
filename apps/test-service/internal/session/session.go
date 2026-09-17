@@ -1485,7 +1485,7 @@ func toProtocolToolchain(instance toolchain.Instance) (workspacev12.ToolchainEle
 	if instance.Coverage.LLVMProfdata != "" && instance.Coverage.LLVMCov != "" {
 		coverage = append(coverage, workspacev12.LlvmCov)
 	}
-	return workspacev12.ToolchainElement{
+	result := workspacev12.ToolchainElement{
 		ToolchainID:        instance.ID,
 		Family:             workspacev12.Family(instance.Family),
 		Version:            instance.Version,
@@ -1494,7 +1494,14 @@ func toProtocolToolchain(instance toolchain.Instance) (workspacev12.ToolchainEle
 		TargetArchitecture: workspacev12.TArchitecture(instance.TargetArchitecture),
 		Generators:         generators,
 		Capabilities:       workspacev12.ToolchainCapabilities{CoverageDrivers: coverage},
-	}, nil
+	}
+	if instance.CompilerSHA256 != "" {
+		if !validHash(instance.CompilerSHA256) {
+			return workspacev12.ToolchainElement{}, errors.New("invalid workspace toolchain compiler digest")
+		}
+		result.CompilerSha256 = &instance.CompilerSHA256
+	}
+	return result, nil
 }
 
 func boundedProtocolString(value string, maximumRunes int) bool {

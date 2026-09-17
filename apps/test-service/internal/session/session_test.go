@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"unit-test-ide.local/test-service/internal/protocolmodel"
 	"unit-test-ide.local/test-service/internal/session"
 	"unit-test-ide.local/test-service/internal/task"
+	"unit-test-ide.local/test-service/internal/toolchain"
 )
 
 var fixedTime = time.Date(2026, 7, 22, 3, 4, 5, 0, time.UTC)
@@ -136,6 +138,45 @@ func TestSessionRoutesControlledTaskStart(t *testing.T) {
 	snapshot, ok := result.Response.Payload.(protocolmodel.TaskSnapshot)
 	if !ok || snapshot.TaskID != id('1') || snapshot.Outcome != nil {
 		t.Fatalf("payload=%#v", result.Response.Payload)
+	}
+}
+
+func TestWorkspaceInspectCompilerSHA256(t *testing.T) {
+	base := toolchain.Instance{
+		ID: "gcc-test", Family: toolchain.FamilyGCC, Version: "15.1.0",
+		TargetTriple: "x86_64-linux-gnu", HostArchitecture: "x64", TargetArchitecture: "x64",
+		Generators: []string{"Ninja"},
+	}
+	inspect := func(t *testing.T, instance toolchain.Instance) session.HandleResult {
+		t.Helper()
+		backend := &v12Backend{snapshot: discovery.Snapshot{
+			WorkspaceURI: "file:///workspace", Generation: strings.Repeat("a", 64),
+			Toolchains: []toolchain.Instance{instance},
+		}}
+		return authenticatedV12(t, backend).Handle(context.Background(), requestVersion(t, protocol.Version12, "workspace/inspect", map[string]any{}))
+	}
+
+	populated := base
+	populated.CompilerSHA256 = strings.Repeat("b", 64)
+	result := inspect(t, populated)
+	raw, err := json.Marshal(result.Payload)
+	if err != nil || result.Kind != "response" || !strings.Contains(string(raw), `"compilerSha256":"`+populated.CompilerSHA256+`"`) {
+		t.Fatalf("populated workspace/inspect = %#v (%s), %v", result, raw, err)
+	}
+
+	legacy := inspect(t, base)
+	legacyRaw, err := json.Marshal(legacy.Payload)
+	if err != nil || legacy.Kind != "response" || strings.Contains(string(legacyRaw), "compilerSha256") {
+		t.Fatalf("legacy workspace/inspect = %#v (%s), %v", legacy, legacyRaw, err)
+	}
+
+	for _, invalid := range []string{strings.Repeat("B", 64), "not-a-sha256"} {
+		value := base
+		value.CompilerSHA256 = invalid
+		result := inspect(t, value)
+		if result.Error == nil || result.Error.Code != "SERVICE_UNHEALTHY" {
+			t.Fatalf("workspace/inspect accepted compiler digest %q: %#v", invalid, result)
+		}
 	}
 }
 

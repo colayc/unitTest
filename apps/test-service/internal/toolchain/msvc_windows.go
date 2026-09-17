@@ -1119,6 +1119,7 @@ func (adapter *msvcAdapter) probeContext(
 		TargetTriple:       windowsTargetTriple(candidate.config.TargetArchitecture, "msvc"),
 		HostArchitecture:   candidate.config.HostArchitecture,
 		TargetArchitecture: candidate.config.TargetArchitecture,
+		CompilerSHA256:     cl.digest,
 		Sysroot:            candidate.sdk,
 		Environment:        instanceEnvironment,
 		Generators:         append([]string(nil), generators.names...),
