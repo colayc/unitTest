@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import test from "node:test";
 import { prepareFrameworkRuntime, type FrameworkRuntimePrepareDependencies } from "./native-framework-prepare.js";
 import { stableFrameworkIdDigest } from "./native-framework-matrix.js";
+import { hashCompiledFrameworkExecutable } from "./native-framework-workspace.js";
 import type { FrameworkId, FrameworkToolchainFamily } from "./native-framework-report.js";
 import type { TaskServiceFixture } from "./probe.js";
 
@@ -29,6 +30,12 @@ async function fixture(t: test.TestContext, mutation = "", platform: "linux" | "
   await writeFile(join(repositoryRoot, "build", platform === "win32" ? "unity-runner-generator.exe" : "unity-runner-generator"), "generator");
   if (mutation === "fixture-input") await writeFile(join(repositoryRoot, "testdata/frameworks/cpputest/tests/framework_tests.cpp"), "substituted executable inputs");
   if (mutation === "matrix-input") await writeFile(join(repositoryRoot, "testdata/framework-matrix/opaque.c"), "substituted matrix executable input");
+  if (mutation === "alternate-contract") {
+    const path = join(repositoryRoot, "testdata/framework-matrix/contract.json");
+    const contract = JSON.parse(await readFile(path, "utf8"));
+    for (const id of ["cpputest", "unity"]) contract.frameworks[id].primaryCTestName = `${id}.alternate`;
+    await writeFile(path, JSON.stringify(contract));
+  }
   let disposed = 0;
   let started = 0;
   const catalogs: any[] = [];
@@ -38,6 +45,7 @@ async function fixture(t: test.TestContext, mutation = "", platform: "linux" | "
     startService: async (_binary: string, directory: string) => {
       started++;
       const frameworkId = basename(resolve(directory, "..")) as FrameworkId;
+      await writeFile(join(directory, "session-secret"), "credential-must-not-survive");
       const family = basename(resolve(directory, "../..")) as FrameworkToolchainFamily;
       for (const profile of mutation === "duplicate" ? ["a", "b"] : ["a"]) {
         const bin = join(directory, "data/build", profile.repeat(64), "bin");
@@ -59,6 +67,7 @@ async function fixture(t: test.TestContext, mutation = "", platform: "linux" | "
       };
       if (mutation === "framework") catalog.containers[0]!.framework = "wrong";
       if (mutation === "container") catalog.containers[0]!.ctestLogicalName = "wrong";
+      if (mutation === "alternate-contract") catalog.containers[0]!.ctestLogicalName = `${frameworkId}.alternate`;
       catalogs.push(catalog);
       const bytes = Buffer.from(JSON.stringify(catalog));
       const client = {
@@ -70,7 +79,7 @@ async function fixture(t: test.TestContext, mutation = "", platform: "linux" | "
         readArtifact: async () => bytes,
         runTests: async () => { throw new Error("preparation must not execute matrix scenarios"); },
       };
-      return { client, dispose: async () => { disposed++; if (mutation === "cleanup") throw new Error("secret raw cleanup output"); }, kill: async () => {}, restart: async () => {} } as unknown as TaskServiceFixture;
+      return { client, dispose: async () => { disposed++; await rm(directory, { recursive: true, force: true }); if (mutation === "cleanup") throw new Error("secret raw cleanup output"); }, kill: async () => {}, restart: async () => {} } as unknown as TaskServiceFixture;
     },
   };
   return { repositoryRoot, dependencies, catalogs, counts: () => ({ disposed, started }) };
@@ -111,11 +120,50 @@ test("Windows producer selects exactly clang-cl and msvc and hashes .exe files",
 test("producer requires audited benchmark evidence and rejects invalid evidence", async (t) => {
   const input = await fixture(t);
   const options = { repositoryRoot: input.repositoryRoot, platform: "linux", candidateCommit: "1".repeat(40) } as const;
-  await assert.rejects(prepareFrameworkRuntime(options), /verified framework benchmark evidence/u);
+  await assert.rejects(prepareFrameworkRuntime(options), /framework runtime preparation failed/u);
   assert.equal(input.counts().started, 0);
-  await assert.rejects(prepareFrameworkRuntime(options, { ...input.dependencies, benchmark: { ...benchmark, allocationsPerOperation: [300001, 2, 3] } }), /benchmark allocations/u);
+  await assert.rejects(prepareFrameworkRuntime(options, { ...input.dependencies, benchmark: { ...benchmark, allocationsPerOperation: [300001, 2, 3] } }), /framework runtime preparation failed/u);
   assert.equal(input.counts().disposed, input.counts().started);
 });
+
+test("prepared executable evidence survives destructive Service disposal without retaining Service secrets", async (t) => {
+  const input = await fixture(t);
+  const result = await prepareFrameworkRuntime({ repositoryRoot: input.repositoryRoot, platform: "linux", candidateCommit: "1".repeat(40) }, input.dependencies);
+  for (const toolchain of result.manifest.toolchains) for (const framework of toolchain.frameworks) {
+    const workRoot = join(input.repositoryRoot, ".native-e2e/framework-work");
+    assert.equal(await hashCompiledFrameworkExecutable(workRoot, "linux", toolchain.family, framework.frameworkId), framework.evidence.executableArtifactSha256);
+    const serviceRoot = join(workRoot, "linux", toolchain.family, framework.frameworkId, "service");
+    assert.deepEqual(await readdir(serviceRoot), ["data"]);
+    assert.equal(await readFile(join(serviceRoot, "data/build", "a".repeat(64), "bin", `phase9_${framework.frameworkId}`), "utf8"), `compiled:${toolchain.family}:${framework.frameworkId}`);
+  }
+});
+
+test("producer discovers against the selected alternate repository contract", async (t) => {
+  const input = await fixture(t, "alternate-contract");
+  const result = await prepareFrameworkRuntime({ repositoryRoot: input.repositoryRoot, platform: "linux", candidateCommit: "1".repeat(40) }, input.dependencies);
+  assert.equal(result.manifest.contractSha256, digest(await readFile(join(input.repositoryRoot, "testdata/framework-matrix/contract.json"), "utf8")));
+  assert.notEqual(result.manifest.contractSha256, digest(await readFile(join(root, "testdata/framework-matrix/contract.json"), "utf8")));
+  assert.equal(result.manifest.toolchains[0]!.frameworks[0]!.catalogArtifactSha256, digest(JSON.stringify(input.catalogs[0])));
+});
+
+for (const phase of ["inputs", "startup", "early-filesystem"] as const) {
+  test(`preparation sanitizes ${phase} errors without cause, output, environment, or paths`, async (t) => {
+    const input = await fixture(t);
+    const unsafe = new Error(`${input.repositoryRoot} TOKEN=secret stdout=private stderr=private`);
+    const dependencies = { ...input.dependencies,
+      ...(phase === "inputs" ? { verifyInputs: async () => { throw unsafe; } } : {}),
+      ...(phase === "startup" ? { startService: async () => { throw unsafe; } } : {}),
+    };
+    if (phase === "early-filesystem") await rm(join(input.repositoryRoot, "tools/framework-bundle/manifest.json"));
+    await assert.rejects(prepareFrameworkRuntime({ repositoryRoot: input.repositoryRoot, platform: "linux", candidateCommit: "1".repeat(40) }, dependencies), (error: Error & { code?: string }) => {
+      assert.equal(error.message, "framework runtime preparation failed");
+      assert.equal(error.code, "FRAMEWORK_RUNTIME_PREPARE_FAILED");
+      assert.equal(error.cause, undefined);
+      assert.doesNotMatch(`${error.stack} ${JSON.stringify(error)}`, /TOKEN|secret|stdout|stderr|framework-producer-|[A-Za-z]:\\/u);
+      return true;
+    });
+  });
+}
 
 for (const mutation of ["partial", "framework", "container", "family", "artifact", "task", "compiler", "fixture-input", "matrix-input", "duplicate", "cleanup"]) {
   test(`producer rejects ${mutation} and disposes all started Services`, async (t) => {

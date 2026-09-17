@@ -1,12 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, readFile, rm } from "node:fs/promises";
+import { lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { prepareLinuxFrameworkInputs, type LinuxFrameworkInputManifest } from "./linux-framework-inputs.js";
 import { verifyPreparedCMakeBundle } from "./native-build.js";
 import { discoverFrameworkCatalog, loadMatrixContract, stableFrameworkIdDigest, type F1FrameworkIdentity } from "./native-framework-matrix.js";
 import type { FrameworkPlatform, FrameworkToolchainFamily } from "./native-framework-report.js";
 import { buildFrameworkRuntimeManifest, type FrameworkRuntimeManifest, type FrameworkRuntimeFramework, type FrameworkRuntimeToolchain } from "./native-framework-runtime-contract.js";
-import { hashCompiledFrameworkExecutable, stageFrameworkWorkspace, validateOwnedFrameworkStage } from "./native-framework-workspace.js";
+import { readCompiledFrameworkExecutable, stageFrameworkWorkspace, validateOwnedFrameworkStage } from "./native-framework-workspace.js";
 import { startService } from "./probe.js";
 
 type PreparedRoots = Readonly<Record<"cpputest" | "unity" | "cmock", string>>;
@@ -28,6 +28,22 @@ export interface PreparedFrameworkRuntime {
 }
 
 export async function prepareFrameworkRuntime(
+  options: FrameworkRuntimePrepareOptions,
+  dependencies?: FrameworkRuntimePrepareDependencies,
+): Promise<PreparedFrameworkRuntime> {
+  try {
+    return await prepareFrameworkRuntimeInternal(options, dependencies);
+  } catch {
+    // Nothing from filesystem errors, child output, injected operations, or causes
+    // crosses this boundary. Even the stack is path-free for CLI diagnostics.
+    const error = Object.assign(new Error("framework runtime preparation failed"), { code: "FRAMEWORK_RUNTIME_PREPARE_FAILED" });
+    error.name = "FrameworkRuntimePrepareError";
+    error.stack = `${error.name}: ${error.message}`;
+    throw error;
+  }
+}
+
+async function prepareFrameworkRuntimeInternal(
   options: FrameworkRuntimePrepareOptions,
   dependencies?: FrameworkRuntimePrepareDependencies,
 ): Promise<PreparedFrameworkRuntime> {
@@ -78,14 +94,16 @@ export async function prepareFrameworkRuntime(
           staged.serviceDirectory,
           { workspaceRoot: staged.workspaceRoot, trustedWorkspace: true, timeoutMs: 120_000, cmakeBundleRoot: join(repositoryRoot, ".bundled-tools/cmake") },
         );
+        let compiled: Awaited<ReturnType<typeof readCompiledFrameworkExecutable>>;
         try {
-          const discovery = await discoverFrameworkCatalog({ fixture, frameworkId, toolchainFamily: family, timeoutMs: 120_000 });
+          const discovery = await discoverFrameworkCatalog({ fixture, repositoryRoot, frameworkId, toolchainFamily: family, timeoutMs: 120_000 });
           const toolchain = discovery.toolchain;
           if (typeof toolchain.compilerSha256 !== "string" || !/^[0-9a-f]{64}$/u.test(toolchain.compilerSha256)) throw new Error("verified Service compiler digest is required");
           if (compilerVersion !== undefined && (compilerVersion !== toolchain.version || compilerSha256 !== toolchain.compilerSha256)) throw new Error("Service compiler identity changed across frameworks");
           compilerVersion = toolchain.version;
           compilerSha256 = toolchain.compilerSha256;
           const dependency = locked.frameworks.find(({ id }) => id === frameworkId)!;
+          compiled = await readCompiledFrameworkExecutable(workRoot, options.platform, family, frameworkId);
           frameworks.push({
             frameworkId, dependencyVersion: dependency.version, dependencySha256: dependency.source.sha256,
             dependencyTreeSha256: identity.frameworkTreeSha256[frameworkId],
@@ -94,7 +112,7 @@ export async function prepareFrameworkRuntime(
             evidence: {
               sourceArtifactSha256: identity.fixtures[frameworkId].sourceSha256,
               sourceLocationDigest: identity.fixtures[frameworkId].metadataSha256,
-              executableArtifactSha256: await hashCompiledFrameworkExecutable(workRoot, options.platform, family, frameworkId),
+              executableArtifactSha256: compiled.sha256,
             },
             ...(frameworkId === "unity" ? { cMockProvenance: {
               revision: provenance.value.cmock.revision, generatorVersion: provenance.value.generator.version,
@@ -105,6 +123,13 @@ export async function prepareFrameworkRuntime(
         } finally {
           try { await fixture.dispose(); } catch { throw new Error("framework Service cleanup failed"); }
         }
+        // Real disposal removes the Service directory, including its build tree.
+        // Restore only the validated executable, never sessions, databases, or credentials.
+        await validateOwnedFrameworkStage(stageRoot, ownershipId);
+        await mkdir(staged.serviceDirectory, { mode: 0o700 });
+        const executableDirectory = join(staged.buildRoot, compiled.profileId, "bin");
+        await mkdir(executableDirectory, { recursive: true, mode: 0o700 });
+        await writeFile(join(executableDirectory, `phase9_${frameworkId}${options.platform === "win32" ? ".exe" : ""}`), compiled.bytes, { flag: "wx", mode: 0o700 });
       }
       toolchains.push({ family, compilerVersion: compilerVersion!, compilerSha256: compilerSha256!, frameworks });
     }

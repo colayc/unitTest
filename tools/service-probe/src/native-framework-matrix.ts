@@ -221,6 +221,7 @@ interface ScenarioObservation {
 
 export interface FrameworkDiscoveryOptions {
   readonly fixture: FrameworkFixture;
+  readonly repositoryRoot?: string;
   readonly frameworkId: FrameworkId;
   readonly toolchainFamily: FrameworkToolchainFamily;
   readonly timeoutMs?: number;
@@ -234,9 +235,10 @@ export interface DiscoveredFrameworkCatalog extends SelectedWorkspace {
 }
 
 export async function discoverFrameworkCatalog(options: FrameworkDiscoveryOptions): Promise<DiscoveredFrameworkCatalog> {
-  closedKeys(options, ["fixture", "frameworkId", "toolchainFamily", "timeoutMs"], "framework discovery options");
+  closedKeys(options, ["fixture", "repositoryRoot", "frameworkId", "toolchainFamily", "timeoutMs"], "framework discovery options");
   if (options.frameworkId !== "cpputest" && options.frameworkId !== "unity") throw new Error("framework ID is invalid");
-  const contract = await loadMatrixContract(options.frameworkId);
+  if (options.repositoryRoot !== undefined && (!isAbsolute(options.repositoryRoot) || options.repositoryRoot.includes("\0"))) throw new Error("framework discovery repository root is invalid");
+  const contract = await loadMatrixContract(options.frameworkId, options.repositoryRoot);
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS) throw new Error("framework discovery timeout is invalid");
   const client = options.fixture.client;

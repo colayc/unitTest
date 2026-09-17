@@ -149,6 +149,15 @@ export async function hashCompiledFrameworkExecutable(
   family: FrameworkToolchainFamily,
   frameworkId: FrameworkId,
 ): Promise<string> {
+  return (await readCompiledFrameworkExecutable(workRoot, platform, family, frameworkId)).sha256;
+}
+
+export async function readCompiledFrameworkExecutable(
+  workRoot: string,
+  platform: FrameworkPlatform,
+  family: FrameworkToolchainFamily,
+  frameworkId: FrameworkId,
+): Promise<Readonly<{ bytes: Buffer; profileId: string; sha256: string }>> {
   validateCombination(platform, family);
   if (!isAbsolute(workRoot)) throw new Error("framework work root must be absolute");
   const root = await requireDirectDirectory(resolve(workRoot), "framework work root");
@@ -174,7 +183,8 @@ export async function hashCompiledFrameworkExecutable(
     matches.push(executable);
   }
   if (matches.length !== 1) throw new Error(`expected exactly one compiled ${frameworkId} executable`);
-  return createHash("sha256").update(await readFile(matches[0]!)).digest("hex");
+  const bytes = await readFile(matches[0]!);
+  return { bytes, profileId: relative(buildRoot, matches[0]!).split(sep)[0]!, sha256: createHash("sha256").update(bytes).digest("hex") };
 }
 
 function validateClosedOptions(options: FrameworkWorkspaceStageOptions): void {
