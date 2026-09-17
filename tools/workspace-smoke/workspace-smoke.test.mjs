@@ -59,6 +59,14 @@ function calledSelectors(source, packageName) {
     .map((match) => match[1]);
 }
 
+function workflowJob(workflow, name) {
+  const start = workflow.indexOf(`  ${name}:`);
+  assert.notEqual(start, -1, `foundation job ${name} is missing`);
+  const remainder = workflow.slice(start + 1);
+  const next = remainder.search(/\r?\n {2}[a-z][a-z0-9-]*:\s*$/mu);
+  return workflow.slice(start, next === -1 ? undefined : start + 1 + next);
+}
+
 async function productionGoSources(directory) {
   const entries = await readdir(directory, { withFileTypes: true });
   return Promise.all(entries
@@ -276,14 +284,10 @@ test("Phase 9 audit workflow is read-only, fixed-coordinate, and fail-closed", a
 
 test("P4 native framework matrix workflow is opt-in, fixed, and fail-closed until real reports exist", async () => {
   const workflow = await readFile(".github/workflows/foundation.yml", "utf8");
-  const start = workflow.indexOf("  verify-framework-matrix:");
-  assert.notEqual(start, -1, "verify-framework-matrix job is missing");
-  const remainder = workflow.slice(start + 1);
-  const next = remainder.search(/\r?\n {2}[a-z][a-z0-9-]*:\s*$/mu);
-  const job = workflow.slice(start, next === -1 ? undefined : start + 1 + next);
+  const job = workflowJob(workflow, "verify-framework-matrix");
 
   assert.match(job, /^ {4}if: \$\{\{ vars\.UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED == '1' \}\}\s*$/mu);
-  assert.match(job, /^ {4}needs:\r?\n {6}- verify-linux\r?\n {6}- verify-windows\s*$/mu);
+  assert.match(job, /^ {4}needs:\r?\n {6}- verify-framework-windows\r?\n {6}- verify-linux\s*$/mu);
   assert.match(job, /^ {4}runs-on: ubuntu-24\.04\s*$/mu);
   assert.match(job, /^ {4}timeout-minutes: 30\s*$/mu);
   assert.doesNotMatch(job, /secrets\.|continue-on-error|workflow_dispatch|inputs:/u);
@@ -304,19 +308,78 @@ test("P4 native framework matrix workflow is opt-in, fixed, and fail-closed unti
   );
   assert.match(job, /^ {10}path: \.superpowers\/phase9\/p4\/native-framework-matrix-report\.json\s*$/mu);
 
+  assert.equal((job.match(/actions\/download-artifact@/gu) ?? []).length, 2);
+  assert.match(job, /name: native-framework-windows\r?\n {10}path: \.native-e2e\/framework-inputs\/windows/u);
+  assert.match(job, /name: native-framework-linux\r?\n {10}path: \.native-e2e\/framework-inputs\/linux/u);
+
   for (const [platform, path] of [
     ["windows", ".native-e2e/artifacts/windows/framework-report.json"],
     ["linux", ".native-e2e/artifacts/linux/framework-report.json"],
   ]) {
     assert.match(workflow, new RegExp(
       `^ {6}- name: Upload P4 ${platform === "windows" ? "Windows" : "Linux"} framework report\\r?\\n`
-      + ` {8}if: \\$\\{\\{ always\\(\\) && vars\\.UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED == '1' \\}\\}\\r?\\n`
       + ` {8}uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7\\r?\\n`
       + ` {8}with:\\r?\\n {10}name: native-framework-${platform}\\r?\\n {10}path: ${path}\\r?\\n`
       + " {10}if-no-files-found: error\\r?\\n {10}retention-days: 14\\s*$",
       "mu",
     ));
   }
+});
+
+test("fixed hosted framework producers preserve privileged Windows paths and publish exact artifacts", async () => {
+  const workflow = await readFile(".github/workflows/foundation.yml", "utf8");
+  const legacyWindows = workflowJob(workflow, "verify-windows");
+  const legacyWfp = workflowJob(workflow, "verify-windows-wfp");
+  const frameworkWindows = workflowJob(workflow, "verify-framework-windows");
+  const frameworkLinux = workflowJob(workflow, "verify-linux");
+  const aggregator = workflowJob(workflow, "verify-framework-matrix");
+
+  assert.match(
+    legacyWindows,
+    /^ {4}runs-on: \$\{\{ github\.event_name == 'push' && github\.ref == 'refs\/heads\/master' && 'unit-test-wfp' \|\| 'windows-2025-vs2026' \}\}\s*$/mu,
+  );
+  assert.match(
+    legacyWindows,
+    /^ {6}- name: Verify privileged Windows WFP lifecycle\r?\n {8}env:\r?\n {10}UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED: \$\{\{ github\.event_name == 'push' && github\.ref == 'refs\/heads\/master' && '1' \|\| '0' \}\}\r?\n {8}run: go test \.\/apps\/test-service\/internal\/offlineboundary -run '\^TestPrivilegedWindowsWFPDynamicLifecycle\$' -count=1 -v\s*$/mu,
+  );
+  assert.match(
+    legacyWindows,
+    /^ {6}- name: Verify TypeScript WFP sibling sequencing\r?\n {8}env:\r?\n {10}UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED: \$\{\{ github\.event_name == 'push' && github\.ref == 'refs\/heads\/master' && '1' \|\| '0' \}\}\r?\n {8}run: pnpm --filter @unit-test-ide\/service-probe test:wfp-integration\s*$/mu,
+  );
+  assert.match(legacyWfp, /^ {4}runs-on: windows-2025-vs2026\s*$/mu);
+  assert.match(
+    legacyWfp,
+    /^ {6}- name: Revalidate closed Windows WFP coverage evidence\r?\n {8}run: >-\r?\n {10}node apps\/code-oss-extension\/dist\/test\/coverage-evidence-validator\.js\r?\n {10}--platform windows\r?\n {10}--input \.native-e2e\/artifacts\/windows\/coverage-execution-report\.json\s*$/mu,
+  );
+
+  assert.match(frameworkWindows, /^ {4}runs-on: windows-2022\s*$/mu);
+  assert.doesNotMatch(frameworkWindows, /secrets:|secrets\.|unit-test-wfp|windows-2025-vs2026|administrator|WFP/iu);
+  for (const source of [frameworkWindows, frameworkLinux, aggregator]) {
+    for (const use of source.matchAll(/^\s+- uses: (\S+)\s*(?:#.*)?$/gmu)) {
+      assert.match(use[1], /@[0-9a-f]{40}$/u, `framework action is not pinned: ${use[1]}`);
+    }
+  }
+  for (const pin of [
+    "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
+    "pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa",
+    "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
+    "actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16",
+    "actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830",
+    "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+  ]) assert.match(frameworkWindows, new RegExp(pin));
+
+  const producer = frameworkWindows.indexOf("pnpm prepare:native-framework-runtime -- --platform win32 --candidate '${{ github.sha }}'");
+  const native = frameworkWindows.indexOf("pnpm test:e2e:native -- --platform win32");
+  assert.ok(producer !== -1 && native > producer, "Windows runtime producer must precede required native execution");
+  assert.equal((aggregator.match(/node tools\/phase9\/p4-report\.mjs/gu) ?? []).length, 1);
+  assert.match(
+    frameworkWindows,
+    /^ {6}- name: Run required Windows framework matrix\r?\n {8}env:\r?\n {10}UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS: msvc,clang-cl\r?\n {10}UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED: '1'\r?\n {8}run: pnpm test:e2e:native -- --platform win32\s*$/mu,
+  );
+  assert.match(
+    frameworkWindows,
+    /^ {6}- name: Upload P4 Windows framework report\r?\n {8}uses: actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7\r?\n {8}with:\r?\n {10}name: native-framework-windows\r?\n {10}path: \.native-e2e\/artifacts\/windows\/framework-report\.json\r?\n {10}if-no-files-found: error\r?\n {10}retention-days: 14\s*$/mu,
+  );
 });
 
 test("root verification runs Phase 9 contracts and preserves the exact deferred boundary", async () => {

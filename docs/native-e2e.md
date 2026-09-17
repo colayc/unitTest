@@ -166,19 +166,24 @@ identity。平台成功结果必须是 2 个 toolchain × 2 个 framework × 每
 
 ## Hosted CI（Service native E2E）
 
-`.github/workflows/foundation.yml` 使用两个固定 job：
+`.github/workflows/foundation.yml` 使用三个固定 native job：
 
 - `verify-windows`：`master` push 使用标签为 `unit-test-wfp` 的 Windows self-hosted runner，Pull Request 使用 `windows-2025-vs2026`，要求 `msvc,clang-cl`。
+- `verify-framework-windows`：独立运行在固定的 `windows-2022` hosted runner；准备 CMake/F1/Go 输入并构建 Unity generator 与 Service 后，执行 Windows producer 和 required framework matrix。该 job 不使用 secrets、self-hosted 标签、管理员步骤或 WFP 命令。
 - `verify-linux`：`ubuntu-24.04`，要求 `gcc,clang`。
 
-Linux job 固定执行完整 native 矩阵；Windows 公共 hosted runner 默认跳过原生矩阵，因为 `clang-cl` linker diagnostic 场景可能耗尽 named-pipe liveness reconnect。为在稳定的自托管/专用 runner 上启用 Windows 矩阵，设置仓库变量 `UNIT_TEST_IDE_WINDOWS_NATIVE_E2E_REQUIRED=1`；启用后缺少 toolchain report 会使 job 失败。
+`verify-framework-windows` 固定执行 producer 后的完整 required framework matrix。Linux job 在联网完成 CMake、F1 和 Go module 准备后，通过 `tools/linux-offline/run.mjs --allow-sudo-root` 在同一离线边界内依次执行 producer 与 required matrix。两者分别只在成功后上传固定的 `native-framework-windows` 与 `native-framework-linux` artifact；内容分别来自 `.native-e2e/artifacts/windows/framework-report.json` 与 `.native-e2e/artifacts/linux/framework-report.json`，缺失即失败，保留 14 天。
+
+`verify-framework-matrix` 只依赖 `verify-framework-windows` 与 `verify-linux`，下载上述两个固定 artifact，运行唯一的 P4 aggregator，并上传 `native-framework-matrix-report`（14 天、缺失即失败）。本地 producer/matrix 成功仍不是 hosted evidence，不创建 P4 receipt、不推进 gate，`releaseReady=false` 保持不变。
+
+原有 `verify-windows` 管理员/WFP 路径和独立的 `verify-windows-wfp` evidence revalidation 路径保持不变。`verify-windows` 的公共 hosted runner 默认跳过普通原生矩阵，因为 `clang-cl` linker diagnostic 场景可能耗尽 named-pipe liveness reconnect。为在稳定的自托管/专用 runner 上启用该普通 Windows 矩阵，设置仓库变量 `UNIT_TEST_IDE_WINDOWS_NATIVE_E2E_REQUIRED=1`；启用后缺少 toolchain report 会使 job 失败。它不替代独立的 `verify-framework-windows` P4 producer。
 
 每个 job 的共同步骤为：
 
 1. `pnpm install --frozen-lockfile`
 2. `pnpm verify`
 3. `pnpm prepare:cmake-bundle`
-4. （Linux 默认执行；Windows 由上述仓库变量启用）`pnpm test:e2e:native`
+4. （Linux 默认执行；普通 Windows job 由上述仓库变量启用）`pnpm test:e2e:native`
 5. 使用 `actions/upload-artifact@v7` 只上传已执行平台的 `toolchain-report.json`
 6. `git diff --exit-code`
 
