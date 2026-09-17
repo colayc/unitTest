@@ -94,10 +94,10 @@ closed runtime manifest 放在固定位置
 workspace 放在固定的 `.native-e2e/framework-work/` 树中；CLI 和环境变量都不能指定
 替代路径、命令、shell、hook 或 executable。
 
-当前分支没有创建这些 runtime 输入的本地 producer。Task 6 hosted producer 是完整验收的
-明确前置条件；下面的 F1/CMake/fixture 命令只验证静态输入和单独 fixture，**不会**创建
-runtime manifest 或 Service workspace。在 Task 6 producer 落地并成功运行前，不应把
-`test:e2e:native` required-mode 命令报告为完整 P4 验收。producer 必须原子地产生且只产生：
+本地 producer `prepare:native-framework-runtime` 使用已准备的 F1/CMake 输入、真实
+Service discovery、实际编译产物和固定 Go `BenchmarkCatalog10000`（`-benchtime=1x -count=3`）
+构造 closed runtime。它只接受有序的 `--platform` 和 40 位小写 `--candidate`，不接受
+benchmark 文件、环境覆盖、shell 或自定义命令。固定输出为：
 
 ```text
 .native-e2e/framework-runtime/windows.json
@@ -108,12 +108,20 @@ runtime manifest 或 Service workspace。在 Task 6 producer 落地并成功运�
 
 每个 manifest 必须绑定 committed matrix contract、当前 candidate、compiler identity、
 F1 tree/source/provenance identity、从实际 Service catalog 重算的 stable ID，以及固定 build
-root 中唯一 compiled executable 的摘要。缺少 Task 6 producer 或上述任一路径时，当前
-可运行且可信的检查是 `pnpm check:framework-bundle` 和
-`pnpm verify:framework-fixtures -- ...`；required native 命令会在 Service matrix 执行前
-fail closed，而不是自行合成这些输入。
+root 中唯一 compiled executable 的摘要。producer 不下载依赖；运行前应预先准备锁定的
+framework archive/tree、CMake bundle、Go module cache 和两套本机 compiler，并在已建立的
+offline boundary 内运行 producer 和 required matrix。Go benchmark 强制 `GOPROXY=off`、
+`GOTOOLCHAIN=local`，采集恰好三次 allocations/op，任一样本超过 300000 即失败。
 
-Task 6 producer 已提供固定输入之后，Windows 本地完整验收：
+准备过程使用同卷 `.native-e2e/framework-work/.staging/{invocation}/...`。发布和 consumer
+共用 `.native-e2e/framework-runtime/{windows|linux}.lock`，consumer 持锁直到 dispose；
+锁已存在时直接 fail closed，不自动清理未知锁。发布在持锁期间备份旧 manifest/work tree、
+rename 新内容并重新验证，失败恢复完整旧 pair。仅删除已验证属于本次操作的 staging/backup；
+未知所有权、符号链接、残留 backup 或不完整旧 runtime 均保留并拒绝覆盖。崩溃留下的锁和
+backup 需人工检查，不能作为成功证据。stdout 的 producer 摘要仅包含 schema/platform/
+candidate/toolchain families/manifest SHA-256，不包含路径、环境、凭据或原始子进程输出。
+
+Windows 本地准备与 required matrix（先在联网准备阶段完成 bundle/cache，随后进入 offline boundary）：
 
 ```powershell
 pnpm check:framework-bundle
@@ -122,19 +130,27 @@ pnpm prepare:framework-bundle
 $cmake = (node tools/cmake-bundle/prepare.mjs | ConvertFrom-Json).executable
 $generator = (Resolve-Path build\unity-runner-generator.exe).Path
 pnpm verify:framework-fixtures -- --cmake $cmake --generator $generator --toolchains msvc,clang-cl --frameworks cpputest,unity
+$candidate = (git rev-parse HEAD).Trim()
+pnpm prepare:native-framework-runtime -- --platform win32 --candidate $candidate
 $env:UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS='msvc,clang-cl'
 $env:UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED='1'
 pnpm test:e2e:native -- --platform win32
 ```
 
-Task 6 producer 已提供固定输入之后，Linux 使用同一流程，把 generator 输出名改为无
-`.exe`，并设置：
+Linux 同样先准备并检查锁定的 bundle/cache，随后在 offline boundary 内运行：
 
 ```sh
+pnpm check:framework-bundle
+go -C apps/test-service build -trimpath -o ../../build/unity-runner-generator ./cmd/unity-runner-generator
+pnpm prepare:native-framework-runtime -- --platform linux --candidate "$(git rev-parse HEAD)"
 export UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS=gcc,clang
 export UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED=1
 pnpm test:e2e:native -- --platform linux
 ```
+
+两平台 required matrix 都必须设置上述 `UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS` 和
+`UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED=1`。本地 producer/matrix 成功不是 hosted
+四工具链证据，不创建 P4 receipt、不改变 gate 状态，`releaseReady=false` 保持不变。
 
 required mode 不允许 skip。缺少任一 compiler、F1 fixture/provenance、预生成 CMock
 输出、固定 runtime manifest、已编译 framework executable、17 场景中的任一项或

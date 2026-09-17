@@ -175,7 +175,7 @@ function validateCMockProvenance(input: unknown): Readonly<CMockProvenance> {
   return { ...provenance } as unknown as Readonly<CMockProvenance>;
 }
 
-function validateBenchmark(input: unknown): RuntimeBenchmark {
+export function validateBenchmark(input: unknown): RuntimeBenchmark {
   const benchmark = closedObject(input, BENCHMARK_KEYS, "framework runtime benchmark");
   if (
     benchmark.id !== "catalog-10000" ||

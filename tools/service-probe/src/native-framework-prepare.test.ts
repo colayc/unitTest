@@ -4,6 +4,7 @@ import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/pr
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import test from "node:test";
+import * as prepareModule from "./native-framework-prepare.js";
 import { prepareFrameworkRuntime, type FrameworkRuntimePrepareDependencies } from "./native-framework-prepare.js";
 import { stableFrameworkIdDigest } from "./native-framework-matrix.js";
 import { hashCompiledFrameworkExecutable } from "./native-framework-workspace.js";
@@ -17,6 +18,16 @@ const benchmark: FrameworkRuntimePrepareDependencies["benchmark"] = {
   allocationsPerOperation: [101, 102, 103], catalogRevision: "1".repeat(64),
   catalogArtifactSha256: "2".repeat(64), stableIdDigest: "3".repeat(64), status: "passed",
 };
+
+test("prepare CLI accepts only ordered platform and full lowercase candidate", () => {
+  const parse = (prepareModule as any).parseFrameworkPrepareArguments;
+  assert.equal(typeof parse, "function");
+  assert.deepEqual(parse(["--platform", "win32", "--candidate", "1".repeat(40)]), { platform: "win32", candidateCommit: "1".repeat(40) });
+  for (const args of [[], ["--platform", "darwin", "--candidate", "1".repeat(40)], ["--candidate", "1".repeat(40), "--platform", "linux"],
+    ["--platform", "linux", "--candidate", "ABC"], ["--platform", "linux", "--candidate", "1".repeat(40), "--benchmark", "private.json"]]) {
+    assert.throws(() => parse(args), /arguments/u);
+  }
+});
 
 async function fixture(t: test.TestContext, mutation = "", platform: "linux" | "win32" = "linux") {
   const repositoryRoot = await mkdtemp(join(tmpdir(), "framework-producer-"));
@@ -91,6 +102,8 @@ test("producer binds Service discovery and actual compiled bytes to closed F1 id
   assert.deepEqual(result.manifest.toolchains.map(({ family }: { family: string }) => family), ["clang", "gcc"]);
   assert.deepEqual(input.counts(), { started: 4, disposed: 4 });
   assert.equal(result.ownedStagingRoots.length, 4);
+  assert.ok(result.ownedStagingRoots.every(path => path.includes(join(".staging", result.ownershipId))));
+  await assert.rejects(readdir(join(input.repositoryRoot, ".native-e2e/framework-work/linux")), { code: "ENOENT" });
   assert.deepEqual(result.manifest.benchmark, benchmark);
   // @ts-expect-error F1 loader is covered by its Node tests.
   const { loadF1FrameworkIdentity } = await import("../../framework-bundle/consume.mjs");
@@ -130,7 +143,7 @@ test("prepared executable evidence survives destructive Service disposal without
   const input = await fixture(t);
   const result = await prepareFrameworkRuntime({ repositoryRoot: input.repositoryRoot, platform: "linux", candidateCommit: "1".repeat(40) }, input.dependencies);
   for (const toolchain of result.manifest.toolchains) for (const framework of toolchain.frameworks) {
-    const workRoot = join(input.repositoryRoot, ".native-e2e/framework-work");
+    const workRoot = join(input.repositoryRoot, ".native-e2e/framework-work/.staging", result.ownershipId);
     assert.equal(await hashCompiledFrameworkExecutable(workRoot, "linux", toolchain.family, framework.frameworkId), framework.evidence.executableArtifactSha256);
     const serviceRoot = join(workRoot, "linux", toolchain.family, framework.frameworkId, "service");
     assert.deepEqual(await readdir(serviceRoot), ["data"]);

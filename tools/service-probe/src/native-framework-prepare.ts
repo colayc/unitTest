@@ -1,6 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import { collectAuditedFrameworkBenchmark } from "./native-framework-benchmark.js";
+import { publishFrameworkRuntime } from "./native-framework-publish.js";
 import { prepareLinuxFrameworkInputs, type LinuxFrameworkInputManifest } from "./linux-framework-inputs.js";
 import { verifyPreparedCMakeBundle } from "./native-build.js";
 import { discoverFrameworkCatalog, loadMatrixContract, stableFrameworkIdDigest, type F1FrameworkIdentity } from "./native-framework-matrix.js";
@@ -70,8 +73,8 @@ async function prepareFrameworkRuntimeInternal(
   if (provenance.cMockProvenanceSha256 !== identity.cMockProvenanceSha256) throw new Error("CMock provenance changed during preparation");
   const preparedFrameworkRoots = await (dependencies.verifyInputs ?? verifyInputs)(options, locked, identity);
   const platformName = options.platform === "win32" ? "windows" : "linux";
-  const workRoot = join(repositoryRoot, ".native-e2e/framework-work");
   const ownershipId = randomUUID();
+  const workRoot = join(repositoryRoot, ".native-e2e/framework-work/.staging", ownershipId);
   const ownedStagingRoots: string[] = [];
   const toolchains: FrameworkRuntimeToolchain[] = [];
   const families: readonly FrameworkToolchainFamily[] = options.platform === "win32" ? ["clang-cl", "msvc"] : ["clang", "gcc"];
@@ -162,4 +165,30 @@ async function verifyInputs(options: FrameworkRuntimePrepareOptions, manifest: L
     generatorPath: join(root, "build", options.platform === "win32" ? "unity-runner-generator.exe" : "unity-runner-generator"),
   });
   return { cpputest: boundary.environment.UNIT_TEST_IDE_TEST_CPPUTEST_ROOT!, unity: boundary.environment.UNIT_TEST_IDE_TEST_UNITY_ROOT!, cmock: boundary.environment.UNIT_TEST_IDE_TEST_CMOCK_ROOT! };
+}
+
+export function parseFrameworkPrepareArguments(arguments_: readonly string[]): { platform: FrameworkPlatform; candidateCommit: string } {
+  if (arguments_.length !== 4 || arguments_[0] !== "--platform" || arguments_[2] !== "--candidate" ||
+      (arguments_[1] !== "win32" && arguments_[1] !== "linux") || !/^[0-9a-f]{40}$/u.test(arguments_[3]!)) {
+    throw new Error("framework prepare arguments are invalid");
+  }
+  return { platform: arguments_[1], candidateCommit: arguments_[3]! };
+}
+
+async function main(): Promise<void> {
+  // pnpm's forwarding delimiter is removed only at the process boundary.
+  const args = process.argv.slice(2);
+  const options = parseFrameworkPrepareArguments(args[0] === "--" ? args.slice(1) : args);
+  if (options.platform !== process.platform) throw new Error("framework prepare platform is unavailable");
+  const repositoryRoot = resolve(import.meta.dirname, "../../..");
+  const benchmark = await collectAuditedFrameworkBenchmark(repositoryRoot);
+  const prepared = await prepareFrameworkRuntime({ repositoryRoot, ...options }, { benchmark });
+  process.stdout.write(`${JSON.stringify(await publishFrameworkRuntime(prepared))}\n`);
+}
+
+if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  main().catch(() => {
+    process.stderr.write("framework runtime producer failed\n");
+    process.exitCode = 1;
+  });
 }

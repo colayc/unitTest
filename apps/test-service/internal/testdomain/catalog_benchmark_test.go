@@ -1,7 +1,11 @@
 package testdomain
 
 import (
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 )
@@ -25,6 +29,18 @@ func TestCatalog10000AllocationBudget(t *testing.T) {
 
 func BenchmarkCatalog10000(b *testing.B) {
 	input := catalog10000Input(b)
+	artifact, err := json.Marshal(input)
+	if err != nil {
+		b.Fatal(err)
+	}
+	ids := make([]string, len(input.Items))
+	for index, item := range input.Items {
+		ids[index] = item.ID.String()
+	}
+	sort.Strings(ids)
+	// Identity diagnostics happen outside the measured operation; the fixed
+	// producer validates all three lines against committed input anchors.
+	fmt.Printf("UTIDE_CATALOG10000 %s %x %x\n", input.Revision, sha256.Sum256(artifact), sha256.Sum256([]byte(strings.Join(ids, "\n"))))
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {

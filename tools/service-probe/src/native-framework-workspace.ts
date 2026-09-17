@@ -57,7 +57,7 @@ export async function stageFrameworkWorkspace(
   const stageRoot = resolve(options.stageRoot);
   const platformName = options.platform === "win32" ? "windows" : "linux";
   const expectedStageRoot = join(
-    repositoryRoot, ".native-e2e", "framework-work", platformName, options.family, options.frameworkId,
+    repositoryRoot, ".native-e2e", "framework-work", ".staging", options.ownershipId, platformName, options.family, options.frameworkId,
   );
   if (!samePath(stageRoot, expectedStageRoot)) {
     throw new Error("owned staging root must use the fixed framework-work layout");

@@ -181,7 +181,7 @@ async function workspaceFixture(t: test.TestContext) {
   for (const name of ["cpputest", "unity", "cmock"]) await mkdir(join(prepared, name), { recursive: true });
   await write(repositoryRoot, "sdk/cmake/UnitTestIDE.cmake", "# helper\n");
   await write(repositoryRoot, "generator", "generator\n");
-  const stageRoot = join(repositoryRoot, ".native-e2e", "framework-work", "linux", "gcc", "cpputest");
+  const stageRoot = join(repositoryRoot, ".native-e2e", "framework-work", ".staging", "01234567-89ab-4def-8123-456789abcdef", "linux", "gcc", "cpputest");
   const options: FrameworkWorkspaceStageOptions = {
     repositoryRoot, stageRoot, platform: "linux", family: "gcc", frameworkId: "cpputest",
     ownershipId: "01234567-89ab-4def-8123-456789abcdef", candidateCommit: "1".repeat(40),

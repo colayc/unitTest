@@ -9,6 +9,7 @@ import type {
   FrameworkPlatformFrameworkOptions,
 } from "./native-framework-matrix.js";
 import { parseFrameworkRuntimeManifest } from "./native-framework-runtime-contract.js";
+import { acquireFrameworkRuntimeLock } from "./native-framework-publish.js";
 
 export const frameworkRequiredEnvironment = "UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED";
 
@@ -33,6 +34,24 @@ export async function loadRequiredFrameworkRuntime(
   platform: FrameworkPlatform,
   artifactDirectory: string,
   dependencies: FrameworkRuntimeDependencies = defaultDependencies,
+): Promise<LoadedFrameworkRuntime> {
+  const release = await acquireFrameworkRuntimeLock(repositoryRoot, platform);
+  try {
+    const loaded = await loadLockedFrameworkRuntime(repositoryRoot, platform, artifactDirectory, dependencies);
+    let disposed = false;
+    return { ...loaded, async dispose() {
+      if (disposed) return;
+      disposed = true;
+      try { await loaded.dispose(); } finally { await release(); }
+    } };
+  } catch (error) { await release(); throw error; }
+}
+
+async function loadLockedFrameworkRuntime(
+  repositoryRoot: string,
+  platform: FrameworkPlatform,
+  artifactDirectory: string,
+  dependencies: FrameworkRuntimeDependencies,
 ): Promise<LoadedFrameworkRuntime> {
   const platformName = platform === "win32" ? "windows" : "linux";
   const manifestPath = join(repositoryRoot, ".native-e2e", "framework-runtime", `${platformName}.json`);

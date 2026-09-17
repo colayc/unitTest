@@ -16,6 +16,7 @@
     "prepare:cmake-bundle": "node tools/cmake-bundle/prepare.mjs",
     "prepare:coverage-bundle": "node tools/coverage-bundle/prepare.mjs",
     "prepare:framework-bundle": "node tools/framework-bundle/prepare.mjs",
+    "prepare:native-framework-runtime": "pnpm --filter @unit-test-ide/service-probe prepare:native-framework-runtime",
     "check:framework-bundle": "node tools/framework-bundle/check.mjs",
     "update:cmock-fixture": "node tools/framework-bundle/update-cmock-fixture.mjs",
     "verify:framework-fixtures": "node tools/framework-bundle/verify-fixtures.mjs",
