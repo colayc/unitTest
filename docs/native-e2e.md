@@ -178,7 +178,8 @@ identity。平台成功结果必须是 2 个 toolchain × 2 个 framework × 每
 
 原有 `verify-windows` 管理员/WFP 路径和独立的 `verify-windows-wfp` evidence revalidation 路径保持不变。`verify-windows` 的公共 hosted runner 默认跳过普通原生矩阵，因为 `clang-cl` linker diagnostic 场景可能耗尽 named-pipe liveness reconnect。为在稳定的自托管/专用 runner 上启用该普通 Windows 矩阵，设置仓库变量 `UNIT_TEST_IDE_WINDOWS_NATIVE_E2E_REQUIRED=1`；启用后缺少 toolchain report 会使 job 失败。它不替代独立的 `verify-framework-windows` P4 producer。
 
-每个 job 的共同步骤为：
+下列共同步骤只描述原有 `verify-windows` 与 `verify-linux` 的普通 toolchain
+报告路径，不包含独立的 `verify-framework-windows` producer job：
 
 1. `pnpm install --frozen-lockfile`
 2. `pnpm verify`

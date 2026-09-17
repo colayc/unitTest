@@ -265,7 +265,10 @@ jobs:
         working-directory: apps/test-service
         run: go mod download
       - name: Build Unity generator
-        run: go -C apps/test-service build -trimpath -o ../../build/unity-runner-generator.exe ./cmd/unity-runner-generator
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path build | Out-Null
+          go -C apps/test-service build -trimpath -o ../../build/unity-runner-generator.exe ./cmd/unity-runner-generator
       - name: Build Service
         run: node tools/service-probe/build-service.mjs
       - name: Prepare trusted Windows framework runtime

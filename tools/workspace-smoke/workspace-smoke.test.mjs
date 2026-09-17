@@ -67,6 +67,11 @@ function workflowJob(workflow, name) {
   return workflow.slice(start, next === -1 ? undefined : start + 1 + next);
 }
 
+function workflowActionUses(workflow) {
+  return [...workflow.matchAll(/^\s+(?:-\s+)?uses:\s+(\S+)\s*(?:#.*)?$/gmu)]
+    .map((match) => match[1]);
+}
+
 async function productionGoSources(directory) {
   const entries = await readdir(directory, { withFileTypes: true });
   return Promise.all(entries
@@ -326,6 +331,21 @@ test("P4 native framework matrix workflow is opt-in, fixed, and fail-closed unti
   }
 });
 
+test("workflow action pin scanning includes direct, named, and id steps", () => {
+  const fixture = `steps:
+      - uses: actions/checkout@${"a".repeat(40)}
+      - name: Restore cache
+        uses: actions/cache@${"b".repeat(40)}
+      - id: upload
+        uses: actions/upload-artifact@${"c".repeat(40)}
+`;
+  assert.deepEqual(workflowActionUses(fixture), [
+    `actions/checkout@${"a".repeat(40)}`,
+    `actions/cache@${"b".repeat(40)}`,
+    `actions/upload-artifact@${"c".repeat(40)}`,
+  ]);
+});
+
 test("fixed hosted framework producers preserve privileged Windows paths and publish exact artifacts", async () => {
   const workflow = await readFile(".github/workflows/foundation.yml", "utf8");
   const legacyWindows = workflowJob(workflow, "verify-windows");
@@ -355,8 +375,8 @@ test("fixed hosted framework producers preserve privileged Windows paths and pub
   assert.match(frameworkWindows, /^ {4}runs-on: windows-2022\s*$/mu);
   assert.doesNotMatch(frameworkWindows, /secrets:|secrets\.|unit-test-wfp|windows-2025-vs2026|administrator|WFP/iu);
   for (const source of [frameworkWindows, frameworkLinux, aggregator]) {
-    for (const use of source.matchAll(/^\s+- uses: (\S+)\s*(?:#.*)?$/gmu)) {
-      assert.match(use[1], /@[0-9a-f]{40}$/u, `framework action is not pinned: ${use[1]}`);
+    for (const use of workflowActionUses(source)) {
+      assert.match(use, /@[0-9a-f]{40}$/u, `framework action is not pinned: ${use}`);
     }
   }
   for (const pin of [
@@ -372,6 +392,10 @@ test("fixed hosted framework producers preserve privileged Windows paths and pub
   const native = frameworkWindows.indexOf("pnpm test:e2e:native -- --platform win32");
   assert.ok(producer !== -1 && native > producer, "Windows runtime producer must precede required native execution");
   assert.equal((aggregator.match(/node tools\/phase9\/p4-report\.mjs/gu) ?? []).length, 1);
+  assert.match(
+    frameworkWindows,
+    /^ {6}- name: Build Unity generator\r?\n {8}shell: pwsh\r?\n {8}run: \|\r?\n {10}New-Item -ItemType Directory -Force -Path build \| Out-Null\r?\n {10}go -C apps\/test-service build -trimpath -o \.\.\/\.\.\/build\/unity-runner-generator\.exe \.\/cmd\/unity-runner-generator\s*$/mu,
+  );
   assert.match(
     frameworkWindows,
     /^ {6}- name: Run required Windows framework matrix\r?\n {8}env:\r?\n {10}UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS: msvc,clang-cl\r?\n {10}UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED: '1'\r?\n {8}run: pnpm test:e2e:native -- --platform win32\s*$/mu,
