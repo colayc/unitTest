@@ -453,6 +453,7 @@ git commit -m "feat: prepare framework runtime from service evidence"
 - Test: `tools/service-probe/src/native-framework-prepare.test.ts`
 - Modify: `tools/service-probe/src/native-framework-workspace.ts`
 - Test: `tools/service-probe/src/native-framework-workspace.test.ts`
+- Modify: `tools/service-probe/src/native-framework-runtime.ts`
 - Modify: `tools/service-probe/package.json`
 - Modify: `tools/service-probe/run-tests.mjs`
 - Modify: `package.json`
@@ -493,9 +494,9 @@ node --test tools/service-probe/dist/native-framework-publish.test.js
 
 Expected: FAIL because the publisher is absent.
 
-- [ ] **Step 3: Implement owned same-volume publication**
+- [ ] **Step 3: Implement owned same-volume publication with reader coordination**
 
-Validate staging ownership before every mutation. Rename the current platform manifest/work root to bounded backup paths, rename verified staging into the final fixed paths, re-open the final manifest with `parseFrameworkRuntimeManifest`, validate all final workspace roots, then remove only the owned backup. Restore the backup if any final step fails. Reject unknown backup or staging ownership instead of deleting it.
+Validate staging ownership before every mutation. Acquire a fixed repository-local publication lock shared with the runtime loader. Rename the current platform manifest/work root to bounded backup paths, rename verified staging into the final fixed paths, re-open the final manifest with `parseFrameworkRuntimeManifest`, validate all final workspace roots, then remove only the owned backup. Restore the backup if any final step fails. Reject unknown backup or staging ownership instead of deleting it. The consumer must hold the same lock while reading the manifest and all work roots; lock failure is a sanitized fail-closed error.
 
 - [ ] **Step 4: Implement the closed CLI and package entry**
 
