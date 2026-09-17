@@ -14,18 +14,26 @@ const tests = [
   "dist/linux-framework-inputs.test.js",
   "dist/native-framework-report.test.js",
   "dist/native-framework-matrix.test.js",
+  "dist/native-framework-runtime-contract.test.js",
 ];
 
 const requested = process.argv.slice(2).filter((value) => value !== "--");
 let selected = tests;
 if (requested.length > 0) {
   const nativeBuildPair = ["native-build-windows.test.ts", "native-build-linux.test.ts"];
-  if (requested.length === 1 && ["native-framework-matrix.test.ts", "dist/native-framework-matrix.test.js"].includes(requested[0])) {
-    selected = ["dist/native-framework-matrix.test.js"];
+  const focusedTests = new Map([
+    ["native-framework-matrix.test.ts", "dist/native-framework-matrix.test.js"],
+    ["dist/native-framework-matrix.test.js", "dist/native-framework-matrix.test.js"],
+    ["native-framework-runtime-contract.test.ts", "dist/native-framework-runtime-contract.test.js"],
+    ["dist/native-framework-runtime-contract.test.js", "dist/native-framework-runtime-contract.test.js"],
+  ]);
+  const focused = requested.length === 1 ? focusedTests.get(requested[0]) : undefined;
+  if (focused !== undefined) {
+    selected = [focused];
   } else if (requested.length === 2 && nativeBuildPair.every((value) => requested.includes(value))) {
     selected = ["dist/native-build-windows.test.js", "dist/native-build-linux.test.js"];
   } else {
-    throw new Error("service-probe focused tests must be the framework matrix or the Windows/Linux native-build pair");
+    throw new Error("service-probe focused tests must be a known single test or the Windows/Linux native-build pair");
   }
 }
 const result = spawnSync(process.execPath, ["--test", ...selected], {

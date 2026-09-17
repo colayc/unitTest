@@ -710,31 +710,50 @@ test("required runtime validates F1 identity before starting any framework Servi
   await mkdir(join(root, "testdata", "framework-matrix"), { recursive: true });
   await mkdir(join(root, ".native-e2e", "framework-runtime"), { recursive: true });
   await writeFile(join(root, "testdata", "framework-matrix", "contract.json"), contract);
+  const runtimeFramework = (family: "clang" | "gcc", frameworkId: "cpputest" | "unity") => ({
+    frameworkId,
+    catalogArtifactSha256: digest(`catalog:${family}:${frameworkId}`),
+    dependencyVersion: frameworkId === "cpputest" ? "4.0" : "2.6.1",
+    dependencySha256: digest(`archive:${frameworkId}`),
+    dependencyTreeSha256: f1Identity.frameworkTreeSha256[frameworkId],
+    stableIdDigest: digest(`stable:${family}:${frameworkId}`),
+    timeoutMs: 100,
+    evidence: {
+      sourceArtifactSha256: f1Identity.fixtures[frameworkId].sourceSha256,
+      sourceLocationDigest: digest(`locations:${family}:${frameworkId}`),
+      executableArtifactSha256: digest(`binary:${family}:${frameworkId}`),
+    },
+    ...(frameworkId === "unity" ? { cMockProvenance: {
+      revision: "6ea503340b1d3fdc0f2bcaf69273ba0160ec83af",
+      generatorVersion: "2.7.0",
+      inputSha256: digest("cmock input"),
+      outputSha256: digest("cmock output"),
+      manifestSha256: f1Identity.cMockProvenanceSha256,
+      generatedAtRuntime: false,
+    } } : {}),
+  });
   await writeFile(join(root, ".native-e2e", "framework-runtime", "linux.json"), `${JSON.stringify({
     schemaVersion: 1,
     platform: "linux",
     candidateCommit,
     contractSha256: digestBytes(contract),
-    benchmark: {},
-    toolchains: [{
-      family: "clang",
-      compilerVersion: "18.1.0",
-      compilerSha256: digest("compiler:clang"),
-      frameworks: [{
-        frameworkId: "cpputest",
-        catalogArtifactSha256: digest("catalog:clang:cpputest"),
-        dependencyVersion: "4.0",
-        dependencySha256: digest("archive:cpputest"),
-        dependencyTreeSha256: f1Identity.frameworkTreeSha256.cpputest,
-        stableIdDigest: digest("stable:cpputest"),
-        timeoutMs: 100,
-        evidence: {
-          sourceArtifactSha256: f1Identity.fixtures.cpputest.sourceSha256,
-          sourceLocationDigest: digest("locations:cpputest"),
-          executableArtifactSha256: digest("binary:clang:cpputest"),
-        },
-      }],
-    }],
+    benchmark: {
+      id: "catalog-10000",
+      itemCount: 10_000,
+      sampleCount: 3,
+      allocationBudgetPerOperation: 300_000,
+      allocationsPerOperation: [100, 100, 100],
+      catalogRevision: digest("benchmark catalog"),
+      catalogArtifactSha256: digest("benchmark artifact"),
+      stableIdDigest: digest("benchmark stable"),
+      status: "passed",
+    },
+    toolchains: (["clang", "gcc"] as const).map((family) => ({
+      family,
+      compilerVersion: family === "clang" ? "18.1.0" : "15.2.0",
+      compilerSha256: digest(`compiler:${family}`),
+      frameworks: [runtimeFramework(family, "cpputest"), runtimeFramework(family, "unity")],
+    })),
   })}\n`);
   const events: string[] = [];
   const loaded = await loadRequiredFrameworkRuntime(root, "linux", artifactDirectory, {
@@ -751,9 +770,12 @@ test("required runtime validates F1 identity before starting any framework Servi
     },
   });
   assert.equal(loaded.identity, f1Identity);
-  assert.deepEqual(events, ["identity", "service"]);
+  assert.deepEqual(events, ["identity", "service", "service", "service", "service"]);
   await loaded.dispose();
-  assert.deepEqual(events, ["identity", "service", "dispose"]);
+  assert.deepEqual(events, [
+    "identity", "service", "service", "service", "service",
+    "dispose", "dispose", "dispose", "dispose",
+  ]);
 });
 
 test("required native CLI carries the pre-Service F1 identity into native-build", async () => {
