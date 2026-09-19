@@ -7,7 +7,7 @@
   "frameworks": {
     "cpputest": {
       "fixtureSha256": "6eef50ec7940e4a6b80891d0ff452ed503b5996de313df711ecad607185761ee",
-      "augmentationSha256": "0c181f67acad4bd248c2f6d23312ba301837ca83ec36516999e9cf4d01c518cb",
+      "augmentationSha256": "4ffba371794499e4b6d56ca332015f05788bc50620c2567d1f63a016a1d78587",
       "primaryCTestName": "cpputest.framework",
       "malformedCTestName": "cpputest.matrix.malformed",
       "opaqueCTestName": "cpputest.matrix.opaque",

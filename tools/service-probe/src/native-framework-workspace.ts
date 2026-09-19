@@ -349,6 +349,9 @@ function projectConfiguration(
   };
   return [
     "cmake_minimum_required(VERSION 3.28)",
+    // Locked framework trees include legacy CMake policy declarations. CMake
+    // 4.x requires an explicit policy floor before entering those projects.
+    "set(CMAKE_POLICY_VERSION_MINIMUM 3.5)",
     ...(options.family === "msvc"
       ? [
           // Keep the controlled fixture build independent of MSVC's external
