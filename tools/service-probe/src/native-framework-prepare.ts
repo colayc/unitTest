@@ -146,7 +146,6 @@ async function prepareFrameworkRuntimeInternal(
             } } : {}),
           });
         } finally {
-          markStage(`dispose-service:${family}:${frameworkId}`);
           try {
             await fixture.dispose();
           } catch (error) {
