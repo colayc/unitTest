@@ -917,8 +917,9 @@ async function readTaskArtifact(
     const kinds = [...new Set(page.items.map((candidate) => candidate.kind))]
       .filter((value) => /^[a-z0-9-]+$/u.test(value))
       .sort();
+    const countLabel = matches.length === 0 ? "zero" : "multiple";
     throw new Error(
-      `task must expose exactly one ${kind} artifact count ${matches.length} [kinds=${kinds.length > 0 ? kinds.join(",") : "none"}]`,
+      `framework discovery artifact count ${countLabel} [kinds=${kinds.length > 0 ? kinds.join(",") : "none"}]`,
     );
   }
   const metadata = matches[0]!;

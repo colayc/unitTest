@@ -234,6 +234,8 @@ function classifyDiscoveryValidationError(message: string): string {
 function classifyDiscoveryArtifactError(message: string): string {
   const value = message.toLowerCase();
   if (value.includes("unexpectedly paginated")) return "artifact-pagination";
+  if (value.includes("framework discovery artifact count zero")) return "artifact-count-zero";
+  if (value.includes("framework discovery artifact count multiple")) return "artifact-count-multiple";
   const explicitCount = value.match(/exactly one [a-z-]+ artifact count ([0-9]+)/u)?.[1];
   if (explicitCount !== undefined) return `artifact-count-${explicitCount}`;
   const count = value.match(/exactly one [a-z-]+ artifact \[count=([0-9]+)/u)?.[1];
