@@ -352,17 +352,22 @@ function projectConfiguration(
     // Locked framework trees include legacy CMake policy declarations. CMake
     // 4.x requires an explicit policy floor before entering those projects.
     "set(CMAKE_POLICY_VERSION_MINIMUM 3.5)",
-    ...(options.family === "msvc" || options.family === "clang-cl"
+    "project(unit_test_ide_framework_workspace LANGUAGES C CXX)",
+    ...(options.platform === "win32" && (options.family === "msvc" || options.family === "clang-cl")
       ? [
           // Keep the controlled fixture build independent of the external PDB
-          // path limit used by MSVC-compatible compilers. This covers both
-          // MSVC and clang-cl; it affects only generated staging input, while
-          // compiler identity and the fixed Service-owned build profile stay
-          // unchanged.
+          // path limit used by MSVC-compatible compilers. The explicit flags
+          // cover clang-cl as well as MSVC and affect only generated staging
+          // input; compiler identity and the fixed Service-owned build profile
+          // stay unchanged.
           "set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT Embedded)",
+          "string(APPEND CMAKE_C_FLAGS_DEBUG \" /Z7\")",
+          "string(APPEND CMAKE_CXX_FLAGS_DEBUG \" /Z7\")",
+          "string(APPEND CMAKE_EXE_LINKER_FLAGS_DEBUG \" /DEBUG:NONE\")",
+          "string(APPEND CMAKE_SHARED_LINKER_FLAGS_DEBUG \" /DEBUG:NONE\")",
+          "string(APPEND CMAKE_MODULE_LINKER_FLAGS_DEBUG \" /DEBUG:NONE\")",
         ]
       : []),
-    "project(unit_test_ide_framework_workspace LANGUAGES C CXX)",
     ...Object.entries(variables).map(([name, value]) => `set(${name} ${cmakeLiteral(value.split(sep).join("/"))})`),
     "enable_testing()",
     "add_subdirectory(framework-matrix)",
