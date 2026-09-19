@@ -903,7 +903,14 @@ async function readTaskArtifact(
   );
   if (page.nextCursor !== undefined) throw new Error(`${kind} artifact listing was unexpectedly paginated`);
   const matches = page.items.filter((candidate) => candidate.kind === kind);
-  if (matches.length !== 1) throw new Error(`task must expose exactly one ${kind} artifact [count=${matches.length}]`);
+  if (matches.length !== 1) {
+    const kinds = [...new Set(page.items.map((candidate) => candidate.kind))]
+      .filter((value) => /^[a-z0-9-]+$/u.test(value))
+      .sort();
+    throw new Error(
+      `task must expose exactly one ${kind} artifact [count=${matches.length}; kinds=${kinds.length > 0 ? kinds.join(",") : "none"}]`,
+    );
+  }
   const metadata = matches[0]!;
   if (
     metadata.taskId !== taskId || !DIGEST.test(metadata.sha256) ||
