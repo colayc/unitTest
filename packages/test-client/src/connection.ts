@@ -84,7 +84,7 @@ export class Connection {
     payload: Record<string, unknown>,
     options: RequestOptions = {}
   ): Promise<Record<string, unknown>> {
-    if (this.#closed) return Promise.reject(new Error("service connection is closed"));
+    if (this.#closed) return Promise.reject(this.#closeError ?? new Error("service connection is closed"));
     const messageId = randomUUID().replaceAll("-", "");
     const request: RequestEnvelope = {
       protocolVersion: version,
