@@ -360,13 +360,12 @@ function projectConfiguration(
           // explicit flags cover clang-cl as well as MSVC and affect only
           // generated staging input; compiler identity and the fixed
           // Service-owned build profile stay unchanged.
+          "set(CMAKE_OBJECT_PATH_MAX 64 CACHE STRING \"\" FORCE)",
           "set(CMAKE_TRY_COMPILE_CONFIGURATION Release CACHE STRING \"\" FORCE)",
-          "set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT Embedded CACHE STRING \"\" FORCE)",
-          "set(CMAKE_C_FLAGS_DEBUG \"${CMAKE_C_FLAGS_DEBUG} /Z7\" CACHE STRING \"\" FORCE)",
-          "set(CMAKE_CXX_FLAGS_DEBUG \"${CMAKE_CXX_FLAGS_DEBUG} /Z7\" CACHE STRING \"\" FORCE)",
-          "set(CMAKE_EXE_LINKER_FLAGS_DEBUG \"${CMAKE_EXE_LINKER_FLAGS_DEBUG} /DEBUG:NONE /PDB:NUL\" CACHE STRING \"\" FORCE)",
-          "set(CMAKE_SHARED_LINKER_FLAGS_DEBUG \"${CMAKE_SHARED_LINKER_FLAGS_DEBUG} /DEBUG:NONE /PDB:NUL\" CACHE STRING \"\" FORCE)",
-          "set(CMAKE_MODULE_LINKER_FLAGS_DEBUG \"${CMAKE_MODULE_LINKER_FLAGS_DEBUG} /DEBUG:NONE /PDB:NUL\" CACHE STRING \"\" FORCE)",
+          "set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT \"\" CACHE STRING \"\" FORCE)",
+          "set(CMAKE_EXE_LINKER_FLAGS_DEBUG \"${CMAKE_EXE_LINKER_FLAGS_DEBUG} /DEBUG:NONE\" CACHE STRING \"\" FORCE)",
+          "set(CMAKE_SHARED_LINKER_FLAGS_DEBUG \"${CMAKE_SHARED_LINKER_FLAGS_DEBUG} /DEBUG:NONE\" CACHE STRING \"\" FORCE)",
+          "set(CMAKE_MODULE_LINKER_FLAGS_DEBUG \"${CMAKE_MODULE_LINKER_FLAGS_DEBUG} /DEBUG:NONE\" CACHE STRING \"\" FORCE)",
         ]
       : []),
     "project(unit_test_ide_framework_workspace LANGUAGES C CXX)",
@@ -381,8 +380,66 @@ function projectConfiguration(
         ]
       : []),
     ...Object.entries(variables).map(([name, value]) => `set(${name} ${cmakeLiteral(value.split(sep).join("/"))})`),
+    ...(options.frameworkId === "cpputest"
+      ? [
+          // MSVC still applies MAX_PATH to the locked third-party source
+          // operands. Copy the already validated CppUTest tree into the
+          // Service-owned short build directory and configure against that
+          // copy; the staged source remains untouched and its digest is
+          // still verified before this configuration is emitted.
+          "if(MSVC)",
+          "  set(_utide_cpputest_short_root \"${CMAKE_BINARY_DIR}/utide-cpputest-src\")",
+          "  file(MAKE_DIRECTORY \"${_utide_cpputest_short_root}\")",
+          "  file(COPY \"${UNIT_TEST_IDE_CPPUTEST_ROOT}/\" DESTINATION \"${_utide_cpputest_short_root}\")",
+          "  set(UNIT_TEST_IDE_CPPUTEST_ROOT \"${_utide_cpputest_short_root}\")",
+          "endif()",
+        ]
+      : [
+          // MSVC also applies MAX_PATH to the locked Unity and CMock source
+          // operands. Use Service-owned short copies for this fixture while
+          // leaving the validated prepared trees and their digests unchanged.
+          "if(MSVC)",
+          "  set(_utide_unity_short_root \"${CMAKE_BINARY_DIR}/utide-unity-src\")",
+          "  set(_utide_cmock_short_root \"${CMAKE_BINARY_DIR}/utide-cmock-src\")",
+          "  file(MAKE_DIRECTORY \"${_utide_unity_short_root}\")",
+          "  file(MAKE_DIRECTORY \"${_utide_cmock_short_root}\")",
+          "  file(COPY \"${UNIT_TEST_IDE_UNITY_ROOT}/\" DESTINATION \"${_utide_unity_short_root}\")",
+          "  file(COPY \"${UNIT_TEST_IDE_CMOCK_ROOT}/\" DESTINATION \"${_utide_cmock_short_root}\")",
+          "  set(UNIT_TEST_IDE_UNITY_ROOT \"${_utide_unity_short_root}\")",
+          "  set(UNIT_TEST_IDE_CMOCK_ROOT \"${_utide_cmock_short_root}\")",
+          "endif()",
+        ]),
+    ...(options.frameworkId === "cpputest"
+      ? [
+          // CppUTest's legacy headers include sibling files without the
+          // `CppUTest/` prefix. Keep that sibling directory explicit so the
+          // MSVC frontend resolves the same locked headers as clang-cl.
+          "include_directories(${UNIT_TEST_IDE_CPPUTEST_ROOT}/include/CppUTest)",
+          "if(MSVC)",
+          "  include_directories(BEFORE \"${UNIT_TEST_IDE_CPPUTEST_ROOT}/include/CppUTest\")",
+          "  include_directories(BEFORE \"${UNIT_TEST_IDE_CPPUTEST_ROOT}/include\")",
+          "endif()",
+        ]
+      : []),
     "enable_testing()",
     "add_subdirectory(framework-matrix)",
+    ...(options.frameworkId === "unity"
+      ? [
+          // Keep Unity compile PDB names explicit so generated runner object
+          // paths remain deterministic in the Service-owned build root.
+          "if(MSVC)",
+          "  foreach(_utide_target utide_unity utide_cmock phase9_unity phase9_unity_malformed phase9_matrix_opaque)",
+          "    if(TARGET ${_utide_target})",
+          "      set_target_properties(${_utide_target} PROPERTIES",
+          "        COMPILE_PDB_NAME \"utide-${_utide_target}\"",
+          "        COMPILE_PDB_NAME_DEBUG \"utide-${_utide_target}\"",
+          "        COMPILE_PDB_OUTPUT_DIRECTORY \"${CMAKE_BINARY_DIR}\"",
+          "        COMPILE_PDB_OUTPUT_DIRECTORY_DEBUG \"${CMAKE_BINARY_DIR}\")",
+          "    endif()",
+          "  endforeach()",
+          "endif()",
+        ]
+      : []),
     ...(options.platform === "win32" && (options.family === "msvc" || options.family === "clang-cl")
       ? [
           // CppUTest 4.0 unconditionally adds /WX to global MSVC flags. Keep
@@ -392,9 +449,8 @@ function projectConfiguration(
           "if(MSVC)",
           "  foreach(_utide_target CppUTest CppUTestExt CppUTestTests CppUTestExtTests phase9_cpputest phase9_cpputest_malformed phase9_matrix_opaque)",
           "    if(TARGET ${_utide_target})",
-          "      target_compile_options(${_utide_target} PRIVATE /WX- /FdNUL)",
+          "      target_compile_options(${_utide_target} PRIVATE /WX-)",
           "      target_compile_definitions(${_utide_target} PRIVATE CPPUTEST_MEM_LEAK_DETECTION_DISABLED)",
-          "      set_target_properties(${_utide_target} PROPERTIES COMPILE_PDB_NAME NUL COMPILE_PDB_NAME_DEBUG NUL COMPILE_PDB_NAME_RELEASE NUL COMPILE_PDB_OUTPUT_DIRECTORY \"${CMAKE_BINARY_DIR}\" COMPILE_PDB_OUTPUT_DIRECTORY_DEBUG \"${CMAKE_BINARY_DIR}\" COMPILE_PDB_OUTPUT_DIRECTORY_RELEASE \"${CMAKE_BINARY_DIR}\" PDB_NAME NUL PDB_NAME_DEBUG NUL PDB_NAME_RELEASE NUL PDB_OUTPUT_DIRECTORY \"${CMAKE_BINARY_DIR}\" PDB_OUTPUT_DIRECTORY_DEBUG \"${CMAKE_BINARY_DIR}\" PDB_OUTPUT_DIRECTORY_RELEASE \"${CMAKE_BINARY_DIR}\")",
           "    endif()",
           "  endforeach()",
           "endif()",
