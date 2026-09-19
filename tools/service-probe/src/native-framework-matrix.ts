@@ -274,7 +274,8 @@ export async function discoverFrameworkCatalog(options: FrameworkDiscoveryOption
     const errorCode = typeof discoveryTask.errorCode === "string" && /^[a-z0-9_-]+$/u.test(discoveryTask.errorCode)
       ? discoveryTask.errorCode
       : "unknown";
-    throw new Error(`${options.frameworkId} discovery finished with ${String(discoveryTask.outcome)} [code=${errorCode}]`);
+    const errorDetail = typeof discoveryTask.errorMessage === "string" ? classifyTaskErrorMessage(discoveryTask.errorMessage) : "unknown";
+    throw new Error(`${options.frameworkId} discovery finished with ${String(discoveryTask.outcome)} [code=${errorCode}; detail=${errorDetail}]`);
   }
   const catalog = await bounded(
     `${options.frameworkId} catalog read`,
@@ -289,6 +290,17 @@ export async function discoverFrameworkCatalog(options: FrameworkDiscoveryOption
   catalogSelection(catalog, options.frameworkId, contract);
   const artifact = await readTaskArtifact(options.fixture.client, discovery.taskId, "test-catalog", timeoutMs);
   return { ...selected, catalog, taskId: discovery.taskId, catalogArtifactSha256: artifact.sha256, catalogArtifactSizeBytes: artifact.bytes.byteLength };
+}
+
+function classifyTaskErrorMessage(message: string): string {
+  const value = message.toLowerCase();
+  if (value.includes("spectre")) return "spectre-library";
+  if (value.includes("cmake") || value.includes("configure")) return "cmake-configure";
+  if (value.includes("ninja") || value.includes("msbuild") || value.includes("link")) return "build-tool";
+  if (value.includes("clang") || value.includes("cl.exe") || value.includes("compiler")) return "compiler";
+  if (value.includes("generator") || value.includes("catalog")) return "generator";
+  if (value.includes("not found") || value.includes("no such file") || value.includes("cannot find")) return "missing-input";
+  return "unknown";
 }
 
 export async function runFrameworkMatrix(

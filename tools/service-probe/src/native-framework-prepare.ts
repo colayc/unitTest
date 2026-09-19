@@ -127,8 +127,9 @@ async function prepareFrameworkRuntimeInternal(
             const message = error instanceof Error ? error.message : String(error);
             const taskOutcome = message.match(/discovery finished with ([a-z-]+)/u)?.[1];
             const taskCode = message.match(/\[code=([a-z0-9_-]+)\]/u)?.[1];
+            const taskDetail = message.match(/detail=([a-z0-9-]+)/u)?.[1];
             const kind = taskOutcome !== undefined
-              ? `task-${taskOutcome}${taskCode === undefined ? "" : `-${taskCode}`}`
+              ? `task-${taskOutcome}${taskCode === undefined ? "" : `-${taskCode}`}${taskDetail === undefined ? "" : `-${taskDetail}`}`
               : message.includes("catalog is incomplete or unbound")
                 ? "catalog-incomplete"
                 : message.includes("catalog has no matching container")
