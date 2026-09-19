@@ -216,7 +216,7 @@ func resolveAllowedPath(
 		previous = candidate
 		root, err := workspace.OpenRoot(candidate)
 		if err == nil && root.Contains(absolute) {
-			return absolute, true
+			return launchNativePath(absolute), true
 		}
 	}
 	return "", false

@@ -3,6 +3,8 @@
 package ctest
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -18,5 +20,27 @@ func TestBuildDescriptorWindowsPathsUseFilesystemIdentity(t *testing.T) {
 	}
 	if !descriptor.Compatibility.CaseLevel || descriptor.Executable.Identity == "" {
 		t.Fatalf("case-variant Windows descriptor = %#v", descriptor)
+	}
+}
+
+func TestLaunchNativePathShortensOversizedExistingDirectory(t *testing.T) {
+	root := t.TempDir()
+	longPath := root
+	for range 18 {
+		longPath = filepath.Join(longPath, "long-directory")
+	}
+	longPath = filepath.Join(longPath, "framework-matrix", "f1")
+	if err := os.MkdirAll(longPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if len(longPath) < 248 {
+		t.Skip("test directory is not beyond the Windows CreateProcess limit")
+	}
+	shortPath := launchNativePath(longPath)
+	if len(shortPath) >= len(longPath) {
+		t.Fatalf("launchNativePath() = %q, want a shorter spelling than %q", shortPath, longPath)
+	}
+	if _, err := os.Stat(shortPath); err != nil {
+		t.Fatalf("short launch path is not usable: %v", err)
 	}
 }

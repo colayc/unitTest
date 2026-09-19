@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -343,6 +344,13 @@ func canonicalPortablePath(value string) string {
 	canonical := path.Clean(portable)
 	if unc && strings.HasPrefix(canonical, "/") && !strings.HasPrefix(canonical, "//") {
 		canonical = "/" + canonical
+	}
+	if filepath.IsAbs(filepath.FromSlash(canonical)) {
+		canonical = strings.ReplaceAll(canonicalNativePath(canonical), `\`, "/")
+		canonical = path.Clean(canonical)
+		if unc && strings.HasPrefix(canonical, "/") && !strings.HasPrefix(canonical, "//") {
+			canonical = "/" + canonical
+		}
 	}
 	if runtime.GOOS == "windows" {
 		canonical = strings.ToLower(canonical)

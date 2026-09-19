@@ -1,7 +1,5 @@
 //go:build !windows
 
-package ctest
+package cmake
 
 func canonicalNativePath(path string) string { return path }
-
-func launchNativePath(path string) string { return path }
