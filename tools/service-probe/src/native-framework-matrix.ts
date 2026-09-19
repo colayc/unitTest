@@ -908,7 +908,7 @@ async function readTaskArtifact(
       .filter((value) => /^[a-z0-9-]+$/u.test(value))
       .sort();
     throw new Error(
-      `task must expose exactly one ${kind} artifact [count=${matches.length}; kinds=${kinds.length > 0 ? kinds.join(",") : "none"}]`,
+      `task must expose exactly one ${kind} artifact count ${matches.length} [kinds=${kinds.length > 0 ? kinds.join(",") : "none"}]`,
     );
   }
   const metadata = matches[0]!;

@@ -232,6 +232,8 @@ function classifyDiscoveryValidationError(message: string): string {
 function classifyDiscoveryArtifactError(message: string): string {
   const value = message.toLowerCase();
   if (value.includes("unexpectedly paginated")) return "artifact-pagination";
+  const explicitCount = value.match(/exactly one [a-z-]+ artifact count ([0-9]+)/u)?.[1];
+  if (explicitCount !== undefined) return `artifact-count-${explicitCount}`;
   const count = value.match(/exactly one [a-z-]+ artifact \[count=([0-9]+)/u)?.[1];
   if (count !== undefined) return `artifact-count-${count}`;
   if (value.includes("exactly one")) return "artifact-count";
