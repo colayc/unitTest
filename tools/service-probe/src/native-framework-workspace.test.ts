@@ -3,10 +3,13 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { cp, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import test from "node:test";
+import { discoverFrameworkCatalog } from "./native-framework-matrix.js";
+import { startService } from "./probe.js";
 import {
   hashCompiledFrameworkExecutable,
+  readCompiledFrameworkExecutable,
   stageFrameworkWorkspace,
   validateOwnedFrameworkStage,
   type FrameworkWorkspaceStageOptions,
@@ -23,6 +26,60 @@ const FIXTURE_FILES = {
     "tests/fixture_runtime.c", "tests/framework_tests.c",
   ],
 } as const;
+
+test("actual Service inspection binds staged profiles to the requested compiler", async (t) => {
+  const input = await realServiceWorkspace(t);
+  const service = await startService(input.binary, input.staged.serviceDirectory, {
+    workspaceRoot: input.staged.workspaceRoot, trustedWorkspace: true, timeoutMs: 120_000,
+    ...await cmakeServiceOptions(),
+  });
+  try {
+    const snapshot = await service.client.inspectWorkspace();
+    const compiler = snapshot.toolchains.find(({ family }) => family === input.family);
+    assert.ok(compiler, JSON.stringify(snapshot.diagnostics));
+    const profile = snapshot.projects.find(({ projectId }) => projectId === "framework-matrix")?.buildProfiles
+      .find(({ toolchainId }) => toolchainId === compiler.toolchainId);
+    assert.ok(profile, `staged ${input.family} workspace must expose a toolchain-bound profile`);
+    assert.equal(profile.origin, "generated");
+    assert.equal(profile.generator, "Ninja");
+    assert.match(profile.buildProfileId, /^[0-9a-f]{64}$/u);
+    assert.match(compiler.compilerSha256 ?? "", /^[0-9a-f]{64}$/u);
+  } finally { await service.dispose(); }
+});
+
+test("actual Service discovers staged Unity and hashes its generated-profile executable", async (t) => {
+  const bundleRoot = process.env.UNIT_TEST_IDE_TEST_FRAMEWORK_BUNDLE;
+  if (!bundleRoot) { t.skip("requires explicitly prepared UNIT_TEST_IDE_TEST_FRAMEWORK_BUNDLE; never downloads in tests"); return; }
+  // @ts-expect-error The F1 manifest reader is validated by its direct Node suite.
+  const { readFrameworkManifest } = await import("../../framework-bundle/manifest.mjs");
+  // @ts-expect-error The F1 bundle verifier is validated by its direct Node suite.
+  const { verifyPreparedFrameworkBundle } = await import("../../framework-bundle/prepare.mjs");
+  const locked = await readFrameworkManifest();
+  await verifyPreparedFrameworkBundle({ root: bundleRoot, ...locked });
+  const input = await realServiceWorkspace(t, bundleRoot);
+  const service = await startService(input.binary, input.staged.serviceDirectory, {
+    workspaceRoot: input.staged.workspaceRoot, trustedWorkspace: true, timeoutMs: 120_000,
+    ...await cmakeServiceOptions(),
+  });
+  try {
+    const discovered = await discoverFrameworkCatalog({
+      fixture: service, repositoryRoot: input.repositoryRoot, frameworkId: "unity", toolchainFamily: input.family, timeoutMs: 120_000,
+    });
+    assert.equal(discovered.profile.origin, "generated");
+    assert.equal(discovered.profile.generator, "Ninja");
+    assert.equal(discovered.profile.toolchainId, discovered.toolchain.toolchainId);
+    assert.equal(discovered.catalog.partial, false);
+    assert.deepEqual(discovered.catalog.containers.map(({ ctestLogicalName }) => ctestLogicalName).sort(),
+      ["unity.framework", "unity.matrix.malformed", "unity.matrix.opaque"]);
+    const compiled = await readCompiledFrameworkExecutable(input.workRoot, input.platform, input.family, "unity");
+    assert.equal(compiled.profileId, discovered.profile.buildProfileId);
+    assert.equal(compiled.sha256, createHash("sha256").update(await readFile(join(
+      input.staged.buildRoot, discovered.profile.buildProfileId, "bin", `phase9_unity${input.platform === "win32" ? ".exe" : ""}`,
+    ))).digest("hex"));
+    assert.ok(compiled.bytes.byteLength > 0);
+    await assert.rejects(lstat(join(input.staged.workspaceRoot, "source/build")), { code: "ENOENT" });
+  } finally { await service.dispose(); }
+});
 
 test("actual staged Unity configure keeps F1 and malformed sources inside the CMake source root", async (t) => {
   const input = await workspaceFixture(t);
@@ -47,10 +104,7 @@ test("actual staged Unity configure keeps F1 and malformed sources inside the CM
   });
   const workspace = JSON.parse(await readFile(join(stage.workspaceRoot, ".unit-test-ide/workspace.json"), "utf8"));
   const build = join(input.repositoryRoot, "configure-test");
-  execute(process.env.CMAKE ?? "cmake", ["-S", join(stage.workspaceRoot, workspace.projects[0].sourceDir), "-B", build,
-    "-DUNIT_TEST_IDE_FRAMEWORK=unity", `-DUNIT_TEST_IDE_HELPER=${input.options.cmakeHelper}`,
-    `-DUNIT_TEST_IDE_UNITY_ROOT=${input.options.preparedFrameworkRoots.unity}`,
-    `-DUNIT_TEST_IDE_CMOCK_ROOT=${input.options.preparedFrameworkRoots.cmock}`, `-DUTIDE_UNITY_RUNNER_GENERATOR=${generator}`]);
+  execute(process.env.CMAKE ?? "cmake", ["-S", join(stage.workspaceRoot, workspace.projects[0].sourceDir), "-B", build]);
   for (const [name, source] of [["unity.framework", "frameworks/unity/tests/framework_tests.c"], ["unity.matrix.malformed", "framework-matrix/malformed_unity.c"]]) {
     const manifest = JSON.parse(await readFile(join(build, ".unit-test-ide", createHash("sha256").update(name!).digest("hex"), "manifest.json"), "utf8"));
     assert.deepEqual(manifest.sources, [source]);
@@ -70,10 +124,18 @@ test("staging creates one closed owned framework workspace with canonical config
     "service/",
     "workspace/",
     "workspace/.unit-test-ide/",
+    "workspace/.unit-test-ide/inputs/",
+    "workspace/.unit-test-ide/inputs/cmake/",
+    "workspace/.unit-test-ide/inputs/cmake/UnitTestIDE.cmake",
+    "workspace/.unit-test-ide/inputs/prepared/",
+    "workspace/.unit-test-ide/inputs/prepared/cmock/",
+    "workspace/.unit-test-ide/inputs/prepared/cpputest/",
+    "workspace/.unit-test-ide/inputs/prepared/unity/",
+    "workspace/.unit-test-ide/inputs/tools/",
+    "workspace/.unit-test-ide/inputs/tools/unity-runner-generator",
     "workspace/.unit-test-ide/workspace.json",
     "workspace/source/",
     "workspace/source/CMakeLists.txt",
-    "workspace/source/CMakePresets.json",
     "workspace/source/framework-matrix/",
     "workspace/source/framework-matrix/CMakeLists.txt",
     "workspace/source/framework-matrix/contract.json",
@@ -120,11 +182,10 @@ test("staging creates one closed owned framework workspace with canonical config
       ] },
     }], version: 2,
   });
-  const presets = JSON.parse(await readFile(join(staged.workspaceRoot, "source", "CMakePresets.json"), "utf8"));
-  assert.equal(presets.configurePresets[0].cacheVariables.UNIT_TEST_IDE_FRAMEWORK, "cpputest");
-  assert.equal(presets.configurePresets[0].cacheVariables.CMAKE_C_COMPILER, "gcc");
-  assert.equal(presets.configurePresets[0].cacheVariables.CMAKE_CXX_COMPILER, "g++");
-  assert.equal(presets.configurePresets[0].cacheVariables.UTIDE_UNITY_RUNNER_GENERATOR, undefined);
+  const cmake = await readFile(join(staged.workspaceRoot, "source", "CMakeLists.txt"), "utf8");
+  assert.ok(cmake.includes("set(UNIT_TEST_IDE_FRAMEWORK [[cpputest]])"));
+  assert.ok(cmake.includes(`set(UNIT_TEST_IDE_CPPUTEST_ROOT [[${join(staged.workspaceRoot, ".unit-test-ide", "inputs", "prepared", "cpputest").replaceAll("\\", "/")}]])`));
+  assert.doesNotMatch(cmake, /CMAKE_(?:C|CXX)_COMPILER|UTIDE_UNITY_RUNNER_GENERATOR|CMAKE_BINARY_DIR/u);
   assert.equal(await readFile(join(staged.workspaceRoot, ".unit-test-ide", "workspace.json"), "utf8"), `${JSON.stringify(workspace, null, 2)}\n`);
   await validateOwnedFrameworkStage(fixture.stageRoot, fixture.options.ownershipId);
 });
@@ -206,8 +267,8 @@ test("compiled executable hashing accepts one fixed regular build artifact", asy
   await assert.rejects(hashCompiledFrameworkExecutable(root, "linux", "msvc", "cpputest"), /toolchain is incompatible/u);
 });
 
-async function workspaceFixture(t: test.TestContext) {
-  const repositoryRoot = await mkdtemp(join(tmpdir(), "utide-framework-workspace-"));
+async function workspaceFixture(t: test.TestContext, prefix = "utide-framework-workspace-") {
+  const repositoryRoot = await mkdtemp(join(tmpdir(), prefix));
   t.after(() => rm(repositoryRoot, { recursive: true, force: true }));
   for (const name of MATRIX_FILES) await write(repositoryRoot, `testdata/framework-matrix/${name}`, matrixContent(name));
   for (const [framework, files] of Object.entries(FIXTURE_FILES)) {
@@ -228,6 +289,51 @@ async function workspaceFixture(t: test.TestContext) {
     unityRunnerGenerator: join(repositoryRoot, "generator"),
   };
   return { repositoryRoot, stageRoot, options };
+}
+
+async function realServiceWorkspace(t: test.TestContext, bundleRoot?: string) {
+  const input = await workspaceFixture(t, "f2-");
+  const repository = resolve(import.meta.dirname, "../../..");
+  for (const path of ["testdata/frameworks", "testdata/framework-matrix", "sdk/cmake"]) {
+    await cp(join(repository, path), join(input.repositoryRoot, path), { recursive: true });
+  }
+  if (bundleRoot) {
+    for (const [name, source] of [["unity", "Unity-2.6.1"], ["cmock", "CMock-2.7.0"]]) {
+      await cp(join(bundleRoot, source!), join(input.repositoryRoot, ".prepared", name!), { recursive: true });
+    }
+  }
+  const platform = process.platform === "win32" ? "win32" : "linux";
+  const family = platform === "win32" ? "msvc" : "gcc";
+  const binary = join(input.repositoryRoot, `unit-test-service${platform === "win32" ? ".exe" : ""}`);
+  const unityRunnerGenerator = join(input.repositoryRoot, `unity-runner-generator${platform === "win32" ? ".exe" : ""}`);
+  for (const [output, pkg] of [[binary, "unit-test-service"], [unityRunnerGenerator, "unity-runner-generator"]]) {
+    const built = spawnSync("go", ["build", "-o", output!, `./apps/test-service/cmd/${pkg}`], {
+      cwd: repository, encoding: "utf8", windowsHide: true, timeout: 120_000,
+    });
+    assert.equal(built.status, 0, built.error?.message ?? `${built.stdout}\n${built.stderr}`);
+  }
+  const workRoot = join(input.repositoryRoot, ".native-e2e/framework-work/.staging", input.options.ownershipId);
+  const staged = await stageFrameworkWorkspace({
+    ...input.options, platform, family, frameworkId: "unity", unityRunnerGenerator,
+    stageRoot: join(workRoot, platform === "win32" ? "windows" : "linux", family, "unity"),
+  });
+  return { ...input, binary, staged, workRoot, platform, family } as const;
+}
+
+async function cmakeExecutable(): Promise<string> {
+  if (process.env.CMAKE && isAbsolute(process.env.CMAKE)) return process.env.CMAKE;
+  const name = process.platform === "win32" ? "cmake.exe" : "cmake";
+  for (const directory of (process.env.PATH ?? "").split(delimiter)) {
+    const path = resolve(directory, name);
+    if ((await lstat(path).catch(() => undefined))?.isFile()) return path;
+  }
+  throw new Error("real Service workspace tests require CMake on PATH or an absolute CMAKE");
+}
+
+async function cmakeServiceOptions() {
+  return process.env.UNIT_TEST_IDE_TEST_CMAKE_BUNDLE
+    ? { cmakeBundleRoot: process.env.UNIT_TEST_IDE_TEST_CMAKE_BUNDLE }
+    : { devCMakeExecutable: await cmakeExecutable() };
 }
 
 function matrixContent(name: typeof MATRIX_FILES[number]): string {

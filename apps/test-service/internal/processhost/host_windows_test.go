@@ -4,8 +4,11 @@ package processhost
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -57,23 +60,25 @@ func TestTargetWindowsEnvironmentAppliesOverlayAndUnset(t *testing.T) {
 	}
 }
 
-func TestWindowsTargetWaitConfirmsInnerJobEmptyBeforeClosingAndReturning(t *testing.T) {
-	queries := 0
-	closedAfterZero := false
+func TestWindowsTargetWaitGivesNaturalDescendantsGraceBeforeClosingJob(t *testing.T) {
+	var queries atomic.Int32
+	jobClosed := false
 	operations := defaultWindowsTargetOperations()
 	operations.waitProcess = func(windows.Handle, uint32) (uint32, error) { return windows.WAIT_OBJECT_0, nil }
 	operations.exitCode = func(windows.Handle) (uint32, error) { return 17, nil }
 	operations.terminateJob = func(windows.Handle, uint32) error { return nil }
 	operations.queryActiveProcesses = func(windows.Handle) (uint32, error) {
-		queries++
-		if queries == 1 {
+		if queries.Add(1) == 1 {
 			return 1, nil
 		}
 		return 0, nil
 	}
 	operations.closeHandle = func(handle windows.Handle) error {
 		if handle == 502 {
-			closedAfterZero = queries >= 2
+			if queries.Load() < 2 {
+				t.Fatalf("job closed before active descendants drained; queries=%d", queries.Load())
+			}
+			jobClosed = true
 		}
 		return nil
 	}
@@ -82,12 +87,15 @@ func TestWindowsTargetWaitConfirmsInnerJobEmptyBeforeClosingAndReturning(t *test
 	if code != 17 || err != nil {
 		t.Fatalf("Wait = (%d, %v)", code, err)
 	}
-	if !closedAfterZero {
-		t.Fatalf("job closed before zero active processes; queries=%d", queries)
+	if !jobClosed {
+		t.Fatalf("job was not closed; queries=%d", queries.Load())
+	}
+	if queries.Load() < 2 {
+		t.Fatalf("natural cleanup queries = %d, want descendant drain polling", queries.Load())
 	}
 }
 
-func TestWindowsTargetActiveCountTimeoutOrErrorReturnsStableWaitFailure(t *testing.T) {
+func TestWindowsTargetNaturalWaitIgnoresActiveCountTimeoutOrError(t *testing.T) {
 	for _, test := range []struct {
 		name  string
 		query func(windows.Handle) (uint32, error)
@@ -105,13 +113,37 @@ func TestWindowsTargetActiveCountTimeoutOrErrorReturnsStableWaitFailure(t *testi
 			target := &windowsTarget{processOwner: winprocess.NewHandleOwner(511, operations.closeHandle), jobOwner: winprocess.NewHandleOwner(512, operations.closeHandle), pid: 513, ops: operations, waitDone: make(chan struct{}), cleanupWait: 20 * time.Millisecond}
 			started := time.Now()
 			_, err := target.Wait()
-			if err == nil || err.Error() != "target job cleanup failed" {
-				t.Fatalf("Wait error = %v", err)
+			if err != nil {
+				t.Fatalf("Wait error = %v, want safe natural job close", err)
 			}
 			if time.Since(started) > 200*time.Millisecond {
 				t.Fatalf("Wait did not release promptly: %s", time.Since(started))
 			}
 		})
+	}
+}
+
+func TestWindowsTargetNaturalWaitReportsJobCloseError(t *testing.T) {
+	operations := defaultWindowsTargetOperations()
+	operations.waitProcess = func(windows.Handle, uint32) (uint32, error) { return windows.WAIT_OBJECT_0, nil }
+	operations.exitCode = func(windows.Handle) (uint32, error) { return 0, nil }
+	operations.queryActiveProcesses = func(windows.Handle) (uint32, error) { return 0, nil }
+	operations.closeHandle = func(handle windows.Handle) error {
+		if handle == 522 {
+			return errors.New("injected natural job close failure")
+		}
+		return nil
+	}
+	target := &windowsTarget{
+		processOwner: winprocess.NewHandleOwner(521, operations.closeHandle),
+		jobOwner:     winprocess.NewHandleOwner(522, operations.closeHandle),
+		pid:          523,
+		ops:          operations,
+		waitDone:     make(chan struct{}),
+		cleanupWait:  time.Millisecond,
+	}
+	if code, err := target.Wait(); code != 0 || err == nil {
+		t.Fatalf("Wait = (%d, %v), want natural job close failure", code, err)
 	}
 }
 
@@ -124,10 +156,7 @@ func TestWindowsTerminateAfterNaturalWaitIsIdempotent(t *testing.T) {
 	operations.exitCode = func(windows.Handle) (uint32, error) { return 0, nil }
 	operations.terminateJob = func(windows.Handle, uint32) error {
 		terminateCalls++
-		if terminateCalls > 1 {
-			t.Fatal("natural completion must not terminate an already-cleaned job")
-		}
-		return nil
+		return errors.New("empty job rejects termination")
 	}
 	operations.queryActiveProcesses = func(windows.Handle) (uint32, error) { return 0, nil }
 	operations.closeHandle = func(windows.Handle) error { return nil }
@@ -146,16 +175,47 @@ func TestWindowsTerminateAfterNaturalWaitIsIdempotent(t *testing.T) {
 	if err := platform.Terminate(target, 0); err != nil {
 		t.Fatalf("Terminate after natural Wait = %v, want nil", err)
 	}
-	if terminateCalls != 1 {
-		t.Fatalf("terminateJob calls = %d, want one natural-exit cleanup", terminateCalls)
+	if terminateCalls != 0 {
+		t.Fatalf("terminateJob calls = %d, want no natural-exit termination", terminateCalls)
+	}
+}
+
+func TestWindowsTargetNaturalWaitClosesEmptyJobWhenTerminationRejects(t *testing.T) {
+	var terminateCalls atomic.Int32
+	operations := defaultWindowsTargetOperations()
+	operations.waitProcess = func(windows.Handle, uint32) (uint32, error) { return windows.WAIT_OBJECT_0, nil }
+	operations.exitCode = func(windows.Handle) (uint32, error) { return 0, nil }
+	operations.terminateJob = func(windows.Handle, uint32) error {
+		terminateCalls.Add(1)
+		return errors.New("ERROR_ACCESS_DENIED")
+	}
+	operations.queryActiveProcesses = func(windows.Handle) (uint32, error) { return 0, nil }
+	operations.closeHandle = func(windows.Handle) error { return nil }
+	target := &windowsTarget{
+		processOwner: winprocess.NewHandleOwner(731, operations.closeHandle),
+		jobOwner:     winprocess.NewHandleOwner(732, operations.closeHandle),
+		pid:          733,
+		ops:          operations,
+		waitDone:     make(chan struct{}),
+		cleanupWait:  time.Millisecond,
+	}
+	if code, err := target.Wait(); code != 0 || err != nil {
+		t.Fatalf("Wait = (%d, %v), want successful natural cleanup", code, err)
+	}
+	if calls := terminateCalls.Load(); calls != 0 {
+		t.Fatalf("TerminateJobObject calls = %d, want zero", calls)
 	}
 }
 
 func TestWindowsTargetTerminateActiveCountFailureStillReleasesWait(t *testing.T) {
 	operations := defaultWindowsTargetOperations()
+	var terminateCalls atomic.Int32
 	operations.waitProcess = func(windows.Handle, uint32) (uint32, error) { return windows.WAIT_OBJECT_0, nil }
 	operations.exitCode = func(windows.Handle) (uint32, error) { return 1, nil }
-	operations.terminateJob = func(windows.Handle, uint32) error { return errors.New("private terminate detail") }
+	operations.terminateJob = func(windows.Handle, uint32) error {
+		terminateCalls.Add(1)
+		return errors.New("private terminate detail")
+	}
 	operations.queryActiveProcesses = func(windows.Handle) (uint32, error) { return 1, nil }
 	operations.closeHandle = func(windows.Handle) error { return nil }
 	target := &windowsTarget{processOwner: winprocess.NewHandleOwner(521, operations.closeHandle), jobOwner: winprocess.NewHandleOwner(522, operations.closeHandle), pid: 523, ops: operations, waitDone: make(chan struct{}), cleanupWait: 20 * time.Millisecond}
@@ -169,6 +229,9 @@ func TestWindowsTargetTerminateActiveCountFailureStillReleasesWait(t *testing.T)
 		}
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("Terminate did not release Wait")
+	}
+	if calls := terminateCalls.Load(); calls == 0 {
+		t.Fatal("Terminate did not attempt forced job cleanup")
 	}
 }
 
@@ -378,10 +441,10 @@ func TestWindowsInnerJobCloseRetriesAfterFailure(t *testing.T) {
 		return nil
 	}
 	target := &windowsTarget{processOwner: winprocess.NewHandleOwner(702, operations.closeHandle), jobOwner: winprocess.NewHandleOwner(701, operations.closeHandle), pid: 703, ops: operations, waitDone: make(chan struct{}), cleanupWait: time.Millisecond}
-	if err := target.closeJob(); err == nil {
+	if err := target.closeJob(true); err == nil {
 		t.Fatal("first close unexpectedly succeeded")
 	}
-	if err := target.closeJob(); err != nil {
+	if err := target.closeJob(true); err != nil {
 		t.Fatalf("second close = %v", err)
 	}
 	if got := attempts.Load(); got != 2 {
@@ -486,6 +549,52 @@ func TestWindowsRealTargetOwnerCleanup(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		t.Fatalf("Wait=(%d,%v), events=%v", code, err, events)
+	}
+}
+
+// Keep the control writer open while the target exits, matching the real
+// process-control client. Run must close its inherited read handle, join the
+// control decoder, and still publish the final exit frame. A status EOF here
+// would surface to the client as a connection close with no exit code.
+func TestWindowsRunPublishesNaturalExitWhileControlPeerRemainsOpen(t *testing.T) {
+	controlReader, controlWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controlWriter.Close()
+	platform := newWindowsPlatform(defaultWindowsTargetOperations())
+	platform.operations.registerExecutable = func(string) error { return nil }
+	if err := json.NewEncoder(controlWriter).Encode(processcontrol.StartCommand(processcontrol.Spec{
+		Executable: os.Getenv("ComSpec"), Args: []string{"/c", "exit", "0"},
+	})); err != nil {
+		t.Fatal(err)
+	}
+	var status bytes.Buffer
+	done := make(chan int, 1)
+	go func() {
+		done <- Run(context.Background(), platform, controlReader, &status, os.Stdout, os.Stderr)
+	}()
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("Run code = %d, status = %q", code, status.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not publish natural exit while control peer remained open")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(status.Bytes()))
+	var statuses []processcontrol.HostStatus
+	for {
+		var value processcontrol.HostStatus
+		if err := decoder.Decode(&value); errors.Is(err, io.EOF) {
+			break
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		statuses = append(statuses, value)
+	}
+	if len(statuses) != 2 || statuses[0].Kind != "started" || statuses[1].Kind != "exit" || statuses[1].ExitCode != 0 {
+		t.Fatalf("statuses = %#v", statuses)
 	}
 }
 

@@ -32,7 +32,11 @@ var (
 	errProcessHostFailed      = errors.New("process host failed")
 )
 
-const windowsHostShutdownWait = time.Second
+// windowsHostShutdownWait bounds the wait for the process-host and its output
+// drain after a terminal result. Five seconds gives Windows pipe readers time
+// to observe a naturally exited CMake/Ninja child while keeping a broken host
+// bounded and fail-closed.
+const windowsHostShutdownWait = 5 * time.Second
 
 type windowsRunner struct {
 	executable string

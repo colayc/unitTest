@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { copyFile, lstat, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { copyFile, cp, lstat, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { FrameworkId, FrameworkPlatform, FrameworkToolchainFamily } from "./native-framework-report.js";
 import type { F1FrameworkIdentity } from "./native-framework-matrix.js";
@@ -109,15 +109,29 @@ export async function stageFrameworkWorkspace(
       }
     }
     await mkdir(join(workspaceRoot, ".unit-test-ide"), { recursive: true, mode: 0o700 });
+    const inputsRoot = join(workspaceRoot, ".unit-test-ide", "inputs");
+    const preparedRoot = join(inputsRoot, "prepared");
+    await mkdir(preparedRoot, { recursive: true, mode: 0o700 });
+    for (const [frameworkId, source] of Object.entries(preparedFrameworkRoots) as Array<[keyof typeof preparedFrameworkRoots, string]>) {
+      await copyOwnedDirectory(source, join(preparedRoot, frameworkId));
+    }
+    const helperDestination = join(inputsRoot, "cmake", "UnitTestIDE.cmake");
+    await mkdir(dirname(helperDestination), { recursive: true, mode: 0o700 });
+    await copyFile(cmakeHelper, helperDestination);
+    const generatorDestination = join(inputsRoot, "tools", options.platform === "win32" ? "unity-runner-generator.exe" : "unity-runner-generator");
+    await mkdir(dirname(generatorDestination), { recursive: true, mode: 0o700 });
+    await copyFile(unityRunnerGenerator, generatorDestination);
+    const stagedInputs = {
+      cpputest: join(preparedRoot, "cpputest"),
+      unity: join(preparedRoot, "unity"),
+      cmock: join(preparedRoot, "cmock"),
+    } as const;
     await writeCanonical(join(workspaceRoot, ".unit-test-ide", "workspace.json"), workspaceConfiguration(options, contract));
     // Both the locked F1 fixtures and the matrix overlay must be descendants of
     // CMAKE_SOURCE_DIR; the Unity generator deliberately rejects source escapes.
     await writeFile(join(workspaceRoot, "source", "CMakeLists.txt"),
-      'cmake_minimum_required(VERSION 3.28)\nproject(unit_test_ide_framework_workspace LANGUAGES C CXX)\nenable_testing()\nadd_subdirectory(framework-matrix)\n',
+      projectConfiguration(options, stagedInputs, helperDestination, generatorDestination),
       { flag: "wx", mode: 0o600 });
-    await writeCanonical(join(workspaceRoot, "source", "CMakePresets.json"), presetConfiguration(
-      options, preparedFrameworkRoots, cmakeHelper, unityRunnerGenerator,
-    ));
     return Object.freeze({
       serviceDirectory,
       workspaceRoot,
@@ -131,6 +145,23 @@ export async function stageFrameworkWorkspace(
       await rm(stageRoot, { recursive: true });
     }
     throw error;
+  }
+}
+
+async function copyOwnedDirectory(source: string, destination: string): Promise<void> {
+  await cp(source, destination, { recursive: true, dereference: false, errorOnExist: true, force: false });
+  await validateCopiedDirectory(destination);
+}
+
+async function validateCopiedDirectory(root: string): Promise<void> {
+  const info = await lstat(root);
+  if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("staged framework input is unsafe");
+  for (const name of await readdir(root)) {
+    const path = join(root, name);
+    const entry = await lstat(path);
+    if (entry.isSymbolicLink()) throw new Error("staged framework input contains a symbolic link");
+    if (entry.isDirectory()) await validateCopiedDirectory(path);
+    else if (!entry.isFile()) throw new Error("staged framework input contains an unsupported entry");
   }
 }
 
@@ -286,7 +317,9 @@ function workspaceConfiguration(options: FrameworkWorkspaceStageOptions, contrac
     projects: [{
       id: "framework-matrix",
       sourceDir: "source",
-      fallback: { configurations: ["Debug"], preferredGenerator: generator(options.family) },
+      // Use a verified Ninja profile for each family, including MSVC, avoiding
+      // MSBuild's legacy path restrictions. Native host path limits still apply.
+      fallback: { configurations: ["Debug"], preferredGenerator: "Ninja" },
       tests: { containers: [contract.primary, contract.malformed, contract.opaque].map((ctestName) => ({
         ctestName, framework: options.frameworkId,
       })) },
@@ -294,14 +327,16 @@ function workspaceConfiguration(options: FrameworkWorkspaceStageOptions, contrac
   };
 }
 
-function presetConfiguration(
+function projectConfiguration(
   options: FrameworkWorkspaceStageOptions,
   roots: Readonly<Record<"cpputest" | "unity" | "cmock", string>>,
   cmakeHelper: string,
   unityRunnerGenerator: string,
-): unknown {
-  const cacheVariables: Record<string, string> = {
-    CMAKE_BUILD_TYPE: "Debug",
+): string {
+  // Preset profiles have no verified toolchain binding and choose their own
+  // binaryDir. Keep only fixture inputs here so Service fallback profiles own
+  // compiler selection and service/data/build/<profile-id> output placement.
+  const variables: Record<string, string> = {
     UNIT_TEST_IDE_FRAMEWORK: options.frameworkId,
     UNIT_TEST_IDE_HELPER: cmakeHelper,
     ...(options.frameworkId === "cpputest"
@@ -311,31 +346,31 @@ function presetConfiguration(
           UNIT_TEST_IDE_UNITY_ROOT: roots.unity,
           UTIDE_UNITY_RUNNER_GENERATOR: unityRunnerGenerator,
         }),
-    ...compilerVariables(options.family),
   };
-  return {
-    version: 6,
-    configurePresets: [{
-      name: `${options.family}-debug`,
-      displayName: `${options.family} Debug`,
-      generator: generator(options.family),
-      binaryDir: "${sourceDir}/build/${presetName}",
-      cacheVariables,
-      ...(options.family === "msvc" ? { architecture: "x64" } : {}),
-    }],
-    buildPresets: [{ name: `${options.family}-debug`, configurePreset: `${options.family}-debug`, configuration: "Debug" }],
-  };
+  return [
+    "cmake_minimum_required(VERSION 3.28)",
+    ...(options.family === "msvc"
+      ? [
+          // Keep the controlled fixture build independent of MSVC's external
+          // PDB path limit. This affects only generated staging input; the
+          // compiler identity and the fixed Service-owned build profile stay
+          // unchanged.
+          "set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT Embedded)",
+        ]
+      : []),
+    "project(unit_test_ide_framework_workspace LANGUAGES C CXX)",
+    ...Object.entries(variables).map(([name, value]) => `set(${name} ${cmakeLiteral(value.split(sep).join("/"))})`),
+    "enable_testing()",
+    "add_subdirectory(framework-matrix)",
+    "",
+  ].join("\n");
 }
 
-function compilerVariables(family: FrameworkToolchainFamily): Record<string, string> {
-  if (family === "gcc") return { CMAKE_C_COMPILER: "gcc", CMAKE_CXX_COMPILER: "g++" };
-  if (family === "clang") return { CMAKE_C_COMPILER: "clang", CMAKE_CXX_COMPILER: "clang++" };
-  if (family === "clang-cl") return { CMAKE_C_COMPILER: "clang-cl", CMAKE_CXX_COMPILER: "clang-cl" };
-  return {};
-}
-
-function generator(family: FrameworkToolchainFamily): string {
-  return family === "msvc" ? "Visual Studio 17 2022" : "Ninja";
+function cmakeLiteral(value: string): string {
+  // Bracket arguments preserve spaces, semicolons, quotes and ${...} literally.
+  let equals = "";
+  while (value.includes(`]${equals}]`)) equals += "=";
+  return `[${equals}[${value}]${equals}]`;
 }
 
 interface MatrixNames { readonly primary: string; readonly malformed: string; readonly opaque: string }

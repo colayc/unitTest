@@ -46,18 +46,30 @@ func TestPlannerBuildsValidatedConfigureAndBuildSteps(t *testing.T) {
 		t.Fatalf("Plan() steps = %#v", plan.Steps)
 	}
 	wantConfigure := []string{
-		"-S", fixture.sourceDir,
-		"-B", fixture.profile.BinaryDir,
+		"-S", mustPlannerLaunchPath(t, fixture.sourceDir),
+		"-B", mustPlannerLaunchPath(t, fixture.profile.BinaryDir),
 		"-G", "Ninja",
 		"-DCMAKE_BUILD_TYPE=Debug",
-		"-DCMAKE_C_COMPILER=" + filepath.ToSlash(fixture.toolchain.CCompiler),
-		"-DCMAKE_CXX_COMPILER=" + filepath.ToSlash(fixture.toolchain.CXXCompiler),
+		"-DCMAKE_C_COMPILER=" + filepath.ToSlash(mustPlannerLaunchPath(t, fixture.toolchain.CCompiler)),
+		"-DCMAKE_CXX_COMPILER=" + filepath.ToSlash(mustPlannerLaunchPath(t, fixture.toolchain.CXXCompiler)),
+	}
+	if runtime.GOOS == "windows" {
+		ninja, err := verifiedNinjaExecutable(PlanInput{
+			Installation: fixture.installation, Toolchain: fixture.toolchain,
+			Profile: fixture.profile,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantConfigure = append(wantConfigure,
+			"-DCMAKE_MAKE_PROGRAM:FILEPATH="+filepath.ToSlash(ninja),
+		)
 	}
 	if !reflect.DeepEqual(plan.Steps[0].Process.Args, wantConfigure) {
 		t.Fatalf("configure args = %#v, want %#v", plan.Steps[0].Process.Args, wantConfigure)
 	}
 	wantBuild := []string{
-		"--build", fixture.profile.BinaryDir,
+		"--build", mustPlannerLaunchPath(t, fixture.profile.BinaryDir),
 		"--config", "Debug",
 		"--parallel", strconv.Itoa(8),
 		"--target", "unit-tests",
@@ -83,6 +95,15 @@ func TestPlannerBuildsValidatedConfigureAndBuildSteps(t *testing.T) {
 	}
 }
 
+func mustPlannerLaunchPath(t *testing.T, path string) string {
+	t.Helper()
+	short, err := cmakeLaunchPath(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return short
+}
+
 func TestPlannerFixtureProvidesVerifiedWindowsNinja(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows Ninja discovery")
@@ -97,9 +118,71 @@ func TestPlannerFixtureProvidesVerifiedWindowsNinja(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Plan() error = %v, want fixture-owned Ninja accepted", err)
 	}
-	want := filepath.Join(fixture.dataRoot, "program-files", "CMake", "bin", "ninja.exe")
+	want, err := verifiedNinjaExecutable(PlanInput{
+		Installation: fixture.installation, Toolchain: fixture.toolchain,
+		Profile: fixture.profile,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !slices.Contains(plan.Steps[0].Process.LaunchPlan, want) {
 		t.Fatalf("LaunchPlan = %#v, want fixture-owned Ninja %q", plan.Steps[0].Process.LaunchPlan, want)
+	}
+}
+
+func TestPlannerPassesTheRegisteredNinjaPathToCMake(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows Ninja launch path")
+	}
+	fixture := newPlannerFixture(t)
+	plan, err := Plan(PlanInput{
+		Installation: fixture.installation, WorkspaceRoot: fixture.root,
+		Project: fixture.project, Profile: fixture.profile,
+		Toolchain: fixture.toolchain, Jobs: 1, Configure: true,
+	})
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	want, err := verifiedNinjaExecutable(PlanInput{
+		Installation: fixture.installation, Toolchain: fixture.toolchain,
+		Profile: fixture.profile,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := plan.Steps[0].Process.Args
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-DCMAKE_MAKE_PROGRAM:FILEPATH=") {
+			if strings.TrimPrefix(arg, "-DCMAKE_MAKE_PROGRAM:FILEPATH=") != filepath.ToSlash(want) {
+				t.Fatalf("CMAKE_MAKE_PROGRAM = %q, want %q", arg, filepath.ToSlash(want))
+			}
+			return
+		}
+	}
+	t.Fatalf("configure args = %#v, want registered Ninja path", args)
+}
+
+func TestPlannerUsesOneShortSpellingForCMakeDirectories(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows CMake path spelling")
+	}
+	fixture := newPlannerFixture(t)
+	plan, err := Plan(PlanInput{
+		Installation: fixture.installation, WorkspaceRoot: fixture.root,
+		Project: fixture.project, Profile: fixture.profile,
+		Toolchain: fixture.toolchain, Jobs: 1, Configure: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	configure := plan.Steps[0].Process
+	if configure.Dir != configure.Args[1] {
+		t.Fatalf("configure paths disagree: dir=%q args=%#v", configure.Dir, configure.Args)
+	}
+	build := plan.Steps[1].Process
+	if configure.Args[3] != build.Dir || build.Dir != build.Args[1] || build.Dir != mustPlannerLaunchPath(t, fixture.profile.BinaryDir) ||
+		configure.Dir != mustPlannerLaunchPath(t, fixture.sourceDir) {
+		t.Fatalf("source/build working paths are not consistently canonicalized: configure=%#v build=%#v", configure, build)
 	}
 }
 
@@ -166,11 +249,18 @@ func TestNativeBuildLaunchPlanDeclaresClosedWindowsCoverageTree(t *testing.T) {
 		},
 		Targets: []cmake.Target{{Type: "EXECUTABLE", Artifacts: []string{`C:\fixture\build\coverage-tests.exe`}}},
 	}
+	longNinja := ninjaPath
+	shortNinja, err := cmakeLaunchExecutablePath(longNinja)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ninjaPath = shortNinja
 	want := []string{
 		filepath.Join(root, "bin", "cmake.exe"),
 		filepath.Join(root, "bin", "ctest.exe"),
 		`C:\fixture\tools\unity-runner-generator.exe`,
 		filepath.Join(toolRoot, "clang-cl.exe"),
+		longNinja,
 		ninjaPath,
 		filepath.Join(toolRoot, "lld-link.exe"),
 		filepath.Join(toolRoot, "llvm-lib.exe"),
@@ -1233,11 +1323,11 @@ func TestPlannerInjectsOnlyTypedCoveragePathsForPresetAndGeneratedProfiles(t *te
 				t.Fatal(err)
 			}
 			configure := plan.Steps[0].Process.Args
-			wantBinaryPair := []string{"-B", coverageBinaryDir}
+			wantBinaryPair := []string{"-B", mustPlannerLaunchPath(t, coverageBinaryDir)}
 			if countArgumentPair(configure, wantBinaryPair) != 1 {
 				t.Fatalf("coverage configure args = %#v, want exactly one %#v", configure, wantBinaryPair)
 			}
-			wantInclude := "-DCMAKE_PROJECT_TOP_LEVEL_INCLUDES:FILEPATH=" + filepath.ToSlash(include)
+			wantInclude := "-DCMAKE_PROJECT_TOP_LEVEL_INCLUDES:FILEPATH=" + filepath.ToSlash(mustPlannerLaunchPath(t, include))
 			if countArgument(configure, wantInclude) != 1 {
 				t.Fatalf("coverage configure args = %#v, want exactly one %q", configure, wantInclude)
 			}
@@ -1245,7 +1335,8 @@ func TestPlannerInjectsOnlyTypedCoveragePathsForPresetAndGeneratedProfiles(t *te
 				t.Fatalf("coverage configure reused base binary dir or exposed generic args: %#v", configure)
 			}
 			build := plan.Steps[1]
-			if build.Process.Args[1] != coverageBinaryDir || build.Process.Dir != coverageBinaryDir {
+			launchCoverageDir := mustPlannerLaunchPath(t, coverageBinaryDir)
+			if build.Process.Args[1] != launchCoverageDir || build.Process.Dir != launchCoverageDir {
 				t.Fatalf("coverage build step = %#v, want isolated binary dir %q", build, coverageBinaryDir)
 			}
 		})
@@ -1498,8 +1589,8 @@ func TestPlannerUsesMSVCEnvironmentWithNinjaFallback(t *testing.T) {
 	for _, expected := range []string{
 		"-G\nNinja",
 		"-DCMAKE_BUILD_TYPE=Debug",
-		"-DCMAKE_C_COMPILER=" + filepath.ToSlash(fixture.toolchain.CCompiler),
-		"-DCMAKE_CXX_COMPILER=" + filepath.ToSlash(fixture.toolchain.CXXCompiler),
+		"-DCMAKE_C_COMPILER=" + filepath.ToSlash(mustPlannerLaunchPath(t, fixture.toolchain.CCompiler)),
+		"-DCMAKE_CXX_COMPILER=" + filepath.ToSlash(mustPlannerLaunchPath(t, fixture.toolchain.CXXCompiler)),
 	} {
 		if !strings.Contains(arguments, expected) {
 			t.Fatalf("MSVC Ninja configure args lack %q: %#v", expected, plan.Steps[0].Process.Args)
@@ -1547,7 +1638,7 @@ func TestPlannerInjectsOnlyManifestBoundUnityRunnerForPresetAndGeneratedConfigur
 				t.Fatal(err)
 			}
 			args := plan.Steps[0].Process.Args
-			want := "-DUTIDE_UNITY_RUNNER_GENERATOR:FILEPATH=" + filepath.ToSlash(generatorPath)
+			want := "-DUTIDE_UNITY_RUNNER_GENERATOR:FILEPATH=" + filepath.ToSlash(mustPlannerLaunchPath(t, generatorPath))
 			count := 0
 			for _, argument := range args {
 				if strings.HasPrefix(argument, "-DUTIDE_") {
