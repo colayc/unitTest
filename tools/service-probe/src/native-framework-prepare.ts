@@ -125,6 +125,7 @@ async function prepareFrameworkRuntimeInternal(
             discovery = await discoverFrameworkCatalog({ fixture, repositoryRoot, frameworkId, toolchainFamily: family, timeoutMs: 120_000 });
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
+            const taskOutcome = message.match(/discovery finished with ([a-z-]+)/u)?.[1];
             const kind = message.includes("workspace inspection")
               ? "workspace"
               : message.includes("discovery start")
@@ -133,9 +134,11 @@ async function prepareFrameworkRuntimeInternal(
                   ? "task"
                   : message.includes("catalog read")
                     ? "catalog-read"
-                    : message.includes("artifact")
+                : message.includes("artifact")
                       ? "artifact"
-                      : "validation";
+                      : taskOutcome !== undefined
+                        ? `task-${taskOutcome}`
+                        : "validation";
             markStage(`discover-catalog:${family}:${frameworkId}:${kind}`);
             throw error;
           }
