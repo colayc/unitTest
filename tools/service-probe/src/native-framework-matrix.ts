@@ -271,7 +271,10 @@ export async function discoverFrameworkCatalog(options: FrameworkDiscoveryOption
     timeoutMs,
   );
   if (discoveryTask.outcome !== "succeeded") {
-    throw new Error(`${options.frameworkId} discovery finished with ${String(discoveryTask.outcome)}`);
+    const errorCode = typeof discoveryTask.errorCode === "string" && /^[a-z0-9_-]+$/u.test(discoveryTask.errorCode)
+      ? discoveryTask.errorCode
+      : "unknown";
+    throw new Error(`${options.frameworkId} discovery finished with ${String(discoveryTask.outcome)} [code=${errorCode}]`);
   }
   const catalog = await bounded(
     `${options.frameworkId} catalog read`,

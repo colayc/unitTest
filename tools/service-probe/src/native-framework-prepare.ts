@@ -126,8 +126,9 @@ async function prepareFrameworkRuntimeInternal(
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             const taskOutcome = message.match(/discovery finished with ([a-z-]+)/u)?.[1];
+            const taskCode = message.match(/\[code=([a-z0-9_-]+)\]/u)?.[1];
             const kind = taskOutcome !== undefined
-              ? `task-${taskOutcome}`
+              ? `task-${taskOutcome}${taskCode === undefined ? "" : `-${taskCode}`}`
               : message.includes("workspace inspection")
               ? "workspace"
               : message.includes("discovery start")
