@@ -229,8 +229,8 @@ function classifyDiscoveryValidationError(message: string): string {
   if (value.includes("task lookup timed out")) return "task-lookup-timeout";
   if (value.includes("task poll timed out")) return "task-poll-timeout";
   if (/task(?: [a-z-]+)? timed out/u.test(value)) return "task-timeout";
-  const waitKind = value.match(/discovery wait failed \[kind=([a-z-]+)\]/u)?.[1];
-  if (waitKind !== undefined) return `wait-${waitKind}`;
+  const wait = value.match(/discovery wait failed \[kind=([a-z-]+); process=([a-z-]+)\]/u);
+  if (wait !== null) return `wait-${wait[1]}-${wait[2]}`;
   const phase = value.match(/\[phase=([a-z-]+)\]/u)?.[1];
   if (phase !== undefined) return `phase-${phase}`;
   return "validation";

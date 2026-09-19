@@ -463,6 +463,13 @@ export class TaskServiceFixture {
     return this.#instance.client;
   }
 
+  get processState(): "running" | "exited" | "stopped" {
+    if (this.#disposed || this.#disposeRequested) return "stopped";
+    const child = this.#instance?.child;
+    if (!child) return "stopped";
+    return child.exitCode === null && child.signalCode === null ? "running" : "exited";
+  }
+
   pauseNextReconnect(): ReconnectGate {
     this.#assertAvailable();
     if (!this.#instance) throw new Error("task service fixture is stopped");

@@ -51,7 +51,8 @@ const EVIDENCE_KEYS = [
   "executableArtifactSha256", "sourceArtifactSha256", "sourceLocationDigest",
 ] as const;
 
-type FrameworkFixture = Pick<TaskServiceFixture, "client" | "kill" | "restart">;
+type FrameworkFixture = Pick<TaskServiceFixture, "client" | "kill" | "restart"> &
+  Partial<Pick<TaskServiceFixture, "processState">>;
 
 export interface F1FrameworkFixtureIdentity {
   readonly metadataSha256: string;
@@ -284,7 +285,8 @@ export async function discoverFrameworkCatalog(options: FrameworkDiscoveryOption
       const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
       const kind = message.includes("timed out") ? "timeout" :
         message.includes("socket") || message.includes("connection") || message.includes("closed") ? "transport" : "unknown";
-      throw new Error(`${options.frameworkId} discovery wait failed [kind=${kind}]`);
+      const processState = options.fixture.processState ?? "unknown";
+      throw new Error(`${options.frameworkId} discovery wait failed [kind=${kind}; process=${processState}]`);
     }
     const discoveryTask = discoveryObservation.task;
   if (discoveryTask.outcome !== "succeeded") {
