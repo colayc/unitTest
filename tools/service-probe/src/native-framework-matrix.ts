@@ -833,7 +833,15 @@ async function waitForTerminalTask(
       }
       return { task, events };
     }
-    await bounded(`${label} task poll`, delay(Math.min(10, remaining)), remaining);
+    try {
+      await bounded(`${label} task poll`, delay(Math.min(10, remaining)), remaining);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("timed out")) {
+        throw new Error(`${label} task poll timed out [status=${lastStatus}]`);
+      }
+      throw error;
+    }
   }
 }
 

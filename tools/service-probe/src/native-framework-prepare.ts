@@ -226,8 +226,9 @@ function classifyDiscoveryValidationError(message: string): string {
   if (value.includes("catalog")) return "catalog";
   if (value.includes("workspace")) return "workspace-validation";
   if (value.includes("toolchain") || value.includes("compiler")) return "toolchain";
-  if (value.includes("task timed out")) return "task-timeout";
   if (value.includes("task lookup timed out")) return "task-lookup-timeout";
+  if (value.includes("task poll timed out")) return "task-poll-timeout";
+  if (/task(?: [a-z-]+)? timed out/u.test(value)) return "task-timeout";
   const phase = value.match(/\[phase=([a-z-]+)\]/u)?.[1];
   if (phase !== undefined) return `phase-${phase}`;
   return "validation";
