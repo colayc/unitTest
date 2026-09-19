@@ -360,7 +360,7 @@ function projectConfiguration(
           // explicit flags cover clang-cl as well as MSVC and affect only
           // generated staging input; compiler identity and the fixed
           // Service-owned build profile stay unchanged.
-          "set(CMAKE_OBJECT_PATH_MAX 64 CACHE STRING \"\" FORCE)",
+          "set(CMAKE_OBJECT_PATH_MAX 32 CACHE STRING \"\" FORCE)",
           "set(CMAKE_TRY_COMPILE_CONFIGURATION Release CACHE STRING \"\" FORCE)",
           "set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT \"\" CACHE STRING \"\" FORCE)",
           "set(CMAKE_EXE_LINKER_FLAGS_DEBUG \"${CMAKE_EXE_LINKER_FLAGS_DEBUG} /DEBUG:NONE\" CACHE STRING \"\" FORCE)",
