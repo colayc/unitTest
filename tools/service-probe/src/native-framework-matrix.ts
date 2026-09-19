@@ -330,7 +330,13 @@ function classifyDiscoveryWaitFailure(message: string, code: string | undefined)
   if (message.includes("timed out")) return "timeout";
   if (message.includes("event sequence gap")) return "event-gap";
   if (message.includes("invalid json")) return "invalid-json";
-  if (message.includes("invalid protocol message")) return "invalid-protocol";
+  if (message.includes("invalid protocol message")) {
+    const eventMatch = message.match(/\[event=([a-z0-9._-]+);keywords=/u);
+    if (eventMatch?.[1] !== undefined && eventMatch[1] !== "unknown") {
+      return `invalid-protocol-${eventMatch[1]}`;
+    }
+    return "invalid-protocol";
+  }
   if (message.includes("unsupported protocol version")) return "unsupported-protocol";
   if (message.includes("protocol version")) return "protocol-version";
   if (message.includes("response method")) return "response-method";

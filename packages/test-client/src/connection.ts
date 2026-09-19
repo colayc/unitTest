@@ -187,7 +187,17 @@ export class Connection {
     }
     const validator = validators[version];
     if (!validator(value)) {
-      this.#closeWithError(new Error(`service returned invalid protocol message: ${ajv.errorsText(validator.errors)}`));
+      const eventName = isSafeProtocolToken((value as { event?: unknown }).event)
+        ? (value as { event: string }).event
+        : "unknown";
+      const keywords = [...new Set((validator.errors ?? [])
+        .map((error) => error.keyword)
+        .filter(isSafeProtocolToken))]
+        .sort()
+        .join(",") || "unknown";
+      this.#closeWithError(new Error(
+        `service returned invalid protocol message [event=${eventName};keywords=${keywords}]: ${ajv.errorsText(validator.errors)}`,
+      ));
       return false;
     }
     const message = value as IncomingEnvelope;
@@ -283,4 +293,8 @@ function isProtocolVersion(value: unknown): value is ProtocolVersion {
 
 function protocolRank(version: ProtocolVersion): number {
   return { "1.0": 0, "1.1": 1, "1.2": 2, "1.3": 3, "1.4": 4 }[version];
+}
+
+function isSafeProtocolToken(value: unknown): value is string {
+  return typeof value === "string" && /^[a-z0-9._-]+$/u.test(value);
 }
