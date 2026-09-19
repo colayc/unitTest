@@ -903,7 +903,7 @@ async function readTaskArtifact(
   );
   if (page.nextCursor !== undefined) throw new Error(`${kind} artifact listing was unexpectedly paginated`);
   const matches = page.items.filter((candidate) => candidate.kind === kind);
-  if (matches.length !== 1) throw new Error(`task must expose exactly one ${kind} artifact`);
+  if (matches.length !== 1) throw new Error(`task must expose exactly one ${kind} artifact [count=${matches.length}]`);
   const metadata = matches[0]!;
   if (
     metadata.taskId !== taskId || !DIGEST.test(metadata.sha256) ||
