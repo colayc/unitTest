@@ -53,6 +53,6 @@ endif()
 add_executable(phase9_matrix_opaque opaque.c)
 add_test(
   NAME "${UNIT_TEST_IDE_FRAMEWORK}.matrix.opaque"
-  COMMAND phase9_matrix_opaque
+  COMMAND "$<TARGET_FILE:phase9_matrix_opaque>"
 )
 set_tests_properties("${UNIT_TEST_IDE_FRAMEWORK}.matrix.opaque" PROPERTIES TIMEOUT 2)
