@@ -288,34 +288,50 @@ export async function discoverFrameworkCatalog(options: FrameworkDiscoveryOption
   try {
     phase = "discovery-start";
     let discovery: Awaited<ReturnType<ProtocolClient["discoverTests"]>>;
-    try {
-      discovery = await bounded(
-        `${options.frameworkId} discovery start`,
-        client.discoverTests({
-          idempotencyKey: idempotencyKey(),
-          projectId: selected.projectId,
-          profileId: selected.profile.buildProfileId,
-        }),
-        timeoutMs,
-      );
-    } catch (error) {
-      const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
-      const code = error !== null && typeof error === "object" && "code" in error &&
-        typeof error.code === "string" && /^[a-z0-9_.-]+$/iu.test(error.code) ? error.code.toLowerCase() : undefined;
-      const kind = code !== undefined
-        ? `error-${code}`
-        : message.includes("toolchain")
-          ? "toolchain"
-          : message.includes("generator")
-            ? "generator"
-            : message.includes("cmake") || message.includes("configure")
-              ? "cmake"
-              : message.includes("profile")
-                ? "profile"
-                : message.includes("build") || message.includes("compile")
-                  ? "build"
-                  : "unknown";
-      throw new Error(`${options.frameworkId} discovery start failed [kind=${kind}]`);
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        discovery = await bounded(
+          `${options.frameworkId} discovery start`,
+          client.discoverTests({
+            idempotencyKey: idempotencyKey(),
+            projectId: selected.projectId,
+            profileId: selected.profile.buildProfileId,
+          }),
+          timeoutMs,
+        );
+        break;
+      } catch (error) {
+        const code = errorCode(error).toUpperCase();
+        if (code === "WORKSPACE_CHANGED" && attempt === 0) {
+          await delay(100);
+          try {
+            workspace = await bounded(
+              `${options.frameworkId} workspace refresh`,
+              client.inspectWorkspace(),
+              timeoutMs,
+            );
+            selected = selectWorkspace(workspace, options.toolchainFamily);
+            continue;
+          } catch {
+            // Fall through to the stable start-error classification below.
+          }
+        }
+        const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+        const kind = code !== "" && /^[A-Z0-9_.-]+$/u.test(code)
+          ? `error-${code.toLowerCase()}`
+          : message.includes("toolchain")
+            ? "toolchain"
+            : message.includes("generator")
+              ? "generator"
+              : message.includes("cmake") || message.includes("configure")
+                ? "cmake"
+                : message.includes("profile")
+                  ? "profile"
+                  : message.includes("build") || message.includes("compile")
+                    ? "build"
+                    : "unknown";
+        throw new Error(`${options.frameworkId} discovery start failed [kind=${kind}]`);
+      }
     }
     phase = "task-wait";
     let discoveryObservation: Readonly<{ task: ProtocolTaskSnapshot; events: readonly ProtocolTaskEvent[] }>;

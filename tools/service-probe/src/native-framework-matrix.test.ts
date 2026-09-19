@@ -1155,6 +1155,27 @@ test("discovery-only path returns verified catalog evidence without executing sc
   assert.equal(fixture.client.runRequests.length, 0);
 });
 
+test("discovery refreshes the workspace once after a stale generation start error", async () => {
+  const fixture = new FakeFixture();
+  const original = fixture.client.discoverTests.bind(fixture.client);
+  let stale = true;
+  let attempts = 0;
+  fixture.client.discoverTests = async (value) => {
+    attempts += 1;
+    if (stale) {
+      stale = false;
+      const error = new Error("workspace generation is stale");
+      Object.assign(error, { code: "WORKSPACE_CHANGED" });
+      throw error;
+    }
+    return original(value);
+  };
+  await discoverFrameworkCatalog({ fixture: fixture as never, frameworkId: "cpputest", toolchainFamily: "clang", timeoutMs: 100 });
+  assert.equal(attempts, 2);
+  assert.equal(fixture.client.calls.filter(({ method }) => method === "discoverTests").length, 1);
+  assert.equal(fixture.client.calls.filter(({ method }) => method === "inspectWorkspace").length, 2);
+});
+
 for (const mutation of ["partial", "framework", "container", "family", "artifact", "task"] as const) {
   test(`both discovery consumers reject ${mutation} substitution`, async () => {
     for (const producer of [false, true]) {
