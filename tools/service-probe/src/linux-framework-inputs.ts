@@ -56,9 +56,15 @@ export async function prepareLinuxFrameworkInputs(options: LinuxFrameworkInputBo
   markStage("framework-inputs:validate-manifest");
   const manifest = validateLinuxFrameworkInputManifest(options.manifest); if (!DIGEST.test(options.manifestSha256)) throw new Error("Linux framework manifest digest is required"); const cacheRoot = absoluteDirectory(options.cacheRoot, "cache root"); const sourceRoot = absoluteDirectory(options.sourceRoot, "source root"); const repositoryRoot = absoluteDirectory(options.repositoryRoot ?? resolve(import.meta.dirname, "../../.."), "repository root"); const roots = new Map<FrameworkDependencyID, string>();
   for (const framework of manifest.frameworks) { markStage(`framework-inputs:archive:${framework.id}`); const archive = join(cacheRoot, `${framework.source.sha256}-${framework.source.filename}`); if (await digestFile(archive) !== framework.source.sha256) throw new Error(`Linux framework input archive digest mismatch: ${framework.id}`); const source = childDirectory(sourceRoot, framework.sourceDirectory, `${framework.id} source directory`); await requiredFrameworkFile(source, marker(framework.id), framework.id); const license = await regularFileWithin(source, join(source, framework.license.path), `${framework.id} license`); if (license.digest !== framework.license.sha256) throw new Error(`Linux framework license digest mismatch: ${framework.id}`); roots.set(framework.id, source); }
-  markStage("framework-inputs:helper");
-  const helper = await regularFileWithin(repositoryRoot, options.helperPath, "UnitTestIDE helper"); const generator = await regularFileWithin(repositoryRoot, options.generatorPath, "Unity runner generator"); const expectedHelperPath = await realpath(resolve(repositoryRoot, manifest.fixtureTools.cmakeHelper.path));
-  if (helper.path !== expectedHelperPath || helper.digest !== manifest.fixtureTools.cmakeHelper.sha256) throw new Error("Linux framework CMake helper digest mismatch"); markStage("framework-inputs:generator"); await verifyUnityRunnerGenerator(generator.path, manifest.fixtureTools.unityRunnerGenerator);
+  markStage("framework-inputs:helper-file");
+  const helper = await regularFileWithin(repositoryRoot, options.helperPath, "UnitTestIDE helper");
+  markStage("framework-inputs:generator-file");
+  const generator = await regularFileWithin(repositoryRoot, options.generatorPath, "Unity runner generator");
+  const expectedHelperPath = await realpath(resolve(repositoryRoot, manifest.fixtureTools.cmakeHelper.path));
+  markStage("framework-inputs:helper-identity");
+  if (helper.path !== expectedHelperPath || helper.digest !== manifest.fixtureTools.cmakeHelper.sha256) throw new Error("Linux framework CMake helper digest mismatch");
+  markStage("framework-inputs:generator-identity");
+  await verifyUnityRunnerGenerator(generator.path, manifest.fixtureTools.unityRunnerGenerator);
   markStage("framework-inputs:resolved-manifest");
   const resolved = await readResolvedFrameworkTrees(sourceRoot, manifest, options.manifestSha256); markStage("framework-inputs:tree-digest"); const trees = await verifyResolvedFrameworkTrees(sourceRoot, manifest, resolved);
   const identityDigest = createHash("sha256").update(JSON.stringify({ schemaVersion: manifest.schemaVersion, platforms: manifest.platforms, fixtureTools: manifest.fixtureTools, frameworks: manifest.frameworks.map((framework) => ({ ...framework, treeSha256: trees.find((tree) => tree.id === framework.id)?.treeSha256 })), helperSha256: helper.digest, generatorSha256: generator.digest })).digest("hex");
