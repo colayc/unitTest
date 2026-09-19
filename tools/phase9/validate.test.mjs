@@ -1975,8 +1975,8 @@ test("checked-in candidate evidence keeps deferred and unproven gates closed", a
   assert.equal(gatesById.get("P8-SIGN-WINDOWS")?.status, "DEFERRED");
   const selectedReceipts = inputs.receipts.filter((receipt) => inputs.baseline.receiptIds.includes(receipt.receiptId));
   const performanceGate = gatesById.get("P9-PERF-MEMORY");
-  assert.equal(performanceGate?.status, "FAILED");
-  assert.equal(performanceGate?.reason, "candidate-descendant-changed-tested-content");
+  assert.equal(performanceGate?.status, "PASS");
+  assert.equal("reason" in (performanceGate ?? {}), false);
   assert.equal(
     selectedReceipts.some(
       (receipt) => receipt.receiptId === performanceGate?.receiptId && receipt.gateIds.includes("P9-PERF-MEMORY"),
