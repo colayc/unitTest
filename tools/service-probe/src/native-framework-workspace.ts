@@ -371,6 +371,16 @@ function projectConfiguration(
         ]
       : []),
     "project(unit_test_ide_framework_workspace LANGUAGES C CXX)",
+    ...(options.frameworkId === "cpputest"
+      ? [
+          // CppUTest 4.0 injects a forced MemoryLeakDetector header and
+          // warning flags globally. The matrix validates framework discovery,
+          // not the legacy allocator shim; keep this fixture independent of
+          // CI include-path differences while preserving product diagnostics.
+          "set(CPPUTEST_FLAGS OFF CACHE BOOL \"\" FORCE)",
+          "set(MEMORY_LEAK_DETECTION OFF CACHE BOOL \"\" FORCE)",
+        ]
+      : []),
     ...Object.entries(variables).map(([name, value]) => `set(${name} ${cmakeLiteral(value.split(sep).join("/"))})`),
     "enable_testing()",
     "add_subdirectory(framework-matrix)",
