@@ -80,7 +80,9 @@ async function prepareFrameworkRuntimeInternal(
   const provenance = await readCMockGeneration(join(repositoryRoot, "testdata/frameworks/unity/mocks/cmock-generation.json"), { root: repositoryRoot, manifest: locked, manifestSha256 });
   if (provenance.cMockProvenanceSha256 !== identity.cMockProvenanceSha256) throw new Error("CMock provenance changed during preparation");
   markStage("verify-locked-inputs");
-  const preparedFrameworkRoots = await (dependencies.verifyInputs ?? verifyInputs)(options, locked, identity);
+  const preparedFrameworkRoots = dependencies.verifyInputs !== undefined
+    ? await dependencies.verifyInputs(options, locked, identity)
+    : await verifyInputs(options, locked, identity, markStage);
   const platformName = options.platform === "win32" ? "windows" : "linux";
   const ownershipId = randomUUID();
   const workRoot = join(repositoryRoot, ".native-e2e/framework-work/.staging", ownershipId);
@@ -168,12 +170,15 @@ async function prepareFrameworkRuntimeInternal(
   }
 }
 
-async function verifyInputs(options: FrameworkRuntimePrepareOptions, manifest: LinuxFrameworkInputManifest, identity: F1FrameworkIdentity): Promise<PreparedRoots> {
+async function verifyInputs(options: FrameworkRuntimePrepareOptions, manifest: LinuxFrameworkInputManifest, identity: F1FrameworkIdentity, markStage: (stage: string) => void): Promise<PreparedRoots> {
   const root = resolve(options.repositoryRoot);
+  markStage("verify-cmake-bundle");
   await verifyPreparedCMakeBundle(join(root, ".bundled-tools/cmake"), options.platform, "x64", { manifestPath: join(root, "tools/cmake-bundle/manifest.json") });
+  markStage("verify-service-binary");
   const binary = await lstat(join(root, "build", options.platform === "win32" ? "unit-test-service.exe" : "unit-test-service"));
   if (!binary.isFile() || binary.isSymbolicLink()) throw new Error("framework Service binary is unsafe");
   // Despite its historical name this validator accepts both locked manifest platforms.
+  markStage("prepare-locked-framework-inputs");
   const boundary = await prepareLinuxFrameworkInputs({
     manifest, manifestSha256: identity.manifestSha256, repositoryRoot: root,
     cacheRoot: join(root, ".superpowers/cache/framework-bundle"),
@@ -181,6 +186,7 @@ async function verifyInputs(options: FrameworkRuntimePrepareOptions, manifest: L
     helperPath: join(root, "sdk/cmake/UnitTestIDE.cmake"),
     generatorPath: join(root, "build", options.platform === "win32" ? "unity-runner-generator.exe" : "unity-runner-generator"),
   });
+  markStage("return-prepared-inputs");
   return { cpputest: boundary.environment.UNIT_TEST_IDE_TEST_CPPUTEST_ROOT!, unity: boundary.environment.UNIT_TEST_IDE_TEST_UNITY_ROOT!, cmock: boundary.environment.UNIT_TEST_IDE_TEST_CMOCK_ROOT! };
 }
 
