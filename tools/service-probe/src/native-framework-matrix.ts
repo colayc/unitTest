@@ -802,7 +802,16 @@ async function waitForTerminalTask(
   for (;;) {
     const remaining = deadline - Date.now();
     if (remaining <= 0) throw new Error(`${label} task timed out after ${timeoutMs}ms [status=${lastStatus}]`);
-    const task = await bounded(`${label} task lookup`, client().getTask(taskId), remaining);
+    let task: ProtocolTaskSnapshot;
+    try {
+      task = await bounded(`${label} task lookup`, client().getTask(taskId), remaining);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("timed out")) {
+        throw new Error(`${label} task lookup timed out [status=${lastStatus}]`);
+      }
+      throw error;
+    }
     lastStatus = task.status;
     if (task.status === "finished") {
       if (subscription !== undefined) {
