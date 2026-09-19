@@ -797,11 +797,13 @@ async function waitForTerminalTask(
 ): Promise<Readonly<{ task: ProtocolTaskSnapshot; events: readonly ProtocolTaskEvent[] }>> {
   const deadline = Date.now() + timeoutMs;
   const events: ProtocolTaskEvent[] = [];
+  let lastStatus = "unknown";
   let pendingEvent = subscription?.next();
   for (;;) {
     const remaining = deadline - Date.now();
-    if (remaining <= 0) throw new Error(`${label} task timed out after ${timeoutMs}ms`);
+    if (remaining <= 0) throw new Error(`${label} task timed out after ${timeoutMs}ms [status=${lastStatus}]`);
     const task = await bounded(`${label} task lookup`, client().getTask(taskId), remaining);
+    lastStatus = task.status;
     if (task.status === "finished") {
       if (subscription !== undefined) {
         while (subscription.lastSequence < task.lastSequence && pendingEvent !== undefined) {
