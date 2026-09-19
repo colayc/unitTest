@@ -148,7 +148,7 @@ async function prepareFrameworkRuntimeInternal(
                     ? "catalog-read"
                 : message.includes("artifact")
                       ? "artifact"
-                      : "validation";
+                      : classifyDiscoveryValidationError(message);
             markStage(`discover-catalog:${family}:${frameworkId}:${kind}`);
             throw error;
           }
@@ -215,6 +215,16 @@ async function prepareFrameworkRuntimeInternal(
     }
     throw error;
   }
+}
+
+function classifyDiscoveryValidationError(message: string): string {
+  const value = message.toLowerCase();
+  if (value.includes("source uri")) return "source-uri";
+  if (value.includes("artifact")) return "artifact";
+  if (value.includes("catalog")) return "catalog";
+  if (value.includes("workspace")) return "workspace-validation";
+  if (value.includes("toolchain") || value.includes("compiler")) return "toolchain";
+  return "validation";
 }
 
 async function verifyInputs(options: FrameworkRuntimePrepareOptions, manifest: LinuxFrameworkInputManifest, identity: F1FrameworkIdentity, markStage: (stage: string) => void): Promise<PreparedRoots> {
