@@ -192,6 +192,7 @@ export class Connection {
         : "unknown";
       const keywords = [...new Set((validator.errors ?? [])
         .map((error) => error.keyword)
+        .map((keyword) => keyword.toLowerCase())
         .filter(isSafeProtocolToken))]
         .sort()
         .join(",") || "unknown";
