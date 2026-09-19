@@ -149,7 +149,7 @@ async function prepareFrameworkRuntimeInternal(
                   : message.includes("catalog read")
                     ? "catalog-read"
                 : message.includes("artifact")
-                      ? "artifact"
+                      ? classifyDiscoveryArtifactError(message)
                       : classifyDiscoveryValidationError(message);
             markStage(`discover-catalog:${family}:${frameworkId}:${kind}`);
             throw error;
@@ -227,6 +227,16 @@ function classifyDiscoveryValidationError(message: string): string {
   if (value.includes("workspace")) return "workspace-validation";
   if (value.includes("toolchain") || value.includes("compiler")) return "toolchain";
   return "validation";
+}
+
+function classifyDiscoveryArtifactError(message: string): string {
+  const value = message.toLowerCase();
+  if (value.includes("unexpectedly paginated")) return "artifact-pagination";
+  if (value.includes("exactly one")) return "artifact-count";
+  if (value.includes("metadata is invalid")) return "artifact-metadata";
+  if (value.includes("artifact bytes")) return "artifact-bytes";
+  if (value.includes("artifact read")) return "artifact-read";
+  return "artifact";
 }
 
 async function verifyInputs(options: FrameworkRuntimePrepareOptions, manifest: LinuxFrameworkInputManifest, identity: F1FrameworkIdentity, markStage: (stage: string) => void): Promise<PreparedRoots> {
