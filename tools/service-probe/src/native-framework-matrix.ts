@@ -285,8 +285,7 @@ export async function discoverFrameworkCatalog(options: FrameworkDiscoveryOption
       const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
       const code = error !== null && typeof error === "object" && "code" in error &&
         typeof error.code === "string" && /^[a-z0-9_-]+$/u.test(error.code) ? error.code : undefined;
-      const kind = code !== undefined ? `error-${code}` : message.includes("timed out") ? "timeout" :
-        message.includes("socket") || message.includes("connection") || message.includes("closed") ? "transport" : "unknown";
+      const kind = classifyDiscoveryWaitFailure(message, code);
       const processState = options.fixture.processState ?? "unknown";
       throw new Error(`${options.frameworkId} discovery wait failed [kind=${kind}; process=${processState}]`);
     }
@@ -324,6 +323,21 @@ export async function discoverFrameworkCatalog(options: FrameworkDiscoveryOption
   } finally {
     eventSubscription?.close();
   }
+}
+
+function classifyDiscoveryWaitFailure(message: string, code: string | undefined): string {
+  if (code !== undefined) return `error-${code}`;
+  if (message.includes("timed out")) return "timeout";
+  if (message.includes("event sequence gap")) return "event-gap";
+  if (message.includes("invalid json")) return "invalid-json";
+  if (message.includes("invalid protocol message")) return "invalid-protocol";
+  if (message.includes("unsupported protocol version")) return "unsupported-protocol";
+  if (message.includes("protocol version")) return "protocol-version";
+  if (message.includes("response method")) return "response-method";
+  if (message.includes("service connection ended")) return "connection-ended";
+  if (message.includes("service connection closed")) return "connection-closed";
+  if (message.includes("socket") || message.includes("connection") || message.includes("closed")) return "transport";
+  return "unknown";
 }
 
 async function subscribeDiscoveryEvents(client: ProtocolClient): Promise<EventSubscription | undefined> {
