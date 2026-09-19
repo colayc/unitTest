@@ -61,8 +61,10 @@ export async function prepareLinuxFrameworkInputs(options: LinuxFrameworkInputBo
   markStage("framework-inputs:generator-file");
   const generator = await regularFileWithin(repositoryRoot, options.generatorPath, "Unity runner generator");
   const expectedHelperPath = await realpath(resolve(repositoryRoot, manifest.fixtureTools.cmakeHelper.path));
-  markStage("framework-inputs:helper-identity");
-  if (helper.path !== expectedHelperPath || helper.digest !== manifest.fixtureTools.cmakeHelper.sha256) throw new Error("Linux framework CMake helper digest mismatch");
+  markStage("framework-inputs:helper-path");
+  if (helper.path !== expectedHelperPath) throw new Error("Linux framework CMake helper path mismatch");
+  markStage("framework-inputs:helper-digest");
+  if (helper.digest !== manifest.fixtureTools.cmakeHelper.sha256) throw new Error(`Linux framework CMake helper digest mismatch: observed ${helper.digest}, expected ${manifest.fixtureTools.cmakeHelper.sha256}`);
   markStage("framework-inputs:generator-identity");
   await verifyUnityRunnerGenerator(generator.path, manifest.fixtureTools.unityRunnerGenerator);
   markStage("framework-inputs:resolved-manifest");
