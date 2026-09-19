@@ -168,7 +168,6 @@ async function prepareFrameworkRuntimeInternal(
     });
     return { manifest, ownershipId, ownedStagingRoots: Object.freeze([...ownedStagingRoots]) };
   } catch (error) {
-    markStage("cleanup-staging");
     for (const stageRoot of [...ownedStagingRoots].reverse()) {
       await validateOwnedFrameworkStage(stageRoot, ownershipId);
       await rm(stageRoot, { recursive: true });
