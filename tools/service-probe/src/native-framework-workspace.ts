@@ -320,7 +320,9 @@ function workspaceConfiguration(options: FrameworkWorkspaceStageOptions, contrac
       // Use a verified Ninja profile for each family, including MSVC, avoiding
       // MSBuild's legacy path restrictions. Native host path limits still apply.
       fallback: { configurations: ["Debug"], preferredGenerator: "Ninja" },
-      tests: { containers: [contract.primary, contract.malformed, contract.opaque].map((ctestName) => ({
+      // Leave the opaque CTest undeclared so the Service exercises its
+      // fail-closed opaque fallback instead of probing it as the framework.
+      tests: { containers: [contract.primary, contract.malformed].map((ctestName) => ({
         ctestName, framework: options.frameworkId,
       })) },
     }],

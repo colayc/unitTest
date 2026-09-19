@@ -182,7 +182,6 @@ test("staging creates one closed owned framework workspace with canonical config
       tests: { containers: [
         { ctestName: "cpputest.framework", framework: "cpputest" },
         { ctestName: "cpputest.matrix.malformed", framework: "cpputest" },
-        { ctestName: "cpputest.matrix.opaque", framework: "cpputest" },
       ] },
     }], version: 2,
   });
