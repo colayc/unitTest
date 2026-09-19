@@ -126,7 +126,9 @@ async function prepareFrameworkRuntimeInternal(
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             const taskOutcome = message.match(/discovery finished with ([a-z-]+)/u)?.[1];
-            const kind = message.includes("workspace inspection")
+            const kind = taskOutcome !== undefined
+              ? `task-${taskOutcome}`
+              : message.includes("workspace inspection")
               ? "workspace"
               : message.includes("discovery start")
                 ? "start"
@@ -136,9 +138,7 @@ async function prepareFrameworkRuntimeInternal(
                     ? "catalog-read"
                 : message.includes("artifact")
                       ? "artifact"
-                      : taskOutcome !== undefined
-                        ? `task-${taskOutcome}`
-                        : "validation";
+                      : "validation";
             markStage(`discover-catalog:${family}:${frameworkId}:${kind}`);
             throw error;
           }
