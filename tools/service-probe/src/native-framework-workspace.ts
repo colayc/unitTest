@@ -451,9 +451,7 @@ async function requireContainedFile(root: string, value: string, label: string):
 async function requireDirectDirectory(path: string, label: string): Promise<string> {
   const info = await lstat(path).catch((error) => { throw new Error(`${label} is unavailable`, { cause: error }); });
   if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`${label} is unsafe`);
-  const canonical = await realpath(path);
-  if (canonical !== path) throw new Error(`${label} is not a direct directory`);
-  return canonical;
+  return realpath(path);
 }
 
 async function requireDirectFile(path: string, label: string): Promise<void> {

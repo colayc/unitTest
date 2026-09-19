@@ -1,6 +1,6 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { mkdir, readFile, rm } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, posix, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { readFrameworkManifest } from "./manifest.mjs";
@@ -155,16 +155,25 @@ const unityManifestDirectory = join(".unit-test-ide", "3599003af019a34669698d4cd
 const runnerProtocol = "utide.runner.v1";
 const runnerStatuses = new Set(["passed", "failed", "skipped"]);
 
+function pathApiFor(...values) {
+  // The verifier accepts Windows-style fixture paths even when its contract
+  // tests run on Linux. Use the matching path grammar for containment checks,
+  // while leaving the returned path in the host platform's native form.
+  if (values.some((value) => typeof value === "string" && /^(?:[A-Za-z]:[\\/]|\\\\)/u.test(value))) return win32;
+  return process.platform === "win32" ? win32 : posix;
+}
+
 function containedPath(root, path) {
-  const resolvedRoot = resolve(root);
-  const resolvedPath = resolve(path);
-  const pathRelative = relative(resolvedRoot, resolvedPath);
-  return pathRelative === "" || (!pathRelative.startsWith(`..${sep}`) && pathRelative !== ".." && !isAbsolute(pathRelative));
+  const pathApi = pathApiFor(root, path);
+  const resolvedRoot = pathApi.resolve(root);
+  const resolvedPath = pathApi.resolve(root, path);
+  const pathRelative = pathApi.relative(resolvedRoot, resolvedPath);
+  return pathRelative === "" || (!pathRelative.startsWith(`..${pathApi.sep}`) && pathRelative !== ".." && !pathApi.isAbsolute(pathRelative));
 }
 
 export function controlledUnityResultPath(root, name) {
   const output = resolve(root, name);
-  if (!containedPath(root, output)) throw new FixtureError("Unity runner result file escapes its controlled directory");
+  if (!containedPath(root, name)) throw new FixtureError("Unity runner result file escapes its controlled directory");
   return output;
 }
 
