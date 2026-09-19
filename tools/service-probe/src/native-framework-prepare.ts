@@ -69,7 +69,14 @@ async function prepareFrameworkRuntimeInternal(
   // @ts-expect-error Canonical provenance reader is validated by its direct Node suite.
   const { readCMockGeneration } = await import("../../framework-bundle/cmock-provenance.mjs");
   markStage("load-f1-identity");
-  const identity: F1FrameworkIdentity = await loadF1FrameworkIdentity(repositoryRoot);
+  let identity: F1FrameworkIdentity;
+  try {
+    identity = await loadF1FrameworkIdentity(repositoryRoot);
+  } catch (error) {
+    const code = error !== null && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : "unknown";
+    markStage(`load-f1-identity:${code}`);
+    throw error;
+  }
   markStage("load-matrix-contracts");
   await loadMatrixContract("cpputest", repositoryRoot);
   await loadMatrixContract("unity", repositoryRoot);
