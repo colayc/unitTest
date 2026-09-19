@@ -434,7 +434,10 @@ function classifyTaskErrorMessage(message: string): string {
   const value = message.toLowerCase();
   if (value.includes("program database") || value.includes("pdb")) return "pdb-path";
   const compilerCode = value.match(/\b(?:c|d|l)\d{4}\b/u)?.[0];
-  if (compilerCode !== undefined) return `compiler-${compilerCode}`;
+  if (compilerCode !== undefined) {
+    const missing = value.match(/cannot open (?:include file|source file):\s*[\"']?([a-z0-9_.-]+)/u)?.[1];
+    return `compiler-${compilerCode}${missing === undefined ? "" : `-${missing}`}`;
+  }
   if (/\berror\s+c\d{4}\b/iu.test(message) || value.includes("clang-cl")) return "compiler";
   if (value.includes("lnk") || value.includes("undefined symbol") || value.includes("unresolved external")) return "linker";
   if (value.includes("spectre")) return "spectre-library";
