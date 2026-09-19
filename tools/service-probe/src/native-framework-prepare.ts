@@ -242,7 +242,6 @@ function classifyDiscoveryArtifactError(message: string): string {
   if (explicitCount !== undefined) return `artifact-count-${explicitCount}`;
   const count = value.match(/exactly one [a-z-]+ artifact \[count=([0-9]+)/u)?.[1];
   if (count !== undefined) return `artifact-count-${count}`;
-  if (value.includes("exactly one")) return "artifact-count";
   if (value.includes("metadata is invalid")) return "artifact-metadata";
   if (value.includes("artifact bytes")) return "artifact-bytes";
   if (value.includes("artifact read")) return "artifact-read";
