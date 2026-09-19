@@ -361,6 +361,7 @@ function projectConfiguration(
           // cover clang-cl as well as MSVC and affect only generated staging
           // input; compiler identity and the fixed Service-owned build profile
           // stay unchanged.
+          "set(CMAKE_OBJECT_PATH_MAX 128 CACHE STRING \"\" FORCE)",
           "set(CMAKE_TRY_COMPILE_CONFIGURATION Release CACHE STRING \"\" FORCE)",
           "set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT Embedded CACHE STRING \"\" FORCE)",
           "set(CMAKE_C_FLAGS_DEBUG \"${CMAKE_C_FLAGS_DEBUG} /Z7\" CACHE STRING \"\" FORCE)",
@@ -380,6 +381,8 @@ function projectConfiguration(
           "set(CMAKE_EXE_LINKER_FLAGS_RELEASE \"${CMAKE_EXE_LINKER_FLAGS_RELEASE} /DEBUG:NONE /PDB:NUL\" CACHE STRING \"\" FORCE)",
           "set(CMAKE_SHARED_LINKER_FLAGS_RELEASE \"${CMAKE_SHARED_LINKER_FLAGS_RELEASE} /DEBUG:NONE /PDB:NUL\" CACHE STRING \"\" FORCE)",
           "set(CMAKE_MODULE_LINKER_FLAGS_RELEASE \"${CMAKE_MODULE_LINKER_FLAGS_RELEASE} /DEBUG:NONE /PDB:NUL\" CACHE STRING \"\" FORCE)",
+          "set(CMAKE_C_FLAGS_RELEASE \"${CMAKE_C_FLAGS_RELEASE} /Z7 /FdNUL\" CACHE STRING \"\" FORCE)",
+          "set(CMAKE_CXX_FLAGS_RELEASE \"${CMAKE_CXX_FLAGS_RELEASE} /Z7 /FdNUL\" CACHE STRING \"\" FORCE)",
         ]
       : []),
     ...(options.frameworkId === "cpputest"
@@ -404,7 +407,8 @@ function projectConfiguration(
           "if(MSVC)",
           "  foreach(_utide_target CppUTest CppUTestExt phase9_cpputest phase9_cpputest_malformed)",
           "    if(TARGET ${_utide_target})",
-          "      target_compile_options(${_utide_target} PRIVATE /WX-)",
+          "      target_compile_options(${_utide_target} PRIVATE /WX- /FdNUL)",
+          "      set_target_properties(${_utide_target} PROPERTIES COMPILE_PDB_NAME NUL COMPILE_PDB_NAME_DEBUG NUL COMPILE_PDB_NAME_RELEASE NUL COMPILE_PDB_OUTPUT_DIRECTORY \"${CMAKE_BINARY_DIR}\" COMPILE_PDB_OUTPUT_DIRECTORY_DEBUG \"${CMAKE_BINARY_DIR}\" COMPILE_PDB_OUTPUT_DIRECTORY_RELEASE \"${CMAKE_BINARY_DIR}\" PDB_NAME NUL PDB_NAME_DEBUG NUL PDB_NAME_RELEASE NUL PDB_OUTPUT_DIRECTORY \"${CMAKE_BINARY_DIR}\" PDB_OUTPUT_DIRECTORY_DEBUG \"${CMAKE_BINARY_DIR}\" PDB_OUTPUT_DIRECTORY_RELEASE \"${CMAKE_BINARY_DIR}\")",
           "    endif()",
           "  endforeach()",
           "endif()",
