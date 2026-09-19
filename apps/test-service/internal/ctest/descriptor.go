@@ -177,12 +177,13 @@ func equivalentPath(first, second string) bool {
 // Windows path aliases.
 func canonicalComparisonPath(path string) string {
 	path = filepath.Clean(path)
+	path = canonicalNativePath(path)
 	parent := filepath.Dir(path)
 	resolvedParent, err := filepath.EvalSymlinks(parent)
 	if err != nil {
 		return path
 	}
-	return filepath.Clean(filepath.Join(resolvedParent, filepath.Base(path)))
+	return canonicalNativePath(filepath.Clean(filepath.Join(resolvedParent, filepath.Base(path))))
 }
 
 func resolveAllowedPath(

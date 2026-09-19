@@ -356,12 +356,10 @@ function projectConfiguration(
     "set(CMAKE_POLICY_VERSION_MINIMUM 3.5)",
     ...(options.platform === "win32" && (options.family === "msvc" || options.family === "clang-cl")
       ? [
-          // Keep the controlled fixture build independent of the external PDB
-          // path limit used by MSVC-compatible compilers. The explicit flags
-          // cover clang-cl as well as MSVC and affect only generated staging
-          // input; compiler identity and the fixed Service-owned build profile
-          // stay unchanged.
-          "set(CMAKE_OBJECT_PATH_MAX 128 CACHE STRING \"\" FORCE)",
+          // Keep the controlled fixture build independent of PDB output. The
+          // explicit flags cover clang-cl as well as MSVC and affect only
+          // generated staging input; compiler identity and the fixed
+          // Service-owned build profile stay unchanged.
           "set(CMAKE_TRY_COMPILE_CONFIGURATION Release CACHE STRING \"\" FORCE)",
           "set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT Embedded CACHE STRING \"\" FORCE)",
           "set(CMAKE_C_FLAGS_DEBUG \"${CMAKE_C_FLAGS_DEBUG} /Z7\" CACHE STRING \"\" FORCE)",
@@ -372,19 +370,6 @@ function projectConfiguration(
         ]
       : []),
     "project(unit_test_ide_framework_workspace LANGUAGES C CXX)",
-    ...(options.platform === "win32" && (options.family === "msvc" || options.family === "clang-cl")
-      ? [
-          // The framework producer does not publish debug symbols. Force the
-          // single-config Ninja fixture to Release after project() so the
-          // compiler cannot reintroduce a PDB through the Debug profile.
-          "set(CMAKE_BUILD_TYPE Release CACHE STRING \"\" FORCE)",
-          "set(CMAKE_EXE_LINKER_FLAGS_RELEASE \"${CMAKE_EXE_LINKER_FLAGS_RELEASE} /DEBUG:NONE /PDB:NUL\" CACHE STRING \"\" FORCE)",
-          "set(CMAKE_SHARED_LINKER_FLAGS_RELEASE \"${CMAKE_SHARED_LINKER_FLAGS_RELEASE} /DEBUG:NONE /PDB:NUL\" CACHE STRING \"\" FORCE)",
-          "set(CMAKE_MODULE_LINKER_FLAGS_RELEASE \"${CMAKE_MODULE_LINKER_FLAGS_RELEASE} /DEBUG:NONE /PDB:NUL\" CACHE STRING \"\" FORCE)",
-          "set(CMAKE_C_FLAGS_RELEASE \"${CMAKE_C_FLAGS_RELEASE} /Z7 /FdNUL\" CACHE STRING \"\" FORCE)",
-          "set(CMAKE_CXX_FLAGS_RELEASE \"${CMAKE_CXX_FLAGS_RELEASE} /Z7 /FdNUL\" CACHE STRING \"\" FORCE)",
-        ]
-      : []),
     ...(options.frameworkId === "cpputest"
       ? [
           // CppUTest 4.0 injects a forced MemoryLeakDetector header and
