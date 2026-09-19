@@ -405,7 +405,7 @@ function projectConfiguration(
           // compiler-version warnings in this locked third-party fixture
           // from failing the producer build.
           "if(MSVC)",
-          "  foreach(_utide_target CppUTest CppUTestExt phase9_cpputest phase9_cpputest_malformed)",
+          "  foreach(_utide_target CppUTest CppUTestExt CppUTestTests CppUTestExtTests phase9_cpputest phase9_cpputest_malformed)",
           "    if(TARGET ${_utide_target})",
           "      target_compile_options(${_utide_target} PRIVATE /WX- /FdNUL)",
           "      set_target_properties(${_utide_target} PROPERTIES COMPILE_PDB_NAME NUL COMPILE_PDB_NAME_DEBUG NUL COMPILE_PDB_NAME_RELEASE NUL COMPILE_PDB_OUTPUT_DIRECTORY \"${CMAKE_BINARY_DIR}\" COMPILE_PDB_OUTPUT_DIRECTORY_DEBUG \"${CMAKE_BINARY_DIR}\" COMPILE_PDB_OUTPUT_DIRECTORY_RELEASE \"${CMAKE_BINARY_DIR}\" PDB_NAME NUL PDB_NAME_DEBUG NUL PDB_NAME_RELEASE NUL PDB_OUTPUT_DIRECTORY \"${CMAKE_BINARY_DIR}\" PDB_OUTPUT_DIRECTORY_DEBUG \"${CMAKE_BINARY_DIR}\" PDB_OUTPUT_DIRECTORY_RELEASE \"${CMAKE_BINARY_DIR}\")",
