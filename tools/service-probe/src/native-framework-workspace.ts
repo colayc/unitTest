@@ -374,6 +374,21 @@ function projectConfiguration(
     ...Object.entries(variables).map(([name, value]) => `set(${name} ${cmakeLiteral(value.split(sep).join("/"))})`),
     "enable_testing()",
     "add_subdirectory(framework-matrix)",
+    ...(options.platform === "win32" && (options.family === "msvc" || options.family === "clang-cl")
+      ? [
+          // CppUTest 4.0 unconditionally adds /WX to global MSVC flags. Keep
+          // warning-as-error policy for product code, but prevent new
+          // compiler-version warnings in this locked third-party fixture
+          // from failing the producer build.
+          "if(MSVC)",
+          "  foreach(_utide_target CppUTest CppUTestExt phase9_cpputest phase9_cpputest_malformed)",
+          "    if(TARGET ${_utide_target})",
+          "      target_compile_options(${_utide_target} PRIVATE /WX-)",
+          "    endif()",
+          "  endforeach()",
+          "endif()",
+        ]
+      : []),
     "",
   ].join("\n");
 }
