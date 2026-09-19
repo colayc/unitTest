@@ -115,6 +115,42 @@ func TestWindowsTargetActiveCountTimeoutOrErrorReturnsStableWaitFailure(t *testi
 	}
 }
 
+func TestWindowsTerminateAfterNaturalWaitIsIdempotent(t *testing.T) {
+	terminateCalls := 0
+	operations := defaultWindowsTargetOperations()
+	operations.waitProcess = func(windows.Handle, uint32) (uint32, error) {
+		return windows.WAIT_OBJECT_0, nil
+	}
+	operations.exitCode = func(windows.Handle) (uint32, error) { return 0, nil }
+	operations.terminateJob = func(windows.Handle, uint32) error {
+		terminateCalls++
+		if terminateCalls > 1 {
+			t.Fatal("natural completion must not terminate an already-cleaned job")
+		}
+		return nil
+	}
+	operations.queryActiveProcesses = func(windows.Handle) (uint32, error) { return 0, nil }
+	operations.closeHandle = func(windows.Handle) error { return nil }
+	target := &windowsTarget{
+		processOwner: winprocess.NewHandleOwner(531, operations.closeHandle),
+		jobOwner:     winprocess.NewHandleOwner(532, operations.closeHandle),
+		pid:          533,
+		ops:          operations,
+		waitDone:     make(chan struct{}),
+		cleanupWait:  20 * time.Millisecond,
+	}
+	if code, err := target.Wait(); code != 0 || err != nil {
+		t.Fatalf("Wait = (%d, %v), want successful natural exit", code, err)
+	}
+	platform := newWindowsPlatform(operations)
+	if err := platform.Terminate(target, 0); err != nil {
+		t.Fatalf("Terminate after natural Wait = %v, want nil", err)
+	}
+	if terminateCalls != 1 {
+		t.Fatalf("terminateJob calls = %d, want one natural-exit cleanup", terminateCalls)
+	}
+}
+
 func TestWindowsTargetTerminateActiveCountFailureStillReleasesWait(t *testing.T) {
 	operations := defaultWindowsTargetOperations()
 	operations.waitProcess = func(windows.Handle, uint32) (uint32, error) { return windows.WAIT_OBJECT_0, nil }

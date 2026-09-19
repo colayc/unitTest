@@ -274,6 +274,17 @@ func (platform *windowsPlatform) Terminate(value Target, _ time.Duration) error 
 	if !ok || target == nil || target.pid <= 0 || target.jobOwner == nil || target.processOwner == nil {
 		return errors.New("invalid windows process target")
 	}
+	// Wait owns the successful natural-exit cleanup: it confirms the target
+	// job is empty, closes the job/process handles, and releases launch inputs.
+	// The host calls Terminate after a natural wait as a final idempotent
+	// cleanup hook. Do not treat the already-closed job as an infrastructure
+	// failure in that path; a second close would otherwise turn a successful
+	// CMake configure into a failed task with no exit code.
+	select {
+	case <-target.waitDone:
+		return nil
+	default:
+	}
 	var terminateErr error
 	if err := target.closeJob(); err != nil {
 		terminateErr = errors.New("target job termination failed")
