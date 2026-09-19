@@ -228,6 +228,10 @@ function classifyDiscoveryValidationError(message: string): string {
   if (value.includes("no build profile")) return "toolchain-profile";
   if (value.includes("not present")) return "toolchain-missing";
   if (value.includes("incompatible with the platform")) return "toolchain-platform";
+  if (value.includes("profile")) return "toolchain-profile";
+  if (value.includes("platform")) return "toolchain-platform";
+  if (value.includes("family")) return "toolchain-family";
+  if (value.includes("identity")) return "toolchain-identity";
   if (value.includes("compiler")) return "compiler";
   if (value.includes("toolchain")) return "toolchain";
   if (value.includes("task lookup timed out")) return "task-lookup-timeout";
