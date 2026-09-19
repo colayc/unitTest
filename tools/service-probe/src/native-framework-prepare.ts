@@ -129,6 +129,14 @@ async function prepareFrameworkRuntimeInternal(
             const taskCode = message.match(/\[code=([a-z0-9_-]+)\]/u)?.[1];
             const kind = taskOutcome !== undefined
               ? `task-${taskOutcome}${taskCode === undefined ? "" : `-${taskCode}`}`
+              : message.includes("catalog is incomplete or unbound")
+                ? "catalog-incomplete"
+                : message.includes("catalog has no matching container")
+                  ? "catalog-framework"
+                  : message.includes("catalog does not satisfy")
+                    ? "contract-container"
+                    : message.includes("catalog is missing the")
+                      ? "contract-case"
               : message.includes("workspace inspection")
               ? "workspace"
               : message.includes("discovery start")
