@@ -133,10 +133,12 @@ async function prepareFrameworkRuntimeInternal(
               : message.includes("catalog is incomplete or unbound")
                 ? "catalog-incomplete"
                 : message.includes("catalog has no matching container")
-                  ? "catalog-framework"
-                  : message.includes("catalog does not satisfy")
-                    ? "contract-container"
-                    : message.includes("catalog is missing the")
+                    ? "catalog-framework"
+                    : message.includes("catalog does not satisfy")
+                      ? "contract-container"
+                      : message.match(/catalog contract containers missing \[([a-z,]+)\]/u) !== null
+                        ? `contract-container-${message.match(/catalog contract containers missing \[([a-z,]+)\]/u)![1]}`
+                      : message.includes("catalog is missing the")
                       ? "contract-case"
               : message.includes("workspace inspection")
               ? "workspace"

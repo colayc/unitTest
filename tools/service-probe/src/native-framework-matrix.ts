@@ -713,13 +713,16 @@ function catalogSelection(
   const opaqueContainer = catalog.containers.find((candidate) =>
     candidate.framework === "opaque-ctest" && candidate.ctestLogicalName === contract.opaqueCTestName
   );
-  if (primary === undefined || malformedContainer === undefined || opaqueContainer === undefined) {
-    throw new Error(`${frameworkId} catalog does not satisfy the bound matrix workspace contract`);
-  }
+  const missing = [
+    primary === undefined ? "primary" : undefined,
+    malformedContainer === undefined ? "malformed" : undefined,
+    opaqueContainer === undefined ? "opaque" : undefined,
+  ].filter((value): value is string => value !== undefined);
+  if (missing.length > 0) throw new Error(`${frameworkId} catalog contract containers missing [${missing.join(",")}]`);
   const item = (
     label: string,
     logicalName: string,
-    containerId = primary.id,
+      containerId = primary!.id,
   ): ProtocolTestCatalog["items"][number] => {
     const matched = catalog.items.find((candidate) =>
       candidate.kind === "case" && candidate.containerId === containerId &&
@@ -731,7 +734,7 @@ function catalogSelection(
   const pass = item("passing", contract.pass);
   const assertion = item("assertion failure", contract.assertion);
   const crash = item("crash", contract.crash);
-  const malformed = item("malformed output", contract.malformed, malformedContainer.id);
+  const malformed = item("malformed output", contract.malformed, malformedContainer!.id);
   const mock = item("mock failure", contract.mock);
   const skip = item("skipped", contract.skip);
   const timeout = item("timeout", contract.timeout);
@@ -739,7 +742,7 @@ function catalogSelection(
     all: {
       mode: "items",
       itemIds: catalog.items.filter((candidate) =>
-        candidate.kind === "case" && candidate.containerId === primary.id &&
+        candidate.kind === "case" && candidate.containerId === primary!.id &&
         candidate.id !== crash.id && candidate.id !== timeout.id
       ).map(({ id }) => id).sort(),
     },
@@ -747,7 +750,7 @@ function catalogSelection(
     crash: { mode: "items", itemIds: [crash.id] },
     malformed: { mode: "items", itemIds: [malformed.id] },
     mock: { mode: "items", itemIds: [mock.id] },
-    opaque: { mode: "containers", containerIds: [opaqueContainer.id] },
+    opaque: { mode: "containers", containerIds: [opaqueContainer!.id] },
     pass: { mode: "items", itemIds: [pass.id] },
     filter: { mode: "filter", filter: { includeItemIds: [pass.id] } },
     skip: { mode: "items", itemIds: [skip.id] },
