@@ -120,7 +120,25 @@ async function prepareFrameworkRuntimeInternal(
         let compiled: Awaited<ReturnType<typeof readCompiledFrameworkExecutable>>;
         try {
           markStage(`discover-catalog:${family}:${frameworkId}`);
-          const discovery = await discoverFrameworkCatalog({ fixture, repositoryRoot, frameworkId, toolchainFamily: family, timeoutMs: 120_000 });
+          let discovery: Awaited<ReturnType<typeof discoverFrameworkCatalog>>;
+          try {
+            discovery = await discoverFrameworkCatalog({ fixture, repositoryRoot, frameworkId, toolchainFamily: family, timeoutMs: 120_000 });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            const kind = message.includes("workspace inspection")
+              ? "workspace"
+              : message.includes("discovery start")
+                ? "start"
+                : message.includes("discovery finished")
+                  ? "task"
+                  : message.includes("catalog read")
+                    ? "catalog-read"
+                    : message.includes("artifact")
+                      ? "artifact"
+                      : "validation";
+            markStage(`discover-catalog:${family}:${frameworkId}:${kind}`);
+            throw error;
+          }
           const toolchain = discovery.toolchain;
           if (typeof toolchain.compilerSha256 !== "string" || !/^[0-9a-f]{64}$/u.test(toolchain.compilerSha256)) throw new Error("verified Service compiler digest is required");
           if (compilerVersion !== undefined && (compilerVersion !== toolchain.version || compilerSha256 !== toolchain.compilerSha256)) throw new Error("Service compiler identity changed across frameworks");
