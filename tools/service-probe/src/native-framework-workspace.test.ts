@@ -95,6 +95,10 @@ test("actual staged Unity configure keeps F1 and malformed sources inside the CM
     return result.stdout;
   };
   const generator = join(input.repositoryRoot, process.platform === "win32" ? "generator.exe" : "generator");
+  // Go 1.26 refuses to replace an existing non-object output with -o. The
+  // generic workspace fixture uses a text placeholder for staging-only tests;
+  // remove it before compiling the real generator for this configure test.
+  await rm(generator, { force: true });
   execute("go", ["build", "-o", generator, "./apps/test-service/cmd/unity-runner-generator"]);
   const platform = process.platform === "win32" ? "win32" : "linux";
   const family = platform === "win32" ? "msvc" : "gcc";
