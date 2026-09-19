@@ -219,12 +219,12 @@ const f1Identity: F1FrameworkIdentity = {
     cpputest: {
       metadataSha256: "6eef50ec7940e4a6b80891d0ff452ed503b5996de313df711ecad607185761ee",
       sourceSha256: "114b3d7c6aadcc487b2df01a917c4c0702ba1fdb381456b12c406839181ac5f2",
-      executableSha256: "fed16783995c7fe860a931f8d783e50b1bac04c64bd98843fa61613b41a821b3",
+      executableSha256: "404936868d101c6300c60a0e204d88a678c898d5aaf32bc124d26219f57aed59",
     },
     unity: {
       metadataSha256: "1287993f09fb2d8079933ac89a85bd464122edac7b3c92621692a02484536333",
-      sourceSha256: "cfec3aea0fec4f1c6a84a4e835edb060415266deb156893d1c10de5ddb0fae15",
-      executableSha256: "c094e9ebbf45592d8b087410f6905844d82132bec626dbc549f1db75a9d5e44e",
+      sourceSha256: "c1a3571d4670320c05b98fa6cc0794d616412aa1c925e97f4c2bdf4e41466a2b",
+      executableSha256: "fcd613cbe9ef65686e2d9b533ebb5a5e48b8054a69c3a3e39ca6ad513140e50f",
     },
   },
 };
