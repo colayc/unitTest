@@ -301,7 +301,7 @@ export async function discoverFrameworkCatalog(options: FrameworkDiscoveryOption
     } catch (error) {
       const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
       const code = error !== null && typeof error === "object" && "code" in error &&
-        typeof error.code === "string" && /^[a-z0-9_-]+$/u.test(error.code) ? error.code : undefined;
+        typeof error.code === "string" && /^[a-z0-9_.-]+$/iu.test(error.code) ? error.code.toLowerCase() : undefined;
       const kind = code !== undefined
         ? `error-${code}`
         : message.includes("toolchain")
@@ -330,7 +330,7 @@ export async function discoverFrameworkCatalog(options: FrameworkDiscoveryOption
     } catch (error) {
       const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
       const code = error !== null && typeof error === "object" && "code" in error &&
-        typeof error.code === "string" && /^[a-z0-9_-]+$/u.test(error.code) ? error.code : undefined;
+        typeof error.code === "string" && /^[a-z0-9_.-]+$/iu.test(error.code) ? error.code.toLowerCase() : undefined;
       const kind = classifyDiscoveryWaitFailure(message, code);
       const processState = options.fixture.processState ?? "unknown";
       throw new Error(`${options.frameworkId} discovery wait failed [kind=${kind}; process=${processState}]`);

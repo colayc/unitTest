@@ -143,7 +143,7 @@ async function prepareFrameworkRuntimeInternal(
               : message.includes("workspace inspection")
               ? "workspace"
               : message.includes("discovery start")
-                ? "start"
+                ? `start-${message.match(/discovery start failed \[kind=([a-z0-9._-]+)\]/u)?.[1] ?? "unknown"}`
                 : message.includes("discovery finished")
                   ? "task"
                   : message.includes("catalog read")
