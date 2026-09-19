@@ -252,12 +252,37 @@ export async function discoverFrameworkCatalog(options: FrameworkDiscoveryOption
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS) throw new Error("framework discovery timeout is invalid");
   const client = options.fixture.client;
-  const workspace = await bounded(
-    `${options.frameworkId} workspace inspection`,
-    client.inspectWorkspace(),
-    timeoutMs,
-  );
-  const selected = selectWorkspace(workspace, options.toolchainFamily);
+  let workspace: Awaited<ReturnType<ProtocolClient["inspectWorkspace"]>>;
+  try {
+    workspace = await bounded(
+      `${options.frameworkId} workspace inspection`,
+      client.inspectWorkspace(),
+      timeoutMs,
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+    const kind = message.includes("invalid toolchain")
+      ? "invalid-toolchain"
+      : message.includes("fixed windows") || message.includes("windows environment")
+        ? "windows-environment"
+        : message.includes("probe") || message.includes("adapter")
+          ? "toolchain-probe"
+          : message.includes("cmake")
+            ? "cmake"
+            : "unknown";
+    throw new Error(`${options.frameworkId} workspace inspection failed [kind=${kind}]`);
+  }
+  let selected: SelectedWorkspace;
+  try {
+    selected = selectWorkspace(workspace, options.toolchainFamily);
+  } catch {
+    const codes = [...new Set((workspace.diagnostics ?? [])
+      .map(({ code }) => code)
+      .filter((code): code is string => /^[A-Z0-9_.-]+$/u.test(code)))].slice(0, 8);
+    const hasToolchain = workspace.toolchains.some(({ family }) => family === options.toolchainFamily);
+    const kind = hasToolchain ? "profile-missing" : "toolchain-missing";
+    throw new Error(`${options.frameworkId} workspace selection failed [kind=${kind};diagnostics=${codes.join(",") || "none"}]`);
+  }
   const eventSubscription = await subscribeDiscoveryEvents(client);
   let phase = "discovery-start";
   try {

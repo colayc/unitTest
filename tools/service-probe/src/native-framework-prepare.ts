@@ -221,6 +221,12 @@ async function prepareFrameworkRuntimeInternal(
 
 function classifyDiscoveryValidationError(message: string): string {
   const value = message.toLowerCase();
+  const inspection = value.match(/workspace inspection failed \[kind=([a-z-]+)\]/u)?.[1];
+  if (inspection !== undefined) return `workspace-inspection-${inspection}`;
+  const selection = value.match(/workspace selection failed \[kind=([a-z-]+);diagnostics=([a-z0-9_.-]+)\]/u);
+  if (selection?.[1] !== undefined && selection[2] !== undefined) {
+    return `workspace-selection-${selection[1]}-${selection[2].toLowerCase()}`;
+  }
   if (value.includes("source uri")) return "source-uri";
   if (value.includes("artifact")) return "artifact";
   if (value.includes("catalog")) return "catalog";
