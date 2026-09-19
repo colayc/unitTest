@@ -91,6 +91,32 @@ func TestV13AddsBuildCategoryToLegacyDiagnosticJournalEntry(
 	}
 }
 
+func TestV13NormalizesCompilerNoteDiagnosticSeverity(t *testing.T) {
+	persisted := eventForProjection(
+		14,
+		testID('b'),
+		task.EventTaskDiagnostic,
+		time.Date(2026, 7, 31, 5, 30, 0, 0, time.UTC),
+		`{"diagnostic":{"severity":"note","code":"C4996","message":"note"}}`,
+	)
+	event := subscribeSingleProjectedEvent(
+		t,
+		protocol.Version13,
+		persisted,
+	)
+	var payload struct {
+		Diagnostic struct {
+			Severity string `json:"severity"`
+		} `json:"diagnostic"`
+	}
+	if err := json.Unmarshal(event.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Diagnostic.Severity != "info" {
+		t.Fatalf("projected diagnostic = %#v", payload)
+	}
+}
+
 func subscribeSingleProjectedEvent(
 	t *testing.T,
 	version string,
