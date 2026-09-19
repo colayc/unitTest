@@ -258,7 +258,9 @@ export async function discoverFrameworkCatalog(options: FrameworkDiscoveryOption
   );
   const selected = selectWorkspace(workspace, options.toolchainFamily);
   const eventSubscription = await subscribeDiscoveryEvents(client);
+  let phase = "discovery-start";
   try {
+    phase = "discovery-start";
     const discovery = await bounded(
       `${options.frameworkId} discovery start`,
       client.discoverTests({
@@ -268,6 +270,7 @@ export async function discoverFrameworkCatalog(options: FrameworkDiscoveryOption
       }),
       timeoutMs,
     );
+    phase = "task-wait";
     const discoveryObservation = await waitForTerminalTask(
       () => options.fixture.client,
       discovery.taskId,
@@ -284,8 +287,9 @@ export async function discoverFrameworkCatalog(options: FrameworkDiscoveryOption
       discoveryTask.errorMessage,
       ...discoveryObservation.events.flatMap((event) => eventFailureFragments(event)),
     ].filter((value): value is string => typeof value === "string").join("\n"));
-    throw new Error(`${options.frameworkId} discovery finished with ${String(discoveryTask.outcome)} [code=${errorCode}; detail=${errorDetail}]`);
+      throw new Error(`${options.frameworkId} discovery finished with ${String(discoveryTask.outcome)} [code=${errorCode}; detail=${errorDetail}]`);
   }
+  phase = "catalog-read";
   const catalog = await bounded(
     `${options.frameworkId} catalog read`,
     options.fixture.client.getTestCatalog({
@@ -295,10 +299,16 @@ export async function discoverFrameworkCatalog(options: FrameworkDiscoveryOption
     }),
     timeoutMs,
   );
+  phase = "catalog-validation";
   validateCatalog(catalog, selected, options.frameworkId);
+  phase = "catalog-selection";
   catalogSelection(catalog, options.frameworkId, contract);
+    phase = "artifact-read";
     const artifact = await readTaskArtifact(options.fixture.client, discovery.taskId, "test-catalog", timeoutMs);
     return { ...selected, catalog, taskId: discovery.taskId, catalogArtifactSha256: artifact.sha256, catalogArtifactSizeBytes: artifact.bytes.byteLength };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`${message} [phase=${phase}]`);
   } finally {
     eventSubscription?.close();
   }

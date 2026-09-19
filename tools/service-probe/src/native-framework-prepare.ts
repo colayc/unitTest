@@ -226,6 +226,8 @@ function classifyDiscoveryValidationError(message: string): string {
   if (value.includes("catalog")) return "catalog";
   if (value.includes("workspace")) return "workspace-validation";
   if (value.includes("toolchain") || value.includes("compiler")) return "toolchain";
+  const phase = value.match(/\[phase=([a-z-]+)\]/u)?.[1];
+  if (phase !== undefined) return `phase-${phase}`;
   return "validation";
 }
 
@@ -240,6 +242,8 @@ function classifyDiscoveryArtifactError(message: string): string {
   if (value.includes("metadata is invalid")) return "artifact-metadata";
   if (value.includes("artifact bytes")) return "artifact-bytes";
   if (value.includes("artifact read")) return "artifact-read";
+  const phase = value.match(/\[phase=([a-z-]+)\]/u)?.[1];
+  if (phase !== undefined) return `phase-${phase}`;
   return "artifact";
 }
 
