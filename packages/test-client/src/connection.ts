@@ -205,8 +205,13 @@ export class Connection {
         .map((property) => property.toLowerCase()))]
         .sort()
         .join(",") || "unknown";
+      const paths = [...new Set((validator.errors ?? [])
+        .map((error) => error.instancePath)
+        .filter((path): path is string => /^\/?[a-zA-Z0-9_./-]*$/u.test(path)))]
+        .sort()
+        .join(",") || "unknown";
       this.#closeWithError(new Error(
-        `service returned invalid protocol message [event=${eventName};keywords=${keywords};properties=${properties}]: ${ajv.errorsText(validator.errors)}`,
+        `service returned invalid protocol message [event=${eventName};keywords=${keywords};properties=${properties};paths=${paths}]: ${ajv.errorsText(validator.errors)}`,
       ));
       return false;
     }

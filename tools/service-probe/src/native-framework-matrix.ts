@@ -379,11 +379,13 @@ function classifyDiscoveryWaitFailure(message: string, code: string | undefined)
   if (message.includes("invalid protocol message")) {
     const eventMatch = message.match(/\[event=([a-z0-9._-]+);keywords=/u);
     if (eventMatch?.[1] !== undefined && eventMatch[1] !== "unknown") {
-      const keywordMatch = message.match(/;keywords=([a-z0-9,]+);properties=/u);
+    const keywordMatch = message.match(/;keywords=([a-z0-9,]+);properties=/u);
       const keywords = keywordMatch?.[1]?.replaceAll(",", "-");
-      const propertyMatch = message.match(/;properties=([a-z0-9,]+)\]/u);
+      const propertyMatch = message.match(/;properties=([a-z0-9,]+);paths=/u);
       const properties = propertyMatch?.[1]?.replaceAll(",", "-");
-      const details = [keywords, properties]
+      const pathMatch = message.match(/;paths=([a-z0-9_./,-]+)\]/u);
+      const paths = pathMatch?.[1]?.replaceAll(",", "-").replaceAll("/", "_");
+      const details = [keywords, properties, paths]
         .filter((value): value is string => value !== undefined && value !== "unknown")
         .join("-");
       return `invalid-protocol-${eventMatch[1]}${details.length > 0 ? `-${details}` : ""}`;
