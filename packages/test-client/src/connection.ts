@@ -196,8 +196,17 @@ export class Connection {
         .filter(isSafeProtocolToken))]
         .sort()
         .join(",") || "unknown";
+      const properties = [...new Set((validator.errors ?? [])
+        .flatMap((error) => {
+          const params = error.params as Record<string, unknown> | undefined;
+          return [params?.missingProperty, params?.additionalProperty];
+        })
+        .filter(isSafeProtocolToken)
+        .map((property) => property.toLowerCase()))]
+        .sort()
+        .join(",") || "unknown";
       this.#closeWithError(new Error(
-        `service returned invalid protocol message [event=${eventName};keywords=${keywords}]: ${ajv.errorsText(validator.errors)}`,
+        `service returned invalid protocol message [event=${eventName};keywords=${keywords};properties=${properties}]: ${ajv.errorsText(validator.errors)}`,
       ));
       return false;
     }
