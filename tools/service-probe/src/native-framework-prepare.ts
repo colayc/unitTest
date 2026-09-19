@@ -147,7 +147,18 @@ async function prepareFrameworkRuntimeInternal(
           });
         } finally {
           markStage(`dispose-service:${family}:${frameworkId}`);
-          try { await fixture.dispose(); } catch { throw new Error("framework Service cleanup failed"); }
+          try {
+            await fixture.dispose();
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            const kind = message.includes("forced service process exit")
+              ? "process-exit"
+              : message.includes("fixture directory cleanup")
+                ? "directory-cleanup"
+                : "unknown";
+            markStage(`dispose-service:${family}:${frameworkId}:${kind}`);
+            throw new Error("framework Service cleanup failed");
+          }
         }
         // Real disposal removes the Service directory, including its build tree.
         // Restore only the validated executable, never sessions, databases, or credentials.
