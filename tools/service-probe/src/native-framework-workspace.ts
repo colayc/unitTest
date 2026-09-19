@@ -371,6 +371,17 @@ function projectConfiguration(
         ]
       : []),
     "project(unit_test_ide_framework_workspace LANGUAGES C CXX)",
+    ...(options.platform === "win32" && (options.family === "msvc" || options.family === "clang-cl")
+      ? [
+          // The framework producer does not publish debug symbols. Force the
+          // single-config Ninja fixture to Release after project() so the
+          // compiler cannot reintroduce a PDB through the Debug profile.
+          "set(CMAKE_BUILD_TYPE Release CACHE STRING \"\" FORCE)",
+          "set(CMAKE_EXE_LINKER_FLAGS_RELEASE \"${CMAKE_EXE_LINKER_FLAGS_RELEASE} /DEBUG:NONE /PDB:NUL\" CACHE STRING \"\" FORCE)",
+          "set(CMAKE_SHARED_LINKER_FLAGS_RELEASE \"${CMAKE_SHARED_LINKER_FLAGS_RELEASE} /DEBUG:NONE /PDB:NUL\" CACHE STRING \"\" FORCE)",
+          "set(CMAKE_MODULE_LINKER_FLAGS_RELEASE \"${CMAKE_MODULE_LINKER_FLAGS_RELEASE} /DEBUG:NONE /PDB:NUL\" CACHE STRING \"\" FORCE)",
+        ]
+      : []),
     ...(options.frameworkId === "cpputest"
       ? [
           // CppUTest 4.0 injects a forced MemoryLeakDetector header and
