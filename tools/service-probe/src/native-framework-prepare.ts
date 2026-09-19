@@ -241,7 +241,10 @@ function classifyDiscoveryValidationError(message: string): string {
   if (value.includes("family")) return "toolchain-family";
   if (value.includes("identity")) return "toolchain-identity";
   if (value.includes("compiler")) return "compiler";
-  if (value.includes("toolchain")) return "toolchain";
+  if (value.includes("toolchain")) {
+    const tokens = [...new Set(value.match(/\b(?:toolchain|unavailable|invalid|missing|not|found|discovered|profile|generator|compiler|cmake|configure|build|failed|error)\b/gu) ?? [])];
+    return `toolchain${tokens.length > 1 ? `-${tokens.slice(1, 5).join("-")}` : ""}`;
+  }
   if (value.includes("task lookup timed out")) return "task-lookup-timeout";
   if (value.includes("task poll timed out")) return "task-poll-timeout";
   if (/task(?: [a-z-]+)? timed out/u.test(value)) return "task-timeout";
