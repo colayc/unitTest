@@ -435,7 +435,7 @@ function classifyTaskErrorMessage(message: string): string {
   if (value.includes("program database") || value.includes("pdb")) return "pdb-path";
   const compilerCode = value.match(/\b(?:c|d|l)\d{4}\b/u)?.[0];
   if (compilerCode !== undefined) {
-    const missing = value.match(/cannot open (?:include file|source file):\s*[\"']?([a-z0-9_.-]+)/u)?.[1];
+    const missing = value.match(/cannot open (?:include file|source file):\s*["']?([a-z0-9_.-]+)/u)?.[1];
     return `compiler-${compilerCode}${missing === undefined ? "" : `-${missing}`}`;
   }
   if (/\berror\s+c\d{4}\b/iu.test(message) || value.includes("clang-cl")) return "compiler";
