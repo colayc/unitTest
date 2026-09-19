@@ -7,9 +7,11 @@ import type {
   WorkspaceSnapshot,
 } from "@unit-test-ide/protocol-models";
 import type {
+  EventSubscription,
   ProtocolClient,
   ProtocolArtifactMetadata,
   ProtocolTaskSnapshot,
+  ProtocolTaskEvent,
   ProtocolTestCatalog,
   ProtocolTestRun,
 } from "@unit-test-ide/test-client";
@@ -255,26 +257,33 @@ export async function discoverFrameworkCatalog(options: FrameworkDiscoveryOption
     timeoutMs,
   );
   const selected = selectWorkspace(workspace, options.toolchainFamily);
-  const discovery = await bounded(
-    `${options.frameworkId} discovery start`,
-    client.discoverTests({
-      idempotencyKey: idempotencyKey(),
-      projectId: selected.projectId,
-      profileId: selected.profile.buildProfileId,
-    }),
-    timeoutMs,
-  );
-  const discoveryTask = await waitForTerminalTask(
-    () => options.fixture.client,
-    discovery.taskId,
-    `${options.frameworkId} discovery`,
-    timeoutMs,
-  );
+  const eventSubscription = await subscribeDiscoveryEvents(client);
+  try {
+    const discovery = await bounded(
+      `${options.frameworkId} discovery start`,
+      client.discoverTests({
+        idempotencyKey: idempotencyKey(),
+        projectId: selected.projectId,
+        profileId: selected.profile.buildProfileId,
+      }),
+      timeoutMs,
+    );
+    const discoveryObservation = await waitForTerminalTask(
+      () => options.fixture.client,
+      discovery.taskId,
+      `${options.frameworkId} discovery`,
+      timeoutMs,
+      eventSubscription,
+    );
+    const discoveryTask = discoveryObservation.task;
   if (discoveryTask.outcome !== "succeeded") {
     const errorCode = typeof discoveryTask.errorCode === "string" && /^[a-z0-9_-]+$/u.test(discoveryTask.errorCode)
       ? discoveryTask.errorCode
       : "unknown";
-    const errorDetail = typeof discoveryTask.errorMessage === "string" ? classifyTaskErrorMessage(discoveryTask.errorMessage) : "unknown";
+    const errorDetail = classifyTaskErrorMessage([
+      discoveryTask.errorMessage,
+      ...discoveryObservation.events.flatMap((event) => eventFailureFragments(event)),
+    ].filter((value): value is string => typeof value === "string").join("\n"));
     throw new Error(`${options.frameworkId} discovery finished with ${String(discoveryTask.outcome)} [code=${errorCode}; detail=${errorDetail}]`);
   }
   const catalog = await bounded(
@@ -288,12 +297,47 @@ export async function discoverFrameworkCatalog(options: FrameworkDiscoveryOption
   );
   validateCatalog(catalog, selected, options.frameworkId);
   catalogSelection(catalog, options.frameworkId, contract);
-  const artifact = await readTaskArtifact(options.fixture.client, discovery.taskId, "test-catalog", timeoutMs);
-  return { ...selected, catalog, taskId: discovery.taskId, catalogArtifactSha256: artifact.sha256, catalogArtifactSizeBytes: artifact.bytes.byteLength };
+    const artifact = await readTaskArtifact(options.fixture.client, discovery.taskId, "test-catalog", timeoutMs);
+    return { ...selected, catalog, taskId: discovery.taskId, catalogArtifactSha256: artifact.sha256, catalogArtifactSizeBytes: artifact.bytes.byteLength };
+  } finally {
+    eventSubscription?.close();
+  }
+}
+
+async function subscribeDiscoveryEvents(client: ProtocolClient): Promise<EventSubscription | undefined> {
+  try {
+    return await client.subscribeEvents(0);
+  } catch {
+    // Test doubles and older protocol fixtures may not expose event replay.
+    return undefined;
+  }
+}
+
+function eventFailureFragments(event: ProtocolTaskEvent): readonly string[] {
+  if (event.event === "task.output") {
+    const text = (event.payload as { text?: unknown }).text;
+    return typeof text === "string" ? [text] : [];
+  }
+  if (event.event === "task.step_finished") {
+    const errorCode = (event.payload as { errorCode?: unknown }).errorCode;
+    return typeof errorCode === "string" ? [errorCode] : [];
+  }
+  if (event.event === "task.diagnostic") {
+    const diagnostic = (event.payload as { diagnostic?: { code?: unknown; message?: unknown } }).diagnostic;
+    if (diagnostic === undefined) return [];
+    return [
+      ...(typeof diagnostic.code === "string" ? [diagnostic.code] : []),
+      ...(typeof diagnostic.message === "string" ? [diagnostic.message] : []),
+    ];
+  }
+  return [];
 }
 
 function classifyTaskErrorMessage(message: string): string {
   const value = message.toLowerCase();
+  if (value.includes("program database") || value.includes("pdb")) return "pdb-path";
+  if (/\berror\s+c\d{4}\b/iu.test(message) || value.includes("clang-cl")) return "compiler";
+  if (value.includes("lnk") || value.includes("undefined symbol") || value.includes("unresolved external")) return "linker";
   if (value.includes("spectre")) return "spectre-library";
   if (value.includes("cmake") || value.includes("configure")) return "cmake-configure";
   if (value.includes("ninja") || value.includes("msbuild") || value.includes("link")) return "build-tool";
@@ -618,7 +662,7 @@ async function executeScenario(context: ScenarioContext): Promise<ScenarioObserv
     context.fixture.client.getTestRun(task.runId),
     context.timeoutMs,
   );
-  if (context.id === "timeout" && terminalTask.outcome !== "timed_out") {
+  if (context.id === "timeout" && terminalTask.task.outcome !== "timed_out") {
     throw new Error("timeout scenario did not produce a durable Service timed_out task");
   }
   const evidence = await readRunEvidence(context, task.taskId, task.runId, run);
@@ -736,13 +780,35 @@ async function waitForTerminalTask(
   taskId: string,
   label: string,
   timeoutMs: number,
-): Promise<ProtocolTaskSnapshot> {
+  subscription?: EventSubscription,
+): Promise<Readonly<{ task: ProtocolTaskSnapshot; events: readonly ProtocolTaskEvent[] }>> {
   const deadline = Date.now() + timeoutMs;
+  const events: ProtocolTaskEvent[] = [];
+  let pendingEvent = subscription?.next();
   for (;;) {
     const remaining = deadline - Date.now();
     if (remaining <= 0) throw new Error(`${label} task timed out after ${timeoutMs}ms`);
     const task = await bounded(`${label} task lookup`, client().getTask(taskId), remaining);
-    if (task.status === "finished") return task;
+    if (task.status === "finished") {
+      if (subscription !== undefined) {
+        while (subscription.lastSequence < task.lastSequence && pendingEvent !== undefined) {
+          const next = await bounded(`${label} event replay`, pendingEvent, Math.max(deadline - Date.now(), 1));
+          if (next.done) break;
+          events.push(next.value);
+          pendingEvent = subscription.next();
+        }
+        while (pendingEvent !== undefined) {
+          const next = await Promise.race([
+            pendingEvent,
+            delay(Math.min(25, Math.max(deadline - Date.now(), 1))).then(() => undefined),
+          ]);
+          if (next === undefined || next.done) break;
+          events.push(next.value);
+          pendingEvent = subscription.next();
+        }
+      }
+      return { task, events };
+    }
     await bounded(`${label} task poll`, delay(Math.min(10, remaining)), remaining);
   }
 }
