@@ -35,8 +35,8 @@ test("committed CMock provenance digest comes from the closed F1 reader", async 
     manifest,
     manifestSha256,
   });
-  assert.equal(manifestSha256, "2f08cfd45b9374a5331f0484d53b466c3813312d046e5226c64754c0c986f87b");
-  assert.equal(provenance.cMockProvenanceSha256, "4f0a73e5decc2402930fc4d609d1640150fe6addb30e20cc9900e1cf418520a8");
+  assert.equal(manifestSha256, "2ed58a385314968813598dd0ca89cbdc491e7c1eda87d58a676efb61a5af5fa0");
+  assert.equal(provenance.cMockProvenanceSha256, "038b46e53f833097d6311564c3d647c418ba254e1b129ada161ab40f3b0d961a");
   assert.notEqual(provenance.cMockProvenanceSha256, manifestSha256);
 });
 
@@ -177,7 +177,7 @@ function framework(platform, family, id) {
       generatorVersion: "2.7.0",
       inputSha256: "007f23aea2dba06d111f66be95905adde8fe32e7d2031bf8a8c70117a8209f57",
       outputSha256: "1565d1a2d39b655eb551a729663fae7e167f1c0d6cd3f9a8c2aafe2d67348128",
-      manifestSha256: "4f0a73e5decc2402930fc4d609d1640150fe6addb30e20cc9900e1cf418520a8",
+      manifestSha256: "038b46e53f833097d6311564c3d647c418ba254e1b129ada161ab40f3b0d961a",
       generatedAtRuntime: false,
     } } : {}),
     scenarios: scenarioIds.map((scenarioId, index) => ({

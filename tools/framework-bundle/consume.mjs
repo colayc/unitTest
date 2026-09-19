@@ -13,7 +13,7 @@ const lockedFixtures = Object.freeze({
     files: Object.freeze([".unit-test-ide/workspace.json", "CMakeLists.txt", "fixture.json", "tests/framework_tests.cpp"]),
   }),
   unity: Object.freeze({
-    sourceSha256: "eaf9b66d897a3361b05f7d050a779d47d35339804ccaa5fa800f7986f1ecb34c",
+    sourceSha256: "cfec3aea0fec4f1c6a84a4e835edb060415266deb156893d1c10de5ddb0fae15",
     metadataSha256: "1287993f09fb2d8079933ac89a85bd464122edac7b3c92621692a02484536333",
     dependencies: Object.freeze(["unity", "cmock"]),
     files: Object.freeze([

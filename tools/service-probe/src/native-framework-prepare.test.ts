@@ -117,7 +117,7 @@ test("producer binds Service discovery and actual compiled bytes to closed F1 id
     assert.equal(framework.evidence.executableArtifactSha256, digest(`compiled:${toolchain.family}:${framework.frameworkId}`));
     assert.equal(framework.evidence.sourceArtifactSha256, identity.fixtures[framework.frameworkId].sourceSha256);
     assert.equal(toolchain.compilerSha256, digest(`compiler:${toolchain.family}`));
-    if (framework.frameworkId === "unity") assert.equal(framework.cMockProvenance!.manifestSha256, "4f0a73e5decc2402930fc4d609d1640150fe6addb30e20cc9900e1cf418520a8");
+    if (framework.frameworkId === "unity") assert.equal(framework.cMockProvenance!.manifestSha256, "038b46e53f833097d6311564c3d647c418ba254e1b129ada161ab40f3b0d961a");
   }
 });
 
