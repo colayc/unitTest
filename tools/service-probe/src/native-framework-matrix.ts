@@ -271,13 +271,21 @@ export async function discoverFrameworkCatalog(options: FrameworkDiscoveryOption
       timeoutMs,
     );
     phase = "task-wait";
-    const discoveryObservation = await waitForTerminalTask(
-      () => options.fixture.client,
-      discovery.taskId,
-      `${options.frameworkId} discovery`,
-      timeoutMs,
-      eventSubscription,
-    );
+    let discoveryObservation: Readonly<{ task: ProtocolTaskSnapshot; events: readonly ProtocolTaskEvent[] }>;
+    try {
+      discoveryObservation = await waitForTerminalTask(
+        () => options.fixture.client,
+        discovery.taskId,
+        `${options.frameworkId} discovery`,
+        timeoutMs,
+        eventSubscription,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+      const kind = message.includes("timed out") ? "timeout" :
+        message.includes("socket") || message.includes("connection") || message.includes("closed") ? "transport" : "unknown";
+      throw new Error(`${options.frameworkId} discovery wait failed [kind=${kind}]`);
+    }
     const discoveryTask = discoveryObservation.task;
   if (discoveryTask.outcome !== "succeeded") {
     const errorCode = typeof discoveryTask.errorCode === "string" && /^[a-z0-9_-]+$/u.test(discoveryTask.errorCode)
