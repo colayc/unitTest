@@ -34,11 +34,13 @@ export async function prepareFrameworkRuntime(
   options: FrameworkRuntimePrepareOptions,
   dependencies?: FrameworkRuntimePrepareDependencies,
 ): Promise<PreparedFrameworkRuntime> {
+  let failureStage = "validate-options";
   try {
-    return await prepareFrameworkRuntimeInternal(options, dependencies);
+    return await prepareFrameworkRuntimeInternal(options, dependencies, (stage) => { failureStage = stage; });
   } catch {
     // Nothing from filesystem errors, child output, injected operations, or causes
     // crosses this boundary. Even the stack is path-free for CLI diagnostics.
+    process.stderr.write(`framework runtime preparation failed [stage=${failureStage}]\n`);
     const error = Object.assign(new Error("framework runtime preparation failed"), { code: "FRAMEWORK_RUNTIME_PREPARE_FAILED" });
     error.name = "FrameworkRuntimePrepareError";
     error.stack = `${error.name}: ${error.message}`;
@@ -49,7 +51,9 @@ export async function prepareFrameworkRuntime(
 async function prepareFrameworkRuntimeInternal(
   options: FrameworkRuntimePrepareOptions,
   dependencies?: FrameworkRuntimePrepareDependencies,
+  markStage: (stage: string) => void = () => {},
 ): Promise<PreparedFrameworkRuntime> {
+  markStage("validate-options");
   if (options === null || typeof options !== "object" || Object.getPrototypeOf(options) !== Object.prototype ||
       Reflect.ownKeys(options).length !== 3 || !["repositoryRoot", "platform", "candidateCommit"].every((key) => Object.hasOwn(options, key)) ||
       !isAbsolute(options.repositoryRoot) || options.repositoryRoot.includes("\0") ||
@@ -64,13 +68,18 @@ async function prepareFrameworkRuntimeInternal(
   const { readFrameworkManifest } = await import("../../framework-bundle/manifest.mjs");
   // @ts-expect-error Canonical provenance reader is validated by its direct Node suite.
   const { readCMockGeneration } = await import("../../framework-bundle/cmock-provenance.mjs");
+  markStage("load-f1-identity");
   const identity: F1FrameworkIdentity = await loadF1FrameworkIdentity(repositoryRoot);
+  markStage("load-matrix-contracts");
   await loadMatrixContract("cpputest", repositoryRoot);
   await loadMatrixContract("unity", repositoryRoot);
+  markStage("load-locked-manifest");
   const { manifest: locked, manifestSha256 } = await readFrameworkManifest(join(repositoryRoot, "tools/framework-bundle/manifest.json")) as { manifest: LinuxFrameworkInputManifest; manifestSha256: string };
   if (manifestSha256 !== identity.manifestSha256) throw new Error("framework manifest identity changed during preparation");
+  markStage("load-cmock-provenance");
   const provenance = await readCMockGeneration(join(repositoryRoot, "testdata/frameworks/unity/mocks/cmock-generation.json"), { root: repositoryRoot, manifest: locked, manifestSha256 });
   if (provenance.cMockProvenanceSha256 !== identity.cMockProvenanceSha256) throw new Error("CMock provenance changed during preparation");
+  markStage("verify-locked-inputs");
   const preparedFrameworkRoots = await (dependencies.verifyInputs ?? verifyInputs)(options, locked, identity);
   const platformName = options.platform === "win32" ? "windows" : "linux";
   const ownershipId = randomUUID();
@@ -84,6 +93,7 @@ async function prepareFrameworkRuntimeInternal(
       let compilerVersion: string | undefined;
       let compilerSha256: string | undefined;
       for (const frameworkId of ["cpputest", "unity"] as const) {
+        markStage(`stage-workspace:${family}:${frameworkId}`);
         const stageRoot = join(workRoot, platformName, family, frameworkId);
         const staged = await stageFrameworkWorkspace({
           repositoryRoot, stageRoot, ownershipId, candidateCommit: options.candidateCommit, platform: options.platform,
@@ -92,6 +102,7 @@ async function prepareFrameworkRuntimeInternal(
           unityRunnerGenerator: join(repositoryRoot, "build", options.platform === "win32" ? "unity-runner-generator.exe" : "unity-runner-generator"),
         });
         ownedStagingRoots.push(stageRoot);
+        markStage(`start-service:${family}:${frameworkId}`);
         const fixture = await (dependencies.startService ?? startService)(
           join(repositoryRoot, "build", options.platform === "win32" ? "unit-test-service.exe" : "unit-test-service"),
           staged.serviceDirectory,
@@ -99,6 +110,7 @@ async function prepareFrameworkRuntimeInternal(
         );
         let compiled: Awaited<ReturnType<typeof readCompiledFrameworkExecutable>>;
         try {
+          markStage(`discover-catalog:${family}:${frameworkId}`);
           const discovery = await discoverFrameworkCatalog({ fixture, repositoryRoot, frameworkId, toolchainFamily: family, timeoutMs: 120_000 });
           const toolchain = discovery.toolchain;
           if (typeof toolchain.compilerSha256 !== "string" || !/^[0-9a-f]{64}$/u.test(toolchain.compilerSha256)) throw new Error("verified Service compiler digest is required");
@@ -106,6 +118,7 @@ async function prepareFrameworkRuntimeInternal(
           compilerVersion = toolchain.version;
           compilerSha256 = toolchain.compilerSha256;
           const dependency = locked.frameworks.find(({ id }) => id === frameworkId)!;
+          markStage(`read-executable:${family}:${frameworkId}`);
           compiled = await readCompiledFrameworkExecutable(workRoot, options.platform, family, frameworkId);
           frameworks.push({
             frameworkId, dependencyVersion: dependency.version, dependencySha256: dependency.source.sha256,
@@ -124,10 +137,12 @@ async function prepareFrameworkRuntimeInternal(
             } } : {}),
           });
         } finally {
+          markStage(`dispose-service:${family}:${frameworkId}`);
           try { await fixture.dispose(); } catch { throw new Error("framework Service cleanup failed"); }
         }
         // Real disposal removes the Service directory, including its build tree.
         // Restore only the validated executable, never sessions, databases, or credentials.
+        markStage(`restore-executable:${family}:${frameworkId}`);
         await validateOwnedFrameworkStage(stageRoot, ownershipId);
         await mkdir(staged.serviceDirectory, { mode: 0o700 });
         const executableDirectory = join(staged.buildRoot, compiled.profileId, "bin");
@@ -136,6 +151,7 @@ async function prepareFrameworkRuntimeInternal(
       }
       toolchains.push({ family, compilerVersion: compilerVersion!, compilerSha256: compilerSha256!, frameworks });
     }
+    markStage("build-runtime-manifest");
     const manifest = buildFrameworkRuntimeManifest({
       schemaVersion: 1, candidateCommit: options.candidateCommit, platform: options.platform,
       contractSha256: createHash("sha256").update(await readFile(join(repositoryRoot, "testdata/framework-matrix/contract.json"))).digest("hex"),
@@ -143,6 +159,7 @@ async function prepareFrameworkRuntimeInternal(
     });
     return { manifest, ownershipId, ownedStagingRoots: Object.freeze([...ownedStagingRoots]) };
   } catch (error) {
+    markStage("cleanup-staging");
     for (const stageRoot of [...ownedStagingRoots].reverse()) {
       await validateOwnedFrameworkStage(stageRoot, ownershipId);
       await rm(stageRoot, { recursive: true });
