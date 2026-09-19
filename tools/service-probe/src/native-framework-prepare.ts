@@ -225,7 +225,10 @@ function classifyDiscoveryValidationError(message: string): string {
   if (value.includes("artifact")) return "artifact";
   if (value.includes("catalog")) return "catalog";
   if (value.includes("workspace")) return "workspace-validation";
-  if (value.includes("toolchain") || value.includes("compiler")) return "toolchain";
+  if (value.includes("no build profile")) return "toolchain-profile";
+  if (value.includes("not present")) return "toolchain-missing";
+  if (value.includes("compiler")) return "compiler";
+  if (value.includes("toolchain")) return "toolchain";
   if (value.includes("task lookup timed out")) return "task-lookup-timeout";
   if (value.includes("task poll timed out")) return "task-poll-timeout";
   if (/task(?: [a-z-]+)? timed out/u.test(value)) return "task-timeout";
