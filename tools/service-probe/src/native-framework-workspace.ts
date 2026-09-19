@@ -360,12 +360,12 @@ function projectConfiguration(
           // cover clang-cl as well as MSVC and affect only generated staging
           // input; compiler identity and the fixed Service-owned build profile
           // stay unchanged.
-          "set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT Embedded)",
-          "string(APPEND CMAKE_C_FLAGS_DEBUG \" /Z7\")",
-          "string(APPEND CMAKE_CXX_FLAGS_DEBUG \" /Z7\")",
-          "string(APPEND CMAKE_EXE_LINKER_FLAGS_DEBUG \" /DEBUG:NONE\")",
-          "string(APPEND CMAKE_SHARED_LINKER_FLAGS_DEBUG \" /DEBUG:NONE\")",
-          "string(APPEND CMAKE_MODULE_LINKER_FLAGS_DEBUG \" /DEBUG:NONE\")",
+          "set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT Embedded CACHE STRING \"\" FORCE)",
+          "set(CMAKE_C_FLAGS_DEBUG \"${CMAKE_C_FLAGS_DEBUG} /Z7\" CACHE STRING \"\" FORCE)",
+          "set(CMAKE_CXX_FLAGS_DEBUG \"${CMAKE_CXX_FLAGS_DEBUG} /Z7\" CACHE STRING \"\" FORCE)",
+          "set(CMAKE_EXE_LINKER_FLAGS_DEBUG \"${CMAKE_EXE_LINKER_FLAGS_DEBUG} /DEBUG:NONE /PDB:NUL\" CACHE STRING \"\" FORCE)",
+          "set(CMAKE_SHARED_LINKER_FLAGS_DEBUG \"${CMAKE_SHARED_LINKER_FLAGS_DEBUG} /DEBUG:NONE /PDB:NUL\" CACHE STRING \"\" FORCE)",
+          "set(CMAKE_MODULE_LINKER_FLAGS_DEBUG \"${CMAKE_MODULE_LINKER_FLAGS_DEBUG} /DEBUG:NONE /PDB:NUL\" CACHE STRING \"\" FORCE)",
         ]
       : []),
     ...Object.entries(variables).map(([name, value]) => `set(${name} ${cmakeLiteral(value.split(sep).join("/"))})`),
