@@ -227,6 +227,8 @@ function classifyDiscoveryValidationError(message: string): string {
   if (selection?.[1] !== undefined && selection[2] !== undefined) {
     return `workspace-selection-${selection[1]}-${selection[2].toLowerCase()}`;
   }
+  const start = value.match(/discovery start failed \[kind=([a-z0-9_-]+)\]/u)?.[1];
+  if (start !== undefined) return `discovery-start-${start}`;
   if (value.includes("source uri")) return "source-uri";
   if (value.includes("artifact")) return "artifact";
   if (value.includes("catalog")) return "catalog";

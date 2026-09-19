@@ -287,15 +287,36 @@ export async function discoverFrameworkCatalog(options: FrameworkDiscoveryOption
   let phase = "discovery-start";
   try {
     phase = "discovery-start";
-    const discovery = await bounded(
-      `${options.frameworkId} discovery start`,
-      client.discoverTests({
-        idempotencyKey: idempotencyKey(),
-        projectId: selected.projectId,
-        profileId: selected.profile.buildProfileId,
-      }),
-      timeoutMs,
-    );
+    let discovery: Awaited<ReturnType<ProtocolClient["discoverTests"]>>;
+    try {
+      discovery = await bounded(
+        `${options.frameworkId} discovery start`,
+        client.discoverTests({
+          idempotencyKey: idempotencyKey(),
+          projectId: selected.projectId,
+          profileId: selected.profile.buildProfileId,
+        }),
+        timeoutMs,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+      const code = error !== null && typeof error === "object" && "code" in error &&
+        typeof error.code === "string" && /^[a-z0-9_-]+$/u.test(error.code) ? error.code : undefined;
+      const kind = code !== undefined
+        ? `error-${code}`
+        : message.includes("toolchain")
+          ? "toolchain"
+          : message.includes("generator")
+            ? "generator"
+            : message.includes("cmake") || message.includes("configure")
+              ? "cmake"
+              : message.includes("profile")
+                ? "profile"
+                : message.includes("build") || message.includes("compile")
+                  ? "build"
+                  : "unknown";
+      throw new Error(`${options.frameworkId} discovery start failed [kind=${kind}]`);
+    }
     phase = "task-wait";
     let discoveryObservation: Readonly<{ task: ProtocolTaskSnapshot; events: readonly ProtocolTaskEvent[] }>;
     try {
