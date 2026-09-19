@@ -221,6 +221,8 @@ async function prepareFrameworkRuntimeInternal(
 
 function classifyDiscoveryValidationError(message: string): string {
   const value = message.toLowerCase();
+  const phase = value.match(/\[phase=([a-z-]+)\]/u)?.[1];
+  if (phase !== undefined) return `phase-${phase}`;
   const inspection = value.match(/workspace inspection failed \[kind=([a-z-]+)\]/u)?.[1];
   if (inspection !== undefined) return `workspace-inspection-${inspection}`;
   const selection = value.match(/workspace selection failed \[kind=([a-z-]+);diagnostics=([a-z0-9_.-]+)\]/u);
@@ -250,8 +252,6 @@ function classifyDiscoveryValidationError(message: string): string {
   if (/task(?: [a-z-]+)? timed out/u.test(value)) return "task-timeout";
   const wait = value.match(/discovery wait failed \[kind=([a-z0-9._-]+); process=([a-z-]+)\]/u);
   if (wait !== null) return `wait-${wait[1]}-${wait[2]}`;
-  const phase = value.match(/\[phase=([a-z-]+)\]/u)?.[1];
-  if (phase !== undefined) return `phase-${phase}`;
   return "validation";
 }
 
