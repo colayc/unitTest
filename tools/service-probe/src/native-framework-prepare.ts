@@ -185,6 +185,7 @@ async function verifyInputs(options: FrameworkRuntimePrepareOptions, manifest: L
     sourceRoot: join(root, ".superpowers/runtime/framework-bundle/v2", identity.manifestSha256),
     helperPath: join(root, "sdk/cmake/UnitTestIDE.cmake"),
     generatorPath: join(root, "build", options.platform === "win32" ? "unity-runner-generator.exe" : "unity-runner-generator"),
+    markStage,
   });
   markStage("return-prepared-inputs");
   return { cpputest: boundary.environment.UNIT_TEST_IDE_TEST_CPPUTEST_ROOT!, unity: boundary.environment.UNIT_TEST_IDE_TEST_UNITY_ROOT!, cmock: boundary.environment.UNIT_TEST_IDE_TEST_CMOCK_ROOT! };
