@@ -44,13 +44,13 @@ const evidence = Object.freeze({
 });
 
 const f1Identity: F1FrameworkIdentity = Object.freeze({
-  manifestSha256: "2ed58a385314968813598dd0ca89cbdc491e7c1eda87d58a676efb61a5af5fa0",
+  manifestSha256: "6ac0e8fd1393c0d84d882445d7ab49ca2cec6b87ee9f1e4b44cfd828125a9441",
   frameworkTreeSha256: Object.freeze({
     cpputest: "c564fb5e4e32836dc66f46efb86edb6f1f2fa6afa255a57052031aa00fc56f04",
     unity: "abfb7b2b7aec36739a7b138490d2e9dd178cc4f00e806ed372cbb8cfe98f73ae",
     cmock: "19e013d70a3f032decb2e836b875a997d085ca72b34c92c91b528e6ad2e49ac3",
   }),
-  cMockProvenanceSha256: "038b46e53f833097d6311564c3d647c418ba254e1b129ada161ab40f3b0d961a",
+  cMockProvenanceSha256: "e039f3f6ed52900ef70ddd8f3892bbd695bf97747903a860e2d919f124358bb6",
   fixtures: Object.freeze({
     cpputest: Object.freeze({ metadataSha256: "6eef50ec7940e4a6b80891d0ff452ed503b5996de313df711ecad607185761ee", sourceSha256: "114b3d7c6aadcc487b2df01a917c4c0702ba1fdb381456b12c406839181ac5f2", executableSha256: digest("cpp-executable") }),
     unity: Object.freeze({ metadataSha256: "1287993f09fb2d8079933ac89a85bd464122edac7b3c92621692a02484536333", sourceSha256: "cfec3aea0fec4f1c6a84a4e835edb060415266deb156893d1c10de5ddb0fae15", executableSha256: digest("unity-executable") }),
@@ -1211,7 +1211,7 @@ function platformOptions(artifactDirectory: string, events?: string[]): Framewor
           generatorVersion: "2.7.0",
           inputSha256: "007f23aea2dba06d111f66be95905adde8fe32e7d2031bf8a8c70117a8209f57",
           outputSha256: "1565d1a2d39b655eb551a729663fae7e167f1c0d6cd3f9a8c2aafe2d67348128",
-          manifestSha256: "038b46e53f833097d6311564c3d647c418ba254e1b129ada161ab40f3b0d961a",
+          manifestSha256: "e039f3f6ed52900ef70ddd8f3892bbd695bf97747903a860e2d919f124358bb6",
           generatedAtRuntime: false as const,
         },
       } : {}),

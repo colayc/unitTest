@@ -6,8 +6,8 @@ import test from "node:test";
 import { loadF1FrameworkIdentity } from "./consume.mjs";
 
 const sourceRoot = join(import.meta.dirname, "..", "..");
-const manifestSha256 = "2ed58a385314968813598dd0ca89cbdc491e7c1eda87d58a676efb61a5af5fa0";
-const cMockProvenanceSha256 = "038b46e53f833097d6311564c3d647c418ba254e1b129ada161ab40f3b0d961a";
+const manifestSha256 = "6ac0e8fd1393c0d84d882445d7ab49ca2cec6b87ee9f1e4b44cfd828125a9441";
+const cMockProvenanceSha256 = "e039f3f6ed52900ef70ddd8f3892bbd695bf97747903a860e2d919f124358bb6";
 
 async function identityFixture() {
   const root = await mkdtemp(join(tmpdir(), "utide-f1-identity-"));

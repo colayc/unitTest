@@ -7,7 +7,7 @@
   "fixtureTools": {
     "cmakeHelper": {
       "path": "sdk/cmake/UnitTestIDE.cmake",
-      "sha256": "a9e0ff8bfc676131f4812b69a7f063cf1a79a7b8d52d64845631613e5877f00b"
+      "sha256": "8f05b38b718ad6fca635ab043647099934339135652e0fcfeef62610164b748c"
     },
     "unityRunnerGenerator": {
       "name": "unity-runner-generator",

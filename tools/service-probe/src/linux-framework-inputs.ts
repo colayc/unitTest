@@ -18,7 +18,7 @@ const EXPECTED: Readonly<Record<FrameworkDependencyID, LockedFramework>> = {
   cmock: { version: "2.7.0", tag: "v2.7.0", revision: "6ea503340b1d3fdc0f2bcaf69273ba0160ec83af", url: "https://github.com/ThrowTheSwitch/CMock/archive/refs/tags/v2.7.0.tar.gz", filename: "CMock-2.7.0.tar.gz", sha256: "d96282cf0286682f7628afc31cf2e3ed6ecb66944d63e098824d98196904f04c", license: { spdx: "MIT", path: "LICENSE.txt", sha256: "f19bba29498b9405a86ab5fdc6bc58654fffb197603834e6d1423d583649b35c" }, sourceDirectory: "CMock-2.7.0", treeSha256: "19e013d70a3f032decb2e836b875a997d085ca72b34c92c91b528e6ad2e49ac3" }
 };
 const EXPECTED_FIXTURE_TOOLS = {
-  cmakeHelper: { path: "sdk/cmake/UnitTestIDE.cmake", sha256: "a9e0ff8bfc676131f4812b69a7f063cf1a79a7b8d52d64845631613e5877f00b" },
+  cmakeHelper: { path: "sdk/cmake/UnitTestIDE.cmake", sha256: "8f05b38b718ad6fca635ab043647099934339135652e0fcfeef62610164b748c" },
   unityRunnerGenerator: { name: "unity-runner-generator", schemaVersion: 1, version: "1.0.0", runnerProtocol: "utide.runner.v1" },
   cmockGenerator: { frameworkId: "cmock", version: "2.7.0", entrypoint: "lib/cmock.rb", containerImage: "docker.io/library/ruby", containerTag: "3.3.6-bookworm", containerPlatform: "linux/amd64", containerDigest: "sha256:7184e67a2927ea0749093abd199f38c1da5f371ab4bf7056b6fff50669031556", generatedAtRuntime: false }
 } as const;

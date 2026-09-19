@@ -12,7 +12,7 @@ const expectedManifest = {
   schemaVersion: 2,
   platforms: ["linux-x64", "windows-x64"],
   fixtureTools: {
-    cmakeHelper: { path: "sdk/cmake/UnitTestIDE.cmake", sha256: "a9e0ff8bfc676131f4812b69a7f063cf1a79a7b8d52d64845631613e5877f00b" },
+    cmakeHelper: { path: "sdk/cmake/UnitTestIDE.cmake", sha256: "8f05b38b718ad6fca635ab043647099934339135652e0fcfeef62610164b748c" },
     unityRunnerGenerator: { name: "unity-runner-generator", schemaVersion: 1, version: "1.0.0", runnerProtocol: "utide.runner.v1" },
     cmockGenerator: { frameworkId: "cmock", version: "2.7.0", entrypoint: "lib/cmock.rb", containerImage: "docker.io/library/ruby", containerTag: "3.3.6-bookworm", containerPlatform: "linux/amd64", containerDigest: "sha256:7184e67a2927ea0749093abd199f38c1da5f371ab4bf7056b6fff50669031556", generatedAtRuntime: false }
   },

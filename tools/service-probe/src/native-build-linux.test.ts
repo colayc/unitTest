@@ -950,13 +950,13 @@ async function createPreparedBundleFixture() {
 }
 
 const frameworkIdentity: F1FrameworkIdentity = {
-  manifestSha256: "2ed58a385314968813598dd0ca89cbdc491e7c1eda87d58a676efb61a5af5fa0",
+  manifestSha256: "6ac0e8fd1393c0d84d882445d7ab49ca2cec6b87ee9f1e4b44cfd828125a9441",
   frameworkTreeSha256: {
     cpputest: "c564fb5e4e32836dc66f46efb86edb6f1f2fa6afa255a57052031aa00fc56f04",
     unity: "abfb7b2b7aec36739a7b138490d2e9dd178cc4f00e806ed372cbb8cfe98f73ae",
     cmock: "19e013d70a3f032decb2e836b875a997d085ca72b34c92c91b528e6ad2e49ac3",
   },
-  cMockProvenanceSha256: "038b46e53f833097d6311564c3d647c418ba254e1b129ada161ab40f3b0d961a",
+  cMockProvenanceSha256: "e039f3f6ed52900ef70ddd8f3892bbd695bf97747903a860e2d919f124358bb6",
   fixtures: {
     cpputest: {
       metadataSha256: "6eef50ec7940e4a6b80891d0ff452ed503b5996de313df711ecad607185761ee",

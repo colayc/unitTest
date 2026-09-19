@@ -4,6 +4,7 @@
 *.md text eol=lf
 *.sql text eol=lf
 *.ts text eol=lf
+sdk/cmake/*.cmake text eol=lf
 tools/coverage-bundle/licenses/*.txt text eol=lf
 tools/release/staging/share/doc/readme.txt text eol=lf
 tools/release/staging/bin/unit-test-ide.exe text eol=lf

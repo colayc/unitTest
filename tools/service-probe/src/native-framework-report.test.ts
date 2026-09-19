@@ -81,7 +81,7 @@ function platformInput(platform: "linux" | "win32" = "linux"): FrameworkPlatform
               generatorVersion: "2.7.0",
               inputSha256: "007f23aea2dba06d111f66be95905adde8fe32e7d2031bf8a8c70117a8209f57",
               outputSha256: "1565d1a2d39b655eb551a729663fae7e167f1c0d6cd3f9a8c2aafe2d67348128",
-              manifestSha256: "038b46e53f833097d6311564c3d647c418ba254e1b129ada161ab40f3b0d961a",
+              manifestSha256: "e039f3f6ed52900ef70ddd8f3892bbd695bf97747903a860e2d919f124358bb6",
               generatedAtRuntime: false as const,
             },
           } : {}),
