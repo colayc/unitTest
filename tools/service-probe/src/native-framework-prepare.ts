@@ -222,7 +222,10 @@ async function prepareFrameworkRuntimeInternal(
 function classifyDiscoveryValidationError(message: string): string {
   const value = message.toLowerCase();
   const phase = value.match(/\[phase=([a-z-]+)\]/u)?.[1];
-  if (phase !== undefined) return `phase-${phase}`;
+  if (phase !== undefined) {
+    const waitKind = value.match(/discovery wait failed \[kind=([a-z0-9._-]+); process=/u)?.[1];
+    return `phase-${phase}${waitKind === undefined ? "" : `-${waitKind}`}`;
+  }
   const inspection = value.match(/workspace inspection failed \[kind=([a-z-]+)\]/u)?.[1];
   if (inspection !== undefined) return `workspace-inspection-${inspection}`;
   const selection = value.match(/workspace selection failed \[kind=([a-z-]+);diagnostics=([a-z0-9_.-]+)\]/u);
