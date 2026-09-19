@@ -493,8 +493,14 @@ jobs:
         with:
           path: .bundled-tools/cmake
           key: coverage-gate-cmake-linux-x64-v1-${{ steps.cmake-manifest.outputs.digest }}
-      - name: Prepare CMake bundle
-        run: pnpm prepare:cmake-bundle
+      - name: Prepare CMake bundle and export toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          result="$(node tools/cmake-bundle/prepare.mjs)"
+          cmake="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).executable)' "$result")"
+          echo "$(dirname "$cmake")" >> "$GITHUB_PATH"
+          echo "CMAKE=$cmake" >> "$GITHUB_ENV"
       - id: framework-manifest
         shell: bash
         run: |
