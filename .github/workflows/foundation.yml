@@ -292,6 +292,7 @@ jobs:
       - name: Prepare trusted Windows framework runtime
         env:
           UTIDE_KEEP_FRAMEWORK_FAILURE: '1'
+          UTIDE_DEBUG_FRAMEWORK: '1'
         shell: pwsh
         run: |
           Push-Location C:\utide
@@ -320,6 +321,7 @@ jobs:
             C:\utide\.native-e2e\framework-failure\**\build.ninja
             C:\utide\.native-e2e\framework-failure\**\failure-context.txt
             C:\utide\.native-e2e\framework-failure\tree.txt
+            C:\utide\.native-e2e\artifacts\windows\framework-debug-*.json
           if-no-files-found: warn
           retention-days: 1
       - name: Run required Windows framework matrix
