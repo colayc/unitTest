@@ -364,7 +364,7 @@ function projectConfiguration(
           "set(CMAKE_TRY_COMPILE_CONFIGURATION Release CACHE STRING \"\" FORCE)",
           // Embed MSVC debug information in object files so cl.exe does not
           // need to create a compiler PDB under the runner's long workspace.
-          "set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT Embedded CACHE STRING \"\" FORCE)",
+          `set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT ${options.family === "clang-cl" ? "None" : "Embedded"} CACHE STRING "" FORCE)`,
           // Keep any compiler/linker PDB fallback under the owned source tree;
           // the Service build directory also contains a 64-character profile
           // id and can exceed clang-cl's PDB path limit on hosted runners.
