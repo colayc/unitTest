@@ -302,6 +302,7 @@ jobs:
             U:\.native-e2e\framework-work\.staging\*\windows\clang-cl\cpputest\service\data\build\**\build.ninja
             U:\.native-e2e\framework-failure\**\CMake*.log
             U:\.native-e2e\framework-failure\**\build.ninja
+            U:\.native-e2e\framework-failure\**\failure-context.txt
           if-no-files-found: warn
           retention-days: 1
       - name: Run required Windows framework matrix

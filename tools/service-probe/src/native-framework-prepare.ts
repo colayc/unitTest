@@ -125,10 +125,12 @@ async function prepareFrameworkRuntimeInternal(
             discovery = await discoverFrameworkCatalog({ fixture, repositoryRoot, frameworkId, toolchainFamily: family, timeoutMs: 120_000 });
           } catch (error) {
             if (process.env.UTIDE_KEEP_FRAMEWORK_FAILURE === "1") {
-              await mkdir(join(repositoryRoot, ".native-e2e", "framework-failure", family), { recursive: true }).catch(() => undefined);
+              const failureRoot = join(repositoryRoot, ".native-e2e", "framework-failure", family, frameworkId);
+              await mkdir(failureRoot, { recursive: true }).catch(() => undefined);
+              await writeFile(join(failureRoot, "failure-context.txt"), `service=${staged.serviceDirectory}\nbuild=${join(staged.serviceDirectory, "data", "build")}\n`, { flag: "w" }).catch(() => undefined);
               await cp(
                 join(staged.serviceDirectory, "data", "build"),
-                join(repositoryRoot, ".native-e2e", "framework-failure", family, frameworkId),
+                failureRoot,
                 { recursive: true, force: true },
               ).catch(() => undefined);
             }
