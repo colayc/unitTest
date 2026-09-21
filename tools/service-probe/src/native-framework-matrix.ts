@@ -361,9 +361,10 @@ export async function discoverFrameworkCatalog(options: FrameworkDiscoveryOption
       ...discoveryObservation.events.flatMap((event) => eventFailureFragments(event)),
     ].filter((value): value is string => typeof value === "string");
     if (process.env.UTIDE_DEBUG_FRAMEWORK === "1") {
-      await mkdir(options.artifactDirectory, { recursive: true }).catch(() => undefined);
+      const debugDirectory = join(repositoryRoot, ".native-e2e", "artifacts", "windows");
+      await mkdir(debugDirectory, { recursive: true }).catch(() => undefined);
       await writeFile(
-        join(options.artifactDirectory, `framework-debug-${options.toolchainFamily}-${options.frameworkId}.json`),
+        join(debugDirectory, `framework-debug-${options.toolchainFamily}-${options.frameworkId}.json`),
         JSON.stringify({ task: discoveryTask, fragments: failureFragments }, null, 2),
         { flag: "w" },
       ).catch(() => undefined);
