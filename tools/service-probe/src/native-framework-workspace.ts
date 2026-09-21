@@ -365,9 +365,11 @@ function projectConfiguration(
           // Embed MSVC debug information in object files so cl.exe does not
           // need to create a compiler PDB under the runner's long workspace.
           "set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT Embedded CACHE STRING \"\" FORCE)",
-          "set(CMAKE_EXE_LINKER_FLAGS_DEBUG \"${CMAKE_EXE_LINKER_FLAGS_DEBUG} /DEBUG:NONE\" CACHE STRING \"\" FORCE)",
-          "set(CMAKE_SHARED_LINKER_FLAGS_DEBUG \"${CMAKE_SHARED_LINKER_FLAGS_DEBUG} /DEBUG:NONE\" CACHE STRING \"\" FORCE)",
-          "set(CMAKE_MODULE_LINKER_FLAGS_DEBUG \"${CMAKE_MODULE_LINKER_FLAGS_DEBUG} /DEBUG:NONE\" CACHE STRING \"\" FORCE)",
+          // Do not append to CMake's default /debug /INCREMENTAL pair: clang-cl
+          // may still open a linker PDB when /DEBUG:NONE appears after them.
+          "set(CMAKE_EXE_LINKER_FLAGS_DEBUG \"/DEBUG:NONE\" CACHE STRING \"\" FORCE)",
+          "set(CMAKE_SHARED_LINKER_FLAGS_DEBUG \"/DEBUG:NONE\" CACHE STRING \"\" FORCE)",
+          "set(CMAKE_MODULE_LINKER_FLAGS_DEBUG \"/DEBUG:NONE\" CACHE STRING \"\" FORCE)",
         ]
       : []),
     ...(options.frameworkId === "cpputest"
