@@ -365,6 +365,13 @@ function projectConfiguration(
           // Embed MSVC debug information in object files so cl.exe does not
           // need to create a compiler PDB under the runner's long workspace.
           "set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT Embedded CACHE STRING \"\" FORCE)",
+          // Keep any compiler/linker PDB fallback under the owned source tree;
+          // the Service build directory also contains a 64-character profile
+          // id and can exceed clang-cl's PDB path limit on hosted runners.
+          "set(_utide_pdb_root \"${CMAKE_SOURCE_DIR}/.utide-pdb\")",
+          "file(MAKE_DIRECTORY \"${_utide_pdb_root}\")",
+          "set(CMAKE_COMPILE_PDB_OUTPUT_DIRECTORY \"${_utide_pdb_root}\" CACHE PATH \"\" FORCE)",
+          "set(CMAKE_PDB_OUTPUT_DIRECTORY \"${_utide_pdb_root}\" CACHE PATH \"\" FORCE)",
           // Do not append to CMake's default /debug /INCREMENTAL pair: clang-cl
           // may still open a linker PDB when /DEBUG:NONE appears after them.
           "set(CMAKE_EXE_LINKER_FLAGS_DEBUG \"/DEBUG:NONE\" CACHE STRING \"\" FORCE)",
@@ -436,12 +443,12 @@ function projectConfiguration(
           "      set_target_properties(${_utide_target} PROPERTIES",
           "        COMPILE_PDB_NAME \"utide-${_utide_target}\"",
           "        COMPILE_PDB_NAME_DEBUG \"utide-${_utide_target}\"",
-          "        COMPILE_PDB_OUTPUT_DIRECTORY \"${CMAKE_BINARY_DIR}\"",
-          "        COMPILE_PDB_OUTPUT_DIRECTORY_DEBUG \"${CMAKE_BINARY_DIR}\"",
+          "        COMPILE_PDB_OUTPUT_DIRECTORY \"${_utide_pdb_root}\"",
+          "        COMPILE_PDB_OUTPUT_DIRECTORY_DEBUG \"${_utide_pdb_root}\"",
           "        PDB_NAME \"utide-${_utide_target}\"",
           "        PDB_NAME_DEBUG \"utide-${_utide_target}\"",
-          "        PDB_OUTPUT_DIRECTORY \"${CMAKE_BINARY_DIR}\"",
-          "        PDB_OUTPUT_DIRECTORY_DEBUG \"${CMAKE_BINARY_DIR}\")",
+          "        PDB_OUTPUT_DIRECTORY \"${_utide_pdb_root}\"",
+          "        PDB_OUTPUT_DIRECTORY_DEBUG \"${_utide_pdb_root}\")",
           "    endif()",
           "  endforeach()",
           "endif()",
@@ -461,12 +468,12 @@ function projectConfiguration(
           "      set_target_properties(${_utide_target} PROPERTIES",
           "        COMPILE_PDB_NAME \"utide-${_utide_target}\"",
           "        COMPILE_PDB_NAME_DEBUG \"utide-${_utide_target}\"",
-          "        COMPILE_PDB_OUTPUT_DIRECTORY \"${CMAKE_BINARY_DIR}\"",
-          "        COMPILE_PDB_OUTPUT_DIRECTORY_DEBUG \"${CMAKE_BINARY_DIR}\"",
+          "        COMPILE_PDB_OUTPUT_DIRECTORY \"${_utide_pdb_root}\"",
+          "        COMPILE_PDB_OUTPUT_DIRECTORY_DEBUG \"${_utide_pdb_root}\"",
           "        PDB_NAME \"utide-${_utide_target}\"",
           "        PDB_NAME_DEBUG \"utide-${_utide_target}\"",
-          "        PDB_OUTPUT_DIRECTORY \"${CMAKE_BINARY_DIR}\"",
-          "        PDB_OUTPUT_DIRECTORY_DEBUG \"${CMAKE_BINARY_DIR}\")",
+          "        PDB_OUTPUT_DIRECTORY \"${_utide_pdb_root}\"",
+          "        PDB_OUTPUT_DIRECTORY_DEBUG \"${_utide_pdb_root}\")",
           "    endif()",
           "  endforeach()",
           "endif()",
