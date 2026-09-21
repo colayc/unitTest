@@ -392,35 +392,10 @@ function projectConfiguration(
         ]
       : []),
     ...Object.entries(variables).map(([name, value]) => `set(${name} ${cmakeLiteral(value.split(sep).join("/"))})`),
-    ...(options.frameworkId === "cpputest"
-      ? [
-          // MSVC still applies MAX_PATH to the locked third-party source
-          // operands. Copy the already validated CppUTest tree into the
-          // Service-owned short build directory and configure against that
-          // copy; the staged source remains untouched and its digest is
-          // still verified before this configuration is emitted.
-          "if(WIN32)",
-          "  set(_utide_cpputest_short_root \"${CMAKE_BINARY_DIR}/utide-cpputest-src\")",
-          "  file(MAKE_DIRECTORY \"${_utide_cpputest_short_root}\")",
-          "  file(COPY \"${UNIT_TEST_IDE_CPPUTEST_ROOT}/\" DESTINATION \"${_utide_cpputest_short_root}\")",
-          "  set(UNIT_TEST_IDE_CPPUTEST_ROOT \"${_utide_cpputest_short_root}\")",
-          "endif()",
-        ]
-      : [
-          // MSVC also applies MAX_PATH to the locked Unity and CMock source
-          // operands. Use Service-owned short copies for this fixture while
-          // leaving the validated prepared trees and their digests unchanged.
-          "if(WIN32)",
-          "  set(_utide_unity_short_root \"${CMAKE_BINARY_DIR}/utide-unity-src\")",
-          "  set(_utide_cmock_short_root \"${CMAKE_BINARY_DIR}/utide-cmock-src\")",
-          "  file(MAKE_DIRECTORY \"${_utide_unity_short_root}\")",
-          "  file(MAKE_DIRECTORY \"${_utide_cmock_short_root}\")",
-          "  file(COPY \"${UNIT_TEST_IDE_UNITY_ROOT}/\" DESTINATION \"${_utide_unity_short_root}\")",
-          "  file(COPY \"${UNIT_TEST_IDE_CMOCK_ROOT}/\" DESTINATION \"${_utide_cmock_short_root}\")",
-          "  set(UNIT_TEST_IDE_UNITY_ROOT \"${_utide_unity_short_root}\")",
-          "  set(UNIT_TEST_IDE_CMOCK_ROOT \"${_utide_cmock_short_root}\")",
-          "endif()",
-        ]),
+    // The producer and consumer both run from the dedicated short physical
+    // workspace on Windows. Keep the validated prepared roots in place; an
+    // extra CMake file(COPY) pass is unnecessary and can fail when a consumer
+    // workspace is recreated from the published runtime.
     ...(options.frameworkId === "cpputest"
       ? [
           // CppUTest's legacy headers include sibling files without the
