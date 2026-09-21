@@ -292,6 +292,14 @@ jobs:
           } finally {
             Pop-Location
           }
+      - name: Capture failed Windows framework tree
+        if: ${{ failure() }}
+        shell: pwsh
+        run: |
+          $tree = 'U:\.native-e2e\framework-failure\tree.txt'
+          Get-ChildItem 'U:\.native-e2e\framework-work\.staging' -Recurse -Force -ErrorAction SilentlyContinue |
+            ForEach-Object { "$($_.FullName)`t$($_.Length)" } |
+            Out-File -FilePath $tree -Encoding utf8
       - name: Upload failed Windows framework diagnostics
         if: ${{ failure() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -303,6 +311,7 @@ jobs:
             U:\.native-e2e\framework-failure\**\CMake*.log
             U:\.native-e2e\framework-failure\**\build.ninja
             U:\.native-e2e\framework-failure\**\failure-context.txt
+            U:\.native-e2e\framework-failure\tree.txt
           if-no-files-found: warn
           retention-days: 1
       - name: Run required Windows framework matrix
