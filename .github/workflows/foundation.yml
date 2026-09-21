@@ -287,7 +287,6 @@ jobs:
             pnpm prepare:native-framework-runtime -- --platform win32 --candidate '${{ github.sha }}'
           } finally {
             Pop-Location
-            cmd /c subst U: /d
           }
       - name: Run required Windows framework matrix
         env:
@@ -295,8 +294,7 @@ jobs:
           UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED: '1'
         shell: pwsh
         run: |
-          if (Get-PSDrive -Name U -ErrorAction SilentlyContinue) { throw 'drive U: is already in use' }
-          cmd /c subst U: "$env:GITHUB_WORKSPACE"
+          if (-not (Get-PSDrive -Name U -ErrorAction SilentlyContinue)) { cmd /c subst U: "$env:GITHUB_WORKSPACE" }
           try {
             Push-Location U:\
             pnpm --filter @unit-test-ide/service-probe test:e2e:native:windows
