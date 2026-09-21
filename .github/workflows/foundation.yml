@@ -313,7 +313,8 @@ jobs:
       - name: Remove short Windows workspace drive
         if: ${{ always() }}
         shell: pwsh
-        run: if (Get-PSDrive -Name U -ErrorAction SilentlyContinue) { cmd /c subst U: /d }
+        run: |
+          if (Get-PSDrive -Name U -ErrorAction SilentlyContinue) { cmd /c subst U: /d }
 
   verify-linux:
     runs-on: ubuntu-24.04
