@@ -448,7 +448,14 @@ function eventFailureFragments(event: ProtocolTaskEvent): readonly string[] {
 
 function classifyTaskErrorMessage(message: string): string {
   const value = message.toLowerCase();
-  if (value.includes("program database") || value.includes("pdb")) return "pdb-path";
+  if (value.includes("program database") || value.includes("pdb")) {
+    // Keep the producer diagnostic path-free while distinguishing the two
+    // Windows failure families that both mention PDBs.
+    if (value.includes("c1041")) return "pdb-path-c1041";
+    if (value.includes("lnk1318")) return "pdb-path-lnk1318";
+    if (value.includes("cannot open") || value.includes("could not open")) return "pdb-path-open";
+    return "pdb-path";
+  }
   const compilerCode = value.match(/\b(?:c|d|l)\d{4}\b/u)?.[0];
   if (compilerCode !== undefined) {
     // MSVC reports this path/argument failure without naming the generated
