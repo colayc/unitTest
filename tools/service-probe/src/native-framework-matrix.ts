@@ -454,6 +454,8 @@ function classifyTaskErrorMessage(message: string): string {
     if (value.includes("c1041")) return "pdb-path-c1041";
     if (value.includes("lnk1318")) return "pdb-path-lnk1318";
     if (value.includes("cannot open") || value.includes("could not open")) return "pdb-path-open";
+    const code = value.match(/\b(?:c|l|lnk)\d{4}\b/u)?.[0];
+    if (code !== undefined) return `pdb-path-${code}`;
     return "pdb-path";
   }
   const compilerCode = value.match(/\b(?:c|d|l)\d{4}\b/u)?.[0];
