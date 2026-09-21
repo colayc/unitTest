@@ -451,6 +451,12 @@ function classifyTaskErrorMessage(message: string): string {
   if (value.includes("program database") || value.includes("pdb")) return "pdb-path";
   const compilerCode = value.match(/\b(?:c|d|l)\d{4}\b/u)?.[0];
   if (compilerCode !== undefined) {
+    // MSVC reports this path/argument failure without naming the generated
+    // output file. Keep the classification stable and path-free so CI can
+    // distinguish it from a missing include or source file.
+    if (compilerCode === "c1083" && value.includes("compiler generated file") && value.includes("invalid argument")) {
+      return "compiler-c1083-invalid-argument";
+    }
     const missing = value.match(/cannot open [^:]{0,64}file:\s*["']?([a-z0-9_.-]+)/u)?.[1];
     return `compiler-${compilerCode}${missing === undefined ? "" : `-${missing}`}`;
   }

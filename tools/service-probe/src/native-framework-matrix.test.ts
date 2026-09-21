@@ -1205,6 +1205,22 @@ for (const mutation of ["partial", "framework", "container", "family", "artifact
   });
 }
 
+test("discovery classifies MSVC generated-file C1083 without exposing paths", async () => {
+  const fixture = new FakeFixture();
+  const discover = fixture.client.discoverTests.bind(fixture.client);
+  fixture.client.discoverTests = async (value) => {
+    const task = await discover(value);
+    fixture.client.task(task.taskId as string)!.outcome = "failed";
+    fixture.client.task(task.taskId as string)!.errorMessage =
+      'fatal error C1083: Cannot open compiler generated file: "": Invalid argument';
+    return task;
+  };
+  await assert.rejects(
+    discoverFrameworkCatalog({ fixture: fixture as never, frameworkId: "cpputest", toolchainFamily: "clang", timeoutMs: 100 }),
+    /compiler-c1083-invalid-argument/u,
+  );
+});
+
 function platformOptions(artifactDirectory: string, events?: string[]): FrameworkPlatformOptions {
   const makeFramework = (family: FrameworkToolchainFamily, id: FrameworkId) => {
     const fixture = new FakeFixture(id, family, () => events?.push(`framework:${family}:${id}`));
