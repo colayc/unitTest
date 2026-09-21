@@ -275,7 +275,20 @@ jobs:
       - name: Build Service
         run: node tools/service-probe/build-service.mjs
       - name: Prepare trusted Windows framework runtime
-        run: pnpm prepare:native-framework-runtime -- --platform win32 --candidate '${{ github.sha }}'
+        shell: pwsh
+        run: |
+          # Hosted Windows runners may not expose 8.3 aliases. Run only the
+          # producer from a short drive mapping so clang-cl sees bounded paths;
+          # the mapping targets the same checkout and is removed unconditionally.
+          if (Get-PSDrive -Name U -ErrorAction SilentlyContinue) { throw 'drive U: is already in use' }
+          cmd /c subst U: "$env:GITHUB_WORKSPACE"
+          try {
+            Push-Location U:\
+            pnpm prepare:native-framework-runtime -- --platform win32 --candidate '${{ github.sha }}'
+          } finally {
+            Pop-Location
+            cmd /c subst U: /d
+          }
       - name: Run required Windows framework matrix
         env:
           UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS: msvc,clang-cl
