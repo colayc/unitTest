@@ -354,28 +354,22 @@ function projectConfiguration(
     // Locked framework trees include legacy CMake policy declarations. CMake
     // 4.x requires an explicit policy floor before entering those projects.
     "set(CMAKE_POLICY_VERSION_MINIMUM 3.5)",
+    "project(unit_test_ide_framework_workspace LANGUAGES C CXX)",
     ...(options.platform === "win32" && (options.family === "msvc" || options.family === "clang-cl")
       ? [
-          // Keep the controlled fixture build independent of PDB output. The
-          // explicit flags cover clang-cl as well as MSVC and affect only
-          // generated staging input; compiler identity and the fixed
-          // Service-owned build profile stay unchanged.
-          // CMake requires this limit to be at least 128; lower values are
-          // ignored, which would leave long MSVC object paths unchanged on
-          // runners without 8.3 short-name support.
+          // Apply these after project() so compiler initialization cannot
+          // replace the cache values. CMake requires OBJECT_PATH_MAX >= 128;
+          // smaller values are ignored on runners without 8.3 names.
           "set(CMAKE_OBJECT_PATH_MAX 128 CACHE STRING \"\" FORCE)",
           "set(CMAKE_TRY_COMPILE_CONFIGURATION Release CACHE STRING \"\" FORCE)",
           // Embed MSVC debug information in object files so cl.exe does not
-          // need to create a compiler PDB under the runner's long workspace
-          // path. This avoids C1083 invalid-argument failures on volumes
-          // where 8.3 short names are unavailable.
+          // need to create a compiler PDB under the runner's long workspace.
           "set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT Embedded CACHE STRING \"\" FORCE)",
           "set(CMAKE_EXE_LINKER_FLAGS_DEBUG \"${CMAKE_EXE_LINKER_FLAGS_DEBUG} /DEBUG:NONE\" CACHE STRING \"\" FORCE)",
           "set(CMAKE_SHARED_LINKER_FLAGS_DEBUG \"${CMAKE_SHARED_LINKER_FLAGS_DEBUG} /DEBUG:NONE\" CACHE STRING \"\" FORCE)",
           "set(CMAKE_MODULE_LINKER_FLAGS_DEBUG \"${CMAKE_MODULE_LINKER_FLAGS_DEBUG} /DEBUG:NONE\" CACHE STRING \"\" FORCE)",
         ]
       : []),
-    "project(unit_test_ide_framework_workspace LANGUAGES C CXX)",
     ...(options.frameworkId === "cpputest"
       ? [
           // CppUTest 4.0 injects a forced MemoryLeakDetector header and
