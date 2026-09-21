@@ -429,8 +429,8 @@ function projectConfiguration(
     "add_subdirectory(framework-matrix)",
     ...(options.frameworkId === "unity"
       ? [
-          // Keep Unity compile PDB names explicit so generated runner object
-          // paths remain deterministic in the Service-owned build root.
+          // Keep any generator-emitted compile PDB fallback in the short,
+          // Service-owned build root even when a toolchain ignores Embedded.
           "if(MSVC)",
           "  foreach(_utide_target utide_unity utide_cmock phase9_unity phase9_unity_malformed phase9_matrix_opaque)",
           "    if(TARGET ${_utide_target})",
