@@ -293,6 +293,7 @@ jobs:
         env:
           UTIDE_KEEP_FRAMEWORK_FAILURE: '1'
           UTIDE_DEBUG_FRAMEWORK: '1'
+          UT_DEBUG_PROCESS_HOST_FAILURES: '1'
         shell: pwsh
         run: |
           Push-Location C:\utide
@@ -329,6 +330,7 @@ jobs:
           UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS: msvc,clang-cl
           UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED: '1'
           UTIDE_DEBUG_FRAMEWORK: '1'
+          UT_DEBUG_PROCESS_HOST_FAILURES: '1'
         shell: pwsh
         run: |
           Push-Location C:\utide

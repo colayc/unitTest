@@ -52,7 +52,7 @@ const EVIDENCE_KEYS = [
 ] as const;
 
 type FrameworkFixture = Pick<TaskServiceFixture, "client" | "kill" | "restart"> &
-  Partial<Pick<TaskServiceFixture, "processState">>;
+  Partial<Pick<TaskServiceFixture, "processState" | "debugDiagnostics">>;
 
 export interface F1FrameworkFixtureIdentity {
   readonly metadataSha256: string;
@@ -365,7 +365,12 @@ export async function discoverFrameworkCatalog(options: FrameworkDiscoveryOption
       await mkdir(debugDirectory, { recursive: true }).catch(() => undefined);
       await writeFile(
         join(debugDirectory, `framework-debug-${options.toolchainFamily}-${options.frameworkId}.json`),
-        JSON.stringify({ task: discoveryTask, fragments: failureFragments, events: discoveryObservation.events }, null, 2),
+        JSON.stringify({
+          task: discoveryTask,
+          fragments: failureFragments,
+          events: discoveryObservation.events,
+          serviceDiagnostics: options.fixture.debugDiagnostics,
+        }, null, 2),
         { flag: "w" },
       ).catch(() => undefined);
     }

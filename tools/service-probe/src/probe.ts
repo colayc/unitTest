@@ -470,6 +470,12 @@ export class TaskServiceFixture {
     return child.exitCode === null && child.signalCode === null ? "running" : "exited";
   }
 
+  /** Returns redacted Service diagnostics for bounded native-E2E failure evidence. */
+  get debugDiagnostics(): string {
+    const instance = this.#instance;
+    return instance === undefined ? "service instance unavailable" : diagnostics(instance);
+  }
+
   pauseNextReconnect(): ReconnectGate {
     this.#assertAvailable();
     if (!this.#instance) throw new Error("task service fixture is stopped");
