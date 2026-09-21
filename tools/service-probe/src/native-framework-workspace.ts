@@ -124,10 +124,23 @@ export async function stageFrameworkWorkspace(
     await mkdir(dirname(generatorDestination), { recursive: true, mode: 0o700 });
     await copyFile(unityRunnerGenerator, generatorDestination);
     const stagedInputs = {
-      cpputest: join(preparedRoot, "cpputest"),
-      unity: join(preparedRoot, "unity"),
-      cmock: join(preparedRoot, "cmock"),
+      // MSVC hashes long source-relative object paths into a C_/... suffix;
+      // even the dedicated C:\\utide workspace can exceed its 128-character
+      // object-path limit when the validated inputs live below workspace/.
+      // Keep the canonical workspace copies for ownership/evidence, and point
+      // Windows CMake at a second Service-owned copy directly below the stage
+      // root so compiler input paths remain short enough for MSVC.
+      cpputest: options.platform === "win32" ? join(stageRoot, "i", "cpputest") : join(preparedRoot, "cpputest"),
+      unity: options.platform === "win32" ? join(stageRoot, "i", "unity") : join(preparedRoot, "unity"),
+      cmock: options.platform === "win32" ? join(stageRoot, "i", "cmock") : join(preparedRoot, "cmock"),
     } as const;
+    if (options.platform === "win32") {
+      const shortPreparedRoot = join(stageRoot, "i");
+      await mkdir(shortPreparedRoot, { recursive: true, mode: 0o700 });
+      for (const [frameworkId, source] of Object.entries(preparedFrameworkRoots) as Array<[keyof typeof preparedFrameworkRoots, string]>) {
+        await copyOwnedDirectory(source, join(shortPreparedRoot, frameworkId));
+      }
+    }
     await writeCanonical(join(workspaceRoot, ".unit-test-ide", "workspace.json"), workspaceConfiguration(options, contract));
     // Both the locked F1 fixtures and the matrix overlay must be descendants of
     // CMAKE_SOURCE_DIR; the Unity generator deliberately rejects source escapes.
