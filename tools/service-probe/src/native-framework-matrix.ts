@@ -453,7 +453,11 @@ function classifyTaskErrorMessage(message: string): string {
     // Windows failure families that both mention PDBs.
     if (value.includes("c1041")) return "pdb-path-c1041";
     if (value.includes("lnk1318")) return "pdb-path-lnk1318";
-    if (value.includes("cannot open") || value.includes("could not open")) return "pdb-path-open";
+    if (/\b(?:cannot|could not|unable to|failed to)\s+open\b/u.test(value)) return "pdb-path-open";
+    if (value.includes("too long") || value.includes("exceeds")) return "pdb-path-too-long";
+    if (value.includes("sharing") || value.includes("locked")) return "pdb-path-sharing";
+    if (value.includes("access denied")) return "pdb-path-access-denied";
+    if (value.includes("invalid")) return "pdb-path-invalid";
     const code = value.match(/\b(?:c|l|lnk)\d{4}\b/u)?.[0];
     if (code !== undefined) return `pdb-path-${code}`;
     return "pdb-path";
