@@ -675,6 +675,7 @@ func (c *Coordinator) Succeeded(
 	)
 	if err != nil {
 		if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") == "1" {
+			fmt.Fprintf(os.Stderr, "cmake file api read reply failed: %v\\n", err)
 			return fmt.Errorf("%w: %s (%v)", ErrConfigureRequired, classifyConfigureReplyFailure(err), err)
 		}
 		return ErrConfigureRequired
