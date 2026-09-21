@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { collectAuditedFrameworkBenchmark } from "./native-framework-benchmark.js";
@@ -124,6 +124,13 @@ async function prepareFrameworkRuntimeInternal(
           try {
             discovery = await discoverFrameworkCatalog({ fixture, repositoryRoot, frameworkId, toolchainFamily: family, timeoutMs: 120_000 });
           } catch (error) {
+            if (process.env.UTIDE_KEEP_FRAMEWORK_FAILURE === "1") {
+              await cp(
+                join(staged.serviceDirectory, "data", "build"),
+                join(repositoryRoot, ".native-e2e", "framework-failure", family, frameworkId),
+                { recursive: true, force: true },
+              ).catch(() => undefined);
+            }
             const message = error instanceof Error ? error.message : String(error);
             const taskOutcome = message.match(/discovery finished with ([a-z-]+)/u)?.[1];
             const taskCode = message.match(/\[code=([a-z0-9_-]+)\]/u)?.[1];
