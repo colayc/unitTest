@@ -365,7 +365,7 @@ export async function discoverFrameworkCatalog(options: FrameworkDiscoveryOption
       await mkdir(debugDirectory, { recursive: true }).catch(() => undefined);
       await writeFile(
         join(debugDirectory, `framework-debug-${options.toolchainFamily}-${options.frameworkId}.json`),
-        JSON.stringify({ task: discoveryTask, fragments: failureFragments }, null, 2),
+        JSON.stringify({ task: discoveryTask, fragments: failureFragments, events: discoveryObservation.events }, null, 2),
         { flag: "w" },
       ).catch(() => undefined);
     }

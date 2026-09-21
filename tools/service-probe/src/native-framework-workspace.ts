@@ -377,9 +377,11 @@ function projectConfiguration(
           // smaller values are ignored on runners without 8.3 names.
           "set(CMAKE_OBJECT_PATH_MAX 128 CACHE STRING \"\" FORCE)",
           "set(CMAKE_TRY_COMPILE_CONFIGURATION Release CACHE STRING \"\" FORCE)",
-          // Embed MSVC debug information in object files so cl.exe does not
-          // need to create a compiler PDB under the runner's long workspace.
-          "set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT Embedded CACHE STRING \"\" FORCE)",
+          // Keep cl.exe debug information in objects, but disable clang-cl's
+          // compiler-PDB mode entirely: clang-cl still emits /Fd paths for
+          // Embedded and can report an infrastructure failure before Ninja
+          // returns its underlying compiler diagnostic.
+          `set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT ${options.family === "clang-cl" ? "None" : "Embedded"} CACHE STRING "" FORCE)`,
           // Keep any compiler/linker PDB fallback under the owned source tree;
           // the Service build directory also contains a 64-character profile
           // id and can exceed clang-cl's PDB path limit on hosted runners.
