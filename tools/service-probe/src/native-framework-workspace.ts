@@ -360,7 +360,10 @@ function projectConfiguration(
           // explicit flags cover clang-cl as well as MSVC and affect only
           // generated staging input; compiler identity and the fixed
           // Service-owned build profile stay unchanged.
-          "set(CMAKE_OBJECT_PATH_MAX 32 CACHE STRING \"\" FORCE)",
+          // CMake requires this limit to be at least 128; lower values are
+          // ignored, which would leave long MSVC object paths unchanged on
+          // runners without 8.3 short-name support.
+          "set(CMAKE_OBJECT_PATH_MAX 128 CACHE STRING \"\" FORCE)",
           "set(CMAKE_TRY_COMPILE_CONFIGURATION Release CACHE STRING \"\" FORCE)",
           // Embed MSVC debug information in object files so cl.exe does not
           // need to create a compiler PDB under the runner's long workspace
