@@ -274,30 +274,38 @@ jobs:
           go -C apps/test-service build -trimpath -o ../../build/unity-runner-generator.exe ./cmd/unity-runner-generator
       - name: Build Service
         run: node tools/service-probe/build-service.mjs
+      - name: Prepare short Windows framework workspace
+        shell: pwsh
+        run: |
+          $shortRoot = 'C:\utide'
+          if (Test-Path -LiteralPath $shortRoot) { throw 'C:\utide is already in use' }
+          New-Item -ItemType Directory -Path $shortRoot | Out-Null
+          robocopy $env:GITHUB_WORKSPACE $shortRoot /E /XD `
+            (Join-Path $env:GITHUB_WORKSPACE '.git') `
+            (Join-Path $env:GITHUB_WORKSPACE 'node_modules') `
+            (Join-Path $env:GITHUB_WORKSPACE '.native-e2e') | Out-Null
+          if ($LASTEXITCODE -gt 7) { throw "short workspace copy failed with robocopy code $LASTEXITCODE" }
+          Push-Location $shortRoot
+          pnpm install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { throw "short workspace install failed with exit code $LASTEXITCODE" }
+          Pop-Location
       - name: Prepare trusted Windows framework runtime
         env:
           UTIDE_KEEP_FRAMEWORK_FAILURE: '1'
         shell: pwsh
         run: |
-          # Hosted Windows runners may not expose 8.3 aliases. Run only the
-          # producer from a short drive mapping so clang-cl sees bounded paths;
-          # the mapping targets the same checkout and is removed unconditionally.
-          if (Get-PSDrive -Name U -ErrorAction SilentlyContinue) { throw 'drive U: is already in use' }
-          cmd /c subst U: "$env:GITHUB_WORKSPACE"
-          try {
-            Push-Location U:\
-            node U:\tools\service-probe\build-service.mjs
-            pnpm exec tsc -b tools/service-probe/tsconfig.json --force
-            node U:\tools\service-probe\dist\native-framework-prepare.js --platform win32 --candidate '${{ github.sha }}'
-          } finally {
-            Pop-Location
-          }
+          Push-Location C:\utide
+          node C:\utide\tools\service-probe\build-service.mjs
+          pnpm exec tsc -b tools/service-probe/tsconfig.json --force
+          node C:\utide\tools\service-probe\dist\native-framework-prepare.js --platform win32 --candidate '${{ github.sha }}'
+          Pop-Location
       - name: Capture failed Windows framework tree
         if: ${{ failure() }}
         shell: pwsh
         run: |
-          $tree = 'U:\.native-e2e\framework-failure\tree.txt'
-          Get-ChildItem 'U:\.native-e2e\framework-work\.staging' -Recurse -Force -ErrorAction SilentlyContinue |
+          $tree = 'C:\utide\.native-e2e\framework-failure\tree.txt'
+          New-Item -ItemType Directory -Force -Path (Split-Path $tree) | Out-Null
+          Get-ChildItem 'C:\utide\.native-e2e\framework-work\.staging' -Recurse -Force -ErrorAction SilentlyContinue |
             ForEach-Object { "$($_.FullName)`t$($_.Length)" } |
             Out-File -FilePath $tree -Encoding utf8
       - name: Upload failed Windows framework diagnostics
@@ -306,12 +314,12 @@ jobs:
         with:
           name: native-framework-windows-failure
           path: |
-            U:\.native-e2e\framework-work\.staging\*\windows\clang-cl\cpputest\service\data\build\**\CMake*.log
-            U:\.native-e2e\framework-work\.staging\*\windows\clang-cl\cpputest\service\data\build\**\build.ninja
-            U:\.native-e2e\framework-failure\**\CMake*.log
-            U:\.native-e2e\framework-failure\**\build.ninja
-            U:\.native-e2e\framework-failure\**\failure-context.txt
-            U:\.native-e2e\framework-failure\tree.txt
+            C:\utide\.native-e2e\framework-work\.staging\*\windows\clang-cl\cpputest\service\data\build\**\CMake*.log
+            C:\utide\.native-e2e\framework-work\.staging\*\windows\clang-cl\cpputest\service\data\build\**\build.ninja
+            C:\utide\.native-e2e\framework-failure\**\CMake*.log
+            C:\utide\.native-e2e\framework-failure\**\build.ninja
+            C:\utide\.native-e2e\framework-failure\**\failure-context.txt
+            C:\utide\.native-e2e\framework-failure\tree.txt
           if-no-files-found: warn
           retention-days: 1
       - name: Run required Windows framework matrix
@@ -320,27 +328,23 @@ jobs:
           UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED: '1'
         shell: pwsh
         run: |
-          if (-not (Get-PSDrive -Name U -ErrorAction SilentlyContinue)) { cmd /c subst U: "$env:GITHUB_WORKSPACE" }
-          try {
-            Push-Location U:\
-            node U:\tools\service-probe\build-service.mjs
-            pnpm exec tsc -b tools/service-probe/tsconfig.json --force
-            node U:\tools\service-probe\dist\native-run.js --platform win32
-          } finally {
-            Pop-Location
-          }
+          Push-Location C:\utide
+          node C:\utide\tools\service-probe\build-service.mjs
+          pnpm exec tsc -b tools/service-probe/tsconfig.json --force
+          node C:\utide\tools\service-probe\dist\native-run.js --platform win32
+          Pop-Location
       - name: Upload P4 Windows framework report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: native-framework-windows
-          path: U:\.native-e2e\artifacts\windows\framework-report.json
+          path: C:\utide\.native-e2e\artifacts\windows\framework-report.json
           if-no-files-found: error
           retention-days: 14
-      - name: Remove short Windows workspace drive
+      - name: Remove short Windows workspace
         if: ${{ always() }}
         shell: pwsh
         run: |
-          if (Get-PSDrive -Name U -ErrorAction SilentlyContinue) { cmd /c subst U: /d }
+          if (Test-Path -LiteralPath 'C:\utide') { Remove-Item -LiteralPath 'C:\utide' -Recurse -Force }
 
   verify-linux:
     runs-on: ubuntu-24.04
