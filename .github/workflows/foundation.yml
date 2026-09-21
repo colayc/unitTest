@@ -284,7 +284,9 @@ jobs:
           cmd /c subst U: "$env:GITHUB_WORKSPACE"
           try {
             Push-Location U:\
-            pnpm prepare:native-framework-runtime -- --platform win32 --candidate '${{ github.sha }}'
+            node U:\tools\service-probe\build-service.mjs
+            pnpm exec tsc -b tools/service-probe/tsconfig.json --force
+            node U:\tools\service-probe\dist\native-framework-prepare.js --platform win32 --candidate '${{ github.sha }}'
           } finally {
             Pop-Location
           }
@@ -297,7 +299,9 @@ jobs:
           if (-not (Get-PSDrive -Name U -ErrorAction SilentlyContinue)) { cmd /c subst U: "$env:GITHUB_WORKSPACE" }
           try {
             Push-Location U:\
-            pnpm --filter @unit-test-ide/service-probe test:e2e:native:windows
+            node U:\tools\service-probe\build-service.mjs
+            pnpm exec tsc -b tools/service-probe/tsconfig.json --force
+            node U:\tools\service-probe\dist\native-run.js --platform win32
           } finally {
             Pop-Location
           }
