@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { cp, lstat, mkdir, readFile, realpath, rm } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { startService, type TaskServiceFixture } from "./probe.js";
 import type { FrameworkPlatform } from "./native-framework-report.js";
 import type {
@@ -76,11 +76,13 @@ async function loadLockedFrameworkRuntime(
   const consumptionRoot = join(lockRoot, "consumer");
   await mkdir(consumptionRoot, { mode: 0o700 });
   const consumptionIdentity = await lstat(consumptionRoot);
+  const canonicalLockRoot = await realpath(lockRoot);
+  const canonicalConsumptionRoot = join(canonicalLockRoot, "consumer");
   const cleanup = async () => {
     const current = await lstat(consumptionRoot);
     if (!current.isDirectory() || current.isSymbolicLink() ||
         current.dev !== consumptionIdentity.dev || current.ino !== consumptionIdentity.ino ||
-        await realpath(consumptionRoot) !== resolve(consumptionRoot) ||
+        await realpath(consumptionRoot) !== canonicalConsumptionRoot ||
         await readFile(join(lockRoot, "owner"), "utf8") !== lockOwner) {
       throw new Error("framework consumer ownership changed");
     }
@@ -101,7 +103,11 @@ async function loadLockedFrameworkRuntime(
           recursive: true, force: false, errorOnExist: true,
           filter: async (source) => {
             const info = await lstat(source);
-            if (info.isSymbolicLink() || (!info.isDirectory() && !info.isFile()) || await realpath(source) !== resolve(source)) {
+            const canonicalSource = await realpath(source);
+            const canonicalBase = await realpath(publishedBase);
+            const child = relative(canonicalBase, canonicalSource);
+            if (info.isSymbolicLink() || (!info.isDirectory() && !info.isFile()) ||
+                child === ".." || child.startsWith(`..${sep}`) || isAbsolute(child)) {
               throw new Error("framework consumer input is unsafe");
             }
             // Build-profile identities include the workspace path. A fresh Service

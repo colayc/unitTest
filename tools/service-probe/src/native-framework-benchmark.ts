@@ -40,9 +40,12 @@ export async function collectAuditedFrameworkBenchmark(repositoryRoot: string): 
   try {
     if (arguments.length !== 1 || typeof repositoryRoot !== "string" || !isAbsolute(repositoryRoot) ||
         resolve(repositoryRoot) !== resolve(import.meta.dirname, "../../..")) throw new Error("invalid benchmark root");
+    const repositoryRealpath = await realpath(repositoryRoot);
     const source = join(repositoryRoot, "apps/test-service/internal/testdomain/catalog_benchmark_test.go");
+    const sourceRealpath = await realpath(source);
+    const expectedSourceRealpath = join(repositoryRealpath, "apps/test-service/internal/testdomain/catalog_benchmark_test.go");
     const info = await lstat(source);
-    if (!info.isFile() || info.isSymbolicLink() || await realpath(source) !== source ||
+    if (!info.isFile() || info.isSymbolicLink() || sourceRealpath !== expectedSourceRealpath ||
         createHash("sha256").update((await readFile(source, "utf8")).replaceAll("\r\n", "\n")).digest("hex") !== benchmarkSourceSha256) {
       throw new Error("invalid benchmark source");
     }

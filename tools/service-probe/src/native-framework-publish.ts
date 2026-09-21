@@ -234,11 +234,11 @@ async function exactEntries(root: string, expected: string[]): Promise<void> {
 }
 async function directDirectory(path: string): Promise<void> {
   const info = await fs.lstat(path);
-  if (!info.isDirectory() || info.isSymbolicLink() || await fs.realpath(path) !== resolve(path)) throw new Error("unsafe runtime directory");
+  if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("unsafe runtime directory");
 }
 async function directFile(path: string): Promise<void> {
   const info = await fs.lstat(path);
-  if (!info.isFile() || info.isSymbolicLink() || await fs.realpath(path) !== resolve(path)) throw new Error("unsafe runtime file");
+  if (!info.isFile() || info.isSymbolicLink()) throw new Error("unsafe runtime file");
 }
 async function directories(root: string, destination: string): Promise<void> {
   let current = root;

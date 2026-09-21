@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { copyFile, cp, lstat, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { FrameworkId, FrameworkPlatform, FrameworkToolchainFamily } from "./native-framework-report.js";
@@ -54,7 +55,8 @@ export async function stageFrameworkWorkspace(
   options: FrameworkWorkspaceStageOptions,
 ): Promise<StagedFrameworkWorkspace> {
   validateClosedOptions(options);
-  const repositoryRoot = await requireDirectDirectory(resolve(options.repositoryRoot), "repository root");
+  const repositoryRoot = resolve(options.repositoryRoot);
+  await requireDirectDirectory(repositoryRoot, "repository root");
   const stageRoot = resolve(options.stageRoot);
   const platformName = options.platform === "win32" ? "windows" : "linux";
   const expectedStageRoot = join(
@@ -512,8 +514,9 @@ function parseContract(bytes: Uint8Array, frameworkId: FrameworkId): MatrixNames
 
 async function requireContainedDirectory(root: string, value: string, label: string): Promise<string> {
   if (!isAbsolute(value)) throw new Error(`${label} must be absolute`);
-  const path = await requireDirectDirectory(resolve(value), label);
-  requireContained(root, path, label);
+  const path = resolve(value);
+  await requireDirectDirectory(path, label);
+  requireContained(await realpath(root), await realpath(path), label);
   return path;
 }
 
@@ -522,9 +525,8 @@ async function requireContainedFile(root: string, value: string, label: string):
   const path = resolve(value);
   await requireDirectFile(path, label);
   const canonical = await realpath(path);
-  if (canonical !== path) throw new Error(`${label} is not a direct regular file`);
-  requireContained(root, canonical, label);
-  return canonical;
+  requireContained(await realpath(root), canonical, label);
+  return path;
 }
 
 async function requireDirectDirectory(path: string, label: string): Promise<string> {
@@ -547,6 +549,7 @@ function requireContained(root: string, path: string, label: string): void {
 
 async function createVerifiedStageAncestors(repositoryRoot: string, parent: string): Promise<void> {
   requireContained(repositoryRoot, parent, "staging ancestor");
+  const canonicalRepositoryRoot = await realpath(repositoryRoot);
   const components = relative(repositoryRoot, parent).split(sep);
   let current = repositoryRoot;
   for (const component of components) {
@@ -559,14 +562,18 @@ async function createVerifiedStageAncestors(repositoryRoot: string, parent: stri
     if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("staging ancestor is a symbolic link or unsafe");
     const canonical = await realpath(current);
     if (!samePath(canonical, current)) throw new Error("staging ancestor is not a direct directory");
-    requireContained(repositoryRoot, canonical, "staging ancestor");
+    requireContained(canonicalRepositoryRoot, canonical, "staging ancestor");
   }
 }
 
 function samePath(left: string, right: string): boolean {
+  const physical = (value: string): string => {
+    try { return realpathSync.native(resolve(value)); }
+    catch { return resolve(value); }
+  };
   return process.platform === "win32"
-    ? resolve(left).toLowerCase() === resolve(right).toLowerCase()
-    : resolve(left) === resolve(right);
+    ? physical(left).toLowerCase() === physical(right).toLowerCase()
+    : physical(left) === physical(right);
 }
 
 async function writeCanonical(path: string, value: unknown): Promise<void> {
