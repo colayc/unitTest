@@ -326,6 +326,7 @@ jobs:
         env:
           UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS: msvc,clang-cl
           UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED: '1'
+          UTIDE_DEBUG_FRAMEWORK: '1'
         shell: pwsh
         run: |
           Push-Location C:\utide
@@ -333,6 +334,14 @@ jobs:
           pnpm exec tsc -b tools/service-probe/tsconfig.json --force
           node C:\utide\tools\service-probe\dist\native-run.js --platform win32
           Pop-Location
+      - name: Upload failed Windows matrix diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: native-framework-windows-matrix-failure
+          path: C:\utide\.native-e2e\artifacts\windows\framework-debug-*.json
+          if-no-files-found: warn
+          retention-days: 1
       - name: Upload P4 Windows framework report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:

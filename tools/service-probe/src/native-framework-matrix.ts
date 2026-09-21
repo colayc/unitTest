@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { isAbsolute, join, normalize, resolve, sep } from "node:path";
 import type {
   BuildProfileElement,
@@ -356,10 +356,19 @@ export async function discoverFrameworkCatalog(options: FrameworkDiscoveryOption
     const errorCode = typeof discoveryTask.errorCode === "string" && /^[a-z0-9_-]+$/u.test(discoveryTask.errorCode)
       ? discoveryTask.errorCode
       : "unknown";
-    const errorDetail = classifyTaskErrorMessage([
+    const failureFragments = [
       discoveryTask.errorMessage,
       ...discoveryObservation.events.flatMap((event) => eventFailureFragments(event)),
-    ].filter((value): value is string => typeof value === "string").join("\n"));
+    ].filter((value): value is string => typeof value === "string");
+    if (process.env.UTIDE_DEBUG_FRAMEWORK === "1") {
+      await mkdir(options.artifactDirectory, { recursive: true }).catch(() => undefined);
+      await writeFile(
+        join(options.artifactDirectory, `framework-debug-${options.toolchainFamily}-${options.frameworkId}.json`),
+        JSON.stringify({ task: discoveryTask, fragments: failureFragments }, null, 2),
+        { flag: "w" },
+      ).catch(() => undefined);
+    }
+    const errorDetail = classifyTaskErrorMessage(failureFragments.join("\n"));
       throw new Error(`${options.frameworkId} discovery finished with ${String(discoveryTask.outcome)} [code=${errorCode}; detail=${errorDetail}]`);
   }
   phase = "catalog-read";
