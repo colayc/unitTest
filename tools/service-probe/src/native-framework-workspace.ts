@@ -388,7 +388,7 @@ function projectConfiguration(
           // Service-owned short build directory and configure against that
           // copy; the staged source remains untouched and its digest is
           // still verified before this configuration is emitted.
-          "if(MSVC)",
+          "if(WIN32)",
           "  set(_utide_cpputest_short_root \"${CMAKE_BINARY_DIR}/utide-cpputest-src\")",
           "  file(MAKE_DIRECTORY \"${_utide_cpputest_short_root}\")",
           "  file(COPY \"${UNIT_TEST_IDE_CPPUTEST_ROOT}/\" DESTINATION \"${_utide_cpputest_short_root}\")",
@@ -399,7 +399,7 @@ function projectConfiguration(
           // MSVC also applies MAX_PATH to the locked Unity and CMock source
           // operands. Use Service-owned short copies for this fixture while
           // leaving the validated prepared trees and their digests unchanged.
-          "if(MSVC)",
+          "if(WIN32)",
           "  set(_utide_unity_short_root \"${CMAKE_BINARY_DIR}/utide-unity-src\")",
           "  set(_utide_cmock_short_root \"${CMAKE_BINARY_DIR}/utide-cmock-src\")",
           "  file(MAKE_DIRECTORY \"${_utide_unity_short_root}\")",
@@ -416,7 +416,7 @@ function projectConfiguration(
           // `CppUTest/` prefix. Keep that sibling directory explicit so the
           // MSVC frontend resolves the same locked headers as clang-cl.
           "include_directories(${UNIT_TEST_IDE_CPPUTEST_ROOT}/include/CppUTest)",
-          "if(MSVC)",
+          "if(WIN32)",
           "  include_directories(BEFORE \"${UNIT_TEST_IDE_CPPUTEST_ROOT}/include/CppUTest\")",
           "  include_directories(BEFORE \"${UNIT_TEST_IDE_CPPUTEST_ROOT}/include\")",
           "endif()",
@@ -428,7 +428,7 @@ function projectConfiguration(
       ? [
           // Keep any generator-emitted compile PDB fallback in the short,
           // Service-owned build root even when a toolchain ignores Embedded.
-          "if(MSVC)",
+          "if(WIN32)",
           "  foreach(_utide_target utide_unity utide_cmock phase9_unity phase9_unity_malformed phase9_matrix_opaque)",
           "    if(TARGET ${_utide_target})",
           "      set_target_properties(${_utide_target} PROPERTIES",
@@ -447,7 +447,7 @@ function projectConfiguration(
           // warning-as-error policy for product code, but prevent new
           // compiler-version warnings in this locked third-party fixture
           // from failing the producer build.
-          "if(MSVC)",
+          "if(WIN32)",
           "  foreach(_utide_target CppUTest CppUTestExt CppUTestTests CppUTestExtTests phase9_cpputest phase9_cpputest_malformed phase9_matrix_opaque)",
           "    if(TARGET ${_utide_target})",
           "      target_compile_options(${_utide_target} PRIVATE /WX-)",
