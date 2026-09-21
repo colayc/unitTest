@@ -275,6 +275,8 @@ jobs:
       - name: Build Service
         run: node tools/service-probe/build-service.mjs
       - name: Prepare trusted Windows framework runtime
+        env:
+          UTIDE_KEEP_FRAMEWORK_FAILURE: '1'
         shell: pwsh
         run: |
           # Hosted Windows runners may not expose 8.3 aliases. Run only the
@@ -290,6 +292,16 @@ jobs:
           } finally {
             Pop-Location
           }
+      - name: Upload failed Windows framework diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: native-framework-windows-failure
+          path: |
+            U:\.native-e2e\framework-work\.staging\*\windows\clang-cl\cpputest\service\data\build\**\CMake*.log
+            U:\.native-e2e\framework-work\.staging\*\windows\clang-cl\cpputest\service\data\build\**\build.ninja
+          if-no-files-found: warn
+          retention-days: 1
       - name: Run required Windows framework matrix
         env:
           UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS: msvc,clang-cl

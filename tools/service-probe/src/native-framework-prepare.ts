@@ -211,9 +211,11 @@ async function prepareFrameworkRuntimeInternal(
     });
     return { manifest, ownershipId, ownedStagingRoots: Object.freeze([...ownedStagingRoots]) };
   } catch (error) {
-    for (const stageRoot of [...ownedStagingRoots].reverse()) {
-      await validateOwnedFrameworkStage(stageRoot, ownershipId);
-      await rm(stageRoot, { recursive: true });
+    if (process.env.UTIDE_KEEP_FRAMEWORK_FAILURE !== "1") {
+      for (const stageRoot of [...ownedStagingRoots].reverse()) {
+        await validateOwnedFrameworkStage(stageRoot, ownershipId);
+        await rm(stageRoot, { recursive: true });
+      }
     }
     throw error;
   }
