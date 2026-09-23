@@ -1293,7 +1293,7 @@ func appendVerifiedGeneratorPaths(
 		result = append(result, path)
 	}
 	for _, reference := range references {
-		if reference.role != "path-generator-ninja" {
+		if reference.role != "path-generator-ninja" && reference.role != "path-clang-cl" {
 			continue
 		}
 		key := identityPath(reference.path)

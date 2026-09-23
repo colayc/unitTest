@@ -62,6 +62,12 @@ func TestClangCLAdapterCombinesValidatedMSVCEnvironmentAndLLVMTools(t *testing.T
 	if !reflect.DeepEqual(got.Generators, []string{"Ninja"}) {
 		t.Fatalf("clang-cl generators = %#v, want Ninja", got.Generators)
 	}
+	if !windowsPathListContains(
+		map[string]string{"PATH": windowsEnvironmentValues(got.Environment)["PATH"]},
+		fixture.llvmRoot,
+	) {
+		t.Fatalf("clang-cl final PATH omitted verified LLVM root: %#v", got.Environment)
+	}
 	if got.Coverage.LLVMProfdata != fixture.llvmProfdata ||
 		got.Coverage.LLVMCov != fixture.llvmCov || got.Coverage.GCov != "" {
 		t.Fatalf("clang-cl coverage = %#v", got.Coverage)
@@ -232,7 +238,9 @@ func TestClangCLGeneratorEnvironmentBoundaryFailsClosedForAdapterAndRegistry(t *
 						t,
 						"x64",
 						"x64",
-						test.finalPathByte,
+						// The adapter appends both verified Ninja and LLVM
+						// directories to PATH after capture.
+						test.finalPathByte - 1 - len(fixture.llvmRoot),
 					),
 				),
 			)
