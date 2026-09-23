@@ -430,10 +430,11 @@ function projectConfiguration(
           "set(CMAKE_OBJECT_PATH_MAX 128 CACHE STRING \"\" FORCE)",
           "set(CMAKE_TRY_COMPILE_CONFIGURATION Release CACHE STRING \"\" FORCE)",
           // F2 validates framework discovery and execution, not third-party
-          // compiler debug databases. Disable MSVC/clang-cl debug information
-          // so CMake emits no /Fd path that can exceed Windows MAX_PATH after
-          // the published consumer prefix is applied.
-          "set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT \"\" CACHE STRING \"\" FORCE)",
+          // compiler debug databases. Embed debug information in each object
+          // so CMake selects /Z7 instead of emitting a compiler /Fd database
+          // path that can exceed Windows MAX_PATH after the consumer prefix
+          // is applied.
+          "set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT Embedded CACHE STRING \"\" FORCE)",
           // Do not append to CMake's default /debug /INCREMENTAL pair: clang-cl
           // may still open a linker PDB when /DEBUG:NONE appears after them.
           "set(CMAKE_EXE_LINKER_FLAGS_DEBUG \"/DEBUG:NONE\" CACHE STRING \"\" FORCE)",
