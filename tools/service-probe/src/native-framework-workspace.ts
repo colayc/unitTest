@@ -32,6 +32,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{1
 const COMMIT = /^[0-9a-f]{40}$/u;
 const BUILD_PROFILE = /^[0-9a-f]{64}$/u;
 const execFile = promisify(execFileCallback);
+const WINDOWS_INPUT_DIRECTORY = Object.freeze({ cpputest: "c", unity: "u", cmock: "m" });
 
 export interface FrameworkWorkspaceStageOptions {
   readonly repositoryRoot: string;
@@ -151,13 +152,13 @@ export async function stageFrameworkWorkspace(
       // Windows CMake at a second Service-owned copy directly below the
       // workspace root so compiler input paths remain short enough for MSVC
       // while every File API path remains inside the Service boundary.
-      cpputest: options.platform === "win32" ? join(workspaceRoot, "cpputest") : join(preparedRoot, "cpputest"),
-      unity: options.platform === "win32" ? join(workspaceRoot, "unity") : join(preparedRoot, "unity"),
-      cmock: options.platform === "win32" ? join(workspaceRoot, "cmock") : join(preparedRoot, "cmock"),
+      cpputest: options.platform === "win32" ? join(workspaceRoot, WINDOWS_INPUT_DIRECTORY.cpputest) : join(preparedRoot, "cpputest"),
+      unity: options.platform === "win32" ? join(workspaceRoot, WINDOWS_INPUT_DIRECTORY.unity) : join(preparedRoot, "unity"),
+      cmock: options.platform === "win32" ? join(workspaceRoot, WINDOWS_INPUT_DIRECTORY.cmock) : join(preparedRoot, "cmock"),
     } as const;
     if (options.platform === "win32") {
       for (const [frameworkId, source] of Object.entries(preparedFrameworkRoots) as Array<[keyof typeof preparedFrameworkRoots, string]>) {
-        await copyOwnedDirectory(source, join(workspaceRoot, frameworkId));
+        await copyOwnedDirectory(source, join(workspaceRoot, WINDOWS_INPUT_DIRECTORY[frameworkId]));
       }
     }
     const cmakeInputs = options.platform === "win32"
