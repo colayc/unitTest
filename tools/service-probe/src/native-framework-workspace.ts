@@ -393,15 +393,27 @@ function projectConfiguration(
   // Preset profiles have no verified toolchain binding and choose their own
   // binaryDir. Keep only fixture inputs here so Service fallback profiles own
   // compiler selection and service/data/build/<profile-id> output placement.
+  // The producer stages this workspace under `.staging/<owner>` and the
+  // publisher atomically moves it to the immutable runtime root. Absolute
+  // paths would therefore point at the deleted staging tree for consumers.
+  const workspaceInputs = options.platform === "win32"
+    ? { cpputest: "../c", unity: "../u", cmock: "../m" }
+    : {
+        cpputest: "../.unit-test-ide/inputs/prepared/cpputest",
+        unity: "../.unit-test-ide/inputs/prepared/unity",
+        cmock: "../.unit-test-ide/inputs/prepared/cmock",
+      };
+  const helperInput = "../.unit-test-ide/inputs/cmake/UnitTestIDE.cmake";
+  const generatorInput = `../.unit-test-ide/inputs/tools/unity-runner-generator${options.platform === "win32" ? ".exe" : ""}`;
   const variables: Record<string, string> = {
     UNIT_TEST_IDE_FRAMEWORK: options.frameworkId,
-    UNIT_TEST_IDE_HELPER: cmakeHelper,
+    UNIT_TEST_IDE_HELPER: helperInput,
     ...(options.frameworkId === "cpputest"
-      ? { UNIT_TEST_IDE_CPPUTEST_ROOT: roots.cpputest }
+      ? { UNIT_TEST_IDE_CPPUTEST_ROOT: workspaceInputs.cpputest }
       : {
-          UNIT_TEST_IDE_CMOCK_ROOT: roots.cmock,
-          UNIT_TEST_IDE_UNITY_ROOT: roots.unity,
-          UTIDE_UNITY_RUNNER_GENERATOR: unityRunnerGenerator,
+          UNIT_TEST_IDE_CMOCK_ROOT: workspaceInputs.cmock,
+          UNIT_TEST_IDE_UNITY_ROOT: workspaceInputs.unity,
+          UTIDE_UNITY_RUNNER_GENERATOR: generatorInput,
         }),
   };
   return [
@@ -445,7 +457,10 @@ function projectConfiguration(
           "set(MEMORY_LEAK_DETECTION OFF CACHE BOOL \"\" FORCE)",
         ]
       : []),
-    ...Object.entries(variables).map(([name, value]) => `set(${name} ${cmakeLiteral(value.split(sep).join("/"))})`),
+    ...Object.entries(variables).map(([name, value]) => {
+      if (value.startsWith("../")) return `set(${name} "\${CMAKE_SOURCE_DIR}/${value}")`;
+      return `set(${name} ${cmakeLiteral(value.split(sep).join("/"))})`;
+    }),
     // The producer and consumer both run from the dedicated short physical
     // workspace on Windows. Keep the validated prepared roots in place; an
     // extra CMake file(COPY) pass is unnecessary and can fail when a consumer
