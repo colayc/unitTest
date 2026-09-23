@@ -508,7 +508,12 @@ export async function runFrameworkMatrix(
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const now = options.now ?? (() => new Date());
   const discoveryStarted = now();
-  const discovery = await discoverFrameworkCatalog({ fixture: options.fixture, frameworkId: options.frameworkId, toolchainFamily: options.toolchainFamily, timeoutMs });
+  let discovery: DiscoveredFrameworkCatalog;
+  try {
+    discovery = await discoverFrameworkCatalog({ fixture: options.fixture, frameworkId: options.frameworkId, toolchainFamily: options.toolchainFamily, timeoutMs });
+  } catch (error) {
+    throw stageError(options.frameworkId, "discovery", error);
+  }
   const { catalog } = discovery;
   const selected = discovery;
   const compilerVersion = discovery.toolchain.version;
@@ -560,20 +565,25 @@ export async function runFrameworkMatrix(
     }
     await verifyExecution();
     const startedAt = now();
-    const observation = await executeScenario({
-      catalog,
-      completedRunIds,
-      fixture: options.fixture,
-      frameworkId: options.frameworkId,
-      id,
-      projectId: selected.projectId,
-      profileId: selected.profile.buildProfileId,
-      platform: options.platform,
-      selection,
-      contract,
-      timeoutMs,
-      toolchainFamily: options.toolchainFamily,
-    });
+    let observation: ScenarioObservation;
+    try {
+      observation = await executeScenario({
+        catalog,
+        completedRunIds,
+        fixture: options.fixture,
+        frameworkId: options.frameworkId,
+        id,
+        projectId: selected.projectId,
+        profileId: selected.profile.buildProfileId,
+        platform: options.platform,
+        selection,
+        contract,
+        timeoutMs,
+        toolchainFamily: options.toolchainFamily,
+      });
+    } catch (error) {
+      throw stageError(options.frameworkId, id, error);
+    }
     await verifyExecution();
     const expected = expectedOutcome(id);
     if (observation.outcome !== expected) {
@@ -605,6 +615,11 @@ export async function runFrameworkMatrix(
     evidence: Object.freeze(evidence),
     scenarios: Object.freeze(scenarios),
   });
+}
+
+function stageError(frameworkId: FrameworkId, stage: string, error: unknown): Error {
+  const detail = error instanceof Error ? error.message : String(error);
+  return new Error(`${frameworkId} ${stage} failed: ${detail}`, { cause: error });
 }
 
 export async function runFrameworkPlatform(options: FrameworkPlatformOptions): Promise<FrameworkPlatformReport> {
