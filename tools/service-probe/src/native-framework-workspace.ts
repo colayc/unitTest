@@ -97,11 +97,10 @@ export async function stageFrameworkWorkspace(
     });
     owned = true;
     const serviceDirectory = join(stageRoot, "service");
-    // The Windows stage root is already a verified, Service-owned boundary.
-    // Reuse it directly so CMake/MSVC does not gain another path segment in
-    // generated object/PDB paths; other platforms keep the descriptive name
-    // used by the security tests.
-    const workspaceRoot = options.platform === "win32" ? stageRoot : join(stageRoot, "workspace");
+    // Keep the Windows workspace as a short sibling of service/ so the Service
+    // can enforce disjoint workspace and data roots without adding path
+    // segments to CMake/MSVC's generated object/PDB paths.
+    const workspaceRoot = join(stageRoot, options.platform === "win32" ? "i" : "workspace");
     const matrixDestination = join(workspaceRoot, "source", "framework-matrix");
     await mkdir(serviceDirectory, { recursive: false, mode: 0o700 });
     await mkdir(matrixDestination, { recursive: true, mode: 0o700 });
@@ -135,15 +134,13 @@ export async function stageFrameworkWorkspace(
       // Windows CMake at a second Service-owned copy directly below the
       // workspace root so compiler input paths remain short enough for MSVC
       // while every File API path remains inside the Service boundary.
-      cpputest: options.platform === "win32" ? join(workspaceRoot, "i", "cpputest") : join(preparedRoot, "cpputest"),
-      unity: options.platform === "win32" ? join(workspaceRoot, "i", "unity") : join(preparedRoot, "unity"),
-      cmock: options.platform === "win32" ? join(workspaceRoot, "i", "cmock") : join(preparedRoot, "cmock"),
+      cpputest: options.platform === "win32" ? join(workspaceRoot, "cpputest") : join(preparedRoot, "cpputest"),
+      unity: options.platform === "win32" ? join(workspaceRoot, "unity") : join(preparedRoot, "unity"),
+      cmock: options.platform === "win32" ? join(workspaceRoot, "cmock") : join(preparedRoot, "cmock"),
     } as const;
     if (options.platform === "win32") {
-      const shortPreparedRoot = join(workspaceRoot, "i");
-      await mkdir(shortPreparedRoot, { recursive: true, mode: 0o700 });
       for (const [frameworkId, source] of Object.entries(preparedFrameworkRoots) as Array<[keyof typeof preparedFrameworkRoots, string]>) {
-        await copyOwnedDirectory(source, join(shortPreparedRoot, frameworkId));
+        await copyOwnedDirectory(source, join(workspaceRoot, frameworkId));
       }
     }
     await writeCanonical(join(workspaceRoot, ".unit-test-ide", "workspace.json"), workspaceConfiguration(options, contract));
