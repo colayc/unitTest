@@ -218,6 +218,8 @@ func (interpreter *Interpreter) Interpret(
 	termination := testframework.ProcessExited
 	if result.TimedOut {
 		termination = testframework.ProcessTimedOut
+	} else if processExitWasCrash(result.ExitCode) {
+		termination = testframework.ProcessCrashed
 	}
 	if state.parseErr == nil && state.invocation.ControlFile != nil {
 		encoded, readErr := state.invocation.ControlFile.Read(
@@ -471,6 +473,8 @@ func parsedDomainResult(
 	case testframework.CaseNotRun:
 		if termination == testframework.ProcessTimedOut {
 			outcome = testdomain.ItemTimedOut
+		} else if termination == testframework.ProcessCrashed {
+			outcome = testdomain.ItemErrored
 		} else {
 			outcome = testdomain.ItemNotRun
 			reason = testdomain.ReasonContainerTerminated
@@ -508,6 +512,15 @@ func parsedDomainResult(
 		details = append(details, testdomain.FailureDetail{
 			Category:     "test_timeout",
 			Message:      "test invocation exceeded its timeout",
+			Locations:    []testdomain.SourceLocation{},
+			EvidenceRefs: []string{},
+		})
+	}
+	if value.Status == testframework.CaseNotRun &&
+		termination == testframework.ProcessCrashed {
+		details = append(details, testdomain.FailureDetail{
+			Category:     "test_process_crash",
+			Message:      "test process terminated unexpectedly",
 			Locations:    []testdomain.SourceLocation{},
 			EvidenceRefs: []string{},
 		})
