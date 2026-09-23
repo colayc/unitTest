@@ -712,7 +712,7 @@ test("runner emits the exact 17 scenarios and derives every selection from the c
   assert.equal(fixture.client.calls.filter(({ method }) => method === "inspectWorkspace").length >= 1, true);
   assert.equal(fixture.client.calls.filter(({ method }) => method === "discoverTests").length, 1);
   assert.equal(fixture.client.calls.filter(({ method }) => method === "cancelTask").length, 1);
-  assert.equal(fixture.client.calls.filter(({ method }) => method === "reconnect").length, 1);
+  assert.equal(fixture.client.calls.filter(({ method }) => method === "reconnect").length, 2);
   const opaque = fixture.client.calls.find((call) =>
     call.method === "runTests" && (call.value as { scenario?: unknown }).scenario === "opaque-fallback"
   )?.value as { selection?: unknown } | undefined;
@@ -895,7 +895,7 @@ test("required toolchain rejects a stable ID that omits discovered catalog or F1
 
 for (const [operation, prepare, pattern] of [
   ["cancellation", (fixture: FakeFixture) => { fixture.client.cancelPromise = new Promise(() => undefined); }, /cancel.*timed out/iu],
-  ["reconnect", (fixture: FakeFixture) => { fixture.client.reconnectPromise = new Promise(() => undefined); }, /reconnect.*timed out/iu],
+  ["reconnect", (fixture: FakeFixture) => { fixture.client.reconnectPromise = new Promise(() => undefined); }, /connection refresh.*timed out/iu],
   ["service restart", (fixture: FakeFixture) => { fixture.killPromise = new Promise(() => undefined); }, /service.*(?:stop|kill|restart).*timed out/iu],
 ] as const) {
   test(`${operation} is bounded by the runner deadline`, async () => {
@@ -1168,6 +1168,15 @@ test("discovery-only path returns verified catalog evidence without executing sc
   assert.equal(result.catalogArtifactSha256, digest(JSON.stringify({ catalog: "validated", framework: "cpputest", family: "clang" }) + "\n"));
   assert.ok(result.catalogArtifactSizeBytes > 0);
   assert.equal(fixture.client.runRequests.length, 0);
+});
+
+test("framework matrix refreshes a pre-launched fixture connection before discovery", async () => {
+  const fixture = new FakeFixture();
+  await runFrameworkMatrix(matrixOptions(fixture));
+  const reconnect = fixture.client.calls.findIndex(({ method }) => method === "reconnect");
+  const inspect = fixture.client.calls.findIndex(({ method }) => method === "inspectWorkspace");
+  assert.ok(reconnect >= 0, "framework matrix must refresh the pre-launched connection");
+  assert.ok(inspect > reconnect, "connection refresh must happen before workspace inspection");
 });
 
 test("discovery refreshes the workspace once after a stale generation start error", async () => {

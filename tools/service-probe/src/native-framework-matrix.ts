@@ -542,6 +542,11 @@ export async function runFrameworkMatrix(
   validateMatrixOptions(options);
   const contract = await loadMatrixContract(options.frameworkId);
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  await bounded(
+    `${options.frameworkId} connection refresh`,
+    options.fixture.client.reconnect(),
+    timeoutMs,
+  );
   const now = options.now ?? (() => new Date());
   const discoveryStarted = now();
   let discovery: DiscoveredFrameworkCatalog;
