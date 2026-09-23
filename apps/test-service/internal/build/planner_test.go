@@ -1604,6 +1604,34 @@ func TestPlannerUsesMSVCEnvironmentWithNinjaFallback(t *testing.T) {
 	}
 }
 
+func TestPlannerPinsClangCLPresetCompilerToVerifiedPath(t *testing.T) {
+	fixture := newPlannerFixture(t)
+	fixture.profile.Origin = "preset"
+	fixture.profile.ConfigurePreset = "debug"
+	fixture.toolchain.Family = toolchain.FamilyClangCL
+	fixture.toolchain.ID = "clang-cl"
+	writePlannerPreset(t, fixture.sourceDir, "debug")
+
+	plan, err := Plan(PlanInput{
+		Installation: fixture.installation,
+		WorkspaceRoot: fixture.root,
+		Project: fixture.project,
+		Profile: fixture.profile,
+		Toolchain: fixture.toolchain,
+		Jobs: 1,
+		Configure: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "-DCMAKE_CXX_COMPILER=" + filepath.ToSlash(
+		mustPlannerLaunchPath(t, fixture.toolchain.CXXCompiler),
+	)
+	if countArgument(plan.Steps[0].Process.Args, want) != 1 {
+		t.Fatalf("preset configure args = %#v, want exactly %q", plan.Steps[0].Process.Args, want)
+	}
+}
+
 func TestPlannerInjectsOnlyManifestBoundUnityRunnerForPresetAndGeneratedConfigure(t *testing.T) {
 	for _, origin := range []string{"generated", "preset"} {
 		t.Run(origin, func(t *testing.T) {

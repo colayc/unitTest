@@ -109,6 +109,16 @@ func configureStep(input PlanInput, sourceDir string, launchPlan []string, launc
 			return task.ExecutionStep{}, task.ErrInvalidArgument
 		}
 		args = []string{"--preset", input.Profile.ConfigurePreset}
+		if input.Toolchain.Family == toolchain.FamilyClangCL {
+			launchCompiler, compilerErr := cmakeLaunchPath(input.Toolchain.CXXCompiler)
+			if compilerErr != nil {
+				return task.ExecutionStep{}, task.ErrInvalidArgument
+			}
+			// Presets commonly use the bare `clang-cl` name. Pin it to the
+			// verified toolchain selected by the Service so CMake does not
+			// resolve a different runner PATH entry or a missing shim.
+			args = append(args, "-DCMAKE_CXX_COMPILER="+filepath.ToSlash(launchCompiler))
+		}
 		if input.Coverage != nil {
 			args = append(args, "-B", launchBinaryDir)
 		}
