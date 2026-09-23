@@ -425,9 +425,11 @@ function projectConfiguration(
     ...(options.platform === "win32" && (options.family === "msvc" || options.family === "clang-cl")
       ? [
           // Apply these after project() so compiler initialization cannot
-          // replace the cache values. CMake requires OBJECT_PATH_MAX >= 128;
-          // smaller values are ignored on runners without 8.3 names.
-          "set(CMAKE_OBJECT_PATH_MAX 128 CACHE STRING \"\" FORCE)",
+          // replace the cache values. Keep the limit below the Windows MAX_PATH
+          // boundary while allowing CMake to retain short relative source
+          // paths; a lower value makes it encode the full C:\\utide path into
+          // every object filename and recreates the compiler path failure.
+          "set(CMAKE_OBJECT_PATH_MAX 240 CACHE STRING \"\" FORCE)",
           "set(CMAKE_TRY_COMPILE_CONFIGURATION Release CACHE STRING \"\" FORCE)",
           // F2 validates framework discovery and execution, not third-party
           // compiler debug databases. Embed debug information in each object
