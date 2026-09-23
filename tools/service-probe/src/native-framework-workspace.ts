@@ -100,10 +100,10 @@ export async function stageFrameworkWorkspace(
     });
     owned = true;
     const serviceDirectory = join(stageRoot, "service");
-    // Keep the Windows workspace as a short sibling of service/ so the Service
-    // can enforce disjoint workspace and data roots without adding path
-    // segments to CMake/MSVC's generated object/PDB paths.
-    const workspaceRoot = join(stageRoot, options.platform === "win32" ? "i" : "workspace");
+    // Keep the workspace as a sibling of service/ so the Service and publisher
+    // can enforce their fixed disjoint-root contract. Windows CMake inputs are
+    // shortened separately below, before they reach MSVC's generated paths.
+    const workspaceRoot = join(stageRoot, "workspace");
     const matrixDestination = join(workspaceRoot, "source", "framework-matrix");
     await mkdir(serviceDirectory, { recursive: false, mode: 0o700 });
     await mkdir(matrixDestination, { recursive: true, mode: 0o700 });
