@@ -97,10 +97,11 @@ export async function stageFrameworkWorkspace(
     });
     owned = true;
     const serviceDirectory = join(stageRoot, "service");
-    // Keep the Windows workspace segment short enough for MSVC's generated
-    // object/PDB paths while retaining the Service-owned workspace boundary.
-    // Other platforms keep the descriptive name used by the security tests.
-    const workspaceRoot = join(stageRoot, options.platform === "win32" ? "w" : "workspace");
+    // The Windows stage root is already a verified, Service-owned boundary.
+    // Reuse it directly so CMake/MSVC does not gain another path segment in
+    // generated object/PDB paths; other platforms keep the descriptive name
+    // used by the security tests.
+    const workspaceRoot = options.platform === "win32" ? stageRoot : join(stageRoot, "workspace");
     const matrixDestination = join(workspaceRoot, "source", "framework-matrix");
     await mkdir(serviceDirectory, { recursive: false, mode: 0o700 });
     await mkdir(matrixDestination, { recursive: true, mode: 0o700 });
