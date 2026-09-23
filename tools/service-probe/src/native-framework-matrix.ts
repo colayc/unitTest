@@ -895,7 +895,7 @@ async function executeScenario(context: ScenarioContext): Promise<ScenarioObserv
   }
   let evidence: ScenarioObservation;
   try {
-    evidence = await readRunEvidence(context, task.taskId, task.runId, run);
+    evidence = await readRunEvidence(context, task.taskId, task.runId, run, terminalTask);
   } catch (error) {
     throw operationError(`${context.frameworkId} ${context.id} artifacts`, error);
   }
@@ -1119,6 +1119,7 @@ async function readRunEvidence(
   taskId: string,
   runId: string,
   run: ProtocolTestRun,
+  terminalTask: Readonly<{ task: ProtocolTaskSnapshot; events: readonly ProtocolTaskEvent[] }>,
 ): Promise<ScenarioObservation> {
   let summaryArtifact: ArtifactEvidence;
   let resultsArtifact: ArtifactEvidence;
@@ -1143,12 +1144,18 @@ async function readRunEvidence(
   const results = parseResultLines(resultsArtifact.bytes);
   const classification = classifyRunEvidence(context, run, results);
   const outcome = evidenceOutcome(context.id, run, results);
+  const taskErrorMessage = terminalTask.task.errorMessage;
+  const eventFailureClasses = [...new Set(
+    terminalTask.events
+      .flatMap(eventFailureFragments)
+      .map((fragment) => classifyTaskErrorMessage(fragment)),
+  )].sort();
   return {
     outcome,
     classification,
     artifactSha256: summaryArtifact.sha256,
     artifactSizeBytes: summaryArtifact.bytes.byteLength,
-    diagnostic: `runOutcome=${run.outcome};summary=${canonicalJson(run.summary)};results=${canonicalJson(results.map(({ itemId, iteration, outcome, reason, failureDetails }) => ({
+    diagnostic: `taskOutcome=${terminalTask.task.outcome ?? "none"};taskErrorCode=${terminalTask.task.errorCode ?? "none"};taskErrorClass=${taskErrorMessage === undefined ? "none" : classifyTaskErrorMessage(taskErrorMessage)};eventFailureClasses=${eventFailureClasses.length > 0 ? eventFailureClasses.join(",") : "none"};runOutcome=${run.outcome};summary=${canonicalJson(run.summary)};results=${canonicalJson(results.map(({ itemId, iteration, outcome, reason, failureDetails }) => ({
       itemId, iteration, outcome, reason: reason ?? null, failureCategories: failureDetails.map(({ category, subtype }) => ({ category, subtype: subtype ?? null })),
     })))} `,
   };
