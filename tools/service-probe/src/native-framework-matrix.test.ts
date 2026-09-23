@@ -332,6 +332,11 @@ class FakeProtocolClient {
     return this.#state.artifactsByTask.get(taskId)?.find((value) => value.kind === kind);
   }
 
+  dropArtifactsForLastTask(): void {
+    const taskId = [...this.#state.tasks.keys()].findLast((value) => value.startsWith("task-service-restart-"));
+    if (taskId !== undefined) this.#state.artifactsByTask.delete(taskId);
+  }
+
   task(taskId: string): Record<string, unknown> | undefined {
     return this.#state.tasks.get(taskId);
   }
@@ -467,6 +472,7 @@ class FakeProtocolClient {
     const taskId = `task-${scenario}-${this.#frameworkId}-${this.#family}`;
     const runId = `run-${scenario}-${this.#frameworkId}-${this.#family}`;
     const outcome = scenarioOutcomes.get(scenario)!;
+    const recovered = scenario === "service-restart";
     const task = {
       ...taskSnapshot(taskId, outcome === "interrupted" ? "interrupted" : outcome === "timed_out" ? "timed_out" : outcome === "cancelled" ? "cancelled" : "succeeded"),
       kind: "testRun",
@@ -480,7 +486,7 @@ class FakeProtocolClient {
     this.#state.tasks.set(taskId, task);
     const run = {
       catalogRevision,
-      incomplete: false,
+      incomplete: recovered,
       outcome,
       profileId: "profile",
       projectId: "root",
@@ -492,11 +498,11 @@ class FakeProtocolClient {
       status: "completed",
       summary: {
         cancelled: outcome === "cancelled" ? 1 : 0,
-        completed: 1,
+        completed: recovered ? 0 : 1,
         errored: outcome === "errored" ? 1 : 0,
         failed: outcome === "failed" ? 1 : 0,
         iterations: value.repeatCount,
-        notRun: 0,
+        notRun: recovered ? 1 : 0,
         passed: outcome === "passed" && skipped === 0 ? 1 : 0,
         skipped,
         timedOut: outcome === "timed_out" ? 1 : 0,
@@ -511,7 +517,7 @@ class FakeProtocolClient {
     this.addArtifact(taskId, "test-run-summary", Buffer.from(JSON.stringify({
       runId, taskId, status: "completed", outcome, startedAt: run.startedAt,
       finishedAt: run.finishedAt, summary: run.summary, resultRevision: run.resultRevision,
-      incomplete: false, catalogRevision,
+      incomplete: recovered, catalogRevision,
     }) + "\n"));
     return task;
   }
@@ -591,6 +597,7 @@ class FakeFixture {
     this.calls.push("restart");
     if (this.restartPromise !== undefined) return this.restartPromise;
     this.clientBeforeRestart = this.client;
+    this.clientBeforeRestart.dropArtifactsForLastTask();
     this.client = this.client.replacement();
     return this;
   }

@@ -1069,10 +1069,19 @@ async function readRunEvidence(
   runId: string,
   run: ProtocolTestRun,
 ): Promise<ScenarioObservation> {
-  const [summaryArtifact, resultsArtifact] = await Promise.all([
-    readTaskArtifact(context.fixture.client, taskId, "test-run-summary", context.timeoutMs),
-    readTaskArtifact(context.fixture.client, taskId, "test-results", context.timeoutMs),
-  ]);
+  let summaryArtifact: ArtifactEvidence;
+  let resultsArtifact: ArtifactEvidence;
+  try {
+    [summaryArtifact, resultsArtifact] = await Promise.all([
+      readTaskArtifact(context.fixture.client, taskId, "test-run-summary", context.timeoutMs),
+      readTaskArtifact(context.fixture.client, taskId, "test-results", context.timeoutMs),
+    ]);
+  } catch (error) {
+    if (context.id === "service-restart" && isMissingRecoveryArtifact(error)) {
+      return recoveryRunEvidence(context, taskId, runId, run);
+    }
+    throw error;
+  }
   const summary = parseJsonObject(summaryArtifact.bytes, "test-run-summary");
   if (
     summary.runId !== runId || summary.taskId !== taskId || summary.status !== "completed" ||
@@ -1088,6 +1097,45 @@ async function readRunEvidence(
     classification,
     artifactSha256: summaryArtifact.sha256,
     artifactSizeBytes: summaryArtifact.bytes.byteLength,
+  };
+}
+
+function isMissingRecoveryArtifact(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("framework discovery artifact count zero");
+}
+
+function recoveryRunEvidence(
+  context: ScenarioContext,
+  taskId: string,
+  runId: string,
+  run: ProtocolTestRun,
+): ScenarioObservation {
+  if (
+    run.runId !== runId || run.taskId !== taskId || run.status !== "completed" ||
+    run.outcome !== "interrupted" || !run.incomplete || run.summary.notRun < 1 ||
+    run.catalogRevision !== context.catalog.revision
+  ) {
+    throw new Error(`${context.frameworkId} ${context.id} recovery TestRun state is invalid`);
+  }
+  const bytes = Buffer.from(canonicalJson({
+    schemaVersion: 1,
+    kind: "service-restart-recovery",
+    frameworkId: context.frameworkId,
+    toolchainFamily: context.toolchainFamily,
+    taskId,
+    runId,
+    catalogRevision: run.catalogRevision,
+    resultRevision: run.resultRevision,
+    selectionSnapshot: run.selectionSnapshot,
+    summary: run.summary,
+    outcome: run.outcome,
+    incomplete: run.incomplete,
+  }), "utf8");
+  return {
+    outcome: "interrupted",
+    classification: "service-restarted",
+    artifactSha256: digestBytes(bytes),
+    artifactSizeBytes: bytes.byteLength,
   };
 }
 
