@@ -1975,14 +1975,22 @@ test("checked-in candidate evidence keeps deferred and unproven gates closed", a
   assert.equal(gatesById.get("P8-SIGN-WINDOWS")?.status, "DEFERRED");
   const selectedReceipts = inputs.receipts.filter((receipt) => inputs.baseline.receiptIds.includes(receipt.receiptId));
   const performanceGate = gatesById.get("P9-PERF-MEMORY");
-  assert.equal(performanceGate?.status, "PASS");
-  assert.equal("reason" in (performanceGate ?? {}), false);
-  assert.equal(
-    selectedReceipts.some(
-      (receipt) => receipt.receiptId === performanceGate?.receiptId && receipt.gateIds.includes("P9-PERF-MEMORY"),
-    ),
-    true,
-  );
+  if (inputs.baseline.receiptIds.length === 0) {
+    // A candidate may be bootstrapped before its first successful online receipt.
+    // Keep that state explicitly closed so the workflow can produce the receipt
+    // needed for the subsequent evidence-bound run.
+    assert.equal(performanceGate?.status, "MISSING");
+    assert.equal("receiptId" in (performanceGate ?? {}), false);
+  } else {
+    assert.equal(performanceGate?.status, "PASS");
+    assert.equal("reason" in (performanceGate ?? {}), false);
+    assert.equal(
+      selectedReceipts.some(
+        (receipt) => receipt.receiptId === performanceGate?.receiptId && receipt.gateIds.includes("P9-PERF-MEMORY"),
+      ),
+      true,
+    );
+  }
 });
 
 test("candidate CLI derives tested-content changes from Git", async () => {
