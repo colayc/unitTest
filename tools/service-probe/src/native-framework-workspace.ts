@@ -429,20 +429,11 @@ function projectConfiguration(
           // smaller values are ignored on runners without 8.3 names.
           "set(CMAKE_OBJECT_PATH_MAX 128 CACHE STRING \"\" FORCE)",
           "set(CMAKE_TRY_COMPILE_CONFIGURATION Release CACHE STRING \"\" FORCE)",
-          // Keep cl.exe debug information in objects, but disable clang-cl's
-          // compiler-PDB mode entirely: the empty format is the supported CMake
-          // value that adds no /Fd or /Zi flag.
-          `set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT ${options.family === "clang-cl" ? '""' : "Embedded"} CACHE STRING "" FORCE)`,
-          // Keep any compiler/linker PDB fallback under the owned source tree;
-          // the Service build directory also contains a 64-character profile
-          // id and can exceed clang-cl's PDB path limit on hosted runners.
-          // Keep compiler PDBs in a short sibling of source/; the published
-          // consumer path includes a fixed runtime/consumer prefix and MSVC
-          // rejects the longer source/.utide-pdb location.
-          "set(_utide_pdb_root \"${CMAKE_SOURCE_DIR}/../p\")",
-          "file(MAKE_DIRECTORY \"${_utide_pdb_root}\")",
-          "set(CMAKE_COMPILE_PDB_OUTPUT_DIRECTORY \"${_utide_pdb_root}\" CACHE PATH \"\" FORCE)",
-          "set(CMAKE_PDB_OUTPUT_DIRECTORY \"${_utide_pdb_root}\" CACHE PATH \"\" FORCE)",
+          // F2 validates framework discovery and execution, not third-party
+          // compiler debug databases. Disable MSVC/clang-cl debug information
+          // so CMake emits no /Fd path that can exceed Windows MAX_PATH after
+          // the published consumer prefix is applied.
+          "set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT \"\" CACHE STRING \"\" FORCE)",
           // Do not append to CMake's default /debug /INCREMENTAL pair: clang-cl
           // may still open a linker PDB when /DEBUG:NONE appears after them.
           "set(CMAKE_EXE_LINKER_FLAGS_DEBUG \"/DEBUG:NONE\" CACHE STRING \"\" FORCE)",
@@ -482,27 +473,6 @@ function projectConfiguration(
       : []),
     "enable_testing()",
     "add_subdirectory(framework-matrix)",
-    ...(options.frameworkId === "unity"
-      ? [
-          // Keep any generator-emitted compile PDB fallback in the short,
-          // Service-owned build root even when a toolchain ignores Embedded.
-          "if(WIN32)",
-          "  foreach(_utide_target utide_unity utide_cmock phase9_unity phase9_unity_malformed phase9_matrix_opaque)",
-          "    if(TARGET ${_utide_target})",
-          "      set_target_properties(${_utide_target} PROPERTIES",
-          "        COMPILE_PDB_NAME \"utide-${_utide_target}\"",
-          "        COMPILE_PDB_NAME_DEBUG \"utide-${_utide_target}\"",
-          "        COMPILE_PDB_OUTPUT_DIRECTORY \"${_utide_pdb_root}\"",
-          "        COMPILE_PDB_OUTPUT_DIRECTORY_DEBUG \"${_utide_pdb_root}\"",
-          "        PDB_NAME \"utide-${_utide_target}\"",
-          "        PDB_NAME_DEBUG \"utide-${_utide_target}\"",
-          "        PDB_OUTPUT_DIRECTORY \"${_utide_pdb_root}\"",
-          "        PDB_OUTPUT_DIRECTORY_DEBUG \"${_utide_pdb_root}\")",
-          "    endif()",
-          "  endforeach()",
-          "endif()",
-        ]
-      : []),
     ...(options.platform === "win32" && (options.family === "msvc" || options.family === "clang-cl")
       ? [
           // CppUTest 4.0 unconditionally adds /WX to global MSVC flags. Keep
@@ -514,15 +484,6 @@ function projectConfiguration(
           "    if(TARGET ${_utide_target})",
           "      target_compile_options(${_utide_target} PRIVATE /WX-)",
           "      target_compile_definitions(${_utide_target} PRIVATE CPPUTEST_MEM_LEAK_DETECTION_DISABLED)",
-          "      set_target_properties(${_utide_target} PROPERTIES",
-          "        COMPILE_PDB_NAME \"utide-${_utide_target}\"",
-          "        COMPILE_PDB_NAME_DEBUG \"utide-${_utide_target}\"",
-          "        COMPILE_PDB_OUTPUT_DIRECTORY \"${_utide_pdb_root}\"",
-          "        COMPILE_PDB_OUTPUT_DIRECTORY_DEBUG \"${_utide_pdb_root}\"",
-          "        PDB_NAME \"utide-${_utide_target}\"",
-          "        PDB_NAME_DEBUG \"utide-${_utide_target}\"",
-          "        PDB_OUTPUT_DIRECTORY \"${_utide_pdb_root}\"",
-          "        PDB_OUTPUT_DIRECTORY_DEBUG \"${_utide_pdb_root}\")",
           "    endif()",
           "  endforeach()",
           "endif()",
