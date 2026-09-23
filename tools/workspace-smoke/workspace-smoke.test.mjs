@@ -318,13 +318,14 @@ test("P4 native framework matrix workflow is opt-in, fixed, and fail-closed unti
   assert.match(job, /name: native-framework-linux\r?\n {10}path: \.native-e2e\/framework-inputs\/linux/u);
 
   for (const [platform, path] of [
-    ["windows", ".native-e2e/artifacts/windows/framework-report.json"],
+    ["windows", "C:\\utide\\.native-e2e\\artifacts\\windows\\framework-report.json"],
     ["linux", ".native-e2e/artifacts/linux/framework-report.json"],
   ]) {
+    const escapedPath = path.replace(/[\\^$.*+?()[\]{}|]/gu, "\\$&");
     assert.match(workflow, new RegExp(
       `^ {6}- name: Upload P4 ${platform === "windows" ? "Windows" : "Linux"} framework report\\r?\\n`
       + ` {8}uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7\\r?\\n`
-      + ` {8}with:\\r?\\n {10}name: native-framework-${platform}\\r?\\n {10}path: ${path}\\r?\\n`
+      + ` {8}with:\\r?\\n {10}name: native-framework-${platform}\\r?\\n {10}path: ${escapedPath}\\r?\\n`
       + " {10}if-no-files-found: error\\r?\\n {10}retention-days: 14\\s*$",
       "mu",
     ));
@@ -388,8 +389,8 @@ test("fixed hosted framework producers preserve privileged Windows paths and pub
     "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
   ]) assert.match(frameworkWindows, new RegExp(pin));
 
-  const producer = frameworkWindows.indexOf("pnpm prepare:native-framework-runtime -- --platform win32 --candidate '${{ github.sha }}'");
-  const native = frameworkWindows.indexOf("pnpm test:e2e:native -- --platform win32");
+  const producer = frameworkWindows.indexOf("node C:\\utide\\tools\\service-probe\\dist\\native-framework-prepare.js --platform win32 --candidate '${{ github.sha }}'");
+  const native = frameworkWindows.indexOf("node C:\\utide\\tools\\service-probe\\dist\\native-run.js --platform win32");
   assert.ok(producer !== -1 && native > producer, "Windows runtime producer must precede required native execution");
   assert.equal((aggregator.match(/node tools\/phase9\/p4-report\.mjs/gu) ?? []).length, 1);
   assert.match(
@@ -398,11 +399,11 @@ test("fixed hosted framework producers preserve privileged Windows paths and pub
   );
   assert.match(
     frameworkWindows,
-    /^ {6}- name: Run required Windows framework matrix\r?\n {8}env:\r?\n {10}UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS: msvc,clang-cl\r?\n {10}UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED: '1'\r?\n {8}run: pnpm test:e2e:native -- --platform win32\s*$/mu,
+    /^ {6}- name: Run required Windows framework matrix\r?\n {8}env:\r?\n {10}UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS: msvc,clang-cl\r?\n {10}UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED: '1'\r?\n {8}.*?shell: pwsh\r?\n {8}run: \|\r?\n {10}Push-Location C:\\utide\r?\n {10}node C:\\utide\\tools\\service-probe\\build-service\.mjs\r?\n {10}pnpm exec tsc -b [^\r\n]+\r?\n {10}node C:\\utide\\tools\\service-probe\\dist\\native-run\.js --platform win32\r?\n {10}Pop-Location\s*$/mus,
   );
   assert.match(
     frameworkWindows,
-    /^ {6}- name: Upload P4 Windows framework report\r?\n {8}uses: actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7\r?\n {8}with:\r?\n {10}name: native-framework-windows\r?\n {10}path: \.native-e2e\/artifacts\/windows\/framework-report\.json\r?\n {10}if-no-files-found: error\r?\n {10}retention-days: 14\s*$/mu,
+    /^ {6}- name: Upload P4 Windows framework report\r?\n {8}uses: actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7\r?\n {8}with:\r?\n {10}name: native-framework-windows\r?\n {10}path: C:\\utide\\\.native-e2e\\artifacts\\windows\\framework-report\.json\r?\n {10}if-no-files-found: error\r?\n {10}retention-days: 14\s*$/mu,
   );
 });
 
