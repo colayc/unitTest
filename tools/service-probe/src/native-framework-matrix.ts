@@ -227,6 +227,8 @@ interface ScenarioObservation {
   readonly classification: FrameworkScenarioEvidence["classification"];
   readonly artifactSha256: string;
   readonly artifactSizeBytes: number;
+  /** Path-free result facts retained only for bounded mismatch diagnostics. */
+  readonly diagnostic?: string;
 }
 
 export interface FrameworkDiscoveryOptions {
@@ -629,12 +631,14 @@ export async function runFrameworkMatrix(
     const expected = expectedOutcome(id);
     if (observation.outcome !== expected) {
       throw new Error(
-        `${options.frameworkId} ${id} observed ${observation.outcome}, expected ${expected}`,
+        `${options.frameworkId} ${id} observed ${observation.outcome}, expected ${expected}` +
+        ` [classification=${observation.classification};${observation.diagnostic ?? "diagnostic=unavailable"}]`,
       );
     }
     if (observation.classification !== expectedClassification(id)) {
       throw new Error(
-        `${options.frameworkId} ${id} classified ${observation.classification}, expected ${expectedClassification(id)}`,
+        `${options.frameworkId} ${id} classified ${observation.classification}, expected ${expectedClassification(id)}` +
+        ` [${observation.diagnostic ?? "diagnostic=unavailable"}]`,
       );
     }
     if (observation.runId !== undefined) completedRunIds.set(id, observation.runId);
@@ -1144,6 +1148,9 @@ async function readRunEvidence(
     classification,
     artifactSha256: summaryArtifact.sha256,
     artifactSizeBytes: summaryArtifact.bytes.byteLength,
+    diagnostic: `runOutcome=${run.outcome};summary=${canonicalJson(run.summary)};results=${canonicalJson(results.map(({ itemId, iteration, outcome, reason, failureDetails }) => ({
+      itemId, iteration, outcome, reason: reason ?? null, failureCategories: failureDetails.map(({ category, subtype }) => ({ category, subtype: subtype ?? null })),
+    })))} `,
   };
 }
 
