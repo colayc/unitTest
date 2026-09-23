@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
+import { execFile as execFileCallback } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { copyFile, cp, lstat, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { promisify } from "node:util";
 import type { FrameworkId, FrameworkPlatform, FrameworkToolchainFamily } from "./native-framework-report.js";
 import type { F1FrameworkIdentity } from "./native-framework-matrix.js";
 
@@ -29,6 +31,7 @@ const PLATFORM_FAMILIES = Object.freeze({
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const COMMIT = /^[0-9a-f]{40}$/u;
 const BUILD_PROFILE = /^[0-9a-f]{64}$/u;
+const execFile = promisify(execFileCallback);
 
 export interface FrameworkWorkspaceStageOptions {
   readonly repositoryRoot: string;
@@ -143,11 +146,18 @@ export async function stageFrameworkWorkspace(
         await copyOwnedDirectory(source, join(workspaceRoot, frameworkId));
       }
     }
+    const cmakeInputs = options.platform === "win32"
+      ? {
+          cpputest: await requireContainedDirectory(repositoryRoot, await windowsShortPath(stagedInputs.cpputest), "short staged CppUTest root"),
+          unity: await requireContainedDirectory(repositoryRoot, await windowsShortPath(stagedInputs.unity), "short staged Unity root"),
+          cmock: await requireContainedDirectory(repositoryRoot, await windowsShortPath(stagedInputs.cmock), "short staged CMock root"),
+        }
+      : stagedInputs;
     await writeCanonical(join(workspaceRoot, ".unit-test-ide", "workspace.json"), workspaceConfiguration(options, contract));
     // Both the locked F1 fixtures and the matrix overlay must be descendants of
     // CMAKE_SOURCE_DIR; the Unity generator deliberately rejects source escapes.
     await writeFile(join(workspaceRoot, "source", "CMakeLists.txt"),
-      projectConfiguration(options, stagedInputs, helperDestination, generatorDestination),
+      projectConfiguration(options, cmakeInputs, helperDestination, generatorDestination),
       { flag: "wx", mode: 0o600 });
     return Object.freeze({
       serviceDirectory,
@@ -163,6 +173,19 @@ export async function stageFrameworkWorkspace(
     }
     throw error;
   }
+}
+
+async function windowsShortPath(value: string): Promise<string> {
+  if (process.platform !== "win32") return value;
+  const command = `for %I in ("${value.replaceAll('"', '""')}") do @echo %~sI`;
+  const { stdout } = await execFile(process.env.ComSpec ?? "cmd.exe", ["/d", "/c", command], {
+    windowsHide: true,
+    windowsVerbatimArguments: true,
+    maxBuffer: 1024 * 1024,
+  });
+  const short = stdout.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean).at(-1);
+  if (short === undefined || !isAbsolute(short)) throw new Error("Windows short path resolution failed");
+  return short;
 }
 
 async function copyOwnedDirectory(source: string, destination: string): Promise<void> {
