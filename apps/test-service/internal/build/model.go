@@ -22,6 +22,7 @@ type StartRequest struct {
 	WorkspaceGeneration string
 	ProjectID           string
 	BuildProfileID      string
+	ToolchainID         string
 	TargetIDs           []string
 	Jobs                int
 	Timeout             time.Duration

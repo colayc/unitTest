@@ -102,7 +102,7 @@ func (c *Coordinator) Targets(
 	ctx context.Context,
 	request TargetsRequest,
 ) ([]cmake.Target, error) {
-	snapshot, project, profile, instance, err := c.resolve(ctx, request.WorkspaceGeneration, request.ProjectID, request.BuildProfileID)
+	snapshot, project, profile, instance, err := c.resolve(ctx, request.WorkspaceGeneration, request.ProjectID, request.BuildProfileID, "")
 	if err != nil {
 		return nil, err
 	}
@@ -363,6 +363,7 @@ func (c *Coordinator) Resume(
 	var payload struct {
 		ProjectID      string   `json:"projectId"`
 		BuildProfileID string   `json:"buildProfileId"`
+		ToolchainID    string   `json:"toolchainId,omitempty"`
 		TargetIDs      []string `json:"targetIds"`
 		Jobs           int      `json:"jobs"`
 		TimeoutMS      int64    `json:"timeoutMs"`
@@ -375,6 +376,7 @@ func (c *Coordinator) Resume(
 		IdempotencyKey:      persisted.IdempotencyKey,
 		WorkspaceGeneration: persisted.WorkspaceGeneration,
 		ProjectID:           payload.ProjectID, BuildProfileID: payload.BuildProfileID,
+		ToolchainID:         payload.ToolchainID,
 		TargetIDs: append([]string(nil), payload.TargetIDs...),
 		Jobs:      payload.Jobs, Timeout: persisted.Timeout,
 	}, false)
@@ -422,6 +424,7 @@ func (c *Coordinator) prepare(
 	}
 	snapshot, project, profile, instance, err := c.resolve(
 		ctx, request.WorkspaceGeneration, request.ProjectID, request.BuildProfileID,
+		request.ToolchainID,
 	)
 	if err != nil {
 		return nil, err
@@ -555,11 +558,13 @@ func (c *Coordinator) prepare(
 	requestJSON, err := json.Marshal(struct {
 		ProjectID      string   `json:"projectId"`
 		BuildProfileID string   `json:"buildProfileId"`
+		ToolchainID    string   `json:"toolchainId,omitempty"`
 		TargetIDs      []string `json:"targetIds"`
 		Jobs           int      `json:"jobs"`
 		TimeoutMS      int64    `json:"timeoutMs"`
 	}{
 		ProjectID: request.ProjectID, BuildProfileID: request.BuildProfileID,
+		ToolchainID: request.ToolchainID,
 		TargetIDs: append([]string{}, request.TargetIDs...),
 		Jobs:      request.Jobs, TimeoutMS: request.Timeout.Milliseconds(),
 	})
@@ -902,6 +907,7 @@ func (c *Coordinator) resolve(
 	generation string,
 	projectID string,
 	profileID string,
+	requestedToolchainID string,
 ) (
 	discovery.Snapshot,
 	workspace.ProjectConfig,
@@ -936,10 +942,18 @@ func (c *Coordinator) resolve(
 	if profile.ID == "" {
 		return discovery.Snapshot{}, workspace.ProjectConfig{}, cmake.BuildProfile{}, toolchain.Instance{}, ErrBuildProfileNotFound
 	}
-	var instance toolchain.Instance
-	if profile.ToolchainID != "" {
+	if requestedToolchainID != "" && profile.Origin != "preset" &&
+		requestedToolchainID != profile.ToolchainID {
+		return discovery.Snapshot{}, workspace.ProjectConfig{}, cmake.BuildProfile{}, toolchain.Instance{}, task.ErrInvalidArgument
+	}
+	instance := toolchain.Instance{}
+	toolchainID := profile.ToolchainID
+	if requestedToolchainID != "" {
+		toolchainID = requestedToolchainID
+	}
+	if toolchainID != "" {
 		for _, candidate := range snapshot.Toolchains {
-			if candidate.ID == profile.ToolchainID {
+			if candidate.ID == toolchainID {
 				instance = candidate
 				break
 			}

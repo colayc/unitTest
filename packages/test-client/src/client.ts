@@ -74,6 +74,7 @@ export interface CMakeBuildInput {
   workspaceGeneration: string;
   projectId: string;
   buildProfileId: string;
+  toolchainId?: string;
   targetIds: string[];
   jobs: number;
   timeoutMs: number;
@@ -405,6 +406,10 @@ function validateCMakeContext(input: CMakeTargetsInput): void {
 
 function validateCMakeBuildInput(input: CMakeBuildInput): void {
   validateCMakeContext(input);
+  if (input.toolchainId !== undefined &&
+    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(input.toolchainId)) {
+    throw new Error("toolchainId is invalid");
+  }
   if (!/^[0-9a-f]{32}$/.test(input.idempotencyKey)) {
     throw new Error("idempotencyKey must be a 32-character lowercase hexadecimal value");
   }

@@ -153,6 +153,7 @@ type buildStartPayloadV12 struct {
 	WorkspaceGeneration string   `json:"workspaceGeneration"`
 	ProjectID           string   `json:"projectId"`
 	BuildProfileID      string   `json:"buildProfileId"`
+	ToolchainID         string   `json:"toolchainId,omitempty"`
 	TargetIDs           []string `json:"targetIds"`
 	Jobs                int      `json:"jobs"`
 	TimeoutMS           int64    `json:"timeoutMs"`
@@ -957,6 +958,7 @@ func (s *Session) handleV12TaskStart(ctx context.Context, version string, reques
 			WorkspaceGeneration: payload.WorkspaceGeneration,
 			ProjectID:           payload.ProjectID,
 			BuildProfileID:      payload.BuildProfileID,
+			ToolchainID:         payload.ToolchainID,
 			TargetIDs:           append([]string(nil), payload.TargetIDs...),
 			Jobs:                payload.Jobs,
 			Timeout:             time.Duration(payload.TimeoutMS) * time.Millisecond,
@@ -1025,6 +1027,7 @@ func (s *Session) handleV13TaskStart(
 					WorkspaceGeneration,
 				ProjectID:      payload.ProjectID,
 				BuildProfileID: payload.BuildProfileID,
+				ToolchainID:    payload.ToolchainID,
 				TargetIDs: append(
 					[]string(nil),
 					payload.TargetIDs...,
@@ -1571,6 +1574,7 @@ func profileDisplayName(profile cmake.BuildProfile) string {
 type storedBuildRequest struct {
 	ProjectID      string   `json:"projectId"`
 	BuildProfileID string   `json:"buildProfileId"`
+	ToolchainID    string   `json:"toolchainId,omitempty"`
 	TargetIDs      []string `json:"targetIds"`
 	Jobs           int64    `json:"jobs"`
 	TimeoutMS      int64    `json:"timeoutMs"`
@@ -1617,6 +1621,7 @@ func toProtocolTaskV13(
 		if err != nil ||
 			!validProjectID(request.ProjectID) ||
 			!validHash(request.BuildProfileID) ||
+			(request.ToolchainID != "" && !validProtocolToolchainID(request.ToolchainID)) ||
 			request.TargetIDs == nil ||
 			!validTargetIDs(request.TargetIDs) ||
 			request.Jobs < 1 || request.Jobs > 256 ||
@@ -1776,6 +1781,7 @@ func toProtocolTaskV12(value task.Task) (taskv12.TaskSnapshotV12, error) {
 	case task.KindCMakeBuild:
 		request, err := decodeStrict[storedBuildRequest](value.Request)
 		if err != nil || !validProjectID(request.ProjectID) || !validHash(request.BuildProfileID) ||
+			(request.ToolchainID != "" && !validProtocolToolchainID(request.ToolchainID)) ||
 			request.TargetIDs == nil || !validTargetIDs(request.TargetIDs) ||
 			request.Jobs < 1 || request.Jobs > 256 ||
 			!validHash(value.WorkspaceGeneration) || value.Timeout < time.Millisecond || value.Timeout > 24*time.Hour ||
@@ -2203,6 +2209,7 @@ func validBuildStart(value buildStartPayloadV12) bool {
 		validHash(value.WorkspaceGeneration) &&
 		validProjectID(value.ProjectID) &&
 		validHash(value.BuildProfileID) &&
+		(value.ToolchainID == "" || validProtocolToolchainID(value.ToolchainID)) &&
 		validTargetIDs(value.TargetIDs) &&
 		value.Jobs >= 1 && value.Jobs <= 256 &&
 		value.TimeoutMS >= 1 && value.TimeoutMS <= maxTimeoutMS

@@ -1268,6 +1268,7 @@ function startBuild(
       workspaceGeneration: context.snapshot.workspaceGeneration,
       projectId: context.projectId,
       buildProfileId: context.profile.buildProfileId,
+      toolchainId: context.toolchain.toolchainId,
       targetIds,
       jobs: 2,
       timeoutMs,
