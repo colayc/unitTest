@@ -2506,6 +2506,33 @@ test("reconnect reuses credentials and the active subscription cursor", async ()
   client.close();
 });
 
+test("closing the active subscription permits reconnect without restoring it", async () => {
+  const first = pair();
+  const second = pair();
+  const streams = [first[0], second[0]];
+  let calls = 0;
+  for (const server of [first[1], second[1]]) {
+    createInterface({ input: server }).on("line", (line) => {
+      const request = JSON.parse(line) as JsonObject;
+      const payload = request.method === "handshake"
+        ? { negotiatedProtocolVersion: "1.1", serviceVersion: "0.1.0" }
+        : { afterSequence: (request.payload as JsonObject).afterSequence };
+      server.write(`${JSON.stringify(response(request, payload, "1.1"))}\n`);
+    });
+  }
+  const client = await ProtocolClient.connect(async () => {
+    const stream = streams[calls++];
+    assert.ok(stream);
+    return stream;
+  });
+  await client.handshake("0123456789abcdef", "test", "0.2.0");
+  const subscription = await client.subscribeEvents(0);
+  subscription.close();
+  await client.reconnect();
+  assert.equal(calls, 2);
+  client.close();
+});
+
 test("reconnect validates its acknowledgement before accepting a same-chunk replay event", async () => {
   const first = pair();
   const second = pair();

@@ -672,7 +672,9 @@ export class ProtocolClient {
     }
     this.#beginLifecycleOperation("subscribe");
     const connection = this.#connection;
-    const subscription = new EventSubscription(afterSequence);
+    const subscription = new EventSubscription(afterSequence, () => {
+      if (this.#activeSubscription === subscription) this.#activeSubscription = undefined;
+    });
     const previous = this.#activeSubscription;
     let committed = false;
     const retireUnacknowledgedSubscriptions = () => {
