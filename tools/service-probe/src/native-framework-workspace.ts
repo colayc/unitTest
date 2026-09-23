@@ -117,20 +117,6 @@ export async function stageFrameworkWorkspace(
         await copyFile(join(fixtureRoots[frameworkId], ...name.split("/")), target);
       }
     }
-    if (options.platform === "win32" && options.frameworkId === "cpputest") {
-      // F1 identity is validated against the repository fixture before this
-      // stage is created. Keep that locked source unchanged, but shorten only
-      // the generated workspace's CppUTest binary-directory label so MSVC's
-      // absolute /Fo path remains below MAX_PATH.
-      const fixtureCMake = join(workspaceRoot, "source", "frameworks", "cpputest", "CMakeLists.txt");
-      const source = await readFile(fixtureCMake, "utf8");
-      const shortened = source.replace(
-        '"${CMAKE_BINARY_DIR}/upstream-cpputest"',
-        '"${CMAKE_BINARY_DIR}/u"',
-      );
-      if (shortened === source) throw new Error("CppUTest fixture binary directory is not replaceable");
-      await writeFile(fixtureCMake, shortened, { flag: "w", mode: 0o600 });
-    }
     await mkdir(join(workspaceRoot, ".unit-test-ide"), { recursive: true, mode: 0o700 });
     const inputsRoot = join(workspaceRoot, ".unit-test-ide", "inputs");
     const preparedRoot = join(inputsRoot, "prepared");
