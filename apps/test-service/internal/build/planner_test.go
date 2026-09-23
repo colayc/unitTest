@@ -1624,11 +1624,16 @@ func TestPlannerPinsClangCLPresetCompilerToVerifiedPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "-DCMAKE_CXX_COMPILER=" + filepath.ToSlash(
+	want := filepath.ToSlash(
 		mustPlannerLaunchPath(t, fixture.toolchain.CXXCompiler),
 	)
-	if countArgument(plan.Steps[0].Process.Args, want) != 1 {
-		t.Fatalf("preset configure args = %#v, want exactly %q", plan.Steps[0].Process.Args, want)
+	for _, argument := range []string{
+		"-DCMAKE_C_COMPILER=" + want,
+		"-DCMAKE_CXX_COMPILER=" + want,
+	} {
+		if countArgument(plan.Steps[0].Process.Args, argument) != 1 {
+			t.Fatalf("preset configure args = %#v, want exactly %q", plan.Steps[0].Process.Args, argument)
+		}
 	}
 }
 

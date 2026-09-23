@@ -114,10 +114,15 @@ func configureStep(input PlanInput, sourceDir string, launchPlan []string, launc
 			if compilerErr != nil {
 				return task.ExecutionStep{}, task.ErrInvalidArgument
 			}
-			// Presets commonly use the bare `clang-cl` name. Pin it to the
-			// verified toolchain selected by the Service so CMake does not
-			// resolve a different runner PATH entry or a missing shim.
-			args = append(args, "-DCMAKE_CXX_COMPILER="+filepath.ToSlash(launchCompiler))
+			// Presets commonly use the bare `clang-cl` name. Pin both language
+			// compilers to the verified toolchain selected by the Service so a
+			// C-and-CXX project cannot resolve a different runner PATH entry or
+			// a missing shim for its first (C) compiler probe.
+			compiler := filepath.ToSlash(launchCompiler)
+			args = append(args,
+				"-DCMAKE_C_COMPILER="+compiler,
+				"-DCMAKE_CXX_COMPILER="+compiler,
+			)
 		}
 		if input.Coverage != nil {
 			args = append(args, "-B", launchBinaryDir)
