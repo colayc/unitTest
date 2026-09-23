@@ -9,6 +9,8 @@ import (
 	"errors"
 	"io"
 	"net/url"
+	"os"
+	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -1157,9 +1159,27 @@ func backendFailure(version string, request protocol.Request, err error) HandleR
 	case errors.Is(err, artifactstore.ErrInvalidArtifact), errors.Is(err, artifactstore.ErrUnsafePath):
 		code, message, retryable = "ARTIFACT_NOT_FOUND", "artifact was not found", false
 	case errors.Is(err, task.ErrStorageUnavailable), errors.Is(err, artifactstore.ErrStoreUnavailable):
-		code, message, retryable = "STORAGE_UNAVAILABLE", "storage is unavailable", true
+		code, message, retryable = "STORAGE_UNAVAILABLE", debugStorageFailureMessage(err), true
 	}
 	return handled(protocol.Failure(version, request, code, message, retryable))
+}
+
+func debugStorageFailureMessage(err error) string {
+	if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") != "1" {
+		return "storage is unavailable"
+	}
+	// taskstore wraps failures as "storage unavailable: <operation> failed".
+	// Expose only that fixed operation token in opt-in diagnostics; never carry
+	// SQLite/Windows paths or driver text through the protocol.
+	const prefix = "storage unavailable: "
+	value := err.Error()
+	if start := strings.Index(value, prefix); start >= 0 {
+		operation := strings.TrimSuffix(value[start+len(prefix):], " failed")
+		if operation != "" && len(operation) <= 64 && !strings.ContainsAny(operation, "\\/:\r\n") {
+			return "storage is unavailable [operation=" + operation + "]"
+		}
+	}
+	return "storage is unavailable"
 }
 
 func taskNotFound(version string, request protocol.Request) HandleResult {
