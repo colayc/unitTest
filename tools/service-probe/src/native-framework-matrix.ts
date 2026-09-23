@@ -784,7 +784,7 @@ async function executeScenario(context: ScenarioContext): Promise<ScenarioObserv
         artifactSizeBytes: bytes.byteLength,
       };
     }
-    throw error;
+    throw operationError(`${context.frameworkId} ${context.id} start`, error);
   }
   if (context.id === "stale-catalog") {
     throw new Error("stale catalog scenario unexpectedly started a task");
@@ -818,21 +818,36 @@ async function executeScenario(context: ScenarioContext): Promise<ScenarioObserv
     );
   }
 
-  const terminalTask = await waitForTerminalTask(
-    () => context.fixture.client,
-    task.taskId,
-    `${context.frameworkId} ${context.id}`,
-    context.timeoutMs,
-  );
-  const run = await bounded(
-    `${context.frameworkId} ${context.id} result`,
-    context.fixture.client.getTestRun(task.runId),
-    context.timeoutMs,
-  );
+  let terminalTask: Readonly<{ task: ProtocolTaskSnapshot; events: readonly ProtocolTaskEvent[] }>;
+  try {
+    terminalTask = await waitForTerminalTask(
+      () => context.fixture.client,
+      task.taskId,
+      `${context.frameworkId} ${context.id}`,
+      context.timeoutMs,
+    );
+  } catch (error) {
+    throw operationError(`${context.frameworkId} ${context.id} wait`, error);
+  }
+  let run: ProtocolTestRun;
+  try {
+    run = await bounded(
+      `${context.frameworkId} ${context.id} result`,
+      context.fixture.client.getTestRun(task.runId),
+      context.timeoutMs,
+    );
+  } catch (error) {
+    throw operationError(`${context.frameworkId} ${context.id} result`, error);
+  }
   if (context.id === "timeout" && terminalTask.task.outcome !== "timed_out") {
     throw new Error("timeout scenario did not produce a durable Service timed_out task");
   }
-  const evidence = await readRunEvidence(context, task.taskId, task.runId, run);
+  let evidence: ScenarioObservation;
+  try {
+    evidence = await readRunEvidence(context, task.taskId, task.runId, run);
+  } catch (error) {
+    throw operationError(`${context.frameworkId} ${context.id} artifacts`, error);
+  }
   return {
     taskId: task.taskId,
     runId: task.runId,
@@ -1082,37 +1097,46 @@ async function readTaskArtifact(
   kind: string,
   timeoutMs: number,
 ): Promise<ArtifactEvidence> {
-  const page = await bounded(
-    `${kind} artifact listing`,
-    client.listArtifacts(taskId, { limit: 100 }),
-    timeoutMs,
-  );
-  if (page.nextCursor !== undefined) throw new Error(`${kind} artifact listing was unexpectedly paginated`);
-  const matches = page.items.filter((candidate) => candidate.kind === kind);
-  if (matches.length !== 1) {
-    const kinds = [...new Set(page.items.map((candidate) => candidate.kind))]
-      .filter((value) => /^[a-z0-9-]+$/u.test(value))
-      .sort();
-    const countLabel = matches.length === 0 ? "zero" : "multiple";
-    throw new Error(
-      `framework discovery artifact count ${countLabel} [kinds=${kinds.length > 0 ? kinds.join(",") : "none"}]`,
+  try {
+    const page = await bounded(
+      `${kind} artifact listing`,
+      client.listArtifacts(taskId, { limit: 100 }),
+      timeoutMs,
     );
+    if (page.nextCursor !== undefined) throw new Error(`${kind} artifact listing was unexpectedly paginated`);
+    const matches = page.items.filter((candidate) => candidate.kind === kind);
+    if (matches.length !== 1) {
+      const kinds = [...new Set(page.items.map((candidate) => candidate.kind))]
+        .filter((value) => /^[a-z0-9-]+$/u.test(value))
+        .sort();
+      const countLabel = matches.length === 0 ? "zero" : "multiple";
+      throw new Error(
+        `framework discovery artifact count ${countLabel} [kinds=${kinds.length > 0 ? kinds.join(",") : "none"}]`,
+      );
+    }
+    const metadata = matches[0]!;
+    if (
+      metadata.taskId !== taskId || !DIGEST.test(metadata.sha256) ||
+      !Number.isSafeInteger(metadata.sizeBytes) || metadata.sizeBytes < 0
+    ) throw new Error(`${kind} artifact metadata is invalid`);
+    const bytes = await bounded(
+      `${kind} artifact read`,
+      client.readArtifact(metadata.artifactId),
+      timeoutMs,
+    );
+    const sha256 = digestBytes(bytes);
+    if (bytes.byteLength !== metadata.sizeBytes || sha256 !== metadata.sha256) {
+      throw new Error(`${kind} artifact bytes do not match Service metadata`);
+    }
+    return { metadata, bytes, sha256 };
+  } catch (error) {
+    throw operationError(`${kind} artifact`, error);
   }
-  const metadata = matches[0]!;
-  if (
-    metadata.taskId !== taskId || !DIGEST.test(metadata.sha256) ||
-    !Number.isSafeInteger(metadata.sizeBytes) || metadata.sizeBytes < 0
-  ) throw new Error(`${kind} artifact metadata is invalid`);
-  const bytes = await bounded(
-    `${kind} artifact read`,
-    client.readArtifact(metadata.artifactId),
-    timeoutMs,
-  );
-  const sha256 = digestBytes(bytes);
-  if (bytes.byteLength !== metadata.sizeBytes || sha256 !== metadata.sha256) {
-    throw new Error(`${kind} artifact bytes do not match Service metadata`);
-  }
-  return { metadata, bytes, sha256 };
+}
+
+function operationError(label: string, error: unknown): Error {
+  const detail = error instanceof Error ? error.message : String(error);
+  return new Error(`${label} operation failed: ${detail}`, { cause: error });
 }
 
 function parseResultLines(bytes: Uint8Array): ResultItemEvidence[] {
