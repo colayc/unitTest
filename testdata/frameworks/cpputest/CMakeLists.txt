@@ -10,7 +10,10 @@ if(NOT DEFINED UNIT_TEST_IDE_HELPER OR NOT IS_ABSOLUTE "${UNIT_TEST_IDE_HELPER}"
 endif()
 
 enable_testing()
-add_subdirectory("${UNIT_TEST_IDE_CPPUTEST_ROOT}" "${CMAKE_BINARY_DIR}/upstream-cpputest" EXCLUDE_FROM_ALL)
+# Keep the generated MSVC object paths below MAX_PATH on hosted Windows
+# runners. The source tree remains the locked input; only the build-directory
+# label is shortened because CMake includes it in every upstream object path.
+add_subdirectory("${UNIT_TEST_IDE_CPPUTEST_ROOT}" "${CMAKE_BINARY_DIR}/u" EXCLUDE_FROM_ALL)
 
 add_executable(phase9_cpputest tests/framework_tests.cpp)
 target_link_libraries(phase9_cpputest PRIVATE CppUTest CppUTestExt)
