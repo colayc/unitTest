@@ -112,7 +112,12 @@ async function loadLockedFrameworkRuntime(
             }
             // Build-profile identities include the workspace path. A fresh Service
             // must rebuild its own tree, not mix producer and consumer profiles.
-            if (source === join(publishedBase, "service")) return false;
+            // `fs.cp` may pass a differently-normalized spelling of the
+            // source path on Windows.  Compare the canonical relative child
+            // instead of relying on string identity, otherwise the producer's
+            // service directory is copied into the consumer and the fresh
+            // service directory creation below fails with EEXIST.
+            if (child === "service") return false;
             return true;
           },
         });
