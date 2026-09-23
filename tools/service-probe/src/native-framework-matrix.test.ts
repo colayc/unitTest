@@ -332,6 +332,12 @@ class FakeProtocolClient {
     return this.#state.artifactsByTask.get(taskId)?.find((value) => value.kind === kind);
   }
 
+  removeArtifact(taskId: string, kind: string): void {
+    const artifacts = this.#state.artifactsByTask.get(taskId);
+    if (artifacts === undefined) return;
+    this.#state.artifactsByTask.set(taskId, artifacts.filter((value) => value.kind !== kind));
+  }
+
   dropArtifactsForLastTask(): void {
     const taskId = [...this.#state.tasks.keys()].findLast((value) => value.startsWith("task-service-restart-"));
     if (taskId !== undefined) this.#state.artifactsByTask.delete(taskId);
@@ -1182,6 +1188,27 @@ test("discovery refreshes the workspace once after a stale generation start erro
   await discoverFrameworkCatalog({ fixture: fixture as never, frameworkId: "cpputest", toolchainFamily: "clang", timeoutMs: 100 });
   assert.equal(attempts, 2);
   assert.equal(fixture.client.calls.filter(({ method }) => method === "discoverTests").length, 1);
+  assert.equal(fixture.client.calls.filter(({ method }) => method === "inspectWorkspace").length, 2);
+});
+
+test("discovery retries once when configure completion requires a fresh File API reply", async () => {
+  const fixture = new FakeFixture();
+  const original = fixture.client.discoverTests.bind(fixture.client);
+  let first = true;
+  fixture.client.discoverTests = async (value) => {
+    const task = await original(value);
+    if (first) {
+      first = false;
+      const stored = fixture.client.task(task.taskId as string)!;
+      stored.outcome = "infrastructure_failed";
+      stored.errorMessage = "configure required";
+      fixture.client.removeArtifact(task.taskId as string, "test-catalog");
+    }
+    return task;
+  };
+  const result = await discoverFrameworkCatalog({ fixture: fixture as never, frameworkId: "cpputest", toolchainFamily: "clang", timeoutMs: 100 });
+  assert.equal(result.catalog.revision, catalogRevision);
+  assert.equal(fixture.client.calls.filter(({ method }) => method === "discoverTests").length, 2);
   assert.equal(fixture.client.calls.filter(({ method }) => method === "inspectWorkspace").length, 2);
 });
 

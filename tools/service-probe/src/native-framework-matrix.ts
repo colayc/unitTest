@@ -287,97 +287,111 @@ export async function discoverFrameworkCatalog(options: FrameworkDiscoveryOption
   const eventSubscription = await subscribeDiscoveryEvents(client);
   let phase = "discovery-start";
   try {
-    phase = "discovery-start";
     let discovery: Awaited<ReturnType<ProtocolClient["discoverTests"]>>;
-    for (let attempt = 0; ; attempt += 1) {
-      try {
-        discovery = await bounded(
-          `${options.frameworkId} discovery start`,
-          client.discoverTests({
-            idempotencyKey: idempotencyKey(),
-            projectId: selected.projectId,
-            profileId: selected.profile.buildProfileId,
-          }),
-          timeoutMs,
-        );
-        break;
-      } catch (error) {
-        const code = errorCode(error).toUpperCase();
-        if (code === "WORKSPACE_CHANGED" && attempt === 0) {
-          await delay(100);
-          try {
-            workspace = await bounded(
-              `${options.frameworkId} workspace refresh`,
-              client.inspectWorkspace(),
-              timeoutMs,
-            );
-            selected = selectWorkspace(workspace, options.toolchainFamily);
-            continue;
-          } catch {
-            // Fall through to the stable start-error classification below.
-          }
-        }
-        const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
-        const kind = code !== "" && /^[A-Z0-9_.-]+$/u.test(code)
-          ? `error-${code.toLowerCase()}`
-          : message.includes("toolchain")
-            ? "toolchain"
-            : message.includes("generator")
-              ? "generator"
-              : message.includes("cmake") || message.includes("configure")
-                ? "cmake"
-                : message.includes("profile")
-                  ? "profile"
-                  : message.includes("build") || message.includes("compile")
-                    ? "build"
-                    : "unknown";
-        throw new Error(`${options.frameworkId} discovery start failed [kind=${kind}]`);
-      }
-    }
-    phase = "task-wait";
     let discoveryObservation: Readonly<{ task: ProtocolTaskSnapshot; events: readonly ProtocolTaskEvent[] }>;
-    try {
-      discoveryObservation = await waitForTerminalTask(
-        () => options.fixture.client,
-        discovery.taskId,
-        `${options.frameworkId} discovery`,
-        timeoutMs,
-        eventSubscription,
-      );
-    } catch (error) {
-      const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
-      const code = error !== null && typeof error === "object" && "code" in error &&
-        typeof error.code === "string" && /^[a-z0-9_.-]+$/iu.test(error.code) ? error.code.toLowerCase() : undefined;
-      const kind = classifyDiscoveryWaitFailure(message, code);
-      const processState = options.fixture.processState ?? "unknown";
-      throw new Error(`${options.frameworkId} discovery wait failed [kind=${kind}; process=${processState}]`);
+    let discoveryTask: ProtocolTaskSnapshot;
+    let recoveredConfigureRequired = false;
+    for (;;) {
+      phase = "discovery-start";
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          discovery = await bounded(
+            `${options.frameworkId} discovery start`,
+            client.discoverTests({
+              idempotencyKey: idempotencyKey(),
+              projectId: selected.projectId,
+              profileId: selected.profile.buildProfileId,
+            }),
+            timeoutMs,
+          );
+          break;
+        } catch (error) {
+          const code = errorCode(error).toUpperCase();
+          if (code === "WORKSPACE_CHANGED" && attempt === 0) {
+            await delay(100);
+            try {
+              workspace = await bounded(
+                `${options.frameworkId} workspace refresh`,
+                client.inspectWorkspace(),
+                timeoutMs,
+              );
+              selected = selectWorkspace(workspace, options.toolchainFamily);
+              continue;
+            } catch {
+              // Fall through to the stable start-error classification below.
+            }
+          }
+          const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+          const kind = code !== "" && /^[A-Z0-9_.-]+$/u.test(code)
+            ? `error-${code.toLowerCase()}`
+            : message.includes("toolchain")
+              ? "toolchain"
+              : message.includes("generator")
+                ? "generator"
+                : message.includes("cmake") || message.includes("configure")
+                  ? "cmake"
+                  : message.includes("profile")
+                    ? "profile"
+                    : message.includes("build") || message.includes("compile")
+                      ? "build"
+                      : "unknown";
+          throw new Error(`${options.frameworkId} discovery start failed [kind=${kind}]`);
+        }
+      }
+      phase = "task-wait";
+      try {
+        discoveryObservation = await waitForTerminalTask(
+          () => options.fixture.client,
+          discovery.taskId,
+          `${options.frameworkId} discovery`,
+          timeoutMs,
+          eventSubscription,
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+        const code = error !== null && typeof error === "object" && "code" in error &&
+          typeof error.code === "string" && /^[a-z0-9_.-]+$/iu.test(error.code) ? error.code.toLowerCase() : undefined;
+        const kind = classifyDiscoveryWaitFailure(message, code);
+        const processState = options.fixture.processState ?? "unknown";
+        throw new Error(`${options.frameworkId} discovery wait failed [kind=${kind}; process=${processState}]`);
+      }
+      discoveryTask = discoveryObservation.task;
+      const failureFragments = [
+        discoveryTask.errorMessage,
+        ...discoveryObservation.events.flatMap((event) => eventFailureFragments(event)),
+      ].filter((value): value is string => typeof value === "string");
+      const configureRequired = discoveryTask.outcome !== "succeeded" &&
+        failureFragments.some((value) => value.toLowerCase().includes("configure required"));
+      if (configureRequired && !recoveredConfigureRequired) {
+        recoveredConfigureRequired = true;
+        await delay(100);
+        workspace = await bounded(`${options.frameworkId} workspace refresh`, client.inspectWorkspace(), timeoutMs);
+        selected = selectWorkspace(workspace, options.toolchainFamily);
+        continue;
+      }
+      if (discoveryTask.outcome !== "succeeded") {
+        const errorCode = typeof discoveryTask.errorCode === "string" && /^[a-z0-9_-]+$/u.test(discoveryTask.errorCode)
+          ? discoveryTask.errorCode
+          : "unknown";
+        if (process.env.UTIDE_DEBUG_FRAMEWORK === "1") {
+          const debugDirectory = join(repositoryRoot, ".native-e2e", "artifacts", "windows");
+          await mkdir(debugDirectory, { recursive: true }).catch(() => undefined);
+          await writeFile(
+            join(debugDirectory, `framework-debug-${options.toolchainFamily}-${options.frameworkId}.json`),
+            JSON.stringify({
+              task: discoveryTask,
+              fragments: failureFragments,
+              events: discoveryObservation.events,
+              serviceDiagnostics: options.fixture.debugDiagnostics,
+            }, null, 2),
+            { flag: "w" },
+          ).catch(() => undefined);
+        }
+        const errorDetail = classifyTaskErrorMessage(failureFragments.join("\n"));
+        throw new Error(`${options.frameworkId} discovery finished with ${String(discoveryTask.outcome)} [code=${errorCode}; detail=${errorDetail}]`);
+      }
+      break;
     }
-    const discoveryTask = discoveryObservation.task;
-  if (discoveryTask.outcome !== "succeeded") {
-    const errorCode = typeof discoveryTask.errorCode === "string" && /^[a-z0-9_-]+$/u.test(discoveryTask.errorCode)
-      ? discoveryTask.errorCode
-      : "unknown";
-    const failureFragments = [
-      discoveryTask.errorMessage,
-      ...discoveryObservation.events.flatMap((event) => eventFailureFragments(event)),
-    ].filter((value): value is string => typeof value === "string");
-    if (process.env.UTIDE_DEBUG_FRAMEWORK === "1") {
-      const debugDirectory = join(repositoryRoot, ".native-e2e", "artifacts", "windows");
-      await mkdir(debugDirectory, { recursive: true }).catch(() => undefined);
-      await writeFile(
-        join(debugDirectory, `framework-debug-${options.toolchainFamily}-${options.frameworkId}.json`),
-        JSON.stringify({
-          task: discoveryTask,
-          fragments: failureFragments,
-          events: discoveryObservation.events,
-          serviceDiagnostics: options.fixture.debugDiagnostics,
-        }, null, 2),
-        { flag: "w" },
-      ).catch(() => undefined);
-    }
-    const errorDetail = classifyTaskErrorMessage(failureFragments.join("\n"));
-      throw new Error(`${options.frameworkId} discovery finished with ${String(discoveryTask.outcome)} [code=${errorCode}; detail=${errorDetail}]`);
-  }
   phase = "catalog-read";
   const catalog = await bounded(
     `${options.frameworkId} catalog read`,
