@@ -150,9 +150,21 @@ func (s *Store) GetRunForTask(
 	validated, err := testdomain.NewTestRun(run)
 	if err != nil {
 		return testdomain.TestRun{},
-			storageError("validate TestRun for Task", err)
+			storageError(testRunValidationOperation("validate TestRun for Task", err), err)
 	}
 	return validated, nil
+}
+
+func testRunValidationOperation(operation string, err error) string {
+	var validation *testdomain.ValidationError
+	if !errors.As(err, &validation) || validation.Field == "" {
+		return operation
+	}
+	field := validation.Field
+	if len(field) > 64 || strings.ContainsAny(field, "\\/:\r\n") {
+		return operation
+	}
+	return operation + " [field=" + field + "]"
 }
 
 func (s *Store) StartRun(
