@@ -474,7 +474,9 @@ class FakeProtocolClient {
     const outcome = scenarioOutcomes.get(scenario)!;
     const recovered = scenario === "service-restart";
     const task = {
-      ...taskSnapshot(taskId, outcome === "interrupted" ? "interrupted" : outcome === "timed_out" ? "timed_out" : outcome === "cancelled" ? "cancelled" : "succeeded"),
+      // Framework test timeout is recorded on TestRun; the Service Task only
+      // times out when its own deadline expires.
+      ...taskSnapshot(taskId, outcome === "interrupted" ? "interrupted" : outcome === "cancelled" ? "cancelled" : "succeeded"),
       kind: "testRun",
       projectId: "root",
       profileId: "profile",
@@ -719,7 +721,7 @@ test("runner emits the exact 17 scenarios and derives every selection from the c
   assert.deepEqual(fixture.calls, ["kill", "restart"]);
   assert.notEqual(fixture.client, fixture.clientBeforeRestart, "restart must reacquire a replacement client");
   const timeoutTaskId = "task-timeout-cpputest-clang";
-  assert.equal(fixture.client.task(timeoutTaskId)?.outcome, "timed_out");
+  assert.equal(fixture.client.task(timeoutTaskId)?.outcome, "succeeded");
   const timeoutScenario = result.scenarios.find(({ id }) => id === "timeout")!;
   assert.equal(
     timeoutScenario.resultArtifactSha256,

@@ -839,8 +839,14 @@ async function executeScenario(context: ScenarioContext): Promise<ScenarioObserv
   } catch (error) {
     throw operationError(`${context.frameworkId} ${context.id} result`, error);
   }
-  if (context.id === "timeout" && terminalTask.task.outcome !== "timed_out") {
-    throw new Error("timeout scenario did not produce a durable Service timed_out task");
+  // A framework test timeout is a durable TestRun outcome, not a Service Task
+  // deadline. The task completes successfully after persisting the timed-out
+  // test item and its partial results; only a task-level deadline produces a
+  // task outcome of timed_out.
+  if (context.id === "timeout" && run.outcome !== "timed_out") {
+    throw new Error(
+      `timeout scenario did not produce a durable TestRun timed_out outcome [taskOutcome=${terminalTask.task.outcome ?? "none"}; runOutcome=${run.outcome}]`,
+    );
   }
   let evidence: ScenarioObservation;
   try {
