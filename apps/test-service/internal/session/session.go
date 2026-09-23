@@ -1125,7 +1125,7 @@ func backendFailure(version string, request protocol.Request, err error) HandleR
 	case errors.Is(err, build.ErrConfigureRequired):
 		code, message, retryable = "CONFIGURE_REQUIRED", "CMake configure is required", false
 	case errors.Is(err, testdomain.ErrCatalogStale):
-		code, message, retryable = "CATALOG_STALE", "test Catalog is stale", false
+		code, message, retryable = "TEST_CATALOG_STALE", "test Catalog is stale", false
 	case errors.Is(err, testdomain.ErrEmptySelection),
 		errors.Is(err, testdomain.ErrSelectionTooLarge),
 		errors.Is(err, testdomain.ErrUnknownSelectionID),
