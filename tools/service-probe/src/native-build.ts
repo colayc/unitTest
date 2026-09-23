@@ -267,6 +267,19 @@ async function runNativeMatrixWithDependencies(
           family,
           frameworkIdentity,
         ));
+        // The framework matrix may keep this family Service idle longer than
+        // its authenticated connection timeout. Re-establish the main native
+        // fixture connection before resuming the core build scenarios.
+        const reconnect = (fixture.client as ProtocolClient & {
+          reconnect?: () => Promise<void>;
+        }).reconnect;
+        if (typeof reconnect === "function") {
+          await withNamedTimeout(
+            `${family} native connection refresh`,
+            reconnect.call(fixture.client),
+            nativeTimeoutMs,
+          );
+        }
       }
       const scenarios = await dependencies.executeScenarios({
         ...selected,
