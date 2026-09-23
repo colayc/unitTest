@@ -97,7 +97,10 @@ export async function stageFrameworkWorkspace(
     });
     owned = true;
     const serviceDirectory = join(stageRoot, "service");
-    const workspaceRoot = join(stageRoot, "workspace");
+    // Keep the Windows workspace segment short enough for MSVC's generated
+    // object/PDB paths while retaining the Service-owned workspace boundary.
+    // Other platforms keep the descriptive name used by the security tests.
+    const workspaceRoot = join(stageRoot, options.platform === "win32" ? "w" : "workspace");
     const matrixDestination = join(workspaceRoot, "source", "framework-matrix");
     await mkdir(serviceDirectory, { recursive: false, mode: 0o700 });
     await mkdir(matrixDestination, { recursive: true, mode: 0o700 });
