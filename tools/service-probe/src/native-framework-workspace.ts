@@ -128,14 +128,15 @@ export async function stageFrameworkWorkspace(
       // even the dedicated C:\\utide workspace can exceed its 128-character
       // object-path limit when the validated inputs live below workspace/.
       // Keep the canonical workspace copies for ownership/evidence, and point
-      // Windows CMake at a second Service-owned copy directly below the stage
-      // root so compiler input paths remain short enough for MSVC.
-      cpputest: options.platform === "win32" ? join(stageRoot, "i", "cpputest") : join(preparedRoot, "cpputest"),
-      unity: options.platform === "win32" ? join(stageRoot, "i", "unity") : join(preparedRoot, "unity"),
-      cmock: options.platform === "win32" ? join(stageRoot, "i", "cmock") : join(preparedRoot, "cmock"),
+      // Windows CMake at a second Service-owned copy directly below the
+      // workspace root so compiler input paths remain short enough for MSVC
+      // while every File API path remains inside the Service boundary.
+      cpputest: options.platform === "win32" ? join(workspaceRoot, "i", "cpputest") : join(preparedRoot, "cpputest"),
+      unity: options.platform === "win32" ? join(workspaceRoot, "i", "unity") : join(preparedRoot, "unity"),
+      cmock: options.platform === "win32" ? join(workspaceRoot, "i", "cmock") : join(preparedRoot, "cmock"),
     } as const;
     if (options.platform === "win32") {
-      const shortPreparedRoot = join(stageRoot, "i");
+      const shortPreparedRoot = join(workspaceRoot, "i");
       await mkdir(shortPreparedRoot, { recursive: true, mode: 0o700 });
       for (const [frameworkId, source] of Object.entries(preparedFrameworkRoots) as Array<[keyof typeof preparedFrameworkRoots, string]>) {
         await copyOwnedDirectory(source, join(shortPreparedRoot, frameworkId));
