@@ -270,6 +270,7 @@ export async function discoverFrameworkCatalog(options: FrameworkDiscoveryOption
           : message.includes("cmake")
             ? "cmake"
             : "unknown";
+    await writeFrameworkDebugArtifact(options, "workspace-inspection", error);
     throw new Error(`${options.frameworkId} workspace inspection failed [kind=${kind}]`);
   }
   let selected: SelectedWorkspace;
@@ -400,6 +401,27 @@ export async function discoverFrameworkCatalog(options: FrameworkDiscoveryOption
   } finally {
     eventSubscription?.close();
   }
+}
+
+async function writeFrameworkDebugArtifact(
+  options: FrameworkDiscoveryOptions,
+  phase: string,
+  error: unknown,
+): Promise<void> {
+  if (process.env.UTIDE_DEBUG_FRAMEWORK !== "1") return;
+  const debugDirectory = join(options.repositoryRoot ?? repositoryRoot, ".native-e2e", "artifacts", "windows");
+  const detail = error instanceof Error ? error.message : String(error);
+  await mkdir(debugDirectory, { recursive: true }).catch(() => undefined);
+  await writeFile(
+    join(debugDirectory, `framework-debug-${options.toolchainFamily}-${options.frameworkId}.json`),
+    JSON.stringify({
+      phase,
+      error: detail.slice(0, 4096),
+      processState: options.fixture.processState ?? "unknown",
+      serviceDiagnostics: options.fixture.debugDiagnostics ?? "unavailable",
+    }, null, 2),
+    { flag: "w" },
+  ).catch(() => undefined);
 }
 
 function classifyDiscoveryWaitFailure(message: string, code: string | undefined): string {

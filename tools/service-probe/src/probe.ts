@@ -284,7 +284,10 @@ function serviceSensitive(instance: ServiceInstance): string[] {
 
 function diagnostics(instance: ServiceInstance): string {
   const sensitive = serviceSensitive(instance);
-  return `stdout=${redact(instance.stdout, sensitive)}; stderr=${redact(instance.stderr, sensitive)}`;
+  const exit = instance.child.exitCode === null && instance.child.signalCode === null
+    ? "running"
+    : `exit=${String(instance.child.exitCode)}; signal=${String(instance.child.signalCode)}`;
+  return `process=${exit}; stdout=${redact(instance.stdout, sensitive)}; stderr=${redact(instance.stderr, sensitive)}`;
 }
 
 async function forceStop(instance: ServiceInstance): Promise<void> {
