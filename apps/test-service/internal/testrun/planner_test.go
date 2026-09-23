@@ -52,7 +52,7 @@ func TestPlannerBuildsDeterministicFrameworkInvocationsAndIterations(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if adapter.calls != 1 ||
+	if adapter.calls != 2 ||
 		adapter.lastInput.Mode != testframework.RunSelectionCases ||
 		len(adapter.lastInput.Items) != 2 {
 		t.Fatalf("adapter input = %#v, calls=%d", adapter.lastInput, adapter.calls)
