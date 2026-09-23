@@ -1,7 +1,7 @@
 # Phase 9 Gate Matrix
 
-- Candidate commit: `f746f125014402ffeca6e99bc39f53cc4545a9f5`
-- Recorded by commit: `f746f125014402ffeca6e99bc39f53cc4545a9f5`
+- Candidate commit: `a0d1c9c1abaadbe20ac0661e0510b7f5fcba356b`
+- Recorded by commit: `a0d1c9c1abaadbe20ac0661e0510b7f5fcba356b`
 - Evaluation mode: `candidate`
 - Catalog complete: `true`
 - Release ready: `false`
@@ -10,8 +10,8 @@
 
 | Status | Count |
 |---|---:|
-| PASS | 13 |
-| MISSING | 46 |
+| PASS | 0 |
+| MISSING | 59 |
 | FAILED | 0 |
 | DEFERRED | 3 |
 
@@ -68,16 +68,16 @@
 | P8-RUNTIME-PRODUCER-PROVENANCE | 8 | supply-chain | MISSING |  | missing |  |
 | P8-SIGN-WINDOWS | 8 | signing | DEFERRED |  |  |  |
 | P8-WINDOWS-MSIX-PACKAGE | 8 | packaging | MISSING |  | missing |  |
-| P9-MATRIX-CONTRACT | 9 | contract | PASS | github-actions-35454897633-phase9 |  |  |
-| P9-MATRIX-E2E | 9 | end-to-end | PASS | github-actions-35454897633-phase9 |  |  |
-| P9-MATRIX-FAULT-INJECTION | 9 | fault-injection | PASS | github-actions-35454897633-phase9 |  |  |
-| P9-MATRIX-INTEGRATION | 9 | integration | PASS | github-actions-35454897633-phase9 |  |  |
-| P9-MATRIX-UNIT | 9 | unit | PASS | github-actions-35454897633-phase9 |  |  |
-| P9-PERF-CANCEL | 9 | performance | PASS | github-actions-35454897633-phase9 |  |  |
-| P9-PERF-DISCOVERY-10000 | 9 | performance | PASS | github-actions-35454897633-phase9 |  |  |
-| P9-PERF-FILTER | 9 | performance | PASS | github-actions-35454897633-phase9 |  |  |
-| P9-PERF-HARDWARE-BASELINE | 9 | performance | PASS | github-actions-35454897633-phase9 | available |  |
-| P9-PERF-MEMORY | 9 | performance | PASS | github-actions-35454897633-phase9 |  |  |
-| P9-PERF-REPORT | 9 | performance | PASS | github-actions-35454897633-phase9 |  |  |
-| P9-PERF-STARTUP | 9 | performance | PASS | github-actions-35454897633-phase9 |  |  |
-| P9-UPSTREAM-CODEOSS | 9 | upstream | PASS | github-actions-35454897633-phase9 |  |  |
+| P9-MATRIX-CONTRACT | 9 | contract | MISSING |  |  |  |
+| P9-MATRIX-E2E | 9 | end-to-end | MISSING |  |  |  |
+| P9-MATRIX-FAULT-INJECTION | 9 | fault-injection | MISSING |  |  |  |
+| P9-MATRIX-INTEGRATION | 9 | integration | MISSING |  |  |  |
+| P9-MATRIX-UNIT | 9 | unit | MISSING |  |  |  |
+| P9-PERF-CANCEL | 9 | performance | MISSING |  |  |  |
+| P9-PERF-DISCOVERY-10000 | 9 | performance | MISSING |  |  |  |
+| P9-PERF-FILTER | 9 | performance | MISSING |  |  |  |
+| P9-PERF-HARDWARE-BASELINE | 9 | performance | MISSING |  | missing |  |
+| P9-PERF-MEMORY | 9 | performance | MISSING |  |  |  |
+| P9-PERF-REPORT | 9 | performance | MISSING |  |  |  |
+| P9-PERF-STARTUP | 9 | performance | MISSING |  |  |  |
+| P9-UPSTREAM-CODEOSS | 9 | upstream | MISSING |  |  |  |

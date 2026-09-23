@@ -1,8 +1,6 @@
 {
-  "candidateCommit": "f746f125014402ffeca6e99bc39f53cc4545a9f5",
+  "candidateCommit": "a0d1c9c1abaadbe20ac0661e0510b7f5fcba356b",
   "evaluationMode": "candidate",
-  "receiptIds": [
-    "github-actions-35454897633-phase9"
-  ],
+  "receiptIds": [],
   "schemaVersion": 1
 }
