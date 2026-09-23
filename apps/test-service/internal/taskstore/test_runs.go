@@ -100,7 +100,12 @@ func (s *Store) GetRun(
 	if s == nil || ctx == nil || !lowerHex(runID, 32) {
 		return testdomain.TestRun{}, task.ErrInvalidArgument
 	}
-	run, err := scanTestRun(s.db.QueryRowContext(
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return testdomain.TestRun{}, storageError("begin TestRun read", err)
+	}
+	defer tx.Rollback()
+	run, err := scanTestRun(tx.QueryRowContext(
 		ctx,
 		testRunSelect+` WHERE run_id=?`,
 		runID,
@@ -111,7 +116,7 @@ func (s *Store) GetRun(
 	if err != nil {
 		return testdomain.TestRun{}, storageError("get TestRun", err)
 	}
-	results, err := loadRunResults(ctx, s.db, runID)
+	results, err := loadRunResults(ctx, tx, runID)
 	if err != nil {
 		return testdomain.TestRun{}, err
 	}
@@ -119,6 +124,9 @@ func (s *Store) GetRun(
 	validated, err := testdomain.NewTestRun(run)
 	if err != nil {
 		return testdomain.TestRun{}, storageError("validate TestRun", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return testdomain.TestRun{}, storageError("commit TestRun read", err)
 	}
 	return validated, nil
 }
@@ -130,7 +138,12 @@ func (s *Store) GetRunForTask(
 	if s == nil || ctx == nil || !lowerHex(taskID, 32) {
 		return testdomain.TestRun{}, task.ErrInvalidArgument
 	}
-	run, err := scanTestRun(s.db.QueryRowContext(
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return testdomain.TestRun{}, storageError("begin TestRun for Task read", err)
+	}
+	defer tx.Rollback()
+	run, err := scanTestRun(tx.QueryRowContext(
 		ctx,
 		testRunSelect+` WHERE task_id=?`,
 		taskID,
@@ -142,7 +155,7 @@ func (s *Store) GetRunForTask(
 		return testdomain.TestRun{},
 			storageError("get TestRun for Task", err)
 	}
-	results, err := loadRunResults(ctx, s.db, run.RunID)
+	results, err := loadRunResults(ctx, tx, run.RunID)
 	if err != nil {
 		return testdomain.TestRun{}, err
 	}
@@ -151,6 +164,9 @@ func (s *Store) GetRunForTask(
 	if err != nil {
 		return testdomain.TestRun{},
 			storageError(testRunValidationOperation("validate TestRun for Task", err), err)
+	}
+	if err := tx.Commit(); err != nil {
+		return testdomain.TestRun{}, storageError("commit TestRun for Task read", err)
 	}
 	return validated, nil
 }
