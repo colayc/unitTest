@@ -436,7 +436,10 @@ function projectConfiguration(
           // Keep any compiler/linker PDB fallback under the owned source tree;
           // the Service build directory also contains a 64-character profile
           // id and can exceed clang-cl's PDB path limit on hosted runners.
-          "set(_utide_pdb_root \"${CMAKE_SOURCE_DIR}/.utide-pdb\")",
+          // Keep compiler PDBs in a short sibling of source/; the published
+          // consumer path includes a fixed runtime/consumer prefix and MSVC
+          // rejects the longer source/.utide-pdb location.
+          "set(_utide_pdb_root \"${CMAKE_SOURCE_DIR}/../p\")",
           "file(MAKE_DIRECTORY \"${_utide_pdb_root}\")",
           "set(CMAKE_COMPILE_PDB_OUTPUT_DIRECTORY \"${_utide_pdb_root}\" CACHE PATH \"\" FORCE)",
           "set(CMAKE_PDB_OUTPUT_DIRECTORY \"${_utide_pdb_root}\" CACHE PATH \"\" FORCE)",
