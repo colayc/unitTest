@@ -166,6 +166,38 @@ func TestInterpreterTurnsMalformedFrameworkOutputIntoDomainError(
 	}
 }
 
+func TestInterpreterTurnsParserMalformedDiagnosticIntoDomainError(t *testing.T) {
+	containerID, itemID := interpreterIDs(t)
+	parser := &recordingResultParser{
+		finish: testframework.ParseResult{
+			Cases: []testframework.ParsedCaseResult{{
+				ItemID: itemID, ParentLogicalName: "Group",
+				LogicalName: "Case", Status: testframework.CaseNotRun,
+			}},
+			Diagnostics: []testdomain.Diagnostic{{
+				Severity: "error", Category: "framework_output_invalid",
+				Code: "test.invalid", Message: "invalid output",
+			}},
+			Complete: false,
+		},
+	}
+	store := newResultAppender()
+	interpreter := newTestInterpreter(t, store, containerID, itemID, parser, nil)
+	current, step := interpreterTaskAndStep(interpreter)
+	if verdict, err := interpreter.Interpret(
+		context.Background(), current, step,
+		task.ProcessResult{ExitCode: 0},
+	); err != nil || verdict != task.StepVerdictSucceeded {
+		t.Fatalf("Interpret() = %q, %v", verdict, err)
+	}
+	results := store.results()
+	if len(results) != 1 || results[0].Outcome != testdomain.ItemErrored ||
+		len(results[0].FailureDetails) != 1 ||
+		results[0].FailureDetails[0].Category != "framework_output_invalid" {
+		t.Fatalf("malformed diagnostic result = %#v", results)
+	}
+}
+
 func TestInterpreterClassifiesProcessCrashAsErroredResult(t *testing.T) {
 	containerID, itemID := interpreterIDs(t)
 	parser := &recordingResultParser{

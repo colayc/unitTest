@@ -277,6 +277,17 @@ func (interpreter *Interpreter) Interpret(
 		}
 		return state.verdict, nil
 	}
+	if hasParseDiagnostic(parsed.Diagnostics, "framework_output_invalid") {
+		if err := interpreter.persistMalformedOutput(ctx, state); err != nil {
+			return task.StepVerdictDefault, err
+		}
+		state.completed = true
+		state.verdict = task.StepVerdictSucceeded
+		if err := interpreter.recordContainerFinished(state); err != nil {
+			return task.StepVerdictDefault, err
+		}
+		return state.verdict, nil
+	}
 	timeoutAssigned := false
 	for _, candidate := range parsed.Cases {
 		candidateTermination := termination
@@ -409,6 +420,57 @@ func (interpreter *Interpreter) persistMalformed(
 		}
 	}
 	return nil
+}
+
+func (interpreter *Interpreter) persistMalformedOutput(
+	ctx context.Context,
+	state *invocationInterpreter,
+) error {
+	for _, expected := range state.invocation.ExpectedCases {
+		result, exists := state.persisted[expected.ItemID]
+		if exists {
+			result.Outcome = testdomain.ItemErrored
+			result.Reason = ""
+			result.Partial = true
+			result.FailureDetails = append(result.FailureDetails, testdomain.FailureDetail{
+				Category:     "framework_output_invalid",
+				Message:      "framework output could not be validated",
+				Locations:    []testdomain.SourceLocation{},
+				EvidenceRefs: []string{},
+			})
+			if err := interpreter.persistResult(ctx, state, result); err != nil {
+				return err
+			}
+			continue
+		}
+		result = testdomain.TestItemResult{
+			ItemID:      expected.ItemID,
+			ContainerID: state.invocation.ContainerID,
+			Iteration:   state.invocation.Job.Iteration,
+			Outcome:     testdomain.ItemErrored,
+			FailureDetails: []testdomain.FailureDetail{{
+				Category:     "framework_output_invalid",
+				Message:      "framework output could not be validated",
+				Locations:    []testdomain.SourceLocation{},
+				EvidenceRefs: []string{},
+			}},
+			OutputRefs: []string{},
+			Partial:    true,
+		}
+		if err := interpreter.persistResult(ctx, state, result); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func hasParseDiagnostic(values []testdomain.Diagnostic, category string) bool {
+	for _, value := range values {
+		if value.Category == category {
+			return true
+		}
+	}
+	return false
 }
 
 func (interpreter *Interpreter) persistOpaque(
