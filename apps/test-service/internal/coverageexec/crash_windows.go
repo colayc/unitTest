@@ -3,5 +3,6 @@
 package coverageexec
 
 func processExitWasCrash(exitCode int) bool {
-	return exitCode != 0 && uint32(exitCode)&0x80000000 != 0
+	code := uint32(exitCode)
+	return code == 3 || code&0x80000000 != 0
 }

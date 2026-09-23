@@ -182,7 +182,7 @@ func TestInterpreterClassifiesProcessCrashAsErroredResult(t *testing.T) {
 	current, step := interpreterTaskAndStep(interpreter)
 	exitCode := -1
 	if runtime.GOOS == "windows" {
-		exitCode = int(uint32(0xc0000005))
+		exitCode = 3
 	}
 	if verdict, err := interpreter.Interpret(
 		context.Background(), current, step,
