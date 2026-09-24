@@ -462,13 +462,13 @@ function projectConfiguration(
       : []),
     "enable_testing()",
     "add_subdirectory(framework-matrix)",
-    ...(options.platform === "linux" && options.family === "clang"
+    ...(options.platform === "linux"
       ? [
-          // Ubuntu's LLVM toolchain may expose clang++ as a symlink whose
-          // canonical spelling is clang. CMake then uses the C driver for
-          // CXX links and omits libstdc++, so explicitly carry the verified
-          // C++ runtime through every CppUTest consumer in this fixture.
-          "if(UNIX AND NOT APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL \"Clang\")",
+          // The locked CppUTest fixture enables file/line allocation operators
+          // by default, but its consumers are intentionally isolated from
+          // those legacy operators. Keep both Linux CXX drivers on the
+          // verified runtime and disable the incompatible overloads.
+          "if(UNIX AND NOT APPLE)",
           "  foreach(_utide_target CppUTest CppUTestExt phase9_cpputest phase9_cpputest_malformed)",
           "    if(TARGET ${_utide_target})",
           "      target_link_libraries(${_utide_target} PRIVATE stdc++ m)",
