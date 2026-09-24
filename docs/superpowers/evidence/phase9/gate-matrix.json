@@ -1,5 +1,5 @@
 {
-  "candidateCommit": "8d470bef674ed917912d3440bb27a86bae09fcc6",
+  "candidateCommit": "d4b09828981c5256d60d12dbb9d8e9b34399fbfb",
   "catalogComplete": true,
   "counts": {
     "deferred": 3,
@@ -7,7 +7,7 @@
     "missing": 59,
     "pass": 0
   },
-  "currentCommit": "8d470bef674ed917912d3440bb27a86bae09fcc6",
+  "currentCommit": "d4b09828981c5256d60d12dbb9d8e9b34399fbfb",
   "evaluationMode": "candidate",
   "gates": [
     {
@@ -284,7 +284,7 @@
       "status": "MISSING"
     }
   ],
-  "recordedByCommit": "8d470bef674ed917912d3440bb27a86bae09fcc6",
+  "recordedByCommit": "d4b09828981c5256d60d12dbb9d8e9b34399fbfb",
   "releaseReady": false,
   "schemaVersion": 1
 }
