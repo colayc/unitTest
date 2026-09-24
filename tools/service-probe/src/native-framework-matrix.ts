@@ -376,7 +376,12 @@ export async function discoverFrameworkCatalog(options: FrameworkDiscoveryOption
           ? discoveryTask.errorCode
           : "unknown";
         if (process.env.UTIDE_DEBUG_FRAMEWORK === "1") {
-          const debugDirectory = join(repositoryRoot, ".native-e2e", "artifacts", "windows");
+          const debugDirectory = join(
+            repositoryRoot,
+            ".native-e2e",
+            "artifacts",
+            process.platform === "win32" ? "windows" : "linux",
+          );
           await mkdir(debugDirectory, { recursive: true }).catch(() => undefined);
           await writeFile(
             join(debugDirectory, `framework-debug-${options.toolchainFamily}-${options.frameworkId}.json`),
