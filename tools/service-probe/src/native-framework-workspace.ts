@@ -472,6 +472,7 @@ function projectConfiguration(
           "  foreach(_utide_target CppUTest CppUTestExt phase9_cpputest phase9_cpputest_malformed)",
           "    if(TARGET ${_utide_target})",
           "      target_link_libraries(${_utide_target} PRIVATE stdc++ m)",
+          "      target_compile_definitions(${_utide_target} PRIVATE CPPUTEST_MEM_LEAK_DETECTION_DISABLED)",
           "    endif()",
           "  endforeach()",
           "endif()",
