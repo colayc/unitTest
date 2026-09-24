@@ -364,9 +364,6 @@ jobs:
     timeout-minutes: 60
     env:
       UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS: gcc,clang
-      UTIDE_KEEP_FRAMEWORK_FAILURE: '1'
-      UTIDE_DEBUG_FRAMEWORK: '1'
-      UT_DEBUG_PROCESS_HOST_FAILURES: '1'
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -475,11 +472,18 @@ jobs:
       - run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm --filter code-oss-extension test:benchmark
       - run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm --filter code-oss-extension test:host
       - name: Prepare trusted Linux framework runtime offline
+        env:
+          UTIDE_KEEP_FRAMEWORK_FAILURE: '1'
+          UTIDE_DEBUG_FRAMEWORK: '1'
+          UT_DEBUG_PROCESS_HOST_FAILURES: '1'
         run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm prepare:native-framework-runtime -- --platform linux --candidate "${{ github.sha }}"
       - name: Run required Linux framework matrix offline
         env:
           UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS: gcc,clang
           UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED: '1'
+          UTIDE_KEEP_FRAMEWORK_FAILURE: '1'
+          UTIDE_DEBUG_FRAMEWORK: '1'
+          UT_DEBUG_PROCESS_HOST_FAILURES: '1'
         run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm test:e2e:native
       - if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
