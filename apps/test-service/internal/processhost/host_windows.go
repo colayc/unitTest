@@ -317,10 +317,15 @@ func (target *windowsTarget) closeJob(forceTerminate bool) error {
 	_, operationErr, closeErr := target.jobOwner.UseExclusiveAndCloseEventually(func(job windows.Handle) error {
 		if !forceTerminate {
 			// Let naturally exiting descendants drain so their inherited pipes
-			// can close before the job handle is released. This is explicitly
-			// best effort; closeHandle remains the only error that affects
-			// natural-exit success classification.
-			_, _ = waitWindowsJobEmptyState(job, target.ops.queryActiveProcesses, target.cleanupWait)
+			// can close before the job handle is released. If descendants remain
+			// after the grace period, terminate the inner job explicitly so the
+			// subsequent close is deterministic on Windows runners whose job
+			// accounting lags process exit.
+			empty, queryErr := waitWindowsJobEmptyState(job, target.ops.queryActiveProcesses, target.cleanupWait)
+			if !empty && queryErr == nil {
+				_ = target.ops.terminateJob(job, 1)
+				_, _ = waitWindowsJobEmptyState(job, target.ops.queryActiveProcesses, target.cleanupWait)
+			}
 			return nil
 		}
 		terminateErr := target.ops.terminateJob(job, 1)
