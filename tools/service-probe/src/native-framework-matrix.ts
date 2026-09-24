@@ -1611,7 +1611,7 @@ async function publishReportAtomically(
   }
   const destination = join(directory, "framework-report.json");
   const temporary = join(directory, `.framework-report-${randomBytes(8).toString("hex")}.tmp`);
-  const bytes = Buffer.from(`${JSON.stringify(report)}\n`, "utf8");
+  const bytes = Buffer.from(`${JSON.stringify(canonicalizeJson(report), null, 2)}\n`, "utf8");
   let handle;
   try {
     handle = await open(temporary, "wx", 0o600);
@@ -1625,6 +1625,18 @@ async function publishReportAtomically(
     await rm(temporary, { force: true }).catch(() => undefined);
     throw error;
   }
+}
+
+function canonicalizeJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalizeJson);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value as Record<string, unknown>)
+        .sort((left, right) => left.localeCompare(right, "en"))
+        .map((key) => [key, canonicalizeJson((value as Record<string, unknown>)[key])]),
+    );
+  }
+  return value;
 }
 
 function closedKeys(value: unknown, allowed: readonly string[], label: string): void {
