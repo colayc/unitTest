@@ -1,0 +1,13 @@
+[
+  { "name": "absolute path", "entries": [{ "path": "/escape", "type": "file", "size": 1 }] },
+  { "name": "backslash", "entries": [{ "path": "CMock-2.7.0\\escape", "type": "file", "size": 1 }] },
+  { "name": "parent", "entries": [{ "path": "CMock-2.7.0/../escape", "type": "file", "size": 1 }] },
+  { "name": "empty segment", "entries": [{ "path": "CMock-2.7.0//escape", "type": "file", "size": 1 }] },
+  { "name": "reserved Windows name", "entries": [{ "path": "CMock-2.7.0/CON", "type": "file", "size": 1 }] },
+  { "name": "symlink", "entries": [{ "path": "CMock-2.7.0/link", "type": "symlink", "size": 0 }] },
+  { "name": "hardlink", "entries": [{ "path": "CMock-2.7.0/link", "type": "hardlink", "size": 0 }] },
+  { "name": "junction", "entries": [{ "path": "CMock-2.7.0/link", "type": "junction", "size": 0 }] },
+  { "name": "device", "entries": [{ "path": "CMock-2.7.0/device", "type": "device", "size": 0 }] },
+  { "name": "unexpected root", "entries": [{ "path": "other/file", "type": "file", "size": 1 }] },
+  { "name": "duplicate", "entries": [{ "path": "CMock-2.7.0/a", "type": "file", "size": 1 }, { "path": "CMock-2.7.0/a", "type": "file", "size": 1 }] }
+]

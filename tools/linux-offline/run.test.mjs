@@ -53,13 +53,26 @@ test("Linux offline launcher prefers rootless isolation and requires explicit au
 test("Linux workflow prepares downloads before entering a namespace and wraps final native E2E", async () => {
   const workflow = await readFile(resolve(import.meta.dirname, "..", "..", ".github", "workflows", "foundation.yml"), "utf8");
   const extensionPackage = await readFile(resolve(import.meta.dirname, "..", "..", "apps", "code-oss-extension", "package.json"), "utf8");
-  const coveragePrepare = workflow.indexOf("- run: pnpm prepare:coverage-bundle");
-  const frameworkPrepare = workflow.indexOf("- name: Prepare locked Linux framework inputs");
-  const goModuleDownload = workflow.indexOf("- name: Prepare Go module cache before Linux offline namespace");
-  const namespaceProbe = workflow.indexOf("Verify fail-closed Linux offline namespace");
+  const linuxStart = workflow.indexOf("  verify-linux:");
+  const linuxEnd = workflow.indexOf("\n  verify-framework-matrix:", linuxStart);
+  const linuxJob = workflow.slice(linuxStart, linuxEnd);
+  const coveragePrepare = linuxJob.indexOf("- run: pnpm prepare:coverage-bundle");
+  const frameworkPrepare = linuxJob.indexOf("- name: Prepare locked Linux framework inputs");
+  const goModuleDownload = linuxJob.indexOf("- name: Prepare Go module cache before Linux offline namespace");
+  const namespaceProbe = linuxJob.indexOf("Verify fail-closed Linux offline namespace");
+  const frameworkProducer = linuxJob.indexOf('node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm prepare:native-framework-runtime -- --platform linux --candidate "${{ github.sha }}"');
+  const nativeMatrix = linuxJob.indexOf("node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm test:e2e:native");
   assert.ok(coveragePrepare !== -1 && frameworkPrepare !== -1 && goModuleDownload !== -1 && namespaceProbe !== -1 && coveragePrepare < namespaceProbe && frameworkPrepare < namespaceProbe && goModuleDownload < namespaceProbe);
+  assert.ok(frameworkProducer > goModuleDownload && nativeMatrix > frameworkProducer, "Linux producer must run offline after dependency preparation and before native execution");
   assert.match(workflow, /node tools\/linux-offline\/run\.mjs --allow-sudo-root -- pnpm verify/u);
-  assert.match(workflow, /node tools\/linux-offline\/run\.mjs --allow-sudo-root -- pnpm test:e2e:native/u);
+  assert.match(
+    linuxJob,
+    /^ {6}- name: Run required Linux framework matrix offline\r?\n {8}env:\r?\n {10}UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS: gcc,clang\r?\n {10}UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED: '1'\r?\n {10}UTIDE_KEEP_FRAMEWORK_FAILURE: '1'\r?\n {10}UTIDE_DEBUG_FRAMEWORK: '1'\r?\n {10}UT_DEBUG_PROCESS_HOST_FAILURES: '1'\r?\n {8}run: node tools\/linux-offline\/run\.mjs --allow-sudo-root -- pnpm test:e2e:native\s*$/mu,
+  );
+  assert.match(
+    linuxJob,
+    /^ {6}- name: Upload P4 Linux framework report\r?\n {8}uses: actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7\r?\n {8}with:\r?\n {10}name: native-framework-linux\r?\n {10}path: \.native-e2e\/artifacts\/linux\/framework-report\.json\r?\n {10}if-no-files-found: error\r?\n {10}retention-days: 14\s*$/mu,
+  );
   for (const command of [
     "go test ./apps/test-service/... -count=1",
     "go test -race ./apps/test-service/internal/coverageplatform ./apps/test-service/internal/coveragegcc ./apps/test-service/internal/coveragebundle ./apps/test-service/internal/coverageexec -count=1",

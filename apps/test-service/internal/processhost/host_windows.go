@@ -255,7 +255,14 @@ func (target *windowsTarget) Wait() (int, error) {
 			target.waitCode = -1
 			target.waitErr = errors.New("target wait failed")
 		}
-		if err := target.closeJob(); err != nil {
+		// The process has already signaled, so natural completion must not call
+		// TerminateJobObject. Give descendants a brief, best-effort grace period
+		// to drain before closing the KILL_ON_JOB_CLOSE job. Query failures and
+		// timeouts are deliberately ignored here: the job close is still the
+		// definitive cleanup operation, and a native accounting race must not
+		// turn an otherwise successful natural exit into an infrastructure
+		// failure.
+		if err := target.closeJob(false); err != nil {
 			target.waitErr = errors.Join(target.waitErr, errors.New("target job cleanup failed"))
 		}
 		_ = target.processOwner.CloseEventually()
@@ -274,8 +281,19 @@ func (platform *windowsPlatform) Terminate(value Target, _ time.Duration) error 
 	if !ok || target == nil || target.pid <= 0 || target.jobOwner == nil || target.processOwner == nil {
 		return errors.New("invalid windows process target")
 	}
+	// Wait owns the successful natural-exit cleanup: it closes the protected
+	// job/process handles and releases launch inputs.
+	// The host calls Terminate after a natural wait as a final idempotent
+	// cleanup hook. Do not treat the already-closed job as an infrastructure
+	// failure in that path; a second close would otherwise turn a successful
+	// CMake configure into a failed task with no exit code.
+	select {
+	case <-target.waitDone:
+		return nil
+	default:
+	}
 	var terminateErr error
-	if err := target.closeJob(); err != nil {
+	if err := target.closeJob(true); err != nil {
 		terminateErr = errors.New("target job termination failed")
 		_, processErr := target.processOwner.Use(func(handle windows.Handle) error {
 			return target.ops.terminateProcess(handle, 1)
@@ -288,8 +306,23 @@ func (platform *windowsPlatform) Terminate(value Target, _ time.Duration) error 
 	return errors.Join(terminateErr, waitErr)
 }
 
-func (target *windowsTarget) closeJob() error {
+// closeJob performs either natural-exit cleanup (forceTerminate=false) or
+// stop/cancellation cleanup (forceTerminate=true). Natural exit deliberately
+// avoids TerminateJobObject: once the target has signaled, termination is
+// neither necessary nor universally accepted by Windows. Both paths remain
+// fail-closed if the job cannot be proven empty or its handle cannot be
+// closed. Natural completion intentionally relies on the protected job's
+// KILL_ON_JOB_CLOSE disposition; forced cleanup remains fail-closed.
+func (target *windowsTarget) closeJob(forceTerminate bool) error {
 	_, operationErr, closeErr := target.jobOwner.UseExclusiveAndCloseEventually(func(job windows.Handle) error {
+		if !forceTerminate {
+			// Let naturally exiting descendants drain so their inherited pipes
+			// can close before the job handle is released. This is explicitly
+			// best effort; closeHandle remains the only error that affects
+			// natural-exit success classification.
+			_, _ = waitWindowsJobEmptyState(job, target.ops.queryActiveProcesses, target.cleanupWait)
+			return nil
+		}
 		terminateErr := target.ops.terminateJob(job, 1)
 		empty := waitWindowsJobEmpty(job, target.ops.queryActiveProcesses, target.cleanupWait)
 		if !empty {
@@ -310,8 +343,13 @@ func (target *windowsTarget) closeJob() error {
 }
 
 func waitWindowsJobEmpty(job windows.Handle, query func(windows.Handle) (uint32, error), duration time.Duration) bool {
+	empty, _ := waitWindowsJobEmptyState(job, query, duration)
+	return empty
+}
+
+func waitWindowsJobEmptyState(job windows.Handle, query func(windows.Handle) (uint32, error), duration time.Duration) (bool, error) {
 	if job == 0 || job == windows.InvalidHandle || query == nil {
-		return false
+		return false, errors.New("invalid job query")
 	}
 	if duration < 0 {
 		duration = 0
@@ -320,13 +358,13 @@ func waitWindowsJobEmpty(job windows.Handle, query func(windows.Handle) (uint32,
 	for {
 		active, err := query(job)
 		if err != nil {
-			return false
+			return false, err
 		}
 		if active == 0 {
-			return true
+			return true, nil
 		}
 		if !time.Now().Before(deadline) {
-			return false
+			return false, nil
 		}
 		time.Sleep(5 * time.Millisecond)
 	}

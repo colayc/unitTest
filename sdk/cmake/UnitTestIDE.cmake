@@ -317,7 +317,10 @@ function(unit_test_ide_add_unity_test)
   set(output_relative ".unit-test-ide/${test_identity}")
   set(runner_relative "${output_relative}/runner.c")
   set(manifest_relative "${output_relative}/manifest.json")
-  file(REAL_PATH "${CMAKE_BINARY_DIR}" build_root)
+  # Preserve the Service-selected build-root spelling. On Windows the MSVC
+  # compiler may reject an otherwise valid generated source path after CMake
+  # expands an 8.3 build root into a long path.
+  set(build_root "${CMAKE_BINARY_DIR}")
   file(MAKE_DIRECTORY "${build_root}/${output_relative}")
 
   set(generator_arguments

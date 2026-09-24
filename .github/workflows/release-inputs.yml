@@ -889,3 +889,46 @@ jobs:
           path: .release/attestation/release-input-provenance.json
           retention-days: 1
           if-no-files-found: error
+      - name: Generate closed P8 producer report
+        id: p8-producer-report
+        shell: bash
+        env:
+          APPIMAGETOOL_ARTIFACT_ID: ${{ needs.build-linux.outputs.appimagetool_artifact_id }}
+          APPIMAGETOOL_ARTIFACT_DIGEST: ${{ needs.build-linux.outputs.appimagetool_artifact_digest }}
+          LINUX_ARTIFACT_ID: ${{ needs.build-linux.outputs.linux_artifact_id }}
+          LINUX_ARTIFACT_DIGEST: ${{ needs.build-linux.outputs.linux_artifact_digest }}
+          PROVENANCE_ARTIFACT_ID: ${{ steps.upload-provenance.outputs.artifact-id }}
+          PROVENANCE_ARTIFACT_DIGEST: ${{ steps.upload-provenance.outputs.artifact-digest }}
+          WINDOWS_ARTIFACT_ID: ${{ needs.build-windows.outputs.windows_artifact_id }}
+          WINDOWS_ARTIFACT_DIGEST: ${{ needs.build-windows.outputs.windows_artifact_digest }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import { writeCanonicalJson } from "./tools/phase9/canonical-json.mjs";
+          const attempt = Number(process.env.GITHUB_RUN_ATTEMPT);
+          await writeCanonicalJson(".release/attestation/p8-report-input.json", {
+            schemaVersion: 1,
+            mode: "producer",
+            candidateCommit: process.env.GITHUB_SHA,
+            runId: process.env.GITHUB_RUN_ID,
+            runAttempt: attempt,
+            artifacts: [
+              { kind: "appimagetool", id: process.env.APPIMAGETOOL_ARTIFACT_ID, name: `appimagetool-linux-x64-${attempt}`, digest: process.env.APPIMAGETOOL_ARTIFACT_DIGEST },
+              { kind: "linux-runtime", id: process.env.LINUX_ARTIFACT_ID, name: `code-oss-linux-x64-${attempt}`, digest: process.env.LINUX_ARTIFACT_DIGEST },
+              { kind: "provenance", id: process.env.PROVENANCE_ARTIFACT_ID, name: `release-input-provenance-${attempt}`, digest: process.env.PROVENANCE_ARTIFACT_DIGEST },
+              { kind: "windows-runtime", id: process.env.WINDOWS_ARTIFACT_ID, name: `code-oss-windows-x64-${attempt}`, digest: process.env.WINDOWS_ARTIFACT_DIGEST },
+            ],
+          });
+          NODE
+          node tools/phase9/p8-report-create.mjs \
+            --input .release/attestation/p8-report-input.json \
+            --out-dir .release/attestation/p8-reports \
+            --github-output "$GITHUB_OUTPUT"
+      - name: Upload closed P8 producer report
+        id: upload-p8-producer-report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ steps.p8-producer-report.outputs.runtime_producer_provenance_artifact_name }}
+          path: .release/attestation/p8-reports/p8-runtime-producer-provenance/p8-report.json
+          retention-days: 1
+          if-no-files-found: error

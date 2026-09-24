@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "framework": "cpputest",
+  "ctestName": "cpputest.framework",
+  "scenarios": [
+    { "id": "pass", "name": "Pass", "outcome": "passed" },
+    { "id": "assertion-failure", "name": "AssertionFailure", "outcome": "failed" },
+    { "id": "skip", "name": "Skipped", "outcome": "skipped" },
+    { "id": "mock-missing-call", "name": "MockMissingCall", "outcome": "mock-failure" },
+    { "id": "mock-unexpected-call", "name": "MockUnexpectedCall", "outcome": "mock-failure" },
+    { "id": "mock-parameter-mismatch", "name": "MockParameterMismatch", "outcome": "mock-failure" },
+    { "id": "crash", "name": "Crash", "outcome": "crash" },
+    { "id": "timeout", "name": "Timeout", "outcome": "timeout" }
+  ]
+}

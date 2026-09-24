@@ -16,6 +16,7 @@
       "targetTriple": "x86_64-linux-gnu",
       "hostArchitecture": "x64",
       "targetArchitecture": "x64",
+      "compilerSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "generators": ["Ninja", "Unix Makefiles"],
       "capabilities": { "coverageDrivers": ["gcov"] }
     }],

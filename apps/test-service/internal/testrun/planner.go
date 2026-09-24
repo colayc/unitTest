@@ -94,111 +94,109 @@ func PlanRun(
 		return PlannedRun{}, err
 	}
 
-	base := make([]PlannedInvocation, 0)
-	for _, selected := range selection {
-		if err := ctx.Err(); err != nil {
-			return PlannedRun{}, err
-		}
-		binding, exists := bindings[selected.container.ID]
-		if !exists {
-			return PlannedRun{}, task.ErrInvalidArgument
-		}
-		if binding.Descriptor.Blocked ||
-			binding.Descriptor.LogicalName !=
-				selected.container.CTestLogicalName {
-			return PlannedRun{}, task.ErrInvalidArgument
-		}
-		if selected.container.Framework ==
-			testdomain.FrameworkOpaqueCTest {
-			if len(selected.items) != 0 ||
-				input.Runner == nil ||
-				!nilAdapter(binding.Adapter) {
+	candidates := make([]PlannedInvocation, 0)
+	jobs := make([]ScheduledJob, 0)
+	for iteration := int64(1); iteration <= input.RepeatCount; iteration++ {
+		// Framework plans own one-shot control files. Rebuild the plan for every
+		// repeat so each invocation receives a fresh Service-owned result file.
+		base := make([]PlannedInvocation, 0)
+		for _, selected := range selection {
+			if err := ctx.Err(); err != nil {
+				return PlannedRun{}, err
+			}
+			binding, exists := bindings[selected.container.ID]
+			if !exists {
 				return PlannedRun{}, task.ErrInvalidArgument
 			}
-			timeout, err := effectiveInvocationTimeout(
-				input.TaskTimeout,
-				binding.Descriptor.TimeoutSeconds,
+			if binding.Descriptor.Blocked ||
+				binding.Descriptor.LogicalName !=
+					selected.container.CTestLogicalName {
+				return PlannedRun{}, task.ErrInvalidArgument
+			}
+			if selected.container.Framework ==
+				testdomain.FrameworkOpaqueCTest {
+				if len(selected.items) != 0 ||
+					input.Runner == nil ||
+					!nilAdapter(binding.Adapter) {
+					return PlannedRun{}, task.ErrInvalidArgument
+				}
+				timeout, err := effectiveInvocationTimeout(
+					input.TaskTimeout,
+					binding.Descriptor.TimeoutSeconds,
+				)
+				if err != nil {
+					return PlannedRun{}, err
+				}
+				step, err := input.Runner.OpaqueRunPlan(
+					binding.Descriptor,
+					timeout,
+				)
+				if err != nil {
+					return PlannedRun{}, task.ErrInvalidArgument
+				}
+				base = append(base, PlannedInvocation{
+					Step:        step,
+					ContainerID: selected.container.ID,
+					Framework:   selected.container.Framework,
+					ExpectedCases: []testframework.ExpectedCase{{
+						ItemID:      selected.container.ID,
+						LogicalName: selected.container.CTestLogicalName,
+					}},
+					ParseInput: testframework.ParseInput{
+						Descriptor: binding.Descriptor,
+					},
+					Timeout: timeout,
+				})
+				continue
+			}
+			if nilAdapter(binding.Adapter) ||
+				binding.Adapter.Framework() != selected.container.Framework ||
+				binding.Adapter.ContractVersion() == "" ||
+				!selected.container.Capabilities.CanRunCase ||
+				len(selected.items) == 0 {
+				return PlannedRun{}, task.ErrInvalidArgument
+			}
+			runItems, byID, err := plannerRunItems(
+				catalog,
+				selected.items,
 			)
 			if err != nil {
 				return PlannedRun{}, err
 			}
-			step, err := input.Runner.OpaqueRunPlan(
-				binding.Descriptor,
-				timeout,
+			mode := testframework.RunSelectionCases
+			if selected.wholeContainer {
+				mode = testframework.RunSelectionAll
+			}
+			frameworkPlan, err := binding.Adapter.PlanRun(
+				ctx,
+				testframework.RunInput{
+					Descriptor: binding.Descriptor,
+					Mode:       mode,
+					Items:      runItems,
+				},
 			)
 			if err != nil {
-				return PlannedRun{}, task.ErrInvalidArgument
+				return PlannedRun{}, err
 			}
-			base = append(base, PlannedInvocation{
-				Step:        step,
-				ContainerID: selected.container.ID,
-				Framework:   selected.container.Framework,
-				ExpectedCases: []testframework.ExpectedCase{{
-					ItemID:      selected.container.ID,
-					LogicalName: selected.container.CTestLogicalName,
-				}},
-				ParseInput: testframework.ParseInput{
-					Descriptor: binding.Descriptor,
-				},
-				Timeout: timeout,
-			})
-			continue
+			planned, err := frameworkInvocations(
+				input.TaskTimeout,
+				selected.container,
+				binding,
+				frameworkPlan,
+				runItems,
+				byID,
+			)
+			if err != nil {
+				return PlannedRun{}, err
+			}
+			base = append(base, planned...)
 		}
-		if nilAdapter(binding.Adapter) ||
-			binding.Adapter.Framework() != selected.container.Framework ||
-			binding.Adapter.ContractVersion() == "" ||
-			!selected.container.Capabilities.CanRunCase ||
-			len(selected.items) == 0 {
+		if len(base) == 0 ||
+			len(candidates)+len(base) > maxPlannedInvocations {
 			return PlannedRun{}, task.ErrInvalidArgument
 		}
-		runItems, byID, err := plannerRunItems(
-			catalog,
-			selected.items,
-		)
-		if err != nil {
-			return PlannedRun{}, err
-		}
-		mode := testframework.RunSelectionCases
-		if selected.wholeContainer {
-			mode = testframework.RunSelectionAll
-		}
-		frameworkPlan, err := binding.Adapter.PlanRun(
-			ctx,
-			testframework.RunInput{
-				Descriptor: binding.Descriptor,
-				Mode:       mode,
-				Items:      runItems,
-			},
-		)
-		if err != nil {
-			return PlannedRun{}, err
-		}
-		planned, err := frameworkInvocations(
-			input.TaskTimeout,
-			selected.container,
-			binding,
-			frameworkPlan,
-			runItems,
-			byID,
-		)
-		if err != nil {
-			return PlannedRun{}, err
-		}
-		base = append(base, planned...)
-		if len(base) > maxPlannedInvocations {
-			return PlannedRun{}, task.ErrInvalidArgument
-		}
-	}
-	if len(base) == 0 ||
-		len(base) > maxPlannedInvocations/int(input.RepeatCount) {
-		return PlannedRun{}, task.ErrInvalidArgument
-	}
-
-	candidates := make([]PlannedInvocation, 0, len(base)*int(input.RepeatCount))
-	jobs := make([]ScheduledJob, 0, cap(candidates))
-	for iteration := int64(1); iteration <= input.RepeatCount; iteration++ {
 		for _, template := range base {
-			invocation := clonePlannedInvocation(template)
+			invocation := template
 			index := len(candidates) + 1
 			id := plannedStepID(index)
 			state := InvocationState{

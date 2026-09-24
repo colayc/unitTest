@@ -295,7 +295,7 @@ func TestFixtureListsAndConfiguresNamedPreset(t *testing.T) {
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code := run([]string{"--preset", "fixture"}, &stdout, &stderr); code != 0 {
+	if code := run([]string{"--preset", "fixture", "-DCMAKE_MAKE_PROGRAM:FILEPATH=C:/tools/ninja.exe"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("configure exit = %d, stderr = %q", code, stderr.String())
 	}
 	state, err := readFixtureState(filepath.Join(root, "build-fixture"))

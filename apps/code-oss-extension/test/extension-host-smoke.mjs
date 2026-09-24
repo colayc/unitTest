@@ -2,8 +2,8 @@ import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { EXTENSION_ACTIVATION_MARKER } from "../dist/src/extension.js";
 import { redactServiceError } from "../dist/src/service-resources.js";
+import { waitForActivation } from "./extension-host-smoke-support.mjs";
 
 const executable = process.env.CODE_OSS_EXECUTABLE?.trim();
 if (!executable) {
@@ -21,45 +21,6 @@ const sensitive = [executable, repositoryRoot, extensionPath, smokeRoot, workspa
 
 function redactedFailure(message, output = "") {
   return redactServiceError(new Error(`${message}; process-output=${output}`), sensitive);
-}
-
-function boundedOutput(current, chunk) {
-  const next = current + String(chunk);
-  return next.length <= 131_072 ? next : next.slice(-131_072);
-}
-
-function waitForActivation(child) {
-  return new Promise((resolveActivation, rejectActivation) => {
-    let output = "";
-    let settled = false;
-    const timer = setTimeout(() => finish(new Error("activation marker timed out")), 30_000);
-    const cleanup = () => {
-      clearTimeout(timer);
-      child.stdout.off("data", onData);
-      child.stderr.off("data", onData);
-      child.off("error", onError);
-      child.off("exit", onExit);
-    };
-    const finish = (error) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      if (error) rejectActivation(redactedFailure(error.message, output));
-      else resolveActivation();
-    };
-    const onData = (chunk) => {
-      output = boundedOutput(output, chunk);
-      if (output.includes(EXTENSION_ACTIVATION_MARKER)) finish();
-    };
-    const onError = (error) => finish(error);
-    const onExit = (code, signal) => finish(new Error(
-      `Code-OSS exited before activation marker with code ${String(code)} and signal ${String(signal)}`
-    ));
-    child.stdout.on("data", onData);
-    child.stderr.on("data", onData);
-    child.once("error", onError);
-    child.once("exit", onExit);
-  });
 }
 
 function waitForExit(child, timeoutMs) {
@@ -105,13 +66,17 @@ try {
   ];
   child = spawn(executable, args, {
     cwd: repositoryRoot,
-    env: process.env,
+    env: { ...process.env, UNIT_TEST_IDE_HOST_SMOKE: "1" },
     shell: false,
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"]
   });
 
-  await waitForActivation(child);
+  await waitForActivation(
+    child,
+    join(userDataDirectory, "User", "globalStorage", "unit-test-ide.code-oss-extension", "activation.marker"),
+    redactedFailure
+  );
   child.kill("SIGTERM");
   try {
     await waitForExit(child, 5_000);

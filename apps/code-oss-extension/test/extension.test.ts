@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import {
   ProtocolClient,
@@ -30,6 +33,17 @@ import type {
 } from "../src/testing-api.js";
 
 type Listener = () => void | Promise<void>;
+
+test("development activation publishes one exact host-observable completion marker", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "unit-test-ide-activation-marker-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const extension = await import("../src/extension.js") as Record<string, unknown>;
+  assert.equal(typeof extension.writeDevelopmentActivationMarker, "function");
+  const writeMarker = extension.writeDevelopmentActivationMarker as (path: string) => Promise<void>;
+  await writeMarker(directory);
+  assert.equal(await readFile(join(directory, "activation.marker"), "utf8"), `${EXTENSION_ACTIVATION_MARKER}\n`);
+  await assert.rejects(writeMarker(directory), /EEXIST/u);
+});
 
 class FakeTestingCollection implements TestingTestItemCollection {
   readonly entries = new Map<string, TestingTestItem>();
@@ -419,6 +433,20 @@ test("activation completion marker is not emitted when controller activation rej
       (marker) => markers.push(marker)
     ),
     /activation rejected/
+  );
+  assert.deepEqual(markers, []);
+});
+
+test("activation completion marker is not emitted when durable marker publication rejects", async () => {
+  const markers: string[] = [];
+
+  await assert.rejects(
+    () => activateControllerWithMarker(
+      { activate: async () => undefined },
+      (marker) => markers.push(marker),
+      async () => { throw new Error("marker write rejected"); }
+    ),
+    /marker write rejected/
   );
   assert.deepEqual(markers, []);
 });

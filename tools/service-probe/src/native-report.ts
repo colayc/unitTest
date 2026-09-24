@@ -1,6 +1,11 @@
-import { lstat, mkdir, open, rename, rm } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import type { NativeScenarioResult, PreparedCMakeBundle } from "./native-build.js";
+import {
+  buildFrameworkPlatformReport,
+  type FrameworkPlatform,
+  type FrameworkPlatformReport,
+} from "./native-framework-report.js";
 
 export interface NativeToolchainReport {
   schemaVersion: 1;
@@ -47,6 +52,35 @@ export async function writeNativeToolchainReport(
     throw error;
   }
   return target;
+}
+
+export async function verifyRequiredFrameworkReport(
+  artifactDirectory: string,
+  platform: FrameworkPlatform,
+): Promise<FrameworkPlatformReport> {
+  if (!isAbsolute(artifactDirectory) || artifactDirectory.includes("\0")) {
+    throw new Error("native artifact directory must be an absolute path");
+  }
+  const target = join(resolve(artifactDirectory), "framework-report.json");
+  const info = await lstat(target).catch(() => undefined);
+  if (info === undefined) throw new Error("required framework report is missing");
+  if (!info.isFile() || info.isSymbolicLink() || info.size < 1 || info.size > 16 * 1024 * 1024) {
+    throw new Error("required framework report is unsafe");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readFile(target, "utf8"));
+  } catch (error) {
+    throw new Error("required framework report is invalid", { cause: error });
+  }
+  let report: FrameworkPlatformReport;
+  try {
+    report = buildFrameworkPlatformReport(parsed as FrameworkPlatformReport);
+  } catch (error) {
+    throw new Error("required framework report is invalid", { cause: error });
+  }
+  if (report.platform !== platform) throw new Error("required framework report platform is invalid");
+  return report;
 }
 
 function buildReport(

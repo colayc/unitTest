@@ -22,6 +22,59 @@ const linuxBaselineManifestSha256 = "b".repeat(64);
 const windowsBaselineManifestSha256 = "c".repeat(64);
 const generatedAt = "2026-08-25T00:00:00.000Z";
 const baselineGeneratedAt = "2026-08-24T00:00:00.000Z";
+const foundationTrustPathActionPins = new Map([
+  ["actions/cache", "0057852bfaa89a56745cba8c7296529d2fc39830"],
+  ["actions/checkout", "d23441a48e516b6c34aea4fa41551a30e30af803"],
+  ["actions/download-artifact", "d3f86a106a0bac45b974a628896c90dbdf5c8093"],
+  ["actions/setup-go", "924ae3a1cded613372ab5595356fb5720e22ba16"],
+  ["actions/setup-node", "249970729cb0ef3589644e2896645e5dc5ba9c38"],
+  ["actions/upload-artifact", "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"],
+  ["pnpm/action-setup", "f40ffcd9367d9f12939873eb1018b921a783ffaa"],
+]);
+const foundationTrustPathJobs = [
+  "verify-windows",
+  "verify-linux",
+  "verify-release-input-run",
+  "package-windows",
+  "package-linux",
+  "install-smoke-windows",
+  "install-smoke-linux",
+  "release-qualification",
+];
+const foundationTrustPathActionCounts = new Map([
+  ["verify-windows", 9],
+  ["verify-linux", 11],
+  ["verify-release-input-run", 3],
+  ["package-windows", 6],
+  ["package-linux", 7],
+  ["install-smoke-windows", 5],
+  ["install-smoke-linux", 5],
+  ["release-qualification", 15],
+]);
+
+function foundationJobSource(workflow, jobName) {
+  const start = workflow.indexOf(`  ${jobName}:`);
+  assert.ok(start >= 0, `${jobName} must exist`);
+  const nextJob = workflow.slice(start + 1).search(/^  [a-z0-9][a-z0-9-]*:/mu);
+  const end = nextJob < 0 ? workflow.length : start + 1 + nextJob;
+  return workflow.slice(start, end);
+}
+
+function assertFoundationP8TrustPathPinned(workflow) {
+  let invocationCount = 0;
+  for (const jobName of foundationTrustPathJobs) {
+    const job = foundationJobSource(workflow, jobName);
+    const invocations = [...job.matchAll(/^\s+(?:-\s+)?uses:\s+([^\s#]+)/gmu)].map((match) => match[1]);
+    assert.equal(invocations.length, foundationTrustPathActionCounts.get(jobName), `${jobName} action invocation count`);
+    invocationCount += invocations.length;
+    for (const invocation of invocations) {
+      const match = /^([^@]+)@([0-9a-f]{40})$/u.exec(invocation);
+      assert.ok(match, `${jobName} contains mutable action ${invocation}`);
+      assert.equal(match[2], foundationTrustPathActionPins.get(match[1]), `${jobName} contains unreviewed action ${invocation}`);
+    }
+  }
+  assert.equal(invocationCount, 61, "foundation P8 trust path action invocation count");
+}
 
 const lifecyclePass = Object.freeze({
   install: "pass",
@@ -524,11 +577,11 @@ test("foundation release publication is downstream of a successful qualification
   assert.match(workflow, /release-qualification:\r?\n[\s\S]*?needs:\r?\n\s+- install-smoke-windows\r?\n\s+- install-smoke-linux/u);
   const qualificationStart = workflow.indexOf("  release-qualification:");
   const qualificationJob = workflow.slice(qualificationStart);
-  assert.match(qualificationJob, /uses: pnpm\/action-setup@v4[\s\S]*?version: 11\.4\.0[\s\S]*?run_install: false/u);
+  assert.match(qualificationJob, /uses: pnpm\/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4[\s\S]*?version: 11\.4\.0[\s\S]*?run_install: false/u);
   assert.match(qualificationJob, /run: pnpm install --frozen-lockfile/u);
   assert.match(workflow, /node tools\/release\/qualification\.mjs[\s\S]*?release-qualification\.json/u);
   assert.match(workflow, /signature_required=\$env:RELEASE_SIGNING_REQUIRED/u);
-  assert.match(workflow, /qualificationOutcome\.qualified[\s\S]*?actions\/upload-artifact@v7/u);
+  assert.match(workflow, /qualificationOutcome\.qualified[\s\S]*?actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7/u);
   assert.match(workflow, /id: canonical-release-version[\s\S]*?name: qualified-release-\$\{\{ steps\.canonical-release-version\.outputs\.version \}\}/u);
 });
 
@@ -547,6 +600,45 @@ test("foundation stages a closed qualified release", async () => {
   const stageIndex = qualificationJob.indexOf("node tools/release/stage-qualified-release.mjs");
   const uploadIndex = qualificationJob.indexOf("name: Publish qualified release artifacts");
   assert.ok(stageIndex >= 0 && uploadIndex > stageIndex);
+});
+
+test("foundation uploads all six deterministic content-bound unsigned P8 reports", async () => {
+  const workflow = await readFile(resolve(".github/workflows/foundation.yml"), "utf8");
+  const qualificationStart = workflow.indexOf("  release-qualification:");
+  const job = workflow.slice(qualificationStart);
+  assert.match(job, /- verify-release-input-run/u);
+  assert.match(job, /id: p8-foundation-reports/u);
+  assert.match(job, /node tools\/phase9\/p8-report-create\.mjs/u);
+  for (const output of [
+    "install_lifecycle_linux_artifact_name",
+    "install_lifecycle_windows_artifact_name",
+    "license_audit_artifact_name",
+    "linux_appimage_package_artifact_name",
+    "qualification_unsigned_artifact_name",
+    "windows_msix_package_artifact_name",
+  ]) {
+    assert.ok(job.includes("name: ${{ steps.p8-foundation-reports.outputs." + output + " }}"));
+  }
+  assert.match(workflow, /artifact_id: \$\{\{ steps\.upload-package-windows\.outputs\.artifact-id \}\}/u);
+  assert.match(workflow, /artifact_id: \$\{\{ steps\.upload-package-linux\.outputs\.artifact-id \}\}/u);
+  assert.match(job, /SIGNATURE_REQUIRED: \$\{\{ needs\.package-windows\.outputs\.signature_required \}\}/u);
+  assert.match(job, /SIGNATURE_OUTCOME: \$\{\{ needs\.package-windows\.outputs\.signature_outcome \}\}/u);
+  assert.equal((job.match(/if: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.release_signing_required == '0' \}\}/gu) ?? []).length, 7);
+});
+
+test("foundation P8 report trust path uses only reviewed immutable action commits", async () => {
+  const workflow = await readFile(resolve(".github/workflows/foundation.yml"), "utf8");
+  assertFoundationP8TrustPathPinned(workflow);
+});
+
+test("foundation P8 trust path rejects a mutable direct sequence action", async () => {
+  const workflow = await readFile(resolve(".github/workflows/foundation.yml"), "utf8");
+  const mutated = workflow.replace(
+    "- uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6",
+    "- uses: actions/checkout@v6",
+  );
+  assert.notEqual(mutated, workflow);
+  assert.throws(() => assertFoundationP8TrustPathPinned(mutated), /verify-windows contains mutable action actions\/checkout@v6/u);
 });
 
 test("release package jobs materialize digest-pinned runtime inputs before packaging", async () => {

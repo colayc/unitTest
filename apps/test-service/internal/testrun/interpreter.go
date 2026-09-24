@@ -218,6 +218,8 @@ func (interpreter *Interpreter) Interpret(
 	termination := testframework.ProcessExited
 	if result.TimedOut {
 		termination = testframework.ProcessTimedOut
+	} else if processExitWasCrash(result.ExitCode) {
+		termination = testframework.ProcessCrashed
 	}
 	if state.parseErr == nil && state.invocation.ControlFile != nil {
 		encoded, readErr := state.invocation.ControlFile.Read(
@@ -266,6 +268,17 @@ func (interpreter *Interpreter) Interpret(
 	if finishErr != nil {
 		state.parseErr = finishErr
 		if err := interpreter.persistMalformed(ctx, state); err != nil {
+			return task.StepVerdictDefault, err
+		}
+		state.completed = true
+		state.verdict = task.StepVerdictSucceeded
+		if err := interpreter.recordContainerFinished(state); err != nil {
+			return task.StepVerdictDefault, err
+		}
+		return state.verdict, nil
+	}
+	if hasParseDiagnostic(parsed.Diagnostics, "framework_output_invalid") {
+		if err := interpreter.persistMalformedOutput(ctx, state); err != nil {
 			return task.StepVerdictDefault, err
 		}
 		state.completed = true
@@ -409,6 +422,57 @@ func (interpreter *Interpreter) persistMalformed(
 	return nil
 }
 
+func (interpreter *Interpreter) persistMalformedOutput(
+	ctx context.Context,
+	state *invocationInterpreter,
+) error {
+	for _, expected := range state.invocation.ExpectedCases {
+		result, exists := state.persisted[expected.ItemID]
+		if exists {
+			result.Outcome = testdomain.ItemErrored
+			result.Reason = ""
+			result.Partial = true
+			result.FailureDetails = append(result.FailureDetails, testdomain.FailureDetail{
+				Category:     "framework_output_invalid",
+				Message:      "framework output could not be validated",
+				Locations:    []testdomain.SourceLocation{},
+				EvidenceRefs: []string{},
+			})
+			if err := interpreter.persistResult(ctx, state, result); err != nil {
+				return err
+			}
+			continue
+		}
+		result = testdomain.TestItemResult{
+			ItemID:      expected.ItemID,
+			ContainerID: state.invocation.ContainerID,
+			Iteration:   state.invocation.Job.Iteration,
+			Outcome:     testdomain.ItemErrored,
+			FailureDetails: []testdomain.FailureDetail{{
+				Category:     "framework_output_invalid",
+				Message:      "framework output could not be validated",
+				Locations:    []testdomain.SourceLocation{},
+				EvidenceRefs: []string{},
+			}},
+			OutputRefs: []string{},
+			Partial:    true,
+		}
+		if err := interpreter.persistResult(ctx, state, result); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func hasParseDiagnostic(values []testdomain.Diagnostic, category string) bool {
+	for _, value := range values {
+		if value.Category == category {
+			return true
+		}
+	}
+	return false
+}
+
 func (interpreter *Interpreter) persistOpaque(
 	ctx context.Context,
 	state *invocationInterpreter,
@@ -471,6 +535,8 @@ func parsedDomainResult(
 	case testframework.CaseNotRun:
 		if termination == testframework.ProcessTimedOut {
 			outcome = testdomain.ItemTimedOut
+		} else if termination == testframework.ProcessCrashed {
+			outcome = testdomain.ItemErrored
 		} else {
 			outcome = testdomain.ItemNotRun
 			reason = testdomain.ReasonContainerTerminated
@@ -508,6 +574,15 @@ func parsedDomainResult(
 		details = append(details, testdomain.FailureDetail{
 			Category:     "test_timeout",
 			Message:      "test invocation exceeded its timeout",
+			Locations:    []testdomain.SourceLocation{},
+			EvidenceRefs: []string{},
+		})
+	}
+	if value.Status == testframework.CaseNotRun &&
+		termination == testframework.ProcessCrashed {
+		details = append(details, testdomain.FailureDetail{
+			Category:     "test_process_crash",
+			Message:      "test process terminated unexpectedly",
 			Locations:    []testdomain.SourceLocation{},
 			EvidenceRefs: []string{},
 		})

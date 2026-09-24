@@ -19,6 +19,7 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
       - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
@@ -47,6 +48,7 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
+          mkdir -p .superpowers/phase9/snapshots
           mapfile -t run_ids < <(jq -r '.runIds[]' .superpowers/phase9/requests.json)
           for run_id in "${run_ids[@]}"; do
             [[ "$run_id" =~ ^[1-9][0-9]*$ ]] || {
@@ -57,6 +59,20 @@ jobs:
             gh api "repos/colayc/unitTest/actions/runs/$run_id" > ".superpowers/phase9/snapshots/$run_id/run.json"
             gh api "repos/colayc/unitTest/actions/runs/$run_id/jobs?per_page=100" > ".superpowers/phase9/snapshots/$run_id/jobs.json"
             gh api "repos/colayc/unitTest/actions/runs/$run_id/artifacts?per_page=100" > ".superpowers/phase9/snapshots/$run_id/artifacts.json"
+            reports_root=".superpowers/phase9/snapshots/$run_id/reports"
+            while IFS= read -r artifact_id; do
+              [[ "$artifact_id" =~ ^[1-9][0-9]*$ ]] || {
+                echo 'PHASE9_GATE_SCHEMA_INVALID: artifact ID is not canonical' >&2
+                exit 1
+              }
+              mkdir -p "$reports_root"
+              gh api "repos/colayc/unitTest/actions/artifacts/$artifact_id/zip" > "$reports_root/$artifact_id.zip"
+            done < <(jq -r '
+              .artifacts[]
+              | select(.expired == false)
+              | select(.name | test("^p8-(install-lifecycle-linux|install-lifecycle-windows|license-audit|linux-appimage-package|qualification-unsigned|runtime-producer-provenance|windows-msix-package)-report-[1-9][0-9]*-[0-9a-f]{64}$"))
+              | .id
+            ' ".superpowers/phase9/snapshots/$run_id/artifacts.json")
           done
 
       - name: Audit Phase 9 evidence offline
@@ -82,3 +98,107 @@ jobs:
             .superpowers/phase9/audit/phase9-gate-matrix.md
           if-no-files-found: error
           retention-days: 14
+
+  phase9-performance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:phase9:performance
+      - run: node tools/phase9/performance.mjs --out .superpowers/phase9/performance/baseline.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: phase9-performance-baseline
+          path: .superpowers/phase9/performance/baseline.json
+          if-no-files-found: error
+          retention-days: 14
+
+  phase9-offline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: node --test tools/phase9/validate.test.mjs tools/phase9/audit.test.mjs
+
+  phase9-matrix-e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:e2e
+
+  phase9-fault-injection:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: 1.26.6
+          cache-dependency-path: apps/test-service/go.sum
+      - run: pnpm install --frozen-lockfile
+      - name: Prepare CMake bundle before namespace entry
+        run: pnpm prepare:cmake-bundle
+      - name: Prepare Go modules before namespace entry
+        working-directory: apps/test-service
+        env:
+          GOENV: "off"
+          GOTOOLCHAIN: local
+        run: go mod download
+      - name: Run native fault injection offline
+        env:
+          GOENV: "off"
+          GOTOOLCHAIN: local
+        run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm test:e2e:native
+
+  phase9-upstream-codeoss:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:workspace

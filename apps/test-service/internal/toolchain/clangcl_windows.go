@@ -291,7 +291,13 @@ func (adapter *clangCLAdapter) probeCandidate(
 	}
 	instanceEnvironment, err := appendVerifiedGeneratorPaths(
 		candidate.context.environment,
-		generators.directories,
+		append(
+			append([]windowsDirectoryReference(nil), generators.directories...),
+			windowsDirectoryReference{
+				role: "path-clang-cl",
+				path: filepath.Dir(cCompiler.path),
+			},
+		),
 	)
 	if err != nil {
 		return Instance{}, err
@@ -305,6 +311,7 @@ func (adapter *clangCLAdapter) probeCandidate(
 		TargetTriple:       cTriple,
 		HostArchitecture:   candidate.context.config.HostArchitecture,
 		TargetArchitecture: targetArchitecture,
+		CompilerSHA256:     cCompiler.digest,
 		Sysroot:            candidate.context.sdk,
 		Environment:        instanceEnvironment,
 		Generators:         append([]string(nil), generators.names...),

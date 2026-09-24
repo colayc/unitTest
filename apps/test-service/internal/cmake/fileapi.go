@@ -991,7 +991,11 @@ func SnapshotTargetArtifact(
 		command == "" || strings.IndexByte(command, 0) >= 0 {
 		return FingerprintFile{}, ErrTargetArtifact
 	}
-	if !sameDirectory(profile.BinaryDir, target.ProjectBuildDir) {
+	// File API target build directories may be nested below the profile's
+	// binary directory (for example, a target declared by an add_subdirectory
+	// fixture). They remain owned by the Service profile as long as the target
+	// build root is contained by that profile root.
+	if !pathInsideRoots(target.ProjectBuildDir, profile.BinaryDir) {
 		return FingerprintFile{}, ErrTargetArtifact
 	}
 	absolute, err := filepath.Abs(command)

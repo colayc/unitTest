@@ -56,21 +56,135 @@ UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS=gcc,clang pnpm test:e2e:native
 
 环境变量只能包含当前平台允许的 family；重复、未知或跨平台 family 会在 Service 启动前失败。CI 总是设置完整 required family，因此不能把缺失工具链降级为 `skipped`。
 
-## Hosted CI
+## Phase 9 F1 静态 framework fixture 验收
 
-`.github/workflows/foundation.yml` 使用两个固定 job：
+F1 的 fixture 验证独立于 Service native E2E；它验证锁定的 CppUTest/CppUMock
+八个场景和 Unity/CMock 六个场景，不生成或替代 P4 的正式矩阵报告。
+在具有 MSVC、clang-cl、Ninja 的 Windows developer shell 中执行：
+
+```powershell
+pnpm prepare:cmake-bundle
+pnpm prepare:framework-bundle
+pnpm update:cmock-fixture
+pnpm check:framework-bundle
+go -C apps/test-service build -trimpath -o ../../build/unity-runner-generator.exe ./cmd/unity-runner-generator
+$cmake = (node tools/cmake-bundle/prepare.mjs | ConvertFrom-Json).executable
+$generator = (Resolve-Path build\unity-runner-generator.exe).Path
+pnpm verify:framework-fixtures -- --cmake $cmake --generator $generator --toolchains msvc,clang-cl --frameworks cpputest,unity
+```
+
+`update:cmock-fixture` 仅供维护者显式使用，需要 Linux Docker；生成文件与 provenance
+一起提交。普通 CI 的 `test`/`verify` 只检查这些已提交输入，不运行 Docker、Ruby
+或 Ceedling。网络准备和 native 编译不进入普通 `verify`。离线
+`check:framework-bundle` 不下载缺失缓存，已有缓存必须完整通过校验。
+每个请求的 compiler 都是必需项，缺失即失败，不能记为 skip。
+
+本地 stdout 验收摘要不包含绝对路径、环境变量或凭据，且不写
+`framework-report.json`、P4 receipt 或 gate status。F2 负责 hosted 四工具链
+（MSVC、clang-cl、GCC、Clang）正式证据；F1 通过不代表 P4 gate 已通过。
+license inventory 不等于第三方 license/legal 人工审批。Phase 8 的正式 Windows
+签名、人工 legal 审批、文档收尾仍为已批准的三个 DEFERRED 项，`releaseReady=false`。
+
+## Phase 9 F2 本地 framework matrix
+
+F2 required mode 只消费已经通过 `check:framework-bundle` 的 F1 输入。它不会在
+测试运行时启动 CMock、Ruby 或 Docker，也不会下载 framework。可信准备步骤必须先把
+closed runtime manifest 放在固定位置
+`.native-e2e/framework-runtime/{windows|linux}.json`，并把每个 family/framework
+workspace 放在固定的 `.native-e2e/framework-work/` 树中；CLI 和环境变量都不能指定
+替代路径、命令、shell、hook 或 executable。
+
+本地 producer `prepare:native-framework-runtime` 使用已准备的 F1/CMake 输入、真实
+Service discovery、实际编译产物和固定 Go `BenchmarkCatalog10000`（`-benchtime=1x -count=3`）
+构造 closed runtime。它只接受有序的 `--platform` 和 40 位小写 `--candidate`，不接受
+benchmark 文件、环境覆盖、shell 或自定义命令。固定输出为：
+
+```text
+.native-e2e/framework-runtime/windows.json
+.native-e2e/framework-work/windows/{msvc,clang-cl}/{cpputest,unity}/{service,workspace}/...
+.native-e2e/framework-runtime/linux.json
+.native-e2e/framework-work/linux/{gcc,clang}/{cpputest,unity}/{service,workspace}/...
+```
+
+每个 manifest 必须绑定 committed matrix contract、当前 candidate、compiler identity、
+F1 tree/source/provenance identity、从实际 Service catalog 重算的 stable ID，以及固定 build
+root 中唯一 compiled executable 的摘要。producer 不下载依赖；运行前应预先准备锁定的
+framework archive/tree、CMake bundle、Go module cache 和两套本机 compiler，并在已建立的
+offline boundary 内运行 producer 和 required matrix。Go benchmark 强制 `GOPROXY=off`、
+`GOTOOLCHAIN=local`，采集恰好三次 allocations/op，任一样本超过 300000 即失败。
+
+准备过程使用同卷 `.native-e2e/framework-work/.staging/{invocation}/...`。发布和 consumer
+共用 `.native-e2e/framework-runtime/{windows|linux}.lock`，consumer 持锁直到 dispose；
+consumer 在锁目录内复制 workspace/service 后执行，销毁临时 Service 不会删除已发布的
+compiled evidence，因此正常消费后仍可再次 prepare/publish 替换。
+锁已存在时直接 fail closed，不自动清理未知锁。发布在持锁期间备份旧 manifest/work tree、
+rename 新内容并重新验证，失败恢复完整旧 pair。仅删除已验证属于本次操作的 staging/backup；
+未知所有权、符号链接、残留 backup 或不完整旧 runtime 均保留并拒绝覆盖。崩溃留下的锁和
+backup 需人工检查，不能作为成功证据。stdout 的 producer 摘要仅包含 schema/platform/
+candidate/toolchain families/manifest SHA-256，不包含路径、环境、凭据或原始子进程输出。
+最终结构验证失败时，新树按已记录的目录身份移入 `.native-e2e/framework-work/.failed-{invocation}`
+隔离区（保留未知条目），随后恢复并重新验证完整旧 pair；隔离区不作为可消费 runtime。
+
+Windows 本地准备与 required matrix（先在联网准备阶段完成 bundle/cache，随后进入 offline boundary）：
+
+```powershell
+pnpm check:framework-bundle
+go -C apps/test-service build -trimpath -o ../../build/unity-runner-generator.exe ./cmd/unity-runner-generator
+pnpm prepare:framework-bundle
+$cmake = (node tools/cmake-bundle/prepare.mjs | ConvertFrom-Json).executable
+$generator = (Resolve-Path build\unity-runner-generator.exe).Path
+pnpm verify:framework-fixtures -- --cmake $cmake --generator $generator --toolchains msvc,clang-cl --frameworks cpputest,unity
+$candidate = (git rev-parse HEAD).Trim()
+pnpm prepare:native-framework-runtime -- --platform win32 --candidate $candidate
+$env:UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS='msvc,clang-cl'
+$env:UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED='1'
+pnpm test:e2e:native -- --platform win32
+```
+
+Linux 同样先准备并检查锁定的 bundle/cache，随后在 offline boundary 内运行：
+
+```sh
+pnpm check:framework-bundle
+go -C apps/test-service build -trimpath -o ../../build/unity-runner-generator ./cmd/unity-runner-generator
+pnpm prepare:native-framework-runtime -- --platform linux --candidate "$(git rev-parse HEAD)"
+export UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS=gcc,clang
+export UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED=1
+pnpm test:e2e:native -- --platform linux
+```
+
+两平台 required matrix 都必须设置上述 `UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS` 和
+`UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED=1`。本地 producer/matrix 成功不是 hosted
+四工具链证据，不创建 P4 receipt、不改变 gate 状态，`releaseReady=false` 保持不变。
+
+required mode 不允许 skip。缺少任一 compiler、F1 fixture/provenance、预生成 CMock
+输出、固定 runtime manifest、已编译 framework executable、17 场景中的任一项或
+最终 `framework-report.json` 都会使命令失败。报告中的
+`executableArtifactSha256` 是固定 Service build root 中唯一实际编译 executable
+的 SHA-256；`sourceArtifactSha256` 和 stable ID 继续绑定 Task 3 的跨平台 F1 输入
+identity。平台成功结果必须是 2 个 toolchain × 2 个 framework × 每 framework 17
+个有序场景，并且 framework 报告只在全部 workspace/Service cleanup 后原子发布。
+
+## Hosted CI（Service native E2E）
+
+`.github/workflows/foundation.yml` 使用三个固定 native job：
 
 - `verify-windows`：`master` push 使用标签为 `unit-test-wfp` 的 Windows self-hosted runner，Pull Request 使用 `windows-2025-vs2026`，要求 `msvc,clang-cl`。
+- `verify-framework-windows`：独立运行在固定的 `windows-2022` hosted runner；准备 CMake/F1/Go 输入并构建 Unity generator 与 Service 后，执行 Windows producer 和 required framework matrix。该 job 不使用 secrets、self-hosted 标签、管理员步骤或 WFP 命令。
 - `verify-linux`：`ubuntu-24.04`，要求 `gcc,clang`。
 
-Linux job 固定执行完整 native 矩阵；Windows 公共 hosted runner 默认跳过原生矩阵，因为 `clang-cl` linker diagnostic 场景可能耗尽 named-pipe liveness reconnect。为在稳定的自托管/专用 runner 上启用 Windows 矩阵，设置仓库变量 `UNIT_TEST_IDE_WINDOWS_NATIVE_E2E_REQUIRED=1`；启用后缺少 toolchain report 会使 job 失败。
+`verify-framework-windows` 固定执行 producer 后的完整 required framework matrix。Linux job 在联网完成 CMake、F1 和 Go module 准备后，通过 `tools/linux-offline/run.mjs --allow-sudo-root` 在同一离线边界内依次执行 producer 与 required matrix。两者分别只在成功后上传固定的 `native-framework-windows` 与 `native-framework-linux` artifact；内容分别来自 `.native-e2e/artifacts/windows/framework-report.json` 与 `.native-e2e/artifacts/linux/framework-report.json`，缺失即失败，保留 14 天。
 
-每个 job 的共同步骤为：
+`verify-framework-matrix` 只依赖 `verify-framework-windows` 与 `verify-linux`，下载上述两个固定 artifact，运行唯一的 P4 aggregator，并上传 `native-framework-matrix-report`（14 天、缺失即失败）。本地 producer/matrix 成功仍不是 hosted evidence，不创建 P4 receipt、不推进 gate，`releaseReady=false` 保持不变。
+
+原有 `verify-windows` 管理员/WFP 路径和独立的 `verify-windows-wfp` evidence revalidation 路径保持不变。`verify-windows` 的公共 hosted runner 默认跳过普通原生矩阵，因为 `clang-cl` linker diagnostic 场景可能耗尽 named-pipe liveness reconnect。为在稳定的自托管/专用 runner 上启用该普通 Windows 矩阵，设置仓库变量 `UNIT_TEST_IDE_WINDOWS_NATIVE_E2E_REQUIRED=1`；启用后缺少 toolchain report 会使 job 失败。它不替代独立的 `verify-framework-windows` P4 producer。
+
+下列共同步骤只描述原有 `verify-windows` 与 `verify-linux` 的普通 toolchain
+报告路径，不包含独立的 `verify-framework-windows` producer job：
 
 1. `pnpm install --frozen-lockfile`
 2. `pnpm verify`
 3. `pnpm prepare:cmake-bundle`
-4. （Linux 默认执行；Windows 由上述仓库变量启用）`pnpm test:e2e:native`
+4. （Linux 默认执行；普通 Windows job 由上述仓库变量启用）`pnpm test:e2e:native`
 5. 使用 `actions/upload-artifact@v7` 只上传已执行平台的 `toolchain-report.json`
 6. `git diff --exit-code`
 
@@ -101,7 +215,9 @@ Service、构建/测试进程和 coverage evidence validator 都通过同一显�
 
 ```text
 .native-e2e/artifacts/windows/toolchain-report.json
+.native-e2e/artifacts/windows/framework-report.json
 .native-e2e/artifacts/linux/toolchain-report.json
+.native-e2e/artifacts/linux/framework-report.json
 ```
 
 报告只包含：
@@ -114,6 +230,12 @@ Service、构建/测试进程和 coverage evidence validator 都通过同一显�
 - 每个场景的 `passed`/`skipped` 状态。
 
 报告写入采用临时文件加原子 rename，并拒绝绝对路径、token、environment 和不受限字符串。CI 即使 native job 失败也会尝试上传已有报告，便于定位失败。
+
+`framework-report.json` 另包含两个平台 toolchain、每个 toolchain 的 CppUTest/CppUMock
+与 Unity/CMock evidence、每个 framework 的 17 个有序场景、F1 provenance、catalog/source
+stable identity、实际 executable digest 和 Service artifact digest。required mode 会在
+命令成功前重新读取并按 closed schema 验证该文件；缺失、截断、路径字段、scenario
+缺失或 provenance 缺失均不能被 `toolchain-report.json` 掩盖。
 
 ## 后续阶段
 

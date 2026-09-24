@@ -7,6 +7,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   realpath,
   rm,
   symlink,
@@ -41,7 +42,17 @@ import {
   type StartServiceOptions,
   type TaskServiceFixture,
 } from "./probe.js";
-import { writeNativeToolchainReport } from "./native-report.js";
+import { verifyRequiredFrameworkReport, writeNativeToolchainReport } from "./native-report.js";
+import {
+  publishFrameworkPlatformReport,
+  runFrameworkToolchain,
+  type F1FrameworkIdentity,
+  type FrameworkPlatformOptions,
+} from "./native-framework-matrix.js";
+import type {
+  FrameworkId,
+  FrameworkToolchainEvidence,
+} from "./native-framework-report.js";
 
 const execFile = promisify(execFileCallback);
 const repositoryRoot = resolve(import.meta.dirname, "../../..");
@@ -51,6 +62,7 @@ const nativeLivenessReconnectTimeoutMs = 30_000;
 const nativeLivenessReconnectAttempts = 3;
 const nativeLivenessReconnectBackoffMs = 250;
 const requiredEnvironmentName = "UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS";
+const frameworkRequiredEnvironmentName = "UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED";
 const families = ["gcc", "clang", "msvc", "clang-cl"] as const;
 const platformFamilies: Readonly<Record<"linux" | "win32", readonly RequiredToolchainFamily[]>> = {
   linux: ["gcc", "clang"],
@@ -82,6 +94,14 @@ export interface NativeMatrixOptions {
   requiredFamilies: readonly RequiredToolchainFamily[];
   artifactDirectory: string;
   workDirectory?: string;
+  /**
+   * Prepared Service-owned framework fixtures. The native CLI never builds
+   * this value from command-line input; F1 consumers supply it after validating
+   * the committed framework workspace identities.
+   */
+  frameworkPlatform?: FrameworkPlatformOptions;
+  /** Validated F1 identity loaded before required framework Services start. */
+  frameworkIdentity?: F1FrameworkIdentity;
 }
 
 interface FamilyWorkspace {
@@ -127,6 +147,11 @@ interface NativeMatrixDependencies {
   executeScenarios: (context: FamilyExecutionContext) => Promise<Record<string, "passed">>;
   cleanupWorkspace: (workspace: FamilyWorkspace) => Promise<void>;
   writeReport: typeof writeNativeToolchainReport;
+  loadFrameworkIdentity?: (root: string) => Promise<F1FrameworkIdentity>;
+  frameworkExecutableDigest?: typeof frameworkExecutableDigest;
+  runFrameworkToolchain?: typeof runFrameworkToolchain;
+  publishFrameworkReport?: typeof publishFrameworkPlatformReport;
+  verifyFrameworkReport?: typeof verifyRequiredFrameworkReport;
 }
 
 const defaultDependencies: NativeMatrixDependencies = {
@@ -139,6 +164,11 @@ const defaultDependencies: NativeMatrixDependencies = {
   executeScenarios: executeCoreScenarios,
   cleanupWorkspace: (workspace) => rm(workspace.root, { recursive: true, force: true }),
   writeReport: writeNativeToolchainReport,
+  loadFrameworkIdentity,
+  frameworkExecutableDigest,
+  runFrameworkToolchain,
+  publishFrameworkReport: publishFrameworkPlatformReport,
+  verifyFrameworkReport: verifyRequiredFrameworkReport,
 };
 
 export async function runNativeMatrix(
@@ -152,6 +182,18 @@ async function runNativeMatrixWithDependencies(
   dependencies: NativeMatrixDependencies,
 ): Promise<readonly NativeScenarioResult[]> {
   validateMatrixOptions(options, dependencies.architecture);
+  const frameworkRequiredValue = dependencies.environment[frameworkRequiredEnvironmentName];
+  if (frameworkRequiredValue !== undefined && frameworkRequiredValue !== "0" && frameworkRequiredValue !== "1") {
+    throw new Error(`${frameworkRequiredEnvironmentName} must be 0 or 1`);
+  }
+  if (frameworkRequiredValue === "1" && options.frameworkPlatform === undefined) {
+    throw new Error("required framework platform is missing");
+  }
+  const frameworkIdentity = frameworkRequiredValue === "1"
+    ? options.frameworkIdentity ??
+      await (dependencies.loadFrameworkIdentity ?? loadFrameworkIdentity)(dependencies.repositoryRoot)
+    : undefined;
+  if (frameworkIdentity !== undefined) validateRequiredFrameworkInputs(options.frameworkPlatform!, frameworkIdentity);
   const enforced = parseRequiredToolchains(dependencies.environment[requiredEnvironmentName]);
   for (const family of enforced) {
     if (!options.requiredFamilies.includes(family)) {
@@ -173,6 +215,10 @@ async function runNativeMatrixWithDependencies(
   await requireDirectFile(serviceBinary, "native Service binary");
 
   const results: NativeScenarioResult[] = [];
+  const frameworkToolchains: FrameworkToolchainEvidence[] = [];
+  const frameworkStartedAt = options.frameworkPlatform === undefined
+    ? undefined
+    : (options.frameworkPlatform.now ?? (() => new Date()))().toISOString();
   const workDirectory = options.workDirectory ??
     join(tmpdir(), "uti-native");
   for (const family of options.requiredFamilies) {
@@ -206,6 +252,35 @@ async function runNativeMatrixWithDependencies(
         results.push(skippedResult(options.platform, family, bundle.cmakeVersion));
         continue;
       }
+      if (options.frameworkPlatform !== undefined) {
+        if (frameworkIdentity !== undefined) {
+          await verifyCompiledFrameworkEvidence(
+            options.frameworkPlatform,
+            dependencies,
+            dependencies.repositoryRoot,
+            options.platform as "linux" | "win32",
+            family,
+          );
+        }
+        frameworkToolchains.push(await (dependencies.runFrameworkToolchain ?? runFrameworkToolchain)(
+          options.frameworkPlatform,
+          family,
+          frameworkIdentity,
+        ));
+        // The framework matrix may keep this family Service idle longer than
+        // its authenticated connection timeout. Re-establish the main native
+        // fixture connection before resuming the core build scenarios.
+        const reconnect = (fixture.client as ProtocolClient & {
+          reconnect?: () => Promise<void>;
+        }).reconnect;
+        if (typeof reconnect === "function") {
+          await withNamedTimeout(
+            `${family} native connection refresh`,
+            reconnect.call(fixture.client),
+            nativeTimeoutMs,
+          );
+        }
+      }
       const scenarios = await dependencies.executeScenarios({
         ...selected,
         family,
@@ -234,6 +309,19 @@ async function runNativeMatrixWithDependencies(
     bundle,
     results,
   );
+  if (options.frameworkPlatform !== undefined) {
+    await (dependencies.publishFrameworkReport ?? publishFrameworkPlatformReport)(
+      options.frameworkPlatform,
+      frameworkToolchains,
+      frameworkStartedAt!,
+    );
+    if (frameworkIdentity !== undefined) {
+      await (dependencies.verifyFrameworkReport ?? verifyRequiredFrameworkReport)(
+        options.artifactDirectory,
+        options.frameworkPlatform.platform,
+      );
+    }
+  }
   return results;
 }
 
@@ -258,6 +346,18 @@ function validateMatrixOptions(options: NativeMatrixOptions, architecture: strin
     if (!allowed.includes(family)) {
       throw new Error(`toolchain family ${family} is incompatible with ${options.platform}`);
     }
+  }
+  if (options.frameworkPlatform !== undefined) {
+    const frameworkPlatform = options.platform === "win32" ? "win32" : "linux";
+    if (
+      options.frameworkPlatform.platform !== frameworkPlatform ||
+      resolve(options.frameworkPlatform.artifactDirectory) !== resolve(options.artifactDirectory)
+    ) {
+      throw new Error("framework platform output must match the native matrix platform and artifact directory");
+    }
+  }
+  if (options.frameworkIdentity !== undefined && options.frameworkPlatform === undefined) {
+    throw new Error("framework identity requires a framework platform");
   }
 }
 
@@ -703,7 +803,6 @@ async function runPresetBuildScenario(
       events,
       context.family,
       expectedCompiler,
-      context.toolchain.version,
     );
   } finally {
     await fixture?.dispose();
@@ -833,18 +932,18 @@ function assertPresetCompiler(
   events: readonly ProtocolTaskEvent[],
   family: RequiredToolchainFamily,
   expectedCompiler: string,
-  expectedVersion: string,
 ): void {
   const output = events
     .filter((event) => event.event === "task.output")
     .map((event) => String((event.payload as { text?: unknown }).text ?? ""))
     .join("");
-  if (
-    !output.includes(`CXX compiler identification is ${expectedCompiler}`) ||
-    !output.includes(expectedVersion)
-  ) {
+  const identification = new RegExp(
+    `CXX compiler identification is ${expectedCompiler} [0-9]+(?:\\.[0-9]+)+`,
+    "u",
+  );
+  if (!identification.test(output)) {
     throw new Error(
-      `${family} preset build did not identify ${expectedCompiler} ${expectedVersion}; output=${
+      `${family} preset build did not identify ${expectedCompiler} with a concrete version; output=${
         scrubNativeErrorText(output)
       }`,
     );
@@ -1169,6 +1268,7 @@ function startBuild(
       workspaceGeneration: context.snapshot.workspaceGeneration,
       projectId: context.projectId,
       buildProfileId: context.profile.buildProfileId,
+      toolchainId: context.toolchain.toolchainId,
       targetIds,
       jobs: 2,
       timeoutMs,
@@ -1544,6 +1644,111 @@ async function sha256File(path: string): Promise<string> {
   return hash.digest("hex");
 }
 
+async function loadFrameworkIdentity(root: string): Promise<F1FrameworkIdentity> {
+  // The F1 validator is an ESM JavaScript boundary shared by CI tooling and
+  // the compiled TypeScript probe; it intentionally has no runtime wrapper.
+  // @ts-expect-error consume.mjs is validated by its direct Node test suite.
+  const module = await import("../../framework-bundle/consume.mjs") as {
+    loadF1FrameworkIdentity(repositoryRoot: string): Promise<F1FrameworkIdentity>;
+  };
+  return module.loadF1FrameworkIdentity(root);
+}
+
+function validateRequiredFrameworkInputs(
+  options: FrameworkPlatformOptions,
+  identity: F1FrameworkIdentity,
+): void {
+  const expectedFamilies = platformFamilies[options.platform];
+  if (
+    options.toolchains.length !== expectedFamilies.length ||
+    expectedFamilies.some((family) => !options.toolchains.some((candidate) => candidate.family === family))
+  ) throw new Error("required framework toolchains are incomplete");
+  for (const toolchain of options.toolchains) {
+    if (
+      !/^[0-9]+(?:\.[0-9]+){1,3}$/u.test(toolchain.compilerVersion) ||
+      !/^[0-9a-f]{64}$/u.test(toolchain.compilerSha256)
+    ) throw new Error("required framework compiler identity is invalid");
+    if (toolchain.frameworks.length !== 2) throw new Error("required framework fixture set is incomplete");
+    for (const frameworkId of ["cpputest", "unity"] as const) {
+      const framework = toolchain.frameworks.find((candidate) => candidate.frameworkId === frameworkId);
+      if (framework === undefined) throw new Error(`required ${frameworkId} fixture is missing`);
+      if (
+        framework.dependencyTreeSha256 !== identity.frameworkTreeSha256[frameworkId] ||
+        framework.evidence.sourceArtifactSha256 !== identity.fixtures[frameworkId].sourceSha256 ||
+        !/^[0-9a-f]{64}$/u.test(framework.stableIdDigest)
+      ) throw new Error(`required ${frameworkId} fixture identity does not match F1`);
+      if (
+        frameworkId === "unity" && framework.cMockProvenance?.manifestSha256 !== identity.cMockProvenanceSha256 ||
+        frameworkId === "cpputest" && framework.cMockProvenance !== undefined
+      ) throw new Error(`required ${frameworkId} provenance does not match F1`);
+    }
+  }
+}
+
+async function verifyCompiledFrameworkEvidence(
+  options: FrameworkPlatformOptions,
+  dependencies: NativeMatrixDependencies,
+  root: string,
+  platform: "linux" | "win32",
+  family: RequiredToolchainFamily,
+): Promise<void> {
+  const toolchain = options.toolchains.find((candidate) => candidate.family === family);
+  if (toolchain === undefined) throw new Error(`required framework toolchain ${family} is missing`);
+  for (const frameworkId of ["cpputest", "unity"] as const) {
+    const framework = toolchain.frameworks.find((candidate) => candidate.frameworkId === frameworkId);
+    if (framework === undefined) throw new Error(`required ${frameworkId} fixture is missing for ${family}`);
+    const actual = await (dependencies.frameworkExecutableDigest ?? frameworkExecutableDigest)(
+      root,
+      platform,
+      family,
+      frameworkId,
+    );
+    if (actual !== framework.evidence.executableArtifactSha256) {
+      throw new Error(`compiled ${frameworkId} executable identity does not match framework evidence`);
+    }
+  }
+}
+
+async function frameworkExecutableDigest(
+  root: string,
+  platform: "linux" | "win32",
+  family: RequiredToolchainFamily,
+  frameworkId: FrameworkId,
+): Promise<string> {
+  if (!platformFamilies[platform].includes(family)) throw new Error("framework executable toolchain is incompatible with the platform");
+  const platformName = platform === "win32" ? "windows" : "linux";
+  const buildRoot = join(
+    resolve(root), ".native-e2e", "framework-work", platformName, family, frameworkId,
+    "service", "data", "build",
+  );
+  await requireDirectDirectory(buildRoot, `${frameworkId} framework build root`);
+  const executableName = `phase9_${frameworkId}${platform === "win32" ? ".exe" : ""}`;
+  const matches: string[] = [];
+  for (const entry of await readdir(buildRoot, { withFileTypes: true })) {
+    if (!/^[0-9a-f]{64}$/u.test(entry.name)) continue;
+    const profileRoot = join(buildRoot, entry.name);
+    const profileInfo = await lstat(profileRoot);
+    if (!profileInfo.isDirectory() || profileInfo.isSymbolicLink()) throw new Error(`${frameworkId} framework build profile is unsafe`);
+    const executableDirectory = join(profileRoot, "bin");
+    const directoryInfo = await lstat(executableDirectory).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return undefined;
+      throw error;
+    });
+    if (directoryInfo === undefined) continue;
+    if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink()) throw new Error(`${frameworkId} executable directory is unsafe`);
+    const candidate = join(executableDirectory, executableName);
+    const candidateInfo = await lstat(candidate).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return undefined;
+      throw error;
+    });
+    if (candidateInfo === undefined) continue;
+    if (!candidateInfo.isFile() || candidateInfo.isSymbolicLink()) throw new Error(`${frameworkId} compiled executable is unsafe`);
+    matches.push(candidate);
+  }
+  if (matches.length !== 1) throw new Error(`expected exactly one compiled ${frameworkId} executable`);
+  return sha256File(matches[0]!);
+}
+
 async function readCMakeCapabilities(executable: string): Promise<unknown> {
   const { stdout } = await execFile(executable, ["-E", "capabilities"], {
     encoding: "utf8",
@@ -1649,6 +1854,7 @@ function withinRoot(root: string, candidate: string): boolean {
 }
 
 export const __testing = Object.freeze({
+  assertPresetCompiler,
   runNativeMatrixWithDependencies,
   selectGeneratedProfile,
   startFamilyBuildAtCheckpoint,
@@ -1656,4 +1862,5 @@ export const __testing = Object.freeze({
   recoverAfterCancellation,
   recoverNativeLiveness,
   startFailureBuildWithStaleRetry,
+  frameworkExecutableDigest,
 });

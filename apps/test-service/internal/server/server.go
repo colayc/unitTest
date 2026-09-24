@@ -407,6 +407,13 @@ func projectV13Diagnostic(
 	if _, exists := value.Diagnostic["category"]; !exists {
 		value.Diagnostic["category"] = "build_error"
 	}
+	// The internal MSVC-compatible diagnostic parser can retain compiler
+	// notes as a distinct severity. Protocol v1.3/v1.4 deliberately expose
+	// only error, warning, and info, so normalize notes at this boundary
+	// instead of rejecting an otherwise valid task event.
+	if severity, ok := value.Diagnostic["severity"].(string); ok && severity == "note" {
+		value.Diagnostic["severity"] = "info"
+	}
 	projected, err := json.Marshal(value)
 	if err != nil {
 		return nil, err

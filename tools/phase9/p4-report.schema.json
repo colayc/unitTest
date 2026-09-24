@@ -1,0 +1,543 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://unit-test-ide.invalid/schemas/phase9-p4-report-v1.json",
+  "$ref": "#/$defs/matrixReport",
+  "$defs": {
+    "commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$"
+    },
+    "cmockProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "revision",
+        "generatorVersion",
+        "inputSha256",
+        "outputSha256",
+        "manifestSha256",
+        "generatedAtRuntime"
+      ],
+      "properties": {
+        "revision": {
+          "$ref": "#/$defs/commit"
+        },
+        "generatorVersion": {
+          "type": "string",
+          "pattern": "^[0-9]+(?:\\.[0-9]+){1,2}$"
+        },
+        "inputSha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "outputSha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "manifestSha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "generatedAtRuntime": {
+          "const": false
+        }
+      }
+    },
+    "scenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "status",
+        "candidateCommit",
+        "platform",
+        "toolchainFamily",
+        "frameworkId",
+        "catalogRevision",
+        "sourceArtifactSha256",
+        "sourceLocationDigest",
+        "executableArtifactSha256",
+        "resultArtifactSha256",
+        "resultArtifactSizeBytes",
+        "startedAt",
+        "finishedAt",
+        "observedOutcome",
+        "classification"
+      ],
+      "properties": {
+        "id": {
+          "enum": [
+            "all",
+            "assertion-failure",
+            "cancel",
+            "crash",
+            "discovery",
+            "failed-rerun",
+            "filter",
+            "malformed-output",
+            "mock-failure",
+            "opaque-fallback",
+            "reconnect-replay",
+            "repeat",
+            "service-restart",
+            "single",
+            "skip",
+            "stale-catalog",
+            "timeout"
+          ]
+        },
+        "status": {
+          "const": "passed"
+        },
+        "candidateCommit": {
+          "$ref": "#/$defs/commit"
+        },
+        "platform": {
+          "enum": [
+            "linux",
+            "win32"
+          ]
+        },
+        "toolchainFamily": {
+          "enum": [
+            "clang",
+            "clang-cl",
+            "gcc",
+            "msvc"
+          ]
+        },
+        "frameworkId": {
+          "enum": [
+            "cpputest",
+            "unity"
+          ]
+        },
+        "catalogRevision": {
+          "$ref": "#/$defs/digest"
+        },
+        "sourceArtifactSha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "sourceLocationDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "executableArtifactSha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "resultArtifactSha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "resultArtifactSizeBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1073741824
+        },
+        "startedAt": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "finishedAt": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "observedOutcome": {
+          "enum": [
+            "cancelled",
+            "errored",
+            "failed",
+            "interrupted",
+            "passed",
+            "rejected",
+            "skipped",
+            "timed-out"
+          ]
+        },
+        "classification": {
+          "enum": [
+            "aggregate",
+            "assertion",
+            "cancelled",
+            "crash",
+            "discovery",
+            "ignored",
+            "malformed-output",
+            "mock-expectation",
+            "opaque-fallback",
+            "repeat",
+            "replay",
+            "selection",
+            "service-restarted",
+            "stale-catalog",
+            "test",
+            "timeout"
+          ]
+        }
+      }
+    },
+    "scenarioSet": {
+      "type": "array",
+      "minItems": 17,
+      "maxItems": 17,
+      "prefixItems": [
+        { "type": "object", "required": ["id"], "properties": { "id": { "const": "all" } } },
+        { "type": "object", "required": ["id"], "properties": { "id": { "const": "assertion-failure" } } },
+        { "type": "object", "required": ["id"], "properties": { "id": { "const": "cancel" } } },
+        { "type": "object", "required": ["id"], "properties": { "id": { "const": "crash" } } },
+        { "type": "object", "required": ["id"], "properties": { "id": { "const": "discovery" } } },
+        { "type": "object", "required": ["id"], "properties": { "id": { "const": "failed-rerun" } } },
+        { "type": "object", "required": ["id"], "properties": { "id": { "const": "filter" } } },
+        { "type": "object", "required": ["id"], "properties": { "id": { "const": "malformed-output" } } },
+        { "type": "object", "required": ["id"], "properties": { "id": { "const": "mock-failure" } } },
+        { "type": "object", "required": ["id"], "properties": { "id": { "const": "opaque-fallback" } } },
+        { "type": "object", "required": ["id"], "properties": { "id": { "const": "reconnect-replay" } } },
+        { "type": "object", "required": ["id"], "properties": { "id": { "const": "repeat" } } },
+        { "type": "object", "required": ["id"], "properties": { "id": { "const": "service-restart" } } },
+        { "type": "object", "required": ["id"], "properties": { "id": { "const": "single" } } },
+        { "type": "object", "required": ["id"], "properties": { "id": { "const": "skip" } } },
+        { "type": "object", "required": ["id"], "properties": { "id": { "const": "stale-catalog" } } },
+        { "type": "object", "required": ["id"], "properties": { "id": { "const": "timeout" } } }
+      ],
+      "items": false
+    },
+    "framework": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "dependencyVersion",
+        "dependencySha256",
+        "dependencyTreeSha256",
+        "catalogRevision",
+        "catalogArtifactSha256",
+        "sourceArtifactSha256",
+        "sourceLocationDigest",
+        "executableArtifactSha256",
+        "stableIdDigest",
+        "scenarios"
+      ],
+      "properties": {
+        "id": {
+          "enum": [
+            "cpputest",
+            "unity"
+          ]
+        },
+        "dependencyVersion": {
+          "type": "string",
+          "pattern": "^[0-9]+(?:\\.[0-9]+){1,2}$"
+        },
+        "dependencySha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "dependencyTreeSha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "catalogRevision": {
+          "$ref": "#/$defs/digest"
+        },
+        "catalogArtifactSha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "sourceArtifactSha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "sourceLocationDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "executableArtifactSha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "stableIdDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "cMockProvenance": {
+          "$ref": "#/$defs/cmockProvenance"
+        },
+        "scenarios": {
+          "allOf": [
+            { "$ref": "#/$defs/scenarioSet" },
+            { "type": "array", "items": { "$ref": "#/$defs/scenario" } }
+          ]
+        }
+      }
+    },
+    "toolchain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "family",
+        "compilerVersion",
+        "compilerSha256",
+        "frameworks"
+      ],
+      "properties": {
+        "family": {
+          "enum": [
+            "clang",
+            "clang-cl",
+            "gcc",
+            "msvc"
+          ]
+        },
+        "compilerVersion": {
+          "type": "string",
+          "pattern": "^[0-9]+(?:\\.[0-9]+){1,3}$",
+          "maxLength": 64
+        },
+        "compilerSha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "frameworks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/framework"
+          },
+          "minItems": 2,
+          "maxItems": 2
+        }
+      }
+    },
+    "benchmark": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "itemCount",
+        "sampleCount",
+        "allocationBudgetPerOperation",
+        "allocationsPerOperation",
+        "catalogRevision",
+        "catalogArtifactSha256",
+        "stableIdDigest",
+        "startedAt",
+        "finishedAt",
+        "status"
+      ],
+      "properties": {
+        "id": {
+          "const": "catalog-10000"
+        },
+        "itemCount": {
+          "const": 10000
+        },
+        "sampleCount": {
+          "const": 3
+        },
+        "allocationBudgetPerOperation": {
+          "const": 300000
+        },
+        "allocationsPerOperation": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 300000
+          },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "catalogRevision": {
+          "$ref": "#/$defs/digest"
+        },
+        "catalogArtifactSha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "stableIdDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "startedAt": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "finishedAt": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "status": {
+          "const": "passed"
+        }
+      }
+    },
+    "platformToolchains": {
+      "type": "object",
+      "required": ["platform", "toolchains"],
+      "allOf": [
+        {
+          "if": { "properties": { "platform": { "const": "linux" } }, "required": ["platform"] },
+          "then": {
+            "properties": {
+              "toolchains": {
+                "type": "array",
+                "prefixItems": [
+                  { "type": "object", "required": ["family"], "properties": { "family": { "const": "clang" } } },
+                  { "type": "object", "required": ["family"], "properties": { "family": { "const": "gcc" } } }
+                ],
+                "items": false,
+                "minItems": 2,
+                "maxItems": 2
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "platform": { "const": "win32" },
+              "toolchains": {
+                "type": "array",
+                "prefixItems": [
+                  { "type": "object", "required": ["family"], "properties": { "family": { "const": "clang-cl" } } },
+                  { "type": "object", "required": ["family"], "properties": { "family": { "const": "msvc" } } }
+                ],
+                "items": false,
+                "minItems": 2,
+                "maxItems": 2
+              }
+            }
+          }
+        }
+      ]
+    },
+    "platformReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "allOf": [
+        { "$ref": "#/$defs/platformToolchains" }
+      ],
+      "required": [
+        "schemaVersion",
+        "candidateCommit",
+        "sourceCommit",
+        "platform",
+        "architecture",
+        "executionMode",
+        "publication",
+        "startedAt",
+        "finishedAt",
+        "toolchains",
+        "benchmark"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "candidateCommit": {
+          "$ref": "#/$defs/commit"
+        },
+        "sourceCommit": {
+          "$ref": "#/$defs/commit"
+        },
+        "platform": {
+          "enum": [
+            "linux",
+            "win32"
+          ]
+        },
+        "architecture": {
+          "const": "x64"
+        },
+        "executionMode": {
+          "const": "native"
+        },
+        "publication": {
+          "const": "atomic-after-cleanup"
+        },
+        "startedAt": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "finishedAt": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "toolchains": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/toolchain"
+          },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "benchmark": {
+          "$ref": "#/$defs/benchmark"
+        }
+      }
+    },
+    "matrixReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "candidateCommit",
+        "platforms",
+        "frameworkStableIdDigests",
+        "backendBenchmark",
+        "overallStatus"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "candidateCommit": {
+          "$ref": "#/$defs/commit"
+        },
+        "platforms": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/platformReport"
+          },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "frameworkStableIdDigests": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "cpputest",
+            "unity"
+          ],
+          "properties": {
+            "cpputest": {
+              "$ref": "#/$defs/digest"
+            },
+            "unity": {
+              "$ref": "#/$defs/digest"
+            }
+          }
+        },
+        "backendBenchmark": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "itemCount",
+            "sampleCountPerPlatform",
+            "allocationBudgetPerOperation",
+            "stableIdDigest",
+            "status"
+          ],
+          "properties": {
+            "id": {
+              "const": "catalog-10000"
+            },
+            "itemCount": {
+              "const": 10000
+            },
+            "sampleCountPerPlatform": {
+              "const": 3
+            },
+            "allocationBudgetPerOperation": {
+              "const": 300000
+            },
+            "stableIdDigest": {
+              "$ref": "#/$defs/digest"
+            },
+            "status": {
+              "const": "passed"
+            }
+          }
+        },
+        "overallStatus": {
+          "const": "passed"
+        }
+      }
+    }
+  }
+}

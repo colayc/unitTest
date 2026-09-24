@@ -332,6 +332,7 @@
             "workspaceGeneration": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
             "projectId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" },
             "buildProfileId": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "toolchainId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
             "targetIds": { "type": "array", "maxItems": 128, "uniqueItems": true, "items": { "type": "string", "pattern": "^[0-9a-f]{64}$" } },
             "jobs": { "type": "integer", "minimum": 1, "maximum": 256 },
             "timeoutMs": { "type": "integer", "minimum": 1, "maximum": 86400000 }

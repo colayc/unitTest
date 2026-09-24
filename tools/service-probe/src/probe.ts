@@ -284,7 +284,10 @@ function serviceSensitive(instance: ServiceInstance): string[] {
 
 function diagnostics(instance: ServiceInstance): string {
   const sensitive = serviceSensitive(instance);
-  return `stdout=${redact(instance.stdout, sensitive)}; stderr=${redact(instance.stderr, sensitive)}`;
+  const exit = instance.child.exitCode === null && instance.child.signalCode === null
+    ? "running"
+    : `exit=${String(instance.child.exitCode)}; signal=${String(instance.child.signalCode)}`;
+  return `process=${exit}; stdout=${redact(instance.stdout, sensitive)}; stderr=${redact(instance.stderr, sensitive)}`;
 }
 
 async function forceStop(instance: ServiceInstance): Promise<void> {
@@ -461,6 +464,19 @@ export class TaskServiceFixture {
     this.#assertAvailable();
     if (!this.#instance) throw new Error("task service fixture is stopped");
     return this.#instance.client;
+  }
+
+  get processState(): "running" | "exited" | "stopped" {
+    if (this.#disposed || this.#disposeRequested) return "stopped";
+    const child = this.#instance?.child;
+    if (!child) return "stopped";
+    return child.exitCode === null && child.signalCode === null ? "running" : "exited";
+  }
+
+  /** Returns redacted Service diagnostics for bounded native-E2E failure evidence. */
+  get debugDiagnostics(): string {
+    const instance = this.#instance;
+    return instance === undefined ? "service instance unavailable" : diagnostics(instance);
   }
 
   pauseNextReconnect(): ReconnectGate {

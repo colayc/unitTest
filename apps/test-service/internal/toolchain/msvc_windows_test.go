@@ -4,6 +4,8 @@ package toolchain
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -50,6 +52,27 @@ func TestMSVCBuildsTypedFixedVsDevCmdArguments(t *testing.T) {
 	next, err := buildVsDevCmdArguments(path, config)
 	if err != nil || next[4] != want[4] {
 		t.Fatalf("buildVsDevCmdArguments() leaked caller mutation: %#v, %v", next, err)
+	}
+}
+
+func TestMSVCPublishesVerifiedCompilerSHA256(t *testing.T) {
+	fixture := newWindowsToolchainFixture(t)
+	runner := newWindowsFakeRunner(fixture)
+	adapters, err := newWindowsAdapters(runner, fixture.manualMSVC(), fixture.options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	instances, err := adapters[0].Discover(context.Background())
+	if err != nil || len(instances) != 1 {
+		t.Fatalf("Discover() = %#v, %v", instances, err)
+	}
+	contents, err := os.ReadFile(fixture.cl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := sha256.Sum256(contents)
+	if instances[0].CompilerSHA256 != hex.EncodeToString(want[:]) {
+		t.Fatalf("CompilerSHA256 = %q, want verified cl digest %q", instances[0].CompilerSHA256, hex.EncodeToString(want[:]))
 	}
 }
 

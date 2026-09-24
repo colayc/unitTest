@@ -2,6 +2,8 @@ package toolchain
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -39,6 +41,7 @@ func TestGCCProbeUsesFixedArgumentsAndBuildsDescriptor(t *testing.T) {
 	}
 	coverage := instance.Coverage
 	instance.ID = "<stable>"
+	compilerDigest := sha256.Sum256([]byte(filepath.Base(fixture.gcc)))
 	want := Instance{
 		ID:                 "<stable>",
 		Family:             FamilyGCC,
@@ -48,6 +51,7 @@ func TestGCCProbeUsesFixedArgumentsAndBuildsDescriptor(t *testing.T) {
 		TargetTriple:       "x86_64-linux-gnu",
 		HostArchitecture:   "x64",
 		TargetArchitecture: "x64",
+		CompilerSHA256:     hex.EncodeToString(compilerDigest[:]),
 		Sysroot:            fixture.sysroot,
 		Environment:        []string{},
 		Generators:         []string{"Ninja"},
@@ -72,6 +76,48 @@ func TestGCCProbeUsesFixedArgumentsAndBuildsDescriptor(t *testing.T) {
 	}
 	calls = append(calls, probeCall{fixture.ninja, "--version"})
 	runner.assertCalls(calls...)
+}
+
+func TestGNUProbePublishesVerifiedCompilerSHA256(t *testing.T) {
+	t.Parallel()
+
+	fixture := newGNUFixture(t)
+	tests := []struct {
+		name      string
+		family    Family
+		hostArch  string
+		compiler  string
+		candidate Candidate
+	}{
+		{
+			name: "gcc", family: FamilyGCC, hostArch: "x64", compiler: fixture.gcc,
+			candidate: Candidate{Family: FamilyGCC, CCompiler: fixture.gcc, CXXCompiler: fixture.gxx, Ninja: fixture.ninja},
+		},
+		{
+			name: "clang", family: FamilyClang, hostArch: "arm64", compiler: fixture.clang,
+			candidate: Candidate{Family: FamilyClang, CCompiler: fixture.clang, CXXCompiler: fixture.clangxx, Make: fixture.make},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			adapter, err := newGNUAdapter(newGNUFakeRunner(t, fixture), test.family, nil, test.hostArch)
+			if err != nil {
+				t.Fatal(err)
+			}
+			instance, err := adapter.Probe(context.Background(), test.candidate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			contents, err := os.ReadFile(test.compiler)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := sha256.Sum256(contents)
+			if instance.CompilerSHA256 != hex.EncodeToString(want[:]) {
+				t.Fatalf("CompilerSHA256 = %q, want verified C compiler digest %q", instance.CompilerSHA256, hex.EncodeToString(want[:]))
+			}
+		})
+	}
 }
 
 // TestGCCProbeRetainsGCovEvidence catches removal of the discovery-time

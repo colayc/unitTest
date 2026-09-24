@@ -1,0 +1,17 @@
+{
+  "version": 2,
+  "projects": [
+    {
+      "id": "unity-fixture",
+      "sourceDir": ".",
+      "fallback": {
+        "configurations": ["Debug"]
+      },
+      "tests": {
+        "containers": [
+          { "ctestName": "unity.framework", "framework": "unity" }
+        ]
+      }
+    }
+  ]
+}

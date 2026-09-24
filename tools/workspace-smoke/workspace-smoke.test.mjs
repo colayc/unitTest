@@ -59,6 +59,19 @@ function calledSelectors(source, packageName) {
     .map((match) => match[1]);
 }
 
+function workflowJob(workflow, name) {
+  const start = workflow.indexOf(`  ${name}:`);
+  assert.notEqual(start, -1, `foundation job ${name} is missing`);
+  const remainder = workflow.slice(start + 1);
+  const next = remainder.search(/\r?\n {2}[a-z][a-z0-9-]*:\s*$/mu);
+  return workflow.slice(start, next === -1 ? undefined : start + 1 + next);
+}
+
+function workflowActionUses(workflow) {
+  return [...workflow.matchAll(/^\s+(?:-\s+)?uses:\s+(\S+)\s*(?:#.*)?$/gmu)]
+    .map((match) => match[1]);
+}
+
 async function productionGoSources(directory) {
   const entries = await readdir(directory, { withFileTypes: true });
   return Promise.all(entries
@@ -81,6 +94,68 @@ test("workspace pins supported toolchains", async () => {
   );
 });
 
+test("ordinary verification checks committed framework inputs without running maintainer generation", async () => {
+  const { scripts } = JSON.parse(await readFile("package.json", "utf8"));
+  for (const [name, file] of Object.entries({
+    "check:framework-bundle": "check.mjs",
+    "prepare:framework-bundle": "prepare.mjs",
+    "update:cmock-fixture": "update-cmock-fixture.mjs",
+    "verify:framework-fixtures": "verify-fixtures.mjs",
+  })) assert.equal(scripts[name], `node tools/framework-bundle/${file}`);
+  const tests = (await readdir("tools/framework-bundle")).filter((name) => name.endsWith(".test.mjs"));
+  for (const name of tests) assert.ok(scripts["test:framework-bundle"].split(/\s+/u).includes(`tools/framework-bundle/${name}`), `${name} is not wired`);
+  assert.ok(scripts["test:framework-bundle"].includes("tools/linux-offline/run.test.mjs"));
+  const steps = scripts.verify.split(/\s*&&\s*/u);
+  assert.ok(steps.indexOf("pnpm check:framework-bundle") > steps.indexOf("pnpm check:coverage-generated"));
+  assert.ok(steps.indexOf("pnpm check:framework-bundle") < steps.indexOf("pnpm build"));
+  for (const name of ["test", "verify"]) {
+    assert.doesNotMatch(scripts[name], /update:cmock-fixture|docker|ruby|ceedling/iu);
+    assert.doesNotMatch(scripts[name], /pnpm (?:prepare:framework-bundle|verify:framework-fixtures)/u);
+  }
+});
+
+test("runtime and workflow sources cannot execute the maintainer-only CMock generator", async () => {
+  const files = execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ".github/workflows/*.yml", "apps", "sdk", "tools/service-probe/src"], { encoding: "utf8", windowsHide: true }).split("\0").filter(Boolean);
+  const forbidden = /lib[\\/]cmock\.rb|update-cmock-fixture|\bruby\b|docker\s+run/iu;
+  for (const file of files.filter((path) => /\.(?:yml|yaml|[cm]?js|tsx?|go|json|cmake|txt|ps1|sh|bat|cmd|c|cpp|h|hpp)$/iu.test(path))) {
+    const source = await readFile(file, "utf8");
+    if (!forbidden.test(source)) continue;
+    // These validators compare inert manifest identity/marker data, not generation commands.
+    if (["tools/service-probe/src/linux-framework-inputs.ts", "tools/service-probe/src/linux-framework-inputs.test.ts"].includes(file)) {
+      assert.doesNotMatch(source, /\b(?:execFile|execSync|spawn|spawnSync|exec)\s*\([^;]*cmockGenerator/u, `${file} must not execute CMock manifest identity data`);
+      for (const line of source.split(/\r?\n/u).filter((line) => forbidden.test(line))) {
+        assert.match(line, /cmockGenerator:\s*\{|^function marker\(/u, `${file} contains generator use outside inert identity data`);
+      }
+    } else assert.doesNotMatch(source, forbidden, `${file} crosses the maintainer generation boundary`);
+  }
+});
+
+test("Phase 9 performance baseline job contract is fixed and reviewed", async () => {
+  const workflow = await readFile(".github/workflows/phase9-gates.yml", "utf8");
+  const start = workflow.indexOf("  phase9-performance:");
+  assert.notEqual(start, -1, "phase9-performance job is missing");
+  const remainder = workflow.slice(start + 1);
+  const next = remainder.search(/\r?\n {2}[a-z][a-z0-9-]*:\s*$/mu);
+  const job = workflow.slice(start, next === -1 ? undefined : start + 1 + next);
+  assert.match(job, /^ {4}runs-on: ubuntu-24\.04\s*$/mu);
+  assert.match(job, /^ {4}timeout-minutes: 30\s*$/mu);
+  assert.match(job, /^ {6}- run: pnpm install --frozen-lockfile\s*$/mu);
+  assert.match(job, /^ {6}- run: pnpm test:phase9:performance\s*$/mu);
+  assert.match(job, /^ {6}- run: node tools\/phase9\/performance\.mjs --out \.superpowers\/phase9\/performance\/baseline\.json\s*$/mu);
+  assert.match(job, /^ {10}node-version: 24\.18\.0\s*$/mu);
+  assert.match(job, /^ {10}cache: pnpm\s*$/mu);
+  assert.match(job, /^ {10}name: phase9-performance-baseline\s*$/mu);
+  assert.match(job, /^ {10}path: \.superpowers\/phase9\/performance\/baseline\.json\s*$/mu);
+  assert.match(job, /^ {10}if-no-files-found: error\s*$/mu);
+  assert.match(job, /^ {10}retention-days: 14\s*$/mu);
+  for (const sha of [
+    "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
+    "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
+    "pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa",
+    "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+  ]) assert.match(job, new RegExp(sha.replaceAll("@", "\\@")));
+});
+
 test("Phase 9 audit workflow is read-only, fixed-coordinate, and fail-closed", async () => {
   const workflow = await readFile(".github/workflows/phase9-gates.yml", "utf8");
 
@@ -98,13 +173,77 @@ test("Phase 9 audit workflow is read-only, fixed-coordinate, and fail-closed", a
   assert.doesNotMatch(workflow, /continue-on-error/u);
   assert.doesNotMatch(workflow, /\beval\b|\bsh\s+-c\b/u);
 
-  for (const pin of [
+  const jobSource = (name) => {
+    const start = workflow.indexOf(`  ${name}:`);
+    assert.notEqual(start, -1, `Phase 9 execution job ${name} is missing`);
+    const remainder = workflow.slice(start + 1);
+    const next = remainder.search(/\r?\n {2}[a-z][a-z0-9-]*:\s*$/mu);
+    return workflow.slice(start, next === -1 ? undefined : start + 1 + next);
+  };
+  const setupPins = [
     "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
     "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
     "pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa",
-    "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+  ];
+  const setupGoPin = "actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16";
+  for (const [name, commands] of [
+    ["phase9-offline", ["node --test tools/phase9/validate.test.mjs tools/phase9/audit.test.mjs"]],
+    ["phase9-matrix-e2e", ["pnpm test:e2e"]],
+    ["phase9-fault-injection", [
+      "pnpm prepare:cmake-bundle",
+      "go mod download",
+      "node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm test:e2e:native",
+    ]],
+    ["phase9-upstream-codeoss", ["pnpm test:workspace"]],
   ]) {
-    assert.equal(workflow.split(pin).length - 1, 1, `${pin} must appear exactly once`);
+    const source = jobSource(name);
+    assert.match(source, new RegExp(`^  ${name}:\\s*$`, "mu"), `${name} must retain its exact job name`);
+    assert.match(source, /^ {4}runs-on: ubuntu-24\.04\s*$/mu, `${name} must use the fixed Ubuntu runner`);
+    assert.match(source, /^ {4}timeout-minutes: 30\s*$/mu, `${name} must use the fixed timeout`);
+    assert.doesNotMatch(source, /^\s+inputs:/mu, `${name} must not accept dynamic inputs`);
+    assert.doesNotMatch(source, /secrets\.|\$\{\{/u, `${name} must not interpolate dynamic data`);
+    for (const pin of setupPins) {
+      assert.equal(source.split(pin).length - 1, 1, `${name} must use ${pin} exactly once`);
+    }
+    assert.match(source, /^ {10}fetch-depth: 0\s*$/mu, `${name} must fetch fixed checkout history`);
+    assert.match(source, /^ {10}persist-credentials: false\s*$/mu, `${name} checkout must not persist credentials`);
+    assert.match(source, /^ {10}node-version: 24\.18\.0\s*$/mu, `${name} must use the pinned Node version`);
+    assert.match(source, /^ {10}cache: pnpm\s*$/mu, `${name} must use the pnpm cache`);
+    if (name === "phase9-fault-injection") {
+      assert.equal(source.split(setupGoPin).length - 1, 1, `${name} must use pinned setup-go exactly once`);
+      assert.match(
+        source,
+        /^ {6}- uses: actions\/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6\r?\n {8}with:\r?\n {10}go-version: 1\.26\.6\r?\n {10}cache-dependency-path: apps\/test-service\/go\.sum\s*$/mu,
+      );
+      assert.equal([...source.matchAll(/^[ \t]+env:/gmu)].length, 2, `${name} must have exactly two static environment blocks`);
+      assert.match(
+        source,
+        /^ {6}- name: Prepare Go modules before namespace entry\r?\n {8}working-directory: apps\/test-service\r?\n {8}env:\r?\n {10}GOENV: "off"\r?\n {10}GOTOOLCHAIN: local\r?\n {8}run: go mod download\s*$/mu,
+      );
+      assert.match(
+        source,
+        /^ {6}- name: Run native fault injection offline\r?\n {8}env:\r?\n {10}GOENV: "off"\r?\n {10}GOTOOLCHAIN: local\r?\n {8}run: node tools\/linux-offline\/run\.mjs --allow-sudo-root -- pnpm test:e2e:native\s*$/mu,
+      );
+      assert.ok(source.indexOf(setupGoPin) < source.indexOf("go mod download"), `${name} must set up Go before downloading modules`);
+    } else {
+      assert.equal(source.split(setupGoPin).length - 1, 0, `${name} must not set up Go`);
+      assert.doesNotMatch(source, /^\s+env:/mu, `${name} must not define an environment`);
+    }
+    assert.deepEqual(
+      [...source.matchAll(/^[ \t]+(?:-[ \t]+)?run:[ \t]*(.*?)[ \t]*$/gmu)].map((match) => match[1]),
+      ["pnpm install --frozen-lockfile", ...commands],
+      `${name} must install from the lockfile and run only its exact fixed command`,
+    );
+  }
+  assert.equal(workflow.split(setupGoPin).length - 1, 1, `${setupGoPin} must appear exactly once`);
+
+  for (const [pin, expectedCount] of [
+    ["actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803", 6],
+    ["actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38", 6],
+    ["pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa", 6],
+    ["actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", 2],
+  ]) {
+    assert.equal(workflow.split(pin).length - 1, expectedCount, `${pin} must appear exactly ${expectedCount} times`);
   }
   assert.match(workflow, /fetch-depth: 0/u);
   assert.match(workflow, /persist-credentials: false/u);
@@ -146,6 +285,126 @@ test("Phase 9 audit workflow is read-only, fixed-coordinate, and fail-closed", a
   assert.match(upload, /\.superpowers\/phase9\/audit\/phase9-gate-matrix\.md/u);
   assert.match(upload, /if-no-files-found: error/u);
   assert.match(upload, /retention-days: 14/u);
+});
+
+test("P4 native framework matrix workflow is opt-in, fixed, and fail-closed until real reports exist", async () => {
+  const workflow = await readFile(".github/workflows/foundation.yml", "utf8");
+  const job = workflowJob(workflow, "verify-framework-matrix");
+
+  assert.match(job, /^ {4}if: \$\{\{ vars\.UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED == '1' \}\}\s*$/mu);
+  assert.match(job, /^ {4}needs:\r?\n {6}- verify-framework-windows\r?\n {6}- verify-linux\s*$/mu);
+  assert.match(job, /^ {4}runs-on: ubuntu-24\.04\s*$/mu);
+  assert.match(job, /^ {4}timeout-minutes: 30\s*$/mu);
+  assert.doesNotMatch(job, /secrets\.|continue-on-error|workflow_dispatch|inputs:/u);
+  for (const pin of [
+    "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
+    "pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa",
+    "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
+    "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+    "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+  ]) assert.match(job, new RegExp(pin));
+  for (const artifact of ["native-framework-linux", "native-framework-windows", "native-framework-matrix-report"]) {
+    assert.match(job, new RegExp(`^ {10}name: ${artifact}\\s*$`, "mu"));
+  }
+  assert.match(job, /^ {6}- run: pnpm install --frozen-lockfile\s*$/mu);
+  assert.match(
+    job,
+    /node tools\/phase9\/p4-report\.mjs \\\r?\n {12}--windows \.native-e2e\/framework-inputs\/windows\/framework-report\.json \\\r?\n {12}--linux \.native-e2e\/framework-inputs\/linux\/framework-report\.json \\\r?\n {12}--candidate "\$GITHUB_SHA" \\\r?\n {12}--out \.superpowers\/phase9\/p4\/native-framework-matrix-report\.json/u,
+  );
+  assert.match(job, /^ {10}path: \.superpowers\/phase9\/p4\/native-framework-matrix-report\.json\s*$/mu);
+
+  assert.equal((job.match(/actions\/download-artifact@/gu) ?? []).length, 2);
+  assert.match(job, /name: native-framework-windows\r?\n {10}path: \.native-e2e\/framework-inputs\/windows/u);
+  assert.match(job, /name: native-framework-linux\r?\n {10}path: \.native-e2e\/framework-inputs\/linux/u);
+
+  for (const [platform, path] of [
+    ["windows", "C:\\utide\\.native-e2e\\artifacts\\windows\\framework-report.json"],
+    ["linux", ".native-e2e/artifacts/linux/framework-report.json"],
+  ]) {
+    const escapedPath = path.replace(/[\\^$.*+?()[\]{}|]/gu, "\\$&");
+    assert.match(workflow, new RegExp(
+      `^ {6}- name: Upload P4 ${platform === "windows" ? "Windows" : "Linux"} framework report\\r?\\n`
+      + ` {8}uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7\\r?\\n`
+      + ` {8}with:\\r?\\n {10}name: native-framework-${platform}\\r?\\n {10}path: ${escapedPath}\\r?\\n`
+      + " {10}if-no-files-found: error\\r?\\n {10}retention-days: 14\\s*$",
+      "mu",
+    ));
+  }
+});
+
+test("workflow action pin scanning includes direct, named, and id steps", () => {
+  const fixture = `steps:
+      - uses: actions/checkout@${"a".repeat(40)}
+      - name: Restore cache
+        uses: actions/cache@${"b".repeat(40)}
+      - id: upload
+        uses: actions/upload-artifact@${"c".repeat(40)}
+`;
+  assert.deepEqual(workflowActionUses(fixture), [
+    `actions/checkout@${"a".repeat(40)}`,
+    `actions/cache@${"b".repeat(40)}`,
+    `actions/upload-artifact@${"c".repeat(40)}`,
+  ]);
+});
+
+test("fixed hosted framework producers preserve privileged Windows paths and publish exact artifacts", async () => {
+  const workflow = await readFile(".github/workflows/foundation.yml", "utf8");
+  const legacyWindows = workflowJob(workflow, "verify-windows");
+  const legacyWfp = workflowJob(workflow, "verify-windows-wfp");
+  const frameworkWindows = workflowJob(workflow, "verify-framework-windows");
+  const frameworkLinux = workflowJob(workflow, "verify-linux");
+  const aggregator = workflowJob(workflow, "verify-framework-matrix");
+
+  assert.match(
+    legacyWindows,
+    /^ {4}runs-on: \$\{\{ github\.event_name == 'push' && github\.ref == 'refs\/heads\/master' && 'unit-test-wfp' \|\| 'windows-2025-vs2026' \}\}\s*$/mu,
+  );
+  assert.match(
+    legacyWindows,
+    /^ {6}- name: Verify privileged Windows WFP lifecycle\r?\n {8}env:\r?\n {10}UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED: \$\{\{ github\.event_name == 'push' && github\.ref == 'refs\/heads\/master' && '1' \|\| '0' \}\}\r?\n {8}run: go test \.\/apps\/test-service\/internal\/offlineboundary -run '\^TestPrivilegedWindowsWFPDynamicLifecycle\$' -count=1 -v\s*$/mu,
+  );
+  assert.match(
+    legacyWindows,
+    /^ {6}- name: Verify TypeScript WFP sibling sequencing\r?\n {8}env:\r?\n {10}UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED: \$\{\{ github\.event_name == 'push' && github\.ref == 'refs\/heads\/master' && '1' \|\| '0' \}\}\r?\n {8}run: pnpm --filter @unit-test-ide\/service-probe test:wfp-integration\s*$/mu,
+  );
+  assert.match(legacyWfp, /^ {4}runs-on: windows-2025-vs2026\s*$/mu);
+  assert.match(
+    legacyWfp,
+    /^ {6}- name: Revalidate closed Windows WFP coverage evidence\r?\n {8}run: >-\r?\n {10}node apps\/code-oss-extension\/dist\/test\/coverage-evidence-validator\.js\r?\n {10}--platform windows\r?\n {10}--input \.native-e2e\/artifacts\/windows\/coverage-execution-report\.json\s*$/mu,
+  );
+
+  assert.match(frameworkWindows, /^ {4}runs-on: windows-2022\s*$/mu);
+  assert.doesNotMatch(frameworkWindows, /secrets:|secrets\.|unit-test-wfp|windows-2025-vs2026|administrator|WFP/iu);
+  for (const source of [frameworkWindows, frameworkLinux, aggregator]) {
+    for (const use of workflowActionUses(source)) {
+      assert.match(use, /@[0-9a-f]{40}$/u, `framework action is not pinned: ${use}`);
+    }
+  }
+  for (const pin of [
+    "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
+    "pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa",
+    "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
+    "actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16",
+    "actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830",
+    "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+  ]) assert.match(frameworkWindows, new RegExp(pin));
+
+  const producer = frameworkWindows.indexOf("node C:\\utide\\tools\\service-probe\\dist\\native-framework-prepare.js --platform win32 --candidate '${{ github.sha }}'");
+  const native = frameworkWindows.indexOf("node C:\\utide\\tools\\service-probe\\dist\\native-run.js --platform win32");
+  assert.ok(producer !== -1 && native > producer, "Windows runtime producer must precede required native execution");
+  assert.equal((aggregator.match(/node tools\/phase9\/p4-report\.mjs/gu) ?? []).length, 1);
+  assert.match(
+    frameworkWindows,
+    /^ {6}- name: Build Unity generator\r?\n {8}shell: pwsh\r?\n {8}run: \|\r?\n {10}New-Item -ItemType Directory -Force -Path build \| Out-Null\r?\n {10}go -C apps\/test-service build -trimpath -o \.\.\/\.\.\/build\/unity-runner-generator\.exe \.\/cmd\/unity-runner-generator\s*$/mu,
+  );
+  assert.match(
+    frameworkWindows,
+    /^ {6}- name: Run required Windows framework matrix\r?\n {8}env:\r?\n {10}UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS: msvc,clang-cl\r?\n {10}UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED: '1'\r?\n {8}.*?shell: pwsh\r?\n {8}run: \|\r?\n {10}Push-Location C:\\utide\r?\n {10}node C:\\utide\\tools\\service-probe\\build-service\.mjs\r?\n {10}pnpm exec tsc -b [^\r\n]+\r?\n {10}node C:\\utide\\tools\\service-probe\\dist\\native-run\.js --platform win32\r?\n {10}Pop-Location\s*$/mus,
+  );
+  assert.match(
+    frameworkWindows,
+    /^ {6}- name: Upload P4 Windows framework report\r?\n {8}uses: actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7\r?\n {8}with:\r?\n {10}name: native-framework-windows\r?\n {10}path: C:\\utide\\\.native-e2e\\artifacts\\windows\\framework-report\.json\r?\n {10}if-no-files-found: error\r?\n {10}retention-days: 14\s*$/mu,
+  );
 });
 
 test("root verification runs Phase 9 contracts and preserves the exact deferred boundary", async () => {
@@ -193,6 +452,28 @@ test("root verification runs Phase 9 contracts and preserves the exact deferred 
     deferredIds,
   );
   assert.equal(matrix.counts.deferred, 3);
+  assert.equal(matrix.releaseReady, false);
+});
+
+test("root exposes one closed native framework matrix producer-validator suite", async () => {
+  const manifest = JSON.parse(await readFile("package.json", "utf8"));
+  assert.equal(
+    manifest.scripts["test:native-framework-matrix"],
+    "node --test tools/phase9/p4-report.test.mjs",
+  );
+  assert.equal(
+    Object.values(manifest.scripts).filter((command) => command.includes("tools/phase9/p4-report.test.mjs")).length,
+    1,
+  );
+  assert.equal(manifest.scripts.test.split("pnpm run test:native-framework-matrix").length, 2);
+  assert.ok(
+    manifest.scripts.test.indexOf("pnpm run test:phase9-gates")
+      < manifest.scripts.test.indexOf("pnpm run test:native-framework-matrix"),
+  );
+  assert.ok(
+    manifest.scripts.test.indexOf("pnpm run test:native-framework-matrix")
+      < manifest.scripts.test.indexOf("pnpm run test:workspace"),
+  );
 });
 
 test("release manifest contract stays pinned to the repository product identity", async () => {
@@ -265,7 +546,7 @@ test("Hosted CI pins native toolchain runners and gates unstable Windows native 
     assert.ok(verify > prepare && prepare !== -1 && native > verify);
     assert.match(source, /path:\s*\.bundled-tools\/cmake/);
     assert.match(source, /GITHUB_PATH/);
-    assert.match(source, /uses:\s*actions\/upload-artifact@v7/);
+    assert.match(source, /uses:\s*actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a\s*#\s*v7/);
     assert.match(source, /if:\s*always\(\)/);
     assert.match(
       source,
@@ -316,7 +597,7 @@ test("Hosted CI pins native toolchain runners and gates unstable Windows native 
       assert.notEqual(coverageReport, -1);
       const uploadStep = source.slice(source.lastIndexOf("      - ", coverageReport), coverageReport);
       assert.match(uploadStep, /steps\.windows-coverage-evidence\.outcome\s*==\s*'success'/u, "WFP evidence upload must depend on validation of the exact report bytes");
-      assert.match(source, /coverage-execution-windows-[\s\S]*if-no-files-found:\s*error/u, "required verified Windows runs must fail closed without evidence");
+      assert.match(source, /name:\s*coverage-execution-windows-\$\{\{\s*github\.run_attempt\s*\}\}\s*[\s\S]*if-no-files-found:\s*error/u, "required verified Windows runs must upload attempt-qualified evidence and fail closed without it");
       const cleanupStep = source.slice(source.lastIndexOf("      - ", legacyCleanup), serviceSmoke);
       assert.match(cleanupStep, /windows-offline-boundary\.ps1/u);
       assert.match(cleanupStep, /-Action\s+LegacyCleanup/u);
@@ -363,10 +644,11 @@ test("coverage acceptance is a required, closed-evidence cross-platform CI gate"
   assert.ok(bootstrap !== -1 && framework !== -1 && goDownload !== -1);
   assert.ok(native > bootstrap && native > framework && native > goDownload);
   assert.ok(validator > native, "the exact published evidence must be validated after native execution");
-  assert.match(linux, /name:\s*linux-gcc-coverage-report-\$\{\{ github\.run_attempt \}\}/u);
+  assert.match(linux, /name:\s*linux-gcc-coverage-report-\$\{\{\s*github\.run_attempt\s*\}\}\s*$/mu);
   const report = linux.indexOf("linux-gcc-coverage-report.json");
   assert.notEqual(report, -1);
   const upload = linux.slice(linux.lastIndexOf("      - ", report), report + 300);
+  assert.match(upload, /uses:\s*actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a\s*#\s*v7/u);
   assert.match(upload, /if:\s*always\(\)/u);
   assert.match(upload, /if-no-files-found:\s*error/u);
 
@@ -380,6 +662,10 @@ test("coverage acceptance is a required, closed-evidence cross-platform CI gate"
   const smokeStep = windows.slice(windows.lastIndexOf("      - ", smoke), evidenceValidator);
   assert.match(smokeStep, /github\.event_name\s*==\s*['"]push['"][\s\S]*github\.ref\s*==\s*['"]refs\/heads\/master['"]/u);
   assert.doesNotMatch(smokeStep, /vars\.UNIT_TEST_IDE_WFP_INTEGRATION_REQUIRED/u);
+  assert.match(windows, /name:\s*coverage-execution-windows-\$\{\{\s*github\.run_attempt\s*\}\}\s*$/mu);
+  const windowsReport = windows.indexOf("coverage-execution-report.json");
+  const windowsUpload = windows.slice(windows.lastIndexOf("      - ", windowsReport), windowsReport + 300);
+  assert.match(windowsUpload, /uses:\s*actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a\s*#\s*v7/u);
 
   for (const retained of ["verify-windows", "verify-linux", "package-windows", "package-linux", "release-qualification"]) {
     assert.ok(jobs.includes(retained), `existing ${retained} job must remain present`);
@@ -494,7 +780,7 @@ test("trusted producer documentation keeps unsigned qualification operational, c
     const stepStart = source.lastIndexOf("      - ", artifactAt);
     const nextStep = source.indexOf("\n      - ", artifactAt);
     const uploadStep = source.slice(stepStart, nextStep === -1 ? undefined : nextStep);
-    assert.match(uploadStep, /uses:\s*actions\/upload-artifact@v7/u);
+    assert.match(uploadStep, /uses:\s*actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a\s*#\s*v7/u);
     assert.match(uploadStep, /^\s{10}retention-days:\s*1\s*$/mu, `${artifact} must retain unsigned qualification evidence for exactly one day`);
   }
 });

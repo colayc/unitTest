@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "main": "./dist/src/extension.js",
+  "main": "./dist/src/extension-entry.cjs",
   "engines": { "vscode": ">=1.90.0" },
   "activationEvents": ["onStartupFinished"],
   "extensionKind": ["workspace"],
@@ -38,7 +38,7 @@
   },
   "scripts": {
     "build": "tsc -b tsconfig.json",
-    "test": "pnpm run build && node --test dist/test/coverage-service-smoke-support.test.js dist/test/manifest.test.js dist/test/service-manager.test.js dist/test/service-resources.test.js dist/test/trust-gate.test.js dist/test/extension.test.js dist/test/testing-api.test.js dist/test/testing-api-benchmark.test.js dist/test/vscode-testing-bridge.test.js",
+    "test": "pnpm run build && node --test test/extension-host-smoke-support.test.mjs dist/test/coverage-service-smoke-support.test.js dist/test/manifest.test.js dist/test/service-manager.test.js dist/test/service-resources.test.js dist/test/trust-gate.test.js dist/test/extension.test.js dist/test/testing-api.test.js dist/test/testing-api-benchmark.test.js dist/test/vscode-testing-bridge.test.js",
     "test:benchmark": "pnpm run build && node --test dist/test/testing-api-benchmark.test.js",
     "test:coverage-service-smoke": "pnpm run build && node --test dist/test/coverage-service-smoke.test.js",
     "test:coverage-service-smoke:linux": "pnpm run build && node --test dist/test/coverage-service-smoke-linux.test.js",

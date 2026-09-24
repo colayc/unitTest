@@ -1,0 +1,45 @@
+{
+  "candidateCommit": "86d861aefb76f80d013d2278766831e40b717379",
+  "evidence": {
+    "artifacts": [
+      {
+        "digest": "131c0b1670a31080ac80f532995a67660a9f6d0d79570a274f5c921f8cf05170",
+        "expired": false,
+        "id": "10336584316",
+        "name": "phase9-gate-audit-1"
+      }
+    ],
+    "conclusion": "success",
+    "event": "workflow_dispatch",
+    "headSha": "86d861aefb76f80d013d2278766831e40b717379",
+    "jobs": [
+      {
+        "conclusion": "success",
+        "name": "phase9-offline"
+      },
+      {
+        "conclusion": "success",
+        "name": "phase9-matrix-e2e"
+      },
+      {
+        "conclusion": "success",
+        "name": "phase9-fault-injection"
+      }
+    ],
+    "kind": "github-actions",
+    "repository": "colayc/unitTest",
+    "runAttempt": 1,
+    "runId": "34818145925",
+    "workflowPath": ".github/workflows/phase9-gates.yml"
+  },
+  "gateIds": [
+    "P9-MATRIX-CONTRACT",
+    "P9-MATRIX-E2E",
+    "P9-MATRIX-FAULT-INJECTION",
+    "P9-MATRIX-INTEGRATION",
+    "P9-MATRIX-UNIT"
+  ],
+  "observedAt": "2026-09-14T07:32:06.154Z",
+  "receiptId": "github-actions-34818145925-1",
+  "schemaVersion": 1
+}

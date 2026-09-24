@@ -13,6 +13,12 @@ import {
   writeCanonicalJson,
 } from "./canonical-json.mjs";
 import schema from "./gates.schema.json" with { type: "json" };
+import { validateP7Report, validateP7ReportDocument } from "./p7-report.mjs";
+import {
+  P8_REPORT_ARTIFACTS,
+  validateP8Report,
+  validateP8ReportDocument,
+} from "./p8-report.mjs";
 
 export const ALLOWED_DEFERRED_GATE_IDS = Object.freeze([
   "P8-DOCS-CLOSEOUT",
@@ -30,7 +36,15 @@ const MAX_RECEIPT_BYTES = 256 * 1024;
 const MAX_RECEIPTS = 256;
 const COMMIT_PATTERN = /^[0-9a-f]{40}$/u;
 const UNSAFE_DISPLAY_PATTERN = /[\0\r\n`;<>&|]/u;
+const RUN_ATTEMPT_ARTIFACT_SUFFIX = "-{runAttempt}";
 const CANDIDATE_LINEAGE_REASON = "candidate-descendant-changed-tested-content";
+const P7_SEMANTIC_REPORT_GATES = new Set([
+  "P7-COVERAGE-UI-AND-SOURCE-DECORATION",
+  "P7-HISTORY-AND-ARTIFACT-BROWSER",
+  "P7-MAIN-USER-JOURNEY",
+  "P7-MOCK-CONFIGURATION-UX",
+]);
+const P8_SEMANTIC_REPORT_GATES = new Set(Object.keys(P8_REPORT_ARTIFACTS));
 const execFileAsync = promisify(execFile);
 
 const ajv = new Ajv2020({ allErrors: true, strict: true });
@@ -154,6 +168,21 @@ export function validateRegistry(value) {
     assertSafeRepositoryPath(workflowPath, `gate ${gate.id} workflow path`);
     assertUniqueSortedDisplayStrings(jobs, `gate ${gate.id} jobs`);
     assertUniqueSortedDisplayStrings(artifacts, `gate ${gate.id} artifacts`);
+    if (P8_REPORT_ARTIFACTS[gate.id] === undefined) {
+      for (const name of artifacts) {
+        const firstToken = name.indexOf("{runAttempt}");
+        if (firstToken !== -1
+            && (firstToken !== name.length - "{runAttempt}".length
+              || !name.endsWith(RUN_ATTEMPT_ARTIFACT_SUFFIX))) {
+          schemaFailure(`gate ${gate.id} artifacts`);
+        }
+      }
+    }
+    const expectedP8Artifact = P8_REPORT_ARTIFACTS[gate.id];
+    if (expectedP8Artifact !== undefined
+        && (artifacts.length !== 1 || artifacts[0] !== expectedP8Artifact)) {
+      schemaFailure(`gate ${gate.id} artifacts`);
+    }
     if (commands.length + jobs.length + artifacts.length === 0) schemaFailure(`gate ${gate.id} verification policy`);
   }
   for (const sourceSection of declaredSections) {
@@ -191,6 +220,10 @@ export function validateReceipt(value) {
     for (const name of [...jobNames, ...artifactNames]) assertNonemptyDisplayString(name, "receipt evidence name");
     if (value.evidence.artifacts.some(({ expired }) => expired)) {
       throw phase9Failure("PHASE9_EVIDENCE_UNTRUSTED", `receipt ${value.receiptId} contains expired captured evidence`);
+    }
+    for (const artifact of value.evidence.artifacts) {
+      if (artifact.report?.gateId?.startsWith("P7-")) validateP7ReportDocument(artifact.report);
+      else if (artifact.report !== undefined) validateP8ReportDocument(artifact.report);
     }
   } else {
     assertSafeRepositoryPath(value.evidence.approvalPath, "approval path");
@@ -276,7 +309,8 @@ async function repositoryState(repositoryRoot, candidateCommit) {
   return { changedPaths, currentCommit };
 }
 
-function evidenceSatisfiesVerification(repository, verification, receipt) {
+function evidenceSatisfiesVerification(repository, gate, receipt) {
+  const { verification } = gate;
   if (receipt.evidence.kind === "manual-approval") {
     return receipt.evidence.decision === "approved" && verification.jobs.length === 0 && verification.artifacts.length === 0;
   }
@@ -285,14 +319,59 @@ function evidenceSatisfiesVerification(repository, verification, receipt) {
   const jobs = new Map(receipt.evidence.jobs.map((job) => [job.name, job]));
   const artifacts = new Map(receipt.evidence.artifacts.map((artifact) => [artifact.name, artifact]));
   if (!verification.jobs.every((name) => jobs.get(name)?.conclusion === "success")) return false;
-  return verification.artifacts.every((name) => artifacts.get(name)?.expired === false);
+  if (!P8_SEMANTIC_REPORT_GATES.has(gate.id)
+      && !verification.artifacts.every((name) => artifacts.get(artifactNameForRunAttempt(name, receipt.evidence.runAttempt))?.expired === false)) return false;
+  if (gate.id === "P7-WINDOWS-WFP-OFFLINE" && receipt.evidence.event !== "push") return false;
+  if (P7_SEMANTIC_REPORT_GATES.has(gate.id)) {
+    if (verification.artifacts.length !== 1) return false;
+    const artifact = artifacts.get(artifactNameForRunAttempt(verification.artifacts[0], receipt.evidence.runAttempt));
+    if (artifact?.report === undefined) return false;
+    try {
+      validateP7Report(artifact.report, {
+        gateId: gate.id,
+        candidateCommit: receipt.candidateCommit,
+        runAttempt: receipt.evidence.runAttempt,
+      });
+    } catch (error) {
+      if (error?.code !== "PHASE9_P7_REPORT_INVALID") throw error;
+      return false;
+    }
+  }
+  if (P8_SEMANTIC_REPORT_GATES.has(gate.id)) {
+    if (verification.artifacts.length !== 1 || verification.artifacts[0] !== P8_REPORT_ARTIFACTS[gate.id]) return false;
+    const reports = receipt.evidence.artifacts.filter((artifact) => artifact.report?.gateId === gate.id);
+    if (reports.length !== 1) return false;
+    const [artifact] = reports;
+    if (artifact.expired !== false) return false;
+    try {
+      validateP8Report(artifact.report, {
+        gateId: gate.id,
+        candidateCommit: receipt.candidateCommit,
+        runId: receipt.evidence.runId,
+        runAttempt: receipt.evidence.runAttempt,
+        workflowPath: receipt.evidence.workflowPath,
+        artifacts: receipt.evidence.artifacts,
+        reportArtifactName: artifact.name,
+      });
+    } catch (error) {
+      if (error?.code !== "PHASE9_P8_REPORT_INVALID") throw error;
+      return false;
+    }
+  }
+  return true;
+}
+
+function artifactNameForRunAttempt(name, runAttempt) {
+  return name.endsWith(RUN_ATTEMPT_ARTIFACT_SUFFIX)
+    ? `${name.slice(0, -RUN_ATTEMPT_ARTIFACT_SUFFIX.length)}-${runAttempt}`
+    : name;
 }
 
 function recordedStatus(repository, gate, receipt) {
   if (gate.disposition === "deferred") return "DEFERRED";
   if (receipt === undefined) return "MISSING";
   if (receipt.evidence.kind === "github-actions" && receipt.evidence.conclusion !== "success") return "FAILED";
-  if (!evidenceSatisfiesVerification(repository, gate.verification, receipt)) return "MISSING";
+  if (!evidenceSatisfiesVerification(repository, gate, receipt)) return "MISSING";
   return "PASS";
 }
 
@@ -348,7 +427,9 @@ export function evaluateRecordedMatrix({ registry, baseline, receipts, currentCo
       if (receipt !== undefined && gate.disposition !== "deferred") row.receiptId = receipt.receiptId;
       if (gate.verification.artifacts.length > 0 && gate.disposition !== "deferred") {
         row.artifactAvailability = receipt?.evidence.kind === "github-actions"
-          && gate.verification.artifacts.every((name) => receipt.evidence.artifacts.some((item) => item.name === name && !item.expired))
+          && gate.verification.artifacts.every((name) => receipt.evidence.artifacts.some(
+            (item) => item.name === artifactNameForRunAttempt(name, receipt.evidence.runAttempt) && !item.expired,
+          ))
           ? "available" : "missing";
       }
       return row;

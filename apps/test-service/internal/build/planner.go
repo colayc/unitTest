@@ -83,6 +83,25 @@ func configureStep(input PlanInput, sourceDir string, launchPlan []string, launc
 	if err != nil {
 		return task.ExecutionStep{}, err
 	}
+	launchSourceDir, err := cmakeLaunchPath(sourceDir)
+	if err != nil {
+		return task.ExecutionStep{}, task.ErrInvalidArgument
+	}
+	launchBinaryDir, err := cmakeLaunchPath(planBinaryDir(input))
+	if err != nil {
+		return task.ExecutionStep{}, task.ErrInvalidArgument
+	}
+	var launchCompiler, launchCXXCompiler string
+	if input.Profile.Origin == "generated" {
+		launchCompiler, err = cmakeLaunchPath(input.Toolchain.CCompiler)
+		if err != nil {
+			return task.ExecutionStep{}, task.ErrInvalidArgument
+		}
+		launchCXXCompiler, err = cmakeLaunchPath(input.Toolchain.CXXCompiler)
+		if err != nil {
+			return task.ExecutionStep{}, task.ErrInvalidArgument
+		}
+	}
 	var args []string
 	switch input.Profile.Origin {
 	case "preset":
@@ -90,8 +109,23 @@ func configureStep(input PlanInput, sourceDir string, launchPlan []string, launc
 			return task.ExecutionStep{}, task.ErrInvalidArgument
 		}
 		args = []string{"--preset", input.Profile.ConfigurePreset}
+		if input.Toolchain.Family == toolchain.FamilyClangCL {
+			launchCompiler, compilerErr := cmakeLaunchPath(input.Toolchain.CXXCompiler)
+			if compilerErr != nil {
+				return task.ExecutionStep{}, task.ErrInvalidArgument
+			}
+			// Presets commonly use the bare `clang-cl` name. Pin both language
+			// compilers to the verified toolchain selected by the Service so a
+			// C-and-CXX project cannot resolve a different runner PATH entry or
+			// a missing shim for its first (C) compiler probe.
+			compiler := filepath.ToSlash(launchCompiler)
+			args = append(args,
+				"-DCMAKE_C_COMPILER="+compiler,
+				"-DCMAKE_CXX_COMPILER="+compiler,
+			)
+		}
 		if input.Coverage != nil {
-			args = append(args, "-B", input.Coverage.BinaryDir)
+			args = append(args, "-B", launchBinaryDir)
 		}
 	case "generated":
 		if input.Profile.Generator == "" || input.Toolchain.CCompiler == "" ||
@@ -99,30 +133,48 @@ func configureStep(input PlanInput, sourceDir string, launchPlan []string, launc
 			return task.ExecutionStep{}, task.ErrInvalidArgument
 		}
 		args = []string{
-			"-S", sourceDir,
-			"-B", planBinaryDir(input),
+			"-S", launchSourceDir,
+			"-B", launchBinaryDir,
 			"-G", input.Profile.Generator,
 		}
 		if input.Profile.Configuration != "" && !multiConfigGenerator(input.Profile.Generator) {
 			args = append(args, "-DCMAKE_BUILD_TYPE="+input.Profile.Configuration)
 		}
 		args = append(args,
-			"-DCMAKE_C_COMPILER="+filepath.ToSlash(input.Toolchain.CCompiler),
-			"-DCMAKE_CXX_COMPILER="+filepath.ToSlash(input.Toolchain.CXXCompiler),
+			"-DCMAKE_C_COMPILER="+filepath.ToSlash(launchCompiler),
+			"-DCMAKE_CXX_COMPILER="+filepath.ToSlash(launchCXXCompiler),
 		)
 	default:
 		return task.ExecutionStep{}, task.ErrInvalidArgument
 	}
 	if input.Coverage != nil {
+		launchInclude, includeErr := cmakeLaunchPath(input.Coverage.TopLevelInclude.Path)
+		if includeErr != nil {
+			return task.ExecutionStep{}, task.ErrInvalidArgument
+		}
 		args = append(args,
 			"-DCMAKE_PROJECT_TOP_LEVEL_INCLUDES:FILEPATH="+
-				filepath.ToSlash(input.Coverage.TopLevelInclude.Path),
+				filepath.ToSlash(launchInclude),
 		)
 	}
+	if runtime.GOOS == "windows" && strings.HasPrefix(input.Profile.Generator, "Ninja") && input.Installation.Root != "" {
+		ninja, err := verifiedNinjaExecutable(input)
+		if err != nil {
+			return task.ExecutionStep{}, task.ErrInvalidArgument
+		}
+		// CMake may canonicalize a PATH lookup to an 8.3 spelling before
+		// launching Ninja. Pass the exact verified path that is registered by
+		// the Windows launch plan so the child process has one stable identity.
+		args = append(args, "-DCMAKE_MAKE_PROGRAM:FILEPATH="+filepath.ToSlash(ninja))
+	}
 	if input.Installation.UnityRunnerGenerator.Valid() {
+		launchGenerator, generatorErr := cmakeLaunchPath(input.Installation.UnityRunnerGenerator.Path)
+		if generatorErr != nil {
+			return task.ExecutionStep{}, task.ErrInvalidArgument
+		}
 		args = append(args,
 			"-DUTIDE_UNITY_RUNNER_GENERATOR:FILEPATH="+
-				filepath.ToSlash(input.Installation.UnityRunnerGenerator.Path),
+				filepath.ToSlash(launchGenerator),
 		)
 	}
 	parser, err := diagnostic.NewParser(diagnostic.FamilyCMake, diagnostic.Options{
@@ -140,7 +192,7 @@ func configureStep(input PlanInput, sourceDir string, launchPlan []string, launc
 			LaunchInputs: append([]cmake.FingerprintFile(nil), launchInputs...),
 			Args:         append([]string(nil), args...),
 			Env:          environment,
-			Dir:          sourceDir,
+			Dir:          launchSourceDir,
 		},
 		Public: task.CommandSummary{
 			Executable: filepath.Base(input.Installation.Executable),
@@ -157,7 +209,11 @@ func buildStep(input PlanInput, sourceDir string, targetNames, launchPlan []stri
 		return task.ExecutionStep{}, err
 	}
 	binaryDir := planBinaryDir(input)
-	args := []string{"--build", binaryDir}
+	launchBinaryDir, err := cmakeLaunchPath(binaryDir)
+	if err != nil {
+		return task.ExecutionStep{}, task.ErrInvalidArgument
+	}
+	args := []string{"--build", launchBinaryDir}
 	if input.Profile.Configuration != "" {
 		args = append(args, "--config", input.Profile.Configuration)
 	}
@@ -187,7 +243,7 @@ func buildStep(input PlanInput, sourceDir string, targetNames, launchPlan []stri
 			LaunchInputs: append([]cmake.FingerprintFile(nil), launchInputs...),
 			Args:         append([]string(nil), args...),
 			Env:          environment,
-			Dir:          binaryDir,
+			Dir:          launchBinaryDir,
 		},
 		Public: task.CommandSummary{
 			Executable: filepath.Base(input.Installation.Executable),
@@ -210,24 +266,25 @@ func nativeBuildLaunchPlan(input PlanInput) ([]string, error) {
 		input.Toolchain.CXXCompiler,
 	}
 	if strings.HasPrefix(input.Profile.Generator, "Ninja") && input.Installation.Root != "" {
-		name := "ninja"
 		if runtime.GOOS == "windows" {
-			name += ".exe"
-		}
-		if runtime.GOOS == "windows" {
-			if path := verifiedNinjaPath(input.Toolchain.Environment, name); path != "" {
-				values = append(values, path)
-			} else if path := verifiedDefaultNinjaPath(name); path != "" {
-				values = append(values, path)
-			} else if len(input.Toolchain.Environment) == 0 {
-				// Keep deterministic synthetic planner fixtures working when no
-				// captured toolchain environment is supplied.
-				values = append(values, filepath.Join(input.Installation.Root, "bin", name))
-			} else {
-				return nil, task.ErrInvalidArgument
+			path, err := verifiedNinjaCandidate(input)
+			if err != nil {
+				return nil, err
+			}
+			values = append(values, path)
+			shortPath, shortErr := cmakeLaunchExecutablePath(path)
+			if shortErr != nil {
+				return nil, shortErr
+			}
+			if !strings.EqualFold(filepath.Clean(shortPath), filepath.Clean(path)) {
+				// Keep both spellings registered. CMake normally uses the short
+				// spelling for its child, while other generator paths may retain
+				// the verified long spelling. Both are derived from one verified
+				// file and are therefore not independent PATH discoveries.
+				values = append(values, shortPath)
 			}
 		} else {
-			values = append(values, filepath.Join(input.Installation.Root, "bin", name))
+			values = append(values, filepath.Join(input.Installation.Root, "bin", "ninja"))
 		}
 	}
 	if runtime.GOOS == "windows" && input.Toolchain.CXXCompiler != "" {
@@ -277,6 +334,33 @@ func nativeBuildLaunchPlan(input PlanInput) ([]string, error) {
 		result = append(result, value)
 	}
 	return result, nil
+}
+
+func verifiedNinjaExecutable(input PlanInput) (string, error) {
+	path, err := verifiedNinjaCandidate(input)
+	if err != nil {
+		return "", err
+	}
+	return cmakeLaunchExecutablePath(path)
+}
+
+func verifiedNinjaCandidate(input PlanInput) (string, error) {
+	name := "ninja"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	if path := verifiedNinjaPath(input.Toolchain.Environment, name); path != "" {
+		return path, nil
+	}
+	if path := verifiedDefaultNinjaPath(name); path != "" {
+		return path, nil
+	}
+	if len(input.Toolchain.Environment) == 0 {
+		// Keep deterministic synthetic planner fixtures working when no
+		// captured toolchain environment is supplied.
+		return filepath.Join(input.Installation.Root, "bin", name), nil
+	}
+	return "", task.ErrInvalidArgument
 }
 
 func verifiedNinjaPath(environment []string, executableName string) string {

@@ -4,14 +4,16 @@ export class EventSubscription implements AsyncIterable<ProtocolTaskEvent> {
   readonly #queue: ProtocolTaskEvent[] = [];
   readonly #waiters: Array<(value: IteratorResult<ProtocolTaskEvent>) => void> = [];
   #closed = false;
+  readonly #onClose?: () => void;
   lastSequence: number;
 
   get closed(): boolean { return this.#closed; }
 
-  constructor(afterSequence: number) {
+  constructor(afterSequence: number, onClose?: () => void) {
     if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) {
       throw new Error("event subscription sequence must be a non-negative safe integer");
     }
+    this.#onClose = onClose;
     this.lastSequence = afterSequence;
   }
 
@@ -29,6 +31,7 @@ export class EventSubscription implements AsyncIterable<ProtocolTaskEvent> {
     if (this.#closed) return;
     this.#closed = true;
     for (const waiter of this.#waiters.splice(0)) waiter({ value: undefined, done: true });
+    this.#onClose?.();
   }
 
   [Symbol.asyncIterator](): AsyncIterator<ProtocolTaskEvent> {

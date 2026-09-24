@@ -1,6 +1,7 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
+    "allowJs": true,
     "rootDir": ".",
     "outDir": "dist",
     "types": ["node", "vscode"]
@@ -10,5 +11,5 @@
     { "path": "../../packages/coverage-models/tsconfig.json" },
     { "path": "../../tools/service-probe/tsconfig.json" }
   ],
-  "include": ["src/**/*.ts", "test/**/*.ts"]
+  "include": ["src/**/*.ts", "src/**/*.cts", "test/**/*.ts", "test/testing-api-benchmark-support.mjs"]
 }

@@ -1,104 +1,132 @@
 {
-  "candidateCommit": "1e20a5ceee370e9823f9fe05f40980f893cd9ed3",
+  "candidateCommit": "fe4e128478fc883c5280cedff1df5409c0498e91",
   "catalogComplete": true,
   "counts": {
     "deferred": 3,
     "failed": 0,
-    "missing": 49,
-    "pass": 10
+    "missing": 18,
+    "pass": 41
   },
-  "currentCommit": "7a42c0d5d33b7e78ba86cbdfde60fc22b66f36f6",
-  "evaluationMode": "historical",
+  "currentCommit": "fe4e128478fc883c5280cedff1df5409c0498e91",
+  "evaluationMode": "candidate",
   "gates": [
     {
       "id": "P1-IPC-PER-USER-AUTH",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050102-1-foundation",
+      "status": "PASS"
     },
     {
       "id": "P1-PROTOCOL-NO-SHELL",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050102-1-foundation",
+      "status": "PASS"
     },
     {
       "id": "P1-PROTOCOL-VERSION-COMPAT",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050102-1-foundation",
+      "status": "PASS"
     },
     {
       "id": "P1-TOKEN-FILE-SECURE",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050102-1-foundation",
+      "status": "PASS"
     },
     {
       "id": "P2-ARTIFACT-ATOMIC-CLEANUP",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050102-1-foundation",
+      "status": "PASS"
     },
     {
       "id": "P2-EVENT-REPLAY-PERSISTENCE",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050102-1-foundation",
+      "status": "PASS"
     },
     {
       "id": "P2-FAILURE-OWNERSHIP",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050102-1-foundation",
+      "status": "PASS"
     },
     {
       "id": "P2-PROCESS-TREE-TERMINATION",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050102-1-foundation",
+      "status": "PASS"
     },
     {
       "id": "P2-TASK-CANCEL-TIMEOUT",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050102-1-foundation",
+      "status": "PASS"
     },
     {
       "id": "P3-CMAKE-CONFIGURE-BUILD",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050102-1-foundation",
+      "status": "PASS"
     },
     {
       "id": "P3-DIAGNOSTIC-URI",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050102-1-foundation",
+      "status": "PASS"
     },
     {
       "id": "P3-TOOLCHAIN-LINUX-CLANG",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050102-1-foundation",
+      "status": "PASS"
     },
     {
       "id": "P3-TOOLCHAIN-LINUX-GCC",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050102-1-foundation",
+      "status": "PASS"
     },
     {
       "id": "P3-TOOLCHAIN-WINDOWS-CLANGCL",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050102-1-foundation",
+      "status": "PASS"
     },
     {
       "id": "P3-TOOLCHAIN-WINDOWS-MSVC",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050102-1-foundation",
+      "status": "PASS"
     },
     {
       "id": "P3-WORKSPACE-TRUST-PATHS",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050102-1-foundation",
+      "status": "PASS"
     },
     {
+      "artifactAvailability": "available",
       "id": "P4-CPPUTEST-CPPUMOCK",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050102-1-foundation",
+      "status": "PASS"
     },
     {
+      "artifactAvailability": "available",
       "id": "P4-DISCOVERY-CTEST",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050102-1-foundation",
+      "status": "PASS"
     },
     {
+      "artifactAvailability": "available",
       "id": "P4-RECOVERY-AND-10000-BACKEND",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050102-1-foundation",
+      "status": "PASS"
     },
     {
+      "artifactAvailability": "available",
       "id": "P4-SELECTION-AND-RERUN",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050102-1-foundation",
+      "status": "PASS"
     },
     {
+      "artifactAvailability": "available",
       "id": "P4-UNITY-CMOCK",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050102-1-foundation",
+      "status": "PASS"
     },
     {
+      "artifactAvailability": "missing",
       "id": "P5-COVERAGE-FAULT-MAPPING",
       "status": "MISSING"
     },
     {
+      "artifactAvailability": "missing",
       "id": "P5-COVERAGE-REPORTS",
       "status": "MISSING"
     },
@@ -108,19 +136,23 @@
       "status": "MISSING"
     },
     {
+      "artifactAvailability": "available",
       "id": "P5-LINUX-GCC-COVERAGE",
-      "receiptId": "github-actions-34731651809-1",
+      "receiptId": "github-actions-35971050102-1-foundation",
       "status": "PASS"
     },
     {
       "id": "P5-PROTOCOL-V14-COMPAT",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050102-1-foundation",
+      "status": "PASS"
     },
     {
+      "artifactAvailability": "missing",
       "id": "P5-WINDOWS-LLVM-COVERAGE",
       "status": "MISSING"
     },
     {
+      "artifactAvailability": "missing",
       "id": "P6-BRANDING-AND-BUILTIN-REGISTRATION",
       "status": "MISSING"
     },
@@ -131,19 +163,23 @@
     },
     {
       "id": "P6-SERVICE-LIFECYCLE",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050102-1-foundation",
+      "status": "PASS"
     },
     {
       "id": "P6-TESTING-API",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050102-1-foundation",
+      "status": "PASS"
     },
     {
       "id": "P6-TESTING-API-10000-ITEMS",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050102-1-foundation",
+      "status": "PASS"
     },
     {
       "id": "P6-WORKSPACE-TRUST-GATE",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050102-1-foundation",
+      "status": "PASS"
     },
     {
       "artifactAvailability": "missing",
@@ -157,7 +193,7 @@
     },
     {
       "id": "P7-LINUX-GCC-OFFLINE",
-      "receiptId": "github-actions-34731651809-1",
+      "receiptId": "github-actions-35971050102-1-foundation",
       "status": "PASS"
     },
     {
@@ -171,112 +207,125 @@
       "status": "MISSING"
     },
     {
+      "artifactAvailability": "missing",
       "id": "P7-WINDOWS-WFP-OFFLINE",
-      "receiptId": "github-actions-34731651809-1",
-      "status": "PASS"
+      "status": "MISSING"
     },
     {
       "id": "P8-DOCS-CLOSEOUT",
       "status": "DEFERRED"
     },
     {
+      "artifactAvailability": "missing",
       "id": "P8-INSTALL-LIFECYCLE-LINUX",
-      "receiptId": "github-actions-34731651809-1",
-      "status": "PASS"
+      "status": "MISSING"
     },
     {
+      "artifactAvailability": "missing",
       "id": "P8-INSTALL-LIFECYCLE-WINDOWS",
-      "receiptId": "github-actions-34731651809-1",
-      "status": "PASS"
+      "status": "MISSING"
     },
     {
       "id": "P8-LEGAL-THIRD-PARTY",
       "status": "DEFERRED"
     },
     {
+      "artifactAvailability": "missing",
       "id": "P8-LICENSE-AUDIT",
-      "receiptId": "github-actions-34731651809-1",
-      "status": "PASS"
+      "status": "MISSING"
     },
     {
+      "artifactAvailability": "missing",
       "id": "P8-LINUX-APPIMAGE-PACKAGE",
-      "receiptId": "github-actions-34731651809-1",
-      "status": "PASS"
+      "status": "MISSING"
     },
     {
+      "artifactAvailability": "missing",
       "id": "P8-QUALIFICATION-UNSIGNED",
-      "receiptId": "github-actions-34731651809-1",
-      "status": "PASS"
+      "status": "MISSING"
     },
     {
+      "artifactAvailability": "missing",
       "id": "P8-RUNTIME-PRODUCER-PROVENANCE",
-      "receiptId": "github-actions-34728889872-1",
-      "status": "PASS"
+      "status": "MISSING"
     },
     {
       "id": "P8-SIGN-WINDOWS",
       "status": "DEFERRED"
     },
     {
+      "artifactAvailability": "missing",
       "id": "P8-WINDOWS-MSIX-PACKAGE",
-      "receiptId": "github-actions-34731651809-1",
-      "status": "PASS"
+      "status": "MISSING"
     },
     {
       "id": "P9-MATRIX-CONTRACT",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050104-1-phase9",
+      "status": "PASS"
     },
     {
       "id": "P9-MATRIX-E2E",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050104-1-phase9",
+      "status": "PASS"
     },
     {
       "id": "P9-MATRIX-FAULT-INJECTION",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050104-1-phase9",
+      "status": "PASS"
     },
     {
       "id": "P9-MATRIX-INTEGRATION",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050104-1-phase9",
+      "status": "PASS"
     },
     {
       "id": "P9-MATRIX-UNIT",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050104-1-phase9",
+      "status": "PASS"
     },
     {
       "id": "P9-PERF-CANCEL",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050104-1-phase9",
+      "status": "PASS"
     },
     {
       "id": "P9-PERF-DISCOVERY-10000",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050104-1-phase9",
+      "status": "PASS"
     },
     {
       "id": "P9-PERF-FILTER",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050104-1-phase9",
+      "status": "PASS"
     },
     {
-      "artifactAvailability": "missing",
+      "artifactAvailability": "available",
       "id": "P9-PERF-HARDWARE-BASELINE",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050104-1-phase9",
+      "status": "PASS"
     },
     {
       "id": "P9-PERF-MEMORY",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050104-1-phase9",
+      "status": "PASS"
     },
     {
       "id": "P9-PERF-REPORT",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050104-1-phase9",
+      "status": "PASS"
     },
     {
       "id": "P9-PERF-STARTUP",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050104-1-phase9",
+      "status": "PASS"
     },
     {
       "id": "P9-UPSTREAM-CODEOSS",
-      "status": "MISSING"
+      "receiptId": "github-actions-35971050104-1-phase9",
+      "status": "PASS"
     }
   ],
-  "recordedByCommit": "7a42c0d5d33b7e78ba86cbdfde60fc22b66f36f6",
+  "recordedByCommit": "fe4e128478fc883c5280cedff1df5409c0498e91",
   "releaseReady": false,
   "schemaVersion": 1
 }

@@ -4,11 +4,17 @@
 *.md text eol=lf
 *.sql text eol=lf
 *.ts text eol=lf
+sdk/cmake/*.cmake text eol=lf
 tools/coverage-bundle/licenses/*.txt text eol=lf
 tools/release/staging/share/doc/readme.txt text eol=lf
 tools/release/staging/bin/unit-test-ide.exe text eol=lf
 *.yaml text eol=lf
 *.yml text eol=lf
+testdata/frameworks/unity/include/Dependency.h text eol=lf
+testdata/frameworks/unity/mocks/* text eol=lf
+testdata/framework-matrix/CMakeLists.txt text eol=lf
+testdata/framework-matrix/*.c text eol=lf
+testdata/framework-matrix/*.cpp text eol=lf
 apps/test-service/internal/testframework/cpputest/testdata/list-crlf.valid.txt text eol=crlf
 apps/test-service/internal/testframework/cpputest/testdata/pass.txt text eol=lf
 apps/test-service/internal/unityrunner/testdata/basic.runner.golden.c text eol=lf

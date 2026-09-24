@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "workspace": {
+    "cmakeSha256": "4b5251de75aee4ca4ba0641caf09f61160690636f9e3a9a1718c48083aafbb44",
+    "opaqueSourceSha256": "f186e4eb4aab6a1d9ec7bc5c49eaea6d9d162e0159dfe8f953bb48ade9b58d43"
+  },
+  "frameworks": {
+    "cpputest": {
+      "fixtureSha256": "6eef50ec7940e4a6b80891d0ff452ed503b5996de313df711ecad607185761ee",
+      "augmentationSha256": "4ffba371794499e4b6d56ca332015f05788bc50620c2567d1f63a016a1d78587",
+      "primaryCTestName": "cpputest.framework",
+      "malformedCTestName": "cpputest.matrix.malformed",
+      "opaqueCTestName": "cpputest.matrix.opaque",
+      "pass": "Pass",
+      "assertion": "AssertionFailure",
+      "crash": "Crash",
+      "malformed": "MalformedOutput",
+      "mock": "MockMissingCall",
+      "skip": "Skipped",
+      "timeout": "Timeout"
+    },
+    "unity": {
+      "fixtureSha256": "1287993f09fb2d8079933ac89a85bd464122edac7b3c92621692a02484536333",
+      "augmentationSha256": "e60f814b36c9a5476dfb8d6a12a2a3f212ae1a214b42160c331aceaa2440ac7f",
+      "primaryCTestName": "unity.framework",
+      "malformedCTestName": "unity.matrix.malformed",
+      "opaqueCTestName": "unity.matrix.opaque",
+      "pass": "test_pass",
+      "assertion": "test_assertion_failure",
+      "crash": "test_crash",
+      "malformed": "test_malformed_output",
+      "mock": "test_cmock_expectation_failure",
+      "skip": "test_skipped",
+      "timeout": "test_timeout"
+    }
+  }
+}

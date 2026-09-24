@@ -1,255 +1,163 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
-import { createWriteStream } from "node:fs";
-import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join, posix, relative, resolve } from "node:path";
+import { randomBytes } from "node:crypto";
+import { createWriteStream, createReadStream } from "node:fs";
+import { link, lstat, mkdir, open, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Transform } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { setTimeout as delay } from "node:timers/promises";
+import { directoryDigest, frameworkFailure, readFrameworkManifest, sha256File } from "./manifest.mjs";
 
 const execFile = promisify(execFileCallback);
-const DIGEST = /^[0-9a-f]{64}$/u;
 const toolDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(toolDirectory, "..", "..");
-const approved = {
-  cpputest: { version: "4.0", license: "BSD-3-Clause", url: "https://github.com/cpputest/cpputest/releases/download/v4.0/cpputest-4.0.tar.gz", filename: "cpputest-4.0.tar.gz", sha256: "21c692105db15299b5529af81a11a7ad80397f92c122bd7bf1e4a4b0e85654f7", sourceDirectory: "cpputest-4.0", treeSha256: "c564fb5e4e32836dc66f46efb86edb6f1f2fa6afa255a57052031aa00fc56f04" },
-  unity: { version: "2.6.1", license: "MIT", url: "https://github.com/ThrowTheSwitch/Unity/archive/refs/tags/v2.6.1.tar.gz", filename: "Unity-2.6.1.tar.gz", sha256: "b41a66d45a6b99758fb3202ace6178177014d52fc524bf1f72687d93e9867292", sourceDirectory: "Unity-2.6.1", treeSha256: "abfb7b2b7aec36739a7b138490d2e9dd178cc4f00e806ed372cbb8cfe98f73ae" }
-};
-const approvedFixtureTools = {
-  cmakeHelper: { path: "sdk/cmake/UnitTestIDE.cmake", sha256: "101ba1a2cb15b54dfbdce49c5d92d9e6a32ffef35e038d4aaf96ae9f4746f4d3" },
-  unityRunnerGenerator: { name: "unity-runner-generator", schemaVersion: 1, version: "1.0.0", runnerProtocol: "utide.runner.v1" }
-};
-const downloadLimit = 64 * 1024 * 1024;
-const maxArchiveEntries = 8192;
-const maxArchiveDepth = 32;
-const maxExpandedBytes = 256 * 1024 * 1024;
+const archiveLimit = 64 * 1024 * 1024;
+const maxEntries = 8192, maxDepth = 32, maxExpanded = 256 * 1024 * 1024;
+const windowsReserved = /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?$/iu;
 
-export function validateManifest(value) {
-  closed(value, ["schemaVersion", "platform", "fixtureTools", "frameworks"], "framework manifest");
-  if (value.schemaVersion !== 1 || value.platform !== "linux-x64" || !Array.isArray(value.frameworks) || value.frameworks.length !== 2) throw new Error("framework manifest has an invalid Linux identity");
-  closed(value.fixtureTools, ["cmakeHelper", "unityRunnerGenerator"], "framework fixture tools");
-  closed(value.fixtureTools.cmakeHelper, ["path", "sha256"], "framework CMake helper");
-  closed(value.fixtureTools.unityRunnerGenerator, ["name", "schemaVersion", "version", "runnerProtocol"], "framework Unity generator");
-  if (JSON.stringify(value.fixtureTools) !== JSON.stringify(approvedFixtureTools) || !DIGEST.test(value.fixtureTools.cmakeHelper.sha256)) throw new Error("framework fixture tools are not locked");
-  const ids = new Set();
-  for (const entry of value.frameworks) {
-    closed(entry, ["id", "version", "source", "license", "sourceDirectory", "treeSha256"], "framework input");
-    if (!(entry.id in approved) || ids.has(entry.id)) throw new Error("framework input has an invalid identity");
-    const required = approved[entry.id];
-    closed(entry.source, ["filename", "url", "sha256"], "framework input source");
-    if (entry.version !== required.version || entry.license !== required.license || entry.source.url !== required.url || entry.source.filename !== required.filename || entry.source.sha256 !== required.sha256 || entry.sourceDirectory !== required.sourceDirectory || entry.treeSha256 !== required.treeSha256 || !safeFilename(entry.source.filename) || !DIGEST.test(entry.source.sha256) || !DIGEST.test(entry.treeSha256) || !safeDirectory(entry.sourceDirectory)) {
-      throw new Error("framework input is not locked");
-    }
-    ids.add(entry.id);
-  }
-  if (!ids.has("cpputest") || !ids.has("unity")) throw new Error("framework manifest omits a required input");
-  return value;
+function failure(code, message, cause) { return frameworkFailure(code, message, cause); }
+function randomName(prefix) { return `${prefix}${process.pid}-${randomBytes(10).toString("hex")}`; }
+function validPath(path) {
+  if (typeof path !== "string" || path.length === 0 || path.includes("\\") || path.includes("\0") || path.includes("\r") || path.includes("\n") || path.startsWith("/") || /^[A-Za-z]:/u.test(path)) return false;
+  const parts = path.replace(/\/$/u, "").split("/");
+  return parts.length > 0 && parts.every((part) => part && part !== "." && part !== ".." && !windowsReserved.test(part));
 }
 
+export function validateArchiveEntries(entries, input) {
+  if (!Array.isArray(entries) || entries.length === 0 || entries.length > maxEntries) throw failure("FRAMEWORK_ARCHIVE_UNSAFE", "archive entry count is invalid");
+  let total = 0; const seen = new Set(); const root = `${input.sourceDirectory}/`;
+  for (const entry of entries) {
+    if (!entry || typeof entry !== "object" || !validPath(entry.path) || (entry.type !== "file" && entry.type !== "directory") || !Number.isSafeInteger(entry.size) || entry.size < 0) throw failure("FRAMEWORK_ARCHIVE_UNSAFE", "archive contains an unsafe entry");
+    const normalized = entry.path.replace(/\/$/u, "");
+    if ((normalized !== input.sourceDirectory && !entry.path.startsWith(root)) || (normalized === input.sourceDirectory && entry.type !== "directory") || seen.has(normalized)) throw failure("FRAMEWORK_ARCHIVE_UNSAFE", "archive path escapes or duplicates its source root");
+    seen.add(normalized); const depth = normalized.split("/").length;
+    if (depth > maxDepth) throw failure("FRAMEWORK_ARCHIVE_UNSAFE", "archive path exceeds depth limit");
+    total += entry.size; if (!Number.isSafeInteger(total) || total > maxExpanded) throw failure("FRAMEWORK_ARCHIVE_UNSAFE", "archive exceeds expanded-byte limit");
+  }
+  return entries;
+}
+
+function tarExecutable() { return process.platform === "win32" ? join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe") : "/usr/bin/tar"; }
+async function inspectArchive(archive) {
+  let tar = tarExecutable();
+  try { await lstat(tar); } catch { if (process.platform !== "win32") tar = "/bin/tar"; }
+  const options = { shell: false, windowsHide: true, timeout: 60_000, maxBuffer: 8 * 1024 * 1024, env: { ...process.env, LANG: "C", LC_ALL: "C" } };
+  const [names, verbose] = await Promise.all([execFile(tar, ["-tf", archive], options), execFile(tar, ["-tvf", archive], options)]);
+  const listed = names.stdout.split(/\r?\n/u).filter(Boolean), lines = verbose.stdout.split(/\r?\n/u).filter(Boolean);
+  if (listed.length !== lines.length) throw failure("FRAMEWORK_ARCHIVE_UNSAFE", "archive listings disagree");
+  return parseArchiveEntries(listed, lines);
+}
+function parseArchiveEntries(listed, lines) {
+  if (!Array.isArray(listed) || !Array.isArray(lines) || listed.length !== lines.length) throw failure("FRAMEWORK_ARCHIVE_UNSAFE", "archive listings disagree");
+  return listed.map((path, index) => {
+    const line = lines[index]; const marker = line[0];
+    if (marker !== "-" && marker !== "d") throw failure("FRAMEWORK_ARCHIVE_UNSAFE", "archive has a non-regular entry");
+    const fields = line.trim().split(/\s+/u); const date = fields.findIndex((part) => /^\d{4}-\d\d-\d\d$/u.test(part) || /^[A-Z][a-z]{2}$/u.test(part));
+    const sizeToken = date >= 1 ? fields[date - 1] : /^\d+$/u.test(fields[1] ?? "") ? fields[4] : undefined;
+    if (!/^\d+$/u.test(sizeToken ?? "")) throw failure("FRAMEWORK_ARCHIVE_UNSAFE", "archive has an unparseable entry size");
+    const size = Number(sizeToken); if (!Number.isSafeInteger(size)) throw failure("FRAMEWORK_ARCHIVE_UNSAFE", "archive has an invalid entry size");
+    return { path, type: marker === "d" ? "directory" : "file", size };
+  });
+}
+async function extractArchive(archive, staging) {
+  let tar = tarExecutable(); try { await lstat(tar); } catch { if (process.platform !== "win32") tar = "/bin/tar"; }
+  await execFile(tar, ["-xf", archive, "-C", staging], { shell: false, windowsHide: true, timeout: 120_000, maxBuffer: 8 * 1024 * 1024, env: { ...process.env, LANG: "C", LC_ALL: "C" } });
+}
+async function fsyncFile(path) { const handle = await open(path, "r+"); try { await handle.sync(); } finally { await handle.close(); } }
+function trustedUrl(url, initial = false) {
+  let parsed; try { parsed = new URL(url); } catch { throw failure("FRAMEWORK_ARCHIVE_UNTRUSTED", "archive URL is invalid"); }
+  const host = parsed.hostname.toLowerCase();
+  if (parsed.protocol !== "https:" || (initial ? host !== "github.com" : !(host === "github.com" || host === "release-assets.githubusercontent.com" || host === "codeload.github.com"))) throw failure("FRAMEWORK_ARCHIVE_UNTRUSTED", "archive URL is outside approved GitHub hosts");
+  return parsed;
+}
+async function defaultDownload(input, target) {
+  trustedUrl(input.source.url, true); let url = input.source.url;
+  for (let redirects = 0; redirects <= 5; redirects += 1) {
+    const response = await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(5 * 60 * 1000) });
+    if (response.status >= 300 && response.status < 400) { const location = response.headers.get("location"); if (!location || redirects === 5) throw failure("FRAMEWORK_ARCHIVE_UNTRUSTED", "archive redirect is invalid"); url = new URL(location, url).href; trustedUrl(url); continue; }
+    if (!response.ok || !response.body) throw failure("FRAMEWORK_ARCHIVE_UNTRUSTED", "archive download failed"); trustedUrl(response.url); let bytes = 0;
+    const limited = new Transform({ transform(chunk, _encoding, done) { bytes += chunk.length; done(bytes > archiveLimit ? failure("FRAMEWORK_ARCHIVE_UNTRUSTED", "archive exceeds response limit") : null, chunk); } });
+    await pipeline(response.body, limited, createWriteStream(target, { flags: "wx", mode: 0o600 })); await fsyncFile(target); return;
+  }
+}
 export async function verifyLockedArchive(cacheRoot, input) {
-  const root = absolute(cacheRoot, "framework cache root");
-  const archive = join(root, `${input.source.sha256}-${input.source.filename}`);
-  const metadata = await lstat(archive);
-  if (!metadata.isFile() || metadata.isSymbolicLink()) throw new Error(`framework archive is not a regular file: ${input.id}`);
-  if (await sha256(archive) !== input.source.sha256) throw new Error(`framework archive digest mismatch: ${input.id}`);
+  const archive = join(cacheRoot, `${input.source.sha256}-${input.source.filename}`); let data;
+  try { data = await lstat(archive); } catch (error) { if (error?.code === "ENOENT") throw error; throw failure("FRAMEWORK_ARCHIVE_UNTRUSTED", "archive cache cannot be inspected", error); }
+  if (!data.isFile() || data.isSymbolicLink() || await sha256File(archive) !== input.source.sha256) throw failure("FRAMEWORK_ARCHIVE_UNTRUSTED", `archive cache identity mismatch: ${input.id}`);
   return archive;
 }
-
+async function ensureArchive(cacheRoot, input, download) {
+  try { return await verifyLockedArchive(cacheRoot, input); } catch (error) { if (error?.code !== "ENOENT") throw error; }
+  const target = join(cacheRoot, `${input.source.sha256}-${input.source.filename}`), partial = join(cacheRoot, randomName(".partial-"));
+  try { await download(input, partial); if (await sha256File(partial) !== input.source.sha256) throw failure("FRAMEWORK_ARCHIVE_UNTRUSTED", `downloaded archive identity mismatch: ${input.id}`); try { await link(partial, target); } catch (error) { if (error?.code !== "EEXIST") throw error; } return await verifyLockedArchive(cacheRoot, input); } finally { await rm(partial, { force: true }); }
+}
+async function requiredStat(path, code, message) {
+  try { return await lstat(path); } catch (error) { if (error?.code === "ENOENT") throw failure(code, message, error); throw error; }
+}
+async function assertNoSymlinkComponents(path) {
+  const resolved = resolve(path); const components = [];
+  for (let current = resolved; dirname(current) !== current; current = dirname(current)) components.push(current);
+  for (const component of components.reverse()) {
+    try { const stat = await lstat(component); if (stat.isSymbolicLink()) throw failure("FRAMEWORK_PATH_UNSAFE", "mutable framework path contains a symbolic-link component"); } catch (error) { if (error?.code !== "ENOENT") throw error; }
+  }
+}
+async function auditTree(root, input) {
+  const source = join(root, input.sourceDirectory); const metadata = await requiredStat(source, "FRAMEWORK_TREE_MISMATCH", `source root is missing: ${input.id}`);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw failure("FRAMEWORK_ARCHIVE_UNSAFE", `source root is unsafe: ${input.id}`);
+  async function walk(directory) { for (const entry of await readdir(directory, { withFileTypes: true })) { const path = join(directory, entry.name); const stat = await lstat(path); if (stat.isSymbolicLink() || (!stat.isFile() && !stat.isDirectory())) throw failure("FRAMEWORK_ARCHIVE_UNSAFE", "extraction contains unsafe filesystem entry"); if (stat.isDirectory()) await walk(path); } }
+  await walk(source); const marker = input.id === "cpputest" ? "CMakeLists.txt" : input.id === "unity" ? "src/unity.c" : "lib/cmock.rb"; const markerStat = await requiredStat(join(source, marker), "FRAMEWORK_MARKER_MISMATCH", `source marker is missing: ${input.id}`);
+  if (!markerStat.isFile() || markerStat.isSymbolicLink()) throw failure("FRAMEWORK_MARKER_MISMATCH", `source marker is invalid: ${input.id}`);
+  const license = join(source, input.license.path); const licenseStat = await requiredStat(license, "FRAMEWORK_LICENSE_MISMATCH", `license is missing: ${input.id}`); if (!licenseStat.isFile() || licenseStat.isSymbolicLink() || await sha256File(license) !== input.license.sha256) throw failure("FRAMEWORK_LICENSE_MISMATCH", `license identity mismatch: ${input.id}`);
+  if (await directoryDigest(source) !== input.treeSha256) throw failure("FRAMEWORK_TREE_MISMATCH", `source tree identity mismatch: ${input.id}`);
+}
+function canonicalResolved(manifest, manifestSha256) { return { schemaVersion: manifest.schemaVersion, manifestSha256, platforms: manifest.platforms, fixtureTools: manifest.fixtureTools, frameworks: manifest.frameworks.map(({ id, version, tag, revision, source, license, sourceDirectory, treeSha256 }) => ({ id, version, tag, revision, source: { filename: source.filename, sha256: source.sha256 }, license, sourceDirectory, treeSha256 })) }; }
+export async function verifyPreparedFrameworkBundle({ root, manifest, manifestSha256 }) {
+  const ready = await readFile(join(root, "READY"), "utf8"); if (ready !== "framework-bundle-v2\n") throw failure("FRAMEWORK_ARCHIVE_UNSAFE", "prepared bundle is not ready");
+  const resolved = JSON.parse(await readFile(join(root, "manifest.resolved.json"), "utf8")); if (JSON.stringify(resolved) !== JSON.stringify(canonicalResolved(manifest, manifestSha256))) throw failure("FRAMEWORK_ARCHIVE_UNSAFE", "prepared bundle manifest differs");
+  for (const input of manifest.frameworks) await auditTree(root, input); return true;
+}
+async function reusePreparedBundle(root, manifest, manifestSha256) {
+  let stat;
+  try { stat = await lstat(root); } catch (error) { if (error.code === "ENOENT") return false; throw error; }
+  if (!stat.isDirectory() || stat.isSymbolicLink()) throw failure("FRAMEWORK_CACHE_INVALID", "prepared bundle target has an unsafe type");
+  try { await verifyPreparedFrameworkBundle({ root, manifest, manifestSha256 }); }
+  catch { throw failure("FRAMEWORK_CACHE_INVALID", "existing prepared bundle is invalid"); }
+  return true;
+}
+async function publishPreparedBundle(staging, target, manifest, manifestSha256, renameBundle) {
+  // All cooperating publishers serialize the existence check and directory rename.
+  // An existing target, even an empty/incomplete one, is never a replacement target.
+  const lockPath = join(dirname(target), `.framework-publish-${manifestSha256}.lock`);
+  let lock;
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    try { lock = await open(lockPath, "wx", 0o600); break; }
+    catch (error) { if (error.code !== "EEXIST") throw error; await delay(25); }
+  }
+  if (!lock) throw failure("FRAMEWORK_CACHE_INVALID", "prepared bundle publisher is busy");
+  try {
+    if (await reusePreparedBundle(target, manifest, manifestSha256)) return true;
+    try { await renameBundle(staging, target); return false; }
+    catch (error) {
+      if (!["EEXIST", "ENOTEMPTY", "EPERM"].includes(error.code)) throw error;
+      if (!await reusePreparedBundle(target, manifest, manifestSha256)) throw failure("FRAMEWORK_CACHE_INVALID", "prepared bundle could not be published");
+      return true;
+    }
+  } finally { await lock.close(); await rm(lockPath, { force: true }); }
+}
 export async function prepareFrameworkBundle(options = {}) {
-  if (process.platform !== "linux") throw new Error("Linux framework bootstrap requires a Linux runner");
-  const { manifestPath, cacheRoot, outputRoot } = validateBundlePaths({
-    manifestPath: options.manifestPath ?? join(toolDirectory, "manifest.json"),
-    cacheRoot: options.cacheRoot ?? join(repositoryRoot, ".superpowers", "cache", "framework-bundle"),
-    outputRoot: options.outputRoot ?? join(repositoryRoot, ".superpowers", "runtime", "framework-bundle", "linux-x64")
-  });
-  await assertNoSymlinkComponents(repositoryRoot, manifestPath);
-  const manifestMetadata = await lstat(manifestPath);
-  if (!manifestMetadata.isFile() || manifestMetadata.isSymbolicLink()) throw new Error("framework manifest must be a regular repository file");
-  const manifest = validateManifest(JSON.parse(await readFile(manifestPath, "utf8")));
-  await mkdir(cacheRoot, { recursive: true, mode: 0o700 });
-  await assertNoSymlinkComponents(repositoryRoot, cacheRoot);
-  const archives = new Map();
-  for (const input of manifest.frameworks) {
-    try {
-      archives.set(input.id, await verifyLockedArchive(cacheRoot, input));
-    } catch (error) {
-      if (error?.code !== "ENOENT") throw error;
-      await downloadLockedArchive(cacheRoot, input);
-      archives.set(input.id, await verifyLockedArchive(cacheRoot, input));
-    }
-  }
-  const parent = dirname(outputRoot);
-  await mkdir(parent, { recursive: true, mode: 0o700 });
-  await assertNoSymlinkComponents(repositoryRoot, parent);
-  const staging = join(parent, `.framework-bundle-${process.pid}-${randomBytes(8).toString("hex")}`);
-  await mkdir(staging, { mode: 0o700 });
-  try {
-    for (const input of manifest.frameworks) {
-      const archive = archives.get(input.id);
-      await verifySafeTar(archive);
-      await execFile("tar", ["--no-same-owner", "--no-same-permissions", "-xzf", archive, "-C", staging], { shell: false, windowsHide: true, timeout: 120_000 });
-      await verifySourceTree(staging, input);
-    }
-    const resolved = {
-      schemaVersion: 1,
-      platform: "linux-x64",
-      fixtureTools: manifest.fixtureTools,
-      frameworks: await Promise.all(manifest.frameworks.map(async ({ id, version, source, license, sourceDirectory, treeSha256 }) => {
-        const actualTreeSha256 = await directoryDigest(join(staging, sourceDirectory));
-        if (actualTreeSha256 !== treeSha256) throw new Error(`framework source tree digest mismatch: ${id}`);
-        return {
-        id,
-        version,
-        source: { filename: source.filename, sha256: source.sha256 },
-        license,
-        sourceDirectory,
-        treeSha256
-        };
-      }))
-    };
-    await assertNoSymlinkComponents(repositoryRoot, outputRoot);
-    await writeFile(join(staging, "manifest.resolved.json"), `${JSON.stringify(resolved, null, 2)}\n`, { flag: "wx", mode: 0o600 });
-    await writeFile(join(staging, "READY"), "framework-bundle-v1\n", { flag: "wx", mode: 0o600 });
-    await assertNoSymlinkComponents(repositoryRoot, outputRoot);
-    await rm(outputRoot, { recursive: true, force: true });
-    await rename(staging, outputRoot);
-  } catch (error) {
-    await rm(staging, { recursive: true, force: true });
-    throw error;
-  }
-  return { root: outputRoot, manifest };
+  const runtimeRoot = resolve(options.runtimeRoot ?? join(repositoryRoot, ".superpowers", "runtime", "framework-bundle")); const cacheRoot = resolve(options.cacheRoot ?? join(repositoryRoot, ".superpowers", "cache", "framework-bundle")); const ops = options.operations ?? {};
+  const locked = await (ops.readManifest ?? readFrameworkManifest)(options.manifestPath); const { manifest, manifestSha256 } = locked; const target = join(runtimeRoot, "v2", manifestSha256);
+  await assertNoSymlinkComponents(dirname(target));
+  if (await reusePreparedBundle(target, manifest, manifestSha256)) return { root: target, manifest, manifestSha256, reused: true };
+  await mkdir(cacheRoot, { recursive: true, mode: 0o700 }); await mkdir(dirname(target), { recursive: true, mode: 0o700 }); await assertNoSymlinkComponents(cacheRoot); await assertNoSymlinkComponents(dirname(target)); const staging = join(dirname(target), randomName(".framework-bundle-")); await mkdir(staging, { mode: 0o700 });
+  try { for (const input of manifest.frameworks) { const archive = await ensureArchive(cacheRoot, input, ops.download ?? defaultDownload); const entries = ops.inspectArchive ? await ops.inspectArchive(input, archive) : await inspectArchive(archive); validateArchiveEntries(entries, input); await verifyLockedArchive(cacheRoot, input); if (ops.extractArchive) await ops.extractArchive(input, staging, archive); else await extractArchive(archive, staging); }
+    const topLevel = await readdir(staging, { withFileTypes: true }); const actualRoots = topLevel.filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort(); const expectedRoots = manifest.frameworks.map((item) => item.sourceDirectory).sort(); if (topLevel.some((entry) => !entry.isDirectory()) || JSON.stringify(actualRoots) !== JSON.stringify(expectedRoots)) throw failure("FRAMEWORK_ARCHIVE_UNSAFE", "extraction roots do not match manifest");
+    for (const input of manifest.frameworks) await auditTree(staging, input); await writeFile(join(staging, "manifest.resolved.json"), `${JSON.stringify(canonicalResolved(manifest, manifestSha256), null, 2)}\n`, { flag: "wx", mode: 0o600 }); await writeFile(join(staging, "READY"), "framework-bundle-v2\n", { flag: "wx", mode: 0o600 });
+    const reused = await publishPreparedBundle(staging, target, manifest, manifestSha256, ops.renameBundle ?? rename);
+    return { root: target, manifest, manifestSha256, reused };
+  } finally { await rm(staging, { recursive: true, force: true }); }
 }
-
-export function validateBundlePaths(value, root = repositoryRoot) {
-  const approvedRoot = absolute(root, "repository root");
-  if (!within(approvedRoot, approvedRoot)) throw new Error("framework repository root is invalid");
-  const expected = {
-    manifestPath: join(approvedRoot, "tools", "framework-bundle", "manifest.json"),
-    cacheRoot: join(approvedRoot, ".superpowers", "cache", "framework-bundle"),
-    outputRoot: join(approvedRoot, ".superpowers", "runtime", "framework-bundle", "linux-x64")
-  };
-  for (const key of Object.keys(expected)) {
-    const candidate = absolute(value[key], `framework ${key}`);
-    if (candidate !== expected[key] || !within(approvedRoot, candidate)) throw new Error(`framework ${key} is outside its approved repository root`);
-  }
-  return expected;
-}
-
-function closed(value, keys, label) {
-  if (!value || typeof value !== "object" || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) throw new Error(`${label} must be an object`);
-  const actual = Object.keys(value).sort();
-  const expected = [...keys].sort();
-  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) throw new Error(`${label} has unexpected fields`);
-}
-
-function safeFilename(value) { return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._+-]*$/u.test(value); }
-function safeDirectory(value) { return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._+-]*$/u.test(value) && !value.includes(".."); }
-function absolute(value, label) { if (typeof value !== "string" || value.includes("\0") || !isAbsolute(value)) throw new Error(`${label} must be an absolute path`); return resolve(value); }
-async function sha256(path) { return createHash("sha256").update(await readFile(path)).digest("hex"); }
-
-async function downloadLockedArchive(cacheRoot, input) {
-  const target = join(cacheRoot, `${input.source.sha256}-${input.source.filename}`);
-  const partial = join(cacheRoot, `.partial-${randomBytes(8).toString("hex")}`);
-  try {
-    const response = await fetch(input.source.url, { redirect: "follow", signal: AbortSignal.timeout(5 * 60 * 1000) });
-    const final = new URL(response.url);
-    if (!response.ok || !response.body || !["release-assets.githubusercontent.com", "codeload.github.com"].includes(final.hostname)) throw new Error(`framework archive download failed: ${input.id}`);
-    let received = 0;
-    const limit = new Transform({ transform(chunk, _encoding, callback) { received += chunk.length; callback(received > downloadLimit ? new Error("framework archive exceeds size limit") : null, chunk); } });
-    await pipeline(response.body, limit, createWriteStream(partial, { flags: "wx", mode: 0o600 }));
-    if (await sha256(partial) !== input.source.sha256) throw new Error(`framework archive digest mismatch: ${input.id}`);
-    await rename(partial, target);
-  } finally {
-    await rm(partial, { force: true });
-  }
-}
-
-async function verifySafeTar(archive) {
-  const [verbose, listed] = await Promise.all([
-    execFile("tar", ["-tvzf", archive], { shell: false, windowsHide: true, timeout: 60_000, maxBuffer: 8 * 1024 * 1024 }),
-    execFile("tar", ["-tzf", archive], { shell: false, windowsHide: true, timeout: 60_000, maxBuffer: 8 * 1024 * 1024 })
-  ]);
-  const types = verbose.stdout.split(/\r?\n/u).filter(Boolean);
-  const names = listed.stdout.split(/\r?\n/u).filter(Boolean);
-  validateTarEntries(names, types);
-}
-
-export function validateTarEntries(names, types) {
-  if (names.length === 0 || names.length !== types.length || names.length > maxArchiveEntries) throw new Error(names.length > maxArchiveEntries ? "framework archive exceeds entry count limit" : "framework archive contains an unsafe entry");
-  let expandedBytes = 0;
-  for (let index = 0; index < names.length; index += 1) {
-    const name = names[index];
-    const entry = types[index];
-    if (!/^[d-]/u.test(entry) || entry.includes(" -> ") || !safeTarPath(name)) throw new Error("framework archive contains an unsafe entry");
-    const depth = name.replace(/\/$/u, "").split("/").length;
-    if (depth > maxArchiveDepth) throw new Error("framework archive exceeds path depth limit");
-    const fields = entry.trim().split(/\s+/u);
-    const size = fields.find((field) => /^\d+$/u.test(field));
-    if (size === undefined || !Number.isSafeInteger(Number(size))) throw new Error("framework archive has an invalid expanded size");
-    expandedBytes += Number(size);
-    if (!Number.isSafeInteger(expandedBytes) || expandedBytes > maxExpandedBytes) throw new Error("framework archive exceeds expanded size limit");
-  }
-}
-
-function safeTarPath(name) {
-  if (!name || /[\0\r\n\\]/u.test(name) || name.startsWith("/") || /^[A-Za-z]:/u.test(name)) return false;
-  const normalized = posix.normalize(name.replace(/\/$/u, ""));
-  return normalized !== "." && normalized === name.replace(/\/$/u, "") && !normalized.split("/").some((part) => part === ".." || part === "");
-}
-
-async function verifySourceTree(root, input) {
-  const path = resolve(root, input.sourceDirectory);
-  if (relative(root, path).startsWith("..")) throw new Error(`framework source escapes bootstrap root: ${input.id}`);
-  const metadata = await lstat(path);
-  if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new Error(`framework source root is invalid: ${input.id}`);
-  const marker = input.id === "cpputest" ? join(path, "CMakeLists.txt") : join(path, "src", "unity.c");
-  const markerMetadata = await lstat(marker);
-  if (!markerMetadata.isFile() || markerMetadata.isSymbolicLink()) throw new Error(`framework source marker is invalid: ${input.id}`);
-}
-
-async function directoryDigest(root) {
-  const hash = createHash("sha256");
-  async function visit(directory, prefix) {
-    for (const entry of (await readdir(directory, { withFileTypes: true })).sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0)) {
-      const path = join(directory, entry.name);
-      const relativeName = prefix ? `${prefix}/${entry.name}` : entry.name;
-      const metadata = await lstat(path);
-      if (metadata.isSymbolicLink() || (!metadata.isDirectory() && !metadata.isFile())) throw new Error("framework source tree contains an unsafe entry");
-      hash.update(`${metadata.isDirectory() ? "d" : "f"}:${relativeName}\0`);
-      if (metadata.isDirectory()) await visit(path, relativeName);
-      else hash.update(await readFile(path));
-    }
-  }
-  await visit(root, "");
-  return hash.digest("hex");
-}
-
-function within(root, target) {
-  const value = relative(root, target);
-  return value === "" || (!value.startsWith("..") && !isAbsolute(value));
-}
-
-async function assertNoSymlinkComponents(root, target) {
-  if (!within(root, target)) throw new Error("framework path is outside repository root");
-  let current = root;
-  const rootMetadata = await lstat(current);
-  if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink()) throw new Error("framework repository root is unsafe");
-  for (const part of relative(root, target).split(/[\\/]/u).filter(Boolean)) {
-    current = join(current, part);
-    try {
-      const metadata = await lstat(current);
-      if (metadata.isSymbolicLink()) throw new Error("framework path contains a symbolic-link component");
-    } catch (error) {
-      if (error?.code === "ENOENT") return;
-      throw error;
-    }
-  }
-}
-
-if (process.argv[1] && resolve(process.argv[1]) === resolve(import.meta.filename)) {
-  prepareFrameworkBundle().then((result) => process.stdout.write(`${JSON.stringify({ root: result.root, frameworks: result.manifest.frameworks.map((item) => item.id) })}\n`)).catch((error) => {
-    process.stderr.write(`framework-bundle: ${error instanceof Error ? error.message : String(error)}\n`);
-    process.exitCode = 1;
-  });
-}
+export const __testing = Object.freeze({ mkdirp: async (path) => mkdir(path, { recursive: true }), fsyncFile, inspectArchive, parseArchiveEntries, extractArchive, trustedUrl });
+if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) prepareFrameworkBundle().then((result) => process.stdout.write(`${JSON.stringify(result)}\n`)).catch((error) => { process.stderr.write(`framework-bundle: ${error.message}\n`); process.exitCode = 1; });

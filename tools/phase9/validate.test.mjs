@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import Ajv2020 from "ajv/dist/2020.js";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -24,6 +25,10 @@ import {
   validateReceipt,
   validateRegistry,
 } from "./validate.mjs";
+import { buildMatrixReport } from "./p4-report.mjs";
+import { validateP7Report } from "./p7-report.mjs";
+import { artifactNameForP8Gate } from "./p8-report.mjs";
+import { createP8ReportArtifacts } from "./p8-report-create.mjs";
 import { renderMatrixJson, renderMatrixMarkdown, writeMatrixOutputs } from "./render.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -31,6 +36,34 @@ const candidateCommit = "a".repeat(40);
 const currentCommit = candidateCommit;
 const repositoryRoot = join(import.meta.dirname, "..", "..");
 const gateRegistryPath = join(import.meta.dirname, "gates.json");
+const P8_REQUIRED_ARTIFACTS = Object.freeze({
+  "P8-INSTALL-LIFECYCLE-LINUX": "p8-install-lifecycle-linux-report-{runAttempt}-{reportDigest}",
+  "P8-INSTALL-LIFECYCLE-WINDOWS": "p8-install-lifecycle-windows-report-{runAttempt}-{reportDigest}",
+  "P8-LICENSE-AUDIT": "p8-license-audit-report-{runAttempt}-{reportDigest}",
+  "P8-LINUX-APPIMAGE-PACKAGE": "p8-linux-appimage-package-report-{runAttempt}-{reportDigest}",
+  "P8-QUALIFICATION-UNSIGNED": "p8-qualification-unsigned-report-{runAttempt}-{reportDigest}",
+  "P8-RUNTIME-PRODUCER-PROVENANCE": "p8-runtime-producer-provenance-report-{runAttempt}-{reportDigest}",
+  "P8-WINDOWS-MSIX-PACKAGE": "p8-windows-msix-package-report-{runAttempt}-{reportDigest}",
+});
+const P4_SCENARIO_IDS = [
+  "all",
+  "assertion-failure",
+  "cancel",
+  "crash",
+  "discovery",
+  "failed-rerun",
+  "filter",
+  "malformed-output",
+  "mock-failure",
+  "opaque-fallback",
+  "reconnect-replay",
+  "repeat",
+  "service-restart",
+  "single",
+  "skip",
+  "stale-catalog",
+  "timeout",
+];
 const ALL_GATE_IDS = [
   "P1-IPC-PER-USER-AUTH",
   "P1-PROTOCOL-NO-SHELL",
@@ -223,6 +256,257 @@ function githubReceipt(overrides = {}) {
     },
   };
   return { ...receipt, ...overrides, evidence: { ...receipt.evidence, ...overrides.evidence } };
+}
+
+function fixtureDigest(label) {
+  return createHash("sha256").update(label, "utf8").digest("hex");
+}
+
+function p7Report(gateId, overrides = {}) {
+  const contracts = {
+    "P7-COVERAGE-UI-AND-SOURCE-DECORATION": {
+      executionMode: "ui-contract",
+      checks: ["coverage-tree", "html-report-offline", "source-decoration"],
+    },
+    "P7-HISTORY-AND-ARTIFACT-BROWSER": {
+      executionMode: "ui-contract",
+      checks: ["artifact-browser", "history-browser", "protocol-artifact-integrity"],
+    },
+    "P7-MAIN-USER-JOURNEY": {
+      executionMode: "terminal-free-journey",
+      checks: ["artifact-browser", "coverage-ui", "discover-tests", "history-browser", "mock-configuration", "run-tests", "service-lifecycle", "terminal-free"],
+    },
+    "P7-MOCK-CONFIGURATION-UX": {
+      executionMode: "ui-contract",
+      checks: ["mock-configuration", "mock-failure-navigation", "stub-configuration"],
+    },
+  };
+  const contract = contracts[gateId];
+  return {
+    schemaVersion: 1,
+    gateId,
+    candidateCommit,
+    sourceCommit: candidateCommit,
+    runAttempt: 1,
+    producer: "code-oss-extension-host",
+    executionMode: contract.executionMode,
+    outcome: "passed",
+    startedAt: "2026-09-15T00:00:00.000Z",
+    finishedAt: "2026-09-15T00:00:01.000Z",
+    checks: contract.checks.map((id) => ({ id, status: "passed" })),
+    ...overrides,
+  };
+}
+
+function p8Report(gateId, overrides = {}) {
+  const outcomes = {
+    "P8-INSTALL-LIFECYCLE-LINUX": ["install-linux", "launch-linux", "rollback-linux", "uninstall-linux", "upgrade-linux"],
+    "P8-INSTALL-LIFECYCLE-WINDOWS": ["install-windows", "launch-windows", "rollback-windows", "uninstall-windows", "upgrade-windows"],
+    "P8-LICENSE-AUDIT": ["license-audit-linux", "license-audit-windows"],
+    "P8-LINUX-APPIMAGE-PACKAGE": ["appimage-envelope", "appimage-licenses", "appimage-manifest", "appimage-payload", "appimage-runtime"],
+    "P8-QUALIFICATION-UNSIGNED": ["appimage-package", "install-lifecycle-linux", "install-lifecycle-windows", "license-audit-linux", "license-audit-windows", "msix-package"],
+    "P8-RUNTIME-PRODUCER-PROVENANCE": ["appimagetool", "fixed-code-oss-source", "provenance", "runtime-linux", "runtime-windows"],
+    "P8-WINDOWS-MSIX-PACKAGE": ["msix-licenses", "msix-manifest", "msix-payload", "msix-runtime", "msix-unsigned"],
+  };
+  const producerRun = {
+    workflowPath: ".github/workflows/release-inputs.yml",
+    sourceCommit: candidateCommit,
+    codeOssCommit: "b1c0a14de1414fcdaa400695b4db1c0799bc3124",
+    runId: "70",
+    runAttempt: 2,
+    artifacts: [
+      { kind: "appimagetool", id: "701", name: "appimagetool-linux-x64-2", digest: fixtureDigest("producer-appimagetool") },
+      { kind: "linux-runtime", id: "702", name: "code-oss-linux-x64-2", digest: fixtureDigest("producer-linux") },
+      { kind: "provenance", id: "703", name: "release-input-provenance-2", digest: fixtureDigest("producer-provenance") },
+      { kind: "windows-runtime", id: "704", name: "code-oss-windows-x64-2", digest: fixtureDigest("producer-windows") },
+    ],
+  };
+  const producerGate = gateId === "P8-RUNTIME-PRODUCER-PROVENANCE";
+  const report = {
+    schemaVersion: 1,
+    gateId,
+    candidateCommit,
+    sourceCommit: candidateCommit,
+    runId: producerGate ? producerRun.runId : "80",
+    runAttempt: producerGate ? producerRun.runAttempt : 1,
+    producerRun,
+    executionMode: producerGate ? "producer" : "unsigned-foundation",
+    releaseVersion: "1.2.3",
+    packages: [
+      { platform: "linux", id: "801", name: "release-input-linux-1.2.3-1", digest: fixtureDigest("package-linux") },
+      { platform: "windows", id: "802", name: "release-input-windows-1.2.3-1", digest: fixtureDigest("package-windows") },
+    ],
+    signing: { signature_required: "0", signature_outcome: "not-required" },
+    outcome: "passed",
+    outcomes: outcomes[gateId].map((id) => ({ id, status: "passed" })),
+  };
+  if (producerGate) {
+    delete report.releaseVersion;
+    delete report.packages;
+    delete report.signing;
+  }
+  return { ...report, ...overrides };
+}
+
+function p8Receipt(gate, { report = p8Report(gate.id), includeReport = true, receiptId } = {}) {
+  const artifactName = artifactNameForP8Gate(gate.id, report.runAttempt, report);
+  const boundArtifacts = gate.id === "P8-RUNTIME-PRODUCER-PROVENANCE"
+    ? report.producerRun.artifacts
+    : report.packages;
+  return githubReceipt({
+    receiptId: receiptId ?? `github-actions-p8-${gate.id.toLowerCase()}`,
+    gateIds: [gate.id],
+    evidence: {
+      workflowPath: gate.verification.workflowPath,
+      runId: report.runId,
+      runAttempt: report.runAttempt,
+      jobs: gate.verification.jobs.map((name) => ({ name, conclusion: "success" })),
+      artifacts: [
+        ...boundArtifacts.map(({ id, name, digest }) => ({ id, name, digest, expired: false })),
+        {
+          id: String(900 + Object.keys(P8_REQUIRED_ARTIFACTS).indexOf(gate.id)),
+          name: artifactName,
+          digest: fixtureDigest(`p8-report:${gate.id}`),
+          expired: false,
+          ...(includeReport ? { report } : {}),
+        },
+      ],
+    },
+  });
+}
+
+const P4_SCENARIO_RESULTS = {
+  all: ["failed", "aggregate"],
+  "assertion-failure": ["failed", "assertion"],
+  cancel: ["cancelled", "cancelled"],
+  crash: ["errored", "crash"],
+  discovery: ["passed", "discovery"],
+  "failed-rerun": ["failed", "assertion"],
+  filter: ["passed", "selection"],
+  "malformed-output": ["errored", "malformed-output"],
+  "mock-failure": ["failed", "mock-expectation"],
+  "opaque-fallback": ["passed", "opaque-fallback"],
+  "reconnect-replay": ["passed", "replay"],
+  repeat: ["passed", "repeat"],
+  "service-restart": ["interrupted", "service-restarted"],
+  single: ["passed", "test"],
+  skip: ["skipped", "ignored"],
+  "stale-catalog": ["rejected", "stale-catalog"],
+  timeout: ["timed-out", "timeout"],
+};
+
+function p4PlatformReport(platform) {
+  const families = platform === "win32" ? ["clang-cl", "msvc"] : ["clang", "gcc"];
+  return {
+    schemaVersion: 1,
+    candidateCommit,
+    sourceCommit: candidateCommit,
+    platform,
+    architecture: "x64",
+    executionMode: "native",
+    publication: "atomic-after-cleanup",
+    startedAt: "2026-09-15T00:00:00.000Z",
+    finishedAt: "2026-09-15T00:20:00.000Z",
+    toolchains: families.map((family) => ({
+      family,
+      compilerVersion: family === "msvc" ? "19.44.35228.0" : "22.1.8",
+      compilerSha256: fixtureDigest(`compiler:${platform}:${family}`),
+      frameworks: [
+        {
+          id: "cpputest",
+          dependencyVersion: "4.0",
+          dependencySha256: "21c692105db15299b5529af81a11a7ad80397f92c122bd7bf1e4a4b0e85654f7",
+          dependencyTreeSha256: "c564fb5e4e32836dc66f46efb86edb6f1f2fa6afa255a57052031aa00fc56f04",
+          stableIdDigest: "b".repeat(64),
+        },
+        {
+          id: "unity",
+          dependencyVersion: "2.6.1",
+          dependencySha256: "b41a66d45a6b99758fb3202ace6178177014d52fc524bf1f72687d93e9867292",
+          dependencyTreeSha256: "abfb7b2b7aec36739a7b138490d2e9dd178cc4f00e806ed372cbb8cfe98f73ae",
+          stableIdDigest: "c".repeat(64),
+          cMockProvenance: {
+            revision: "6f6f662d72657669657765642d636d6f636b2d31",
+            generatorVersion: "2.5.3",
+            inputSha256: fixtureDigest("cmock:input"),
+            outputSha256: fixtureDigest("cmock:output"),
+            manifestSha256: fixtureDigest("cmock:manifest"),
+            generatedAtRuntime: false,
+          },
+        },
+      ].map((framework) => {
+        const catalogRevision = fixtureDigest(`catalog-revision:${platform}:${family}:${framework.id}`);
+        const sourceArtifactSha256 = fixtureDigest(`source:${framework.id}`);
+        const sourceLocationDigest = fixtureDigest(`source-locations:${framework.id}`);
+        const executableArtifactSha256 = fixtureDigest(`executable:${platform}:${family}:${framework.id}`);
+        return {
+          ...framework,
+          catalogRevision,
+          catalogArtifactSha256: fixtureDigest(`catalog-artifact:${platform}:${family}:${framework.id}`),
+          sourceArtifactSha256,
+          sourceLocationDigest,
+          executableArtifactSha256,
+          scenarios: P4_SCENARIO_IDS.map((id, index) => ({
+            id,
+            status: "passed",
+            candidateCommit,
+            platform,
+            toolchainFamily: family,
+            frameworkId: framework.id,
+            catalogRevision,
+            sourceArtifactSha256,
+            sourceLocationDigest,
+            executableArtifactSha256,
+            resultArtifactSha256: fixtureDigest(`result:${platform}:${family}:${framework.id}:${id}`),
+            resultArtifactSizeBytes: 1024 + index,
+            startedAt: `2026-09-15T00:00:${String(10 + index).padStart(2, "0")}.000Z`,
+            finishedAt: `2026-09-15T00:01:${String(10 + index).padStart(2, "0")}.000Z`,
+            observedOutcome: P4_SCENARIO_RESULTS[id][0],
+            classification: P4_SCENARIO_RESULTS[id][1],
+          })),
+        };
+      }),
+    })),
+    benchmark: {
+      id: "catalog-10000",
+      itemCount: 10000,
+      sampleCount: 3,
+      allocationBudgetPerOperation: 300000,
+      allocationsPerOperation: [210120, 210120, 210120],
+      catalogRevision: fixtureDigest(`benchmark-catalog-revision:${platform}`),
+      catalogArtifactSha256: fixtureDigest(`benchmark-catalog-artifact:${platform}`),
+      stableIdDigest: "d".repeat(64),
+      startedAt: "2026-09-15T00:18:00.000Z",
+      finishedAt: "2026-09-15T00:19:00.000Z",
+      status: "passed",
+    },
+  };
+}
+
+function labelOnlyP4PlatformReport(platform) {
+  const report = p4PlatformReport(platform);
+  delete report.sourceCommit;
+  delete report.executionMode;
+  delete report.publication;
+  delete report.startedAt;
+  delete report.finishedAt;
+  for (const toolchain of report.toolchains) {
+    delete toolchain.compilerSha256;
+    for (const framework of toolchain.frameworks) {
+      delete framework.catalogRevision;
+      delete framework.catalogArtifactSha256;
+      delete framework.sourceArtifactSha256;
+      delete framework.sourceLocationDigest;
+      delete framework.executableArtifactSha256;
+      delete framework.cMockProvenance;
+      framework.scenarios = framework.scenarios.map(({ id, status }) => ({ id, status }));
+    }
+  }
+  delete report.benchmark.catalogRevision;
+  delete report.benchmark.catalogArtifactSha256;
+  delete report.benchmark.startedAt;
+  delete report.benchmark.finishedAt;
+  return report;
 }
 
 async function fixture(name, bytes) {
@@ -788,15 +1072,190 @@ test("future Phase 9 work remains MISSING and only the approved Phase 8 boundary
   }
 });
 
+test("generic successful workflow metadata and arbitrary gate IDs cannot satisfy required P8 gates", async () => {
+  const registry = await readCanonicalJson(gateRegistryPath, { label: "Phase 8 registry", maxBytes: 1024 * 1024 });
+  const requiredGates = registry.gates.filter(({ id }) => Object.hasOwn(P8_REQUIRED_ARTIFACTS, id));
+  const foundationGates = requiredGates.filter(({ id }) => id !== "P8-RUNTIME-PRODUCER-PROVENANCE");
+  const producerGate = requiredGates.find(({ id }) => id === "P8-RUNTIME-PRODUCER-PROVENANCE");
+  const foundationReceipt = githubReceipt({
+    receiptId: "github-actions-p8-generic-foundation",
+    gateIds: foundationGates.map(({ id }) => id),
+    evidence: {
+      workflowPath: ".github/workflows/foundation.yml",
+      runId: "80",
+      jobs: [...new Set(foundationGates.flatMap(({ verification }) => verification.jobs))]
+        .map((name) => ({ name, conclusion: "success" })),
+      artifacts: [],
+    },
+  });
+  const producerReceipt = githubReceipt({
+    receiptId: "github-actions-p8-generic-producer",
+    gateIds: [producerGate.id],
+    evidence: {
+      workflowPath: ".github/workflows/release-inputs.yml",
+      runId: "70",
+      jobs: [{ name: "attest", conclusion: "success" }],
+      artifacts: [],
+    },
+  });
+  const matrix = evaluateRecordedMatrix({
+    registry,
+    baseline: {
+      schemaVersion: 1,
+      candidateCommit,
+      evaluationMode: "historical",
+      receiptIds: [foundationReceipt.receiptId, producerReceipt.receiptId],
+    },
+    receipts: [foundationReceipt, producerReceipt],
+    currentCommit,
+    changedPaths: [],
+  });
+
+  for (const gate of requiredGates) {
+    assert.deepEqual(gate.verification.artifacts, [P8_REQUIRED_ARTIFACTS[gate.id]]);
+    assert.equal(matrix.gates.find(({ id }) => id === gate.id).status, "MISSING", `${gate.id} requires gate-specific semantic evidence`);
+  }
+});
+
+test("attempt-qualified P8 artifacts without closed semantic reports remain MISSING", async () => {
+  const registry = await readCanonicalJson(gateRegistryPath, { label: "Phase 8 registry", maxBytes: 1024 * 1024 });
+  for (const gate of registry.gates.filter(({ id }) => Object.hasOwn(P8_REQUIRED_ARTIFACTS, id))) {
+    const receipt = p8Receipt(gate, { includeReport: false });
+    const matrix = evaluateRecordedMatrix({
+      registry,
+      baseline: { schemaVersion: 1, candidateCommit, evaluationMode: "historical", receiptIds: [receipt.receiptId] },
+      receipts: [receipt],
+      currentCommit,
+      changedPaths: [],
+    });
+    assert.equal(matrix.gates.find(({ id }) => id === gate.id).status, "MISSING", `${gate.id} rejects an arbitrary same-name artifact`);
+  }
+});
+
+test("closed P8 reports bind candidate producer artifacts packages and exact passing outcomes", async () => {
+  const registry = await readCanonicalJson(gateRegistryPath, { label: "Phase 8 registry", maxBytes: 1024 * 1024 });
+  for (const gate of registry.gates.filter(({ id }) => Object.hasOwn(P8_REQUIRED_ARTIFACTS, id))) {
+    const receipt = p8Receipt(gate);
+    const matrix = evaluateRecordedMatrix({
+      registry,
+      baseline: { schemaVersion: 1, candidateCommit, evaluationMode: "historical", receiptIds: [receipt.receiptId] },
+      receipts: [receipt],
+      currentCommit,
+      changedPaths: [],
+    });
+    assert.equal(matrix.gates.find(({ id }) => id === gate.id).status, "PASS", `${gate.id} accepts its exact semantic report`);
+  }
+});
+
+test("P8 report generation is deterministic closed and produces provider-name content bindings", async () => {
+  const producer = p8Report("P8-RUNTIME-PRODUCER-PROVENANCE");
+  const producerInput = {
+    schemaVersion: 1,
+    mode: "producer",
+    candidateCommit,
+    runId: producer.runId,
+    runAttempt: producer.runAttempt,
+    artifacts: producer.producerRun.artifacts,
+  };
+  const root = await mkdtemp(join(tmpdir(), "phase9-p8-reports-"));
+  fixtureRoots.push(root);
+  const first = await createP8ReportArtifacts(producerInput, join(root, "producer-first"));
+  const second = await createP8ReportArtifacts(producerInput, join(root, "producer-second"));
+  assert.deepEqual(first, second);
+  assert.equal(first.reports.length, 1);
+  const producerEntry = first.reports[0];
+  assert.equal(producerEntry.artifactName, artifactNameForP8Gate(
+    producerEntry.gateId,
+    producer.runAttempt,
+    await readCanonicalJson(join(root, "producer-first", producerEntry.file), { label: "generated P8 report", maxBytes: 128 * 1024 }),
+  ));
+
+  const qualification = p8Report("P8-QUALIFICATION-UNSIGNED");
+  const foundation = await createP8ReportArtifacts({
+    schemaVersion: 1,
+    mode: "foundation",
+    candidateCommit,
+    runId: qualification.runId,
+    runAttempt: qualification.runAttempt,
+    producerRun: qualification.producerRun,
+    releaseVersion: qualification.releaseVersion,
+    packages: qualification.packages,
+    signing: qualification.signing,
+  }, join(root, "foundation"));
+  assert.equal(foundation.reports.length, 6);
+  assert.deepEqual(foundation.reports.map(({ gateId }) => gateId), Object.keys(P8_REQUIRED_ARTIFACTS)
+    .filter((gateId) => gateId !== "P8-RUNTIME-PRODUCER-PROVENANCE").sort((left, right) => left.localeCompare(right, "en")));
+  await assert.rejects(createP8ReportArtifacts({ ...producerInput, arbitrary: true }, join(root, "open-input")), {
+    code: "PHASE9_P8_REPORT_INVALID",
+  });
+  await assert.rejects(createP8ReportArtifacts({
+    schemaVersion: 1,
+    mode: "foundation",
+    candidateCommit,
+    runId: qualification.runId,
+    runAttempt: qualification.runAttempt,
+    producerRun: qualification.producerRun,
+    releaseVersion: qualification.releaseVersion,
+    packages: qualification.packages,
+    signing: { signature_required: "1", signature_outcome: "verified" },
+  }, join(root, "signed-input")), { code: "PHASE9_P8_REPORT_INVALID" });
+});
+
+test("unsigned P8 qualification rejects signed ambiguous and malformed reports", async () => {
+  const registry = await readCanonicalJson(gateRegistryPath, { label: "Phase 8 registry", maxBytes: 1024 * 1024 });
+  const gate = registry.gates.find(({ id }) => id === "P8-QUALIFICATION-UNSIGNED");
+  const status = (report, includeReport = true) => {
+    const receipt = p8Receipt(gate, { report, includeReport, receiptId: "github-actions-p8-unsigned-negative" });
+    return evaluateRecordedMatrix({
+      registry,
+      baseline: { schemaVersion: 1, candidateCommit, evaluationMode: "historical", receiptIds: [receipt.receiptId] },
+      receipts: [receipt],
+      currentCommit,
+      changedPaths: [],
+    }).gates.find(({ id }) => id === gate.id).status;
+  };
+
+  assert.equal(status(p8Report(gate.id), false), "MISSING");
+  assert.equal(status(p8Report(gate.id, {
+    signing: { signature_required: "1", signature_outcome: "verified" },
+  })), "MISSING");
+  const wrongSource = p8Report(gate.id, { sourceCommit: "c".repeat(40) });
+  assert.equal(status(wrongSource), "MISSING");
+  const substitutedPackage = structuredClone(p8Report(gate.id));
+  substitutedPackage.packages[0].id = "999";
+  const substitutedReceipt = p8Receipt(gate, {
+    report: substitutedPackage,
+    receiptId: "github-actions-p8-substituted-package",
+  });
+  substitutedReceipt.evidence.artifacts[0].id = "801";
+  const substitutedMatrix = evaluateRecordedMatrix({
+    registry,
+    baseline: { schemaVersion: 1, candidateCommit, evaluationMode: "historical", receiptIds: [substitutedReceipt.receiptId] },
+    receipts: [substitutedReceipt],
+    currentCommit,
+    changedPaths: [],
+  });
+  assert.equal(substitutedMatrix.gates.find(({ id }) => id === gate.id).status, "MISSING");
+  const missingProducerArtifact = structuredClone(p8Report(gate.id));
+  missingProducerArtifact.producerRun.artifacts.pop();
+  assert.throws(() => status(missingProducerArtifact), /PHASE9_P8_REPORT_INVALID/u);
+  const ambiguous = structuredClone(p8Report(gate.id));
+  delete ambiguous.signing;
+  assert.equal(status(ambiguous), "MISSING");
+  assert.throws(() => status({ ...p8Report(gate.id), unrelated: true }), /PHASE9_P8_REPORT_INVALID/u);
+});
+
 test("generic successful foundation jobs cannot satisfy feature-specific gates without their artifacts", async () => {
   const registry = await readCanonicalJson(gateRegistryPath, { label: "Phase 1 through 9 registry", maxBytes: 1024 * 1024 });
   const gateArtifacts = {
     "P5-LINUX-CLANG-COVERAGE": "linux-clang-coverage-report",
+    "P5-WINDOWS-LLVM-COVERAGE": "coverage-execution-windows-{runAttempt}",
+    "P6-BRANDING-AND-BUILTIN-REGISTRATION": "code-oss-branding-builtin-report",
     "P6-CODEOSS-HOST-SMOKE": "code-oss-host-smoke-report",
-    "P7-COVERAGE-UI-AND-SOURCE-DECORATION": "coverage-ui-source-decoration-report",
-    "P7-HISTORY-AND-ARTIFACT-BROWSER": "history-artifact-browser-report",
-    "P7-MAIN-USER-JOURNEY": "main-user-journey-report",
-    "P7-MOCK-CONFIGURATION-UX": "mock-configuration-ux-report",
+    "P7-COVERAGE-UI-AND-SOURCE-DECORATION": "coverage-ui-source-decoration-report-{runAttempt}",
+    "P7-HISTORY-AND-ARTIFACT-BROWSER": "history-artifact-browser-report-{runAttempt}",
+    "P7-MAIN-USER-JOURNEY": "main-user-journey-report-{runAttempt}",
+    "P7-MOCK-CONFIGURATION-UX": "mock-configuration-ux-report-{runAttempt}",
   };
   const gateIds = Object.keys(gateArtifacts);
   const receipt = githubReceipt({
@@ -825,6 +1284,393 @@ test("generic successful foundation jobs cannot satisfy feature-specific gates w
     assert.equal(matrix.gates.find(({ id }) => id === gateId).status, "MISSING", `${gateId} requires feature-specific evidence`);
     assert.deepEqual(registry.gates.find(({ id }) => id === gateId).verification.artifacts, [gateArtifacts[gateId]]);
   }
+  assert.deepEqual(
+    registry.gates.find(({ id }) => id === "P6-BRANDING-AND-BUILTIN-REGISTRATION").verification.jobs,
+    ["code-oss-branding-builtin"],
+  );
+});
+
+test("P7 UI and journey gates reject arbitrary same-name artifacts without closed semantic reports", async () => {
+  const registry = await readCanonicalJson(gateRegistryPath, { label: "Phase 7 registry", maxBytes: 1024 * 1024 });
+  const artifacts = {
+    "P7-COVERAGE-UI-AND-SOURCE-DECORATION": "coverage-ui-source-decoration-report-1",
+    "P7-HISTORY-AND-ARTIFACT-BROWSER": "history-artifact-browser-report-1",
+    "P7-MAIN-USER-JOURNEY": "main-user-journey-report-1",
+    "P7-MOCK-CONFIGURATION-UX": "mock-configuration-ux-report-1",
+  };
+  const gateIds = Object.keys(artifacts);
+  const receipt = githubReceipt({
+    receiptId: "github-actions-p7-arbitrary-artifacts",
+    gateIds,
+    evidence: {
+      workflowPath: ".github/workflows/foundation.yml",
+      runId: "43",
+      jobs: [{ name: "verify-p7-ui-journey", conclusion: "success" }],
+      artifacts: gateIds.map((gateId, index) => ({
+        id: String(60 + index),
+        name: artifacts[gateId],
+        digest: String(index + 1).repeat(64),
+        expired: false,
+      })),
+    },
+  });
+  const matrix = evaluateRecordedMatrix({
+    registry,
+    baseline: { schemaVersion: 1, candidateCommit, evaluationMode: "historical", receiptIds: [receipt.receiptId] },
+    receipts: [receipt],
+    currentCommit,
+    changedPaths: [],
+  });
+
+  for (const gateId of gateIds) {
+    assert.equal(matrix.gates.find(({ id }) => id === gateId).status, "MISSING", `${gateId} requires a closed semantic report`);
+  }
+});
+
+test("P7 report validator accepts only exact passing UI and terminal-free contracts", () => {
+  for (const gateId of [
+    "P7-COVERAGE-UI-AND-SOURCE-DECORATION",
+    "P7-HISTORY-AND-ARTIFACT-BROWSER",
+    "P7-MAIN-USER-JOURNEY",
+    "P7-MOCK-CONFIGURATION-UX",
+  ]) {
+    assert.equal(validateP7Report(p7Report(gateId), { gateId, candidateCommit, runAttempt: 1 }), true);
+  }
+
+  assert.throws(
+    () => validateP7Report({ ...p7Report("P7-MOCK-CONFIGURATION-UX"), unrelated: true }, {
+      gateId: "P7-MOCK-CONFIGURATION-UX", candidateCommit, runAttempt: 1,
+    }),
+    /PHASE9_P7_REPORT_INVALID/u,
+  );
+  assert.throws(
+    () => validateP7Report(p7Report("P7-MAIN-USER-JOURNEY", {
+      executionMode: "activation-only",
+      outcome: "skipped",
+      checks: [{ id: "activation", status: "passed" }],
+    }), { gateId: "P7-MAIN-USER-JOURNEY", candidateCommit, runAttempt: 1 }),
+    /PHASE9_P7_REPORT_INVALID/u,
+  );
+});
+
+test("P7 closed reports remain MISSING until the dedicated producer job succeeds", async () => {
+  const registry = await readCanonicalJson(gateRegistryPath, { label: "Phase 7 registry", maxBytes: 1024 * 1024 });
+  const gateId = "P7-COVERAGE-UI-AND-SOURCE-DECORATION";
+  const receipt = githubReceipt({
+    receiptId: "github-actions-p7-producer-required",
+    gateIds: [gateId],
+    evidence: {
+      workflowPath: ".github/workflows/foundation.yml",
+      runId: "46",
+      jobs: [],
+      artifacts: [{
+        id: "72",
+        name: "coverage-ui-source-decoration-report-1",
+        digest: "9".repeat(64),
+        expired: false,
+        report: p7Report(gateId),
+      }],
+    },
+  });
+  const evaluate = () => evaluateRecordedMatrix({
+    registry,
+    baseline: { schemaVersion: 1, candidateCommit, evaluationMode: "historical", receiptIds: [receipt.receiptId] },
+    receipts: [receipt],
+    currentCommit,
+    changedPaths: [],
+  }).gates.find(({ id }) => id === gateId).status;
+
+  assert.equal(evaluate(), "MISSING");
+  receipt.evidence.jobs.push({ name: "verify-p7-ui-journey", conclusion: "success" });
+  assert.equal(evaluate(), "PASS");
+});
+
+test("P7 main journey rejects an activation-only skipped report", async () => {
+  const registry = await readCanonicalJson(gateRegistryPath, { label: "Phase 7 registry", maxBytes: 1024 * 1024 });
+  const receipt = githubReceipt({
+    receiptId: "github-actions-p7-activation-only",
+    gateIds: ["P7-MAIN-USER-JOURNEY"],
+    evidence: {
+      workflowPath: ".github/workflows/foundation.yml",
+      runId: "44",
+      jobs: [{ name: "verify-p7-ui-journey", conclusion: "success" }],
+      artifacts: [{
+        id: "70",
+        name: "main-user-journey-report-1",
+        digest: "7".repeat(64),
+        expired: false,
+        report: {
+          schemaVersion: 1,
+          gateId: "P7-MAIN-USER-JOURNEY",
+          candidateCommit,
+          sourceCommit: candidateCommit,
+          runAttempt: 1,
+          producer: "code-oss-extension-host",
+          executionMode: "activation-only",
+          outcome: "skipped",
+          startedAt: "2026-09-15T00:00:00.000Z",
+          finishedAt: "2026-09-15T00:00:01.000Z",
+          checks: [{ id: "activation", status: "passed" }],
+        },
+      }],
+    },
+  });
+  const matrix = evaluateRecordedMatrix({
+    registry,
+    baseline: { schemaVersion: 1, candidateCommit, evaluationMode: "historical", receiptIds: [receipt.receiptId] },
+    receipts: [receipt],
+    currentCommit,
+    changedPaths: [],
+  });
+
+  assert.equal(matrix.gates.find(({ id }) => id === "P7-MAIN-USER-JOURNEY").status, "MISSING");
+});
+
+test("P7 Windows WFP gate rejects workflow_dispatch runs that skip native coverage", async () => {
+  const registry = await readCanonicalJson(gateRegistryPath, { label: "Phase 7 registry", maxBytes: 1024 * 1024 });
+  const receipt = githubReceipt({
+    receiptId: "github-actions-p7-wfp-dispatch-skip",
+    gateIds: ["P7-WINDOWS-WFP-OFFLINE"],
+    evidence: {
+      workflowPath: ".github/workflows/foundation.yml",
+      runId: "45",
+      event: "workflow_dispatch",
+      jobs: [
+        { name: "verify-windows", conclusion: "success" },
+        { name: "verify-windows-wfp", conclusion: "success" },
+      ],
+      artifacts: [{
+        id: "71",
+        name: "coverage-execution-windows-1",
+        digest: "8".repeat(64),
+        expired: false,
+      }],
+    },
+  });
+  const matrix = evaluateRecordedMatrix({
+    registry,
+    baseline: { schemaVersion: 1, candidateCommit, evaluationMode: "historical", receiptIds: [receipt.receiptId] },
+    receipts: [receipt],
+    currentCommit,
+    changedPaths: [],
+  });
+
+  assert.equal(matrix.gates.find(({ id }) => id === "P7-WINDOWS-WFP-OFFLINE").status, "MISSING");
+});
+
+test("P5 coverage gates require the closed Linux GCC and Windows LLVM artifacts", async () => {
+  const registry = await readCanonicalJson(gateRegistryPath, { label: "Phase 5 registry", maxBytes: 1024 * 1024 });
+  const gateArtifacts = {
+    "P5-COVERAGE-FAULT-MAPPING": ["coverage-execution-windows-{runAttempt}", "linux-gcc-coverage-report-{runAttempt}"],
+    "P5-COVERAGE-REPORTS": ["coverage-execution-windows-{runAttempt}", "linux-gcc-coverage-report-{runAttempt}"],
+    "P5-LINUX-GCC-COVERAGE": ["linux-gcc-coverage-report-{runAttempt}"],
+    "P5-WINDOWS-LLVM-COVERAGE": ["coverage-execution-windows-{runAttempt}"],
+  };
+  const gateIds = Object.keys(gateArtifacts);
+  const receipt = githubReceipt({
+    receiptId: "github-actions-p5-without-closed-artifacts",
+    gateIds,
+    evidence: {
+      workflowPath: ".github/workflows/foundation.yml",
+      runId: "42",
+      jobs: [
+        { name: "coverage-linux-gcc", conclusion: "success" },
+        { name: "verify-windows", conclusion: "success" },
+      ],
+      artifacts: [],
+    },
+  });
+  const matrix = evaluateRecordedMatrix({
+    registry,
+    baseline: { schemaVersion: 1, candidateCommit, evaluationMode: "historical", receiptIds: [receipt.receiptId] },
+    receipts: [receipt],
+    currentCommit,
+    changedPaths: [],
+  });
+
+  for (const gateId of gateIds) {
+    assert.equal(matrix.gates.find(({ id }) => id === gateId).status, "MISSING", `${gateId} requires closed coverage artifacts`);
+    assert.deepEqual(registry.gates.find(({ id }) => id === gateId).verification.artifacts, gateArtifacts[gateId]);
+  }
+});
+
+test("P5 attempt-qualified artifact contracts derive exact names from receipt runAttempt", async () => {
+  const registry = await readCanonicalJson(gateRegistryPath, { label: "Phase 5 registry", maxBytes: 1024 * 1024 });
+  const receipt = githubReceipt({
+    receiptId: "github-actions-p5-attempt-2",
+    gateIds: ["P5-LINUX-GCC-COVERAGE"],
+    evidence: {
+      workflowPath: ".github/workflows/foundation.yml",
+      runId: "42",
+      runAttempt: 2,
+      jobs: [{ name: "coverage-linux-gcc", conclusion: "success" }],
+      artifacts: [
+        { id: "51", name: "linux-gcc-coverage-report-1", digest: "c".repeat(64), expired: false },
+        { id: "52", name: "linux-gcc-coverage-report-2", digest: "d".repeat(64), expired: false },
+      ],
+    },
+  });
+  const matrix = evaluateRecordedMatrix({
+    registry,
+    baseline: { schemaVersion: 1, candidateCommit, evaluationMode: "historical", receiptIds: [receipt.receiptId] },
+    receipts: [receipt],
+    currentCommit,
+    changedPaths: [],
+  });
+
+  assert.equal(matrix.gates.find(({ id }) => id === "P5-LINUX-GCC-COVERAGE").status, "PASS");
+
+  receipt.evidence.artifacts[1].name = "linux-gcc-coverage-report-3";
+  const wrongAttemptMatrix = evaluateRecordedMatrix({
+    registry,
+    baseline: { schemaVersion: 1, candidateCommit, evaluationMode: "historical", receiptIds: [receipt.receiptId] },
+    receipts: [receipt],
+    currentCommit,
+    changedPaths: [],
+  });
+  assert.equal(wrongAttemptMatrix.gates.find(({ id }) => id === "P5-LINUX-GCC-COVERAGE").status, "MISSING");
+});
+
+test("generic foundation verification cannot PASS P4 without the native framework matrix report", async () => {
+  const registry = await readCanonicalJson(gateRegistryPath, { label: "Phase 4 registry", maxBytes: 1024 * 1024 });
+  const gateIds = [
+    "P4-CPPUTEST-CPPUMOCK",
+    "P4-DISCOVERY-CTEST",
+    "P4-RECOVERY-AND-10000-BACKEND",
+    "P4-SELECTION-AND-RERUN",
+    "P4-UNITY-CMOCK",
+  ];
+  const receipt = githubReceipt({
+    receiptId: "github-actions-foundation-generic-p4",
+    gateIds,
+    evidence: {
+      workflowPath: ".github/workflows/foundation.yml",
+      runId: "41",
+      jobs: [
+        { name: "verify-linux", conclusion: "success" },
+        { name: "verify-windows", conclusion: "success" },
+      ],
+      artifacts: [],
+    },
+  });
+  const matrix = evaluateRecordedMatrix({
+    registry,
+    baseline: { schemaVersion: 1, candidateCommit, evaluationMode: "historical", receiptIds: [receipt.receiptId] },
+    receipts: [receipt],
+    currentCommit,
+    changedPaths: [],
+  });
+
+  for (const gateId of gateIds) {
+    assert.equal(matrix.gates.find(({ id }) => id === gateId).status, "MISSING", `${gateId} requires P4-specific evidence`);
+    assert.deepEqual(registry.gates.find(({ id }) => id === gateId).verification, {
+      artifacts: ["native-framework-matrix-report"],
+      commands: registry.gates.find(({ id }) => id === gateId).verification.commands,
+      jobs: ["verify-framework-matrix", "verify-linux", "verify-windows"],
+      workflowPath: ".github/workflows/foundation.yml",
+    });
+  }
+});
+
+test("P4 report CLI aggregates the exact four-toolchain framework and backend benchmark contract", async () => {
+  const root = await mkdtemp(join(tmpdir(), "phase9-p4-report-"));
+  fixtureRoots.push(root);
+  const windows = join(root, "windows.json");
+  const linux = join(root, "linux.json");
+  const output = join(root, "matrix.json");
+  await writeFile(windows, encodeCanonicalJson(p4PlatformReport("win32")));
+  await writeFile(linux, encodeCanonicalJson(p4PlatformReport("linux")));
+
+  let failure;
+  try {
+    await execFileAsync(process.execPath, [
+      join(import.meta.dirname, "p4-report.mjs"),
+      "--windows", windows,
+      "--linux", linux,
+      "--candidate", candidateCommit,
+      "--out", output,
+    ]);
+  } catch (error) {
+    failure = error;
+  }
+  assert.equal(failure, undefined, failure?.stderr);
+
+  const matrix = await readCanonicalJson(output, { label: "P4 matrix report", maxBytes: 1024 * 1024 });
+  assert.equal(matrix.schemaVersion, 1);
+  assert.equal(matrix.candidateCommit, candidateCommit);
+  assert.equal(matrix.overallStatus, "passed");
+  assert.deepEqual(matrix.platforms.map(({ platform }) => platform), ["linux", "win32"]);
+  assert.deepEqual(matrix.platforms.flatMap(({ toolchains }) => toolchains.map(({ family }) => family)), [
+    "clang", "gcc", "clang-cl", "msvc",
+  ]);
+  assert.deepEqual(matrix.frameworkStableIdDigests, {
+    cpputest: "b".repeat(64),
+    unity: "c".repeat(64),
+  });
+  assert.deepEqual(matrix.backendBenchmark, {
+    id: "catalog-10000",
+    itemCount: 10000,
+    sampleCountPerPlatform: 3,
+    allocationBudgetPerOperation: 300000,
+    stableIdDigest: "d".repeat(64),
+    status: "passed",
+  });
+});
+
+test("P4 report validator rejects incomplete, unlocked, failed, or cross-platform-inconsistent evidence", () => {
+  const cases = [
+    (windows) => { windows.toolchains[0].family = "gcc"; },
+    (windows) => { delete windows.startedAt; },
+    (windows) => { delete windows.toolchains[0].compilerSha256; },
+    (windows) => { windows.toolchains[0].frameworks[0].scenarios.pop(); },
+    (windows) => { windows.toolchains[0].frameworks[0].scenarios[0].status = "failed"; },
+    (windows) => { delete windows.toolchains[0].frameworks[0].catalogRevision; },
+    (windows) => { delete windows.toolchains[0].frameworks[0].sourceArtifactSha256; },
+    (windows) => { delete windows.toolchains[0].frameworks[0].sourceLocationDigest; },
+    (windows) => { delete windows.toolchains[0].frameworks[0].scenarios[0].resultArtifactSha256; },
+    (windows) => { delete windows.toolchains[0].frameworks[1].cMockProvenance; },
+    (windows) => { windows.toolchains[0].frameworks[0].dependencySha256 = "0".repeat(64); },
+    (windows) => { windows.toolchains[0].frameworks[0].stableIdDigest = "0".repeat(64); },
+    (windows) => { windows.toolchains[0].frameworks[1].cMockProvenance.outputSha256 = "0".repeat(64); },
+    (windows) => { windows.toolchains[0].frameworks[0].scenarios[0].catalogRevision = "0".repeat(64); },
+    (windows) => { windows.toolchains[0].frameworks[0].scenarios[0].finishedAt = windows.startedAt; },
+    (windows) => { windows.benchmark.itemCount = 9999; },
+    (windows) => { windows.benchmark.allocationsPerOperation[0] = 300001; },
+    (windows) => { delete windows.benchmark.catalogArtifactSha256; },
+    (windows) => { windows.unreviewed = true; },
+  ];
+  for (const mutate of cases) {
+    const windows = p4PlatformReport("win32");
+    const linux = p4PlatformReport("linux");
+    mutate(windows);
+    assert.throws(
+      () => buildMatrixReport({ candidateCommit, windows, linux }),
+      /PHASE9_P4_REPORT_INVALID/u,
+    );
+  }
+});
+
+test("P4 report validator rejects label-only reports without native evidence bindings", () => {
+  assert.throws(
+    () => buildMatrixReport({
+      candidateCommit,
+      windows: labelOnlyP4PlatformReport("win32"),
+      linux: labelOnlyP4PlatformReport("linux"),
+    }),
+    /PHASE9_P4_REPORT_INVALID/u,
+  );
+});
+
+test("P4 report validator rejects a scenario result substituted from another toolchain", () => {
+  const windows = p4PlatformReport("win32");
+  const linux = p4PlatformReport("linux");
+  windows.toolchains[1].frameworks[0].scenarios[0] = structuredClone(
+    windows.toolchains[0].frameworks[0].scenarios[0],
+  );
+  assert.throws(
+    () => buildMatrixReport({ candidateCommit, windows, linux }),
+    /PHASE9_P4_REPORT_INVALID/u,
+  );
 });
 
 test("only the exact three approved Phase 8 gates may be deferred", () => {
@@ -889,6 +1735,9 @@ test("registry rejects unsafe display strings, paths, duplicates, and empty veri
     (gate) => { gate.verification.commands = ["go test --pkg=../other"]; },
     (gate) => { gate.verification.jobs = ["phase9", "phase9"]; },
     (gate) => { gate.verification.artifacts = ["../report"]; },
+    (gate) => { gate.verification.artifacts = ["report{runAttempt}"]; },
+    (gate) => { gate.verification.artifacts = ["report-{runAttempt}-extra"]; },
+    (gate) => { gate.verification.artifacts = ["report-{runAttempt}{runAttempt}"]; },
     (gate) => { gate.verification.commands = []; gate.verification.jobs = []; gate.verification.artifacts = []; },
     (gate) => { gate.verification.workflowPath = "C:\\workflow.yml"; },
   ];
@@ -1107,7 +1956,7 @@ test("historical mode preserves receipt-backed rows after later product changes"
   assert.equal("reason" in matrix.gates[0], false);
 });
 
-test("checked-in historical evidence keeps deferred and unproven gates closed", async () => {
+test("checked-in candidate evidence keeps deferred and unproven gates closed", async () => {
   const evidenceRoot = join(repositoryRoot, "docs", "superpowers", "evidence", "phase9");
   const inputs = await loadPhase9Inputs({
     registryPath: gateRegistryPath,
@@ -1120,11 +1969,28 @@ test("checked-in historical evidence keeps deferred and unproven gates closed", 
   });
   const gatesById = new Map(matrix.gates.map((gate) => [gate.id, gate]));
 
-  assert.equal(inputs.baseline.evaluationMode, "historical");
-  assert.equal(matrix.evaluationMode, "historical");
+  assert.equal(inputs.baseline.evaluationMode, "candidate");
+  assert.equal(matrix.evaluationMode, "candidate");
   assert.equal(matrix.releaseReady, false);
   assert.equal(gatesById.get("P8-SIGN-WINDOWS")?.status, "DEFERRED");
-  assert.equal(gatesById.get("P9-PERF-MEMORY")?.status, "MISSING");
+  const selectedReceipts = inputs.receipts.filter((receipt) => inputs.baseline.receiptIds.includes(receipt.receiptId));
+  const performanceGate = gatesById.get("P9-PERF-MEMORY");
+  if (inputs.baseline.receiptIds.length === 0) {
+    // A candidate may be bootstrapped before its first successful online receipt.
+    // Keep that state explicitly closed so the workflow can produce the receipt
+    // needed for the subsequent evidence-bound run.
+    assert.equal(performanceGate?.status, "MISSING");
+    assert.equal("receiptId" in (performanceGate ?? {}), false);
+  } else {
+    assert.equal(performanceGate?.status, "PASS");
+    assert.equal("reason" in (performanceGate ?? {}), false);
+    assert.equal(
+      selectedReceipts.some(
+        (receipt) => receipt.receiptId === performanceGate?.receiptId && receipt.gateIds.includes("P9-PERF-MEMORY"),
+      ),
+      true,
+    );
+  }
 });
 
 test("candidate CLI derives tested-content changes from Git", async () => {

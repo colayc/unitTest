@@ -1,0 +1,9 @@
+---
+:cmock:
+  :mock_path: /out
+  :mock_prefix: Mock
+  :mock_suffix: ''
+  :plugins: []
+  :fail_on_unexpected_calls: true
+  :when_no_prototypes: :error
+  :verbosity: 0

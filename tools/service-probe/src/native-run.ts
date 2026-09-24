@@ -2,6 +2,12 @@ import { resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import type { RequiredToolchainFamily } from "./native-build.js";
+import type { FrameworkPlatformOptions } from "./native-framework-matrix.js";
+import {
+  frameworkMatrixRequired,
+  loadRequiredFrameworkRuntime,
+  type LoadedFrameworkRuntime,
+} from "./native-framework-runtime.js";
 import { installNativeHttpNetworkGuard } from "./native-network-guard.js";
 import { resolveNativeWorkDirectory } from "./native-work-root.js";
 
@@ -26,8 +32,15 @@ function parsePlatform(arguments_: readonly string[]): "linux" | "win32" {
   return arguments_[1];
 }
 
-export async function main(arguments_: readonly string[] = process.argv.slice(2)): Promise<void> {
+export async function main(
+  arguments_: readonly string[] = process.argv.slice(2),
+  frameworkPlatform?: FrameworkPlatformOptions,
+  environment: NodeJS.ProcessEnv = process.env,
+  runtimeLoader: typeof loadRequiredFrameworkRuntime = loadRequiredFrameworkRuntime,
+  matrixRunner?: typeof import("./native-build.js").runNativeMatrix,
+): Promise<void> {
   const { runNativeMatrix } = await import("./native-build.js");
+  const executeMatrix = matrixRunner ?? runNativeMatrix;
   const platform = parsePlatform(arguments_);
   if (platform !== process.platform) {
     throw new Error(`native E2E for ${platform} must run on ${platform}`);
@@ -35,26 +48,38 @@ export async function main(arguments_: readonly string[] = process.argv.slice(2)
   const requiredFamilies: readonly RequiredToolchainFamily[] = platform === "linux"
     ? ["gcc", "clang"]
     : ["msvc", "clang-cl"];
-  const results = await runNativeMatrix({
-    platform,
-    requiredFamilies,
-    artifactDirectory: resolve(
-      repositoryRoot,
-      ".native-e2e",
-      "artifacts",
-      platform === "linux" ? "linux" : "windows",
-    ),
-    workDirectory: resolveNativeWorkDirectory(repositoryRoot, platform, tmpdir()),
-  });
-  process.stdout.write(`${JSON.stringify({
-    platform,
-    results: results.map((result) => ({
-      family: result.toolchainFamily,
-      version: result.toolchainVersion,
-      generator: result.generator,
-      scenarios: result.scenarios,
-    })),
-  })}\n`);
+  const artifactDirectory = resolve(
+    repositoryRoot,
+    ".native-e2e",
+    "artifacts",
+    platform === "linux" ? "linux" : "windows",
+  );
+  let loaded: LoadedFrameworkRuntime | undefined;
+  if (frameworkMatrixRequired(environment) && frameworkPlatform === undefined) {
+    loaded = await runtimeLoader(repositoryRoot, platform, artifactDirectory);
+    frameworkPlatform = loaded.options;
+  }
+  try {
+    const results = await executeMatrix({
+      platform,
+      requiredFamilies,
+      artifactDirectory,
+      workDirectory: resolveNativeWorkDirectory(repositoryRoot, platform, tmpdir()),
+      ...(frameworkPlatform === undefined ? {} : { frameworkPlatform }),
+      ...(loaded === undefined ? {} : { frameworkIdentity: loaded.identity }),
+    });
+    process.stdout.write(`${JSON.stringify({
+      platform,
+      results: results.map((result) => ({
+        family: result.toolchainFamily,
+        version: result.toolchainVersion,
+        generator: result.generator,
+        scenarios: result.scenarios,
+      })),
+    })}\n`);
+  } finally {
+    await loaded?.dispose();
+  }
 }
 
 if (
@@ -68,4 +93,4 @@ if (
   });
 }
 
-export const __testing = Object.freeze({ parsePlatform });
+export const __testing = Object.freeze({ parsePlatform, frameworkMatrixRequired });

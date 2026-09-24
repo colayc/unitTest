@@ -9,6 +9,8 @@ import (
 	"errors"
 	"io"
 	"net/url"
+	"os"
+	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -151,6 +153,7 @@ type buildStartPayloadV12 struct {
 	WorkspaceGeneration string   `json:"workspaceGeneration"`
 	ProjectID           string   `json:"projectId"`
 	BuildProfileID      string   `json:"buildProfileId"`
+	ToolchainID         string   `json:"toolchainId,omitempty"`
 	TargetIDs           []string `json:"targetIds"`
 	Jobs                int      `json:"jobs"`
 	TimeoutMS           int64    `json:"timeoutMs"`
@@ -955,6 +958,7 @@ func (s *Session) handleV12TaskStart(ctx context.Context, version string, reques
 			WorkspaceGeneration: payload.WorkspaceGeneration,
 			ProjectID:           payload.ProjectID,
 			BuildProfileID:      payload.BuildProfileID,
+			ToolchainID:         payload.ToolchainID,
 			TargetIDs:           append([]string(nil), payload.TargetIDs...),
 			Jobs:                payload.Jobs,
 			Timeout:             time.Duration(payload.TimeoutMS) * time.Millisecond,
@@ -1023,6 +1027,7 @@ func (s *Session) handleV13TaskStart(
 					WorkspaceGeneration,
 				ProjectID:      payload.ProjectID,
 				BuildProfileID: payload.BuildProfileID,
+				ToolchainID:    payload.ToolchainID,
 				TargetIDs: append(
 					[]string(nil),
 					payload.TargetIDs...,
@@ -1123,7 +1128,7 @@ func backendFailure(version string, request protocol.Request, err error) HandleR
 	case errors.Is(err, build.ErrConfigureRequired):
 		code, message, retryable = "CONFIGURE_REQUIRED", "CMake configure is required", false
 	case errors.Is(err, testdomain.ErrCatalogStale):
-		code, message, retryable = "CATALOG_STALE", "test Catalog is stale", false
+		code, message, retryable = "TEST_CATALOG_STALE", "test Catalog is stale", false
 	case errors.Is(err, testdomain.ErrEmptySelection),
 		errors.Is(err, testdomain.ErrSelectionTooLarge),
 		errors.Is(err, testdomain.ErrUnknownSelectionID),
@@ -1157,9 +1162,27 @@ func backendFailure(version string, request protocol.Request, err error) HandleR
 	case errors.Is(err, artifactstore.ErrInvalidArtifact), errors.Is(err, artifactstore.ErrUnsafePath):
 		code, message, retryable = "ARTIFACT_NOT_FOUND", "artifact was not found", false
 	case errors.Is(err, task.ErrStorageUnavailable), errors.Is(err, artifactstore.ErrStoreUnavailable):
-		code, message, retryable = "STORAGE_UNAVAILABLE", "storage is unavailable", true
+		code, message, retryable = "STORAGE_UNAVAILABLE", debugStorageFailureMessage(err), true
 	}
 	return handled(protocol.Failure(version, request, code, message, retryable))
+}
+
+func debugStorageFailureMessage(err error) string {
+	if os.Getenv("UT_DEBUG_PROCESS_HOST_FAILURES") != "1" {
+		return "storage is unavailable"
+	}
+	// taskstore wraps failures as "storage unavailable: <operation> failed".
+	// Expose only that fixed operation token in opt-in diagnostics; never carry
+	// SQLite/Windows paths or driver text through the protocol.
+	const prefix = "storage unavailable: "
+	value := err.Error()
+	if start := strings.Index(value, prefix); start >= 0 {
+		operation := strings.TrimSuffix(value[start+len(prefix):], " failed")
+		if operation != "" && len(operation) <= 64 && !strings.ContainsAny(operation, "\\/:\r\n") {
+			return "storage is unavailable [operation=" + operation + "]"
+		}
+	}
+	return "storage is unavailable"
 }
 
 func taskNotFound(version string, request protocol.Request) HandleResult {
@@ -1485,7 +1508,7 @@ func toProtocolToolchain(instance toolchain.Instance) (workspacev12.ToolchainEle
 	if instance.Coverage.LLVMProfdata != "" && instance.Coverage.LLVMCov != "" {
 		coverage = append(coverage, workspacev12.LlvmCov)
 	}
-	return workspacev12.ToolchainElement{
+	result := workspacev12.ToolchainElement{
 		ToolchainID:        instance.ID,
 		Family:             workspacev12.Family(instance.Family),
 		Version:            instance.Version,
@@ -1494,7 +1517,14 @@ func toProtocolToolchain(instance toolchain.Instance) (workspacev12.ToolchainEle
 		TargetArchitecture: workspacev12.TArchitecture(instance.TargetArchitecture),
 		Generators:         generators,
 		Capabilities:       workspacev12.ToolchainCapabilities{CoverageDrivers: coverage},
-	}, nil
+	}
+	if instance.CompilerSHA256 != "" {
+		if !validHash(instance.CompilerSHA256) {
+			return workspacev12.ToolchainElement{}, errors.New("invalid workspace toolchain compiler digest")
+		}
+		result.CompilerSha256 = &instance.CompilerSHA256
+	}
+	return result, nil
 }
 
 func boundedProtocolString(value string, maximumRunes int) bool {
@@ -1544,6 +1574,7 @@ func profileDisplayName(profile cmake.BuildProfile) string {
 type storedBuildRequest struct {
 	ProjectID      string   `json:"projectId"`
 	BuildProfileID string   `json:"buildProfileId"`
+	ToolchainID    string   `json:"toolchainId,omitempty"`
 	TargetIDs      []string `json:"targetIds"`
 	Jobs           int64    `json:"jobs"`
 	TimeoutMS      int64    `json:"timeoutMs"`
@@ -1590,6 +1621,7 @@ func toProtocolTaskV13(
 		if err != nil ||
 			!validProjectID(request.ProjectID) ||
 			!validHash(request.BuildProfileID) ||
+			(request.ToolchainID != "" && !validProtocolToolchainID(request.ToolchainID)) ||
 			request.TargetIDs == nil ||
 			!validTargetIDs(request.TargetIDs) ||
 			request.Jobs < 1 || request.Jobs > 256 ||
@@ -1749,6 +1781,7 @@ func toProtocolTaskV12(value task.Task) (taskv12.TaskSnapshotV12, error) {
 	case task.KindCMakeBuild:
 		request, err := decodeStrict[storedBuildRequest](value.Request)
 		if err != nil || !validProjectID(request.ProjectID) || !validHash(request.BuildProfileID) ||
+			(request.ToolchainID != "" && !validProtocolToolchainID(request.ToolchainID)) ||
 			request.TargetIDs == nil || !validTargetIDs(request.TargetIDs) ||
 			request.Jobs < 1 || request.Jobs > 256 ||
 			!validHash(value.WorkspaceGeneration) || value.Timeout < time.Millisecond || value.Timeout > 24*time.Hour ||
@@ -2176,6 +2209,7 @@ func validBuildStart(value buildStartPayloadV12) bool {
 		validHash(value.WorkspaceGeneration) &&
 		validProjectID(value.ProjectID) &&
 		validHash(value.BuildProfileID) &&
+		(value.ToolchainID == "" || validProtocolToolchainID(value.ToolchainID)) &&
 		validTargetIDs(value.TargetIDs) &&
 		value.Jobs >= 1 && value.Jobs <= 256 &&
 		value.TimeoutMS >= 1 && value.TimeoutMS <= maxTimeoutMS

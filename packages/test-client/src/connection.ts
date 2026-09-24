@@ -187,7 +187,32 @@ export class Connection {
     }
     const validator = validators[version];
     if (!validator(value)) {
-      this.#closeWithError(new Error(`service returned invalid protocol message: ${ajv.errorsText(validator.errors)}`));
+      const eventName = isSafeProtocolToken((value as { event?: unknown }).event)
+        ? (value as { event: string }).event
+        : "unknown";
+      const keywords = [...new Set((validator.errors ?? [])
+        .map((error) => error.keyword)
+        .map((keyword) => keyword.toLowerCase())
+        .filter(isSafeProtocolToken))]
+        .sort()
+        .join(",") || "unknown";
+      const properties = [...new Set((validator.errors ?? [])
+        .flatMap((error) => {
+          const params = error.params as Record<string, unknown> | undefined;
+          return [params?.missingProperty, params?.additionalProperty];
+        })
+        .filter(isSafeProtocolToken)
+        .map((property) => property.toLowerCase()))]
+        .sort()
+        .join(",") || "unknown";
+      const paths = [...new Set((validator.errors ?? [])
+        .map((error) => error.instancePath)
+        .filter((path): path is string => /^\/?[a-zA-Z0-9_./-]*$/u.test(path)))]
+        .sort()
+        .join(",") || "unknown";
+      this.#closeWithError(new Error(
+        `service returned invalid protocol message [event=${eventName};keywords=${keywords};properties=${properties};paths=${paths}]: ${ajv.errorsText(validator.errors)}`,
+      ));
       return false;
     }
     const message = value as IncomingEnvelope;
@@ -283,4 +308,8 @@ function isProtocolVersion(value: unknown): value is ProtocolVersion {
 
 function protocolRank(version: ProtocolVersion): number {
   return { "1.0": 0, "1.1": 1, "1.2": 2, "1.3": 3, "1.4": 4 }[version];
+}
+
+function isSafeProtocolToken(value: unknown): value is string {
+  return typeof value === "string" && /^[a-z0-9._-]+$/u.test(value);
 }

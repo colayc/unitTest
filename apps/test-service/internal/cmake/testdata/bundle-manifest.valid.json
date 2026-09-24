@@ -17,7 +17,7 @@
       }
     },
     "linux-x64": {
-      "url": "https://cmake.org/files/v4.3/cmake-4.3.4-linux-x86_64.tar.gz",
+      "url": "https://github.com/Kitware/CMake/releases/download/v4.3.4/cmake-4.3.4-linux-x86_64.tar.gz",
       "archiveSha256": "ca6f08ccbd5e6b0a9068d33317d0d1aff7278d08cccaed4529b8fbead7942a68",
       "rootDirectory": "cmake-4.3.4-linux-x86_64",
       "executable": "bin/cmake",

@@ -336,6 +336,7 @@ func (adapter *gnuAdapter) Probe(ctx context.Context, candidate Candidate) (Inst
 		TargetTriple:       cDescriptor.triple,
 		HostArchitecture:   adapter.hostArch,
 		TargetArchitecture: targetArchitecture,
+		CompilerSHA256:     cCompiler.digest,
 		Sysroot:            cDescriptor.sdk,
 		Environment:        []string{},
 		Generators:         generators,

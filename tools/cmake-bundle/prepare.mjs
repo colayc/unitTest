@@ -40,6 +40,29 @@ const maximumCapabilitiesBytes = 1024 * 1024;
 const downloadTimeoutMs = 5 * 60 * 1000;
 const redirectCodes = new Set([301, 302, 303, 307, 308]);
 const digestPattern = /^[0-9a-f]{64}$/;
+const linuxArchiveURL =
+  "https://github.com/Kitware/CMake/releases/download/v4.3.4/cmake-4.3.4-linux-x86_64.tar.gz";
+const linuxRedirectPath =
+  "/github-production-release-asset/537699/66016ec2-c886-4780-bbca-25417a5e8f4b";
+const linuxRedirectQueryKeys = [
+  "jwt",
+  "response-content-disposition",
+  "response-content-type",
+  "se",
+  "sig",
+  "ske",
+  "skoid",
+  "sks",
+  "skt",
+  "sktid",
+  "skv",
+  "sp",
+  "spr",
+  "sr",
+  "rscd",
+  "rsct",
+  "sv",
+].sort();
 
 const fixedArchives = {
   "win32-x64": {
@@ -50,7 +73,7 @@ const fixedArchives = {
     licensePath: "doc/cmake/LICENSE.rst",
   },
   "linux-x64": {
-    url: "https://cmake.org/files/v4.3/cmake-4.3.4-linux-x86_64.tar.gz",
+    url: linuxArchiveURL,
     rootDirectory: "cmake-4.3.4-linux-x86_64",
     executable: "bin/cmake",
     ctestExecutable: "bin/ctest",
@@ -850,17 +873,47 @@ async function downloadArchive(lockedURL, destination) {
 function validateDistributionURL(value, lockedURL) {
   const url = new URL(value);
   const locked = new URL(lockedURL);
-  if (
+  const unsafeURL =
     url.protocol !== "https:" ||
-    url.hostname !== "cmake.org" ||
     url.port !== "" ||
     url.username !== "" ||
     url.password !== "" ||
-    url.search !== "" ||
-    url.hash !== "" ||
-    url.pathname !== locked.pathname ||
-    !url.pathname.startsWith("/files/v4.3/") ||
-    basename(url.pathname) !== basename(locked.pathname)
+    url.hash !== "";
+  if (unsafeURL) {
+    throw new Error("CMake archive URL is outside the fixed distribution origin");
+  }
+
+  if (locked.href === fixedArchives["win32-x64"].url) {
+    if (url.href !== locked.href) {
+      throw new Error("CMake archive URL is outside the fixed distribution origin");
+    }
+    return;
+  }
+
+  if (locked.href !== linuxArchiveURL) {
+    throw new Error("CMake archive URL is outside the fixed distribution origin");
+  }
+  if (url.href === locked.href) {
+    return;
+  }
+
+  const actualQueryKeys = [...url.searchParams.keys()].sort();
+  const exactQueryKeys =
+    actualQueryKeys.length === linuxRedirectQueryKeys.length &&
+    actualQueryKeys.every((key, index) => key === linuxRedirectQueryKeys[index]);
+  const filename = basename(locked.pathname);
+  if (
+    url.hostname !== "release-assets.githubusercontent.com" ||
+    url.pathname !== linuxRedirectPath ||
+    !exactQueryKeys ||
+    [...url.searchParams.values()].some((entry) => entry === "") ||
+    url.searchParams.get("sp") !== "r" ||
+    url.searchParams.get("sr") !== "b" ||
+    url.searchParams.get("spr") !== "https" ||
+    url.searchParams.get("rscd") !== `attachment; filename=${filename}` ||
+    url.searchParams.get("rsct") !== "application/octet-stream" ||
+    url.searchParams.get("response-content-disposition") !== `attachment; filename=${filename}` ||
+    url.searchParams.get("response-content-type") !== "application/octet-stream"
   ) {
     throw new Error("CMake archive URL is outside the fixed distribution origin");
   }
