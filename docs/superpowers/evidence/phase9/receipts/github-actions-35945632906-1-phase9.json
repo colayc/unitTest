@@ -3,12 +3,6 @@
   "evidence": {
     "artifacts": [
       {
-        "digest": "10b1280d340799a6939e2d2d6a7cf5b8a829c51c539ac1d43e5b0db60bebbef6",
-        "expired": false,
-        "id": "10786945617",
-        "name": "phase9-gate-audit-1"
-      },
-      {
         "digest": "abc4dfce1e1bf2b76955fd3670a3dc0e893851d0b93bd218545c6b5c627d2c88",
         "expired": false,
         "id": "10786785963",
