@@ -391,6 +391,7 @@ export async function discoverFrameworkCatalog(options: FrameworkDiscoveryOption
               events: discoveryObservation.events,
               workspace,
               selectedWorkspace: selected,
+              artifacts: await readDebugTaskArtifacts(options.fixture.client, discoveryTask.taskId, timeoutMs),
               serviceDiagnostics: options.fixture.debugDiagnostics,
             }, null, 2),
             { flag: "w" },
@@ -445,6 +446,46 @@ async function writeFrameworkDebugArtifact(
     }, null, 2),
     { flag: "w" },
   ).catch(() => undefined);
+}
+
+async function readDebugTaskArtifacts(
+  client: ProtocolClient,
+  taskId: string,
+  timeoutMs: number,
+): Promise<readonly Record<string, unknown>[]> {
+  const kinds = new Set(["diagnostics", "execution-plan", "stderr", "stdout", "task-summary"]);
+  try {
+    const page = await bounded("framework debug artifact listing", client.listArtifacts(taskId, { limit: 100 }), timeoutMs);
+    if (page.nextCursor !== undefined) return [{ error: "artifact listing unexpectedly paginated" }];
+    const records: Record<string, unknown>[] = [];
+    for (const metadata of page.items.filter((item) => kinds.has(item.kind))) {
+      const record: Record<string, unknown> = {
+        kind: metadata.kind,
+        sizeBytes: metadata.sizeBytes,
+        sha256: metadata.sha256,
+      };
+      if (metadata.sizeBytes <= 256 * 1024) {
+        try {
+          const bytes = await bounded(`framework debug ${metadata.kind} artifact`, client.readArtifact(metadata.artifactId), timeoutMs);
+          record.text = redactDebugArtifact(Buffer.from(bytes).toString("utf8")).slice(0, 16 * 1024);
+        } catch {
+          record.read = "failed";
+        }
+      } else {
+        record.read = "skipped-size";
+      }
+      records.push(record);
+    }
+    return records;
+  } catch (error) {
+    return [{ error: error instanceof Error ? error.message.slice(0, 512) : String(error).slice(0, 512) }];
+  }
+}
+
+function redactDebugArtifact(value: string): string {
+  return value
+    .replaceAll(/(?:[A-Za-z]:[\\/]|\\\\)[^\r\n"']+/gu, "<path>")
+    .replaceAll(/\/(?:[^\r\n"']+\/)+[^\r\n"']*/gu, "<path>");
 }
 
 function classifyDiscoveryWaitFailure(message: string, code: string | undefined): string {
