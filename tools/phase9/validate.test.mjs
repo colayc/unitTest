@@ -1956,7 +1956,7 @@ test("historical mode preserves receipt-backed rows after later product changes"
   assert.equal("reason" in matrix.gates[0], false);
 });
 
-test("checked-in candidate evidence keeps deferred and unproven gates closed", async () => {
+test("checked-in historical evidence keeps deferred and unproven gates closed", async () => {
   const evidenceRoot = join(repositoryRoot, "docs", "superpowers", "evidence", "phase9");
   const inputs = await loadPhase9Inputs({
     registryPath: gateRegistryPath,
@@ -1969,8 +1969,8 @@ test("checked-in candidate evidence keeps deferred and unproven gates closed", a
   });
   const gatesById = new Map(matrix.gates.map((gate) => [gate.id, gate]));
 
-  assert.equal(inputs.baseline.evaluationMode, "candidate");
-  assert.equal(matrix.evaluationMode, "candidate");
+  assert.equal(inputs.baseline.evaluationMode, "historical");
+  assert.equal(matrix.evaluationMode, "historical");
   assert.equal(matrix.releaseReady, false);
   assert.equal(gatesById.get("P8-SIGN-WINDOWS")?.status, "DEFERRED");
   const selectedReceipts = inputs.receipts.filter((receipt) => inputs.baseline.receiptIds.includes(receipt.receiptId));
@@ -2006,6 +2006,18 @@ test("candidate CLI derives tested-content changes from Git", async () => {
     receiptId: "github-actions-20-1",
     status: "FAILED",
   });
+});
+
+test("historical CLI accepts a selected receipt whose candidate is not an ancestor", async () => {
+  const candidateLineage = await createGitLineageFixture();
+  const unrelatedLineage = await createGitLineageFixture();
+  const inputs = await createCliInputs(candidateLineage.candidate, "historical");
+  await execFileAsync(process.execPath, validatorArguments(inputs, unrelatedLineage.root));
+  const matrix = JSON.parse(await readFile(inputs.out, "utf8"));
+  assert.equal(matrix.evaluationMode, "historical");
+  assert.equal(matrix.currentCommit, unrelatedLineage.productCommit);
+  assert.equal(matrix.releaseReady, false);
+  assert.equal(matrix.gates[0].status, "PASS");
 });
 
 test("candidate CLI rejects unrelated history without disclosing repository paths", async () => {

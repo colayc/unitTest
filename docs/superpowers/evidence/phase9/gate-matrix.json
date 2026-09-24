@@ -7,8 +7,8 @@
     "missing": 18,
     "pass": 41
   },
-  "currentCommit": "fe4e128478fc883c5280cedff1df5409c0498e91",
-  "evaluationMode": "candidate",
+  "currentCommit": "4dd38f6f9d28816462cbf3b7266bdf58b9c16499",
+  "evaluationMode": "historical",
   "gates": [
     {
       "id": "P1-IPC-PER-USER-AUTH",
@@ -325,7 +325,7 @@
       "status": "PASS"
     }
   ],
-  "recordedByCommit": "fe4e128478fc883c5280cedff1df5409c0498e91",
+  "recordedByCommit": "4dd38f6f9d28816462cbf3b7266bdf58b9c16499",
   "releaseReady": false,
   "schemaVersion": 1
 }
