@@ -455,6 +455,13 @@ jobs:
         run: go mod download
       - name: Verify fail-closed Linux offline namespace
         run: node tools/linux-offline/run.mjs --allow-sudo-root -- node tools/linux-offline/probe.mjs
+      - name: Reset native framework diagnostics
+        shell: bash
+        run: |
+          rm -rf .native-e2e/framework-failure
+          if [[ -d .native-e2e/artifacts/linux ]]; then
+            find .native-e2e/artifacts/linux -maxdepth 1 -type f -name 'framework-debug-*.json' -delete
+          fi
       - run: node tools/linux-offline/run.mjs --allow-sudo-root -- pnpm verify
       - name: Build and consume locked CppUTest and Unity inputs
         run: |
