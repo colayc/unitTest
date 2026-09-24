@@ -121,7 +121,7 @@ test("staging creates one closed owned framework workspace with canonical config
   const staged = await stageFrameworkWorkspace(fixture.options);
 
   assert.deepEqual(Object.keys(staged).sort(), ["buildRoot", "family", "frameworkId", "serviceDirectory", "workspaceRoot"]);
-  assert.equal(staged.family, "gcc");
+  assert.equal(staged.family, "clang");
   assert.equal(staged.frameworkId, "cpputest");
   assert.deepEqual(await tree(fixture.stageRoot), [
     "owner.json",
@@ -188,8 +188,9 @@ test("staging creates one closed owned framework workspace with canonical config
   const cmake = await readFile(join(staged.workspaceRoot, "source", "CMakeLists.txt"), "utf8");
   assert.ok(cmake.includes("set(UNIT_TEST_IDE_FRAMEWORK [[cpputest]])"));
   assert.ok(cmake.includes('set(UNIT_TEST_IDE_CPPUTEST_ROOT "${CMAKE_SOURCE_DIR}/../.unit-test-ide/inputs/prepared/cpputest")'));
+  assert.ok(cmake.includes('target_link_libraries(${_utide_target} PRIVATE stdc++)'));
   assert.doesNotMatch(cmake, /\.staging|\.native-e2e[\\/]/u);
-  assert.doesNotMatch(cmake, /CMAKE_(?:C|CXX)_COMPILER|UTIDE_UNITY_RUNNER_GENERATOR|CMAKE_BINARY_DIR/u);
+  assert.doesNotMatch(cmake, /CMAKE_(?:C|CXX)_COMPILER=|UTIDE_UNITY_RUNNER_GENERATOR|CMAKE_BINARY_DIR/u);
   assert.equal(await readFile(join(staged.workspaceRoot, ".unit-test-ide", "workspace.json"), "utf8"), `${JSON.stringify(workspace, null, 2)}\n`);
   await validateOwnedFrameworkStage(fixture.stageRoot, fixture.options.ownershipId);
 });
@@ -282,9 +283,9 @@ async function workspaceFixture(t: test.TestContext, prefix = "utide-framework-w
   for (const name of ["cpputest", "unity", "cmock"]) await mkdir(join(prepared, name), { recursive: true });
   await write(repositoryRoot, "sdk/cmake/UnitTestIDE.cmake", "# helper\n");
   await write(repositoryRoot, "generator", "generator\n");
-  const stageRoot = join(repositoryRoot, ".native-e2e", "framework-work", ".staging", "01234567-89ab-4def-8123-456789abcdef", "linux", "gcc", "cpputest");
+  const stageRoot = join(repositoryRoot, ".native-e2e", "framework-work", ".staging", "01234567-89ab-4def-8123-456789abcdef", "linux", "clang", "cpputest");
   const options: FrameworkWorkspaceStageOptions = {
-    repositoryRoot, stageRoot, platform: "linux", family: "gcc", frameworkId: "cpputest",
+    repositoryRoot, stageRoot, platform: "linux", family: "clang", frameworkId: "cpputest",
     ownershipId: "01234567-89ab-4def-8123-456789abcdef", candidateCommit: "1".repeat(40),
     preparedFrameworkRoots: {
       cpputest: join(prepared, "cpputest"), unity: join(prepared, "unity"), cmock: join(prepared, "cmock"),
