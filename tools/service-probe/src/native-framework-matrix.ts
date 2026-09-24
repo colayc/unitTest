@@ -389,6 +389,8 @@ export async function discoverFrameworkCatalog(options: FrameworkDiscoveryOption
               task: discoveryTask,
               fragments: failureFragments,
               events: discoveryObservation.events,
+              workspace,
+              selectedWorkspace: selected,
               serviceDiagnostics: options.fixture.debugDiagnostics,
             }, null, 2),
             { flag: "w" },
