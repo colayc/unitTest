@@ -1,0 +1,112 @@
+{
+  "candidateCommit": "fe4e128478fc883c5280cedff1df5409c0498e91",
+  "evidence": {
+    "artifacts": [
+      {
+        "digest": "a6593e50f866c1bf29fb405b5501bd281a03ef6eefaf687c0a0c9b7acfb8ec61",
+        "expired": false,
+        "id": "10796073449",
+        "name": "coverage-bundle-linux-1"
+      },
+      {
+        "digest": "4fbe8ebd3725068897fc7642b77cb8b86bfbb1f177a1035ef734f679f91abd0a",
+        "expired": false,
+        "id": "10796676898",
+        "name": "coverage-bundle-windows-1"
+      },
+      {
+        "digest": "c761c6b1445634e1bc73ebf857b64ae3f009a3f32bf0fa8307c49ba5245740c4",
+        "expired": false,
+        "id": "10795464732",
+        "name": "linux-gcc-coverage-report-1"
+      },
+      {
+        "digest": "ccc3bcc4bed6bdf735bc6c7008c543da673a1b2a0537359a632f7fd9875644bb",
+        "expired": false,
+        "id": "10796018479",
+        "name": "native-framework-linux"
+      },
+      {
+        "digest": "d136c26cdf122bf371367ce93759c6f8985aa632f6f106ee898d875f2ab3de62",
+        "expired": false,
+        "id": "10797029836",
+        "name": "native-framework-matrix-report"
+      },
+      {
+        "digest": "de3e5c2abc6cd091d9453dbb2d25ddfc6dc3ae3724128c1bf2cf985456de12db",
+        "expired": false,
+        "id": "10797422079",
+        "name": "native-framework-windows"
+      },
+      {
+        "digest": "97dd7d06f086190eb44be38a59f71cf12a82609920ac2de4adfd1e876a96d25b",
+        "expired": false,
+        "id": "10795589463",
+        "name": "native-toolchain-linux-1"
+      }
+    ],
+    "conclusion": "success",
+    "event": "pull_request",
+    "headSha": "fe4e128478fc883c5280cedff1df5409c0498e91",
+    "jobs": [
+      {
+        "conclusion": "success",
+        "name": "coverage-linux-gcc"
+      },
+      {
+        "conclusion": "success",
+        "name": "verify-framework-matrix"
+      },
+      {
+        "conclusion": "success",
+        "name": "verify-framework-windows"
+      },
+      {
+        "conclusion": "success",
+        "name": "verify-linux"
+      },
+      {
+        "conclusion": "success",
+        "name": "verify-windows"
+      }
+    ],
+    "kind": "github-actions",
+    "repository": "colayc/unitTest",
+    "runAttempt": 1,
+    "runId": "35971050102",
+    "workflowPath": ".github/workflows/foundation.yml"
+  },
+  "gateIds": [
+    "P1-IPC-PER-USER-AUTH",
+    "P1-PROTOCOL-NO-SHELL",
+    "P1-PROTOCOL-VERSION-COMPAT",
+    "P1-TOKEN-FILE-SECURE",
+    "P2-ARTIFACT-ATOMIC-CLEANUP",
+    "P2-EVENT-REPLAY-PERSISTENCE",
+    "P2-FAILURE-OWNERSHIP",
+    "P2-PROCESS-TREE-TERMINATION",
+    "P2-TASK-CANCEL-TIMEOUT",
+    "P3-CMAKE-CONFIGURE-BUILD",
+    "P3-DIAGNOSTIC-URI",
+    "P3-TOOLCHAIN-LINUX-CLANG",
+    "P3-TOOLCHAIN-LINUX-GCC",
+    "P3-TOOLCHAIN-WINDOWS-CLANGCL",
+    "P3-TOOLCHAIN-WINDOWS-MSVC",
+    "P3-WORKSPACE-TRUST-PATHS",
+    "P4-CPPUTEST-CPPUMOCK",
+    "P4-DISCOVERY-CTEST",
+    "P4-RECOVERY-AND-10000-BACKEND",
+    "P4-SELECTION-AND-RERUN",
+    "P4-UNITY-CMOCK",
+    "P5-LINUX-GCC-COVERAGE",
+    "P5-PROTOCOL-V14-COMPAT",
+    "P6-SERVICE-LIFECYCLE",
+    "P6-TESTING-API",
+    "P6-TESTING-API-10000-ITEMS",
+    "P6-WORKSPACE-TRUST-GATE",
+    "P7-LINUX-GCC-OFFLINE"
+  ],
+  "observedAt": "2026-09-24T08:20:55Z",
+  "receiptId": "github-actions-35971050102-1-foundation",
+  "schemaVersion": 1
+}
