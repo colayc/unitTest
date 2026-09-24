@@ -375,7 +375,7 @@ export async function discoverFrameworkCatalog(options: FrameworkDiscoveryOption
         const errorCode = typeof discoveryTask.errorCode === "string" && /^[a-z0-9_-]+$/u.test(discoveryTask.errorCode)
           ? discoveryTask.errorCode
           : "unknown";
-        if (process.env.UTIDE_DEBUG_FRAMEWORK === "1") {
+        if (process.env.UTIDE_DEBUG_FRAMEWORK === "1" && options.repositoryRoot !== undefined) {
           const debugDirectory = join(
             repositoryRoot,
             ".native-e2e",
@@ -432,8 +432,8 @@ async function writeFrameworkDebugArtifact(
   phase: string,
   error: unknown,
 ): Promise<void> {
-  if (process.env.UTIDE_DEBUG_FRAMEWORK !== "1") return;
-  const debugDirectory = join(options.repositoryRoot ?? repositoryRoot, ".native-e2e", "artifacts", "windows");
+  if (process.env.UTIDE_DEBUG_FRAMEWORK !== "1" || options.repositoryRoot === undefined) return;
+  const debugDirectory = join(options.repositoryRoot, ".native-e2e", "artifacts", "windows");
   const detail = error instanceof Error ? error.message : String(error);
   await mkdir(debugDirectory, { recursive: true }).catch(() => undefined);
   await writeFile(
