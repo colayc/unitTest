@@ -285,8 +285,13 @@ func configureDirectories(args []string) (string, string, error) {
 }
 
 func presetDirectories(args []string) (string, string, error) {
-	if len(args) != 2 || args[0] != "--preset" || args[1] == "" {
+	if len(args) < 2 || args[0] != "--preset" || args[1] == "" {
 		return "", "", errors.New("configure requires -S/-B or --preset <name>")
+	}
+	for _, argument := range args[2:] {
+		if !strings.HasPrefix(argument, "-D") || strings.ContainsRune(argument, 0) {
+			return "", "", errors.New("configure accepts only -D cache overrides after --preset <name>")
+		}
 	}
 	sourceDir, err := os.Getwd()
 	if err != nil {
