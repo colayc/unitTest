@@ -117,7 +117,7 @@ test("actual staged Unity configure keeps F1 and malformed sources inside the CM
 });
 
 test("staging creates one closed owned framework workspace with canonical configuration", async (t) => {
-  const fixture = await workspaceFixture(t);
+  const fixture = await workspaceFixture(t, "utide-framework-workspace-", "clang");
   const staged = await stageFrameworkWorkspace(fixture.options);
 
   assert.deepEqual(Object.keys(staged).sort(), ["buildRoot", "family", "frameworkId", "serviceDirectory", "workspaceRoot"]);
@@ -272,7 +272,7 @@ test("compiled executable hashing accepts one fixed regular build artifact", asy
   await assert.rejects(hashCompiledFrameworkExecutable(root, "linux", "msvc", "cpputest"), /toolchain is incompatible/u);
 });
 
-async function workspaceFixture(t: test.TestContext, prefix = "utide-framework-workspace-") {
+async function workspaceFixture(t: test.TestContext, prefix = "utide-framework-workspace-", family: "gcc" | "clang" = "gcc") {
   const repositoryRoot = await mkdtemp(join(tmpdir(), prefix));
   t.after(() => rm(repositoryRoot, { recursive: true, force: true }));
   for (const name of MATRIX_FILES) await write(repositoryRoot, `testdata/framework-matrix/${name}`, matrixContent(name));
@@ -283,9 +283,9 @@ async function workspaceFixture(t: test.TestContext, prefix = "utide-framework-w
   for (const name of ["cpputest", "unity", "cmock"]) await mkdir(join(prepared, name), { recursive: true });
   await write(repositoryRoot, "sdk/cmake/UnitTestIDE.cmake", "# helper\n");
   await write(repositoryRoot, "generator", "generator\n");
-  const stageRoot = join(repositoryRoot, ".native-e2e", "framework-work", ".staging", "01234567-89ab-4def-8123-456789abcdef", "linux", "clang", "cpputest");
+  const stageRoot = join(repositoryRoot, ".native-e2e", "framework-work", ".staging", "01234567-89ab-4def-8123-456789abcdef", "linux", family, "cpputest");
   const options: FrameworkWorkspaceStageOptions = {
-    repositoryRoot, stageRoot, platform: "linux", family: "clang", frameworkId: "cpputest",
+    repositoryRoot, stageRoot, platform: "linux", family, frameworkId: "cpputest",
     ownershipId: "01234567-89ab-4def-8123-456789abcdef", candidateCommit: "1".repeat(40),
     preparedFrameworkRoots: {
       cpputest: join(prepared, "cpputest"), unity: join(prepared, "unity"), cmock: join(prepared, "cmock"),
