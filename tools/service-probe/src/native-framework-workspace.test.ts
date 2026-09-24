@@ -188,7 +188,7 @@ test("staging creates one closed owned framework workspace with canonical config
   const cmake = await readFile(join(staged.workspaceRoot, "source", "CMakeLists.txt"), "utf8");
   assert.ok(cmake.includes("set(UNIT_TEST_IDE_FRAMEWORK [[cpputest]])"));
   assert.ok(cmake.includes('set(UNIT_TEST_IDE_CPPUTEST_ROOT "${CMAKE_SOURCE_DIR}/../.unit-test-ide/inputs/prepared/cpputest")'));
-  assert.ok(cmake.includes('target_link_libraries(${_utide_target} PRIVATE stdc++)'));
+  assert.ok(cmake.includes('target_link_libraries(${_utide_target} PRIVATE stdc++ m)'));
   assert.doesNotMatch(cmake, /\.staging|\.native-e2e[\\/]/u);
   assert.doesNotMatch(cmake, /CMAKE_(?:C|CXX)_COMPILER=|UTIDE_UNITY_RUNNER_GENERATOR|CMAKE_BINARY_DIR/u);
   assert.equal(await readFile(join(staged.workspaceRoot, ".unit-test-ide", "workspace.json"), "utf8"), `${JSON.stringify(workspace, null, 2)}\n`);

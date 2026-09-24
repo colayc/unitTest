@@ -471,7 +471,7 @@ function projectConfiguration(
           "if(UNIX AND NOT APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL \"Clang\")",
           "  foreach(_utide_target CppUTest CppUTestExt phase9_cpputest phase9_cpputest_malformed)",
           "    if(TARGET ${_utide_target})",
-          "      target_link_libraries(${_utide_target} PRIVATE stdc++)",
+          "      target_link_libraries(${_utide_target} PRIVATE stdc++ m)",
           "    endif()",
           "  endforeach()",
           "endif()",
