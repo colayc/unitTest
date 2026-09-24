@@ -67,7 +67,7 @@ test("Linux workflow prepares downloads before entering a namespace and wraps fi
   assert.match(workflow, /node tools\/linux-offline\/run\.mjs --allow-sudo-root -- pnpm verify/u);
   assert.match(
     linuxJob,
-    /^ {6}- name: Run required Linux framework matrix offline\r?\n {8}env:\r?\n {10}UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS: gcc,clang\r?\n {10}UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED: '1'\r?\n {8}run: node tools\/linux-offline\/run\.mjs --allow-sudo-root -- pnpm test:e2e:native\s*$/mu,
+    /^ {6}- name: Run required Linux framework matrix offline\r?\n {8}env:\r?\n {10}UNIT_TEST_IDE_NATIVE_REQUIRED_TOOLCHAINS: gcc,clang\r?\n {10}UNIT_TEST_IDE_P4_FRAMEWORK_MATRIX_REQUIRED: '1'\r?\n {10}UTIDE_KEEP_FRAMEWORK_FAILURE: '1'\r?\n {10}UTIDE_DEBUG_FRAMEWORK: '1'\r?\n {10}UT_DEBUG_PROCESS_HOST_FAILURES: '1'\r?\n {8}run: node tools\/linux-offline\/run\.mjs --allow-sudo-root -- pnpm test:e2e:native\s*$/mu,
   );
   assert.match(
     linuxJob,
