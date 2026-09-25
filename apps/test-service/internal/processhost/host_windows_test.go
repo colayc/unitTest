@@ -95,6 +95,27 @@ func TestWindowsTargetWaitGivesNaturalDescendantsGraceBeforeClosingJob(t *testin
 	}
 }
 
+func TestWindowsTargetWaitAcceptsExitedProcessAfterWaitFailure(t *testing.T) {
+	operations := defaultWindowsTargetOperations()
+	operations.waitProcess = func(windows.Handle, uint32) (uint32, error) {
+		return windows.WAIT_FAILED, errors.New("transient wait failure")
+	}
+	operations.exitCode = func(windows.Handle) (uint32, error) { return 23, nil }
+	operations.queryActiveProcesses = func(windows.Handle) (uint32, error) { return 0, nil }
+	operations.closeHandle = func(windows.Handle) error { return nil }
+	target := &windowsTarget{
+		processOwner: winprocess.NewHandleOwner(504, operations.closeHandle),
+		jobOwner:     winprocess.NewHandleOwner(505, operations.closeHandle),
+		pid:          506,
+		ops:          operations,
+		waitDone:     make(chan struct{}),
+		cleanupWait:  time.Millisecond,
+	}
+	if code, err := target.Wait(); code != 23 || err != nil {
+		t.Fatalf("Wait = (%d, %v), want exited process accepted after wait failure", code, err)
+	}
+}
+
 func TestWindowsTargetNaturalWaitIgnoresActiveCountTimeoutOrError(t *testing.T) {
 	for _, test := range []struct {
 		name  string

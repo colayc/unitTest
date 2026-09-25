@@ -24,6 +24,8 @@ import (
 
 const windowsPostKillWait = time.Second
 
+const windowsStillActiveExitCode = 259
+
 type windowsPlatform struct {
 	operations  windowsTargetOperations
 	cleanupWait time.Duration
@@ -239,17 +241,30 @@ func (target *windowsTarget) Wait() (int, error) {
 		used, err := target.processOwner.Use(func(handle windows.Handle) error {
 			var waitErr error
 			waitResult, waitErr = target.ops.waitProcess(handle, windows.INFINITE)
-			if waitErr != nil || waitResult != windows.WAIT_OBJECT_0 {
-				return waitErr
-			}
 			code, codeErr := target.ops.exitCode(handle)
+			if waitErr == nil && waitResult == windows.WAIT_OBJECT_0 {
+				if codeErr != nil {
+					target.waitCode = -1
+					target.waitErr = errors.New("target exit status unavailable")
+				} else {
+					target.waitCode = int(code)
+				}
+				return nil
+			}
+			// On some Windows runners the process handle can report a transient
+			// wait failure even though its exit code is already final. The exit
+			// code is a valid completion proof when it is no longer STILL_ACTIVE.
+			if codeErr == nil && code != windowsStillActiveExitCode {
+				waitResult = windows.WAIT_OBJECT_0
+				waitErr = nil
+				target.waitCode = int(code)
+				return nil
+			}
 			if codeErr != nil {
 				target.waitCode = -1
 				target.waitErr = errors.New("target exit status unavailable")
-			} else {
-				target.waitCode = int(code)
 			}
-			return nil
+			return waitErr
 		})
 		if !used || err != nil || waitResult != windows.WAIT_OBJECT_0 {
 			target.waitCode = -1
