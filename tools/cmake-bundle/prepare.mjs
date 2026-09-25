@@ -37,7 +37,11 @@ const supportedKeys = ["linux-x64", "win32-x64"];
 const maximumArchiveBytes = 512 * 1024 * 1024;
 const maximumArchiveListingBytes = 64 * 1024 * 1024;
 const maximumCapabilitiesBytes = 1024 * 1024;
-const downloadTimeoutMs = 5 * 60 * 1000;
+// The fixed archive is fetched through the repository's proxy on the trusted
+// Windows runner.  A cold cache can legitimately take longer than five
+// minutes, so keep this bounded but allow enough time to complete the initial
+// cache fill instead of retrying the same partial download three times.
+const downloadTimeoutMs = 15 * 60 * 1000;
 const redirectCodes = new Set([301, 302, 303, 307, 308]);
 const digestPattern = /^[0-9a-f]{64}$/;
 const linuxArchiveURL =
