@@ -1,8 +1,8 @@
 # Phase 9 Gate Matrix
 
 - Candidate commit: `fe4e128478fc883c5280cedff1df5409c0498e91`
-- Recorded by commit: `fe4e128478fc883c5280cedff1df5409c0498e91`
-- Evaluation mode: `candidate`
+- Recorded by commit: `4dd38f6f9d28816462cbf3b7266bdf58b9c16499`
+- Evaluation mode: `historical`
 - Catalog complete: `true`
 - Release ready: `false`
 

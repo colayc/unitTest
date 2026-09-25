@@ -95,6 +95,27 @@ func TestWindowsTargetWaitGivesNaturalDescendantsGraceBeforeClosingJob(t *testin
 	}
 }
 
+func TestWindowsTargetWaitAcceptsExitedProcessAfterWaitFailure(t *testing.T) {
+	operations := defaultWindowsTargetOperations()
+	operations.waitProcess = func(windows.Handle, uint32) (uint32, error) {
+		return windows.WAIT_FAILED, errors.New("transient wait failure")
+	}
+	operations.exitCode = func(windows.Handle) (uint32, error) { return 23, nil }
+	operations.queryActiveProcesses = func(windows.Handle) (uint32, error) { return 0, nil }
+	operations.closeHandle = func(windows.Handle) error { return nil }
+	target := &windowsTarget{
+		processOwner: winprocess.NewHandleOwner(504, operations.closeHandle),
+		jobOwner:     winprocess.NewHandleOwner(505, operations.closeHandle),
+		pid:          506,
+		ops:          operations,
+		waitDone:     make(chan struct{}),
+		cleanupWait:  time.Millisecond,
+	}
+	if code, err := target.Wait(); code != 23 || err != nil {
+		t.Fatalf("Wait = (%d, %v), want exited process accepted after wait failure", code, err)
+	}
+}
+
 func TestWindowsTargetNaturalWaitIgnoresActiveCountTimeoutOrError(t *testing.T) {
 	for _, test := range []struct {
 		name  string
@@ -204,6 +225,52 @@ func TestWindowsTargetNaturalWaitClosesEmptyJobWhenTerminationRejects(t *testing
 	}
 	if calls := terminateCalls.Load(); calls != 0 {
 		t.Fatalf("TerminateJobObject calls = %d, want zero", calls)
+	}
+}
+
+func TestWindowsTargetNaturalWaitTerminatesRemainingDescendantsBeforeClose(t *testing.T) {
+	var terminated atomic.Bool
+	var terminateCalls atomic.Int32
+	var queryCalls atomic.Int32
+	operations := defaultWindowsTargetOperations()
+	operations.waitProcess = func(windows.Handle, uint32) (uint32, error) {
+		return windows.WAIT_OBJECT_0, nil
+	}
+	operations.exitCode = func(windows.Handle) (uint32, error) { return 0, nil }
+	operations.queryActiveProcesses = func(windows.Handle) (uint32, error) {
+		queryCalls.Add(1)
+		if terminated.Load() {
+			return 0, nil
+		}
+		return 1, nil
+	}
+	operations.terminateJob = func(windows.Handle, uint32) error {
+		terminateCalls.Add(1)
+		terminated.Store(true)
+		return nil
+	}
+	operations.closeHandle = func(handle windows.Handle) error {
+		if handle == 742 && !terminated.Load() {
+			t.Fatalf("natural close released live job before terminating descendants")
+		}
+		return nil
+	}
+	target := &windowsTarget{
+		processOwner: winprocess.NewHandleOwner(741, operations.closeHandle),
+		jobOwner:     winprocess.NewHandleOwner(742, operations.closeHandle),
+		pid:          743,
+		ops:          operations,
+		waitDone:     make(chan struct{}),
+		cleanupWait:  time.Millisecond,
+	}
+	if code, err := target.Wait(); code != 0 || err != nil {
+		t.Fatalf("Wait = (%d, %v), want successful natural cleanup", code, err)
+	}
+	if calls := terminateCalls.Load(); calls != 1 {
+		t.Fatalf("natural descendant termination calls = %d, want 1", calls)
+	}
+	if queries := queryCalls.Load(); queries < 2 {
+		t.Fatalf("natural cleanup queries = %d, want a post-termination empty check", queries)
 	}
 }
 

@@ -278,7 +278,7 @@ async function execFileText(command, arguments_) {
   return stdout;
 }
 
-async function repositoryState(repositoryRoot, candidateCommit) {
+async function repositoryState(repositoryRoot, candidateCommit, { requireAncestry = true } = {}) {
   if (!COMMIT_PATTERN.test(candidateCommit)) {
     throw phase9Failure("PHASE9_EVIDENCE_UNTRUSTED", "candidate commit is invalid");
   }
@@ -287,6 +287,7 @@ async function repositoryState(repositoryRoot, candidateCommit) {
   if (!COMMIT_PATTERN.test(currentCommit) || !/^([0-9a-f]{40})\r?\n?$/u.test(currentOutput)) {
     throw phase9Failure("PHASE9_EVIDENCE_UNTRUSTED", "current commit output is invalid");
   }
+  if (!requireAncestry) return { changedPaths: [], currentCommit };
   try {
     await execFileText("git", [
       "-C", repositoryRoot, "merge-base", "--is-ancestor", candidateCommit, currentCommit,
@@ -492,7 +493,9 @@ async function main() {
     baselinePath: arguments_.baseline,
     receiptsDirectory: arguments_.receipts,
   });
-  const state = await repositoryState(arguments_["repository-root"], baseline.candidateCommit);
+  const state = await repositoryState(arguments_["repository-root"], baseline.candidateCommit, {
+    requireAncestry: baseline.evaluationMode === "candidate",
+  });
   const matrix = evaluateRecordedMatrix({
     registry,
     baseline,

@@ -1,6 +1,6 @@
 {
   "candidateCommit": "fe4e128478fc883c5280cedff1df5409c0498e91",
-  "evaluationMode": "candidate",
+  "evaluationMode": "historical",
   "receiptIds": [
     "github-actions-35971050102-1-foundation",
     "github-actions-35971050104-1-phase9"
