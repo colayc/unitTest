@@ -116,6 +116,40 @@ func TestWindowsTargetWaitAcceptsExitedProcessAfterWaitFailure(t *testing.T) {
 	}
 }
 
+func TestWindowsTargetWaitRetriesTransientFailureBeforeExitIsVisible(t *testing.T) {
+	var waits atomic.Int32
+	var exitCodes atomic.Int32
+	operations := defaultWindowsTargetOperations()
+	operations.waitProcess = func(windows.Handle, uint32) (uint32, error) {
+		if waits.Add(1) == 1 {
+			return windows.WAIT_FAILED, errors.New("transient wait failure")
+		}
+		return windows.WAIT_OBJECT_0, nil
+	}
+	operations.exitCode = func(windows.Handle) (uint32, error) {
+		if exitCodes.Add(1) == 1 {
+			return windowsStillActiveExitCode, nil
+		}
+		return 23, nil
+	}
+	operations.queryActiveProcesses = func(windows.Handle) (uint32, error) { return 0, nil }
+	operations.closeHandle = func(windows.Handle) error { return nil }
+	target := &windowsTarget{
+		processOwner: winprocess.NewHandleOwner(507, operations.closeHandle),
+		jobOwner:     winprocess.NewHandleOwner(508, operations.closeHandle),
+		pid:          509,
+		ops:          operations,
+		waitDone:     make(chan struct{}),
+		cleanupWait:  time.Millisecond,
+	}
+	if code, err := target.Wait(); code != 23 || err != nil {
+		t.Fatalf("Wait = (%d, %v), want transient wait failure retried", code, err)
+	}
+	if waits.Load() < 2 || exitCodes.Load() < 2 {
+		t.Fatalf("wait attempts = %d, exit-code attempts = %d, want retry", waits.Load(), exitCodes.Load())
+	}
+}
+
 func TestWindowsTargetNaturalWaitIgnoresActiveCountTimeoutOrError(t *testing.T) {
 	for _, test := range []struct {
 		name  string
