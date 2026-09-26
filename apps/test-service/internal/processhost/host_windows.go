@@ -26,6 +26,11 @@ const windowsPostKillWait = time.Second
 
 const windowsStillActiveExitCode = 259
 
+const (
+	windowsWaitRetryAttempts = 100
+	windowsWaitRetryDelay    = 10 * time.Millisecond
+)
+
 type windowsPlatform struct {
 	operations  windowsTargetOperations
 	cleanupWait time.Duration
@@ -239,32 +244,37 @@ func (target *windowsTarget) Wait() (int, error) {
 		defer close(target.waitDone)
 		var waitResult uint32
 		used, err := target.processOwner.Use(func(handle windows.Handle) error {
-			var waitErr error
-			waitResult, waitErr = target.ops.waitProcess(handle, windows.INFINITE)
-			code, codeErr := target.ops.exitCode(handle)
-			if waitErr == nil && waitResult == windows.WAIT_OBJECT_0 {
-				if codeErr != nil {
-					target.waitCode = -1
-					target.waitErr = errors.New("target exit status unavailable")
-				} else {
-					target.waitCode = int(code)
+			for attempt := 0; ; attempt++ {
+				var waitErr error
+				waitResult, waitErr = target.ops.waitProcess(handle, windows.INFINITE)
+				code, codeErr := target.ops.exitCode(handle)
+				if waitErr == nil && waitResult == windows.WAIT_OBJECT_0 {
+					if codeErr != nil {
+						target.waitCode = -1
+						target.waitErr = errors.New("target exit status unavailable")
+					} else {
+						target.waitCode = int(code)
+					}
+					return nil
 				}
-				return nil
+				// On some Windows runners the process handle can report a transient
+				// wait failure before the exit code becomes final. Retry the native
+				// wait/query pair for a bounded interval before accepting failure.
+				if codeErr == nil && code != windowsStillActiveExitCode {
+					waitResult = windows.WAIT_OBJECT_0
+					waitErr = nil
+					target.waitCode = int(code)
+					return nil
+				}
+				if attempt >= windowsWaitRetryAttempts {
+					if codeErr != nil {
+						target.waitCode = -1
+						target.waitErr = errors.New("target exit status unavailable")
+					}
+					return waitErr
+				}
+				time.Sleep(windowsWaitRetryDelay)
 			}
-			// On some Windows runners the process handle can report a transient
-			// wait failure even though its exit code is already final. The exit
-			// code is a valid completion proof when it is no longer STILL_ACTIVE.
-			if codeErr == nil && code != windowsStillActiveExitCode {
-				waitResult = windows.WAIT_OBJECT_0
-				waitErr = nil
-				target.waitCode = int(code)
-				return nil
-			}
-			if codeErr != nil {
-				target.waitCode = -1
-				target.waitErr = errors.New("target exit status unavailable")
-			}
-			return waitErr
 		})
 		if !used || err != nil || waitResult != windows.WAIT_OBJECT_0 {
 			target.waitCode = -1

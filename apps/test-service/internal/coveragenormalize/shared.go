@@ -23,7 +23,7 @@ func canonicalWorkspaceRoot(value string) (string, error) {
 	if err != nil || !filepath.IsAbs(root) {
 		return "", ErrInvalidSourcePath
 	}
-	return root, nil
+	return canonicalNativePath(root), nil
 }
 
 func workspaceRelativeSource(root, value string) (string, string, error) {
@@ -34,6 +34,7 @@ func workspaceRelativeSource(root, value string) (string, string, error) {
 	if err != nil || !filepath.IsAbs(path) {
 		return "", "", ErrInvalidSourcePath
 	}
+	path = canonicalNativePath(path)
 	relative, err := filepath.Rel(root, path)
 	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
 		return "", "", ErrInvalidSourcePath

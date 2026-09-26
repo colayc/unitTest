@@ -186,6 +186,26 @@ func TestPlannerUsesOneShortSpellingForCMakeDirectories(t *testing.T) {
 	}
 }
 
+func TestSameNativePathAcceptsWindowsShortAndLongSpelling(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows path spelling")
+	}
+	path := filepath.Join(t.TempDir(), "coverage-build")
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	short, err := cmakeLaunchPath(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if short == path {
+		t.Skipf("filesystem did not provide a distinct short spelling for %q", path)
+	}
+	if !sameNativePath(path, short) {
+		t.Fatalf("sameNativePath(%q, %q) = false; short and long spellings identify one directory", path, short)
+	}
+}
+
 func TestPlannerAcceptsTrackedWindowsCoverageFixtureUnderWFP(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows WFP launch declaration")
