@@ -1146,8 +1146,8 @@ func pathWithinRoot(root, path string) bool {
 }
 
 func sameNativePath(left, right string) bool {
-	left = filepath.Clean(left)
-	right = filepath.Clean(right)
+	left = canonicalNativePath(left)
+	right = canonicalNativePath(right)
 	if runtime.GOOS == "windows" {
 		return strings.EqualFold(left, right)
 	}
