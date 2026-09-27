@@ -29,6 +29,40 @@ func generationRunFixture() testgendomain.Run {
 	return testgendomain.Run{ID: strings.Repeat("2", 32), TaskID: strings.Repeat("3", 32), Request: generationRequestFixture(), State: testgendomain.StateQueued, Revision: 1, CreatedAt: time.Date(2026, 9, 27, 0, 0, 0, 0, time.UTC)}
 }
 
+func TestGenerationRecordEncodingPreservesBoundedHTMLSensitivePreview(t *testing.T) {
+	record := testgendomain.NewGenerationRecord(generationRequestFixture())
+	diff := strings.Repeat("+<>&\n", 52000)
+	sum := sha256.Sum256([]byte(diff))
+	record.MinimizedCaseIDs = []string{strings.Repeat("5", 32)}
+	record.Preview = &testgendomain.PreviewIdentity{
+		CandidateSetDigest: strings.Repeat("b", 64), DiffDigest: hex.EncodeToString(sum[:]),
+		ConfirmationDigest: strings.Repeat("d", 64), Diff: diff,
+	}
+	if !record.ValidFor(generationRequestFixture(), 1) {
+		t.Fatal("valid near-limit preview rejected")
+	}
+	raw, hash, err := generationRecordBytes(record)
+	if err != nil || len(raw) > maxGenerationRecordBytes || bytes.Contains(raw, []byte(`\u003c`)) || !generationRecordMatches(raw, hash, record) {
+		t.Fatalf("HTML-sensitive preview encoding: size=%d hash=%q err=%v", len(raw), hash, err)
+	}
+	var decoded testgendomain.GenerationRecord
+	if err := strictGenerationJSON(raw, &decoded); err != nil || decoded.Preview == nil || decoded.Preview.Diff != diff {
+		t.Fatalf("decoded preview: %+v, %v", decoded.Preview, err)
+	}
+	legacy := record
+	legacyDiff := "<>&"
+	legacyDiffHash := sha256.Sum256([]byte(legacyDiff))
+	legacy.Preview = &testgendomain.PreviewIdentity{CandidateSetDigest: strings.Repeat("b", 64), DiffDigest: hex.EncodeToString(legacyDiffHash[:]), ConfirmationDigest: strings.Repeat("d", 64), Diff: legacyDiff}
+	legacyRaw, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacySum := sha256.Sum256(legacyRaw)
+	if !generationRecordMatches(legacyRaw, hex.EncodeToString(legacySum[:]), legacy) || generationRecordMatches(legacyRaw, strings.Repeat("0", 64), legacy) {
+		t.Fatal("legacy HTML-escaped record hash validation failed")
+	}
+}
+
 func TestGenerationPersistenceAndRevisionCAS(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()

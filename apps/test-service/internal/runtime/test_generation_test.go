@@ -740,8 +740,11 @@ func TestLargeExactPreviewDiffSurvivesDatabaseRestartAndAccept(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	diff := fixtureGenerationDiff + strings.Repeat("+TEST_CASE(generated_branch) { ASSERT_TRUE(1); }\n", 2500)
-	if len(diff) <= 65536 || len(diff) >= 262144 {
+	defer func() { _ = store.Close() }()
+	// HTML-sensitive bytes used to expand sixfold under json.Marshal. Keep this
+	// near the protocol limit to exercise durable checkpoint and replay.
+	diff := fixtureGenerationDiff + strings.Repeat("+<>&\n", 52000)
+	if len(diff) <= 260000 || len(diff) >= 262144 {
 		t.Fatalf("test diff size = %d", len(diff))
 	}
 	driver := &generationDriverFixture{complete: true}
@@ -758,6 +761,7 @@ func TestLargeExactPreviewDiffSurvivesDatabaseRestartAndAccept(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer service.Close()
 	owner := strings.Repeat("e", 64)
 	started, err := service.StartTestGeneration(context.Background(), owner, generationv15.TestGenerationStartRequestV15{
 		IdempotencyKey: strings.Repeat("1", 32), WorkspaceGeneration: strings.Repeat("2", 64), ProjectID: "core",
@@ -791,7 +795,6 @@ func TestLargeExactPreviewDiffSurvivesDatabaseRestartAndAccept(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
 	config.Store = store
 	config.Publisher = &generationPublisherFixture{complete: true, diff: diff}
 	restarted, err := newGenerationService(config)

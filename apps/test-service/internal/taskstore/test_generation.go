@@ -93,13 +93,24 @@ func (s *Store) GetGeneration(ctx context.Context, runID string) (testgendomain.
 	if s == nil || ctx == nil {
 		return testgendomain.Run{}, task.ErrInvalidArgument
 	}
-	return getGeneration(ctx, s.db, runID, "")
+	return s.getGenerationSnapshot(ctx, runID, "")
 }
 func (s *Store) GetGenerationByTask(ctx context.Context, taskID string) (testgendomain.Run, error) {
 	if s == nil || ctx == nil {
 		return testgendomain.Run{}, task.ErrInvalidArgument
 	}
-	return getGeneration(ctx, s.db, "", taskID)
+	return s.getGenerationSnapshot(ctx, "", taskID)
+}
+
+// The row and candidate count must be read from the same SQLite snapshot.
+// Otherwise a concurrent checkpoint can make a valid run appear conflicting.
+func (s *Store) getGenerationSnapshot(ctx context.Context, runID, taskID string) (testgendomain.Run, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return testgendomain.Run{}, storageError("begin generation read", err)
+	}
+	defer tx.Rollback()
+	return getGeneration(ctx, tx, runID, taskID)
 }
 
 func getGeneration(ctx context.Context, q interface {
@@ -140,8 +151,7 @@ func getGeneration(ctx context.Context, q interface {
 	if err := strictGenerationJSON(recordJSON, &r.Record); err != nil {
 		return testgendomain.Run{}, task.ErrConflict
 	}
-	canonicalRecord, expectedRecordHash, err := generationRecordBytes(r.Record)
-	if err != nil || !bytes.Equal(recordJSON, canonicalRecord) || recordHash != expectedRecordHash {
+	if !generationRecordMatches(recordJSON, recordHash, r.Record) {
 		return testgendomain.Run{}, task.ErrConflict
 	}
 	r.CreatedAt, err = time.Parse(time.RFC3339Nano, created)
@@ -203,13 +213,39 @@ func generationRecordBytes(r testgendomain.GenerationRecord) ([]byte, string, er
 	if r.IsZero() {
 		raw = []byte(`{}`)
 	} else {
-		raw, err = json.Marshal(r)
+		var buf bytes.Buffer
+		encoder := json.NewEncoder(&buf)
+		encoder.SetEscapeHTML(false)
+		err = encoder.Encode(r)
+		raw = bytes.TrimSuffix(buf.Bytes(), []byte("\n"))
 	}
 	if err != nil || len(raw) > maxGenerationRecordBytes {
 		return nil, "", task.ErrInvalidArgument
 	}
 	sum := sha256.Sum256(raw)
 	return raw, hex.EncodeToString(sum[:]), nil
+}
+
+// Records written before HTML escaping was disabled remain readable. They are
+// accepted only when the exact previous canonical bytes and hash match; the
+// next checkpoint writes the new canonical form.
+func generationRecordMatches(raw []byte, hash string, record testgendomain.GenerationRecord) bool {
+	canonical, expected, err := generationRecordBytes(record)
+	if err != nil {
+		return false
+	}
+	if bytes.Equal(raw, canonical) && hash == expected {
+		return true
+	}
+	if record.IsZero() {
+		return false
+	}
+	legacy, err := json.Marshal(record)
+	if err != nil || len(legacy) > maxGenerationRecordBytes || !bytes.Equal(raw, legacy) {
+		return false
+	}
+	sum := sha256.Sum256(legacy)
+	return hash == hex.EncodeToString(sum[:])
 }
 
 func (s *Store) CheckpointGeneration(ctx context.Context, expected int64, next testgendomain.Run, candidates []testgendomain.Candidate, artifacts []task.Artifact) (testgendomain.Run, error) {
