@@ -162,7 +162,7 @@ func decodeAST(reader io.Reader, limit int64, sourceDigest string) (Program, err
 		return nil
 	}
 	for _, child := range root.Inner {
-		if err := visit(child, true); err != nil {
+		if err := visit(child, false); err != nil {
 			return Program{}, err
 		}
 	}

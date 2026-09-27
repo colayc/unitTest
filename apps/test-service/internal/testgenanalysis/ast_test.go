@@ -176,6 +176,7 @@ func TestDecodeASTRejectsIncompletePredicatesAndUnmodeledLocalEffects(t *testing
 func TestDecodeASTRejectsConstructorAndUnsafeMethodReceiver(t *testing.T) {
 	const digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	for name, decl := range map[string]string{
+		"orphan method":   `{"kind":"CXXMethodDecl","name":"read","type":{"qualType":"int ()"},"loc":{"line":1,"col":1},"inner":[{"kind":"CompoundStmt"}]}`,
 		"constructor":     `{"kind":"CXXConstructorDecl","name":"Danger","type":{"qualType":"void ()"},"loc":{"line":1,"col":1},"inner":[{"kind":"CompoundStmt"}]}`,
 		"unsafe receiver": `{"kind":"CXXRecordDecl","name":"Danger","completeDefinition":true,"definitionData":{"isPOD":false,"isTrivial":false},"inner":[{"kind":"CXXMethodDecl","name":"read","type":{"qualType":"int ()"},"loc":{"line":1,"col":1},"inner":[{"kind":"CompoundStmt","inner":[{"kind":"ReturnStmt","inner":[{"kind":"IntegerLiteral","value":"1"}]}]}]}]}`,
 	} {
