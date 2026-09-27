@@ -71,9 +71,9 @@ func (v Validator) runStages(ctx context.Context, r ValidationRequest, roots Roo
 					return result, nil
 				}
 				proof = &resolvedProof
-				proofDigest = resolvedProof.EvidenceDigest
+				proofDigest = resolvedProof.ContentDigest
 			}
-			delta, diagnostic := compareCoverage(baseline, candidate, r.Metrics, target, proof, digestBytes(r.BaselineCoverage), digestBytes(evidence.CoverageJSON))
+			delta, diagnostic := compareCoverage(ctx, baseline, candidate, r.Metrics, target, proof, digestBytes(r.BaselineCoverage), digestBytes(evidence.CoverageJSON))
 			if diagnostic != DiagnosticNone {
 				result.Diagnostic = diagnostic
 				return result, nil
@@ -100,13 +100,19 @@ func (v Validator) runStages(ctx context.Context, r ValidationRequest, roots Roo
 	return result, nil
 }
 
-func compareCoverage(before, after coverage.CoverageDocumentV1, selected Metrics, target ResolvedCandidate, proof *TargetCoverageProof, baselineDigest, candidateDigest string) (CoverageDelta, Diagnostic) {
+func compareCoverage(ctx context.Context, before, after coverage.CoverageDocumentV1, selected Metrics, target ResolvedCandidate, proof *TargetCoverageProof, baselineDigest, candidateDigest string) (CoverageDelta, Diagnostic) {
+	if ctx.Err() != nil {
+		return CoverageDelta{}, DiagnosticStageFailed
+	}
 	if !reflect.DeepEqual(before.Provenance, after.Provenance) || len(before.Files) != len(after.Files) {
 		return CoverageDelta{}, DiagnosticCoverage
 	}
 	var targetDelta CoverageDelta
 	foundTarget := false
 	for i := range before.Files {
+		if ctx.Err() != nil {
+			return CoverageDelta{}, DiagnosticStageFailed
+		}
 		b, a := before.Files[i], after.Files[i]
 		if b.URI != a.URI || b.Sha256 != a.Sha256 || b.Summary.Functions.Total != a.Summary.Functions.Total || b.Summary.Lines.Total != a.Summary.Lines.Total || b.Summary.Branches.Total != a.Summary.Branches.Total || len(b.Lines) != len(a.Lines) {
 			return CoverageDelta{}, DiagnosticCoverage
@@ -115,6 +121,9 @@ func compareCoverage(before, after coverage.CoverageDocumentV1, selected Metrics
 			return CoverageDelta{}, DiagnosticRegression
 		}
 		for j := range b.Lines {
+			if j&255 == 0 && ctx.Err() != nil {
+				return CoverageDelta{}, DiagnosticStageFailed
+			}
 			if b.Lines[j].Line != a.Lines[j].Line || b.Lines[j].Branches.Total != a.Lines[j].Branches.Total {
 				return CoverageDelta{}, DiagnosticCoverage
 			}
@@ -125,9 +134,15 @@ func compareCoverage(before, after coverage.CoverageDocumentV1, selected Metrics
 		if b.URI == target.TargetFileURI {
 			foundTarget = true
 			lineIndex := 0
-			for _, targetLine := range target.TargetLines {
+			for targetIndex, targetLine := range target.TargetLines {
+				if targetIndex&255 == 0 && ctx.Err() != nil {
+					return CoverageDelta{}, DiagnosticStageFailed
+				}
 				for lineIndex < len(b.Lines) && b.Lines[lineIndex].Line < targetLine {
 					lineIndex++
+					if lineIndex&255 == 0 && ctx.Err() != nil {
+						return CoverageDelta{}, DiagnosticStageFailed
+					}
 				}
 				if lineIndex == len(b.Lines) || b.Lines[lineIndex].Line != targetLine {
 					return CoverageDelta{}, DiagnosticCoverage
@@ -148,7 +163,7 @@ func compareCoverage(before, after coverage.CoverageDocumentV1, selected Metrics
 	if a.Functions.Covered < b.Functions.Covered || a.Lines.Covered < b.Lines.Covered || a.Branches.Covered < b.Branches.Covered {
 		return CoverageDelta{}, DiagnosticRegression
 	}
-	identityDelta, diagnostic := proofDelta(before, after, target, proof, baselineDigest, candidateDigest)
+	identityDelta, diagnostic := proofDelta(ctx, before, after, target, proof, baselineDigest, candidateDigest)
 	if diagnostic != DiagnosticNone {
 		return CoverageDelta{}, diagnostic
 	}
