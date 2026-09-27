@@ -11,10 +11,8 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -32,7 +30,7 @@ import (
 )
 
 // Run explicitly with: UTIDE_NATIVE_LLVM_BUNDLE=/approved/offline/bundle
-// go test -tags native_llvm_fixture ./apps/test-service/internal/coveragellvm -run '^TestNativeLinuxLLVMFixture$' -count=1
+// go test -tags native_llvm_fixture ./apps/test-service/internal/coveragellvm ./apps/test-service/internal/coverageexec -run '^TestNativeLinuxLLVMFixture' -count=1
 // Missing bundle/tools are failures, not skips. The ordinary suite never runs
 // this native-tool assertion.
 func TestNativeLinuxLLVMFixture(t *testing.T) {
@@ -74,7 +72,6 @@ func TestNativeLinuxLLVMFixture(t *testing.T) {
 	if err != nil || bytes.Contains(canonical, []byte(workspace)) {
 		t.Fatalf("normalized coverage retained host path: %v", err)
 	}
-	nativeCancellationFixture(t, toolset, workspace, sourceDir, buildDir)
 }
 
 func nativeFixtureToolset(t *testing.T) *Toolset {
@@ -215,78 +212,4 @@ func nativeCoverageDocument(t *testing.T, toolset *Toolset, workspace, binary st
 		t.Fatal(err)
 	}
 	return normalized
-}
-
-func nativeCancellationFixture(t *testing.T, toolset *Toolset, workspace, sourceDir, buildDir string) {
-	t.Helper()
-	source, binary := filepath.Join(sourceDir, "cancel.c"), filepath.Join(buildDir, "cancel")
-	program := "#include <stdio.h>\n#include <unistd.h>\n#include <sys/types.h>\nextern int __llvm_profile_write_file(void);\nint main(int argc, char **argv) { pid_t child = fork(); if (child < 0) return 2; if (child == 0) { for (;;) sleep(1); } FILE *f = fopen(argv[1], \"w\"); if (!f) return 3; fprintf(f, \"%ld\\n\", (long)child); fclose(f); __llvm_profile_write_file(); for (;;) sleep(1); }\n"
-	if err := os.WriteFile(source, []byte(program), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	nativeRun(t, toolset.CCompiler(), []string{"-fprofile-instr-generate", "-fcoverage-mapping", source, "-o", binary}, nil)
-	profileRoot := filepath.Join(workspace, "cancel-profiles")
-	if err := os.Mkdir(profileRoot, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	pidFile := filepath.Join(buildDir, "child.pid")
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	command := exec.CommandContext(ctx, binary, pidFile)
-	command.Env = []string{"LLVM_PROFILE_FILE=" + filepath.Join(profileRoot, "cancel-%p.profraw")}
-	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	command.Cancel = func() error { return syscall.Kill(-command.Process.Pid, syscall.SIGKILL) }
-	if err := command.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL); _ = command.Wait() }()
-	var child int
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		contents, err := os.ReadFile(pidFile)
-		if err == nil {
-			child, _ = strconv.Atoi(strings.TrimSpace(string(contents)))
-			if child > 0 {
-				break
-			}
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if child <= 0 {
-		t.Fatal("instrumented descendant did not start")
-	}
-	profileDeadline := time.Now().Add(5 * time.Second)
-	for {
-		entries, err := os.ReadDir(profileRoot)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(entries) > 0 {
-			break
-		}
-		if time.Now().After(profileDeadline) {
-			t.Fatal("cancellation fixture did not produce profraw")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	cancel()
-	_ = command.Wait()
-	if err := os.RemoveAll(profileRoot); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(profileRoot); !os.IsNotExist(err) {
-		t.Fatalf("profile root survived cancellation cleanup: %v", err)
-	}
-	goneDeadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(goneDeadline) {
-		if err := syscall.Kill(child, 0); errors.Is(err, syscall.ESRCH) {
-			return
-		}
-		state, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", child))
-		if os.IsNotExist(err) || err == nil && strings.Contains(string(state), ") Z ") {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("descendant survived cancellation")
 }

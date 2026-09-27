@@ -23,6 +23,28 @@ func TestGenericToolsetExecutableAuthorizationRejectsEarlyClose(t *testing.T) {
 	}
 }
 
+func TestCoverageExecutionCloseRemovesOwnedProfileFiles(t *testing.T) {
+	parent := filepath.Join(t.TempDir(), "executions")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	owner, _, profileRoot, _, err := allocateExecutionRoots(parent, "11111111111111111111111111111111")
+	if err != nil {
+		t.Fatal(err)
+	}
+	produced := filepath.Join(profileRoot, "p-000001-i-000001-123-module.profraw")
+	if err := os.WriteFile(produced, []byte("profile"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	execution := &execution{root: owner}
+	if err := execution.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(profileRoot); !os.IsNotExist(err) {
+		t.Fatalf("production execution cleanup left profile root: %v", err)
+	}
+}
+
 type boundaryTestPath struct {
 	path   string
 	closed bool
