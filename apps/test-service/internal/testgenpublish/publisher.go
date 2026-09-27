@@ -41,7 +41,12 @@ type journalFile struct {
 	Before                                                           []byte
 	Mode                                                             uint32
 	Existed                                                          bool
-	publishedIdentity                                                os.FileInfo `json:"-"`
+	Restored                                                         *restoredState `json:",omitempty"`
+	publishedIdentity                                                os.FileInfo    `json:"-"`
+}
+type restoredState struct {
+	Kind, Digest, Target string
+	Mode                 uint32
 }
 type journalRecord struct {
 	Version            int
@@ -570,7 +575,7 @@ func (p *Publisher) readReceipt(d string) (Receipt, bool, error) {
 
 // restoreExclusive recreates the original pathname only when it is vacant.
 // Link preserves an existing symlink object rather than following its target.
-func (p *Publisher) restoreExclusive(parent *os.Root, from, to string) error {
+func (p *Publisher) restoreExclusive(parent *os.Root, from, to string, beforeRemove func() error) error {
 	if err := parent.Link(from, to); err != nil {
 		info, statErr := parent.Lstat(from)
 		if statErr != nil || !linked(info) {
@@ -584,15 +589,23 @@ func (p *Publisher) restoreExclusive(parent *os.Root, from, to string) error {
 	if p.hooks.afterRestoreCreate != nil {
 		p.hooks.afterRestoreCreate(from, to)
 	}
+	if beforeRemove != nil {
+		if err := beforeRemove(); err != nil {
+			return ErrConflict
+		}
+	}
 	if err := parent.Remove(from); err != nil {
 		return ErrConflict
+	}
+	if p.hooks.afterReplayRemove != nil {
+		p.hooks.afterReplayRemove(from)
 	}
 	return nil
 }
 
 // movePublished moves the current pathname into a journal-known hold before
 // any deletion. A raced replacement is restored exclusively, never removed.
-func (p *Publisher) movePublished(parent *os.Root, item journalFile, current os.FileInfo) error {
+func (p *Publisher) movePublished(parent *os.Root, item journalFile, current os.FileInfo, beforeRestoreRemoval func() error) error {
 	name := path.Base(item.Path)
 	if _, err := parent.Lstat(item.HoldName); err == nil {
 		return ErrConflict
@@ -610,11 +623,11 @@ func (p *Publisher) movePublished(parent *os.Root, item journalFile, current os.
 		return ErrConflict
 	}
 	if !os.SameFile(moved, current) || linked(moved) || !moved.Mode().IsRegular() || !sameMode(moved.Mode().Perm(), os.FileMode(item.Mode)) {
-		return errors.Join(ErrConflict, p.restoreExclusive(parent, item.HoldName, name))
+		return errors.Join(ErrConflict, p.restoreExclusive(parent, item.HoldName, name, beforeRestoreRemoval))
 	}
 	data, err := p.readRelative(parent, item.HoldName)
 	if err != nil || digest(data) != item.AfterDigest {
-		return errors.Join(ErrConflict, p.restoreExclusive(parent, item.HoldName, name))
+		return errors.Join(ErrConflict, p.restoreExclusive(parent, item.HoldName, name, beforeRestoreRemoval))
 	}
 	if err := parent.Remove(item.HoldName); err != nil {
 		return ErrConflict
@@ -643,6 +656,59 @@ func (p *Publisher) sameRestoredEntry(parent *os.Root, left, right string, leftI
 	a, aErr := p.readRelative(parent, left)
 	b, bErr := p.readRelative(parent, right)
 	return aErr == nil && bErr == nil && digest(a) == digest(b)
+}
+
+// markRestored makes removal of the final private alias replayable. The marker
+// describes only a terminal public entry; replay never removes that entry.
+func (p *Publisher) markRestored(j *journalRecord, index int, parent *os.Root, name, private string) error {
+	current, currentErr := parent.Lstat(name)
+	alias, aliasErr := parent.Lstat(private)
+	if currentErr != nil || aliasErr != nil || !p.sameRestoredEntry(parent, name, private, current, alias) {
+		return ErrConflict
+	}
+	state := &restoredState{}
+	if linked(current) {
+		target, err := parent.Readlink(name)
+		if err != nil || len(target) > maxEditBytes {
+			return ErrConflict
+		}
+		state.Kind, state.Target = "symlink", target
+	} else if current.Mode().IsRegular() {
+		data, err := p.readRelative(parent, name)
+		if err != nil {
+			return ErrConflict
+		}
+		state.Kind, state.Digest, state.Mode = "regular", digest(data), uint32(current.Mode().Perm())
+	} else {
+		return ErrConflict
+	}
+	j.Files[index].Restored = state
+	if err := writeRootJSON(p.journal, journalName(j.ConfirmationDigest), *j); err != nil {
+		return ErrConflict
+	}
+	return nil
+}
+
+func (p *Publisher) matchesRestored(parent *os.Root, name string, state *restoredState) bool {
+	if state == nil {
+		return false
+	}
+	info, err := parent.Lstat(name)
+	if err != nil {
+		return false
+	}
+	if state.Kind == "symlink" {
+		if !linked(info) {
+			return false
+		}
+		target, err := parent.Readlink(name)
+		return err == nil && target == state.Target
+	}
+	if linked(info) || !info.Mode().IsRegular() || uint32(info.Mode().Perm()) != state.Mode {
+		return false
+	}
+	data, err := p.readRelative(parent, name)
+	return err == nil && digest(data) == state.Digest
 }
 
 func (p *Publisher) clearRestoredPair(parent *os.Root, item journalFile, private string, alsoBackup bool) error {
@@ -690,9 +756,28 @@ func (p *Publisher) rollback(j journalRecord) error {
 		current, currentErr := parent.Lstat(name)
 		backup, backupErr := parent.Lstat(item.BackupName)
 		currentPresent := currentErr == nil
+		mark := func(private string) error { return p.markRestored(&j, i, parent, name, private) }
+		if item.Restored != nil && errors.Is(backupErr, os.ErrNotExist) {
+			if _, holdErr := parent.Lstat(item.HoldName); errors.Is(holdErr, os.ErrNotExist) {
+				if !p.matchesRestored(parent, name, item.Restored) {
+					result = errors.Join(result, ErrConflict)
+					_ = parent.Close()
+					continue
+				}
+				if err := parent.Remove(item.StageName); err != nil && !errors.Is(err, os.ErrNotExist) {
+					result = errors.Join(result, ErrConflict)
+				}
+				result = errors.Join(result, parent.Close())
+				continue
+			}
+		}
 		if hold, holdErr := parent.Lstat(item.HoldName); holdErr == nil {
 			if currentPresent {
 				if p.sameRestoredEntry(parent, name, item.HoldName, current, hold) {
+					if err := mark(item.HoldName); err != nil {
+						result = errors.Join(result, err, parent.Close())
+						continue
+					}
 					result = errors.Join(result, p.clearRestoredPair(parent, item, item.HoldName, backupErr == nil), parent.Close())
 					continue
 				}
@@ -709,12 +794,12 @@ func (p *Publisher) rollback(j journalRecord) error {
 						continue
 					}
 				} else {
-					result = errors.Join(result, ErrConflict, p.restoreExclusive(parent, item.HoldName, name))
+					result = errors.Join(result, ErrConflict, p.restoreExclusive(parent, item.HoldName, name, func() error { return mark(item.HoldName) }))
 					_ = parent.Close()
 					continue
 				}
 			} else {
-				result = errors.Join(result, ErrConflict, p.restoreExclusive(parent, item.HoldName, name))
+				result = errors.Join(result, ErrConflict, p.restoreExclusive(parent, item.HoldName, name, func() error { return mark(item.HoldName) }))
 				_ = parent.Close()
 				continue
 			}
@@ -724,6 +809,10 @@ func (p *Publisher) rollback(j journalRecord) error {
 			continue
 		}
 		if currentPresent && backupErr == nil && p.sameRestoredEntry(parent, name, item.BackupName, current, backup) {
+			if err := mark(item.BackupName); err != nil {
+				result = errors.Join(result, err, parent.Close())
+				continue
+			}
 			result = errors.Join(result, p.clearRestoredPair(parent, item, item.BackupName, false), parent.Close())
 			continue
 		}
@@ -741,7 +830,7 @@ func (p *Publisher) rollback(j journalRecord) error {
 			}
 			hash := digest(data)
 			if hash == item.AfterDigest && sameMode(current.Mode().Perm(), os.FileMode(item.Mode)) && (item.publishedIdentity == nil || os.SameFile(current, item.publishedIdentity)) {
-				if err := p.movePublished(parent, item, current); err != nil {
+				if err := p.movePublished(parent, item, current, func() error { return mark(item.HoldName) }); err != nil {
 					result = errors.Join(result, err)
 					_ = parent.Close()
 					continue
@@ -764,7 +853,7 @@ func (p *Publisher) rollback(j journalRecord) error {
 					result = errors.Join(result, ErrConflict)
 				} else if currentPresent {
 					result = errors.Join(result, ErrConflict)
-				} else if err := p.restoreExclusive(parent, item.BackupName, name); err != nil {
+				} else if err := p.restoreExclusive(parent, item.BackupName, name, func() error { return mark(item.BackupName) }); err != nil {
 					result = errors.Join(result, ErrConflict)
 				}
 			} else if errors.Is(backupErr, os.ErrNotExist) {
@@ -905,6 +994,9 @@ func validJournal(j journalRecord) bool {
 	seen := map[string]bool{}
 	for _, f := range j.Files {
 		if !generatedTestPath(f.Path) && !cmakePath(f.Path) || seen[strings.ToLower(f.Path)] || !validHex(f.AfterDigest, 64) || f.Existed && (!validHex(f.BeforeDigest, 64) || digest(f.Before) != f.BeforeDigest) || !f.Existed && (f.BeforeDigest != "" || len(f.Before) > 0) || len(f.Before) > maxEditBytes || !strings.HasPrefix(f.StageName, ".testgen-") || !strings.HasSuffix(f.StageName, ".stage") || !strings.HasPrefix(f.BackupName, ".testgen-") || !strings.HasSuffix(f.BackupName, ".backup") || !strings.HasPrefix(f.HoldName, ".testgen-") || !strings.HasSuffix(f.HoldName, ".hold") {
+			return false
+		}
+		if f.Restored != nil && (f.Restored.Kind != "regular" && f.Restored.Kind != "symlink" || f.Restored.Kind == "regular" && (!validHex(f.Restored.Digest, 64) || f.Restored.Target != "" || f.Restored.Mode > 0777) || f.Restored.Kind == "symlink" && (f.Restored.Digest != "" || f.Restored.Mode != 0 || len(f.Restored.Target) > maxEditBytes)) {
 			return false
 		}
 		seen[strings.ToLower(f.Path)] = true

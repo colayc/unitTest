@@ -775,3 +775,144 @@ func TestCrashAfterFirstRestoredPairRemovalConverges(t *testing.T) {
 		t.Fatalf("user file lost: %q %v", data, err)
 	}
 }
+
+func TestCrashAfterFinalRestoredPairRemovalConverges(t *testing.T) {
+	for _, symlink := range []bool{false, true} {
+		for _, laterEdit := range []bool{false, true} {
+			name := map[bool]string{false: "held-user-file", true: "raced-symlink"}[symlink]
+			if laterEdit {
+				name += "-later-edit"
+			}
+			t.Run(name, func(t *testing.T) {
+				f := newFixture(t)
+				plan := f.plan(t)
+				target := filepath.Join(f.root, "tests", "CMakeLists.txt")
+				want := "user during rollback\n"
+				if symlink {
+					outside := filepath.Join(t.TempDir(), "outside")
+					if err := os.WriteFile(outside, []byte("outside\n"), 0600); err != nil {
+						t.Fatal(err)
+					}
+					f.p.hooks.beforeRename = func(rel string) {
+						if rel != "tests/CMakeLists.txt" {
+							return
+						}
+						if err := os.Remove(target); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.Symlink(outside, target); err != nil {
+							t.Skipf("symlink unavailable: %v", err)
+						}
+					}
+					f.p.hooks.afterRestoreCreate = func(from, to string) {
+						if strings.HasSuffix(from, ".backup") && to == "CMakeLists.txt" {
+							panic("crash after symlink restoration")
+						}
+					}
+					want = outside
+				} else {
+					f.p.hooks.fail = func(stage string) error {
+						if stage == "cleanup" {
+							return errors.New("rollback")
+						}
+						return nil
+					}
+					f.p.hooks.beforeRollbackMove = func(rel string) {
+						if rel != "tests/CMakeLists.txt" {
+							return
+						}
+						if err := os.Remove(target); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.WriteFile(target, []byte(want), 0600); err != nil {
+							t.Fatal(err)
+						}
+					}
+					f.p.hooks.afterRestoreCreate = func(from, to string) {
+						if strings.HasSuffix(from, ".hold") && to == "CMakeLists.txt" {
+							panic("crash after held restoration")
+						}
+					}
+				}
+				func() {
+					defer func() {
+						if recover() == nil {
+							t.Fatal("restoration crash not reached")
+						}
+					}()
+					_, _ = f.p.Accept(context.Background(), f.request(plan))
+				}()
+				f.close(t)
+				p, err := New(f.root, f.journal, func(context.Context, string) error { return nil })
+				if err != nil {
+					t.Fatal(err)
+				}
+				removeCount := 0
+				p.hooks.afterReplayRemove = func(name string) {
+					removeCount++
+					if symlink || strings.HasSuffix(name, ".hold") {
+						panic("crash after final private removal")
+					}
+				}
+				func() {
+					defer func() {
+						if recover() == nil {
+							t.Fatal("final removal crash not reached")
+						}
+					}()
+					_ = p.Recover(context.Background())
+				}()
+				if removeCount != map[bool]int{false: 2, true: 1}[symlink] {
+					t.Fatalf("removed %d entries", removeCount)
+				}
+				if err := p.Close(); err != nil {
+					t.Fatal(err)
+				}
+				p, err = New(f.root, f.journal, func(context.Context, string) error { return nil })
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer p.Close()
+				if laterEdit {
+					if err := os.Remove(target); err != nil {
+						t.Fatal(err)
+					}
+					if symlink {
+						want = filepath.Join(t.TempDir(), "later-outside")
+						if err := os.Symlink(want, target); err != nil {
+							t.Fatal(err)
+						}
+					} else {
+						want = "later user edit\n"
+						if err := os.WriteFile(target, []byte(want), 0600); err != nil {
+							t.Fatal(err)
+						}
+					}
+					for n := 0; n < 2; n++ {
+						if err := p.Recover(context.Background()); !errors.Is(err, ErrConflict) {
+							t.Fatalf("later edit not protected on recovery %d: %v", n, err)
+						}
+					}
+				} else {
+					if err := p.Recover(context.Background()); err != nil {
+						t.Fatalf("first recover: %v", err)
+					}
+					if err := p.Recover(context.Background()); err != nil {
+						t.Fatalf("repeat recover: %v", err)
+					}
+				}
+				if symlink {
+					got, err := os.Readlink(target)
+					if err != nil || got != want {
+						t.Fatalf("symlink changed: %q %v", got, err)
+					}
+				} else {
+					got, err := os.ReadFile(target)
+					if err != nil || string(got) != want {
+						t.Fatalf("user file changed: %q %v", got, err)
+					}
+				}
+			})
+		}
+	}
+}
