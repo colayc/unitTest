@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"sort"
 )
 
@@ -82,21 +83,37 @@ type Decision struct {
 	Kind   DecisionKind `json:"kind"`
 	Reason ReasonCode   `json:"reason"`
 }
+type EffectKind string
+
+const (
+	EffectLocalMemory EffectKind = "local-memory"
+	EffectExternal    EffectKind = "external"
+	EffectUnknown     EffectKind = "unknown"
+)
+
+type SourceExcerpt struct {
+	Digest         string `json:"digest,omitempty"`
+	LocationDigest string `json:"locationDigest"`
+	StartByte      int    `json:"startByte"`
+	EndByte        int    `json:"endByte"`
+}
 type Diagnostic struct {
 	SymbolID string     `json:"symbolId"`
 	Reason   ReasonCode `json:"reason"`
 }
 type Function struct {
-	SymbolID       string      `json:"symbolId"`
-	Name           string      `json:"name"`
-	ReturnType     Type        `json:"returnType"`
-	Parameters     []Parameter `json:"parameters"`
-	LocalTypes     []Type      `json:"localTypes"`
-	Branches       []Branch    `json:"branches"`
-	Calls          []string    `json:"calls"`
-	BodyKinds      []string    `json:"bodyKinds"`
-	LocationDigest string      `json:"locationDigest"`
-	Decision       Decision    `json:"decision"`
+	SymbolID       string        `json:"symbolId"`
+	Name           string        `json:"name"`
+	ReturnType     Type          `json:"returnType"`
+	Parameters     []Parameter   `json:"parameters"`
+	LocalTypes     []Type        `json:"localTypes"`
+	Branches       []Branch      `json:"branches"`
+	Calls          []string      `json:"calls"`
+	BodyKinds      []string      `json:"bodyKinds"`
+	LocationDigest string        `json:"locationDigest"`
+	Excerpt        SourceExcerpt `json:"excerpt"`
+	Effect         EffectKind    `json:"effect"`
+	Decision       Decision      `json:"decision"`
 }
 type TranslationUnit struct {
 	ID           string   `json:"id"`
@@ -112,6 +129,16 @@ type Program struct {
 }
 
 func digestBytes(data []byte) string { sum := sha256.Sum256(data); return hex.EncodeToString(sum[:]) }
+func bindSourceExcerpts(program *Program, source []byte) error {
+	for i := range program.Functions {
+		ref := &program.Functions[i].Excerpt
+		if ref.StartByte < 0 || ref.EndByte <= ref.StartByte || ref.EndByte > len(source) || ref.LocationDigest != program.Functions[i].LocationDigest {
+			return errors.New("invalid source excerpt")
+		}
+		ref.Digest = digestBytes(source[ref.StartByte:ref.EndByte])
+	}
+	return sealProgram(program)
+}
 func sealProgram(program *Program) error {
 	sort.Slice(program.Functions, func(i, j int) bool { return program.Functions[i].SymbolID < program.Functions[j].SymbolID })
 	for i := range program.Functions {

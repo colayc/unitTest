@@ -70,6 +70,10 @@ func TestAnalyzeUsesOnlyVerifiedFixedCompilerWithCleanEnvironment(t *testing.T) 
 	if len(program.Functions) != 1 || program.Functions[0].Decision.Kind != DecisionSupported {
 		t.Fatalf("unexpected program %#v", program)
 	}
+	wantExcerpt := sha256.Sum256([]byte("int choose(int x){return x>0 ? 1 : 0;}"))
+	if program.Functions[0].Effect != EffectLocalMemory || program.Functions[0].Excerpt.Digest != hex.EncodeToString(wantExcerpt[:]) || program.Functions[0].Excerpt.LocationDigest != program.Functions[0].LocationDigest || program.Functions[0].Excerpt.StartByte != 0 || program.Functions[0].Excerpt.EndByte != 38 {
+		t.Fatalf("missing closed effect/excerpt evidence: %#v", program.Functions[0])
+	}
 }
 
 func TestAnalyzeSuppressesImplicitHostHeaders(t *testing.T) {

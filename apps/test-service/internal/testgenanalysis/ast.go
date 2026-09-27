@@ -16,6 +16,8 @@ const maxFunctions = 4096
 const maxBranches = 16384
 
 type astLocation struct {
+	Offset       int          `json:"offset"`
+	TokLen       int          `json:"tokLen"`
 	Line         int          `json:"line"`
 	Col          int          `json:"col"`
 	SpellingLoc  *astLocation `json:"spellingLoc"`
@@ -106,9 +108,12 @@ func decodeAST(reader io.Reader, limit int64, sourceDigest string) (Program, err
 	}
 	collect(&root)
 	program := Program{Version: IRVersion, TranslationUnits: []TranslationUnit{{ID: digestBytes([]byte("translation-unit:" + sourceDigest)), SourceDigest: sourceDigest, Symbols: []string{}}}, Functions: []Function{}, Diagnostics: []Diagnostic{}}
-	var visit func(*astNode) error
-	visit = func(n *astNode) error {
-		if n.Kind == "FunctionDecl" || n.Kind == "CXXMethodDecl" || n.Kind == "CXXConstructorDecl" {
+	var visit func(*astNode, bool) error
+	visit = func(n *astNode, receiverSafe bool) error {
+		if n.Kind == "CXXRecordDecl" && n.CompleteDefinition {
+			receiverSafe = safeRecordDefinition(n)
+		}
+		if n.Kind == "FunctionDecl" || n.Kind == "CXXMethodDecl" || n.Kind == "CXXConstructorDecl" || n.Kind == "CXXDestructorDecl" {
 			if n.Name == "" || n.Type.QualType == "" {
 				return errors.New("partial function declaration in AST")
 			}
@@ -121,6 +126,14 @@ func decodeAST(reader io.Reader, limit int64, sourceDigest string) (Program, err
 				if err != nil {
 					return err
 				}
+				if n.Kind == "CXXConstructorDecl" || n.Kind == "CXXDestructorDecl" {
+					f.BodyKinds = append(f.BodyKinds, "UnmodeledSpecialMember")
+				}
+				if n.Kind == "CXXMethodDecl" && !receiverSafe {
+					f.BodyKinds = append(f.BodyKinds, "UnsafeReceiver")
+				}
+				f.Decision = (SafetyClassifier{}).Classify(f)
+				setEffect(&f)
 				program.Functions = append(program.Functions, f)
 				program.TranslationUnits[0].Symbols = append(program.TranslationUnits[0].Symbols, f.SymbolID)
 				if f.Decision.Kind != DecisionSupported {
@@ -142,14 +155,14 @@ func decodeAST(reader io.Reader, limit int64, sourceDigest string) (Program, err
 			return nil
 		}
 		for _, child := range n.Inner {
-			if err := visit(child); err != nil {
+			if err := visit(child, receiverSafe); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
 	for _, child := range root.Inner {
-		if err := visit(child); err != nil {
+		if err := visit(child, true); err != nil {
 			return Program{}, err
 		}
 	}
@@ -172,7 +185,7 @@ func functionFromAST(n, body *astNode, sourceDigest string, declared map[string]
 		return Function{}, errors.New("unusable function identity")
 	}
 	location := locationDigest(sourceDigest, effectiveLocation(n))
-	f := Function{SymbolID: digestBytes([]byte("symbol:" + sourceDigest + ":" + n.Kind + ":" + n.Name + ":" + location)), Name: n.Name, ReturnType: parseType(strings.SplitN(n.Type.QualType, " (", 2)[0], declared), Parameters: []Parameter{}, LocalTypes: []Type{}, Branches: []Branch{}, Calls: []string{}, BodyKinds: []string{}, LocationDigest: location}
+	f := Function{SymbolID: digestBytes([]byte("symbol:" + sourceDigest + ":" + n.Kind + ":" + n.Name + ":" + location)), Name: n.Name, ReturnType: parseType(strings.SplitN(n.Type.QualType, " (", 2)[0], declared), Parameters: []Parameter{}, LocalTypes: []Type{}, Branches: []Branch{}, Calls: []string{}, BodyKinds: []string{}, LocationDigest: location, Excerpt: SourceExcerpt{LocationDigest: location, StartByte: n.Range.Begin.Offset, EndByte: n.Range.End.Offset + n.Range.End.TokLen}}
 	for _, child := range n.Inner {
 		if child.Kind == "ParmVarDecl" {
 			if !safeIdentifier(child.Name) {
@@ -257,7 +270,22 @@ func functionFromAST(n, body *astNode, sourceDigest string, declared map[string]
 		return Function{}, err
 	}
 	f.Decision = (SafetyClassifier{}).Classify(f)
+	setEffect(&f)
 	return f, nil
+}
+func setEffect(f *Function) {
+	switch f.Decision.Kind {
+	case DecisionSupported:
+		f.Effect = EffectLocalMemory
+	case DecisionUnsupported:
+		if f.Decision.Reason == ReasonExternalCall {
+			f.Effect = EffectExternal
+		} else {
+			f.Effect = EffectUnknown
+		}
+	default:
+		f.Effect = EffectUnknown
+	}
 }
 func validSHA(v string) bool {
 	if len(v) != 64 {
@@ -298,7 +326,7 @@ func safeRecordDefinition(n *astNode) bool {
 			if t.Kind != TypeInteger && t.Kind != TypeBoolean && t.Kind != TypeFloating {
 				return false
 			}
-		case "CXXRecordDecl", "CXXMethodDecl":
+		case "CXXRecordDecl", "CXXMethodDecl", "AccessSpecDecl":
 			continue
 		default:
 			return false

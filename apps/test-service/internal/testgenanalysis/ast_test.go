@@ -13,7 +13,7 @@ import (
 	"unit-test-ide.local/test-service/internal/probe"
 )
 
-const scalarAST = `{"kind":"TranslationUnitDecl","inner":[{"kind":"FunctionDecl","name":"choose","type":{"qualType":"int (int)"},"loc":{"line":1,"col":1},"inner":[{"kind":"ParmVarDecl","name":"x","type":{"qualType":"int"}},{"kind":"CompoundStmt","inner":[{"kind":"IfStmt","inner":[{"kind":"BinaryOperator","opcode":">","inner":[{"kind":"ImplicitCastExpr","inner":[{"kind":"DeclRefExpr","referencedDecl":{"name":"x"}}]},{"kind":"IntegerLiteral","value":"0"}]},{"kind":"ReturnStmt","inner":[{"kind":"IntegerLiteral","value":"1"}]},{"kind":"ReturnStmt","inner":[{"kind":"IntegerLiteral","value":"0"}]}]}]}]}]}`
+const scalarAST = `{"kind":"TranslationUnitDecl","inner":[{"kind":"FunctionDecl","name":"choose","type":{"qualType":"int (int)"},"loc":{"line":1,"col":1},"range":{"begin":{"offset":0},"end":{"offset":37,"tokLen":1}},"inner":[{"kind":"ParmVarDecl","name":"x","type":{"qualType":"int"}},{"kind":"CompoundStmt","inner":[{"kind":"IfStmt","inner":[{"kind":"BinaryOperator","opcode":">","inner":[{"kind":"ImplicitCastExpr","inner":[{"kind":"DeclRefExpr","referencedDecl":{"name":"x"}}]},{"kind":"IntegerLiteral","value":"0"}]},{"kind":"ReturnStmt","inner":[{"kind":"IntegerLiteral","value":"1"}]},{"kind":"ReturnStmt","inner":[{"kind":"IntegerLiteral","value":"0"}]}]}]}]}]}`
 
 func TestDecodeASTCreatesStablePathFreeBranchIR(t *testing.T) {
 	first, err := decodeAST(strings.NewReader(scalarAST), 1<<20, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
@@ -168,6 +168,25 @@ func TestDecodeASTRejectsIncompletePredicatesAndUnmodeledLocalEffects(t *testing
 			}
 			if p.Functions[0].Decision.Kind == DecisionSupported {
 				t.Fatalf("unsafe %s accepted: %#v", name, p.Functions[0])
+			}
+		})
+	}
+}
+
+func TestDecodeASTRejectsConstructorAndUnsafeMethodReceiver(t *testing.T) {
+	const digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	for name, decl := range map[string]string{
+		"constructor":     `{"kind":"CXXConstructorDecl","name":"Danger","type":{"qualType":"void ()"},"loc":{"line":1,"col":1},"inner":[{"kind":"CompoundStmt"}]}`,
+		"unsafe receiver": `{"kind":"CXXRecordDecl","name":"Danger","completeDefinition":true,"definitionData":{"isPOD":false,"isTrivial":false},"inner":[{"kind":"CXXMethodDecl","name":"read","type":{"qualType":"int ()"},"loc":{"line":1,"col":1},"inner":[{"kind":"CompoundStmt","inner":[{"kind":"ReturnStmt","inner":[{"kind":"IntegerLiteral","value":"1"}]}]}]}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			input := `{"kind":"TranslationUnitDecl","inner":[` + decl + `]}`
+			p, err := decodeAST(strings.NewReader(input), 1<<20, digest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(p.Functions) != 1 || p.Functions[0].Decision.Kind == DecisionSupported {
+				t.Fatalf("unmodeled receiver/constructor accepted: %#v", p.Functions)
 			}
 		})
 	}

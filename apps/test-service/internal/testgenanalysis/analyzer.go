@@ -1,6 +1,7 @@
 package testgenanalysis
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -68,7 +69,8 @@ func (a Analyzer) Analyze(ctx context.Context, request AnalysisRequest) (Program
 		return Program{}, err
 	}
 	sourcePath := filepath.Join(request.WorkspaceRoot, filepath.FromSlash(request.SourceRelative))
-	if err := verifySource(sourcePath, request.WorkspaceRoot, request.SourceDigest); err != nil {
+	sourceBytes, err := verifySource(sourcePath, request.WorkspaceRoot, request.SourceDigest)
+	if err != nil {
 		return Program{}, err
 	}
 	args = append([]string{"-Xclang", "-ast-dump=json", "-fsyntax-only", "-nostdinc", "-nostdinc++", "-isystem", filepath.Join(a.bundle.ResourceDir(), "include")}, args...)
@@ -86,12 +88,19 @@ func (a Analyzer) Analyze(ctx context.Context, request AnalysisRequest) (Program
 	if err := a.bundle.Verify(); err != nil {
 		return Program{}, errors.New("fixed Clang bundle changed during analysis")
 	}
-	if err := verifySource(sourcePath, request.WorkspaceRoot, request.SourceDigest); err != nil {
+	afterBytes, err := verifySource(sourcePath, request.WorkspaceRoot, request.SourceDigest)
+	if err != nil {
 		return Program{}, err
+	}
+	if !bytes.Equal(sourceBytes, afterBytes) {
+		return Program{}, errors.New("source snapshot changed during analysis")
 	}
 	program, err := decodeAST(strings.NewReader(string(result.Stdout)), maxASTBytes, request.SourceDigest)
 	if err != nil {
 		return Program{}, errors.New("fixed Clang emitted unsupported AST")
+	}
+	if err := bindSourceExcerpts(&program, sourceBytes); err != nil {
+		return Program{}, errors.New("fixed Clang source range is incomplete")
 	}
 	return program, nil
 }
@@ -112,41 +121,41 @@ func safeRelativeSource(v string) bool {
 	}
 	return true
 }
-func verifySource(path, root, digest string) error {
+func verifySource(path, root, digest string) ([]byte, error) {
 	for current := path; ; current = filepath.Dir(current) {
 		info, err := os.Lstat(current)
 		if err != nil {
-			return errors.New("source snapshot is missing")
+			return nil, errors.New("source snapshot is missing")
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			return errors.New("source snapshot contains link")
+			return nil, errors.New("source snapshot contains link")
 		}
 		if current == root {
 			if !info.IsDir() {
-				return errors.New("trusted root is not a directory")
+				return nil, errors.New("trusted root is not a directory")
 			}
 			break
 		}
 		if parent := filepath.Dir(current); parent == current {
-			return errors.New("source escaped workspace")
+			return nil, errors.New("source escaped workspace")
 		}
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return errors.New("source snapshot is unavailable")
+		return nil, errors.New("source snapshot is unavailable")
 	}
 	defer file.Close()
 	before, err := file.Stat()
 	if err != nil || !before.Mode().IsRegular() || before.Size() > maxSourceBytes {
-		return errors.New("source snapshot exceeds budget")
+		return nil, errors.New("source snapshot exceeds budget")
 	}
 	bytes, err := io.ReadAll(io.LimitReader(file, maxSourceBytes+1))
 	if err != nil || len(bytes) > maxSourceBytes {
-		return errors.New("source snapshot exceeds budget")
+		return nil, errors.New("source snapshot exceeds budget")
 	}
 	after, err := os.Lstat(path)
 	if err != nil || !os.SameFile(before, after) || before.Size() != after.Size() || digestBytes(bytes) != digest {
-		return errors.New("source snapshot is stale")
+		return nil, errors.New("source snapshot is stale")
 	}
-	return nil
+	return bytes, nil
 }
