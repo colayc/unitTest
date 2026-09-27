@@ -47,7 +47,18 @@ func TestGenerationRecordEncodingPreservesBoundedHTMLSensitivePreview(t *testing
 	}
 	var decoded testgendomain.GenerationRecord
 	if err := strictGenerationJSON(raw, &decoded); err != nil || decoded.Preview == nil || decoded.Preview.Diff != diff {
-		t.Fatalf("decoded preview: %+v, %v", decoded.Preview, err)
+		t.Fatalf("decoded preview mismatch: %v", err)
+	}
+	controlDiff := strings.Repeat("\x00", 262000)
+	controlHash := sha256.Sum256([]byte(controlDiff))
+	record.Preview.Diff = controlDiff
+	record.Preview.DiffDigest = hex.EncodeToString(controlHash[:])
+	if !record.ValidFor(generationRequestFixture(), 1) {
+		t.Fatal("valid near-limit control-byte preview rejected")
+	}
+	controlJSON, _, err := generationRecordBytes(record)
+	if err != nil || len(controlJSON) <= 384<<10 || len(controlJSON) > maxGenerationRecordBytes {
+		t.Fatalf("worst-case JSON escaped record: size=%d err=%v", len(controlJSON), err)
 	}
 	legacy := record
 	legacyDiff := "<>&"
@@ -410,6 +421,17 @@ func TestGenerationMigrationPreservesInterleavedLegacyCursorReplay(t *testing.T)
 }
 
 func TestGenerationRecordCapacityMigrationPreservesCandidateReferences(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		before int
+	}{{"pre-014", 13}, {"pre-015", 14}} {
+		t.Run(tc.name, func(t *testing.T) {
+			testGenerationRecordCapacityMigrationPreservesCandidateReferences(t, tc.before)
+		})
+	}
+}
+
+func testGenerationRecordCapacityMigrationPreservesCandidateReferences(t *testing.T, before int) {
 	path := filepath.Join(t.TempDir(), "tasks.sqlite")
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -424,7 +446,7 @@ func TestGenerationRecordCapacityMigrationPreservesCandidateReferences(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	applyMigrationsThrough(t, context.Background(), store, migrations[:13])
+	applyMigrationsThrough(t, context.Background(), store, migrations[:before])
 	run, err := store.CreateGeneration(context.Background(), generationRunFixture())
 	if err != nil {
 		t.Fatal(err)

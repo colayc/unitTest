@@ -735,15 +735,31 @@ func TestGenerationAcceptRehydratesDurablePreviewAfterRestart(t *testing.T) {
 }
 
 func TestLargeExactPreviewDiffSurvivesDatabaseRestartAndAccept(t *testing.T) {
+	cases := []struct {
+		name   string
+		suffix string
+	}{
+		{"html", strings.Repeat("+<>&\n", 52000)},
+		{"backslash", "+" + strings.Repeat("\\", 261000) + "\n"},
+		{"quote", "+" + strings.Repeat("\"", 261000) + "\n"},
+		{"control", "+" + strings.Repeat("\x00", 261000) + "\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			testLargeExactPreviewDiffSurvivesDatabaseRestartAndAccept(t, fixtureGenerationDiff+tc.suffix)
+		})
+	}
+}
+
+func testLargeExactPreviewDiffSurvivesDatabaseRestartAndAccept(t *testing.T, diff string) {
 	path := filepath.Join(t.TempDir(), "tasks.sqlite")
 	store, err := taskstore.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = store.Close() }()
-	// HTML-sensitive bytes used to expand sixfold under json.Marshal. Keep this
-	// near the protocol limit to exercise durable checkpoint and replay.
-	diff := fixtureGenerationDiff + strings.Repeat("+<>&\n", 52000)
+	// These near-limit diffs exercise JSON's worst-case escape expansion through
+	// checkpoint, restart, preview retrieval, and accept.
 	if len(diff) <= 260000 || len(diff) >= 262144 {
 		t.Fatalf("test diff size = %d", len(diff))
 	}

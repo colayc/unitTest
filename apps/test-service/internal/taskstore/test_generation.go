@@ -205,7 +205,9 @@ func strictGenerationJSON(data []byte, out any) error {
 	return nil
 }
 
-const maxGenerationRecordBytes = 384 << 10 // Matches migration 014's record_json CHECK.
+// Six-byte JSON escapes for every byte in a 262144-byte preview diff fit in
+// 1.5 MiB; the remaining closed record metadata fits within this 2 MiB cap.
+const maxGenerationRecordBytes = 2 << 20 // Matches migration 015's record_json CHECK.
 
 func generationRecordBytes(r testgendomain.GenerationRecord) ([]byte, string, error) {
 	var raw []byte
