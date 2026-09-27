@@ -144,6 +144,16 @@ func (c *Coordinator) checkpoint(ctx context.Context, runID string, expectedRevi
 
 // Cancel uses the task ID, not a run ID, as the ownership capability.
 func (c *Coordinator) Cancel(ctx context.Context, taskID string) (testgendomain.Run, error) {
+	return c.terminalize(ctx, taskID, testgendomain.StateCancelled)
+}
+
+// Fail records a closed terminal result even when a formerly trusted snapshot
+// became stale. No new process or workspace write is permitted on this path.
+func (c *Coordinator) Fail(ctx context.Context, taskID string) (testgendomain.Run, error) {
+	return c.terminalize(ctx, taskID, testgendomain.StateFailed)
+}
+
+func (c *Coordinator) terminalize(ctx context.Context, taskID string, state testgendomain.State) (testgendomain.Run, error) {
 	if c == nil || c.store == nil {
 		return testgendomain.Run{}, ErrUnavailable
 	}
@@ -156,7 +166,7 @@ func (c *Coordinator) Cancel(ctx context.Context, taskID string) (testgendomain.
 			return r, nil
 		}
 		next := testgendomain.CloneRun(r)
-		next.State = testgendomain.StateCancelled
+		next.State = state
 		next.Revision++
 		now := time.Now().UTC()
 		next.FinishedAt = &now

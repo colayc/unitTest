@@ -1,0 +1,482 @@
+package runtime
+
+import (
+	"context"
+	"errors"
+	"slices"
+	"sort"
+	"sync"
+	"time"
+
+	generationv15 "unit-test-ide.local/test-service/internal/protocolmodel/v1_5/testgeneration"
+	"unit-test-ide.local/test-service/internal/session"
+	"unit-test-ide.local/test-service/internal/task"
+	"unit-test-ide.local/test-service/internal/taskstore"
+	"unit-test-ide.local/test-service/internal/testgencoord"
+	"unit-test-ide.local/test-service/internal/testgendomain"
+	"unit-test-ide.local/test-service/internal/testgenpublish"
+)
+
+// GenerationDriver is product-owned. A deployment must supply an implementation
+// that resolves snapshots and executes fixed analysis/validation plans; IPC
+// cannot supply a driver, process command, candidate or generated file.
+type GenerationDriver interface {
+	Targets(context.Context, generationv15.TestGenerationTargetListRequestV15) (generationv15.TestGenerationTargetListV15, error)
+	Resolve(context.Context, generationv15.TestGenerationStartRequestV15) (testgendomain.Request, error)
+	StageBudget(testgendomain.Run, testgendomain.State) testgencoord.BudgetAmount
+	RunStage(context.Context, testgendomain.Run, testgendomain.State, func(context.Context) error) (GenerationStageResult, error)
+	ProjectCandidate(context.Context, testgendomain.Run, testgendomain.Candidate) (generationv15.TestGenerationCandidateV15, error)
+	CandidateSet(context.Context, testgendomain.Run, []testgendomain.Candidate) (testgenpublish.CandidateSet, error)
+}
+
+type GenerationStageResult struct {
+	Next             testgendomain.State
+	Candidates       []testgendomain.Candidate
+	Artifacts        []task.Artifact
+	MinimizedCaseIDs []string
+	PreviewSet       *testgenpublish.CandidateSet
+}
+
+type generationPublisher interface {
+	Recover(context.Context) error
+	Plan(context.Context, testgenpublish.CandidateSet) (testgenpublish.PublishPlan, error)
+	Accept(context.Context, testgenpublish.AcceptRequest) (testgenpublish.Receipt, error)
+}
+
+type GenerationServiceConfig struct {
+	Store          *taskstore.Store
+	Driver         GenerationDriver
+	Publisher      generationPublisher
+	Trusted        bool
+	CoverageReady  bool
+	VerifySnapshot testgencoord.SnapshotVerifier
+	VerifyArtifact testgencoord.ArtifactVerifier
+	VerifyProcess  testgencoord.ProcessOwnerVerifier
+	PublishEvent   func(task.Event)
+}
+
+type generationService struct {
+	store        *taskstore.Store
+	coord        *testgencoord.Coordinator
+	driver       GenerationDriver
+	publisher    generationPublisher
+	publishEvent func(task.Event)
+	mu           sync.Mutex
+	running      map[string]context.CancelFunc
+	wg           sync.WaitGroup
+}
+
+func newGenerationService(config GenerationServiceConfig) (*generationService, error) {
+	if !config.Trusted || !config.CoverageReady || config.Store == nil || config.Driver == nil || config.Publisher == nil || config.VerifySnapshot == nil || config.VerifyArtifact == nil || config.VerifyProcess == nil {
+		return nil, task.ErrStorageUnavailable
+	}
+	if err := config.Publisher.Recover(context.Background()); err != nil {
+		return nil, err
+	}
+	return &generationService{
+		store: config.Store, coord: testgencoord.NewWithProcessVerifier(config.Store, config.VerifySnapshot, config.VerifyArtifact, config.VerifyProcess),
+		driver: config.Driver, publisher: config.Publisher, publishEvent: config.PublishEvent,
+		running: make(map[string]context.CancelFunc),
+	}, nil
+}
+
+func (s *generationService) TestGenerationReady() bool { return s != nil }
+
+func (s *generationService) ListTestGenerationTargets(ctx context.Context, owner string, input generationv15.TestGenerationTargetListRequestV15) (generationv15.TestGenerationTargetListV15, error) {
+	if s == nil || !validGenerationOwner(owner) || ctx == nil {
+		return generationv15.TestGenerationTargetListV15{}, task.ErrInvalidArgument
+	}
+	return s.driver.Targets(ctx, input)
+}
+
+func (s *generationService) StartTestGeneration(ctx context.Context, owner string, input generationv15.TestGenerationStartRequestV15) (generationv15.TestGenerationRunV15, error) {
+	if s == nil || !validGenerationOwner(owner) || ctx == nil {
+		return generationv15.TestGenerationRunV15{}, task.ErrInvalidArgument
+	}
+	request, err := s.driver.Resolve(ctx, input)
+	if err != nil {
+		return generationv15.TestGenerationRunV15{}, err
+	}
+	// The authenticated realm is authoritative even if a driver accidentally
+	// returns a different owner; the client cannot supply this field.
+	request.SessionOwnerDigest = owner
+	if testgendomain.ValidateRequest(request) != nil || request.IdempotencyKey != input.IdempotencyKey || request.WorkspaceGeneration != input.WorkspaceGeneration || request.ProjectID != input.ProjectID {
+		return generationv15.TestGenerationRunV15{}, task.ErrInvalidArgument
+	}
+	run, err := s.coord.Start(ctx, request)
+	if err != nil {
+		return generationv15.TestGenerationRunV15{}, err
+	}
+	if run.Request.SessionOwnerDigest != owner {
+		return generationv15.TestGenerationRunV15{}, task.ErrNotFound
+	}
+	s.launch(run.ID)
+	return generationRunV15(run), nil
+}
+
+func (s *generationService) GetTestGenerationRun(ctx context.Context, owner, runID string) (generationv15.TestGenerationRunV15, error) {
+	run, err := s.owned(ctx, owner, runID)
+	if err != nil {
+		return generationv15.TestGenerationRunV15{}, err
+	}
+	return generationRunV15(run), nil
+}
+
+func (s *generationService) ListTestGenerationCandidates(ctx context.Context, owner string, input generationv15.TestGenerationCandidateListRequestV15) (generationv15.TestGenerationCandidatePageV15, error) {
+	run, err := s.owned(ctx, owner, input.RunID)
+	if err != nil {
+		return generationv15.TestGenerationCandidatePageV15{}, err
+	}
+	candidates, err := s.coord.ListCandidates(ctx, run.ID)
+	if err != nil {
+		return generationv15.TestGenerationCandidatePageV15{}, err
+	}
+	limit := 100
+	if input.Limit != nil {
+		limit = int(*input.Limit)
+	}
+	if limit < 1 || limit > 200 {
+		return generationv15.TestGenerationCandidatePageV15{}, task.ErrInvalidArgument
+	}
+	cursor := ""
+	if input.Cursor != nil {
+		cursor = *input.Cursor
+	}
+	page := generationv15.TestGenerationCandidatePageV15{Items: []generationv15.TestGenerationCandidateV15{}}
+	for _, candidate := range candidates {
+		if candidate.CaseID <= cursor {
+			continue
+		}
+		if len(page.Items) == limit {
+			next := page.Items[len(page.Items)-1].CandidateID
+			page.NextCursor = &next
+			break
+		}
+		projected, projectErr := s.driver.ProjectCandidate(ctx, run, candidate)
+		if projectErr != nil || projected.CandidateID != candidate.CaseID || projected.Kind != generationv15.TestGenerationCandidateKindV15(candidate.Kind) {
+			return generationv15.TestGenerationCandidatePageV15{}, task.ErrStorageUnavailable
+		}
+		page.Items = append(page.Items, projected)
+	}
+	return page, nil
+}
+
+func (s *generationService) AcceptTestGeneration(ctx context.Context, owner string, input generationv15.TestGenerationAcceptRequestV15) (generationv15.TestGenerationRunV15, error) {
+	run, err := s.owned(ctx, owner, input.RunID)
+	if err != nil {
+		return generationv15.TestGenerationRunV15{}, err
+	}
+	if run.State == testgendomain.StateAccepted {
+		if run.Record.Preview == nil || input.ConfirmationDigest != run.Record.Preview.ConfirmationDigest {
+			return generationv15.TestGenerationRunV15{}, testgendomain.ErrStaleSnapshot
+		}
+		if err := s.publisher.Recover(ctx); err != nil {
+			return generationv15.TestGenerationRunV15{}, err
+		}
+		// Accepted is only replayable while Task 12's durable receipt and
+		// published files still attest to the committed preview. Never re-plan
+		// here: the publisher has already changed the workspace.
+		if _, err := s.publisher.Accept(ctx, publicationForRun(run)); err != nil {
+			return generationv15.TestGenerationRunV15{}, err
+		}
+		return generationRunV15(run), nil
+	}
+	if run.State != testgendomain.StateAwaitingConfirmation || run.Record.Preview == nil || input.ConfirmationDigest != run.Record.Preview.ConfirmationDigest {
+		return generationv15.TestGenerationRunV15{}, testgendomain.ErrStaleSnapshot
+	}
+	if err := s.publisher.Recover(ctx); err != nil {
+		return generationv15.TestGenerationRunV15{}, err
+	}
+	all, err := s.coord.ListCandidates(ctx, run.ID)
+	if err != nil {
+		return generationv15.TestGenerationRunV15{}, err
+	}
+	selected := make([]testgendomain.Candidate, 0, len(run.Record.MinimizedCaseIDs))
+	for _, candidate := range all {
+		if slices.Contains(run.Record.MinimizedCaseIDs, candidate.CaseID) {
+			selected = append(selected, candidate)
+		}
+	}
+	if len(selected) != len(run.Record.MinimizedCaseIDs) || len(selected) == 0 || !slices.Contains(run.Record.MinimizedCaseIDs, input.CandidateID) {
+		return generationv15.TestGenerationRunV15{}, task.ErrNotFound
+	}
+	for _, candidate := range selected {
+		if candidate.Kind == testgendomain.KindCharacterization && !input.ConfirmCharacterization {
+			return generationv15.TestGenerationRunV15{}, session.ErrCharacterizationConfirmationRequired
+		}
+	}
+	preview := run.Record.Preview
+	publication := publicationForRun(run)
+	if _, err := s.publisher.Accept(ctx, publication); errors.Is(err, testgenpublish.ErrConflict) {
+		set, resolveErr := s.driver.CandidateSet(ctx, run, selected)
+		if resolveErr != nil {
+			return generationv15.TestGenerationRunV15{}, resolveErr
+		}
+		ids := append([]string(nil), set.CaseIDs...)
+		sort.Strings(ids)
+		if set.RunID != run.ID || set.SnapshotDigest != run.Record.SnapshotDigest || !slices.Equal(ids, run.Record.MinimizedCaseIDs) {
+			return generationv15.TestGenerationRunV15{}, task.ErrConflict
+		}
+		plan, planErr := s.publisher.Plan(ctx, set)
+		if planErr != nil {
+			return generationv15.TestGenerationRunV15{}, planErr
+		}
+		if plan.CandidateSetDigest != preview.CandidateSetDigest || plan.DiffDigest != preview.DiffDigest || plan.ConfirmationDigest != preview.ConfirmationDigest || plan.CharacterizationDigest != preview.CharacterizationDigest {
+			return generationv15.TestGenerationRunV15{}, testgendomain.ErrStaleSnapshot
+		}
+		if _, err = s.publisher.Accept(ctx, publication); err != nil {
+			return generationv15.TestGenerationRunV15{}, err
+		}
+	} else if err != nil {
+		return generationv15.TestGenerationRunV15{}, err
+	}
+	// The publisher itself changes generated tests/CMake. A post-publication
+	// workspace snapshot recheck would reject our own edits; the durable receipt
+	// and CAS over the already-confirmed preview are authoritative here.
+	next := testgendomain.CloneRun(run)
+	next.State = testgendomain.StateAccepted
+	next.Revision++
+	now := time.Now().UTC()
+	next.FinishedAt = &now
+	committed, err := s.store.CheckpointGeneration(ctx, run.Revision, next, nil, nil)
+	if err != nil {
+		return generationv15.TestGenerationRunV15{}, err
+	}
+	s.publishNewEvents(ctx, run, committed)
+	return generationRunV15(committed), nil
+}
+
+func publicationForRun(run testgendomain.Run) testgenpublish.AcceptRequest {
+	preview := run.Record.Preview
+	return testgenpublish.AcceptRequest{
+		RunID: run.ID, CandidateSetDigest: preview.CandidateSetDigest,
+		SnapshotDigest: run.Record.SnapshotDigest, DiffDigest: preview.DiffDigest,
+		ConfirmationDigest: preview.ConfirmationDigest, CharacterizationDigest: preview.CharacterizationDigest,
+	}
+}
+
+func (s *generationService) owned(ctx context.Context, owner, runID string) (testgendomain.Run, error) {
+	if s == nil || ctx == nil || !validGenerationOwner(owner) || !validGenerationRunID(runID) {
+		return testgendomain.Run{}, task.ErrInvalidArgument
+	}
+	run, err := s.coord.Get(ctx, runID)
+	if err != nil {
+		return testgendomain.Run{}, err
+	}
+	if run.Request.SessionOwnerDigest == "" || run.Request.SessionOwnerDigest != owner {
+		return testgendomain.Run{}, task.ErrNotFound
+	}
+	return run, nil
+}
+
+func validGenerationOwner(value string) bool  { return validGenerationDigest(value) }
+func validGenerationRunID(value string) bool  { return len(value) == 32 && validGenerationHex(value) }
+func validGenerationDigest(value string) bool { return len(value) == 64 && validGenerationHex(value) }
+func validGenerationHex(value string) bool {
+	for _, char := range value {
+		if char < '0' || char > '9' && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func generationRunV15(run testgendomain.Run) generationv15.TestGenerationRunV15 {
+	result := generationv15.TestGenerationRunV15{
+		RunID: run.ID, TaskID: run.TaskID, ProjectID: run.Request.ProjectID,
+		WorkspaceGeneration: run.Request.WorkspaceGeneration, State: generationv15.TestGenerationStateV15(run.State),
+		CreatedAt: run.CreatedAt, FinishedAt: run.FinishedAt, LastSequence: run.LastSequence,
+	}
+	if run.State == testgendomain.StateAwaitingConfirmation || testgendomain.IsTerminal(run.State) {
+		count := int64(run.CandidateCount)
+		result.CandidateCount = &count
+	}
+	return result
+}
+
+func (s *generationService) launch(runID string) {
+	s.mu.Lock()
+	if _, exists := s.running[runID]; exists {
+		s.mu.Unlock()
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.running[runID] = cancel
+	s.wg.Add(1)
+	s.mu.Unlock()
+	go func() {
+		defer s.wg.Done()
+		defer func() { s.mu.Lock(); delete(s.running, runID); s.mu.Unlock() }()
+		s.run(ctx, runID)
+	}()
+}
+
+func (s *generationService) run(ctx context.Context, runID string) {
+	for ctx.Err() == nil {
+		run, err := s.coord.Get(ctx, runID)
+		if err != nil || testgendomain.IsTerminal(run.State) || run.State == testgendomain.StateAwaitingConfirmation {
+			return
+		}
+		next, err := testgencoord.NextStage(run.State)
+		if err != nil {
+			return
+		}
+		ledger, err := generationLedger(run)
+		if err != nil {
+			s.fail(run)
+			return
+		}
+		amount := s.driver.StageBudget(run, next)
+		amount.Events = 1
+		if next == testgendomain.StateBaseline {
+			amount.Events = 2
+		}
+		reservation, err := ledger.Reserve(ctx, amount)
+		if err != nil {
+			s.fail(run)
+			return
+		}
+		stageCtx, cancel := reservation.StageContext(ctx)
+		result, stageErr := s.driver.RunStage(stageCtx, run, next, func(processCtx context.Context) error {
+			return s.coord.AuthorizeProcessLaunch(processCtx, runID)
+		})
+		stageContextErr := stageCtx.Err()
+		if stageErr != nil || stageContextErr != nil {
+			cancel()
+			reservation.Release()
+			s.fail(run)
+			return
+		}
+		if result.Next == "" {
+			result.Next = next
+		}
+		if !testgendomain.ValidTransition(run.State, result.Next) {
+			cancel()
+			reservation.Release()
+			s.fail(run)
+			return
+		}
+		record := run.Record
+		record.MinimizedCaseIDs = append([]string(nil), record.MinimizedCaseIDs...)
+		if result.MinimizedCaseIDs != nil {
+			record.MinimizedCaseIDs = append([]string(nil), result.MinimizedCaseIDs...)
+			sort.Strings(record.MinimizedCaseIDs)
+		}
+		record.BudgetUsed.Candidates += amount.Candidates
+		record.BudgetUsed.OutputBytes += amount.OutputBytes
+		record.BudgetUsed.Events += amount.Events
+		record.BudgetUsed.Artifacts += amount.Artifacts
+		if result.Next == testgendomain.StateAwaitingConfirmation {
+			if result.PreviewSet == nil {
+				cancel()
+				reservation.Release()
+				s.fail(run)
+				return
+			}
+			plan, planErr := s.publisher.Plan(stageCtx, *result.PreviewSet)
+			if planErr != nil {
+				cancel()
+				reservation.Release()
+				s.fail(run)
+				return
+			}
+			record.Preview = &testgendomain.PreviewIdentity{
+				CandidateSetDigest: plan.CandidateSetDigest, DiffDigest: plan.DiffDigest,
+				ConfirmationDigest: plan.ConfirmationDigest, CharacterizationDigest: plan.CharacterizationDigest,
+			}
+		}
+		cancel()
+		if err := reservation.Commit(); err != nil {
+			s.fail(run)
+			return
+		}
+		committed, err := s.coord.CheckpointWithRecord(ctx, run.ID, run.Revision, result.Next, result.Candidates, result.Artifacts, record)
+		if err != nil {
+			// The ledger is reconstructed from the committed record on the next
+			// attempt; a failed CAS never carries in-memory usage forward.
+			return
+		}
+		s.publishNewEvents(ctx, run, committed)
+		if committed.State == testgendomain.StateAwaitingConfirmation || testgendomain.IsTerminal(committed.State) {
+			return
+		}
+	}
+}
+
+func generationLedger(run testgendomain.Run) (*testgencoord.BudgetLedger, error) {
+	used := testgencoord.BudgetAmount{
+		Candidates: run.Record.BudgetUsed.Candidates, OutputBytes: run.Record.BudgetUsed.OutputBytes,
+		Events: run.Record.BudgetUsed.Events, Artifacts: run.Record.BudgetUsed.Artifacts,
+	}
+	limits := testgencoord.BudgetLimits{
+		WallTime:   time.Duration(run.Request.Budgets.WallTimeMS) * time.Millisecond,
+		Candidates: run.Request.Budgets.CandidateCount, MemoryMiB: run.Request.Budgets.MemoryMiB,
+		Processes: run.Request.Budgets.Concurrency, OutputBytes: 1 << 30, Events: 10000, Artifacts: 1000,
+	}
+	return testgencoord.NewBudgetLedgerFromUsage(limits, run.CreatedAt, time.Now, used)
+}
+
+func (s *generationService) fail(run testgendomain.Run) {
+	if run.State == testgendomain.StateCancelled || testgendomain.IsTerminal(run.State) {
+		return
+	}
+	_, _ = s.coord.Fail(context.Background(), run.TaskID)
+}
+
+func (s *generationService) publishNewEvents(ctx context.Context, before, after testgendomain.Run) {
+	if s.publishEvent == nil {
+		return
+	}
+	events, err := s.store.ReplayGenerationEvents(ctx, after.ID, before.LastSequence, 200)
+	if err != nil {
+		return
+	}
+	for _, event := range events {
+		s.publishEvent(event)
+	}
+}
+
+func (s *generationService) ResumeAll(ctx context.Context) error {
+	if s == nil || ctx == nil {
+		return task.ErrInvalidArgument
+	}
+	cursor := ""
+	for {
+		page, err := s.store.List(ctx, cursor, 200, task.KindTestGeneration)
+		if err != nil {
+			return err
+		}
+		for _, item := range page.Items {
+			run, getErr := s.store.GetGenerationByTask(ctx, item.ID)
+			if getErr != nil {
+				return getErr
+			}
+			if testgendomain.IsTerminal(run.State) || run.State == testgendomain.StateAwaitingConfirmation {
+				continue
+			}
+			if _, resumeErr := s.coord.Resume(ctx, run.TaskID); resumeErr != nil {
+				s.fail(run)
+				continue
+			}
+			s.launch(run.ID)
+		}
+		if page.NextCursor == "" {
+			return nil
+		}
+		cursor = page.NextCursor
+	}
+}
+
+func (s *generationService) Close() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	for _, cancel := range s.running {
+		cancel()
+	}
+	s.mu.Unlock()
+	s.wg.Wait()
+}
+
+var _ session.GenerationBackend = (*generationService)(nil)

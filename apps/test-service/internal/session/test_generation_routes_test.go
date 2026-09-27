@@ -133,3 +133,18 @@ func TestV15GenerationRoutesRequireReadyBackendAndClosedPayloads(t *testing.T) {
 		}
 	}
 }
+
+func TestV15GlobalEventSubscriptionFailsClosedWithoutOwnerScopedStream(t *testing.T) {
+	active := session.NewWithGeneration("0123456789abcdef", "linux", "unix-socket", &fakeBackend{}, &coverageBackend{fakeBackend: &fakeBackend{}}, &generationBackend{ready: true})
+	result := active.Handle(context.Background(), requestVersion(t, protocol.Version15, "handshake", map[string]any{
+		"token": "0123456789abcdef", "clientName": "test", "clientVersion": "0.6.0",
+		"supportedProtocolVersions": []string{protocol.Version15},
+	}))
+	if result.Response.Error != nil {
+		t.Fatal(result.Response.Error)
+	}
+	result = active.Handle(context.Background(), requestVersion(t, protocol.Version15, "events/subscribe", map[string]any{"afterSequence": 0}))
+	if result.Response.Error == nil || result.Response.Error.Code != "PROTOCOL_FEATURE_UNAVAILABLE" || result.Subscription != nil {
+		t.Fatalf("global event subscription = %+v", result)
+	}
+}

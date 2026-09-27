@@ -102,6 +102,32 @@ func TestCancelOwnershipIdempotencyAndStaleIdentity(t *testing.T) {
 	}
 }
 
+func TestFailTerminalizesStaleRunWithoutLaunchingOrChangingOwnership(t *testing.T) {
+	s, err := taskstore.Open(filepath.Join(t.TempDir(), "tasks.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	c := New(s, func(context.Context, testgendomain.Request) (testgendomain.SnapshotIdentity, error) {
+		return coordRequest().SnapshotIdentity(), nil
+	})
+	r, err := c.Start(context.Background(), coordRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.verify = func(context.Context, testgendomain.Request) (testgendomain.SnapshotIdentity, error) {
+		return testgendomain.SnapshotIdentity{}, ErrStaleSnapshot
+	}
+	failed, err := c.Fail(context.Background(), r.TaskID)
+	if err != nil || failed.State != testgendomain.StateFailed || failed.Request != r.Request {
+		t.Fatalf("Fail = %+v, %v", failed, err)
+	}
+	again, err := c.Fail(context.Background(), r.TaskID)
+	if err != nil || again.Revision != failed.Revision {
+		t.Fatalf("idempotent Fail = %+v, %v", again, err)
+	}
+}
+
 func TestResumeFailsClosedWithoutArtifactByteVerification(t *testing.T) {
 	s, err := taskstore.Open(filepath.Join(t.TempDir(), "tasks.sqlite"))
 	if err != nil {

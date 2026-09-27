@@ -442,6 +442,11 @@ func (s *Session) Handle(ctx context.Context, request protocol.Request) HandleRe
 		if s.negotiatedVersion == protocol.Version10 {
 			return handled(protocol.Failure(responseVersion, request, "PROTOCOL_FEATURE_UNAVAILABLE", "method requires protocol 1.1", false))
 		}
+		if s.negotiatedVersion == protocol.Version15 && request.Method == "events/subscribe" {
+			// The legacy broker is workspace-global. Until v1.5 has an
+			// owner-scoped stream, subscribing would expose foreign runs.
+			return handled(protocol.Failure(responseVersion, request, "PROTOCOL_FEATURE_UNAVAILABLE", "owner-scoped event stream is unavailable", false))
+		}
 		if s.backend == nil {
 			return handled(protocol.Failure(responseVersion, request, "SERVICE_UNHEALTHY", "task service is unavailable", true))
 		}
