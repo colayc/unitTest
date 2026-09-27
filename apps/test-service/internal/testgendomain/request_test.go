@@ -12,7 +12,7 @@ func validRequest() Request {
 		Goals:                 Goals{FunctionPercent: 90, LinePercent: 80, BranchPercent: 70},
 		Budgets:               Budgets{WallTimeMS: 1000, CandidateCount: 4, MemoryMiB: 256, Concurrency: 1},
 		CompileSnapshotDigest: strings.Repeat("b", 64), CoverageSnapshotDigest: strings.Repeat("c", 64),
-		SourceDigest: strings.Repeat("1", 64), CMakeTargetDigest: strings.Repeat("2", 64), FrameworkBundleDigest: strings.Repeat("3", 64), AnalyzerBundleDigest: strings.Repeat("4", 64), BaselineReportDigest: strings.Repeat("5", 64),
+		SourceDigest: strings.Repeat("1", 64), CMakeTargetDigest: strings.Repeat("2", 64), FrameworkBundleDigest: strings.Repeat("3", 64), AnalyzerBundleDigest: strings.Repeat("4", 64), BaselineReportDigest: strings.Repeat("5", 64), ProcessOwnerDigest: strings.Repeat("d", 64),
 	}
 }
 

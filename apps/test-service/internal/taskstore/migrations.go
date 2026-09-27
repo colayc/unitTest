@@ -54,7 +54,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			return err
 		}
 	}
-	return nil
+	return s.reconcileGenerationRecords(ctx)
 }
 
 func (s *Store) applyMigration(ctx context.Context, current migration) (resultErr error) {

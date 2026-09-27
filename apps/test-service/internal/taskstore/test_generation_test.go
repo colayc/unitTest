@@ -3,8 +3,12 @@ package taskstore
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -17,7 +21,7 @@ func generationRequestFixture() testgendomain.Request {
 	return testgendomain.Request{IdempotencyKey: strings.Repeat("1", 32), WorkspaceGeneration: strings.Repeat("a", 64), ProjectID: "project", Scope: testgendomain.ScopeWorkspace, Framework: testgendomain.FrameworkAuto,
 		Goals: testgendomain.Goals{FunctionPercent: 90, LinePercent: 80, BranchPercent: 70}, Budgets: testgendomain.Budgets{WallTimeMS: 1000, CandidateCount: 4, MemoryMiB: 256, Concurrency: 1},
 		CompileSnapshotDigest: strings.Repeat("b", 64), CoverageSnapshotDigest: strings.Repeat("c", 64),
-		SourceDigest: strings.Repeat("1", 64), CMakeTargetDigest: strings.Repeat("2", 64), FrameworkBundleDigest: strings.Repeat("3", 64), AnalyzerBundleDigest: strings.Repeat("4", 64), BaselineReportDigest: strings.Repeat("5", 64)}
+		SourceDigest: strings.Repeat("1", 64), CMakeTargetDigest: strings.Repeat("2", 64), FrameworkBundleDigest: strings.Repeat("3", 64), AnalyzerBundleDigest: strings.Repeat("4", 64), BaselineReportDigest: strings.Repeat("5", 64), ProcessOwnerDigest: strings.Repeat("d", 64)}
 }
 
 func generationRunFixture() testgendomain.Run {
@@ -233,6 +237,100 @@ func TestGenerationRejectsTamperedCheckpointRecord(t *testing.T) {
 	}
 	if _, err := s.GetGeneration(context.Background(), created.ID); !errors.Is(err, task.ErrConflict) {
 		t.Fatalf("tampered record: %v", err)
+	}
+}
+
+func TestGenerationV10UpgradeBackfillsOrTerminalizesWithoutAdoption(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		name := "complete-identity"
+		if legacy {
+			name = "old-identity"
+		}
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "tasks.sqlite")
+			seedGenerationV10(t, path, legacy)
+			s, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			r, err := s.GetGeneration(context.Background(), strings.Repeat("2", 32))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if legacy {
+				if r.State != testgendomain.StateFailed || !r.Record.IsZero() {
+					t.Fatalf("unsafe old run resumed: %+v", r)
+				}
+				storedTask, err := s.Get(context.Background(), r.TaskID)
+				if err != nil || storedTask.Status != task.StatusFinished {
+					t.Fatalf("old task not terminal: %+v, %v", storedTask, err)
+				}
+			} else if r.State != testgendomain.StateQueued || !r.Record.ValidFor(r.Request, r.CandidateCount) {
+				t.Fatalf("backfill lost resumable checkpoint: %+v", r)
+			}
+		})
+	}
+}
+
+func seedGenerationV10(t *testing.T, path string, legacy bool) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	store := &Store{db: db, newID: task.NewID}
+	migrations, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyMigrationsThrough(t, context.Background(), store, migrations[:10])
+	rq := generationRequestFixture()
+	raw, err := json.Marshal(rq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy {
+		var values map[string]any
+		if err := json.Unmarshal(raw, &values); err != nil {
+			t.Fatal(err)
+		}
+		for _, key := range []string{"sourceDigest", "cmakeTargetDigest", "frameworkBundleDigest", "analyzerBundleDigest", "baselineReportDigest", "processOwnerDigest"} {
+			delete(values, key)
+		}
+		raw, err = json.Marshal(values)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	sum := sha256.Sum256(raw)
+	created := time.Date(2026, 9, 27, 0, 0, 0, 0, time.UTC)
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec(`INSERT INTO tasks(task_id,idempotency_key,request_hash,kind,scenario,request_json,workspace_generation,plan_fingerprint,active_step,timeout_ms,status,outcome,created_at,started_at,finished_at,last_sequence,error_code,error_message) VALUES(?,?,?,'test_generation',NULL,?,?,?,'',?,'queued',NULL,?,NULL,NULL,0,'','')`, strings.Repeat("3", 32), rq.IdempotencyKey, hex.EncodeToString(sum[:]), string(raw), rq.WorkspaceGeneration, hex.EncodeToString(sum[:]), rq.Budgets.WallTimeMS, formatTime(created))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = tx.Exec(`INSERT INTO test_generation_runs(run_id,task_id,state,revision,artifact_digests_json,candidate_count) VALUES(?,?,'queued',1,'[]',0)`, strings.Repeat("2", 32), strings.Repeat("3", 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := insertEvents(context.Background(), tx, []task.EventDraft{{TaskID: strings.Repeat("3", 32), Type: task.EventTaskCreated, At: created, Payload: json.RawMessage(`{"status":"queued"}`)}}, task.NewID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`UPDATE tasks SET last_sequence=? WHERE task_id=?`, events[0].Sequence, strings.Repeat("3", 32)); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

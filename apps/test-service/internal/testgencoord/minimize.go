@@ -49,10 +49,22 @@ func validCoverageID(id string) bool {
 }
 
 func validMinCandidate(c ValidatedCandidate) bool {
-	return validCoverageID(c.CaseID) && (c.Kind == testgendomain.KindVerified || c.Kind == testgendomain.KindCharacterization) &&
-		validCoverageID(c.AssertionDigest) && c.Complexity >= 0 && c.Complexity <= 1_000_000 &&
+	return validMinHex(c.CaseID, 32) && (c.Kind == testgendomain.KindVerified || c.Kind == testgendomain.KindCharacterization) &&
+		validMinHex(c.AssertionDigest, 64) && c.Complexity >= 0 && c.Complexity <= 1_000_000 &&
 		len(c.Coverage.Functions)+len(c.Coverage.Lines)+len(c.Coverage.Branches) <= 10000 &&
 		!(c.IndependentErrorPath && c.Kind != testgendomain.KindVerified)
+}
+
+func validMinHex(value string, size int) bool {
+	if len(value) != size {
+		return false
+	}
+	for _, c := range value {
+		if c < '0' || c > '9' && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func quality(c ValidatedCandidate) int {

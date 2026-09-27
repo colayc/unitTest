@@ -18,7 +18,7 @@ import (
 func coordRequest() testgendomain.Request {
 	return testgendomain.Request{IdempotencyKey: strings.Repeat("1", 32), WorkspaceGeneration: strings.Repeat("a", 64), ProjectID: "project", Scope: testgendomain.ScopeWorkspace, Framework: testgendomain.FrameworkAuto,
 		Goals: testgendomain.Goals{FunctionPercent: 90, LinePercent: 80, BranchPercent: 70}, Budgets: testgendomain.Budgets{WallTimeMS: 1000, CandidateCount: 4, MemoryMiB: 256, Concurrency: 1}, CompileSnapshotDigest: strings.Repeat("b", 64), CoverageSnapshotDigest: strings.Repeat("c", 64),
-		SourceDigest: strings.Repeat("1", 64), CMakeTargetDigest: strings.Repeat("2", 64), FrameworkBundleDigest: strings.Repeat("3", 64), AnalyzerBundleDigest: strings.Repeat("4", 64), BaselineReportDigest: strings.Repeat("5", 64)}
+		SourceDigest: strings.Repeat("1", 64), CMakeTargetDigest: strings.Repeat("2", 64), FrameworkBundleDigest: strings.Repeat("3", 64), AnalyzerBundleDigest: strings.Repeat("4", 64), BaselineReportDigest: strings.Repeat("5", 64), ProcessOwnerDigest: strings.Repeat("d", 64)}
 }
 
 func TestRestartResumesFromEachCompletedStage(t *testing.T) {
@@ -47,6 +47,7 @@ func TestRestartResumesFromEachCompletedStage(t *testing.T) {
 		c = New(s, func(context.Context, testgendomain.Request) (testgendomain.SnapshotIdentity, error) {
 			return coordRequest().SnapshotIdentity(), nil
 		})
+		c.verifyProcess = func(context.Context, string, string) error { return nil }
 		resumed, err := c.Resume(ctx, r.TaskID)
 		if err != nil || resumed.State != expected {
 			t.Fatalf("resume after %s: %+v, %v", expected, resumed, err)
@@ -89,6 +90,7 @@ func TestCancelOwnershipIdempotencyAndStaleIdentity(t *testing.T) {
 	if err != nil || again.Revision != cancelled.Revision {
 		t.Fatalf("idempotent cancel = %+v, %v", again, err)
 	}
+	c.verifyProcess = func(context.Context, string, string) error { return nil }
 	if _, err := c.Resume(ctx, r.TaskID); err != nil {
 		t.Fatal(err)
 	}
@@ -128,12 +130,14 @@ func TestResumeFailsClosedWithoutArtifactByteVerification(t *testing.T) {
 	verified := New(s, func(context.Context, testgendomain.Request) (testgendomain.SnapshotIdentity, error) {
 		return coordRequest().SnapshotIdentity(), nil
 	}, func(context.Context, task.Artifact) error { return nil })
+	verified.verifyProcess = func(context.Context, string, string) error { return nil }
 	if _, err = verified.Resume(ctx, r.TaskID); err != nil {
 		t.Fatalf("verified resume: %v", err)
 	}
 	changed := New(s, func(context.Context, testgendomain.Request) (testgendomain.SnapshotIdentity, error) {
 		return coordRequest().SnapshotIdentity(), nil
 	}, func(context.Context, task.Artifact) error { return errors.New("bytes changed") })
+	changed.verifyProcess = func(context.Context, string, string) error { return nil }
 	if _, err = changed.Resume(ctx, r.TaskID); !errors.Is(err, ErrStaleSnapshot) {
 		t.Fatalf("changed bytes: %v", err)
 	}
@@ -176,6 +180,7 @@ func TestOnlyOneWriterCanCommitARevision(t *testing.T) {
 	c := New(s, func(context.Context, testgendomain.Request) (testgendomain.SnapshotIdentity, error) {
 		return coordRequest().SnapshotIdentity(), nil
 	})
+	c.verifyProcess = func(context.Context, string, string) error { return nil }
 	r, err := c.Start(ctx, coordRequest())
 	if err != nil {
 		t.Fatal(err)
@@ -223,6 +228,7 @@ func TestRestartRevalidatesStoredArtifactBytes(t *testing.T) {
 	c := New(s, func(context.Context, testgendomain.Request) (testgendomain.SnapshotIdentity, error) {
 		return coordRequest().SnapshotIdentity(), nil
 	}, files.VerifyGenerationSource)
+	c.verifyProcess = func(context.Context, string, string) error { return nil }
 	r, err := c.Start(ctx, coordRequest())
 	if err != nil {
 		t.Fatal(err)
@@ -254,6 +260,7 @@ func TestRestartRevalidatesStoredArtifactBytes(t *testing.T) {
 	c = New(s, func(context.Context, testgendomain.Request) (testgendomain.SnapshotIdentity, error) {
 		return coordRequest().SnapshotIdentity(), nil
 	}, files.VerifyGenerationSource)
+	c.verifyProcess = func(context.Context, string, string) error { return nil }
 	resumed, err := c.Resume(ctx, r.TaskID)
 	if err != nil || resumed.Revision != checkpoint.Revision || resumed.State != checkpoint.State {
 		t.Fatalf("resumed = %+v, %v", resumed, err)
@@ -292,6 +299,7 @@ func TestCheckpointRejectsExistingArtifactChangedBetweenStages(t *testing.T) {
 			c := New(s, func(context.Context, testgendomain.Request) (testgendomain.SnapshotIdentity, error) {
 				return coordRequest().SnapshotIdentity(), nil
 			}, files.VerifyGenerationSource)
+			c.verifyProcess = func(context.Context, string, string) error { return nil }
 			r, err := c.Start(ctx, coordRequest())
 			if err != nil {
 				t.Fatal(err)
@@ -350,6 +358,7 @@ func TestResumeRejectsChangedTrustedIdentity(t *testing.T) {
 			now := base.SnapshotIdentity()
 			tc.change(&now)
 			stale := New(s, func(context.Context, testgendomain.Request) (testgendomain.SnapshotIdentity, error) { return now, nil })
+			stale.verifyProcess = func(context.Context, string, string) error { return nil }
 			if _, err := stale.Resume(ctx, r.TaskID); !errors.Is(err, ErrStaleSnapshot) {
 				t.Fatalf("resume drift: %v", err)
 			}
@@ -387,6 +396,60 @@ func TestResumeNeverAdoptsUnverifiableProcess(t *testing.T) {
 	}
 }
 
+func TestProcessOwnerMustExistBeforeLaunch(t *testing.T) {
+	s, err := taskstore.Open(filepath.Join(t.TempDir(), "tasks.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	rq := coordRequest()
+	rq.ProcessOwnerDigest = ""
+	c := New(s, func(context.Context, testgendomain.Request) (testgendomain.SnapshotIdentity, error) {
+		return rq.SnapshotIdentity(), nil
+	})
+	if _, err := c.Start(context.Background(), rq); !errors.Is(err, task.ErrInvalidArgument) {
+		t.Fatalf("missing owner accepted: %v", err)
+	}
+	rq = coordRequest()
+	verify := func(context.Context, testgendomain.Request) (testgendomain.SnapshotIdentity, error) {
+		return rq.SnapshotIdentity(), nil
+	}
+	c = New(s, verify)
+	r, err := c.Start(context.Background(), rq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.AuthorizeProcessLaunch(context.Background(), r.ID); !errors.Is(err, ErrStaleSnapshot) {
+		t.Fatalf("unverifiable owner launch: %v", err)
+	}
+	live := NewWithProcessVerifier(s, verify, nil, func(context.Context, string, string) error { return errors.New("live") })
+	if err := live.AuthorizeProcessLaunch(context.Background(), r.ID); !errors.Is(err, ErrStaleSnapshot) {
+		t.Fatalf("live owner launch: %v", err)
+	}
+	clean := NewWithProcessVerifier(s, verify, nil, func(context.Context, string, string) error { return nil })
+	if err := clean.AuthorizeProcessLaunch(context.Background(), r.ID); err != nil {
+		t.Fatalf("clean owner launch: %v", err)
+	}
+}
+
+func TestProcessCapableCheckpointRejectsMissingAttestation(t *testing.T) {
+	s, err := taskstore.Open(filepath.Join(t.TempDir(), "tasks.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	c := New(s, func(context.Context, testgendomain.Request) (testgendomain.SnapshotIdentity, error) {
+		return coordRequest().SnapshotIdentity(), nil
+	})
+	r, err := c.Start(context.Background(), coordRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Checkpoint(context.Background(), r.ID, r.Revision, testgendomain.StateBaseline, nil, nil); !errors.Is(err, ErrStaleSnapshot) {
+		t.Fatalf("unattested process-capable stage: %v", err)
+	}
+}
+
 func TestCheckpointRecordIsDigestBoundAndRestarted(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "tasks.sqlite")
@@ -398,6 +461,7 @@ func TestCheckpointRecordIsDigestBoundAndRestarted(t *testing.T) {
 	c := New(s, func(context.Context, testgendomain.Request) (testgendomain.SnapshotIdentity, error) {
 		return coordRequest().SnapshotIdentity(), nil
 	})
+	c.verifyProcess = func(context.Context, string, string) error { return nil }
 	r, err := c.Start(ctx, coordRequest())
 	if err != nil {
 		t.Fatal(err)
@@ -420,8 +484,65 @@ func TestCheckpointRecordIsDigestBoundAndRestarted(t *testing.T) {
 	c = New(s, func(context.Context, testgendomain.Request) (testgendomain.SnapshotIdentity, error) {
 		return coordRequest().SnapshotIdentity(), nil
 	})
+	c.verifyProcess = func(context.Context, string, string) error { return nil }
 	resumed, err := c.Resume(ctx, r.TaskID)
 	if err != nil || resumed.Record.BudgetUsed.Candidates != 1 || resumed.Record.BudgetUsed.OutputBytes != 5 {
 		t.Fatalf("record after restart: %+v, %v", resumed.Record, err)
+	}
+}
+
+func TestMinimizedRealCaseIDsCheckpointAndResume(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	s, err := taskstore.Open(filepath.Join(root, "tasks.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	files, err := artifactstore.New(filepath.Join(root, "artifacts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer files.Close()
+	c := NewWithProcessVerifier(s, func(context.Context, testgendomain.Request) (testgendomain.SnapshotIdentity, error) {
+		return coordRequest().SnapshotIdentity(), nil
+	}, files.VerifyGenerationSource, func(context.Context, string, string) error { return nil })
+	r, err := c.Start(ctx, coordRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range []testgendomain.State{testgendomain.StateBaseline, testgendomain.StateAnalyzing, testgendomain.StateSolving, testgendomain.StateRendering} {
+		r, err = c.Checkpoint(ctx, r.ID, r.Revision, state, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	a, err := files.CommitGenerationSource(ctx, r.TaskID, strings.Repeat("4", 32), r.CreatedAt, []byte("TEST(Classify, Positive){}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	caseID := strings.Repeat("5", 32)
+	candidate := testgendomain.Candidate{CaseID: caseID, Kind: testgendomain.KindVerified, TargetSymbol: "fn:classify", Assertions: []testgendomain.Assertion{{Kind: testgendomain.AssertionIndependentOracle, EvidenceDigest: strings.Repeat("6", 64)}}, StagedSourceArtifact: testgendomain.ArtifactRef{ID: a.ID, Digest: a.SHA256}, CodeDigest: strings.Repeat("7", 64), CoverageDelta: testgendomain.Coverage{Branches: 1}, PlannedEdits: []testgendomain.PlannedEdit{{Path: "tests/classify_test.c", Operation: testgendomain.EditCreate, AfterDigest: strings.Repeat("8", 64)}}}
+	r, err = c.Checkpoint(ctx, r.ID, r.Revision, testgendomain.StateValidating, []testgendomain.Candidate{candidate}, []task.Artifact{a})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err = c.Checkpoint(ctx, r.ID, r.Revision, testgendomain.StateMinimizing, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	minimized := Minimize(Coverage{}, []ValidatedCandidate{{CaseID: caseID, Kind: testgendomain.KindVerified, Coverage: Coverage{Branches: []string{"branch1"}}, AssertionDigest: candidate.Assertions[0].EvidenceDigest}})
+	if len(minimized) != 1 {
+		t.Fatalf("minimized=%+v", minimized)
+	}
+	record := r.Record
+	record.MinimizedCaseIDs = candidateIDs(minimized)
+	r, err = c.CheckpointWithRecord(ctx, r.ID, r.Revision, testgendomain.StateAwaitingConfirmation, nil, nil, record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := c.Resume(ctx, r.TaskID)
+	if err != nil || len(resumed.Record.MinimizedCaseIDs) != 1 || resumed.Record.MinimizedCaseIDs[0] != caseID {
+		t.Fatalf("durable minimized set: %+v, %v", resumed.Record, err)
 	}
 }

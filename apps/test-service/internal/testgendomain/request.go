@@ -77,15 +77,29 @@ type Request struct {
 func (r Request) SnapshotIdentity() SnapshotIdentity {
 	return SnapshotIdentity{WorkspaceGeneration: r.WorkspaceGeneration, CompileSnapshotDigest: r.CompileSnapshotDigest, CoverageSnapshotDigest: r.CoverageSnapshotDigest, SourceDigest: r.SourceDigest, CMakeTargetDigest: r.CMakeTargetDigest, FrameworkBundleDigest: r.FrameworkBundleDigest, AnalyzerBundleDigest: r.AnalyzerBundleDigest, BaselineReportDigest: r.BaselineReportDigest, ProcessOwnerDigest: r.ProcessOwnerDigest}
 }
+
+// IsLegacySnapshot recognizes only the pre-v11 closed request shape. Such
+// rows may be displayed after upgrade but never resumed or published: the
+// missing identities cannot be reconstructed from historical metadata.
+func (r Request) IsLegacySnapshot() bool {
+	if r.SourceDigest != "" || r.CMakeTargetDigest != "" || r.FrameworkBundleDigest != "" || r.AnalyzerBundleDigest != "" || r.BaselineReportDigest != "" || r.ProcessOwnerDigest != "" {
+		return false
+	}
+	clone := r
+	placeholder := strings.Repeat("0", 64)
+	clone.SourceDigest, clone.CMakeTargetDigest, clone.FrameworkBundleDigest = placeholder, placeholder, placeholder
+	clone.AnalyzerBundleDigest, clone.BaselineReportDigest, clone.ProcessOwnerDigest = placeholder, placeholder, placeholder
+	return ValidateRequest(clone) == nil
+}
 func (r Request) SnapshotMatches(now SnapshotIdentity) error {
-	if r.SnapshotIdentity() != now || !validDigest(now.WorkspaceGeneration) || !validDigest(now.CompileSnapshotDigest) || !validDigest(now.CoverageSnapshotDigest) || !validDigest(now.SourceDigest) || !validDigest(now.CMakeTargetDigest) || !validDigest(now.FrameworkBundleDigest) || !validDigest(now.AnalyzerBundleDigest) || !validDigest(now.BaselineReportDigest) || now.ProcessOwnerDigest != "" && !validDigest(now.ProcessOwnerDigest) {
+	if r.SnapshotIdentity() != now || !validDigest(now.WorkspaceGeneration) || !validDigest(now.CompileSnapshotDigest) || !validDigest(now.CoverageSnapshotDigest) || !validDigest(now.SourceDigest) || !validDigest(now.CMakeTargetDigest) || !validDigest(now.FrameworkBundleDigest) || !validDigest(now.AnalyzerBundleDigest) || !validDigest(now.BaselineReportDigest) || !validDigest(now.ProcessOwnerDigest) {
 		return ErrStaleSnapshot
 	}
 	return nil
 }
 
 func ValidateRequest(r Request) error {
-	if !validID(r.IdempotencyKey) || !validDigest(r.WorkspaceGeneration) || !validDigest(r.CompileSnapshotDigest) || !validDigest(r.CoverageSnapshotDigest) || !validDigest(r.SourceDigest) || !validDigest(r.CMakeTargetDigest) || !validDigest(r.FrameworkBundleDigest) || !validDigest(r.AnalyzerBundleDigest) || !validDigest(r.BaselineReportDigest) || r.ProcessOwnerDigest != "" && !validDigest(r.ProcessOwnerDigest) || !validProjectID(r.ProjectID) || !validGoals(r.Goals) || !validBudgets(r.Budgets) {
+	if !validID(r.IdempotencyKey) || !validDigest(r.WorkspaceGeneration) || !validDigest(r.CompileSnapshotDigest) || !validDigest(r.CoverageSnapshotDigest) || !validDigest(r.SourceDigest) || !validDigest(r.CMakeTargetDigest) || !validDigest(r.FrameworkBundleDigest) || !validDigest(r.AnalyzerBundleDigest) || !validDigest(r.BaselineReportDigest) || !validDigest(r.ProcessOwnerDigest) || !validProjectID(r.ProjectID) || !validGoals(r.Goals) || !validBudgets(r.Budgets) {
 		return ErrInvalid
 	}
 	switch r.Framework {

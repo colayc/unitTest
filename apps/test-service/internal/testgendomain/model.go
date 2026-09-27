@@ -148,7 +148,8 @@ func validState(v State) bool {
 }
 
 func ValidateRun(r Run) error {
-	if !validID(r.ID) || !validID(r.TaskID) || r.ID == r.TaskID || ValidateRequest(r.Request) != nil || !validState(r.State) || r.Revision < 1 || r.Revision > 10000 || r.CreatedAt.IsZero() || r.LastSequence < 0 || r.CandidateCount < 0 || int64(r.CandidateCount) > r.Request.Budgets.CandidateCount || len(r.ArtifactDigests) > 1000 {
+	legacyTerminal := IsTerminal(r.State) && r.Record.IsZero() && r.Request.IsLegacySnapshot()
+	if !validID(r.ID) || !validID(r.TaskID) || r.ID == r.TaskID || ValidateRequest(r.Request) != nil && !legacyTerminal || !validState(r.State) || r.Revision < 1 || r.Revision > 10000 || r.CreatedAt.IsZero() || r.LastSequence < 0 || r.CandidateCount < 0 || int64(r.CandidateCount) > r.Request.Budgets.CandidateCount || len(r.ArtifactDigests) > 1000 {
 		return ErrInvalid
 	}
 	if IsTerminal(r.State) != (r.FinishedAt != nil) {

@@ -108,6 +108,11 @@ func (c *Coordinator) checkpoint(ctx context.Context, runID string, expectedRevi
 	if err := c.check(ctx, current.Request); err != nil {
 		return testgendomain.Run{}, err
 	}
+	if nextState != testgendomain.StateCancelled && nextState != testgendomain.StateFailed {
+		if c.verifyProcess == nil || c.verifyProcess(ctx, current.TaskID, current.Request.ProcessOwnerDigest) != nil {
+			return testgendomain.Run{}, ErrStaleSnapshot
+		}
+	}
 	if err := c.verifyOwnedArtifacts(ctx, current); err != nil {
 		return testgendomain.Run{}, err
 	}
@@ -174,6 +179,9 @@ func (c *Coordinator) Resume(ctx context.Context, taskID string) (testgendomain.
 	if err != nil {
 		return testgendomain.Run{}, err
 	}
+	if testgendomain.IsTerminal(r.State) && r.Record.IsZero() && r.Request.IsLegacySnapshot() {
+		return r, nil
+	}
 	if err := c.check(ctx, r.Request); err != nil {
 		return testgendomain.Run{}, err
 	}
@@ -183,12 +191,37 @@ func (c *Coordinator) Resume(ctx context.Context, taskID string) (testgendomain.
 	if err := c.verifyOwnedArtifacts(ctx, r); err != nil {
 		return testgendomain.Run{}, err
 	}
-	if r.Request.ProcessOwnerDigest != "" {
-		if c.verifyProcess == nil || c.verifyProcess(ctx, r.TaskID, r.Request.ProcessOwnerDigest) != nil {
-			return testgendomain.Run{}, ErrStaleSnapshot
-		}
+	if c.verifyProcess == nil || c.verifyProcess(ctx, r.TaskID, r.Request.ProcessOwnerDigest) != nil {
+		return testgendomain.Run{}, ErrStaleSnapshot
 	}
 	return r, nil
+}
+
+// AuthorizeProcessLaunch is the required prelaunch gate for process-capable
+// stages. The owner identity is allocated and persisted in the trusted start
+// request before any external process may start; a later ad-hoc owner cannot
+// be substituted. Runtime must use this gate for each launch.
+func (c *Coordinator) AuthorizeProcessLaunch(ctx context.Context, runID string) error {
+	if c == nil || c.store == nil || c.verifyProcess == nil {
+		return ErrStaleSnapshot
+	}
+	r, err := c.store.GetGeneration(ctx, runID)
+	if err != nil {
+		return err
+	}
+	if testgendomain.IsTerminal(r.State) || r.Request.ProcessOwnerDigest == "" || r.Record.IsZero() {
+		return ErrStaleSnapshot
+	}
+	if err := c.check(ctx, r.Request); err != nil {
+		return err
+	}
+	if err := c.verifyOwnedArtifacts(ctx, r); err != nil {
+		return err
+	}
+	if err := c.verifyProcess(ctx, r.TaskID, r.Request.ProcessOwnerDigest); err != nil {
+		return ErrStaleSnapshot
+	}
+	return nil
 }
 
 func (c *Coordinator) verifyOwnedArtifacts(ctx context.Context, r testgendomain.Run) error {

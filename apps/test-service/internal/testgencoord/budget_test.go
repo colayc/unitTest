@@ -142,3 +142,82 @@ func TestBudgetRejectsCounterOverflowAndNegativeReservation(t *testing.T) {
 		t.Fatalf("overflow mutated ledger: %+v", got)
 	}
 }
+
+func TestBudgetLongStageExpiresBeforeCommitAndReleasesOnce(t *testing.T) {
+	start := time.Unix(100, 0)
+	now := start
+	ledger, err := NewBudgetLedger(BudgetLimits{WallTime: time.Second, Candidates: 1, MemoryMiB: 64, Processes: 1, OutputBytes: 8, Events: 1, Artifacts: 1}, start, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := ledger.Reserve(context.Background(), BudgetAmount{Candidates: 1, Processes: 1, OutputBytes: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = start.Add(2 * time.Second)
+	if err := r.Commit(); !errors.Is(err, ErrBudgetTimeout) {
+		t.Fatalf("expired commit: %v", err)
+	}
+	r.Release()
+	if got := ledger.Reserved(); got != (BudgetAmount{}) {
+		t.Fatalf("expired reservation leaked: %+v", got)
+	}
+	if got := ledger.Usage(); got != (BudgetAmount{}) {
+		t.Fatalf("expired reservation consumed budget: %+v", got)
+	}
+}
+
+func TestBudgetStageContextEnforcesGlobalDeadline(t *testing.T) {
+	start := time.Now()
+	ledger, err := NewBudgetLedger(BudgetLimits{WallTime: 50 * time.Millisecond, Candidates: 1, MemoryMiB: 64, Processes: 1, OutputBytes: 8, Events: 1, Artifacts: 1}, start, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := ledger.Reserve(context.Background(), BudgetAmount{Processes: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := r.StageContext(context.Background())
+	defer cancel()
+	select {
+	case <-ctx.Done():
+		if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			t.Fatal(ctx.Err())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("stage exceeded global deadline")
+	}
+	if err := r.Commit(); !errors.Is(err, ErrBudgetTimeout) {
+		t.Fatalf("expired stage commit: %v", err)
+	}
+	if got := ledger.Reserved(); got != (BudgetAmount{}) {
+		t.Fatalf("lease leaked: %+v", got)
+	}
+}
+
+func TestBudgetStageContextPropagatesRunCancellation(t *testing.T) {
+	start := time.Now()
+	ledger, err := NewBudgetLedger(BudgetLimits{WallTime: time.Second, Candidates: 1, MemoryMiB: 64, Processes: 1, OutputBytes: 8, Events: 1, Artifacts: 1}, start, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	r, err := ledger.Reserve(runCtx, BudgetAmount{Processes: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stageCtx, cancelStage := r.StageContext(context.Background())
+	defer cancelStage()
+	cancelRun()
+	select {
+	case <-stageCtx.Done():
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("stage ignored run cancellation")
+	}
+	if err := r.Commit(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled commit: %v", err)
+	}
+	if got := ledger.Reserved(); got != (BudgetAmount{}) {
+		t.Fatalf("cancel leaked %+v", got)
+	}
+}

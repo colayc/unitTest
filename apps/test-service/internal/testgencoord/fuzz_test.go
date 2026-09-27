@@ -14,9 +14,9 @@ func FuzzMinimizeReordering(f *testing.F) {
 	f.Add(uint8(1), uint8(2), uint8(3))
 	f.Fuzz(func(t *testing.T, a, b, c uint8) {
 		cs := []ValidatedCandidate{
-			{CaseID: "a", Kind: testgendomain.KindVerified, Coverage: Coverage{Functions: []string{"f1"}, Lines: []string{"l1"}}, AssertionDigest: "p1", Complexity: int64(a % 8)},
-			{CaseID: "b", Kind: testgendomain.KindCharacterization, Coverage: Coverage{Lines: []string{"l1"}, Branches: []string{"b1"}}, AssertionDigest: "p2", Complexity: int64(b % 8)},
-			{CaseID: "c", Kind: testgendomain.KindVerified, Coverage: Coverage{Branches: []string{"b1"}}, AssertionDigest: "p3", Complexity: int64(c % 8)},
+			{CaseID: minCase("a"), Kind: testgendomain.KindVerified, Coverage: Coverage{Functions: []string{"f1"}, Lines: []string{"l1"}}, AssertionDigest: minProof("1"), Complexity: int64(a % 8)},
+			{CaseID: minCase("b"), Kind: testgendomain.KindCharacterization, Coverage: Coverage{Lines: []string{"l1"}, Branches: []string{"b1"}}, AssertionDigest: minProof("2"), Complexity: int64(b % 8)},
+			{CaseID: minCase("c"), Kind: testgendomain.KindVerified, Coverage: Coverage{Branches: []string{"b1"}}, AssertionDigest: minProof("3"), Complexity: int64(c % 8)},
 		}
 		want := candidateIDs(Minimize(Coverage{}, cs))
 		for shift := 1; shift < len(cs); shift++ {

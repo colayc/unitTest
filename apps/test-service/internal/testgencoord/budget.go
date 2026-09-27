@@ -53,7 +53,9 @@ type BudgetLedger struct {
 type BudgetReservation struct {
 	ledger *BudgetLedger
 	amount BudgetAmount
+	ctx    context.Context
 	done   bool
+	result error
 }
 
 func NewBudgetLedger(limits BudgetLimits, started time.Time, now func() time.Time) (*BudgetLedger, error) {
@@ -119,7 +121,29 @@ func (l *BudgetLedger) Reserve(ctx context.Context, amount BudgetAmount) (*Budge
 	l.reserved.OutputBytes += amount.OutputBytes
 	l.reserved.Events += amount.Events
 	l.reserved.Artifacts += amount.Artifacts
-	return &BudgetReservation{ledger: l, amount: amount}, nil
+	return &BudgetReservation{ledger: l, amount: amount, ctx: ctx}, nil
+}
+
+// StageContext binds the external stage process tree to the run's absolute
+// deadline. The stage runner must pass this context into processcontrol and
+// defer Release; Commit independently refuses elapsed work.
+func (r *BudgetReservation) StageContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if r == nil || r.ledger == nil || parent == nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		return ctx, func() {}
+	}
+	l := r.ledger
+	l.mu.Lock()
+	done := r.done
+	l.mu.Unlock()
+	ctx, cancel := context.WithDeadline(parent, l.started.Add(l.limits.WallTime))
+	if done {
+		cancel()
+		return ctx, func() {}
+	}
+	stop := context.AfterFunc(r.ctx, cancel)
+	return ctx, func() { stop(); cancel() }
 }
 
 func (r *BudgetReservation) Release() {
@@ -131,6 +155,7 @@ func (r *BudgetReservation) Release() {
 	defer l.mu.Unlock()
 	if !r.done {
 		r.done = true
+		r.result = ErrBudgetInvalid
 		l.reserved.WallTime -= r.amount.WallTime
 		l.reserved.Candidates -= r.amount.Candidates
 		l.reserved.MemoryMiB -= r.amount.MemoryMiB
@@ -143,15 +168,23 @@ func (r *BudgetReservation) Release() {
 
 // Commit consumes count/output/event/artifact budgets permanently and frees
 // active wall-time, memory and process reservations. It is idempotent.
-func (r *BudgetReservation) Commit() {
+func (r *BudgetReservation) Commit() error {
 	if r == nil || r.ledger == nil {
-		return
+		return ErrBudgetInvalid
 	}
 	l := r.ledger
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if r.done {
-		return
+		return r.result
+	}
+	if err := r.ctx.Err(); err != nil {
+		r.releaseLocked(err)
+		return err
+	}
+	if l.now().Sub(l.started) >= l.limits.WallTime {
+		r.releaseLocked(ErrBudgetTimeout)
+		return ErrBudgetTimeout
 	}
 	r.done = true
 	l.reserved.WallTime -= r.amount.WallTime
@@ -165,6 +198,20 @@ func (r *BudgetReservation) Commit() {
 	l.used.OutputBytes += r.amount.OutputBytes
 	l.used.Events += r.amount.Events
 	l.used.Artifacts += r.amount.Artifacts
+	return nil
+}
+
+func (r *BudgetReservation) releaseLocked(result error) {
+	l := r.ledger
+	r.done = true
+	r.result = result
+	l.reserved.WallTime -= r.amount.WallTime
+	l.reserved.Candidates -= r.amount.Candidates
+	l.reserved.MemoryMiB -= r.amount.MemoryMiB
+	l.reserved.Processes -= r.amount.Processes
+	l.reserved.OutputBytes -= r.amount.OutputBytes
+	l.reserved.Events -= r.amount.Events
+	l.reserved.Artifacts -= r.amount.Artifacts
 }
 
 func (l *BudgetLedger) Usage() BudgetAmount {

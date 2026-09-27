@@ -144,7 +144,7 @@ func getGeneration(ctx context.Context, q interface {
 	}
 	canonical, e := json.Marshal(r.Request)
 	digest := sha256.Sum256(request)
-	if e != nil || !bytes.Equal(request, canonical) || requestHash != hex.EncodeToString(digest[:]) {
+	if e != nil || !bytes.Equal(request, canonical) && !r.Request.IsLegacySnapshot() || requestHash != hex.EncodeToString(digest[:]) {
 		return testgendomain.Run{}, task.ErrConflict
 	}
 	wantStatus := "running"
