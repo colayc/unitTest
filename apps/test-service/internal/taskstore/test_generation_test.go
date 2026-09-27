@@ -1,0 +1,272 @@
+package taskstore
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+	"unit-test-ide.local/test-service/internal/task"
+	"unit-test-ide.local/test-service/internal/testgendomain"
+)
+
+func generationRequestFixture() testgendomain.Request {
+	return testgendomain.Request{IdempotencyKey: strings.Repeat("1", 32), WorkspaceGeneration: strings.Repeat("a", 64), ProjectID: "project", Scope: testgendomain.ScopeWorkspace, Framework: testgendomain.FrameworkAuto,
+		Goals: testgendomain.Goals{FunctionPercent: 90, LinePercent: 80, BranchPercent: 70}, Budgets: testgendomain.Budgets{WallTimeMS: 1000, CandidateCount: 4, MemoryMiB: 256, Concurrency: 1},
+		CompileSnapshotDigest: strings.Repeat("b", 64), CoverageSnapshotDigest: strings.Repeat("c", 64)}
+}
+
+func generationRunFixture() testgendomain.Run {
+	return testgendomain.Run{ID: strings.Repeat("2", 32), TaskID: strings.Repeat("3", 32), Request: generationRequestFixture(), State: testgendomain.StateQueued, Revision: 1, CreatedAt: time.Date(2026, 9, 27, 0, 0, 0, 0, time.UTC)}
+}
+
+func TestGenerationPersistenceAndRevisionCAS(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	original := generationRunFixture()
+	if _, err := s.CreateGeneration(ctx, original); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetGeneration(ctx, original.ID)
+	if err != nil || got.ID != original.ID || got.Revision != 1 {
+		t.Fatalf("GetGeneration = %+v, %v", got, err)
+	}
+	storedTask, err := s.Get(ctx, original.TaskID)
+	if err != nil || storedTask.Kind != task.KindTestGeneration {
+		t.Fatalf("task = %+v, %v", storedTask, err)
+	}
+	next := got
+	next.State = testgendomain.StateBaseline
+	next.Revision = 2
+	if _, err := s.CheckpointGeneration(ctx, 1, next, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CheckpointGeneration(ctx, 1, next, nil, nil); !errors.Is(err, task.ErrConflict) {
+		t.Fatalf("stale writer: %v", err)
+	}
+	reopened, err := s.GetGeneration(ctx, original.ID)
+	if err != nil || reopened.State != next.State || reopened.Revision != 2 {
+		t.Fatalf("checkpoint = %+v, %v", reopened, err)
+	}
+}
+
+func TestGenerationRejectsTaskMismatchAndImpossibleTransition(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	r := generationRunFixture()
+	r.TaskID = r.ID
+	if _, err := s.CreateGeneration(ctx, r); err == nil {
+		t.Fatal("accepted matching task/run ids")
+	}
+	r = generationRunFixture()
+	if _, err := s.CreateGeneration(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	next := r
+	next.State = testgendomain.StateValidating
+	next.Revision = 2
+	if _, err := s.CheckpointGeneration(ctx, 1, next, nil, nil); err == nil {
+		t.Fatal("accepted impossible transition")
+	}
+	if _, err := s.ReplayGenerationEvents(ctx, r.ID, 0, 201); !errors.Is(err, task.ErrInvalidArgument) {
+		t.Fatalf("unbounded replay: %v", err)
+	}
+}
+
+func TestGenerationCannotBypassCoordinatorThroughGenericTaskAPIs(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	r := generationRunFixture()
+	input := task.Task{ID: r.TaskID, IdempotencyKey: r.Request.IdempotencyKey, RequestHash: strings.Repeat("d", 64), Kind: task.KindTestGeneration, Request: []byte(`{}`), WorkspaceGeneration: r.Request.WorkspaceGeneration, Timeout: time.Second, Status: task.StatusQueued, CreatedAt: r.CreatedAt}
+	_, _, err := s.Create(ctx, input, nil, task.EventDraft{TaskID: r.TaskID, Type: task.EventTaskCreated, At: r.CreatedAt, Payload: []byte(`{}`)})
+	if !errors.Is(err, task.ErrInvalidArgument) {
+		t.Fatalf("generic create: %v", err)
+	}
+	created, err := s.CreateGeneration(ctx, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, err = s.Get(ctx, r.TaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.Status = task.StatusRunning
+	_, _, err = s.Apply(ctx, task.Mutation{Task: input, Expected: task.StatusQueued})
+	if !errors.Is(err, task.ErrInvalidArgument) {
+		t.Fatalf("generic mutation: %v", err)
+	}
+	_, err = s.AppendEvent(ctx, r.TaskID, task.EventDraft{TaskID: r.TaskID, Type: task.EventTaskDiagnostic, At: r.CreatedAt, Payload: []byte(`{}`)})
+	if !errors.Is(err, task.ErrInvalidArgument) {
+		t.Fatalf("generic event: %v", err)
+	}
+	if created.Revision != 1 {
+		t.Fatal(created)
+	}
+}
+
+func TestGenerationRecoveryLeavesCompletedCheckpointIntact(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	r := generationRunFixture()
+	created, err := s.CreateGeneration(ctx, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := created
+	next.State = testgendomain.StateBaseline
+	next.Revision++
+	checkpoint, err := s.CheckpointGeneration(ctx, created.Revision, next, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RecoverInterrupted(ctx, r.CreatedAt.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetGeneration(ctx, r.ID)
+	if err != nil || got.State != testgendomain.StateBaseline || got.Revision != checkpoint.Revision || got.LastSequence != checkpoint.LastSequence {
+		t.Fatalf("recovered checkpoint = %+v, %v", got, err)
+	}
+}
+
+func TestGenerationCandidatesAreOwnedBoundedAndUnique(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	r, err := s.CreateGeneration(ctx, generationRunFixture())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range []testgendomain.State{testgendomain.StateBaseline, testgendomain.StateAnalyzing, testgendomain.StateSolving, testgendomain.StateRendering} {
+		next := r
+		next.State = state
+		next.Revision++
+		r, err = s.CheckpointGeneration(ctx, r.Revision, next, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	a := task.Artifact{ID: strings.Repeat("4", 32), TaskID: r.TaskID, Kind: "test-generation-source", RelativePath: "tasks/" + r.TaskID + "/" + strings.Repeat("4", 32) + ".source", MIMEType: "application/octet-stream", Size: 12, SHA256: strings.Repeat("e", 64), CreatedAt: r.CreatedAt}
+	c := testgendomain.Candidate{CaseID: strings.Repeat("5", 32), Kind: testgendomain.KindVerified, TargetSymbol: "fn:classify", Assertions: []testgendomain.Assertion{{Kind: testgendomain.AssertionIndependentOracle, EvidenceDigest: strings.Repeat("6", 64)}}, StagedSourceArtifact: testgendomain.ArtifactRef{ID: a.ID, Digest: a.SHA256}, CodeDigest: strings.Repeat("7", 64), PlannedEdits: []testgendomain.PlannedEdit{{Path: "tests/classify_test.c", Operation: testgendomain.EditCreate, AfterDigest: strings.Repeat("8", 64)}}}
+	next := r
+	next.State = testgendomain.StateValidating
+	next.Revision++
+	next.CandidateCount = 1
+	next.ArtifactDigests = []testgendomain.ArtifactRef{{ID: a.ID, Digest: a.SHA256}}
+	r, err = s.CheckpointGeneration(ctx, r.Revision, next, []testgendomain.Candidate{c}, []task.Artifact{a})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.ListGenerationCandidates(ctx, r.ID)
+	if err != nil || len(got) != 1 || got[0].CaseID != c.CaseID {
+		t.Fatalf("candidates = %+v, %v", got, err)
+	}
+	got[0].PlannedEdits[0].Path = "tampered"
+	again, err := s.ListGenerationCandidates(ctx, r.ID)
+	if err != nil || again[0].PlannedEdits[0].Path != "tests/classify_test.c" {
+		t.Fatalf("candidate clone = %+v, %v", again, err)
+	}
+	next = r
+	next.State = testgendomain.StateMinimizing
+	next.Revision++
+	next.CandidateCount++
+	if _, err = s.CheckpointGeneration(ctx, r.Revision, next, []testgendomain.Candidate{c}, nil); !errors.Is(err, task.ErrConflict) {
+		t.Fatalf("duplicate case id: %v", err)
+	}
+	other := c
+	other.CaseID = strings.Repeat("9", 32)
+	other.StagedSourceArtifact.ID = strings.Repeat("a", 32)
+	if _, err = s.CheckpointGeneration(ctx, r.Revision, next, []testgendomain.Candidate{other}, nil); !errors.Is(err, task.ErrInvalidArgument) {
+		t.Fatalf("foreign artifact: %v", err)
+	}
+	events, err := s.ReplayGenerationEvents(ctx, r.ID, 0, 200)
+	if err != nil || len(events) != 7 {
+		t.Fatalf("events = %d, %v", len(events), err)
+	}
+}
+
+func TestGenerationRejectsPersistedRequestOrStatusDrift(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		tamper func(*testing.T, *Store, testgendomain.Run)
+	}{
+		{"request", func(t *testing.T, s *Store, r testgendomain.Run) {
+			changed := r.Request
+			changed.CompileSnapshotDigest = strings.Repeat("f", 64)
+			raw, _ := json.Marshal(changed)
+			if _, err := s.db.Exec(`UPDATE tasks SET request_json=? WHERE task_id=?`, string(raw), r.TaskID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"status", func(t *testing.T, s *Store, r testgendomain.Run) {
+			if _, err := s.db.Exec(`UPDATE tasks SET status='running' WHERE task_id=?`, r.TaskID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := openTestStore(t)
+			r, err := s.CreateGeneration(context.Background(), generationRunFixture())
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.tamper(t, s, r)
+			if _, err := s.GetGeneration(context.Background(), r.ID); !errors.Is(err, task.ErrConflict) {
+				t.Fatalf("tampered row: %v", err)
+			}
+		})
+	}
+}
+
+func TestGenerationRejectsUnownedArtifactKinds(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	r, err := s.CreateGeneration(ctx, generationRunFixture())
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := task.Artifact{ID: strings.Repeat("4", 32), TaskID: r.TaskID, Kind: "stdout", RelativePath: "tasks/" + r.TaskID + "/" + strings.Repeat("4", 32) + ".source", MIMEType: "application/octet-stream", Size: 4, SHA256: strings.Repeat("e", 64), CreatedAt: r.CreatedAt}
+	next := r
+	next.State = testgendomain.StateBaseline
+	next.Revision++
+	next.ArtifactDigests = []testgendomain.ArtifactRef{{ID: a.ID, Digest: a.SHA256}}
+	if _, err = s.CheckpointGeneration(ctx, r.Revision, next, nil, []task.Artifact{a}); !errors.Is(err, task.ErrInvalidArgument) {
+		t.Fatalf("arbitrary artifact kind: %v", err)
+	}
+}
+
+func TestGenerationEventsUseClosedProtocolPayloads(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	r, err := s.CreateGeneration(ctx, generationRunFixture())
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := r
+	next.State = testgendomain.StateBaseline
+	next.Revision++
+	r, err = s.CheckpointGeneration(ctx, r.Revision, next, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next = r
+	next.State = testgendomain.StateCancelled
+	next.Revision++
+	finished := r.CreatedAt.Add(time.Minute)
+	next.FinishedAt = &finished
+	if _, err = s.CheckpointGeneration(ctx, r.Revision, next, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	events, err := s.ReplayGenerationEvents(ctx, r.ID, 0, 200)
+	if err != nil || len(events) != 5 {
+		t.Fatalf("events = %+v, %v", events, err)
+	}
+	wantTypes := []task.EventType{task.EventTaskCreated, task.EventTaskStarted, task.EventTestGenerationStateChanged, task.EventTestGenerationStateChanged, task.EventTaskFinished}
+	wantPayloads := [][]byte{[]byte(`{"status":"queued"}`), []byte(`{"status":"running"}`), []byte(`{"runId":"` + r.ID + `","from":"queued","to":"baseline"}`), []byte(`{"runId":"` + r.ID + `","from":"baseline","to":"cancelled"}`), []byte(`{"outcome":"cancelled"}`)}
+	for i, e := range events {
+		if e.Type != wantTypes[i] || !bytes.Equal(e.Payload, wantPayloads[i]) {
+			t.Fatalf("event %d = %s %s", i, e.Type, e.Payload)
+		}
+	}
+}

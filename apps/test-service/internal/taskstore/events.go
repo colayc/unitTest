@@ -119,11 +119,14 @@ func (s *Store) AppendEvent(ctx context.Context, taskID string, draft task.Event
 		return task.Event{}, storageError("begin append event", err)
 	}
 	defer tx.Rollback()
-	var exists int
-	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM tasks WHERE task_id=?`, taskID).Scan(&exists); isNoRows(err) {
+	var kind string
+	if err := tx.QueryRowContext(ctx, `SELECT kind FROM tasks WHERE task_id=?`, taskID).Scan(&kind); isNoRows(err) {
 		return task.Event{}, task.ErrNotFound
 	} else if err != nil {
 		return task.Event{}, storageError("find event task", err)
+	}
+	if kind == string(task.KindTestGeneration) {
+		return task.Event{}, task.ErrInvalidArgument
 	}
 	events, err := insertEvents(ctx, tx, []task.EventDraft{draft}, s.newID)
 	if err != nil {

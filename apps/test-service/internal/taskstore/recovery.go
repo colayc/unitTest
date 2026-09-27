@@ -181,6 +181,10 @@ func (s *Store) RecoverInterrupted(ctx context.Context, at time.Time) ([]task.Ev
 
 	events := make([]task.Event, 0, len(candidates))
 	for _, candidate := range candidates {
+		if candidate.kind == task.KindTestGeneration {
+			// Generation stages resume from their own durable checkpoints.
+			continue
+		}
 		interrupt := candidate.kind == task.KindSimulation ||
 			candidate.status == task.StatusRunning ||
 			candidate.status == task.StatusCancelling

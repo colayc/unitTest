@@ -22,7 +22,7 @@ type rowScanner interface {
 }
 
 func (s *Store) Create(ctx context.Context, input task.Task, steps []task.StepSnapshot, event task.EventDraft) (task.Task, []task.Event, error) {
-	if input.Kind == task.KindCoverageRun {
+	if input.Kind == task.KindCoverageRun || input.Kind == task.KindTestGeneration {
 		return task.Task{}, nil, task.ErrInvalidArgument
 	}
 	return s.createTask(ctx, input, steps, event, nil)
@@ -400,6 +400,9 @@ func (s *Store) List(ctx context.Context, cursor string, limit int, kinds ...tas
 }
 
 func (s *Store) Apply(ctx context.Context, mutation task.Mutation) (task.Task, []task.Event, error) {
+	if mutation.Task.Kind == task.KindTestGeneration {
+		return task.Task{}, nil, task.ErrInvalidArgument
+	}
 	if mutation.Task.ID == "" || !validStatus(mutation.Expected) {
 		return task.Task{}, nil, task.ErrInvalidArgument
 	}
@@ -454,7 +457,7 @@ func (s *Store) Apply(ctx context.Context, mutation task.Mutation) (task.Task, [
 	result, err := tx.ExecContext(ctx, `UPDATE tasks SET
 		kind=?, scenario=?, request_json=?, workspace_generation=?, plan_fingerprint=?, active_step=?,
 		timeout_ms=?, status=?, outcome=?, started_at=?, finished_at=?, error_code=?, error_message=?
-		WHERE task_id=? AND status=?`,
+		WHERE task_id=? AND status=? AND kind<>'test_generation'`,
 		string(mutation.Task.Kind), nullableScenario(mutation.Task), string(mutation.Task.Request),
 		mutation.Task.WorkspaceGeneration, mutation.Task.PlanFingerprint, mutation.Task.ActiveStep,
 		mutation.Task.Timeout.Milliseconds(), string(mutation.Task.Status), nullableOutcome(mutation.Task),
@@ -852,7 +855,7 @@ func validateTask(value task.Task) error {
 		if !task.ValidScenario(value.Scenario) || value.WorkspaceGeneration != "" {
 			return task.ErrInvalidArgument
 		}
-	case task.KindCMakeBuild, task.KindTestDiscovery, task.KindTestRun, task.KindCoverageRun:
+	case task.KindCMakeBuild, task.KindTestDiscovery, task.KindTestRun, task.KindCoverageRun, task.KindTestGeneration:
 		if value.Scenario != "" || !validWorkspaceGeneration(value.WorkspaceGeneration) {
 			return task.ErrInvalidArgument
 		}
@@ -872,7 +875,7 @@ func validateTask(value task.Task) error {
 func validTaskKind(value task.Kind) bool {
 	switch value {
 	case task.KindSimulation, task.KindCMakeBuild,
-		task.KindTestDiscovery, task.KindTestRun, task.KindCoverageRun:
+		task.KindTestDiscovery, task.KindTestRun, task.KindCoverageRun, task.KindTestGeneration:
 		return true
 	default:
 		return false

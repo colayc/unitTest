@@ -1036,8 +1036,8 @@ func TestMigration009UpgradesCoverageSchemaAndPreservesRelations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(migrations) != 9 || migrations[len(migrations)-1].version != 9 {
-		t.Fatalf("migration tail = %#v, want version 9", migrations)
+	if len(migrations) < 9 || migrations[8].version != 9 {
+		t.Fatalf("migration 9 missing from %#v", migrations)
 	}
 	wantLegacyChecksums := []string{
 		"2f3f3db3d9811852897799f6e5b210e615edb47002dde34a51bb21432b8a3158",
@@ -1109,8 +1109,8 @@ func TestMigration009FailureRollsBackAndRestoresForeignKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(migrations) != 9 || migrations[len(migrations)-1].version != 9 {
-		t.Fatalf("migration tail = %#v, want version 9", migrations)
+	if len(migrations) < 9 || migrations[8].version != 9 {
+		t.Fatalf("migration 9 missing from %#v", migrations)
 	}
 	applyMigrationsThrough(t, ctx, store, migrations[:8])
 	legacy := seedCoverageMigrationLegacyData(t, db)
@@ -1312,7 +1312,7 @@ func TestReopenDoesNotReapplyMigrationAndDetectsChecksumTampering(t *testing.T) 
 	if err := store.db.QueryRow(`SELECT COUNT(*), MIN(sha256) FROM schema_migrations`).Scan(&count, &checksum); err != nil {
 		t.Fatal(err)
 	}
-	if count != 9 || len(checksum) != 64 {
+	if count != 10 || len(checksum) != 64 {
 		t.Fatalf("schema_migrations count=%d checksum=%q", count, checksum)
 	}
 	if err := store.Close(); err != nil {
@@ -1322,7 +1322,7 @@ func TestReopenDoesNotReapplyMigrationAndDetectsChecksumTampering(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&count); err != nil || count != 9 {
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&count); err != nil || count != 10 {
 		t.Fatalf("reopen count=%d err=%v", count, err)
 	}
 	if _, err := store.db.Exec(`UPDATE schema_migrations SET sha256=? WHERE version=1`, strings.Repeat("0", 64)); err != nil {
