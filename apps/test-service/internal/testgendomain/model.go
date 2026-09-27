@@ -95,16 +95,17 @@ type Candidate struct {
 }
 
 type Run struct {
-	ID              string        `json:"runId"`
-	TaskID          string        `json:"taskId"`
-	Request         Request       `json:"request"`
-	State           State         `json:"state"`
-	Revision        int64         `json:"revision"`
-	CreatedAt       time.Time     `json:"createdAt"`
-	FinishedAt      *time.Time    `json:"finishedAt,omitempty"`
-	LastSequence    int64         `json:"lastSequence"`
-	CandidateCount  int           `json:"candidateCount"`
-	ArtifactDigests []ArtifactRef `json:"artifactDigests"`
+	ID              string           `json:"runId"`
+	TaskID          string           `json:"taskId"`
+	Request         Request          `json:"request"`
+	State           State            `json:"state"`
+	Revision        int64            `json:"revision"`
+	CreatedAt       time.Time        `json:"createdAt"`
+	FinishedAt      *time.Time       `json:"finishedAt,omitempty"`
+	LastSequence    int64            `json:"lastSequence"`
+	CandidateCount  int              `json:"candidateCount"`
+	ArtifactDigests []ArtifactRef    `json:"artifactDigests"`
+	Record          GenerationRecord `json:"record"`
 }
 
 func IsTerminal(v State) bool {
@@ -162,6 +163,9 @@ func ValidateRun(r Run) error {
 			return ErrInvalid
 		}
 		seen[a.ID] = true
+	}
+	if !r.Record.IsZero() && !r.Record.ValidFor(r.Request, r.CandidateCount) {
+		return ErrInvalid
 	}
 	return nil
 }
@@ -227,6 +231,7 @@ func CloneCandidate(c Candidate) Candidate {
 }
 func CloneRun(r Run) Run {
 	r.ArtifactDigests = append([]ArtifactRef(nil), r.ArtifactDigests...)
+	r.Record.MinimizedCaseIDs = append([]string(nil), r.Record.MinimizedCaseIDs...)
 	if r.FinishedAt != nil {
 		t := *r.FinishedAt
 		r.FinishedAt = &t

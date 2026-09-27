@@ -21,10 +21,20 @@ type SnapshotVerifier func(context.Context, testgendomain.Request) (testgendomai
 // SHA-256 with the supplied task-owned metadata before returning nil.
 type ArtifactVerifier func(context.Context, task.Artifact) error
 
+// ProcessOwnerVerifier attests that no process from this owner remains live.
+// A successful resume never adopts an old process; it only returns a durable
+// completed checkpoint from which the runtime may start a fresh stage.
+type ProcessOwnerVerifier func(context.Context, string, string) error
+
 type Coordinator struct {
 	store          *taskstore.Store
 	verify         SnapshotVerifier
 	verifyArtifact ArtifactVerifier
+	verifyProcess  ProcessOwnerVerifier
+}
+
+func NewWithProcessVerifier(store *taskstore.Store, verify SnapshotVerifier, artifactVerifier ArtifactVerifier, processVerifier ProcessOwnerVerifier) *Coordinator {
+	return &Coordinator{store: store, verify: verify, verifyArtifact: artifactVerifier, verifyProcess: processVerifier}
 }
 
 func New(store *taskstore.Store, verify SnapshotVerifier, artifactVerifier ...ArtifactVerifier) *Coordinator {
@@ -53,7 +63,7 @@ func (c *Coordinator) Start(ctx context.Context, request testgendomain.Request) 
 	if err := c.check(ctx, request); err != nil {
 		return testgendomain.Run{}, err
 	}
-	r := testgendomain.Run{ID: task.NewID(), TaskID: task.NewID(), Request: request, State: testgendomain.StateQueued, Revision: 1, CreatedAt: time.Now().UTC()}
+	r := testgendomain.Run{ID: task.NewID(), TaskID: task.NewID(), Request: request, State: testgendomain.StateQueued, Revision: 1, CreatedAt: time.Now().UTC(), Record: testgendomain.NewGenerationRecord(request)}
 	return c.store.CreateGeneration(ctx, r)
 }
 func (c *Coordinator) Get(ctx context.Context, runID string) (testgendomain.Run, error) {
@@ -73,6 +83,14 @@ func (c *Coordinator) ListCandidates(ctx context.Context, runID string) ([]testg
 // candidates in one database transaction. The expected revision is the
 // cross-process writer lease; stale writers cannot overwrite newer progress.
 func (c *Coordinator) Checkpoint(ctx context.Context, runID string, expectedRevision int64, nextState testgendomain.State, candidates []testgendomain.Candidate, artifacts []task.Artifact) (testgendomain.Run, error) {
+	return c.checkpoint(ctx, runID, expectedRevision, nextState, candidates, artifacts, nil)
+}
+
+func (c *Coordinator) CheckpointWithRecord(ctx context.Context, runID string, expectedRevision int64, nextState testgendomain.State, candidates []testgendomain.Candidate, artifacts []task.Artifact, record testgendomain.GenerationRecord) (testgendomain.Run, error) {
+	return c.checkpoint(ctx, runID, expectedRevision, nextState, candidates, artifacts, &record)
+}
+
+func (c *Coordinator) checkpoint(ctx context.Context, runID string, expectedRevision int64, nextState testgendomain.State, candidates []testgendomain.Candidate, artifacts []task.Artifact, record *testgendomain.GenerationRecord) (testgendomain.Run, error) {
 	if c == nil || c.store == nil {
 		return testgendomain.Run{}, ErrUnavailable
 	}
@@ -94,6 +112,10 @@ func (c *Coordinator) Checkpoint(ctx context.Context, runID string, expectedRevi
 		return testgendomain.Run{}, err
 	}
 	next := testgendomain.CloneRun(current)
+	if record != nil {
+		next.Record = *record
+		next.Record.MinimizedCaseIDs = append([]string(nil), record.MinimizedCaseIDs...)
+	}
 	next.State = nextState
 	next.Revision++
 	next.CandidateCount += len(candidates)
@@ -155,8 +177,16 @@ func (c *Coordinator) Resume(ctx context.Context, taskID string) (testgendomain.
 	if err := c.check(ctx, r.Request); err != nil {
 		return testgendomain.Run{}, err
 	}
+	if r.Record.IsZero() || !r.Record.ValidFor(r.Request, r.CandidateCount) {
+		return testgendomain.Run{}, ErrStaleSnapshot
+	}
 	if err := c.verifyOwnedArtifacts(ctx, r); err != nil {
 		return testgendomain.Run{}, err
+	}
+	if r.Request.ProcessOwnerDigest != "" {
+		if c.verifyProcess == nil || c.verifyProcess(ctx, r.TaskID, r.Request.ProcessOwnerDigest) != nil {
+			return testgendomain.Run{}, ErrStaleSnapshot
+		}
 	}
 	return r, nil
 }

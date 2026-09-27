@@ -42,6 +42,12 @@ type SnapshotIdentity struct {
 	WorkspaceGeneration    string `json:"workspaceGeneration"`
 	CompileSnapshotDigest  string `json:"compileSnapshotDigest"`
 	CoverageSnapshotDigest string `json:"coverageSnapshotDigest"`
+	SourceDigest           string `json:"sourceDigest"`
+	CMakeTargetDigest      string `json:"cmakeTargetDigest"`
+	FrameworkBundleDigest  string `json:"frameworkBundleDigest"`
+	AnalyzerBundleDigest   string `json:"analyzerBundleDigest"`
+	BaselineReportDigest   string `json:"baselineReportDigest"`
+	ProcessOwnerDigest     string `json:"processOwnerDigest,omitempty"`
 }
 
 // Request contains only service-resolved identities and closed protocol inputs.
@@ -60,20 +66,26 @@ type Request struct {
 	Budgets                Budgets   `json:"budgets"`
 	CompileSnapshotDigest  string    `json:"compileSnapshotDigest"`
 	CoverageSnapshotDigest string    `json:"coverageSnapshotDigest"`
+	SourceDigest           string    `json:"sourceDigest"`
+	CMakeTargetDigest      string    `json:"cmakeTargetDigest"`
+	FrameworkBundleDigest  string    `json:"frameworkBundleDigest"`
+	AnalyzerBundleDigest   string    `json:"analyzerBundleDigest"`
+	BaselineReportDigest   string    `json:"baselineReportDigest"`
+	ProcessOwnerDigest     string    `json:"processOwnerDigest,omitempty"`
 }
 
 func (r Request) SnapshotIdentity() SnapshotIdentity {
-	return SnapshotIdentity{r.WorkspaceGeneration, r.CompileSnapshotDigest, r.CoverageSnapshotDigest}
+	return SnapshotIdentity{WorkspaceGeneration: r.WorkspaceGeneration, CompileSnapshotDigest: r.CompileSnapshotDigest, CoverageSnapshotDigest: r.CoverageSnapshotDigest, SourceDigest: r.SourceDigest, CMakeTargetDigest: r.CMakeTargetDigest, FrameworkBundleDigest: r.FrameworkBundleDigest, AnalyzerBundleDigest: r.AnalyzerBundleDigest, BaselineReportDigest: r.BaselineReportDigest, ProcessOwnerDigest: r.ProcessOwnerDigest}
 }
 func (r Request) SnapshotMatches(now SnapshotIdentity) error {
-	if r.SnapshotIdentity() != now || !validDigest(now.WorkspaceGeneration) || !validDigest(now.CompileSnapshotDigest) || !validDigest(now.CoverageSnapshotDigest) {
+	if r.SnapshotIdentity() != now || !validDigest(now.WorkspaceGeneration) || !validDigest(now.CompileSnapshotDigest) || !validDigest(now.CoverageSnapshotDigest) || !validDigest(now.SourceDigest) || !validDigest(now.CMakeTargetDigest) || !validDigest(now.FrameworkBundleDigest) || !validDigest(now.AnalyzerBundleDigest) || !validDigest(now.BaselineReportDigest) || now.ProcessOwnerDigest != "" && !validDigest(now.ProcessOwnerDigest) {
 		return ErrStaleSnapshot
 	}
 	return nil
 }
 
 func ValidateRequest(r Request) error {
-	if !validID(r.IdempotencyKey) || !validDigest(r.WorkspaceGeneration) || !validDigest(r.CompileSnapshotDigest) || !validDigest(r.CoverageSnapshotDigest) || !validProjectID(r.ProjectID) || !validGoals(r.Goals) || !validBudgets(r.Budgets) {
+	if !validID(r.IdempotencyKey) || !validDigest(r.WorkspaceGeneration) || !validDigest(r.CompileSnapshotDigest) || !validDigest(r.CoverageSnapshotDigest) || !validDigest(r.SourceDigest) || !validDigest(r.CMakeTargetDigest) || !validDigest(r.FrameworkBundleDigest) || !validDigest(r.AnalyzerBundleDigest) || !validDigest(r.BaselineReportDigest) || r.ProcessOwnerDigest != "" && !validDigest(r.ProcessOwnerDigest) || !validProjectID(r.ProjectID) || !validGoals(r.Goals) || !validBudgets(r.Budgets) {
 		return ErrInvalid
 	}
 	switch r.Framework {

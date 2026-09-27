@@ -29,6 +29,10 @@ func (s *Store) CreateGeneration(ctx context.Context, run testgendomain.Run) (te
 	}
 	hash := sha256.Sum256(requestJSON)
 	requestHash := hex.EncodeToString(hash[:])
+	recordJSON, recordHash, err := generationRecordBytes(run.Record)
+	if err != nil {
+		return testgendomain.Run{}, task.ErrInvalidArgument
+	}
 	now := run.CreatedAt.UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -51,7 +55,7 @@ func (s *Store) CreateGeneration(ctx context.Context, run testgendomain.Run) (te
 		}
 		return testgendomain.Run{}, storageError("create generation task", err)
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO test_generation_runs(run_id,task_id,state,revision,artifact_digests_json,candidate_count) VALUES(?,?,?,1,'[]',0)`, run.ID, run.TaskID, string(run.State))
+	_, err = tx.ExecContext(ctx, `INSERT INTO test_generation_runs(run_id,task_id,state,revision,artifact_digests_json,candidate_count,record_json,record_sha256) VALUES(?,?,?,1,'[]',0,?,?)`, run.ID, run.TaskID, string(run.State), string(recordJSON), recordHash)
 	if err != nil {
 		return testgendomain.Run{}, storageError("create generation relation", err)
 	}
@@ -95,11 +99,12 @@ func getGeneration(ctx context.Context, q interface {
 		value = taskID
 	}
 	var r testgendomain.Run
-	var request, artifacts []byte
+	var request, artifacts, recordJSON []byte
+	var recordHash string
 	var state, created, requestHash, workspace, status string
 	var finished sql.NullString
 	var kind string
-	err := q.QueryRowContext(ctx, `SELECT g.run_id,g.task_id,g.state,g.revision,g.artifact_digests_json,g.candidate_count,t.request_json,t.created_at,t.finished_at,t.last_sequence,t.kind,t.request_hash,t.workspace_generation,t.status FROM test_generation_runs g JOIN tasks t ON t.task_id=g.task_id WHERE `+filter, value).Scan(&r.ID, &r.TaskID, &state, &r.Revision, &artifacts, &r.CandidateCount, &request, &created, &finished, &r.LastSequence, &kind, &requestHash, &workspace, &status)
+	err := q.QueryRowContext(ctx, `SELECT g.run_id,g.task_id,g.state,g.revision,g.artifact_digests_json,g.candidate_count,g.record_json,g.record_sha256,t.request_json,t.created_at,t.finished_at,t.last_sequence,t.kind,t.request_hash,t.workspace_generation,t.status FROM test_generation_runs g JOIN tasks t ON t.task_id=g.task_id WHERE `+filter, value).Scan(&r.ID, &r.TaskID, &state, &r.Revision, &artifacts, &r.CandidateCount, &recordJSON, &recordHash, &request, &created, &finished, &r.LastSequence, &kind, &requestHash, &workspace, &status)
 	if isNoRows(err) {
 		return testgendomain.Run{}, task.ErrNotFound
 	}
@@ -114,6 +119,13 @@ func getGeneration(ctx context.Context, q interface {
 		return testgendomain.Run{}, task.ErrConflict
 	}
 	if err := strictGenerationJSON(artifacts, &r.ArtifactDigests); err != nil {
+		return testgendomain.Run{}, task.ErrConflict
+	}
+	if err := strictGenerationJSON(recordJSON, &r.Record); err != nil {
+		return testgendomain.Run{}, task.ErrConflict
+	}
+	canonicalRecord, expectedRecordHash, err := generationRecordBytes(r.Record)
+	if err != nil || !bytes.Equal(recordJSON, canonicalRecord) || recordHash != expectedRecordHash {
 		return testgendomain.Run{}, task.ErrConflict
 	}
 	r.CreatedAt, err = time.Parse(time.RFC3339Nano, created)
@@ -167,6 +179,21 @@ func strictGenerationJSON(data []byte, out any) error {
 	return nil
 }
 
+func generationRecordBytes(r testgendomain.GenerationRecord) ([]byte, string, error) {
+	var raw []byte
+	var err error
+	if r.IsZero() {
+		raw = []byte(`{}`)
+	} else {
+		raw, err = json.Marshal(r)
+	}
+	if err != nil || len(raw) > 65536 {
+		return nil, "", task.ErrInvalidArgument
+	}
+	sum := sha256.Sum256(raw)
+	return raw, hex.EncodeToString(sum[:]), nil
+}
+
 func (s *Store) CheckpointGeneration(ctx context.Context, expected int64, next testgendomain.Run, candidates []testgendomain.Candidate, artifacts []task.Artifact) (testgendomain.Run, error) {
 	if s == nil || ctx == nil || expected < 1 || testgendomain.ValidateRun(next) != nil || next.Revision != expected+1 || testgendomain.ValidateCandidates(candidates) != nil || len(artifacts) > 1000 {
 		return testgendomain.Run{}, task.ErrInvalidArgument
@@ -184,6 +211,15 @@ func (s *Store) CheckpointGeneration(ctx context.Context, expected int64, next t
 		return testgendomain.Run{}, task.ErrConflict
 	}
 	if next.CandidateCount != current.CandidateCount+len(candidates) || next.LastSequence != current.LastSequence || len(next.ArtifactDigests) < len(current.ArtifactDigests) {
+		return testgendomain.Run{}, task.ErrInvalidArgument
+	}
+	if !current.Record.IsZero() && (!next.Record.ValidFor(next.Request, next.CandidateCount) || !next.Record.MonotonicAfter(current.Record)) {
+		return testgendomain.Run{}, task.ErrInvalidArgument
+	}
+	if current.Record.IsZero() && !next.Record.IsZero() && !next.Record.ValidFor(next.Request, next.CandidateCount) {
+		return testgendomain.Run{}, task.ErrInvalidArgument
+	}
+	if len(next.Record.MinimizedCaseIDs) > 0 && next.State != testgendomain.StateAwaitingConfirmation && next.State != testgendomain.StateAccepted && next.State != testgendomain.StateRejected {
 		return testgendomain.Run{}, task.ErrInvalidArgument
 	}
 	for i, a := range current.ArtifactDigests {
@@ -224,11 +260,21 @@ func (s *Store) CheckpointGeneration(ctx context.Context, expected int64, next t
 			return testgendomain.Run{}, task.ErrConflict
 		}
 	}
+	for _, caseID := range next.Record.MinimizedCaseIDs {
+		var found int
+		if e := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM test_generation_candidates WHERE run_id=? AND case_id=?`, next.ID, caseID).Scan(&found); e != nil || found != 1 {
+			return testgendomain.Run{}, task.ErrInvalidArgument
+		}
+	}
 	refs, e := json.Marshal(next.ArtifactDigests)
 	if e != nil || len(refs) > 128000 {
 		return testgendomain.Run{}, task.ErrInvalidArgument
 	}
-	result, e := tx.ExecContext(ctx, `UPDATE test_generation_runs SET state=?,revision=?,artifact_digests_json=?,candidate_count=? WHERE run_id=? AND revision=?`, string(next.State), next.Revision, string(refs), next.CandidateCount, next.ID, expected)
+	recordJSON, recordHash, e := generationRecordBytes(next.Record)
+	if e != nil {
+		return testgendomain.Run{}, task.ErrInvalidArgument
+	}
+	result, e := tx.ExecContext(ctx, `UPDATE test_generation_runs SET state=?,revision=?,artifact_digests_json=?,candidate_count=?,record_json=?,record_sha256=? WHERE run_id=? AND revision=?`, string(next.State), next.Revision, string(refs), next.CandidateCount, string(recordJSON), recordHash, next.ID, expected)
 	if e != nil {
 		return testgendomain.Run{}, storageError("generation checkpoint", e)
 	}

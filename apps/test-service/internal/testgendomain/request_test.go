@@ -12,6 +12,7 @@ func validRequest() Request {
 		Goals:                 Goals{FunctionPercent: 90, LinePercent: 80, BranchPercent: 70},
 		Budgets:               Budgets{WallTimeMS: 1000, CandidateCount: 4, MemoryMiB: 256, Concurrency: 1},
 		CompileSnapshotDigest: strings.Repeat("b", 64), CoverageSnapshotDigest: strings.Repeat("c", 64),
+		SourceDigest: strings.Repeat("1", 64), CMakeTargetDigest: strings.Repeat("2", 64), FrameworkBundleDigest: strings.Repeat("3", 64), AnalyzerBundleDigest: strings.Repeat("4", 64), BaselineReportDigest: strings.Repeat("5", 64),
 	}
 }
 
@@ -49,10 +50,12 @@ func TestValidateRequestRejectsInvalidClosedValues(t *testing.T) {
 
 func TestRequestSnapshotIdentityMustMatch(t *testing.T) {
 	r := validRequest()
-	if err := r.SnapshotMatches(SnapshotIdentity{WorkspaceGeneration: r.WorkspaceGeneration, CompileSnapshotDigest: r.CompileSnapshotDigest, CoverageSnapshotDigest: r.CoverageSnapshotDigest}); err != nil {
+	if err := r.SnapshotMatches(r.SnapshotIdentity()); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.SnapshotMatches(SnapshotIdentity{WorkspaceGeneration: r.WorkspaceGeneration, CompileSnapshotDigest: strings.Repeat("f", 64), CoverageSnapshotDigest: r.CoverageSnapshotDigest}); err == nil {
+	changed := r.SnapshotIdentity()
+	changed.CompileSnapshotDigest = strings.Repeat("f", 64)
+	if err := r.SnapshotMatches(changed); err == nil {
 		t.Fatal("accepted stale compile snapshot")
 	}
 }

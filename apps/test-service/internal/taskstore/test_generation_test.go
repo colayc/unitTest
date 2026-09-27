@@ -16,7 +16,8 @@ import (
 func generationRequestFixture() testgendomain.Request {
 	return testgendomain.Request{IdempotencyKey: strings.Repeat("1", 32), WorkspaceGeneration: strings.Repeat("a", 64), ProjectID: "project", Scope: testgendomain.ScopeWorkspace, Framework: testgendomain.FrameworkAuto,
 		Goals: testgendomain.Goals{FunctionPercent: 90, LinePercent: 80, BranchPercent: 70}, Budgets: testgendomain.Budgets{WallTimeMS: 1000, CandidateCount: 4, MemoryMiB: 256, Concurrency: 1},
-		CompileSnapshotDigest: strings.Repeat("b", 64), CoverageSnapshotDigest: strings.Repeat("c", 64)}
+		CompileSnapshotDigest: strings.Repeat("b", 64), CoverageSnapshotDigest: strings.Repeat("c", 64),
+		SourceDigest: strings.Repeat("1", 64), CMakeTargetDigest: strings.Repeat("2", 64), FrameworkBundleDigest: strings.Repeat("3", 64), AnalyzerBundleDigest: strings.Repeat("4", 64), BaselineReportDigest: strings.Repeat("5", 64)}
 }
 
 func generationRunFixture() testgendomain.Run {
@@ -216,6 +217,22 @@ func TestGenerationRejectsPersistedRequestOrStatusDrift(t *testing.T) {
 				t.Fatalf("tampered row: %v", err)
 			}
 		})
+	}
+}
+
+func TestGenerationRejectsTamperedCheckpointRecord(t *testing.T) {
+	s := openTestStore(t)
+	r := generationRunFixture()
+	r.Record = testgendomain.NewGenerationRecord(r.Request)
+	created, err := s.CreateGeneration(context.Background(), r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE test_generation_runs SET record_json='{}' WHERE run_id=?`, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetGeneration(context.Background(), created.ID); !errors.Is(err, task.ErrConflict) {
+		t.Fatalf("tampered record: %v", err)
 	}
 }
 

@@ -17,7 +17,8 @@ import (
 
 func coordRequest() testgendomain.Request {
 	return testgendomain.Request{IdempotencyKey: strings.Repeat("1", 32), WorkspaceGeneration: strings.Repeat("a", 64), ProjectID: "project", Scope: testgendomain.ScopeWorkspace, Framework: testgendomain.FrameworkAuto,
-		Goals: testgendomain.Goals{FunctionPercent: 90, LinePercent: 80, BranchPercent: 70}, Budgets: testgendomain.Budgets{WallTimeMS: 1000, CandidateCount: 4, MemoryMiB: 256, Concurrency: 1}, CompileSnapshotDigest: strings.Repeat("b", 64), CoverageSnapshotDigest: strings.Repeat("c", 64)}
+		Goals: testgendomain.Goals{FunctionPercent: 90, LinePercent: 80, BranchPercent: 70}, Budgets: testgendomain.Budgets{WallTimeMS: 1000, CandidateCount: 4, MemoryMiB: 256, Concurrency: 1}, CompileSnapshotDigest: strings.Repeat("b", 64), CoverageSnapshotDigest: strings.Repeat("c", 64),
+		SourceDigest: strings.Repeat("1", 64), CMakeTargetDigest: strings.Repeat("2", 64), FrameworkBundleDigest: strings.Repeat("3", 64), AnalyzerBundleDigest: strings.Repeat("4", 64), BaselineReportDigest: strings.Repeat("5", 64)}
 }
 
 func TestRestartResumesFromEachCompletedStage(t *testing.T) {
@@ -315,5 +316,112 @@ func TestCheckpointRejectsExistingArtifactChangedBetweenStages(t *testing.T) {
 				t.Fatalf("checkpoint changed after rejection: %+v, %v", persisted, err)
 			}
 		})
+	}
+}
+
+func TestResumeRejectsChangedTrustedIdentity(t *testing.T) {
+	base := coordRequest()
+	for _, tc := range []struct {
+		name   string
+		change func(*testgendomain.SnapshotIdentity)
+	}{
+		{"source", func(v *testgendomain.SnapshotIdentity) { v.SourceDigest = strings.Repeat("f", 64) }},
+		{"compile", func(v *testgendomain.SnapshotIdentity) { v.CompileSnapshotDigest = strings.Repeat("f", 64) }},
+		{"cmake", func(v *testgendomain.SnapshotIdentity) { v.CMakeTargetDigest = strings.Repeat("f", 64) }},
+		{"framework", func(v *testgendomain.SnapshotIdentity) { v.FrameworkBundleDigest = strings.Repeat("f", 64) }},
+		{"analyzer", func(v *testgendomain.SnapshotIdentity) { v.AnalyzerBundleDigest = strings.Repeat("f", 64) }},
+		{"baseline", func(v *testgendomain.SnapshotIdentity) { v.BaselineReportDigest = strings.Repeat("f", 64) }},
+		{"coverage", func(v *testgendomain.SnapshotIdentity) { v.CoverageSnapshotDigest = strings.Repeat("f", 64) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := taskstore.Open(filepath.Join(t.TempDir(), "tasks.sqlite"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			ctx := context.Background()
+			good := New(s, func(context.Context, testgendomain.Request) (testgendomain.SnapshotIdentity, error) {
+				return base.SnapshotIdentity(), nil
+			})
+			r, err := good.Start(ctx, base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := base.SnapshotIdentity()
+			tc.change(&now)
+			stale := New(s, func(context.Context, testgendomain.Request) (testgendomain.SnapshotIdentity, error) { return now, nil })
+			if _, err := stale.Resume(ctx, r.TaskID); !errors.Is(err, ErrStaleSnapshot) {
+				t.Fatalf("resume drift: %v", err)
+			}
+		})
+	}
+}
+
+func TestResumeNeverAdoptsUnverifiableProcess(t *testing.T) {
+	ctx := context.Background()
+	s, err := taskstore.Open(filepath.Join(t.TempDir(), "tasks.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	rq := coordRequest()
+	rq.ProcessOwnerDigest = strings.Repeat("d", 64)
+	verify := func(context.Context, testgendomain.Request) (testgendomain.SnapshotIdentity, error) {
+		return rq.SnapshotIdentity(), nil
+	}
+	c := New(s, verify)
+	r, err := c.Start(ctx, rq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Resume(ctx, r.TaskID); !errors.Is(err, ErrStaleSnapshot) {
+		t.Fatalf("adopted without process proof: %v", err)
+	}
+	attested := NewWithProcessVerifier(s, verify, nil, func(context.Context, string, string) error { return nil })
+	if _, err := attested.Resume(ctx, r.TaskID); err != nil {
+		t.Fatalf("verified completed checkpoint: %v", err)
+	}
+	stillLive := NewWithProcessVerifier(s, verify, nil, func(context.Context, string, string) error { return errors.New("owned process still live") })
+	if _, err := stillLive.Resume(ctx, r.TaskID); !errors.Is(err, ErrStaleSnapshot) {
+		t.Fatalf("adopted live process: %v", err)
+	}
+}
+
+func TestCheckpointRecordIsDigestBoundAndRestarted(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "tasks.sqlite")
+	ctx := context.Background()
+	s, err := taskstore.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := New(s, func(context.Context, testgendomain.Request) (testgendomain.SnapshotIdentity, error) {
+		return coordRequest().SnapshotIdentity(), nil
+	})
+	r, err := c.Start(ctx, coordRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := r.Record
+	record.BudgetUsed.Candidates = 1
+	record.BudgetUsed.OutputBytes = 5
+	r, err = c.CheckpointWithRecord(ctx, r.ID, r.Revision, testgendomain.StateBaseline, nil, nil, record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = taskstore.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	c = New(s, func(context.Context, testgendomain.Request) (testgendomain.SnapshotIdentity, error) {
+		return coordRequest().SnapshotIdentity(), nil
+	})
+	resumed, err := c.Resume(ctx, r.TaskID)
+	if err != nil || resumed.Record.BudgetUsed.Candidates != 1 || resumed.Record.BudgetUsed.OutputBytes != 5 {
+		t.Fatalf("record after restart: %+v, %v", resumed.Record, err)
 	}
 }
