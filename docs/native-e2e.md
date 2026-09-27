@@ -237,6 +237,26 @@ stable identity、实际 executable digest 和 Service artifact digest。require
 命令成功前重新读取并按 closed schema 验证该文件；缺失、截断、路径字段、scenario
 缺失或 provenance 缺失均不能被 `toolchain-report.json` 掩盖。
 
+## Phase 10 离线测试生成证据边界
+
+测试生成的本地静态 fixture、Protocol v1.5 契约测试、扩展控制器测试、mutation fixture
+和性能/安全单元测试，只能证明实现的闭集行为与 fail-closed 规则。它们不产生
+Phase 10 native coverage receipt，也不能替代 Linux Clang/LLVM、Linux GCC/gcovr、
+Windows clang-cl/LLVM 的真实 Service 矩阵。
+
+真正的 Phase 10 native/hosted evidence 必须绑定合并候选 SHA、固定 Clang/analyzer
+bundle 的逐文件摘要与 license inventory、实际 runner/job/artifact identity、四个
+toolchain/framework 组合的 coverage delta、mutation 和性能报告，并在全部报告关闭
+后才写入 gate catalog。cross-compile、parser-only、local-static 或缺少 immutable
+artifact receipt 的结果保持 `MISSING`，不得标为 PASS。
+
+本地可以先运行 `pnpm test:phase10:test-generation` 验证报告 schema、断言/覆盖率增量、
+故障场景、mutation 和预算逻辑；该命令不上传 artifact、不创建 receipt、不改变 gate
+状态。任何正式 Code-OSS/native workflow 尚未运行时，`releaseReady=false` 必须保持不变。
+
+Phase 10 完成后仍需重新执行完整 Phase 9 regression，随后才进入正式 Windows 签名、
+第三方 license/legal 人工审批和最终发布资格验证。
+
 ## 后续阶段
 
 Phase 5 才会为 clang-cl/Clang/GCC 加入 coverage instrumentation、`llvm-profdata`、`llvm-cov` 和 `gcovr`。当前 Phase 3D 只验证 clang-cl/LLVM 工具链边界与真实构建，不执行覆盖率命令。

@@ -158,6 +158,34 @@ Phase 8 仍未完成：首次 hosted producer 与无签名双平台资格验证�
 
 验收标准：源设计规格中的每项发布门禁和成功标准均有自动化结果或明确签署的人工记录。
 
+### Phase 10：离线覆盖率驱动的单元测试用例自动生成
+
+Phase 10 在 Phase 8 的正式签名、最终第三方 license/legal 审批和最终发布资格之前
+实施。首个版本采用完全离线、产品自研的源码分析/有界求解/测试渲染/真实编译执行
+闭环，不使用云端或本地 LLM，不使用 Mock、Stub、CppUMock 或 CMock 生成测试。
+生成器只处理可证明安全的 C/C++ 子集，所有候选必须有有效断言、通过真实测试并带来
+函数/行/分支中的至少一项覆盖率增量；characterization 候选须显式标记并单独确认。
+
+当前状态：Phase 10 的 Protocol v1.5、任务/事件/制品持久化、owner-scoped progress
+与取消/重启语义、摘要绑定 preview/accept、Code-OSS 命令与结果/精确 diff UX、离线
+本地报告/mutation/performance/security harness 已实现并通过相应本地回归。它们证明
+契约、安全边界和 fail-closed 行为，不等于四工具链 native 或 hosted 发布证据。
+
+Phase 10 尚未宣告完成：Linux Clang/LLVM coverage、固定 analyzer bundle 的实际准备
+与 license inventory、四工具链真实生成/编译/执行/coverage delta、hosted CI receipt、
+完整 Phase 9 regression 以及最终 gate catalog 仍需逐项以 immutable evidence 闭合。
+在这些证据闭合前，所有缺失或未运行的行保持 `MISSING`，gate matrix 的
+`releaseReady` 必须为 `false`。
+
+详细设计与操作边界：
+`docs/superpowers/specs/2026-09-27-offline-coverage-guided-test-generation-design.md`、
+`docs/test-generation.md`、
+`docs/superpowers/plans/2026-09-27-offline-coverage-guided-test-generation.md`。
+
+Phase 10 完成并合并后，才进入后续 release 阶段：正式 Windows 签名、第三方
+license/legal 人工审批、更新路线图/文档状态和最终发布资格验证。上述三项不由 Phase 10
+本地测试或文档自动通过。
+
 ## 跨阶段规则
 
 - 每个阶段在编写生产代码前都以详细计划和失败测试开始。
