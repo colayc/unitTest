@@ -60,7 +60,7 @@ func TestAnalyzeUsesOnlyVerifiedFixedCompilerWithCleanEnvironment(t *testing.T) 
 	if *verified != 2 || runner.calls != 1 {
 		t.Fatalf("bundle verifications=%d, launches=%d", *verified, runner.calls)
 	}
-	want := []string{"-Xclang", "-ast-dump=json", "-fsyntax-only", "-std=c11", "-resource-dir", a.bundle.ResourceDir(), filepath.Join(request.WorkspaceRoot, request.SourceRelative)}
+	want := []string{"-Xclang", "-ast-dump=json", "-fsyntax-only", "-nostdinc", "-nostdinc++", "-isystem", filepath.Join(a.bundle.ResourceDir(), "include"), "-std=c11", "-resource-dir", a.bundle.ResourceDir(), filepath.Join(request.WorkspaceRoot, request.SourceRelative)}
 	if !reflect.DeepEqual(runner.spec.Args, want) {
 		t.Fatalf("args = %#v, want %#v", runner.spec.Args, want)
 	}
@@ -69,6 +69,17 @@ func TestAnalyzeUsesOnlyVerifiedFixedCompilerWithCleanEnvironment(t *testing.T) 
 	}
 	if len(program.Functions) != 1 || program.Functions[0].Decision.Kind != DecisionSupported {
 		t.Fatalf("unexpected program %#v", program)
+	}
+}
+
+func TestAnalyzeSuppressesImplicitHostHeaders(t *testing.T) {
+	a, request, runner, _ := fixtureAnalysis(t)
+	if _, err := a.Analyze(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(runner.spec.Args, " ")
+	if !strings.Contains(joined, "-nostdinc") || !strings.Contains(joined, "-nostdinc++") {
+		t.Fatalf("host include roots remain enabled: %#v", runner.spec.Args)
 	}
 }
 

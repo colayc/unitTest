@@ -50,7 +50,7 @@ func TestNativeClangASTFixtures(t *testing.T) {
 		{"safe/scalar-branches.c", "choose", DecisionSupported},
 		{"safe/aggregate-methods.cpp", "sum", DecisionSupported},
 		{"safe/bounded-loop.c", "sum_first_four", DecisionSupported},
-		{"safe/temp-file.cpp", "write_temporary", DecisionRequiresConfirmation},
+		{"safe/temp-file.cpp", "write_temporary", DecisionUnsupported},
 		{"unsupported/macro-side-effect.cpp", "hidden_effect", DecisionUnsupported},
 		{"unsupported/template-instantiation.cpp", "use_template", DecisionUnsupported},
 		{"unsupported/system-api.c", "unsafe_api", DecisionUnsupported},
@@ -88,6 +88,39 @@ func TestNativeClangASTFixtures(t *testing.T) {
 	}
 }
 
+func TestNativeSwitchIncludesCaseAndDefaultEdges(t *testing.T) {
+	clang := os.Getenv("UTIDE_TESTGEN_TEST_CLANG")
+	if clang == "" {
+		t.Skip("requires local Clang 22")
+	}
+	path := filepath.Join("testdata", "safe", "scalar-branches.c")
+	source, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(source)
+	r, err := probe.NewRunner().Run(context.Background(), probe.Spec{Executable: clang, Args: []string{"-Xclang", "-ast-dump=json", "-fsyntax-only", "-nostdinc", "-nostdinc++", "-std=c11", path}, Env: []string{}, Timeout: 10 * time.Second, MaxOutput: maxASTBytes})
+	if err != nil || r.ExitCode != 0 {
+		t.Fatalf("clang: %v/%d", err, r.ExitCode)
+	}
+	p, err := decodeAST(strings.NewReader(string(r.Stdout)), maxASTBytes, hex.EncodeToString(sum[:]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cases, defaults int
+	for _, b := range p.Functions[0].Branches {
+		if b.Kind == BranchCase {
+			cases++
+		}
+		if b.Kind == BranchDefault {
+			defaults++
+		}
+	}
+	if cases != 1 || defaults != 1 {
+		t.Fatalf("switch edges case=%d default=%d: %#v", cases, defaults, p.Functions[0].Branches)
+	}
+}
+
 func TestDecodeASTRejectsMalformedTruncatedAndOversized(t *testing.T) {
 	for _, input := range []string{`{`, `{}`, `{"kind":"TranslationUnitDecl","inner":[{"kind":"FunctionDecl"}]}`, scalarAST + `{}`} {
 		if _, err := decodeAST(strings.NewReader(input), 1<<20, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"); err == nil {
@@ -115,5 +148,27 @@ func TestDecodeASTUsesStatementRangesAndRejectsMacroExpansion(t *testing.T) {
 	}
 	if p.Functions[0].Decision.Reason != ReasonMacroExpansion {
 		t.Fatalf("macro accepted: %#v", p.Functions[0].Decision)
+	}
+}
+
+func TestDecodeASTRejectsIncompletePredicatesAndUnmodeledLocalEffects(t *testing.T) {
+	const digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	for name, statement := range map[string]string{
+		"arithmetic if":     `{"kind":"IfStmt","inner":[{"kind":"BinaryOperator","opcode":">","inner":[{"kind":"BinaryOperator","opcode":"+","inner":[{"kind":"DeclRefExpr","referencedDecl":{"name":"x"}},{"kind":"IntegerLiteral","value":"1"}]},{"kind":"IntegerLiteral","value":"0"}]},{"kind":"ReturnStmt"}]}`,
+		"arithmetic switch": `{"kind":"SwitchStmt","inner":[{"kind":"BinaryOperator","opcode":"+","inner":[{"kind":"DeclRefExpr","referencedDecl":{"name":"x"}},{"kind":"IntegerLiteral","value":"1"}]},{"kind":"CompoundStmt","inner":[{"kind":"CaseStmt","inner":[{"kind":"ConstantExpr","inner":[{"kind":"IntegerLiteral","value":"1"}]},{"kind":"ReturnStmt"}]}]}]}`,
+		"conditional":       `{"kind":"ConditionalOperator","inner":[{"kind":"BinaryOperator","opcode":">","inner":[{"kind":"DeclRefExpr","referencedDecl":{"name":"x"}},{"kind":"IntegerLiteral","value":"0"}]},{"kind":"IntegerLiteral","value":"1"},{"kind":"IntegerLiteral","value":"0"}]}`,
+		"volatile local":    `{"kind":"DeclStmt","inner":[{"kind":"VarDecl","name":"v","type":{"qualType":"volatile int"},"inner":[{"kind":"IntegerLiteral","value":"0"}]}]}`,
+		"constructor":       `{"kind":"DeclStmt","inner":[{"kind":"VarDecl","name":"v","type":{"qualType":"Danger"},"inner":[{"kind":"CXXConstructExpr"}]}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			input := `{"kind":"TranslationUnitDecl","inner":[{"kind":"FunctionDecl","name":"f","type":{"qualType":"int (int)"},"loc":{"line":1,"col":1},"inner":[{"kind":"ParmVarDecl","name":"x","type":{"qualType":"int"}},{"kind":"CompoundStmt","inner":[` + statement + `]}]}]}`
+			p, err := decodeAST(strings.NewReader(input), 1<<20, digest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if p.Functions[0].Decision.Kind == DecisionSupported {
+				t.Fatalf("unsafe %s accepted: %#v", name, p.Functions[0])
+			}
+		})
 	}
 }

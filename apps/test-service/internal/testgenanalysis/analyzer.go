@@ -71,7 +71,7 @@ func (a Analyzer) Analyze(ctx context.Context, request AnalysisRequest) (Program
 	if err := verifySource(sourcePath, request.WorkspaceRoot, request.SourceDigest); err != nil {
 		return Program{}, err
 	}
-	args = append([]string{"-Xclang", "-ast-dump=json", "-fsyntax-only"}, args...)
+	args = append([]string{"-Xclang", "-ast-dump=json", "-fsyntax-only", "-nostdinc", "-nostdinc++", "-isystem", filepath.Join(a.bundle.ResourceDir(), "include")}, args...)
 	args = append(args, "-resource-dir", a.bundle.ResourceDir(), sourcePath)
 	result, err := a.runner.Run(ctx, probe.Spec{Executable: a.bundle.ClangPath(), Args: args, Dir: request.WorkspaceRoot, Env: []string{}, Timeout: request.Timeout, MaxOutput: maxASTBytes})
 	if err != nil {

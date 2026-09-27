@@ -28,19 +28,25 @@ type astRange struct {
 type astType struct {
 	QualType string `json:"qualType"`
 }
+type astDefinition struct {
+	IsTrivial bool `json:"isTrivial"`
+	IsPOD     bool `json:"isPOD"`
+}
 type astReference struct {
 	Name string `json:"name"`
 }
 type astNode struct {
-	Kind           string        `json:"kind"`
-	Name           string        `json:"name"`
-	Type           astType       `json:"type"`
-	Loc            astLocation   `json:"loc"`
-	Range          astRange      `json:"range"`
-	Opcode         string        `json:"opcode"`
-	Value          string        `json:"value"`
-	ReferencedDecl *astReference `json:"referencedDecl"`
-	Inner          []*astNode    `json:"inner"`
+	Kind               string        `json:"kind"`
+	Name               string        `json:"name"`
+	Type               astType       `json:"type"`
+	Loc                astLocation   `json:"loc"`
+	Range              astRange      `json:"range"`
+	Opcode             string        `json:"opcode"`
+	Value              string        `json:"value"`
+	ReferencedDecl     *astReference `json:"referencedDecl"`
+	CompleteDefinition bool          `json:"completeDefinition"`
+	DefinitionData     astDefinition `json:"definitionData"`
+	Inner              []*astNode    `json:"inner"`
 }
 
 func decodeAST(reader io.Reader, limit int64, sourceDigest string) (Program, error) {
@@ -86,7 +92,7 @@ func decodeAST(reader io.Reader, limit int64, sourceDigest string) (Program, err
 	declared := map[string]TypeKind{}
 	var collect func(*astNode)
 	collect = func(n *astNode) {
-		if (n.Kind == "RecordDecl" || n.Kind == "CXXRecordDecl") && safeIdentifier(n.Name) {
+		if (n.Kind == "RecordDecl" || n.Kind == "CXXRecordDecl") && safeIdentifier(n.Name) && safeRecordDefinition(n) {
 			declared[n.Name] = TypeRecord
 		}
 		if n.Kind == "EnumDecl" && safeIdentifier(n.Name) {
@@ -166,7 +172,7 @@ func functionFromAST(n, body *astNode, sourceDigest string, declared map[string]
 		return Function{}, errors.New("unusable function identity")
 	}
 	location := locationDigest(sourceDigest, effectiveLocation(n))
-	f := Function{SymbolID: digestBytes([]byte("symbol:" + sourceDigest + ":" + n.Kind + ":" + n.Name + ":" + location)), Name: n.Name, ReturnType: parseType(strings.SplitN(n.Type.QualType, " (", 2)[0], declared), Parameters: []Parameter{}, Branches: []Branch{}, Calls: []string{}, BodyKinds: []string{}, LocationDigest: location}
+	f := Function{SymbolID: digestBytes([]byte("symbol:" + sourceDigest + ":" + n.Kind + ":" + n.Name + ":" + location)), Name: n.Name, ReturnType: parseType(strings.SplitN(n.Type.QualType, " (", 2)[0], declared), Parameters: []Parameter{}, LocalTypes: []Type{}, Branches: []Branch{}, Calls: []string{}, BodyKinds: []string{}, LocationDigest: location}
 	for _, child := range n.Inner {
 		if child.Kind == "ParmVarDecl" {
 			if !safeIdentifier(child.Name) {
@@ -184,6 +190,15 @@ func functionFromAST(n, body *astNode, sourceDigest string, declared map[string]
 		if !seenKinds[node.Kind] {
 			f.BodyKinds = append(f.BodyKinds, node.Kind)
 			seenKinds[node.Kind] = true
+		}
+		if node.Kind == "VarDecl" {
+			f.LocalTypes = append(f.LocalTypes, parseType(node.Type.QualType, declared))
+		}
+		if node.Kind == "UnaryOperator" && (node.Opcode == "&" || node.Opcode == "*" || node.Opcode == "--") {
+			if !seenKinds["UnsafeUnary"] {
+				f.BodyKinds = append(f.BodyKinds, "UnsafeUnary")
+				seenKinds["UnsafeUnary"] = true
+			}
 		}
 		if hasMacroLocation(node.Loc) || hasMacroLocation(node.Range.Begin) || hasMacroLocation(node.Range.End) {
 			if !seenKinds["MacroExpansion"] {
@@ -211,6 +226,9 @@ func functionFromAST(n, body *astNode, sourceDigest string, declared map[string]
 			pred := extractBranchPredicate(node, kind)
 			bound := kind == BranchLoop && verifiedForLoop(node, pred)
 			f.Branches = append(f.Branches, Branch{kind, pred, bound, locationDigest(sourceDigest, effectiveLocation(node))})
+			if kind == BranchSwitch {
+				f.Branches = append(f.Branches, switchEdges(node, sourceDigest, pred.Left)...)
+			}
 			if pred.Operator == "unknown" && kind != BranchSwitch {
 				if !seenKinds["UnknownPredicate"] {
 					f.BodyKinds = append(f.BodyKinds, "UnknownPredicate")
@@ -266,6 +284,28 @@ func effectiveLocation(n *astNode) astLocation {
 	return n.Range.Begin
 }
 func hasMacroLocation(loc astLocation) bool { return loc.SpellingLoc != nil || loc.ExpansionLoc != nil }
+func safeRecordDefinition(n *astNode) bool {
+	if !n.CompleteDefinition || n.Kind == "CXXRecordDecl" && (!n.DefinitionData.IsPOD || !n.DefinitionData.IsTrivial) {
+		return false
+	}
+	for _, child := range n.Inner {
+		if child == nil {
+			continue
+		}
+		switch child.Kind {
+		case "FieldDecl":
+			t := parseType(child.Type.QualType, nil)
+			if t.Kind != TypeInteger && t.Kind != TypeBoolean && t.Kind != TypeFloating {
+				return false
+			}
+		case "CXXRecordDecl", "CXXMethodDecl":
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
 func parseType(v string, declared map[string]TypeKind) Type {
 	v = strings.TrimSpace(v)
 	t := Type{Kind: TypeUnknown}
@@ -283,7 +323,8 @@ func parseType(v string, declared map[string]TypeKind) Type {
 	if strings.Contains(v, "[") && strings.HasSuffix(v, "]") {
 		left := strings.LastIndex(v, "[")
 		n, err := strconv.Atoi(v[left+1 : len(v)-1])
-		if err == nil && n > 0 && n <= 1024 {
+		base := parseType(strings.TrimSpace(v[:left]), declared)
+		if err == nil && n > 0 && n <= 1024 && (base.Kind == TypeInteger || base.Kind == TypeBoolean || base.Kind == TypeFloating) {
 			t.Kind = TypeArray
 			t.Bound = n
 		}
@@ -299,12 +340,13 @@ func parseType(v string, declared map[string]TypeKind) Type {
 	case "char", "signed char", "unsigned char", "short", "unsigned short", "int", "unsigned int", "long", "unsigned long", "long long", "unsigned long long", "size_t":
 		t.Kind = TypeInteger
 	default:
-		if strings.HasPrefix(v, "enum ") {
-			t.Kind = TypeEnum
-		} else if strings.HasPrefix(v, "struct ") || strings.HasPrefix(v, "class ") {
-			t.Kind = TypeRecord
-		} else if kind, ok := declared[v]; ok {
+		name := v
+		for _, prefix := range []string{"enum ", "struct ", "class "} {
+			name = strings.TrimPrefix(name, prefix)
+		}
+		if kind, ok := declared[name]; ok {
 			t.Kind = kind
+			t.Proven = kind == TypeRecord
 		}
 	}
 	return t
@@ -346,10 +388,56 @@ func expression(nodes []*astNode, index int) string {
 		if n.ReferencedDecl != nil && safeIdentifier(n.ReferencedDecl.Name) {
 			return n.ReferencedDecl.Name
 		}
-	case "ImplicitCastExpr", "ParenExpr":
+	case "ImplicitCastExpr", "ParenExpr", "ConstantExpr":
+		if n.Value != "" && len(n.Value) < 32 {
+			return n.Value
+		}
 		return expression(n.Inner, 0)
+	case "BinaryOperator":
+		if n.Opcode == "<" || n.Opcode == "<=" || n.Opcode == ">" || n.Opcode == ">=" || n.Opcode == "==" || n.Opcode == "!=" || n.Opcode == "&&" || n.Opcode == "||" {
+			left, right := expression(n.Inner, 0), expression(n.Inner, 1)
+			if left != "" && right != "" {
+				return "(" + left + n.Opcode + right + ")"
+			}
+		}
+	case "UnaryOperator":
+		if n.Opcode == "!" {
+			value := expression(n.Inner, 0)
+			if value != "" {
+				return "!" + value
+			}
+		}
 	}
 	return ""
+}
+func switchEdges(node *astNode, sourceDigest, selector string) []Branch {
+	edges := []Branch{}
+	var visit func(*astNode)
+	visit = func(n *astNode) {
+		if n == nil {
+			return
+		}
+		if n.Kind == "CaseStmt" {
+			label := expression(n.Inner, 0)
+			op := "=="
+			if label == "" || selector == "" {
+				op = "unknown"
+			}
+			edges = append(edges, Branch{Kind: BranchCase, Predicate: Predicate{Operator: op, Left: selector, Right: label}, LocationDigest: digestBytes([]byte("case:" + locationDigest(sourceDigest, effectiveLocation(n)) + ":" + label))})
+		}
+		if n.Kind == "DefaultStmt" {
+			edges = append(edges, Branch{Kind: BranchDefault, Predicate: Predicate{Operator: "default", Left: selector}, LocationDigest: digestBytes([]byte("default:" + locationDigest(sourceDigest, effectiveLocation(n))))})
+		}
+		for _, child := range n.Inner {
+			visit(child)
+		}
+	}
+	for _, child := range node.Inner {
+		if child != nil && child.Kind == "CompoundStmt" {
+			visit(child)
+		}
+	}
+	return edges
 }
 func verifiedForLoop(node *astNode, p Predicate) bool {
 	if node.Kind != "ForStmt" || len(node.Inner) < 5 || p.Operator != "<" || !safeIdentifier(p.Left) {

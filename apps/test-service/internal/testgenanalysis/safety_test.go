@@ -20,6 +20,9 @@ func TestSafetyClassifierFailsClosed(t *testing.T) {
 		{"template", Function{Name: "f", ReturnType: Type{Kind: TypeInteger}, BodyKinds: []string{"FunctionTemplateDecl"}}, DecisionUnsupported, ReasonUnsupportedSyntax},
 		{"unbounded loop", Function{Name: "f", ReturnType: Type{Kind: TypeInteger}, BodyKinds: []string{"CompoundStmt", "WhileStmt"}}, DecisionUnsupported, ReasonUnboundedLoop},
 		{"recursion", Function{Name: "f", ReturnType: Type{Kind: TypeInteger}, Calls: []string{"f"}}, DecisionUnsupported, ReasonRecursion},
+		{"callee spelling does not prove purity", Function{Name: "f", ReturnType: Type{Kind: TypeInteger}, Calls: []string{"abs"}}, DecisionUnsupported, ReasonUnknownCall},
+		{"callee spelling does not prove temp IO", Function{Name: "f", ReturnType: Type{Kind: TypeInteger}, Calls: []string{"fopen"}}, DecisionUnsupported, ReasonUnknownCall},
+		{"unmodeled constructor", Function{Name: "f", ReturnType: Type{Kind: TypeInteger}, BodyKinds: []string{"CompoundStmt", "CXXConstructExpr"}}, DecisionUnsupported, ReasonUnsupportedSyntax},
 		{"condition-only loop", Function{Name: "f", ReturnType: Type{Kind: TypeInteger}, BodyKinds: []string{"CompoundStmt", "ForStmt"}, Branches: []Branch{{Kind: BranchLoop, Predicate: Predicate{Operator: "<", Left: "i", Right: "4"}}}}, DecisionUnsupported, ReasonUnboundedLoop},
 	}
 	for _, tt := range tests {

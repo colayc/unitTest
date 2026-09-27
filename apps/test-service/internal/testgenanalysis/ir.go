@@ -27,6 +27,7 @@ type Type struct {
 	Kind     TypeKind `json:"kind"`
 	Spelling string   `json:"spelling,omitempty"`
 	Bound    int      `json:"bound,omitempty"`
+	Proven   bool     `json:"proven,omitempty"`
 }
 type Parameter struct {
 	Name string `json:"name"`
@@ -37,6 +38,8 @@ type BranchKind string
 const (
 	BranchIf           BranchKind = "if"
 	BranchSwitch       BranchKind = "switch"
+	BranchCase         BranchKind = "case"
+	BranchDefault      BranchKind = "default"
 	BranchShortCircuit BranchKind = "short-circuit"
 	BranchLoop         BranchKind = "loop"
 )
@@ -88,6 +91,7 @@ type Function struct {
 	Name           string      `json:"name"`
 	ReturnType     Type        `json:"returnType"`
 	Parameters     []Parameter `json:"parameters"`
+	LocalTypes     []Type      `json:"localTypes"`
 	Branches       []Branch    `json:"branches"`
 	Calls          []string    `json:"calls"`
 	BodyKinds      []string    `json:"bodyKinds"`
