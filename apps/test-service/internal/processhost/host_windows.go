@@ -434,10 +434,10 @@ func createWindowsProtectedJob(limitFlags uint32) (windows.Handle, error) {
 }
 
 func createSuspendedWindowsTarget(spec processcontrol.Spec, stdin, stdout, stderr windows.Handle) (windows.ProcessInformation, error) {
-	environment := targetWindowsEnvironment(
-		spec.Env,
-		spec.EnvUnset,
-	)
+	environment := targetWindowsEnvironment(spec.Env, spec.EnvUnset)
+	if spec.ClosedEnvironment {
+		environment = processcontrol.ClosedEnvironment(spec.Env)
+	}
 	return createSuspendedWindowsProcess(spec.Executable, spec.Args, spec.Dir, environment, stdin, stdout, stderr, []windows.Handle{stdin, stdout, stderr})
 }
 

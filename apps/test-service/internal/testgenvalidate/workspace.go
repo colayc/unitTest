@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 
@@ -99,8 +100,11 @@ func directDirectory(path string) bool {
 	}
 }
 
-func snapshot(source, temporary string, edits []testgenrender.StagedFile) (Roots, string, error) {
+func snapshot(source, temporary string, edits []testgenrender.StagedFile, expected map[string]string) (Roots, string, error) {
 	if !directDirectory(source) || !directDirectory(temporary) || source == temporary || within(source, temporary) || within(temporary, source) {
+		return Roots{}, "", errIsolation
+	}
+	if expected == nil {
 		return Roots{}, "", errIsolation
 	}
 	root, err := os.MkdirTemp(temporary, "testgen-")
@@ -116,6 +120,7 @@ func snapshot(source, temporary string, edits []testgenrender.StagedFile) (Roots
 	count := 0
 	var bytes int64
 	identities := []os.FileInfo{}
+	seenSource := map[string]bool{}
 	err = filepath.WalkDir(source, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return errIsolation
@@ -145,6 +150,11 @@ func snapshot(source, temporary string, edits []testgenrender.StagedFile) (Roots
 		if !info.Mode().IsRegular() || !singlyLinked(path) || count >= maxSnapshotFiles || info.Size() < 0 || bytes > maxSnapshotBytes-info.Size() {
 			return errIsolation
 		}
+		key := strings.ToLower(rel)
+		if seenSource[key] || !validDigest(expected[key]) {
+			return errIsolation
+		}
+		seenSource[key] = true
 		for _, other := range identities {
 			if os.SameFile(other, info) {
 				return errIsolation
@@ -159,16 +169,19 @@ func snapshot(source, temporary string, edits []testgenrender.StagedFile) (Roots
 		}
 		opened, err := input.Stat()
 		if err != nil || !os.SameFile(info, opened) {
+			_ = input.Close()
 			return errIsolation
 		}
 		output, err := os.OpenFile(dest, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0400)
 		if err != nil {
+			_ = input.Close()
 			return errIsolation
 		}
-		_, copyErr := io.Copy(output, input)
+		hash := sha256.New()
+		_, copyErr := io.Copy(io.MultiWriter(output, hash), input)
 		closeErr := output.Close()
 		inputErr := input.Close()
-		if copyErr != nil || closeErr != nil || inputErr != nil {
+		if copyErr != nil || closeErr != nil || inputErr != nil || hex.EncodeToString(hash.Sum(nil)) != expected[key] {
 			return errIsolation
 		}
 		after, err := os.Lstat(path)
@@ -178,6 +191,13 @@ func snapshot(source, temporary string, edits []testgenrender.StagedFile) (Roots
 		return nil
 	})
 	if err != nil {
+		return Roots{}, root, errIsolation
+	}
+	if len(seenSource) != len(expected) {
+		return Roots{}, root, errIsolation
+	}
+	copied, _, err := sourceFingerprint(roots.Source)
+	if err != nil || !reflect.DeepEqual(copied, expected) {
 		return Roots{}, root, errIsolation
 	}
 	seen := map[string]bool{}

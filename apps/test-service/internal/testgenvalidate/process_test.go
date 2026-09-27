@@ -15,11 +15,13 @@ import (
 
 type fakeRunner struct {
 	prepared int
+	lastSpec processcontrol.Spec
 	process  *fakeProcess
 }
 
-func (r *fakeRunner) Prepare(context.Context, processcontrol.Spec, string, string) (processcontrol.Process, error) {
+func (r *fakeRunner) Prepare(_ context.Context, spec processcontrol.Spec, _ string, _ string) (processcontrol.Process, error) {
 	r.prepared++
+	r.lastSpec = spec
 	return r.process, nil
 }
 func (r *fakeRunner) Cleanup(context.Context, task.ProcessLease, time.Duration) error { return nil }
@@ -89,6 +91,9 @@ func TestPreparedExecutorPersistsLeaseBeforeStartAndCloses(t *testing.T) {
 	if !reflect.DeepEqual(process.events, []string{"record", "start", "record", "close", "release"}) {
 		t.Fatalf("lease lifecycle: %v", process.events)
 	}
+	if !runner.lastSpec.ClosedEnvironment {
+		t.Fatal("validator allowed inherited host environment")
+	}
 }
 
 func TestPreparedExecutorStopsOutputFlood(t *testing.T) {
@@ -131,5 +136,44 @@ func TestPreparedExecutorRejectsMissingExitResult(t *testing.T) {
 	}, RecordLease: func(context.Context, task.ProcessLease) error { return nil }, ReleaseLease: func(context.Context, task.ProcessLease) error { return nil }}
 	if _, err := executor.Execute(context.Background(), StageCompile, Roots{Source: filepath.Join(root, "source"), Build: filepath.Join(root, "build"), Artifacts: filepath.Join(root, "artifacts")}); err == nil {
 		t.Fatal("missing completion accepted")
+	}
+}
+
+func TestPreparedExecutorRejectsSymlinkUnderBuildOrArtifactRoot(t *testing.T) {
+	for _, kind := range []string{"build-dir", "artifact-env", "unreferenced-build"} {
+		t.Run(kind, func(t *testing.T) {
+			root := t.TempDir()
+			executable := filepath.Join(root, "cmake.exe")
+			_ = os.WriteFile(executable, []byte("fixed-tool"), 0600)
+			for _, dir := range []string{"source", "build", "artifacts"} {
+				_ = os.Mkdir(filepath.Join(root, dir), 0700)
+			}
+			outside := t.TempDir()
+			branch := "build"
+			if kind == "artifact-env" {
+				branch = "artifacts"
+			}
+			link := filepath.Join(root, branch, "escape")
+			if err := os.Symlink(outside, link); err != nil {
+				t.Skipf("symlink unavailable: %v", err)
+			}
+			spec := processcontrol.Spec{Executable: executable, Dir: filepath.Join(root, "build")}
+			if kind == "build-dir" {
+				spec.Dir = link
+			}
+			if kind == "artifact-env" {
+				spec.Env = []string{"LLVM_PROFILE_FILE=" + filepath.Join(link, "profile.profraw")}
+			}
+			process := &fakeProcess{output: make(chan processcontrol.Output), done: make(chan processcontrol.Result, 1)}
+			process.done <- processcontrol.Result{}
+			close(process.done)
+			close(process.output)
+			runner := &fakeRunner{process: process}
+			executor := PreparedProcessExecutor{Runner: runner, TaskID: testID, ServiceInstanceID: testID, ToolSHA256: map[string]string{executable: digestTest([]byte("fixed-tool"))}, Plan: func(context.Context, Stage, Roots) (processcontrol.Spec, error) { return spec, nil }, RecordLease: func(context.Context, task.ProcessLease) error { return nil }, ReleaseLease: func(context.Context, task.ProcessLease) error { return nil }}
+			_, err := executor.Execute(context.Background(), StageCompile, Roots{Source: filepath.Join(root, "source"), Build: filepath.Join(root, "build"), Artifacts: filepath.Join(root, "artifacts")})
+			if err == nil || runner.prepared != 0 {
+				t.Fatalf("escaped owned root prepared: %v %d", err, runner.prepared)
+			}
+		})
 	}
 }

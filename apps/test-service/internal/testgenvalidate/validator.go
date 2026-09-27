@@ -5,7 +5,9 @@ package testgenvalidate
 import (
 	"context"
 	"errors"
+	"reflect"
 
+	"unit-test-ide.local/test-service/internal/testgendomain"
 	"unit-test-ide.local/test-service/internal/testgenrender"
 )
 
@@ -37,11 +39,25 @@ type StageEvidence struct {
 // receipts. Caller-provided digest strings are never sufficient on their own.
 type EvidenceVerifier func(context.Context, string, AssertionEvidence) bool
 
+// ResolvedCandidate is read from the durable, service-owned candidate and
+// baseline records. It is never reconstructed from client request fields.
+type ResolvedCandidate struct {
+	ID                   string
+	Kind                 testgendomain.CandidateKind
+	TargetSymbol         string
+	TargetFileURI        string
+	BaselineSHA256       string
+	SourceSnapshotDigest string
+	AssertionDigest      string
+}
+type CandidateResolver func(context.Context, string) (ResolvedCandidate, error)
+
 type Config struct {
-	SourceRoot     string
-	TempRoot       string
-	Planner        StageExecutor
-	VerifyEvidence EvidenceVerifier
+	SourceRoot       string
+	TempRoot         string
+	Planner          StageExecutor
+	VerifyEvidence   EvidenceVerifier
+	ResolveCandidate CandidateResolver
 }
 
 type Validator struct{ Config Config }
@@ -73,13 +89,24 @@ func validRequest(r ValidationRequest) bool {
 }
 
 func (v Validator) Validate(ctx context.Context, r ValidationRequest) (result ValidationResult, err error) {
-	if ctx == nil || !validRequest(r) || v.Config.Planner == nil || v.Config.VerifyEvidence == nil {
+	if ctx == nil || !validRequest(r) || v.Config.Planner == nil || v.Config.VerifyEvidence == nil || v.Config.ResolveCandidate == nil {
 		return result, ErrInvalidRequest
+	}
+	resolved, resolveErr := v.Config.ResolveCandidate(ctx, r.CandidateID)
+	if resolveErr != nil || resolved.ID != r.CandidateID || (resolved.Kind != Verified && resolved.Kind != Characterization) || resolved.Kind != r.Assertion.Kind || resolved.TargetSymbol == "" || !safeRelative(resolved.TargetFileURI) || !validDigest(resolved.BaselineSHA256) || resolved.BaselineSHA256 != digestBytes(r.BaselineCoverage) || !validDigest(resolved.AssertionDigest) || resolved.AssertionDigest != assertionDigest(r.Assertion) {
+		return ValidationResult{Diagnostic: DiagnosticAssertion}, nil
 	}
 	if _, err := decodeCoverage(r.BaselineCoverage); err != nil {
 		return ValidationResult{Diagnostic: DiagnosticCoverage}, nil
 	}
-	roots, root, err := snapshot(v.Config.SourceRoot, v.Config.TempRoot, r.Edits.Files)
+	original, fingerprint, err := sourceFingerprint(v.Config.SourceRoot)
+	if err != nil {
+		return ValidationResult{Diagnostic: DiagnosticIsolation}, nil
+	}
+	if !validDigest(resolved.SourceSnapshotDigest) || resolved.SourceSnapshotDigest != fingerprint {
+		return ValidationResult{Diagnostic: DiagnosticIsolation}, nil
+	}
+	roots, root, err := snapshot(v.Config.SourceRoot, v.Config.TempRoot, r.Edits.Files, original)
 	if root != "" {
 		defer func() {
 			if cleanupErr := cleanup(root); cleanupErr != nil {
@@ -92,8 +119,8 @@ func (v Validator) Validate(ctx context.Context, r ValidationRequest) (result Va
 	if err != nil {
 		return ValidationResult{Diagnostic: DiagnosticIsolation}, nil
 	}
-	original, fingerprint, err := sourceFingerprint(v.Config.SourceRoot)
-	if err != nil {
+	current, _, err := sourceFingerprint(v.Config.SourceRoot)
+	if err != nil || !reflect.DeepEqual(original, current) {
 		return ValidationResult{Diagnostic: DiagnosticIsolation}, nil
 	}
 	staged, stagedDigest, err := sourceFingerprint(roots.Source)
@@ -104,5 +131,12 @@ func (v Validator) Validate(ctx context.Context, r ValidationRequest) (result Va
 	if !v.Config.VerifyEvidence(ctx, r.CandidateID, r.Assertion) {
 		return ValidationResult{Diagnostic: DiagnosticAssertion}, nil
 	}
-	return v.runStages(ctx, r, roots, original, staged)
+	return v.runStages(ctx, r, roots, original, staged, resolved)
+}
+
+func assertionDigest(e AssertionEvidence) string {
+	if e.Kind == Verified {
+		return e.IndependentProofDigest
+	}
+	return e.ObservedOutputReceipt
 }

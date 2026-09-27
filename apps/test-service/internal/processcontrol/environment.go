@@ -11,6 +11,29 @@ import (
 // applied in the same critical section as the environment snapshot.
 var environSnapshot = os.Environ
 
+// ClosedEnvironment never reads the host environment. It is used for
+// validation processes whose environment is entirely service-owned.
+func ClosedEnvironment(extra []string) []string {
+	values := make(map[string]string, len(extra))
+	for _, entry := range extra {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok || key == "" || strings.ContainsAny(key, "=\x00") || strings.ContainsRune(entry, '\x00') {
+			continue
+		}
+		values[strings.ToUpper(key)] = entry
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	result := make([]string, 0, len(keys))
+	for _, key := range keys {
+		result = append(result, values[key])
+	}
+	return result
+}
+
 func hostileEnvironmentKey(key string) bool {
 	upper := strings.ToUpper(key)
 	return strings.HasPrefix(upper, "PYTHON") ||

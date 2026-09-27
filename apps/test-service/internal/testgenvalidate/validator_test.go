@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
 
+	coverage "unit-test-ide.local/test-service/internal/coveragemodel/v1"
 	"unit-test-ide.local/test-service/internal/testgenrender"
 )
 
@@ -24,6 +26,36 @@ func coverageFixture(functions, lines, branches int64) []byte {
 	return []byte(fmt.Sprintf(`{"schemaVersion":"1.0","provenance":{"platform":"windows","architecture":"x64","compiler":{"family":"clang-cl","version":"22.1.8"},"driver":{"name":"llvm-cov","version":"22.1.8"},"collector":{"name":"llvm-cov","version":"22.1.8"},"normalizerVersion":"1","instrumentationFingerprint":"%s"},"completeness":{"outcome":"available","reasons":[]},"summary":{"functions":{"covered":%d,"total":1},"lines":{"covered":%d,"total":1},"branches":{"covered":%d,"total":1}},"files":[{"uri":"source.c","sha256":"%s","summary":{"functions":{"covered":%d,"total":1},"lines":{"covered":%d,"total":1},"branches":{"covered":%d,"total":1}},"lines":[{"line":1,"count":%d,"branches":{"covered":%d,"total":1}}]}]}`, testID, functions, lines, branches, testID, functions, lines, branches, lines, branches))
 }
 
+func twoFileCoverage(targetCovered, otherCovered int64) []byte {
+	file := func(uri, sha string, covered int64) coverage.CoverageFileV1 {
+		return coverage.CoverageFileV1{URI: uri, Sha256: sha, Summary: coverage.CoverageSummaryV1{Lines: coverage.CoverageMetricV1{Covered: covered, Total: 1}}, Lines: []coverage.CoverageLineV1{{Line: 1, Count: covered}}}
+	}
+	value := coverage.CoverageDocumentV1{SchemaVersion: coverage.The10, Completeness: coverage.CoverageCompletenessV1{Outcome: coverage.Available, Reasons: []coverage.Reason{}}, Provenance: coverage.CoverageProvenanceV1{Platform: coverage.Windows, Architecture: coverage.X64, Compiler: coverage.CoverageCompilerV1{Family: coverage.ClangCl, Version: "22.1.8"}, Driver: coverage.CoverageDriverV1{Name: coverage.FluffyLlvmCov, Version: "22.1.8"}, Collector: coverage.CoverageCollectorV1{Name: coverage.PurpleLlvmCov, Version: "22.1.8"}, NormalizerVersion: "1", InstrumentationFingerprint: testID}, Summary: coverage.CoverageSummaryV1{Lines: coverage.CoverageMetricV1{Covered: targetCovered + otherCovered, Total: 2}}, Files: []coverage.CoverageFileV1{file("source.c", testID, targetCovered), file("unrelated.c", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", otherCovered)}}
+	data, _ := json.Marshal(value)
+	return data
+}
+
+func TestValidateRequiresTargetSpecificGain(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		baseline, after []byte
+		want            Diagnostic
+	}{
+		{"unrelated-only", twoFileCoverage(0, 0), twoFileCoverage(0, 1), DiagnosticNoDelta},
+		{"target-regression", twoFileCoverage(1, 0), twoFileCoverage(0, 1), DiagnosticRegression},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := t.TempDir()
+			_ = os.WriteFile(filepath.Join(source, "source.c"), []byte("source"), 0600)
+			v := Validator{Config: Config{SourceRoot: source, TempRoot: t.TempDir(), Planner: &fixturePlanner{coverage: tc.after}, VerifyEvidence: trustedFixtureProof, ResolveCandidate: fixtureResolver(source, tc.baseline)}}
+			result, err := v.Validate(context.Background(), ValidationRequest{TaskID: testID, CandidateID: testID, BaselineCoverage: tc.baseline, Metrics: Metrics{Lines: true}, Assertion: AssertionEvidence{Kind: Verified, IndependentProofDigest: testID}})
+			if err != nil || result.Retained || result.Diagnostic != tc.want {
+				t.Fatalf("target-only check failed: %+v %v", result, err)
+			}
+		})
+	}
+}
+
 func TestValidateOrderedStagesAndReceipts(t *testing.T) {
 	source := t.TempDir()
 	if err := os.Mkdir(filepath.Join(source, "tests"), 0700); err != nil {
@@ -33,7 +65,7 @@ func TestValidateOrderedStagesAndReceipts(t *testing.T) {
 		t.Fatal(err)
 	}
 	planner := &fixturePlanner{coverage: coverageFixture(1, 1, 0)}
-	v := Validator{Config: Config{SourceRoot: source, TempRoot: t.TempDir(), Planner: planner, VerifyEvidence: trustedFixtureProof}}
+	v := Validator{Config: Config{SourceRoot: source, TempRoot: t.TempDir(), Planner: planner, VerifyEvidence: trustedFixtureProof, ResolveCandidate: fixtureResolver(source, coverageFixture(0, 1, 0))}}
 	r := ValidationRequest{TaskID: testID, CandidateID: testID, Edits: testgenrender.StagedEditSet{Files: []testgenrender.StagedFile{{Path: "tests/generated/test.c", Content: []byte("test\n"), AfterDigest: digestTest([]byte("test\n"))}, {Path: "tests/CMakeLists.txt", Content: []byte("after\n"), BeforeDigest: digestTest([]byte("before\n")), AfterDigest: digestTest([]byte("after\n"))}}}, BaselineCoverage: coverageFixture(0, 1, 0), Metrics: Metrics{Functions: true}, Assertion: AssertionEvidence{Kind: Verified, IndependentProofDigest: testID}}
 	result, err := v.Validate(context.Background(), r)
 	if err != nil {
@@ -94,7 +126,7 @@ func TestValidateRejectsSourceMutation(t *testing.T) {
 			_ = os.WriteFile(path, []byte("changed"), 0600)
 		}
 	}}
-	v := Validator{Config: Config{SourceRoot: source, TempRoot: t.TempDir(), Planner: planner, VerifyEvidence: trustedFixtureProof}}
+	v := Validator{Config: Config{SourceRoot: source, TempRoot: t.TempDir(), Planner: planner, VerifyEvidence: trustedFixtureProof, ResolveCandidate: fixtureResolver(source, coverageFixture(0, 1, 0))}}
 	result, err := v.Validate(context.Background(), ValidationRequest{TaskID: testID, CandidateID: testID, BaselineCoverage: coverageFixture(0, 1, 0), Metrics: Metrics{Functions: true}, Assertion: AssertionEvidence{Kind: Verified, IndependentProofDigest: testID}})
 	if err != nil {
 		t.Fatal(err)
@@ -118,7 +150,7 @@ func TestValidateRejectsStagedSnapshotMutation(t *testing.T) {
 			}
 		}
 	}}
-	v := Validator{Config: Config{SourceRoot: source, TempRoot: t.TempDir(), Planner: planner, VerifyEvidence: trustedFixtureProof}}
+	v := Validator{Config: Config{SourceRoot: source, TempRoot: t.TempDir(), Planner: planner, VerifyEvidence: trustedFixtureProof, ResolveCandidate: fixtureResolver(source, coverageFixture(0, 1, 0))}}
 	result, err := v.Validate(context.Background(), ValidationRequest{TaskID: testID, CandidateID: testID, BaselineCoverage: coverageFixture(0, 1, 0), Metrics: Metrics{Functions: true}, Assertion: AssertionEvidence{Kind: Verified, IndependentProofDigest: testID}})
 	if err != nil || result.Retained || result.Diagnostic != DiagnosticIsolation {
 		t.Fatalf("snapshot mutation accepted: %+v %v", result, err)
@@ -146,7 +178,7 @@ func TestValidateRejectsFalseProgressAndUnprovenAssertion(t *testing.T) {
 			if !tc.proof {
 				verifier = func(context.Context, string, AssertionEvidence) bool { return false }
 			}
-			v := Validator{Config: Config{SourceRoot: source, TempRoot: temp, Planner: &fixturePlanner{coverage: tc.coverage}, VerifyEvidence: verifier}}
+			v := Validator{Config: Config{SourceRoot: source, TempRoot: temp, Planner: &fixturePlanner{coverage: tc.coverage}, VerifyEvidence: verifier, ResolveCandidate: fixtureResolver(source, coverageFixture(0, 1, 0))}}
 			result, err := v.Validate(context.Background(), ValidationRequest{TaskID: testID, CandidateID: testID, BaselineCoverage: coverageFixture(0, 1, 0), Metrics: tc.metrics, Assertion: AssertionEvidence{Kind: Verified, IndependentProofDigest: testID}})
 			if err != nil || result.Retained || result.Diagnostic != tc.want {
 				t.Fatalf("false progress: %+v %v", result, err)
@@ -163,7 +195,7 @@ func TestValidateStopsOnStageFailure(t *testing.T) {
 				t.Fatal(err)
 			}
 			planner := &fixturePlanner{fail: failed, coverage: coverageFixture(1, 1, 0)}
-			v := Validator{Config: Config{SourceRoot: source, TempRoot: t.TempDir(), Planner: planner, VerifyEvidence: trustedFixtureProof}}
+			v := Validator{Config: Config{SourceRoot: source, TempRoot: t.TempDir(), Planner: planner, VerifyEvidence: trustedFixtureProof, ResolveCandidate: fixtureResolver(source, coverageFixture(0, 1, 0))}}
 			result, err := v.Validate(context.Background(), ValidationRequest{TaskID: testID, CandidateID: testID, BaselineCoverage: coverageFixture(0, 1, 0), Metrics: Metrics{Functions: true}, Assertion: AssertionEvidence{Kind: Verified, IndependentProofDigest: testID}})
 			if err != nil {
 				t.Fatal(err)
@@ -177,4 +209,37 @@ func TestValidateStopsOnStageFailure(t *testing.T) {
 
 func trustedFixtureProof(_ context.Context, _ string, evidence AssertionEvidence) bool {
 	return evidence.Kind == Verified && evidence.IndependentProofDigest == testID
+}
+
+func fixtureResolver(source string, baseline []byte) CandidateResolver {
+	return func(context.Context, string) (ResolvedCandidate, error) {
+		_, fingerprint, _ := sourceFingerprint(source)
+		return ResolvedCandidate{ID: testID, Kind: Verified, TargetSymbol: testID, TargetFileURI: "source.c", BaselineSHA256: digestTest(baseline), SourceSnapshotDigest: fingerprint, AssertionDigest: testID}, nil
+	}
+}
+
+func TestValidateRejectsAuthoritativeKindMismatch(t *testing.T) {
+	source := t.TempDir()
+	_ = os.WriteFile(filepath.Join(source, "source.c"), []byte("source"), 0600)
+	baseline := coverageFixture(0, 1, 0)
+	v := Validator{Config: Config{SourceRoot: source, TempRoot: t.TempDir(), Planner: &fixturePlanner{coverage: coverageFixture(1, 1, 0)}, VerifyEvidence: trustedFixtureProof, ResolveCandidate: func(context.Context, string) (ResolvedCandidate, error) {
+		return ResolvedCandidate{ID: testID, Kind: Characterization, TargetSymbol: testID, TargetFileURI: "source.c", BaselineSHA256: digestTest(baseline), AssertionDigest: testID}, nil
+	}}}
+	result, err := v.Validate(context.Background(), ValidationRequest{TaskID: testID, CandidateID: testID, BaselineCoverage: baseline, Metrics: Metrics{Functions: true}, Assertion: AssertionEvidence{Kind: Verified, IndependentProofDigest: testID}})
+	if err != nil || result.Retained || result.Diagnostic != DiagnosticAssertion {
+		t.Fatalf("kind mismatch accepted: %+v %v", result, err)
+	}
+}
+
+func TestValidateRejectsSourceSnapshotIdentityMismatch(t *testing.T) {
+	source := t.TempDir()
+	_ = os.WriteFile(filepath.Join(source, "source.c"), []byte("source"), 0600)
+	baseline := coverageFixture(0, 1, 0)
+	v := Validator{Config: Config{SourceRoot: source, TempRoot: t.TempDir(), Planner: &fixturePlanner{coverage: coverageFixture(1, 1, 0)}, VerifyEvidence: trustedFixtureProof, ResolveCandidate: func(context.Context, string) (ResolvedCandidate, error) {
+		return ResolvedCandidate{ID: testID, Kind: Verified, TargetSymbol: testID, TargetFileURI: "source.c", BaselineSHA256: digestTest(baseline), SourceSnapshotDigest: testID, AssertionDigest: testID}, nil
+	}}}
+	result, err := v.Validate(context.Background(), ValidationRequest{TaskID: testID, CandidateID: testID, BaselineCoverage: baseline, Metrics: Metrics{Functions: true}, Assertion: AssertionEvidence{Kind: Verified, IndependentProofDigest: testID}})
+	if err != nil || result.Retained || result.Diagnostic != DiagnosticIsolation {
+		t.Fatalf("stale source snapshot accepted: %+v %v", result, err)
+	}
 }

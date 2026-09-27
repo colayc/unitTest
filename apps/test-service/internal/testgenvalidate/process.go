@@ -42,6 +42,7 @@ func (e PreparedProcessExecutor) Execute(ctx context.Context, stage Stage, roots
 	if err != nil || !e.acceptSpec(spec, roots) {
 		return evidence, ErrProcessRejected
 	}
+	spec.ClosedEnvironment = true
 	process, err := e.Runner.Prepare(ctx, spec, e.TaskID, e.ServiceInstanceID)
 	if err != nil || process == nil {
 		return evidence, ErrProcessRejected
@@ -74,6 +75,11 @@ func (e PreparedProcessExecutor) Execute(ctx context.Context, stage Stage, roots
 	if err := e.RecordLease(ctx, lease); err != nil {
 		_ = stopProcess()
 		_ = process.Close(context.Background())
+		return evidence, ErrProcessRejected
+	}
+	if !e.acceptSpec(spec, roots) {
+		_ = stopProcess()
+		_ = closeProcess()
 		return evidence, ErrProcessRejected
 	}
 	if err := process.Start(ctx); err != nil {
@@ -145,7 +151,7 @@ func (e PreparedProcessExecutor) Execute(ctx context.Context, stage Stage, roots
 }
 
 func (e PreparedProcessExecutor) acceptSpec(spec processcontrol.Spec, roots Roots) bool {
-	if spec.Executable == "" || !filepath.IsAbs(spec.Executable) || filepath.Clean(spec.Executable) != spec.Executable || len(spec.Args) > 256 || len(spec.Batch) != 0 || len(spec.LaunchPlan) != 0 || len(spec.LaunchInputs) != 0 || !pathWithinRoots(spec.Dir, roots) {
+	if spec.Executable == "" || !filepath.IsAbs(spec.Executable) || filepath.Clean(spec.Executable) != spec.Executable || len(spec.Args) > 256 || len(spec.Batch) != 0 || len(spec.LaunchPlan) != 0 || len(spec.LaunchInputs) != 0 || !pathWithinRoots(spec.Dir, roots) || !directDirectory(spec.Dir) || !scanStageRoots(roots) {
 		return false
 	}
 	expected, ok := e.ToolSHA256[spec.Executable]
@@ -169,7 +175,7 @@ func (e PreparedProcessExecutor) acceptSpec(spec processcontrol.Spec, roots Root
 	}
 	for _, entry := range spec.Env {
 		key, value, ok := strings.Cut(entry, "=")
-		if !ok || (key != "LLVM_PROFILE_FILE" && key != "TEMP" && key != "TMP") || !pathWithinRoots(value, roots) {
+		if !ok || (key != "LLVM_PROFILE_FILE" && key != "TEMP" && key != "TMP") || !pathWithinRoots(value, roots) || !within(roots.Artifacts, value) || !safeEnvironmentDestination(key, value) {
 			return false
 		}
 	}
@@ -179,6 +185,41 @@ func (e PreparedProcessExecutor) acceptSpec(spec processcontrol.Spec, roots Root
 		}
 	}
 	return true
+}
+
+func scanStageRoots(roots Roots) bool {
+	for _, root := range []string{roots.Build, roots.Artifacts} {
+		if !directDirectory(root) {
+			return false
+		}
+		count := 0
+		err := filepath.WalkDir(root, func(path string, _ os.DirEntry, walkErr error) error {
+			if walkErr != nil || count >= 100000 {
+				return ErrProcessRejected
+			}
+			count++
+			info, err := os.Lstat(path)
+			if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() && !info.Mode().IsRegular() {
+				return ErrProcessRejected
+			}
+			return nil
+		})
+		if err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+func safeEnvironmentDestination(key, path string) bool {
+	if key == "TEMP" || key == "TMP" {
+		return directDirectory(path)
+	}
+	if key != "LLVM_PROFILE_FILE" || !directDirectory(filepath.Dir(path)) {
+		return false
+	}
+	info, err := os.Lstat(path)
+	return os.IsNotExist(err) || err == nil && info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 && singlyLinked(path)
 }
 
 func pathWithinRoots(path string, roots Roots) bool {
