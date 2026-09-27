@@ -42,10 +42,13 @@ type EvidenceVerifier func(context.Context, string, AssertionEvidence) bool
 // ResolvedCandidate is read from the durable, service-owned candidate and
 // baseline records. It is never reconstructed from client request fields.
 type ResolvedCandidate struct {
-	ID                   string
-	Kind                 testgendomain.CandidateKind
-	TargetSymbol         string
-	TargetFileURI        string
+	ID            string
+	Kind          testgendomain.CandidateKind
+	TargetSymbol  string
+	TargetFileURI string
+	// TargetLines is the authoritative source-line set for TargetSymbol.
+	// Coverage JSON v1 has line IDs but no function or branch IDs.
+	TargetLines          []int64
 	BaselineSHA256       string
 	SourceSnapshotDigest string
 	AssertionDigest      string
@@ -93,7 +96,7 @@ func (v Validator) Validate(ctx context.Context, r ValidationRequest) (result Va
 		return result, ErrInvalidRequest
 	}
 	resolved, resolveErr := v.Config.ResolveCandidate(ctx, r.CandidateID)
-	if resolveErr != nil || resolved.ID != r.CandidateID || (resolved.Kind != Verified && resolved.Kind != Characterization) || resolved.Kind != r.Assertion.Kind || resolved.TargetSymbol == "" || !safeRelative(resolved.TargetFileURI) || !validDigest(resolved.BaselineSHA256) || resolved.BaselineSHA256 != digestBytes(r.BaselineCoverage) || !validDigest(resolved.AssertionDigest) || resolved.AssertionDigest != assertionDigest(r.Assertion) {
+	if resolveErr != nil || resolved.ID != r.CandidateID || (resolved.Kind != Verified && resolved.Kind != Characterization) || resolved.Kind != r.Assertion.Kind || resolved.TargetSymbol == "" || !safeRelative(resolved.TargetFileURI) || !validTargetLines(resolved.TargetLines) || !validDigest(resolved.BaselineSHA256) || resolved.BaselineSHA256 != digestBytes(r.BaselineCoverage) || !validDigest(resolved.AssertionDigest) || resolved.AssertionDigest != assertionDigest(r.Assertion) {
 		return ValidationResult{Diagnostic: DiagnosticAssertion}, nil
 	}
 	if _, err := decodeCoverage(r.BaselineCoverage); err != nil {
@@ -132,6 +135,20 @@ func (v Validator) Validate(ctx context.Context, r ValidationRequest) (result Va
 		return ValidationResult{Diagnostic: DiagnosticAssertion}, nil
 	}
 	return v.runStages(ctx, r, roots, original, staged, resolved)
+}
+
+func validTargetLines(lines []int64) bool {
+	if len(lines) == 0 || len(lines) > 10000 {
+		return false
+	}
+	var previous int64
+	for _, line := range lines {
+		if line <= previous || line > 9007199254740991 {
+			return false
+		}
+		previous = line
+	}
+	return true
 }
 
 func assertionDigest(e AssertionEvidence) string {

@@ -35,6 +35,44 @@ func twoFileCoverage(targetCovered, otherCovered int64) []byte {
 	return data
 }
 
+func sameFileCoverage(targetLine, otherLine, functionCovered, otherBranch int64) []byte {
+	line := func(number, count, branches int64) coverage.CoverageLineV1 {
+		return coverage.CoverageLineV1{Line: number, Count: count, Branches: coverage.CoverageMetricV1{Covered: branches, Total: number - 1}}
+	}
+	file := coverage.CoverageFileV1{URI: "source.c", Sha256: testID, Lines: []coverage.CoverageLineV1{line(1, targetLine, 0), line(2, otherLine, otherBranch)}, Summary: coverage.CoverageSummaryV1{Functions: coverage.CoverageMetricV1{Covered: functionCovered, Total: 2}, Lines: coverage.CoverageMetricV1{Covered: targetLine + otherLine, Total: 2}, Branches: coverage.CoverageMetricV1{Covered: otherBranch, Total: 1}}}
+	value := coverage.CoverageDocumentV1{SchemaVersion: coverage.The10, Completeness: coverage.CoverageCompletenessV1{Outcome: coverage.Available, Reasons: []coverage.Reason{}}, Provenance: coverage.CoverageProvenanceV1{Platform: coverage.Windows, Architecture: coverage.X64, Compiler: coverage.CoverageCompilerV1{Family: coverage.ClangCl, Version: "22.1.8"}, Driver: coverage.CoverageDriverV1{Name: coverage.FluffyLlvmCov, Version: "22.1.8"}, Collector: coverage.CoverageCollectorV1{Name: coverage.PurpleLlvmCov, Version: "22.1.8"}, NormalizerVersion: "1", InstrumentationFingerprint: testID}, Summary: file.Summary, Files: []coverage.CoverageFileV1{file}}
+	data, _ := json.Marshal(value)
+	return data
+}
+
+func TestSameFileUnrelatedGainsCannotRetainTarget(t *testing.T) {
+	baseline := sameFileCoverage(0, 0, 0, 0)
+	for _, tc := range []struct {
+		name     string
+		after    []byte
+		metrics  Metrics
+		retained bool
+	}{
+		{"other-function", sameFileCoverage(0, 0, 1, 0), Metrics{Functions: true}, false},
+		{"other-line", sameFileCoverage(0, 1, 0, 0), Metrics{Lines: true}, false},
+		{"other-branch", sameFileCoverage(0, 0, 0, 1), Metrics{Branches: true}, false},
+		{"target-line", sameFileCoverage(1, 0, 0, 0), Metrics{Lines: true}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := t.TempDir()
+			_ = os.WriteFile(filepath.Join(source, "source.c"), []byte("source"), 0600)
+			v := Validator{Config: Config{SourceRoot: source, TempRoot: t.TempDir(), Planner: &fixturePlanner{coverage: tc.after}, VerifyEvidence: trustedFixtureProof, ResolveCandidate: fixtureResolver(source, baseline)}}
+			result, err := v.Validate(context.Background(), ValidationRequest{TaskID: testID, CandidateID: testID, BaselineCoverage: baseline, Metrics: tc.metrics, Assertion: AssertionEvidence{Kind: Verified, IndependentProofDigest: testID}})
+			if err != nil || result.Retained != tc.retained {
+				t.Fatalf("wrong target-symbol retention: %+v %v", result, err)
+			}
+			if !tc.retained && result.Diagnostic != DiagnosticNoDelta {
+				t.Fatalf("wrong diagnostic: %+v", result)
+			}
+		})
+	}
+}
+
 func TestValidateRequiresTargetSpecificGain(t *testing.T) {
 	for _, tc := range []struct {
 		name            string
@@ -64,9 +102,9 @@ func TestValidateOrderedStagesAndReceipts(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(source, "tests", "CMakeLists.txt"), []byte("before\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	planner := &fixturePlanner{coverage: coverageFixture(1, 1, 0)}
-	v := Validator{Config: Config{SourceRoot: source, TempRoot: t.TempDir(), Planner: planner, VerifyEvidence: trustedFixtureProof, ResolveCandidate: fixtureResolver(source, coverageFixture(0, 1, 0))}}
-	r := ValidationRequest{TaskID: testID, CandidateID: testID, Edits: testgenrender.StagedEditSet{Files: []testgenrender.StagedFile{{Path: "tests/generated/test.c", Content: []byte("test\n"), AfterDigest: digestTest([]byte("test\n"))}, {Path: "tests/CMakeLists.txt", Content: []byte("after\n"), BeforeDigest: digestTest([]byte("before\n")), AfterDigest: digestTest([]byte("after\n"))}}}, BaselineCoverage: coverageFixture(0, 1, 0), Metrics: Metrics{Functions: true}, Assertion: AssertionEvidence{Kind: Verified, IndependentProofDigest: testID}}
+	planner := &fixturePlanner{coverage: coverageFixture(0, 1, 0)}
+	v := Validator{Config: Config{SourceRoot: source, TempRoot: t.TempDir(), Planner: planner, VerifyEvidence: trustedFixtureProof, ResolveCandidate: fixtureResolver(source, coverageFixture(0, 0, 0))}}
+	r := ValidationRequest{TaskID: testID, CandidateID: testID, Edits: testgenrender.StagedEditSet{Files: []testgenrender.StagedFile{{Path: "tests/generated/test.c", Content: []byte("test\n"), AfterDigest: digestTest([]byte("test\n"))}, {Path: "tests/CMakeLists.txt", Content: []byte("after\n"), BeforeDigest: digestTest([]byte("before\n")), AfterDigest: digestTest([]byte("after\n"))}}}, BaselineCoverage: coverageFixture(0, 0, 0), Metrics: Metrics{Lines: true}, Assertion: AssertionEvidence{Kind: Verified, IndependentProofDigest: testID}}
 	result, err := v.Validate(context.Background(), r)
 	if err != nil {
 		t.Fatal(err)
@@ -214,7 +252,7 @@ func trustedFixtureProof(_ context.Context, _ string, evidence AssertionEvidence
 func fixtureResolver(source string, baseline []byte) CandidateResolver {
 	return func(context.Context, string) (ResolvedCandidate, error) {
 		_, fingerprint, _ := sourceFingerprint(source)
-		return ResolvedCandidate{ID: testID, Kind: Verified, TargetSymbol: testID, TargetFileURI: "source.c", BaselineSHA256: digestTest(baseline), SourceSnapshotDigest: fingerprint, AssertionDigest: testID}, nil
+		return ResolvedCandidate{ID: testID, Kind: Verified, TargetSymbol: testID, TargetFileURI: "source.c", TargetLines: []int64{1}, BaselineSHA256: digestTest(baseline), SourceSnapshotDigest: fingerprint, AssertionDigest: testID}, nil
 	}
 }
 
@@ -236,7 +274,7 @@ func TestValidateRejectsSourceSnapshotIdentityMismatch(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(source, "source.c"), []byte("source"), 0600)
 	baseline := coverageFixture(0, 1, 0)
 	v := Validator{Config: Config{SourceRoot: source, TempRoot: t.TempDir(), Planner: &fixturePlanner{coverage: coverageFixture(1, 1, 0)}, VerifyEvidence: trustedFixtureProof, ResolveCandidate: func(context.Context, string) (ResolvedCandidate, error) {
-		return ResolvedCandidate{ID: testID, Kind: Verified, TargetSymbol: testID, TargetFileURI: "source.c", BaselineSHA256: digestTest(baseline), SourceSnapshotDigest: testID, AssertionDigest: testID}, nil
+		return ResolvedCandidate{ID: testID, Kind: Verified, TargetSymbol: testID, TargetFileURI: "source.c", TargetLines: []int64{1}, BaselineSHA256: digestTest(baseline), SourceSnapshotDigest: testID, AssertionDigest: testID}, nil
 	}}}
 	result, err := v.Validate(context.Background(), ValidationRequest{TaskID: testID, CandidateID: testID, BaselineCoverage: baseline, Metrics: Metrics{Functions: true}, Assertion: AssertionEvidence{Kind: Verified, IndependentProofDigest: testID}})
 	if err != nil || result.Retained || result.Diagnostic != DiagnosticIsolation {

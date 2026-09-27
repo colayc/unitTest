@@ -62,7 +62,7 @@ func (v Validator) runStages(ctx context.Context, r ValidationRequest, roots Roo
 				result.Diagnostic = DiagnosticCoverage
 				return result, nil
 			}
-			delta, diagnostic := compareCoverage(baseline, candidate, r.Metrics, target.TargetFileURI)
+			delta, diagnostic := compareCoverage(baseline, candidate, r.Metrics, target)
 			if diagnostic != DiagnosticNone {
 				result.Diagnostic = diagnostic
 				return result, nil
@@ -74,12 +74,13 @@ func (v Validator) runStages(ctx context.Context, r ValidationRequest, roots Roo
 			CandidateID    string
 			TargetSymbol   string
 			TargetFileURI  string
+			TargetLines    []int64
 			BaselineDigest string
 			SnapshotDigest string
 			OutputDigest   string
 			CoverageDigest string
 			Discovery      []string
-		}{stage, r.CandidateID, target.TargetSymbol, target.TargetFileURI, target.BaselineSHA256, roots.SnapshotDigest, digestBytes(evidence.Output), digestBytes(evidence.CoverageJSON), evidence.DiscoveredCaseIDs}
+		}{stage, r.CandidateID, target.TargetSymbol, target.TargetFileURI, target.TargetLines, target.BaselineSHA256, roots.SnapshotDigest, digestBytes(evidence.Output), digestBytes(evidence.CoverageJSON), evidence.DiscoveredCaseIDs}
 		encoded, _ := json.Marshal(receipt)
 		result.Receipts = append(result.Receipts, StageReceipt{Stage: stage, Digest: digestBytes(encoded), OutputDigest: receipt.OutputDigest, CoverageDigest: receipt.CoverageDigest})
 	}
@@ -87,7 +88,7 @@ func (v Validator) runStages(ctx context.Context, r ValidationRequest, roots Roo
 	return result, nil
 }
 
-func compareCoverage(before, after coverage.CoverageDocumentV1, selected Metrics, targetURI string) (CoverageDelta, Diagnostic) {
+func compareCoverage(before, after coverage.CoverageDocumentV1, selected Metrics, target ResolvedCandidate) (CoverageDelta, Diagnostic) {
 	if !reflect.DeepEqual(before.Provenance, after.Provenance) || len(before.Files) != len(after.Files) {
 		return CoverageDelta{}, DiagnosticCoverage
 	}
@@ -109,9 +110,20 @@ func compareCoverage(before, after coverage.CoverageDocumentV1, selected Metrics
 				return CoverageDelta{}, DiagnosticRegression
 			}
 		}
-		if b.URI == targetURI {
+		if b.URI == target.TargetFileURI {
 			foundTarget = true
-			targetDelta = CoverageDelta{Functions: a.Summary.Functions.Covered - b.Summary.Functions.Covered, Lines: a.Summary.Lines.Covered - b.Summary.Lines.Covered, Branches: a.Summary.Branches.Covered - b.Summary.Branches.Covered}
+			lineIndex := 0
+			for _, targetLine := range target.TargetLines {
+				for lineIndex < len(b.Lines) && b.Lines[lineIndex].Line < targetLine {
+					lineIndex++
+				}
+				if lineIndex == len(b.Lines) || b.Lines[lineIndex].Line != targetLine {
+					return CoverageDelta{}, DiagnosticCoverage
+				}
+				if b.Lines[lineIndex].Count == 0 && a.Lines[lineIndex].Count > 0 {
+					targetDelta.Lines++
+				}
+			}
 		}
 	}
 	if !foundTarget {
@@ -124,12 +136,11 @@ func compareCoverage(before, after coverage.CoverageDocumentV1, selected Metrics
 	if a.Functions.Covered < b.Functions.Covered || a.Lines.Covered < b.Lines.Covered || a.Branches.Covered < b.Branches.Covered {
 		return CoverageDelta{}, DiagnosticRegression
 	}
-	if !selected.Functions || targetDelta.Functions == 0 {
-		if !selected.Lines || targetDelta.Lines == 0 {
-			if !selected.Branches || targetDelta.Branches == 0 {
-				return CoverageDelta{}, DiagnosticNoDelta
-			}
-		}
+	// Coverage JSON v1 contains no stable function or branch IDs. File-level
+	// increases cannot be attributed to TargetSymbol, so those metrics fail
+	// closed until a richer trusted collector identity contract is available.
+	if !selected.Lines || targetDelta.Lines == 0 {
+		return CoverageDelta{}, DiagnosticNoDelta
 	}
 	return targetDelta, DiagnosticNone
 }
