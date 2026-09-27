@@ -531,3 +531,169 @@ func TestSymlinkReplacementBeforeRenameIsRestoredWithoutFollowing(t *testing.T) 
 		t.Fatalf("link target changed: %q %v", data, err)
 	}
 }
+
+func TestCrashAfterExclusiveRestoreConvergesOnRepeatedRecovery(t *testing.T) {
+	for _, symlink := range []bool{false, true} {
+		t.Run(map[bool]string{false: "regular", true: "symlink"}[symlink], func(t *testing.T) {
+			f := newFixture(t)
+			plan := f.plan(t)
+			if symlink {
+				outside := filepath.Join(t.TempDir(), "outside")
+				if err := os.WriteFile(outside, []byte("outside"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				target := filepath.Join(f.root, "tests", "CMakeLists.txt")
+				f.p.hooks.beforeRename = func(rel string) {
+					if rel != "tests/CMakeLists.txt" {
+						return
+					}
+					if err := os.Remove(target); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Symlink(outside, target); err != nil {
+						t.Skipf("symlink unavailable: %v", err)
+					}
+				}
+			} else {
+				f.p.hooks.fail = func(stage string) error {
+					if stage == "cleanup" {
+						return errors.New("rollback")
+					}
+					return nil
+				}
+			}
+			f.p.hooks.afterRestoreCreate = func(from, to string) {
+				if strings.HasSuffix(from, ".backup") && to == "CMakeLists.txt" {
+					panic("crash after restore link")
+				}
+			}
+			func() {
+				defer func() {
+					if recover() == nil {
+						t.Fatal("restore crash not reached")
+					}
+				}()
+				_, _ = f.p.Accept(context.Background(), f.request(plan))
+			}()
+			f.close(t)
+			p, err := New(f.root, f.journal, func(context.Context, string) error { return nil })
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer p.Close()
+			if err := p.Recover(context.Background()); err != nil {
+				t.Fatalf("first recover: %v", err)
+			}
+			if err := p.Recover(context.Background()); err != nil {
+				t.Fatalf("repeat recover: %v", err)
+			}
+			if symlink {
+				info, err := os.Lstat(filepath.Join(f.root, "tests", "CMakeLists.txt"))
+				if err != nil || info.Mode()&os.ModeSymlink == 0 {
+					t.Fatalf("symlink not preserved: %v %v", info, err)
+				}
+			} else {
+				cmake, source, _ := readFixture(t, fixture{root: f.root})
+				if cmake != f.before || source != nil {
+					t.Fatal("regular recovery incomplete")
+				}
+			}
+		})
+	}
+}
+
+func TestRecoveryPreservesLaterUserReplacementAfterRestoreCrash(t *testing.T) {
+	f := newFixture(t)
+	plan := f.plan(t)
+	f.p.hooks.fail = func(stage string) error {
+		if stage == "cleanup" {
+			return errors.New("rollback")
+		}
+		return nil
+	}
+	f.p.hooks.afterRestoreCreate = func(from, to string) {
+		if strings.HasSuffix(from, ".backup") && to == "CMakeLists.txt" {
+			panic("crash after restore link")
+		}
+	}
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("restore crash not reached")
+			}
+		}()
+		_, _ = f.p.Accept(context.Background(), f.request(plan))
+	}()
+	f.close(t)
+	target := filepath.Join(f.root, "tests", "CMakeLists.txt")
+	if err := os.Remove(target); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("later user edit\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	p, err := New(f.root, f.journal, func(context.Context, string) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	if err := p.Recover(context.Background()); !errors.Is(err, ErrConflict) {
+		t.Fatalf("later edit not surfaced: %v", err)
+	}
+	data, err := os.ReadFile(target)
+	if err != nil || string(data) != "later user edit\n" {
+		t.Fatalf("later edit overwritten: %q %v", data, err)
+	}
+}
+
+func TestCrashAfterHeldUserFileRestoreConverges(t *testing.T) {
+	f := newFixture(t)
+	plan := f.plan(t)
+	f.p.hooks.fail = func(stage string) error {
+		if stage == "cleanup" {
+			return errors.New("rollback")
+		}
+		return nil
+	}
+	f.p.hooks.beforeRollbackMove = func(rel string) {
+		if rel != "tests/CMakeLists.txt" {
+			return
+		}
+		target := filepath.Join(f.root, "tests", "CMakeLists.txt")
+		if err := os.Remove(target); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, []byte("user during rollback\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.p.hooks.afterRestoreCreate = func(from, to string) {
+		if strings.HasSuffix(from, ".hold") && to == "CMakeLists.txt" {
+			panic("crash after held restore")
+		}
+	}
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("held restore crash not reached")
+			}
+		}()
+		_, _ = f.p.Accept(context.Background(), f.request(plan))
+	}()
+	f.close(t)
+	p, err := New(f.root, f.journal, func(context.Context, string) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	if err := p.Recover(context.Background()); err != nil {
+		t.Fatalf("first recover: %v", err)
+	}
+	if err := p.Recover(context.Background()); err != nil {
+		t.Fatalf("repeat recover: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(f.root, "tests", "CMakeLists.txt"))
+	if err != nil || string(data) != "user during rollback\n" {
+		t.Fatalf("user file lost: %q %v", data, err)
+	}
+}

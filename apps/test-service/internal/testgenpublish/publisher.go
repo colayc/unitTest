@@ -23,6 +23,7 @@ type publisherHooks struct {
 	fail               func(string) error
 	beforeRename       func(string)
 	beforeRollbackMove func(string)
+	afterRestoreCreate func(string, string)
 	afterBackup        func(string)
 	cleanupRemove      func(string) error
 }
@@ -568,7 +569,7 @@ func (p *Publisher) readReceipt(d string) (Receipt, bool, error) {
 
 // restoreExclusive recreates the original pathname only when it is vacant.
 // Link preserves an existing symlink object rather than following its target.
-func restoreExclusive(parent *os.Root, from, to string) error {
+func (p *Publisher) restoreExclusive(parent *os.Root, from, to string) error {
 	if err := parent.Link(from, to); err != nil {
 		info, statErr := parent.Lstat(from)
 		if statErr != nil || !linked(info) {
@@ -578,6 +579,9 @@ func restoreExclusive(parent *os.Root, from, to string) error {
 		if linkErr != nil || parent.Symlink(target, to) != nil {
 			return ErrConflict
 		}
+	}
+	if p.hooks.afterRestoreCreate != nil {
+		p.hooks.afterRestoreCreate(from, to)
 	}
 	if err := parent.Remove(from); err != nil {
 		return ErrConflict
@@ -605,13 +609,59 @@ func (p *Publisher) movePublished(parent *os.Root, item journalFile, current os.
 		return ErrConflict
 	}
 	if !os.SameFile(moved, current) || linked(moved) || !moved.Mode().IsRegular() || !sameMode(moved.Mode().Perm(), os.FileMode(item.Mode)) {
-		return errors.Join(ErrConflict, restoreExclusive(parent, item.HoldName, name))
+		return errors.Join(ErrConflict, p.restoreExclusive(parent, item.HoldName, name))
 	}
 	data, err := p.readRelative(parent, item.HoldName)
 	if err != nil || digest(data) != item.AfterDigest {
-		return errors.Join(ErrConflict, restoreExclusive(parent, item.HoldName, name))
+		return errors.Join(ErrConflict, p.restoreExclusive(parent, item.HoldName, name))
 	}
 	if err := parent.Remove(item.HoldName); err != nil {
+		return ErrConflict
+	}
+	return nil
+}
+
+// sameRestoredEntry recognizes an interrupted exclusive restore. A regular
+// file must still be the same filesystem object; a recreated symlink fallback
+// is equivalent only when both link targets are byte-identical.
+func (p *Publisher) sameRestoredEntry(parent *os.Root, left, right string, leftInfo, rightInfo os.FileInfo) bool {
+	if leftInfo == nil || rightInfo == nil {
+		return false
+	}
+	if linked(leftInfo) || linked(rightInfo) {
+		if !linked(leftInfo) || !linked(rightInfo) {
+			return false
+		}
+		a, aErr := parent.Readlink(left)
+		b, bErr := parent.Readlink(right)
+		return aErr == nil && bErr == nil && a == b
+	}
+	if !leftInfo.Mode().IsRegular() || !rightInfo.Mode().IsRegular() || !os.SameFile(leftInfo, rightInfo) {
+		return false
+	}
+	a, aErr := p.readRelative(parent, left)
+	b, bErr := p.readRelative(parent, right)
+	return aErr == nil && bErr == nil && digest(a) == digest(b)
+}
+
+func (p *Publisher) clearRestoredPair(parent *os.Root, item journalFile, private string, alsoBackup bool) error {
+	if err := parent.Remove(private); err != nil {
+		return ErrConflict
+	}
+	if alsoBackup {
+		info, err := parent.Lstat(item.BackupName)
+		if err != nil || linked(info) || !info.Mode().IsRegular() {
+			return ErrConflict
+		}
+		data, err := p.readRelative(parent, item.BackupName)
+		if err != nil || digest(data) != item.BeforeDigest {
+			return ErrConflict
+		}
+		if err := parent.Remove(item.BackupName); err != nil {
+			return ErrConflict
+		}
+	}
+	if err := parent.Remove(item.StageName); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return ErrConflict
 	}
 	return nil
@@ -635,6 +685,10 @@ func (p *Publisher) rollback(j journalRecord) error {
 		currentPresent := currentErr == nil
 		if hold, holdErr := parent.Lstat(item.HoldName); holdErr == nil {
 			if currentPresent {
+				if p.sameRestoredEntry(parent, name, item.HoldName, current, hold) {
+					result = errors.Join(result, p.clearRestoredPair(parent, item, item.HoldName, backupErr == nil), parent.Close())
+					continue
+				}
 				result = errors.Join(result, ErrConflict)
 				_ = parent.Close()
 				continue
@@ -648,18 +702,22 @@ func (p *Publisher) rollback(j journalRecord) error {
 						continue
 					}
 				} else {
-					result = errors.Join(result, ErrConflict, restoreExclusive(parent, item.HoldName, name))
+					result = errors.Join(result, ErrConflict, p.restoreExclusive(parent, item.HoldName, name))
 					_ = parent.Close()
 					continue
 				}
 			} else {
-				result = errors.Join(result, ErrConflict, restoreExclusive(parent, item.HoldName, name))
+				result = errors.Join(result, ErrConflict, p.restoreExclusive(parent, item.HoldName, name))
 				_ = parent.Close()
 				continue
 			}
 		} else if !errors.Is(holdErr, os.ErrNotExist) {
 			result = errors.Join(result, ErrConflict)
 			_ = parent.Close()
+			continue
+		}
+		if currentPresent && backupErr == nil && p.sameRestoredEntry(parent, name, item.BackupName, current, backup) {
+			result = errors.Join(result, p.clearRestoredPair(parent, item, item.BackupName, false), parent.Close())
 			continue
 		}
 		if currentErr == nil {
@@ -699,7 +757,7 @@ func (p *Publisher) rollback(j journalRecord) error {
 					result = errors.Join(result, ErrConflict)
 				} else if currentPresent {
 					result = errors.Join(result, ErrConflict)
-				} else if err := restoreExclusive(parent, item.BackupName, name); err != nil {
+				} else if err := p.restoreExclusive(parent, item.BackupName, name); err != nil {
 					result = errors.Join(result, ErrConflict)
 				}
 			} else if errors.Is(backupErr, os.ErrNotExist) {
