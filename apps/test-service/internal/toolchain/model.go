@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -34,6 +36,44 @@ type CoverageCapability struct {
 	GCovEvidence        ExecutableEvidence
 	GCovVersion         string
 	ToolsetIdentity     string
+}
+
+// LLVMToolEvidence binds a fixed LLVM role to one executable snapshot.
+type LLVMToolEvidence struct {
+	Role     string
+	Path     string
+	Evidence ExecutableEvidence
+}
+
+// LLVMToolsetIdentityForTools constructs the Linux four-tool identity. Paths
+// participate in the hash but are never returned in the serialized identity.
+func LLVMToolsetIdentityForTools(version string, tools []LLVMToolEvidence) (string, error) {
+	roles := []string{"clang", "clang++", "llvm-profdata", "llvm-cov"}
+	if version == "" || len(tools) != len(roles) {
+		return "", fmt.Errorf("invalid LLVM tool count or version")
+	}
+	root := ""
+	identities := make(map[string]struct{}, len(tools))
+	parts := []string{"llvm-toolset-v2", version}
+	for index, tool := range tools {
+		if tool.Role != roles[index] || tool.Path == "" || !filepath.IsAbs(tool.Path) ||
+			filepath.Clean(tool.Path) != tool.Path || filepath.Base(tool.Path) != tool.Role ||
+			!validUnixExecutableEvidence(tool.Evidence) {
+			return "", fmt.Errorf("invalid LLVM %s evidence", roles[index])
+		}
+		if index == 0 {
+			root = filepath.Dir(tool.Path)
+		} else if filepath.Dir(tool.Path) != root {
+			return "", fmt.Errorf("LLVM tools have different installation roots")
+		}
+		if _, duplicate := identities[tool.Evidence.FileIdentity]; duplicate {
+			return "", fmt.Errorf("LLVM tool roles share one executable")
+		}
+		identities[tool.Evidence.FileIdentity] = struct{}{}
+		parts = append(parts, tool.Role, identityPath(tool.Path), tool.Evidence.FileIdentity, tool.Evidence.SHA256)
+	}
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // LLVMToolsetIdentity binds a discovery version and the three exact executable

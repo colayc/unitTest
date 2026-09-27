@@ -503,6 +503,119 @@ func TestClangProbeUsesFixedArgumentsAndResourceIdentity(t *testing.T) {
 	)
 }
 
+func TestLinuxClangProbeRetainsFourVerifiedCoverageTools(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux executable identity")
+	}
+	fixture := newGNUFixture(t)
+	profdata := filepath.Join(filepath.Dir(fixture.clang), "llvm-profdata")
+	cov := filepath.Join(filepath.Dir(fixture.clang), "llvm-cov")
+	for _, path := range []string{profdata, cov} {
+		if err := os.WriteFile(path, []byte(filepath.Base(path)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runner := newGNUFakeRunner(t, fixture)
+	runner.outputs[probeKey(profdata, "--version")] = successfulOutput("llvm-profdata version 18.1.3\n")
+	runner.outputs[probeKey(cov, "--version")] = successfulOutput("LLVM version 18.1.3\n")
+	adapter, err := newGNUAdapter(runner, FamilyClang, nil, "arm64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance, err := adapter.Probe(context.Background(), Candidate{Family: FamilyClang, CCompiler: fixture.clang, CXXCompiler: fixture.clangxx, Make: fixture.make})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if instance.Coverage.ToolsetIdentity == "" || instance.Coverage.CompilerEvidence == instance.Coverage.CXXCompilerEvidence ||
+		instance.Coverage.LLVMProfdata != profdata || instance.Coverage.LLVMCov != cov || instance.Coverage.CovEvidence.SHA256 == "" {
+		t.Fatalf("missing distinct four-tool coverage evidence: %#v", instance.Coverage)
+	}
+}
+
+func TestLinuxClangProbeDropsCoverageWhenToolMutatesDuringVersionProbe(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux executable identity")
+	}
+	fixture := newGNUFixture(t)
+	profdata := filepath.Join(filepath.Dir(fixture.clang), "llvm-profdata")
+	cov := filepath.Join(filepath.Dir(fixture.clang), "llvm-cov")
+	for _, path := range []string{profdata, cov} {
+		if err := os.WriteFile(path, []byte(filepath.Base(path)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runner := newGNUFakeRunner(t, fixture)
+	runner.outputs[probeKey(profdata, "--version")] = successfulOutput("llvm-profdata version 18.1.3\n")
+	runner.outputs[probeKey(cov, "--version")] = successfulOutput("LLVM version 18.1.3\n")
+	runner.afterCall = func(call probeCall) {
+		if call.executable == cov && call.argument == "--version" {
+			if err := os.WriteFile(cov, []byte("mutated"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	adapter, _ := newGNUAdapter(runner, FamilyClang, nil, "arm64")
+	instance, err := adapter.Probe(context.Background(), Candidate{Family: FamilyClang, CCompiler: fixture.clang, CXXCompiler: fixture.clangxx, Make: fixture.make})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if instance.Coverage != (CoverageCapability{}) {
+		t.Fatalf("advertised mutated LLVM coverage: %#v", instance.Coverage)
+	}
+}
+
+func TestLinuxClangProbeClosesCoverageOnMissingOrMismatchedTool(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux executable identity")
+	}
+	for _, variant := range []string{"missing", "mismatched", "different-root"} {
+		t.Run(variant, func(t *testing.T) {
+			fixture := newGNUFixture(t)
+			profdata := filepath.Join(filepath.Dir(fixture.clang), "llvm-profdata")
+			cov := filepath.Join(filepath.Dir(fixture.clang), "llvm-cov")
+			for _, path := range []string{profdata, cov} {
+				if err := os.WriteFile(path, []byte(filepath.Base(path)), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			runner := newGNUFakeRunner(t, fixture)
+			runner.outputs[probeKey(profdata, "--version")] = successfulOutput("llvm-profdata version 18.1.3\n")
+			runner.outputs[probeKey(cov, "--version")] = successfulOutput("LLVM version 18.1.3\n")
+			switch variant {
+			case "missing":
+				os.Remove(fixture.clangxx)
+			case "mismatched":
+				runner.outputs[probeKey(cov, "--version")] = successfulOutput("LLVM version 19.0.0\n")
+			case "different-root":
+				other := filepath.Join(t.TempDir(), "llvm-cov")
+				if err := os.WriteFile(other, []byte("cov"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(cov); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(other, cov); err != nil {
+					t.Fatal(err)
+				}
+			}
+			adapter, _ := newGNUAdapter(runner, FamilyClang, nil, "arm64")
+			instance, err := adapter.Probe(context.Background(), Candidate{Family: FamilyClang, CCompiler: fixture.clang, CXXCompiler: fixture.clangxx, Make: fixture.make})
+			if variant == "missing" {
+				if err == nil {
+					t.Fatal("missing clang++ accepted")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if instance.Coverage != (CoverageCapability{}) {
+				t.Fatalf("advertised invalid coverage: %#v", instance.Coverage)
+			}
+		})
+	}
+}
+
 func TestGNUProbeRejectsMismatchedCompilerPairs(t *testing.T) {
 	t.Parallel()
 

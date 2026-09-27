@@ -2,9 +2,6 @@ package runtime
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	goruntime "runtime"
 	"strings"
@@ -292,22 +289,25 @@ func coverageToolchainSnapshot(instance toolchain.Instance, platform string) (co
 		result.Collector = coveragedomain.CollectorSnapshot{Name: coveragedomain.CollectorGCovr, Version: "8.6"}
 		result.InstrumentationFingerprint = coveragegcc.InstrumentationFingerprint()
 	case result.Platform == coveragedomain.PlatformLinux && instance.Family == toolchain.FamilyClang:
+		tools := []toolchain.LLVMToolEvidence{
+			{Role: "clang", Path: instance.CCompiler, Evidence: instance.Coverage.CompilerEvidence},
+			{Role: "clang++", Path: instance.CXXCompiler, Evidence: instance.Coverage.CXXCompilerEvidence},
+			{Role: "llvm-profdata", Path: instance.Coverage.LLVMProfdata, Evidence: instance.Coverage.ProfdataEvidence},
+			{Role: "llvm-cov", Path: instance.Coverage.LLVMCov, Evidence: instance.Coverage.CovEvidence},
+		}
+		identity, err := toolchain.LLVMToolsetIdentityForTools(instance.Version, tools)
+		if err != nil || identity != instance.Coverage.ToolsetIdentity {
+			return coveragedomain.ToolchainSnapshot{}, coveragedomain.ErrInvalidToolchain
+		}
 		result.Compiler.Family = coveragedomain.CompilerFamilyClang
 		result.Driver = coveragedomain.DriverSnapshot{Name: coveragedomain.DriverLLVMCov, Version: instance.Version}
 		result.Collector = coveragedomain.CollectorSnapshot{Name: coveragedomain.CollectorLLVMCov, Version: instance.Version}
+		result.InstrumentationFingerprint = coveragellvm.InstrumentationFingerprint()
 	default:
 		return coveragedomain.ToolchainSnapshot{}, coveragedomain.ErrInvalidToolchain
 	}
 	if result.Architecture == "" {
 		return coveragedomain.ToolchainSnapshot{}, coveragedomain.ErrInvalidToolchain
-	}
-	if result.InstrumentationFingerprint == "" {
-		identity, _ := json.Marshal(struct {
-			Family   toolchain.Family
-			Contract string
-		}{instance.Family, result.NormalizerVersion})
-		sum := sha256.Sum256(identity)
-		result.InstrumentationFingerprint = hex.EncodeToString(sum[:])
 	}
 	return result, nil
 }

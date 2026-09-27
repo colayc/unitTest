@@ -45,6 +45,7 @@ var (
 	gccVersionPattern   = regexp.MustCompile(`(?i)(?:\bgcc\b|(?:^|[^A-Za-z0-9_])g\+\+(?:$|[^A-Za-z0-9_])|\bgnu compiler collection\b)[^\r\n]*?\b([0-9]+\.[0-9]+(?:\.[0-9]+)?)\b`)
 	gcovVersionPattern  = regexp.MustCompile(`(?i)\bgcov\b[^\r\n]*?\b([0-9]+\.[0-9]+(?:\.[0-9]+)?)\b`)
 	clangVersionPattern = regexp.MustCompile(`(?i)\bclang version ([0-9]+\.[0-9]+(?:\.[0-9]+)?)\b`)
+	llvmVersionPattern  = regexp.MustCompile(`(?i)\b(?:llvm-profdata|llvm) version ([0-9]+\.[0-9]+(?:\.[0-9]+)?)\b`)
 	versionPattern      = regexp.MustCompile(`^[0-9]+\.[0-9]+(?:\.[0-9]+)?$`)
 	triplePattern       = regexp.MustCompile(`^[A-Za-z0-9_+.]+(?:-[A-Za-z0-9_+.]+)+$`)
 )
@@ -355,7 +356,86 @@ func (adapter *gnuAdapter) Probe(ctx context.Context, candidate Candidate) (Inst
 			return Instance{}, invalidProbe("TOOLCHAIN_PROBE_FAILED", "construct automatic toolchain id")
 		}
 	}
+	if adapter.family == FamilyClang && runtime.GOOS == "linux" {
+		capability, coverageErr := adapter.probeLLVMCoverage(ctx, instance)
+		if isContextError(coverageErr) {
+			return Instance{}, coverageErr
+		}
+		if coverageErr == nil {
+			instance.Coverage = capability
+		}
+	}
 	return instance, nil
+}
+
+// probeLLVMCoverage is best-effort: an ordinary Clang remains discoverable
+// when its same-installation coverage tools cannot be verified.
+func (adapter *gnuAdapter) probeLLVMCoverage(ctx context.Context, instance Instance) (CoverageCapability, error) {
+	if adapter == nil || adapter.family != FamilyClang || runtime.GOOS != "linux" ||
+		instance.Family != FamilyClang || instance.CCompiler == "" || instance.CXXCompiler == "" {
+		return CoverageCapability{}, ErrInvalidToolchain
+	}
+	root := filepath.Dir(instance.CCompiler)
+	paths := []string{instance.CCompiler, instance.CXXCompiler, filepath.Join(root, "llvm-profdata"), filepath.Join(root, "llvm-cov")}
+	roles := []string{"clang", "clang++", "llvm-profdata", "llvm-cov"}
+	snapshots := make([]*executableSnapshot, 0, len(paths))
+	defer func() {
+		for _, item := range snapshots {
+			_ = item.Close()
+		}
+	}()
+	for index, path := range paths {
+		item, err := openDirectExecutableSnapshot(ctx, path)
+		if err != nil {
+			return CoverageCapability{}, err
+		}
+		snapshots = append(snapshots, item)
+		if filepath.Dir(item.path) != root || filepath.Base(item.path) != roles[index] {
+			return CoverageCapability{}, ErrInvalidToolchain
+		}
+	}
+	verify := func() error {
+		for _, item := range snapshots {
+			if err := item.Verify(ctx); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for _, index := range []int{2, 3} {
+		output, err := adapter.runProbe(ctx, snapshots[index].path, "--version", verify)
+		if err != nil {
+			return CoverageCapability{}, err
+		}
+		line, err := parseFirstLine(output, 4096)
+		if err != nil {
+			return CoverageCapability{}, err
+		}
+		match := llvmVersionPattern.FindStringSubmatch(line)
+		if len(match) != 2 || match[1] != instance.Version {
+			return CoverageCapability{}, ErrInvalidToolchain
+		}
+	}
+	if err := verify(); err != nil {
+		return CoverageCapability{}, err
+	}
+	tools := make([]LLVMToolEvidence, len(paths))
+	for index, item := range snapshots {
+		evidence, err := unixExecutableEvidence(item)
+		if err != nil {
+			return CoverageCapability{}, err
+		}
+		tools[index] = LLVMToolEvidence{Role: roles[index], Path: item.path, Evidence: evidence}
+	}
+	identity, err := LLVMToolsetIdentityForTools(instance.Version, tools)
+	if err != nil {
+		return CoverageCapability{}, err
+	}
+	return CoverageCapability{
+		LLVMProfdata: paths[2], LLVMCov: paths[3], CompilerEvidence: tools[0].Evidence,
+		CXXCompilerEvidence: tools[1].Evidence, ProfdataEvidence: tools[2].Evidence,
+		CovEvidence: tools[3].Evidence, ToolsetIdentity: identity,
+	}, nil
 }
 
 // probeGCCCoverage is deliberately best-effort. A valid ordinary GCC

@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -240,6 +241,27 @@ func TestCoverageSnapshotAcceptsOnlySupportedPlatformFamilies(t *testing.T) {
 			if test.family == toolchain.FamilyGCC {
 				instance.Coverage = toolchain.CoverageCapability{GCov: "/usr/bin/gcov", GCovVersion: "18.1.8", ToolsetIdentity: strings.Repeat("a", 64)}
 			}
+			if test.family == toolchain.FamilyClang {
+				root := t.TempDir()
+				paths := []string{filepath.Join(root, "clang"), filepath.Join(root, "clang++"), filepath.Join(root, "llvm-profdata"), filepath.Join(root, "llvm-cov")}
+				evidence := []toolchain.ExecutableEvidence{
+					{FileIdentity: "unix:1:10", SHA256: strings.Repeat("a", 64)},
+					{FileIdentity: "unix:1:11", SHA256: strings.Repeat("b", 64)},
+					{FileIdentity: "unix:1:12", SHA256: strings.Repeat("c", 64)},
+					{FileIdentity: "unix:1:13", SHA256: strings.Repeat("d", 64)},
+				}
+				roles := []string{"clang", "clang++", "llvm-profdata", "llvm-cov"}
+				tools := make([]toolchain.LLVMToolEvidence, 4)
+				for index := range tools {
+					tools[index] = toolchain.LLVMToolEvidence{Role: roles[index], Path: paths[index], Evidence: evidence[index]}
+				}
+				identity, err := toolchain.LLVMToolsetIdentityForTools(instance.Version, tools)
+				if err != nil {
+					t.Fatal(err)
+				}
+				instance.CCompiler, instance.CXXCompiler = paths[0], paths[1]
+				instance.Coverage = toolchain.CoverageCapability{LLVMProfdata: paths[2], LLVMCov: paths[3], CompilerEvidence: evidence[0], CXXCompilerEvidence: evidence[1], ProfdataEvidence: evidence[2], CovEvidence: evidence[3], ToolsetIdentity: identity}
+			}
 			got, err := coverageToolchainSnapshot(instance, test.platform)
 			if err != nil {
 				t.Fatalf("coverageToolchainSnapshot() error = %v", err)
@@ -254,6 +276,9 @@ func TestCoverageSnapshotAcceptsOnlySupportedPlatformFamilies(t *testing.T) {
 	}
 	if _, err := coverageToolchainSnapshot(toolchain.Instance{ID: "toolchain", Family: toolchain.FamilyGCC, Version: "18.1.8", TargetArchitecture: "amd64"}, "linux"); !errors.Is(err, coveragedomain.ErrInvalidToolchain) {
 		t.Fatalf("incomplete GCC coverage snapshot error = %v", err)
+	}
+	if _, err := coverageToolchainSnapshot(toolchain.Instance{ID: "toolchain", Family: toolchain.FamilyClang, Version: "18.1.8", TargetArchitecture: "amd64"}, "linux"); !errors.Is(err, coveragedomain.ErrInvalidToolchain) {
+		t.Fatalf("synthetic Linux Clang coverage snapshot error = %v", err)
 	}
 	if _, err := coverageToolchainSnapshot(toolchain.Instance{ID: "toolchain", Family: toolchain.FamilyMSVC, Version: "19.0", TargetArchitecture: "amd64"}, "windows"); !errors.Is(err, coveragedomain.ErrInvalidToolchain) {
 		t.Fatalf("unsupported family error = %v", err)
