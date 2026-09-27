@@ -143,7 +143,7 @@ func (s *Store) AppendEvent(ctx context.Context, taskID string, draft task.Event
 
 func (s *Store) Watermark(ctx context.Context) (int64, error) {
 	var watermark int64
-	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence),0) FROM task_events`).Scan(&watermark); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT MAX(COALESCE((SELECT MAX(sequence) FROM task_events),0), COALESCE((SELECT sequence FROM legacy_event_cursor_floor WHERE singleton=1),0))`).Scan(&watermark); err != nil {
 		return 0, storageError("read event watermark", err)
 	}
 	return watermark, nil

@@ -2,6 +2,8 @@ export interface TestGenerationContractV15 {
     acceptRequest:        TestGenerationAcceptRequestV15;
     candidateListRequest: TestGenerationCandidateListRequestV15;
     candidatePage:        TestGenerationCandidatePageV15;
+    eventPage:            TestGenerationEventPageV15;
+    eventReplayRequest:   TestGenerationEventReplayRequestV15;
     run:                  TestGenerationRunV15;
     runIdRequest:         TestGenerationRunIDRequestV15;
     startRequest:         TestGenerationStartRequestV15;
@@ -114,6 +116,38 @@ export enum Operation {
     Modify = "modify",
 }
 
+export interface TestGenerationEventPageV15 {
+    items:             TestGenerationProgressEventV15[];
+    nextAfterSequence: number;
+}
+
+export interface TestGenerationProgressEventV15 {
+    occurredAt: Date;
+    sequence:   number;
+    state:      TestGenerationStateV15;
+}
+
+export enum TestGenerationStateV15 {
+    Accepted = "accepted",
+    Analyzing = "analyzing",
+    AwaitingConfirmation = "awaiting_confirmation",
+    Baseline = "baseline",
+    Cancelled = "cancelled",
+    Failed = "failed",
+    Minimizing = "minimizing",
+    Queued = "queued",
+    Rejected = "rejected",
+    Rendering = "rendering",
+    Solving = "solving",
+    Validating = "validating",
+}
+
+export interface TestGenerationEventReplayRequestV15 {
+    afterSequence: number;
+    limit?:        number;
+    runId:         string;
+}
+
 export interface TestGenerationRunV15 {
     candidateCount?:     number;
     createdAt:           Date;
@@ -132,21 +166,6 @@ export interface TestGenerationPreviewV15 {
     characterizationDigest?: string;
     confirmationDigest:      string;
     diffDigest:              string;
-}
-
-export enum TestGenerationStateV15 {
-    Accepted = "accepted",
-    Analyzing = "analyzing",
-    AwaitingConfirmation = "awaiting_confirmation",
-    Baseline = "baseline",
-    Cancelled = "cancelled",
-    Failed = "failed",
-    Minimizing = "minimizing",
-    Queued = "queued",
-    Rejected = "rejected",
-    Rendering = "rendering",
-    Solving = "solving",
-    Validating = "validating",
 }
 
 export interface TestGenerationRunIDRequestV15 {

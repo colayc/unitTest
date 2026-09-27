@@ -21,4 +21,10 @@ UPDATE tasks SET last_sequence=COALESCE((
   SELECT MAX(sequence) FROM test_generation_events g WHERE g.task_id=tasks.task_id
 ),0) WHERE kind='test_generation';
 
-DELETE FROM task_events WHERE task_id IN (SELECT task_id FROM tasks WHERE kind='test_generation');
+-- Preserve historical global sequence continuity for old saved subscriptions.
+-- The original generation content is available only in the private journal;
+-- legacy clients receive a closed, empty output tombstone at the same cursor.
+UPDATE task_events
+SET event_type='task.output',
+    payload_json='{"stepId":"generation-redacted","stream":"combined","text":"","truncated":false}'
+WHERE task_id IN (SELECT task_id FROM tasks WHERE kind='test_generation');

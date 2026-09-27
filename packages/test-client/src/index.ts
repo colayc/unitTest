@@ -23,6 +23,7 @@ export type {
   TestGenerationTargetListInput,
   TestGenerationCandidateListInput,
   TestGenerationAcceptInput,
+  TestGenerationEventReplayInput,
   TaskPage
 } from "./client.js";
 export { ProtocolError } from "./envelopes.js";
@@ -71,6 +72,9 @@ export type {
   TestGenerationCandidateListRequestV15,
   TestGenerationCandidatePageV15,
   TestGenerationAcceptRequestV15,
+  TestGenerationEventReplayRequestV15,
+  TestGenerationEventPageV15,
+  TestGenerationProgressEventV15,
   TestCatalog,
   TestCatalogV14,
   TestRun,

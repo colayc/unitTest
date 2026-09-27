@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"slices"
 	"sort"
 	"sync"
@@ -126,6 +127,81 @@ func (s *generationService) GetTestGenerationRun(ctx context.Context, owner, run
 	return generationRunV15(run), nil
 }
 
+func (s *generationService) CancelTestGeneration(ctx context.Context, owner, runID string) (generationv15.TestGenerationRunV15, error) {
+	s.acceptMu.Lock()
+	defer s.acceptMu.Unlock()
+	run, err := s.owned(ctx, owner, runID)
+	if err != nil {
+		return generationv15.TestGenerationRunV15{}, err
+	}
+	if testgendomain.IsTerminal(run.State) {
+		return generationRunV15(run), nil
+	}
+	s.mu.Lock()
+	stop := s.running[run.ID]
+	s.mu.Unlock()
+	if stop != nil {
+		stop()
+	}
+	cancelled, err := s.coord.Cancel(ctx, run.TaskID)
+	if err != nil {
+		return generationv15.TestGenerationRunV15{}, err
+	}
+	s.publishNewEvents(ctx, run, cancelled)
+	return generationRunV15(cancelled), nil
+}
+
+func (s *generationService) ReplayTestGenerationEvents(ctx context.Context, owner string, input generationv15.TestGenerationEventReplayRequestV15) (generationv15.TestGenerationEventPageV15, error) {
+	run, err := s.owned(ctx, owner, input.RunID)
+	if err != nil {
+		return generationv15.TestGenerationEventPageV15{}, err
+	}
+	limit := 100
+	if input.Limit != nil {
+		limit = int(*input.Limit)
+	}
+	if input.AfterSequence < 0 || input.AfterSequence > run.LastSequence || limit < 1 || limit > 200 {
+		return generationv15.TestGenerationEventPageV15{}, task.ErrInvalidArgument
+	}
+	events, err := s.store.ReplayGenerationEvents(ctx, run.ID, input.AfterSequence, limit)
+	if err != nil {
+		return generationv15.TestGenerationEventPageV15{}, err
+	}
+	page := generationv15.TestGenerationEventPageV15{Items: make([]generationv15.TestGenerationProgressEventV15, 0, len(events)), NextAfterSequence: input.AfterSequence}
+	for _, event := range events {
+		state, projectErr := projectGenerationEvent(run, event)
+		if projectErr != nil {
+			return generationv15.TestGenerationEventPageV15{}, projectErr
+		}
+		page.Items = append(page.Items, generationv15.TestGenerationProgressEventV15{Sequence: event.Sequence, State: generationv15.TestGenerationStateV15(state), OccurredAt: event.At})
+		page.NextAfterSequence = event.Sequence
+	}
+	return page, nil
+}
+
+func projectGenerationEvent(run testgendomain.Run, event task.Event) (testgendomain.State, error) {
+	switch event.Type {
+	case task.EventTaskCreated:
+		return testgendomain.StateQueued, nil
+	case task.EventTaskStarted:
+		return testgendomain.StateBaseline, nil
+	case task.EventTaskFinished:
+		if testgendomain.IsTerminal(run.State) {
+			return run.State, nil
+		}
+	case task.EventTestGenerationStateChanged:
+		var value struct {
+			RunID string              `json:"runId"`
+			From  testgendomain.State `json:"from"`
+			To    testgendomain.State `json:"to"`
+		}
+		if json.Unmarshal(event.Payload, &value) == nil && value.RunID == run.ID && testgendomain.ValidTransition(value.From, value.To) {
+			return value.To, nil
+		}
+	}
+	return "", task.ErrConflict
+}
+
 func (s *generationService) ListTestGenerationCandidates(ctx context.Context, owner string, input generationv15.TestGenerationCandidateListRequestV15) (generationv15.TestGenerationCandidatePageV15, error) {
 	run, err := s.owned(ctx, owner, input.RunID)
 	if err != nil {
@@ -156,13 +232,32 @@ func (s *generationService) ListTestGenerationCandidates(ctx context.Context, ow
 			page.NextCursor = &next
 			break
 		}
+		if err := s.driver.ValidateCandidate(ctx, run, candidate); err != nil {
+			return generationv15.TestGenerationCandidatePageV15{}, task.ErrConflict
+		}
 		projected, projectErr := s.driver.ProjectCandidate(ctx, run, candidate)
-		if projectErr != nil || projected.CandidateID != candidate.CaseID || projected.Kind != generationv15.TestGenerationCandidateKindV15(candidate.Kind) {
+		if projectErr != nil || !matchesDurableReview(candidate, projected) {
 			return generationv15.TestGenerationCandidatePageV15{}, task.ErrStorageUnavailable
 		}
 		page.Items = append(page.Items, projected)
 	}
 	return page, nil
+}
+
+func matchesDurableReview(candidate testgendomain.Candidate, projected generationv15.TestGenerationCandidateV15) bool {
+	if projected.CandidateID != candidate.CaseID || projected.Kind != generationv15.TestGenerationCandidateKindV15(candidate.Kind) ||
+		projected.CodeDigest != candidate.CodeDigest || projected.ArtifactDigest != candidate.StagedSourceArtifact.Digest ||
+		len(projected.PlannedEdits) != len(candidate.PlannedEdits) {
+		return false
+	}
+	for i, edit := range candidate.PlannedEdits {
+		got := projected.PlannedEdits[i]
+		if got.Path != edit.Path || got.Operation != generationv15.Operation(edit.Operation) || got.AfterDigest != edit.AfterDigest ||
+			(edit.BeforeDigest == "" && got.BeforeDigest != nil) || (edit.BeforeDigest != "" && (got.BeforeDigest == nil || *got.BeforeDigest != edit.BeforeDigest)) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *generationService) AcceptTestGeneration(ctx context.Context, owner string, input generationv15.TestGenerationAcceptRequestV15) (generationv15.TestGenerationRunV15, error) {

@@ -27,6 +27,7 @@ type generationDriverFixture struct {
 	launches             int
 	complete             bool
 	candidateSetMismatch bool
+	block                <-chan struct{}
 }
 
 func TestGenerationFactoryOnlyRunsForTrustedReadyRuntime(t *testing.T) {
@@ -104,6 +105,13 @@ func (d *generationDriverFixture) RunStage(ctx context.Context, run testgendomai
 	d.stages = append(d.stages, next)
 	d.launches++
 	d.mu.Unlock()
+	if next == testgendomain.StateBaseline && d.block != nil {
+		select {
+		case <-ctx.Done():
+			return GenerationStageResult{}, ctx.Err()
+		case <-d.block:
+		}
+	}
 	if next == testgendomain.StateMinimizing && !d.complete {
 		return GenerationStageResult{Next: testgendomain.StateRejected}, nil
 	}
@@ -118,8 +126,21 @@ func (d *generationDriverFixture) RunStage(ctx context.Context, run testgendomai
 	}
 	return GenerationStageResult{Next: next}, nil
 }
-func (d *generationDriverFixture) ProjectCandidate(context.Context, testgendomain.Run, testgendomain.Candidate) (generationv15.TestGenerationCandidateV15, error) {
-	return generationv15.TestGenerationCandidateV15{}, nil
+func (d *generationDriverFixture) ProjectCandidate(_ context.Context, _ testgendomain.Run, candidate testgendomain.Candidate) (generationv15.TestGenerationCandidateV15, error) {
+	edits := make([]generationv15.TestGenerationPlannedEditV15, 0, len(candidate.PlannedEdits))
+	for _, edit := range candidate.PlannedEdits {
+		item := generationv15.TestGenerationPlannedEditV15{Path: edit.Path, Operation: generationv15.Operation(edit.Operation), AfterDigest: edit.AfterDigest}
+		if edit.BeforeDigest != "" {
+			item.BeforeDigest = &edit.BeforeDigest
+		}
+		edits = append(edits, item)
+	}
+	return generationv15.TestGenerationCandidateV15{
+		CandidateID: candidate.CaseID, Kind: generationv15.TestGenerationCandidateKindV15(candidate.Kind),
+		CodeDigest: candidate.CodeDigest, ArtifactDigest: candidate.StagedSourceArtifact.Digest,
+		AssertionProvenance: generationv15.TestGenerationAssertionProvenanceV15{Kind: generationv15.Kind(candidate.Assertions[0].Kind), EvidenceDigest: candidate.Assertions[0].EvidenceDigest},
+		PlannedEdits:        edits, Diagnostics: []generationv15.TestGenerationDiagnosticV15{},
+	}, nil
 }
 func (d *generationDriverFixture) ValidateCandidate(context.Context, testgendomain.Run, testgendomain.Candidate) error {
 	return nil
@@ -400,6 +421,63 @@ func statesAsStrings(values []testgendomain.State) []string {
 	return result
 }
 
+func TestGenerationCancelAndPrivateProgressReplayAreOwnerScoped(t *testing.T) {
+	store, err := taskstore.Open(filepath.Join(t.TempDir(), "tasks.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	driver := &generationDriverFixture{block: make(chan struct{})}
+	service, err := newGenerationService(GenerationServiceConfig{
+		Store: store, Driver: driver, Publisher: &generationPublisherFixture{}, Trusted: true, CoverageReady: true,
+		VerifySnapshot: func(_ context.Context, r testgendomain.Request) (testgendomain.SnapshotIdentity, error) {
+			return r.SnapshotIdentity(), nil
+		},
+		VerifyArtifact: func(context.Context, task.Artifact) error { return nil },
+		VerifyProcess:  func(context.Context, string, string) error { return nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	owner, foreign := strings.Repeat("e", 64), strings.Repeat("f", 64)
+	started, err := service.StartTestGeneration(context.Background(), owner, generationv15.TestGenerationStartRequestV15{
+		IdempotencyKey: strings.Repeat("1", 32), WorkspaceGeneration: strings.Repeat("2", 64), ProjectID: "core",
+		Scope: generationv15.Workspace, Framework: generationv15.Auto,
+		Goals:   generationv15.TestGenerationGoalsV15{FunctionPercent: 70, LinePercent: 80, BranchPercent: 60},
+		Budgets: generationv15.TestGenerationBudgetsV15{WallTimeMS: 60000, CandidateCount: 4, MemoryMiB: 64, Concurrency: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.CancelTestGeneration(context.Background(), foreign, started.RunID); !errors.Is(err, task.ErrNotFound) {
+		t.Fatalf("foreign cancel = %v", err)
+	}
+	cancelled, err := service.CancelTestGeneration(context.Background(), owner, started.RunID)
+	if err != nil || cancelled.State != generationv15.Cancelled {
+		t.Fatalf("cancel = %+v, %v", cancelled, err)
+	}
+	if _, err := service.ReplayTestGenerationEvents(context.Background(), foreign, generationv15.TestGenerationEventReplayRequestV15{RunID: started.RunID}); !errors.Is(err, task.ErrNotFound) {
+		t.Fatalf("foreign replay = %v", err)
+	}
+	page, err := service.ReplayTestGenerationEvents(context.Background(), owner, generationv15.TestGenerationEventReplayRequestV15{RunID: started.RunID})
+	if err != nil || len(page.Items) < 3 || page.Items[len(page.Items)-1].State != generationv15.Cancelled {
+		t.Fatalf("private replay = %+v, %v", page, err)
+	}
+	for i, item := range page.Items {
+		if item.Sequence != int64(i+1) {
+			t.Fatalf("sequence gap at %d: %+v", i, page.Items)
+		}
+	}
+	if err := service.ResumeAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := service.GetTestGenerationRun(context.Background(), owner, started.RunID)
+	if err != nil || reloaded.State != generationv15.Cancelled {
+		t.Fatalf("restart cancellation = %+v, %v", reloaded, err)
+	}
+}
+
 func TestGenerationAcceptRehydratesDurablePreviewAfterRestart(t *testing.T) {
 	store, err := taskstore.Open(filepath.Join(t.TempDir(), "tasks.sqlite"))
 	if err != nil {
@@ -469,6 +547,15 @@ func TestGenerationAcceptRehydratesDurablePreviewAfterRestart(t *testing.T) {
 	defer restarted.Close()
 	if err := restarted.ResumeAll(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+	review, err := restarted.ListTestGenerationCandidates(context.Background(), owner, generationv15.TestGenerationCandidateListRequestV15{RunID: run.RunID})
+	if err != nil || len(review.Items) != 1 || len(review.Items[0].PlannedEdits) != 1 ||
+		review.Items[0].PlannedEdits[0].Path != "tests/generated/classify_test.cpp" ||
+		review.Items[0].PlannedEdits[0].AfterDigest != strings.Repeat("8", 64) {
+		t.Fatalf("restarted review metadata = %+v, %v", review, err)
+	}
+	if _, err := restarted.ListTestGenerationCandidates(context.Background(), strings.Repeat("f", 64), generationv15.TestGenerationCandidateListRequestV15{RunID: run.RunID}); !errors.Is(err, task.ErrNotFound) {
+		t.Fatalf("foreign review = %v", err)
 	}
 	accepted, err := restarted.AcceptTestGeneration(context.Background(), owner, generationv15.TestGenerationAcceptRequestV15{
 		RunID: run.RunID, CandidateID: strings.Repeat("5", 32), ConfirmationDigest: strings.Repeat("d", 64), ConfirmCharacterization: false,

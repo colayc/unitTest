@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"unit-test-ide.local/test-service/internal/eventbroker"
 	"unit-test-ide.local/test-service/internal/task"
 	"unit-test-ide.local/test-service/internal/testgendomain"
 )
@@ -284,9 +285,24 @@ func TestGenerationV10UpgradeBackfillsOrTerminalizesWithoutAdoption(t *testing.T
 				t.Fatalf("migrated generation replay = %+v, %v", privateEvents, err)
 			}
 			global, err := s.EventsAfter(context.Background(), 0, 100, 200)
-			if err != nil || len(global) != 0 {
-				t.Fatalf("generation leaked to legacy replay = %+v, %v", global, err)
+			if err != nil || len(global) != 1 || global[0].Type != task.EventTaskOutput ||
+				!bytes.Equal(global[0].Payload, []byte(`{"stepId":"generation-redacted","stream":"combined","text":"","truncated":false}`)) {
+				t.Fatalf("legacy cursor tombstone = %+v, %v", global, err)
 			}
+			watermark, err := s.Watermark(context.Background())
+			if err != nil || watermark < 1 {
+				t.Fatalf("saved legacy cursor invalidated: watermark=%d, %v", watermark, err)
+			}
+			broker, err := eventbroker.New(s, 8, 8)
+			if err != nil {
+				t.Fatal(err)
+			}
+			subscription, err := broker.Subscribe(context.Background(), 1)
+			if err != nil {
+				t.Fatalf("saved cursor rejected: %v", err)
+			}
+			subscription.Close()
+			_ = broker.Close()
 			if legacy {
 				if r.State != testgendomain.StateFailed || !r.Record.IsZero() {
 					t.Fatalf("unsafe old run resumed: %+v", r)
@@ -299,6 +315,63 @@ func TestGenerationV10UpgradeBackfillsOrTerminalizesWithoutAdoption(t *testing.T
 				t.Fatalf("backfill lost resumable checkpoint: %+v", r)
 			}
 		})
+	}
+}
+
+func TestGenerationMigrationPreservesInterleavedLegacyCursorReplay(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tasks.sqlite")
+	seedGenerationV10(t, path, false)
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyTask := strings.Repeat("4", 32)
+	_, err = db.Exec(`INSERT INTO tasks(task_id,idempotency_key,request_hash,kind,scenario,request_json,workspace_generation,plan_fingerprint,active_step,timeout_ms,status,outcome,created_at,started_at,finished_at,last_sequence,error_code,error_message)
+		VALUES(?,?,?,?,?,?,?,?,?,?,'queued',NULL,?,NULL,NULL,0,'','')`, legacyTask, strings.Repeat("9", 32), strings.Repeat("a", 64), "simulation", "success", `{}`, "", "", "", 1000, "2026-09-27T00:00:00Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`INSERT INTO task_events(event_id,task_id,event_type,occurred_at,payload_json) VALUES
+		(?,?,'task.created','2026-09-27T00:00:01Z','{"status":"queued"}'),
+		(?,?,'testGeneration.stateChanged','2026-09-27T00:00:02Z','{"secret":"must-not-leak"}')`, strings.Repeat("b", 32), legacyTask, strings.Repeat("c", 32), strings.Repeat("3", 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	global, err := s.EventsAfter(context.Background(), 0, 3, 10)
+	if err != nil || len(global) != 3 || global[0].Sequence != 1 || global[1].Sequence != 2 || global[2].Sequence != 3 ||
+		global[1].Type != task.EventTaskCreated || global[2].Type != task.EventTaskOutput || bytes.Contains(global[2].Payload, []byte("must-not-leak")) {
+		t.Fatalf("interleaved replay = %+v, %v", global, err)
+	}
+	broker, err := eventbroker.New(s, 8, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer broker.Close()
+	subscription, err := broker.Subscribe(context.Background(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+	subscription.Activate()
+	for _, want := range []int64{2, 3} {
+		select {
+		case event := <-subscription.Events:
+			if event.Sequence != want {
+				t.Fatalf("replay sequence=%d want=%d", event.Sequence, want)
+			}
+		case err := <-subscription.Errors:
+			t.Fatalf("replay error: %v", err)
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for interleaved replay")
+		}
 	}
 }
 

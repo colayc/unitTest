@@ -6,6 +6,8 @@ type TestGenerationContractV15 struct {
 	AcceptRequest        TestGenerationAcceptRequestV15        `json:"acceptRequest"`
 	CandidateListRequest TestGenerationCandidateListRequestV15 `json:"candidateListRequest"`
 	CandidatePage        TestGenerationCandidatePageV15        `json:"candidatePage"`
+	EventPage            TestGenerationEventPageV15            `json:"eventPage"`
+	EventReplayRequest   TestGenerationEventReplayRequestV15   `json:"eventReplayRequest"`
 	Run                  TestGenerationRunV15                  `json:"run"`
 	RunIDRequest         TestGenerationRunIDRequestV15         `json:"runIdRequest"`
 	StartRequest         TestGenerationStartRequestV15         `json:"startRequest"`
@@ -72,6 +74,23 @@ type TestGenerationPlannedEditV15 struct {
 	BeforeDigest *string   `json:"beforeDigest,omitempty"`
 	Operation    Operation `json:"operation"`
 	Path         string    `json:"path"`
+}
+
+type TestGenerationEventPageV15 struct {
+	Items             []TestGenerationProgressEventV15 `json:"items"`
+	NextAfterSequence int64                            `json:"nextAfterSequence"`
+}
+
+type TestGenerationProgressEventV15 struct {
+	OccurredAt time.Time              `json:"occurredAt"`
+	Sequence   int64                  `json:"sequence"`
+	State      TestGenerationStateV15 `json:"state"`
+}
+
+type TestGenerationEventReplayRequestV15 struct {
+	AfterSequence int64  `json:"afterSequence"`
+	Limit         *int64 `json:"limit,omitempty"`
+	RunID         string `json:"runId"`
 }
 
 type TestGenerationRunV15 struct {

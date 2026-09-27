@@ -36,6 +36,7 @@ import type {
   TestGenerationTargetListV15,
   TestGenerationRunV15,
   TestGenerationCandidatePageV15,
+  TestGenerationEventPageV15,
   TestGenerationCoverageV15,
   WorkspaceSnapshot
 } from "@unit-test-ide/protocol-models";
@@ -285,6 +286,21 @@ export function decodeTestGenerationRun(value: unknown): TestGenerationRunV15 {
       confirmationDigest: wireString(preview.confirmationDigest, "preview confirmation digest"),
       ...(preview.characterizationDigest === undefined ? {} : { characterizationDigest: wireString(preview.characterizationDigest, "characterization digest") })
     } })
+  };
+}
+
+export function decodeTestGenerationEventPage(value: unknown): TestGenerationEventPageV15 {
+  const wire = record(value, "test generation event page");
+  return {
+    items: wireArray(wire.items, "test generation events").map((entry) => {
+      const event = record(entry, "test generation progress event");
+      return {
+        sequence: safeInteger(event.sequence, "generation event sequence"),
+        state: wireEnum(event.state, Object.values(TestGenerationStateV15), "generation event state"),
+        occurredAt: date(event.occurredAt, "generation event occurredAt")
+      };
+    }),
+    nextAfterSequence: safeInteger(wire.nextAfterSequence, "generation event nextAfterSequence")
   };
 }
 

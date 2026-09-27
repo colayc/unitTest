@@ -4,7 +4,7 @@
   "title": "TestGenerationContractV15",
   "type": "object",
   "additionalProperties": false,
-  "required": ["targetListRequest", "targetList", "startRequest", "runIdRequest", "run", "candidateListRequest", "candidatePage", "acceptRequest"],
+  "required": ["targetListRequest", "targetList", "startRequest", "runIdRequest", "run", "candidateListRequest", "candidatePage", "acceptRequest", "eventReplayRequest", "eventPage"],
   "properties": {
     "targetListRequest": { "$ref": "#/$defs/targetListRequest" },
     "startRequest": { "$ref": "#/$defs/startRequest" },
@@ -13,7 +13,9 @@
     "targetList": { "$ref": "#/$defs/targetList" },
     "run": { "$ref": "#/$defs/run" },
     "candidatePage": { "$ref": "#/$defs/candidatePage" },
-    "acceptRequest": { "$ref": "#/$defs/acceptRequest" }
+    "acceptRequest": { "$ref": "#/$defs/acceptRequest" },
+    "eventReplayRequest": { "$ref": "#/$defs/eventReplayRequest" },
+    "eventPage": { "$ref": "#/$defs/eventPage" }
   },
   "$defs": {
     "id": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
@@ -172,6 +174,32 @@
         "diffDigest": { "$ref": "#/$defs/digest" },
         "confirmationDigest": { "$ref": "#/$defs/digest" },
         "characterizationDigest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "eventReplayRequest": {
+      "title": "TestGenerationEventReplayRequestV15", "type": "object", "additionalProperties": false,
+      "required": ["runId", "afterSequence"],
+      "properties": {
+        "runId": { "$ref": "#/$defs/id" },
+        "afterSequence": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 200 }
+      }
+    },
+    "eventPage": {
+      "title": "TestGenerationEventPageV15", "type": "object", "additionalProperties": false,
+      "required": ["items", "nextAfterSequence"],
+      "properties": {
+        "items": { "type": "array", "maxItems": 200, "items": { "$ref": "#/$defs/progressEvent" } },
+        "nextAfterSequence": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+      }
+    },
+    "progressEvent": {
+      "title": "TestGenerationProgressEventV15", "type": "object", "additionalProperties": false,
+      "required": ["sequence", "state", "occurredAt"],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "state": { "$ref": "#/$defs/state" },
+        "occurredAt": { "type": "string", "format": "date-time" }
       }
     },
     "acceptRequest": {

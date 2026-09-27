@@ -334,6 +334,9 @@ test("protocol 1.5 client routes typed generation methods and rejects downgrade"
     if (request.method === "handshake") return response(request, { negotiatedProtocolVersion: "1.5", serviceVersion: "0.6.0" }, "1.5");
     if (request.method === "testGeneration/targets/list") return response(request, { items: [{ kind: "build-target", targetId: TARGET_ID, frameworks: ["cpputest"] }] }, "1.5");
     if (request.method === "testGeneration/candidates/list") return response(request, { items: [candidate] }, "1.5");
+    if (request.method === "testGeneration/events/replay") return response(request, {
+      items: [{ sequence: 8, state: "awaiting_confirmation", occurredAt: SENT_AT }], nextAfterSequence: 8
+    }, "1.5");
     return response(request, run, "1.5");
   });
   await fixture.client.handshake("0123456789abcdef", "test", "0.6.0");
@@ -357,7 +360,11 @@ test("protocol 1.5 client routes typed generation methods and rejects downgrade"
     runId: RUN_ID, candidateId: ARTIFACT_ID, confirmationDigest: "e".repeat(64), confirmCharacterization: true
   })).runId, RUN_ID);
   assert.equal("candidateKind" in (fixture.requests.at(-1)?.payload as JsonObject), false);
-  assert.equal(fixture.requests.filter((request) => String(request.method).startsWith("testGeneration/")).length, 5);
+  const events = await fixture.client.replayTestGenerationEvents({ runId: RUN_ID, afterSequence: 0 });
+  assert.equal(events.items[0]?.occurredAt.getTime(), new Date(SENT_AT).getTime());
+  assert.equal(events.nextAfterSequence, 8);
+  assert.equal((await fixture.client.cancelTestGeneration(RUN_ID)).runId, RUN_ID);
+  assert.equal(fixture.requests.filter((request) => String(request.method).startsWith("testGeneration/")).length, 7);
   fixture.client.close();
 
   const old = scriptedClient((request) => response(request, { negotiatedProtocolVersion: "1.4", serviceVersion: "0.5.0" }, "1.4"));
@@ -409,6 +416,9 @@ test("protocol 1.5 generation input fails closed before writing", async () => {
   await assert.rejects(() => fixture.client.acceptTestGeneration({
     runId: RUN_ID, candidateId: ARTIFACT_ID, confirmCharacterization: false
   } as never), /invalid protocol request/);
+  await assert.rejects(() => fixture.client.replayTestGenerationEvents({ runId: RUN_ID, afterSequence: -1 }), /invalid protocol request/);
+  await assert.rejects(() => fixture.client.replayTestGenerationEvents({ runId: RUN_ID, afterSequence: 0, sourcePath: "C:/private" } as never), /invalid protocol request/);
+  await assert.rejects(() => fixture.client.cancelTestGeneration("unsafe/path"), /invalid protocol request/);
   assert.equal(fixture.requests.length, 1);
   fixture.client.close();
 });

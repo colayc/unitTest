@@ -37,6 +37,8 @@ import type {
   TestGenerationAcceptRequestV15,
   TestGenerationCandidateListRequestV15,
   TestGenerationCandidatePageV15,
+  TestGenerationEventPageV15,
+  TestGenerationEventReplayRequestV15,
   TestGenerationRunV15,
   TestGenerationStartRequestV15,
   TestGenerationTargetListRequestV15,
@@ -67,6 +69,7 @@ import {
   decodeTestRunPageV14,
   decodeTestRunV14,
   decodeTestGenerationCandidatePage,
+  decodeTestGenerationEventPage,
   decodeTestGenerationRun,
   decodeTestGenerationTargetList,
   decodeWorkspaceSnapshot
@@ -130,6 +133,7 @@ export type TestGenerationStartInput = TestGenerationStartRequestV15;
 export type TestGenerationTargetListInput = TestGenerationTargetListRequestV15;
 export type TestGenerationCandidateListInput = TestGenerationCandidateListRequestV15;
 export type TestGenerationAcceptInput = TestGenerationAcceptRequestV15;
+export type TestGenerationEventReplayInput = TestGenerationEventReplayRequestV15;
 export interface CoverageRunListInput {
   projectId?: string;
   coverageProfileId?: string;
@@ -337,6 +341,8 @@ const validateGenerationRun = payloadAjv.getSchema(`${generationSchema}run`) as 
 const validateGenerationCandidateListRequest = payloadAjv.getSchema(`${generationSchema}candidateListRequest`) as ValidateFunction;
 const validateGenerationCandidates = payloadAjv.getSchema(`${generationSchema}candidatePage`) as ValidateFunction;
 const validateGenerationAccept = payloadAjv.getSchema(`${generationSchema}acceptRequest`) as ValidateFunction;
+const validateGenerationEventReplay = payloadAjv.getSchema(`${generationSchema}eventReplayRequest`) as ValidateFunction;
+const validateGenerationEventPage = payloadAjv.getSchema(`${generationSchema}eventPage`) as ValidateFunction;
 const validateSubscription = payloadAjv.compile({
   type: "object",
   additionalProperties: false,
@@ -715,6 +721,28 @@ export class ProtocolClient {
     return this.#decodeV14InboundResponse(version, () => {
       validatePayload("testGeneration/runs/get", validateGenerationRun, payload);
       return decodeTestGenerationRun(payload);
+    });
+  }
+
+  async cancelTestGeneration(runId: string): Promise<TestGenerationRunV15> {
+    const version = this.#requireV15();
+    const request = { runId };
+    validateRequestPayload("testGeneration/runs/cancel", validateGenerationRunId, request);
+    const payload = await this.#connection.request(version, "testGeneration/runs/cancel", request);
+    return this.#decodeV14InboundResponse(version, () => {
+      validatePayload("testGeneration/runs/cancel", validateGenerationRun, payload);
+      return decodeTestGenerationRun(payload);
+    });
+  }
+
+  async replayTestGenerationEvents(input: TestGenerationEventReplayInput): Promise<TestGenerationEventPageV15> {
+    const version = this.#requireV15();
+    const request = snapshotRequestPayload("testGeneration/events/replay", input);
+    validateRequestPayload("testGeneration/events/replay", validateGenerationEventReplay, request);
+    const payload = await this.#connection.request(version, "testGeneration/events/replay", request as Record<string, unknown>);
+    return this.#decodeV14InboundResponse(version, () => {
+      validatePayload("testGeneration/events/replay", validateGenerationEventPage, payload);
+      return decodeTestGenerationEventPage(payload);
     });
   }
 

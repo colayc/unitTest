@@ -92,6 +92,8 @@ test("protocol 1.5 validates test-generation methods and rejects unsafe payloads
   for (const [method, payload] of [
     ["testGeneration/targets/list", { workspaceGeneration: "c".repeat(64), projectId: "core" }],
     ["testGeneration/runs/get", { runId: "d".repeat(32) }],
+    ["testGeneration/runs/cancel", { runId: "d".repeat(32) }],
+    ["testGeneration/events/replay", { runId: "d".repeat(32), afterSequence: 0 }],
     ["testGeneration/candidates/list", { runId: "d".repeat(32) }],
     ["testGeneration/accept", { runId: "d".repeat(32), candidateId: "e".repeat(32), confirmationDigest: "f".repeat(64), confirmCharacterization: true }]
   ]) assert.equal(validate({ ...base, method, payload }), true, `${method}: ${JSON.stringify(validate.errors)}`);

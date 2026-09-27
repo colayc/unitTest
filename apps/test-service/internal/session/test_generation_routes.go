@@ -24,6 +24,8 @@ type GenerationBackend interface {
 	ListTestGenerationTargets(context.Context, string, generationv15.TestGenerationTargetListRequestV15) (generationv15.TestGenerationTargetListV15, error)
 	StartTestGeneration(context.Context, string, generationv15.TestGenerationStartRequestV15) (generationv15.TestGenerationRunV15, error)
 	GetTestGenerationRun(context.Context, string, string) (generationv15.TestGenerationRunV15, error)
+	CancelTestGeneration(context.Context, string, string) (generationv15.TestGenerationRunV15, error)
+	ReplayTestGenerationEvents(context.Context, string, generationv15.TestGenerationEventReplayRequestV15) (generationv15.TestGenerationEventPageV15, error)
 	ListTestGenerationCandidates(context.Context, string, generationv15.TestGenerationCandidateListRequestV15) (generationv15.TestGenerationCandidatePageV15, error)
 	AcceptTestGeneration(context.Context, string, generationv15.TestGenerationAcceptRequestV15) (generationv15.TestGenerationRunV15, error)
 }
@@ -32,7 +34,7 @@ var ErrCharacterizationConfirmationRequired = errors.New("characterization confi
 
 func generationMethod(method string) bool {
 	switch method {
-	case "testGeneration/targets/list", "testGeneration/start", "testGeneration/runs/get", "testGeneration/candidates/list", "testGeneration/accept":
+	case "testGeneration/targets/list", "testGeneration/start", "testGeneration/runs/get", "testGeneration/runs/cancel", "testGeneration/events/replay", "testGeneration/candidates/list", "testGeneration/accept":
 		return true
 	}
 	return false
@@ -108,6 +110,26 @@ func (s *Session) handleGeneration(ctx context.Context, version string, request 
 			return invalidPayload(version, request)
 		}
 		value, err := backend.GetTestGenerationRun(ctx, owner, input.RunID)
+		if err != nil {
+			return generationFailure(version, request, err)
+		}
+		return handled(protocol.Success(version, request, value))
+	case "testGeneration/runs/cancel":
+		input, err := decodeStrict[generationv15.TestGenerationRunIDRequestV15](request.Payload)
+		if err != nil || !validID(input.RunID) {
+			return invalidPayload(version, request)
+		}
+		value, err := backend.CancelTestGeneration(ctx, owner, input.RunID)
+		if err != nil {
+			return generationFailure(version, request, err)
+		}
+		return handled(protocol.Success(version, request, value))
+	case "testGeneration/events/replay":
+		input, err := decodeStrict[generationv15.TestGenerationEventReplayRequestV15](request.Payload)
+		if err != nil || !validID(input.RunID) || input.AfterSequence < 0 || input.AfterSequence > 9007199254740991 || input.Limit != nil && (*input.Limit < 1 || *input.Limit > 200) {
+			return invalidPayload(version, request)
+		}
+		value, err := backend.ReplayTestGenerationEvents(ctx, owner, input)
 		if err != nil {
 			return generationFailure(version, request, err)
 		}

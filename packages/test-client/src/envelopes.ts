@@ -24,6 +24,8 @@ export type Method =
   | "testGeneration/targets/list"
   | "testGeneration/start"
   | "testGeneration/runs/get"
+  | "testGeneration/runs/cancel"
+  | "testGeneration/events/replay"
   | "testGeneration/candidates/list"
   | "testGeneration/accept";
 

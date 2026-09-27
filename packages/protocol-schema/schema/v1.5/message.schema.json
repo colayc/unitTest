@@ -57,6 +57,8 @@
     { "$ref": "#/$defs/testGenerationTargetsListRequest" },
     { "$ref": "#/$defs/testGenerationStartRequest" },
     { "$ref": "#/$defs/testGenerationRunGetRequest" },
+    { "$ref": "#/$defs/testGenerationRunCancelRequest" },
+    { "$ref": "#/$defs/testGenerationEventsReplayRequest" },
     { "$ref": "#/$defs/testGenerationCandidatesListRequest" },
     { "$ref": "#/$defs/testGenerationAcceptRequest" },
     {
@@ -662,6 +664,16 @@
       "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "properties": { "kind": { "const": "request" }, "method": { "const": "testGeneration/runs/get" }, "payload": { "$ref": "urn:unit-test-ide:protocol:v1.5:test-generation#/$defs/runIdRequest" } }, "required": ["kind", "method", "payload"] }],
       "unevaluatedProperties": false
     },
+    "testGenerationRunCancelRequest": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "properties": { "kind": { "const": "request" }, "method": { "const": "testGeneration/runs/cancel" }, "payload": { "$ref": "urn:unit-test-ide:protocol:v1.5:test-generation#/$defs/runIdRequest" } }, "required": ["kind", "method", "payload"] }],
+      "unevaluatedProperties": false
+    },
+    "testGenerationEventsReplayRequest": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "properties": { "kind": { "const": "request" }, "method": { "const": "testGeneration/events/replay" }, "payload": { "$ref": "urn:unit-test-ide:protocol:v1.5:test-generation#/$defs/eventReplayRequest" } }, "required": ["kind", "method", "payload"] }],
+      "unevaluatedProperties": false
+    },
     "testGenerationCandidatesListRequest": {
       "type": "object",
       "allOf": [{ "$ref": "#/$defs/base" }, { "type": "object", "properties": { "kind": { "const": "request" }, "method": { "const": "testGeneration/candidates/list" }, "payload": { "$ref": "urn:unit-test-ide:protocol:v1.5:test-generation#/$defs/candidateListRequest" } }, "required": ["kind", "method", "payload"] }],
@@ -724,6 +736,7 @@
         },
         { "$ref": "#/$defs/testGenerationTargetsListResponse" },
         { "$ref": "#/$defs/testGenerationRunResponse" },
+        { "$ref": "#/$defs/testGenerationEventsReplayResponse" },
         { "$ref": "#/$defs/testGenerationCandidatesListResponse" },
         { "$ref": "#/$defs/testGenerationAcceptResponse"
         }
@@ -1137,7 +1150,12 @@
     },
     "testGenerationRunResponse": {
       "type": "object",
-      "allOf": [{ "$ref": "#/$defs/responseBase" }, { "type": "object", "properties": { "method": { "enum": ["testGeneration/start", "testGeneration/runs/get"] }, "payload": { "$ref": "urn:unit-test-ide:protocol:v1.5:test-generation#/$defs/run" } } }],
+      "allOf": [{ "$ref": "#/$defs/responseBase" }, { "type": "object", "properties": { "method": { "enum": ["testGeneration/start", "testGeneration/runs/get", "testGeneration/runs/cancel"] }, "payload": { "$ref": "urn:unit-test-ide:protocol:v1.5:test-generation#/$defs/run" } } }],
+      "unevaluatedProperties": false
+    },
+    "testGenerationEventsReplayResponse": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/$defs/responseBase" }, { "type": "object", "properties": { "method": { "const": "testGeneration/events/replay" }, "payload": { "$ref": "urn:unit-test-ide:protocol:v1.5:test-generation#/$defs/eventPage" } } }],
       "unevaluatedProperties": false
     },
     "testGenerationCandidatesListResponse": {

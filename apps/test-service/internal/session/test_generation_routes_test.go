@@ -39,6 +39,16 @@ func (b *generationBackend) GetTestGenerationRun(_ context.Context, owner, _ str
 	b.owner = owner
 	return generationRun(), b.err
 }
+func (b *generationBackend) CancelTestGeneration(_ context.Context, owner, _ string) (generationv15.TestGenerationRunV15, error) {
+	b.calls = append(b.calls, "cancel")
+	b.owner = owner
+	return generationRun(), b.err
+}
+func (b *generationBackend) ReplayTestGenerationEvents(_ context.Context, owner string, _ generationv15.TestGenerationEventReplayRequestV15) (generationv15.TestGenerationEventPageV15, error) {
+	b.calls = append(b.calls, "events")
+	b.owner = owner
+	return generationv15.TestGenerationEventPageV15{Items: []generationv15.TestGenerationProgressEventV15{}, NextAfterSequence: 0}, b.err
+}
 func (b *generationBackend) ListTestGenerationCandidates(_ context.Context, owner string, _ generationv15.TestGenerationCandidateListRequestV15) (generationv15.TestGenerationCandidatePageV15, error) {
 	b.calls = append(b.calls, "candidates")
 	b.owner = owner
@@ -97,6 +107,8 @@ func TestV15GenerationRoutesRequireReadyBackendAndClosedPayloads(t *testing.T) {
 		{"testGeneration/targets/list", map[string]any{"workspaceGeneration": strings.Repeat("c", 64), "projectId": "core"}},
 		{"testGeneration/start", map[string]any{"idempotencyKey": strings.Repeat("d", 32), "workspaceGeneration": strings.Repeat("c", 64), "projectId": "core", "scope": "workspace", "framework": "auto", "goals": map[string]any{"functionPercent": 70, "linePercent": 80, "branchPercent": 60}, "budgets": map[string]any{"wallTimeMs": 60000, "candidateCount": 2, "memoryMiB": 64, "concurrency": 1}}},
 		{"testGeneration/runs/get", map[string]any{"runId": strings.Repeat("a", 32)}},
+		{"testGeneration/runs/cancel", map[string]any{"runId": strings.Repeat("a", 32)}},
+		{"testGeneration/events/replay", map[string]any{"runId": strings.Repeat("a", 32), "afterSequence": 0}},
 		{"testGeneration/candidates/list", map[string]any{"runId": strings.Repeat("a", 32)}},
 		{"testGeneration/accept", map[string]any{"runId": strings.Repeat("a", 32), "candidateId": strings.Repeat("e", 32), "confirmationDigest": strings.Repeat("f", 64), "confirmCharacterization": false}},
 	} {
@@ -105,11 +117,11 @@ func TestV15GenerationRoutesRequireReadyBackendAndClosedPayloads(t *testing.T) {
 			t.Fatalf("%s = %#v", input.method, result.Response)
 		}
 	}
-	if strings.Join(backend.calls, ",") != "targets,start,get,candidates,accept" || len(backend.owner) != 64 {
+	if strings.Join(backend.calls, ",") != "targets,start,get,cancel,events,candidates,accept" || len(backend.owner) != 64 {
 		t.Fatalf("backend calls = %#v, owner=%q", backend.calls, backend.owner)
 	}
 	bad := active.Handle(context.Background(), requestVersion(t, protocol.Version15, "testGeneration/accept", map[string]any{"runId": strings.Repeat("a", 32), "candidateId": strings.Repeat("e", 32), "confirmCharacterization": false}))
-	if bad.Response.Error == nil || bad.Response.Error.Code != "INVALID_MESSAGE" || len(backend.calls) != 5 {
+	if bad.Response.Error == nil || bad.Response.Error.Code != "INVALID_MESSAGE" || len(backend.calls) != 7 {
 		t.Fatalf("missing confirmation digest = %#v, calls=%#v", bad.Response, backend.calls)
 	}
 	backend.err = errors.New("C:\\private\\secret.cpp token=private")
