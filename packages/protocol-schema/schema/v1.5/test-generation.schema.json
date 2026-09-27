@@ -1,0 +1,175 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:unit-test-ide:protocol:v1.5:test-generation",
+  "title": "TestGenerationContractV15",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["targetListRequest", "targetList", "startRequest", "runIdRequest", "run", "candidateListRequest", "candidatePage", "acceptRequest"],
+  "properties": {
+    "targetListRequest": { "$ref": "#/$defs/targetListRequest" },
+    "startRequest": { "$ref": "#/$defs/startRequest" },
+    "runIdRequest": { "$ref": "#/$defs/runIdRequest" },
+    "candidateListRequest": { "$ref": "#/$defs/candidateListRequest" },
+    "targetList": { "$ref": "#/$defs/targetList" },
+    "run": { "$ref": "#/$defs/run" },
+    "candidatePage": { "$ref": "#/$defs/candidatePage" },
+    "acceptRequest": { "$ref": "#/$defs/acceptRequest" }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "name": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "symbol": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[^/\\\\:]*:[^/\\\\]*$" },
+    "relativePath": { "type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$" },
+    "scope": { "title": "TestGenerationScopeV15", "enum": ["symbol", "file", "target", "workspace", "coverage-gap"] },
+    "framework": { "title": "TestGenerationFrameworkV15", "enum": ["auto", "cpputest", "unity"] },
+    "state": { "title": "TestGenerationStateV15", "enum": ["queued", "baseline", "analyzing", "solving", "rendering", "validating", "minimizing", "awaiting_confirmation", "accepted", "rejected", "cancelled", "failed"] },
+    "candidateKind": { "title": "TestGenerationCandidateKindV15", "enum": ["verified", "characterization"] },
+    "percent": { "type": "number", "minimum": 0, "maximum": 100 },
+    "goals": {
+      "title": "TestGenerationGoalsV15", "type": "object", "additionalProperties": false,
+      "required": ["functionPercent", "linePercent", "branchPercent"],
+      "properties": { "functionPercent": { "$ref": "#/$defs/percent" }, "linePercent": { "$ref": "#/$defs/percent" }, "branchPercent": { "$ref": "#/$defs/percent" } }
+    },
+    "budgets": {
+      "title": "TestGenerationBudgetsV15", "type": "object", "additionalProperties": false,
+      "required": ["wallTimeMs", "candidateCount", "memoryMiB", "concurrency"],
+      "properties": {
+        "wallTimeMs": { "type": "integer", "minimum": 1, "maximum": 86400000 },
+        "candidateCount": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "memoryMiB": { "type": "integer", "minimum": 64, "maximum": 1048576 },
+        "concurrency": { "type": "integer", "minimum": 1, "maximum": 256 }
+      }
+    },
+    "targetListRequest": {
+      "title": "TestGenerationTargetListRequestV15", "type": "object", "additionalProperties": false,
+      "required": ["workspaceGeneration", "projectId"],
+      "properties": {
+        "workspaceGeneration": { "$ref": "#/$defs/digest" }, "projectId": { "$ref": "#/$defs/name" },
+        "cursor": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 200 }
+      }
+    },
+    "target": {
+      "title": "TestGenerationTargetV15", "type": "object", "additionalProperties": false,
+      "required": ["targetId", "displayName", "frameworks"],
+      "properties": {
+        "targetId": { "$ref": "#/$defs/digest" }, "displayName": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "frameworks": { "type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "items": { "enum": ["cpputest", "unity"] } }
+      }
+    },
+    "targetList": {
+      "title": "TestGenerationTargetListV15", "type": "object", "additionalProperties": false,
+      "required": ["items"],
+      "properties": { "items": { "type": "array", "maxItems": 200, "items": { "$ref": "#/$defs/target" } }, "nextCursor": { "type": "string", "minLength": 1, "maxLength": 4096 } }
+    },
+    "startRequest": {
+      "title": "TestGenerationStartRequestV15", "type": "object", "additionalProperties": false,
+      "required": ["idempotencyKey", "workspaceGeneration", "projectId", "scope", "framework", "goals", "budgets"],
+      "properties": {
+        "idempotencyKey": { "$ref": "#/$defs/id" }, "workspaceGeneration": { "$ref": "#/$defs/digest" },
+        "projectId": { "$ref": "#/$defs/name" }, "scope": { "$ref": "#/$defs/scope" },
+        "symbolId": { "$ref": "#/$defs/symbol" }, "file": { "$ref": "#/$defs/relativePath" },
+        "targetId": { "$ref": "#/$defs/digest" }, "coverageReportId": { "$ref": "#/$defs/id" },
+        "framework": { "$ref": "#/$defs/framework" }, "goals": { "$ref": "#/$defs/goals" }, "budgets": { "$ref": "#/$defs/budgets" }
+      },
+      "allOf": [
+        { "if": { "properties": { "scope": { "const": "symbol" } } }, "then": { "required": ["symbolId"] } },
+        { "if": { "properties": { "scope": { "const": "file" } } }, "then": { "required": ["file"] } },
+        { "if": { "properties": { "scope": { "const": "target" } } }, "then": { "required": ["targetId"] } },
+        { "if": { "properties": { "scope": { "const": "coverage-gap" } } }, "then": { "required": ["coverageReportId"] } }
+      ]
+    },
+    "runIdRequest": {
+      "title": "TestGenerationRunIdRequestV15", "type": "object", "additionalProperties": false,
+      "required": ["runId"], "properties": { "runId": { "$ref": "#/$defs/id" } }
+    },
+    "candidateListRequest": {
+      "title": "TestGenerationCandidateListRequestV15", "type": "object", "additionalProperties": false,
+      "required": ["runId"], "properties": {
+        "runId": { "$ref": "#/$defs/id" }, "cursor": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 200 }
+      }
+    },
+    "coverage": {
+      "title": "TestGenerationCoverageV15", "type": "object", "additionalProperties": false,
+      "required": ["functionPercent", "linePercent", "branchPercent"],
+      "properties": { "functionPercent": { "$ref": "#/$defs/percent" }, "linePercent": { "$ref": "#/$defs/percent" }, "branchPercent": { "$ref": "#/$defs/percent" } }
+    },
+    "diagnostic": {
+      "title": "TestGenerationDiagnosticV15", "type": "object", "additionalProperties": false,
+      "required": ["code", "severity", "message"],
+      "properties": {
+        "code": { "$ref": "#/$defs/name" }, "severity": { "enum": ["info", "warning", "error"] },
+        "message": { "type": "string", "maxLength": 2048 }
+      }
+    },
+    "plannedEdit": {
+      "title": "TestGenerationPlannedEditV15", "type": "object", "additionalProperties": false,
+      "required": ["path", "operation", "afterDigest"],
+      "properties": {
+        "path": { "$ref": "#/$defs/relativePath" }, "operation": { "enum": ["create", "modify"] },
+        "beforeDigest": { "$ref": "#/$defs/digest" }, "afterDigest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "assertionProvenance": {
+      "title": "TestGenerationAssertionProvenanceV15", "type": "object", "additionalProperties": false,
+      "required": ["kind", "evidenceDigest"],
+      "properties": {
+        "kind": { "enum": ["independent-oracle", "observed-output"] },
+        "evidenceDigest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "candidate": {
+      "title": "TestGenerationCandidateV15", "type": "object", "additionalProperties": false,
+      "required": ["candidateId", "kind", "codeDigest", "artifactDigest", "assertionProvenance", "baselineCoverage", "deltaCoverage", "plannedEdits", "diagnostics", "characterizationConfirmed"],
+      "properties": {
+        "candidateId": { "$ref": "#/$defs/id" }, "kind": { "$ref": "#/$defs/candidateKind" },
+        "codeDigest": { "$ref": "#/$defs/digest" }, "artifactDigest": { "$ref": "#/$defs/digest" },
+        "assertionProvenance": { "$ref": "#/$defs/assertionProvenance" },
+        "baselineCoverage": { "$ref": "#/$defs/coverage" }, "deltaCoverage": { "$ref": "#/$defs/coverage" },
+        "plannedEdits": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/$defs/plannedEdit" } },
+        "diagnostics": { "type": "array", "maxItems": 1000, "items": { "$ref": "#/$defs/diagnostic" } },
+        "characterizationConfirmed": { "type": "boolean" }
+      },
+      "allOf": [
+        { "if": { "properties": { "kind": { "const": "verified" } } }, "then": { "type": "object", "properties": { "assertionProvenance": { "type": "object", "properties": { "kind": { "const": "independent-oracle" } } }, "characterizationConfirmed": { "const": false } } } },
+        { "if": { "properties": { "kind": { "const": "characterization" } } }, "then": { "type": "object", "properties": { "assertionProvenance": { "type": "object", "properties": { "kind": { "const": "observed-output" } } } } } }
+      ]
+    },
+    "candidatePage": {
+      "title": "TestGenerationCandidatePageV15", "type": "object", "additionalProperties": false,
+      "required": ["items"], "properties": {
+        "items": { "type": "array", "maxItems": 200, "items": { "$ref": "#/$defs/candidate" } },
+        "nextCursor": { "type": "string", "minLength": 1, "maxLength": 4096 }
+      }
+    },
+    "run": {
+      "title": "TestGenerationRunV15", "type": "object", "additionalProperties": false,
+      "required": ["runId", "taskId", "workspaceGeneration", "projectId", "state", "createdAt", "lastSequence"],
+      "properties": {
+        "runId": { "$ref": "#/$defs/id" }, "taskId": { "$ref": "#/$defs/id" },
+        "workspaceGeneration": { "$ref": "#/$defs/digest" }, "projectId": { "$ref": "#/$defs/name" },
+        "state": { "$ref": "#/$defs/state" }, "createdAt": { "type": "string", "format": "date-time" },
+        "finishedAt": { "type": "string", "format": "date-time" },
+        "lastSequence": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "candidateCount": { "type": "integer", "minimum": 0, "maximum": 1000 }
+      },
+      "allOf": [
+        { "if": { "properties": { "state": { "enum": ["accepted", "rejected", "cancelled", "failed"] } } }, "then": { "required": ["finishedAt"] }, "else": { "not": { "required": ["finishedAt"] } } }
+      ]
+    },
+    "acceptRequest": {
+      "title": "TestGenerationAcceptRequestV15", "type": "object", "additionalProperties": false,
+      "required": ["runId", "candidateId", "candidateKind", "confirmCharacterization"],
+      "properties": {
+        "runId": { "$ref": "#/$defs/id" }, "candidateId": { "$ref": "#/$defs/id" },
+        "candidateKind": { "$ref": "#/$defs/candidateKind" }, "confirmCharacterization": { "type": "boolean" }
+      },
+      "allOf": [
+        { "if": { "properties": { "candidateKind": { "const": "characterization" } } }, "then": { "type": "object", "properties": { "confirmCharacterization": { "const": true } } } },
+        { "if": { "properties": { "candidateKind": { "const": "verified" } } }, "then": { "type": "object", "properties": { "confirmCharacterization": { "const": false } } } }
+      ]
+    }
+  }
+}

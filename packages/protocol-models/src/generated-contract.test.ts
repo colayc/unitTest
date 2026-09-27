@@ -82,6 +82,33 @@ import {
   TaskStatusV14,
   TestSelectionModeV14
 } from "./index.js";
+import type {
+  TestGenerationStartRequestV15,
+  TestGenerationRunV15,
+  TestGenerationCandidatePageV15
+} from "./index.js";
+import {
+  TestGenerationFrameworkV15,
+  TestGenerationScopeV15,
+  TestGenerationStateV15
+} from "./index.js";
+
+test("protocol 1.5 generated models expose typed generation contracts", () => {
+  const request: TestGenerationStartRequestV15 = {
+    idempotencyKey: "a".repeat(32), workspaceGeneration: "b".repeat(64), projectId: "core",
+    scope: TestGenerationScopeV15.Symbol, symbolId: "target:foo", framework: TestGenerationFrameworkV15.Cpputest,
+    goals: { functionPercent: 80, linePercent: 90, branchPercent: 70 },
+    budgets: { wallTimeMs: 60_000, candidateCount: 5, memoryMiB: 1024, concurrency: 2 }
+  };
+  const run: TestGenerationRunV15 = {
+    runId: "c".repeat(32), taskId: "d".repeat(32), workspaceGeneration: request.workspaceGeneration,
+    projectId: request.projectId, state: TestGenerationStateV15.Queued, createdAt: new Date("2026-09-27T00:00:00Z"),
+    lastSequence: 0
+  };
+  const page: TestGenerationCandidatePageV15 = { items: [] };
+  assert.equal(run.projectId, "core");
+  assert.equal(page.items.length, 0);
+});
 
 test("generated capabilities represent an empty Windows service", () => {
   const value: Capabilities = {

@@ -19,6 +19,10 @@ export type {
   TestDiscoveryInput,
   TestRunInput,
   TestRunListInput,
+  TestGenerationStartInput,
+  TestGenerationTargetListInput,
+  TestGenerationCandidateListInput,
+  TestGenerationAcceptInput,
   TaskPage
 } from "./client.js";
 export { ProtocolError } from "./envelopes.js";
@@ -28,7 +32,11 @@ export {
   TestFailureCategoryV13,
   TestFailureSubtypeV13,
   TestSelectionModeV13,
-  TestSelectionModeV14
+  TestSelectionModeV14,
+  TestGenerationCandidateKindV15,
+  TestGenerationFrameworkV15,
+  TestGenerationScopeV15,
+  TestGenerationStateV15
 } from "@unit-test-ide/protocol-models";
 export type {
   ArtifactMetadata,
@@ -40,6 +48,7 @@ export type {
   CapabilitiesV12,
   CapabilitiesV13,
   CapabilitiesV14,
+  CapabilitiesV15,
   CoverageReport,
   CoverageRun,
   CoverageRunPage,
@@ -49,10 +58,19 @@ export type {
   TaskEventV12,
   TaskEventV13,
   TaskEventV14,
+  TaskEventV15,
   TaskSnapshot,
   TaskSnapshotV12,
   TaskSnapshotV13,
   TaskSnapshotV14,
+  TaskSnapshotV15,
+  TestGenerationStartRequestV15,
+  TestGenerationTargetListRequestV15,
+  TestGenerationTargetListV15,
+  TestGenerationRunV15,
+  TestGenerationCandidateListRequestV15,
+  TestGenerationCandidatePageV15,
+  TestGenerationAcceptRequestV15,
   TestCatalog,
   TestCatalogV14,
   TestRun,

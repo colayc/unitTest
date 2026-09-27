@@ -35,12 +35,16 @@ ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.4/coverage"));
 ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.4/task"));
 ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.4/event"));
 ajv.addSchema(require("@unit-test-ide/protocol-schema/v1.4/artifact"));
+for (const name of ["capabilities", "diagnostic", "test", "coverage", "test-generation", "task", "event", "artifact"]) {
+  ajv.addSchema(require(`@unit-test-ide/protocol-schema/v1.5/${name}`));
+}
 const validators: Record<ProtocolVersion, ValidateFunction> = {
   "1.0": ajv.compile(require("@unit-test-ide/protocol-schema/v1/message")),
   "1.1": ajv.compile(require("@unit-test-ide/protocol-schema/v1.1/message")),
   "1.2": ajv.compile(require("@unit-test-ide/protocol-schema/v1.2/message")),
   "1.3": ajv.compile(require("@unit-test-ide/protocol-schema/v1.3/message")),
-  "1.4": ajv.compile(require("@unit-test-ide/protocol-schema/v1.4/message"))
+  "1.4": ajv.compile(require("@unit-test-ide/protocol-schema/v1.4/message")),
+  "1.5": ajv.compile(require("@unit-test-ide/protocol-schema/v1.5/message"))
 };
 
 type Pending = {
@@ -303,11 +307,11 @@ export class Connection {
 }
 
 function isProtocolVersion(value: unknown): value is ProtocolVersion {
-  return value === "1.0" || value === "1.1" || value === "1.2" || value === "1.3" || value === "1.4";
+  return value === "1.0" || value === "1.1" || value === "1.2" || value === "1.3" || value === "1.4" || value === "1.5";
 }
 
 function protocolRank(version: ProtocolVersion): number {
-  return { "1.0": 0, "1.1": 1, "1.2": 2, "1.3": 3, "1.4": 4 }[version];
+  return { "1.0": 0, "1.1": 1, "1.2": 2, "1.3": 3, "1.4": 4, "1.5": 5 }[version];
 }
 
 function isSafeProtocolToken(value: unknown): value is string {

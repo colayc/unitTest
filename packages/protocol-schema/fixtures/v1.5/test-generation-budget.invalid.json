@@ -1,0 +1,26 @@
+{
+  "protocolVersion": "1.5",
+  "kind": "request",
+  "messageId": "11111111111111111111111111111111",
+  "sentAt": "2026-09-27T00:00:00Z",
+  "method": "testGeneration/start",
+  "payload": {
+    "idempotencyKey": "22222222222222222222222222222222",
+    "workspaceGeneration": "3333333333333333333333333333333333333333333333333333333333333333",
+    "projectId": "core",
+    "scope": "symbol",
+    "symbolId": "target:foo",
+    "framework": "cpputest",
+    "goals": {
+      "functionPercent": 80,
+      "linePercent": 90,
+      "branchPercent": 70
+    },
+    "budgets": {
+      "wallTimeMs": 60000,
+      "candidateCount": 0,
+      "memoryMiB": 1024,
+      "concurrency": 2
+    }
+  }
+}

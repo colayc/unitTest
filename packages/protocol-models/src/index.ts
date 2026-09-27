@@ -288,3 +288,57 @@ export {
   ArtifactKindV14,
   ArtifactMIMETypeV14
 } from "./generated/artifact-v1-4.js";
+export type { CapabilitiesV15 } from "./generated/capabilities-v1-5.js";
+export { FrameworkAdapterIDV15 } from "./generated/capabilities-v1-5.js";
+export type { DiagnosticV15 } from "./generated/diagnostic-v1-5.js";
+export type { TestContractV15 } from "./generated/test-v1-5.js";
+export type { CoverageContractV15 } from "./generated/coverage-v1-5.js";
+export type {
+  TestGenerationAcceptRequestV15,
+  TestGenerationCandidatePageV15,
+  TestGenerationCandidateV15,
+  TestGenerationCoverageV15,
+  TestGenerationDiagnosticV15,
+  TestGenerationPlannedEditV15,
+  TestGenerationContractV15,
+  TestGenerationRunV15,
+  TestGenerationRunIDRequestV15,
+  TestGenerationStartRequestV15,
+  TestGenerationTargetListV15,
+  TestGenerationTargetListRequestV15,
+  TestGenerationCandidateListRequestV15
+} from "./generated/test-generation-v1-5.js";
+export {
+  TestGenerationCandidateKindV15,
+  TestGenerationFrameworkV15,
+  TestGenerationScopeV15,
+  TestGenerationStateV15,
+  Kind as TestGenerationAssertionKindV15,
+  Severity as TestGenerationDiagnosticSeverityV15,
+  Operation as TestGenerationEditOperationV15,
+  Framework as TestGenerationTargetFrameworkV15
+} from "./generated/test-generation-v1-5.js";
+export type {
+  TaskSnapshotV15,
+  TestGenerationTaskSnapshotV15
+} from "./generated/task-v1-5.js";
+export {
+  TaskKindV15,
+  TaskStatusV15,
+  TaskOutcomeV15,
+  SimulationScenarioV15
+} from "./generated/task-v1-5.js";
+export type {
+  TaskEventV15,
+  TestGenerationStateChangedEventV15
+} from "./generated/event-v1-5.js";
+export {
+  TaskEventNameV15,
+  EventKindV15,
+  EventProtocolVersionV15
+} from "./generated/event-v1-5.js";
+export type { ArtifactMetadataV15 } from "./generated/artifact-v1-5.js";
+export {
+  ArtifactKindV15,
+  ArtifactMIMETypeV15
+} from "./generated/artifact-v1-5.js";

@@ -6,6 +6,116 @@ import addFormats from "ajv-formats";
 
 const load = async (path) => JSON.parse(await readFile(new URL(path, import.meta.url), "utf8"));
 
+test("protocol 1.5 validates test-generation methods and rejects unsafe payloads", async () => {
+  const ajv = new Ajv2020({ allErrors: true, strict: true, strictRequired: false });
+  addFormats(ajv);
+  ajv.addSchema(await load("../schema/v1.2/workspace.schema.json"));
+  for (const name of ["capabilities", "diagnostic", "test", "coverage", "test-generation", "task", "event", "artifact"]) {
+    ajv.addSchema(await load(`../schema/v1.5/${name}.schema.json`));
+  }
+  const validate = ajv.compile(await load("../schema/v1.5/message.schema.json"));
+  for (const fixture of [
+    "test-generation-start.valid.json",
+    "test-generation-run.valid.json",
+    "test-generation-candidate-set.valid.json",
+    "test-generation-accept.valid.json"
+  ]) {
+    assert.equal(validate(await load(`../fixtures/v1.5/${fixture}`)), true, fixture);
+  }
+  for (const fixture of ["test-generation-budget.invalid.json", "test-generation-path.invalid.json"]) {
+    assert.equal(validate(await load(`../fixtures/v1.5/${fixture}`)), false, fixture);
+  }
+  const base = { protocolVersion: "1.5", kind: "request", messageId: "a".repeat(32), sentAt: "2026-09-27T00:00:00Z" };
+  const start = {
+    ...base, method: "testGeneration/start", payload: {
+      idempotencyKey: "b".repeat(32), workspaceGeneration: "c".repeat(64), projectId: "core",
+      scope: "symbol", symbolId: "target:foo", framework: "cpputest",
+      goals: { functionPercent: 80, linePercent: 90, branchPercent: 70 },
+      budgets: { wallTimeMs: 60000, candidateCount: 5, memoryMiB: 1024, concurrency: 2 }
+    }
+  };
+  assert.equal(validate(start), true, JSON.stringify(validate.errors));
+  for (const [method, payload] of [
+    ["testGeneration/targets/list", { workspaceGeneration: "c".repeat(64), projectId: "core" }],
+    ["testGeneration/runs/get", { runId: "d".repeat(32) }],
+    ["testGeneration/candidates/list", { runId: "d".repeat(32) }],
+    ["testGeneration/accept", { runId: "d".repeat(32), candidateId: "e".repeat(32), candidateKind: "characterization", confirmCharacterization: true }]
+  ]) assert.equal(validate({ ...base, method, payload }), true, `${method}: ${JSON.stringify(validate.errors)}`);
+  for (const [name, payload] of [
+    ["unknown", { ...start.payload, command: "rm -rf /" }],
+    ["percentage", { ...start.payload, goals: { ...start.payload.goals, branchPercent: 101 } }],
+    ["zero budget", { ...start.payload, budgets: { ...start.payload.budgets, candidateCount: 0 } }],
+    ["overflow budget", { ...start.payload, budgets: { ...start.payload.budgets, wallTimeMs: Number.MAX_SAFE_INTEGER + 1 } }],
+    ["absolute path", { ...start.payload, sourcePath: "C:\\private\\source.c" }]
+  ]) assert.equal(validate({ ...start, payload }), false, name);
+  assert.equal(validate({ ...base, method: "testGeneration/accept", payload: { runId: "d".repeat(32), candidateId: "e".repeat(32) } }), false);
+  assert.equal(validate({ ...start, protocolVersion: "1.4" }), false);
+});
+
+test("protocol 1.5 closes candidate summaries, responses, and state transitions", async () => {
+  const ajv = new Ajv2020({ allErrors: true, strict: true, strictRequired: false });
+  addFormats(ajv);
+  ajv.addSchema(await load("../schema/v1.2/workspace.schema.json"));
+  for (const name of ["capabilities", "diagnostic", "test", "coverage", "test-generation", "task", "event", "artifact"]) {
+    ajv.addSchema(await load(`../schema/v1.5/${name}.schema.json`));
+  }
+  const message = ajv.compile(await load("../schema/v1.5/message.schema.json"));
+  const candidate = {
+    candidateId: "e".repeat(32), kind: "characterization", codeDigest: "a".repeat(64),
+    artifactDigest: "b".repeat(64), assertionProvenance: { kind: "observed-output", evidenceDigest: "c".repeat(64) },
+    baselineCoverage: { functionPercent: 25, linePercent: 35, branchPercent: 15 },
+    deltaCoverage: { functionPercent: 5, linePercent: 4, branchPercent: 3 },
+    plannedEdits: [{ path: "tests/new_test.cpp", operation: "create", afterDigest: "d".repeat(64) }],
+    diagnostics: [], characterizationConfirmed: false
+  };
+  const response = {
+    protocolVersion: "1.5", kind: "response", messageId: "1".repeat(32), requestId: "2".repeat(32),
+    sentAt: "2026-09-27T00:00:00Z", method: "testGeneration/candidates/list", payload: { items: [candidate] }
+  };
+  assert.equal(message(response), true);
+  for (const [name, mutation] of [
+    ["raw source", { source: "int secret;" }],
+    ["absolute path", { plannedEdits: [{ ...candidate.plannedEdits[0], path: "C:/private/test.cpp" }] }],
+    ["traversal", { plannedEdits: [{ ...candidate.plannedEdits[0], path: "../test.cpp" }] }],
+    ["digest", { codeDigest: "ABC" }],
+    ["provenance", { assertionProvenance: { kind: "independent-oracle", evidenceDigest: "c".repeat(64) } }]
+  ]) {
+    assert.equal(message({ ...response, payload: { items: [{ ...candidate, ...mutation }] } }), false, name);
+  }
+  const event = {
+    protocolVersion: "1.5", kind: "event", messageId: "3".repeat(32), sentAt: "2026-09-27T00:00:00Z",
+    sequence: 1, taskId: "4".repeat(32), payloadVersion: 1, event: "testGeneration.state.changed",
+    payload: { runId: "5".repeat(32), from: "queued", to: "baseline" }
+  };
+  assert.equal(message(event), true);
+  assert.equal(message({ ...event, payload: { ...event.payload, to: "accepted" } }), false);
+  assert.equal(message({ ...event, payload: { ...event.payload, from: "nonsense" } }), false);
+  const oldAjv = new Ajv2020({ strict: true });
+  addFormats(oldAjv);
+  oldAjv.addSchema(await load("../schema/v1.2/workspace.schema.json"));
+  for (const name of ["capabilities", "diagnostic", "test", "coverage", "task", "event", "artifact"]) oldAjv.addSchema(await load(`../schema/v1.4/${name}.schema.json`));
+  assert.equal(oldAjv.compile(await load("../schema/v1.4/message.schema.json"))({ ...response, protocolVersion: "1.4" }), false);
+});
+
+test("protocol 1.5 advertises generation and snapshots generation tasks", async () => {
+  const ajv = new Ajv2020({ strict: true });
+  addFormats(ajv);
+  const capabilities = ajv.compile(await load("../schema/v1.5/capabilities.schema.json"));
+  const v14 = await load("../schema/v1.4/capabilities.schema.json");
+  const base = Object.fromEntries(Object.entries(v14.properties).map(([key, schema]) => [key,
+    key === "frameworkAdapters" ? [] : schema.const ?? (schema.type === "boolean" ? false : "1.0")]));
+  const advertised = { ...base, testGeneration: true, maxTestGenerationCandidates: 1000 };
+  assert.equal(capabilities(advertised), true);
+  assert.equal(capabilities({ ...advertised, maxTestGenerationCandidates: 0 }), false);
+  const task = ajv.compile(await load("../schema/v1.5/task.schema.json"));
+  const snapshot = {
+    taskId: "a".repeat(32), kind: "testGeneration", runId: "b".repeat(32), workspaceGeneration: "c".repeat(64),
+    projectId: "core", status: "running", createdAt: "2026-09-27T00:00:00Z", lastSequence: 2
+  };
+  assert.equal(task(snapshot), true);
+  assert.equal(task({ ...snapshot, sourcePath: "C:/secret.c" }), false);
+});
+
 test("protocol v1 accepts authenticated handshake shape and rejects a missing token", async () => {
   const ajv = new Ajv2020({ allErrors: true, strict: true });
   addFormats(ajv);

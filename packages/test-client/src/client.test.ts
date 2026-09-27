@@ -8,6 +8,7 @@ import { Connection } from "./connection.js";
 import { decodeCoverageReport, decodeCoverageRun, decodeCoverageRunPage, decodeTaskEvent, decodeTestCatalog, decodeTestRun } from "./decoders.js";
 import { ProtocolError } from "./envelopes.js";
 import { ProtocolClient, TestFailureSubtypeV13, TestSelectionModeV13, TestSelectionModeV14 } from "./index.js";
+import { TestGenerationCandidateKindV15, TestGenerationFrameworkV15, TestGenerationScopeV15 } from "@unit-test-ide/protocol-models";
 import type { CoverageReport, CoverageRun, CoverageRunInput, CoverageRunListInput, CoverageRunPage } from "./index.js";
 import { EventSubscription } from "./subscription.js";
 
@@ -315,26 +316,160 @@ test("EventSubscription rejects an unsafe initial sequence", () => {
   assert.throws(() => new EventSubscription(Number.MAX_SAFE_INTEGER + 1), /safe integer/i);
 });
 
-test("client prefers protocol 1.4 and accepts negotiated downgrades", async () => {
-  for (const negotiated of ["1.4", "1.3", "1.2", "1.1"] as const) {
+test("protocol 1.5 client routes typed generation methods and rejects downgrade", async () => {
+  const run = {
+    runId: RUN_ID, taskId: TASK_ID, workspaceGeneration: WORKSPACE_GENERATION,
+    projectId: "core", state: "awaiting_confirmation", createdAt: SENT_AT, lastSequence: 8, candidateCount: 1
+  };
+  const candidate = {
+    candidateId: ARTIFACT_ID, kind: "characterization", codeDigest: "a".repeat(64), artifactDigest: "b".repeat(64),
+    assertionProvenance: { kind: "observed-output", evidenceDigest: "c".repeat(64) },
+    baselineCoverage: { functionPercent: 20, linePercent: 30, branchPercent: 10 },
+    deltaCoverage: { functionPercent: 5, linePercent: 4, branchPercent: 3 },
+    plannedEdits: [{ path: "tests/new_test.cpp", operation: "create", afterDigest: "d".repeat(64) }],
+    diagnostics: [], characterizationConfirmed: false
+  };
+  const fixture = scriptedClient((request) => {
+    if (request.method === "handshake") return response(request, { negotiatedProtocolVersion: "1.5", serviceVersion: "0.6.0" }, "1.5");
+    if (request.method === "testGeneration/targets/list") return response(request, { items: [] }, "1.5");
+    if (request.method === "testGeneration/candidates/list") return response(request, { items: [candidate] }, "1.5");
+    return response(request, run, "1.5");
+  });
+  await fixture.client.handshake("0123456789abcdef", "test", "0.6.0");
+  assert.equal((await fixture.client.listTestGenerationTargets({ workspaceGeneration: WORKSPACE_GENERATION, projectId: "core" })).items.length, 0);
+  const startInput = {
+    idempotencyKey: "b".repeat(32), workspaceGeneration: WORKSPACE_GENERATION, projectId: "core",
+    scope: TestGenerationScopeV15.Symbol, symbolId: "target:foo", framework: TestGenerationFrameworkV15.Cpputest,
+    goals: { functionPercent: 80, linePercent: 90, branchPercent: 70 },
+    budgets: { wallTimeMs: 60000, candidateCount: 5, memoryMiB: 1024, concurrency: 2 }
+  };
+  assert.equal((await fixture.client.startTestGeneration(startInput)).runId, RUN_ID);
+  assert.equal((await fixture.client.getTestGenerationRun(RUN_ID)).createdAt.getTime(), new Date(SENT_AT).getTime());
+  assert.equal((await fixture.client.listTestGenerationCandidates({ runId: RUN_ID })).items[0]?.codeDigest, "a".repeat(64));
+  assert.equal((await fixture.client.acceptTestGeneration({
+    runId: RUN_ID, candidateId: ARTIFACT_ID, candidateKind: TestGenerationCandidateKindV15.Characterization, confirmCharacterization: true
+  })).runId, RUN_ID);
+  assert.equal(fixture.requests.filter((request) => String(request.method).startsWith("testGeneration/")).length, 5);
+  fixture.client.close();
+
+  const old = scriptedClient((request) => response(request, { negotiatedProtocolVersion: "1.4", serviceVersion: "0.5.0" }, "1.4"));
+  await old.client.handshake("0123456789abcdef", "test", "0.5.0");
+  await assert.rejects(() => old.client.startTestGeneration(startInput), /protocol 1.5|feature unavailable/i);
+  assert.equal(old.requests.length, 1);
+  old.client.close();
+});
+
+test("protocol 1.5 generic task cancellation returns a generation snapshot", async () => {
+  const fixture = scriptedClient((request) => request.method === "handshake"
+    ? response(request, { negotiatedProtocolVersion: "1.5", serviceVersion: "0.6.0" }, "1.5")
+    : response(request, {
+      taskId: TASK_ID, kind: "testGeneration", runId: RUN_ID,
+      workspaceGeneration: WORKSPACE_GENERATION, projectId: "core",
+      status: "cancelling", createdAt: SENT_AT, lastSequence: 2
+    }, "1.5"));
+  await fixture.client.handshake("0123456789abcdef", "test", "0.6.0");
+  const task = await fixture.client.cancelTask(TASK_ID);
+  assert.equal(task.kind, "testGeneration");
+  assert.equal(task.createdAt.getTime(), new Date(SENT_AT).getTime());
+  fixture.client.close();
+});
+
+test("protocol 1.5 generation input fails closed before writing", async () => {
+  const fixture = scriptedClient((request) => response(request, {
+    negotiatedProtocolVersion: "1.5", serviceVersion: "0.6.0"
+  }, "1.5"));
+  await fixture.client.handshake("0123456789abcdef", "test", "0.6.0");
+  const input = {
+    idempotencyKey: "b".repeat(32), workspaceGeneration: WORKSPACE_GENERATION, projectId: "core",
+    scope: TestGenerationScopeV15.Symbol, symbolId: "target:foo", framework: TestGenerationFrameworkV15.Cpputest,
+    goals: { functionPercent: 80, linePercent: 90, branchPercent: 70 },
+    budgets: { wallTimeMs: 60000, candidateCount: 5, memoryMiB: 1024, concurrency: 2 }
+  };
+  await assert.rejects(() => fixture.client.startTestGeneration({
+    ...input, goals: { ...input.goals, branchPercent: 101 }
+  }), /invalid protocol request/);
+  await assert.rejects(() => fixture.client.startTestGeneration({
+    ...input, budgets: { ...input.budgets, candidateCount: 0 }
+  }), /invalid protocol request/);
+  const withPath = { ...input, sourcePath: "C:/private/source.cpp" };
+  await assert.rejects(() => fixture.client.startTestGeneration(withPath), /invalid protocol request/);
+  await assert.rejects(() => fixture.client.acceptTestGeneration({
+    runId: RUN_ID, candidateId: ARTIFACT_ID,
+    candidateKind: TestGenerationCandidateKindV15.Characterization, confirmCharacterization: false
+  }), /invalid protocol request/);
+  assert.equal(fixture.requests.length, 1);
+  fixture.client.close();
+});
+
+test("protocol 1.5 candidate responses reject source and bad digests", async () => {
+  for (const candidate of [
+    { candidateId: ARTIFACT_ID, kind: "verified", codeDigest: "not-a-digest", artifactDigest: "b".repeat(64),
+      assertionProvenance: { kind: "independent-oracle", evidenceDigest: "c".repeat(64) },
+      baselineCoverage: { functionPercent: 20, linePercent: 30, branchPercent: 10 },
+      deltaCoverage: { functionPercent: 5, linePercent: 4, branchPercent: 3 },
+      plannedEdits: [{ path: "tests/new_test.cpp", operation: "create", afterDigest: "d".repeat(64) }],
+      diagnostics: [], characterizationConfirmed: false },
+    { candidateId: ARTIFACT_ID, kind: "verified", codeDigest: "a".repeat(64), artifactDigest: "b".repeat(64),
+      assertionProvenance: { kind: "independent-oracle", evidenceDigest: "c".repeat(64) },
+      baselineCoverage: { functionPercent: 20, linePercent: 30, branchPercent: 10 },
+      deltaCoverage: { functionPercent: 5, linePercent: 4, branchPercent: 3 },
+      plannedEdits: [{ path: "tests/new_test.cpp", operation: "create", afterDigest: "d".repeat(64) }],
+      diagnostics: [], characterizationConfirmed: false, source: "int secret;" }
+  ]) {
+    const fixture = scriptedClient((request) => request.method === "handshake"
+      ? response(request, { negotiatedProtocolVersion: "1.5", serviceVersion: "0.6.0" }, "1.5")
+      : response(request, { items: [candidate] }, "1.5"));
+    await fixture.client.handshake("0123456789abcdef", "test", "0.6.0");
+    await assert.rejects(() => fixture.client.listTestGenerationCandidates({ runId: RUN_ID }), /invalid protocol message|invalid .* response/i);
+    fixture.client.close();
+  }
+});
+
+test("protocol 1.5 keeps common capabilities and artifact listing typed", async () => {
+  const fixture = scriptedClient((request) => {
+    if (request.method === "handshake") return response(request, { negotiatedProtocolVersion: "1.5", serviceVersion: "0.6.0" }, "1.5");
+    if (request.method === "capabilities/get") return response(request, {
+      workspaceInspect: true, targetList: true, cmakeBuild: true, testDiscovery: true, testRun: true,
+      frameworkAdapters: [], opaqueCTestFallback: true, ctestJson: true,
+      maxRepeatCount: 100, maxSelectionSize: 100000, maxCatalogPageSize: 1000,
+      unityHelperContractVersion: "1", unityRunnerContractVersion: "utide.runner.v1",
+      coverageRun: true, coverageReport: true, maxCoveragePageSize: 200,
+      maxCoverageTimeoutMs: 86400000, testGeneration: true, maxTestGenerationCandidates: 1000
+    }, "1.5");
+    return response(request, { items: [{
+      artifactId: ARTIFACT_ID, taskId: TASK_ID, kind: "task-summary", mimeType: "application/json",
+      sizeBytes: 2, sha256: "a".repeat(64), createdAt: SENT_AT,
+      uri: "unit-test-ide://artifact/" + ARTIFACT_ID
+    }] }, "1.5");
+  });
+  await fixture.client.handshake("0123456789abcdef", "test", "0.6.0");
+  const capabilities = await fixture.client.getCapabilities();
+  assert.equal("testGeneration" in capabilities && capabilities.testGeneration, true);
+  const page = await fixture.client.listArtifacts(TASK_ID);
+  assert.equal(page.items[0]?.createdAt.getTime(), new Date(SENT_AT).getTime());
+  fixture.client.close();
+});
+
+test("client prefers protocol 1.5 and accepts negotiated downgrades", async () => {
+  for (const negotiated of ["1.5", "1.4", "1.3", "1.2", "1.1"] as const) {
     const fixture = scriptedClient((request) => response(request, {
       negotiatedProtocolVersion: negotiated,
       serviceVersion: "0.5.0"
     }, negotiated));
     const result = await fixture.client.handshake("0123456789abcdef", "test", "0.5.0");
     assert.equal(result.negotiatedProtocolVersion, negotiated);
-    assert.equal(fixture.requests[0]?.protocolVersion, "1.4");
-    assert.deepEqual((fixture.requests[0]?.payload as JsonObject).supportedProtocolVersions, ["1.4", "1.3", "1.2", "1.1", "1.0"]);
+    assert.equal(fixture.requests[0]?.protocolVersion, "1.5");
+    assert.deepEqual((fixture.requests[0]?.payload as JsonObject).supportedProtocolVersions, ["1.5", "1.4", "1.3", "1.2", "1.1", "1.0"]);
     fixture.client.close();
   }
 });
 
-test("client retries legacy services from the v1.4 ceiling", async () => {
+test("client retries legacy services from the v1.5 ceiling", async () => {
   const fixture = scriptedClient((request) => request.protocolVersion === "1.2"
     ? response(request, { negotiatedProtocolVersion: "1.2", serviceVersion: "0.3.0" }, "1.2")
     : error(request, "UNSUPPORTED_PROTOCOL", false, "1.0"));
   await fixture.client.handshake("0123456789abcdef", "test", "0.5.0");
-  assert.deepEqual(fixture.requests.map(({ protocolVersion }) => protocolVersion), ["1.4", "1.3", "1.2"]);
+  assert.deepEqual(fixture.requests.map(({ protocolVersion }) => protocolVersion), ["1.5", "1.4", "1.3", "1.2"]);
   fixture.client.close();
 });
 
@@ -1557,7 +1692,7 @@ test("legacy unsupported handshake retries do not lock the event version", async
   try {
     const negotiated = await client.handshake("0123456789abcdef", "test", "0.5.0");
     assert.equal(negotiated.negotiatedProtocolVersion, "1.2");
-    assert.deepEqual(handshakeVersions, ["1.4", "1.3", "1.2"]);
+    assert.deepEqual(handshakeVersions, ["1.5", "1.4", "1.3", "1.2"]);
     const subscription = await client.subscribeEvents(0);
     const event = (await take(subscription, 1))[0];
     assert.equal(event?.protocolVersion, "1.2");
@@ -1833,7 +1968,7 @@ test("client performs handshake, capabilities, and shutdown in order", async () 
 });
 
 test("client exposes stable server error codes", async () => {
-  const { client } = scriptedClient((request) => error(request, "AUTH_FAILED", false, "1.4"));
+  const { client } = scriptedClient((request) => error(request, "AUTH_FAILED", false, "1.5"));
   await assert.rejects(
     () => client.handshake("wrong-token-value", "test", "0.1.0"),
     (failure: unknown) => failure instanceof ProtocolError && failure.code === "AUTH_FAILED"
@@ -1932,15 +2067,15 @@ test("client falls back to an exact 1.0 handshake", async () => {
   assert.equal(negotiated.negotiatedProtocolVersion, "1.0");
   assert.deepEqual(
     fixture.requests.map(({ protocolVersion }) => protocolVersion),
-    ["1.4", "1.3", "1.2", "1.1", "1.0"]
+    ["1.5", "1.4", "1.3", "1.2", "1.1", "1.0"]
   );
   assert.deepEqual(fixture.requests[0]?.payload, {
     token: "0123456789abcdef",
     clientName: "test",
     clientVersion: "0.2.0",
-    supportedProtocolVersions: ["1.4", "1.3", "1.2", "1.1", "1.0"]
+    supportedProtocolVersions: ["1.5", "1.4", "1.3", "1.2", "1.1", "1.0"]
   });
-  assert.equal("supportedProtocolVersions" in (fixture.requests[4]?.payload as JsonObject), false);
+  assert.equal("supportedProtocolVersions" in (fixture.requests[5]?.payload as JsonObject), false);
   fixture.client.close();
 });
 
@@ -1984,7 +2119,7 @@ test("a same-version handshake failure consumes the Connection legacy opportunit
   let handshakeCount = 0;
   const fixture = scriptedClient((request) => {
     handshakeCount++;
-    if (handshakeCount === 1) return error(request, "AUTH_FAILED", false, "1.4");
+    if (handshakeCount === 1) return error(request, "AUTH_FAILED", false, "1.5");
     if (handshakeCount === 2) return error(request, "UNSUPPORTED_PROTOCOL", false, "1.0");
     return response(request, { negotiatedProtocolVersion: "1.0", serviceVersion: "0.1.0" }, "1.0");
   });
@@ -1996,7 +2131,7 @@ test("a same-version handshake failure consumes the Connection legacy opportunit
     () => fixture.client.handshake("0123456789abcdef", "test", "0.2.0"),
     /protocol version/
   );
-  assert.deepEqual(fixture.requests.map(({ protocolVersion }) => protocolVersion), ["1.4", "1.4"]);
+  assert.deepEqual(fixture.requests.map(({ protocolVersion }) => protocolVersion), ["1.5", "1.5"]);
 });
 
 test("an authenticated connection rejects a legacy-version handshake error", async () => {
@@ -2494,7 +2629,7 @@ test("reconnect reuses credentials and the active subscription cursor", async ()
   assert.equal((await subscription.next()).value?.sequence, 4);
   await client.reconnect();
   assert.equal(calls, 2);
-  assert.deepEqual((requests[1]?.[0]?.payload as JsonObject).supportedProtocolVersions, ["1.4", "1.3", "1.2", "1.1", "1.0"]);
+  assert.deepEqual((requests[1]?.[0]?.payload as JsonObject).supportedProtocolVersions, ["1.5", "1.4", "1.3", "1.2", "1.1", "1.0"]);
   assert.deepEqual(requests[1]?.[1]?.payload, { afterSequence: 4 });
 
   first[1].write(`${JSON.stringify(taskEvent(5, "task.output", { payload: { old: true } }))}\n`);

@@ -1,6 +1,6 @@
-import type { TaskEvent, TaskEventV12, TaskEventV13, TaskEventV14 } from "@unit-test-ide/protocol-models";
+import type { TaskEvent, TaskEventV12, TaskEventV13, TaskEventV14, TaskEventV15 } from "@unit-test-ide/protocol-models";
 
-export type ProtocolVersion = "1.0" | "1.1" | "1.2" | "1.3" | "1.4";
+export type ProtocolVersion = "1.0" | "1.1" | "1.2" | "1.3" | "1.4" | "1.5";
 export type Method =
   | "handshake"
   | "capabilities/get"
@@ -20,9 +20,14 @@ export type Method =
   | "coverage/runs/start"
   | "coverage/runs/get"
   | "coverage/runs/list"
-  | "coverage/reports/get";
+  | "coverage/reports/get"
+  | "testGeneration/targets/list"
+  | "testGeneration/start"
+  | "testGeneration/runs/get"
+  | "testGeneration/candidates/list"
+  | "testGeneration/accept";
 
-export type ProtocolTaskEvent = TaskEvent | TaskEventV12 | TaskEventV13 | TaskEventV14;
+export type ProtocolTaskEvent = TaskEvent | TaskEventV12 | TaskEventV13 | TaskEventV14 | TaskEventV15;
 
 export interface RequestEnvelope {
   protocolVersion: ProtocolVersion;

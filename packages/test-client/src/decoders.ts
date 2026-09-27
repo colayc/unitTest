@@ -3,6 +3,8 @@ import type {
   ArtifactMetadataV12,
   ArtifactMetadataV13,
   ArtifactMetadataV14,
+  ArtifactMetadataV15,
+  CapabilitiesV15,
   CoverageCompletenessV14,
   CoverageIncompleteReasonV14,
   CoverageMetricV14,
@@ -16,10 +18,12 @@ import type {
   TaskEventV12,
   TaskEventV13,
   TaskEventV14,
+  TaskEventV15,
   TaskSnapshot,
   TaskSnapshotV12,
   TaskSnapshotV13,
   TaskSnapshotV14,
+  TaskSnapshotV15,
   TestCatalog,
   TestCatalogV14,
   TestItemResult,
@@ -29,7 +33,29 @@ import type {
   TestRunSummaryV13,
   TestRunV14,
   TestSourceLocationV13,
+  TestGenerationTargetListV15,
+  TestGenerationRunV15,
+  TestGenerationCandidatePageV15,
+  TestGenerationCoverageV15,
   WorkspaceSnapshot
+} from "@unit-test-ide/protocol-models";
+import {
+  FrameworkAdapterIDV15,
+  ArtifactKindV15,
+  ArtifactMIMETypeV15,
+  EventProtocolVersionV15,
+  EventKindV15,
+  TaskEventNameV15,
+  TaskKindV15,
+  TaskStatusV15,
+  TaskOutcomeV15,
+  SimulationScenarioV15,
+  TestGenerationCandidateKindV15,
+  TestGenerationStateV15,
+  TestGenerationAssertionKindV15,
+  TestGenerationDiagnosticSeverityV15,
+  TestGenerationEditOperationV15,
+  TestGenerationTargetFrameworkV15
 } from "@unit-test-ide/protocol-models";
 import type { ProtocolTaskEvent } from "./envelopes.js";
 
@@ -62,6 +88,236 @@ function iteration(value: unknown, name: string): number {
   const result = safeInteger(value, name);
   if (result < 1 || result > 100) throw new Error(`${name} must be between 1 and 100`);
   return result;
+}
+
+function wireString(value: unknown, name: string): string {
+  if (typeof value !== "string") throw new Error(`invalid ${name}`);
+  return value;
+}
+
+function wireBoolean(value: unknown, name: string): boolean {
+  if (typeof value !== "boolean") throw new Error(`invalid ${name}`);
+  return value;
+}
+
+function wireEnum<T extends string>(value: unknown, values: readonly T[], name: string): T {
+  const found = values.find((item) => item === value);
+  if (found === undefined) throw new Error(`invalid ${name}`);
+  return found;
+}
+
+function wireArray(value: unknown, name: string): unknown[] {
+  if (!Array.isArray(value)) throw new Error(`invalid ${name}`);
+  return value;
+}
+
+export function decodeCapabilitiesV15(value: unknown): CapabilitiesV15 {
+  const wire = record(value, "protocol 1.5 capabilities");
+  return {
+    workspaceInspect: wireBoolean(wire.workspaceInspect, "workspaceInspect"),
+    targetList: wireBoolean(wire.targetList, "targetList"),
+    cmakeBuild: wireBoolean(wire.cmakeBuild, "cmakeBuild"),
+    testDiscovery: wireBoolean(wire.testDiscovery, "testDiscovery"),
+    testRun: wireBoolean(wire.testRun, "testRun"),
+    frameworkAdapters: wireArray(wire.frameworkAdapters, "frameworkAdapters").map((entry) => {
+      const adapter = record(entry, "framework adapter");
+      return {
+        id: wireEnum(adapter.id, Object.values(FrameworkAdapterIDV15), "framework adapter id"),
+        contractVersion: wireString(adapter.contractVersion, "contract version"),
+        displayName: wireString(adapter.displayName, "display name"),
+        canDiscoverCases: wireBoolean(adapter.canDiscoverCases, "canDiscoverCases"),
+        canRunCase: wireBoolean(adapter.canRunCase, "canRunCase"),
+        canReportSkipped: wireBoolean(adapter.canReportSkipped, "canReportSkipped"),
+        canReportSourceLocation: wireBoolean(adapter.canReportSourceLocation, "canReportSourceLocation"),
+        canReportMockDetails: wireBoolean(adapter.canReportMockDetails, "canReportMockDetails")
+      };
+    }),
+    opaqueCTestFallback: wireBoolean(wire.opaqueCTestFallback, "opaqueCTestFallback"),
+    ctestJson: wireBoolean(wire.ctestJson, "ctestJson"),
+    maxRepeatCount: safeInteger(wire.maxRepeatCount, "maxRepeatCount"),
+    maxSelectionSize: safeInteger(wire.maxSelectionSize, "maxSelectionSize"),
+    maxCatalogPageSize: safeInteger(wire.maxCatalogPageSize, "maxCatalogPageSize"),
+    unityHelperContractVersion: wireString(wire.unityHelperContractVersion, "unityHelperContractVersion"),
+    unityRunnerContractVersion: wireString(wire.unityRunnerContractVersion, "unityRunnerContractVersion"),
+    coverageRun: wireBoolean(wire.coverageRun, "coverageRun"),
+    coverageReport: wireBoolean(wire.coverageReport, "coverageReport"),
+    maxCoveragePageSize: safeInteger(wire.maxCoveragePageSize, "maxCoveragePageSize"),
+    maxCoverageTimeoutMs: safeInteger(wire.maxCoverageTimeoutMs, "maxCoverageTimeoutMs"),
+    testGeneration: wireBoolean(wire.testGeneration, "testGeneration"),
+    maxTestGenerationCandidates: safeInteger(wire.maxTestGenerationCandidates, "maxTestGenerationCandidates")
+  };
+}
+
+export function decodeArtifactMetadataV15(value: unknown): ArtifactMetadataV15 {
+  const wire = record(value, "protocol 1.5 artifact metadata");
+  return {
+    artifactId: wireString(wire.artifactId, "artifact id"),
+    taskId: wireString(wire.taskId, "artifact task id"),
+    kind: wireEnum(wire.kind, Object.values(ArtifactKindV15), "artifact kind"),
+    mimeType: wireEnum(wire.mimeType, Object.values(ArtifactMIMETypeV15), "artifact mime type"),
+    sizeBytes: safeInteger(wire.sizeBytes, "artifact sizeBytes"),
+    sha256: wireString(wire.sha256, "artifact sha256"),
+    createdAt: date(wire.createdAt, "artifact createdAt"),
+    uri: wireString(wire.uri, "artifact uri")
+  };
+}
+
+export function decodeTaskSnapshotV15(value: unknown): TaskSnapshotV15 {
+  const wire = record(value, "protocol 1.5 task snapshot");
+  const common = {
+    taskId: wireString(wire.taskId, "task id"),
+    status: wireEnum(wire.status, Object.values(TaskStatusV15), "task status"),
+    createdAt: date(wire.createdAt, "task createdAt"),
+    lastSequence: safeInteger(wire.lastSequence, "task lastSequence"),
+    ...(wire.outcome === undefined ? {} : { outcome: wireEnum(wire.outcome, Object.values(TaskOutcomeV15), "task outcome") }),
+    ...(wire.startedAt === undefined ? {} : { startedAt: date(wire.startedAt, "task startedAt") }),
+    ...(wire.finishedAt === undefined ? {} : { finishedAt: date(wire.finishedAt, "task finishedAt") }),
+    ...(wire.errorCode === undefined ? {} : { errorCode: wireString(wire.errorCode, "task errorCode") }),
+    ...(wire.errorMessage === undefined ? {} : { errorMessage: wireString(wire.errorMessage, "task errorMessage") })
+  };
+  switch (wire.kind) {
+    case "testGeneration":
+      return {
+        ...common, kind: TaskKindV15.TestGeneration,
+        runId: wireString(wire.runId, "generation run id"),
+        workspaceGeneration: wireString(wire.workspaceGeneration, "workspace generation"),
+        projectId: wireString(wire.projectId, "project id")
+      };
+    case "cmakeBuild":
+      return {
+        ...common, kind: TaskKindV15.CmakeBuild,
+        workspaceGeneration: wireString(wire.workspaceGeneration, "workspace generation"),
+        projectId: wireString(wire.projectId, "project id"),
+        buildProfileId: wireString(wire.buildProfileId, "build profile id"),
+        targetIds: wireArray(wire.targetIds, "target ids").map((id) => wireString(id, "target id")),
+        jobs: safeInteger(wire.jobs, "jobs"),
+        timeoutMs: safeInteger(wire.timeoutMs, "timeoutMs")
+      };
+    case "simulation":
+      return {
+        ...common, kind: TaskKindV15.Simulation,
+        scenario: wireEnum(wire.scenario, Object.values(SimulationScenarioV15), "scenario"),
+        ...(wire.timeoutMs === undefined ? {} : { timeoutMs: safeInteger(wire.timeoutMs, "timeoutMs") })
+      };
+    case "testDiscovery":
+      return {
+        ...common, kind: TaskKindV15.TestDiscovery,
+        projectId: wireString(wire.projectId, "project id"),
+        profileId: wireString(wire.profileId, "profile id"),
+        ...(wire.catalogRevision === undefined ? {} : { catalogRevision: wireString(wire.catalogRevision, "catalog revision") })
+      };
+    case "testRun":
+      return {
+        ...common, kind: TaskKindV15.TestRun,
+        projectId: wireString(wire.projectId, "project id"),
+        profileId: wireString(wire.profileId, "profile id"),
+        catalogRevision: wireString(wire.catalogRevision, "catalog revision"),
+        runId: wireString(wire.runId, "run id"),
+        repeatCount: safeInteger(wire.repeatCount, "repeat count")
+      };
+    case "coverageRun":
+      return {
+        ...common, kind: TaskKindV15.CoverageRun,
+        workspaceGeneration: wireString(wire.workspaceGeneration, "workspace generation"),
+        projectId: wireString(wire.projectId, "project id"),
+        coverageProfileId: wireString(wire.coverageProfileId, "coverage profile id"),
+        catalogRevision: wireString(wire.catalogRevision, "catalog revision"),
+        coverageRunId: wireString(wire.coverageRunId, "coverage run id"),
+        testRunId: wireString(wire.testRunId, "test run id"),
+        repeatCount: safeInteger(wire.repeatCount, "repeat count"),
+        timeoutMs: safeInteger(wire.timeoutMs, "timeoutMs")
+      };
+    default:
+      throw new Error("invalid protocol 1.5 task kind");
+  }
+}
+
+function decodeGenerationCoverage(value: unknown): TestGenerationCoverageV15 {
+  const wire = record(value, "test generation coverage");
+  return {
+    functionPercent: wireNumber(wire.functionPercent, "function percentage"),
+    linePercent: wireNumber(wire.linePercent, "line percentage"),
+    branchPercent: wireNumber(wire.branchPercent, "branch percentage")
+  };
+}
+
+function wireNumber(value: unknown, name: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`invalid ${name}`);
+  return value;
+}
+
+export function decodeTestGenerationTargetList(value: unknown): TestGenerationTargetListV15 {
+  const wire = record(value, "test generation target list");
+  const items = wireArray(wire.items, "test generation targets").map((entry) => {
+    const target = record(entry, "test generation target");
+    return {
+      targetId: wireString(target.targetId, "target id"),
+      displayName: wireString(target.displayName, "target display name"),
+      frameworks: wireArray(target.frameworks, "target frameworks").map((framework) =>
+        wireEnum(framework, Object.values(TestGenerationTargetFrameworkV15), "target framework"))
+    };
+  });
+  return {
+    items,
+    ...(wire.nextCursor === undefined ? {} : { nextCursor: wireString(wire.nextCursor, "target cursor") })
+  };
+}
+
+export function decodeTestGenerationRun(value: unknown): TestGenerationRunV15 {
+  const wire = record(value, "test generation run");
+  return {
+    runId: wireString(wire.runId, "generation run id"),
+    taskId: wireString(wire.taskId, "generation task id"),
+    workspaceGeneration: wireString(wire.workspaceGeneration, "workspace generation"),
+    projectId: wireString(wire.projectId, "generation project id"),
+    state: wireEnum(wire.state, Object.values(TestGenerationStateV15), "generation state"),
+    createdAt: date(wire.createdAt, "generation createdAt"),
+    lastSequence: safeInteger(wire.lastSequence, "generation lastSequence"),
+    ...(wire.finishedAt === undefined ? {} : { finishedAt: date(wire.finishedAt, "generation finishedAt") }),
+    ...(wire.candidateCount === undefined ? {} : { candidateCount: safeInteger(wire.candidateCount, "generation candidateCount") })
+  };
+}
+
+export function decodeTestGenerationCandidatePage(value: unknown): TestGenerationCandidatePageV15 {
+  const wire = record(value, "test generation candidate page");
+  const items = wireArray(wire.items, "generation candidates").map((entry) => {
+    const candidate = record(entry, "generation candidate");
+    const provenance = record(candidate.assertionProvenance, "assertion provenance");
+    return {
+      candidateId: wireString(candidate.candidateId, "candidate id"),
+      kind: wireEnum(candidate.kind, Object.values(TestGenerationCandidateKindV15), "candidate kind"),
+      codeDigest: wireString(candidate.codeDigest, "code digest"),
+      artifactDigest: wireString(candidate.artifactDigest, "artifact digest"),
+      assertionProvenance: {
+        kind: wireEnum(provenance.kind, Object.values(TestGenerationAssertionKindV15), "assertion provenance kind"),
+        evidenceDigest: wireString(provenance.evidenceDigest, "evidence digest")
+      },
+      baselineCoverage: decodeGenerationCoverage(candidate.baselineCoverage),
+      deltaCoverage: decodeGenerationCoverage(candidate.deltaCoverage),
+      plannedEdits: wireArray(candidate.plannedEdits, "planned edits").map((entry) => {
+        const edit = record(entry, "planned edit");
+        return {
+          path: wireString(edit.path, "planned edit path"),
+          operation: wireEnum(edit.operation, Object.values(TestGenerationEditOperationV15), "planned edit operation"),
+          afterDigest: wireString(edit.afterDigest, "planned edit digest"),
+          ...(edit.beforeDigest === undefined ? {} : { beforeDigest: wireString(edit.beforeDigest, "prior digest") })
+        };
+      }),
+      diagnostics: wireArray(candidate.diagnostics, "generation diagnostics").map((entry) => {
+        const diagnostic = record(entry, "generation diagnostic");
+        return {
+          code: wireString(diagnostic.code, "diagnostic code"),
+          message: wireString(diagnostic.message, "diagnostic message"),
+          severity: wireEnum(diagnostic.severity, Object.values(TestGenerationDiagnosticSeverityV15), "diagnostic severity")
+        };
+      }),
+      characterizationConfirmed: wireBoolean(candidate.characterizationConfirmed, "characterization confirmation")
+    };
+  });
+  return {
+    items,
+    ...(wire.nextCursor === undefined ? {} : { nextCursor: wireString(wire.nextCursor, "candidate cursor") })
+  };
 }
 
 function decodeCoverageMetric(value: unknown, name: string): CoverageMetricV14 {
@@ -288,6 +544,7 @@ export function decodeTaskSnapshotV14(value: unknown): TaskSnapshotV14 {
 
 export function decodeTaskEvent(value: unknown): ProtocolTaskEvent {
   const wire = record(value, "task event");
+  if (wire.protocolVersion === "1.5") return decodeTaskEventV15(wire);
   if (wire.protocolVersion === "1.4") return decodeTaskEventV14(wire);
   if (wire.protocolVersion === "1.3") return decodeTaskEventV13(wire);
   if (wire.protocolVersion === "1.2") return decodeTaskEventV12(wire);
@@ -302,6 +559,59 @@ export function decodeTaskEvent(value: unknown): ProtocolTaskEvent {
     payloadVersion: safeInteger(wire.payloadVersion, "event payloadVersion"),
     payload: record(wire.payload, "event payload")
   };
+}
+
+function decodeTaskEventV15(wire: Record<string, unknown>): TaskEventV15 {
+  const event = wireEnum(wire.event, Object.values(TaskEventNameV15), "protocol 1.5 event");
+  let payload: Record<string, unknown>;
+  if (event === TaskEventNameV15.TestGenerationStateChanged) {
+    const state = record(wire.payload, "generation state transition");
+    const from = wireEnum(state.from, Object.values(TestGenerationStateV15), "previous generation state");
+    const to = wireEnum(state.to, Object.values(TestGenerationStateV15), "next generation state");
+    const transitions: Record<string, readonly string[]> = {
+      queued: ["baseline", "cancelled", "failed"],
+      baseline: ["analyzing", "cancelled", "failed"],
+      analyzing: ["solving", "cancelled", "failed"],
+      solving: ["rendering", "cancelled", "failed"],
+      rendering: ["validating", "cancelled", "failed"],
+      validating: ["minimizing", "rejected", "cancelled", "failed"],
+      minimizing: ["awaiting_confirmation", "rejected", "cancelled", "failed"],
+      awaiting_confirmation: ["accepted", "rejected", "cancelled", "failed"],
+      accepted: [], rejected: [], cancelled: [], failed: []
+    };
+    if (!transitions[from]?.includes(to)) throw new Error("invalid test generation state transition");
+    payload = { runId: wireString(state.runId, "generation run id"), from, to };
+  } else {
+    const legacy = decodeTaskEventV14({ ...wire, protocolVersion: "1.4" });
+    payload = record(legacy.payload, "protocol 1.5 event payload");
+  }
+  const decoded = {
+    protocolVersion: EventProtocolVersionV15.The15,
+    kind: EventKindV15.Event,
+    messageId: wireString(wire.messageId, "event message id"),
+    sentAt: date(wire.sentAt, "event sentAt"),
+    sequence: safeInteger(wire.sequence, "event sequence"),
+    event,
+    taskId: wireString(wire.taskId, "event task id"),
+    payloadVersion: safeInteger(wire.payloadVersion, "event payload version"),
+    payload
+  };
+  if (!isDecodedTaskEventV15(decoded)) throw new Error("invalid protocol 1.5 event");
+  return decoded;
+}
+
+function isDecodedTaskEventV15(value: unknown): value is TaskEventV15 {
+  const wire = record(value, "decoded protocol 1.5 event");
+  if (wire.protocolVersion !== EventProtocolVersionV15.The15 ||
+      wire.kind !== EventKindV15.Event ||
+      !Object.values(TaskEventNameV15).includes(wire.event as TaskEventNameV15)) return false;
+  const payload = record(wire.payload, "decoded protocol 1.5 payload");
+  if (wire.event === TaskEventNameV15.TestGenerationStateChanged) {
+    return typeof payload.runId === "string" &&
+      Object.values(TestGenerationStateV15).includes(payload.from as TestGenerationStateV15) &&
+      Object.values(TestGenerationStateV15).includes(payload.to as TestGenerationStateV15);
+  }
+  return true;
 }
 
 function decodeTaskEventV12(wire: Record<string, unknown>): TaskEventV12 {

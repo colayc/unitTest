@@ -10,11 +10,13 @@ import type {
   ArtifactMetadataV12,
   ArtifactMetadataV13,
   ArtifactMetadataV14,
+  ArtifactMetadataV15,
   Capabilities,
   CapabilitiesV11,
   CapabilitiesV12,
   CapabilitiesV13,
   CapabilitiesV14,
+  CapabilitiesV15,
   CoverageReport,
   CoverageRun,
   CoverageRunPage,
@@ -24,6 +26,7 @@ import type {
   TaskSnapshotV12,
   TaskSnapshotV13,
   TaskSnapshotV14,
+  TaskSnapshotV15,
   TestCatalog,
   TestCatalogV14,
   TestRun,
@@ -31,6 +34,13 @@ import type {
   TestRunV14,
   TestRunPage,
   TestSelection,
+  TestGenerationAcceptRequestV15,
+  TestGenerationCandidateListRequestV15,
+  TestGenerationCandidatePageV15,
+  TestGenerationRunV15,
+  TestGenerationStartRequestV15,
+  TestGenerationTargetListRequestV15,
+  TestGenerationTargetListV15,
   WorkspaceSnapshot
 } from "@unit-test-ide/protocol-models";
 import { Connection, MAX_MESSAGE_BYTES } from "./connection.js";
@@ -39,20 +49,26 @@ import {
   decodeArtifactMetadataV12,
   decodeArtifactMetadataV13,
   decodeArtifactMetadataV14,
+  decodeArtifactMetadataV15,
   decodeCoverageReport,
   decodeCoverageRun,
   decodeCoverageRunPage,
+  decodeCapabilitiesV15,
   decodeTargetList,
   decodeTaskSnapshot,
   decodeTaskSnapshotV12,
   decodeTaskSnapshotV13,
   decodeTaskSnapshotV14,
+  decodeTaskSnapshotV15,
   decodeTestCatalog,
   decodeTestCatalogV14,
   decodeTestRun,
   decodeTestRunPage,
   decodeTestRunPageV14,
   decodeTestRunV14,
+  decodeTestGenerationCandidatePage,
+  decodeTestGenerationRun,
+  decodeTestGenerationTargetList,
   decodeWorkspaceSnapshot
 } from "./decoders.js";
 import type { Method, ProtocolTaskEvent, ProtocolVersion } from "./envelopes.js";
@@ -110,6 +126,10 @@ export interface TestRunListInput {
   limit?: number;
 }
 export type CoverageRunInput = CoverageRunStartRequest;
+export type TestGenerationStartInput = TestGenerationStartRequestV15;
+export type TestGenerationTargetListInput = TestGenerationTargetListRequestV15;
+export type TestGenerationCandidateListInput = TestGenerationCandidateListRequestV15;
+export type TestGenerationAcceptInput = TestGenerationAcceptRequestV15;
 export interface CoverageRunListInput {
   projectId?: string;
   coverageProfileId?: string;
@@ -117,8 +137,8 @@ export interface CoverageRunListInput {
   limit?: number;
 }
 export interface PageInput { cursor?: string; limit?: number }
-export type ProtocolTaskSnapshot = TaskSnapshot | TaskSnapshotV12 | TaskSnapshotV13 | TaskSnapshotV14;
-export type ProtocolArtifactMetadata = ArtifactMetadata | ArtifactMetadataV12 | ArtifactMetadataV13 | ArtifactMetadataV14;
+export type ProtocolTaskSnapshot = TaskSnapshot | TaskSnapshotV12 | TaskSnapshotV13 | TaskSnapshotV14 | TaskSnapshotV15;
+export type ProtocolArtifactMetadata = ArtifactMetadata | ArtifactMetadataV12 | ArtifactMetadataV13 | ArtifactMetadataV14 | ArtifactMetadataV15;
 export type ProtocolTestCatalog = TestCatalog | TestCatalogV14;
 export type ProtocolTestRun = TestRun | TestRunV14;
 export type ProtocolTestRunPage = TestRunPage | TestRunPageV14;
@@ -166,6 +186,9 @@ payloadAjv.addSchema(require("@unit-test-ide/protocol-schema/v1.4/task"));
 payloadAjv.addSchema(require("@unit-test-ide/protocol-schema/v1.4/event"));
 payloadAjv.addSchema(require("@unit-test-ide/protocol-schema/v1.4/artifact"));
 payloadAjv.addSchema(require("@unit-test-ide/protocol-schema/v1.4/message"));
+for (const name of ["capabilities", "diagnostic", "test", "coverage", "test-generation", "task", "event", "artifact", "message"]) {
+  payloadAjv.addSchema(require(`@unit-test-ide/protocol-schema/v1.5/${name}`));
+}
 
 const validateHandshakeV10 = payloadAjv.compile({
   type: "object",
@@ -181,7 +204,7 @@ const validateHandshakeModern = payloadAjv.compile({
   additionalProperties: false,
   required: ["negotiatedProtocolVersion", "serviceVersion"],
   properties: {
-    negotiatedProtocolVersion: { enum: ["1.0", "1.1", "1.2", "1.3", "1.4"] },
+    negotiatedProtocolVersion: { enum: ["1.0", "1.1", "1.2", "1.3", "1.4", "1.5"] },
     serviceVersion: { type: "string", minLength: 1 }
   }
 });
@@ -190,10 +213,12 @@ const validateCapabilitiesV11 = payloadAjv.compile(require("@unit-test-ide/proto
 const validateCapabilitiesV12 = payloadAjv.getSchema("urn:unit-test-ide:protocol:v1.2:capabilities") as ValidateFunction;
 const validateCapabilitiesV13 = payloadAjv.getSchema("urn:unit-test-ide:protocol:v1.3:capabilities") as ValidateFunction;
 const validateCapabilitiesV14 = payloadAjv.getSchema("urn:unit-test-ide:protocol:v1.4:capabilities") as ValidateFunction;
+const validateCapabilitiesV15 = payloadAjv.getSchema("urn:unit-test-ide:protocol:v1.5:capabilities") as ValidateFunction;
 const validateTask = payloadAjv.getSchema("urn:unit-test-ide:protocol:v1.1:task") as ValidateFunction;
 const validateTaskV12 = payloadAjv.getSchema("urn:unit-test-ide:protocol:v1.2:task") as ValidateFunction;
 const validateTaskV13 = payloadAjv.getSchema("urn:unit-test-ide:protocol:v1.3:task") as ValidateFunction;
 const validateTaskV14 = payloadAjv.getSchema("urn:unit-test-ide:protocol:v1.4:task") as ValidateFunction;
+const validateTaskV15 = payloadAjv.getSchema("urn:unit-test-ide:protocol:v1.5:task") as ValidateFunction;
 const validateWorkspaceV12 = payloadAjv.getSchema("urn:unit-test-ide:protocol:v1.2:workspace") as ValidateFunction;
 const validateTargetListV12 = payloadAjv.compile({
   $ref: "urn:unit-test-ide:protocol:v1.2:workspace#/$defs/targetList"
@@ -228,6 +253,9 @@ const validateTaskPageV13 = payloadAjv.compile({
 const validateTaskPageV14 = payloadAjv.compile({
   $ref: "urn:unit-test-ide:protocol:v1.4:message#/$defs/tasksListResponse/allOf/1/properties/payload"
 });
+const validateTaskPageV15 = payloadAjv.compile({
+  $ref: "urn:unit-test-ide:protocol:v1.5:message#/$defs/tasksListResponse/allOf/1/properties/payload"
+});
 const validateArtifactPage = payloadAjv.compile({
   type: "object",
   additionalProperties: false,
@@ -257,6 +285,9 @@ const validateArtifactPageV13 = payloadAjv.compile({
 });
 const validateArtifactPageV14 = payloadAjv.compile({
   $ref: "urn:unit-test-ide:protocol:v1.4:message#/$defs/artifactsListResponse/allOf/1/properties/payload"
+});
+const validateArtifactPageV15 = payloadAjv.compile({
+  $ref: "urn:unit-test-ide:protocol:v1.5:message#/$defs/artifactsListResponse/allOf/1/properties/payload"
 });
 const validateTestCatalogV13 = payloadAjv.compile({
   $ref: "urn:unit-test-ide:protocol:v1.3:test#/$defs/testCatalog"
@@ -297,6 +328,15 @@ const validateCoverageReportIdPayloadV14 = payloadAjv.getSchema(
 const validateCoverageRunsListPayloadV14 = payloadAjv.getSchema(
   "urn:unit-test-ide:protocol:v1.4:message#/$defs/coverageRunsListPayload"
 ) as ValidateFunction;
+const generationSchema = "urn:unit-test-ide:protocol:v1.5:test-generation#/$defs/";
+const validateGenerationTargetsRequest = payloadAjv.getSchema(`${generationSchema}targetListRequest`) as ValidateFunction;
+const validateGenerationTargets = payloadAjv.getSchema(`${generationSchema}targetList`) as ValidateFunction;
+const validateGenerationStart = payloadAjv.getSchema(`${generationSchema}startRequest`) as ValidateFunction;
+const validateGenerationRunId = payloadAjv.getSchema(`${generationSchema}runIdRequest`) as ValidateFunction;
+const validateGenerationRun = payloadAjv.getSchema(`${generationSchema}run`) as ValidateFunction;
+const validateGenerationCandidateListRequest = payloadAjv.getSchema(`${generationSchema}candidateListRequest`) as ValidateFunction;
+const validateGenerationCandidates = payloadAjv.getSchema(`${generationSchema}candidatePage`) as ValidateFunction;
+const validateGenerationAccept = payloadAjv.getSchema(`${generationSchema}acceptRequest`) as ValidateFunction;
 const validateSubscription = payloadAjv.compile({
   type: "object",
   additionalProperties: false,
@@ -376,6 +416,10 @@ function decodeTaskResponse(
   version: TaskProtocolVersion,
   payload: Record<string, unknown>
 ): ProtocolTaskSnapshot {
+  if (version === "1.5") {
+    validatePayload(method, validateTaskV15, payload);
+    return decodeTaskSnapshotV15(payload);
+  }
   if (version === "1.4") {
     validatePayload(method, validateTaskV14, payload);
     return decodeTaskSnapshotV14(payload);
@@ -463,9 +507,15 @@ export class ProtocolClient {
     return result;
   }
 
-  async getCapabilities(): Promise<Capabilities | CapabilitiesV11 | CapabilitiesV12 | CapabilitiesV13 | CapabilitiesV14> {
+  async getCapabilities(): Promise<Capabilities | CapabilitiesV11 | CapabilitiesV12 | CapabilitiesV13 | CapabilitiesV14 | CapabilitiesV15> {
     const version = this.#requireAuthentication();
     const payload = await this.#connection.request(version, "capabilities/get", {});
+    if (version === "1.5") {
+      return this.#decodeV14InboundResponse(version, () => {
+        validatePayload("capabilities/get", validateCapabilitiesV15, payload);
+        return decodeCapabilitiesV15(payload);
+      });
+    }
     if (version === "1.4") {
       return this.#decodeV14InboundResponse(version, () => {
         validatePayload("capabilities/get", validateCapabilitiesV14, payload);
@@ -516,11 +566,15 @@ export class ProtocolClient {
     });
   }
 
-  async startCMakeBuild(input: CMakeBuildInput): Promise<TaskSnapshotV12 | TaskSnapshotV13 | TaskSnapshotV14> {
+  async startCMakeBuild(input: CMakeBuildInput): Promise<TaskSnapshotV12 | TaskSnapshotV13 | TaskSnapshotV14 | TaskSnapshotV15> {
     const version = this.#requireV12();
     validateCMakeBuildInput(input);
     const payload = await this.#connection.request(version, "tasks/start", { ...input, kind: "cmakeBuild" });
     return this.#decodeV14InboundResponse(version, () => {
+      if (version === "1.5") {
+        validatePayload("tasks/start", validateTaskV15, payload);
+        return decodeTaskSnapshotV15(payload);
+      }
       if (version === "1.4") {
         validatePayload("tasks/start", validateTaskV14, payload);
         return decodeTaskSnapshotV14(payload);
@@ -534,21 +588,21 @@ export class ProtocolClient {
     });
   }
 
-  async discoverTests(input: TestDiscoveryInput): Promise<TaskSnapshotV13 | TaskSnapshotV14> {
+  async discoverTests(input: TestDiscoveryInput): Promise<TaskSnapshotV13 | TaskSnapshotV14 | TaskSnapshotV15> {
     const version = this.#requireV13();
     const payload = await this.#connection.request(version, "tasks/start", { ...input, kind: "testDiscovery" });
     return this.#decodeV14InboundResponse(
       version,
-      () => decodeTaskResponse("tasks/start", version, payload) as TaskSnapshotV13 | TaskSnapshotV14
+      () => decodeTaskResponse("tasks/start", version, payload) as TaskSnapshotV13 | TaskSnapshotV14 | TaskSnapshotV15
     );
   }
 
-  async runTests(input: TestRunInput): Promise<TaskSnapshotV13 | TaskSnapshotV14> {
+  async runTests(input: TestRunInput): Promise<TaskSnapshotV13 | TaskSnapshotV14 | TaskSnapshotV15> {
     const version = this.#requireV13();
     const payload = await this.#connection.request(version, "tasks/start", { ...input, kind: "testRun" });
     return this.#decodeV14InboundResponse(
       version,
-      () => decodeTaskResponse("tasks/start", version, payload) as TaskSnapshotV13 | TaskSnapshotV14
+      () => decodeTaskResponse("tasks/start", version, payload) as TaskSnapshotV13 | TaskSnapshotV14 | TaskSnapshotV15
     );
   }
 
@@ -556,8 +610,8 @@ export class ProtocolClient {
     const version = this.#requireV13();
     const payload = await this.#connection.request(version, "tests/catalog/get", { ...input });
     return this.#decodeV14InboundResponse(version, () => {
-      validatePayload("tests/catalog/get", version === "1.4" ? validateTestCatalogV14 : validateTestCatalogV13, payload);
-      return version === "1.4" ? decodeTestCatalogV14(payload) : decodeTestCatalog(payload);
+      validatePayload("tests/catalog/get", version === "1.4" || version === "1.5" ? validateTestCatalogV14 : validateTestCatalogV13, payload);
+      return version === "1.4" || version === "1.5" ? decodeTestCatalogV14(payload) : decodeTestCatalog(payload);
     });
   }
 
@@ -565,8 +619,8 @@ export class ProtocolClient {
     const version = this.#requireV13();
     const payload = await this.#connection.request(version, "tests/runs/get", { runId });
     return this.#decodeV14InboundResponse(version, () => {
-      validatePayload("tests/runs/get", version === "1.4" ? validateTestRunV14 : validateTestRunV13, payload);
-      return version === "1.4" ? decodeTestRunV14(payload) : decodeTestRun(payload);
+      validatePayload("tests/runs/get", version === "1.4" || version === "1.5" ? validateTestRunV14 : validateTestRunV13, payload);
+      return version === "1.4" || version === "1.5" ? decodeTestRunV14(payload) : decodeTestRun(payload);
     });
   }
 
@@ -574,8 +628,8 @@ export class ProtocolClient {
     const version = this.#requireV13();
     const payload = await this.#connection.request(version, "tests/runs/list", { ...input });
     return this.#decodeV14InboundResponse(version, () => {
-      validatePayload("tests/runs/list", version === "1.4" ? validateTestRunPageV14 : validateTestRunPageV13, payload);
-      return version === "1.4" ? decodeTestRunPageV14(payload) : decodeTestRunPage(payload);
+      validatePayload("tests/runs/list", version === "1.4" || version === "1.5" ? validateTestRunPageV14 : validateTestRunPageV13, payload);
+      return version === "1.4" || version === "1.5" ? decodeTestRunPageV14(payload) : decodeTestRunPage(payload);
     });
   }
 
@@ -631,6 +685,61 @@ export class ProtocolClient {
     });
   }
 
+  async listTestGenerationTargets(input: TestGenerationTargetListInput): Promise<TestGenerationTargetListV15> {
+    const version = this.#requireV15();
+    const request = snapshotRequestPayload("testGeneration/targets/list", input);
+    validateRequestPayload("testGeneration/targets/list", validateGenerationTargetsRequest, request);
+    const payload = await this.#connection.request(version, "testGeneration/targets/list", request as Record<string, unknown>);
+    return this.#decodeV14InboundResponse(version, () => {
+      validatePayload("testGeneration/targets/list", validateGenerationTargets, payload);
+      return decodeTestGenerationTargetList(payload);
+    });
+  }
+
+  async startTestGeneration(input: TestGenerationStartInput): Promise<TestGenerationRunV15> {
+    const version = this.#requireV15();
+    const request = snapshotRequestPayload("testGeneration/start", input);
+    validateRequestPayload("testGeneration/start", validateGenerationStart, request);
+    const payload = await this.#connection.request(version, "testGeneration/start", request as Record<string, unknown>);
+    return this.#decodeV14InboundResponse(version, () => {
+      validatePayload("testGeneration/start", validateGenerationRun, payload);
+      return decodeTestGenerationRun(payload);
+    });
+  }
+
+  async getTestGenerationRun(runId: string): Promise<TestGenerationRunV15> {
+    const version = this.#requireV15();
+    const request = { runId };
+    validateRequestPayload("testGeneration/runs/get", validateGenerationRunId, request);
+    const payload = await this.#connection.request(version, "testGeneration/runs/get", request);
+    return this.#decodeV14InboundResponse(version, () => {
+      validatePayload("testGeneration/runs/get", validateGenerationRun, payload);
+      return decodeTestGenerationRun(payload);
+    });
+  }
+
+  async listTestGenerationCandidates(input: TestGenerationCandidateListInput): Promise<TestGenerationCandidatePageV15> {
+    const version = this.#requireV15();
+    const request = snapshotRequestPayload("testGeneration/candidates/list", input);
+    validateRequestPayload("testGeneration/candidates/list", validateGenerationCandidateListRequest, request);
+    const payload = await this.#connection.request(version, "testGeneration/candidates/list", request as Record<string, unknown>);
+    return this.#decodeV14InboundResponse(version, () => {
+      validatePayload("testGeneration/candidates/list", validateGenerationCandidates, payload);
+      return decodeTestGenerationCandidatePage(payload);
+    });
+  }
+
+  async acceptTestGeneration(input: TestGenerationAcceptInput): Promise<TestGenerationRunV15> {
+    const version = this.#requireV15();
+    const request = snapshotRequestPayload("testGeneration/accept", input);
+    validateRequestPayload("testGeneration/accept", validateGenerationAccept, request);
+    const payload = await this.#connection.request(version, "testGeneration/accept", request as Record<string, unknown>);
+    return this.#decodeV14InboundResponse(version, () => {
+      validatePayload("testGeneration/accept", validateGenerationRun, payload);
+      return decodeTestGenerationRun(payload);
+    });
+  }
+
   async startTask(input: StartTaskInput): Promise<ProtocolTaskSnapshot> {
     const version = this.#requireTaskProtocol();
     const payload = await this.#connection.request(
@@ -649,13 +758,17 @@ export class ProtocolClient {
   async listTasks(input: PageInput = {}): Promise<TaskPage> {
     const { version, payload } = await this.#requestTaskProtocol("tasks/list", { ...input });
     return this.#decodeV14InboundResponse(version, () => {
-      const validator = version === "1.4"
+      const validator = version === "1.5"
+        ? validateTaskPageV15
+        : version === "1.4"
         ? validateTaskPageV14
         : version === "1.3" ? validateTaskPageV13 : version === "1.2" ? validateTaskPageV12 : validateTaskPage;
       validatePayload("tasks/list", validator, payload);
       return {
         items: (payload.items as Record<string, unknown>[]).map((item) =>
-          version === "1.4"
+          version === "1.5"
+            ? decodeTaskSnapshotV15(item)
+            : version === "1.4"
             ? decodeTaskSnapshotV14(item)
             : version === "1.3"
             ? decodeTaskSnapshotV13(item)
@@ -725,13 +838,17 @@ export class ProtocolClient {
   async listArtifacts(taskId: string, input: PageInput = {}): Promise<ArtifactPage> {
     const { version, payload } = await this.#requestTaskProtocol("artifacts/list", { taskId, ...input });
     return this.#decodeV14InboundResponse(version, () => {
-      const validator = version === "1.4"
+      const validator = version === "1.5"
+        ? validateArtifactPageV15
+        : version === "1.4"
         ? validateArtifactPageV14
         : version === "1.3" ? validateArtifactPageV13 : version === "1.2" ? validateArtifactPageV12 : validateArtifactPage;
       validatePayload("artifacts/list", validator, payload);
       return {
         items: (payload.items as Record<string, unknown>[]).map((item) =>
-          version === "1.4"
+          version === "1.5"
+            ? decodeArtifactMetadataV15(item)
+            : version === "1.4"
             ? decodeArtifactMetadataV14(item)
             : version === "1.3"
             ? decodeArtifactMetadataV13(item)
@@ -879,9 +996,10 @@ export class ProtocolClient {
 
   async #authenticate(connection: Connection, credentials: Credentials): Promise<HandshakeResult> {
     const attempts: ReadonlyArray<{
-      version: "1.4" | "1.3" | "1.2" | "1.1";
+      version: "1.5" | "1.4" | "1.3" | "1.2" | "1.1";
       offered: ProtocolVersion[];
     }> = [
+      { version: "1.5", offered: ["1.5", "1.4", "1.3", "1.2", "1.1", "1.0"] },
       { version: "1.4", offered: ["1.4", "1.3", "1.2", "1.1", "1.0"] },
       { version: "1.3", offered: ["1.3", "1.2", "1.1", "1.0"] },
       { version: "1.2", offered: ["1.2", "1.1", "1.0"] },
@@ -923,32 +1041,40 @@ export class ProtocolClient {
     return version;
   }
 
-  #requireV12(): "1.2" | "1.3" | "1.4" {
+  #requireV12(): "1.2" | "1.3" | "1.4" | "1.5" {
     const version = this.#requireAuthentication();
-    if (version !== "1.2" && version !== "1.3" && version !== "1.4") {
+    if (version !== "1.2" && version !== "1.3" && version !== "1.4" && version !== "1.5") {
       throw new ProtocolError("PROTOCOL_FEATURE_UNAVAILABLE", "protocol 1.2 or newer was not negotiated", false);
     }
     return version;
   }
 
-  #requireV13(): "1.3" | "1.4" {
+  #requireV13(): "1.3" | "1.4" | "1.5" {
     const version = this.#requireAuthentication();
-    if (version !== "1.3" && version !== "1.4") {
+    if (version !== "1.3" && version !== "1.4" && version !== "1.5") {
       throw new ProtocolError("PROTOCOL_FEATURE_UNAVAILABLE", "protocol 1.3 or newer was not negotiated", false);
     }
     return version;
   }
 
-  #requireV14(): "1.4" {
+  #requireV14(): "1.4" | "1.5" {
     const version = this.#requireAuthentication();
-    if (version !== "1.4") {
+    if (version !== "1.4" && version !== "1.5") {
       throw new ProtocolError("PROTOCOL_FEATURE_UNAVAILABLE", "protocol 1.4 was not negotiated", false);
     }
     return version;
   }
 
+  #requireV15(): "1.5" {
+    const version = this.#requireAuthentication();
+    if (version !== "1.5") {
+      throw new ProtocolError("PROTOCOL_FEATURE_UNAVAILABLE", "protocol 1.5 was not negotiated", false);
+    }
+    return version;
+  }
+
   #decodeV14InboundResponse<T>(version: ProtocolVersion, decode: () => T): T {
-    if (version !== "1.4") return decode();
+    if (version !== "1.4" && version !== "1.5") return decode();
     try {
       return decode();
     } catch (error) {
