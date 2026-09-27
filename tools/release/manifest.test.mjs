@@ -11,6 +11,7 @@ import addFormats from "ajv-formats";
 
 import {
   buildReleaseManifest,
+  readReleaseConfig,
   toDeterministicManifestBytes,
 } from "./manifest.mjs";
 import { validateReleaseManifestRecord } from "./release-manifest-validation.mjs";
@@ -30,6 +31,21 @@ function sha256Text(value) {
 async function readJson(name) {
   return JSON.parse(await readFile(new URL(name, root), "utf8"));
 }
+
+test("release config permits the fixed testgen path without changing legacy four-key configs", async (t) => {
+  await withStaging(t, async (directory) => {
+    const legacy = { schemaVersion: 1, product: "unit-test-ide", inputPath: "release-input.json", outputPath: "manifest.generated.json" };
+    const legacyPath = join(directory, "legacy.json");
+    const fixedPath = join(directory, "fixed.json");
+    const wrongPath = join(directory, "wrong.json");
+    await writeFile(legacyPath, JSON.stringify(legacy));
+    await writeFile(fixedPath, JSON.stringify({ ...legacy, testgenBundlePath: "bundles/testgen" }));
+    await writeFile(wrongPath, JSON.stringify({ ...legacy, testgenBundlePath: "bundles/other" }));
+    assert.equal((await readReleaseConfig(legacyPath)).testgenBundlePath, "bundles/testgen");
+    assert.equal((await readReleaseConfig(fixedPath)).testgenBundlePath, "bundles/testgen");
+    await assert.rejects(() => readReleaseConfig(wrongPath), /testgenBundlePath/u);
+  });
+});
 
 function validate(schema, value) {
   const ajv = new Ajv2020({ allErrors: true, strict: true });

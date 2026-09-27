@@ -1087,6 +1087,8 @@ jobs:
           "CMAKE=$($result.executable)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "cmake_root=$cmakeRoot" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
       - run: pnpm prepare:coverage-bundle
+      - run: pnpm prepare:testgen-bundle
+      - run: pnpm check:testgen-bundle
       - run: pnpm build
       - name: Build Windows service binary
         shell: pwsh
@@ -1140,6 +1142,7 @@ jobs:
             --service '.release/windows/unit-test-service.exe' `
             --cmake-root '${{ steps.cmake-bundle.outputs.cmake_root }}' `
             --coverage-root '.superpowers/runtime/coverage-bundle/windows-x64' `
+            --testgen-root '.superpowers/cache/testgen-bundle/22.1.8/windows-x64' `
             --out '.release/windows/dist'
           $stagingRoot = $stagingRoot.Trim()
           $packagePath = Join-Path $PWD ".release/windows/dist/unit-test-ide-$version.msix"
@@ -1159,6 +1162,7 @@ jobs:
             --service '.release/windows/unit-test-service.exe' `
             --cmake-root '${{ steps.cmake-bundle.outputs.cmake_root }}' `
             --coverage-root '.superpowers/runtime/coverage-bundle/windows-x64' `
+            --testgen-root '.superpowers/cache/testgen-bundle/22.1.8/windows-x64' `
             --out '.release/windows/dist'
           $baselineStagingRoot = $baselineStagingRoot.Trim()
           $baselinePackagePath = Join-Path $PWD ".release/windows/dist/unit-test-ide-$baselineVersion.msix"
@@ -1342,6 +1346,8 @@ jobs:
           echo "CMAKE=$cmake" >> "$GITHUB_ENV"
           echo "cmake_root=$cmake_root" >> "$GITHUB_OUTPUT"
       - run: pnpm prepare:coverage-bundle
+      - run: pnpm prepare:testgen-bundle
+      - run: pnpm check:testgen-bundle
       - run: pnpm build
       - name: Build Linux service binary
         shell: bash
@@ -1383,6 +1389,7 @@ jobs:
             --service .release/linux/unit-test-service \
             --cmake-root "${{ steps.cmake-bundle.outputs.cmake_root }}" \
             --coverage-root .superpowers/runtime/coverage-bundle/linux-x64 \
+            --testgen-root .superpowers/cache/testgen-bundle/22.1.8/linux-x64 \
             --out .release/linux/dist)"
           package_json="$(node tools/release/linux/package-appimage.mjs \
             --staging-root "$staging_root" \
@@ -1403,6 +1410,7 @@ jobs:
             --service .release/linux/unit-test-service \
             --cmake-root "${{ steps.cmake-bundle.outputs.cmake_root }}" \
             --coverage-root .superpowers/runtime/coverage-bundle/linux-x64 \
+            --testgen-root .superpowers/cache/testgen-bundle/22.1.8/linux-x64 \
             --out .release/linux/dist)"
           baseline_package_json="$(node tools/release/linux/package-appimage.mjs \
             --staging-root "$baseline_staging_root" \

@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://unit-test-ide.invalid/tools/testgen-bundle/manifest.schema.json",
+  "title": "Pinned offline Clang frontend bundle",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "clangVersion", "sourceCommit", "platforms"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "clangVersion": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "sourceCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "platforms": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["windows-x64", "linux-x64"],
+      "properties": {
+        "windows-x64": { "$ref": "#/$defs/platform" },
+        "linux-x64": { "$ref": "#/$defs/platform" }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "path": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+/-]*$",
+      "not": { "pattern": "(^|/)\\.\\.(/|$)" }
+    },
+    "archive": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["filename", "url", "sha256"],
+      "properties": {
+        "filename": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9.+_-]*\\.tar\\.xz$" },
+        "url": {
+          "type": "string",
+          "pattern": "^https://github\\.com/llvm/llvm-project/releases/download/llvmorg-[0-9]+\\.[0-9]+\\.[0-9]+/(?:clang(?:\\+|%2B)llvm-[0-9]+\\.[0-9]+\\.[0-9]+-x86_64-pc-windows-msvc|LLVM-[0-9]+\\.[0-9]+\\.[0-9]+-Linux-X64)\\.tar\\.xz$"
+        },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "size"],
+      "properties": {
+        "path": { "$ref": "#/$defs/path" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "size": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "license": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "url", "sha256", "size"],
+      "properties": {
+        "path": { "$ref": "#/$defs/path" },
+        "url": {
+          "type": "string",
+          "pattern": "^https://raw\\.githubusercontent\\.com/llvm/llvm-project/[0-9a-f]{40}/(?:LICENSE|clang/LICENSE|compiler-rt/LICENSE)\\.TXT$"
+        },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "size": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "platform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["archive", "archiveRoot", "target", "executable", "resourceDir", "files", "licenses"],
+      "properties": {
+        "archive": { "$ref": "#/$defs/archive" },
+        "archiveRoot": { "$ref": "#/$defs/path" },
+        "target": { "enum": ["windows-x64", "linux-x64"] },
+        "executable": { "$ref": "#/$defs/path" },
+        "resourceDir": { "$ref": "#/$defs/path" },
+        "files": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/file" } },
+        "licenses": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/license" } }
+      }
+    }
+  }
+}

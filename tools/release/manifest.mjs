@@ -68,7 +68,8 @@ async function loadJson(path) {
 
 function validateReleaseConfig(config, configPath) {
   requirePlainObject(config, "release config");
-  requireExactKeys(config, releaseConfigKeys, "release config");
+  requireExactKeys(config, Object.hasOwn(config, "testgenBundlePath")
+    ? [...releaseConfigKeys, "testgenBundlePath"] : releaseConfigKeys, "release config");
   if (config.schemaVersion !== 1 || config.product !== "unit-test-ide") {
     throw new Error("unsupported release config");
   }
@@ -78,15 +79,19 @@ function validateReleaseConfig(config, configPath) {
   if (!isPortableReleasePath(config.outputPath)) {
     throw new Error(`unsafe release config outputPath: ${config.outputPath}`);
   }
+  if ((config.testgenBundlePath ?? "bundles/testgen") !== "bundles/testgen") {
+    throw new Error("release config testgenBundlePath must be bundles/testgen");
+  }
   return {
     schemaVersion: config.schemaVersion,
     product: config.product,
     inputPath: resolve(dirname(configPath), ...config.inputPath.split("/")),
     outputPath: resolve(dirname(configPath), ...config.outputPath.split("/")),
+    testgenBundlePath: "bundles/testgen",
   };
 }
 
-async function readReleaseConfig(configPath = defaultConfigPath) {
+export async function readReleaseConfig(configPath = defaultConfigPath) {
   const resolvedConfigPath = resolve(configPath);
   if (cachedConfigs.has(resolvedConfigPath)) return cachedConfigs.get(resolvedConfigPath);
   const config = validateReleaseConfig(await loadJson(resolvedConfigPath), resolvedConfigPath);

@@ -486,6 +486,7 @@ test("release manifest contract stays pinned to the repository product identity"
     product: "unit-test-ide",
     inputPath: "release-input.json",
     outputPath: "manifest.generated.json",
+    testgenBundlePath: "bundles/testgen",
   });
   assert.equal(schema.properties.product.const, "unit-test-ide");
   assert.equal(schema.properties.schemaVersion.const, 1);
