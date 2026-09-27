@@ -39,6 +39,17 @@ export interface TestGenerationControllerState {
   readonly detail?: string;
 }
 
+/** Identity of the preview that the user actually inspected before confirmation. */
+export interface GenerationPreviewBinding {
+  readonly runId: string;
+  readonly candidateId: string;
+  readonly candidateSetDigest: string;
+  readonly candidateArtifactDigest: string;
+  readonly candidateCodeDigest: string;
+  readonly diffDigest: string;
+  readonly confirmationDigest: string;
+}
+
 export interface TestGenerationControllerOptions {
   readonly readContext: () => GenerationContext;
   readonly onStateChanged?: (state: TestGenerationControllerState) => void;
@@ -83,6 +94,7 @@ export class TestGenerationController {
   #state: TestGenerationControllerState = { state: "idle" };
   #closed = false;
   #operation = 0;
+  #epoch = 0;
   #runId: string | undefined;
   #lastSequence = 0;
   #events = new Map<number, TestGenerationEventPageV15["items"][number]>();
@@ -94,8 +106,10 @@ export class TestGenerationController {
   async start(selection: GenerationSelection): Promise<TestGenerationControllerState> {
     this.#assertOpen();
     const operation = ++this.#operation;
+    const epoch = ++this.#epoch;
     const context = this.#assertContext();
-    const client = await this.#assertCapability(context.client);
+    const client = await this.#assertCapability(context.client, epoch);
+    this.#assertFresh(epoch, context, client);
     const request: TestGenerationStartInput = {
       ...selection,
       idempotencyKey: randomBytes(16).toString("hex"),
@@ -109,7 +123,8 @@ export class TestGenerationController {
     try {
       const run = await client.startTestGeneration(request);
       this.#assertCurrent(operation);
-      this.#setRun(run);
+      this.#assertFresh(epoch, context, client);
+      this.#setRun(run, epoch);
       await this.refresh();
       return this.getState();
     } catch (error) {
@@ -120,11 +135,14 @@ export class TestGenerationController {
 
   async restore(runId: string): Promise<TestGenerationControllerState> {
     this.#assertOpen();
+    const epoch = ++this.#epoch;
     const context = this.#assertContext();
-    const client = await this.#assertCapability(context.client);
+    const client = await this.#assertCapability(context.client, epoch);
+    this.#assertFresh(epoch, context, client);
     const run = await client.getTestGenerationRun(runId);
+    this.#assertFresh(epoch, context, client);
     this.#assertRunContext(run, context);
-    this.#setRun(run);
+    this.#setRun(run, epoch);
     await this.refresh();
     return this.getState();
   }
@@ -137,16 +155,21 @@ export class TestGenerationController {
 
   async refresh(): Promise<TestGenerationControllerState> {
     this.#assertOpen();
+    const epoch = ++this.#epoch;
     if (!this.#runId) return this.getState();
     const context = this.#assertContext();
-    const client = await this.#assertCapability(context.client);
+    const client = await this.#assertCapability(context.client, epoch);
+    this.#assertFresh(epoch, context, client);
     const run = await client.getTestGenerationRun(this.#runId);
+    this.#assertFresh(epoch, context, client);
     this.#assertRunContext(run, context);
-    this.#setRun(run);
+    this.#setRun(run, epoch);
     const replay = await client.replayTestGenerationEvents({ runId: run.runId, afterSequence: this.#lastSequence, limit: this.options.maxEventPageSize ?? 128 });
+    this.#assertFresh(epoch, context, client);
     this.#mergeEvents(replay);
     if (run.state === "awaiting_confirmation") {
       const candidates = await client.listTestGenerationCandidates({ runId: run.runId, limit: this.options.maxCandidatePageSize ?? 128 });
+      this.#assertFresh(epoch, context, client);
       this.#publish({ state: "preview", run, candidates, events: this.#eventPage() });
     } else if (run.state === "accepted") {
       this.#publish({ state: "accepted", run, events: this.#eventPage() });
@@ -171,23 +194,41 @@ export class TestGenerationController {
     return this.getState();
   }
 
-  async accept(candidateId: string, confirmCharacterization = false): Promise<TestGenerationControllerState> {
+  async accept(candidateId: string, confirmCharacterization = false, displayed?: GenerationPreviewBinding): Promise<TestGenerationControllerState> {
     this.#assertOpen();
     if (!this.#runId) throw new Error("No active test-generation run.");
+    const epoch = ++this.#epoch;
     const context = this.#assertContext();
-    const client = await this.#assertCapability(context.client);
+    const client = await this.#assertCapability(context.client, epoch);
+    this.#assertFresh(epoch, context, client);
     // Always refetch the run and candidate page. Local preview state is display-only.
     const run = await client.getTestGenerationRun(this.#runId);
+    this.#assertFresh(epoch, context, client);
     this.#assertRunContext(run, context);
     if (!run.preview?.confirmationDigest) throw new Error("The service has not produced a confirmable preview.");
     const candidates = await client.listTestGenerationCandidates({ runId: run.runId, limit: this.options.maxCandidatePageSize ?? 128 });
+    this.#assertFresh(epoch, context, client);
     const candidate = candidates.items.find((item) => item.candidateId === candidateId);
     if (!candidate) throw new Error("The selected generated-test candidate is no longer available.");
+    if (displayed && (
+      displayed.runId !== run.runId ||
+      displayed.candidateId !== candidate.candidateId ||
+      displayed.candidateSetDigest !== run.preview.candidateSetDigest ||
+      displayed.candidateArtifactDigest !== candidate.artifactDigest ||
+      displayed.candidateCodeDigest !== candidate.codeDigest ||
+      displayed.diffDigest !== run.preview.diffDigest ||
+      displayed.confirmationDigest !== run.preview.confirmationDigest
+    )) {
+      this.#publish({ state: "preview", run, candidates, detail: "The generated-test preview changed; review the refreshed preview before accepting." });
+      throw new Error("Generated-test preview is stale; review the refreshed preview before accepting.");
+    }
     if (candidate.kind === "characterization" && !confirmCharacterization) throw new Error("Characterization candidates require explicit confirmation.");
     this.#publish({ state: "accepting", run, candidates });
     try {
+      this.#assertFresh(epoch, context, client);
       const accepted = await client.acceptTestGeneration({ runId: run.runId, candidateId, confirmationDigest: run.preview.confirmationDigest, confirmCharacterization } satisfies TestGenerationAcceptInput);
-      this.#setRun(accepted);
+      this.#assertFresh(epoch, context, client);
+      this.#setRun(accepted, epoch);
       return this.refresh();
     } catch (error) {
       this.#publish({ state: "preview", run, candidates, detail: errorMessage(error) });
@@ -198,11 +239,14 @@ export class TestGenerationController {
   async cancel(): Promise<TestGenerationControllerState> {
     this.#assertOpen();
     if (!this.#runId) return this.getState();
+    const epoch = ++this.#epoch;
     const context = this.#assertContext();
-    const client = await this.#assertCapability(context.client);
+    const client = await this.#assertCapability(context.client, epoch);
+    this.#assertFresh(epoch, context, client);
     const run = await client.cancelTestGeneration(this.#runId);
+    this.#assertFresh(epoch, context, client);
     this.#assertRunContext(run, context);
-    this.#setRun(run);
+    this.#setRun(run, epoch);
     return this.refresh();
   }
 
@@ -217,11 +261,11 @@ export class TestGenerationController {
     return context;
   }
 
-  async #assertCapability(client: ExtensionProtocolClient | undefined): Promise<ExtensionGenerationProtocolClient> {
+  async #assertCapability(client: ExtensionProtocolClient | undefined, epoch?: number): Promise<ExtensionGenerationProtocolClient> {
     const generation = generationClient(client);
     const capabilities = await generation.getCapabilities();
     if (!("testGeneration" in capabilities) || capabilities.testGeneration !== true) {
-      this.#publish({ state: "unavailable", detail: "The service does not advertise offline test generation." });
+      if (epoch === undefined || epoch === this.#epoch) this.#publish({ state: "unavailable", detail: "The service does not advertise offline test generation." });
       throw new Error("Protocol v1.5 test-generation capability is unavailable.");
     }
     return generation;
@@ -231,7 +275,8 @@ export class TestGenerationController {
     if (run.projectId !== context.projectId || run.workspaceGeneration !== context.workspaceGeneration) throw new Error("The generation run is stale for this workspace.");
   }
 
-  #setRun(run: TestGenerationRunV15): void {
+  #setRun(run: TestGenerationRunV15, epoch?: number): void {
+    if (epoch !== undefined) this.#assertEpoch(epoch);
     if (this.#runId !== run.runId) {
       this.#runId = run.runId;
       this.#lastSequence = 0;
@@ -257,6 +302,18 @@ export class TestGenerationController {
   }
 
   #assertCurrent(operation: number): void { if (operation !== this.#operation) throw new Error("The generation run became stale."); }
+
+  #assertEpoch(epoch: number): void {
+    if (this.#closed || epoch !== this.#epoch) throw new Error("The generation operation became stale.");
+  }
+
+  #assertFresh(epoch: number, expected: GenerationContext, client: ExtensionGenerationProtocolClient): void {
+    this.#assertEpoch(epoch);
+    const current = this.options.readContext();
+    if (current.trust !== "trusted" || current.projectId !== expected.projectId || current.workspaceGeneration !== expected.workspaceGeneration || current.client !== client) {
+      throw new Error("The workspace or service session changed during test generation.");
+    }
+  }
 }
 
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }

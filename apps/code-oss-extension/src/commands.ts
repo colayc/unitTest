@@ -5,7 +5,7 @@ import type { CoverageControllerState } from "./coverage-controller.js";
 import { openCoverageHtml } from "./coverage-viewer.js";
 import { openCoverageSource as verifyAndOpenCoverageSource } from "./coverage-sources.js";
 import { redactServiceError } from "./service-resources.js";
-import type { GenerationSelection, TestGenerationController, TestGenerationControllerState } from "./test-generation-controller.js";
+import type { GenerationPreviewBinding, GenerationSelection, TestGenerationControllerState } from "./test-generation-controller.js";
 import { createGenerationDiffReview, redactGenerationDiffPaths } from "./test-generation-diff.js";
 import { buildGenerationResults, renderGenerationResults } from "./test-generation-results.js";
 import { TestGenerationScopeV15 } from "@unit-test-ide/test-client";
@@ -54,13 +54,21 @@ export interface TestGenerationCommandHost extends CommandHost {
   showInformationMessage?: (message: string) => void | PromiseLike<unknown>;
   confirmGeneration?: (message: string) => boolean | PromiseLike<boolean>;
   openGenerationDiff?: (title: string, diff: string) => void | PromiseLike<void>;
+  pickGenerationCandidate?: (candidates: readonly GenerationCandidateChoice[]) => GenerationCandidateChoice | undefined | PromiseLike<GenerationCandidateChoice | undefined>;
+  pickGenerationSelection?: (scope: GenerationSelection["scope"]) => unknown | PromiseLike<unknown>;
+}
+
+export interface GenerationCandidateChoice {
+  readonly candidateId: string;
+  readonly kind: string;
+  readonly label: string;
 }
 
 export interface TestGenerationCommandController {
   getState(): TestGenerationControllerState;
   start(selection: GenerationSelection): Promise<TestGenerationControllerState>;
   refresh(): Promise<TestGenerationControllerState>;
-  accept(candidateId: string, confirmCharacterization?: boolean): Promise<TestGenerationControllerState>;
+  accept(candidateId: string, confirmCharacterization?: boolean, displayed?: GenerationPreviewBinding): Promise<TestGenerationControllerState>;
   cancel(): Promise<TestGenerationControllerState>;
 }
 
@@ -338,6 +346,17 @@ export function registerTestGenerationCommands(
       await host.showErrorMessage(redactServiceError(error, []).message);
     }
   };
+  const startForScope = async (value: unknown, scope: GenerationSelection["scope"]): Promise<void> => {
+    if (value === undefined && scope !== TestGenerationScopeV15.Workspace) {
+      if (!host.pickGenerationSelection) {
+        await host.showErrorMessage("Unit Test: Select a file, symbol, target, or coverage gap before generating tests.");
+        return;
+      }
+      value = await host.pickGenerationSelection(scope);
+      if (value === undefined) return;
+    }
+    await start(generationSelection(value, scope));
+  };
   const review = async (): Promise<void> => {
     if (!await requireTrusted()) return;
     try {
@@ -358,25 +377,21 @@ export function registerTestGenerationCommands(
   const accept = async (value?: unknown): Promise<void> => {
     if (!await requireTrusted()) return;
     const input = typeof value === "object" && value !== null ? value as Record<string, unknown> : {};
-    const candidateId = typeof input.candidateId === "string" ? input.candidateId : undefined;
-    if (!candidateId) {
-      await host.showErrorMessage("Unit Test: Select a generated-test candidate before accepting.");
-      return;
-    }
     try {
       // Refresh before showing the diff or asking for confirmation. The local
       // preview is display-only and cannot authorize a write.
       const state = await controller.refresh();
-      const candidate = state.candidates?.items.find((item) => item.candidateId === candidateId);
-      if (!state.run || !candidate) {
+      let candidateId = typeof input.candidateId === "string" ? input.candidateId : undefined;
+      if (!candidateId && state.candidates && host.pickGenerationCandidate) {
+        const picked = await host.pickGenerationCandidate(state.candidates.items.map((item) => ({ candidateId: item.candidateId, kind: item.kind, label: `${item.kind}: ${item.candidateId}` })));
+        candidateId = picked?.candidateId;
+      }
+      const candidate = candidateId === undefined ? undefined : state.candidates?.items.find((item) => item.candidateId === candidateId);
+      if (!state.run || !candidate || !candidateId) {
         await host.showErrorMessage("Unit Test: The selected generated-test candidate is stale.");
         return;
       }
-      const confirmCharacterization = input.confirmCharacterization === true;
-      if (candidate.kind === "characterization" && !confirmCharacterization) {
-        await host.showErrorMessage("Unit Test: Characterization candidates require explicit confirmation.");
-        return;
-      }
+      let confirmCharacterization = input.confirmCharacterization === true;
       const diff = createGenerationDiffReview(state.run);
       if (host.openGenerationDiff) await host.openGenerationDiff(diff.title, redactGenerationDiffPaths(diff.content));
       else output.appendLine(redactGenerationDiffPaths(diff.content));
@@ -385,7 +400,20 @@ export function registerTestGenerationCommands(
         return;
       }
       if (!await host.confirmGeneration("Accept the exact generated-test diff?")) return;
-      await controller.accept(candidateId, confirmCharacterization);
+      if (candidate.kind === "characterization") {
+        if (!await host.confirmGeneration("This is a characterization test based on observed behavior. Confirm again to accept it.")) return;
+        confirmCharacterization = true;
+      }
+      const displayed: GenerationPreviewBinding = {
+        runId: state.run.runId,
+        candidateId: candidate.candidateId,
+        candidateSetDigest: state.run.preview?.candidateSetDigest ?? "",
+        candidateArtifactDigest: candidate.artifactDigest,
+        candidateCodeDigest: candidate.codeDigest,
+        diffDigest: state.run.preview?.diffDigest ?? "",
+        confirmationDigest: state.run.preview?.confirmationDigest ?? ""
+      };
+      await controller.accept(candidateId, confirmCharacterization, displayed);
       await host.showInformationMessage?.("Unit Test: Generated tests accepted.");
     } catch (error) {
       await host.showErrorMessage(redactServiceError(error, []).message);
@@ -402,11 +430,11 @@ export function registerTestGenerationCommands(
   };
 
   context.subscriptions.push(
-    host.registerCommand("unitTestIde.generateTests", () => start(generationSelection(undefined, TestGenerationScopeV15.Workspace))),
-    host.registerCommand("unitTestIde.generateTestsForSymbol", (value) => start(generationSelection(value, TestGenerationScopeV15.Symbol))),
-    host.registerCommand("unitTestIde.generateTestsForFile", (value) => start(generationSelection(value, TestGenerationScopeV15.File))),
-    host.registerCommand("unitTestIde.generateTestsForTarget", (value) => start(generationSelection(value, TestGenerationScopeV15.Target))),
-    host.registerCommand("unitTestIde.generateTestsForCoverageGap", (value) => start(generationSelection(value, TestGenerationScopeV15.CoverageGap))),
+    host.registerCommand("unitTestIde.generateTests", () => startForScope(undefined, TestGenerationScopeV15.Workspace)),
+    host.registerCommand("unitTestIde.generateTestsForSymbol", (value) => startForScope(value, TestGenerationScopeV15.Symbol)),
+    host.registerCommand("unitTestIde.generateTestsForFile", (value) => startForScope(value, TestGenerationScopeV15.File)),
+    host.registerCommand("unitTestIde.generateTestsForTarget", (value) => startForScope(value, TestGenerationScopeV15.Target)),
+    host.registerCommand("unitTestIde.generateTestsForCoverageGap", (value) => startForScope(value, TestGenerationScopeV15.CoverageGap)),
     host.registerCommand("unitTestIde.reviewGeneratedTests", review),
     host.registerCommand("unitTestIde.acceptGeneratedTests", accept),
     host.registerCommand("unitTestIde.cancelTestGeneration", cancel)

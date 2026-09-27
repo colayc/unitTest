@@ -12,6 +12,7 @@ function setup(overrides: { trust?: "trusted" | "blocked-untrusted"; capable?: b
   let sequence = 0;
   const events = [{ sequence: 1, state: "queued", occurredAt: new Date(0) }];
   const accepted: any[] = [];
+  let currentTrust = overrides.trust ?? "trusted";
   const client: any = {
     async getCapabilities() { return { testGeneration: overrides.capable !== false, maxTestGenerationCandidates: 8 }; },
     async listTestGenerationTargets() { return { items: [] }; },
@@ -22,12 +23,13 @@ function setup(overrides: { trust?: "trusted" | "blocked-untrusted"; capable?: b
     async listTestGenerationCandidates() { return { items: [candidate] }; },
     async acceptTestGeneration(input: any) { accepted.push(input); run = { ...run, state: "accepted" }; return run; }
   };
+  let currentClient = client;
   const states: TestGenerationControllerState[] = [];
   const controller = new TestGenerationController({
-    readContext: () => ({ trust: overrides.trust ?? "trusted", client, projectId: "core", workspaceGeneration: "c".repeat(64) }),
+    readContext: () => ({ trust: currentTrust, client: currentClient, projectId: "core", workspaceGeneration: "c".repeat(64) }),
     onStateChanged: (state) => states.push(state)
   });
-  return { controller, client, states, accepted, setSequence(value: number) { sequence = value; } };
+  return { controller, client, states, accepted, setSequence(value: number) { sequence = value; }, setContext(value: { trust?: "trusted" | "blocked-untrusted"; client?: any }) { currentTrust = value.trust ?? currentTrust; currentClient = value.client ?? currentClient; } };
 }
 
 test("controller gates generation on trust and advertised capability", async () => {
@@ -59,4 +61,40 @@ test("controller rejects a restarted run from another workspace", async () => {
   const fixture = setup();
   fixture.client.getTestGenerationRun = async () => ({ ...runBase, workspaceGeneration: "9".repeat(64) });
   await assert.rejects(() => fixture.controller.restore(id), /stale/);
+});
+
+test("controller rejects a preview that changes after the user confirms", async () => {
+  const fixture = setup();
+  await fixture.controller.start({ scope: "workspace" as any });
+  const shown = fixture.controller.getState();
+  const preview = shown.run!.preview!;
+  const selected = shown.candidates!.items[0]!;
+  const binding = {
+    runId: shown.run!.runId,
+    candidateId: selected.candidateId,
+    candidateSetDigest: preview.candidateSetDigest,
+    candidateArtifactDigest: selected.artifactDigest,
+    candidateCodeDigest: selected.codeDigest,
+    diffDigest: preview.diffDigest,
+    confirmationDigest: preview.confirmationDigest
+  };
+  fixture.client.getTestGenerationRun = async () => ({ ...runBase, state: "awaiting_confirmation", preview: { ...preview, confirmationDigest: "9".repeat(64) } });
+  await assert.rejects(() => fixture.controller.accept(selected.candidateId, false, binding), /preview is stale/);
+  assert.equal(fixture.accepted.length, 0);
+  assert.equal(fixture.controller.getState().state, "preview");
+});
+
+test("controller rejects trust or session changes while an RPC is pending", async () => {
+  let release: (() => void) | undefined;
+  const fixture = setup();
+  const original = fixture.client.getTestGenerationRun;
+  fixture.client.getTestGenerationRun = async () => {
+    await new Promise<void>((resolve) => { release = resolve; });
+    return original();
+  };
+  const operation = fixture.controller.restore(id);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  fixture.setContext({ trust: "blocked-untrusted" });
+  release!();
+  await assert.rejects(operation, /workspace or service session changed|stale/);
 });

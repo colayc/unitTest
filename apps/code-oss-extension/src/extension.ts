@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { basename, isAbsolute, join } from "node:path";
-import type { CoverageSourceSnapshotV14 } from "@unit-test-ide/test-client";
+import { TestGenerationScopeV15, type CoverageSourceSnapshotV14 } from "@unit-test-ide/test-client";
 import type * as vscodeTypes from "vscode";
 import type { ServiceStatus, TrustState } from "./contracts.js";
 import {
@@ -49,6 +49,8 @@ export interface ExtensionHost extends CommandHost {
   showInformationMessage?: (message: string) => void | PromiseLike<unknown>;
   confirmGeneration?: (message: string) => boolean | PromiseLike<boolean>;
   openGenerationDiff?: (title: string, diff: string) => void | PromiseLike<void>;
+  pickGenerationCandidate?: (candidates: readonly { candidateId: string; kind: string; label: string }[]) => { candidateId: string; kind: string; label: string } | undefined | PromiseLike<{ candidateId: string; kind: string; label: string } | undefined>;
+  pickGenerationSelection?: (scope: TestGenerationScopeV15) => unknown | PromiseLike<unknown>;
   createTestController?: TestingApiHost["createTestController"];
   onDidChangeWorkspaceFolders(listener: () => void | Promise<void>): DisposableLike;
   onDidGrantWorkspaceTrust(listener: () => void | Promise<void>): DisposableLike;
@@ -548,6 +550,29 @@ function createVSCodeHost(
       const document = await vscode.workspace.openTextDocument({ content: diff, language: "diff" });
       await vscode.window.showTextDocument(document, { viewColumn: vscode.ViewColumn.One, preview: false });
       void title;
+    },
+    pickGenerationCandidate: async (candidates) => {
+      const picked = await vscode.window.showQuickPick(
+        candidates.map((candidate) => ({ label: candidate.label, description: candidate.kind, candidate })),
+        { placeHolder: "Select a generated-test candidate" }
+      );
+      return picked?.candidate;
+    },
+    pickGenerationSelection: async (scope) => {
+      const editor = vscode.window.activeTextEditor;
+      if (scope === TestGenerationScopeV15.File && editor) {
+        return { file: vscode.workspace.asRelativePath(editor.document.uri, false) };
+      }
+      const prompt = scope === TestGenerationScopeV15.Symbol
+        ? "Enter the opaque symbol identifier"
+        : scope === TestGenerationScopeV15.Target
+          ? "Enter the opaque build target identifier"
+          : "Enter the opaque coverage-gap identifier";
+      const value = await vscode.window.showInputBox({ prompt, ignoreFocusOut: true });
+      if (!value) return undefined;
+      if (scope === TestGenerationScopeV15.Symbol) return { symbolId: value };
+      if (scope === TestGenerationScopeV15.Target) return { targetId: value };
+      return { coverageReportId: value };
     },
     pickCoverageSource: async (sources) => {
       const picked = await vscode.window.showQuickPick(
