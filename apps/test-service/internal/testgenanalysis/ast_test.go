@@ -54,6 +54,9 @@ func TestNativeClangASTFixtures(t *testing.T) {
 		{"unsupported/macro-side-effect.cpp", "hidden_effect", DecisionUnsupported},
 		{"unsupported/template-instantiation.cpp", "use_template", DecisionUnsupported},
 		{"unsupported/system-api.c", "unsafe_api", DecisionUnsupported},
+		{"unsupported/persistent-local.cpp", "static_counter", DecisionUnsupported},
+		{"unsupported/persistent-local.cpp", "thread_counter", DecisionUnsupported},
+		{"unsupported/persistent-local.cpp", "external_counter_write", DecisionUnsupported},
 	}
 	for _, fixture := range fixtures {
 		t.Run(fixture.path, func(t *testing.T) {
@@ -207,6 +210,36 @@ func TestDecodeASTRejectsGlobalAndUnprovenArrayWrites(t *testing.T) {
 			}
 			if p.Functions[0].Decision.Kind == DecisionSupported || p.Functions[0].Effect == EffectLocalMemory {
 				t.Fatalf("unproven effect accepted: %#v", p.Functions[0])
+			}
+		})
+	}
+}
+
+func TestDecodeASTRejectsNonAutomaticLocalStorage(t *testing.T) {
+	const digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	for _, tc := range []struct {
+		name, attributes string
+		want             DecisionKind
+	}{
+		{"implicit auto", "", DecisionSupported},
+		{"explicit auto", `,"storageClass":"auto"`, DecisionSupported},
+		{"static", `,"storageClass":"static"`, DecisionUnsupported},
+		{"extern", `,"storageClass":"extern"`, DecisionUnsupported},
+		{"thread local", `,"tls":"dynamic"`, DecisionUnsupported},
+		{"thread local alternate", `,"tlsKind":"dynamic"`, DecisionUnsupported},
+		{"unknown storage", `,"storageClass":"register"`, DecisionUnsupported},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := `{"kind":"TranslationUnitDecl","inner":[{"kind":"FunctionDecl","name":"f","type":{"qualType":"int ()"},"loc":{"line":1,"col":1},"inner":[{"kind":"CompoundStmt","inner":[{"kind":"DeclStmt","inner":[{"kind":"VarDecl","id":"local-v","name":"v","type":{"qualType":"int"}` + tc.attributes + `,"inner":[{"kind":"IntegerLiteral","value":"0"}]}]},{"kind":"BinaryOperator","opcode":"=","inner":[{"kind":"DeclRefExpr","referencedDecl":{"id":"local-v","kind":"VarDecl","name":"v"}},{"kind":"IntegerLiteral","value":"1"}]},{"kind":"ReturnStmt","inner":[{"kind":"DeclRefExpr","referencedDecl":{"id":"local-v","kind":"VarDecl","name":"v"}}]}]}]}]}`
+			p, err := decodeAST(strings.NewReader(input), 1<<20, digest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(p.Functions) != 1 || p.Functions[0].Decision.Kind != tc.want {
+				t.Fatalf("storage %q: decision %#v", tc.name, p.Functions)
+			}
+			if tc.want == DecisionUnsupported && p.Functions[0].Effect == EffectLocalMemory {
+				t.Fatalf("persistent local falsely classified as local-memory: %#v", p.Functions[0])
 			}
 		})
 	}

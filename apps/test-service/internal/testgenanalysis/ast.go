@@ -51,6 +51,9 @@ type astNode struct {
 	Range              astRange      `json:"range"`
 	Opcode             string        `json:"opcode"`
 	Value              string        `json:"value"`
+	StorageClass       string        `json:"storageClass"`
+	TLS                string        `json:"tls"`
+	TLSKind            string        `json:"tlsKind"`
 	ReferencedDecl     *astReference `json:"referencedDecl"`
 	CompleteDefinition bool          `json:"completeDefinition"`
 	DefinitionData     astDefinition `json:"definitionData"`
@@ -189,6 +192,11 @@ func findDirectBody(n *astNode) *astNode {
 	}
 	return nil
 }
+
+func automaticLocal(n *astNode) bool {
+	return n.Kind == "VarDecl" && (n.StorageClass == "" || n.StorageClass == "auto") && n.TLS == "" && n.TLSKind == ""
+}
+
 func functionFromAST(n, body *astNode, sourceDigest string, declared map[string]TypeKind, sourcePath, workspaceRoot string) (Function, error) {
 	if !safeIdentifier(n.Name) || n.Loc.Line < 0 || n.Loc.Col < 0 {
 		return Function{}, errors.New("unusable function identity")
@@ -216,7 +224,7 @@ func functionFromAST(n, body *astNode, sourceDigest string, declared map[string]
 		if node == nil {
 			return
 		}
-		if node.Kind == "VarDecl" && node.ID != "" {
+		if node.Kind == "VarDecl" && node.ID != "" && automaticLocal(node) {
 			localIDs[node.ID] = true
 			knownIDs[node.ID] = true
 			t := parseType(node.Type.QualType, declared)
@@ -248,6 +256,9 @@ func functionFromAST(n, body *astNode, sourceDigest string, declared map[string]
 		}
 		if node.Kind == "VarDecl" {
 			f.LocalTypes = append(f.LocalTypes, parseType(node.Type.QualType, declared))
+			if !automaticLocal(node) {
+				unsafe("NonAutomaticLocalStorage")
+			}
 		}
 		if node.Kind == "DeclRefExpr" {
 			r := node.ReferencedDecl
